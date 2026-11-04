@@ -26,6 +26,8 @@ import .ownership as ownership
 import .runtime_x86 as runtime_x86
 import .ir_a64 as ir_a64
 import .runtime_a64 as runtime_a64
+import .ir_wasm as ir_wasm
+import .runtime_wasm as runtime_wasm
 from .dwarf import uleb, sleb, bytes_line, exprloc, str_pieces, dw_string, dw_ref, abbrev_section, gdb_scripts_section, AB_CU, AB_BASE, AB_SUBPROGRAM, AB_TYPED_SUBPROGRAM, AB_PARAM, AB_VAR, AB_BLOCK, AB_PTR, AB_VOIDPTR, AB_STRUCT, AB_MEMBER, AB_ARRAY, AB_SUBRANGE, AB_VARIANT_PART, AB_VARIANT, AB_TAG, OP_FBREG, OP_BREG15, OP_DEREF, OP_PLUS_UCONST, OP_STACK_VALUE, OP_PUSH_OBJECT_ADDRESS, OP_LIT0, OP_MINUS, OP_REG6, OP_GNU_DEREF_TYPE, OP_GNU_CONVERT, ATE_BOOLEAN, ATE_FLOAT, ATE_SIGNED, ATE_UNSIGNED, ATE_UTF, LANG_RUST
 from .parser import expr_of, stmt_of, type_expr_of, block_of, pattern_of, fun_of  // AST values for #test cases (MYLA-184)
 
@@ -234,6 +236,12 @@ pub struct CodeGen {
     passed_on: [str: [int32]],
     tag_enums: [str: bool],         // MYLA-133: the enums whose `==` compares tags only
     a64: bool,                      // MYLA-163: the target is aarch64 Linux (`ir_a64.my`), else x86-64
+    // MYLA-158: the target is wasm32 on WASI (`ir_wasm.my`); each function's
+    // words, and those its calls pass (-1: two different counts)
+    wasm: bool,
+    wasm_arity: [str: int32],
+    wasm_calls: [str: int32],
+    wasm_envs: [str],               // MYLA-158: the environments with deep copies (`__env_routines`)
 }
 
 // A code generator for `src` (checked alone, `checker_on`), the receiver of
@@ -315,7 +323,7 @@ pub fun new_codegen(c: Checker) -> CodeGen {
         dbg_fn_end: "", dbg_mark: "", dbg_n: 0, dbg_script: "",
         keep_ir: false, wants_ftoa: false, inlining: true, inl_names: [], inl_bodies: [], inl_no: [:], ssa: false, ssa_stats: no_ssa_stats(), ir_texts: [], ir_blocked: [], ir_ready: false,
         pend_store: "", pend_temp: -1, temp_uses: [], temp_remat: [], temp_src: [], temp_imm: [], temp_frame: [], temp_mem: [], temp_off: [],
-        temp_reg: [], slot_reg: [], saved_regs: [], in_frame: false, resume_blocks: [], frames: c.task_line > 0, norm: compiler_norm(), save_base: 0, arg_words: 0, frameless: false, kept_params: [:], keeping: [:], scan_kept: [], scan_args: [], owning: [:], no_owned: [], handed: handed, passed_on: passed_on, tag_enums: [:], a64: false,
+        temp_reg: [], slot_reg: [], saved_regs: [], in_frame: false, resume_blocks: [], frames: c.task_line > 0, norm: compiler_norm(), save_base: 0, arg_words: 0, frameless: false, kept_params: [:], keeping: [:], scan_kept: [], scan_args: [], owning: [:], no_owned: [], handed: handed, passed_on: passed_on, tag_enums: [:], a64: false, wasm: false, wasm_arity: [:], wasm_calls: [:], wasm_envs: [],
     }
 }
 
@@ -1893,7 +1901,7 @@ impl CodeGen {
 
     fun generate(var self) -> str {
         let en = self.entry_name()
-        if self.a64 { self.emit_runtime_prelude_a64(en) } else { self.emit_runtime_prelude(en) }
+        if self.wasm { self.emit_runtime_prelude_wasm(en) } else if self.a64 { self.emit_runtime_prelude_a64(en) } else { self.emit_runtime_prelude(en) }
         // Start from the entry point: every function is emitted once a function
         // emitted calls it, makes it a value or applies it partially (MYLA-108;
         // `take_ir`); generic ones stamped out per instance (D13).
@@ -1932,14 +1940,15 @@ impl CodeGen {
             }
         }
         for pj in self.partial_jobs {
-            if self.a64 { self.gen_partial_function_a64(pj) } else { self.gen_partial_function(pj) }
+            if self.wasm { self.gen_partial_function_wasm(pj) } else if self.a64 { self.gen_partial_function_a64(pj) } else { self.gen_partial_function(pj) }
         }
         for n in self.fnval_set {
-            if self.a64 { self.emit_fnval_thunk_a64(n) } else { self.emit_fnval_thunk(n) }
+            if self.wasm { self.emit_fnval_thunk_wasm(n) } else if self.a64 { self.emit_fnval_thunk_a64(n) } else { self.emit_fnval_thunk(n) }
         }
         self.emit_drop_helpers()
-        if self.uses_float && !self.a64 { self.raw(self.fmod_text()) }
+        if self.uses_float && !self.a64 && !self.wasm { self.raw(self.fmod_text()) }
         if self.fn_seen.contains("std$rt$float_to_str") { self.raw("\t.set __float_to_str, myla_std$rt$float_to_str") }
+        if self.wasm { return self.wasm_module(self.assemble_source()) }
         return self.assemble_source()
     }
 
@@ -2039,6 +2048,18 @@ impl CodeGen {
             si = si + 1
         }
         for line in self.strdata { out.push(line) }
+        if self.wasm && self.frames {
+            // each environment's drop function, its clone and its deep copy
+            // (`__deep_env`, `__dclone_env`, MYLA-158)
+            out.push("\t.balign 8")
+            out.push("__env_routines:")
+            out.push(format("\t.quad {}", self.wasm_envs.len()))
+            for l in self.wasm_envs {
+                out.push(format("\t.quad myla_{}_env_drop", l))
+                out.push(format("\t.quad myla_{}_env_clone", l))
+                out.push(format("\t.quad myla_{}_env_deep", l))
+            }
+        }
         out.push("")
         out.push("\t.bss")
         out.push("\t.balign 8")
@@ -2108,6 +2129,14 @@ impl CodeGen {
             // 1 once a task has failed: the program ends (D97)
             out.push("__exec_failing:")
             out.push("\t.skip 8")
+        }
+        if self.wasm {
+            // WASI's calls (std.platform's blocks, MYLA-158) and the
+            // environment of the function value being called
+            for v in [("__wasi_args", 128), ("__wasi_buf", 64), ("__wasi_stat", 64), ("__wasi_cookies", 512), ("__wasi_subs", 1584), ("__wasi_events", 1056), ("__wasi_watch", 520), ("__wasi_ready", 264), ("myla_env", 8)] {
+                out.push(v.0 + ":")
+                out.push(format("\t.skip {}", v.1))
+            }
         }
         out.push("")
         if self.line_files.len() > 0 { for l in self.dbg_sections() { out.push(l) } }
@@ -2960,8 +2989,13 @@ impl CodeGen {
         if self.frames {
             self.emit_env_routine(env_deep_ir(self, lifted, owned, false))
             self.emit_env_routine(env_deep_ir(self, lifted, owned, true))
-            self.emit(format("\t.quad myla_{}_env_clone", lifted))
-            self.emit(format("\t.quad myla_{}_env_deep", lifted))
+            if self.wasm {
+                // no data beside code on wasm: a table (`__env_routines`)
+                self.wasm_envs.push(lifted)
+            } else {
+                self.emit(format("\t.quad myla_{}_env_clone", lifted))
+                self.emit(format("\t.quad myla_{}_env_deep", lifted))
+            }
         }
         self.emit_env_routine(env_drop_ir(self, lifted, owned, self.rt_alloc_names().1))
     }

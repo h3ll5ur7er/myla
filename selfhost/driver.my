@@ -58,10 +58,9 @@ fun compile_asm(file: str, opts: LoadOptions, debug: bool, target: str) -> Resul
     native.runtime = true
     let ch = load_and_check(file, native)?
     var g = new_codegen(ch.checker)
-    if target == "aarch64-linux" {
-        if debug { return Err("myla: -g is not supported for aarch64-linux yet") }
-        g.a64 = true
-    }
+    if target != "x86_64-linux" && debug { return Err(format("myla: -g is not supported for {} yet", target)) }
+    if target == "aarch64-linux" { g.a64 = true }
+    if target == "wasm32-wasi" { g.wasm = true }
     g.set_sources(ch.prog.spans, ch.prog.next_id)
     if debug { g.enable_debug_info(read_gdb_script(opts.stdlib_root)) }
     return Ok(g.generate())
@@ -156,8 +155,9 @@ fun removed(path: str) -> bool {
     }
 }
 
-// `target`: x86_64-linux (GNU as and ld) or aarch64-linux (clang and
-// ld.lld, MYLA-163).
+// `target`: x86_64-linux (GNU as and ld), aarch64-linux (clang and ld.lld,
+// MYLA-163) or wasm32-wasi (clang and wasm-ld, a module to run under a
+// WASI host such as tools/wasm/run.mjs, MYLA-158).
 pub fun cmd_build(file: str, output: str, opts: LoadOptions, debug: bool, target: str) -> int32 {
     let asm = match compile_asm(file, opts, debug, target) {
         Ok(a) => a,
@@ -180,6 +180,10 @@ pub fun cmd_build(file: str, output: str, opts: LoadOptions, debug: bool, target
     if target == "aarch64-linux" {
         assemble = ["clang", "--target=aarch64-linux-gnu", "-c", "-o", obj_path, asm_path]
         link = ["ld.lld", "-static", "-o", output, obj_path]
+    }
+    if target == "wasm32-wasi" {
+        assemble = ["clang", "--target=wasm32-wasi", "-mtail-call", "-mbulk-memory", "-mnontrapping-fptoint", "-msign-ext", "-c", "-o", obj_path, asm_path]
+        link = ["wasm-ld", "-z", "stack-size=8388608", "-o", output, obj_path]
     }
     if run_step("/usr/bin/env", assemble, "myla: assembler failed") {
         return 1

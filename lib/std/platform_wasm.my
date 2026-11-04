@@ -1,0 +1,621 @@
+// std.platform — the platform layer under std.rt: WebAssembly on WASI
+// preview 1 (MYLA-158, D125).
+//
+// The same functions as std/platform.my (Linux on x86-64), over the
+// `wasi_snapshot_preview1` imports. Each call goes through `__syscall(n,
+// args, 0, 0)`: `n` is one of the W_ numbers below, the runtime's
+// dispatcher (selfhost/runtime_wasm.my) calls the import of that number
+// with the words in the block `__wasi_args` as its arguments, and gives
+// its errno (or, for `W_MEMORY_GROW`, `memory.grow`'s result). WASI's
+// errnos are given back as Linux's, negative, which std.io knows.
+//
+// WASI has no working directory and no processes: paths are resolved
+// against the first directory the host opened for the program (descriptor
+// 3, `/` in the test runner) and the working directory the host's `PWD`
+// names; `run` and `spawn` fail with ENOSYS. One worker runs every task
+// (D125), so nothing here waits for another thread. Not for programs (its
+// primitives are the standard library's, D100).
+
+pub const EINTR: int64 = -4
+pub const EAGAIN: int64 = -11
+
+const W_FD_WRITE: int64 = 1
+const W_FD_READ: int64 = 2
+const W_FD_CLOSE: int64 = 3
+const W_FD_FILESTAT_GET: int64 = 4
+const W_FD_READDIR: int64 = 5
+const W_PATH_OPEN: int64 = 6
+const W_PATH_FILESTAT_GET: int64 = 7
+const W_PATH_CREATE_DIRECTORY: int64 = 8
+const W_PATH_REMOVE_DIRECTORY: int64 = 9
+const W_PATH_UNLINK_FILE: int64 = 10
+const W_PATH_RENAME: int64 = 11
+const W_CLOCK_TIME_GET: int64 = 12
+const W_POLL_ONEOFF: int64 = 13
+const W_PROC_EXIT: int64 = 14
+const W_ARGS_SIZES_GET: int64 = 15
+const W_ARGS_GET: int64 = 16
+const W_ENVIRON_SIZES_GET: int64 = 17
+const W_ENVIRON_GET: int64 = 18
+const W_MEMORY_GROW: int64 = 19
+
+const ENOSYS: int64 = -38
+const PREOPEN: int64 = 3
+const PAGE: int64 = 65536
+const LOW32: int64 = 4294967295i64
+
+// --- calls ---------------------------------------------------------------------
+
+// The `k`-th argument word of the next call.
+fun arg(k: int64, v: int64) {
+    __store64(__rt_addr("__wasi_args") + 8 * k, v)
+}
+
+// The import `n` called with the arguments set: 0, or a negative errno.
+fun call(n: int64) -> int64 {
+    let e = __syscall(n, __rt_addr("__wasi_args"), 0, 0)
+    if e == 0 {
+        return 0
+    }
+    return -errno_linux(e)
+}
+
+// WASI's errno `e` as Linux's.
+#test(44)[2]
+#test(76)[13]
+#test(6)[11]
+fun errno_linux(e: int64) -> int64 {
+    if e == 2 || e == 63 || e == 76 { return 13 }  // EACCES, EPERM, ENOTCAPABLE
+    if e == 6 { return 11 }    // EAGAIN
+    if e == 8 { return 9 }     // EBADF
+    if e == 20 { return 17 }   // EEXIST
+    if e == 27 { return 4 }    // EINTR
+    if e == 28 { return 22 }   // EINVAL
+    if e == 29 { return 5 }    // EIO
+    if e == 31 { return 21 }   // EISDIR
+    if e == 44 { return 2 }    // ENOENT
+    if e == 52 { return 38 }   // ENOSYS
+    if e == 54 { return 20 }   // ENOTDIR
+    if e == 55 { return 39 }   // ENOTEMPTY
+    if e == 58 { return 95 }   // ENOTSUP
+    if e == 64 { return 32 }   // EPIPE
+    return 5
+}
+
+// A scratch word of the calls (`__wasi_buf`, 64 bytes).
+fun scratch(k: int64) -> int64 {
+    return __rt_addr("__wasi_buf") + 8 * k
+}
+
+// --- the start -------------------------------------------------------------------
+
+// The arguments and the environment as the kernel lays them out on Linux,
+// for `__argv` and `__environ`: a list of 8-byte pointers to NUL-terminated
+// strings ending with 0 (the runtime's `_start` calls this first).
+pub fun wasm_start() {
+    __store64(__rt_addr("__argv"), c_vector(W_ARGS_SIZES_GET, W_ARGS_GET))
+    __store64(__rt_addr("__envp"), c_vector(W_ENVIRON_SIZES_GET, W_ENVIRON_GET))
+}
+
+// The vector of `sizes`/`get` (args or environ): WASI writes 4-byte
+// pointers, widened here to the 8-byte ones std.rt reads.
+fun c_vector(sizes: int64, get: int64) -> int64 {
+    arg(0, scratch(0))
+    arg(1, scratch(1))
+    __store64(scratch(0), 0)
+    __store64(scratch(1), 0)
+    let r = call(sizes)
+    let n = __load64(scratch(0)) & LOW32
+    let bytes = __load64(scratch(1)) & LOW32
+    let ptrs = map_memory(4 * n + bytes + 8 * n + 8)
+    let strs = ptrs + 4 * n
+    let out = strs + bytes
+    if r == 0 && n > 0 {
+        arg(0, ptrs)
+        arg(1, strs)
+        let g = call(get)
+    }
+    var i: int64 = 0
+    while i < n {
+        __store64(out + 8 * i, __load32(ptrs + 4 * i) as int64)
+        i += 1
+    }
+    __store64(out + 8 * n, 0)
+    return out
+}
+
+// --- files and directories -----------------------------------------------------
+
+// The value of the environment variable `name` (no `=`), "" when unset.
+fun env_value(name: str) -> str {
+    var at = __load64(__rt_addr("__envp"))
+    if at == 0 {
+        return ""
+    }
+    let np = __addr_of(name)
+    let nlen = __load64(np)
+    while __load64(at) != 0 {
+        let s = __load64(at)
+        var i: int64 = 0
+        while i < nlen && __load8(s + i) == __load8(np + 8 + i) {
+            i += 1
+        }
+        if i == nlen && __load8(s + nlen) == 61u8 {
+            var sb = StringBuilder()
+            var j = nlen + 1
+            while __load8(s + j) != 0u8 {
+                sb.append_byte(__load8(s + j))
+                j += 1
+            }
+            return sb.build()
+        }
+        at += 8
+    }
+    return ""
+}
+
+// `path` as WASI takes it: relative to the preopened `/`, a relative one
+// first joined to the working directory (`PWD`).
+#test("/tmp/x")["tmp/x"]
+#test("/")["."]
+fun wasi_path(path: str) -> str {
+    var full = path
+    if path.len() == 0 || path[0] != '/' {
+        var wd = env_value("PWD")
+        if wd == "" {
+            wd = "/"
+        }
+        full = wd + "/" + path
+    }
+    var i = 0
+    while i < full.len() && full[i] == '/' {
+        i += 1
+    }
+    if i == full.len() {
+        return "."
+    }
+    var sb = StringBuilder()
+    sb.append(full, i, full.len())
+    return sb.build()
+}
+
+// The import `n` on a path of the preopened directory: `(dir, path, len)`
+// as its first three arguments, then `rest` from the fourth on.
+fun on_path(n: int64, path: str, flags_first: bool, rest: [int64]) -> int64 {
+    let p = wasi_path(path)
+    let a = __addr_of(p)
+    var k: int64 = 0
+    arg(k, PREOPEN)
+    k += 1
+    if flags_first {
+        arg(k, 1)  // LOOKUPFLAGS_SYMLINK_FOLLOW
+        k += 1
+    }
+    arg(k, a + 8)
+    arg(k + 1, __load64(a))
+    k += 2
+    for v in rest {
+        arg(k, v)
+        k += 1
+    }
+    return call(n)
+}
+
+// `path` opened with WASI's open flags `oflags`: its descriptor.
+fun open_with(path: str, oflags: int64) -> int64 {
+    let fdp = scratch(7)
+    // every right the directory may pass on
+    let r = on_path(W_PATH_OPEN, path, true, [oflags, -1, -1, 0, fdp])
+    if r < 0 {
+        return r
+    }
+    return __load64(fdp) & LOW32
+}
+
+pub fun open_read(path: str) -> int64 {
+    return open_with(path, 0)
+}
+
+pub fun open_write(path: str) -> int64 {
+    return open_with(path, 9)  // OFLAGS_CREAT | OFLAGS_TRUNC
+}
+
+pub fun open_dir(path: str) -> int64 {
+    return open_with(path, 2)  // OFLAGS_DIRECTORY
+}
+
+// One read or write of `n` bytes at `buf` (`op`: the import).
+fun rw(op: int64, fd: int64, buf: int64, n: int64) -> int64 {
+    let iov = scratch(2)
+    __store32(iov, buf as uint32)
+    __store32(iov + 4, n as uint32)
+    arg(0, fd)
+    arg(1, iov)
+    arg(2, 1)
+    arg(3, scratch(3))
+    let r = call(op)
+    if r < 0 {
+        return r
+    }
+    return __load64(scratch(3)) & LOW32
+}
+
+pub fun read(fd: int64, buf: int64, n: int64) -> int64 {
+    return rw(W_FD_READ, fd, buf, n)
+}
+
+pub fun write(fd: int64, buf: int64, n: int64) -> int64 {
+    return rw(W_FD_WRITE, fd, buf, n)
+}
+
+pub fun close(fd: int64) {
+    arg(0, fd)
+    let r = call(W_FD_CLOSE)
+}
+
+// The size of the open file `fd` (a filestat's size at 32).
+pub fun file_size(fd: int64) -> int64 {
+    let st = __rt_addr("__wasi_stat")
+    arg(0, fd)
+    arg(1, st)
+    if call(W_FD_FILESTAT_GET) < 0 {
+        return 0
+    }
+    return __load64(st + 32)
+}
+
+// The mode of what `path` names, from its file type: a directory 0o40755,
+// a regular file 0o100644, anything else 0o644.
+pub fun mode_of(path: str) -> int64 {
+    let st = __rt_addr("__wasi_stat")
+    let r = on_path(W_PATH_FILESTAT_GET, path, true, [st])
+    if r < 0 {
+        return r
+    }
+    let t = __load8(st + 16) as int64
+    if t == 3 {
+        return 16877
+    }
+    if t == 4 {
+        return 33188
+    }
+    return 420
+}
+
+pub fun make_dir(path: str, mode: int64) -> int64 {
+    return on_path(W_PATH_CREATE_DIRECTORY, path, false, [])
+}
+
+pub fun remove_file(path: str) -> int64 {
+    return on_path(W_PATH_UNLINK_FILE, path, false, [])
+}
+
+pub fun remove_dir(path: str) -> int64 {
+    return on_path(W_PATH_REMOVE_DIRECTORY, path, false, [])
+}
+
+pub fun rename(from_path: str, to_path: str) -> int64 {
+    let b = wasi_path(to_path)
+    let ba = __addr_of(b)
+    return on_path(W_PATH_RENAME, from_path, false, [PREOPEN, ba + 8, __load64(ba)])
+}
+
+// The working directory (`PWD`, else `/`) written to `buf`: its length.
+pub fun cwd(buf: int64, n: int64) -> int64 {
+    var wd = env_value("PWD")
+    if wd == "" {
+        wd = "/"
+    }
+    let a = __addr_of(wd)
+    let len = __load64(a)
+    if len + 1 > n {
+        return -34  // ERANGE
+    }
+    __copy_bytes(buf, a + 8, len)
+    __store8(buf + len, 0u8)
+    return len
+}
+
+// The next entries of the directory `fd` read to `buf` as Linux's records
+// (`dir_entry_name`, `dir_entry_size`): WASI's records (a 24-byte header,
+// the name not terminated) read after the cookie of the last entry given,
+// kept in the descriptor's word of `__wasi_cookies`, and each rewritten
+// with its name NUL-terminated at 19.
+pub fun dir_read(fd: int64, buf: int64, n: int64) -> int64 {
+    let cookie_at = __rt_addr("__wasi_cookies") + 8 * (fd & 63)
+    let raw = __alloc(n)
+    arg(0, fd)
+    arg(1, raw)
+    arg(2, n / 2)
+    arg(3, __load64(cookie_at))
+    arg(4, scratch(4))
+    let r = call(W_FD_READDIR)
+    if r < 0 {
+        __free(raw)
+        return r
+    }
+    let used = __load64(scratch(4)) & LOW32
+    var at: int64 = 0
+    var out: int64 = 0
+    while at + 24 <= used {
+        let namlen = __load32(raw + at + 16) as int64
+        if at + 24 + namlen > used {
+            break
+        }
+        let size = (19 + namlen + 1 + 7) / 8 * 8
+        if out + size > n {
+            break
+        }
+        __store64(buf + out, __load64(raw + at + 8))
+        __store64(buf + out + 8, 0)
+        __store64(buf + out + 16, size)
+        __copy_bytes(buf + out + 19, raw + at + 24, namlen)
+        __store8(buf + out + 19 + namlen, 0u8)
+        __store64(cookie_at, __load64(raw + at))
+        out += size
+        at += 24 + namlen
+    }
+    __free(raw)
+    return out
+}
+
+pub fun dir_entry_name(rec: int64) -> int64 {
+    return rec + 19
+}
+
+pub fun dir_entry_size(rec: int64) -> int64 {
+    return __load64(rec + 16) & 65535i64
+}
+
+// --- the standard streams --------------------------------------------------------
+
+// 1 when a read of `fd` won't block, 0 when `timeout_ms` (negative: none)
+// ran out: poll_oneoff on the descriptor and, with a limit, the clock.
+pub fun poll_read(fd: int64, timeout_ms: int64) -> int64 {
+    let subs = __rt_addr("__wasi_subs")
+    // a subscription: userdata 8, tag 1 (+8), then the fd (+16)
+    __store64(subs, 1)
+    __store8(subs + 8, 1u8)
+    __store32(subs + 16, fd as uint32)
+    var n: int64 = 1
+    if timeout_ms >= 0 {
+        clock_sub(subs + 48, 2, timeout_ms * 1000000)
+        n = 2
+    }
+    let got = poll(subs, n)
+    var i: int64 = 0
+    while i < got {
+        if __load64(__rt_addr("__wasi_events") + 32 * i) == 1 {
+            return 1
+        }
+        i += 1
+    }
+    return 0
+}
+
+// A clock subscription at `s` (userdata `tag`) for `ns` nanoseconds from now.
+fun clock_sub(s: int64, tag: int64, ns: int64) {
+    __store64(s, tag)
+    __store8(s + 8, 0u8)
+    __store32(s + 16, 1u32)  // CLOCKID_MONOTONIC
+    __store64(s + 24, ns)
+    __store64(s + 32, 1000)
+    __store64(s + 40, 0)
+}
+
+// poll_oneoff on the `n` subscriptions at `subs`: how many events
+// (`__wasi_events`, 32 bytes each, the userdata first).
+fun poll(subs: int64, n: int64) -> int64 {
+    arg(0, subs)
+    arg(1, __rt_addr("__wasi_events"))
+    arg(2, n)
+    arg(3, scratch(5))
+    if call(W_POLL_ONEOFF) < 0 {
+        return 0
+    }
+    return __load64(scratch(5)) & LOW32
+}
+
+pub fun write_all(fd: int64, p: int64, n: int64) {
+    var at = p
+    var left = n
+    while left > 0 {
+        let r = write(fd, at, left)
+        if r >= 0 {
+            at += r
+            left -= r
+        } else if r != EINTR && r != EAGAIN {
+            return
+        }
+    }
+}
+
+// The `n` bytes at `p` and a newline on the standard output in one write.
+pub fun write_line(p: int64, n: int64) {
+    let iov = scratch(2)
+    __store32(iov, p as uint32)
+    __store32(iov + 4, n as uint32)
+    __store32(iov + 8, (__addr_of("\n") + 8) as uint32)
+    __store32(iov + 12, 1u32)
+    arg(0, 1)
+    arg(1, iov)
+    arg(2, 2)
+    arg(3, scratch(4))
+    if call(W_FD_WRITE) < 0 {
+        return
+    }
+    let r = __load64(scratch(4)) & LOW32
+    if r < n {
+        write_all(1, p + r, n - r)
+        write_all(1, __addr_of("\n") + 8, 1)
+    } else if r == n {
+        write_all(1, __addr_of("\n") + 8, 1)
+    }
+}
+
+// --- processes: none on WASI -------------------------------------------------------
+
+pub fun run(program: str, argv: [str]) -> [uint8] {
+    let none: [uint8] = []
+    __set_run_stderr(none)
+    __set_run_status(-1, 0, 38)
+    return none
+}
+
+pub fun spawn(program: str, argv: [str]) -> [int] {
+    return [38, 0, -1, -1, -1]
+}
+
+pub fun reap(pid: int64) -> int64 {
+    return -1
+}
+
+pub fun kill(pid: int64, sig: int64) {
+}
+
+// --- memory --------------------------------------------------------------------
+
+// `n` bytes of fresh, zeroed memory: the pages the linear memory grew by.
+pub fun map_memory(n: int64) -> int64 {
+    arg(0, (n + PAGE - 1) / PAGE)
+    let old = __syscall(W_MEMORY_GROW, __rt_addr("__wasi_args"), 0, 0)
+    if old < 0 {
+        return -12  // ENOMEM
+    }
+    return old * PAGE
+}
+
+// The linear memory doesn't shrink: nothing given back.
+pub fun unmap_memory(p: int64, n: int64) {
+}
+
+// --- time ----------------------------------------------------------------------
+
+pub fun clock_ns() -> int64 {
+    arg(0, 1)  // CLOCKID_MONOTONIC
+    arg(1, 1)
+    arg(2, scratch(6))
+    let r = call(W_CLOCK_TIME_GET)
+    return __load64(scratch(6))
+}
+
+pub fun sleep_ns(n: int64) {
+    if n <= 0 {
+        return
+    }
+    let subs = __rt_addr("__wasi_subs")
+    clock_sub(subs, 2, n)
+    let got = poll(subs, 1)
+}
+
+// --- the poller (D124) -----------------------------------------------------------
+// One worker, so the poller is poll_oneoff over the watched descriptors and
+// the clock: `poller_watch` records a descriptor (`__wasi_watch`, up to 32,
+// `[fd][token]`), `poller_wait` polls them all, `poller_event` gives the
+// tokens of those ready. Nothing can wake it from another thread.
+
+pub fun poller_new() -> int64 {
+    __store64(__rt_addr("__wasi_watch"), 0)
+    return 1
+}
+
+pub fun poller_wait(p: int64, timeout_ms: int64) -> int64 {
+    let w = __rt_addr("__wasi_watch")
+    let n = __load64(w)
+    let subs = __rt_addr("__wasi_subs")
+    var i: int64 = 0
+    while i < n {
+        let s = subs + 48 * i
+        __store64(s, __load64(w + 16 + 16 * i))
+        __store8(s + 8, 1u8)
+        __store32(s + 16, __load64(w + 8 + 16 * i) as uint32)
+        i += 1
+    }
+    var m = n
+    if timeout_ms >= 0 || n == 0 {
+        var t = timeout_ms
+        if t < 0 {
+            t = 3600000
+        }
+        clock_sub(subs + 48 * n, 0, t * 1000000)
+        m = n + 1
+    }
+    let got = poll(subs, m)
+    // the descriptors ready, their tokens kept for `poller_event`, unwatched
+    var k: int64 = 0
+    var e: int64 = 0
+    while e < got {
+        let tok = __load64(__rt_addr("__wasi_events") + 32 * e)
+        if tok != 0 && ((__load32(__rt_addr("__wasi_events") + 32 * e + 8) as int64) >> 16) == 1 {
+            __store64(__rt_addr("__wasi_ready") + 8 * k, tok)
+            forget_token(tok)
+            k += 1
+        }
+        e += 1
+    }
+    return k
+}
+
+// The watch with the token `tok` taken off.
+fun forget_token(tok: int64) {
+    let w = __rt_addr("__wasi_watch")
+    let n = __load64(w)
+    var i: int64 = 0
+    while i < n {
+        if __load64(w + 16 + 16 * i) == tok {
+            __store64(w + 8 + 16 * i, __load64(w + 8 + 16 * (n - 1)))
+            __store64(w + 16 + 16 * i, __load64(w + 16 + 16 * (n - 1)))
+            __store64(w, n - 1)
+            return
+        }
+        i += 1
+    }
+}
+
+pub fun poller_event(i: int64) -> int64 {
+    return __load64(__rt_addr("__wasi_ready") + 8 * i)
+}
+
+pub fun poller_watch(p: int64, fd: int64, token: int64) -> int64 {
+    let w = __rt_addr("__wasi_watch")
+    let n = __load64(w)
+    if n >= 32 {
+        return -12
+    }
+    __store64(w + 8 + 16 * n, fd)
+    __store64(w + 16 + 16 * n, token)
+    __store64(w, n + 1)
+    return 0
+}
+
+pub fun poller_forget(p: int64, fd: int64) {
+    let w = __rt_addr("__wasi_watch")
+    var i: int64 = 0
+    while i < __load64(w) {
+        if __load64(w + 8 + 16 * i) == fd {
+            forget_token(__load64(w + 16 + 16 * i))
+        } else {
+            i += 1
+        }
+    }
+}
+
+pub fun poller_wake(p: int64) {
+}
+
+// --- workers: one -------------------------------------------------------------------
+
+pub fun cpus_allowed() -> int64 {
+    return 1
+}
+
+pub fun park(addr: int64, seen: int64) {
+}
+
+pub fun unpark_one(addr: int64) {
+}
+
+pub fun exit(code: int64) {
+    arg(0, code)
+    let r = __syscall(W_PROC_EXIT, __rt_addr("__wasi_args"), 0, 0)
+}

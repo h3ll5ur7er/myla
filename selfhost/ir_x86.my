@@ -92,6 +92,11 @@ impl CodeGen {
         // the ownership instructions as plain operations and calls
         // (MYLA-162), the owners a tail call drops after it first moved
         // before it
+        if self.wasm {
+            // wasm's (MYLA-158)
+            self.emit_wasm(self.expand_ownership(f), decl_id, line, col, mangled)
+            return
+        }
         if self.a64 {
             // aarch64's translation, its tail calls only `become`'s (MYLA-163)
             self.emit_a64(self.expand_ownership(f), decl_id, line, col, mangled)

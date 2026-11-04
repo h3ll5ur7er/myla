@@ -41,7 +41,7 @@ fun usage_lines() -> [str] {
         "  run   <file.my> [options] [args...]  interpret a program with these arguments",
         "  test  <file.my> [options]            run its #test cases",
         "  build <file.my> [-o <out>] [-g] [--target <t>] [options]  compile to a binary (-g: debug information for gdb;",
-        "                                       <t>: x86_64-linux, the default, or aarch64-linux)",
+        "                                       <t>: x86_64-linux, the default, aarch64-linux or wasm32-wasi)",
         "  check <file.my> [options]            type-check it",
         "  repl  [options]                      the interactive interpreter",
         "commands on the project around the working directory (myla.toml):",
@@ -102,8 +102,8 @@ fun parse_command_line(argv: [str]) -> Result<CommandLine, CliError> {
             j = j + 1
         } else if cmd == "build" && a == "--target" && has_value {
             cl.target = argv[j + 1]
-            if cl.target != "x86_64-linux" && cl.target != "aarch64-linux" {
-                return Err(CliError { msg: "myla: unknown target '" + cl.target + "' (x86_64-linux, aarch64-linux)", usage: false })
+            if cl.target != "x86_64-linux" && cl.target != "aarch64-linux" && cl.target != "wasm32-wasi" {
+                return Err(CliError { msg: "myla: unknown target '" + cl.target + "' (x86_64-linux, aarch64-linux, wasm32-wasi)", usage: false })
             }
             j = j + 2
         } else if cmd == "clean" && a == "--deps" {

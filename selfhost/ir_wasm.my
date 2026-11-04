@@ -1,0 +1,1538 @@
+// ir_wasm.my -- IR → WebAssembly (wasm32, LLVM's wasm assembly; MYLA-158,
+// D125; wiki: Architecture/Native-backend, "wasm32 on WASI").
+//
+// The third backend, after `ir_x86.my` and `ir_a64.my`. wasm has no
+// registers to allocate: every temporary is a local (an i64), and the
+// engine allocates. What it does have that the others don't is structured
+// control flow, which a function gets here the simple way (D125 (3)): a
+// loop over a block-number local, each IR block one arm of a `br_table`
+// dispatch, a jump storing the next block's number and branching back to
+// the loop. The slots are cells of a frame in linear memory (the shadow
+// stack, `__stack_pointer`), as their addresses are taken; a frame
+// function's slots are in its heap frame.
+//
+// Addresses are 32-bit, held zero-extended in i64 locals and in memory as
+// today's 8-byte words (D122's 4-byte layouts come after, MYLA-158). Every
+// function takes its argument words as i64 parameters and gives an i64
+// (0 when it has no result), so a function value is called through one
+// `call_indirect` type per number of words; its code word holds its index
+// in the table, and its environment goes in the memory word `myla_env`.
+
+from .checker import Type, subst_type
+from .codegen import CodeGen, PartialJob, is_aggregate, int_width_cg, is_tfloat32, is_aggregate_opt, is_cell_t, is_tfunc, tls_offset
+from .ir import IrFunc, Inst, Term, Slot, ENV_WORD, ends_in_call
+from .ir_x86 import slots_at, frame_size
+
+// A function being emitted: its argument words, the local of each
+// temporary (`nparams + t`), the scratch locals, the frame's size and each
+// slot's offset in it (from the frame-base local, or in the heap frame),
+// the dispatch number of each block, the blocks in dispatch order, the
+// points a frame function resumes at.
+struct WFn { nparams: int32, la: int32, lb: int32, bb: int32, fp: int32, size: int32, soff: [int32], scratch: int32, frame: bool, num: [int32], order: [int32], resumes: [int32] }
+
+impl CodeGen {
+    // `f` as `myla_<mangled>` for wasm32.
+    fun emit_wasm(var self, f: IrFunc, decl_id: int32, line: int32, col: int32, mangled: str) {
+        self.cur_file = self.file_number(decl_id)
+        self.cur_path = self.path_of(decl_id)
+        var nparams = 0
+        if f.frame {
+            nparams = 1
+        } else {
+            for s in f.slots {
+                if s.word >= 0 {
+                    var n = 1
+                    if s.inline { n = s.size / 8 }
+                    if s.word + n > nparams { nparams = s.word + n }
+                }
+            }
+        }
+        // the frame: each slot a cell (a frame function's are in its heap
+        // frame), then a scratch cell
+        var soff: [int32] = []
+        var cur = 0
+        if f.frame {
+            soff = slots_at(f, 0, [])
+        } else {
+            for s in f.slots {
+                soff.push(cur)
+                cur = cur + (s.size + 7) / 8 * 8
+                if s.size == 0 { cur = cur + 8 }
+            }
+        }
+        let scratch = cur
+        cur = cur + 8
+        let size = (cur + 15) / 16 * 16
+        // the blocks reached, numbered in the order they are laid out
+        let reach = wasm_reachable(f)
+        var num: [int32] = []
+        for b in f.blocks { num.push(-1) }
+        var order: [int32] = []
+        for b in f.order {
+            if reach[b] {
+                num[b] = order.len()
+                order.push(b)
+            }
+        }
+        var resumes: [int32] = []
+        if f.frame {
+            for b in order {
+                match f.blocks[b].term { Term.Suspend(rb) => { if !wasm_has(resumes, rb) { resumes.push(rb) } }, _ => {} }
+            }
+        }
+        let t = f.temps.len()
+        let w = WFn { nparams: nparams, la: nparams + t, lb: nparams + t + 1, bb: nparams + t + 2, fp: nparams + t + 3, size: size, soff: soff, scratch: scratch, frame: f.frame, num: num, order: order, resumes: resumes }
+        let name = format("myla_{}", mangled)
+        self.wasm_define(name, nparams)
+        self.emit("")
+        self.emit(format("{}:", name))
+        self.emit(format(".functype {} {}", name, wasm_sig(nparams)))
+        var locals = StringBuilder()
+        locals.append(".local ")
+        var k = 0
+        while k < t + 2 {
+            locals.append("i64, ")
+            k = k + 1
+        }
+        locals.append("i32, i32")
+        self.emit(locals.build())
+        // the frame below the stack pointer
+        self.emit("global.get __stack_pointer")
+        self.emit(format("i32.const {}", size))
+        self.emit("i32.sub")
+        self.emit(format("local.tee {}", w.fp))
+        self.emit("global.set __stack_pointer")
+        if !f.frame {
+            // the parameters into their cells, the environment from `myla_env`
+            var si = 0
+            while si < f.slots.len() {
+                let s = f.slots[si]
+                if s.word == ENV_WORD {
+                    self.emit(format("local.get {}", w.fp))
+                    self.emit("i32.const myla_env")
+                    self.emit("i64.load 0")
+                    self.emit(format("i64.store {}", soff[si]))
+                } else if s.word >= 0 {
+                    var n = 1
+                    if s.inline { n = s.size / 8 }
+                    var j = 0
+                    while j < n {
+                        self.emit(format("local.get {}", w.fp))
+                        self.emit(format("local.get {}", s.word + j))
+                        self.emit(format("i64.store {}", soff[si] + 8 * j))
+                        j = j + 1
+                    }
+                }
+                si = si + 1
+            }
+        }
+        // the first block: 0, or a frame function's resume point (state k + 1
+        // the k-th)
+        self.emit("i32.const 0")
+        self.emit(format("local.set {}", w.bb))
+        if f.frame && resumes.len() > 0 {
+            var ri = 0
+            while ri < resumes.len() {
+                self.emit("local.get 0")
+                self.emit("i32.wrap_i64")
+                self.emit("i64.load 16")
+                self.emit(format("i64.const {}", ri + 1))
+                self.emit("i64.eq")
+                self.emit("if")
+                self.emit(format("i32.const {}", num[resumes[ri]]))
+                self.emit(format("local.set {}", w.bb))
+                self.emit("end_if")
+                ri = ri + 1
+            }
+        }
+        // the dispatch: a block per IR block, innermost first
+        let n = order.len()
+        self.emit("loop")
+        var i = 0
+        while i < n {
+            self.emit("block")
+            i = i + 1
+        }
+        self.emit(format("local.get {}", w.bb))
+        var table = StringBuilder()
+        table.append("br_table {")
+        i = 0
+        while i < n {
+            table.append(format("{}, ", i))
+            i = i + 1
+        }
+        table.append(format("{}", n - 1))
+        table.append("}")
+        self.emit(table.build())
+        i = 0
+        while i < n {
+            self.emit("end_block")
+            let b = order[i]
+            let insts = f.blocks[b].insts
+            let term = f.blocks[b].term
+            var becomes = match term { Term.Become => true, _ => false }
+            var resume_at = -1
+            match term {
+                Term.Suspend(rb) => {
+                    if ends_in_call(insts) {
+                        becomes = true
+                        resume_at = rb
+                    }
+                },
+                _ => {},
+            }
+            var stop = insts.len()
+            if becomes { stop = insts.len() - 1 }
+            var j = 0
+            while j < stop {
+                self.wasm_inst(f, w, insts[j])
+                j = j + 1
+            }
+            if becomes {
+                if resume_at >= 0 { self.wasm_state(w, resume_at) }
+                self.wasm_tail_call(f, w, insts[insts.len() - 1])
+            } else {
+                self.wasm_term(f, w, term, n - 1 - i)
+            }
+            i = i + 1
+        }
+        self.emit("end_loop")
+        self.emit("unreachable")
+        self.emit("end_function")
+        if f.frame { self.emit_frame_new_wasm(f, mangled, soff) }
+    }
+
+    // A function `name` taking `n` words, for its `.functype` declaration.
+    fun wasm_define(var self, name: str, n: int32) {
+        self.wasm_arity[name] = n
+    }
+
+    // A call of `name` with `n` words (checked against its definition when
+    // the module is put together).
+    fun wasm_call(var self, op: str, name: str, n: int32) {
+        match get(self.wasm_calls, name) {
+            Some(m) => { if m != n { self.wasm_calls[name] = -1 } },
+            None => { self.wasm_calls[name] = n },
+        }
+        self.emit(format("{} {}", op, name))
+    }
+
+    // -- operands ----------------------------------------------------------
+
+    fun wasm_get(var self, w: WFn, t: int32) {
+        self.emit(format("local.get {}", w.nparams + t))
+    }
+
+    fun wasm_set(var self, w: WFn, t: int32) {
+        if t < 0 {
+            self.emit("drop")
+            return
+        }
+        self.emit(format("local.set {}", w.nparams + t))
+    }
+
+    // The i32 address of slot `s`'s cell (its offset not added: `wasm_soff`).
+    fun wasm_slot_base(var self, w: WFn) {
+        if w.frame {
+            self.emit("local.get 0")
+            self.emit("i32.wrap_i64")
+        } else {
+            self.emit(format("local.get {}", w.fp))
+        }
+    }
+
+    // The i32 address `p + off` of a temporary `p` holding an address.
+    fun wasm_addr(var self, w: WFn, p: int32, off: int32) {
+        self.wasm_get(w, p)
+        if off != 0 {
+            self.emit(format("i64.const {}", off))
+            self.emit("i64.add")
+        }
+        self.emit("i32.wrap_i64")
+    }
+
+    // The i32 address of the runtime variable `sym` (worker 0's own copy
+    // with tasks: one worker, D125).
+    fun wasm_rt_var(var self, sym: str) {
+        if self.frames && tls_offset(sym) != 0 {
+            self.emit(format("i32.const __tls_blocks+{}", tls_offset(sym)))
+            return
+        }
+        self.emit(format("i32.const {}", sym))
+    }
+
+    // The i64 on the stack wrapped to the width of `t` (sign- or
+    // zero-extended), as a temporary holds it.
+    fun wasm_wrap(var self, t: Type) {
+        match t {
+            Type.TInt(bits, s) => {
+                if bits == 32 {
+                    if s { self.emit("i64.extend32_s") } else {
+                        self.emit("i64.const 4294967295")
+                        self.emit("i64.and")
+                    }
+                } else if bits == 16 {
+                    if s { self.emit("i64.extend16_s") } else {
+                        self.emit("i64.const 65535")
+                        self.emit("i64.and")
+                    }
+                } else if bits == 8 {
+                    if s { self.emit("i64.extend8_s") } else {
+                        self.emit("i64.const 255")
+                        self.emit("i64.and")
+                    }
+                }
+            },
+            _ => {},
+        }
+    }
+
+    // A runtime error `trap` reported at `line:col` (its position record as
+    // the argument, as `__panic` takes it); nothing follows.
+    fun wasm_trap(var self, trap: str, line: int32, col: int32) {
+        if line <= 0 { self.emit("i64.const 0") }
+        else {
+            self.emit(format("i32.const {}", self.position_label(line, col)))
+            self.emit("i64.extend_i32_u")
+        }
+        self.wasm_call("call", trap, 1)
+        self.emit("drop")
+        self.emit("unreachable")
+    }
+
+    // `suspend L`'s state, the one resuming at L, into the heap frame.
+    fun wasm_state(var self, w: WFn, b: int32) {
+        var k = 0
+        while k < w.resumes.len() && w.resumes[k] != b { k = k + 1 }
+        self.emit("local.get 0")
+        self.emit("i32.wrap_i64")
+        self.emit(format("i64.const {}", k + 1))
+        self.emit("i64.store 16")
+    }
+
+    // The frame given back to the stack (before a return or a tail call).
+    fun wasm_leave(var self, w: WFn) {
+        self.emit(format("local.get {}", w.fp))
+        self.emit(format("i32.const {}", w.size))
+        self.emit("i32.add")
+        self.emit("global.set __stack_pointer")
+    }
+
+    // -- instructions --------------------------------------------------------
+
+    fun wasm_inst(var self, f: IrFunc, w: WFn, inst: Inst) {
+        match inst {
+            Inst.Const(d, t, v) => {
+                var x = v
+                match t {
+                    Type.TInt(bits, s) => { x = wasm_wrapped(v, bits, s) },
+                    _ => {},
+                }
+                self.emit(format("i64.const {}", x))
+                self.wasm_set(w, d)
+            },
+            Inst.Str(d, text) => {
+                self.emit(format("i32.const {}", self.string_label(text)))
+                self.emit("i64.extend_i32_u")
+                self.wasm_set(w, d)
+            },
+            Inst.Label(d, sym) => {
+                self.emit(format("i32.const {}", sym))
+                self.emit("i64.extend_i32_u")
+                self.wasm_set(w, d)
+            },
+            Inst.Load(d, s) => {
+                self.wasm_slot_base(w)
+                self.emit(format("i64.load {}", w.soff[s]))
+                self.wasm_set(w, d)
+            },
+            Inst.Store(s, v) => {
+                self.wasm_slot_base(w)
+                self.wasm_get(w, v)
+                self.emit(format("i64.store {}", w.soff[s]))
+            },
+            Inst.Addr(d, s) => {
+                self.wasm_slot_base(w)
+                self.emit(format("i32.const {}", w.soff[s]))
+                self.emit("i32.add")
+                self.emit("i64.extend_i32_u")
+                self.wasm_set(w, d)
+            },
+            Inst.Offset(d, p, off) => {
+                self.wasm_get(w, p)
+                self.emit(format("i64.const {}", off))
+                self.emit("i64.add")
+                self.wasm_set(w, d)
+            },
+            Inst.LoadAt(d, p, off, width) => {
+                self.wasm_addr(w, p, off)
+                self.wasm_load(width, f.temps[d])
+                self.wasm_set(w, d)
+            },
+            Inst.StoreAt(p, off, v, width) => {
+                self.wasm_addr(w, p, off)
+                self.wasm_get(w, v)
+                self.wasm_store(width, f.temps[v])
+            },
+            Inst.Mov(d, a) => {
+                self.wasm_get(w, a)
+                self.wasm_set(w, d)
+            },
+            Inst.Copy(d, src, size) => {
+                self.wasm_addr(w, d, 0)
+                self.wasm_addr(w, src, 0)
+                self.emit(format("i32.const {}", size))
+                self.emit("memory.copy 0, 0")
+            },
+            Inst.Bin(d, op, t, rt, a, b, pos) => {
+                match t {
+                    Type.TFloat(fw) => { self.wasm_float_op(w, op, rt, a, b) },
+                    _ => { self.wasm_int_op(w, op, t, rt, a, b, pos.line, pos.col) },
+                }
+                self.wasm_set(w, d)
+            },
+            Inst.Cmp(d, op, t, a, b) => {
+                match t {
+                    Type.TFloat(fw) => {
+                        self.wasm_get(w, a)
+                        self.emit("f64.reinterpret_i64")
+                        self.wasm_get(w, b)
+                        self.emit("f64.reinterpret_i64")
+                        self.emit("f64." + wasm_fcmp(op))
+                    },
+                    _ => {
+                        var signed = true
+                        match t { Type.TInt(iw, s) => { signed = s }, _ => {} }
+                        self.wasm_get(w, a)
+                        self.wasm_get(w, b)
+                        self.emit("i64." + wasm_icmp(op, signed))
+                    },
+                }
+                self.emit("i64.extend_i32_u")
+                self.wasm_set(w, d)
+            },
+            Inst.Un(d, op, t, a) => {
+                match t {
+                    Type.TFloat(fw) => {
+                        self.wasm_get(w, a)
+                        self.emit("f64.reinterpret_i64")
+                        self.emit("f64.neg")
+                        self.emit("i64.reinterpret_f64")
+                    },
+                    _ => {
+                        if op == "-" {
+                            self.emit("i64.const 0")
+                            self.wasm_get(w, a)
+                            self.emit("i64.sub")
+                        } else if op == "~" {
+                            self.wasm_get(w, a)
+                            self.emit("i64.const -1")
+                            self.emit("i64.xor")
+                        } else {
+                            self.wasm_get(w, a)
+                            self.emit("i64.const 1")
+                            self.emit("i64.xor")
+                        }
+                        self.wasm_wrap(t)
+                    },
+                }
+                self.wasm_set(w, d)
+            },
+            Inst.Cast(d, src, tgt, a) => {
+                self.wasm_get(w, a)
+                self.wasm_cast(w, src, tgt)
+                self.wasm_set(w, d)
+            },
+            Inst.Call(d, name, args) => {
+                for x in args { self.wasm_get(w, x) }
+                self.wasm_call("call", format("myla_{}", name), args.len())
+                self.wasm_set(w, d)
+            },
+            Inst.CallSret(name, r, args) => {
+                self.wasm_get(w, r)
+                for x in args { self.wasm_get(w, x) }
+                self.wasm_call("call", format("myla_{}", name), args.len() + 1)
+                self.emit("drop")
+            },
+            Inst.CallInd(d, fv, args) => {
+                self.wasm_env(w, fv)
+                for x in args { self.wasm_get(w, x) }
+                self.wasm_code(w, fv)
+                self.emit(format("call_indirect {}", wasm_sig(args.len())))
+                self.wasm_set(w, d)
+            },
+            Inst.CallIndSret(fv, r, args) => {
+                self.wasm_env(w, fv)
+                self.wasm_get(w, r)
+                for x in args { self.wasm_get(w, x) }
+                self.wasm_code(w, fv)
+                self.emit(format("call_indirect {}", wasm_sig(args.len() + 1)))
+                self.emit("drop")
+            },
+            Inst.Rt(d, name, args) => { self.wasm_rt(f, w, d, name, args) },
+            Inst.RtPair(d, d2, name, args) => { panic("internal error: wasm: a runtime call with two results") },
+            Inst.Init(s) => {},
+            Inst.Moved(s) => {},
+            Inst.Check(v, kind, p) => {
+                self.wasm_get(w, v)
+                self.emit("i64.eqz")
+                self.emit("if")
+                self.wasm_trap("__trap_" + kind, p.line, p.col)
+                self.emit("end_if")
+            },
+            Inst.SbAppend(h, v) => {
+                self.wasm_get(w, h)
+                self.wasm_get(w, v)
+                self.emit("i64.const 8")
+                self.emit("i64.add")
+                self.wasm_addr(w, v, 0)
+                self.emit("i64.load 0")
+                self.wasm_call("call", "__sb_append_bytes", 3)
+                self.emit("drop")
+            },
+            Inst.SbAppendRange(h, v, a, b, p) => {
+                // 0 <= start <= end <= len
+                self.wasm_get(w, a)
+                self.emit("i64.extend32_s")
+                self.emit(format("local.set {}", w.la))
+                self.wasm_get(w, b)
+                self.emit("i64.extend32_s")
+                self.emit(format("local.set {}", w.lb))
+                self.emit(format("local.get {}", w.la))
+                self.emit("i64.const 0")
+                self.emit("i64.lt_s")
+                self.emit(format("local.get {}", w.lb))
+                self.emit(format("local.get {}", w.la))
+                self.emit("i64.lt_s")
+                self.emit("i32.or")
+                self.emit(format("local.get {}", w.lb))
+                self.wasm_addr(w, v, 0)
+                self.emit("i64.load 0")
+                self.emit("i64.gt_s")
+                self.emit("i32.or")
+                self.emit("if")
+                self.wasm_trap("__trap_index", p.line, p.col)
+                self.emit("end_if")
+                self.wasm_get(w, h)
+                self.wasm_get(w, v)
+                self.emit("i64.const 8")
+                self.emit("i64.add")
+                self.emit(format("local.get {}", w.la))
+                self.emit("i64.add")
+                self.emit(format("local.get {}", w.lb))
+                self.emit(format("local.get {}", w.la))
+                self.emit("i64.sub")
+                self.wasm_call("call", "__sb_append_bytes", 3)
+                self.emit("drop")
+            },
+            Inst.SbAppendByte(h, b) => {
+                self.wasm_slot_base(w)
+                self.wasm_get(w, b)
+                self.emit(format("i64.store8 {}", w.scratch))
+                self.wasm_get(w, h)
+                self.wasm_slot_base(w)
+                self.emit(format("i32.const {}", w.scratch))
+                self.emit("i32.add")
+                self.emit("i64.extend_i32_u")
+                self.emit("i64.const 1")
+                self.wasm_call("call", "__sb_append_bytes", 3)
+                self.emit("drop")
+            },
+            Inst.SbBuild(d, c) => {
+                // a new string: its length, then the builder's bytes
+                self.wasm_addr(w, c, 0)
+                self.emit("i64.load 0")
+                self.emit("i64.const 8")
+                self.emit("i64.add")
+                self.wasm_call("call", "__alloc", 1)
+                self.wasm_set(w, d)
+                self.wasm_addr(w, d, 0)
+                self.wasm_addr(w, c, 0)
+                self.emit("i64.load 0")
+                self.emit("i64.store 0")
+                self.wasm_addr(w, d, 8)
+                self.wasm_addr(w, c, 16)
+                self.wasm_addr(w, c, 0)
+                self.emit("i64.load 0")
+                self.emit("i32.wrap_i64")
+                self.emit("memory.copy 0, 0")
+            },
+            Inst.Global(d, sym, gw) => {
+                self.wasm_rt_var(sym)
+                if gw == 4 { self.emit("i64.load32_s 0") } else { self.emit("i64.load 0") }
+                self.wasm_set(w, d)
+            },
+            Inst.Exit(v) => {
+                self.wasm_get(w, v)
+                if self.frames { self.wasm_call("call", "__task_exit", 1) }
+                else { self.wasm_call("call", "__exit", 1) }
+                self.emit("drop")
+                self.emit("unreachable")
+            },
+            Inst.Elem(d, c, i, stride, is_str, p) => {
+                self.wasm_get(w, i)
+                self.wasm_addr(w, c, 0)
+                self.emit("i64.load 0")
+                self.emit("i64.ge_u")
+                self.emit("if")
+                self.wasm_trap("__trap_index", p.line, p.col)
+                self.emit("end_if")
+                self.wasm_get(w, c)
+                if is_str { self.emit("i64.const 8") } else { self.emit("i64.const 16") }
+                self.emit("i64.add")
+                self.wasm_get(w, i)
+                self.emit(format("i64.const {}", stride))
+                self.emit("i64.mul")
+                self.emit("i64.add")
+                self.wasm_set(w, d)
+            },
+            Inst.Load8(d, p) => {
+                self.wasm_addr(w, p, 0)
+                self.emit("i64.load8_u 0")
+                self.wasm_set(w, d)
+            },
+            Inst.Append(d, h, c, stride) => {
+                // grown when full (the new cell stored into the holder), then
+                // the element counted and its address
+                self.wasm_get(w, c)
+                self.emit(format("local.set {}", w.la))
+                self.emit(format("local.get {}", w.la))
+                self.emit("i32.wrap_i64")
+                self.emit("i64.load 0")
+                self.emit(format("local.get {}", w.la))
+                self.emit("i32.wrap_i64")
+                self.emit("i64.load 8")
+                self.emit("i64.ge_u")
+                self.emit("if")
+                self.emit(format("local.get {}", w.la))
+                self.emit(format("i64.const {}", stride))
+                self.wasm_call("call", "__list_grow", 2)
+                self.emit(format("local.set {}", w.la))
+                self.wasm_addr(w, h, 0)
+                self.emit(format("local.get {}", w.la))
+                self.emit("i64.store 0")
+                self.emit("end_if")
+                // the old length, then counted
+                self.emit(format("local.get {}", w.la))
+                self.emit("i32.wrap_i64")
+                self.emit("i64.load 0")
+                self.emit(format("local.set {}", w.lb))
+                self.emit(format("local.get {}", w.la))
+                self.emit("i32.wrap_i64")
+                self.emit(format("local.get {}", w.lb))
+                self.emit("i64.const 1")
+                self.emit("i64.add")
+                self.emit("i64.store 0")
+                self.emit(format("local.get {}", w.la))
+                self.emit("i64.const 16")
+                self.emit("i64.add")
+                self.emit(format("local.get {}", w.lb))
+                self.emit(format("i64.const {}", stride))
+                self.emit("i64.mul")
+                self.emit("i64.add")
+                self.wasm_set(w, d)
+            },
+            Inst.Pop(d, c, stride, p) => {
+                self.wasm_addr(w, c, 0)
+                self.emit("i64.load 0")
+                self.emit("i64.eqz")
+                self.emit("if")
+                self.wasm_trap("__trap_pop", p.line, p.col)
+                self.emit("end_if")
+                self.wasm_addr(w, c, 0)
+                self.emit("i64.load 0")
+                self.emit("i64.const 1")
+                self.emit("i64.sub")
+                self.emit(format("local.set {}", w.lb))
+                self.wasm_addr(w, c, 0)
+                self.emit(format("local.get {}", w.lb))
+                self.emit("i64.store 0")
+                self.wasm_get(w, c)
+                self.emit("i64.const 16")
+                self.emit("i64.add")
+                self.emit(format("local.get {}", w.lb))
+                self.emit(format("i64.const {}", stride))
+                self.emit("i64.mul")
+                self.emit("i64.add")
+                self.wasm_set(w, d)
+            },
+            Inst.Print(t, a) => {
+                self.wasm_get(w, a)
+                match t {
+                    Type.TFloat(fw) => {
+                        // its text (9 or 17 digits), printed and dropped
+                        self.uses_float = true
+                        self.wants_ftoa = true
+                        if fw == 32 { self.emit("i64.const 9") } else { self.emit("i64.const 17") }
+                        self.wasm_call("call", "__float_to_str", 2)
+                        self.emit(format("local.tee {}", w.la))
+                        self.wasm_call("call", "__print_str", 1)
+                        self.emit("drop")
+                        self.emit(format("local.get {}", w.la))
+                        self.wasm_call("call", "__str_drop", 1)
+                    },
+                    Type.TBool => { self.wasm_call("call", "myla_std$rt$print_bool", 1) },
+                    Type.TStr => { self.wasm_call("call", "__print_str", 1) },
+                    Type.TChar => { self.wasm_call("call", "myla_std$rt$print_char", 1) },
+                    Type.TInt(iw, s) => {
+                        if s { self.wasm_call("call", "myla_std$rt$print_int", 1) } else { self.wasm_call("call", "myla_std$rt$print_uint", 1) }
+                    },
+                    _ => {},
+                }
+                self.emit("drop")
+            },
+            Inst.Frame(d) => {
+                self.emit("local.get 0")
+                self.wasm_set(w, d)
+            },
+            Inst.Loc(p) => {},
+            Inst.Bind(name, s) => {},
+            Inst.Scope(open) => {},
+            _ => { panic("internal error: an ownership instruction reached the wasm translation") },
+        }
+    }
+
+    // A function value's environment (the word after its code) into `myla_env`.
+    fun wasm_env(var self, w: WFn, fv: int32) {
+        self.emit("i32.const myla_env")
+        self.wasm_addr(w, fv, 8)
+        self.emit("i64.load 0")
+        self.emit("i64.store 0")
+    }
+
+    // A function value's code (its table index) as the i32 `call_indirect` takes.
+    fun wasm_code(var self, w: WFn, fv: int32) {
+        self.wasm_addr(w, fv, 0)
+        self.emit("i64.load 0")
+        self.emit("i32.wrap_i64")
+    }
+
+    // A load of `width` bytes at the i32 address on the stack, extended as a
+    // temporary of type `t` holds it (a `float32` element widened).
+    fun wasm_load(var self, width: int32, t: Type) {
+        if width == 4 && is_tfloat32(t) {
+            self.emit("f32.load 0")
+            self.emit("f64.promote_f32")
+            self.emit("i64.reinterpret_f64")
+            return
+        }
+        var signed = false
+        match t { Type.TInt(iw, s) => { signed = s }, _ => {} }
+        var sx = "_u"
+        if signed { sx = "_s" }
+        if width == 1 { self.emit(format("i64.load8{} 0", sx)) }
+        else if width == 2 { self.emit(format("i64.load16{} 0", sx)) }
+        else if width == 4 { self.emit(format("i64.load32{} 0", sx)) }
+        else { self.emit("i64.load 0") }
+    }
+
+    // A store of the low `width` bytes of the i64 on the stack (of type `t`).
+    fun wasm_store(var self, width: int32, t: Type) {
+        if width == 4 && is_tfloat32(t) {
+            self.emit("f64.reinterpret_i64")
+            self.emit("f32.demote_f64")
+            self.emit("f32.store 0")
+            return
+        }
+        if width == 1 { self.emit("i64.store8 0") }
+        else if width == 2 { self.emit("i64.store16 0") }
+        else if width == 4 { self.emit("i64.store32 0") }
+        else { self.emit("i64.store 0") }
+    }
+
+    // `a op b` on integers of type `t`, wrapped to `rt`, onto the stack; a
+    // zero divisor traps at `line:col`; the minimum by -1 wraps (wasm would
+    // trap), as the language says (MYLA-5).
+    fun wasm_int_op(var self, w: WFn, op: str, t: Type, rt: Type, a: int32, b: int32, line: int32, col: int32) {
+        var signed = true
+        match t { Type.TInt(iw, s) => { signed = s }, _ => {} }
+        if op == "/" || op == "%" {
+            self.wasm_get(w, b)
+            self.emit("i64.eqz")
+            self.emit("if")
+            if op == "/" { self.wasm_trap("__trap_div", line, col) } else { self.wasm_trap("__trap_mod", line, col) }
+            self.emit("end_if")
+            if signed {
+                // by -1: a / 1 negated, a % 1 (0)
+                self.wasm_get(w, a)
+                self.wasm_get(w, b)
+                self.emit("i64.const 1")
+                self.wasm_get(w, b)
+                self.emit("i64.const -1")
+                self.emit("i64.ne")
+                self.emit("i64.select")
+                if op == "/" {
+                    self.emit("i64.div_s")
+                    self.emit(format("local.set {}", w.la))
+                    self.emit(format("local.get {}", w.la))
+                    self.emit("i64.const 0")
+                    self.emit(format("local.get {}", w.la))
+                    self.emit("i64.sub")
+                    self.wasm_get(w, b)
+                    self.emit("i64.const -1")
+                    self.emit("i64.ne")
+                    self.emit("i64.select")
+                } else {
+                    self.emit("i64.rem_s")
+                }
+            } else {
+                self.wasm_get(w, a)
+                self.wasm_get(w, b)
+                if op == "/" { self.emit("i64.div_u") } else { self.emit("i64.rem_u") }
+            }
+            self.wasm_wrap(rt)
+            return
+        }
+        self.wasm_get(w, a)
+        self.wasm_get(w, b)
+        if op == "<<" || op == ">>" {
+            self.emit(format("i64.const {}", int_width_cg(rt) - 1))
+            self.emit("i64.and")
+        }
+        if op == "+" { self.emit("i64.add") }
+        else if op == "-" { self.emit("i64.sub") }
+        else if op == "*" { self.emit("i64.mul") }
+        else if op == "&" { self.emit("i64.and") }
+        else if op == "|" { self.emit("i64.or") }
+        else if op == "^" { self.emit("i64.xor") }
+        else if op == "<<" { self.emit("i64.shl") }
+        else if op == ">>" {
+            if signed { self.emit("i64.shr_s") } else { self.emit("i64.shr_u") }
+        } else {
+            panic(format("internal error: wasm: the integer operation {}", op))
+        }
+        self.wasm_wrap(rt)
+    }
+
+    // `a op b` on floats (their f64 images), rounded to a float32's when `rt`
+    // is one, as bits onto the stack.
+    fun wasm_float_op(var self, w: WFn, op: str, rt: Type, a: int32, b: int32) {
+        self.uses_float = true
+        if op == "%" {
+            // std.rt's, exact (wasm has no `frem`)
+            let fm = self.request_fn("std$rt$fmod", [])
+            self.wasm_get(w, a)
+            self.wasm_get(w, b)
+            self.wasm_call("call", "myla_std$rt$fmod", 2)
+            self.emit("f64.reinterpret_i64")
+        } else {
+            self.wasm_get(w, a)
+            self.emit("f64.reinterpret_i64")
+            self.wasm_get(w, b)
+            self.emit("f64.reinterpret_i64")
+            if op == "+" { self.emit("f64.add") }
+            else if op == "-" { self.emit("f64.sub") }
+            else if op == "*" { self.emit("f64.mul") }
+            else if op == "/" { self.emit("f64.div") }
+            else { panic(format("internal error: wasm: the float operation {}", op)) }
+        }
+        if is_tfloat32(rt) {
+            self.emit("f32.demote_f64")
+            self.emit("f64.promote_f32")
+        }
+        self.emit("i64.reinterpret_f64")
+    }
+
+    // The value on the stack, of type `src`, `as tgt`.
+    fun wasm_cast(var self, w: WFn, src: Type, tgt: Type) {
+        if wasm_is_char(tgt) { return }
+        if wasm_is_char(src) {
+            self.wasm_wrap(tgt)
+            return
+        }
+        let ft = wasm_is_float(tgt)
+        let fs = wasm_is_float(src)
+        if ft {
+            self.uses_float = true
+            if fs {
+                self.emit("f64.reinterpret_i64")
+            } else {
+                var signed = true
+                match src { Type.TInt(iw, s) => { signed = s }, _ => {} }
+                if signed { self.emit("f64.convert_i64_s") } else { self.emit("f64.convert_i64_u") }
+            }
+            if is_tfloat32(tgt) {
+                self.emit("f32.demote_f64")
+                self.emit("f64.promote_f32")
+            }
+            self.emit("i64.reinterpret_f64")
+            return
+        }
+        if fs {
+            // toward zero, clamped to the type's range, NaN 0 (D59): the
+            // saturating truncation, narrower types clamped again
+            self.uses_float = true
+            self.emit("f64.reinterpret_i64")
+            match tgt {
+                Type.TInt(bits, s) => {
+                    if s { self.emit("i64.trunc_sat_f64_s") } else { self.emit("i64.trunc_sat_f64_u") }
+                    if bits < 64 {
+                        var hi: int64 = (1i64 << (bits as int64)) - 1
+                        var lo: int64 = 0
+                        if s {
+                            hi = (1i64 << ((bits - 1) as int64)) - 1
+                            lo = -(1i64 << ((bits - 1) as int64))
+                        }
+                        self.wasm_clamp(w, lo, hi, s)
+                    }
+                },
+                _ => {},
+            }
+            return
+        }
+        // a value is held extended from its type's width, so widening an
+        // unsigned one, or a signed one to a signed type, keeps it
+        let widens = match src {
+            Type.TInt(w1, s1) => match tgt {
+                Type.TInt(w2, s2) => w1 < w2 && (!s1 || s2),
+                _ => false,
+            },
+            _ => false,
+        }
+        if widens { return }
+        self.wasm_wrap(tgt)
+    }
+
+    // The i64 on the stack clamped to `lo ..= hi` (compared signed or not),
+    // through the scratch local `la`.
+    fun wasm_clamp(var self, w: WFn, lo: int64, hi: int64, signed: bool) {
+        var sx = "_u"
+        if signed { sx = "_s" }
+        self.emit(format("local.set {}", w.la))
+        self.emit(format("i64.const {}", hi))
+        self.emit(format("local.get {}", w.la))
+        self.emit(format("local.get {}", w.la))
+        self.emit(format("i64.const {}", hi))
+        self.emit("i64.gt" + sx)
+        self.emit("i64.select")
+        self.emit(format("local.set {}", w.la))
+        self.emit(format("i64.const {}", lo))
+        self.emit(format("local.get {}", w.la))
+        self.emit(format("local.get {}", w.la))
+        self.emit(format("i64.const {}", lo))
+        self.emit("i64.lt" + sx)
+        self.emit("i64.select")
+    }
+
+    // A runtime call (`rt name`), the inline ones done in place.
+    fun wasm_rt(var self, f: IrFunc, w: WFn, d: int32, name: str, args: [int32]) {
+        if name == "__sqrt" {
+            self.uses_float = true
+            self.wasm_get(w, args[0])
+            self.emit("f64.reinterpret_i64")
+            self.emit("f64.sqrt")
+            self.emit("i64.reinterpret_f64")
+            self.wasm_set(w, d)
+            return
+        }
+        if name == "__f64_bits" || name == "__f64_from_bits" {
+            self.wasm_get(w, args[0])
+            self.wasm_set(w, d)
+            return
+        }
+        if name == "__f64_round" {
+            // to the nearest, ties to even
+            self.uses_float = true
+            self.wasm_get(w, args[0])
+            self.emit("f64.reinterpret_i64")
+            self.emit("f64.nearest")
+            self.emit("i64.trunc_sat_f64_s")
+            self.wasm_set(w, d)
+            return
+        }
+        if wasm_starts(name, "__rt_addr:") {
+            self.wasm_rt_var(wasm_after(name, 10))
+            self.emit("i64.extend_i32_u")
+            self.wasm_set(w, d)
+            return
+        }
+        if wasm_starts(name, "__rt_waddr:") {
+            // one worker: its own copy
+            self.wasm_rt_var(wasm_after(name, 11))
+            self.emit("i64.extend_i32_u")
+            self.wasm_set(w, d)
+            return
+        }
+        if name == "__rotl" {
+            self.wasm_get(w, args[0])
+            self.wasm_get(w, args[1])
+            self.emit("i64.rotl")
+            self.wasm_set(w, d)
+            return
+        }
+        if name == "__bsr64" {
+            self.emit("i64.const 63")
+            self.wasm_get(w, args[0])
+            self.emit("i64.clz")
+            self.emit("i64.sub")
+            self.wasm_set(w, d)
+            return
+        }
+        if name == "__cas64" {
+            // one worker: a load, a comparison and a store
+            self.wasm_addr(w, args[0], 0)
+            self.emit("i64.load 0")
+            self.wasm_get(w, args[1])
+            self.emit("i64.eq")
+            self.emit("if")
+            self.wasm_addr(w, args[0], 0)
+            self.wasm_get(w, args[2])
+            self.emit("i64.store 0")
+            self.emit("i64.const 1")
+            self.emit(format("local.set {}", w.la))
+            self.emit("else")
+            self.emit("i64.const 0")
+            self.emit(format("local.set {}", w.la))
+            self.emit("end_if")
+            self.emit(format("local.get {}", w.la))
+            self.wasm_set(w, d)
+            return
+        }
+        if name == "__xchg64" || name == "__fetch_add64" {
+            self.wasm_addr(w, args[0], 0)
+            self.emit("i64.load 0")
+            self.emit(format("local.set {}", w.la))
+            self.wasm_addr(w, args[0], 0)
+            if name == "__xchg64" { self.wasm_get(w, args[1]) }
+            else {
+                self.emit(format("local.get {}", w.la))
+                self.wasm_get(w, args[1])
+                self.emit("i64.add")
+            }
+            self.emit("i64.store 0")
+            self.emit(format("local.get {}", w.la))
+            self.wasm_set(w, d)
+            return
+        }
+        if name == "__pause" {
+            return
+        }
+        if name == "__rc_inc" || name == "__rc_inc_atomic" || name == "__rc_dec" || name == "__rc_dec_atomic" {
+            // a cell's count, at -8, up or down by one; down, whether it
+            // reached 0
+            self.wasm_addr(w, args[0], -8)
+            self.wasm_addr(w, args[0], -8)
+            self.emit("i64.load 0")
+            self.emit("i64.const 1")
+            if name == "__rc_dec" || name == "__rc_dec_atomic" { self.emit("i64.sub") } else { self.emit("i64.add") }
+            self.emit(format("local.tee {}", w.la))
+            self.emit("i64.store 0")
+            if d >= 0 {
+                self.emit(format("local.get {}", w.la))
+                self.emit("i64.eqz")
+                self.emit("i64.extend_i32_u")
+                self.wasm_set(w, d)
+            }
+            return
+        }
+        if wasm_starts(name, "__cow:") {
+            // the holder's cell unique: cloned (and stored back) when shared
+            let clone = wasm_after(name, 6)
+            self.wasm_addr(w, args[0], 0)
+            self.emit("i64.load 0")
+            self.emit(format("local.tee {}", w.la))
+            self.emit("i64.const 8")
+            self.emit("i64.sub")
+            self.emit("i32.wrap_i64")
+            self.emit("i64.load 0")
+            self.emit("i64.const 1")
+            self.emit("i64.gt_u")
+            self.emit("if")
+            self.emit(format("local.get {}", w.la))
+            self.wasm_call("call", clone, 1)
+            self.emit(format("local.set {}", w.la))
+            self.wasm_addr(w, args[0], 0)
+            self.emit(format("local.get {}", w.la))
+            self.emit("i64.store 0")
+            self.emit("end_if")
+            self.emit(format("local.get {}", w.la))
+            self.wasm_set(w, d)
+            return
+        }
+        if name == "__run_frame" {
+            self.wasm_get(w, args[0])
+            self.wasm_addr(w, args[0], 0)
+            self.emit("i64.load 0")
+            self.emit("i32.wrap_i64")
+            self.emit(format("call_indirect {}", wasm_sig(1)))
+            self.emit("drop")
+            return
+        }
+        // any other: a call
+        for x in args { self.wasm_get(w, x) }
+        if name == "__float_to_str" {
+            self.uses_float = true
+            self.wants_ftoa = true
+        }
+        self.wasm_call("call", name, args.len())
+        self.wasm_set(w, d)
+    }
+
+    // A call made in place of the function (`become`, or the call before a
+    // `suspend`): the frame given back, `return_call`.
+    fun wasm_tail_call(var self, f: IrFunc, w: WFn, c: Inst) {
+        match c {
+            Inst.Call(d, name, args) => {
+                self.wasm_leave(w)
+                for x in args { self.wasm_get(w, x) }
+                self.wasm_call("return_call", format("myla_{}", name), args.len())
+            },
+            Inst.CallSret(name, res, args) => {
+                self.wasm_leave(w)
+                self.wasm_get(w, res)
+                for x in args { self.wasm_get(w, x) }
+                self.wasm_call("return_call", format("myla_{}", name), args.len() + 1)
+            },
+            Inst.CallInd(d, fv, args) => {
+                self.wasm_env(w, fv)
+                self.wasm_leave(w)
+                for x in args { self.wasm_get(w, x) }
+                self.wasm_code(w, fv)
+                self.emit(format("return_call_indirect {}", wasm_sig(args.len())))
+            },
+            Inst.CallIndSret(fv, res, args) => {
+                self.wasm_env(w, fv)
+                self.wasm_leave(w)
+                self.wasm_get(w, res)
+                for x in args { self.wasm_get(w, x) }
+                self.wasm_code(w, fv)
+                self.emit(format("return_call_indirect {}", wasm_sig(args.len() + 1)))
+            },
+            _ => { panic("internal error: wasm: `become` without a call") },
+        }
+    }
+
+    // A block's end (`depth`: how many blocks lie between it and the loop).
+    fun wasm_term(var self, f: IrFunc, w: WFn, t: Term, depth: int32) {
+        match t {
+            Term.Open => { self.emit("unreachable") },
+            Term.Jmp(b) => {
+                self.emit(format("i32.const {}", w.num[b]))
+                self.emit(format("local.set {}", w.bb))
+                self.emit(format("br {}", depth))
+            },
+            Term.Br(c, a, b) => {
+                self.emit(format("i32.const {}", w.num[a]))
+                self.emit(format("i32.const {}", w.num[b]))
+                self.wasm_get(w, c)
+                self.emit("i64.const 0")
+                self.emit("i64.ne")
+                self.emit("i32.select")
+                self.emit(format("local.set {}", w.bb))
+                self.emit(format("br {}", depth))
+            },
+            Term.Ret(v) => {
+                self.wasm_leave(w)
+                if v >= 0 { self.wasm_get(w, v) } else { self.emit("i64.const 0") }
+                self.emit("return")
+            },
+            Term.Become => { self.emit("unreachable") },
+            Term.Suspend(b) => {
+                // back to the executor, resuming at b
+                self.wasm_state(w, b)
+                self.wasm_leave(w)
+                self.emit("i64.const 0")
+                self.emit("return")
+            },
+            Term.Trap(kind, p) => { self.wasm_trap("__trap_" + kind, p.line, p.col) },
+            Term.Panic(m, p) => {
+                self.wasm_get(w, m)
+                if p.line <= 0 { self.emit("i64.const 0") } else {
+                    self.emit(format("i32.const {}", self.position_label(p.line, p.col)))
+                    self.emit("i64.extend_i32_u")
+                }
+                self.wasm_call("call", "__panic", 2)
+                self.emit("drop")
+                self.emit("unreachable")
+            },
+        }
+    }
+}
+
+// The `.functype` signature of a function of `n` words.
+#test(0)["() -> (i64)"]
+#test(2)["(i64, i64) -> (i64)"]
+pub fun wasm_sig(n: int32) -> str {
+    var sb = StringBuilder()
+    sb.append("(")
+    var i = 0
+    while i < n {
+        if i > 0 { sb.append(", ") }
+        sb.append("i64")
+        i = i + 1
+    }
+    sb.append(") -> (i64)")
+    return sb.build()
+}
+
+// The blocks reachable from the entry (and a frame function's resume points).
+fun wasm_reachable(f: IrFunc) -> [bool] {
+    var seen: [bool] = []
+    for b in f.blocks { seen.push(false) }
+    if f.blocks.len() == 0 { return seen }
+    var work = [0]
+    seen[0] = true
+    while work.len() > 0 {
+        let b = work.pop()
+        var next: [int32] = []
+        match f.blocks[b].term {
+            Term.Jmp(x) => { next.push(x) },
+            Term.Br(c, x, y) => {
+                next.push(x)
+                next.push(y)
+            },
+            Term.Suspend(x) => { next.push(x) },
+            _ => {},
+        }
+        for x in next {
+            if !seen[x] {
+                seen[x] = true
+                work.push(x)
+            }
+        }
+    }
+    return seen
+}
+
+// `v` wrapped to a `w`-bit integer, signed or not.
+#test(130, 8, true)[-126]
+#test(-1, 16, false)[65535]
+fun wasm_wrapped(v: int64, w: int32, s: bool) -> int64 {
+    if w >= 64 { return v }
+    let m = v & ((1i64 << (w as int64)) - 1)
+    if s && ((m >> ((w - 1) as int64)) & 1) == 1 { return m - (1i64 << (w as int64)) }
+    return m
+}
+
+// The i64 comparison for `op`.
+#test("<", false)["lt_u"]
+#test(">=", true)["ge_s"]
+fun wasm_icmp(op: str, signed: bool) -> str {
+    if op == "==" { return "eq" }
+    if op == "!=" { return "ne" }
+    var sx = "_u"
+    if signed { sx = "_s" }
+    if op == "<" { return "lt" + sx }
+    if op == "<=" { return "le" + sx }
+    if op == ">" { return "gt" + sx }
+    return "ge" + sx
+}
+
+// The f64 comparison for `op` (false for a NaN but `!=`, as wasm's are).
+#test("<=")["le"]
+fun wasm_fcmp(op: str) -> str {
+    if op == "==" { return "eq" }
+    if op == "!=" { return "ne" }
+    if op == "<" { return "lt" }
+    if op == "<=" { return "le" }
+    if op == ">" { return "gt" }
+    return "ge"
+}
+
+// Whether `xs` holds `x`.
+#test([2, 5], 5)[true]
+fun wasm_has(xs: [int32], x: int32) -> bool {
+    for y in xs { if y == x { return true } }
+    return false
+}
+
+fun wasm_is_float(t: Type) -> bool {
+    return match t { Type.TFloat(w) => true, _ => false }
+}
+
+fun wasm_is_char(t: Type) -> bool {
+    return match t { Type.TChar => true, _ => false }
+}
+
+// Whether `s` starts with `prefix`.
+#test("__cow:x", "__cow:")[true]
+fun wasm_starts(s: str, prefix: str) -> bool {
+    if s.len() < prefix.len() { return false }
+    var i = 0
+    while i < prefix.len() {
+        if s[i] != prefix[i] { return false }
+        i = i + 1
+    }
+    return true
+}
+
+// `s` from byte `at` on.
+#test("__cow:clone", 6)["clone"]
+fun wasm_after(s: str, at: int32) -> str {
+    var sb = StringBuilder()
+    sb.append(s, at, s.len())
+    return sb.build()
+}
+
+impl CodeGen {
+    // `myla_<f>__new(args…)`: a new heap frame for the frame function `f`
+    // (its header, then the slots, zeroed), each argument copied into its
+    // parameter's slot with references of its own (an aggregate from the
+    // address passed; a lambda's environment from `myla_env`); the frame.
+    fun emit_frame_new_wasm(var self, f: IrFunc, mangled: str, soff: [int32]) {
+        let size = frame_size(f)
+        var words = 0
+        for s in f.slots { if s.word >= 0 && s.word + 1 > words { words = s.word + 1 } }
+        let fl = words
+        let name = format("myla_{}__new", mangled)
+        self.wasm_define(name, words)
+        self.emit("")
+        self.emit(format("{}:", name))
+        self.emit(format(".functype {} {}", name, wasm_sig(words)))
+        self.emit(".local i64")
+        self.emit(format("i64.const {}", size))
+        self.wasm_call("call", "__alloc", 1)
+        self.emit(format("local.tee {}", fl))
+        self.emit("i32.wrap_i64")
+        self.emit("i32.const 0")
+        self.emit(format("i32.const {}", size))
+        self.emit("memory.fill 0")
+        self.emit(format("local.get {}", fl))
+        self.emit("i32.wrap_i64")
+        self.emit(format("i32.const myla_{}", mangled))
+        self.emit("i64.extend_i32_u")
+        self.emit("i64.store 0")
+        var i = 0
+        while i < f.slots.len() {
+            let s = f.slots[i]
+            if s.word >= 0 || s.word == ENV_WORD {
+                if is_aggregate(s.ty) && s.word >= 0 {
+                    self.emit(format("local.get {}", fl))
+                    self.emit(format("i64.const {}", soff[i]))
+                    self.emit("i64.add")
+                    self.emit("i32.wrap_i64")
+                    self.emit(format("local.get {}", s.word))
+                    self.emit("i32.wrap_i64")
+                    self.emit(format("i32.const {}", s.size))
+                    self.emit("memory.copy 0, 0")
+                } else {
+                    self.emit(format("local.get {}", fl))
+                    self.emit("i32.wrap_i64")
+                    if s.word == ENV_WORD {
+                        self.emit("i32.const myla_env")
+                        self.emit("i64.load 0")
+                    } else {
+                        self.emit(format("local.get {}", s.word))
+                    }
+                    self.emit(format("i64.store {}", soff[i]))
+                }
+                if self.owns_heap(s.ty) { self.wasm_retain_at(fl, soff[i], s.ty, false) }
+                // a lambda's environment, held until its captures are copied
+                if s.word == ENV_WORD {
+                    self.emit(format("local.get {}", fl))
+                    self.emit("i32.wrap_i64")
+                    self.emit(format("i64.load {}", soff[i]))
+                    self.wasm_call("call", "__func_retain", 1)
+                    self.emit("drop")
+                }
+            }
+            i = i + 1
+        }
+        self.emit(format("local.get {}", fl))
+        self.emit("end_function")
+    }
+
+    // A reference of its own to each heap value of type `t` at `off` bytes
+    // into the value whose address the local `base` holds; `member`: held as
+    // a member (a boxed value as its pointer). What `retain T [%p]` becomes
+    // (`ownership.my`), in place.
+    fun wasm_retain_at(var self, base: int32, off: int32, t: Type, member: bool) {
+        if is_cell_t(t) || (member && self.is_boxed(t)) {
+            // the count at the cell's -8, one up (one worker)
+            var k = 0
+            while k < 2 {
+                self.emit(format("local.get {}", base))
+                self.emit("i32.wrap_i64")
+                self.emit(format("i64.load {}", off))
+                self.emit("i64.const 8")
+                self.emit("i64.sub")
+                self.emit("i32.wrap_i64")
+                k = k + 1
+            }
+            self.emit("i64.load 0")
+            self.emit("i64.const 1")
+            self.emit("i64.add")
+            self.emit("i64.store 0")
+        } else if is_tfunc(t) {
+            self.emit(format("local.get {}", base))
+            self.emit("i32.wrap_i64")
+            self.emit(format("i64.load {}", off + 8))
+            self.wasm_call("call", "__func_retain", 1)
+            self.emit("drop")
+        } else if self.owns_heap(t) {
+            if self.walk_helper(t) {
+                let name = self.register_walk(t, true)
+                self.emit(format("local.get {}", base))
+                self.emit(format("i64.const {}", off))
+                self.emit("i64.add")
+                self.wasm_call("call", name, 1)
+                self.emit("drop")
+                return
+            }
+            var members: [Type] = []
+            match t {
+                Type.TStruct(nm, a) => {
+                    let info = self.struct_info(nm)
+                    let sub = self.type_subst(info.type_params, a)
+                    for fl in info.fields { members.push(subst_type(fl.ty, sub)) }
+                },
+                Type.TTuple(es) => { members = es },
+                _ => {},
+            }
+            var cur = off
+            for m in members {
+                self.wasm_retain_at(base, cur, m, true)
+                cur = cur + self.stored_size(m)
+            }
+        }
+    }
+
+    // `myla_<fn>__fnval`, the adapter that calls a plain `fun` as a function
+    // value (MYLA-126): a parameter passed owned gets a reference of its own,
+    // then the function in its place (an async one's frame made, D90).
+    fun emit_fnval_thunk_wasm(var self, n: str) {
+        let sig = self.sig_of(n)
+        var first = 0
+        if is_aggregate_opt(sig.ret) { first = 1 }
+        var words = first + sig.params.len()
+        let name = format("myla_{}__fnval", n)
+        var k = 0
+        while k < sig.params.len() {
+            if self.byval_param(sig, k, sig.params[k]) { panic("internal error: wasm: a function value of a function taking a value by copy (not yet, MYLA-158)") }
+            k = k + 1
+        }
+        self.wasm_define(name, words)
+        self.emit("")
+        self.emit(format("{}:", name))
+        self.emit(format(".functype {} {}", name, wasm_sig(words)))
+        let async_fn = self.is_async_fn(n)
+        var i = 0
+        while i < sig.params.len() && !async_fn {
+            if self.owned_param(sig, i, sig.params[i]) {
+                let p = first + i
+                var j = 0
+                while j < 2 {
+                    self.emit(format("local.get {}", p))
+                    self.emit("i64.const 8")
+                    self.emit("i64.sub")
+                    self.emit("i32.wrap_i64")
+                    j = j + 1
+                }
+                self.emit("i64.load 0")
+                self.emit("i64.const 1")
+                self.emit("i64.add")
+                self.emit("i64.store 0")
+            }
+            i = i + 1
+        }
+        i = 0
+        while i < words {
+            self.emit(format("local.get {}", i))
+            i = i + 1
+        }
+        if async_fn { self.wasm_call("return_call", format("myla_{}__new", n), words) }
+        else { self.wasm_call("return_call", format("myla_{}", n), words) }
+        self.emit("end_function")
+    }
+
+    // A partial application's function (`myla_<lifted>`, D119): its
+    // environment (`myla_env`) holds the arguments given, the call brings
+    // the holes; the target called in its place with all of them. A
+    // parameter passed by value gets a copy of its own (D88), one passed
+    // owned a reference of its own (MYLA-127).
+    fun gen_partial_function_wasm(var self, job: PartialJob) {
+        let n = job.slots.len()
+        var first = 0
+        if job.sret { first = 1 }
+        var holes = 0
+        for sl in job.slots {
+            if sl < 0 { holes = holes + 1 }
+        }
+        var tsig = self.funcs[0]
+        if job.fn_off < 0 { tsig = self.sig_of(job.target) }
+        let in_words = first + holes
+        // its locals: the environment, an address
+        let env = in_words
+        let src = in_words + 1
+        let name = format("myla_{}", job.lifted)
+        self.wasm_define(name, in_words)
+        self.emit("")
+        self.emit(format("{}:", name))
+        self.emit(format(".functype {} {}", name, wasm_sig(in_words)))
+        self.emit(".local i64, i64")
+        self.emit("i32.const myla_env")
+        self.emit("i64.load 0")
+        self.emit(format("local.set {}", env))
+        var total = 0
+        if job.sret {
+            self.emit("local.get 0")
+            total = 1
+        }
+        var hidx = 0
+        var pos = 0
+        while pos < n {
+            // its word (or an aggregate's address) into `src`
+            if job.slots[pos] < 0 {
+                self.emit(format("local.get {}", first + hidx))
+                hidx = hidx + 1
+            } else {
+                self.emit(format("local.get {}", env))
+                self.emit(format("i64.const {}", job.slots[pos]))
+                self.emit("i64.add")
+                if !job.aggs[pos] {
+                    self.emit("i32.wrap_i64")
+                    self.emit("i64.load 0")
+                }
+            }
+            self.emit(format("local.set {}", src))
+            let named = job.fn_off < 0 && pos < tsig.params.len()
+            if named && self.byval_param(tsig, pos, tsig.params[pos]) {
+                let t = tsig.params[pos]
+                self.wasm_retain_at(src, 0, t, false)
+                var k = 0
+                while k < self.word_size(t) / 8 {
+                    self.emit(format("local.get {}", src))
+                    self.emit("i32.wrap_i64")
+                    self.emit(format("i64.load {}", 8 * k))
+                    k = k + 1
+                }
+                total = total + self.word_size(t) / 8
+            } else {
+                if named && self.owned_param(tsig, pos, tsig.params[pos]) {
+                    var j = 0
+                    while j < 2 {
+                        self.emit(format("local.get {}", src))
+                        self.emit("i64.const 8")
+                        self.emit("i64.sub")
+                        self.emit("i32.wrap_i64")
+                        j = j + 1
+                    }
+                    self.emit("i64.load 0")
+                    self.emit("i64.const 1")
+                    self.emit("i64.add")
+                    self.emit("i64.store 0")
+                }
+                self.emit(format("local.get {}", src))
+                total = total + 1
+            }
+            pos = pos + 1
+        }
+        if job.fn_off >= 0 {
+            // the function value in the environment: its environment, its code
+            self.emit("i32.const myla_env")
+            self.emit(format("local.get {}", env))
+            self.emit("i32.wrap_i64")
+            self.emit(format("i64.load {}", job.fn_off + 8))
+            self.emit("i64.store 0")
+            self.emit(format("local.get {}", env))
+            self.emit("i32.wrap_i64")
+            self.emit(format("i64.load {}", job.fn_off))
+            self.emit("i32.wrap_i64")
+            self.emit(format("return_call_indirect {}", wasm_sig(total)))
+        } else {
+            self.wasm_call("return_call", format("myla_{}", job.target), total)
+        }
+        self.emit("end_function")
+        if job.owned.len() > 0 { self.emit_env_drop(job.lifted, job.owned) }
+    }
+}

@@ -18,8 +18,8 @@ WebAssembly as a target ([[MYLA-62]], step 3), so Myla programs, and the self-ho
 
 ## Done when
 
-- [ ] The platform layer for wasm ([[MYLA-162]]): host imports for output, files and time
-- [ ] The native parity programs give the same output under a wasm runtime
+- [x] The platform layer for wasm ([[MYLA-162]]): host imports for output, files and time
+- [x] The native parity programs give the same output under a wasm runtime
 - [ ] The self-hosted checker and interpreter run as wasm with an API a page can call
 
 ## The plan (2026-11-04, D125 with D122)
@@ -32,3 +32,8 @@ Steps, each verified. The backend comes before D122's 4-byte layouts: the runtim
 3. **`runtime_wasm.my`:** the start (`_start`), the traps, the bulk copy and comparison, the counts of function values; then tasks on one worker.
 4. **Parity:** the examples and the parity programs under Node's WASI against x86-64; the stress programs on one worker; CI.
 5. **D122:** a target description (pointer size and alignment: 8 on the native targets, 4 on wasm32); sizes, field offsets, strides, cell headers, frame headers and std.rt's offsets computed from it; the native targets' code byte for byte the same, wasm's cells smaller.
+
+## Progress
+
+- 2026-11-04, steps 1 to 4: `--target wasm32-wasi` in `gen_main` and `myla build`; [[lib/std/platform_wasm.my]] over WASI preview 1; [[selfhost/ir_wasm.my]] (locals, the dispatch loop, the shadow stack, `return_call`); [[selfhost/runtime_wasm.my]] (the start, the WASI dispatcher, the runtime's functions, tasks on one worker, the module put together for clang); [[tools/wasm/run.mjs]] with a WASI shim of our own ([[tools/wasm/wasi.mjs]]), Node 22's own WASI crashing when the memory grows. Evidence ([[tests/burn/test_wasm.py]], 15 tests): every example and test_aarch64's programs as their x86-64 builds; files and directories; the 23 stress programs on one worker in five orders; test_time's timers; the compiler built for wasm compiles the compiler under Node as the native one does, for either target, and reaches the fixed point.
+- Next: D122's 4-byte layouts (step 5); then the checker and interpreter behind an API a page can call, with the shim in a browser.
