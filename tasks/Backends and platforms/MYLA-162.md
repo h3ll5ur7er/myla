@@ -2,18 +2,18 @@
 id: MYLA-162
 title: The runtime off assembly - Myla runtime and a platform layer
 type: feature
-status: in-progress
+status: review
 priority: medium
 labels: [runtime, platforms]
 ---
 Second step of [[MYLA-62]]: the runtime (about 3,000 lines of hand-written x86-64 assembly in [[selfhost/codegen.my]]: the allocator with per-worker heaps, strings, maps, builders, printing and float formatting, traps, the work-stealing executor with actor executors, thread state through `%fs`, `clone`, `futex` and raw system calls) rewritten once in Myla and compiled through the IR (D117), so that a new backend only translates the IR and a new target only needs a thin platform layer. [[MYLA-160]] sizes it first. This is the step that makes other platforms affordable.
 
-- [ ] The portable part in Myla: allocator, strings, maps, builders, formatting (byte-identical to the interpreter), traps, the executor's logic
-- [ ] The platform layer behind a small interface: memory (`mmap`), output and files, processes (`__run`), directories, threads, parking and waking, thread-local state, time, exit; Linux first, with system calls as today
-- [ ] Atomics where the runtime needs them (counts of actor handles, queues, the failure flag of D97)
-- [ ] The x86-64 backend uses it; the gates and the bootstrap still pass, and the cost against the assembly runtime is measured
-- [ ] Arenas that grow lazily (D106, [[MYLA-206]])
-- [ ] The runtime out of [[selfhost/codegen.my]] (D108, [[MYLA-217]])
+- [x] The portable part in Myla: allocator, strings, maps, builders, formatting (byte-identical to the interpreter), traps, the executor's logic
+- [x] The platform layer behind a small interface: memory (`mmap`), output and files, processes (`__run`), directories, threads, parking and waking, thread-local state, time, exit; Linux first, with system calls as today
+- [x] Atomics where the runtime needs them (counts of actor handles, queues, the failure flag of D97)
+- [x] The x86-64 backend uses it; the gates and the bootstrap still pass, and the cost against the assembly runtime is measured
+- [x] Arenas that grow lazily (D106, [[MYLA-206]])
+- [x] The runtime out of [[selfhost/codegen.my]] (D108, [[MYLA-217]])
 - [ ] Then the reactor: [[MYLA-230]] (D107)
 
 ## Sizing (2026-11-03, for [[MYLA-160]])
@@ -279,3 +279,23 @@ The code generator's per-type routines (retain, drop, clone, the deep walks, der
 - The interface, for the ports (MYLA-163 to MYLA-165): files (`open_read`, `open_write`, `open_dir`, `read`, `write`, `close`, `file_size`), paths (`mode_of`, `make_dir`, `remove_file`, `remove_dir`, `rename`, `cwd`), directories (`dir_read`, `dir_entry_name`, `dir_entry_size`), the standard streams (`poll_read`, `write_all`, `write_line`), processes (`run`), workers (`cpus_allowed`, `park`, `unpark_one`) and `exit`. How a port picks its version of the module waits for the code-per-target design of MYLA-245; with one platform, the module is the Linux one.
 - The other half stays in the backend, per target: the program's start (stack limit, alternate signal stack, the stack-overflow handler), the heap's memory (`__heap_init`'s mmap), starting worker threads (clone) and their thread-local state, the jumps into frames, the traps' and panic's writes, `__syscall` itself and the memory and atomic primitives.
 - **Measured:** the benchmarks run the same instructions; the stress programs t05, t18 and t12 0.2%, 0.1% and 0.4% more (printing and parking now a call into another module, which the inliner doesn't cross); compiling the compiler the same. The suite passes.
+
+## Step 30: the arenas grow lazily (2026-11-04, D106 (B))
+
+- std.rt's allocator maps a 16 MiB chunk (`std.platform`'s `map_memory`, on a new primitive `__syscall5` for mmap's five arguments) when the arena is full, and none before the first cell; a cell bigger than a chunk gets a mapping of its own. With tasks, a worker's chunks are aligned to their size (mapped one chunk bigger, the ends given back) with its number in their first word, so `free_tasks` finds a cell's owner at its address rounded down to a chunk (was `(p - __heap_base) >> 32`). `_start`'s region of a 4 GiB arena per worker, `__heap_init` and `__heap_base` are gone, and the rings of ready frames are reserved for the workers that run (`exec_workers * 8 MiB`, was 32 always).
+- **Measured:** under `ulimit -v 400000` a program with tasks runs on four workers, and one mapping 320 MB in all (small cells, and growing lists up to a 128 MB cell) runs too (`test_the_heap_grows_in_chunks_under_a_small_address_space_limit`; before, both "out of memory"). The benchmarks run 20 instructions more each (the first chunk's mapping), binary trees' wall time the same within noise; compiling the compiler the same. The stress tests pass three times in a row.
+
+## Step 31: the runtime's assembly in a module of its own (2026-11-04, D108)
+
+- What stays hand-written for x86-64 Linux moved from `codegen.my` to [[selfhost/runtime_x86.my]] (`impl CodeGen`, 850 lines): the program's start, the traps and the panic, the system-call and memory primitives, the executor's control transfers, the environments' deep copies, composition, std.math's and the float runtime's primitives and data. The empty list, map, builder and character emitters left by the port are gone (their cell layouts kept as one comment), and so is `tls_addr`, which nothing called. `codegen.my`: 5,484 lines to 4,625 (8,794 before step 26).
+- Every example, benchmark, stress test and the compiler compile to the same assembly as before the move; the suite passes.
+
+## Step 32: runtime errors reported by std.rt (2026-11-04)
+
+- `__panic` is a stub now: with tasks it hands the failure to `__task_fail` (which goes back to the executor for a task other than the entry's), then jumps to std.rt's `panic_report` (`panic_report_tasks` waits for the other workers first, D97), which writes `runtime error: <message>` and `  --> file:line:col` through `std.platform` and ends the process. It allocates nothing (the digits go to `__panic_buf`), so out of memory reports through it too. `__write_err`, `__write_err_num`, the assembly `__write_all` and the two message strings are gone; the trap entries stay three instructions each.
+- Programs carry 35 lines of assembly more (the report compiled from Myla). The suite passes (every runtime error of the error corpus with its position, the failing-task tests), the stress tests three times in a row, and out of memory under `ulimit -v 100000` still reports.
+
+## Where it stands (2026-11-04)
+
+The portable runtime is Myla (std.rt), over the platform layer (std.platform); the per-type routines are IR functions; the ownership instructions reach the backend as plain operations; the heap grows lazily. What stays hand-written for x86-64 Linux is [[selfhost/runtime_x86.my]] (about 830 lines): the program's start and the stack-overflow handler, the trap entries and `__panic`'s stub, the system-call and memory primitives, the executor's control transfers (threads, frames), the environments' deep copies, composition, and the float primitives and tables; and in the backend, the function-value adapters, the partial-application thunks and the async frame constructor (calling-convention glue). "Time" in the platform list has no user yet: the runtime reads no clock. Next: the reactor ([[MYLA-230]], D107), and per target the platform's assembly and std.platform again ([[MYLA-163]] to [[MYLA-165]]).
+

@@ -66,3 +66,30 @@ pub fun cancelled() -> bool {
 pub async fun yield() {
     await __yield()
 }
+
+// `await task.sleep(ms)`: the running task asleep for at least `ms`
+// milliseconds (none for `ms <= 0`), the other tasks running meanwhile
+// (D124). Natively the task waits on the executor's timers, which an idle
+// worker polls. Tasks whose time comes at once go on earliest first (for one
+// deadline, in the order they went to sleep); on a busy program a task
+// whose time came while others ran may go on after a later one. With
+// MYLA_TIME=virtual the interpreter's clock moves only when no task is
+// ready, so they go on in deadline order exactly.
+pub async fun sleep(ms: int) {
+    await __sleep(ms)
+}
+
+// `await task.timeout(ms, f)`: `f` run as a child task, and `Some` of its
+// result, or `None` when `ms` milliseconds passed first (D124). The child
+// is then cancelled (D96: its sleeps end at once, and it stops where it
+// looks at `cancelled()`), and awaited before this returns either way.
+pub async fun timeout<T>(ms: int, f: async () -> T) -> Option<T> {
+    async let work = f()
+    let t = __cancel_after(work, ms)
+    let r = await work
+    if __disarm(t) {
+        return Some(r)
+    }
+    return None
+}
+

@@ -201,6 +201,27 @@ class NativeRuntime(unittest.TestCase):
                                       env={**os.environ, "MYLA_THREADS": "1"})
                 self.assertEqual((proc.stdout, proc.stderr, proc.returncode), ("1\n", "", 0))
 
+    def test_the_heap_grows_in_chunks_under_a_small_address_space_limit(self):
+        # the arenas are mapped as the program allocates (D106 (B), MYLA-162):
+        # under a 400 MB limit a program with tasks runs on four workers, and
+        # one allocating more than a chunk (16 MiB), in small cells and in one
+        # cell bigger than a chunk, runs too
+        tasks = ("async fun one(i: int) -> int {\n    var xs: [str] = []\n"
+                 "    for k in 0..1000 {\n        xs.push(f\"{k}\")\n    }\n    return xs.len() + i\n}\n\n"
+                 "#main\nasync fun main() {\n    async let a = one(1)\n    async let b = one(2)\n"
+                 "    async let c = one(3)\n    print(await a + await b + await c)\n}\n")
+        many = ("fun main() {\n    var xs: [[int]] = []\n    for i in 0..30000 {\n"
+                "        var row: [int] = []\n        for j in 0..400 {\n            row.push(j)\n        }\n"
+                "        xs.push(row)\n    }\n    var big: [int] = []\n    for i in 0..12000000 {\n"
+                "        big.push(i)\n    }\n    print(xs.len() + xs[29999][399] + big[11999999])\n}\n")
+        for name, source, threads, expected in [("lazy_tasks", tasks, "4", "3006\n"), ("lazy_many", many, "1", "12030398\n")]:
+            for backend, binary in self.binaries(name, source):
+                with self.subTest(program=name, backend=backend):
+                    proc = subprocess.run(["bash", "-c", f"ulimit -v 400000 && exec {binary}"],
+                                          capture_output=True, text=True, timeout=120,
+                                          env={**os.environ, "MYLA_THREADS": threads})
+                    self.assertEqual((proc.stdout, proc.stderr, proc.returncode), (expected, "", 0))
+
     def test_runtime_errors_in_an_imported_module_name_its_file(self):
         for line, message, position in MODULE_TRAPS:
             with self.subTest(line=line):

@@ -79,6 +79,8 @@ fun main() {
 
 A protocol that frames messages with a `Content-Length` header reads the header lines with `read_line` and the body with `read_exact`; `tests/burn/test_stdin.py` has an example.
 
+In a task, each read has an async version that waits for the input with the task suspended, so the other tasks run meanwhile (D124, [[MYLA-230]]): `await r.read_line_async()`, `await r.read_exact_async(n)`, `await r.read_to_end_async()`, `await r.fill_async(want)`. They give what the blocking reads give; outside a task they block as those do. A task asked to stop (`task.cancel`, a `task.timeout` that ran out) stops waiting at once and gets `Err(IoError.Other(125))` (ECANCELED). Natively the executor's poller watches the descriptor (a regular file, which it can't watch, is always ready); the interpreter looks at the waiting tasks' descriptors before each turn.
+
 ## std.process
 
 | Item | Meaning |
@@ -87,7 +89,8 @@ A protocol that frames messages with a `Content-Length` header reads the header 
 | `exit(code: int32)` | Ends the process; the low 8 bits become the exit status |
 | `env(name: str) -> Option<str>` | The value of the environment variable `name` the process started with (`""` included), or `None` when there is none ([[MYLA-243]]; the primitive `__getenv`, which reads the environment the process started with, or `""` with `__io_errno` 2) |
 | `run(program: str, args: [str]) -> Result<Output, SpawnError>` | Runs a program found by its exact path (no `PATH` search) with the current environment, waits, captures its output |
-| `command(program)` → `Command` | Builder: `.arg(a)`, `.args([…])`, `.output()` |
+| `run_async(program: str, args: [str]) -> Result<Output, SpawnError>` (async) | `run` in a task: the task waits for the child (its output read as it comes, then its end) suspended, the other tasks running (D124, [[MYLA-230]]); outside a task it blocks as `run` does. A task asked to stop stops waiting: the child is killed and reaped, `Err(SpawnError.Other(125))` |
+| `command(program)` → `Command` | Builder: `.arg(a)`, `.args([…])`, `.output()`, `.output_async()` (async, as `run_async`) |
 | `struct Output { stdout: [uint8], stderr: [uint8], status: ExitStatus }` | Output is raw bytes |
 | `enum ExitStatus { Exited(int32), Signaled(int32) }` | |
 | `enum SpawnError { NotFound, PermissionDenied, Other(int32) }` | `Other` carries the errno |
@@ -229,8 +232,21 @@ Child tasks whose number is known only at run time (D89, [[Language/Concurrency]
 | `cancel(child)` | Asks the child task of the `async let` named `child` to stop (D96): sets a flag it and its children see, and goes on; the compiler takes the call itself |
 | `cancelled() -> bool` | True when the running task, or a task above it, was asked to stop |
 | `yield()` (async) | `await task.yield()` gives the other ready tasks a turn and goes on after them; a task stopped by a failure elsewhere stops there (D97, D107, [[MYLA-228]]) |
+| `timeout<T>(ms: int, f: async () -> T) -> Option<T>` (async) | Runs `f` as a child task: `Some` of its result, or `None` when `ms` milliseconds passed first, the child then cancelled (its sleeps end) and awaited (D124) |
+| `sleep(ms: int)` (async) | `await task.sleep(ms)`: the running task asleep for at least `ms` milliseconds (none for `ms <= 0`), the others running meanwhile (D124, [[MYLA-230]]); tasks whose time comes at once go on earliest first |
 
 `all` is written in Myla with `async let` alone, halving the list until one function is left, so the tasks nest about log2(len(fs)) deep. Cancelling is cooperative: the child decides where to stop ([[Language/Concurrency]]).
+
+## std.time
+
+The clock (D124, [[MYLA-230]]): monotonic, so the difference of two readings is the time that passed; its zero is some fixed point in the past, not a date.
+
+| Function | Result |
+| --- | --- |
+| `now_ns() -> int64` | The clock in nanoseconds |
+| `now_ms() -> int64` | The clock in milliseconds |
+
+The interpreter reads the same clock; with `MYLA_TIME=virtual` it reads one that moves only when no task is ready, to the next sleeper's deadline, so tests of timing logic take no time and order exactly.
 
 ## std.json
 

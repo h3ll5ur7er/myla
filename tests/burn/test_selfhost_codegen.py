@@ -1157,8 +1157,10 @@ class SelfHostedCodegenParity(unittest.TestCase):
     def test_a_runtime_variable_is_its_own_operand(self) -> None:
         # MYLA-162: the address of a runtime variable (`__rt_addr`) that only
         # loads and stores read is no instruction: they name the variable
+        # (a first cell maps the arena, D106)
         source = (
             "fun main() {\n"
+            "    let first = __alloc(8)\n"
             "    let before = __load64(__rt_addr(\"__heap_ptr\"))\n"
             "    let p = __alloc(64)\n"
             "    print(__load64(__rt_addr(\"__heap_ptr\")) - before)\n"

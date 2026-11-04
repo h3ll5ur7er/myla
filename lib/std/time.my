@@ -1,0 +1,17 @@
+// std.time — the clock (D124, MYLA-230).
+//
+// A monotonic clock: it never goes back and doesn't follow changes to the
+// date, so the difference of two readings is the time that passed. Its zero
+// is some fixed point in the past, not a date. The interpreter reads the same
+// clock, or with MYLA_TIME=virtual one that moves only when every task
+// sleeps (`std.task.sleep`), for tests that take no time.
+
+// The clock, in nanoseconds.
+pub fun now_ns() -> int64 {
+    return __clock_ns()
+}
+
+// The clock, in milliseconds.
+pub fun now_ms() -> int64 {
+    return __clock_ns() / 1000000
+}

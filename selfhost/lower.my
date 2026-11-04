@@ -1148,6 +1148,48 @@ impl Lower {
                             self.enter_self()
                             return
                         }
+                        // `await __wait_readable(fd)`: waiting for input, the
+                        // others running (D124); with no tasks, nothing (the
+                        // read after it blocks)
+                        if n == "__wait_readable" || n == "__wait_either" {
+                            var fds: [int32] = []
+                            for x in a {
+                                let fd = self.expr(cg, x)
+                                let f64 = self.temp(Type.TInt(64, true))
+                                self.add(Inst.Cast(f64, Type.TInt(32, true), Type.TInt(64, true), fd))
+                                fds.push(f64)
+                            }
+                            if !cg.frames { return }
+                            self.leave_self()
+                            let me = self.temp(Type.TPtr)
+                            self.add(Inst.Frame(me))
+                            var cargs = [me]
+                            for f in fds { cargs.push(f) }
+                            if n == "__wait_either" { self.add(Inst.Call(-1, "__wait_fd2", cargs)) } else { self.add(Inst.Call(-1, "__wait_fd", cargs)) }
+                            let after = self.new_block()
+                            self.finish(Term.Suspend(after))
+                            self.start(after)
+                            self.enter_self()
+                            return
+                        }
+                        // `await __sleep(ms)`: asleep, the others running
+                        // (D124); with no tasks, the thread asleep
+                        if n == "__sleep" {
+                            let ms = self.expr(cg, a[0])
+                            if !cg.frames {
+                                let ns = self.temp(Type.TInt(64, true))
+                                self.add(Inst.Cast(ns, Type.TInt(32, true), Type.TInt(64, true), ms))
+                                let k = self.konst(Type.TInt(64, true), 1000000)
+                                let t = self.temp(Type.TInt(64, true))
+                                self.add(Inst.Bin(t, "*", Type.TInt(64, true), Type.TInt(64, true), ns, k, Pos { line: 0, col: 0 }))
+                                self.rt_call(cg, -1, "__sleep_ns", [t])
+                                return
+                            }
+                            self.leave_self()
+                            self.sleep_turn(ms)
+                            self.enter_self()
+                            return
+                        }
                     },
                     _ => {},
                 }
@@ -1437,6 +1479,19 @@ impl Lower {
         let me = self.temp(Type.TPtr)
         self.add(Inst.Frame(me))
         self.add(Inst.Call(-1, "__yield", [me]))
+        let after = self.new_block()
+        self.finish(Term.Suspend(after))
+        self.start(after)
+    }
+
+    // This frame asleep for the `ms` milliseconds in `ms` (D124): on the
+    // executor's timers, resumed when they pass.
+    fun sleep_turn(var self, ms: int32) {
+        let me = self.temp(Type.TPtr)
+        self.add(Inst.Frame(me))
+        let m = self.temp(Type.TInt(64, true))
+        self.add(Inst.Cast(m, Type.TInt(32, true), Type.TInt(64, true), ms))
+        self.add(Inst.Call(-1, "__sleep", [me, m]))
         let after = self.new_block()
         self.finish(Term.Suspend(after))
         self.start(after)
@@ -2591,6 +2646,26 @@ impl Lower {
                     return self.owned_value(cg, d, Type.TStr)
                 }
                 if is_builtin_call_name(nm) { return self.io_call(cg, e, nm, args) }
+                // `__cancel_after(a, ms)` (D124): the child's first frame on
+                // the timers as a deadline
+                if nm == "__cancel_after" && args.len() == 2 {
+                    match args[0].kind {
+                        ExprKind.Name(an) => {
+                            let ts = self.lookup(an)
+                            if ts >= 0 && self.task_of(ts) >= 0 {
+                                let fr = self.temp(Type.TPtr)
+                                self.add(Inst.Load(fr, ts))
+                                let ms = self.expr(cg, args[1])
+                                let m = self.temp(Type.TInt(64, true))
+                                self.add(Inst.Cast(m, Type.TInt(32, true), Type.TInt(64, true), ms))
+                                let d = self.temp(Type.TInt(64, true))
+                                self.add(Inst.Rt(d, "__cancel_after", [fr, m]))
+                                return d
+                            }
+                        },
+                        _ => {},
+                    }
+                }
                 // `task.cancel(a)` (D96): the child's first frame flagged
                 if nm == "std$task$cancel" && args.len() == 1 {
                     match args[0].kind {
@@ -3574,13 +3649,13 @@ impl Lower {
                 return -1
             }
             let d = self.temp(t)
-            if nm == "__alloc" || nm == "__equal_bytes" || nm == "__syscall" || nm == "__environ" || nm == "__rotl" || nm == "__bsr64" || nm == "__cas64" || nm == "__xchg64" || nm == "__fetch_add64" || nm == "__f64_round" { self.add(Inst.Rt(d, nm, vals)) } else if nm == "__argv" { self.add(Inst.Rt(d, "__argv_of", vals)) } else { self.add(Inst.Mov(d, vals[0])) }
+            if nm == "__alloc" || nm == "__equal_bytes" || nm == "__syscall" || nm == "__syscall5" || nm == "__environ" || nm == "__rotl" || nm == "__bsr64" || nm == "__cas64" || nm == "__xchg64" || nm == "__fetch_add64" || nm == "__f64_round" { self.add(Inst.Rt(d, nm, vals)) } else if nm == "__argv" { self.add(Inst.Rt(d, "__argv_of", vals)) } else { self.add(Inst.Mov(d, vals[0])) }
             if nm == "__str_of" || nm == "__list_of" { return self.owned_value(cg, d, t) }
             return d
         }
         // helpers without a result, then those with one
-        let effects = ["__exit", "__write", "__write_file", "__mkdir", "__unlink", "__rmdir", "__rename"]
-        let results = ["__args", "__read_file", "__read", "__poll", "__getcwd", "__getenv", "__sqrt", "__f64_bits", "__f64_from_bits", "__list_dir", "__stat", "__run", "__task_cancelled"]
+        let effects = ["__exit", "__write", "__write_file", "__mkdir", "__unlink", "__rmdir", "__rename", "__sleep_ns", "__kill", "__close"]
+        let results = ["__clock_ns", "__disarm", "__spawn", "__reap", "__args", "__read_file", "__read", "__poll", "__getcwd", "__getenv", "__sqrt", "__f64_bits", "__f64_from_bits", "__list_dir", "__stat", "__run", "__task_cancelled"]
         var has_result = false
         var known = false
         for r in effects { if r == nm { known = true } }
@@ -3928,7 +4003,7 @@ fun char_cast_checked(src: Type, t: Type) -> bool {
 pub fun myla_runtime_function(name: str) -> str {
     if name == "__str_concat" { return "std$rt$str_concat" }
     if name == "__str_eq" { return "std$rt$str_eq" }
-    if name == "__stat" || name == "__mkdir" || name == "__unlink" || name == "__rmdir" || name == "__rename" || name == "__getcwd" || name == "__read_file" || name == "__write_file" || name == "__list_dir" || name == "__getenv" || name == "__run" || name == "__read" || name == "__poll" || name == "__args" || name == "__int_to_str" || name == "__uint_to_str" || name == "__str_chars" || name == "__map_lookup" || name == "__sb_append" || name == "__print_str" || name == "__print_int" || name == "__print_uint" || name == "__print_bool" || name == "__print_char" || name == "__write" || name == "__map_keys" || name == "__bool_to_str" || name == "__char_to_str" {
+    if name == "__stat" || name == "__mkdir" || name == "__unlink" || name == "__rmdir" || name == "__rename" || name == "__getcwd" || name == "__read_file" || name == "__write_file" || name == "__list_dir" || name == "__getenv" || name == "__run" || name == "__read" || name == "__poll" || name == "__args" || name == "__int_to_str" || name == "__uint_to_str" || name == "__str_chars" || name == "__map_lookup" || name == "__sb_append" || name == "__print_str" || name == "__print_int" || name == "__print_uint" || name == "__print_bool" || name == "__print_char" || name == "__write" || name == "__map_keys" || name == "__bool_to_str" || name == "__char_to_str" || name == "__clock_ns" || name == "__sleep_ns" || name == "__disarm" || name == "__spawn" || name == "__reap" || name == "__kill" || name == "__close" {
         // `__stat` -> `std$rt$stat`
         var sb = StringBuilder()
         sb.append(name, 2, name.len())

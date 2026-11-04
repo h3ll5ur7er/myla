@@ -91,7 +91,11 @@ async fun run(pool: Pool) -> str {
 - `task.cancel(a)` takes the name of an `async let` of this function (`task.cancel() takes the name of an 'async let'`); a lambda in it can't cancel it (`a lambda can't cancel the child task 'a' of its function`). It sets a flag and goes on: it doesn't wait, and the child isn't stopped. It can only be called: `let stop = task.cancel` is an error (D97 (4)), since the compiler takes the call itself.
 - `task.cancelled()` is true in a task that was asked to stop, or whose parent (or theirs) was: a request reaches the whole tree below the child, its children started later too. Outside a task that was asked, and in a program without tasks, it is false.
 - `await a` still gives what the child returned, and a scope still waits for its children: whatever the child does when asked, it runs to its end, so it can give back what it holds. Cancelling a child that has ended does nothing.
-- The flag is the program's: unlike a failure (D97), it stops nothing at a suspension point.
+- The flag is the program's: unlike a failure (D97), it stops nothing at a suspension point, with one exception: a cancelled task's `await task.sleep(ms)` ends at once, and so does a sleep it starts later (D124), so a child asleep when asked can look at the flag without waiting out its sleep.
+
+### A time limit: `task.timeout`
+
+`await task.timeout(ms, f)` runs the async function value `f` as a child task and gives `Some` of its result, or `None` when `ms` milliseconds passed first (D124). At that moment the child is cancelled as `task.cancel` does it (its sleeps end), and `timeout` awaits it before it returns either way: the time limit is a request too, so a child that computes without looking at `task.cancelled()` keeps `timeout` waiting. Natively the limit is a deadline on the executor's timers, taken off when the child ends first; with `MYLA_TIME=virtual` the interpreter's clock moves only when every task sleeps, so a child that computes without sleeping never reaches its limit there.
 
 ## Actors
 
@@ -191,6 +195,7 @@ Which ready task runs next isn't part of the language: a program whose result de
 - A worker runs the newest ready task first, so a tree of tasks unfolds depth first and needs memory for its depth, not its width: `task.all` over 1.1 million functions on one worker took 20.8 s and 3.3 GB first in, first out, and takes 1.9 s and 354 MB depth first. An idle worker takes the oldest task of another worker's queue.
 - An `async let` queues its child and the parent goes on; awaiting a child that has ended gives its result at once, and so does an awaited async function, method or function value that ends without suspending. An awaited actor call and `await task.yield()` give the other tasks a turn afterwards: the task goes behind every task ready then ([[MYLA-228]]).
 - On one worker (`MYLA_THREADS=1`) native code runs tasks in the same order as the interpreter, so a program prints the same in both.
+- A task asleep (`await task.sleep(ms)`, D124) goes on once its time has come, queued like a task that became ready then; sleepers whose time comes at once go on earliest first. Natively an idle worker waits in the platform's poll until the nearest deadline (the others park as before), so a program that never sleeps pays nothing; the interpreter waits for the earliest sleeper when no task is ready, on the real clock or, with `MYLA_TIME=virtual`, on one that jumps there.
 - `MYLA_SCHED` changes the order, in the interpreter and in native code alike: `fifo` runs the oldest ready task first (breadth first, the order before D110), `seed:N` queues each ready task at the newest or the oldest end as a generator seeded with N decides, a turn still going behind the others. On one worker each order is reproducible and the same in both runners; the stress tests run every program in a few of them ([[Development/Concurrency-stress-tests]]).
 
 ## Output from tasks running at once

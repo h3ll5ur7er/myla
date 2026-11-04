@@ -94,6 +94,92 @@ pub fun run(program: str, args: [str]) -> Result<Output, SpawnError> {
     return collect(program, argv)
 }
 
+// --- In a task: waiting without blocking the worker (D124) ---------------------
+
+// `run`, the task waiting for the child (its output read as it comes, then
+// its end) with the task suspended, the other tasks running meanwhile;
+// outside a task it blocks as `run` does. A task asked to stop
+// (`task.cancel`, a `task.timeout` that ran out) stops waiting: the child is
+// killed and reaped, and the result is `Err(SpawnError.Other(125))`
+// (ECANCELED).
+pub async fun run_async(program: str, args: [str]) -> Result<Output, SpawnError> {
+    var argv = [program]
+    for a in args {
+        argv.push(a)
+    }
+    return await collect_async(program, argv)
+}
+
+// `collect`, waiting as `run_async` does: the child started, its two pipes
+// read as either has bytes, then its end awaited (its pidfd) and reaped.
+async fun collect_async(program: str, argv: [str]) -> Result<Output, SpawnError> {
+    let h = __spawn(program, argv)
+    if h[0] != 0 {
+        return Err(spawn_error_from_errno(h[0]))
+    }
+    let pid = h[1]
+    var out: [uint8] = []
+    var err: [uint8] = []
+    var ofd = h[2]
+    var efd = h[3]
+    var stopped = false
+    while ofd >= 0 || efd >= 0 {
+        if ofd >= 0 && efd >= 0 {
+            await __wait_either(ofd, efd)
+        } else if ofd >= 0 {
+            await __wait_readable(ofd)
+        } else {
+            await __wait_readable(efd)
+        }
+        if __task_cancelled() {
+            stopped = true
+            break
+        }
+        if ofd >= 0 && __poll(ofd, 0) != 0 {
+            let chunk = __read(ofd, 4096)
+            if chunk.len() == 0 {
+                __close(ofd)
+                ofd = -1
+            }
+            var i = 0
+            while i < chunk.len() {
+                out.push(chunk[i] as uint8)
+                i = i + 1
+            }
+        }
+        if efd >= 0 && __poll(efd, 0) != 0 {
+            let chunk = __read(efd, 4096)
+            if chunk.len() == 0 {
+                __close(efd)
+                efd = -1
+            }
+            var i = 0
+            while i < chunk.len() {
+                err.push(chunk[i] as uint8)
+                i = i + 1
+            }
+        }
+    }
+    if !stopped {
+        await __wait_readable(h[4])
+        stopped = __task_cancelled()
+    }
+    __close(ofd)
+    __close(efd)
+    __close(h[4])
+    if stopped {
+        __kill(pid, 9)
+        let gone = __reap(pid)
+        return Err(SpawnError.Other(125))
+    }
+    let code = __reap(pid)
+    var status = ExitStatus.Exited(code)
+    if code < 0 {
+        status = ExitStatus.Signaled(-code)
+    }
+    return Ok(Output { stdout: out, stderr: err, status: status })
+}
+
 // A builder for a subprocess invocation. Start with `command`, chain `arg` /
 // `args`, then call `output`.
 pub struct Command {
@@ -126,5 +212,10 @@ impl Command {
     // Spawn the command, wait for it, and collect its output.
     fun output(self) -> Result<Output, SpawnError> {
         return collect(self.program, self.argv)
+    }
+
+    // `output`, the task waiting as `run_async` does.
+    async fun output_async(self) -> Result<Output, SpawnError> {
+        return await collect_async(self.program, self.argv)
     }
 }

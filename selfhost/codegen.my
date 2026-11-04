@@ -23,6 +23,7 @@ from .anf import Norm, new_norm
 from .lower import lower_function, lower_lambda, blocked_types, Lowered, myla_runtime_function, derived_eq_ir, walk_ir, drop_entry_ir, dropb_slow_ir, list_drop_slow_ir, map_drop_slow_ir, clone_ir, deep_walk_ir, deep_cell_ir, Routine, Want, env_drop_ir, env_deep_ir
 import .ir_x86 as ir_x86
 import .ownership as ownership
+import .runtime_x86 as runtime_x86
 from .dwarf import uleb, sleb, bytes_line, exprloc, str_pieces, dw_string, dw_ref, abbrev_section, gdb_scripts_section, AB_CU, AB_BASE, AB_SUBPROGRAM, AB_TYPED_SUBPROGRAM, AB_PARAM, AB_VAR, AB_BLOCK, AB_PTR, AB_VOIDPTR, AB_STRUCT, AB_MEMBER, AB_ARRAY, AB_SUBRANGE, AB_VARIANT_PART, AB_VARIANT, AB_TAG, OP_FBREG, OP_BREG15, OP_DEREF, OP_PLUS_UCONST, OP_STACK_VALUE, OP_PUSH_OBJECT_ADDRESS, OP_LIT0, OP_MINUS, OP_REG6, OP_GNU_DEREF_TYPE, OP_GNU_CONVERT, ATE_BOOLEAN, ATE_FLOAT, ATE_SIGNED, ATE_UNSIGNED, ATE_UTF, LANG_RUST
 from .parser import expr_of, stmt_of, type_expr_of, block_of, pattern_of, fun_of  // AST values for #test cases (MYLA-184)
 
@@ -1881,9 +1882,9 @@ impl CodeGen {
     // name the rest of the runtime calls and the function standing for it.
     fun rt_exec(self) -> [(str, str)] {
         // every program's (`__map_lookup`: `remove`'s, `emit_map_remove`)
-        var out = [("__list_grow", "std$rt$list_grow"), ("__sb_append_bytes", "std$rt$sb_append_bytes"), ("__map_new", "std$rt$map_new"), ("__map_rebuild", "std$rt$map_rebuild"), ("__map_lookup", "std$rt$map_lookup")]
+        var out = [("__panic_report", "std$rt$panic_report"), ("__list_grow", "std$rt$list_grow"), ("__sb_append_bytes", "std$rt$sb_append_bytes"), ("__map_new", "std$rt$map_new"), ("__map_rebuild", "std$rt$map_rebuild"), ("__map_lookup", "std$rt$map_lookup")]
         if self.frames {
-            for p in [("__sched_init", "std$rt$sched_init"), ("__workers_count", "std$rt$workers_count"), ("__task_cancel", "std$rt$task_cancel"), ("__task_cancelled", "std$rt$task_cancelled"), ("__failed_wait", "std$rt$failed_wait"), ("__wait_stopped", "std$rt$wait_stopped"), ("__exec_push", "std$rt$exec_push"), ("__exec_yield_push", "std$rt$exec_yield_push"), ("__exec_find", "std$rt$exec_find"), ("__exec_peek", "std$rt$exec_peek"), ("__wake_waiters", "std$rt$wake_waiters"), ("__actor_leave", "std$rt$actor_leave"), ("__task_wait", "std$rt$task_wait"), ("__actor_enter_rt", "std$rt$actor_enter"), ("__exec_loop", "std$rt$exec_run"), ("__deep_str", "std$rt$deep_str"), ("__dclone_str", "std$rt$dclone_str"), ("__dclone_cell", "std$rt$dclone_cell")] { out.push(p) }
+            for p in [("__sched_init", "std$rt$sched_init"), ("__workers_count", "std$rt$workers_count"), ("__task_cancel", "std$rt$task_cancel"), ("__task_cancelled", "std$rt$task_cancelled"), ("__failed_wait", "std$rt$failed_wait"), ("__wait_stopped", "std$rt$wait_stopped"), ("__exec_push", "std$rt$exec_push"), ("__exec_yield_push", "std$rt$exec_yield_push"), ("__exec_find", "std$rt$exec_find"), ("__exec_peek", "std$rt$exec_peek"), ("__wake_waiters", "std$rt$wake_waiters"), ("__actor_leave", "std$rt$actor_leave"), ("__task_wait", "std$rt$task_wait"), ("__actor_enter_rt", "std$rt$actor_enter"), ("__exec_loop", "std$rt$exec_run"), ("__deep_str", "std$rt$deep_str"), ("__dclone_str", "std$rt$dclone_str"), ("__dclone_cell", "std$rt$dclone_cell"), ("__panic_report_tasks", "std$rt$panic_report_tasks"), ("myla___sleep", "std$rt$sleep_frame"), ("__cancel_after", "std$rt$cancel_after"), ("__task_end", "std$rt$task_end"), ("myla___wait_fd", "std$rt$wait_fd"), ("myla___wait_fd2", "std$rt$wait_fd2")] { out.push(p) }
         }
         return out
     }
@@ -2013,8 +2014,6 @@ impl CodeGen {
             out.push(format(".Lmsg{}:\n\t.quad {}\n\t.ascii \"{}\"", label, text.len(), text))
             ti = ti + 1
         }
-        out.push(".Lmsg_rterr:\n\t.quad 15\n\t.ascii \"runtime error: \"")
-        out.push(".Lmsg_at:\n\t.quad 7\n\t.ascii \"\\n  --> \"")
         for line in self.posdata { out.push(line) }
         for line in self.rodata { out.push(line) }
         if self.uses_float { for chunk in self.float_rodata_text() { out.push(chunk) } }
@@ -2062,6 +2061,23 @@ impl CodeGen {
         // 1 once a stack overflow is being reported (`__on_segv`)
         out.push("__segv_once:")
         out.push("\t.skip 8")
+        // a runtime error's line and column as digits (std.rt's
+        // `write_err_num`)
+        out.push("__panic_buf:")
+        out.push("\t.skip 32")
+        // the poller's events and words (std.platform, D124)
+        out.push("__poll_buf:")
+        out.push("\t.skip 128")
+        // the timers (std.rt's `sleep_frame`, D124): their heap's cell, its
+        // count, its lock, the order they were set in; the poller and
+        // whether a worker waits in it
+        for v in ["__timers", "__timer_count", "__timer_lock", "__timer_seq", "__exec_poller", "__exec_polling", "__watches", "__watch_count", "__exec_waking"] {
+            out.push(v + ":")
+            out.push("\t.skip 8")
+        }
+        // a timer entry being swapped (std.rt's `timer_sift`, the lock held)
+        out.push("__timer_tmp:")
+        out.push("\t.skip 32")
         if self.frames {
             // each worker's queue: `[lock][head][tail]`, a cache line each
             out.push("\t.balign 64")
@@ -2071,8 +2087,6 @@ impl CodeGen {
             out.push("\t.skip 8")
             out.push("__tls_blocks:")
             out.push(format("\t.skip {}", TLS_SIZE * MAX_WORKERS))
-            out.push("__heap_base:")
-            out.push("\t.skip 8")
             // the CPUs this process may run on (`workers_count`)
             out.push("__cpu_mask:")
             out.push("\t.skip 128")
@@ -2199,41 +2213,6 @@ impl CodeGen {
         return name
     }
 
-    // `__deep_env` and `__dclone_env`, the deep copies of a function value's
-    // environment every program with tasks may need (D92, MYLA-148); the
-    // strings' and a plain cell's are std.rt's (`rt_exec`, MYLA-162).
-    fun emit_deep_runtime(var self) {
-        // none; owning nothing (`__free` its drop): as a string, itself when
-        // unshared, else a copy; else the deep copy just before its drop
-        // function
-        self.raw("__deep_env:")
-        self.raw("\ttestq %rdi, %rdi")
-        self.raw("\tjz .Lde_none")
-        self.raw("\tmovq (%rdi), %rax")
-        self.raw("\tleaq __free(%rip), %rcx")
-        self.raw("\tcmpq %rcx, %rax")
-        self.raw("\tje __deep_str")
-        self.raw("\tjmp *-8(%rax)")
-        self.raw(".Lde_none:")
-        self.raw("\txorl %eax, %eax")
-        self.raw("\tret")
-        self.raw("")
-        // its clone, only reading the original: owning nothing, a copy; else
-        // the clone two words before its drop function
-        self.raw("__dclone_env:")
-        self.raw("\ttestq %rdi, %rdi")
-        self.raw("\tjz .Ldce_none")
-        self.raw("\tmovq (%rdi), %rax")
-        self.raw("\tleaq __free(%rip), %rcx")
-        self.raw("\tcmpq %rcx, %rax")
-        self.raw("\tje __dclone_cell")
-        self.raw("\tjmp *-16(%rax)")
-        self.raw(".Ldce_none:")
-        self.raw("\txorl %eax, %eax")
-        self.raw("\tret")
-        self.raw("")
-    }
-
     // -- thread state (D92, MYLA-137) ---------------------------------------
 
     // The operand of the runtime variable `sym`, which is a thread's own in a
@@ -2241,236 +2220,13 @@ impl CodeGen {
     // its symbol.
     #test(codegen_on("[int]"), "__heap_end")["__heap_end(%rip)"]
     fun tv(self, sym: str) -> str {
-        // (a process-wide one, like `__heap_base`, next to %rip with tasks
+        // (a process-wide one, like `__exec_workers`, next to %rip with tasks
         // too: MYLA-162)
         if !self.frames || tls_offset(sym) == 0 { return sym + "(%rip)" }
         return format("%fs:{}", tls_offset(sym))
     }
 
-    // `reg` = the address of the runtime variable `sym`, plus `extra`.
-    fun tls_addr(var self, sym: str, extra: int32, reg: str) {
-        if !self.frames {
-            if extra == 0 { self.raw(format("\tleaq {}(%rip), %{}", sym, reg)) }
-            else { self.raw(format("\tleaq {}+{}(%rip), %{}", sym, extra, reg)) }
-            return
-        }
-        self.raw(format("\tmovq %fs:0, %{}", reg))
-        self.raw(format("\tleaq {}(%{}), %{}", tls_offset(sym) + extra, reg, reg))
-    }
-
     // -- the executor (D90, D92, MYLA-140: workers and their queues) --------
-
-    // The ready frames: each worker has a ring of its own (`emit_executor`
-    // below); `__exec_push` (%rdi: a frame) queues one, `__exec_run` resumes
-    // frames until none is left anywhere (each frame function takes its
-    // frame in %rdi, D119). `myla___resume`
-    // goes on with the frame in %rdi, through its resume function;
-    // `myla___finish`, at a frame function's end, resumes the frame's caller
-    // in place of it, or ends its task and returns to the executor.
-    // `__exec_cur` is the frame the executor resumed last: until control
-    // comes back, what runs is that frame's task, whose first frame is at the
-    // end of the chain of callers (word 8); `__exec_task` is that first
-    // frame (the one resumed may end meanwhile). `__exec_main` is the entry's.
-    //
-    // A task's first frame says in its `task` word (24) how the task is:
-    // 0 running, the frame waiting for it, or 1 done; the frame is never
-    // resumed again then. A failure doesn't end a task this way: it ends
-    // the program (D97, `__task_fail`).
-    fun emit_executor(var self) {
-        // Each worker has a queue of ready frames (D92, MYLA-140): a ring of
-        // its own (EXEC_CAP frames, at `__wq_rings` + its index * 8 MiB) and a
-        // record `[lock][head][tail]` (a cache line of `__wq`; the counters
-        // run either way, the ring index is the counter masked). A worker
-        // pushes onto its own queue's tail and takes its newest frame (depth
-        // first: a task's children before its siblings'), else steals the
-        // oldest frame of the next queue that has one (the biggest piece of
-        // a tree of tasks); a frame yielding a turn goes to the oldest end,
-        // behind the others (D110: depth-first, with one worker the order of
-        // the self-hosted interpreter). MYLA_SCHED changes it
-        // (`__sched_init`): `fifo` takes the oldest (a yield goes to the
-        // newest end); `seed:N` queues each push at the end a generator
-        // seeded with N picks (a yield still behind the others).
-        // `__exec_seq` counts pushes, the word sleeping workers wait on
-        // (futex); `__exec_idle` counts the workers with nothing to run
-        // (spinning a while, then asleep), `__exec_sleepers` those asleep.
-        //
-        // (the queues in std.rt: `exec_push` and the others, MYLA-162)
-        // __exec_run: a worker's loop (std.rt's `exec_run`, MYLA-162), its
-        // stack recorded; a task failed (`__task_fail`): the loop again from
-        // its start, on that stack, no frame running
-        self.raw("__exec_run:")
-        self.raw(format("\tmovq %rsp, {}", self.tv("__exec_sp")))
-        self.raw("\tcall __exec_loop")
-        self.raw(".Lexec_failed:")
-        self.raw(format("\tmovq {}, %rsp", self.tv("__exec_sp")))
-        self.raw("\txorl %eax, %eax")
-        self.raw(format("\txchgq %rax, {}", self.tv("__exec_cur")))
-        self.raw("\tcall __exec_loop")
-        self.raw("")
-        // the runtime's entry points a frame function tail-calls take the
-        // frame in %rdi (D119)
-        self.raw("myla___resume:")
-        self.raw("\tjmp *(%rdi)")
-        self.raw("")
-        self.raw("myla___finish:")
-        self.raw("\tmovq %rdi, %rax")
-        self.raw("\tmovq 8(%rax), %rdi")
-        self.raw("\ttestq %rdi, %rdi")
-        self.raw("\tjz .Lfinish_task")
-        self.raw("\tjmp *(%rdi)")
-        // a task's first frame: its task ends; the frame waiting for it, in
-        // its `task` word, goes on, and the word says done (1)
-        self.raw(".Lfinish_task:")
-        // the entry's task: the program ends (its children have ended)
-        self.raw("\tcmpq __exec_main(%rip), %rax")
-        self.raw("\tje .Lfinish_program")
-        self.raw("\tmovq $1, %rdi")
-        self.raw("\txchgq %rdi, 24(%rax)")
-        self.raw("\tjmp __wake_waiters")
-        self.raw(".Lfinish_program:")
-        self.raw("\tmovq $231, %rax")
-        self.raw("\txorq %rdi, %rdi")
-        self.raw("\tsyscall")
-        self.raw("")
-        // __task_fail: a panic (%rdi 2, %rsi the message, %rdx the position)
-        // or an `exit` (%rdi 3, %rsi the code) in a task ends the program
-        // (D97): the first failure claims it, every other worker drops its
-        // frames from then on, and this returns (%rax 0) for the caller to
-        // report the failure at once, wait until no other worker runs a frame
-        // (`__failed_wait`) and end the program (MYLA-170: a sibling looping
-        // without a suspension point delays the end, not the report). A later
-        // failure is not reported: its worker goes back to the executor.
-        // With no task running it returns at once.
-        self.raw("__task_fail:")
-        self.raw(format("\tmovq {}, %rax", self.tv("__exec_cur")))
-        self.raw("\ttestq %rax, %rax")
-        self.raw("\tjz .Ltf_now")
-        self.raw("\tmovq $1, %rcx")
-        self.raw("\txorl %eax, %eax")
-        self.raw("\tlock cmpxchgq %rcx, __exec_failing(%rip)")
-        self.raw("\tjne .Lexec_failed")
-        self.raw(".Ltf_now:")
-        self.raw("\txorl %eax, %eax")
-        self.raw("\tret")
-        self.raw("")
-        // __start_workers: the workers besides the main thread (worker 0),
-        // as many as `__exec_workers` says (`_start` set it); each a thread
-        // (clone: the address space, files, signal handlers and thread group
-        // shared, CLONE_SETTLS) with its state block and an 8 MiB stack with
-        // a guard page at its bottom (MYLA-172), running `__exec_run`
-        self.raw("__start_workers:")
-        self.raw("\tpushq %rbx")
-        self.raw("\tpushq %r12")
-        self.raw("\tpushq %r13")
-        self.raw("\tmovq $1, %rbx")
-        self.raw(".Lsw_next:")
-        self.raw("\tcmpl __exec_workers(%rip), %ebx")
-        self.raw("\tjae .Lsw_done")
-        self.raw("\tmovq %rbx, %r12")
-        self.raw(format("\timulq ${}, %r12", TLS_SIZE))
-        self.raw("\tleaq __tls_blocks(%rip), %rax")
-        self.raw("\taddq %rax, %r12")
-        self.raw("\tmovq %r12, (%r12)")
-        self.raw(format("\tmovq %rbx, {}(%r12)", tls_offset("__worker_id")))
-        self.raw("\tmovq $9, %rax")
-        self.raw("\txorq %rdi, %rdi")
-        self.raw("\tmovq $8388608, %rsi")
-        self.raw("\tmovq $3, %rdx")
-        self.raw("\tmovq $147490, %r10")
-        self.raw("\tmovq $-1, %r8")
-        self.raw("\txorq %r9, %r9")
-        self.raw("\tsyscall")
-        self.raw("\tcmpq $-4096, %rax")
-        self.raw("\tja .Lsw_short")
-        // the stack's lowest page faults: mprotect(base, 4096, PROT_NONE)
-        self.raw("\tmovq %rax, %r13")
-        self.raw("\tmovq %rax, %rdi")
-        self.raw("\tmovq $4096, %rsi")
-        self.raw("\txorq %rdx, %rdx")
-        self.raw("\tmovq $10, %rax")
-        self.raw("\tsyscall")
-        self.raw("\tmovq %r13, %rax")
-        self.raw("\tleaq 8388608(%rax), %rsi")
-        self.raw("\tmovq $855808, %rdi")
-        self.raw("\txorq %rdx, %rdx")
-        self.raw("\txorq %r10, %r10")
-        self.raw("\tmovq %r12, %r8")
-        self.raw("\tmovq $56, %rax")
-        self.raw("\tsyscall")
-        self.raw("\ttestq %rax, %rax")
-        self.raw("\tjz .Lsw_child")
-        self.raw("\tjs .Lsw_short")
-        self.raw("\tincq %rbx")
-        self.raw("\tjmp .Lsw_next")
-        // the new thread, on its stack: an alternate signal stack of its own
-        // (a thread made with CLONE_VM has none), so `__on_segv` reports its
-        // stack's overflow as the main thread's (MYLA-172): mmap(64 KiB),
-        // sigaltstack
-        self.raw(".Lsw_child:")
-        self.raw("\tmovq $9, %rax")
-        self.raw("\txorl %edi, %edi")
-        self.raw("\tmovl $65536, %esi")
-        self.raw("\tmovl $3, %edx")
-        self.raw("\tmovl $34, %r10d")
-        self.raw("\tmovq $-1, %r8")
-        self.raw("\txorl %r9d, %r9d")
-        self.raw("\tsyscall")
-        self.raw("\tcmpq $-4096, %rax")
-        self.raw("\tja .Lsw_run")
-        self.raw("\tsubq $32, %rsp")
-        self.raw("\tmovq %rax, (%rsp)")
-        self.raw("\tmovq $0, 8(%rsp)")
-        self.raw("\tmovq $65536, 16(%rsp)")
-        self.raw("\tmovq $131, %rax")
-        self.raw("\tmovq %rsp, %rdi")
-        self.raw("\txorl %esi, %esi")
-        self.raw("\tsyscall")
-        self.raw("\taddq $32, %rsp")
-        self.raw(".Lsw_run:")
-        // its own arena first, for std.rt's allocator (MYLA-162)
-        self.raw("\tcall __heap_init")
-        self.raw("\tjmp __exec_run")
-        // no more threads to be had: the workers made so far
-        self.raw(".Lsw_short:")
-        self.raw("\tmovl %ebx, __exec_workers(%rip)")
-        self.raw(".Lsw_done:")
-        self.raw("\tpopq %r13")
-        self.raw("\tpopq %r12")
-        self.raw("\tpopq %rbx")
-        self.raw("\tret")
-        self.raw("")
-        // myla___yield(frame): a turn for the others, the frame queued again
-        // (its resume point stored before this tail call, D92)
-        self.raw("myla___yield:")
-        self.raw("\tjmp __exec_yield_push")
-        self.raw("")
-        // the entry points that may go on with the frame at once (D90):
-        // std.rt decides (`task_wait`, `actor_enter`: the frame to resume, or
-        // 0 for the worker to return to the executor), the jump into the
-        // frame is the platform's (MYLA-162)
-        for ep in [("myla___wait", "__task_wait"), ("myla___actor_enter", "__actor_enter_rt")] {
-            self.raw(ep.0 + ":")
-            self.raw("\tcall " + ep.1)
-            self.raw("\ttestq %rax, %rax")
-            self.raw("\tjz " + ".L" + ep.0 + "_park")
-            self.raw("\tmovq %rax, %rdi")
-            self.raw("\tjmp *(%rax)")
-            self.raw(".L" + ep.0 + "_park:")
-            self.raw("\tret")
-            self.raw("")
-        }
-        // __task_exit: `exit` (%edi the code) when tasks take turns
-        self.raw("__task_exit:")
-        self.raw("\tpushq %rdi")
-        self.raw("\tmovslq %edi, %rsi")
-        self.raw("\tmovq $3, %rdi")
-        self.raw("\tcall __task_fail")
-        self.raw("\tcall __failed_wait")
-        self.raw("\tpopq %rdi")
-        self.raw("\tmovq $231, %rax")
-        self.raw("\tsyscall")
-        self.raw("")
-    }
 
     // -- functions --------------------------------------------------------
 
@@ -3560,614 +3316,7 @@ impl CodeGen {
 
     // -- runtime prelude (_start + print/heap helpers) --------------------
 
-    fun emit_runtime_prelude(var self, entry_name: str) {
-        self.raw("\t.global _start")
-        self.raw("_start:")
-        // the main thread's stack may grow to 120 MiB (MYLA-182): Linux grows
-        // it up to the soft RLIMIT_STACK, read at each growth, and keeps at
-        // least 128 MiB free below it; deep recursion (the self-hosted
-        // interpreter takes some 9 KB of stack per interpreted call) then
-        // runs where 8 MiB would end in a segfault. prlimit64(0,
-        // RLIMIT_STACK), raised to min(120 MiB, the hard limit) when lower
-        self.raw("\tsubq $16, %rsp")
-        self.raw("\tmovq $302, %rax")
-        self.raw("\txorl %edi, %edi")
-        self.raw("\tmovl $3, %esi")
-        self.raw("\txorl %edx, %edx")
-        self.raw("\tmovq %rsp, %r10")
-        self.raw("\tsyscall")
-        self.raw("\ttestq %rax, %rax")
-        self.raw("\tjnz .Lstk_done")
-        self.raw("\tmovq $125829120, %rcx")
-        self.raw("\tcmpq %rcx, (%rsp)")
-        self.raw("\tjae .Lstk_done")
-        self.raw("\tcmpq %rcx, 8(%rsp)")
-        self.raw("\tjae .Lstk_set")
-        self.raw("\tmovq 8(%rsp), %rcx")
-        self.raw(".Lstk_set:")
-        self.raw("\tmovq %rcx, (%rsp)")
-        self.raw("\tmovq $302, %rax")
-        self.raw("\txorl %edi, %edi")
-        self.raw("\tmovl $3, %esi")
-        self.raw("\tmovq %rsp, %rdx")
-        self.raw("\txorl %r10d, %r10d")
-        self.raw("\tsyscall")
-        self.raw(".Lstk_done:")
-        self.raw("\taddq $16, %rsp")
-        // SIGSEGV on an alternate stack (MYLA-182): a fault next to the stack
-        // pointer is the main stack running out (past its 120 MiB), reported as
-        // `runtime error: stack overflow`; any other fault gets the default action
-        // back and happens again. mmap(64 KiB), sigaltstack, rt_sigaction(SIGSEGV,
-        // SA_SIGINFO | SA_ONSTACK | SA_RESTORER)
-        self.raw("	movq $9, %rax")
-        self.raw("	xorl %edi, %edi")
-        self.raw("	movl $65536, %esi")
-        self.raw("	movl $3, %edx")
-        self.raw("	movl $34, %r10d")
-        self.raw("	movq $-1, %r8")
-        self.raw("	xorl %r9d, %r9d")
-        self.raw("	syscall")
-        self.raw("	cmpq $-4096, %rax")
-        self.raw("	ja .Lsov_done")
-        self.raw("	subq $32, %rsp")
-        self.raw("	movq %rax, (%rsp)")
-        self.raw("	movq $0, 8(%rsp)")
-        self.raw("	movq $65536, 16(%rsp)")
-        self.raw("	movq $131, %rax")
-        self.raw("	movq %rsp, %rdi")
-        self.raw("	xorl %esi, %esi")
-        self.raw("	syscall")
-        self.raw("	leaq __on_segv(%rip), %rax")
-        self.raw("	movq %rax, (%rsp)")
-        self.raw("	movq $201326596, 8(%rsp)")
-        self.raw("	leaq __sig_restorer(%rip), %rax")
-        self.raw("	movq %rax, 16(%rsp)")
-        self.raw("	movq $0, 24(%rsp)")
-        self.raw("	movq $13, %rax")
-        self.raw("	movl $11, %edi")
-        self.raw("	movq %rsp, %rsi")
-        self.raw("	xorl %edx, %edx")
-        self.raw("	movl $8, %r10d")
-        self.raw("	syscall")
-        self.raw("	addq $32, %rsp")
-        self.raw(".Lsov_done:")
-        if self.frames {
-            // the main thread's state block, worker 0's: arch_prctl(
-            // ARCH_SET_FS, block), its first word its own address
-            self.raw("\tleaq __tls_blocks(%rip), %rsi")
-            self.raw("\tmovq %rsi, (%rsi)")
-            self.raw("\tmovq $4098, %rdi")
-            self.raw("\tmovq $158, %rax")
-            self.raw("\tsyscall")
-            // the workers' rings of ready frames, EXEC_CAP frames each
-            self.raw("\tmovq $9, %rax")
-            self.raw("\txorq %rdi, %rdi")
-            self.raw(format("\tmovq ${}, %rsi", 8 * EXEC_CAP * MAX_WORKERS))
-            self.raw("\tmovq $3, %rdx")
-            self.raw("\tmovq $16418, %r10")
-            self.raw("\tmovq $-1, %r8")
-            self.raw("\txorq %r9, %r9")
-            self.raw("\tsyscall")
-            self.raw("\tcmpq $-4096, %rax")
-            self.raw("\tja __trap_oom")
-            self.raw("\tmovq %rax, __wq_rings(%rip)")
-        }
-        self.raw("\tmovq (%rsp), %rax")
-        self.raw("\tmovq %rax, __argc(%rip)")
-        self.raw("\tleaq 8(%rsp), %rcx")
-        self.raw("\tmovq %rcx, __argv(%rip)")
-        self.raw("\tleaq 16(%rsp,%rax,8), %rcx")
-        self.raw("\tmovq %rcx, __envp(%rip)")
-        if self.frames {
-            // as many workers as `__workers_count` says (it reads the
-            // environment), and the heap region: an arena of 4 GiB per
-            // worker, reserved (MAP_NORESERVE), not MAX_WORKERS always
-            // (MYLA-172, D106)
-            self.raw("\tcall __sched_init")
-            self.raw("\tcall __workers_count")
-            self.raw("\tmovl %eax, __exec_workers(%rip)")
-            self.raw("\tmovl %eax, %esi")
-            self.raw("\tshlq $32, %rsi")
-            self.raw("\tmovq $9, %rax")
-            self.raw("\txorq %rdi, %rdi")
-            self.raw("\tmovq $3, %rdx")
-            self.raw("\tmovq $16418, %r10")
-            self.raw("\tmovq $-1, %r8")
-            self.raw("\txorq %r9, %r9")
-            self.raw("\tsyscall")
-            self.raw("\tcmpq $-4096, %rax")
-            self.raw("\tja __trap_oom")
-            self.raw("\tmovq %rax, __heap_base(%rip)")
-        }
-        // the arena (this worker's with tasks), before anything is
-        // allocated, for std.rt's allocator (which doesn't check on every
-        // call, as the assembly's did)
-        self.raw("\tcall __heap_init")
-        // with tasks, the other workers (D92)
-        if self.frames { self.raw("\tcall __start_workers") }
-        if self.frames && self.sig_of(entry_name).decl.is_async {
-            // the entry's task: its frame queued, the executor run (D90)
-            self.raw(format("\tcall myla_{}__new", entry_name))
-            self.raw("\tmovq %rax, __exec_main(%rip)")
-            self.raw("\tmovq %rax, 40(%rax)")
-            self.raw("\tmovq %rax, %rdi")
-            self.raw("\tcall __exec_push")
-            self.raw("\tcall __exec_run")
-        } else {
-            self.raw(format("\tcall myla_{}", entry_name))
-        }
-        // exit_group: every thread ends (D89 (3))
-        self.raw("\tmovq $231, %rax")
-        self.raw("\txorq %rdi, %rdi")
-        self.raw("\tsyscall")
-        self.raw("")
-        if self.frames {
-            self.emit_executor()
-            self.emit_deep_runtime()
-        } else {
-            // no task but the first: nothing is ever cancelled (D96)
-            self.raw("__task_cancelled:")
-            self.raw("\txorl %eax, %eax")
-            self.raw("\tret")
-            self.raw("")
-        }
-        // Runtime errors: `runtime error: <message>` on stderr, then exit(1)
-        // (MYLA-17); the message is the interpreter's, without the values. The
-        // caller passes the position record in %rsi; out of memory has none.
-        for label in trap_labels() {
-            self.raw(format("{}:", label))
-            if label == "__trap_oom" { self.raw("\txorl %esi, %esi") }
-            self.raw(format("\tleaq .Lmsg{}(%rip), %rdi", label))
-            self.raw("\tjmp __panic")
-        }
-        self.raw("")
-        // __write_all: write rdx bytes at rsi to fd rdi, however many write
-        // calls it takes: a short write continues, EINTR and EAGAIN (a full
-        // non-blocking pipe) retry, another error gives up (MYLA-17).
-        self.raw("__write_all:")
-        self.raw(".Lwa_loop:")
-        self.raw("\ttestq %rdx, %rdx")
-        self.raw("\tjz .Lwa_done")
-        self.raw("\tmovq $1, %rax")
-        self.raw("\tsyscall")
-        self.raw("\tcmpq $-4, %rax")
-        self.raw("\tje .Lwa_loop")
-        self.raw("\tcmpq $-11, %rax")
-        self.raw("\tje .Lwa_loop")
-        self.raw("\ttestq %rax, %rax")
-        self.raw("\tjs .Lwa_done")
-        self.raw("\taddq %rax, %rsi")
-        self.raw("\tsubq %rax, %rdx")
-        self.raw("\tjmp .Lwa_loop")
-        self.raw(".Lwa_done:")
-        self.raw("\tret")
-        self.raw("")
-        // __panic: %rdi -> the message, %rsi -> the position record or 0;
-        // `runtime error: <message>`, then `  --> file:line:col` (MYLA-65).
-        // __on_segv(sig, siginfo, ucontext), on the alternate stack: the fault
-        // address (siginfo + 16) within 64 KiB below or 1 MiB above the interrupted
-        // %rsp (ucontext + 160) is a stack overflow (MYLA-182), reported once:
-        // a worker overflowing after another sleeps until its exit ends the
-        // process (MYLA-172)
-        self.raw("__on_segv:")
-        self.raw("	movq 16(%rsi), %rax")
-        self.raw("	movq 160(%rdx), %rcx")
-        self.raw("	movq %rcx, %r8")
-        self.raw("	subq $65536, %r8")
-        self.raw("	cmpq %r8, %rax")
-        self.raw("	jb .Lsegv_other")
-        self.raw("	movq %rcx, %r8")
-        self.raw("	addq $1048576, %r8")
-        self.raw("	cmpq %r8, %rax")
-        self.raw("	ja .Lsegv_other")
-        self.raw("	movl $1, %eax")
-        self.raw("	xchgl %eax, __segv_once(%rip)")
-        self.raw("	testl %eax, %eax")
-        self.raw("	jz .Lsegv_report")
-        self.raw(".Lsegv_sleep:")
-        self.raw("	movq $34, %rax")
-        self.raw("	syscall")
-        self.raw("	jmp .Lsegv_sleep")
-        self.raw(".Lsegv_report:")
-        self.raw("	movq $1, %rax")
-        self.raw("	movl $2, %edi")
-        self.raw("	leaq .Lmsg_sov(%rip), %rsi")
-        self.raw("	movl $30, %edx")
-        self.raw("	syscall")
-        self.raw("	movq $231, %rax")
-        self.raw("	movl $1, %edi")
-        self.raw("	syscall")
-        self.raw(".Lsegv_other:")
-        self.raw("	subq $32, %rsp")
-        self.raw("	movq $0, (%rsp)")
-        self.raw("	movq $0, 8(%rsp)")
-        self.raw("	movq $0, 16(%rsp)")
-        self.raw("	movq $0, 24(%rsp)")
-        self.raw("	movq $13, %rax")
-        self.raw("	movl $11, %edi")
-        self.raw("	movq %rsp, %rsi")
-        self.raw("	xorl %edx, %edx")
-        self.raw("	movl $8, %r10d")
-        self.raw("	syscall")
-        self.raw("	addq $32, %rsp")
-        self.raw("	ret")
-        self.raw("__sig_restorer:")
-        self.raw("	movq $15, %rax")
-        self.raw("	syscall")
-        self.raw(".Lmsg_sov:")
-        self.raw("	.ascii \"runtime error: stack overflow\\n\"")
-        self.raw("")
-        self.raw("__panic:")
-        if self.frames {
-            // held for the parent when a task other than the entry's fails
-            self.raw("\tpushq %rsi")
-            self.raw("\tpushq %rdi")
-            self.raw("\tmovq %rsi, %rdx")
-            self.raw("\tmovq %rdi, %rsi")
-            self.raw("\tmovq $2, %rdi")
-            self.raw("\tcall __task_fail")
-            self.raw("\tpopq %rdi")
-            self.raw("\tpopq %rsi")
-        }
-        self.raw("\tpushq %rsi")
-        self.raw("\tpushq %rdi")
-        self.raw("\tleaq .Lmsg_rterr(%rip), %rdi")
-        self.raw("\tcall __write_err")
-        self.raw("\tpopq %rdi")
-        self.raw("\tcall __write_err")
-        self.raw("\tpopq %rsi")
-        self.raw("\ttestq %rsi, %rsi")
-        self.raw("\tjz .Lpanic_nl")
-        self.raw("\tpushq %rsi")
-        self.raw("\tleaq .Lmsg_at(%rip), %rdi")
-        self.raw("\tcall __write_err")
-        self.raw("\tmovq (%rsp), %rsi")
-        self.raw("\tmovq (%rsi), %rdi")
-        self.raw("\tcall __write_err")
-        self.raw("\tmovq (%rsp), %rsi")
-        self.raw("\tmovl 8(%rsi), %edi")
-        self.raw("\tcall __write_err_num")
-        self.raw("\tpopq %rsi")
-        self.raw("\tmovl 12(%rsi), %edi")
-        self.raw("\tcall __write_err_num")
-        self.raw(".Lpanic_nl:")
-        self.raw("\tsubq $16, %rsp")
-        self.raw("\tmovb $10, (%rsp)")
-        self.raw("\tmovq $2, %rdi")
-        self.raw("\tmovq %rsp, %rsi")
-        self.raw("\tmovq $1, %rdx")
-        self.raw("\tcall __write_all")
-        self.raw("\taddq $16, %rsp")
-        // reported; with tasks, the end waits for the other workers (D97)
-        if self.frames { self.raw("\tcall __failed_wait") }
-        self.raw("\tmovq $231, %rax")
-        self.raw("\tmovq $1, %rdi")
-        self.raw("\tsyscall")
-        self.raw("")
-        // __write_err: write the [len:8][bytes] at %rdi to stderr
-        self.raw("__write_err:")
-        self.raw("\tmovq (%rdi), %rdx")
-        self.raw("\tleaq 8(%rdi), %rsi")
-        self.raw("\tmovq $2, %rdi")
-        self.raw("\tjmp __write_all")
-        self.raw("")
-        // __write_err_num: write ':' and %rdi in decimal to stderr
-        self.raw("__write_err_num:")
-        self.raw("\tpushq %rbp")
-        self.raw("\tmovq %rsp, %rbp")
-        self.raw("\tsubq $32, %rsp")
-        self.raw("\tmovq %rdi, %rax")
-        self.raw("\tleaq -1(%rbp), %rsi")
-        self.raw("\tmovq $10, %rcx")
-        self.raw(".Lwen_loop:")
-        self.raw("\txorq %rdx, %rdx")
-        self.raw("\tdivq %rcx")
-        self.raw("\taddb $48, %dl")
-        self.raw("\tmovb %dl, (%rsi)")
-        self.raw("\tdecq %rsi")
-        self.raw("\ttestq %rax, %rax")
-        self.raw("\tjnz .Lwen_loop")
-        self.raw("\tmovb $58, (%rsi)")
-        self.raw("\tmovq %rbp, %rdx")
-        self.raw("\tsubq %rsi, %rdx")
-        self.raw("\tmovq $2, %rdi")
-        self.raw("\tcall __write_all")
-        self.raw("\tleave")
-        self.raw("\tret")
-        self.raw("")
-        // __str_eq: the same string, or equal lengths and bytes, compared
-        // eight at a time (MYLA-133); %rax = 1 or 0, clobbers %rcx %rdi %rsi
-        self.raw("__str_eq:")
-        self.raw("\tcmpq %rdi, %rsi")
-        self.raw("\tje .Lse_eq")
-        self.raw("\tmovq (%rdi), %rcx")
-        self.raw("\tcmpq (%rsi), %rcx")
-        self.raw("\tjne .Lse_ne")
-        self.raw("\tleaq 8(%rdi), %rdi")
-        self.raw("\tleaq 8(%rsi), %rsi")
-        self.raw(".Lse_words:")
-        self.raw("\tcmpq $8, %rcx")
-        self.raw("\tjb .Lse_bytes")
-        self.raw("\tmovq (%rdi), %rax")
-        self.raw("\tcmpq (%rsi), %rax")
-        self.raw("\tjne .Lse_ne")
-        self.raw("\taddq $8, %rdi")
-        self.raw("\taddq $8, %rsi")
-        self.raw("\tsubq $8, %rcx")
-        self.raw("\tjmp .Lse_words")
-        self.raw(".Lse_bytes:")
-        self.raw("\ttestq %rcx, %rcx")
-        self.raw("\tjz .Lse_eq")
-        self.raw("\tmovb (%rdi), %al")
-        self.raw("\tcmpb (%rsi), %al")
-        self.raw("\tjne .Lse_ne")
-        self.raw("\tincq %rdi")
-        self.raw("\tincq %rsi")
-        self.raw("\tdecq %rcx")
-        self.raw("\tjmp .Lse_bytes")
-        self.raw(".Lse_eq:")
-        self.raw("\tmovq $1, %rax")
-        self.raw("\tret")
-        self.raw(".Lse_ne:")
-        self.raw("\txorq %rax, %rax")
-        self.raw("\tret")
-        self.raw("")
-        // __syscall(n, a, b, c): Linux's platform layer for the runtime written
-        // in Myla (MYLA-162): the call's number and three arguments moved
-        // into the kernel's registers; the result, a negative errno on a
-        // failure
-        self.raw("__syscall:")
-        self.raw("\tmovq %rdi, %rax")
-        self.raw("\tmovq %rsi, %rdi")
-        self.raw("\tmovq %rdx, %rsi")
-        self.raw("\tmovq %rcx, %rdx")
-        self.raw("\txorl %r10d, %r10d")
-        self.raw("\tsyscall")
-        self.raw("\tret")
-        self.raw("")
-        // __set_io_errno(e): the errno the I/O primitives report (a worker's
-        // own with tasks)
-        self.raw("__set_io_errno:")
-        self.raw(format("\tmovq %rdi, {}", self.tv("__io_errno_val")))
-        self.raw("\tret")
-        self.raw("")
-        // __set_run_status(exit, signal, errno), __set_run_stderr(bytes): what
-        // the `__run_*` primitives give after `std.rt`'s `run`; the stderr
-        // list's reference is the variable's, which `__run_stderr` hands over
-        self.raw("__set_run_status:")
-        self.raw(format("\tmovl %edi, {}", self.tv("__run_exit_val")))
-        self.raw(format("\tmovl %esi, {}", self.tv("__run_signal_val")))
-        self.raw(format("\tmovl %edx, {}", self.tv("__run_errno_val")))
-        self.raw("\tret")
-        self.raw("")
-        self.raw("__set_run_stderr:")
-        self.raw("\tincq -8(%rdi)")
-        self.raw(format("\tmovq %rdi, {}", self.tv("__run_stderr_val")))
-        self.raw("\tret")
-        self.raw("")
-        // __argv(): the program's arguments as the kernel gave them
-        self.raw("__argv_of:")
-        self.raw("\tmovq __argv(%rip), %rax")
-        self.raw("\tret")
-        self.raw("")
-        // __environ(): the environment the process started with
-        self.raw("__environ:")
-        self.raw("\tmovq __envp(%rip), %rax")
-        self.raw("\tret")
-        self.raw("")
-        // __copy_bytes(dst, src, n): a bulk copy for the runtime written in
-        // Myla (MYLA-162's prototype)
-        self.raw("__copy_bytes:")
-        self.raw("\tmovq %rdx, %rcx")
-        self.emit_byte_copy(true)
-        self.raw("\tret")
-        self.raw("")
-        // __equal_bytes(p, q, n): whether n bytes at p and q are equal, eight
-        // at a time (MYLA-162's bulk comparison)
-        self.raw("__equal_bytes:")
-        self.raw("\tcmpq $8, %rdx")
-        self.raw("\tjb .Leb_tail")
-        self.raw(".Leb_words:")
-        self.raw("\tmovq (%rdi), %rax")
-        self.raw("\tcmpq (%rsi), %rax")
-        self.raw("\tjne .Leb_no")
-        self.raw("\taddq $8, %rdi")
-        self.raw("\taddq $8, %rsi")
-        self.raw("\tsubq $8, %rdx")
-        self.raw("\tcmpq $8, %rdx")
-        self.raw("\tjae .Leb_words")
-        self.raw(".Leb_tail:")
-        self.raw("\ttestq %rdx, %rdx")
-        self.raw("\tjz .Leb_yes")
-        self.raw(".Leb_bytes:")
-        self.raw("\tmovzbl (%rdi), %eax")
-        self.raw("\tcmpb (%rsi), %al")
-        self.raw("\tjne .Leb_no")
-        self.raw("\tincq %rdi")
-        self.raw("\tincq %rsi")
-        self.raw("\tdecq %rdx")
-        self.raw("\tjnz .Leb_bytes")
-        self.raw(".Leb_yes:")
-        self.raw("\tmovl $1, %eax")
-        self.raw("\tret")
-        self.raw(".Leb_no:")
-        self.raw("\txorl %eax, %eax")
-        self.raw("\tret")
-        self.raw("")
-        // __str_drop: rdi = str cell. Decrement; free at zero (a str owns nothing
-        // else); static cells never reach zero. Built as IR with std.rt's
-        // allocator (MYLA-162).
-        self.emit_routine(drop_entry_ir("__str_drop", self.rt_alloc_names().1, false), -1, 0, 0)
-        self.raw("\t.set __str_drop, myla___str_drop")
-        self.raw("__heap_init:")
-        if self.frames {
-            // with tasks: this worker's arena of the region `_start` reserved
-            self.raw(format("\tmovq {}, %rax", self.tv("__worker_id")))
-            self.raw("\tshlq $32, %rax")
-            self.raw("\taddq __heap_base(%rip), %rax")
-            self.raw(format("\tmovq %rax, {}", self.tv("__heap_ptr")))
-            self.raw("\tmovabsq $4294967296, %rcx")
-            self.raw("\taddq %rcx, %rax")
-            self.raw(format("\tmovq %rax, {}", self.tv("__heap_end")))
-            self.raw("\tret")
-            self.raw("")
-            // (std.rt's allocator takes the cells back itself: `alloc_drained`)
-        } else {
-            self.raw("\tpushq %rdi")
-            self.raw("\tmovq $9, %rax")
-            self.raw("\txorq %rdi, %rdi")
-            self.raw("\tmovabsq $4294967296, %rsi")
-            self.raw("\tmovq $3, %rdx")
-            self.raw("\tmovq $34, %r10")
-            self.raw("\tmovq $-1, %r8")
-            self.raw("\txorq %r9, %r9")
-            self.raw("\tsyscall")
-            self.raw("\tcmpq $-4096, %rax")
-            self.raw("\tja __trap_oom")
-            self.raw(format("\tmovq %rax, {}", self.tv("__heap_ptr")))
-            self.raw("\tmovabsq $4294967296, %rcx")
-            self.raw("\taddq %rcx, %rax")
-            self.raw(format("\tmovq %rax, {}", self.tv("__heap_end")))
-            self.raw("\tpopq %rdi")
-            self.raw("\tret")
-            self.raw("")
-        }
-        // the executor's routines and the allocator in std.rt (MYLA-162):
-        // the names the rest of the runtime calls stand for its functions
-        for p in self.rt_exec() {
-            self.raw(format("\t.set {}, myla_{}", p.0, p.1))
-        }
-        self.raw("\t.set __print_str, myla_std$rt$print_str")
-        let names = self.rt_alloc_names()
-        self.raw(format("\t.set __alloc, myla_{}", names.0))
-        self.raw(format("\t.set __free, myla_{}", names.1))
-        self.raw("")
-        self.raw("__func_retain:")
-        self.raw("\ttestq %rdi, %rdi")
-        self.raw("\tjz .Lfret_done")
-        self.raw("\tincq -8(%rdi)")
-        self.raw(".Lfret_done:")
-        self.raw("\tret")
-        self.raw("")
-        // at refcount zero, tail-call the env's drop function (word 0): it
-        // releases what the env owns and frees the cell
-        self.raw("__func_drop:")
-        self.raw("\ttestq %rdi, %rdi")
-        self.raw("\tjz .Lfdrop_done")
-        self.raw("\tdecq -8(%rdi)")
-        self.raw("\tjnz .Lfdrop_done")
-        self.raw("\tmovq (%rdi), %rax")
-        self.raw("\tjmp *%rax")
-        self.raw(".Lfdrop_done:")
-        self.raw("\tret")
-        self.raw("")
-        self.emit_list_runtime()
-        self.emit_sb_runtime()
-        self.emit_map_runtime()
-        self.emit_char_runtime()
-        self.emit_compose_runtime()
-        self.emit_io_runtime()
-        self.emit_derived_eq()
-    }
-
-    // Freestanding I/O runtime backing the `std` intrinsics (D29): `__write`
-    // (write(2)), `__args` (build a [str] from the argc/argv captured at _start)
-    // and `__read_file` (open/fstat/read/close into a fresh str cell, errno ->
-    // __io_errno_val; a file whose size fstat doesn't know read to its end).
-    fun emit_io_runtime(var self) {
-        self.emit_math_runtime()
-    }
-
-    // std.math's primitives (MYLA-248). A float64 travels as its bits in a
-    // general-purpose register: `__sqrt` rdi = x -> rax = the correctly
-    // rounded square root (sqrtsd); `__f64_bits` and `__f64_from_bits` are the
-    // bits themselves.
-    fun emit_math_runtime(var self) {
-        self.raw("__sqrt:")
-        self.raw("\tmovq %rdi, %xmm0")
-        self.raw("\tsqrtsd %xmm0, %xmm0")
-        self.raw("\tmovq %xmm0, %rax")
-        self.raw("\tret")
-        self.raw("__f64_bits:")
-        self.raw("__f64_from_bits:")
-        self.raw("\tmovq %rdi, %rax")
-        self.raw("\tret")
-        self.raw("")
-    }
-
-    // __compose_call(x), its env in %r10: the env holds two fat values a
-    // (env[8]) and b (env[24]); computes b(a(x)) for scalar x/result via the
-    // closure calling convention (D119), b by a jump in place of it.
-    // __compose_env_drop releases both and frees the env.
-    fun emit_compose_runtime(var self) {
-        self.raw("__compose_call:")
-        self.raw("\tpushq %rbp")
-        self.raw("\tmovq %rsp, %rbp")
-        self.raw("\tpushq %rbx")
-        self.raw("\tmovq %r10, %rbx")
-        self.raw("\tmovq 16(%rbx), %r10")
-        self.raw("\tcall *8(%rbx)")
-        self.raw("\tmovq %rax, %rdi")
-        self.raw("\tmovq 32(%rbx), %r10")
-        self.raw("\tmovq 24(%rbx), %rcx")
-        self.raw("\tpopq %rbx")
-        self.raw("\tleave")
-        self.raw("\tjmp *%rcx")
-        self.raw("")
-        // its env's routines as IR (MYLA-162): those of an environment
-        // that owns two function values
-        let fv = Type.TFunc([Type.TInt(64, true)], Some(Type.TInt(64, true)))
-        let owned = [DropEntry { off: 8, ty: fv }, DropEntry { off: 24, ty: fv }]
-        self.emit_env_drop("__compose", owned)
-        self.raw("\t.set __compose_env_drop, myla___compose_env_drop")
-    }
-
     // -- the float runtime (first rendered from the retired Python backend's)
-
-    // __fmod: emitted once, after the functions, when the program uses
-    // floats (`__float_to_str` is std.rt's, MYLA-162).
-    fun fmod_text(self) -> str {
-        return "\n__fmod:\n\tsubq $16, %rsp\n\tmovsd %xmm1, (%rsp)\n\tmovsd %xmm0, 8(%rsp)\n\tfldl (%rsp)\n\tfldl 8(%rsp)\n.Lfm_loop:\n\tfprem\n\tfnstsw %ax\n\ttestb $0x04, %ah\n\tjnz .Lfm_loop\n\tfstpl 8(%rsp)\n\tfstp %st(0)\n\tmovsd 8(%rsp), %xmm0\n\taddq $16, %rsp\n\tret"
-    }
-
-    // The float runtime's read-only data: 10^k as double-double (high and
-    // low parts, k = -323 … 308) and the constants and strings it uses.
-    fun float_rodata_text(self) -> [str] {
-        return [
-            "\t.align 8\n__pow10_hi:\n\t.quad 2\n\t.quad 20\n\t.quad 202\n\t.quad 2024\n\t.quad 20240\n\t.quad 202402\n\t.quad 2024023\n\t.quad 20240225\n\t.quad 202402253\n\t.quad 2024022533\n\t.quad 20240225331\n\t.quad 202402253307\n\t.quad 2024022533073\n\t.quad 20240225330731\n\t.quad 202402253307311\n\t.quad 2024022533073106\n\t.quad 14067255587423757\n\t.quad 28843068552705937\n\t.quad 43935135038780789\n\t.quad 58984656790831465\n\t.quad 73730820988539331\n\t.quad 88785826515146292\n\t.quad 103904837566199265\n\t.quad 118622047889322841\n\t.quad 133640861072699439\n\t.quad 148827732767309341\n\t.quad 163516667822284197\n\t.quad 178500136920474894\n\t.quad 193753278774808361\n\t.quad 208414601263231731\n\t.quad 223363554653233072\n\t.quad 238672046670206876\n\t.quad 253315770551822017\n\t.quad 268231017195544690\n\t.quad 283497375779670158\n\t.quad 298220099847875929\n\t.quad 313102429747185839\n\t.quad 328327642400795355",
-            "\t.quad 343127515088718537\n\t.quad 357977699729812859\n\t.quad 373162730810652889\n\t.quad 388037943947518856\n\t.quad 402856736734887018\n\t.quad 418002527998569348\n\t.quad 432951315792606003\n\t.quad 447739452472819711\n\t.quad 462846923602558975\n\t.quad 477867561647738880\n\t.quad 492625760723309567\n\t.quad 507695809847245055\n\t.quad 522786614153307040\n\t.quad 537515577286843527\n\t.quad 552549081483236265\n\t.quad 567708407528440906\n\t.quad 582408819937334620\n\t.quad 597406635727923891\n\t.quad 612632877534010032\n\t.quad 627305408375869788\n\t.quad 642268372207666611\n\t.quad 657559961436488592\n\t.quad 672205264185541748\n\t.quad 687134192901330321\n\t.quad 702417654075538165\n\t.quad 717108310787339481\n\t.quad 732004002085151248\n\t.quad 747245916486888083\n\t.quad 762014473397072540\n\t.quad 776877706278891331\n\t.quad 792079047660636948\n\t.quad 806923678983304940\n\t.quad 821755214193255592\n\t.quad 836916933485166033\n\t.quad 851835856226274979\n\t.quad 866636436678541900\n\t.quad 881759462523347679\n\t.quad 896750935477777867\n\t.quad 911521286674494270\n\t.quad 926606525949861901",
-            "\t.quad 941668848721988616\n\t.quad 956409679161331466\n\t.quad 971458017489982157\n\t.quad 986589529537203136\n\t.quad 1001301531111923376\n\t.quad 1016313833359795804\n\t.quad 1031512913058476026\n\t.quad 1046196761445088248\n\t.quad 1061173872207825654\n\t.quad 1076438935941134042\n\t.quad 1091095290979984528\n\t.quad 1106038035058019764\n\t.quad 1121338765435035937\n\t.quad 1135997042391571637\n\t.quad 1150906225254077410\n\t.quad 1166165004111681755\n\t.quad 1180901940167114633\n\t.quad 1195778348405079915\n\t.quad 1210996158982008645\n\t.quad 1225809910563708299\n\t.quad 1240654312332395758\n\t.quad 1255832114822727210\n\t.quad 1270720881566796762\n\t.quad 1285534027017830097\n\t.quad 1300672759111093893\n\t.quad 1315634782849665299\n\t.quad 1330417404552989528\n\t.quad 1345517981961616942\n\t.quad 1360551545733881565\n\t.quad 1375304359089833620\n\t.quad 1390367676064245817\n\t.quad 1405471103150663971\n\t.quad 1420194806792385388\n\t.quad 1435221736624009287\n\t.quad 1450393389603155501\n\t.quad 1465088665789573560\n\t.quad 1480080061302068262\n\t.quad 1495318341129581720\n\t.quad 1509985856129180093\n\t.quad 1524942550158150189",
-            "\t.quad 1540245895267272284\n\t.quad 1554886299732867059\n\t.quad 1569809105594332656\n\t.quad 1585084913200636780\n\t.quad 1599789920352257571\n\t.quad 1614679632300144556\n\t.quad 1629914072514475415\n\t.quad 1644696643526046078\n\t.quad 1659554037198953950\n\t.quad 1674748079569560918\n\t.quad 1689606396538113878\n\t.quad 1704432229395612459\n\t.quad 1719586820746957814\n\t.quad 1734519108376626298\n\t.quad 1749314120125326744\n\t.quad 1764430185090674430\n\t.quad 1779434709694088543\n\t.quad 1794199622703728310\n\t.quad 1809278064245250148\n\t.quad 1824353132768337726\n\t.quad 1839088652478113550\n\t.quad 1854130352394805458\n\t.quad 1869274311464449155\n\t.quad 1883981126779826596\n\t.quad 1898986946203520525\n\t.quad 1914198181197535432\n\t.quad 1928876964877758202\n\t.quad 1943847744757508792\n\t.quad 1959124678896417459\n\t.quad 1973776087932934496\n\t.quad 1988712649508052920\n\t.quad 2004005651756423078\n\t.quad 2018678418954170056\n\t.quad 2033581564216171130\n\t.quad 2048832796073144600\n\t.quad 2063583882754760367\n\t.quad 2078454394898482779\n\t.quad 2093664835357607922\n\t.quad 2108492405910189303\n\t.quad 2123331049774342709",
-            "\t.quad 2138501654884006594\n\t.quad 2153403916716827833\n\t.quad 2168211439214214631\n\t.quad 2183343142615420257\n\t.quad 2198318345151600733\n\t.quad 2213095475689254516\n\t.quad 2228189189140793873\n\t.quad 2243235622832598603\n\t.quad 2257983073722075613\n\t.quad 2273039687613394005\n\t.quad 2288155682980613045\n\t.quad 2302874149838667426\n\t.quad 2317894533690707531\n\t.quad 2333078460381573359\n\t.quad 2347768622521441578\n\t.quad 2362753625475748981\n\t.quad 2378003891349863625\n\t.quad 2392666412163378171\n\t.quad 2407616863459743482\n\t.quad 2422927227859672249\n\t.quad 2437567441023246835\n\t.quad 2452484150466153072\n\t.quad 2467752337549257996\n\t.quad 2482471633181877288\n\t.quad 2497355391596014898\n\t.quad 2512582389893159038\n\t.quad 2527378914499454799\n\t.quad 2542230494174560547\n\t.quad 2557417269047914859\n\t.quad 2572289212573816547\n\t.quad 2587109367699086492\n\t.quad 2602256861885146051\n\t.quad 2617202456699725402\n\t.quad 2631991923788046320\n\t.quad 2647101057927919596\n\t.quad 2662118577829098228\n\t.quad 2676878076131336112\n\t.quad 2691949749288605597\n\t.quad 2707037508532166338\n\t.quad 2721767740441745010",
-            "\t.quad 2736802830608190479\n\t.quad 2751959182959546249\n\t.quad 2766660834407543660\n\t.quad 2781660198997012551\n\t.quad 2796883536805199404\n\t.quad 2811557277646183863\n\t.quad 2826521753976886565\n\t.quad 2841810507270260023\n\t.quad 2856456991659083397\n\t.quad 2871387397424584742\n\t.quad 2886672704910933552\n\t.quad 2901359899787470558\n\t.quad 2916257033516642453\n\t.quad 2931500750957579450\n\t.quad 2946265927169263605\n\t.quad 2961130568675457522\n\t.quad 2976333670837672046\n\t.quad 2991175000696960837\n\t.quad 3006007911516652822\n\t.quad 3021171350320739931\n\t.quad 3036087048976517625\n\t.quad 3050888972797672567\n\t.quad 3066013677853588373\n\t.quad 3081002002287187261\n\t.quad 3095773665367583373\n\t.quad 3110860544497550640\n\t.quad 3125919792542303038\n\t.quad 3140661904118051853\n\t.quad 3155711843867210001\n\t.quad 3170840353250979498\n\t.quad 3185553605935471189\n\t.quad 3200567472070557930\n\t.quad 3215763619480711314\n\t.quad 3230448689654209719\n\t.quad 3245427327650554853\n\t.quad 3260689527820848751\n\t.quad 3275347076010955275\n\t.quad 3290291311528060557\n\t.quad 3305593906203914289\n\t.quad 3320248687600129567",
-            "\t.quad 3335159326946102182\n\t.quad 3350419926408040080\n\t.quad 3365153448830347546\n\t.quad 3380031279415448416\n\t.quad 3395250867926296632\n\t.quad 3410061285881897251\n\t.quad 3424907076661459308\n\t.quad 3440086615415384007\n\t.quad 3454972126665216220\n\t.quad 3469786628572181779\n\t.quad 3484927056235360856\n\t.quad 3499885900780341111\n\t.quad 3514669847147661653\n\t.quad 3529772080386284458\n\t.quad 3544802539477307722\n\t.quad 3559556646450443677\n\t.quad 3574621580446335748\n\t.quad 3589721975617479139\n\t.quad 3604446942557231707\n\t.quad 3619475451511394546\n\t.quad 3634644143635780247\n\t.quad 3649340653511681853\n\t.quad 3664333591136030989\n\t.quad 3679568979503817384\n\t.quad 3694237699278302034\n\t.quad 3709195899275879974\n\t.quad 3724496420693862360\n\t.quad 3739138001697432014\n\t.quad 3754062278231366209\n\t.quad 3769339924178256082\n\t.quad 3784041484441278595\n\t.quad 3798932632592748196\n\t.quad 3814168868061557325\n\t.quad 3828948072970981232\n\t.quad 3843806869186450252\n\t.quad 3859002664735258655\n\t.quad 3873857694494683923\n\t.quad 3888684897022652376\n\t.quad 3903841200462085070\n\t.quad 3918770277926589793",
-            "\t.quad 3933566627244108473\n\t.quad 3948684364170478951\n\t.quad 3963685753846975329\n\t.quad 3978451973076164153\n\t.quad 3993532047392122311\n\t.quad 4008604054463141788\n\t.quad 4023340849777945987\n\t.quad 4038384144200923364\n\t.quad 4053525113571281807\n\t.quad 4068233174594694770\n\t.quad 4083240551153433103\n\t.quad 4098448866519239753\n\t.quad 4113128866711215964\n\t.quad 4128101167230658355\n\t.quad 4143375250170144896\n\t.quad 4158027847206421152\n\t.quad 4172965893781238599\n\t.quad 4188260752279232537\n\t.quad 4202930039008934928\n\t.quad 4217834634465954580\n\t.quad 4233087679066701273\n\t.quad 4247835366853742247\n\t.quad 4262707295203537489\n\t.quad 4277919505920253670\n\t.quad 4292743757239851855\n\t.quad 4307583784117748259\n\t.quad 4322756117994590892\n\t.quad 4337655138388951980\n\t.quad 4352464011485697175\n\t.quad 4367597403136100796\n\t.quad 4382569440205035030\n\t.quad 4397347889687374747\n\t.quad 4412443251819771522\n\t.quad 4427486594234968593\n\t.quad 4442235333156365461\n\t.quad 4457293557087583675\n\t.quad 4472406533629990549\n\t.quad 4487126258331716666\n\t.quad 4502148214488346440\n\t.quad 4517329193108106637",
-            "\t.quad 4532020583610935537\n\t.quad 4547007122018943789\n\t.quad 4562254508917369340\n\t.quad 4576918229304087675\n\t.quad 4591870180066957722\n\t.quad 4607182418800017408\n\t.quad 4621819117588971520\n\t.quad 4636737291354636288\n\t.quad 4652007308841189376\n\t.quad 4666723172467343360\n\t.quad 4681608360884174848\n\t.quad 4696837146684686336\n\t.quad 4711630319722168320\n\t.quad 4726483295884279808\n\t.quad 4741671816366391296\n\t.quad 4756540486875873280\n\t.quad 4771362005757984768\n\t.quad 4786511204640096256\n\t.quad 4801453603149578240\n\t.quad 4816244402031689728\n\t.quad 4831355200913801216\n\t.quad 4846369599423283200\n\t.quad 4861130398305394688\n\t.quad 4876203697187506176\n\t.quad 4891288408196988160\n\t.quad 4906019910204099648\n\t.quad 4921056587992461136\n\t.quad 4936209963552724370\n\t.quad 4950912855330343670\n\t.quad 4965913770331839924\n\t.quad 4981134201117475473\n\t.quad 4995809153217856309\n\t.quad 5010775143622804482\n\t.quad 5026061058026967681\n\t.quad 5040708725286295329\n\t.quad 5055640609639927018\n\t.quad 5070927765361438756\n\t.quad 5085611494797045271\n\t.quad 5100510072459938204\n\t.quad 5115755594818026499",
-            "\t.quad 5130517386810051970\n\t.quad 5145383438407770339\n\t.quad 5160588303184390427\n\t.quad 5175426328141668785\n\t.quad 5190260616003865117\n\t.quad 5205425776111082661\n\t.quad 5220338247323490791\n\t.quad 5235141515912716385\n\t.quad 5250267901928720505\n\t.quad 5265253074562153804\n\t.quad 5280026050892618910\n\t.quad 5295114571585172422\n\t.quad 5310170741700075612\n\t.quad 5324914135746594931\n\t.quad 5339965678584216207\n\t.quad 5355091182177117338\n\t.quad 5369805687274470848\n\t.quad 5384821118925634864\n\t.quad 5400014330993143358\n\t.quad 5414700624226077134\n\t.quad 5429680791046716481\n\t.quad 5444940124671458729\n\t.quad 5459598867255545107\n\t.quad 5474544595765125207\n\t.quad 5489849056681572461\n\t.quad 5504500338876674884\n\t.quad 5519412436223111189\n\t.quad 5534674858185628699\n\t.quad 5549404963419349393\n\t.quad 5564284217833028085\n\t.quad 5579505586129598578\n\t.quad 5594312666986969927\n\t.quad 5609159848224127513\n\t.quad 5624341125050046623\n\t.quad 5639223377414889316\n\t.quad 5654039237190600509\n\t.quad 5669181362189711628\n\t.quad 5684137024229819303\n\t.quad 5698922296640836753\n\t.quad 5714026187434080693",
-            "\t.quad 5729053538610189329\n\t.quad 5743808940547873046\n\t.quad 5758875493249449819\n\t.quad 5773972853347434393\n\t.quad 5788699084901003135\n\t.quad 5803729174622436191\n\t.quad 5818894902808190235\n\t.quad 5833592647658521698\n\t.quad 5848587129000908155\n\t.quad 5863819622897374573\n\t.quad 5878489548701575880\n\t.quad 5893449256236299642\n\t.quad 5908746951022133612\n\t.quad 5923389709789098439\n\t.quad 5938315458527276601\n\t.quad 5953594944729471431\n\t.quad 5968293054513797149\n\t.quad 5983185640364723748\n\t.quad 5998423672957854125\n\t.quad 6013199508259175692\n\t.quad 6028059708478020687\n\t.quad 6043257259031049059\n\t.quad 6058108998157561886\n\t.quad 6072937571782577189\n\t.quad 6088095589093318446\n\t.quad 6103021453049119613\n\t.quad 6117819141328598108\n\t.quad 6132938551957418355\n\t.quad 6147936803441821416\n\t.quad 6162704330251049122\n\t.quad 6177786039042055882\n\t.quad 6192854981472359231\n\t.quad 6207593053720795150\n\t.quad 6222637944310812178\n\t.quad 6237775920867971275\n\t.quad 6252485228896883966\n\t.quad 6267494164212496957\n\t.quad 6282699556909163622\n\t.quad 6297380774879948160\n\t.quad 6312354597622900960",
-            "\t.quad 6327625826393305484\n\t.quad 6342279612666699247\n\t.quad 6357219145787913579\n\t.quad 6372515862468903621\n\t.quad 6387181665105488315\n\t.quad 6402087712267973674\n\t.quad 6417342571500552501\n\t.quad 6432086856852908225\n\t.quad 6446960202883822321\n\t.quad 6462174185701937069\n\t.quad 6476995114331412940\n\t.quad 6491836525663526975\n\t.quad 6507010590108141647\n\t.quad 6521906365687930162\n\t.quad 6536716590790747262\n\t.quad 6551851672448740766\n\t.quad 6566820540753443970\n\t.quad 6581600310554213283\n\t.quad 6596697323084647052\n\t.quad 6611737571003524759\n\t.quad 6626487599298388029\n\t.quad 6641547434946439245\n\t.quad 6656657389519784240\n\t.quad 6671378373375286140\n\t.quad 6686401903474135643\n\t.quad 6701579930952233849\n\t.quad 6716272551097421911\n\t.quad 6731260626558379117\n\t.quad 6746505131482525380\n\t.quad 6761170052691860085\n\t.quad 6776123504483000594\n\t.quad 6791432928788053163\n\t.quad 6806070800255343574\n\t.quad 6820990439868928716\n\t.quad 6836262289665382271\n\t.quad 6850974717710472879\n\t.quad 6865861337619414107\n\t.quad 6881091912785062770\n\t.quad 6895881730762912551\n\t.quad 6910736104866537457",
-            "\t.quad 6925926372775540717\n\t.quad 6940791766859600628\n\t.quad 6955614650918971313\n\t.quad 6970765556272656797\n\t.quad 6985704755147937538\n\t.quad 7000496887210966211\n\t.quad 7015609352569224180\n\t.quad 7030620626435931512\n\t.quad 7045382727252532438\n\t.quad 7060457653552755724\n\t.quad 7075539313153278087\n\t.quad 7090272086580789417\n\t.quad 7105310353644650708\n\t.quad 7120460749313351812\n\t.quad 7135164882712455333\n\t.quad 7150167349740806863\n\t.quad 7165384870476088769\n\t.quad 7180061035097450290\n\t.quad 7195028541153624318\n\t.quad 7210311613711739039\n\t.quad 7224960465073586886\n\t.quad 7239893829555368824\n\t.quad 7255182835437068374\n\t.quad 7269863095822322742\n\t.quad 7284763118922862403\n\t.quad 7300010448078009108\n\t.quad 7314768852325550060\n\t.quad 7329636315483470312\n\t.quad 7344842944710342753\n\t.quad 7359677661323397949\n\t.quad 7374513327662353932\n\t.quad 7389680210865521039\n\t.quad 7404589451273023737\n\t.quad 7419394066030959928\n\t.quad 7434522134757852294\n\t.quad 7449504152308370132\n\t.quad 7464278443256716681\n\t.quad 7479368607221621995\n\t.quad 7494421696200865555\n\t.quad 7509166374053909719",
-            "\t.quad 7524219521649687053\n\t.quad 7539342016321045576\n\t.quad 7554057775135708506\n\t.quad 7569074773933509297\n\t.quad 7584265047601073839\n\t.quad 7598952565167317594\n\t.quad 7613934262404594417\n\t.quad 7629190726498141398\n\t.quad 7643850664720225804\n\t.quad 7658797887777303439\n\t.quad 7674104216878122611\n\t.quad 7688751996227527688\n\t.quad 7703665553093004554\n\t.quad 7718929799454322764\n\t.quad 7733656483940292144\n\t.quad 7748537163665533883\n\t.quad 7763760313601558186\n\t.quad 7778564053884953642\n\t.quad 7793412627027934517\n\t.quad 7808595643736132738\n\t.quad 7823474633821702097\n\t.quad 7838291852880443846\n\t.quad 7853435676983343159\n\t.quad 7868388153203847971\n\t.quad 7883174753039699947\n\t.quad 7898280303113987046\n\t.quad 7913304543138139760\n\t.quad 7928061241389138444\n\t.quad 7943129414482358927\n\t.quad 7958223736346011545\n\t.quad 7972951233830551935\n\t.quad 7987982905965699551\n\t.quad 8003145667125738796\n\t.quad 8017844648236784758\n\t.quad 8032840674905064340\n\t.quad 8048070271315481149\n\t.quad 8062741404405536460\n\t.quad 8077702621047577727\n\t.quad 8092997486257191375\n\t.quad 8107641424014248003",
-            "\t.quad 8122568646490040916\n\t.quad 8137849974864254185\n\t.quad 8152544630576045329\n\t.quad 8167438655623861334\n\t.quad 8182678487213103467\n\t.quad 8197450949396715491\n\t.quad 8212312555081272796\n\t.quad 8227511862466441555\n\t.quad 8242360307532691156\n\t.quad 8257190253682816137\n\t.quad 8272349986649944491\n\t.quad 8287272633750019851\n\t.quad 8302071662386050765\n\t.quad 8317192748460561537\n\t.quad 8332187858484294864\n\t.quad 8346956694235468292\n\t.quad 8362040039203907206\n\t.quad 8377105913801525268\n\t.quad 8391845264313580056\n\t.quad 8406891752733120670\n\t.quad 8422026733359923043\n\t.quad 8436737289693151036\n\t.quad 8451747785389158155\n\t.quad 8466950252372585831\n\t.quad 8481632689390553280\n\t.quad 8496608035942484721\n\t.quad 8511876407571054294\n\t.quad 8526531384320212620\n\t.quad 8541472405536132655\n\t.quad 8556770982335504827\n\t.quad 8571433297250123029\n\t.quad 8586340797630094426\n\t.quad 8601597473384530800\n\t.quad 8616338352758403622\n\t.quad 8631213117947018928\n\t.quad 8646428874712260188\n\t.quad 8661246477190873849\n\t.quad 8676089274419180472\n\t.quad 8691265071234035877\n\t.quad 8706157598619623015",
-            "\t.quad 8720969177136690689\n\t.quad 8736105950562497410\n\t.quad 8751071646802550833\n\t.quad 8765852738296924221\n\t.quad 8780951402944363085\n\t.quad 8795988553143856240\n\t.quad 8810739872155129740\n\t.quad 8825801321198693743\n\t.quad 8840908250655452261\n\t.quad 8855630494976198527\n\t.quad 8870655600656603486\n\t.quad 8885830673919285211\n\t.quad 8900524524987563474\n\t.quad 8915514139102383430\n\t.quad 8930755759050537036\n\t.quad 8945421882333202015\n\t.quad 8960376836716005366\n\t.quad 8975683443661690106\n\t.quad 8990322489028717112\n\t.quad 9005243596016972999\n\t.quad 9020517280031764984\n\t.quad 9035226268917471035\n\t.quad 9050114321809489162\n\t.quad 9065346688203983948\n\t.quad 9080133147627747248\n\t.quad 9094988921128908188\n\t.quad 9110180938284831491\n\t.quad 9125043052530916322\n\t.quad 9139867303189443290\n\t.quad 9155019916792074128\n\t.quad 9169955912700582330\n\t.quad 9184749379333099561\n\t.quad 9199863512903218227\n\t.quad 9214871658872686752\n__pow10_lo:\n\t.quad 0\n\t.quad 0\n\t.quad 0\n\t.quad 0\n\t.quad 0",
-            "\t.quad 0\n\t.quad 9223372036854775808\n\t.quad 0\n\t.quad 0\n\t.quad 0\n\t.quad 9223372036854775808\n\t.quad 0\n\t.quad 0\n\t.quad 0\n\t.quad 9223372036854775808\n\t.quad 0\n\t.quad 2\n\t.quad 9223372036854775814\n\t.quad 8\n\t.quad 587\n\t.quad 14064\n\t.quad 75109\n\t.quad 9223372036856121870\n\t.quad 9223372036859847825\n\t.quad 16388697\n\t.quad 1774499711\n\t.quad 9223372044879582477\n\t.quad 9223372048383365765\n\t.quad 9223373251652303152\n\t.quad 9223375388737027041\n\t.quad 9223475924421465803\n\t.quad 9224410912521675756\n\t.quad 7625641840482501\n\t.quad 9250131208096067717\n\t.quad 9253585101631713943\n\t.quad 9278617586545735144\n\t.quad 9287176517230560963\n\t.quad 9307722883409925178\n\t.quad 9325067961899398308\n\t.quad 9335748461204161435\n\t.quad 129611968246199743\n\t.quad 9360961078044752290\n\t.quad 9376218039925921802\n\t.quad 172912005781421181\n\t.quad 9413102558601261618",
-            "\t.quad 205315511206043970\n\t.quad 216051202608657188\n\t.quad 9461537860747342853\n\t.quad 250605974766649082\n\t.quad 261466072743550649\n\t.quad 9506375054453157069\n\t.quad 295890474250217472\n\t.quad 306812698029584896\n\t.quad 9545795405908119936\n\t.quad 337791449719276816\n\t.quad 352433517924853332\n\t.quad 360918037850841043\n\t.quad 375712253555095495\n\t.quad 390827323464885689\n\t.quad 9627676508649869529\n\t.quad 9642695517939417735\n\t.quad 9657454395663168297\n\t.quad 450963315984297990\n\t.quad 471566206793168388\n\t.quad 9713958342631775806\n\t.quad 502533925459790387\n\t.quad 513240875133344128\n\t.quad 527941129817382896\n\t.quad 9758704125064061009\n\t.quad 566796449001265530\n\t.quad 9802905969031155752\n\t.quad 594011375692237774\n\t.quad 9823510225096721021\n\t.quad 9846638484628479175\n\t.quad 9861717608216577017\n\t.quad 646928686026003986\n\t.quad 9885136457658737769\n\t.quad 681815119974302879\n\t.quad 699728127346696931\n\t.quad 714782372411718556\n\t.quad 712179856604746779\n\t.quad 739389513124320548\n\t.quad 754226005472164461\n\t.quad 769393921186441481\n\t.quad 10013416326221724461",
-            "\t.quad 791504387155570747\n\t.quad 806564516167638565\n\t.quad 10054999285888414357\n\t.quad 846348282669347014\n\t.quad 861108149186915964\n\t.quad 875975003065657883\n\t.quad 10111113018972564318\n\t.quad 897138486845911956\n\t.quad 10144914410269929442\n\t.quad 10162438740195993069\n\t.quad 10172671110909279953\n\t.quad 967748299553233086\n\t.quad 984833905780156278\n\t.quad 995729301695086932\n\t.quad 10228842093456563374\n\t.quad 1023276377962012179\n\t.quad 10264792861544555828\n\t.quad 10273182227136404738\n\t.quad 1059419019484993404\n\t.quad 10306996826213472425\n\t.quad 10322287045316523882\n\t.quad 10343102431324357282\n\t.quad 10353944952206365515\n\t.quad 10368624003215718429\n\t.quad 1165033315405014254\n\t.quad 1175942567452454441\n\t.quad 1190705032418597299\n\t.quad 10433180679918526448\n\t.quad 10444024764812224492\n\t.quad 10458705770836189671\n\t.quad 10479029630582066480\n\t.quad 1268821672991141764\n\t.quad 10500874286218971447\n\t.quad 10494511432984344649\n\t.quad 10509429207076071004\n\t.quad 10547567727224515584\n\t.quad 10562238775994173184\n\t.quad 1356461306567308192\n\t.quad 1364476181109834273\n\t.quad 1379155819642573141",
-            "\t.quad 1404608138080463210\n\t.quad 1407051955071307540\n\t.quad 10653506571183880010\n\t.quad 10673400674790722190\n\t.quad 10677382506108679366\n\t.quad 10698660049026169982\n\t.quad 10718510097044792783\n\t.quad 10722785632284212490\n\t.quad 10737529236255018534\n\t.quad 10760803048610341996\n\t.quad 1550486548008194681\n\t.quad 10779879726588617634\n\t.quad 1584131222284665967\n\t.quad 1582915802591669330\n\t.quad 10834620713920289043\n\t.quad 10834268007376911040\n\t.quad 10863277184278436247\n\t.quad 10878062603832590333\n\t.quad 10887622258872909816\n\t.quad 10902864447541469174\n\t.quad 1699655362604722691\n\t.quad 1714741637165188228\n\t.quad 1713580448653192488\n\t.quad 1728770295005247602\n\t.quad 1743636479508585287\n\t.quad 10996970442641317821\n\t.quad 11011914584204309462\n\t.quad 1797654312925896297\n\t.quad 1812470527116117507\n\t.quad 11052257662356724798\n\t.quad 11072927744337240487\n\t.quad 11068394694504718599\n\t.quad 11101668159971506250\n\t.quad 11107352073611811187\n\t.quad 1907657806960234508\n\t.quad 1927498768518380039\n\t.quad 1938747299587758217\n\t.quad 11174059050453672276\n\t.quad 1959746700351171757\n\t.quad 1974553614751377368",
-            "\t.quad 11224209480972450246\n\t.quad 2014937721198671816\n\t.quad 11251083709186951750\n\t.quad 11259476868651186606\n\t.quad 2055031654800618483\n\t.quad 11295847824855672712\n\t.quad 11314117688539650229\n\t.quad 2105214444971344158\n\t.quad 11328736871080424663\n\t.quad 2128112808786557821\n\t.quad 2150378704847931031\n\t.quad 2160376628177293434\n\t.quad 11398047848261720936\n\t.quad 2197369545894944623\n\t.quad 2208531776897906507\n\t.quad 2223610465558451486\n\t.quad 11460868939797443994\n\t.quad 11475802680534073728\n\t.quad 2261481737768549439\n\t.quad 11503460595146660441\n\t.quad 11523814563357343863\n\t.quad 2308085216923082454\n\t.quad 11529310967111437225\n\t.quad 11565423511863618805\n\t.quad 11580105127846619186\n\t.quad 11598176044105619743\n\t.quad 2379872784373400165\n\t.quad 2395002528442798846\n\t.quad 11645043835452534536\n\t.quad 2435776599753213238\n\t.quad 11671916932648421757\n\t.quad 11682822606342872028\n\t.quad 2478365411824158358\n\t.quad 11706934546938732305\n\t.quad 2509728243035585317\n\t.quad 11747236464665007633\n\t.quad 11762335322574650262\n\t.quad 2547201049757043466\n\t.quad 2562504563619175885\n\t.quad 11797233754340309696",
-            "\t.quad 2589817179187686216\n\t.quad 11832490450056525043\n\t.quad 2613423838358468417\n\t.quad 11866072572166420830\n\t.quad 11881051438188438491\n\t.quad 2666993726254343773\n\t.quad 2687499344461803514\n\t.quad 11929628033671590404\n\t.quad 11940785187931803268\n\t.quad 2720468495323428714\n\t.quad 11969068459544834735\n\t.quad 11963098807568758187\n\t.quad 2778484962396186215\n\t.quad 2789684959541760001\n\t.quad 2809780311493564929\n\t.quad 2820922846565585025\n\t.quad 2838874140091617873\n\t.quad 12075520332140570907\n\t.quad 12084330328322033348\n\t.quad 12099260159132735605\n\t.quad 2898100922638176347\n\t.quad 12133217143057959822\n\t.quad 2930955565638619335\n\t.quad 2931907998147695589\n\t.quad 2955788930666568248\n\t.quad 2976082738276335715\n\t.quad 2977399876241457645\n\t.quad 12219629312322944716\n\t.quad 3001586934749545990\n\t.quad 12253248776301968655\n\t.quad 3048464678931202519\n\t.quad 12277993256208530280\n\t.quad 12303358717044987536\n\t.quad 3086154407076808599\n\t.quad 12327298116018299714\n\t.quad 12342171298783566866\n\t.quad 3134751490642374261\n\t.quad 3149449726929455634\n\t.quad 3164444822567779478\n\t.quad 3156645114622736260",
-            "\t.quad 3171423647473183410\n\t.quad 3213423668297437269\n\t.quad 3228649650581959787\n\t.quad 3239800829089714566\n\t.quad 3254865702131250663\n\t.quad 3252741445267430150\n\t.quad 3283565231004130844\n\t.quad 3304228965786579666\n\t.quad 3299896910559508579\n\t.quad 3328766810794896232\n\t.quad 12570856230996255967\n\t.quad 3361425932982415849\n\t.quad 3370792248869510343\n\t.quad 3393274059167405310\n\t.quad 3403124768244593787\n\t.quad 12645979697529198387\n\t.quad 12657206682565836032\n\t.quad 12672366313768475712\n\t.quad 3461970110699351216\n\t.quad 12699521652806813731\n\t.quad 12714394337737512214\n\t.quad 3509535091037754066\n\t.quad 12747025918533859449\n\t.quad 3525943175987022659\n\t.quad 12775363413629680702\n\t.quad 12790505885876290982\n\t.quad 12796141262079990848\n\t.quad 12811131641049047889\n\t.quad 12826371826895506962\n\t.quad 3631430648259976141\n\t.quad 3640480070600066433\n\t.quad 3655509662310196961\n\t.quad 12893320477241352039\n\t.quad 3682299265275852992\n\t.quad 3704259509117775292\n\t.quad 12945848094099737451\n\t.quad 12956357641096191114\n\t.quad 12958867293328658100\n\t.quad 3766752122278926810\n\t.quad 3781824529517178960",
-            "\t.quad 3792783739217095781\n\t.quad 13034635638363518017\n\t.quad 3825410887416450735\n\t.quad 13050898080840183087\n\t.quad 3856671083969765240\n\t.quad 13093354562810783914\n\t.quad 13108338873110926036\n\t.quad 13125842237525285828\n\t.quad 13141067167156155062\n\t.quad 3929936356769448093\n\t.quad 3940768826356625604\n\t.quad 13180761268897297163\n\t.quad 13195876032842305511\n\t.quad 13210595012792947680\n\t.quad 4006679902334268308\n\t.quad 4017557959896326265\n\t.quad 13257037537719592809\n\t.quad 4053088618013570910\n\t.quad 4064309855427028278\n\t.quad 4074159742176345351\n\t.quad 13319332298180431086\n\t.quad 13334516046980853801\n\t.quad 4117896183574595481\n\t.quad 13364774405352715680\n\t.quad 4129421565601463783\n\t.quad 13388864664572583829\n\t.quad 4177509938886011014\n\t.quad 4199597566440843434\n\t.quad 13434811996002290988\n\t.quad 13453173979131656251\n\t.quad 13461312216836689044\n\t.quad 4257557416083959843\n\t.quad 4272608056927624236\n\t.quad 13514994075236376164\n\t.quad 13526175972679181822\n\t.quad 13535730809648611066\n\t.quad 13550970990787632824\n\t.quad 13572047837043726746\n\t.quad 0\n\t.quad 0",
-            "\t.quad 0\n\t.quad 0\n\t.quad 0\n\t.quad 0\n\t.quad 0\n\t.quad 0\n\t.quad 0\n\t.quad 0\n\t.quad 0\n\t.quad 0\n\t.quad 0\n\t.quad 0\n\t.quad 0\n\t.quad 0\n\t.quad 0\n\t.quad 0\n\t.quad 0\n\t.quad 0\n\t.quad 0\n\t.quad 0\n\t.quad 0\n\t.quad 4710765210229538816\n\t.quad 4715268809856909312\n\t.quad 13964255069592354816\n\t.quad 13975162224939892736\n\t.quad 13981636149404237824\n\t.quad 4780645771244470272\n\t.quad 4800602457044418560\n\t.quad 14029299703590420480\n\t.quad 4824677260566986752\n\t.quad 14065604198855081984\n\t.quad 4857179894804643840\n\t.quad 4872391467718410240\n\t.quad 4883524634512719872\n\t.quad 14123963132267200512\n\t.quad 4915961517140082688\n\t.quad 4926518402099445760\n\t.quad 4947636018668699648\n\t.quad 14181858391540350976\n\t.quad 14186454650970357760",
-            "\t.quad 14214082209040764416\n\t.quad 14221472948906051072\n\t.quad 14248405003206058736\n\t.quad 5038506455456638036\n\t.quad 5038319906572856136\n\t.quad 14288703004709081917\n\t.quad 14303796683349599238\n\t.quad 5096493544750428921\n\t.quad 14337071784722739237\n\t.quad 5112961867177860753\n\t.quad 5127942638494901814\n\t.quad 5143200838688890850\n\t.quad 14397290248725482757\n\t.quad 14398922808440881432\n\t.quad 14428128031182130220\n\t.quad 14439035736522321719\n\t.quad 5231437703132034300\n\t.quad 5242260436232340027\n\t.quad 5260811358455337317\n\t.quad 5275599805665940926\n\t.quad 14511619896589403347\n\t.quad 14529814033601682180\n\t.quad 14538371886599431049\n\t.quad 5323625835746936617\n\t.quad 5351038025413396254\n\t.quad 5358588297429754776\n\t.quad 5379895436365873951\n\t.quad 14621001614315140620\n\t.quad 14636217619071722383\n\t.quad 14647356325669551219\n\t.quad 5441005738810886712\n\t.quad 5448138894227567384\n\t.quad 5469804492741534711\n\t.quad 5487468886786780795\n\t.quad 14723039205782783463\n\t.quad 5508224084316221759\n\t.quad 14741729030092055778\n\t.quad 5542071438375645305\n\t.quad 14749446225329969680\n\t.quad 5577685379488012783",
-            "\t.quad 5587784340134076631\n\t.quad 14825076670280873716\n\t.quad 14844185664571951404\n\t.quad 14849974435234508253\n\t.quad 14865012749971958100\n\t.quad 5663141587708117782\n\t.quad 5678307500522922971\n\t.quad 5679884581785203528\n\t.quad 5706896517143790083\n\t.quad 14950865444625768126\n\t.quad 14961853114133124718\n\t.quad 14976713600924163081\n\t.quad 14986836260241114646\n\t.quad 15001901696398029774\n\t.quad 15022576593064527969\n\t.quad 15040002003108459836\n\t.quad 5809408818375143055\n\t.quad 5841511392415234258\n\t.quad 15074943063333482996\n\t.quad 5869007220246249671\n\t.quad 5883848145480827129\n\t.quad 15106120826987902531\n\t.quad 15121019444973671379\n\t.quad 5935473250455630650\n\t.quad 15176174255843405820\n\t.quad 5960653527999080458\n\t.quad 15199843079118241530\n\t.quad 5987049862732030608\n\t.quad 15227255466277010022\n\t.quad 6022635847818765184\n\t.quad 6040717016522513968\n\t.quad 15269260354947328271\n\t.quad 15284411458276619091\n\t.quad 15299350285947639828\n\t.quad 15314142572679110169\n\t.quad 15336759055961162088\n\t.quad 6125770286988623422\n\t.quad 6144019587789745895\n\t.quad 6152439531315385665\n\t.quad 15394665851008064183",
-            "\t.quad 15403464737432683210\n\t.quad 6197920679731074626\n\t.quad 6218386980831686121\n\t.quad 6235682018646938802\n\t.quad 6250993751027435998\n\t.quad 6262252117155159126\n\t.quad 15503925170139340362\n\t.quad 6271183363525526621\n\t.quad 15532654322540951380\n\t.quad 6326594571711135083\n\t.quad 6326935628266169905\n\t.quad 15570827089239248913\n\t.quad 6370597604902122235\n\t.quad 6381114602043539315\n\t.quad 15622165001154191448\n\t.quad 15633218473674102894\n\t.quad 15648161214230834826\n\t.quad 15663461940206221868\n\t.quad 15682078863773624878\n\t.quad 15688762308479226597\n\t.quad 15710814377135527400\n\t.quad 15720958091877439171\n\t.quad 15736010368393754170\n\t.quad 6522380884343060591\n\t.quad 6549120143124506321\n\t.quad 6557168882463097367\n\t.quad 15800338897359821657\n\t.quad 15815403447284806191\n\t.quad 6600869564198716042\n\t.quad 15838667451556388051\n\t.quad 15859835150893108482\n\t.quad 6617891749752725196\n\t.quad 15888634959027437651\n\t.quad 15892880453312119199\n\t.quad 6689635118904938366\n\t.quad 6704719235758830430\n\t.quad 6726332552995057677\n\t.quad 6743988035458870792\n\t.quad 15966784744312877997\n\t.quad 15993224099435106323",
-            "\t.quad 6788024849156054516\n\t.quad 6802936600622187889\n\t.quad 16018336534649448017\n\t.quad 6836307205845535296\n\t.quad 6847526947788242129\n\t.quad 16083162576329208827\n\t.quad 6878180288986781571\n\t.quad 6893112902273744228\n\t.quad 16127511124838167363\n\t.quad 6920755653331083244\n\t.quad 16163091271436723213\n\t.quad 16166283706280145984\n\t.quad 16191591948408621610\n\t.quad 6982518012130186060\n\t.quad 16207083560356724492\n\t.quad 16222234571101812584\n\t.quad 16249733129449727144\n\t.quad 7035010233023956060\n\t.quad 16268284616197813531\n\t.quad 7074250895573587892\n\t.quad 16310916199304077919\n\t.quad 7101326876339410185\n\t.quad 16332176588905073514\n\t.quad 7125055747823104222\n\t.quad 7139782730942803221\n\t.quad 7164875495204004375\n\t.quad 16393981423484742343\n\t.quad 16408837817237730681\n\t.quad 16431233932633314486\n\t.quad 16446396254418704867\n\t.quad 16457467857302544476\n\t.quad 16475552148681415738\n\t.quad 7265953008968961208\n\t.quad 7275178623440543692\n\t.quad 7295308312253184992\n\t.quad 7310141167574771052\n\t.quad 16541975800264376947\n\t.quad 16567978094457343172\n\t.quad 7351786928465428502\n\t.quad 16591754666720184306",
-            "\t.quad 7389535513882014473\n\t.quad 7390553214977507116\n\t.quad 7405226470382092023\n\t.quad 16646175145755994278\n\t.quad 16666677697909592424\n\t.quad 16681743592819276513\n\t.quad 7468193549396569294\n\t.quad 16715571514660638208\n\t.quad 7507486656686235264\n\t.quad 7518742175219566113\n\t.quad 7538733424569326548\n\t.quad 7542067617601162022\n\t.quad 7563901724670788476\n\t.quad 7583846641578979885\n\t.quad 16812475236256400015\n\t.quad 7607932478437570151\n\t.quad 16851061413286473216\n\t.quad 7637122349227797761\n\t.quad 7637285979349467656\n\t.quad 16892362498314867415\n\t.quad 16907239086085770183\n\t.quad 16922057306108956344\n\t.quad 7710998379181313434\n\t.quad 7731514096036767872\n\t.quad 7742481479065600672\n\t.quad 16986518769728265820\n\t.quad 7776788537546717709\n\t.quad 7777443566502298754\n\t.quad 17031931430614575782\n\t.quad 17043019839657841999\n\t.quad 17058006250868767395\n\t.quad 7844839795278712168\n\t.quad 17080440031303470910\n\t.quad 17102447111357623491\n\t.quad 17117653641704540148\n\t.quad 7909777184276130567\n\t.quad 17146761182853081655\n\t.quad 7927555536158797039\n\t.quad 17168648009404892139\n\t.quad 17191936599390661945",
-            "\t.quad 17206997503608985736\n\t.quad 17224357254426754901\n\t.quad 17239642023056203562\n\t.quad 17250866684495116021\n\t.quad 17268663991083225689\n\t.quad 8057988658405415185\n\t.quad 17295889112523735211\n\t.quad 8091113990793215893\n\t.quad 8106412954591121275\n\t.quad 17341193333534809255\n\t.quad 17361146943751997928\n\t.quad 8149550550428492702\n\t.quad 8164821955346263173\n\t.quad 8168508878667849369\n\t.quad 17412924023456548464\n\t.quad 17428062688256055308\n\t.quad 17447236697115546500\n\t.quad 8240096742328358811\n\t.quad 17478081573710770814\n\t.quad 8269977678330400881\n\t.quad 17498647939198266825\n\t.quad 17513825484703193404\n\t.quad 17535117640951489507\n\t.quad 17552718380065087086\n\t.quad 17562759727809539090\n\t.quad 8353524032627828969\n\t.quad 8368405709970948498\n\t.quad 17610314891431048965\n\t.quad 17625261677323105478\n\t.quad 8417243843776749316\n\t.quad 17657468063736256827\n\t.quad 8447933695112687735\n\t.quad 8465129395903213130\n\t.quad 8475978919083309533\n\t.quad 17715779508703643564\n\t.quad 17712050424774629749\n\t.quad 8520154222361446403\n\t.quad 17761481200832101118\n\t.quad 17772561267521243582\n\t.quad 17787537250789514285",
-            "\t.quad 17802804428574947740\n\t.quad 8596151911769212925\n\t.quad 17838394584658356994\n\t.quad 8620798535177573499\n\t.quad 17862396941767623475\n\t.quad 17882805782688123392\n\t.quad 17882917943541818368\n\t.quad 17911450954185925072\n\t.quad 17926246462008244804\n\t.quad 8715443047340349227\n\t.quad 17946459272806599721\n\t.quad 8749146895201199642\n\t.quad 17986809087878668384\n\t.quad 8769928034088087312\n\t.quad 8784919622776474324\n\t.quad 18023157971702243959\n\t.quad 8819814338074970427\n\t.quad 18060019438313740859\n\t.quad 18074802370242207946\n\t.quad 18089903335432263933\n\t.quad 18107187971928035230\n\t.quad 18082348143375254873\n\t.quad 8912599740500244377\n\t.quad 8927245410063936192\n\t.quad 18157462554107144769\n\t.quad 8947714589084859183\n\t.quad 18184455833633773061\n__fsplit:\n\t.quad 4728779608772575232\n__fbig:\n\t.quad 9092767647661031424\n__fup:\n\t.quad 4895412794951729152\n__fdown:\n\t.quad 4318952042648305664",
-        ]
-    }
 
     // -- end of the float runtime
 
@@ -4224,10 +3373,14 @@ impl CodeGen {
         self.emit_ir_at(g, decl_id, line, col, f.name)
     }
 
-    // char support: UTF-8 encode for printing, UTF-8 decode for `chars`.
-    fun emit_char_runtime(var self) {
-    }
-
+    // -- the cells the runtime and the generated code share (std.rt reads
+    // them too) ------------------------------------------------------------
+    //
+    // List cell layout: [len:8][cap:8][elem0..]. The value pointer points at the
+    // length word. Strides are passed in (per element type) so one routine serves
+    // every list. Copy-on-write clones are per element type (`__clone_list_*`,
+    // `clone_ir`): they retain the elements they share (D38).
+    //
     // Map cell: [count:8][cap:8][slot0..]; slot = [state:8][key:8][value…][rank:8]
     // where state 0=empty, 1=occupied, 2=tombstone, and rank is the key's place
     // in the order of insertion: the occupied slots' ranks are 0 … count - 1
@@ -4235,37 +3388,8 @@ impl CodeGen {
     // a removed one leaves, and a grow copies them). Open addressing, linear probing,
     // multiplicative hashing (`__map_hash`). cap is a power of two. Copy-on-write clones are per type
     // (`__clone_map_*`, `clone_ir`) and retain the values they share.
-    fun emit_map_runtime(var self) {
-    }
-
-    // %rcx bytes from (%rsi) to (%rdi), leaving both past the bytes and
-    // clobbering %rax and %rcx: 8 at a time, then the tail, with `rep movsb`
-    // only for a long copy, where it is fast. Its start costs tens of cycles,
-    // which made short strings slower than C (MYLA-252). `raw` for the
-    // runtime prelude.
-    fun emit_byte_copy(var self, raw: bool) {
-        let rep = self.label()
-        let words = self.label()
-        let bytes = self.label()
-        let done = self.label()
-        let lines = ["cmpq $512, %rcx", format("jae {}", rep),
-            format("{}:", words), "cmpq $8, %rcx", format("jb {}", bytes), "movq (%rsi), %rax", "movq %rax, (%rdi)",
-            "addq $8, %rsi", "addq $8, %rdi", "subq $8, %rcx", format("jmp {}", words),
-            format("{}:", bytes), "testq %rcx, %rcx", format("jz {}", done), "movb (%rsi), %al", "movb %al, (%rdi)",
-            "incq %rsi", "incq %rdi", "decq %rcx", format("jmp {}", bytes),
-            format("{}:", rep), "cld", "rep movsb", format("{}:", done)]
-        for line in lines {
-            if raw {
-                if ends_colon(line) { self.raw(line) } else { self.raw("\t" + line) }
-            } else {
-                self.emit(line)
-            }
-        }
-    }
-
+    //
     // StringBuilder cell: [len:8][cap:8][bytes…] (cap is a byte capacity).
-    fun emit_sb_runtime(var self) {
-    }
 
     // -- reference-counting helpers (drop / copy-on-write clone) ----------
 
@@ -4372,12 +3496,6 @@ impl CodeGen {
         self.raw("\t.set __sb_clone, myla___sb_clone")
     }
 
-    // List cell layout: [len:8][cap:8][elem0..]. The value pointer points at the
-    // length word. Strides are passed in (per element type) so one routine serves
-    // every list. Copy-on-write clones are per element type (`__clone_list_*`,
-    // `clone_ir`): they retain the elements they share (D38).
-    fun emit_list_runtime(var self) {
-    }
 }
 
 // -- free helpers ---------------------------------------------------------
@@ -4385,7 +3503,7 @@ impl CodeGen {
 #test(".L1:")[true]
 #test(".L2:")[true]
 #test("cld")[false]
-fun ends_colon(s: str) -> bool {
+pub fun ends_colon(s: str) -> bool {
     let n = s.len()
     return n > 0 && s[n - 1] == 58
 }
@@ -4833,7 +3951,7 @@ fun compiler_norm() -> Norm {
 }
 
 // The ready-frame ring's size (D90): a power of two.
-const EXEC_CAP: int32 = 1048576
+pub const EXEC_CAP: int32 = 1048576
 
 // The generator of MYLA_SCHED=seed:N (D110): x * SCHED_MUL + SCHED_ADD,
 // wrapping (Knuth's MMIX constants), the same in the interpreter
@@ -4976,7 +4094,8 @@ pub fun is_builtin_call_name(nm: str) -> bool {
     if nm == "__list_dir" || nm == "__mkdir" || nm == "__stat" || nm == "__getcwd" || nm == "__getenv" { return true }
     if nm == "__sqrt" || nm == "__f64_bits" || nm == "__f64_from_bits" { return true }
     if nm == "__unlink" || nm == "__rmdir" || nm == "__rename" { return true }
-    if nm == "__task_cancelled" { return true }
+    if nm == "__task_cancelled" || nm == "__clock_ns" || nm == "__sleep_ns" || nm == "__disarm" { return true }
+    if nm == "__spawn" || nm == "__reap" || nm == "__kill" || nm == "__close" { return true }
     if is_raw_memory_primitive(nm) { return true }
     return false
 }
@@ -5261,7 +4380,7 @@ pub fun is_tfloat32(t: Type) -> bool {
 // The runtime-error entries and their messages (MYLA-17), as in the Python
 // backend (`_TRAPS`). `__panic` prints them after `runtime error: `.
 #test()[["__trap_index", "__trap_key", "__trap_pop", "__trap_div", "__trap_mod", "__trap_match", "__trap_oom", "__trap_char"]]
-fun trap_labels() -> [str] {
+pub fun trap_labels() -> [str] {
     return ["__trap_index", "__trap_key", "__trap_pop", "__trap_div", "__trap_mod", "__trap_match", "__trap_oom", "__trap_char"]
 }
 

@@ -150,4 +150,78 @@ impl Reader {
         self.pos = 0
         return Ok(sb.build())
     }
+
+    // --- In a task: waiting for input without blocking the worker (D124) ---
+    // Each async version reads as its blocking twin does, but first waits
+    // for input with the task suspended, the other tasks running; outside a
+    // task it blocks as the twin does. A task asked to stop (`task.cancel`,
+    // a `task.timeout` that ran out) stops waiting at once and gets
+    // `Other(125)` (ECANCELED).
+
+    // `fill`, the task waiting for the input.
+    async fun fill_async(var self, want: int32) -> Result<bool, IoError> {
+        if self.eof { return Ok(false) }
+        await __wait_readable(self.fd)
+        if __task_cancelled() { return Err(IoError.Other(125)) }
+        return self.fill(want)
+    }
+
+    // `read_line`, the task waiting for the input.
+    async fun read_line_async(var self) -> Result<Option<str>, IoError> {
+        var scanned = 0
+        var found = -1
+        while found < 0 {
+            let buf = self.buf
+            let n = buf.len()
+            var i = self.pos + scanned
+            while i < n {
+                if buf[i] == '\n' {
+                    found = i
+                    i = n
+                } else {
+                    i = i + 1
+                }
+            }
+            if found < 0 {
+                scanned = self.buf.len() - self.pos
+                let more = await self.fill_async(1)
+                if !more? {
+                    if scanned == 0 { return Ok(None) }
+                    found = self.buf.len()
+                }
+            }
+        }
+        let line = slice(self.buf, self.pos, found)
+        if found < self.buf.len() { self.pos = found + 1 } else { self.pos = found }
+        return Ok(Some(line))
+    }
+
+    // `read_exact`, the task waiting for the input.
+    async fun read_exact_async(var self, n: int32) -> Result<Option<str>, IoError> {
+        if n <= 0 { return Ok(Some("")) }
+        while self.buf.len() - self.pos < n {
+            let more = await self.fill_async(n - (self.buf.len() - self.pos))
+            if !more? { return Ok(None) }
+        }
+        let out = slice(self.buf, self.pos, self.pos + n)
+        self.pos = self.pos + n
+        return Ok(Some(out))
+    }
+
+    // `read_to_end`, the task waiting for the input.
+    async fun read_to_end_async(var self) -> Result<str, IoError> {
+        var sb = StringBuilder()
+        sb.append(slice(self.buf, self.pos, self.buf.len()))
+        while !self.eof {
+            await __wait_readable(self.fd)
+            if __task_cancelled() { return Err(IoError.Other(125)) }
+            let chunk = __read(self.fd, CHUNK)
+            let err = __io_errno()
+            if err != 0 { return Err(from_errno(err)) }
+            if chunk.len() == 0 { self.eof = true } else { sb.append(chunk) }
+        }
+        self.buf = ""
+        self.pos = 0
+        return Ok(sb.build())
+    }
 }

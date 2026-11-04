@@ -44,6 +44,7 @@ Since D85 the IR is stable: the instruction set, the terminators, the model of s
 | [[selfhost/lower.my]] | The checked AST of one function or lambda → `IrFunc` (`lower_function`, `lower_lambda`), reading the code generator |
 | [[selfhost/ir_x86.my]] | `impl CodeGen`: `IrFunc` → assembly, with the frame layout, through the code generator's `emit`, pools and debug information |
 | [[selfhost/inline.my]] | Calls to small leaf functions replaced by copies of their bodies (`inline_calls`), and blocks only one jump reaches joined to it (`merge_blocks`) |
+| [[selfhost/runtime_x86.my]] | `impl CodeGen`: the runtime's x86-64 Linux assembly, the part not in `std.rt` ([[MYLA-162]], D108) |
 | [[selfhost/ownership.my]] | `impl CodeGen`: the ownership instructions made plain before the translation (`expand_ownership`, [[MYLA-162]]) |
 
 `impl CodeGen` blocks in other modules (allowed since an `impl` follows its type) give the IR code the code generator's state without a second copy of it. In `generate`, each function job goes through `lower_function`, inlining (`inline_small`, not for a frame function, nor under `-g` or `--no-inline`), the verifier and `emit_ir` (`gen_any_function`, `take_ir`), and each lambda job through `lower_lambda` (`gen_any_lambda`). Since [[MYLA-107]] there is no other path: a function the lowering can't take, or the verifier rejects, is an internal error. During the migration such a function fell back to the old one-pass emission, which [[MYLA-107]] deleted.
