@@ -114,14 +114,16 @@ class WasmParity(unittest.TestCase):
 
     def test_compiler(self):
         # the compiler built for wasm makes the same assembly as the one built
-        # for x86-64, for either target
+        # for x86-64, for either target; without --target, for its own (D127)
         with tempfile.TemporaryDirectory() as tmp:
             gen = os.path.join(tmp, "gen.wasm")
             build_wasm("selfhost/gen_main.my", gen)
-            for extra in ([], ["--target", "wasm32-wasi"]):
+            for extra, ref in (([], ["--target", "wasm32-wasi"]),
+                               (["--target", "wasm32-wasi"], ["--target", "wasm32-wasi"]),
+                               (["--target", "x86_64-linux"], [])):
                 with self.subTest(target=extra):
                     src = os.path.join(_REPO, "examples", "maps.my")
-                    want = run([native_compiler(), src, STDLIB_ROOT] + extra)
+                    want = run([native_compiler(), src, STDLIB_ROOT] + ref)
                     got = run(NODE + [gen, src, STDLIB_ROOT] + extra)
                     self.assertEqual(got[2], 0, got[1])
                     self.assertEqual(got, want)

@@ -255,14 +255,17 @@ class Aarch64Parity(unittest.TestCase):
 
     def test_compiler(self):
         # the compiler built for aarch64 makes the same assembly as the one
-        # built for x86-64, for either target
+        # built for x86-64, for either target; without --target, for its own
+        # (the machine it runs on, D127)
         with tempfile.TemporaryDirectory() as tmp:
             gen = os.path.join(tmp, "gen")
             build_a64("selfhost/gen_main.my", gen)
-            for extra in ([], ["--target", "aarch64-linux"]):
+            for extra, ref in (([], ["--target", "aarch64-linux"]),
+                               (["--target", "aarch64-linux"], ["--target", "aarch64-linux"]),
+                               (["--target", "x86_64-linux"], [])):
                 with self.subTest(target=extra):
                     src = os.path.join(_REPO, "examples", "maps.my")
-                    want = run([native_compiler(), src, STDLIB_ROOT] + extra)
+                    want = run([native_compiler(), src, STDLIB_ROOT] + ref)
                     got = run(["qemu-aarch64", gen, src, STDLIB_ROOT] + extra)
                     self.assertEqual(got[2], 0, got[1])
                     self.assertEqual(got, want)
