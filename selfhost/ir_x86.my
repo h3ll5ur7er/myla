@@ -3219,7 +3219,7 @@ fun writes_no_slot(inst: Inst) -> bool {
 
 // The offsets of `f`'s slots: in its heap frame after the header (D90) for a
 // frame function, else `layout_slots`'.
-fun slots_at(f: IrFunc, below: int32, inreg: [bool]) -> [int32] {
+pub fun slots_at(f: IrFunc, below: int32, inreg: [bool]) -> [int32] {
     if !f.frame { return layout_slots(f, below, inreg) }
     let (pos, extent) = slot_positions(f, false, [])
     var off: [int32] = []
@@ -3228,7 +3228,7 @@ fun slots_at(f: IrFunc, below: int32, inreg: [bool]) -> [int32] {
 }
 
 // The size of a frame function's heap frame: the header, then its slots.
-fun frame_size(f: IrFunc) -> int32 {
+pub fun frame_size(f: IrFunc) -> int32 {
     let (pos, extent) = slot_positions(f, false, [])
     return FRAME_HEADER + extent
 }

@@ -8,7 +8,7 @@ labels: [backend, platforms]
 ---
 The first new target of [[MYLA-62]], the closest to what exists (Linux system calls, no libc), after the runtime in Myla ([[MYLA-162]]): an aarch64 backend of Myla's own from the IR (D117), with [[selfhost/ir_x86.my]] as its template.
 
-- [ ] The platform layer for Linux on aarch64 (its system call numbers and conventions, thread-local state, atomics): system calls and atomics done, thread-local state with tasks
+- [x] The platform layer for Linux on aarch64 (its system call numbers and conventions, thread-local state, atomics): done
 - [ ] `myla build --target aarch64-linux`; the parity, stress and concurrency programs pass under qemu or on hardware, in CI if practical
 
 ## The plan (2026-11-04, the owner's choice of aarch64 first)
@@ -28,4 +28,6 @@ Steps, each verified:
 ## Progress
 
 - 2026-11-04, steps 1 to 5 without tasks: `--target aarch64-linux` in `gen_main` and `myla build` (clang and ld.lld), the loader's `for_target` (`std/platform_aarch64.my`), [[selfhost/ir_a64.my]] (every temporary in a frame cell), [[selfhost/runtime_a64.my]], the partial applications' functions and the function-value adapters. A map's `remove` became IR in the lowering for both targets (the `mapremove` instruction and its x86-64 assembly went). Evidence: every example but `concurrency` and ten programs for widths, floats, casts, calls with stack words and `become`, partial applications by copy, maps, strings, traps, panics and exit give under qemu what their x86-64 builds give (and the interpreter); the compiler built for aarch64 makes, under qemu, byte for byte the assembly the x86-64 one makes, for either target ([[tests/burn/test_aarch64.py]]; CI installs clang, lld and qemu-user).
-- Next: tasks (frame functions with `suspend`, the executor's control transfers, threads with the state block in `tpidr_el0`, the deep copies of environments), then the stress and concurrency programs under qemu; the stack-overflow handler; an exact `__fmod`.
+- 2026-11-04, tasks: frame functions (the frame in x28, `suspend`, `__new`), the executor's control transfers, `__task_fail`, worker threads (`clone`, the state block in `tpidr_el0`), the environments' deep copies, an actor's atomic count. Evidence: `examples/concurrency.my`, the 23 stress programs on 1, 4 and 16 workers (three runs each) and in the four other orders, and test_time's ten tests (timers, reads that suspend, child processes) pass under qemu ([[tests/burn/test_aarch64.py]]).
+- 2026-11-04, a float `%` exact on aarch64: std.rt's `fmod` (musl's algorithm on the bits; its `#test` cases are Python's `math.fmod`, among them `1e20 % 3.0` and `2^1000 % 0.1`, which `x - trunc(x / y) * y` gets wrong).
+- Left: the stack-overflow handler, `-g`; a run on aarch64 hardware (qemu on x86-64 keeps x86-64's memory order, so it can't show a missing barrier).

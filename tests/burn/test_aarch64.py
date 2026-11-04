@@ -18,14 +18,15 @@ import unittest
 
 from ._native import CAN_BUILD_NATIVE, SKIP_REASON
 from ._tools import STDLIB_ROOT, native_compiler
+from . import test_time
 
 _REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir))
 
 HAVE_A64 = all(shutil.which(t) for t in ("clang", "ld.lld", "qemu-aarch64"))
 A64_SKIP = "the aarch64 tests need clang, ld.lld and qemu-aarch64"
 
-# examples that need what the backend doesn't have yet: tasks
-NOT_YET = {"concurrency"}
+# examples that need what the backend doesn't have yet
+NOT_YET: set[str] = set()
 
 
 def build_x86(src: str, out: str) -> None:
@@ -92,6 +93,9 @@ fun main() {
     print(f"{nan == nan} {nan != nan} {nan < 1.0} {nan as int} {1.0 / 0.0} {-1.0 / 0.0}")
     print(f"{7 as float / 2.0} {(2 as float) < 3.0} {2.5 <= 2.5} {2.5 >= 3.0}")
     print(f"{18446744073709551615u64 as float} {-1 as float}")
+    let big = 1e20
+    let tiny: float32 = 5.5
+    print(f"{big % 3.0} {-1e300 % 7.25} {-7.5 % 2.0} {1.0 % 0.0} {tiny % 2.0}")
 }
 """,
     "calls": """
@@ -262,6 +266,40 @@ class Aarch64Parity(unittest.TestCase):
                     got = run(["qemu-aarch64", gen, src, STDLIB_ROOT] + extra)
                     self.assertEqual(got[2], 0, got[1])
                     self.assertEqual(got, want)
+
+
+@unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
+@unittest.skipUnless(HAVE_A64, A64_SKIP)
+class Aarch64Tasks(unittest.TestCase):
+    def test_stress_programs(self):
+        # the concurrency stress programs (test_concurrency_stress), built
+        # for aarch64, on 1, 4 and 16 workers and in the other orders
+        from .test_concurrency_stress import EXPECTED, SCHEDULES, _DIR
+        for name, want in EXPECTED.items():
+            with self.subTest(program=name), tempfile.TemporaryDirectory() as tmp:
+                exe = os.path.join(tmp, name)
+                build_a64(os.path.join(_DIR, name + ".my"), exe)
+                runs = [{"MYLA_THREADS": w} for w in ("1", "4", "16")]
+                runs += [{"MYLA_THREADS": "1", "MYLA_SCHED": sched} for sched in SCHEDULES]
+                for extra in runs:
+                    p = subprocess.run(["qemu-aarch64", exe], capture_output=True, text=True, timeout=120,
+                                       env=dict(os.environ, **extra))
+                    self.assertEqual((p.stdout, p.returncode), want, extra)
+
+
+@unittest.skipUnless(HAVE_A64, A64_SKIP)
+class Aarch64Time(test_time.Time):
+    """test_time's programs (timers, reads that suspend, child processes)
+    built for aarch64 and run under qemu (through a script, as the tests run
+    the binary)."""
+
+    def native(self, name: str, text: str) -> str:
+        exe = os.path.join(self.dir, name)
+        build_a64(self.source(name, text), exe + ".a64")
+        with open(exe, "w", encoding="utf-8") as fh:
+            fh.write(f'#!/bin/sh\nexec qemu-aarch64 "{exe}.a64" "$@"\n')
+        os.chmod(exe, 0o755)
+        return exe
 
 
 if __name__ == "__main__":

@@ -2209,6 +2209,78 @@ fun fscale(x0: float64, e0: int64) -> int64 {
     return __f64_round(prod.0) + __f64_round(lo)
 }
 
+// A float `%` on a target without an instruction for it (aarch64,
+// MYLA-163): the remainder of `x / y` truncated toward zero, exactly, its
+// sign `x`'s (C's `fmod`, as x86-64's `fprem` gives it), on the bits of both
+// (musl's algorithm: the significands' long division, one bit a step); a NaN
+// for a zero or NaN `y` and for an infinite or NaN `x`.
+#test(4620130267728707584, 4611686018427387904)[4609434218613702656]
+#test(-4618441417868443648, 4607182418800017408)[-4618441417868443648]
+#test(118622047889322841, 4906019910204099648)[118622047889322841]
+#test(4906019910204099648, 4613937818241073152)[4607182418800017408]
+#test(-128383115725867620, 4619848792751996928)[-4604367669032910848]
+#test(7, 2)[1]
+#test(9110782046170513408, 4591870180066957722)[4591870178993215898]
+#test(4607182418800017408, 0)[9221120237041090560]
+pub fun fmod(xb: int64, yb: int64) -> int64 {
+    var ux = xb as uint64
+    var uy = yb as uint64
+    var ex = ((ux >> 52u64) & 0x7FFu64) as int64
+    var ey = ((uy >> 52u64) & 0x7FFu64) as int64
+    let sx = ux & 0x8000000000000000u64
+    let ynan = (uy << 1u64) > 0xFFE0000000000000u64
+    if (uy << 1u64) == 0u64 || ynan || ex == 2047 { return 0x7FF8000000000000 }
+    if (ux << 1u64) <= (uy << 1u64) {
+        if (ux << 1u64) == (uy << 1u64) { return sx as int64 }
+        return xb
+    }
+    // the significands with their leading bit, a subnormal's normalized
+    if ex == 0 {
+        var i = ux << 12u64
+        while (i >> 63u64) == 0u64 {
+            ex -= 1
+            i = i << 1u64
+        }
+        ux = ux << ((1 - ex) as uint64)
+    } else {
+        ux = (ux & 0x000FFFFFFFFFFFFFu64) | 0x0010000000000000u64
+    }
+    if ey == 0 {
+        var i = uy << 12u64
+        while (i >> 63u64) == 0u64 {
+            ey -= 1
+            i = i << 1u64
+        }
+        uy = uy << ((1 - ey) as uint64)
+    } else {
+        uy = (uy & 0x000FFFFFFFFFFFFFu64) | 0x0010000000000000u64
+    }
+    while ex > ey {
+        let d = ux - uy
+        if (d >> 63u64) == 0u64 {
+            if d == 0u64 { return sx as int64 }
+            ux = d
+        }
+        ux = ux << 1u64
+        ex -= 1
+    }
+    let d = ux - uy
+    if (d >> 63u64) == 0u64 {
+        if d == 0u64 { return sx as int64 }
+        ux = d
+    }
+    while (ux >> 52u64) == 0u64 {
+        ux = ux << 1u64
+        ex -= 1
+    }
+    if ex > 0 {
+        ux = (ux - 0x0010000000000000u64) | ((ex as uint64) << 52u64)
+    } else {
+        ux = ux >> ((1 - ex) as uint64)
+    }
+    return (ux | sx) as int64
+}
+
 // `__float_to_str`: the float64 of the bits `bits` with `digits` significant
 // digits, trailing zeros dropped: plain digits up to its units, then a point
 // and the rest, or `0.` and zeros before them for a magnitude below 1.

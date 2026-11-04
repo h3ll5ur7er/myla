@@ -1938,9 +1938,7 @@ impl CodeGen {
             if self.a64 { self.emit_fnval_thunk_a64(n) } else { self.emit_fnval_thunk(n) }
         }
         self.emit_drop_helpers()
-        if self.uses_float {
-            if self.a64 { self.raw(runtime_a64.fmod_text_a64()) } else { self.raw(self.fmod_text()) }
-        }
+        if self.uses_float && !self.a64 { self.raw(self.fmod_text()) }
         if self.fn_seen.contains("std$rt$float_to_str") { self.raw("\t.set __float_to_str, myla_std$rt$float_to_str") }
         return self.assemble_source()
     }
@@ -2043,7 +2041,7 @@ impl CodeGen {
         for line in self.strdata { out.push(line) }
         out.push("")
         out.push("\t.bss")
-        out.push("\t.align 8")
+        out.push("\t.balign 8")
         out.push("__heap_ptr:")
         out.push("\t.skip 8")
         out.push("__heap_end:")
