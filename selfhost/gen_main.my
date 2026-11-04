@@ -12,6 +12,7 @@
 
 from std.process import args, exit
 from std.io import write, eprintln
+from std.platform import TARGET
 from .checker import build_checker_decls
 from .codegen import new_codegen
 from .dwarf import read_gdb_script
@@ -30,8 +31,9 @@ from .diag import render
 // (`--ssa`; `--ssa-stats` also reports what that did on stderr, and with
 // `--emit-ir` the text shows the promoted functions). `no_inline`: no
 // small function copied into its callers (`--no-inline`, for the tests of
-// one function's code). `target`: `x86_64-linux` (the default) or
-// `aarch64-linux` (`--target`, MYLA-163).
+// one function's code). `target`: `x86_64-linux`, `aarch64-linux`
+// (MYLA-163) or `wasm32-wasi` (MYLA-158) with `--target`; by default the
+// target this compiler was built for, the machine's it runs on (MYLA-276).
 struct Mode { debug: bool, emit_ir: bool, frames: bool, ssa: bool, ssa_stats: bool, no_inline: bool, target: str }
 
 fun emit_asm(prog: Loaded, mode: Mode, stdlib_root: str) -> int32 {
@@ -70,7 +72,7 @@ fun main() {
     }
     var opts = load_options(default_stdlib_root())
     opts.runtime = true
-    var mode = Mode { debug: false, emit_ir: false, frames: false, ssa: false, ssa_stats: false, no_inline: false, target: "x86_64-linux" }
+    var mode = Mode { debug: false, emit_ir: false, frames: false, ssa: false, ssa_stats: false, no_inline: false, target: TARGET }
     var j = 2
     while j < argv.len() {
         if argv[j] == "-g" {

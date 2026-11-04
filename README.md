@@ -86,7 +86,7 @@ async fun main() {
 
 ## What it values
 
-- **Few dependencies.** On x86-64 the toolchain needs GNU binutils (`as`, `ld`), nothing else (clang and lld for the aarch64 and wasm targets), and the tests only Python's standard library; native programs are static binaries without libc.
+- **Few dependencies.** The toolchain needs GNU binutils (`as`, `ld`), nothing else (clang and lld to build for another machine or for wasm), and the tests only Python's standard library; native programs are static binaries without libc.
 - **Predictable code.** Explicitly sized integers (`int8` … `uint64`, `int` is `int32`), no implicit conversions, value semantics with copy-on-write, deep immutability for `let`, no null (`Option`), errors as values (`Result` and `?`).
 - **Safety the checker can give cheaply.** Exhaustive `match`, ranges and spans in every diagnostic, actors whose state only their own methods reach, captures that can't be changed from a lambda, a warning for actor state checked before an `await` and changed after it.
 - **One meaning, two ways to run it.** There is one implementation, and its interpreter and its native code are tested against each other on every program of the test suites, and against the answers the retired Python toolchain gave, recorded, down to the text of every diagnostic.
@@ -102,9 +102,9 @@ The reference is the wiki, starting at [Language](docs/Language.md); the reasons
 
 ## Getting started
 
-You need x86-64 Linux and GNU binutils (`as`, `ld`); for `--target aarch64-linux` or `--target wasm32-wasi` also clang and lld (and qemu-user or Node to run what they build). gdb is optional, for debugging; Python 3.12 or later only runs the tests.
+You need Linux on x86-64 or aarch64 (a Raspberry Pi 4 or 5 with a 64-bit OS works) and GNU binutils (`as`, `ld`); for another target (`--target aarch64-linux`, `x86_64-linux` or `wasm32-wasi`) also clang and lld (and qemu-user or Node to run what they build). gdb is optional, for debugging; Python 3.12 or later only runs the tests.
 
-`scripts/bootstrap.sh` builds the compiler from the committed seed (`bootstrap/seed.s`, its own assembly; only `as` and `ld` needed), checks the fixed point, and builds `build/myla`, the command-line tool, and `build/myla-lsp`, the language server:
+`scripts/bootstrap.sh` (or `just bootstrap`) builds the compiler from the committed seed for the machine (`bootstrap/seed.s` on x86-64, `bootstrap/seed-aarch64.s` on aarch64: its own assembly; only `as` and `ld` needed), checks the fixed point, and builds `build/myla`, the command-line tool, and `build/myla-lsp`, the language server:
 
 ```bash
 scripts/bootstrap.sh

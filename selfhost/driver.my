@@ -12,6 +12,7 @@
 from std.process import run, Output, ExitStatus, SpawnError
 from std.io import write, eprintln
 from std.fs import write_to_file, remove_file
+from std.platform import TARGET
 from .loader import load_program_opts, LoadOptions, for_target, file_of, Loaded, type_errors, warning_reports
 from .diag import render, Report
 from .checker import build_checker_decls, Checker, CheckErr
@@ -88,22 +89,6 @@ fun step_failed(out: Output, label: str) -> bool {
     return false
 }
 
-// Run one step (`program args…`); return true on failure (nonzero exit,
-// terminating signal, or spawn error), echoing the child's stderr and `label`.
-pub fun run_step(program: str, argv: [str], label: str) -> bool {
-    var failed = false
-    match run(program, argv) {
-        Ok(out) => {
-            failed = step_failed(out, label)
-        },
-        Err(e) => {
-            eprintln(label)
-            failed = true
-        },
-    }
-    return failed
-}
-
 // `myla run <file> [args]` / `myla test`: interpret the program with argv
 // `[file, args...]`, or run its #test cases; the exit status.
 pub fun cmd_interp(file: str, opts: LoadOptions, tests: bool, prog_args: [str]) -> int32 {
@@ -155,9 +140,62 @@ fun removed(path: str) -> bool {
     }
 }
 
-// `target`: x86_64-linux (GNU as and ld), aarch64-linux (clang and ld.lld,
-// MYLA-163) or wasm32-wasi (clang and wasm-ld, a module to run under a
-// WASI host such as tools/wasm/run.mjs, MYLA-158).
+// The assembler's and the linker's command lines for `target` (the
+// assembly `asm`, the object `obj`, the program `out`) on a host whose own
+// target is `host` (the toolchain's, `std.platform.TARGET`): the host's GNU
+// `as` and `ld` for its own Linux target, as the bootstrap uses them; clang
+// and lld for another Linux target (MYLA-163) and for wasm32-wasi (a module
+// for a WASI host such as tools/wasm/run.mjs, MYLA-158; MYLA-276).
+#test("x86_64-linux", "x86_64-linux", "a.s", "a.o", "a")[(["as", "--64", "-o", "a.o", "a.s"], ["ld", "-o", "a", "a.o"])]
+#test("aarch64-linux", "aarch64-linux", "a.s", "a.o", "a")[(["as", "-o", "a.o", "a.s"], ["ld", "-o", "a", "a.o"])]
+#test("aarch64-linux", "x86_64-linux", "a.s", "a.o", "a")[(["clang", "--target=aarch64-linux-gnu", "-c", "-o", "a.o", "a.s"], ["ld.lld", "-static", "-o", "a", "a.o"])]
+#test("x86_64-linux", "aarch64-linux", "a.s", "a.o", "a")[(["clang", "--target=x86_64-linux-gnu", "-c", "-o", "a.o", "a.s"], ["ld.lld", "-static", "-o", "a", "a.o"])]
+pub fun build_commands(target: str, host: str, asm: str, obj: str, out: str) -> ([str], [str]) {
+    if target == "wasm32-wasi" {
+        // the stack below the data, so running out of it can't overwrite
+        // the data (MYLA-261)
+        return (["clang", "--target=wasm32-wasi", "-mtail-call", "-mbulk-memory", "-mnontrapping-fptoint", "-msign-ext", "-c", "-o", obj, asm],
+                ["wasm-ld", "--stack-first", "-z", "stack-size=8388608", "-o", out, obj])
+    }
+    if target == host {
+        if target == "x86_64-linux" {
+            return (["as", "--64", "-o", obj, asm], ["ld", "-o", out, obj])
+        }
+        return (["as", "-o", obj, asm], ["ld", "-o", out, obj])
+    }
+    let triple = if target == "aarch64-linux" { "aarch64-linux-gnu" } else { "x86_64-linux-gnu" }
+    return (["clang", "--target=" + triple, "-c", "-o", obj, asm], ["ld.lld", "-static", "-o", out, obj])
+}
+
+// What a failed step says: that its tool is missing when `env` couldn't
+// find it (exit status 127), and what building for `target` needs.
+#test("clang", "aarch64-linux", "x86_64-linux")["myla: 'clang' was not found: building for aarch64-linux here needs clang and ld.lld"]
+#test("as", "x86_64-linux", "x86_64-linux")["myla: 'as' was not found: building for x86_64-linux here needs GNU as and ld (binutils)"]
+pub fun missing_tool(tool: str, target: str, host: str) -> str {
+    var needs = "clang and ld.lld"
+    if target == "wasm32-wasi" { needs = "clang and wasm-ld" } else if target == host { needs = "GNU as and ld (binutils)" }
+    return format("myla: '{}' was not found: building for {} here needs {}", tool, target, needs)
+}
+
+// Run one step of a build: false when it worked; a missing tool named.
+fun build_step(argv: [str], label: str, target: str) -> bool {
+    var failed = true
+    match run("/usr/bin/env", argv) {
+        Ok(out) => {
+            let missing = match out.status { ExitStatus.Exited(code) => code == 127, _ => false }
+            if missing {
+                eprintln(missing_tool(argv[0], target, TARGET))
+            } else {
+                failed = step_failed(out, label)
+            }
+        },
+        Err(e) => { eprintln(label) },
+    }
+    return failed
+}
+
+// `target`: x86_64-linux, aarch64-linux or wasm32-wasi; its tools are
+// `build_commands`'.
 pub fun cmd_build(file: str, output: str, opts: LoadOptions, debug: bool, target: str) -> int32 {
     let asm = match compile_asm(file, opts, debug, target) {
         Ok(a) => a,
@@ -175,22 +213,11 @@ pub fun cmd_build(file: str, output: str, opts: LoadOptions, debug: bool, target
             return 1
         },
     }
-    var assemble = ["as", "--64", "-o", obj_path, asm_path]
-    var link = ["ld", "-o", output, obj_path]
-    if target == "aarch64-linux" {
-        assemble = ["clang", "--target=aarch64-linux-gnu", "-c", "-o", obj_path, asm_path]
-        link = ["ld.lld", "-static", "-o", output, obj_path]
-    }
-    if target == "wasm32-wasi" {
-        assemble = ["clang", "--target=wasm32-wasi", "-mtail-call", "-mbulk-memory", "-mnontrapping-fptoint", "-msign-ext", "-c", "-o", obj_path, asm_path]
-        // the stack below the data, so running out of it can't overwrite
-        // the data (MYLA-261)
-        link = ["wasm-ld", "--stack-first", "-z", "stack-size=8388608", "-o", output, obj_path]
-    }
-    if run_step("/usr/bin/env", assemble, "myla: assembler failed") {
+    let tools = build_commands(target, TARGET, asm_path, obj_path, output)
+    if build_step(tools.0, "myla: assembler failed", target) {
         return 1
     }
-    if run_step("/usr/bin/env", link, "myla: linker failed") {
+    if build_step(tools.1, "myla: linker failed", target) {
         return 1
     }
     // the assembly and object file were only steps (MYLA-35)

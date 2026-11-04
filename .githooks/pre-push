@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# pre-push — before a push, check that bootstrap/seed.s is the current compiler
+# pre-push — before a push, check that the seeds (bootstrap/seed*.s) are the current compiler
 # (scripts/check-seed.sh, MYLA-218) when the commits pushed change the
 # compiler's sources or the seed. Optional: scripts/install-hooks.sh turns it
 # on for a clone. MYLA_SKIP_SEED_CHECK=1 git push skips it once.
@@ -22,14 +22,14 @@ while read -r local_ref local_sha remote_ref remote_sha; do
     else
         base="$remote_sha"
     fi
-    if [ -z "$base" ] || [ -n "$(git diff --name-only "$base" "$local_sha" -- selfhost lib/std bootstrap/seed.s)" ]; then
+    if [ -z "$base" ] || [ -n "$(git diff --name-only "$base" "$local_sha" -- selfhost lib/std bootstrap)" ]; then
         relevant=1
     fi
 done
 [ "$relevant" = 1 ] || exit 0
 
-if [ -n "$(git status --porcelain -- selfhost lib/std bootstrap/seed.s)" ]; then
+if [ -n "$(git status --porcelain -- selfhost lib/std bootstrap)" ]; then
     echo "pre-push: uncommitted changes in selfhost/, lib/std/ or the seed are checked as they are" >&2
 fi
-echo "pre-push: checking that bootstrap/seed.s is the current compiler (about 5 s)"
+echo "pre-push: checking that the seeds are the current compiler (about 7 s)"
 scripts/check-seed.sh

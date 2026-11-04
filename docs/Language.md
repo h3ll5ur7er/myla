@@ -33,4 +33,4 @@ The reference for Myla (version 1.0). These pages and the decisions on [[Project
 | [[Language/Attributes-and-testing]] | `#main`, `#test`, `#derive`, `const`, `assert`/`panic`/`unreachable`, runtime errors |
 | [[Language/Grammar]] | The grammar in EBNF |
 
-The reasons behind each rule are recorded as numbered decisions (D1–D126) on [[Project/Decisions]]. When a rule is broken, the message underlines the place, often with a note (`'x' is declared here`) or a `help: did you mean 'count'?` line for a misspelt name.
+The reasons behind each rule are recorded as numbered decisions (D1–D127) on [[Project/Decisions]]. When a rule is broken, the message underlines the place, often with a note (`'x' is declared here`) or a `help: did you mean 'count'?` line for a misspelt name.

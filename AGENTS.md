@@ -18,6 +18,6 @@ Myla resembles Rust and Swift but differs from both in many details (newlines en
 
 ## Working agreement
 
-After changing `selfhost/` or `lib/std/`, run `scripts/update-seed.sh` and commit `bootstrap/seed.s` with the change (and `selfhost/embedded_std.my`, the standard library the tools carry, which the bootstrap regenerates from `lib/`); CI fails a pull request whose seed or embedded library isn't current.
+After changing `selfhost/` or `lib/std/`, run `scripts/update-seed.sh` and commit the seeds `bootstrap/seed.s` and `bootstrap/seed-aarch64.s` with the change (and `selfhost/embedded_std.my`, the standard library the tools carry, which the bootstrap regenerates from `lib/`); CI fails a pull request whose seed or embedded library isn't current.
 
 For every programming task: write the test first where it makes sense (soft TDD) and see it fail; before reporting that you are done, self-review the whole diff and improve or clean up what you find; then report with concrete evidence (test results before/after, measurements, program output, the bootstrap fixed point). Details: `docs/Development/Conventions.md`.

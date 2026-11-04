@@ -49,7 +49,7 @@ flowchart LR
 | `lib/std/*.my` | The standard library, in Myla; `rt.my` is the native runtime, `platform*.my` the platform layer per target | [[Language/Standard-library]] |
 | `lib/debug/myla_gdb.py` | gdb pretty-printers, embedded in `-g` binaries (D82) | [[Development/Debugging]] |
 
-For x86-64 the toolchain needs only `as` and `ld`; aarch64 needs clang and `ld.lld`, wasm32 clang and `wasm-ld` (D125), and running their programs on an x86-64 machine `qemu-aarch64` and Node. The tools beyond the compiler (the language server, the grammar generator) are written in Myla too, in `tools/`.
+The toolchain bootstraps on x86-64 and aarch64 Linux from that machine's seed and needs only its `as` and `ld` (D127), which also build programs for that machine, its default target. Building for the other machine needs clang and `ld.lld`, for wasm32 clang and `wasm-ld` (D125); running those programs on another machine needs `qemu-aarch64` or Node. The tools beyond the compiler (the language server, the grammar generator) are written in Myla too, in `tools/`.
 
 ## Principles
 

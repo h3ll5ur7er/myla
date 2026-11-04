@@ -10,5 +10,8 @@ obj="$(mktemp --suffix=.o)"
 
 trap 'rm -f "$obj"' EXIT
 
-"$repo/build/stage3" "$input" "$repo/lib" | as --64 -o "$obj" -
+# for this machine, stage3's default target, with its as and ld (MYLA-276)
+flags=()
+if [ "$(uname -m)" = x86_64 ]; then flags=(--64); fi
+"$repo/build/stage3" "$input" "$repo/lib" | as "${flags[@]}" -o "$obj" -
 ld -o "$out" "$obj"

@@ -25,4 +25,4 @@ Found by [[Project/Reflection-2026-11]]. The target is chosen today by:
   One list of targets; one `match` choosing the emitter. The default target is the host's.
 - [ ] The x86-64 code out of `codegen.my` into `ir_x86.my` (or an `x86` module), so `codegen.my` is the target-neutral monomorphizer and pools; behaviour unchanged, the bootstrap's fixed point the proof
 - [ ] A missing tool (clang, ld.lld, wasm-ld) named in the error, not left to `/usr/bin/env`; [[Getting started]] listing each target's tools
-- [ ] How a non-x86-64 host bootstraps (D101: cross-compiling, or a seed of its own)
+- [x] How a non-x86-64 host bootstraps (D101: cross-compiling, or a seed of its own): a seed of its own, D127, [[MYLA-276]]; the default target is the host's (`std.platform.TARGET`)

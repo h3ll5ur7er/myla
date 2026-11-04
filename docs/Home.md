@@ -46,14 +46,14 @@ fun main() {
 
 | Part | Where | Role |
 | --- | --- | --- |
-| **Self-hosted toolchain** | `selfhost/`, `lib/`, `bootstrap/seed.s` | The compiler, interpreter, `#test` runner, REPL and project tool, written in Myla; `build/myla` runs and builds programs. It compiles itself, starting from a committed seed, its own assembly. See [[Architecture/Self-hosted-compiler]] and [[Development/Bootstrap]]. |
+| **Self-hosted toolchain** | `selfhost/`, `lib/`, `bootstrap/seed*.s` | The compiler, interpreter, `#test` runner, REPL and project tool, written in Myla; `build/myla` runs and builds programs. It compiles itself, starting from a committed seed, its own assembly. See [[Architecture/Self-hosted-compiler]] and [[Development/Bootstrap]]. |
 | **Editor tooling** | `tools/lsp/`, `vscode-extension/`, `editor/`, `grammar/`, `tools/` | Language server (written in Myla), VS Code extension (with a gdb debugger), the grammar description and the tree-sitter grammar generated from it by a tool written in Myla. See [[Architecture/Editor-tooling]]. |
 
 Until November 2026 a Python toolchain (`src/myla/`, `myla.py`) was the bootstrap and the reference the self-hosted one was tested against; it was retired by D101 ([[MYLA-219]]), and the tests now compare with its answers, recorded ([[Development/Testing]]).
 
 ```mermaid
 flowchart LR
-    seed["bootstrap/seed.s"] -->|"as + ld"| s0["stage 0"]
+    seed["bootstrap/seed.s (x86-64)<br/>or seed-aarch64.s"] -->|"as + ld"| s0["stage 0"]
     s0 -->|compiles selfhost/| s1["stage 1"]
     s1 -->|compiles itself| s2["stage 2"] -->|compiles itself| s3["stage 3<br/>= stage 2 byte for byte"]
     s3 -->|builds| cli["build/myla"]
