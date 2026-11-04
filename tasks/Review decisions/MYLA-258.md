@@ -51,7 +51,7 @@ New functions of `std.platform` (Linux first): `clock_ns()` (monotonic), `sleep_
 
 ## Decision
 
-Open: the owner's.
+**D124 (2026-11-04): the recommendation** (1A, 2A, 3, 4A, 5C), the owner's choice on each question.
 
-- [ ] Decided, and recorded on [[Project/Decisions]]
-- [ ] The implementation tasks created or updated to match ([[MYLA-230]])
+- [x] Decided, and recorded on [[Project/Decisions]]
+- [x] The implementation tasks created or updated to match ([[MYLA-230]])
