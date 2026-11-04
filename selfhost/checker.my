@@ -704,7 +704,7 @@ fun is_builtin_op_trait(name: str) -> bool {
 #test("B")[false]
 #test("len")[true]
 fun is_builtin_func(name: str) -> bool {
-    return name == "print" || name == "assert" || name == "panic" || name == "unreachable" || name == "len" || name == "push" || name == "pop" || name == "contains" || name == "remove" || name == "keys" || name == "format" || name == "chars" || name == "StringBuilder" || name == "append" || name == "append_byte" || name == "build" || name == "__write" || name == "__exit" || name == "__args" || name == "__read_file" || name == "__io_errno" || name == "__run" || name == "__run_stderr" || name == "__run_exit_code" || name == "__run_signal" || name == "__run_errno" || name == "__write_file" || name == "__read" || name == "__poll" || name == "__list_dir" || name == "__mkdir" || name == "__stat" || name == "__getcwd" || name == "__getenv" || name == "__sqrt" || name == "__f64_bits" || name == "__f64_from_bits" || name == "__unlink" || name == "__rmdir" || name == "__rename" || name == "__task_cancelled" || name == "__yield" || name == "__sleep" || name == "__clock_ns" || name == "__sleep_ns" || name == "__cancel_after" || name == "__disarm" || name == "__wait_readable" || is_raw_memory_primitive(name)
+    return name == "print" || name == "assert" || name == "panic" || name == "unreachable" || name == "len" || name == "push" || name == "pop" || name == "contains" || name == "remove" || name == "keys" || name == "format" || name == "chars" || name == "StringBuilder" || name == "append" || name == "append_byte" || name == "build" || name == "__write" || name == "__exit" || name == "__args" || name == "__read_file" || name == "__io_errno" || name == "__run" || name == "__run_stderr" || name == "__run_exit_code" || name == "__run_signal" || name == "__run_errno" || name == "__write_file" || name == "__read" || name == "__poll" || name == "__list_dir" || name == "__mkdir" || name == "__stat" || name == "__getcwd" || name == "__getenv" || name == "__sqrt" || name == "__f64_bits" || name == "__f64_from_bits" || name == "__unlink" || name == "__rmdir" || name == "__rename" || name == "__task_cancelled" || name == "__yield" || name == "__sleep" || name == "__clock_ns" || name == "__sleep_ns" || name == "__cancel_after" || name == "__disarm" || name == "__wait_readable" || name == "__wait_either" || name == "__spawn" || name == "__reap" || name == "__kill" || name == "__close" || is_raw_memory_primitive(name)
 }
 
 // The raw-memory primitives the runtime written in Myla needs (MYLA-162's
@@ -5759,6 +5759,29 @@ impl Checker {
             if !a_ok { return Err(terr_at(e.line, e.col, e.sp, format("__run() argv must be a [str], found '{}'", type_name(a_t)))) }
             return Ok(Some(Type.TList(t_byte())))
         }
+        // a child started and not waited for (D124, `std.process.run_async`):
+        // `[errno, pid, out, err, exited]`; then reaped (its exit code, or
+        // minus its signal), signalled, its descriptors closed
+        if name == "__spawn" {
+            if args.len() != 2 { return Err(terr_at(e.line, e.col, e.sp, "__spawn() takes (program: str, argv: [str])")) }
+            let p_t = self.expect_value(args[0], Some(Type.TStr))?
+            if !is_str(p_t) { return Err(terr_at(e.line, e.col, e.sp, format("__spawn() program must be a string, found '{}'", type_name(p_t)))) }
+            let a_t = self.expect_value(args[1], Some(Type.TList(Type.TStr)))?
+            let a_ok = match a_t { Type.TList(el) => is_str(el), _ => false }
+            if !a_ok { return Err(terr_at(e.line, e.col, e.sp, format("__spawn() argv must be a [str], found '{}'", type_name(a_t)))) }
+            return Ok(Some(Type.TList(t_int())))
+        }
+        if name == "__reap" || name == "__close" || name == "__kill" {
+            var want = 1
+            if name == "__kill" { want = 2 }
+            if args.len() != want { return Err(terr_at(e.line, e.col, e.sp, format("{}() takes {} int argument(s)", name, want))) }
+            for a in args {
+                let t = self.expect_value(a, Some(t_int()))?
+                if !type_eq(t, t_int()) { return Err(terr_at(a.line, a.col, a.sp, format("{}() takes an 'int', found '{}'", name, type_name(t)))) }
+            }
+            if name == "__reap" { return Ok(Some(t_int())) }
+            return Ok(None)
+        }
         if name == "__run_stderr" {
             if args.len() > 0 { return Err(terr_at(e.line, e.col, e.sp, "__run_stderr() takes no arguments")) }
             return Ok(Some(Type.TList(t_byte())))
@@ -5773,6 +5796,17 @@ impl Checker {
             if args.len() > 0 { return Err(terr_at(e.line, e.col, e.sp, "__yield() takes no arguments")) }
             self.suspended = e.id
             if !self.awaited.contains(e.id) { return Err(terr_at(e.line, e.col, e.sp, "a call to '__yield' needs 'await'")) }
+            return Ok(None)
+        }
+        // until `a` or `b` is readable (a child's two pipes)
+        if name == "__wait_either" {
+            if args.len() != 2 { return Err(terr_at(e.line, e.col, e.sp, "__wait_either() takes (a: int, b: int)")) }
+            for a in args {
+                let f_t = self.expect_value(a, Some(t_int()))?
+                if !type_eq(f_t, t_int()) { return Err(terr_at(a.line, a.col, a.sp, format("__wait_either() takes an 'int', found '{}'", type_name(f_t)))) }
+            }
+            self.suspended = e.id
+            if !self.awaited.contains(e.id) { return Err(terr_at(e.line, e.col, e.sp, "a call to '__wait_either' needs 'await'")) }
             return Ok(None)
         }
         // the running task waiting until `fd` is readable (D124, `std.io`'s

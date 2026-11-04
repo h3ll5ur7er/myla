@@ -89,7 +89,8 @@ In a task, each read has an async version that waits for the input with the task
 | `exit(code: int32)` | Ends the process; the low 8 bits become the exit status |
 | `env(name: str) -> Option<str>` | The value of the environment variable `name` the process started with (`""` included), or `None` when there is none ([[MYLA-243]]; the primitive `__getenv`, which reads the environment the process started with, or `""` with `__io_errno` 2) |
 | `run(program: str, args: [str]) -> Result<Output, SpawnError>` | Runs a program found by its exact path (no `PATH` search) with the current environment, waits, captures its output |
-| `command(program)` → `Command` | Builder: `.arg(a)`, `.args([…])`, `.output()` |
+| `run_async(program: str, args: [str]) -> Result<Output, SpawnError>` (async) | `run` in a task: the task waits for the child (its output read as it comes, then its end) suspended, the other tasks running (D124, [[MYLA-230]]); outside a task it blocks as `run` does. A task asked to stop stops waiting: the child is killed and reaped, `Err(SpawnError.Other(125))` |
+| `command(program)` → `Command` | Builder: `.arg(a)`, `.args([…])`, `.output()`, `.output_async()` (async, as `run_async`) |
 | `struct Output { stdout: [uint8], stderr: [uint8], status: ExitStatus }` | Output is raw bytes |
 | `enum ExitStatus { Exited(int32), Signaled(int32) }` | |
 | `enum SpawnError { NotFound, PermissionDenied, Other(int32) }` | `Other` carries the errno |

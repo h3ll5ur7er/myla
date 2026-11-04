@@ -129,7 +129,7 @@ struct Task { frames: [AFrame], state: int32, value: Value, failed: bool, err: O
 struct Sleeper { at: int64, seq: int64, task: int32 }
 
 // A task waiting for input on `fd` (D124, `std.io`'s async reads).
-struct FdWait { fd: int32, task: int32 }
+struct FdWait { fd: int32, fd2: int32, task: int32 }
 
 // A task's deadline (`std.task.timeout`, D124): at `at` the task `task` is
 // cancelled and `Interp.fired[rec]` says so.
@@ -1171,7 +1171,7 @@ impl Interp {
         var rest: [FdWait] = []
         var woke = false
         for w in self.fd_waits {
-            if __poll(w.fd, 0) != 0 {
+            if __poll(w.fd, 0) != 0 || (w.fd2 >= 0 && __poll(w.fd2, 0) != 0) {
                 self.tasks[w.task].state = 0
                 self.ready(w.task)
                 woke = true
@@ -2965,7 +2965,17 @@ impl Interp {
             let fd = as_int(self.eval(args[0])) as int32
             if self.stop() { return Value.VUnit }
             if self.cur < 0 || self.cur >= self.tasks.len() || self.tasks[self.cur].requested || __poll(fd, 0) != 0 { return Value.VUnit }
-            self.fd_waits.push(FdWait { fd: fd, task: self.cur })
+            self.fd_waits.push(FdWait { fd: fd, fd2: -1, task: self.cur })
+            self.tasks[self.cur].state = 1
+            self.parked = true
+            return Value.VUnit
+        }
+        if nm == "__wait_either" {
+            let fa = as_int(self.eval(args[0])) as int32
+            let fb = as_int(self.eval(args[1])) as int32
+            if self.stop() { return Value.VUnit }
+            if self.cur < 0 || self.cur >= self.tasks.len() || self.tasks[self.cur].requested || __poll(fa, 0) != 0 || __poll(fb, 0) != 0 { return Value.VUnit }
+            self.fd_waits.push(FdWait { fd: fa, fd2: fb, task: self.cur })
             self.tasks[self.cur].state = 1
             self.parked = true
             return Value.VUnit
@@ -3045,6 +3055,28 @@ impl Interp {
             var out: [Value] = []
             for a in self.argv { out.push(Value.VStr(a)) }
             return Value.VList(out)
+        }
+        // a child not waited for (D124): the native primitives' own
+        if nm == "__spawn" {
+            let prog = as_str(self.eval(args[0]))
+            var argv: [str] = []
+            match self.eval(args[1]) {
+                Value.VList(xs) => { for x in xs { argv.push(as_str(x)) } },
+                _ => {},
+            }
+            var out: [Value] = []
+            for x in __spawn(prog, argv) { out.push(Value.VInt(x as int64)) }
+            return Value.VList(out)
+        }
+        if nm == "__reap" { return Value.VInt(__reap(as_int(self.eval(args[0])) as int32) as int64) }
+        if nm == "__close" {
+            __close(as_int(self.eval(args[0])) as int32)
+            return Value.VUnit
+        }
+        if nm == "__kill" {
+            let pid = as_int(self.eval(args[0])) as int32
+            __kill(pid, as_int(self.eval(args[1])) as int32)
+            return Value.VUnit
         }
         if nm == "__run" {
             let prog = as_str(self.eval(args[0]))

@@ -2,7 +2,7 @@
 id: MYLA-230
 title: "Sleep, timers, timeouts and suspending I/O on a reactor"
 type: feature
-status: in-progress
+status: review
 priority: low
 labels: [concurrency, runtime, io]
 ---
@@ -12,7 +12,7 @@ D107 ([[MYLA-212]]): waits for the runtime off assembly ([[MYLA-162]]). A reacto
 - [x] The clock and `sleep`: `std.time` (`now_ms`, `now_ns`), `task.sleep`, the timer heap and the poller with its event descriptor only; `exec_stuck` with timers; the interpreter's sleeping tasks (real time, `MYLA_TIME=virtual`); tests in both
 - [x] `task.timeout` and cancellation waking reactor waits
 - [x] Suspending reads on pipes and standard input: async versions of `Reader`'s reads beside the blocking ones (D124 as refined: only an async function can suspend)
-- [ ] `std.process.run_async`, suspending, on pidfds
+- [x] `std.process.run_async`, suspending, on pidfds
 
 ## Step 1: the clock and sleep (2026-11-04)
 
@@ -32,4 +32,14 @@ D107 ([[MYLA-212]]): waits for the runtime off assembly ([[MYLA-162]]). A reacto
 - `Reader`'s async versions (`fill_async`, `read_line_async`, `read_exact_async`, `read_to_end_async`) wait on the awaited primitive `__wait_readable(fd)` before a read that then doesn't block; a task asked to stop gets ECANCELED. Natively `myla___wait_fd(frame, fd)` (std.rt's `wait_fd`) watches the descriptor in the poller (`EPOLLIN | EPOLLONESHOT`, the frame as the token; one the poller can't watch, a regular file, is ready at once) and keeps `[fd][frame]` in `__watches` under the timers' lock; the polling worker queues the frames its events name (unless a cancel took them first), waits with no deadline when only descriptors are watched, and a worker too busy to poll glances at the poller every 64 frames; a cancel unwatches and queues its tasks' waiting frames; `exec_stuck` also needs no descriptor watched. Without tasks the wait is nothing and the read blocks. The interpreter keeps waiting tasks beside its sleepers and polls their descriptors (`__poll`, no wait) before each turn, a millisecond at a time when nothing else is ready.
 - `__wait_readable` is in `std.io`, which the compiler itself imports, so the seed learnt the primitive first (a seed from the sources without the new reads), as for `__syscall5`.
 - Tests: lines fed 150 ms apart to a reader with `read_line_async` beside a ticker every 40 ms: on one worker the ticks come before the first line and between the lines, natively and in the interpreter (with the blocking `read_line` every tick waits for the input's end); a `timeout` of 50 ms around a read whose input comes two seconds later gives `None` at once on 1 and 4 workers and in the interpreter; standard input from a regular file is read at once.
+
+## Step 4: a child process waited for without blocking the worker (2026-11-04)
+
+- `std.process.run_async` (and `Command.output_async`): `__spawn` starts the child as `run` does (pipes, fork, exec, the exec's errno through a pipe closed on exec) without waiting, giving `[errno, pid, out, err, pidfd]` (`pidfd_open`: a descriptor readable when the child ends); one task then reads both pipes as either has bytes (`__wait_either`, a wait on two descriptors: the frame's two watch entries go together, so it is queued once), waits on the pidfd, and reaps the child (`__reap`: its code, or minus its signal). A task asked to stop kills the child (`__kill`), reaps it and gets ECANCELED. No `async let` in `std.process`: that would make every program importing it, the compiler too, a program with tasks.
+- A race the tests found: the polling worker, counted idle, took a frame off the watches (or the timers) before queueing it, and another worker going idle in between saw nothing queued, watched or set, and ended the program ("every task waits for another one"; 11 of 60 runs on 4 workers). The frames on their way are now counted (`__exec_waking`), and the check reads the counts, then that, then the queues again: 0 of 60 runs on 4 workers, 0 of 30 on 16.
+- Tests: a child that sleeps, writes to both streams and exits with 3 beside a ticker whose ticks all come first (on one worker; with the blocking `run` they wait for the child), 200 KB on each stream at once, a program that doesn't exist, a 50 ms limit around a child that would sleep five seconds (killed, no `sleep` left behind), and `run` unchanged; natively on 1 and 4 workers and in the interpreter.
+
+## Where it stands (2026-11-04)
+
+D124 is built: the clock and `sleep`, `timeout`, cancellation waking sleeps and reads, reads and child processes that suspend the task, natively on the executor's poller (epoll) and in the interpreter (real time, or `MYLA_TIME=virtual`). Left for later, as D124 said: a duration type; writes that suspend (a full pipe); sockets (no `std.net` yet).
 

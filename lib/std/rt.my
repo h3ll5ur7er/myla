@@ -270,6 +270,27 @@ pub fun run(program: str, argv: [str]) -> [uint8] {
     return os.run(program, argv)
 }
 
+// `__spawn`, `__reap`, `__kill`, `__close`: a child started and not waited
+// for, then waited for, signalled, its descriptors closed (D124,
+// `std.process.run_async`; the platform's).
+pub fun spawn(program: str, argv: [str]) -> [int] {
+    return os.spawn(program, argv)
+}
+
+pub fun reap(pid: int) -> int {
+    return os.reap(pid as int64) as int
+}
+
+pub fun kill(pid: int, sig: int) {
+    os.kill(pid as int64, sig as int64)
+}
+
+pub fun close(fd: int) {
+    if fd >= 0 {
+        os.close(fd as int64)
+    }
+}
+
 // --- standard input ----------------------------------------------------------
 
 // `__read`: what one read of at most `n` bytes of `fd` gives (retried on
@@ -1545,7 +1566,10 @@ pub fun exec_run() {
 fun exec_idle() {
     __fetch_add64(__rt_addr("__exec_idle"), 1)
     if exec_peek() == 0 {
-        if __rt_get("__exec_idle") >= __rt_get("__exec_workers") && __rt_get("__timer_count") == 0 && __rt_get("__watch_count") == 0 {
+        // (the counts first, then the wake-ups in flight, then the queues
+        // again: a frame taken off the timers or watches is counted in
+        // `__exec_waking` until it is queued)
+        if __rt_get("__exec_idle") >= __rt_get("__exec_workers") && __rt_get("__timer_count") == 0 && __rt_get("__watch_count") == 0 && __rt_get("__exec_waking") == 0 && exec_peek() == 0 {
             exec_stuck()
         }
         var spins: int64 = 4000
@@ -1724,6 +1748,7 @@ fun timers_fire() {
     let now = os.clock_ns()
     let lock = __rt_addr("__timer_lock")
     var due: [int64] = []
+    __fetch_add64(__rt_addr("__exec_waking"), 1)
     take_lock(lock)
     while true {
         let cell = __rt_get("__timers")
@@ -1752,6 +1777,7 @@ fun timers_fire() {
             exec_push(due[i])
         }
     }
+    __fetch_add64(__rt_addr("__exec_waking"), -1)
 }
 
 // The task whose first frame is `t` asked to stop (its flags' 2), and the
@@ -1773,7 +1799,8 @@ fun cancel_locked(t: int64) {
         while k < __load64(ws) {
             let wf = __load64(ws + 24 + k * 16)
             if task_below(__load64(wf + 40), t) {
-                os.poller_forget(__rt_get("__exec_poller"), __load64(ws + 16 + k * 16))
+                // every entry of the frame taken (and unwatched), so it is
+                // queued once
                 let gone = watch_take(wf)
                 exec_push(wf)
             } else {
@@ -1931,6 +1958,7 @@ fun exec_glance() {
 // descriptor became readable queued, unless a cancel took it already.
 fun poll_events(n: int64) {
     let lock = __rt_addr("__timer_lock")
+    __fetch_add64(__rt_addr("__exec_waking"), 1)
     var i: int64 = 0
     while i < n {
         let fr = os.poller_event(i)
@@ -1944,6 +1972,7 @@ fun poll_events(n: int64) {
         }
         i += 1
     }
+    __fetch_add64(__rt_addr("__exec_waking"), -1)
 }
 
 // --- descriptors: frames waiting for input (D124) --------------------------------
@@ -1955,6 +1984,18 @@ fun poll_events(n: int64) {
 // frame function suspends after this call). A task asked to stop waits no
 // time, nor for what the poller can't watch (a regular file: always ready).
 pub fun wait_fd(fr: int64, fd: int64) {
+    wait_fds(fr, fd, -1)
+}
+
+// `myla___wait_fd2(frame, a, b)`: the frame waiting until `a` or `b` is
+// readable (a child's stdout and stderr, `std.process.run_async`).
+pub fun wait_fd2(fr: int64, a: int64, b: int64) {
+    wait_fds(fr, a, b)
+}
+
+// The frame waiting for `a`, and `b` too unless it is negative: an entry
+// for each, so the first event takes both (`watch_take`).
+fun wait_fds(fr: int64, a: int64, b: int64) {
     if task_cancelled() != 0 {
         exec_push(fr)
         return
@@ -1964,6 +2005,23 @@ pub fun wait_fd(fr: int64, fd: int64) {
     if __rt_get("__exec_poller") == 0 {
         __store64(__rt_addr("__exec_poller"), os.poller_new())
     }
+    var ready = !watch_add(a, fr)
+    if b >= 0 && !ready {
+        ready = !watch_add(b, fr)
+    }
+    if ready {
+        // one the poller can't watch (a regular file): ready now
+        let gone = watch_take(fr)
+        __store64(lock, 0)
+        exec_push(fr)
+        return
+    }
+    __store64(lock, 0)
+}
+
+// An entry `[fd][frame]` on `__watches`, the descriptor watched; false when
+// the poller can't watch it (no entry then). The lock held.
+fun watch_add(fd: int64, fr: int64) -> bool {
     var cell = __rt_get("__watches")
     if cell == 0 || __load64(cell) == __load64(cell + 8) {
         var cap: int64 = 8
@@ -1982,39 +2040,40 @@ pub fun wait_fd(fr: int64, fd: int64) {
         __store64(__rt_addr("__watches"), bigger)
         cell = bigger
     }
+    if os.poller_watch(__rt_get("__exec_poller"), fd, fr) < 0 {
+        return false
+    }
     let n = __load64(cell)
     __store64(cell + 16 + n * 16, fd)
     __store64(cell + 24 + n * 16, fr)
     __store64(cell, n + 1)
     __store64(__rt_addr("__watch_count"), n + 1)
-    if os.poller_watch(__rt_get("__exec_poller"), fd, fr) < 0 {
-        let gone = watch_take(fr)
-        __store64(lock, 0)
-        exec_push(fr)
-        return
-    }
-    __store64(lock, 0)
+    return true
 }
 
-// Whether the frame `fr` was waiting for a descriptor; its entry taken off
-// (the lock held).
+// Whether the frame `fr` was waiting for a descriptor: every entry of it
+// taken off and its descriptor no longer watched (the lock held).
 fun watch_take(fr: int64) -> bool {
     let cell = __rt_get("__watches")
     if cell == 0 {
         return false
     }
-    let n = __load64(cell)
+    var n = __load64(cell)
+    var found = false
     var i: int64 = 0
     while i < n {
         if __load64(cell + 24 + i * 16) == fr {
-            __copy_bytes(cell + 16 + i * 16, cell + 16 + (n - 1) * 16, 16)
-            __store64(cell, n - 1)
-            __store64(__rt_addr("__watch_count"), n - 1)
-            return true
+            os.poller_forget(__rt_get("__exec_poller"), __load64(cell + 16 + i * 16))
+            n -= 1
+            __copy_bytes(cell + 16 + i * 16, cell + 16 + n * 16, 16)
+            found = true
+        } else {
+            i += 1
         }
-        i += 1
     }
-    return false
+    __store64(cell, n)
+    __store64(__rt_addr("__watch_count"), n)
+    return found
 }
 
 // Every task waits for another one: the program ends.

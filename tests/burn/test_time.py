@@ -286,6 +286,83 @@ async fun main() {
 FEEDER = "import sys, time\nfor i in range(3):\n    time.sleep(0.15)\n    sys.stdout.write(f'{i}\\n'); sys.stdout.flush()\n"
 
 
+# `process.run_async`: a child that sleeps, writes both streams and exits 3,
+# beside a ticker (its ticks go on meanwhile); 200 KB on each stream at once
+# (no deadlock between the pipes); a program that doesn't exist; a time
+# limit around a child that would sleep five seconds (killed); `run` as before
+PROCESS = """import std.process as process
+from std.process import ExitStatus, SpawnError
+import std.task as task
+import std.time as time
+
+fun text(bs: [uint8]) -> int {
+    return bs.len()
+}
+
+async fun child() -> str {
+    return match await process.run_async("/bin/sh", ["-c", "sleep 0.2; echo out; echo error >&2; exit 3"]) {
+        Ok(o) => {
+            let code = match o.status {
+                ExitStatus.Exited(c) => c,
+                ExitStatus.Signaled(s) => -s,
+            }
+            f"{text(o.stdout)} {text(o.stderr)} {code}"
+        },
+        Err(e) => "spawn failed",
+    }
+}
+
+async fun big() -> str {
+    return match await process.run_async("/bin/sh", ["-c", "head -c 200000 /dev/zero | tr '\\\\0' a; head -c 200000 /dev/zero | tr '\\\\0' b >&2"]) {
+        Ok(o) => f"{text(o.stdout)} {text(o.stderr)}",
+        Err(e) => "spawn failed",
+    }
+}
+
+async fun ticker() -> int {
+    var n = 0
+    for i in 0..5 {
+        await task.sleep(30)
+        n = n + 1
+        print("t")
+    }
+    return n
+}
+
+async fun missing() -> str {
+    return match await process.run_async("/no/such/program", []) {
+        Ok(o) => "ran",
+        Err(e) => match e {
+            SpawnError.NotFound => "not found",
+            _ => "other error",
+        },
+    }
+}
+
+async fun slow() -> int {
+    return match await process.run_async("/bin/sleep", ["5"]) {
+        Ok(o) => 0,
+        Err(e) => 1,
+    }
+}
+
+#main
+async fun main() {
+    let start = time.now_ms()
+    async let c = child()
+    async let t = ticker()
+    print(await c)
+    print(await t)
+    print(await big())
+    print(await missing())
+    let r = await task.timeout(50, async () => await slow())
+    print(match r { Some(v) => "finished", None => "timed out" })
+    print(time.now_ms() - start < 3000)
+    print(match process.run("/bin/sh", ["-c", "echo sync"]) { Ok(o) => text(o.stdout), Err(e) => -1 })
+}
+"""
+
+
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
 class Time(unittest.TestCase):
     def setUp(self):
@@ -423,6 +500,19 @@ class Time(unittest.TestCase):
             with self.subTest(file=label), open(path, encoding="utf-8") as fh:
                 out = subprocess.run(cmd, stdin=fh, capture_output=True, text=True, timeout=60).stdout
                 self.assertEqual(out, "from file\ntrue\n")
+
+    def test_a_child_process_waited_for_without_blocking_the_worker(self):
+        want = "t\nt\nt\nt\nt\n4 6 3\n5\n200000 200000\nnot found\ntimed out\ntrue\n5\n"
+        exe = self.native("process", PROCESS)
+        for workers in ["1", "4"]:
+            with self.subTest(workers=workers):
+                out, err, code, _ = self.run_timed([exe], MYLA_THREADS=workers)
+                if workers == "1":
+                    self.assertEqual((out, err, code), (want, "", 0))
+                else:
+                    self.assertEqual((sorted(out.splitlines()), err, code), (sorted(want.splitlines()), "", 0))
+        out, err, code, _ = self.interpreted("process", PROCESS)
+        self.assertEqual((out, err, code), (want, "", 0))
 
 
 if __name__ == "__main__":
