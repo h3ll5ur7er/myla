@@ -811,9 +811,11 @@ impl CodeGen {
                 // per-type drop routines' fast path, MYLA-162)
                 if name == "__rc_dec" || name == "__rc_dec_atomic" {
                     let at = self.rc_dec(name, args[0], temp_base)
-                    self.emit("sete %al")
-                    self.emit("movzbl %al, %eax")
-                    self.store_temp(d, temp_base)
+                    if d >= 0 && self.temp_uses[d] > 0 {
+                        self.emit("sete %al")
+                        self.emit("movzbl %al, %eax")
+                        self.store_temp(d, temp_base)
+                    }
                     return
                 }
                 // a frame resumed (its resume function the frame's first

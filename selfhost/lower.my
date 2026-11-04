@@ -4369,3 +4369,111 @@ impl Lower {
         }
     }
 }
+
+// A copy-on-write clone (`__clone_list_<E>`, `__clone_map_<K>_<V>`,
+// `__sb_clone`; `t` the list's, map's or builder's type): the shared cell
+// given copied into a new one (count 1), each element or occupied slot it
+// now shares retained, the original's count down by one (the caller saw it
+// above 1); the copy returned.
+pub fun clone_ir(cg: CodeGen, t: Type, name: str) -> IrFunc {
+    let i64 = Type.TInt(64, true)
+    var lw = routine(name, Some(i64))
+    let sp = lw.new_slot("cell", i64, 8, 0, false)
+    let sc = lw.new_slot("copy", i64, 8, -1, false)
+    let size = lw.temp(i64)
+    lw.add(Inst.LoadAt(size, lw.read_cell(sp), -16, 8))
+    let c = lw.temp(i64)
+    lw.add(Inst.Rt(c, "__alloc", [size]))
+    lw.add(Inst.Store(sc, c))
+    let size2 = lw.temp(i64)
+    lw.add(Inst.LoadAt(size2, lw.read_cell(sp), -16, 8))
+    lw.add(Inst.Rt(-1, "__copy_bytes", [lw.read_cell(sc), lw.read_cell(sp), size2]))
+    match t {
+        Type.TList(et) => {
+            if cg.owns_heap(et) || cg.is_boxed(et) {
+                lw.each_entry(cg, sc, 0, cg.elem_size(et), false, et, Type.TBool, true)
+            }
+        },
+        Type.TMap(kt, vt) => {
+            if cg.owns_heap(kt) || cg.owns_heap(vt) {
+                lw.each_entry(cg, sc, 8, cg.map_slot_size(t), true, kt, vt, true)
+            }
+        },
+        _ => {},
+    }
+    lw.add(Inst.Rt(-1, "__rc_dec", [lw.read_cell(sp)]))
+    lw.finish(Term.Ret(lw.read_cell(sc)))
+    return lw.f
+}
+
+impl Lower {
+    // Over the entries of the list or map cell in the slot `sc` (`count_at`:
+    // the word holding how many, its length or its capacity; `stride` bytes
+    // an entry): a list's element of type `a` retained (`retain`) or
+    // released, or a map's occupied slot's key `a` and value `b`.
+    fun each_entry(var self, cg: CodeGen, sc: int32, count_at: int32, stride: int32, is_map: bool, a: Type, b: Type, retain: bool) {
+        let i64 = Type.TInt(64, true)
+        let si = self.new_slot("i", i64, 8, -1, false)
+        let sn = self.new_slot("n", i64, 8, -1, false)
+        self.add(Inst.Store(si, self.int_const(0)))
+        let n = self.temp(i64)
+        self.add(Inst.LoadAt(n, self.read_cell(sc), count_at, 8))
+        self.add(Inst.Store(sn, n))
+        let body = self.new_block()
+        let next = self.new_block()
+        let done = self.new_block()
+        self.count_test(si, sn, body, done)
+        self.start(body)
+        if is_map {
+            let state = self.temp(i64)
+            self.add(Inst.LoadAt(state, self.entry_at(sc, si, stride), 16, 8))
+            let full = self.temp(Type.TBool)
+            self.add(Inst.Cmp(full, "==", i64, state, self.int_const(1)))
+            let occupied = self.new_block()
+            self.finish(Term.Br(full, occupied, next))
+            self.start(occupied)
+            if cg.owns_heap(a) { self.entry_member(cg, self.entry_at(sc, si, stride), 24, a, retain) }
+            if cg.owns_heap(b) { self.entry_member(cg, self.entry_at(sc, si, stride), 32, b, retain) }
+        } else {
+            self.entry_member(cg, self.entry_at(sc, si, stride), 16, a, retain)
+        }
+        self.finish(Term.Jmp(next))
+        self.start(next)
+        let i2 = self.temp(i64)
+        self.add(Inst.Load(i2, si))
+        let i3 = self.temp(i64)
+        self.add(Inst.Bin(i3, "+", i64, i64, i2, self.int_const(1), Pos { line: 0, col: 0 }))
+        self.add(Inst.Store(si, i3))
+        self.count_test(si, sn, body, done)
+        self.start(done)
+    }
+
+    // The cell in `sc` plus the index in `si` times `stride`.
+    fun entry_at(var self, sc: int32, si: int32, stride: int32) -> int32 {
+        let i64 = Type.TInt(64, true)
+        let i = self.temp(i64)
+        self.add(Inst.Load(i, si))
+        let scaled = self.temp(i64)
+        self.add(Inst.Bin(scaled, "*", i64, i64, i, self.int_const(stride), Pos { line: 0, col: 0 }))
+        let at = self.temp(i64)
+        self.add(Inst.Bin(at, "+", i64, i64, self.read_cell(sc), scaled, Pos { line: 0, col: 0 }))
+        return at
+    }
+
+    // The member of type `ft` at `off` from `at` retained or released.
+    fun entry_member(var self, cg: CodeGen, at: int32, off: int32, ft: Type, retain: bool) {
+        if !retain {
+            self.drop_member(cg, at, off, ft)
+            return
+        }
+        if cg.is_boxed(ft) || is_cell_t(ft) {
+            let v = self.temp(ft)
+            self.add(Inst.LoadAt(v, at, off, 8))
+            self.add(Inst.RetainVal(ft, v))
+        } else if is_tfunc(ft) || cg.owns_heap(ft) {
+            let p = self.temp(Type.TInt(64, true))
+            self.add(Inst.Bin(p, "+", Type.TInt(64, true), Type.TInt(64, true), at, self.int_const(off), Pos { line: 0, col: 0 }))
+            self.add(Inst.Retain(ft, p))
+        }
+    }
+}

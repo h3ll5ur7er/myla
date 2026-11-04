@@ -20,7 +20,7 @@ from .ir import render_func, verify, moves, IrFunc, Inst
 from .ssa import SsaStats, no_ssa_stats
 from .inline import inlinable, inline_calls, same_module, may_inline, merge_blocks
 from .anf import Norm, new_norm
-from .lower import lower_function, lower_lambda, blocked_types, Lowered, myla_runtime_function, derived_eq_ir, walk_ir, drop_entry_ir, dropb_slow_ir, list_drop_slow_ir, map_drop_slow_ir
+from .lower import lower_function, lower_lambda, blocked_types, Lowered, myla_runtime_function, derived_eq_ir, walk_ir, drop_entry_ir, dropb_slow_ir, list_drop_slow_ir, map_drop_slow_ir, clone_ir
 import .ir_x86 as ir_x86
 from .dwarf import uleb, sleb, bytes_line, exprloc, str_pieces, dw_string, dw_ref, abbrev_section, gdb_scripts_section, AB_CU, AB_BASE, AB_SUBPROGRAM, AB_TYPED_SUBPROGRAM, AB_PARAM, AB_VAR, AB_BLOCK, AB_PTR, AB_VOIDPTR, AB_STRUCT, AB_MEMBER, AB_ARRAY, AB_SUBRANGE, AB_VARIANT_PART, AB_VARIANT, AB_TAG, OP_FBREG, OP_BREG15, OP_DEREF, OP_PLUS_UCONST, OP_STACK_VALUE, OP_PUSH_OBJECT_ADDRESS, OP_LIT0, OP_MINUS, OP_REG6, OP_GNU_DEREF_TYPE, OP_GNU_CONVERT, ATE_BOOLEAN, ATE_FLOAT, ATE_SIGNED, ATE_UNSIGNED, ATE_UTF, LANG_RUST
 from .parser import expr_of, stmt_of, type_expr_of, block_of, pattern_of, fun_of  // AST values for #test cases (MYLA-184)
@@ -1509,6 +1509,16 @@ impl CodeGen {
         if self.helper_seen.contains(key) { return }
         self.helper_seen[key] = true
         self.need_drop.push(t)
+    }
+
+    // Whether the list or map type `t` holds nothing that owns heap values
+    // (its clone and drop are the builder's, MYLA-162).
+    fun holds_nothing(self, t: Type) -> bool {
+        return match t {
+            Type.TList(e) => !self.owns_heap(e) && !self.is_boxed(e),
+            Type.TMap(k, v) => !self.owns_heap(k) && !self.owns_heap(v) && !self.is_boxed(v),
+            _ => false,
+        }
     }
 
     // Record that `t`'s copy-on-write clone routine must be emitted.
@@ -5252,14 +5262,20 @@ impl CodeGen {
             self.raw("")
         }
         // __str_drop: rdi = str cell. Decrement; free at zero (a str owns nothing
-        // else); static cells never reach zero. Clobbers only %rax (MYLA-18).
-        self.raw("__str_drop:")
-        self.raw("\tdecq -8(%rdi)")
-        self.raw("\tjnz .Lsdrop_keep")
-        self.raw("\tjmp __free")
-        self.raw(".Lsdrop_keep:")
-        self.raw("\tret")
-        self.raw("")
+        // else); static cells never reach zero. Built as IR with std.rt's
+        // allocator (MYLA-162).
+        if self.rt_alloc() {
+            self.emit_routine(drop_entry_ir("__str_drop", self.rt_alloc_names().1, false), -1, 0, 0)
+            self.raw("\t.set __str_drop, myla___str_drop")
+        } else {
+            self.raw("__str_drop:")
+            self.raw("\tdecq -8(%rdi)")
+            self.raw("\tjnz .Lsdrop_keep")
+            self.raw("\tjmp __free")
+            self.raw(".Lsdrop_keep:")
+            self.raw("\tret")
+            self.raw("")
+        }
         self.raw("__heap_init:")
         if self.frames {
             // with tasks: this worker's arena of the region `_start` reserved
@@ -6995,7 +7011,7 @@ impl CodeGen {
     // (D105, MYLA-179; a new key takes the count, `__map_rebuild` closes the gap
     // a removed one leaves, and a grow copies them). Open addressing, linear probing,
     // multiplicative hashing (`__map_hash`). cap is a power of two. Copy-on-write clones are per type
-    // (`__clone_map_*`, emit_map_clone_helper) and retain the values they share.
+    // (`__clone_map_*`, `clone_ir`) and retain the values they share.
     fun emit_map_runtime(var self) {
         if !self.rt_exec_has("__map_lookup") {
             // __map_hash: rsi=key (value or str cell), rcx=is_str -> rax=hash,
@@ -7573,6 +7589,12 @@ impl CodeGen {
                 var free = ""
                 if self.rt_alloc() { free = self.rt_alloc_names().1 }
                 let name = self.drop_call_name(t)
+                // a list or map whose entries own nothing: the builder's drop
+                if free != "" && self.holds_nothing(t) {
+                    self.need_sb = true
+                    self.raw(format("\t.set {}, myla___sb_drop", name))
+                    continue
+                }
                 let slow = name + "_slow"
                 var atomic = false
                 match t {
@@ -7597,11 +7619,16 @@ impl CodeGen {
                 let tok = mono_token(t)
                 if list_has_str(self.clone_emitted, tok) { continue }
                 self.clone_emitted.push(tok)
-                match t {
-                    Type.TList(e) => { self.emit_list_clone_helper(t) },
-                    Type.TMap(k2, v) => { self.emit_map_clone_helper(t) },
-                    _ => {},
+                // built as IR (MYLA-162); a list or map whose entries own
+                // nothing: the builder's clone
+                let name = self.clone_call_name(t)
+                if self.rt_alloc() && self.holds_nothing(t) {
+                    self.need_sb = true
+                    self.raw(format("\t.set {}, myla___sb_clone", name))
+                    continue
                 }
+                self.emit_routine(clone_ir(self, t, name), -1, 0, 0)
+                self.raw(format("\t.set {}, myla_{}", name, name))
             }
             while dk < self.need_deep.len() {
                 let t = self.need_deep[dk]
@@ -7632,122 +7659,17 @@ impl CodeGen {
         if self.need_sb { self.emit_sb_rc_helpers() }
     }
 
-    // `__clone_list_<elem>`: %rdi = shared cell. Allocate an independent copy
-    // (rc=1), retain each element it now shares, decrement the original, and
-    // return the copy in %rax (the copy-on-write clone, D38).
-    fun emit_list_clone_helper(var self, t: Type) {
-        let et = list_elem(t)
-        let stride = self.elem_size(et)
-        self.emit(format("__clone_list_{}:", mono_token(et)))
-        self.emit("pushq %rbp")
-        self.emit("movq %rsp, %rbp")
-        self.emit("pushq %rbx")
-        self.emit("pushq %r12")
-        self.emit("pushq %r13")
-        self.emit("pushq %r14")
-        self.emit("movq %rdi, %rbx")
-        self.emit("movq -16(%rbx), %r12")
-        self.emit("movq %r12, %rdi")
-        self.emit("call __alloc")
-        self.emit("movq %rax, %r13")
-        self.emit("movq %rbx, %rsi")
-        self.emit("movq %r13, %rdi")
-        self.emit("movq %r12, %rcx")
-        self.emit_byte_copy(false)
-        if self.owns_heap(et) {
-            self.emit("movq (%r13), %r12")
-            self.emit("xorq %r14, %r14")
-            let loop = self.label()
-            let done = self.label()
-            self.emit(format("{}:", loop))
-            self.emit("cmpq %r12, %r14")
-            self.emit(format("jge {}", done))
-            self.emit("movq %r14, %rax")
-            self.emit(format("imulq ${}, %rax", stride))
-            self.emit("leaq 16(%r13,%rax), %rcx")
-            self.walk_member("rcx", 0, et, true)
-            self.emit("incq %r14")
-            self.emit(format("jmp {}", loop))
-            self.emit(format("{}:", done))
-        }
-        self.emit("decq -8(%rbx)")
-        self.emit("movq %r13, %rax")
-        self.emit("popq %r14")
-        self.emit("popq %r13")
-        self.emit("popq %r12")
-        self.emit("popq %rbx")
-        self.emit("leave")
-        self.emit("ret")
-        self.emit("")
-    }
-
-    // `__clone_map_<k>_<v>`: %rdi = shared map cell -> rax = independent copy
-    // (rc=1); retain each occupied slot's owning key/value; original decremented.
-    fun emit_map_clone_helper(var self, t: Type) {
-        let kt = map_key(t)
-        let vt = map_val(t)
-        let ss = self.map_slot_size(t)
-        self.emit(format("__clone_map_{}:", map_token(kt, vt)))
-        self.emit("pushq %rbp")
-        self.emit("movq %rsp, %rbp")
-        self.emit("pushq %rbx")
-        self.emit("pushq %r12")
-        self.emit("pushq %r13")
-        self.emit("pushq %r14")
-        self.emit("movq %rdi, %rbx")
-        self.emit("movq -16(%rbx), %r12")
-        self.emit("movq %r12, %rdi")
-        self.emit("call __alloc")
-        self.emit("movq %rax, %r13")
-        self.emit("movq %rbx, %rsi")
-        self.emit("movq %r13, %rdi")
-        self.emit("movq %r12, %rcx")
-        self.emit("cld")
-        self.emit("rep movsb")
-        if self.owns_heap(kt) || self.owns_heap(vt) {
-            self.emit("movq 8(%r13), %r12")
-            self.emit("xorq %r14, %r14")
-            let loop = self.label()
-            let done = self.label()
-            self.emit(format("{}:", loop))
-            self.emit("cmpq %r12, %r14")
-            self.emit(format("jge {}", done))
-            self.emit("movq %r14, %rax")
-            self.emit(format("imulq ${}, %rax", ss))
-            self.emit("leaq 16(%r13,%rax), %rcx")
-            self.emit("movq (%rcx), %rax")
-            self.emit("cmpq $1, %rax")
-            let cont = self.label()
-            self.emit(format("jne {}", cont))
-            // the slot's address on the stack: a walk may call a helper
-            self.emit("pushq %rcx")
-            if self.owns_heap(kt) {
-                self.emit("movq (%rsp), %rcx")
-                self.walk_member("rcx", 8, kt, true)
-            }
-            if self.owns_heap(vt) {
-                self.emit("movq (%rsp), %rcx")
-                self.walk_member("rcx", 16, vt, true)
-            }
-            self.emit("addq $8, %rsp")
-            self.emit(format("{}:", cont))
-            self.emit("incq %r14")
-            self.emit(format("jmp {}", loop))
-            self.emit(format("{}:", done))
-        }
-        self.emit("decq -8(%rbx)")
-        self.emit("movq %r13, %rax")
-        self.emit("popq %r14")
-        self.emit("popq %r13")
-        self.emit("popq %r12")
-        self.emit("popq %rbx")
-        self.emit("leave")
-        self.emit("ret")
-        self.emit("")
-    }
 
     // Builder reference-counting helpers (bytes are scalars: drop just frees).
     fun emit_sb_rc_helpers(var self) {
+        // built as IR with std.rt's allocator (MYLA-162)
+        if self.rt_alloc() {
+            self.emit_routine(drop_entry_ir("__sb_drop", self.rt_alloc_names().1, false), -1, 0, 0)
+            self.raw("\t.set __sb_drop, myla___sb_drop")
+            self.emit_routine(clone_ir(self, Type.TSB, "__sb_clone"), -1, 0, 0)
+            self.raw("\t.set __sb_clone, myla___sb_clone")
+            return
+        }
         self.emit("__sb_drop:")
         self.emit("decq -8(%rdi)")
         let keep = self.label()
@@ -7782,7 +7704,7 @@ impl CodeGen {
     // List cell layout: [len:8][cap:8][elem0..]. The value pointer points at the
     // length word. Strides are passed in (per element type) so one routine serves
     // every list. Copy-on-write clones are per element type (`__clone_list_*`,
-    // emit_list_clone_helper): they retain the elements they share (D38).
+    // `clone_ir`): they retain the elements they share (D38).
     fun emit_list_runtime(var self) {
         if !self.rt_exec_has("__list_grow") {
             // __list_grow: rdi=full cell (len==cap), rsi=stride -> rax=larger cell.
