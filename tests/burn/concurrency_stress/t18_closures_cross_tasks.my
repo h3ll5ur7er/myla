@@ -1,0 +1,46 @@
+// 18. Closures handed to children and shared between siblings: each task
+// gets the environment (its strings, lists, struct and nested function
+// value) deep-copied or cloned, and the original stays whole; a composition's
+// too (MYLA-162)
+struct P {
+    name: str,
+    tags: [str],
+}
+
+fun make(s: str, p: P) -> (int) -> int {
+    let xs = [1, 2, 3]
+    let g = (k: int) => k + len(p.tags)
+    return (n: int) => n + len(s) + len(xs) + g(n) + len(p.name)
+}
+
+async fun use(f: (int) -> int, n: int) -> int {
+    var t = 0
+    for i in 0..n {
+        t = t + f(i)
+    }
+    return t
+}
+
+async fun maker(i: int) -> (int) -> int {
+    return make(f"k{i}", P { name: "pq", tags: ["a", f"t{i}"] })
+}
+
+#main
+async fun main() {
+    var total = 0
+    var round = 0
+    while round < 1000 {
+        let f = make("abc", P { name: "pq", tags: ["a", "b"] })
+        async let a = use(f, 10)
+        async let b = use(f, 20)
+        async let m = maker(round)
+        async let c = use(await m, 5)
+        async let d = use(await m, 7)
+        let h = f >> ((n: int) => n * 2)
+        async let e = use(h, 4)
+        let mine = await m
+        total = total + await a + await b + await c + await d + await e + f(1) + mine(2) + h(3)
+        round = round + 1
+    }
+    print(total)
+}

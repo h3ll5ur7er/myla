@@ -26,7 +26,7 @@
 // the project root and then the stdlib root.
 
 from std.fs import read_to_string, exists, is_dir
-from .stdroot import is_embedded, embedded_text
+from .stdroot import is_embedded, embedded_text, EMBEDDED_ROOT
 from .parser import parse_source_all, expr_of, stmt_of, type_expr_of, block_of, pattern_of, fun_of
 from .diag import Report, reports, type_report, chain
 from .checker import CheckErr
@@ -327,6 +327,11 @@ impl Loader {
 
     fun module_id(self, path: str) -> str {
         if path == self.entry { return "" }
+        // the standard library the tools carry (the runtime's fallback)
+        match rel_under(path, EMBEDDED_ROOT) {
+            Some(rest) => { return module_tag(rest) },
+            None => {},
+        }
         if self.stdlib_root != "" {
             match rel_under(path, self.stdlib_root) {
                 Some(rest) => { return module_tag(rest) },
@@ -1328,14 +1333,20 @@ pub fun load_program_opts(entry: str, opts: LoadOptions) -> Result<Loaded, Repor
     for p in opts.overrides.keys() { normalized[normalize(p)] = opts.overrides[p] }
     var ld = Loader { stdlib_root: stdlib, project_root: project_root, packages: packages, entry: e, modules: [], next_id: 0, spans: [], overrides: normalized }
     ld.load(e)?
-    // the runtime's functions in Myla, compiled where a program uses them; a
-    // standard library without them leaves the assembly routines in place
-    let rt_path = join_path(stdlib, "std/rt.my")
-    let have_rt = match source_text(rt_path, normalized) {
-        Some(t) => true,
-        None => readable(rt_path),
+    // the runtime's functions in Myla (MYLA-162), compiled where a program
+    // uses them: the standard library's, else the copy the tools carry
+    if opts.runtime {
+        var rt_path = EMBEDDED_ROOT + "/std/rt.my"
+        if stdlib != "" {
+            let own = join_path(stdlib, "std/rt.my")
+            let have = match source_text(own, normalized) {
+                Some(t) => true,
+                None => readable(own),
+            }
+            if have { rt_path = own }
+        }
+        let rt = ld.load(rt_path)?
     }
-    if opts.runtime && stdlib != "" && have_rt { let rt = ld.load(rt_path)? }
     ld.check_ids()?
     ld.build_exports()
     ld.build_bindings()?

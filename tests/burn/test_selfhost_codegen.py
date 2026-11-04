@@ -719,7 +719,9 @@ class SelfHostedCodegenParity(unittest.TestCase):
             asm = self._emit_asm(path)
         body = function_body(asm, "myla_K.eq")
         self.assertLess(len(body), 16, "\n".join(body))
-        self.assertGreater(len(function_body(asm, "myla_P.eq")), 15)
+        # a payload's variant compares it too (the routine built as IR, MYLA-162)
+        p_eq = "\n".join(function_body(asm, "myla_P.eq"))
+        self.assertIn("cmpq 8(", p_eq, p_eq)
 
     def test_corpus_codegen_parity(self) -> None:
         checked = 0
@@ -1171,6 +1173,40 @@ class SelfHostedCodegenParity(unittest.TestCase):
         self.assertRegex(body, r"movq __heap_ptr\(%rip\), %r", body)
         self.assertNotIn("leaq __heap_ptr", body, body)
 
+    def test_a_library_without_the_runtime_gets_the_embedded_one(self) -> None:
+        # MYLA-162: the runtime is std.rt, so a standard library folder
+        # without `std/rt.my` compiles against the copy the tools carry
+        source = (
+            "fun main() {\n"
+            "    var xs = [\"a\"]\n"
+            "    xs.push(f\"b{len(xs)}\")\n"
+            "    print(xs[1])\n"
+            "}\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            os.makedirs(os.path.join(tmp, "lib", "std"))
+            path = os.path.join(tmp, "prog.my")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(source)
+            asm = self._emit_asm(path, os.path.join(tmp, "lib"))
+            self.assertIn("myla_std$rt$alloc:", asm)
+            self.assertEqual(self._build_and_run(asm), ("b1\n", 0))
+
+    def test_a_float_rounds_to_the_nearest_integer(self) -> None:
+        # MYLA-162: `__f64_round(x)` is one `cvtsd2si`: the nearest int64,
+        # ties to even (the float formatting in std.rt rounds so)
+        source = (
+            "fun main() {\n"
+            "    let xs = [2.5, 3.5, -1.5, 1.4999, -0.5, 1e15 + 0.5, 7.0]\n"
+            "    for x in xs { print(__f64_round(x)) }\n"
+            "}\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "prog.my")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(source)
+            asm = self._emit_asm(path)
+            self.assertEqual(self._build_and_run(asm), ("2\n4\n-2\n1\n0\n1000000000000000\n7\n", 0))
+        self.assertIn("cvtsd2si", self._function_asm(asm, "main"))
+
     def test_atomics_and_pause_are_inline(self) -> None:
         # MYLA-162: the runtime's atomics are single instructions in place,
         # without a call: `__cas64` a `lock cmpxchg`, `__xchg64` an `xchg`,
@@ -1299,10 +1335,53 @@ class SelfHostedCodegenParity(unittest.TestCase):
             asm = self._emit_asm(path)
             self.assertEqual(self._build_and_run(asm), ("-578\n2717256091452271059\n", 0))
         body = self._function_asm(asm, "spin")
-        head = re.findall(r"jmp (\.L\d+)\n", body)[-1]
-        loop = body[body.index(head + ":"):body.rindex("jmp " + head)]
+        # the loop: from its first block to the jump back to it
+        loop = ""
+        for m in re.finditer(r"\tj[a-z]+ (\.L\d+)\n", body):
+            at = body.find(m.group(1) + ":")
+            if 0 <= at < m.start():
+                loop = body[at:m.start()]
+        self.assertNotEqual(loop, "", body)
         self.assertNotIn("(%rbp)", loop, body)
         self.assertRegex(loop, r"%r[sd]i", body)
+
+    def test_a_while_loop_tests_at_its_end(self) -> None:
+        # MYLA-162: `while c { body }` tests `c` on the way in and at the end
+        # of each turn, jumping back to the body: no `jmp` a turn, and
+        # `continue` goes to the test
+        source = (
+            "fun sum(n: int64) -> int64 {\n"
+            "    var s: int64 = 0\n"
+            "    var i: int64 = 0\n"
+            "    while i < n {\n"
+            "        s += i\n"
+            "        i += 1\n"
+            "    }\n"
+            "    return s\n"
+            "}\n"
+            "fun odd(n: int64) -> int64 {\n"
+            "    var s: int64 = 0\n"
+            "    var i: int64 = 0\n"
+            "    while i < n {\n"
+            "        i += 1\n"
+            "        if i % 2 == 0 { continue }\n"
+            "        s += i\n"
+            "    }\n"
+            "    return s\n"
+            "}\n"
+            "fun main() {\n"
+            "    print(sum(10))\n"
+            "    print(sum(0))\n"
+            "    print(odd(10))\n"
+            "}\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "prog.my")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(source)
+            asm = self._emit_asm(path, flags=("--no-inline",))
+            self.assertEqual(self._build_and_run(asm), ("45\n0\n25\n", 0))
+        body = self._function_asm(asm, "sum")
+        self.assertNotIn("\tjmp ", body, body)
 
     def test_while_true_tests_nothing(self) -> None:
         # MYLA-162: `while true` jumps back to its body, with no constant

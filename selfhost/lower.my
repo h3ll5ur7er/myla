@@ -30,7 +30,7 @@
 from std.num import f64_literal_bits, f32_round_bits
 from .ast import Expr, ExprKind, Stmt, StmtKind, Block, FunData, ElseTail, ExprOrBlock, MatchArm, Pattern, PatternKind, FieldInit, MapEntry, BindElem, bind_elems, Param
 from .checker import Type, is_raw_memory_primitive, Subst, FuncSig, opt_subst_type, subst_type, builtin_method
-from .codegen import codegen_on, may_write_expr, is_actor_t, is_async_t, CodeGen, LamJob, PartialJob, Cap, DropEntry, tfunc_params, tfunc_ret, is_hole_expr, mangle_fn, is_builtin_call_name, is_aggregate, tuple_elems, is_struct_or_enum_t, is_tfunc, is_overloadable_op, arith_method_cg, enum_name_of, is_tstr, is_cmp, place_root, is_aggregate_opt, arms_may_write, is_cell_t, list_elem, is_list_t, is_map_t, is_str_t, map_key, map_val, format_segments, args_have_hole, success_variant, failure_variant
+from .codegen import codegen_on, may_write_expr, is_actor_t, is_sb_t, is_async_t, CodeGen, LamJob, PartialJob, Cap, DropEntry, tfunc_params, tfunc_ret, is_hole_expr, mangle_fn, is_builtin_call_name, is_aggregate, tuple_elems, is_struct_or_enum_t, is_tfunc, is_overloadable_op, arith_method_cg, enum_name_of, is_tstr, is_cmp, place_root, is_aggregate_opt, arms_may_write, is_cell_t, list_elem, is_list_t, is_map_t, is_str_t, map_key, map_val, format_segments, args_have_hole, success_variant, failure_variant
 from .ir import IrFunc, IrBlock, Inst, Term, Slot, Pos, Instance, ENV_WORD
 from .parser import expr_of, stmt_of, type_expr_of, block_of, pattern_of, fun_of  // AST values for #test cases (MYLA-184)
 
@@ -66,7 +66,17 @@ struct LoopTarget { cont: int32, brk: int32, owners: int32, temps: int32 }
 // function holds between suspensions (D92), or -1; `deep_res`: an actor
 // method's result is copied deeply before it leaves the actor (D92).
 // `scope_ids`: the open scopes' indices in `f.scope_parent` (MYLA-183).
-struct Lower { f: IrFunc, cur: int32, scopes: [[Local]], scope_ids: [int32], owners: [[int32]], temps: [[int32]], loops: [LoopTarget], sret: int32, arm_binds: [Local], err: str, lams: [LamJob], partials: [PartialJob], fnvals: [str], holder: [int32], into: int32, placed: [bool], tail: bool, tailed: bool, frame_fn: bool, result: int32, tasks: [TaskSlot], actor_self: int32, actor_off: int32, deep_res: bool, narrow: [int32: int32] }
+struct Lower { f: IrFunc, cur: int32, scopes: [[Local]], scope_ids: [int32], owners: [[int32]], temps: [[int32]], loops: [LoopTarget], sret: int32, arm_binds: [Local], err: str, lams: [LamJob], partials: [PartialJob], fnvals: [str], holder: [int32], into: int32, placed: [bool], tail: bool, tailed: bool, frame_fn: bool, result: int32, tasks: [TaskSlot], actor_self: int32, actor_off: int32, deep_res: bool, narrow: [int32: int32], wants: [Want] }
+
+// A per-type routine a routine built as IR calls, for the code generator to
+// emit (MYLA-162): `kind` 0 a cell's deep copy, 1 an inline value's deep
+// walk, 2 a boxed enum's contents' deep walk, 3 a copy-on-write clone, 4 a
+// release walk, 5 a retain walk, 6 a cell type's drop routine; of
+// type `t`, a deep clone's when `clone`.
+pub struct Want { kind: int32, t: Type, clone: bool }
+
+// A routine's IR and the routines it calls.
+pub struct Routine { f: IrFunc, wants: [Want] }
 
 // A function's IR, with the code it needs generated besides (see `Lower`).
 // A child task of an `async let` (D89): the slot holding its frame, its
@@ -82,7 +92,7 @@ pub struct Lowered { f: IrFunc, lams: [LamJob], partials: [PartialJob], fnvals: 
 // entry block, the receiver of `#test` cases of the lowering's methods
 // (MYLA-184), with a code generator from `codegen_on` as their `cg`.
 pub fun lower_on() -> Lower {
-    var lw = Lower { f: IrFunc { name: "test", ret: None, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false, scope_parent: [-1] }, cur: 0, scopes: [[]], scope_ids: [0], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [], actor_self: -1, actor_off: 0, deep_res: false, narrow: [:] }
+    var lw = Lower { f: IrFunc { name: "test", ret: None, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false, scope_parent: [-1] }, cur: 0, scopes: [[]], scope_ids: [0], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [], actor_self: -1, actor_off: 0, deep_res: false, narrow: [:], wants: [] }
     lw.start(lw.new_block())
     return lw
 }
@@ -93,7 +103,7 @@ pub fun lower_on() -> Lower {
 pub fun lower_function(cg: CodeGen, fd: FunData, mangled: str) -> Result<Lowered, str> {
     let sig = cg.sig_of(fd.name)
     let ret = opt_subst_type(sig.ret, cg.subst)
-    var lw = Lower { f: IrFunc { name: mangled, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false, scope_parent: [-1] }, cur: 0, scopes: [[]], scope_ids: [0], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [], actor_self: -1, actor_off: 0, deep_res: false, narrow: [:] }
+    var lw = Lower { f: IrFunc { name: mangled, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false, scope_parent: [-1] }, cur: 0, scopes: [[]], scope_ids: [0], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [], actor_self: -1, actor_off: 0, deep_res: false, narrow: [:], wants: [] }
     var first_word = 0
     // an async function, when tasks take turns: its frame function, its
     // slots in its heap frame, the result in the first (D90)
@@ -191,7 +201,7 @@ pub fun lower_function(cg: CodeGen, fd: FunData, mangled: str) -> Result<Lowered
 // own at entry, borrowed as a parameter is (captures are immutable, D48).
 pub fun lower_lambda(cg: CodeGen, job: LamJob) -> Result<Lowered, str> {
     let ret = opt_subst_type(tfunc_ret(job.ftype), cg.subst)
-    var lw = Lower { f: IrFunc { name: job.lifted, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false, scope_parent: [-1] }, cur: 0, scopes: [[]], scope_ids: [0], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [], actor_self: -1, actor_off: 0, deep_res: false, narrow: [:] }
+    var lw = Lower { f: IrFunc { name: job.lifted, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false, scope_parent: [-1] }, cur: 0, scopes: [[]], scope_ids: [0], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [], actor_self: -1, actor_off: 0, deep_res: false, narrow: [:], wants: [] }
     // an async lambda, when tasks take turns: a frame function, as an async
     // function's (D90); its frame holds the environment and the arguments
     let frame = cg.frames && is_async_t(job.ftype)
@@ -996,18 +1006,34 @@ impl Lower {
             },
             StmtKind.IfS(c, then, otherwise) => { self.if_stmt(cg, c, then, otherwise) },
             StmtKind.WhileS(c, body) => {
-                let head = self.new_block()
-                self.finish(Term.Jmp(head))
-                self.start(head)
-                let body_b = self.new_block()
-                let end = self.new_block()
-                self.branch(cg, c, body_b, end)
-                self.start(body_b)
-                self.loops.push(LoopTarget { cont: head, brk: end, owners: self.owners.len(), temps: self.temps.len() })
-                self.block(cg, body)
-                self.loops.pop()
-                self.finish(Term.Jmp(head))
-                self.start(end)
+                let forever = match c.kind { ExprKind.BoolLit(b) => b, _ => false }
+                if forever {
+                    let head = self.new_block()
+                    self.finish(Term.Jmp(head))
+                    self.start(head)
+                    let end = self.new_block()
+                    self.loops.push(LoopTarget { cont: head, brk: end, owners: self.owners.len(), temps: self.temps.len() })
+                    self.block(cg, body)
+                    self.loops.pop()
+                    self.finish(Term.Jmp(head))
+                    self.start(end)
+                } else {
+                    // tested on the way in and again at the end of each turn
+                    // (where `continue` goes): one jump a turn, back to the
+                    // body, not two (MYLA-162)
+                    let body_b = self.new_block()
+                    let latch = self.new_block()
+                    let end = self.new_block()
+                    self.branch(cg, c, body_b, end)
+                    self.start(body_b)
+                    self.loops.push(LoopTarget { cont: latch, brk: end, owners: self.owners.len(), temps: self.temps.len() })
+                    self.block(cg, body)
+                    self.loops.pop()
+                    self.finish(Term.Jmp(latch))
+                    self.start(latch)
+                    self.branch(cg, c, body_b, end)
+                    self.start(end)
+                }
             },
             StmtKind.ForS(vn, start, end, body, iter) => { self.for_range(cg, vn, start, end, body, iter) },
             StmtKind.BreakS => {
@@ -1946,19 +1972,12 @@ impl Lower {
             },
             None => {},
         }
-        let head = self.new_block()
-        self.finish(Term.Jmp(head))
-        self.start(head)
-        let a = self.temp(loop_t)
-        self.add(Inst.Load(a, lv))
-        let b = self.temp(loop_t)
-        self.add(Inst.Load(b, fe))
-        let c = self.temp(Type.TBool)
-        self.add(Inst.Cmp(c, "<", loop_t, a, b))
+        // tested on the way in and after each step (MYLA-162: one jump a
+        // turn, back to the body)
         let body_b = self.new_block()
         let cont = self.new_block()
         let done = self.new_block()
-        self.finish(Term.Br(c, body_b, done))
+        self.range_test(lv, fe, loop_t, body_b, done)
         self.start(body_b)
         let depth = self.owners.len()
         self.open_scope()
@@ -1976,8 +1995,19 @@ impl Lower {
         let y = self.temp(loop_t)
         self.add(Inst.Bin(y, "+", loop_t, loop_t, x, one, Pos { line: 0, col: 0 }))
         self.add(Inst.Store(lv, y))
-        self.finish(Term.Jmp(head))
+        self.range_test(lv, fe, loop_t, body_b, done)
         self.start(done)
+    }
+
+    // A range loop's test, `lv < fe`, ending the block: on to `yes` or `no`.
+    fun range_test(var self, lv: int32, fe: int32, loop_t: Type, yes: int32, no: int32) {
+        let a = self.temp(loop_t)
+        self.add(Inst.Load(a, lv))
+        let b = self.temp(loop_t)
+        self.add(Inst.Load(b, fe))
+        let c = self.temp(Type.TBool)
+        self.add(Inst.Cmp(c, "<", loop_t, a, b))
+        self.finish(Term.Br(c, yes, no))
     }
 
     // `for v in xs { body }`: the loop holds a reference to the list (dropped
@@ -2012,22 +2042,16 @@ impl Lower {
         let zero = self.konst(Type.TInt(64, false), 0)
         self.add(Inst.Store(idx, zero))
         let elem = self.value_slot(cg, vn, et, false)
-        let head = self.new_block()
-        self.finish(Term.Jmp(head))
-        self.start(head)
+        // tested on the way in and after each step (MYLA-162)
+        let body_b = self.new_block()
+        let cont = self.new_block()
+        let done = self.new_block()
+        self.list_test(idx, held, lt, body_b, done)
+        self.start(body_b)
         let i = self.temp(Type.TInt(64, false))
         self.add(Inst.Load(i, idx))
         let cell = self.temp(lt)
         self.add(Inst.Load(cell, held))
-        let n = self.temp(Type.TInt(64, false))
-        self.add_load(n, cell, 0)
-        let c = self.temp(Type.TBool)
-        self.add(Inst.Cmp(c, "<", Type.TInt(64, false), i, n))
-        let body_b = self.new_block()
-        let cont = self.new_block()
-        let done = self.new_block()
-        self.finish(Term.Br(c, body_b, done))
-        self.start(body_b)
         let p = self.temp(Type.TPtr)
         self.add(Inst.Elem(p, cell, i, stride, false, Pos { line: 0, col: 0 }))
         self.mark_elem(p, stride)
@@ -2055,10 +2079,24 @@ impl Lower {
         let i3 = self.temp(Type.TInt(64, false))
         self.add(Inst.Bin(i3, "+", Type.TInt(64, false), Type.TInt(64, false), i2, one, Pos { line: 0, col: 0 }))
         self.add(Inst.Store(idx, i3))
-        self.finish(Term.Jmp(head))
+        self.list_test(idx, held, lt, body_b, done)
         self.start(done)
         self.drop_owners(self.owners.len() - 1)
         self.owners.pop()
+    }
+
+    // A list loop's test, the index in `idx` below the length of the list
+    // `held` holds, ending the block: on to `yes` or `no`.
+    fun list_test(var self, idx: int32, held: int32, lt: Type, yes: int32, no: int32) {
+        let i = self.temp(Type.TInt(64, false))
+        self.add(Inst.Load(i, idx))
+        let cell = self.temp(lt)
+        self.add(Inst.Load(cell, held))
+        let n = self.temp(Type.TInt(64, false))
+        self.add_load(n, cell, 0)
+        let c = self.temp(Type.TBool)
+        self.add(Inst.Cmp(c, "<", Type.TInt(64, false), i, n))
+        self.finish(Term.Br(c, yes, no))
     }
 
     // --- scalar expressions -----------------------------------------------------
@@ -3313,7 +3351,9 @@ impl Lower {
         self.add(Inst.Cow(cell, Type.TSB, h))
         let v = self.expr(cg, args[1])
         if nm == "append_byte" {
-            self.add(Inst.SbAppendByte(h, v))
+            // std.rt's where the program has it (MYLA-162)
+            if cg.has_func("std$rt$sb_append_byte") && !cg.owning.contains("std$rt$sb_append_byte") { self.add(Inst.Call(-1, "std$rt$sb_append_byte", [h, v])) }
+            else { self.add(Inst.SbAppendByte(h, v)) }
         } else if args.len() == 4 {
             let a = self.expr(cg, args[2])
             let b = self.expr(cg, args[3])
@@ -3534,7 +3574,7 @@ impl Lower {
                 return -1
             }
             let d = self.temp(t)
-            if nm == "__alloc" || nm == "__equal_bytes" || nm == "__syscall" || nm == "__environ" || nm == "__rotl" || nm == "__bsr64" || nm == "__cas64" || nm == "__xchg64" || nm == "__fetch_add64" { self.add(Inst.Rt(d, nm, vals)) } else if nm == "__argv" { self.add(Inst.Rt(d, "__argv_of", vals)) } else { self.add(Inst.Mov(d, vals[0])) }
+            if nm == "__alloc" || nm == "__equal_bytes" || nm == "__syscall" || nm == "__environ" || nm == "__rotl" || nm == "__bsr64" || nm == "__cas64" || nm == "__xchg64" || nm == "__fetch_add64" || nm == "__f64_round" { self.add(Inst.Rt(d, nm, vals)) } else if nm == "__argv" { self.add(Inst.Rt(d, "__argv_of", vals)) } else { self.add(Inst.Mov(d, vals[0])) }
             if nm == "__str_of" || nm == "__list_of" { return self.owned_value(cg, d, t) }
             return d
         }
@@ -3888,7 +3928,7 @@ fun char_cast_checked(src: Type, t: Type) -> bool {
 pub fun myla_runtime_function(name: str) -> str {
     if name == "__str_concat" { return "std$rt$str_concat" }
     if name == "__str_eq" { return "std$rt$str_eq" }
-    if name == "__stat" || name == "__mkdir" || name == "__unlink" || name == "__rmdir" || name == "__rename" || name == "__getcwd" || name == "__read_file" || name == "__write_file" || name == "__list_dir" || name == "__getenv" || name == "__run" || name == "__read" || name == "__poll" || name == "__args" || name == "__int_to_str" || name == "__uint_to_str" || name == "__str_chars" || name == "__map_lookup" || name == "__sb_append" || name == "__print_str" || name == "__print_int" || name == "__print_uint" || name == "__print_bool" || name == "__print_char" || name == "__write" || name == "__map_keys" {
+    if name == "__stat" || name == "__mkdir" || name == "__unlink" || name == "__rmdir" || name == "__rename" || name == "__getcwd" || name == "__read_file" || name == "__write_file" || name == "__list_dir" || name == "__getenv" || name == "__run" || name == "__read" || name == "__poll" || name == "__args" || name == "__int_to_str" || name == "__uint_to_str" || name == "__str_chars" || name == "__map_lookup" || name == "__sb_append" || name == "__print_str" || name == "__print_int" || name == "__print_uint" || name == "__print_bool" || name == "__print_char" || name == "__write" || name == "__map_keys" || name == "__bool_to_str" || name == "__char_to_str" {
         // `__stat` -> `std$rt$stat`
         var sb = StringBuilder()
         sb.append(name, 2, name.len())
@@ -3937,4 +3977,808 @@ fun calls_nothing(e: Expr) -> bool {
         ExprKind.Cast(x, t) => calls_nothing(x),
         _ => false,
     }
+}
+
+// --- the per-type routines as IR (MYLA-162) -------------------------------------
+//
+// Functions the code generator makes for a type rather than for source:
+// built here as IR, so every backend emits them as it emits any function.
+
+// An empty lowering of the routine `name` with result type `ret`, its entry
+// block started.
+fun routine(name: str, ret: Option<Type>) -> Lower {
+    var lw = Lower { f: IrFunc { name: name, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false, scope_parent: [-1] }, cur: 0, scopes: [[]], scope_ids: [0], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [], actor_self: -1, actor_off: 0, deep_res: false, narrow: [:], wants: [] }
+    let entry = lw.new_block()
+    lw.start(entry)
+    return lw
+}
+
+// `#derive(Eq)`'s `T.eq(self, other) -> bool` for the struct or enum `name`:
+// the two values' addresses; field by field, or the tags and then the
+// payload of the variant both have, each component compared as `==` does (a
+// struct or enum by its own `eq`, a boxed one's cell passed, a string's
+// bytes, a float as a float: NaN unequal, 0.0 and -0.0 equal).
+pub fun derived_eq_ir(cg: CodeGen, name: str, is_enum: bool) -> IrFunc {
+    var lw = routine(name + ".eq", Some(Type.TBool))
+    let sa = lw.new_slot("self", Type.TPtr, 8, 0, false)
+    let sb = lw.new_slot("other", Type.TPtr, 8, 1, false)
+    let a = lw.temp(Type.TPtr)
+    lw.add(Inst.Load(a, sa))
+    let b = lw.temp(Type.TPtr)
+    lw.add(Inst.Load(b, sb))
+    let unequal = lw.new_block()
+    if is_enum {
+        let i64 = Type.TInt(64, true)
+        let ta = lw.temp(i64)
+        lw.add(Inst.LoadAt(ta, a, 0, 8))
+        let tb = lw.temp(i64)
+        lw.add(Inst.LoadAt(tb, b, 0, 8))
+        let same = lw.temp(Type.TBool)
+        lw.add(Inst.Cmp(same, "==", i64, ta, tb))
+        let tags_same = lw.new_block()
+        lw.finish(Term.Br(same, tags_same, unequal))
+        lw.start(tags_same)
+        let et = Type.TEnum(name, [])
+        var i = 0
+        for v in cg.enum_info(name).variants {
+            if v.payload.len() > 0 {
+                let is_v = lw.temp(Type.TBool)
+                lw.add(Inst.Cmp(is_v, "==", i64, ta, lw.konst(i64, i as int64)))
+                let this_v = lw.new_block()
+                let next_v = lw.new_block()
+                lw.finish(Term.Br(is_v, this_v, next_v))
+                lw.start(this_v)
+                var j = 0
+                for pt in v.payload {
+                    lw.eq_component(cg, a, b, cg.variant_field_offset(et, v.name, j), pt, unequal)
+                    j = j + 1
+                }
+                lw.finish(Term.Jmp(next_v))
+                lw.start(next_v)
+            }
+            i = i + 1
+        }
+    } else {
+        var off = 0
+        for fl in cg.struct_info(name).fields {
+            lw.eq_component(cg, a, b, off, fl.ty, unequal)
+            off = off + cg.stored_size(fl.ty)
+        }
+    }
+    lw.finish(Term.Ret(lw.konst(Type.TBool, 1)))
+    lw.start(unequal)
+    lw.finish(Term.Ret(lw.konst(Type.TBool, 0)))
+    return lw.f
+}
+
+impl Lower {
+    // The component of type `ft` at `off` in the values at `a` and `b`
+    // compared, on in a new block when equal, to `unequal` when not.
+    fun eq_component(var self, cg: CodeGen, a: int32, b: int32, off: int32, ft: Type, unequal: int32) {
+        let eq = self.temp(Type.TBool)
+        if is_struct_or_enum_t(ft) {
+            var pa = -1
+            var pb = -1
+            if cg.is_boxed(ft) {
+                pa = self.temp(Type.TPtr)
+                self.add(Inst.LoadAt(pa, a, off, 8))
+                pb = self.temp(Type.TPtr)
+                self.add(Inst.LoadAt(pb, b, off, 8))
+            } else {
+                pa = self.offset(a, off)
+                pb = self.offset(b, off)
+            }
+            self.add(Inst.Call(eq, cg.type_key(ft) + ".eq", [pa, pb]))
+        } else if is_tstr(ft) {
+            let ka = self.temp(Type.TStr)
+            self.add(Inst.LoadAt(ka, a, off, 8))
+            let kb = self.temp(Type.TStr)
+            self.add(Inst.LoadAt(kb, b, off, 8))
+            self.rt_call(cg, eq, "__str_eq", [ka, kb])
+        } else if is_tfloat_ir(ft) {
+            let f64 = Type.TFloat(64)
+            let xa = self.temp(f64)
+            self.add(Inst.LoadAt(xa, a, off, 8))
+            let xb = self.temp(f64)
+            self.add(Inst.LoadAt(xb, b, off, 8))
+            self.add(Inst.Cmp(eq, "==", f64, xa, xb))
+        } else {
+            let i64 = Type.TInt(64, true)
+            let xa = self.temp(i64)
+            self.add(Inst.LoadAt(xa, a, off, 8))
+            let xb = self.temp(i64)
+            self.add(Inst.LoadAt(xb, b, off, 8))
+            self.add(Inst.Cmp(eq, "==", i64, xa, xb))
+        }
+        let next = self.new_block()
+        self.finish(Term.Br(eq, next, unequal))
+        self.start(next)
+    }
+}
+
+// Whether `t` is a float type.
+#test(Type.TFloat(32))[true]
+#test(Type.TInt(64, true))[false]
+fun is_tfloat_ir(t: Type) -> bool {
+    return match t {
+        Type.TFloat(w) => true,
+        _ => false,
+    }
+}
+
+// `__walkd_<T>` / `__walkr_<T>` (`retain`): release or retain every heap value
+// the inline value of type `t` at the address given holds, member by member
+// (an enum's by the variant its tag names); a cell or a boxed value is a
+// leaf (its count bumped, or its drop routine called), an inline aggregate
+// is walked in its turn.
+pub fun walk_ir(cg: CodeGen, t: Type, retain: bool, name: str) -> IrFunc {
+    var lw = routine(name, None)
+    // (the slot read afresh at each use: it lives in a register across the
+    // calls, each read that register)
+    let sp = lw.new_slot("p", Type.TPtr, 8, 0, false)
+    lw.walk_body(cg, sp, t, retain)
+    lw.finish(Term.Ret(-1))
+    return lw.f
+}
+
+impl Lower {
+    // A walk over the value of type `t` at the address the slot `sp` holds
+    // (see `walk_ir`), on in the block it ends at.
+    fun walk_body(var self, cg: CodeGen, sp: int32, t: Type, retain: bool) {
+        match t {
+            Type.TStruct(n, a) => {
+                let info = cg.struct_info(n)
+                let sub = cg.type_subst(info.type_params, a)
+                var cur = 0
+                for f in info.fields {
+                    let ft = subst_type(f.ty, sub)
+                    self.walk_member(cg, self.read_ptr(sp), cur, ft, retain)
+                    cur = cur + cg.stored_size(ft)
+                }
+            },
+            Type.TTuple(es) => {
+                var cur = 0
+                for et in es {
+                    self.walk_member(cg, self.read_ptr(sp), cur, et, retain)
+                    cur = cur + cg.stored_size(et)
+                }
+            },
+            Type.TEnum(n, a) => {
+                let info = cg.enum_info(n)
+                let sub = cg.type_subst(info.type_params, a)
+                let i64 = Type.TInt(64, true)
+                let tag = self.temp(i64)
+                self.add(Inst.LoadAt(tag, self.read_ptr(sp), 0, 8))
+                let done = self.new_block()
+                var idx = 0
+                for v in info.variants {
+                    if cg.variant_owns(v, sub) {
+                        let is_v = self.temp(Type.TBool)
+                        self.add(Inst.Cmp(is_v, "==", i64, tag, self.konst(i64, idx as int64)))
+                        let this_v = self.new_block()
+                        let next_v = self.new_block()
+                        self.finish(Term.Br(is_v, this_v, next_v))
+                        self.start(this_v)
+                        var cur = 8
+                        for ft0 in v.payload {
+                            let ft = subst_type(ft0, sub)
+                            self.walk_member(cg, self.read_ptr(sp), cur, ft, retain)
+                            cur = cur + cg.stored_size(ft)
+                        }
+                        self.finish(Term.Jmp(done))
+                        self.start(next_v)
+                    }
+                    idx = idx + 1
+                }
+                self.finish(Term.Jmp(done))
+                self.start(done)
+            },
+            _ => {},
+        }
+    }
+}
+
+impl Lower {
+    // The pointer the slot `sp` holds, read into a new temporary.
+    fun read_ptr(var self, sp: int32) -> int32 {
+        let t = self.temp(Type.TPtr)
+        self.add(Inst.Load(t, sp))
+        return t
+    }
+
+    // A walk's action on the member of type `ft` at `off` in the value at `p`.
+    fun walk_member(var self, cg: CodeGen, p: int32, off: int32, ft: Type, retain: bool) {
+        if cg.is_boxed(ft) || is_cell_t(ft) {
+            let v = self.temp(ft)
+            self.add(Inst.LoadAt(v, p, off, 8))
+            if retain { self.add(Inst.RetainVal(ft, v)) } else { self.add(Inst.DropVal(ft, v)) }
+        } else if is_tfunc(ft) || cg.owns_heap(ft) {
+            if retain { self.add(Inst.Retain(ft, self.offset(p, off))) } else { self.add(Inst.DropAt(ft, self.offset(p, off))) }
+        }
+    }
+}
+
+// A drop routine's entry: the cell's count down by one (`atomic`: an
+// actor's, which threads share, D92); at 0, its slow path `slow` in place of
+// it (a tail call), else nothing more. Its fast path makes no call, so it
+// sets up no frame.
+pub fun drop_entry_ir(name: str, slow: str, atomic: bool) -> IrFunc {
+    var lw = routine(name, None)
+    let sp = lw.new_slot("cell", Type.TInt(64, true), 8, 0, false)
+    let zero = lw.temp(Type.TBool)
+    var dec = "__rc_dec"
+    if atomic { dec = "__rc_dec_atomic" }
+    lw.add(Inst.Rt(zero, dec, [lw.read_cell(sp)]))
+    let gone = lw.new_block()
+    let kept = lw.new_block()
+    lw.finish(Term.Br(zero, gone, kept))
+    lw.start(gone)
+    lw.add(Inst.Call(-1, slow, [lw.read_cell(sp)]))
+    lw.finish(Term.Become)
+    lw.start(kept)
+    lw.finish(Term.Ret(-1))
+    return lw.f
+}
+
+// A boxed enum's (`walk`: its release walk) or an actor's (`actor`, its
+// fields as a struct's) cell whose count reached 0: what it holds released,
+// then the cell freed (`free`: std.rt's, or "" for the runtime's `__free`).
+pub fun dropb_slow_ir(cg: CodeGen, t: Type, walk: str, name: str, free: str) -> IrFunc {
+    var lw = routine(name, None)
+    let sp = lw.new_slot("cell", Type.TInt(64, true), 8, 0, false)
+    if walk != "" {
+        // the enum's release walk in place, no call to it
+        lw.walk_body(cg, sp, t, false)
+    } else {
+        lw.add(Inst.DropAt(t, lw.read_cell(sp)))
+    }
+    lw.free_cell(sp, free)
+    return lw.f
+}
+
+// A list's cell (elements of type `et`) whose count reached 0: each element
+// released, then the cell freed.
+pub fun list_drop_slow_ir(cg: CodeGen, et: Type, name: str, free: str) -> IrFunc {
+    var lw = routine(name, None)
+    let sp = lw.new_slot("cell", Type.TInt(64, true), 8, 0, false)
+    if cg.owns_heap(et) || cg.is_boxed(et) {
+        let stride = cg.stored_size(et)
+        let i64 = Type.TInt(64, true)
+        let si = lw.new_slot("i", i64, 8, -1, false)
+        let sn = lw.new_slot("n", i64, 8, -1, false)
+        lw.add(Inst.Store(si, lw.int_const(0)))
+        let n = lw.temp(i64)
+        lw.add(Inst.LoadAt(n, lw.read_cell(sp), 0, 8))
+        lw.add(Inst.Store(sn, n))
+        let body = lw.new_block()
+        let done = lw.new_block()
+        lw.count_test(si, sn, body, done)
+        lw.start(body)
+        // the element's address: cell + 16 + i * stride
+        let i = lw.temp(i64)
+        lw.add(Inst.Load(i, si))
+        let scaled = lw.temp(i64)
+        lw.add(Inst.Bin(scaled, "*", i64, i64, i, lw.int_const(stride), Pos { line: 0, col: 0 }))
+        let at = lw.temp(i64)
+        lw.add(Inst.Bin(at, "+", i64, i64, lw.read_cell(sp), scaled, Pos { line: 0, col: 0 }))
+        lw.drop_member(cg, at, 16, et)
+        let i2 = lw.temp(i64)
+        lw.add(Inst.Load(i2, si))
+        let i3 = lw.temp(i64)
+        lw.add(Inst.Bin(i3, "+", i64, i64, i2, lw.int_const(1), Pos { line: 0, col: 0 }))
+        lw.add(Inst.Store(si, i3))
+        lw.count_test(si, sn, body, done)
+        lw.start(done)
+    }
+    lw.free_cell(sp, free)
+    return lw.f
+}
+
+// A map's cell (`mt`) whose count reached 0: each occupied slot's key and
+// value released, then the cell freed.
+pub fun map_drop_slow_ir(cg: CodeGen, mt: Type, name: str, free: str) -> IrFunc {
+    var lw = routine(name, None)
+    let sp = lw.new_slot("cell", Type.TInt(64, true), 8, 0, false)
+    let kt = map_key(mt)
+    let vt = map_val(mt)
+    if cg.owns_heap(kt) || cg.owns_heap(vt) {
+        let ss = cg.map_slot_size(mt)
+        let i64 = Type.TInt(64, true)
+        let si = lw.new_slot("i", i64, 8, -1, false)
+        let sn = lw.new_slot("n", i64, 8, -1, false)
+        lw.add(Inst.Store(si, lw.int_const(0)))
+        let n = lw.temp(i64)
+        lw.add(Inst.LoadAt(n, lw.read_cell(sp), 8, 8))
+        lw.add(Inst.Store(sn, n))
+        let body = lw.new_block()
+        let next = lw.new_block()
+        let done = lw.new_block()
+        lw.count_test(si, sn, body, done)
+        lw.start(body)
+        let i = lw.temp(i64)
+        lw.add(Inst.Load(i, si))
+        let scaled = lw.temp(i64)
+        lw.add(Inst.Bin(scaled, "*", i64, i64, i, lw.int_const(ss), Pos { line: 0, col: 0 }))
+        let at = lw.temp(i64)
+        lw.add(Inst.Bin(at, "+", i64, i64, lw.read_cell(sp), scaled, Pos { line: 0, col: 0 }))
+        let state = lw.temp(i64)
+        lw.add(Inst.LoadAt(state, at, 16, 8))
+        let full = lw.temp(Type.TBool)
+        lw.add(Inst.Cmp(full, "==", i64, state, lw.int_const(1)))
+        let occupied = lw.new_block()
+        lw.finish(Term.Br(full, occupied, next))
+        lw.start(occupied)
+        if cg.owns_heap(kt) { lw.drop_member(cg, at, 24, kt) }
+        if cg.owns_heap(vt) {
+            // (the slot's address again: a key's drop is a call)
+            let i4 = lw.temp(i64)
+            lw.add(Inst.Load(i4, si))
+            let sc4 = lw.temp(i64)
+            lw.add(Inst.Bin(sc4, "*", i64, i64, i4, lw.int_const(ss), Pos { line: 0, col: 0 }))
+            let at4 = lw.temp(i64)
+            lw.add(Inst.Bin(at4, "+", i64, i64, lw.read_cell(sp), sc4, Pos { line: 0, col: 0 }))
+            lw.drop_member(cg, at4, 32, vt)
+        }
+        lw.finish(Term.Jmp(next))
+        lw.start(next)
+        let i2 = lw.temp(i64)
+        lw.add(Inst.Load(i2, si))
+        let i3 = lw.temp(i64)
+        lw.add(Inst.Bin(i3, "+", i64, i64, i2, lw.int_const(1), Pos { line: 0, col: 0 }))
+        lw.add(Inst.Store(si, i3))
+        lw.count_test(si, sn, body, done)
+        lw.start(done)
+    }
+    lw.free_cell(sp, free)
+    return lw.f
+}
+
+impl Lower {
+    // The cell the slot `sp` holds (as an integer), read into a new temporary.
+    fun read_cell(var self, sp: int32) -> int32 {
+        let t = self.temp(Type.TInt(64, true))
+        self.add(Inst.Load(t, sp))
+        return t
+    }
+
+    // The block ended with `i < n` (both slots): on to `yes` or `no`.
+    fun count_test(var self, si: int32, sn: int32, yes: int32, no: int32) {
+        let i64 = Type.TInt(64, true)
+        let i = self.temp(i64)
+        self.add(Inst.Load(i, si))
+        let n = self.temp(i64)
+        self.add(Inst.Load(n, sn))
+        let c = self.temp(Type.TBool)
+        self.add(Inst.Cmp(c, "<", i64, i, n))
+        self.finish(Term.Br(c, yes, no))
+    }
+
+    // The member of type `ft` at `off` from the address `at` released (a
+    // cell's or boxed value's drop routine, or what an inline value holds).
+    fun drop_member(var self, cg: CodeGen, at: int32, off: int32, ft: Type) {
+        if cg.is_boxed(ft) || is_cell_t(ft) {
+            let v = self.temp(ft)
+            self.add(Inst.LoadAt(v, at, off, 8))
+            self.add(Inst.DropVal(ft, v))
+        } else if is_tfunc(ft) || cg.owns_heap(ft) {
+            let p = self.temp(Type.TInt(64, true))
+            self.add(Inst.Bin(p, "+", Type.TInt(64, true), Type.TInt(64, true), at, self.int_const(off), Pos { line: 0, col: 0 }))
+            self.add(Inst.DropAt(ft, p))
+        }
+    }
+
+    // The cell in the slot `sp` freed in place of the routine (std.rt's
+    // `free`, a tail call), or by the runtime's `__free` (`free` "").
+    fun free_cell(var self, sp: int32, free: str) {
+        if free != "" {
+            self.add(Inst.Call(-1, free, [self.read_cell(sp)]))
+            self.finish(Term.Become)
+        } else {
+            self.add(Inst.Rt(-1, "__free", [self.read_cell(sp)]))
+            self.finish(Term.Ret(-1))
+        }
+    }
+}
+
+// A copy-on-write clone (`__clone_list_<E>`, `__clone_map_<K>_<V>`,
+// `__sb_clone`; `t` the list's, map's or builder's type): the shared cell
+// given copied into a new one (count 1), each element or occupied slot it
+// now shares retained, the original's count down by one (the caller saw it
+// above 1); the copy returned.
+pub fun clone_ir(cg: CodeGen, t: Type, name: str) -> IrFunc {
+    let i64 = Type.TInt(64, true)
+    var lw = routine(name, Some(i64))
+    let sp = lw.new_slot("cell", i64, 8, 0, false)
+    let sc = lw.new_slot("copy", i64, 8, -1, false)
+    let size = lw.temp(i64)
+    lw.add(Inst.LoadAt(size, lw.read_cell(sp), -16, 8))
+    let c = lw.temp(i64)
+    lw.add(Inst.Rt(c, "__alloc", [size]))
+    lw.add(Inst.Store(sc, c))
+    let size2 = lw.temp(i64)
+    lw.add(Inst.LoadAt(size2, lw.read_cell(sp), -16, 8))
+    lw.add(Inst.Rt(-1, "__copy_bytes", [lw.read_cell(sc), lw.read_cell(sp), size2]))
+    match t {
+        Type.TList(et) => {
+            if cg.owns_heap(et) || cg.is_boxed(et) {
+                lw.each_entry(cg, sc, 0, cg.elem_size(et), false, et, Type.TBool, true)
+            }
+        },
+        Type.TMap(kt, vt) => {
+            if cg.owns_heap(kt) || cg.owns_heap(vt) {
+                lw.each_entry(cg, sc, 8, cg.map_slot_size(t), true, kt, vt, true)
+            }
+        },
+        _ => {},
+    }
+    lw.add(Inst.Rt(-1, "__rc_dec", [lw.read_cell(sp)]))
+    lw.finish(Term.Ret(lw.read_cell(sc)))
+    return lw.f
+}
+
+impl Lower {
+    // Over the entries of the list or map cell in the slot `sc` (`count_at`:
+    // the word holding how many, its length or its capacity; `stride` bytes
+    // an entry): a list's element of type `a` retained (`retain`) or
+    // released, or a map's occupied slot's key `a` and value `b`.
+    fun each_entry(var self, cg: CodeGen, sc: int32, count_at: int32, stride: int32, is_map: bool, a: Type, b: Type, retain: bool) {
+        let i64 = Type.TInt(64, true)
+        let si = self.new_slot("i", i64, 8, -1, false)
+        let sn = self.new_slot("n", i64, 8, -1, false)
+        self.add(Inst.Store(si, self.int_const(0)))
+        let n = self.temp(i64)
+        self.add(Inst.LoadAt(n, self.read_cell(sc), count_at, 8))
+        self.add(Inst.Store(sn, n))
+        let body = self.new_block()
+        let next = self.new_block()
+        let done = self.new_block()
+        self.count_test(si, sn, body, done)
+        self.start(body)
+        if is_map {
+            let state = self.temp(i64)
+            self.add(Inst.LoadAt(state, self.entry_at(sc, si, stride), 16, 8))
+            let full = self.temp(Type.TBool)
+            self.add(Inst.Cmp(full, "==", i64, state, self.int_const(1)))
+            let occupied = self.new_block()
+            self.finish(Term.Br(full, occupied, next))
+            self.start(occupied)
+            if cg.owns_heap(a) { self.entry_member(cg, self.entry_at(sc, si, stride), 24, a, retain) }
+            if cg.owns_heap(b) { self.entry_member(cg, self.entry_at(sc, si, stride), 32, b, retain) }
+        } else {
+            self.entry_member(cg, self.entry_at(sc, si, stride), 16, a, retain)
+        }
+        self.finish(Term.Jmp(next))
+        self.start(next)
+        let i2 = self.temp(i64)
+        self.add(Inst.Load(i2, si))
+        let i3 = self.temp(i64)
+        self.add(Inst.Bin(i3, "+", i64, i64, i2, self.int_const(1), Pos { line: 0, col: 0 }))
+        self.add(Inst.Store(si, i3))
+        self.count_test(si, sn, body, done)
+        self.start(done)
+    }
+
+    // The cell in `sc` plus the index in `si` times `stride`.
+    fun entry_at(var self, sc: int32, si: int32, stride: int32) -> int32 {
+        let i64 = Type.TInt(64, true)
+        let i = self.temp(i64)
+        self.add(Inst.Load(i, si))
+        let scaled = self.temp(i64)
+        self.add(Inst.Bin(scaled, "*", i64, i64, i, self.int_const(stride), Pos { line: 0, col: 0 }))
+        let at = self.temp(i64)
+        self.add(Inst.Bin(at, "+", i64, i64, self.read_cell(sc), scaled, Pos { line: 0, col: 0 }))
+        return at
+    }
+
+    // The member of type `ft` at `off` from `at` retained or released.
+    fun entry_member(var self, cg: CodeGen, at: int32, off: int32, ft: Type, retain: bool) {
+        if !retain {
+            self.drop_member(cg, at, off, ft)
+            return
+        }
+        if cg.is_boxed(ft) || is_cell_t(ft) {
+            let v = self.temp(ft)
+            self.add(Inst.LoadAt(v, at, off, 8))
+            self.add(Inst.RetainVal(ft, v))
+        } else if is_tfunc(ft) || cg.owns_heap(ft) {
+            let p = self.temp(Type.TInt(64, true))
+            self.add(Inst.Bin(p, "+", Type.TInt(64, true), Type.TInt(64, true), at, self.int_const(off), Pos { line: 0, col: 0 }))
+            self.add(Inst.Retain(ft, p))
+        }
+    }
+}
+
+// The deep walk (`__deepw_<T>`, or `inline`: `__deepi_<E>`, a boxed enum's
+// cell contents) of the value at the address given: each member made a deep
+// copy of its own (`clone`: a clone of it; D92). An actor handle stays
+// shared, a clone taking a reference of its own.
+pub fun deep_walk_ir(cg: CodeGen, t: Type, clone: bool, inline: bool, name: str) -> Routine {
+    var lw = routine(name, None)
+    let sp = lw.new_slot("p", Type.TInt(64, true), 8, 0, false)
+    match t {
+        Type.TStruct(n, a) => {
+            let info = cg.struct_info(n)
+            let sub = cg.type_subst(info.type_params, a)
+            var cur = 0
+            for f in info.fields {
+                let ft = subst_type(f.ty, sub)
+                lw.deep_member(cg, sp, cur, ft, clone)
+                cur = cur + cg.stored_size(ft)
+            }
+        },
+        Type.TTuple(es) => {
+            var cur = 0
+            for et in es {
+                lw.deep_member(cg, sp, cur, et, clone)
+                cur = cur + cg.stored_size(et)
+            }
+        },
+        Type.TEnum(n, a) => {
+            if cg.is_boxed(t) && !inline {
+                lw.deep_member(cg, sp, 0, t, clone)
+            } else {
+                let info = cg.enum_info(n)
+                let sub = cg.type_subst(info.type_params, a)
+                let i64 = Type.TInt(64, true)
+                let tag = lw.temp(i64)
+                lw.add(Inst.LoadAt(tag, lw.read_cell(sp), 0, 8))
+                let done = lw.new_block()
+                var idx = 0
+                for v in info.variants {
+                    if cg.variant_owns(v, sub) {
+                        let is_v = lw.temp(Type.TBool)
+                        lw.add(Inst.Cmp(is_v, "==", i64, tag, lw.konst(i64, idx as int64)))
+                        let this_v = lw.new_block()
+                        let next_v = lw.new_block()
+                        lw.finish(Term.Br(is_v, this_v, next_v))
+                        lw.start(this_v)
+                        var cur = 8
+                        for ft0 in v.payload {
+                            let ft = subst_type(ft0, sub)
+                            lw.deep_member(cg, sp, cur, ft, clone)
+                            cur = cur + cg.stored_size(ft)
+                        }
+                        lw.finish(Term.Jmp(done))
+                        lw.start(next_v)
+                    }
+                    idx = idx + 1
+                }
+                lw.finish(Term.Jmp(done))
+                lw.start(done)
+            }
+        },
+        _ => { lw.deep_member(cg, sp, 0, t, clone) },
+    }
+    lw.finish(Term.Ret(-1))
+    return Routine { f: lw.f, wants: lw.wants }
+}
+
+// The deep copy of a cell of type `t` (`__deep_list_<E>`, `__deep_map_`,
+// `__deepb_<E>`, `__deep_sb`; the cell given, one reference, consumed): the
+// same cell when it was the only reference, else a copy (its members
+// retained, the original's count down); then each member a deep copy of its
+// own. `clone`: a copy word for word, then each member cloned; the cell
+// given only read.
+pub fun deep_cell_ir(cg: CodeGen, t: Type, clone: bool, name: str) -> Routine {
+    let i64 = Type.TInt(64, true)
+    var lw = routine(name, Some(i64))
+    let sp = lw.new_slot("cell", i64, 8, 0, false)
+    let sc = lw.new_slot("unique", i64, 8, -1, false)
+    lw.add(Inst.Store(sc, lw.read_cell(sp)))
+    let deepen = lw.new_block()
+    if clone {
+        lw.copy_cell(sp, sc)
+        lw.finish(Term.Jmp(deepen))
+    } else {
+        let rc = lw.temp(i64)
+        lw.add(Inst.LoadAt(rc, lw.read_cell(sp), -8, 8))
+        let only = lw.temp(Type.TBool)
+        lw.add(Inst.Cmp(only, "==", i64, rc, lw.int_const(1)))
+        let shared = lw.new_block()
+        lw.finish(Term.Br(only, deepen, shared))
+        lw.start(shared)
+        match t {
+            Type.TList(e) => { lw.clone_call(cg, t, sp, sc) },
+            Type.TMap(k, v) => { lw.clone_call(cg, t, sp, sc) },
+            _ => {
+                if is_sb_t(t) {
+                    lw.clone_call(cg, t, sp, sc)
+                } else {
+                    // a boxed enum: a copy of the box, what it holds retained
+                    lw.copy_cell(sp, sc)
+                    lw.add(Inst.Retain(t, lw.read_cell(sc)))
+                    lw.add(Inst.Rt(-1, "__rc_dec", [lw.read_cell(sp)]))
+                }
+            },
+        }
+        lw.finish(Term.Jmp(deepen))
+    }
+    lw.start(deepen)
+    match t {
+        Type.TList(e) => {
+            if cg.owns_heap(e) || cg.is_boxed(e) { lw.deep_entries(cg, sc, 0, cg.stored_size(e), false, e, Type.TBool, clone) }
+        },
+        Type.TMap(k, v) => {
+            if cg.owns_heap(k) || cg.owns_heap(v) { lw.deep_entries(cg, sc, 8, cg.map_slot_size(t), true, k, v, clone) }
+        },
+        _ => {
+            if !is_sb_t(t) {
+                lw.wants.push(Want { kind: 2, t: t, clone: clone })
+                lw.add(Inst.Rt(-1, cg.deep_walk_label(t, clone, true), [lw.read_cell(sc)]))
+            }
+        },
+    }
+    lw.finish(Term.Ret(lw.read_cell(sc)))
+    return Routine { f: lw.f, wants: lw.wants }
+}
+
+impl Lower {
+    // A copy of the cell in `sp` (as large as allocated) into `sc`.
+    fun copy_cell(var self, sp: int32, sc: int32) {
+        let i64 = Type.TInt(64, true)
+        let size = self.temp(i64)
+        self.add(Inst.LoadAt(size, self.read_cell(sp), -16, 8))
+        let c = self.temp(i64)
+        self.add(Inst.Rt(c, "__alloc", [size]))
+        self.add(Inst.Store(sc, c))
+        let size2 = self.temp(i64)
+        self.add(Inst.LoadAt(size2, self.read_cell(sp), -16, 8))
+        self.add(Inst.Rt(-1, "__copy_bytes", [self.read_cell(sc), self.read_cell(sp), size2]))
+    }
+
+    // The copy-on-write clone of the cell in `sp` (type `t`) into `sc`.
+    fun clone_call(var self, cg: CodeGen, t: Type, sp: int32, sc: int32) {
+        self.wants.push(Want { kind: 3, t: t, clone: false })
+        let c = self.temp(Type.TInt(64, true))
+        self.add(Inst.Rt(c, cg.clone_call_name(t), [self.read_cell(sp)]))
+        self.add(Inst.Store(sc, c))
+    }
+
+    // Each list element or occupied map slot of the cell in `sc` made deep
+    // (see `each_entry`).
+    fun deep_entries(var self, cg: CodeGen, sc: int32, count_at: int32, stride: int32, is_map: bool, a: Type, b: Type, clone: bool) {
+        let i64 = Type.TInt(64, true)
+        let si = self.new_slot("i", i64, 8, -1, false)
+        let sn = self.new_slot("n", i64, 8, -1, false)
+        let se = self.new_slot("entry", i64, 8, -1, false)
+        self.add(Inst.Store(si, self.int_const(0)))
+        let n = self.temp(i64)
+        self.add(Inst.LoadAt(n, self.read_cell(sc), count_at, 8))
+        self.add(Inst.Store(sn, n))
+        let body = self.new_block()
+        let next = self.new_block()
+        let done = self.new_block()
+        self.count_test(si, sn, body, done)
+        self.start(body)
+        self.add(Inst.Store(se, self.entry_at(sc, si, stride)))
+        if is_map {
+            let state = self.temp(i64)
+            self.add(Inst.LoadAt(state, self.read_cell(se), 16, 8))
+            let full = self.temp(Type.TBool)
+            self.add(Inst.Cmp(full, "==", i64, state, self.int_const(1)))
+            let occupied = self.new_block()
+            self.finish(Term.Br(full, occupied, next))
+            self.start(occupied)
+            if cg.owns_heap(a) { self.deep_member(cg, se, 24, a, clone) }
+            if cg.owns_heap(b) { self.deep_member(cg, se, 32, b, clone) }
+        } else {
+            self.deep_member(cg, se, 16, a, clone)
+        }
+        self.finish(Term.Jmp(next))
+        self.start(next)
+        let i2 = self.temp(i64)
+        self.add(Inst.Load(i2, si))
+        let i3 = self.temp(i64)
+        self.add(Inst.Bin(i3, "+", i64, i64, i2, self.int_const(1), Pos { line: 0, col: 0 }))
+        self.add(Inst.Store(si, i3))
+        self.count_test(si, sn, body, done)
+        self.start(done)
+    }
+
+    // The member of type `ft` at `off` from the address in the slot `sp` made
+    // a deep copy (`clone`: a clone) of its own, stored back.
+    fun deep_member(var self, cg: CodeGen, sp: int32, off: int32, ft: Type, clone: bool) {
+        let i64 = Type.TInt(64, true)
+        if is_actor_t(ft) {
+            if clone {
+                let v = self.temp(ft)
+                self.add(Inst.LoadAt(v, self.read_cell(sp), off, 8))
+                self.add(Inst.RetainVal(ft, v))
+            }
+            return
+        }
+        if cg.is_boxed(ft) || is_cell_t(ft) {
+            let v = self.temp(i64)
+            self.add(Inst.LoadAt(v, self.read_cell(sp), off, 8))
+            let r = self.temp(i64)
+            if !is_str_t(ft) { self.wants.push(Want { kind: 0, t: ft, clone: clone }) }
+            // (a routine is called by the name its alias gives it)
+            self.add(Inst.Rt(r, cg.deep_cell_label(ft, clone), [v]))
+            self.add(Inst.StoreAt(self.read_cell(sp), off, r, 8))
+        } else if is_tfunc(ft) {
+            let env = self.temp(i64)
+            self.add(Inst.LoadAt(env, self.read_cell(sp), off + 8, 8))
+            let r = self.temp(i64)
+            var nm = "__deep_env"
+            if clone { nm = "__dclone_env" }
+            self.add(Inst.Rt(r, nm, [env]))
+            self.add(Inst.StoreAt(self.read_cell(sp), off + 8, r, 8))
+        } else if cg.owns_heap(ft) {
+            self.wants.push(Want { kind: 1, t: ft, clone: clone })
+            let p = self.temp(i64)
+            self.add(Inst.Bin(p, "+", i64, i64, self.read_cell(sp), self.int_const(off), Pos { line: 0, col: 0 }))
+            self.add(Inst.Rt(-1, cg.deep_walk_label(ft, clone, false), [p]))
+        }
+    }
+}
+
+// `myla_<lifted>_env_drop`: a lambda's or partial application's environment
+// released at its count's end (`__func_drop`): each capture it owns (`owned`,
+// held inline: a boxed enum as its value) released, then the cell freed.
+pub fun env_drop_ir(cg: CodeGen, lifted: str, owned: [DropEntry], free: str) -> Routine {
+    let i64 = Type.TInt(64, true)
+    var lw = routine(lifted + "_env_drop", None)
+    let sp = lw.new_slot("env", i64, 8, 0, false)
+    for d in owned {
+        if is_cell_t(d.ty) {
+            let v = lw.temp(d.ty)
+            lw.add(Inst.LoadAt(v, lw.read_cell(sp), d.off, 8))
+            lw.add(Inst.DropVal(d.ty, v))
+        } else if is_tfunc(d.ty) {
+            let e = lw.temp(i64)
+            lw.add(Inst.LoadAt(e, lw.read_cell(sp), d.off + 8, 8))
+            lw.add(Inst.Rt(-1, "__func_drop", [e]))
+        } else if cg.owns_heap(d.ty) {
+            let p = lw.temp(i64)
+            lw.add(Inst.Bin(p, "+", i64, i64, lw.read_cell(sp), lw.int_const(d.off), Pos { line: 0, col: 0 }))
+            if cg.is_boxed(d.ty) {
+                lw.wants.push(Want { kind: 4, t: d.ty, clone: false })
+                lw.add(Inst.Rt(-1, cg.walk_label(d.ty, false), [p]))
+            } else {
+                lw.add(Inst.DropAt(d.ty, p))
+            }
+        }
+    }
+    lw.free_cell(sp, free)
+    return Routine { f: lw.f, wants: lw.wants }
+}
+
+// `myla_<lifted>_env_deep` (`__deep_env`, D92): the environment made unshared
+// deeply, the same cell when it was the only reference, else a copy (its
+// captures retained, the original's count down), each capture a deep copy
+// of its own; `clone` (`_env_clone`, `__dclone_env`): a copy, each capture
+// cloned. The cell returned.
+pub fun env_deep_ir(cg: CodeGen, lifted: str, owned: [DropEntry], clone: bool) -> Routine {
+    let i64 = Type.TInt(64, true)
+    var suffix = "_env_deep"
+    if clone { suffix = "_env_clone" }
+    var lw = routine(lifted + suffix, Some(i64))
+    let sp = lw.new_slot("env", i64, 8, 0, false)
+    let sc = lw.new_slot("unique", i64, 8, -1, false)
+    lw.add(Inst.Store(sc, lw.read_cell(sp)))
+    let deepen = lw.new_block()
+    if clone {
+        lw.copy_cell(sp, sc)
+        lw.finish(Term.Jmp(deepen))
+    } else {
+        let rc = lw.temp(i64)
+        lw.add(Inst.LoadAt(rc, lw.read_cell(sp), -8, 8))
+        let only = lw.temp(Type.TBool)
+        lw.add(Inst.Cmp(only, "==", i64, rc, lw.int_const(1)))
+        let shared = lw.new_block()
+        lw.finish(Term.Br(only, deepen, shared))
+        lw.start(shared)
+        lw.copy_cell(sp, sc)
+        for d in owned {
+            let p = lw.temp(i64)
+            lw.add(Inst.Bin(p, "+", i64, i64, lw.read_cell(sc), lw.int_const(d.off), Pos { line: 0, col: 0 }))
+            lw.add(Inst.Retain(d.ty, p))
+        }
+        lw.add(Inst.Rt(-1, "__rc_dec", [lw.read_cell(sp)]))
+        lw.finish(Term.Jmp(deepen))
+    }
+    lw.start(deepen)
+    for d in owned { lw.deep_member(cg, sc, d.off, d.ty, clone) }
+    lw.finish(Term.Ret(lw.read_cell(sc)))
+    return Routine { f: lw.f, wants: lw.wants }
 }
