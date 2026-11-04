@@ -1,0 +1,519 @@
+// runtime_wasm.my -- the runtime's WebAssembly part (MYLA-158, D125).
+//
+// What `runtime_x86.my` gives for x86-64, for wasm32 on WASI preview 1:
+// the program's start (`_start`), the dispatcher through which
+// std.platform (lib/std/platform_wasm.my) calls the WASI imports, the
+// traps and the panic, the memory primitives (`memory.copy`, a byte
+// comparison), the function values' counts, composition and std.math's
+// primitives. Then the module's text put together for clang's wasm
+// assembler (`wasm_module`): the `.set` aliases resolved (wasm has no
+// function aliases), every function's type declared before its first use,
+// the data's pointers written as 32-bit words and every data label given
+// its size.
+
+from .codegen import CodeGen, trap_labels, tls_offset, EXEC_CAP
+from .lower import drop_entry_ir
+from .ir_wasm import wasm_sig
+
+// The WASI imports std.platform calls, by their number there (1, 2, …):
+// each one's parameters (`i` an i32, `l` an i64) and whether it gives an
+// errno.
+fun wasi_calls() -> [(str, str, bool)] {
+    return [("fd_write", "iiii", true), ("fd_read", "iiii", true), ("fd_close", "i", true), ("fd_filestat_get", "ii", true),
+        ("fd_readdir", "iiili", true), ("path_open", "iiiiillii", true), ("path_filestat_get", "iiiii", true),
+        ("path_create_directory", "iii", true), ("path_remove_directory", "iii", true), ("path_unlink_file", "iii", true),
+        ("path_rename", "iiiiii", true), ("clock_time_get", "ili", true), ("poll_oneoff", "iiii", true), ("proc_exit", "i", false),
+        ("args_sizes_get", "ii", true), ("args_get", "ii", true), ("environ_sizes_get", "ii", true), ("environ_get", "ii", true)]
+}
+
+// The number std.platform gives `memory.grow` (after the imports).
+const W_MEMORY_GROW: int32 = 19
+
+impl CodeGen {
+    fun emit_runtime_prelude_wasm(var self, entry_name: str) {
+        let ws = self.request_fn("std$platform$wasm_start", [])
+        var start = ["call myla_std$platform$wasm_start", "drop"]
+        self.wasm_calls["myla_std$platform$wasm_start"] = 0
+        if self.frames {
+            // one worker (D125): its state block, worker 0's, its first word
+            // its own address; its ring of ready frames
+            for l in ["i32.const __tls_blocks", "i32.const __tls_blocks", "i64.extend_i32_u", "i64.store 0",
+                "call __sched_init", "drop", "call __workers_count", "drop", "i32.const __exec_workers", "i64.const 1", "i64.store 0",
+                "i32.const __wq_rings", format("i64.const {}", 8 * EXEC_CAP), "call myla_std$platform$map_memory", "i64.store 0"] { start.push(l) }
+            self.wasm_calls["__sched_init"] = 0
+            self.wasm_calls["__workers_count"] = 0
+            self.wasm_calls["myla_std$platform$map_memory"] = 1
+        }
+        if self.frames && self.sig_of(entry_name).decl.is_async {
+            // the entry's task: its frame queued, the executor run (D90)
+            for l in [format("call myla_{}__new", entry_name), "local.set 0", "i32.const __exec_main", "local.get 0", "i64.store 0",
+                "local.get 0", "i32.wrap_i64", "local.get 0", "i64.store 40", "local.get 0", "call __exec_push", "drop", "call __exec_run", "drop"] { start.push(l) }
+            self.wasm_calls[format("myla_{}__new", entry_name)] = 0
+            self.wasm_calls["__exec_push"] = 1
+            self.wasm_calls["__exec_run"] = 0
+        } else {
+            start.push(format("call myla_{}", entry_name))
+            start.push("drop")
+            self.wasm_calls[format("myla_{}", entry_name)] = 0
+        }
+        for l in ["i64.const 0", "call __exit", "drop"] { start.push(l) }
+        var body0 = [".local i64"]
+        for l in start { body0.push(l) }
+        self.wasm_fn("_start", 0, body0, false)
+        self.wasm_fn("__exit", 1, ["local.get 0", "i32.wrap_i64", "call proc_exit", "unreachable"], true)
+        // __syscall(n, args, _, _): the import numbered `n` called with the
+        // words at `args`, its errno; `memory.grow`'s result for its number
+        var body: [str] = []
+        var k = 0
+        for c in wasi_calls() {
+            body.push("local.get 0")
+            body.push(format("i64.const {}", k + 1))
+            body.push("i64.eq")
+            body.push("if")
+            var j = 0
+            while j < c.1.len() {
+                body.push("local.get 1")
+                body.push("i32.wrap_i64")
+                body.push(format("i64.load {}", 8 * j))
+                if c.1[j] == 'i' { body.push("i32.wrap_i64") }
+                j = j + 1
+            }
+            body.push("call " + c.0)
+            if c.2 { body.push("i64.extend_i32_u") } else { body.push("i64.const 0") }
+            body.push("return")
+            body.push("end_if")
+            k = k + 1
+        }
+        for line in ["local.get 0", format("i64.const {}", W_MEMORY_GROW), "i64.eq", "if", "local.get 1", "i32.wrap_i64", "i64.load 0", "i32.wrap_i64", "memory.grow 0", "i64.extend_i32_s", "return", "end_if", "i64.const 52"] { body.push(line) }
+        self.wasm_fn("__syscall", 4, body, true)
+        self.wasm_fn("__syscall5", 6, ["i64.const 52"], true)
+        if self.frames {
+            self.emit_executor_wasm()
+        } else {
+            // no task but the first: nothing is ever cancelled (D96)
+            self.wasm_fn("__task_cancelled", 0, ["i64.const 0"], true)
+        }
+        // the runtime errors (MYLA-17): the message, the position record the
+        // caller passes
+        for label in trap_labels() {
+            var pos = "local.get 0"
+            if label == "__trap_oom" { pos = "i64.const 0" }
+            self.wasm_fn(label, 1, [format("i32.const .Lmsg{}", label), "i64.extend_i32_u", pos, "call __panic", "drop", "unreachable"], true)
+        }
+        if self.frames {
+            // held for the parent when a task other than the entry's fails
+            self.wasm_fn("__panic", 2, ["i64.const 2", "local.get 0", "local.get 1", "call __task_fail", "drop",
+                "local.get 0", "local.get 1", "call __panic_report_tasks", "drop", "unreachable"], true)
+            self.wasm_calls["__panic_report_tasks"] = 2
+        } else {
+            self.wasm_fn("__panic", 2, ["local.get 0", "local.get 1", "call __panic_report", "drop", "unreachable"], true)
+            self.wasm_calls["__panic_report"] = 2
+        }
+        // __str_eq(a, b): the same string, or equal lengths and bytes
+        self.wasm_fn("__str_eq", 2, ["local.get 0", "local.get 1", "i64.eq", "if", "i64.const 1", "return", "end_if",
+            "local.get 0", "i32.wrap_i64", "i64.load 0", "local.get 1", "i32.wrap_i64", "i64.load 0", "i64.ne", "if", "i64.const 0", "return", "end_if",
+            "local.get 0", "i64.const 8", "i64.add", "local.get 1", "i64.const 8", "i64.add", "local.get 0", "i32.wrap_i64", "i64.load 0",
+            "return_call __equal_bytes"], true)
+        self.wasm_calls["__equal_bytes"] = 3
+        // __equal_bytes(p, q, n): whether n bytes at p and q are equal
+        self.wasm_fn("__equal_bytes", 3, ["block", "loop", "local.get 2", "i64.eqz", "br_if 1",
+            "local.get 0", "i32.wrap_i64", "i64.load8_u 0", "local.get 1", "i32.wrap_i64", "i64.load8_u 0", "i64.ne", "if", "i64.const 0", "return", "end_if",
+            "local.get 0", "i64.const 1", "i64.add", "local.set 0", "local.get 1", "i64.const 1", "i64.add", "local.set 1",
+            "local.get 2", "i64.const 1", "i64.sub", "local.set 2", "br 0", "end_loop", "end_block", "i64.const 1"], true)
+        self.wasm_fn("__copy_bytes", 3, ["local.get 0", "i32.wrap_i64", "local.get 1", "i32.wrap_i64", "local.get 2", "i32.wrap_i64", "memory.copy 0, 0", "i64.const 0"], true)
+        self.wasm_fn("__argv_of", 0, ["i32.const __argv", "i64.load 0"], true)
+        self.wasm_fn("__environ", 0, ["i32.const __envp", "i64.load 0"], true)
+        self.wasm_fn("__set_io_errno", 1, ["i32.const __io_errno_val", "local.get 0", "i64.store 0", "i64.const 0"], true)
+        self.wasm_fn("__set_run_status", 3, ["i32.const __run_exit_val", "local.get 0", "i64.store32 0", "i32.const __run_signal_val", "local.get 1", "i64.store32 0",
+            "i32.const __run_errno_val", "local.get 2", "i64.store32 0", "i64.const 0"], true)
+        self.wasm_fn("__set_run_stderr", 1, ["local.get 0", "i64.const 8", "i64.sub", "i32.wrap_i64", "local.get 0", "i64.const 8", "i64.sub", "i32.wrap_i64",
+            "i64.load 0", "i64.const 1", "i64.add", "i64.store 0", "i32.const __run_stderr_val", "local.get 0", "i64.store 0", "i64.const 0"], true)
+        // __str_drop, as IR with std.rt's allocator (MYLA-162)
+        self.emit_routine(drop_entry_ir("__str_drop", self.rt_alloc_names().1, false), -1, 0, 0)
+        self.raw("\t.set __str_drop, myla___str_drop")
+        for p in self.rt_exec() {
+            self.raw(format("\t.set {}, myla_{}", p.0, p.1))
+        }
+        self.raw("\t.set __print_str, myla_std$rt$print_str")
+        let names = self.rt_alloc_names()
+        self.raw(format("\t.set __alloc, myla_{}", names.0))
+        self.raw(format("\t.set __free, myla_{}", names.1))
+        // the function values' counts; at zero, the env's drop function
+        // (word 0) in place of this
+        self.wasm_fn("__func_retain", 1, ["local.get 0", "i64.eqz", "if", "i64.const 0", "return", "end_if",
+            "local.get 0", "i64.const 8", "i64.sub", "i32.wrap_i64", "local.get 0", "i64.const 8", "i64.sub", "i32.wrap_i64",
+            "i64.load 0", "i64.const 1", "i64.add", "i64.store 0", "i64.const 0"], true)
+        self.wasm_fn("__func_drop", 1, ["local.get 0", "i64.eqz", "if", "i64.const 0", "return", "end_if",
+            "local.get 0", "i64.const 8", "i64.sub", "i32.wrap_i64", "local.get 0", "i64.const 8", "i64.sub", "i32.wrap_i64",
+            "i64.load 0", "i64.const 1", "i64.sub", "i64.store 0",
+            "local.get 0", "i64.const 8", "i64.sub", "i32.wrap_i64", "i64.load 0", "i64.eqz", "i32.eqz", "if", "i64.const 0", "return", "end_if",
+            "local.get 0", "local.get 0", "i32.wrap_i64", "i64.load 0", "i32.wrap_i64", format("return_call_indirect {}", wasm_sig(1))], true)
+        // __compose_call(x), its env (`myla_env`) holding two function values
+        // a (env[8], env[16]) and b (env[24], env[32]): b(a(x)), b in its place
+        self.wasm_fn("__compose_call", 1, [".local i64", "i32.const myla_env", "i64.load 0", "local.set 1",
+            "i32.const myla_env", "local.get 1", "i32.wrap_i64", "i64.load 16", "i64.store 0",
+            "local.get 0", "local.get 1", "i32.wrap_i64", "i64.load 8", "i32.wrap_i64", format("call_indirect {}", wasm_sig(1)), "local.set 0",
+            "i32.const myla_env", "local.get 1", "i32.wrap_i64", "i64.load 32", "i64.store 0",
+            "local.get 0", "local.get 1", "i32.wrap_i64", "i64.load 24", "i32.wrap_i64", format("return_call_indirect {}", wasm_sig(1))], true)
+        // std.math's primitives (MYLA-248), a float64 as its bits
+        self.wasm_fn("__sqrt", 1, ["local.get 0", "f64.reinterpret_i64", "f64.sqrt", "i64.reinterpret_f64"], true)
+        self.wasm_fn("__f64_bits", 1, ["local.get 0"], true)
+        self.wasm_fn("__f64_from_bits", 1, ["local.get 0"], true)
+        self.emit_compose_env_drop()
+        self.emit_derived_eq()
+    }
+
+    // The executor's control transfers on one worker (`runtime_x86.my`'s
+    // `emit_executor` says what each does; the queues are std.rt's). A
+    // frame function takes its frame as its one word and goes on by
+    // `return_call`; one going back to the executor returns.
+    fun emit_executor_wasm(var self) {
+        let one = wasm_sig(1)
+        self.wasm_fn("__exec_run", 0, ["call __exec_loop", "drop", "i64.const 0"], true)
+        self.wasm_calls["__exec_loop"] = 0
+        self.wasm_fn("myla___resume", 1, ["local.get 0", "local.get 0", "i32.wrap_i64", "i64.load 0", "i32.wrap_i64", "return_call_indirect " + one], true)
+        // the frame's caller goes on in its place; a task's first frame: its
+        // task ends (std.rt's `task_end`), the entry's: the program
+        self.wasm_fn("myla___finish", 1, [".local i64", "local.get 0", "i32.wrap_i64", "i64.load 8", "local.tee 1", "i64.eqz", "i32.eqz", "if",
+            "local.get 1", "local.get 1", "i32.wrap_i64", "i64.load 0", "i32.wrap_i64", "return_call_indirect " + one, "end_if",
+            "local.get 0", "i32.const __exec_main", "i64.load 0", "i64.eq", "if", "i64.const 0", "call __exit", "drop", "end_if",
+            "local.get 0", "return_call __task_end"], true)
+        self.wasm_calls["__task_end"] = 1
+        // __task_fail(kind, a, b): the first failure claims the program (0
+        // back); with one worker no other can come while it is reported;
+        // with no task running, 0 at once
+        self.wasm_fn("__task_fail", 3, [format("i32.const __tls_blocks+{}", tls_offset("__exec_cur")), "i64.load 0", "i64.eqz", "if", "i64.const 0", "return", "end_if",
+            "i32.const __exec_failing", "i64.load 0", "i64.eqz", "if", "i32.const __exec_failing", "i64.const 1", "i64.store 0", "i64.const 0", "return", "end_if",
+            "unreachable"], true)
+        self.wasm_fn("myla___yield", 1, ["local.get 0", "return_call __exec_yield_push"], true)
+        self.wasm_calls["__exec_yield_push"] = 1
+        // the entry points that may go on with the frame at once (D90):
+        // std.rt decides (the frame to resume, or 0 back to the executor)
+        for ep in [("myla___wait", "__task_wait"), ("myla___actor_enter", "__actor_enter_rt")] {
+            self.wasm_fn(ep.0, 2, [".local i64", "local.get 0", "local.get 1", "call " + ep.1, "local.tee 2", "i64.eqz", "if", "i64.const 0", "return", "end_if",
+                "local.get 2", "local.get 2", "i32.wrap_i64", "i64.load 0", "i32.wrap_i64", "return_call_indirect " + one], true)
+            self.wasm_calls[ep.1] = 2
+        }
+        // __task_exit(code): `exit` when tasks take turns
+        self.wasm_fn("__task_exit", 1, ["i64.const 3", "local.get 0", "i64.const 0", "call __task_fail", "drop", "call __failed_wait", "drop", "local.get 0", "call __exit", "drop", "unreachable"], true)
+        self.wasm_calls["__failed_wait"] = 0
+        // the environments' deep copies (D92, MYLA-148): owning nothing
+        // (`__free` its drop), the string's or the cell's; else the routine
+        // `__env_routines` gives beside its drop function
+        for dc in [("__deep_env", "__deep_str", 16), ("__dclone_env", "__dclone_cell", 8)] {
+            self.wasm_fn(dc.0, 1, [".local i64, i64", "local.get 0", "i64.eqz", "if", "i64.const 0", "return", "end_if",
+                "local.get 0", "i32.wrap_i64", "i64.load 0", "local.tee 1", "i32.const __free", "i64.extend_i32_u", "i64.eq", "if", "local.get 0", "return_call " + dc.1, "end_if",
+                "i32.const __env_routines", "i64.extend_i32_u", "i64.const 8", "i64.add", "local.set 2",
+                "loop", "local.get 2", "i32.wrap_i64", "i64.load 0", "local.get 1", "i64.ne", "if", "local.get 2", "i64.const 24", "i64.add", "local.set 2", "br 1", "end_if", "end_loop",
+                "local.get 0", "local.get 2", "i32.wrap_i64", format("i64.load {}", dc.2), "i32.wrap_i64", "return_call_indirect " + one], true)
+            self.wasm_calls[dc.1] = 1
+        }
+    }
+
+    // A hand-written function `name` of `n` words: its `.functype`, then
+    // `body` (a result left on the stack, or `unreachable`), its end;
+    // `result`: whether it gives an i64 (`_start` gives nothing).
+    fun wasm_fn(var self, name: str, n: int32, body: [str], result: bool) {
+        if result { self.wasm_define(name, n) }
+        self.raw("")
+        if name == "_start" { self.raw("\t.globl _start") }
+        self.raw(name + ":")
+        if result { self.raw(format("\t.functype {} {}", name, wasm_sig(n))) } else { self.raw(format("\t.functype {} () -> ()", name)) }
+        for line in body {
+            if ends_colon_w(line) { self.raw(line) } else { self.raw("\t" + line) }
+        }
+        self.raw("\tend_function")
+    }
+
+    // The assembly as clang's wasm32 assembler takes it (see the top).
+    fun wasm_module(var self, text: str) -> str {
+        let lines = split_lines_w(text)
+        // the aliases (`.set a, b`), resolved to what they stand for
+        var alias: [str: str] = [:]
+        for line in lines {
+            if wasm_begins(line, "\t.set ") {
+                let rest = wasm_from(line, 6)
+                let comma = wasm_index(rest, ", ")
+                alias[wasm_cut(rest, 0, comma)] = wasm_from(rest, comma + 2)
+            }
+        }
+        var out: [str] = []
+        // the imports and every function's type first
+        for c in wasi_calls() {
+            var params = StringBuilder()
+            params.append("(")
+            var j = 0
+            while j < c.1.len() {
+                if j > 0 { params.append(", ") }
+                if c.1[j] == 'i' { params.append("i32") } else { params.append("i64") }
+                j = j + 1
+            }
+            params.append(")")
+            var res = "() "
+            if c.2 { res = "(i32)" }
+            out.push(format("\t.functype {} {} -> {}", c.0, params.build(), res))
+            out.push(format("\t.import_module {}, wasi_snapshot_preview1", c.0))
+            out.push(format("\t.import_name {}, {}", c.0, c.0))
+        }
+        for name in self.wasm_arity.keys() { out.push(format("\t.functype {} {}", name, wasm_sig(self.wasm_arity[name]))) }
+        out.push("\t.globaltype __stack_pointer, i32")
+        // a call whose words don't match its callee's
+        for name in self.wasm_calls.keys() {
+            let to = wasm_resolve(alias, name)
+            let n = self.wasm_calls[name]
+            match get(self.wasm_arity, to) {
+                Some(m) => { if n != m { panic(format("internal error: wasm: {} ({}) takes {} words, called with {}", name, to, m, n)) } },
+                None => { panic(format("internal error: wasm: {} ({}) is called but not defined", name, to)) },
+            }
+        }
+        var section = "text"
+        var data: [str] = []
+        for line in lines {
+            if wasm_begins(line, "\t.set ") || wasm_begins(line, "\t.file ") || wasm_begins(line, "\t.section .note") {
+                continue
+            }
+            if line == "\t.text" {
+                section = "text"
+                out.push(line)
+                continue
+            }
+            if line == "\t.section .rodata" || line == "\t.data" || line == "\t.bss" {
+                for d in wasm_data(data) { out.push(d) }
+                data = []
+                section = wasm_from(line, wasm_last_dot(line) + 1)
+                out.push(format("\t.section .{},\"\",@", section))
+                continue
+            }
+            if section == "text" {
+                out.push(wasm_aliased(alias, line))
+            } else {
+                data.push(line)
+            }
+        }
+        for d in wasm_data(data) { out.push(d) }
+        return join_lines_w(out)
+    }
+}
+
+// `name` through the aliases to what it stands for.
+fun wasm_resolve(alias: [str: str], name: str) -> str {
+    var n = name
+    var steps = 0
+    while alias.contains(n) && steps < 16 {
+        n = alias[n]
+        steps = steps + 1
+    }
+    return n
+}
+
+// A line of code with an aliased symbol as its operand resolved.
+fun wasm_aliased(alias: [str: str], line: str) -> str {
+    for op in ["\tcall ", "\treturn_call ", "\ti32.const "] {
+        if wasm_begins(line, op) {
+            let sym = wasm_from(line, op.len())
+            if alias.contains(sym) { return op + wasm_resolve(alias, sym) }
+            return line
+        }
+    }
+    return line
+}
+
+// A data section's lines for wasm: aligned at its start, each label sized
+// by the bytes up to the next one, a pointer word (`.quad sym`) as two
+// 32-bit words (the symbol, then 0).
+fun wasm_data(lines0: [str]) -> [str] {
+    var lines: [str] = []
+    for l in lines0 { for p in split_lines_w(l) { lines.push(p) } }
+    if lines.len() == 0 { return [] }
+    var out: [str] = ["\t.p2align 6"]
+    var off: int64 = 0
+    var label = ""
+    var start: int64 = 0
+    for line in lines {
+        if line == "" { continue }
+        if ends_colon_w(line) {
+            if label != "" { out.push(format("\t.size {}, {}", label, off - start)) }
+            label = wasm_cut(line, 0, line.len() - 1)
+            start = off
+            out.push(line)
+            continue
+        }
+        if wasm_begins(line, "\t.balign ") || wasm_begins(line, "\t.align ") {
+            let n = wasm_int(wasm_from(line, wasm_index(line, "align ") + 6))
+            out.push(format("\t.p2align {}", wasm_log2(n)))
+            off = (off + n - 1) / n * n
+            continue
+        }
+        if wasm_begins(line, "\t.quad ") {
+            let v = wasm_from(line, 7)
+            if wasm_is_number(v) { out.push(line) } else {
+                out.push("\t.int32 " + v)
+                out.push("\t.int32 0")
+            }
+            off += 8
+            continue
+        }
+        if wasm_begins(line, "\t.long ") {
+            off += 4 * wasm_items(wasm_from(line, 7))
+            for item in wasm_split_items(wasm_from(line, 7)) { out.push("\t.int32 " + item) }
+            continue
+        }
+        if wasm_begins(line, "\t.byte ") {
+            off += wasm_items(wasm_from(line, 7))
+            out.push(line)
+            continue
+        }
+        if wasm_begins(line, "\t.skip ") {
+            off += wasm_int(wasm_from(line, 7))
+            out.push(line)
+            continue
+        }
+        if wasm_begins(line, "\t.ascii ") {
+            off += wasm_ascii_len(wasm_from(line, 8))
+            out.push(line)
+            continue
+        }
+        panic(format("internal error: wasm: a data line it doesn't know: {}", line))
+    }
+    if label != "" { out.push(format("\t.size {}, {}", label, off - start)) }
+    return out
+}
+
+// The bytes of an `.ascii` operand (`"…"`, `\x` one byte).
+#test("\"ab\\\"c\"")[4]
+fun wasm_ascii_len(s: str) -> int64 {
+    var n: int64 = 0
+    var i = 1
+    while i < s.len() - 1 {
+        if s[i] == '\\' { i = i + 1 }
+        n += 1
+        i = i + 1
+    }
+    return n
+}
+
+// How many comma-separated items `s` holds.
+#test("1, 2, 3")[3]
+fun wasm_items(s: str) -> int64 {
+    var n: int64 = 1
+    for c in s.chars() { if c == ',' { n += 1 } }
+    return n
+}
+
+// The comma-separated items of `s`, trimmed.
+#test("913, 30")[["913", "30"]]
+fun wasm_split_items(s: str) -> [str] {
+    var out: [str] = []
+    var start = 0
+    var i = 0
+    while i <= s.len() {
+        if i == s.len() || s[i] == ',' {
+            var a = start
+            while a < i && s[a] == ' ' { a = a + 1 }
+            out.push(wasm_cut(s, a, i))
+            start = i + 1
+        }
+        i = i + 1
+    }
+    return out
+}
+
+#test("-12")[true]
+#test(".Lstr3")[false]
+fun wasm_is_number(s: str) -> bool {
+    if s.len() == 0 { return false }
+    var i = 0
+    if s[0] == '-' { i = 1 }
+    if i == s.len() { return false }
+    while i < s.len() {
+        if s[i] < '0' || s[i] > '9' { return false }
+        i = i + 1
+    }
+    return true
+}
+
+#test("4616")[4616]
+fun wasm_int(s: str) -> int64 {
+    var n: int64 = 0
+    for c in s.chars() {
+        if c >= '0' && c <= '9' { n = n * 10 + (c as int64 - 48) }
+    }
+    return n
+}
+
+#test(64)[6]
+#test(8)[3]
+fun wasm_log2(n: int64) -> int64 {
+    var k: int64 = 0
+    while (1i64 << k) < n { k += 1 }
+    return k
+}
+
+fun ends_colon_w(line: str) -> bool {
+    return line.len() > 0 && line[line.len() - 1] == ':' && line[0] != '\t'
+}
+
+#test("a.b.c")[3]
+fun wasm_last_dot(s: str) -> int32 {
+    var i = s.len() - 1
+    while i >= 0 && s[i] != '.' { i = i - 1 }
+    return i
+}
+
+fun wasm_begins(s: str, p: str) -> bool {
+    if s.len() < p.len() { return false }
+    var i = 0
+    while i < p.len() {
+        if s[i] != p[i] { return false }
+        i = i + 1
+    }
+    return true
+}
+
+// Where `p` first occurs in `s` (-1: nowhere).
+#test("a, b", ", ")[1]
+fun wasm_index(s: str, p: str) -> int32 {
+    var i = 0
+    while i + p.len() <= s.len() {
+        var j = 0
+        while j < p.len() && s[i + j] == p[j] { j = j + 1 }
+        if j == p.len() { return i }
+        i = i + 1
+    }
+    return -1
+}
+
+fun wasm_cut(s: str, a: int32, b: int32) -> str {
+    var sb = StringBuilder()
+    sb.append(s, a, b)
+    return sb.build()
+}
+
+fun wasm_from(s: str, a: int32) -> str {
+    return wasm_cut(s, a, s.len())
+}
+
+#test("a\nb")[["a", "b"]]
+fun split_lines_w(s: str) -> [str] {
+    var out: [str] = []
+    var start = 0
+    var i = 0
+    while i < s.len() {
+        if s[i] == '\n' {
+            out.push(wasm_cut(s, start, i))
+            start = i + 1
+        }
+        i = i + 1
+    }
+    out.push(wasm_cut(s, start, s.len()))
+    return out
+}
+
+fun join_lines_w(lines: [str]) -> str {
+    var sb = StringBuilder()
+    for l in lines {
+        sb.append(l)
+        sb.append("\n")
+    }
+    return sb.build()
+}

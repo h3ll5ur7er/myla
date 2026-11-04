@@ -92,6 +92,16 @@ impl CodeGen {
         // the ownership instructions as plain operations and calls
         // (MYLA-162), the owners a tail call drops after it first moved
         // before it
+        if self.wasm {
+            // wasm's (MYLA-158)
+            self.emit_wasm(self.expand_ownership(f), decl_id, line, col, mangled)
+            return
+        }
+        if self.a64 {
+            // aarch64's translation, its tail calls only `become`'s (MYLA-163)
+            self.emit_a64(self.expand_ownership(f), decl_id, line, col, mangled)
+            return
+        }
         f = self.expand_ownership(self.hoist_tail_drops(f))
         let tc = touches(f)
         self.temp_uses = use_counts(f, tc)
@@ -1003,15 +1013,6 @@ impl CodeGen {
                     self.emit("movq $231, %rax")
                     self.emit("syscall")
                 }
-            },
-            Inst.MapRemove(mt, h, c, k) => {
-                // the holder, then the cell, below the key
-                self.load_temp(h, "rax", temp_base)
-                self.emit("pushq %rax")
-                self.load_temp(c, "rax", temp_base)
-                self.emit("pushq %rax")
-                self.load_temp(k, "rsi", temp_base)
-                self.emit_map_remove(mt)
             },
             Inst.Elem(d, c, i, stride, is_str, p) => {
                 self.load_temp(c, "rax", temp_base)
@@ -3223,7 +3224,7 @@ fun writes_no_slot(inst: Inst) -> bool {
 
 // The offsets of `f`'s slots: in its heap frame after the header (D90) for a
 // frame function, else `layout_slots`'.
-fun slots_at(f: IrFunc, below: int32, inreg: [bool]) -> [int32] {
+pub fun slots_at(f: IrFunc, below: int32, inreg: [bool]) -> [int32] {
     if !f.frame { return layout_slots(f, below, inreg) }
     let (pos, extent) = slot_positions(f, false, [])
     var off: [int32] = []
@@ -3232,7 +3233,7 @@ fun slots_at(f: IrFunc, below: int32, inreg: [bool]) -> [int32] {
 }
 
 // The size of a frame function's heap frame: the header, then its slots.
-fun frame_size(f: IrFunc) -> int32 {
+pub fun frame_size(f: IrFunc) -> int32 {
     let (pos, extent) = slot_positions(f, false, [])
     return FRAME_HEADER + extent
 }

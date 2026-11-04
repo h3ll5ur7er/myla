@@ -1,0 +1,623 @@
+// runtime_a64.my -- the runtime's aarch64 Linux assembly (MYLA-163, D117).
+//
+// What `runtime_x86.my` gives for x86-64, for aarch64: the program's start,
+// the traps and the panic, the system-call and memory primitives, the
+// function values' counts, composition and std.math's primitives. Not yet:
+// tasks (the executor's control transfers, the threads, the deep copies of
+// environments) and the stack-overflow handler.
+//
+// The hand-written routines keep to what the code `ir_a64.my` makes
+// assumes: they may change x0 to x17 and the flags, and keep x19 to x29
+// and sp.
+
+from .codegen import CodeGen, trap_labels, tls_offset, TLS_SIZE, EXEC_CAP
+from .lower import drop_entry_ir
+
+impl CodeGen {
+    fun emit_runtime_prelude_a64(var self, entry_name: str) {
+        // the kernel's stack: argc, the arguments, 0, the environment, 0
+        for line in ["\t.global _start", "\t.p2align 2", "_start:"] { self.raw(line) }
+        // the main thread's stack may grow to 120 MiB (MYLA-182):
+        // prlimit64(0, RLIMIT_STACK), raised to min(120 MiB, the hard limit)
+        // when lower
+        for line in [
+            "\tsub sp, sp, #16",
+            "\tmov x0, #0",
+            "\tmov x1, #3",
+            "\tmov x2, #0",
+            "\tmov x3, sp",
+            "\tmov x8, #261",
+            "\tsvc #0",
+            "\tcbnz x0, .Lstk_done",
+            "\tmov x4, #125829120",
+            "\tldp x5, x6, [sp]",
+            "\tcmp x5, x4",
+            "\tb.hs .Lstk_done",
+            "\tcmp x6, x4",
+            "\tcsel x4, x6, x4, lo",
+            "\tstr x4, [sp]",
+            "\tmov x0, #0",
+            "\tmov x1, #3",
+            "\tmov x2, sp",
+            "\tmov x3, #0",
+            "\tmov x8, #261",
+            "\tsvc #0",
+            ".Lstk_done:",
+            "\tadd sp, sp, #16",
+        ] { self.raw(line) }
+        // SIGSEGV on an alternate stack (MYLA-182): `__on_segv`
+        self.emit("bl __alt_stack")
+        for line in [
+            // rt_sigaction(SIGSEGV, {__on_segv, SA_SIGINFO | SA_ONSTACK, 0,
+            // 0}, 0, 8): the kernel returns through its own trampoline
+            "\tsub sp, sp, #32",
+            "\tadrp x0, __on_segv",
+            "\tadd x0, x0, :lo12:__on_segv",
+            "\tmovz x1, #4",
+            "\tmovk x1, #0x800, lsl #16",
+            "\tstp x0, x1, [sp]",
+            "\tstp xzr, xzr, [sp, #16]",
+            "\tmov x0, #11",
+            "\tmov x1, sp",
+            "\tmov x2, #0",
+            "\tmov x3, #8",
+            "\tmov x8, #134",
+            "\tsvc #0",
+            "\tadd sp, sp, #32",
+        ] { self.raw(line) }
+        if self.frames {
+            // the main thread's state block, worker 0's, its first word its
+            // own address
+            self.a64_adr("x1", "__tls_blocks")
+            self.emit("str x1, [x1]")
+            self.emit("msr tpidr_el0, x1")
+        }
+        for line in [
+            "\tldr x0, [sp]",
+            "\tadrp x1, __argc",
+            "\tstr x0, [x1, :lo12:__argc]",
+            "\tadd x2, sp, #8",
+            "\tadrp x1, __argv",
+            "\tstr x2, [x1, :lo12:__argv]",
+            "\tadd x2, x2, x0, lsl #3",
+            "\tadd x2, x2, #8",
+            "\tadrp x1, __envp",
+            "\tstr x2, [x1, :lo12:__envp]",
+        ] { self.raw(line) }
+        if self.frames {
+            // as many workers as `__workers_count` says; their rings of
+            // ready frames, EXEC_CAP frames each (D106)
+            self.emit("bl __sched_init")
+            self.emit("bl __workers_count")
+            self.a64_adr("x1", "__exec_workers")
+            self.emit("str w0, [x1]")
+            self.emit("mov w1, w0")
+            self.a64_imm("x2", (8 * EXEC_CAP) as int64)
+            self.emit("mul x1, x1, x2")
+            self.a64_mmap(16418)
+            self.emit("cmn x0, #4096")
+            self.emit("b.hi __trap_oom")
+            self.a64_adr("x1", "__wq_rings")
+            self.emit("str x0, [x1]")
+            self.emit("bl __start_workers")
+        }
+        if self.frames && self.sig_of(entry_name).decl.is_async {
+            // the entry's task: its frame queued, the executor run (D90)
+            self.emit(format("bl myla_{}__new", entry_name))
+            self.a64_adr("x1", "__exec_main")
+            self.emit("str x0, [x1]")
+            self.emit("str x0, [x0, #40]")
+            self.emit("bl __exec_push")
+            self.emit("bl __exec_run")
+        } else {
+            self.emit(format("bl myla_{}", entry_name))
+        }
+        // exit_group(0): every thread ends (D89 (3))
+        for line in ["\tmov x0, #0", "\tmov x8, #94", "\tsvc #0", ""] { self.raw(line) }
+        if self.frames {
+            self.emit_executor_a64()
+            self.emit_deep_runtime_a64()
+        } else {
+            // no task but the first: nothing is ever cancelled (D96)
+            for line in ["__task_cancelled:", "\tmov x0, #0", "\tret", ""] { self.raw(line) }
+        }
+        for line in [
+            // __alt_stack: an alternate signal stack for the running thread
+            // (a thread made with CLONE_VM has none): mmap(64 KiB),
+            // sigaltstack
+            "__alt_stack:",
+            "\tmov x0, #0",
+            "\tmov x1, #65536",
+            "\tmov x2, #3",
+            "\tmov x3, #34",
+            "\tmov x4, #-1",
+            "\tmov x5, #0",
+            "\tmov x8, #222",
+            "\tsvc #0",
+            "\tcmn x0, #4096",
+            "\tb.hi .Las_done",
+            "\tsub sp, sp, #32",
+            "\tstr x0, [sp]",
+            "\tstr xzr, [sp, #8]",
+            "\tmov x1, #65536",
+            "\tstr x1, [sp, #16]",
+            "\tmov x0, sp",
+            "\tmov x1, #0",
+            "\tmov x8, #132",
+            "\tsvc #0",
+            "\tadd sp, sp, #32",
+            ".Las_done:",
+            "\tret",
+            "",
+            // __on_segv(sig, siginfo, ucontext), on the alternate stack: the
+            // fault address (siginfo + 16) within 64 KiB below or 1 MiB above
+            // the interrupted sp (ucontext + 432, the sigcontext's sp) is a
+            // stack overflow, reported once (a worker overflowing after
+            // another waits for its exit to end the process); any other
+            // fault gets the default action back and happens again
+            "__on_segv:",
+            "\tldr x3, [x1, #16]",
+            "\tldr x4, [x2, #432]",
+            "\tsub x5, x4, #16, lsl #12",
+            "\tcmp x3, x5",
+            "\tb.lo .Lsegv_other",
+            "\tadd x5, x4, #256, lsl #12",
+            "\tcmp x3, x5",
+            "\tb.hi .Lsegv_other",
+            "\tadrp x6, __segv_once",
+            "\tadd x6, x6, :lo12:__segv_once",
+            "\tmov w7, #1",
+            ".Lsegv_claim:",
+            "\tldaxr w8, [x6]",
+            "\tstlxr w9, w7, [x6]",
+            "\tcbnz w9, .Lsegv_claim",
+            "\tcbz w8, .Lsegv_report",
+            ".Lsegv_sleep:",
+            "\tmov x0, #0",
+            "\tmov x1, #0",
+            "\tmov x2, #0",
+            "\tmov x3, #0",
+            "\tmov x8, #73",
+            "\tsvc #0",
+            "\tb .Lsegv_sleep",
+            ".Lsegv_report:",
+            "\tmov x0, #2",
+            "\tadrp x1, .Lmsg_sov",
+            "\tadd x1, x1, :lo12:.Lmsg_sov",
+            "\tmov x2, #30",
+            "\tmov x8, #64",
+            "\tsvc #0",
+            "\tmov x0, #1",
+            "\tmov x8, #94",
+            "\tsvc #0",
+            ".Lsegv_other:",
+            "\tsub sp, sp, #32",
+            "\tstp xzr, xzr, [sp]",
+            "\tstp xzr, xzr, [sp, #16]",
+            "\tmov x0, #11",
+            "\tmov x1, sp",
+            "\tmov x2, #0",
+            "\tmov x3, #8",
+            "\tmov x8, #134",
+            "\tsvc #0",
+            "\tadd sp, sp, #32",
+            "\tret",
+            ".Lmsg_sov:",
+            "\t.ascii \"runtime error: stack overflow\\n\"",
+            "\t.p2align 2",
+            "",
+        ] { self.raw(line) }
+        // Runtime errors (MYLA-17): the message in x0, the position record
+        // the caller passes in x1 (out of memory has none)
+        for label in trap_labels() {
+            self.raw(format("{}:", label))
+            if label == "__trap_oom" { self.raw("\tmov x1, #0") }
+            self.raw(format("\tadrp x0, .Lmsg{}", label))
+            self.raw(format("\tadd x0, x0, :lo12:.Lmsg{}", label))
+            self.raw("\tb __panic")
+        }
+        self.raw("")
+        // __panic(x0 the message, x1 the position record or 0): std.rt
+        // reports it (`panic_report`); with tasks, held for the parent when a
+        // task other than the entry's fails (`__task_fail` goes back to the
+        // executor then)
+        self.raw("__panic:")
+        if self.frames {
+            for line in ["\tstp x0, x1, [sp, #-16]!", "\tmov x2, x1", "\tmov x1, x0", "\tmov x0, #2", "\tbl __task_fail", "\tldp x0, x1, [sp], #16", "\tb __panic_report_tasks"] { self.raw(line) }
+        } else {
+            self.raw("\tb __panic_report")
+        }
+        self.raw("")
+        for line in [
+            // __str_eq(a, b): the same string, or equal lengths and bytes
+            "__str_eq:",
+            "\tcmp x0, x1",
+            "\tb.eq .Lse_eq",
+            "\tldr x2, [x0], #8",
+            "\tldr x3, [x1], #8",
+            "\tcmp x2, x3",
+            "\tb.ne .Lse_ne",
+            "\tb __equal_bytes",
+            ".Lse_eq:",
+            "\tmov x0, #1",
+            "\tret",
+            ".Lse_ne:",
+            "\tmov x0, #0",
+            "\tret",
+            "",
+            // __syscall(n, a, b, c): the number in x8, the arguments in x0
+            // to x2 (x3 0); the result, a negative errno on a failure
+            "__syscall:",
+            "\tmov x8, x0",
+            "\tmov x0, x1",
+            "\tmov x1, x2",
+            "\tmov x2, x3",
+            "\tmov x3, #0",
+            "\tsvc #0",
+            "\tret",
+            "",
+            // __syscall5(n, a, b, c, d, e): five arguments, the sixth 0
+            "__syscall5:",
+            "\tmov x8, x0",
+            "\tmov x0, x1",
+            "\tmov x1, x2",
+            "\tmov x2, x3",
+            "\tmov x3, x4",
+            "\tmov x4, x5",
+            "\tmov x5, #0",
+            "\tsvc #0",
+            "\tret",
+            "",
+            "__argv_of:",
+            "\tadrp x0, __argv",
+            "\tldr x0, [x0, :lo12:__argv]",
+            "\tret",
+            "",
+            "__environ:",
+            "\tadrp x0, __envp",
+            "\tldr x0, [x0, :lo12:__envp]",
+            "\tret",
+            "",
+            // __copy_bytes(dst, src, n): sixteen bytes at a time, then eight,
+            // then one
+            "__copy_bytes:",
+            ".Lcb_pairs:",
+            "\tcmp x2, #16",
+            "\tb.lo .Lcb_word",
+            "\tldp x3, x4, [x1], #16",
+            "\tstp x3, x4, [x0], #16",
+            "\tsub x2, x2, #16",
+            "\tb .Lcb_pairs",
+            ".Lcb_word:",
+            "\tcmp x2, #8",
+            "\tb.lo .Lcb_bytes",
+            "\tldr x3, [x1], #8",
+            "\tstr x3, [x0], #8",
+            "\tsub x2, x2, #8",
+            ".Lcb_bytes:",
+            "\tcbz x2, .Lcb_done",
+            "\tldrb w3, [x1], #1",
+            "\tstrb w3, [x0], #1",
+            "\tsub x2, x2, #1",
+            "\tb .Lcb_bytes",
+            ".Lcb_done:",
+            "\tret",
+            "",
+            // __equal_bytes(p, q, n): whether n bytes at p and q are equal
+            "__equal_bytes:",
+            ".Leb_words:",
+            "\tcmp x2, #8",
+            "\tb.lo .Leb_bytes",
+            "\tldr x3, [x0], #8",
+            "\tldr x4, [x1], #8",
+            "\tcmp x3, x4",
+            "\tb.ne .Leb_no",
+            "\tsub x2, x2, #8",
+            "\tb .Leb_words",
+            ".Leb_bytes:",
+            "\tcbz x2, .Leb_yes",
+            "\tldrb w3, [x0], #1",
+            "\tldrb w4, [x1], #1",
+            "\tcmp w3, w4",
+            "\tb.ne .Leb_no",
+            "\tsub x2, x2, #1",
+            "\tb .Leb_bytes",
+            ".Leb_yes:",
+            "\tmov x0, #1",
+            "\tret",
+            ".Leb_no:",
+            "\tmov x0, #0",
+            "\tret",
+            "",
+        ] { self.raw(line) }
+        // the I/O primitives' errno and `run`'s results (a worker's own with
+        // tasks)
+        self.raw("__set_io_errno:")
+        self.a64_rt_var("x1", "__io_errno_val")
+        for line in ["\tstr x0, [x1]", "\tret", "", "__set_run_status:"] { self.raw(line) }
+        self.a64_rt_var("x3", "__run_exit_val")
+        self.raw("\tstr w0, [x3]")
+        self.a64_rt_var("x3", "__run_signal_val")
+        self.raw("\tstr w1, [x3]")
+        self.a64_rt_var("x3", "__run_errno_val")
+        for line in ["\tstr w2, [x3]", "\tret", "", "__set_run_stderr:", "\tldur x1, [x0, #-8]", "\tadd x1, x1, #1", "\tstur x1, [x0, #-8]"] { self.raw(line) }
+        self.a64_rt_var("x1", "__run_stderr_val")
+        for line in ["\tstr x0, [x1]", "\tret", ""] { self.raw(line) }
+        // __str_drop, as IR with std.rt's allocator (MYLA-162)
+        self.emit_routine(drop_entry_ir("__str_drop", self.rt_alloc_names().1, false), -1, 0, 0)
+        self.raw("\t.set __str_drop, myla___str_drop")
+        for p in self.rt_exec() {
+            self.raw(format("\t.set {}, myla_{}", p.0, p.1))
+        }
+        self.raw("\t.set __print_str, myla_std$rt$print_str")
+        let names = self.rt_alloc_names()
+        self.raw(format("\t.set __alloc, myla_{}", names.0))
+        self.raw(format("\t.set __free, myla_{}", names.1))
+        self.raw("")
+        for line in [
+            "__func_retain:",
+            "\tcbz x0, .Lfret_done",
+            "\tldur x1, [x0, #-8]",
+            "\tadd x1, x1, #1",
+            "\tstur x1, [x0, #-8]",
+            ".Lfret_done:",
+            "\tret",
+            "",
+            // at a count of zero, a jump to the env's drop function (word 0)
+            "__func_drop:",
+            "\tcbz x0, .Lfdrop_done",
+            "\tldur x1, [x0, #-8]",
+            "\tsubs x1, x1, #1",
+            "\tstur x1, [x0, #-8]",
+            "\tb.ne .Lfdrop_done",
+            "\tldr x1, [x0]",
+            "\tbr x1",
+            ".Lfdrop_done:",
+            "\tret",
+            "",
+            // __compose_call(x), its env in x9 holding two function values,
+            // a (env[8], env[16]) and b (env[24], env[32]): b(a(x)), b by a
+            // jump in place of it
+            "__compose_call:",
+            "\tstp x29, x30, [sp, #-32]!",
+            "\tmov x29, sp",
+            "\tstr x19, [sp, #16]",
+            "\tmov x19, x9",
+            "\tldr x9, [x19, #16]",
+            "\tldr x15, [x19, #8]",
+            "\tblr x15",
+            "\tldr x9, [x19, #32]",
+            "\tldr x15, [x19, #24]",
+            "\tldr x19, [sp, #16]",
+            "\tldp x29, x30, [sp], #32",
+            "\tbr x15",
+            "",
+            // std.math's primitives (MYLA-248), a float64 as its bits
+            "__sqrt:",
+            "\tfmov d0, x0",
+            "\tfsqrt d0, d0",
+            "\tfmov x0, d0",
+            "\tret",
+            "__f64_bits:",
+            "__f64_from_bits:",
+            "\tret",
+            "",
+        ] { self.raw(line) }
+        self.emit_compose_env_drop()
+        self.emit_derived_eq()
+    }
+}
+
+impl CodeGen {
+    // mmap(0, x1 bytes, read and write, `flags`, -1, 0) into x0
+    fun a64_mmap(var self, flags: int32) {
+        self.emit("mov x0, #0")
+        self.emit("mov x2, #3")
+        self.a64_imm("x3", flags as int64)
+        self.emit("mov x4, #-1")
+        self.emit("mov x5, #0")
+        self.emit("mov x8, #222")
+        self.emit("svc #0")
+    }
+
+    // The executor's control transfers (`runtime_x86.my`'s `emit_executor`
+    // says what each does; the queues are std.rt's, MYLA-162). A frame
+    // function takes its frame in x0.
+    fun emit_executor_a64(var self) {
+        // __exec_run: a worker's loop, its stack recorded; a task failed
+        // (`__task_fail`): the loop again from its start, on that stack, no
+        // frame running
+        self.raw("__exec_run:")
+        self.a64_rt_var("x16", "__exec_sp")
+        self.emit("mov x17, sp")
+        self.emit("str x17, [x16]")
+        self.emit("bl __exec_loop")
+        self.raw(".Lexec_failed:")
+        self.a64_rt_var("x16", "__exec_sp")
+        self.emit("ldr x17, [x16]")
+        self.emit("mov sp, x17")
+        self.a64_rt_var("x16", "__exec_cur")
+        self.emit("stlr xzr, [x16]")
+        self.emit("bl __exec_loop")
+        self.raw("")
+        for line in [
+            "myla___resume:",
+            "\tldr x16, [x0]",
+            "\tbr x16",
+            "",
+            // the frame's caller goes on in its place; a task's first frame:
+            // its task ends (std.rt's `task_end`), the entry's: the program
+            "myla___finish:",
+            "\tmov x1, x0",
+            "\tldr x0, [x1, #8]",
+            "\tcbz x0, .Lfinish_task",
+            "\tldr x16, [x0]",
+            "\tbr x16",
+            ".Lfinish_task:",
+            "\tadrp x2, __exec_main",
+            "\tldr x2, [x2, :lo12:__exec_main]",
+            "\tcmp x1, x2",
+            "\tb.eq .Lfinish_program",
+            "\tmov x0, x1",
+            "\tb __task_end",
+            ".Lfinish_program:",
+            "\tmov x0, #0",
+            "\tmov x8, #94",
+            "\tsvc #0",
+            "",
+            // __task_fail(kind, …): the first failure claims the program
+            // (x0 0 back), a later one goes back to the executor; with no
+            // task running, x0 0 at once
+            "__task_fail:",
+        ] { self.raw(line) }
+        self.a64_rt_var("x16", "__exec_cur")
+        for line in [
+            "\tldr x3, [x16]",
+            "\tcbz x3, .Ltf_now",
+            "\tadrp x16, __exec_failing",
+            "\tadd x16, x16, :lo12:__exec_failing",
+            "\tmov x4, #1",
+            ".Ltf_claim:",
+            "\tldaxr x5, [x16]",
+            "\tcbnz x5, .Ltf_lost",
+            "\tstlxr w6, x4, [x16]",
+            "\tcbnz w6, .Ltf_claim",
+            ".Ltf_now:",
+            "\tmov x0, #0",
+            "\tret",
+            ".Ltf_lost:",
+            "\tclrex",
+            "\tb .Lexec_failed",
+            "",
+            // __start_workers: the workers besides the main thread, each a
+            // thread (clone: the address space, files, signal handlers and
+            // thread group shared, CLONE_SETTLS) with its state block and an
+            // 8 MiB stack with a guard page at its bottom, running
+            // `__exec_run`
+            "__start_workers:",
+            "\tstp x29, x30, [sp, #-48]!",
+            "\tmov x29, sp",
+            "\tstp x19, x20, [sp, #16]",
+            "\tstr x21, [sp, #32]",
+            "\tmov x19, #1",
+            ".Lsw_next:",
+            "\tadrp x0, __exec_workers",
+            "\tldr w0, [x0, :lo12:__exec_workers]",
+            "\tcmp x19, x0",
+            "\tb.hs .Lsw_done",
+        ] { self.raw(line) }
+        self.a64_adr("x20", "__tls_blocks")
+        self.a64_imm("x1", TLS_SIZE as int64)
+        self.emit("madd x20, x19, x1, x20")
+        self.emit("str x20, [x20]")
+        self.emit(format("str x19, [x20, #{}]", tls_offset("__worker_id")))
+        self.emit("mov x1, #8388608")
+        self.a64_mmap(147490)
+        self.emit("cmn x0, #4096")
+        self.emit("b.hi .Lsw_short")
+        for line in [
+            // the stack's lowest page faults: mprotect(base, 4096, PROT_NONE)
+            "\tmov x21, x0",
+            "\tmov x1, #4096",
+            "\tmov x2, #0",
+            "\tmov x8, #226",
+            "\tsvc #0",
+            // clone(flags, stack, parent_tid, tls, child_tid)
+            "\tmovz x0, #0xf00",
+            "\tmovk x0, #0xd, lsl #16",
+            "\tadd x1, x21, #2048, lsl #12",
+            "\tmov x2, #0",
+            "\tmov x3, x20",
+            "\tmov x4, #0",
+            "\tmov x8, #220",
+            "\tsvc #0",
+            "\tcbz x0, .Lsw_child",
+            "\ttbnz x0, #63, .Lsw_short",
+            "\tadd x19, x19, #1",
+            "\tb .Lsw_next",
+            // the new thread, on its stack (its chunks mapped as it
+            // allocates, std.rt)
+            ".Lsw_child:",
+            "\tbl __alt_stack",
+            "\tb __exec_run",
+            // no more threads to be had: the workers made so far
+            ".Lsw_short:",
+            "\tadrp x0, __exec_workers",
+            "\tstr w19, [x0, :lo12:__exec_workers]",
+            ".Lsw_done:",
+            "\tldp x19, x20, [sp, #16]",
+            "\tldr x21, [sp, #32]",
+            "\tldp x29, x30, [sp], #48",
+            "\tret",
+            "",
+            // a turn for the others, the frame queued again (D92)
+            "myla___yield:",
+            "\tb __exec_yield_push",
+            "",
+        ] { self.raw(line) }
+        // the entry points that may go on with the frame at once (D90):
+        // std.rt decides (the frame to resume, or 0 for the worker to return
+        // to the executor)
+        for ep in [("myla___wait", "__task_wait"), ("myla___actor_enter", "__actor_enter_rt")] {
+            for line in [
+                ep.0 + ":",
+                "\tstp x29, x30, [sp, #-16]!",
+                "\tmov x29, sp",
+                "\tbl " + ep.1,
+                "\tldp x29, x30, [sp], #16",
+                "\tcbz x0, .L" + ep.0 + "_park",
+                "\tldr x16, [x0]",
+                "\tbr x16",
+                ".L" + ep.0 + "_park:",
+                "\tret",
+                "",
+            ] { self.raw(line) }
+        }
+        for line in [
+            // __task_exit(code): `exit` when tasks take turns
+            "__task_exit:",
+            "\tstp x0, x30, [sp, #-16]!",
+            "\tsxtw x1, w0",
+            "\tmov x0, #3",
+            "\tbl __task_fail",
+            "\tbl __failed_wait",
+            "\tldp x0, x30, [sp], #16",
+            "\tmov x8, #94",
+            "\tsvc #0",
+            "",
+        ] { self.raw(line) }
+    }
+
+    // `__deep_env` and `__dclone_env`, a function value's environment's deep
+    // copies (D92, MYLA-148): owning nothing (`__free` its drop), the
+    // string's or the cell's; else the routines just before its drop
+    // function
+    fun emit_deep_runtime_a64(var self) {
+        for line in [
+            "__deep_env:",
+            "\tcbz x0, .Lde_none",
+            "\tldr x1, [x0]",
+            "\tadrp x2, __free",
+            "\tadd x2, x2, :lo12:__free",
+            "\tcmp x1, x2",
+            "\tb.eq __deep_str",
+            "\tldur x1, [x1, #-8]",
+            "\tbr x1",
+            ".Lde_none:",
+            "\tret",
+            "",
+            "__dclone_env:",
+            "\tcbz x0, .Ldce_none",
+            "\tldr x1, [x0]",
+            "\tadrp x2, __free",
+            "\tadd x2, x2, :lo12:__free",
+            "\tcmp x1, x2",
+            "\tb.eq __dclone_cell",
+            "\tldur x1, [x1, #-16]",
+            "\tbr x1",
+            ".Ldce_none:",
+            "\tret",
+            "",
+        ] { self.raw(line) }
+    }
+}

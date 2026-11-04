@@ -33,11 +33,14 @@ jobs:
           node-version: "22"
           cache: npm
           cache-dependency-path: editor/tree-sitter-myla/package-lock.json
-      - name: gdb for the debug-information tests (MYLA-156)
+      - name: gdb for the debug-information tests (MYLA-156); clang, lld and qemu-user for the aarch64 ones (MYLA-163)
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq gdb
+          sudo apt-get install -y -qq gdb clang lld qemu-user
           gdb --version | head -1
+          clang --version | head -1
+          ld.lld --version | head -1
+          qemu-aarch64 --version | head -1
       # the self-hosted tools the burn tests build, keyed on every source
       # that can change them (as tests/burn/_tools.py's own hash is)
       - uses: actions/cache@v6

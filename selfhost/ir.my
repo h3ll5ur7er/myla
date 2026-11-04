@@ -115,10 +115,6 @@ pub enum Inst {
     SbAppendByte(int32, int32),
     // %dst = sbbuild %cell: a new string of the builder's bytes
     SbBuild(int32, int32),
-    // mapremove T [%holder] %cell %key: the key's entry removed from the map
-    // %cell, which the 8 bytes at %holder point at (made unique already); the
-    // table is rebuilt and stored back
-    MapRemove(Type, int32, int32, int32),
     // %dst = global sym width: the runtime's variable `sym`, 8 bytes or 4
     // (sign-extended)
     Global(int32, str, int32),
@@ -277,7 +273,6 @@ pub fun render_inst(inst: Inst) -> str {
         Inst.SbAppendRange(h, v, a, b, p) => format("sbappend [%t{}] %t{}[%t{}..%t{}] @{}:{}", h, v, a, b, p.line, p.col)
         Inst.SbAppendByte(h, b) => format("sbappendbyte [%t{}] %t{}", h, b)
         Inst.SbBuild(d, c) => format("%t{} = sbbuild %t{}", d, c)
-        Inst.MapRemove(t, h, c, k) => format("mapremove {} [%t{}] %t{} %t{}", type_name(t), h, c, k)
         Inst.Global(d, sym, w) => format("%t{} = global {} {}", d, sym, w)
         Inst.Exit(v) => format("exit %t{}", v)
         Inst.Moved(s) => format("moved ${}", s)
@@ -626,7 +621,6 @@ pub fun inst_uses(inst: Inst) -> [int32] {
         Inst.SbAppendRange(h, v, a, b, pos) => [h, v, a, b]
         Inst.SbAppendByte(h, b) => [h, b]
         Inst.SbBuild(d, c) => [c]
-        Inst.MapRemove(t, h, c, k) => [h, c, k]
         Inst.Global(d, sym, w) => []
         Inst.Exit(v) => [v]
         Inst.Moved(s) => []

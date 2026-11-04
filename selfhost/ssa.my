@@ -582,7 +582,6 @@ pub fun rename_uses(inst: Inst, to: [int32]) -> Inst {
         Inst.SbAppendRange(h, v, a, b, pos) => Inst.SbAppendRange(rn(h, to), rn(v, to), rn(a, to), rn(b, to), pos)
         Inst.SbAppendByte(h, b) => Inst.SbAppendByte(rn(h, to), rn(b, to))
         Inst.SbBuild(d, c) => Inst.SbBuild(d, rn(c, to))
-        Inst.MapRemove(t, h, c, k) => Inst.MapRemove(t, rn(h, to), rn(c, to), rn(k, to))
         Inst.Exit(v) => Inst.Exit(rn(v, to))
         Inst.CallInd(d, fv, args) => Inst.CallInd(d, rn(fv, to), rn_all(args, to))
         Inst.CallIndSret(fv, r, args) => Inst.CallIndSret(rn(fv, to), rn(r, to), rn_all(args, to))

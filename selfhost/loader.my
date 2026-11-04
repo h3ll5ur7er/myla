@@ -108,6 +108,31 @@ pub fun load_options(stdlib_root: str) -> LoadOptions {
     return LoadOptions { stdlib_root: stdlib_root, packages: [], root: "", overrides: [:], runtime: false }
 }
 
+// `opts` for the target `target`: aarch64 Linux takes the standard
+// library's `std/platform_aarch64.my` for its `std/platform.my` (MYLA-163),
+// wasm32 on WASI `std/platform_wasm.my` (MYLA-158), the smallest form of
+// choosing a module per target (MYLA-245).
+pub fun for_target(opts: LoadOptions, target: str) -> LoadOptions {
+    var file = ""
+    if target == "aarch64-linux" { file = "platform_aarch64.my" }
+    if target == "wasm32-wasi" { file = "platform_wasm.my" }
+    if file == "" { return opts }
+    var o = opts
+    let path = opts.stdlib_root + "/std/" + file
+    var text = ""
+    match source_text(path, opts.overrides) {
+        Some(t) => { text = t },
+        None => {
+            match read_to_string(path) {
+                Ok(t) => { text = t },
+                Err(e) => { return opts },
+            }
+        },
+    }
+    o.overrides[opts.stdlib_root + "/std/platform.my"] = text
+    return o
+}
+
 struct Loader {
     stdlib_root: str,
     project_root: str,

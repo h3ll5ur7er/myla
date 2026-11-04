@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Myla playground</title>
+<!--
+  page.html — the smallest page on tools/wasm/myla.mjs (MYLA-158): check and
+  run Myla in the browser, nothing installed. Serve this directory with
+  `play.wasm` (selfhost/play_main.my built with `myla build --target
+  wasm32-wasi -o play.wasm`) beside it, from any static server.
+-->
+<style>
+  :root { --fg: #1d1d1f; --bg: #fbfbfd; --muted: #6e6e73; --err: #b3261e; --warn: #8a5a00; --line: #d2d2d7; }
+  @media (prefers-color-scheme: dark) { :root { --fg: #f5f5f7; --bg: #161618; --muted: #a1a1a6; --err: #ff8a80; --warn: #ffcc66; --line: #3a3a3c; } }
+  body { margin: 0; padding: 16px; font: 15px/1.45 system-ui, sans-serif; color: var(--fg); background: var(--bg); }
+  main { max-width: 900px; margin: 0 auto; display: grid; gap: 12px; }
+  textarea, pre { box-sizing: border-box; width: 100%; font: 13px/1.5 ui-monospace, monospace; border: 1px solid var(--line); border-radius: 8px; padding: 10px; background: transparent; color: inherit; }
+  textarea { min-height: 260px; resize: vertical; }
+  pre { min-height: 80px; white-space: pre-wrap; margin: 0; }
+  .bar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  button { font: inherit; padding: 6px 14px; border-radius: 8px; border: 1px solid var(--line); background: transparent; color: inherit; cursor: pointer; }
+  #status { color: var(--muted); }
+  .error { color: var(--err); }
+  .warning { color: var(--warn); }
+</style>
+</head>
+<body>
+<main>
+  <h1>Myla playground</h1>
+  <textarea id="source" spellcheck="false" aria-label="Myla source">fun fib(n: int) -> int {
+    if n < 2 {
+        return n
+    }
+    return fib(n - 1) + fib(n - 2)
+}
+
+fun main() {
+    for i in 0..10 {
+        print(fib(i))
+    }
+}
+</textarea>
+  <div class="bar">
+    <button id="check">Check</button>
+    <button id="run">Run</button>
+    <span id="status">loading…</span>
+  </div>
+  <pre id="diagnostics" aria-label="Diagnostics"></pre>
+  <pre id="output" aria-label="Output"></pre>
+</main>
+<script type="module">
+  import { loadMyla } from "./myla.mjs";
+  const $ = (id) => document.getElementById(id);
+  const myla = await loadMyla(fetch("play.wasm"));
+  $("status").textContent = "ready";
+
+  function showDiagnostics(ds) {
+    $("diagnostics").replaceChildren(...ds.map((d) => {
+      const line = document.createElement("div");
+      line.className = d.severity;
+      line.textContent = `${d.line}:${d.col} ${d.kind}: ${d.message}`;
+      return line;
+    }));
+  }
+
+  $("check").onclick = async () => {
+    const r = await myla.check($("source").value);
+    showDiagnostics(r.diagnostics);
+    $("status").textContent = r.ok ? "no errors" : "errors";
+    window.lastCheck = r;
+  };
+  $("run").onclick = async () => {
+    $("status").textContent = "running…";
+    const r = await myla.run($("source").value);
+    $("output").textContent = r.stdout + r.stderr;
+    $("status").textContent = `exit ${r.exitCode}`;
+    window.lastRun = r;
+  };
+  window.mylaReady = true;
+</script>
+</body>
+</html>

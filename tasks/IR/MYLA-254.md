@@ -77,7 +77,7 @@ The owner took the four recommendations: D120 (memory widths), D121 (a pointer k
 
 - [x] Widths on the memory instructions; packed list elements ([[MYLA-247]])
 - [x] The pointer kind: `Type.TPtr`, a kind of the IR's temporaries only (the language never names it), for the 43 address temporaries and slots of the lowering (frames, environments, element, slot and member addresses, allocations, labels, boxes, map slots); indices, lengths and a task's state word stay integers. The verifier rejects arithmetic on an address but `offset` (a `#test` in [[selfhost/ir.my]]); the debug information shows one as a number. 905 tests pass; the bootstrap reaches its fixed point; the generated code is the same.
-- [ ] The target description: after the prototype, as the owner agreed (on x86-64 every size is 8 already, so it can only be tested against a 32-bit backend)
+- [ ] The target description: after the prototype, as the owner agreed (on x86-64 every size is 8 already, so it can only be tested against a 32-bit backend). Deferred by D126 (2026-11-04): wasm32 runs with 32-bit addresses on today's layouts; the 4-byte layouts are [[MYLA-260]], with packed struct fields
 - [x] The mem2reg prototype and its measurements (below)
 - [ ] SSA with block parameters in the IR
 

@@ -40,12 +40,13 @@ fun usage_lines() -> [str] {
         "commands on a file:",
         "  run   <file.my> [options] [args...]  interpret a program with these arguments",
         "  test  <file.my> [options]            run its #test cases",
-        "  build <file.my> [-o <out>] [-g] [options]  compile to a binary (-g: debug information for gdb)",
+        "  build <file.my> [-o <out>] [-g] [--target <t>] [options]  compile to a binary (-g: debug information for gdb;",
+        "                                       <t>: x86_64-linux, the default, aarch64-linux or wasm32-wasi)",
         "  check <file.my> [options]            type-check it",
         "  repl  [options]                      the interactive interpreter",
         "commands on the project around the working directory (myla.toml):",
         "  new   <name>                         create a project in the directory <name>",
-        "  build [-g] [options]                 compile src/main.my to build/<name>",
+        "  build [-g] [--target <t>] [options]  compile src/main.my to build/<name>",
         "  run   [options] [args...]            interpret src/main.my with these arguments",
         "  test  [options]                      run the #test cases of every file under src/",
         "  check [options]                      type-check every file under src/",
@@ -64,7 +65,7 @@ fun usage() {
 // A command's arguments: its file ("" in project mode), the load options,
 // `build`'s output and `-g`, `clean`'s `--deps`, `fetch`'s `--update`, `new`'s
 // name, and the program's arguments (`run`).
-struct CommandLine { file: str, opts: LoadOptions, output: str, debug: bool, deps: bool, update: bool, name: str, rest: [str] }
+struct CommandLine { file: str, opts: LoadOptions, output: str, debug: bool, target: str, deps: bool, update: bool, name: str, rest: [str] }
 
 // A command line that can't be run: the message, and whether the usage
 // follows it (exit status 2; else 1).
@@ -78,7 +79,7 @@ struct CliError { msg: str, usage: bool }
 #test(["/work/myla/selfhost/main.my", "new", "--lib", "freshlib"])[Err(CliError { msg: "myla: unknown option 'freshlib'", usage: true })]
 fun parse_command_line(argv: [str]) -> Result<CommandLine, CliError> {
     let cmd = argv[1]
-    var cl = CommandLine { file: "", opts: load_options(default_stdlib_root()), output: "a.out", debug: false, deps: false, update: false, name: "", rest: [] }
+    var cl = CommandLine { file: "", opts: load_options(default_stdlib_root()), output: "a.out", debug: false, target: "x86_64-linux", deps: false, update: false, name: "", rest: [] }
     var positional = 0
     var j = 2
     while j < argv.len() {
@@ -99,6 +100,12 @@ fun parse_command_line(argv: [str]) -> Result<CommandLine, CliError> {
         } else if cmd == "build" && a == "-g" {
             cl.debug = true
             j = j + 1
+        } else if cmd == "build" && a == "--target" && has_value {
+            cl.target = argv[j + 1]
+            if cl.target != "x86_64-linux" && cl.target != "aarch64-linux" && cl.target != "wasm32-wasi" {
+                return Err(CliError { msg: "myla: unknown target '" + cl.target + "' (x86_64-linux, aarch64-linux, wasm32-wasi)", usage: false })
+            }
+            j = j + 2
         } else if cmd == "clean" && a == "--deps" {
             cl.deps = true
             j = j + 1
@@ -142,7 +149,7 @@ fun main() {
         usage()
         exit(2)
     }
-    var cl = CommandLine { file: "", opts: load_options(""), output: "", debug: false, deps: false, update: false, name: "", rest: [] }
+    var cl = CommandLine { file: "", opts: load_options(""), output: "", debug: false, target: "x86_64-linux", deps: false, update: false, name: "", rest: [] }
     match parse_command_line(argv) {
         Ok(c) => { cl = c },
         Err(e) => {
@@ -168,13 +175,13 @@ fun main() {
     if cmd == "fetch" { exit(project_fetch(cl.update)) }
     if cl.file == "" {
         // project mode (MYLA-94)
-        if cmd == "build" { exit(project_build(cl.opts, cl.debug)) }
+        if cmd == "build" { exit(project_build(cl.opts, cl.debug, cl.target)) }
         if cmd == "run" { exit(project_run(cl.opts, cl.rest)) }
         if cmd == "test" { exit(project_test(cl.opts)) }
         exit(project_check(cl.opts))
     }
     if cmd == "build" {
-        exit(cmd_build(cl.file, cl.output, cl.opts, cl.debug))
+        exit(cmd_build(cl.file, cl.output, cl.opts, cl.debug, cl.target))
     }
     if cmd == "check" {
         match load_and_check(cl.file, cl.opts) {
