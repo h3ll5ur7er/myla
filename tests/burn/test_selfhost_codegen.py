@@ -1315,10 +1315,53 @@ class SelfHostedCodegenParity(unittest.TestCase):
             asm = self._emit_asm(path)
             self.assertEqual(self._build_and_run(asm), ("-578\n2717256091452271059\n", 0))
         body = self._function_asm(asm, "spin")
-        head = re.findall(r"jmp (\.L\d+)\n", body)[-1]
-        loop = body[body.index(head + ":"):body.rindex("jmp " + head)]
+        # the loop: from its first block to the jump back to it
+        loop = ""
+        for m in re.finditer(r"\tj[a-z]+ (\.L\d+)\n", body):
+            at = body.find(m.group(1) + ":")
+            if 0 <= at < m.start():
+                loop = body[at:m.start()]
+        self.assertNotEqual(loop, "", body)
         self.assertNotIn("(%rbp)", loop, body)
         self.assertRegex(loop, r"%r[sd]i", body)
+
+    def test_a_while_loop_tests_at_its_end(self) -> None:
+        # MYLA-162: `while c { body }` tests `c` on the way in and at the end
+        # of each turn, jumping back to the body: no `jmp` a turn, and
+        # `continue` goes to the test
+        source = (
+            "fun sum(n: int64) -> int64 {\n"
+            "    var s: int64 = 0\n"
+            "    var i: int64 = 0\n"
+            "    while i < n {\n"
+            "        s += i\n"
+            "        i += 1\n"
+            "    }\n"
+            "    return s\n"
+            "}\n"
+            "fun odd(n: int64) -> int64 {\n"
+            "    var s: int64 = 0\n"
+            "    var i: int64 = 0\n"
+            "    while i < n {\n"
+            "        i += 1\n"
+            "        if i % 2 == 0 { continue }\n"
+            "        s += i\n"
+            "    }\n"
+            "    return s\n"
+            "}\n"
+            "fun main() {\n"
+            "    print(sum(10))\n"
+            "    print(sum(0))\n"
+            "    print(odd(10))\n"
+            "}\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "prog.my")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(source)
+            asm = self._emit_asm(path, flags=("--no-inline",))
+            self.assertEqual(self._build_and_run(asm), ("45\n0\n25\n", 0))
+        body = self._function_asm(asm, "sum")
+        self.assertNotIn("\tjmp ", body, body)
 
     def test_while_true_tests_nothing(self) -> None:
         # MYLA-162: `while true` jumps back to its body, with no constant

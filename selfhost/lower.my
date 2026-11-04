@@ -996,18 +996,34 @@ impl Lower {
             },
             StmtKind.IfS(c, then, otherwise) => { self.if_stmt(cg, c, then, otherwise) },
             StmtKind.WhileS(c, body) => {
-                let head = self.new_block()
-                self.finish(Term.Jmp(head))
-                self.start(head)
-                let body_b = self.new_block()
-                let end = self.new_block()
-                self.branch(cg, c, body_b, end)
-                self.start(body_b)
-                self.loops.push(LoopTarget { cont: head, brk: end, owners: self.owners.len(), temps: self.temps.len() })
-                self.block(cg, body)
-                self.loops.pop()
-                self.finish(Term.Jmp(head))
-                self.start(end)
+                let forever = match c.kind { ExprKind.BoolLit(b) => b, _ => false }
+                if forever {
+                    let head = self.new_block()
+                    self.finish(Term.Jmp(head))
+                    self.start(head)
+                    let end = self.new_block()
+                    self.loops.push(LoopTarget { cont: head, brk: end, owners: self.owners.len(), temps: self.temps.len() })
+                    self.block(cg, body)
+                    self.loops.pop()
+                    self.finish(Term.Jmp(head))
+                    self.start(end)
+                } else {
+                    // tested on the way in and again at the end of each turn
+                    // (where `continue` goes): one jump a turn, back to the
+                    // body, not two (MYLA-162)
+                    let body_b = self.new_block()
+                    let latch = self.new_block()
+                    let end = self.new_block()
+                    self.branch(cg, c, body_b, end)
+                    self.start(body_b)
+                    self.loops.push(LoopTarget { cont: latch, brk: end, owners: self.owners.len(), temps: self.temps.len() })
+                    self.block(cg, body)
+                    self.loops.pop()
+                    self.finish(Term.Jmp(latch))
+                    self.start(latch)
+                    self.branch(cg, c, body_b, end)
+                    self.start(end)
+                }
             },
             StmtKind.ForS(vn, start, end, body, iter) => { self.for_range(cg, vn, start, end, body, iter) },
             StmtKind.BreakS => {
