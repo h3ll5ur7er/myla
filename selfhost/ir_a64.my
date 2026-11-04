@@ -982,6 +982,9 @@ impl CodeGen {
             self.emit(format("b.ne {}", no))
             self.emit("stlxr w15, x13, [x11]")
             self.emit(format("cbnz w15, {}", again))
+            // a full barrier, as the exchanges have: what follows isn't
+            // seen before the swap (publish, then look; MYLA-267)
+            self.emit("dmb ish")
             self.emit("mov x10, #1")
             self.emit(format("b {}", done))
             self.emit(format("{}:", no))

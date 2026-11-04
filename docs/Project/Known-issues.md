@@ -27,7 +27,7 @@ The targets are x86-64 and aarch64 Linux and wasm32 on WASI; macOS and Windows a
 - wasm32: the shadow stack lies above the static data, so a deep overflow of it would overwrite data instead of trapping; a trap under `run.mjs` prints `wasm trap: …` and exits 134 instead of `runtime error: stack overflow` and 1 ([[MYLA-261]]).
 - aarch64 and wasm32: a plain function used as a function value with a parameter passed by value stops the compiler (`__fnval` panics; [[MYLA-263]]), as does the lowering's `RtPair` fallback ([[MYLA-264]]).
 - A computed NaN's bits differ: `to_bits(0.0 / 0.0)` is 0xFFF8… on x86-64 and wasm on x86-64, 0x7FF8… on aarch64 ([[MYLA-266]]).
-- The runtime's lock-free protocols were argued from x86-64's memory order; on aarch64 they pass under qemu, which rarely reorders memory ([[MYLA-267]]). One program waiting on a child process on 4 workers ended once in six runs with `runtime error: every task waits for another one` ([[MYLA-275]]).
+- The runtime's lock-free protocols were argued from x86-64's memory order; on aarch64 they pass under qemu, which rarely reorders memory ([[MYLA-267]]). Unlocking is a plain store, which aarch64 hardware may reorder before a critical section's stores.
 - The aarch64 and wasm32 tests skip silently when clang, `ld.lld`, `wasm-ld`, qemu or Node is missing, and the full self-compile on those targets isn't in CI ([[MYLA-268]]).
 - On wasm32 there are no processes (`run` gives `Other(38)`), one worker, and input that can't suspend; no page says so yet ([[MYLA-266]]).
 

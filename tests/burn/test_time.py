@@ -517,6 +517,22 @@ class Time(unittest.TestCase):
         out, err, code, _ = self.interpreted("process", PROCESS)
         self.assertEqual((out, err, code), (want, "", 0))
 
+    def test_child_processes_waited_for_by_programs_running_at_once(self):
+        # MYLA-275: with the machine busy, a worker leaving `exec_idle` to take
+        # the last queued frame could look idle to another worker's check,
+        # which then ended the program ("every task waits for another one");
+        # under qemu about 1 run in 25 did, 8 at a time, so 64 runs nearly always
+        want = sorted("t\nt\nt\nt\nt\n4 6 3\n5\n200000 200000\nnot found\ntimed out\ntrue\n5\n".splitlines())
+        exe = self.native("process_many", PROCESS)
+        env = {**os.environ, "MYLA_THREADS": "4"}
+        for round_ in range(8):
+            runs = [subprocess.Popen([exe], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
+                    for _ in range(8)]
+            for p in runs:
+                out, err = p.communicate(timeout=120)
+                with self.subTest(round=round_):
+                    self.assertEqual((sorted(out.splitlines()), err, p.returncode), (want, "", 0))
+
 
 if __name__ == "__main__":
     unittest.main()

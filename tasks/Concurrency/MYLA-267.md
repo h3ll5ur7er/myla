@@ -17,5 +17,5 @@ Found by [[Project/Reflection-2026-11]]. The executor's lock-free protocols were
 aarch64 is weakly ordered. Its backend uses `ldaxr`/`stlxr` loops plus a `dmb ish` after the exchanges, and passed the stress programs under qemu. But qemu on an x86-64 host doesn't reorder memory, so a missing barrier could not show.
 
 - [ ] Each protocol's ordering requirement written down (which stores must be visible before which loads), and the IR's atomics specified to meet them ([[MYLA-264]])
-- [ ] The aarch64 sequences checked against those requirements; the first suspect is the stuck check's plain loads in `exec_idle` ([[MYLA-275]], seen failing once under qemu)
+- [ ] The aarch64 sequences checked against those requirements: first, every unlock is a plain store (`__store64(lock, 0)`), which needs release semantics (`stlr`) on aarch64; a release store and an acquire load as typed intrinsics ([[MYLA-264]]). ([[MYLA-275]] turned out to be a race in the stuck check on every processor, not the ordering; `__cas64` got its missing `dmb ish` there.)
 - [ ] The stress programs on arm64 hardware (a GitHub arm64 runner), on 1–16 workers, many runs each
