@@ -30,7 +30,7 @@
 from std.num import f64_literal_bits, f32_round_bits
 from .ast import Expr, ExprKind, Stmt, StmtKind, Block, FunData, ElseTail, ExprOrBlock, MatchArm, Pattern, PatternKind, FieldInit, MapEntry, BindElem, bind_elems, Param
 from .checker import Type, is_raw_memory_primitive, Subst, FuncSig, opt_subst_type, subst_type, builtin_method
-from .codegen import codegen_on, may_write_expr, is_actor_t, is_async_t, CodeGen, LamJob, PartialJob, Cap, DropEntry, tfunc_params, tfunc_ret, is_hole_expr, mangle_fn, is_builtin_call_name, is_aggregate, tuple_elems, is_struct_or_enum_t, is_tfunc, is_overloadable_op, arith_method_cg, enum_name_of, is_tstr, is_cmp, place_root, is_aggregate_opt, arms_may_write, is_cell_t, list_elem, is_list_t, is_map_t, is_str_t, map_key, map_val, format_segments, args_have_hole, success_variant, failure_variant
+from .codegen import codegen_on, may_write_expr, is_actor_t, is_sb_t, is_async_t, CodeGen, LamJob, PartialJob, Cap, DropEntry, tfunc_params, tfunc_ret, is_hole_expr, mangle_fn, is_builtin_call_name, is_aggregate, tuple_elems, is_struct_or_enum_t, is_tfunc, is_overloadable_op, arith_method_cg, enum_name_of, is_tstr, is_cmp, place_root, is_aggregate_opt, arms_may_write, is_cell_t, list_elem, is_list_t, is_map_t, is_str_t, map_key, map_val, format_segments, args_have_hole, success_variant, failure_variant
 from .ir import IrFunc, IrBlock, Inst, Term, Slot, Pos, Instance, ENV_WORD
 from .parser import expr_of, stmt_of, type_expr_of, block_of, pattern_of, fun_of  // AST values for #test cases (MYLA-184)
 
@@ -66,7 +66,16 @@ struct LoopTarget { cont: int32, brk: int32, owners: int32, temps: int32 }
 // function holds between suspensions (D92), or -1; `deep_res`: an actor
 // method's result is copied deeply before it leaves the actor (D92).
 // `scope_ids`: the open scopes' indices in `f.scope_parent` (MYLA-183).
-struct Lower { f: IrFunc, cur: int32, scopes: [[Local]], scope_ids: [int32], owners: [[int32]], temps: [[int32]], loops: [LoopTarget], sret: int32, arm_binds: [Local], err: str, lams: [LamJob], partials: [PartialJob], fnvals: [str], holder: [int32], into: int32, placed: [bool], tail: bool, tailed: bool, frame_fn: bool, result: int32, tasks: [TaskSlot], actor_self: int32, actor_off: int32, deep_res: bool, narrow: [int32: int32] }
+struct Lower { f: IrFunc, cur: int32, scopes: [[Local]], scope_ids: [int32], owners: [[int32]], temps: [[int32]], loops: [LoopTarget], sret: int32, arm_binds: [Local], err: str, lams: [LamJob], partials: [PartialJob], fnvals: [str], holder: [int32], into: int32, placed: [bool], tail: bool, tailed: bool, frame_fn: bool, result: int32, tasks: [TaskSlot], actor_self: int32, actor_off: int32, deep_res: bool, narrow: [int32: int32], wants: [Want] }
+
+// A per-type routine a routine built as IR calls, for the code generator to
+// emit (MYLA-162): `kind` 0 a cell's deep copy, 1 an inline value's deep
+// walk, 2 a boxed enum's contents' deep walk, 3 a copy-on-write clone; of
+// type `t`, a deep clone's when `clone`.
+pub struct Want { kind: int32, t: Type, clone: bool }
+
+// A routine's IR and the routines it calls.
+pub struct Routine { f: IrFunc, wants: [Want] }
 
 // A function's IR, with the code it needs generated besides (see `Lower`).
 // A child task of an `async let` (D89): the slot holding its frame, its
@@ -82,7 +91,7 @@ pub struct Lowered { f: IrFunc, lams: [LamJob], partials: [PartialJob], fnvals: 
 // entry block, the receiver of `#test` cases of the lowering's methods
 // (MYLA-184), with a code generator from `codegen_on` as their `cg`.
 pub fun lower_on() -> Lower {
-    var lw = Lower { f: IrFunc { name: "test", ret: None, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false, scope_parent: [-1] }, cur: 0, scopes: [[]], scope_ids: [0], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [], actor_self: -1, actor_off: 0, deep_res: false, narrow: [:] }
+    var lw = Lower { f: IrFunc { name: "test", ret: None, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false, scope_parent: [-1] }, cur: 0, scopes: [[]], scope_ids: [0], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [], actor_self: -1, actor_off: 0, deep_res: false, narrow: [:], wants: [] }
     lw.start(lw.new_block())
     return lw
 }
@@ -93,7 +102,7 @@ pub fun lower_on() -> Lower {
 pub fun lower_function(cg: CodeGen, fd: FunData, mangled: str) -> Result<Lowered, str> {
     let sig = cg.sig_of(fd.name)
     let ret = opt_subst_type(sig.ret, cg.subst)
-    var lw = Lower { f: IrFunc { name: mangled, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false, scope_parent: [-1] }, cur: 0, scopes: [[]], scope_ids: [0], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [], actor_self: -1, actor_off: 0, deep_res: false, narrow: [:] }
+    var lw = Lower { f: IrFunc { name: mangled, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false, scope_parent: [-1] }, cur: 0, scopes: [[]], scope_ids: [0], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [], actor_self: -1, actor_off: 0, deep_res: false, narrow: [:], wants: [] }
     var first_word = 0
     // an async function, when tasks take turns: its frame function, its
     // slots in its heap frame, the result in the first (D90)
@@ -191,7 +200,7 @@ pub fun lower_function(cg: CodeGen, fd: FunData, mangled: str) -> Result<Lowered
 // own at entry, borrowed as a parameter is (captures are immutable, D48).
 pub fun lower_lambda(cg: CodeGen, job: LamJob) -> Result<Lowered, str> {
     let ret = opt_subst_type(tfunc_ret(job.ftype), cg.subst)
-    var lw = Lower { f: IrFunc { name: job.lifted, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false, scope_parent: [-1] }, cur: 0, scopes: [[]], scope_ids: [0], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [], actor_self: -1, actor_off: 0, deep_res: false, narrow: [:] }
+    var lw = Lower { f: IrFunc { name: job.lifted, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false, scope_parent: [-1] }, cur: 0, scopes: [[]], scope_ids: [0], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [], actor_self: -1, actor_off: 0, deep_res: false, narrow: [:], wants: [] }
     // an async lambda, when tasks take turns: a frame function, as an async
     // function's (D90); its frame holds the environment and the arguments
     let frame = cg.frames && is_async_t(job.ftype)
@@ -3977,7 +3986,7 @@ fun calls_nothing(e: Expr) -> bool {
 // An empty lowering of the routine `name` with result type `ret`, its entry
 // block started.
 fun routine(name: str, ret: Option<Type>) -> Lower {
-    var lw = Lower { f: IrFunc { name: name, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false, scope_parent: [-1] }, cur: 0, scopes: [[]], scope_ids: [0], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [], actor_self: -1, actor_off: 0, deep_res: false, narrow: [:] }
+    var lw = Lower { f: IrFunc { name: name, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false, scope_parent: [-1] }, cur: 0, scopes: [[]], scope_ids: [0], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [], actor_self: -1, actor_off: 0, deep_res: false, narrow: [:], wants: [] }
     let entry = lw.new_block()
     lw.start(entry)
     return lw
@@ -4474,6 +4483,230 @@ impl Lower {
             let p = self.temp(Type.TInt(64, true))
             self.add(Inst.Bin(p, "+", Type.TInt(64, true), Type.TInt(64, true), at, self.int_const(off), Pos { line: 0, col: 0 }))
             self.add(Inst.Retain(ft, p))
+        }
+    }
+}
+
+// The deep walk (`__deepw_<T>`, or `inline`: `__deepi_<E>`, a boxed enum's
+// cell contents) of the value at the address given: each member made a deep
+// copy of its own (`clone`: a clone of it; D92). An actor handle stays
+// shared, a clone taking a reference of its own.
+pub fun deep_walk_ir(cg: CodeGen, t: Type, clone: bool, inline: bool, name: str) -> Routine {
+    var lw = routine(name, None)
+    let sp = lw.new_slot("p", Type.TInt(64, true), 8, 0, false)
+    match t {
+        Type.TStruct(n, a) => {
+            let info = cg.struct_info(n)
+            let sub = cg.type_subst(info.type_params, a)
+            var cur = 0
+            for f in info.fields {
+                let ft = subst_type(f.ty, sub)
+                lw.deep_member(cg, sp, cur, ft, clone)
+                cur = cur + cg.stored_size(ft)
+            }
+        },
+        Type.TTuple(es) => {
+            var cur = 0
+            for et in es {
+                lw.deep_member(cg, sp, cur, et, clone)
+                cur = cur + cg.stored_size(et)
+            }
+        },
+        Type.TEnum(n, a) => {
+            if cg.is_boxed(t) && !inline {
+                lw.deep_member(cg, sp, 0, t, clone)
+            } else {
+                let info = cg.enum_info(n)
+                let sub = cg.type_subst(info.type_params, a)
+                let i64 = Type.TInt(64, true)
+                let tag = lw.temp(i64)
+                lw.add(Inst.LoadAt(tag, lw.read_cell(sp), 0, 8))
+                let done = lw.new_block()
+                var idx = 0
+                for v in info.variants {
+                    if cg.variant_owns(v, sub) {
+                        let is_v = lw.temp(Type.TBool)
+                        lw.add(Inst.Cmp(is_v, "==", i64, tag, lw.konst(i64, idx as int64)))
+                        let this_v = lw.new_block()
+                        let next_v = lw.new_block()
+                        lw.finish(Term.Br(is_v, this_v, next_v))
+                        lw.start(this_v)
+                        var cur = 8
+                        for ft0 in v.payload {
+                            let ft = subst_type(ft0, sub)
+                            lw.deep_member(cg, sp, cur, ft, clone)
+                            cur = cur + cg.stored_size(ft)
+                        }
+                        lw.finish(Term.Jmp(done))
+                        lw.start(next_v)
+                    }
+                    idx = idx + 1
+                }
+                lw.finish(Term.Jmp(done))
+                lw.start(done)
+            }
+        },
+        _ => { lw.deep_member(cg, sp, 0, t, clone) },
+    }
+    lw.finish(Term.Ret(-1))
+    return Routine { f: lw.f, wants: lw.wants }
+}
+
+// The deep copy of a cell of type `t` (`__deep_list_<E>`, `__deep_map_`,
+// `__deepb_<E>`, `__deep_sb`; the cell given, one reference, consumed): the
+// same cell when it was the only reference, else a copy (its members
+// retained, the original's count down); then each member a deep copy of its
+// own. `clone`: a copy word for word, then each member cloned; the cell
+// given only read.
+pub fun deep_cell_ir(cg: CodeGen, t: Type, clone: bool, name: str) -> Routine {
+    let i64 = Type.TInt(64, true)
+    var lw = routine(name, Some(i64))
+    let sp = lw.new_slot("cell", i64, 8, 0, false)
+    let sc = lw.new_slot("unique", i64, 8, -1, false)
+    lw.add(Inst.Store(sc, lw.read_cell(sp)))
+    let deepen = lw.new_block()
+    if clone {
+        lw.copy_cell(sp, sc)
+        lw.finish(Term.Jmp(deepen))
+    } else {
+        let rc = lw.temp(i64)
+        lw.add(Inst.LoadAt(rc, lw.read_cell(sp), -8, 8))
+        let only = lw.temp(Type.TBool)
+        lw.add(Inst.Cmp(only, "==", i64, rc, lw.int_const(1)))
+        let shared = lw.new_block()
+        lw.finish(Term.Br(only, deepen, shared))
+        lw.start(shared)
+        match t {
+            Type.TList(e) => { lw.clone_call(cg, t, sp, sc) },
+            Type.TMap(k, v) => { lw.clone_call(cg, t, sp, sc) },
+            _ => {
+                if is_sb_t(t) {
+                    lw.clone_call(cg, t, sp, sc)
+                } else {
+                    // a boxed enum: a copy of the box, what it holds retained
+                    lw.copy_cell(sp, sc)
+                    lw.add(Inst.Retain(t, lw.read_cell(sc)))
+                    lw.add(Inst.Rt(-1, "__rc_dec", [lw.read_cell(sp)]))
+                }
+            },
+        }
+        lw.finish(Term.Jmp(deepen))
+    }
+    lw.start(deepen)
+    match t {
+        Type.TList(e) => {
+            if cg.owns_heap(e) || cg.is_boxed(e) { lw.deep_entries(cg, sc, 0, cg.stored_size(e), false, e, Type.TBool, clone) }
+        },
+        Type.TMap(k, v) => {
+            if cg.owns_heap(k) || cg.owns_heap(v) { lw.deep_entries(cg, sc, 8, cg.map_slot_size(t), true, k, v, clone) }
+        },
+        _ => {
+            if !is_sb_t(t) {
+                lw.wants.push(Want { kind: 2, t: t, clone: clone })
+                lw.add(Inst.Rt(-1, cg.deep_walk_label(t, clone, true), [lw.read_cell(sc)]))
+            }
+        },
+    }
+    lw.finish(Term.Ret(lw.read_cell(sc)))
+    return Routine { f: lw.f, wants: lw.wants }
+}
+
+impl Lower {
+    // A copy of the cell in `sp` (as large as allocated) into `sc`.
+    fun copy_cell(var self, sp: int32, sc: int32) {
+        let i64 = Type.TInt(64, true)
+        let size = self.temp(i64)
+        self.add(Inst.LoadAt(size, self.read_cell(sp), -16, 8))
+        let c = self.temp(i64)
+        self.add(Inst.Rt(c, "__alloc", [size]))
+        self.add(Inst.Store(sc, c))
+        let size2 = self.temp(i64)
+        self.add(Inst.LoadAt(size2, self.read_cell(sp), -16, 8))
+        self.add(Inst.Rt(-1, "__copy_bytes", [self.read_cell(sc), self.read_cell(sp), size2]))
+    }
+
+    // The copy-on-write clone of the cell in `sp` (type `t`) into `sc`.
+    fun clone_call(var self, cg: CodeGen, t: Type, sp: int32, sc: int32) {
+        self.wants.push(Want { kind: 3, t: t, clone: false })
+        let c = self.temp(Type.TInt(64, true))
+        self.add(Inst.Rt(c, cg.clone_call_name(t), [self.read_cell(sp)]))
+        self.add(Inst.Store(sc, c))
+    }
+
+    // Each list element or occupied map slot of the cell in `sc` made deep
+    // (see `each_entry`).
+    fun deep_entries(var self, cg: CodeGen, sc: int32, count_at: int32, stride: int32, is_map: bool, a: Type, b: Type, clone: bool) {
+        let i64 = Type.TInt(64, true)
+        let si = self.new_slot("i", i64, 8, -1, false)
+        let sn = self.new_slot("n", i64, 8, -1, false)
+        let se = self.new_slot("entry", i64, 8, -1, false)
+        self.add(Inst.Store(si, self.int_const(0)))
+        let n = self.temp(i64)
+        self.add(Inst.LoadAt(n, self.read_cell(sc), count_at, 8))
+        self.add(Inst.Store(sn, n))
+        let body = self.new_block()
+        let next = self.new_block()
+        let done = self.new_block()
+        self.count_test(si, sn, body, done)
+        self.start(body)
+        self.add(Inst.Store(se, self.entry_at(sc, si, stride)))
+        if is_map {
+            let state = self.temp(i64)
+            self.add(Inst.LoadAt(state, self.read_cell(se), 16, 8))
+            let full = self.temp(Type.TBool)
+            self.add(Inst.Cmp(full, "==", i64, state, self.int_const(1)))
+            let occupied = self.new_block()
+            self.finish(Term.Br(full, occupied, next))
+            self.start(occupied)
+            if cg.owns_heap(a) { self.deep_member(cg, se, 24, a, clone) }
+            if cg.owns_heap(b) { self.deep_member(cg, se, 32, b, clone) }
+        } else {
+            self.deep_member(cg, se, 16, a, clone)
+        }
+        self.finish(Term.Jmp(next))
+        self.start(next)
+        let i2 = self.temp(i64)
+        self.add(Inst.Load(i2, si))
+        let i3 = self.temp(i64)
+        self.add(Inst.Bin(i3, "+", i64, i64, i2, self.int_const(1), Pos { line: 0, col: 0 }))
+        self.add(Inst.Store(si, i3))
+        self.count_test(si, sn, body, done)
+        self.start(done)
+    }
+
+    // The member of type `ft` at `off` from the address in the slot `sp` made
+    // a deep copy (`clone`: a clone) of its own, stored back.
+    fun deep_member(var self, cg: CodeGen, sp: int32, off: int32, ft: Type, clone: bool) {
+        let i64 = Type.TInt(64, true)
+        if is_actor_t(ft) {
+            if clone {
+                let v = self.temp(ft)
+                self.add(Inst.LoadAt(v, self.read_cell(sp), off, 8))
+                self.add(Inst.RetainVal(ft, v))
+            }
+            return
+        }
+        if cg.is_boxed(ft) || is_cell_t(ft) {
+            let v = self.temp(i64)
+            self.add(Inst.LoadAt(v, self.read_cell(sp), off, 8))
+            let r = self.temp(i64)
+            if !is_str_t(ft) { self.wants.push(Want { kind: 0, t: ft, clone: clone }) }
+            // (a routine is called by the name its alias gives it)
+            self.add(Inst.Rt(r, cg.deep_cell_label(ft, clone), [v]))
+            self.add(Inst.StoreAt(self.read_cell(sp), off, r, 8))
+        } else if is_tfunc(ft) {
+            let env = self.temp(i64)
+            self.add(Inst.LoadAt(env, self.read_cell(sp), off + 8, 8))
+            let r = self.temp(i64)
+            var nm = "__deep_env"
+            if clone { nm = "__dclone_env" }
+            self.add(Inst.Rt(r, nm, [env]))
+            self.add(Inst.StoreAt(self.read_cell(sp), off + 8, r, 8))
+        } else if cg.owns_heap(ft) {
+            self.wants.push(Want { kind: 1, t: ft, clone: clone })
+            let p = self.temp(i64)
+            self.add(Inst.Bin(p, "+", i64, i64, self.read_cell(sp), self.int_const(off), Pos { line: 0, col: 0 }))
+            self.add(Inst.Rt(-1, cg.deep_walk_label(ft, clone, false), [p]))
         }
     }
 }

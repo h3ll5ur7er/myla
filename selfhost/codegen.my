@@ -20,7 +20,7 @@ from .ir import render_func, verify, moves, IrFunc, Inst
 from .ssa import SsaStats, no_ssa_stats
 from .inline import inlinable, inline_calls, same_module, may_inline, merge_blocks
 from .anf import Norm, new_norm
-from .lower import lower_function, lower_lambda, blocked_types, Lowered, myla_runtime_function, derived_eq_ir, walk_ir, drop_entry_ir, dropb_slow_ir, list_drop_slow_ir, map_drop_slow_ir, clone_ir
+from .lower import lower_function, lower_lambda, blocked_types, Lowered, myla_runtime_function, derived_eq_ir, walk_ir, drop_entry_ir, dropb_slow_ir, list_drop_slow_ir, map_drop_slow_ir, clone_ir, deep_walk_ir, deep_cell_ir, Routine
 import .ir_x86 as ir_x86
 from .dwarf import uleb, sleb, bytes_line, exprloc, str_pieces, dw_string, dw_ref, abbrev_section, gdb_scripts_section, AB_CU, AB_BASE, AB_SUBPROGRAM, AB_TYPED_SUBPROGRAM, AB_PARAM, AB_VAR, AB_BLOCK, AB_PTR, AB_VOIDPTR, AB_STRUCT, AB_MEMBER, AB_ARRAY, AB_SUBRANGE, AB_VARIANT_PART, AB_VARIANT, AB_TAG, OP_FBREG, OP_BREG15, OP_DEREF, OP_PLUS_UCONST, OP_STACK_VALUE, OP_PUSH_OBJECT_ADDRESS, OP_LIT0, OP_MINUS, OP_REG6, OP_GNU_DEREF_TYPE, OP_GNU_CONVERT, ATE_BOOLEAN, ATE_FLOAT, ATE_SIGNED, ATE_UNSIGNED, ATE_UTF, LANG_RUST
 from .parser import expr_of, stmt_of, type_expr_of, block_of, pattern_of, fun_of  // AST values for #test cases (MYLA-184)
@@ -2213,23 +2213,35 @@ impl CodeGen {
     // `clone`: %rax = a deep copy of the cell at %rdi, which is only read.
     #test(codegen_on("enum E { A, B(int) }"), Type.TBool, true)["__dcloneb_.bool"]
     fun deep_cell_name(var self, t: Type, clone: bool) -> str {
-        var pre = "__deep"
-        if clone { pre = "__dclone" }
-        if is_str_t(t) { return pre + "_str" }
-        var name = ""
-        match t {
-            Type.TList(e) => { name = pre + "_list_" + mono_token(e) },
-            Type.TMap(k, v) => { name = pre + "_map_" + map_token(k, v) },
-            _ => {
-                if is_sb_t(t) { name = pre + "_sb" } else { name = pre + "b_" + mono_token(t) }
-            },
-        }
+        if is_str_t(t) { return self.deep_cell_label(t, clone) }
+        let name = self.deep_cell_label(t, clone)
         if !self.helper_seen.contains(name) {
             self.helper_seen[name] = true
             self.need_deepc.push(t)
             self.deepc_clone.push(clone)
         }
         return name
+    }
+
+    // The name of the deep copy routine of a cell of type `t` (no request).
+    fun deep_cell_label(self, t: Type, clone: bool) -> str {
+        var pre = "__deep"
+        if clone { pre = "__dclone" }
+        if is_str_t(t) { return pre + "_str" }
+        return match t {
+            Type.TList(e) => pre + "_list_" + mono_token(e),
+            Type.TMap(k, v) => pre + "_map_" + map_token(k, v),
+            _ => if is_sb_t(t) { pre + "_sb" } else { pre + "b_" + mono_token(t) },
+        }
+    }
+
+    // The name of the deep walk of an inline `t` (`inline`: of a boxed
+    // enum's cell contents) (no request).
+    fun deep_walk_label(self, t: Type, clone: bool, inline: bool) -> str {
+        var pre = "__deep"
+        if clone { pre = "__dclone" }
+        if inline { return pre + "i_" + mono_token(t) }
+        return pre + "w_" + mono_token(t)
     }
 
     // One member of type `ft` at `off(base)` (`base` callee-saved) made a
@@ -2256,193 +2268,6 @@ impl CodeGen {
             self.emit(format("leaq {}(%{}), %rdi", off, base))
             self.emit("call " + self.register_deep(ft, clone))
         }
-    }
-
-    // `__deepw_<T>`: each member of the T at %rdi, kept in %rbx (`inline`:
-    // `__deepi_<E>`, the value in a boxed enum's cell).
-    fun emit_deep_walk(var self, t: Type, inline: bool, clone: bool) {
-        var pre = "__deep"
-        if clone { pre = "__dclone" }
-        if inline { self.emit(format("{}i_{}:", pre, mono_token(t))) } else { self.emit(format("{}w_{}:", pre, mono_token(t))) }
-        self.emit("pushq %rbp")
-        self.emit("movq %rsp, %rbp")
-        self.emit("pushq %rbx")
-        self.emit("pushq %r12")
-        self.emit("movq %rdi, %rbx")
-        match t {
-            Type.TStruct(n, a) => {
-                let info = self.struct_info(n)
-                let sub = self.type_subst(info.type_params, a)
-                var cur = 0
-                for f in info.fields {
-                    let ft = subst_type(f.ty, sub)
-                    self.deep_member("rbx", cur, ft, clone)
-                    cur = cur + self.stored_size(ft)
-                }
-            },
-            Type.TTuple(es) => {
-                var cur = 0
-                for et in es {
-                    self.deep_member("rbx", cur, et, clone)
-                    cur = cur + self.stored_size(et)
-                }
-            },
-            Type.TEnum(n, a) => {
-                if self.is_boxed(t) && !inline { self.deep_member("rbx", 0, t, clone) }
-                else {
-                    let info = self.enum_info(n)
-                    let sub = self.type_subst(info.type_params, a)
-                    let done = self.label()
-                    var idx = 0
-                    for v in info.variants {
-                        if self.variant_owns(v, sub) {
-                            let nxt = self.label()
-                            self.emit(format("cmpq ${}, (%rbx)", idx))
-                            self.emit(format("jne {}", nxt))
-                            var cur = 8
-                            for ft0 in v.payload {
-                                let ft = subst_type(ft0, sub)
-                                self.deep_member("rbx", cur, ft, clone)
-                                cur = cur + self.stored_size(ft)
-                            }
-                            self.emit(format("jmp {}", done))
-                            self.emit(format("{}:", nxt))
-                        }
-                        idx = idx + 1
-                    }
-                    self.emit(format("{}:", done))
-                }
-            },
-            _ => { self.deep_member("rbx", 0, t, clone) },
-        }
-        self.emit("popq %r12")
-        self.emit("popq %rbx")
-        self.emit("leave")
-        self.emit("ret")
-        self.emit("")
-    }
-
-    // The deep copy of a cell of type `t` (`deep_cell_name`): a shared cell
-    // is cloned first (its members retained, the original released), then
-    // each member is made a deep copy of its own.
-    // `clone`: the cell copied word for word, then each member cloned.
-    fun emit_deep_cell(var self, t: Type, clone: bool) {
-        let name = self.deep_cell_name(t, clone)
-        self.emit(format("{}:", name))
-        self.emit("pushq %rbp")
-        self.emit("movq %rsp, %rbp")
-        self.emit("pushq %rbx")
-        self.emit("pushq %r12")
-        self.emit("pushq %r13")
-        self.emit("pushq %r14")
-        self.emit("movq %rdi, %rbx")
-        let unique = self.label()
-        if clone {
-            self.emit("movq -16(%rbx), %rdi")
-            self.emit("call __alloc")
-            self.emit("movq %rax, %r12")
-            self.emit("movq %rbx, %rsi")
-            self.emit("movq %r12, %rdi")
-            self.emit("movq -16(%rbx), %rcx")
-            self.emit("cld")
-            self.emit("rep movsb")
-            self.emit("movq %r12, %rbx")
-            self.emit(format("jmp {}", unique))
-        }
-        self.emit("cmpq $1, -8(%rbx)")
-        self.emit(format("je {}", unique))
-        match t {
-            Type.TList(e) => {
-                self.register_clone(t)
-                self.emit("call " + self.clone_call_name(t))
-                self.emit("movq %rax, %rbx")
-            },
-            Type.TMap(k, v) => {
-                self.register_clone(t)
-                self.emit("call " + self.clone_call_name(t))
-                self.emit("movq %rax, %rbx")
-            },
-            _ => {
-                if is_sb_t(t) {
-                    self.need_sb = true
-                    self.emit("call __sb_clone")
-                    self.emit("movq %rax, %rbx")
-                } else {
-                    // a boxed enum: a copy of the box, its members retained
-                    self.emit("movq -16(%rbx), %rdi")
-                    self.emit("call __alloc")
-                    self.emit("movq %rax, %r12")
-                    self.emit("movq %rbx, %rsi")
-                    self.emit("movq %r12, %rdi")
-                    self.emit("movq -16(%rbx), %rcx")
-                    self.emit("cld")
-                    self.emit("rep movsb")
-                    self.owned_walk("r12", 0, t, true)
-                    self.emit("decq -8(%rbx)")
-                    self.emit("movq %r12, %rbx")
-                }
-            },
-        }
-        self.emit(format("{}:", unique))
-        match t {
-            Type.TList(e) => {
-                if self.owns_heap(e) {
-                    let stride = self.stored_size(e)
-                    self.emit("movq (%rbx), %r12")
-                    self.emit("xorq %r13, %r13")
-                    let loop = self.label()
-                    let done = self.label()
-                    self.emit(format("{}:", loop))
-                    self.emit("cmpq %r12, %r13")
-                    self.emit(format("jge {}", done))
-                    self.emit("movq %r13, %rax")
-                    self.emit(format("imulq ${}, %rax", stride))
-                    self.emit("leaq 16(%rbx,%rax), %r14")
-                    self.deep_member("r14", 0, e, clone)
-                    self.emit("incq %r13")
-                    self.emit(format("jmp {}", loop))
-                    self.emit(format("{}:", done))
-                }
-            },
-            Type.TMap(k, v) => {
-                if self.owns_heap(k) || self.owns_heap(v) {
-                    let ss = self.map_slot_size(t)
-                    self.emit("movq 8(%rbx), %r12")
-                    self.emit("xorq %r13, %r13")
-                    let loop = self.label()
-                    let done = self.label()
-                    let cont = self.label()
-                    self.emit(format("{}:", loop))
-                    self.emit("cmpq %r12, %r13")
-                    self.emit(format("jge {}", done))
-                    self.emit("movq %r13, %rax")
-                    self.emit(format("imulq ${}, %rax", ss))
-                    self.emit("leaq 16(%rbx,%rax), %r14")
-                    self.emit("cmpq $1, (%r14)")
-                    self.emit(format("jne {}", cont))
-                    if self.owns_heap(k) { self.deep_member("r14", 8, k, clone) }
-                    if self.owns_heap(v) { self.deep_member("r14", 16, v, clone) }
-                    self.emit(format("{}:", cont))
-                    self.emit("incq %r13")
-                    self.emit(format("jmp {}", loop))
-                    self.emit(format("{}:", done))
-                }
-            },
-            _ => {
-                if !is_sb_t(t) {
-                    self.emit("movq %rbx, %rdi")
-                    self.emit("call " + self.register_deep_inline(t, clone))
-                }
-            },
-        }
-        self.emit("movq %rbx, %rax")
-        self.emit("popq %r14")
-        self.emit("popq %r13")
-        self.emit("popq %r12")
-        self.emit("popq %rbx")
-        self.emit("leave")
-        self.emit("ret")
-        self.emit("")
     }
 
     // The deep walk of a boxed enum's inline value (its cell's contents).
@@ -6808,6 +6633,19 @@ impl CodeGen {
         }
     }
 
+    // A routine built as IR, under the name its callers call (an alias of
+    // `myla_<name>`), the routines it calls requested.
+    fun emit_wanting(var self, r: Routine) {
+        self.emit_routine(r.f, -1, 0, 0)
+        self.raw(format("\t.set {}, myla_{}", r.f.name, r.f.name))
+        for w in r.wants {
+            if w.kind == 0 { let n0 = self.deep_cell_name(w.t, w.clone) }
+            if w.kind == 1 { let n1 = self.register_deep(w.t, w.clone) }
+            if w.kind == 2 { let n2 = self.register_deep_inline(w.t, w.clone) }
+            if w.kind == 3 { self.register_clone(w.t) }
+        }
+    }
+
     // A routine built as IR for a type (MYLA-162), emitted as a function
     // (`myla_<its name>`) where the type `decl_id` is declared: checked,
     // its small leaf callees inlined, the functions it calls requested.
@@ -7635,13 +7473,14 @@ impl CodeGen {
                 let inl = self.deep_inline[dk]
                 let cl = self.deep_clone[dk]
                 dk = dk + 1
-                self.emit_deep_walk(t, inl, cl)
+                // built as IR (MYLA-162)
+                self.emit_wanting(deep_walk_ir(self, t, cl, inl, self.deep_walk_label(t, cl, inl)))
             }
             while dc < self.need_deepc.len() {
                 let t = self.need_deepc[dc]
                 let cl = self.deepc_clone[dc]
                 dc = dc + 1
-                self.emit_deep_cell(t, cl)
+                self.emit_wanting(deep_cell_ir(self, t, cl, self.deep_cell_label(t, cl)))
             }
             while k < self.need_walk.len() {
                 let t = self.need_walk[k]
@@ -7899,7 +7738,7 @@ pub fun is_str_t(t: Type) -> bool { return match t { Type.TStr => true, _ => fal
 #test(Type.TSB)[true]
 #test(Type.TStr)[false]
 #test(Type.TInt(32, true))[false]
-fun is_sb_t(t: Type) -> bool { return match t { Type.TSB => true, _ => false } }
+pub fun is_sb_t(t: Type) -> bool { return match t { Type.TSB => true, _ => false } }
 
 // A heap cell whose pointer is the value: retained and dropped as one pointer.
 #test(Type.TSB)[true]
