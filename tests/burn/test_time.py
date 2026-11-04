@@ -455,7 +455,10 @@ class Time(unittest.TestCase):
 
     def test_cancelling_a_sleeping_child_wakes_it(self):
         exe = self.native("cancel", CANCEL)
-        for workers in ["1", "4"]:
+        # ten times on 4 workers: a cancel between the child's look at its
+        # flags and its timer let it sleep its whole time (MYLA-163, about one
+        # run in 60 natively, one in 6 under qemu)
+        for workers in ["1"] + ["4"] * 10:
             with self.subTest(workers=workers):
                 out, err, code, _ = self.run_timed([exe], MYLA_THREADS=workers)
                 self.assertEqual((out, err, code), ("1\ntrue\n", "", 0))

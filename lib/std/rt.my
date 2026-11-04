@@ -1185,26 +1185,19 @@ pub fun workers_count() -> int64 {
 // its parent task in word 56.
 
 // `__task_cancel`: the child task whose first frame is `fr` asked to stop;
-// none (0: joined already) is left alone.
+// none (0: joined already) is left alone. Its sleepers and readers (and its
+// children's) go on at once (D124). Under the timers' lock, which a task
+// takes to look at its flags before it waits (`timer_add`, `wait_fds`), so
+// none starts waiting unseen after this (MYLA-163: a cancel between a
+// sleeper's look and its timer let it sleep its whole time).
 pub fun task_cancel(fr: int64) {
     if fr == 0 {
         return
     }
-    if __rt_get("__timer_count") != 0 || __rt_get("__watch_count") != 0 {
-        // its sleepers (and its children's) wake at once (D124)
-        let lock = __rt_addr("__timer_lock")
-        take_lock(lock)
-        cancel_locked(fr)
-        __store64(lock, 0)
-        return
-    }
-    let at = fr + 48
-    while true {
-        let flags = __load64(at)
-        if __cas64(at, flags, flags | 2) {
-            return
-        }
-    }
+    let lock = __rt_addr("__timer_lock")
+    take_lock(lock)
+    cancel_locked(fr)
+    __store64(lock, 0)
 }
 
 // `__task_cancelled`: 1 when the running task or a task above it was asked to
@@ -1630,11 +1623,7 @@ const TIMER: int64 = 32
 // timers (its frame function suspends after this call); no time at all in
 // a task already asked to stop (D124).
 pub fun sleep_frame(fr: int64, ms: int64) {
-    var n = ms * 1000000
-    if task_cancelled() != 0 {
-        n = 0
-    }
-    let seq = timer_add(os.clock_ns() + n, fr, 0)
+    let seq = timer_add(os.clock_ns() + ms * 1000000, fr, 0)
 }
 
 // `__cancel_after(child, ms)`: the child task whose first frame is `fr`
@@ -1678,9 +1667,15 @@ pub fun task_end(fr: int64) {
 }
 
 // A timer at `at` for `fr` (and `cell`); its order among timers of one time.
-fun timer_add(at: int64, fr: int64, cell: int64) -> int64 {
+// A sleeper (no cell) of a task asked to stop is due at once, its flags read
+// under the lock (`task_cancel`).
+fun timer_add(at0: int64, fr: int64, cell: int64) -> int64 {
     let lock = __rt_addr("__timer_lock")
     take_lock(lock)
+    var at = at0
+    if cell == 0 && task_cancelled() != 0 {
+        at = 0
+    }
     if __rt_get("__exec_poller") == 0 {
         __store64(__rt_addr("__exec_poller"), os.poller_new())
     }
@@ -1996,12 +1991,14 @@ pub fun wait_fd2(fr: int64, a: int64, b: int64) {
 // The frame waiting for `a`, and `b` too unless it is negative: an entry
 // for each, so the first event takes both (`watch_take`).
 fun wait_fds(fr: int64, a: int64, b: int64) {
+    // (its flags read under the lock, `task_cancel`)
+    let lock = __rt_addr("__timer_lock")
+    take_lock(lock)
     if task_cancelled() != 0 {
+        __store64(lock, 0)
         exec_push(fr)
         return
     }
-    let lock = __rt_addr("__timer_lock")
-    take_lock(lock)
     if __rt_get("__exec_poller") == 0 {
         __store64(__rt_addr("__exec_poller"), os.poller_new())
     }
