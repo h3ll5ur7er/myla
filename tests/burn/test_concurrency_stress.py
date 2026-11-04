@@ -85,6 +85,8 @@ EXPECTED = {
     # 17. cancelling a child doesn't make its parent look cancelled, after
     # the parent's frames changed (MYLA-162: natively it did)
     "t17_cancelled_after_an_await": ("false\n2\n", 0),
+    # 18. closures handed to children and shared between siblings
+    "t18_closures_cross_tasks": ("989570\n", 0),
 }
 
 

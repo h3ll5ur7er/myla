@@ -20,7 +20,7 @@ from .ir import render_func, verify, moves, IrFunc, Inst
 from .ssa import SsaStats, no_ssa_stats
 from .inline import inlinable, inline_calls, same_module, may_inline, merge_blocks
 from .anf import Norm, new_norm
-from .lower import lower_function, lower_lambda, blocked_types, Lowered, myla_runtime_function, derived_eq_ir, walk_ir, drop_entry_ir, dropb_slow_ir, list_drop_slow_ir, map_drop_slow_ir, clone_ir, deep_walk_ir, deep_cell_ir, Routine
+from .lower import lower_function, lower_lambda, blocked_types, Lowered, myla_runtime_function, derived_eq_ir, walk_ir, drop_entry_ir, dropb_slow_ir, list_drop_slow_ir, map_drop_slow_ir, clone_ir, deep_walk_ir, deep_cell_ir, Routine, Want, env_drop_ir, env_deep_ir
 import .ir_x86 as ir_x86
 from .dwarf import uleb, sleb, bytes_line, exprloc, str_pieces, dw_string, dw_ref, abbrev_section, gdb_scripts_section, AB_CU, AB_BASE, AB_SUBPROGRAM, AB_TYPED_SUBPROGRAM, AB_PARAM, AB_VAR, AB_BLOCK, AB_PTR, AB_VOIDPTR, AB_STRUCT, AB_MEMBER, AB_ARRAY, AB_SUBRANGE, AB_VARIANT_PART, AB_VARIANT, AB_TAG, OP_FBREG, OP_BREG15, OP_DEREF, OP_PLUS_UCONST, OP_STACK_VALUE, OP_PUSH_OBJECT_ADDRESS, OP_LIT0, OP_MINUS, OP_REG6, OP_GNU_DEREF_TYPE, OP_GNU_CONVERT, ATE_BOOLEAN, ATE_FLOAT, ATE_SIGNED, ATE_UNSIGNED, ATE_UTF, LANG_RUST
 from .parser import expr_of, stmt_of, type_expr_of, block_of, pattern_of, fun_of  // AST values for #test cases (MYLA-184)
@@ -2235,6 +2235,12 @@ impl CodeGen {
         }
     }
 
+    // The name of `t`'s release (or `retain`) walk (no request).
+    fun walk_label(self, t: Type, retain: bool) -> str {
+        if retain { return "__walkr_" + mono_token(t) }
+        return "__walkd_" + mono_token(t)
+    }
+
     // The name of the deep walk of an inline `t` (`inline`: of a boxed
     // enum's cell contents) (no request).
     fun deep_walk_label(self, t: Type, clone: bool, inline: bool) -> str {
@@ -4096,8 +4102,19 @@ impl CodeGen {
     // `myla_<lifted>_env_drop(%rdi = env)`: release the env's owned values, then
     // tail-call __free on the cell (reached through __func_drop at refcount 0).
     fun emit_env_drop(var self, lifted: str, owned: [DropEntry]) {
-        // with tasks, the env's deep copy, found just before its drop
-        // function by `__deep_env` (D92)
+        // built as IR with std.rt's allocator (MYLA-162); with tasks, the
+        // env's deep copy and clone too, found just before its drop function
+        // by `__deep_env` (D92)
+        if self.rt_alloc() {
+            if self.frames {
+                self.emit_env_routine(env_deep_ir(self, lifted, owned, false))
+                self.emit_env_routine(env_deep_ir(self, lifted, owned, true))
+                self.emit(format("\t.quad myla_{}_env_clone", lifted))
+                self.emit(format("\t.quad myla_{}_env_deep", lifted))
+            }
+            self.emit_env_routine(env_drop_ir(self, lifted, owned, self.rt_alloc_names().1))
+            return
+        }
         if self.frames { self.emit_env_deep(lifted, owned) }
         self.emit(format("myla_{}_env_drop:", lifted))
         self.emit("pushq %rbp")
@@ -6633,16 +6650,29 @@ impl CodeGen {
         }
     }
 
+    // An environment's routine built as IR (`myla_<lifted>_env_…`, the label
+    // its callers use), the routines it calls requested.
+    fun emit_env_routine(var self, r: Routine) {
+        self.emit_routine(r.f, -1, 0, 0)
+        self.request_wants(r.wants)
+    }
+
     // A routine built as IR, under the name its callers call (an alias of
     // `myla_<name>`), the routines it calls requested.
     fun emit_wanting(var self, r: Routine) {
         self.emit_routine(r.f, -1, 0, 0)
         self.raw(format("\t.set {}, myla_{}", r.f.name, r.f.name))
-        for w in r.wants {
+        self.request_wants(r.wants)
+    }
+
+    // The routines a routine built as IR calls (see `Want`), requested.
+    fun request_wants(var self, wants: [Want]) {
+        for w in wants {
             if w.kind == 0 { let n0 = self.deep_cell_name(w.t, w.clone) }
             if w.kind == 1 { let n1 = self.register_deep(w.t, w.clone) }
             if w.kind == 2 { let n2 = self.register_deep_inline(w.t, w.clone) }
             if w.kind == 3 { self.register_clone(w.t) }
+            if w.kind == 4 { let n4 = self.register_walk(w.t, false) }
         }
     }
 

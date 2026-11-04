@@ -70,7 +70,8 @@ struct Lower { f: IrFunc, cur: int32, scopes: [[Local]], scope_ids: [int32], own
 
 // A per-type routine a routine built as IR calls, for the code generator to
 // emit (MYLA-162): `kind` 0 a cell's deep copy, 1 an inline value's deep
-// walk, 2 a boxed enum's contents' deep walk, 3 a copy-on-write clone; of
+// walk, 2 a boxed enum's contents' deep walk, 3 a copy-on-write clone, 4 a
+// release walk; of
 // type `t`, a deep clone's when `clone`.
 pub struct Want { kind: int32, t: Type, clone: bool }
 
@@ -4709,4 +4710,75 @@ impl Lower {
             self.add(Inst.Rt(-1, cg.deep_walk_label(ft, clone, false), [p]))
         }
     }
+}
+
+// `myla_<lifted>_env_drop`: a lambda's or partial application's environment
+// released at its count's end (`__func_drop`): each capture it owns (`owned`,
+// held inline: a boxed enum as its value) released, then the cell freed.
+pub fun env_drop_ir(cg: CodeGen, lifted: str, owned: [DropEntry], free: str) -> Routine {
+    let i64 = Type.TInt(64, true)
+    var lw = routine(lifted + "_env_drop", None)
+    let sp = lw.new_slot("env", i64, 8, 0, false)
+    for d in owned {
+        if is_cell_t(d.ty) {
+            let v = lw.temp(d.ty)
+            lw.add(Inst.LoadAt(v, lw.read_cell(sp), d.off, 8))
+            lw.add(Inst.DropVal(d.ty, v))
+        } else if is_tfunc(d.ty) {
+            let e = lw.temp(i64)
+            lw.add(Inst.LoadAt(e, lw.read_cell(sp), d.off + 8, 8))
+            lw.add(Inst.Rt(-1, "__func_drop", [e]))
+        } else if cg.owns_heap(d.ty) {
+            let p = lw.temp(i64)
+            lw.add(Inst.Bin(p, "+", i64, i64, lw.read_cell(sp), lw.int_const(d.off), Pos { line: 0, col: 0 }))
+            if cg.is_boxed(d.ty) {
+                lw.wants.push(Want { kind: 4, t: d.ty, clone: false })
+                lw.add(Inst.Rt(-1, cg.walk_label(d.ty, false), [p]))
+            } else {
+                lw.add(Inst.DropAt(d.ty, p))
+            }
+        }
+    }
+    lw.free_cell(sp, free)
+    return Routine { f: lw.f, wants: lw.wants }
+}
+
+// `myla_<lifted>_env_deep` (`__deep_env`, D92): the environment made unshared
+// deeply, the same cell when it was the only reference, else a copy (its
+// captures retained, the original's count down), each capture a deep copy
+// of its own; `clone` (`_env_clone`, `__dclone_env`): a copy, each capture
+// cloned. The cell returned.
+pub fun env_deep_ir(cg: CodeGen, lifted: str, owned: [DropEntry], clone: bool) -> Routine {
+    let i64 = Type.TInt(64, true)
+    var suffix = "_env_deep"
+    if clone { suffix = "_env_clone" }
+    var lw = routine(lifted + suffix, Some(i64))
+    let sp = lw.new_slot("env", i64, 8, 0, false)
+    let sc = lw.new_slot("unique", i64, 8, -1, false)
+    lw.add(Inst.Store(sc, lw.read_cell(sp)))
+    let deepen = lw.new_block()
+    if clone {
+        lw.copy_cell(sp, sc)
+        lw.finish(Term.Jmp(deepen))
+    } else {
+        let rc = lw.temp(i64)
+        lw.add(Inst.LoadAt(rc, lw.read_cell(sp), -8, 8))
+        let only = lw.temp(Type.TBool)
+        lw.add(Inst.Cmp(only, "==", i64, rc, lw.int_const(1)))
+        let shared = lw.new_block()
+        lw.finish(Term.Br(only, deepen, shared))
+        lw.start(shared)
+        lw.copy_cell(sp, sc)
+        for d in owned {
+            let p = lw.temp(i64)
+            lw.add(Inst.Bin(p, "+", i64, i64, lw.read_cell(sc), lw.int_const(d.off), Pos { line: 0, col: 0 }))
+            lw.add(Inst.Retain(d.ty, p))
+        }
+        lw.add(Inst.Rt(-1, "__rc_dec", [lw.read_cell(sp)]))
+        lw.finish(Term.Jmp(deepen))
+    }
+    lw.start(deepen)
+    for d in owned { lw.deep_member(cg, sc, d.off, d.ty, clone) }
+    lw.finish(Term.Ret(lw.read_cell(sc)))
+    return Routine { f: lw.f, wants: lw.wants }
 }
