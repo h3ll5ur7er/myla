@@ -568,6 +568,7 @@ pub fun rename_uses(inst: Inst, to: [int32]) -> Inst {
         Inst.RetainVal(t, v) => Inst.RetainVal(t, rn(v, to))
         Inst.Retain(t, p) => Inst.Retain(t, rn(p, to))
         Inst.DropAt(t, p) => Inst.DropAt(t, rn(p, to))
+        Inst.DropVal(t, v) => Inst.DropVal(t, rn(v, to))
         Inst.Deep(t, p) => Inst.Deep(t, rn(p, to))
         Inst.CloneDeep(t, p) => Inst.CloneDeep(t, rn(p, to))
         Inst.Elem(d, c, i, stride, is_str, pos) => Inst.Elem(d, rn(c, to), rn(i, to), stride, is_str, pos)

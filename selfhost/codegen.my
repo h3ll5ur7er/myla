@@ -8999,6 +8999,20 @@ fun reg_of_move(s: str) -> str {
 #test("\tmovq 8(%rax), %rax", "%r12")[""]
 #test("\tmovslq %eax, %rax", "%r12")[""]
 #test("\tmovq %rax, %rcx", "%r12")[""]
+// The same for the one reader of the loaded value (`load_temp`), which
+// takes it in `reg`: a source reading %rax is fine, as nothing reads the
+// value from %rax after it (MYLA-162).
+#test("\tmovq 8(%rax), %rax", "%rdi")["\tmovq 8(%rax), %rdi"]
+#test("\tmovslq %eax, %rax", "%r12")[""]
+pub fun fold_load_for_reader(line: str, reg: str) -> str {
+    if !(text_at(line, 0, "\tmovq ") || text_at(line, 0, "\tleaq ")) { return "" }
+    if line.len() < 12 || !text_at(line, line.len() - 6, ", %rax") { return "" }
+    var out = StringBuilder()
+    out.append(line, 0, line.len() - 4)
+    out.append(reg)
+    return out.build()
+}
+
 pub fun fold_load(line: str, reg: str) -> str {
     if !(text_at(line, 0, "\tmovq ") || text_at(line, 0, "\tleaq ")) { return "" }
     if line.len() < 12 || !text_at(line, line.len() - 6, ", %rax") { return "" }

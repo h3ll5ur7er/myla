@@ -67,6 +67,9 @@ pub enum Inst {
     Retain(Type, int32),
     // drop T $slot: release what the owning slot holds (its owner's end)
     DropSlot(Type, int32),
+    // drop T %v: release the cell %v points at (T a string, list, map,
+    // builder, actor or boxed enum), the counterpart of `retain T %v`
+    DropVal(Type, int32),
     // drop T [%ptr]: release what the member at %ptr holds (before it is
     // overwritten)
     DropAt(Type, int32),
@@ -259,6 +262,7 @@ pub fun render_inst(inst: Inst) -> str {
         Inst.Retain(t, p) => format("retain {} [%t{}]", type_name(t), p)
         Inst.DropSlot(t, s) => format("drop {} ${}", type_name(t), s)
         Inst.DropAt(t, p) => format("drop {} [%t{}]", type_name(t), p)
+        Inst.DropVal(t, v) => format("drop {} %t{}", type_name(t), v)
         Inst.Deep(t, p) => format("deep {} [%t{}]", type_name(t), p)
         Inst.CloneDeep(t, p) => format("clone {} [%t{}]", type_name(t), p)
         Inst.Init(s) => format("init ${}", s)
@@ -607,6 +611,7 @@ pub fun inst_uses(inst: Inst) -> [int32] {
         Inst.Retain(t, p) => [p]
         Inst.DropSlot(t, s) => []
         Inst.DropAt(t, p) => [p]
+        Inst.DropVal(t, v) => [v]
         Inst.Deep(t, p) => [p]
         Inst.CloneDeep(t, p) => [p]
         Inst.Init(s) => []

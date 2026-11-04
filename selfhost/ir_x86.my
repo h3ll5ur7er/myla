@@ -11,7 +11,7 @@
 
 from .ast import FunData
 from .checker import Type
-from .codegen import CodeGen, CgBinding, int_signed, takes_operand, is_cmp, fold_load, text_at, has_text, is_aggregate, is_actor_t, is_tfloat32, REG_WORDS, arg_reg, spilled_word, SPILLED_ENV, narrow_operand, int_width_cg, tls_offset, TLS_SIZE
+from .codegen import CodeGen, CgBinding, int_signed, takes_operand, is_cmp, fold_load, fold_load_for_reader, text_at, has_text, is_aggregate, is_actor_t, is_tfloat32, REG_WORDS, arg_reg, spilled_word, SPILLED_ENV, narrow_operand, int_width_cg, tls_offset, TLS_SIZE
 from .ir import IrFunc, Inst, Term, Touches, Slot, ENV_WORD, render_func, touches, use_counts, def_counts, inst_uses, term_uses, successors, ends_in_call
 from .ssa import promote, add_ssa_stats
 from .parser import expr_of, stmt_of, type_expr_of, block_of, pattern_of, fun_of  // AST values for #test cases (MYLA-184)
@@ -868,6 +868,12 @@ impl CodeGen {
             Inst.Frame(d) => {
                 self.emit("movq %r15, %rax")
                 self.store_temp(d, temp_base)
+            },
+            Inst.DropVal(t, v) => {
+                // the cell into %rdi, its type's drop routine called
+                self.load_temp(v, "rdi", temp_base)
+                self.register_drop(t)
+                self.emit("call " + self.drop_call_name(t))
             },
             Inst.DropAt(t, p) => {
                 // the walk keeps the address in callee-saved %rbx across the
@@ -2589,7 +2595,7 @@ impl CodeGen {
                 // read once, by this: loaded straight into `reg` (MYLA-125)
                 if reg != "rax" {
                     let n = self.text.len()
-                    let folded = fold_load(self.text[n - 1], "%" + reg)
+                    let folded = fold_load_for_reader(self.text[n - 1], "%" + reg)
                     if folded != "" {
                         self.text[n - 1] = folded
                         return
@@ -2670,7 +2676,7 @@ impl CodeGen {
 // register that pay for saving and restoring it (MYLA-121; on the compiler
 // compiling itself, 4 and 12 ran equally fast and 12 ran 1.6% fewer
 // instructions, 40 was slower).
-const REG_MIN_USE: int64 = 12
+const REG_MIN_USE: int64 = 4
 
 // How many loops each reachable block of `f` is in: a jump back to a block
 // emitted earlier closes a loop over the blocks emitted from there to it.
@@ -3541,6 +3547,7 @@ fun reads_then_calls(inst: Inst) -> bool {
         Inst.CallIndSret(fv, r, args) => true,
         Inst.Rt(d, name, args) => name != "__sqrt" && name != "__f64_bits" && name != "__f64_from_bits" && name != "__f64_round" && name != "__rotl" && name != "__bsr64" && name != "__cas64" && name != "__xchg64" && name != "__fetch_add64" && name != "__pause" && !text_starts(name, "__rt_addr:") && !text_starts(name, "__rt_waddr:"),
         Inst.RtPair(d, d2, name, args) => true,
+        Inst.DropVal(t, v) => true,
         _ => false,
     }
 }
