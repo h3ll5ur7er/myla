@@ -2,7 +2,7 @@
 id: MYLA-158
 title: A WebAssembly target
 type: feature
-status: backlog
+status: in-progress
 priority: low
 labels: [backend, wasm, design]
 ---
@@ -21,3 +21,14 @@ WebAssembly as a target ([[MYLA-62]], step 3), so Myla programs, and the self-ho
 - [ ] The platform layer for wasm ([[MYLA-162]]): host imports for output, files and time
 - [ ] The native parity programs give the same output under a wasm runtime
 - [ ] The self-hosted checker and interpreter run as wasm with an API a page can call
+
+## The plan (2026-11-04, D125 with D122)
+
+The owner chose wasm next, with D122 (sizes from a target description), which only a 32-bit backend can test, and decided wasm's open choices in D125: WASI preview 1, clang's wasm assembly and `wasm-ld`, a dispatch loop for control flow, one worker. Checked first: clang, `wasm-ld` and Node 22's WASI run a hand-written module (`fd_write`, a 10-million-deep `return_call` recursion, `proc_exit`).
+
+Steps, each verified. The backend comes before D122's 4-byte layouts: the runtime in Myla ([[lib/std/rt.my]]) reads its cells at literal 8-byte offsets, so wasm first runs with today's layouts (addresses are 32-bit locals, a pointer in memory a zero-extended 8-byte word), and D122 then shrinks them, tested against a backend that works:
+1. **The target:** `--target wasm32-wasi` in `gen_main` and `myla build` (clang, `wasm-ld`), the loader's `std/platform_wasm.my` over WASI imports, a runner for the tests (Node's WASI).
+2. **`ir_wasm.my`:** the IR to wasm assembly: temporaries as locals, slots in a shadow stack in linear memory, the dispatch loop, calls (`call`, `call_indirect` through a table for function values, `return_call` for `become`), traps and positions, memory growth for the allocator.
+3. **`runtime_wasm.my`:** the start (`_start`), the traps, the bulk copy and comparison, the counts of function values; then tasks on one worker.
+4. **Parity:** the examples and the parity programs under Node's WASI against x86-64; the stress programs on one worker; CI.
+5. **D122:** a target description (pointer size and alignment: 8 on the native targets, 4 on wasm32); sizes, field offsets, strides, cell headers, frame headers and std.rt's offsets computed from it; the native targets' code byte for byte the same, wasm's cells smaller.
