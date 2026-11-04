@@ -1,6 +1,7 @@
 // 18. Closures handed to children and shared between siblings: each task
 // gets the environment (its strings, lists, struct and nested function
-// value) deep-copied or cloned, and the original stays whole (MYLA-162)
+// value) deep-copied or cloned, and the original stays whole; a composition's
+// too (MYLA-162)
 struct P {
     name: str,
     tags: [str],
@@ -35,8 +36,10 @@ async fun main() {
         async let m = maker(round)
         async let c = use(await m, 5)
         async let d = use(await m, 7)
+        let h = f >> ((n: int) => n * 2)
+        async let e = use(h, 4)
         let mine = await m
-        total = total + await a + await b + await c + await d + f(1) + mine(2)
+        total = total + await a + await b + await c + await d + await e + f(1) + mine(2) + h(3)
         round = round + 1
     }
     print(total)

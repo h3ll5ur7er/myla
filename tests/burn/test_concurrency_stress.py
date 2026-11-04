@@ -86,7 +86,7 @@ EXPECTED = {
     # the parent's frames changed (MYLA-162: natively it did)
     "t17_cancelled_after_an_await": ("false\n2\n", 0),
     # 18. closures handed to children and shared between siblings
-    "t18_closures_cross_tasks": ("989570\n", 0),
+    "t18_closures_cross_tasks": ("1125570\n", 0),
 }
 
 

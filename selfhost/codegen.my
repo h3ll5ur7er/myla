@@ -6493,6 +6493,15 @@ impl CodeGen {
         self.raw("\tleave")
         self.raw("\tjmp *%rcx")
         self.raw("")
+        if self.rt_alloc() {
+            // its env's routines as IR (MYLA-162): those of an environment
+            // that owns two function values
+            let fv = Type.TFunc([Type.TInt(64, true)], Some(Type.TInt(64, true)))
+            let owned = [DropEntry { off: 8, ty: fv }, DropEntry { off: 24, ty: fv }]
+            self.emit_env_drop("__compose", owned)
+            self.raw("\t.set __compose_env_drop, myla___compose_env_drop")
+            return
+        }
         if self.frames {
             // the deep copy of a composition's env: both function values'
             self.raw("__compose_env_deep:")
