@@ -807,6 +807,15 @@ impl CodeGen {
                     self.emit("pause")
                     return
                 }
+                // a cell's count down by one, whether it reached 0 (the
+                // per-type drop routines' fast path, MYLA-162)
+                if name == "__rc_dec" || name == "__rc_dec_atomic" {
+                    let at = self.rc_dec(name, args[0], temp_base)
+                    self.emit("sete %al")
+                    self.emit("movzbl %al, %eax")
+                    self.store_temp(d, temp_base)
+                    return
+                }
                 // a frame resumed (its resume function the frame's first
                 // word): a call, the callee-saved registers kept
                 if name == "__run_frame" {
@@ -1063,7 +1072,7 @@ impl CodeGen {
             Term.Br(c, a, b) => match insts[last] {
                 // a compare-and-swap only the branch reads: its flag (MYLA-162)
                 Inst.Rt(d, name, args) => {
-                    if d != c || self.temp_uses[d] != 1 || name != "__cas64" { return -1 }
+                    if d != c || self.temp_uses[d] != 1 || !(name == "__cas64" || name == "__rc_dec" || name == "__rc_dec_atomic") { return -1 }
                     last
                 },
                 // a negated flag only the branch reads: the inverted jump (MYLA-251)
@@ -1173,6 +1182,21 @@ impl CodeGen {
     fun emit_compare_branch(var self, cmp: Inst, term: Term, labels: [str], next: int32, temp_base: int32) {
         match cmp {
             Inst.Rt(d, name, args) => {
+                // a count down: ZF set when it reached 0
+                if name == "__rc_dec" || name == "__rc_dec_atomic" {
+                    let rc = self.rc_dec(name, args[0], temp_base)
+                    match term {
+                        Term.Br(c, yes, no) => {
+                            if no == next { self.emit(format("je {}", labels[yes])) }
+                            else {
+                                self.emit(format("jne {}", labels[no]))
+                                if yes != next { self.emit(format("jmp {}", labels[yes])) }
+                            }
+                        },
+                        _ => {},
+                    }
+                    return
+                }
                 // `lock cmpxchg` sets ZF when it swapped
                 let at = self.atomic_at(args[0], temp_base)
                 self.load_temp(args[2], "rdx", temp_base)
@@ -1723,6 +1747,19 @@ impl CodeGen {
         self.pend_store = ""
         self.pend_temp = -1
         return src
+    }
+
+    // `decq` (atomic: `lock decq`) of the count before the cell at `p`.
+    fun rc_dec(var self, name: str, p: int32, temp_base: int32) -> str {
+        var base = self.reg_of(p)
+        if base == "" || text_has_xmm(base) {
+            self.load_temp(p, "rcx", temp_base)
+            base = "%rcx"
+        }
+        var insn = "decq"
+        if name == "__rc_dec_atomic" { insn = "lock decq" }
+        self.emit(format("{} -8({})", insn, base))
+        return base
     }
 
     // The memory operand of an atomic operation on the address `p`: the
@@ -2987,7 +3024,7 @@ fun clobber_kind(inst: Inst) -> int32 {
         Inst.Loc(p) => 0,
         Inst.Bind(name, s) => 0,
         Inst.Scope(open) => 0,
-        Inst.Rt(d, name, args) => if name == "__sqrt" || name == "__f64_bits" || name == "__f64_from_bits" || name == "__f64_round" || name == "__rotl" || name == "__bsr64" || name == "__cas64" || name == "__xchg64" || name == "__fetch_add64" || name == "__pause" || text_starts(name, "__rt_addr:") || text_starts(name, "__rt_waddr:") { 0 } else { 2 },
+        Inst.Rt(d, name, args) => if name == "__sqrt" || name == "__f64_bits" || name == "__f64_from_bits" || name == "__f64_round" || name == "__rotl" || name == "__bsr64" || name == "__cas64" || name == "__xchg64" || name == "__fetch_add64" || name == "__pause" || name == "__rc_dec" || name == "__rc_dec_atomic" || text_starts(name, "__rt_addr:") || text_starts(name, "__rt_waddr:") { 0 } else { 2 },
         _ => 2,
     }
 }
@@ -3595,7 +3632,7 @@ fun reads_then_calls(inst: Inst) -> bool {
         Inst.CallSret(name, r, args) => true,
         Inst.CallInd(d, fv, args) => true,
         Inst.CallIndSret(fv, r, args) => true,
-        Inst.Rt(d, name, args) => name != "__sqrt" && name != "__f64_bits" && name != "__f64_from_bits" && name != "__f64_round" && name != "__rotl" && name != "__bsr64" && name != "__cas64" && name != "__xchg64" && name != "__fetch_add64" && name != "__pause" && !text_starts(name, "__rt_addr:") && !text_starts(name, "__rt_waddr:"),
+        Inst.Rt(d, name, args) => name != "__sqrt" && name != "__f64_bits" && name != "__f64_from_bits" && name != "__f64_round" && name != "__rotl" && name != "__bsr64" && name != "__cas64" && name != "__xchg64" && name != "__fetch_add64" && name != "__pause" && name != "__rc_dec" && name != "__rc_dec_atomic" && !text_starts(name, "__rt_addr:") && !text_starts(name, "__rt_waddr:"),
         Inst.RtPair(d, d2, name, args) => true,
         Inst.DropVal(t, v) => true,
         Inst.Retain(t, p) => true,

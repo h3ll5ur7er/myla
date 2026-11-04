@@ -20,7 +20,7 @@ from .ir import render_func, verify, moves, IrFunc, Inst
 from .ssa import SsaStats, no_ssa_stats
 from .inline import inlinable, inline_calls, same_module, may_inline, merge_blocks
 from .anf import Norm, new_norm
-from .lower import lower_function, lower_lambda, blocked_types, Lowered, myla_runtime_function, derived_eq_ir, walk_ir
+from .lower import lower_function, lower_lambda, blocked_types, Lowered, myla_runtime_function, derived_eq_ir, walk_ir, drop_entry_ir, dropb_slow_ir, list_drop_slow_ir, map_drop_slow_ir
 import .ir_x86 as ir_x86
 from .dwarf import uleb, sleb, bytes_line, exprloc, str_pieces, dw_string, dw_ref, abbrev_section, gdb_scripts_section, AB_CU, AB_BASE, AB_SUBPROGRAM, AB_TYPED_SUBPROGRAM, AB_PARAM, AB_VAR, AB_BLOCK, AB_PTR, AB_VOIDPTR, AB_STRUCT, AB_MEMBER, AB_ARRAY, AB_SUBRANGE, AB_VARIANT_PART, AB_VARIANT, AB_TAG, OP_FBREG, OP_BREG15, OP_DEREF, OP_PLUS_UCONST, OP_STACK_VALUE, OP_PUSH_OBJECT_ADDRESS, OP_LIT0, OP_MINUS, OP_REG6, OP_GNU_DEREF_TYPE, OP_GNU_CONVERT, ATE_BOOLEAN, ATE_FLOAT, ATE_SIGNED, ATE_UNSIGNED, ATE_UTF, LANG_RUST
 from .parser import expr_of, stmt_of, type_expr_of, block_of, pattern_of, fun_of  // AST values for #test cases (MYLA-184)
@@ -7568,14 +7568,28 @@ impl CodeGen {
                 let tok = mono_token(t)
                 if list_has_str(self.drop_emitted, tok) { continue }
                 self.drop_emitted.push(tok)
+                // built as IR (MYLA-162): an entry counting down, and the
+                // rest when the count reaches 0
+                var free = ""
+                if self.rt_alloc() { free = self.rt_alloc_names().1 }
+                let name = self.drop_call_name(t)
+                let slow = name + "_slow"
+                var atomic = false
                 match t {
-                    Type.TList(e) => { self.emit_list_drop_helper(t) },
-                    Type.TMap(k2, v) => { self.emit_map_drop_helper(t) },
-                    Type.TEnum(n, a) => { self.emit_dropb_helper(t, false) },
+                    Type.TList(e) => { self.emit_routine(list_drop_slow_ir(self, e, slow, free), -1, 0, 0) },
+                    Type.TMap(k2, v) => { self.emit_routine(map_drop_slow_ir(self, t, slow, free), -1, 0, 0) },
+                    Type.TEnum(n, a) => {
+                        self.emit_routine(dropb_slow_ir(self, t, "inline", slow, free), -1, 0, 0)
+                    },
                     // an actor's cell: its fields, as a struct's (same token)
-                    Type.TActor(n) => { self.emit_dropb_helper(Type.TStruct(n, []), self.frames) },
+                    Type.TActor(n) => {
+                        atomic = self.frames
+                        self.emit_routine(dropb_slow_ir(self, Type.TStruct(n, []), "", slow, free), -1, 0, 0)
+                    },
                     _ => {},
                 }
+                self.emit_routine(drop_entry_ir(name, slow, atomic), -1, 0, 0)
+                self.raw(format("\t.set {}, myla_{}", name, name))
             }
             while j < self.need_clone.len() {
                 let t = self.need_clone[j]
@@ -7616,50 +7630,6 @@ impl CodeGen {
             }
         }
         if self.need_sb { self.emit_sb_rc_helpers() }
-    }
-
-    // `__drop_list_<elem>`: %rdi = list cell. Decrement the refcount; at zero,
-    // drop each of the `len` elements that own heap, then free the cell.
-    fun emit_list_drop_helper(var self, t: Type) {
-        let et = list_elem(t)
-        let stride = self.stored_size(et)
-        self.emit(format("__drop_list_{}:", mono_token(et)))
-        self.emit("decq -8(%rdi)")
-        let keep = self.label()
-        self.emit(format("jnz {}", keep))
-        self.emit("pushq %rbp")
-        self.emit("movq %rsp, %rbp")
-        self.emit("pushq %rbx")
-        self.emit("pushq %r12")
-        self.emit("pushq %r13")
-        self.emit("pushq %r14")
-        self.emit("movq %rdi, %rbx")
-        if self.owns_heap(et) {
-            self.emit("movq (%rbx), %r12")
-            self.emit("xorq %r13, %r13")
-            let loop = self.label()
-            let done = self.label()
-            self.emit(format("{}:", loop))
-            self.emit("cmpq %r12, %r13")
-            self.emit(format("jge {}", done))
-            self.emit("movq %r13, %rax")
-            self.emit(format("imulq ${}, %rax", stride))
-            self.emit("leaq 16(%rbx,%rax), %r14")
-            self.walk_member("r14", 0, et, false)
-            self.emit("incq %r13")
-            self.emit(format("jmp {}", loop))
-            self.emit(format("{}:", done))
-        }
-        self.emit("movq %rbx, %rdi")
-        self.emit("popq %r14")
-        self.emit("popq %r13")
-        self.emit("popq %r12")
-        self.emit("popq %rbx")
-        self.emit("leave")
-        self.emit("jmp __free")
-        self.emit(format("{}:", keep))
-        self.emit("ret")
-        self.emit("")
     }
 
     // `__clone_list_<elem>`: %rdi = shared cell. Allocate an independent copy
@@ -7707,57 +7677,6 @@ impl CodeGen {
         self.emit("popq %r12")
         self.emit("popq %rbx")
         self.emit("leave")
-        self.emit("ret")
-        self.emit("")
-    }
-
-    // `__drop_map_<k>_<v>`: %rdi = map cell. Decrement the refcount; at zero,
-    // drop each occupied slot's owning key/value, then free the cell.
-    fun emit_map_drop_helper(var self, t: Type) {
-        let kt = map_key(t)
-        let vt = map_val(t)
-        let ss = self.map_slot_size(t)
-        self.emit(format("__drop_map_{}:", map_token(kt, vt)))
-        self.emit("decq -8(%rdi)")
-        let keep = self.label()
-        self.emit(format("jnz {}", keep))
-        self.emit("pushq %rbp")
-        self.emit("movq %rsp, %rbp")
-        self.emit("pushq %rbx")
-        self.emit("pushq %r12")
-        self.emit("pushq %r13")
-        self.emit("pushq %r14")
-        self.emit("movq %rdi, %rbx")
-        if self.owns_heap(kt) || self.owns_heap(vt) {
-            self.emit("movq 8(%rbx), %r12")
-            self.emit("xorq %r13, %r13")
-            let loop = self.label()
-            let done = self.label()
-            self.emit(format("{}:", loop))
-            self.emit("cmpq %r12, %r13")
-            self.emit(format("jge {}", done))
-            self.emit("movq %r13, %rax")
-            self.emit(format("imulq ${}, %rax", ss))
-            self.emit("leaq 16(%rbx,%rax), %r14")
-            self.emit("movq (%r14), %rax")
-            self.emit("cmpq $1, %rax")
-            let cont = self.label()
-            self.emit(format("jne {}", cont))
-            if self.owns_heap(kt) { self.walk_member("r14", 8, kt, false) }
-            if self.owns_heap(vt) { self.walk_member("r14", 16, vt, false) }
-            self.emit(format("{}:", cont))
-            self.emit("incq %r13")
-            self.emit(format("jmp {}", loop))
-            self.emit(format("{}:", done))
-        }
-        self.emit("movq %rbx, %rdi")
-        self.emit("popq %r14")
-        self.emit("popq %r13")
-        self.emit("popq %r12")
-        self.emit("popq %rbx")
-        self.emit("leave")
-        self.emit("jmp __free")
-        self.emit(format("{}:", keep))
         self.emit("ret")
         self.emit("")
     }
@@ -7823,28 +7742,6 @@ impl CodeGen {
         self.emit("popq %r12")
         self.emit("popq %rbx")
         self.emit("leave")
-        self.emit("ret")
-        self.emit("")
-    }
-
-    // `__dropb_<E>`: %rdi = boxed-enum cell. Decrement; at zero, drop the
-    // children the inline value owns, then free the cell.
-    // `atomic`: an actor's cell, whose handles threads share (D92).
-    fun emit_dropb_helper(var self, t: Type, atomic: bool) {
-        self.emit(format("__dropb_{}:", mono_token(t)))
-        if atomic { self.emit("lock decq -8(%rdi)") } else { self.emit("decq -8(%rdi)") }
-        let keep = self.label()
-        self.emit(format("jnz {}", keep))
-        self.emit("pushq %rbp")
-        self.emit("movq %rsp, %rbp")
-        self.emit("pushq %rbx")
-        self.emit("movq %rdi, %rbx")
-        self.owned_walk("rbx", 0, t, false)
-        self.emit("movq %rbx, %rdi")
-        self.emit("popq %rbx")
-        self.emit("leave")
-        self.emit("jmp __free")
-        self.emit(format("{}:", keep))
         self.emit("ret")
         self.emit("")
     }

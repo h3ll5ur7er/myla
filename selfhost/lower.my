@@ -4106,58 +4106,66 @@ pub fun walk_ir(cg: CodeGen, t: Type, retain: bool, name: str) -> IrFunc {
     // (the slot read afresh at each use: it lives in a register across the
     // calls, each read that register)
     let sp = lw.new_slot("p", Type.TPtr, 8, 0, false)
-    match t {
-        Type.TStruct(n, a) => {
-            let info = cg.struct_info(n)
-            let sub = cg.type_subst(info.type_params, a)
-            var cur = 0
-            for f in info.fields {
-                let ft = subst_type(f.ty, sub)
-                lw.walk_member(cg, lw.read_ptr(sp), cur, ft, retain)
-                cur = cur + cg.stored_size(ft)
-            }
-        },
-        Type.TTuple(es) => {
-            var cur = 0
-            for et in es {
-                lw.walk_member(cg, lw.read_ptr(sp), cur, et, retain)
-                cur = cur + cg.stored_size(et)
-            }
-        },
-        Type.TEnum(n, a) => {
-            let info = cg.enum_info(n)
-            let sub = cg.type_subst(info.type_params, a)
-            let i64 = Type.TInt(64, true)
-            let tag = lw.temp(i64)
-            lw.add(Inst.LoadAt(tag, lw.read_ptr(sp), 0, 8))
-            let done = lw.new_block()
-            var idx = 0
-            for v in info.variants {
-                if cg.variant_owns(v, sub) {
-                    let is_v = lw.temp(Type.TBool)
-                    lw.add(Inst.Cmp(is_v, "==", i64, tag, lw.konst(i64, idx as int64)))
-                    let this_v = lw.new_block()
-                    let next_v = lw.new_block()
-                    lw.finish(Term.Br(is_v, this_v, next_v))
-                    lw.start(this_v)
-                    var cur = 8
-                    for ft0 in v.payload {
-                        let ft = subst_type(ft0, sub)
-                        lw.walk_member(cg, lw.read_ptr(sp), cur, ft, retain)
-                        cur = cur + cg.stored_size(ft)
-                    }
-                    lw.finish(Term.Jmp(done))
-                    lw.start(next_v)
-                }
-                idx = idx + 1
-            }
-            lw.finish(Term.Jmp(done))
-            lw.start(done)
-        },
-        _ => {},
-    }
+    lw.walk_body(cg, sp, t, retain)
     lw.finish(Term.Ret(-1))
     return lw.f
+}
+
+impl Lower {
+    // A walk over the value of type `t` at the address the slot `sp` holds
+    // (see `walk_ir`), on in the block it ends at.
+    fun walk_body(var self, cg: CodeGen, sp: int32, t: Type, retain: bool) {
+        match t {
+            Type.TStruct(n, a) => {
+                let info = cg.struct_info(n)
+                let sub = cg.type_subst(info.type_params, a)
+                var cur = 0
+                for f in info.fields {
+                    let ft = subst_type(f.ty, sub)
+                    self.walk_member(cg, self.read_ptr(sp), cur, ft, retain)
+                    cur = cur + cg.stored_size(ft)
+                }
+            },
+            Type.TTuple(es) => {
+                var cur = 0
+                for et in es {
+                    self.walk_member(cg, self.read_ptr(sp), cur, et, retain)
+                    cur = cur + cg.stored_size(et)
+                }
+            },
+            Type.TEnum(n, a) => {
+                let info = cg.enum_info(n)
+                let sub = cg.type_subst(info.type_params, a)
+                let i64 = Type.TInt(64, true)
+                let tag = self.temp(i64)
+                self.add(Inst.LoadAt(tag, self.read_ptr(sp), 0, 8))
+                let done = self.new_block()
+                var idx = 0
+                for v in info.variants {
+                    if cg.variant_owns(v, sub) {
+                        let is_v = self.temp(Type.TBool)
+                        self.add(Inst.Cmp(is_v, "==", i64, tag, self.konst(i64, idx as int64)))
+                        let this_v = self.new_block()
+                        let next_v = self.new_block()
+                        self.finish(Term.Br(is_v, this_v, next_v))
+                        self.start(this_v)
+                        var cur = 8
+                        for ft0 in v.payload {
+                            let ft = subst_type(ft0, sub)
+                            self.walk_member(cg, self.read_ptr(sp), cur, ft, retain)
+                            cur = cur + cg.stored_size(ft)
+                        }
+                        self.finish(Term.Jmp(done))
+                        self.start(next_v)
+                    }
+                    idx = idx + 1
+                }
+                self.finish(Term.Jmp(done))
+                self.start(done)
+            },
+            _ => {},
+        }
+    }
 }
 
 impl Lower {
@@ -4176,6 +4184,188 @@ impl Lower {
             if retain { self.add(Inst.RetainVal(ft, v)) } else { self.add(Inst.DropVal(ft, v)) }
         } else if is_tfunc(ft) || cg.owns_heap(ft) {
             if retain { self.add(Inst.Retain(ft, self.offset(p, off))) } else { self.add(Inst.DropAt(ft, self.offset(p, off))) }
+        }
+    }
+}
+
+// A drop routine's entry: the cell's count down by one (`atomic`: an
+// actor's, which threads share, D92); at 0, its slow path `slow` in place of
+// it (a tail call), else nothing more. Its fast path makes no call, so it
+// sets up no frame.
+pub fun drop_entry_ir(name: str, slow: str, atomic: bool) -> IrFunc {
+    var lw = routine(name, None)
+    let sp = lw.new_slot("cell", Type.TInt(64, true), 8, 0, false)
+    let zero = lw.temp(Type.TBool)
+    var dec = "__rc_dec"
+    if atomic { dec = "__rc_dec_atomic" }
+    lw.add(Inst.Rt(zero, dec, [lw.read_cell(sp)]))
+    let gone = lw.new_block()
+    let kept = lw.new_block()
+    lw.finish(Term.Br(zero, gone, kept))
+    lw.start(gone)
+    lw.add(Inst.Call(-1, slow, [lw.read_cell(sp)]))
+    lw.finish(Term.Become)
+    lw.start(kept)
+    lw.finish(Term.Ret(-1))
+    return lw.f
+}
+
+// A boxed enum's (`walk`: its release walk) or an actor's (`actor`, its
+// fields as a struct's) cell whose count reached 0: what it holds released,
+// then the cell freed (`free`: std.rt's, or "" for the runtime's `__free`).
+pub fun dropb_slow_ir(cg: CodeGen, t: Type, walk: str, name: str, free: str) -> IrFunc {
+    var lw = routine(name, None)
+    let sp = lw.new_slot("cell", Type.TInt(64, true), 8, 0, false)
+    if walk != "" {
+        // the enum's release walk in place, no call to it
+        lw.walk_body(cg, sp, t, false)
+    } else {
+        lw.add(Inst.DropAt(t, lw.read_cell(sp)))
+    }
+    lw.free_cell(sp, free)
+    return lw.f
+}
+
+// A list's cell (elements of type `et`) whose count reached 0: each element
+// released, then the cell freed.
+pub fun list_drop_slow_ir(cg: CodeGen, et: Type, name: str, free: str) -> IrFunc {
+    var lw = routine(name, None)
+    let sp = lw.new_slot("cell", Type.TInt(64, true), 8, 0, false)
+    if cg.owns_heap(et) || cg.is_boxed(et) {
+        let stride = cg.stored_size(et)
+        let i64 = Type.TInt(64, true)
+        let si = lw.new_slot("i", i64, 8, -1, false)
+        let sn = lw.new_slot("n", i64, 8, -1, false)
+        lw.add(Inst.Store(si, lw.int_const(0)))
+        let n = lw.temp(i64)
+        lw.add(Inst.LoadAt(n, lw.read_cell(sp), 0, 8))
+        lw.add(Inst.Store(sn, n))
+        let body = lw.new_block()
+        let done = lw.new_block()
+        lw.count_test(si, sn, body, done)
+        lw.start(body)
+        // the element's address: cell + 16 + i * stride
+        let i = lw.temp(i64)
+        lw.add(Inst.Load(i, si))
+        let scaled = lw.temp(i64)
+        lw.add(Inst.Bin(scaled, "*", i64, i64, i, lw.int_const(stride), Pos { line: 0, col: 0 }))
+        let at = lw.temp(i64)
+        lw.add(Inst.Bin(at, "+", i64, i64, lw.read_cell(sp), scaled, Pos { line: 0, col: 0 }))
+        lw.drop_member(cg, at, 16, et)
+        let i2 = lw.temp(i64)
+        lw.add(Inst.Load(i2, si))
+        let i3 = lw.temp(i64)
+        lw.add(Inst.Bin(i3, "+", i64, i64, i2, lw.int_const(1), Pos { line: 0, col: 0 }))
+        lw.add(Inst.Store(si, i3))
+        lw.count_test(si, sn, body, done)
+        lw.start(done)
+    }
+    lw.free_cell(sp, free)
+    return lw.f
+}
+
+// A map's cell (`mt`) whose count reached 0: each occupied slot's key and
+// value released, then the cell freed.
+pub fun map_drop_slow_ir(cg: CodeGen, mt: Type, name: str, free: str) -> IrFunc {
+    var lw = routine(name, None)
+    let sp = lw.new_slot("cell", Type.TInt(64, true), 8, 0, false)
+    let kt = map_key(mt)
+    let vt = map_val(mt)
+    if cg.owns_heap(kt) || cg.owns_heap(vt) {
+        let ss = cg.map_slot_size(mt)
+        let i64 = Type.TInt(64, true)
+        let si = lw.new_slot("i", i64, 8, -1, false)
+        let sn = lw.new_slot("n", i64, 8, -1, false)
+        lw.add(Inst.Store(si, lw.int_const(0)))
+        let n = lw.temp(i64)
+        lw.add(Inst.LoadAt(n, lw.read_cell(sp), 8, 8))
+        lw.add(Inst.Store(sn, n))
+        let body = lw.new_block()
+        let next = lw.new_block()
+        let done = lw.new_block()
+        lw.count_test(si, sn, body, done)
+        lw.start(body)
+        let i = lw.temp(i64)
+        lw.add(Inst.Load(i, si))
+        let scaled = lw.temp(i64)
+        lw.add(Inst.Bin(scaled, "*", i64, i64, i, lw.int_const(ss), Pos { line: 0, col: 0 }))
+        let at = lw.temp(i64)
+        lw.add(Inst.Bin(at, "+", i64, i64, lw.read_cell(sp), scaled, Pos { line: 0, col: 0 }))
+        let state = lw.temp(i64)
+        lw.add(Inst.LoadAt(state, at, 16, 8))
+        let full = lw.temp(Type.TBool)
+        lw.add(Inst.Cmp(full, "==", i64, state, lw.int_const(1)))
+        let occupied = lw.new_block()
+        lw.finish(Term.Br(full, occupied, next))
+        lw.start(occupied)
+        if cg.owns_heap(kt) { lw.drop_member(cg, at, 24, kt) }
+        if cg.owns_heap(vt) {
+            // (the slot's address again: a key's drop is a call)
+            let i4 = lw.temp(i64)
+            lw.add(Inst.Load(i4, si))
+            let sc4 = lw.temp(i64)
+            lw.add(Inst.Bin(sc4, "*", i64, i64, i4, lw.int_const(ss), Pos { line: 0, col: 0 }))
+            let at4 = lw.temp(i64)
+            lw.add(Inst.Bin(at4, "+", i64, i64, lw.read_cell(sp), sc4, Pos { line: 0, col: 0 }))
+            lw.drop_member(cg, at4, 32, vt)
+        }
+        lw.finish(Term.Jmp(next))
+        lw.start(next)
+        let i2 = lw.temp(i64)
+        lw.add(Inst.Load(i2, si))
+        let i3 = lw.temp(i64)
+        lw.add(Inst.Bin(i3, "+", i64, i64, i2, lw.int_const(1), Pos { line: 0, col: 0 }))
+        lw.add(Inst.Store(si, i3))
+        lw.count_test(si, sn, body, done)
+        lw.start(done)
+    }
+    lw.free_cell(sp, free)
+    return lw.f
+}
+
+impl Lower {
+    // The cell the slot `sp` holds (as an integer), read into a new temporary.
+    fun read_cell(var self, sp: int32) -> int32 {
+        let t = self.temp(Type.TInt(64, true))
+        self.add(Inst.Load(t, sp))
+        return t
+    }
+
+    // The block ended with `i < n` (both slots): on to `yes` or `no`.
+    fun count_test(var self, si: int32, sn: int32, yes: int32, no: int32) {
+        let i64 = Type.TInt(64, true)
+        let i = self.temp(i64)
+        self.add(Inst.Load(i, si))
+        let n = self.temp(i64)
+        self.add(Inst.Load(n, sn))
+        let c = self.temp(Type.TBool)
+        self.add(Inst.Cmp(c, "<", i64, i, n))
+        self.finish(Term.Br(c, yes, no))
+    }
+
+    // The member of type `ft` at `off` from the address `at` released (a
+    // cell's or boxed value's drop routine, or what an inline value holds).
+    fun drop_member(var self, cg: CodeGen, at: int32, off: int32, ft: Type) {
+        if cg.is_boxed(ft) || is_cell_t(ft) {
+            let v = self.temp(ft)
+            self.add(Inst.LoadAt(v, at, off, 8))
+            self.add(Inst.DropVal(ft, v))
+        } else if is_tfunc(ft) || cg.owns_heap(ft) {
+            let p = self.temp(Type.TInt(64, true))
+            self.add(Inst.Bin(p, "+", Type.TInt(64, true), Type.TInt(64, true), at, self.int_const(off), Pos { line: 0, col: 0 }))
+            self.add(Inst.DropAt(ft, p))
+        }
+    }
+
+    // The cell in the slot `sp` freed in place of the routine (std.rt's
+    // `free`, a tail call), or by the runtime's `__free` (`free` "").
+    fun free_cell(var self, sp: int32, free: str) {
+        if free != "" {
+            self.add(Inst.Call(-1, free, [self.read_cell(sp)]))
+            self.finish(Term.Become)
+        } else {
+            self.add(Inst.Rt(-1, "__free", [self.read_cell(sp)]))
+            self.finish(Term.Ret(-1))
         }
     }
 }
