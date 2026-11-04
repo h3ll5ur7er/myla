@@ -183,7 +183,9 @@ pub fun cmd_build(file: str, output: str, opts: LoadOptions, debug: bool, target
     }
     if target == "wasm32-wasi" {
         assemble = ["clang", "--target=wasm32-wasi", "-mtail-call", "-mbulk-memory", "-mnontrapping-fptoint", "-msign-ext", "-c", "-o", obj_path, asm_path]
-        link = ["wasm-ld", "-z", "stack-size=8388608", "-o", output, obj_path]
+        // the stack below the data, so running out of it can't overwrite
+        // the data (MYLA-261)
+        link = ["wasm-ld", "--stack-first", "-z", "stack-size=8388608", "-o", output, obj_path]
     }
     if run_step("/usr/bin/env", assemble, "myla: assembler failed") {
         return 1

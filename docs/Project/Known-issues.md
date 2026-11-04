@@ -24,7 +24,7 @@ Retired by D101 ([[MYLA-219]]); its tasks stay in the `Python toolchain` epic.
 
 The targets are x86-64 and aarch64 Linux and wasm32 on WASI; macOS and Windows are planned ([[MYLA-62]]). What the two new backends showed ([[Project/Reflection-2026-11]]):
 
-- wasm32: the shadow stack lies above the static data, so a deep overflow of it would overwrite data instead of trapping; a trap under `run.mjs` prints `wasm trap: …` and exits 134 instead of `runtime error: stack overflow` and 1 ([[MYLA-261]]).
+- wasm32: the shadow stack lay above the static data, so a deep overflow of it overwrote data; a trap under `run.mjs` printed `wasm trap: …` and exited 134 ([[MYLA-261]]). *Fixed, in review.*
 - aarch64 and wasm32: a plain function used as a function value with a parameter passed by value stops the compiler (`__fnval` panics; [[MYLA-263]]), as does the lowering's `RtPair` fallback ([[MYLA-264]]).
 - A computed NaN's bits differ: `to_bits(0.0 / 0.0)` is 0xFFF8… on x86-64 and wasm on x86-64, 0x7FF8… on aarch64 ([[MYLA-266]]).
 - The runtime's lock-free protocols were argued from x86-64's memory order; on aarch64 they pass under qemu, which rarely reorders memory ([[MYLA-267]]). Unlocking is a plain store, which aarch64 hardware may reorder before a critical section's stores.

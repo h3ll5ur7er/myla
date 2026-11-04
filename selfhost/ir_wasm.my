@@ -96,7 +96,17 @@ impl CodeGen {
         }
         locals.append("i32, i32")
         self.emit(locals.build())
-        // the frame below the stack pointer
+        // the frame below the stack pointer; no room for it is a stack
+        // overflow (the stack lies below the data, `--stack-first`, so it
+        // can only run out at address 0; MYLA-261)
+        self.emit("global.get __stack_pointer")
+        self.emit(format("i32.const {}", size))
+        self.emit("i32.lt_u")
+        self.emit("if")
+        self.wasm_call("call", "__trap_stack", 0)
+        self.emit("drop")
+        self.emit("unreachable")
+        self.emit("end_if")
         self.emit("global.get __stack_pointer")
         self.emit(format("i32.const {}", size))
         self.emit("i32.sub")

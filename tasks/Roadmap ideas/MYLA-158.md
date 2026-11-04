@@ -42,7 +42,7 @@ Steps, each verified. The backend comes before D122's 4-byte layouts: the runtim
 
 ## Next, from the reflection (2026-11-04, [[Project/Reflection-2026-11]])
 
-- [ ] The shadow stack below the data and trap reports like native ones ([[MYLA-261]])
+- [x] The shadow stack below the data and trap reports like native ones ([[MYLA-261]])
 - [ ] A stackifier in place of the dispatch loop, measured against it (fib 1.9×, binary trees 2.7×, string building 2.4× the x86-64 build under Node, [[MYLA-270]])
 - [ ] The module written by Myla instead of clang and wasm-ld (D125 (2), [[MYLA-269]]), which a toolchain building wasm in the page needs
 - [ ] `play.wasm` smaller (about 2 MB today) for the website ([[MYLA-159]])
