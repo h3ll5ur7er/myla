@@ -1962,19 +1962,12 @@ impl Lower {
             },
             None => {},
         }
-        let head = self.new_block()
-        self.finish(Term.Jmp(head))
-        self.start(head)
-        let a = self.temp(loop_t)
-        self.add(Inst.Load(a, lv))
-        let b = self.temp(loop_t)
-        self.add(Inst.Load(b, fe))
-        let c = self.temp(Type.TBool)
-        self.add(Inst.Cmp(c, "<", loop_t, a, b))
+        // tested on the way in and after each step (MYLA-162: one jump a
+        // turn, back to the body)
         let body_b = self.new_block()
         let cont = self.new_block()
         let done = self.new_block()
-        self.finish(Term.Br(c, body_b, done))
+        self.range_test(lv, fe, loop_t, body_b, done)
         self.start(body_b)
         let depth = self.owners.len()
         self.open_scope()
@@ -1992,8 +1985,19 @@ impl Lower {
         let y = self.temp(loop_t)
         self.add(Inst.Bin(y, "+", loop_t, loop_t, x, one, Pos { line: 0, col: 0 }))
         self.add(Inst.Store(lv, y))
-        self.finish(Term.Jmp(head))
+        self.range_test(lv, fe, loop_t, body_b, done)
         self.start(done)
+    }
+
+    // A range loop's test, `lv < fe`, ending the block: on to `yes` or `no`.
+    fun range_test(var self, lv: int32, fe: int32, loop_t: Type, yes: int32, no: int32) {
+        let a = self.temp(loop_t)
+        self.add(Inst.Load(a, lv))
+        let b = self.temp(loop_t)
+        self.add(Inst.Load(b, fe))
+        let c = self.temp(Type.TBool)
+        self.add(Inst.Cmp(c, "<", loop_t, a, b))
+        self.finish(Term.Br(c, yes, no))
     }
 
     // `for v in xs { body }`: the loop holds a reference to the list (dropped
@@ -2028,22 +2032,16 @@ impl Lower {
         let zero = self.konst(Type.TInt(64, false), 0)
         self.add(Inst.Store(idx, zero))
         let elem = self.value_slot(cg, vn, et, false)
-        let head = self.new_block()
-        self.finish(Term.Jmp(head))
-        self.start(head)
+        // tested on the way in and after each step (MYLA-162)
+        let body_b = self.new_block()
+        let cont = self.new_block()
+        let done = self.new_block()
+        self.list_test(idx, held, lt, body_b, done)
+        self.start(body_b)
         let i = self.temp(Type.TInt(64, false))
         self.add(Inst.Load(i, idx))
         let cell = self.temp(lt)
         self.add(Inst.Load(cell, held))
-        let n = self.temp(Type.TInt(64, false))
-        self.add_load(n, cell, 0)
-        let c = self.temp(Type.TBool)
-        self.add(Inst.Cmp(c, "<", Type.TInt(64, false), i, n))
-        let body_b = self.new_block()
-        let cont = self.new_block()
-        let done = self.new_block()
-        self.finish(Term.Br(c, body_b, done))
-        self.start(body_b)
         let p = self.temp(Type.TPtr)
         self.add(Inst.Elem(p, cell, i, stride, false, Pos { line: 0, col: 0 }))
         self.mark_elem(p, stride)
@@ -2071,10 +2069,24 @@ impl Lower {
         let i3 = self.temp(Type.TInt(64, false))
         self.add(Inst.Bin(i3, "+", Type.TInt(64, false), Type.TInt(64, false), i2, one, Pos { line: 0, col: 0 }))
         self.add(Inst.Store(idx, i3))
-        self.finish(Term.Jmp(head))
+        self.list_test(idx, held, lt, body_b, done)
         self.start(done)
         self.drop_owners(self.owners.len() - 1)
         self.owners.pop()
+    }
+
+    // A list loop's test, the index in `idx` below the length of the list
+    // `held` holds, ending the block: on to `yes` or `no`.
+    fun list_test(var self, idx: int32, held: int32, lt: Type, yes: int32, no: int32) {
+        let i = self.temp(Type.TInt(64, false))
+        self.add(Inst.Load(i, idx))
+        let cell = self.temp(lt)
+        self.add(Inst.Load(cell, held))
+        let n = self.temp(Type.TInt(64, false))
+        self.add_load(n, cell, 0)
+        let c = self.temp(Type.TBool)
+        self.add(Inst.Cmp(c, "<", Type.TInt(64, false), i, n))
+        self.finish(Term.Br(c, yes, no))
     }
 
     // --- scalar expressions -----------------------------------------------------

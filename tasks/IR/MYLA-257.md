@@ -40,3 +40,5 @@ What a splitting that pays needs: the edges' moves in the cost (a piece's regist
 ## Loops tested at their end (2026-11-04, for MYLA-162)
 
 `while c { body }` (not `while true`) is lowered with its test on the way in and again at the end of each turn, where `continue` goes, branching back to the body: one jump a turn instead of a jump back to a test at the top and the test's branch out. The condition is lowered twice (evaluated once a turn as before). Benchmarks: 0.98% fewer instructions on the geometric mean (sieve 4.3%, mandelbrot 3.0%, fannkuch 1.9%, quicksort 1.8%, word frequencies 1.0%; string building 0.4% more); compiling the compiler 0.15% more (its conditions lowered twice).
+
+Then `for i in a..b` and `for x in xs` the same way (their test on the way in and after each step; a list loop's body reloads the index and the cell, which live in registers): benchmarks another 0.91% fewer on the geometric mean (closures 6.5%, sieve 1.4%, string building 0.7%), compiling the compiler 0.10% fewer.
