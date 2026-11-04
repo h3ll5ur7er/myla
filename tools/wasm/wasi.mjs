@@ -1,38 +1,52 @@
 // wasi.mjs — the WASI preview 1 calls a Myla program built for wasm32-wasi
-// makes (MYLA-158, D125), over Node's synchronous file system API.
+// makes (MYLA-158, D125), over a file system and standard streams given to
+// it: the host's (node_fs.mjs) or files in memory (mem_fs.mjs, for a page).
+// It imports nothing of Node's, so a browser runs it too.
 //
 // A shim of our own instead of `node:wasi`: Node 22's crashes (a
 // segmentation fault) when the program's memory grows between two calls,
-// and the page the website needs runs in a browser, which has no WASI at
-// all. Every call reads the memory afresh (it may have grown), works on
-// the descriptors it keeps, and gives WASI's errno.
+// and a browser has no WASI at all. Every call reads the memory afresh (it
+// may have grown) and gives WASI's errno.
 //
-// Descriptor 3 is the directory the program sees as `/` (`preopen`); the
-// program resolves its relative paths against `PWD` itself
+// Descriptor 3 is the directory the program sees as `/`; the program
+// resolves its relative paths against `PWD` itself
 // (lib/std/platform_wasm.my). A descriptor watched by `poll_oneoff` counts
-// as ready at once: Node can't wait for input without blocking, so a read
-// blocks the program as a blocking one would.
+// as ready at once (a host can't wait for input without blocking), so a
+// read blocks the program as a blocking one would.
+//
+// A file system gives: `open(path, {create, trunc, excl, dir})` a handle,
+// `read(handle, bytes)` and `write(handle, bytes)` how many, `close`,
+// `fstat(handle)` and `stat(path, follow)` `{type, size, ino, nlink,
+// mtimeNs}` (type 3 a directory, 4 a regular file, 7 a symbolic link),
+// `readdir(path)` `[{name, type}]`, `mkdir`, `rmdir`, `unlink`,
+// `rename(from, to)`; a failure throws an error whose `code` is an errno's
+// name (`ENOENT`, …). The streams: `stdin(bytes)` how many it read (0 at the
+// end), `stdout(bytes)`, `stderr(bytes)`.
 
-import fs from "node:fs";
-import path from "node:path";
-
-const ERRNO = {
+export const ERRNO = {
   E2BIG: 1, EACCES: 2, EAGAIN: 6, EBADF: 8, EEXIST: 20, EINTR: 27, EINVAL: 28, EIO: 29, EISDIR: 31,
   ENOENT: 44, ENOSYS: 52, ENOTDIR: 54, ENOTEMPTY: 55, ENOTSUP: 58, EPERM: 63, EPIPE: 64, ENOTCAPABLE: 76,
 };
 
-// A Node error's code as WASI's errno.
+// An error's code as WASI's errno.
 function errnoOf(e) {
   return ERRNO[e && e.code] ?? ERRNO.EIO;
 }
 
-// A WASI file type (3 a directory, 4 a regular file, 7 a symbolic link).
-function fileType(st) {
-  if (st.isDirectory()) return 3;
-  if (st.isFile()) return 4;
-  if (st.isSymbolicLink()) return 7;
-  if (st.isCharacterDevice()) return 2;
-  return 0;
+// An error with the errno name `code` (what a file system throws).
+export function fsError(code) {
+  return Object.assign(new Error(code), { code });
+}
+
+// `a` joined with the relative `b`, `.` and `..` resolved.
+export function joinPath(a, b) {
+  const parts = [];
+  for (const p of (b.startsWith("/") ? b : `${a}/${b}`).split("/")) {
+    if (p === "" || p === ".") continue;
+    if (p === "..") parts.pop();
+    else parts.push(p);
+  }
+  return "/" + parts.join("/");
 }
 
 export class ProcExit extends Error {
@@ -42,14 +56,29 @@ export class ProcExit extends Error {
   }
 }
 
+// The monotonic clock in nanoseconds.
+function monotonicNs() {
+  return BigInt(Math.round(globalThis.performance.now() * 1e6));
+}
+
+// The thread asleep for `ms` milliseconds (a busy wait where it may not
+// block, as on a page's main thread).
+function sleepMs(ms) {
+  try {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+  } catch {
+    const end = globalThis.performance.now() + ms;
+    while (globalThis.performance.now() < end) { /* waiting */ }
+  }
+}
+
 export class Wasi {
-  constructor({ args = [], env = {}, preopen = "/" } = {}) {
+  constructor({ args = [], env = {}, fs, stdin, stdout, stderr, root = "/" }) {
     this.args = args;
     this.env = Object.entries(env).map(([k, v]) => `${k}=${v}`);
-    this.fds = new Map([
-      [0, { node: 0 }], [1, { node: 1 }], [2, { node: 2 }],
-      [3, { dir: true, path: preopen }],
-    ]);
+    this.fs = fs;
+    this.stdio = [stdin, stdout, stderr];
+    this.fds = new Map([[0, { std: 0 }], [1, { std: 1 }], [2, { std: 2 }], [3, { dir: true, path: root }]]);
     this.next = 4;
     this.memory = null;
     this.enc = new TextEncoder();
@@ -58,13 +87,13 @@ export class Wasi {
 
   view() { return new DataView(this.memory.buffer); }
   bytes(p, n) { return new Uint8Array(this.memory.buffer, p, n); }
-  str(p, n) { return this.dec.decode(this.bytes(p, n)); }
+  str(p, n) { return this.dec.decode(this.bytes(p, n).slice()); }
 
-  // The host path of `p` (`len` bytes) under the directory descriptor `fd`.
+  // The path of `p` (`len` bytes) under the directory descriptor `fd`.
   resolve(fd, p, len) {
     const d = this.fds.get(fd);
-    if (!d || !d.dir) throw Object.assign(new Error("not a directory"), { code: "EBADF" });
-    return path.join(d.path, this.str(p, len));
+    if (!d || !d.dir) throw fsError("EBADF");
+    return joinPath(d.path, this.str(p, len));
   }
 
   // Each iovec of `iovs` (`n` of them): its address and length.
@@ -77,14 +106,15 @@ export class Wasi {
 
   writeStat(buf, st) {
     const v = this.view();
-    v.setBigUint64(buf, BigInt(st.dev), true);
-    v.setBigUint64(buf + 8, BigInt(st.ino), true);
-    v.setUint8(buf + 16, fileType(st));
-    v.setBigUint64(buf + 24, BigInt(st.nlink), true);
-    v.setBigUint64(buf + 32, BigInt(st.size), true);
-    v.setBigUint64(buf + 40, BigInt(Math.trunc(st.atimeMs * 1e6)), true);
-    v.setBigUint64(buf + 48, BigInt(Math.trunc(st.mtimeMs * 1e6)), true);
-    v.setBigUint64(buf + 56, BigInt(Math.trunc(st.ctimeMs * 1e6)), true);
+    v.setBigUint64(buf, 0n, true);
+    v.setBigUint64(buf + 8, BigInt(st.ino ?? 0), true);
+    v.setUint8(buf + 16, st.type);
+    v.setBigUint64(buf + 24, BigInt(st.nlink ?? 1), true);
+    v.setBigUint64(buf + 32, BigInt(st.size ?? 0), true);
+    const t = BigInt(st.mtimeNs ?? 0);
+    v.setBigUint64(buf + 40, t, true);
+    v.setBigUint64(buf + 48, t, true);
+    v.setBigUint64(buf + 56, t, true);
   }
 
   // A vector of NUL-terminated strings (`args_get`, `environ_get`).
@@ -105,7 +135,19 @@ export class Wasi {
     return 0;
   }
 
-  // Each call wrapped: a Node error becomes its errno.
+  // One read or write of the descriptor `fd` (a stream or an open file).
+  io(fd, write, u8) {
+    const d = this.fds.get(fd);
+    if (!d || d.dir) throw fsError("EBADF");
+    if (d.std !== undefined) {
+      const s = this.stdio[d.std];
+      if (write) { s(u8); return u8.length; }
+      return s(u8);
+    }
+    return write ? this.fs.write(d.handle, u8) : this.fs.read(d.handle, u8);
+  }
+
+  // Each call wrapped: a file system's error becomes its errno.
   guard(f) {
     return (...a) => {
       try {
@@ -126,45 +168,27 @@ export class Wasi {
         environ_sizes_get: g(function (c, s) { return this.sizes(this.env, c, s); }),
         environ_get: g(function (p, b) { return this.vector(this.env, p, b); }),
         clock_time_get: g(function (id, _precision, out) {
-          const t = id === 0 ? BigInt(Date.now()) * 1000000n : process.hrtime.bigint();
+          const t = id === 0 ? BigInt(Date.now()) * 1000000n : monotonicNs();
           this.view().setBigUint64(out, t, true);
           return 0;
         }),
         proc_exit: (code) => { throw new ProcExit(code); },
         fd_write: g(function (fd, iovs, n, nwritten) {
-          const d = this.fds.get(fd);
-          if (!d || d.dir) return ERRNO.EBADF;
           let total = 0;
           for (const [p, len] of this.iovecs(iovs, n)) {
             let off = 0;
-            while (off < len) {
-              try {
-                off += fs.writeSync(d.node, this.bytes(p + off, len - off));
-              } catch (e) {
-                if (e.code !== "EAGAIN") throw e;
-              }
-            }
+            while (off < len) off += this.io(fd, true, this.bytes(p + off, len - off).slice());
             total += len;
           }
           this.view().setUint32(nwritten, total, true);
           return 0;
         }),
         fd_read: g(function (fd, iovs, n, nread) {
-          const d = this.fds.get(fd);
-          if (!d || d.dir) return ERRNO.EBADF;
           let total = 0;
           for (const [p, len] of this.iovecs(iovs, n)) {
-            let got;
-            for (;;) {
-              try {
-                got = fs.readSync(d.node, this.bytes(p, len), 0, len, null);
-                break;
-              } catch (e) {
-                if (e.code === "EAGAIN") continue;
-                if (e.code === "EOF") { got = 0; break; }
-                throw e;
-              }
-            }
+            const tmp = new Uint8Array(len);
+            const got = this.io(fd, false, tmp);
+            this.bytes(p, got).set(tmp.subarray(0, got));
             total += got;
             if (got < len) break;
           }
@@ -174,62 +198,54 @@ export class Wasi {
         fd_close: g(function (fd) {
           const d = this.fds.get(fd);
           if (!d) return ERRNO.EBADF;
-          if (d.node !== undefined && fd > 2) fs.closeSync(d.node);
+          if (d.handle !== undefined) this.fs.close(d.handle);
           this.fds.delete(fd);
           return 0;
         }),
         fd_filestat_get: g(function (fd, buf) {
           const d = this.fds.get(fd);
           if (!d) return ERRNO.EBADF;
-          this.writeStat(buf, d.node !== undefined ? fs.fstatSync(d.node) : fs.statSync(d.path));
+          if (d.std !== undefined) this.writeStat(buf, { type: 2 });
+          else this.writeStat(buf, d.handle !== undefined ? this.fs.fstat(d.handle) : this.fs.stat(d.path, true));
           return 0;
         }),
         fd_fdstat_get: g(function (fd, buf) {
           const d = this.fds.get(fd);
           if (!d) return ERRNO.EBADF;
           this.bytes(buf, 24).fill(0);
-          this.view().setUint8(buf, d.dir ? 3 : 4);
+          this.view().setUint8(buf, d.dir ? 3 : d.std !== undefined ? 2 : 4);
           return 0;
         }),
         fd_readdir: g(function (fd, buf, len, cookie, used) {
           const d = this.fds.get(fd);
           if (!d || !d.dir) return ERRNO.EBADF;
-          if (!d.entries) {
-            d.entries = [".", ".."].map((name) => ({ name, type: 3 }))
-              .concat(fs.readdirSync(d.path, { withFileTypes: true })
-                .map((e) => ({ name: e.name, type: e.isDirectory() ? 3 : e.isFile() ? 4 : e.isSymbolicLink() ? 7 : 0 })));
-          }
+          if (!d.entries) d.entries = [{ name: ".", type: 3 }, { name: "..", type: 3 }, ...this.fs.readdir(d.path)];
           let at = 0;
-          for (let i = Number(cookie); i < d.entries.length; i++) {
+          for (let i = Number(cookie); i < d.entries.length && at < len; i++) {
             const name = this.enc.encode(d.entries[i].name);
             const rec = new Uint8Array(24 + name.length);
             const v = new DataView(rec.buffer);
             v.setBigUint64(0, BigInt(i + 1), true);
-            v.setBigUint64(8, 0n, true);
             v.setUint32(16, name.length, true);
             v.setUint8(20, d.entries[i].type);
             rec.set(name, 24);
             const n = Math.min(rec.length, len - at);
             this.bytes(buf + at, n).set(rec.subarray(0, n));
             at += n;
-            if (at === len) break;
           }
           this.view().setUint32(used, at, true);
           return 0;
         }),
         path_open: g(function (dirfd, _dirflags, p, len, oflags, _rights, _inherit, _fdflags, out) {
-          const host = this.resolve(dirfd, p, len);
+          const path = this.resolve(dirfd, p, len);
+          const want = { create: !!(oflags & 1), dir: !!(oflags & 2), excl: !!(oflags & 4), trunc: !!(oflags & 8) };
           let entry;
-          if (oflags & 2) {
-            if (!fs.statSync(host).isDirectory()) return ERRNO.ENOTDIR;
-            entry = { dir: true, path: host };
+          if (!want.create && this.fs.stat(path, true).type === 3) {
+            entry = { dir: true, path };
+          } else if (want.dir) {
+            return ERRNO.ENOTDIR;
           } else {
-            const flags = (oflags & 1) ? ((oflags & 4) ? "wx" : (oflags & 8) ? "w" : "a") : "r";
-            if (flags === "r" && fs.statSync(host).isDirectory()) {
-              entry = { dir: true, path: host };
-            } else {
-              entry = { node: fs.openSync(host, flags), path: host };
-            }
+            entry = { handle: this.fs.open(path, want), path };
           }
           const fd = this.next++;
           this.fds.set(fd, entry);
@@ -237,15 +253,14 @@ export class Wasi {
           return 0;
         }),
         path_filestat_get: g(function (dirfd, flags, p, len, buf) {
-          const host = this.resolve(dirfd, p, len);
-          this.writeStat(buf, (flags & 1) ? fs.statSync(host) : fs.lstatSync(host));
+          this.writeStat(buf, this.fs.stat(this.resolve(dirfd, p, len), !!(flags & 1)));
           return 0;
         }),
-        path_create_directory: g(function (dirfd, p, len) { fs.mkdirSync(this.resolve(dirfd, p, len)); return 0; }),
-        path_remove_directory: g(function (dirfd, p, len) { fs.rmdirSync(this.resolve(dirfd, p, len)); return 0; }),
-        path_unlink_file: g(function (dirfd, p, len) { fs.unlinkSync(this.resolve(dirfd, p, len)); return 0; }),
+        path_create_directory: g(function (dirfd, p, len) { this.fs.mkdir(this.resolve(dirfd, p, len)); return 0; }),
+        path_remove_directory: g(function (dirfd, p, len) { this.fs.rmdir(this.resolve(dirfd, p, len)); return 0; }),
+        path_unlink_file: g(function (dirfd, p, len) { this.fs.unlink(this.resolve(dirfd, p, len)); return 0; }),
         path_rename: g(function (fd1, p1, l1, fd2, p2, l2) {
-          fs.renameSync(this.resolve(fd1, p1, l1), this.resolve(fd2, p2, l2));
+          this.fs.rename(this.resolve(fd1, p1, l1), this.resolve(fd2, p2, l2));
           return 0;
         }),
         poll_oneoff: g(function (subs, events, n, count) {
@@ -266,7 +281,7 @@ export class Wasi {
           }
           if (ready.length === 0 && nearest !== null) {
             const ms = Number(nearest.ns / 1000000n);
-            if (ms > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+            if (ms > 0) sleepMs(ms);
             ready.push({ user: nearest.user, type: 0 });
           }
           ready.forEach((r, i) => {

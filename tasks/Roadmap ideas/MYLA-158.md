@@ -20,7 +20,7 @@ WebAssembly as a target ([[MYLA-62]], step 3), so Myla programs, and the self-ho
 
 - [x] The platform layer for wasm ([[MYLA-162]]): host imports for output, files and time
 - [x] The native parity programs give the same output under a wasm runtime
-- [ ] The self-hosted checker and interpreter run as wasm with an API a page can call
+- [x] The self-hosted checker and interpreter run as wasm with an API a page can call
 
 ## The plan (2026-11-04, D125 with D122)
 
@@ -37,4 +37,5 @@ Steps, each verified. The backend comes before D122's 4-byte layouts: the runtim
 
 - 2026-11-04, steps 1 to 4: `--target wasm32-wasi` in `gen_main` and `myla build`; [[lib/std/platform_wasm.my]] over WASI preview 1; [[selfhost/ir_wasm.my]] (locals, the dispatch loop, the shadow stack, `return_call`); [[selfhost/runtime_wasm.my]] (the start, the WASI dispatcher, the runtime's functions, tasks on one worker, the module put together for clang); [[tools/wasm/run.mjs]] with a WASI shim of our own ([[tools/wasm/wasi.mjs]]), Node 22's own WASI crashing when the memory grows. Evidence ([[tests/burn/test_wasm.py]], 15 tests): every example and test_aarch64's programs as their x86-64 builds; files and directories; the 23 stress programs on one worker in five orders; test_time's timers; the compiler built for wasm compiles the compiler under Node as the native one does, for either target, and reaches the fixed point.
 - D126 (2026-11-04): step 5, D122's 4-byte layouts, deferred to [[MYLA-260]]; wasm32 keeps 32-bit addresses on today's layouts.
-- Next: the checker and interpreter behind an API a page can call, with the shim in a browser.
+- 2026-11-04, the page API: [[selfhost/play_main.my]] (`check` as JSON, `run`, `test`) built for wasm, [[tools/wasm/myla.mjs]] (`loadMyla`, `check`, `run`, `test`, files in memory), the WASI shim's core free of Node (backends [[tools/wasm/node_fs.mjs]] and [[tools/wasm/mem_fs.mjs]]), [[tools/wasm/page.html]] and `scripts/build-page.sh`. Evidence ([[tests/burn/test_wasm.py]]): `check` gives `myla check`'s 226 errors of the error corpus (kind, message, position); `run` and `test` give what `myla run` and `myla test` give on every example; input, arguments, a module, written files; the page in Chromium runs its example, shows a type error, reports a runtime error with its source line and an endless recursion as a stack overflow.
+- Next ([[MYLA-159]], the website): running the interpreter in a Web Worker (a program that never ends), the editor; then a stackifier for speed, [[MYLA-260]] for memory.

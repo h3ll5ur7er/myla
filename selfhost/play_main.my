@@ -1,0 +1,124 @@
+// play_main.my -- the toolchain for a web page (MYLA-158): built for wasm32
+// on WASI and called by tools/wasm/myla.mjs, which gives it the page's
+// files in memory.
+//
+//     play check <file.my>            the diagnostics, as JSON, on stdout
+//     play run <file.my> [args...]    the program interpreted (`myla run`)
+//     play test <file.my>             its #test cases (`myla test`)
+//
+// `check` prints `[{"severity", "kind", "message", "path", "line", "col",
+// "endLine", "endCol", "notes": [{"label", "message", "line", "col"}]}, …]`:
+// the errors (as `myla check` reports them) and the checker's warnings, a
+// line and column 0 when there is no position, the end 0 when there is no
+// range; its exit status 1 when there is an error. `run` and `test` print
+// what `myla run` and `myla test` print.
+
+from std.process import args, exit
+from std.io import println, eprintln
+from .loader import load_program_opts, load_options, type_errors, warning_reports
+from .checker import build_checker_decls
+from .stdroot import default_stdlib_root
+from .diag import Report
+from .driver import cmd_interp
+
+fun main() {
+    let argv = args()
+    if argv.len() < 3 {
+        eprintln("usage: play check|run|test <file.my> [args...]")
+        exit(2)
+    }
+    let opts = load_options(default_stdlib_root())
+    let cmd = argv[1]
+    var rest: [str] = []
+    var i = 3
+    while i < argv.len() {
+        rest.push(argv[i])
+        i += 1
+    }
+    if cmd == "check" { exit(check_json(argv[2])) }
+    if cmd == "run" { exit(cmd_interp(argv[2], opts, false, rest)) }
+    if cmd == "test" { exit(cmd_interp(argv[2], opts, true, rest)) }
+    eprintln("play: unknown command '" + cmd + "'")
+    exit(2)
+}
+
+// `file` loaded and checked: its diagnostics as JSON on stdout; 1 when one
+// is an error.
+fun check_json(file: str) -> int32 {
+    var out: [str] = []
+    var failed = false
+    match load_program_opts(file, load_options(default_stdlib_root())) {
+        Err(r) => {
+            for j in report_json(r, "error") { out.push(j) }
+            failed = true
+        },
+        Ok(prog) => {
+            match build_checker_decls(prog.decls, prog.next_id) {
+                Ok(c) => { for w in warning_reports(prog, c.warnings) { for j in report_json(w, "warning") { out.push(j) } } },
+                Err(errs) => {
+                    for j in report_json(type_errors(prog, errs), "error") { out.push(j) }
+                    failed = true
+                },
+            }
+        },
+    }
+    var sb = StringBuilder()
+    sb.append("[")
+    var k = 0
+    while k < out.len() {
+        if k > 0 { sb.append(",") }
+        sb.append(out[k])
+        k += 1
+    }
+    sb.append("]")
+    println(sb.build())
+    if failed { return 1 }
+    return 0
+}
+
+// `r` and the reports after it (`more`) as JSON objects.
+fun report_json(r: Report, severity: str) -> [str] {
+    var out: [str] = []
+    var notes = StringBuilder()
+    notes.append("[")
+    var k = 0
+    while k < r.notes.len() {
+        let n = r.notes[k]
+        if k > 0 { notes.append(",") }
+        notes.append(format("{{\"label\":{},\"message\":{},\"line\":{},\"col\":{}}}", json_str(n.label), json_str(n.msg), n.line, n.col))
+        k += 1
+    }
+    notes.append("]")
+    out.push(format("{{\"severity\":{},\"kind\":{},\"message\":{},\"path\":{},\"line\":{},\"col\":{},\"endLine\":{},\"endCol\":{},\"notes\":{}}}",
+        json_str(severity), json_str(r.kind), json_str(r.msg), json_str(r.path), r.line, r.col, r.sp.eline, r.sp.ecol, notes.build()))
+    for m in r.more { for j in report_json(m, severity) { out.push(j) } }
+    return out
+}
+
+// `s` as a JSON string.
+#test("a\"b")["\"a\\\"b\""]
+#test("x\ny")["\"x\\ny\""]
+#test("\u{1}")["\"\\u0001\""]
+fun json_str(s: str) -> str {
+    var sb = StringBuilder()
+    sb.append("\"")
+    var i = 0
+    while i < s.len() {
+        let c = s[i]
+        if c == '"' { sb.append("\\\"") }
+        else if c == '\\' { sb.append("\\\\") }
+        else if c == '\n' { sb.append("\\n") }
+        else if c == '\t' { sb.append("\\t") }
+        else if c == '\r' { sb.append("\\r") }
+        else if c < 32u8 {
+            let hex = "0123456789abcdef"
+            sb.append("\\u00")
+            sb.append_byte(hex[(c >> 4) as int32])
+            sb.append_byte(hex[(c & 15u8) as int32])
+        }
+        else { sb.append_byte(c) }
+        i += 1
+    }
+    sb.append("\"")
+    return sb.build()
+}

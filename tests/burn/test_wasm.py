@@ -143,6 +143,151 @@ class WasmTasks(unittest.TestCase):
                     self.assertEqual((p.stdout, p.returncode), want, extra)
 
 
+@unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
+@unittest.skipUnless(HAVE_WASM, WASM_SKIP)
+class WasmPage(unittest.TestCase):
+    """The page API (tools/wasm/myla.mjs over selfhost/play_main.my built for
+    wasm, its files in memory) against the native CLI (`myla check`, `myla
+    run`, `myla test`)."""
+
+    @classmethod
+    def setUpClass(cls):
+        from ._tools import selfhost_tool
+        cls.myla = selfhost_tool("main")
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.play = os.path.join(cls.tmp.name, "play.wasm")
+        build_wasm("selfhost/play_main.my", cls.play)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def page(self, requests: list[dict]) -> list[dict]:
+        import json
+        path = os.path.join(self.tmp.name, "requests.json")
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(requests, fh)
+        p = subprocess.run(["node", "--stack-size=7000", os.path.join(_REPO, "tests", "burn", "data", "wasm_page.mjs"), self.play, path],
+                           capture_output=True, text=True, timeout=600)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        return json.loads(p.stdout)
+
+    def native(self, cmd: str, source: str, stdin: str = "", args: list[str] | None = None) -> tuple[str, str, int]:
+        # the CLI on the same file, as `main.my` in a directory of its own
+        with tempfile.TemporaryDirectory() as tmp:
+            with open(os.path.join(tmp, "main.my"), "w", encoding="utf-8") as fh:
+                fh.write(source)
+            p = subprocess.run([self.myla, cmd, "main.my"] + (args or []), capture_output=True, text=True, cwd=tmp,
+                               input=stdin, timeout=120)
+            return p.stdout, p.stderr, p.returncode
+
+    def test_check_reports_the_error_corpus(self):
+        # each file's errors: their kind, message and position, as `myla
+        # check` reports them
+        import re
+        files = []
+        for path in sorted(glob.glob(os.path.join(_REPO, "examples", "errors", "*.my"))):
+            with open(path, encoding="utf-8") as fh:
+                text = fh.read()
+            if "//~ runtime error" in text or "import " in text:
+                continue
+            files.append((os.path.basename(path), text))
+        got = self.page([{"op": "check", "files": text} for _, text in files])
+        head = re.compile(r"^((?:lex|parse|module|type) error): (.*)\n  --> main\.my:(\d+):(\d+)$", re.M)
+        for (name, text), res in zip(files, got):
+            with self.subTest(file=name):
+                out, err, code = self.native("check", text)
+                want = [(k, m, int(l), int(c)) for k, m, l, c in head.findall(err)]
+                errors = [d for d in res["diagnostics"] if d["severity"] == "error"]
+                self.assertEqual([(d["kind"], d["message"], d["line"], d["col"]) for d in errors], want)
+                self.assertEqual(res["ok"], code == 0)
+        self.assertGreater(len(files), 150)
+
+    def test_run_gives_what_the_interpreter_gives(self):
+        # every single-file example (but those reading input or files), and
+        # its #test cases
+        cases = []
+        for path in sorted(glob.glob(os.path.join(_REPO, "examples", "*.my"))):
+            with open(path, encoding="utf-8") as fh:
+                cases.append((os.path.basename(path), fh.read()))
+        got = self.page([{"op": "run", "files": t} for _, t in cases] + [{"op": "test", "files": t} for _, t in cases])
+        for i, (name, text) in enumerate(cases):
+            with self.subTest(example=name):
+                out, err, code = self.native("run", text)
+                self.assertEqual((got[i]["stdout"], got[i]["stderr"], got[i]["exitCode"]), (out, err, code))
+                out, err, code = self.native("test", text)
+                t = got[len(cases) + i]
+                self.assertEqual((t["stdout"], t["stderr"], t["exitCode"]), (out, err, code))
+
+    def test_input_arguments_modules_and_files(self):
+        echo = ("import std.io as io\nfrom std.process import args\nimport std.fs as fs\n\nfun main() {\n"
+                "    var r = io.stdin()\n    match r.read_line() { Ok(Some(l)) => { print(\"got \" + l) }, _ => { print(\"none\") } }\n"
+                "    for a in args() { print(a) }\n"
+                "    match fs.write_to_file(\"out/note.txt\", \"written\") { Ok(n) => { print(n) }, Err(e) => { print(\"no dir\") } }\n"
+                "    match fs.make_dir(\"out\") { Ok(n) => {}, Err(e) => { print(\"mkdir failed\") } }\n"
+                "    match fs.write_to_file(\"out/note.txt\", \"written\") { Ok(n) => { print(n) }, Err(e) => { print(\"write failed\") } }\n"
+                "    let xs = [1]\n    print(xs[3])\n}\n")
+        geo = {"main.my": "import geo\n\nfun main() {\n    print(geo.twice(21))\n}\n",
+               "geo.my": "pub fun twice(n: int) -> int {\n    return 2 * n\n}\n"}
+        got = self.page([{"op": "run", "files": echo, "stdin": "hello\nmore\n", "args": ["a", "b c"], "read": ["out/note.txt"]},
+                         {"op": "run", "files": geo}, {"op": "check", "files": geo}])
+        self.assertEqual((got[0]["stdout"], got[0]["exitCode"]), ("got hello\nmain.my\na\nb c\nno dir\n7\n", 1))
+        self.assertEqual(got[0]["stderr"], self.native("run", echo, "hello\nmore\n", ["a", "b c"])[1])
+        self.assertEqual(got[0]["read"], {"out/note.txt": "written"})
+        self.assertEqual((got[1]["stdout"], got[1]["exitCode"]), ("42\n", 0))
+        self.assertEqual(got[2], {"ok": True, "diagnostics": []})
+
+    def test_warnings_and_ranges(self):
+        # a warning comes with the errors' fields; an error's range
+        warn = "fun main() {\n    print(__clock_ns() > 0)\n}\n"
+        bad = "fun main() {\n    let x: int = \"a\"\n}\n"
+        got = self.page([{"op": "check", "files": warn}, {"op": "check", "files": bad}])
+        out, err, code = self.native("check", warn)
+        self.assertEqual(got[0]["ok"], True)
+        self.assertEqual([d["severity"] for d in got[0]["diagnostics"]], ["warning"] * err.count("warning:"))
+        self.assertEqual(err.count("warning:"), 1)
+        w = got[0]["diagnostics"][0]
+        self.assertEqual((w["line"], w["col"]), (2, 11))
+        self.assertIn("'__clock_ns' is a primitive", w["message"])
+        self.assertEqual([n["label"] for n in w["notes"]], ["help"])
+        d = got[1]["diagnostics"][0]
+        self.assertEqual((d["severity"], d["kind"], d["line"], d["col"], d["endLine"]), ("error", "type error", 2, 5, 2))
+        self.assertGreater(d["endCol"], d["col"])
+
+
+def _have_playwright() -> bool:
+    if not shutil.which("node"):
+        return False
+    p = subprocess.run(["node", "-e", "require('playwright')"], capture_output=True)
+    return p.returncode == 0
+
+
+@unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
+@unittest.skipUnless(HAVE_WASM, WASM_SKIP)
+@unittest.skipUnless(_have_playwright(), "the browser test needs Node's playwright with its Chromium")
+class WasmBrowser(unittest.TestCase):
+    def test_the_playground_page(self):
+        # tools/wasm/page.html in Chromium: its example run, a type error
+        # checked and shown, a runtime error and an endless recursion
+        # through the API, nothing logged as an error
+        import json
+        with tempfile.TemporaryDirectory() as tmp:
+            for f in ("page.html", "myla.mjs", "wasi.mjs", "mem_fs.mjs"):
+                shutil.copy(os.path.join(_REPO, "tools", "wasm", f), tmp)
+            build_wasm("selfhost/play_main.my", os.path.join(tmp, "play.wasm"))
+            p = subprocess.run(["node", os.path.join(_REPO, "tests", "burn", "data", "wasm_browser.js"), tmp],
+                               capture_output=True, text=True, timeout=300)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            got = json.loads(p.stdout)
+        self.assertEqual(got["run"], {"stdout": "0\n1\n1\n2\n3\n5\n8\n13\n21\n34\n", "exitCode": 0})
+        self.assertEqual(got["check"]["ok"], False)
+        self.assertEqual(got["shown"], "2:5 type error: cannot assign value of type 'str' to binding of type 'int32'")
+        self.assertEqual(got["more"]["a"][1], 1)
+        self.assertTrue(got["more"]["a"][0].startswith("runtime error: list index 2 out of bounds (len 1)\n  --> main.my:3:13\n"))
+        self.assertEqual(got["more"]["b"], ["runtime error: stack overflow\n", 1])
+        self.assertEqual(got["errors"], [])
+
+
 @unittest.skipUnless(HAVE_WASM, WASM_SKIP)
 class WasmTime(test_time.Time):
     """test_time's programs built for wasm and run under Node (through a
