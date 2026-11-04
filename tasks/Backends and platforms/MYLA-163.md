@@ -2,14 +2,14 @@
 id: MYLA-163
 title: "Target: Linux on aarch64"
 type: feature
-status: in-progress
+status: review
 priority: medium
 labels: [backend, platforms]
 ---
 The first new target of [[MYLA-62]], the closest to what exists (Linux system calls, no libc), after the runtime in Myla ([[MYLA-162]]): an aarch64 backend of Myla's own from the IR (D117), with [[selfhost/ir_x86.my]] as its template.
 
 - [x] The platform layer for Linux on aarch64 (its system call numbers and conventions, thread-local state, atomics): done
-- [ ] `myla build --target aarch64-linux`; the parity, stress and concurrency programs pass under qemu or on hardware, in CI if practical
+- [x] `myla build --target aarch64-linux`; the parity, stress and concurrency programs pass under qemu or on hardware, in CI if practical
 
 ## The plan (2026-11-04, the owner's choice of aarch64 first)
 
@@ -31,4 +31,4 @@ Steps, each verified:
 - 2026-11-04, tasks: frame functions (the frame in x28, `suspend`, `__new`), the executor's control transfers, `__task_fail`, worker threads (`clone`, the state block in `tpidr_el0`), the environments' deep copies, an actor's atomic count. Evidence: `examples/concurrency.my`, the 23 stress programs on 1, 4 and 16 workers (three runs each) and in the four other orders, and test_time's ten tests (timers, reads that suspend, child processes) pass under qemu ([[tests/burn/test_aarch64.py]]).
 - 2026-11-04, a float `%` exact on aarch64: std.rt's `fmod` (musl's algorithm on the bits; its `#test` cases are Python's `math.fmod`, among them `1e20 % 3.0` and `2^1000 % 0.1`, which `x - trunc(x / y) * y` gets wrong).
 - 2026-11-04, a stack overflow reported on aarch64 too (the 120 MiB limit, an alternate signal stack per thread, `__on_segv` with aarch64's sigcontext): on the main stack and on a worker's, once, under qemu ([[tests/burn/test_aarch64.py]]).
-- Left: `-g`; a run on aarch64 hardware (qemu on x86-64 keeps x86-64's memory order, so it can't show a missing barrier).
+- Left, outside this task: `-g` ([[MYLA-259]]); a run on aarch64 hardware (qemu on x86-64 keeps x86-64's memory order, so it can't show a missing barrier); a cancel race in std.rt that the qemu runs found was fixed for both targets (see the commit `MYLA-163: a cancel can no longer slip past a sleeper`).
