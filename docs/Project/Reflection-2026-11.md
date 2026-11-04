@@ -225,6 +225,7 @@ In this order, each a task:
 | [[MYLA-272]] | D119 against what the backends do (a decision) | medium |
 | [[MYLA-273]] | Mark the superseded parts of decisions (the owner's call) | low |
 | [[MYLA-274]] | A non-reentrant actor method kind (split off [[MYLA-171]]) | low |
+| [[MYLA-275]] | aarch64: a child-process wait on 4 workers ended once with "every task waits for another one" (found by this page's verification) | high (bug) |
 
 **Updated tasks:**
 - [[MYLA-160]] in review: the IR's open points (D120–D123, D126), the first backends and modularity ticked.
