@@ -1882,7 +1882,7 @@ impl CodeGen {
         // every program's (`__map_lookup`: `remove`'s, `emit_map_remove`)
         var out = [("__list_grow", "std$rt$list_grow"), ("__sb_append_bytes", "std$rt$sb_append_bytes"), ("__map_new", "std$rt$map_new"), ("__map_rebuild", "std$rt$map_rebuild"), ("__map_lookup", "std$rt$map_lookup")]
         if self.frames {
-            for p in [("__sched_init", "std$rt$sched_init"), ("__workers_count", "std$rt$workers_count"), ("__task_cancel", "std$rt$task_cancel"), ("__task_cancelled", "std$rt$task_cancelled"), ("__failed_wait", "std$rt$failed_wait"), ("__wait_stopped", "std$rt$wait_stopped"), ("__exec_push", "std$rt$exec_push"), ("__exec_yield_push", "std$rt$exec_yield_push"), ("__exec_find", "std$rt$exec_find"), ("__exec_peek", "std$rt$exec_peek"), ("__wake_waiters", "std$rt$wake_waiters"), ("__actor_leave", "std$rt$actor_leave"), ("__task_wait", "std$rt$task_wait"), ("__actor_enter_rt", "std$rt$actor_enter"), ("__exec_loop", "std$rt$exec_run")] { out.push(p) }
+            for p in [("__sched_init", "std$rt$sched_init"), ("__workers_count", "std$rt$workers_count"), ("__task_cancel", "std$rt$task_cancel"), ("__task_cancelled", "std$rt$task_cancelled"), ("__failed_wait", "std$rt$failed_wait"), ("__wait_stopped", "std$rt$wait_stopped"), ("__exec_push", "std$rt$exec_push"), ("__exec_yield_push", "std$rt$exec_yield_push"), ("__exec_find", "std$rt$exec_find"), ("__exec_peek", "std$rt$exec_peek"), ("__wake_waiters", "std$rt$wake_waiters"), ("__actor_leave", "std$rt$actor_leave"), ("__task_wait", "std$rt$task_wait"), ("__actor_enter_rt", "std$rt$actor_enter"), ("__exec_loop", "std$rt$exec_run"), ("__deep_str", "std$rt$deep_str"), ("__dclone_str", "std$rt$dclone_str"), ("__dclone_cell", "std$rt$dclone_cell")] { out.push(p) }
         }
         return out
     }
@@ -2198,88 +2198,27 @@ impl CodeGen {
         return name
     }
 
-    // `__deep_str` and `__deep_env`, the deep copies every program with tasks
-    // may need (D92).
+    // `__deep_env` and `__dclone_env`, the deep copies of a function value's
+    // environment every program with tasks may need (D92, MYLA-148); the
+    // strings' and a plain cell's are std.rt's (`rt_exec`, MYLA-162).
     fun emit_deep_runtime(var self) {
-        // a string: itself when unshared or static (its count never reaches
-        // zero), else a copy
-        self.raw("__deep_str:")
-        self.raw("\tmovq -8(%rdi), %rax")
-        self.raw("\tcmpq $1, %rax")
-        self.raw("\tje .Lds_same")
-        self.raw("\tmovabsq $2305843009213693952, %rcx")
-        self.raw("\tcmpq %rcx, %rax")
-        self.raw("\tjae .Lds_same")
-        self.raw("\tpushq %rbx")
-        self.raw("\tpushq %r12")
-        self.raw("\tmovq %rdi, %rbx")
-        self.raw("\tmovq -16(%rbx), %rdi")
-        self.raw("\tcall __alloc")
-        self.raw("\tmovq %rax, %r12")
-        self.raw("\tmovq %rbx, %rsi")
-        self.raw("\tmovq %r12, %rdi")
-        self.raw("\tmovq -16(%rbx), %rcx")
-        self.raw("\tcld")
-        self.raw("\trep movsb")
-        self.raw("\tdecq -8(%rbx)")
-        self.raw("\tmovq %r12, %rax")
-        self.raw("\tpopq %r12")
-        self.raw("\tpopq %rbx")
-        self.raw("\tret")
-        self.raw(".Lds_same:")
-        self.raw("\tmovq %rdi, %rax")
-        self.raw("\tret")
-        self.raw("")
-        // a function value's env: none; owning nothing (`__free` its drop),
-        // itself when unshared, else a copy; else the deep copy just before
-        // its drop function
+        // none; owning nothing (`__free` its drop): as a string, itself when
+        // unshared, else a copy; else the deep copy just before its drop
+        // function
         self.raw("__deep_env:")
         self.raw("\ttestq %rdi, %rdi")
         self.raw("\tjz .Lde_none")
         self.raw("\tmovq (%rdi), %rax")
         self.raw("\tleaq __free(%rip), %rcx")
         self.raw("\tcmpq %rcx, %rax")
-        self.raw("\tjne .Lde_owns")
-        self.raw("\tcmpq $1, -8(%rdi)")
-        self.raw("\tje .Lde_same")
-        self.raw("\tpushq %rbx")
-        self.raw("\tpushq %r12")
-        self.raw("\tmovq %rdi, %rbx")
-        self.raw("\tmovq -16(%rbx), %rdi")
-        self.raw("\tcall __alloc")
-        self.raw("\tmovq %rax, %r12")
-        self.raw("\tmovq %rbx, %rsi")
-        self.raw("\tmovq %r12, %rdi")
-        self.raw("\tmovq -16(%rbx), %rcx")
-        self.raw("\tcld")
-        self.raw("\trep movsb")
-        self.raw("\tdecq -8(%rbx)")
-        self.raw("\tmovq %r12, %rax")
-        self.raw("\tpopq %r12")
-        self.raw("\tpopq %rbx")
-        self.raw("\tret")
-        self.raw(".Lde_owns:")
+        self.raw("\tje __deep_str")
         self.raw("\tjmp *-8(%rax)")
-        self.raw(".Lde_same:")
-        self.raw("\tmovq %rdi, %rax")
-        self.raw("\tret")
         self.raw(".Lde_none:")
         self.raw("\txorl %eax, %eax")
         self.raw("\tret")
         self.raw("")
-        // the clones (MYLA-148), only reading the original: a string (a
-        // static one shared), a function value's env (owning nothing: a
-        // copy; else the clone two words before its drop function)
-        self.raw("__dclone_str:")
-        self.raw("\tmovq -8(%rdi), %rax")
-        self.raw("\tmovabsq $2305843009213693952, %rcx")
-        self.raw("\tcmpq %rcx, %rax")
-        self.raw("\tjae .Ldcs_same")
-        self.raw("\tjmp __dclone_cell")
-        self.raw(".Ldcs_same:")
-        self.raw("\tmovq %rdi, %rax")
-        self.raw("\tret")
-        self.raw("")
+        // its clone, only reading the original: owning nothing, a copy; else
+        // the clone two words before its drop function
         self.raw("__dclone_env:")
         self.raw("\ttestq %rdi, %rdi")
         self.raw("\tjz .Ldce_none")
@@ -2290,24 +2229,6 @@ impl CodeGen {
         self.raw("\tjmp *-16(%rax)")
         self.raw(".Ldce_none:")
         self.raw("\txorl %eax, %eax")
-        self.raw("\tret")
-        self.raw("")
-        // a cell copied word for word: %rdi -> %rax
-        self.raw("__dclone_cell:")
-        self.raw("\tpushq %rbx")
-        self.raw("\tpushq %r12")
-        self.raw("\tmovq %rdi, %rbx")
-        self.raw("\tmovq -16(%rbx), %rdi")
-        self.raw("\tcall __alloc")
-        self.raw("\tmovq %rax, %r12")
-        self.raw("\tmovq %rbx, %rsi")
-        self.raw("\tmovq %r12, %rdi")
-        self.raw("\tmovq -16(%rbx), %rcx")
-        self.raw("\tcld")
-        self.raw("\trep movsb")
-        self.raw("\tmovq %r12, %rax")
-        self.raw("\tpopq %r12")
-        self.raw("\tpopq %rbx")
         self.raw("\tret")
         self.raw("")
     }

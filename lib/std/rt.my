@@ -1729,6 +1729,42 @@ pub fun list_grow(cell: int64, stride: int64) -> int64 {
     return p
 }
 
+// --- deep copies between tasks (D92, MYLA-148) ---------------------------------------
+// A value crossing to another task shares no count with the original: the
+// per-type deep copies built by the code generator end at these, for the
+// cells that own nothing. A cell's size is the word 16 bytes before it, its
+// count the word 8 before; a static string's count starts at 2^61 and never
+// reaches zero.
+
+// `__deep_str`: the string (or another cell owning nothing) itself when it
+// is unshared or static, else a copy, the original's count down (first: it
+// stays above zero, and the copy is a tail call).
+pub fun deep_str(cell: int64) -> int64 {
+    let rc = __load64(cell - 8)
+    if rc == 1 || rc >= 2305843009213693952 {
+        return cell
+    }
+    __store64(cell - 8, rc - 1)
+    return dclone_cell(cell)
+}
+
+// `__dclone_str`: a copy of the string, others holding the original (whose
+// count stays); a static one shared.
+pub fun dclone_str(cell: int64) -> int64 {
+    if __load64(cell - 8) >= 2305843009213693952 {
+        return cell
+    }
+    return dclone_cell(cell)
+}
+
+// `__dclone_cell`: a copy of the cell, word for word.
+pub fun dclone_cell(cell: int64) -> int64 {
+    let size = __load64(cell - 16)
+    let copy = __alloc(size)
+    __copy_bytes(copy, cell, size)
+    return copy
+}
+
 // --- floats as text ----------------------------------------------------------------
 // A float is printed with `digits` significant digits (17 for a float64, 9
 // for a float32), the shortest of them that keep its value, as the
