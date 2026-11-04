@@ -15,7 +15,7 @@ from std.io import write, eprintln
 from .checker import build_checker_decls
 from .codegen import new_codegen
 from .dwarf import read_gdb_script
-from .loader import load_program_opts, load_options, parse_package_flag, Loaded, type_errors
+from .loader import load_program_opts, load_options, for_target, parse_package_flag, Loaded, type_errors
 from .stdroot import default_stdlib_root
 from .diag import render
 
@@ -30,14 +30,16 @@ from .diag import render
 // (`--ssa`; `--ssa-stats` also reports what that did on stderr, and with
 // `--emit-ir` the text shows the promoted functions). `no_inline`: no
 // small function copied into its callers (`--no-inline`, for the tests of
-// one function's code).
-struct Mode { debug: bool, emit_ir: bool, frames: bool, ssa: bool, ssa_stats: bool, no_inline: bool }
+// one function's code). `target`: `x86_64-linux` (the default) or
+// `aarch64-linux` (`--target`, MYLA-163).
+struct Mode { debug: bool, emit_ir: bool, frames: bool, ssa: bool, ssa_stats: bool, no_inline: bool, target: str }
 
 fun emit_asm(prog: Loaded, mode: Mode, stdlib_root: str) -> int32 {
     return match build_checker_decls(prog.decls, prog.next_id) {
         Ok(c) => {
             var g = new_codegen(c)
             if mode.frames { g.frames = true }
+            if mode.target == "aarch64-linux" { g.a64 = true }
             g.set_sources(prog.spans, prog.next_id)
             if mode.debug { g.enable_debug_info(read_gdb_script(stdlib_root)) }
             if mode.emit_ir { g.keep_ir_text() }
@@ -62,12 +64,12 @@ fun emit_asm(prog: Loaded, mode: Mode, stdlib_root: str) -> int32 {
 fun main() {
     let argv = args()
     if argv.len() < 2 {
-        eprintln("usage: gen_main <file.my> [stdlib_root] [-g] [--emit-ir] [--no-inline] [--ssa | --ssa-stats] [--package name=dir]... [--root dir]")
+        eprintln("usage: gen_main <file.my> [stdlib_root] [-g] [--emit-ir] [--no-inline] [--ssa | --ssa-stats] [--target x86_64-linux|aarch64-linux] [--package name=dir]... [--root dir]")
         exit(2)
     }
     var opts = load_options(default_stdlib_root())
     opts.runtime = true
-    var mode = Mode { debug: false, emit_ir: false, frames: false, ssa: false, ssa_stats: false, no_inline: false }
+    var mode = Mode { debug: false, emit_ir: false, frames: false, ssa: false, ssa_stats: false, no_inline: false, target: "x86_64-linux" }
     var j = 2
     while j < argv.len() {
         if argv[j] == "-g" {
@@ -92,6 +94,13 @@ fun main() {
                 },
             }
             j = j + 1
+        } else if argv[j] == "--target" && j + 1 < argv.len() {
+            mode.target = argv[j + 1]
+            if mode.target != "x86_64-linux" && mode.target != "aarch64-linux" {
+                eprintln(format("gen_main: unknown target '{}' (x86_64-linux, aarch64-linux)", mode.target))
+                exit(2)
+            }
+            j = j + 1
         } else if argv[j] == "--root" && j + 1 < argv.len() {
             opts.root = argv[j + 1]
             j = j + 1
@@ -100,7 +109,11 @@ fun main() {
         }
         j = j + 1
     }
-    match load_program_opts(argv[1], opts) {
+    if mode.debug && mode.target == "aarch64-linux" {
+        eprintln("gen_main: -g is not supported for aarch64-linux yet")
+        exit(2)
+    }
+    match load_program_opts(argv[1], for_target(opts, mode.target)) {
         Ok(prog) => {
             let code = emit_asm(prog, mode, opts.stdlib_root)
             exit(code)

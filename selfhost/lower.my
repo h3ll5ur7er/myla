@@ -3391,8 +3391,11 @@ impl Lower {
         return d
     }
 
-    // `remove(m, k)`: the map made unique (copies keep the entry), then the
-    // key; see `emit_map_remove`.
+    // `remove(m, k)`: the map made unique (copies keep the entry), the
+    // key's entry found; when there is one, it becomes a tombstone, its key
+    // and value are released and the table is rebuilt without it (the keys
+    // after it in the order of insertion moved up, D105), stored back into
+    // the holder.
     #test(lower_on(), codegen_on("enum E { A, B(int) }"), expr_of("(a, 'c')"), expr_of("(a, 'c')"))[0]
     fun map_remove(var self, cg: CodeGen, m: Expr, k: Expr) -> int32 {
         let mt = self.place_type(cg, m)
@@ -3401,7 +3404,40 @@ impl Lower {
         let cell = self.temp(mt)
         self.add(Inst.Cow(cell, mt, h))
         let key = self.expr(cg, k)
-        self.add(Inst.MapRemove(mt, h, cell, key))
+        let slot = self.map_lookup(cg, mt, cell, key)
+        let i64 = Type.TInt(64, true)
+        let found = self.temp(Type.TBool)
+        self.add(Inst.Cmp(found, "!=", Type.TPtr, slot, self.konst(Type.TPtr, 0)))
+        let yes = self.new_block()
+        let done = self.new_block()
+        self.finish(Term.Br(found, yes, done))
+        self.start(yes)
+        self.add(Inst.StoreAt(slot, 0, self.konst(i64, 2), 8))
+        let n = self.temp(i64)
+        self.add(Inst.LoadAt(n, cell, 0, 8))
+        let n1 = self.temp(i64)
+        self.add(Inst.Bin(n1, "-", i64, i64, n, self.konst(i64, 1), Pos { line: 0, col: 0 }))
+        self.add(Inst.StoreAt(cell, 0, n1, 8))
+        let ss = cg.map_slot_size(mt)
+        let rank = self.temp(i64)
+        self.add(Inst.LoadAt(rank, slot, ss - 8, 8))
+        for kv in [(8, map_key(mt)), (16, map_val(mt))] {
+            let ft = kv.1
+            if cg.is_boxed(ft) || is_cell_t(ft) {
+                let v = self.temp(ft)
+                self.add(Inst.LoadAt(v, slot, kv.0, 8))
+                self.add(Inst.DropVal(ft, v))
+            } else if is_tfunc(ft) || cg.owns_heap(ft) {
+                self.add(Inst.DropAt(ft, self.offset(slot, kv.0)))
+            }
+        }
+        let c2 = self.temp(i64)
+        self.add(Inst.LoadAt(c2, h, 0, 8))
+        let rebuilt = self.temp(i64)
+        self.rt_call(cg, rebuilt, "__map_rebuild", [c2, self.int_const(ss), rank, self.int_const(cg.map_is_str(mt))])
+        self.add(Inst.StoreAt(h, 0, rebuilt, 8))
+        self.finish(Term.Jmp(done))
+        self.start(done)
         return -1
     }
 

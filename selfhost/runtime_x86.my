@@ -690,8 +690,12 @@ impl CodeGen {
         self.raw("\tleave")
         self.raw("\tjmp *%rcx")
         self.raw("")
-        // its env's routines as IR (MYLA-162): those of an environment
-        // that owns two function values
+        self.emit_compose_env_drop()
+    }
+
+    // __compose_env_drop and its env's routines as IR (MYLA-162): those of
+    // an environment that owns two function values
+    fun emit_compose_env_drop(var self) {
         let fv = Type.TFunc([Type.TInt(64, true)], Some(Type.TInt(64, true)))
         let owned = [DropEntry { off: 8, ty: fv }, DropEntry { off: 24, ty: fv }]
         self.emit_env_drop("__compose", owned)

@@ -1,0 +1,255 @@
+// runtime_a64.my -- the runtime's aarch64 Linux assembly (MYLA-163, D117).
+//
+// What `runtime_x86.my` gives for x86-64, for aarch64: the program's start,
+// the traps and the panic, the system-call and memory primitives, the
+// function values' counts, composition and std.math's primitives. Not yet:
+// tasks (the executor's control transfers, the threads, the deep copies of
+// environments) and the stack-overflow handler.
+//
+// The hand-written routines keep to what the code `ir_a64.my` makes
+// assumes: they may change x0 to x17 and the flags, and keep x19 to x29
+// and sp.
+
+from .codegen import CodeGen, trap_labels
+from .lower import drop_entry_ir
+
+impl CodeGen {
+    fun emit_runtime_prelude_a64(var self, entry_name: str) {
+        if self.frames { panic("internal error: aarch64: tasks (not yet, MYLA-163)") }
+        // the kernel's stack: argc, the arguments, 0, the environment, 0
+        for line in [
+            "\t.global _start",
+            "\t.p2align 2",
+            "_start:",
+            "\tldr x0, [sp]",
+            "\tadrp x1, __argc",
+            "\tstr x0, [x1, :lo12:__argc]",
+            "\tadd x2, sp, #8",
+            "\tadrp x1, __argv",
+            "\tstr x2, [x1, :lo12:__argv]",
+            "\tadd x2, x2, x0, lsl #3",
+            "\tadd x2, x2, #8",
+            "\tadrp x1, __envp",
+            "\tstr x2, [x1, :lo12:__envp]",
+            format("\tbl myla_{}", entry_name),
+            // exit_group(0)
+            "\tmov x0, #0",
+            "\tmov x8, #94",
+            "\tsvc #0",
+            "",
+            // no task but the first: nothing is ever cancelled (D96)
+            "__task_cancelled:",
+            "\tmov x0, #0",
+            "\tret",
+            "",
+        ] { self.raw(line) }
+        // Runtime errors (MYLA-17): the message in x0, the position record
+        // the caller passes in x1 (out of memory has none)
+        for label in trap_labels() {
+            self.raw(format("{}:", label))
+            if label == "__trap_oom" { self.raw("\tmov x1, #0") }
+            self.raw(format("\tadrp x0, .Lmsg{}", label))
+            self.raw(format("\tadd x0, x0, :lo12:.Lmsg{}", label))
+            self.raw("\tb __panic")
+        }
+        self.raw("")
+        for line in [
+            // __panic(x0 the message, x1 the position record or 0): std.rt
+            // reports it (`panic_report`)
+            "__panic:",
+            "\tb __panic_report",
+            "",
+            // __str_eq(a, b): the same string, or equal lengths and bytes
+            "__str_eq:",
+            "\tcmp x0, x1",
+            "\tb.eq .Lse_eq",
+            "\tldr x2, [x0], #8",
+            "\tldr x3, [x1], #8",
+            "\tcmp x2, x3",
+            "\tb.ne .Lse_ne",
+            "\tb __equal_bytes",
+            ".Lse_eq:",
+            "\tmov x0, #1",
+            "\tret",
+            ".Lse_ne:",
+            "\tmov x0, #0",
+            "\tret",
+            "",
+            // __syscall(n, a, b, c): the number in x8, the arguments in x0
+            // to x2 (x3 0); the result, a negative errno on a failure
+            "__syscall:",
+            "\tmov x8, x0",
+            "\tmov x0, x1",
+            "\tmov x1, x2",
+            "\tmov x2, x3",
+            "\tmov x3, #0",
+            "\tsvc #0",
+            "\tret",
+            "",
+            // __syscall5(n, a, b, c, d, e): five arguments, the sixth 0
+            "__syscall5:",
+            "\tmov x8, x0",
+            "\tmov x0, x1",
+            "\tmov x1, x2",
+            "\tmov x2, x3",
+            "\tmov x3, x4",
+            "\tmov x4, x5",
+            "\tmov x5, #0",
+            "\tsvc #0",
+            "\tret",
+            "",
+            "__set_io_errno:",
+            "\tadrp x1, __io_errno_val",
+            "\tstr x0, [x1, :lo12:__io_errno_val]",
+            "\tret",
+            "",
+            "__set_run_status:",
+            "\tadrp x3, __run_exit_val",
+            "\tstr w0, [x3, :lo12:__run_exit_val]",
+            "\tadrp x3, __run_signal_val",
+            "\tstr w1, [x3, :lo12:__run_signal_val]",
+            "\tadrp x3, __run_errno_val",
+            "\tstr w2, [x3, :lo12:__run_errno_val]",
+            "\tret",
+            "",
+            "__set_run_stderr:",
+            "\tldur x1, [x0, #-8]",
+            "\tadd x1, x1, #1",
+            "\tstur x1, [x0, #-8]",
+            "\tadrp x1, __run_stderr_val",
+            "\tstr x0, [x1, :lo12:__run_stderr_val]",
+            "\tret",
+            "",
+            "__argv_of:",
+            "\tadrp x0, __argv",
+            "\tldr x0, [x0, :lo12:__argv]",
+            "\tret",
+            "",
+            "__environ:",
+            "\tadrp x0, __envp",
+            "\tldr x0, [x0, :lo12:__envp]",
+            "\tret",
+            "",
+            // __copy_bytes(dst, src, n): sixteen bytes at a time, then eight,
+            // then one
+            "__copy_bytes:",
+            ".Lcb_pairs:",
+            "\tcmp x2, #16",
+            "\tb.lo .Lcb_word",
+            "\tldp x3, x4, [x1], #16",
+            "\tstp x3, x4, [x0], #16",
+            "\tsub x2, x2, #16",
+            "\tb .Lcb_pairs",
+            ".Lcb_word:",
+            "\tcmp x2, #8",
+            "\tb.lo .Lcb_bytes",
+            "\tldr x3, [x1], #8",
+            "\tstr x3, [x0], #8",
+            "\tsub x2, x2, #8",
+            ".Lcb_bytes:",
+            "\tcbz x2, .Lcb_done",
+            "\tldrb w3, [x1], #1",
+            "\tstrb w3, [x0], #1",
+            "\tsub x2, x2, #1",
+            "\tb .Lcb_bytes",
+            ".Lcb_done:",
+            "\tret",
+            "",
+            // __equal_bytes(p, q, n): whether n bytes at p and q are equal
+            "__equal_bytes:",
+            ".Leb_words:",
+            "\tcmp x2, #8",
+            "\tb.lo .Leb_bytes",
+            "\tldr x3, [x0], #8",
+            "\tldr x4, [x1], #8",
+            "\tcmp x3, x4",
+            "\tb.ne .Leb_no",
+            "\tsub x2, x2, #8",
+            "\tb .Leb_words",
+            ".Leb_bytes:",
+            "\tcbz x2, .Leb_yes",
+            "\tldrb w3, [x0], #1",
+            "\tldrb w4, [x1], #1",
+            "\tcmp w3, w4",
+            "\tb.ne .Leb_no",
+            "\tsub x2, x2, #1",
+            "\tb .Leb_bytes",
+            ".Leb_yes:",
+            "\tmov x0, #1",
+            "\tret",
+            ".Leb_no:",
+            "\tmov x0, #0",
+            "\tret",
+            "",
+        ] { self.raw(line) }
+        // __str_drop, as IR with std.rt's allocator (MYLA-162)
+        self.emit_routine(drop_entry_ir("__str_drop", self.rt_alloc_names().1, false), -1, 0, 0)
+        self.raw("\t.set __str_drop, myla___str_drop")
+        for p in self.rt_exec() {
+            self.raw(format("\t.set {}, myla_{}", p.0, p.1))
+        }
+        self.raw("\t.set __print_str, myla_std$rt$print_str")
+        let names = self.rt_alloc_names()
+        self.raw(format("\t.set __alloc, myla_{}", names.0))
+        self.raw(format("\t.set __free, myla_{}", names.1))
+        self.raw("")
+        for line in [
+            "__func_retain:",
+            "\tcbz x0, .Lfret_done",
+            "\tldur x1, [x0, #-8]",
+            "\tadd x1, x1, #1",
+            "\tstur x1, [x0, #-8]",
+            ".Lfret_done:",
+            "\tret",
+            "",
+            // at a count of zero, a jump to the env's drop function (word 0)
+            "__func_drop:",
+            "\tcbz x0, .Lfdrop_done",
+            "\tldur x1, [x0, #-8]",
+            "\tsubs x1, x1, #1",
+            "\tstur x1, [x0, #-8]",
+            "\tb.ne .Lfdrop_done",
+            "\tldr x1, [x0]",
+            "\tbr x1",
+            ".Lfdrop_done:",
+            "\tret",
+            "",
+            // __compose_call(x), its env in x9 holding two function values,
+            // a (env[8], env[16]) and b (env[24], env[32]): b(a(x)), b by a
+            // jump in place of it
+            "__compose_call:",
+            "\tstp x29, x30, [sp, #-32]!",
+            "\tmov x29, sp",
+            "\tstr x19, [sp, #16]",
+            "\tmov x19, x9",
+            "\tldr x9, [x19, #16]",
+            "\tldr x15, [x19, #8]",
+            "\tblr x15",
+            "\tldr x9, [x19, #32]",
+            "\tldr x15, [x19, #24]",
+            "\tldr x19, [sp, #16]",
+            "\tldp x29, x30, [sp], #32",
+            "\tbr x15",
+            "",
+            // std.math's primitives (MYLA-248), a float64 as its bits
+            "__sqrt:",
+            "\tfmov d0, x0",
+            "\tfsqrt d0, d0",
+            "\tfmov x0, d0",
+            "\tret",
+            "__f64_bits:",
+            "__f64_from_bits:",
+            "\tret",
+            "",
+        ] { self.raw(line) }
+        self.emit_compose_env_drop()
+        self.emit_derived_eq()
+    }
+}
+
+// __fmod(d0, d1) -> d0, a float `%`: x - trunc(x / y) * y. Not exact when
+// the quotient is large (an exact one in std.rt is to replace it, MYLA-163).
+#test()["\n__fmod:\n\tfdiv d2, d0, d1\n\tfrintz d2, d2\n\tfmsub d0, d2, d1, d0\n\tret"]
+pub fun fmod_text_a64() -> str {
+    return "\n__fmod:\n\tfdiv d2, d0, d1\n\tfrintz d2, d2\n\tfmsub d0, d2, d1, d0\n\tret"
+}

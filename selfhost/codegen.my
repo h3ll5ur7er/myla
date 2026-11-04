@@ -24,6 +24,8 @@ from .lower import lower_function, lower_lambda, blocked_types, Lowered, myla_ru
 import .ir_x86 as ir_x86
 import .ownership as ownership
 import .runtime_x86 as runtime_x86
+import .ir_a64 as ir_a64
+import .runtime_a64 as runtime_a64
 from .dwarf import uleb, sleb, bytes_line, exprloc, str_pieces, dw_string, dw_ref, abbrev_section, gdb_scripts_section, AB_CU, AB_BASE, AB_SUBPROGRAM, AB_TYPED_SUBPROGRAM, AB_PARAM, AB_VAR, AB_BLOCK, AB_PTR, AB_VOIDPTR, AB_STRUCT, AB_MEMBER, AB_ARRAY, AB_SUBRANGE, AB_VARIANT_PART, AB_VARIANT, AB_TAG, OP_FBREG, OP_BREG15, OP_DEREF, OP_PLUS_UCONST, OP_STACK_VALUE, OP_PUSH_OBJECT_ADDRESS, OP_LIT0, OP_MINUS, OP_REG6, OP_GNU_DEREF_TYPE, OP_GNU_CONVERT, ATE_BOOLEAN, ATE_FLOAT, ATE_SIGNED, ATE_UNSIGNED, ATE_UTF, LANG_RUST
 from .parser import expr_of, stmt_of, type_expr_of, block_of, pattern_of, fun_of  // AST values for #test cases (MYLA-184)
 
@@ -231,6 +233,7 @@ pub struct CodeGen {
     handed: [str: [int32]],
     passed_on: [str: [int32]],
     tag_enums: [str: bool],         // MYLA-133: the enums whose `==` compares tags only
+    a64: bool,                      // MYLA-163: the target is aarch64 Linux (`ir_a64.my`), else x86-64
 }
 
 // A code generator for `src` (checked alone, `checker_on`), the receiver of
@@ -312,7 +315,7 @@ pub fun new_codegen(c: Checker) -> CodeGen {
         dbg_fn_end: "", dbg_mark: "", dbg_n: 0, dbg_script: "",
         keep_ir: false, wants_ftoa: false, inlining: true, inl_names: [], inl_bodies: [], inl_no: [:], ssa: false, ssa_stats: no_ssa_stats(), ir_texts: [], ir_blocked: [], ir_ready: false,
         pend_store: "", pend_temp: -1, temp_uses: [], temp_remat: [], temp_src: [], temp_imm: [], temp_frame: [], temp_mem: [], temp_off: [],
-        temp_reg: [], slot_reg: [], saved_regs: [], in_frame: false, resume_blocks: [], frames: c.task_line > 0, norm: compiler_norm(), save_base: 0, arg_words: 0, frameless: false, kept_params: [:], keeping: [:], scan_kept: [], scan_args: [], owning: [:], no_owned: [], handed: handed, passed_on: passed_on, tag_enums: [:],
+        temp_reg: [], slot_reg: [], saved_regs: [], in_frame: false, resume_blocks: [], frames: c.task_line > 0, norm: compiler_norm(), save_base: 0, arg_words: 0, frameless: false, kept_params: [:], keeping: [:], scan_kept: [], scan_args: [], owning: [:], no_owned: [], handed: handed, passed_on: passed_on, tag_enums: [:], a64: false,
     }
 }
 
@@ -367,6 +370,12 @@ impl CodeGen {
             self.emit(format("movq $0, %{}", reg))
             return
         }
+        self.emit(format("leaq {}(%rip), %{}", self.position_label(line, col), reg))
+    }
+
+    // The label of the record of position `line:col` in the current file,
+    // made the first time (shared by the backends).
+    fun position_label(var self, line: int32, col: int32) -> str {
         let key = format("{}:{}:{}", self.cur_path, line, col)
         var lab = ""
         match get(self.pos_labels, key) {
@@ -381,7 +390,7 @@ impl CodeGen {
                 self.posdata.push(format("\t.long {}, {}", line, col))
             },
         }
-        self.emit(format("leaq {}(%rip), %{}", lab, reg))
+        return lab
     }
 
     // Take the runtime-error entry `trap` when `jump` (`jae`, `jz`, ..., or
@@ -1675,13 +1684,6 @@ impl CodeGen {
         else if self.owns_heap(t) { self.owned_walk(base, off, t, true) }
     }
 
-    // Release every heap reference an inline value of `t` at `off(base)` holds.
-    fun drop_value(var self, base: str, off: int32, t: Type) {
-        if is_cell_t(t) { self.drop_box(off, base, t) }
-        else if is_tfunc(t) { self.drop_box(off + 8, base, t) }
-        else if self.owns_heap(t) { self.owned_walk(base, off, t, false) }
-    }
-
     // A struct/enum is laid out per its concrete type arguments: generic type
     // parameters are substituted so a generic container instantiated with an
     // inline aggregate (e.g. `Option<TypeExpr>`) reserves the real payload size,
@@ -1881,7 +1883,7 @@ impl CodeGen {
     // (MYLA-162): a list's growth, and with tasks the executor's; each the
     // name the rest of the runtime calls and the function standing for it.
     fun rt_exec(self) -> [(str, str)] {
-        // every program's (`__map_lookup`: `remove`'s, `emit_map_remove`)
+        // every program's (`__map_lookup`: `remove`'s too)
         var out = [("__panic_report", "std$rt$panic_report"), ("__list_grow", "std$rt$list_grow"), ("__sb_append_bytes", "std$rt$sb_append_bytes"), ("__map_new", "std$rt$map_new"), ("__map_rebuild", "std$rt$map_rebuild"), ("__map_lookup", "std$rt$map_lookup")]
         if self.frames {
             for p in [("__sched_init", "std$rt$sched_init"), ("__workers_count", "std$rt$workers_count"), ("__task_cancel", "std$rt$task_cancel"), ("__task_cancelled", "std$rt$task_cancelled"), ("__failed_wait", "std$rt$failed_wait"), ("__wait_stopped", "std$rt$wait_stopped"), ("__exec_push", "std$rt$exec_push"), ("__exec_yield_push", "std$rt$exec_yield_push"), ("__exec_find", "std$rt$exec_find"), ("__exec_peek", "std$rt$exec_peek"), ("__wake_waiters", "std$rt$wake_waiters"), ("__actor_leave", "std$rt$actor_leave"), ("__task_wait", "std$rt$task_wait"), ("__actor_enter_rt", "std$rt$actor_enter"), ("__exec_loop", "std$rt$exec_run"), ("__deep_str", "std$rt$deep_str"), ("__dclone_str", "std$rt$dclone_str"), ("__dclone_cell", "std$rt$dclone_cell"), ("__panic_report_tasks", "std$rt$panic_report_tasks"), ("myla___sleep", "std$rt$sleep_frame"), ("__cancel_after", "std$rt$cancel_after"), ("__task_end", "std$rt$task_end"), ("myla___wait_fd", "std$rt$wait_fd"), ("myla___wait_fd2", "std$rt$wait_fd2")] { out.push(p) }
@@ -1891,7 +1893,7 @@ impl CodeGen {
 
     fun generate(var self) -> str {
         let en = self.entry_name()
-        self.emit_runtime_prelude(en)
+        if self.a64 { self.emit_runtime_prelude_a64(en) } else { self.emit_runtime_prelude(en) }
         // Start from the entry point: every function is emitted once a function
         // emitted calls it, makes it a value or applies it partially (MYLA-108;
         // `take_ir`); generic ones stamped out per instance (D13).
@@ -1929,10 +1931,16 @@ impl CodeGen {
                 draining = true
             }
         }
-        for pj in self.partial_jobs { self.gen_partial_function(pj) }
-        for n in self.fnval_set { self.emit_fnval_thunk(n) }
+        for pj in self.partial_jobs {
+            if self.a64 { self.gen_partial_function_a64(pj) } else { self.gen_partial_function(pj) }
+        }
+        for n in self.fnval_set {
+            if self.a64 { self.emit_fnval_thunk_a64(n) } else { self.emit_fnval_thunk(n) }
+        }
         self.emit_drop_helpers()
-        if self.uses_float { self.raw(self.fmod_text()) }
+        if self.uses_float {
+            if self.a64 { self.raw(runtime_a64.fmod_text_a64()) } else { self.raw(self.fmod_text()) }
+        }
         if self.fn_seen.contains("std$rt$float_to_str") { self.raw("\t.set __float_to_str, myla_std$rt$float_to_str") }
         return self.assemble_source()
     }
@@ -2797,24 +2805,6 @@ impl CodeGen {
     // see a half-made slot. The new value is also taken before the old one is
     // released, so `xs[i] = xs[i]` is safe.
 
-    // Release the value of type `t` stored at %rcx (preserved). The walk keeps
-    // the address in callee-saved %rbx across the drop calls.
-    fun drop_stored(var self, t: Type, inline: bool) {
-        if self.owns_heap(t) {
-            self.emit("pushq %rbx")
-            self.emit("movq %rcx, %rbx")
-            self.release("rbx", 0, t, inline)
-            self.emit("movq %rbx, %rcx")
-            self.emit("popq %rbx")
-        }
-    }
-
-    // Release the value of type `t` at `off(%base)`: stored as a member (a boxed
-    // enum as its pointer) or, with `inline`, as a variable holds it.
-    fun release(var self, base: str, off: int32, t: Type, inline: bool) {
-        if inline { self.drop_value(base, off, t) } else { self.walk_member(base, off, t, false) }
-    }
-
     // -- maps / strings / chars -------------------------------------------
 
     #test(codegen_on("[int]"), Type.TMap(Type.TStr, Type.TInt(32, true)))[32]
@@ -2825,43 +2815,6 @@ impl CodeGen {
     fun map_is_str(self, mt: Type) -> int32 {
         if is_str_t(map_key(mt)) { return 1 }
         return 0
-    }
-
-    // The rest of `remove`: the key in %rsi, the unique cell and below it the
-    // map's holder on the stack (both popped); removes the key's entry,
-    // releases its key and value, rebuilds the table and stores it back
-    // (shared with the IR backend, MYLA-105).
-    fun emit_map_remove(var self, mt: Type) {
-        self.emit("movq (%rsp), %rdi")
-        self.emit(format("movq ${}, %rdx", self.map_slot_size(mt)))
-        self.emit(format("movq ${}, %rcx", self.map_is_str(mt)))
-        self.emit("call __map_lookup")
-        self.emit("popq %rdx")               // cell
-        let done = self.label()
-        self.emit("testq %rax, %rax")
-        self.emit(format("jz {}", done))
-        self.emit("movq $2, (%rax)")         // tombstone
-        self.emit("decq (%rdx)")             // len -= 1
-        // its rank, for the rebuild to close the gap (D105, MYLA-179)
-        self.emit(format("pushq {}(%rax)", self.map_slot_size(mt) - 8))
-        if is_str_t(map_key(mt)) {           // the key's reference (MYLA-18)
-            self.emit("pushq %rax")
-            self.emit("movq 8(%rax), %rdi")
-            self.emit("call __str_drop")
-            self.emit("popq %rax")
-        }
-        self.emit("leaq 16(%rax), %rcx")     // &value
-        self.drop_stored(map_val(mt), false)
-        self.emit("movq 8(%rsp), %rax")      // &holder
-        self.emit("movq (%rax), %rdi")
-        self.emit(format("movq ${}, %rsi", self.map_slot_size(mt)))
-        self.emit(format("movq ${}, %rcx", self.map_is_str(mt)))
-        self.emit("popq %rdx")               // the removed key's rank
-        self.emit("call __map_rebuild")
-        self.emit("movq (%rsp), %rcx")
-        self.emit("movq %rax, (%rcx)")       // publish the rebuilt cell
-        self.emit(format("{}:", done))
-        self.emit("addq $8, %rsp")           // &holder
     }
 
     // -- strings: format + StringBuilder ----------------------------------

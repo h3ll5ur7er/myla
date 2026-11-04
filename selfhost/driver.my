@@ -12,7 +12,7 @@
 from std.process import run, Output, ExitStatus, SpawnError
 from std.io import write, eprintln
 from std.fs import write_to_file, remove_file
-from .loader import load_program_opts, LoadOptions, file_of, Loaded, type_errors, warning_reports
+from .loader import load_program_opts, LoadOptions, for_target, file_of, Loaded, type_errors, warning_reports
 from .diag import render, Report
 from .checker import build_checker_decls, Checker, CheckErr
 from .codegen import new_codegen
@@ -50,14 +50,18 @@ pub fun load_and_check(file: str, opts: LoadOptions) -> Result<Checked, str> {
     }
 }
 
-// Type-check `file`, then generate its x86-64 assembly (`debug`: with DWARF
+// Type-check `file`, then generate its assembly for `target` (`debug`: with DWARF
 // debug information, MYLA-71, MYLA-66; `ir`: lowering functions to the IR
 // first, MYLA-103).
-fun compile_asm(file: str, opts: LoadOptions, debug: bool) -> Result<str, str> {
-    var native = opts
+fun compile_asm(file: str, opts: LoadOptions, debug: bool, target: str) -> Result<str, str> {
+    var native = for_target(opts, target)
     native.runtime = true
     let ch = load_and_check(file, native)?
     var g = new_codegen(ch.checker)
+    if target == "aarch64-linux" {
+        if debug { return Err("myla: -g is not supported for aarch64-linux yet") }
+        g.a64 = true
+    }
     g.set_sources(ch.prog.spans, ch.prog.next_id)
     if debug { g.enable_debug_info(read_gdb_script(opts.stdlib_root)) }
     return Ok(g.generate())
@@ -152,8 +156,10 @@ fun removed(path: str) -> bool {
     }
 }
 
-pub fun cmd_build(file: str, output: str, opts: LoadOptions, debug: bool) -> int32 {
-    let asm = match compile_asm(file, opts, debug) {
+// `target`: x86_64-linux (GNU as and ld) or aarch64-linux (clang and
+// ld.lld, MYLA-163).
+pub fun cmd_build(file: str, output: str, opts: LoadOptions, debug: bool, target: str) -> int32 {
+    let asm = match compile_asm(file, opts, debug, target) {
         Ok(a) => a,
         Err(e) => {
             eprintln(e)
@@ -169,10 +175,16 @@ pub fun cmd_build(file: str, output: str, opts: LoadOptions, debug: bool) -> int
             return 1
         },
     }
-    if run_step("/usr/bin/env", ["as", "--64", "-o", obj_path, asm_path], "myla: assembler failed") {
+    var assemble = ["as", "--64", "-o", obj_path, asm_path]
+    var link = ["ld", "-o", output, obj_path]
+    if target == "aarch64-linux" {
+        assemble = ["clang", "--target=aarch64-linux-gnu", "-c", "-o", obj_path, asm_path]
+        link = ["ld.lld", "-static", "-o", output, obj_path]
+    }
+    if run_step("/usr/bin/env", assemble, "myla: assembler failed") {
         return 1
     }
-    if run_step("/usr/bin/env", ["ld", "-o", output, obj_path], "myla: linker failed") {
+    if run_step("/usr/bin/env", link, "myla: linker failed") {
         return 1
     }
     // the assembly and object file were only steps (MYLA-35)
