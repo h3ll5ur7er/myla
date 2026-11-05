@@ -8,7 +8,7 @@
 // implementing the prelude's `Format` gets the spec's text as it is, and
 // `pad` gives it fill, alignment and width.
 
-from std.num import format_fixed
+from .num import format_fixed
 
 // A spec: `fill` one character; `align` 0 (the type's default), '<', '>' or
 // '^'; `plus` a sign on numbers that are not negative; `alt` the prefix of a
