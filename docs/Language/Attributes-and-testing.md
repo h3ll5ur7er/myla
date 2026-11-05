@@ -105,4 +105,6 @@ The position is that of the expression that fails: an index's `[`, a call's `(` 
 | Missing map key (`m[k]`) | `map key 'b' not found` | `map key not found` |
 | `pop` on an empty list | `pop from an empty list` | the same |
 | `assert`, `panic`, `unreachable` | the message | the same |
+| An integer `as char` that isn't a Unicode scalar value (a surrogate, above U+10FFFF) | `invalid char: 55296 is not a Unicode scalar value` | `invalid char` |
+| Running out of the stack | `stack overflow` (no position) | the same (no position; on every target, [[Language/Targets]], [[MYLA-261]]) |
 | Heap arena exhausted | — | `out of memory` (no position) |

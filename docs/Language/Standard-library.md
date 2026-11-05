@@ -1,6 +1,6 @@
 # Standard library
 
-Myla has built-in functions known to the checker, and a small standard library written in Myla under [[lib/std/io.my|lib/std/]]. Both work without libc: natively they rest on the platform layer `std.platform`, raw Linux system calls on x86-64 and aarch64 and WASI's imports on wasm32 ([[Architecture/Native-backend]]), and so does the interpreter, which is a native program itself. What a target lacks shows as an error of its own, `Unsupported` (D129, D132): on wasm32 `run` and `spawn` fail with `SpawnError.Unsupported`, as there are no processes; how targets differ is to be specified ([[MYLA-266]]).
+Myla has built-in functions known to the checker, and a small standard library written in Myla under [[lib/std/io.my|lib/std/]]. Both work without libc: natively they rest on the platform layer `std.platform`, raw Linux system calls on x86-64 and aarch64 and WASI's imports on wasm32 ([[Architecture/Native-backend]]), and so does the interpreter, which is a native program itself. What a target lacks shows as an error of its own, `Unsupported` (D129, D132): on wasm32 `run` and `spawn` fail with `SpawnError.Unsupported`, as there are no processes. What each target can do (processes, suspending input, the file system it sees, the working directory) is on [[Language/Targets]].
 
 [TOC]
 

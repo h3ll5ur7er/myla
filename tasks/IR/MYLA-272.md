@@ -14,7 +14,7 @@ Found by [[Project/Reflection-2026-11]]. D119 says Myla's own functions use each
 - **The checker:** `become`'s limit is a fixed six words (`checker.my`), x86-64's count. AAPCS64 has eight and Win64 four.
 
 The choice for the owner:
-- [ ] Either Myla keeps one internal convention per target, with the platform's C convention only at C boundaries ([[MYLA-166]], [[MYLA-241]]); or the backends move to D119 as written, and `myla_env` becomes a parameter on wasm. Recorded as a decision changing or confirming D119.
+- [x] Either Myla keeps one internal convention per target, with the platform's C convention only at C boundaries ([[MYLA-166]], [[MYLA-241]]); or the backends move to D119 as written, and `myla_env` becomes a parameter on wasm. Recorded as a decision changing or confirming D119.
 
 Then:
 - [x] The backends and the checker's rule as decided

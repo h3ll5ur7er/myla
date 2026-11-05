@@ -2,7 +2,7 @@
 id: MYLA-266
 title: "Targets and capabilities in the language's specification"
 type: chore
-status: backlog
+status: review
 priority: high
 labels: [language, docs, platforms, design]
 ---
@@ -25,17 +25,17 @@ Found by [[Project/Reflection-2026-11]]. The language and standard-library pages
 - Stack overflow has no row in the runtime-error table.
 
 Decisions for the owner first:
-- [ ] **NaNs:** canonical (every computed NaN made `0x7FF8000000000000` where its bits can be seen), or a computed NaN's sign and payload unspecified
-- [ ] **Errors programs see:** `IoError` and `SpawnError` as causes (D113), including "unsupported", instead of raw errno numbers
-- [ ] **`become`'s word limit:** one number for every target, or per target
-- [ ] **Capabilities:** how a program learns what its target can do (code per target, [[MYLA-245]]; a query; errors only), and the minimum stack depth a program may rely on
+- [x] **NaNs:** (D128) canonical (every computed NaN made `0x7FF8000000000000` where its bits can be seen), or a computed NaN's sign and payload unspecified
+- [x] **Errors programs see:** (D129) `IoError` and `SpawnError` as causes (D113), including "unsupported", instead of raw errno numbers
+- [x] **`become`'s word limit:** (D131) one number for every target, or per target
+- [x] **Capabilities:** (D132) how a program learns what its target can do (code per target, [[MYLA-245]]; a query; errors only), and the minimum stack depth a program may rely on
 
 Then the pages:
 - [x] A page [[Language/Targets]] (2026-11-05): each target's capabilities (processes, workers, suspending input, file modes and links, paths and the working directory, exit codes, stack depth, memory, how traps are reported)
-- [ ] [[Language/Expressions-and-operators]]: `MIN / -1` and `MIN % -1` (done with the reflection); NaNs once decided
-- [ ] [[Language/Attributes-and-testing]]: stack overflow and an invalid `as char` in the runtime-error table
-- [ ] [[Language/Statements]]: `become`'s rule stated in the language's terms
-- [ ] [[Language/Standard-library]] and [[Language/Concurrency]]: what differs per target
+- [x] [[Language/Expressions-and-operators]]: `MIN / -1` and `MIN % -1` (done with the reflection); NaNs (D128, the float arithmetic paragraph)
+- [x] [[Language/Attributes-and-testing]]: stack overflow and an invalid `as char` in the runtime-error table
+- [x] [[Language/Statements]]: `become`'s rule stated in the language's terms (words, on every target, D131)
+- [x] [[Language/Standard-library]] and [[Language/Concurrency]]: what differs per target (both point at [[Language/Targets]])
 
 ## Decided (2026-11-05)
 
