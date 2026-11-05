@@ -1,0 +1,11 @@
+//~ type error: the 'else' of a let-else must leave the block
+//~ span: {
+// A let-else binds its pattern's names for the rest of the block, so its
+// `else` must not fall through into it (D137).
+fun main() {
+    let o = Some(1)
+    let Some(v) = o else {
+        print(0)
+    }
+    print(v)
+}

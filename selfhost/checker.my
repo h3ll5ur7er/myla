@@ -12,7 +12,7 @@
 // collected, up to MAX_ERRORS: the same errors in the same order as types.py
 // (MYLA-65, D80).
 
-from .parser import parse_source, Parsed, expr_of, stmt_of, type_expr_of, block_of, pattern_of, fun_of
+from .parser import parse_source, Parsed, expr_of, stmt_of, type_expr_of, block_of, pattern_of, fun_of, is_let_else_marker
 from .ast import int_text
 from .ast import Program, Decl, DeclKind, FunData, Param, TypeParam, Field, Variant
 from .ast import Attribute, TypeExpr, TypeKind, Expr, ExprKind, FieldInit, MapEntry
@@ -1350,7 +1350,7 @@ fun is_diverging(e: Expr) -> bool {
 fun stmt_returns(s: Stmt) -> bool {
     return match s.kind {
         StmtKind.ReturnS(v, tail) => true,
-        StmtKind.ExprStmt(e) => is_diverging(e),
+        StmtKind.ExprStmt(e) => is_diverging(e) || match_returns(e),
         StmtKind.IfS(cond, then, otherwise) => {
             if !block_returns(then) { return false }
             match otherwise {
@@ -1359,6 +1359,50 @@ fun stmt_returns(s: Stmt) -> bool {
             }
         },
         _ => false,
+    }
+}
+
+// Whether `e` is a match whose every arm returns (or diverges): a function
+// may end with one, as with a let-else (D137).
+#test(expr_of("match o { Some(v) => 1, None => 2 }"))[false]
+fun match_returns(e: Expr) -> bool {
+    match e.kind {
+        ExprKind.MatchE(value, arms) => {
+            for arm in arms {
+                let ok = match arm.body { ExprOrBlock.EB_Block(b) => block_returns(b), ExprOrBlock.EB_Expr(x) => is_diverging(x) }
+                if !ok { return false }
+            }
+            return arms.len() > 0
+        },
+        _ => {},
+    }
+    return false
+}
+
+// Whether running `b` always leaves it: a `return`, `become`, `break` or
+// `continue` at its level, a call that never returns, or an `if` (or match)
+// whose every branch leaves (a let-else's `else`, D137). A `break` inside a
+// loop in `b` leaves that loop, not `b`, so loops are not looked into.
+#test(block_of("{ }"))[false]
+fun block_leaves(b: Block) -> bool {
+    for st in b.stmts { if stmt_leaves(st) { return true } }
+    return false
+}
+
+#test(stmt_of("break"))[true]
+#test(stmt_of("x = 1"))[false]
+fun stmt_leaves(st: Stmt) -> bool {
+    return match st.kind {
+        StmtKind.BreakS => true,
+        StmtKind.ContinueS => true,
+        StmtKind.IfS(cond, then, otherwise) => {
+            if !block_leaves(then) { return false }
+            match otherwise {
+                Some(et) => match et { ElseTail.ElseBlock(b) => block_leaves(b), ElseTail.ElseIf(s2) => stmt_leaves(s2) },
+                None => false,
+            }
+        },
+        _ => stmt_returns(st),
     }
 }
 
@@ -3335,6 +3379,13 @@ impl Checker {
         match self.check_redundant(arms, st) {
             Ok(x) => {},
             Err(err) => { return Err(if_worded(err, arms)) },
+        }
+        // a let-else's `else` must leave the block (D137)
+        if arms.len() == 2 && is_let_else_marker(arms[1].pattern) {
+            let leaves = match arms[1].body { ExprOrBlock.EB_Block(b) => block_leaves(b), ExprOrBlock.EB_Expr(x) => is_diverging(x) }
+            if !leaves {
+                return Err(terr_at(arms[1].line, arms[1].col, arms[1].sp, "the 'else' of a let-else must leave the block: end it with 'return', 'become', 'break', 'continue' or a call that never returns ('panic', 'unreachable')"))
+            }
         }
         if as_stmt { return Ok(None) }
         // collect non-diverging arm values
@@ -6902,16 +6953,20 @@ fun if_worded(err: CheckErr, arms: [MatchArm]) -> CheckErr {
     // `%else`: an `if` used as a value; `%iflet`, `%whilelet`: an `if let`, a
     // `while let` (MYLA-226), whose pattern must be able to fail
     let marker = match arms[1].pattern.kind { PatternKind.PBind(n) => n, _ => "" }
-    if marker != "%else" && marker != "%iflet" && marker != "%whilelet" { return err }
+    if marker != "%else" && marker != "%iflet" && marker != "%whilelet" && marker != "%letelse" { return err }
     if err.msg == "unreachable match arm (a previous arm already matches everything)" && marker != "%else" {
         let pat = arms[0].pattern
         var advice = "use 'let' instead"
-        var what = "if let"
+        var what = "'if let'"
         if marker == "%whilelet" {
             advice = "use 'while true' and 'let'"
-            what = "while let"
+            what = "'while let'"
         }
-        return CheckErr { line: pat.line, col: pat.col, sp: pat.sp, msg: format("the pattern of this '{}' always matches: {}", what, advice), decl: err.decl, notes: err.notes }
+        if marker == "%letelse" {
+            advice = "use 'let' instead, or 'match'"
+            what = "let-else"
+        }
+        return CheckErr { line: pat.line, col: pat.col, sp: pat.sp, msg: format("the pattern of this {} always matches: {}", what, advice), decl: err.decl, notes: err.notes }
     }
     var msg = err.msg
     let types = "match arms have incompatible types "

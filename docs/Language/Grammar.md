@@ -102,11 +102,12 @@ function_type = "async"? "(" ( type ( "," type )* ","? )? ")" "->" type ;
 
 ```ebnf
 block       = "{" SEP* ( statement ( SEP+ statement )* SEP* )? "}" ;
-statement   = var_decl | async_let | if_stmt | while_stmt | for_stmt | return_stmt | become_stmt
+statement   = var_decl | let_else | async_let | if_stmt | while_stmt | for_stmt | return_stmt | become_stmt
             | "break" | "continue" | assignment | expression ;
 
 var_decl    = ( "let" | "var" ) ( IDENT | bind_tuple ) ( ":" type )? "=" expression ;
 async_let   = "async" "let" IDENT ( ":" type )? "=" expression ;   (* a child task, D89 *)
+let_else    = "let" variant_pattern ( "|" base_pattern )* "=" expression "else" block ;   (* D137: a pattern that can fail; the else block leaves *)
 bind_tuple  = "(" bind_elem "," ( bind_elem ( "," bind_elem )* ","? )? ")" ;
 bind_elem   = IDENT | bind_tuple ;                  (* the name "_" discards *)
 

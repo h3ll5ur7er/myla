@@ -124,6 +124,53 @@ fun main() {
 // 0
 ```
 
+
+## let-else
+
+`let P = e else { … }` matches `e` against a pattern `P` that can fail, such as a variant (`Some(x)`, `Ok(v)`, `Shape.Rect(w, h)`), optionally with alternatives (`|`). When it matches, `P`'s bindings are in scope for the rest of the block. When it doesn't, the `else` block runs, and that block must leave: end it with `return`, `become`, `break`, `continue` or a call that never returns (`panic`, `unreachable`, `exit`). One that can fall through is an error, and so is a pattern that always matches (D137, [[MYLA-256]]). It is sugar over `match`: `match e { P => { the rest of the block }, _ => { … } }`, so a function may also end in a `match` whose every arm returns. It keeps the expected case unindented where `if let` would nest it:
+
+```myla
+fun parse_port(s: str) -> Result<int, str> {
+    if s == "80" { return Ok(80) }
+    if s == "443" { return Ok(443) }
+    return Err("not a port")
+}
+
+fun ports(args: [str]) -> [int] {
+    var out: [int] = []
+    for a in args {
+        let Ok(p) = parse_port(a) else {
+            continue
+        }
+        out.push(p)
+    }
+    return out
+}
+
+fun head(xs: [int]) -> Option<int> {
+    if xs.len() == 0 { return None }
+    return Some(xs[0])
+}
+
+fun first(xs: [int]) -> str {
+    let Some(x) = head(xs) else {
+        return "none"
+    }
+    return f"first {x}"
+}
+
+fun main() {
+    let ps = ports(["80", "x", "443"])
+    print(ps.len())
+    print(first(ps))
+    print(first([]))
+}
+// output:
+// 2
+// first 80
+// none
+```
+
 ## Loops
 
 ```myla

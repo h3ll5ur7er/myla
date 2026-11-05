@@ -1097,7 +1097,7 @@ impl Parser {
             self.skip_separators()
         }
         self.expect(TokenKind.RBRACE, "'}'")
-        return Block { line: lbrace.line, col: lbrace.column, sp: self.span_from(lbrace.line, lbrace.column), stmts: stmts }
+        return Block { line: lbrace.line, col: lbrace.column, sp: self.span_from(lbrace.line, lbrace.column), stmts: self.fold_let_else(stmts) }
     }
 
     #test(parser_on("enum E { A, B(int) }"))[Stmt { id: 1, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 21 }, kind: StmtKind.ExprStmt(Expr { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 21 }, kind: ExprKind.Hole }) }]
@@ -1141,6 +1141,11 @@ impl Parser {
     fun var_decl(var self) -> Stmt {
         let kw = self.advance()
         let kind = kw.lexeme
+        // `let Some(x) = e else { … }`, `let Shape.Rect(w, h) = …`: a pattern
+        // that can fail, so a let-else (D137)
+        if kind == "let" && ((self.check(TokenKind.IDENT) && (self.peek_kind_at(1) == TokenKind.LPAREN || self.peek_kind_at(1) == TokenKind.DOT)) || self.check(TokenKind.DOT)) {
+            return self.let_else(kw)
+        }
         if self.check(TokenKind.LPAREN) {
             let lp = self.peek()
             let elems = self.tuple_binding()
@@ -1302,6 +1307,68 @@ impl Parser {
         }
         let e = self.let_match(kw.line, kw.column, self.span_from(kw.line, kw.column), value, pat, then, "%iflet", otherwise)
         return self.mk_stmt(kw.line, kw.column, StmtKind.ExprStmt(e))
+    }
+
+    // `let P = e else { … }` (D137): `match e { P => { the rest of the block },
+    // %letelse => { … } }`. The match's first arm is empty here; the block it
+    // stands in gets the statements after it (`fold_let_else`). The checker
+    // holds the `else` block to leaving (`check_let_else`).
+    fun let_else(var self, kw: Token) -> Stmt {
+        let pat = self.pattern()
+        self.expect(TokenKind.ASSIGN, "'=' after the pattern of a let-else")
+        let value = self.expression()
+        self.expect(TokenKind.ELSE, "'else' after a let-else's value: a pattern that can fail to match needs one")
+        let otherwise = self.block()
+        let then = Block { line: pat.line, col: pat.col, sp: pat.sp, stmts: [] }
+        let e = self.let_match(kw.line, kw.column, self.span_from(kw.line, kw.column), value, pat, then, "%letelse", ExprOrBlock.EB_Block(otherwise))
+        return self.mk_stmt(kw.line, kw.column, StmtKind.ExprStmt(e))
+    }
+
+    // A block's statements with each let-else's match given the statements
+    // after it as its first arm (the last let-else first, so one inside the
+    // rest of another is folded already).
+    fun fold_let_else(var self, stmts0: [Stmt]) -> [Stmt] {
+        var stmts = stmts0
+        var i = stmts.len() - 1
+        while i >= 0 {
+            let s = stmts[i]
+            match s.kind {
+                StmtKind.ExprStmt(e) => {
+                    match e.kind {
+                        ExprKind.MatchE(value, arms) => {
+                            if arms.len() == 2 && is_let_else_marker(arms[1].pattern) {
+                                var rest: [Stmt] = []
+                                var j = i + 1
+                                while j < stmts.len() {
+                                    rest.push(stmts[j])
+                                    j += 1
+                                }
+                                var b = Block { line: arms[0].line, col: arms[0].col, sp: arms[0].sp, stmts: rest }
+                                if rest.len() > 0 {
+                                    let first = rest[0]
+                                    let last = rest[rest.len() - 1]
+                                    b = Block { line: first.line, col: first.col, sp: SrcSpan { sline: first.sp.sline, scol: first.sp.scol, eline: last.sp.eline, ecol: last.sp.ecol }, stmts: rest }
+                                }
+                                var new_arms = arms
+                                new_arms[0] = MatchArm { line: arms[0].line, col: arms[0].col, sp: arms[0].sp, pattern: arms[0].pattern, guard: None, body: ExprOrBlock.EB_Block(self.valued(b)) }
+                                var kept: [Stmt] = []
+                                var k = 0
+                                while k < i {
+                                    kept.push(stmts[k])
+                                    k += 1
+                                }
+                                kept.push(Stmt { id: s.id, line: s.line, col: s.col, sp: s.sp, kind: StmtKind.ExprStmt(Expr { id: e.id, line: e.line, col: e.col, sp: e.sp, kind: ExprKind.MatchE(value, new_arms) }) })
+                                stmts = kept
+                            }
+                        },
+                        _ => {},
+                    }
+                },
+                _ => {},
+            }
+            i -= 1
+        }
+        return stmts
     }
 
     // `while let P = e { body }`: `while true { match e { P => { body }, _ => { break } } }`.
@@ -2309,4 +2376,11 @@ pub fun parse_source(src: str, first_id: int32) -> Result<Parsed, Diag> {
 #test(TokenKind.FUN, false)[true]
 fun starts_member(k: TokenKind, attributes: bool) -> bool {
     return k == TokenKind.FUN || (attributes && k == TokenKind.HASH)
+}
+
+// Whether `p` is the marker arm of a let-else's match (D137).
+#test(Pattern { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 1 }, kind: PatternKind.PBind("%letelse") })[true]
+#test(Pattern { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 1 }, kind: PatternKind.PBind("x") })[false]
+pub fun is_let_else_marker(p: Pattern) -> bool {
+    return match p.kind { PatternKind.PBind(n) => n == "%letelse", _ => false }
 }
