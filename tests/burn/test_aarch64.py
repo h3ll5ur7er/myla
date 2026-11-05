@@ -355,6 +355,21 @@ class Aarch64Time(test_time.Time):
     built for aarch64 and run under qemu (through a script, as the tests run
     the binary)."""
 
+    def test_a_child_process_waited_for_without_blocking_the_worker(self):
+        # As test_time's, but on one worker the property, not the exact order:
+        # the child's 0.2 s against five 30 ms ticks leaves 50 ms, which qemu's
+        # emulated clock reads and polls can use up on a busy machine (one run
+        # in the full suite printed the fifth tick after the child's line).
+        # A tick before the child's line shows the worker wasn't blocked.
+        want = "t\nt\nt\nt\nt\n4 6 3\n5\n200000 200000\nnot found\ntimed out\ntrue\n5\n"
+        exe = self.native("process", test_time.PROCESS)
+        for workers in ["1", "4"]:
+            with self.subTest(workers=workers):
+                out, err, code, _ = self.run_timed([exe], MYLA_THREADS=workers)
+                self.assertEqual((sorted(out.splitlines()), err, code), (sorted(want.splitlines()), "", 0))
+                if workers == "1":
+                    self.assertEqual(out.splitlines()[0], "t")
+
     def native(self, name: str, text: str) -> str:
         exe = os.path.join(self.dir, name)
         build_a64(self.source(name, text), exe + ".a64")
