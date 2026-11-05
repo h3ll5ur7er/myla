@@ -18,7 +18,7 @@ import unittest
 
 from ._native import CAN_BUILD_NATIVE, SKIP_REASON
 from ._tools import STDLIB_ROOT, native_compiler
-from . import test_time
+from . import test_time, test_unit_type
 
 _REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir))
 
@@ -234,6 +234,9 @@ fun main() {
 """,
 }
 
+
+# the unit type (D138): values without size in lists, maps, enums and tasks
+PROGRAMS["unit"] = test_unit_type.PROGRAM
 
 # a struct of some 33 KB: frames, copies and offsets past what one
 # instruction reaches

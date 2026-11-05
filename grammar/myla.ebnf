@@ -111,7 +111,7 @@ import_item  = IDENT ( "as" IDENT )? ;
 (* ----- Types ----- *)
 
 type          = prim_type | named_type | "[" type "]" @list_type | "[" type ":" type "]" @map_type
-              | tuple_type | function_type ;
+              | "(" ")" @unit_type | tuple_type | function_type ;   (* "()": the unit type, D138 *)
 named_type    = IDENT type_args? ;
 type_args     = "<" type ( "," type )* ","? ">" ;
 prim_type     = "bool" | "str" | "int8" | "int16" | "int32" | "int64"
@@ -129,7 +129,7 @@ var_decl    = ( "let" | "var" ) ( IDENT | bind_tuple ) ( ":" type )? "=" express
 async_let   = "async" "let" IDENT ( ":" type )? "=" expression ;   (* a child task, D89 *)
 let_else    = "let" variant_pattern ( "|" base_pattern )* "=" expression "else" block ;   (* D137: a pattern that can fail; the else block leaves *)
 bind_tuple  = "(" bind_elem "," ( bind_elem ( "," bind_elem )* ","? )? ")" ;
-bind_elem   = IDENT | bind_tuple ;                  (* the name "_" discards *)
+bind_elem   = IDENT | "(" ")" @unit_binding | bind_tuple ;                  (* the name "_" discards *)
 
 if_stmt     = "if" ( cond | let_cond ) block ( NL* "else" ( if_stmt | block ) )? ;
 let_cond    = "let" pattern "=" cond ;   (* if let, while let: D104 (5) *)
@@ -170,7 +170,7 @@ call_arg    = "_" @hole | expression ;            (* "_" alone: a partial-applic
 
 primary     = INT | FLOAT | CHAR | STRING | fstring | "true" @boolean | "false" @boolean
             | "self" @self | IDENT | struct_literal | "(" NL* expression NL* ")" @paren_expression
-            | tuple | list | map | match_expr | if_expr ;
+            | "(" NL* ")" @unit | tuple | list | map | match_expr | if_expr ;   (* "()": the unit value, D138 *)
 fstring     = 'f"' ( FSTRING_TEXT | "{{" @escape_sequence | "}}" @escape_sequence
                    | "{" expression "}" @interpolation )* '"' ;
               (* lowered by the lexer to: format(STRING, expression, …) *)
@@ -196,7 +196,7 @@ guard       = expression ;                          (* without struct literals *
 
 pattern       = base_pattern ( "|" base_pattern @or_pattern )* ;
 base_pattern  = INT | CHAR | STRING | "true" @boolean | "false" @boolean | "-" INT @negative_literal
-              | "_" @wildcard | IDENT | variant_pattern | tuple_pattern | struct_pattern ;
+              | "_" @wildcard | IDENT | variant_pattern | "(" ")" @unit_pattern | tuple_pattern | struct_pattern ;
 variant_pattern = IDENT "." IDENT payload? | "." IDENT payload? | IDENT payload ;
 payload       = "(" ( pattern ( "," pattern )* ","? )? ")" ;
 tuple_pattern = "(" pattern "," ( pattern ( "," pattern )* ","? )? ")" ;
@@ -218,9 +218,10 @@ field_pattern = IDENT ( ":" pattern )? ;
 @conflict tuple_type ;
 @conflict named_type ;
 @conflict if_stmt if_expr ;
+@conflict unit lambda ;               (* "()" before "=>": a lambda without parameters *)
 
 @restrict cond struct_literal lambda ;            (* a lambda's body would take the "{" *)
-@restrict guard struct_literal paren_expression tuple lambda ;   (* "(…) =>" would read as a lambda *)
+@restrict guard struct_literal paren_expression unit tuple lambda ;   (* "(…) =>" would read as a lambda *)
 @restrict cast_expression named_type ;            (* "a as T < b": "<" opens type arguments *)
 @restrict fstring NL ;                            (* f-strings are single-line *)
 

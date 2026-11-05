@@ -89,7 +89,7 @@ import_item  = IDENT ( "as" IDENT )? ;
 
 ```ebnf
 type          = prim_type | named_type | "[" type "]" | "[" type ":" type "]"
-              | tuple_type | function_type ;
+              | "(" ")" | tuple_type | function_type ;   (* "()": the unit type, D138 *)
 named_type    = IDENT type_args? ;
 type_args     = "<" type ( "," type )* ","? ">" ;
 prim_type     = "bool" | "str" | "int8" | "int16" | "int32" | "int64"
@@ -109,7 +109,7 @@ var_decl    = ( "let" | "var" ) ( IDENT | bind_tuple ) ( ":" type )? "=" express
 async_let   = "async" "let" IDENT ( ":" type )? "=" expression ;   (* a child task, D89 *)
 let_else    = "let" variant_pattern ( "|" base_pattern )* "=" expression "else" block ;   (* D137: a pattern that can fail; the else block leaves *)
 bind_tuple  = "(" bind_elem "," ( bind_elem ( "," bind_elem )* ","? )? ")" ;
-bind_elem   = IDENT | bind_tuple ;                  (* the name "_" discards *)
+bind_elem   = IDENT | "(" ")" | bind_tuple ;                  (* the name "_" discards *)
 
 if_stmt     = "if" ( cond | let_cond ) block ( NL* "else" ( if_stmt | block ) )? ;
 let_cond    = "let" pattern "=" cond ;   (* if let, while let: D104 (5) *)
@@ -152,7 +152,7 @@ call_arg    = "_" | expression ;            (* "_" alone: a partial-application 
 
 primary     = INT | FLOAT | CHAR | STRING | fstring | "true" | "false"
             | "self" | IDENT | struct_literal | "(" NL* expression NL* ")"
-            | tuple | list | map | match_expr | if_expr ;
+            | "(" NL* ")" | tuple | list | map | match_expr | if_expr ;   (* "()": the unit value, D138 *)
 fstring     = 'f"' ( FSTRING_TEXT | "{{" | "}}"
                    | "{" expression "}" )* '"' ;
               (* lowered by the lexer to: format(STRING, expression, …) *)
@@ -180,7 +180,7 @@ guard       = expression ;                          (* without struct literals *
 ```ebnf
 pattern       = base_pattern ( "|" base_pattern )* ;
 base_pattern  = INT | CHAR | STRING | "true" | "false" | "-" INT
-              | "_" | IDENT | variant_pattern | tuple_pattern | struct_pattern ;
+              | "_" | IDENT | variant_pattern | "(" ")" | tuple_pattern | struct_pattern ;
 variant_pattern = IDENT "." IDENT payload? | "." IDENT payload? | IDENT payload ;
 payload       = "(" ( pattern ( "," pattern )* ","? )? ")" ;
 tuple_pattern = "(" pattern "," ( pattern ( "," pattern )* ","? )? ")" ;

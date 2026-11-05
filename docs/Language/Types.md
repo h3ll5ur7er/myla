@@ -39,7 +39,36 @@ An alias is another name for the same type, not a new type (D5). Aliases may be 
 
 ## Tuples
 
-`(int, str)` with literals `(1, "a")`. A 1-tuple is written `(int,)` / `(1,)`; there is no 0-tuple (D35). Elements are read with `t.0`, `t.1` (a constant index) or destructured with `let (a, b) = t`. Tuples can't be compared with `==`.
+`(int, str)` with literals `(1, "a")`. A 1-tuple is written `(int,)` / `(1,)` (D35). Elements are read with `t.0`, `t.1` (a constant index) or destructured with `let (a, b) = t`. Tuples can't be compared with `==`.
+
+## The unit type
+
+`()` is a type with one value, also written `()` (D138, [[MYLA-278]]): what a function gives back when it succeeds or fails with nothing to give.
+
+```myla
+from std.fs import write_to_file, IoError
+
+fun save(path: str, text: str) -> Result<(), IoError> {
+    write_to_file(path, text)?
+    return Ok(())
+}
+
+fun main() {
+    match save("notes.txt", "hi") {
+        Ok(()) => print("saved")
+        Err(e) => print("not saved")
+    }
+}
+// output:
+// saved
+```
+
+- It works wherever a type does: `Option<()>`, `[()]`, a map `[str: ()]` used as a set, a field, a payload (`Done(())`), a type argument.
+- `()` is also its pattern (`Ok(())`, `let ((), n) = pair`), and the only one it needs: a `match` on it is exhaustive with one arm.
+- `==` is always `true` and `!=` always `false` (both sides still run), and a struct or enum with a `()` member can `#derive(Eq)`. There is no ordering, and `print` and f-strings don't take it.
+- It takes no memory: a list of units holds only its length, and a `Result<(), E>` is as large as its `Err`.
+- It is the 0-tuple: `type_name` writes it `()`, as the empty element list of a tuple.
+- A function without a result type still returns nothing, as before; it isn't a function returning `()`, so it can't `return ()` and its type can't be written as `() -> ()` (a function type ending in `-> ()` is that of a function that returns the unit value).
 
 ## Structs and enums
 
@@ -81,4 +110,5 @@ Inside a generic declaration, a type parameter `T` stands for any type; only ope
 | `bool` | yes | no | `true`/`false` | yes |
 | `str` | yes (bytes) | no | yes | yes |
 | struct, enum | with `Eq` (`impl Eq` or `#derive(Eq)`) | with `Ord` | no | no |
+| `()` | yes (always equal) | no | no | no |
 | tuple, list, map, function, `StringBuilder` | no | no | no | no |

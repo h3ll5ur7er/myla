@@ -1706,6 +1706,10 @@
         },
         {
           "type": "SYMBOL",
+          "name": "unit_type"
+        },
+        {
+          "type": "SYMBOL",
           "name": "tuple_type"
         },
         {
@@ -2315,6 +2319,10 @@
         {
           "type": "SYMBOL",
           "name": "identifier"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "unit_binding"
         },
         {
           "type": "SYMBOL",
@@ -3132,6 +3140,10 @@
         {
           "type": "SYMBOL",
           "name": "paren_expression"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "unit"
         },
         {
           "type": "SYMBOL",
@@ -4314,6 +4326,10 @@
         },
         {
           "type": "SYMBOL",
+          "name": "unit_pattern"
+        },
+        {
+          "type": "SYMBOL",
           "name": "tuple_pattern"
         },
         {
@@ -4709,6 +4725,19 @@
         }
       ]
     },
+    "unit_type": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "STRING",
+          "value": "("
+        },
+        {
+          "type": "STRING",
+          "value": ")"
+        }
+      ]
+    },
     "break_stmt": {
       "type": "STRING",
       "value": "break"
@@ -4716,6 +4745,19 @@
     "continue_stmt": {
       "type": "STRING",
       "value": "continue"
+    },
+    "unit_binding": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "STRING",
+          "value": "("
+        },
+        {
+          "type": "STRING",
+          "value": ")"
+        }
+      ]
     },
     "_self_1": {
       "type": "STRING",
@@ -5449,6 +5491,31 @@
         }
       ]
     },
+    "unit": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "STRING",
+          "value": "("
+        },
+        {
+          "type": "CHOICE",
+          "members": [
+            {
+              "type": "SYMBOL",
+              "name": "_nl_rep"
+            },
+            {
+              "type": "BLANK"
+            }
+          ]
+        },
+        {
+          "type": "STRING",
+          "value": ")"
+        }
+      ]
+    },
     "_escape_sequence_19": {
       "type": "STRING",
       "value": "{{"
@@ -5516,6 +5583,19 @@
     "wildcard": {
       "type": "STRING",
       "value": "_"
+    },
+    "unit_pattern": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "STRING",
+          "value": "("
+        },
+        {
+          "type": "STRING",
+          "value": ")"
+        }
+      ]
     }
   },
   "extras": [
@@ -5555,6 +5635,10 @@
     [
       "if_stmt",
       "if_expr"
+    ],
+    [
+      "unit",
+      "lambda"
     ]
   ],
   "precedences": [],

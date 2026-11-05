@@ -1,0 +1,10 @@
+//~ type error: cannot return a value from a function with no return type
+// A function without a result type returns nothing, not the unit value (D138):
+// it ends with a bare `return`; one that gives back `()` says `-> ()`.
+fun f() {
+    return ()
+}
+
+fun main() {
+    f()
+}

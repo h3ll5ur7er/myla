@@ -1058,7 +1058,8 @@ impl Parser {
             return self.mk_type(lp.line, lp.column, TypeKind.TFn(params, ret, false))
         }
         if params.len() == 0 {
-            self.fail_at(lp, "'()' is only valid as a function type '() -> R'")
+            // the unit type (D138)
+            return self.mk_type(lp.line, lp.column, TypeKind.TTuple([]))
         }
         if !saw_comma {
             self.fail_at(self.peek(), "expected ',' in tuple type (use '(T,)' for a 1-tuple)")
@@ -1192,6 +1193,8 @@ impl Parser {
     #test(parser_on("a.b[0]"))[[BindElem.BWild, BindElem.BWild]]
     fun tuple_binding(var self) -> [BindElem] {
         self.skip()
+        // `()`: the unit value (D138)
+        if self.match1(TokenKind.RPAREN) { return [] }
         var elems: [BindElem] = [self.binding_elem()]
         if !self.match1(TokenKind.COMMA) {
             self.fail_at(self.peek(), "expected ',' in destructuring binding (use '(x,)' for a 1-tuple)")
@@ -2143,6 +2146,10 @@ impl Parser {
     #test(parser_on("[int]"))[Pattern { id: 2, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 6 }, kind: PatternKind.PTuple([Pattern { id: 0, line: 1, col: 2, sp: SrcSpan { sline: 1, scol: 2, eline: 1, ecol: 5 }, kind: PatternKind.PBind("int") }, Pattern { id: 1, line: 1, col: 6, sp: SrcSpan { sline: 1, scol: 6, eline: 1, ecol: 6 }, kind: PatternKind.PWild }]) }]
     fun tuple_pattern(var self) -> Pattern {
         let lp = self.advance()
+        if self.match1(TokenKind.RPAREN) {
+            // the unit value (D138)
+            return self.mk_pat(lp.line, lp.column, PatternKind.PTuple([]))
+        }
         var elems: [Pattern] = [self.pattern()]
         if !self.match1(TokenKind.COMMA) {
             self.fail_at(self.peek(), "expected ',' in tuple pattern (use '(p,)' for a 1-tuple)")
@@ -2236,6 +2243,10 @@ impl Parser {
     #test(parser_on("a.b[0]"))[Expr { id: 0, line: 1, col: 2, sp: SrcSpan { sline: 1, scol: 2, eline: 1, ecol: 7 }, kind: ExprKind.Hole }]
     fun paren_or_tuple(var self) -> Expr {
         let lp = self.advance()
+        if self.match1(TokenKind.RPAREN) {
+            // the unit value (D138)
+            return self.mk_expr(lp.line, lp.column, ExprKind.TupleLit([]))
+        }
         let first = self.expression()
         if !self.check(TokenKind.COMMA) {
             self.expect(TokenKind.RPAREN, "')'")

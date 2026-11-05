@@ -194,6 +194,17 @@ fun field_names(fields: [FieldT]) -> [str] {
     return out
 }
 
+// Whether `t` is the unit type `()`, the 0-tuple (D138).
+#test(Type.TTuple([]))[true]
+#test(Type.TTuple([Type.TBool]))[false]
+#test(Type.TBool)[false]
+pub fun is_unit(t: Type) -> bool {
+    return match t {
+        Type.TTuple(es) => es.len() == 0,
+        _ => false,
+    }
+}
+
 // A type as the Python checker's messages write it (types.py: type_name).
 #test(Type.TStr)["str"]
 #test(Type.TStruct("Rect", []))["Rect"]
@@ -2972,7 +2983,7 @@ impl Checker {
             if is_int(lt) || is_float(lt) { hint = Some(lt) }
             let rt = self.expect_value(r, hint)?
             let common = self.unify(l, lt, r, rt)?
-            if !(is_int(common) || is_float(common) || is_char(common) || is_bool(common) || is_str(common)) {
+            if !(is_int(common) || is_float(common) || is_char(common) || is_bool(common) || is_str(common) || is_unit(common)) {
                 return Err(terr_at(e.line, e.col, e.sp, format("cannot compare values of type '{}'", type_name(common))))
             }
             return Ok(Type.TBool)
@@ -4766,6 +4777,7 @@ fun is_eq_type(t: Type, eq_names: [str]) -> bool {
         Type.TChar => true,
         Type.TFloat(w) => true,
         Type.TError => true,          // has had its error (MYLA-110)
+        Type.TTuple(es) => es.len() == 0,   // the unit type (D138)
         Type.TStruct(n, a) => contains_str(eq_names, n),
         Type.TEnum(n, a) => contains_str(eq_names, n),
         _ => false,

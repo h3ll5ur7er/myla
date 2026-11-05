@@ -115,7 +115,7 @@ SYNTAX_ERRORS = {
     "impl_body_not_fun": "struct S { a: int }\nimpl S {\n    let x = 1\n}\n",
     "trait_body_not_fun": "trait T {\n    let x = 1\n}\n",
     "expected_type": "fun f(x: 1) {\n}\n",
-    "unit_type": "fun f(x: ()) {\n}\n",
+    # (`fun f(x: ())` was one; since D138 `()` is the unit type: test_unit_type)
     "struct_fields_on_one_line": "struct S { a: int b: int }\n",
     "binding_name": "fun main() {\n    let (1, 2) = (1, 2)\n}\n",
     "expected_expression": "fun main() {\n    let x = \n}\n",

@@ -29,7 +29,7 @@
 
 from std.num import f64_literal_bits, f32_round_bits
 from .ast import Expr, ExprKind, Stmt, StmtKind, Block, FunData, ElseTail, ExprOrBlock, MatchArm, Pattern, PatternKind, FieldInit, MapEntry, BindElem, bind_elems, Param
-from .checker import Type, is_raw_memory_primitive, Subst, FuncSig, opt_subst_type, subst_type, builtin_method
+from .checker import Type, is_unit, is_raw_memory_primitive, Subst, FuncSig, opt_subst_type, subst_type, builtin_method
 from .codegen import codegen_on, may_write_expr, is_actor_t, is_sb_t, is_async_t, CodeGen, LamJob, PartialJob, Cap, DropEntry, tfunc_params, tfunc_ret, is_hole_expr, mangle_fn, is_builtin_call_name, is_aggregate, tuple_elems, is_struct_or_enum_t, is_tfunc, is_overloadable_op, arith_method_cg, enum_name_of, is_tstr, is_cmp, place_root, is_aggregate_opt, arms_may_write, is_cell_t, list_elem, is_list_t, is_map_t, is_str_t, map_key, map_val, format_segments, args_have_hole, success_variant, failure_variant
 from .ir import IrFunc, IrBlock, Inst, Term, Slot, Pos, Instance, ENV_WORD
 from .parser import expr_of, stmt_of, type_expr_of, block_of, pattern_of, fun_of  // AST values for #test cases (MYLA-184)
@@ -2305,6 +2305,13 @@ impl Lower {
         if is_overloadable_op(op) && is_struct_or_enum_t(lt) && lowerable(cg, lt) {
             return self.overloaded_scalar(cg, op, l, r, lt)
         }
+        if (op == "==" || op == "!=") && is_unit(lt) {
+            // the unit type has one value (D138): equal, once both sides ran
+            self.discard(cg, l)
+            self.discard(cg, r)
+            if op == "==" { return self.konst(Type.TBool, 1) }
+            return self.konst(Type.TBool, 0)
+        }
         if is_tstr(lt) {
             if op == "==" || op == "!=" {
                 let a = self.expr(cg, l)
@@ -3124,7 +3131,9 @@ impl Lower {
         var i = 0
         for el in elems {
             // an element narrower than a word: a scalar, stored at its size
-            if stride < 8 { self.add(Inst.StoreAt(cell, 16 + i * stride, self.expr(cg, el), stride)) }
+            // an element without size (the unit type, an empty struct): runs, stores nothing
+            if stride == 0 { self.discard(cg, el) }
+            else if stride < 8 { self.add(Inst.StoreAt(cell, 16 + i * stride, self.expr(cg, el), stride)) }
             else { self.store_member(cg, el, cell, 16 + i * stride) }
             i = i + 1
             if owned { self.add_store(cell, 0, self.konst(Type.TInt(64, true), i as int64)) }
