@@ -27,5 +27,9 @@ Questions for the design round (a decision before the implementation):
 - **Against what exists:** `?` already covers `Option`/`Result` when the function returns the same kind; `guard` is for everything else (a different error, a message, a loop's `continue`) and for plain conditions.
 - **Lowering:** sugar over `match` (as `if let` is): `match e { P => { rest of the block }, _ => { else block } }`, so the bindings' ownership and drops follow the existing rules; the interpreter and the IR need nothing new.
 
-- [ ] Design round and a decision (D-number) on the spelling and forms, the examples and errors on [[Language/Statements]]
+- [x] Design round and a decision (D137) on the spelling and forms; the examples and errors on [[Language/Statements]] come with the implementation
 - [ ] Parser, checker (the else block must leave), lowering, interpreter; error-corpus examples; the tree-sitter grammar and the editor
+
+## Decided (2026-11-05): D137
+
+Rust's let-else: `let P = e else { … }`, whose `else` block must leave the block. No `guard` keyword, and no plain-condition form.

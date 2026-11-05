@@ -36,3 +36,21 @@ Then the pages:
 - [ ] [[Language/Attributes-and-testing]]: stack overflow and an invalid `as char` in the runtime-error table
 - [ ] [[Language/Statements]]: `become`'s rule stated in the language's terms
 - [ ] [[Language/Standard-library]] and [[Language/Concurrency]]: what differs per target
+
+## Decided (2026-11-05)
+
+The owner chose the recommendations:
+- **D128:** NaNs are canonical where their bits can be seen.
+- **D129:** errors are portable causes, with `Unsupported`.
+- **D131:** `become` passes six words freely on every target.
+- **D132:** capabilities show as errors at run time and as code per target at compile time.
+- **D133:** one worker may skip the deep copies and atomic counts.
+
+- [x] **NaNs:** D128
+- [x] **Errors programs see:** D129 ([[MYLA-190]])
+- [x] **`become`'s word limit:** D131
+- [x] **Capabilities:** D132
+
+Then the work:
+- [ ] D128 in `std.math`: `to_bits`, `copysign` and the other sign and payload readers see `0x7FF8000000000000` for every NaN. A test that `copysign(1.0, 0.0 / 0.0)` is `1` on every target (today -1 on x86-64, 1 on aarch64).
+- [ ] D133 on wasm32: plain counts for actor handles, no deep copies at task boundaries, measured

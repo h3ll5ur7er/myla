@@ -22,3 +22,15 @@ Then:
 Also track [[MYLA-250]]'s follow-ups:
 - [ ] A parameter kept in the register it came in
 - [ ] A generic `become` counting a type parameter as one word, which could end in an internal error (a latent bug, [[MYLA-250]])
+
+## Decided (2026-11-05)
+
+The owner chose the recommendations:
+- **D130:** Myla's own convention per target, with each platform's C convention only at C boundaries. This changes D119.
+- **D131:** `become` passes six words freely on every target.
+
+- [x] The decision: D130 and D131
+
+Then:
+- [ ] wasm32: the closure environment as a parameter instead of the memory word `myla_env` (D130)
+- [ ] [[Architecture/Native-backend]] and [[Architecture/IR]] describe each target's internal convention as the contract; D119's wording on those pages follows D130

@@ -2,7 +2,7 @@
 id: MYLA-254
 title: "The IR's open points: addresses, widths, sizes per target, SSA"
 type: design
-status: in-progress
+status: done
 priority: medium
 labels: [ir, backend, design, wasm]
 ---
@@ -89,3 +89,5 @@ The owner took the four recommendations: D120 (memory widths), D121 (a pointer k
 - **What today's backend makes of it** (instructions at each benchmark's `profile_size`, the same programs with and without the pass): closures 7.7% fewer, n-body 2.6% fewer, fib, string building, word frequency and binary trees within 1.3%, the rest 5–18% more (Ackermann 18%, Game of Life 13%); compiling the compiler 1.6% more. Every program prints the same.
 - **Why not more yet:** the backend was built for slots and for temporaries written once. A promoted parameter has two homes (its slot, then the temporary its entry load fills; in D123's form it is a block parameter of the entry and has none). Join values are separate temporaries the copies fill, which nothing coalesces with the values flowing into them. And the allocator's weights (a callee-saved register only for 12 weighted uses, `REG_MIN_USE`) were tuned for slots read in place.
 - **For D123:** building SSA is cheap (one pass of about 600 lines with the renaming) and the form is correct on everything the suite runs. The gain is there in the counts (3.7 memory accesses removed per copy added) and shows where the backend can take it (closures). What remains is the backend's half: parameters as the entry's block parameters, block parameters coalesced by the register allocator, and the allocator's weights for values instead of slots. Those are the next step before the IR's form changes for good, together with the optimisations D123 is for ([[MYLA-251]]).
+
+Its decisions are recorded (D120–D123, D126; the target description deferred to [[MYLA-260]] and [[MYLA-262]]); closed with the owner's agreement (2026-11-05).

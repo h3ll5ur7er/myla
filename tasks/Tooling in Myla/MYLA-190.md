@@ -20,3 +20,10 @@ Decided by D113 ([[MYLA-211]]): I/O and process functions return `Result<T, IoEr
 
 - `IoError.Other` carries Linux's errno numbers, which programs can print; wasm maps WASI's errnos onto them (anything unmapped becomes EIO), macOS's differ (EAGAIN 35, ENOSYS 78). D113's enum of causes should be the whole interface, with a cause for "unsupported on this target": wasm's `run` and `spawn` give `Other(38)` today. [[MYLA-266]] asks for that decision; [[MYLA-265]] gives the platform layer causes instead of errnos.
 - PATH search on Windows also means `PATHEXT` ([[MYLA-165]]).
+
+## Decided (2026-11-05)
+
+- **D129:** `IoError` and `SpawnError` name portable causes (`NotFound`, `PermissionDenied`, `AlreadyExists`, `IsADirectory`, `NotADirectory`, `NotEmpty`, `Interrupted`, `Unsupported`, …), plus `Other(code)` for the rest. wasm32's `run` gives `Unsupported`.
+- **D138:** the always-0 `int32` results become `Result<(), IoError>` ([[MYLA-278]]).
+
+- [ ] The causes in `std.fs` and `std.process` from each platform module's codes ([[MYLA-265]]); the error tests on every target

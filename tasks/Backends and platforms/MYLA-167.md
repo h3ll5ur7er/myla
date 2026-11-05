@@ -2,7 +2,7 @@
 id: MYLA-167
 title: "LLVM: debug information"
 type: feature
-status: review
+status: done
 priority: low
 labels: [llvm, debugging]
 ---
@@ -13,3 +13,5 @@ With [[MYLA-161]]: `myla build -g --backend llvm` describes lines, functions and
 
 - [ ] Line tables, functions, parameters and locals (frame functions' slots in their heap frame, as [[MYLA-141]] describes them), types for the pretty-printers (D82)
 - [ ] The gdb tests of `tests/burn/test_debug_info.py` pass with `--backend llvm`
+
+LLVM was dropped by D117; closed with the owner's agreement (2026-11-05).

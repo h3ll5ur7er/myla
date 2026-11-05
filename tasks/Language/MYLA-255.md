@@ -23,5 +23,12 @@ Questions for the design round (a decision before the implementation):
 - **Lowering:** the caller fills in the missing arguments, so the callee and its calling convention (D119) stay as they are; `become` (D87) and the stack-word rule count the filled-in arguments.
 - **Interplay:** overloads don't exist in Myla, so no ambiguity there; the checker's messages for a wrong number of arguments name the defaults; the LSP's signature help shows them.
 
-- [ ] Design round and a decision (D-number), the examples and errors on [[Language/Functions]]
+- [x] Design round and a decision (D136); the examples and errors on [[Language/Functions-and-closures]] come with the implementation
 - [ ] Parser, checker, lowering, interpreter; error-corpus examples; the tree-sitter grammar and the editor
+
+## Decided (2026-11-05): D136
+
+The owner chose the recommendation:
+- **Which parameters:** trailing ones only, and no named arguments for now.
+- **What a default may be:** any expression that doesn't refer to other parameters, evaluated by the caller at each call.
+- **Function types:** defaults belong to the declaration, not the function type.
