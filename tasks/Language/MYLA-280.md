@@ -32,7 +32,24 @@ print(xs[::-1])    // [50, 40, 30, 20, 10]
 | Maps | no slices | no |
 
 Then:
-- [ ] The decision
+- [x] The decision for indexes from the end and the step (D142)
+- [ ] The owner's word on the other three questions (clamped bounds, byte slices of `str`, no slice assignment yet)
 - [ ] Parser and grammar (`[a:b:step]` inside an index, kept apart from a map literal), checker, interpreter, `std.rt`'s slice routine, the bounds checks for `^`
 - [ ] [[Language/Collections-and-strings]], [[Language/Expressions-and-operators]]
 - [ ] Tests: parity programs on every target, the error corpus
+
+## Decided (2026-11-05): D142
+
+- **From the end:** `^`, in an index and in a slice's bounds: `xs[^1]`, `xs[1:^1]`, `xs[^3:]`. A plain negative index stays an error.
+- **The step:** an ordinary signed integer, as in Python: `xs[::2]`, `xs[::-1]`, `xs[^1:0:-2]`; with a negative step the bounds default to the end and the start.
+
+```myla
+let xs = [10, 20, 30, 40, 50]
+print(xs[^1])       // 50
+print(xs[1:^1])     // [20, 30, 40]
+print(xs[^2:])      // [40, 50]
+print(xs[::-1])     // [50, 40, 30, 20, 10]
+print(xs[::2])      // [10, 30, 50]
+```
+
+Still open: the three other rows of the table above (recommended: bounds clamped, `str` sliced by bytes with an error off a character's boundary, no assignment to a slice yet).
