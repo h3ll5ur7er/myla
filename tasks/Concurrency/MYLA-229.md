@@ -30,3 +30,7 @@ The owner chose the recommendation, Swift's model:
 - [[tests/burn/test_defer.py]]: each way a scope ends, the order, variables read at the end, the names it sees, nesting, loops, `become` 100000 deep, a block in an async function after its child, an async loop, a lambda, a `match` arm, and none on `exit` or a panic; the same program on aarch64 and wasm32 (`PROGRAMS["defer"]`); the errors; two corpus entries.
 
 For the owner: D135 also says a deferred block runs "when its task is stopped at a suspension point (D96)". Under D96 nothing is stopped, and the only stop at a suspension point is D97's, when a failure elsewhere ends the program, which D135 excludes ("not on a failure"). So today the case can't arise and nothing runs for it; it needs a decision only if a stopping cancellation comes.
+
+## Decided (2026-11-05): D141
+
+The owner chose the recommendation for the question above: a deferred block runs on every way its block ends that the program survives; D135's "stopped at a suspension point" is dropped; a stopping cancellation, if one comes, runs them as a `return` does, as part of that decision. Nothing to build: it is what runs.

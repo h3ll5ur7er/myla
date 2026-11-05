@@ -2,7 +2,7 @@
 id: MYLA-277
 title: "Number formatting in `format` and f-strings: width, alignment, precision (`{x:>8.3}`)"
 type: feature
-status: backlog
+status: todo
 priority: high
 labels: [language, stdlib, formatting]
 ---
@@ -27,7 +27,7 @@ A short design round first, to settle the spec's grammar, recorded on [[Language
 - **Errors:** a malformed spec in an f-string is a parse or type error at its position, since the spec is known at compile time. In a `format` call with a constant string, the same.
 
 Then:
-- [ ] The decision and the pages
+- [x] The decision (D139) — the pages follow with the implementation
 - [ ] Lexer (the spec after `:` inside a hole, kept apart from `::` and from a map literal's `:` inside a hole) and checker (the spec against the value's type)
 - [ ] Std code: the formatting in Myla (`std.num`), shared by the interpreter and every backend, so the output is byte-identical everywhere
 - [ ] Tests: parity programs, the error corpus, the tree-sitter grammar's f-string rule
@@ -50,3 +50,12 @@ A hole is `{expression:spec}`, the spec fixed in the source (an f-string, or a c
 | Where it is built | the lexer splits the hole at its last top-level `:` (not inside `[ ]`, `( )`, `{ }` or a string, so `{m["a"]:>4}` and `{[1: 2].len()}` work); the formatting is Myla in `std.num` | as said | |
 
 The checker's errors name the spec's position: `type error: the format spec '.2' needs a float, found 'int32'`.
+
+## Decided (2026-11-05): D139
+
+The owner accepted the proposal above, with two additions:
+- **`#`** adds the prefix (`0x`, `0b`, `0o`), counted in the width: `f"{255:#06x}"` is `0x00ff`, `f"{5:#b}"` is `0b101`. The number of digits is the width with `0`: `f"{5:08b}"` is `00000101`.
+- **A `Format` trait** for a user's types, Python's model: `trait Format { fun format(self, spec: str) -> str }`; `{x}` calls `x.format("")`, `{x:dmy}` passes `"dmy"` as it is (read when the program runs, not checked before); `std.fmt.pad(text, spec)` gives such a type fill, alignment and width. `print` keeps taking the five scalar types.
+
+Then also:
+- [ ] `trait Format` in the prelude, the checker letting a type that implements it stand in a hole, and `std.fmt.pad`
