@@ -1559,10 +1559,7 @@ pub fun exec_run() {
 fun exec_idle() {
     __fetch_add64(__rt_addr("__exec_idle"), 1)
     if exec_peek() == 0 {
-        // (the counts first, then the wake-ups in flight, then the queues
-        // again: a frame taken off the timers or watches is counted in
-        // `__exec_waking` until it is queued)
-        if __rt_get("__exec_idle") >= __rt_get("__exec_workers") && __rt_get("__timer_count") == 0 && __rt_get("__watch_count") == 0 && __rt_get("__exec_waking") == 0 && exec_peek() == 0 {
+        if exec_all_waiting() {
             exec_stuck()
         }
         var spins: int64 = 4000
@@ -1589,7 +1586,34 @@ fun exec_idle() {
             __fetch_add64(__rt_addr("__exec_sleepers"), -1)
         }
     }
+    // leaving: counted before this worker can take a frame (exec_find), so
+    // a check that began while it was idle sees it left
+    __fetch_add64(__rt_addr("__exec_gen"), 1)
     __fetch_add64(__rt_addr("__exec_idle"), -1)
+}
+
+// Whether no task can go on: every worker idle for the whole check (no one
+// left `exec_idle` meanwhile: `__exec_gen` unchanged), and then no timer,
+// no watched descriptor, no frame being taken off them (`__exec_waking`)
+// and nothing queued, read in that order. While every worker is idle, a
+// frame moves only from the timers or the watches to a queue, counted in
+// `__exec_waking` all the way, so these reads can't miss it; a worker that
+// takes a frame off a queue or runs one has left `exec_idle` (MYLA-275:
+// without the generation, a worker that left and took the last queued
+// frame after the idle count was read looked like no one). Each read is a
+// read-modify-write, ordered on every processor; the check is rare.
+fun exec_all_waiting() -> bool {
+    let gen = __fetch_add64(__rt_addr("__exec_gen"), 0)
+    if __fetch_add64(__rt_addr("__exec_idle"), 0) < __rt_get("__exec_workers") {
+        return false
+    }
+    if __fetch_add64(__rt_addr("__timer_count"), 0) != 0 || __fetch_add64(__rt_addr("__watch_count"), 0) != 0 {
+        return false
+    }
+    if __fetch_add64(__rt_addr("__exec_waking"), 0) != 0 || exec_peek() != 0 {
+        return false
+    }
+    return __fetch_add64(__rt_addr("__exec_gen"), 0) == gen
 }
 
 // --- time: the clock, sleeping, the timers (D124) --------------------------------

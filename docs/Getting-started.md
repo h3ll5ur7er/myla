@@ -4,7 +4,8 @@
 
 ## Requirements
 
-- **GNU `as` and `ld`** (binutils) on x86-64 Linux: they build the toolchain from its seed, and native programs.
+- **Linux on x86-64 or aarch64** (a PC, an ARM server, a Raspberry Pi 4 or 5 with a 64-bit OS) and its **GNU `as` and `ld`** (binutils: `sudo apt install binutils`): they build the toolchain from the machine's seed, and native programs. `just bootstrap` runs the same script as `scripts/bootstrap.sh` if `just` is installed.
+- **For the other targets** (optional): clang and `ld.lld` for `--target aarch64-linux`, clang and `wasm-ld` for `--target wasm32-wasi` (LLVM 18 or newer, with the `lld` package); to run their programs on an x86-64 machine, `qemu-aarch64` (`qemu-user`) and Node 22 or newer. The tests of those targets skip without them.
 - **Python 3.12 or newer**, only to run the tests (standard library only; `uv` is optional).
 
 ## Build the toolchain
@@ -13,7 +14,7 @@
 scripts/bootstrap.sh            # output in ./build (gitignored); about 8 seconds
 ```
 
-This builds the compiler from the committed seed `bootstrap/seed.s` (its own assembly, so only `as` and `ld` are needed), checks that it compiles itself to a byte-identical fixed point, and builds `build/myla`, the command-line tool, and `build/myla-lsp`, the language server. Details, stages and timings: [[Development/Bootstrap]].
+This builds the compiler from the committed seed for the machine (`bootstrap/seed.s` on x86-64, `bootstrap/seed-aarch64.s` on aarch64: its own assembly, so only `as` and `ld` are needed), checks that it compiles itself to a byte-identical fixed point, and builds `build/myla`, the command-line tool, and `build/myla-lsp`, the language server. Details, stages and timings: [[Development/Bootstrap]].
 
 ## Run a program
 
@@ -40,7 +41,7 @@ A run reports up to 20 errors: after a syntax error the parser goes on at the ne
 | --- | --- |
 | `myla run <file> [args…]` | Load modules, type-check, interpret |
 | `myla test <file>` | Run every `#test(args)[expected]` case; prints `PASS`/`FAIL` per case and exits 1 on a failure |
-| `myla build <file> [-o out] [-g]` | Compile to a static x86-64 ELF (`a.out` by default) through `as` and `ld`; `-g` adds DWARF debug information for gdb: line table, variables and types ([[Development/Debugging]]) |
+| `myla build <file> [-o out] [-g] [--target t]` | Compile to a static ELF for this machine (`a.out` by default) through `as` and `ld`; `-g` adds DWARF debug information for gdb: line table, variables and types ([[Development/Debugging]], x86-64 only). `--target x86_64-linux` or `aarch64-linux` builds for the other machine (clang, `ld.lld`), `--target wasm32-wasi` a WebAssembly module (clang, `wasm-ld`), run with `node tools/wasm/run.mjs prog.wasm` ([[Architecture/Native-backend]]) |
 | `myla check <file>` | Type-check only, printing any warnings (D95), then `ok` |
 | `myla repl` | The interactive interpreter ([[MYLA-82]]) |
 

@@ -29,10 +29,21 @@ Measurements in October 2026 showed that the bootstrap's slowness comes from two
 | October 2026 | The mid-level IR with its verifier, every function through it (D79, D85); guaranteed tail calls (`become`, D87); the project tool with Git dependencies (D73); tools in Myla (language server, REPL, grammar generator, D71) | Done |
 | October 2026 | Concurrency: `async`/`await`, structured child tasks, actors, on a multi-threaded work-stealing native runtime (D89 to D97, [[MYLA-61]]) | Done |
 | November 2026 | The bootstrap from a committed seed, `bootstrap/seed.s`, with `as` and `ld` alone ([[MYLA-218]]); the Python toolchain retired, the tests answered from its recorded answers ([[MYLA-219]], D101) | In review |
+| November 2026 | The runtime in Myla (`std.rt` over `std.platform`, D117, [[MYLA-162]]); backends of Myla's own for Linux on aarch64 ([[MYLA-163]]) and wasm32 on WASI (D125, [[MYLA-158]]), with the checker and interpreter in a web page | In review |
 
 The milestone numbering was locked by D23: self-hosting is the destination (v1.0), reached through the feature milestones. The detailed per-version designs are in [[Archive]].
 
 ## Next
+
+After the first two new targets, the [[Project/Reflection-2026-11]] set the order: not a fifth target yet, but the boundary around the IR made solid, so that the next target costs translation only ([[MYLA-62]]):
+
+1. **Fix** wasm's shadow stack and trap reports ([[MYLA-261]]).
+2. **Specify** the IR as a contract with conformance programs ([[MYLA-264]]), the targets' capabilities and the edge cases on the language pages ([[MYLA-266]]), and the calling-convention question ([[MYLA-272]]).
+3. **Consolidate**: a target description ([[MYLA-262]]), the backend glue as IR ([[MYLA-263]]), one layout module ([[MYLA-185]]), the platform interface in Myla's terms ([[MYLA-265]]), an object model instead of GAS text ([[MYLA-269]]).
+4. **Verify**: every suite on every target ([[MYLA-268]]), memory ordering on arm64 hardware ([[MYLA-267]]), benchmarks on the new targets ([[MYLA-270]]).
+5. **Then** a register allocator for every target ([[MYLA-257]]), the wasm stackifier and binary writer ([[MYLA-158]]), macOS and Windows ([[MYLA-164]], [[MYLA-165]]), the C FFI ([[MYLA-166]]) and the website ([[MYLA-159]]).
+
+## Earlier plans (October 2026)
 
 1. **Quick wins**:
    - ~~make the bootstrap fast~~: done, 5 minutes → 8 seconds ([[MYLA-60]], [[MYLA-16]]);
@@ -56,8 +67,8 @@ Bigger directions, collected as tasks in the `Roadmap ideas` epic: three are don
 | --- | --- | --- |
 | Swift-style actors and structured concurrency | [[MYLA-61]] | Safety from the checker (isolation, sendability, no locks), not runtime deadlocks |
 | A mid-level IR between checker and code generators | [[MYLA-67]] | Checkable reference counting, optimisations (slot reuse, register allocation, retain/drop elision, inlining), small backends |
-| Other platforms through Myla's own backends (no LLVM, D117) | [[MYLA-62]] | Planned: de-risking first ([[MYLA-160]], with the gap to C measured, [[MYLA-242]]), the runtime in Myla ([[MYLA-162]]), then wasm and aarch64 backends, macOS and Windows ([[MYLA-158]], [[MYLA-163]] to [[MYLA-165]]), and a C FFI both ways ([[MYLA-166]], [[MYLA-241]]) |
-| A WebAssembly target | [[MYLA-158]] | Myla and its toolchain in the browser, through a wasm backend of Myla's own |
+| Other platforms through Myla's own backends (no LLVM, D117) | [[MYLA-62]] | De-risked ([[MYLA-160]], [[MYLA-242]]), the runtime in Myla ([[MYLA-162]]) and the aarch64 and wasm32 backends built ([[MYLA-163]], [[MYLA-158]]); next the work above, then macOS and Windows ([[MYLA-164]], [[MYLA-165]]) and a C FFI both ways ([[MYLA-166]], [[MYLA-241]]) |
+| A WebAssembly target | [[MYLA-158]] | Built: programs as WASI modules, the checker and interpreter in a page (`tools/wasm/myla.mjs`); next a stackifier and a binary writer |
 | A website: Angular webapp with docs, an online editor and a gamified tutorial | [[MYLA-159]] | Static, data in IndexedDB; needs the wasm toolchain |
 | Debugger | [[MYLA-66]] | First step: line tables ([[MYLA-71]]) |
 | Better error messages | [[MYLA-65]] | Files, spans, notes, several errors per run |
@@ -68,10 +79,10 @@ Bigger directions, collected as tasks in the `Roadmap ideas` epic: three are don
 
 Ideas not yet decided or scheduled (from the decision log and the feature catalogue in [[Archive/future-features]]):
 
-- compound assignment `+= -= *= /= %=`, `**` and `**=`;
+- `**` and `**=` (compound assignment itself is built, D104);
 - custom operators (D18) and user-defined macros / attributes;
 - sets (D39: as a thin layer over maps);
 - by-reference closure capture with `ref` (D15, D48);
-- `#derive(Ord)`, trait objects, user-defined bounds beyond operators;
+- trait objects (`#derive(Ord)` is decided, D113, not yet built), user-defined bounds beyond operators;
 - associated functions (`Type.new()`), named-field enum variants (D32), `@` bindings and range patterns (D33);
 - `exec` from the language runtime beyond `std.process` (D29); the package manifest is built ([[Architecture/Project-tool]]).

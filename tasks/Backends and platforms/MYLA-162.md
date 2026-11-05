@@ -14,7 +14,7 @@ Second step of [[MYLA-62]]: the runtime (about 3,000 lines of hand-written x86-6
 - [x] The x86-64 backend uses it; the gates and the bootstrap still pass, and the cost against the assembly runtime is measured
 - [x] Arenas that grow lazily (D106, [[MYLA-206]])
 - [x] The runtime out of [[selfhost/codegen.my]] (D108, [[MYLA-217]])
-- [ ] Then the reactor: [[MYLA-230]] (D107)
+- [x] Then the reactor: [[MYLA-230]] (D107; the timers, `task.sleep` and the poller, D124, in `std.rt` on every target)
 
 ## Sizing (2026-11-03, for [[MYLA-160]])
 

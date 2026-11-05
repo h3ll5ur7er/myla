@@ -49,3 +49,9 @@ Then `for i in a..b` and `for x in xs` the same way (their test on the way in an
 - `REG_MIN_USE` from 12 to 4: a value crossing a call takes a callee-saved register when its loop-weighted reads and writes are at least 4. With 2 the benchmarks ran 1.25% more instructions; 4 and 12 compile the compiler in the same time (twelve runs each, medians 870 ms and 884 ms).
 - Benchmarks: 1.98% fewer instructions on the geometric mean (fib 6.1%, sieve 4.6%, fannkuch 3.0%, quicksort 2.4%, string building 2.3%); compiling the compiler 0.91% fewer.
 - And an IR instruction for the per-type routines (MYLA-162): `drop T %v`, the cell a value points at released (`DropVal`, the counterpart of `retain T %v`).
+
+## For every target (2026-11-04, [[Project/Reflection-2026-11]])
+
+The allocator is tied to x86-64's register file (about 800 lines in [[selfhost/ir_x86.my]]); aarch64 runs with none, every temporary in a frame cell, and wasm leaves allocation to the engine. Built against a description of the register file (the target's, [[MYLA-262]]), it is the main performance lever for aarch64; its measures want aarch64 hardware ([[MYLA-270]]).
+
+- [ ] The allocator independent of the target, x86-64 and aarch64 both using it

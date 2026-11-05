@@ -28,3 +28,7 @@ Three peepholes from the list above; the analyses (hoisting the copy-on-write ch
 - A copy-on-write check takes the list's address straight into `%rcx`.
 - `tests/burn/test_loop_overhead.py`: the compiler before the change fails its two code checks; programs that branch on negated flags print the same natively and interpreted.
 - Measured against the baseline: sieve 1.07× as fast, fib, fannkuch and Game of Life within noise (1–3 % fewer instructions). The compiler's own assembly is 1 % smaller.
+
+## From the new targets (2026-11-04)
+
+These are passes on the IR ([[selfhost/ssa.my]], [[selfhost/inline.my]] are the models), not x86-64 instruction selection, so aarch64 and wasm gain from them too; only the re-extension item is per backend.

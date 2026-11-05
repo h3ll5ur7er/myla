@@ -5,8 +5,10 @@
 //
 // The program sees the host's `/` as its root, the working directory as
 // `PWD`, the environment and the arguments (the module's path first); its
-// exit code is the process's. A trap (a wasm runtime error the program
-// didn't report itself) ends it with 134 and the engine's message.
+// exit code is the process's. A trap the program didn't report itself ends
+// it as a runtime error does natively: the engine's call stack running out
+// as `runtime error: stack overflow`, anything else as `runtime error:
+// <the engine's message>`, with exit code 1 (MYLA-261, as myla.mjs).
 
 import { readFileSync } from "node:fs";
 import { Wasi } from "./wasi.mjs";
@@ -24,7 +26,8 @@ let code;
 try {
   code = wasi.start(instance);
 } catch (e) {
-  process.stderr.write(`wasm trap: ${e.message}\n`);
-  code = 134;
+  if (!(e instanceof WebAssembly.RuntimeError || e instanceof RangeError)) throw e;
+  process.stderr.write(/call stack/i.test(e.message) ? "runtime error: stack overflow\n" : `runtime error: ${e.message}\n`);
+  code = 1;
 }
 process.exitCode = code;

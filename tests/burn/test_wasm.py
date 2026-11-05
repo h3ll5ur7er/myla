@@ -44,7 +44,7 @@ def build_wasm(src: str, out: str) -> None:
         subprocess.run([native_compiler(), src, STDLIB_ROOT, "--target", "wasm32-wasi"], stdout=fh, check=True, cwd=_REPO)
     subprocess.run(["clang", "--target=wasm32-wasi", "-mtail-call", "-mbulk-memory", "-mnontrapping-fptoint", "-msign-ext",
                     "-c", "-o", out + ".o", out + ".s"], check=True)
-    subprocess.run(["wasm-ld", "-z", "stack-size=8388608", "-o", out, out + ".o"], check=True)
+    subprocess.run(["wasm-ld", "--stack-first", "-z", "stack-size=8388608", "-o", out, out + ".o"], check=True)
 
 
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
@@ -114,14 +114,16 @@ class WasmParity(unittest.TestCase):
 
     def test_compiler(self):
         # the compiler built for wasm makes the same assembly as the one built
-        # for x86-64, for either target
+        # for x86-64, for either target; without --target, for its own (D127)
         with tempfile.TemporaryDirectory() as tmp:
             gen = os.path.join(tmp, "gen.wasm")
             build_wasm("selfhost/gen_main.my", gen)
-            for extra in ([], ["--target", "wasm32-wasi"]):
+            for extra, ref in (([], ["--target", "wasm32-wasi"]),
+                               (["--target", "wasm32-wasi"], ["--target", "wasm32-wasi"]),
+                               (["--target", "x86_64-linux"], [])):
                 with self.subTest(target=extra):
                     src = os.path.join(_REPO, "examples", "maps.my")
-                    want = run([native_compiler(), src, STDLIB_ROOT] + extra)
+                    want = run([native_compiler(), src, STDLIB_ROOT] + ref)
                     got = run(NODE + [gen, src, STDLIB_ROOT] + extra)
                     self.assertEqual(got[2], 0, got[1])
                     self.assertEqual(got, want)
@@ -288,6 +290,127 @@ class WasmBrowser(unittest.TestCase):
         self.assertEqual(got["errors"], [])
 
 
+# MYLA-261: a recursion whose frames are large runs out of the shadow stack
+# (`__stack_pointer`, in memory) before the engine's call stack; one whose
+# frames are small runs out of the engine's first
+BIG_FRAMES = """
+struct Q {
+    a: int64, b: int64, c: int64, d: int64, e: int64, f: int64, g: int64, h: int64,
+}
+
+struct R {
+    x: Q, y: Q, z: Q, w: Q,
+}
+
+fun down(n: int64, q: Q) -> int64 {
+    let r = R { x: q, y: q, z: q, w: q }
+    let s = R { x: r.y, y: r.z, z: r.w, w: r.x }
+    let t = R { x: s.y, y: s.z, z: s.w, w: s.x }
+    let u = R { x: t.y, y: t.z, z: t.w, w: t.x }
+    let v = Q { a: u.x.a + 1, b: u.y.b, c: u.z.c, d: u.w.d, e: q.e, f: q.f, g: q.g, h: q.h }
+    if n == 0 {
+        return v.a
+    }
+    return down(n - 1, v) + 1
+}
+
+fun main() {
+    let q = Q { a: 0, b: 0, c: 0, d: 0, e: 0, f: 0, g: 0, h: 0 }
+    print(down(1000, q))
+    print("the data is intact")
+    print(down(100000000, q))
+}
+"""
+
+SMALL_FRAMES = """
+fun down(n: int) -> int {
+    if n == 0 {
+        return 0
+    }
+    return down(n - 1) + 1
+}
+
+fun main() {
+    print(down(1000))
+    print(down(100000000))
+}
+"""
+
+
+def _leb(b: bytes, i: int) -> tuple[int, int]:
+    v = shift = 0
+    while True:
+        x = b[i]
+        i += 1
+        v |= (x & 0x7F) << shift
+        shift += 7
+        if x < 0x80:
+            return v, i
+
+
+def stack_and_data(path: str) -> tuple[int, list[int]]:
+    """A module's first global's start value (wasm-ld's `__stack_pointer`)
+    and the start of each active data segment."""
+    with open(path, "rb") as fh:
+        b = fh.read()
+    i, sp, data = 8, -1, []
+    while i < len(b):
+        sid = b[i]
+        size, i = _leb(b, i + 1)
+        end = i + size
+        if sid == 6 and sp < 0:              # globals: type, mutability, i32.const n
+            _, j = _leb(b, i)
+            assert b[j + 2] == 0x41
+            sp, _ = _leb(b, j + 3)
+        if sid == 11:                         # data: flags 0, i32.const n, end, bytes
+            n, j = _leb(b, i)
+            for _ in range(n):
+                assert b[j] == 0 and b[j + 1] == 0x41
+                off, j = _leb(b, j + 2)
+                data.append(off)
+                ln, j = _leb(b, j + 1)
+                j += ln
+        i = end
+    return sp, data
+
+
+@unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
+@unittest.skipUnless(HAVE_WASM, WASM_SKIP)
+class WasmStack(unittest.TestCase):
+    """Running out of the stack on wasm is the runtime error it is natively
+    (MYLA-261): never a write over the static data, never the engine's own
+    trap message."""
+
+    def same(self, tmp: str, name: str, source: str) -> None:
+        """The program built for wasm gives what its x86-64 build gives,
+        which runs out of its stack too."""
+        path = os.path.join(tmp, name + ".my")
+        with open(path, "w") as fh:
+            fh.write(source.lstrip())
+        out = os.path.join(tmp, name + ".wasm")
+        build_wasm(path, out)
+        build_x86(path, os.path.join(tmp, name))
+        want = run([os.path.join(tmp, name)])
+        self.assertEqual(want[1:], ("runtime error: stack overflow\n", 1))
+        self.assertEqual(run(NODE + [out]), want)
+
+    def test_the_stack_lies_below_the_data(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "hello.wasm")
+            build_wasm(os.path.join(_REPO, "examples", "hello.my"), path)
+            sp, data = stack_and_data(path)
+            self.assertTrue(data)
+            self.assertLessEqual(sp, min(data))
+
+    def test_running_out_of_the_shadow_stack(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.same(tmp, "big", BIG_FRAMES)
+
+    def test_running_out_of_the_engines_stack(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.same(tmp, "small", SMALL_FRAMES)
+
+
 @unittest.skipUnless(HAVE_WASM, WASM_SKIP)
 class WasmTime(test_time.Time):
     """test_time's programs built for wasm and run under Node (through a
@@ -311,6 +434,9 @@ class WasmTime(test_time.Time):
         self.skipTest("the WASI shim can't wait for input without blocking")
 
     def test_a_child_process_waited_for_without_blocking_the_worker(self):
+        self.skipTest("WASI has no processes")
+
+    def test_child_processes_waited_for_by_programs_running_at_once(self):
         self.skipTest("WASI has no processes")
 
     def test_the_virtual_clock_takes_no_time(self):

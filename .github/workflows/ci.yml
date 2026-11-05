@@ -78,6 +78,36 @@ jobs:
           ld -o build/hello build/hello.o
           build/hello
 
+  bootstrap-arm64:
+    # what a Raspberry Pi 4 with a 64-bit OS does (MYLA-276, D127): `just
+    # bootstrap` from the aarch64 seed with the machine's own as and ld, then
+    # build/myla targets the machine without --target
+    name: Bootstrap on aarch64 (just bootstrap)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - name: just
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq just
+      - name: just bootstrap (bootstrap/seed-aarch64.s, stages 0–3, the fixed point)
+        run: just bootstrap
+      - name: The seeds are the current compiler (the x86-64 one written by this aarch64 compiler)
+        run: scripts/check-seed.sh build
+      - name: Every example built for this machine gives what the interpreter gives
+        run: |
+          fail=0
+          for f in examples/*.my; do
+            name=$(basename "$f" .my)
+            [ "$name" = args ] && continue    # argv[0] differs: the binary's path
+            build/myla build "$f" -o "build/ex_$name" || { echo "build failed: $f"; fail=1; continue; }
+            want=$(build/myla run "$f" < /dev/null 2>&1; echo "exit $?")
+            got=$("build/ex_$name" < /dev/null 2>&1; echo "exit $?")
+            [ "$want" = "$got" ] || { echo "differs: $f"; fail=1; }
+          done
+          exit $fail
+
   vscode-extension:
     name: VS Code extension (typecheck, lint, tests, .vsix)
     runs-on: ubuntu-24.04

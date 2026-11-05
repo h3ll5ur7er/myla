@@ -23,3 +23,5 @@ A function value parameter lives in the caller's storage (its address is the arg
 
 - [ ] A test: the program above, natively against the interpreter, with a million steps
 - [ ] The lowering and the checker agree
+
+Still reproduces on 2026-11-04 on x86-64, aarch64 and wasm32: the failure is in the lowering, which every target shares.

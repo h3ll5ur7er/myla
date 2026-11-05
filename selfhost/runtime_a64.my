@@ -2,9 +2,9 @@
 //
 // What `runtime_x86.my` gives for x86-64, for aarch64: the program's start,
 // the traps and the panic, the system-call and memory primitives, the
-// function values' counts, composition and std.math's primitives. Not yet:
-// tasks (the executor's control transfers, the threads, the deep copies of
-// environments) and the stack-overflow handler.
+// function values' counts, composition, std.math's primitives, the tasks'
+// executor (its control transfers, the workers, an environment's deep
+// copies) and the stack-overflow handler. Not yet: `-g` (MYLA-259).
 //
 // The hand-written routines keep to what the code `ir_a64.my` makes
 // assumes: they may change x0 to x17 and the flags, and keep x19 to x29

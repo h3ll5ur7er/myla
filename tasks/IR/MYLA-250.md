@@ -67,3 +67,7 @@ What the convention didn't do, as follow-ups:
 - a parameter kept in the register it came in when nothing in its life uses that register (the allocator has to learn which instruction sequences use `%rcx`, `%rdx`, `%rsi` and `%rdi`), which would remove the entry store a parameter without a register now costs; with the loop weights of a self tail call, Ackermann's `m` would get its register too;
 - 16-byte stack alignment at calls, with the FFI.
 - the checker counts a value of a type parameter as one word, so a generic function's `become` handing one over by value could still need more stack words in an instance than the rule saw, and stop the code generator with an internal error (no program does so yet).
+
+## The follow-ups' tasks (2026-11-04)
+
+The convention question these follow-ups belong to (floats in vector registers, 16-byte alignment, and whether Myla's own functions use the platform's C convention at all, D119) is [[MYLA-272]], which also carries the parameter kept in its register and the generic `become` counting a type parameter as one word.

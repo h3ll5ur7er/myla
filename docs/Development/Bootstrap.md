@@ -6,7 +6,7 @@
 
 ## Stages
 
-The bootstrap starts from a seed: `bootstrap/seed.s`, the self-hosted compiler's own assembly, committed (D101, [[MYLA-218]]). It needs only `as` and `ld`. Until the Python toolchain was retired ([[MYLA-219]]), it could build stage 1 instead (`--from-python`); see [[Development/Bootstrap#the-python-toolchains-last-state]].
+The bootstrap starts from a seed: the self-hosted compiler's own assembly for the machine it runs on, committed (D101, [[MYLA-218]]): `bootstrap/seed.s` on x86-64 Linux, `bootstrap/seed-aarch64.s` on aarch64 Linux (D127, [[MYLA-276]]). It needs only that machine's `as` and `ld`. Until the Python toolchain was retired ([[MYLA-219]]), it could build stage 1 instead (`--from-python`); see [[Development/Bootstrap#the-python-toolchains-last-state]].
 
 ```mermaid
 flowchart LR
@@ -37,7 +37,9 @@ The result is about 6.2 MB of assembly and a 1.5 MB static binary; the whole scr
 - **The optional pre-push hook:** `scripts/install-hooks.sh` sets `core.hooksPath` to `.githooks/`, whose `pre-push` runs `scripts/check-seed.sh` (about 6 s) when the commits pushed change `selfhost/`, `lib/std/` or the seed, and stops the push if the seed is stale (`MYLA_SKIP_SEED_CHECK=1 git push` skips it once). It checks the working tree, so commit first.
 - **What it doesn't limit:** the seed only has to compile the compiler. What the compiler emits for programs (new system calls, IPC, a C FFI, other backends and platforms) is the compiler's business, not the seed's.
 - **Checking a seed:** run `scripts/update-seed.sh` at the commit its header names and compare; the compiler is deterministic, so the result is the same byte for byte.
-- **Other hosts:** the seed is x86-64 Linux assembly; another host cross-compiles from x86-64 Linux, or gets a seed of its own later.
+- **Other machines** (D127, [[MYLA-276]]): `scripts/bootstrap.sh` (`just bootstrap`) finds the machine with `uname -m` ([[scripts/host.sh]]) and takes its seed: `bootstrap/seed.s` on x86-64, `bootstrap/seed-aarch64.s` on aarch64, such as a Raspberry Pi 4 or 5 with a 64-bit OS or an ARM server. It assembles and links the seed with that machine's GNU `as` and `ld` (binutils; nothing else). The tools it builds target the machine by default (`std.platform.TARGET`, which each target's platform module defines), so `build/myla build x.my` makes an aarch64 program there, through the same `as` and `ld`; another target takes `--target` and clang with lld. 32-bit ARM (`armv7l`) and other systems stop with a message.
+- **Both seeds from one machine:** `scripts/update-seed.sh` writes every seed. This machine's is its `stage3.s`; the other's is that compiler's output for the other target, which is what the other machine's fixed point gives, byte for byte, as the compiler is deterministic and behaves the same on every target. `scripts/check-seed.sh` checks both. CI's `bootstrap-arm64` job runs `just bootstrap` on GitHub's arm64 runner, checks the seeds from there, and compares every example built there with the interpreter.
+- **Another machine's bootstrap, emulated:** `MYLA_ARCH=aarch64 AS=aarch64-linux-gnu-as LD=aarch64-linux-gnu-ld MYLA_RUN=qemu-aarch64 scripts/bootstrap.sh build-a64` runs the aarch64 bootstrap on x86-64 (binutils-aarch64-linux-gnu and qemu-user); it reaches the same fixed point in about 75 s.
 
 The burn tests bootstrap from the seed too (`tests/burn/_tools.py`, [[MYLA-235]]), and CI's `bootstrap` job runs without Python, checks that the seed is current, and builds and runs an example with `build/stage3`.
 

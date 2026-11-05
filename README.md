@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/h3ll5ur7er/myla/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/h3ll5ur7er/myla/actions/workflows/ci.yml)
 
-Myla is a small, statically typed programming language with value semantics. It compiles to x86-64 Linux binaries without libc, and its compiler is written in Myla and compiles itself. It borrows from Swift, Rust and Python, but is none of them: newlines end statements, functions start with `fun`, collections are values, and everything is checked before anything runs.
+Myla is a small, statically typed programming language with value semantics. It compiles to static x86-64 and aarch64 Linux binaries without libc and to WebAssembly modules for WASI (its checker and interpreter run in a web page too), and its compiler is written in Myla and compiles itself. It borrows from Swift, Rust and Python, but is none of them: newlines end statements, functions start with `fun`, collections are values, and everything is checked before anything runs.
 
 ```myla
 enum Shape {
@@ -86,7 +86,7 @@ async fun main() {
 
 ## What it values
 
-- **No dependencies.** The toolchain needs GNU binutils (`as`, `ld`), nothing else, and the tests only Python's standard library; native programs are static binaries without libc.
+- **Few dependencies.** The toolchain needs GNU binutils (`as`, `ld`), nothing else (clang and lld to build for another machine or for wasm), and the tests only Python's standard library; native programs are static binaries without libc.
 - **Predictable code.** Explicitly sized integers (`int8` … `uint64`, `int` is `int32`), no implicit conversions, value semantics with copy-on-write, deep immutability for `let`, no null (`Option`), errors as values (`Result` and `?`).
 - **Safety the checker can give cheaply.** Exhaustive `match`, ranges and spans in every diagnostic, actors whose state only their own methods reach, captures that can't be changed from a lambda, a warning for actor state checked before an `await` and changed after it.
 - **One meaning, two ways to run it.** There is one implementation, and its interpreter and its native code are tested against each other on every program of the test suites, and against the answers the retired Python toolchain gave, recorded, down to the text of every diagnostic.
@@ -102,9 +102,9 @@ The reference is the wiki, starting at [Language](docs/Language.md); the reasons
 
 ## Getting started
 
-You need x86-64 Linux and GNU binutils (`as`, `ld`). gdb is optional, for debugging; Python 3.12 or later only runs the tests.
+You need Linux on x86-64 or aarch64 (a Raspberry Pi 4 or 5 with a 64-bit OS works) and GNU binutils (`as`, `ld`); for another target (`--target aarch64-linux`, `x86_64-linux` or `wasm32-wasi`) also clang and lld (and qemu-user or Node to run what they build). gdb is optional, for debugging; Python 3.12 or later only runs the tests.
 
-`scripts/bootstrap.sh` builds the compiler from the committed seed (`bootstrap/seed.s`, its own assembly; only `as` and `ld` needed), checks the fixed point, and builds `build/myla`, the command-line tool, and `build/myla-lsp`, the language server:
+`scripts/bootstrap.sh` (or `just bootstrap`) builds the compiler from the committed seed for the machine (`bootstrap/seed.s` on x86-64, `bootstrap/seed-aarch64.s` on aarch64: its own assembly; only `as` and `ld` needed), checks the fixed point, and builds `build/myla`, the command-line tool, and `build/myla-lsp`, the language server:
 
 ```bash
 scripts/bootstrap.sh
@@ -138,9 +138,9 @@ The architecture, from the module loader to the native runtime, is described in 
 
 ## Status
 
-Version 1.0, self-hosting, was reached in June 2026. Since then: the mid-level IR, guaranteed tail calls, concurrency with actors and a work-stealing runtime, the project tool, the tools rewritten in Myla, and in November 2026 the bootstrap from a committed seed, which retired the Python toolchain (D101). The review of October 2026 and what came of it are on [Review 2026-10](docs/Project/Review-2026-10.md); open bugs are on [Known issues](docs/Project/Known-issues.md).
+Version 1.0, self-hosting, was reached in June 2026. Since then: the mid-level IR, guaranteed tail calls, concurrency with actors and a work-stealing runtime, the project tool, the tools rewritten in Myla, and in November 2026 the bootstrap from a committed seed, which retired the Python toolchain (D101), the runtime rewritten in Myla, and backends of Myla's own for Linux on aarch64 and for WebAssembly (WASI, and a page API for the checker and interpreter). The review of October 2026 and what came of it are on [Review 2026-10](docs/Project/Review-2026-10.md); open bugs are on [Known issues](docs/Project/Known-issues.md).
 
-Next on the [Roadmap](docs/Project/Roadmap.md): other platforms through backends of Myla's own (WebAssembly, Linux on aarch64, macOS, Windows), with the runtime written in Myla, then a C FFI.
+Next on the [Roadmap](docs/Project/Roadmap.md), from the [reflection on the two new backends](docs/Project/Reflection-2026-11.md): the IR and the targets' capabilities specified, the backend glue and the platform interface consolidated and every suite run on every target; then macOS, Windows and a C FFI.
 
 ## Working on Myla
 

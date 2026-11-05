@@ -11,3 +11,5 @@ Split off [[MYLA-163]]: `myla build -g --target aarch64-linux` is refused for no
 - [ ] `.loc` lines from `loc` and the frame's CFA described for aarch64 (x29-based)
 - [ ] variables and parameters as the frame cells they live in (`DW_OP_fbreg` against x29, or the heap frame's x28 in a frame function)
 - [ ] the pretty-printers and the burn tests of [[tests/burn/test_debug_info.py]] under `gdb-multiarch` with qemu's gdbstub, where practical
+
+- [ ] wasm: DWARF in custom sections (clang writes them from `.loc`), for browsers' devtools; [[MYLA-158]]

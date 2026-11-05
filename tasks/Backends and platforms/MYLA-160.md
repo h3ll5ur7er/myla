@@ -2,7 +2,7 @@
 id: MYLA-160
 title: "Backends: de-risking D117"
 type: design
-status: in-progress
+status: review
 priority: medium
 labels: [backend, platforms, design]
 ---
@@ -10,12 +10,12 @@ First step of [[MYLA-62]]. D117 (2026-11-02) chose Myla's own backends from the 
 
 - [x] **The gap to C:** benchmarks of Myla native against C at `-O0` and `-O2` (gcc, and clang for what LLVM would win back), and where the time goes ([[MYLA-242]]); no factor fixed in advance: the owner weighs the numbers, the bar being that Myla clearly feels faster than Python. Result ([[Development/Benchmarks]]): about 3× C with Myla's semantics on the geometric mean; clang isn't ahead of gcc; every large gap has a cause and a task ([[MYLA-246]] to [[MYLA-252]]), none needing LLVM
 - [x] **The runtime's port:** the runtime ([[MYLA-162]]) sized piece by piece (allocator, strings, maps, builders, formatting, traps, executor, threads), what Myla can't yet express for it (raw memory, atomics for actor handles, `deep`, `clone` and the executor's queues, D92, thread-local state), and what that costs the language. Answered on [[MYLA-162]]: about 2,700 lines of hand-written assembly plus 600 lines of per-type templates (which become IR); raw and bulk memory, atomics as primitives of the standard library, system calls, thread-local state and a few control transfers in the platform layer; no language change; Myla's versions of the hot string routines take 1.2–1.3× the assembly's instructions on a bulk-copy primitive
-- [ ] **The IR's open points:** a pointer kind ("Untyped addresses"), sizes per target, 32-bit wasm ("Lowered per target"), SSA form for the optimisations of D117 (3). Options and recommendations: [[MYLA-254]] (with memory widths, which [[MYLA-247]] needs)
+- [x] **The IR's open points:** a pointer kind ("Untyped addresses"), sizes per target, 32-bit wasm ("Lowered per target"), SSA form for the optimisations of D117 (3). Options and recommendations: [[MYLA-254]] (with memory widths, which [[MYLA-247]] needs). Decided: D120 (widths), D121 (a pointer kind), D122 (sizes per target), D123 (SSA where a pass wants it), D126 (wasm32 keeps 8-byte layouts for now, [[MYLA-260]])
 - [x] **Calling conventions:** Myla's own convention on each new backend (arguments above the frame base, the callee popping them, [[MYLA-126]]; `become`, D87; suspended frames, D90), and each platform's C convention for the runtime's platform layer and [[MYLA-166]]. Answered by D119 ([[MYLA-250]]): each target's C convention for Myla's own functions too (System V on x86-64, done; AAPCS64, Win64 and wasm's C convention with their backends), the environment a hidden parameter, `become` by `return_call` on wasm and by the checker's stack-word rule natively; floats in vector registers and 16-byte alignment come with the FFI
 - [x] **Object files and linking per platform:** the platform's assembler and linker as external tools, or object files written by Myla (ELF, COFF, Mach-O, wasm modules); signing on macOS
 - [x] **Debug information per platform:** the hand-written DWARF (D82) on Linux and macOS, CodeView/PDB on Windows, wasm's own
-- [ ] **The first backend:** wasm (no register allocation; structured control flow rebuilt from the blocks) or aarch64 (closest to x86-64), decided from the answers above
-- [ ] **Modularity:** what of the toolchain each backend and platform brings along, and what goes into packages ([[MYLA-245]])
+- [x] **The first backend:** wasm (no register allocation; structured control flow rebuilt from the blocks) or aarch64 (closest to x86-64), decided from the answers above. Built: aarch64 on Linux first ([[MYLA-163]]), then wasm32 on WASI ([[MYLA-158]], D125); what they taught: [[Project/Reflection-2026-11]]
+- [x] **Modularity:** what of the toolchain each backend and platform brings along, and what goes into packages ([[MYLA-245]]). Handed on: the backends showed what each target brings (a translation of about 1,500 lines, a runtime file of 500–600, a platform module, its tools); how a target is described and chosen is [[MYLA-262]], code per target [[MYLA-245]]
 - [x] **The gates:** how the parity, stress and concurrency suites run on a target the CI machine can't execute (an emulator, a wasm runtime)
 
 ## Object files, linking, debug information, gates (2026-11-03)

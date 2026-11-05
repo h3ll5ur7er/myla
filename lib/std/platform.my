@@ -17,6 +17,11 @@
 // are `int64`. Not for programs (its primitives are the standard
 // library's, D100).
 
+// The target this module is the platform layer of, as `--target` names it:
+// the target a program built with it runs on (x86-64 Linux). The toolchain's
+// own build of it is its default target, the host's.
+pub const TARGET: str = "x86_64-linux"
+
 pub const EINTR: int64 = -4
 pub const EAGAIN: int64 = -11
 

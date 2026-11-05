@@ -10,3 +10,5 @@ Split from [[MYLA-16]], whose optional last item it was. The Python backend's ma
 
 - [ ] Removal leaves a tombstone; lookups pass over tombstones, inserts reuse them, growing counts them
 - [ ] The map tests and the parity programs with `remove` still pass; a removal-heavy program measured before and after
+
+Superseded by [[MYLA-271]] (2026-11-04): the Python backend is gone and maps are std.rt's, lowered as IR on every target. Closing this one is the owner's call.

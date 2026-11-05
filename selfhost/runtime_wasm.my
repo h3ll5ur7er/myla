@@ -100,6 +100,14 @@ impl CodeGen {
             if label == "__trap_oom" { pos = "i64.const 0" }
             self.wasm_fn(label, 1, [format("i32.const .Lmsg{}", label), "i64.extend_i32_u", pos, "call __panic", "drop", "unreachable"], true)
         }
+        // out of the shadow stack (the frame check in every function,
+        // MYLA-261): the error natively reported from the SIGSEGV handler,
+        // without a position; the stack given back whole first, as what
+        // reports it runs Myla code (and nothing returns into the frames
+        // given up)
+        let overflow = self.string_label("stack overflow")
+        self.wasm_fn("__trap_stack", 0, ["i32.const __stack_high", "global.set __stack_pointer",
+            format("i32.const {}", overflow), "i64.extend_i32_u", "i64.const 0", "call __panic", "drop", "unreachable"], true)
         if self.frames {
             // held for the parent when a task other than the entry's fails
             self.wasm_fn("__panic", 2, ["i64.const 2", "local.get 0", "local.get 1", "call __task_fail", "drop",

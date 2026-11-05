@@ -39,3 +39,10 @@ Steps, each verified. The backend comes before D122's 4-byte layouts: the runtim
 - D126 (2026-11-04): step 5, D122's 4-byte layouts, deferred to [[MYLA-260]]; wasm32 keeps 32-bit addresses on today's layouts.
 - 2026-11-04, the page API: [[selfhost/play_main.my]] (`check` as JSON, `run`, `test`) built for wasm, [[tools/wasm/myla.mjs]] (`loadMyla`, `check`, `run`, `test`, files in memory), the WASI shim's core free of Node (backends [[tools/wasm/node_fs.mjs]] and [[tools/wasm/mem_fs.mjs]]), [[tools/wasm/page.html]] and `scripts/build-page.sh`. Evidence ([[tests/burn/test_wasm.py]]): `check` gives `myla check`'s 226 errors of the error corpus (kind, message, position); `run` and `test` give what `myla run` and `myla test` give on every example; input, arguments, a module, written files; the page in Chromium runs its example, shows a type error, reports a runtime error with its source line and an endless recursion as a stack overflow.
 - Next ([[MYLA-159]], the website): running the interpreter in a Web Worker (a program that never ends), the editor; then a stackifier for speed, [[MYLA-260]] for memory.
+
+## Next, from the reflection (2026-11-04, [[Project/Reflection-2026-11]])
+
+- [x] The shadow stack below the data and trap reports like native ones ([[MYLA-261]])
+- [ ] A stackifier in place of the dispatch loop, measured against it (fib 1.9×, binary trees 2.7×, string building 2.4× the x86-64 build under Node, [[MYLA-270]])
+- [ ] The module written by Myla instead of clang and wasm-ld (D125 (2), [[MYLA-269]]), which a toolchain building wasm in the page needs
+- [ ] `play.wasm` smaller (about 2 MB today) for the website ([[MYLA-159]])

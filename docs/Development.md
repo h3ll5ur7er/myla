@@ -16,13 +16,14 @@ How to change Myla safely: the test suites, the bootstrap and the working conven
 ## Repository layout
 
 ```
-bootstrap/seed.s        the seed: the self-hosted compiler's own assembly, stage 0 of the bootstrap
+bootstrap/seed.s        the seed: the self-hosted compiler's own assembly, stage 0 of the bootstrap (x86-64)
+bootstrap/seed-aarch64.s  the same for aarch64 machines (D127)
 selfhost/               the self-hosted compiler, interpreter and CLI (build/myla)
 lib/                    the stdlib root: std/ holds the standard library, debug/ the gdb pretty-printer
 examples/               one runnable example per feature, plus args/ stdio/ readfile/ subprocess/ modules/
 examples/errors/        programs that must be rejected, one diagnostic each
 tests/burn/             the tests (Python unittest): interpreter output, native parity, #test cases, error corpus, self-hosting gates
-scripts/                bootstrap.sh, update-seed.sh, check-seed.sh, install-hooks.sh, build.sh, test.sh (fast|all), the generators (gen_unicode_tables.py, gen_treesitter.sh)
+scripts/                bootstrap.sh, update-seed.sh, check-seed.sh, host.sh (the machine and its seed), install-hooks.sh, build.sh, test.sh (fast|all), the generators (gen_unicode_tables.py, gen_treesitter.sh)
 justfile                bootstrap, build, run, test, run-all recipes
 grammar/                myla.ebnf, the grammar description
 tools/                  tools written in Myla: lsp/ (the language server), grammar/ (the generator)
