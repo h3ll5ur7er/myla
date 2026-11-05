@@ -14,6 +14,7 @@ sources changes.
 """
 from __future__ import annotations
 
+import fcntl
 import functools
 import glob
 import hashlib
@@ -48,14 +49,22 @@ def _cached(name: str, make) -> str:
     """The cached binary `name` for the current sources, made by `make(path)`
     if the cache has none."""
     path = os.path.join(_CACHE, f"{name}-{BACKEND}-{_sources_hash()}")
-    if not os.path.exists(path):
-        os.makedirs(_CACHE, exist_ok=True)
+    if os.path.exists(path):
+        return path
+    os.makedirs(_CACHE, exist_ok=True)
+    # one process at a time makes `name` (scripts/test-target.py runs suites
+    # in parallel, MYLA-268): the others wait, then find it made; the stale
+    # copies, and nothing another process is still making, go under the lock
+    with open(os.path.join(_CACHE, f"{name}-{BACKEND}.lock"), "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if os.path.exists(path):
+            return path
         for stale in glob.glob(os.path.join(_CACHE, f"{name}-{BACKEND}-*")):
             os.remove(stale)
         tmp = f"{path}.{os.getpid()}.tmp"
         try:
             make(tmp)
-            os.replace(tmp, path)   # atomic, so parallel runs never see half a file
+            os.replace(tmp, path)   # atomic, so a run without the lock never sees half a file
         finally:
             for leftover in (tmp, tmp + ".s", tmp + ".o"):
                 if os.path.exists(leftover):
