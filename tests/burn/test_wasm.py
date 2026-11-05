@@ -137,6 +137,22 @@ class WasmParity(unittest.TestCase):
                     self.assertEqual(got[2], 0, got[1])
                     self.assertEqual(got, want)
 
+    def test_the_compiler_compiles_itself(self):
+        # the whole compiler compiled by the compiler built for wasm, under
+        # Node: byte for byte what the native compiler writes, for wasm32
+        # (that compiler's own target) and for x86-64 (MYLA-268)
+        with tempfile.TemporaryDirectory() as tmp:
+            gen = os.path.join(tmp, "gen.wasm")
+            build_wasm("selfhost/gen_main.my", gen)
+            src = os.path.join(_REPO, "selfhost", "gen_main.my")
+            for target in ["wasm32-wasi", "x86_64-linux"]:
+                with self.subTest(target=target):
+                    want = run([native_compiler(), src, STDLIB_ROOT, "--target", target])
+                    got = run(NODE + [gen, src, STDLIB_ROOT, "--target", target])
+                    self.assertEqual(got[1:], ("", 0))
+                    self.assertEqual(len(got[0]), len(want[0]))
+                    self.assertTrue(got[0] == want[0], "the assembly differs")
+
 
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
 @unittest.skipUnless(HAVE_WASM, WASM_SKIP)

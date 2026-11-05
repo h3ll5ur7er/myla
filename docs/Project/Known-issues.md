@@ -28,7 +28,7 @@ The targets are x86-64 and aarch64 Linux and wasm32 on WASI; macOS and Windows a
 - aarch64 and wasm32: a plain function used as a function value with a parameter passed by value stops the compiler (`__fnval` panics; [[MYLA-263]]), as does the lowering's `RtPair` fallback ([[MYLA-264]]).
 - A computed NaN's bits differed between targets (`to_bits(0.0 / 0.0)`, `copysign(1.0, nan)`) ([[MYLA-266]]). *Fixed by D128, in review.*
 - The runtime's lock-free protocols were argued from x86-64's memory order. Unlocks were plain stores, which aarch64 may make visible before a critical section's stores; a task's end and the failure flag lacked an order ([[MYLA-267]]). *Fixed, in review; the stress programs run on arm64 hardware in CI.*
-- The full self-compile on aarch64 and wasm32 isn't in CI, and the suites besides the stress programs don't run per target yet ([[MYLA-268]]). (A missing target tool now fails CI instead of skipping.)
+- The suites besides the stress programs, the examples and the self-compile don't run per target yet ([[MYLA-268]]).
 - On wasm32 there are no processes (`run` gives `SpawnError.Unsupported`, D129), one worker, and input that can't suspend; no page says so yet ([[MYLA-266]]).
 
 ## Concurrency
