@@ -2,7 +2,7 @@
 id: MYLA-280
 title: "Slices and indexes from the end: `xs[a:b:step]`, `xs[-1]` or `xs[^1]`"
 type: feature
-status: backlog
+status: todo
 priority: medium
 labels: [language, collections, design]
 ---
@@ -33,7 +33,7 @@ print(xs[::-1])    // [50, 40, 30, 20, 10]
 
 Then:
 - [x] The decision for indexes from the end and the step (D142)
-- [ ] The owner's word on the other three questions (clamped bounds, byte slices of `str`, no slice assignment yet)
+- [x] The other three questions (D143): bounds clamped, `str` sliced by bytes with an error off a character's boundary, no assignment to a slice yet
 - [ ] Parser and grammar (`[a:b:step]` inside an index, kept apart from a map literal), checker, interpreter, `std.rt`'s slice routine, the bounds checks for `^`
 - [ ] [[Language/Collections-and-strings]], [[Language/Expressions-and-operators]]
 - [ ] Tests: parity programs on every target, the error corpus
@@ -52,4 +52,6 @@ print(xs[::-1])     // [50, 40, 30, 20, 10]
 print(xs[::2])      // [10, 30, 50]
 ```
 
-Still open: the three other rows of the table above (recommended: bounds clamped, `str` sliced by bytes with an error off a character's boundary, no assignment to a slice yet).
+## Decided (2026-11-05): D143
+
+The owner chose the recommendations of the three other rows: bounds clamped (`xs[2:99]` is the rest, `xs[5:2]` empty), a `str` sliced by bytes with a runtime error off a character's boundary, no assignment to a slice yet.
