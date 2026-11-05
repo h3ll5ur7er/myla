@@ -107,6 +107,10 @@ jobs:
             [ "$want" = "$got" ] || { echo "differs: $f"; fail=1; }
           done
           exit $fail
+      # the runtime's lock-free protocols on a weakly ordered processor
+      # (MYLA-267): each stress program 20 times on 1, 4 and 16 workers
+      - name: The concurrency stress programs on this machine's memory order
+        run: python3 scripts/stress-native.py --runs 20
 
   vscode-extension:
     name: VS Code extension (typecheck, lint, tests, .vsix)

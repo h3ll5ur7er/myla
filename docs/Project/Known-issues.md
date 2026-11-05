@@ -27,7 +27,7 @@ The targets are x86-64 and aarch64 Linux and wasm32 on WASI; macOS and Windows a
 - wasm32: the shadow stack lay above the static data, so a deep overflow of it overwrote data; a trap under `run.mjs` printed `wasm trap: …` and exited 134 ([[MYLA-261]]). *Fixed, in review.*
 - aarch64 and wasm32: a plain function used as a function value with a parameter passed by value stops the compiler (`__fnval` panics; [[MYLA-263]]), as does the lowering's `RtPair` fallback ([[MYLA-264]]).
 - A computed NaN's bits differed between targets (`to_bits(0.0 / 0.0)`, `copysign(1.0, nan)`) ([[MYLA-266]]). *Fixed by D128, in review.*
-- The runtime's lock-free protocols were argued from x86-64's memory order; on aarch64 they pass under qemu, which rarely reorders memory ([[MYLA-267]]). Unlocking is a plain store, which aarch64 hardware may reorder before a critical section's stores.
+- The runtime's lock-free protocols were argued from x86-64's memory order. Unlocks were plain stores, which aarch64 may make visible before a critical section's stores; a task's end and the failure flag lacked an order ([[MYLA-267]]). *Fixed, in review; the stress programs run on arm64 hardware in CI.*
 - The aarch64 and wasm32 tests skip silently when clang, `ld.lld`, `wasm-ld`, qemu or Node is missing, and the full self-compile on those targets isn't in CI ([[MYLA-268]]).
 - On wasm32 there are no processes (`run` gives `Other(38)`), one worker, and input that can't suspend; no page says so yet ([[MYLA-266]]).
 

@@ -482,6 +482,9 @@ impl CodeGen {
             "\tcbnz x5, .Ltf_lost",
             "\tstlxr w6, x4, [x16]",
             "\tcbnz w6, .Ltf_claim",
+            // the flag seen before what the workers run is looked at: each
+            // worker publishes its frame, then looks at the flag (MYLA-267)
+            "\tdmb ish",
             ".Ltf_now:",
             "\tmov x0, #0",
             "\tret",

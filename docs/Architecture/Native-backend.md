@@ -82,6 +82,24 @@ D90, D91 and D92, [[MYLA-138]] and [[MYLA-137]]: a program with an `async let` (
 - **Output.** `print` writes its line with one `writev` (`__print_line`), so lines printed by several workers at once stay whole; every exit is `exit_group`.
 - **Costs.** Eight CPU-bound children run 3.9 times as fast on 4 workers as on one, a tree of 131,072 small tasks 3.7 times. A program whose tasks mostly take turns at one actor gains nothing from more workers: eight tasks making 20,000 calls each of one actor take 14 ms on one worker, 49 on two, 80 on four (189 before the wait for a busy actor), the actor's record and the tasks' frames moving between cores at every call; and on one worker a program pays a few milliseconds more than the runtime of one thread for locks, atomics and copies.
 
+
+### Memory ordering
+
+[[MYLA-267]]. x86-64 keeps stores in order and loads in order, and its locked instructions are full barriers, so the runtime's protocols were first argued there. aarch64 may reorder a store with a later load, a load with a later load, and plain stores with each other. What each protocol needs and what gives it, on aarch64:
+
+| Protocol | What must hold | How |
+|---|---|---|
+| **Spin locks** (each queue, each actor record, the timers and watches) | What a holder wrote is seen by the next holder | `take_lock`: an exchange (`ldaxr`/`stlxr`, then `dmb ish`). `give_lock`: a release store (`__store_rel64`, `stlr`). |
+| **A task's end and its waiters** | A waiter that sees the task done (`task` word 1) sees its result | `task_end`: the result first, then an exchange on the word. `task_wait`: an acquire load of the word (`__load_acq64`, `ldar`), then a compare-and-swap to join the waiters. |
+| **Parking** (`exec_idle`, `exec_pushed`) | A push is never missed by a worker going to sleep | The sleeper counts itself (`__fetch_add64`), reads `__exec_seq` and looks at the queues; the pusher pushes, bumps `__exec_seq` (`__fetch_add64`) and reads the sleepers. Both read-modify-writes end in `dmb ish`, so neither side reads before its write is seen. The futex compares `__exec_seq`. |
+| **The failure flag** (D97) | A failing task sees every frame a worker runs, or that worker sees the flag | A worker publishes the frame it takes (`__xchg64` on `__exec_cur`, a full barrier), then reads `__exec_failing`. `__task_fail` claims the flag (`ldaxr`/`stlxr`, then `dmb ish`), then looks at the workers' frames. |
+| **The stuck check** (MYLA-275) | No frame is missed while every worker is idle | The counts are read with read-modify-writes, which are ordered, around a generation that a worker bumps on leaving `exec_idle`. |
+| **The poller's claim** (`__exec_polling`) | One worker polls at a time | Claimed by an exchange, given back by a release store. |
+| **Remote frees** | A cell freed by another worker is pushed and taken whole | Pushed by compare-and-swap, taken by an exchange. |
+| **Glances** (`exec_peek`, `exec_find`'s empty check, an actor's spinning caller) | Nothing: they are hints | A stale value only costs a round. Every decision is made again under the lock, or by the next round. |
+
+Two primitives give the one-sided orders: `__load_acq64` (`ldar`) and `__store_rel64` (`stlr`). On x86-64 they are plain moves, on wasm32 plain loads and stores (one worker). The atomics `__cas64`, `__xchg64` and `__fetch_add64` are full barriers on every target. The stress programs run on GitHub's arm64 runner in CI (`scripts/stress-native.py`, 20 runs on each of 1, 4 and 16 workers). qemu on an x86-64 machine can't show a reordering.
+
 ## Runtime helpers
 
 The table names x86-64's runtime entry points as the generated code calls them (the other targets have the same names); most are std.rt's functions now (`.set` to `myla_std$rt$…`), the per-type ones IR functions ([[MYLA-162]]).
