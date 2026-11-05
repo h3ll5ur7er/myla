@@ -254,6 +254,45 @@ def _function(asm: str, name: str) -> str:
     return m.group(1)
 
 
+# MYLA-253: parameters a `become` passes on borrowed
+BECOME_PARAMS = """struct Cfg {
+    name: str,
+    step: int,
+}
+
+fun relay(n: int, f: (int) -> int, a: int) -> int {
+    if n == 0 {
+        return f(a)
+    }
+    become relay(n - 1, f, a + 1)
+}
+
+fun walk(n: int, label: str, c: Cfg, acc: int) -> int {
+    if n == 0 {
+        return acc + label.len() + c.name.len()
+    }
+    become walk(n - 1, label, c, acc + c.step)
+}
+
+fun inner(n: int, s: str) -> int {
+    if n == 0 {
+        return s.len()
+    }
+    become inner(n - 1, s)
+}
+
+fun outer(c: Cfg) -> int {
+    become inner(1000, c.name)
+}
+
+fun main() {
+    print(relay(1000000, (x: int) => x * 2, 0))
+    print(walk(1000000, "abc", Cfg { name: "cfg", step: 2 }, 0))
+    print(outer(Cfg { name: "name", step: 1 }))
+}
+"""
+
+
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
 class RegisterArguments(unittest.TestCase):
     def setUp(self) -> None:
@@ -312,6 +351,12 @@ class RegisterArguments(unittest.TestCase):
         self.assertIn("popq 16(%rbp)", body)
         # through a function value: the frame left, the code jumped to
         self.assertRegex(_function(asm, "relay"), r"popq 16\(%rbp\)\n\tleave\n\tjmp \*%r11")
+
+    def test_become_passes_its_parameters_on(self):
+        # MYLA-253: a parameter the caller holds (a function value, a string,
+        # a struct, a part of one) passed on by `become` needs nothing of the
+        # frame being left
+        self.same("relay", BECOME_PARAMS, "2000000\n2000006\n4\n")
 
 
 if __name__ == "__main__":

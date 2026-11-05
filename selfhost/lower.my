@@ -324,6 +324,19 @@ fun is_scalar(t: Type) -> bool {
     }
 }
 
+// The variable `e` names, or whose field or tuple element it is ("" for
+// anything else, an index included).
+#test(expr_of("c.name"))["c"]
+#test(expr_of("xs[0]"))[""]
+fun field_root(e: Expr) -> str {
+    return match e.kind {
+        ExprKind.Name(n) => n,
+        ExprKind.GetField(t, f) => field_root(t),
+        ExprKind.TupleIndex(t, i) => field_root(t),
+        _ => "",
+    }
+}
+
 // Whether `t` is no type (a function without a result).
 #test(None)[true]
 #test(Some(Type.TBool))[false]
@@ -837,6 +850,17 @@ impl Lower {
             }
             s = s - 1
         }
+    }
+
+    // Whether `e` is a parameter of this function, or a field or element of
+    // a tuple of one, that its caller holds (it came as an argument word and
+    // this function doesn't own it): what a `become` may pass on borrowed,
+    // since nothing of the frame it leaves keeps it (MYLA-253).
+    fun caller_holds(self, e: Expr) -> bool {
+        let root = field_root(e)
+        if root == "" { return false }
+        let slot = self.lookup(root)
+        return slot >= 0 && self.f.slots[slot].word >= 0 && !self.f.slots[slot].owns
     }
 
     // The deferred blocks of the owners' scope `s`, the last met first (D135),
@@ -3125,7 +3149,9 @@ impl Lower {
             let owned = i < owns.len() && owns[i]
             let byval = any_byval && cg.byval_param(sig, i, params[i])
             // nothing keeps a borrowed value alive once `become` has gone
-            if tail && !owned && !byval && !(i == 0 && root != "") && (is_aggregate(params[i]) || cg.owns_heap(params[i])) { return self.unsupported("a 'become' passing a value to a borrowed parameter") }
+            // (unless it is a parameter, or a part of one, that the caller
+            // holds: it outlives the jump, MYLA-253)
+            if tail && !owned && !byval && !(i == 0 && root != "") && (is_aggregate(params[i]) || cg.owns_heap(params[i])) && !self.caller_holds(argv[i]) { return self.unsupported("a 'become' passing a value to a borrowed parameter") }
             // a copy of its own, which the method's writes can't reach either
             if byval { for w in self.value_words(cg, params[i], self.addr(cg, argv[i])) { vals.push(w) } }
             else if i > 0 && root != "" && place_root(argv[i]) == root && (is_aggregate(params[i]) || cg.owns_heap(params[i])) {
