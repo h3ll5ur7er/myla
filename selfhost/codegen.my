@@ -2134,7 +2134,7 @@ impl CodeGen {
         if self.wasm {
             // WASI's calls (std.platform's blocks, MYLA-158) and the
             // environment of the function value being called
-            for v in [("__wasi_args", 128), ("__wasi_buf", 64), ("__wasi_stat", 64), ("__wasi_cookies", 512), ("__wasi_subs", 1584), ("__wasi_events", 1056), ("__wasi_watch", 520), ("__wasi_ready", 264), ("myla_env", 8)] {
+            for v in [("__wasi_args", 128), ("__wasi_buf", 64), ("__wasi_stat", 64), ("__wasi_cookies", 512), ("__wasi_subs", 1584), ("__wasi_events", 1056), ("__wasi_watch", 520), ("__wasi_ready", 264)] {
                 out.push(v.0 + ":")
                 out.push(format("\t.skip {}", v.1))
             }

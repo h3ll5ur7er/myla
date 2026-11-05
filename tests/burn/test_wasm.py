@@ -66,6 +66,33 @@ class WasmParity(unittest.TestCase):
             build_wasm(src, wb)
             self.assertEqual(run(NODE + [wb]), run([xb]))
 
+    def test_a_closure_gets_its_environment_as_a_parameter(self):
+        # D130: a function value's environment travels as its last parameter,
+        # not through a memory word every call shares (which would stand in
+        # the way of threads); lambdas, partial applications, compositions,
+        # plain functions and async lambdas as values all agree with x86-64
+        source = ("import std.task as task\n\n"
+                  "fun twice(f: (int) -> int, x: int) -> int {\n    return f(f(x))\n}\n\n"
+                  "fun add(a: int, b: int) -> int {\n    return a + b\n}\n\n"
+                  "fun pick(k: int) -> (int) -> int {\n    if k > 0 {\n        return (x: int) => x * k\n    }\n"
+                  "    return add(_, k)\n}\n\n"
+                  "fun apply(f: (int) -> int, x: int) -> int {\n    become f(x)\n}\n\n"
+                  "#main\nasync fun main() {\n    let k = 3\n    let f = (x: int) => x + k\n"
+                  "    print(twice(f, 1))\n    print(twice(add(_, 10), 1))\n    print(twice(f >> add(_, 100), 0))\n"
+                  "    let g = add\n    print(g(2, 5))\n    print(pick(4)(5) + pick(0)(5))\n"
+                  "    print(apply((x: int) => x + k, 4) + apply(add(_, 1), 4))\n"
+                  "    let names = [\"a\", \"bb\"]\n    let size = (i: int) => names[i].len()\n    print(size(1))\n"
+                  "    let jobs: [async () -> int] = [async () => k * 2, async () => k * 3]\n"
+                  "    let rs = await task.all(jobs)\n    print(rs[0] + rs[1])\n}\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "closures.my")
+            with open(path, "w") as fh:
+                fh.write(source)
+            self.same(path)
+            asm = subprocess.run([native_compiler(), path, STDLIB_ROOT, "--target", "wasm32-wasi"], capture_output=True,
+                                 text=True, check=True, cwd=_REPO).stdout
+            self.assertEqual(asm.count("myla_env"), 0)
+
     def test_examples(self):
         for path in sorted(glob.glob(os.path.join(_REPO, "examples", "*.my"))):
             with self.subTest(example=os.path.basename(path)):
