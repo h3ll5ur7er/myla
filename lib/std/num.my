@@ -619,6 +619,89 @@ fun scientific(d: Decimal) -> str {
     return sb.build()
 }
 
+// The exact decimal expansion of a finite v > 0.
+fun exact_decimal(v: float64) -> Decimal {
+    let b = decompose(v)
+    if b.exp >= 0 {
+        let digits = big_to_decimal(big_shl(big_from_u64(b.mant), b.exp))
+        return Decimal { digits: strip_zeros(digits), point: digits.len() }
+    }
+    let digits = big_to_decimal(big_mul_pow5(big_from_u64(b.mant), -b.exp))
+    return Decimal { digits: strip_zeros(digits), point: digits.len() + b.exp }
+}
+
+// `x` with exactly `prec` digits after the point (none, and no point, for
+// 0), rounded on its exact binary value to nearest, ties to even (D139):
+// "3.14" for (3.14159, 2), "2.67" for (2.675, 2) since 2.675 is 2.67499… in
+// binary, "0.12" for (0.125, 2). "nan", "inf" and "-inf" as format_float
+// writes them; a negative value that rounds to zero keeps its sign.
+#test(3.14159265, 2)["3.14"]
+#test(2.675, 2)["2.67"]
+#test(0.125, 2)["0.12"]
+#test(0.375, 2)["0.38"]
+#test(2.5, 0)["2"]
+#test(3.5, 0)["4"]
+#test(0.5, 0)["0"]
+#test(0.51, 0)["1"]
+#test(9.996, 2)["10.00"]
+#test(1e21, 1)["1000000000000000000000.0"]
+#test(1.0e-7, 3)["0.000"]
+#test(-0.0001, 2)["-0.00"]
+#test(0.0, 3)["0.000"]
+#test(-1.5, 1)["-1.5"]
+pub fun format_fixed(x: float64, prec: int32) -> str {
+    if x != x { return "nan" }
+    var v = x
+    var sign = ""
+    if v < 0.0f64 || (v == 0.0f64 && 1.0f64 / v < 0.0f64) {
+        sign = "-"
+        v = -v
+    }
+    if v > 1.7976931348623157e308f64 { return sign + "inf" }
+    // the digits kept: those before the point and `prec` after it
+    var d = Decimal { digits: "0", point: 1 }
+    if v != 0.0f64 {
+        let exact = exact_decimal(v)
+        let keep = exact.point + prec
+        if keep >= 1 {
+            d = round_digits(exact, keep)
+        } else if keep == 0 {
+            // below the last place kept: up to one unit of it past a half
+            // (a tie goes to the even 0)
+            var rest = false
+            var i = 1
+            while i < exact.digits.len() {
+                if exact.digits[i] != '0' { rest = true }
+                i = i + 1
+            }
+            let first = exact.digits[0]
+            if first > '5' || (first == '5' && rest) { d = Decimal { digits: "1", point: exact.point + 1 } }
+        }
+    }
+    var sb = StringBuilder()
+    sb.append(sign)
+    if d.point <= 0 {
+        sb.append_byte('0')
+    } else {
+        var k = 0
+        while k < d.point {
+            if k < d.digits.len() && !(d.digits == "0") { sb.append_byte(d.digits[k]) } else { sb.append_byte('0') }
+            k = k + 1
+        }
+    }
+    if prec > 0 {
+        sb.append_byte('.')
+        var j = 0
+        while j < prec {
+            // the digit at place point + j of 0.digits
+            let at = d.point + j
+            if at >= 0 && at < d.digits.len() && !(d.digits == "0") { sb.append_byte(d.digits[at]) } else { sb.append_byte('0') }
+            j = j + 1
+        }
+    }
+    return sb.build()
+}
+
 // The shortest decimal that reads back as `x`, written as Python's repr
 // writes floats: "1.0", "0.1", "1e+16", "1.5e-07", "-0.0", "nan", "inf".
 // Exponents below -4 or from 16 on use scientific notation.
@@ -642,16 +725,7 @@ pub fun format_float(x: float64) -> str {
     }
     if v == 0.0f64 { return sign + "0.0" }
     if v > 1.7976931348623157e308f64 { return sign + "inf" }
-    // the exact decimal expansion of v
-    let b = decompose(v)
-    var exact = Decimal { digits: "", point: 0 }
-    if b.exp >= 0 {
-        let digits = big_to_decimal(big_shl(big_from_u64(b.mant), b.exp))
-        exact = Decimal { digits: strip_zeros(digits), point: digits.len() }
-    } else {
-        let digits = big_to_decimal(big_mul_pow5(big_from_u64(b.mant), -b.exp))
-        exact = Decimal { digits: strip_zeros(digits), point: digits.len() + b.exp }
-    }
+    let exact = exact_decimal(v)
     // the fewest digits that read back as v: 17 always do, and if p digits
     // do, so do more (they are closer), so a binary search finds it
     var lo = 1

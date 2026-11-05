@@ -6,23 +6,43 @@
 // underlying open/read/close run as raw Linux syscalls natively and as Python
 // file IO in the interpreter, with identical (errno-keyed) error mapping.
 
-// Why a filesystem operation failed. `Other` carries the raw OS errno for
-// anything not given its own variant.
+// Why a filesystem or I/O operation failed: the causes a program handles on
+// every target (D129). `Unsupported`: the target can't do it at all (wasm32
+// has no processes, D132). `Cancelled`: the task waiting for input was asked
+// to stop (D96). `Other` holds the platform's own code for anything else; its
+// numbers are the platform's, not portable.
 pub enum IoError {
     NotFound,
     PermissionDenied,
+    AlreadyExists,
+    NotADirectory,
+    IsADirectory,
+    NotEmpty,
+    Interrupted,
+    Cancelled,
+    Unsupported,
     Other(int32),
 }
 
-// Map a (nonzero) OS errno to an `IoError`. ENOENT/EACCES on Linux. Also
-// used by `std.io`.
+// The cause of a (nonzero) error code from `std.platform`, which gives Linux's
+// numbers on every target so far (wasm32's maps WASI's onto them). Also used
+// by `std.io` and `std.process`.
+#test(2)[IoError.NotFound]
+#test(1)[IoError.PermissionDenied]
+#test(17)[IoError.AlreadyExists]
+#test(39)[IoError.NotEmpty]
+#test(38)[IoError.Unsupported]
+#test(5)[IoError.Other(5)]
 pub fun from_errno(code: int32) -> IoError {
-    if code == 2 {
-        return IoError.NotFound
-    }
-    if code == 13 {
-        return IoError.PermissionDenied
-    }
+    if code == 2 { return IoError.NotFound }
+    if code == 13 || code == 1 { return IoError.PermissionDenied }
+    if code == 17 { return IoError.AlreadyExists }
+    if code == 20 { return IoError.NotADirectory }
+    if code == 21 { return IoError.IsADirectory }
+    if code == 39 { return IoError.NotEmpty }
+    if code == 4 { return IoError.Interrupted }
+    if code == 125 { return IoError.Cancelled }
+    if code == 38 || code == 95 { return IoError.Unsupported }
     return IoError.Other(code)
 }
 
@@ -38,16 +58,15 @@ pub fun read_to_string(path: str) -> Result<str, IoError> {
 }
 
 // Write `contents` to `path`, creating or truncating the file (mode 0644). The
-// bytes are written verbatim (as UTF-8). On success `Ok(n)` is returned, where
-// `n` is the number of bytes written; on failure (open/write) an `IoError`
-// carrying the OS errno is returned. Runs as raw open/write/close syscalls
+// bytes are written verbatim (as UTF-8): `Ok(())` once all of them are
+// (D138); on failure (open/write) an `IoError` with the cause. Runs as raw open/write/close syscalls
 // natively and as Python file IO in the interpreter, with identical
 // (errno-keyed) error mapping.
-pub fun write_to_file(path: str, contents: str) -> Result<int32, IoError> {
+pub fun write_to_file(path: str, contents: str) -> Result<(), IoError> {
     __write_file(path, contents)
     let err = __io_errno()
     if err == 0 {
-        return Ok(contents.len())
+        return Ok(())
     }
     return Err(from_errno(err))
 }
@@ -97,21 +116,20 @@ pub fun list_dir(path: str) -> Result<[str], IoError> {
 }
 
 // Make the directory `path` (mode 0755, less the umask). Its parent must
-// exist; a path that exists already is `Other(17)` (EEXIST). `Ok` holds 0.
-pub fun make_dir(path: str) -> Result<int32, IoError> {
+// exist; a path that exists already is `AlreadyExists`.
+pub fun make_dir(path: str) -> Result<(), IoError> {
     __mkdir(path, 0o755)
     let err = __io_errno()
     if err == 0 {
-        return Ok(0)
+        return Ok(())
     }
     return Err(from_errno(err))
 }
 
 // Make the directory `path` and the parents it lacks, like `mkdir -p`. A
-// directory that exists already is fine; a file at `path` is `Other(17)`
-// (EEXIST), and a file where a parent should be is `Other(20)` (ENOTDIR).
-// `Ok` holds 0.
-pub fun make_dir_all(path: str) -> Result<int32, IoError> {
+// directory that exists already is fine; a file at `path` is
+// `AlreadyExists`, and a file where a parent should be is `NotADirectory`.
+pub fun make_dir_all(path: str) -> Result<(), IoError> {
     var i = 1
     while i <= path.len() {
         if i == path.len() || path[i] == '/' {
@@ -125,34 +143,33 @@ pub fun make_dir_all(path: str) -> Result<int32, IoError> {
         i = i + 1
     }
     if is_dir(path) {
-        return Ok(0)
+        return Ok(())
     }
     return Err(from_errno(17))
 }
 
 // Remove the file `path` (a symbolic link is removed itself, not what it
-// names). A directory is `Other(21)` (EISDIR). `Ok` holds 0.
-pub fun remove_file(path: str) -> Result<int32, IoError> {
+// names). A directory is `IsADirectory`.
+pub fun remove_file(path: str) -> Result<(), IoError> {
     __unlink(path)
     return io_result()
 }
 
 // Remove the directory `path`, which must be empty: one that isn't is
-// `Other(39)` (ENOTEMPTY). `Ok` holds 0.
-pub fun remove_dir(path: str) -> Result<int32, IoError> {
+// `NotEmpty`.
+pub fun remove_dir(path: str) -> Result<(), IoError> {
     __rmdir(path)
     return io_result()
 }
 
 // Remove `path` and, for a directory, everything in it, like `rm -r`. A
 // symbolic link is removed, not followed, even one naming a directory.
-// `Ok` holds 0.
-pub fun remove_dir_all(path: str) -> Result<int32, IoError> {
+pub fun remove_dir_all(path: str) -> Result<(), IoError> {
     // a file or a link goes at once; a directory is EISDIR
     __unlink(path)
     let err = __io_errno()
     if err == 0 {
-        return Ok(0)
+        return Ok(())
     }
     if err != 21 {
         return Err(from_errno(err))
@@ -164,17 +181,17 @@ pub fun remove_dir_all(path: str) -> Result<int32, IoError> {
 }
 
 // Rename (or move, within one file system) `from_path` to `to`, replacing a
-// file at `to`. `Ok` holds 0.
-pub fun rename(from_path: str, to: str) -> Result<int32, IoError> {
+// file at `to`.
+pub fun rename(from_path: str, to: str) -> Result<(), IoError> {
     __rename(from_path, to)
     return io_result()
 }
 
-// `Ok(0)`, or the error of the last primitive.
-fun io_result() -> Result<int32, IoError> {
+// `Ok(())`, or the error of the last primitive.
+fun io_result() -> Result<(), IoError> {
     let err = __io_errno()
     if err == 0 {
-        return Ok(0)
+        return Ok(())
     }
     return Err(from_errno(err))
 }

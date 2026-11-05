@@ -16,7 +16,8 @@ from ._native import (
     build_and_run_full,
     check_file,
     interpret_full,
-    run_source_both,
+    run_file_both_now,
+    run_source_both_now,
 )
 
 EXAMPLE = os.path.abspath(
@@ -54,25 +55,18 @@ PRELUDE = (
     "    return match e {\n"
     "        SpawnError.NotFound => \"notfound\",\n"
     "        SpawnError.PermissionDenied => \"perm\",\n"
-    "        SpawnError.Other(code) => \"other\",\n"
+    "        _ => \"other\",\n"
     "    }\n"
     "}\n"
 )
 
 
+@unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
 class TestSubprocessExample(unittest.TestCase):
-    def test_interpreter(self):
-        out, err, code = interpret_full(check_file(EXAMPLE))
-        self.assertEqual(out, EXPECTED_OUT)
-        self.assertEqual(err, EXPECTED_ERR)
-        self.assertEqual(code, EXPECTED_CODE)
-
-    @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
-    def test_native_matches_interpreter(self):
-        interp = interpret_full(check_file(EXAMPLE))
-        native = build_and_run_full(check_file(EXAMPLE))
-        self.assertEqual(native, (EXPECTED_OUT, EXPECTED_ERR, EXPECTED_CODE))
-        self.assertEqual(interp, native)
+    # The example names SpawnError's causes (D129): its own expectation, not
+    # the retired toolchain's recorded answer.
+    def test_interpreter_and_native(self):
+        self.assertEqual(run_file_both_now(EXAMPLE), (EXPECTED_OUT, EXPECTED_ERR, EXPECTED_CODE))
 
 
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
@@ -81,7 +75,7 @@ class TestSubprocessParity(unittest.TestCase):
     spawning subprocesses and capturing their output."""
 
     def test_captures_stdout(self):
-        out, err, code = run_source_both(
+        out, err, code = run_source_both_now(
             PRELUDE +
             "fun main() {\n"
             "    match run(\"/bin/echo\", [\"hi\", \"there\"]) {\n"
@@ -93,7 +87,7 @@ class TestSubprocessParity(unittest.TestCase):
         self.assertEqual((out, err, code), ("hi there\n", "", 0))
 
     def test_captures_stderr_and_exit_code(self):
-        out, err, code = run_source_both(
+        out, err, code = run_source_both_now(
             PRELUDE +
             "fun main() {\n"
             "    match run(\"/bin/sh\", [\"-c\", \"printf out; printf err 1>&2; exit 5\"]) {\n"
@@ -109,7 +103,7 @@ class TestSubprocessParity(unittest.TestCase):
         self.assertEqual((out, err, code), ("outexit 5\n", "err", 0))
 
     def test_reports_terminating_signal(self):
-        out, err, code = run_source_both(
+        out, err, code = run_source_both_now(
             PRELUDE +
             "fun main() {\n"
             "    match run(\"/bin/sh\", [\"-c\", \"kill -9 $$\"]) {\n"
@@ -121,7 +115,7 @@ class TestSubprocessParity(unittest.TestCase):
         self.assertEqual((out, err, code), ("signal 9\n", "", 0))
 
     def test_missing_program_is_not_found(self):
-        out, err, code = run_source_both(
+        out, err, code = run_source_both_now(
             PRELUDE +
             "fun main() {\n"
             "    match run(\"/no/such/program\", []) {\n"
@@ -133,7 +127,7 @@ class TestSubprocessParity(unittest.TestCase):
         self.assertEqual((out, err, code), ("notfound\n", "", 0))
 
     def test_command_builder_matches_run(self):
-        out, err, code = run_source_both(
+        out, err, code = run_source_both_now(
             PRELUDE +
             "fun main() {\n"
             "    match command(\"/bin/echo\").arg(\"a\").args([\"b\", \"c\"]).output() {\n"

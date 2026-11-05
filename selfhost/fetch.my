@@ -91,7 +91,7 @@ pub fun check_out(g: GitPackage) -> Result<int32, str> {
     let failed = format("myla: dependency '{}': cannot check out commit {} from {}", g.name, g.git.commit, g.git.url)
     if exists(partial) && !remove_tree(partial) { return Err(format("myla: cannot remove {}", partial)) }
     match make_dir_all(parent_dir(g.dir)) {
-        Ok(n) => {},
+        Ok(()) => {},
         Err(e) => { return Err(format("myla: cannot create {}", parent_dir(g.dir))) },
     }
     eprintln(format("fetching {}{} ({})", g.name, ref_text(g.git.reference), short(g.git.commit)))
@@ -106,7 +106,7 @@ pub fun check_out(g: GitPackage) -> Result<int32, str> {
         return Err(failed + "\n" + trim_end(co.err))
     }
     match rename(partial, g.dir) {
-        Ok(n) => {},
+        Ok(()) => {},
         Err(e) => { return Err(format("myla: cannot rename {} to {}", partial, g.dir)) },
     }
     return Ok(0)
@@ -164,7 +164,7 @@ fun write_lock(p: Project) -> Result<int32, str> {
     let path = parent_dir(p.manifest) + "/myla.lock"
     if lock.entries.len() == 0 && !is_file(path) { return Ok(0) }
     return match write_to_file(path, render_lock(lock)) {
-        Ok(n) => Ok(0)
+        Ok(()) => Ok(0)
         Err(e) => Err("myla: cannot write " + path)
     }
 }
@@ -182,7 +182,7 @@ fun with_entry(lock: Lock, e: LockEntry) -> Lock {
 // Remove the directory tree `path`; whether that worked.
 fun remove_tree(path: str) -> bool {
     return match remove_dir_all(path) {
-        Ok(n) => true
+        Ok(()) => true
         Err(e) => false
     }
 }

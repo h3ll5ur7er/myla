@@ -2,7 +2,7 @@
 id: MYLA-158
 title: A WebAssembly target
 type: feature
-status: in-progress
+status: review
 priority: low
 labels: [backend, wasm, design]
 ---
@@ -43,6 +43,10 @@ Steps, each verified. The backend comes before D122's 4-byte layouts: the runtim
 ## Next, from the reflection (2026-11-04, [[Project/Reflection-2026-11]])
 
 - [x] The shadow stack below the data and trap reports like native ones ([[MYLA-261]])
-- [ ] A stackifier in place of the dispatch loop, measured against it (fib 1.9×, binary trees 2.7×, string building 2.4× the x86-64 build under Node, [[MYLA-270]])
-- [ ] The module written by Myla instead of clang and wasm-ld (D125 (2), [[MYLA-269]]), which a toolchain building wasm in the page needs
-- [ ] `play.wasm` smaller (about 2 MB today) for the website ([[MYLA-159]])
+- Moved to its own task: A stackifier in place of the dispatch loop, measured against it (fib 1.9×, binary trees 2.7×, string building 2.4× the x86-64 build under Node, [[MYLA-270]])
+- Moved to its own task: The module written by Myla instead of clang and wasm-ld (D125 (2), [[MYLA-269]]), which a toolchain building wasm in the page needs
+- Moved to its own task: `play.wasm` smaller (about 2 MB today) for the website ([[MYLA-159]])
+
+## Status (2026-11-05)
+
+The target is built and tested in CI. The three items left open are tasks of their own, so this one is done once they are taken from there: the stackifier ([[MYLA-270]]), the module written by Myla instead of clang and wasm-ld ([[MYLA-269]]), and a smaller `play.wasm` ([[MYLA-159]]).

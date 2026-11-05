@@ -1,6 +1,6 @@
 # Standard library
 
-Myla has built-in functions known to the checker, and a small standard library written in Myla under [[lib/std/io.my|lib/std/]]. Both work without libc: natively they rest on the platform layer `std.platform`, raw Linux system calls on x86-64 and aarch64 and WASI's imports on wasm32 ([[Architecture/Native-backend]]), and so does the interpreter, which is a native program itself. What a target lacks shows as an error: on wasm32 `run` and `spawn` fail with `Other(38)` (ENOSYS), as there are no processes; how targets differ is to be specified ([[MYLA-266]]).
+Myla has built-in functions known to the checker, and a small standard library written in Myla under [[lib/std/io.my|lib/std/]]. Both work without libc: natively they rest on the platform layer `std.platform`, raw Linux system calls on x86-64 and aarch64 and WASI's imports on wasm32 ([[Architecture/Native-backend]]), and so does the interpreter, which is a native program itself. What a target lacks shows as an error of its own, `Unsupported` (D129, D132): on wasm32 `run` and `spawn` fail with `SpawnError.Unsupported`, as there are no processes. What each target can do (processes, suspending input, the file system it sees, the working directory) is on [[Language/Targets]].
 
 [TOC]
 
@@ -79,7 +79,7 @@ fun main() {
 
 A protocol that frames messages with a `Content-Length` header reads the header lines with `read_line` and the body with `read_exact`; `tests/burn/test_stdin.py` has an example.
 
-In a task, each read has an async version that waits for the input with the task suspended, so the other tasks run meanwhile (D124, [[MYLA-230]]): `await r.read_line_async()`, `await r.read_exact_async(n)`, `await r.read_to_end_async()`, `await r.fill_async(want)`. They give what the blocking reads give; outside a task they block as those do. A task asked to stop (`task.cancel`, a `task.timeout` that ran out) stops waiting at once and gets `Err(IoError.Other(125))` (ECANCELED). Natively the executor's poller watches the descriptor (a regular file, which it can't watch, is always ready); the interpreter looks at the waiting tasks' descriptors before each turn.
+In a task, each read has an async version that waits for the input with the task suspended, so the other tasks run meanwhile (D124, [[MYLA-230]]): `await r.read_line_async()`, `await r.read_exact_async(n)`, `await r.read_to_end_async()`, `await r.fill_async(want)`. They give what the blocking reads give; outside a task they block as those do. A task asked to stop (`task.cancel`, a `task.timeout` that ran out) stops waiting at once and gets `Err(IoError.Cancelled)` (ECANCELED). Natively the executor's poller watches the descriptor (a regular file, which it can't watch, is always ready); the interpreter looks at the waiting tasks' descriptors before each turn.
 
 ## std.process
 
@@ -89,11 +89,11 @@ In a task, each read has an async version that waits for the input with the task
 | `exit(code: int32)` | Ends the process; the low 8 bits become the exit status |
 | `env(name: str) -> Option<str>` | The value of the environment variable `name` the process started with (`""` included), or `None` when there is none ([[MYLA-243]]; the primitive `__getenv`, which reads the environment the process started with, or `""` with `__io_errno` 2) |
 | `run(program: str, args: [str]) -> Result<Output, SpawnError>` | Runs a program found by its exact path (no `PATH` search) with the current environment, waits, captures its output |
-| `run_async(program: str, args: [str]) -> Result<Output, SpawnError>` (async) | `run` in a task: the task waits for the child (its output read as it comes, then its end) suspended, the other tasks running (D124, [[MYLA-230]]); outside a task it blocks as `run` does. A task asked to stop stops waiting: the child is killed and reaped, `Err(SpawnError.Other(125))` |
+| `run_async(program: str, args: [str]) -> Result<Output, SpawnError>` (async) | `run` in a task: the task waits for the child (its output read as it comes, then its end) suspended, the other tasks running (D124, [[MYLA-230]]); outside a task it blocks as `run` does. A task asked to stop stops waiting: the child is killed and reaped, `Err(SpawnError.Cancelled)` |
 | `command(program)` → `Command` | Builder: `.arg(a)`, `.args([…])`, `.output()`, `.output_async()` (async, as `run_async`) |
 | `struct Output { stdout: [uint8], stderr: [uint8], status: ExitStatus }` | Output is raw bytes |
 | `enum ExitStatus { Exited(int32), Signaled(int32) }` | |
-| `enum SpawnError { NotFound, PermissionDenied, Other(int32) }` | `Other` carries the errno |
+| `enum SpawnError { NotFound, PermissionDenied, Unsupported, Cancelled, Other(int32) }` | Why a program couldn't be run (D129): not there, not allowed, no processes on this target, or the waiting task was stopped; `Other` holds the platform's own code for anything else |
 
 ```myla
 from std.process import command, ExitStatus
@@ -121,22 +121,22 @@ fun main() {
 | Function | Result |
 | --- | --- |
 | `read_to_string(path: str) -> Result<str, IoError>` | The whole file |
-| `write_to_file(path: str, contents: str) -> Result<int32, IoError>` | Creates or truncates (mode 0644); `Ok` holds the number of bytes |
+| `write_to_file(path: str, contents: str) -> Result<(), IoError>` | Creates or truncates (mode 0644); `Ok(())` once every byte is written (D138) |
 | `list_dir(path: str) -> Result<[str], IoError>` | The names of the directory's entries, without `.` and `..`, sorted by their bytes |
-| `make_dir(path: str) -> Result<int32, IoError>` | Makes one directory (mode 0755 less the umask); its parent must exist; `Ok` holds 0 |
-| `make_dir_all(path: str) -> Result<int32, IoError>` | Makes the directory and the parents it lacks, like `mkdir -p`; an existing directory is fine; `Ok` holds 0 |
+| `make_dir(path: str) -> Result<(), IoError>` | Makes one directory (mode 0755 less the umask); its parent must exist |
+| `make_dir_all(path: str) -> Result<(), IoError>` | Makes the directory and the parents it lacks, like `mkdir -p`; an existing directory is fine |
 | `exists(path: str) -> bool` | Whether the path names anything (symbolic links followed, so a dangling one doesn't count) |
 | `is_dir(path: str) -> bool`, `is_file(path: str) -> bool` | Whether it names a directory, a regular file (links followed) |
 | `current_dir() -> Result<str, IoError>` | The working directory: an absolute path without symbolic links, as the kernel gives it; a directory that was removed is `NotFound` ([[MYLA-98]]) |
-| `remove_file(path: str) -> Result<int32, IoError>` | Removes a file, or a symbolic link itself; a directory is `Other(21)` (EISDIR); `Ok` holds 0 ([[MYLA-96]]) |
-| `remove_dir(path: str) -> Result<int32, IoError>` | Removes an empty directory; one that isn't is `Other(39)` (ENOTEMPTY); `Ok` holds 0 |
-| `remove_dir_all(path: str) -> Result<int32, IoError>` | Removes the path and, for a directory, everything in it, like `rm -r`; symbolic links are removed, not followed; `Ok` holds 0 |
-| `rename(from_path: str, to: str) -> Result<int32, IoError>` | Renames or moves within one file system, replacing a file at `to`; `Ok` holds 0 |
-| `enum IoError { NotFound, PermissionDenied, Other(int32) }` | Mapped from the OS errno |
+| `remove_file(path: str) -> Result<(), IoError>` | Removes a file, or a symbolic link itself; a directory is `IsADirectory` ([[MYLA-96]]) |
+| `remove_dir(path: str) -> Result<(), IoError>` | Removes an empty directory; one that isn't is `NotEmpty` |
+| `remove_dir_all(path: str) -> Result<(), IoError>` | Removes the path and, for a directory, everything in it, like `rm -r`; symbolic links are removed, not followed |
+| `rename(from_path: str, to: str) -> Result<(), IoError>` | Renames or moves within one file system, replacing a file at `to` |
+| `enum IoError { NotFound, PermissionDenied, AlreadyExists, NotADirectory, IsADirectory, NotEmpty, Interrupted, Cancelled, Unsupported, Other(int32) }` | Why an operation failed, the same causes on every target (D129); `Cancelled`: a task's read stopped by `task.cancel` or a timeout (D96); `Unsupported`: the target can't do it; `Other` holds the platform's own code for anything else, whose numbers aren't portable |
 
 The file's bytes become the string unchanged, even when they aren't valid UTF-8: strings work on bytes, and `chars` gives U+FFFD for the invalid ones ([[Language/Collections-and-strings]], [[MYLA-12]]).
 
-`from_errno(code: int32) -> IoError` maps an errno; `std.io` uses it too. Errors without a variant of their own keep their errno in `Other`: a path that exists already is `Other(17)` (EEXIST), a file where a directory should be `Other(20)` (ENOTDIR).
+`from_errno(code: int32) -> IoError` turns the platform layer's code (Linux's numbers on every target so far; wasm32's maps WASI's onto them) into its cause; `std.io` and `std.process` use it too.
 
 ```myla
 from std.fs import list_dir, make_dir_all, is_dir, IoError
@@ -184,10 +184,21 @@ Numbers from text and back ([[MYLA-79]]). The conversions are exact, computed wi
 | `parse_int(s: str) -> Option<int64>` | A decimal integer with an optional `-`; `None` for anything else or out of range |
 | `parse_float(s: str) -> Option<float64>` | The nearest double to `-? digits (. digits)? ([eE] [+-]? digits)?`; too large is infinite |
 | `format_float(x: float64) -> str` | The shortest decimal that reads back as `x`, as Python's `repr` writes it: `1.0`, `0.1`, `1e+16`, `1.5e-07`, `-0.0`, `nan`, `inf` |
+| `format_fixed(x: float64, prec: int32) -> str` | `x` with `prec` digits after the point, rounded on its exact binary value, ties to even: `2.67` for `(2.675, 2)` (D139) |
 | `pow2(k: int32) -> float64` | 2^k exactly, for -1022 <= k <= 1023 |
 | `f64_literal_bits(text) -> uint64`, `f32_round_bits(bits) -> uint64`, `float_from_bits(bits) -> float64` | The bit-level steps (for the compiler) |
 
 `format("{}", x)` writes a float with up to 17 significant digits (`0.10000000000000001`); `format_float` is the short form.
+
+## std.fmt
+
+Format specs (D139, [[Language/Collections-and-strings]]): the code every runner formats a hole's spec with, so the interpreter and every target print the same bytes, and a helper for a type implementing `Format`.
+
+| Function | Result |
+| --- | --- |
+| `pad(text: str, spec: str) -> str` | `text` with the fill, alignment (left by default) and width of `spec`: `pad("x", "^5")` is `"  x  "`. A spec that isn't one is a runtime error |
+| `parse_spec(s: str) -> Result<Spec, str>` | The spec's parts (`fill`, `align`, `plus`, `alt`, `zero`, `width`, `prec`, `kind`), or why it isn't one |
+| `fmt_int(v: int64, bits: int32, signed: bool, spec: str) -> str`, `fmt_float(x: float64, text: str, spec: str) -> str`, `fmt_text(text: str, spec: str) -> str` | A hole's text, as a spec makes it (what the compiler calls) |
 
 ## std.math
 
@@ -216,11 +227,11 @@ fun main() {
 | `exp(x)`, `ln(x)`, `log2(x)`, `log10(x)`, `pow(x, y)` | Within 1 ulp; `log2` is exact for powers of two, `log10` for powers of ten up to 10²², `ln(0)` is `-inf`, `ln(-1)` NaN |
 | `sin(x)`, `cos(x)`, `atan(x)` | Within 1 ulp, for every finite argument: arguments above 2^20·π/2 are reduced by Payne and Hanek's method |
 | `tan(x)`, `asin(x)`, `acos(x)`, `atan2(y, x)` | Within 4 ulp |
-| `abs(x)`, `copysign(x, s)`, `trunc(x)`, `floor(x)`, `ceil(x)`, `round(x)` | Exact; `round` takes halves away from zero, zeros keep their sign |
+| `abs(x)`, `copysign(x, s)`, `trunc(x)`, `floor(x)`, `ceil(x)`, `round(x)` | Exact; `round` takes halves away from zero, zeros keep their sign; `copysign` reads a NaN `s` as positive (D128) |
 | `min(a, b)`, `max(a, b)` | The other argument when one is NaN |
 | `ldexp(x, k)` | x·2^k |
 | `is_nan(x)`, `is_infinite(x)`, `is_finite(x)`, `infinity()`, `nan()` | |
-| `to_bits(x) -> uint64`, `from_bits(b) -> float64` | The IEEE 754 bits of a float and back |
+| `to_bits(x) -> uint64`, `from_bits(b) -> float64` | The IEEE 754 bits of a float and back; every NaN gives `0x7FF8000000000000`, so its sign and payload, which differ between processors, can't be seen (D128) |
 
 ## std.task
 
@@ -324,5 +335,5 @@ What TOML has beyond the subset is an error naming it: "floats are not supported
 
 ## std.rt
 
-Not for programs: the runtime written in Myla ([[MYLA-162]], D117), which a native build loads with every program and compiles where the code generator calls it in place of the assembly routine it replaces. So far string concatenation and equality (`str_concat`, `str_eq`) and the file system behind `std.fs` (`read_file`, `write_file`, `list_dir`, `stat`, `mkdir`, `unlink`, `rmdir`, `rename`, `getcwd`, on Linux's system calls) `std.process.env`'s `getenv` `std.io`'s reader (`read`, `poll`), `std.process.args`'s `args`, integers as text (`int_to_str`, `uint_to_str`, behind `format`), a string's characters (`str_chars`, behind `chars()`), a map's lookup (`map_lookup`, behind `m[k]` and `contains`), a string builder's append (`sb_append`), a map's keys (`map_keys`), `print` of every scalar but a float and `std.io.write` (`print_str`, `print_int`, …, `write`; a line and its newline in one `writev`, so the lines of tasks on other workers don't interleave) and the process runner behind `std.process.run` (`run`: fork, exec, both outputs read as they come through poll, wait). It works on raw memory through primitives the interpreter doesn't have (`__load8`, `__load32`, `__load64`, `__store8`, `__store32`, `__store64`, a list's cell and back (`__list_addr`, `__list_of`, the list type from the context), `__alloc`, `__free`, `__addr_of`, `__str_of`, and the bulk `__copy_bytes` and `__equal_bytes`, which each backend does natively), makes system calls through `__syscall(n, a, b, c)` and records the errno `std.io` reports with `__set_io_errno` reads the arguments and the environment through `__argv()` and `__environ()` and leaves a run's stderr and status with `__set_run_stderr` and `__set_run_status`; addresses are `int64`. A standard library root without `std/rt.my` gets the copy the tools carry: the assembly routines it replaced are gone from the code generator. Under it, `std.platform` is the platform layer, one module per target ([[lib/std/platform.my]] for x86-64 Linux, [[lib/std/platform_aarch64.my]], [[lib/std/platform_wasm.my]]; the loader takes the target's for `std/platform.my`): every system call std.rt makes, the numbers, flags and record layouts with them, and the process runner (fork, exec, poll, wait), behind functions that give a result or a negative errno (`open_read`, `read`, `write_line`, `mode_of`, `dir_read`, `run`, `cpus_allowed`, `park`, `unpark_one`, `exit`, …). A port to another system gives that module again; std.rt stays as it is. Its interface is Linux's (negative errnos, `getdents64` records, `st_mode` bits), which wasm32's module imitates; [[MYLA-265]] is to make it Myla's.
+Not for programs: the runtime written in Myla ([[MYLA-162]], D117), which a native build loads with every program and compiles where the code generator calls it in place of the assembly routine it replaces. So far string concatenation and equality (`str_concat`, `str_eq`) and the file system behind `std.fs` (`read_file`, `write_file`, `list_dir`, `stat`, `mkdir`, `unlink`, `rmdir`, `rename`, `getcwd`, on Linux's system calls) `std.process.env`'s `getenv` `std.io`'s reader (`read`, `poll`), `std.process.args`'s `args`, integers as text (`int_to_str`, `uint_to_str`, behind `format`), a string's characters (`str_chars`, behind `chars()`), a map's lookup (`map_lookup`, behind `m[k]` and `contains`), a string builder's append (`sb_append`), a map's keys (`map_keys`), `print` of every scalar but a float and `std.io.write` (`print_str`, `print_int`, …, `write`; a line and its newline in one `writev`, so the lines of tasks on other workers don't interleave) and the process runner behind `std.process.run` (`run`: fork, exec, both outputs read as they come through poll, wait). It works on raw memory through primitives the interpreter doesn't have (`__load8`, `__load32`, `__load64`, `__store8`, `__store32`, `__store64`, a list's cell and back (`__list_addr`, `__list_of`, the list type from the context), `__alloc`, `__free`, `__addr_of`, `__str_of`, and the bulk `__copy_bytes` and `__equal_bytes`, which each backend does natively; the atomics `__cas64`, `__xchg64` and `__fetch_add64`, full barriers, and `__load_acq64` and `__store_rel64`, a load with acquire and a store with release ordering: `ldar` and `stlr` on aarch64, plain moves on x86-64, whose ordering gives both, MYLA-267), makes system calls through `__syscall(n, a, b, c)` and records the errno `std.io` reports with `__set_io_errno` reads the arguments and the environment through `__argv()` and `__environ()` and leaves a run's stderr and status with `__set_run_stderr` and `__set_run_status`; addresses are `int64`. A standard library root without `std/rt.my` gets the copy the tools carry: the assembly routines it replaced are gone from the code generator. Under it, `std.platform` is the platform layer, one module per target ([[lib/std/platform.my]] for x86-64 Linux, [[lib/std/platform_aarch64.my]], [[lib/std/platform_wasm.my]]; the loader takes the target's for `std/platform.my`): every system call std.rt makes, the numbers, flags and record layouts with them, and the process runner (fork, exec, poll, wait), behind functions that give a result or a negative errno (`open_read`, `read`, `write_line`, `mode_of`, `dir_read`, `run`, `cpus_allowed`, `park`, `unpark_one`, `exit`, …). A port to another system gives that module again; std.rt stays as it is. Its interface is Linux's (negative errnos, `getdents64` records, `st_mode` bits), which wasm32's module imitates; [[MYLA-265]] is to make it Myla's.
 

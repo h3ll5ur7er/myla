@@ -87,6 +87,12 @@ EXPECTED = {
     "t17_cancelled_after_an_await": ("false\n2\n", 0),
     # 18. closures handed to children and shared between siblings
     "t18_closures_cross_tasks": ("1125570\n", 0),
+    # 19-21. t18's three parts on their own (found by the arm64 hardware run,
+    # MYLA-267): closures deep-copied into children; siblings cloning a
+    # finished child's closure (MYLA-148); a composition into a child
+    "t19_closures_to_children": ("1564000\n", 0),
+    "t20_siblings_clone_a_closure": ("429570\n", 0),
+    "t21_composition_to_a_child": ("632000\n", 0),
 }
 
 

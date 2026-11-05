@@ -60,7 +60,7 @@ fun add(
 // true
 ```
 
-- A trailing comma may follow the last element of every comma-separated list (D104 (4), [[MYLA-225]]): call and attribute arguments, the parameters of functions, methods and lambdas, list, map and tuple literals, struct fields and literals, enum variants and their payloads, generic arguments and parameters, tuple and function types, patterns and import lists. A one-element tuple needs its comma: `(1,)` is a tuple, `(1)` the number in parentheses.
+- A trailing comma may follow the last element of every comma-separated list (D104 (4), [[MYLA-225]]): call and attribute arguments, the parameters of functions, methods and lambdas, list, map and tuple literals, struct fields and literals, enum variants and their payloads, generic arguments and parameters, tuple and function types, patterns and import lists. A one-element tuple needs its comma: `(1,)` is a tuple, `(1)` the number in parentheses, and `()` the unit value ([[Language/Types]], D138).
 - `else` may sit on the line after the closing `}` of its `if`.
 - `// …` comments run to the end of the line; `/* … */` comments may span lines and do **not** nest (the first `*/` ends them). An unterminated block comment is a lex error.
 

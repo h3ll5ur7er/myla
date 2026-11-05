@@ -1,0 +1,13 @@
+//~ type error: the pattern of this let-else always matches: use 'let' instead, or 'match'
+//~ span: Only(v)
+// A let-else is for a pattern that can fail; this enum has one variant (D137).
+enum One {
+    Only(int),
+}
+
+fun main() {
+    let Only(v) = One.Only(3) else {
+        return
+    }
+    print(v)
+}

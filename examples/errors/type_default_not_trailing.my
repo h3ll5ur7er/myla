@@ -1,0 +1,11 @@
+//~ type error: parameter 'b' needs a default: the parameters after one with a default have one too
+//~ span: b: int
+// Only the last parameters can have defaults, as only they can be left out
+// of a call (D136).
+fun f(a: int = 1, b: int) -> int {
+    return a + b
+}
+
+fun main() {
+    print(f(1, 2))
+}

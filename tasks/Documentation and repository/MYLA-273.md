@@ -2,7 +2,7 @@
 id: MYLA-273
 title: "Mark the superseded parts of decisions"
 type: chore
-status: backlog
+status: review
 priority: low
 labels: [docs, decisions]
 ---
@@ -20,4 +20,4 @@ Found by [[Project/Reflection-2026-11]]. Several rows on [[Project/Decisions]] a
 | D108 | "later by the LLVM backend" | D117 |
 | D117 (4) | LLVM's tools not allowed | D125 (2) uses clang and wasm-ld (LLVM's assembler and linker; its optimiser not used) |
 
-- [ ] The owner decides whether and how to mark them (with [[MYLA-193]]'s page format); then a "changed by" note per row
+- [x] The owner decides whether and how to mark them: D134, an italic note now, the page's format later ([[MYLA-193]]); a "changed by" note on D2, D26, D29, D35, D58, D67, D82, D85, D86, D87, D108, D117 and D119

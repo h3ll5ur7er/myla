@@ -349,7 +349,7 @@ class SelfHostedInterpParity(unittest.TestCase):
                     self.assertEqual(self._myla_run(path), _oracle(path))
 
     def test_module_programs_match_the_oracle(self) -> None:
-        from .test_selfhost_codegen import MODULE_PROJECTS, _write_project
+        from .test_selfhost_codegen import MODULE_OUTPUTS_SINCE, MODULE_PROJECTS, _write_project
 
         entries = {"examples/modules": os.path.join(_REPO, "examples", "modules", "main.my")}
         with tempfile.TemporaryDirectory() as tmp:
@@ -357,7 +357,11 @@ class SelfHostedInterpParity(unittest.TestCase):
                 entries[name] = _write_project(os.path.join(tmp, name), files)
             for name, entry in entries.items():
                 with self.subTest(program=name):
-                    self.assertEqual(self._myla_run(entry), _linked_oracle(entry, _modules(entry)))
+                    if name in MODULE_OUTPUTS_SINCE:
+                        expected = (MODULE_OUTPUTS_SINCE[name], 0)
+                    else:
+                        expected = _linked_oracle(entry, _modules(entry))
+                    self.assertEqual(self._myla_run(entry), expected)
 
     def test_updates_are_amortised_constant(self) -> None:
         """`push`, element assignment, a `push` inside a `var self` method and

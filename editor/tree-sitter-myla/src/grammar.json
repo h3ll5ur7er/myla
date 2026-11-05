@@ -118,6 +118,13 @@
         }
       }
     },
+    "format_spec": {
+      "type": "TOKEN",
+      "content": {
+        "type": "PATTERN",
+        "value": ":(?:(?:[^\"{}\\\\\\n]))*"
+      }
+    },
     "comment": {
       "type": "TOKEN",
       "content": {
@@ -912,6 +919,27 @@
         {
           "type": "SYMBOL",
           "name": "_type"
+        },
+        {
+          "type": "CHOICE",
+          "members": [
+            {
+              "type": "SEQ",
+              "members": [
+                {
+                  "type": "STRING",
+                  "value": "="
+                },
+                {
+                  "type": "SYMBOL",
+                  "name": "_expression"
+                }
+              ]
+            },
+            {
+              "type": "BLANK"
+            }
+          ]
         }
       ]
     },
@@ -1685,6 +1713,10 @@
         },
         {
           "type": "SYMBOL",
+          "name": "unit_type"
+        },
+        {
+          "type": "SYMBOL",
           "name": "tuple_type"
         },
         {
@@ -2027,6 +2059,10 @@
         },
         {
           "type": "SYMBOL",
+          "name": "let_else"
+        },
+        {
+          "type": "SYMBOL",
           "name": "async_let"
         },
         {
@@ -2056,6 +2092,10 @@
         {
           "type": "SYMBOL",
           "name": "continue_stmt"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "defer_stmt"
         },
         {
           "type": "SYMBOL",
@@ -2173,6 +2213,51 @@
         }
       ]
     },
+    "let_else": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "STRING",
+          "value": "let"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "variant_pattern"
+        },
+        {
+          "type": "REPEAT",
+          "content": {
+            "type": "SEQ",
+            "members": [
+              {
+                "type": "STRING",
+                "value": "|"
+              },
+              {
+                "type": "SYMBOL",
+                "name": "_base_pattern"
+              }
+            ]
+          }
+        },
+        {
+          "type": "STRING",
+          "value": "="
+        },
+        {
+          "type": "SYMBOL",
+          "name": "_expression"
+        },
+        {
+          "type": "STRING",
+          "value": "else"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "block"
+        }
+      ]
+    },
     "bind_tuple": {
       "type": "SEQ",
       "members": [
@@ -2245,6 +2330,10 @@
         {
           "type": "SYMBOL",
           "name": "identifier"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "unit_binding"
         },
         {
           "type": "SYMBOL",
@@ -2469,6 +2558,19 @@
         {
           "type": "SYMBOL",
           "name": "_expression"
+        }
+      ]
+    },
+    "defer_stmt": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "STRING",
+          "value": "defer"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "block"
         }
       ]
     },
@@ -3062,6 +3164,10 @@
         {
           "type": "SYMBOL",
           "name": "paren_expression"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "unit"
         },
         {
           "type": "SYMBOL",
@@ -4244,6 +4350,10 @@
         },
         {
           "type": "SYMBOL",
+          "name": "unit_pattern"
+        },
+        {
+          "type": "SYMBOL",
           "name": "tuple_pattern"
         },
         {
@@ -4639,6 +4749,19 @@
         }
       ]
     },
+    "unit_type": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "STRING",
+          "value": "("
+        },
+        {
+          "type": "STRING",
+          "value": ")"
+        }
+      ]
+    },
     "break_stmt": {
       "type": "STRING",
       "value": "break"
@@ -4646,6 +4769,19 @@
     "continue_stmt": {
       "type": "STRING",
       "value": "continue"
+    },
+    "unit_binding": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "STRING",
+          "value": "("
+        },
+        {
+          "type": "STRING",
+          "value": ")"
+        }
+      ]
     },
     "_self_1": {
       "type": "STRING",
@@ -5379,6 +5515,31 @@
         }
       ]
     },
+    "unit": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "STRING",
+          "value": "("
+        },
+        {
+          "type": "CHOICE",
+          "members": [
+            {
+              "type": "SYMBOL",
+              "name": "_nl_rep"
+            },
+            {
+              "type": "BLANK"
+            }
+          ]
+        },
+        {
+          "type": "STRING",
+          "value": ")"
+        }
+      ]
+    },
     "_escape_sequence_19": {
       "type": "STRING",
       "value": "{{"
@@ -5397,6 +5558,18 @@
         {
           "type": "SYMBOL",
           "name": "_expression"
+        },
+        {
+          "type": "CHOICE",
+          "members": [
+            {
+              "type": "SYMBOL",
+              "name": "format_spec"
+            },
+            {
+              "type": "BLANK"
+            }
+          ]
         },
         {
           "type": "STRING",
@@ -5446,6 +5619,19 @@
     "wildcard": {
       "type": "STRING",
       "value": "_"
+    },
+    "unit_pattern": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "STRING",
+          "value": "("
+        },
+        {
+          "type": "STRING",
+          "value": ")"
+        }
+      ]
     }
   },
   "extras": [
@@ -5485,6 +5671,10 @@
     [
       "if_stmt",
       "if_expr"
+    ],
+    [
+      "unit",
+      "lambda"
     ]
   ],
   "precedences": [],

@@ -12,8 +12,10 @@
 // collected, up to MAX_ERRORS: the same errors in the same order as types.py
 // (MYLA-65, D80).
 
-from .parser import parse_source, Parsed, expr_of, stmt_of, type_expr_of, block_of, pattern_of, fun_of
+from .parser import parse_source, Parsed, expr_of, stmt_of, type_expr_of, block_of, pattern_of, fun_of, is_let_else_marker
 from .ast import int_text
+from .util import format_specs
+from std.fmt import parse_spec, spec_need
 from .ast import Program, Decl, DeclKind, FunData, Param, TypeParam, Field, Variant
 from .ast import Attribute, TypeExpr, TypeKind, Expr, ExprKind, FieldInit, MapEntry
 from .ast import Stmt, StmtKind, Block, ElseTail, BindElem, ExprOrBlock
@@ -192,6 +194,32 @@ fun field_names(fields: [FieldT]) -> [str] {
     var out: [str] = []
     for f in fields { out.push(f.name) }
     return out
+}
+
+// Whether `e` is a call (whose value, without a result, is `()`, D140).
+#test(expr_of("f(1)"))[true]
+#test(expr_of("x"))[false]
+fun is_call_expr(e: Expr) -> bool {
+    return match e.kind { ExprKind.Call(c, args) => true, _ => false }
+}
+
+// A function's result written as `t`: none for `()`, the same thing (D140).
+#test(Type.TTuple([]))[None]
+#test(Type.TBool)[Some(Type.TBool)]
+pub fun result_of(t: Type) -> Option<Type> {
+    if is_unit(t) { return None }
+    return Some(t)
+}
+
+// Whether `t` is the unit type `()`, the 0-tuple (D138).
+#test(Type.TTuple([]))[true]
+#test(Type.TTuple([Type.TBool]))[false]
+#test(Type.TBool)[false]
+pub fun is_unit(t: Type) -> bool {
+    return match t {
+        Type.TTuple(es) => es.len() == 0,
+        _ => false,
+    }
 }
 
 // A type as the Python checker's messages write it (types.py: type_name).
@@ -712,7 +740,7 @@ fun is_builtin_func(name: str) -> bool {
 #test("__load8")[true]
 #test("__load")[false]
 pub fun is_raw_memory_primitive(name: str) -> bool {
-    return name == "__load8" || name == "__load64" || name == "__store8" || name == "__store64" || name == "__alloc" || name == "__addr_of" || name == "__str_of" || name == "__copy_bytes" || name == "__equal_bytes" || name == "__syscall" || name == "__syscall5" || name == "__set_io_errno" || name == "__free" || name == "__environ" || name == "__set_run_status" || name == "__set_run_stderr" || name == "__argv" || name == "__load32" || name == "__store32" || name == "__list_addr" || name == "__list_of" || name == "__rotl" || name == "__rt_addr" || name == "__rt_get" || name == "__bsr64" || name == "__trap_oom" || name == "__rt_waddr" || name == "__cas64" || name == "__xchg64" || name == "__fetch_add64" || name == "__pause" || name == "__run_frame" || name == "__f64_round"
+    return name == "__load8" || name == "__load64" || name == "__store8" || name == "__store64" || name == "__alloc" || name == "__addr_of" || name == "__str_of" || name == "__copy_bytes" || name == "__equal_bytes" || name == "__syscall" || name == "__syscall5" || name == "__set_io_errno" || name == "__free" || name == "__environ" || name == "__set_run_status" || name == "__set_run_stderr" || name == "__argv" || name == "__load32" || name == "__store32" || name == "__list_addr" || name == "__list_of" || name == "__rotl" || name == "__rt_addr" || name == "__rt_get" || name == "__bsr64" || name == "__trap_oom" || name == "__rt_waddr" || name == "__cas64" || name == "__xchg64" || name == "__fetch_add64" || name == "__pause" || name == "__run_frame" || name == "__f64_round" || name == "__load_acq64" || name == "__store_rel64"
 }
 
 #test("sum")[false]
@@ -1180,7 +1208,8 @@ pub struct ConstDeclT { name: str, declared: TypeExpr, value: Expr, line: int32,
 // (D89), 1 with a result of type `ty`, 2 with none
 pub struct Binding { ty: Type, mutable: bool, line: int32, col: int32, sp: SrcSpan, task: int32 }
 // A lambda being checked (D89): its parameters' frame and where it is
-pub struct LamAt { base: int32, line: int32, col: int32, sp: SrcSpan }
+// `defer_at`: the checker's `defer_at` outside the lambda, given back after it
+pub struct LamAt { base: int32, line: int32, col: int32, sp: SrcSpan, defer_at: int32 }
 // A function with a `#main` attribute: where it is, its name and declaration.
 pub struct MainAt { line: int32, col: int32, sp: SrcSpan, name: str, id: int32 }
 pub struct Frame { names: [str], binds: [Binding] }
@@ -1242,6 +1271,9 @@ pub struct Checker {
     has_cur_ret: bool,
     ret_at: Option<TypeExpr>,       // the return type of the function being checked, for notes (MYLA-65)
     loop_depth: int32,
+    // in a deferred block (D135): the loop depth where the innermost one
+    // starts, which its `break` and `continue` can't leave; -1 outside one
+    defer_at: int32,
     frames: [Frame],
     lambda_infer_active: bool,
     lambda_depth: int32,            // lambdas being checked (`?` names "lambda" or "function")
@@ -1249,6 +1281,7 @@ pub struct Checker {
     lambda_infer: [MatchVal],
     stmt_match: bool,
     resolved: [int32: Type],        // expr node id -> resolved type (v0.8 interp side table)
+    call_defaults: [int32: [Expr]], // call node id -> the defaults it leaves to its trailing parameters (D136)
     errs: [CheckErr],               // the errors of the functions checked so far (MYLA-65, D80)
     warnings: [CheckErr],           // D95: the warnings found, in the order found
     // going on after a declaration's error (MYLA-110, D84; types.py: Checker):
@@ -1322,9 +1355,9 @@ fun new_checker(decls: [Decl]) -> Checker {
         impl_decls: [], traits: [], trait_decls: [], trait_impls: [], user_trait_impls: [],
         aliases: [], alias_cache: [], const_decls: [], consts: [], const_values: [:], const_done: [], const_folding: [],
         allow_self: false, type_params: [], bounds_cur: [],
-        cur_ret: None, has_cur_ret: false, ret_at: None, loop_depth: 0,
+        cur_ret: None, has_cur_ret: false, ret_at: None, loop_depth: 0, defer_at: -1,
         frames: [], lambda_infer_active: false, lambda_depth: 0, cur_decl: -1, lambda_infer: [], stmt_match: false,
-        resolved: [:], errs: [], warnings: [], mains: [],
+        resolved: [:], call_defaults: [:], errs: [], warnings: [], mains: [],
         skipped_decls: [:], skipped_fns: [:], broken_impls: [:], redefined: [:],
         lost_methods: [:], lost_traits: [:], failed_consts: [:], bodies: false,
         call_kind: "", call_kind_id: -1, call_target: "", call_mutates: false, fun_name: "", handovers: [:], become_words: [], passed_on: [],
@@ -1350,7 +1383,7 @@ fun is_diverging(e: Expr) -> bool {
 fun stmt_returns(s: Stmt) -> bool {
     return match s.kind {
         StmtKind.ReturnS(v, tail) => true,
-        StmtKind.ExprStmt(e) => is_diverging(e),
+        StmtKind.ExprStmt(e) => is_diverging(e) || match_returns(e),
         StmtKind.IfS(cond, then, otherwise) => {
             if !block_returns(then) { return false }
             match otherwise {
@@ -1359,6 +1392,50 @@ fun stmt_returns(s: Stmt) -> bool {
             }
         },
         _ => false,
+    }
+}
+
+// Whether `e` is a match whose every arm returns (or diverges): a function
+// may end with one, as with a let-else (D137).
+#test(expr_of("match o { Some(v) => 1, None => 2 }"))[false]
+fun match_returns(e: Expr) -> bool {
+    match e.kind {
+        ExprKind.MatchE(value, arms) => {
+            for arm in arms {
+                let ok = match arm.body { ExprOrBlock.EB_Block(b) => block_returns(b), ExprOrBlock.EB_Expr(x) => is_diverging(x) }
+                if !ok { return false }
+            }
+            return arms.len() > 0
+        },
+        _ => {},
+    }
+    return false
+}
+
+// Whether running `b` always leaves it: a `return`, `become`, `break` or
+// `continue` at its level, a call that never returns, or an `if` (or match)
+// whose every branch leaves (a let-else's `else`, D137). A `break` inside a
+// loop in `b` leaves that loop, not `b`, so loops are not looked into.
+#test(block_of("{ }"))[false]
+fun block_leaves(b: Block) -> bool {
+    for st in b.stmts { if stmt_leaves(st) { return true } }
+    return false
+}
+
+#test(stmt_of("break"))[true]
+#test(stmt_of("x = 1"))[false]
+fun stmt_leaves(st: Stmt) -> bool {
+    return match st.kind {
+        StmtKind.BreakS => true,
+        StmtKind.ContinueS => true,
+        StmtKind.IfS(cond, then, otherwise) => {
+            if !block_leaves(then) { return false }
+            match otherwise {
+                Some(et) => match et { ElseTail.ElseBlock(b) => block_leaves(b), ElseTail.ElseIf(s2) => stmt_leaves(s2) },
+                None => false,
+            }
+        },
+        _ => stmt_returns(st),
     }
 }
 
@@ -1753,7 +1830,7 @@ impl Checker {
             TypeKind.TFn(params, ret, asy) => {
                 let ps = self.resolve_list(params, visiting)?
                 let rt = self.resolve(ret, visiting)?
-                Ok(func_type(ps, Some(rt), asy))
+                Ok(func_type(ps, result_of(rt), asy))
             },
             TypeKind.TRef(name, args) => self.resolve_ref(name, args, ln, cl, sp, visiting),
         }
@@ -1936,7 +2013,7 @@ impl Checker {
         return Ok(Type.TError)
     }
 
-    #test(checker_on("[int]"), Param { line: 7, col: 14, sp: SrcSpan { sline: 7, scol: 14, eline: 7, ecol: 21 }, name: "c", ty: Some(TypeExpr { id: 8, line: 7, col: 17, sp: SrcSpan { sline: 7, scol: 17, eline: 7, ecol: 21 }, kind: TypeKind.TRef("char", []) }) })[Ok(Type.TChar)]
+    #test(checker_on("[int]"), Param { line: 7, col: 14, sp: SrcSpan { sline: 7, scol: 14, eline: 7, ecol: 21 }, name: "c", ty: Some(TypeExpr { id: 8, line: 7, col: 17, sp: SrcSpan { sline: 7, scol: 17, eline: 7, ecol: 21 }, kind: TypeKind.TRef("char", []) }), default: None })[Ok(Type.TChar)]
     fun param_type(var self, p: Param) -> Result<Type, CheckErr> {
         return match p.ty {
             Some(te) => self.resolve0(te),
@@ -2061,7 +2138,7 @@ impl Checker {
                     var ps: [Type] = []
                     for p in fd.params { ps.push(self.param_part(p)?) }
                     var rt: Option<Type> = None
-                    match fd.ret_type { Some(te) => { rt = Some(self.resolve_part(te)?) }, None => {} }
+                    match fd.ret_type { Some(te) => { rt = result_of(self.resolve_part(te)?) }, None => {} }
                     self.type_params = []
                     let idx = self.func_idx(fd.name)
                     self.functions[idx] = FuncSig { name: fd.name, params: ps, ret: rt, type_params: tp_names(fd.type_params), bounds: build_bounds(fd.type_params), decl: fd, has_decl: true, decl_id: decl.id }
@@ -2188,6 +2265,14 @@ impl Checker {
                     match tp_fail { Some(e) => { self.record(e)? }, None => {} }
                     var msigs: [TraitMethodSig] = []
                     for m in methods {
+                        // a call through a bound can't know an implementation's
+                        // defaults, so a trait's methods have none (D136)
+                        for p in m.params {
+                            match p.default {
+                                Some(d) => { self.record(terr_at(d.line, d.col, d.sp, format("the methods of a trait can't have default values (parameter '{}' of '{}.{}')", p.name, name, m.name)))? },
+                                None => {},
+                            }
+                        }
                         var dup = false
                         for prev in msigs { if prev.name == m.name { dup = true } }
                         if dup {
@@ -2203,7 +2288,7 @@ impl Checker {
                         var params: [Type] = [Type.TSelf]
                         for p in m.params { params.push(self.param_part(p)?) }
                         var rt: Option<Type> = None
-                        match m.ret_type { Some(te) => { rt = Some(self.resolve_part(te)?) }, None => {} }
+                        match m.ret_type { Some(te) => { rt = result_of(self.resolve_part(te)?) }, None => {} }
                         self.allow_self = false
                         self.type_params = []
                         let recv = match m.receiver { Some(r) => r, None => "self" }
@@ -2444,10 +2529,10 @@ impl Checker {
         var params: [Type] = [self_t]
         for p in m.params { params.push(self.param_part(p)?) }
         var rt: Option<Type> = None
-        match m.ret_type { Some(te) => { rt = Some(self.resolve_part(te)?) }, None => {} }
+        match m.ret_type { Some(te) => { rt = result_of(self.resolve_part(te)?) }, None => {} }
         self.type_params = []
         // synthesize a self parameter so the body checker binds `self`
-        var sparams: [Param] = [Param { line: m.line, col: m.col, sp: no_span(), name: "self", ty: Some(target_te) }]
+        var sparams: [Param] = [Param { line: m.line, col: m.col, sp: no_span(), name: "self", ty: Some(target_te), default: None }]
         for p in m.params { sparams.push(p) }
         let fdecl = FunData {
             line: m.line, col: m.col, sp: m.sp, name: mangled, params: sparams,
@@ -2665,7 +2750,12 @@ impl Checker {
     fun expect_value(var self, e: Expr, expected: Option<Type>) -> Result<Type, CheckErr> {
         return match self.infer(e, expected)? {
             Some(t) => Ok(t),
-            None => Err(terr_at(e.line, e.col, e.sp, "expression does not produce a value")),
+            None => {
+                // a call of a function without a result: the value `()` (D140)
+                if !is_call_expr(e) { return Err(terr_at(e.line, e.col, e.sp, "expression does not produce a value")) }
+                self.resolved[e.id] = Type.TTuple([])
+                Ok(Type.TTuple([]))
+            },
         }
     }
 
@@ -2714,10 +2804,16 @@ impl Checker {
             ExprKind.MapLit(entries) => Ok(Some(self.infer_map_lit(e, entries, expected)?)),
             ExprKind.Index(t, i) => Ok(Some(self.infer_index(e, t, i)?)),
             ExprKind.MatchE(s, arms) => self.infer_match(e, s, arms, expected, as_stmt),
-            ExprKind.Try(x) => Ok(Some(self.infer_try(e, x)?)),
+            ExprKind.Try(x) => {
+                if self.defer_at >= 0 { return Err(terr_at(e.line, e.col, e.sp, "a deferred block can't use '?': it runs as its block ends")) }
+                Ok(Some(self.infer_try(e, x)?))
+            },
             ExprKind.Cast(x, ty) => Ok(Some(self.infer_cast(e, x, ty)?)),
             ExprKind.Lambda(ps, ret, body, asy) => Ok(Some(self.infer_lambda(e, ps, ret, body, asy, expected)?)),
-            ExprKind.Await(x) => self.infer_await(e, x, expected),
+            ExprKind.Await(x) => {
+                if self.defer_at >= 0 { return Err(terr_at(e.line, e.col, e.sp, "a deferred block can't 'await': it runs as its block ends, without suspending")) }
+                self.infer_await(e, x, expected)
+            },
             ExprKind.Hole => Err(terr_at(e.line, e.col, e.sp, "'_' placeholder is only valid as a call argument")),
         }
         match r { Ok(om) => { self.record_type(e.id, om) }, Err(x) => {} }
@@ -2919,7 +3015,7 @@ impl Checker {
             if is_int(lt) || is_float(lt) { hint = Some(lt) }
             let rt = self.expect_value(r, hint)?
             let common = self.unify(l, lt, r, rt)?
-            if !(is_int(common) || is_float(common) || is_char(common) || is_bool(common) || is_str(common)) {
+            if !(is_int(common) || is_float(common) || is_char(common) || is_bool(common) || is_str(common) || is_unit(common)) {
                 return Err(terr_at(e.line, e.col, e.sp, format("cannot compare values of type '{}'", type_name(common))))
             }
             return Ok(Type.TBool)
@@ -3335,6 +3431,13 @@ impl Checker {
         match self.check_redundant(arms, st) {
             Ok(x) => {},
             Err(err) => { return Err(if_worded(err, arms)) },
+        }
+        // a let-else's `else` must leave the block (D137)
+        if arms.len() == 2 && is_let_else_marker(arms[1].pattern) {
+            let leaves = match arms[1].body { ExprOrBlock.EB_Block(b) => block_leaves(b), ExprOrBlock.EB_Expr(x) => is_diverging(x) }
+            if !leaves {
+                return Err(terr_at(arms[1].line, arms[1].col, arms[1].sp, "the 'else' of a let-else must leave the block: end it with 'return', 'become', 'break', 'continue' or a call that never returns ('panic', 'unreachable')"))
+            }
         }
         if as_stmt { return Ok(None) }
         // collect non-diverging arm values
@@ -4039,15 +4142,27 @@ impl Checker {
             },
             StmtKind.ForS(var_name, start, end, body, iter) => self.check_for(s, var_name, start, end, body, iter),
             StmtKind.ReturnS(v, tail) => {
+                if self.defer_at >= 0 { return Err(terr_at(s.line, s.col, s.sp, format("a deferred block can't '{}': it runs as its block ends", if_str(tail, "become", "return")))) }
                 if !tail { return self.check_return(s, v) }
                 match v { Some(ve) => self.check_become(ve), None => Ok(0) }
             },
             StmtKind.BreakS => {
                 if self.loop_depth == 0 { return Err(terr_at(s.line, s.col, s.sp, "'break' outside of a loop")) }
+                if self.loop_depth == self.defer_at { return Err(terr_at(s.line, s.col, s.sp, "a deferred block can't 'break' out of itself")) }
                 Ok(0)
             },
             StmtKind.ContinueS => {
                 if self.loop_depth == 0 { return Err(terr_at(s.line, s.col, s.sp, "'continue' outside of a loop")) }
+                if self.loop_depth == self.defer_at { return Err(terr_at(s.line, s.col, s.sp, "a deferred block can't 'continue' out of itself")) }
+                Ok(0)
+            },
+            StmtKind.DeferS(body) => {
+                // checked where it stands, with the names declared before it
+                let saved = self.defer_at
+                self.defer_at = self.loop_depth
+                let r = self.check_block(body)
+                self.defer_at = saved
+                r?
                 Ok(0)
             },
             StmtKind.ExprStmt(ex) => {
@@ -4099,7 +4214,10 @@ impl Checker {
                         // positioned at the `return`, where Python reports a mismatch
                         self.lambda_infer.push(MatchVal { ty: vt, node: Some(Expr { id: ve.id, line: s.line, col: s.col, sp: s.sp, kind: ve.kind }) })
                     } else {
-                        return Err(terr_at(s.line, s.col, s.sp, "cannot return a value from a function with no return type"))
+                        // `return ()`, or the call of another function without
+                        // a result: the same as `return` (D140)
+                        let vt = self.expect_value(ve, None)?
+                        if !is_unit(vt) { return Err(terr_at(s.line, s.col, s.sp, "cannot return a value from a function with no return type")) }
                     }
                 },
                 None => {},
@@ -4204,6 +4322,16 @@ impl Checker {
         var ats: [Type] = []
         for a in all {
             if self.resolved.contains(a.id) { ats.push(self.resolved[a.id]) } else { ats.push(Type.TBool) }
+        }
+        // and the defaults the call leaves to its trailing parameters (D136),
+        // as their parameters' types say (the defaults may not be checked yet)
+        if self.call_defaults.contains(ve.id) {
+            let fi = self.func_idx(target)
+            var k = ats.len()
+            for d in self.call_defaults[ve.id] {
+                if fi >= 0 && k < self.functions[fi].params.len() { ats.push(self.functions[fi].params[k]) } else { ats.push(Type.TBool) }
+                k = k + 1
+            }
         }
         self.become_words.push(BecomeWords { func: self.fun_name, target: target, value: kind == "value", mutates: self.call_mutates, args: ats, line: ve.line, col: ve.col, sp: ve.sp, decl: self.cur_decl })
         return Ok(0)
@@ -4478,6 +4606,8 @@ impl Checker {
     #test(checker_on("enum E { A, B(int) }"), stmt_of("x = x + 1"), "a", None, expr_of("a.b[0]"))[Err(CheckErr { line: 1, col: 3, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 10 }, msg: "'async let' can only stand in an async function", decl: -1, notes: [] })]
     fun check_async_let(var self, s: Stmt, name: str, ty: Option<TypeExpr>, init: Expr) -> Result<int32, CheckErr> {
         if !self.in_async { return Err(terr_at(s.line, s.col, s.sp, "'async let' can only stand in an async function")) }
+        // its scope would wait for the child: a suspension (D135)
+        if self.defer_at >= 0 { return Err(terr_at(s.line, s.col, s.sp, "a deferred block can't start a task: it runs as its block ends, without suspending")) }
         if self.task_line == 0 {
             self.task_line = s.line
             self.task_col = s.col
@@ -4588,6 +4718,57 @@ impl Checker {
         }
     }
 
+    // A call of `sig` with `given` arguments (after `skip` parameters: a
+    // method's receiver): too many or too few is an error; fewer than its
+    // parameters records the defaults of the ones left out (D136).
+    fun call_arity(var self, e: Expr, sig: FuncSig, skip: int32, given: int32, what: str) -> Result<bool, CheckErr> {
+        let total = sig.params.len() - skip
+        let optional = trailing_defaults(sig.decl.params)
+        if given > total || given < total - optional {
+            if optional == 0 { return Err(terr_at(e.line, e.col, e.sp, format("{} expects {} argument(s), got {}", what, total, given))) }
+            return Err(terr_at(e.line, e.col, e.sp, format("{} expects {} to {} argument(s), got {}", what, total - optional, total, given)))
+        }
+        if given < total {
+            var ds: [Expr] = []
+            var i = skip + given
+            while i < sig.decl.params.len() {
+                match sig.decl.params[i].default { Some(d) => { ds.push(d) }, None => {} }
+                i += 1
+            }
+            self.call_defaults[e.id] = ds
+        }
+        return Ok(true)
+    }
+
+    // The defaults of `fd`'s parameters (D136): only trailing ones, each of
+    // its parameter's type, checked before any parameter is in scope (a
+    // default can't name one). A default whose parameter's type mentions a
+    // type parameter isn't supported: the caller, which evaluates it, has no
+    // binding for it.
+    fun check_defaults(var self, fd: FunData, sig: FuncSig) -> Result<bool, CheckErr> {
+        var seen = false
+        var i = 0
+        while i < fd.params.len() {
+            let p = fd.params[i]
+            match p.default {
+                Some(d) => {
+                    seen = true
+                    let pt = sig.params[i]
+                    if !has_error(pt) {
+                        if contains_type_param(pt) { return Err(terr_at(d.line, d.col, d.sp, format("parameter '{}' can't have a default: its type mentions a type parameter", p.name))) }
+                        let dt = self.expect_value(d, Some(pt))?
+                        if !type_eq(dt, pt) { return Err(terr_at(d.line, d.col, d.sp, format("the default of parameter '{}' is a '{}', but the parameter is a '{}'", p.name, type_name(dt), type_name(pt)))) }
+                    }
+                },
+                None => {
+                    if seen { return Err(terr_at(p.line, p.col, p.sp, format("parameter '{}' needs a default: the parameters after one with a default have one too", p.name))) }
+                },
+            }
+            i = i + 1
+        }
+        return Ok(true)
+    }
+
     #test(checker_on("fun f(n: int) -> int { return n * 2 }"), fun_of("fun f(n: int) -> int { return n * 2 }"))[Ok(0)]
     fun check_function(var self, fd: FunData) -> Result<int32, CheckErr> {
         let idx = self.func_idx(fd.name)
@@ -4600,6 +4781,7 @@ impl Checker {
         self.bounds_cur = sig.bounds
         self.frames = []
         self.push_scope()
+        self.check_defaults(fd, sig)?
         self.in_async = fd.is_async
         if fd.is_async { self.met_concurrency(fd.line, fd.col, fd.sp, self.cur_decl) }
         if self.is_actor(self.cur_key) { self.actor_self = self.cur_key } else { self.actor_self = "" }
@@ -4644,6 +4826,7 @@ fun is_eq_type(t: Type, eq_names: [str]) -> bool {
         Type.TChar => true,
         Type.TFloat(w) => true,
         Type.TError => true,          // has had its error (MYLA-110)
+        Type.TTuple(es) => es.len() == 0,   // the unit type (D138)
         Type.TStruct(n, a) => contains_str(eq_names, n),
         Type.TEnum(n, a) => contains_str(eq_names, n),
         _ => false,
@@ -5317,6 +5500,7 @@ impl Checker {
         self.cur_decl = id
         self.frames = []
         self.loop_depth = 0
+        self.defer_at = -1
         self.lambda_depth = 0
         self.lambda_infer_active = false
         self.lambda_infer = []
@@ -5371,7 +5555,7 @@ impl Checker {
         }
     }
 
-    #test(checker_on("[int]"), Param { line: 3, col: 26, sp: SrcSpan { sline: 3, scol: 26, eline: 3, ecol: 30 }, name: "k", ty: Some(TypeExpr { id: 48, line: 3, col: 29, sp: SrcSpan { sline: 3, scol: 29, eline: 3, ecol: 30 }, kind: TypeKind.TRef("K", []) }) })[Ok(Type.TError)]
+    #test(checker_on("[int]"), Param { line: 3, col: 26, sp: SrcSpan { sline: 3, scol: 26, eline: 3, ecol: 30 }, name: "k", ty: Some(TypeExpr { id: 48, line: 3, col: 29, sp: SrcSpan { sline: 3, scol: 29, eline: 3, ecol: 30 }, kind: TypeKind.TRef("K", []) }), default: None })[Ok(Type.TError)]
     fun param_part(var self, p: Param) -> Result<Type, CheckErr> {
         return match self.param_type(p) {
             Ok(t) => Ok(t),
@@ -5393,9 +5577,9 @@ impl Checker {
     }
 }
 
-#test()["enum Option<T> { Some(T), None }\nenum Result<T, E> { Ok(T), Err(E) }\nfun get<K, V>(m: [K: V], k: K) -> Option<V> {\n    if contains(m, k) {\n        return Some(m[k])\n    }\n    return None\n}\n"]
+#test()["enum Option<T> { Some(T), None }\nenum Result<T, E> { Ok(T), Err(E) }\nfun get<K, V>(m: [K: V], k: K) -> Option<V> {\n    if contains(m, k) {\n        return Some(m[k])\n    }\n    return None\n}\ntrait Format {\n    fun format(self, spec: str) -> str\n}\n"]
 fun prelude_src() -> str {
-    return "enum Option<T> { Some(T), None }\nenum Result<T, E> { Ok(T), Err(E) }\nfun get<K, V>(m: [K: V], k: K) -> Option<V> {\n    if contains(m, k) {\n        return Some(m[k])\n    }\n    return None\n}\n"
+    return "enum Option<T> { Some(T), None }\nenum Result<T, E> { Ok(T), Err(E) }\nfun get<K, V>(m: [K: V], k: K) -> Option<V> {\n    if contains(m, k) {\n        return Some(m[k])\n    }\n    return None\n}\ntrait Format {\n    fun format(self, spec: str) -> str\n}\n"
 }
 
 // The prelude's declarations, with node ids from `first_id`.
@@ -5429,6 +5613,8 @@ pub fun build_checker_decls(decls: [Decl], next_id: int32) -> Result<Checker, [C
     var c = new_checker(all)
     let r = c.run_all()
     match r { Ok(x) => {}, Err(e) => { return Err(e) } }
+    // every call with all its arguments, for whatever runs the program (D136)
+    c.fill_defaults()
     return Ok(c)
 }
 
@@ -5470,6 +5656,16 @@ fun count_format_holes(fmt: str, line: int32, col: int32) -> Result<int32, Check
             if i + 1 < n && cs[i + 1] == '}' { holes = holes + 1
             i = i + 2
             continue }
+            // `{:spec}` (D139)
+            if i + 1 < n && cs[i + 1] == ':' {
+                var j = i + 2
+                while j < n && cs[j] != '}' && cs[j] != '{' { j = j + 1 }
+                if j < n && cs[j] == '}' {
+                    holes = holes + 1
+                    i = j + 1
+                    continue
+                }
+            }
             return Err(terr(line, col, "format(): a single '{' must be a '{}' placeholder or an escaped '{{'"))
         }
         if c == '}' {
@@ -5624,7 +5820,10 @@ impl Checker {
         // (a spinning loop's hint to the processor), `__run_frame(fr)` (the
         // executor resuming a frame, D90: until it suspends or ends) and
         // `__f64_round(x)` (a float64 rounded to the nearest int64, ties to
-        // even, for formatting floats)
+        // even, for formatting floats); `__load_acq64(p)` and
+        // `__store_rel64(p, v)` (the 8 bytes at `p` read with acquire, written
+        // with release ordering: nothing after the read is seen before it,
+        // nothing before the write after it; MYLA-267)
         if is_raw_memory_primitive(name) {
             let i64 = Type.TInt(64, true)
             if name == "__rt_addr" || name == "__rt_get" || name == "__rt_waddr" {
@@ -5669,7 +5868,7 @@ impl Checker {
             if name == "__store32" { want = [i64, Type.TInt(32, false)] }
             if name == "__rotl" { want = [i64, i64] }
             if name == "__cas64" { want = [i64, i64, i64] }
-            if name == "__xchg64" || name == "__fetch_add64" { want = [i64, i64] }
+            if name == "__xchg64" || name == "__fetch_add64" || name == "__store_rel64" { want = [i64, i64] }
             if name == "__f64_round" { want = [Type.TFloat(64)] }
             if name == "__copy_bytes" || name == "__equal_bytes" { want = [i64, i64, i64] }
             if name == "__syscall" { want = [i64, i64, i64, i64] }
@@ -5688,7 +5887,7 @@ impl Checker {
             if name == "__load8" { return Ok(Some(Type.TInt(8, false))) }
             if name == "__load32" { return Ok(Some(Type.TInt(32, false))) }
             if name == "__equal_bytes" || name == "__cas64" { return Ok(Some(Type.TBool)) }
-            if name == "__store8" || name == "__store32" || name == "__store64" || name == "__copy_bytes" || name == "__set_io_errno" || name == "__free" || name == "__set_run_status" || name == "__set_run_stderr" || name == "__pause" || name == "__run_frame" { return Ok(None) }
+            if name == "__store8" || name == "__store32" || name == "__store64" || name == "__store_rel64" || name == "__copy_bytes" || name == "__set_io_errno" || name == "__free" || name == "__set_run_status" || name == "__set_run_stderr" || name == "__pause" || name == "__run_frame" { return Ok(None) }
             if name == "__str_of" { return Ok(Some(Type.TStr)) }
             return Ok(Some(i64))
         }
@@ -5885,7 +6084,7 @@ impl Checker {
             self.mark_call(e, "function", name, sig_mutates(sig), "", sig.decl.is_async)
             return Ok(gr)
         }
-        if args.len() != sig.params.len() { return Err(terr_at(e.line, e.col, e.sp, format("function '{}' expects {} argument(s), got {}", name, sig.params.len(), args.len()))) }
+        self.call_arity(e, sig, 0, args.len(), format("function '{}'", name))?
         var i = 0
         while i < args.len() {
             if !has_error(sig.params[i]) {   // else the parameter's type failed (MYLA-110)
@@ -5946,10 +6145,27 @@ impl Checker {
         let holes = count_format_holes(fval, fmt.line, fmt.col)?
         let rest = args.len() - 1
         if holes != rest { return Err(terr_at(e.line, e.col, e.sp, format("format() has {} placeholder(s) but {} argument(s)", holes, rest))) }
+        let specs = format_specs(fval)
         var i = 1
         while i < args.len() {
             let at = self.expect_value(args[i], None)?
+            let spec = specs[i - 1]
+            // a type of the program's with its own form (D139): the spec is its
+            if is_struct_or_enum(at) && self.type_implements(at, "Format")? {
+                i = i + 1
+                continue
+            }
             if !is_printable(at) { return Err(terr_at(args[i].line, args[i].col, args[i].sp, format("format() cannot render a value of type '{}'", type_name(at)))) }
+            if spec != "" {
+                let sp = match parse_spec(spec) {
+                    Ok(x) => x
+                    Err(why) => { return Err(terr_at(args[i].line, args[i].col, args[i].sp, why)) }
+                }
+                var class = 2
+                if is_int(at) { class = 0 } else if is_float(at) { class = 1 }
+                let need = spec_need(sp, class)
+                if need != "" { return Err(terr_at(args[i].line, args[i].col, args[i].sp, format("the format spec '{}' {}, found '{}'", spec, need, type_name(at)))) }
+            }
             i = i + 1
         }
         return Ok(Type.TStr)
@@ -6045,7 +6261,7 @@ impl Checker {
 
     fun infer_generic_call(var self, e: Expr, name: str, sig: FuncSig, args: [Expr]) -> Result<Option<Type>, CheckErr> {
         if sig_has_error(sig.params, sig.ret) { return Err(poisoned()) }   // its type arguments can't be inferred (MYLA-110)
-        if args.len() != sig.params.len() { return Err(terr_at(e.line, e.col, e.sp, format("function '{}' expects {} argument(s), got {}", name, sig.params.len(), args.len()))) }
+        self.call_arity(e, sig, 0, args.len(), format("function '{}'", name))?
         var subst: [Subst] = []
         var arg_types: [Type] = []
         var i = 0
@@ -6127,8 +6343,7 @@ impl Checker {
                     let lv = self.check_lvalue(target)?
                     if !lv.mutable { return Err(with_notes(terr_at(e.line, e.col, e.sp, format("cannot call the mutating method '{}' on an immutable receiver (declare it with 'var')", field)), self.declared_at(target))) }
                 }
-                let nargs = sig.params.len() - 1
-                if args.len() != nargs { return Err(terr_at(e.line, e.col, e.sp, format("method '{}' expects {} argument(s), got {}", field, nargs, args.len()))) }
+                self.call_arity(e, sig, 1, args.len(), format("method '{}'", field))?
                 if sig.type_params.len() > 0 {
                     let gr = self.infer_generic_method(e, sig, field, recv_type, args)?
                     self.mark_call(e, "method", sig.name, recv == "var self", mkey, sig.decl.is_async)
@@ -6264,7 +6479,9 @@ impl Checker {
         self.task_init = false
         self.in_guard = false
         self.lambda_depth = self.lambda_depth + 1
-        self.lams.push(LamAt { base: self.frames.len() - 1, line: e.line, col: e.col, sp: e.sp })
+        self.lams.push(LamAt { base: self.frames.len() - 1, line: e.line, col: e.col, sp: e.sp, defer_at: self.defer_at })
+        // a lambda in a deferred block is a function of its own (D135)
+        self.defer_at = -1
         self.in_async = asy
         if asy { self.met_concurrency(e.line, e.col, e.sp, e.id) }
         var ret_t: Option<Type> = None
@@ -6320,6 +6537,7 @@ impl Checker {
 
     fun restore_lambda(var self, r: Option<Type>, h: bool, a: bool, inf: [MatchVal], asy: bool, ti: bool, ig: bool) {
         self.lambda_depth = self.lambda_depth - 1
+        self.defer_at = self.lams[self.lams.len() - 1].defer_at
         self.lams.pop()
         self.in_async = asy
         self.task_init = ti
@@ -6469,7 +6687,9 @@ fun strip_async(t: Type) -> Type {
 #test([Type.TStr], Some(Type.TStr), false)[Type.TFunc([Type.TStr], Some(Type.TStr))]
 #test([Type.TParam("T")], Some(Type.TParam("T")), false)[Type.TFunc([Type.TParam("T")], Some(Type.TParam("T")))]
 #test([Type.TInt(32, true), Type.TInt(32, true)], Some(Type.TInt(32, true)), false)[Type.TFunc([Type.TInt(32, true), Type.TInt(32, true)], Some(Type.TInt(32, true)))]
-fun func_type(ps: [Type], r: Option<Type>, asy: bool) -> Type {
+fun func_type(ps: [Type], r0: Option<Type>, asy: bool) -> Type {
+    // a result of `()` is no result (D140)
+    let r: Option<Type> = match r0 { Some(t) => result_of(t), None => None }
     if asy { return Type.TAsync(Type.TFunc(ps, r)) }
     return Type.TFunc(ps, r)
 }
@@ -6653,6 +6873,7 @@ impl Effects {
             },
             StmtKind.ReturnS(v, t) => { self.opt(v) },
             StmtKind.ExprStmt(x) => { self.expr(x) },
+            StmtKind.DeferS(b) => { self.block(b) },
             _ => {},
         }
     }
@@ -6852,6 +7073,7 @@ impl Reads {
             },
             StmtKind.ReturnS(v, t) => { self.opt(v, locals) },
             StmtKind.ExprStmt(x) => { self.expr(x, locals) },
+            StmtKind.DeferS(b) => { self.block(b, locals) },
             _ => {},
         }
     }
@@ -6899,16 +7121,20 @@ fun if_worded(err: CheckErr, arms: [MatchArm]) -> CheckErr {
     // `%else`: an `if` used as a value; `%iflet`, `%whilelet`: an `if let`, a
     // `while let` (MYLA-226), whose pattern must be able to fail
     let marker = match arms[1].pattern.kind { PatternKind.PBind(n) => n, _ => "" }
-    if marker != "%else" && marker != "%iflet" && marker != "%whilelet" { return err }
+    if marker != "%else" && marker != "%iflet" && marker != "%whilelet" && marker != "%letelse" { return err }
     if err.msg == "unreachable match arm (a previous arm already matches everything)" && marker != "%else" {
         let pat = arms[0].pattern
         var advice = "use 'let' instead"
-        var what = "if let"
+        var what = "'if let'"
         if marker == "%whilelet" {
             advice = "use 'while true' and 'let'"
-            what = "while let"
+            what = "'while let'"
         }
-        return CheckErr { line: pat.line, col: pat.col, sp: pat.sp, msg: format("the pattern of this '{}' always matches: {}", what, advice), decl: err.decl, notes: err.notes }
+        if marker == "%letelse" {
+            advice = "use 'let' instead, or 'match'"
+            what = "let-else"
+        }
+        return CheckErr { line: pat.line, col: pat.col, sp: pat.sp, msg: format("the pattern of this {} always matches: {}", what, advice), decl: err.decl, notes: err.notes }
     }
     var msg = err.msg
     let types = "match arms have incompatible types "
@@ -7137,6 +7363,8 @@ impl Reentrancy {
                 self.suspend(aw)
                 self.call_changes(init)
             },
+            // without an `await`, read as where it stands (D135)
+            StmtKind.DeferS(b) => { self.block(b) },
             _ => {},
         }
     }
@@ -7205,4 +7433,166 @@ fun child_reaches_self(e: Expr) -> CheckErr {
 #test("__task_cancelled")[true]
 fun starts_with_dunder(name: str) -> bool {
     return name.len() >= 2 && name[0] == '_' && name[1] == '_'
+}
+
+// =========================================================================
+// Default arguments (D136, MYLA-255): filled in once the program is checked
+// =========================================================================
+//
+// The checker records, for each call that leaves trailing parameters out,
+// the defaults of those parameters (`call_defaults`, keyed by the call's node
+// id). `fill_defaults` rewrites every function and method body and every
+// constant, so that call carries them as arguments of its own: the
+// interpreter, the lowering and everything after them see each call with all
+// its arguments. The rebuilt nodes keep their ids, so the side tables (types,
+// the calls' targets) still apply; a default's nodes are shared by the calls
+// it fills, as they have one type.
+
+impl Checker {
+    // Every recorded call given its defaults, in the declarations, the
+    // functions' and methods' signatures and the method bodies the checker
+    // keeps apart.
+    fun fill_defaults(var self) {
+        if self.call_defaults.len() == 0 { return }
+        let t = self.call_defaults
+        var ds: [Decl] = []
+        for d in self.decls { ds.push(fd_decl(d, t)) }
+        self.decls = ds
+        var i = 0
+        while i < self.functions.len() {
+            var f = self.functions[i]
+            f.decl = fd_fun(f.decl, t)
+            self.functions[i] = f
+            i += 1
+        }
+        i = 0
+        while i < self.method_decls.len() {
+            self.method_decls[i] = fd_fun(self.method_decls[i], t)
+            i += 1
+        }
+    }
+}
+
+fun fd_decl(d: Decl, t: [int32: [Expr]]) -> Decl {
+    let k = match d.kind {
+        DeclKind.FunDecl(f) => DeclKind.FunDecl(fd_fun(f, t)),
+        DeclKind.ImplDecl(target, ms, tps, tr, targs) => DeclKind.ImplDecl(target, fd_funs(ms, t), tps, tr, targs),
+        DeclKind.TraitDecl(n, ms, tps, p) => DeclKind.TraitDecl(n, fd_funs(ms, t), tps, p),
+        DeclKind.ConstDecl(n, te, e, attrs, p) => DeclKind.ConstDecl(n, te, fd_expr(e, t), attrs, p),
+        _ => d.kind,
+    }
+    return Decl { id: d.id, line: d.line, col: d.col, sp: d.sp, kind: k }
+}
+
+fun fd_funs(ms: [FunData], t: [int32: [Expr]]) -> [FunData] {
+    var out: [FunData] = []
+    for m in ms { out.push(fd_fun(m, t)) }
+    return out
+}
+
+fun fd_fun(f: FunData, t: [int32: [Expr]]) -> FunData {
+    var g = f
+    g.body = match f.body { Some(b) => Some(fd_block(b, t)), None => None }
+    return g
+}
+
+fun fd_block(b: Block, t: [int32: [Expr]]) -> Block {
+    var ss: [Stmt] = []
+    for s in b.stmts { ss.push(fd_stmt(s, t)) }
+    return Block { line: b.line, col: b.col, sp: b.sp, stmts: ss }
+}
+
+fun fd_stmt(s: Stmt, t: [int32: [Expr]]) -> Stmt {
+    let k = match s.kind {
+        StmtKind.VarDecl(kind, name, te, init) => StmtKind.VarDecl(kind, name, te, fd_expr(init, t)),
+        StmtKind.DestructDecl(kind, b, te, init) => StmtKind.DestructDecl(kind, b, te, fd_expr(init, t)),
+        StmtKind.Assign(place, value) => StmtKind.Assign(fd_expr(place, t), fd_expr(value, t)),
+        StmtKind.IfS(c, then, el) => StmtKind.IfS(fd_expr(c, t), fd_block(then, t), fd_else(el, t)),
+        StmtKind.WhileS(c, body) => StmtKind.WhileS(fd_expr(c, t), fd_block(body, t)),
+        StmtKind.ForS(v, start, end, body, iter) => StmtKind.ForS(v, fd_opt(start, t), fd_opt(end, t), fd_block(body, t), fd_opt(iter, t)),
+        StmtKind.ReturnS(v, tail) => StmtKind.ReturnS(fd_opt(v, t), tail),
+        StmtKind.ExprStmt(e) => StmtKind.ExprStmt(fd_expr(e, t)),
+        StmtKind.DeferS(b) => StmtKind.DeferS(fd_block(b, t)),
+        _ => s.kind,
+    }
+    return Stmt { id: s.id, line: s.line, col: s.col, sp: s.sp, kind: k }
+}
+
+fun fd_else(el: Option<ElseTail>, t: [int32: [Expr]]) -> Option<ElseTail> {
+    return match el {
+        Some(ElseTail.ElseBlock(b)) => Some(ElseTail.ElseBlock(fd_block(b, t))),
+        Some(ElseTail.ElseIf(s)) => Some(ElseTail.ElseIf(fd_stmt(s, t))),
+        None => None,
+    }
+}
+
+fun fd_opt(e: Option<Expr>, t: [int32: [Expr]]) -> Option<Expr> {
+    return match e { Some(x) => Some(fd_expr(x, t)), None => None }
+}
+
+fun fd_exprs(es: [Expr], t: [int32: [Expr]]) -> [Expr] {
+    var out: [Expr] = []
+    for e in es { out.push(fd_expr(e, t)) }
+    return out
+}
+
+fun fd_body(b: ExprOrBlock, t: [int32: [Expr]]) -> ExprOrBlock {
+    return match b {
+        ExprOrBlock.EB_Expr(x) => ExprOrBlock.EB_Expr(fd_expr(x, t)),
+        ExprOrBlock.EB_Block(bl) => ExprOrBlock.EB_Block(fd_block(bl, t)),
+    }
+}
+
+fun fd_expr(e: Expr, t: [int32: [Expr]]) -> Expr {
+    let k = match e.kind {
+        ExprKind.Unary(op, a) => ExprKind.Unary(op, fd_expr(a, t)),
+        ExprKind.Binary(op, a, b) => ExprKind.Binary(op, fd_expr(a, t), fd_expr(b, t)),
+        ExprKind.Call(c, args) => {
+            var all = fd_exprs(args, t)
+            // the defaults this call leaves to its trailing parameters, which
+            // may themselves call something with defaults
+            if t.contains(e.id) {
+                for d in t[e.id] { all.push(fd_expr(d, t)) }
+            }
+            ExprKind.Call(fd_expr(c, t), all)
+        },
+        ExprKind.GetField(a, f) => ExprKind.GetField(fd_expr(a, t), f),
+        ExprKind.StructLit(n, fs) => {
+            var fs2: [FieldInit] = []
+            for f in fs { fs2.push(FieldInit { line: f.line, col: f.col, sp: f.sp, name: f.name, value: fd_expr(f.value, t) }) }
+            ExprKind.StructLit(n, fs2)
+        },
+        ExprKind.TupleLit(es) => ExprKind.TupleLit(fd_exprs(es, t)),
+        ExprKind.TupleIndex(a, i) => ExprKind.TupleIndex(fd_expr(a, t), i),
+        ExprKind.ListLit(es) => ExprKind.ListLit(fd_exprs(es, t)),
+        ExprKind.MapLit(ms) => {
+            var ms2: [MapEntry] = []
+            for m in ms { ms2.push(MapEntry { key: fd_expr(m.key, t), value: fd_expr(m.value, t) }) }
+            ExprKind.MapLit(ms2)
+        },
+        ExprKind.Index(a, i) => ExprKind.Index(fd_expr(a, t), fd_expr(i, t)),
+        ExprKind.MatchE(s, arms) => {
+            var arms2: [MatchArm] = []
+            for a in arms { arms2.push(MatchArm { line: a.line, col: a.col, sp: a.sp, pattern: a.pattern, guard: fd_opt(a.guard, t), body: fd_body(a.body, t) }) }
+            ExprKind.MatchE(fd_expr(s, t), arms2)
+        },
+        ExprKind.Try(a) => ExprKind.Try(fd_expr(a, t)),
+        ExprKind.Cast(a, te) => ExprKind.Cast(fd_expr(a, t), te),
+        ExprKind.Lambda(ps, rt, body, asy) => ExprKind.Lambda(ps, rt, fd_body(body, t), asy),
+        ExprKind.Await(a) => ExprKind.Await(fd_expr(a, t)),
+        _ => e.kind,
+    }
+    return Expr { id: e.id, line: e.line, col: e.col, sp: e.sp, kind: k }
+}
+
+// How many of `ps`, from the last, have a default (D136).
+#test([])[0]
+fun trailing_defaults(ps: [Param]) -> int32 {
+    var n = 0
+    var i = ps.len() - 1
+    while i >= 0 {
+        match ps[i].default { Some(d) => { n += 1 }, None => { return n } }
+        i -= 1
+    }
+    return n
 }

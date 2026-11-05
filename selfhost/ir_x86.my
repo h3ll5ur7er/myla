@@ -845,6 +845,20 @@ impl CodeGen {
                     self.store_temp(d, temp_base)
                     return
                 }
+                // x86-64's loads and stores are ordered as acquire and
+                // release by themselves (MYLA-267)
+                if name == "__load_acq64" {
+                    let at = self.atomic_at(args[0], temp_base)
+                    self.emit("movq " + at + ", %rax")
+                    self.store_temp(d, temp_base)
+                    return
+                }
+                if name == "__store_rel64" {
+                    let at = self.atomic_at(args[0], temp_base)
+                    self.load_temp(args[1], "rax", temp_base)
+                    self.emit("movq %rax, " + at)
+                    return
+                }
                 if name == "__xchg64" {
                     let at = self.atomic_at(args[0], temp_base)
                     self.load_temp(args[1], "rax", temp_base)
@@ -1813,7 +1827,7 @@ impl CodeGen {
                     Inst.StoreAt(p, off, v, w) => { if v != p { at_uses[p] += 1 } },
                     // an atomic's address
                     Inst.Rt(d, name, args) => {
-                        if (name == "__cas64" || name == "__xchg64" || name == "__fetch_add64") && args.len() > 0 {
+                        if (name == "__cas64" || name == "__xchg64" || name == "__fetch_add64" || name == "__load_acq64" || name == "__store_rel64") && args.len() > 0 {
                             var k = 1
                             var again = false
                             while k < args.len() {
@@ -3679,7 +3693,7 @@ fun canonical_insn(t: Type, reg: str) -> str {
 #test("__drop_list_.str")[false]
 fun rt_internal(name: str) -> bool {
     if name.len() <= 15 {
-        if name == "__sqrt" || name == "__f64_bits" || name == "__f64_from_bits" || name == "__f64_round" || name == "__rotl" || name == "__bsr64" || name == "__cas64" || name == "__xchg64" || name == "__fetch_add64" || name == "__pause" || name == "__rc_dec" || name == "__rc_dec_atomic" || name == "__rc_inc" || name == "__rc_inc_atomic" { return true }
+        if name == "__sqrt" || name == "__f64_bits" || name == "__f64_from_bits" || name == "__f64_round" || name == "__rotl" || name == "__bsr64" || name == "__cas64" || name == "__xchg64" || name == "__fetch_add64" || name == "__load_acq64" || name == "__store_rel64" || name == "__pause" || name == "__rc_dec" || name == "__rc_dec_atomic" || name == "__rc_inc" || name == "__rc_inc_atomic" { return true }
     }
     // (a byte told apart first: `t` of `__rt`)
     let mark = "__rt"

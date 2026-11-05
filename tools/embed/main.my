@@ -150,7 +150,7 @@ fun main() {
     }
     if current != text {
         match write_to_file(out, text) {
-            Ok(n) => println(f"embed: wrote {out}"),
+            Ok(()) => println(f"embed: wrote {out}"),
             Err(e) => {
                 eprintln(f"embed: cannot write {out}")
                 exit(1)

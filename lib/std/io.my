@@ -156,13 +156,13 @@ impl Reader {
     // for input with the task suspended, the other tasks running; outside a
     // task it blocks as the twin does. A task asked to stop (`task.cancel`,
     // a `task.timeout` that ran out) stops waiting at once and gets
-    // `Other(125)` (ECANCELED).
+    // `Cancelled`.
 
     // `fill`, the task waiting for the input.
     async fun fill_async(var self, want: int32) -> Result<bool, IoError> {
         if self.eof { return Ok(false) }
         await __wait_readable(self.fd)
-        if __task_cancelled() { return Err(IoError.Other(125)) }
+        if __task_cancelled() { return Err(IoError.Cancelled) }
         return self.fill(want)
     }
 
@@ -214,7 +214,7 @@ impl Reader {
         sb.append(slice(self.buf, self.pos, self.buf.len()))
         while !self.eof {
             await __wait_readable(self.fd)
-            if __task_cancelled() { return Err(IoError.Other(125)) }
+            if __task_cancelled() { return Err(IoError.Cancelled) }
             let chunk = __read(self.fd, CHUNK)
             let err = __io_errno()
             if err != 0 { return Err(from_errno(err)) }

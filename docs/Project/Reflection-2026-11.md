@@ -195,15 +195,21 @@ In this order, each a task:
    - benchmarks on the new targets ([[MYLA-270]]).
 5. **Then performance and reach:** the shared register allocator ([[MYLA-257]]), the stackifier and binary writer for wasm ([[MYLA-158]]), macOS and Windows ([[MYLA-164]], [[MYLA-165]]).
 
-## Decisions this needs from the owner
+## Decisions this needed from the owner
 
-- **NaNs:** canonical, or a computed NaN's bits unspecified ([[MYLA-266]]).
-- **Program-visible errors:** `IoError` and `SpawnError` as causes (D113's enum, [[MYLA-190]]) instead of raw errnos, including an "unsupported on this target" cause.
-- **`become`'s word limit:** a language rule (a number of words for every target) or a per-target one; Win64 has four registers.
-- **D119:** Myla's own convention per target with the C convention only at C boundaries, or D119 as written ([[MYLA-272]]).
-- **Capabilities:** how a program learns what its target can do: code per target ([[MYLA-245]]), a query, or only errors.
-- **Superseded decisions:** whether to mark the superseded parts on [[Project/Decisions]] ([[MYLA-273]]).
-- **One worker:** whether an implementation may skip deep copies and atomic counts on one worker.
+All decided on 2026-11-05, the recommendations taken:
+
+| Question | Decision |
+|---|---|
+| NaNs | D128: canonical where their bits can be seen |
+| Program-visible errors | D129: portable causes, `Unsupported` among them |
+| `become`'s word limit | D131: six words on every target |
+| D119 | D130: Myla's own convention per target, each platform's C convention only at C boundaries |
+| Capabilities | D132: errors at run time, code per target at compile time |
+| One worker | D133: may skip the deep copies and atomic counts |
+| Superseded decisions | D134: marked now |
+
+The same round settled `defer` (D135), default parameter values (D136), let-else instead of `guard` (D137) and a unit type (D138). Number formatting in f-strings was decided by D113 and is [[MYLA-277]].
 
 ## Changes made with this page
 

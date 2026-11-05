@@ -115,7 +115,7 @@ SYNTAX_ERRORS = {
     "impl_body_not_fun": "struct S { a: int }\nimpl S {\n    let x = 1\n}\n",
     "trait_body_not_fun": "trait T {\n    let x = 1\n}\n",
     "expected_type": "fun f(x: 1) {\n}\n",
-    "unit_type": "fun f(x: ()) {\n}\n",
+    # (`fun f(x: ())` was one; since D138 `()` is the unit type: test_unit_type)
     "struct_fields_on_one_line": "struct S { a: int b: int }\n",
     "binding_name": "fun main() {\n    let (1, 2) = (1, 2)\n}\n",
     "expected_expression": "fun main() {\n    let x = \n}\n",
@@ -131,7 +131,8 @@ SYNTAX_ERRORS = {
     "declarations_without_separator": "const A: int = 1 const B: int = 2\n",
     # `>=` closing type arguments is split into `>` and `=` (MYLA-15)
     "split_ge_then_missing_value": "fun main() {\n    let x: Option<int>=\n}\n",
-    "split_ge_in_a_parameter": "fun f(x: Option<int>= 1) {}\n",
+    # (`fun f(x: Option<int>= 1)` was one; since D136 the `=` is a default:
+    # test_default_params)
     # several errors: the parser resumes at the next statement, member or
     # declaration (MYLA-65, D80)
     "several_statements": "fun main() {\n    let = 1\n    let y = 2\n    y = = 3\n}\nfun g() {\n    print(1 +)\n}\n",

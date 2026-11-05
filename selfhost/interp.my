@@ -11,7 +11,8 @@ from .ast import Expr, ExprKind, Stmt, StmtKind, Block, Decl, DeclKind, FunData,
 from .tokens import SrcSpan, no_span
 from .checker import Checker, Type, is_raw_memory_primitive, checker_on, builtin_method, builtin_method_name
 from .anf import Norm, new_norm, stmt_suspends, body_suspends
-from .util import cp_utf8
+from .util import cp_utf8, format_specs
+from std.fmt import fmt_int, fmt_float, fmt_text
 from std.num import f64_literal_bits, f32_round_bits, float_from_bits, pow2, format_float
 from std.io import write
 from std.fs import read_to_string
@@ -95,7 +96,13 @@ pub enum TailCall {
     TValue(Value, [Value]),
 }
 
-pub struct RtFrame { names: [str], vals: [Value] }
+// A scope's variables, and its deferred blocks (D135) in the order they were
+// met.
+pub struct RtFrame { names: [str], vals: [Value], defers: [Deferral] }
+
+// A deferred block, and how many of its scope's names were declared before
+// it: the ones it sees when it runs.
+pub struct Deferral { body: Block, names: int32 }
 
 // -- concurrency (D89, MYLA-139) --------------------------------------------
 //
@@ -364,7 +371,7 @@ pub fun time_from_env() -> str {
 
 // Whether the awaited `op` calls a function value (a local, or any callee
 // but a name or a method), which goes on at once natively (MYLA-228).
-#test(expr_of("f(1)"), [RtFrame { names: ["f"], vals: [Value.VUnit] }])[true]
+#test(expr_of("f(1)"), [RtFrame { names: ["f"], vals: [Value.VUnit], defers: [] }])[true]
 #test(expr_of("f(1)"), [])[false]
 #test(expr_of("a.m()"), [])[false]
 #test(expr_of("fs[0]()"), [])[true]
@@ -485,7 +492,7 @@ impl Interp {
 
     // -- scopes -----------------------------------------------------------
 
-    fun push_scope(var self) { self.scopes.push(RtFrame { names: [], vals: [] }) }
+    fun push_scope(var self) { self.scopes.push(RtFrame { names: [], vals: [], defers: [] }) }
     fun pop_scope(var self) { self.scopes = drop_last_frame(self.scopes) }
 
     fun define(var self, name: str, v: Value) {
@@ -990,7 +997,55 @@ impl Interp {
                 i = i + 1
             }
         }
+        self.run_defers()
         self.pop_scope()
+    }
+
+    // The deferred blocks of the innermost scope, the last met first, as it
+    // ends (D135): after a `return`'s value, a `?`, `break`, `continue` or
+    // the arguments of a `become`, which wait for them; not on a failure or
+    // `exit`, which end the program (D97). Each sees the names declared
+    // before it.
+    fun run_defers(var self) {
+        let top = self.scopes.len() - 1
+        if self.scopes[top].defers.len() == 0 { return }
+        let ds = self.scopes[top].defers
+        self.scopes[top].defers = []
+        match self.ctrl { Ctrl.CExit => { return }, _ => {} }
+        let saved_ctrl = self.ctrl
+        let saved_val = self.ctrl_val
+        let saved_tail = self.tail
+        self.ctrl = Ctrl.CNone
+        var i = ds.len() - 1
+        while i >= 0 {
+            let names = self.scopes[top].names
+            let vals = self.scopes[top].vals
+            var nb: [str] = []
+            var vb: [Value] = []
+            var k = 0
+            while k < ds[i].names {
+                nb.push(names[k])
+                vb.push(vals[k])
+                k = k + 1
+            }
+            self.scopes[top].names = nb
+            self.scopes[top].vals = vb
+            self.exec_block(ds[i].body)
+            // the later names back, after what the block changed
+            var after = self.scopes[top].vals
+            while k < names.len() {
+                nb.push(names[k])
+                after.push(vals[k])
+                k = k + 1
+            }
+            self.scopes[top].names = nb
+            self.scopes[top].vals = after
+            match self.ctrl { Ctrl.CExit => { return }, _ => {} }
+            i = i - 1
+        }
+        self.ctrl = saved_ctrl
+        self.ctrl_val = saved_val
+        self.tail = saved_tail
     }
 
     // -- concurrency (D89, MYLA-139) --------------------------------------
@@ -1067,10 +1122,10 @@ impl Interp {
     }
 
     // A task running `body` with the variables `scopes`, ready to run.
-    #test(interp_on("fun main() { print(1 + 2) }"), [RtFrame { names: [], vals: [] }], block_of("{ }"))[0]
+    #test(interp_on("fun main() { print(1 + 2) }"), [RtFrame { names: [], vals: [], defers: [] }], block_of("{ }"))[0]
     fun new_task(var self, scopes: [RtFrame], body: Block) -> int32 {
         var sc = scopes
-        sc.push(RtFrame { names: [], vals: [] })
+        sc.push(RtFrame { names: [], vals: [], defers: [] })
         let f = AFrame { scopes: sc, conts: [Cont.KScope, Cont.KStmts(body.stmts, 0)], place: None, pend: Ctrl.CNone, pval: Value.VUnit, perr: None, pcode: 0 }
         self.tasks.push(Task { frames: [f], state: 0, value: Value.VUnit, failed: false, err: None, code: 0, awaited: false, waiters: [], cancelled: false, kids: [], requested: false })
         let id = self.tasks.len() - 1
@@ -1465,6 +1520,12 @@ impl Interp {
                 },
                 _ => {},
             }
+        }
+        // its deferred blocks, once its children have ended (D135)
+        let failing = match self.frames[top].pend { Ctrl.CExit => true, _ => false }
+        if !failing {
+            self.run_defers()
+            self.take_ctrl()
         }
         self.pop_scope()
         self.frames[top].conts.pop()
@@ -1904,6 +1965,10 @@ impl Interp {
             StmtKind.ForS(var_name, start, end, body, iter) => { self.exec_for(var_name, start, end, body, iter) },
             StmtKind.BreakS => { self.ctrl = Ctrl.CBreak },
             StmtKind.ContinueS => { self.ctrl = Ctrl.CContinue },
+            StmtKind.DeferS(body) => {
+                let top = self.scopes.len() - 1
+                self.scopes[top].defers.push(Deferral { body: body, names: self.scopes[top].names.len() })
+            },
         }
     }
 
@@ -2106,6 +2171,8 @@ impl Interp {
                 i = i + 1
             }
         }
+        // its value first, then its deferred blocks (D135)
+        self.run_defers()
         self.pop_scope()
         return result
     }
@@ -2884,13 +2951,40 @@ impl Interp {
     #test(interp_on("[int]"), [Expr { id: 244, line: 126, col: 19, sp: SrcSpan { sline: 126, scol: 19, eline: 126, ecol: 45 }, kind: ExprKind.StrLit("braces {{}} stay literal") }])[Value.VStr("braces {} stay literal")]
     fun eval_format(var self, args: [Expr]) -> Value {
         let fmt = as_str(self.eval(args[0]))
+        let specs = format_specs(fmt)
         var parts: [str] = []
         var i = 1
         while i < args.len() {
-            parts.push(format_typed(self.eval(args[i]), self.resolved_of(args[i].id)))
+            let v = self.eval(args[i])
+            let t = self.resolved_of(args[i].id)
+            parts.push(self.format_spec_value(v, t, specs[i - 1]))
             i = i + 1
         }
         return Value.VStr(render_format(fmt, parts))
+    }
+
+    // One hole's text (D139): a value of a type with its own `format`
+    // through it, the spec passed as it is; else the print form, formatted by
+    // the spec with std.fmt as native code does.
+    fun format_spec_value(var self, v: Value, t: Option<Type>, spec: str) -> str {
+        match v {
+            Value.VStruct(n, fns, fvs) => { return self.user_format(v, spec) },
+            Value.VEnum(en, vr, pl) => { return self.user_format(v, spec) },
+            _ => {},
+        }
+        let text = format_typed(v, t)
+        if spec == "" { return text }
+        return match t {
+            Some(Type.TInt(w, sg)) => fmt_int(as_int(v), w, sg, spec),
+            Some(Type.TFloat(w)) => fmt_float(as_float(v), text, spec),
+            _ => fmt_text(text, spec),
+        }
+    }
+
+    fun user_format(var self, v: Value, spec: str) -> str {
+        let fi = self.func_idx(format("{}.format", value_key(v)))
+        let (rr, fs) = self.call_method(fi, v, [Value.VStr(spec)])
+        return as_str(rr)
     }
 
     #test(interp_on("[int]"), "List")[false]
@@ -4022,10 +4116,12 @@ fun render_format(fmt: str, parts: [str]) -> str {
         } else if c == 125 && i + 1 < n && (fmt[i + 1] as int32) == 125 {
             sb.append_byte(125)
             i = i + 2
-        } else if c == 123 && i + 1 < n && (fmt[i + 1] as int32) == 125 {
+        } else if c == 123 {
+            // a hole, its spec (D139) applied already
             sb.append(parts[arg])
             arg = arg + 1
-            i = i + 2
+            while i < n && (fmt[i] as int32) != 125 { i = i + 1 }
+            i = i + 1
         } else {
             sb.append_byte(fmt[i])
             i = i + 1
@@ -4104,9 +4200,10 @@ fun value_eq(a: Value, b: Value) -> bool {
         Value.VBool(x) => match b { Value.VBool(y) => x == y, _ => false },
         Value.VStr(x) => match b { Value.VStr(y) => x == y, _ => false },
         Value.VFloat(x) => match b { Value.VFloat(y) => x == y, _ => false },
-        Value.VUnit => match b { Value.VUnit => true, _ => false },
+        // a function's "nothing" is the unit value `()` (D140)
+        Value.VUnit => match b { Value.VUnit => true, Value.VTuple(es) => es.len() == 0, _ => false },
         Value.VStruct(n, fns, fvs) => match b { Value.VStruct(n2, fns2, fvs2) => n == n2 && values_eq(fvs, fvs2), _ => false },
-        Value.VTuple(es) => match b { Value.VTuple(es2) => values_eq(es, es2), _ => false },
+        Value.VTuple(es) => match b { Value.VTuple(es2) => values_eq(es, es2), Value.VUnit => es.len() == 0, _ => false },
         Value.VEnum(en, vr, pl) => match b { Value.VEnum(en2, vr2, pl2) => en == en2 && vr == vr2 && values_eq(pl, pl2), _ => false },
         Value.VList(xs) => match b { Value.VList(ys) => values_eq(xs, ys), _ => false },
         Value.VMap(ks, vs) => match b { Value.VMap(ks2, vs2) => maps_eq(ks, vs, ks2, vs2), _ => false },
@@ -4312,9 +4409,9 @@ fun map_get(ks: [Value], vs: [Value], k: Value) -> Value {
     return Value.VUnit
 }
 
-#test([RtFrame { names: [], vals: [] }])[[]]
-#test([RtFrame { names: ["s"], vals: [Value.VStr("Hi")] }, RtFrame { names: ["c"], vals: [Value.VInt(72)] }])[[RtFrame { names: ["s"], vals: [Value.VStr("Hi")] }]]
-#test([RtFrame { names: ["s"], vals: [Value.VStr("apple")] }, RtFrame { names: [], vals: [] }, RtFrame { names: [], vals: [] }])[[RtFrame { names: ["s"], vals: [Value.VStr("apple")] }, RtFrame { names: [], vals: [] }]]
+#test([RtFrame { names: [], vals: [], defers: [] }])[[]]
+#test([RtFrame { names: ["s"], vals: [Value.VStr("Hi")], defers: [] }, RtFrame { names: ["c"], vals: [Value.VInt(72)], defers: [] }])[[RtFrame { names: ["s"], vals: [Value.VStr("Hi")], defers: [] }]]
+#test([RtFrame { names: ["s"], vals: [Value.VStr("apple")], defers: [] }, RtFrame { names: [], vals: [], defers: [] }, RtFrame { names: [], vals: [], defers: [] }])[[RtFrame { names: ["s"], vals: [Value.VStr("apple")], defers: [] }, RtFrame { names: [], vals: [], defers: [] }]]
 fun drop_last_frame(xs: [RtFrame]) -> [RtFrame] {
     var out: [RtFrame] = []
     var i = 0

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import glob
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -35,6 +36,15 @@ def _have_wasm() -> bool:
 HAVE_WASM = _have_wasm()
 WASM_SKIP = "the wasm tests need node, clang with its wasm32 target and wasm-ld"
 
+
+@unittest.skipUnless(os.environ.get("MYLA_REQUIRE_TARGETS"), "MYLA_REQUIRE_TARGETS is not set")
+class WasmTools(unittest.TestCase):
+    """CI sets MYLA_REQUIRE_TARGETS, so a missing tool fails there instead of
+    skipping the target's tests unnoticed (MYLA-268)."""
+
+    def test_the_tools_are_there(self):
+        self.assertTrue(HAVE_WASM, WASM_SKIP)
+
 # V8's stack for deep recursion (the main thread's is 8 MiB)
 NODE = ["node", "--stack-size=7000", RUNNER]
 
@@ -56,6 +66,58 @@ class WasmParity(unittest.TestCase):
             build_x86(src, xb)
             build_wasm(src, wb)
             self.assertEqual(run(NODE + [wb]), run([xb]))
+
+    def test_a_closure_gets_its_environment_as_a_parameter(self):
+        # D130: a function value's environment travels as its last parameter,
+        # not through a memory word every call shares (which would stand in
+        # the way of threads); lambdas, partial applications, compositions,
+        # plain functions and async lambdas as values all agree with x86-64
+        source = ("import std.task as task\n\n"
+                  "fun twice(f: (int) -> int, x: int) -> int {\n    return f(f(x))\n}\n\n"
+                  "fun add(a: int, b: int) -> int {\n    return a + b\n}\n\n"
+                  "fun pick(k: int) -> (int) -> int {\n    if k > 0 {\n        return (x: int) => x * k\n    }\n"
+                  "    return add(_, k)\n}\n\n"
+                  "fun apply(f: (int) -> int, x: int) -> int {\n    become f(x)\n}\n\n"
+                  "#main\nasync fun main() {\n    let k = 3\n    let f = (x: int) => x + k\n"
+                  "    print(twice(f, 1))\n    print(twice(add(_, 10), 1))\n    print(twice(f >> add(_, 100), 0))\n"
+                  "    let g = add\n    print(g(2, 5))\n    print(pick(4)(5) + pick(0)(5))\n"
+                  "    print(apply((x: int) => x + k, 4) + apply(add(_, 1), 4))\n"
+                  "    let names = [\"a\", \"bb\"]\n    let size = (i: int) => names[i].len()\n    print(size(1))\n"
+                  "    let jobs: [async () -> int] = [async () => k * 2, async () => k * 3]\n"
+                  "    let rs = await task.all(jobs)\n    print(rs[0] + rs[1])\n}\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "closures.my")
+            with open(path, "w") as fh:
+                fh.write(source)
+            self.same(path)
+            asm = subprocess.run([native_compiler(), path, STDLIB_ROOT, "--target", "wasm32-wasi"], capture_output=True,
+                                 text=True, check=True, cwd=_REPO).stdout
+            self.assertEqual(asm.count("myla_env"), 0)
+
+    def test_one_worker_makes_no_deep_copies(self):
+        # D133: with one worker nothing is shared between threads, so values
+        # crossing between tasks (arguments, captures, results) keep their
+        # counts: the program's own functions call no deep-copy routine
+        source = ("struct Job {\n    xs: [int],\n    tags: [str: int],\n}\n\n"
+                  "async fun work(j: Job) -> int {\n    return j.xs.len() + j.tags.len()\n}\n\n"
+                  "async fun names(n: int) -> [str] {\n    return [\"a\", f\"{n}\"]\n}\n\n"
+                  "#main\nasync fun main() {\n    let j = Job { xs: [1, 2, 3], tags: [\"a\": 1] }\n"
+                  "    async let a = work(j)\n    async let b = names(4)\n    let c = async () => j.xs.len()\n"
+                  "    async let d = c()\n    print(await a + (await b).len() + await d)\n}\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "tasks.my")
+            with open(path, "w") as fh:
+                fh.write(source)
+            self.same(path)
+            asm = subprocess.run([native_compiler(), path, STDLIB_ROOT, "--target", "wasm32-wasi"], capture_output=True,
+                                 text=True, check=True, cwd=_REPO).stdout
+        bodies = re.findall(r"^(myla_(?:main|work|names)[A-Za-z0-9_]*):\n(.*?)\n\tend_function", asm, re.M | re.S)
+        self.assertGreater(len(bodies), 3)
+        for name, body in bodies:
+            if name.endswith(("_env_deep", "_env_clone", "_env_drop")):
+                continue
+            with self.subTest(function=name):
+                self.assertEqual(re.findall(r"call \S*(?:deep|dclone)\S*", body), [])
 
     def test_examples(self):
         for path in sorted(glob.glob(os.path.join(_REPO, "examples", "*.my"))):
@@ -91,7 +153,7 @@ class WasmParity(unittest.TestCase):
         # and removed, a relative path against the working directory
         source = ("import std.fs as fs\n\nfun main() {\n"
                   "    match fs.make_dir(\"wd\") { Ok(n) => {}, Err(e) => { print(\"mkdir failed\") } }\n"
-                  "    match fs.write_to_file(\"wd/a.txt\", \"one\\ntwo\\n\") { Ok(n) => { print(n) }, Err(e) => { print(\"write failed\") } }\n"
+                  "    match fs.write_to_file(\"wd/a.txt\", \"one\\ntwo\\n\") { Ok(()) => { print(\"written\") }, Err(e) => { print(\"write failed\") } }\n"
                   "    match fs.read_to_string(\"wd/a.txt\") { Ok(s) => { print(s.len()) }, Err(e) => { print(\"read failed\") } }\n"
                   "    print(fs.exists(\"wd/a.txt\"))\n    print(fs.is_dir(\"wd\"))\n"
                   "    match fs.rename(\"wd/a.txt\", \"wd/b.txt\") { Ok(n) => {}, Err(e) => { print(\"rename failed\") } }\n"
@@ -127,6 +189,22 @@ class WasmParity(unittest.TestCase):
                     got = run(NODE + [gen, src, STDLIB_ROOT] + extra)
                     self.assertEqual(got[2], 0, got[1])
                     self.assertEqual(got, want)
+
+    def test_the_compiler_compiles_itself(self):
+        # the whole compiler compiled by the compiler built for wasm, under
+        # Node: byte for byte what the native compiler writes, for wasm32
+        # (that compiler's own target) and for x86-64 (MYLA-268)
+        with tempfile.TemporaryDirectory() as tmp:
+            gen = os.path.join(tmp, "gen.wasm")
+            build_wasm("selfhost/gen_main.my", gen)
+            src = os.path.join(_REPO, "selfhost", "gen_main.my")
+            for target in ["wasm32-wasi", "x86_64-linux"]:
+                with self.subTest(target=target):
+                    want = run([native_compiler(), src, STDLIB_ROOT, "--target", target])
+                    got = run(NODE + [gen, src, STDLIB_ROOT, "--target", target])
+                    self.assertEqual(got[1:], ("", 0))
+                    self.assertEqual(len(got[0]), len(want[0]))
+                    self.assertTrue(got[0] == want[0], "the assembly differs")
 
 
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
@@ -225,15 +303,15 @@ class WasmPage(unittest.TestCase):
         echo = ("import std.io as io\nfrom std.process import args\nimport std.fs as fs\n\nfun main() {\n"
                 "    var r = io.stdin()\n    match r.read_line() { Ok(Some(l)) => { print(\"got \" + l) }, _ => { print(\"none\") } }\n"
                 "    for a in args() { print(a) }\n"
-                "    match fs.write_to_file(\"out/note.txt\", \"written\") { Ok(n) => { print(n) }, Err(e) => { print(\"no dir\") } }\n"
+                "    match fs.write_to_file(\"out/note.txt\", \"written\") { Ok(()) => { print(\"written\") }, Err(e) => { print(\"no dir\") } }\n"
                 "    match fs.make_dir(\"out\") { Ok(n) => {}, Err(e) => { print(\"mkdir failed\") } }\n"
-                "    match fs.write_to_file(\"out/note.txt\", \"written\") { Ok(n) => { print(n) }, Err(e) => { print(\"write failed\") } }\n"
+                "    match fs.write_to_file(\"out/note.txt\", \"written\") { Ok(()) => { print(\"written\") }, Err(e) => { print(\"write failed\") } }\n"
                 "    let xs = [1]\n    print(xs[3])\n}\n")
         geo = {"main.my": "import geo\n\nfun main() {\n    print(geo.twice(21))\n}\n",
                "geo.my": "pub fun twice(n: int) -> int {\n    return 2 * n\n}\n"}
         got = self.page([{"op": "run", "files": echo, "stdin": "hello\nmore\n", "args": ["a", "b c"], "read": ["out/note.txt"]},
                          {"op": "run", "files": geo}, {"op": "check", "files": geo}])
-        self.assertEqual((got[0]["stdout"], got[0]["exitCode"]), ("got hello\nmain.my\na\nb c\nno dir\n7\n", 1))
+        self.assertEqual((got[0]["stdout"], got[0]["exitCode"]), ("got hello\nmain.my\na\nb c\nno dir\nwritten\n", 1))
         self.assertEqual(got[0]["stderr"], self.native("run", echo, "hello\nmore\n", ["a", "b c"])[1])
         self.assertEqual(got[0]["read"], {"out/note.txt": "written"})
         self.assertEqual((got[1]["stdout"], got[1]["exitCode"]), ("42\n", 0))
@@ -410,6 +488,39 @@ class WasmStack(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             self.same(tmp, "small", SMALL_FRAMES)
 
+
+
+# D129: what wasm32 can't do is a cause of its own, `Unsupported`
+UNSUPPORTED = """
+from std.process import run, SpawnError
+from std.fs import read_to_string, IoError
+
+fun main() {
+    print(match run("/bin/true", []) {
+        Ok(o) => "ran",
+        Err(SpawnError.Unsupported) => "unsupported",
+        Err(e) => "another error",
+    })
+    print(match read_to_string("/no/such/file") {
+        Ok(s) => "read",
+        Err(IoError.NotFound) => "not found",
+        Err(e) => "another error",
+    })
+}
+"""
+
+
+@unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
+@unittest.skipUnless(HAVE_WASM, WASM_SKIP)
+class WasmCapabilities(unittest.TestCase):
+    def test_no_processes_is_unsupported(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "unsupported.my")
+            with open(path, "w") as fh:
+                fh.write(UNSUPPORTED.lstrip())
+            out = os.path.join(tmp, "unsupported.wasm")
+            build_wasm(path, out)
+            self.assertEqual(run(NODE + [out]), ("unsupported\nnot found\n", "", 0))
 
 @unittest.skipUnless(HAVE_WASM, WASM_SKIP)
 class WasmTime(test_time.Time):

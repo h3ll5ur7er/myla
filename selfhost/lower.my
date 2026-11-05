@@ -29,8 +29,9 @@
 
 from std.num import f64_literal_bits, f32_round_bits
 from .ast import Expr, ExprKind, Stmt, StmtKind, Block, FunData, ElseTail, ExprOrBlock, MatchArm, Pattern, PatternKind, FieldInit, MapEntry, BindElem, bind_elems, Param
-from .checker import Type, is_raw_memory_primitive, Subst, FuncSig, opt_subst_type, subst_type, builtin_method
+from .checker import Type, is_unit, is_raw_memory_primitive, Subst, FuncSig, opt_subst_type, subst_type, builtin_method
 from .codegen import codegen_on, may_write_expr, is_actor_t, is_sb_t, is_async_t, CodeGen, LamJob, PartialJob, Cap, DropEntry, tfunc_params, tfunc_ret, is_hole_expr, mangle_fn, is_builtin_call_name, is_aggregate, tuple_elems, is_struct_or_enum_t, is_tfunc, is_overloadable_op, arith_method_cg, enum_name_of, is_tstr, is_cmp, place_root, is_aggregate_opt, arms_may_write, is_cell_t, list_elem, is_list_t, is_map_t, is_str_t, map_key, map_val, format_segments, args_have_hole, success_variant, failure_variant
+from .util import format_specs
 from .ir import IrFunc, IrBlock, Inst, Term, Slot, Pos, Instance, ENV_WORD
 from .parser import expr_of, stmt_of, type_expr_of, block_of, pattern_of, fun_of  // AST values for #test cases (MYLA-184)
 
@@ -66,7 +67,7 @@ struct LoopTarget { cont: int32, brk: int32, owners: int32, temps: int32 }
 // function holds between suspensions (D92), or -1; `deep_res`: an actor
 // method's result is copied deeply before it leaves the actor (D92).
 // `scope_ids`: the open scopes' indices in `f.scope_parent` (MYLA-183).
-struct Lower { f: IrFunc, cur: int32, scopes: [[Local]], scope_ids: [int32], owners: [[int32]], temps: [[int32]], loops: [LoopTarget], sret: int32, arm_binds: [Local], err: str, lams: [LamJob], partials: [PartialJob], fnvals: [str], holder: [int32], into: int32, placed: [bool], tail: bool, tailed: bool, frame_fn: bool, result: int32, tasks: [TaskSlot], actor_self: int32, actor_off: int32, deep_res: bool, narrow: [int32: int32], wants: [Want] }
+struct Lower { f: IrFunc, cur: int32, scopes: [[Local]], scope_ids: [int32], owners: [[int32]], temps: [[int32]], loops: [LoopTarget], sret: int32, arm_binds: [Local], err: str, lams: [LamJob], partials: [PartialJob], fnvals: [str], holder: [int32], into: int32, placed: [bool], tail: bool, tailed: bool, frame_fn: bool, result: int32, tasks: [TaskSlot], actor_self: int32, actor_off: int32, deep_res: bool, narrow: [int32: int32], wants: [Want], defers: [LDefer] }
 
 // A per-type routine a routine built as IR calls, for the code generator to
 // emit (MYLA-162): `kind` 0 a cell's deep copy, 1 an inline value's deep
@@ -88,11 +89,18 @@ struct TaskSlot { slot: int32, ty: Type, void: bool, owns: bool, depth: int32, f
 
 pub struct Lowered { f: IrFunc, lams: [LamJob], partials: [PartialJob], fnvals: [str] }
 
+// A deferred block (D135): the owners' scope it belongs to, and the names it
+// sees, those of the first `nscopes` scopes, of the last only the first
+// `nnames` (declared before it); the code generator it is lowered with (the
+// function's, which doesn't change while it is lowered). Emitted where each
+// way out of that scope leaves it.
+struct LDefer { depth: int32, nscopes: int32, nnames: int32, body: Block, cg: CodeGen }
+
 // A lowering of a function `test` without a result, at the start of its
 // entry block, the receiver of `#test` cases of the lowering's methods
 // (MYLA-184), with a code generator from `codegen_on` as their `cg`.
 pub fun lower_on() -> Lower {
-    var lw = Lower { f: IrFunc { name: "test", ret: None, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false, scope_parent: [-1] }, cur: 0, scopes: [[]], scope_ids: [0], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [], actor_self: -1, actor_off: 0, deep_res: false, narrow: [:], wants: [] }
+    var lw = Lower { f: IrFunc { name: "test", ret: None, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false, scope_parent: [-1] }, cur: 0, scopes: [[]], scope_ids: [0], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [], actor_self: -1, actor_off: 0, deep_res: false, narrow: [:], wants: [], defers: [] }
     lw.start(lw.new_block())
     return lw
 }
@@ -103,7 +111,7 @@ pub fun lower_on() -> Lower {
 pub fun lower_function(cg: CodeGen, fd: FunData, mangled: str) -> Result<Lowered, str> {
     let sig = cg.sig_of(fd.name)
     let ret = opt_subst_type(sig.ret, cg.subst)
-    var lw = Lower { f: IrFunc { name: mangled, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false, scope_parent: [-1] }, cur: 0, scopes: [[]], scope_ids: [0], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [], actor_self: -1, actor_off: 0, deep_res: false, narrow: [:], wants: [] }
+    var lw = Lower { f: IrFunc { name: mangled, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false, scope_parent: [-1] }, cur: 0, scopes: [[]], scope_ids: [0], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [], actor_self: -1, actor_off: 0, deep_res: false, narrow: [:], wants: [], defers: [] }
     var first_word = 0
     // an async function, when tasks take turns: its frame function, its
     // slots in its heap frame, the result in the first (D90)
@@ -201,7 +209,7 @@ pub fun lower_function(cg: CodeGen, fd: FunData, mangled: str) -> Result<Lowered
 // own at entry, borrowed as a parameter is (captures are immutable, D48).
 pub fun lower_lambda(cg: CodeGen, job: LamJob) -> Result<Lowered, str> {
     let ret = opt_subst_type(tfunc_ret(job.ftype), cg.subst)
-    var lw = Lower { f: IrFunc { name: job.lifted, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false, scope_parent: [-1] }, cur: 0, scopes: [[]], scope_ids: [0], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [], actor_self: -1, actor_off: 0, deep_res: false, narrow: [:], wants: [] }
+    var lw = Lower { f: IrFunc { name: job.lifted, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false, scope_parent: [-1] }, cur: 0, scopes: [[]], scope_ids: [0], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [], actor_self: -1, actor_off: 0, deep_res: false, narrow: [:], wants: [], defers: [] }
     // an async lambda, when tasks take turns: a frame function, as an async
     // function's (D90); its frame holds the environment and the arguments
     let frame = cg.frames && is_async_t(job.ftype)
@@ -314,6 +322,26 @@ fun is_scalar(t: Type) -> bool {
         Type.TPtr => true
         _ => false
     }
+}
+
+// The variable `e` names, or whose field or tuple element it is ("" for
+// anything else, an index included).
+#test(expr_of("c.name"))["c"]
+#test(expr_of("xs[0]"))[""]
+fun field_root(e: Expr) -> str {
+    return match e.kind {
+        ExprKind.Name(n) => n,
+        ExprKind.GetField(t, f) => field_root(t),
+        ExprKind.TupleIndex(t, i) => field_root(t),
+        _ => "",
+    }
+}
+
+// Whether `t` is no type (a function without a result).
+#test(None)[true]
+#test(Some(Type.TBool))[false]
+fun is_none_type(t: Option<Type>) -> bool {
+    return match t { Some(x) => false, None => true }
 }
 
 // Whether values of type `t` can be lowered: scalars, strings, lists, maps,
@@ -791,6 +819,7 @@ impl Lower {
     fun close_scope(var self) {
         let depth = self.owners.len() - 1
         self.drop_owners(depth)
+        while self.defers.len() > 0 && self.defers[self.defers.len() - 1].depth >= depth { let d = self.defers.pop() }
         while self.tasks.len() > 0 && self.tasks[self.tasks.len() - 1].depth >= depth { let t = self.tasks.pop() }
         self.scopes.pop()
         self.owners.pop()
@@ -798,18 +827,19 @@ impl Lower {
         self.add(Inst.Scope(false))
     }
 
-    // Drop the owners of the scopes from the innermost down to index `depth`,
-    // each scope's in reverse order (they stay registered); first, a scope
-    // left waits for the child tasks it started (D89, D90).
+    // Leave the scopes from the innermost down to index `depth`, each in
+    // turn: it waits for the child tasks it started (D89, D90), the latest
+    // first, then its deferred blocks run, the last met first (D135), then
+    // its owners are dropped in reverse order (they stay registered).
     fun drop_owners(var self, depth: int32) {
-        // the child tasks of those scopes first, the latest first (D89)
         var j = self.tasks.len() - 1
-        while j >= 0 && self.tasks[j].depth >= depth {
-            self.join_task(self.tasks[j])
-            j = j - 1
-        }
         var s = self.owners.len() - 1
         while s >= depth {
+            while j >= 0 && self.tasks[j].depth >= s {
+                self.join_task(self.tasks[j])
+                j = j - 1
+            }
+            if self.defers.len() > 0 { self.emit_defers(s) }
             var i = self.owners[s].len() - 1
             while i >= 0 {
                 let slot = self.owners[s][i]
@@ -819,6 +849,48 @@ impl Lower {
                 i = i - 1
             }
             s = s - 1
+        }
+    }
+
+    // Whether `e` is a parameter of this function, or a field or element of
+    // a tuple of one, that its caller holds (it came as an argument word and
+    // this function doesn't own it): what a `become` may pass on borrowed,
+    // since nothing of the frame it leaves keeps it (MYLA-253).
+    fun caller_holds(self, e: Expr) -> bool {
+        let root = field_root(e)
+        if root == "" { return false }
+        let slot = self.lookup(root)
+        return slot >= 0 && self.f.slots[slot].word >= 0 && !self.f.slots[slot].owns
+    }
+
+    // The deferred blocks of the owners' scope `s`, the last met first (D135),
+    // each with the names it saw where it stands.
+    fun emit_defers(var self, s: int32) {
+        let ds = self.defers
+        var i = ds.len() - 1
+        while i >= 0 {
+            if ds[i].depth == s {
+                let d = ds[i]
+                let saved = self.scopes
+                var cut: [[Local]] = []
+                var k = 0
+                while k < d.nscopes - 1 {
+                    cut.push(saved[k])
+                    k = k + 1
+                }
+                var last: [Local] = []
+                var j = 0
+                while j < d.nnames {
+                    last.push(saved[d.nscopes - 1][j])
+                    j = j + 1
+                }
+                cut.push(last)
+                self.scopes = cut
+                self.block(d.cg, d.body)
+                self.scopes = saved
+                self.defers = ds
+            }
+            i = i - 1
         }
     }
 
@@ -995,6 +1067,20 @@ impl Lower {
             },
             StmtKind.Assign(target, value) => { self.assign(cg, target, value) },
             StmtKind.ReturnS(ov, tail) => {
+                // `return ()` (or another such call) in a function without a
+                // result: the value for its effects, then as `return` (D140)
+                var unit_ret = false
+                match ov {
+                    Some(e) => { unit_ret = !tail && is_none_type(self.f.ret) },
+                    None => {},
+                }
+                if unit_ret {
+                    match ov { Some(e) => { self.discard(cg, e) }, None => {} }
+                    self.drop_temps(0)
+                    self.drop_owners(0)
+                    self.exit_fn(-1, false)
+                    return
+                }
                 match ov {
                     Some(e) => { if tail { self.become_call(cg, e) } else { self.ret_value(cg, e) } },
                     None => {
@@ -1056,6 +1142,11 @@ impl Lower {
                 }
                 let src = self.addr(cg, init)
                 self.destructure(cg, bind_elems(binding), src, t)
+            },
+            // emitted where its scope is left (`drop_owners`, D135)
+            StmtKind.DeferS(body) => {
+                let top = self.scopes.len() - 1
+                self.defers.push(LDefer { depth: self.owners.len() - 1, nscopes: self.scopes.len(), nnames: self.scopes[top].len(), body: body, cg: cg })
             },
         }
     }
@@ -1668,7 +1759,12 @@ impl Lower {
         let fr = self.temp(Type.TPtr)
         self.add(Inst.Load(fr, ts))
         let st = self.temp(Type.TInt(64, false))
-        self.add_load(st, fr, FRAME_TASK)
+        // an acquire load: the child's result, written before its task word
+        // changed (`task_end`'s exchange), is read only after it. A plain
+        // load let aarch64 read the result first, a stale one (MYLA-267: a
+        // sibling's clone crashed on arm64 hardware, t20)
+        let at = self.offset(fr, FRAME_TASK)
+        self.add(Inst.Rt(st, "__load_acq64", [at]))
         // running (0) or a frame waiting already: wait; 1, 2 or 3: ended
         let running = self.temp(Type.TBool)
         self.add(Inst.Cmp(running, "==", Type.TInt(64, false), st, self.int_const(0)))
@@ -2300,6 +2396,13 @@ impl Lower {
         if is_overloadable_op(op) && is_struct_or_enum_t(lt) && lowerable(cg, lt) {
             return self.overloaded_scalar(cg, op, l, r, lt)
         }
+        if (op == "==" || op == "!=") && is_unit(lt) {
+            // the unit type has one value (D138): equal, once both sides ran
+            self.discard(cg, l)
+            self.discard(cg, r)
+            if op == "==" { return self.konst(Type.TBool, 1) }
+            return self.konst(Type.TBool, 0)
+        }
         if is_tstr(lt) {
             if op == "==" || op == "!=" {
                 let a = self.expr(cg, l)
@@ -2461,8 +2564,13 @@ impl Lower {
             },
             ExprKind.Call(callee, args) => {
                 let d = self.call(cg, e, callee, args, into)
-                if d < 0 { return self.unsupported("a call without a value used as one") }
-                return d
+                if d >= 0 { return d }
+                if !is_unit(t) { return self.unsupported("a call without a value used as one") }
+                // a function without a result gives `()` (D140): no bytes
+                let slot = self.build_slot(cg, "__tuple", t, into)
+                let base = self.slot_addr(slot)
+                self.built(slot, into, base)
+                return base
             },
             ExprKind.Binary(op, l, r) => {
                 let lt = cg.type_of(l.id)
@@ -3041,7 +3149,9 @@ impl Lower {
             let owned = i < owns.len() && owns[i]
             let byval = any_byval && cg.byval_param(sig, i, params[i])
             // nothing keeps a borrowed value alive once `become` has gone
-            if tail && !owned && !byval && !(i == 0 && root != "") && (is_aggregate(params[i]) || cg.owns_heap(params[i])) { return self.unsupported("a 'become' passing a value to a borrowed parameter") }
+            // (unless it is a parameter, or a part of one, that the caller
+            // holds: it outlives the jump, MYLA-253)
+            if tail && !owned && !byval && !(i == 0 && root != "") && (is_aggregate(params[i]) || cg.owns_heap(params[i])) && !self.caller_holds(argv[i]) { return self.unsupported("a 'become' passing a value to a borrowed parameter") }
             // a copy of its own, which the method's writes can't reach either
             if byval { for w in self.value_words(cg, params[i], self.addr(cg, argv[i])) { vals.push(w) } }
             else if i > 0 && root != "" && place_root(argv[i]) == root && (is_aggregate(params[i]) || cg.owns_heap(params[i])) {
@@ -3119,7 +3229,9 @@ impl Lower {
         var i = 0
         for el in elems {
             // an element narrower than a word: a scalar, stored at its size
-            if stride < 8 { self.add(Inst.StoreAt(cell, 16 + i * stride, self.expr(cg, el), stride)) }
+            // an element without size (the unit type, an empty struct): runs, stores nothing
+            if stride == 0 { self.discard(cg, el) }
+            else if stride < 8 { self.add(Inst.StoreAt(cell, 16 + i * stride, self.expr(cg, el), stride)) }
             else { self.store_member(cg, el, cell, 16 + i * stride) }
             i = i + 1
             if owned { self.add_store(cell, 0, self.konst(Type.TInt(64, true), i as int64)) }
@@ -3487,11 +3599,12 @@ impl Lower {
             _ => ""
         }
         let segs = format_segments(fmt)
+        let specs = format_specs(fmt)
         var acc = self.temp(Type.TStr)
         self.add(Inst.Str(acc, segs[0]))
         var k = 1
         while k < args.len() {
-            let piece = self.render(cg, args[k])
+            let piece = self.render_spec(cg, args[k], specs[k - 1])
             let joined = self.temp(Type.TStr)
             self.rt_call(cg, joined, "__str_concat", [acc, piece])
             let j = self.owned_value(cg, joined, Type.TStr)
@@ -3503,6 +3616,84 @@ impl Lower {
             k = k + 1
         }
         return acc
+    }
+
+    // One hole's text (D139): a value of a type with its own `format`
+    // through it, the spec passed as it is; else the print form, formatted by
+    // the spec with std.fmt (as the interpreter does), a new string the
+    // statement owns.
+    fun render_spec(var self, cg: CodeGen, arg: Expr, spec: str) -> int32 {
+        let t = cg.type_of(arg.id)
+        if is_struct_or_enum_t(t) { return self.user_format(cg, arg, t, spec) }
+        if spec == "" { return self.render(cg, arg) }
+        var name = "std$fmt$fmt_text"
+        var vals: [int32] = []
+        match t {
+            Type.TInt(w, sg) => {
+                name = "std$fmt$fmt_int"
+                let v = self.expr(cg, arg)
+                let v64 = self.temp(Type.TInt(64, true))
+                self.add(Inst.Cast(v64, t, Type.TInt(64, true), v))
+                vals = [v64, self.int_const(w), self.konst(Type.TBool, if sg { 1 } else { 0 })]
+            },
+            Type.TFloat(w) => {
+                name = "std$fmt$fmt_float"
+                let v = self.expr(cg, arg)
+                var extra = 17
+                if w == 32 { extra = 9 }
+                let text = self.temp(Type.TStr)
+                self.rt_call(cg, text, "__float_to_str", [v, self.int_const(extra)])
+                let owned_text = self.owned_value(cg, text, Type.TStr)
+                var v64 = v
+                if w == 32 {
+                    v64 = self.temp(Type.TFloat(64))
+                    self.add(Inst.Cast(v64, t, Type.TFloat(64), v))
+                }
+                vals = [v64, owned_text]
+            },
+            _ => { vals = [self.render(cg, arg)] },
+        }
+        if !cg.has_func(name) { return self.unsupported("a format spec without std.fmt") }
+        let sv = self.temp(Type.TStr)
+        self.add(Inst.Str(sv, spec))
+        vals.push(sv)
+        return self.call_owning(cg, name, vals)
+    }
+
+    // `x.format(spec)` of a value of a type implementing `Format` (D139).
+    fun user_format(var self, cg: CodeGen, arg: Expr, t: Type, spec: str) -> int32 {
+        let name = format("{}.format", cg.type_key(t))
+        if !cg.has_func(name) { return self.unsupported("format of a value without a 'format' method") }
+        let sig = cg.sig_of(name)
+        let p = self.addr(cg, arg)
+        var vals: [int32] = []
+        if cg.has_byval(sig) && cg.byval_param(sig, 0, t) { for w in self.value_words(cg, t, p) { vals.push(w) } } else { vals.push(p) }
+        let sv = self.temp(Type.TStr)
+        self.add(Inst.Str(sv, spec))
+        vals.push(sv)
+        return self.call_owning(cg, name, vals)
+    }
+
+    // A call of the function `name` with the argument words `vals` (each
+    // one word, the receiver's address first for a method), each parameter
+    // that keeps its argument given a reference of its own (MYLA-127); the
+    // string it returns, owned by the statement.
+    fun call_owning(var self, cg: CodeGen, name: str, vals: [int32]) -> int32 {
+        let sig = cg.sig_of(name)
+        var params: [Type] = []
+        var first = 0
+        if sig.has_decl && match sig.decl.receiver { Some(r) => true, None => false } { first = 1 }
+        for pt in sig.params { params.push(pt) }
+        let owns = cg.owned_params(sig, params)
+        var i = first
+        while i < vals.len() {
+            let pi = i - first
+            if pi < owns.len() && owns[pi] { self.retain(cg, params[pi], vals[i]) }
+            i = i + 1
+        }
+        let d = self.temp(Type.TStr)
+        self.add(Inst.Call(d, name, vals))
+        return self.owned_value(cg, d, Type.TStr)
     }
 
     // The print form of a printable value as a string: a string itself
@@ -3680,12 +3871,12 @@ impl Lower {
                 self.add(Inst.StoreAt(vals[0], 0, vals[1], w))
                 return -1
             }
-            if nm == "__copy_bytes" || nm == "__set_io_errno" || nm == "__free" || nm == "__set_run_status" || nm == "__set_run_stderr" || nm == "__pause" || nm == "__run_frame" {
+            if nm == "__copy_bytes" || nm == "__set_io_errno" || nm == "__free" || nm == "__set_run_status" || nm == "__set_run_stderr" || nm == "__pause" || nm == "__run_frame" || nm == "__store_rel64" {
                 self.add(Inst.Rt(-1, nm, vals))
                 return -1
             }
             let d = self.temp(t)
-            if nm == "__alloc" || nm == "__equal_bytes" || nm == "__syscall" || nm == "__syscall5" || nm == "__environ" || nm == "__rotl" || nm == "__bsr64" || nm == "__cas64" || nm == "__xchg64" || nm == "__fetch_add64" || nm == "__f64_round" { self.add(Inst.Rt(d, nm, vals)) } else if nm == "__argv" { self.add(Inst.Rt(d, "__argv_of", vals)) } else { self.add(Inst.Mov(d, vals[0])) }
+            if nm == "__alloc" || nm == "__equal_bytes" || nm == "__syscall" || nm == "__syscall5" || nm == "__environ" || nm == "__rotl" || nm == "__bsr64" || nm == "__cas64" || nm == "__xchg64" || nm == "__fetch_add64" || nm == "__f64_round" || nm == "__load_acq64" { self.add(Inst.Rt(d, nm, vals)) } else if nm == "__argv" { self.add(Inst.Rt(d, "__argv_of", vals)) } else { self.add(Inst.Mov(d, vals[0])) }
             if nm == "__str_of" || nm == "__list_of" { return self.owned_value(cg, d, t) }
             return d
         }
@@ -4098,7 +4289,7 @@ fun calls_nothing(e: Expr) -> bool {
 // An empty lowering of the routine `name` with result type `ret`, its entry
 // block started.
 fun routine(name: str, ret: Option<Type>) -> Lower {
-    var lw = Lower { f: IrFunc { name: name, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false, scope_parent: [-1] }, cur: 0, scopes: [[]], scope_ids: [0], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [], actor_self: -1, actor_off: 0, deep_res: false, narrow: [:], wants: [] }
+    var lw = Lower { f: IrFunc { name: name, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false, scope_parent: [-1] }, cur: 0, scopes: [[]], scope_ids: [0], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [], actor_self: -1, actor_off: 0, deep_res: false, narrow: [:], wants: [], defers: [] }
     let entry = lw.new_block()
     lw.start(entry)
     return lw

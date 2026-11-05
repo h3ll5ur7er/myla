@@ -18,12 +18,21 @@ import unittest
 
 from ._native import CAN_BUILD_NATIVE, SKIP_REASON
 from ._tools import STDLIB_ROOT, native_compiler
-from . import test_time
+from . import test_defer, test_format_specs, test_register_args, test_time, test_unit_type
 
 _REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir))
 
 HAVE_A64 = all(shutil.which(t) for t in ("clang", "ld.lld", "qemu-aarch64"))
 A64_SKIP = "the aarch64 tests need clang, ld.lld and qemu-aarch64"
+
+
+@unittest.skipUnless(os.environ.get("MYLA_REQUIRE_TARGETS"), "MYLA_REQUIRE_TARGETS is not set")
+class Aarch64Tools(unittest.TestCase):
+    """CI sets MYLA_REQUIRE_TARGETS, so a missing tool fails there instead of
+    skipping the target's tests unnoticed (MYLA-268)."""
+
+    def test_the_tools_are_there(self):
+        self.assertTrue(HAVE_A64, A64_SKIP)
 
 # examples that need what the backend doesn't have yet
 NOT_YET: set[str] = set()
@@ -96,6 +105,20 @@ fun main() {
     let big = 1e20
     let tiny: float32 = 5.5
     print(f"{big % 3.0} {-1e300 % 7.25} {-7.5 % 2.0} {1.0 % 0.0} {tiny % 2.0}")
+}
+""",
+    # D128: a NaN's sign and payload can't be seen; every NaN reads as the
+    # canonical one (x86-64's 0.0 / 0.0 is 0xFFF8..., aarch64's 0x7FF8...)
+    "nan_bits": """
+import std.math as math
+
+fun main() {
+    let z = 0.0
+    let n = z / z
+    print(f"{math.to_bits(n)} {math.to_bits(-n)} {math.to_bits(math.sqrt(-1.0))}")
+    print(f"{math.copysign(1.0, n)} {math.copysign(1.0, -n)} {math.to_bits(math.abs(-n))}")
+    print(f"{math.to_bits(math.from_bits(0xFFF0000000000001u64))} {math.is_nan(math.from_bits(0x7FF0000000000001u64))}")
+    print(math.to_bits(math.copysign(n, -1.0)))
 }
 """,
     "calls": """
@@ -211,6 +234,16 @@ fun main() {
 """,
 }
 
+
+# the unit type (D138): values without size in lists, maps, enums and tasks
+PROGRAMS["unit"] = test_unit_type.PROGRAM
+PROGRAMS["void_is_unit"] = test_unit_type.VOID
+# format specs (D139): the formatting is std.fmt on every target
+PROGRAMS["format_specs"] = test_format_specs.PROGRAM
+# a `become` passing its parameters on (MYLA-253)
+PROGRAMS["become_params"] = test_register_args.BECOME_PARAMS
+# `defer` (D135): every way a scope ends, in plain and async functions
+PROGRAMS["defer"] = test_defer.PROGRAM
 
 # a struct of some 33 KB: frames, copies and offsets past what one
 # instruction reaches
@@ -331,6 +364,21 @@ class Aarch64Time(test_time.Time):
     """test_time's programs (timers, reads that suspend, child processes)
     built for aarch64 and run under qemu (through a script, as the tests run
     the binary)."""
+
+    def test_a_child_process_waited_for_without_blocking_the_worker(self):
+        # As test_time's, but on one worker the property, not the exact order:
+        # the child's 0.2 s against five 30 ms ticks leaves 50 ms, which qemu's
+        # emulated clock reads and polls can use up on a busy machine (one run
+        # in the full suite printed the fifth tick after the child's line).
+        # A tick before the child's line shows the worker wasn't blocked.
+        want = "t\nt\nt\nt\nt\n4 6 3\n5\n200000 200000\nnot found\ntimed out\ntrue\n5\n"
+        exe = self.native("process", test_time.PROCESS)
+        for workers in ["1", "4"]:
+            with self.subTest(workers=workers):
+                out, err, code, _ = self.run_timed([exe], MYLA_THREADS=workers)
+                self.assertEqual((sorted(out.splitlines()), err, code), (sorted(want.splitlines()), "", 0))
+                if workers == "1":
+                    self.assertEqual(out.splitlines()[0], "t")
 
     def native(self, name: str, text: str) -> str:
         exe = os.path.join(self.dir, name)

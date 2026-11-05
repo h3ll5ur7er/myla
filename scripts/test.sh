@@ -25,7 +25,8 @@ case "$mode" in
         # tools cached (MYLA-153, 2026-11-01): the broad corpora and the
         # native parity suites; `all` runs them
         slow=(test_compiler_parity test_concurrency_stress test_json test_lsp test_vscode_debugger
-              test_native_runtime test_grammar test_fs test_stdin test_declaration_recovery test_toml)
+              test_native_runtime test_grammar test_fs test_stdin test_declaration_recovery test_toml
+              test_aarch64 test_wasm)
         modules=()
         for f in tests/burn/test_*.py; do
             name="$(basename "$f" .py)"

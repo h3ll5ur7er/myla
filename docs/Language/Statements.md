@@ -124,6 +124,53 @@ fun main() {
 // 0
 ```
 
+
+## let-else
+
+`let P = e else { … }` matches `e` against a pattern `P` that can fail, such as a variant (`Some(x)`, `Ok(v)`, `Shape.Rect(w, h)`), optionally with alternatives (`|`). When it matches, `P`'s bindings are in scope for the rest of the block. When it doesn't, the `else` block runs, and that block must leave: end it with `return`, `become`, `break`, `continue` or a call that never returns (`panic`, `unreachable`, `exit`). One that can fall through is an error, and so is a pattern that always matches (D137, [[MYLA-256]]). It is sugar over `match`: `match e { P => { the rest of the block }, _ => { … } }`, so a function may also end in a `match` whose every arm returns. It keeps the expected case unindented where `if let` would nest it:
+
+```myla
+fun parse_port(s: str) -> Result<int, str> {
+    if s == "80" { return Ok(80) }
+    if s == "443" { return Ok(443) }
+    return Err("not a port")
+}
+
+fun ports(args: [str]) -> [int] {
+    var out: [int] = []
+    for a in args {
+        let Ok(p) = parse_port(a) else {
+            continue
+        }
+        out.push(p)
+    }
+    return out
+}
+
+fun head(xs: [int]) -> Option<int> {
+    if xs.len() == 0 { return None }
+    return Some(xs[0])
+}
+
+fun first(xs: [int]) -> str {
+    let Some(x) = head(xs) else {
+        return "none"
+    }
+    return f"first {x}"
+}
+
+fun main() {
+    let ps = ports(["80", "x", "443"])
+    print(ps.len())
+    print(first(ps))
+    print(first([]))
+}
+// output:
+// 2
+// first 80
+// none
+```
+
 ## Loops
 
 ```myla
@@ -214,9 +261,43 @@ The checker accepts a `become` that can run without the function's frame (`Check
 - Scalars pass freely. A function or a method takes what else `become` passes as a value of its own: a string, list, map or builder owned (the compiler passes such a parameter owned, D86), a struct, tuple or enum (or a value of a type parameter) by value, copied into its argument words (D88). A function value passed must be a parameter or a part of one.
 - A function value only borrows its arguments: the address of a struct, tuple or enum, a heap value. So when `become` calls one, these must be (parts of) parameters, which live in the caller's storage. A parameter that a `become` hands a value over to can't be passed on to a function value, not even a part of it.
 - A method that changes its receiver (`var self`) can only be called on `self`.
-- It passes no more argument words on the stack than the function received there (D119). Each argument is a word (a struct, tuple or enum handed over by value as many as it has fields, a nested recursive enum counting one, D88), and so is an aggregate result's address; the first six words travel in registers, so a `become` passing six or fewer is always accepted. Past six, the callee's words go where the function's own came, as its caller pops them (`check_become_words`).
+- It passes no more argument words on the stack than the function received there (D119; on every target, D131). Each argument is a word (a struct, tuple or enum handed over by value as many as it has fields, a nested recursive enum counting one, D88), and so is an aggregate result's address; the first six words travel in registers, so a `become` passing six or fewer is always accepted. Past six, the callee's words go where the function's own came, as its caller pops them (`check_become_words`).
 
 The guarantee is the `become`'s own: a function value's code runs as written, so a lambda whose body calls a function, or a partial application, makes an ordinary call there.
+
+## defer
+
+`defer { … }` runs its block when the block it stands in ends (D135, D141, [[MYLA-229]]): at its end, and at each way out of it that runs: `return` (after the returned value is computed), `?`, `break`, `continue`, and a `become` (after its arguments, before its call). Several run the last one met first. A `defer` that wasn't reached doesn't run.
+
+```myla
+fun copy(lines: [str]) -> int {
+    var done = 0
+    defer {
+        print(f"copied {done}")
+    }
+    for l in lines {
+        if l == "" {
+            return done
+        }
+        done += 1
+    }
+    return done
+}
+
+fun main() {
+    print(copy(["a", "b", "", "c"]))
+}
+// output:
+// copied 2
+// 2
+```
+
+- The block reads the variables as they are when it runs (`done` above), and sees the names declared before the `defer`: one declared later, or by a block it is left from, isn't the one it means.
+- It may not `return`, `become`, use `?`, `await`, or start a task with `async let`: it runs on the way out, without suspending. `break` and `continue` only reach a loop inside it. A lambda in it is a function of its own.
+- In an async function a block's children end first (the block waits for them as it ends), then its deferred blocks run.
+- A failure (a panic, a runtime error, `exit`) runs none: it ends the program at once (D97). They run on every way out the program survives (D141); a cancellation only asks a task to stop (D96), so it stops nothing itself.
+- `defer` is a keyword only at the start of a statement before `{`; elsewhere it is an ordinary name.
+- At the top of the REPL the session's scope never ends, so a `defer` typed there doesn't run.
 
 ## Expression statements
 

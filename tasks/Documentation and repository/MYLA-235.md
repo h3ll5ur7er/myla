@@ -15,7 +15,7 @@ The owner, on 2026-11-01: "primarily use the native compiler for tests, python s
 - [x] `tests/burn/_native.py`: test programs built by the natively built CLI (`myla build`, from the entry file `check_file` records); `test_debug_info.py` builds through it too
 - [x] `MYLA_TEST_BACKEND=python`: the Python backend builds everything, the fallback; tests that compare the two compilers, or a runner with the interpreter, still run both
 - [x] [[Development/Testing]] describes it
-- [ ] CI's job time on a runner, once this runs there (locally the burn suite takes the same time)
+- [x] CI's job time on a runner, once this runs there (locally the burn suite takes the same time)
 
 ## Evidence
 
@@ -24,3 +24,5 @@ The owner, on 2026-11-01: "primarily use the native compiler for tests, python s
 - The fallback: `MYLA_TEST_BACKEND=python` runs `test_compiler_parity.py`, `test_debug_info.py` and `test_fs.py` (206 tests) green in 51 s.
 - Stage 1 still comes from the Python backend until the seed ([[MYLA-218]]).
 - Unit 627, integration 2, burn 836 (5 skipped, 463 s from an empty tool cache) and the extension's 54 tests pass on commit eae1be7; the bootstrap reaches its byte-identical fixed point (6,210,821 bytes).
+
+CI's burn job ran the suite in 2 minutes 46 seconds on GitHub's runner (2026-11-05, run 111, 17:00:47 to 17:03:33), as it does here.

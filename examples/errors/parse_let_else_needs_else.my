@@ -1,0 +1,7 @@
+//~ parse error: expected 'else' after a let-else's value: a pattern that can fail to match needs one
+// `let Some(v) = o` can fail to match, so it needs an `else` that leaves (D137).
+fun main() {
+    let o = Some(1)
+    let Some(v) = o
+    print(v)
+}

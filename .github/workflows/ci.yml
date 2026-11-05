@@ -58,6 +58,9 @@ jobs:
           ld --version | head -1
           editor/tree-sitter-myla/node_modules/.bin/tree-sitter --version
       - name: Burn tests
+        # a target whose tools are missing fails instead of skipping (MYLA-268)
+        env:
+          MYLA_REQUIRE_TARGETS: "1"
         run: python3 -m unittest discover -s tests/burn -t . -v
 
   bootstrap:
@@ -107,6 +110,14 @@ jobs:
             [ "$want" = "$got" ] || { echo "differs: $f"; fail=1; }
           done
           exit $fail
+      # the runtime's lock-free protocols on a weakly ordered processor
+      # (MYLA-267): each stress program 20 times on 1, 4 and 16 workers
+      - name: The concurrency stress programs on this machine's memory order
+        run: python3 scripts/stress-native.py --runs 20
+      # closures crossing tasks, which this machine once crashed on (2 runs
+      # of 20 of t18, MYLA-267), and its three parts on their own
+      - name: Closures across tasks, 100 runs each on 4 workers
+        run: python3 scripts/stress-native.py --runs 100 --workers 4 --only t18_closures_cross_tasks --only t19_closures_to_children --only t20_siblings_clone_a_closure --only t21_composition_to_a_child
 
   vscode-extension:
     name: VS Code extension (typecheck, lint, tests, .vsix)

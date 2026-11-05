@@ -1153,6 +1153,7 @@ impl CodeGen {
                 match iter { Some(e) => { self.scan_expr(e, false) }, None => {} }
                 self.scan_block(body)
             },
+            StmtKind.DeferS(body) => { self.scan_block(body) },
             _ => {},
         }
     }
@@ -2134,7 +2135,7 @@ impl CodeGen {
         if self.wasm {
             // WASI's calls (std.platform's blocks, MYLA-158) and the
             // environment of the function value being called
-            for v in [("__wasi_args", 128), ("__wasi_buf", 64), ("__wasi_stat", 64), ("__wasi_cookies", 512), ("__wasi_subs", 1584), ("__wasi_events", 1056), ("__wasi_watch", 520), ("__wasi_ready", 264), ("myla_env", 8)] {
+            for v in [("__wasi_args", 128), ("__wasi_buf", 64), ("__wasi_stat", 64), ("__wasi_cookies", 512), ("__wasi_subs", 1584), ("__wasi_events", 1056), ("__wasi_watch", 520), ("__wasi_ready", 264)] {
                 out.push(v.0 + ":")
                 out.push(format("\t.skip {}", v.1))
             }
@@ -3184,6 +3185,7 @@ impl CodeGen {
                 },
                 StmtKind.ReturnS(ov, tail) => { for v in self.free_opt(ov, bnd) { out.push(v) } },
                 StmtKind.ExprStmt(e) => { for v in self.free_expr(e, bnd) { out.push(v) } },
+                StmtKind.DeferS(body) => { for v in self.free_block(body, bnd) { out.push(v) } },
                 _ => {},
             }
         }
@@ -3573,7 +3575,9 @@ pub fun format_segments(s: str) -> [str] {
             continue }
             segs.push(cur)
             cur = ""
-            i = i + 2
+            // past the hole and its spec, if any (D139)
+            while i < n && s[i] != '}' { i = i + 1 }
+            i = i + 1
             continue
         }
         if c == '}' {
@@ -3788,6 +3792,7 @@ fun names_in_block(b: Block, acc: [str]) -> [str] {
                 match iter { Some(e) => { out = names_in_expr(e, out) }, None => {} }
                 out = names_in_block(body, out)
             },
+            StmtKind.DeferS(body) => { out = names_in_block(body, out) },
             _ => {},
         }
     }
@@ -3862,6 +3867,7 @@ fun may_write_stmt(st: Stmt, name: str) -> bool {
         },
         StmtKind.ReturnS(ov, tail) => { return may_write_opt(ov, name) },
         StmtKind.ExprStmt(e) => { return may_write_expr(e, name) },
+        StmtKind.DeferS(body) => { return may_write_block(body, name) },
         _ => {},
     }
     return false

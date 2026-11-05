@@ -34,7 +34,8 @@ pub struct Expr { id: int32, line: int32, col: int32, sp: SrcSpan, kind: ExprKin
 
 pub struct FieldInit { line: int32, col: int32, sp: SrcSpan, name: str, value: Expr }
 pub struct MapEntry { key: Expr, value: Expr }
-pub struct Param { line: int32, col: int32, sp: SrcSpan, name: str, ty: Option<TypeExpr> }
+// `default`: the value a call that leaves the parameter out gets (D136)
+pub struct Param { line: int32, col: int32, sp: SrcSpan, name: str, ty: Option<TypeExpr>, default: Option<Expr> }
 
 pub enum ExprOrBlock {
     EB_Expr(Expr),
@@ -121,6 +122,7 @@ pub enum StmtKind {
     BreakS,
     ContinueS,
     ExprStmt(Expr),
+    DeferS(Block),                                       // `defer { … }` (D135)
 }
 
 // --- declarations --------------------------------------------------------
@@ -391,6 +393,7 @@ pub fun dump_stmt(s: Stmt) -> str {
         StmtKind.BreakS => "(break)",
         StmtKind.ContinueS => "(continue)",
         StmtKind.ExprStmt(e) => format("(exprstmt {})", dump_expr(e)),
+        StmtKind.DeferS(b) => format("(defer {})", dump_block(b)),
     }
 }
 

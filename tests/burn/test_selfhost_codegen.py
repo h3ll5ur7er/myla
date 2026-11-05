@@ -153,6 +153,14 @@ STRESS_PROGRAMS = {
 }
 PEAK_LIMIT_MB = 30
 
+# Module programs changed since the recordings (so they have none), with
+# what they print: D138 made `write_to_file` and `make_dir` return
+# `Result<(), IoError>`, so `io_through_the_ir` matches `Ok(())` (it prints what
+# was recorded before).
+MODULE_OUTPUTS_SINCE = {
+    "io_through_the_ir": "start\ntrue\ntrue\nno file\nnot written\nno dir\nnot made\ntrue\ntrue\nfalse\n3\n",
+}
+
 # Multi-module programs (MYLA-30): the self-hosted loader links modules the way
 # the Python one does: per-module names (`id$name`), `pub` exports and
 # re-exports, module aliases, nested modules and packages. Each project is
@@ -194,7 +202,7 @@ MODULE_PROJECTS = {
             '        Err(e) => { print("no file") },\n'
             "    }\n"
             '    match write_to_file("/nonexistent/dir/file", "x") {\n'
-            "        Ok(n) => { print(n) },\n"
+            '        Ok(()) => { print("written") },\n'
             '        Err(e) => { print("not written") },\n'
             "    }\n"
             '    match list_dir("/nonexistent") {\n'
@@ -202,7 +210,7 @@ MODULE_PROJECTS = {
             '        Err(e) => { print("no dir") },\n'
             "    }\n"
             '    match make_dir("/nonexistent/a/b") {\n'
-            "        Ok(n) => { print(n) },\n"
+            '        Ok(()) => { print("made") },\n'
             '        Err(e) => { print("not made") },\n'
             "    }\n"
             '    print(exists("/"))\n'
@@ -767,7 +775,10 @@ class SelfHostedCodegenParity(unittest.TestCase):
             for name, entry in entries.items():
                 with self.subTest(program=name):
                     out, code = self._build_and_run(self._emit_asm(entry, stdlib))
-                    expected, _ = _linked_oracle(entry, _modules(entry))
+                    if name in MODULE_OUTPUTS_SINCE:
+                        expected = MODULE_OUTPUTS_SINCE[name]
+                    else:
+                        expected, _ = _linked_oracle(entry, _modules(entry))
                     self.assertEqual((out, code), (expected, 0))
 
     def _assert_diagnostic_matches(self, entry: str, stdlib: str, modules: list[str], name: str = "",

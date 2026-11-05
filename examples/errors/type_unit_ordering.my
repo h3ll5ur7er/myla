@@ -1,0 +1,5 @@
+//~ type error: comparison requires numeric or char operands
+// The unit type has one value: `==` holds, but there is no order (D138).
+fun main() {
+    let b = () < ()
+}

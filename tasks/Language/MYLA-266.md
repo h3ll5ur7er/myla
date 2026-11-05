@@ -2,7 +2,7 @@
 id: MYLA-266
 title: "Targets and capabilities in the language's specification"
 type: chore
-status: backlog
+status: review
 priority: high
 labels: [language, docs, platforms, design]
 ---
@@ -25,14 +25,36 @@ Found by [[Project/Reflection-2026-11]]. The language and standard-library pages
 - Stack overflow has no row in the runtime-error table.
 
 Decisions for the owner first:
-- [ ] **NaNs:** canonical (every computed NaN made `0x7FF8000000000000` where its bits can be seen), or a computed NaN's sign and payload unspecified
-- [ ] **Errors programs see:** `IoError` and `SpawnError` as causes (D113), including "unsupported", instead of raw errno numbers
-- [ ] **`become`'s word limit:** one number for every target, or per target
-- [ ] **Capabilities:** how a program learns what its target can do (code per target, [[MYLA-245]]; a query; errors only), and the minimum stack depth a program may rely on
+- [x] **NaNs:** (D128) canonical (every computed NaN made `0x7FF8000000000000` where its bits can be seen), or a computed NaN's sign and payload unspecified
+- [x] **Errors programs see:** (D129) `IoError` and `SpawnError` as causes (D113), including "unsupported", instead of raw errno numbers
+- [x] **`become`'s word limit:** (D131) one number for every target, or per target
+- [x] **Capabilities:** (D132) how a program learns what its target can do (code per target, [[MYLA-245]]; a query; errors only), and the minimum stack depth a program may rely on
 
 Then the pages:
-- [ ] A page `Language/Targets` (new): each target's capabilities (processes, workers, suspending input, file modes and links, paths and the working directory, exit codes, stack depth, memory, how traps are reported)
-- [ ] [[Language/Expressions-and-operators]]: `MIN / -1` and `MIN % -1` (done with the reflection); NaNs once decided
-- [ ] [[Language/Attributes-and-testing]]: stack overflow and an invalid `as char` in the runtime-error table
-- [ ] [[Language/Statements]]: `become`'s rule stated in the language's terms
-- [ ] [[Language/Standard-library]] and [[Language/Concurrency]]: what differs per target
+- [x] A page [[Language/Targets]] (2026-11-05): each target's capabilities (processes, workers, suspending input, file modes and links, paths and the working directory, exit codes, stack depth, memory, how traps are reported)
+- [x] [[Language/Expressions-and-operators]]: `MIN / -1` and `MIN % -1` (done with the reflection); NaNs (D128, the float arithmetic paragraph)
+- [x] [[Language/Attributes-and-testing]]: stack overflow and an invalid `as char` in the runtime-error table
+- [x] [[Language/Statements]]: `become`'s rule stated in the language's terms (words, on every target, D131)
+- [x] [[Language/Standard-library]] and [[Language/Concurrency]]: what differs per target (both point at [[Language/Targets]])
+
+## Decided (2026-11-05)
+
+The owner chose the recommendations:
+- **D128:** NaNs are canonical where their bits can be seen.
+- **D129:** errors are portable causes, with `Unsupported`.
+- **D131:** `become` passes six words freely on every target.
+- **D132:** capabilities show as errors at run time and as code per target at compile time.
+- **D133:** one worker may skip the deep copies and atomic counts.
+
+- [x] **NaNs:** D128
+- [x] **Errors programs see:** D129 ([[MYLA-190]])
+- [x] **`become`'s word limit:** D131
+- [x] **Capabilities:** D132
+
+Then the work:
+- [x] D128 in `std.math`: `to_bits`, `copysign` and the other sign and payload readers see `0x7FF8000000000000` for every NaN. A test that `copysign(1.0, 0.0 / 0.0)` is `1` on every target (today -1 on x86-64, 1 on aarch64).
+  - **How:** `to_bits` returns the canonical NaN for any NaN, and `copysign` reads `s`'s sign through it. Inside, std.math computes with `raw_bits` and `with_sign`, whose results reach a program only through `to_bits` again.
+  - **Test:** `nan_bits` in `test_aarch64`'s programs, which `test_wasm` uses too, checks that the aarch64 and wasm builds print what the x86-64 build prints. Before the change the first two lines differed (x86-64: `18444492273895866368 9221120237041090560 …` and `-1 1 …`; aarch64: the other way round). After it, all lines agree.
+  - **`#test` cases** on `to_bits` and `copysign`.
+  - **Cost:** none. A program of 3 million `sin`, `exp` and `ln` calls runs 2,289,132,366 instructions before and after (callgrind). A first version that canonicalised inside std.math too was 34% slower.
+- [x] D133 on wasm32: plain counts for actor handles (they already were: `__rc_inc_atomic` is a plain add there), no deep copies at task boundaries (`Deep` expands to nothing, `CloneDeep` to a retain, in `ownership.my`), measured: 0.42–0.55 s instead of 0.62–0.69 s for 6000 children each handed a 20000-element list and a 200-entry map ([[tests/burn/test_wasm.py]] `test_one_worker_makes_no_deep_copies`)

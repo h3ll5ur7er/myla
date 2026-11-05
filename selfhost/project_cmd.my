@@ -101,7 +101,7 @@ pub fun project_build(base: LoadOptions, debug: bool, target: str) -> int32 {
     }
     let out_dir = h.project.root.dir + "/build"
     match make_dir_all(out_dir) {
-        Ok(n) => {},
+        Ok(()) => {},
         Err(e) => {
             eprintln("myla: cannot create " + shown(h, out_dir))
             return 1
@@ -207,7 +207,7 @@ pub fun project_clean(deps: bool) -> int32 {
     for d in dirs {
         if exists(d) {
             match remove_dir_all(d) {
-                Ok(n) => {},
+                Ok(()) => {},
                 Err(e) => {
                     eprintln("myla: cannot remove " + relative_path(cwd, d))
                     return 1
@@ -231,7 +231,7 @@ pub fun project_new(name: str) -> int32 {
         return 1
     }
     match make_dir_all(name + "/src") {
-        Ok(n) => {},
+        Ok(()) => {},
         Err(e) => {
             eprintln(format("myla: cannot create '{}'", name))
             return 1
@@ -245,7 +245,7 @@ pub fun project_new(name: str) -> int32 {
     for f in files {
         let (path, text) = f
         match write_to_file(path, text) {
-            Ok(n) => {},
+            Ok(()) => {},
             Err(e) => {
                 eprintln("myla: cannot write " + path)
                 return 1

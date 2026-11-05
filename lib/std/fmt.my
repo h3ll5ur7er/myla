@@ -1,0 +1,263 @@
+// std.fmt: format specs (D139, MYLA-277).
+//
+// A hole of an f-string or of a constant `format` string may carry a spec,
+// `{x:spec}`, as Rust writes it: `[[fill]align][sign][#][0][width]
+// [.precision][kind]`. The checker reads it with `parse_spec` and holds it
+// to the value's type (`spec_need`); the interpreter and native code format
+// with the functions below, so every runner prints the same bytes. A type
+// implementing the prelude's `Format` gets the spec's text as it is, and
+// `pad` gives it fill, alignment and width.
+
+from .num import format_fixed
+
+// A spec: `fill` one character; `align` 0 (the type's default), '<', '>' or
+// '^'; `plus` a sign on numbers that are not negative; `alt` the prefix of a
+// kind (0x, 0b, 0o); `zero` zeros after the sign up to the width; `width` the
+// least number of characters; `prec` the digits after a float's point (-1:
+// as it prints); `kind` 0 or 'x', 'X', 'b', 'o'.
+pub struct Spec {
+    fill: str,
+    align: uint8,
+    plus: bool,
+    alt: bool,
+    zero: bool,
+    width: int32,
+    prec: int32,
+    kind: uint8,
+}
+
+fun is_align(c: char) -> bool {
+    return c == '<' || c == '>' || c == '^'
+}
+
+fun is_digit(c: char) -> bool {
+    return c >= '0' && c <= '9'
+}
+
+// The spec `s`, or why it isn't one.
+#test("")[Ok(Spec { fill: " ", align: 0, plus: false, alt: false, zero: false, width: 0, prec: -1, kind: 0 })]
+#test("*>8.2")[Ok(Spec { fill: "*", align: '>', plus: false, alt: false, zero: false, width: 8, prec: 2, kind: 0 })]
+#test("#010x")[Ok(Spec { fill: " ", align: 0, plus: false, alt: true, zero: true, width: 10, prec: -1, kind: 'x' })]
+#test("+")[Ok(Spec { fill: " ", align: 0, plus: true, alt: false, zero: false, width: 0, prec: -1, kind: 0 })]
+#test("q")[Err("invalid format spec 'q'")]
+#test(".")[Err("invalid format spec '.'")]
+pub fun parse_spec(s: str) -> Result<Spec, str> {
+    let cs = s.chars()
+    let n = cs.len()
+    var sp = Spec { fill: " ", align: 0, plus: false, alt: false, zero: false, width: 0, prec: -1, kind: 0 }
+    var i = 0
+    if n >= 2 && is_align(cs[1]) {
+        sp.fill = format("{}", cs[0])
+        sp.align = cs[1] as uint8
+        i = 2
+    } else if n >= 1 && is_align(cs[0]) {
+        sp.align = cs[0] as uint8
+        i = 1
+    }
+    if i < n && cs[i] == '+' {
+        sp.plus = true
+        i += 1
+    }
+    if i < n && cs[i] == '#' {
+        sp.alt = true
+        i += 1
+    }
+    if i < n && cs[i] == '0' {
+        sp.zero = true
+        i += 1
+    }
+    while i < n && is_digit(cs[i]) {
+        sp.width = sp.width * 10 + (cs[i] as int32 - 48)
+        i += 1
+    }
+    if i < n && cs[i] == '.' {
+        i += 1
+        if i >= n || !is_digit(cs[i]) { return Err(format("invalid format spec '{}'", s)) }
+        sp.prec = 0
+        while i < n && is_digit(cs[i]) {
+            sp.prec = sp.prec * 10 + (cs[i] as int32 - 48)
+            i += 1
+        }
+    }
+    if i < n && (cs[i] == 'x' || cs[i] == 'X' || cs[i] == 'b' || cs[i] == 'o') {
+        sp.kind = cs[i] as uint8
+        i += 1
+    }
+    if i != n { return Err(format("invalid format spec '{}'", s)) }
+    return Ok(sp)
+}
+
+// What the spec `sp` needs that a value of class `class` (0 an integer, 1 a
+// float, 2 text: `str`, `char`, `bool`) isn't, as the checker's message ends
+// ("needs a float"); "" when it fits.
+#test(Spec { fill: " ", align: 0, plus: false, alt: false, zero: false, width: 0, prec: 2, kind: 0 }, 0)["needs a float"]
+#test(Spec { fill: " ", align: 0, plus: false, alt: false, zero: false, width: 0, prec: 2, kind: 0 }, 1)[""]
+#test(Spec { fill: " ", align: 0, plus: false, alt: false, zero: false, width: 0, prec: -1, kind: 'x' }, 1)["needs an integer"]
+#test(Spec { fill: " ", align: 0, plus: true, alt: false, zero: false, width: 0, prec: -1, kind: 0 }, 2)["needs a number"]
+#test(Spec { fill: " ", align: 0, plus: false, alt: true, zero: false, width: 0, prec: -1, kind: 0 }, 0)["needs a kind: x, X, b or o"]
+pub fun spec_need(sp: Spec, class: int32) -> str {
+    if sp.alt && sp.kind == 0 { return "needs a kind: x, X, b or o" }
+    if sp.prec >= 0 && class != 1 { return "needs a float" }
+    if sp.kind != 0 && class != 0 { return "needs an integer" }
+    if (sp.plus || sp.zero) && class == 2 { return "needs a number" }
+    return ""
+}
+
+// `text` filled out to the spec's width, aligned as it says or as `dflt`
+// ('<' or '>') when it doesn't; the width counts Unicode scalars, and a
+// longer text stays as it is.
+fun fill_to(text: str, sp: Spec, dflt: uint8) -> str {
+    let have = text.chars().len()
+    if have >= sp.width { return text }
+    let gap = sp.width - have
+    var align = sp.align
+    if align == 0 { align = dflt }
+    var left = 0
+    if align == '>' { left = gap } else if align == '^' { left = gap / 2 }
+    var sb = StringBuilder()
+    var k = 0
+    while k < left {
+        sb.append(sp.fill)
+        k += 1
+    }
+    sb.append(text)
+    while k < gap {
+        sb.append(sp.fill)
+        k += 1
+    }
+    return sb.build()
+}
+
+// `text` with the fill, alignment and width of `spec` (left-aligned unless
+// it says otherwise): what a type implementing `Format` uses to give its own
+// form a width. A spec that isn't one is a runtime error.
+#test("x", "^5")["  x  "]
+#test("ab", ">4")["  ab"]
+#test("ab", "")["ab"]
+pub fun pad(text: str, spec: str) -> str {
+    return match parse_spec(spec) {
+        Ok(sp) => fill_to(text, sp, '<')
+        Err(why) => { panic(why) }
+    }
+}
+
+// A number's sign (or none), its prefix and digits, made `sp.width` long:
+// with zeros between the prefix and the digits for `0`, else filled and
+// aligned (right by default).
+fun number(sign: str, prefix: str, digits: str, sp: Spec) -> str {
+    if sp.zero && sp.align == 0 {
+        let have = sign.len() + prefix.len() + digits.len()
+        var sb = StringBuilder()
+        sb.append(sign)
+        sb.append(prefix)
+        var k = have
+        while k < sp.width {
+            sb.append_byte('0')
+            k += 1
+        }
+        sb.append(digits)
+        return sb.build()
+    }
+    return fill_to(sign + prefix + digits, sp, '>')
+}
+
+// The digits of `u` in base `base` (2, 8, 10 or 16), upper-case for 'X'.
+#test(255, 16, false)["ff"]
+#test(255, 16, true)["FF"]
+#test(5, 2, false)["101"]
+#test(0, 8, false)["0"]
+fun digits_of(u: uint64, base: uint64, upper: bool) -> str {
+    if u == 0 { return "0" }
+    var ds: [uint8] = []
+    var v = u
+    while v > 0 {
+        let d = (v % base) as uint8
+        if d < 10 { ds.push('0' + d) } else if upper { ds.push('A' + d - 10) } else { ds.push('a' + d - 10) }
+        v = v / base
+    }
+    var sb = StringBuilder()
+    var i = ds.len() - 1
+    while i >= 0 {
+        sb.append_byte(ds[i])
+        i -= 1
+    }
+    return sb.build()
+}
+
+// The integer `v` (its bits, `bits` wide, signed or not) formatted by
+// `spec`: decimal, or a kind, which writes a negative signed value as its
+// two's complement at its width.
+#test(42, 32, true, ">6")["    42"]
+#test(-7, 32, true, "04")["-007"]
+#test(7, 32, true, "+")["+7"]
+#test(255, 32, true, "#06x")["0x00ff"]
+#test(-1, 8, true, "08b")["11111111"]
+#test(-1, 64, false, "")["18446744073709551615"]
+pub fun fmt_int(v: int64, bits: int32, signed: bool, spec: str) -> str {
+    let sp = match parse_spec(spec) {
+        Ok(x) => x
+        Err(why) => { panic(why) }
+    }
+    var u = v as uint64
+    if bits < 64 { u = u & ((1u64 << (bits as uint64)) - 1) }
+    if sp.kind != 0 {
+        var base: uint64 = 16
+        var prefix = "0x"
+        if sp.kind == 'b' {
+            base = 2
+            prefix = "0b"
+        } else if sp.kind == 'o' {
+            base = 8
+            prefix = "0o"
+        }
+        if !sp.alt { prefix = "" }
+        var sign = ""
+        if sp.plus { sign = "+" }
+        return number(sign, prefix, digits_of(u, base, sp.kind == 'X'), sp)
+    }
+    var sign = ""
+    var mag = u
+    if signed && v < 0 {
+        sign = "-"
+        mag = 0u64 - (v as uint64)
+    } else if sp.plus {
+        sign = "+"
+    }
+    return number(sign, "", digits_of(mag, 10, false), sp)
+}
+
+// The float `x` formatted by `spec`: `text` (its print form) unless the spec
+// has a precision. "nan" and "inf" are filled with the fill, never zeros.
+#test(3.5, "3.5", "8.2")["    3.50"]
+#test(3.5, "3.5", "08.2")["00003.50"]
+#test(-3.5, "-3.5", "08.2")["-0003.50"]
+#test(1.5, "1.5", "+.1")["+1.5"]
+#test(0.1, "0.1", ">6")["   0.1"]
+pub fun fmt_float(x: float64, text: str, spec: str) -> str {
+    var sp = match parse_spec(spec) {
+        Ok(y) => y
+        Err(why) => { panic(why) }
+    }
+    var body = text
+    if sp.prec >= 0 { body = format_fixed(x, sp.prec) }
+    var sign = ""
+    if body.len() > 0 && body[0] == '-' {
+        sign = "-"
+        var sb = StringBuilder()
+        sb.append(body, 1, body.len())
+        body = sb.build()
+    } else if sp.plus && x == x {
+        sign = "+"
+    }
+    if x != x || body == "inf" { sp.zero = false }
+    return number(sign, "", body, sp)
+}
+
+// A `str`, `char` or `bool`'s print form `text` formatted by `spec`: fill,
+// alignment (left by default) and width.
+#test("ab", "^6")["  ab  "]
+#test("λ", ">3")["  λ"]
+#test("toolong", "3")["toolong"]
+pub fun fmt_text(text: str, spec: str) -> str {
+    return pad(text, spec)
+}

@@ -122,3 +122,28 @@ pub fun is_blank(s: str) -> bool {
     }
     return true
 }
+
+// The spec of each hole of a constant format string, "" for `{}` and the
+// text after the `:` for `{:spec}` (D139); escaped braces are no holes.
+#test("a {} b {:>8} c {{}}")[["", ">8"]]
+#test("{:.2}")[[".2"]]
+pub fun format_specs(fmt: str) -> [str] {
+    var out: [str] = []
+    let n = fmt.len()
+    var i = 0
+    while i < n {
+        if fmt[i] == '{' && i + 1 < n && fmt[i + 1] == '{' { i = i + 2 }
+        else if fmt[i] == '}' && i + 1 < n && fmt[i + 1] == '}' { i = i + 2 }
+        else if fmt[i] == '{' {
+            var j = i + 1
+            while j < n && fmt[j] != '}' { j = j + 1 }
+            var sb = StringBuilder()
+            if j > i + 1 { sb.append(fmt, i + 2, j) }
+            out.push(sb.build())
+            i = j + 1
+        } else {
+            i = i + 1
+        }
+    }
+    return out
+}

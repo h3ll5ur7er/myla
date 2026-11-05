@@ -135,7 +135,7 @@ pub fun own_tests(file: str, opts: LoadOptions) -> Result<TestRun, str> {
 // Whether the file `path` was removed.
 fun removed(path: str) -> bool {
     return match remove_file(path) {
-        Ok(n) => true
+        Ok(()) => true
         Err(e) => false
     }
 }
@@ -207,7 +207,7 @@ pub fun cmd_build(file: str, output: str, opts: LoadOptions, debug: bool, target
     let asm_path = output + ".s"
     let obj_path = output + ".o"
     match write_to_file(asm_path, asm) {
-        Ok(n) => {},
+        Ok(()) => {},
         Err(e) => {
             eprintln("myla: cannot write assembly to " + asm_path)
             return 1

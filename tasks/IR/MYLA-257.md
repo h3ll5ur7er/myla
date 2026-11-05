@@ -2,7 +2,7 @@
 id: MYLA-257
 title: "Register allocation on lifetime intervals with holes (D123's backend half)"
 type: feature
-status: in-progress
+status: backlog
 priority: medium
 labels: [backend, ir, performance]
 ---
@@ -55,3 +55,7 @@ Then `for i in a..b` and `for x in xs` the same way (their test on the way in an
 The allocator is tied to x86-64's register file (about 800 lines in [[selfhost/ir_x86.my]]); aarch64 runs with none, every temporary in a frame cell, and wasm leaves allocation to the engine. Built against a description of the register file (the target's, [[MYLA-262]]), it is the main performance lever for aarch64; its measures want aarch64 hardware ([[MYLA-270]]).
 
 - [ ] The allocator independent of the target, x86-64 and aarch64 both using it
+
+## Paused (2026-11-05)
+
+Back in the backlog: the first steps are merged and safe (`--ssa`, off by default); the rest is performance work, taken up again with [[MYLA-262]]'s backend interface, which the target-independent allocator wants.

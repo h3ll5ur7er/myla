@@ -16,7 +16,9 @@
 // function takes its argument words as i64 parameters and gives an i64
 // (0 when it has no result), so a function value is called through one
 // `call_indirect` type per number of words; its code word holds its index
-// in the table, and its environment goes in the memory word `myla_env`.
+// in the table, and its environment is the call's last argument (D130): a
+// lambda, a partial application's function, a plain function's adapter and
+// `__compose_call` take it as their last parameter.
 
 from .checker import Type, subst_type
 from .codegen import CodeGen, PartialJob, is_aggregate, int_width_cg, is_tfloat32, is_aggregate_opt, is_cell_t, is_tfunc, tls_offset
@@ -36,6 +38,8 @@ impl CodeGen {
         self.cur_file = self.file_number(decl_id)
         self.cur_path = self.path_of(decl_id)
         var nparams = 0
+        // a lambda's environment: the parameter after its words (D130)
+        var envp = -1
         if f.frame {
             nparams = 1
         } else {
@@ -45,6 +49,10 @@ impl CodeGen {
                     if s.inline { n = s.size / 8 }
                     if s.word + n > nparams { nparams = s.word + n }
                 }
+            }
+            if has_env_slot(f) {
+                envp = nparams
+                nparams = nparams + 1
             }
         }
         // the frame: each slot a cell (a frame function's are in its heap
@@ -113,14 +121,13 @@ impl CodeGen {
         self.emit(format("local.tee {}", w.fp))
         self.emit("global.set __stack_pointer")
         if !f.frame {
-            // the parameters into their cells, the environment from `myla_env`
+            // the parameters into their cells, the environment too
             var si = 0
             while si < f.slots.len() {
                 let s = f.slots[si]
                 if s.word == ENV_WORD {
                     self.emit(format("local.get {}", w.fp))
-                    self.emit("i32.const myla_env")
-                    self.emit("i64.load 0")
+                    self.emit(format("local.get {}", envp))
                     self.emit(format("i64.store {}", soff[si]))
                 } else if s.word >= 0 {
                     var n = 1
@@ -465,18 +472,18 @@ impl CodeGen {
                 self.emit("drop")
             },
             Inst.CallInd(d, fv, args) => {
-                self.wasm_env(w, fv)
                 for x in args { self.wasm_get(w, x) }
+                self.wasm_env(w, fv)
                 self.wasm_code(w, fv)
-                self.emit(format("call_indirect {}", wasm_sig(args.len())))
+                self.emit(format("call_indirect {}", wasm_sig(args.len() + 1)))
                 self.wasm_set(w, d)
             },
             Inst.CallIndSret(fv, r, args) => {
-                self.wasm_env(w, fv)
                 self.wasm_get(w, r)
                 for x in args { self.wasm_get(w, x) }
+                self.wasm_env(w, fv)
                 self.wasm_code(w, fv)
-                self.emit(format("call_indirect {}", wasm_sig(args.len() + 1)))
+                self.emit(format("call_indirect {}", wasm_sig(args.len() + 2)))
                 self.emit("drop")
             },
             Inst.Rt(d, name, args) => { self.wasm_rt(f, w, d, name, args) },
@@ -702,12 +709,11 @@ impl CodeGen {
         }
     }
 
-    // A function value's environment (the word after its code) into `myla_env`.
+    // A function value's environment (the word after its code), the last
+    // argument of its call (D130).
     fun wasm_env(var self, w: WFn, fv: int32) {
-        self.emit("i32.const myla_env")
         self.wasm_addr(w, fv, 8)
         self.emit("i64.load 0")
-        self.emit("i64.store 0")
     }
 
     // A function value's code (its table index) as the i32 `call_indirect` takes.
@@ -998,6 +1004,19 @@ impl CodeGen {
             self.wasm_set(w, d)
             return
         }
+        // one worker (D125 (4)): a plain load and store (MYLA-267)
+        if name == "__load_acq64" {
+            self.wasm_addr(w, args[0], 0)
+            self.emit("i64.load 0")
+            self.wasm_set(w, d)
+            return
+        }
+        if name == "__store_rel64" {
+            self.wasm_addr(w, args[0], 0)
+            self.wasm_get(w, args[1])
+            self.emit("i64.store 0")
+            return
+        }
         if name == "__xchg64" || name == "__fetch_add64" {
             self.wasm_addr(w, args[0], 0)
             self.emit("i64.load 0")
@@ -1094,19 +1113,19 @@ impl CodeGen {
                 self.wasm_call("return_call", format("myla_{}", name), args.len() + 1)
             },
             Inst.CallInd(d, fv, args) => {
-                self.wasm_env(w, fv)
                 self.wasm_leave(w)
                 for x in args { self.wasm_get(w, x) }
+                self.wasm_env(w, fv)
                 self.wasm_code(w, fv)
-                self.emit(format("return_call_indirect {}", wasm_sig(args.len())))
+                self.emit(format("return_call_indirect {}", wasm_sig(args.len() + 1)))
             },
             Inst.CallIndSret(fv, res, args) => {
-                self.wasm_env(w, fv)
                 self.wasm_leave(w)
                 self.wasm_get(w, res)
                 for x in args { self.wasm_get(w, x) }
+                self.wasm_env(w, fv)
                 self.wasm_code(w, fv)
-                self.emit(format("return_call_indirect {}", wasm_sig(args.len() + 1)))
+                self.emit(format("return_call_indirect {}", wasm_sig(args.len() + 2)))
             },
             _ => { panic("internal error: wasm: `become` without a call") },
         }
@@ -1173,6 +1192,12 @@ pub fun wasm_sig(n: int32) -> str {
     }
     sb.append(") -> (i64)")
     return sb.build()
+}
+
+// Whether `f` is a lambda's body, which takes its environment (D130).
+fun has_env_slot(f: IrFunc) -> bool {
+    for s in f.slots { if s.word == ENV_WORD { return true } }
+    return false
 }
 
 // The blocks reachable from the entry (and a frame function's resume points).
@@ -1278,11 +1303,14 @@ impl CodeGen {
     // `myla_<f>__new(args…)`: a new heap frame for the frame function `f`
     // (its header, then the slots, zeroed), each argument copied into its
     // parameter's slot with references of its own (an aggregate from the
-    // address passed; a lambda's environment from `myla_env`); the frame.
+    // address passed; a lambda's environment from its last parameter, D130);
+    // the frame.
     fun emit_frame_new_wasm(var self, f: IrFunc, mangled: str, soff: [int32]) {
         let size = frame_size(f)
         var words = 0
         for s in f.slots { if s.word >= 0 && s.word + 1 > words { words = s.word + 1 } }
+        let envp = words
+        if has_env_slot(f) { words = words + 1 }
         let fl = words
         let name = format("myla_{}__new", mangled)
         self.wasm_define(name, words)
@@ -1319,8 +1347,7 @@ impl CodeGen {
                     self.emit(format("local.get {}", fl))
                     self.emit("i32.wrap_i64")
                     if s.word == ENV_WORD {
-                        self.emit("i32.const myla_env")
-                        self.emit("i64.load 0")
+                        self.emit(format("local.get {}", envp))
                     } else {
                         self.emit(format("local.get {}", s.word))
                     }
@@ -1399,7 +1426,9 @@ impl CodeGen {
 
     // `myla_<fn>__fnval`, the adapter that calls a plain `fun` as a function
     // value (MYLA-126): a parameter passed owned gets a reference of its own,
-    // then the function in its place (an async one's frame made, D90).
+    // then the function in its place (an async one's frame made, D90). It
+    // takes the environment last, as every function value's code does, and
+    // ignores it (D130).
     fun emit_fnval_thunk_wasm(var self, n: str) {
         let sig = self.sig_of(n)
         var first = 0
@@ -1411,10 +1440,10 @@ impl CodeGen {
             if self.byval_param(sig, k, sig.params[k]) { panic("internal error: wasm: a function value of a function taking a value by copy (not yet, MYLA-158)") }
             k = k + 1
         }
-        self.wasm_define(name, words)
+        self.wasm_define(name, words + 1)
         self.emit("")
         self.emit(format("{}:", name))
-        self.emit(format(".functype {} {}", name, wasm_sig(words)))
+        self.emit(format(".functype {} {}", name, wasm_sig(words + 1)))
         let async_fn = self.is_async_fn(n)
         var i = 0
         while i < sig.params.len() && !async_fn {
@@ -1446,8 +1475,8 @@ impl CodeGen {
     }
 
     // A partial application's function (`myla_<lifted>`, D119): its
-    // environment (`myla_env`) holds the arguments given, the call brings
-    // the holes; the target called in its place with all of them. A
+    // environment (the last parameter, D130) holds the arguments given, the
+    // call brings the holes; the target called in its place with all of them. A
     // parameter passed by value gets a copy of its own (D88), one passed
     // owned a reference of its own (MYLA-127).
     fun gen_partial_function_wasm(var self, job: PartialJob) {
@@ -1461,18 +1490,15 @@ impl CodeGen {
         var tsig = self.funcs[0]
         if job.fn_off < 0 { tsig = self.sig_of(job.target) }
         let in_words = first + holes
-        // its locals: the environment, an address
+        // the environment (its last parameter); a local: an address
         let env = in_words
         let src = in_words + 1
         let name = format("myla_{}", job.lifted)
-        self.wasm_define(name, in_words)
+        self.wasm_define(name, in_words + 1)
         self.emit("")
         self.emit(format("{}:", name))
-        self.emit(format(".functype {} {}", name, wasm_sig(in_words)))
-        self.emit(".local i64, i64")
-        self.emit("i32.const myla_env")
-        self.emit("i64.load 0")
-        self.emit(format("local.set {}", env))
+        self.emit(format(".functype {} {}", name, wasm_sig(in_words + 1)))
+        self.emit(".local i64")
         var total = 0
         if job.sret {
             self.emit("local.get 0")
@@ -1528,17 +1554,16 @@ impl CodeGen {
             pos = pos + 1
         }
         if job.fn_off >= 0 {
-            // the function value in the environment: its environment, its code
-            self.emit("i32.const myla_env")
+            // the function value in the environment: its environment (the
+            // last argument), its code
             self.emit(format("local.get {}", env))
             self.emit("i32.wrap_i64")
             self.emit(format("i64.load {}", job.fn_off + 8))
-            self.emit("i64.store 0")
             self.emit(format("local.get {}", env))
             self.emit("i32.wrap_i64")
             self.emit(format("i64.load {}", job.fn_off))
             self.emit("i32.wrap_i64")
-            self.emit(format("return_call_indirect {}", wasm_sig(total)))
+            self.emit(format("return_call_indirect {}", wasm_sig(total + 1)))
         } else {
             self.wasm_call("return_call", format("myla_{}", job.target), total)
         }

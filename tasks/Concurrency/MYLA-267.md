@@ -2,7 +2,7 @@
 id: MYLA-267
 title: "The runtime's memory ordering on weakly ordered CPUs"
 type: chore
-status: backlog
+status: review
 priority: high
 labels: [concurrency, runtime, platforms]
 ---
@@ -16,6 +16,33 @@ Found by [[Project/Reflection-2026-11]]. The executor's lock-free protocols were
 
 aarch64 is weakly ordered. Its backend uses `ldaxr`/`stlxr` loops plus a `dmb ish` after the exchanges, and passed the stress programs under qemu. But qemu on an x86-64 host doesn't reorder memory, so a missing barrier could not show.
 
-- [ ] Each protocol's ordering requirement written down (which stores must be visible before which loads), and the IR's atomics specified to meet them ([[MYLA-264]])
-- [ ] The aarch64 sequences checked against those requirements: first, every unlock is a plain store (`__store64(lock, 0)`), which needs release semantics (`stlr`) on aarch64; a release store and an acquire load as typed intrinsics ([[MYLA-264]]). ([[MYLA-275]] turned out to be a race in the stuck check on every processor, not the ordering; `__cas64` got its missing `dmb ish` there.)
-- [ ] The stress programs on arm64 hardware (a GitHub arm64 runner), on 1–16 workers, many runs each
+- [x] Each protocol's ordering requirement written down (which stores must be visible before which loads), and the IR's atomics specified to meet them ([[MYLA-264]]): [[Architecture/Native-backend]], "Memory ordering"
+- [x] The aarch64 sequences checked against those requirements; three gaps found and fixed (below)
+- [x] The stress programs on arm64 hardware (a GitHub arm64 runner), on 1–16 workers, many runs each
+
+## Done (2026-11-05)
+
+- **Two new primitives:** `__load_acq64` and `__store_rel64` in the checker, the lowering and the three backends. aarch64 emits `ldar` and `stlr`, x86-64 plain `movq`, wasm32 plain loads and stores.
+- **Unlocks were plain stores (22 sites):** every `__store64(lock, 0)` after a `take_lock`, on the queues, the actor records and the timers, could become visible before the critical section's stores. They are now `give_lock`, a release store; the poller's claim is given back the same way.
+- **`task_wait` read the child's `task` word with a plain load,** then read the child's result: now an acquire load.
+- **`__task_fail` claimed the failure flag without a barrier** and then looked at what the workers run, a store then a load: now `dmb ish` after the claim, as the exchanges have. `__cas64` got its barrier with [[MYLA-275]].
+- **The requirements of every protocol:** a table on [[Architecture/Native-backend]] ("Memory ordering").
+- **The stress programs on hardware:** `scripts/stress-native.py` builds each with the machine's `myla` and runs it 20 times on each of 1, 4 and 16 workers; CI's `bootstrap-arm64` job runs it on GitHub's arm64 runner.
+
+Evidence:
+- the concurrency stress, time, native runtime, aarch64 (qemu) and scheduling suites pass, 40 tests;
+- `stress-native.py` passes here (0 failed runs);
+- the fixed point is reached and the seeds updated.
+
+The arm64 hardware run is the CI job's.
+
+## Found by the arm64 hardware (2026-11-05)
+
+- **The first run on GitHub's arm64 runner:** every stress program passed its 60 runs but one. `t18_closures_cross_tasks` crashed with signal 11 in 2 of its 20 runs on 4 workers. x86-64 never failed (0 of 640 runs, 8 at a time), and neither did qemu (0 of 200).
+- **Bisection:** t18's three parts as programs of their own. t19 (closures deep-copied into children) and t21 (a composition into a child) passed 100 of 100. t20 (siblings and the parent cloning a finished child's closure, [[MYLA-148]]) crashed in 3 of 100, as did t18.
+- **The cause:** the lowering's `wait_task` reads the child's `task` word itself before calling `__wait`, and when the child has ended it reads the result from the frame at once. That load was plain, so aarch64 could read the result before the word: a stale result, whose clone then followed a bad pointer. `task_wait` in std.rt had its acquire load since step two, but the compiler's inlined check didn't.
+- **The fix:** an acquire load (`__load_acq64`, `ldar`) in [[selfhost/lower.my]].
+
+**After the fix, on GitHub's arm64 runner** (CI run 42056099956, commit bf992b0):
+- every stress program passed 60 runs (20 on each of 1, 4 and 16 workers);
+- t18, t19, t20 and t21 each passed 100 runs on 4 workers, where t18 and t20 had crashed in 3 of 100 each.

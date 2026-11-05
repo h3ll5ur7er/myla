@@ -2,7 +2,7 @@
 id: MYLA-161
 title: "LLVM: user code on x86-64 Linux, linked with the assembly runtime"
 type: feature
-status: review
+status: done
 priority: medium
 labels: [llvm, backend]
 ---
@@ -15,3 +15,5 @@ Second step of [[MYLA-62]], after the decisions ([[MYLA-160]]): an LLVM backend 
 - [ ] The calling convention decided in [[MYLA-160]] between LLVM code and the runtime (the executor resuming frame functions, function values)
 - [ ] The native parity programs, the stress tests and the concurrency programs pass with `--backend llvm`; the compiler compiled through LLVM compiles itself to the same output
 - [ ] Measured against the assembly backend: compile time, binary size, run time of the compiler and of the benchmarks of [[MYLA-140]] and [[MYLA-150]]
+
+LLVM was dropped by D117; closed with the owner's agreement (2026-11-05).

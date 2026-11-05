@@ -18,6 +18,7 @@ FLOAT          = digits ( "." digits exponent? | exponent ) float_suffix? | digi
 CHAR           = "'" ( char_char | escape ) "'" ;
 STRING         = '"' ( string_char | escape )* '"' ;
 FSTRING_TEXT   = ( fstring_char | escape )+ ;
+FORMAT_SPEC    = ":" spec_char* ;   (* a hole's format spec, D139 *)
 COMMENT        = "//" line_char* | "/*" not_star* ( "*"+ not_star_slash not_star* )* "*"+ "/" ;
 NL             = /\n/ ;
 
@@ -37,6 +38,7 @@ escape         = "\" ( "n" | "t" | "r" | "0" | "\" | '"' | "'" | "u{" hexdigit+ 
 char_char      = /[^'\\\n]/ ;
 string_char    = /[^"\\\n]/ ;
 fstring_char   = /[^"{}\\\n]/ ;
+spec_char      = /[^"{}\\\n]/ ;
 line_char      = /[^\n]/ ;
 not_star       = /[^*]/ ;
 not_star_slash = /[^*\/]/ ;
@@ -63,7 +65,7 @@ enum_decl    = "enum" IDENT type_params? "{" NL* ( variant ","? NL* )* "}" ;
 variant      = IDENT ( "(" type ( "," type )* ","? ")" )? ;
 
 fun_decl     = "async"? "fun" IDENT generics? "(" NL* ( param NL* ( "," NL* param NL* )* ( "," NL* )? )? ")" ( "->" type )? block ;
-param        = IDENT ":" type ;
+param        = IDENT ":" type ( "=" expression )? ;   (* a default: D136 *)
 generics     = "<" generic ( "," generic )* ","? ">" ;
 generic      = IDENT ( ":" IDENT ( "+" IDENT )* )? ;
 type_params  = "<" IDENT ( "," IDENT )* ","? ">" ;
@@ -89,7 +91,7 @@ import_item  = IDENT ( "as" IDENT )? ;
 
 ```ebnf
 type          = prim_type | named_type | "[" type "]" | "[" type ":" type "]"
-              | tuple_type | function_type ;
+              | "(" ")" | tuple_type | function_type ;   (* "()": the unit type, D138 *)
 named_type    = IDENT type_args? ;
 type_args     = "<" type ( "," type )* ","? ">" ;
 prim_type     = "bool" | "str" | "int8" | "int16" | "int32" | "int64"
@@ -102,13 +104,14 @@ function_type = "async"? "(" ( type ( "," type )* ","? )? ")" "->" type ;
 
 ```ebnf
 block       = "{" SEP* ( statement ( SEP+ statement )* SEP* )? "}" ;
-statement   = var_decl | async_let | if_stmt | while_stmt | for_stmt | return_stmt | become_stmt
-            | "break" | "continue" | assignment | expression ;
+statement   = var_decl | let_else | async_let | if_stmt | while_stmt | for_stmt | return_stmt | become_stmt
+            | "break" | "continue" | defer_stmt | assignment | expression ;
 
 var_decl    = ( "let" | "var" ) ( IDENT | bind_tuple ) ( ":" type )? "=" expression ;
 async_let   = "async" "let" IDENT ( ":" type )? "=" expression ;   (* a child task, D89 *)
+let_else    = "let" variant_pattern ( "|" base_pattern )* "=" expression "else" block ;   (* D137: a pattern that can fail; the else block leaves *)
 bind_tuple  = "(" bind_elem "," ( bind_elem ( "," bind_elem )* ","? )? ")" ;
-bind_elem   = IDENT | bind_tuple ;                  (* the name "_" discards *)
+bind_elem   = IDENT | "(" ")" | bind_tuple ;                  (* the name "_" discards *)
 
 if_stmt     = "if" ( cond | let_cond ) block ( NL* "else" ( if_stmt | block ) )? ;
 let_cond    = "let" pattern "=" cond ;   (* if let, while let: D104 (5) *)
@@ -117,6 +120,7 @@ for_stmt    = "for" IDENT "in" cond ( ".." cond )? block ;
 cond        = expression ;                          (* without struct literals *)
 return_stmt = "return" ( expression ( "," expression )* )? ;   (* a, b is a tuple *)
 become_stmt = "become" expression ;                (* a call, D87 *)
+defer_stmt  = "defer" block ;                      (* runs as its block ends, D135 *)
 
 assignment  = place ( "=" | compound_op ) expression ;
 compound_op = "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>=" ;   (* D104 (2): place = place op expression *)
@@ -151,9 +155,9 @@ call_arg    = "_" | expression ;            (* "_" alone: a partial-application 
 
 primary     = INT | FLOAT | CHAR | STRING | fstring | "true" | "false"
             | "self" | IDENT | struct_literal | "(" NL* expression NL* ")"
-            | tuple | list | map | match_expr | if_expr ;
+            | "(" NL* ")" | tuple | list | map | match_expr | if_expr ;   (* "()": the unit value, D138 *)
 fstring     = 'f"' ( FSTRING_TEXT | "{{" | "}}"
-                   | "{" expression "}" )* '"' ;
+                   | "{" expression FORMAT_SPEC? "}" )* '"' ;
               (* lowered by the lexer to: format(STRING, expression, …) *)
 if_expr     = "if" ( cond | let_cond ) block NL* "else" ( if_expr | block ) ;   (* an if used as a value, D104 (1) *)
 struct_literal = IDENT "{" NL* ( field_init ( "," NL* field_init )* ","? NL* )? "}" ;
@@ -179,7 +183,7 @@ guard       = expression ;                          (* without struct literals *
 ```ebnf
 pattern       = base_pattern ( "|" base_pattern )* ;
 base_pattern  = INT | CHAR | STRING | "true" | "false" | "-" INT
-              | "_" | IDENT | variant_pattern | tuple_pattern | struct_pattern ;
+              | "_" | IDENT | variant_pattern | "(" ")" | tuple_pattern | struct_pattern ;
 variant_pattern = IDENT "." IDENT payload? | "." IDENT payload? | IDENT payload ;
 payload       = "(" ( pattern ( "," pattern )* ","? )? ")" ;
 tuple_pattern = "(" pattern "," ( pattern ( "," pattern )* ","? )? ")" ;

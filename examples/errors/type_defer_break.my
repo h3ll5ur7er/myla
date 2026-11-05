@@ -1,0 +1,10 @@
+//~ type error: a deferred block can't 'break' out of itself
+// `break` and `continue` in a deferred block only reach a loop inside it
+// (D135).
+fun main() {
+    for i in 0..3 {
+        defer {
+            break
+        }
+    }
+}
