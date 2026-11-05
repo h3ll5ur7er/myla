@@ -36,7 +36,7 @@ module.exports = grammar({
     enum_decl: $ => seq('enum', $.identifier, optional($.type_params), '{', optional($._nl_rep), repeat(seq($.variant, optional(','), optional($._nl_rep))), '}'),
     variant: $ => seq($.identifier, optional(seq('(', $._type, repeat(seq(',', $._type)), optional(','), ')'))),
     fun_decl: $ => seq(optional('async'), 'fun', $.identifier, optional($.generics), '(', optional($._nl_rep), optional(seq($.param, optional($._nl_rep), repeat(seq(',', optional($._nl_rep), $.param, optional($._nl_rep))), optional(seq(',', optional($._nl_rep))))), ')', optional(seq('->', $._type)), $.block),
-    param: $ => seq($.identifier, ':', $._type),
+    param: $ => seq($.identifier, ':', $._type, optional(seq('=', $._expression))),
     generics: $ => seq('<', $.generic, repeat(seq(',', $.generic)), optional(','), '>'),
     generic: $ => seq($.identifier, optional(seq(':', $.identifier, repeat(seq('+', $.identifier))))),
     type_params: $ => seq('<', $.identifier, repeat(seq(',', $.identifier)), optional(','), '>'),

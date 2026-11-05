@@ -87,7 +87,7 @@ enum_decl    = "enum" IDENT type_params? "{" NL* ( variant ","? NL* )* "}" ;
 variant      = IDENT ( "(" type ( "," type )* ","? ")" )? ;
 
 fun_decl     = "async"? "fun" IDENT generics? "(" NL* ( param NL* ( "," NL* param NL* )* ( "," NL* )? )? ")" ( "->" type )? block ;
-param        = IDENT ":" type ;
+param        = IDENT ":" type ( "=" expression )? ;   (* a default: D136 *)
 generics     = "<" generic ( "," generic )* ","? ">" ;
 generic      = IDENT ( ":" IDENT ( "+" IDENT )* )? ;
 type_params  = "<" IDENT ( "," IDENT )* ","? ">" ;

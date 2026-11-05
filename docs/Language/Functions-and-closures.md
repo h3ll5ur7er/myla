@@ -25,6 +25,35 @@ fun main() {
 - A top-level name can't reuse a built-in function's name (`print`, `len`, `push`, …).
 - Every path must return a value ([[Language/Statements]]).
 
+
+### Default values
+
+A function's or method's trailing parameters may have default values (`port: int = 80`), and a call may leave out a suffix of them (D136, [[MYLA-255]]). The caller evaluates each default it leaves out, at each call, so a default may be any expression of the parameter's type that doesn't name another parameter: a constant, a call, a literal. There are no named arguments: only the last parameters can be left out.
+
+```myla
+fun connect(host: str, port: int = 80, retries: int = 3) -> str {
+    return f"{host}:{port}, {retries} tries"
+}
+
+fun main() {
+    print(connect("example.org"))
+    print(connect("example.org", 8080))
+    print(connect("example.org", 8080, 5))
+    let f = connect
+    print(f("x", 1, 1))
+}
+// output:
+// example.org:80, 3 tries
+// example.org:8080, 3 tries
+// example.org:8080, 5 tries
+// x:1, 1 tries
+```
+
+- **Defaults belong to the declaration,** not to the function's type: a function value of `connect` is a `(str, int, int) -> str` and takes every argument, and a partial application lists every position (`connect(_, 8080, 3)`).
+- **Errors:** a parameter without a default after one with a default; a default of another type; one that names another parameter; a default on a parameter whose type mentions a type parameter, which the caller couldn't evaluate; defaults on a trait's methods, as a call through a bound can't know an implementation's. Too few or too many arguments say how many the function takes (`expects 1 to 3 argument(s)`).
+- **`#test`** cases give every argument.
+- **Implementation:** once the program is checked, every call that leaves arguments out gets its defaults (the checker's `fill_defaults`), so the interpreter and every backend see each call whole; `become`'s word rule counts them (D131).
+
 ## Function values
 
 ```myla

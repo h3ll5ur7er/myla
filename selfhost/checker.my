@@ -1249,6 +1249,7 @@ pub struct Checker {
     lambda_infer: [MatchVal],
     stmt_match: bool,
     resolved: [int32: Type],        // expr node id -> resolved type (v0.8 interp side table)
+    call_defaults: [int32: [Expr]], // call node id -> the defaults it leaves to its trailing parameters (D136)
     errs: [CheckErr],               // the errors of the functions checked so far (MYLA-65, D80)
     warnings: [CheckErr],           // D95: the warnings found, in the order found
     // going on after a declaration's error (MYLA-110, D84; types.py: Checker):
@@ -1324,7 +1325,7 @@ fun new_checker(decls: [Decl]) -> Checker {
         allow_self: false, type_params: [], bounds_cur: [],
         cur_ret: None, has_cur_ret: false, ret_at: None, loop_depth: 0,
         frames: [], lambda_infer_active: false, lambda_depth: 0, cur_decl: -1, lambda_infer: [], stmt_match: false,
-        resolved: [:], errs: [], warnings: [], mains: [],
+        resolved: [:], call_defaults: [:], errs: [], warnings: [], mains: [],
         skipped_decls: [:], skipped_fns: [:], broken_impls: [:], redefined: [:],
         lost_methods: [:], lost_traits: [:], failed_consts: [:], bodies: false,
         call_kind: "", call_kind_id: -1, call_target: "", call_mutates: false, fun_name: "", handovers: [:], become_words: [], passed_on: [],
@@ -1980,7 +1981,7 @@ impl Checker {
         return Ok(Type.TError)
     }
 
-    #test(checker_on("[int]"), Param { line: 7, col: 14, sp: SrcSpan { sline: 7, scol: 14, eline: 7, ecol: 21 }, name: "c", ty: Some(TypeExpr { id: 8, line: 7, col: 17, sp: SrcSpan { sline: 7, scol: 17, eline: 7, ecol: 21 }, kind: TypeKind.TRef("char", []) }) })[Ok(Type.TChar)]
+    #test(checker_on("[int]"), Param { line: 7, col: 14, sp: SrcSpan { sline: 7, scol: 14, eline: 7, ecol: 21 }, name: "c", ty: Some(TypeExpr { id: 8, line: 7, col: 17, sp: SrcSpan { sline: 7, scol: 17, eline: 7, ecol: 21 }, kind: TypeKind.TRef("char", []) }), default: None })[Ok(Type.TChar)]
     fun param_type(var self, p: Param) -> Result<Type, CheckErr> {
         return match p.ty {
             Some(te) => self.resolve0(te),
@@ -2232,6 +2233,14 @@ impl Checker {
                     match tp_fail { Some(e) => { self.record(e)? }, None => {} }
                     var msigs: [TraitMethodSig] = []
                     for m in methods {
+                        // a call through a bound can't know an implementation's
+                        // defaults, so a trait's methods have none (D136)
+                        for p in m.params {
+                            match p.default {
+                                Some(d) => { self.record(terr_at(d.line, d.col, d.sp, format("the methods of a trait can't have default values (parameter '{}' of '{}.{}')", p.name, name, m.name)))? },
+                                None => {},
+                            }
+                        }
                         var dup = false
                         for prev in msigs { if prev.name == m.name { dup = true } }
                         if dup {
@@ -2491,7 +2500,7 @@ impl Checker {
         match m.ret_type { Some(te) => { rt = Some(self.resolve_part(te)?) }, None => {} }
         self.type_params = []
         // synthesize a self parameter so the body checker binds `self`
-        var sparams: [Param] = [Param { line: m.line, col: m.col, sp: no_span(), name: "self", ty: Some(target_te) }]
+        var sparams: [Param] = [Param { line: m.line, col: m.col, sp: no_span(), name: "self", ty: Some(target_te), default: None }]
         for p in m.params { sparams.push(p) }
         let fdecl = FunData {
             line: m.line, col: m.col, sp: m.sp, name: mangled, params: sparams,
@@ -4256,6 +4265,16 @@ impl Checker {
         for a in all {
             if self.resolved.contains(a.id) { ats.push(self.resolved[a.id]) } else { ats.push(Type.TBool) }
         }
+        // and the defaults the call leaves to its trailing parameters (D136),
+        // as their parameters' types say (the defaults may not be checked yet)
+        if self.call_defaults.contains(ve.id) {
+            let fi = self.func_idx(target)
+            var k = ats.len()
+            for d in self.call_defaults[ve.id] {
+                if fi >= 0 && k < self.functions[fi].params.len() { ats.push(self.functions[fi].params[k]) } else { ats.push(Type.TBool) }
+                k = k + 1
+            }
+        }
         self.become_words.push(BecomeWords { func: self.fun_name, target: target, value: kind == "value", mutates: self.call_mutates, args: ats, line: ve.line, col: ve.col, sp: ve.sp, decl: self.cur_decl })
         return Ok(0)
     }
@@ -4639,6 +4658,57 @@ impl Checker {
         }
     }
 
+    // A call of `sig` with `given` arguments (after `skip` parameters: a
+    // method's receiver): too many or too few is an error; fewer than its
+    // parameters records the defaults of the ones left out (D136).
+    fun call_arity(var self, e: Expr, sig: FuncSig, skip: int32, given: int32, what: str) -> Result<bool, CheckErr> {
+        let total = sig.params.len() - skip
+        let optional = trailing_defaults(sig.decl.params)
+        if given > total || given < total - optional {
+            if optional == 0 { return Err(terr_at(e.line, e.col, e.sp, format("{} expects {} argument(s), got {}", what, total, given))) }
+            return Err(terr_at(e.line, e.col, e.sp, format("{} expects {} to {} argument(s), got {}", what, total - optional, total, given)))
+        }
+        if given < total {
+            var ds: [Expr] = []
+            var i = skip + given
+            while i < sig.decl.params.len() {
+                match sig.decl.params[i].default { Some(d) => { ds.push(d) }, None => {} }
+                i += 1
+            }
+            self.call_defaults[e.id] = ds
+        }
+        return Ok(true)
+    }
+
+    // The defaults of `fd`'s parameters (D136): only trailing ones, each of
+    // its parameter's type, checked before any parameter is in scope (a
+    // default can't name one). A default whose parameter's type mentions a
+    // type parameter isn't supported: the caller, which evaluates it, has no
+    // binding for it.
+    fun check_defaults(var self, fd: FunData, sig: FuncSig) -> Result<bool, CheckErr> {
+        var seen = false
+        var i = 0
+        while i < fd.params.len() {
+            let p = fd.params[i]
+            match p.default {
+                Some(d) => {
+                    seen = true
+                    let pt = sig.params[i]
+                    if !has_error(pt) {
+                        if contains_type_param(pt) { return Err(terr_at(d.line, d.col, d.sp, format("parameter '{}' can't have a default: its type mentions a type parameter", p.name))) }
+                        let dt = self.expect_value(d, Some(pt))?
+                        if !type_eq(dt, pt) { return Err(terr_at(d.line, d.col, d.sp, format("the default of parameter '{}' is a '{}', but the parameter is a '{}'", p.name, type_name(dt), type_name(pt)))) }
+                    }
+                },
+                None => {
+                    if seen { return Err(terr_at(p.line, p.col, p.sp, format("parameter '{}' needs a default: the parameters after one with a default have one too", p.name))) }
+                },
+            }
+            i = i + 1
+        }
+        return Ok(true)
+    }
+
     #test(checker_on("fun f(n: int) -> int { return n * 2 }"), fun_of("fun f(n: int) -> int { return n * 2 }"))[Ok(0)]
     fun check_function(var self, fd: FunData) -> Result<int32, CheckErr> {
         let idx = self.func_idx(fd.name)
@@ -4651,6 +4721,7 @@ impl Checker {
         self.bounds_cur = sig.bounds
         self.frames = []
         self.push_scope()
+        self.check_defaults(fd, sig)?
         self.in_async = fd.is_async
         if fd.is_async { self.met_concurrency(fd.line, fd.col, fd.sp, self.cur_decl) }
         if self.is_actor(self.cur_key) { self.actor_self = self.cur_key } else { self.actor_self = "" }
@@ -5422,7 +5493,7 @@ impl Checker {
         }
     }
 
-    #test(checker_on("[int]"), Param { line: 3, col: 26, sp: SrcSpan { sline: 3, scol: 26, eline: 3, ecol: 30 }, name: "k", ty: Some(TypeExpr { id: 48, line: 3, col: 29, sp: SrcSpan { sline: 3, scol: 29, eline: 3, ecol: 30 }, kind: TypeKind.TRef("K", []) }) })[Ok(Type.TError)]
+    #test(checker_on("[int]"), Param { line: 3, col: 26, sp: SrcSpan { sline: 3, scol: 26, eline: 3, ecol: 30 }, name: "k", ty: Some(TypeExpr { id: 48, line: 3, col: 29, sp: SrcSpan { sline: 3, scol: 29, eline: 3, ecol: 30 }, kind: TypeKind.TRef("K", []) }), default: None })[Ok(Type.TError)]
     fun param_part(var self, p: Param) -> Result<Type, CheckErr> {
         return match self.param_type(p) {
             Ok(t) => Ok(t),
@@ -5480,6 +5551,8 @@ pub fun build_checker_decls(decls: [Decl], next_id: int32) -> Result<Checker, [C
     var c = new_checker(all)
     let r = c.run_all()
     match r { Ok(x) => {}, Err(e) => { return Err(e) } }
+    // every call with all its arguments, for whatever runs the program (D136)
+    c.fill_defaults()
     return Ok(c)
 }
 
@@ -5939,7 +6012,7 @@ impl Checker {
             self.mark_call(e, "function", name, sig_mutates(sig), "", sig.decl.is_async)
             return Ok(gr)
         }
-        if args.len() != sig.params.len() { return Err(terr_at(e.line, e.col, e.sp, format("function '{}' expects {} argument(s), got {}", name, sig.params.len(), args.len()))) }
+        self.call_arity(e, sig, 0, args.len(), format("function '{}'", name))?
         var i = 0
         while i < args.len() {
             if !has_error(sig.params[i]) {   // else the parameter's type failed (MYLA-110)
@@ -6099,7 +6172,7 @@ impl Checker {
 
     fun infer_generic_call(var self, e: Expr, name: str, sig: FuncSig, args: [Expr]) -> Result<Option<Type>, CheckErr> {
         if sig_has_error(sig.params, sig.ret) { return Err(poisoned()) }   // its type arguments can't be inferred (MYLA-110)
-        if args.len() != sig.params.len() { return Err(terr_at(e.line, e.col, e.sp, format("function '{}' expects {} argument(s), got {}", name, sig.params.len(), args.len()))) }
+        self.call_arity(e, sig, 0, args.len(), format("function '{}'", name))?
         var subst: [Subst] = []
         var arg_types: [Type] = []
         var i = 0
@@ -6181,8 +6254,7 @@ impl Checker {
                     let lv = self.check_lvalue(target)?
                     if !lv.mutable { return Err(with_notes(terr_at(e.line, e.col, e.sp, format("cannot call the mutating method '{}' on an immutable receiver (declare it with 'var')", field)), self.declared_at(target))) }
                 }
-                let nargs = sig.params.len() - 1
-                if args.len() != nargs { return Err(terr_at(e.line, e.col, e.sp, format("method '{}' expects {} argument(s), got {}", field, nargs, args.len()))) }
+                self.call_arity(e, sig, 1, args.len(), format("method '{}'", field))?
                 if sig.type_params.len() > 0 {
                     let gr = self.infer_generic_method(e, sig, field, recv_type, args)?
                     self.mark_call(e, "method", sig.name, recv == "var self", mkey, sig.decl.is_async)
@@ -7263,4 +7335,165 @@ fun child_reaches_self(e: Expr) -> CheckErr {
 #test("__task_cancelled")[true]
 fun starts_with_dunder(name: str) -> bool {
     return name.len() >= 2 && name[0] == '_' && name[1] == '_'
+}
+
+// =========================================================================
+// Default arguments (D136, MYLA-255): filled in once the program is checked
+// =========================================================================
+//
+// The checker records, for each call that leaves trailing parameters out,
+// the defaults of those parameters (`call_defaults`, keyed by the call's node
+// id). `fill_defaults` rewrites every function and method body and every
+// constant, so that call carries them as arguments of its own: the
+// interpreter, the lowering and everything after them see each call with all
+// its arguments. The rebuilt nodes keep their ids, so the side tables (types,
+// the calls' targets) still apply; a default's nodes are shared by the calls
+// it fills, as they have one type.
+
+impl Checker {
+    // Every recorded call given its defaults, in the declarations, the
+    // functions' and methods' signatures and the method bodies the checker
+    // keeps apart.
+    fun fill_defaults(var self) {
+        if self.call_defaults.len() == 0 { return }
+        let t = self.call_defaults
+        var ds: [Decl] = []
+        for d in self.decls { ds.push(fd_decl(d, t)) }
+        self.decls = ds
+        var i = 0
+        while i < self.functions.len() {
+            var f = self.functions[i]
+            f.decl = fd_fun(f.decl, t)
+            self.functions[i] = f
+            i += 1
+        }
+        i = 0
+        while i < self.method_decls.len() {
+            self.method_decls[i] = fd_fun(self.method_decls[i], t)
+            i += 1
+        }
+    }
+}
+
+fun fd_decl(d: Decl, t: [int32: [Expr]]) -> Decl {
+    let k = match d.kind {
+        DeclKind.FunDecl(f) => DeclKind.FunDecl(fd_fun(f, t)),
+        DeclKind.ImplDecl(target, ms, tps, tr, targs) => DeclKind.ImplDecl(target, fd_funs(ms, t), tps, tr, targs),
+        DeclKind.TraitDecl(n, ms, tps, p) => DeclKind.TraitDecl(n, fd_funs(ms, t), tps, p),
+        DeclKind.ConstDecl(n, te, e, attrs, p) => DeclKind.ConstDecl(n, te, fd_expr(e, t), attrs, p),
+        _ => d.kind,
+    }
+    return Decl { id: d.id, line: d.line, col: d.col, sp: d.sp, kind: k }
+}
+
+fun fd_funs(ms: [FunData], t: [int32: [Expr]]) -> [FunData] {
+    var out: [FunData] = []
+    for m in ms { out.push(fd_fun(m, t)) }
+    return out
+}
+
+fun fd_fun(f: FunData, t: [int32: [Expr]]) -> FunData {
+    var g = f
+    g.body = match f.body { Some(b) => Some(fd_block(b, t)), None => None }
+    return g
+}
+
+fun fd_block(b: Block, t: [int32: [Expr]]) -> Block {
+    var ss: [Stmt] = []
+    for s in b.stmts { ss.push(fd_stmt(s, t)) }
+    return Block { line: b.line, col: b.col, sp: b.sp, stmts: ss }
+}
+
+fun fd_stmt(s: Stmt, t: [int32: [Expr]]) -> Stmt {
+    let k = match s.kind {
+        StmtKind.VarDecl(kind, name, te, init) => StmtKind.VarDecl(kind, name, te, fd_expr(init, t)),
+        StmtKind.DestructDecl(kind, b, te, init) => StmtKind.DestructDecl(kind, b, te, fd_expr(init, t)),
+        StmtKind.Assign(place, value) => StmtKind.Assign(fd_expr(place, t), fd_expr(value, t)),
+        StmtKind.IfS(c, then, el) => StmtKind.IfS(fd_expr(c, t), fd_block(then, t), fd_else(el, t)),
+        StmtKind.WhileS(c, body) => StmtKind.WhileS(fd_expr(c, t), fd_block(body, t)),
+        StmtKind.ForS(v, start, end, body, iter) => StmtKind.ForS(v, fd_opt(start, t), fd_opt(end, t), fd_block(body, t), fd_opt(iter, t)),
+        StmtKind.ReturnS(v, tail) => StmtKind.ReturnS(fd_opt(v, t), tail),
+        StmtKind.ExprStmt(e) => StmtKind.ExprStmt(fd_expr(e, t)),
+        _ => s.kind,
+    }
+    return Stmt { id: s.id, line: s.line, col: s.col, sp: s.sp, kind: k }
+}
+
+fun fd_else(el: Option<ElseTail>, t: [int32: [Expr]]) -> Option<ElseTail> {
+    return match el {
+        Some(ElseTail.ElseBlock(b)) => Some(ElseTail.ElseBlock(fd_block(b, t))),
+        Some(ElseTail.ElseIf(s)) => Some(ElseTail.ElseIf(fd_stmt(s, t))),
+        None => None,
+    }
+}
+
+fun fd_opt(e: Option<Expr>, t: [int32: [Expr]]) -> Option<Expr> {
+    return match e { Some(x) => Some(fd_expr(x, t)), None => None }
+}
+
+fun fd_exprs(es: [Expr], t: [int32: [Expr]]) -> [Expr] {
+    var out: [Expr] = []
+    for e in es { out.push(fd_expr(e, t)) }
+    return out
+}
+
+fun fd_body(b: ExprOrBlock, t: [int32: [Expr]]) -> ExprOrBlock {
+    return match b {
+        ExprOrBlock.EB_Expr(x) => ExprOrBlock.EB_Expr(fd_expr(x, t)),
+        ExprOrBlock.EB_Block(bl) => ExprOrBlock.EB_Block(fd_block(bl, t)),
+    }
+}
+
+fun fd_expr(e: Expr, t: [int32: [Expr]]) -> Expr {
+    let k = match e.kind {
+        ExprKind.Unary(op, a) => ExprKind.Unary(op, fd_expr(a, t)),
+        ExprKind.Binary(op, a, b) => ExprKind.Binary(op, fd_expr(a, t), fd_expr(b, t)),
+        ExprKind.Call(c, args) => {
+            var all = fd_exprs(args, t)
+            // the defaults this call leaves to its trailing parameters, which
+            // may themselves call something with defaults
+            if t.contains(e.id) {
+                for d in t[e.id] { all.push(fd_expr(d, t)) }
+            }
+            ExprKind.Call(fd_expr(c, t), all)
+        },
+        ExprKind.GetField(a, f) => ExprKind.GetField(fd_expr(a, t), f),
+        ExprKind.StructLit(n, fs) => {
+            var fs2: [FieldInit] = []
+            for f in fs { fs2.push(FieldInit { line: f.line, col: f.col, sp: f.sp, name: f.name, value: fd_expr(f.value, t) }) }
+            ExprKind.StructLit(n, fs2)
+        },
+        ExprKind.TupleLit(es) => ExprKind.TupleLit(fd_exprs(es, t)),
+        ExprKind.TupleIndex(a, i) => ExprKind.TupleIndex(fd_expr(a, t), i),
+        ExprKind.ListLit(es) => ExprKind.ListLit(fd_exprs(es, t)),
+        ExprKind.MapLit(ms) => {
+            var ms2: [MapEntry] = []
+            for m in ms { ms2.push(MapEntry { key: fd_expr(m.key, t), value: fd_expr(m.value, t) }) }
+            ExprKind.MapLit(ms2)
+        },
+        ExprKind.Index(a, i) => ExprKind.Index(fd_expr(a, t), fd_expr(i, t)),
+        ExprKind.MatchE(s, arms) => {
+            var arms2: [MatchArm] = []
+            for a in arms { arms2.push(MatchArm { line: a.line, col: a.col, sp: a.sp, pattern: a.pattern, guard: fd_opt(a.guard, t), body: fd_body(a.body, t) }) }
+            ExprKind.MatchE(fd_expr(s, t), arms2)
+        },
+        ExprKind.Try(a) => ExprKind.Try(fd_expr(a, t)),
+        ExprKind.Cast(a, te) => ExprKind.Cast(fd_expr(a, t), te),
+        ExprKind.Lambda(ps, rt, body, asy) => ExprKind.Lambda(ps, rt, fd_body(body, t), asy),
+        ExprKind.Await(a) => ExprKind.Await(fd_expr(a, t)),
+        _ => e.kind,
+    }
+    return Expr { id: e.id, line: e.line, col: e.col, sp: e.sp, kind: k }
+}
+
+// How many of `ps`, from the last, have a default (D136).
+#test([])[0]
+fun trailing_defaults(ps: [Param]) -> int32 {
+    var n = 0
+    var i = ps.len() - 1
+    while i >= 0 {
+        match ps[i].default { Some(d) => { n += 1 }, None => { return n } }
+        i -= 1
+    }
+    return n
 }

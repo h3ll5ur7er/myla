@@ -838,9 +838,13 @@ impl Renamer {
     #test(Renamer { env: ["main": "main"], aliases: [:], exports: ["": [:]], vals: [], tys: ["Self"], path: "examples/hello.my", err: None }, [])[[]]
     #test(Renamer { env: ["main": "main"], aliases: [:], exports: ["": [:]], vals: [], tys: ["Self"], path: "examples/loops.my", err: None }, [])[[]]
     #test(Renamer { env: ["main": "main"], aliases: [:], exports: ["": [:]], vals: [], tys: ["Self"], path: "examples/variables.my", err: None }, [])[[]]
-    fun params(self, ps: [Param]) -> [Param] {
+    fun params(var self, ps: [Param]) -> [Param] {
         var out: [Param] = []
-        for p in ps { out.push(Param { line: p.line, col: p.col, sp: p.sp, name: p.name, ty: self.opt_ty(p.ty) }) }
+        for p in ps {
+            // a default's names are its declaration's module's (D136)
+            let d: Option<Expr> = match p.default { Some(x) => Some(self.expr(x)), None => None }
+            out.push(Param { line: p.line, col: p.col, sp: p.sp, name: p.name, ty: self.opt_ty(p.ty), default: d })
+        }
         return out
     }
 
@@ -1057,7 +1061,7 @@ impl Renamer {
                 let saved = self.vals
                 var ps2: [Param] = []
                 for p in ps {
-                    ps2.push(Param { line: p.line, col: p.col, sp: p.sp, name: p.name, ty: self.opt_ty(p.ty) })
+                    ps2.push(Param { line: p.line, col: p.col, sp: p.sp, name: p.name, ty: self.opt_ty(p.ty), default: None })
                     self.vals.push(p.name)
                 }
                 let rt2 = self.opt_ty(rt)

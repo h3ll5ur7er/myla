@@ -34,7 +34,8 @@ pub struct Expr { id: int32, line: int32, col: int32, sp: SrcSpan, kind: ExprKin
 
 pub struct FieldInit { line: int32, col: int32, sp: SrcSpan, name: str, value: Expr }
 pub struct MapEntry { key: Expr, value: Expr }
-pub struct Param { line: int32, col: int32, sp: SrcSpan, name: str, ty: Option<TypeExpr> }
+// `default`: the value a call that leaves the parameter out gets (D136)
+pub struct Param { line: int32, col: int32, sp: SrcSpan, name: str, ty: Option<TypeExpr>, default: Option<Expr> }
 
 pub enum ExprOrBlock {
     EB_Expr(Expr),

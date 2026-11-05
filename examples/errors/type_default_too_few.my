@@ -1,0 +1,10 @@
+//~ type error: function 'f' expects 1 to 2 argument(s), got 0
+//~ span: f()
+// A call may leave out the parameters with defaults, not the others (D136).
+fun f(a: int, b: int = 2) -> int {
+    return a + b
+}
+
+fun main() {
+    print(f())
+}

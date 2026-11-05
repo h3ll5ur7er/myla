@@ -754,7 +754,10 @@ impl Parser {
                 let pname = self.expect(TokenKind.IDENT, "parameter name")
                 self.expect(TokenKind.COLON, "':'")
                 let ptype = self.parse_type()
-                params.push(Param { line: pname.line, col: pname.column, sp: self.span_from(pname.line, pname.column), name: pname.lexeme, ty: Some(ptype) })
+                // `= value`: a default, for a call that leaves the parameter out (D136)
+                var dflt: Option<Expr> = None
+                if self.match1(TokenKind.ASSIGN) { dflt = Some(self.expression()) }
+                params.push(Param { line: pname.line, col: pname.column, sp: self.span_from(pname.line, pname.column), name: pname.lexeme, ty: Some(ptype), default: dflt })
                 if !self.match1(TokenKind.COMMA) || self.check(TokenKind.RPAREN) {
                     break
                 }
@@ -894,7 +897,10 @@ impl Parser {
             let pname = self.expect(TokenKind.IDENT, "parameter name")
             self.expect(TokenKind.COLON, "':'")
             let ptype = self.parse_type()
-            params.push(Param { line: pname.line, col: pname.column, sp: self.span_from(pname.line, pname.column), name: pname.lexeme, ty: Some(ptype) })
+            // `= value`: a default, for a call that leaves the parameter out (D136)
+            var dflt: Option<Expr> = None
+            if self.match1(TokenKind.ASSIGN) { dflt = Some(self.expression()) }
+            params.push(Param { line: pname.line, col: pname.column, sp: self.span_from(pname.line, pname.column), name: pname.lexeme, ty: Some(ptype), default: dflt })
         }
         self.expect(TokenKind.RPAREN, "')'")
         var ret: Option<TypeExpr> = None
@@ -2199,7 +2205,7 @@ impl Parser {
         return false
     }
 
-    #test(parser_on("a.b[0]"))[Expr { id: 2, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 7 }, kind: ExprKind.Lambda([Param { line: 1, col: 2, sp: SrcSpan { sline: 1, scol: 2, eline: 1, ecol: 7 }, name: ".", ty: None }], None, ExprOrBlock.EB_Expr(Expr { id: 1, line: 1, col: 7, sp: SrcSpan { sline: 1, scol: 7, eline: 1, ecol: 7 }, kind: ExprKind.Hole }), false) }]
+    #test(parser_on("a.b[0]"))[Expr { id: 2, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 7 }, kind: ExprKind.Lambda([Param { line: 1, col: 2, sp: SrcSpan { sline: 1, scol: 2, eline: 1, ecol: 7 }, name: ".", ty: None, default: None }], None, ExprOrBlock.EB_Expr(Expr { id: 1, line: 1, col: 7, sp: SrcSpan { sline: 1, scol: 7, eline: 1, ecol: 7 }, kind: ExprKind.Hole }), false) }]
     fun lambda_expr(var self) -> Expr {
         let lp = self.advance()
         var params: [Param] = []
@@ -2210,7 +2216,7 @@ impl Parser {
                 if self.match1(TokenKind.COLON) {
                     pty = Some(self.parse_type())
                 }
-                params.push(Param { line: pname.line, col: pname.column, sp: self.span_from(pname.line, pname.column), name: pname.lexeme, ty: pty })
+                params.push(Param { line: pname.line, col: pname.column, sp: self.span_from(pname.line, pname.column), name: pname.lexeme, ty: pty, default: None })
                 if !self.match1(TokenKind.COMMA) || self.check(TokenKind.RPAREN) {
                     break
                 }

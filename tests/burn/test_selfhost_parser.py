@@ -131,7 +131,8 @@ SYNTAX_ERRORS = {
     "declarations_without_separator": "const A: int = 1 const B: int = 2\n",
     # `>=` closing type arguments is split into `>` and `=` (MYLA-15)
     "split_ge_then_missing_value": "fun main() {\n    let x: Option<int>=\n}\n",
-    "split_ge_in_a_parameter": "fun f(x: Option<int>= 1) {}\n",
+    # (`fun f(x: Option<int>= 1)` was one; since D136 the `=` is a default:
+    # test_default_params)
     # several errors: the parser resumes at the next statement, member or
     # declaration (MYLA-65, D80)
     "several_statements": "fun main() {\n    let = 1\n    let y = 2\n    y = = 3\n}\nfun g() {\n    print(1 +)\n}\n",
