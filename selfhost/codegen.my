@@ -4375,14 +4375,14 @@ pub fun is_tfloat32(t: Type) -> bool {
 
 // The runtime-error entries and their messages (MYLA-17), as in the Python
 // backend (`_TRAPS`). `__panic` prints them after `runtime error: `.
-#test()[["__trap_index", "__trap_key", "__trap_pop", "__trap_div", "__trap_mod", "__trap_match", "__trap_oom", "__trap_char"]]
+#test()[["__trap_index", "__trap_key", "__trap_pop", "__trap_div", "__trap_mod", "__trap_match", "__trap_oom", "__trap_char", "__trap_step", "__trap_boundary"]]
 pub fun trap_labels() -> [str] {
-    return ["__trap_index", "__trap_key", "__trap_pop", "__trap_div", "__trap_mod", "__trap_match", "__trap_oom", "__trap_char"]
+    return ["__trap_index", "__trap_key", "__trap_pop", "__trap_div", "__trap_mod", "__trap_match", "__trap_oom", "__trap_char", "__trap_step", "__trap_boundary"]
 }
 
-#test()[["index out of bounds", "map key not found", "pop from an empty list", "division by zero", "modulo by zero", "no match arm matched", "out of memory", "invalid char"]]
+#test()[["index out of bounds", "map key not found", "pop from an empty list", "division by zero", "modulo by zero", "no match arm matched", "out of memory", "invalid char", "slice step is zero", "a slice bound inside a character"]]
 fun trap_messages() -> [str] {
-    return ["index out of bounds", "map key not found", "pop from an empty list", "division by zero", "modulo by zero", "no match arm matched", "out of memory", "invalid char"]
+    return ["index out of bounds", "map key not found", "pop from an empty list", "division by zero", "modulo by zero", "no match arm matched", "out of memory", "invalid char", "slice step is zero", "a slice bound inside a character"]
 }
 
 // The DW_ATE encoding of a scalar type (MYLA-66).

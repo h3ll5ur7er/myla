@@ -35,6 +35,35 @@ fun main() {
 | `push(xs, v)`, `pop(xs)` | Built-in functions (not methods); need a `var` place; `pop` returns the last element, and popping an empty list is a runtime error |
 | `for x in xs` | Visits a snapshot of the elements |
 
+## Slices and indexes from the end
+
+`^n` counts from the end, in an index and in a slice's bounds: `xs[^1]` is the last element (D142, [[MYLA-280]]). A slice `xs[a:b]` is a new list of the elements from `a` up to, not including, `b`; `xs[a:]`, `xs[:b]` and `xs[:]` leave a bound out, and `xs[a:b:step]` takes every `step`-th, backwards for a negative step.
+
+```myla
+fun main() {
+    let xs = [10, 20, 30, 40, 50]
+    print(xs[^1])
+    print(xs[1:^1].len())
+    print(xs[::-1][0])
+    print(xs[2:99].len())
+    let s = "hello, world"
+    print(s[7:])
+    print(s[::-1])
+}
+// output:
+// 50
+// 3
+// 50
+// 3
+// world
+// dlrow ,olleh
+```
+
+- A slice's bounds are clamped to the list, so a slice never fails: `xs[2:99]` is the rest, `xs[5:2]` is empty, and a plain negative bound is before the start (only `^` counts from the end). A single index out of range is still an error, `xs[^0]` and `xs[^6]` of five elements too (D143).
+- The step is a signed integer, not 0 (`slice step is zero` when the program runs). With a negative step the bounds left out are the end and the start, as in Python: `xs[^1:0:-2]` is `[50, 30]`.
+- A `str` is sliced by bytes, as `s[i]` and `len(s)` count them: a slice whose bound falls inside a character is a runtime error (`a slice bound inside a character`), and with a step other than 1 every byte taken must be a whole character (ASCII).
+- `xs[^1] = v` assigns as any index does; a slice is a value to read: assigning to one (`xs[1:3] = ys`) isn't part of the language yet. Maps have no slices.
+
 ## Maps
 
 ```myla

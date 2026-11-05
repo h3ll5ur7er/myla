@@ -1,0 +1,118 @@
+// std.slice: what a slice takes (D142, D143, MYLA-280).
+//
+// `xs[a:b:step]` takes the elements from `a` up to (not including) `b`,
+// `step` apart; a bound may count from the end (`^n` is `len - n`), and a
+// bound left out is the end the step starts or stops at. The bounds are
+// clamped to the list, so a slice never fails (a plain negative bound is
+// before the start, not a count from the end). A negative step goes
+// backwards, as in Python. The interpreter and the code generator both take
+// their indices from `range_of`, so every runner takes the same elements; a
+// step of 0 and a `str` bound inside a character are checked by the caller,
+// which reports them where the slice stands.
+
+// The indices a slice takes: `count` of them, from `first`, `step` apart.
+pub struct Range { first: int64, step: int64, count: int64 }
+
+fun clamp(x: int64, lo: int64, hi: int64) -> int64 {
+    if x < lo { return lo }
+    if x > hi { return hi }
+    return x
+}
+
+// A bound's place: `b`, or `n - b` counted from the end.
+fun place(n: int64, b: int64, from_end: bool) -> int64 {
+    if from_end { return n - b }
+    return b
+}
+
+// The indices of a slice of something `n` long; `has_start`, `has_stop`:
+// whether those bounds were given, `start_end`, `stop_end`: whether they
+// count from the end; `step` not 0.
+#test(5, 1, true, false, 3, true, false, 1)[Range { first: 1, step: 1, count: 2 }]
+#test(5, 0, false, false, 0, false, false, -1)[Range { first: 4, step: -1, count: 5 }]
+#test(5, 1, true, true, 0, true, false, -2)[Range { first: 4, step: -2, count: 2 }]
+#test(5, 2, true, false, 99, true, false, 1)[Range { first: 2, step: 1, count: 3 }]
+#test(5, 5, true, false, 2, true, false, 1)[Range { first: 5, step: 1, count: 0 }]
+#test(5, -3, true, false, 2, true, false, 1)[Range { first: 0, step: 1, count: 2 }]
+#test(5, 0, false, false, 0, false, false, 2)[Range { first: 0, step: 2, count: 3 }]
+pub fun range_of(n: int64, start: int64, has_start: bool, start_end: bool, stop: int64, has_stop: bool, stop_end: bool, step: int64) -> Range {
+    if step > 0 {
+        var lo: int64 = 0
+        if has_start { lo = clamp(place(n, start, start_end), 0, n) }
+        var hi = n
+        if has_stop { hi = clamp(place(n, stop, stop_end), 0, n) }
+        var count: int64 = 0
+        if hi > lo { count = (hi - lo + step - 1) / step }
+        return Range { first: lo, step: step, count: count }
+    }
+    var lo = n - 1
+    if has_start { lo = clamp(place(n, start, start_end), -1, n - 1) }
+    var hi: int64 = -1
+    if has_stop { hi = clamp(place(n, stop, stop_end), -1, n - 1) }
+    var count: int64 = 0
+    if lo > hi { count = (lo - hi - step - 1) / (-step) }
+    return Range { first: lo, step: step, count: count }
+}
+
+// The elements of `xs` a slice takes (what native code calls).
+pub fun take<T>(xs: [T], start: int64, has_start: bool, start_end: bool, stop: int64, has_stop: bool, stop_end: bool, step: int64) -> [T] {
+    let r = range_of(xs.len() as int64, start, has_start, start_end, stop, has_stop, stop_end, step)
+    var out: [T] = []
+    var i = r.first
+    var k: int64 = 0
+    while k < r.count {
+        out.push(xs[i])
+        i += r.step
+        k += 1
+    }
+    return out
+}
+
+// Whether the byte at `i` of `s` starts a character (or is its end).
+fun starts_char(s: str, i: int64) -> bool {
+    if i < 0 || i >= s.len() as int64 { return true }
+    return (s[i] & 0xC0) != 0x80
+}
+
+// Whether a slice of `s` takes whole characters (D143): with a step of 1 its
+// two ends lie between characters; with any other it takes single bytes,
+// which must each be a character (ASCII).
+#test("größe", 0, true, false, 2, true, false, 1)[true]
+#test("größe", 0, true, false, 3, true, false, 1)[false]
+#test("aö", 0, false, false, 0, false, false, -1)[false]
+#test("abc", 0, false, false, 0, false, false, -1)[true]
+pub fun str_whole(s: str, start: int64, has_start: bool, start_end: bool, stop: int64, has_stop: bool, stop_end: bool, step: int64) -> bool {
+    let r = range_of(s.len() as int64, start, has_start, start_end, stop, has_stop, stop_end, step)
+    if r.count == 0 { return true }
+    if r.step == 1 { return starts_char(s, r.first) && starts_char(s, r.first + r.count) }
+    var i = r.first
+    var k: int64 = 0
+    while k < r.count {
+        if s[i] >= 0x80 { return false }
+        i += r.step
+        k += 1
+    }
+    return true
+}
+
+// The bytes of `s` a slice takes (what native code calls, once `str_whole`
+// said yes).
+#test("hello, world", 7, true, false, 0, false, false, 1)["world"]
+#test("hello, world", 0, false, false, 0, false, false, -1)["dlrow ,olleh"]
+#test("größe", 4, true, false, 0, false, false, 1)["ße"]
+pub fun take_str(s: str, start: int64, has_start: bool, start_end: bool, stop: int64, has_stop: bool, stop_end: bool, step: int64) -> str {
+    let r = range_of(s.len() as int64, start, has_start, start_end, stop, has_stop, stop_end, step)
+    var sb = StringBuilder()
+    if r.step == 1 {
+        if r.count > 0 { sb.append(s, r.first as int32, (r.first + r.count) as int32) }
+        return sb.build()
+    }
+    var i = r.first
+    var k: int64 = 0
+    while k < r.count {
+        sb.append_byte(s[i])
+        i += r.step
+        k += 1
+    }
+    return sb.build()
+}

@@ -18,7 +18,7 @@ import unittest
 
 from ._native import CAN_BUILD_NATIVE, SKIP_REASON
 from ._tools import STDLIB_ROOT, native_compiler
-from . import test_builtin_impls, test_defer, test_format_specs, test_register_args, test_time, test_unit_type
+from . import test_builtin_impls, test_defer, test_format_specs, test_register_args, test_slices, test_time, test_unit_type
 
 _REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir))
 
@@ -244,6 +244,8 @@ PROGRAMS["format_specs"] = test_format_specs.PROGRAM
 PROGRAMS["become_params"] = test_register_args.BECOME_PARAMS
 # impl blocks on lists, maps, char and float64 (MYLA-221)
 PROGRAMS["builtin_impls"] = test_builtin_impls.PROGRAM
+# slices and ^ from the end (D142, D143)
+PROGRAMS["slices"] = test_slices.PROGRAM
 # `defer` (D135): every way a scope ends, in plain and async functions
 PROGRAMS["defer"] = test_defer.PROGRAM
 

@@ -2,7 +2,7 @@
 id: MYLA-280
 title: "Slices and indexes from the end: `xs[a:b:step]`, `xs[-1]` or `xs[^1]`"
 type: feature
-status: todo
+status: review
 priority: medium
 labels: [language, collections, design]
 ---
@@ -34,9 +34,9 @@ print(xs[::-1])    // [50, 40, 30, 20, 10]
 Then:
 - [x] The decision for indexes from the end and the step (D142)
 - [x] The other three questions (D143): bounds clamped, `str` sliced by bytes with an error off a character's boundary, no assignment to a slice yet
-- [ ] Parser and grammar (`[a:b:step]` inside an index, kept apart from a map literal), checker, interpreter, `std.rt`'s slice routine, the bounds checks for `^`
-- [ ] [[Language/Collections-and-strings]], [[Language/Expressions-and-operators]]
-- [ ] Tests: parity programs on every target, the error corpus
+- [x] Parser and grammar (`[a:b:step]` inside an index, kept apart from a map literal), checker, interpreter, `std.rt`'s slice routine, the bounds checks for `^`
+- [x] [[Language/Collections-and-strings]], [[Language/Expressions-and-operators]]
+- [x] Tests: parity programs on every target, the error corpus
 
 ## Decided (2026-11-05): D142
 
@@ -55,3 +55,11 @@ print(xs[::2])      // [10, 30, 50]
 ## Decided (2026-11-05): D143
 
 The owner chose the recommendations of the three other rows: bounds clamped (`xs[2:99]` is the rest, `xs[5:2]` empty), a `str` sliced by bytes with a runtime error off a character's boundary, no assignment to a slice yet.
+
+## Built (2026-11-05)
+
+- **Syntax:** the parser writes `xs[^n]` as `Index(xs, Unary("^", n))` and a slice as `Index(xs, Binary(":", start, stop))` (with the step, `Binary(":", that, step)`), a bound left out a `Hole`: every walker over expressions already goes into them, so captures, renaming, `await` and the analyses need nothing new. `^` anywhere else is a parse error.
+- **Checker:** a slice is the same kind of list or string, its bounds and step integers (the step without `^`); a map has none; `xs[^1] = v` assigns, a slice can't be assigned to.
+- **std.slice** (new, Myla): `range_of` gives the indices (the bounds clamped, a negative step backwards); `take<T>`, `take_str` and `str_whole` are what native code calls. The interpreter takes its indices from `range_of` too.
+- **Lowering:** `^n` is the cell's length less `n`, then the usual bounds check; a slice calls `take` (an instance per element type) or `str_whole` and `take_str`, with two new runtime errors checked where the slice stands, `slice step is zero` and `a slice bound inside a character`, on every target.
+- [[tests/burn/test_slices.py]]: every form against the interpreter and native code, the same program on aarch64 and wasm32 (`PROGRAMS["slices"]`), the runtime errors in each runner at the slice's position, the type errors; `#test` cases in `std.slice`; the grammar's `index_part` and tree-sitter.
