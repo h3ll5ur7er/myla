@@ -2,7 +2,7 @@
 id: MYLA-267
 title: "The runtime's memory ordering on weakly ordered CPUs"
 type: chore
-status: backlog
+status: review
 priority: high
 labels: [concurrency, runtime, platforms]
 ---
@@ -18,7 +18,7 @@ aarch64 is weakly ordered. Its backend uses `ldaxr`/`stlxr` loops plus a `dmb is
 
 - [x] Each protocol's ordering requirement written down (which stores must be visible before which loads), and the IR's atomics specified to meet them ([[MYLA-264]]): [[Architecture/Native-backend]], "Memory ordering"
 - [x] The aarch64 sequences checked against those requirements; three gaps found and fixed (below)
-- [ ] The stress programs on arm64 hardware (a GitHub arm64 runner), on 1–16 workers, many runs each
+- [x] The stress programs on arm64 hardware (a GitHub arm64 runner), on 1–16 workers, many runs each
 
 ## Done (2026-11-05)
 
@@ -43,4 +43,6 @@ The arm64 hardware run is the CI job's.
 - **The cause:** the lowering's `wait_task` reads the child's `task` word itself before calling `__wait`, and when the child has ended it reads the result from the frame at once. That load was plain, so aarch64 could read the result before the word: a stale result, whose clone then followed a bad pointer. `task_wait` in std.rt had its acquire load since step two, but the compiler's inlined check didn't.
 - **The fix:** an acquire load (`__load_acq64`, `ldar`) in [[selfhost/lower.my]].
 
-The hardware run after the fix is CI's.
+**After the fix, on GitHub's arm64 runner** (CI run 42056099956, commit bf992b0):
+- every stress program passed 60 runs (20 on each of 1, 4 and 16 workers);
+- t18, t19, t20 and t21 each passed 100 runs on 4 workers, where t18 and t20 had crashed in 3 of 100 each.
