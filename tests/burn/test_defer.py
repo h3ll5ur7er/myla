@@ -124,9 +124,11 @@ fun nested() {
     print("nested body")
 }
 
+// (the children print nothing: on several workers they run in parallel,
+// and the order of their lines would be the timing's; test_one_worker
+// checks the order where it is defined)
 async fun child(n: int) -> int {
     await task.yield()
-    print(f"child {n} runs")
     return n * 2
 }
 
@@ -152,7 +154,6 @@ async fun ticks(n: int) -> int {
 
 async fun slow(n: int) -> int {
     await task.yield()
-    print(f"slow {n} ends")
     return n
 }
 
@@ -245,7 +246,6 @@ outer deferred
 k = 3
 inner deferred
 parent waits
-child 7 runs
 parent's deferred block, after its child
 14
 6
@@ -255,16 +255,61 @@ the lambda leaves
 the arm ends
 none
 inner deferred
-slow 1 ends
 outer deferred
 5
 """
+
+# On one worker the order of tasks is defined (D110): a scope's children end
+# before its deferred blocks run, scope by scope.
+ONE_WORKER = """import std.task as task
+
+async fun slow(n: int) -> int {
+    await task.yield()
+    print(f"slow {n} ends")
+    return n
+}
+
+async fun scopes(n: int) -> int {
+    defer {
+        print("outer deferred")
+    }
+    async let a = slow(1)
+    if n > 0 {
+        defer {
+            print("inner deferred")
+        }
+        return n
+    }
+    return await a
+}
+
+#main
+async fun main() {
+    print(await scopes(5))
+}
+"""
+
+ONE_WORKER_WANT = "inner deferred\nslow 1 ends\nouter deferred\n5\n"
 
 
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
 class Defer(unittest.TestCase):
     def test_in_the_interpreter_and_natively(self):
         self.assertEqual(run_source_both_now(PROGRAM), (WANT, "", 0))
+
+    def test_one_worker(self):
+        myla = selfhost_tool("main")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "one.my")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(ONE_WORKER)
+            exe = os.path.join(tmp, "one")
+            subprocess.run([myla, "build", path, "-o", exe, "--stdlib", STDLIB_ROOT], check=True)
+            env = dict(os.environ, MYLA_THREADS="1")
+            for argv in ([myla, "run", path, "--stdlib", STDLIB_ROOT], [exe]):
+                with self.subTest(argv=argv[1] if len(argv) > 1 else "native"):
+                    proc = subprocess.run(argv, capture_output=True, text=True, timeout=60, env=env)
+                    self.assertEqual((proc.stdout, proc.stderr, proc.returncode), (ONE_WORKER_WANT, "", 0))
 
     def test_not_on_a_failure(self):
         # a failure ends the program at once (D97): `exit`, a panic
