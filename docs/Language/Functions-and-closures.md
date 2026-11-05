@@ -18,7 +18,7 @@ fun main() {
 // 10
 ```
 
-- Parameter and result types are always written; a function without `-> T` returns nothing.
+- Parameter and result types are always written; a function without `-> T` returns the unit value `()`, the same as one declared `-> ()` (D140): its type is `(…) -> ()`, and `return ()` may end it.
 - Parameters are immutable inside the body, and arguments are passed by value.
 - Functions may be declared in any order and may recurse.
 - Calls must give exactly the declared number of arguments, each of the parameter's type.

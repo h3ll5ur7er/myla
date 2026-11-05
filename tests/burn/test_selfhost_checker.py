@@ -101,7 +101,7 @@ TYPE_ERRORS: dict[str, str] = {
     "assign_index_of_int": _main("var x = 1", "x[0] = 2"),
     "assign_list_index_str": _main("var xs = [1]", "xs[\"a\"] = 2"),
     "push_onto_call": _main("push(g(), 1)", before="fun g() -> [int] {\n    return [1]\n}\n"),
-    "no_value": _main("let x = print(1)"),
+    # (`let x = print(1)` was one; since D140 a call without a result is `()`)
     "placeholder_value": _main("let x = _"),
     "lambda_param_type": _main("let f = (x) => x"),
     "lambda_duplicate_param": _main("let f = (x: int, x: int) => x"),

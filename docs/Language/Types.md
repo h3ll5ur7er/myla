@@ -19,7 +19,7 @@ Every expression has a type known before the program runs. Types are resolved by
 
 There is no implicit conversion: `int32 + int64` is a type error, and so is `float32 + float64`. Literals are flexible (they adopt the type the context expects), and `x as T` converts explicitly ([[Language/Expressions-and-operators]]).
 
-There is no unit type and no `void`: a function without `-> T` returns nothing, and calling it is not an expression with a value.
+A function without `-> T` returns the unit value `()` (D140, see the unit type below): there is no separate `void`.
 
 ## Aliases
 
@@ -68,7 +68,7 @@ fun main() {
 - `==` is always `true` and `!=` always `false` (both sides still run), and a struct or enum with a `()` member can `#derive(Eq)`. There is no ordering, and `print` and f-strings don't take it.
 - It takes no memory: a list of units holds only its length, and a `Result<(), E>` is as large as its `Err`.
 - It is the 0-tuple: `type_name` writes it `()`, as the empty element list of a tuple.
-- A function without a result type still returns nothing, as before; it isn't a function returning `()`, so it can't `return ()` and its type can't be written as `() -> ()` (a function type ending in `-> ()` is that of a function that returns the unit value).
+- A function without a result type returns `()` (D140): `fun f()` and `fun f() -> ()` are the same, `return` and `return ()` too, and a call of it is the value `()` (`let u = log("hi")`, `Ok(log("hi"))`). Its type is written `(str) -> ()`.
 
 ## Structs and enums
 
@@ -83,7 +83,7 @@ Both are reference-counted, copy-on-write values: a copy is cheap, and writing t
 
 ## Function types
 
-`(int, str) -> bool`, `() -> int`. A function value is any top-level non-generic `fun`, a lambda, or a partial application; closures and plain functions share the type ([[Language/Functions-and-closures]]). A function type in source needs a result type: a function that returns nothing can be stored in a binding inferred from a lambda, but its type can't be written.
+`(int, str) -> bool`, `() -> int`. A function value is any top-level non-generic `fun`, a lambda, or a partial application; closures and plain functions share the type ([[Language/Functions-and-closures]]). A function type in source needs a result type; for a function without one it is `()`: `(str) -> ()` (D140).
 
 ## Option and Result
 

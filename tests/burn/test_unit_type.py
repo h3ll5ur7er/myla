@@ -98,8 +98,63 @@ async fun main() {
 WANT = ("true\nfalse\nok\nerr refused\n2\n-1\n3\n2\ntrue\nsome\n7\n7\ntrue\ntrue\ndone\n3\ntrue\nok\nerr refused\n")
 
 
+# D140: a function without a result type returns `()`
+VOID = """fun log(s: str) {
+    print(s)
+}
+
+fun shout(s: str) -> () {
+    print(s + "!")
+    return ()
+}
+
+fun twice(f: (str) -> (), s: str) {
+    f(s)
+    f(s)
+    return
+}
+
+fun wrap(ok: bool) -> Result<(), str> {
+    if !ok {
+        return Err("no")
+    }
+    return Ok(log("wrapped"))
+}
+
+fun pick(k: int) -> (str) -> () {
+    if k > 0 {
+        return log
+    }
+    return shout
+}
+
+fun main() {
+    let u = log("a")
+    print(u == ())
+    print(shout("b") == log("c"))
+    twice(log, "d")
+    twice(shout, "e")
+    let f: (str) -> () = (s: str) => print("[" + s + "]")
+    twice(f, "f")
+    pick(0)("g")
+    pick(1)("h")
+    match wrap(true) {
+        Ok(()) => print("ok")
+        Err(e) => print(e)
+    }
+    let xs: [()] = [log("i"), ()]
+    print(xs.len())
+}
+"""
+
+VOID_WANT = "a\ntrue\nb!\nc\ntrue\nd\nd\ne!\ne!\n[f]\n[f]\ng!\nh\nwrapped\nok\ni\n2\n"
+
+
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
 class UnitType(unittest.TestCase):
+    def test_a_function_without_a_result_returns_unit(self):
+        self.assertEqual(run_source_both_now(VOID), (VOID_WANT, "", 0))
+
     def test_in_the_interpreter_and_natively(self):
         self.assertEqual(run_source_both_now(PROGRAM), (WANT, "", 0))
 
@@ -119,7 +174,6 @@ class UnitType(unittest.TestCase):
         cases = {
             "not_a_number": ("fun main() {\n    let u = ()\n    print(u + 1)\n}\n", "type error"),
             "ordered": ("fun main() {\n    print(() < ())\n}\n", "comparison requires numeric or char operands"),
-            "a_value_is_needed": ("fun f() -> () {\n}\n\nfun main() {\n    f()\n}\n", "type error"),
             "not_an_int": ("fun main() {\n    let x: int = ()\n}\n", "type error"),
         }
         myla = selfhost_tool("main")

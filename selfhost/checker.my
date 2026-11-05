@@ -194,6 +194,21 @@ fun field_names(fields: [FieldT]) -> [str] {
     return out
 }
 
+// Whether `e` is a call (whose value, without a result, is `()`, D140).
+#test(expr_of("f(1)"))[true]
+#test(expr_of("x"))[false]
+fun is_call_expr(e: Expr) -> bool {
+    return match e.kind { ExprKind.Call(c, args) => true, _ => false }
+}
+
+// A function's result written as `t`: none for `()`, the same thing (D140).
+#test(Type.TTuple([]))[None]
+#test(Type.TBool)[Some(Type.TBool)]
+pub fun result_of(t: Type) -> Option<Type> {
+    if is_unit(t) { return None }
+    return Some(t)
+}
+
 // Whether `t` is the unit type `()`, the 0-tuple (D138).
 #test(Type.TTuple([]))[true]
 #test(Type.TTuple([Type.TBool]))[false]
@@ -1813,7 +1828,7 @@ impl Checker {
             TypeKind.TFn(params, ret, asy) => {
                 let ps = self.resolve_list(params, visiting)?
                 let rt = self.resolve(ret, visiting)?
-                Ok(func_type(ps, Some(rt), asy))
+                Ok(func_type(ps, result_of(rt), asy))
             },
             TypeKind.TRef(name, args) => self.resolve_ref(name, args, ln, cl, sp, visiting),
         }
@@ -2121,7 +2136,7 @@ impl Checker {
                     var ps: [Type] = []
                     for p in fd.params { ps.push(self.param_part(p)?) }
                     var rt: Option<Type> = None
-                    match fd.ret_type { Some(te) => { rt = Some(self.resolve_part(te)?) }, None => {} }
+                    match fd.ret_type { Some(te) => { rt = result_of(self.resolve_part(te)?) }, None => {} }
                     self.type_params = []
                     let idx = self.func_idx(fd.name)
                     self.functions[idx] = FuncSig { name: fd.name, params: ps, ret: rt, type_params: tp_names(fd.type_params), bounds: build_bounds(fd.type_params), decl: fd, has_decl: true, decl_id: decl.id }
@@ -2271,7 +2286,7 @@ impl Checker {
                         var params: [Type] = [Type.TSelf]
                         for p in m.params { params.push(self.param_part(p)?) }
                         var rt: Option<Type> = None
-                        match m.ret_type { Some(te) => { rt = Some(self.resolve_part(te)?) }, None => {} }
+                        match m.ret_type { Some(te) => { rt = result_of(self.resolve_part(te)?) }, None => {} }
                         self.allow_self = false
                         self.type_params = []
                         let recv = match m.receiver { Some(r) => r, None => "self" }
@@ -2512,7 +2527,7 @@ impl Checker {
         var params: [Type] = [self_t]
         for p in m.params { params.push(self.param_part(p)?) }
         var rt: Option<Type> = None
-        match m.ret_type { Some(te) => { rt = Some(self.resolve_part(te)?) }, None => {} }
+        match m.ret_type { Some(te) => { rt = result_of(self.resolve_part(te)?) }, None => {} }
         self.type_params = []
         // synthesize a self parameter so the body checker binds `self`
         var sparams: [Param] = [Param { line: m.line, col: m.col, sp: no_span(), name: "self", ty: Some(target_te), default: None }]
@@ -2733,7 +2748,12 @@ impl Checker {
     fun expect_value(var self, e: Expr, expected: Option<Type>) -> Result<Type, CheckErr> {
         return match self.infer(e, expected)? {
             Some(t) => Ok(t),
-            None => Err(terr_at(e.line, e.col, e.sp, "expression does not produce a value")),
+            None => {
+                // a call of a function without a result: the value `()` (D140)
+                if !is_call_expr(e) { return Err(terr_at(e.line, e.col, e.sp, "expression does not produce a value")) }
+                self.resolved[e.id] = Type.TTuple([])
+                Ok(Type.TTuple([]))
+            },
         }
     }
 
@@ -4192,7 +4212,10 @@ impl Checker {
                         // positioned at the `return`, where Python reports a mismatch
                         self.lambda_infer.push(MatchVal { ty: vt, node: Some(Expr { id: ve.id, line: s.line, col: s.col, sp: s.sp, kind: ve.kind }) })
                     } else {
-                        return Err(terr_at(s.line, s.col, s.sp, "cannot return a value from a function with no return type"))
+                        // `return ()`, or the call of another function without
+                        // a result: the same as `return` (D140)
+                        let vt = self.expect_value(ve, None)?
+                        if !is_unit(vt) { return Err(terr_at(s.line, s.col, s.sp, "cannot return a value from a function with no return type")) }
                     }
                 },
                 None => {},
@@ -6635,7 +6658,9 @@ fun strip_async(t: Type) -> Type {
 #test([Type.TStr], Some(Type.TStr), false)[Type.TFunc([Type.TStr], Some(Type.TStr))]
 #test([Type.TParam("T")], Some(Type.TParam("T")), false)[Type.TFunc([Type.TParam("T")], Some(Type.TParam("T")))]
 #test([Type.TInt(32, true), Type.TInt(32, true)], Some(Type.TInt(32, true)), false)[Type.TFunc([Type.TInt(32, true), Type.TInt(32, true)], Some(Type.TInt(32, true)))]
-fun func_type(ps: [Type], r: Option<Type>, asy: bool) -> Type {
+fun func_type(ps: [Type], r0: Option<Type>, asy: bool) -> Type {
+    // a result of `()` is no result (D140)
+    let r: Option<Type> = match r0 { Some(t) => result_of(t), None => None }
     if asy { return Type.TAsync(Type.TFunc(ps, r)) }
     return Type.TFunc(ps, r)
 }

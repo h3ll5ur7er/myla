@@ -323,6 +323,13 @@ fun is_scalar(t: Type) -> bool {
     }
 }
 
+// Whether `t` is no type (a function without a result).
+#test(None)[true]
+#test(Some(Type.TBool))[false]
+fun is_none_type(t: Option<Type>) -> bool {
+    return match t { Some(x) => false, None => true }
+}
+
 // Whether values of type `t` can be lowered: scalars, strings, lists, maps,
 // builders, function values, and structs, tuples and enums (recursive ones
 // too, whose members are boxed) of such values.
@@ -1035,6 +1042,20 @@ impl Lower {
             },
             StmtKind.Assign(target, value) => { self.assign(cg, target, value) },
             StmtKind.ReturnS(ov, tail) => {
+                // `return ()` (or another such call) in a function without a
+                // result: the value for its effects, then as `return` (D140)
+                var unit_ret = false
+                match ov {
+                    Some(e) => { unit_ret = !tail && is_none_type(self.f.ret) },
+                    None => {},
+                }
+                if unit_ret {
+                    match ov { Some(e) => { self.discard(cg, e) }, None => {} }
+                    self.drop_temps(0)
+                    self.drop_owners(0)
+                    self.exit_fn(-1, false)
+                    return
+                }
                 match ov {
                     Some(e) => { if tail { self.become_call(cg, e) } else { self.ret_value(cg, e) } },
                     None => {
@@ -2518,8 +2539,13 @@ impl Lower {
             },
             ExprKind.Call(callee, args) => {
                 let d = self.call(cg, e, callee, args, into)
-                if d < 0 { return self.unsupported("a call without a value used as one") }
-                return d
+                if d >= 0 { return d }
+                if !is_unit(t) { return self.unsupported("a call without a value used as one") }
+                // a function without a result gives `()` (D140): no bytes
+                let slot = self.build_slot(cg, "__tuple", t, into)
+                let base = self.slot_addr(slot)
+                self.built(slot, into, base)
+                return base
             },
             ExprKind.Binary(op, l, r) => {
                 let lt = cg.type_of(l.id)

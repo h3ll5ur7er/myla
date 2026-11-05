@@ -237,6 +237,7 @@ fun main() {
 
 # the unit type (D138): values without size in lists, maps, enums and tasks
 PROGRAMS["unit"] = test_unit_type.PROGRAM
+PROGRAMS["void_is_unit"] = test_unit_type.VOID
 # `defer` (D135): every way a scope ends, in plain and async functions
 PROGRAMS["defer"] = test_defer.PROGRAM
 
