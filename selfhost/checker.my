@@ -1583,6 +1583,13 @@ impl Checker {
             Type.TBool => Some("bool"),
             Type.TStr => Some("str"),
             Type.TSB => Some("StringBuilder"),
+            // the builtin kinds a program may give methods too (D103, MYLA-221):
+            // a list's or map's are keyed by its kind, as a generic struct's
+            // are by its name, with names no program can declare
+            Type.TChar => Some("char"),
+            Type.TFloat(w) => Some(format("float{}", w)),
+            Type.TList(e) => Some("__list"),
+            Type.TMap(k, v) => Some("__map"),
             _ => None,
         }
     }
@@ -2508,7 +2515,12 @@ impl Checker {
         }
         match key_opt {
             Some(k) => {
-                if tps.len() > 0 { return Err(terr_at(ln, cl, sp, "generic impls on built-in types are not supported yet (only concrete built-in receivers)")) }
+                // generic ones on lists and maps, their parameters bound by the
+                // receiver's type (MYLA-221)
+                let generic_ok = match target { Type.TList(e) => true, Type.TMap(kt, vt) => true, _ => false }
+                if tps.len() > 0 && !generic_ok { return Err(terr_at(ln, cl, sp, "generic impls on built-in types are only for lists and maps")) }
+                // a built-in value is one word, which a method changing it
+                // would have to give back to its caller's place (MYLA-221)
                 for m in methods { if match m.receiver { Some(r) => r == "var self", None => false } { return Err(terr_at(m.line, m.col, m.sp, "'var self' methods on built-in types are not supported yet; use a read-only 'self' receiver")) } }
             },
             None => { return Err(terr_at(ln, cl, sp, format("cannot 'impl' on type '{}': an impl takes structs, enums, and concrete scalar / str / StringBuilder receivers", type_name(target)))) },
@@ -6344,6 +6356,11 @@ impl Checker {
                     if !lv.mutable { return Err(with_notes(terr_at(e.line, e.col, e.sp, format("cannot call the mutating method '{}' on an immutable receiver (declare it with 'var')", field)), self.declared_at(target))) }
                 }
                 self.call_arity(e, sig, 1, args.len(), format("method '{}'", field))?
+                // a list's or map's methods are keyed by its kind: an `impl
+                // [int]`'s take only an `[int32]` (MYLA-221)
+                if (mkey == "__list" || mkey == "__map") && sig.type_params.len() == 0 && !type_eq(recv_type, sig.params[0]) {
+                    return Err(terr_at(e.line, e.col, e.sp, format("method '{}' is for '{}', not '{}'", field, type_name(sig.params[0]), type_name(recv_type))))
+                }
                 if sig.type_params.len() > 0 {
                     let gr = self.infer_generic_method(e, sig, field, recv_type, args)?
                     self.mark_call(e, "method", sig.name, recv == "var self", mkey, sig.decl.is_async)

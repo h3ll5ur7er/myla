@@ -56,7 +56,7 @@ There is no `f<int>(x)` call syntax: annotate the binding instead.
 - Generic functions can't be used as values or partially applied.
 - `#main`, `#test` and `#derive` can't be applied to generic declarations.
 - An `impl` on a generic type is either generic over all its parameters in order (`impl<T> Box<T>`) or not allowed (`impl Box<int>` is an error).
-- Generic `impl`s on built-in types aren't supported.
+- A generic `impl` on a built-in type is for lists and maps: `impl<T> [T] { fun second(self) -> T { … } }`, `impl<K, V> [K: V]`, their type parameters bound by the receiver's type ([[MYLA-221]]).
 
 ## How generics run
 

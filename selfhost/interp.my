@@ -470,6 +470,9 @@ impl Interp {
     fun type_name_of(self, te: TypeExpr) -> str {
         return match te.kind {
             TypeKind.TRef(name, args) => name,
+            // an impl on lists or maps (MYLA-221), keyed as the checker keys it
+            TypeKind.TList(e) => "__list",
+            TypeKind.TMap(k, v) => "__map",
             _ => "",
         }
     }
@@ -3597,6 +3600,9 @@ fun value_key(v: Value) -> str {
         Value.VSB(b) => "StringBuilder",
         Value.VChar(c) => "char",
         Value.VInt(i) => "int32",
+        Value.VFloat(f) => "float64",
+        Value.VList(xs) => "__list",
+        Value.VMap(ks, vs) => "__map",
         _ => "",
     }
 }
@@ -3613,6 +3619,11 @@ fun type_key_of(t: Type) -> str {
         Type.TBool => "bool",
         Type.TStr => "str",
         Type.TSB => "StringBuilder",
+        // as the checker keys them (MYLA-221)
+        Type.TChar => "char",
+        Type.TFloat(w) => format("float{}", w),
+        Type.TList(e) => "__list",
+        Type.TMap(k, v) => "__map",
         _ => "",
     }
 }

@@ -79,8 +79,9 @@ TYPE_ERRORS: dict[str, str] = {
     "derive_enum_payload": "#derive(Eq)\nenum E { A([int]) }\nfun main() {}\n",
     "generic_impl_order": ("struct P<A, B> { a: A, b: B }\nimpl<A, B> P<B, A> {\n    fun f(self) -> int {\n"
                            "        return 1\n    }\n}\nfun main() {}\n"),
-    "generic_impl_on_builtin": "impl<T> int {\n    fun f(self) -> int {\n        return 1\n    }\n}\nfun main() {}\n",
-    "impl_on_list": "impl [int] {\n    fun f(self) -> int {\n        return 1\n    }\n}\nfun main() {}\n",
+    # (`impl<T> int` and `impl [int]` were two; since MYLA-221 lists and maps
+    # take impls, generic ones too, and the message for `impl<T> int` says so:
+    # test_builtin_impls)
     "self_type_args": "trait T {\n    fun f(self) -> Self<int>\n}\nfun main() {}\n",
     "type_param_args": "fun f<T>(x: T<int>) {}\nfun main() {}\n",
     "not_generic": "struct S { a: int }\nfun f(x: S<int>) {}\nfun main() {}\n",
