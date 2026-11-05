@@ -57,4 +57,4 @@ Then the work:
   - **Test:** `nan_bits` in `test_aarch64`'s programs, which `test_wasm` uses too, checks that the aarch64 and wasm builds print what the x86-64 build prints. Before the change the first two lines differed (x86-64: `18444492273895866368 9221120237041090560 …` and `-1 1 …`; aarch64: the other way round). After it, all lines agree.
   - **`#test` cases** on `to_bits` and `copysign`.
   - **Cost:** none. A program of 3 million `sin`, `exp` and `ln` calls runs 2,289,132,366 instructions before and after (callgrind). A first version that canonicalised inside std.math too was 34% slower.
-- [ ] D133 on wasm32: plain counts for actor handles, no deep copies at task boundaries, measured
+- [x] D133 on wasm32: plain counts for actor handles (they already were: `__rc_inc_atomic` is a plain add there), no deep copies at task boundaries (`Deep` expands to nothing, `CloneDeep` to a retain, in `ownership.my`), measured: 0.42–0.55 s instead of 0.62–0.69 s for 6000 children each handed a 20000-element list and a 200-entry map ([[tests/burn/test_wasm.py]] `test_one_worker_makes_no_deep_copies`)

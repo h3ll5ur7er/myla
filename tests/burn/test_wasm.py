@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import glob
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -92,6 +93,31 @@ class WasmParity(unittest.TestCase):
             asm = subprocess.run([native_compiler(), path, STDLIB_ROOT, "--target", "wasm32-wasi"], capture_output=True,
                                  text=True, check=True, cwd=_REPO).stdout
             self.assertEqual(asm.count("myla_env"), 0)
+
+    def test_one_worker_makes_no_deep_copies(self):
+        # D133: with one worker nothing is shared between threads, so values
+        # crossing between tasks (arguments, captures, results) keep their
+        # counts: the program's own functions call no deep-copy routine
+        source = ("struct Job {\n    xs: [int],\n    tags: [str: int],\n}\n\n"
+                  "async fun work(j: Job) -> int {\n    return j.xs.len() + j.tags.len()\n}\n\n"
+                  "async fun names(n: int) -> [str] {\n    return [\"a\", f\"{n}\"]\n}\n\n"
+                  "#main\nasync fun main() {\n    let j = Job { xs: [1, 2, 3], tags: [\"a\": 1] }\n"
+                  "    async let a = work(j)\n    async let b = names(4)\n    let c = async () => j.xs.len()\n"
+                  "    async let d = c()\n    print(await a + (await b).len() + await d)\n}\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "tasks.my")
+            with open(path, "w") as fh:
+                fh.write(source)
+            self.same(path)
+            asm = subprocess.run([native_compiler(), path, STDLIB_ROOT, "--target", "wasm32-wasi"], capture_output=True,
+                                 text=True, check=True, cwd=_REPO).stdout
+        bodies = re.findall(r"^(myla_(?:main|work|names)[A-Za-z0-9_]*):\n(.*?)\n\tend_function", asm, re.M | re.S)
+        self.assertGreater(len(bodies), 3)
+        for name, body in bodies:
+            if name.endswith(("_env_deep", "_env_clone", "_env_drop")):
+                continue
+            with self.subTest(function=name):
+                self.assertEqual(re.findall(r"call \S*(?:deep|dclone)\S*", body), [])
 
     def test_examples(self):
         for path in sorted(glob.glob(os.path.join(_REPO, "examples", "*.my"))):

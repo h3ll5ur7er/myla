@@ -137,11 +137,20 @@ impl Plain {
                 self.wants.push(Want { kind: 3, t: t, clone: false })
                 self.insts.push(Inst.Rt(d, "__cow:" + cg.clone_call_name(t), [h]))
             },
+            // one worker (wasm32, D125 (4)) shares nothing between threads:
+            // a value crossing between tasks keeps its counts (D133)
             Inst.Deep(t, p) => {
+                if cg.wasm { return }
                 self.wants.push(Want { kind: 1, t: t, clone: false })
                 self.insts.push(Inst.Rt(-1, cg.deep_walk_label(t, false, false), [p]))
             },
             Inst.CloneDeep(t, p) => {
+                if cg.wasm {
+                    // a reference of its own instead of a copy
+                    let b = self.base_of(p)
+                    self.act(cg, b.0, b.1, t, true, false)
+                    return
+                }
                 self.wants.push(Want { kind: 1, t: t, clone: true })
                 self.insts.push(Inst.Rt(-1, cg.deep_walk_label(t, true, false), [p]))
             },

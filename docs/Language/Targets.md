@@ -45,4 +45,4 @@ A program learns that its target lacks something from an error: the cause `Unsup
 
 ## How each target is built
 
-An implementation may leave out what only parallel workers need when only one worker can exist: the deep copies at task boundaries and the atomic counts of actor handles (D133). Values are immutable, so the difference shows only in speed. The details of each target's code generation, runtime and platform layer are on [[Architecture/Native-backend]].
+An implementation may leave out what only parallel workers need when only one worker can exist: the deep copies at task boundaries and the atomic counts of actor handles (D133). Values are immutable, so the difference shows only in speed. wasm32 leaves out both: a value crossing between tasks keeps its counts (an argument of a child, a capture of an async lambda, a result), and an actor handle's count is a plain one. A program handing a 20000-element list and a 200-entry map to 6000 children ran in 0.42 to 0.55 s instead of 0.62 to 0.69 s under Node (2026-11-05). The details of each target's code generation, runtime and platform layer are on [[Architecture/Native-backend]].
