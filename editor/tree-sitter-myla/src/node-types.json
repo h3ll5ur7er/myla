@@ -2526,7 +2526,7 @@
     "named": true,
     "fields": {},
     "children": {
-      "multiple": false,
+      "multiple": true,
       "required": false,
       "types": [
         {
@@ -2559,6 +2559,10 @@
         },
         {
           "type": "float",
+          "named": true
+        },
+        {
+          "type": "format_spec",
           "named": true
         },
         {
@@ -2638,7 +2642,7 @@
     "fields": {},
     "children": {
       "multiple": true,
-      "required": false,
+      "required": true,
       "types": [
         {
           "type": "await_expression",
@@ -5463,6 +5467,10 @@
   {
     "type": "for",
     "named": false
+  },
+  {
+    "type": "format_spec",
+    "named": true
   },
   {
     "type": "from",

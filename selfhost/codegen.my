@@ -3575,7 +3575,9 @@ pub fun format_segments(s: str) -> [str] {
             continue }
             segs.push(cur)
             cur = ""
-            i = i + 2
+            // past the hole and its spec, if any (D139)
+            while i < n && s[i] != '}' { i = i + 1 }
+            i = i + 1
             continue
         }
         if c == '}' {

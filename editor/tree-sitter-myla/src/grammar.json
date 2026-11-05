@@ -118,6 +118,13 @@
         }
       }
     },
+    "format_spec": {
+      "type": "TOKEN",
+      "content": {
+        "type": "PATTERN",
+        "value": ":(?:(?:[^\"{}\\\\\\n]))*"
+      }
+    },
     "comment": {
       "type": "TOKEN",
       "content": {
@@ -5551,6 +5558,18 @@
         {
           "type": "SYMBOL",
           "name": "_expression"
+        },
+        {
+          "type": "CHOICE",
+          "members": [
+            {
+              "type": "SYMBOL",
+              "name": "format_spec"
+            },
+            {
+              "type": "BLANK"
+            }
+          ]
         },
         {
           "type": "STRING",

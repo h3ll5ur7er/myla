@@ -11,7 +11,8 @@ from .ast import Expr, ExprKind, Stmt, StmtKind, Block, Decl, DeclKind, FunData,
 from .tokens import SrcSpan, no_span
 from .checker import Checker, Type, is_raw_memory_primitive, checker_on, builtin_method, builtin_method_name
 from .anf import Norm, new_norm, stmt_suspends, body_suspends
-from .util import cp_utf8
+from .util import cp_utf8, format_specs
+from std.fmt import fmt_int, fmt_float, fmt_text
 from std.num import f64_literal_bits, f32_round_bits, float_from_bits, pow2, format_float
 from std.io import write
 from std.fs import read_to_string
@@ -2950,13 +2951,40 @@ impl Interp {
     #test(interp_on("[int]"), [Expr { id: 244, line: 126, col: 19, sp: SrcSpan { sline: 126, scol: 19, eline: 126, ecol: 45 }, kind: ExprKind.StrLit("braces {{}} stay literal") }])[Value.VStr("braces {} stay literal")]
     fun eval_format(var self, args: [Expr]) -> Value {
         let fmt = as_str(self.eval(args[0]))
+        let specs = format_specs(fmt)
         var parts: [str] = []
         var i = 1
         while i < args.len() {
-            parts.push(format_typed(self.eval(args[i]), self.resolved_of(args[i].id)))
+            let v = self.eval(args[i])
+            let t = self.resolved_of(args[i].id)
+            parts.push(self.format_spec_value(v, t, specs[i - 1]))
             i = i + 1
         }
         return Value.VStr(render_format(fmt, parts))
+    }
+
+    // One hole's text (D139): a value of a type with its own `format`
+    // through it, the spec passed as it is; else the print form, formatted by
+    // the spec with std.fmt as native code does.
+    fun format_spec_value(var self, v: Value, t: Option<Type>, spec: str) -> str {
+        match v {
+            Value.VStruct(n, fns, fvs) => { return self.user_format(v, spec) },
+            Value.VEnum(en, vr, pl) => { return self.user_format(v, spec) },
+            _ => {},
+        }
+        let text = format_typed(v, t)
+        if spec == "" { return text }
+        return match t {
+            Some(Type.TInt(w, sg)) => fmt_int(as_int(v), w, sg, spec),
+            Some(Type.TFloat(w)) => fmt_float(as_float(v), text, spec),
+            _ => fmt_text(text, spec),
+        }
+    }
+
+    fun user_format(var self, v: Value, spec: str) -> str {
+        let fi = self.func_idx(format("{}.format", value_key(v)))
+        let (rr, fs) = self.call_method(fi, v, [Value.VStr(spec)])
+        return as_str(rr)
     }
 
     #test(interp_on("[int]"), "List")[false]
@@ -4088,10 +4116,12 @@ fun render_format(fmt: str, parts: [str]) -> str {
         } else if c == 125 && i + 1 < n && (fmt[i + 1] as int32) == 125 {
             sb.append_byte(125)
             i = i + 2
-        } else if c == 123 && i + 1 < n && (fmt[i + 1] as int32) == 125 {
+        } else if c == 123 {
+            // a hole, its spec (D139) applied already
             sb.append(parts[arg])
             arg = arg + 1
-            i = i + 2
+            while i < n && (fmt[i] as int32) != 125 { i = i + 1 }
+            i = i + 1
         } else {
             sb.append_byte(fmt[i])
             i = i + 1

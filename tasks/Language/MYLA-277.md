@@ -2,7 +2,7 @@
 id: MYLA-277
 title: "Number formatting in `format` and f-strings: width, alignment, precision (`{x:>8.3}`)"
 type: feature
-status: todo
+status: review
 priority: high
 labels: [language, stdlib, formatting]
 ---
@@ -27,10 +27,10 @@ A short design round first, to settle the spec's grammar, recorded on [[Language
 - **Errors:** a malformed spec in an f-string is a parse or type error at its position, since the spec is known at compile time. In a `format` call with a constant string, the same.
 
 Then:
-- [x] The decision (D139) — the pages follow with the implementation
-- [ ] Lexer (the spec after `:` inside a hole, kept apart from `::` and from a map literal's `:` inside a hole) and checker (the spec against the value's type)
-- [ ] Std code: the formatting in Myla (`std.num`), shared by the interpreter and every backend, so the output is byte-identical everywhere
-- [ ] Tests: parity programs, the error corpus, the tree-sitter grammar's f-string rule
+- [x] The decision (D139) and the pages ([[Language/Collections-and-strings]], [[Language/Standard-library]], [[Language/Grammar]])
+- [x] Lexer (the spec after `:` inside a hole, kept apart from `::` and from a map literal's `:` inside a hole) and checker (the spec against the value's type)
+- [x] Std code: the formatting in Myla (`std.num`), shared by the interpreter and every backend, so the output is byte-identical everywhere
+- [x] Tests: parity programs, the error corpus, the tree-sitter grammar's f-string rule
 
 ## Proposal for the design round (2026-11-05, for the owner; nothing decided)
 
@@ -58,4 +58,12 @@ The owner accepted the proposal above, with two additions:
 - **A `Format` trait** for a user's types, Python's model: `trait Format { fun format(self, spec: str) -> str }`; `{x}` calls `x.format("")`, `{x:dmy}` passes `"dmy"` as it is (read when the program runs, not checked before); `std.fmt.pad(text, spec)` gives such a type fill, alignment and width. `print` keeps taking the five scalar types.
 
 Then also:
-- [ ] `trait Format` in the prelude, the checker letting a type that implements it stand in a hole, and `std.fmt.pad`
+- [x] `trait Format` in the prelude, the checker letting a type that implements it stand in a hole, and `std.fmt.pad`
+
+## Built (2026-11-05)
+
+- The lexer splits a hole at its first `:` outside brackets and strings (no expression has one, so a `:` fill works too) and writes `{:spec}` into the format string; `format`'s own string takes `{:spec}` the same way.
+- `std.fmt` (new) parses a spec (`parse_spec`), says what it needs of a type (`spec_need`) and formats: `fmt_int`, `fmt_float` (the precision by `std.num.format_fixed`, new, exact and ties to even), `fmt_text`, and `pad` for a type's own form. `std.rt` imports it, so every native program has it; only what a program calls is emitted.
+- The checker holds each spec to its value's type with those functions; the interpreter formats with them; the lowering calls them, and a type implementing the prelude's `trait Format` through its `format` method.
+- [[tests/burn/test_format_specs.py]]: every rule against the interpreter and native code, the same program on aarch64 and wasm32 (`PROGRAMS["format_specs"]`), the errors; `#test` cases in `std.fmt` and `std.num`; the grammar's `FORMAT_SPEC`.
+- A float without a precision prints as `print` prints it, with 17 significant digits (`{0.1:>6}` is `0.10000000000000001`): that is the print form today, not something D139 changed.

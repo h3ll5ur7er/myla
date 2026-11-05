@@ -31,6 +31,7 @@ from std.num import f64_literal_bits, f32_round_bits
 from .ast import Expr, ExprKind, Stmt, StmtKind, Block, FunData, ElseTail, ExprOrBlock, MatchArm, Pattern, PatternKind, FieldInit, MapEntry, BindElem, bind_elems, Param
 from .checker import Type, is_unit, is_raw_memory_primitive, Subst, FuncSig, opt_subst_type, subst_type, builtin_method
 from .codegen import codegen_on, may_write_expr, is_actor_t, is_sb_t, is_async_t, CodeGen, LamJob, PartialJob, Cap, DropEntry, tfunc_params, tfunc_ret, is_hole_expr, mangle_fn, is_builtin_call_name, is_aggregate, tuple_elems, is_struct_or_enum_t, is_tfunc, is_overloadable_op, arith_method_cg, enum_name_of, is_tstr, is_cmp, place_root, is_aggregate_opt, arms_may_write, is_cell_t, list_elem, is_list_t, is_map_t, is_str_t, map_key, map_val, format_segments, args_have_hole, success_variant, failure_variant
+from .util import format_specs
 from .ir import IrFunc, IrBlock, Inst, Term, Slot, Pos, Instance, ENV_WORD
 from .parser import expr_of, stmt_of, type_expr_of, block_of, pattern_of, fun_of  // AST values for #test cases (MYLA-184)
 
@@ -3572,11 +3573,12 @@ impl Lower {
             _ => ""
         }
         let segs = format_segments(fmt)
+        let specs = format_specs(fmt)
         var acc = self.temp(Type.TStr)
         self.add(Inst.Str(acc, segs[0]))
         var k = 1
         while k < args.len() {
-            let piece = self.render(cg, args[k])
+            let piece = self.render_spec(cg, args[k], specs[k - 1])
             let joined = self.temp(Type.TStr)
             self.rt_call(cg, joined, "__str_concat", [acc, piece])
             let j = self.owned_value(cg, joined, Type.TStr)
@@ -3588,6 +3590,84 @@ impl Lower {
             k = k + 1
         }
         return acc
+    }
+
+    // One hole's text (D139): a value of a type with its own `format`
+    // through it, the spec passed as it is; else the print form, formatted by
+    // the spec with std.fmt (as the interpreter does), a new string the
+    // statement owns.
+    fun render_spec(var self, cg: CodeGen, arg: Expr, spec: str) -> int32 {
+        let t = cg.type_of(arg.id)
+        if is_struct_or_enum_t(t) { return self.user_format(cg, arg, t, spec) }
+        if spec == "" { return self.render(cg, arg) }
+        var name = "std$fmt$fmt_text"
+        var vals: [int32] = []
+        match t {
+            Type.TInt(w, sg) => {
+                name = "std$fmt$fmt_int"
+                let v = self.expr(cg, arg)
+                let v64 = self.temp(Type.TInt(64, true))
+                self.add(Inst.Cast(v64, t, Type.TInt(64, true), v))
+                vals = [v64, self.int_const(w), self.konst(Type.TBool, if sg { 1 } else { 0 })]
+            },
+            Type.TFloat(w) => {
+                name = "std$fmt$fmt_float"
+                let v = self.expr(cg, arg)
+                var extra = 17
+                if w == 32 { extra = 9 }
+                let text = self.temp(Type.TStr)
+                self.rt_call(cg, text, "__float_to_str", [v, self.int_const(extra)])
+                let owned_text = self.owned_value(cg, text, Type.TStr)
+                var v64 = v
+                if w == 32 {
+                    v64 = self.temp(Type.TFloat(64))
+                    self.add(Inst.Cast(v64, t, Type.TFloat(64), v))
+                }
+                vals = [v64, owned_text]
+            },
+            _ => { vals = [self.render(cg, arg)] },
+        }
+        if !cg.has_func(name) { return self.unsupported("a format spec without std.fmt") }
+        let sv = self.temp(Type.TStr)
+        self.add(Inst.Str(sv, spec))
+        vals.push(sv)
+        return self.call_owning(cg, name, vals)
+    }
+
+    // `x.format(spec)` of a value of a type implementing `Format` (D139).
+    fun user_format(var self, cg: CodeGen, arg: Expr, t: Type, spec: str) -> int32 {
+        let name = format("{}.format", cg.type_key(t))
+        if !cg.has_func(name) { return self.unsupported("format of a value without a 'format' method") }
+        let sig = cg.sig_of(name)
+        let p = self.addr(cg, arg)
+        var vals: [int32] = []
+        if cg.has_byval(sig) && cg.byval_param(sig, 0, t) { for w in self.value_words(cg, t, p) { vals.push(w) } } else { vals.push(p) }
+        let sv = self.temp(Type.TStr)
+        self.add(Inst.Str(sv, spec))
+        vals.push(sv)
+        return self.call_owning(cg, name, vals)
+    }
+
+    // A call of the function `name` with the argument words `vals` (each
+    // one word, the receiver's address first for a method), each parameter
+    // that keeps its argument given a reference of its own (MYLA-127); the
+    // string it returns, owned by the statement.
+    fun call_owning(var self, cg: CodeGen, name: str, vals: [int32]) -> int32 {
+        let sig = cg.sig_of(name)
+        var params: [Type] = []
+        var first = 0
+        if sig.has_decl && match sig.decl.receiver { Some(r) => true, None => false } { first = 1 }
+        for pt in sig.params { params.push(pt) }
+        let owns = cg.owned_params(sig, params)
+        var i = first
+        while i < vals.len() {
+            let pi = i - first
+            if pi < owns.len() && owns[pi] { self.retain(cg, params[pi], vals[i]) }
+            i = i + 1
+        }
+        let d = self.temp(Type.TStr)
+        self.add(Inst.Call(d, name, vals))
+        return self.owned_value(cg, d, Type.TStr)
     }
 
     // The print form of a printable value as a string: a string itself

@@ -17,6 +17,9 @@
 // environment.
 
 import .platform as os
+// format specs (D139): the code generator calls std.fmt's functions, which
+// every program carries this way
+import .fmt as fmt
 
 // `a + b` (`__str_concat`): a new cell holding both strings' bytes.
 pub fun str_concat(a: str, b: str) -> str {

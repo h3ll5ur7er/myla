@@ -14,6 +14,8 @@
 
 from .parser import parse_source, Parsed, expr_of, stmt_of, type_expr_of, block_of, pattern_of, fun_of, is_let_else_marker
 from .ast import int_text
+from .util import format_specs
+from std.fmt import parse_spec, spec_need
 from .ast import Program, Decl, DeclKind, FunData, Param, TypeParam, Field, Variant
 from .ast import Attribute, TypeExpr, TypeKind, Expr, ExprKind, FieldInit, MapEntry
 from .ast import Stmt, StmtKind, Block, ElseTail, BindElem, ExprOrBlock
@@ -5575,9 +5577,9 @@ impl Checker {
     }
 }
 
-#test()["enum Option<T> { Some(T), None }\nenum Result<T, E> { Ok(T), Err(E) }\nfun get<K, V>(m: [K: V], k: K) -> Option<V> {\n    if contains(m, k) {\n        return Some(m[k])\n    }\n    return None\n}\n"]
+#test()["enum Option<T> { Some(T), None }\nenum Result<T, E> { Ok(T), Err(E) }\nfun get<K, V>(m: [K: V], k: K) -> Option<V> {\n    if contains(m, k) {\n        return Some(m[k])\n    }\n    return None\n}\ntrait Format {\n    fun format(self, spec: str) -> str\n}\n"]
 fun prelude_src() -> str {
-    return "enum Option<T> { Some(T), None }\nenum Result<T, E> { Ok(T), Err(E) }\nfun get<K, V>(m: [K: V], k: K) -> Option<V> {\n    if contains(m, k) {\n        return Some(m[k])\n    }\n    return None\n}\n"
+    return "enum Option<T> { Some(T), None }\nenum Result<T, E> { Ok(T), Err(E) }\nfun get<K, V>(m: [K: V], k: K) -> Option<V> {\n    if contains(m, k) {\n        return Some(m[k])\n    }\n    return None\n}\ntrait Format {\n    fun format(self, spec: str) -> str\n}\n"
 }
 
 // The prelude's declarations, with node ids from `first_id`.
@@ -5654,6 +5656,16 @@ fun count_format_holes(fmt: str, line: int32, col: int32) -> Result<int32, Check
             if i + 1 < n && cs[i + 1] == '}' { holes = holes + 1
             i = i + 2
             continue }
+            // `{:spec}` (D139)
+            if i + 1 < n && cs[i + 1] == ':' {
+                var j = i + 2
+                while j < n && cs[j] != '}' && cs[j] != '{' { j = j + 1 }
+                if j < n && cs[j] == '}' {
+                    holes = holes + 1
+                    i = j + 1
+                    continue
+                }
+            }
             return Err(terr(line, col, "format(): a single '{' must be a '{}' placeholder or an escaped '{{'"))
         }
         if c == '}' {
@@ -6133,10 +6145,27 @@ impl Checker {
         let holes = count_format_holes(fval, fmt.line, fmt.col)?
         let rest = args.len() - 1
         if holes != rest { return Err(terr_at(e.line, e.col, e.sp, format("format() has {} placeholder(s) but {} argument(s)", holes, rest))) }
+        let specs = format_specs(fval)
         var i = 1
         while i < args.len() {
             let at = self.expect_value(args[i], None)?
+            let spec = specs[i - 1]
+            // a type of the program's with its own form (D139): the spec is its
+            if is_struct_or_enum(at) && self.type_implements(at, "Format")? {
+                i = i + 1
+                continue
+            }
             if !is_printable(at) { return Err(terr_at(args[i].line, args[i].col, args[i].sp, format("format() cannot render a value of type '{}'", type_name(at)))) }
+            if spec != "" {
+                let sp = match parse_spec(spec) {
+                    Ok(x) => x
+                    Err(why) => { return Err(terr_at(args[i].line, args[i].col, args[i].sp, why)) }
+                }
+                var class = 2
+                if is_int(at) { class = 0 } else if is_float(at) { class = 1 }
+                let need = spec_need(sp, class)
+                if need != "" { return Err(terr_at(args[i].line, args[i].col, args[i].sp, format("the format spec '{}' {}, found '{}'", spec, need, type_name(at)))) }
+            }
             i = i + 1
         }
         return Ok(Type.TStr)

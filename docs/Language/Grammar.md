@@ -18,6 +18,7 @@ FLOAT          = digits ( "." digits exponent? | exponent ) float_suffix? | digi
 CHAR           = "'" ( char_char | escape ) "'" ;
 STRING         = '"' ( string_char | escape )* '"' ;
 FSTRING_TEXT   = ( fstring_char | escape )+ ;
+FORMAT_SPEC    = ":" spec_char* ;   (* a hole's format spec, D139 *)
 COMMENT        = "//" line_char* | "/*" not_star* ( "*"+ not_star_slash not_star* )* "*"+ "/" ;
 NL             = /\n/ ;
 
@@ -37,6 +38,7 @@ escape         = "\" ( "n" | "t" | "r" | "0" | "\" | '"' | "'" | "u{" hexdigit+ 
 char_char      = /[^'\\\n]/ ;
 string_char    = /[^"\\\n]/ ;
 fstring_char   = /[^"{}\\\n]/ ;
+spec_char      = /[^"{}\\\n]/ ;
 line_char      = /[^\n]/ ;
 not_star       = /[^*]/ ;
 not_star_slash = /[^*\/]/ ;
@@ -155,7 +157,7 @@ primary     = INT | FLOAT | CHAR | STRING | fstring | "true" | "false"
             | "self" | IDENT | struct_literal | "(" NL* expression NL* ")"
             | "(" NL* ")" | tuple | list | map | match_expr | if_expr ;   (* "()": the unit value, D138 *)
 fstring     = 'f"' ( FSTRING_TEXT | "{{" | "}}"
-                   | "{" expression "}" )* '"' ;
+                   | "{" expression FORMAT_SPEC? "}" )* '"' ;
               (* lowered by the lexer to: format(STRING, expression, …) *)
 if_expr     = "if" ( cond | let_cond ) block NL* "else" ( if_expr | block ) ;   (* an if used as a value, D104 (1) *)
 struct_literal = IDENT "{" NL* ( field_init ( "," NL* field_init )* ","? NL* )? "}" ;

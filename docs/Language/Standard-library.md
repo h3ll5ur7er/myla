@@ -184,10 +184,21 @@ Numbers from text and back ([[MYLA-79]]). The conversions are exact, computed wi
 | `parse_int(s: str) -> Option<int64>` | A decimal integer with an optional `-`; `None` for anything else or out of range |
 | `parse_float(s: str) -> Option<float64>` | The nearest double to `-? digits (. digits)? ([eE] [+-]? digits)?`; too large is infinite |
 | `format_float(x: float64) -> str` | The shortest decimal that reads back as `x`, as Python's `repr` writes it: `1.0`, `0.1`, `1e+16`, `1.5e-07`, `-0.0`, `nan`, `inf` |
+| `format_fixed(x: float64, prec: int32) -> str` | `x` with `prec` digits after the point, rounded on its exact binary value, ties to even: `2.67` for `(2.675, 2)` (D139) |
 | `pow2(k: int32) -> float64` | 2^k exactly, for -1022 <= k <= 1023 |
 | `f64_literal_bits(text) -> uint64`, `f32_round_bits(bits) -> uint64`, `float_from_bits(bits) -> float64` | The bit-level steps (for the compiler) |
 
 `format("{}", x)` writes a float with up to 17 significant digits (`0.10000000000000001`); `format_float` is the short form.
+
+## std.fmt
+
+Format specs (D139, [[Language/Collections-and-strings]]): the code every runner formats a hole's spec with, so the interpreter and every target print the same bytes, and a helper for a type implementing `Format`.
+
+| Function | Result |
+| --- | --- |
+| `pad(text: str, spec: str) -> str` | `text` with the fill, alignment (left by default) and width of `spec`: `pad("x", "^5")` is `"  x  "`. A spec that isn't one is a runtime error |
+| `parse_spec(s: str) -> Result<Spec, str>` | The spec's parts (`fill`, `align`, `plus`, `alt`, `zero`, `width`, `prec`, `kind`), or why it isn't one |
+| `fmt_int(v: int64, bits: int32, signed: bool, spec: str) -> str`, `fmt_float(x: float64, text: str, spec: str) -> str`, `fmt_text(text: str, spec: str) -> str` | A hole's text, as a spec makes it (what the compiler calls) |
 
 ## std.math
 

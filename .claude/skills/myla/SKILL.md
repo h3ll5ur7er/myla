@@ -74,7 +74,7 @@ fun main() {
 | `opt.unwrap()`, `.map(…)`, `.unwrap_or(…)` | `match opt { Some(v) => v, None => 0 }`, `if let Some(v) = opt { … }` or `?` | `Option`/`Result` have no methods; `if let`/`while let` (D104) are sugar over `match` |
 | `\|x\| x + 1`, `{ x in x + 1 }` | `(x: int) => x + 1`, `(x) => { return x }` | Lambda syntax; parameter types can be omitted only when a function type is expected |
 | `Fn(i32) -> i32`, `(Int) -> Int` | `(int) -> int` | Function types |
-| `println!("{}", x)`, `print("\(x)")` | `print(x)`, `print(f"x = {x}")`, `format("x = {}", x)` | `print` takes exactly one int/float/char/bool/str |
+| `println!("{}", x)`, `print("\(x)")` | `print(x)`, `print(f"x = {x}")`, `format("x = {}", x)` | `print` takes exactly one int/float/char/bool/str; holes take Rust's specs, `{x:>8.2}`, `{n:#06x}` (D139), and a type with `impl Format` (`fun format(self, spec: str) -> str`) can stand in one |
 | `0..=n`, `loop { }`, labelled breaks | `0..n + 1`, `while true { }` | Ranges are half-open and only exist in `for` heads; no `loop`, no labels |
 | `255_u8` | `255u8` | `_` only between digits |
 | `i32`, `u8`, `f64`, `Int`, `Double` as types | `int32`, `uint8`, `float64` (or `float`), `int` | Type names are spelled out; suffixes are short (`5i64`, `2f64`) |

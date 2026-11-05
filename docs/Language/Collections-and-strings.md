@@ -102,13 +102,73 @@ Byte comparisons with ASCII char literals type-check directly: `if s[i] == ' ' {
 
 ## format and f-strings
 
-`format(fmt, args…) -> str` replaces each `{}` in `fmt` by the next argument rendered as `print` would; `{{` and `}}` are literal braces. `fmt` must be a string literal, and the number of `{}` must match the number of arguments (checked at compile time). Arguments may be integers, floats, `char`, `bool` and `str`. `f"…{expr}…"` is shorthand for `format` ([[Language/Lexical-structure]]).
+`format(fmt, args…) -> str` replaces each `{}` in `fmt` by the next argument rendered as `print` would (or as a spec says, `{:>8}`, below); `{{` and `}}` are literal braces. `fmt` must be a string literal, and the number of `{}` must match the number of arguments (checked at compile time). Arguments may be integers, floats, `char`, `bool` and `str`. `f"…{expr}…"` is shorthand for `format` ([[Language/Lexical-structure]]).
 
 How values are rendered:
 
 - integers in decimal, unsigned ones without a sign;
 - `bool` as `true`/`false`; `char` as its UTF-8 glyph;
 - floats in plain positional decimal, never in exponent form: the value rounded to 9 significant digits for `float32` or 17 for `float64` (enough to read it back exactly), with trailing zeros trimmed. So `6.0` prints `6`, `0.5` prints `0.5`, but `0.1f64` prints `0.10000000000000001` and `1e20` (a `float32`) prints `100000002000000000000`. Special values print `nan`, `inf`, `-inf` and `-0`.
+
+### Format specs
+
+A hole may carry a spec after a `:`, `{x:spec}` in an f-string or `{:spec}` in `format`'s string (D139, [[MYLA-277]]). It is Rust's: `[[fill]align][sign][#][0][width][.precision][kind]`, checked against the value's type when the program is compiled.
+
+```myla
+fun main() {
+    let pi = 3.14159265
+    print(f"{pi:.2} [{42:>6}] [{42:<6}] [{"ab":^6}] {7:03} {-7:04} {7:+}")
+    print(f"{255:x} {255:X} {255:b} {255:o} {255:#06x} {5:08b} {-1i8:x}")
+    print(f"{2.675:.2} {0.125:.2} {2.5:.0} [{3.5:*>8.2}]")
+}
+// output:
+// 3.14 [    42] [42    ] [  ab  ] 007 -007 +7
+// ff FF 11111111 377 0x00ff 00000101 ff
+// 2.67 0.12 2 [****3.50]
+```
+
+| Part | Meaning | On |
+| --- | --- | --- |
+| `fill` `align` | `<` left, `>` right, `^` centred, after an optional fill character (a space by default); numbers align right and text left unless the spec says otherwise | every printable type |
+| `width` | the least number of characters (Unicode scalars); a longer value is never cut | every printable type |
+| `+` | a sign on a value that isn't negative | integers, floats |
+| `#` | the prefix of a kind, `0x`, `0b` or `0o`, counted in the width | integers with a kind |
+| `0` | zeros between the sign (and prefix) and the digits, up to the width | integers, floats |
+| `.precision` | that many digits after the point, rounded on the exact binary value to nearest, ties to even: `2.675` (2.67499… in binary) gives `2.67`, `0.125` gives `0.12` | floats |
+| `kind` | `x` `X` hexadecimal, `b` binary, `o` octal; a negative signed value as its two's complement at its type's width (`{-1i8:x}` is `ff`) | integers |
+
+Anything else is a compile-time error at the value: `the format spec '.2' needs a float, found 'int32'`, `invalid format spec 'q'`. A hole's spec may not contain `{` or `}`.
+
+A type of the program can give itself a form by implementing the prelude's `Format` trait: `{x}` calls `x.format("")`, `{x:spec}` passes the spec's text as it is, read when the program runs (it isn't checked before), and `std.fmt.pad(text, spec)` applies fill, alignment and width ([[Language/Standard-library]]).
+
+```myla
+import std.fmt as fmt
+
+struct Date {
+    y: int,
+    m: int,
+    d: int,
+}
+
+impl Format for Date {
+    fun format(self, spec: str) -> str {
+        return match spec {
+            "" => f"{self.y:04}-{self.m:02}-{self.d:02}"
+            "dmy" => f"{self.d:02}.{self.m:02}.{self.y}"
+            _ => fmt.pad(self.format(""), spec)
+        }
+    }
+}
+
+fun main() {
+    let d = Date { y: 2026, m: 11, d: 5 }
+    print(f"{d} {d:dmy} [{d:>12}]")
+}
+// output:
+// 2026-11-05 05.11.2026 [  2026-11-05]
+```
+
+`print(x)` still takes the five scalar types: a struct goes through `print(f"{x}")`.
 
 The interpreter and the native backend share the float algorithm and constant tables, so their output is byte-identical (D56, [[Architecture/Native-backend]]).
 
