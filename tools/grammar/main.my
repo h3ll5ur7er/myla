@@ -35,7 +35,7 @@ fun read_or_exit(path: str) -> str {
 
 fun write_or_exit(path: str, text: str) {
     match write_to_file(path, text) {
-        Ok(n) => {},
+        Ok(()) => {},
         Err(e) => {
             eprintln(format("grammar: cannot write {}", path))
             exit(1)

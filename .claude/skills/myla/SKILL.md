@@ -89,7 +89,7 @@ fun main() {
 ## Types and conversions
 
 - `int` = `int32`, `float` = `float64`, and unsuffixed float literals default to `float64` (D102); for single precision write `0.1f32` or annotate `let x: float32 = 0.1`.
-- Integers: `int8`…`int64`, `uint8`…`uint64`, wrapping arithmetic. Also `bool`, `char` (Unicode scalar), `str` (immutable UTF-8 bytes), `StringBuilder`, tuples `(int, str)` (1-tuple `(int,)`), lists `[T]`, maps `[K: V]` (keys: integers, `char`, `bool`, `str`), function types, structs, enums, generics.
+- Integers: `int8`…`int64`, `uint8`…`uint64`, wrapping arithmetic. Also `bool`, `char` (Unicode scalar), `str` (immutable UTF-8 bytes), `StringBuilder`, tuples `(int, str)` (1-tuple `(int,)`), the unit type `()` with its one value `()` (D138), lists `[T]`, maps `[K: V]` (keys: integers, `char`, `bool`, `str`), function types, structs, enums, generics.
 - **No implicit conversion at all.** A literal adapts to its context (`let b: uint8 = 200`, `x + 1` with `x: int64`), but a *variable* has a fixed type: `let n = 2` is an `int32`, so `big + n` with `big: int64` fails. Annotate (`let n: int64 = 2`) or cast (`n as int64`).
 - `s[i]` is a byte (`uint8`); `len(s)` counts bytes; `chars(s)` gives `[char]`; `'a'` is a `char` but fits a `uint8` when one is expected (`s[i] == 'a'` works). `+` concatenates strings; no slicing.
 - Escapes are the same in chars, strings and f-strings: `\n \t \r \0 \\ \" \'` and `\u{1F600}` (so `"\r\n"` works). Identifiers may use letters of any script (`größe`, `π`): Unicode XID, not normalized (D72).
@@ -106,7 +106,7 @@ fun main() {
 - Generic bounds: `fun sum<T: Add>(…)`; a bound allows the operator on `T`, not calling trait methods on it.
 - Entry point: `fun main()` without parameters; `std.process.args()` and `std.process.exit(code)`.
 - Input: `var r = stdin()` (from `std.io`), then `r.read_line()` (`Result<Option<str>, IoError>`, no `"\n"`), `r.read_exact(n)`, `r.read_to_end()`. A reader is a value, so a helper function can't read from one it was passed: keep it in a struct field and read in `var self` methods.
-- Files (`std.fs`): `read_to_string(path)`, `write_to_file(path, s)`, `list_dir(path)` (`Result<[str], IoError>`, sorted, without `.`/`..`), `make_dir(path)`, `make_dir_all(path)`, `remove_file(path)`, `remove_dir(path)`, `remove_dir_all(path)`, `rename(from, to)`, `exists(path)`, `is_dir(path)`, `is_file(path)`, `current_dir()`.
+- Files (`std.fs`): `read_to_string(path)`, `write_to_file(path, s)`, `list_dir(path)` (`Result<[str], IoError>`, sorted, without `.`/`..`), `make_dir(path)`, `make_dir_all(path)`, `remove_file(path)`, `remove_dir(path)`, `remove_dir_all(path)`, `rename(from, to)` (these and `write_to_file` give `Result<(), IoError>`: match `Ok(())`), `exists(path)`, `is_dir(path)`, `is_file(path)`, `current_dir()`.
 - Also in the standard library: `std.json` (`parse`, `to_string`, `field`), `std.toml` (`parse`, `parse_doc`), `std.num` (`parse_int`, `parse_float`, `format_float`), `std.task` (`all`, `cancel`, `cancelled`); the reference is `docs/Language/Standard-library.md`.
 - Part of a string: `var sb = StringBuilder()`, `append(sb, s, start, end)` (byte offsets, must lie within `s`), `build(sb)`; there is no slicing syntax.
 - Constants: `const MAX: int = 10`; no global variables.

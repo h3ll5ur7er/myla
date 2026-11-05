@@ -126,12 +126,12 @@ class TestWriteToFileParity(unittest.TestCase):
         # Each backend writes the file then reads it back within its own run, so
         # a fixed path is safe; both must produce the same round-tripped output.
         path = os.path.join(tempfile.gettempdir(), "myla_burn_wtf.txt")
-        out, err, code = _run_both(
+        out, err, code = run_source_both_now(
             "from std.io import write\n"
             "from std.fs import write_to_file, read_to_string, IoError\n"
             "fun main() {\n"
             f'    match write_to_file("{path}", "abc\\nλ done\\n") {{\n'
-            "        Ok(n) => print(n),\n"
+            '        Ok(()) => print("written"),\n'
             "        Err(e) => print(-1),\n"
             "    }\n"
             f'    match read_to_string("{path}") {{\n'
@@ -140,8 +140,8 @@ class TestWriteToFileParity(unittest.TestCase):
             "    }\n"
             "}\n",
         )
-        # "abc\nλ done\n" is 12 bytes (λ = 2), then the verbatim file content.
-        self.assertEqual((out, err, code), ("12\nabc\nλ done\n", "", 0))
+        # `Ok(())` once written (D138), then the verbatim file content
+        self.assertEqual((out, err, code), ("written\nabc\nλ done\n", "", 0))
 
     def test_write_to_missing_dir_errno_parity(self):
         out, _, _ = run_source_both_now(
@@ -220,9 +220,9 @@ fun show(label: str, r: Result<[str], IoError>) {
     }
 }
 
-fun made(label: str, r: Result<int32, IoError>) {
+fun made(label: str, r: Result<(), IoError>) {
     match r {
-        Ok(n) => { println(format("{}: ok {}", label, n)) },
+        Ok(()) => { println(format("{}: ok", label)) },
         Err(e) => { println(format("{}: {}", label, describe(e))) },
     }
 }
@@ -278,13 +278,13 @@ fun main() {
 """
 
 FS_TOUR_OUTPUT = """empty: 0 []
-make a: ok 0
+make a: ok
 make a again: already exists
 make in missing: not found
-make all: ok 0
-make all again: ok 0
-make all trailing: ok 0
-make sub: ok 0
+make all: ok
+make all again: ok
+make all trailing: ok
+make sub: ok
 a: 10 [.hidden,10,9,Alpha,_under,a b,beta,sub,zeta.txt,λ.my]
 a/: 10 [.hidden,10,9,Alpha,_under,a b,beta,sub,zeta.txt,λ.my]
 deep: 2 [est,est2]
@@ -299,7 +299,7 @@ make all over a file: already exists
 'missing': exists false dir false file false
 'a/beta/x': exists false dir false file false
 '': exists false dir false file false
-make many: ok 0
+make many: ok
 many: 300 first entry-number-0-with-a-longer-name.txt last entry-number-99-with-a-longer-name.txt
 """
 
@@ -349,9 +349,9 @@ fun main() {
 # followed), and the errors.
 REMOVE_TOUR = """from std.fs import write_to_file, make_dir, remove_file, remove_dir, remove_dir_all, rename, exists, IoError
 from std.io import println
-fun code(r: Result<int32, IoError>) -> str {
+fun code(r: Result<(), IoError>) -> str {
     return match r {
-        Ok(n) => "ok"
+        Ok(()) => "ok"
         Err(e) => match e {
             IoError.NotFound => "not found"
             IoError.PermissionDenied => "denied"
@@ -408,9 +408,9 @@ class IoErrorCauses(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             out, err, code = run_source_both_now(
                 "from std.fs import IoError, make_dir, remove_file, remove_dir, write_to_file, read_to_string\n"
-                "fun cause(r: Result<int32, IoError>) -> str {\n"
+                "fun cause(r: Result<(), IoError>) -> str {\n"
                 "    return match r {\n"
-                '        Ok(n) => "ok",\n'
+                '        Ok(()) => "ok",\n'
                 '        Err(IoError.NotFound) => "not found",\n'
                 '        Err(IoError.PermissionDenied) => "permission denied",\n'
                 '        Err(IoError.AlreadyExists) => "already exists",\n'

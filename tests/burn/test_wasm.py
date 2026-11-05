@@ -100,7 +100,7 @@ class WasmParity(unittest.TestCase):
         # and removed, a relative path against the working directory
         source = ("import std.fs as fs\n\nfun main() {\n"
                   "    match fs.make_dir(\"wd\") { Ok(n) => {}, Err(e) => { print(\"mkdir failed\") } }\n"
-                  "    match fs.write_to_file(\"wd/a.txt\", \"one\\ntwo\\n\") { Ok(n) => { print(n) }, Err(e) => { print(\"write failed\") } }\n"
+                  "    match fs.write_to_file(\"wd/a.txt\", \"one\\ntwo\\n\") { Ok(()) => { print(\"written\") }, Err(e) => { print(\"write failed\") } }\n"
                   "    match fs.read_to_string(\"wd/a.txt\") { Ok(s) => { print(s.len()) }, Err(e) => { print(\"read failed\") } }\n"
                   "    print(fs.exists(\"wd/a.txt\"))\n    print(fs.is_dir(\"wd\"))\n"
                   "    match fs.rename(\"wd/a.txt\", \"wd/b.txt\") { Ok(n) => {}, Err(e) => { print(\"rename failed\") } }\n"
@@ -250,15 +250,15 @@ class WasmPage(unittest.TestCase):
         echo = ("import std.io as io\nfrom std.process import args\nimport std.fs as fs\n\nfun main() {\n"
                 "    var r = io.stdin()\n    match r.read_line() { Ok(Some(l)) => { print(\"got \" + l) }, _ => { print(\"none\") } }\n"
                 "    for a in args() { print(a) }\n"
-                "    match fs.write_to_file(\"out/note.txt\", \"written\") { Ok(n) => { print(n) }, Err(e) => { print(\"no dir\") } }\n"
+                "    match fs.write_to_file(\"out/note.txt\", \"written\") { Ok(()) => { print(\"written\") }, Err(e) => { print(\"no dir\") } }\n"
                 "    match fs.make_dir(\"out\") { Ok(n) => {}, Err(e) => { print(\"mkdir failed\") } }\n"
-                "    match fs.write_to_file(\"out/note.txt\", \"written\") { Ok(n) => { print(n) }, Err(e) => { print(\"write failed\") } }\n"
+                "    match fs.write_to_file(\"out/note.txt\", \"written\") { Ok(()) => { print(\"written\") }, Err(e) => { print(\"write failed\") } }\n"
                 "    let xs = [1]\n    print(xs[3])\n}\n")
         geo = {"main.my": "import geo\n\nfun main() {\n    print(geo.twice(21))\n}\n",
                "geo.my": "pub fun twice(n: int) -> int {\n    return 2 * n\n}\n"}
         got = self.page([{"op": "run", "files": echo, "stdin": "hello\nmore\n", "args": ["a", "b c"], "read": ["out/note.txt"]},
                          {"op": "run", "files": geo}, {"op": "check", "files": geo}])
-        self.assertEqual((got[0]["stdout"], got[0]["exitCode"]), ("got hello\nmain.my\na\nb c\nno dir\n7\n", 1))
+        self.assertEqual((got[0]["stdout"], got[0]["exitCode"]), ("got hello\nmain.my\na\nb c\nno dir\nwritten\n", 1))
         self.assertEqual(got[0]["stderr"], self.native("run", echo, "hello\nmore\n", ["a", "b c"])[1])
         self.assertEqual(got[0]["read"], {"out/note.txt": "written"})
         self.assertEqual((got[1]["stdout"], got[1]["exitCode"]), ("42\n", 0))

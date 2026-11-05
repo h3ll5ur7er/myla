@@ -121,17 +121,17 @@ fun main() {
 | Function | Result |
 | --- | --- |
 | `read_to_string(path: str) -> Result<str, IoError>` | The whole file |
-| `write_to_file(path: str, contents: str) -> Result<int32, IoError>` | Creates or truncates (mode 0644); `Ok` holds the number of bytes |
+| `write_to_file(path: str, contents: str) -> Result<(), IoError>` | Creates or truncates (mode 0644); `Ok(())` once every byte is written (D138) |
 | `list_dir(path: str) -> Result<[str], IoError>` | The names of the directory's entries, without `.` and `..`, sorted by their bytes |
-| `make_dir(path: str) -> Result<int32, IoError>` | Makes one directory (mode 0755 less the umask); its parent must exist; `Ok` holds 0 |
-| `make_dir_all(path: str) -> Result<int32, IoError>` | Makes the directory and the parents it lacks, like `mkdir -p`; an existing directory is fine; `Ok` holds 0 |
+| `make_dir(path: str) -> Result<(), IoError>` | Makes one directory (mode 0755 less the umask); its parent must exist |
+| `make_dir_all(path: str) -> Result<(), IoError>` | Makes the directory and the parents it lacks, like `mkdir -p`; an existing directory is fine |
 | `exists(path: str) -> bool` | Whether the path names anything (symbolic links followed, so a dangling one doesn't count) |
 | `is_dir(path: str) -> bool`, `is_file(path: str) -> bool` | Whether it names a directory, a regular file (links followed) |
 | `current_dir() -> Result<str, IoError>` | The working directory: an absolute path without symbolic links, as the kernel gives it; a directory that was removed is `NotFound` ([[MYLA-98]]) |
-| `remove_file(path: str) -> Result<int32, IoError>` | Removes a file, or a symbolic link itself; a directory is `IsADirectory`; `Ok` holds 0 ([[MYLA-96]]) |
-| `remove_dir(path: str) -> Result<int32, IoError>` | Removes an empty directory; one that isn't is `NotEmpty`; `Ok` holds 0 |
-| `remove_dir_all(path: str) -> Result<int32, IoError>` | Removes the path and, for a directory, everything in it, like `rm -r`; symbolic links are removed, not followed; `Ok` holds 0 |
-| `rename(from_path: str, to: str) -> Result<int32, IoError>` | Renames or moves within one file system, replacing a file at `to`; `Ok` holds 0 |
+| `remove_file(path: str) -> Result<(), IoError>` | Removes a file, or a symbolic link itself; a directory is `IsADirectory` ([[MYLA-96]]) |
+| `remove_dir(path: str) -> Result<(), IoError>` | Removes an empty directory; one that isn't is `NotEmpty` |
+| `remove_dir_all(path: str) -> Result<(), IoError>` | Removes the path and, for a directory, everything in it, like `rm -r`; symbolic links are removed, not followed |
+| `rename(from_path: str, to: str) -> Result<(), IoError>` | Renames or moves within one file system, replacing a file at `to` |
 | `enum IoError { NotFound, PermissionDenied, AlreadyExists, NotADirectory, IsADirectory, NotEmpty, Interrupted, Cancelled, Unsupported, Other(int32) }` | Why an operation failed, the same causes on every target (D129); `Cancelled`: a task's read stopped by `task.cancel` or a timeout (D96); `Unsupported`: the target can't do it; `Other` holds the platform's own code for anything else, whose numbers aren't portable |
 
 The file's bytes become the string unchanged, even when they aren't valid UTF-8: strings work on bytes, and `chars` gives U+FFFD for the invalid ones ([[Language/Collections-and-strings]], [[MYLA-12]]).
