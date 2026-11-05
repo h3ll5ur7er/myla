@@ -52,5 +52,9 @@ The owner chose the recommendations:
 - [x] **Capabilities:** D132
 
 Then the work:
-- [ ] D128 in `std.math`: `to_bits`, `copysign` and the other sign and payload readers see `0x7FF8000000000000` for every NaN. A test that `copysign(1.0, 0.0 / 0.0)` is `1` on every target (today -1 on x86-64, 1 on aarch64).
+- [x] D128 in `std.math`: `to_bits`, `copysign` and the other sign and payload readers see `0x7FF8000000000000` for every NaN. A test that `copysign(1.0, 0.0 / 0.0)` is `1` on every target (today -1 on x86-64, 1 on aarch64).
+  - **How:** `to_bits` returns the canonical NaN for any NaN, and `copysign` reads `s`'s sign through it. Inside, std.math computes with `raw_bits` and `with_sign`, whose results reach a program only through `to_bits` again.
+  - **Test:** `nan_bits` in `test_aarch64`'s programs, which `test_wasm` uses too, checks that the aarch64 and wasm builds print what the x86-64 build prints. Before the change the first two lines differed (x86-64: `18444492273895866368 9221120237041090560 …` and `-1 1 …`; aarch64: the other way round). After it, all lines agree.
+  - **`#test` cases** on `to_bits` and `copysign`.
+  - **Cost:** none. A program of 3 million `sin`, `exp` and `ln` calls runs 2,289,132,366 instructions before and after (callgrind). A first version that canonicalised inside std.math too was 34% slower.
 - [ ] D133 on wasm32: plain counts for actor handles, no deep copies at task boundaries, measured

@@ -11,7 +11,9 @@
 // - `sin`, `cos` and `tan` reduce their argument exactly: by a three-part π/2
 //   below 2^20·π/2 (about 1.6 million), above that by Payne and Hanek's
 //   method with 1584 bits of 2/π.
-// NaN, the infinities and signed zeros behave as in C's <math.h>.
+// NaN, the infinities and signed zeros behave as in C's <math.h>, but a NaN
+// has no sign or payload to see: `to_bits` and the functions built on it read
+// every NaN as 0x7FF8000000000000 (D128).
 
 pub const PI: float64 = 3.141592653589793
 pub const TAU: float64 = 6.283185307179586
@@ -26,10 +28,25 @@ const MANTISSA: uint64 = 0x000FFFFFFFFFFFFF
 
 // --- bits and classes ---------------------------------------------------------
 
-// The IEEE 754 bits of `x`.
+// The IEEE 754 bits of `x`; every NaN gives the canonical quiet NaN's,
+// 0x7FF8000000000000, so a NaN's sign and payload, which differ between
+// processors (x86-64's 0.0 / 0.0 is 0xFFF8..., aarch64's 0x7FF8...), can't
+// be seen (D128).
 #test(1.0)[4607182418800017408u64]
 #test(-0.0)[9223372036854775808u64]
+#test(0.0 / 0.0)[9221120237041090560u64]
+#test(-(0.0 / 0.0))[9221120237041090560u64]
 pub fun to_bits(x: float64) -> uint64 {
+    if x != x {
+        return 0x7FF8000000000000
+    }
+    return __f64_bits(x)
+}
+
+// The bits as the processor has them, a NaN's sign and payload included:
+// what std.math computes with. Its results' bits reach a program only
+// through `to_bits` again, which makes a NaN canonical (D128).
+fun raw_bits(x: float64) -> uint64 {
     return __f64_bits(x)
 }
 
@@ -54,31 +71,38 @@ pub fun is_nan(x: float64) -> bool {
 
 #test(1.0)[false]
 pub fun is_infinite(x: float64) -> bool {
-    return (to_bits(x) & (SIGN ^ 0xFFFFFFFFFFFFFFFF)) == EXPONENT
+    return (raw_bits(x) & (SIGN ^ 0xFFFFFFFFFFFFFFFF)) == EXPONENT
 }
 
 #test(1.0)[true]
 pub fun is_finite(x: float64) -> bool {
-    return (to_bits(x) & EXPONENT) != EXPONENT
+    return (raw_bits(x) & EXPONENT) != EXPONENT
 }
 
 // The unbiased exponent field of `x` (-1023 for zero and subnormals, 1024 for
 // infinities and NaN).
 fun exponent(x: float64) -> int32 {
-    return ((to_bits(x) >> 52) & 2047) as int32 - 1023
+    return ((raw_bits(x) >> 52) & 2047) as int32 - 1023
 }
 
-// `x` with the sign of `s`.
+// `x` with the sign of `s`, as the processor has it: what std.math computes
+// with (`copysign` reads a NaN `s` as positive, D128).
+fun with_sign(x: float64, s: float64) -> float64 {
+    return from_bits((raw_bits(x) & (SIGN ^ 0xFFFFFFFFFFFFFFFF)) | (raw_bits(s) & SIGN))
+}
+
+// `x` with the sign of `s` (a NaN `s` counts as positive, D128).
 #test(2.0, -1.0)[-2.0]
+#test(1.0, 0.0 / 0.0)[1.0]
 pub fun copysign(x: float64, s: float64) -> float64 {
-    return from_bits((to_bits(x) & (SIGN ^ 0xFFFFFFFFFFFFFFFF)) | (to_bits(s) & SIGN))
+    return from_bits((raw_bits(x) & (SIGN ^ 0xFFFFFFFFFFFFFFFF)) | (to_bits(s) & SIGN))
 }
 
 // --- rounding -----------------------------------------------------------------
 
 #test(-2.5)[2.5]
 pub fun abs(x: float64) -> float64 {
-    return from_bits(to_bits(x) & (SIGN ^ 0xFFFFFFFFFFFFFFFF))
+    return from_bits(raw_bits(x) & (SIGN ^ 0xFFFFFFFFFFFFFFFF))
 }
 
 // `x` without its fractional part (toward zero).
@@ -90,10 +114,10 @@ pub fun trunc(x: float64) -> float64 {
         return x                          // an integer already, or inf or NaN
     }
     if e < 0 {
-        return copysign(0.0, x)
+        return with_sign(0.0, x)
     }
     let fraction = MANTISSA >> (e as uint64)
-    return from_bits(to_bits(x) & (fraction ^ 0xFFFFFFFFFFFFFFFF))
+    return from_bits(raw_bits(x) & (fraction ^ 0xFFFFFFFFFFFFFFFF))
 }
 
 #test(2.7)[2.0]
@@ -123,7 +147,7 @@ pub fun ceil(x: float64) -> float64 {
 pub fun round(x: float64) -> float64 {
     let t = trunc(x)
     if abs(x - t) >= 0.5 {
-        return t + copysign(1.0, x)
+        return t + with_sign(1.0, x)
     }
     return t
 }
@@ -214,7 +238,7 @@ pub fun exp(x: float64) -> float64 {
     if abs(x) < 3.7252902984e-09 {         // 2^-28
         return 1.0 + x
     }
-    let k = trunc(INV_LN2 * x + copysign(0.5, x))
+    let k = trunc(INV_LN2 * x + with_sign(0.5, x))
     let hi = x - k * LN2_HI
     let lo = k * LN2_LO
     let r = hi - lo
@@ -234,7 +258,7 @@ fun reduce_log(x: float64) -> (float64, int32) {
         k = -54
     }
     k += exponent(v)
-    var f = from_bits((to_bits(v) & MANTISSA) | 0x3FF0000000000000)    // in [1, 2)
+    var f = from_bits((raw_bits(v) & MANTISSA) | 0x3FF0000000000000)    // in [1, 2)
     if f > SQRT2 {
         f = f * 0.5
         k += 1
@@ -307,29 +331,29 @@ pub fun log10(x: float64) -> float64 {
         k = -54
     }
     k += exponent(v)
-    let m = from_bits((to_bits(v) & MANTISSA) | 0x3FF0000000000000)
+    let m = from_bits((raw_bits(v) & MANTISSA) | 0x3FF0000000000000)
     let kf = k as float64
     return kf * 3.01029995663611771306e-01 + (kf * 3.69423907715893078616e-13 + 4.34294481903251816668e-01 * ln(m))
 }
 
 // The high 32 bits of `x`, as fdlibm reads them.
 fun high(x: float64) -> int32 {
-    return (to_bits(x) >> 32) as int32
+    return (raw_bits(x) >> 32) as int32
 }
 
 // The low 32 bits of `x`.
 fun low(x: float64) -> uint32 {
-    return (to_bits(x) & 0xFFFFFFFF) as uint32
+    return (raw_bits(x) & 0xFFFFFFFF) as uint32
 }
 
 // `x` with its high 32 bits replaced by `h`.
 fun with_high(x: float64, h: int32) -> float64 {
-    return from_bits((((h as uint32) as uint64) << 32) | (to_bits(x) & 0xFFFFFFFF))
+    return from_bits((((h as uint32) as uint64) << 32) | (raw_bits(x) & 0xFFFFFFFF))
 }
 
 // `x` with its low 32 bits cleared.
 fun clear_low(x: float64) -> float64 {
-    return from_bits(to_bits(x) & 0xFFFFFFFF00000000)
+    return from_bits(raw_bits(x) & 0xFFFFFFFF00000000)
 }
 
 // x^y (fdlibm's e_pow.c: log2(x) in extra precision, y split in two, then
@@ -641,7 +665,7 @@ fun rem_pio2_large(x: float64) -> (int32, float64, float64) {
     let pio2 = pio2_parts()
     // |x| = z·2^e0 with z's integer part 24 bits wide, split in 24-bit pieces
     let e0 = exponent(x) - 23
-    var z = from_bits((to_bits(abs(x)) & MANTISSA) | ((23 + 1023) as uint64) << 52)
+    var z = from_bits((raw_bits(abs(x)) & MANTISSA) | ((23 + 1023) as uint64) << 52)
     var tx = zeros(3)
     for i in 0..2 {
         tx[i] = trunc(z)
@@ -891,7 +915,7 @@ pub fun atan(x: float64) -> float64 {
     }
     var t = abs(x)
     if t >= 7.3786976294838206464e19 {       // 2^66
-        return copysign(1.5707963267948966, x)
+        return with_sign(1.5707963267948966, x)
     }
     var hi = 0.0
     var lo = 0.0
@@ -930,7 +954,7 @@ pub fun atan(x: float64) -> float64 {
         return x - x * (s1 + s2)
     }
     let r = hi - ((t * (s1 + s2) - lo) - t)
-    return copysign(r, x)
+    return with_sign(r, x)
 }
 
 const PI_LO: float64 = 1.2246467991473531772e-16
@@ -946,21 +970,21 @@ pub fun atan2(y: float64, x: float64) -> float64 {
     if x == 1.0 {
         return atan(y)
     }
-    let x_negative = to_bits(x) & SIGN != 0
+    let x_negative = raw_bits(x) & SIGN != 0
     if y == 0.0 {
-        return if x_negative { copysign(PI, y) } else { y }
+        return if x_negative { with_sign(PI, y) } else { y }
     }
     if x == 0.0 {
-        return copysign(1.5707963267948966, y)
+        return with_sign(1.5707963267948966, y)
     }
     if is_infinite(x) {
         if is_infinite(y) {
-            return copysign(if x_negative { 2.356194490192345 } else { 0.7853981633974483 }, y)
+            return with_sign(if x_negative { 2.356194490192345 } else { 0.7853981633974483 }, y)
         }
-        return copysign(if x_negative { PI } else { 0.0 }, y)
+        return with_sign(if x_negative { PI } else { 0.0 }, y)
     }
     if is_infinite(y) {
-        return copysign(1.5707963267948966, y)
+        return with_sign(1.5707963267948966, y)
     }
     let k = exponent(y) - exponent(x)
     var z = 0.0
@@ -972,9 +996,9 @@ pub fun atan2(y: float64, x: float64) -> float64 {
         z = atan(abs(y / x))
     }
     if !x_negative {
-        return copysign(z, y)
+        return with_sign(z, y)
     }
-    return copysign(PI - (z - PI_LO), y)
+    return with_sign(PI - (z - PI_LO), y)
 }
 
 #test(1.0)[1.5707963267948966]

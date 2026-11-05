@@ -98,6 +98,20 @@ fun main() {
     print(f"{big % 3.0} {-1e300 % 7.25} {-7.5 % 2.0} {1.0 % 0.0} {tiny % 2.0}")
 }
 """,
+    # D128: a NaN's sign and payload can't be seen; every NaN reads as the
+    # canonical one (x86-64's 0.0 / 0.0 is 0xFFF8..., aarch64's 0x7FF8...)
+    "nan_bits": """
+import std.math as math
+
+fun main() {
+    let z = 0.0
+    let n = z / z
+    print(f"{math.to_bits(n)} {math.to_bits(-n)} {math.to_bits(math.sqrt(-1.0))}")
+    print(f"{math.copysign(1.0, n)} {math.copysign(1.0, -n)} {math.to_bits(math.abs(-n))}")
+    print(f"{math.to_bits(math.from_bits(0xFFF0000000000001u64))} {math.is_nan(math.from_bits(0x7FF0000000000001u64))}")
+    print(math.to_bits(math.copysign(n, -1.0)))
+}
+""",
     "calls": """
 fun ten(a: int, b: int, c: int, d: int, e: int, f: int, g: int, h: int, i: int, j: int) -> int {
     return a + 2 * b + 3 * c + 4 * d + 5 * e + 6 * f + 7 * g + 8 * h + 9 * i + 10 * j

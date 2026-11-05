@@ -216,11 +216,11 @@ fun main() {
 | `exp(x)`, `ln(x)`, `log2(x)`, `log10(x)`, `pow(x, y)` | Within 1 ulp; `log2` is exact for powers of two, `log10` for powers of ten up to 10²², `ln(0)` is `-inf`, `ln(-1)` NaN |
 | `sin(x)`, `cos(x)`, `atan(x)` | Within 1 ulp, for every finite argument: arguments above 2^20·π/2 are reduced by Payne and Hanek's method |
 | `tan(x)`, `asin(x)`, `acos(x)`, `atan2(y, x)` | Within 4 ulp |
-| `abs(x)`, `copysign(x, s)`, `trunc(x)`, `floor(x)`, `ceil(x)`, `round(x)` | Exact; `round` takes halves away from zero, zeros keep their sign |
+| `abs(x)`, `copysign(x, s)`, `trunc(x)`, `floor(x)`, `ceil(x)`, `round(x)` | Exact; `round` takes halves away from zero, zeros keep their sign; `copysign` reads a NaN `s` as positive (D128) |
 | `min(a, b)`, `max(a, b)` | The other argument when one is NaN |
 | `ldexp(x, k)` | x·2^k |
 | `is_nan(x)`, `is_infinite(x)`, `is_finite(x)`, `infinity()`, `nan()` | |
-| `to_bits(x) -> uint64`, `from_bits(b) -> float64` | The IEEE 754 bits of a float and back |
+| `to_bits(x) -> uint64`, `from_bits(b) -> float64` | The IEEE 754 bits of a float and back; every NaN gives `0x7FF8000000000000`, so its sign and payload, which differ between processors, can't be seen (D128) |
 
 ## std.task
 
