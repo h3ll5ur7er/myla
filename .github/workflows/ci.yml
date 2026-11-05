@@ -58,6 +58,9 @@ jobs:
           ld --version | head -1
           editor/tree-sitter-myla/node_modules/.bin/tree-sitter --version
       - name: Burn tests
+        # a target whose tools are missing fails instead of skipping (MYLA-268)
+        env:
+          MYLA_REQUIRE_TARGETS: "1"
         run: python3 -m unittest discover -s tests/burn -t . -v
 
   bootstrap:

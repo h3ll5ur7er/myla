@@ -35,6 +35,15 @@ def _have_wasm() -> bool:
 HAVE_WASM = _have_wasm()
 WASM_SKIP = "the wasm tests need node, clang with its wasm32 target and wasm-ld"
 
+
+@unittest.skipUnless(os.environ.get("MYLA_REQUIRE_TARGETS"), "MYLA_REQUIRE_TARGETS is not set")
+class WasmTools(unittest.TestCase):
+    """CI sets MYLA_REQUIRE_TARGETS, so a missing tool fails there instead of
+    skipping the target's tests unnoticed (MYLA-268)."""
+
+    def test_the_tools_are_there(self):
+        self.assertTrue(HAVE_WASM, WASM_SKIP)
+
 # V8's stack for deep recursion (the main thread's is 8 MiB)
 NODE = ["node", "--stack-size=7000", RUNNER]
 

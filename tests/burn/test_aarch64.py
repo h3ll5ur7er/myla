@@ -25,6 +25,15 @@ _REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pa
 HAVE_A64 = all(shutil.which(t) for t in ("clang", "ld.lld", "qemu-aarch64"))
 A64_SKIP = "the aarch64 tests need clang, ld.lld and qemu-aarch64"
 
+
+@unittest.skipUnless(os.environ.get("MYLA_REQUIRE_TARGETS"), "MYLA_REQUIRE_TARGETS is not set")
+class Aarch64Tools(unittest.TestCase):
+    """CI sets MYLA_REQUIRE_TARGETS, so a missing tool fails there instead of
+    skipping the target's tests unnoticed (MYLA-268)."""
+
+    def test_the_tools_are_there(self):
+        self.assertTrue(HAVE_A64, A64_SKIP)
+
 # examples that need what the backend doesn't have yet
 NOT_YET: set[str] = set()
 
