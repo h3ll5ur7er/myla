@@ -994,6 +994,19 @@ impl CodeGen {
             self.a64_st("x10", fr, d)
             return
         }
+        // acquire and release (MYLA-267): `ldar` and `stlr`
+        if name == "__load_acq64" {
+            self.a64_ld("x11", fr, args[0])
+            self.emit("ldar x10, [x11]")
+            self.a64_st("x10", fr, d)
+            return
+        }
+        if name == "__store_rel64" {
+            self.a64_ld("x11", fr, args[0])
+            self.a64_ld("x12", fr, args[1])
+            self.emit("stlr x12, [x11]")
+            return
+        }
         if name == "__xchg64" || name == "__fetch_add64" {
             self.a64_ld("x11", fr, args[0])
             self.a64_ld("x12", fr, args[1])

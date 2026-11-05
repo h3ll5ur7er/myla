@@ -998,6 +998,19 @@ impl CodeGen {
             self.wasm_set(w, d)
             return
         }
+        // one worker (D125 (4)): a plain load and store (MYLA-267)
+        if name == "__load_acq64" {
+            self.wasm_addr(w, args[0], 0)
+            self.emit("i64.load 0")
+            self.wasm_set(w, d)
+            return
+        }
+        if name == "__store_rel64" {
+            self.wasm_addr(w, args[0], 0)
+            self.wasm_get(w, args[1])
+            self.emit("i64.store 0")
+            return
+        }
         if name == "__xchg64" || name == "__fetch_add64" {
             self.wasm_addr(w, args[0], 0)
             self.emit("i64.load 0")
