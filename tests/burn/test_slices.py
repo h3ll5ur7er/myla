@@ -11,7 +11,7 @@ import subprocess
 import tempfile
 import unittest
 
-from tests.burn._native import CAN_BUILD_NATIVE, SKIP_REASON, run_source_both_now
+from tests.burn._native import CAN_BUILD_NATIVE, SKIP_REASON, run_argv, run_source_both_now, target_flags
 from tests.burn._tools import STDLIB_ROOT, selfhost_tool
 
 PROGRAM = """fun shown(xs: [int]) -> str {
@@ -118,9 +118,10 @@ class Slices(unittest.TestCase):
                 with open(path, "w", encoding="utf-8") as fh:
                     fh.write(src)
                 exe = os.path.join(tmp, name)
-                subprocess.run([myla, "build", path, "-o", exe, "--stdlib", STDLIB_ROOT], check=True)
-                for argv in ([myla, "run", path, "--stdlib", STDLIB_ROOT], [exe]):
-                    with self.subTest(case=name, runner="interpreter" if len(argv) > 1 else "native"):
+                subprocess.run([myla, "build", path, "-o", exe, "--stdlib", STDLIB_ROOT, *target_flags()], check=True)
+                for runner, argv in (("interpreter", [myla, "run", path, "--stdlib", STDLIB_ROOT]),
+                                     ("native", run_argv(exe, exe)[0])):
+                    with self.subTest(case=name, runner=runner):
                         proc = subprocess.run(argv, capture_output=True, text=True, timeout=60)
                         self.assertEqual((proc.stdout, proc.returncode), ("", 1), proc.stderr)
                         self.assertIn("runtime error: ", proc.stderr)

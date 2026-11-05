@@ -14,12 +14,20 @@ import { readFileSync } from "node:fs";
 import { Wasi } from "./wasi.mjs";
 import { NodeFs, nodeStdio } from "./node_fs.mjs";
 
-const [file, ...rest] = process.argv.slice(2);
+// `--argv0 NAME` first: the name the program sees as its argv[0] (the test
+// harness gives the native binaries' one, MYLA-268), else the file's.
+let given = process.argv.slice(2);
+let argv0 = null;
+if (given[0] === "--argv0" && given.length >= 2) {
+  argv0 = given[1];
+  given = given.slice(2);
+}
+const [file, ...rest] = given;
 if (!file) {
   process.stderr.write("usage: node run.mjs program.wasm [args…]\n");
   process.exit(2);
 }
-const wasi = new Wasi({ args: [file, ...rest], env: { ...process.env, PWD: process.cwd() }, fs: new NodeFs(), ...nodeStdio });
+const wasi = new Wasi({ args: [argv0 ?? file, ...rest], env: { ...process.env, PWD: process.cwd() }, fs: new NodeFs(), ...nodeStdio });
 const module = new WebAssembly.Module(readFileSync(file));
 const instance = new WebAssembly.Instance(module, wasi.imports());
 let code;

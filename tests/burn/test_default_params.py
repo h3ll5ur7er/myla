@@ -9,7 +9,7 @@ import subprocess
 import tempfile
 import unittest
 
-from tests.burn._native import CAN_BUILD_NATIVE, SKIP_REASON
+from tests.burn._native import CAN_BUILD_NATIVE, SKIP_REASON, run_argv, target_flags
 from tests.burn._tools import STDLIB_ROOT, selfhost_tool
 
 _PROGRAM = """struct Conn {
@@ -111,10 +111,10 @@ class DefaultParams(unittest.TestCase):
                               timeout=60)
         self.assertEqual((proc.stdout, proc.stderr, proc.returncode), (_WANT, "", 0))
         exe = os.path.join(self.tmp.name, "defaults")
-        built = subprocess.run([self.myla, "build", path, "-o", exe, "--stdlib", STDLIB_ROOT], capture_output=True,
+        built = subprocess.run([self.myla, "build", path, "-o", exe, "--stdlib", STDLIB_ROOT, *target_flags()], capture_output=True,
                                text=True)
         self.assertEqual(built.returncode, 0, built.stderr)
-        proc = subprocess.run([exe], capture_output=True, text=True, timeout=60)
+        proc = subprocess.run(run_argv(exe, exe)[0], capture_output=True, text=True, timeout=60)
         self.assertEqual((proc.stdout, proc.stderr, proc.returncode), (_WANT, "", 0))
 
     def test_a_split_ge_before_a_default(self):

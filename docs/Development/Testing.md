@@ -16,6 +16,17 @@ uv run pytest tests/burn -q                              # pytest from the dev g
 
 `scripts/test.sh fast` runs the burn tests without the self-hosting gates (`tests/burn/test_selfhost_*`) and every module of 4 s or more ([[MYLA-153]]); `test_aarch64` and `test_wasm`, which take minutes, are on its slow list); use it while working and the full run before committing.
 
+### On another target
+
+```bash
+python3 scripts/test-target.py aarch64-linux             # the suites built for aarch64, run under qemu-aarch64 (about 2.5 min)
+python3 scripts/test-target.py wasm32-wasi test_slices   # one suite, built for wasm32, run under Node
+```
+
+`scripts/test-target.py` runs the burn suites that build and run programs (the parity programs, the native runtime errors, the error corpus's runtime cases, the I/O suites and the language features) for another target ([[MYLA-268]]), one process per suite, as many at once as there are CPUs. It sets `MYLA_TEST_TARGET`, and `tests/burn/_native.py` then builds with `--target`, assembles with clang and `ld.lld` or `wasm-ld` (`assemble`) and runs under `qemu-aarch64 -0 <argv0>` or `node tools/wasm/run.mjs --argv0 <argv0>` (`run_argv`), so a test that builds through those helpers runs on the target unchanged. CI runs both targets (the `targets` job).
+
+`tests/burn/_targets.py` is the one place that says which suites run and what each target is excused from, with the reason and its task: whole tests (`SKIP`, matched by id or a prefix of one) and single programs of a test's loop (`SKIP_PROGRAMS`, which the loop asks `program_excuse`). A test that reads the x86-64 assembly runs its program on every target and ends, skipped, where it starts reading (`_x86_only` in `test_selfhost_codegen.py`). An exception is for a real difference ([[Language/Targets]]) or a known gap with a task; check that it's earned by running the test with `MYLA_TEST_TARGET` set and the skip left out.
+
 The burn tests build everything with the self-hosted compiler ([[MYLA-235]]). `tests/burn/_tools.py` bootstraps the compiler of the current sources from the seed (`bootstrap/seed.s` assembled is stage 0, it compiles the compiler, which compiles it again: at the fixed point the same as `build/stage3`, [[MYLA-218]]) and builds the self-hosted tools (`selfhost/<name>.my`) with it through `selfhost_tool(name)`, other Myla programs such as the grammar tool and the language server through `myla_tool(path, name)`, as `scripts/bootstrap.sh` does; `tests/burn/_native.py` builds the test programs with the natively built CLI (`myla build`). A tool is cached as `build/test-tools/<name>-selfhost-<hash>`, where the hash covers every source that can change it (`bootstrap/seed.s`, `lib/std/*.my`, `selfhost/*.my`, `tools/**/*.my`), so an edit to any of them rebuilds it and the stale copy is removed. The whole suite takes about 2 minutes in one process with the tools cached (836 tests in 121 s on 4 cores, measured on 2026-11-01 after [[MYLA-219]]); building the tools adds about a minute to a cold run.
 
 ## Recorded answers
