@@ -1191,7 +1191,8 @@ pub struct ConstDeclT { name: str, declared: TypeExpr, value: Expr, line: int32,
 // (D89), 1 with a result of type `ty`, 2 with none
 pub struct Binding { ty: Type, mutable: bool, line: int32, col: int32, sp: SrcSpan, task: int32 }
 // A lambda being checked (D89): its parameters' frame and where it is
-pub struct LamAt { base: int32, line: int32, col: int32, sp: SrcSpan }
+// `defer_at`: the checker's `defer_at` outside the lambda, given back after it
+pub struct LamAt { base: int32, line: int32, col: int32, sp: SrcSpan, defer_at: int32 }
 // A function with a `#main` attribute: where it is, its name and declaration.
 pub struct MainAt { line: int32, col: int32, sp: SrcSpan, name: str, id: int32 }
 pub struct Frame { names: [str], binds: [Binding] }
@@ -1253,6 +1254,9 @@ pub struct Checker {
     has_cur_ret: bool,
     ret_at: Option<TypeExpr>,       // the return type of the function being checked, for notes (MYLA-65)
     loop_depth: int32,
+    // in a deferred block (D135): the loop depth where the innermost one
+    // starts, which its `break` and `continue` can't leave; -1 outside one
+    defer_at: int32,
     frames: [Frame],
     lambda_infer_active: bool,
     lambda_depth: int32,            // lambdas being checked (`?` names "lambda" or "function")
@@ -1334,7 +1338,7 @@ fun new_checker(decls: [Decl]) -> Checker {
         impl_decls: [], traits: [], trait_decls: [], trait_impls: [], user_trait_impls: [],
         aliases: [], alias_cache: [], const_decls: [], consts: [], const_values: [:], const_done: [], const_folding: [],
         allow_self: false, type_params: [], bounds_cur: [],
-        cur_ret: None, has_cur_ret: false, ret_at: None, loop_depth: 0,
+        cur_ret: None, has_cur_ret: false, ret_at: None, loop_depth: 0, defer_at: -1,
         frames: [], lambda_infer_active: false, lambda_depth: 0, cur_decl: -1, lambda_infer: [], stmt_match: false,
         resolved: [:], call_defaults: [:], errs: [], warnings: [], mains: [],
         skipped_decls: [:], skipped_fns: [:], broken_impls: [:], redefined: [:],
@@ -2778,10 +2782,16 @@ impl Checker {
             ExprKind.MapLit(entries) => Ok(Some(self.infer_map_lit(e, entries, expected)?)),
             ExprKind.Index(t, i) => Ok(Some(self.infer_index(e, t, i)?)),
             ExprKind.MatchE(s, arms) => self.infer_match(e, s, arms, expected, as_stmt),
-            ExprKind.Try(x) => Ok(Some(self.infer_try(e, x)?)),
+            ExprKind.Try(x) => {
+                if self.defer_at >= 0 { return Err(terr_at(e.line, e.col, e.sp, "a deferred block can't use '?': it runs as its block ends")) }
+                Ok(Some(self.infer_try(e, x)?))
+            },
             ExprKind.Cast(x, ty) => Ok(Some(self.infer_cast(e, x, ty)?)),
             ExprKind.Lambda(ps, ret, body, asy) => Ok(Some(self.infer_lambda(e, ps, ret, body, asy, expected)?)),
-            ExprKind.Await(x) => self.infer_await(e, x, expected),
+            ExprKind.Await(x) => {
+                if self.defer_at >= 0 { return Err(terr_at(e.line, e.col, e.sp, "a deferred block can't 'await': it runs as its block ends, without suspending")) }
+                self.infer_await(e, x, expected)
+            },
             ExprKind.Hole => Err(terr_at(e.line, e.col, e.sp, "'_' placeholder is only valid as a call argument")),
         }
         match r { Ok(om) => { self.record_type(e.id, om) }, Err(x) => {} }
@@ -4110,15 +4120,27 @@ impl Checker {
             },
             StmtKind.ForS(var_name, start, end, body, iter) => self.check_for(s, var_name, start, end, body, iter),
             StmtKind.ReturnS(v, tail) => {
+                if self.defer_at >= 0 { return Err(terr_at(s.line, s.col, s.sp, format("a deferred block can't '{}': it runs as its block ends", if_str(tail, "become", "return")))) }
                 if !tail { return self.check_return(s, v) }
                 match v { Some(ve) => self.check_become(ve), None => Ok(0) }
             },
             StmtKind.BreakS => {
                 if self.loop_depth == 0 { return Err(terr_at(s.line, s.col, s.sp, "'break' outside of a loop")) }
+                if self.loop_depth == self.defer_at { return Err(terr_at(s.line, s.col, s.sp, "a deferred block can't 'break' out of itself")) }
                 Ok(0)
             },
             StmtKind.ContinueS => {
                 if self.loop_depth == 0 { return Err(terr_at(s.line, s.col, s.sp, "'continue' outside of a loop")) }
+                if self.loop_depth == self.defer_at { return Err(terr_at(s.line, s.col, s.sp, "a deferred block can't 'continue' out of itself")) }
+                Ok(0)
+            },
+            StmtKind.DeferS(body) => {
+                // checked where it stands, with the names declared before it
+                let saved = self.defer_at
+                self.defer_at = self.loop_depth
+                let r = self.check_block(body)
+                self.defer_at = saved
+                r?
                 Ok(0)
             },
             StmtKind.ExprStmt(ex) => {
@@ -4559,6 +4581,8 @@ impl Checker {
     #test(checker_on("enum E { A, B(int) }"), stmt_of("x = x + 1"), "a", None, expr_of("a.b[0]"))[Err(CheckErr { line: 1, col: 3, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 10 }, msg: "'async let' can only stand in an async function", decl: -1, notes: [] })]
     fun check_async_let(var self, s: Stmt, name: str, ty: Option<TypeExpr>, init: Expr) -> Result<int32, CheckErr> {
         if !self.in_async { return Err(terr_at(s.line, s.col, s.sp, "'async let' can only stand in an async function")) }
+        // its scope would wait for the child: a suspension (D135)
+        if self.defer_at >= 0 { return Err(terr_at(s.line, s.col, s.sp, "a deferred block can't start a task: it runs as its block ends, without suspending")) }
         if self.task_line == 0 {
             self.task_line = s.line
             self.task_col = s.col
@@ -5451,6 +5475,7 @@ impl Checker {
         self.cur_decl = id
         self.frames = []
         self.loop_depth = 0
+        self.defer_at = -1
         self.lambda_depth = 0
         self.lambda_infer_active = false
         self.lambda_infer = []
@@ -6402,7 +6427,9 @@ impl Checker {
         self.task_init = false
         self.in_guard = false
         self.lambda_depth = self.lambda_depth + 1
-        self.lams.push(LamAt { base: self.frames.len() - 1, line: e.line, col: e.col, sp: e.sp })
+        self.lams.push(LamAt { base: self.frames.len() - 1, line: e.line, col: e.col, sp: e.sp, defer_at: self.defer_at })
+        // a lambda in a deferred block is a function of its own (D135)
+        self.defer_at = -1
         self.in_async = asy
         if asy { self.met_concurrency(e.line, e.col, e.sp, e.id) }
         var ret_t: Option<Type> = None
@@ -6458,6 +6485,7 @@ impl Checker {
 
     fun restore_lambda(var self, r: Option<Type>, h: bool, a: bool, inf: [MatchVal], asy: bool, ti: bool, ig: bool) {
         self.lambda_depth = self.lambda_depth - 1
+        self.defer_at = self.lams[self.lams.len() - 1].defer_at
         self.lams.pop()
         self.in_async = asy
         self.task_init = ti
@@ -6791,6 +6819,7 @@ impl Effects {
             },
             StmtKind.ReturnS(v, t) => { self.opt(v) },
             StmtKind.ExprStmt(x) => { self.expr(x) },
+            StmtKind.DeferS(b) => { self.block(b) },
             _ => {},
         }
     }
@@ -6990,6 +7019,7 @@ impl Reads {
             },
             StmtKind.ReturnS(v, t) => { self.opt(v, locals) },
             StmtKind.ExprStmt(x) => { self.expr(x, locals) },
+            StmtKind.DeferS(b) => { self.block(b, locals) },
             _ => {},
         }
     }
@@ -7279,6 +7309,8 @@ impl Reentrancy {
                 self.suspend(aw)
                 self.call_changes(init)
             },
+            // without an `await`, read as where it stands (D135)
+            StmtKind.DeferS(b) => { self.block(b) },
             _ => {},
         }
     }
@@ -7426,6 +7458,7 @@ fun fd_stmt(s: Stmt, t: [int32: [Expr]]) -> Stmt {
         StmtKind.ForS(v, start, end, body, iter) => StmtKind.ForS(v, fd_opt(start, t), fd_opt(end, t), fd_block(body, t), fd_opt(iter, t)),
         StmtKind.ReturnS(v, tail) => StmtKind.ReturnS(fd_opt(v, t), tail),
         StmtKind.ExprStmt(e) => StmtKind.ExprStmt(fd_expr(e, t)),
+        StmtKind.DeferS(b) => StmtKind.DeferS(fd_block(b, t)),
         _ => s.kind,
     }
     return Stmt { id: s.id, line: s.line, col: s.col, sp: s.sp, kind: k }

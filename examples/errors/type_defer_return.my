@@ -1,0 +1,13 @@
+//~ type error: a deferred block can't 'return'
+// A deferred block runs as its block ends, on the way out: it can't leave
+// the function itself (D135).
+fun f() -> int {
+    defer {
+        return 1
+    }
+    return 2
+}
+
+fun main() {
+    print(f())
+}

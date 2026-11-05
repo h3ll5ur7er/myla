@@ -66,7 +66,7 @@ struct LoopTarget { cont: int32, brk: int32, owners: int32, temps: int32 }
 // function holds between suspensions (D92), or -1; `deep_res`: an actor
 // method's result is copied deeply before it leaves the actor (D92).
 // `scope_ids`: the open scopes' indices in `f.scope_parent` (MYLA-183).
-struct Lower { f: IrFunc, cur: int32, scopes: [[Local]], scope_ids: [int32], owners: [[int32]], temps: [[int32]], loops: [LoopTarget], sret: int32, arm_binds: [Local], err: str, lams: [LamJob], partials: [PartialJob], fnvals: [str], holder: [int32], into: int32, placed: [bool], tail: bool, tailed: bool, frame_fn: bool, result: int32, tasks: [TaskSlot], actor_self: int32, actor_off: int32, deep_res: bool, narrow: [int32: int32], wants: [Want] }
+struct Lower { f: IrFunc, cur: int32, scopes: [[Local]], scope_ids: [int32], owners: [[int32]], temps: [[int32]], loops: [LoopTarget], sret: int32, arm_binds: [Local], err: str, lams: [LamJob], partials: [PartialJob], fnvals: [str], holder: [int32], into: int32, placed: [bool], tail: bool, tailed: bool, frame_fn: bool, result: int32, tasks: [TaskSlot], actor_self: int32, actor_off: int32, deep_res: bool, narrow: [int32: int32], wants: [Want], defers: [LDefer] }
 
 // A per-type routine a routine built as IR calls, for the code generator to
 // emit (MYLA-162): `kind` 0 a cell's deep copy, 1 an inline value's deep
@@ -88,11 +88,18 @@ struct TaskSlot { slot: int32, ty: Type, void: bool, owns: bool, depth: int32, f
 
 pub struct Lowered { f: IrFunc, lams: [LamJob], partials: [PartialJob], fnvals: [str] }
 
+// A deferred block (D135): the owners' scope it belongs to, and the names it
+// sees, those of the first `nscopes` scopes, of the last only the first
+// `nnames` (declared before it); the code generator it is lowered with (the
+// function's, which doesn't change while it is lowered). Emitted where each
+// way out of that scope leaves it.
+struct LDefer { depth: int32, nscopes: int32, nnames: int32, body: Block, cg: CodeGen }
+
 // A lowering of a function `test` without a result, at the start of its
 // entry block, the receiver of `#test` cases of the lowering's methods
 // (MYLA-184), with a code generator from `codegen_on` as their `cg`.
 pub fun lower_on() -> Lower {
-    var lw = Lower { f: IrFunc { name: "test", ret: None, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false, scope_parent: [-1] }, cur: 0, scopes: [[]], scope_ids: [0], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [], actor_self: -1, actor_off: 0, deep_res: false, narrow: [:], wants: [] }
+    var lw = Lower { f: IrFunc { name: "test", ret: None, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false, scope_parent: [-1] }, cur: 0, scopes: [[]], scope_ids: [0], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [], actor_self: -1, actor_off: 0, deep_res: false, narrow: [:], wants: [], defers: [] }
     lw.start(lw.new_block())
     return lw
 }
@@ -103,7 +110,7 @@ pub fun lower_on() -> Lower {
 pub fun lower_function(cg: CodeGen, fd: FunData, mangled: str) -> Result<Lowered, str> {
     let sig = cg.sig_of(fd.name)
     let ret = opt_subst_type(sig.ret, cg.subst)
-    var lw = Lower { f: IrFunc { name: mangled, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false, scope_parent: [-1] }, cur: 0, scopes: [[]], scope_ids: [0], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [], actor_self: -1, actor_off: 0, deep_res: false, narrow: [:], wants: [] }
+    var lw = Lower { f: IrFunc { name: mangled, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false, scope_parent: [-1] }, cur: 0, scopes: [[]], scope_ids: [0], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [], actor_self: -1, actor_off: 0, deep_res: false, narrow: [:], wants: [], defers: [] }
     var first_word = 0
     // an async function, when tasks take turns: its frame function, its
     // slots in its heap frame, the result in the first (D90)
@@ -201,7 +208,7 @@ pub fun lower_function(cg: CodeGen, fd: FunData, mangled: str) -> Result<Lowered
 // own at entry, borrowed as a parameter is (captures are immutable, D48).
 pub fun lower_lambda(cg: CodeGen, job: LamJob) -> Result<Lowered, str> {
     let ret = opt_subst_type(tfunc_ret(job.ftype), cg.subst)
-    var lw = Lower { f: IrFunc { name: job.lifted, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false, scope_parent: [-1] }, cur: 0, scopes: [[]], scope_ids: [0], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [], actor_self: -1, actor_off: 0, deep_res: false, narrow: [:], wants: [] }
+    var lw = Lower { f: IrFunc { name: job.lifted, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false, scope_parent: [-1] }, cur: 0, scopes: [[]], scope_ids: [0], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [], actor_self: -1, actor_off: 0, deep_res: false, narrow: [:], wants: [], defers: [] }
     // an async lambda, when tasks take turns: a frame function, as an async
     // function's (D90); its frame holds the environment and the arguments
     let frame = cg.frames && is_async_t(job.ftype)
@@ -791,6 +798,7 @@ impl Lower {
     fun close_scope(var self) {
         let depth = self.owners.len() - 1
         self.drop_owners(depth)
+        while self.defers.len() > 0 && self.defers[self.defers.len() - 1].depth >= depth { let d = self.defers.pop() }
         while self.tasks.len() > 0 && self.tasks[self.tasks.len() - 1].depth >= depth { let t = self.tasks.pop() }
         self.scopes.pop()
         self.owners.pop()
@@ -798,18 +806,19 @@ impl Lower {
         self.add(Inst.Scope(false))
     }
 
-    // Drop the owners of the scopes from the innermost down to index `depth`,
-    // each scope's in reverse order (they stay registered); first, a scope
-    // left waits for the child tasks it started (D89, D90).
+    // Leave the scopes from the innermost down to index `depth`, each in
+    // turn: it waits for the child tasks it started (D89, D90), the latest
+    // first, then its deferred blocks run, the last met first (D135), then
+    // its owners are dropped in reverse order (they stay registered).
     fun drop_owners(var self, depth: int32) {
-        // the child tasks of those scopes first, the latest first (D89)
         var j = self.tasks.len() - 1
-        while j >= 0 && self.tasks[j].depth >= depth {
-            self.join_task(self.tasks[j])
-            j = j - 1
-        }
         var s = self.owners.len() - 1
         while s >= depth {
+            while j >= 0 && self.tasks[j].depth >= s {
+                self.join_task(self.tasks[j])
+                j = j - 1
+            }
+            if self.defers.len() > 0 { self.emit_defers(s) }
             var i = self.owners[s].len() - 1
             while i >= 0 {
                 let slot = self.owners[s][i]
@@ -819,6 +828,37 @@ impl Lower {
                 i = i - 1
             }
             s = s - 1
+        }
+    }
+
+    // The deferred blocks of the owners' scope `s`, the last met first (D135),
+    // each with the names it saw where it stands.
+    fun emit_defers(var self, s: int32) {
+        let ds = self.defers
+        var i = ds.len() - 1
+        while i >= 0 {
+            if ds[i].depth == s {
+                let d = ds[i]
+                let saved = self.scopes
+                var cut: [[Local]] = []
+                var k = 0
+                while k < d.nscopes - 1 {
+                    cut.push(saved[k])
+                    k = k + 1
+                }
+                var last: [Local] = []
+                var j = 0
+                while j < d.nnames {
+                    last.push(saved[d.nscopes - 1][j])
+                    j = j + 1
+                }
+                cut.push(last)
+                self.scopes = cut
+                self.block(d.cg, d.body)
+                self.scopes = saved
+                self.defers = ds
+            }
+            i = i - 1
         }
     }
 
@@ -1056,6 +1096,11 @@ impl Lower {
                 }
                 let src = self.addr(cg, init)
                 self.destructure(cg, bind_elems(binding), src, t)
+            },
+            // emitted where its scope is left (`drop_owners`, D135)
+            StmtKind.DeferS(body) => {
+                let top = self.scopes.len() - 1
+                self.defers.push(LDefer { depth: self.owners.len() - 1, nscopes: self.scopes.len(), nnames: self.scopes[top].len(), body: body, cg: cg })
             },
         }
     }
@@ -4112,7 +4157,7 @@ fun calls_nothing(e: Expr) -> bool {
 // An empty lowering of the routine `name` with result type `ret`, its entry
 // block started.
 fun routine(name: str, ret: Option<Type>) -> Lower {
-    var lw = Lower { f: IrFunc { name: name, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false, scope_parent: [-1] }, cur: 0, scopes: [[]], scope_ids: [0], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [], actor_self: -1, actor_off: 0, deep_res: false, narrow: [:], wants: [] }
+    var lw = Lower { f: IrFunc { name: name, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false, scope_parent: [-1] }, cur: 0, scopes: [[]], scope_ids: [0], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [], actor_self: -1, actor_off: 0, deep_res: false, narrow: [:], wants: [], defers: [] }
     let entry = lw.new_block()
     lw.start(entry)
     return lw

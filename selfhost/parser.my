@@ -1141,6 +1141,12 @@ impl Parser {
             let tok = self.advance()
             return self.mk_stmt(tok.line, tok.column, StmtKind.ContinueS)
         }
+        // `defer { … }` (D135): `defer` is a keyword only here, before a block
+        if k == TokenKind.IDENT && self.peek().lexeme == "defer" && self.peek_kind_at(1) == TokenKind.LBRACE {
+            let tok = self.advance()
+            let body = self.block()
+            return self.mk_stmt(tok.line, tok.column, StmtKind.DeferS(body))
+        }
         return self.assign_or_expr()
     }
 

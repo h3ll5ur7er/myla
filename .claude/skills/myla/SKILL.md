@@ -110,6 +110,7 @@ fun main() {
 - Also in the standard library: `std.json` (`parse`, `to_string`, `field`), `std.toml` (`parse`, `parse_doc`), `std.num` (`parse_int`, `parse_float`, `format_float`), `std.task` (`all`, `cancel`, `cancelled`); the reference is `docs/Language/Standard-library.md`.
 - Part of a string: `var sb = StringBuilder()`, `append(sb, s, start, end)` (byte offsets, must lie within `s`), `build(sb)`; there is no slicing syntax.
 - Constants: `const MAX: int = 10`; no global variables.
+- `defer { … }` runs its block when the enclosing block ends, the last one met first: at its end, `return` (after the value), `?`, `break`, `continue`, before a `become`'s call; not on a failure (D135). It can't `return`, `?`, `await` or `break` out of itself, and sees the names declared before it.
 - `become f(args)` is a guaranteed tail call: it ends the function like `return f(args)`, but the stack doesn't grow (D87). The call must be a function, a method or a function value that's a parameter (not a builtin, a variant or a partial application), and must not be followed by `?`. Past six argument words (a struct handed over counts a word per field), it can't pass more than its function received (D119).
 
 ## Concurrency (D89 to D97, `docs/Language/Concurrency.md`)

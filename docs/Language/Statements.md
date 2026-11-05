@@ -265,6 +265,40 @@ The checker accepts a `become` that can run without the function's frame (`Check
 
 The guarantee is the `become`'s own: a function value's code runs as written, so a lambda whose body calls a function, or a partial application, makes an ordinary call there.
 
+## defer
+
+`defer { … }` runs its block when the block it stands in ends (D135, [[MYLA-229]]): at its end, and at each way out of it that runs: `return` (after the returned value is computed), `?`, `break`, `continue`, and a `become` (after its arguments, before its call). Several run the last one met first. A `defer` that wasn't reached doesn't run.
+
+```myla
+fun copy(lines: [str]) -> int {
+    var done = 0
+    defer {
+        print(f"copied {done}")
+    }
+    for l in lines {
+        if l == "" {
+            return done
+        }
+        done += 1
+    }
+    return done
+}
+
+fun main() {
+    print(copy(["a", "b", "", "c"]))
+}
+// output:
+// copied 2
+// 2
+```
+
+- The block reads the variables as they are when it runs (`done` above), and sees the names declared before the `defer`: one declared later, or by a block it is left from, isn't the one it means.
+- It may not `return`, `become`, use `?`, `await`, or start a task with `async let`: it runs on the way out, without suspending. `break` and `continue` only reach a loop inside it. A lambda in it is a function of its own.
+- In an async function a block's children end first (the block waits for them as it ends), then its deferred blocks run.
+- A failure (a panic, a runtime error, `exit`) runs none: it ends the program at once (D97). D135 also names a task stopped at a suspension point; today the only such stop is a failure elsewhere ending the program (D96 stops nothing), which runs none either.
+- `defer` is a keyword only at the start of a statement before `{`; elsewhere it is an ordinary name.
+- At the top of the REPL the session's scope never ends, so a `defer` typed there doesn't run.
+
 ## Expression statements
 
 Any expression can stand alone; usually it's a call. A `match` used as a statement may have arms without a value.

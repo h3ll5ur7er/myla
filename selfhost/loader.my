@@ -986,6 +986,7 @@ impl Renamer {
             },
             StmtKind.ReturnS(v, tail) => StmtKind.ReturnS(self.opt_expr(v), tail),
             StmtKind.ExprStmt(x) => StmtKind.ExprStmt(self.expr(x)),
+            StmtKind.DeferS(body) => StmtKind.DeferS(self.block(body)),
             _ => s.kind,
         }
         return Stmt { id: s.id, line: s.line, col: s.col, sp: s.sp, kind: k }

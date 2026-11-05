@@ -1153,6 +1153,7 @@ impl CodeGen {
                 match iter { Some(e) => { self.scan_expr(e, false) }, None => {} }
                 self.scan_block(body)
             },
+            StmtKind.DeferS(body) => { self.scan_block(body) },
             _ => {},
         }
     }
@@ -3184,6 +3185,7 @@ impl CodeGen {
                 },
                 StmtKind.ReturnS(ov, tail) => { for v in self.free_opt(ov, bnd) { out.push(v) } },
                 StmtKind.ExprStmt(e) => { for v in self.free_expr(e, bnd) { out.push(v) } },
+                StmtKind.DeferS(body) => { for v in self.free_block(body, bnd) { out.push(v) } },
                 _ => {},
             }
         }
@@ -3788,6 +3790,7 @@ fun names_in_block(b: Block, acc: [str]) -> [str] {
                 match iter { Some(e) => { out = names_in_expr(e, out) }, None => {} }
                 out = names_in_block(body, out)
             },
+            StmtKind.DeferS(body) => { out = names_in_block(body, out) },
             _ => {},
         }
     }
@@ -3862,6 +3865,7 @@ fun may_write_stmt(st: Stmt, name: str) -> bool {
         },
         StmtKind.ReturnS(ov, tail) => { return may_write_opt(ov, name) },
         StmtKind.ExprStmt(e) => { return may_write_expr(e, name) },
+        StmtKind.DeferS(body) => { return may_write_block(body, name) },
         _ => {},
     }
     return false

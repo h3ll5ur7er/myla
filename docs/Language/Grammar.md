@@ -103,7 +103,7 @@ function_type = "async"? "(" ( type ( "," type )* ","? )? ")" "->" type ;
 ```ebnf
 block       = "{" SEP* ( statement ( SEP+ statement )* SEP* )? "}" ;
 statement   = var_decl | let_else | async_let | if_stmt | while_stmt | for_stmt | return_stmt | become_stmt
-            | "break" | "continue" | assignment | expression ;
+            | "break" | "continue" | defer_stmt | assignment | expression ;
 
 var_decl    = ( "let" | "var" ) ( IDENT | bind_tuple ) ( ":" type )? "=" expression ;
 async_let   = "async" "let" IDENT ( ":" type )? "=" expression ;   (* a child task, D89 *)
@@ -118,6 +118,7 @@ for_stmt    = "for" IDENT "in" cond ( ".." cond )? block ;
 cond        = expression ;                          (* without struct literals *)
 return_stmt = "return" ( expression ( "," expression )* )? ;   (* a, b is a tuple *)
 become_stmt = "become" expression ;                (* a call, D87 *)
+defer_stmt  = "defer" block ;                      (* runs as its block ends, D135 *)
 
 assignment  = place ( "=" | compound_op ) expression ;
 compound_op = "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>=" ;   (* D104 (2): place = place op expression *)

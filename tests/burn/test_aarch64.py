@@ -18,7 +18,7 @@ import unittest
 
 from ._native import CAN_BUILD_NATIVE, SKIP_REASON
 from ._tools import STDLIB_ROOT, native_compiler
-from . import test_time, test_unit_type
+from . import test_defer, test_time, test_unit_type
 
 _REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir))
 
@@ -237,6 +237,8 @@ fun main() {
 
 # the unit type (D138): values without size in lists, maps, enums and tasks
 PROGRAMS["unit"] = test_unit_type.PROGRAM
+# `defer` (D135): every way a scope ends, in plain and async functions
+PROGRAMS["defer"] = test_defer.PROGRAM
 
 # a struct of some 33 KB: frames, copies and offsets past what one
 # instruction reaches

@@ -624,6 +624,7 @@ impl Resolver {
             StmtKind.BreakS => {},
             StmtKind.ContinueS => {},
             StmtKind.ExprStmt(e) => { self.expr(e) },
+            StmtKind.DeferS(body) => { self.block(body) },
         }
     }
 

@@ -72,6 +72,7 @@
   "in"
   "return"
   "become"
+  "defer"
   "await"
   "match"
 ] @keyword
