@@ -35,3 +35,12 @@ Evidence:
 - the fixed point is reached and the seeds updated.
 
 The arm64 hardware run is the CI job's.
+
+## Found by the arm64 hardware (2026-11-05)
+
+- **The first run on GitHub's arm64 runner:** every stress program passed its 60 runs but one. `t18_closures_cross_tasks` crashed with signal 11 in 2 of its 20 runs on 4 workers. x86-64 never failed (0 of 640 runs, 8 at a time), and neither did qemu (0 of 200).
+- **Bisection:** t18's three parts as programs of their own. t19 (closures deep-copied into children) and t21 (a composition into a child) passed 100 of 100. t20 (siblings and the parent cloning a finished child's closure, [[MYLA-148]]) crashed in 3 of 100, as did t18.
+- **The cause:** the lowering's `wait_task` reads the child's `task` word itself before calling `__wait`, and when the child has ended it reads the result from the frame at once. That load was plain, so aarch64 could read the result before the word: a stale result, whose clone then followed a bad pointer. `task_wait` in std.rt had its acquire load since step two, but the compiler's inlined check didn't.
+- **The fix:** an acquire load (`__load_acq64`, `ldar`) in [[selfhost/lower.my]].
+
+The hardware run after the fix is CI's.
