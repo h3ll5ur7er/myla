@@ -6,23 +6,43 @@
 // underlying open/read/close run as raw Linux syscalls natively and as Python
 // file IO in the interpreter, with identical (errno-keyed) error mapping.
 
-// Why a filesystem operation failed. `Other` carries the raw OS errno for
-// anything not given its own variant.
+// Why a filesystem or I/O operation failed: the causes a program handles on
+// every target (D129). `Unsupported`: the target can't do it at all (wasm32
+// has no processes, D132). `Cancelled`: the task waiting for input was asked
+// to stop (D96). `Other` holds the platform's own code for anything else; its
+// numbers are the platform's, not portable.
 pub enum IoError {
     NotFound,
     PermissionDenied,
+    AlreadyExists,
+    NotADirectory,
+    IsADirectory,
+    NotEmpty,
+    Interrupted,
+    Cancelled,
+    Unsupported,
     Other(int32),
 }
 
-// Map a (nonzero) OS errno to an `IoError`. ENOENT/EACCES on Linux. Also
-// used by `std.io`.
+// The cause of a (nonzero) error code from `std.platform`, which gives Linux's
+// numbers on every target so far (wasm32's maps WASI's onto them). Also used
+// by `std.io` and `std.process`.
+#test(2)[IoError.NotFound]
+#test(1)[IoError.PermissionDenied]
+#test(17)[IoError.AlreadyExists]
+#test(39)[IoError.NotEmpty]
+#test(38)[IoError.Unsupported]
+#test(5)[IoError.Other(5)]
 pub fun from_errno(code: int32) -> IoError {
-    if code == 2 {
-        return IoError.NotFound
-    }
-    if code == 13 {
-        return IoError.PermissionDenied
-    }
+    if code == 2 { return IoError.NotFound }
+    if code == 13 || code == 1 { return IoError.PermissionDenied }
+    if code == 17 { return IoError.AlreadyExists }
+    if code == 20 { return IoError.NotADirectory }
+    if code == 21 { return IoError.IsADirectory }
+    if code == 39 { return IoError.NotEmpty }
+    if code == 4 { return IoError.Interrupted }
+    if code == 125 { return IoError.Cancelled }
+    if code == 38 || code == 95 { return IoError.Unsupported }
     return IoError.Other(code)
 }
 
@@ -97,7 +117,7 @@ pub fun list_dir(path: str) -> Result<[str], IoError> {
 }
 
 // Make the directory `path` (mode 0755, less the umask). Its parent must
-// exist; a path that exists already is `Other(17)` (EEXIST). `Ok` holds 0.
+// exist; a path that exists already is `AlreadyExists`. `Ok` holds 0.
 pub fun make_dir(path: str) -> Result<int32, IoError> {
     __mkdir(path, 0o755)
     let err = __io_errno()
@@ -108,8 +128,8 @@ pub fun make_dir(path: str) -> Result<int32, IoError> {
 }
 
 // Make the directory `path` and the parents it lacks, like `mkdir -p`. A
-// directory that exists already is fine; a file at `path` is `Other(17)`
-// (EEXIST), and a file where a parent should be is `Other(20)` (ENOTDIR).
+// directory that exists already is fine; a file at `path` is
+// `AlreadyExists`, and a file where a parent should be is `NotADirectory`.
 // `Ok` holds 0.
 pub fun make_dir_all(path: str) -> Result<int32, IoError> {
     var i = 1
@@ -131,14 +151,14 @@ pub fun make_dir_all(path: str) -> Result<int32, IoError> {
 }
 
 // Remove the file `path` (a symbolic link is removed itself, not what it
-// names). A directory is `Other(21)` (EISDIR). `Ok` holds 0.
+// names). A directory is `IsADirectory`. `Ok` holds 0.
 pub fun remove_file(path: str) -> Result<int32, IoError> {
     __unlink(path)
     return io_result()
 }
 
 // Remove the directory `path`, which must be empty: one that isn't is
-// `Other(39)` (ENOTEMPTY). `Ok` holds 0.
+// `NotEmpty`. `Ok` holds 0.
 pub fun remove_dir(path: str) -> Result<int32, IoError> {
     __rmdir(path)
     return io_result()

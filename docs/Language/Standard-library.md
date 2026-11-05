@@ -1,6 +1,6 @@
 # Standard library
 
-Myla has built-in functions known to the checker, and a small standard library written in Myla under [[lib/std/io.my|lib/std/]]. Both work without libc: natively they rest on the platform layer `std.platform`, raw Linux system calls on x86-64 and aarch64 and WASI's imports on wasm32 ([[Architecture/Native-backend]]), and so does the interpreter, which is a native program itself. What a target lacks shows as an error: on wasm32 `run` and `spawn` fail with `Other(38)` (ENOSYS), as there are no processes; how targets differ is to be specified ([[MYLA-266]]).
+Myla has built-in functions known to the checker, and a small standard library written in Myla under [[lib/std/io.my|lib/std/]]. Both work without libc: natively they rest on the platform layer `std.platform`, raw Linux system calls on x86-64 and aarch64 and WASI's imports on wasm32 ([[Architecture/Native-backend]]), and so does the interpreter, which is a native program itself. What a target lacks shows as an error of its own, `Unsupported` (D129, D132): on wasm32 `run` and `spawn` fail with `SpawnError.Unsupported`, as there are no processes; how targets differ is to be specified ([[MYLA-266]]).
 
 [TOC]
 
@@ -79,7 +79,7 @@ fun main() {
 
 A protocol that frames messages with a `Content-Length` header reads the header lines with `read_line` and the body with `read_exact`; `tests/burn/test_stdin.py` has an example.
 
-In a task, each read has an async version that waits for the input with the task suspended, so the other tasks run meanwhile (D124, [[MYLA-230]]): `await r.read_line_async()`, `await r.read_exact_async(n)`, `await r.read_to_end_async()`, `await r.fill_async(want)`. They give what the blocking reads give; outside a task they block as those do. A task asked to stop (`task.cancel`, a `task.timeout` that ran out) stops waiting at once and gets `Err(IoError.Other(125))` (ECANCELED). Natively the executor's poller watches the descriptor (a regular file, which it can't watch, is always ready); the interpreter looks at the waiting tasks' descriptors before each turn.
+In a task, each read has an async version that waits for the input with the task suspended, so the other tasks run meanwhile (D124, [[MYLA-230]]): `await r.read_line_async()`, `await r.read_exact_async(n)`, `await r.read_to_end_async()`, `await r.fill_async(want)`. They give what the blocking reads give; outside a task they block as those do. A task asked to stop (`task.cancel`, a `task.timeout` that ran out) stops waiting at once and gets `Err(IoError.Cancelled)` (ECANCELED). Natively the executor's poller watches the descriptor (a regular file, which it can't watch, is always ready); the interpreter looks at the waiting tasks' descriptors before each turn.
 
 ## std.process
 
@@ -89,11 +89,11 @@ In a task, each read has an async version that waits for the input with the task
 | `exit(code: int32)` | Ends the process; the low 8 bits become the exit status |
 | `env(name: str) -> Option<str>` | The value of the environment variable `name` the process started with (`""` included), or `None` when there is none ([[MYLA-243]]; the primitive `__getenv`, which reads the environment the process started with, or `""` with `__io_errno` 2) |
 | `run(program: str, args: [str]) -> Result<Output, SpawnError>` | Runs a program found by its exact path (no `PATH` search) with the current environment, waits, captures its output |
-| `run_async(program: str, args: [str]) -> Result<Output, SpawnError>` (async) | `run` in a task: the task waits for the child (its output read as it comes, then its end) suspended, the other tasks running (D124, [[MYLA-230]]); outside a task it blocks as `run` does. A task asked to stop stops waiting: the child is killed and reaped, `Err(SpawnError.Other(125))` |
+| `run_async(program: str, args: [str]) -> Result<Output, SpawnError>` (async) | `run` in a task: the task waits for the child (its output read as it comes, then its end) suspended, the other tasks running (D124, [[MYLA-230]]); outside a task it blocks as `run` does. A task asked to stop stops waiting: the child is killed and reaped, `Err(SpawnError.Cancelled)` |
 | `command(program)` → `Command` | Builder: `.arg(a)`, `.args([…])`, `.output()`, `.output_async()` (async, as `run_async`) |
 | `struct Output { stdout: [uint8], stderr: [uint8], status: ExitStatus }` | Output is raw bytes |
 | `enum ExitStatus { Exited(int32), Signaled(int32) }` | |
-| `enum SpawnError { NotFound, PermissionDenied, Other(int32) }` | `Other` carries the errno |
+| `enum SpawnError { NotFound, PermissionDenied, Unsupported, Cancelled, Other(int32) }` | Why a program couldn't be run (D129): not there, not allowed, no processes on this target, or the waiting task was stopped; `Other` holds the platform's own code for anything else |
 
 ```myla
 from std.process import command, ExitStatus
@@ -128,15 +128,15 @@ fun main() {
 | `exists(path: str) -> bool` | Whether the path names anything (symbolic links followed, so a dangling one doesn't count) |
 | `is_dir(path: str) -> bool`, `is_file(path: str) -> bool` | Whether it names a directory, a regular file (links followed) |
 | `current_dir() -> Result<str, IoError>` | The working directory: an absolute path without symbolic links, as the kernel gives it; a directory that was removed is `NotFound` ([[MYLA-98]]) |
-| `remove_file(path: str) -> Result<int32, IoError>` | Removes a file, or a symbolic link itself; a directory is `Other(21)` (EISDIR); `Ok` holds 0 ([[MYLA-96]]) |
-| `remove_dir(path: str) -> Result<int32, IoError>` | Removes an empty directory; one that isn't is `Other(39)` (ENOTEMPTY); `Ok` holds 0 |
+| `remove_file(path: str) -> Result<int32, IoError>` | Removes a file, or a symbolic link itself; a directory is `IsADirectory`; `Ok` holds 0 ([[MYLA-96]]) |
+| `remove_dir(path: str) -> Result<int32, IoError>` | Removes an empty directory; one that isn't is `NotEmpty`; `Ok` holds 0 |
 | `remove_dir_all(path: str) -> Result<int32, IoError>` | Removes the path and, for a directory, everything in it, like `rm -r`; symbolic links are removed, not followed; `Ok` holds 0 |
 | `rename(from_path: str, to: str) -> Result<int32, IoError>` | Renames or moves within one file system, replacing a file at `to`; `Ok` holds 0 |
-| `enum IoError { NotFound, PermissionDenied, Other(int32) }` | Mapped from the OS errno |
+| `enum IoError { NotFound, PermissionDenied, AlreadyExists, NotADirectory, IsADirectory, NotEmpty, Interrupted, Cancelled, Unsupported, Other(int32) }` | Why an operation failed, the same causes on every target (D129); `Cancelled`: a task's read stopped by `task.cancel` or a timeout (D96); `Unsupported`: the target can't do it; `Other` holds the platform's own code for anything else, whose numbers aren't portable |
 
 The file's bytes become the string unchanged, even when they aren't valid UTF-8: strings work on bytes, and `chars` gives U+FFFD for the invalid ones ([[Language/Collections-and-strings]], [[MYLA-12]]).
 
-`from_errno(code: int32) -> IoError` maps an errno; `std.io` uses it too. Errors without a variant of their own keep their errno in `Other`: a path that exists already is `Other(17)` (EEXIST), a file where a directory should be `Other(20)` (ENOTDIR).
+`from_errno(code: int32) -> IoError` turns the platform layer's code (Linux's numbers on every target so far; wasm32's maps WASI's onto them) into its cause; `std.io` and `std.process` use it too.
 
 ```myla
 from std.fs import list_dir, make_dir_all, is_dir, IoError

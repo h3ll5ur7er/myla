@@ -154,3 +154,21 @@ def run_source_both(source: str, args=None) -> tuple[str, str, int]:
         native = build_and_run_full(check_file(path), args=args, argv0=argv0)
     assert interp == native, f"interpreter {interp!r} != native {native!r}"
     return interp
+
+
+def run_file_both_now(path: str, args=None) -> tuple[str, str, int]:
+    """`path` run by today's self-hosted interpreter (`myla run`) and as a
+    native binary, which must agree on (stdout, stderr, exit), returned. For
+    programs no recorded answer of the retired Python toolchain covers (new,
+    or changed in what they print, as D129 changed I/O errors): each test gives
+    its own expectation. Both see the file's path as `argv[0]`."""
+    interp = selfhost_run(path, args)
+    native = build_and_run_full(Program(path), args=args, argv0=path)
+    assert interp == native, f"interpreter {interp!r} != native {native!r}"
+    return interp
+
+
+def run_source_both_now(source: str, args=None) -> tuple[str, str, int]:
+    """`run_file_both_now` for a program's text."""
+    with tempfile.TemporaryDirectory() as tmp:
+        return run_file_both_now(write_program(tmp, source), args)

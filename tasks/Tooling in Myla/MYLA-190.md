@@ -26,4 +26,10 @@ Decided by D113 ([[MYLA-211]]): I/O and process functions return `Result<T, IoEr
 - **D129:** `IoError` and `SpawnError` name portable causes (`NotFound`, `PermissionDenied`, `AlreadyExists`, `IsADirectory`, `NotADirectory`, `NotEmpty`, `Interrupted`, `Unsupported`, …), plus `Other(code)` for the rest. wasm32's `run` gives `Unsupported`.
 - **D138:** the always-0 `int32` results become `Result<(), IoError>` ([[MYLA-278]]).
 
-- [ ] The causes in `std.fs` and `std.process` from each platform module's codes ([[MYLA-265]]); the error tests on every target
+- [x] The causes in `std.fs` and `std.process` from each platform module's codes ([[MYLA-265]]); the error tests on every target
+  - **The causes:** `IoError` gains `AlreadyExists`, `NotADirectory`, `IsADirectory`, `NotEmpty`, `Interrupted`, `Cancelled` (a cancelled read; `Other(125)` before) and `Unsupported`. `SpawnError` gains `Unsupported` and `Cancelled`.
+  - **The mapping:** `from_errno` and `spawn_error_from_errno` map the platform layer's codes, which are Linux's numbers on every target so far, wasm32's included. `#test` cases cover it.
+  - **Tests:**
+    - `test_fs.IoErrorCauses`, written first and failing, makes each common cause happen in the interpreter and natively;
+    - `test_wasm.WasmCapabilities`: `run` on wasm32 is `Unsupported`;
+    - the tests whose programs print causes now (`test_fs`, `test_process`, the `readfile` and `subprocess` examples) carry their own expectations, through `run_file_both_now` and `run_source_both_now` in `_native.py`, as no recorded answer covers them.

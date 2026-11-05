@@ -135,11 +135,19 @@ fun value_at(doc: TomlDoc, path: [str]) -> TomlPos {
 }
 
 #test(IoError.NotFound)["no such file or directory"]
+#test(IoError.IsADirectory)["is a directory"]
 #test(IoError.Other(21))["errno 21"]
 fun io_text(e: IoError) -> str {
     return match e {
         IoError.NotFound => "no such file or directory"
         IoError.PermissionDenied => "permission denied"
+        IoError.AlreadyExists => "already exists"
+        IoError.NotADirectory => "not a directory"
+        IoError.IsADirectory => "is a directory"
+        IoError.NotEmpty => "directory not empty"
+        IoError.Interrupted => "interrupted"
+        IoError.Cancelled => "cancelled"
+        IoError.Unsupported => "not supported on this target"
         IoError.Other(code) => format("errno {}", code)
     }
 }

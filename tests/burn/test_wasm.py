@@ -411,6 +411,39 @@ class WasmStack(unittest.TestCase):
             self.same(tmp, "small", SMALL_FRAMES)
 
 
+
+# D129: what wasm32 can't do is a cause of its own, `Unsupported`
+UNSUPPORTED = """
+from std.process import run, SpawnError
+from std.fs import read_to_string, IoError
+
+fun main() {
+    print(match run("/bin/true", []) {
+        Ok(o) => "ran",
+        Err(SpawnError.Unsupported) => "unsupported",
+        Err(e) => "another error",
+    })
+    print(match read_to_string("/no/such/file") {
+        Ok(s) => "read",
+        Err(IoError.NotFound) => "not found",
+        Err(e) => "another error",
+    })
+}
+"""
+
+
+@unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
+@unittest.skipUnless(HAVE_WASM, WASM_SKIP)
+class WasmCapabilities(unittest.TestCase):
+    def test_no_processes_is_unsupported(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "unsupported.my")
+            with open(path, "w") as fh:
+                fh.write(UNSUPPORTED.lstrip())
+            out = os.path.join(tmp, "unsupported.wasm")
+            build_wasm(path, out)
+            self.assertEqual(run(NODE + [out]), ("unsupported\nnot found\n", "", 0))
+
 @unittest.skipUnless(HAVE_WASM, WASM_SKIP)
 class WasmTime(test_time.Time):
     """test_time's programs built for wasm and run under Node (through a

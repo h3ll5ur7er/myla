@@ -10,7 +10,8 @@ fun describe(e: IoError) -> str {
     return match e {
         IoError.NotFound => "no such file",
         IoError.PermissionDenied => "permission denied",
-        IoError.Other(code) => "I/O error",
+        IoError.IsADirectory => "a directory, not a file",
+        _ => "I/O error",
     }
 }
 

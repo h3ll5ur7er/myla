@@ -26,6 +26,8 @@ fun describe_error(e: SpawnError) -> str {
     return match e {
         SpawnError.NotFound => "not found (as expected)",
         SpawnError.PermissionDenied => "permission denied",
+        SpawnError.Unsupported => "no processes on this target",
+        SpawnError.Cancelled => "cancelled",
         SpawnError.Other(code) => format("other errno {}", code),
     }
 }

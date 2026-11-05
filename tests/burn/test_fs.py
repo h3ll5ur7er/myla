@@ -24,6 +24,8 @@ from ._native import (
     build_and_run_full,
     check_file,
     interpret_full,
+    run_file_both_now,
+    run_source_both_now,
     write_program,
 )
 from ._tools import STDLIB_ROOT, selfhost_tool
@@ -52,33 +54,21 @@ def _run_both(source: str, args=None):
     return interp
 
 
+@unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
 class TestReadFileExample(unittest.TestCase):
-    def test_interpreter_echoes_file(self):
-        out, err, code = interpret_full(check_file(EXAMPLE), argv=["prog", POEM])
-        self.assertEqual(out, POEM_TEXT)
-        self.assertEqual((err, code), ("", 0))
+    # The example's error causes changed with D129, so these are its own
+    # expectations, not the retired toolchain's recorded answers.
+    def test_echoes_the_file(self):
+        self.assertEqual(run_file_both_now(EXAMPLE, [POEM]), (POEM_TEXT, "", 0))
 
-    @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
-    def test_native_matches_interpreter(self):
-        interp = interpret_full(check_file(EXAMPLE), argv=["prog", POEM])
-        native = build_and_run_full(check_file(EXAMPLE), args=[POEM], argv0="prog")
-        self.assertEqual(native, (POEM_TEXT, "", 0))
-        self.assertEqual(interp, native)
+    def test_missing_file(self):
+        self.assertEqual(run_file_both_now(EXAMPLE, ["/no/such/file"]), ("", "no such file\n", 1))
 
-    @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
-    def test_missing_file_parity(self):
-        interp = interpret_full(check_file(EXAMPLE), argv=["prog", "/no/such/file"])
-        native = build_and_run_full(
-            check_file(EXAMPLE), args=["/no/such/file"], argv0="prog")
-        self.assertEqual(native, ("", "no such file\n", 1))
-        self.assertEqual(interp, native)
+    def test_a_directory(self):
+        self.assertEqual(run_file_both_now(EXAMPLE, ["/"]), ("", "a directory, not a file\n", 1))
 
-    @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
-    def test_missing_argument_parity(self):
-        interp = interpret_full(check_file(EXAMPLE), argv=["prog"])
-        native = build_and_run_full(check_file(EXAMPLE), args=[], argv0="prog")
-        self.assertEqual(native, ("", "usage: readfile <path>\n", 2))
-        self.assertEqual(interp, native)
+    def test_missing_argument(self):
+        self.assertEqual(run_file_both_now(EXAMPLE, []), ("", "usage: readfile <path>\n", 2))
 
 
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
@@ -110,14 +100,14 @@ class TestReadToStringParity(unittest.TestCase):
         self.assertEqual(out, f"{len(POEM_TEXT.encode('utf-8'))}\n")
 
     def test_not_found_errno_parity(self):
-        out, _, _ = _run_both(
+        out, _, _ = run_source_both_now(
             "from std.io import println\n"
             "from std.fs import read_to_string, IoError\n"
             "fun describe(e: IoError) -> str {\n"
             "    return match e {\n"
             '        IoError.NotFound => "not-found",\n'
             '        IoError.PermissionDenied => "denied",\n'
-            '        IoError.Other(c) => "other",\n'
+            '        _ => "other",\n'
             "    }\n"
             "}\n"
             "fun main() {\n"
@@ -154,14 +144,14 @@ class TestWriteToFileParity(unittest.TestCase):
         self.assertEqual((out, err, code), ("12\nabc\nλ done\n", "", 0))
 
     def test_write_to_missing_dir_errno_parity(self):
-        out, _, _ = _run_both(
+        out, _, _ = run_source_both_now(
             "from std.io import println\n"
             "from std.fs import write_to_file, IoError\n"
             "fun describe(e: IoError) -> str {\n"
             "    return match e {\n"
             '        IoError.NotFound => "not-found",\n'
             '        IoError.PermissionDenied => "denied",\n'
-            '        IoError.Other(c) => "other",\n'
+            '        _ => "other",\n'
             "    }\n"
             "}\n"
             "fun main() {\n"
@@ -174,14 +164,14 @@ class TestWriteToFileParity(unittest.TestCase):
         self.assertEqual(out, "not-found\n")
 
 
-    def test_directory_read_is_other_errno(self):
-        # Opening a directory succeeds but reading it fails with EISDIR (21),
-        # which maps to IoError.Other — and both backends must agree on the code.
-        out, _, _ = _run_both(
+    def test_directory_read_is_a_directory(self):
+        # Opening a directory succeeds but reading it fails with EISDIR, which
+        # is IoError.IsADirectory (D129) in both implementations.
+        out, _, _ = run_source_both_now(
             "from std.fs import read_to_string, IoError\n"
             "fun code_of(e: IoError) -> int32 {\n"
             "    return match e {\n"
-            "        IoError.Other(c) => c,\n"
+            "        IoError.IsADirectory => 21,\n"
             "        _ => -1,\n"
             "    }\n"
             "}\n"
@@ -205,7 +195,12 @@ fun describe(e: IoError) -> str {
     return match e {
         IoError.NotFound => "not found"
         IoError.PermissionDenied => "permission denied"
+        IoError.AlreadyExists => "already exists"
+        IoError.NotADirectory => "not a directory"
+        IoError.IsADirectory => "is a directory"
+        IoError.NotEmpty => "not empty"
         IoError.Other(code) => format("errno {}", code)
+        _ => "other"
     }
 }
 
@@ -284,7 +279,7 @@ fun main() {
 
 FS_TOUR_OUTPUT = """empty: 0 []
 make a: ok 0
-make a again: errno 17
+make a again: already exists
 make in missing: not found
 make all: ok 0
 make all again: ok 0
@@ -293,10 +288,10 @@ make sub: ok 0
 a: 10 [.hidden,10,9,Alpha,_under,a b,beta,sub,zeta.txt,λ.my]
 a/: 10 [.hidden,10,9,Alpha,_under,a b,beta,sub,zeta.txt,λ.my]
 deep: 2 [est,est2]
-file: errno 20
+file: not a directory
 missing: not found
-make all through a file: errno 20
-make all over a file: errno 17
+make all through a file: not a directory
+make all over a file: already exists
 '.': exists true dir true file false
 'a': exists true dir true file false
 'a/beta': exists true dir false file true
@@ -322,6 +317,7 @@ fun main() {
                 IoError.NotFound => { println("not found") },
                 IoError.PermissionDenied => { println("permission denied") },
                 IoError.Other(code) => { println(format("errno {}", code)) },
+                _ => { println("other") },
             }
         },
     }
@@ -359,7 +355,10 @@ fun code(r: Result<int32, IoError>) -> str {
         Err(e) => match e {
             IoError.NotFound => "not found"
             IoError.PermissionDenied => "denied"
+            IoError.IsADirectory => "is a directory"
+            IoError.NotEmpty => "not empty"
             IoError.Other(c) => format("errno {}", c)
+            _ => "other"
         }
     }
 }
@@ -386,7 +385,7 @@ fun main() {
     println(code(remove_dir("e")))
 }
 """
-REMOVE_TOUR_OUTPUT = "ok\nfalse true\nok\nnot found\nerrno 21\nerrno 39\nok\nfalse\ntrue\nnot found\nok\nfalse\nnot found\nok\n"
+REMOVE_TOUR_OUTPUT = "ok\nfalse true\nok\nnot found\nis a directory\nnot empty\nok\nfalse\ntrue\nnot found\nok\nfalse\nnot found\nok\n"
 
 
 def prepare_tree(work: str) -> None:
@@ -398,6 +397,47 @@ def prepare_tree(work: str) -> None:
             fh.write(rel)
     os.symlink(os.path.join(work, "outside"), os.path.join(work, "tree", "link"))
     os.symlink("nowhere", os.path.join(work, "tree", "sub", "dangling"))
+
+
+@unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
+class IoErrorCauses(unittest.TestCase):
+    """Each portable cause of an `IoError` (D129, MYLA-190), made to happen
+    for real, named the same by the interpreter and native code."""
+
+    def test_the_causes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out, err, code = run_source_both_now(
+                "from std.fs import IoError, make_dir, remove_file, remove_dir, write_to_file, read_to_string\n"
+                "fun cause(r: Result<int32, IoError>) -> str {\n"
+                "    return match r {\n"
+                '        Ok(n) => "ok",\n'
+                '        Err(IoError.NotFound) => "not found",\n'
+                '        Err(IoError.PermissionDenied) => "permission denied",\n'
+                '        Err(IoError.AlreadyExists) => "already exists",\n'
+                '        Err(IoError.NotADirectory) => "not a directory",\n'
+                '        Err(IoError.IsADirectory) => "is a directory",\n'
+                '        Err(IoError.NotEmpty) => "not empty",\n'
+                '        Err(IoError.Interrupted) => "interrupted",\n'
+                '        Err(IoError.Cancelled) => "cancelled",\n'
+                '        Err(IoError.Unsupported) => "unsupported",\n'
+                '        Err(IoError.Other(c)) => f"other {c}",\n'
+                "    }\n"
+                "}\n"
+                "fun main() {\n"
+                f'    let d = "{tmp}/d"\n'
+                "    print(cause(make_dir(d)))\n"
+                "    print(cause(make_dir(d)))\n"
+                "    print(cause(remove_file(d)))\n"
+                '    print(cause(write_to_file(d + "/f", "x")))\n'
+                "    print(cause(remove_dir(d)))\n"
+                '    print(cause(make_dir(d + "/f/g")))\n'
+                '    print(cause(make_dir(d + "/no/such")))\n'
+                '    print(cause(remove_file(d + "/f")))\n'
+                "    print(cause(remove_dir(d)))\n"
+                "}\n",
+            )
+        self.assertEqual((out, err, code), ("ok\nalready exists\nis a directory\nok\nnot empty\nnot a directory\n"
+                                            "not found\nok\nok\n", "", 0))
 
 
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
