@@ -25,10 +25,15 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--myla", default=os.path.join(_REPO, "build", "myla"))
     ap.add_argument("--runs", type=int, default=10)
+    ap.add_argument("--only", action="append", default=[], help="a program's name (repeatable); default: all")
+    ap.add_argument("--workers", default="1,4,16", help="the worker counts, comma-separated")
     args = ap.parse_args()
+    counts = args.workers.split(",")
     failures = 0
     with tempfile.TemporaryDirectory() as tmp:
         for name, want in sorted(EXPECTED.items()):
+            if args.only and name not in args.only:
+                continue
             exe = os.path.join(tmp, name)
             built = subprocess.run([args.myla, "build", os.path.join(_DIR, name + ".my"), "-o", exe],
                                    capture_output=True, text=True)
@@ -37,14 +42,15 @@ def main() -> int:
                 failures += 1
                 continue
             bad = 0
-            for workers in ["1", "4", "16"]:
+            for workers in counts:
                 for _ in range(args.runs):
                     got = _run([exe], dict(os.environ, MYLA_THREADS=workers))
                     if got != want:
                         bad += 1
-                        print(f"FAIL {name} on {workers} workers: {got!r}, expected {want!r}")
+                        how = f"signal {-got[1]}" if got[1] < 0 else f"exit {got[1]}"
+                        print(f"FAIL {name} on {workers} workers ({how}): {got[0]!r}, expected {want!r}")
             failures += bad
-            print(f"{'ok  ' if bad == 0 else 'FAIL'} {name} ({3 * args.runs} runs)")
+            print(f"{'ok  ' if bad == 0 else 'FAIL'} {name} ({len(counts) * args.runs} runs, {bad} failed)")
     print(f"{failures} failed runs")
     return 1 if failures else 0
 

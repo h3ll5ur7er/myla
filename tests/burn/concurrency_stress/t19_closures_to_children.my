@@ -1,0 +1,35 @@
+// 19. A closure (its strings, list, struct and nested function value)
+// deep-copied into two children that call it at once, the parent calling the
+// original meanwhile: part 1 of t18, on its own
+struct P {
+    name: str,
+    tags: [str],
+}
+
+fun make(s: str, p: P) -> (int) -> int {
+    let xs = [1, 2, 3]
+    let g = (k: int) => k + len(p.tags)
+    return (n: int) => n + len(s) + len(xs) + g(n) + len(p.name)
+}
+
+async fun use(f: (int) -> int, n: int) -> int {
+    var t = 0
+    for i in 0..n {
+        t = t + f(i)
+    }
+    return t
+}
+
+#main
+async fun main() {
+    var total = 0
+    var round = 0
+    while round < 2000 {
+        let f = make("abc", P { name: "pq", tags: ["a", "b"] })
+        async let a = use(f, 10)
+        async let b = use(f, 20)
+        total = total + await a + await b + f(1)
+        round = round + 1
+    }
+    print(total)
+}

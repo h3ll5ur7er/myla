@@ -1,0 +1,36 @@
+// 21. A composition (`f >> g`, two function values in its environment)
+// deep-copied into a child while the parent calls the original: part 3 of
+// t18, on its own
+struct P {
+    name: str,
+    tags: [str],
+}
+
+fun make(s: str, p: P) -> (int) -> int {
+    let xs = [1, 2, 3]
+    let g = (k: int) => k + len(p.tags)
+    return (n: int) => n + len(s) + len(xs) + g(n) + len(p.name)
+}
+
+async fun use(f: (int) -> int, n: int) -> int {
+    var t = 0
+    for i in 0..n {
+        t = t + f(i)
+    }
+    return t
+}
+
+#main
+async fun main() {
+    var total = 0
+    var round = 0
+    while round < 2000 {
+        let f = make("abc", P { name: "pq", tags: ["a", "b"] })
+        let h = f >> ((n: int) => n * 2)
+        async let e = use(h, 4)
+        async let e2 = use(h, 6)
+        total = total + await e + await e2 + h(3)
+        round = round + 1
+    }
+    print(total)
+}
