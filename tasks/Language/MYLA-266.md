@@ -31,7 +31,7 @@ Decisions for the owner first:
 - [ ] **Capabilities:** how a program learns what its target can do (code per target, [[MYLA-245]]; a query; errors only), and the minimum stack depth a program may rely on
 
 Then the pages:
-- [ ] A page `Language/Targets` (new): each target's capabilities (processes, workers, suspending input, file modes and links, paths and the working directory, exit codes, stack depth, memory, how traps are reported)
+- [x] A page [[Language/Targets]] (2026-11-05): each target's capabilities (processes, workers, suspending input, file modes and links, paths and the working directory, exit codes, stack depth, memory, how traps are reported)
 - [ ] [[Language/Expressions-and-operators]]: `MIN / -1` and `MIN % -1` (done with the reflection); NaNs once decided
 - [ ] [[Language/Attributes-and-testing]]: stack overflow and an invalid `as char` in the runtime-error table
 - [ ] [[Language/Statements]]: `become`'s rule stated in the language's terms

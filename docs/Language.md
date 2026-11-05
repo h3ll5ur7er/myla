@@ -12,7 +12,7 @@ The reference for Myla (version 1.0). These pages and the decisions on [[Project
 - **Mostly statements.** `if` and loops are statements; `match` is an expression, and so are lambdas.
 - **Newlines end statements.** A `;` may replace that line break to put several statements on one line (D61). Blocks use braces; indentation doesn't matter.
 - **Errors as values.** `Option<T>` and `Result<T, E>` with the `?` operator; no exceptions. `panic`, `assert` and `unreachable` stop the program.
-- **Everything checked before running.** The interpreter and the native backends (x86-64 and aarch64 Linux, wasm32 on WASI) all run only programs the checker accepted, and must agree on everything they print. Where a target lacks something (processes and threads on wasm32), the difference is the platform's, not the language's; a page on targets and their capabilities is to come ([[MYLA-266]]).
+- **Everything checked before running.** The interpreter and the native backends (x86-64 and aarch64 Linux, wasm32 on WASI) all run only programs the checker accepted, and must agree on everything they print. Where a target lacks something (processes and threads on wasm32), the difference is the platform's, not the language's; [[Language/Targets]] lists what each target can do.
 
 ## Pages
 
@@ -31,6 +31,7 @@ The reference for Myla (version 1.0). These pages and the decisions on [[Project
 | [[Language/Standard-library]] | `print` and the other built-in functions, `std.io`, `std.fs`, `std.process` |
 | [[Language/Concurrency]] | D89 to D97: `async`/`await`, `async let`, `std.task`, actors |
 | [[Language/Attributes-and-testing]] | `#main`, `#test`, `#derive`, `const`, `assert`/`panic`/`unreachable`, runtime errors |
+| [[Language/Targets]] | What every target guarantees, and what differs: processes, workers, files, stacks, memory |
 | [[Language/Grammar]] | The grammar in EBNF |
 
 The reasons behind each rule are recorded as numbered decisions (D1–D138) on [[Project/Decisions]]. When a rule is broken, the message underlines the place, often with a note (`'x' is declared here`) or a `help: did you mean 'count'?` line for a misspelt name.
