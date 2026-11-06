@@ -502,6 +502,26 @@ fun root_name(e: Expr) -> str {
 // The argument words that travel in registers (D119, System V on x86-64).
 pub const REG_ARG_WORDS: int32 = 6
 
+// Whether `t` is a built-in value type that takes impls (MYLA-221): a
+// number, `bool`, `char`, `str`, `StringBuilder`, a list or a map; not a
+// struct, enum, tuple or actor handle (D144).
+#test(Type.TList(Type.TStr))[true]
+#test(Type.TActor("A"))[false]
+#test(Type.TStruct("P", []))[false]
+pub fun is_builtin_value(t: Type) -> bool {
+    return match t {
+        Type.TInt(w, s) => true,
+        Type.TFloat(w) => true,
+        Type.TChar => true,
+        Type.TBool => true,
+        Type.TStr => true,
+        Type.TSB => true,
+        Type.TList(e) => true,
+        Type.TMap(k, v) => true,
+        _ => false,
+    }
+}
+
 // Whether `t` is passed by its address, or its words by value: a struct,
 // tuple, enum or function value.
 #test(Type.TTuple([]))[true]
@@ -1363,6 +1383,7 @@ pub struct Checker {
     conc_sp: SrcSpan,
     conc_node: int32,
     in_async: bool,
+    self_assignable: bool,          // D144: in a `var self` method of a built-in type, `self = v` writes the receiver
     actor_self: str,
     // the call being checked is a builtin function called as a method
     // (`xs.push(v)`, D103, MYLA-221): a local of the same name doesn't shadow it
@@ -1399,7 +1420,7 @@ fun new_checker(decls: [Decl]) -> Checker {
         skipped_decls: [:], skipped_fns: [:], broken_impls: [:], redefined: [:],
         lost_methods: [:], lost_traits: [:], failed_consts: [:], bodies: false,
         call_kind: "", call_kind_id: -1, call_target: "", call_mutates: false, fun_name: "", handovers: [:], become_words: [], passed_on: [],
-        actors: [:], conc_line: 0, conc_col: 0, conc_sp: no_span(), conc_node: -1, in_async: false, actor_self: "", builtin_as_method: false, cur_key: "",
+        actors: [:], conc_line: 0, conc_col: 0, conc_sp: no_span(), conc_node: -1, in_async: false, self_assignable: false, actor_self: "", builtin_as_method: false, cur_key: "",
         lams: [], awaited: [:], call_key: "", call_async: false, suspended: -1, task_init: false, in_guard: false, neg_lit: -1,
         task_line: 0, task_col: 0, task_sp: no_span(), task_node: -1,
     }
@@ -2560,9 +2581,6 @@ impl Checker {
                 // receiver's type (MYLA-221)
                 let generic_ok = match target { Type.TList(e) => true, Type.TMap(kt, vt) => true, _ => false }
                 if tps.len() > 0 && !generic_ok { return Err(terr_at(ln, cl, sp, "generic impls on built-in types are only for lists and maps")) }
-                // a built-in value is one word, which a method changing it
-                // would have to give back to its caller's place (MYLA-221)
-                for m in methods { if match m.receiver { Some(r) => r == "var self", None => false } { return Err(terr_at(m.line, m.col, m.sp, "'var self' methods on built-in types are not supported yet; use a read-only 'self' receiver")) } }
             },
             None => { return Err(terr_at(ln, cl, sp, format("cannot 'impl' on type '{}': an impl takes structs, enums, and concrete scalar / str / StringBuilder receivers", type_name(target)))) },
         }
@@ -4220,7 +4238,7 @@ impl Checker {
                 }
             },
             StmtKind.Assign(target, value) => {
-                match target.kind { ExprKind.Name(n) => { if n == "self" { return Err(terr_at(s.line, s.col, s.sp, "cannot reassign 'self'; mutate its fields or elements instead")) } }, _ => {} }
+                match target.kind { ExprKind.Name(n) => { if n == "self" && !self.self_assignable { return Err(terr_at(s.line, s.col, s.sp, "cannot reassign 'self'; mutate its fields or elements instead")) } }, _ => {} }
                 let lv = self.check_lvalue(target)?
                 if !lv.mutable { return Err(with_notes(terr_at(s.line, s.col, s.sp, "cannot assign to an immutable binding (declare it with 'var')"), self.declared_at(target))) }
                 let vt = self.expect_value(value, Some(lv.ty))?
@@ -4907,6 +4925,13 @@ impl Checker {
         if fd.is_async { self.met_concurrency(fd.line, fd.col, fd.sp, self.cur_decl) }
         if self.is_actor(self.cur_key) { self.actor_self = self.cur_key } else { self.actor_self = "" }
         let recv = match fd.receiver { Some(r) => r, None => "" }
+        // a built-in value's `var self` method changes it by assigning it,
+        // which reaches the caller's place (D144); a struct's changes its
+        // fields
+        self.self_assignable = recv == "var self" && sig.params.len() > 0 && is_builtin_value(sig.params[0])
+        // an async one would need its receiver back from its frame, as a
+        // struct's gets it (D99)
+        if self.self_assignable && fd.is_async { return Err(terr_at(fd.line, fd.col, fd.sp, "async 'var self' methods on built-in types are not supported yet")) }
         var i = 0
         while i < fd.params.len() {
             let mutable = i == 0 && recv == "var self"

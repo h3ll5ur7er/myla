@@ -15,7 +15,7 @@ from .tokens import no_span
 from std.num import f64_literal_bits, f32_round_bits
 from std.fs import current_dir
 from .loader import Span
-from .checker import CheckErr, Checker, Type, is_raw_memory_primitive, FuncSig, StructInfo, EnumInfo, FieldT, VariantT, Subst, subst_type, subst_get, opt_subst_type, CV, type_name, checker_on
+from .checker import CheckErr, Checker, Type, is_builtin_value, is_raw_memory_primitive, FuncSig, StructInfo, EnumInfo, FieldT, VariantT, Subst, subst_type, subst_get, opt_subst_type, CV, type_name, checker_on
 from .ir import render_func, verify, moves, IrFunc, Inst
 from .ssa import SsaStats, no_ssa_stats
 from .inline import inlinable, inline_calls, same_module, may_inline, merge_blocks
@@ -1279,7 +1279,7 @@ impl CodeGen {
     // arguments substituted), is passed owned: its body keeps it, and it is
     // a scalar that owns heap memory (a string, list, map or builder).
     fun owned_param(self, sig: FuncSig, i: int32, t: Type) -> bool {
-        if is_aggregate(t) || !self.owns_heap(t) { return false }
+        if is_aggregate(t) || !self.owns_heap(t) || recv_by_address(sig, i, t) { return false }
         return match get(self.kept_params, sig.name) {
             Some(flags) => i < flags.len() && flags[i],
             None => false,
@@ -1361,7 +1361,7 @@ impl CodeGen {
         }
         var i = 0
         while i < params.len() {
-            out.push(i < flags.len() && flags[i] && !is_aggregate(params[i]) && self.owns_heap(params[i]))
+            out.push(i < flags.len() && flags[i] && !is_aggregate(params[i]) && self.owns_heap(params[i]) && !recv_by_address(sig, i, params[i]))
             i = i + 1
         }
         return out
@@ -3392,6 +3392,14 @@ fun join_lines(xs: [str]) -> str {
         i = i + 1
     }
     return sb.build()
+}
+
+// Whether `sig`'s parameter `i`, of type `t`, is a built-in value's `var
+// self` receiver, which gets the address of its caller's place (D144); a
+// struct's, tuple's or enum's is an address already, an actor's handle is
+// shared.
+pub fun recv_by_address(sig: FuncSig, i: int32, t: Type) -> bool {
+    return i == 0 && sig.has_decl && is_builtin_value(t) && match sig.decl.receiver { Some(r) => r == "var self", None => false }
 }
 
 #test(Type.TSB)[false]

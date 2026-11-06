@@ -30,7 +30,7 @@
 from std.num import f64_literal_bits, f32_round_bits
 from .ast import Expr, ExprKind, Stmt, StmtKind, Block, FunData, ElseTail, ExprOrBlock, MatchArm, Pattern, PatternKind, FieldInit, MapEntry, BindElem, bind_elems, Param
 from .checker import CheckErr, REG_ARG_WORDS, type_name, Type, is_unit, is_slice_expr, from_end_of, slice_parts, is_hole_part, is_raw_memory_primitive, Subst, FuncSig, opt_subst_type, subst_type, builtin_method
-from .codegen import codegen_on, may_write_expr, is_actor_t, is_sb_t, is_async_t, CodeGen, LamJob, PartialJob, Cap, DropEntry, tfunc_params, tfunc_ret, is_hole_expr, mangle_fn, is_builtin_call_name, is_aggregate, tuple_elems, is_struct_or_enum_t, is_tfunc, is_overloadable_op, arith_method_cg, enum_name_of, is_tstr, is_cmp, place_root, is_aggregate_opt, arms_may_write, is_cell_t, list_elem, is_list_t, is_map_t, is_str_t, map_key, map_val, format_segments, args_have_hole, success_variant, failure_variant
+from .codegen import codegen_on, recv_by_address, may_write_expr, is_actor_t, is_sb_t, is_async_t, CodeGen, LamJob, PartialJob, Cap, DropEntry, tfunc_params, tfunc_ret, is_hole_expr, mangle_fn, is_builtin_call_name, is_aggregate, tuple_elems, is_struct_or_enum_t, is_tfunc, is_overloadable_op, arith_method_cg, enum_name_of, is_tstr, is_cmp, place_root, is_aggregate_opt, arms_may_write, is_cell_t, list_elem, is_list_t, is_map_t, is_str_t, map_key, map_val, format_segments, args_have_hole, success_variant, failure_variant
 from .util import format_specs
 from .tokens import Note, no_span
 from .ir_x86 import slots_at, frame_size
@@ -69,7 +69,7 @@ struct LoopTarget { cont: int32, brk: int32, owners: int32, temps: int32 }
 // function holds between suspensions (D92), or -1; `deep_res`: an actor
 // method's result is copied deeply before it leaves the actor (D92).
 // `scope_ids`: the open scopes' indices in `f.scope_parent` (MYLA-183).
-struct Lower { f: IrFunc, cur: int32, scopes: [[Local]], scope_ids: [int32], owners: [[int32]], temps: [[int32]], loops: [LoopTarget], sret: int32, arm_binds: [Local], err: str, lams: [LamJob], partials: [PartialJob], fnvals: [str], holder: [int32], into: int32, placed: [bool], tail: bool, tailed: bool, frame_fn: bool, result: int32, tasks: [TaskSlot], actor_self: int32, actor_off: int32, deep_res: bool, narrow: [int32: int32], wants: [Want], defers: [LDefer], received: int32, refused: [CheckErr], fn_name: str }
+struct Lower { f: IrFunc, cur: int32, scopes: [[Local]], scope_ids: [int32], owners: [[int32]], temps: [[int32]], loops: [LoopTarget], sret: int32, arm_binds: [Local], err: str, lams: [LamJob], partials: [PartialJob], fnvals: [str], holder: [int32], into: int32, placed: [bool], tail: bool, tailed: bool, frame_fn: bool, result: int32, tasks: [TaskSlot], actor_self: int32, actor_off: int32, deep_res: bool, narrow: [int32: int32], wants: [Want], defers: [LDefer], received: int32, refused: [CheckErr], fn_name: str, by_addr: int32, by_addr_t: Type }
 
 // A per-type routine a routine built as IR calls, for the code generator to
 // emit (MYLA-162): `kind` 0 a cell's deep copy, 1 an inline value's deep
@@ -104,7 +104,7 @@ struct LDefer { depth: int32, nscopes: int32, nnames: int32, body: Block, cg: Co
 // entry block, the receiver of `#test` cases of the lowering's methods
 // (MYLA-184), with a code generator from `codegen_on` as their `cg`.
 pub fun lower_on() -> Lower {
-    var lw = Lower { f: IrFunc { name: "test", ret: None, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false, scope_parent: [-1] }, cur: 0, scopes: [[]], scope_ids: [0], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [], actor_self: -1, actor_off: 0, deep_res: false, narrow: [:], wants: [], defers: [], received: -1, refused: [], fn_name: "" }
+    var lw = Lower { f: IrFunc { name: "test", ret: None, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false, scope_parent: [-1] }, cur: 0, scopes: [[]], scope_ids: [0], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [], actor_self: -1, actor_off: 0, deep_res: false, narrow: [:], wants: [], defers: [], received: -1, refused: [], fn_name: "", by_addr: -1, by_addr_t: Type.TBool }
     lw.start(lw.new_block())
     return lw
 }
@@ -115,7 +115,7 @@ pub fun lower_on() -> Lower {
 pub fun lower_function(cg: CodeGen, fd: FunData, mangled: str) -> Result<Lowered, str> {
     let sig = cg.sig_of(fd.name)
     let ret = opt_subst_type(sig.ret, cg.subst)
-    var lw = Lower { f: IrFunc { name: mangled, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false, scope_parent: [-1] }, cur: 0, scopes: [[]], scope_ids: [0], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [], actor_self: -1, actor_off: 0, deep_res: false, narrow: [:], wants: [], defers: [], received: -1, refused: [], fn_name: "" }
+    var lw = Lower { f: IrFunc { name: mangled, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false, scope_parent: [-1] }, cur: 0, scopes: [[]], scope_ids: [0], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [], actor_self: -1, actor_off: 0, deep_res: false, narrow: [:], wants: [], defers: [], received: -1, refused: [], fn_name: "", by_addr: -1, by_addr_t: Type.TBool }
     lw.fn_name = fd.name
     var first_word = 0
     // an async function, when tasks take turns: its frame function, its
@@ -167,7 +167,13 @@ pub fun lower_function(cg: CodeGen, fd: FunData, mangled: str) -> Result<Lowered
         // passed by value holds the aggregate in its argument words, owning
         // what it holds (D88)
         var s = -1
-        if cg.byval_param(sig, i, t) {
+        if recv_by_address(sig, i, t) {
+            // a built-in value's `var self`: the address of the caller's
+            // place, read and written through (D144)
+            s = lw.new_slot(fd.params[i].name, Type.TPtr, 8, word, false)
+            lw.by_addr = s
+            lw.by_addr_t = t
+        } else if cg.byval_param(sig, i, t) {
             s = lw.new_slot(fd.params[i].name, t, cg.word_size(t), word, cg.owns_heap(t))
             lw.f.slots[s].inline = true
         } else { s = lw.new_slot(fd.params[i].name, t, 8, word, cg.owned_param(sig, i, t)) }
@@ -218,7 +224,7 @@ pub fun lower_function(cg: CodeGen, fd: FunData, mangled: str) -> Result<Lowered
 // own at entry, borrowed as a parameter is (captures are immutable, D48).
 pub fun lower_lambda(cg: CodeGen, job: LamJob) -> Result<Lowered, str> {
     let ret = opt_subst_type(tfunc_ret(job.ftype), cg.subst)
-    var lw = Lower { f: IrFunc { name: job.lifted, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false, scope_parent: [-1] }, cur: 0, scopes: [[]], scope_ids: [0], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [], actor_self: -1, actor_off: 0, deep_res: false, narrow: [:], wants: [], defers: [], received: -1, refused: [], fn_name: "" }
+    var lw = Lower { f: IrFunc { name: job.lifted, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false, scope_parent: [-1] }, cur: 0, scopes: [[]], scope_ids: [0], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [], actor_self: -1, actor_off: 0, deep_res: false, narrow: [:], wants: [], defers: [], received: -1, refused: [], fn_name: "", by_addr: -1, by_addr_t: Type.TBool }
     // an async lambda, when tasks take turns: a frame function, as an async
     // function's (D90); its frame holds the environment and the arguments
     let frame = cg.frames && is_async_t(job.ftype)
@@ -735,7 +741,7 @@ impl Lower {
         match e.kind {
             ExprKind.Name(n) => {
                 let slot = self.lookup(n)
-                if slot >= 0 { return self.f.slots[slot].ty }
+                if slot >= 0 { return self.var_type(slot) }
             },
             ExprKind.GetField(t, f) => { return cg.struct_field_type_t(self.place_type(cg, t), f) },
             ExprKind.Index(b, i) => {
@@ -753,6 +759,38 @@ impl Lower {
             _ => {},
         }
         return cg.type_of(e.id)
+    }
+
+    // A narrow list element a `var self` method was given in a cell of its
+    // own (`back`: the cell, the element's address) stored back after the
+    // call (D144); nothing for (-1, -1).
+    fun write_back(var self, back: (int32, int32)) {
+        if back.0 < 0 { return }
+        let v = self.temp(self.f.slots[back.0].ty)
+        self.add(Inst.Load(v, back.0))
+        self.add_store(back.1, 0, v)
+    }
+
+    // The type of the variable in slot `s` (a built-in value's `var self`
+    // receiver's slot holds an address, D144).
+    fun var_type(self, s: int32) -> Type {
+        if s == self.by_addr { return self.by_addr_t }
+        return self.f.slots[s].ty
+    }
+
+    // The value of the scalar variable in slot `s`: through the address it
+    // holds for a built-in value's `var self` receiver (D144).
+    fun read_var(var self, s: int32) -> int32 {
+        if s == self.by_addr {
+            let p = self.temp(Type.TPtr)
+            self.add(Inst.Load(p, s))
+            let v = self.temp(self.by_addr_t)
+            self.add(Inst.LoadAt(v, p, 0, 8))
+            return v
+        }
+        let d = self.temp(self.f.slots[s].ty)
+        self.add(Inst.Load(d, s))
+        return d
     }
 
     // The address of the aggregate in slot `s`: an aggregate parameter's slot
@@ -2008,7 +2046,7 @@ impl Lower {
             },
             _ => {},
         }
-        if local >= 0 && (self.f.slots[local].owns || !is_aggregate(t)) {
+        if local >= 0 && local != self.by_addr && (self.f.slots[local].owns || !is_aggregate(t)) {
             // a variable: nothing is evaluated between the value and the store
             if is_aggregate(t) {
                 let src = self.addr(cg, value)
@@ -2396,9 +2434,7 @@ impl Lower {
         let slot = self.lookup(n)
         if slot >= 0 {
             if is_aggregate(self.f.slots[slot].ty) { return self.unsupported("an aggregate used as a scalar") }
-            let d = self.temp(self.f.slots[slot].ty)
-            self.add(Inst.Load(d, slot))
-            return d
+            return self.read_var(slot)
         }
         // a str const is its folded value, a static string (MYLA-84)
         match get(cg.const_strs, n) {
@@ -2979,7 +3015,7 @@ impl Lower {
             let slot = self.lookup(nm)
             if slot >= 0 && !has_name(seen, nm) {
                 seen.push(nm)
-                let ct = self.f.slots[slot].ty
+                let ct = self.var_type(slot)
                 if !lowerable(cg, ct) { return self.unsupported("a capture of that type") }
                 // a sibling child task, which this child may await (MYLA-148)
                 let ti = self.task_of(slot)
@@ -3012,8 +3048,7 @@ impl Lower {
                 self.add(Inst.Copy(dst, self.slot_addr(slot), cg.size(c.ty)))
                 self.retain(cg, c.ty, dst)
             } else {
-                let v = self.temp(c.ty)
-                self.add(Inst.Load(v, slot))
+                let v = self.read_var(slot)
                 self.add_store(made.2, c.off, v)
                 self.retain(cg, c.ty, v)
             }
@@ -3172,6 +3207,10 @@ impl Lower {
         var vals: [int32] = []
         let owns = cg.owned_params(sig, params)
         let any_byval = cg.has_byval(sig)
+        // a narrow list element passed as a built-in value's `var self`: the
+        // cell holding it for the call, and the element's address it goes
+        // back to after it
+        var back: (int32, int32) = (-1, -1)
         var i = 0
         while i < argv.len() && i < params.len() {
             // an owned parameter gets a reference of its own: an owned
@@ -3184,6 +3223,23 @@ impl Lower {
             if tail && !owned && !byval && !(i == 0 && root != "") && (is_aggregate(params[i]) || cg.owns_heap(params[i])) && !self.caller_holds(argv[i]) { return self.unsupported("a 'become' passing a value to a borrowed parameter") }
             // a copy of its own, which the method's writes can't reach either
             if byval { for w in self.value_words(cg, params[i], self.addr(cg, argv[i])) { vals.push(w) } }
+            // a built-in value's `var self`: its place's address (D144)
+            else if i == 0 && recv_by_address(sig, 0, params[0]) {
+                if root == "" || self.lookup(root) < 0 { return self.unsupported("a 'var self' method on that receiver") }
+                // after a `become` only the receiver this function was given
+                // outlives it
+                if tail && self.lookup(root) != self.by_addr { return self.unsupported("a 'become' passing a place of this function as 'var self'") }
+                let at = self.place(cg, argv[0])
+                if self.width_at(at, 0) < 8 {
+                    if tail { return self.unsupported("a 'become' with a list element narrower than a word as 'var self'") }
+                    let cell = self.new_slot("__receiver", params[0], 8, -1, false)
+                    let v = self.temp(params[0])
+                    self.add_load(v, at, 0)
+                    self.add(Inst.Store(cell, v))
+                    back = (cell, at)
+                    vals.push(self.slot_addr(cell))
+                } else { vals.push(at) }
+            }
             else if i > 0 && root != "" && place_root(argv[i]) == root && (is_aggregate(params[i]) || cg.owns_heap(params[i])) {
                 let staged = self.stage(cg, params[i], argv[i])
                 if owned { self.moved(staged.0) }
@@ -3224,6 +3280,7 @@ impl Lower {
         }
         if !has_ret {
             self.add(Inst.Call(-1, target, vals))
+            self.write_back(back)
             return -1
         }
         if is_aggregate(ret_t) {
@@ -3231,17 +3288,20 @@ impl Lower {
                 // straight into the statement's destination
                 let dst = self.slot_addr(into)
                 self.add(Inst.CallSret(target, dst, vals))
+                self.write_back(back)
                 self.placed[dst] = true
                 return dst
             }
             let slot = self.value_slot(cg, "__result", ret_t, true)
             let res = self.slot_addr(slot)
             self.add(Inst.CallSret(target, res, vals))
+            self.write_back(back)
             self.own_temp(slot)
             return res
         }
         let d = self.temp(ret_t)
         self.add(Inst.Call(d, target, vals))
+        self.write_back(back)
         return self.owned_value(cg, d, ret_t)
     }
 
@@ -4435,7 +4495,7 @@ fun calls_nothing(e: Expr) -> bool {
 // An empty lowering of the routine `name` with result type `ret`, its entry
 // block started.
 fun routine(name: str, ret: Option<Type>) -> Lower {
-    var lw = Lower { f: IrFunc { name: name, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false, scope_parent: [-1] }, cur: 0, scopes: [[]], scope_ids: [0], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [], actor_self: -1, actor_off: 0, deep_res: false, narrow: [:], wants: [], defers: [], received: -1, refused: [], fn_name: "" }
+    var lw = Lower { f: IrFunc { name: name, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false, scope_parent: [-1] }, cur: 0, scopes: [[]], scope_ids: [0], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [], actor_self: -1, actor_off: 0, deep_res: false, narrow: [:], wants: [], defers: [], received: -1, refused: [], fn_name: "", by_addr: -1, by_addr_t: Type.TBool }
     let entry = lw.new_block()
     lw.start(entry)
     return lw

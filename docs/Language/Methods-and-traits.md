@@ -38,7 +38,29 @@ fun main() {
 
 - A method's first parameter is `self` (read-only copy) or `var self` (changes the caller's value, D47).
 - A `var self` method needs a **mutable place** as its receiver: a `var` variable or one of its fields or elements. Calling it on a `let` binding or a temporary is a type error.
-- `impl` works on structs, enums, the built-in scalars (`int32`, `float64`, `bool`, `char`, `str`, `StringBuilder`, …), lists and maps: `impl [int] { … }`, `impl [str: int] { … }`, and generic ones, `impl<T> [T] { … }` ([[MYLA-221]]). A list's or map's methods are keyed by its kind, as a generic struct's are by its name: an `impl [int]`'s `total` is a method of every list that only an `[int32]` may call (`method 'total' is for '[int32]', not '[str]'`), and two impls on lists can't both have a `total`. Methods on built-in types must use `self` (a `var self` one would have to give a list or a number back to its caller's place: not yet). Tuples can't have methods.
+- `impl` works on structs, enums, the built-in scalars (`int32`, `float64`, `bool`, `char`, `str`, `StringBuilder`, …), lists and maps: `impl [int] { … }`, `impl [str: int] { … }`, and generic ones, `impl<T> [T] { … }` ([[MYLA-221]]). A list's or map's methods are keyed by its kind, as a generic struct's are by its name: an `impl [int]`'s `total` is a method of every list that only an `[int32]` may call (`method 'total' is for '[int32]', not '[str]'`), and two impls on lists can't both have a `total`. A `var self` method on a built-in type changes the caller's value as a struct's does (D144): `self.push(x)` on a list, and `self = v`, which only a built-in value's `var self` method may write (a struct's changes its fields; a read-only `self` can't be assigned). An async one isn't supported yet. Tuples can't have methods.
+
+```myla
+impl int {
+    fun bump(var self, by: int) -> int {
+        self = self + by
+        return self
+    }
+}
+
+fun main() {
+    var n = 5
+    print(n.bump(3))
+    var counts = [1, 2]
+    counts[0].bump(10)
+    print(n)
+    print(counts[0])
+}
+// output:
+// 8
+// 8
+// 11
+```
 - A generic type takes a generic impl that names every parameter in order: `impl<T> Box<T> { … }`. Methods may have their own type parameters.
 - A type may have several `impl` blocks; a method name must be unique per type and differ from every field name. There is no orphan rule (D45): any module may add methods to any type.
 - The only call form is `receiver.method(args)` (D46). There are no static or associated functions (every method takes `self`), and `Type.method` isn't a value; wrap it in a lambda.

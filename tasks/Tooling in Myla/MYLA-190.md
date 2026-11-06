@@ -33,3 +33,11 @@ Decided by D113 ([[MYLA-211]]): I/O and process functions return `Result<T, IoEr
     - `test_fs.IoErrorCauses`, written first and failing, makes each common cause happen in the interpreter and natively;
     - `test_wasm.WasmCapabilities`: `run` on wasm32 is `Unsupported`;
     - the tests whose programs print causes now (`test_fs`, `test_process`, the `readfile` and `subprocess` examples) carry their own expectations, through `run_file_both_now` and `run_source_both_now` in `_native.py`, as no recorded answer covers them.
+
+## Decided (2026-11-06)
+
+- **D146:** `write(fd, s)` returns `Result<(), IoError>`; `print`, `println`, `eprint` and `eprintln` return nothing, and a broken pipe on them ends the program quietly on every target.
+- **D147:** `PATH` search for a program name without a `/`; `Command` gains `cwd`, `env`, `env_remove`, `env_clear` and `stdin(text)`; `run` stays the shortcut; all of it `Unsupported` on wasm32.
+
+- [ ] D146 done, with `test_stdio` extended (a broken pipe, a write's error)
+- [ ] D147 done, with `test_process` extended (PATH, a directory, the environment, stdin), `Command`'s immutability documented

@@ -2,7 +2,7 @@
 id: MYLA-221
 title: "Methods on builtin types; the free collection functions deprecated"
 type: feature
-status: in-progress
+status: review
 priority: medium
 labels: [language, builtins, stdlib]
 ---
@@ -10,7 +10,7 @@ D103 ([[MYLA-204]]): `impl` blocks on builtin types are allowed, the builtin col
 
 - [x] The list: every builtin function on lists, maps, strings and chars with its method name and whether it takes `var self` (`push`, `insert`, `remove`, `set`, …)
 - [x] `impl [T]`, `impl Map<K, V>`, `impl str`, `impl char` and the numeric types in the checker; method lookup on builtin receivers
-- [ ] `var self` methods on builtin types (a list or a number is one word, so the method has to give it back to its caller's place on every way out: a convention of its own)
+- [x] `var self` methods on builtin types (a list or a number is one word, so the method has to give it back to its caller's place on every way out: a convention of its own)
 - [x] The free forms give a deprecation warning that names the method (2026-11-06; then gone, below)
 - [x] The repository's code moved (examples, `tools/`, the standard library; `selfhost/` after a seed update, [[MYLA-218]])
 - [x] The free forms removed; [[Language]] pages, the skill, `AGENTS.md` ("`push(xs, v)`") and the grammar updated (2026-11-06; the grammar had nothing to change: a free call is a call)
@@ -53,7 +53,7 @@ Before the standard library round ([[MYLA-211]]), which builds on it. Order: aft
   - Tests: `test_builtin_methods.test_the_function_forms_are_gone` (seen failing first) and method-form cases for what the function forms' argument errors were (on a call, on a list, on a `let`, on an int); the eleven function-form snippets of `test_selfhost_checker` and two harvested ones went; the corpus files `type_pop_non_list.my` and `type_sb_build_non_builder.my` use the methods.
   - The recorded copies under `tests/burn/data/recorded_corpus/` keep the function forms: they are what was recorded, and only the lexer and parser gates read them.
 
-## Proposal: `var self` on builtin types (2026-11-06, for the owner to decide)
+## Proposal: `var self` on builtin types (2026-11-06; accepted by the owner the same day, option 1: D144)
 
 **The problem.** A struct's `var self` method works because an aggregate is passed as a pointer to the caller's storage ([[Architecture/Native-backend]]): what the method writes lands in the caller's place. A list, a map, a string, a builder or a number is one word, passed by value, so a `var self` method on one changes only its own copy. (The interpreter writes the receiver back to its place generically; only native code lacks a way.)
 
@@ -73,3 +73,11 @@ Before the standard library round ([[MYLA-211]]), which builds on it. Order: aft
 - A `var self` method called on an element of a list that the method's arguments also read (`grid[0].m(grid[1])`) is already handled for structs by staging the argument, so nothing new.
 
 **What it takes:** the checker drops the refusal; the lowering adds the pointer parameter and the place address at the call site; tests in the interpreter and natively on all three targets (a list `push`ing in a method, a counter on `int`, a method on a field and on a list element, `become` between two such methods). About a day.
+
+## Step 6 (2026-11-06): `var self` on built-in types (D144)
+
+- **The receiver by address**, as accepted: `recv_by_address` ([[selfhost/codegen.my]]) is a `var self` receiver of a type that isn't an aggregate. The lowering gives it a slot holding the address of the caller's place (typed `ptr`, the value's type kept as `by_addr_t`), so every place rooted at `self` (`self.push`, `self[i] = v`) works as for a struct, a read loads through the address (`read_var`), and `self = v` takes the member path (the old value dropped at the place, the new one stored). It is never an owned parameter (MYLA-127).
+- **The call site** passes the place's address (`place`, each list on the way made unique). A list element narrower than a word (`[bool]`, `[int8]`, `[float32]`: stored at its size) goes in a cell of its own and is stored back after the call (`write_back`). A `become` may pass on only the receiver it was given; the checker already says so ("'become' can call the mutating method 'inc' only on 'self'").
+- **The checker**: the refusal went; `self = v` is allowed in a built-in value's `var self` method only (`self_assignable`), still "cannot reassign 'self'" in a struct's or a read-only one; an async one is refused ("async 'var self' methods on built-in types are not supported yet"). The interpreter needed nothing: it writes the receiver back to its place.
+- **Test first**: `test_builtin_impls.test_var_self_methods` (refused by the checker before; natively it then crashed with a segmentation fault), a program over a variable, a struct's field through its own `var self` method, list elements wide and narrow (`[int8]`, `[bool]`, `[float32]`), a map's value, `self = v` on a list, an `int`, a `str`, a `bool` and a `float32`, `?` leaving early with the receiver written, a `become` to itself, a copy made before the call unchanged. The same output in the interpreter, natively, on aarch64 (qemu) and on wasm32 (Node). `test_errors`: an async one, a call on a `let`, a `become` on a local, `self = v` in a struct's and in a read-only method.
+- **Docs**: [[Language/Methods-and-traits]] (with an example whose output is checked), D144's row, the skill.
