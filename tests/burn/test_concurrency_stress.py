@@ -93,6 +93,9 @@ EXPECTED = {
     "t19_closures_to_children": ("1564000\n", 0),
     "t20_siblings_clone_a_closure": ("429570\n", 0),
     "t21_composition_to_a_child": ("632000\n", 0),
+    # 22. a deadline set after its child ended is not set at all: none fires
+    # later into freed memory (the review of 2026-11-06, R1)
+    "t22_timeout_of_a_quick_child": ("0 timed out\n", 0),
 }
 
 

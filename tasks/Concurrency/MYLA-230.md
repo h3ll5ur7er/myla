@@ -2,7 +2,7 @@
 id: MYLA-230
 title: "Sleep, timers, timeouts and suspending I/O on a reactor"
 type: feature
-status: todo
+status: review
 priority: high
 labels: [concurrency, runtime, io]
 ---
@@ -47,6 +47,12 @@ D124 is built: the clock and `sleep`, `timeout`, cancellation waking sleeps and 
 
 **Reopened by [[Project/Review-2026-11]] (R1, R5).** (1) `task.timeout(ms, f)` arms its deadline after the child is pushed (`__cancel_after` after the `async let`, [[lib/std/task.my]]); on 2+ workers a child that finishes first leaves a stale `[deadline][frame|1][cell]` in the timers: when it fires, `timers_fire` stores into the freed cell and `cancel_locked` CASes the freed frame: a spurious `None` (3 of 3 runs of a widened program on 4 workers), an unrelated fresh task cancelled through frame reuse, SIGSEGV (3 of 12 runs under load on 16 workers). The interpreter guards it (`state != 2`); native code doesn't. Stale entries keep `__timer_count` nonzero, so the stuck check can never fire afterwards. Fix verified in a patched runtime: `task_end` CASes an "ended without a deadline" flag when it doesn't see the armed one, and `cancel_after` returns an unarmed cell when it sees it; or arm before the push. (2) Two tasks reading the same descriptor with `read_line_async` hang natively (`EPOLL_CTL_ADD` → `EEXIST` → `MOD` replaces the first frame's token; `watch_take` deletes the fd; the orphaned frame never wakes and `__watch_count > 0` suppresses the stuck report); the interpreter prints.
 
-- [ ] The deadline race fixed; a loop of `task.timeout(300, quick)` over a trivial child at 16 workers, asserting no `None`, in the stress suite
-- [ ] `watch_add` chains or refuses a second frame for one descriptor; a test with two readers
-- [ ] [[Language/Concurrency]]'s timeout paragraph says what holds
+- [x] The deadline race fixed; a loop of `task.timeout(300, quick)` over a trivial child at 16 workers, asserting no `None`, in the stress suite
+- [x] `watch_add` chains or refuses a second frame for one descriptor; a test with two readers
+- [x] [[Language/Concurrency]]'s timeout paragraph says what holds
+
+## Fixed (2026-11-07)
+
+- **The deadline race.** `cancel_after` sets "has a deadline" (4) and puts the timer in under the timers' lock, and doesn't when the child's flags say it ended already (8); `task_end` sets "ended" by a CAS unless it sees the deadline, which it then takes off under the same lock. So either the end finds the timer or no timer is set. `concurrency_stress/t22_timeout_of_a_quick_child.my`: 80,000 quick children under a 100 ms deadline, then 80,000 under 5 s deadlines while what the first ones left behind would fire; on 16 workers the runtime before failed 10 of 20 runs (9 segfaults, one `1 timed out`), this one 0 of 20, and the stress suite runs it on 1, 4 and 16 workers.
+- **Two readers of one descriptor.** The poller watches a descriptor once, with `fd + 1` as its token, whatever number of frames wait for it; an event queues every frame waiting for it (`watchers_of`), and a descriptor is forgotten when no frame waits for it any more. `test_time.test_two_readers_of_one_descriptor`: two tasks read three slow lines from standard input; the runtime before hung on 1 and on 4 workers, this one and the interpreter print 3.
+

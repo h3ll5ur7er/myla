@@ -1842,18 +1842,30 @@ pub fun sleep_frame(fr: int64, ms: int64) {
 // `__cancel_after(child, ms)`: the child task whose first frame is `fr`
 // cancelled once `ms` milliseconds passed (D124, `task.timeout`): its flags
 // get "has a deadline" (4), so its end takes the deadline off; the cell
-// `__disarm` reads, which says whether the deadline fired.
+// `__disarm` reads, which says whether the deadline fired. The child may
+// have ended already (on another worker, before this ran): its flags say
+// so (8, `task_end`), and no deadline is set, so none can fire later into
+// a freed frame (the review of 2026-11-06, R1). The flag and the timer go
+// in under the timers' lock, so an end that sees the flag finds the timer.
 pub fun cancel_after(fr: int64, ms: int64) -> int64 {
     let cell = __alloc(8)
     __store64(cell, 0)
     let at = fr + 48
+    let lock = __rt_addr("__timer_lock")
+    take_lock(lock)
     while true {
         let flags = __load64(at)
+        if (flags & 8) != 0 {
+            give_lock(lock)
+            return cell
+        }
         if __cas64(at, flags, flags | 4) {
             break
         }
     }
-    let seq = timer_add(os.clock_ns() + ms * 1000000, fr | 1, cell)
+    let seq = timer_add_locked(os.clock_ns() + ms * 1000000, fr | 1, cell)
+    give_lock(lock)
+    timers_changed()
     return cell
 }
 
@@ -1870,11 +1882,20 @@ pub fun disarm(cell: int64) -> bool {
 // that fired did all it does under their lock, so nothing touches the frame
 // after this), then the frames waiting for it go on, its word saying done.
 pub fun task_end(fr: int64) {
-    if (__load64(fr + 48) & 4) != 0 {
-        let lock = __rt_addr("__timer_lock")
-        take_lock(lock)
-        timers_forget(fr | 1)
-        give_lock(lock)
+    // "ended" (8) unless a deadline was set (4) first: then it is taken off
+    let at = fr + 48
+    while true {
+        let flags = __load64(at)
+        if (flags & 4) != 0 {
+            let lock = __rt_addr("__timer_lock")
+            take_lock(lock)
+            timers_forget(fr | 1)
+            give_lock(lock)
+            break
+        }
+        if __cas64(at, flags, flags | 8) {
+            break
+        }
     }
     wake_waiters(__xchg64(fr + 24, 1))
 }
@@ -1885,6 +1906,21 @@ pub fun task_end(fr: int64) {
 fun timer_add(at0: int64, fr: int64, cell: int64) -> int64 {
     let lock = __rt_addr("__timer_lock")
     take_lock(lock)
+    let seq = timer_add_locked(at0, fr, cell)
+    give_lock(lock)
+    timers_changed()
+    return seq
+}
+
+// A worker polling until a later time woken to wait for a new timer.
+fun timers_changed() {
+    if __rt_get("__exec_polling") != 0 {
+        os.poller_wake(__rt_get("__exec_poller"))
+    }
+}
+
+// `timer_add` with the timers' lock held.
+fun timer_add_locked(at0: int64, fr: int64, cell: int64) -> int64 {
     var at = at0
     if cell == 0 && task_cancelled() != 0 {
         at = 0
@@ -1916,11 +1952,6 @@ fun timer_add(at0: int64, fr: int64, cell: int64) -> int64 {
     __store64(e + 24, cell)
     __store64(c, __load64(c) + 1)
     __store64(__rt_addr("__timer_count"), __load64(c))
-    give_lock(lock)
-    // a worker polling until a later time wakes to wait for this one
-    if __rt_get("__exec_polling") != 0 {
-        os.poller_wake(__rt_get("__exec_poller"))
-    }
     return seq
 }
 
@@ -2169,12 +2200,17 @@ fun poll_events(n: int64) {
     __fetch_add64(__rt_addr("__exec_waking"), 1)
     var i: int64 = 0
     while i < n {
-        let fr = os.poller_event(i)
-        if fr != 0 {
+        // the descriptor's token (`watch_add`): every frame waiting for it
+        // queued, each with its other entries taken off
+        let tok = os.poller_event(i)
+        if tok != 0 {
             take_lock(lock)
-            let mine = watch_take(fr)
+            let frs = watchers_of(tok - 1)
+            for fr in frs {
+                let mine = watch_take(fr)
+            }
             give_lock(lock)
-            if mine {
+            for fr in frs {
                 exec_push(fr)
             }
         }
@@ -2230,7 +2266,10 @@ fun wait_fds(fr: int64, a: int64, b: int64) {
 }
 
 // An entry `[fd][frame]` on `__watches`, the descriptor watched; false when
-// the poller can't watch it (no entry then). The lock held.
+// the poller can't watch it (no entry then). The lock held. A descriptor is
+// watched once whatever number of frames wait for it, its token `fd + 1`
+// (a poller keeps one per descriptor: a second frame's would replace the
+// first's, the review of 2026-11-06, R5), and an event queues them all.
 fun watch_add(fd: int64, fr: int64) -> bool {
     var cell = __rt_get("__watches")
     if cell == 0 || __load64(cell) == __load64(cell + 8) {
@@ -2250,7 +2289,7 @@ fun watch_add(fd: int64, fr: int64) -> bool {
         __store64(__rt_addr("__watches"), bigger)
         cell = bigger
     }
-    if os.poller_watch(__rt_get("__exec_poller"), fd, fr) < 0 {
+    if !watched(fd) && os.poller_watch(__rt_get("__exec_poller"), fd, fd + 1) < 0 {
         return false
     }
     let n = __load64(cell)
@@ -2270,10 +2309,11 @@ fun watch_take(fr: int64) -> bool {
     }
     var n = __load64(cell)
     var found = false
+    var gone: [int64] = []
     var i: int64 = 0
     while i < n {
         if __load64(cell + 24 + i * 16) == fr {
-            os.poller_forget(__rt_get("__exec_poller"), __load64(cell + 16 + i * 16))
+            gone.push(__load64(cell + 16 + i * 16))
             n -= 1
             __copy_bytes(cell + 16 + i * 16, cell + 16 + n * 16, 16)
             found = true
@@ -2283,7 +2323,56 @@ fun watch_take(fr: int64) -> bool {
     }
     __store64(cell, n)
     __store64(__rt_addr("__watch_count"), n)
+    // a descriptor no other frame waits for no longer watched
+    for fd in gone {
+        if !watched(fd) {
+            os.poller_forget(__rt_get("__exec_poller"), fd)
+        }
+    }
     return found
+}
+
+// Whether a frame waits for `fd` (the lock held).
+fun watched(fd: int64) -> bool {
+    let cell = __rt_get("__watches")
+    if cell == 0 {
+        return false
+    }
+    var i: int64 = 0
+    while i < __load64(cell) {
+        if __load64(cell + 16 + i * 16) == fd {
+            return true
+        }
+        i += 1
+    }
+    return false
+}
+
+// The frames waiting for `fd` (the lock held).
+fun watchers_of(fd: int64) -> [int64] {
+    var out: [int64] = []
+    let cell = __rt_get("__watches")
+    if cell == 0 {
+        return out
+    }
+    var i: int64 = 0
+    while i < __load64(cell) {
+        let fr = __load64(cell + 24 + i * 16)
+        if __load64(cell + 16 + i * 16) == fd && !has_word(out, fr) {
+            out.push(fr)
+        }
+        i += 1
+    }
+    return out
+}
+
+fun has_word(xs: [int64], x: int64) -> bool {
+    for y in xs {
+        if y == x {
+            return true
+        }
+    }
+    return false
 }
 
 // Every task waits for another one: the program ends.

@@ -251,6 +251,32 @@ async fun main() {
 }
 """
 
+# two tasks reading lines from standard input at once: both wait for the one
+# descriptor, and every line is read by one of them (the review of
+# 2026-11-06, R5: the second watch replaced the first, which waited for ever)
+TWO_READERS = """import std.io as io
+
+async fun reader() -> int {
+    var r = io.stdin()
+    var n = 0
+    while true {
+        match await r.read_line_async() {
+            Ok(Some(line)) => { n = n + 1 },
+            Ok(None) => { return n },
+            Err(e) => { return -100 },
+        }
+    }
+    return n
+}
+
+#main
+async fun main() {
+    async let a = reader()
+    async let b = reader()
+    print(await a + await b)
+}
+"""
+
 # a time limit around a read that gets no input in time; and standard input
 # from a regular file, which the poller can't watch (always ready)
 READ_TIMEOUT = """import std.io as io
@@ -486,6 +512,15 @@ class Time(unittest.TestCase):
                 self.assertEqual([l for l in lines if l.startswith("line")], ["line 0", "line 1", "line 2"])
                 # ticks before the first line came: the worker wasn't blocked
                 self.assertEqual(lines[0], "t")
+
+    def test_two_readers_of_one_descriptor(self):
+        exe = self.native("two_readers", TWO_READERS)
+        from ._tools import selfhost_tool
+        interp = [selfhost_tool("interp_main"), self.source("two_readers", TWO_READERS), STDLIB_ROOT]
+        for label, cmd, env in [("native 1", [exe], {"MYLA_THREADS": "1"}), ("native 4", [exe], {"MYLA_THREADS": "4"}),
+                                ("interpreter", interp, {})]:
+            with self.subTest(runner=label):
+                self.assertEqual(self.fed(cmd, FEEDER, **env), "3\n")
 
     def test_a_time_limit_around_a_read(self):
         exe = self.native("read_timeout", READ_TIMEOUT)
