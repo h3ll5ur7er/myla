@@ -264,7 +264,7 @@ An error without a position is `myla: <file>: <message>` (`myla: /home/ada/app/m
 
 ## Git
 
-Git is run through `std.process`, as the CLI runs `as` and `ld` today: `run("/usr/bin/env", ["git", …])`, so `git` is found on `PATH`, and the child inherits the environment, so the user's credentials, proxy and SSH configuration apply. Myla itself reads no environment variable (D73 (5)). Path-only builds never run Git.
+Git is run through `std.process`, as the CLI runs `as` and `ld`: `command("git")`, found on `PATH` (D147), with `GIT_TERMINAL_PROMPT=0` added to the environment it inherits, so the user's credentials, proxy and SSH configuration apply; without `git` on `PATH` a fetch says "git is not installed (it isn't on PATH)". Myla itself reads no environment variable (D73 (5)). Path-only builds never run Git.
 
 | Step | Command |
 | --- | --- |

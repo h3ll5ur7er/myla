@@ -6,7 +6,7 @@
 // `build` type-checks and generates x86-64 assembly (with `debug`, DWARF debug
 // information for gdb: line tables and variables, MYLA-71, MYLA-66), writes it
 // to `<out>.s`, then shells out to the system assembler and linker (`as`/`ld`,
-// located via `/usr/bin/env` so PATH is honored) to produce the executable
+// found on PATH, D147) to produce the executable
 // `<out>`, and removes the intermediate files.
 
 from std.process import run, Output, ExitStatus, SpawnError
@@ -169,8 +169,8 @@ pub fun build_commands(target: str, host: str, asm: str, obj: str, out: str) -> 
     return (["clang", "--target=" + triple, "-c", "-o", obj, asm], ["ld.lld", "-static", "-o", out, obj])
 }
 
-// What a failed step says: that its tool is missing when `env` couldn't
-// find it (exit status 127), and what building for `target` needs.
+// What a failed step says: that its tool is missing when it isn't on PATH,
+// and what building for `target` needs.
 #test("clang", "aarch64-linux", "x86_64-linux")["myla: 'clang' was not found: building for aarch64-linux here needs clang and ld.lld"]
 #test("as", "x86_64-linux", "x86_64-linux")["myla: 'as' was not found: building for x86_64-linux here needs GNU as and ld (binutils)"]
 pub fun missing_tool(tool: str, target: str, host: str) -> str {
@@ -182,15 +182,15 @@ pub fun missing_tool(tool: str, target: str, host: str) -> str {
 // Run one step of a build: false when it worked; a missing tool named.
 fun build_step(argv: [str], label: str, target: str) -> bool {
     var failed = true
-    match run("/usr/bin/env", argv) {
-        Ok(out) => {
-            let missing = match out.status { ExitStatus.Exited(code) => code == 127, _ => false }
-            if missing {
-                eprintln(missing_tool(argv[0], target, TARGET))
-            } else {
-                failed = step_failed(out, label)
-            }
-        },
+    var rest: [str] = []
+    var i = 1
+    while i < argv.len() {
+        rest.push(argv[i])
+        i += 1
+    }
+    match run(argv[0], rest) {
+        Ok(out) => { failed = step_failed(out, label) },
+        Err(SpawnError.NotFound) => { eprintln(missing_tool(argv[0], target, TARGET)) },
         Err(e) => { eprintln(label) },
     }
     return failed

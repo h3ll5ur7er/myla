@@ -63,4 +63,4 @@ Decided by D113 ([[MYLA-211]]): I/O and process functions return `Result<T, IoEr
     - `test_a_child_gets_sigpipe_back`;
     - `test_a_child_s_path_directory_environment_and_input`: PATH, a directory and one that isn't there, the environment changed, removed from and cleared, stdin, a program found nowhere, a base `Command` unchanged by what was built from it;
     - `test_a_child_waited_for_in_a_task`: with and without tasks; the second failed to build before.
-- **Left**: the project tool still runs `/usr/bin/env git`, which it can now write `run("git", …)`.
+- **The CLI's own tools** (2026-11-06, after): `myla fetch` runs `command("git")` with `GIT_TERMINAL_PROMPT=0` given through `env`, and `myla build` runs `as`, `ld` and `clang` by name, all found on PATH, instead of through `/usr/bin/env`; a tool not there is `SpawnError.NotFound`, with the messages they had (`test_project_fetch.test_git_not_on_path`, `test_selfhost_cli.test_build_without_the_assembler_on_path`).
