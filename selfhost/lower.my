@@ -761,6 +761,13 @@ impl Lower {
         return cg.type_of(e.id)
     }
 
+    // `store [rt_addr sym], v` of the width `w` (MYLA-263).
+    fun store_rt_var(var self, sym: str, v: int32, w: int32) {
+        let at = self.temp(Type.TPtr)
+        self.add(Inst.Intr(at, Intrinsic.RtAddr(sym), []))
+        self.add(Inst.StoreAt(at, 0, v, w))
+    }
+
     // A narrow list element a `var self` method was given in a cell of its
     // own (`back`: the cell, the element's address) stored back after the
     // call (D144); nothing for (-1, -1).
@@ -2976,8 +2983,9 @@ impl Lower {
         }
         let env = self.temp(Type.TPtr)
         self.add(Inst.Rt(env, "__alloc", [self.int_const(size)]))
+        // its first word: the record of its routines (MYLA-263)
         let d = self.temp(Type.TPtr)
-        self.add(Inst.Label(d, drop))
+        self.add(Inst.Label(d, env_record_of(drop)))
         self.add_store(env, 0, d)
         self.add_store(base, 8, env)
         return (slot, base, env)
@@ -4094,12 +4102,30 @@ impl Lower {
                 self.add(Inst.StoreAt(vals[0], 0, vals[1], w))
                 return -1
             }
-            if nm == "__copy_bytes" || nm == "__set_io_errno" || nm == "__free" || nm == "__set_run_status" || nm == "__set_run_stderr" || nm == "__pause" || nm == "__run_frame" || nm == "__store_rel64" {
+            // the runtime variables a primitive sets, stored into in place
+            // (MYLA-263): what `__io_errno` reads, and a child's status and
+            // stderr (the bytes with a reference of their own)
+            if nm == "__set_io_errno" {
+                self.store_rt_var("__io_errno_val", vals[0], 8)
+                return -1
+            }
+            if nm == "__set_run_status" {
+                self.store_rt_var("__run_exit_val", vals[0], 4)
+                self.store_rt_var("__run_signal_val", vals[1], 4)
+                self.store_rt_var("__run_errno_val", vals[2], 4)
+                return -1
+            }
+            if nm == "__set_run_stderr" {
+                self.add(Inst.Intr(-1, Intrinsic.RcInc, [vals[0]]))
+                self.store_rt_var("__run_stderr_val", vals[0], 8)
+                return -1
+            }
+            if nm == "__copy_bytes" || nm == "__free" || nm == "__pause" || nm == "__run_frame" || nm == "__store_rel64" {
                 self.add(rt_inst(-1, nm, vals))
                 return -1
             }
             let d = self.temp(t)
-            if nm == "__alloc" || nm == "__equal_bytes" || nm == "__syscall" || nm == "__syscall5" || nm == "__environ" || nm == "__rotl" || nm == "__bsr64" || nm == "__cas64" || nm == "__xchg64" || nm == "__fetch_add64" || nm == "__f64_round" || nm == "__load_acq64" { self.add(rt_inst(d, nm, vals)) } else if nm == "__argv" { self.add(Inst.Rt(d, "__argv_of", vals)) } else { self.add(Inst.Mov(d, vals[0])) }
+            if nm == "__alloc" || nm == "__equal_bytes" || nm == "__syscall" || nm == "__syscall5" || nm == "__rotl" || nm == "__bsr64" || nm == "__cas64" || nm == "__xchg64" || nm == "__fetch_add64" || nm == "__f64_round" || nm == "__load_acq64" || nm == "__call_code" { self.add(rt_inst(d, nm, vals)) } else if nm == "__argv" { self.add(Inst.Global(d, "__argv", 8)) } else if nm == "__environ" { self.add(Inst.Global(d, "__envp", 8)) } else { self.add(Inst.Mov(d, vals[0])) }
             if nm == "__str_of" || nm == "__list_of" { return self.owned_value(cg, d, t) }
             return d
         }
@@ -4116,6 +4142,8 @@ impl Lower {
             }
         }
         if !known { return self.unsupported(format("the builtin {}", nm)) }
+        // without tasks nothing is ever asked to stop (MYLA-263: no routine)
+        if nm == "__task_cancelled" && !cg.frames { return self.konst(Type.TBool, 0) }
         var vals: [int32] = []
         for a in args { vals.push(self.expr(cg, a)) }
         if nm == "__exit" {
@@ -5289,6 +5317,22 @@ pub fun compose_ir() -> Routine {
     return Routine { f: lw.f, wants: lw.wants }
 }
 
+// The record of the routines of an environment whose drop function is
+// `drop` (MYLA-263): its first word points at it, `[drop, clone, deep]` (the
+// clone and the deep copy with tasks, D92, else 0), the same on every
+// target. An environment owning nothing shares one (`__free`, and a plain
+// cell's copies).
+#test("__free")["__env_plain_routines"]
+#test("myla_main__lam1_env_drop")["myla_main__lam1_env_routines"]
+#test("__compose_env_drop")["myla___compose_env_routines"]
+pub fun env_record_of(drop: str) -> str {
+    if drop == "__free" { return "__env_plain_routines" }
+    if drop == "__compose_env_drop" { return "myla___compose_env_routines" }
+    var sb = StringBuilder()
+    sb.append(drop, 0, drop.len() - 5)
+    return sb.build() + "_routines"
+}
+
 // Whether `x`, awaited, is a wait (`__wait_readable`, `__wait_either`) or a
 // turn for the others (`__yield`), which a program without tasks doesn't do.
 fun waits_without_tasks(x: Expr) -> bool {
@@ -5505,6 +5549,25 @@ pub fun partial_ir(cg: CodeGen, job: PartialJob) -> Routine {
         if named { lw.add(Inst.Call(d, job.target, args)) } else { lw.add(Inst.CallInd(d, fv, args)) }
         if jumps { lw.finish(Term.Become) } else { lw.finish(Term.Ret(d)) }
     }
+    return Routine { f: lw.f, wants: lw.wants }
+}
+
+// `myla_<f>__fnval` of the async function `f`, which has `words` argument
+// words: its value makes its frame (D90), so the adapter is a `become` of
+// `myla_<f>__new` with the words it got; `__new` takes the references of
+// its own. The environment (wasm32's last word, D130) goes unused.
+pub fun async_fnval_ir(f: str, words: int32) -> Routine {
+    let i64 = Type.TInt(64, true)
+    var lw = routine(f + "__fnval", Some(i64))
+    var ws: [int32] = []
+    var k = 0
+    while k < words {
+        ws.push(lw.read_cell(lw.new_slot(format("__w{}", k), i64, 8, k, false)))
+        k = k + 1
+    }
+    let env = lw.new_slot("__env", Type.TPtr, 8, ENV_WORD, false)
+    lw.add(Inst.Call(-1, f + "__new", ws))
+    lw.finish(Term.Become)
     return Routine { f: lw.f, wants: lw.wants }
 }
 

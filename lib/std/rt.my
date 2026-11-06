@@ -81,6 +81,25 @@ pub fun zero_words(p: int64, n: int64) {
     }
 }
 
+// `__equal_bytes(p, q, n)`: whether the `n` bytes at `p` and `q` are the
+// same, eight at a time, then one (MYLA-263: the same on every target).
+pub fun equal_bytes(p: int64, q: int64, n: int64) -> bool {
+    var i: int64 = 0
+    while i + 8 <= n {
+        if __load64(p + i) != __load64(q + i) {
+            return false
+        }
+        i += 8
+    }
+    while i < n {
+        if __load8(p + i) != __load8(q + i) {
+            return false
+        }
+        i += 1
+    }
+    return true
+}
+
 // `a == b` (`__str_eq`): the same cell, or equal lengths and bytes.
 pub fun str_eq(a: str, b: str) -> bool {
     let pa = __addr_of(a)

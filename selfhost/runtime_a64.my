@@ -129,9 +129,6 @@ impl CodeGen {
         if self.frames {
             self.emit_executor_a64()
             self.emit_deep_runtime_a64()
-        } else {
-            // no task but the first: nothing is ever cancelled (D96)
-            for line in ["__task_cancelled:", "\tmov x0, #0", "\tret", ""] { self.raw(line) }
         }
         for line in [
             // __alt_stack: an alternate signal stack for the running thread
@@ -241,22 +238,6 @@ impl CodeGen {
         }
         self.raw("")
         for line in [
-            // __str_eq(a, b): the same string, or equal lengths and bytes
-            "__str_eq:",
-            "\tcmp x0, x1",
-            "\tb.eq .Lse_eq",
-            "\tldr x2, [x0], #8",
-            "\tldr x3, [x1], #8",
-            "\tcmp x2, x3",
-            "\tb.ne .Lse_ne",
-            "\tb __equal_bytes",
-            ".Lse_eq:",
-            "\tmov x0, #1",
-            "\tret",
-            ".Lse_ne:",
-            "\tmov x0, #0",
-            "\tret",
-            "",
             // __syscall(n, a, b, c): the number in x8, the arguments in x0
             // to x2 (x3 0); the result, a negative errno on a failure
             "__syscall:",
@@ -278,16 +259,6 @@ impl CodeGen {
             "\tmov x4, x5",
             "\tmov x5, #0",
             "\tsvc #0",
-            "\tret",
-            "",
-            "__argv_of:",
-            "\tadrp x0, __argv",
-            "\tldr x0, [x0, :lo12:__argv]",
-            "\tret",
-            "",
-            "__environ:",
-            "\tadrp x0, __envp",
-            "\tldr x0, [x0, :lo12:__envp]",
             "\tret",
             "",
             // __copy_bytes(dst, src, n): sixteen bytes at a time, then eight,
@@ -315,46 +286,7 @@ impl CodeGen {
             ".Lcb_done:",
             "\tret",
             "",
-            // __equal_bytes(p, q, n): whether n bytes at p and q are equal
-            "__equal_bytes:",
-            ".Leb_words:",
-            "\tcmp x2, #8",
-            "\tb.lo .Leb_bytes",
-            "\tldr x3, [x0], #8",
-            "\tldr x4, [x1], #8",
-            "\tcmp x3, x4",
-            "\tb.ne .Leb_no",
-            "\tsub x2, x2, #8",
-            "\tb .Leb_words",
-            ".Leb_bytes:",
-            "\tcbz x2, .Leb_yes",
-            "\tldrb w3, [x0], #1",
-            "\tldrb w4, [x1], #1",
-            "\tcmp w3, w4",
-            "\tb.ne .Leb_no",
-            "\tsub x2, x2, #1",
-            "\tb .Leb_bytes",
-            ".Leb_yes:",
-            "\tmov x0, #1",
-            "\tret",
-            ".Leb_no:",
-            "\tmov x0, #0",
-            "\tret",
-            "",
         ] { self.raw(line) }
-        // the I/O primitives' errno and `run`'s results (a worker's own with
-        // tasks)
-        self.raw("__set_io_errno:")
-        self.a64_rt_var("x1", "__io_errno_val")
-        for line in ["\tstr x0, [x1]", "\tret", "", "__set_run_status:"] { self.raw(line) }
-        self.a64_rt_var("x3", "__run_exit_val")
-        self.raw("\tstr w0, [x3]")
-        self.a64_rt_var("x3", "__run_signal_val")
-        self.raw("\tstr w1, [x3]")
-        self.a64_rt_var("x3", "__run_errno_val")
-        for line in ["\tstr w2, [x3]", "\tret", "", "__set_run_stderr:", "\tldur x1, [x0, #-8]", "\tadd x1, x1, #1", "\tstur x1, [x0, #-8]"] { self.raw(line) }
-        self.a64_rt_var("x1", "__run_stderr_val")
-        for line in ["\tstr x0, [x1]", "\tret", ""] { self.raw(line) }
         // __str_drop, as IR with std.rt's allocator (MYLA-162)
         self.emit_routine(drop_entry_ir("__str_drop", self.rt_alloc_names().1, false), -1, 0, 0)
         self.raw("\t.set __str_drop, myla___str_drop")
@@ -382,19 +314,11 @@ impl CodeGen {
             "\tsubs x1, x1, #1",
             "\tstur x1, [x0, #-8]",
             "\tb.ne .Lfdrop_done",
+            // its drop function, the first of its record (MYLA-263)
             "\tldr x1, [x0]",
+            "\tldr x1, [x1]",
             "\tbr x1",
             ".Lfdrop_done:",
-            "\tret",
-            "",
-            // std.math's primitives (MYLA-248), a float64 as its bits
-            "__sqrt:",
-            "\tfmov d0, x0",
-            "\tfsqrt d0, d0",
-            "\tfmov x0, d0",
-            "\tret",
-            "__f64_bits:",
-            "__f64_from_bits:",
             "\tret",
             "",
         ] { self.raw(line) }
@@ -587,19 +511,13 @@ impl CodeGen {
     }
 
     // `__deep_env` and `__dclone_env`, a function value's environment's deep
-    // copies (D92, MYLA-148): owning nothing (`__free` its drop), the
-    // string's or the cell's; else the routines just before its drop
-    // function
+    // copies (D92, MYLA-148): the routines its record names (MYLA-263)
     fun emit_deep_runtime_a64(var self) {
         for line in [
             "__deep_env:",
             "\tcbz x0, .Lde_none",
             "\tldr x1, [x0]",
-            "\tadrp x2, __free",
-            "\tadd x2, x2, :lo12:__free",
-            "\tcmp x1, x2",
-            "\tb.eq __deep_str",
-            "\tldur x1, [x1, #-8]",
+            "\tldr x1, [x1, #16]",
             "\tbr x1",
             ".Lde_none:",
             "\tret",
@@ -607,11 +525,7 @@ impl CodeGen {
             "__dclone_env:",
             "\tcbz x0, .Ldce_none",
             "\tldr x1, [x0]",
-            "\tadrp x2, __free",
-            "\tadd x2, x2, :lo12:__free",
-            "\tcmp x1, x2",
-            "\tb.eq __dclone_cell",
-            "\tldur x1, [x1, #-16]",
+            "\tldr x1, [x1, #8]",
             "\tbr x1",
             ".Ldce_none:",
             "\tret",

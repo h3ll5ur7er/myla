@@ -995,6 +995,13 @@ impl CodeGen {
                 self.emit(format("{}:", done))
                 self.a64_st("x0", fr, d)
             },
+            // a call through a code address with one word (MYLA-263)
+            Intrinsic.CallCode => {
+                self.a64_ld("x0", fr, args[1])
+                self.a64_ld("x9", fr, args[0])
+                self.emit("blr x9")
+                self.a64_st("x0", fr, d)
+            },
             Intrinsic.RunFrame => {
                 self.a64_ld("x0", fr, args[0])
                 self.emit("ldr x15, [x0]")
@@ -1071,16 +1078,8 @@ impl CodeGen {
     // value (MYLA-126): a parameter passed owned gets a reference of its own,
     // then the jump to the function (the environment in x9 unused).
     fun emit_fnval_thunk_a64(var self, n: str) {
-        if self.is_async_fn(n) {
-            // an async function's value makes its frame (D90)
-            self.emit("")
-            self.emit("\t.p2align 2")
-            self.emit(format("myla_{}__fnval:", n))
-            self.emit(format("b myla_{}__new", n))
-            return
-        }
         // as on every target (MYLA-263)
-        self.emit_fnval_adapter(n)
+        if self.is_async_fn(n) { self.emit_async_fnval(n) } else { self.emit_fnval_adapter(n) }
     }
 
 

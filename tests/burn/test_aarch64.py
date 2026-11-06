@@ -271,6 +271,42 @@ fun main() {
     print(g(Pair { a: 7, b: "" }, 0))
 }
 """
+# async functions' values (their adapters, a `become` of `__new`, as IR,
+# MYLA-263), one of them with an aggregate result, which wasm32 refused to
+# build; a closure crossing into a child task (its environment's deep copy,
+# found through its record)
+PROGRAMS["async_function_values"] = """import std.task as task
+
+struct Pair {
+    a: int,
+    b: str,
+}
+
+async fun make(n: int, s: str) -> Pair {
+    return Pair { a: n * 2, b: s + "!" }
+}
+
+async fun twice(n: int) -> int {
+    return n * 2
+}
+
+#main
+async fun main() {
+    let f = make
+    let g = twice
+    let p = await f(21, "hi")
+    print(f"{p.a} {p.b}")
+    print(await g(5))
+    let words = ["a", "b"]
+    let h = (x: int) => x + words.len()
+    async let r = task_using(h)
+    print(await r)
+}
+
+async fun task_using(h: (int) -> int) -> int {
+    return h(40)
+}
+"""
 # calls in tail position, a million deep without `become`: each jumps, as on
 # x86-64 (MYLA-283); a function without a result calling one, and one whose
 # result it drops, in tail position too

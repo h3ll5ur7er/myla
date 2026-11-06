@@ -89,9 +89,6 @@ impl CodeGen {
         self.wasm_fn("__syscall5", 6, ["i64.const 52"], true)
         if self.frames {
             self.emit_executor_wasm()
-        } else {
-            // no task but the first: nothing is ever cancelled (D96)
-            self.wasm_fn("__task_cancelled", 0, ["i64.const 0"], true)
         }
         // the runtime errors (MYLA-17): the message, the position record the
         // caller passes
@@ -117,25 +114,7 @@ impl CodeGen {
             self.wasm_fn("__panic", 2, ["local.get 0", "local.get 1", "call __panic_report", "drop", "unreachable"], true)
             self.wasm_calls["__panic_report"] = 2
         }
-        // __str_eq(a, b): the same string, or equal lengths and bytes
-        self.wasm_fn("__str_eq", 2, ["local.get 0", "local.get 1", "i64.eq", "if", "i64.const 1", "return", "end_if",
-            "local.get 0", "i32.wrap_i64", "i64.load 0", "local.get 1", "i32.wrap_i64", "i64.load 0", "i64.ne", "if", "i64.const 0", "return", "end_if",
-            "local.get 0", "i64.const 8", "i64.add", "local.get 1", "i64.const 8", "i64.add", "local.get 0", "i32.wrap_i64", "i64.load 0",
-            "return_call __equal_bytes"], true)
-        self.wasm_calls["__equal_bytes"] = 3
-        // __equal_bytes(p, q, n): whether n bytes at p and q are equal
-        self.wasm_fn("__equal_bytes", 3, ["block", "loop", "local.get 2", "i64.eqz", "br_if 1",
-            "local.get 0", "i32.wrap_i64", "i64.load8_u 0", "local.get 1", "i32.wrap_i64", "i64.load8_u 0", "i64.ne", "if", "i64.const 0", "return", "end_if",
-            "local.get 0", "i64.const 1", "i64.add", "local.set 0", "local.get 1", "i64.const 1", "i64.add", "local.set 1",
-            "local.get 2", "i64.const 1", "i64.sub", "local.set 2", "br 0", "end_loop", "end_block", "i64.const 1"], true)
         self.wasm_fn("__copy_bytes", 3, ["local.get 0", "i32.wrap_i64", "local.get 1", "i32.wrap_i64", "local.get 2", "i32.wrap_i64", "memory.copy 0, 0", "i64.const 0"], true)
-        self.wasm_fn("__argv_of", 0, ["i32.const __argv", "i64.load 0"], true)
-        self.wasm_fn("__environ", 0, ["i32.const __envp", "i64.load 0"], true)
-        self.wasm_fn("__set_io_errno", 1, ["i32.const __io_errno_val", "local.get 0", "i64.store 0", "i64.const 0"], true)
-        self.wasm_fn("__set_run_status", 3, ["i32.const __run_exit_val", "local.get 0", "i64.store32 0", "i32.const __run_signal_val", "local.get 1", "i64.store32 0",
-            "i32.const __run_errno_val", "local.get 2", "i64.store32 0", "i64.const 0"], true)
-        self.wasm_fn("__set_run_stderr", 1, ["local.get 0", "i64.const 8", "i64.sub", "i32.wrap_i64", "local.get 0", "i64.const 8", "i64.sub", "i32.wrap_i64",
-            "i64.load 0", "i64.const 1", "i64.add", "i64.store 0", "i32.const __run_stderr_val", "local.get 0", "i64.store 0", "i64.const 0"], true)
         // __str_drop, as IR with std.rt's allocator (MYLA-162)
         self.emit_routine(drop_entry_ir("__str_drop", self.rt_alloc_names().1, false), -1, 0, 0)
         self.raw("\t.set __str_drop, myla___str_drop")
@@ -155,11 +134,7 @@ impl CodeGen {
             "local.get 0", "i64.const 8", "i64.sub", "i32.wrap_i64", "local.get 0", "i64.const 8", "i64.sub", "i32.wrap_i64",
             "i64.load 0", "i64.const 1", "i64.sub", "i64.store 0",
             "local.get 0", "i64.const 8", "i64.sub", "i32.wrap_i64", "i64.load 0", "i64.eqz", "i32.eqz", "if", "i64.const 0", "return", "end_if",
-            "local.get 0", "local.get 0", "i32.wrap_i64", "i64.load 0", "i32.wrap_i64", format("return_call_indirect {}", wasm_sig(1))], true)
-        // std.math's primitives (MYLA-248), a float64 as its bits
-        self.wasm_fn("__sqrt", 1, ["local.get 0", "f64.reinterpret_i64", "f64.sqrt", "i64.reinterpret_f64"], true)
-        self.wasm_fn("__f64_bits", 1, ["local.get 0"], true)
-        self.wasm_fn("__f64_from_bits", 1, ["local.get 0"], true)
+            "local.get 0", "local.get 0", "i32.wrap_i64", "i64.load 0", "i32.wrap_i64", "i64.load 0", "i32.wrap_i64", format("return_call_indirect {}", wasm_sig(1))], true)
         self.emit_compose_runtime()
         self.emit_derived_eq()
     }
@@ -198,15 +173,11 @@ impl CodeGen {
         // __task_exit(code): `exit` when tasks take turns
         self.wasm_fn("__task_exit", 1, ["i64.const 3", "local.get 0", "i64.const 0", "call __task_fail", "drop", "call __failed_wait", "drop", "local.get 0", "call __exit", "drop", "unreachable"], true)
         self.wasm_calls["__failed_wait"] = 0
-        // the environments' deep copies (D92, MYLA-148): owning nothing
-        // (`__free` its drop), the string's or the cell's; else the routine
-        // `__env_routines` gives beside its drop function
+        // the environments' deep copies (D92, MYLA-148): the routine its
+        // record names (MYLA-263)
         for dc in [("__deep_env", "__deep_str", 16), ("__dclone_env", "__dclone_cell", 8)] {
-            self.wasm_fn(dc.0, 1, [".local i64, i64", "local.get 0", "i64.eqz", "if", "i64.const 0", "return", "end_if",
-                "local.get 0", "i32.wrap_i64", "i64.load 0", "local.tee 1", "i32.const __free", "i64.extend_i32_u", "i64.eq", "if", "local.get 0", "return_call " + dc.1, "end_if",
-                "i32.const __env_routines", "i64.extend_i32_u", "i64.const 8", "i64.add", "local.set 2",
-                "loop", "local.get 2", "i32.wrap_i64", "i64.load 0", "local.get 1", "i64.ne", "if", "local.get 2", "i64.const 24", "i64.add", "local.set 2", "br 1", "end_if", "end_loop",
-                "local.get 0", "local.get 2", "i32.wrap_i64", format("i64.load {}", dc.2), "i32.wrap_i64", "return_call_indirect " + one], true)
+            self.wasm_fn(dc.0, 1, ["local.get 0", "i64.eqz", "if", "i64.const 0", "return", "end_if",
+                "local.get 0", "local.get 0", "i32.wrap_i64", "i64.load 0", "i32.wrap_i64", format("i64.load {}", dc.2), "i32.wrap_i64", "return_call_indirect " + one], true)
             self.wasm_calls[dc.1] = 1
         }
     }

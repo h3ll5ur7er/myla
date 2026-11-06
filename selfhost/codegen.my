@@ -22,7 +22,7 @@ from .inline import inlinable, inline_calls, same_module, may_inline, merge_bloc
 from .hoist import hoist_cows
 from .ranges import widen_counters
 from .anf import Norm, new_norm
-from .lower import lower_function, lower_lambda, blocked_types, Lowered, myla_runtime_function, derived_eq_ir, walk_ir, drop_entry_ir, dropb_slow_ir, list_drop_slow_ir, map_drop_slow_ir, clone_ir, deep_walk_ir, deep_cell_ir, Routine, Want, env_drop_ir, env_deep_ir, partial_ir, frame_new_ir
+from .lower import async_fnval_ir, lower_function, lower_lambda, blocked_types, Lowered, myla_runtime_function, derived_eq_ir, walk_ir, drop_entry_ir, dropb_slow_ir, list_drop_slow_ir, map_drop_slow_ir, clone_ir, deep_walk_ir, deep_cell_ir, Routine, Want, env_drop_ir, env_deep_ir, partial_ir, frame_new_ir
 import .ir_x86 as ir_x86
 import .ownership as ownership
 import .runtime_x86 as runtime_x86
@@ -252,7 +252,7 @@ pub struct CodeGen {
     wasm: bool,
     wasm_arity: [str: int32],
     wasm_calls: [str: int32],
-    wasm_envs: [str],               // MYLA-158: the environments with deep copies (`__env_routines`)
+    env_records: [str],             // MYLA-263: the environments whose routines records the data holds (`env_record_of`)
 }
 
 // A code generator for `src` (checked alone, `checker_on`), the receiver of
@@ -334,7 +334,7 @@ pub fun new_codegen(c: Checker) -> CodeGen {
         dbg_fn_end: "", dbg_mark: "", dbg_n: 0, dbg_script: "",
         keep_ir: false, wants_ftoa: false, inlining: true, inl_names: [], inl_bodies: [], inl_no: [:], ssa: false, ssa_stats: no_ssa_stats(), refused: [], ir_texts: [], ir_blocked: [], ir_ready: false,
         pend_store: "", pend_temp: -1, temp_uses: [], temp_remat: [], temp_fconst: [:], fconst_labels: [:], temp_src: [], temp_imm: [], temp_frame: [], temp_mem: [], temp_off: [],
-        temp_reg: [], slot_reg: [], saved_regs: [], in_frame: false, resume_blocks: [], frames: c.task_line > 0, norm: compiler_norm(), save_base: 0, arg_words: 0, frameless: false, kept_params: [:], keeping: [:], scan_kept: [], scan_args: [], owning: [:], no_owned: [], handed: handed, passed_on: passed_on, tag_enums: [:], a64: false, wasm: false, wasm_arity: [:], wasm_calls: [:], wasm_envs: [],
+        temp_reg: [], slot_reg: [], saved_regs: [], in_frame: false, resume_blocks: [], frames: c.task_line > 0, norm: compiler_norm(), save_base: 0, arg_words: 0, frameless: false, kept_params: [:], keeping: [:], scan_kept: [], scan_args: [], owning: [:], no_owned: [], handed: handed, passed_on: passed_on, tag_enums: [:], a64: false, wasm: false, wasm_arity: [:], wasm_calls: [:], env_records: [],
     }
 }
 
@@ -1908,7 +1908,7 @@ impl CodeGen {
     // name the rest of the runtime calls and the function standing for it.
     fun rt_exec(self) -> [(str, str)] {
         // every program's (`__map_lookup`: `remove`'s too)
-        var out = [("__panic_report", "std$rt$panic_report"), ("__list_grow", "std$rt$list_grow"), ("__sb_append_bytes", "std$rt$sb_append_bytes"), ("__map_new", "std$rt$map_new"), ("__map_rebuild", "std$rt$map_rebuild"), ("__map_lookup", "std$rt$map_lookup")]
+        var out = [("__panic_report", "std$rt$panic_report"), ("__list_grow", "std$rt$list_grow"), ("__sb_append_bytes", "std$rt$sb_append_bytes"), ("__map_new", "std$rt$map_new"), ("__map_rebuild", "std$rt$map_rebuild"), ("__map_lookup", "std$rt$map_lookup"), ("__equal_bytes", "std$rt$equal_bytes")]
         if self.frames {
             for p in [("__sched_init", "std$rt$sched_init"), ("__workers_count", "std$rt$workers_count"), ("__task_cancel", "std$rt$task_cancel"), ("__task_cancelled", "std$rt$task_cancelled"), ("__failed_wait", "std$rt$failed_wait"), ("__wait_stopped", "std$rt$wait_stopped"), ("__exec_push", "std$rt$exec_push"), ("__exec_yield_push", "std$rt$exec_yield_push"), ("__exec_find", "std$rt$exec_find"), ("__exec_peek", "std$rt$exec_peek"), ("__wake_waiters", "std$rt$wake_waiters"), ("__actor_leave", "std$rt$actor_leave"), ("__task_wait", "std$rt$task_wait"), ("__actor_enter_rt", "std$rt$actor_enter"), ("__exec_loop", "std$rt$exec_run"), ("__deep_str", "std$rt$deep_str"), ("__dclone_str", "std$rt$dclone_str"), ("__dclone_cell", "std$rt$dclone_cell"), ("__panic_report_tasks", "std$rt$panic_report_tasks"), ("myla___sleep", "std$rt$sleep_frame"), ("__cancel_after", "std$rt$cancel_after"), ("__task_end", "std$rt$task_end"), ("myla___wait_fd", "std$rt$wait_fd"), ("myla___wait_fd2", "std$rt$wait_fd2")] { out.push(p) }
         }
@@ -2066,16 +2066,30 @@ impl CodeGen {
             si = si + 1
         }
         for line in self.strdata { out.push(line) }
-        if self.wasm && self.frames {
-            // each environment's drop function, its clone and its deep copy
-            // (`__deep_env`, `__dclone_env`, MYLA-158)
-            out.push("\t.balign 8")
-            out.push("__env_routines:")
-            out.push(format("\t.quad {}", self.wasm_envs.len()))
-            for l in self.wasm_envs {
-                out.push(format("\t.quad myla_{}_env_drop", l))
+        // each environment's routines, which its first word points at:
+        // its drop function, its clone and its deep copy (with tasks, D92;
+        // else 0), on every target (`env_record_of`, MYLA-263); one shared
+        // by the environments owning nothing
+        out.push("\t.balign 8")
+        // (std.rt's functions by their own names: wasm has no aliases)
+        out.push("__env_plain_routines:")
+        out.push(format("\t.quad myla_{}", self.rt_alloc_names().1))
+        if self.frames {
+            out.push("\t.quad myla_std$rt$dclone_cell")
+            out.push("\t.quad myla_std$rt$deep_str")
+        } else {
+            out.push("\t.quad 0")
+            out.push("\t.quad 0")
+        }
+        for l in self.env_records {
+            out.push(format("myla_{}_env_routines:", l))
+            out.push(format("\t.quad myla_{}_env_drop", l))
+            if self.frames {
                 out.push(format("\t.quad myla_{}_env_clone", l))
                 out.push(format("\t.quad myla_{}_env_deep", l))
+            } else {
+                out.push("\t.quad 0")
+                out.push("\t.quad 0")
             }
         }
         out.push("")
@@ -2955,6 +2969,16 @@ impl CodeGen {
         self.emit_partial(PartialJob { lifted: n + "__fnval", target: n, fn_off: -1, slots: slots, aggs: aggs, sret: is_aggregate_opt(sig.ret), owned: [] })
     }
 
+    // An async function's adapter, `myla_<f>__fnval`: its value makes its
+    // frame (D90), a `become` of its `__new` with the words it got, built as
+    // IR on every target (MYLA-263). Its call gives the frame, one word,
+    // whatever its result type (wasm32's adapter counted a result's address
+    // for an aggregate one, which `__new` doesn't take).
+    fun emit_async_fnval(var self, n: str) {
+        let r = async_fnval_ir(n, self.sig_of(n).params.len() as int32)
+        self.emit_routine(r.f, -1, 0, 0)
+    }
+
     // An async function's frame constructor, `myla_<f>__new`, built as IR and
     // translated like any function on every target (`frame_new_ir`,
     // MYLA-263).
@@ -2978,19 +3002,13 @@ impl CodeGen {
     // tail-call __free on the cell (reached through __func_drop at refcount 0).
     fun emit_env_drop(var self, lifted: str, owned: [DropEntry]) {
         // built as IR with std.rt's allocator (MYLA-162); with tasks, the
-        // env's deep copy and clone too, found just before its drop function
-        // by `__deep_env` (D92)
+        // env's deep copy and clone too, which `__deep_env` and
+        // `__dclone_env` find in its record (D92, MYLA-263)
         if self.frames {
             self.emit_env_routine(env_deep_ir(self, lifted, owned, false))
             self.emit_env_routine(env_deep_ir(self, lifted, owned, true))
-            if self.wasm {
-                // no data beside code on wasm: a table (`__env_routines`)
-                self.wasm_envs.push(lifted)
-            } else {
-                self.emit(format("\t.quad myla_{}_env_clone", lifted))
-                self.emit(format("\t.quad myla_{}_env_deep", lifted))
-            }
         }
+        self.env_records.push(lifted)
         self.emit_env_routine(env_drop_ir(self, lifted, owned, self.rt_alloc_names().1))
     }
 
@@ -3001,11 +3019,7 @@ impl CodeGen {
     // goes unused (D119).
     fun emit_fnval_thunk(var self, n: str) {
         if self.is_async_fn(n) {
-            // an async function's value makes its frame (D90): `__new` takes
-            // the arguments (with references of its own)
-            self.emit(format("myla_{}__fnval:", n))
-            self.emit(format("jmp myla_{}__new", n))
-            self.emit("")
+            self.emit_async_fnval(n)
             return
         }
         self.emit_fnval_adapter(n)

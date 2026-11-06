@@ -609,6 +609,13 @@ impl CodeGen {
                 self.load_temp(args[0], "rdi", temp_base)
                 self.emit("call *(%rdi)")
             },
+            // a call through a code address with one word (MYLA-263)
+            Intrinsic.CallCode => {
+                self.load_temp(args[1], "rdi", temp_base)
+                self.load_temp(args[0], "rax", temp_base)
+                self.emit("call *%rax")
+                self.store_temp(d, temp_base)
+            },
             Intrinsic.Bsr64 => {
                 self.load_temp(args[0], "rax", temp_base)
                 self.emit("bsrq %rax, %rax")
@@ -2967,6 +2974,7 @@ fun clobber_kind(inst: Inst) -> int32 {
         Inst.Intr(d, op, args) => match op {
             Intrinsic.Unique(clone) => 2
             Intrinsic.RunFrame => 2
+            Intrinsic.CallCode => 2
             _ => 0
         },
         _ => 2,
@@ -3582,6 +3590,7 @@ fun reads_then_calls(inst: Inst) -> bool {
         Inst.Rt(d, name, args) => true,
         Inst.Intr(d, op, args) => match op {
             Intrinsic.RunFrame => true
+            Intrinsic.CallCode => true
             _ => false
         },
         _ => false,

@@ -1081,6 +1081,15 @@ impl CodeGen {
                 self.emit(format("local.get {}", w.la))
                 self.wasm_set(w, d)
             },
+            // a call through a code address (its table index) with one word
+            // (MYLA-263)
+            Intrinsic.CallCode => {
+                self.wasm_get(w, args[1])
+                self.wasm_get(w, args[0])
+                self.emit("i32.wrap_i64")
+                self.emit(format("call_indirect {}", wasm_sig(1)))
+                self.wasm_set(w, d)
+            },
             Intrinsic.RunFrame => {
                 self.wasm_get(w, args[0])
                 self.wasm_addr(w, args[0], 0)
@@ -1366,29 +1375,8 @@ impl CodeGen {
     // MYLA-263); an async one's makes its frame (D90), taking the environment
     // last, as every function value's code does, and ignoring it (D130).
     fun emit_fnval_thunk_wasm(var self, n: str) {
-        if !self.is_async_fn(n) {
-            // as on every target (MYLA-263)
-            self.emit_fnval_adapter(n)
-            return
-        }
-        // an async function's value makes its frame (D90): `__new` takes
-        // the words, the environment last ignored
-        let sig = self.sig_of(n)
-        var first = 0
-        if is_aggregate_opt(sig.ret) { first = 1 }
-        let words = first + sig.params.len()
-        let name = format("myla_{}__fnval", n)
-        self.wasm_define(name, words + 1)
-        self.emit("")
-        self.emit(format("{}:", name))
-        self.emit(format(".functype {} {}", name, wasm_sig(words + 1)))
-        var i = 0
-        while i < words {
-            self.emit(format("local.get {}", i))
-            i = i + 1
-        }
-        self.wasm_call("return_call", format("myla_{}__new", n), words)
-        self.emit("end_function")
+        // as on every target (MYLA-263)
+        if self.is_async_fn(n) { self.emit_async_fnval(n) } else { self.emit_fnval_adapter(n) }
     }
 
 }

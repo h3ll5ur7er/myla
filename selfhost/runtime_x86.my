@@ -161,12 +161,6 @@ impl CodeGen {
         if self.frames {
             self.emit_executor()
             self.emit_deep_runtime()
-        } else {
-            // no task but the first: nothing is ever cancelled (D96)
-            self.raw("__task_cancelled:")
-            self.raw("\txorl %eax, %eax")
-            self.raw("\tret")
-            self.raw("")
         }
         // Runtime errors: `runtime error: <message>` on stderr, then exit(1)
         // (MYLA-17); the message is the interpreter's, without the values. The
@@ -251,43 +245,6 @@ impl CodeGen {
             self.raw("\tjmp __panic_report")
         }
         self.raw("")
-        // __str_eq: the same string, or equal lengths and bytes, compared
-        // eight at a time (MYLA-133); %rax = 1 or 0, clobbers %rcx %rdi %rsi
-        self.raw("__str_eq:")
-        self.raw("\tcmpq %rdi, %rsi")
-        self.raw("\tje .Lse_eq")
-        self.raw("\tmovq (%rdi), %rcx")
-        self.raw("\tcmpq (%rsi), %rcx")
-        self.raw("\tjne .Lse_ne")
-        self.raw("\tleaq 8(%rdi), %rdi")
-        self.raw("\tleaq 8(%rsi), %rsi")
-        self.raw(".Lse_words:")
-        self.raw("\tcmpq $8, %rcx")
-        self.raw("\tjb .Lse_bytes")
-        self.raw("\tmovq (%rdi), %rax")
-        self.raw("\tcmpq (%rsi), %rax")
-        self.raw("\tjne .Lse_ne")
-        self.raw("\taddq $8, %rdi")
-        self.raw("\taddq $8, %rsi")
-        self.raw("\tsubq $8, %rcx")
-        self.raw("\tjmp .Lse_words")
-        self.raw(".Lse_bytes:")
-        self.raw("\ttestq %rcx, %rcx")
-        self.raw("\tjz .Lse_eq")
-        self.raw("\tmovb (%rdi), %al")
-        self.raw("\tcmpb (%rsi), %al")
-        self.raw("\tjne .Lse_ne")
-        self.raw("\tincq %rdi")
-        self.raw("\tincq %rsi")
-        self.raw("\tdecq %rcx")
-        self.raw("\tjmp .Lse_bytes")
-        self.raw(".Lse_eq:")
-        self.raw("\tmovq $1, %rax")
-        self.raw("\tret")
-        self.raw(".Lse_ne:")
-        self.raw("\txorq %rax, %rax")
-        self.raw("\tret")
-        self.raw("")
         // __syscall(n, a, b, c): Linux's platform layer for the runtime written
         // in Myla (MYLA-162): the call's number and three arguments moved
         // into the kernel's registers; the result, a negative errno on a
@@ -314,73 +271,11 @@ impl CodeGen {
         self.raw("\tsyscall")
         self.raw("\tret")
         self.raw("")
-        // __set_io_errno(e): the errno the I/O primitives report (a worker's
-        // own with tasks)
-        self.raw("__set_io_errno:")
-        self.raw(format("\tmovq %rdi, {}", self.tv("__io_errno_val")))
-        self.raw("\tret")
-        self.raw("")
-        // __set_run_status(exit, signal, errno), __set_run_stderr(bytes): what
-        // the `__run_*` primitives give after `std.rt`'s `run`; the stderr
-        // list's reference is the variable's, which `__run_stderr` hands over
-        self.raw("__set_run_status:")
-        self.raw(format("\tmovl %edi, {}", self.tv("__run_exit_val")))
-        self.raw(format("\tmovl %esi, {}", self.tv("__run_signal_val")))
-        self.raw(format("\tmovl %edx, {}", self.tv("__run_errno_val")))
-        self.raw("\tret")
-        self.raw("")
-        self.raw("__set_run_stderr:")
-        self.raw("\tincq -8(%rdi)")
-        self.raw(format("\tmovq %rdi, {}", self.tv("__run_stderr_val")))
-        self.raw("\tret")
-        self.raw("")
-        // __argv(): the program's arguments as the kernel gave them
-        self.raw("__argv_of:")
-        self.raw("\tmovq __argv(%rip), %rax")
-        self.raw("\tret")
-        self.raw("")
-        // __environ(): the environment the process started with
-        self.raw("__environ:")
-        self.raw("\tmovq __envp(%rip), %rax")
-        self.raw("\tret")
-        self.raw("")
         // __copy_bytes(dst, src, n): a bulk copy for the runtime written in
         // Myla (MYLA-162's prototype)
         self.raw("__copy_bytes:")
         self.raw("\tmovq %rdx, %rcx")
         self.emit_byte_copy(true)
-        self.raw("\tret")
-        self.raw("")
-        // __equal_bytes(p, q, n): whether n bytes at p and q are equal, eight
-        // at a time (MYLA-162's bulk comparison)
-        self.raw("__equal_bytes:")
-        self.raw("\tcmpq $8, %rdx")
-        self.raw("\tjb .Leb_tail")
-        self.raw(".Leb_words:")
-        self.raw("\tmovq (%rdi), %rax")
-        self.raw("\tcmpq (%rsi), %rax")
-        self.raw("\tjne .Leb_no")
-        self.raw("\taddq $8, %rdi")
-        self.raw("\taddq $8, %rsi")
-        self.raw("\tsubq $8, %rdx")
-        self.raw("\tcmpq $8, %rdx")
-        self.raw("\tjae .Leb_words")
-        self.raw(".Leb_tail:")
-        self.raw("\ttestq %rdx, %rdx")
-        self.raw("\tjz .Leb_yes")
-        self.raw(".Leb_bytes:")
-        self.raw("\tmovzbl (%rdi), %eax")
-        self.raw("\tcmpb (%rsi), %al")
-        self.raw("\tjne .Leb_no")
-        self.raw("\tincq %rdi")
-        self.raw("\tincq %rsi")
-        self.raw("\tdecq %rdx")
-        self.raw("\tjnz .Leb_bytes")
-        self.raw(".Leb_yes:")
-        self.raw("\tmovl $1, %eax")
-        self.raw("\tret")
-        self.raw(".Leb_no:")
-        self.raw("\txorl %eax, %eax")
         self.raw("\tret")
         self.raw("")
         // __str_drop: rdi = str cell. Decrement; free at zero (a str owns nothing
@@ -412,13 +307,13 @@ impl CodeGen {
         self.raw("\tjz .Lfdrop_done")
         self.raw("\tdecq -8(%rdi)")
         self.raw("\tjnz .Lfdrop_done")
+        // its drop function, the first of its record (MYLA-263)
         self.raw("\tmovq (%rdi), %rax")
-        self.raw("\tjmp *%rax")
+        self.raw("\tjmp *(%rax)")
         self.raw(".Lfdrop_done:")
         self.raw("\tret")
         self.raw("")
         self.emit_compose_runtime()
-        self.emit_math_runtime()
         self.emit_derived_eq()
     }
 
@@ -638,53 +533,29 @@ impl CodeGen {
     // environment every program with tasks may need (D92, MYLA-148); the
     // strings' and a plain cell's are std.rt's (`rt_exec`, MYLA-162).
     fun emit_deep_runtime(var self) {
-        // none; owning nothing (`__free` its drop): as a string, itself when
-        // unshared, else a copy; else the deep copy just before its drop
-        // function
+        // none, or the deep copy its record names (MYLA-263; owning nothing,
+        // a string's: itself when unshared, else a copy)
         self.raw("__deep_env:")
         self.raw("\ttestq %rdi, %rdi")
         self.raw("\tjz .Lde_none")
         self.raw("\tmovq (%rdi), %rax")
-        self.raw("\tleaq __free(%rip), %rcx")
-        self.raw("\tcmpq %rcx, %rax")
-        self.raw("\tje __deep_str")
-        self.raw("\tjmp *-8(%rax)")
+        self.raw("\tjmp *16(%rax)")
         self.raw(".Lde_none:")
         self.raw("\txorl %eax, %eax")
         self.raw("\tret")
         self.raw("")
-        // its clone, only reading the original: owning nothing, a copy; else
-        // the clone two words before its drop function
+        // its clone, only reading the original: the one its record names
         self.raw("__dclone_env:")
         self.raw("\ttestq %rdi, %rdi")
         self.raw("\tjz .Ldce_none")
         self.raw("\tmovq (%rdi), %rax")
-        self.raw("\tleaq __free(%rip), %rcx")
-        self.raw("\tcmpq %rcx, %rax")
-        self.raw("\tje __dclone_cell")
-        self.raw("\tjmp *-16(%rax)")
+        self.raw("\tjmp *8(%rax)")
         self.raw(".Ldce_none:")
         self.raw("\txorl %eax, %eax")
         self.raw("\tret")
         self.raw("")
     }
 
-    // std.math's primitives (MYLA-248). A float64 travels as its bits in a
-    // general-purpose register: `__sqrt` rdi = x -> rax = the correctly
-    // rounded square root (sqrtsd); `__f64_bits` and `__f64_from_bits` are the
-    // bits themselves.
-    fun emit_math_runtime(var self) {
-        self.raw("__sqrt:")
-        self.raw("\tmovq %rdi, %xmm0")
-        self.raw("\tsqrtsd %xmm0, %xmm0")
-        self.raw("\tmovq %xmm0, %rax")
-        self.raw("\tret")
-        self.raw("__f64_bits:")
-        self.raw("__f64_from_bits:")
-        self.raw("\tmovq %rdi, %rax")
-        self.raw("\tret")
-        self.raw("")
-    }
 
     // __compose_call(x) (`l >> r`'s code, its environment holding the two
     // function values) as IR on every target (`compose_ir`, MYLA-263), and

@@ -412,6 +412,11 @@ pub enum Intrinsic {
     // resume function) with fr as the argument; returns when that returns;
     // no result (D90)
     RunFrame,
+    // call_code(code, arg): the function at the code address `code` (a
+    // function of one word, such as an environment's routine its record
+    // names) called with `arg` by the target's convention; its result
+    // (MYLA-263)
+    CallCode,
 }
 
 // The intrinsic a primitive of the language's runtime code names (`__cas64`
@@ -432,6 +437,7 @@ pub fun primitive_intrinsic(name: str) -> Option<Intrinsic> {
     if name == "__store_rel64" { return Some(Intrinsic.StoreRel64) }
     if name == "__pause" { return Some(Intrinsic.Pause) }
     if name == "__run_frame" { return Some(Intrinsic.RunFrame) }
+    if name == "__call_code" { return Some(Intrinsic.CallCode) }
     return None
 }
 
@@ -460,6 +466,7 @@ pub fun intrinsic_name(op: Intrinsic) -> str {
         Intrinsic.RtAddr(sym) => "rt_addr " + sym
         Intrinsic.RtWaddr(sym) => "rt_waddr " + sym
         Intrinsic.RunFrame => "run_frame"
+        Intrinsic.CallCode => "call_code"
     }
 }
 
@@ -474,6 +481,7 @@ pub fun intrinsic_arity(op: Intrinsic) -> int32 {
         Intrinsic.Xchg64 => 2
         Intrinsic.FetchAdd64 => 2
         Intrinsic.StoreRel64 => 2
+        Intrinsic.CallCode => 2
         Intrinsic.Cas64 => 3
         _ => 1
     }
