@@ -58,6 +58,68 @@ TRAPS = [
     ("unreachable", "unreachable()", "reached unreachable code", "4:16"),
 ]
 
+# A counting loop below a length whose list might change keeps its bounds
+# checks (MYLA-251): (name, main's body, its output, the trap's position).
+KEPT_CHECKS = [
+    ("assigned", "var xs = [1, 2, 3]\n    let n = xs.len()\n    xs = [1]\n    for i in 0..n { print(xs[i]) }", "1\n", "6:29"),
+    ("shadowed", "let xs = [1, 2, 3]\n    for i in 0..xs.len() {\n        let xs = [7]\n        print(xs[i])\n    }", "7\n", "6:17"),
+    ("popped", "var xs = [1, 2, 3]\n    for i in 0..xs.len() {\n        let v = xs.pop()\n        print(xs[i])\n    }", "1\n", "6:17"),
+    ("another_list", "let xs = [1, 2, 3]\n    let ys = [1]\n    for i in 0..xs.len() { print(ys[i]) }", "1\n", "5:36"),
+    ("negative_start", "let xs = [1, 2, 3]\n    for i in -1..xs.len() { print(xs[i]) }", "", "4:37"),
+    ("popped_later", "var xs = [1, 2]\n    let n = xs.len()\n    for k in 0..2 {\n        for i in 0..n { print(xs[i]) }\n        let v = xs.pop()\n    }", "1\n2\n1\n", "6:33"),
+    ("a_field", "var s = S { items: [1, 2, 3] }\n    let n = s.items.len()\n    s.items = [1]\n    for i in 0..n { print(s.items[i]) }", "1\n", "6:34"),
+    ("past_the_end", "let xs = [1, 2, 3]\n    for i in 0..xs.len() {\n        for j in i + 2..xs.len() + 2 { print(xs[j]) }\n    }", "3\n", "5:48"),
+    ("a_string", 'var s = "abc"\n    let n = s.len()\n    s = "a"\n    for i in 0..n { print(s[i]) }', "97\n", "6:28"),
+]
+
+# Counting loops whose index is known to be below the length index without a
+# check, and run as before (MYLA-251).
+UNCHECKED = """\
+struct Body { x: float64, v: float64 }
+
+fun sum(xs: [int]) -> int {
+    var t = 0
+    for i in 0..xs.len() { t += xs[i] }
+    return t
+}
+
+fun pairs(bodies: [Body]) -> float64 {
+    var e = 0.0
+    let n = bodies.len()
+    for i in 0..n {
+        for j in i + 1..n { e += bodies[i].x * bodies[j].x }
+    }
+    return e
+}
+
+fun advance(bodies: [Body]) -> [Body] {
+    var bs = bodies
+    let n = bs.len()
+    for i in 0..n { bs[i].x += bs[i].v }
+    return bs
+}
+
+fun spaces(s: str) -> int {
+    var c = 0
+    for i in 0..s.len() { if s[i] == 32 { c += 1 } }
+    return c
+}
+
+fun each(xs: [int]) -> int {
+    var t = 0
+    for x in xs { t += x }
+    return t
+}
+
+fun main() {
+    print(sum([1, 2, 3]))
+    print(pairs([Body { x: 1.0, v: 0.5 }, Body { x: 2.0, v: 0.5 }]))
+    print(advance([Body { x: 1.0, v: 0.5 }])[0].x)
+    print(spaces("a b c"))
+    print(each([4, 5]))
+}
+"""
+
 # A runtime error in an imported module names that module's file: in a
 # function, a method and a lambda.
 MODULE_MAIN = """\
@@ -154,6 +216,34 @@ class NativeRuntime(unittest.TestCase):
                     self.assertEqual((proc.stdout, proc.stderr, proc.returncode),
                                      ("1\n", f"runtime error: {message}\n{where}\n", 1))
                     self.assertEqual(where, self.interpreter_position(name))
+
+    def test_a_counting_loop_keeps_the_checks_it_needs(self):
+        for name, body, out, position in KEPT_CHECKS:
+            source = f"struct S {{ items: [int] }}\nfun main() {{\n    {body}\n}}\n"
+            for backend, binary in self.binaries(name, source):
+                with self.subTest(case=name, backend=backend):
+                    proc = subprocess.run([binary], capture_output=True, text=True)
+                    self.assertEqual((proc.stdout, proc.stderr, proc.returncode),
+                                     (out, f"runtime error: index out of bounds\n  --> {name}.my:{position}\n", 1))
+
+    def test_a_counting_loop_below_a_length_indexes_unchecked(self):
+        path = self.write("unchecked.my", UNCHECKED)
+        ir = subprocess.run([self.gen, path, self.stdlib, "--emit-ir"], capture_output=True, text=True,
+                            check=True).stdout
+        funcs = {}
+        name = ""
+        for line in ir.splitlines():
+            if line.startswith("fun "):
+                name = line.split()[1]
+            elif " = elem " in line:
+                funcs.setdefault(name, []).append(line.endswith(" unchecked"))
+        self.assertEqual({f: funcs.get(f) for f in ("myla_sum", "myla_pairs", "myla_advance", "myla_spaces", "myla_each")},
+                         {"myla_sum": [True], "myla_pairs": [True, True], "myla_advance": [True, True, True],
+                          "myla_spaces": [True], "myla_each": [True]})
+        for backend, binary in self.binaries("unchecked", UNCHECKED):
+            with self.subTest(backend=backend):
+                proc = subprocess.run([binary], capture_output=True, text=True)
+                self.assertEqual((proc.stdout, proc.returncode), ("6\n2\n1.5\n2\n9\n", 0))
 
     def test_a_stack_overflow_is_reported(self):
         # the main stack grows to 120 MiB, and running out of it is a runtime

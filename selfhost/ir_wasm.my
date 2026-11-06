@@ -603,14 +603,16 @@ impl CodeGen {
                 self.emit("drop")
                 self.emit("unreachable")
             },
-            Inst.Elem(d, c, i, stride, is_str, p) => {
-                self.wasm_get(w, i)
-                self.wasm_addr(w, c, 0)
-                self.emit("i64.load 0")
-                self.emit("i64.ge_u")
-                self.emit("if")
-                self.wasm_trap("__trap_index", p.line, p.col)
-                self.emit("end_if")
+            Inst.Elem(d, c, i, stride, is_str, checked, p) => {
+                if checked {
+                    self.wasm_get(w, i)
+                    self.wasm_addr(w, c, 0)
+                    self.emit("i64.load 0")
+                    self.emit("i64.ge_u")
+                    self.emit("if")
+                    self.wasm_trap("__trap_index", p.line, p.col)
+                    self.emit("end_if")
+                }
                 self.wasm_get(w, c)
                 if is_str { self.emit("i64.const 8") } else { self.emit("i64.const 16") }
                 self.emit("i64.add")

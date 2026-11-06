@@ -572,7 +572,7 @@ pub fun rename_uses(inst: Inst, to: [int32]) -> Inst {
         Inst.DropVal(t, v) => Inst.DropVal(t, rn(v, to))
         Inst.Deep(t, p) => Inst.Deep(t, rn(p, to))
         Inst.CloneDeep(t, p) => Inst.CloneDeep(t, rn(p, to))
-        Inst.Elem(d, c, i, stride, is_str, pos) => Inst.Elem(d, rn(c, to), rn(i, to), stride, is_str, pos)
+        Inst.Elem(d, c, i, stride, is_str, checked, pos) => Inst.Elem(d, rn(c, to), rn(i, to), stride, is_str, checked, pos)
         Inst.Load8(d, p) => Inst.Load8(d, rn(p, to))
         Inst.Cow(d, t, h) => Inst.Cow(d, t, rn(h, to))
         Inst.Append(d, h, c, stride) => Inst.Append(d, rn(h, to), rn(c, to), stride)

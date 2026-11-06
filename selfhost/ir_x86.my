@@ -963,10 +963,11 @@ impl CodeGen {
                     self.emit("syscall")
                 }
             },
-            Inst.Elem(d, c, i, stride, is_str, p) => {
+            Inst.Elem(d, c, i, stride, is_str, checked, p) => {
                 self.load_temp(c, "rax", temp_base)
                 self.load_temp(i, "rcx", temp_base)
-                self.emit_elem_addr(is_str, stride, p.line, p.col)
+                if checked { self.emit_elem_check(p.line, p.col) }
+                self.emit(format("leaq {}, %rax", self.elem_operand(is_str, stride)))
                 self.store_temp(d, temp_base)
             },
             Inst.Load8(d, p) => {
@@ -1466,7 +1467,7 @@ impl CodeGen {
     // place); false when none does. One match of `a` picks the candidates.
     fun emit_pair(var self, f: IrFunc, a: Inst, b: Inst, temp_base: int32) -> bool {
         return match a {
-            Inst.Elem(e, c, i, stride, is_str, p) => self.emit_elem_load(f, a, b, temp_base),
+            Inst.Elem(e, c, i, stride, is_str, checked, p) => self.emit_elem_load(f, a, b, temp_base),
             Inst.Bin(d, op, lt, rt, x, y, pos) => self.emit_add_load(f, a, b, temp_base) || self.emit_in_place(a, b, temp_base),
             _ => false,
         }
@@ -1626,7 +1627,7 @@ impl CodeGen {
     // addressing mode (MYLA-120); false when `a` and `b` aren't such a pair.
     fun emit_elem_load(var self, f: IrFunc, a: Inst, b: Inst, temp_base: int32) -> bool {
         return match a {
-            Inst.Elem(e, c, i, stride, is_str, p) => {
+            Inst.Elem(e, c, i, stride, is_str, checked, p) => {
                 if self.temp_uses[e] != 1 { return false }
                 let ok = match b {
                     Inst.LoadAt(d, q, off, width) => q == e && off == 0 && !is_str,
@@ -1636,7 +1637,7 @@ impl CodeGen {
                 if !ok { return false }
                 self.load_temp(c, "rax", temp_base)
                 self.load_temp(i, "rcx", temp_base)
-                self.emit_elem_check(p.line, p.col)
+                if checked { self.emit_elem_check(p.line, p.col) }
                 let at = self.elem_operand(is_str, stride)
                 match b {
                     Inst.LoadAt(d, q, off, width) => {
@@ -2892,7 +2893,7 @@ pub fun drops_after_free(f: IrFunc, insts: [Inst], at: int32) -> bool {
                     },
                     Inst.LoadAt(d, p, off, width) => { if d == t { found = true; work.push(p) } },
                     Inst.Offset(d, p, off) => { if d == t { found = true; work.push(p) } },
-                    Inst.Elem(d, c, i, stride, is_str, pos) => { if d == t { found = true; work.push(c) } },
+                    Inst.Elem(d, c, i, stride, is_str, checked, pos) => { if d == t { found = true; work.push(c) } },
                     Inst.Const(d, ty, v) => { if d == t { found = true } },
                     Inst.Str(d, text) => { if d == t { found = true } },
                     Inst.Bin(d, op, lt, rt, x, y, pos) => { if d == t { found = true } },
@@ -2962,7 +2963,7 @@ fun clobber_kind(inst: Inst) -> int32 {
         Inst.Mov(d, a) => 0,
         Inst.Cast(d, from_t, to_t, a) => 0,
         Inst.Init(s) => 0,
-        Inst.Elem(d, c, i, stride, is_str, pos) => 0,
+        Inst.Elem(d, c, i, stride, is_str, checked, pos) => 0,
         Inst.Load8(d, p) => 0,
         Inst.Check(v, kind, pos) => 0,
         Inst.Global(d, sym, width) => 0,
@@ -3201,7 +3202,7 @@ fun writes_no_slot(inst: Inst) -> bool {
         Inst.Un(d, op, t, a) => true
         Inst.Mov(d, a) => true
         Inst.Cast(d, from_t, to_t, a) => true
-        Inst.Elem(d, c, i, stride, is_str, pos) => true
+        Inst.Elem(d, c, i, stride, is_str, checked, pos) => true
         Inst.Load8(d, p) => true
         Inst.Check(v, kind, pos) => true
         Inst.Global(d, sym, w) => true

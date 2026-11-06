@@ -563,15 +563,17 @@ impl CodeGen {
                     self.emit("svc #0")
                 }
             },
-            Inst.Elem(d, c, i, stride, is_str, p) => {
+            Inst.Elem(d, c, i, stride, is_str, checked, p) => {
                 self.a64_ld("x10", fr, c)
                 self.a64_ld("x11", fr, i)
-                self.emit("ldr x12, [x10]")
-                let ok = self.label()
-                self.emit("cmp x11, x12")
-                self.emit(format("b.lo {}", ok))
-                self.a64_trap("__trap_index", p.line, p.col)
-                self.emit(format("{}:", ok))
+                if checked {
+                    self.emit("ldr x12, [x10]")
+                    let ok = self.label()
+                    self.emit("cmp x11, x12")
+                    self.emit(format("b.lo {}", ok))
+                    self.a64_trap("__trap_index", p.line, p.col)
+                    self.emit(format("{}:", ok))
+                }
                 if is_str { self.emit("add x10, x10, #8") } else { self.emit("add x10, x10, #16") }
                 if stride == 1 { self.emit("add x10, x10, x11") }
                 else {

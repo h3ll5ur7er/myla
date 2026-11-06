@@ -91,8 +91,9 @@ pub enum Inst {
     Init(int32),
     // %dst = elem %cell[%i] stride: the address of element %i of a list (or
     // of byte %i of a string, `true`), trapping at the position when it is out
-    // of bounds (MYLA-105)
-    Elem(int32, int32, int32, int32, bool, Pos),
+    // of bounds (MYLA-105); unchecked (`false`) where the lowering proved %i
+    // below the length (MYLA-251)
+    Elem(int32, int32, int32, int32, bool, bool, Pos),
     // %dst = load8 [%ptr]: a byte (a string's)
     Load8(int32, int32),
     // %dst = cow T [%holder]: the list or map cell the 8 bytes at %holder
@@ -265,7 +266,10 @@ pub fun render_inst(inst: Inst) -> str {
         Inst.Deep(t, p) => format("deep {} [%t{}]", type_name(t), p)
         Inst.CloneDeep(t, p) => format("clone {} [%t{}]", type_name(t), p)
         Inst.Init(s) => format("init ${}", s)
-        Inst.Elem(d, c, i, stride, is_str, p) => format("%t{} = elem %t{}[%t{}] {}{} @{}:{}", d, c, i, stride, str_suffix(is_str), p.line, p.col)
+        Inst.Elem(d, c, i, stride, is_str, checked, p) => {
+            if !checked { return format("%t{} = elem %t{}[%t{}] {}{} unchecked", d, c, i, stride, str_suffix(is_str)) }
+            format("%t{} = elem %t{}[%t{}] {}{} @{}:{}", d, c, i, stride, str_suffix(is_str), p.line, p.col)
+        }
         Inst.Load8(d, p) => format("%t{} = load8 [%t{}]", d, p)
         Inst.Cow(d, t, h) => format("%t{} = cow {} [%t{}]", d, type_name(t), h)
         Inst.Append(d, h, c, stride) => format("%t{} = append [%t{}] %t{} {}", d, h, c, stride)
@@ -837,7 +841,7 @@ pub fun inst_uses(inst: Inst) -> [int32] {
         Inst.Deep(t, p) => [p]
         Inst.CloneDeep(t, p) => [p]
         Inst.Init(s) => []
-        Inst.Elem(d, c, i, stride, is_str, pos) => [c, i]
+        Inst.Elem(d, c, i, stride, is_str, checked, pos) => [c, i]
         Inst.Load8(d, p) => [p]
         Inst.Cow(d, t, h) => [h]
         Inst.Append(d, h, c, stride) => [h, c]
@@ -899,7 +903,7 @@ pub fun inst_defs(inst: Inst) -> [int32] {
         Inst.Call(d, name, args) => result_temp(d)
         Inst.Rt(d, name, args) => result_temp(d)
         Inst.Intr(d, op, args) => result_temp(d)
-        Inst.Elem(d, c, i, stride, is_str, pos) => [d]
+        Inst.Elem(d, c, i, stride, is_str, checked, pos) => [d]
         Inst.Load8(d, p) => [d]
         Inst.Cow(d, t, h) => [d]
         Inst.Append(d, h, c, stride) => [d]
@@ -932,7 +936,7 @@ fun writes_temp(inst: Inst, t: int32) -> bool {
         Inst.Call(d, name, args) => d == t
         Inst.Rt(d, name, args) => d == t
         Inst.Intr(d, op, args) => d == t
-        Inst.Elem(d, c, i, stride, is_str, pos) => d == t
+        Inst.Elem(d, c, i, stride, is_str, checked, pos) => d == t
         Inst.Load8(d, p) => d == t
         Inst.Cow(d, ty, h) => d == t
         Inst.Append(d, h, c, stride) => d == t
@@ -1048,7 +1052,7 @@ fun borrowed_slots(f: IrFunc) -> [bool] {
                         set.push(d)
                     }
                 },
-                Inst.Elem(d, c, i, stride, is_str, pos) => {
+                Inst.Elem(d, c, i, stride, is_str, checked, pos) => {
                     if root[c] >= 0 {
                         root[d] = root[c]
                         set.push(d)
@@ -1276,7 +1280,7 @@ fun only_reads(inst: Inst) -> bool {
         Inst.Offset(d, p, off) => true
         Inst.LoadAt(d, p, off, width) => true
         Inst.Load8(d, p) => true
-        Inst.Elem(d, c, i, stride, is_str, pos) => true
+        Inst.Elem(d, c, i, stride, is_str, checked, pos) => true
         Inst.Bin(d, op, lt, rt, a, b, pos) => true
         Inst.Cmp(d, op, t, a, b) => true
         Inst.Un(d, op, t, a) => true

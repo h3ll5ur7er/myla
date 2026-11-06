@@ -30,7 +30,7 @@
 from std.num import f64_literal_bits, f32_round_bits
 from .ast import Expr, ExprKind, Stmt, StmtKind, Block, FunData, ElseTail, ExprOrBlock, MatchArm, Pattern, PatternKind, FieldInit, MapEntry, BindElem, bind_elems, Param
 from .checker import CheckErr, REG_ARG_WORDS, type_name, Type, is_unit, is_slice_expr, from_end_of, slice_parts, is_hole_part, is_raw_memory_primitive, Subst, FuncSig, opt_subst_type, subst_type, builtin_method
-from .codegen import codegen_on, recv_by_address, may_write_expr, is_actor_t, is_sb_t, is_async_t, CodeGen, LamJob, PartialJob, Cap, DropEntry, tfunc_params, tfunc_ret, is_hole_expr, mangle_fn, is_builtin_call_name, is_aggregate, tuple_elems, is_struct_or_enum_t, is_tfunc, is_overloadable_op, arith_method_cg, enum_name_of, is_tstr, is_cmp, place_root, is_aggregate_opt, arms_may_write, is_cell_t, list_elem, is_list_t, is_map_t, is_str_t, map_key, map_val, format_segments, args_have_hole, success_variant, failure_variant
+from .codegen import codegen_on, recv_by_address, may_write_expr, is_mutating_builtin, list_has_str, contains_int, is_actor_t, is_sb_t, is_async_t, CodeGen, LamJob, PartialJob, Cap, DropEntry, tfunc_params, tfunc_ret, is_hole_expr, mangle_fn, is_builtin_call_name, is_aggregate, tuple_elems, is_struct_or_enum_t, is_tfunc, is_overloadable_op, arith_method_cg, enum_name_of, is_tstr, is_cmp, place_root, is_aggregate_opt, arms_may_write, is_cell_t, list_elem, is_list_t, is_map_t, is_str_t, map_key, map_val, format_segments, args_have_hole, success_variant, failure_variant
 from .util import format_specs
 from .tokens import Note, no_span
 from .ir_x86 import slots_at, frame_size
@@ -42,6 +42,11 @@ from .parser import expr_of, stmt_of, type_expr_of, block_of, pattern_of, fun_of
 // a parameter other than `var self`, a capture, a `for` loop's element), so
 // a `let` copying a part of it can borrow (MYLA-122).
 struct Local { name: str, slot: int32, fixed: bool }
+
+// What the lowering knows of a slot's value for bounds checks (MYLA-251):
+// a range loop's variable below the length of the list or string `key`
+// names (`len_key`), or a `let` holding that length.
+struct LenFact { slot: int32, key: str }
 
 // Where `continue` and `break` go in the innermost loop, and how many owner
 // and temporary scopes were open when it began (those it leaves are dropped).
@@ -69,7 +74,7 @@ struct LoopTarget { cont: int32, brk: int32, owners: int32, temps: int32 }
 // function holds between suspensions (D92), or -1; `deep_res`: an actor
 // method's result is copied deeply before it leaves the actor (D92).
 // `scope_ids`: the open scopes' indices in `f.scope_parent` (MYLA-183).
-struct Lower { f: IrFunc, cur: int32, scopes: [[Local]], scope_ids: [int32], owners: [[int32]], temps: [[int32]], loops: [LoopTarget], sret: int32, arm_binds: [Local], err: str, lams: [LamJob], partials: [PartialJob], fnvals: [str], holder: [int32], into: int32, placed: [bool], tail: bool, tailed: bool, frame_fn: bool, result: int32, tasks: [TaskSlot], actor_self: int32, actor_off: int32, deep_res: bool, narrow: [int32: int32], wants: [Want], defers: [LDefer], received: int32, refused: [CheckErr], fn_name: str, by_addr: int32, by_addr_t: Type }
+struct Lower { f: IrFunc, cur: int32, scopes: [[Local]], scope_ids: [int32], owners: [[int32]], temps: [[int32]], loops: [LoopTarget], sret: int32, arm_binds: [Local], err: str, lams: [LamJob], partials: [PartialJob], fnvals: [str], holder: [int32], into: int32, placed: [bool], tail: bool, tailed: bool, frame_fn: bool, result: int32, tasks: [TaskSlot], actor_self: int32, actor_off: int32, deep_res: bool, narrow: [int32: int32], wants: [Want], defers: [LDefer], received: int32, refused: [CheckErr], fn_name: str, by_addr: int32, by_addr_t: Type, resized: [str], scanned: bool, below: [LenFact], len_lets: [LenFact], nonneg: [int32] }
 
 // A per-type routine a routine built as IR calls, for the code generator to
 // emit (MYLA-162): `kind` 0 a cell's deep copy, 1 an inline value's deep
@@ -104,7 +109,7 @@ struct LDefer { depth: int32, nscopes: int32, nnames: int32, body: Block, cg: Co
 // entry block, the receiver of `#test` cases of the lowering's methods
 // (MYLA-184), with a code generator from `codegen_on` as their `cg`.
 pub fun lower_on() -> Lower {
-    var lw = Lower { f: IrFunc { name: "test", ret: None, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false, scope_parent: [-1] }, cur: 0, scopes: [[]], scope_ids: [0], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [], actor_self: -1, actor_off: 0, deep_res: false, narrow: [:], wants: [], defers: [], received: -1, refused: [], fn_name: "", by_addr: -1, by_addr_t: Type.TBool }
+    var lw = Lower { f: IrFunc { name: "test", ret: None, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false, scope_parent: [-1] }, cur: 0, scopes: [[]], scope_ids: [0], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [], actor_self: -1, actor_off: 0, deep_res: false, narrow: [:], wants: [], defers: [], received: -1, refused: [], fn_name: "", by_addr: -1, by_addr_t: Type.TBool, resized: [], scanned: false, below: [], len_lets: [], nonneg: [] }
     lw.start(lw.new_block())
     return lw
 }
@@ -115,7 +120,7 @@ pub fun lower_on() -> Lower {
 pub fun lower_function(cg: CodeGen, fd: FunData, mangled: str) -> Result<Lowered, str> {
     let sig = cg.sig_of(fd.name)
     let ret = opt_subst_type(sig.ret, cg.subst)
-    var lw = Lower { f: IrFunc { name: mangled, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false, scope_parent: [-1] }, cur: 0, scopes: [[]], scope_ids: [0], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [], actor_self: -1, actor_off: 0, deep_res: false, narrow: [:], wants: [], defers: [], received: -1, refused: [], fn_name: "", by_addr: -1, by_addr_t: Type.TBool }
+    var lw = Lower { f: IrFunc { name: mangled, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false, scope_parent: [-1] }, cur: 0, scopes: [[]], scope_ids: [0], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [], actor_self: -1, actor_off: 0, deep_res: false, narrow: [:], wants: [], defers: [], received: -1, refused: [], fn_name: "", by_addr: -1, by_addr_t: Type.TBool, resized: [], scanned: false, below: [], len_lets: [], nonneg: [] }
     lw.fn_name = fd.name
     var first_word = 0
     // an async function, when tasks take turns: its frame function, its
@@ -206,7 +211,11 @@ pub fun lower_function(cg: CodeGen, fd: FunData, mangled: str) -> Result<Lowered
         }
     }
     match fd.body {
-        Some(b) => { lw.block(cg, b) },
+        Some(b) => {
+            lw.resized = resized_in_block(b, [])
+            lw.scanned = true
+            lw.block(cg, b)
+        },
         None => {},
     }
     if lw.refused.len() > 0 { return Ok(Lowered { f: lw.f, lams: [], partials: [], fnvals: [], refused: lw.refused }) }
@@ -224,7 +233,7 @@ pub fun lower_function(cg: CodeGen, fd: FunData, mangled: str) -> Result<Lowered
 // own at entry, borrowed as a parameter is (captures are immutable, D48).
 pub fun lower_lambda(cg: CodeGen, job: LamJob) -> Result<Lowered, str> {
     let ret = opt_subst_type(tfunc_ret(job.ftype), cg.subst)
-    var lw = Lower { f: IrFunc { name: job.lifted, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false, scope_parent: [-1] }, cur: 0, scopes: [[]], scope_ids: [0], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [], actor_self: -1, actor_off: 0, deep_res: false, narrow: [:], wants: [], defers: [], received: -1, refused: [], fn_name: "", by_addr: -1, by_addr_t: Type.TBool }
+    var lw = Lower { f: IrFunc { name: job.lifted, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false, scope_parent: [-1] }, cur: 0, scopes: [[]], scope_ids: [0], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [], actor_self: -1, actor_off: 0, deep_res: false, narrow: [:], wants: [], defers: [], received: -1, refused: [], fn_name: "", by_addr: -1, by_addr_t: Type.TBool, resized: [], scanned: false, below: [], len_lets: [], nonneg: [] }
     // an async lambda, when tasks take turns: a frame function, as an async
     // function's (D90); its frame holds the environment and the arguments
     let frame = cg.frames && is_async_t(job.ftype)
@@ -301,7 +310,11 @@ pub fun lower_lambda(cg: CodeGen, job: LamJob) -> Result<Lowered, str> {
         lw.add(Inst.Rt(-1, "__func_drop", [e]))
     }
     match job.body {
-        ExprOrBlock.EB_Block(b) => { lw.block(cg, b) },
+        ExprOrBlock.EB_Block(b) => {
+            lw.resized = resized_in_block(b, [])
+            lw.scanned = true
+            lw.block(cg, b)
+        },
         ExprOrBlock.EB_Expr(ex) => {
             lw.add(Inst.Loc(Pos { line: ex.line, col: ex.col }))
             lw.begin_temps()
@@ -1099,6 +1112,10 @@ impl Lower {
                 // (it is in scope), so the copy needs no reference of its own
                 // (MYLA-122)
                 let borrows = k == "let" && self.fixed_place(init)
+                // `let n = xs.len()`: below it, a range up to `n` is one up to
+                // the length (MYLA-251)
+                var len_of = ""
+                if k == "let" { len_of = self.len_call_key(cg, init) }
                 if is_aggregate(t) {
                     // built in the variable's slot when it can be
                     self.into = slot
@@ -1119,6 +1136,7 @@ impl Lower {
                     else if !took { self.retain(cg, t, v) }
                 }
                 self.declare_as(name, slot, k == "let")
+                if len_of != "" { self.len_lets.push(LenFact { slot: slot, key: len_of }) }
                 self.own(slot)
                 self.add(Inst.Bind(name, slot))
             },
@@ -2141,7 +2159,7 @@ impl Lower {
                 let i = self.index_of(cg, cell, idx)
                 let d = self.temp(Type.TPtr)
                 let size = cg.elem_size(list_elem(lt))
-                self.add(Inst.Elem(d, cell, i, size, false, Pos { line: e.line, col: e.col }))
+                self.add(Inst.Elem(d, cell, i, size, false, !self.in_bounds(base, idx), Pos { line: e.line, col: e.col }))
                 self.mark_elem(d, size)
                 return d
             },
@@ -2193,8 +2211,14 @@ impl Lower {
         }
         let lv = self.new_slot(vn, loop_t, 8, -1, false)
         let fe = self.new_slot("__end", loop_t, 8, -1, false)
+        // what is known of the variable for bounds checks (MYLA-251): it
+        // only grows, from a start that isn't negative, and stays below
+        // the end, which may be a length that can't change meanwhile
+        var from_zero = false
+        var below = ""
         match start {
             Some(e) => {
+                from_zero = self.not_negative(e)
                 let v = self.cond(cg, e)
                 self.add(Inst.Store(lv, v))
             },
@@ -2202,6 +2226,7 @@ impl Lower {
         }
         match end {
             Some(e) => {
+                below = self.bound_key(cg, e)
                 let v = self.cond(cg, e)
                 self.add(Inst.Store(fe, v))
             },
@@ -2218,9 +2243,17 @@ impl Lower {
         self.open_scope()
         self.declare(vn, lv)
         self.add(Inst.Bind(vn, lv))
+        if from_zero {
+            self.nonneg.push(lv)
+            if below != "" { self.below.push(LenFact { slot: lv, key: below }) }
+        }
         self.loops.push(LoopTarget { cont: cont, brk: done, owners: depth, temps: self.temps.len() })
         for st in body.stmts { self.stmt(cg, st) }
         self.loops.pop()
+        if from_zero {
+            self.nonneg.pop()
+            if below != "" { self.below.pop() }
+        }
         self.close_scope()
         self.finish(Term.Jmp(cont))
         self.start(cont)
@@ -2232,6 +2265,111 @@ impl Lower {
         self.add(Inst.Store(lv, y))
         self.range_test(lv, fe, loop_t, body_b, done)
         self.start(done)
+    }
+
+    // The list or string `e` names, for bounds checks (MYLA-251), when its
+    // length can't change while it is in scope: a fixed variable or a part
+    // of one, or a variable the function never resizes or replaces
+    // (`resized`); "" for any other.
+    #test(lower_on(), expr_of("xs"))[""]
+    fun len_key(self, e: Expr) -> str {
+        return match e.kind {
+            ExprKind.Name(n) => {
+                let s = self.lookup(n)
+                if s < 0 || self.shared_self(n) { return "" }
+                if self.fixed_place(e) || (self.scanned && !list_has_str(self.resized, n)) { return format("{}", s) }
+                ""
+            },
+            ExprKind.GetField(t, f) => {
+                if !self.fixed_place(e) { return "" }
+                let k = self.len_key(t)
+                if k == "" { return "" }
+                format("{}.{}", k, f)
+            },
+            ExprKind.TupleIndex(t, i) => {
+                if !self.fixed_place(e) { return "" }
+                let k = self.len_key(t)
+                if k == "" { return "" }
+                format("{}.{}", k, i)
+            },
+            _ => "",
+        }
+    }
+
+    // `len_key` of the list or string whose length `e` is (`xs.len()`,
+    // `len(xs)`); "" when it is no such length.
+    fun len_call_key(self, cg: CodeGen, e: Expr) -> str {
+        return match e.kind {
+            ExprKind.Call(c, args) => {
+                var of: Option<Expr> = None
+                match c.kind {
+                    ExprKind.GetField(t, f) => { if f == "len" && args.len() == 0 { of = Some(t) } },
+                    ExprKind.Name(f) => { if f == "len" && args.len() == 1 && self.lookup("len") < 0 { of = Some(args[0]) } },
+                    _ => {},
+                }
+                match of {
+                    Some(x) => {
+                        let t = cg.type_of(x.id)
+                        if !is_list_t(t) && !is_tstr(t) { return "" }
+                        // the builtin, not a method of the program's (D144)
+                        if cg.has_func(format("{}.len", cg.type_key(t))) { return "" }
+                        self.len_key(x)
+                    },
+                    None => "",
+                }
+            },
+            _ => "",
+        }
+    }
+
+    // `len_call_key` of a range's end, or of the length a `let` it names
+    // holds.
+    fun bound_key(self, cg: CodeGen, e: Expr) -> str {
+        match e.kind {
+            ExprKind.Name(n) => {
+                let s = self.lookup(n)
+                for f in self.len_lets { if f.slot == s { return f.key } }
+                return ""
+            },
+            _ => {},
+        }
+        return self.len_call_key(cg, e)
+    }
+
+    // Whether `e`, a range's start, can't be negative: a constant that isn't,
+    // the variable of an enclosing range from such a start, or one of them
+    // plus 0 or 1 (a variable below its end, itself an integer, plus one
+    // doesn't wrap).
+    #test(lower_on(), expr_of("-n * 2"))[false]
+    fun not_negative(self, e: Expr) -> bool {
+        return match e.kind {
+            ExprKind.IntLit(v, suffix, is_char, big) => v >= 0 && big == "",
+            ExprKind.Name(n) => contains_int(self.nonneg, self.lookup(n)),
+            ExprKind.Binary(op, l, r) => op == "+" && match r.kind {
+                ExprKind.IntLit(v, suffix, is_char, big) => (v == 0 || v == 1) && big == "" && match l.kind {
+                    ExprKind.Name(n) => contains_int(self.nonneg, self.lookup(n)),
+                    _ => false,
+                },
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+
+    // Whether element `idx` of `base` is known to exist (MYLA-251): `idx` is
+    // the variable of a range below the length of the list or string `base`
+    // names.
+    fun in_bounds(self, base: Expr, idx: Expr) -> bool {
+        return match idx.kind {
+            ExprKind.Name(n) => {
+                let s = self.lookup(n)
+                for f in self.below {
+                    if f.slot == s { return f.key == self.len_key(base) }
+                }
+                false
+            },
+            _ => false,
+        }
     }
 
     // A range loop's test, `lv < fe`, ending the block: on to `yes` or `no`.
@@ -2288,7 +2426,9 @@ impl Lower {
         let cell = self.temp(lt)
         self.add(Inst.Load(cell, held))
         let p = self.temp(Type.TPtr)
-        self.add(Inst.Elem(p, cell, i, stride, false, Pos { line: 0, col: 0 }))
+        // below the length `list_test` compared it with, of a list nothing
+        // resizes: the loop holds it (MYLA-251)
+        self.add(Inst.Elem(p, cell, i, stride, false, false, Pos { line: 0, col: 0 }))
         self.mark_elem(p, stride)
         if is_aggregate(et) {
             let dst = self.slot_addr(elem)
@@ -3454,7 +3594,7 @@ impl Lower {
         var stride = 1
         if is_list_t(bt) { stride = cg.elem_size(list_elem(bt)) }
         let d = self.temp(Type.TPtr)
-        self.add(Inst.Elem(d, cell, i, stride, is_tstr(bt), Pos { line: e.line, col: e.col }))
+        self.add(Inst.Elem(d, cell, i, stride, is_tstr(bt), !self.in_bounds(base, idx), Pos { line: e.line, col: e.col }))
         if is_list_t(bt) { self.mark_elem(d, stride) }
         return d
     }
@@ -4540,7 +4680,7 @@ fun calls_nothing(e: Expr) -> bool {
 // An empty lowering of the routine `name` with result type `ret`, its entry
 // block started.
 fun routine(name: str, ret: Option<Type>) -> Lower {
-    var lw = Lower { f: IrFunc { name: name, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false, scope_parent: [-1] }, cur: 0, scopes: [[]], scope_ids: [0], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [], actor_self: -1, actor_off: 0, deep_res: false, narrow: [:], wants: [], defers: [], received: -1, refused: [], fn_name: "", by_addr: -1, by_addr_t: Type.TBool }
+    var lw = Lower { f: IrFunc { name: name, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false, scope_parent: [-1] }, cur: 0, scopes: [[]], scope_ids: [0], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [], actor_self: -1, actor_off: 0, deep_res: false, narrow: [:], wants: [], defers: [], received: -1, refused: [], fn_name: "", by_addr: -1, by_addr_t: Type.TBool, resized: [], scanned: false, below: [], len_lets: [], nonneg: [] }
     let entry = lw.new_block()
     lw.start(entry)
     return lw
@@ -5609,4 +5749,131 @@ pub fun env_deep_ir(cg: CodeGen, lifted: str, owned: [DropEntry], clone: bool) -
     for d in owned { lw.deep_member(cg, sc, d.off, d.ty, clone) }
     lw.finish(Term.Ret(lw.read_cell(sc)))
     return Routine { f: lw.f, wants: lw.wants }
+}
+
+// `acc` with every variable the block may resize or replace (MYLA-251):
+// one assigned whole, the receiver of a method other than `len`, the first
+// argument of a builtin that changes it (`push`, `pop`, `remove`, ...).
+// An element written (`xs[i] = v`, `xs[i].x += 1`) doesn't count: the
+// length stays. By name, so a variable shadowing another counts for both;
+// lambdas can't change what they capture (D93), but their bodies count too.
+#test(block_of("{ xs[i] = 1\n n = xs.len() }"), [])[["n"]]
+#test(block_of("{ xs.push(1)\n ys = []\n zs[0].push(2)\n push(ws, 3) }"), [])[["xs", "ys", "ws"]]
+fun resized_in_block(b: Block, acc: [str]) -> [str] {
+    var out = acc
+    for st in b.stmts { out = resized_in_stmt(st, out) }
+    return out
+}
+
+fun resized_in_stmt(st: Stmt, acc: [str]) -> [str] {
+    var out = acc
+    match st.kind {
+        StmtKind.ExprStmt(e) => { out = resized_in_expr(e, out) },
+        StmtKind.VarDecl(k, n, ty, init) => { out = resized_in_expr(init, out) },
+        StmtKind.DestructDecl(k, bs, ty, init) => { out = resized_in_expr(init, out) },
+        StmtKind.Assign(target, value) => { out = resized_in_expr(value, resized_in_target(target, out)) },
+        StmtKind.ReturnS(ov, tail) => { match ov { Some(e) => { out = resized_in_expr(e, out) }, None => {} } },
+        StmtKind.IfS(c, then, otherwise) => {
+            out = resized_in_block(then, resized_in_expr(c, out))
+            match otherwise {
+                Some(ElseTail.ElseBlock(eb)) => { out = resized_in_block(eb, out) },
+                Some(ElseTail.ElseIf(es)) => { out = resized_in_stmt(es, out) },
+                None => {},
+            }
+        },
+        StmtKind.WhileS(c, body) => { out = resized_in_block(body, resized_in_expr(c, out)) },
+        StmtKind.ForS(v, start, end, body, iter) => {
+            match start { Some(e) => { out = resized_in_expr(e, out) }, None => {} }
+            match end { Some(e) => { out = resized_in_expr(e, out) }, None => {} }
+            match iter { Some(e) => { out = resized_in_expr(e, out) }, None => {} }
+            out = resized_in_block(body, out)
+        },
+        StmtKind.DeferS(body) => { out = resized_in_block(body, out) },
+        _ => {},
+    }
+    return out
+}
+
+// An assignment's target: a variable assigned whole counts, one whose
+// element or field is assigned doesn't.
+fun resized_in_target(t: Expr, acc: [str]) -> [str] {
+    var out = acc
+    match t.kind {
+        ExprKind.Name(n) => { out.push(n) },
+        ExprKind.TupleLit(es) => { for x in es { out = resized_in_target(x, out) } },
+        _ => { out = resized_in_part(t, out) },
+    }
+    return out
+}
+
+// A part of a variable an assignment writes to (or the element a method
+// changes): its variable isn't resized, the indexes it is reached by are
+// read.
+fun resized_in_part(t: Expr, acc: [str]) -> [str] {
+    var out = acc
+    match t.kind {
+        ExprKind.Name(n) => {},
+        ExprKind.Index(b, i) => { out = resized_in_expr(i, resized_in_part(b, out)) },
+        ExprKind.GetField(b, f) => { out = resized_in_part(b, out) },
+        ExprKind.TupleIndex(b, i) => { out = resized_in_part(b, out) },
+        _ => { out = resized_in_expr(t, out) },
+    }
+    return out
+}
+
+fun resized_in_expr(e: Expr, acc: [str]) -> [str] {
+    var out = acc
+    match e.kind {
+        ExprKind.Call(c, args) => {
+            match c.kind {
+                ExprKind.GetField(recv, m) => {
+                    match recv.kind {
+                        ExprKind.Name(n) => { if m != "len" { out.push(n) } },
+                        _ => { out = resized_in_part(recv, out) },
+                    }
+                },
+                ExprKind.Name(f) => {
+                    if is_mutating_builtin(f) && args.len() > 0 {
+                        match args[0].kind {
+                            ExprKind.Name(n) => { out.push(n) },
+                            _ => {},
+                        }
+                    }
+                },
+                _ => { out = resized_in_expr(c, out) },
+            }
+            for a in args { out = resized_in_expr(a, out) }
+        },
+        ExprKind.Unary(op, x) => { out = resized_in_expr(x, out) },
+        ExprKind.Await(x) => { out = resized_in_expr(x, out) },
+        ExprKind.Binary(op, l, r) => { out = resized_in_expr(r, resized_in_expr(l, out)) },
+        ExprKind.GetField(t, f) => { out = resized_in_expr(t, out) },
+        ExprKind.StructLit(n, fields) => { for fi in fields { out = resized_in_expr(fi.value, out) } },
+        ExprKind.TupleLit(es) => { for x in es { out = resized_in_expr(x, out) } },
+        ExprKind.ListLit(es) => { for x in es { out = resized_in_expr(x, out) } },
+        ExprKind.MapLit(entries) => {
+            for en in entries { out = resized_in_expr(en.value, resized_in_expr(en.key, out)) }
+        },
+        ExprKind.TupleIndex(t, i) => { out = resized_in_expr(t, out) },
+        ExprKind.Index(t, i) => { out = resized_in_expr(i, resized_in_expr(t, out)) },
+        ExprKind.MatchE(sc, arms) => {
+            out = resized_in_expr(sc, out)
+            for arm in arms {
+                match arm.guard { Some(g) => { out = resized_in_expr(g, out) }, None => {} }
+                out = resized_in_body(arm.body, out)
+            }
+        },
+        ExprKind.Try(x) => { out = resized_in_expr(x, out) },
+        ExprKind.Cast(x, ty) => { out = resized_in_expr(x, out) },
+        ExprKind.Lambda(ps, rt, body, asy) => { out = resized_in_body(body, out) },
+        _ => {},
+    }
+    return out
+}
+
+fun resized_in_body(b: ExprOrBlock, acc: [str]) -> [str] {
+    return match b {
+        ExprOrBlock.EB_Expr(x) => resized_in_expr(x, acc),
+        ExprOrBlock.EB_Block(blk) => resized_in_block(blk, acc),
+    }
 }

@@ -3694,7 +3694,7 @@ fun names_in_block(b: Block, acc: [str]) -> [str] {
 #test("sum")[false]
 #test("total")[false]
 #test("length")[false]
-fun is_mutating_builtin(n: str) -> bool {
+pub fun is_mutating_builtin(n: str) -> bool {
     return n == "push" || n == "pop" || n == "remove" || n == "append" || n == "append_byte"
 }
 
@@ -4049,7 +4049,7 @@ fun with_int(xs: [int32], x: int32) -> [int32] {
 
 #test([3, 5], 5)[true]
 #test([3], 4)[false]
-fun contains_int(xs: [int32], x: int32) -> bool {
+pub fun contains_int(xs: [int32], x: int32) -> bool {
     for y in xs {
         if y == x { return true }
     }
@@ -4218,7 +4218,7 @@ fun unify_into(declared: Type, concrete: Type) -> [Subst] {
 #test([], "a")[false]
 #test([], "b")[false]
 #test(["a"], "a")[true]
-fun list_has_str(xs: [str], target: str) -> bool {
+pub fun list_has_str(xs: [str], target: str) -> bool {
     for x in xs { if x == target { return true } }
     return false
 }
