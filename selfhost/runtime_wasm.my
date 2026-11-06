@@ -156,19 +156,11 @@ impl CodeGen {
             "i64.load 0", "i64.const 1", "i64.sub", "i64.store 0",
             "local.get 0", "i64.const 8", "i64.sub", "i32.wrap_i64", "i64.load 0", "i64.eqz", "i32.eqz", "if", "i64.const 0", "return", "end_if",
             "local.get 0", "local.get 0", "i32.wrap_i64", "i64.load 0", "i32.wrap_i64", format("return_call_indirect {}", wasm_sig(1))], true)
-        // __compose_call(x, env), its env holding two function values a
-        // (env[8], env[16]) and b (env[24], env[32]): b(a(x)), b in its place;
-        // each gets its environment as its last argument (D130)
-        self.wasm_fn("__compose_call", 2, [
-            "local.get 0", "local.get 1", "i32.wrap_i64", "i64.load 16",
-            "local.get 1", "i32.wrap_i64", "i64.load 8", "i32.wrap_i64", format("call_indirect {}", wasm_sig(2)), "local.set 0",
-            "local.get 0", "local.get 1", "i32.wrap_i64", "i64.load 32",
-            "local.get 1", "i32.wrap_i64", "i64.load 24", "i32.wrap_i64", format("return_call_indirect {}", wasm_sig(2))], true)
         // std.math's primitives (MYLA-248), a float64 as its bits
         self.wasm_fn("__sqrt", 1, ["local.get 0", "f64.reinterpret_i64", "f64.sqrt", "i64.reinterpret_f64"], true)
         self.wasm_fn("__f64_bits", 1, ["local.get 0"], true)
         self.wasm_fn("__f64_from_bits", 1, ["local.get 0"], true)
-        self.emit_compose_env_drop()
+        self.emit_compose_runtime()
         self.emit_derived_eq()
     }
 

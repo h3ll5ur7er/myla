@@ -11,7 +11,7 @@
 
 from .ast import FunData
 from .checker import Type
-from .codegen import CodeGen, CgBinding, int_signed, takes_operand, is_cmp, fold_load, fold_load_for_reader, text_at, has_text, is_aggregate, is_actor_t, is_tfloat32, REG_WORDS, arg_reg, spilled_word, SPILLED_ENV, narrow_operand, int_width_cg, tls_offset, TLS_SIZE
+from .codegen import CodeGen, CgBinding, int_signed, takes_operand, is_cmp, fold_load, fold_load_for_reader, text_at, has_text, is_aggregate, is_actor_t, is_tfloat32, REG_WORDS, arg_reg, spilled_word, narrow_operand, int_width_cg, tls_offset, TLS_SIZE
 from .ir import IrFunc, Inst, Term, Touches, Slot, ENV_WORD, render_func, touches, use_counts, def_counts, inst_uses, term_uses, successors, ends_in_call
 from .ssa import promote, add_ssa_stats
 from .parser import expr_of, stmt_of, type_expr_of, block_of, pattern_of, fun_of  // AST values for #test cases (MYLA-184)
@@ -282,7 +282,7 @@ impl CodeGen {
         self.dbg_pop_scope()
         self.dbg_end_function()
         self.emit("")
-        if f.frame { self.emit_frame_new(f, mangled, slot_off) }
+        if f.frame { self.emit_frame_new_ir(f, mangled) }
         self.in_frame = false
     }
 
@@ -488,64 +488,6 @@ impl CodeGen {
     fun emit_suspend(var self, b: int32, labels: [str]) {
         self.emit_state(b)
         self.emit(format("jmp {}", self.epilogue))
-    }
-
-    // `myla_<f>__new(args…)`: a new heap frame for the frame function `f`
-    // (`[resume fn][caller][state][task]`, then the slots, zeroed), each
-    // argument copied into its parameter's slot with references of its own
-    // (an aggregate from the address passed; a lambda's environment from
-    // %r10); the frame in %rax. The argument registers are kept below the
-    // frame base across the allocation.
-    fun emit_frame_new(var self, f: IrFunc, mangled: str, slot_off: [int32]) {
-        let size = frame_size(f)
-        var words = 0
-        for s in f.slots { if s.word >= 0 && s.word + 1 > words { words = s.word + 1 } }
-        self.emit(format("myla_{}__new:", mangled))
-        self.emit("pushq %rbp")
-        self.emit("movq %rsp, %rbp")
-        let rbx_at = -8 * (self.spill_args(words) + 1)
-        self.emit("pushq %rbx")
-        self.emit(format("movq ${}, %rdi", size))
-        self.emit("call __alloc")
-        self.emit("movq %rax, %rbx")
-        self.emit("movq %rax, %rdi")
-        self.emit(format("movq ${}, %rcx", size / 8))
-        self.emit("xorl %eax, %eax")
-        self.emit("rep stosq")
-        self.emit(format("leaq myla_{}(%rip), %rax", mangled))
-        self.emit("movq %rax, 0(%rbx)")
-        var i = 0
-        while i < f.slots.len() {
-            let s = f.slots[i]
-            if s.word >= 0 || s.word == ENV_WORD {
-                var at = SPILLED_ENV
-                if s.word >= 0 { at = spilled_word(s.word) }
-                if is_aggregate(s.ty) {
-                    self.emit(format("movq {}, %rsi", at))
-                    var w = 0
-                    while w < s.size {
-                        self.emit(format("movq {}(%rsi), %rax", w))
-                        self.emit(format("movq %rax, {}(%rbx)", slot_off[i] + w))
-                        w = w + 8
-                    }
-                } else {
-                    self.emit(format("movq {}, %rax", at))
-                    self.emit(format("movq %rax, {}(%rbx)", slot_off[i]))
-                }
-                if self.owns_heap(s.ty) { self.retain("rbx", slot_off[i], s.ty) }
-                // a lambda's environment, held until its captures are copied
-                if s.word == ENV_WORD {
-                    self.emit(format("movq {}(%rbx), %rdi", slot_off[i]))
-                    self.emit("call __func_retain")
-                }
-            }
-            i = i + 1
-        }
-        self.emit("movq %rbx, %rax")
-        self.emit(format("movq {}(%rbp), %rbx", rbx_at))
-        self.emit("leave")
-        self.emit("ret")
-        self.emit("")
     }
 
     fun emit_inst(var self, f: IrFunc, inst: Inst, slot_off: [int32], temp_base: int32) {

@@ -33,6 +33,7 @@ from .checker import CheckErr, REG_ARG_WORDS, type_name, Type, is_unit, is_slice
 from .codegen import codegen_on, may_write_expr, is_actor_t, is_sb_t, is_async_t, CodeGen, LamJob, PartialJob, Cap, DropEntry, tfunc_params, tfunc_ret, is_hole_expr, mangle_fn, is_builtin_call_name, is_aggregate, tuple_elems, is_struct_or_enum_t, is_tfunc, is_overloadable_op, arith_method_cg, enum_name_of, is_tstr, is_cmp, place_root, is_aggregate_opt, arms_may_write, is_cell_t, list_elem, is_list_t, is_map_t, is_str_t, map_key, map_val, format_segments, args_have_hole, success_variant, failure_variant
 from .util import format_specs
 from .tokens import Note, no_span
+from .ir_x86 import slots_at, frame_size
 from .ir import IrFunc, IrBlock, Inst, Term, Slot, Pos, Instance, ENV_WORD
 from .parser import expr_of, stmt_of, type_expr_of, block_of, pattern_of, fun_of  // AST values for #test cases (MYLA-184)
 
@@ -5195,6 +5196,79 @@ pub fun env_drop_ir(cg: CodeGen, lifted: str, owned: [DropEntry], free: str) -> 
         }
     }
     lw.free_cell(sp, free)
+    return Routine { f: lw.f, wants: lw.wants }
+}
+
+// `__compose_call(x)` (`l >> r`'s code): its environment holds the two
+// function values, a at 8 and b at 24; b(a(x)), b in its place (MYLA-130),
+// as IR for every target (MYLA-263).
+pub fun compose_ir() -> Routine {
+    let i64 = Type.TInt(64, true)
+    var lw = routine("__compose_call", Some(i64))
+    let xs = lw.new_slot("x", i64, 8, 0, false)
+    let es = lw.new_slot("__env", Type.TPtr, 8, ENV_WORD, false)
+    let env = lw.read_cell(es)
+    let x = lw.read_cell(xs)
+    let a = lw.temp(i64)
+    lw.add(Inst.Bin(a, "+", i64, i64, env, lw.int_const(8), Pos { line: 0, col: 0 }))
+    let ax = lw.temp(i64)
+    lw.add(Inst.CallInd(ax, a, [x]))
+    let b = lw.temp(i64)
+    lw.add(Inst.Bin(b, "+", i64, i64, env, lw.int_const(24), Pos { line: 0, col: 0 }))
+    lw.add(Inst.CallInd(-1, b, [ax]))
+    lw.finish(Term.Become)
+    return Routine { f: lw.f, wants: lw.wants }
+}
+
+// `myla_<f>__new(args…)` for the frame function `f` (D90), as IR for every
+// target (MYLA-263): a new heap frame (its header, then the slots, zeroed),
+// the resume function `f` at its start, each argument copied into its
+// parameter's slot with references of its own (an aggregate from the
+// address passed; a lambda's environment, held until its captures are
+// copied, from `ENV_WORD`); the frame returned.
+pub fun frame_new_ir(cg: CodeGen, f: IrFunc, mangled: str) -> Routine {
+    let i64 = Type.TInt(64, true)
+    let size = frame_size(f)
+    let soff = slots_at(f, 0, [])
+    var lw = routine(mangled + "__new", Some(i64))
+    // its parameters: the words the frame function's take
+    var params: [int32] = []
+    var i = 0
+    while i < f.slots.len() {
+        let s = f.slots[i]
+        if s.word >= 0 || s.word == ENV_WORD {
+            var t = i64
+            if s.word == ENV_WORD { t = Type.TPtr }
+            params.push(lw.new_slot(s.name, t, 8, s.word, false))
+        } else {
+            params.push(-1)
+        }
+        i = i + 1
+    }
+    let frame = lw.temp(i64)
+    lw.add(Inst.Rt(frame, "__alloc", [lw.int_const(size)]))
+    lw.add(Inst.Call(-1, "std$rt$zero_words", [frame, lw.int_const(size)]))
+    let code = lw.temp(i64)
+    lw.add(Inst.Label(code, "myla_" + mangled))
+    lw.add(Inst.StoreAt(frame, 0, code, 8))
+    i = 0
+    while i < f.slots.len() {
+        let s = f.slots[i]
+        if params[i] >= 0 {
+            let v = lw.read_cell(params[i])
+            let at = lw.temp(i64)
+            lw.add(Inst.Bin(at, "+", i64, i64, frame, lw.int_const(soff[i]), Pos { line: 0, col: 0 }))
+            if is_aggregate(s.ty) && s.word >= 0 {
+                lw.add(Inst.Copy(at, v, s.size))
+            } else {
+                lw.add(Inst.StoreAt(at, 0, v, 8))
+            }
+            if cg.owns_heap(s.ty) { lw.add(Inst.Retain(s.ty, at)) }
+            if s.word == ENV_WORD { lw.add(Inst.Rt(-1, "__func_retain", [v])) }
+        }
+        i = i + 1
+    }
+    lw.finish(Term.Ret(frame))
     return Routine { f: lw.f, wants: lw.wants }
 }
 

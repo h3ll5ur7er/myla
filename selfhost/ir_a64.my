@@ -185,7 +185,7 @@ impl CodeGen {
         self.emit(format("{}:", self.epilogue))
         self.a64_leave(fr)
         self.emit("ret")
-        if f.frame { self.emit_frame_new_a64(f, mangled, soff) }
+        if f.frame { self.emit_frame_new_ir(f, mangled) }
     }
 
     // The frame left: x28 restored in a frame function, sp, x29 and x30.
@@ -208,83 +208,6 @@ impl CodeGen {
     fun a64_slot(var self, fr: A64Frame, s: int32) -> str {
         if fr.frame { return self.a64_mem("x28", fr.soff[s]) }
         return self.a64_cell(fr.soff[s])
-    }
-
-    // `myla_<f>__new(args…)`: a new heap frame for the frame function `f`
-    // (`[resume fn][caller][state][task]…`, then the slots, zeroed), each
-    // argument copied into its parameter's slot with references of its own
-    // (an aggregate from the address passed; a lambda's environment from
-    // x9); the frame in x0.
-    fun emit_frame_new_a64(var self, f: IrFunc, mangled: str, soff: [int32]) {
-        let size = frame_size(f)
-        var words = 0
-        for s in f.slots { if s.word >= 0 && s.word + 1 > words { words = s.word + 1 } }
-        var regs = words
-        if regs > A64_WORDS { regs = A64_WORDS }
-        // the cells: the argument registers, the environment, the frame
-        let env_cell = 8 * regs
-        let frame_cell = env_cell + 8
-        let fsize = (frame_cell + 8 + 15) / 16 * 16
-        self.emit("")
-        self.emit("\t.p2align 2")
-        self.emit(format("myla_{}__new:", mangled))
-        self.emit("stp x29, x30, [sp, #-16]!")
-        self.emit("mov x29, sp")
-        self.a64_sp_sub(fsize)
-        var w = 0
-        while w < regs {
-            self.emit(format("str x{}, {}", w, self.a64_cell(8 * w)))
-            w = w + 1
-        }
-        self.emit(format("str x9, {}", self.a64_cell(env_cell)))
-        self.a64_imm("x0", size as int64)
-        self.emit("bl __alloc")
-        self.emit(format("str x0, {}", self.a64_cell(frame_cell)))
-        self.a64_imm("x2", size as int64)
-        self.emit("mov x1, #0")
-        let zero = self.label()
-        let zdone = self.label()
-        self.emit(format("{}:", zero))
-        self.emit(format("cbz x2, {}", zdone))
-        self.emit("sub x2, x2, #8")
-        self.emit("str x1, [x0, x2]")
-        self.emit(format("b {}", zero))
-        self.emit(format("{}:", zdone))
-        self.a64_adr("x10", format("myla_{}", mangled))
-        self.emit("str x10, [x0]")
-        var i = 0
-        while i < f.slots.len() {
-            let s = f.slots[i]
-            if s.word >= 0 || s.word == ENV_WORD {
-                // the word passed (or an aggregate's address) into x10
-                if s.word == ENV_WORD { self.emit(format("ldr x10, {}", self.a64_cell(env_cell))) }
-                else if s.word < A64_WORDS { self.emit(format("ldr x10, {}", self.a64_cell(8 * s.word))) }
-                else { self.emit(format("ldr x10, {}", self.a64_mem("x29", 16 + 8 * (s.word - A64_WORDS)))) }
-                self.emit(format("ldr x12, {}", self.a64_cell(frame_cell)))
-                if is_aggregate(s.ty) {
-                    var at = 0
-                    while at < s.size {
-                        self.emit(format("ldr x11, {}", self.a64_mem("x10", at)))
-                        self.emit(format("str x11, {}", self.a64_mem("x12", soff[i] + at)))
-                        at = at + 8
-                    }
-                } else {
-                    self.emit(format("str x10, {}", self.a64_mem("x12", soff[i])))
-                }
-                if self.owns_heap(s.ty) { self.a64_retain_at(frame_cell, soff[i], s.ty, false) }
-                // a lambda's environment, held until its captures are copied
-                if s.word == ENV_WORD {
-                    self.emit(format("ldr x12, {}", self.a64_cell(frame_cell)))
-                    self.emit(format("ldr x0, {}", self.a64_mem("x12", soff[i])))
-                    self.emit("bl __func_retain")
-                }
-            }
-            i = i + 1
-        }
-        self.emit(format("ldr x0, {}", self.a64_cell(frame_cell)))
-        self.emit("mov sp, x29")
-        self.emit("ldp x29, x30, [sp], #16")
-        self.emit("ret")
     }
 
     // -- cells, constants, addresses ----------------------------------------

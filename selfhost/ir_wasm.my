@@ -233,7 +233,7 @@ impl CodeGen {
         self.emit("end_loop")
         self.emit("unreachable")
         self.emit("end_function")
-        if f.frame { self.emit_frame_new_wasm(f, mangled, soff) }
+        if f.frame { self.emit_frame_new_ir(f, mangled) }
     }
 
     // A function `name` taking `n` words, for its `.functype` declaration.
@@ -1317,75 +1317,6 @@ fun wasm_after(s: str, at: int32) -> str {
 }
 
 impl CodeGen {
-    // `myla_<f>__new(args…)`: a new heap frame for the frame function `f`
-    // (its header, then the slots, zeroed), each argument copied into its
-    // parameter's slot with references of its own (an aggregate from the
-    // address passed; a lambda's environment from its last parameter, D130);
-    // the frame.
-    fun emit_frame_new_wasm(var self, f: IrFunc, mangled: str, soff: [int32]) {
-        let size = frame_size(f)
-        var words = 0
-        for s in f.slots { if s.word >= 0 && s.word + 1 > words { words = s.word + 1 } }
-        let envp = words
-        if has_env_slot(f) { words = words + 1 }
-        let fl = words
-        let name = format("myla_{}__new", mangled)
-        self.wasm_define(name, words)
-        self.emit("")
-        self.emit(format("{}:", name))
-        self.emit(format(".functype {} {}", name, wasm_sig(words)))
-        self.emit(".local i64")
-        self.emit(format("i64.const {}", size))
-        self.wasm_call("call", "__alloc", 1)
-        self.emit(format("local.tee {}", fl))
-        self.emit("i32.wrap_i64")
-        self.emit("i32.const 0")
-        self.emit(format("i32.const {}", size))
-        self.emit("memory.fill 0")
-        self.emit(format("local.get {}", fl))
-        self.emit("i32.wrap_i64")
-        self.emit(format("i32.const myla_{}", mangled))
-        self.emit("i64.extend_i32_u")
-        self.emit("i64.store 0")
-        var i = 0
-        while i < f.slots.len() {
-            let s = f.slots[i]
-            if s.word >= 0 || s.word == ENV_WORD {
-                if is_aggregate(s.ty) && s.word >= 0 {
-                    self.emit(format("local.get {}", fl))
-                    self.emit(format("i64.const {}", soff[i]))
-                    self.emit("i64.add")
-                    self.emit("i32.wrap_i64")
-                    self.emit(format("local.get {}", s.word))
-                    self.emit("i32.wrap_i64")
-                    self.emit(format("i32.const {}", s.size))
-                    self.emit("memory.copy 0, 0")
-                } else {
-                    self.emit(format("local.get {}", fl))
-                    self.emit("i32.wrap_i64")
-                    if s.word == ENV_WORD {
-                        self.emit(format("local.get {}", envp))
-                    } else {
-                        self.emit(format("local.get {}", s.word))
-                    }
-                    self.emit(format("i64.store {}", soff[i]))
-                }
-                if self.owns_heap(s.ty) { self.wasm_retain_at(fl, soff[i], s.ty, false) }
-                // a lambda's environment, held until its captures are copied
-                if s.word == ENV_WORD {
-                    self.emit(format("local.get {}", fl))
-                    self.emit("i32.wrap_i64")
-                    self.emit(format("i64.load {}", soff[i]))
-                    self.wasm_call("call", "__func_retain", 1)
-                    self.emit("drop")
-                }
-            }
-            i = i + 1
-        }
-        self.emit(format("local.get {}", fl))
-        self.emit("end_function")
-    }
-
     // A reference of its own to each heap value of type `t` at `off` bytes
     // into the value whose address the local `base` holds; `member`: held as
     // a member (a boxed value as its pointer). What `retain T [%p]` becomes

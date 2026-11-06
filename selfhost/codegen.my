@@ -22,7 +22,7 @@ from .inline import inlinable, inline_calls, same_module, may_inline, merge_bloc
 from .hoist import hoist_cows
 from .ranges import widen_counters
 from .anf import Norm, new_norm
-from .lower import lower_function, lower_lambda, blocked_types, Lowered, myla_runtime_function, derived_eq_ir, walk_ir, drop_entry_ir, dropb_slow_ir, list_drop_slow_ir, map_drop_slow_ir, clone_ir, deep_walk_ir, deep_cell_ir, Routine, Want, env_drop_ir, env_deep_ir, partial_ir
+from .lower import lower_function, lower_lambda, blocked_types, Lowered, myla_runtime_function, derived_eq_ir, walk_ir, drop_entry_ir, dropb_slow_ir, list_drop_slow_ir, map_drop_slow_ir, clone_ir, deep_walk_ir, deep_cell_ir, Routine, Want, env_drop_ir, env_deep_ir, partial_ir, frame_new_ir
 import .ir_x86 as ir_x86
 import .ownership as ownership
 import .runtime_x86 as runtime_x86
@@ -2955,6 +2955,15 @@ impl CodeGen {
         self.emit_partial(PartialJob { lifted: n + "__fnval", target: n, fn_off: -1, slots: slots, aggs: aggs, sret: is_aggregate_opt(sig.ret), owned: [] })
     }
 
+    // An async function's frame constructor, `myla_<f>__new`, built as IR and
+    // translated like any function on every target (`frame_new_ir`,
+    // MYLA-263).
+    fun emit_frame_new_ir(var self, f: IrFunc, mangled: str) {
+        let r = frame_new_ir(self, f, mangled)
+        self.emit_routine(r.f, -1, 0, 0)
+        self.request_wants(r.wants)
+    }
+
     // A partial application's function, built as IR and translated like any
     // function on every target (`partial_ir`, MYLA-263), then its
     // environment's drop.
@@ -3000,20 +3009,6 @@ impl CodeGen {
             return
         }
         self.emit_fnval_adapter(n)
-    }
-
-    // The environment (%r10) and the registers of the first of `n`
-    // argument words pushed right after the frame base is set: how many
-    // words that pushed. Argument word `w` is then at `spilled_word(w)`, the
-    // environment at `SPILLED_ENV`.
-    fun spill_args(var self, n: int32) -> int32 {
-        self.emit("pushq %r10")
-        var w = 0
-        while w < n && w < REG_WORDS {
-            self.emit(format("pushq %{}", arg_reg(w)))
-            w = w + 1
-        }
-        return w + 1
     }
 
     fun free_eb(self, body: ExprOrBlock, bound: [str]) -> [str] {
@@ -4342,10 +4337,9 @@ pub fun arg_reg(w: int32) -> str {
     return regs[w]
 }
 
-// Where argument word `w` is in a function that pushed the environment and
-// the argument registers right after setting its frame base (`spill_args`):
-// below it for a word that came in a register, above the return address for
-// one that came on the stack.
+// Where argument word `w` is once the prologue has stored the argument
+// registers below the frame base: below it for a word that came in a
+// register, above the return address for one that came on the stack.
 #test(0)["-16(%rbp)"]
 #test(5)["-56(%rbp)"]
 #test(6)["16(%rbp)"]
@@ -4353,9 +4347,6 @@ pub fun spilled_word(w: int32) -> str {
     if w < REG_WORDS { return format("{}(%rbp)", -16 - 8 * w) }
     return format("{}(%rbp)", 16 + 8 * (w - REG_WORDS))
 }
-
-// Where the environment (%r10) is after `spill_args`.
-pub const SPILLED_ENV: str = "-8(%rbp)"
 
 // The operand `v` (an immediate or a 64-bit register) for a `width`-byte
 // access: a register's low part.

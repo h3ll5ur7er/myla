@@ -14,7 +14,7 @@
 
 from .checker import Type
 from .codegen import CodeGen, DropEntry, ends_colon, EXEC_CAP, tls_offset, TLS_SIZE, trap_labels
-from .lower import drop_entry_ir
+from .lower import drop_entry_ir, compose_ir
 
 impl CodeGen {
     fun emit_runtime_prelude(var self, entry_name: str) {
@@ -671,25 +671,11 @@ impl CodeGen {
         self.raw("")
     }
 
-    // __compose_call(x), its env in %r10: the env holds two fat values a
-    // (env[8]) and b (env[24]); computes b(a(x)) for scalar x/result via the
-    // closure calling convention (D119), b by a jump in place of it.
-    // __compose_env_drop releases both and frees the env.
+    // __compose_call(x) (`l >> r`'s code, its environment holding the two
+    // function values) as IR on every target (`compose_ir`, MYLA-263), and
+    // __compose_env_drop, which releases both and frees the environment.
     fun emit_compose_runtime(var self) {
-        self.raw("__compose_call:")
-        self.raw("\tpushq %rbp")
-        self.raw("\tmovq %rsp, %rbp")
-        self.raw("\tpushq %rbx")
-        self.raw("\tmovq %r10, %rbx")
-        self.raw("\tmovq 16(%rbx), %r10")
-        self.raw("\tcall *8(%rbx)")
-        self.raw("\tmovq %rax, %rdi")
-        self.raw("\tmovq 32(%rbx), %r10")
-        self.raw("\tmovq 24(%rbx), %rcx")
-        self.raw("\tpopq %rbx")
-        self.raw("\tleave")
-        self.raw("\tjmp *%rcx")
-        self.raw("")
+        self.emit_wanting(compose_ir())
         self.emit_compose_env_drop()
     }
 

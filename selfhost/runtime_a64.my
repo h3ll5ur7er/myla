@@ -375,23 +375,6 @@ impl CodeGen {
             ".Lfdrop_done:",
             "\tret",
             "",
-            // __compose_call(x), its env in x9 holding two function values,
-            // a (env[8], env[16]) and b (env[24], env[32]): b(a(x)), b by a
-            // jump in place of it
-            "__compose_call:",
-            "\tstp x29, x30, [sp, #-32]!",
-            "\tmov x29, sp",
-            "\tstr x19, [sp, #16]",
-            "\tmov x19, x9",
-            "\tldr x9, [x19, #16]",
-            "\tldr x15, [x19, #8]",
-            "\tblr x15",
-            "\tldr x9, [x19, #32]",
-            "\tldr x15, [x19, #24]",
-            "\tldr x19, [sp, #16]",
-            "\tldp x29, x30, [sp], #32",
-            "\tbr x15",
-            "",
             // std.math's primitives (MYLA-248), a float64 as its bits
             "__sqrt:",
             "\tfmov d0, x0",
@@ -403,7 +386,7 @@ impl CodeGen {
             "\tret",
             "",
         ] { self.raw(line) }
-        self.emit_compose_env_drop()
+        self.emit_compose_runtime()
         self.emit_derived_eq()
     }
 }
