@@ -255,6 +255,23 @@ def _function(asm: str, name: str) -> str:
 
 
 # MYLA-253: parameters a `become` passes on borrowed
+APPLY_TAIL = """fun add(a: int, b: int) -> int {
+    return a + b
+}
+
+fun apply_tail(f: (int, int) -> int, a: int, b: int, n: int) -> int {
+    if n == 0 {
+        return f(a, b)
+    }
+    become apply_tail(f, a * 2, b * 2, n - 1)
+}
+
+fun main() {
+    print(apply_tail(add, 1, 2, 5))
+    print(apply_tail(add, 1, 2, 0))
+}
+"""
+
 BECOME_PARAMS = """struct Cfg {
     name: str,
     step: int,
@@ -357,6 +374,12 @@ class RegisterArguments(unittest.TestCase):
         # a struct, a part of one) passed on by `become` needs nothing of the
         # frame being left
         self.same("relay", BECOME_PARAMS, "2000000\n2000006\n4\n")
+
+    def test_a_function_value_parameter_survives_a_tail_call(self):
+        # the review of 2026-11-06 (R2): a function value received in a
+        # register and called by a function that also has a `become` was read
+        # from %rdi after the call's own argument loads had overwritten it
+        self.same("apply_tail", APPLY_TAIL, "96\n3\n")
 
     def test_a_generic_become_counts_the_instance(self):
         # MYLA-272: the checker counts a value of a type parameter as one
