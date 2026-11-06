@@ -1,16 +1,15 @@
 // runtime_x86.my -- the runtime's x86-64 Linux assembly (MYLA-162, D108).
 //
-// What of the runtime is still hand-written for this target: the program's
-// start (`_start`: the stack limit, the alternate signal stack and the
-// stack-overflow handler, the main thread's state block, the workers and
-// their rings), the traps and the panic, the system-call and memory
-// primitives (`__syscall`, `__syscall5`, `__copy_bytes`, `__equal_bytes`,
-// `__str_eq`), the executor's control transfers (starting worker threads,
-// the jumps into frames, `__exec_run`), the deep copies of a function
-// value's environment (`__deep_env`, `__dclone_env`), composition
-// (`__compose_call`), std.math's and the float runtime's primitives. The
-// rest of the runtime is std.rt and std.platform, compiled through the IR;
-// another target gives this module again.
+// What of the runtime is still hand-written for this target, what is the
+// machine's own (MYLA-263): the program's start (`_start`: the stack limit,
+// the alternate signal stack and the stack-overflow handler, the main
+// thread's state block, the workers and their rings), the traps and the
+// panic, the system calls (`__syscall`, `__syscall5`), the bulk copy
+// (`__copy_bytes`), the executor's control transfers (starting worker
+// threads, the jumps into frames, `__exec_run`) and the float remainder
+// (`__fmod`). The rest of the runtime is std.rt and std.platform, and the
+// IR routines the code generator builds (composition, the drop entries),
+// compiled through the IR; another target gives this module again.
 
 from .checker import Type
 from .codegen import CodeGen, DropEntry, ends_colon, EXEC_CAP, tls_offset, TLS_SIZE, trap_labels
@@ -160,7 +159,6 @@ impl CodeGen {
         self.raw("")
         if self.frames {
             self.emit_executor()
-            self.emit_deep_runtime()
         }
         // Runtime errors: `runtime error: <message>` on stderr, then exit(1)
         // (MYLA-17); the message is the interpreter's, without the values. The
@@ -292,26 +290,6 @@ impl CodeGen {
         let names = self.rt_alloc_names()
         self.raw(format("\t.set __alloc, myla_{}", names.0))
         self.raw(format("\t.set __free, myla_{}", names.1))
-        self.raw("")
-        self.raw("__func_retain:")
-        self.raw("\ttestq %rdi, %rdi")
-        self.raw("\tjz .Lfret_done")
-        self.raw("\tincq -8(%rdi)")
-        self.raw(".Lfret_done:")
-        self.raw("\tret")
-        self.raw("")
-        // at refcount zero, tail-call the env's drop function (word 0): it
-        // releases what the env owns and frees the cell
-        self.raw("__func_drop:")
-        self.raw("\ttestq %rdi, %rdi")
-        self.raw("\tjz .Lfdrop_done")
-        self.raw("\tdecq -8(%rdi)")
-        self.raw("\tjnz .Lfdrop_done")
-        // its drop function, the first of its record (MYLA-263)
-        self.raw("\tmovq (%rdi), %rax")
-        self.raw("\tjmp *(%rax)")
-        self.raw(".Lfdrop_done:")
-        self.raw("\tret")
         self.raw("")
         self.emit_compose_runtime()
         self.emit_derived_eq()
@@ -526,33 +504,6 @@ impl CodeGen {
         self.raw("\tpopq %rdi")
         self.raw("\tmovq $231, %rax")
         self.raw("\tsyscall")
-        self.raw("")
-    }
-
-    // `__deep_env` and `__dclone_env`, the deep copies of a function value's
-    // environment every program with tasks may need (D92, MYLA-148); the
-    // strings' and a plain cell's are std.rt's (`rt_exec`, MYLA-162).
-    fun emit_deep_runtime(var self) {
-        // none, or the deep copy its record names (MYLA-263; owning nothing,
-        // a string's: itself when unshared, else a copy)
-        self.raw("__deep_env:")
-        self.raw("\ttestq %rdi, %rdi")
-        self.raw("\tjz .Lde_none")
-        self.raw("\tmovq (%rdi), %rax")
-        self.raw("\tjmp *16(%rax)")
-        self.raw(".Lde_none:")
-        self.raw("\txorl %eax, %eax")
-        self.raw("\tret")
-        self.raw("")
-        // its clone, only reading the original: the one its record names
-        self.raw("__dclone_env:")
-        self.raw("\ttestq %rdi, %rdi")
-        self.raw("\tjz .Ldce_none")
-        self.raw("\tmovq (%rdi), %rax")
-        self.raw("\tjmp *8(%rax)")
-        self.raw(".Ldce_none:")
-        self.raw("\txorl %eax, %eax")
-        self.raw("\tret")
         self.raw("")
     }
 

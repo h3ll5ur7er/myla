@@ -3034,7 +3034,7 @@ impl Lower {
         for p in params { bound.push(p.name) }
         var caps: [Cap] = []
         var seen: [str] = []
-        var size = 8                // word 0 of the env holds its drop function
+        var size = 8                // word 0 of the env: its routines' record (MYLA-263)
         var owns = false
         for nm in cg.free_eb(body, bound) {
             let slot = self.lookup(nm)
@@ -3136,7 +3136,7 @@ impl Lower {
         var fills: [Expr] = []
         var offs: [int32] = []
         var owned: [DropEntry] = []
-        var size = 8               // word 0 of the env holds its drop function
+        var size = 8               // word 0 of the env: its routines' record (MYLA-263)
         var fn_off = -1
         if fn_value {
             fn_off = size

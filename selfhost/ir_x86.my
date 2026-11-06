@@ -610,10 +610,12 @@ impl CodeGen {
                 self.emit("call *(%rdi)")
             },
             // a call through a code address with one word (MYLA-263)
+            // (the code first: whichever operand is in %rax, the other's load
+            // can't overwrite it; nothing lives in %r11 across a call)
             Intrinsic.CallCode => {
+                self.load_temp(args[0], "r11", temp_base)
                 self.load_temp(args[1], "rdi", temp_base)
-                self.load_temp(args[0], "rax", temp_base)
-                self.emit("call *%rax")
+                self.emit("call *%r11")
                 self.store_temp(d, temp_base)
             },
             Intrinsic.Bsr64 => {

@@ -81,6 +81,48 @@ pub fun zero_words(p: int64, n: int64) {
     }
 }
 
+// --- function values' environments (MYLA-263) ------------------------------
+//
+// An environment's first word points at the record of its routines,
+// `[drop, clone, deep]` (the code generator's `env_record_of`); its count is
+// at -8, as a cell's. A function value without one has a null environment.
+
+// `__func_retain(env)`: one more reference to the environment.
+pub fun func_retain(env: int64) {
+    if env != 0 {
+        __store64(env - 8, __load64(env - 8) + 1)
+    }
+}
+
+// `__func_drop(env)`: one reference less; at none, the drop function its
+// record names releases what it holds and frees it.
+pub fun func_drop(env: int64) {
+    if env == 0 {
+        return
+    }
+    let n = __load64(env - 8) - 1
+    __store64(env - 8, n)
+    if n == 0 {
+        let done = __call_code(__load64(__load64(env)), env)
+    }
+}
+
+// `__deep_env(env)` and `__dclone_env(env)` (D92, MYLA-148): the deep copy
+// and the clone its record names (with tasks; null for none).
+pub fun deep_env(env: int64) -> int64 {
+    if env == 0 {
+        return 0
+    }
+    return __call_code(__load64(__load64(env) + 16), env)
+}
+
+pub fun dclone_env(env: int64) -> int64 {
+    if env == 0 {
+        return 0
+    }
+    return __call_code(__load64(__load64(env) + 8), env)
+}
+
 // `__equal_bytes(p, q, n)`: whether the `n` bytes at `p` and `q` are the
 // same, eight at a time, then one (MYLA-263: the same on every target).
 pub fun equal_bytes(p: int64, q: int64, n: int64) -> bool {

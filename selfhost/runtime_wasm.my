@@ -3,9 +3,9 @@
 // What `runtime_x86.my` gives for x86-64, for wasm32 on WASI preview 1:
 // the program's start (`_start`), the dispatcher through which
 // std.platform (lib/std/platform_wasm.my) calls the WASI imports, the
-// traps and the panic, the memory primitives (`memory.copy`, a byte
-// comparison), the function values' counts, composition and std.math's
-// primitives. Then the module's text put together for clang's wasm
+// traps and the panic, the bulk copy (`memory.copy`) and the executor's
+// entry points on one worker; the rest is std.rt's or IR (MYLA-263). Then
+// the module's text put together for clang's wasm
 // assembler (`wasm_module`): the `.set` aliases resolved (wasm has no
 // function aliases), every function's type declared before its first use,
 // the data's pointers written as 32-bit words and every data label given
@@ -125,16 +125,6 @@ impl CodeGen {
         let names = self.rt_alloc_names()
         self.raw(format("\t.set __alloc, myla_{}", names.0))
         self.raw(format("\t.set __free, myla_{}", names.1))
-        // the function values' counts; at zero, the env's drop function
-        // (word 0) in place of this
-        self.wasm_fn("__func_retain", 1, ["local.get 0", "i64.eqz", "if", "i64.const 0", "return", "end_if",
-            "local.get 0", "i64.const 8", "i64.sub", "i32.wrap_i64", "local.get 0", "i64.const 8", "i64.sub", "i32.wrap_i64",
-            "i64.load 0", "i64.const 1", "i64.add", "i64.store 0", "i64.const 0"], true)
-        self.wasm_fn("__func_drop", 1, ["local.get 0", "i64.eqz", "if", "i64.const 0", "return", "end_if",
-            "local.get 0", "i64.const 8", "i64.sub", "i32.wrap_i64", "local.get 0", "i64.const 8", "i64.sub", "i32.wrap_i64",
-            "i64.load 0", "i64.const 1", "i64.sub", "i64.store 0",
-            "local.get 0", "i64.const 8", "i64.sub", "i32.wrap_i64", "i64.load 0", "i64.eqz", "i32.eqz", "if", "i64.const 0", "return", "end_if",
-            "local.get 0", "local.get 0", "i32.wrap_i64", "i64.load 0", "i32.wrap_i64", "i64.load 0", "i32.wrap_i64", format("return_call_indirect {}", wasm_sig(1))], true)
         self.emit_compose_runtime()
         self.emit_derived_eq()
     }
@@ -173,13 +163,6 @@ impl CodeGen {
         // __task_exit(code): `exit` when tasks take turns
         self.wasm_fn("__task_exit", 1, ["i64.const 3", "local.get 0", "i64.const 0", "call __task_fail", "drop", "call __failed_wait", "drop", "local.get 0", "call __exit", "drop", "unreachable"], true)
         self.wasm_calls["__failed_wait"] = 0
-        // the environments' deep copies (D92, MYLA-148): the routine its
-        // record names (MYLA-263)
-        for dc in [("__deep_env", "__deep_str", 16), ("__dclone_env", "__dclone_cell", 8)] {
-            self.wasm_fn(dc.0, 1, ["local.get 0", "i64.eqz", "if", "i64.const 0", "return", "end_if",
-                "local.get 0", "local.get 0", "i32.wrap_i64", "i64.load 0", "i32.wrap_i64", format("i64.load {}", dc.2), "i32.wrap_i64", "return_call_indirect " + one], true)
-            self.wasm_calls[dc.1] = 1
-        }
     }
 
     // A hand-written function `name` of `n` words: its `.functype`, then

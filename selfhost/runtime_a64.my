@@ -1,10 +1,10 @@
 // runtime_a64.my -- the runtime's aarch64 Linux assembly (MYLA-163, D117).
 //
 // What `runtime_x86.my` gives for x86-64, for aarch64: the program's start,
-// the traps and the panic, the system-call and memory primitives, the
-// function values' counts, composition, std.math's primitives, the tasks'
-// executor (its control transfers, the workers, an environment's deep
-// copies) and the stack-overflow handler. Not yet: `-g` (MYLA-259).
+// the traps and the panic, the system calls, the bulk copy, the tasks'
+// executor (its control transfers, the workers) and the stack-overflow
+// handler; the rest is std.rt's or IR (MYLA-263). Not yet: `-g`
+// (MYLA-259).
 //
 // The hand-written routines keep to what the code `ir_a64.my` makes
 // assumes: they may change x0 to x17 and the flags, and keep x19 to x29
@@ -128,7 +128,6 @@ impl CodeGen {
         for line in ["\tmov x0, #0", "\tmov x8, #94", "\tsvc #0", ""] { self.raw(line) }
         if self.frames {
             self.emit_executor_a64()
-            self.emit_deep_runtime_a64()
         }
         for line in [
             // __alt_stack: an alternate signal stack for the running thread
@@ -298,30 +297,6 @@ impl CodeGen {
         self.raw(format("\t.set __alloc, myla_{}", names.0))
         self.raw(format("\t.set __free, myla_{}", names.1))
         self.raw("")
-        for line in [
-            "__func_retain:",
-            "\tcbz x0, .Lfret_done",
-            "\tldur x1, [x0, #-8]",
-            "\tadd x1, x1, #1",
-            "\tstur x1, [x0, #-8]",
-            ".Lfret_done:",
-            "\tret",
-            "",
-            // at a count of zero, a jump to the env's drop function (word 0)
-            "__func_drop:",
-            "\tcbz x0, .Lfdrop_done",
-            "\tldur x1, [x0, #-8]",
-            "\tsubs x1, x1, #1",
-            "\tstur x1, [x0, #-8]",
-            "\tb.ne .Lfdrop_done",
-            // its drop function, the first of its record (MYLA-263)
-            "\tldr x1, [x0]",
-            "\tldr x1, [x1]",
-            "\tbr x1",
-            ".Lfdrop_done:",
-            "\tret",
-            "",
-        ] { self.raw(line) }
         self.emit_compose_runtime()
         self.emit_derived_eq()
     }
@@ -506,29 +481,6 @@ impl CodeGen {
             "\tldp x0, x30, [sp], #16",
             "\tmov x8, #94",
             "\tsvc #0",
-            "",
-        ] { self.raw(line) }
-    }
-
-    // `__deep_env` and `__dclone_env`, a function value's environment's deep
-    // copies (D92, MYLA-148): the routines its record names (MYLA-263)
-    fun emit_deep_runtime_a64(var self) {
-        for line in [
-            "__deep_env:",
-            "\tcbz x0, .Lde_none",
-            "\tldr x1, [x0]",
-            "\tldr x1, [x1, #16]",
-            "\tbr x1",
-            ".Lde_none:",
-            "\tret",
-            "",
-            "__dclone_env:",
-            "\tcbz x0, .Ldce_none",
-            "\tldr x1, [x0]",
-            "\tldr x1, [x1, #8]",
-            "\tbr x1",
-            ".Ldce_none:",
-            "\tret",
             "",
         ] { self.raw(line) }
     }
