@@ -248,6 +248,26 @@ PROGRAMS["builtin_impls"] = test_builtin_impls.PROGRAM
 PROGRAMS["slices"] = test_slices.PROGRAM
 # `defer` (D135): every way a scope ends, in plain and async functions
 PROGRAMS["defer"] = test_defer.PROGRAM
+# a function value of a function taking a struct by copy, which a `become`
+# hands over (D88): its adapter copies the words (MYLA-282)
+PROGRAMS["function_value_taking_a_copy"] = """
+struct Pair { a: int, b: str }
+
+fun step(p: Pair, n: int) -> int {
+    if n == 0 {
+        return p.a + p.b.len()
+    }
+    become step(Pair { a: p.a + 1, b: p.b }, n - 1)
+}
+
+fun main() {
+    let f = step
+    let label = "ab" + "c"
+    print(f(Pair { a: 1, b: label }, 100000))
+    let g: (Pair, int) -> int = step
+    print(g(Pair { a: 7, b: "" }, 0))
+}
+"""
 # a `become` through a partial application's thunk, a million deep: the thunk
 # jumps to its function (D87, MYLA-130, MYLA-268)
 PROGRAMS["become_through_a_thunk"] = """

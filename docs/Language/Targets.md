@@ -47,7 +47,6 @@ A program learns that its target lacks something from an error: the cause `Unsup
 
 Every target runs the burn suites that build and run programs, x86-64 natively and the others under qemu-aarch64 and Node (`scripts/test-target.py`, [[Development/Testing]], [[MYLA-268]]). What the others are excused from, and why, is in `tests/burn/_targets.py`; besides what the table above lists, these are known gaps:
 
-- A function value of a function taking a value by copy isn't built yet on aarch64 and wasm32 ([[MYLA-282]]).
 - A plain call in tail position jumps on x86-64 only (an optimisation; `become` jumps on every target): a recursion millions deep through plain calls overflows the stack elsewhere ([[MYLA-283]]).
 - Under WASI, reading a directory is `Other`, not `IsADirectory`, and a removed working directory stops Node before the program starts ([[MYLA-281]]).
 
