@@ -2,7 +2,7 @@
 id: MYLA-256
 title: "A `guard` statement, as Swift has"
 type: feature
-status: review
+status: done
 priority: low
 labels: [language, ergonomics, design]
 ---
@@ -56,3 +56,7 @@ Evidence:
   It now prints the same in the interpreter and natively (x86-64, and aarch64 checked by hand), and its five error cases give their messages.
 - **Error corpus:** three new files (`type_let_else_must_leave`, `type_let_else_irrefutable`, `parse_let_else_needs_else`).
 - **Suites:** test_if_let, test_error_corpus, test_grammar, test_doc_blocks and the parser and checker gates pass.
+
+## Evidence (review 2026-11-06)
+
+- [x] `exit` leaves a block (reopened by [[Project/Review-2026-11]]): `std$process$exit` is a diverging call in [[selfhost/checker.my]], so `let … else { exit(3) }` and a function ending in `process.exit(2)` check, as the page said; `test_let_else.test_exit_leaves_the_block`. The variant-only pattern rule is now stated on [[Language/Statements]]

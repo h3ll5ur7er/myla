@@ -88,6 +88,12 @@ class IfExpression(unittest.TestCase):
         proc = subprocess.run([exe], capture_output=True, text=True)
         self.assertEqual((proc.stdout, proc.stderr, proc.returncode), (_WANT, "", 0))
 
+    def test_a_missing_else_is_reported_at_the_if(self):
+        path = self.write("no_else_pos.my", "fun main() {\n    let x = if true { 1 }\n    print(x)\n}\n")
+        proc = subprocess.run([self.myla, "check", path, "--stdlib", STDLIB_ROOT], capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 1, proc.stderr)
+        self.assertIn("no_else_pos.my:2:13", proc.stderr)
+
     def test_errors(self):
         cases = {
             "no_else": ("fun main() {\n    let x = if true { 1 }\n}\n",

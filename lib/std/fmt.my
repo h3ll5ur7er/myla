@@ -34,6 +34,9 @@ fun is_digit(c: char) -> bool {
     return c >= '0' && c <= '9'
 }
 
+// The largest width and precision a spec may ask for.
+const MAX_WIDTH: int32 = 1000000
+
 // The spec `s`, or why it isn't one.
 #test("")[Ok(Spec { fill: " ", align: 0, plus: false, alt: false, zero: false, width: 0, prec: -1, kind: 0 })]
 #test("*>8.2")[Ok(Spec { fill: "*", align: '>', plus: false, alt: false, zero: false, width: 8, prec: 2, kind: 0 })]
@@ -41,6 +44,8 @@ fun is_digit(c: char) -> bool {
 #test("+")[Ok(Spec { fill: " ", align: 0, plus: true, alt: false, zero: false, width: 0, prec: -1, kind: 0 })]
 #test("q")[Err("invalid format spec 'q'")]
 #test(".")[Err("invalid format spec '.'")]
+#test("9999999999")[Err("invalid format spec '9999999999': a width above 1000000")]
+#test(".4294967297")[Err("invalid format spec '.4294967297': a precision above 1000000")]
 pub fun parse_spec(s: str) -> Result<Spec, str> {
     let cs = s.chars()
     let n = cs.len()
@@ -68,6 +73,8 @@ pub fun parse_spec(s: str) -> Result<Spec, str> {
     }
     while i < n && is_digit(cs[i]) {
         sp.width = sp.width * 10 + (cs[i] as int32 - 48)
+        // bounded, so a width can't wrap an int32 or fill memory
+        if sp.width > MAX_WIDTH { return Err(format("invalid format spec '{}': a width above {}", s, MAX_WIDTH)) }
         i += 1
     }
     if i < n && cs[i] == '.' {
@@ -76,6 +83,7 @@ pub fun parse_spec(s: str) -> Result<Spec, str> {
         sp.prec = 0
         while i < n && is_digit(cs[i]) {
             sp.prec = sp.prec * 10 + (cs[i] as int32 - 48)
+            if sp.prec > MAX_WIDTH { return Err(format("invalid format spec '{}': a precision above {}", s, MAX_WIDTH)) }
             i += 1
         }
     }

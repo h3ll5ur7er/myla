@@ -170,6 +170,32 @@ class UnitType(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertIn("2 passed", proc.stdout + proc.stderr)
 
+    def test_a_unit_test_on_a_function_without_a_result(self):
+        # D138: `#test(...)[()]` names the value of a function without a result
+        src = ("#test()[()]\nfun g() -> () {\n    return ()\n}\n\n#test(1)[()]\nfun h(n: int) {\n    print(n)\n}\n\n"
+               "#test(2)[1]\nfun wrong(n: int) {\n    print(n)\n}\n\nfun main() {\n}\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "t.my")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(src)
+            proc = subprocess.run([selfhost_tool("main"), "check", path, "--stdlib", STDLIB_ROOT],
+                                  capture_output=True, text=True, timeout=120)
+            self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+            self.assertIn("'#test' on a function without a result expects '[()]'", proc.stderr)
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(src.replace("#test(2)[1]\n", ""))
+            proc = subprocess.run([selfhost_tool("main"), "test", path, "--stdlib", STDLIB_ROOT],
+                                  capture_output=True, text=True, timeout=120)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("2/2 passed", proc.stdout + proc.stderr)
+
+    def test_a_call_without_a_result_as_a_branch_value(self):
+        # D140: a call of a function without a result is the value `()` in a
+        # branch of an `if` or a `match` too
+        src = ("fun nothing() {\n}\n\nfun main() {\n    let c = true\n    let b = if c { nothing() } else { () }\n"
+               "    print(b == ())\n    let m = match 1 {\n        1 => nothing(),\n        _ => (),\n    }\n    print(m == ())\n}\n")
+        self.assertEqual(run_source_both_now(src), ("true\ntrue\n", "", 0))
+
     def test_errors(self):
         cases = {
             "not_a_number": ("fun main() {\n    let u = ()\n    print(u + 1)\n}\n", "type error"),

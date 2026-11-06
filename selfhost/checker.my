@@ -805,7 +805,7 @@ pub fun is_raw_memory_primitive(name: str) -> bool {
 #test("panic")[true]
 #test("push")[false]
 fun is_diverging_builtin(name: str) -> bool {
-    return name == "panic" || name == "unreachable" || name == "__exit"
+    return name == "panic" || name == "unreachable" || name == "__exit" || name == "std$process$exit"
 }
 
 #test("y")[None]
@@ -3570,7 +3570,16 @@ impl Checker {
             match ab {
                 ArmBody.ABDiverge => {},
                 ArmBody.ABValue(ot, node) => {
-                    let t = match ot { Some(x) => x, None => { return Err(if_worded(terr_at(e.line, e.col, e.sp, "this match is used as a value, so every arm must produce one"), arms)) } }
+                    var t = Type.TTuple([])
+                    match ot {
+                        Some(x) => { t = x },
+                        None => {
+                            // a call of a function without a result is the value `()` (D140), as in `expect_value`
+                            let call = match node { Some(ex) => is_call_expr(ex), None => false }
+                            if !call { return Err(if_worded(terr_at(e.line, e.col, e.sp, "this match is used as a value, so every arm must produce one"), arms)) }
+                            match node { Some(ex) => { self.resolved[ex.id] = Type.TTuple([]) }, None => {} }
+                        },
+                    }
                     vals.push(MatchVal { ty: t, node: node })
                 },
             }
@@ -5484,7 +5493,6 @@ impl Checker {
         let idx = self.func_idx(fd.name)
         let sig = self.functions[idx]
         let outs = match attr.outputs { Some(x) => x, None => { return Err(terr_at(attr.line, attr.col, attr.sp, "'#test' requires an expected result, e.g. #test(args)[expected]")) } }
-        match sig.ret { Some(x) => {}, None => { return Err(terr_at(attr.line, attr.col, attr.sp, "'#test' requires the function to return a value")) } }
         if attr.args.len() != sig.params.len() { return Err(terr_at(attr.line, attr.col, attr.sp, format("'#test' expects {} argument(s), got {}", sig.params.len(), attr.args.len()))) }
         if sig_has_error(sig.params, sig.ret) { return Err(poisoned()) }   // the signature failed (MYLA-110)
         self.push_scope()
@@ -5499,10 +5507,14 @@ impl Checker {
         }
         if outs.len() != 1 { self.pop_scope()
             return Err(terr_at(attr.line, attr.col, attr.sp, "'#test' expects exactly one expected value in [...]")) }
-        let rt = match sig.ret { Some(x) => x, None => t_int() }
+        // a function without a result gives `()`, so its case says `[()]` (D138)
+        let rt = match sig.ret { Some(x) => x, None => Type.TTuple([]) }
         let ot = self.expect_value(outs[0], Some(rt))?
         self.pop_scope()
-        if !type_eq(ot, rt) { return Err(terr_at(outs[0].line, outs[0].col, outs[0].sp, format("'#test' expected value type mismatch: expected '{}', found '{}'", type_name(rt), type_name(ot)))) }
+        if !type_eq(ot, rt) {
+            match sig.ret { Some(x) => {}, None => { return Err(terr_at(outs[0].line, outs[0].col, outs[0].sp, "'#test' on a function without a result expects '[()]'")) } }
+            return Err(terr_at(outs[0].line, outs[0].col, outs[0].sp, format("'#test' expected value type mismatch: expected '{}', found '{}'", type_name(rt), type_name(ot))))
+        }
         return Ok(0)
     }
 

@@ -447,10 +447,12 @@ class SelfHostedCheckerParity(unittest.TestCase):
 
     def test_corpus_check_parity(self) -> None:
         checked = 0
+        unrecorded = 0
         for path in _corpus():
             try:
                 expected = _oracle(path)
             except NoGolden:
+                unrecorded += 1
                 continue    # a file added to the corpus since has no recording: test_error_corpus holds it to the self-hosted CLI
             if expected is None:
                 continue  # not part of the checker-parity gate
@@ -458,8 +460,9 @@ class SelfHostedCheckerParity(unittest.TestCase):
                 actual = self._myla_check(path)
                 self.assertEqual(actual, expected)
                 checked += 1
-        # Guard against the corpus silently going empty.
-        self.assertGreater(checked, 60)
+        # Guard against the corpus silently going empty; the unrecorded count
+        # (new files held to the CLI's own output) says how far it has drifted
+        self.assertGreater(checked, 60, f"{checked} compared, {unrecorded} without a recording")
 
     def test_type_errors_match_the_oracle(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

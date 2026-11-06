@@ -83,10 +83,14 @@ fun main() {
     var big: int64 = 1
     big <<= 40
     print(big)
+    var ys = [1, 2, 3, 4]
+    ys[^1] += 5
+    ys[^pick(3)] *= 2
+    print(f"{ys[0]} {ys[1]} {ys[3]}")
 }
 """
 
-_WANT = ("3\n20\n3\nabcd\npick 2\n1 42 30\npick 1\npick 0\npick 1\n102 0\n10\n11 22\n8\n1099511627776\n")
+_WANT = ("3\n20\n3\nabcd\npick 2\n1 42 30\npick 1\npick 0\npick 1\n102 0\n10\n11 22\n8\n1099511627776\npick 3\n1 4 9\n")
 
 
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)

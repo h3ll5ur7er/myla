@@ -2,7 +2,7 @@
 id: MYLA-277
 title: "Number formatting in `format` and f-strings: width, alignment, precision (`{x:>8.3}`)"
 type: feature
-status: review
+status: done
 priority: high
 labels: [language, stdlib, formatting]
 ---
@@ -67,3 +67,7 @@ Then also:
 - The checker holds each spec to its value's type with those functions; the interpreter formats with them; the lowering calls them, and a type implementing the prelude's `trait Format` through its `format` method.
 - [[tests/burn/test_format_specs.py]]: every rule against the interpreter and native code, the same program on aarch64 and wasm32 (`PROGRAMS["format_specs"]`), the errors; `#test` cases in `std.fmt` and `std.num`; the grammar's `FORMAT_SPEC`.
 - A float without a precision prints as `print` prints it, with 17 significant digits (`{0.1:>6}` is `0.10000000000000001`): that is the print form today, not something D139 changed.
+
+## Evidence (review 2026-11-06)
+
+- [x] A width or precision above 1,000,000 is a compile-time error (reopened by [[Project/Review-2026-11]]: `{x:9999999999}` wrapped an `int32` and passed `check`); `MAX_WIDTH` in [[lib/std/fmt.my]], two `#test` cases and two `test_format_specs` error cases; [[Language/Lexical-structure]] no longer says there are no format specifiers
