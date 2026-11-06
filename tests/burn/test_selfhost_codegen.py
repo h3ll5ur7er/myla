@@ -1138,6 +1138,40 @@ class SelfHostedCodegenParity(unittest.TestCase):
         self.assertIn("$16777213", body, body)
         self.assertNotIn("subq $1,", body, body)
 
+    def test_the_branches_of_an_if_share_frame_cells(self) -> None:
+        # MYLA-183 (D112): the locals of an `if`'s branches, an `else if`
+        # chain's and a match's arms share cells, two 64-byte structs per
+        # branch taking two cells, not one per `let` (the review of
+        # 2026-11-06, R18)
+        big = "struct Big { a: int64, b: int64, c: int64, d: int64, e: int64, f: int64, g: int64, h: int64 }\n"
+        mk = "fun mk(k: int64) -> Big {\n    return Big { a: k, b: k, c: k, d: k, e: k, f: k, g: k, h: k }\n}\n"
+        two = "        let x{0} = mk(k + {0})\n        let y{0} = mk(k + {0} + 1)\n        return x{0}.a + y{0}.h\n"
+        source = (
+            big + mk
+            + "fun branches(c: bool, k: int64) -> int64 {\n    if c {\n" + two.format(0)
+            + "    } else {\n" + two.format(2) + "    }\n}\n"
+            + "fun chain(c: int64, k: int64) -> int64 {\n    if c == 0 {\n" + two.format(0)
+            + "    } else if c == 1 {\n" + two.format(2) + "    } else {\n" + two.format(4) + "    }\n}\n"
+            + "fun arms(c: bool, k: int64) -> int64 {\n    match c {\n        true => {\n" + two.format(0).replace("        ", "            ")
+            + "        },\n        false => {\n" + two.format(2).replace("        ", "            ") + "        },\n    }\n}\n"
+            + "fun main() {\n    print(branches(true, 1))\n    print(chain(2, 1))\n    print(arms(false, 1))\n}\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "prog.my")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(source)
+            asm = self._emit_asm(path)
+            self.assertEqual(self._build_and_run(asm), ("3\n11\n7\n", 0))
+        sizes = {}
+        for name in ("branches", "chain", "arms"):
+            body = self._function_asm(asm, name)
+            m = re.search(r"subq \$(\d+), %rsp", body)
+            self.assertIsNotNone(m, body)
+            sizes[name] = int(m.group(1))
+        # two cells of 64 bytes and the saved registers; one cell per `let`
+        # would be 256 bytes for the `if` and 384 for the chain
+        self.assertLess(max(sizes.values()), 3 * 64, sizes)
+        self.assertEqual(sizes["branches"], sizes["arms"], sizes)
+
     def test_a_scaled_index_and_a_compare_with_memory(self) -> None:
         # MYLA-162: `p + ((i & 3) << 3)` loaded or stored is one addressing
         # mode with a scaled index; a value just loaded and compared once is

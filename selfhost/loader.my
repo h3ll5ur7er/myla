@@ -230,6 +230,7 @@ pub fun normalize(p: str) -> str {
 #test("lib2/std/rt.my", "lib")[false]
 #test("prog.my", "lib")[false]
 pub fun in_stdlib(path: str, root: str) -> bool {
+    if root == EMBEDDED_ROOT { return in_std_tree(path) }
     var p = normalize(path)
     var r = normalize(root)
     let pa = p.len() > 0 && p[0] == '/'
@@ -243,6 +244,41 @@ pub fun in_stdlib(path: str, root: str) -> bool {
         if !ra { r = normalize(here + "/" + r) }
     }
     return r != "." && p.len() > r.len() + 1 && starts_with_text(p, r + "/")
+}
+
+// With the embedded library, whether `path` is in a copy of the standard
+// library on disk (the repository's lib/std): under a directory `std` that
+// holds `rt.my`, which `myla check lib/std/fs.my` checks as `--stdlib lib`
+// would.
+fun in_std_tree(path: str) -> bool {
+    var p = normalize(path)
+    if p.len() == 0 || p[0] != '/' {
+        let here = match current_dir() {
+            Ok(d) => d,
+            Err(e) => { return false },
+        }
+        p = normalize(here + "/" + p)
+    }
+    var end = p.len() - 1
+    while end > 0 {
+        if p[end] == '/' {
+            var sb = StringBuilder()
+            sb.append(p, 0, end)
+            let dir = sb.build()
+            if ends_with_std(dir) && exists(dir + "/rt.my") { return true }
+        }
+        end -= 1
+    }
+    return false
+}
+
+// Whether the directory `dir` is named `std`.
+#test("/a/lib/std")[true]
+#test("/a/libstd")[false]
+#test("/std")[true]
+fun ends_with_std(dir: str) -> bool {
+    let n = dir.len()
+    return n >= 4 && dir[n - 4] == '/' && dir[n - 3] == 's' && dir[n - 2] == 't' && dir[n - 1] == 'd'
 }
 
 fun starts_with_text(s: str, prefix: str) -> bool {

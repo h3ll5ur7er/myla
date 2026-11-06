@@ -5578,8 +5578,9 @@ impl Checker {
 
     // A call of a `__` primitive outside the standard library: allowed, with
     // a warning (D100, MYLA-186), once per place (types.py: _warn_primitive).
+    // A file of the standard library checked on its own (`primitives`) gets none.
     fun warn_primitive(var self, at: Expr, name: str) {
-        if self.in_std() { return }
+        if self.in_std() || self.primitives { return }
         let msg = format("'{}' is a primitive of the standard library, not meant to be called from a program", name)
         for w in self.warnings { if w.msg == msg && w.line == at.line && w.col == at.col { return } }
         self.warnings.push(CheckErr { line: at.line, col: at.col, sp: at.sp, msg: msg, decl: self.cur_decl, notes: [Note { label: "help", msg: "call the function of `std` that wraps it; a primitive's behaviour may change with the standard library", line: 0, col: 0, sp: no_span() }] })

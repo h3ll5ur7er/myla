@@ -159,6 +159,25 @@ class RawMemory(unittest.TestCase):
                 self.assertIn("'__addr_of' reads or writes raw memory: only the standard library may call it", ran.stderr)
 
 
+    def test_a_file_of_the_standard_library_may_call_them(self):
+        # the repository's lib/std checked with the embedded library as with
+        # `--stdlib lib`: a std file is one under a `std` directory that holds
+        # `rt.my`; a copy of a std file elsewhere is a program's
+        env = {k: v for k, v in os.environ.items() if k != "MYLA_STDLIB"}
+        rt = os.path.join(STDLIB_ROOT, "std", "rt.my")
+        for args in (["check", rt], ["check", rt, "--stdlib", STDLIB_ROOT]):
+            with self.subTest(args=args[2:]):
+                ran = subprocess.run([selfhost_tool("main"), *args], capture_output=True, text=True, env=env)
+                self.assertEqual((ran.returncode, ran.stderr), (0, ""))
+        with tempfile.TemporaryDirectory() as tmp:
+            os.mkdir(os.path.join(tmp, "std"))
+            path = os.path.join(tmp, "std", "copy.my")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(PROGRAM)
+            ran = subprocess.run([selfhost_tool("main"), "check", path], capture_output=True, text=True, env=env)
+            self.assertNotEqual(ran.returncode, 0)
+            self.assertIn("reads or writes raw memory: only the standard library may call it", ran.stderr)
+
     def test_native_code_concatenates_with_the_runtime_in_myla(self):
         # `+` and `==` on strings call std.rt's functions (MYLA-162; a
         # standard library without std/rt.my gets the embedded one, see

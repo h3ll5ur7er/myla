@@ -72,16 +72,20 @@ fun call(n: int64) -> int64 {
 #test(44)[2]
 #test(76)[13]
 #test(6)[11]
+#test(51)[28]
 fun errno_linux(e: int64) -> int64 {
     if e == 2 || e == 63 || e == 76 { return 13 }  // EACCES, EPERM, ENOTCAPABLE
     if e == 6 { return 11 }    // EAGAIN
     if e == 8 { return 9 }     // EBADF
+    if e == 19 { return 122 }  // EDQUOT
     if e == 20 { return 17 }   // EEXIST
+    if e == 22 { return 27 }   // EFBIG
     if e == 27 { return 4 }    // EINTR
     if e == 28 { return 22 }   // EINVAL
     if e == 29 { return 5 }    // EIO
     if e == 31 { return 21 }   // EISDIR
     if e == 44 { return 2 }    // ENOENT
+    if e == 51 { return 28 }   // ENOSPC
     if e == 52 { return 38 }   // ENOSYS
     if e == 54 { return 20 }   // ENOTDIR
     if e == 55 { return 39 }   // ENOTEMPTY
