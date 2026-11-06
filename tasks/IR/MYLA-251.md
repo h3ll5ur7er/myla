@@ -42,3 +42,14 @@ These are passes on the IR ([[selfhost/ssa.my]], [[selfhost/inline.my]] are the 
   - fannkuch 33.2 → 29.6 million (−11 %), 434 → 355 ms (about 1.2× as fast);
   - quicksort 93.6 → 91.9 million (−2 %), time within noise; Game of Life unchanged (its loops call functions);
   - the self-compile (the same input, the commit before's sources) takes 1.1 % more instructions, the pass's own cost after making it cheap: no work for a function without `cow` or a loop that calls anything, the slots of addresses computed once a round, the renaming only in the loop.
+
+## A counting loop's step without the re-extension (2026-11-06)
+
+- **What.** An IR pass, [[selfhost/ranges.my]] (`widen_counters`, after `hoist_cows`): an int32 `+ 1` of a slot that `i < x` (an int32 `x`) guards, the slot not stored since, can't overflow, so it is retyped int64, which every backend does without its wrap (`movslq`, `sxtw`, `i64.extend32_s`). A forward analysis over the blocks per int32 slot whose address nothing takes: the true side of `cmp < int32 (load $i), x` (or `x > i`) knows it, a store ends it, a block knows what all its predecessors do. That covers `for i in 0..n` and `while i < n { … i += 1 }`. A `<=` loop's step, a second step in the same turn, any step but 1 and any counter without such a comparison keep the wrap.
+- **Test first.** `test_loop_overhead.test_a_counting_loops_increment_is_not_re_extended` (the step of `for i in 0..n` has no `movslq` after its `addq $1`) failed before; `test_counting_loops_at_the_limit_print_the_same` runs loops at `INT32_MAX` (a `<` loop ending there, a `<=` loop that must wrap, two steps a turn that must wrap) natively and interpreted, and `test_aarch64`/`test_wasm` run the same program on both targets.
+- **Measured** (callgrind, against the commit before): sieve 114.2 → 110.2 million instructions (−3.5 %), fannkuch 29.6 → 28.9 (−2.1 %), Game of Life 155.9 → 153.6 (−1.5 %), quicksort −0.2 %; the self-compile (the same input) 0.9 % more instructions, the pass's cost after it skips functions without a loop and without a slot both compared and stepped, its wall time within noise.
+
+## What is left
+
+- **Bounds checks.** None of the benchmark loops indexes a list with `i < xs.len()`: their indices are `i`, `j`, `r - 1`, `i + 1` against lengths that earlier `push` loops set, so dropping a check needs the lists' lengths followed across loops (that `perm` holds `n` elements), a larger analysis than the item assumed. Merging repeated checks finds next to nothing: counting `elem` instructions of the same list and index in one block over quicksort, fannkuch, sieve and Game of Life gives 1 of 59 (a read sees the list through `load`, a write through `cow`).
+- **Re-extension in general** (only where a value's upper bits are read) is a different representation of int32 temporaries in each backend; the counting loop's step above was the common case that the IR could settle on its own.

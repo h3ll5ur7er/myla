@@ -20,6 +20,7 @@ from .ir import render_func, verify, moves, IrFunc, Inst
 from .ssa import SsaStats, no_ssa_stats
 from .inline import inlinable, inline_calls, same_module, may_inline, merge_blocks
 from .hoist import hoist_cows
+from .ranges import widen_counters
 from .anf import Norm, new_norm
 from .lower import lower_function, lower_lambda, blocked_types, Lowered, myla_runtime_function, derived_eq_ir, walk_ir, drop_entry_ir, dropb_slow_ir, list_drop_slow_ir, map_drop_slow_ir, clone_ir, deep_walk_ir, deep_cell_ir, Routine, Want, env_drop_ir, env_deep_ir
 import .ir_x86 as ir_x86
@@ -2373,6 +2374,8 @@ impl CodeGen {
         }
         // a loop's copy-on-write checks made before it (MYLA-251)
         if !self.debug { f = hoist_cows(f) }
+        // a counting loop's step without the int32 re-extension (MYLA-251)
+        f = widen_counters(f)
         let problem = verify(f)
         // with `--ssa`, the text shows each function after promotion instead
         if self.keep_ir && !self.ssa { self.ir_texts.push(render_func(f)) }

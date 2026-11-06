@@ -115,6 +115,82 @@ class LoopOverhead(unittest.TestCase):
         self.assertEqual(built.returncode, 0, built.stderr)
         self.assertEqual(subprocess.run([exe], capture_output=True, text=True).stdout, ran.stdout)
 
+    def test_a_counting_loops_increment_is_not_re_extended(self):
+        # MYLA-251: `i + 1` where `i < n` held (n an int32) can't overflow, so
+        # it is a 64-bit add, with no sign extension after it
+        path = os.path.join(self.tmp.name, "count.my")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(_COUNTING)
+        body = _function(self.asm(path), "total")
+        self.assertRegex(body, r"addq \$1, %r\w+\n")
+        self.assertNotRegex(body, r"addq \$1, (%r\w+)\n\tmovslq %\w+, \1\n", body)
+
+    def test_counting_loops_at_the_limit_print_the_same(self):
+        # at INT32_MAX: a `<` loop ends there; a `<=` loop's increment wraps,
+        # as it must, and a loop that changes its counter elsewhere too stays
+        # as it was
+        path = os.path.join(self.tmp.name, "limit.my")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(_LIMITS)
+        myla = selfhost_tool("main")
+        ran = subprocess.run([myla, "run", path], capture_output=True, text=True)
+        self.assertEqual((ran.stdout, ran.returncode), (_LIMITS_WANT, 0), ran.stderr)
+        exe = os.path.join(self.tmp.name, "limit")
+        built = subprocess.run([myla, "build", path, "-o", exe], capture_output=True, text=True)
+        self.assertEqual(built.returncode, 0, built.stderr)
+        self.assertEqual(subprocess.run([exe], capture_output=True, text=True).stdout, ran.stdout)
+
+
+_COUNTING = """fun total(xs: [int], n: int) -> int {
+    var t = 0
+    for i in 0..n {
+        t += xs[i]
+    }
+    return t
+}
+
+fun main() {
+    print(total([1, 2, 3], 3))
+}
+"""
+
+_LIMITS = """fun main() {
+    var i = 2147483640
+    while i < 2147483647 {
+        i += 1
+    }
+    print(i)
+    var j = 2147483646
+    var turns = 0
+    while j <= 2147483647 {
+        j += 1
+        turns += 1
+        if turns > 3 {
+            break
+        }
+    }
+    print(j)
+    var k = 2147483646
+    var kt = 0
+    while k < 2147483647 {
+        k += 1
+        k += 1
+        kt += 1
+        if kt > 1 {
+            break
+        }
+    }
+    print(k)
+    var m: int = 0
+    for x in 2147483645..2147483647 {
+        m = x + 1
+    }
+    print(m)
+}
+"""
+
+_LIMITS_WANT = "2147483647\n-2147483646\n-2147483646\n2147483647\n"
+
 
 _COW_LOOPS = """fun total(xs: [int]) -> int {
     var t = 0

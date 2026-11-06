@@ -18,7 +18,7 @@ import unittest
 
 from ._native import CAN_BUILD_NATIVE, SKIP_REASON
 from ._tools import STDLIB_ROOT, native_compiler
-from . import test_builtin_impls, test_defer, test_format_specs, test_register_args, test_slices, test_time, test_unit_type
+from . import test_builtin_impls, test_defer, test_format_specs, test_loop_overhead, test_register_args, test_slices, test_time, test_unit_type
 
 _REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir))
 
@@ -248,6 +248,9 @@ PROGRAMS["builtin_impls"] = test_builtin_impls.PROGRAM
 PROGRAMS["slices"] = test_slices.PROGRAM
 # `defer` (D135): every way a scope ends, in plain and async functions
 PROGRAMS["defer"] = test_defer.PROGRAM
+# counting loops at INT32_MAX: a `<` loop's step done on 64 bits, a `<=`
+# loop's still wrapping (MYLA-251)
+PROGRAMS["counting_at_the_limit"] = test_loop_overhead._LIMITS
 # a function value of a function taking a struct by copy, which a `become`
 # hands over (D88): its adapter copies the words (MYLA-282)
 PROGRAMS["function_value_taking_a_copy"] = """

@@ -1,0 +1,269 @@
+// ranges.my: a counter's `+ 1` that can't overflow, done without the
+// re-extension an int32 result takes (MYLA-251).
+//
+// A temporary holds an int32 sign-extended to 64 bits, so each int32
+// operation's result is wrapped again (`movslq`, `sxtw`, `i64.extend32_s`).
+// Where `i < x` held for an int32 `i` and any int32 `x`, and `i` hasn't
+// changed since, `i + 1` is at most `x`, at most 2^31 - 1: it can't wrap,
+// and the same add on 64 bits gives the same value already extended. So
+// such an add is retyped int64, which every backend does without the wrap.
+// That is a counting loop's step (`for i in 0..n`, `while i < n { … i += 1
+// }`): the comparison guards the body, and nothing else writes `i`.
+//
+// What "`i < x` held" means: a forward analysis over the blocks, per int32
+// slot whose address nothing takes (so only `store` writes it): along the
+// branch a `cmp < int32 (load $i), x` (or `x > i`) takes when it holds, the
+// slot is below some int32; a store to it ends that; a block knows it when
+// every block that jumps to it does. Only slots that some comparison and
+// some `+ 1` both read take part, so most functions are left after one scan.
+// A temporary a `load` or a `cmp` writes is written once (only a `&&`'s or
+// `||`'s result is written in more than one block), so a load's slot is a
+// property of its temporary; what changes is whether the slot was stored
+// since.
+
+from .ir import IrFunc, IrBlock, Inst, Term, successors
+from .checker import Type
+
+// `f` with the int32 `+ 1`s that can't overflow done on 64 bits.
+pub fun widen_counters(f0: IrFunc) -> IrFunc {
+    if f0.frame || f0.order.len() == 0 || !has_loop(f0) { return f0 }
+    let ns = f0.slots.len()
+    // the slot each `load` reads, by its temporary (-1: none)
+    var load_slot: [int32] = []
+    var one: [bool] = []
+    for t in f0.temps {
+        load_slot.push(-1)
+        one.push(false)
+    }
+    var addressed: [bool] = []
+    var compared: [bool] = []
+    var stepped: [bool] = []
+    var k = 0
+    while k < ns {
+        addressed.push(false)
+        compared.push(false)
+        stepped.push(false)
+        k = k + 1
+    }
+    // one pass in the emitted order: a load or a constant comes before what
+    // reads it
+    for bo in f0.order {
+        for inst in f0.blocks[bo].insts {
+            match inst {
+                Inst.Load(d, s) => { load_slot[d] = s },
+                Inst.Const(d, t, v) => { if v == 1 { one[d] = true } },
+                Inst.Addr(d, s) => { addressed[s] = true },
+                Inst.Cmp(d, op, t, x, y) => {
+                    if is_i32(t) && op == "<" && load_slot[x] >= 0 { compared[load_slot[x]] = true }
+                    if is_i32(t) && op == ">" && load_slot[y] >= 0 { compared[load_slot[y]] = true }
+                },
+                Inst.Bin(d, op, lt, rt, x, y, pos) => {
+                    if op == "+" && is_i32(lt) && is_i32(rt) {
+                        if load_slot[x] >= 0 && one[y] { stepped[load_slot[x]] = true }
+                        if load_slot[y] >= 0 && one[x] { stepped[load_slot[y]] = true }
+                    }
+                },
+                _ => {},
+            }
+        }
+    }
+    // the slots that take part, and each slot's place among them (-1: none)
+    var cand: [int32] = []
+    var at: [int32] = []
+    k = 0
+    while k < ns {
+        at.push(-1)
+        if compared[k] && stepped[k] && !addressed[k] && is_i32(f0.slots[k].ty) {
+            at[k] = cand.len()
+            cand.push(k)
+        }
+        k = k + 1
+    }
+    if cand.len() == 0 { return f0 }
+    var f = f0
+    let nc = cand.len()
+    let nb = f.blocks.len()
+    let entry = f.order[0]
+    // what each block knows on entry, per candidate (`seen`: some jump, or
+    // the start, reached it)
+    var known: [[bool]] = []
+    var seen: [bool] = []
+    var b = 0
+    while b < nb {
+        known.push(none_known(nc))
+        seen.push(b == entry)
+        b = b + 1
+    }
+    var changed = true
+    var rounds = 0
+    while changed && rounds < 20 {
+        changed = false
+        rounds = rounds + 1
+        for bi in f.order {
+            if seen[bi] {
+                let outs = block_out(f, bi, known[bi], load_slot, at)
+                let succ = successors(f.blocks[bi].term)
+                var si = 0
+                while si < succ.len() {
+                    let s = succ[si]
+                    var edge = outs.0
+                    // the branch's first side, where the comparison held
+                    if si == 0 && outs.1 >= 0 { edge[outs.1] = true }
+                    if !seen[s] {
+                        known[s] = edge
+                        seen[s] = true
+                        changed = true
+                    } else {
+                        k = 0
+                        while k < nc {
+                            if known[s][k] && !edge[k] {
+                                known[s][k] = false
+                                changed = true
+                            }
+                            k = k + 1
+                        }
+                    }
+                    si = si + 1
+                }
+            }
+        }
+    }
+    // the adds, retyped
+    for bi in f.order {
+        if seen[bi] && any_true(known[bi]) {
+            var state = known[bi]
+            // the candidates' loads not stored since, by temporary
+            var current: [int32: bool] = [:]
+            var out: [Inst] = []
+            for inst in f.blocks[bi].insts {
+                var keep = inst
+                match inst {
+                    Inst.Load(d, s) => { if at[s] >= 0 { current[d] = true } },
+                    Inst.Store(s, v) => {
+                        if at[s] >= 0 {
+                            state[at[s]] = false
+                            current = without_slot(current, load_slot, s)
+                        }
+                    },
+                    Inst.Bin(d, op, lt, rt, x, y, pos) => {
+                        if op == "+" && is_i32(lt) && is_i32(rt) {
+                            if (below(current, state, load_slot, at, x) && one[y]) || (below(current, state, load_slot, at, y) && one[x]) {
+                                keep = Inst.Bin(d, op, Type.TInt(64, true), Type.TInt(64, true), x, y, pos)
+                            }
+                        }
+                    },
+                    _ => {},
+                }
+                out.push(keep)
+            }
+            f.blocks[bi].insts = out
+        }
+    }
+    return f
+}
+
+// Whether `f` has a loop: a jump back to a block emitted before (or at)
+// the jump's own, which the terminators alone show.
+fun has_loop(f: IrFunc) -> bool {
+    var pos: [int32] = []
+    for b in f.blocks { pos.push(-1) }
+    var k = 0
+    while k < f.order.len() {
+        pos[f.order[k]] = k
+        k = k + 1
+    }
+    k = 0
+    while k < f.order.len() {
+        for s in successors(f.blocks[f.order[k]].term) {
+            if pos[s] >= 0 && pos[s] <= k { return true }
+        }
+        k = k + 1
+    }
+    return false
+}
+
+// What the block `bi` knows on leaving it, from `known` on entry (per
+// candidate, `at` their places): which are below some int32, and the
+// candidate its branch's first side adds (-1 for none).
+fun block_out(f: IrFunc, bi: int32, known: [bool], load_slot: [int32], at: [int32]) -> ([bool], int32) {
+    var state = known
+    var current: [int32: bool] = [:]
+    // the candidate each comparison says is below some int32
+    var cond_of: [int32: int32] = [:]
+    for inst in f.blocks[bi].insts {
+        match inst {
+            Inst.Load(d, s) => { if at[s] >= 0 { current[d] = true } },
+            Inst.Store(s, v) => {
+                if at[s] >= 0 {
+                    state[at[s]] = false
+                    current = without_slot(current, load_slot, s)
+                    var kept: [int32: int32] = [:]
+                    for c in cond_of.keys() {
+                        if cond_of[c] != at[s] { kept[c] = cond_of[c] }
+                    }
+                    cond_of = kept
+                }
+            },
+            Inst.Cmp(d, op, t, x, y) => {
+                if is_i32(t) {
+                    if op == "<" && current.contains(x) { cond_of[d] = at[load_slot[x]] }
+                    if op == ">" && current.contains(y) { cond_of[d] = at[load_slot[y]] }
+                }
+            },
+            _ => {},
+        }
+    }
+    var adds = -1
+    match f.blocks[bi].term {
+        Term.Br(c, t, e) => {
+            if t != e && cond_of.contains(c) { adds = cond_of[c] }
+        },
+        _ => {},
+    }
+    return (state, adds)
+}
+
+// Whether `x` is a load, not stored since, of a candidate below some int32.
+fun below(current: [int32: bool], state: [bool], load_slot: [int32], at: [int32], x: int32) -> bool {
+    if !current.contains(x) { return false }
+    return state[at[load_slot[x]]]
+}
+
+// `current` without the loads of the slot `s`.
+fun without_slot(current: [int32: bool], load_slot: [int32], s: int32) -> [int32: bool] {
+    var out: [int32: bool] = [:]
+    for t in current.keys() {
+        if load_slot[t] != s { out[t] = true }
+    }
+    return out
+}
+
+#test(2)[[false, false]]
+fun none_known(n: int32) -> [bool] {
+    var out: [bool] = []
+    var k = 0
+    while k < n {
+        out.push(false)
+        k = k + 1
+    }
+    return out
+}
+
+#test([false, true])[true]
+#test([false])[false]
+fun any_true(xs: [bool]) -> bool {
+    for x in xs {
+        if x { return true }
+    }
+    return false
+}
+
+#test(Type.TInt(32, true))[true]
+#test(Type.TInt(32, false))[false]
+#test(Type.TInt(64, true))[false]
+fun is_i32(t: Type) -> bool {
+    return match t {
+        Type.TInt(w, sg) => w == 32 && sg
+        _ => false
+    }
+}
