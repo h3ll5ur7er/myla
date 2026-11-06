@@ -36,6 +36,41 @@ pub fun str_concat(a: str, b: str) -> str {
     return __str_of(p)
 }
 
+// An f-string's pieces joined three or four at a time (MYLA-252): a new
+// cell holding their bytes, made once.
+pub fun str_concat3(a: str, b: str, c: str) -> str {
+    let pa = __addr_of(a)
+    let pb = __addr_of(b)
+    let pc = __addr_of(c)
+    let na = __load64(pa)
+    let nb = __load64(pb)
+    let nc = __load64(pc)
+    let p = __alloc(na + nb + nc + 8)
+    __store64(p, na + nb + nc)
+    __copy_bytes(p + 8, pa + 8, na)
+    __copy_bytes(p + 8 + na, pb + 8, nb)
+    __copy_bytes(p + 8 + na + nb, pc + 8, nc)
+    return __str_of(p)
+}
+
+pub fun str_concat4(a: str, b: str, c: str, d: str) -> str {
+    let pa = __addr_of(a)
+    let pb = __addr_of(b)
+    let pc = __addr_of(c)
+    let pd = __addr_of(d)
+    let na = __load64(pa)
+    let nb = __load64(pb)
+    let nc = __load64(pc)
+    let nd = __load64(pd)
+    let p = __alloc(na + nb + nc + nd + 8)
+    __store64(p, na + nb + nc + nd)
+    __copy_bytes(p + 8, pa + 8, na)
+    __copy_bytes(p + 8 + na, pb + 8, nb)
+    __copy_bytes(p + 8 + na + nb, pc + 8, nc)
+    __copy_bytes(p + 8 + na + nb + nc, pd + 8, nd)
+    return __str_of(p)
+}
+
 // `a == b` (`__str_eq`): the same cell, or equal lengths and bytes.
 pub fun str_eq(a: str, b: str) -> bool {
     let pa = __addr_of(a)

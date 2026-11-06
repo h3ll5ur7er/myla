@@ -3717,22 +3717,58 @@ impl Lower {
         }
         let segs = format_segments(fmt)
         let specs = format_specs(fmt)
-        var acc = self.temp(Type.TStr)
-        self.add(Inst.Str(acc, segs[0]))
+        // the pieces, empty literal ones left out, joined at the end with
+        // as few new strings as there are groups of four (MYLA-252)
+        var parts: [int32] = []
+        if segs[0] != "" || args.len() == 1 { parts.push(self.str_const(segs[0])) }
         var k = 1
         while k < args.len() {
-            let piece = self.render_spec(cg, args[k], specs[k - 1])
-            let joined = self.temp(Type.TStr)
-            self.rt_call(cg, joined, "__str_concat", [acc, piece])
-            let j = self.owned_value(cg, joined, Type.TStr)
-            let seg = self.temp(Type.TStr)
-            self.add(Inst.Str(seg, segs[k]))
-            let next = self.temp(Type.TStr)
-            self.rt_call(cg, next, "__str_concat", [j, seg])
-            acc = self.owned_value(cg, next, Type.TStr)
+            parts.push(self.render_spec(cg, args[k], specs[k - 1]))
+            if segs[k] != "" { parts.push(self.str_const(segs[k])) }
             k = k + 1
         }
-        return acc
+        return self.join_strs(cg, parts)
+    }
+
+    // A temporary holding the literal string `s`.
+    fun str_const(var self, s: str) -> int32 {
+        let t = self.temp(Type.TStr)
+        self.add(Inst.Str(t, s))
+        return t
+    }
+
+    // The strings `parts` (at least one) as one: each group of up to four
+    // joined into a new string the statement owns (std.rt's `str_concat`,
+    // `str_concat3`, `str_concat4`), until one is left.
+    fun join_strs(var self, cg: CodeGen, parts: [int32]) -> int32 {
+        var acc = parts
+        while acc.len() > 1 {
+            var next: [int32] = []
+            var i = 0
+            while i < acc.len() {
+                var n = acc.len() - i
+                if n > 4 { n = 4 }
+                if n == 1 { next.push(acc[i]) }
+                else if n == 2 {
+                    let d = self.temp(Type.TStr)
+                    self.rt_call(cg, d, "__str_concat", [acc[i], acc[i + 1]])
+                    next.push(self.owned_value(cg, d, Type.TStr))
+                } else {
+                    var name = "std$rt$str_concat3"
+                    if n == 4 { name = "std$rt$str_concat4" }
+                    var group: [int32] = []
+                    var j = 0
+                    while j < n {
+                        group.push(acc[i + j])
+                        j = j + 1
+                    }
+                    next.push(self.call_owning(cg, name, group))
+                }
+                i = i + n
+            }
+            acc = next
+        }
+        return acc[0]
     }
 
     // One hole's text (D139): a value of a type with its own `format`
