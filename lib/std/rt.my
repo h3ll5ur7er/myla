@@ -2565,16 +2565,26 @@ pub fun list_grow(cell: int64, stride: int64) -> int64 {
     // a big cell at the top of a memory that doesn't give memory back
     // (wasm32) grows where it is: no copy, and no second cell beside it
     if grew_in_place(cell, bigger * stride + 16) {
-        __store64(cell + 8, (__load64(cell - 16) - 16) / stride)
+        __store64(cell + 8, elements_in(cell, stride, bigger))
         return cell
     }
     let p = __alloc(bigger * stride + 16)
     __copy_bytes(p, cell, cap * stride + 16)
     // the whole cell: its size class (or a big cell's pages) may hold more
     // than was asked (the review of 2026-11-06, R6)
-    __store64(p + 8, (__load64(p - 16) - 16) / stride)
+    __store64(p + 8, elements_in(p, stride, bigger))
     __free(cell)
     return p
+}
+
+// How many elements of `stride` bytes the list cell `p` holds (its size is
+// the word 16 bytes before it), at least `asked`; `asked` for elements of no
+// bytes (a `[()]`).
+fun elements_in(p: int64, stride: int64, asked: int64) -> int64 {
+    if stride == 0 {
+        return asked
+    }
+    return (__load64(p - 16) - 16) / stride
 }
 
 // --- deep copies between tasks (D92, MYLA-148) ---------------------------------------
