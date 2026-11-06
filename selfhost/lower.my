@@ -5220,6 +5220,23 @@ pub fun compose_ir() -> Routine {
     return Routine { f: lw.f, wants: lw.wants }
 }
 
+// The most words a frame constructor zeroes one store each; a frame with
+// more blank words is zeroed by `std.rt.zero_words`.
+const FRAME_ZERO_STORES: int32 = 24
+
+// The places of the words not `written`.
+#test([true, false, true, false])[[1, 3]]
+#test([true])[[]]
+fun blank_words(written: [bool]) -> [int32] {
+    var out: [int32] = []
+    var w = 0
+    while w < written.len() {
+        if !written[w] { out.push(w) }
+        w = w + 1
+    }
+    return out
+}
+
 // `myla_<f>__new(args…)` for the frame function `f` (D90), as IR for every
 // target (MYLA-263): a new heap frame (its header, then the slots, zeroed),
 // the resume function `f` at its start, each argument copied into its
@@ -5247,7 +5264,28 @@ pub fun frame_new_ir(cg: CodeGen, f: IrFunc, mangled: str) -> Routine {
     }
     let frame = lw.temp(i64)
     lw.add(Inst.Rt(frame, "__alloc", [lw.int_const(size)]))
-    lw.add(Inst.Call(-1, "std$rt$zero_words", [frame, lw.int_const(size)]))
+    // zeroed, but for the words written next (the code and the parameters):
+    // a store each in a small frame, a loop in a large one
+    var written: [bool] = [true]
+    while written.len() < size / 8 { written.push(false) }
+    i = 0
+    while i < f.slots.len() {
+        if params[i] >= 0 {
+            var w = 0
+            while w < f.slots[i].size / 8 {
+                written[soff[i] / 8 + w] = true
+                w = w + 1
+            }
+        }
+        i = i + 1
+    }
+    let blank = blank_words(written)
+    if blank.len() > FRAME_ZERO_STORES {
+        lw.add(Inst.Call(-1, "std$rt$zero_words", [frame, lw.int_const(size)]))
+    } else if blank.len() > 0 {
+        let zero = lw.int_const(0)
+        for w in blank { lw.add(Inst.StoreAt(frame, w * 8, zero, 8)) }
+    }
     let code = lw.temp(i64)
     lw.add(Inst.Label(code, "myla_" + mangled))
     lw.add(Inst.StoreAt(frame, 0, code, 8))
@@ -5256,14 +5294,18 @@ pub fun frame_new_ir(cg: CodeGen, f: IrFunc, mangled: str) -> Routine {
         let s = f.slots[i]
         if params[i] >= 0 {
             let v = lw.read_cell(params[i])
-            let at = lw.temp(i64)
-            lw.add(Inst.Bin(at, "+", i64, i64, frame, lw.int_const(soff[i]), Pos { line: 0, col: 0 }))
-            if is_aggregate(s.ty) && s.word >= 0 {
-                lw.add(Inst.Copy(at, v, s.size))
+            if (is_aggregate(s.ty) && s.word >= 0) || cg.owns_heap(s.ty) {
+                let at = lw.temp(i64)
+                lw.add(Inst.Bin(at, "+", i64, i64, frame, lw.int_const(soff[i]), Pos { line: 0, col: 0 }))
+                if is_aggregate(s.ty) && s.word >= 0 {
+                    lw.add(Inst.Copy(at, v, s.size))
+                } else {
+                    lw.add(Inst.StoreAt(at, 0, v, 8))
+                }
+                if cg.owns_heap(s.ty) { lw.add(Inst.Retain(s.ty, at)) }
             } else {
-                lw.add(Inst.StoreAt(at, 0, v, 8))
+                lw.add(Inst.StoreAt(frame, soff[i], v, 8))
             }
-            if cg.owns_heap(s.ty) { lw.add(Inst.Retain(s.ty, at)) }
             if s.word == ENV_WORD { lw.add(Inst.Rt(-1, "__func_retain", [v])) }
         }
         i = i + 1
