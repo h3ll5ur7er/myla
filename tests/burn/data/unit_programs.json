@@ -272,7 +272,7 @@
  {
   "source": "fun main() {\n    print(1e38f32 * 10.0f32)\n    print(-1e38f32 * 10.0f32)\n    let c: float32 = 3.5e38\n    print(c)\n    print(3.4028235e38f32)\n}\n",
   "argv": null,
-  "stdout": "inf\n-inf\ninf\n340282347000000000000000000000000000000\n",
+  "stdout": "inf\n-inf\ninf\n3.4028235e38\n",
   "exit": 0,
   "note": "float32 named since D102 made `float` float64 (MYLA-220)"
  },
@@ -423,7 +423,7 @@
  {
   "source": "fun main() { print(0.1f32 + 0.2f32) }\n",
   "argv": null,
-  "stdout": "0.300000012\n",
+  "stdout": "0.3\n",
   "exit": 0
  },
  {

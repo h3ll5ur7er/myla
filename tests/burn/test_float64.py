@@ -34,9 +34,9 @@ fun main() {
 }
 """
 
-# floats print with round-trip precision: 17 significant digits for a double, 9
-# for a single
-_WANT = ("0.30000000000000004\ntrue\n1.5\n0.300000012\ntrue\nfalse\n0.33333333333333331\n")
+# floats print in their shortest round-trip form, a single's as a single
+# (D155)
+_WANT = ("0.30000000000000004\ntrue\n1.5\n0.3\ntrue\nfalse\n0.3333333333333333\n")
 
 
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)

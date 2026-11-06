@@ -25,7 +25,7 @@
 // directory as if that were `<name>/` in the project root, anything else in
 // the project root and then the stdlib root.
 
-from std.fs import read_to_string, exists, is_dir
+from std.fs import read_to_string, exists, is_dir, current_dir
 from .stdroot import is_embedded, embedded_text, EMBEDDED_ROOT
 from .parser import parse_source_all, expr_of, stmt_of, type_expr_of, block_of, pattern_of, fun_of
 from .diag import Report, reports, type_report, chain
@@ -219,6 +219,40 @@ pub fun normalize(p: str) -> str {
     if absolute { return "/" + joined }
     if joined == "" { return "." }
     return joined
+}
+
+// Whether `path` is a file of the standard library at `root`: their raw
+// memory is the library's own (D152), so a check of one as the entry (`myla
+// test lib/std/rt.my`, an editor) allows it. Both relative to the working
+// directory when they aren't absolute.
+#test("lib/std/rt.my", "lib")[true]
+#test("./lib/std/rt.my", "lib/")[true]
+#test("lib2/std/rt.my", "lib")[false]
+#test("prog.my", "lib")[false]
+pub fun in_stdlib(path: str, root: str) -> bool {
+    var p = normalize(path)
+    var r = normalize(root)
+    let pa = p.len() > 0 && p[0] == '/'
+    let ra = r.len() > 0 && r[0] == '/'
+    if pa != ra {
+        let here = match current_dir() {
+            Ok(d) => d,
+            Err(e) => { return false },
+        }
+        if !pa { p = normalize(here + "/" + p) }
+        if !ra { r = normalize(here + "/" + r) }
+    }
+    return r != "." && p.len() > r.len() + 1 && starts_with_text(p, r + "/")
+}
+
+fun starts_with_text(s: str, prefix: str) -> bool {
+    if prefix.len() > s.len() { return false }
+    var i = 0
+    while i < prefix.len() {
+        if s[i] != prefix[i] { return false }
+        i = i + 1
+    }
+    return true
 }
 
 #test("/work/myla/lib")[["work", "myla", "lib"]]

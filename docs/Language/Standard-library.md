@@ -190,7 +190,7 @@ Numbers from text and back ([[MYLA-79]]). The conversions are exact, computed wi
 | `pow2(k: int32) -> float64` | 2^k exactly, for -1022 <= k <= 1023 |
 | `f64_literal_bits(text) -> uint64`, `f32_round_bits(bits) -> uint64`, `float_from_bits(bits) -> float64` | The bit-level steps (for the compiler) |
 
-`format("{}", x)` writes a float with up to 17 significant digits (`0.10000000000000001`); `format_float` is the short form.
+`format("{}", x)` writes a float as `print` does, in its shortest round-trip form (`0.1`, `1e300`, D155); `format_float` is Python's `repr` of it (`1.0`, `1e+300`).
 
 ## std.fmt
 

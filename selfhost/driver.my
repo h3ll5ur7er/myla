@@ -13,9 +13,9 @@ from std.process import run, Output, ExitStatus, SpawnError
 from std.io import write, eprintln
 from std.fs import write_to_file, remove_file
 from std.platform import TARGET
-from .loader import load_program_opts, LoadOptions, for_target, file_of, Loaded, type_errors, warning_reports
+from .loader import load_program_opts, LoadOptions, for_target, file_of, Loaded, type_errors, warning_reports, in_stdlib
 from .diag import render, Report
-from .checker import build_checker_decls, Checker, CheckErr
+from .checker import build_checker_with, Checker, CheckErr
 from .codegen import new_codegen
 from .dwarf import read_gdb_script
 from .interp import new_interp, RtError, TestRun, sched_from_env, time_from_env
@@ -41,7 +41,8 @@ pub fun load_and_check(file: str, opts: LoadOptions) -> Result<Checked, str> {
         Ok(p) => p,
         Err(r) => { return Err(render(r)) },
     }
-    return match build_checker_decls(prog.decls, prog.next_id) {
+    // a file of the standard library may use its primitives (D152)
+    return match build_checker_with(prog.decls, prog.next_id, in_stdlib(file, opts.stdlib_root)) {
         Ok(c) => {
             // its warnings, before the program is run or built (D95)
             for r in warning_reports(prog, c.warnings) { eprintln(render(r) + "\n") }

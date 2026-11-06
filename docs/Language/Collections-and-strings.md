@@ -137,7 +137,7 @@ How values are rendered:
 
 - integers in decimal, unsigned ones without a sign;
 - `bool` as `true`/`false`; `char` as its UTF-8 glyph;
-- floats in plain positional decimal, never in exponent form: the value rounded to 9 significant digits for `float32` or 17 for `float64` (enough to read it back exactly), with trailing zeros trimmed. So `6.0` prints `6`, `0.5` prints `0.5`, but `0.1f64` prints `0.10000000000000001` and `1e20` (a `float32`) prints `100000002000000000000`. Special values print `nan`, `inf`, `-inf` and `-0`.
+- floats in the fewest significant digits that read back as the same value, a `float32`'s as that `float32` (D155): `6.0` prints `6`, `0.5` prints `0.5`, `0.1` prints `0.1`, `0.1 + 0.2` prints `0.30000000000000004`, and `0.1f32 + 0.2f32` prints `0.3`. In plain positional decimal from 1e-4 up to 1e16, outside it the digits with a point after the first and the exponent: `1.5e-7`, `1e16`, `1e300`, `3.4028235e38`. Special values print `nan`, `inf`, `-inf` and `-0`.
 
 ### Format specs
 

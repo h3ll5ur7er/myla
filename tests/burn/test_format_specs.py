@@ -5,7 +5,7 @@
 compiled; a user's type implementing `Format` gets the spec's text as it is.
 The formatting is Myla (`std.fmt`, `std.num`), so the interpreter and every
 backend print the same bytes. (A float without a precision prints as `print`
-prints it: 17 significant digits, so 0.1 is 0.10000000000000001.)"""
+prints it: in its shortest round-trip form, so 0.1 is 0.1, D155.)"""
 import os
 import subprocess
 import tempfile

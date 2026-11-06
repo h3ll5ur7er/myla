@@ -22,6 +22,7 @@ import .platform as os
 import .fmt as fmt
 // slices (D142): the code generator calls std.slice's functions
 import .slice as slice
+import .num as num
 
 // `a + b` (`__str_concat`): a new cell holding both strings' bytes.
 pub fun str_concat(a: str, b: str) -> str {
@@ -2654,9 +2655,12 @@ pub fun fmod(xb: int64, yb: int64) -> int64 {
     return (ux | sx) as int64
 }
 
-// `__float_to_str`: the float64 of the bits `bits` with `digits` significant
-// digits, trailing zeros dropped: plain digits up to its units, then a point
-// and the rest, or `0.` and zeros before them for a magnitude below 1.
+// `__float_to_str`: the float64 of the bits `bits` in the fewest significant
+// digits, up to `digits`, that read back as it (D155; `digits` is 9 for a
+// float32, whose digits read back as that float32), trailing zeros dropped:
+// plain digits up to its units, then a point and the rest, or `0.` and zeros
+// before them for a magnitude below 1; below 1e-4 and from 1e16 on, its
+// digits with a point after the first and the exponent (`1.5e-7`, `1e300`).
 pub fun float_to_str(bits: int64, digits: int64) -> str {
     let mag = bits & 9223372036854775807
     let inf: int64 = 9218868437227405312
@@ -2689,21 +2693,26 @@ pub fun float_to_str(bits: int64, digits: int64) -> str {
             lo = mid + 1
         }
     }
-    var m = fscale(x, digits - 1 + 323 - at) as uint64
-    var low: uint64 = 1
-    var k = digits - 1
-    while k > 0 {
-        low = low * 10u64
-        k -= 1
+    // the fewest digits that read back as it: more digits, correctly
+    // rounded, are never farther from it, so a binary search finds them
+    // (`digits` always do)
+    var lo_n: int64 = 1
+    var hi_n = digits
+    while lo_n < hi_n {
+        let mid = (lo_n + hi_n) >> 1
+        if digits_reading_back(x, at, mid, mag as uint64, digits == 9).0 != 0u64 {
+            hi_n = mid
+        } else {
+            lo_n = mid + 1
+        }
     }
-    if m >= low * 10u64 {
-        m = m / 10u64
-        at += 1
+    var n = lo_n
+    var dn = decimal_digits(x, at, n)
+    if n < digits {
+        dn = digits_reading_back(x, at, n, mag as uint64, digits == 9)
     }
-    if m < low {
-        m = low
-    }
-    var n = digits
+    var m = dn.0
+    at = dn.1
     while n > 1 {
         let q = m / 10u64
         if m != q * 10u64 {
@@ -2716,6 +2725,9 @@ pub fun float_to_str(bits: int64, digits: int64) -> str {
     var sign: int64 = 0
     if bits < 0 {
         sign = 1
+    }
+    if exp < -4 || exp >= 16 {
+        return exponent_form(m, n, exp, sign == 1)
     }
     var len: int64 = 0
     var dot: int64 = -1
@@ -2771,4 +2783,89 @@ pub fun float_to_str(bits: int64, digits: int64) -> str {
         }
     }
     return __str_of(p)
+}
+
+// `x`'s `n` significant digits, rounded, as an integer, and the index of its
+// decimal exponent (`at`, one more when rounding carried into a new digit).
+fun decimal_digits(x: float64, at0: int64, n: int64) -> (uint64, int64) {
+    var at = at0
+    var m = fscale(x, n - 1 + 323 - at) as uint64
+    var low: uint64 = 1
+    var k = n - 1
+    while k > 0 {
+        low = low * 10u64
+        k -= 1
+    }
+    if m >= low * 10u64 {
+        m = m / 10u64
+        at += 1
+    }
+    if m < low {
+        m = low
+    }
+    return (m, at)
+}
+
+// `x`'s `n` significant digits that read back as it, and the index of their
+// exponent, or 0 for none: the rounded digits, or one either side of them
+// (the scaling's rounding can be one off in the last place).
+fun digits_reading_back(x: float64, at0: int64, n: int64, mag: uint64, f32: bool) -> (uint64, int64) {
+    let d = decimal_digits(x, at0, n)
+    let e = d.1 - 323 - (n - 1)
+    if reads_back(d.0, e, mag, f32) {
+        return d
+    }
+    if reads_back(d.0 - 1u64, e, mag, f32) {
+        return (d.0 - 1u64, d.1)
+    }
+    if reads_back(d.0 + 1u64, e, mag, f32) {
+        return (d.0 + 1u64, d.1)
+    }
+    return (0u64, d.1)
+}
+
+// Whether `m` times 10 to the `e` reads back as the float64 of the bits `mag`
+// (non-negative), or as its float32 (`f32`), as a literal does.
+fun reads_back(m: uint64, e: int64, mag: uint64, f32: bool) -> bool {
+    var b: uint64 = 0
+    if m < 9007199254740992u64 && e >= -22 && e <= 22 {
+        // both exact, so the one rounding of the product or quotient is the
+        // literal's (Clinger's fast path)
+        var ae = e
+        if ae < 0 {
+            ae = -ae
+        }
+        let k = pow10_hi(323 + ae)
+        var y = m as float64
+        if e >= 0 {
+            y = y * k
+        } else {
+            y = y / k
+        }
+        b = __f64_bits(y)
+    } else {
+        b = num.f64_literal_bits(uint_to_str(m) + "e" + int_to_str(e))
+    }
+    if f32 {
+        b = num.f32_round_bits(b)
+    }
+    return b == mag
+}
+
+// The `n` digits of `m` with a point after the first (none for one digit),
+// then `e` and the exponent `exp` (D155).
+fun exponent_form(m0: uint64, n: int64, exp: int64, negative: bool) -> str {
+    let ds = uint_to_str(m0)
+    var sb = StringBuilder()
+    if negative {
+        sb.append("-")
+    }
+    sb.append(ds, 0, 1)
+    if n > 1 {
+        sb.append(".")
+        sb.append(ds, 1, n as int32)
+    }
+    sb.append("e")
+    sb.append(int_to_str(exp))
+    return sb.build()
 }
