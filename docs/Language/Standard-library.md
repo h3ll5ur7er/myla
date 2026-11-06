@@ -6,18 +6,18 @@ Myla has built-in functions known to the checker, and a small standard library w
 
 ## Built-in functions
 
-These names are reserved: no declaration may reuse them.
+These names are reserved: no declaration may reuse them. The ones on a receiver are methods only ([[MYLA-221]]).
 
 | Function | Signature | Notes |
 | --- | --- | --- |
 | `print(x)` | one integer, float, `char`, `bool` or `str` | Writes the value and a newline to stdout |
-| `len(x)` | list, map, `str` or `StringBuilder` → `int` | Strings and builders: bytes |
-| `push(xs, v)`, `pop(xs)` | list | Need a `var` place |
-| `contains(m, k)`, `keys(m)`, `remove(m, k)` | map | `remove` needs a `var` place |
+| `x.len()` | list, map, `str` or `StringBuilder` → `int` | A method; strings and builders: bytes |
+| `xs.push(v)`, `xs.pop()` | list | Methods; need a `var` place |
+| `m.contains(k)`, `m.keys()`, `m.remove(k)` | map | Methods; `remove` needs a `var` place |
 | `get(m, k)` | map → `Option<V>` | The one entry here that is a prelude function, not a built-in: an ordinary generic function every program sees (a declaration of another `get` is a duplicate), so its errors read like any call's |
-| `chars(s)` | `str` → `[char]` | |
+| `s.chars()` | `str` → `[char]` | A method |
 | `format(fmt, args…)` | → `str` | `fmt` is a literal; see [[Language/Collections-and-strings]] |
-| `StringBuilder()`, `append(sb, s)`, `append(sb, s, start, end)`, `append_byte(sb, b)`, `build(sb)` | | The four-argument `append` adds the bytes `s[start..end]` ([[Language/Collections-and-strings]]) |
+| `StringBuilder()`, `sb.append(s)`, `sb.append(s, start, end)`, `sb.append_byte(b)`, `sb.build()` | | Methods but `StringBuilder()`; `append(s, start, end)` adds the bytes `s[start..end]` ([[Language/Collections-and-strings]]) |
 | `assert(cond[, msg])`, `panic(msg)`, `unreachable()` | | See [[Language/Attributes-and-testing]] |
 
 The low-level primitives `__write`, `__read`, `__poll`, `__exit`, `__args`, `__read_file`, `__write_file`, `__list_dir`, `__mkdir`, `__stat`, `__getcwd`, `__getenv`, `__sqrt`, `__f64_bits`, `__f64_from_bits`, `__unlink`, `__rmdir`, `__rename`, `__io_errno`, `__run`, `__run_stderr`, `__run_exit_code`, `__run_signal`, `__run_errno` and `__task_cancelled`, and the primitives behind `std.time`, `std.task`'s timers and `std.process.spawn` (`__clock_ns`, `__sleep`, `__spawn`, …) exist for the standard library; call the `std` functions instead. A call of one from a program outside the standard library compiles, with a warning (D100, [[MYLA-186]]): it is for code that knows what it does, such as a new std function in the making.

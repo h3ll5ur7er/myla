@@ -18,20 +18,20 @@ impl Feed {
 async fun main() {
     let f = Feed { n: 0 }
     var fs: [async () -> int] = []
-    push(fs, async () => {
+    fs.push(async () => {
         while true {
             let x = await f.next()
         }
         return 0
     })
     for i in 0..5 {
-        push(fs, async () => await f.next())
+        fs.push(async () => await f.next())
     }
-    push(fs, async () => {
+    fs.push(async () => {
         let x = await f.next()
         panic("one of the group failed")
         return x
     })
     let rs = await task.all(fs)
-    print(len(rs))
+    print(rs.len())
 }

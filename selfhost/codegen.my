@@ -15,10 +15,11 @@ from .tokens import no_span
 from std.num import f64_literal_bits, f32_round_bits
 from std.fs import current_dir
 from .loader import Span
-from .checker import Checker, Type, is_raw_memory_primitive, FuncSig, StructInfo, EnumInfo, FieldT, VariantT, Subst, subst_type, subst_get, opt_subst_type, CV, type_name, checker_on
+from .checker import CheckErr, Checker, Type, is_raw_memory_primitive, FuncSig, StructInfo, EnumInfo, FieldT, VariantT, Subst, subst_type, subst_get, opt_subst_type, CV, type_name, checker_on
 from .ir import render_func, verify, moves, IrFunc, Inst
 from .ssa import SsaStats, no_ssa_stats
 from .inline import inlinable, inline_calls, same_module, may_inline, merge_blocks
+from .hoist import hoist_cows
 from .anf import Norm, new_norm
 from .lower import lower_function, lower_lambda, blocked_types, Lowered, myla_runtime_function, derived_eq_ir, walk_ir, drop_entry_ir, dropb_slow_ir, list_drop_slow_ir, map_drop_slow_ir, clone_ir, deep_walk_ir, deep_cell_ir, Routine, Want, env_drop_ir, env_deep_ir
 import .ir_x86 as ir_x86
@@ -179,6 +180,10 @@ pub struct CodeGen {
     // emitted (`--ssa`), and what that did
     ssa: bool,
     ssa_stats: SsaStats,
+    // what the program can't be built for, which the lowering found once it
+    // knew an instance's types (MYLA-272): reported as type errors, and
+    // nothing more is emitted
+    refused: [CheckErr],
     ir_texts: [str],
     ir_blocked: [str],
     ir_ready: bool,
@@ -191,6 +196,11 @@ pub struct CodeGen {
     // per temporary, how to recompute it where it is read instead of keeping
     // it in a slot (`remat_texts`; "" for a temporary kept in its slot)
     temp_remat: [str],
+    // per float constant recomputed where it is read, its bits, which an
+    // %xmm register takes from the constant pool, or as 0 by `xorpd`
+    // (`float_const_into`, MYLA-249); and the pool's labels, by bits
+    temp_fconst: [int32: int64],
+    fconst_labels: [int64: str],
     // per temporary read from a variable where it is used, the variable's
     // operand (`-24(%rbp)`), else ""
     temp_src: [str],
@@ -321,8 +331,8 @@ pub fun new_codegen(c: Checker) -> CodeGen {
         debug: false, line_files: [], cur_file: 0, last_loc: "",
         dbg_fn: false, dbg_lines: [], dbg_types: [:], dbg_pending: [], dbg_scopes: [],
         dbg_fn_end: "", dbg_mark: "", dbg_n: 0, dbg_script: "",
-        keep_ir: false, wants_ftoa: false, inlining: true, inl_names: [], inl_bodies: [], inl_no: [:], ssa: false, ssa_stats: no_ssa_stats(), ir_texts: [], ir_blocked: [], ir_ready: false,
-        pend_store: "", pend_temp: -1, temp_uses: [], temp_remat: [], temp_src: [], temp_imm: [], temp_frame: [], temp_mem: [], temp_off: [],
+        keep_ir: false, wants_ftoa: false, inlining: true, inl_names: [], inl_bodies: [], inl_no: [:], ssa: false, ssa_stats: no_ssa_stats(), refused: [], ir_texts: [], ir_blocked: [], ir_ready: false,
+        pend_store: "", pend_temp: -1, temp_uses: [], temp_remat: [], temp_fconst: [:], fconst_labels: [:], temp_src: [], temp_imm: [], temp_frame: [], temp_mem: [], temp_off: [],
         temp_reg: [], slot_reg: [], saved_regs: [], in_frame: false, resume_blocks: [], frames: c.task_line > 0, norm: compiler_norm(), save_base: 0, arg_words: 0, frameless: false, kept_params: [:], keeping: [:], scan_kept: [], scan_args: [], owning: [:], no_owned: [], handed: handed, passed_on: passed_on, tag_enums: [:], a64: false, wasm: false, wasm_arity: [:], wasm_calls: [:], wasm_envs: [],
     }
 }
@@ -1953,6 +1963,8 @@ impl CodeGen {
         self.emit_drop_helpers()
         if self.uses_float && !self.a64 && !self.wasm { self.raw(self.fmod_text()) }
         if self.fn_seen.contains("std$rt$float_to_str") { self.raw("\t.set __float_to_str, myla_std$rt$float_to_str") }
+        // nothing to assemble for a refused program (MYLA-272)
+        if self.refused.len() > 0 { return "" }
         if self.wasm { return self.wasm_module(self.assemble_source()) }
         return self.assemble_source()
     }
@@ -2346,6 +2358,10 @@ impl CodeGen {
             Ok(x) => x
             Err(why) => { panic(format("internal error: {} can't be lowered to the IR: {}", mangled, why)) }
         }
+        if l.refused.len() > 0 {
+            for r in l.refused { self.refused.push(r) }
+            return l.f
+        }
         // a last use moves (MYLA-127), checked by the verifier with the rest;
         // calls to small leaf functions replaced by their bodies
         var f = moves(l.f)
@@ -2355,6 +2371,8 @@ impl CodeGen {
             // the copies' blocks joined to their neighbours
             if f.blocks.len() != n { f = merge_blocks(f) }
         }
+        // a loop's copy-on-write checks made before it (MYLA-251)
+        if !self.debug { f = hoist_cows(f) }
         let problem = verify(f)
         // with `--ssa`, the text shows each function after promotion instead
         if self.keep_ir && !self.ssa { self.ir_texts.push(render_func(f)) }
@@ -3361,7 +3379,7 @@ impl CodeGen {
     // (`myla_<its name>`) where the type `decl_id` is declared: checked,
     // its small leaf callees inlined, the functions it calls requested.
     fun emit_routine(var self, f: IrFunc, decl_id: int32, line: int32, col: int32) {
-        let g = self.take_ir(Ok(Lowered { f: f, lams: [], partials: [], fnvals: [] }), f.name)
+        let g = self.take_ir(Ok(Lowered { f: f, lams: [], partials: [], fnvals: [], refused: [] }), f.name)
         self.emit_ir_at(g, decl_id, line, col, f.name)
     }
 

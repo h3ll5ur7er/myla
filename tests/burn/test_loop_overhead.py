@@ -89,6 +89,91 @@ class LoopOverhead(unittest.TestCase):
         self.assertEqual(built.returncode, 0, built.stderr)
         self.assertEqual(subprocess.run([exe], capture_output=True, text=True).stdout, ran.stdout)
 
+    def test_the_copy_on_write_check_is_made_before_the_loop(self):
+        # MYLA-251: `composite[j] = true` in the sieve's inner loop checks
+        # once, before the loop, that the list is held once; the loop itself
+        # calls no copy
+        body = _function(self.asm(os.path.join(_REPO, "benchmarks", "sieve", "sieve.my")), "count_primes")
+        store = body.index("movb $1, ")
+        back = re.compile(r"\n\tj(?:l|ge|ne|e|b|ae|g|le) (\.L\d+)\n").search(body, store).group(1)
+        loop = body[body.index("\n" + back + ":\n"):body.index(back + "\n", store)]
+        self.assertIn("movb $1, ", loop)
+        self.assertNotIn("__clone_list", loop, loop)
+
+    def test_copies_on_write_around_loops_print_the_same(self):
+        # a list shared before the loop is still copied (once); a loop that
+        # shares it again, calls something or puts another list in its place
+        # keeps the check where it was
+        path = os.path.join(self.tmp.name, "cow.my")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(_COW_LOOPS)
+        myla = selfhost_tool("main")
+        ran = subprocess.run([myla, "run", path], capture_output=True, text=True)
+        self.assertEqual((ran.stdout, ran.returncode), (_COW_WANT, 0), ran.stderr)
+        exe = os.path.join(self.tmp.name, "cow")
+        built = subprocess.run([myla, "build", path, "-o", exe], capture_output=True, text=True)
+        self.assertEqual(built.returncode, 0, built.stderr)
+        self.assertEqual(subprocess.run([exe], capture_output=True, text=True).stdout, ran.stdout)
+
+
+_COW_LOOPS = """fun total(xs: [int]) -> int {
+    var t = 0
+    for x in xs {
+        t += x
+    }
+    return t
+}
+
+fun main() {
+    // shared before the loop: the loop's writes go to a copy
+    let kept = [1, 2, 3, 4]
+    var xs = kept
+    var i = 0
+    while i < 4 {
+        xs[i] = xs[i] * 10
+        i += 1
+    }
+    print(total(kept))
+    print(total(xs))
+    // shared again in the loop: each turn's writes go to a copy of that turn
+    var ys = [1, 1, 1]
+    var olds: [[int]] = []
+    var j = 0
+    while j < 3 {
+        olds.push(ys)
+        ys[j] = 5
+        j += 1
+    }
+    print(total(olds[0]))
+    print(total(olds[2]))
+    print(total(ys))
+    // shared with another variable in the loop
+    var zs = [0, 0]
+    var keep: [int] = []
+    var k = 0
+    while k < 2 {
+        zs[k] = k + 7
+        keep = zs
+        k += 1
+    }
+    zs[0] = 100
+    print(total(keep))
+    print(total(zs))
+    // another list put in its place in the loop
+    var ws = [1, 2]
+    var m = 0
+    while m < 3 {
+        ws[0] = m
+        ws = [ws[0] + 10, ws[1]]
+        m += 1
+    }
+    print(ws[0])
+    print(ws[1])
+}
+"""
+
+_COW_WANT = "10\n100\n3\n11\n15\n15\n108\n12\n2\n"
+
 
 if __name__ == "__main__":
     unittest.main()

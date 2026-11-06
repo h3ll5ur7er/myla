@@ -68,13 +68,10 @@ fun main() {
     bag.add(5)
     print(bag.count())
     print(Word { text: "hey" }.len())
-    // the function forms still work
-    push(xs, 7)
-    print(len(xs))
 }
 """
 
-_WANT = "3\n3\n2\ntrue\n1\n1\n5\n6\n5\nabyz!\n4\n103\n3\n"
+_WANT = "3\n3\n2\ntrue\n1\n1\n5\n6\n5\nabyz!\n4\n103\n"
 
 
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
@@ -105,7 +102,19 @@ class BuiltinMethods(unittest.TestCase):
         cases = {
             "immutable": ("fun main() {\n    let xs = [1]\n    xs.push(2)\n}\n", "type error"),
             "wrong_type": ("fun main() {\n    let s = \"a\"\n    print(s.keys())\n}\n", "type 'str' has no method 'keys'"),
-            "arity": ("fun main() {\n    var xs = [1]\n    xs.push()\n}\n", "type error"),
+            "arity": ("fun main() {\n    var xs = [1]\n    xs.push()\n}\n", "push() takes 1 argument"),
+            # what the function forms' argument errors were (MYLA-221): the
+            # receiver isn't counted, and a type without the method lacks it
+            "no_arguments": ("fun main() {\n    let c = \"a\".chars(1)\n}\n", "chars() takes no arguments"),
+            "append_arity": ("fun main() {\n    var sb = StringBuilder()\n    sb.append()\n}\n",
+                             "append() takes 1 or 3 arguments"),
+            "push_onto_a_call": ("fun g() -> [int] {\n    return [1]\n}\n\nfun main() {\n    g().push(1)\n}\n",
+                                 "invalid assignment target"),
+            "contains_on_a_list": ("fun main() {\n    let b = [1].contains(1)\n}\n",
+                                   "type '[int32]' has no method 'contains'"),
+            "remove_from_a_let": ("fun main() {\n    let m = [1: 2]\n    m.remove(1)\n}\n",
+                                  "remove() needs a mutable map (declare it with 'var')"),
+            "len_of_an_int": ("fun main() {\n    let n = 1.len()\n}\n", "type 'int32' has no method 'len'"),
         }
         for name, (src, want) in cases.items():
             with self.subTest(case=name):
@@ -114,6 +123,25 @@ class BuiltinMethods(unittest.TestCase):
                                       text=True)
                 self.assertEqual(proc.returncode, 1, proc.stderr)
                 self.assertIn(want, proc.stderr)
+
+    def test_the_function_forms_are_gone(self):
+        # MYLA-221, D103: a builtin that is a method is called as one; its
+        # function form is an error naming the method
+        cases = {
+            "push": ("fun main() {\n    var xs = [1]\n    push(xs, 2)\n}\n",
+                     "'push' is a method: call it as 'x.push(…)'"),
+            "len": ("fun main() {\n    print(len([1]))\n}\n", "'len' is a method: call it as 'x.len()'"),
+            "build": ("fun main() {\n    var sb = StringBuilder()\n    print(build(sb))\n}\n",
+                      "'build' is a method: call it as 'x.build()'"),
+        }
+        for name, (src, want) in cases.items():
+            with self.subTest(case=name):
+                path = self.write(name + ".my", src)
+                proc = subprocess.run([self.myla, "check", path, "--stdlib", STDLIB_ROOT], capture_output=True,
+                                      text=True)
+                self.assertEqual(proc.returncode, 1, proc.stderr)
+                self.assertIn("type error: " + want, proc.stderr)
+                self.assertIn(f"{name}.my:", proc.stderr)
 
     def test_a_mutating_method_changes_an_actor_field(self):
         # D95: a field checked before an `await` and changed after it, by the

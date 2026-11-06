@@ -347,10 +347,10 @@ PROGRAMS = {
         "        let push = (s: str) => { print(s + \"!\") }\n"
         "        push(\"pushed\")\n"
         "    }\n"
-        "    print(len(\"abc\"))\n"
+        "    print(\"abc\".len())\n"
         "    var xs = [1]\n"
-        "    push(xs, 2)\n"
-        "    print(len(xs))\n"
+        "    xs.push(2)\n"
+        "    print(xs.len())\n"
         "}\n"
     ),
     # MYLA-102: a local binding shadows a top-level function of the same name
@@ -3386,7 +3386,7 @@ STRESS_TRY_AFTER_STAGED_VALUE_SRC = (
     "    return Ok(xs.len())\n}\n"
     "fun by_holder(i: int) -> Result<int, str> {\n"
     "    var xss: [[[int]]] = [[]]\n"
-    f"    push(xss[fail(i)?], {_BIG_LIST})\n"
+    f"    xss[fail(i)?].push({_BIG_LIST})\n"
     "    return Ok(xss.len())\n}\n"
     "#main\nfun main() {\n"
     "    var fails = 0\n"
@@ -3813,6 +3813,9 @@ PINNED = {
     # (a float prints in plain digits: the largest double has 309)
     "float64_overflow_gives_infinity": "inf\n-inf\n350000000000000000000000000000000000000\nnan\n"
                                        + "17976931348623157" + "0" * 292 + "\n",
+    # the builtins outside the closures' scope are methods since MYLA-221;
+    # the output is the recording's
+    "local_closure_shadows_a_builtin": "42\n7\n3\npushed!\n3\n2\n",
 }
 
 

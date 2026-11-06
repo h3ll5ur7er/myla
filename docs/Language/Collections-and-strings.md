@@ -29,10 +29,10 @@ fun main() {
 | --- | --- |
 | `[a, b, c]` | Elements unify to one type; an expected element type flows into the literals (`let b: [uint8] = [1, 2]`) |
 | `[]` | Needs an expected type |
-| `len(xs)` | `int` |
+| `xs.len()` | `int` |
 | `xs[i]` | Any integer index; out of bounds is a runtime error |
 | `xs[i] = v` | Needs a `var` place |
-| `push(xs, v)`, `pop(xs)` | Built-in functions (not methods); need a `var` place; `pop` returns the last element, and popping an empty list is a runtime error |
+| `xs.push(v)`, `xs.pop()` | Need a `var` place; `pop` returns the last element, and popping an empty list is a runtime error |
 | `for x in xs` | Visits a snapshot of the elements |
 
 ## Slices and indexes from the end
@@ -61,7 +61,7 @@ fun main() {
 
 - A slice's bounds are clamped to the list, so a slice never fails: `xs[2:99]` is the rest, `xs[5:2]` is empty, and a plain negative bound is before the start (only `^` counts from the end). A single index out of range is still an error, `xs[^0]` and `xs[^6]` of five elements too (D143).
 - The step is a signed integer, not 0 (`slice step is zero` when the program runs). With a negative step the bounds left out are the end and the start, as in Python: `xs[^1:0:-2]` is `[50, 30]`.
-- A `str` is sliced by bytes, as `s[i]` and `len(s)` count them: a slice whose bound falls inside a character is a runtime error (`a slice bound inside a character`), and with a step other than 1 every byte taken must be a whole character (ASCII).
+- A `str` is sliced by bytes, as `s[i]` and `s.len()` count them: a slice whose bound falls inside a character is a runtime error (`a slice bound inside a character`), and with a step other than 1 every byte taken must be a whole character (ASCII).
 - `xs[^1] = v` assigns as any index does; a slice is a value to read: assigning to one (`xs[1:3] = ys`) isn't part of the language yet. Maps have no slices.
 
 ## Maps
@@ -98,7 +98,7 @@ fun main() {
 
 ## Methods of the builtin types
 
-The builtin collection and string functions are methods of their first argument (D103, [[MYLA-221]]): `xs.push(v)` is `push(xs, v)`.
+The builtin collection and string operations are methods (D103, [[MYLA-221]]).
 
 | Method | Of |
 | --- | --- |
@@ -108,7 +108,7 @@ The builtin collection and string functions are methods of their first argument 
 | `chars()` | strings |
 | `append(s)`, `append(s, start, end)`, `append_byte(b)`, `build()` | `StringBuilder` (`append`, `append_byte`: a `var` place) |
 
-A type's own method of the same name (`impl str { fun len(self) … }`) comes first, and a local named `chars` doesn't hide `s.chars()`. The function forms still work while the repository moves to the methods; then they go (D103).
+A type's own method of the same name (`impl str { fun len(self) … }`) comes first, and a local named `chars` doesn't hide `s.chars()`. They have no function form: `push(xs, v)` is the error "'push' is a method: call it as 'x.push(…)'" (the function forms went once the repository had moved, D103; `scripts/to_methods.py` rewrites a file). The names stay reserved, so a program can't declare a function `push` of its own, but a local closure of that name is called as one.
 
 ## Value semantics and copy-on-write
 
@@ -120,11 +120,11 @@ Lists, maps and builders behave like every other value: `let b = a` makes an ind
 
 | Operation | Result |
 | --- | --- |
-| `len(s)` | Number of **bytes** |
+| `s.len()` | Number of **bytes** |
 | `s[i]` | The byte at `i`, as a `uint8`; out of bounds is a runtime error; strings can't be assigned into |
 | `a + b` | A new string |
 | `a == b`, `a != b` | Byte-wise equality; there is no `<` on strings |
-| `chars(s)` | `[char]`, one element per Unicode scalar; each byte that isn't part of a well-formed UTF-8 sequence (a stray or truncated byte, an overlong form, an encoded surrogate) gives U+FFFD |
+| `s.chars()` | `[char]`, one element per Unicode scalar; each byte that isn't part of a well-formed UTF-8 sequence (a stray or truncated byte, an overlong form, an encoded surrogate) gives U+FFFD |
 | `format("{} of {}", a, b)` | See below |
 
 Byte comparisons with ASCII char literals type-check directly: `if s[i] == ' ' { … }`.
@@ -222,9 +222,9 @@ fun main() {
 // a, b, c
 ```
 
-`StringBuilder()` creates an empty builder (it takes no arguments); `append(sb, s)` and `append_byte(sb, b: uint8)` add to it (a `var` place is needed); `len(sb)` is its byte length; `build(sb)` returns a new `str`. Use it instead of `+` in loops, which copies the whole string each time.
+`StringBuilder()` creates an empty builder (it takes no arguments); `sb.append(s)` and `sb.append_byte(b: uint8)` add to it (a `var` place is needed); `sb.len()` is its byte length; `sb.build()` returns a new `str`. Use it instead of `+` in loops, which copies the whole string each time.
 
-`append(sb, s, start, end)` adds the bytes of `s` from `start` up to `end` (both `int32`), which is how to take part of a string ([[MYLA-85]]). The range must lie within `s` (`0 <= start <= end <= len(s)`), else it is a runtime error, like an index out of bounds. A range may split a multi-byte character; the bytes are kept, and joined again they make the same string.
+`sb.append(s, start, end)` adds the bytes of `s` from `start` up to `end` (both `int32`), which is how to take part of a string ([[MYLA-85]]). The range must lie within `s` (`0 <= start <= end <= s.len()`), else it is a runtime error, like an index out of bounds. A range may split a multi-byte character; the bytes are kept, and joined again they make the same string.
 
 ```myla
 fun substring(s: str, start: int, end: int) -> str {

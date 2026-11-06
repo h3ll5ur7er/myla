@@ -21,7 +21,7 @@ Then:
 
 Also track [[MYLA-250]]'s follow-ups:
 - [ ] A parameter kept in the register it came in
-- [ ] A generic `become` counting a type parameter as one word, which could end in an internal error (a latent bug, [[MYLA-250]])
+- [x] A generic `become` counting a type parameter as one word, which could end in an internal error (a latent bug, [[MYLA-250]]) (2026-11-06: reproduced, `start<T>(x: T, n)` doing `become sum(x, n)` with `T = Big` of seven words stopped `myla build` with "internal error: a tail call with 2 argument words on the stack in a function that received 0"; the lowering now counts the instance's words in a `become` and refuses one passing too many with the checker's type error at the `become`, a note naming the type arguments, on all three targets, and nothing more is built. `test_register_args.test_a_generic_become_counts_the_instance`, which also builds the same program with only `T = int`)
 
 ## Decided (2026-11-05)
 

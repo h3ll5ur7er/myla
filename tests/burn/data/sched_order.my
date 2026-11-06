@@ -30,9 +30,9 @@ async fun main() {
     var fs: [async () -> int] = []
     for i in 0..5 {
         let k = i
-        push(fs, async () => await leaf(f"f{k}", k % 2))
+        fs.push(async () => await leaf(f"f{k}", k % 2))
     }
     let r = await task.all(fs)
-    print(len(r))
+    print(r.len())
     print(await node("n", 3))
 }

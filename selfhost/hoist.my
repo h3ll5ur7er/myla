@@ -1,0 +1,392 @@
+// hoist.my: the copy-on-write check of a list written in a loop, made once
+// before the loop (MYLA-251).
+//
+// `xs[i] = v` in a loop is `cow [T] [addr $xs]` (make the list held once,
+// copying it if it is shared), then the element's address and the store,
+// every turn. Once the first turn has made the list unique, nothing in a loop
+// that can't share it again or put another list in its place changes that,
+// so the check is needed only before the loop: one `cow` goes into the block
+// the loop is entered from, and what read each `cow` in the loop reads its
+// result instead. A loop is the blocks from one a jump goes back to up to that
+// jump, in the order they were emitted (`loop_depths`'s rule); it qualifies
+// when only its first block is entered from outside it, from one block, and
+// nothing in it calls anything or uses the list's slot except to read its
+// elements and length and to write them through the `cow`. A `cow` moved
+// before a loop that runs no turn copies a shared list nobody writes, which
+// no program can see.
+
+from .ir import IrFunc, IrBlock, Inst, Term, successors, inst_uses, term_uses
+from .checker import Type
+from .ssa import rename_uses, rename_term
+
+// `f` with each qualifying loop's copy-on-write checks made before it,
+// inner loops first and then again outwards, as each move can let the loop
+// around qualify too.
+pub fun hoist_cows(f0: IrFunc) -> IrFunc {
+    if f0.frame || !has_cow(f0) { return f0 }
+    var f = f0
+    var round = 0
+    while round < 4 {
+        let next = hoist_round(f)
+        if !next.1 { return next.0 }
+        f = next.0
+        round = round + 1
+    }
+    return f
+}
+
+// Whether `f` has a `cow` at all (most functions have none).
+fun has_cow(f: IrFunc) -> bool {
+    for b in f.blocks {
+        for inst in b.insts {
+            match inst {
+                Inst.Cow(d, t, h) => { return true },
+                _ => {},
+            }
+        }
+    }
+    return false
+}
+
+// The slot each temporary holds the address of (`addr`), else -1.
+fun addr_slots(f: IrFunc) -> [int32] {
+    var out: [int32] = []
+    for t in f.temps { out.push(-1) }
+    for b in f.blocks {
+        for inst in b.insts {
+            match inst {
+                Inst.Addr(d, s) => { out[d] = s },
+                _ => {},
+            }
+        }
+    }
+    return out
+}
+
+// One pass over the loops; whether anything moved.
+fun hoist_round(f0: IrFunc) -> (IrFunc, bool) {
+    var f = f0
+    let n = f.blocks.len()
+    var at: [int32] = []
+    var preds: [[int32]] = []
+    for b in f.blocks {
+        at.push(-1)
+        preds.push([])
+    }
+    var k = 0
+    while k < f.order.len() {
+        at[f.order[k]] = k
+        k = k + 1
+    }
+    var b = 0
+    while b < n {
+        if at[b] >= 0 {
+            for s in successors(f.blocks[b].term) { preds[s].push(b) }
+        }
+        b = b + 1
+    }
+    // the loops, innermost (shortest) first: (first position, last position)
+    var loops: [(int32, int32)] = []
+    k = 0
+    while k < f.order.len() {
+        for s in successors(f.blocks[f.order[k]].term) {
+            if at[s] >= 0 && at[s] <= k { loops.push((at[s], k)) }
+        }
+        k = k + 1
+    }
+    loops = by_length(loops)
+    var moved = false
+    // the slot of each temporary holding one's address, kept up to date as
+    // the moves add temporaries
+    var slot_of = addr_slots(f)
+    for lp in loops {
+        let r = hoist_loop(f, at, preds, slot_of, lp.0, lp.1)
+        if r.1.len() > 0 {
+            f = r.0
+            while slot_of.len() < f.temps.len() { slot_of.push(-1) }
+            for added in r.1 { slot_of[added.0] = added.1 }
+            moved = true
+        }
+    }
+    return (f, moved)
+}
+
+// The loops `lps` (first, last position), shortest first.
+#test([(0, 5), (2, 3), (1, 4)])[[(2, 3), (1, 4), (0, 5)]]
+fun by_length(lps: [(int32, int32)]) -> [(int32, int32)] {
+    var out = lps
+    var i = 1
+    while i < out.len() {
+        var j = i
+        while j > 0 && out[j].1 - out[j].0 < out[j - 1].1 - out[j - 1].0 {
+            let t = out[j]
+            out[j] = out[j - 1]
+            out[j - 1] = t
+            j = j - 1
+        }
+        i = i + 1
+    }
+    return out
+}
+
+// The loop of the blocks at positions `lo`..`hi`, its `cow`s moved before it
+// where it qualifies; the address temporaries the moves added, with their
+// slots (none: nothing moved).
+fun hoist_loop(f0: IrFunc, at: [int32], preds: [[int32]], slot_of: [int32], lo: int32, hi: int32) -> (IrFunc, [(int32, int32)]) {
+    var f = f0
+    let head = f.order[lo]
+    var inside: [bool] = []
+    for b in f.blocks { inside.push(false) }
+    var k = lo
+    while k <= hi {
+        inside[f.order[k]] = true
+        k = k + 1
+    }
+    // entered at its first block only, from one block outside it
+    var entry = -1
+    k = lo
+    while k <= hi {
+        let b = f.order[k]
+        for p in preds[b] {
+            if !inside[p] {
+                if b != head || entry >= 0 { return (f, []) }
+                entry = p
+            }
+        }
+        k = k + 1
+    }
+    if entry < 0 { return (f, []) }
+    // the slots a `cow` in the loop takes the address of; none in a loop
+    // that calls anything (most loops that do much), which can't qualify
+    var slots: [int32] = []
+    k = lo
+    while k <= hi {
+        for inst in f.blocks[f.order[k]].insts {
+            match inst {
+                Inst.Cow(d, t, h) => {
+                    let s = slot_of[h]
+                    if s >= 0 && !has(slots, s) { slots.push(s) }
+                },
+                Inst.Call(d, name, args) => { return (f, []) },
+                Inst.CallSret(name, r, args) => { return (f, []) },
+                Inst.CallInd(d, fv, args) => { return (f, []) },
+                Inst.CallIndSret(fv, r, args) => { return (f, []) },
+                Inst.Rt(d, name, args) => { return (f, []) },
+                Inst.RtPair(d, d2, name, args) => { return (f, []) },
+                _ => {},
+            }
+        }
+        k = k + 1
+    }
+    var added: [(int32, int32)] = []
+    for s in slots {
+        if only_reads_and_cows(f, slot_of, lo, hi, s) {
+            f = move_cows(f, slot_of, lo, hi, s, entry)
+            // the address temporary it added (the next to last)
+            added.push((f.temps.len() - 2, s))
+        }
+    }
+    return (f, added)
+}
+
+// Whether the loop at `lo`..`hi` leaves the list in slot `s` held once
+// after its first `cow`: it calls nothing, writes no other list into `s`
+// (no store, append, pop, drop, move), and the temporaries holding the
+// slot's address or its list (`addr`, `load`, `cow` and copies of them)
+// are only the list a `cow`, an element's address or a length read take.
+fun only_reads_and_cows(f: IrFunc, slot_of: [int32], lo: int32, hi: int32, s: int32) -> bool {
+    // the temporaries derived from the slot: its address, its list
+    var derived: [bool] = []
+    for t in f.temps { derived.push(false) }
+    var changed = true
+    while changed {
+        changed = false
+        var k = lo
+        while k <= hi {
+            for inst in f.blocks[f.order[k]].insts {
+                var mark = -1
+                match inst {
+                    Inst.Addr(d, sl) => { if sl == s { mark = d } },
+                    Inst.Load(d, sl) => { if sl == s { mark = d } },
+                    Inst.Cow(d, t, h) => { if derived[h] || slot_of[h] == s { mark = d } },
+                    Inst.Mov(d, a) => { if derived[a] { mark = d } },
+                    _ => {},
+                }
+                if mark >= 0 && !derived[mark] {
+                    derived[mark] = true
+                    changed = true
+                }
+            }
+            k = k + 1
+        }
+    }
+    var k = lo
+    while k <= hi {
+        let blk = f.blocks[f.order[k]]
+        for inst in blk.insts {
+            match inst {
+                Inst.Call(d, name, args) => { return false },
+                Inst.CallSret(name, r, args) => { return false },
+                Inst.CallInd(d, fv, args) => { return false },
+                Inst.CallIndSret(fv, r, args) => { return false },
+                Inst.Rt(d, name, args) => { return false },
+                Inst.RtPair(d, d2, name, args) => { return false },
+                Inst.Store(sl, v) => { if sl == s || derived[v] { return false } },
+                Inst.DropSlot(t, sl) => { if sl == s { return false } },
+                Inst.Moved(sl) => { if sl == s { return false } },
+                Inst.Init(sl) => { if sl == s { return false } },
+                // what may take the slot's address or its list
+                Inst.Cow(d, t, h) => {},
+                Inst.Mov(d, a) => {},
+                Inst.Elem(d, c, i, stride, is_str, pos) => { if derived[i] { return false } },
+                Inst.LoadAt(d, p, off, width) => {},
+                _ => {
+                    for u in inst_uses(inst) {
+                        if derived[u] { return false }
+                    }
+                },
+            }
+        }
+        for u in term_uses(blk.term) {
+            if derived[u] { return false }
+        }
+        k = k + 1
+    }
+    return true
+}
+
+// `f` with one `cow` of slot `s`'s list in the block `entry`, and the
+// results of those of it in the loop at `lo`..`hi` that one's.
+fun move_cows(f0: IrFunc, slot_of: [int32], lo: int32, hi: int32, s: int32, entry: int32) -> IrFunc {
+    var f = f0
+    // the types: those of a `cow` in the loop and of its address
+    var list_t = f.temps[0]
+    var addr_t = f.temps[0]
+    var found = false
+    var k = lo
+    while k <= hi && !found {
+        for inst in f.blocks[f.order[k]].insts {
+            match inst {
+                Inst.Cow(d, t, h) => {
+                    if !found && slot_of[h] == s {
+                        list_t = f.temps[d]
+                        addr_t = f.temps[h]
+                        found = true
+                    }
+                },
+                _ => {},
+            }
+        }
+        k = k + 1
+    }
+    let a = f.temps.len()
+    f.temps.push(addr_t)
+    let c = f.temps.len()
+    f.temps.push(list_t)
+    // each `cow` in the loop goes, what reads its result reading the new one
+    var cow_t = list_t
+    var to: [int32] = []
+    for t in f.temps { to.push(-1) }
+    k = lo
+    while k <= hi {
+        let bi = f.order[k]
+        var out: [Inst] = []
+        for inst in f.blocks[bi].insts {
+            var gone = false
+            match inst {
+                Inst.Cow(d, t, h) => {
+                    if slot_of[h] == s {
+                        to[d] = c
+                        cow_t = t
+                        gone = true
+                    }
+                },
+                _ => {},
+            }
+            if !gone { out.push(inst) }
+        }
+        f.blocks[bi].insts = out
+        k = k + 1
+    }
+    // read only in the loop: a `cow`'s result is a temporary of its own,
+    // which the statement that made it reads, and a statement of a loop that
+    // calls nothing ends in the loop
+    k = lo
+    while k <= hi {
+        let bi = f.order[k]
+        var out: [Inst] = []
+        for inst in f.blocks[bi].insts { out.push(rename_uses(inst, to)) }
+        f.blocks[bi].insts = out
+        f.blocks[bi].term = rename_term(f.blocks[bi].term, to)
+        k = k + 1
+    }
+    // after the last instruction of the block that touches the slot or calls
+    // anything: a `cow` changes nothing a program sees, so it may come before
+    // the rest, which keeps a comparison next to the branch it feeds
+    let insts = f.blocks[entry].insts
+    var at = 0
+    var i = 0
+    while i < insts.len() {
+        if touches(insts[i], s) { at = i + 1 }
+        i = i + 1
+    }
+    var out: [Inst] = []
+    i = 0
+    while i < insts.len() {
+        if i == at {
+            out.push(Inst.Addr(a, s))
+            out.push(Inst.Cow(c, cow_t, a))
+        }
+        out.push(insts[i])
+        i = i + 1
+    }
+    if at == insts.len() {
+        out.push(Inst.Addr(a, s))
+        out.push(Inst.Cow(c, cow_t, a))
+    }
+    f.blocks[entry].insts = out
+    return f
+}
+
+// Whether `inst` reads or writes the slot `s`, or calls something (which
+// could), so a `cow` of `s` moved into its block goes after it.
+#test(Inst.Store(1, 4), 1)[true]
+#test(Inst.Store(2, 4), 1)[false]
+#test(Inst.Call(-1, "f", []), 1)[true]
+#test(Inst.Const(3, Type.TBool, 1), 1)[false]
+fun touches(inst: Inst, s: int32) -> bool {
+    return match inst {
+        Inst.Store(sl, v) => sl == s
+        Inst.Load(d, sl) => sl == s
+        Inst.Addr(d, sl) => sl == s
+        Inst.Init(sl) => sl == s
+        Inst.DropSlot(t, sl) => sl == s
+        Inst.Moved(sl) => sl == s
+        Inst.Bind(name, sl) => sl == s
+        Inst.Call(d, name, args) => true
+        Inst.CallSret(name, r, args) => true
+        Inst.CallInd(d, fv, args) => true
+        Inst.CallIndSret(fv, r, args) => true
+        Inst.Rt(d, name, args) => true
+        Inst.RtPair(d, d2, name, args) => true
+        Inst.Cow(d, t, h) => true
+        Inst.Append(d, h, c, stride) => true
+        Inst.Pop(d, c, stride, pos) => true
+        Inst.Copy(d, src, size) => true
+        Inst.StoreAt(p, off, v, width) => true
+        Inst.Retain(t, p) => true
+        Inst.RetainVal(t, v) => true
+        Inst.Scope(open) => true
+        Inst.Frame(d) => true
+        _ => false
+    }
+}
+
+#test([1, 2], 2)[true]
+#test([1, 2], 3)[false]
+fun has(xs: [int32], x: int32) -> bool {
+    for y in xs {
+        if y == x { return true }
+    }
+    return false
+}

@@ -51,7 +51,7 @@ async fun main() {
     let r = Resource { done: [0, 0, 0, 0, 0, 0, 0, 0], greedy: 0, singles: 0, stop: false }
     var fs: [async () -> int] = []
     for w in 0..8 {
-        push(fs, async () => await worker(r, w))
+        fs.push(async () => await worker(r, w))
     }
     let rs = await task.all(fs)
     var full = 0
@@ -62,9 +62,9 @@ async fun main() {
     async let g = greedy(r)
     var singles: [async () -> int] = []
     for k in 0..50 {
-        push(singles, async () => await r.single())
+        singles.push(async () => await r.single())
     }
     let ss = await task.all(singles)
     let turns = await g
-    print(f"singles done {len(ss)}, greedy stopped")
+    print(f"singles done {ss.len()}, greedy stopped")
 }

@@ -80,6 +80,9 @@ impl CodeGen {
     // Emit `f` as `myla_<mangled>`: a function or lambda declared by the node
     // `decl_id` (its file) at `line:col`.
     fun emit_ir_at(var self, f0: IrFunc, decl_id: int32, line: int32, col: int32, mangled: str) {
+        // a program refused for a `become` of an instance (MYLA-272) builds
+        // nothing more: its type errors are what it gets
+        if self.refused.len() > 0 { return }
         // D123's prototype: the scalar slots promoted first (`--ssa`; not
         // under -g, whose debugger reads variables from their slots)
         var f = f0
@@ -574,6 +577,8 @@ impl CodeGen {
                     if home != "" {
                         if self.pend_store != "" { self.flush_temp_in_rax() }
                         if home != "%" + sr { self.emit(format("movapd {}, %{}", home, sr)) }
+                    } else if self.float_const_into(v, "%" + sr) {
+                        // a constant straight from the pool (MYLA-249)
                     } else {
                         self.load_temp(v, "rax", temp_base)
                         self.emit(format("movq %rax, %{}", sr))
@@ -1806,6 +1811,7 @@ impl CodeGen {
     // (MYLA-108); "" for the other temporaries.
     fun remat_texts(var self, f: IrFunc, slot_off: [int32], defs: [int32]) -> [str] {
         var out: [str] = []
+        self.temp_fconst = [:]
         var src: [str] = []
         var imm: [str] = []
         var frame: [int32] = []
@@ -1846,7 +1852,15 @@ impl CodeGen {
             while i < b.insts.len() {
                 let inst = b.insts[i]
                 match inst {
-                    Inst.Const(d, t, v) => { if defs[d] == 1 { out[d] = self.def_text(inst, slot_off) } },
+                    Inst.Const(d, t, v) => {
+                        if defs[d] == 1 {
+                            out[d] = self.def_text(inst, slot_off)
+                            match t {
+                                Type.TFloat(w) => { self.temp_fconst[d] = v },
+                                _ => {},
+                            }
+                        }
+                    },
                     Inst.Str(d, text) => { if defs[d] == 1 { out[d] = self.def_text(inst, slot_off) } },
                     Inst.Addr(d, sl) => { if defs[d] == 1 { out[d] = self.def_text(inst, slot_off) } },
                     Inst.Label(d, sym) => { if defs[d] == 1 { out[d] = self.def_text(inst, slot_off) } },
@@ -2529,6 +2543,7 @@ impl CodeGen {
     fun xmm_in(var self, t: int32, gpr: str, xmm: str, temp_base: int32) -> str {
         let home = self.xmm_home(t)
         if home != "" { return home }
+        if self.float_const_into(t, "%" + xmm) { return "%" + xmm }
         let r = self.reg_of(t)
         if r != "" && self.temp_remat[t] == "" {
             self.emit(format("movq {}, %{}", r, xmm))   // a general-purpose register
@@ -2537,6 +2552,32 @@ impl CodeGen {
         self.load_temp(t, gpr, temp_base)
         self.emit(format("movq %{}, %{}", gpr, xmm))
         return "%" + xmm
+    }
+
+    // The float constant `t` (one recomputed where it is read) into the
+    // %xmm register `xmm` (MYLA-249): +0.0 by `xorpd`, any other from the
+    // constant pool, instead of through a general-purpose register; false
+    // when `t` is no such constant.
+    fun float_const_into(var self, t: int32, xmm: str) -> bool {
+        if self.temp_remat[t] == "" || !self.temp_fconst.contains(t) { return false }
+        let bits = self.temp_fconst[t]
+        if self.pend_store != "" { self.flush_temp_in_rax() }
+        if bits == 0 {
+            self.emit(format("xorpd {}, {}", xmm, xmm))
+            return true
+        }
+        self.emit(format("movsd {}(%rip), {}", self.fconst_label(bits), xmm))
+        return true
+    }
+
+    // The constant pool's label for the float bits `bits`, made the first
+    // time, in .rodata.
+    fun fconst_label(var self, bits: int64) -> str {
+        if self.fconst_labels.contains(bits) { return self.fconst_labels[bits] }
+        let lab = format(".Lfc{}", self.fconst_labels.len())
+        self.fconst_labels[bits] = lab
+        self.rodata.push(format("\t.p2align 3\n{}:\n\t.quad {}", lab, bits))
+        return lab
     }
 
     // %xmm0, a float result, into the temporary `d`: moved into its %xmm

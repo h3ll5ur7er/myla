@@ -13,7 +13,7 @@ Found by the benchmarks ([[MYLA-242]]): in the string programs the runtime's rou
 Myla runs fewer instructions than C with Myla's semantics there (its allocator is cheaper than `malloc`), but takes 1.6× and 2.9× the time.
 
 - [x] Where the time goes per routine (a byte loop where a block copy would do, growth policy of builders, writing digits)
-- [ ] An f-string's pieces formatted straight into one string instead of concatenated pair by pair
+- [x] An f-string's pieces formatted straight into one string instead of concatenated pair by pair (2026-11-06)
 - [x] Measured: string building and word frequency
 
 ## Evidence
@@ -27,3 +27,4 @@ Myla runs fewer instructions than C with Myla's semantics there (its allocator i
   - Their instruction counts rose (the loop's instructions were one `rep movsb` before), and the time fell.
 - **Left for later:** an f-string's pieces are still formatted and concatenated pair by pair; with string building already ahead of C, it is no longer what limits it.
 - The bootstrap reaches its fixed point; the burn suite passes (896 tests).
+- **The f-string's pieces (2026-11-06).** Each hole was two concatenations, one for its text and one for the literal after it, even an empty one: `f"{key}={x};"` made four new strings. Now the pieces are collected (empty literals left out) and joined up to four at a time, each group one new string (`std.rt`'s `str_concat`, and the new `str_concat3` and `str_concat4`; `join_strs` in [[selfhost/lower.my]]); a lone hole is its text. That f-string makes one string. `string_build` (2000000 records, the median of 9 runs, built before and after with the self-hosted compiler of the same commit otherwise): 403 → 275 ms (1.47× as fast), and 146.7 → 92.9 million instructions at its profile size (callgrind); the same output. `test_byte_copies`, `test_format_specs`, the parity and stress programs pass.

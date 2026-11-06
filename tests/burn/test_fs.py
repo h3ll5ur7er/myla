@@ -95,7 +95,7 @@ class TestReadToStringParity(unittest.TestCase):
             "from std.fs import read_to_string, IoError\n"
             "fun main() {\n"
             f'    match read_to_string("{POEM}") {{\n'
-            "        Ok(s) => print(len(s)),\n"
+            "        Ok(s) => print(s.len()),\n"
             "        Err(e) => print(-1),\n"
             "    }\n"
             "}\n",

@@ -16,10 +16,10 @@ actor Store {
 
 impl Store {
     fun churn(var self) {
-        if len(self.xs) > 200 {
+        if self.xs.len() > 200 {
             self.xs = []
         }
-        push(self.xs, 1)
+        self.xs.push(1)
     }
 
     async fun peek(self) -> bool {
@@ -28,7 +28,7 @@ impl Store {
         async let b = total(xs)
         let ta = await a
         let tb = await b
-        return ta == tb && ta == len(xs)
+        return ta == tb && ta == xs.len()
     }
 }
 

@@ -435,9 +435,9 @@ fun if_str(c: bool, a: str, b: str) -> str {
 fun t_int() -> Type { return Type.TInt(32, true) }
 #test()[Type.TInt(8, false)]
 fun t_byte() -> Type { return Type.TInt(8, false) }
-#test()[Type.TFloat(32)]
 // `float`, and a float literal without a suffix: a double (D102, MYLA-220;
 // D19 made it `float32`)
+#test()[Type.TFloat(64)]
 fun t_float() -> Type { return Type.TFloat(64) }
 
 // --- equality ------------------------------------------------------------
@@ -500,7 +500,7 @@ fun root_name(e: Expr) -> str {
 }
 
 // The argument words that travel in registers (D119, System V on x86-64).
-const REG_ARG_WORDS: int32 = 6
+pub const REG_ARG_WORDS: int32 = 6
 
 // Whether `t` is passed by its address, or its words by value: a struct,
 // tuple, enum or function value.
@@ -1753,12 +1753,15 @@ impl Checker {
         for v in ["Some", "None", "Ok", "Err"] { out.push(v) }
         return out
     }
-    // The names a call can name (types.py: _callable_names).
-    #test(checker_on("[int]"))[["print", "assert", "panic", "unreachable", "len", "push", "pop", "contains", "remove", "keys", "format", "chars", "StringBuilder", "append", "append_byte", "build"]]
+    // The names a call can name (types.py: _callable_names): not the
+    // builtins that are methods (MYLA-221).
+    #test(checker_on("[int]"))[["print", "assert", "panic", "unreachable", "format", "StringBuilder"]]
     fun callable_names(self) -> [str] {
         var out: [str] = []
         for f in self.functions { out.push(f.name) }
-        for b in builtin_func_names() { out.push(b) }
+        for b in builtin_func_names() {
+            if !builtin_method_name(b) { out.push(b) }
+        }
         for nm in self.scope_names() { out.push(nm) }
         return out
     }
@@ -5695,9 +5698,9 @@ impl Checker {
     }
 }
 
-#test()["enum Option<T> { Some(T), None }\nenum Result<T, E> { Ok(T), Err(E) }\nfun get<K, V>(m: [K: V], k: K) -> Option<V> {\n    if contains(m, k) {\n        return Some(m[k])\n    }\n    return None\n}\ntrait Format {\n    fun format(self, spec: str) -> str\n}\n"]
+#test()["enum Option<T> { Some(T), None }\nenum Result<T, E> { Ok(T), Err(E) }\nfun get<K, V>(m: [K: V], k: K) -> Option<V> {\n    if m.contains(k) {\n        return Some(m[k])\n    }\n    return None\n}\ntrait Format {\n    fun format(self, spec: str) -> str\n}\n"]
 fun prelude_src() -> str {
-    return "enum Option<T> { Some(T), None }\nenum Result<T, E> { Ok(T), Err(E) }\nfun get<K, V>(m: [K: V], k: K) -> Option<V> {\n    if contains(m, k) {\n        return Some(m[k])\n    }\n    return None\n}\ntrait Format {\n    fun format(self, spec: str) -> str\n}\n"
+    return "enum Option<T> { Some(T), None }\nenum Result<T, E> { Ok(T), Err(E) }\nfun get<K, V>(m: [K: V], k: K) -> Option<V> {\n    if m.contains(k) {\n        return Some(m[k])\n    }\n    return None\n}\ntrait Format {\n    fun format(self, spec: str) -> str\n}\n"
 }
 
 // The prelude's declarations, with node ids from `first_id`.
@@ -5841,6 +5844,7 @@ impl Checker {
         if name == "" { return self.infer_indirect_call(e, callee, args) }
         if self.redefined.contains(name) { return Err(poisoned()) }   // written against the left-out redefinition (MYLA-110)
         if starts_with_dunder(name) && is_builtin_func(name) { self.warn_primitive(callee, name) }
+        if !as_method && builtin_method_name(name) { return Err(function_form(callee, name)) }
 
         if name == "print" {
             if args.len() != 1 { return Err(terr_at(e.line, e.col, e.sp, "print() takes exactly one argument")) }
@@ -6150,14 +6154,14 @@ impl Checker {
             return Ok(Some(t_int()))
         }
         if name == "len" {
-            if args.len() != 1 { return Err(terr_at(e.line, e.col, e.sp, "len() takes exactly one argument")) }
+            if args.len() != 1 { return Err(terr_at(e.line, e.col, e.sp, method_arity("len", 0))) }
             let at = self.expect_value(args[0], None)?
             let ok = match at { Type.TList(x) => true, Type.TMap(k, v) => true, Type.TStr => true, Type.TSB => true, _ => false }
             if !ok { return Err(terr_at(e.line, e.col, e.sp, format("len() requires a list, map, string, or StringBuilder, found '{}'", type_name(at)))) }
             return Ok(Some(t_int()))
         }
         if name == "chars" {
-            if args.len() != 1 { return Err(terr_at(e.line, e.col, e.sp, "chars() takes exactly one argument")) }
+            if args.len() != 1 { return Err(terr_at(e.line, e.col, e.sp, method_arity("chars", 0))) }
             let at = self.expect_value(args[0], None)?
             if !is_str(at) { return Err(terr_at(e.line, e.col, e.sp, format("chars() requires a string, found '{}'", type_name(at)))) }
             return Ok(Some(Type.TList(Type.TChar)))
@@ -6219,7 +6223,7 @@ impl Checker {
     fun infer_list_mutation(var self, e: Expr, name: str, args: [Expr]) -> Result<Option<Type>, CheckErr> {
         var nargs = 1
         if name == "push" { nargs = 2 }
-        if args.len() != nargs { return Err(terr_at(e.line, e.col, e.sp, format("{}() takes {} argument(s)", name, nargs))) }
+        if args.len() != nargs { return Err(terr_at(e.line, e.col, e.sp, method_arity(name, nargs - 1))) }
         let lv = self.check_lvalue(args[0])?
         let elem = match lv.ty { Type.TList(el) => el, _ => { return Err(terr_at(args[0].line, args[0].col, args[0].sp, format("{}() requires a list, found '{}'", name, type_name(lv.ty)))) } }
         if !lv.mutable { return Err(terr_at(args[0].line, args[0].col, args[0].sp, format("{}() needs a mutable list (declare it with 'var')", name))) }
@@ -6234,7 +6238,7 @@ impl Checker {
     fun infer_map_builtin(var self, e: Expr, name: str, args: [Expr]) -> Result<Option<Type>, CheckErr> {
         var nargs = 2
         if name == "keys" { nargs = 1 }
-        if args.len() != nargs { return Err(terr_at(e.line, e.col, e.sp, format("{}() takes {} argument(s)", name, nargs))) }
+        if args.len() != nargs { return Err(terr_at(e.line, e.col, e.sp, method_arity(name, nargs - 1))) }
         var map_t = Type.TStr
         var mutable = true
         if name == "remove" {
@@ -6296,14 +6300,14 @@ impl Checker {
             return Ok(Some(Type.TSB))
         }
         if name == "build" {
-            if args.len() != 1 { return Err(terr_at(e.line, e.col, e.sp, "build() takes exactly one argument")) }
+            if args.len() != 1 { return Err(terr_at(e.line, e.col, e.sp, method_arity("build", 0))) }
             let at = self.expect_value(args[0], None)?
             if !is_sb(at) { return Err(terr_at(args[0].line, args[0].col, args[0].sp, format("build() requires a StringBuilder, found '{}'", type_name(at)))) }
             return Ok(Some(Type.TStr))
         }
-        // append(sb, s, start, end) appends the bytes s[start..end] (MYLA-85)
-        if name == "append" && args.len() != 2 && args.len() != 4 { return Err(terr_at(e.line, e.col, e.sp, "append() takes 2 or 4 argument(s)")) }
-        if name == "append_byte" && args.len() != 2 { return Err(terr_at(e.line, e.col, e.sp, format("{}() takes 2 argument(s)", name))) }
+        // sb.append(s, start, end) appends the bytes s[start..end] (MYLA-85)
+        if name == "append" && args.len() != 2 && args.len() != 4 { return Err(terr_at(e.line, e.col, e.sp, "append() takes 1 or 3 arguments (a string, or a string and the bytes from, to)")) }
+        if name == "append_byte" && args.len() != 2 { return Err(terr_at(e.line, e.col, e.sp, method_arity(name, 1))) }
         let lv = self.check_lvalue(args[0])?
         if !is_sb(lv.ty) { return Err(terr_at(args[0].line, args[0].col, args[0].sp, format("{}() requires a StringBuilder, found '{}'", name, type_name(lv.ty)))) }
         if !lv.mutable { return Err(terr_at(args[0].line, args[0].col, args[0].sp, format("{}() needs a mutable StringBuilder (declare it with 'var')", name))) }
@@ -7208,6 +7212,31 @@ impl Reads {
 #test("len")[false]
 pub fun mutating_builtin(m: str) -> bool {
     return m == "push" || m == "pop" || m == "remove" || m == "append" || m == "append_byte"
+}
+
+// A builtin that is a method called as a function (`push(xs, v)`): its
+// function form went (D103, MYLA-221); the error names the method.
+fun function_form(at: Expr, name: str) -> CheckErr {
+    var msg = format("'{}' is a method: call it as 'x.{}(…)'", name, name)
+    if receiver_only(name) { msg = format("'{}' is a method: call it as 'x.{}()'", name, name) }
+    return with_notes(terr_at(at.line, at.col, at.sp, msg), [Note { label: "help", msg: "`scripts/to_methods.py FILE` rewrites a file's calls", line: 0, col: 0, sp: no_span() }])
+}
+
+// The error for a builtin method called with other than its `n` arguments
+// (the receiver not counted).
+#test("pop", 0)["pop() takes no arguments"]
+#test("push", 1)["push() takes 1 argument"]
+fun method_arity(name: str, n: int32) -> str {
+    if n == 0 { return format("{}() takes no arguments", name) }
+    if n == 1 { return format("{}() takes 1 argument", name) }
+    return format("{}() takes {} arguments", name, n)
+}
+
+// Whether the builtin method `m` takes nothing but its receiver.
+#test("len")[true]
+#test("push")[false]
+fun receiver_only(m: str) -> bool {
+    return m == "len" || m == "pop" || m == "keys" || m == "chars" || m == "build"
 }
 
 // Whether `m` names a builtin function that is also a method (D103,

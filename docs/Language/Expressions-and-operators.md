@@ -126,4 +126,4 @@ Subexpressions evaluate left to right, in the interpreter and in native code ali
 - Struct, tuple, list and enum literals evaluate their elements in the order written (a struct literal in the order of its fields as written, not as declared). A map literal evaluates each key, then its value.
 - `format` and `f"…"` evaluate their arguments left to right.
 - A partial application `f(a, _)` evaluates its receiver and filled arguments when it is made (D60). `_` stands only as a call argument (`'_' placeholder is only valid as a call argument`).
-- An assignment evaluates the value first, then the place: `xs[i] = v` evaluates `v`, then `xs`, then `i`. `push(xs, v)`, `append_byte(sb, b)` and the other writes into a container likewise evaluate the value before they touch the container (MYLA-4).
+- An assignment evaluates the value first, then the place: `xs[i] = v` evaluates `v`, then `xs`, then `i`. `xs.push(v)`, `sb.append_byte(b)` and the other writes into a container likewise evaluate the value before they touch the container (MYLA-4).

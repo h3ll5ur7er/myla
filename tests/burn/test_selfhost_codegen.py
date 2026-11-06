@@ -1199,7 +1199,7 @@ class SelfHostedCodegenParity(unittest.TestCase):
         source = (
             "fun main() {\n"
             "    var xs = [\"a\"]\n"
-            "    xs.push(f\"b{len(xs)}\")\n"
+            "    xs.push(f\"b{xs.len()}\")\n"
             "    print(xs[1])\n"
             "}\n")
         with tempfile.TemporaryDirectory() as tmp:
@@ -1958,7 +1958,7 @@ class SelfHostedCodegenParity(unittest.TestCase):
             self.assertGreater(cpu, 1.5 * wall, f"cpu {cpu:.2f} s, wall {wall:.2f} s")
 
     def test_parity_programs_match_the_oracle(self) -> None:
-        from .test_compiler_parity import PROGRAMS
+        from .test_compiler_parity import PINNED, PROGRAMS
 
         for name in PARITY_PROGRAMS:
             with self.subTest(program=name), tempfile.TemporaryDirectory() as tmp:
@@ -1968,7 +1968,7 @@ class SelfHostedCodegenParity(unittest.TestCase):
                 with open(path, "w", encoding="utf-8") as fh:
                     fh.write(PROGRAMS[name])
                 got = self._build_and_run(self._emit_asm(path))
-                self.assertEqual(got, _oracle(path))
+                self.assertEqual(got, (PINNED[name], 0) if name in PINNED else _oracle(path))
 
 
 

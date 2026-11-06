@@ -1155,9 +1155,25 @@ impl CodeGen {
         var first = 0
         if is_aggregate_opt(sig.ret) { first = 1 }
         var k = 0
+        var byval = false
         while k < sig.params.len() {
-            if self.byval_param(sig, k, sig.params[k]) { panic("internal error: aarch64: a function value of a function taking a value by copy (not yet, MYLA-163)") }
+            if self.byval_param(sig, k, sig.params[k]) { byval = true }
             k = k + 1
+        }
+        if byval {
+            // a function value passes an aggregate by its address; the
+            // function takes the words of one passed by value (D88): the
+            // adapter is a partial application with every argument a hole,
+            // which copies those words, with references of their own, and
+            // gives a parameter passed owned a reference of its own (MYLA-282)
+            var slots: [int32] = []
+            var aggs: [bool] = []
+            for p in sig.params {
+                slots.push(-1)
+                aggs.push(false)
+            }
+            self.gen_partial_function_a64(PartialJob { lifted: n + "__fnval", target: n, fn_off: -1, slots: slots, aggs: aggs, sret: first == 1, owned: [] })
+            return
         }
         self.emit("")
         self.emit("\t.p2align 2")

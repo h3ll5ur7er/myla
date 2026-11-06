@@ -13,8 +13,8 @@ impl Feed {
 async fun forever(f: Feed) -> int {
     var buffer: [int] = []
     while true {
-        push(buffer, await f.next())
-        if len(buffer) > 100 {
+        buffer.push(await f.next())
+        if buffer.len() > 100 {
             buffer = []
         }
     }

@@ -29,9 +29,10 @@
 
 from std.num import f64_literal_bits, f32_round_bits
 from .ast import Expr, ExprKind, Stmt, StmtKind, Block, FunData, ElseTail, ExprOrBlock, MatchArm, Pattern, PatternKind, FieldInit, MapEntry, BindElem, bind_elems, Param
-from .checker import Type, is_unit, is_slice_expr, from_end_of, slice_parts, is_hole_part, is_raw_memory_primitive, Subst, FuncSig, opt_subst_type, subst_type, builtin_method
+from .checker import CheckErr, REG_ARG_WORDS, type_name, Type, is_unit, is_slice_expr, from_end_of, slice_parts, is_hole_part, is_raw_memory_primitive, Subst, FuncSig, opt_subst_type, subst_type, builtin_method
 from .codegen import codegen_on, may_write_expr, is_actor_t, is_sb_t, is_async_t, CodeGen, LamJob, PartialJob, Cap, DropEntry, tfunc_params, tfunc_ret, is_hole_expr, mangle_fn, is_builtin_call_name, is_aggregate, tuple_elems, is_struct_or_enum_t, is_tfunc, is_overloadable_op, arith_method_cg, enum_name_of, is_tstr, is_cmp, place_root, is_aggregate_opt, arms_may_write, is_cell_t, list_elem, is_list_t, is_map_t, is_str_t, map_key, map_val, format_segments, args_have_hole, success_variant, failure_variant
 from .util import format_specs
+from .tokens import Note, no_span
 from .ir import IrFunc, IrBlock, Inst, Term, Slot, Pos, Instance, ENV_WORD
 from .parser import expr_of, stmt_of, type_expr_of, block_of, pattern_of, fun_of  // AST values for #test cases (MYLA-184)
 
@@ -67,7 +68,7 @@ struct LoopTarget { cont: int32, brk: int32, owners: int32, temps: int32 }
 // function holds between suspensions (D92), or -1; `deep_res`: an actor
 // method's result is copied deeply before it leaves the actor (D92).
 // `scope_ids`: the open scopes' indices in `f.scope_parent` (MYLA-183).
-struct Lower { f: IrFunc, cur: int32, scopes: [[Local]], scope_ids: [int32], owners: [[int32]], temps: [[int32]], loops: [LoopTarget], sret: int32, arm_binds: [Local], err: str, lams: [LamJob], partials: [PartialJob], fnvals: [str], holder: [int32], into: int32, placed: [bool], tail: bool, tailed: bool, frame_fn: bool, result: int32, tasks: [TaskSlot], actor_self: int32, actor_off: int32, deep_res: bool, narrow: [int32: int32], wants: [Want], defers: [LDefer] }
+struct Lower { f: IrFunc, cur: int32, scopes: [[Local]], scope_ids: [int32], owners: [[int32]], temps: [[int32]], loops: [LoopTarget], sret: int32, arm_binds: [Local], err: str, lams: [LamJob], partials: [PartialJob], fnvals: [str], holder: [int32], into: int32, placed: [bool], tail: bool, tailed: bool, frame_fn: bool, result: int32, tasks: [TaskSlot], actor_self: int32, actor_off: int32, deep_res: bool, narrow: [int32: int32], wants: [Want], defers: [LDefer], received: int32, refused: [CheckErr], fn_name: str }
 
 // A per-type routine a routine built as IR calls, for the code generator to
 // emit (MYLA-162): `kind` 0 a cell's deep copy, 1 an inline value's deep
@@ -87,7 +88,9 @@ pub struct Routine { f: IrFunc, wants: [Want] }
 // (depth -1), its result read as a deep clone, the parent reading it too.
 struct TaskSlot { slot: int32, ty: Type, void: bool, owns: bool, depth: int32, foreign: bool }
 
-pub struct Lowered { f: IrFunc, lams: [LamJob], partials: [PartialJob], fnvals: [str] }
+// `refused`: what the function can't be built for, at its place (an
+// instance's `become` passing more stack words than it received, MYLA-272).
+pub struct Lowered { f: IrFunc, lams: [LamJob], partials: [PartialJob], fnvals: [str], refused: [CheckErr] }
 
 // A deferred block (D135): the owners' scope it belongs to, and the names it
 // sees, those of the first `nscopes` scopes, of the last only the first
@@ -100,7 +103,7 @@ struct LDefer { depth: int32, nscopes: int32, nnames: int32, body: Block, cg: Co
 // entry block, the receiver of `#test` cases of the lowering's methods
 // (MYLA-184), with a code generator from `codegen_on` as their `cg`.
 pub fun lower_on() -> Lower {
-    var lw = Lower { f: IrFunc { name: "test", ret: None, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false, scope_parent: [-1] }, cur: 0, scopes: [[]], scope_ids: [0], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [], actor_self: -1, actor_off: 0, deep_res: false, narrow: [:], wants: [], defers: [] }
+    var lw = Lower { f: IrFunc { name: "test", ret: None, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false, scope_parent: [-1] }, cur: 0, scopes: [[]], scope_ids: [0], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [], actor_self: -1, actor_off: 0, deep_res: false, narrow: [:], wants: [], defers: [], received: -1, refused: [], fn_name: "" }
     lw.start(lw.new_block())
     return lw
 }
@@ -111,7 +114,8 @@ pub fun lower_on() -> Lower {
 pub fun lower_function(cg: CodeGen, fd: FunData, mangled: str) -> Result<Lowered, str> {
     let sig = cg.sig_of(fd.name)
     let ret = opt_subst_type(sig.ret, cg.subst)
-    var lw = Lower { f: IrFunc { name: mangled, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false, scope_parent: [-1] }, cur: 0, scopes: [[]], scope_ids: [0], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [], actor_self: -1, actor_off: 0, deep_res: false, narrow: [:], wants: [], defers: [] }
+    var lw = Lower { f: IrFunc { name: mangled, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false, scope_parent: [-1] }, cur: 0, scopes: [[]], scope_ids: [0], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [], actor_self: -1, actor_off: 0, deep_res: false, narrow: [:], wants: [], defers: [], received: -1, refused: [], fn_name: "" }
+    lw.fn_name = fd.name
     var first_word = 0
     // an async function, when tasks take turns: its frame function, its
     // slots in its heap frame, the result in the first (D90)
@@ -173,6 +177,9 @@ pub fun lower_function(cg: CodeGen, fd: FunData, mangled: str) -> Result<Lowered
         lw.add(Inst.Bind(fd.params[i].name, s))
         i = i + 1
     }
+    // the argument words it received, which a `become` may pass on the
+    // stack again (D131): known per instance (MYLA-272)
+    if !frame { lw.received = word }
     // an actor's async method holds the actor while it runs (D92)
     let actor_method = cg.frames && fd.params.len() > 0 && has_receiver(fd) && is_actor_t(lw.f.slots[lw.lookup(fd.params[0].name)].ty)
     if frame && actor_method {
@@ -195,12 +202,13 @@ pub fun lower_function(cg: CodeGen, fd: FunData, mangled: str) -> Result<Lowered
         Some(b) => { lw.block(cg, b) },
         None => {},
     }
+    if lw.refused.len() > 0 { return Ok(Lowered { f: lw.f, lams: [], partials: [], fnvals: [], refused: lw.refused }) }
     if lw.err != "" { return Err(lw.err) }
     // the end of the body falls through to the epilogue
     lw.drop_owners(0)
     lw.exit_fn(-1, true)
     if lw.err != "" { return Err(lw.err) }
-    return Ok(Lowered { f: lw.f, lams: lw.lams, partials: lw.partials, fnvals: lw.fnvals })
+    return Ok(Lowered { f: lw.f, lams: lw.lams, partials: lw.partials, fnvals: lw.fnvals, refused: lw.refused })
 }
 
 // The IR of a lambda's body, lifted into `job.lifted` (MYLA-106): called with
@@ -209,7 +217,7 @@ pub fun lower_function(cg: CodeGen, fd: FunData, mangled: str) -> Result<Lowered
 // own at entry, borrowed as a parameter is (captures are immutable, D48).
 pub fun lower_lambda(cg: CodeGen, job: LamJob) -> Result<Lowered, str> {
     let ret = opt_subst_type(tfunc_ret(job.ftype), cg.subst)
-    var lw = Lower { f: IrFunc { name: job.lifted, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false, scope_parent: [-1] }, cur: 0, scopes: [[]], scope_ids: [0], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [], actor_self: -1, actor_off: 0, deep_res: false, narrow: [:], wants: [], defers: [] }
+    var lw = Lower { f: IrFunc { name: job.lifted, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false, scope_parent: [-1] }, cur: 0, scopes: [[]], scope_ids: [0], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [], actor_self: -1, actor_off: 0, deep_res: false, narrow: [:], wants: [], defers: [], received: -1, refused: [], fn_name: "" }
     // an async lambda, when tasks take turns: a frame function, as an async
     // function's (D90); its frame holds the environment and the arguments
     let frame = cg.frames && is_async_t(job.ftype)
@@ -305,7 +313,7 @@ pub fun lower_lambda(cg: CodeGen, job: LamJob) -> Result<Lowered, str> {
     } else {
         lw.finish(Term.Ret(-1))
     }
-    return Ok(Lowered { f: lw.f, lams: lw.lams, partials: lw.partials, fnvals: lw.fnvals })
+    return Ok(Lowered { f: lw.f, lams: lw.lams, partials: lw.partials, fnvals: lw.fnvals, refused: lw.refused })
 }
 
 // Whether `t` is a scalar: an integer, float, bool, char or address.
@@ -1911,6 +1919,23 @@ impl Lower {
         let d = self.unsupported("a 'become' of that call")
     }
 
+    // A `become` at `e` of this instance passing `passed` argument words,
+    // more on the stack than it received: the checker's error, naming the
+    // instance's type arguments (MYLA-272). Nothing more is lowered.
+    fun refuse_become(var self, cg: CodeGen, e: Expr, passed: int32) {
+        var recv_stack = self.received - REG_ARG_WORDS
+        if recv_stack < 0 { recv_stack = 0 }
+        let msg = format("'become' passes {} argument words, {} of them on the stack, but '{}' received {} there", passed, passed - REG_ARG_WORDS, self.fn_name, recv_stack)
+        var with = ""
+        for sb in cg.subst {
+            if with != "" { with = with + ", " }
+            with = with + sb.name + " = " + type_name(sb.ty)
+        }
+        let note = format("in '{}' with {}: a value of a type parameter takes the words of its type", self.fn_name, with)
+        self.refused.push(CheckErr { line: e.line, col: e.col, sp: e.sp, msg: msg, decl: e.id, notes: [Note { label: "note", msg: note, line: 0, col: 0, sp: no_span() }] })
+        let d = self.unsupported("a refused 'become'")
+    }
+
     // The call `c` ending the function by `become`: the owners dropped first,
     // since what the arguments need is theirs (owned, or kept by the caller's
     // caller: the checker sees to it), and the call jumped to.
@@ -3183,6 +3208,15 @@ impl Lower {
             i = i + 1
         }
         if tail {
+            // the checker counts a value of a type parameter as one word; an
+            // instance passing more on the stack than it received is refused
+            // here, as the checker refuses the rest (D131, MYLA-272)
+            var passed = vals.len() as int32
+            if has_ret && is_aggregate(ret_t) { passed = passed + 1 }
+            if self.received >= 0 && passed > REG_ARG_WORDS && passed > self.received {
+                self.refuse_become(cg, e, passed)
+                return -1
+            }
             if has_ret && is_aggregate(ret_t) { self.tail_call(Inst.CallSret(target, self.slot_addr(self.sret), vals)) }
             else { self.tail_call(Inst.Call(-1, target, vals)) }
             return -1
@@ -3683,22 +3717,58 @@ impl Lower {
         }
         let segs = format_segments(fmt)
         let specs = format_specs(fmt)
-        var acc = self.temp(Type.TStr)
-        self.add(Inst.Str(acc, segs[0]))
+        // the pieces, empty literal ones left out, joined at the end with
+        // as few new strings as there are groups of four (MYLA-252)
+        var parts: [int32] = []
+        if segs[0] != "" || args.len() == 1 { parts.push(self.str_const(segs[0])) }
         var k = 1
         while k < args.len() {
-            let piece = self.render_spec(cg, args[k], specs[k - 1])
-            let joined = self.temp(Type.TStr)
-            self.rt_call(cg, joined, "__str_concat", [acc, piece])
-            let j = self.owned_value(cg, joined, Type.TStr)
-            let seg = self.temp(Type.TStr)
-            self.add(Inst.Str(seg, segs[k]))
-            let next = self.temp(Type.TStr)
-            self.rt_call(cg, next, "__str_concat", [j, seg])
-            acc = self.owned_value(cg, next, Type.TStr)
+            parts.push(self.render_spec(cg, args[k], specs[k - 1]))
+            if segs[k] != "" { parts.push(self.str_const(segs[k])) }
             k = k + 1
         }
-        return acc
+        return self.join_strs(cg, parts)
+    }
+
+    // A temporary holding the literal string `s`.
+    fun str_const(var self, s: str) -> int32 {
+        let t = self.temp(Type.TStr)
+        self.add(Inst.Str(t, s))
+        return t
+    }
+
+    // The strings `parts` (at least one) as one: each group of up to four
+    // joined into a new string the statement owns (std.rt's `str_concat`,
+    // `str_concat3`, `str_concat4`), until one is left.
+    fun join_strs(var self, cg: CodeGen, parts: [int32]) -> int32 {
+        var acc = parts
+        while acc.len() > 1 {
+            var next: [int32] = []
+            var i = 0
+            while i < acc.len() {
+                var n = acc.len() - i
+                if n > 4 { n = 4 }
+                if n == 1 { next.push(acc[i]) }
+                else if n == 2 {
+                    let d = self.temp(Type.TStr)
+                    self.rt_call(cg, d, "__str_concat", [acc[i], acc[i + 1]])
+                    next.push(self.owned_value(cg, d, Type.TStr))
+                } else {
+                    var name = "std$rt$str_concat3"
+                    if n == 4 { name = "std$rt$str_concat4" }
+                    var group: [int32] = []
+                    var j = 0
+                    while j < n {
+                        group.push(acc[i + j])
+                        j = j + 1
+                    }
+                    next.push(self.call_owning(cg, name, group))
+                }
+                i = i + n
+            }
+            acc = next
+        }
+        return acc[0]
     }
 
     // One hole's text (D139): a value of a type with its own `format`
@@ -4372,7 +4442,7 @@ fun calls_nothing(e: Expr) -> bool {
 // An empty lowering of the routine `name` with result type `ret`, its entry
 // block started.
 fun routine(name: str, ret: Option<Type>) -> Lower {
-    var lw = Lower { f: IrFunc { name: name, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false, scope_parent: [-1] }, cur: 0, scopes: [[]], scope_ids: [0], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [], actor_self: -1, actor_off: 0, deep_res: false, narrow: [:], wants: [], defers: [] }
+    var lw = Lower { f: IrFunc { name: name, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false, scope_parent: [-1] }, cur: 0, scopes: [[]], scope_ids: [0], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [], actor_self: -1, actor_off: 0, deep_res: false, narrow: [:], wants: [], defers: [], received: -1, refused: [], fn_name: "" }
     let entry = lw.new_block()
     lw.start(entry)
     return lw

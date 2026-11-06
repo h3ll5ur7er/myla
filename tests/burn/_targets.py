@@ -47,17 +47,9 @@ _TAIL_TESTS = [
     "test_selfhost_codegen.SelfHostedCodegenParity.test_tail_calls_hand_over_owned_arguments",
 ]
 
-# A function value of a function taking a struct, tuple or enum by copy (a
-# `become` hands it over, D88): the x86-64 backend's adapter copies its words;
-# aarch64's and wasm32's don't yet (MYLA-282).
-_BYVAL_FNVAL = "a function value of a function taking a value by copy isn't built yet (MYLA-282)"
-
 _BOTH = {
     **{t: _X86_CODE for t in _X86_TESTS},
     **{t: _PLAIN_TAIL_CALLS for t in _TAIL_TESTS},
-    "test_selfhost_codegen.SelfHostedCodegenParity.test_become_passes_aggregates_by_value": _BYVAL_FNVAL,
-    # generated per parity program (test_compiler_parity._make)
-    "test_compiler_parity.TestCompilerParity.test_become_passes_aggregates_by_value": _BYVAL_FNVAL,
 }
 
 SKIP: dict[str, dict[str, str]] = {
@@ -85,9 +77,7 @@ SKIP: dict[str, dict[str, str]] = {
 
 # Programs inside a test's loop a target is excused from.
 SKIP_PROGRAMS: dict[str, dict[str, str]] = {
-    "aarch64-linux": {"become_passes_aggregates_by_value": _BYVAL_FNVAL},
     "wasm32-wasi": {
-        "become_passes_aggregates_by_value": _BYVAL_FNVAL,
         "io_through_the_ir": "it runs a child process, which WASI has none of",
     },
 }
