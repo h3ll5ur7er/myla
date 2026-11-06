@@ -801,6 +801,11 @@ pub fun is_raw_memory_primitive(name: str) -> bool {
     return name == "__load8" || name == "__load64" || name == "__store8" || name == "__store64" || name == "__alloc" || name == "__addr_of" || name == "__str_of" || name == "__copy_bytes" || name == "__equal_bytes" || name == "__syscall" || name == "__syscall5" || name == "__set_io_errno" || name == "__free" || name == "__environ" || name == "__set_run_status" || name == "__set_run_stderr" || name == "__argv" || name == "__load32" || name == "__store32" || name == "__list_addr" || name == "__list_of" || name == "__rotl" || name == "__rt_addr" || name == "__rt_get" || name == "__bsr64" || name == "__trap_oom" || name == "__rt_waddr" || name == "__cas64" || name == "__xchg64" || name == "__fetch_add64" || name == "__pause" || name == "__run_frame" || name == "__f64_round" || name == "__load_acq64" || name == "__store_rel64" || name == "__call_code"
 }
 
+// The error for a program's call of the raw-memory primitive `name`.
+fun raw_memory_call(at: Expr, name: str) -> CheckErr {
+    return CheckErr { line: at.line, col: at.col, sp: at.sp, msg: format("'{}' reads or writes raw memory: only the standard library may call it", name), decl: -1, notes: [Note { label: "help", msg: "the standard library's types and functions do what it does, safely", line: 0, col: 0, sp: no_span() }] }
+}
+
 #test("sum")[false]
 #test("panic")[true]
 #test("push")[false]
@@ -1342,6 +1347,7 @@ pub struct Checker {
     call_defaults: [int32: [Expr]], // call node id -> the defaults it leaves to its trailing parameters (D136)
     errs: [CheckErr],               // the errors of the functions checked so far (MYLA-65, D80)
     warnings: [CheckErr],           // D95: the warnings found, in the order found
+    primitives: bool,               // a program may call the raw-memory primitives (`gen_main --primitives`, the toolchain's tests)
     // going on after a declaration's error (MYLA-110, D84; types.py: Checker):
     // the declarations left out and the functions not checked (by
     // name: a function with a bad bound); the `trait\tkey` pairs whose impl or
@@ -1416,7 +1422,7 @@ fun new_checker(decls: [Decl]) -> Checker {
         allow_self: false, type_params: [], bounds_cur: [],
         cur_ret: None, has_cur_ret: false, ret_at: None, loop_depth: 0, defer_at: -1,
         frames: [], lambda_infer_active: false, lambda_depth: 0, cur_decl: -1, lambda_infer: [], stmt_match: false,
-        resolved: [:], call_defaults: [:], errs: [], warnings: [], mains: [],
+        resolved: [:], call_defaults: [:], errs: [], warnings: [], primitives: false, mains: [],
         skipped_decls: [:], skipped_fns: [:], broken_impls: [:], redefined: [:],
         lost_methods: [:], lost_traits: [:], failed_consts: [:], bodies: false,
         call_kind: "", call_kind_id: -1, call_target: "", call_mutates: false, fun_name: "", handovers: [:], become_words: [], passed_on: [],
@@ -2459,6 +2465,17 @@ impl Checker {
             }
         }
         if target_ok {
+            // a builtin method's name is the builtin's on its kind: a program
+            // can't define it there, as it can't a builtin function (the
+            // review of 2026-11-06, R3: the program's `len` was called by the
+            // standard library's own code, natively)
+            for m in methods {
+                if builtin_method(target, m.name) {
+                    self.record(terr_at(m.line, m.col, m.sp, format("'{}' is a builtin method of '{}': an impl can't define it", m.name, type_name(target))))?
+                    self.lose_impl(methods, trait_name)
+                    return Ok(0)
+                }
+            }
             key_opt = self.type_key(target)
             match self.check_impl_target(ln, cl, sp, target, key_opt, tps, methods) {
                 Ok(x) => {},
@@ -5553,10 +5570,16 @@ impl Checker {
         return Ok(0)
     }
 
+    // Whether the function being checked is the standard library's.
+    #test(checker_on("[int]"))[false]
+    fun in_std(self) -> bool {
+        return self.fun_name.len() >= 4 && self.fun_name[0] == 's' && self.fun_name[1] == 't' && self.fun_name[2] == 'd' && self.fun_name[3] == '$'
+    }
+
     // A call of a `__` primitive outside the standard library: allowed, with
     // a warning (D100, MYLA-186), once per place (types.py: _warn_primitive).
     fun warn_primitive(var self, at: Expr, name: str) {
-        if self.fun_name.len() >= 4 && self.fun_name[0] == 's' && self.fun_name[1] == 't' && self.fun_name[2] == 'd' && self.fun_name[3] == '$' { return }
+        if self.in_std() { return }
         let msg = format("'{}' is a primitive of the standard library, not meant to be called from a program", name)
         for w in self.warnings { if w.msg == msg && w.line == at.line && w.col == at.col { return } }
         self.warnings.push(CheckErr { line: at.line, col: at.col, sp: at.sp, msg: msg, decl: self.cur_decl, notes: [Note { label: "help", msg: "call the function of `std` that wraps it; a primitive's behaviour may change with the standard library", line: 0, col: 0, sp: no_span() }] })
@@ -5764,11 +5787,19 @@ pub fun check_program(user: Program) -> Result<[CheckErr], [CheckErr]> {
 // ids are below `next_id`), with the prelude parsed after it so every id stays
 // unique, and return the populated checker (MYLA-30), or its errors (D80).
 pub fun build_checker_decls(decls: [Decl], next_id: int32) -> Result<Checker, [CheckErr]> {
+    return build_checker_with(decls, next_id, false)
+}
+
+// `build_checker_decls`, a program allowed to call the raw-memory
+// primitives when `primitives` (the toolchain's tests of their code,
+// `gen_main --primitives`).
+pub fun build_checker_with(decls: [Decl], next_id: int32, primitives: bool) -> Result<Checker, [CheckErr]> {
     let pre = prelude(next_id)
     var all: [Decl] = []
     for d in pre.program.decls { all.push(d) }
     for d in decls { all.push(d) }
     var c = new_checker(all)
+    c.primitives = primitives
     let r = c.run_all()
     match r { Ok(x) => {}, Err(e) => { return Err(e) } }
     // every call with all its arguments, for whatever runs the program (D136)
@@ -5880,7 +5911,12 @@ impl Checker {
         let name = match callee.kind { ExprKind.Name(nm) => nm, _ => "" }
         if name == "" { return self.infer_indirect_call(e, callee, args) }
         if self.redefined.contains(name) { return Err(poisoned()) }   // written against the left-out redefinition (MYLA-110)
-        if starts_with_dunder(name) && is_builtin_func(name) { self.warn_primitive(callee, name) }
+        if starts_with_dunder(name) && is_builtin_func(name) {
+            // raw memory outside the standard library: an error (the review
+            // of 2026-11-06, R4: natively a bare crash); the others warn (D100)
+            if is_raw_memory_primitive(name) && !self.primitives && !self.in_std() { return Err(raw_memory_call(callee, name)) }
+            self.warn_primitive(callee, name)
+        }
         if !as_method && builtin_method_name(name) { return Err(function_form(callee, name)) }
 
         if name == "print" {

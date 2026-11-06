@@ -2,7 +2,7 @@
 id: MYLA-221
 title: "Methods on builtin types; the free collection functions deprecated"
 type: feature
-status: todo
+status: review
 priority: high
 labels: [language, builtins, stdlib]
 ---
@@ -86,6 +86,11 @@ Before the standard library round ([[MYLA-211]]), which builds on it. Order: aft
 
 **Reopened by [[Project/Review-2026-11]] (R3).** A program's method on a builtin type is picked up by the standard library's own calls in native code but not in the interpreter: `impl<T> [T] { fun len(self) -> int { return 999 } }` makes `xs[1:]` trap in `<myla>/std/slice.my:64` and `impl str { fun len … }` makes `f"{s:>8}"` trap in `std/fmt.my:140`, while the interpreter dispatches std's calls to the builtin; `impl [int] { fun push(var self, v: int) {} }` silently disables `push` for the whole program. Impls are keyed `__list`/`str` program-wide and "a type's own method comes first". Kotlin resolves the other way (members beat extensions); Swift and Rust don't allow inherent methods on foreign types.
 
-- [ ] A decision: the builtin method names are reserved per receiver kind (as they are as function names), or the builtin wins
-- [ ] The checker, the interpreter and the lowering agree; a burn test that an `impl str { fun len }` can't break `std.fmt`
-- [ ] `examples/errors/type_var_self_on_builtin.my` renamed for what it tests (the async case)
+- [x] A decision: the builtin method names are reserved per receiver kind (as they are as function names), or the builtin wins
+- [x] The checker, the interpreter and the lowering agree; a burn test that an `impl str { fun len }` can't break `std.fmt`
+- [x] `examples/errors/type_var_self_on_builtin.my` renamed for what it tests (the async case)
+
+## Done (2026-11-07)
+
+- The owner chose reserved names (D151). `resolve_impl` refuses an impl on a list, map, string or builder that defines a method named like one of that kind's builtin methods (`builtin_method`): "'len' is a builtin method of 'str': an impl can't define it", at the method. With the checker refusing the program, the interpreter and the lowering have nothing to disagree on; a struct's own `len` is unaffected.
+- `examples/errors/type_builtin_method_name.my` (`impl str { fun len }`); `type_var_self_on_builtin.my` is `type_async_var_self_on_builtin.my`. [[Language/Collections-and-strings]] says the names are reserved.

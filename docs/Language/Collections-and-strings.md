@@ -108,7 +108,7 @@ The builtin collection and string operations are methods (D103, [[MYLA-221]]).
 | `chars()` | strings |
 | `append(s)`, `append(s, start, end)`, `append_byte(b)`, `build()` | `StringBuilder` (`append`, `append_byte`: a `var` place) |
 
-A type's own method of the same name (`impl str { fun len(self) … }`) comes first, and a local named `chars` doesn't hide `s.chars()`. They have no function form: `push(xs, v)` is the error "'push' is a method: call it as 'x.push(…)'" (the function forms went once the repository had moved, D103; `scripts/to_methods.py` rewrites a file). The names stay reserved, so a program can't declare a function `push` of its own, but a local closure of that name is called as one.
+These names are the builtins' on their kinds of value: an `impl` can't define one there (`impl str { fun len(self) … }` is the error "'len' is a builtin method of 'str': an impl can't define it", D151), while a struct's own `len` is its own; and a local named `chars` doesn't hide `s.chars()`. They have no function form: `push(xs, v)` is the error "'push' is a method: call it as 'x.push(…)'" (the function forms went once the repository had moved, D103; `scripts/to_methods.py` rewrites a file). The names stay reserved, so a program can't declare a function `push` of its own, but a local closure of that name is called as one.
 
 ## Value semantics and copy-on-write
 

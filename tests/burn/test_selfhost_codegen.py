@@ -682,7 +682,8 @@ class SelfHostedCodegenParity(unittest.TestCase):
 
     def _emit_asm(self, path: str, stdlib_root: str | None = None, flags: tuple = ()) -> str:
         """Assembly for `path`, produced by the self-hosted backend."""
-        extra = ([stdlib_root] if stdlib_root is not None else []) + list(flags) + target_flags()
+        # (programs that call the raw-memory primitives too: `--primitives`)
+        extra = ([stdlib_root] if stdlib_root is not None else []) + list(flags) + ["--primitives"] + target_flags()
         proc = subprocess.run(
             [self._binary, path, *extra], capture_output=True, text=True
         )

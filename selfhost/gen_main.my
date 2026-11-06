@@ -13,7 +13,7 @@
 from std.process import args, exit
 from std.io import write, eprintln
 from std.platform import TARGET
-from .checker import build_checker_decls
+from .checker import build_checker_with
 from .codegen import new_codegen
 from .dwarf import read_gdb_script
 from .loader import load_program_opts, load_options, for_target, parse_package_flag, Loaded, type_errors
@@ -34,10 +34,12 @@ from .diag import render
 // one function's code). `target`: `x86_64-linux`, `aarch64-linux`
 // (MYLA-163) or `wasm32-wasi` (MYLA-158) with `--target`; by default the
 // target this compiler was built for, the machine's it runs on (MYLA-276).
-struct Mode { debug: bool, emit_ir: bool, frames: bool, ssa: bool, ssa_stats: bool, no_inline: bool, target: str }
+// `primitives`: the program may call the raw-memory primitives
+// (`--primitives`, for the tests of their code; an error otherwise).
+struct Mode { debug: bool, emit_ir: bool, frames: bool, ssa: bool, ssa_stats: bool, no_inline: bool, target: str, primitives: bool }
 
 fun emit_asm(prog: Loaded, mode: Mode, stdlib_root: str) -> int32 {
-    return match build_checker_decls(prog.decls, prog.next_id) {
+    return match build_checker_with(prog.decls, prog.next_id, mode.primitives) {
         Ok(c) => {
             var g = new_codegen(c)
             if mode.frames { g.frames = true }
@@ -71,12 +73,12 @@ fun emit_asm(prog: Loaded, mode: Mode, stdlib_root: str) -> int32 {
 fun main() {
     let argv = args()
     if argv.len() < 2 {
-        eprintln("usage: gen_main <file.my> [stdlib_root] [-g] [--emit-ir] [--no-inline] [--ssa | --ssa-stats] [--target x86_64-linux|aarch64-linux|wasm32-wasi] [--package name=dir]... [--root dir]")
+        eprintln("usage: gen_main <file.my> [stdlib_root] [-g] [--emit-ir] [--no-inline] [--primitives] [--ssa | --ssa-stats] [--target x86_64-linux|aarch64-linux|wasm32-wasi] [--package name=dir]... [--root dir]")
         exit(2)
     }
     var opts = load_options(default_stdlib_root())
     opts.runtime = true
-    var mode = Mode { debug: false, emit_ir: false, frames: false, ssa: false, ssa_stats: false, no_inline: false, target: TARGET }
+    var mode = Mode { debug: false, emit_ir: false, frames: false, ssa: false, ssa_stats: false, no_inline: false, target: TARGET, primitives: false }
     var j = 2
     while j < argv.len() {
         if argv[j] == "-g" {
@@ -87,6 +89,8 @@ fun main() {
             mode.frames = true
         } else if argv[j] == "--no-inline" {
             mode.no_inline = true
+        } else if argv[j] == "--primitives" {
+            mode.primitives = true
         } else if argv[j] == "--ssa" {
             mode.ssa = true
         } else if argv[j] == "--ssa-stats" {

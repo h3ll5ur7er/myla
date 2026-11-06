@@ -1,0 +1,14 @@
+//~ type error: 'len' is a builtin method of 'str': an impl can't define it
+// A builtin method's name is the builtin's on its kind of value, as a
+// builtin function's name is the builtin's: a program's `len` on `str`
+// would be called by the standard library's own code (the review of
+// 2026-11-06, R3).
+impl str {
+    fun len(self) -> int {
+        return 0
+    }
+}
+
+fun main() {
+    print("abc".len())
+}

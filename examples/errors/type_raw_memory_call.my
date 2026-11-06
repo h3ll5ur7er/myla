@@ -1,0 +1,8 @@
+//~ type error: '__load64' reads or writes raw memory: only the standard library may call it
+//~ help: the standard library's types and functions do what it does, safely
+// The raw-memory primitives are the standard library's (the runtime in
+// Myla): a program's call of one is an error, where it was a warning and,
+// natively, a bare crash (the review of 2026-11-06, R4).
+fun main() {
+    print(__load64(0))
+}
