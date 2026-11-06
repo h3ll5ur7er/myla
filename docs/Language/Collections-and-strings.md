@@ -59,7 +59,7 @@ fun main() {
 // dlrow ,olleh
 ```
 
-- A slice's bounds are clamped to the list, so a slice never fails: `xs[2:99]` is the rest, `xs[5:2]` is empty, and a plain negative bound is before the start (only `^` counts from the end). A single index out of range is still an error, `xs[^0]` and `xs[^6]` of five elements too (D143).
+- A slice's bounds are clamped to the list: `xs[2:99]` is the rest, `xs[5:2]` is empty. A plain negative bound is the runtime error `index out of bounds`, as a negative index is (`xs[1:-1]`: write `xs[1:^1]`, D154); only `^` counts from the end. A single index out of range is still an error, `xs[^0]` and `xs[^6]` of five elements too (D143).
 - The step is a signed integer, not 0 (`slice step is zero` when the program runs). With a negative step the bounds left out are the end and the start, as in Python: `xs[^1:0:-2]` is `[50, 30]`.
 - A `str` is sliced by bytes, as `s[i]` and `s.len()` count them: a slice whose bound falls inside a character is a runtime error (`a slice bound inside a character`), and with a step other than 1 every byte taken must be a whole character (ASCII).
 - `xs[^1] = v` assigns as any index does; a slice is a value to read: assigning to one (`xs[1:3] = ys`) isn't part of the language yet. Maps have no slices.

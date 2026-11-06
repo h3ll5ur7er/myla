@@ -184,6 +184,19 @@ fun main() {
 """
 
 
+# D153: a write without a result that the system refuses (a full disk:
+# /dev/full) ends the program with a runtime error and status 1, where the
+# output used to be lost without a word (the review of 2026-11-06, R8)
+WRITES_TO_A_FULL_DISK = """from std.io import println, eprintln
+
+fun main() {
+    print("one")
+    println("two")
+    eprintln("to stderr")
+}
+"""
+
+
 def _argvs(tmp: str, source: str) -> list[tuple[str, list[str], str | None]]:
     """The interpreter's and the native binary's command lines for `source`."""
     path = write_program(tmp, source)
@@ -225,6 +238,35 @@ class BrokenPipe(unittest.TestCase):
                     finally:
                         os.close(3)
                     self.assertEqual((p.stdout, p.stderr, p.returncode), ("broken pipe\nstill running\n", "", 0))
+
+
+    def test_a_write_to_a_full_disk_ends_with_an_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for name, argv, exe in _argvs(tmp, WRITES_TO_A_FULL_DISK):
+                with self.subTest(run=name, stream="stdout"):
+                    with open("/dev/full", "w") as full:
+                        p = subprocess.run(argv, executable=exe, stdout=full, stderr=subprocess.PIPE, text=True, timeout=60)
+                    self.assertEqual((p.stderr, p.returncode),
+                                     ("runtime error: write failed: no space left on device\n", 1))
+                with self.subTest(run=name, stream="println"):
+                    src = WRITES_TO_A_FULL_DISK.replace('    print("one")\n', "")
+                    path = write_program(tmp, src, f"{name}2.my")
+                    cmd = argv
+                    if name == "native":
+                        binary = os.path.join(tmp, "prog2")
+                        native_build(Program(path), binary)
+                        cmd, exe2 = run_argv(binary, binary)
+                    else:
+                        cmd, exe2 = [selfhost_tool("main"), "run", path, "--stdlib", STDLIB_ROOT], None
+                    with open("/dev/full", "w") as full:
+                        p = subprocess.run(cmd, executable=exe2, stdout=full, stderr=subprocess.PIPE, text=True, timeout=60)
+                    self.assertEqual((p.stderr, p.returncode),
+                                     ("runtime error: write failed: no space left on device\n", 1))
+                with self.subTest(run=name, stream="stderr"):
+                    with open("/dev/full", "w") as full:
+                        p = subprocess.run(argv, executable=exe, stdout=subprocess.PIPE, stderr=full, text=True, timeout=60)
+                    # the message itself can't be written either: the status says it
+                    self.assertEqual((p.stdout, p.returncode), ("one\ntwo\n", 1))
 
 
 if __name__ == "__main__":

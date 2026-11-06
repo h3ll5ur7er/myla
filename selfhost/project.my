@@ -149,6 +149,7 @@ fun io_text(e: IoError) -> str {
         IoError.Cancelled => "cancelled"
         IoError.Unsupported => "not supported on this target"
         IoError.BrokenPipe => "broken pipe"
+        IoError.InvalidInput => "invalid input (a NUL byte in a path)"
         IoError.Other(code) => format("errno {}", code)
     }
 }

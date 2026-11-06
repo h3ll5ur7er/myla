@@ -15,7 +15,8 @@ from .util import cp_utf8, format_specs
 from std.fmt import fmt_int, fmt_float, fmt_text
 from std.slice import range_of, str_whole, take_str
 from std.num import f64_literal_bits, f32_round_bits, float_from_bits, pow2, format_float
-from std.io import write
+from std.io import write, eprint, errno_text
+from std.process import exit
 from std.fs import read_to_string
 from .parser import expr_of, stmt_of, type_expr_of, block_of, pattern_of, fun_of  // AST values for #test cases (MYLA-184)
 
@@ -2533,6 +2534,11 @@ impl Interp {
         var step: int64 = 1
         if !is_hole_part(p.step) { step = as_int(self.eval(p.step)) }
         if self.stop() { return Value.VUnit }
+        // a plain negative bound is an error, as a negative index is (D154)
+        if (a.1 && !a.2 && a.0 < 0) || (b.1 && !b.2 && b.0 < 0) {
+            self.fail(e, "index out of bounds")
+            return Value.VUnit
+        }
         if step == 0 {
             self.fail(e, "slice step is zero")
             return Value.VUnit
@@ -3514,8 +3520,18 @@ impl Interp {
 
     // -- output -----------------------------------------------------------
 
+    // A program's output; one the system won't take ends the program with
+    // a runtime error, as natively (D153; a closed pipe ends it quietly in
+    // `write`, D146).
     fun emit(self, s: str) {
-        write(1, s)
+        match write(1, s) {
+            Ok(()) => {},
+            Err(e) => {
+                let code = __io_errno()
+                eprint(f"runtime error: write failed: {errno_text(code)}\n")
+                exit(1)
+            },
+        }
     }
 }
 

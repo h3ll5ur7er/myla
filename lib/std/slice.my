@@ -3,8 +3,8 @@
 // `xs[a:b:step]` takes the elements from `a` up to (not including) `b`,
 // `step` apart; a bound may count from the end (`^n` is `len - n`), and a
 // bound left out is the end the step starts or stops at. The bounds are
-// clamped to the list, so a slice never fails (a plain negative bound is
-// before the start, not a count from the end). A negative step goes
+// clamped to the list; a plain negative bound is an error, which the
+// caller reports as it does a negative index (D154). A negative step goes
 // backwards, as in Python. The interpreter and the code generator both take
 // their indices from `range_of`, so every runner takes the same elements; a
 // step of 0 and a `str` bound inside a character are checked by the caller,

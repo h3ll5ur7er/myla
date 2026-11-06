@@ -169,9 +169,31 @@ fun record(r: int64) {
     }
 }
 
+// Whether `path` holds a NUL byte, which the kernel would take for its end
+// (`"a\u{0}b"` naming `a`): such a path names nothing, with EINVAL (the
+// review of 2026-11-06, R7; `IoError.InvalidInput`).
+fun nul_in(path: str) -> bool {
+    let p = __addr_of(path)
+    let n = __load64(p)
+    var i: int64 = 0
+    while i < n {
+        if __load8(p + 8 + i) == 0u8 {
+            __set_io_errno(EINVAL)
+            return true
+        }
+        i += 1
+    }
+    return false
+}
+
+const EINVAL: int64 = 22
+
 // `__stat`: the mode of what `path` names (the type bits and permissions),
 // or -1.
 pub fun stat(path: str) -> int {
+    if nul_in(path) {
+        return -1
+    }
     let r = os.mode_of(path)
     record(r)
     if r < 0 {
@@ -182,19 +204,27 @@ pub fun stat(path: str) -> int {
 
 // `__mkdir`: a directory with the permissions `mode`.
 pub fun mkdir(path: str, mode: int) {
-    record(os.make_dir(path, mode as int64))
+    if !nul_in(path) {
+        record(os.make_dir(path, mode as int64))
+    }
 }
 
 pub fun unlink(path: str) {
-    record(os.remove_file(path))
+    if !nul_in(path) {
+        record(os.remove_file(path))
+    }
 }
 
 pub fun rmdir(path: str) {
-    record(os.remove_dir(path))
+    if !nul_in(path) {
+        record(os.remove_dir(path))
+    }
 }
 
 pub fun rename(from_path: str, to_path: str) {
-    record(os.rename(from_path, to_path))
+    if !nul_in(from_path) && !nul_in(to_path) {
+        record(os.rename(from_path, to_path))
+    }
 }
 
 // `__getcwd`: the working directory, or "" with the errno (ENOENT for a
@@ -219,6 +249,9 @@ pub fun getcwd() -> str {
 // until the end.
 pub fun read_file(path: str) -> str {
     __set_io_errno(0)
+    if nul_in(path) {
+        return ""
+    }
     let fd = os.open_read(path)
     if fd < 0 {
         __set_io_errno(-fd)
@@ -261,6 +294,9 @@ pub fun read_file(path: str) -> str {
 // permissions 0644), the errno recorded.
 pub fun write_file(path: str, contents: str) {
     __set_io_errno(0)
+    if nul_in(path) {
+        return
+    }
     let fd = os.open_write(path)
     if fd < 0 {
         __set_io_errno(-fd)
@@ -285,6 +321,9 @@ pub fun write_file(path: str, contents: str) {
 // or "" with the errno.
 pub fun list_dir(path: str) -> str {
     __set_io_errno(0)
+    if nul_in(path) {
+        return ""
+    }
     let fd = os.open_dir(path)
     if fd < 0 {
         __set_io_errno(-fd)
@@ -1000,11 +1039,46 @@ fun sb_bigger(holder: int64, cell: int64, need: int64) -> int64 {
 
 
 // `print(s)` (`__print_str`) and `print` of the other scalars but floats.
+// A closed pipe ends the program quietly (D146), another error with a
+// runtime error (D153).
 pub fun print_str(s: str) {
     let c = __addr_of(s)
-    if os.write_line(c + 8, __load64(c)) == os.EPIPE {
+    let r = os.write_line(c + 8, __load64(c))
+    if r == os.EPIPE {
         os.broken_pipe()
     }
+    if r < 0 {
+        write_failed(-r)
+    }
+}
+
+// A write without a result that failed: the program ends with a runtime
+// error saying why (D153; `std.io` says the same for its writes).
+fun write_failed(code: int64) {
+    write_err(__addr_of("runtime error: write failed: "))
+    write_err(__addr_of(errno_text(code)))
+    write_err(__addr_of("\n"))
+    os.exit(1)
+}
+
+// What the errno `code` of a failed write means (as `strerror` says it).
+fun errno_text(code: int64) -> str {
+    if code == 28 {
+        return "no space left on device"
+    }
+    if code == 5 {
+        return "input/output error"
+    }
+    if code == 9 {
+        return "bad file descriptor"
+    }
+    if code == 27 {
+        return "file too large"
+    }
+    if code == 122 {
+        return "disk quota exceeded"
+    }
+    return format("errno {}", code)
 }
 
 pub fun print_int(v: int64) {

@@ -23,6 +23,7 @@ pub enum IoError {
     Cancelled,
     Unsupported,
     BrokenPipe,
+    InvalidInput,
     Other(int32),
 }
 
@@ -35,6 +36,7 @@ pub enum IoError {
 #test(39)[IoError.NotEmpty]
 #test(38)[IoError.Unsupported]
 #test(32)[IoError.BrokenPipe]
+#test(22)[IoError.InvalidInput]
 #test(5)[IoError.Other(5)]
 pub fun from_errno(code: int32) -> IoError {
     if code == 2 { return IoError.NotFound }
@@ -47,6 +49,7 @@ pub fun from_errno(code: int32) -> IoError {
     if code == 125 { return IoError.Cancelled }
     if code == 38 || code == 95 { return IoError.Unsupported }
     if code == 32 { return IoError.BrokenPipe }
+    if code == 22 { return IoError.InvalidInput }
     return IoError.Other(code)
 }
 

@@ -3551,6 +3551,13 @@ impl Lower {
                 let x = self.expr(cg, v)
                 let x64 = self.temp(i64)
                 self.add(Inst.Cast(x64, cg.type_of(v.id), i64, x))
+                // a plain negative bound is an error, as a negative index is
+                // (D154); one counted from the end clamps
+                if !from_end {
+                    let ok = self.temp(Type.TBool)
+                    self.add(Inst.Cmp(ok, ">=", i64, x64, self.konst(i64, 0)))
+                    self.add(Inst.Check(ok, "index", Pos { line: e.line, col: e.col }))
+                }
                 vals.push(x64)
                 vals.push(self.konst(Type.TBool, 1))
                 vals.push(self.konst(Type.TBool, if from_end { 1 } else { 0 }))
