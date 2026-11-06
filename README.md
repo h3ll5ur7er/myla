@@ -96,7 +96,7 @@ async fun main() {
 
 Structs, enums with payloads and `match`, tuples, lists and maps, strings and `char` (UTF-8), `float32`/`float64`; generics (monomorphized), traits with operator overloading and `#derive(Eq)`; methods, closures, pipelines (`x |> f(y)`), composition (`f >> g`) and partial application (`f(_, 2)`); guaranteed tail calls (`become`); modules with `pub` and packages; `#test(args)[expected]` cases next to the code they test; `async`/`await`, structured child tasks (`async let`, `std.task`) and actors on a multi-threaded native runtime.
 
-The standard library has I/O and files (`std.io`, `std.fs`), processes (`std.process`), JSON and TOML (`std.json`, `std.toml`), number formatting (`std.num`) and task groups (`std.task`).
+The standard library has I/O and files (`std.io`, `std.fs`), processes (`std.process`), JSON and TOML (`std.json`, `std.toml`), formatting (`std.fmt`, `std.num`), slices (`std.slice`), mathematics (`std.math`), a clock (`std.time`) and tasks (`std.task`: groups, cancellation, sleep and timeouts).
 
 The reference is the wiki, starting at [Language](docs/Language.md); the reasons behind each rule are the numbered decisions on [Decisions](docs/Project/Decisions.md).
 
@@ -145,8 +145,8 @@ Next on the [Roadmap](docs/Project/Roadmap.md), from the [reflection on the two 
 ## Working on Myla
 
 ```bash
-scripts/test.sh fast        # the quick burn tests, about 20 s once the tools are cached
-scripts/test.sh             # every burn test, the self-hosting gates included (about 2 minutes)
+scripts/test.sh fast        # the quick burn tests, about a minute once the tools are cached
+scripts/test.sh             # every burn test, the self-hosting gates included (about 5 minutes)
 scripts/bootstrap.sh        # after changing selfhost/: the fixed point
 scripts/update-seed.sh      # after changing the compiler: a new seed (CI fails on a stale one)
 ```

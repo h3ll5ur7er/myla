@@ -1,6 +1,6 @@
 # Standard library
 
-Myla has built-in functions known to the checker, and a small standard library written in Myla under [[lib/std/io.my|lib/std/]]. Both work without libc: natively they rest on the platform layer `std.platform`, raw Linux system calls on x86-64 and aarch64 and WASI's imports on wasm32 ([[Architecture/Native-backend]]), and so does the interpreter, which is a native program itself. What a target lacks shows as an error of its own, `Unsupported` (D129, D132): on wasm32 `run` and `spawn` fail with `SpawnError.Unsupported`, as there are no processes. What each target can do (processes, suspending input, the file system it sees, the working directory) is on [[Language/Targets]].
+Myla has built-in functions known to the checker, and a small standard library written in Myla under [[lib/std/io.my|lib/std/]]. Both work without libc: natively they rest on the platform layer `std.platform`, raw Linux system calls on x86-64 and aarch64 and WASI's imports on wasm32 ([[Architecture/Native-backend]]), and so does the interpreter, which is a native program itself. What a target lacks shows as an error of its own, `Unsupported` (D129, D132): on wasm32 `run`, `run_async` and `command(…).run()` fail with `SpawnError.Unsupported`, as there are no processes. What each target can do (processes, suspending input, the file system it sees, the working directory) is on [[Language/Targets]].
 
 [TOC]
 
@@ -20,7 +20,7 @@ These names are reserved: no declaration may reuse them. The ones on a receiver 
 | `StringBuilder()`, `sb.append(s)`, `sb.append(s, start, end)`, `sb.append_byte(b)`, `sb.build()` | | Methods but `StringBuilder()`; `append(s, start, end)` adds the bytes `s[start..end]` ([[Language/Collections-and-strings]]) |
 | `assert(cond[, msg])`, `panic(msg)`, `unreachable()` | | See [[Language/Attributes-and-testing]] |
 
-The low-level primitives `__write`, `__read`, `__poll`, `__exit`, `__args`, `__read_file`, `__write_file`, `__list_dir`, `__mkdir`, `__stat`, `__getcwd`, `__getenv`, `__sqrt`, `__f64_bits`, `__f64_from_bits`, `__unlink`, `__rmdir`, `__rename`, `__io_errno`, `__run`, `__run_stderr`, `__run_exit_code`, `__run_signal`, `__run_errno` and `__task_cancelled`, and the primitives behind `std.time`, `std.task`'s timers and `std.process.spawn` (`__clock_ns`, `__sleep`, `__spawn`, …) exist for the standard library; call the `std` functions instead. A call of one from a program outside the standard library compiles, with a warning (D100, [[MYLA-186]]): it is for code that knows what it does, such as a new std function in the making.
+The low-level primitives `__write`, `__read`, `__poll`, `__exit`, `__args`, `__read_file`, `__write_file`, `__list_dir`, `__mkdir`, `__stat`, `__getcwd`, `__getenv`, `__sqrt`, `__f64_bits`, `__f64_from_bits`, `__unlink`, `__rmdir`, `__rename`, `__io_errno`, `__run`, `__run_stderr`, `__run_exit_code`, `__run_signal`, `__run_errno` and `__task_cancelled`, and the primitives behind `std.time`, `std.task`'s timers and `std.process`'s child processes (`__clock_ns`, `__sleep`, `__spawn`, …) exist for the standard library; call the `std` functions instead. A call of one from a program outside the standard library compiles, with a warning (D100, [[MYLA-186]]): it is for code that knows what it does, such as a new std function in the making.
 
 ## std.io
 

@@ -48,7 +48,7 @@ After the first two new targets, the [[Project/Reflection-2026-11]] set the orde
 1. **Quick wins**:
    - ~~make the bootstrap fast~~: done, 5 minutes → 8 seconds ([[MYLA-60]], [[MYLA-16]]);
    - ~~DWARF line tables so gdb steps through Myla source~~: done for the Python backend, `myla build -g` ([[MYLA-71]]);
-   - the `myla` agent skill ([[MYLA-68]]) and GitHub Actions CI ([[MYLA-69]]), both in review.
+   - ~~the `myla` agent skill ([[MYLA-68]]) and GitHub Actions CI ([[MYLA-69]])~~: done.
 2. **Make the existing toolchains correct.** The October 2026 review found parity and memory bugs. All the urgent ones are fixed: the Python backend's ([[MYLA-2]], [[MYLA-3]], [[MYLA-4]], and [[MYLA-10]] for diagnostics) and the self-hosted compiler's ([[MYLA-21]], [[MYLA-22]]); the Rust edition, with its own miscompiles, was removed ([[MYLA-70]]). The medium and low ones are on [[Project/Known-issues]].
 3. **Close the self-hosted gaps**: ~~floats~~ (done, [[MYLA-29]]), ~~the module loader~~ (done, [[MYLA-30]]), ~~diagnostics~~ (done, [[MYLA-28]]), so that the self-hosted toolchain can replace the Python one for everyday use; since November 2026 it is the only one (D101).
 4. **Performance**: ~~string reclamation~~: done, strings are reference-counted (D62, [[MYLA-18]]).

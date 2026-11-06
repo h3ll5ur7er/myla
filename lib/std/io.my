@@ -1,7 +1,8 @@
-// std.io — freestanding console/stream I/O (v0.5.4, D29; reading MYLA-78).
+// std.io — freestanding console/stream I/O (D29; reading MYLA-78; errors D146).
 //
 // Thin wrappers over the runtime's raw `write` and `read` primitives (the
-// Linux syscalls natively; Python `os.write`/`os.read` in the interpreter).
+// platform layer's system calls natively; the same in the interpreter, which
+// is a native program).
 // String bytes are written verbatim (UTF-8), so `print`/`println` are
 // byte-for-byte identical across the interpreter and the native backend.
 // Output is not buffered, so whatever a program wrote is out before it waits

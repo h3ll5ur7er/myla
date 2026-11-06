@@ -1,10 +1,10 @@
-// std.fs — minimal filesystem access (v0.5.4, D29; directories MYLA-88).
+// std.fs — minimal filesystem access (D29; directories MYLA-88; causes D129).
 //
 // `read_to_string` opens a file, reads it whole, and closes it, returning the
 // contents as a `str` or an `IoError` describing why it failed. Errors are
 // carried in a `Result`, so callers compose them with `?` (D16/D36). The
-// underlying open/read/close run as raw Linux syscalls natively and as Python
-// file IO in the interpreter, with identical (errno-keyed) error mapping.
+// underlying open/read/close go through the platform layer (`std.platform`),
+// natively and in the interpreter alike, with one errno-keyed error mapping.
 
 // Why a filesystem or I/O operation failed: the causes a program handles on
 // every target (D129). `Unsupported`: the target can't do it at all (wasm32

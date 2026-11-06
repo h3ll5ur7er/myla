@@ -21,7 +21,7 @@ fun main() {
 - Parameter and result types are always written; a function without `-> T` returns the unit value `()`, the same as one declared `-> ()` (D140): its type is `(…) -> ()`, and `return ()` may end it.
 - Parameters are immutable inside the body, and arguments are passed by value.
 - Functions may be declared in any order and may recurse.
-- Calls must give exactly the declared number of arguments, each of the parameter's type.
+- Calls give the declared arguments, each of the parameter's type; trailing parameters with a default value may be left out ("Default values" below).
 - A top-level name can't reuse a built-in function's name (`print`, `len`, `push`, …).
 - Every path must return a value ([[Language/Statements]]).
 

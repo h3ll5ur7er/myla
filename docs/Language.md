@@ -28,10 +28,10 @@ The reference for Myla (version 1.0). These pages and the decisions on [[Project
 | [[Language/Generics]] | Generic functions and types, inference, monomorphization |
 | [[Language/Collections-and-strings]] | Lists, maps, strings, `format`, `StringBuilder`, chars |
 | [[Language/Modules]] | Imports, `pub`, packages, resolution rules |
-| [[Language/Standard-library]] | `print` and the other built-in functions, `std.io`, `std.fs`, `std.process` |
-| [[Language/Concurrency]] | D89 to D97: `async`/`await`, `async let`, `std.task`, actors |
+| [[Language/Standard-library]] | `print` and the other built-in functions; `std.io`, `std.fs`, `std.process`, `std.fmt`, `std.slice`, `std.math`, `std.num`, `std.time`, `std.task`, `std.json`, `std.toml` |
+| [[Language/Concurrency]] | D89 to D97, D107, D110, D124: `async`/`await`, `async let`, actors, `std.task` (`all`, `cancel`, `yield`, `sleep`, `timeout`), the scheduling order |
 | [[Language/Attributes-and-testing]] | `#main`, `#test`, `#derive`, `const`, `assert`/`panic`/`unreachable`, runtime errors |
 | [[Language/Targets]] | What every target guarantees, and what differs: processes, workers, files, stacks, memory |
 | [[Language/Grammar]] | The grammar in EBNF |
 
-The reasons behind each rule are recorded as numbered decisions (D1–D138) on [[Project/Decisions]]. When a rule is broken, the message underlines the place, often with a note (`'x' is declared here`) or a `help: did you mean 'count'?` line for a misspelt name.
+The reasons behind each rule are recorded as numbered decisions (D1 onwards) on [[Project/Decisions]]. When a rule is broken, the message underlines the place, often with a note (`'x' is declared here`) or a `help: did you mean 'count'?` line for a misspelt name.

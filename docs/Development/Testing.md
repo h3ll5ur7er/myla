@@ -7,7 +7,7 @@ The tests are the burn tests in `tests/burn/`: modules of the standard library's
 ## Running
 
 ```bash
-scripts/test.sh fast                                     # about 20 seconds once the tools are cached (the quick burn modules)
+scripts/test.sh fast                                     # about a minute once the tools are cached (the quick burn modules)
 scripts/test.sh                                          # every burn test (all)
 python3 -m unittest discover -s tests/burn -t .          # the same
 python3 -m unittest tests.burn.test_error_corpus -v      # one file
@@ -27,7 +27,7 @@ python3 scripts/test-target.py wasm32-wasi test_slices   # one suite, built for 
 
 `tests/burn/_targets.py` is the one place that says which suites run and what each target is excused from, with the reason and its task: whole tests (`SKIP`, matched by id or a prefix of one) and single programs of a test's loop (`SKIP_PROGRAMS`, which the loop asks `program_excuse`). A test that reads the x86-64 assembly runs its program on every target and ends, skipped, where it starts reading (`_x86_only` in `test_selfhost_codegen.py`). An exception is for a real difference ([[Language/Targets]]) or a known gap with a task; check that it's earned by running the test with `MYLA_TEST_TARGET` set and the skip left out.
 
-The burn tests build everything with the self-hosted compiler ([[MYLA-235]]). `tests/burn/_tools.py` bootstraps the compiler of the current sources from the seed (`bootstrap/seed.s` assembled is stage 0, it compiles the compiler, which compiles it again: at the fixed point the same as `build/stage3`, [[MYLA-218]]) and builds the self-hosted tools (`selfhost/<name>.my`) with it through `selfhost_tool(name)`, other Myla programs such as the grammar tool and the language server through `myla_tool(path, name)`, as `scripts/bootstrap.sh` does; `tests/burn/_native.py` builds the test programs with the natively built CLI (`myla build`). A tool is cached as `build/test-tools/<name>-selfhost-<hash>`, where the hash covers every source that can change it (`bootstrap/seed.s`, `lib/std/*.my`, `selfhost/*.my`, `tools/**/*.my`), so an edit to any of them rebuilds it and the stale copy is removed. The whole suite takes about 2 minutes in one process with the tools cached (836 tests in 121 s on 4 cores, measured on 2026-11-01 after [[MYLA-219]]); building the tools adds about a minute to a cold run.
+The burn tests build everything with the self-hosted compiler ([[MYLA-235]]). `tests/burn/_tools.py` bootstraps the compiler of the current sources from the seed (`bootstrap/seed.s` assembled is stage 0, it compiles the compiler, which compiles it again: at the fixed point the same as `build/stage3`, [[MYLA-218]]) and builds the self-hosted tools (`selfhost/<name>.my`) with it through `selfhost_tool(name)`, other Myla programs such as the grammar tool and the language server through `myla_tool(path, name)`, as `scripts/bootstrap.sh` does; `tests/burn/_native.py` builds the test programs with the natively built CLI (`myla build`). A tool is cached as `build/test-tools/<name>-selfhost-<hash>`, where the hash covers every source that can change it (`bootstrap/seed.s`, `lib/std/*.my`, `selfhost/*.my`, `tools/**/*.my`), so an edit to any of them rebuilds it and the stale copy is removed. The whole suite takes about 5 minutes in one process with the tools cached (1,035 tests in 313 s on 4 cores, measured on 2026-11-06 with the aarch64 and wasm32 suites in it; 836 tests in 121 s on 2026-11-01 after [[MYLA-219]]); building the tools adds about a minute to a cold run.
 
 ## Recorded answers
 
@@ -75,7 +75,7 @@ The jobs run on `ubuntu-24.04` (pinned: `ubuntu-latest` moves, and the burn job 
 
 | Suite | Tests | Result |
 | --- | --- | --- |
-| Burn | 870 (plus subtests, about 110 skipped: recorded answers about `selfhost/`, `tools/` and `lib/std/` files changed since, each such file one subtest of the lexer and parser corpus gates; the tree-sitter CLI) | All pass; about 120 s in one process with the tools cached, the compiler bootstrapped from the seed and every program built by it |
+| Burn | 1,035 (plus subtests; 183 skipped on 2026-11-06: recorded answers about `selfhost/`, `tools/` and `lib/std/` files changed since, by now every one of them, each such file one subtest of the lexer and parser corpus gates; the tree-sitter CLI; a target's tools) | All pass; about 5 minutes in one process with the tools cached, the compiler bootstrapped from the seed and every program built by it |
 | `#test` cases in `selfhost/` | on 1,030 of 1,286 value-returning functions (80 %) | `myla test` passes every one ([[MYLA-184]]) |
 
 ## What the Python tests covered

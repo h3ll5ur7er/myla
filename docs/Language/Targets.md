@@ -29,7 +29,7 @@ A program learns that its target lacks something from an error: the cause `Unsup
 
 | | x86-64 Linux | aarch64 Linux | wasm32 on WASI |
 | --- | --- | --- | --- |
-| Child processes (`std.process.run`, `spawn`) | Yes | Yes | No: `Err(SpawnError.Unsupported)` |
+| Child processes (`std.process.run`, `run_async`, `command`) | Yes | Yes | No: `Err(SpawnError.Unsupported)` |
 | Workers for tasks | `MYLA_THREADS`, else one per CPU the process may use; at most 32 | The same | One; `MYLA_THREADS` is ignored (D125 (4)) |
 | Input that suspends a task (`read_line_async`, …) | Yes: the task waits, the others run | Yes | No: the read blocks the program (the host can't wait for input without blocking) |
 | `task.sleep`, `task.timeout` | Yes | Yes | Yes (`poll_oneoff`) |
@@ -39,7 +39,7 @@ A program learns that its target lacks something from an error: the cause `Unsup
 | A child's end by a signal (`ExitStatus.Signaled`) | Yes | Yes | No processes |
 | The main thread's stack | Up to 120 MiB (the soft limit raised, MYLA-182) | The same (under qemu-user: 8 MiB unless `QEMU_STACK_SIZE` says more) | 8 MiB of shadow stack, and the engine's own call stack (Node: `--stack-size`) |
 | A worker's stack | 8 MiB, with a guard page | The same | One worker: the main stack |
-| Memory | The machine's | The machine's | At most 4 GiB, which the program never gives back |
+| Memory | The machine's | The machine's | At most 4 GiB, which the program never gives back; today a list or string stops at 2^26 elements (a cell above 4 KiB takes the next power of two and freed big cells aren't reused by a bigger class, [[MYLA-284]]) |
 | A line printed whole while other workers print | Up to `PIPE_BUF` (4 KiB) per line | The same | One worker: always |
 | Debug information (`myla build -g`) | Yes ([[Development/Debugging]]) | Not yet ([[MYLA-259]]) | Not yet |
 
