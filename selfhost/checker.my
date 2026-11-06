@@ -1111,6 +1111,36 @@ fun contains_type_param(t: Type) -> bool {
     }
 }
 
+// The names of the parameters from `start` on, when every one of them has
+// a default (the defaults a `#test` case leaves out); else none.
+fun defaulted_from(params: [Param], start: int32) -> [str] {
+    var out: [str] = []
+    var i = start
+    while i < params.len() {
+        match params[i].default {
+            Some(d) => { out.push(params[i].name) },
+            None => { return [] },
+        }
+        i += 1
+    }
+    return out
+}
+
+// `'a'`, `'a' and 'b'`, `'a', 'b' and 'c'`.
+#test(["x"])["'x'"]
+#test(["x", "y"])["'x' and 'y'"]
+#test(["x", "y", "z"])["'x', 'y' and 'z'"]
+fun quoted_list(names: [str]) -> str {
+    var sb = StringBuilder()
+    var i = 0
+    while i < names.len() {
+        if i > 0 { sb.append(if i == names.len() - 1 { " and " } else { ", " }) }
+        sb.append(f"'{names[i]}'")
+        i += 1
+    }
+    return sb.build()
+}
+
 #test(None)[true]
 #test(Some(Type.TStr))[false]
 fun is_none_type(t: Option<Type>) -> bool {
@@ -1317,7 +1347,7 @@ pub struct Frame { names: [str], binds: [Binding] }
 // A `become` in function `func` calling `target` (a function value's call
 // when `value`; `mutates`: a `var self` method's), with the types of its
 // arguments (the receiver first), for `check_become_words` (D119).
-pub struct BecomeWords { func: str, target: str, value: bool, mutates: bool, args: [Type], line: int32, col: int32, sp: SrcSpan, decl: int32 }
+pub struct BecomeWords { func: str, target: str, value: bool, mutates: bool, args: [Type], defaults: [str], line: int32, col: int32, sp: SrcSpan, decl: int32 }
 
 // `become` (D87; types.py: _check_become): a `become` that hands a heap value
 // over to a parameter, the first of each, and one that passes a heap-value
@@ -4629,15 +4659,17 @@ impl Checker {
         }
         // and the defaults the call leaves to its trailing parameters (D136),
         // as their parameters' types say (the defaults may not be checked yet)
+        var defaults: [str] = []
         if self.call_defaults.contains(ve.id) {
             let fi = self.func_idx(target)
             var k = ats.len()
             for d in self.call_defaults[ve.id] {
                 if fi >= 0 && k < self.functions[fi].params.len() { ats.push(self.functions[fi].params[k]) } else { ats.push(Type.TBool) }
+                if fi >= 0 && k < self.functions[fi].decl.params.len() { defaults.push(self.functions[fi].decl.params[k].name) }
                 k = k + 1
             }
         }
-        self.become_words.push(BecomeWords { func: self.fun_name, target: target, value: kind == "value", mutates: self.call_mutates, args: ats, line: ve.line, col: ve.col, sp: ve.sp, decl: self.cur_decl })
+        self.become_words.push(BecomeWords { func: self.fun_name, target: target, value: kind == "value", mutates: self.call_mutates, args: ats, defaults: defaults, line: ve.line, col: ve.col, sp: ve.sp, decl: self.cur_decl })
         return Ok(0)
     }
 
@@ -4673,7 +4705,9 @@ impl Checker {
                 i = i + 1
             }
             if passed > REG_ARG_WORDS && passed > received {
-                let msg = format("'become' passes {} argument words, {} of them on the stack, but '{}' received {} there", passed, passed - REG_ARG_WORDS, b.func, max_int(received - REG_ARG_WORDS, 0))
+                var msg = format("'become' passes {} argument words, {} of them on the stack, but '{}' received {} there", passed, passed - REG_ARG_WORDS, b.func, max_int(received - REG_ARG_WORDS, 0))
+                // the defaults the call leaves are passed too (D136, MYLA-293)
+                if b.defaults.len() > 0 { msg = format("{}, counting the defaults of {} the call leaves out", msg, quoted_list(b.defaults)) }
                 self.errs.push(CheckErr { line: b.line, col: b.col, sp: b.sp, msg: msg, decl: b.decl, notes: [] })
             }
         }
@@ -5664,7 +5698,13 @@ impl Checker {
         let idx = self.func_idx(fd.name)
         let sig = self.functions[idx]
         let outs = match attr.outputs { Some(x) => x, None => { return Err(terr_at(attr.line, attr.col, attr.sp, "'#test' requires an expected result, e.g. #test(args)[expected]")) } }
-        if attr.args.len() != sig.params.len() { return Err(terr_at(attr.line, attr.col, attr.sp, format("'#test' expects {} argument(s), got {}", sig.params.len(), attr.args.len()))) }
+        if attr.args.len() != sig.params.len() {
+            var msg = format("'#test' expects {} argument(s), got {}", sig.params.len(), attr.args.len())
+            // a case gives every argument, a default's too (D136, MYLA-293)
+            let left = defaulted_from(fd.params, attr.args.len())
+            if left.len() > 0 { msg = format("{}: a case gives every argument, the defaults of {} too", msg, quoted_list(left)) }
+            return Err(terr_at(attr.line, attr.col, attr.sp, msg))
+        }
         if sig_has_error(sig.params, sig.ret) { return Err(poisoned()) }   // the signature failed (MYLA-110)
         self.push_scope()
         var i = 0
