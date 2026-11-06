@@ -1442,164 +1442,33 @@ impl CodeGen {
     }
 
     // `myla_<fn>__fnval`, the adapter that calls a plain `fun` as a function
-    // value (MYLA-126): a parameter passed owned gets a reference of its own,
-    // then the function in its place (an async one's frame made, D90). It
-    // takes the environment last, as every function value's code does, and
-    // ignores it (D130).
+    // value (MYLA-126): built as IR as on every target (`emit_fnval_adapter`,
+    // MYLA-263); an async one's makes its frame (D90), taking the environment
+    // last, as every function value's code does, and ignoring it (D130).
     fun emit_fnval_thunk_wasm(var self, n: str) {
+        if !self.is_async_fn(n) {
+            // as on every target (MYLA-263)
+            self.emit_fnval_adapter(n)
+            return
+        }
+        // an async function's value makes its frame (D90): `__new` takes
+        // the words, the environment last ignored
         let sig = self.sig_of(n)
         var first = 0
         if is_aggregate_opt(sig.ret) { first = 1 }
-        var words = first + sig.params.len()
+        let words = first + sig.params.len()
         let name = format("myla_{}__fnval", n)
-        var k = 0
-        var byval = false
-        while k < sig.params.len() {
-            if self.byval_param(sig, k, sig.params[k]) { byval = true }
-            k = k + 1
-        }
-        if byval && !self.is_async_fn(n) {
-            // a function value passes an aggregate by its address; the
-            // function takes the words of one passed by value (D88): the
-            // adapter is a partial application with every argument a hole
-            // (MYLA-282)
-            var slots: [int32] = []
-            var aggs: [bool] = []
-            for p in sig.params {
-                slots.push(-1)
-                aggs.push(false)
-            }
-            self.gen_partial_function_wasm(PartialJob { lifted: n + "__fnval", target: n, fn_off: -1, slots: slots, aggs: aggs, sret: first == 1, owned: [] })
-            return
-        }
         self.wasm_define(name, words + 1)
         self.emit("")
         self.emit(format("{}:", name))
         self.emit(format(".functype {} {}", name, wasm_sig(words + 1)))
-        let async_fn = self.is_async_fn(n)
         var i = 0
-        while i < sig.params.len() && !async_fn {
-            if self.owned_param(sig, i, sig.params[i]) {
-                let p = first + i
-                var j = 0
-                while j < 2 {
-                    self.emit(format("local.get {}", p))
-                    self.emit("i64.const 8")
-                    self.emit("i64.sub")
-                    self.emit("i32.wrap_i64")
-                    j = j + 1
-                }
-                self.emit("i64.load 0")
-                self.emit("i64.const 1")
-                self.emit("i64.add")
-                self.emit("i64.store 0")
-            }
-            i = i + 1
-        }
-        i = 0
         while i < words {
             self.emit(format("local.get {}", i))
             i = i + 1
         }
-        if async_fn { self.wasm_call("return_call", format("myla_{}__new", n), words) }
-        else { self.wasm_call("return_call", format("myla_{}", n), words) }
+        self.wasm_call("return_call", format("myla_{}__new", n), words)
         self.emit("end_function")
     }
 
-    // A partial application's function (`myla_<lifted>`, D119): its
-    // environment (the last parameter, D130) holds the arguments given, the
-    // call brings the holes; the target called in its place with all of them. A
-    // parameter passed by value gets a copy of its own (D88), one passed
-    // owned a reference of its own (MYLA-127).
-    fun gen_partial_function_wasm(var self, job: PartialJob) {
-        let n = job.slots.len()
-        var first = 0
-        if job.sret { first = 1 }
-        var holes = 0
-        for sl in job.slots {
-            if sl < 0 { holes = holes + 1 }
-        }
-        var tsig = self.funcs[0]
-        if job.fn_off < 0 { tsig = self.sig_of(job.target) }
-        let in_words = first + holes
-        // the environment (its last parameter); a local: an address
-        let env = in_words
-        let src = in_words + 1
-        let name = format("myla_{}", job.lifted)
-        self.wasm_define(name, in_words + 1)
-        self.emit("")
-        self.emit(format("{}:", name))
-        self.emit(format(".functype {} {}", name, wasm_sig(in_words + 1)))
-        self.emit(".local i64")
-        var total = 0
-        if job.sret {
-            self.emit("local.get 0")
-            total = 1
-        }
-        var hidx = 0
-        var pos = 0
-        while pos < n {
-            // its word (or an aggregate's address) into `src`
-            if job.slots[pos] < 0 {
-                self.emit(format("local.get {}", first + hidx))
-                hidx = hidx + 1
-            } else {
-                self.emit(format("local.get {}", env))
-                self.emit(format("i64.const {}", job.slots[pos]))
-                self.emit("i64.add")
-                if !job.aggs[pos] {
-                    self.emit("i32.wrap_i64")
-                    self.emit("i64.load 0")
-                }
-            }
-            self.emit(format("local.set {}", src))
-            let named = job.fn_off < 0 && pos < tsig.params.len()
-            if named && self.byval_param(tsig, pos, tsig.params[pos]) {
-                let t = tsig.params[pos]
-                self.wasm_retain_at(src, 0, t, false)
-                var k = 0
-                while k < self.word_size(t) / 8 {
-                    self.emit(format("local.get {}", src))
-                    self.emit("i32.wrap_i64")
-                    self.emit(format("i64.load {}", 8 * k))
-                    k = k + 1
-                }
-                total = total + self.word_size(t) / 8
-            } else {
-                if named && self.owned_param(tsig, pos, tsig.params[pos]) {
-                    var j = 0
-                    while j < 2 {
-                        self.emit(format("local.get {}", src))
-                        self.emit("i64.const 8")
-                        self.emit("i64.sub")
-                        self.emit("i32.wrap_i64")
-                        j = j + 1
-                    }
-                    self.emit("i64.load 0")
-                    self.emit("i64.const 1")
-                    self.emit("i64.add")
-                    self.emit("i64.store 0")
-                }
-                self.emit(format("local.get {}", src))
-                total = total + 1
-            }
-            pos = pos + 1
-        }
-        if job.fn_off >= 0 {
-            // the function value in the environment: its environment (the
-            // last argument), its code
-            self.emit(format("local.get {}", env))
-            self.emit("i32.wrap_i64")
-            self.emit(format("i64.load {}", job.fn_off + 8))
-            self.emit(format("local.get {}", env))
-            self.emit("i32.wrap_i64")
-            self.emit(format("i64.load {}", job.fn_off))
-            self.emit("i32.wrap_i64")
-            self.emit(format("return_call_indirect {}", wasm_sig(total + 1)))
-        } else {
-            self.wasm_call("return_call", format("myla_{}", job.target), total)
-        }
-        self.emit("end_function")
-        if job.owned.len() > 0 { self.emit_env_drop(job.lifted, job.owned) }
-    }
 }

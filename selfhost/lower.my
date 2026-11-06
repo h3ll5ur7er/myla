@@ -5198,6 +5198,109 @@ pub fun env_drop_ir(cg: CodeGen, lifted: str, owned: [DropEntry], free: str) -> 
     return Routine { f: lw.f, wants: lw.wants }
 }
 
+// A partial application's function, `myla_<lifted>` (D51, D60), as IR for
+// every target (MYLA-263): its parameters the holes (the result's address
+// first for an aggregate result), an aggregate as its address; its
+// environment (`ENV_WORD`) holds the arguments given (`job.slots`: each
+// argument's offset in it, -1 for a hole; `job.aggs`: an aggregate, passed
+// by its address there), or the function value called (`job.fn_off`). The
+// target called with all of them: a parameter it takes by value (D88)
+// gets a copy of its own (its words, what they own retained), one it takes
+// owned a reference of its own (MYLA-127). In its place (`become`) when the
+// words fit where they came (no more than six, or than it got), so a
+// `become` through one keeps the stack flat (MYLA-130); else a call.
+pub fun partial_ir(cg: CodeGen, job: PartialJob) -> Routine {
+    let i64 = Type.TInt(64, true)
+    let n = job.slots.len()
+    var first = 0
+    if job.sret { first = 1 }
+    var holes = 0
+    for sl in job.slots {
+        if sl < 0 { holes = holes + 1 }
+    }
+    let named = job.fn_off < 0
+    var tsig = cg.funcs[0]
+    if named { tsig = cg.sig_of(job.target) }
+    var ret_t: Option<Type> = Some(i64)
+    if job.sret { ret_t = None }
+    var lw = routine(job.lifted, ret_t)
+    // the words it is called with
+    var sret = -1
+    if job.sret { sret = lw.new_slot("__sret", i64, 8, 0, false) }
+    var hole_slots: [int32] = []
+    var h = 0
+    while h < holes {
+        hole_slots.push(lw.new_slot(format("__hole{}", h), i64, 8, first + h, false))
+        h = h + 1
+    }
+    let env_slot = lw.new_slot("__env", Type.TPtr, 8, ENV_WORD, false)
+    // read once, when something comes from it
+    var env = -1
+    var from_env = !named
+    for sl in job.slots {
+        if sl >= 0 { from_env = true }
+    }
+    if from_env { env = lw.read_cell(env_slot) }
+    var words: [int32] = []
+    if job.sret { words.push(lw.read_cell(sret)) }
+    var hi = 0
+    var pos = 0
+    while pos < n {
+        var v = -1
+        if job.slots[pos] < 0 {
+            v = lw.read_cell(hole_slots[hi])
+            hi = hi + 1
+        } else if job.aggs[pos] {
+            v = lw.temp(i64)
+            lw.add(Inst.Bin(v, "+", i64, i64, env, lw.int_const(job.slots[pos]), Pos { line: 0, col: 0 }))
+        } else {
+            v = lw.temp(i64)
+            lw.add(Inst.LoadAt(v, env, job.slots[pos], 8))
+        }
+        let typed = named && pos < tsig.params.len()
+        if typed && cg.byval_param(tsig, pos, tsig.params[pos]) {
+            let t = tsig.params[pos]
+            lw.add(Inst.Retain(t, v))
+            var k = 0
+            while k < cg.word_size(t) / 8 {
+                let w = lw.temp(i64)
+                lw.add(Inst.LoadAt(w, v, 8 * k, 8))
+                words.push(w)
+                k = k + 1
+            }
+        } else {
+            if typed && cg.owned_param(tsig, pos, tsig.params[pos]) { lw.add(Inst.RetainVal(tsig.params[pos], v)) }
+            words.push(v)
+        }
+        pos = pos + 1
+    }
+    let in_words = first + holes
+    let jumps = words.len() <= 6 || words.len() <= in_words
+    // the function value called: its two words in the environment
+    var fv = -1
+    if !named {
+        fv = lw.temp(i64)
+        lw.add(Inst.Bin(fv, "+", i64, i64, env, lw.int_const(job.fn_off), Pos { line: 0, col: 0 }))
+    }
+    var args: [int32] = []
+    var k = first
+    while k < words.len() {
+        args.push(words[k])
+        k = k + 1
+    }
+    if job.sret {
+        let r = words[0]
+        if named { lw.add(Inst.CallSret(job.target, r, args)) } else { lw.add(Inst.CallIndSret(fv, r, args)) }
+        if jumps { lw.finish(Term.Become) } else { lw.finish(Term.Ret(-1)) }
+    } else {
+        var d = -1
+        if !jumps { d = lw.temp(i64) }
+        if named { lw.add(Inst.Call(d, job.target, args)) } else { lw.add(Inst.CallInd(d, fv, args)) }
+        if jumps { lw.finish(Term.Become) } else { lw.finish(Term.Ret(d)) }
+    }
+    return Routine { f: lw.f, wants: lw.wants }
+}
+
 // `myla_<lifted>_env_deep` (`__deep_env`, D92): the environment made unshared
 // deeply, the same cell when it was the only reference, else a copy (its
 // captures retained, the original's count down), each capture a deep copy
