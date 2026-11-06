@@ -1111,6 +1111,43 @@ fun contains_type_param(t: Type) -> bool {
     }
 }
 
+#test(None)[true]
+#test(Some(Type.TStr))[false]
+fun is_none_type(t: Option<Type>) -> bool {
+    return match t { Some(x) => false, None => true }
+}
+
+// Whether an arm's body never gives a value (it returns, panics, ...).
+fun arm_diverges(body: ExprOrBlock) -> bool {
+    return match body {
+        ExprOrBlock.EB_Expr(x) => is_diverging(x),
+        ExprOrBlock.EB_Block(b) => block_returns(b),
+    }
+}
+
+// Whether the type parameter `p` occurs in `t`.
+#test(Type.TList(Type.TParam("T")), "T")[true]
+#test(Type.TList(Type.TParam("T")), "E")[false]
+#test(Type.TStr, "T")[false]
+fun mentions_param(t: Type, p: str) -> bool {
+    return match t {
+        Type.TParam(n) => n == p,
+        Type.TTuple(es) => list_mentions(es, p),
+        Type.TList(e) => mentions_param(e, p),
+        Type.TMap(k, v) => mentions_param(k, p) || mentions_param(v, p),
+        Type.TStruct(n, args) => list_mentions(args, p),
+        Type.TEnum(n, args) => list_mentions(args, p),
+        Type.TFunc(ps, r) => list_mentions(ps, p) || (match r { Some(rt) => mentions_param(rt, p), None => false }),
+        Type.TAsync(f) => mentions_param(f, p),
+        _ => false,
+    }
+}
+
+fun list_mentions(xs: [Type], p: str) -> bool {
+    for x in xs { if mentions_param(x, p) { return true } }
+    return false
+}
+
 #test([])[false]
 #test([Type.TStr])[false]
 #test([Type.TParam("T")])[true]
@@ -3550,23 +3587,39 @@ impl Checker {
 impl Checker {
     fun infer_match(var self, e: Expr, scrut: Expr, arms: [MatchArm], expected: Option<Type>, as_stmt: bool) -> Result<Option<Type>, CheckErr> {
         let st = self.expect_value(scrut, None)?
-        var bodies: [ArmBody] = []
+        // an arm whose value can't say its type alone (`None`, `[]`,
+        // `Err(e)`) takes the type of the first arm that can, when nothing
+        // is expected (MYLA-290): those arms are checked last
+        var later: [bool] = []
+        var any_later = false
+        var any_now = false
         for arm in arms {
-            self.push_scope()
-            self.check_pattern(arm.pattern, st)?
-            match arm.guard {
-                Some(g) => {
-                    let saved_guard = self.in_guard
-                    self.in_guard = true
-                    let gr = self.expect_type(g, Type.TBool, "match guard")
-                    self.in_guard = saved_guard
-                    gr?
-                },
-                None => {},
+            let l = !as_stmt && is_none_type(expected) && self.arm_needs_context(arm.body)
+            later.push(l)
+            if l { any_later = true } else { any_now = true }
+        }
+        var bodies: [ArmBody] = []
+        var i = 0
+        while i < arms.len() {
+            if any_later && any_now && later[i] {
+                bodies.push(ArmBody.ABDiverge)
+            } else {
+                bodies.push(self.check_arm(arms[i], st, expected, as_stmt)?)
             }
-            let ab = self.check_arm_body(arm.body, expected, as_stmt)?
-            self.pop_scope()
-            bodies.push(ab)
+            i += 1
+        }
+        if any_later && any_now {
+            var hint = expected
+            for ab in bodies {
+                if is_none_type(hint) {
+                    match ab { ArmBody.ABValue(ot, node) => { hint = ot }, _ => {} }
+                }
+            }
+            i = 0
+            while i < arms.len() {
+                if later[i] { bodies[i] = self.check_arm(arms[i], st, hint, as_stmt)? }
+                i += 1
+            }
         }
         self.check_exhaustive(e, st, arms)?
         match self.check_redundant(arms, st) {
@@ -3607,6 +3660,107 @@ impl Checker {
             Err(err) => { return Err(if_worded(err, arms)) },
         }
         return Ok(Some(result))
+    }
+
+    // One arm: its pattern against the scrutinee's type `st`, its guard, its body.
+    fun check_arm(var self, arm: MatchArm, st: Type, expected: Option<Type>, as_stmt: bool) -> Result<ArmBody, CheckErr> {
+        self.push_scope()
+        self.check_pattern(arm.pattern, st)?
+        match arm.guard {
+            Some(g) => {
+                let saved_guard = self.in_guard
+                self.in_guard = true
+                let gr = self.expect_type(g, Type.TBool, "match guard")
+                self.in_guard = saved_guard
+                gr?
+            },
+            None => {},
+        }
+        let ab = self.check_arm_body(arm.body, expected, as_stmt)?
+        self.pop_scope()
+        return Ok(ab)
+    }
+
+    // Whether an arm's value can't give its type without an expected one
+    // (MYLA-290): `None`, `E.V` of a generic enum, `[]`, `[:]`, a variant
+    // that leaves a type parameter open (`Ok(x)`, `Err(e)`), or an inner
+    // `if` or `match` whose arms all can't.
+    #test(checker_on("[int]"), ExprOrBlock.EB_Expr(expr_of("None")))[true]
+    #test(checker_on("[int]"), ExprOrBlock.EB_Expr(expr_of("Some(1)")))[false]
+    #test(checker_on("[int]"), ExprOrBlock.EB_Expr(expr_of("Err(1)")))[true]
+    #test(checker_on("[int]"), ExprOrBlock.EB_Expr(expr_of("[]")))[true]
+    #test(checker_on("[int]"), ExprOrBlock.EB_Expr(expr_of("[1]")))[false]
+    fun arm_needs_context(self, body: ExprOrBlock) -> bool {
+        let value = match body {
+            ExprOrBlock.EB_Expr(ex) => ex,
+            ExprOrBlock.EB_Block(bl) => {
+                if bl.stmts.len() == 0 { return false }
+                match bl.stmts[bl.stmts.len() - 1].kind {
+                    StmtKind.ExprStmt(ex) => ex,
+                    _ => { return false },
+                }
+            },
+        }
+        return self.needs_context(value)
+    }
+
+    fun needs_context(self, ex: Expr) -> bool {
+        match ex.kind {
+            ExprKind.Name(n) => {
+                if n != "None" { return false }
+                return match self.lookup(n) { Some(b) => false, None => true }
+            },
+            ExprKind.ListLit(es) => { return es.len() == 0 },
+            ExprKind.MapLit(es) => { return es.len() == 0 },
+            ExprKind.GetField(target, field) => {
+                return match self.enum_name_ref(target) {
+                    Some(en) => self.variant_leaves_params(en, field),
+                    None => false,
+                }
+            },
+            ExprKind.Call(callee, args) => {
+                match callee.kind {
+                    ExprKind.Name(n) => {
+                        if n != "Ok" && n != "Err" { return false }
+                        return match self.lookup(n) { Some(b) => false, None => true }
+                    },
+                    ExprKind.GetField(target, field) => {
+                        return match self.enum_name_ref(target) {
+                            Some(en) => self.variant_leaves_params(en, field),
+                            None => false,
+                        }
+                    },
+                    _ => { return false },
+                }
+            },
+            ExprKind.MatchE(sc, arms) => {
+                if arms.len() == 0 { return false }
+                for arm in arms {
+                    if !self.arm_needs_context(arm.body) && !arm_diverges(arm.body) { return false }
+                }
+                return true
+            },
+            _ => { return false },
+        }
+        return false
+    }
+
+    // Whether variant `variant` of the enum `name` leaves one of the enum's
+    // type parameters out of its payload, so that a value of it doesn't say
+    // the whole type (`Err(e)` of `Result<T, E>`, `None`).
+    #test(checker_on("[int]"), "Option", "None")[true]
+    #test(checker_on("[int]"), "Option", "Some")[false]
+    #test(checker_on("[int]"), "Result", "Ok")[true]
+    fun variant_leaves_params(self, name: str, variant: str) -> bool {
+        let ei = self.enum_idx(name)
+        if ei < 0 { return false }
+        let payload = match self.enum_variant_payload(name, [], variant) { Some(p) => p, None => { return false } }
+        for tp in self.enums[ei].type_params {
+            var seen = false
+            for t in payload { if mentions_param(t, tp) { seen = true } }
+            if !seen { return true }
+        }
+        return false
     }
 
     // The arms of a statement match (`as_stmt`) need no value, so their last
