@@ -28,6 +28,7 @@ SUITES = [
     "tests.burn.test_builtin_impls",
     "tests.burn.test_default_params",
     "tests.burn.test_let_else",
+    "tests.burn.test_ir_contract",
 ]
 
 # A test that reads the x86-64 code ends there, skipped, on another target,

@@ -22,7 +22,7 @@
 
 from .checker import Type, subst_type
 from .codegen import CodeGen, PartialJob, is_aggregate, int_width_cg, is_tfloat32, is_aggregate_opt, is_cell_t, is_tfunc, tls_offset
-from .ir import IrFunc, Inst, Term, Slot, ENV_WORD, ends_in_call
+from .ir import IrFunc, Inst, Term, Slot, ENV_WORD, ends_in_call, Intrinsic, is_xchg, is_rc_dec
 from .ir_x86 import slots_at, frame_size, tail_call_at, drops_after_free, passes_frame_address, frame_addresses
 
 // A function being emitted: its argument words, the local of each
@@ -504,7 +504,7 @@ impl CodeGen {
                 self.emit("drop")
             },
             Inst.Rt(d, name, args) => { self.wasm_rt(f, w, d, name, args) },
-            Inst.RtPair(d, d2, name, args) => { panic("internal error: wasm: a runtime call with two results") },
+            Inst.Intr(d, op, args) => { self.wasm_intr(f, w, d, op, args) },
             Inst.Init(s) => {},
             Inst.Moved(s) => {},
             Inst.Check(v, kind, p) => {
@@ -947,164 +947,153 @@ impl CodeGen {
         self.emit("i64.select")
     }
 
-    // A runtime call (`rt name`), the inline ones done in place.
-    fun wasm_rt(var self, f: IrFunc, w: WFn, d: int32, name: str, args: [int32]) {
-        if name == "__sqrt" {
-            self.uses_float = true
-            self.wasm_get(w, args[0])
-            self.emit("f64.reinterpret_i64")
-            self.emit("f64.sqrt")
-            self.emit("i64.reinterpret_f64")
-            self.wasm_set(w, d)
-            return
-        }
-        if name == "__f64_bits" || name == "__f64_from_bits" {
-            self.wasm_get(w, args[0])
-            self.wasm_set(w, d)
-            return
-        }
-        if name == "__f64_round" {
-            // to the nearest, ties to even
-            self.uses_float = true
-            self.wasm_get(w, args[0])
-            self.emit("f64.reinterpret_i64")
-            self.emit("f64.nearest")
-            self.emit("i64.trunc_sat_f64_s")
-            self.wasm_set(w, d)
-            return
-        }
-        if wasm_starts(name, "__rt_addr:") {
-            self.wasm_rt_var(wasm_after(name, 10))
-            self.emit("i64.extend_i32_u")
-            self.wasm_set(w, d)
-            return
-        }
-        if wasm_starts(name, "__rt_waddr:") {
-            // one worker: its own copy
-            self.wasm_rt_var(wasm_after(name, 11))
-            self.emit("i64.extend_i32_u")
-            self.wasm_set(w, d)
-            return
-        }
-        if name == "__rotl" {
-            self.wasm_get(w, args[0])
-            self.wasm_get(w, args[1])
-            self.emit("i64.rotl")
-            self.wasm_set(w, d)
-            return
-        }
-        if name == "__bsr64" {
-            self.emit("i64.const 63")
-            self.wasm_get(w, args[0])
-            self.emit("i64.clz")
-            self.emit("i64.sub")
-            self.wasm_set(w, d)
-            return
-        }
-        if name == "__cas64" {
-            // one worker: a load, a comparison and a store
-            self.wasm_addr(w, args[0], 0)
-            self.emit("i64.load 0")
-            self.wasm_get(w, args[1])
-            self.emit("i64.eq")
-            self.emit("if")
-            self.wasm_addr(w, args[0], 0)
-            self.wasm_get(w, args[2])
-            self.emit("i64.store 0")
-            self.emit("i64.const 1")
-            self.emit(format("local.set {}", w.la))
-            self.emit("else")
-            self.emit("i64.const 0")
-            self.emit(format("local.set {}", w.la))
-            self.emit("end_if")
-            self.emit(format("local.get {}", w.la))
-            self.wasm_set(w, d)
-            return
-        }
-        // one worker (D125 (4)): a plain load and store (MYLA-267)
-        if name == "__load_acq64" {
-            self.wasm_addr(w, args[0], 0)
-            self.emit("i64.load 0")
-            self.wasm_set(w, d)
-            return
-        }
-        if name == "__store_rel64" {
-            self.wasm_addr(w, args[0], 0)
-            self.wasm_get(w, args[1])
-            self.emit("i64.store 0")
-            return
-        }
-        if name == "__xchg64" || name == "__fetch_add64" {
-            self.wasm_addr(w, args[0], 0)
-            self.emit("i64.load 0")
-            self.emit(format("local.set {}", w.la))
-            self.wasm_addr(w, args[0], 0)
-            if name == "__xchg64" { self.wasm_get(w, args[1]) }
-            else {
-                self.emit(format("local.get {}", w.la))
-                self.wasm_get(w, args[1])
-                self.emit("i64.add")
-            }
-            self.emit("i64.store 0")
-            self.emit(format("local.get {}", w.la))
-            self.wasm_set(w, d)
-            return
-        }
-        if name == "__pause" {
-            return
-        }
-        if name == "__rc_inc" || name == "__rc_inc_atomic" || name == "__rc_dec" || name == "__rc_dec_atomic" {
-            // a cell's count, at -8, up or down by one; down, whether it
-            // reached 0
-            self.wasm_addr(w, args[0], -8)
-            self.wasm_addr(w, args[0], -8)
-            self.emit("i64.load 0")
-            self.emit("i64.const 1")
-            if name == "__rc_dec" || name == "__rc_dec_atomic" { self.emit("i64.sub") } else { self.emit("i64.add") }
-            self.emit(format("local.tee {}", w.la))
-            self.emit("i64.store 0")
-            if d >= 0 {
-                self.emit(format("local.get {}", w.la))
-                self.emit("i64.eqz")
+    // An intrinsic, done in place (`Intrinsic` says what each means).
+    fun wasm_intr(var self, f: IrFunc, w: WFn, d: int32, op: Intrinsic, args: [int32]) {
+        match op {
+            Intrinsic.Sqrt => {
+                self.uses_float = true
+                self.wasm_get(w, args[0])
+                self.emit("f64.reinterpret_i64")
+                self.emit("f64.sqrt")
+                self.emit("i64.reinterpret_f64")
+                self.wasm_set(w, d)
+            },
+            Intrinsic.F64Bits | Intrinsic.F64FromBits => {
+                self.wasm_get(w, args[0])
+                self.wasm_set(w, d)
+            },
+            Intrinsic.F64Round => {
+                // to the nearest, ties to even
+                self.uses_float = true
+                self.wasm_get(w, args[0])
+                self.emit("f64.reinterpret_i64")
+                self.emit("f64.nearest")
+                self.emit("i64.trunc_sat_f64_s")
+                self.wasm_set(w, d)
+            },
+            Intrinsic.RtAddr(sym) => {
+                self.wasm_rt_var(sym)
                 self.emit("i64.extend_i32_u")
                 self.wasm_set(w, d)
-            }
-            return
+            },
+            Intrinsic.RtWaddr(sym) => {
+                // one worker: its own copy
+                self.wasm_rt_var(sym)
+                self.emit("i64.extend_i32_u")
+                self.wasm_set(w, d)
+            },
+            Intrinsic.Rotl => {
+                self.wasm_get(w, args[0])
+                self.wasm_get(w, args[1])
+                self.emit("i64.rotl")
+                self.wasm_set(w, d)
+            },
+            Intrinsic.Bsr64 => {
+                self.emit("i64.const 63")
+                self.wasm_get(w, args[0])
+                self.emit("i64.clz")
+                self.emit("i64.sub")
+                self.wasm_set(w, d)
+            },
+            Intrinsic.Cas64 => {
+                // one worker: a load, a comparison and a store
+                self.wasm_addr(w, args[0], 0)
+                self.emit("i64.load 0")
+                self.wasm_get(w, args[1])
+                self.emit("i64.eq")
+                self.emit("if")
+                self.wasm_addr(w, args[0], 0)
+                self.wasm_get(w, args[2])
+                self.emit("i64.store 0")
+                self.emit("i64.const 1")
+                self.emit(format("local.set {}", w.la))
+                self.emit("else")
+                self.emit("i64.const 0")
+                self.emit(format("local.set {}", w.la))
+                self.emit("end_if")
+                self.emit(format("local.get {}", w.la))
+                self.wasm_set(w, d)
+            },
+            // one worker (D125 (4)): a plain load and store (MYLA-267)
+            Intrinsic.LoadAcq64 => {
+                self.wasm_addr(w, args[0], 0)
+                self.emit("i64.load 0")
+                self.wasm_set(w, d)
+            },
+            Intrinsic.StoreRel64 => {
+                self.wasm_addr(w, args[0], 0)
+                self.wasm_get(w, args[1])
+                self.emit("i64.store 0")
+            },
+            Intrinsic.Xchg64 | Intrinsic.FetchAdd64 => {
+                self.wasm_addr(w, args[0], 0)
+                self.emit("i64.load 0")
+                self.emit(format("local.set {}", w.la))
+                self.wasm_addr(w, args[0], 0)
+                if is_xchg(op) { self.wasm_get(w, args[1]) }
+                else {
+                    self.emit(format("local.get {}", w.la))
+                    self.wasm_get(w, args[1])
+                    self.emit("i64.add")
+                }
+                self.emit("i64.store 0")
+                self.emit(format("local.get {}", w.la))
+                self.wasm_set(w, d)
+            },
+            Intrinsic.Pause => {
+            },
+            Intrinsic.RcInc | Intrinsic.RcIncAtomic | Intrinsic.RcDec | Intrinsic.RcDecAtomic => {
+                // a cell's count, at -8, up or down by one; down, whether it
+                // reached 0
+                self.wasm_addr(w, args[0], -8)
+                self.wasm_addr(w, args[0], -8)
+                self.emit("i64.load 0")
+                self.emit("i64.const 1")
+                if is_rc_dec(op) { self.emit("i64.sub") } else { self.emit("i64.add") }
+                self.emit(format("local.tee {}", w.la))
+                self.emit("i64.store 0")
+                if d >= 0 {
+                    self.emit(format("local.get {}", w.la))
+                    self.emit("i64.eqz")
+                    self.emit("i64.extend_i32_u")
+                    self.wasm_set(w, d)
+                }
+            },
+            Intrinsic.Unique(clone) => {
+                // the holder's cell unique: cloned (and stored back) when shared
+                self.wasm_addr(w, args[0], 0)
+                self.emit("i64.load 0")
+                self.emit(format("local.tee {}", w.la))
+                self.emit("i64.const 8")
+                self.emit("i64.sub")
+                self.emit("i32.wrap_i64")
+                self.emit("i64.load 0")
+                self.emit("i64.const 1")
+                self.emit("i64.gt_u")
+                self.emit("if")
+                self.emit(format("local.get {}", w.la))
+                self.wasm_call("call", clone, 1)
+                self.emit(format("local.set {}", w.la))
+                self.wasm_addr(w, args[0], 0)
+                self.emit(format("local.get {}", w.la))
+                self.emit("i64.store 0")
+                self.emit("end_if")
+                self.emit(format("local.get {}", w.la))
+                self.wasm_set(w, d)
+            },
+            Intrinsic.RunFrame => {
+                self.wasm_get(w, args[0])
+                self.wasm_addr(w, args[0], 0)
+                self.emit("i64.load 0")
+                self.emit("i32.wrap_i64")
+                self.emit(format("call_indirect {}", wasm_sig(1)))
+                self.emit("drop")
+            },
         }
-        if wasm_starts(name, "__cow:") {
-            // the holder's cell unique: cloned (and stored back) when shared
-            let clone = wasm_after(name, 6)
-            self.wasm_addr(w, args[0], 0)
-            self.emit("i64.load 0")
-            self.emit(format("local.tee {}", w.la))
-            self.emit("i64.const 8")
-            self.emit("i64.sub")
-            self.emit("i32.wrap_i64")
-            self.emit("i64.load 0")
-            self.emit("i64.const 1")
-            self.emit("i64.gt_u")
-            self.emit("if")
-            self.emit(format("local.get {}", w.la))
-            self.wasm_call("call", clone, 1)
-            self.emit(format("local.set {}", w.la))
-            self.wasm_addr(w, args[0], 0)
-            self.emit(format("local.get {}", w.la))
-            self.emit("i64.store 0")
-            self.emit("end_if")
-            self.emit(format("local.get {}", w.la))
-            self.wasm_set(w, d)
-            return
-        }
-        if name == "__run_frame" {
-            self.wasm_get(w, args[0])
-            self.wasm_addr(w, args[0], 0)
-            self.emit("i64.load 0")
-            self.emit("i32.wrap_i64")
-            self.emit(format("call_indirect {}", wasm_sig(1)))
-            self.emit("drop")
-            return
-        }
-        // any other: a call
+    }
+
+    // A call of the runtime routine `name` (`rt`).
+    fun wasm_rt(var self, f: IrFunc, w: WFn, d: int32, name: str, args: [int32]) {
         for x in args { self.wasm_get(w, x) }
         if name == "__float_to_str" {
             self.uses_float = true

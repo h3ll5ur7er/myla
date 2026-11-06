@@ -17,7 +17,7 @@
 
 from .checker import Type, subst_type
 from .codegen import CodeGen, PartialJob, is_aggregate, int_signed, int_width_cg, is_tfloat32, is_aggregate_opt, is_cell_t, is_tfunc, is_actor_t, tls_offset, TLS_SIZE
-from .ir import IrFunc, Inst, Term, Slot, ENV_WORD, ends_in_call
+from .ir import IrFunc, Inst, Term, Slot, ENV_WORD, ends_in_call, Intrinsic, is_xchg, is_rc_dec, is_rc_atomic
 from .ir_x86 import slots_at, frame_size, tail_call_at, drops_after_free, passes_frame_address, frame_addresses
 
 // The argument words that come in registers (x0 to x7).
@@ -482,7 +482,7 @@ impl CodeGen {
                 self.emit("blr x15")
             },
             Inst.Rt(d, name, args) => { self.a64_rt(f, fr, d, name, args) },
-            Inst.RtPair(d, d2, name, args) => { panic("internal error: aarch64: a runtime call with two results") },
+            Inst.Intr(d, op, args) => { self.a64_intr(f, fr, d, op, args) },
             Inst.Init(s) => {},
             Inst.Moved(s) => {},
             Inst.Check(v, kind, p) => {
@@ -850,173 +850,161 @@ impl CodeGen {
         }
     }
 
-    // A runtime call (`rt name`), the inline ones done in place.
-    fun a64_rt(var self, f: IrFunc, fr: A64Frame, d: int32, name: str, args: [int32]) {
-        if name == "__sqrt" {
-            self.uses_float = true
-            self.a64_ld("x10", fr, args[0])
-            self.emit("fmov d0, x10")
-            self.emit("fsqrt d0, d0")
-            self.emit("fmov x10, d0")
-            self.a64_st("x10", fr, d)
-            return
-        }
-        if name == "__f64_bits" || name == "__f64_from_bits" {
-            self.a64_ld("x10", fr, args[0])
-            self.a64_st("x10", fr, d)
-            return
-        }
-        if name == "__f64_round" {
-            // to the nearest, ties to even
-            self.uses_float = true
-            self.a64_ld("x10", fr, args[0])
-            self.emit("fmov d0, x10")
-            self.emit("fcvtns x10, d0")
-            self.a64_st("x10", fr, d)
-            return
-        }
-        if a64_starts(name, "__rt_addr:") {
-            self.a64_rt_var("x10", a64_after(name, 10))
-            self.a64_st("x10", fr, d)
-            return
-        }
-        if a64_starts(name, "__rt_waddr:") {
-            // worker w's own copy: its block in `__tls_blocks`
-            let sym = a64_after(name, 11)
-            self.a64_ld("x11", fr, args[0])
-            self.a64_adr("x10", "__tls_blocks")
-            self.a64_imm("x12", TLS_SIZE as int64)
-            self.emit("madd x10, x11, x12, x10")
-            self.emit(format("add x10, x10, #{}", tls_offset(sym)))
-            self.a64_st("x10", fr, d)
-            return
-        }
-        if name == "__rotl" {
-            // left by n is right by 64 - n
-            self.a64_ld("x10", fr, args[0])
-            self.a64_ld("x11", fr, args[1])
-            self.emit("neg x11, x11")
-            self.emit("ror x10, x10, x11")
-            self.a64_st("x10", fr, d)
-            return
-        }
-        if name == "__bsr64" {
-            self.a64_ld("x10", fr, args[0])
-            self.emit("clz x10, x10")
-            self.emit("mov x11, #63")
-            self.emit("sub x10, x11, x10")
-            self.a64_st("x10", fr, d)
-            return
-        }
-        if name == "__cas64" {
-            // whether the word at the address held `old`, now `new`
-            self.a64_ld("x11", fr, args[0])
-            self.a64_ld("x12", fr, args[1])
-            self.a64_ld("x13", fr, args[2])
-            let again = self.label()
-            let no = self.label()
-            let done = self.label()
-            self.emit(format("{}:", again))
-            self.emit("ldaxr x14, [x11]")
-            self.emit("cmp x14, x12")
-            self.emit(format("b.ne {}", no))
-            self.emit("stlxr w15, x13, [x11]")
-            self.emit(format("cbnz w15, {}", again))
-            // a full barrier, as the exchanges have: what follows isn't
-            // seen before the swap (publish, then look; MYLA-267)
-            self.emit("dmb ish")
-            self.emit("mov x10, #1")
-            self.emit(format("b {}", done))
-            self.emit(format("{}:", no))
-            self.emit("clrex")
-            self.emit("mov x10, #0")
-            self.emit(format("{}:", done))
-            self.a64_st("x10", fr, d)
-            return
-        }
-        // acquire and release (MYLA-267): `ldar` and `stlr`
-        if name == "__load_acq64" {
-            self.a64_ld("x11", fr, args[0])
-            self.emit("ldar x10, [x11]")
-            self.a64_st("x10", fr, d)
-            return
-        }
-        if name == "__store_rel64" {
-            self.a64_ld("x11", fr, args[0])
-            self.a64_ld("x12", fr, args[1])
-            self.emit("stlr x12, [x11]")
-            return
-        }
-        if name == "__xchg64" || name == "__fetch_add64" {
-            self.a64_ld("x11", fr, args[0])
-            self.a64_ld("x12", fr, args[1])
-            let again = self.label()
-            self.emit(format("{}:", again))
-            self.emit("ldaxr x10, [x11]")
-            if name == "__xchg64" { self.emit("stlxr w15, x12, [x11]") }
-            else {
-                self.emit("add x13, x10, x12")
+    // An intrinsic, done in place (`Intrinsic` says what each means).
+    fun a64_intr(var self, f: IrFunc, fr: A64Frame, d: int32, op: Intrinsic, args: [int32]) {
+        match op {
+            Intrinsic.Sqrt => {
+                self.uses_float = true
+                self.a64_ld("x10", fr, args[0])
+                self.emit("fmov d0, x10")
+                self.emit("fsqrt d0, d0")
+                self.emit("fmov x10, d0")
+                self.a64_st("x10", fr, d)
+            },
+            Intrinsic.F64Bits | Intrinsic.F64FromBits => {
+                self.a64_ld("x10", fr, args[0])
+                self.a64_st("x10", fr, d)
+            },
+            Intrinsic.F64Round => {
+                // to the nearest, ties to even
+                self.uses_float = true
+                self.a64_ld("x10", fr, args[0])
+                self.emit("fmov d0, x10")
+                self.emit("fcvtns x10, d0")
+                self.a64_st("x10", fr, d)
+            },
+            Intrinsic.RtAddr(sym) => {
+                self.a64_rt_var("x10", sym)
+                self.a64_st("x10", fr, d)
+            },
+            Intrinsic.RtWaddr(sym) => {
+                // worker w's own copy: its block in `__tls_blocks`
+                self.a64_ld("x11", fr, args[0])
+                self.a64_adr("x10", "__tls_blocks")
+                self.a64_imm("x12", TLS_SIZE as int64)
+                self.emit("madd x10, x11, x12, x10")
+                self.emit(format("add x10, x10, #{}", tls_offset(sym)))
+                self.a64_st("x10", fr, d)
+            },
+            Intrinsic.Rotl => {
+                // left by n is right by 64 - n
+                self.a64_ld("x10", fr, args[0])
+                self.a64_ld("x11", fr, args[1])
+                self.emit("neg x11, x11")
+                self.emit("ror x10, x10, x11")
+                self.a64_st("x10", fr, d)
+            },
+            Intrinsic.Bsr64 => {
+                self.a64_ld("x10", fr, args[0])
+                self.emit("clz x10, x10")
+                self.emit("mov x11, #63")
+                self.emit("sub x10, x11, x10")
+                self.a64_st("x10", fr, d)
+            },
+            Intrinsic.Cas64 => {
+                // whether the word at the address held `old`, now `new`
+                self.a64_ld("x11", fr, args[0])
+                self.a64_ld("x12", fr, args[1])
+                self.a64_ld("x13", fr, args[2])
+                let again = self.label()
+                let no = self.label()
+                let done = self.label()
+                self.emit(format("{}:", again))
+                self.emit("ldaxr x14, [x11]")
+                self.emit("cmp x14, x12")
+                self.emit(format("b.ne {}", no))
                 self.emit("stlxr w15, x13, [x11]")
-            }
-            self.emit(format("cbnz w15, {}", again))
-            self.emit("dmb ish")
-            self.a64_st("x10", fr, d)
-            return
-        }
-        if name == "__pause" {
-            self.emit("yield")
-            return
-        }
-        if name == "__rc_inc" || name == "__rc_inc_atomic" || name == "__rc_dec" || name == "__rc_dec_atomic" {
-            // a cell's count, at -8, up or down by one; down, whether it
-            // reached 0
-            self.a64_ld("x11", fr, args[0])
-            self.emit("sub x11, x11, #8")
-            var delta = "add"
-            if name == "__rc_dec" || name == "__rc_dec_atomic" { delta = "sub" }
-            if name == "__rc_inc_atomic" || name == "__rc_dec_atomic" {
+                self.emit(format("cbnz w15, {}", again))
+                // a full barrier, as the exchanges have: what follows isn't
+                // seen before the swap (publish, then look; MYLA-267)
+                self.emit("dmb ish")
+                self.emit("mov x10, #1")
+                self.emit(format("b {}", done))
+                self.emit(format("{}:", no))
+                self.emit("clrex")
+                self.emit("mov x10, #0")
+                self.emit(format("{}:", done))
+                self.a64_st("x10", fr, d)
+            },
+            // acquire and release (MYLA-267): `ldar` and `stlr`
+            Intrinsic.LoadAcq64 => {
+                self.a64_ld("x11", fr, args[0])
+                self.emit("ldar x10, [x11]")
+                self.a64_st("x10", fr, d)
+            },
+            Intrinsic.StoreRel64 => {
+                self.a64_ld("x11", fr, args[0])
+                self.a64_ld("x12", fr, args[1])
+                self.emit("stlr x12, [x11]")
+            },
+            Intrinsic.Xchg64 | Intrinsic.FetchAdd64 => {
+                self.a64_ld("x11", fr, args[0])
+                self.a64_ld("x12", fr, args[1])
                 let again = self.label()
                 self.emit(format("{}:", again))
                 self.emit("ldaxr x10, [x11]")
-                self.emit(format("{} x10, x10, #1", delta))
-                self.emit("stlxr w15, x10, [x11]")
+                if is_xchg(op) { self.emit("stlxr w15, x12, [x11]") }
+                else {
+                    self.emit("add x13, x10, x12")
+                    self.emit("stlxr w15, x13, [x11]")
+                }
                 self.emit(format("cbnz w15, {}", again))
                 self.emit("dmb ish")
-            } else {
-                self.emit("ldr x10, [x11]")
-                self.emit(format("{} x10, x10, #1", delta))
-                self.emit("str x10, [x11]")
-            }
-            if d >= 0 {
-                self.emit("cmp x10, #0")
-                self.emit("cset x10, eq")
                 self.a64_st("x10", fr, d)
-            }
-            return
+            },
+            Intrinsic.Pause => {
+                self.emit("yield")
+            },
+            Intrinsic.RcInc | Intrinsic.RcIncAtomic | Intrinsic.RcDec | Intrinsic.RcDecAtomic => {
+                // a cell's count, at -8, up or down by one; down, whether it
+                // reached 0
+                self.a64_ld("x11", fr, args[0])
+                self.emit("sub x11, x11, #8")
+                var delta = "add"
+                if is_rc_dec(op) { delta = "sub" }
+                if is_rc_atomic(op) {
+                    let again = self.label()
+                    self.emit(format("{}:", again))
+                    self.emit("ldaxr x10, [x11]")
+                    self.emit(format("{} x10, x10, #1", delta))
+                    self.emit("stlxr w15, x10, [x11]")
+                    self.emit(format("cbnz w15, {}", again))
+                    self.emit("dmb ish")
+                } else {
+                    self.emit("ldr x10, [x11]")
+                    self.emit(format("{} x10, x10, #1", delta))
+                    self.emit("str x10, [x11]")
+                }
+                if d >= 0 {
+                    self.emit("cmp x10, #0")
+                    self.emit("cset x10, eq")
+                    self.a64_st("x10", fr, d)
+                }
+            },
+            Intrinsic.Unique(clone) => {
+                // the holder's cell unique: cloned (and stored back) when shared
+                self.a64_ld("x11", fr, args[0])
+                self.emit("ldr x0, [x11]")
+                self.emit("ldur x12, [x0, #-8]")
+                let done = self.label()
+                self.emit("cmp x12, #1")
+                self.emit(format("b.ls {}", done))
+                self.emit(format("bl {}", clone))
+                self.a64_ld("x11", fr, args[0])
+                self.emit("str x0, [x11]")
+                self.emit(format("{}:", done))
+                self.a64_st("x0", fr, d)
+            },
+            Intrinsic.RunFrame => {
+                self.a64_ld("x0", fr, args[0])
+                self.emit("ldr x15, [x0]")
+                self.emit("blr x15")
+            },
         }
-        if a64_starts(name, "__cow:") {
-            // the holder's cell unique: cloned (and stored back) when shared
-            let clone = a64_after(name, 6)
-            self.a64_ld("x11", fr, args[0])
-            self.emit("ldr x0, [x11]")
-            self.emit("ldur x12, [x0, #-8]")
-            let done = self.label()
-            self.emit("cmp x12, #1")
-            self.emit(format("b.ls {}", done))
-            self.emit(format("bl {}", clone))
-            self.a64_ld("x11", fr, args[0])
-            self.emit("str x0, [x11]")
-            self.emit(format("{}:", done))
-            self.a64_st("x0", fr, d)
-            return
-        }
-        if name == "__run_frame" {
-            self.a64_ld("x0", fr, args[0])
-            self.emit("ldr x15, [x0]")
-            self.emit("blr x15")
-            return
-        }
-        // any other: a call, the arguments in x0 to x5
+    }
+
+    // A call of the runtime routine `name` (`rt`), the arguments in x0 to x5.
+    fun a64_rt(var self, f: IrFunc, fr: A64Frame, d: int32, name: str, args: [int32]) {
         var i = 0
         while i < args.len() {
             self.a64_ld(format("x{}", i), fr, args[i])

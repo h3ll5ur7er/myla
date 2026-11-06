@@ -56,10 +56,15 @@ pub enum Inst {
     // call name sret %ptr (%args): a user function with an aggregate result,
     // written to the storage at %ptr; aggregate arguments are addresses
     CallSret(str, int32, [int32]),
-    // %dst = rt name(%args): a runtime helper, the arguments in %rdi, %rsi,
-    // %rdx, %rcx, %r8 and %r9 (`__str_concat`, `__str_eq`, …); dst -1 without
-    // a result (MYLA-105)
+    // %dst = rt name(%args): a call of the runtime routine `name`, written
+    // by hand in each backend's runtime file (`__alloc`, `__free`,
+    // `__func_drop`, …) or generated (the per-type walks), its arguments the
+    // words of the target's convention; dst -1 without a result (MYLA-105).
+    // An operation every backend does in place is an `intr` instead.
     Rt(int32, str, [int32]),
+    // %dst = intr op(%args): the intrinsic `op`, what `Intrinsic` says of it
+    // (MYLA-264); dst -1 when its result is unused or it has none
+    Intr(int32, Intrinsic, [int32]),
     // retain T %v: one more reference to the cell %v points at (T a string,
     // list, map or builder)
     RetainVal(Type, int32),
@@ -100,9 +105,6 @@ pub enum Inst {
     // %dst = pop %cell stride: the address of the last element of the unique
     // list %cell, which is no longer counted; trapping when it is empty
     Pop(int32, int32, int32, Pos),
-    // %dst, %dst2 = rt name(%args): a runtime helper returning %rax and %rdx
-    // (`__map_set_slot`: the slot, and whether the key was there)
-    RtPair(int32, int32, str, [int32]),
     // check %v kind: trap (`__trap_<kind>`) at the position when %v is 0 (a
     // missing map key)
     Check(int32, str, Pos),
@@ -254,6 +256,7 @@ pub fun render_inst(inst: Inst) -> str {
         Inst.Call(d, name, args) => render_call(d, name, args)
         Inst.CallSret(name, r, args) => render_call(-1, name, args) + format(" sret %t{}", r)
         Inst.Rt(d, name, args) => render_rt(d, name, args)
+        Inst.Intr(d, op, args) => render_intr(d, op, args)
         Inst.RetainVal(t, v) => format("retain {} %t{}", type_name(t), v)
         Inst.Retain(t, p) => format("retain {} [%t{}]", type_name(t), p)
         Inst.DropSlot(t, s) => format("drop {} ${}", type_name(t), s)
@@ -267,7 +270,6 @@ pub fun render_inst(inst: Inst) -> str {
         Inst.Cow(d, t, h) => format("%t{} = cow {} [%t{}]", d, type_name(t), h)
         Inst.Append(d, h, c, stride) => format("%t{} = append [%t{}] %t{} {}", d, h, c, stride)
         Inst.Pop(d, c, stride, p) => format("%t{} = pop %t{} {} @{}:{}", d, c, stride, p.line, p.col)
-        Inst.RtPair(d, d2, name, args) => format("%t{}, ", d) + render_rt(d2, name, args)
         Inst.Check(v, kind, p) => format("check %t{} {} @{}:{}", v, kind, p.line, p.col)
         Inst.SbAppend(h, v) => format("sbappend [%t{}] %t{}", h, v)
         Inst.SbAppendRange(h, v, a, b, p) => format("sbappend [%t{}] %t{}[%t{}..%t{}] @{}:{}", h, v, a, b, p.line, p.col)
@@ -332,6 +334,217 @@ fun render_rt(d: int32, name: str, args: [int32]) -> str {
     var sb = StringBuilder()
     if d >= 0 { sb.append(format("%t{} = ", d)) }
     sb.append(format("rt {}(", name))
+    var first = true
+    for a in args {
+        if !first { sb.append(", ") }
+        sb.append(format("%t{}", a))
+        first = false
+    }
+    sb.append(")")
+    return sb.build()
+}
+
+// The intrinsics (MYLA-264): the operations every backend does in place, each
+// meaning the same on every target, what each backend implements. A float
+// travels as its 64 bits; an address is a word. Of the orderings: a *full
+// barrier* lets no load or store move across it either way (x86-64's `lock`
+// instructions and `xchg`, aarch64's exclusive pair followed by `dmb ish`);
+// an *acquire* load lets nothing after it move before it, a *release* store
+// nothing before it move after it. wasm32 has one worker (D125 (4)), so its
+// atomics are plain loads and stores.
+pub enum Intrinsic {
+    // sqrt(x): the square root of the float64 x, correctly rounded (IEEE
+    // 754): -0 for -0, +inf for +inf, a NaN for a NaN or a negative x
+    Sqrt,
+    // f64_round(x): the float64 x rounded to the nearest integer, ties to
+    // even, as an int64; defined for an x whose rounding fits int64 (std.rt's
+    // float formatting passes such values only)
+    F64Round,
+    // f64_bits(x): the float64 x's 64 bits as an int64, unchanged
+    F64Bits,
+    // f64_from_bits(n): the float64 whose bits are the int64 n's, unchanged
+    F64FromBits,
+    // rotl(x, n): the 64 bits of x rotated left by n mod 64
+    Rotl,
+    // bsr64(x): the place of x's highest set bit, 0 to 63, for an x other
+    // than 0 (std.rt passes none)
+    Bsr64,
+    // cas64(p, old, new): whether the word at p held old, now replaced by
+    // new (else unchanged), as one atomic step; a bool; a full barrier
+    Cas64,
+    // xchg64(p, v): the word at p before, now v, as one atomic step; a full
+    // barrier
+    Xchg64,
+    // fetch_add64(p, n): the word at p before, now plus n (wrapping), as one
+    // atomic step; a full barrier
+    FetchAdd64,
+    // load_acq64(p): the word at p, an acquire load
+    LoadAcq64,
+    // store_rel64(p, v): v into the word at p, a release store; no result
+    StoreRel64,
+    // pause(): a hint inside a spin loop (x86-64's `pause`, aarch64's
+    // `yield`); no memory effect, no result
+    Pause,
+    // rc_inc(c): the count at c - 8 of the cell c, plus one; not atomic, no
+    // ordering; no result
+    RcInc,
+    // rc_inc_atomic(c): as rc_inc, as one atomic step, a full barrier (an
+    // actor handle, which threads share, D92)
+    RcIncAtomic,
+    // rc_dec(c): the count at c - 8 of the cell c, minus one; whether it
+    // reached 0 (a bool); not atomic, no ordering
+    RcDec,
+    // rc_dec_atomic(c): as rc_dec, as one atomic step, a full barrier
+    RcDecAtomic,
+    // unique clone (h): the cell the word at h points at, made unique: when
+    // its count (at the cell - 8) is above 1, the routine `clone` (which
+    // takes the cell and gives a copy of its own, releasing a reference to
+    // the original) is called and its result stored at h; the cell at h after
+    // (MYLA-251)
+    Unique(str),
+    // rt_addr sym (): the address of the runtime variable `sym`, this worker's
+    // own copy of a per-worker one (in its block, with tasks)
+    RtAddr(str),
+    // rt_waddr sym (w): the address of worker w's own copy of the per-worker
+    // runtime variable `sym`
+    RtWaddr(str),
+    // run_frame(fr): the frame fr resumed, a call of its first word (its
+    // resume function) with fr as the argument; returns when that returns;
+    // no result (D90)
+    RunFrame,
+}
+
+// The intrinsic a primitive of the language's runtime code names (`__cas64`
+// in std.rt), or none.
+#test("__cas64")[Some(Intrinsic.Cas64)]
+#test("__alloc")[None]
+pub fun primitive_intrinsic(name: str) -> Option<Intrinsic> {
+    if name == "__sqrt" { return Some(Intrinsic.Sqrt) }
+    if name == "__f64_round" { return Some(Intrinsic.F64Round) }
+    if name == "__f64_bits" { return Some(Intrinsic.F64Bits) }
+    if name == "__f64_from_bits" { return Some(Intrinsic.F64FromBits) }
+    if name == "__rotl" { return Some(Intrinsic.Rotl) }
+    if name == "__bsr64" { return Some(Intrinsic.Bsr64) }
+    if name == "__cas64" { return Some(Intrinsic.Cas64) }
+    if name == "__xchg64" { return Some(Intrinsic.Xchg64) }
+    if name == "__fetch_add64" { return Some(Intrinsic.FetchAdd64) }
+    if name == "__load_acq64" { return Some(Intrinsic.LoadAcq64) }
+    if name == "__store_rel64" { return Some(Intrinsic.StoreRel64) }
+    if name == "__pause" { return Some(Intrinsic.Pause) }
+    if name == "__run_frame" { return Some(Intrinsic.RunFrame) }
+    return None
+}
+
+// The intrinsic's name in the text form.
+#test(Intrinsic.FetchAdd64)["fetch_add64"]
+#test(Intrinsic.Unique("__clone_list_.str"))["unique __clone_list_.str"]
+pub fun intrinsic_name(op: Intrinsic) -> str {
+    return match op {
+        Intrinsic.Sqrt => "sqrt"
+        Intrinsic.F64Round => "f64_round"
+        Intrinsic.F64Bits => "f64_bits"
+        Intrinsic.F64FromBits => "f64_from_bits"
+        Intrinsic.Rotl => "rotl"
+        Intrinsic.Bsr64 => "bsr64"
+        Intrinsic.Cas64 => "cas64"
+        Intrinsic.Xchg64 => "xchg64"
+        Intrinsic.FetchAdd64 => "fetch_add64"
+        Intrinsic.LoadAcq64 => "load_acq64"
+        Intrinsic.StoreRel64 => "store_rel64"
+        Intrinsic.Pause => "pause"
+        Intrinsic.RcInc => "rc_inc"
+        Intrinsic.RcIncAtomic => "rc_inc_atomic"
+        Intrinsic.RcDec => "rc_dec"
+        Intrinsic.RcDecAtomic => "rc_dec_atomic"
+        Intrinsic.Unique(clone) => "unique " + clone
+        Intrinsic.RtAddr(sym) => "rt_addr " + sym
+        Intrinsic.RtWaddr(sym) => "rt_waddr " + sym
+        Intrinsic.RunFrame => "run_frame"
+    }
+}
+
+// How many arguments the intrinsic takes.
+#test(Intrinsic.Cas64)[3]
+#test(Intrinsic.RtAddr("__heap_ptr"))[0]
+pub fun intrinsic_arity(op: Intrinsic) -> int32 {
+    return match op {
+        Intrinsic.Pause => 0
+        Intrinsic.RtAddr(sym) => 0
+        Intrinsic.Rotl => 2
+        Intrinsic.Xchg64 => 2
+        Intrinsic.FetchAdd64 => 2
+        Intrinsic.StoreRel64 => 2
+        Intrinsic.Cas64 => 3
+        _ => 1
+    }
+}
+
+// Whether the intrinsic gives a value.
+#test(Intrinsic.RcDec)[true]
+#test(Intrinsic.RcInc)[false]
+pub fun intrinsic_gives(op: Intrinsic) -> bool {
+    return match op {
+        Intrinsic.StoreRel64 => false
+        Intrinsic.Pause => false
+        Intrinsic.RcInc => false
+        Intrinsic.RcIncAtomic => false
+        Intrinsic.RunFrame => false
+        _ => true
+    }
+}
+
+// Whether `op` is `xchg64` (else, in its family, `fetch_add64`).
+pub fun is_xchg(op: Intrinsic) -> bool {
+    return match op {
+        Intrinsic.Xchg64 => true
+        _ => false
+    }
+}
+
+// Whether `op` is `cas64`.
+pub fun is_cas(op: Intrinsic) -> bool {
+    return match op {
+        Intrinsic.Cas64 => true
+        _ => false
+    }
+}
+
+// Whether `op` is an atomic operation on the address it takes first.
+#test(Intrinsic.LoadAcq64)[true]
+#test(Intrinsic.RcInc)[false]
+pub fun is_atomic_at(op: Intrinsic) -> bool {
+    return match op {
+        Intrinsic.Cas64 | Intrinsic.Xchg64 | Intrinsic.FetchAdd64 | Intrinsic.LoadAcq64 | Intrinsic.StoreRel64 => true
+        _ => false
+    }
+}
+
+// Whether `op` counts a reference down (`rc_dec`, `rc_dec_atomic`).
+#test(Intrinsic.RcDecAtomic)[true]
+#test(Intrinsic.RcInc)[false]
+pub fun is_rc_dec(op: Intrinsic) -> bool {
+    return match op {
+        Intrinsic.RcDec | Intrinsic.RcDecAtomic => true
+        _ => false
+    }
+}
+
+// Whether `op` is a count's atomic form (`rc_inc_atomic`, `rc_dec_atomic`).
+#test(Intrinsic.RcIncAtomic)[true]
+#test(Intrinsic.RcDec)[false]
+pub fun is_rc_atomic(op: Intrinsic) -> bool {
+    return match op {
+        Intrinsic.RcIncAtomic | Intrinsic.RcDecAtomic => true
+        _ => false
+    }
+}
+
+#test(1, Intrinsic.Cas64, [2, 3, 4])["%t1 = intr cas64(%t2, %t3, %t4)"]
+#test(-1, Intrinsic.RcInc, [5])["intr rc_inc(%t5)"]
+fun render_intr(d: int32, op: Intrinsic, args: [int32]) -> str {
+    var sb = StringBuilder()
+    if d >= 0 { sb.append(format("%t{} = ", d)) }
+    sb.append(format("intr {}(", intrinsic_name(op)))
     var first = true
     for a in args {
         if !first { sb.append(", ") }
@@ -411,6 +624,11 @@ pub fun verify(f: IrFunc) -> str {
                 Inst.Addr(d, s) => { addr_of[d] = s },
                 Inst.Bin(d, op, t, rt, a, b2, pos) => {
                     if is_ptr(f.temps[d]) || is_ptr(f.temps[a]) || is_ptr(f.temps[b2]) { return format("L{}: arithmetic on an address (%t{} = %t{} {} %t{}); only offset moves one", bi, d, a, op, b2) }
+                },
+                // an intrinsic with the arguments it takes (MYLA-264)
+                Inst.Intr(d, op, args) => {
+                    if args.len() != intrinsic_arity(op) { return format("L{}: intr {} takes {} arguments, given {}", bi, intrinsic_name(op), intrinsic_arity(op), args.len()) }
+                    if d >= 0 && !intrinsic_gives(op) { return format("L{}: intr {} gives no value, but writes %t{}", bi, intrinsic_name(op), d) }
                 },
                 _ => {},
             }
@@ -602,6 +820,7 @@ pub fun inst_uses(inst: Inst) -> [int32] {
         Inst.Call(d, name, args) => args
         Inst.CallSret(name, r, args) => prepend(r, args)
         Inst.Rt(d, name, args) => args
+        Inst.Intr(d, op, args) => args
         Inst.RetainVal(t, v) => [v]
         Inst.Retain(t, p) => [p]
         Inst.DropSlot(t, s) => []
@@ -615,7 +834,6 @@ pub fun inst_uses(inst: Inst) -> [int32] {
         Inst.Cow(d, t, h) => [h]
         Inst.Append(d, h, c, stride) => [h, c]
         Inst.Pop(d, c, stride, pos) => [c]
-        Inst.RtPair(d, d2, name, args) => args
         Inst.Check(v, kind, pos) => [v]
         Inst.SbAppend(h, v) => [h, v]
         Inst.SbAppendRange(h, v, a, b, pos) => [h, v, a, b]
@@ -653,7 +871,7 @@ pub fun term_uses(t: Term) -> [int32] {
 
 // The temporaries `inst` writes (a temporary can be written in more than one
 // block: the result of `&&`/`||`).
-#test(Inst.RtPair(1, 2, "f", [3]))[[1, 2]]
+#test(Inst.Intr(1, Intrinsic.Cas64, [2, 3, 4]))[[1]]
 #test(Inst.Call(-1, "f", [3]))[[]]
 #test(Inst.Store(0, 4))[[]]
 pub fun inst_defs(inst: Inst) -> [int32] {
@@ -672,12 +890,12 @@ pub fun inst_defs(inst: Inst) -> [int32] {
         Inst.Cast(d, from_t, to_t, a) => [d]
         Inst.Call(d, name, args) => result_temp(d)
         Inst.Rt(d, name, args) => result_temp(d)
+        Inst.Intr(d, op, args) => result_temp(d)
         Inst.Elem(d, c, i, stride, is_str, pos) => [d]
         Inst.Load8(d, p) => [d]
         Inst.Cow(d, t, h) => [d]
         Inst.Append(d, h, c, stride) => [d]
         Inst.Pop(d, c, stride, pos) => [d]
-        Inst.RtPair(d, d2, name, args) => [d, d2]
         Inst.SbBuild(d, c) => [d]
         Inst.Global(d, sym, w) => [d]
         Inst.Label(d, sym) => [d]
@@ -705,12 +923,12 @@ fun writes_temp(inst: Inst, t: int32) -> bool {
         Inst.Cast(d, from_t, to_t, a) => d == t
         Inst.Call(d, name, args) => d == t
         Inst.Rt(d, name, args) => d == t
+        Inst.Intr(d, op, args) => d == t
         Inst.Elem(d, c, i, stride, is_str, pos) => d == t
         Inst.Load8(d, p) => d == t
         Inst.Cow(d, ty, h) => d == t
         Inst.Append(d, h, c, stride) => d == t
         Inst.Pop(d, c, stride, pos) => d == t
-        Inst.RtPair(d, d2, name, args) => d == t || d2 == t
         Inst.SbBuild(d, c) => d == t
         Inst.Global(d, sym, w) => d == t
         Inst.Label(d, sym) => d == t
@@ -1166,6 +1384,9 @@ fun prepend(x: int32, xs: [int32]) -> [int32] {
 #test([Inst.Addr(1, 0), Inst.LoadAt(2, 1, 0, 8)])["L0: read of $0 (s), which holds no value"]
 #test([Inst.Load(1, 1)])[""]
 #test([Inst.Bin(2, "+", Type.TInt(64, false), Type.TInt(64, false), 2, 1, Pos { line: 0, col: 0 })])["L0: arithmetic on an address (%t2 = %t2 + %t1); only offset moves one"]
+#test([Inst.Intr(-1, Intrinsic.Cas64, [1, 1])])["L0: intr cas64 takes 3 arguments, given 2"]
+#test([Inst.Intr(1, Intrinsic.Pause, [])])["L0: intr pause gives no value, but writes %t1"]
+#test([Inst.Intr(-1, Intrinsic.RcDec, [1])])[""]
 fun verify_block(insts: [Inst]) -> str {
     return verify(test_func([IrBlock { insts: insts, term: Term.Ret(-1) }]))
 }

@@ -34,7 +34,7 @@ from .codegen import codegen_on, may_write_expr, is_actor_t, is_sb_t, is_async_t
 from .util import format_specs
 from .tokens import Note, no_span
 from .ir_x86 import slots_at, frame_size
-from .ir import IrFunc, IrBlock, Inst, Term, Slot, Pos, Instance, ENV_WORD
+from .ir import IrFunc, IrBlock, Inst, Term, Slot, Pos, Instance, ENV_WORD, Intrinsic, primitive_intrinsic
 from .parser import expr_of, stmt_of, type_expr_of, block_of, pattern_of, fun_of  // AST values for #test cases (MYLA-184)
 
 // A name in scope: the slot holding it.
@@ -525,7 +525,7 @@ impl Lower {
     fun rt_call(var self, cg: CodeGen, d: int32, name: str, args: [int32]) {
         let f = myla_runtime_function(name)
         if f != "" && cg.has_func(f) && !cg.owning.contains(f) { self.add(Inst.Call(d, f, args)) }
-        else { self.add(Inst.Rt(d, name, args)) }
+        else { self.add(rt_inst(d, name, args)) }
     }
 
     // `d`, the address of a list element of `size` bytes, marked for the
@@ -1776,7 +1776,7 @@ impl Lower {
         // load let aarch64 read the result first, a stale one (MYLA-267: a
         // sibling's clone crashed on arm64 hardware, t20)
         let at = self.offset(fr, FRAME_TASK)
-        self.add(Inst.Rt(st, "__load_acq64", [at]))
+        self.add(Inst.Intr(st, Intrinsic.LoadAcq64, [at]))
         // running (0) or a frame waiting already: wait; 1, 2 or 3: ended
         let running = self.temp(Type.TBool)
         self.add(Inst.Cmp(running, "==", Type.TInt(64, false), st, self.int_const(0)))
@@ -3508,26 +3508,18 @@ impl Lower {
         let is_str = self.int_const(cg.map_is_str(mt))
         let slot = self.temp(Type.TPtr)
         let had = self.temp(Type.TBool)
-        if cg.has_func("std$rt$map_put_slot") && !cg.owning.contains("std$rt$map_put_slot") {
-            // std.rt's (MYLA-162): room made and the slot found in one call,
-            // whose low bit says whether the key was there
-            let i64 = Type.TInt(64, true)
-            let r = self.temp(i64)
-            self.add(Inst.Call(r, "std$rt$map_put_slot", [holder, key, size, is_str]))
-            let pos = Pos { line: 0, col: 0 }
-            let masked = self.temp(i64)
-            self.add(Inst.Bin(masked, "&", i64, i64, r, self.int_const(-2), pos))
-            self.add(Inst.Mov(slot, masked))
-            let bit = self.temp(i64)
-            self.add(Inst.Bin(bit, "&", i64, i64, r, self.int_const(1), pos))
-            self.add(Inst.Cmp(had, "!=", i64, bit, self.int_const(0)))
-        } else {
-            let unused = self.int_const(0)
-            self.add(Inst.Rt(-1, "__map_reserve", [holder, size, unused, is_str]))
-            let cell = self.temp(mt)
-            self.add_load(cell, holder, 0)
-            self.add(Inst.RtPair(slot, had, "__map_set_slot", [cell, key, size, is_str]))
-        }
+        // std.rt's (MYLA-162): room made and the slot found in one call,
+        // whose low bit says whether the key was there
+        let i64 = Type.TInt(64, true)
+        let r = self.temp(i64)
+        self.add(Inst.Call(r, "std$rt$map_put_slot", [holder, key, size, is_str]))
+        let pos = Pos { line: 0, col: 0 }
+        let masked = self.temp(i64)
+        self.add(Inst.Bin(masked, "&", i64, i64, r, self.int_const(-2), pos))
+        self.add(Inst.Mov(slot, masked))
+        let bit = self.temp(i64)
+        self.add(Inst.Bin(bit, "&", i64, i64, r, self.int_const(1), pos))
+        self.add(Inst.Cmp(had, "!=", i64, bit, self.int_const(0)))
         let p = self.offset(slot, 16)
         if cg.owns_heap(vt) {
             let drop_b = self.new_block()
@@ -3985,8 +3977,8 @@ impl Lower {
                 if nm == "__rt_get" { self.add(Inst.Global(d, sym, 8)) }
                 else if nm == "__rt_waddr" {
                     let w = self.expr(cg, args[1])
-                    self.add(Inst.Rt(d, "__rt_waddr:" + sym, [w]))
-                } else { self.add(Inst.Rt(d, "__rt_addr:" + sym, [])) }
+                    self.add(Inst.Intr(d, Intrinsic.RtWaddr(sym), [w]))
+                } else { self.add(Inst.Intr(d, Intrinsic.RtAddr(sym), [])) }
                 return d
             }
             // the out-of-memory error ends the block: nothing after it is
@@ -4026,11 +4018,11 @@ impl Lower {
                 return -1
             }
             if nm == "__copy_bytes" || nm == "__set_io_errno" || nm == "__free" || nm == "__set_run_status" || nm == "__set_run_stderr" || nm == "__pause" || nm == "__run_frame" || nm == "__store_rel64" {
-                self.add(Inst.Rt(-1, nm, vals))
+                self.add(rt_inst(-1, nm, vals))
                 return -1
             }
             let d = self.temp(t)
-            if nm == "__alloc" || nm == "__equal_bytes" || nm == "__syscall" || nm == "__syscall5" || nm == "__environ" || nm == "__rotl" || nm == "__bsr64" || nm == "__cas64" || nm == "__xchg64" || nm == "__fetch_add64" || nm == "__f64_round" || nm == "__load_acq64" { self.add(Inst.Rt(d, nm, vals)) } else if nm == "__argv" { self.add(Inst.Rt(d, "__argv_of", vals)) } else { self.add(Inst.Mov(d, vals[0])) }
+            if nm == "__alloc" || nm == "__equal_bytes" || nm == "__syscall" || nm == "__syscall5" || nm == "__environ" || nm == "__rotl" || nm == "__bsr64" || nm == "__cas64" || nm == "__xchg64" || nm == "__fetch_add64" || nm == "__f64_round" || nm == "__load_acq64" { self.add(rt_inst(d, nm, vals)) } else if nm == "__argv" { self.add(Inst.Rt(d, "__argv_of", vals)) } else { self.add(Inst.Mov(d, vals[0])) }
             if nm == "__str_of" || nm == "__list_of" { return self.owned_value(cg, d, t) }
             return d
         }
@@ -4662,9 +4654,9 @@ pub fun drop_entry_ir(name: str, slow: str, atomic: bool) -> IrFunc {
     var lw = routine(name, None)
     let sp = lw.new_slot("cell", Type.TInt(64, true), 8, 0, false)
     let zero = lw.temp(Type.TBool)
-    var dec = "__rc_dec"
-    if atomic { dec = "__rc_dec_atomic" }
-    lw.add(Inst.Rt(zero, dec, [lw.read_cell(sp)]))
+    var dec = Intrinsic.RcDec
+    if atomic { dec = Intrinsic.RcDecAtomic }
+    lw.add(Inst.Intr(zero, dec, [lw.read_cell(sp)]))
     let gone = lw.new_block()
     let kept = lw.new_block()
     lw.finish(Term.Br(zero, gone, kept))
@@ -4867,7 +4859,7 @@ pub fun clone_ir(cg: CodeGen, t: Type, name: str) -> IrFunc {
         },
         _ => {},
     }
-    lw.add(Inst.Rt(-1, "__rc_dec", [lw.read_cell(sp)]))
+    lw.add(Inst.Intr(-1, Intrinsic.RcDec, [lw.read_cell(sp)]))
     lw.finish(Term.Ret(lw.read_cell(sc)))
     return lw.f
 }
@@ -5043,7 +5035,7 @@ pub fun deep_cell_ir(cg: CodeGen, t: Type, clone: bool, name: str) -> Routine {
                     // a boxed enum: a copy of the box, what it holds retained
                     lw.copy_cell(sp, sc)
                     lw.add(Inst.Retain(t, lw.read_cell(sc)))
-                    lw.add(Inst.Rt(-1, "__rc_dec", [lw.read_cell(sp)]))
+                    lw.add(Inst.Intr(-1, Intrinsic.RcDec, [lw.read_cell(sp)]))
                 }
             },
         }
@@ -5218,6 +5210,16 @@ pub fun compose_ir() -> Routine {
     lw.add(Inst.CallInd(-1, b, [ax]))
     lw.finish(Term.Become)
     return Routine { f: lw.f, wants: lw.wants }
+}
+
+// `rt name(args)`, or the intrinsic the primitive `name` is (MYLA-264).
+#test(1, "__cas64", [2, 3, 4])[Inst.Intr(1, Intrinsic.Cas64, [2, 3, 4])]
+#test(1, "__alloc", [2])[Inst.Rt(1, "__alloc", [2])]
+fun rt_inst(d: int32, name: str, args: [int32]) -> Inst {
+    return match primitive_intrinsic(name) {
+        Some(op) => Inst.Intr(d, op, args)
+        None => Inst.Rt(d, name, args)
+    }
 }
 
 // The most words a frame constructor zeroes one store each; a frame with
@@ -5448,7 +5450,7 @@ pub fun env_deep_ir(cg: CodeGen, lifted: str, owned: [DropEntry], clone: bool) -
             lw.add(Inst.Bin(p, "+", i64, i64, lw.read_cell(sc), lw.int_const(d.off), Pos { line: 0, col: 0 }))
             lw.add(Inst.Retain(d.ty, p))
         }
-        lw.add(Inst.Rt(-1, "__rc_dec", [lw.read_cell(sp)]))
+        lw.add(Inst.Intr(-1, Intrinsic.RcDec, [lw.read_cell(sp)]))
         lw.finish(Term.Jmp(deepen))
     }
     lw.start(deepen)

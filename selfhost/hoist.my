@@ -172,7 +172,7 @@ fun hoist_loop(f0: IrFunc, at: [int32], preds: [[int32]], slot_of: [int32], lo: 
                 Inst.CallInd(d, fv, args) => { return (f, []) },
                 Inst.CallIndSret(fv, r, args) => { return (f, []) },
                 Inst.Rt(d, name, args) => { return (f, []) },
-                Inst.RtPair(d, d2, name, args) => { return (f, []) },
+                Inst.Intr(d, op, args) => { return (f, []) },
                 _ => {},
             }
         }
@@ -230,7 +230,7 @@ fun only_reads_and_cows(f: IrFunc, slot_of: [int32], lo: int32, hi: int32, s: in
                 Inst.CallInd(d, fv, args) => { return false },
                 Inst.CallIndSret(fv, r, args) => { return false },
                 Inst.Rt(d, name, args) => { return false },
-                Inst.RtPair(d, d2, name, args) => { return false },
+                Inst.Intr(d, op, args) => { return false },
                 Inst.Store(sl, v) => { if sl == s || derived[v] { return false } },
                 Inst.DropSlot(t, sl) => { if sl == s { return false } },
                 Inst.Moved(sl) => { if sl == s { return false } },
@@ -368,7 +368,7 @@ fun touches(inst: Inst, s: int32) -> bool {
         Inst.CallInd(d, fv, args) => true
         Inst.CallIndSret(fv, r, args) => true
         Inst.Rt(d, name, args) => true
-        Inst.RtPair(d, d2, name, args) => true
+        Inst.Intr(d, op, args) => true
         Inst.Cow(d, t, h) => true
         Inst.Append(d, h, c, stride) => true
         Inst.Pop(d, c, stride, pos) => true

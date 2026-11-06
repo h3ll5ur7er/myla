@@ -4,14 +4,14 @@
 // own (`retain T`, `drop T`, `cow T`, `deep T`, …), which the verifier and
 // the optimisations read. Before a function is translated to machine code
 // they become the operations a backend knows without knowing types: loads,
-// a count bumped (`__rc_inc`, `__rc_inc_atomic`), and calls of the per-type
+// a count bumped (`intr rc_inc`, `intr rc_inc_atomic`), and calls of the per-type
 // routines (`__drop_list_<E>`, `__walkd_<T>`, `__func_drop`, …), which are
 // requested here. So a backend translates instructions, and the decisions
 // by type stay in one place.
 
 from .checker import Type, subst_type
 from .codegen import CodeGen, is_cell_t, is_tfunc, is_actor_t
-from .ir import IrFunc, Inst
+from .ir import IrFunc, Inst, Intrinsic
 from .lower import Want
 
 // The plain instructions of one block as they are made, with the
@@ -39,8 +39,8 @@ impl Plain {
     // One more reference to the cell `v` of type `t` (an actor handle's
     // count atomic with tasks, D92).
     fun inc(var self, cg: CodeGen, t: Type, v: int32) {
-        if cg.frames && is_actor_t(t) { self.insts.push(Inst.Rt(-1, "__rc_inc_atomic", [v])) }
-        else { self.insts.push(Inst.Rt(-1, "__rc_inc", [v])) }
+        if cg.frames && is_actor_t(t) { self.insts.push(Inst.Intr(-1, Intrinsic.RcIncAtomic, [v])) }
+        else { self.insts.push(Inst.Intr(-1, Intrinsic.RcInc, [v])) }
     }
 
     // The cell `v` of type `t` released by its type's drop routine.
@@ -135,7 +135,7 @@ impl Plain {
             Inst.Cow(d, t, h) => {
                 // the holder's cell made unique by the type's clone
                 self.wants.push(Want { kind: 3, t: t, clone: false })
-                self.insts.push(Inst.Rt(d, "__cow:" + cg.clone_call_name(t), [h]))
+                self.insts.push(Inst.Intr(d, Intrinsic.Unique(cg.clone_call_name(t)), [h]))
             },
             // one worker (wasm32, D125 (4)) shares nothing between threads:
             // a value crossing between tasks keeps its counts (D133)

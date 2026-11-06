@@ -98,7 +98,7 @@ D90, D91 and D92, [[MYLA-138]] and [[MYLA-137]]: a program with an `async let` (
 | **Remote frees** | A cell freed by another worker is pushed and taken whole | Pushed by compare-and-swap, taken by an exchange. |
 | **Glances** (`exec_peek`, `exec_find`'s empty check, an actor's spinning caller) | Nothing: they are hints | A stale value only costs a round. Every decision is made again under the lock, or by the next round. |
 
-Two primitives give the one-sided orders: `__load_acq64` (`ldar`) and `__store_rel64` (`stlr`). On x86-64 they are plain moves, on wasm32 plain loads and stores (one worker). The atomics `__cas64`, `__xchg64` and `__fetch_add64` are full barriers on every target. The stress programs run on GitHub's arm64 runner in CI (`scripts/stress-native.py`, 20 runs on each of 1, 4 and 16 workers). qemu on an x86-64 machine can't show a reordering.
+Two primitives give the one-sided orders: `__load_acq64` (`ldar`) and `__store_rel64` (`stlr`), the IR's `load_acq64` and `store_rel64` intrinsics ([[Architecture/IR#what-each-instruction-means]]). On x86-64 they are plain moves, on wasm32 plain loads and stores (one worker). The atomics `__cas64`, `__xchg64` and `__fetch_add64` are full barriers on every target. The stress programs run on GitHub's arm64 runner in CI (`scripts/stress-native.py`, 20 runs on each of 1, 4 and 16 workers). qemu on an x86-64 machine can't show a reordering.
 
 ## Runtime helpers
 
@@ -141,7 +141,7 @@ Natively, `print` and `format` render floats (`__float_to_str`) like this, and t
 
 ## Integer details
 
-On x86-64 (the other targets' rules are in their sections; [[MYLA-264]] is to state each operation's exact meaning once, for every backend):
+How x86-64 does what [[Architecture/IR#what-each-instruction-means]] says each operation means (the other targets' ways are in their sections):
 
 - `/` and `%` test the divisor for zero (`jz __trap_div` / `__trap_mod`), then use `idivq` (signed, after `cqo`) or `divq`. A signed divisor of -1 skips `idivq` (which faults on the minimum): `/` negates and `%` gives 0, so the result wraps ([[MYLA-5]]).
 - Shift counts are masked to `width - 1` before `shl`/`sar`/`shr`.
