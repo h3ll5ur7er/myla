@@ -23,6 +23,7 @@ pub const TARGET: str = "wasm32-wasi"
 
 pub const EINTR: int64 = -4
 pub const EAGAIN: int64 = -11
+pub const EPIPE: int64 = -32
 
 const W_FD_WRITE: int64 = 1
 const W_FD_READ: int64 = 2
@@ -186,7 +187,12 @@ fun wasi_path(path: str) -> str {
 
 // The import `n` on a path of the preopened directory: `(dir, path, len)`
 // as its first three arguments, then `rest` from the fourth on.
+// An empty path names nothing, as on Linux (ENOENT); WASI would take it for
+// the preopened directory itself (MYLA-281).
 fun on_path(n: int64, path: str, flags_first: bool, rest: [int64]) -> int64 {
+    if path.len() == 0 {
+        return -2
+    }
     let p = wasi_path(path)
     let a = __addr_of(p)
     var k: int64 = 0
@@ -245,8 +251,27 @@ fun rw(op: int64, fd: int64, buf: int64, n: int64) -> int64 {
     return __load64(scratch(3)) & LOW32
 }
 
+// A read of a directory is Linux's EISDIR, as `std.io` reports it on every
+// target (MYLA-281): WASI hosts refuse it otherwise (EBADF, a directory's
+// descriptor has no read right), so a refused read of one is that.
 pub fun read(fd: int64, buf: int64, n: int64) -> int64 {
-    return rw(W_FD_READ, fd, buf, n)
+    let r = rw(W_FD_READ, fd, buf, n)
+    if r == -9 && is_dir_fd(fd) {
+        return -21
+    }
+    return r
+}
+
+// Whether the open descriptor `fd` is a directory (its filestat's type at
+// 16, 3).
+fun is_dir_fd(fd: int64) -> bool {
+    let st = __rt_addr("__wasi_stat")
+    arg(0, fd)
+    arg(1, st)
+    if call(W_FD_FILESTAT_GET) < 0 {
+        return false
+    }
+    return __load8(st + 16) as int64 == 3
 }
 
 pub fun write(fd: int64, buf: int64, n: int64) -> int64 {
@@ -305,11 +330,16 @@ pub fun rename(from_path: str, to_path: str) -> int64 {
     return on_path(W_PATH_RENAME, from_path, false, [PREOPEN, ba + 8, __load64(ba)])
 }
 
-// The working directory (`PWD`, else `/`) written to `buf`: its length.
+// The working directory (`PWD`, else `/`) written to `buf`: its length; as
+// Linux's `getcwd`, ENOENT when it was removed (MYLA-281).
 pub fun cwd(buf: int64, n: int64) -> int64 {
     var wd = env_value("PWD")
     if wd == "" {
         wd = "/"
+    }
+    let st = __rt_addr("__wasi_stat")
+    if on_path(W_PATH_FILESTAT_GET, wd, true, [st]) == -2 {
+        return -2
     }
     let a = __addr_of(wd)
     let len = __load64(a)
@@ -421,7 +451,7 @@ fun poll(subs: int64, n: int64) -> int64 {
     return __load64(scratch(5)) & LOW32
 }
 
-pub fun write_all(fd: int64, p: int64, n: int64) {
+pub fun write_all(fd: int64, p: int64, n: int64) -> int64 {
     var at = p
     var left = n
     while left > 0 {
@@ -430,13 +460,14 @@ pub fun write_all(fd: int64, p: int64, n: int64) {
             at += r
             left -= r
         } else if r != EINTR && r != EAGAIN {
-            return
+            return r
         }
     }
+    return 0
 }
 
 // The `n` bytes at `p` and a newline on the standard output in one write.
-pub fun write_line(p: int64, n: int64) {
+pub fun write_line(p: int64, n: int64) -> int64 {
     let iov = scratch(2)
     __store32(iov, p as uint32)
     __store32(iov + 4, n as uint32)
@@ -446,16 +477,29 @@ pub fun write_line(p: int64, n: int64) {
     arg(1, iov)
     arg(2, 2)
     arg(3, scratch(4))
-    if call(W_FD_WRITE) < 0 {
-        return
+    let c = call(W_FD_WRITE)
+    if c < 0 {
+        return c
     }
     let r = __load64(scratch(4)) & LOW32
     if r < n {
-        write_all(1, p + r, n - r)
-        write_all(1, __addr_of("\n") + 8, 1)
-    } else if r == n {
-        write_all(1, __addr_of("\n") + 8, 1)
+        let e = write_all(1, p + r, n - r)
+        if e < 0 {
+            return e
+        }
+        return write_all(1, __addr_of("\n") + 8, 1)
     }
+    if r == n {
+        return write_all(1, __addr_of("\n") + 8, 1)
+    }
+    return 0
+}
+
+// A write to a closed pipe on the standard output or error ends the program
+// quietly (D146): WASI has no signals, so with the exit code a shell shows
+// for one that SIGPIPE ended.
+pub fun broken_pipe() {
+    exit(141)
 }
 
 // --- processes: none on WASI -------------------------------------------------------
@@ -469,6 +513,16 @@ pub fun run(program: str, argv: [str]) -> [uint8] {
 
 pub fun spawn(program: str, argv: [str]) -> [int] {
     return [38, 0, -1, -1, -1]
+}
+
+// `run` and `spawn` with the paths to try and options (D147): no processes
+// either.
+pub fun run_with(paths: [str], argv: [str], opts: [str]) -> [uint8] {
+    return run("", argv)
+}
+
+pub fun spawn_with(paths: [str], argv: [str], opts: [str]) -> [int] {
+    return spawn("", argv)
 }
 
 pub fun reap(pid: int64) -> int64 {

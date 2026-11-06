@@ -2,15 +2,14 @@
 // commits and writes `myla.lock`; every command that compiles checks out the
 // locked commits it is missing (wiki: Architecture/Project-tool, "Git").
 //
-// Git runs through `/usr/bin/env`, so `git` is found on PATH and inherits the
-// environment (the user's credentials, proxy and SSH configuration), with
-// GIT_TERMINAL_PROMPT=0 so a missing credential fails instead of waiting for a
-// password. A checkout is cloned into `<name>-<commit>.partial` and renamed
+// Git is found on PATH (D147) and inherits the environment (the user's
+// credentials, proxy and SSH configuration), with GIT_TERMINAL_PROMPT=0 so a
+// missing credential fails instead of waiting for a password. A checkout is cloned into `<name>-<commit>.partial` and renamed
 // when it is complete, so an interrupted fetch leaves nothing with the final
 // name; a stale `.partial` is removed first. Checkouts never change after
 // that: another commit is another directory.
 
-from std.process import run, Output, ExitStatus
+from std.process import command, Output, ExitStatus, SpawnError
 from std.fs import exists, is_file, make_dir_all, write_to_file, remove_dir_all, rename
 from std.io import eprintln
 from .project import resolve_project, load_project, project_lock, render_lock, lock_of, render_project_error, parent_dir, ref_text
@@ -29,11 +28,10 @@ fun text_of(bytes: [uint8]) -> str {
 
 // Run `git args…`.
 fun git(argv: [str]) -> GitRun {
-    var full = ["GIT_TERMINAL_PROMPT=0", "git"]
-    for a in argv { full.push(a) }
-    return match run("/usr/bin/env", full) {
+    return match command("git").args(argv).env("GIT_TERMINAL_PROMPT", "0").output() {
         Ok(out) => finished(out)
-        Err(e) => GitRun { ok: false, out: "", err: "cannot run /usr/bin/env\n" }
+        Err(SpawnError.NotFound) => GitRun { ok: false, out: "", err: "git is not installed (it isn't on PATH)\n" }
+        Err(e) => GitRun { ok: false, out: "", err: "cannot run git\n" }
     }
 }
 
@@ -43,7 +41,6 @@ fun finished(out: Output) -> GitRun {
     return match out.status {
         ExitStatus.Exited(code) => match code {
             0 => GitRun { ok: true, out: stdout, err: stderr }
-            127 => GitRun { ok: false, out: stdout, err: "git is not installed (it isn't on PATH)\n" }
             _ => GitRun { ok: false, out: stdout, err: stderr }
         }
         ExitStatus.Signaled(sig) => GitRun { ok: false, out: stdout, err: format("git was killed by signal {}\n", sig) }

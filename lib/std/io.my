@@ -9,12 +9,21 @@
 
 from .fs import IoError, from_errno
 
-// Write `s`'s bytes to file descriptor `fd` (1 = stdout, 2 = stderr).
-pub fun write(fd: int32, s: str) {
+// Write `s`'s bytes to file descriptor `fd` (1 = stdout, 2 = stderr), all of
+// them, or the error that stopped it (D146). A closed pipe on the standard
+// output or error ends the program quietly instead, as Unix tools stop in
+// `yes | head`; on another descriptor it is `BrokenPipe`.
+pub fun write(fd: int32, s: str) -> Result<(), IoError> {
     __write(fd, s)
+    let err = __io_errno()
+    if err != 0 {
+        return Err(from_errno(err))
+    }
+    return Ok(())
 }
 
-// Write `s` to stdout, followed by a newline.
+// Write `s` to stdout, followed by a newline. Like `print`, it reports no
+// error: a closed pipe ends the program quietly (D146).
 pub fun println(s: str) {
     __write(1, s)
     __write(1, "\n")

@@ -11,8 +11,8 @@
 
 from .ast import FunData
 from .checker import Type
-from .codegen import CodeGen, CgBinding, int_signed, takes_operand, is_cmp, fold_load, fold_load_for_reader, text_at, has_text, is_aggregate, is_actor_t, is_tfloat32, REG_WORDS, arg_reg, spilled_word, SPILLED_ENV, narrow_operand, int_width_cg, tls_offset, TLS_SIZE
-from .ir import IrFunc, Inst, Term, Touches, Slot, ENV_WORD, render_func, touches, use_counts, def_counts, inst_uses, term_uses, successors, ends_in_call
+from .codegen import CodeGen, CgBinding, int_signed, same_int, takes_operand, is_cmp, fold_load, fold_load_for_reader, text_at, has_text, is_aggregate, is_actor_t, is_tfloat32, REG_WORDS, arg_reg, spilled_word, narrow_operand, int_width_cg, tls_offset, TLS_SIZE
+from .ir import IrFunc, Inst, Term, Touches, Slot, ENV_WORD, Intrinsic, is_rc_dec, is_rc_atomic, is_cas, is_atomic_at, render_func, touches, use_counts, def_counts, inst_uses, term_uses, successors, ends_in_call
 from .ssa import promote, add_ssa_stats
 from .parser import expr_of, stmt_of, type_expr_of, block_of, pattern_of, fun_of  // AST values for #test cases (MYLA-184)
 
@@ -96,13 +96,15 @@ impl CodeGen {
         // (MYLA-162), the owners a tail call drops after it first moved
         // before it
         if self.wasm {
-            // wasm's (MYLA-158)
-            self.emit_wasm(self.expand_ownership(f), decl_id, line, col, mangled)
+            // wasm's (MYLA-158), calls in tail position `return_call`s too
+            // (MYLA-283)
+            self.emit_wasm(self.expand_ownership(self.hoist_tail_drops(f)), decl_id, line, col, mangled)
             return
         }
         if self.a64 {
-            // aarch64's translation, its tail calls only `become`'s (MYLA-163)
-            self.emit_a64(self.expand_ownership(f), decl_id, line, col, mangled)
+            // aarch64's translation, calls in tail position jumps too
+            // (MYLA-283)
+            self.emit_a64(self.expand_ownership(self.hoist_tail_drops(f)), decl_id, line, col, mangled)
             return
         }
         f = self.expand_ownership(self.hoist_tail_drops(f))
@@ -280,7 +282,7 @@ impl CodeGen {
         self.dbg_pop_scope()
         self.dbg_end_function()
         self.emit("")
-        if f.frame { self.emit_frame_new(f, mangled, slot_off) }
+        if f.frame { self.emit_frame_new_ir(f, mangled) }
         self.in_frame = false
     }
 
@@ -488,62 +490,158 @@ impl CodeGen {
         self.emit(format("jmp {}", self.epilogue))
     }
 
-    // `myla_<f>__new(args…)`: a new heap frame for the frame function `f`
-    // (`[resume fn][caller][state][task]`, then the slots, zeroed), each
-    // argument copied into its parameter's slot with references of its own
-    // (an aggregate from the address passed; a lambda's environment from
-    // %r10); the frame in %rax. The argument registers are kept below the
-    // frame base across the allocation.
-    fun emit_frame_new(var self, f: IrFunc, mangled: str, slot_off: [int32]) {
-        let size = frame_size(f)
-        var words = 0
-        for s in f.slots { if s.word >= 0 && s.word + 1 > words { words = s.word + 1 } }
-        self.emit(format("myla_{}__new:", mangled))
-        self.emit("pushq %rbp")
-        self.emit("movq %rsp, %rbp")
-        let rbx_at = -8 * (self.spill_args(words) + 1)
-        self.emit("pushq %rbx")
-        self.emit(format("movq ${}, %rdi", size))
-        self.emit("call __alloc")
-        self.emit("movq %rax, %rbx")
-        self.emit("movq %rax, %rdi")
-        self.emit(format("movq ${}, %rcx", size / 8))
-        self.emit("xorl %eax, %eax")
-        self.emit("rep stosq")
-        self.emit(format("leaq myla_{}(%rip), %rax", mangled))
-        self.emit("movq %rax, 0(%rbx)")
-        var i = 0
-        while i < f.slots.len() {
-            let s = f.slots[i]
-            if s.word >= 0 || s.word == ENV_WORD {
-                var at = SPILLED_ENV
-                if s.word >= 0 { at = spilled_word(s.word) }
-                if is_aggregate(s.ty) {
-                    self.emit(format("movq {}, %rsi", at))
-                    var w = 0
-                    while w < s.size {
-                        self.emit(format("movq {}(%rsi), %rax", w))
-                        self.emit(format("movq %rax, {}(%rbx)", slot_off[i] + w))
-                        w = w + 8
-                    }
+    // An intrinsic, done in place (`Intrinsic` says what each means).
+    fun emit_intr(var self, d: int32, op: Intrinsic, args: [int32], temp_base: int32) {
+        match op {
+            // std.math's primitives inline (MYLA-249): no call
+            Intrinsic.Sqrt => {
+                self.uses_float = true
+                let ra = self.xmm_in(args[0], "rax", "xmm0", temp_base)
+                self.emit(format("sqrtsd {}, %xmm0", ra))
+                self.xmm_result(d, temp_base)
+            },
+            Intrinsic.F64Bits | Intrinsic.F64FromBits => {
+                self.load_temp(args[0], "rax", temp_base)
+                self.store_temp(d, temp_base)
+            },
+            // to the nearest integer (the default rounding, ties to even)
+            Intrinsic.F64Round => {
+                self.uses_float = true
+                let ra = self.xmm_in(args[0], "rax", "xmm0", temp_base)
+                self.emit(format("cvtsd2si {}, %rax", ra))
+                self.store_temp(d, temp_base)
+            },
+            // the address of a runtime variable (MYLA-162): next to %rip,
+            // or in the worker's block with tasks
+            Intrinsic.RtAddr(sym) => {
+                // the loads and stores reading it name the variable
+                if self.temp_mem[d] != "" { return }
+                if self.frames && tls_offset(sym) != 0 {
+                    self.emit("movq %fs:0, %rax")
+                    self.emit(format("leaq {}(%rax), %rax", tls_offset(sym)))
+                } else { self.emit(format("leaq {}(%rip), %rax", sym)) }
+                self.store_temp(d, temp_base)
+            },
+            // another worker's own of a runtime variable: its block in
+            // `__tls_blocks` (with tasks)
+            Intrinsic.RtWaddr(sym) => {
+                self.load_temp(args[0], "rax", temp_base)
+                self.emit(format("imulq ${}, %rax, %rax", TLS_SIZE))
+                self.emit("leaq __tls_blocks(%rip), %rcx")
+                self.emit(format("leaq {}(%rcx,%rax), %rax", tls_offset(sym)))
+                self.store_temp(d, temp_base)
+            },
+            // atomics (MYLA-162), through the scratch registers
+            Intrinsic.Cas64 => {
+                let at = self.atomic_at(args[0], temp_base)
+                self.load_temp(args[2], "rdx", temp_base)
+                self.load_temp(args[1], "rax", temp_base)
+                self.emit("lock cmpxchgq %rdx, " + at)
+                self.emit("sete %al")
+                self.emit("movzbl %al, %eax")
+                self.store_temp(d, temp_base)
+            },
+            // x86-64's loads and stores are ordered as acquire and
+            // release by themselves (MYLA-267)
+            Intrinsic.LoadAcq64 => {
+                let at = self.atomic_at(args[0], temp_base)
+                self.emit("movq " + at + ", %rax")
+                self.store_temp(d, temp_base)
+            },
+            Intrinsic.StoreRel64 => {
+                let at = self.atomic_at(args[0], temp_base)
+                self.load_temp(args[1], "rax", temp_base)
+                self.emit("movq %rax, " + at)
+            },
+            Intrinsic.Xchg64 => {
+                let at = self.atomic_at(args[0], temp_base)
+                self.load_temp(args[1], "rax", temp_base)
+                self.emit("xchgq %rax, " + at)
+                self.store_temp(d, temp_base)
+            },
+            Intrinsic.FetchAdd64 => {
+                // the value before unused, the addend a constant: one add
+                if (d < 0 || self.temp_uses[d] == 0) && self.temp_imm[args[1]] != "" {
+                    let at = self.atomic_at(args[0], temp_base)
+                    self.emit(format("lock addq {}, {}", self.temp_imm[args[1]], at))
+                    return
+                }
+                let at = self.atomic_at(args[0], temp_base)
+                self.load_temp(args[1], "rax", temp_base)
+                self.emit("lock xaddq %rax, " + at)
+                self.store_temp(d, temp_base)
+            },
+            Intrinsic.Pause => {
+                self.emit("pause")
+            },
+            // one more reference to a cell (`lock`: an actor handle
+            // threads share, D92)
+            Intrinsic.RcInc | Intrinsic.RcIncAtomic => {
+                var inc = "incq"
+                if is_rc_atomic(op) { inc = "lock incq" }
+                let at = self.reg_of(args[0])
+                if at != "" { self.emit(format("{} -8({})", inc, at)) }
+                else {
+                    self.load_temp(args[0], "rax", temp_base)
+                    self.emit(format("{} -8(%rax)", inc))
+                }
+            },
+            // the cell the holder at the argument points at made unique
+            // by the clone routine the intrinsic names (MYLA-251)
+            Intrinsic.Unique(clone) => {
+                self.load_temp(args[0], "rcx", temp_base)
+                self.cow_unique_at_rcx(clone)
+                self.store_temp(d, temp_base)
+            },
+            // a cell's count down by one, whether it reached 0 (the
+            // per-type drop routines' fast path, MYLA-162)
+            Intrinsic.RcDec | Intrinsic.RcDecAtomic => {
+                let at = self.rc_dec(is_rc_atomic(op), args[0], temp_base)
+                if d >= 0 && self.temp_uses[d] > 0 {
+                    self.emit("sete %al")
+                    self.emit("movzbl %al, %eax")
+                    self.store_temp(d, temp_base)
+                }
+            },
+            // a frame resumed (its resume function the frame's first
+            // word): a call, the callee-saved registers kept
+            Intrinsic.RunFrame => {
+                self.load_temp(args[0], "rdi", temp_base)
+                self.emit("call *(%rdi)")
+            },
+            // a call through a code address with one word (MYLA-263)
+            // (the code first: whichever operand is in %rax, the other's load
+            // can't overwrite it; nothing lives in %r11 across a call)
+            Intrinsic.CallCode => {
+                self.load_temp(args[0], "r11", temp_base)
+                self.load_temp(args[1], "rdi", temp_base)
+                self.emit("call *%r11")
+                self.store_temp(d, temp_base)
+            },
+            Intrinsic.Bsr64 => {
+                self.load_temp(args[0], "rax", temp_base)
+                self.emit("bsrq %rax, %rax")
+                self.store_temp(d, temp_base)
+            },
+            // a rotation (MYLA-162): one `rol`, by an immediate when the
+            // count is a constant
+            Intrinsic.Rotl => {
+                // in place when the result's register holds the value
+                if self.temp_imm[args[1]] != "" && d >= 0 && self.temp_reg[d] != "" && self.temp_uses[d] > 0 && self.reg_of(args[0]) == "%" + self.temp_reg[d] && !text_has_xmm("%" + self.temp_reg[d]) {
+                    self.emit(format("rolq {}, %{}", self.temp_imm[args[1]], self.temp_reg[d]))
+                    return
+                }
+                if self.temp_imm[args[1]] != "" {
+                    self.load_temp(args[0], "rax", temp_base)
+                    self.emit(format("rolq {}, %rax", self.temp_imm[args[1]]))
                 } else {
-                    self.emit(format("movq {}, %rax", at))
-                    self.emit(format("movq %rax, {}(%rbx)", slot_off[i]))
+                    self.load_temp(args[1], "rcx", temp_base)
+                    self.load_temp(args[0], "rax", temp_base)
+                    self.emit("rolq %cl, %rax")
                 }
-                if self.owns_heap(s.ty) { self.retain("rbx", slot_off[i], s.ty) }
-                // a lambda's environment, held until its captures are copied
-                if s.word == ENV_WORD {
-                    self.emit(format("movq {}(%rbx), %rdi", slot_off[i]))
-                    self.emit("call __func_retain")
-                }
-            }
-            i = i + 1
+                self.store_temp(d, temp_base)
+            },
         }
-        self.emit("movq %rbx, %rax")
-        self.emit(format("movq {}(%rbp), %rbx", rbx_at))
-        self.emit("leave")
-        self.emit("ret")
-        self.emit("")
     }
 
     fun emit_inst(var self, f: IrFunc, inst: Inst, slot_off: [int32], temp_base: int32) {
@@ -692,7 +790,8 @@ impl CodeGen {
                                     let one: int64 = 1
                                     self.emit(format("andq ${}, %rax", (one << (k as int64)) - 1))
                                 }
-                                self.wrap(rt)
+                                // in range already, as `emit_int_op`'s (MYLA-251)
+                                if !same_int(t, rt) { self.wrap(rt) }
                             } else {
                                 self.load_temp(b, "rcx", temp_base)
                                 self.emit_int_op(op, t, rt, pos.line, pos.col, self.temp_imm[b])
@@ -707,7 +806,7 @@ impl CodeGen {
                                 else if int_signed(t) { self.emit(format("sarq ${}, %rax", c)) }
                                 else { self.emit(format("shrq ${}, %rax", c)) }
                             }
-                            self.wrap(rt)
+                            if op == "<<" || !same_int(t, rt) { self.wrap(rt) }
                         } else {
                             self.load_temp(a, "rax", temp_base)
                             self.emit_int_op(op, t, rt, pos.line, pos.col, self.second_operand(op, b, temp_base))
@@ -790,168 +889,6 @@ impl CodeGen {
                 self.pop_words(n)
             },
             Inst.Rt(d, name, args) => {
-                // std.math's primitives inline (MYLA-249): no call
-                if name == "__sqrt" {
-                    self.uses_float = true
-                    let ra = self.xmm_in(args[0], "rax", "xmm0", temp_base)
-                    self.emit(format("sqrtsd {}, %xmm0", ra))
-                    self.xmm_result(d, temp_base)
-                    return
-                }
-                if name == "__f64_bits" || name == "__f64_from_bits" {
-                    self.load_temp(args[0], "rax", temp_base)
-                    self.store_temp(d, temp_base)
-                    return
-                }
-                // to the nearest integer (the default rounding, ties to even)
-                if name == "__f64_round" {
-                    self.uses_float = true
-                    let ra = self.xmm_in(args[0], "rax", "xmm0", temp_base)
-                    self.emit(format("cvtsd2si {}, %rax", ra))
-                    self.store_temp(d, temp_base)
-                    return
-                }
-                // the address of a runtime variable (MYLA-162): next to %rip,
-                // or in the worker's block with tasks
-                if text_starts(name, "__rt_addr:") {
-                    // the loads and stores reading it name the variable
-                    if self.temp_mem[d] != "" { return }
-                    var sb = StringBuilder()
-                    sb.append(name, 10, name.len())
-                    let sym = sb.build()
-                    if self.frames && tls_offset(sym) != 0 {
-                        self.emit("movq %fs:0, %rax")
-                        self.emit(format("leaq {}(%rax), %rax", tls_offset(sym)))
-                    } else { self.emit(format("leaq {}(%rip), %rax", sym)) }
-                    self.store_temp(d, temp_base)
-                    return
-                }
-                // another worker's own of a runtime variable: its block in
-                // `__tls_blocks` (with tasks)
-                if text_starts(name, "__rt_waddr:") {
-                    var sb = StringBuilder()
-                    sb.append(name, 11, name.len())
-                    let sym = sb.build()
-                    self.load_temp(args[0], "rax", temp_base)
-                    self.emit(format("imulq ${}, %rax, %rax", TLS_SIZE))
-                    self.emit("leaq __tls_blocks(%rip), %rcx")
-                    self.emit(format("leaq {}(%rcx,%rax), %rax", tls_offset(sym)))
-                    self.store_temp(d, temp_base)
-                    return
-                }
-                // atomics (MYLA-162), through the scratch registers
-                if name == "__cas64" {
-                    let at = self.atomic_at(args[0], temp_base)
-                    self.load_temp(args[2], "rdx", temp_base)
-                    self.load_temp(args[1], "rax", temp_base)
-                    self.emit("lock cmpxchgq %rdx, " + at)
-                    self.emit("sete %al")
-                    self.emit("movzbl %al, %eax")
-                    self.store_temp(d, temp_base)
-                    return
-                }
-                // x86-64's loads and stores are ordered as acquire and
-                // release by themselves (MYLA-267)
-                if name == "__load_acq64" {
-                    let at = self.atomic_at(args[0], temp_base)
-                    self.emit("movq " + at + ", %rax")
-                    self.store_temp(d, temp_base)
-                    return
-                }
-                if name == "__store_rel64" {
-                    let at = self.atomic_at(args[0], temp_base)
-                    self.load_temp(args[1], "rax", temp_base)
-                    self.emit("movq %rax, " + at)
-                    return
-                }
-                if name == "__xchg64" {
-                    let at = self.atomic_at(args[0], temp_base)
-                    self.load_temp(args[1], "rax", temp_base)
-                    self.emit("xchgq %rax, " + at)
-                    self.store_temp(d, temp_base)
-                    return
-                }
-                if name == "__fetch_add64" {
-                    // the value before unused, the addend a constant: one add
-                    if (d < 0 || self.temp_uses[d] == 0) && self.temp_imm[args[1]] != "" {
-                        let at = self.atomic_at(args[0], temp_base)
-                        self.emit(format("lock addq {}, {}", self.temp_imm[args[1]], at))
-                        return
-                    }
-                    let at = self.atomic_at(args[0], temp_base)
-                    self.load_temp(args[1], "rax", temp_base)
-                    self.emit("lock xaddq %rax, " + at)
-                    self.store_temp(d, temp_base)
-                    return
-                }
-                if name == "__pause" {
-                    self.emit("pause")
-                    return
-                }
-                // one more reference to a cell (`lock`: an actor handle
-                // threads share, D92)
-                if name == "__rc_inc" || name == "__rc_inc_atomic" {
-                    var inc = "incq"
-                    if name == "__rc_inc_atomic" { inc = "lock incq" }
-                    let at = self.reg_of(args[0])
-                    if at != "" { self.emit(format("{} -8({})", inc, at)) }
-                    else {
-                        self.load_temp(args[0], "rax", temp_base)
-                        self.emit(format("{} -8(%rax)", inc))
-                    }
-                    return
-                }
-                // the cell the holder at the argument points at made unique
-                // by the clone routine named after the colon (MYLA-251)
-                if rt_cow(name) {
-                    self.load_temp(args[0], "rcx", temp_base)
-                    self.cow_unique_at_rcx(text_from(name, 6))
-                    self.store_temp(d, temp_base)
-                    return
-                }
-                // a cell's count down by one, whether it reached 0 (the
-                // per-type drop routines' fast path, MYLA-162)
-                if name == "__rc_dec" || name == "__rc_dec_atomic" {
-                    let at = self.rc_dec(name, args[0], temp_base)
-                    if d >= 0 && self.temp_uses[d] > 0 {
-                        self.emit("sete %al")
-                        self.emit("movzbl %al, %eax")
-                        self.store_temp(d, temp_base)
-                    }
-                    return
-                }
-                // a frame resumed (its resume function the frame's first
-                // word): a call, the callee-saved registers kept
-                if name == "__run_frame" {
-                    self.load_temp(args[0], "rdi", temp_base)
-                    self.emit("call *(%rdi)")
-                    return
-                }
-                if name == "__bsr64" {
-                    self.load_temp(args[0], "rax", temp_base)
-                    self.emit("bsrq %rax, %rax")
-                    self.store_temp(d, temp_base)
-                    return
-                }
-                // a rotation (MYLA-162): one `rol`, by an immediate when the
-                // count is a constant
-                if name == "__rotl" {
-                    // in place when the result's register holds the value
-                    if self.temp_imm[args[1]] != "" && d >= 0 && self.temp_reg[d] != "" && self.temp_uses[d] > 0 && self.reg_of(args[0]) == "%" + self.temp_reg[d] && !text_has_xmm("%" + self.temp_reg[d]) {
-                        self.emit(format("rolq {}, %{}", self.temp_imm[args[1]], self.temp_reg[d]))
-                        return
-                    }
-                    if self.temp_imm[args[1]] != "" {
-                        self.load_temp(args[0], "rax", temp_base)
-                        self.emit(format("rolq {}, %rax", self.temp_imm[args[1]]))
-                    } else {
-                        self.load_temp(args[1], "rcx", temp_base)
-                        self.load_temp(args[0], "rax", temp_base)
-                        self.emit("rolq %cl, %rax")
-                    }
-                    self.store_temp(d, temp_base)
-                    return
-                }
                 self.load_args(args, temp_base)
                 if name == "__float_to_str" {
                     self.uses_float = true
@@ -960,6 +897,7 @@ impl CodeGen {
                 self.emit(format("call {}", name))
                 if d >= 0 { self.store_temp(d, temp_base) }
             },
+            Inst.Intr(d, op, args) => { self.emit_intr(d, op, args, temp_base) },
             Inst.RetainVal(t, v) => { self.unplain() },
             Inst.Retain(t, p) => { self.unplain() },
             Inst.DropSlot(t, s) => { self.unplain() },
@@ -973,13 +911,6 @@ impl CodeGen {
             Inst.CloneDeep(t, p) => { self.unplain() },
             Inst.Init(s) => {},
             Inst.Moved(s) => {},
-            Inst.RtPair(d, d2, name, args) => {
-                self.load_args(args, temp_base)
-                self.emit(format("call {}", name))
-                self.store_temp(d, temp_base)
-                self.emit("movq %rdx, %rax")
-                self.store_temp(d2, temp_base)
-            },
             Inst.Check(v, kind, p) => {
                 self.emit_test(v, temp_base)
                 self.trap("jz", "__trap_" + kind, p.line, p.col)
@@ -1033,10 +964,11 @@ impl CodeGen {
                     self.emit("syscall")
                 }
             },
-            Inst.Elem(d, c, i, stride, is_str, p) => {
+            Inst.Elem(d, c, i, stride, is_str, checked, p) => {
                 self.load_temp(c, "rax", temp_base)
                 self.load_temp(i, "rcx", temp_base)
-                self.emit_elem_addr(is_str, stride, p.line, p.col)
+                if checked { self.emit_elem_check(p.line, p.col) }
+                self.emit(format("leaq {}, %rax", self.elem_operand(is_str, stride)))
                 self.store_temp(d, temp_base)
             },
             Inst.Load8(d, p) => {
@@ -1120,8 +1052,8 @@ impl CodeGen {
         return match term {
             Term.Br(c, a, b) => match insts[last] {
                 // a compare-and-swap only the branch reads: its flag (MYLA-162)
-                Inst.Rt(d, name, args) => {
-                    if d != c || self.temp_uses[d] != 1 || !(name == "__cas64" || name == "__rc_dec" || name == "__rc_dec_atomic") { return -1 }
+                Inst.Intr(d, op, args) => {
+                    if d != c || self.temp_uses[d] != 1 || !(is_rc_dec(op) || is_cas(op)) { return -1 }
                     last
                 },
                 // a negated flag only the branch reads: the inverted jump (MYLA-251)
@@ -1230,10 +1162,10 @@ impl CodeGen {
     // conditional jump; the successor emitted next is fallen through to.
     fun emit_compare_branch(var self, cmp: Inst, term: Term, labels: [str], next: int32, temp_base: int32) {
         match cmp {
-            Inst.Rt(d, name, args) => {
+            Inst.Intr(d, op, args) => {
                 // a count down: ZF set when it reached 0
-                if name == "__rc_dec" || name == "__rc_dec_atomic" {
-                    let rc = self.rc_dec(name, args[0], temp_base)
+                if is_rc_dec(op) {
+                    let rc = self.rc_dec(is_rc_atomic(op), args[0], temp_base)
                     match term {
                         Term.Br(c, yes, no) => {
                             if no == next { self.emit(format("je {}", labels[yes])) }
@@ -1536,7 +1468,7 @@ impl CodeGen {
     // place); false when none does. One match of `a` picks the candidates.
     fun emit_pair(var self, f: IrFunc, a: Inst, b: Inst, temp_base: int32) -> bool {
         return match a {
-            Inst.Elem(e, c, i, stride, is_str, p) => self.emit_elem_load(f, a, b, temp_base),
+            Inst.Elem(e, c, i, stride, is_str, checked, p) => self.emit_elem_load(f, a, b, temp_base),
             Inst.Bin(d, op, lt, rt, x, y, pos) => self.emit_add_load(f, a, b, temp_base) || self.emit_in_place(a, b, temp_base),
             _ => false,
         }
@@ -1696,7 +1628,7 @@ impl CodeGen {
     // addressing mode (MYLA-120); false when `a` and `b` aren't such a pair.
     fun emit_elem_load(var self, f: IrFunc, a: Inst, b: Inst, temp_base: int32) -> bool {
         return match a {
-            Inst.Elem(e, c, i, stride, is_str, p) => {
+            Inst.Elem(e, c, i, stride, is_str, checked, p) => {
                 if self.temp_uses[e] != 1 { return false }
                 let ok = match b {
                     Inst.LoadAt(d, q, off, width) => q == e && off == 0 && !is_str,
@@ -1706,7 +1638,7 @@ impl CodeGen {
                 if !ok { return false }
                 self.load_temp(c, "rax", temp_base)
                 self.load_temp(i, "rcx", temp_base)
-                self.emit_elem_check(p.line, p.col)
+                if checked { self.emit_elem_check(p.line, p.col) }
                 let at = self.elem_operand(is_str, stride)
                 match b {
                     Inst.LoadAt(d, q, off, width) => {
@@ -1772,14 +1704,14 @@ impl CodeGen {
     }
 
     // `decq` (atomic: `lock decq`) of the count before the cell at `p`.
-    fun rc_dec(var self, name: str, p: int32, temp_base: int32) -> str {
+    fun rc_dec(var self, atomic: bool, p: int32, temp_base: int32) -> str {
         var base = self.reg_of(p)
         if base == "" || text_has_xmm(base) {
             self.load_temp(p, "rcx", temp_base)
             base = "%rcx"
         }
         var insn = "decq"
-        if name == "__rc_dec_atomic" { insn = "lock decq" }
+        if atomic { insn = "lock decq" }
         self.emit(format("{} -8({})", insn, base))
         return base
     }
@@ -1832,8 +1764,8 @@ impl CodeGen {
                     Inst.LoadAt(d, p, off, w) => { at_uses[p] += 1 },
                     Inst.StoreAt(p, off, v, w) => { if v != p { at_uses[p] += 1 } },
                     // an atomic's address
-                    Inst.Rt(d, name, args) => {
-                        if (name == "__cas64" || name == "__xchg64" || name == "__fetch_add64" || name == "__load_acq64" || name == "__store_rel64") && args.len() > 0 {
+                    Inst.Intr(d, op, args) => {
+                        if is_atomic_at(op) {
                             var k = 1
                             var again = false
                             while k < args.len() {
@@ -1872,11 +1804,12 @@ impl CodeGen {
                     Inst.Addr(d, s) => { if defs[d] == 1 { frame[d] = slot_off[s] } },
                     // a runtime variable's address only loads and stores read:
                     // the variable itself their operand, nothing computed
-                    Inst.Rt(d, name, args) => {
-                        if d >= 0 && defs[d] == 1 && text_starts(name, "__rt_addr:") && self.temp_uses[d] > 0 && at_uses[d] == self.temp_uses[d] {
-                            var sb = StringBuilder()
-                            sb.append(name, 10, name.len())
-                            mem[d] = sb.build()
+                    Inst.Intr(d, op, args) => {
+                        match op {
+                            Intrinsic.RtAddr(sym) => {
+                                if d >= 0 && defs[d] == 1 && self.temp_uses[d] > 0 && at_uses[d] == self.temp_uses[d] { mem[d] = sym }
+                            },
+                            _ => {},
                         }
                     },
                     _ => {},
@@ -2861,7 +2794,7 @@ fun jump_cond(op: str, signed: bool) -> str {
 #test([], Term.Jmp(6))[-1]
 #test([], Term.Ret(0))[-1]
 #test([], Term.Br(5, 5, 7))[-1]
-fun tail_call_at(insts: [Inst], term: Term) -> int32 {
+pub fun tail_call_at(insts: [Inst], term: Term) -> int32 {
     let v = match term {
         Term.Ret(x) => x,
         _ => -2,
@@ -2900,7 +2833,7 @@ fun tail_call_at(insts: [Inst], term: Term) -> int32 {
 // that owns nothing (a borrowing `let`, a match's copy) whatever was put
 // into that slot depends on (a parameter's slot excepted: the caller keeps
 // its value alive); one taken from another block may depend on anything.
-fun drops_after_free(f: IrFunc, insts: [Inst], at: int32) -> bool {
+pub fun drops_after_free(f: IrFunc, insts: [Inst], at: int32) -> bool {
     var dropped: [int32] = []
     var j = at + 1
     while j < insts.len() {
@@ -2961,7 +2894,7 @@ fun drops_after_free(f: IrFunc, insts: [Inst], at: int32) -> bool {
                     },
                     Inst.LoadAt(d, p, off, width) => { if d == t { found = true; work.push(p) } },
                     Inst.Offset(d, p, off) => { if d == t { found = true; work.push(p) } },
-                    Inst.Elem(d, c, i, stride, is_str, pos) => { if d == t { found = true; work.push(c) } },
+                    Inst.Elem(d, c, i, stride, is_str, checked, pos) => { if d == t { found = true; work.push(c) } },
                     Inst.Const(d, ty, v) => { if d == t { found = true } },
                     Inst.Str(d, text) => { if d == t { found = true } },
                     Inst.Bin(d, op, lt, rt, x, y, pos) => { if d == t { found = true } },
@@ -2971,6 +2904,7 @@ fun drops_after_free(f: IrFunc, insts: [Inst], at: int32) -> bool {
                     Inst.Cast(d, ft, tt, x) => { if d == t { found = true } },
                     Inst.Call(d, name, xs) => { if d == t { found = true } },
                     Inst.Rt(d, name, xs) => { if d == t { found = true } },
+                    Inst.Intr(d, op, xs) => { if d == t { found = true } },
                     _ => {},
                 }
                 k = k - 1
@@ -3030,7 +2964,7 @@ fun clobber_kind(inst: Inst) -> int32 {
         Inst.Mov(d, a) => 0,
         Inst.Cast(d, from_t, to_t, a) => 0,
         Inst.Init(s) => 0,
-        Inst.Elem(d, c, i, stride, is_str, pos) => 0,
+        Inst.Elem(d, c, i, stride, is_str, checked, pos) => 0,
         Inst.Load8(d, p) => 0,
         Inst.Check(v, kind, pos) => 0,
         Inst.Global(d, sym, width) => 0,
@@ -3039,7 +2973,14 @@ fun clobber_kind(inst: Inst) -> int32 {
         Inst.Loc(p) => 0,
         Inst.Bind(name, s) => 0,
         Inst.Scope(open) => 0,
-        Inst.Rt(d, name, args) => if rt_internal(name) { 0 } else { 2 },
+        // an intrinsic calls nothing but `unique`'s clone and `run_frame`'s
+        // resume function
+        Inst.Intr(d, op, args) => match op {
+            Intrinsic.Unique(clone) => 2
+            Intrinsic.RunFrame => 2
+            Intrinsic.CallCode => 2
+            _ => 0
+        },
         _ => 2,
     }
 }
@@ -3080,7 +3021,7 @@ fun contains_int(xs: [int32], x: int32) -> bool {
 #test(Inst.Call(1, "Shape.area", [0]), [false, false])[false]
 #test(Inst.Call(2, "inc", [1]), [false, false, false])[false]
 #test(Inst.Call(4, "Money.compare", [2, 3]), [true, false, true, false, false])[true]
-fun passes_frame_address(c: Inst, in_frame: [bool]) -> bool {
+pub fun passes_frame_address(c: Inst, in_frame: [bool]) -> bool {
     return match c {
         Inst.Call(d, name, args) => {
             for a in args {
@@ -3094,7 +3035,7 @@ fun passes_frame_address(c: Inst, in_frame: [bool]) -> bool {
 
 // Which temporaries of `f` may hold an address in its frame: a slot's
 // address, or one computed from such an address.
-fun frame_addresses(f: IrFunc) -> [bool] {
+pub fun frame_addresses(f: IrFunc) -> [bool] {
     var out: [bool] = []
     for t in f.temps { out.push(false) }
     var changed = true
@@ -3262,7 +3203,7 @@ fun writes_no_slot(inst: Inst) -> bool {
         Inst.Un(d, op, t, a) => true
         Inst.Mov(d, a) => true
         Inst.Cast(d, from_t, to_t, a) => true
-        Inst.Elem(d, c, i, stride, is_str, pos) => true
+        Inst.Elem(d, c, i, stride, is_str, checked, pos) => true
         Inst.Load8(d, p) => true
         Inst.Check(v, kind, pos) => true
         Inst.Global(d, sym, w) => true
@@ -3270,8 +3211,12 @@ fun writes_no_slot(inst: Inst) -> bool {
         Inst.Loc(p) => true
         Inst.Bind(name, s) => true
         Inst.Scope(open) => true
-        // the inline primitives that compute a value and write nothing
-        Inst.Rt(d, name, args) => name == "__rotl" || name == "__bsr64" || name == "__sqrt" || name == "__f64_bits" || name == "__f64_from_bits" || name == "__f64_round" || text_starts(name, "__rt_addr:") || text_starts(name, "__rt_waddr:")
+        // the intrinsics that compute a value and write nothing
+        Inst.Intr(d, op, args) => match op {
+            Intrinsic.Rotl | Intrinsic.Bsr64 | Intrinsic.Sqrt | Intrinsic.F64Bits | Intrinsic.F64FromBits | Intrinsic.F64Round => true
+            Intrinsic.RtAddr(sym) | Intrinsic.RtWaddr(sym) => true
+            _ => false
+        }
         _ => false
     }
 }
@@ -3646,8 +3591,12 @@ fun reads_then_calls(inst: Inst) -> bool {
         Inst.CallSret(name, r, args) => true,
         Inst.CallInd(d, fv, args) => true,
         Inst.CallIndSret(fv, r, args) => true,
-        Inst.Rt(d, name, args) => !rt_internal(name) && !rt_cow(name),
-        Inst.RtPair(d, d2, name, args) => true,
+        Inst.Rt(d, name, args) => true,
+        Inst.Intr(d, op, args) => match op {
+            Intrinsic.RunFrame => true
+            Intrinsic.CallCode => true
+            _ => false
+        },
         _ => false,
     }
 }
@@ -3674,7 +3623,7 @@ fun call_arg_index(inst: Inst, v: int32, nt: int32, src_slot: [int32]) -> int32 
             late = reads_value(fv, v, nt, src_slot)
         },
         Inst.Rt(d, name, args) => { ws = args },
-        Inst.RtPair(d, d2, name, args) => { ws = args },
+        Inst.Intr(d, op, args) => { ws = args },
         _ => { return 99 },
     }
     if late { return 99 }
@@ -3723,39 +3672,6 @@ fun canonical_insn(t: Type, reg: str) -> str {
     }
     if sg { return format("movsbq {}, {}", narrow_operand(reg, 1), reg) }
     return format("movzbl {}, {}", narrow_operand(reg, 1), narrow_operand(reg, 4))
-}
-
-// Whether the runtime operation `name` is done inline, with no call: the
-// float primitives, bit operations, atomics, a count's bump and drop, a
-// runtime variable's address. (None is longer than 15 bytes but the
-// addresses, so the call of a per-type routine is told apart quickly.)
-#test("__rc_inc")[true]
-#test("__rt_addr:__heap_ptr")[true]
-#test("__drop_list_.str")[false]
-fun rt_internal(name: str) -> bool {
-    if name.len() <= 15 {
-        if name == "__sqrt" || name == "__f64_bits" || name == "__f64_from_bits" || name == "__f64_round" || name == "__rotl" || name == "__bsr64" || name == "__cas64" || name == "__xchg64" || name == "__fetch_add64" || name == "__load_acq64" || name == "__store_rel64" || name == "__pause" || name == "__rc_dec" || name == "__rc_dec_atomic" || name == "__rc_inc" || name == "__rc_inc_atomic" { return true }
-    }
-    // (a byte told apart first: `t` of `__rt`)
-    let mark = "__rt"
-    if name.len() < 11 || name[3] != mark[3] { return false }
-    return text_starts(name, "__rt_addr:") || text_starts(name, "__rt_waddr:")
-}
-
-// Whether `name` is a copy-on-write (`__cow:<the clone routine>`).
-#test("__cow:__sb_clone")[true]
-#test("__drop_list_.str")[false]
-fun rt_cow(name: str) -> bool {
-    let mark = "__cow:"
-    return name.len() > 6 && name[5] == mark[5] && text_starts(name, mark)
-}
-
-// `s` from byte `at` on.
-#test("__cow:__sb_clone", 6)["__sb_clone"]
-fun text_from(s: str, at: int32) -> str {
-    var sb = StringBuilder()
-    sb.append(s, at, s.len())
-    return sb.build()
 }
 
 fun text_starts(s: str, prefix: str) -> bool {

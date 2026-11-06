@@ -24,6 +24,7 @@ pub const TARGET: str = "x86_64-linux"
 
 pub const EINTR: int64 = -4
 pub const EAGAIN: int64 = -11
+pub const EPIPE: int64 = -32
 
 const SYS_READ: int64 = 0
 const SYS_WRITE: int64 = 1
@@ -57,6 +58,11 @@ const SYS_SCHED_GETAFFINITY: int64 = 204
 const SYS_GETDENTS64: int64 = 217
 const SYS_EXIT_GROUP: int64 = 231
 const SYS_PIPE2: int64 = 293
+const SYS_CHDIR: int64 = 80
+const SYS_MEMFD_CREATE: int64 = 319
+const SYS_LSEEK: int64 = 8
+const SYS_RT_SIGACTION: int64 = 13
+const SYS_GETPID: int64 = 39
 const SYS_KILL: int64 = 62
 const SYS_PIDFD_OPEN: int64 = 434
 const FUTEX_WAIT_PRIVATE: int64 = 128
@@ -206,8 +212,8 @@ pub fun poll_read(fd: int64, timeout_ms: int64) -> int64 {
 }
 
 // The `n` bytes at `p` written to `fd`, a write at a time, again after an
-// interruption (EINTR, EAGAIN); up to the first error.
-pub fun write_all(fd: int64, p: int64, n: int64) {
+// interruption (EINTR, EAGAIN); 0, or the first error (minus its errno).
+pub fun write_all(fd: int64, p: int64, n: int64) -> int64 {
     var at = p
     var left = n
     while left > 0 {
@@ -216,15 +222,16 @@ pub fun write_all(fd: int64, p: int64, n: int64) {
             at += r
             left -= r
         } else if r != EINTR && r != EAGAIN {
-            return
+            return r
         }
     }
+    return 0
 }
 
 // The `n` bytes at `p` and a newline on the standard output in one write,
 // so the lines of tasks on other workers don't interleave; what a partial
-// write left, written after it.
-pub fun write_line(p: int64, n: int64) {
+// write left, written after it. 0, or the first error (minus its errno).
+pub fun write_line(p: int64, n: int64) -> int64 {
     let nl = __addr_of("\n") + 8
     let iov = __alloc(32)
     __store64(iov, p)
@@ -237,34 +244,241 @@ pub fun write_line(p: int64, n: int64) {
     }
     __free(iov)
     if r < 0 {
-        return
+        return r
     }
     if r < n {
-        write_all(1, p + r, n - r)
-        write_all(1, nl, 1)
-    } else if r == n {
-        write_all(1, nl, 1)
+        let e = write_all(1, p + r, n - r)
+        if e < 0 {
+            return e
+        }
+        return write_all(1, nl, 1)
     }
+    if r == n {
+        return write_all(1, nl, 1)
+    }
+    return 0
+}
+
+// A write to a closed pipe on the standard output or error ends the program
+// quietly (D146), as the default SIGPIPE does, which the runtime ignores so
+// that other writes report the error: the default restored and the signal
+// raised; the exit code a shell would show, should it not end the process.
+pub fun broken_pipe() {
+    let act = __alloc(32)
+    __store64(act, 0)
+    __store64(act + 8, 0)
+    __store64(act + 16, 0)
+    __store64(act + 24, 0)
+    __syscall5(SYS_RT_SIGACTION, 13, act, 0, 8, 0)
+    __syscall(SYS_KILL, __syscall(SYS_GETPID, 0, 0, 0), 13, 0)
+    __syscall(SYS_EXIT_GROUP, 141, 0, 0)
 }
 
 // --- processes ---------------------------------------------------------------
 
 // The child's side of `run`, between fork and exec: system calls on numbers
-// the parent prepared, nothing allocated or released. Its stdout and stderr
-// become the pipes' write ends; when the exec fails, its errno goes back
-// through `report` (closed on exec) and the child ends with 127.
-fun exec_child(out_pipe: int64, err_pipe: int64, report: int64, path: int64, argv: int64, scratch: int64) {
+// the parent prepared (`spec`, `child_spec`), nothing allocated or released.
+// Its stdout and stderr become the pipes' write ends, its stdin the input
+// given (D147), its directory the one given; each of the paths is tried in
+// turn, as `execvp` tries PATH's (one not there or not a directory: the
+// next; one that may not be run: remembered). When none could be run its
+// errno goes back through `report` (closed on exec) and the child ends with
+// 127.
+fun exec_child(out_pipe: int64, err_pipe: int64, report: int64, spec: int64, argv: int64, scratch: int64) {
     __syscall(SYS_DUP2, out_pipe >> 32, 1, 0)
     __syscall(SYS_DUP2, err_pipe >> 32, 2, 0)
+    // SIGPIPE back to its default, which the runtime ignores (D146) and
+    // an exec would keep: the child's `head` must stop as it would anywhere
+    __store64(scratch, 0)
+    __store64(scratch + 8, 0)
+    __store64(scratch + 16, 0)
+    __store64(scratch + 24, 0)
+    __syscall5(SYS_RT_SIGACTION, 13, scratch, 0, 8, 0)
     __syscall(SYS_CLOSE, out_pipe & LOW32, 0, 0)
     __syscall(SYS_CLOSE, out_pipe >> 32, 0, 0)
     __syscall(SYS_CLOSE, err_pipe & LOW32, 0, 0)
     __syscall(SYS_CLOSE, err_pipe >> 32, 0, 0)
     __syscall(SYS_CLOSE, report & LOW32, 0, 0)
-    let r = __syscall(SYS_EXECVE, path, argv, __environ())
+    let input = __load64(spec + 32)
+    if input >= 0 {
+        __syscall(SYS_DUP2, input, 0, 0)
+        __syscall(SYS_CLOSE, input, 0, 0)
+    }
+    var r: int64 = 0
+    let dir = __load64(spec + 24)
+    if dir != 0 {
+        r = __syscall(SYS_CHDIR, dir, 0, 0)
+    }
+    if r == 0 {
+        r = -2                         // ENOENT: no path to try
+        var denied = false
+        let n = __load64(spec + 8)
+        var k: int64 = 0
+        while k < n {
+            r = __syscall(SYS_EXECVE, __load64(__load64(spec) + k * 8), argv, __load64(spec + 16))
+            if r == -13 {
+                denied = true          // EACCES: kept unless one runs
+            } else if r != -2 && r != -20 {
+                break                  // not ENOENT or ENOTDIR: that one's error
+            }
+            k += 1
+        }
+        if denied && (r == -2 || r == -20) {
+            r = -13
+        }
+    }
     __store64(scratch, -r)
     __syscall(SYS_WRITE, report >> 32, scratch, 4)
     __syscall(SYS_EXIT, 127, 0, 0)
+}
+
+// What `exec_child` needs besides the argument vector, made before the fork
+// (D147): `[paths, n, envp, dir, input]`, the `n` paths to try as C strings,
+// the environment (the one given as `NAME=value` entries, or this process's),
+// the directory to change to (0: none) and the descriptor of an anonymous
+// file holding the input given (-1: none, the child reads this process's
+// stdin). `opts` as `std.rt.run_with` describes it. A negative errno when
+// the input's file can't be made.
+fun child_spec(paths: [str], opts: [str]) -> int64 {
+    let spec = __alloc(40)
+    let n = paths.len() as int64
+    let ps = __alloc(n * 8 + 8)
+    var k: int64 = 0
+    for p in paths {
+        __store64(ps + k * 8, c_path(p))
+        k += 1
+    }
+    __store64(spec, ps)
+    __store64(spec + 8, n)
+    var envp = __environ()
+    if opts.len() > 3 && opts[3] != "" {
+        // this process's environment ("keep") or none ("clear"), with the
+        // changes after it applied in order
+        var entries: [str] = []
+        if opts[3] != "clear" {
+            entries = environ_entries()
+        }
+        var i = 4
+        while i < opts.len() {
+            entries = env_change(entries, opts[i])
+            i += 1
+        }
+        let m = entries.len() as int64
+        envp = __alloc(m * 8 + 8)
+        var j: int64 = 0
+        for en in entries {
+            __store64(envp + j * 8, c_path(en))
+            j += 1
+        }
+        __store64(envp + m * 8, 0)
+    }
+    __store64(spec + 16, envp)
+    var dir: int64 = 0
+    if opts.len() > 0 && opts[0] != "" {
+        dir = c_path(opts[0])
+    }
+    __store64(spec + 24, dir)
+    var input: int64 = -1
+    if opts.len() > 2 && opts[1] != "" {
+        let name = c_path("stdin")
+        input = __syscall(SYS_MEMFD_CREATE, name, 1, 0)   // MFD_CLOEXEC
+        __free(name)
+        if input >= 0 {
+            let t = __addr_of(opts[2])
+            let w = write_all(input, t + 8, __load64(t))
+            __syscall(SYS_LSEEK, input, 0, 0)
+            if w < 0 {
+                __syscall(SYS_CLOSE, input, 0, 0)
+                input = w
+            }
+        }
+    }
+    __store64(spec + 32, input)
+    if input < -1 {
+        free_spec(spec)
+        return input
+    }
+    return spec
+}
+
+// The entries of the environment this process started with.
+fun environ_entries() -> [str] {
+    var out: [str] = []
+    var entry = __environ()
+    while __load64(entry) != 0 {
+        let e = __load64(entry)
+        var len: int64 = 0
+        while __load8(e + len) != 0u8 {
+            len += 1
+        }
+        let p = __alloc(len + 8)
+        __store64(p, len)
+        __copy_bytes(p + 8, e, len)
+        out.push(__str_of(p))
+        entry += 8
+    }
+    return out
+}
+
+// `entries` with `change` made: `NAME=value` sets NAME (in place of what it
+// was), a bare `NAME` removes it.
+#test(["A=1", "B=2"], "A=3")[["B=2", "A=3"]]
+#test(["A=1", "B=2"], "B")[["A=1"]]
+fun env_change(entries: [str], change: str) -> [str] {
+    var n = 0
+    while n < change.len() && change[n] != 61u8 {   // '='
+        n += 1
+    }
+    var out: [str] = []
+    for en in entries {
+        let same = en.len() > n && en[n] == 61u8 && starts(en, change, n)
+        if !same {
+            out.push(en)
+        }
+    }
+    if n < change.len() {
+        out.push(change)
+    }
+    return out
+}
+
+// Whether the first `n` bytes of `a` and `b` are the same.
+fun starts(a: str, b: str, n: int32) -> bool {
+    var i = 0
+    while i < n {
+        if a[i] != b[i] {
+            return false
+        }
+        i += 1
+    }
+    return true
+}
+
+// What `child_spec` made, released (the parent's copy of the input closed).
+fun free_spec(spec: int64) {
+    let ps = __load64(spec)
+    var k: int64 = 0
+    while k < __load64(spec + 8) {
+        __free(__load64(ps + k * 8))
+        k += 1
+    }
+    __free(ps)
+    let envp = __load64(spec + 16)
+    if envp != __environ() {
+        var i: int64 = 0
+        while __load64(envp + i * 8) != 0 {
+            __free(__load64(envp + i * 8))
+            i += 1
+        }
+        __free(envp)
+    }
+    if __load64(spec + 24) != 0 {
+        __free(__load64(spec + 24))
+    }
+    if __load64(spec + 32) >= 0 {
+        __syscall(SYS_CLOSE, __load64(spec + 32), 0, 0)
+    }
+    __free(spec)
 }
 
 // A read of up to 4 KB of `fd` into `buf`: the bytes read, 0 for none yet
@@ -287,9 +501,20 @@ fun read_some(fd: int64, buf: int64) -> int64 {
 // code, a signal that ended it with exit code -1, or the errno of a failed
 // spawn) record the rest.
 pub fun run(program: str, argv: [str]) -> [uint8] {
+    return run_with([program], argv, [])
+}
+
+// `run` with the paths to try, in turn, and the options of
+// `std.rt.run_with` (D147).
+pub fun run_with(paths: [str], argv: [str], opts: [str]) -> [uint8] {
     var out: [uint8] = []
     var err: [uint8] = []
-    let path = c_path(program)
+    let spec = child_spec(paths, opts)
+    if spec < 0 {
+        __set_run_status(0, 0, -spec)
+        __set_run_stderr(err)
+        return out
+    }
     let n = argv.len() as int64
     let args = __alloc(n * 8 + 8)
     var k: int64 = 0
@@ -323,7 +548,7 @@ pub fun run(program: str, argv: [str]) -> [uint8] {
         let err_pipe = __load64(pipes + 8)
         let report = __load64(pipes + 16)
         if pid == 0 {
-            exec_child(out_pipe, err_pipe, report, path, args, buf)
+            exec_child(out_pipe, err_pipe, report, spec, args, buf)
         }
         __syscall(SYS_CLOSE, out_pipe >> 32, 0, 0)
         __syscall(SYS_CLOSE, err_pipe >> 32, 0, 0)
@@ -403,7 +628,7 @@ pub fun run(program: str, argv: [str]) -> [uint8] {
         k += 1
     }
     __free(args)
-    __free(path)
+    free_spec(spec)
     __set_run_status(exit_code, signal, errno)
     __set_run_stderr(err)
     return out
@@ -415,7 +640,16 @@ pub fun run(program: str, argv: [str]) -> [uint8] {
 // stderr's pipes and `exited` a descriptor that becomes readable when it ends
 // (a pidfd), or `[errno, 0, -1, -1, -1]` when it couldn't be started.
 pub fun spawn(program: str, argv: [str]) -> [int] {
-    let path = c_path(program)
+    return spawn_with([program], argv, [])
+}
+
+// `spawn` with the paths to try, in turn, and the options of
+// `std.rt.run_with` (D147).
+pub fun spawn_with(paths: [str], argv: [str], opts: [str]) -> [int] {
+    let spec = child_spec(paths, opts)
+    if spec < 0 {
+        return [(-spec) as int, 0, -1, -1, -1]
+    }
     let n = argv.len() as int64
     let args = __alloc(n * 8 + 8)
     var k: int64 = 0
@@ -425,7 +659,7 @@ pub fun spawn(program: str, argv: [str]) -> [int] {
     }
     __store64(args + n * 8, 0)
     let pipes = __alloc(24)
-    let buf = __alloc(8)
+    let buf = __alloc(32)                      // a sigaction for exec_child too
     var errno: int64 = 0
     var pid: int64 = 0
     var out_fd: int64 = -1
@@ -450,7 +684,7 @@ pub fun spawn(program: str, argv: [str]) -> [int] {
         let err_pipe = __load64(pipes + 8)
         let report = __load64(pipes + 16)
         if pid == 0 {
-            exec_child(out_pipe, err_pipe, report, path, args, buf)
+            exec_child(out_pipe, err_pipe, report, spec, args, buf)
         }
         __syscall(SYS_CLOSE, out_pipe >> 32, 0, 0)
         __syscall(SYS_CLOSE, err_pipe >> 32, 0, 0)
@@ -481,7 +715,7 @@ pub fun spawn(program: str, argv: [str]) -> [int] {
         k += 1
     }
     __free(args)
-    __free(path)
+    free_spec(spec)
     return [errno as int, pid as int, out_fd as int, err_fd as int, exited as int]
 }
 

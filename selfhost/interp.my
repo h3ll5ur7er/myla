@@ -3232,6 +3232,24 @@ impl Interp {
             for x in __spawn(prog, argv) { out.push(Value.VInt(x as int64)) }
             return Value.VList(out)
         }
+        // `__run` and `__spawn` with D147's options: the host's own
+        if nm == "__run_with" || nm == "__spawn_with" {
+            let prog = as_str(self.eval(args[0]))
+            var argv: [str] = []
+            match self.eval(args[1]) {
+                Value.VList(xs) => { for x in xs { argv.push(as_str(x)) } },
+                _ => {},
+            }
+            var opts: [str] = []
+            match self.eval(args[2]) {
+                Value.VList(xs) => { for x in xs { opts.push(as_str(x)) } },
+                _ => {},
+            }
+            if nm == "__run_with" { return bytes_to_value(__run_with(prog, argv, opts)) }
+            var out: [Value] = []
+            for x in __spawn_with(prog, argv, opts) { out.push(Value.VInt(x as int64)) }
+            return Value.VList(out)
+        }
         if nm == "__reap" { return Value.VInt(__reap(as_int(self.eval(args[0])) as int32) as int64) }
         if nm == "__close" {
             __close(as_int(self.eval(args[0])) as int32)

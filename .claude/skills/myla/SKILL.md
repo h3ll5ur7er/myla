@@ -101,6 +101,7 @@ fun main() {
 - `match`: arms `pattern [if guard] => expr` or `=> { …; last_expression }`, one per line or comma-separated. Patterns: `_`, bindings, literals, `Variant(a, b)`, `E.Variant`, tuples, `Point { x, y: 0 }`, `a | b`. Matches must be exhaustive, nested patterns included: `Some(Ok(v))`, `Some(Err(e))` and `None` cover an `Option<Result<…>>` without a `_` arm.
 - A function that returns a value must end every path with `return`, `panic(…)` or `unreachable()`; loops and `match` statements don't count, so put `unreachable()` after a loop that always returns.
 - `?` works on `Option`/`Result` when the function returns the same kind (same error type). Inside a lambda it returns from the lambda, so the lambda's result type must be known: pass it where a function type is expected or annotate the variable (`let f: (int) -> Option<int> = (x: int) => …`).
+- Built-in types take impls too: `impl int { … }`, `impl [int] { … }`, `impl<T> [T] { … }`, `impl<K, V> [K: V] { … }`. A `var self` method on one writes the caller's place, by `self.push(x)` or by assigning `self = self + 1` (D144; only there may `self` be assigned, a struct's `var self` method changes fields).
 - `x |> f(y)` is `f(x, y)`; `f >> g` composes; `f(_, 2)` is partial application.
 - Closures capture by value; captured variables can't be changed inside.
 - Generic bounds: `fun sum<T: Add>(…)`; a bound allows the operator on `T`, not calling trait methods on it.

@@ -17,8 +17,8 @@
 
 from .checker import Type, subst_type
 from .codegen import CodeGen, PartialJob, is_aggregate, int_signed, int_width_cg, is_tfloat32, is_aggregate_opt, is_cell_t, is_tfunc, is_actor_t, tls_offset, TLS_SIZE
-from .ir import IrFunc, Inst, Term, Slot, ENV_WORD, ends_in_call
-from .ir_x86 import slots_at, frame_size
+from .ir import IrFunc, Inst, Term, Slot, ENV_WORD, ends_in_call, Intrinsic, is_xchg, is_rc_dec, is_rc_atomic
+from .ir_x86 import slots_at, frame_size, tail_call_at, drops_after_free, passes_frame_address, frame_addresses
 
 // The argument words that come in registers (x0 to x7).
 const A64_WORDS: int32 = 8
@@ -129,6 +129,7 @@ impl CodeGen {
             }
             si = si + 1
         }
+        var in_frame: [bool] = []
         var k = 0
         while k < f.order.len() {
             let b = f.order[k]
@@ -137,6 +138,19 @@ impl CodeGen {
                 let insts = f.blocks[b].insts
                 let term = f.blocks[b].term
                 var stop = insts.len()
+                // a call whose result the function returns at once, made in
+                // its place (MYLA-283, as x86-64's MYLA-126): its arguments
+                // in registers, none an address in this frame
+                var tail = -1
+                if !f.frame {
+                    tail = tail_call_at(insts, term)
+                    if tail >= 0 && !drops_after_free(f, insts, tail) { tail = -1 }
+                    if tail >= 0 && a64_call_words(insts[tail]) > A64_WORDS { tail = -1 }
+                    if tail >= 0 {
+                        if in_frame.len() == 0 { in_frame = frame_addresses(f) }
+                        if passes_frame_address(insts[tail], in_frame) { tail = -1 }
+                    }
+                }
                 // `become`'s call, and the call before a `suspend`, replace
                 // the function (D87, D90)
                 var becomes = match term { Term.Become => true, _ => false }
@@ -151,6 +165,7 @@ impl CodeGen {
                     _ => {},
                 }
                 if becomes { stop = insts.len() - 1 }
+                if !becomes && tail >= 0 { stop = tail }
                 var i = 0
                 while i < stop {
                     self.a64_inst(f, fr, insts[i])
@@ -159,6 +174,8 @@ impl CodeGen {
                 if becomes {
                     if resume_at >= 0 { self.a64_state(fr, resume_at) }
                     self.a64_tail_call(f, fr, insts[insts.len() - 1])
+                } else if tail >= 0 {
+                    self.a64_tail_call(f, fr, insts[tail])
                 } else {
                     self.a64_term(f, fr, term, labels)
                 }
@@ -168,7 +185,7 @@ impl CodeGen {
         self.emit(format("{}:", self.epilogue))
         self.a64_leave(fr)
         self.emit("ret")
-        if f.frame { self.emit_frame_new_a64(f, mangled, soff) }
+        if f.frame { self.emit_frame_new_ir(f, mangled) }
     }
 
     // The frame left: x28 restored in a frame function, sp, x29 and x30.
@@ -191,83 +208,6 @@ impl CodeGen {
     fun a64_slot(var self, fr: A64Frame, s: int32) -> str {
         if fr.frame { return self.a64_mem("x28", fr.soff[s]) }
         return self.a64_cell(fr.soff[s])
-    }
-
-    // `myla_<f>__new(args…)`: a new heap frame for the frame function `f`
-    // (`[resume fn][caller][state][task]…`, then the slots, zeroed), each
-    // argument copied into its parameter's slot with references of its own
-    // (an aggregate from the address passed; a lambda's environment from
-    // x9); the frame in x0.
-    fun emit_frame_new_a64(var self, f: IrFunc, mangled: str, soff: [int32]) {
-        let size = frame_size(f)
-        var words = 0
-        for s in f.slots { if s.word >= 0 && s.word + 1 > words { words = s.word + 1 } }
-        var regs = words
-        if regs > A64_WORDS { regs = A64_WORDS }
-        // the cells: the argument registers, the environment, the frame
-        let env_cell = 8 * regs
-        let frame_cell = env_cell + 8
-        let fsize = (frame_cell + 8 + 15) / 16 * 16
-        self.emit("")
-        self.emit("\t.p2align 2")
-        self.emit(format("myla_{}__new:", mangled))
-        self.emit("stp x29, x30, [sp, #-16]!")
-        self.emit("mov x29, sp")
-        self.a64_sp_sub(fsize)
-        var w = 0
-        while w < regs {
-            self.emit(format("str x{}, {}", w, self.a64_cell(8 * w)))
-            w = w + 1
-        }
-        self.emit(format("str x9, {}", self.a64_cell(env_cell)))
-        self.a64_imm("x0", size as int64)
-        self.emit("bl __alloc")
-        self.emit(format("str x0, {}", self.a64_cell(frame_cell)))
-        self.a64_imm("x2", size as int64)
-        self.emit("mov x1, #0")
-        let zero = self.label()
-        let zdone = self.label()
-        self.emit(format("{}:", zero))
-        self.emit(format("cbz x2, {}", zdone))
-        self.emit("sub x2, x2, #8")
-        self.emit("str x1, [x0, x2]")
-        self.emit(format("b {}", zero))
-        self.emit(format("{}:", zdone))
-        self.a64_adr("x10", format("myla_{}", mangled))
-        self.emit("str x10, [x0]")
-        var i = 0
-        while i < f.slots.len() {
-            let s = f.slots[i]
-            if s.word >= 0 || s.word == ENV_WORD {
-                // the word passed (or an aggregate's address) into x10
-                if s.word == ENV_WORD { self.emit(format("ldr x10, {}", self.a64_cell(env_cell))) }
-                else if s.word < A64_WORDS { self.emit(format("ldr x10, {}", self.a64_cell(8 * s.word))) }
-                else { self.emit(format("ldr x10, {}", self.a64_mem("x29", 16 + 8 * (s.word - A64_WORDS)))) }
-                self.emit(format("ldr x12, {}", self.a64_cell(frame_cell)))
-                if is_aggregate(s.ty) {
-                    var at = 0
-                    while at < s.size {
-                        self.emit(format("ldr x11, {}", self.a64_mem("x10", at)))
-                        self.emit(format("str x11, {}", self.a64_mem("x12", soff[i] + at)))
-                        at = at + 8
-                    }
-                } else {
-                    self.emit(format("str x10, {}", self.a64_mem("x12", soff[i])))
-                }
-                if self.owns_heap(s.ty) { self.a64_retain_at(frame_cell, soff[i], s.ty, false) }
-                // a lambda's environment, held until its captures are copied
-                if s.word == ENV_WORD {
-                    self.emit(format("ldr x12, {}", self.a64_cell(frame_cell)))
-                    self.emit(format("ldr x0, {}", self.a64_mem("x12", soff[i])))
-                    self.emit("bl __func_retain")
-                }
-            }
-            i = i + 1
-        }
-        self.emit(format("ldr x0, {}", self.a64_cell(frame_cell)))
-        self.emit("mov sp, x29")
-        self.emit("ldp x29, x30, [sp], #16")
-        self.emit("ret")
     }
 
     // -- cells, constants, addresses ----------------------------------------
@@ -542,7 +482,7 @@ impl CodeGen {
                 self.emit("blr x15")
             },
             Inst.Rt(d, name, args) => { self.a64_rt(f, fr, d, name, args) },
-            Inst.RtPair(d, d2, name, args) => { panic("internal error: aarch64: a runtime call with two results") },
+            Inst.Intr(d, op, args) => { self.a64_intr(f, fr, d, op, args) },
             Inst.Init(s) => {},
             Inst.Moved(s) => {},
             Inst.Check(v, kind, p) => {
@@ -623,15 +563,17 @@ impl CodeGen {
                     self.emit("svc #0")
                 }
             },
-            Inst.Elem(d, c, i, stride, is_str, p) => {
+            Inst.Elem(d, c, i, stride, is_str, checked, p) => {
                 self.a64_ld("x10", fr, c)
                 self.a64_ld("x11", fr, i)
-                self.emit("ldr x12, [x10]")
-                let ok = self.label()
-                self.emit("cmp x11, x12")
-                self.emit(format("b.lo {}", ok))
-                self.a64_trap("__trap_index", p.line, p.col)
-                self.emit(format("{}:", ok))
+                if checked {
+                    self.emit("ldr x12, [x10]")
+                    let ok = self.label()
+                    self.emit("cmp x11, x12")
+                    self.emit(format("b.lo {}", ok))
+                    self.a64_trap("__trap_index", p.line, p.col)
+                    self.emit(format("{}:", ok))
+                }
                 if is_str { self.emit("add x10, x10, #8") } else { self.emit("add x10, x10, #16") }
                 if stride == 1 { self.emit("add x10, x10, x11") }
                 else {
@@ -910,173 +852,168 @@ impl CodeGen {
         }
     }
 
-    // A runtime call (`rt name`), the inline ones done in place.
-    fun a64_rt(var self, f: IrFunc, fr: A64Frame, d: int32, name: str, args: [int32]) {
-        if name == "__sqrt" {
-            self.uses_float = true
-            self.a64_ld("x10", fr, args[0])
-            self.emit("fmov d0, x10")
-            self.emit("fsqrt d0, d0")
-            self.emit("fmov x10, d0")
-            self.a64_st("x10", fr, d)
-            return
-        }
-        if name == "__f64_bits" || name == "__f64_from_bits" {
-            self.a64_ld("x10", fr, args[0])
-            self.a64_st("x10", fr, d)
-            return
-        }
-        if name == "__f64_round" {
-            // to the nearest, ties to even
-            self.uses_float = true
-            self.a64_ld("x10", fr, args[0])
-            self.emit("fmov d0, x10")
-            self.emit("fcvtns x10, d0")
-            self.a64_st("x10", fr, d)
-            return
-        }
-        if a64_starts(name, "__rt_addr:") {
-            self.a64_rt_var("x10", a64_after(name, 10))
-            self.a64_st("x10", fr, d)
-            return
-        }
-        if a64_starts(name, "__rt_waddr:") {
-            // worker w's own copy: its block in `__tls_blocks`
-            let sym = a64_after(name, 11)
-            self.a64_ld("x11", fr, args[0])
-            self.a64_adr("x10", "__tls_blocks")
-            self.a64_imm("x12", TLS_SIZE as int64)
-            self.emit("madd x10, x11, x12, x10")
-            self.emit(format("add x10, x10, #{}", tls_offset(sym)))
-            self.a64_st("x10", fr, d)
-            return
-        }
-        if name == "__rotl" {
-            // left by n is right by 64 - n
-            self.a64_ld("x10", fr, args[0])
-            self.a64_ld("x11", fr, args[1])
-            self.emit("neg x11, x11")
-            self.emit("ror x10, x10, x11")
-            self.a64_st("x10", fr, d)
-            return
-        }
-        if name == "__bsr64" {
-            self.a64_ld("x10", fr, args[0])
-            self.emit("clz x10, x10")
-            self.emit("mov x11, #63")
-            self.emit("sub x10, x11, x10")
-            self.a64_st("x10", fr, d)
-            return
-        }
-        if name == "__cas64" {
-            // whether the word at the address held `old`, now `new`
-            self.a64_ld("x11", fr, args[0])
-            self.a64_ld("x12", fr, args[1])
-            self.a64_ld("x13", fr, args[2])
-            let again = self.label()
-            let no = self.label()
-            let done = self.label()
-            self.emit(format("{}:", again))
-            self.emit("ldaxr x14, [x11]")
-            self.emit("cmp x14, x12")
-            self.emit(format("b.ne {}", no))
-            self.emit("stlxr w15, x13, [x11]")
-            self.emit(format("cbnz w15, {}", again))
-            // a full barrier, as the exchanges have: what follows isn't
-            // seen before the swap (publish, then look; MYLA-267)
-            self.emit("dmb ish")
-            self.emit("mov x10, #1")
-            self.emit(format("b {}", done))
-            self.emit(format("{}:", no))
-            self.emit("clrex")
-            self.emit("mov x10, #0")
-            self.emit(format("{}:", done))
-            self.a64_st("x10", fr, d)
-            return
-        }
-        // acquire and release (MYLA-267): `ldar` and `stlr`
-        if name == "__load_acq64" {
-            self.a64_ld("x11", fr, args[0])
-            self.emit("ldar x10, [x11]")
-            self.a64_st("x10", fr, d)
-            return
-        }
-        if name == "__store_rel64" {
-            self.a64_ld("x11", fr, args[0])
-            self.a64_ld("x12", fr, args[1])
-            self.emit("stlr x12, [x11]")
-            return
-        }
-        if name == "__xchg64" || name == "__fetch_add64" {
-            self.a64_ld("x11", fr, args[0])
-            self.a64_ld("x12", fr, args[1])
-            let again = self.label()
-            self.emit(format("{}:", again))
-            self.emit("ldaxr x10, [x11]")
-            if name == "__xchg64" { self.emit("stlxr w15, x12, [x11]") }
-            else {
-                self.emit("add x13, x10, x12")
+    // An intrinsic, done in place (`Intrinsic` says what each means).
+    fun a64_intr(var self, f: IrFunc, fr: A64Frame, d: int32, op: Intrinsic, args: [int32]) {
+        match op {
+            Intrinsic.Sqrt => {
+                self.uses_float = true
+                self.a64_ld("x10", fr, args[0])
+                self.emit("fmov d0, x10")
+                self.emit("fsqrt d0, d0")
+                self.emit("fmov x10, d0")
+                self.a64_st("x10", fr, d)
+            },
+            Intrinsic.F64Bits | Intrinsic.F64FromBits => {
+                self.a64_ld("x10", fr, args[0])
+                self.a64_st("x10", fr, d)
+            },
+            Intrinsic.F64Round => {
+                // to the nearest, ties to even
+                self.uses_float = true
+                self.a64_ld("x10", fr, args[0])
+                self.emit("fmov d0, x10")
+                self.emit("fcvtns x10, d0")
+                self.a64_st("x10", fr, d)
+            },
+            Intrinsic.RtAddr(sym) => {
+                self.a64_rt_var("x10", sym)
+                self.a64_st("x10", fr, d)
+            },
+            Intrinsic.RtWaddr(sym) => {
+                // worker w's own copy: its block in `__tls_blocks`
+                self.a64_ld("x11", fr, args[0])
+                self.a64_adr("x10", "__tls_blocks")
+                self.a64_imm("x12", TLS_SIZE as int64)
+                self.emit("madd x10, x11, x12, x10")
+                self.emit(format("add x10, x10, #{}", tls_offset(sym)))
+                self.a64_st("x10", fr, d)
+            },
+            Intrinsic.Rotl => {
+                // left by n is right by 64 - n
+                self.a64_ld("x10", fr, args[0])
+                self.a64_ld("x11", fr, args[1])
+                self.emit("neg x11, x11")
+                self.emit("ror x10, x10, x11")
+                self.a64_st("x10", fr, d)
+            },
+            Intrinsic.Bsr64 => {
+                self.a64_ld("x10", fr, args[0])
+                self.emit("clz x10, x10")
+                self.emit("mov x11, #63")
+                self.emit("sub x10, x11, x10")
+                self.a64_st("x10", fr, d)
+            },
+            Intrinsic.Cas64 => {
+                // whether the word at the address held `old`, now `new`
+                self.a64_ld("x11", fr, args[0])
+                self.a64_ld("x12", fr, args[1])
+                self.a64_ld("x13", fr, args[2])
+                let again = self.label()
+                let no = self.label()
+                let done = self.label()
+                self.emit(format("{}:", again))
+                self.emit("ldaxr x14, [x11]")
+                self.emit("cmp x14, x12")
+                self.emit(format("b.ne {}", no))
                 self.emit("stlxr w15, x13, [x11]")
-            }
-            self.emit(format("cbnz w15, {}", again))
-            self.emit("dmb ish")
-            self.a64_st("x10", fr, d)
-            return
-        }
-        if name == "__pause" {
-            self.emit("yield")
-            return
-        }
-        if name == "__rc_inc" || name == "__rc_inc_atomic" || name == "__rc_dec" || name == "__rc_dec_atomic" {
-            // a cell's count, at -8, up or down by one; down, whether it
-            // reached 0
-            self.a64_ld("x11", fr, args[0])
-            self.emit("sub x11, x11, #8")
-            var delta = "add"
-            if name == "__rc_dec" || name == "__rc_dec_atomic" { delta = "sub" }
-            if name == "__rc_inc_atomic" || name == "__rc_dec_atomic" {
+                self.emit(format("cbnz w15, {}", again))
+                // a full barrier, as the exchanges have: what follows isn't
+                // seen before the swap (publish, then look; MYLA-267)
+                self.emit("dmb ish")
+                self.emit("mov x10, #1")
+                self.emit(format("b {}", done))
+                self.emit(format("{}:", no))
+                self.emit("clrex")
+                self.emit("mov x10, #0")
+                self.emit(format("{}:", done))
+                self.a64_st("x10", fr, d)
+            },
+            // acquire and release (MYLA-267): `ldar` and `stlr`
+            Intrinsic.LoadAcq64 => {
+                self.a64_ld("x11", fr, args[0])
+                self.emit("ldar x10, [x11]")
+                self.a64_st("x10", fr, d)
+            },
+            Intrinsic.StoreRel64 => {
+                self.a64_ld("x11", fr, args[0])
+                self.a64_ld("x12", fr, args[1])
+                self.emit("stlr x12, [x11]")
+            },
+            Intrinsic.Xchg64 | Intrinsic.FetchAdd64 => {
+                self.a64_ld("x11", fr, args[0])
+                self.a64_ld("x12", fr, args[1])
                 let again = self.label()
                 self.emit(format("{}:", again))
                 self.emit("ldaxr x10, [x11]")
-                self.emit(format("{} x10, x10, #1", delta))
-                self.emit("stlxr w15, x10, [x11]")
+                if is_xchg(op) { self.emit("stlxr w15, x12, [x11]") }
+                else {
+                    self.emit("add x13, x10, x12")
+                    self.emit("stlxr w15, x13, [x11]")
+                }
                 self.emit(format("cbnz w15, {}", again))
                 self.emit("dmb ish")
-            } else {
-                self.emit("ldr x10, [x11]")
-                self.emit(format("{} x10, x10, #1", delta))
-                self.emit("str x10, [x11]")
-            }
-            if d >= 0 {
-                self.emit("cmp x10, #0")
-                self.emit("cset x10, eq")
                 self.a64_st("x10", fr, d)
-            }
-            return
+            },
+            Intrinsic.Pause => {
+                self.emit("yield")
+            },
+            Intrinsic.RcInc | Intrinsic.RcIncAtomic | Intrinsic.RcDec | Intrinsic.RcDecAtomic => {
+                // a cell's count, at -8, up or down by one; down, whether it
+                // reached 0
+                self.a64_ld("x11", fr, args[0])
+                self.emit("sub x11, x11, #8")
+                var delta = "add"
+                if is_rc_dec(op) { delta = "sub" }
+                if is_rc_atomic(op) {
+                    let again = self.label()
+                    self.emit(format("{}:", again))
+                    self.emit("ldaxr x10, [x11]")
+                    self.emit(format("{} x10, x10, #1", delta))
+                    self.emit("stlxr w15, x10, [x11]")
+                    self.emit(format("cbnz w15, {}", again))
+                    self.emit("dmb ish")
+                } else {
+                    self.emit("ldr x10, [x11]")
+                    self.emit(format("{} x10, x10, #1", delta))
+                    self.emit("str x10, [x11]")
+                }
+                if d >= 0 {
+                    self.emit("cmp x10, #0")
+                    self.emit("cset x10, eq")
+                    self.a64_st("x10", fr, d)
+                }
+            },
+            Intrinsic.Unique(clone) => {
+                // the holder's cell unique: cloned (and stored back) when shared
+                self.a64_ld("x11", fr, args[0])
+                self.emit("ldr x0, [x11]")
+                self.emit("ldur x12, [x0, #-8]")
+                let done = self.label()
+                self.emit("cmp x12, #1")
+                self.emit(format("b.ls {}", done))
+                self.emit(format("bl {}", clone))
+                self.a64_ld("x11", fr, args[0])
+                self.emit("str x0, [x11]")
+                self.emit(format("{}:", done))
+                self.a64_st("x0", fr, d)
+            },
+            // a call through a code address with one word (MYLA-263)
+            Intrinsic.CallCode => {
+                self.a64_ld("x0", fr, args[1])
+                self.a64_ld("x9", fr, args[0])
+                self.emit("blr x9")
+                self.a64_st("x0", fr, d)
+            },
+            Intrinsic.RunFrame => {
+                self.a64_ld("x0", fr, args[0])
+                self.emit("ldr x15, [x0]")
+                self.emit("blr x15")
+            },
         }
-        if a64_starts(name, "__cow:") {
-            // the holder's cell unique: cloned (and stored back) when shared
-            let clone = a64_after(name, 6)
-            self.a64_ld("x11", fr, args[0])
-            self.emit("ldr x0, [x11]")
-            self.emit("ldur x12, [x0, #-8]")
-            let done = self.label()
-            self.emit("cmp x12, #1")
-            self.emit(format("b.ls {}", done))
-            self.emit(format("bl {}", clone))
-            self.a64_ld("x11", fr, args[0])
-            self.emit("str x0, [x11]")
-            self.emit(format("{}:", done))
-            self.a64_st("x0", fr, d)
-            return
-        }
-        if name == "__run_frame" {
-            self.a64_ld("x0", fr, args[0])
-            self.emit("ldr x15, [x0]")
-            self.emit("blr x15")
-            return
-        }
-        // any other: a call, the arguments in x0 to x5
+    }
+
+    // A call of the runtime routine `name` (`rt`), the arguments in x0 to x5.
+    fun a64_rt(var self, f: IrFunc, fr: A64Frame, d: int32, name: str, args: [int32]) {
         var i = 0
         while i < args.len() {
             self.a64_ld(format("x{}", i), fr, args[i])
@@ -1143,192 +1080,10 @@ impl CodeGen {
     // value (MYLA-126): a parameter passed owned gets a reference of its own,
     // then the jump to the function (the environment in x9 unused).
     fun emit_fnval_thunk_a64(var self, n: str) {
-        if self.is_async_fn(n) {
-            // an async function's value makes its frame (D90)
-            self.emit("")
-            self.emit("\t.p2align 2")
-            self.emit(format("myla_{}__fnval:", n))
-            self.emit(format("b myla_{}__new", n))
-            return
-        }
-        let sig = self.sig_of(n)
-        var first = 0
-        if is_aggregate_opt(sig.ret) { first = 1 }
-        var k = 0
-        var byval = false
-        while k < sig.params.len() {
-            if self.byval_param(sig, k, sig.params[k]) { byval = true }
-            k = k + 1
-        }
-        if byval {
-            // a function value passes an aggregate by its address; the
-            // function takes the words of one passed by value (D88): the
-            // adapter is a partial application with every argument a hole,
-            // which copies those words, with references of their own, and
-            // gives a parameter passed owned a reference of its own (MYLA-282)
-            var slots: [int32] = []
-            var aggs: [bool] = []
-            for p in sig.params {
-                slots.push(-1)
-                aggs.push(false)
-            }
-            self.gen_partial_function_a64(PartialJob { lifted: n + "__fnval", target: n, fn_off: -1, slots: slots, aggs: aggs, sret: first == 1, owned: [] })
-            return
-        }
-        self.emit("")
-        self.emit("\t.p2align 2")
-        self.emit(format("myla_{}__fnval:", n))
-        var i = 0
-        while i < sig.params.len() {
-            if self.owned_param(sig, i, sig.params[i]) {
-                let w = first + i
-                if w < A64_WORDS { self.emit(format("mov x10, x{}", w)) }
-                else { self.emit(format("ldr x10, {}", self.a64_mem("sp", 8 * (w - A64_WORDS)))) }
-                self.emit("ldur x11, [x10, #-8]")
-                self.emit("add x11, x11, #1")
-                self.emit("stur x11, [x10, #-8]")
-            }
-            i = i + 1
-        }
-        self.emit(format("b myla_{}", n))
+        // as on every target (MYLA-263)
+        if self.is_async_fn(n) { self.emit_async_fnval(n) } else { self.emit_fnval_adapter(n) }
     }
 
-    // A partial application's function (`myla_<lifted>`, D119): its
-    // environment (x9) holds the arguments given, the call brings the holes;
-    // the target called with all of them. The words are staged in the frame,
-    // then passed as a call passes them; a parameter passed by value gets a
-    // copy of its own (D88), one passed owned a reference of its own
-    // (MYLA-127).
-    fun gen_partial_function_a64(var self, job: PartialJob) {
-        let n = job.slots.len()
-        var first = 0
-        if job.sret { first = 1 }
-        var holes = 0
-        for sl in job.slots {
-            if sl < 0 { holes = holes + 1 }
-        }
-        var tsig = self.funcs[0]
-        if job.fn_off < 0 { tsig = self.sig_of(job.target) }
-        // the words each argument takes
-        var total = first
-        var pos = 0
-        while pos < n {
-            if job.fn_off < 0 && pos < tsig.params.len() && self.byval_param(tsig, pos, tsig.params[pos]) { total = total + self.word_size(tsig.params[pos]) / 8 }
-            else { total = total + 1 }
-            pos = pos + 1
-        }
-        let in_words = first + holes
-        var out = 0
-        if total > A64_WORDS { out = total - A64_WORDS }
-        let stage = 8 * out
-        let spill = stage + 8 * total
-        var in_regs = in_words
-        if in_regs > A64_WORDS { in_regs = A64_WORDS }
-        let env_cell = spill + 8 * in_regs
-        let addr_cell = env_cell + 8
-        let size = (addr_cell + 8 + 15) / 16 * 16
-        self.emit("")
-        self.emit("\t.p2align 2")
-        self.emit(format("myla_{}:", job.lifted))
-        self.emit("stp x29, x30, [sp, #-16]!")
-        self.emit("mov x29, sp")
-        self.a64_sp_sub(size)
-        var w = 0
-        while w < in_regs {
-            self.emit(format("str x{}, {}", w, self.a64_cell(spill + 8 * w)))
-            w = w + 1
-        }
-        self.emit(format("str x9, {}", self.a64_cell(env_cell)))
-        // the staged words: the result's address, then each argument's
-        var at = 0
-        if job.sret {
-            self.emit(format("ldr x10, {}", self.a64_cell(spill)))
-            self.emit(format("str x10, {}", self.a64_cell(stage)))
-            at = 1
-        }
-        var hidx = 0
-        pos = 0
-        while pos < n {
-            // its word (or an aggregate's address) into x10
-            if job.slots[pos] < 0 {
-                let iw = first + hidx
-                hidx = hidx + 1
-                if iw < A64_WORDS { self.emit(format("ldr x10, {}", self.a64_cell(spill + 8 * iw))) }
-                else { self.emit(format("ldr x10, {}", self.a64_mem("x29", 16 + 8 * (iw - A64_WORDS)))) }
-            } else {
-                self.emit(format("ldr x11, {}", self.a64_cell(env_cell)))
-                if job.aggs[pos] {
-                    self.a64_imm("x10", job.slots[pos] as int64)
-                    self.emit("add x10, x11, x10")
-                } else {
-                    self.emit(format("ldr x10, {}", self.a64_mem("x11", job.slots[pos])))
-                }
-            }
-            let named = job.fn_off < 0 && pos < tsig.params.len()
-            if named && self.byval_param(tsig, pos, tsig.params[pos]) {
-                let t = tsig.params[pos]
-                self.emit(format("str x10, {}", self.a64_cell(addr_cell)))
-                self.a64_retain_at(addr_cell, 0, t, false)
-                self.emit(format("ldr x10, {}", self.a64_cell(addr_cell)))
-                var k = 0
-                while k < self.word_size(t) / 8 {
-                    self.emit(format("ldr x11, {}", self.a64_mem("x10", 8 * k)))
-                    self.emit(format("str x11, {}", self.a64_cell(stage + 8 * (at + k))))
-                    k = k + 1
-                }
-                at = at + self.word_size(t) / 8
-            } else {
-                if named && self.owned_param(tsig, pos, tsig.params[pos]) {
-                    self.emit("ldur x11, [x10, #-8]")
-                    self.emit("add x11, x11, #1")
-                    self.emit("stur x11, [x10, #-8]")
-                }
-                self.emit(format("str x10, {}", self.a64_cell(stage + 8 * at)))
-                at = at + 1
-            }
-            pos = pos + 1
-        }
-        // the words passed: past the eighth at sp, the first eight in x0 to x7
-        var i = A64_WORDS
-        while i < total {
-            self.emit(format("ldr x10, {}", self.a64_cell(stage + 8 * i)))
-            self.emit(format("str x10, {}", self.a64_cell(8 * (i - A64_WORDS))))
-            i = i + 1
-        }
-        i = 0
-        while i < total && i < A64_WORDS {
-            self.emit(format("ldr x{}, {}", i, self.a64_cell(stage + 8 * i)))
-            i = i + 1
-        }
-        if out == 0 {
-            // every word in a register, nothing pointing into this frame: the
-            // frame goes and the target is jumped to, so a `become` through
-            // the thunk runs in constant stack (D87, MYLA-130)
-            if job.fn_off >= 0 {
-                self.emit(format("ldr x16, {}", self.a64_cell(env_cell)))
-                self.emit(format("ldr x9, {}", self.a64_mem("x16", job.fn_off + 8)))
-                self.emit(format("ldr x16, {}", self.a64_mem("x16", job.fn_off)))
-            }
-            self.emit("mov sp, x29")
-            self.emit("ldp x29, x30, [sp], #16")
-            if job.fn_off >= 0 { self.emit("br x16") } else { self.emit(format("b myla_{}", job.target)) }
-            if job.owned.len() > 0 { self.emit_env_drop(job.lifted, job.owned) }
-            return
-        }
-        if job.fn_off >= 0 {
-            // the function value in the environment: its env into x9
-            self.emit(format("ldr x16, {}", self.a64_cell(env_cell)))
-            self.emit(format("ldr x9, {}", self.a64_mem("x16", job.fn_off + 8)))
-            self.emit(format("ldr x15, {}", self.a64_mem("x16", job.fn_off)))
-            self.emit("blr x15")
-        } else {
-            self.emit(format("bl myla_{}", job.target))
-        }
-        self.emit("mov sp, x29")
-        self.emit("ldp x29, x30, [sp], #16")
-        self.emit("ret")
-        if job.owned.len() > 0 { self.emit_env_drop(job.lifted, job.owned) }
-    }
 
     // A reference of its own to each heap value of type `t` at `off` bytes
     // into the value whose address the frame cell `cell` holds (kept there

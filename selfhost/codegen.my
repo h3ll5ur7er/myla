@@ -15,13 +15,14 @@ from .tokens import no_span
 from std.num import f64_literal_bits, f32_round_bits
 from std.fs import current_dir
 from .loader import Span
-from .checker import CheckErr, Checker, Type, is_raw_memory_primitive, FuncSig, StructInfo, EnumInfo, FieldT, VariantT, Subst, subst_type, subst_get, opt_subst_type, CV, type_name, checker_on
+from .checker import CheckErr, Checker, Type, is_builtin_value, is_raw_memory_primitive, FuncSig, StructInfo, EnumInfo, FieldT, VariantT, Subst, subst_type, subst_get, opt_subst_type, CV, type_name, checker_on
 from .ir import render_func, verify, moves, IrFunc, Inst
 from .ssa import SsaStats, no_ssa_stats
 from .inline import inlinable, inline_calls, same_module, may_inline, merge_blocks
 from .hoist import hoist_cows
+from .ranges import widen_counters
 from .anf import Norm, new_norm
-from .lower import lower_function, lower_lambda, blocked_types, Lowered, myla_runtime_function, derived_eq_ir, walk_ir, drop_entry_ir, dropb_slow_ir, list_drop_slow_ir, map_drop_slow_ir, clone_ir, deep_walk_ir, deep_cell_ir, Routine, Want, env_drop_ir, env_deep_ir
+from .lower import async_fnval_ir, lower_function, lower_lambda, blocked_types, Lowered, myla_runtime_function, derived_eq_ir, walk_ir, drop_entry_ir, dropb_slow_ir, list_drop_slow_ir, map_drop_slow_ir, clone_ir, deep_walk_ir, deep_cell_ir, Routine, Want, env_drop_ir, env_deep_ir, partial_ir, frame_new_ir
 import .ir_x86 as ir_x86
 import .ownership as ownership
 import .runtime_x86 as runtime_x86
@@ -192,6 +193,9 @@ pub struct CodeGen {
     // the function being emitted is read
     pend_store: str,
     pend_temp: int32,
+    // the line of `text` that is a register's re-extension (`movslq %eax,
+    // %rax`), or -1: one the next instruction may make moot (MYLA-251)
+    ext_at: int32,
     temp_uses: [int32],
     // per temporary, how to recompute it where it is read instead of keeping
     // it in a slot (`remat_texts`; "" for a temporary kept in its slot)
@@ -251,7 +255,7 @@ pub struct CodeGen {
     wasm: bool,
     wasm_arity: [str: int32],
     wasm_calls: [str: int32],
-    wasm_envs: [str],               // MYLA-158: the environments with deep copies (`__env_routines`)
+    env_records: [str],             // MYLA-263: the environments whose routines records the data holds (`env_record_of`)
 }
 
 // A code generator for `src` (checked alone, `checker_on`), the receiver of
@@ -332,8 +336,8 @@ pub fun new_codegen(c: Checker) -> CodeGen {
         dbg_fn: false, dbg_lines: [], dbg_types: [:], dbg_pending: [], dbg_scopes: [],
         dbg_fn_end: "", dbg_mark: "", dbg_n: 0, dbg_script: "",
         keep_ir: false, wants_ftoa: false, inlining: true, inl_names: [], inl_bodies: [], inl_no: [:], ssa: false, ssa_stats: no_ssa_stats(), refused: [], ir_texts: [], ir_blocked: [], ir_ready: false,
-        pend_store: "", pend_temp: -1, temp_uses: [], temp_remat: [], temp_fconst: [:], fconst_labels: [:], temp_src: [], temp_imm: [], temp_frame: [], temp_mem: [], temp_off: [],
-        temp_reg: [], slot_reg: [], saved_regs: [], in_frame: false, resume_blocks: [], frames: c.task_line > 0, norm: compiler_norm(), save_base: 0, arg_words: 0, frameless: false, kept_params: [:], keeping: [:], scan_kept: [], scan_args: [], owning: [:], no_owned: [], handed: handed, passed_on: passed_on, tag_enums: [:], a64: false, wasm: false, wasm_arity: [:], wasm_calls: [:], wasm_envs: [],
+        pend_store: "", pend_temp: -1, ext_at: -1, temp_uses: [], temp_remat: [], temp_fconst: [:], fconst_labels: [:], temp_src: [], temp_imm: [], temp_frame: [], temp_mem: [], temp_off: [],
+        temp_reg: [], slot_reg: [], saved_regs: [], in_frame: false, resume_blocks: [], frames: c.task_line > 0, norm: compiler_norm(), save_base: 0, arg_words: 0, frameless: false, kept_params: [:], keeping: [:], scan_kept: [], scan_args: [], owning: [:], no_owned: [], handed: handed, passed_on: passed_on, tag_enums: [:], a64: false, wasm: false, wasm_arity: [:], wasm_calls: [:], env_records: [],
     }
 }
 
@@ -955,6 +959,12 @@ impl CodeGen {
         } else if ends_colon(line) {
             self.text.push(line)
         } else {
+            // a register's re-extension that this instruction makes moot
+            // (MYLA-251)
+            let n = self.text.len()
+            if self.ext_at >= 0 && self.ext_at == n - 1 && extension_overwritten(self.text[n - 1], line) { let gone = self.text.pop() }
+            self.ext_at = -1
+            if line.len() > 10 && line[4] == 'l' as uint8 && line[3] == 's' as uint8 && text_at(line, 0, "movslq %") { self.ext_at = self.text.len() }
             self.text.push("\t" + line)
         }
     }
@@ -1278,7 +1288,7 @@ impl CodeGen {
     // arguments substituted), is passed owned: its body keeps it, and it is
     // a scalar that owns heap memory (a string, list, map or builder).
     fun owned_param(self, sig: FuncSig, i: int32, t: Type) -> bool {
-        if is_aggregate(t) || !self.owns_heap(t) { return false }
+        if is_aggregate(t) || !self.owns_heap(t) || recv_by_address(sig, i, t) { return false }
         return match get(self.kept_params, sig.name) {
             Some(flags) => i < flags.len() && flags[i],
             None => false,
@@ -1360,7 +1370,7 @@ impl CodeGen {
         }
         var i = 0
         while i < params.len() {
-            out.push(i < flags.len() && flags[i] && !is_aggregate(params[i]) && self.owns_heap(params[i]))
+            out.push(i < flags.len() && flags[i] && !is_aggregate(params[i]) && self.owns_heap(params[i]) && !recv_by_address(sig, i, params[i]))
             i = i + 1
         }
         return out
@@ -1907,9 +1917,9 @@ impl CodeGen {
     // name the rest of the runtime calls and the function standing for it.
     fun rt_exec(self) -> [(str, str)] {
         // every program's (`__map_lookup`: `remove`'s too)
-        var out = [("__panic_report", "std$rt$panic_report"), ("__list_grow", "std$rt$list_grow"), ("__sb_append_bytes", "std$rt$sb_append_bytes"), ("__map_new", "std$rt$map_new"), ("__map_rebuild", "std$rt$map_rebuild"), ("__map_lookup", "std$rt$map_lookup")]
+        var out = [("__panic_report", "std$rt$panic_report"), ("__list_grow", "std$rt$list_grow"), ("__sb_append_bytes", "std$rt$sb_append_bytes"), ("__map_new", "std$rt$map_new"), ("__map_rebuild", "std$rt$map_rebuild"), ("__map_lookup", "std$rt$map_lookup"), ("__equal_bytes", "std$rt$equal_bytes"), ("__func_retain", "std$rt$func_retain"), ("__func_drop", "std$rt$func_drop")]
         if self.frames {
-            for p in [("__sched_init", "std$rt$sched_init"), ("__workers_count", "std$rt$workers_count"), ("__task_cancel", "std$rt$task_cancel"), ("__task_cancelled", "std$rt$task_cancelled"), ("__failed_wait", "std$rt$failed_wait"), ("__wait_stopped", "std$rt$wait_stopped"), ("__exec_push", "std$rt$exec_push"), ("__exec_yield_push", "std$rt$exec_yield_push"), ("__exec_find", "std$rt$exec_find"), ("__exec_peek", "std$rt$exec_peek"), ("__wake_waiters", "std$rt$wake_waiters"), ("__actor_leave", "std$rt$actor_leave"), ("__task_wait", "std$rt$task_wait"), ("__actor_enter_rt", "std$rt$actor_enter"), ("__exec_loop", "std$rt$exec_run"), ("__deep_str", "std$rt$deep_str"), ("__dclone_str", "std$rt$dclone_str"), ("__dclone_cell", "std$rt$dclone_cell"), ("__panic_report_tasks", "std$rt$panic_report_tasks"), ("myla___sleep", "std$rt$sleep_frame"), ("__cancel_after", "std$rt$cancel_after"), ("__task_end", "std$rt$task_end"), ("myla___wait_fd", "std$rt$wait_fd"), ("myla___wait_fd2", "std$rt$wait_fd2")] { out.push(p) }
+            for p in [("__sched_init", "std$rt$sched_init"), ("__workers_count", "std$rt$workers_count"), ("__task_cancel", "std$rt$task_cancel"), ("__task_cancelled", "std$rt$task_cancelled"), ("__failed_wait", "std$rt$failed_wait"), ("__wait_stopped", "std$rt$wait_stopped"), ("__exec_push", "std$rt$exec_push"), ("__exec_yield_push", "std$rt$exec_yield_push"), ("__exec_find", "std$rt$exec_find"), ("__exec_peek", "std$rt$exec_peek"), ("__wake_waiters", "std$rt$wake_waiters"), ("__actor_leave", "std$rt$actor_leave"), ("__task_wait", "std$rt$task_wait"), ("__actor_enter_rt", "std$rt$actor_enter"), ("__exec_loop", "std$rt$exec_run"), ("__deep_str", "std$rt$deep_str"), ("__dclone_str", "std$rt$dclone_str"), ("__dclone_cell", "std$rt$dclone_cell"), ("__deep_env", "std$rt$deep_env"), ("__dclone_env", "std$rt$dclone_env"), ("__panic_report_tasks", "std$rt$panic_report_tasks"), ("myla___sleep", "std$rt$sleep_frame"), ("__cancel_after", "std$rt$cancel_after"), ("__task_end", "std$rt$task_end"), ("myla___wait_fd", "std$rt$wait_fd"), ("myla___wait_fd2", "std$rt$wait_fd2")] { out.push(p) }
         }
         return out
     }
@@ -1955,7 +1965,7 @@ impl CodeGen {
             }
         }
         for pj in self.partial_jobs {
-            if self.wasm { self.gen_partial_function_wasm(pj) } else if self.a64 { self.gen_partial_function_a64(pj) } else { self.gen_partial_function(pj) }
+            self.emit_partial(pj)
         }
         for n in self.fnval_set {
             if self.wasm { self.emit_fnval_thunk_wasm(n) } else if self.a64 { self.emit_fnval_thunk_a64(n) } else { self.emit_fnval_thunk(n) }
@@ -2065,16 +2075,30 @@ impl CodeGen {
             si = si + 1
         }
         for line in self.strdata { out.push(line) }
-        if self.wasm && self.frames {
-            // each environment's drop function, its clone and its deep copy
-            // (`__deep_env`, `__dclone_env`, MYLA-158)
-            out.push("\t.balign 8")
-            out.push("__env_routines:")
-            out.push(format("\t.quad {}", self.wasm_envs.len()))
-            for l in self.wasm_envs {
-                out.push(format("\t.quad myla_{}_env_drop", l))
+        // each environment's routines, which its first word points at:
+        // its drop function, its clone and its deep copy (with tasks, D92;
+        // else 0), on every target (`env_record_of`, MYLA-263); one shared
+        // by the environments owning nothing
+        out.push("\t.balign 8")
+        // (std.rt's functions by their own names: wasm has no aliases)
+        out.push("__env_plain_routines:")
+        out.push(format("\t.quad myla_{}", self.rt_alloc_names().1))
+        if self.frames {
+            out.push("\t.quad myla_std$rt$dclone_cell")
+            out.push("\t.quad myla_std$rt$deep_str")
+        } else {
+            out.push("\t.quad 0")
+            out.push("\t.quad 0")
+        }
+        for l in self.env_records {
+            out.push(format("myla_{}_env_routines:", l))
+            out.push(format("\t.quad myla_{}_env_drop", l))
+            if self.frames {
                 out.push(format("\t.quad myla_{}_env_clone", l))
                 out.push(format("\t.quad myla_{}_env_deep", l))
+            } else {
+                out.push("\t.quad 0")
+                out.push("\t.quad 0")
             }
         }
         out.push("")
@@ -2373,6 +2397,8 @@ impl CodeGen {
         }
         // a loop's copy-on-write checks made before it (MYLA-251)
         if !self.debug { f = hoist_cows(f) }
+        // a counting loop's step without the int32 re-extension (MYLA-251)
+        f = widen_counters(f)
         let problem = verify(f)
         // with `--ssa`, the text shows each function after promotion instead
         if self.keep_ir && !self.ssa { self.ir_texts.push(render_func(f)) }
@@ -2546,7 +2572,8 @@ impl CodeGen {
                 self.emit("divq %rcx")
             }
             if op == "%" { self.emit("movq %rdx, %rax") }
-            self.wrap(rt)
+            // neither 0 nor -1: the quotient or remainder is in range
+            if !same_int(lt, rt) { self.wrap(rt) }
         } else if op == "/" || op == "%" {
             self.emit("testq %rcx, %rcx")
             if op == "/" { self.trap("jz", "__trap_div", line, col) } else { self.trap("jz", "__trap_mod", line, col) }
@@ -2569,7 +2596,10 @@ impl CodeGen {
                 self.emit("divq %rcx")
                 if op == "%" { self.emit("movq %rdx, %rax") }
             }
-            self.wrap(rt)
+            // only the minimum's quotient by -1 leaves the range (MYLA-251):
+            // a remainder is smaller than the divisor, an unsigned
+            // quotient than the dividend
+            if (op == "/" && int_signed(lt)) || !same_int(lt, rt) { self.wrap(rt) }
         } else if is_cmp(op) {
             self.emit(format("cmpq {}, %rax", src))
             self.emit(format("{} %al", cmp_set(op, int_signed(lt))))
@@ -2579,14 +2609,15 @@ impl CodeGen {
             if op == "==" { self.emit("sete %al") } else { self.emit("setne %al") }
             self.emit("movzbq %al, %rax")
         } else if op == "&" {
+            // bitwise on extended values gives an extended value (MYLA-251)
             self.emit(format("andq {}, %rax", src))
-            self.wrap(rt)
+            if !same_int(lt, rt) { self.wrap(rt) }
         } else if op == "|" {
             self.emit(format("orq {}, %rax", src))
-            self.wrap(rt)
+            if !same_int(lt, rt) { self.wrap(rt) }
         } else if op == "^" {
             self.emit(format("xorq {}, %rax", src))
-            self.wrap(rt)
+            if !same_int(lt, rt) { self.wrap(rt) }
         } else if op == "<<" || op == ">>" {
             self.emit(format("andq ${}, %rcx", int_width_cg(rt) - 1))
             if op == "<<" {
@@ -2596,7 +2627,8 @@ impl CodeGen {
             } else {
                 self.emit("shrq %cl, %rax")
             }
-            self.wrap(rt)
+            // a right shift of an extended value is one
+            if op == "<<" || !same_int(lt, rt) { self.wrap(rt) }
         }
     }
 
@@ -2936,71 +2968,48 @@ impl CodeGen {
         return subst_type(self.struct_field_type(name, field), sub)
     }
 
-    // Emit a partial-application thunk, called as a function value with
-    // `[sret,] holes…` (its env in %r10): rebuild the full argument list from
-    // the env (filled; an aggregate passed by its address in the env) and the
-    // holes, forward the sret pointer, and hand over to the target (a
-    // function value with its own env, as a call through one does;
-    // `thunk_call`, MYLA-130). The caller holds the env, which what the
-    // target borrows lives in, until the target returns to it.
-    fun gen_partial_function(var self, job: PartialJob) {
-        let n = job.slots.len()
-        var first = 0
-        if job.sret { first = 1 }
-        let env = SPILLED_ENV
-        var holes = 0
-        for sl in job.slots {
-            if sl < 0 { holes = holes + 1 }
+    // `myla_<fn>__fnval`, the adapter that calls the plain `fun` `n` as a
+    // function value (MYLA-126): a partial application with every argument a
+    // hole (`partial_ir`, MYLA-263), so a parameter passed owned gets a
+    // reference of its own and one passed by value (D88) a copy, on every
+    // target.
+    fun emit_fnval_adapter(var self, n: str) {
+        let sig = self.sig_of(n)
+        var slots: [int32] = []
+        var aggs: [bool] = []
+        for p in sig.params {
+            slots.push(-1)
+            aggs.push(false)
         }
-        self.emit(format("myla_{}:", job.lifted))
-        self.emit("pushq %rbp")
-        self.emit("movq %rsp, %rbp")
-        self.spill_args(first + holes)
-        // a parameter of a named target passed owned gets a reference of its
-        // own (MYLA-127): the env keeps its filled ones, the holes are lent
-        var tsig = self.funcs[0]
-        if job.fn_off < 0 { tsig = self.sig_of(job.target) }
-        var pushed = 0
-        var pos = n - 1
-        while pos >= 0 {
-            var load: [str] = []
-            if job.slots[pos] < 0 {
-                var hidx = 0
-                var j = 0
-                while j < pos {
-                    if job.slots[j] < 0 { hidx = hidx + 1 }
-                    j = j + 1
-                }
-                load.push(format("movq {}, %rax", spilled_word(first + hidx)))
-            } else {
-                load.push(format("movq {}, %rcx", env))
-                if job.aggs[pos] { load.push(format("leaq {}(%rcx), %rax", job.slots[pos])) }
-                else { load.push(format("movq {}(%rcx), %rax", job.slots[pos])) }
-            }
-            // a parameter passed by value gets a copy of its own (D88)
-            if job.fn_off < 0 && pos < tsig.params.len() && self.byval_param(tsig, pos, tsig.params[pos]) { pushed = pushed + self.push_value_words(tsig.params[pos], load) }
-            else {
-                for line in load { self.emit(line) }
-                if job.fn_off < 0 && pos < tsig.params.len() && self.owned_param(tsig, pos, tsig.params[pos]) { self.emit("incq -8(%rax)") }
-                self.emit("pushq %rax")
-                pushed = pushed + 1
-            }
-            pos = pos - 1
-        }
-        if job.sret {
-            self.emit(format("pushq {}", spilled_word(0)))
-            pushed = pushed + 1
-        }
-        var target = format("myla_{}", job.target)
-        if job.fn_off >= 0 {
-            // the value's env into %r10, its code into %r11
-            self.emit(format("movq {}, %r11", env))
-            self.emit(format("movq {}(%r11), %r10", job.fn_off + 8))
-            self.emit(format("movq {}(%r11), %r11", job.fn_off))
-            target = "*%r11"
-        }
-        self.thunk_call(pushed, first + holes, target)
-        self.emit("")
+        self.emit_partial(PartialJob { lifted: n + "__fnval", target: n, fn_off: -1, slots: slots, aggs: aggs, sret: is_aggregate_opt(sig.ret), owned: [] })
+    }
+
+    // An async function's adapter, `myla_<f>__fnval`: its value makes its
+    // frame (D90), a `become` of its `__new` with the words it got, built as
+    // IR on every target (MYLA-263). Its call gives the frame, one word,
+    // whatever its result type (wasm32's adapter counted a result's address
+    // for an aggregate one, which `__new` doesn't take).
+    fun emit_async_fnval(var self, n: str) {
+        let r = async_fnval_ir(n, self.sig_of(n).params.len() as int32)
+        self.emit_routine(r.f, -1, 0, 0)
+    }
+
+    // An async function's frame constructor, `myla_<f>__new`, built as IR and
+    // translated like any function on every target (`frame_new_ir`,
+    // MYLA-263).
+    fun emit_frame_new_ir(var self, f: IrFunc, mangled: str) {
+        let r = frame_new_ir(self, f, mangled)
+        self.emit_routine(r.f, -1, 0, 0)
+        self.request_wants(r.wants)
+    }
+
+    // A partial application's function, built as IR and translated like any
+    // function on every target (`partial_ir`, MYLA-263), then its
+    // environment's drop.
+    fun emit_partial(var self, job: PartialJob) {
+        let r = partial_ir(self, job)
+        self.emit_routine(r.f, -1, 0, 0)
+        self.request_wants(r.wants)
         if job.owned.len() > 0 { self.emit_env_drop(job.lifted, job.owned) }
     }
 
@@ -3008,19 +3017,13 @@ impl CodeGen {
     // tail-call __free on the cell (reached through __func_drop at refcount 0).
     fun emit_env_drop(var self, lifted: str, owned: [DropEntry]) {
         // built as IR with std.rt's allocator (MYLA-162); with tasks, the
-        // env's deep copy and clone too, found just before its drop function
-        // by `__deep_env` (D92)
+        // env's deep copy and clone too, which `__deep_env` and
+        // `__dclone_env` find in its record (D92, MYLA-263)
         if self.frames {
             self.emit_env_routine(env_deep_ir(self, lifted, owned, false))
             self.emit_env_routine(env_deep_ir(self, lifted, owned, true))
-            if self.wasm {
-                // no data beside code on wasm: a table (`__env_routines`)
-                self.wasm_envs.push(lifted)
-            } else {
-                self.emit(format("\t.quad myla_{}_env_clone", lifted))
-                self.emit(format("\t.quad myla_{}_env_deep", lifted))
-            }
         }
+        self.env_records.push(lifted)
         self.emit_env_routine(env_drop_ir(self, lifted, owned, self.rt_alloc_names().1))
     }
 
@@ -3030,137 +3033,11 @@ impl CodeGen {
     // lends it, MYLA-127) and jumps to `myla_<fn>`; the environment in %r10
     // goes unused (D119).
     fun emit_fnval_thunk(var self, n: str) {
-        let sig = self.sig_of(n)
         if self.is_async_fn(n) {
-            // an async function's value makes its frame (D90): `__new` takes
-            // the arguments (with references of its own)
-            self.emit(format("myla_{}__fnval:", n))
-            self.emit(format("jmp myla_{}__new", n))
-            self.emit("")
+            self.emit_async_fnval(n)
             return
         }
-        let struct_ret = is_aggregate_opt(sig.ret)
-        var byval = false
-        var k = 0
-        while k < sig.params.len() {
-            if self.byval_param(sig, k, sig.params[k]) { byval = true }
-            k = k + 1
-        }
-        if byval {
-            self.emit_byval_fnval_thunk(n, sig, struct_ret)
-            return
-        }
-        self.emit(format("myla_{}__fnval:", n))
-        var first = 0
-        if struct_ret { first = 1 }
-        var i = 0
-        while i < sig.params.len() {
-            if self.owned_param(sig, i, sig.params[i]) {
-                let w = first + i
-                if w < REG_WORDS { self.emit(format("incq -8(%{})", arg_reg(w))) }
-                else {
-                    self.emit(format("movq {}(%rsp), %rax", 8 + 8 * (w - REG_WORDS)))
-                    self.emit("incq -8(%rax)")
-                }
-            }
-            i = i + 1
-        }
-        self.emit(format("jmp myla_{}", n))
-        self.emit("")
-    }
-
-    // The adapter for a function with a parameter passed by value (D88),
-    // which a function value passes by its address: the words rebuilt below
-    // the frame (a copy, with references of its own, of each such
-    // aggregate) and handed over to the function (`thunk_call`).
-    fun emit_byval_fnval_thunk(var self, n: str, sig: FuncSig, struct_ret: bool) {
-        self.emit(format("myla_{}__fnval:", n))
-        self.emit("pushq %rbp")
-        self.emit("movq %rsp, %rbp")
-        var first = 0
-        if struct_ret { first = 1 }
-        self.spill_args(first + sig.params.len())
-        var pushed = 0
-        var i = sig.params.len() - 1
-        while i >= 0 {
-            let load = format("movq {}, %rax", spilled_word(first + i))
-            if self.byval_param(sig, i, sig.params[i]) { pushed = pushed + self.push_value_words(sig.params[i], [load]) }
-            else {
-                self.emit(load)
-                if self.owned_param(sig, i, sig.params[i]) { self.emit("incq -8(%rax)") }
-                self.emit("pushq %rax")
-                pushed = pushed + 1
-            }
-            i = i - 1
-        }
-        if struct_ret {
-            self.emit(format("pushq {}", spilled_word(0)))
-            pushed = pushed + 1
-        }
-        self.thunk_call(pushed, first + sig.params.len(), format("myla_{}", n))
-        self.emit("")
-    }
-
-    // The environment (%r10) and the registers of the first of `n`
-    // argument words pushed right after the frame base is set: how many
-    // words that pushed. Argument word `w` is then at `spilled_word(w)`, the
-    // environment at `SPILLED_ENV`.
-    fun spill_args(var self, n: int32) -> int32 {
-        self.emit("pushq %r10")
-        var w = 0
-        while w < n && w < REG_WORDS {
-            self.emit(format("pushq %{}", arg_reg(w)))
-            w = w + 1
-        }
-        return w + 1
-    }
-
-    // The `pushed` words a thunk just pushed (the first at the lowest
-    // address), after spilling the `in_words` argument words it got
-    // (`spill_args`), as the argument words of `target` (`myla_<fn>`, or
-    // `*%r11`): the first `REG_WORDS` popped into their registers, the rest
-    // moved into the thunk's own stack words when they fit there (its caller
-    // pops those), and the target jumped to in place of the thunk, so a
-    // `become` through a function value keeps the stack flat (MYLA-130);
-    // else, left on the stack, a call.
-    fun thunk_call(var self, pushed: int32, in_words: int32, target: str) {
-        var w = 0
-        while w < pushed && w < REG_WORDS {
-            self.emit(format("popq %{}", arg_reg(w)))
-            w = w + 1
-        }
-        if pushed <= REG_WORDS || pushed <= in_words {
-            var k = 0
-            while k < pushed - REG_WORDS {
-                self.emit(format("movq {}(%rsp), %rax", 8 * k))
-                self.emit(format("movq %rax, {}(%rbp)", 16 + 8 * k))
-                k = k + 1
-            }
-            self.emit("leave")
-            self.emit(format("jmp {}", target))
-            return
-        }
-        self.emit(format("call {}", target))
-        self.emit("leave")
-        self.emit("ret")
-    }
-
-    // Push the words of the aggregate of type `t` whose address the lines
-    // `load` put in %rax, with references of their own to what it holds, for
-    // a parameter passed by value (D88): how many words.
-    #test(codegen_on("enum E { A, B(int) }"), Type.TBool, ["x"])[1]
-    fun push_value_words(var self, t: Type, load: [str]) -> int32 {
-        for line in load { self.emit(line) }
-        self.emit("movq %rax, %r8")
-        self.retain("r8", 0, t)
-        let words = self.word_size(t) / 8
-        var w = words - 1
-        while w >= 0 {
-            for line in load { self.emit(line) }
-            self.emit(format("pushq {}(%rax)", 8 * w))
-            w = w - 1
-        }
-        return words
+        self.emit_fnval_adapter(n)
     }
 
     fun free_eb(self, body: ExprOrBlock, bound: [str]) -> [str] {
@@ -3546,6 +3423,14 @@ fun join_lines(xs: [str]) -> str {
     return sb.build()
 }
 
+// Whether `sig`'s parameter `i`, of type `t`, is a built-in value's `var
+// self` receiver, which gets the address of its caller's place (D144); a
+// struct's, tuple's or enum's is an address already, an actor's handle is
+// shared.
+pub fun recv_by_address(sig: FuncSig, i: int32, t: Type) -> bool {
+    return i == 0 && sig.has_decl && is_builtin_value(t) && match sig.decl.receiver { Some(r) => r == "var self", None => false }
+}
+
 #test(Type.TSB)[false]
 #test(Type.TStr)[false]
 #test(Type.TEnum("List", []))[true]
@@ -3824,7 +3709,7 @@ fun names_in_block(b: Block, acc: [str]) -> [str] {
 #test("sum")[false]
 #test("total")[false]
 #test("length")[false]
-fun is_mutating_builtin(n: str) -> bool {
+pub fun is_mutating_builtin(n: str) -> bool {
     return n == "push" || n == "pop" || n == "remove" || n == "append" || n == "append_byte"
 }
 
@@ -4110,6 +3995,7 @@ pub fun is_builtin_call_name(nm: str) -> bool {
     if nm == "__unlink" || nm == "__rmdir" || nm == "__rename" { return true }
     if nm == "__task_cancelled" || nm == "__clock_ns" || nm == "__sleep_ns" || nm == "__disarm" { return true }
     if nm == "__spawn" || nm == "__reap" || nm == "__kill" || nm == "__close" { return true }
+    if nm == "__run_with" || nm == "__spawn_with" { return true }
     if is_raw_memory_primitive(nm) { return true }
     return false
 }
@@ -4178,7 +4064,7 @@ fun with_int(xs: [int32], x: int32) -> [int32] {
 
 #test([3, 5], 5)[true]
 #test([3], 4)[false]
-fun contains_int(xs: [int32], x: int32) -> bool {
+pub fun contains_int(xs: [int32], x: int32) -> bool {
     for y in xs {
         if y == x { return true }
     }
@@ -4347,7 +4233,7 @@ fun unify_into(declared: Type, concrete: Type) -> [Subst] {
 #test([], "a")[false]
 #test([], "b")[false]
 #test(["a"], "a")[true]
-fun list_has_str(xs: [str], target: str) -> bool {
+pub fun list_has_str(xs: [str], target: str) -> bool {
     for x in xs { if x == target { return true } }
     return false
 }
@@ -4489,10 +4375,9 @@ pub fun arg_reg(w: int32) -> str {
     return regs[w]
 }
 
-// Where argument word `w` is in a function that pushed the environment and
-// the argument registers right after setting its frame base (`spill_args`):
-// below it for a word that came in a register, above the return address for
-// one that came on the stack.
+// Where argument word `w` is once the prologue has stored the argument
+// registers below the frame base: below it for a word that came in a
+// register, above the return address for one that came on the stack.
 #test(0)["-16(%rbp)"]
 #test(5)["-56(%rbp)"]
 #test(6)["16(%rbp)"]
@@ -4500,9 +4385,6 @@ pub fun spilled_word(w: int32) -> str {
     if w < REG_WORDS { return format("{}(%rbp)", -16 - 8 * w) }
     return format("{}(%rbp)", 16 + 8 * (w - REG_WORDS))
 }
-
-// Where the environment (%r10) is after `spill_args`.
-pub const SPILLED_ENV: str = "-8(%rbp)"
 
 // The operand `v` (an immediate or a 64-bit register) for a `width`-byte
 // access: a register's low part.
@@ -4553,37 +4435,152 @@ fun reg_of_move(s: str) -> str {
 
 // The load `line` (`movq X, %rax` or `leaq X, %rax`, X not reading %rax)
 // with `reg` as its destination instead; "" when it isn't one (MYLA-125).
+// A narrower load into a general register too: `movl`, `movzbl` and
+// `movzwl` into %eax take the register's 32-bit name, the sign-extending
+// ones into %rax its own (MYLA-263: a byte compared with a byte).
 #test("\tmovq 8(%rbx), %rax", "%r12")["\tmovq 8(%rbx), %r12"]
 #test("\tleaq .L3(%rip), %rax", "%rbx")["\tleaq .L3(%rip), %rbx"]
 #test("\tmovq %rcx, %rax", "%r12")["\tmovq %rcx, %r12"]
 #test("\tmovq 8(%rax), %rax", "%r12")[""]
 #test("\tmovslq %eax, %rax", "%r12")[""]
 #test("\tmovq %rax, %rcx", "%r12")[""]
+#test("\tmovzbl (%r9,%r8,1), %eax", "%rdi")["\tmovzbl (%r9,%r8,1), %edi"]
+#test("\tmovl 8(%rbx), %eax", "%r12")["\tmovl 8(%rbx), %r12d"]
+#test("\tmovsbq 8(%rbx), %rax", "%rsi")["\tmovsbq 8(%rbx), %rsi"]
+#test("\tmovzbl (%rax), %eax", "%rdi")[""]
+#test("\tmovzbl (%rbx), %eax", "%xmm1")[""]
+#test("\tmovsbq 8(%rbx), %rax", "%xmm1")[""]
+#test("\tmovzbl (%rbx), %rax", "%rdi")[""]
+pub fun fold_load(line: str, reg: str) -> str {
+    return retarget_load(line, reg, true)
+}
+
 // The same for the one reader of the loaded value (`load_temp`), which
 // takes it in `reg`: a source reading %rax is fine, as nothing reads the
 // value from %rax after it (MYLA-162).
 #test("\tmovq 8(%rax), %rax", "%rdi")["\tmovq 8(%rax), %rdi"]
-#test("\tmovslq %eax, %rax", "%r12")[""]
+#test("\tmovzbl (%rax), %eax", "%rdi")["\tmovzbl (%rax), %edi"]
+#test("\tmovslq %eax, %rax", "%r12")["\tmovslq %eax, %r12"]
+#test("\tmovq %rax, %rcx", "%r12")[""]
 pub fun fold_load_for_reader(line: str, reg: str) -> str {
-    if !(text_at(line, 0, "\tmovq ") || text_at(line, 0, "\tleaq ")) { return "" }
-    if line.len() < 12 || !text_at(line, line.len() - 6, ", %rax") { return "" }
+    return retarget_load(line, reg, false)
+}
+
+// `fold_load` (`own_src`: the source must not read %rax) and
+// `fold_load_for_reader`.
+fun retarget_load(line: str, reg: str, own_src: bool) -> str {
+    let full = text_at(line, 0, "\tmovq ") || text_at(line, 0, "\tleaq ")
+    let sext = text_at(line, 0, "\tmovslq ") || text_at(line, 0, "\tmovswq ") || text_at(line, 0, "\tmovsbq ")
+    let zext = text_at(line, 0, "\tmovl ") || text_at(line, 0, "\tmovzbl ") || text_at(line, 0, "\tmovzwl ")
+    if !full && !sext && !zext { return "" }
+    var head = 8
+    if full || text_at(line, 0, "\tmovl ") { head = 6 }
+    // into %rax, or into %eax for a zero-extending load
+    if line.len() < head + 6 { return "" }
+    if zext && !text_at(line, line.len() - 6, ", %eax") { return "" }
+    if !zext && !text_at(line, line.len() - 6, ", %rax") { return "" }
+    var dst = reg
+    if !full {
+        // only a general register takes these
+        let r32 = reg32(reg)
+        if r32 == "" { return "" }
+        if zext { dst = r32 }
+    }
+    if own_src {
+        var src = StringBuilder()
+        src.append(line, head, line.len() - 6)
+        let x = src.build()
+        if has_text(x, "%rax") || has_text(x, "%eax") || has_text(x, "%ax") || has_text(x, "%al") { return "" }
+    }
     var out = StringBuilder()
     out.append(line, 0, line.len() - 4)
-    out.append(reg)
+    out.append(dst)
     return out.build()
 }
 
-pub fun fold_load(line: str, reg: str) -> str {
-    if !(text_at(line, 0, "\tmovq ") || text_at(line, 0, "\tleaq ")) { return "" }
-    if line.len() < 12 || !text_at(line, line.len() - 6, ", %rax") { return "" }
-    var src = StringBuilder()
-    src.append(line, 6, line.len() - 6)
-    let x = src.build()
-    if has_text(x, "%rax") || has_text(x, "%eax") || has_text(x, "%ax") || has_text(x, "%al") { return "" }
-    var out = StringBuilder()
-    out.append(line, 0, line.len() - 4)
-    out.append(reg)
-    return out.build()
+// Whether `a` and `b` are the same integer type: an operation's result
+// kept in its operands' type.
+#test(Type.TInt(32, true), Type.TInt(32, true))[true]
+#test(Type.TInt(32, true), Type.TInt(64, true))[false]
+#test(Type.TBool, Type.TBool)[false]
+pub fun same_int(a: Type, b: Type) -> bool {
+    return match a {
+        Type.TInt(w, s) => match b {
+            Type.TInt(w2, s2) => w == w2 && s == s2,
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+// Whether `prev`, a register's re-extension (`movslq %r11d, %r11`), is
+// moot because `line`, the instruction after it, writes that register's
+// low 32 bits (clearing the rest) without reading memory through it: the
+// low bits of its result don't depend on the upper half of what it reads
+// (MYLA-251: `(y + n - 1) % n` re-extended `y + n` before taking 1 away).
+#test("\tmovslq %r11d, %r11", "leal -1(%r11), %r11d")[true]
+#test("\tmovslq %eax, %rax", "addl $1, %eax")[true]
+#test("\tmovslq %r11d, %r11", "movl $0, %r11d")[true]
+#test("\tmovslq %r11d, %r11", "negl %r11d")[true]
+#test("\tmovslq %r11d, %r11", "leal -1(%r11), %r10d")[false]
+#test("\tmovslq %r11d, %r11", "movl (%r11), %r11d")[false]
+#test("\tmovslq %r11d, %r11", "cmpl $1, %r11d")[false]
+#test("\tmovslq %r11d, %r11", "leal -1(%r11), %r11")[false]
+#test("\tmovl %r11d, %r11d", "leal -1(%r11), %r11d")[false]
+#test("\tmovslq %r11d, %r11", "addl %r10d, %r11d")[true]
+#test("\tmovslq %r11d, %r11", "sarl $1, %r11d")[false]
+#test("\tmovslq %eax, %r12", "addl $1, %eax")[false]
+#test("\tmovslq %r11d, %r10", "leal -1(%r11), %r11d")[false]
+pub fun extension_overwritten(prev: str, line: str) -> bool {
+    if !text_at(prev, 0, "\tmovslq %") { return false }
+    var at = 8
+    while at < prev.len() && prev[at] != ',' as uint8 { at = at + 1 }
+    if at >= prev.len() { return false }
+    var r = StringBuilder()
+    r.append(prev, 8, at)
+    let r32 = r.build()
+    // into the same register (a folded load may have moved it elsewhere)
+    if !text_at(prev, at, ", " + reg64(r32)) || prev.len() != at + 2 + reg64(r32).len() { return false }
+    var m = 0
+    while m < line.len() && line[m] != ' ' as uint8 { m = m + 1 }
+    var mb = StringBuilder()
+    mb.append(line, 0, m)
+    let op = mb.build()
+    // one operand: the register itself
+    if op == "negl" || op == "notl" { return line == op + " " + r32 }
+    if !(op == "leal" || op == "addl" || op == "subl" || op == "imull" || op == "andl" || op == "orl" || op == "xorl" || op == "shll" || op == "movl") { return false }
+    if !text_at(line, line.len() - r32.len() - 2, ", " + r32) { return false }
+    // a memory operand reads the register's whole value
+    return op == "leal" || !has_text(line, "(")
+}
+
+// The 64-bit name of the general register `r32` names the low half of.
+#test("%eax")["%rax"]
+#test("%r11d")["%r11"]
+fun reg64(r32: str) -> str {
+    var sb = StringBuilder()
+    if text_at(r32, 0, "%e") {
+        sb.append("%r")
+        sb.append(r32, 2, r32.len())
+    } else { sb.append(r32, 0, r32.len() - 1) }
+    return sb.build()
+}
+
+// The 32-bit name of the general register `reg`; "" for another.
+#test("%rdi")["%edi"]
+#test("%rbx")["%ebx"]
+#test("%r12")["%r12d"]
+#test("%xmm1")[""]
+#test("%rsp")[""]
+fun reg32(reg: str) -> str {
+    if reg == "%rbx" || reg == "%rcx" || reg == "%rdx" || reg == "%rsi" || reg == "%rdi" {
+        var sb = StringBuilder()
+        sb.append("%e")
+        sb.append(reg, 2, reg.len())
+        return sb.build()
+    }
+    if reg == "%r8" || reg == "%r9" || reg == "%r10" || reg == "%r11" || reg == "%r12" || reg == "%r13" || reg == "%r14" || reg == "%r15" { return reg + "d" }
+    return ""
 }
 
 // Whether `s` holds `t` at byte `at`.

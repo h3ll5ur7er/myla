@@ -1,10 +1,10 @@
 // runtime_a64.my -- the runtime's aarch64 Linux assembly (MYLA-163, D117).
 //
 // What `runtime_x86.my` gives for x86-64, for aarch64: the program's start,
-// the traps and the panic, the system-call and memory primitives, the
-// function values' counts, composition, std.math's primitives, the tasks'
-// executor (its control transfers, the workers, an environment's deep
-// copies) and the stack-overflow handler. Not yet: `-g` (MYLA-259).
+// the traps and the panic, the system calls, the bulk copy, the tasks'
+// executor (its control transfers, the workers) and the stack-overflow
+// handler; the rest is std.rt's or IR (MYLA-263). Not yet: `-g`
+// (MYLA-259).
 //
 // The hand-written routines keep to what the code `ir_a64.my` makes
 // assumes: they may change x0 to x17 and the flags, and keep x19 to x29
@@ -63,6 +63,18 @@ impl CodeGen {
             "\tmov x3, #8",
             "\tmov x8, #134",
             "\tsvc #0",
+            // SIGPIPE ignored (D146): a write to a closed pipe reports EPIPE,
+            // and std.rt ends the program for one on the standard output or
+            // error. rt_sigaction(SIGPIPE, {SIG_IGN, 0, 0, 0}, 0, 8)
+            "\tmov x0, #1",
+            "\tstp x0, xzr, [sp]",
+            "\tstp xzr, xzr, [sp, #16]",
+            "\tmov x0, #13",
+            "\tmov x1, sp",
+            "\tmov x2, #0",
+            "\tmov x3, #8",
+            "\tmov x8, #134",
+            "\tsvc #0",
             "\tadd sp, sp, #32",
         ] { self.raw(line) }
         if self.frames {
@@ -116,10 +128,6 @@ impl CodeGen {
         for line in ["\tmov x0, #0", "\tmov x8, #94", "\tsvc #0", ""] { self.raw(line) }
         if self.frames {
             self.emit_executor_a64()
-            self.emit_deep_runtime_a64()
-        } else {
-            // no task but the first: nothing is ever cancelled (D96)
-            for line in ["__task_cancelled:", "\tmov x0, #0", "\tret", ""] { self.raw(line) }
         }
         for line in [
             // __alt_stack: an alternate signal stack for the running thread
@@ -229,22 +237,6 @@ impl CodeGen {
         }
         self.raw("")
         for line in [
-            // __str_eq(a, b): the same string, or equal lengths and bytes
-            "__str_eq:",
-            "\tcmp x0, x1",
-            "\tb.eq .Lse_eq",
-            "\tldr x2, [x0], #8",
-            "\tldr x3, [x1], #8",
-            "\tcmp x2, x3",
-            "\tb.ne .Lse_ne",
-            "\tb __equal_bytes",
-            ".Lse_eq:",
-            "\tmov x0, #1",
-            "\tret",
-            ".Lse_ne:",
-            "\tmov x0, #0",
-            "\tret",
-            "",
             // __syscall(n, a, b, c): the number in x8, the arguments in x0
             // to x2 (x3 0); the result, a negative errno on a failure
             "__syscall:",
@@ -266,16 +258,6 @@ impl CodeGen {
             "\tmov x4, x5",
             "\tmov x5, #0",
             "\tsvc #0",
-            "\tret",
-            "",
-            "__argv_of:",
-            "\tadrp x0, __argv",
-            "\tldr x0, [x0, :lo12:__argv]",
-            "\tret",
-            "",
-            "__environ:",
-            "\tadrp x0, __envp",
-            "\tldr x0, [x0, :lo12:__envp]",
             "\tret",
             "",
             // __copy_bytes(dst, src, n): sixteen bytes at a time, then eight,
@@ -303,46 +285,7 @@ impl CodeGen {
             ".Lcb_done:",
             "\tret",
             "",
-            // __equal_bytes(p, q, n): whether n bytes at p and q are equal
-            "__equal_bytes:",
-            ".Leb_words:",
-            "\tcmp x2, #8",
-            "\tb.lo .Leb_bytes",
-            "\tldr x3, [x0], #8",
-            "\tldr x4, [x1], #8",
-            "\tcmp x3, x4",
-            "\tb.ne .Leb_no",
-            "\tsub x2, x2, #8",
-            "\tb .Leb_words",
-            ".Leb_bytes:",
-            "\tcbz x2, .Leb_yes",
-            "\tldrb w3, [x0], #1",
-            "\tldrb w4, [x1], #1",
-            "\tcmp w3, w4",
-            "\tb.ne .Leb_no",
-            "\tsub x2, x2, #1",
-            "\tb .Leb_bytes",
-            ".Leb_yes:",
-            "\tmov x0, #1",
-            "\tret",
-            ".Leb_no:",
-            "\tmov x0, #0",
-            "\tret",
-            "",
         ] { self.raw(line) }
-        // the I/O primitives' errno and `run`'s results (a worker's own with
-        // tasks)
-        self.raw("__set_io_errno:")
-        self.a64_rt_var("x1", "__io_errno_val")
-        for line in ["\tstr x0, [x1]", "\tret", "", "__set_run_status:"] { self.raw(line) }
-        self.a64_rt_var("x3", "__run_exit_val")
-        self.raw("\tstr w0, [x3]")
-        self.a64_rt_var("x3", "__run_signal_val")
-        self.raw("\tstr w1, [x3]")
-        self.a64_rt_var("x3", "__run_errno_val")
-        for line in ["\tstr w2, [x3]", "\tret", "", "__set_run_stderr:", "\tldur x1, [x0, #-8]", "\tadd x1, x1, #1", "\tstur x1, [x0, #-8]"] { self.raw(line) }
-        self.a64_rt_var("x1", "__run_stderr_val")
-        for line in ["\tstr x0, [x1]", "\tret", ""] { self.raw(line) }
         // __str_drop, as IR with std.rt's allocator (MYLA-162)
         self.emit_routine(drop_entry_ir("__str_drop", self.rt_alloc_names().1, false), -1, 0, 0)
         self.raw("\t.set __str_drop, myla___str_drop")
@@ -354,56 +297,7 @@ impl CodeGen {
         self.raw(format("\t.set __alloc, myla_{}", names.0))
         self.raw(format("\t.set __free, myla_{}", names.1))
         self.raw("")
-        for line in [
-            "__func_retain:",
-            "\tcbz x0, .Lfret_done",
-            "\tldur x1, [x0, #-8]",
-            "\tadd x1, x1, #1",
-            "\tstur x1, [x0, #-8]",
-            ".Lfret_done:",
-            "\tret",
-            "",
-            // at a count of zero, a jump to the env's drop function (word 0)
-            "__func_drop:",
-            "\tcbz x0, .Lfdrop_done",
-            "\tldur x1, [x0, #-8]",
-            "\tsubs x1, x1, #1",
-            "\tstur x1, [x0, #-8]",
-            "\tb.ne .Lfdrop_done",
-            "\tldr x1, [x0]",
-            "\tbr x1",
-            ".Lfdrop_done:",
-            "\tret",
-            "",
-            // __compose_call(x), its env in x9 holding two function values,
-            // a (env[8], env[16]) and b (env[24], env[32]): b(a(x)), b by a
-            // jump in place of it
-            "__compose_call:",
-            "\tstp x29, x30, [sp, #-32]!",
-            "\tmov x29, sp",
-            "\tstr x19, [sp, #16]",
-            "\tmov x19, x9",
-            "\tldr x9, [x19, #16]",
-            "\tldr x15, [x19, #8]",
-            "\tblr x15",
-            "\tldr x9, [x19, #32]",
-            "\tldr x15, [x19, #24]",
-            "\tldr x19, [sp, #16]",
-            "\tldp x29, x30, [sp], #32",
-            "\tbr x15",
-            "",
-            // std.math's primitives (MYLA-248), a float64 as its bits
-            "__sqrt:",
-            "\tfmov d0, x0",
-            "\tfsqrt d0, d0",
-            "\tfmov x0, d0",
-            "\tret",
-            "__f64_bits:",
-            "__f64_from_bits:",
-            "\tret",
-            "",
-        ] { self.raw(line) }
-        self.emit_compose_env_drop()
+        self.emit_compose_runtime()
         self.emit_derived_eq()
     }
 }
@@ -587,39 +481,6 @@ impl CodeGen {
             "\tldp x0, x30, [sp], #16",
             "\tmov x8, #94",
             "\tsvc #0",
-            "",
-        ] { self.raw(line) }
-    }
-
-    // `__deep_env` and `__dclone_env`, a function value's environment's deep
-    // copies (D92, MYLA-148): owning nothing (`__free` its drop), the
-    // string's or the cell's; else the routines just before its drop
-    // function
-    fun emit_deep_runtime_a64(var self) {
-        for line in [
-            "__deep_env:",
-            "\tcbz x0, .Lde_none",
-            "\tldr x1, [x0]",
-            "\tadrp x2, __free",
-            "\tadd x2, x2, :lo12:__free",
-            "\tcmp x1, x2",
-            "\tb.eq __deep_str",
-            "\tldur x1, [x1, #-8]",
-            "\tbr x1",
-            ".Lde_none:",
-            "\tret",
-            "",
-            "__dclone_env:",
-            "\tcbz x0, .Ldce_none",
-            "\tldr x1, [x0]",
-            "\tadrp x2, __free",
-            "\tadd x2, x2, :lo12:__free",
-            "\tcmp x1, x2",
-            "\tb.eq __dclone_cell",
-            "\tldur x1, [x1, #-16]",
-            "\tbr x1",
-            ".Ldce_none:",
-            "\tret",
             "",
         ] { self.raw(line) }
     }

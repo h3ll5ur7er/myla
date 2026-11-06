@@ -115,6 +115,190 @@ class LoopOverhead(unittest.TestCase):
         self.assertEqual(built.returncode, 0, built.stderr)
         self.assertEqual(subprocess.run([exe], capture_output=True, text=True).stdout, ran.stdout)
 
+    def test_a_counting_loops_increment_is_not_re_extended(self):
+        # MYLA-251: `i + 1` where `i < n` held (n an int32) can't overflow, so
+        # it is a 64-bit add, with no sign extension after it
+        path = os.path.join(self.tmp.name, "count.my")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(_COUNTING)
+        body = _function(self.asm(path), "total")
+        self.assertRegex(body, r"addq \$1, %r\w+\n")
+        self.assertNotRegex(body, r"addq \$1, (%r\w+)\n\tmovslq %\w+, \1\n", body)
+
+    def test_a_remainder_and_a_sum_before_it_are_not_re_extended(self):
+        # MYLA-251: a remainder is in its operands' range already, and `y + n`
+        # re-extended just before `- 1` overwrites the register was moot
+        path = os.path.join(self.tmp.name, "wrapped.my")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(_WRAPPED)
+        body = _function(self.asm(path), "wrapped")
+        self.assertIn("idivq", body, body)
+        self.assertNotRegex(body, r"movq %rdx, %rax\n(\.L\d+:\n)?\tmovslq", body)
+        self.assertNotRegex(body, r"movslq %(\w+), %\w+\n\tleal [^\n]*, %\1\n", body)
+
+    def test_integer_operations_at_the_limits_print_the_same(self):
+        # every operation whose result no longer re-extends, at its type's
+        # limits: natively as interpreted (the minimum divided by -1 wraps)
+        path = os.path.join(self.tmp.name, "wide.my")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(_WIDE_LIMITS)
+        myla = selfhost_tool("main")
+        ran = subprocess.run([myla, "run", path], capture_output=True, text=True)
+        self.assertEqual(ran.returncode, 0, ran.stderr)
+        self.assertEqual(len(ran.stdout.splitlines()), 239)
+        exe = os.path.join(self.tmp.name, "wide")
+        built = subprocess.run([myla, "build", path, "-o", exe], capture_output=True, text=True)
+        self.assertEqual(built.returncode, 0, built.stderr)
+        self.assertEqual(subprocess.run([exe], capture_output=True, text=True).stdout, ran.stdout)
+
+    def test_counting_loops_at_the_limit_print_the_same(self):
+        # at INT32_MAX: a `<` loop ends there; a `<=` loop's increment wraps,
+        # as it must, and a loop that changes its counter elsewhere too stays
+        # as it was
+        path = os.path.join(self.tmp.name, "limit.my")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(_LIMITS)
+        myla = selfhost_tool("main")
+        ran = subprocess.run([myla, "run", path], capture_output=True, text=True)
+        self.assertEqual((ran.stdout, ran.returncode), (_LIMITS_WANT, 0), ran.stderr)
+        exe = os.path.join(self.tmp.name, "limit")
+        built = subprocess.run([myla, "build", path, "-o", exe], capture_output=True, text=True)
+        self.assertEqual(built.returncode, 0, built.stderr)
+        self.assertEqual(subprocess.run([exe], capture_output=True, text=True).stdout, ran.stdout)
+
+
+_WRAPPED = """fun wrapped(ys: [int], n: int) -> int {
+    var t = 0
+    for y in ys {
+        t += (y + n - 1) % n
+    }
+    return t
+}
+
+fun main() {
+    print(wrapped([3, -6, 4], 5))
+}
+"""
+
+_WIDE_LIMITS = """// Integer operations at their types' limits (MYLA-251): the same natively
+// as interpreted, wrapping where the language wraps.
+fun signed32(xs: [int]) {
+    for a in xs {
+        for b in xs {
+            if b != 0 { print(f"{a / b} {a % b}") }
+            print(f"{a & b} {a | b} {a ^ b} {a >> 3} {a >> 31} {(a + b) - 1} {(a - b) * 3 + 1} {(a + b) % 7}")
+        }
+    }
+}
+
+fun unsigned32(xs: [uint32]) {
+    for a in xs {
+        for b in xs {
+            if b != 0u32 { print(f"{a / b} {a % b}") }
+            print(f"{a & b} {a | b} {a ^ b} {a >> 3u32} {(a + b) - 1u32} {a / 8u32} {a % 8u32}")
+        }
+    }
+}
+
+fun small(xs: [int8], ys: [uint8], zs: [int16]) {
+    for a in xs {
+        for b in xs {
+            if b != 0i8 { print(f"{a / b} {a % b}") }
+            print(f"{a & b} {a | b} {a ^ b} {a >> 2i8} {a + b}")
+        }
+    }
+    for a in ys {
+        for b in ys {
+            if b != 0u8 { print(f"{a / b} {a % b}") }
+            print(f"{a & b} {a | b} {a ^ b} {a >> 2u8} {a + b}")
+        }
+    }
+    for a in zs {
+        for b in zs {
+            if b != 0i16 { print(f"{a / b} {a % b}") }
+            print(f"{a ^ b} {a >> 15i16} {a - b}")
+        }
+    }
+}
+
+// constants as the second operand
+fun f(a: uint32, b: int32, c: uint8, d: int64) -> int64 {
+    let x = a ^ 4294967295u32
+    let y = a & 4294967295u32
+    let z = a | 2147483648u32
+    let w = b ^ -1
+    let v = b & -2147483648
+    let u = c ^ 255u8
+    let t = c | 128u8
+    let s = a >> 31u32
+    let r = b >> 31
+    print(f"{x} {y} {z} {w} {v} {u} {t} {s} {r}")
+    print(x > 5u32 && z > 5u32)
+    return x as int64 + y as int64 + z as int64 + w as int64 + v as int64 + u as int64 + t as int64 + d
+}
+fun main() {
+    let mn = -2147483647 - 1
+    signed32([mn, -7, -1, 0, 1, 7, 2147483647])
+    unsigned32([0u32, 1u32, 7u32, 2147483648u32, 4294967295u32])
+    small([-128i8, -1i8, 3i8, 127i8], [0u8, 1u8, 200u8, 255u8], [-32768i16, -3i16, 5i16, 32767i16])
+    print(mn / -1)
+    print(mn % -1)
+    print(f(7u32, 7, 7u8, 1))
+    print(f(4294967295u32, -2147483648, 255u8, 2))
+    print(f(0u32, 2147483647, 0u8, 3))
+}
+"""
+
+_COUNTING = """fun total(xs: [int], n: int) -> int {
+    var t = 0
+    for i in 0..n {
+        t += xs[i]
+    }
+    return t
+}
+
+fun main() {
+    print(total([1, 2, 3], 3))
+}
+"""
+
+_LIMITS = """fun main() {
+    var i = 2147483640
+    while i < 2147483647 {
+        i += 1
+    }
+    print(i)
+    var j = 2147483646
+    var turns = 0
+    while j <= 2147483647 {
+        j += 1
+        turns += 1
+        if turns > 3 {
+            break
+        }
+    }
+    print(j)
+    var k = 2147483646
+    var kt = 0
+    while k < 2147483647 {
+        k += 1
+        k += 1
+        kt += 1
+        if kt > 1 {
+            break
+        }
+    }
+    print(k)
+    var m: int = 0
+    for x in 2147483645..2147483647 {
+        m = x + 1
+    }
+    print(m)
+}
+"""
+
+_LIMITS_WANT = "2147483647\n-2147483646\n-2147483646\n2147483647\n"
+
 
 _COW_LOOPS = """fun total(xs: [int]) -> int {
     var t = 0

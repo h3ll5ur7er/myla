@@ -502,6 +502,26 @@ fun root_name(e: Expr) -> str {
 // The argument words that travel in registers (D119, System V on x86-64).
 pub const REG_ARG_WORDS: int32 = 6
 
+// Whether `t` is a built-in value type that takes impls (MYLA-221): a
+// number, `bool`, `char`, `str`, `StringBuilder`, a list or a map; not a
+// struct, enum, tuple or actor handle (D144).
+#test(Type.TList(Type.TStr))[true]
+#test(Type.TActor("A"))[false]
+#test(Type.TStruct("P", []))[false]
+pub fun is_builtin_value(t: Type) -> bool {
+    return match t {
+        Type.TInt(w, s) => true,
+        Type.TFloat(w) => true,
+        Type.TChar => true,
+        Type.TBool => true,
+        Type.TStr => true,
+        Type.TSB => true,
+        Type.TList(e) => true,
+        Type.TMap(k, v) => true,
+        _ => false,
+    }
+}
+
 // Whether `t` is passed by its address, or its words by value: a struct,
 // tuple, enum or function value.
 #test(Type.TTuple([]))[true]
@@ -770,7 +790,7 @@ fun is_builtin_op_trait(name: str) -> bool {
 #test("B")[false]
 #test("len")[true]
 fun is_builtin_func(name: str) -> bool {
-    return name == "print" || name == "assert" || name == "panic" || name == "unreachable" || name == "len" || name == "push" || name == "pop" || name == "contains" || name == "remove" || name == "keys" || name == "format" || name == "chars" || name == "StringBuilder" || name == "append" || name == "append_byte" || name == "build" || name == "__write" || name == "__exit" || name == "__args" || name == "__read_file" || name == "__io_errno" || name == "__run" || name == "__run_stderr" || name == "__run_exit_code" || name == "__run_signal" || name == "__run_errno" || name == "__write_file" || name == "__read" || name == "__poll" || name == "__list_dir" || name == "__mkdir" || name == "__stat" || name == "__getcwd" || name == "__getenv" || name == "__sqrt" || name == "__f64_bits" || name == "__f64_from_bits" || name == "__unlink" || name == "__rmdir" || name == "__rename" || name == "__task_cancelled" || name == "__yield" || name == "__sleep" || name == "__clock_ns" || name == "__sleep_ns" || name == "__cancel_after" || name == "__disarm" || name == "__wait_readable" || name == "__wait_either" || name == "__spawn" || name == "__reap" || name == "__kill" || name == "__close" || is_raw_memory_primitive(name)
+    return name == "print" || name == "assert" || name == "panic" || name == "unreachable" || name == "len" || name == "push" || name == "pop" || name == "contains" || name == "remove" || name == "keys" || name == "format" || name == "chars" || name == "StringBuilder" || name == "append" || name == "append_byte" || name == "build" || name == "__write" || name == "__exit" || name == "__args" || name == "__read_file" || name == "__io_errno" || name == "__run" || name == "__run_stderr" || name == "__run_exit_code" || name == "__run_signal" || name == "__run_errno" || name == "__write_file" || name == "__read" || name == "__poll" || name == "__list_dir" || name == "__mkdir" || name == "__stat" || name == "__getcwd" || name == "__getenv" || name == "__sqrt" || name == "__f64_bits" || name == "__f64_from_bits" || name == "__unlink" || name == "__rmdir" || name == "__rename" || name == "__task_cancelled" || name == "__yield" || name == "__sleep" || name == "__clock_ns" || name == "__sleep_ns" || name == "__cancel_after" || name == "__disarm" || name == "__wait_readable" || name == "__wait_either" || name == "__spawn" || name == "__run_with" || name == "__spawn_with" || name == "__reap" || name == "__kill" || name == "__close" || is_raw_memory_primitive(name)
 }
 
 // The raw-memory primitives the runtime written in Myla needs (MYLA-162's
@@ -778,7 +798,7 @@ fun is_builtin_func(name: str) -> bool {
 #test("__load8")[true]
 #test("__load")[false]
 pub fun is_raw_memory_primitive(name: str) -> bool {
-    return name == "__load8" || name == "__load64" || name == "__store8" || name == "__store64" || name == "__alloc" || name == "__addr_of" || name == "__str_of" || name == "__copy_bytes" || name == "__equal_bytes" || name == "__syscall" || name == "__syscall5" || name == "__set_io_errno" || name == "__free" || name == "__environ" || name == "__set_run_status" || name == "__set_run_stderr" || name == "__argv" || name == "__load32" || name == "__store32" || name == "__list_addr" || name == "__list_of" || name == "__rotl" || name == "__rt_addr" || name == "__rt_get" || name == "__bsr64" || name == "__trap_oom" || name == "__rt_waddr" || name == "__cas64" || name == "__xchg64" || name == "__fetch_add64" || name == "__pause" || name == "__run_frame" || name == "__f64_round" || name == "__load_acq64" || name == "__store_rel64"
+    return name == "__load8" || name == "__load64" || name == "__store8" || name == "__store64" || name == "__alloc" || name == "__addr_of" || name == "__str_of" || name == "__copy_bytes" || name == "__equal_bytes" || name == "__syscall" || name == "__syscall5" || name == "__set_io_errno" || name == "__free" || name == "__environ" || name == "__set_run_status" || name == "__set_run_stderr" || name == "__argv" || name == "__load32" || name == "__store32" || name == "__list_addr" || name == "__list_of" || name == "__rotl" || name == "__rt_addr" || name == "__rt_get" || name == "__bsr64" || name == "__trap_oom" || name == "__rt_waddr" || name == "__cas64" || name == "__xchg64" || name == "__fetch_add64" || name == "__pause" || name == "__run_frame" || name == "__f64_round" || name == "__load_acq64" || name == "__store_rel64" || name == "__call_code"
 }
 
 #test("sum")[false]
@@ -1363,6 +1383,7 @@ pub struct Checker {
     conc_sp: SrcSpan,
     conc_node: int32,
     in_async: bool,
+    self_assignable: bool,          // D144: in a `var self` method of a built-in type, `self = v` writes the receiver
     actor_self: str,
     // the call being checked is a builtin function called as a method
     // (`xs.push(v)`, D103, MYLA-221): a local of the same name doesn't shadow it
@@ -1399,7 +1420,7 @@ fun new_checker(decls: [Decl]) -> Checker {
         skipped_decls: [:], skipped_fns: [:], broken_impls: [:], redefined: [:],
         lost_methods: [:], lost_traits: [:], failed_consts: [:], bodies: false,
         call_kind: "", call_kind_id: -1, call_target: "", call_mutates: false, fun_name: "", handovers: [:], become_words: [], passed_on: [],
-        actors: [:], conc_line: 0, conc_col: 0, conc_sp: no_span(), conc_node: -1, in_async: false, actor_self: "", builtin_as_method: false, cur_key: "",
+        actors: [:], conc_line: 0, conc_col: 0, conc_sp: no_span(), conc_node: -1, in_async: false, self_assignable: false, actor_self: "", builtin_as_method: false, cur_key: "",
         lams: [], awaited: [:], call_key: "", call_async: false, suspended: -1, task_init: false, in_guard: false, neg_lit: -1,
         task_line: 0, task_col: 0, task_sp: no_span(), task_node: -1,
     }
@@ -2560,9 +2581,6 @@ impl Checker {
                 // receiver's type (MYLA-221)
                 let generic_ok = match target { Type.TList(e) => true, Type.TMap(kt, vt) => true, _ => false }
                 if tps.len() > 0 && !generic_ok { return Err(terr_at(ln, cl, sp, "generic impls on built-in types are only for lists and maps")) }
-                // a built-in value is one word, which a method changing it
-                // would have to give back to its caller's place (MYLA-221)
-                for m in methods { if match m.receiver { Some(r) => r == "var self", None => false } { return Err(terr_at(m.line, m.col, m.sp, "'var self' methods on built-in types are not supported yet; use a read-only 'self' receiver")) } }
             },
             None => { return Err(terr_at(ln, cl, sp, format("cannot 'impl' on type '{}': an impl takes structs, enums, and concrete scalar / str / StringBuilder receivers", type_name(target)))) },
         }
@@ -4220,7 +4238,7 @@ impl Checker {
                 }
             },
             StmtKind.Assign(target, value) => {
-                match target.kind { ExprKind.Name(n) => { if n == "self" { return Err(terr_at(s.line, s.col, s.sp, "cannot reassign 'self'; mutate its fields or elements instead")) } }, _ => {} }
+                match target.kind { ExprKind.Name(n) => { if n == "self" && !self.self_assignable { return Err(terr_at(s.line, s.col, s.sp, "cannot reassign 'self'; mutate its fields or elements instead")) } }, _ => {} }
                 let lv = self.check_lvalue(target)?
                 if !lv.mutable { return Err(with_notes(terr_at(s.line, s.col, s.sp, "cannot assign to an immutable binding (declare it with 'var')"), self.declared_at(target))) }
                 let vt = self.expect_value(value, Some(lv.ty))?
@@ -4907,6 +4925,13 @@ impl Checker {
         if fd.is_async { self.met_concurrency(fd.line, fd.col, fd.sp, self.cur_decl) }
         if self.is_actor(self.cur_key) { self.actor_self = self.cur_key } else { self.actor_self = "" }
         let recv = match fd.receiver { Some(r) => r, None => "" }
+        // a built-in value's `var self` method changes it by assigning it,
+        // which reaches the caller's place (D144); a struct's changes its
+        // fields
+        self.self_assignable = recv == "var self" && sig.params.len() > 0 && is_builtin_value(sig.params[0])
+        // an async one would need its receiver back from its frame, as a
+        // struct's gets it (D99)
+        if self.self_assignable && fd.is_async { return Err(terr_at(fd.line, fd.col, fd.sp, "async 'var self' methods on built-in types are not supported yet")) }
         var i = 0
         while i < fd.params.len() {
             let mutable = i == 0 && recv == "var self"
@@ -5988,7 +6013,7 @@ impl Checker {
             if name == "__store8" { want = [i64, Type.TInt(8, false)] }
             if name == "__store64" { want = [i64, i64] }
             if name == "__store32" { want = [i64, Type.TInt(32, false)] }
-            if name == "__rotl" { want = [i64, i64] }
+            if name == "__rotl" || name == "__call_code" { want = [i64, i64] }
             if name == "__cas64" { want = [i64, i64, i64] }
             if name == "__xchg64" || name == "__fetch_add64" || name == "__store_rel64" { want = [i64, i64] }
             if name == "__f64_round" { want = [Type.TFloat(64)] }
@@ -6090,6 +6115,22 @@ impl Checker {
             let a_t = self.expect_value(args[1], Some(Type.TList(Type.TStr)))?
             let a_ok = match a_t { Type.TList(el) => is_str(el), _ => false }
             if !a_ok { return Err(terr_at(e.line, e.col, e.sp, format("__spawn() argv must be a [str], found '{}'", type_name(a_t)))) }
+            return Ok(Some(Type.TList(t_int())))
+        }
+        // `__run` and `__spawn` with the options of D147 (`std.rt.run_with`):
+        // the program looked for in PATH, a directory, stdin, an environment
+        if name == "__run_with" || name == "__spawn_with" {
+            if args.len() != 3 { return Err(terr_at(e.line, e.col, e.sp, format("{}() takes (program: str, argv: [str], opts: [str])", name))) }
+            let p_t = self.expect_value(args[0], Some(Type.TStr))?
+            if !is_str(p_t) { return Err(terr_at(e.line, e.col, e.sp, format("{}() program must be a string, found '{}'", name, type_name(p_t)))) }
+            var k = 1
+            while k < 3 {
+                let a_t = self.expect_value(args[k], Some(Type.TList(Type.TStr)))?
+                let a_ok = match a_t { Type.TList(el) => is_str(el), _ => false }
+                if !a_ok { return Err(terr_at(e.line, e.col, e.sp, format("{}() takes a [str] for its argument {}, found '{}'", name, k + 1, type_name(a_t)))) }
+                k += 1
+            }
+            if name == "__run_with" { return Ok(Some(Type.TList(t_byte()))) }
             return Ok(Some(Type.TList(t_int())))
         }
         if name == "__reap" || name == "__close" || name == "__kill" {

@@ -210,6 +210,18 @@ class TestFetch(_Layout):
         self.assertEqual(proc.returncode, 1)
         self.assertIn(f"myla: dependency 'greet': cannot check out commit {'0' * 40} from {url}", proc.stderr)
 
+    def test_git_not_on_path(self):
+        # git is looked for on PATH (D147): without it, a fetch says so
+        repo = os.path.join(self.base, "greet")
+        url = library(repo, "greet", "x")
+        app = self.app(f'greet = {{ git = "{url}", tag = "v1" }}\n')
+        empty = os.path.join(self.base, "empty-path")
+        os.makedirs(empty)
+        proc = subprocess.run([self.myla, "fetch"], cwd=app, capture_output=True, text=True,
+                              env=dict(os.environ, PATH=empty))
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("git is not installed (it isn't on PATH)", proc.stderr)
+
     def test_two_versions_of_a_package(self):
         repo = os.path.join(self.base, "greet")
         url = library(repo, "greet", "x")

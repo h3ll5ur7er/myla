@@ -28,6 +28,7 @@ SUITES = [
     "tests.burn.test_builtin_impls",
     "tests.burn.test_default_params",
     "tests.burn.test_let_else",
+    "tests.burn.test_ir_contract",
 ]
 
 # A test that reads the x86-64 code ends there, skipped, on another target,
@@ -38,18 +39,8 @@ _X86_TESTS = [
     "test_selfhost_codegen.SelfHostedCodegenParity.test_derived_eq_on_a_plain_enum_compares_tags",
 ]
 
-# A call in tail position jumps on x86-64 only (MYLA-126, an optimisation:
-# D87 guarantees `become`, which every target keeps); these programs recurse
-# millions deep through plain calls (MYLA-283).
-_PLAIN_TAIL_CALLS = "a plain call in tail position takes a frame here (MYLA-283)"
-_TAIL_TESTS = [
-    "test_selfhost_codegen.SelfHostedCodegenParity.test_calls_in_tail_position_reuse_the_frame",
-    "test_selfhost_codegen.SelfHostedCodegenParity.test_tail_calls_hand_over_owned_arguments",
-]
-
 _BOTH = {
     **{t: _X86_CODE for t in _X86_TESTS},
-    **{t: _PLAIN_TAIL_CALLS for t in _TAIL_TESTS},
 }
 
 SKIP: dict[str, dict[str, str]] = {
@@ -64,14 +55,8 @@ SKIP: dict[str, dict[str, str]] = {
         # no processes (D125, Language/Targets): `run` and `spawn` are
         # `Unsupported` there, which test_wasm checks
         "test_process": "WASI has no processes (test_wasm checks they are Unsupported)",
-        # the file system WASI shows (MYLA-281): reading a directory gives
-        # `Other` for `IsADirectory`, a path's kind differs in the tour, and a
-        # removed working directory stops Node's shim
-        "test_fs.TestReadFileExample.test_a_directory": "reading a directory is Other, not IsADirectory (MYLA-281)",
-        "test_fs.TestWriteToFileParity.test_directory_read_is_a_directory":
-            "reading a directory is Other, not IsADirectory (MYLA-281)",
-        "test_fs.DirectoryParity.test_tour": "a path's kind differs under WASI (MYLA-281)",
-        "test_fs.DirectoryParity.test_current_dir_removed": "a removed working directory stops Node's shim (MYLA-281)",
+        "test_stdio.BrokenPipe.test_a_write_to_another_descriptor_reports_it":
+            "a WASI program has the descriptors 0 to 2 only (and its preopened directories)",
     },
 }
 

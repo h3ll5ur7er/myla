@@ -39,11 +39,13 @@ fun main() {
 
 | Function | Effect |
 | --- | --- |
-| `write(fd: int32, s: str)` | Writes the bytes of `s` to file descriptor `fd` |
+| `write(fd: int32, s: str) -> Result<(), IoError>` | Writes the bytes of `s` to file descriptor `fd`, all of them, or the error that stopped it (D146); a pipe nobody reads any more is `BrokenPipe` |
 | `println(s)` | `s` and a newline to stdout |
 | `eprint(s)`, `eprintln(s)` | To stderr, without / with a newline |
 
 Output isn't buffered: what a program wrote is out before it waits for input.
+
+A write to the standard output or error whose pipe nobody reads any more (`myla run prog.my | head -1`) ends the program quietly, as Unix tools stop: natively by SIGPIPE, on wasm32 with the exit code 141 a shell shows for it (D146). `print`, `println`, `eprint` and `eprintln` report no error otherwise. A write to any other descriptor gives the error to the program instead: the runtime ignores SIGPIPE, and gives a child it starts the default back.
 
 ### Reading
 
@@ -88,9 +90,9 @@ In a task, each read has an async version that waits for the input with the task
 | `args() -> [str]` | Command-line arguments; `args()[0]` is the program as invoked |
 | `exit(code: int32)` | Ends the process; the low 8 bits become the exit status |
 | `env(name: str) -> Option<str>` | The value of the environment variable `name` the process started with (`""` included), or `None` when there is none ([[MYLA-243]]; the primitive `__getenv`, which reads the environment the process started with, or `""` with `__io_errno` 2) |
-| `run(program: str, args: [str]) -> Result<Output, SpawnError>` | Runs a program found by its exact path (no `PATH` search) with the current environment, waits, captures its output |
+| `run(program: str, args: [str]) -> Result<Output, SpawnError>` | Runs a program, waits, captures its output. A name without a `/` is looked for in each directory of `PATH` (`/bin:/usr/bin` without one), as a shell looks; one with a `/` is that path (D147). The child inherits the environment, the directory and stdin |
 | `run_async(program: str, args: [str]) -> Result<Output, SpawnError>` (async) | `run` in a task: the task waits for the child (its output read as it comes, then its end) suspended, the other tasks running (D124, [[MYLA-230]]); outside a task it blocks as `run` does. A task asked to stop stops waiting: the child is killed and reaped, `Err(SpawnError.Cancelled)` |
-| `command(program)` → `Command` | Builder: `.arg(a)`, `.args([…])`, `.output()`, `.output_async()` (async, as `run_async`) |
+| `command(program)` → `Command` | Builder: `.arg(a)`, `.args([…])`, `.cwd(dir)`, `.env(name, value)`, `.env_remove(name)`, `.env_clear()`, `.stdin(text)`, then `.output()` or `.output_async()` (async, as `run_async`) (D147). A `Command` is a value: each builder method gives a new one and leaves the one it was called on as it was. Without `stdin` the child reads this process's stdin; with it, the whole text; `env_clear()` starts from an empty environment, which later `env` calls add to. On wasm32 all of it is `Unsupported` |
 | `struct Output { stdout: [uint8], stderr: [uint8], status: ExitStatus }` | Output is raw bytes |
 | `enum ExitStatus { Exited(int32), Signaled(int32) }` | |
 | `enum SpawnError { NotFound, PermissionDenied, Unsupported, Cancelled, Other(int32) }` | Why a program couldn't be run (D129): not there, not allowed, no processes on this target, or the waiting task was stopped; `Other` holds the platform's own code for anything else |
@@ -132,7 +134,7 @@ fun main() {
 | `remove_dir(path: str) -> Result<(), IoError>` | Removes an empty directory; one that isn't is `NotEmpty` |
 | `remove_dir_all(path: str) -> Result<(), IoError>` | Removes the path and, for a directory, everything in it, like `rm -r`; symbolic links are removed, not followed |
 | `rename(from_path: str, to: str) -> Result<(), IoError>` | Renames or moves within one file system, replacing a file at `to` |
-| `enum IoError { NotFound, PermissionDenied, AlreadyExists, NotADirectory, IsADirectory, NotEmpty, Interrupted, Cancelled, Unsupported, Other(int32) }` | Why an operation failed, the same causes on every target (D129); `Cancelled`: a task's read stopped by `task.cancel` or a timeout (D96); `Unsupported`: the target can't do it; `Other` holds the platform's own code for anything else, whose numbers aren't portable |
+| `enum IoError { NotFound, PermissionDenied, AlreadyExists, NotADirectory, IsADirectory, NotEmpty, Interrupted, Cancelled, Unsupported, BrokenPipe, Other(int32) }` | Why an operation failed, the same causes on every target (D129); `Cancelled`: a task's read stopped by `task.cancel` or a timeout (D96); `Unsupported`: the target can't do it; `BrokenPipe`: a write to a pipe nobody reads any more (D146); `Other` holds the platform's own code for anything else, whose numbers aren't portable |
 
 The file's bytes become the string unchanged, even when they aren't valid UTF-8: strings work on bytes, and `chars` gives U+FFFD for the invalid ones ([[Language/Collections-and-strings]], [[MYLA-12]]).
 

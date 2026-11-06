@@ -73,6 +73,7 @@ fun copyable(i: Inst) -> bool {
         Inst.Un(d, op, t, a) => true,
         Inst.Cast(d, from_t, to_t, a) => true,
         Inst.Rt(d, name, args) => true,
+        Inst.Intr(d, op, args) => true,
         Inst.Global(d, sym, w) => true,
         Inst.Check(v, kind, pos) => true,
         Inst.Loc(p) => true,
@@ -238,6 +239,7 @@ fun moved(i: Inst, to: int32, so: int32, sub: [int32]) -> Inst {
         Inst.Un(d, op, t, a) => Inst.Un(tmp(d, to, sub), op, t, tmp(a, to, sub)),
         Inst.Cast(d, from_t, to_t, a) => Inst.Cast(tmp(d, to, sub), from_t, to_t, tmp(a, to, sub)),
         Inst.Rt(d, name, args) => Inst.Rt(tmp(d, to, sub), name, tmps(args, to, sub)),
+        Inst.Intr(d, op, args) => Inst.Intr(tmp(d, to, sub), op, tmps(args, to, sub)),
         Inst.Global(d, sym, w) => Inst.Global(tmp(d, to, sub), sym, w),
         Inst.Check(v, kind, pos) => Inst.Check(tmp(v, to, sub), kind, pos),
         _ => i,
@@ -262,10 +264,18 @@ pub fun inline_calls(f: IrFunc, names: [str], bodies: [IrFunc]) -> IrFunc {
         order.push(bi)
         var at = -1
         var which = -1
+        // the call a `become` makes in place of the function stays a call
+        // (MYLA-263)
+        var keep = -1
+        match g.blocks[bi].term {
+            Term.Become => { keep = g.blocks[bi].insts.len() - 1 },
+            _ => {},
+        }
         var j = 0
         while j < g.blocks[bi].insts.len() && at < 0 {
             match g.blocks[bi].insts[j] {
                 Inst.Call(d, name, args) => {
+                    if j == keep { j += 1; continue }
                     var c = 0
                     while c < names.len() {
                         if names[c] == name {

@@ -1,6 +1,9 @@
-//~ type error: 'var self' methods on built-in types
-// v0.4.1 allows read-only `self` methods on built-in receivers, but not `var
-// self` mutation yet.
+//~ type error: async 'var self' methods on built-in types are not supported yet
+// A `var self` method on a built-in type gets its caller's place (D144); an
+// async one isn't supported yet: its receiver would have to come back from
+// its frame, as a struct's does.
 impl int {
-    fun inc(var self) -> int { return self + 1 }
+    async fun inc(var self) {
+        self = self + 1
+    }
 }

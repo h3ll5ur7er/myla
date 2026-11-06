@@ -28,11 +28,12 @@ pub fun env(name: str) -> Option<str> {
 // --- Subprocess execution (D29 follow-on) ---------------------------------
 //
 // `run` / `Command` spawn an external program, wait for it to finish, and
-// return its captured output. The program is located by the exact path given
-// (no PATH search — pass an explicit path such as "/usr/bin/as"); the child
-// inherits the current process environment. Output is returned as raw bytes
-// (`[uint8]`) so binary output survives intact; decode to text yourself when
-// you know it is UTF-8.
+// return its captured output. A program named without a `/` is looked for in
+// each directory of PATH, as a shell looks (D147); one named with a `/` is
+// that path. The child inherits the current process environment, directory
+// and stdin unless a `Command` says otherwise. Output is returned as raw
+// bytes (`[uint8]`) so binary output survives intact; decode to text yourself
+// when you know it is UTF-8.
 
 // How a finished child terminated.
 pub enum ExitStatus {
@@ -76,8 +77,8 @@ fun spawn_error_from_errno(code: int32) -> SpawnError {
 
 // Spawn `program` with the complete argument vector `argv` (argv[0] included),
 // wait for it, and collect its output. Shared by `run` and `Command.output`.
-fun collect(program: str, argv: [str]) -> Result<Output, SpawnError> {
-    let out = __run(program, argv)
+fun collect(program: str, argv: [str], opts: [str]) -> Result<Output, SpawnError> {
+    let out = __run_with(program, argv, opts)
     let err = __run_errno()
     if err != 0 {
         return Err(spawn_error_from_errno(err))
@@ -98,7 +99,8 @@ pub fun run(program: str, args: [str]) -> Result<Output, SpawnError> {
     for a in args {
         argv.push(a)
     }
-    return collect(program, argv)
+    let none: [str] = []
+    return collect(program, argv, none)
 }
 
 // --- In a task: waiting without blocking the worker (D124) ---------------------
@@ -114,13 +116,14 @@ pub async fun run_async(program: str, args: [str]) -> Result<Output, SpawnError>
     for a in args {
         argv.push(a)
     }
-    return await collect_async(program, argv)
+    let none: [str] = []
+    return await collect_async(program, argv, none)
 }
 
 // `collect`, waiting as `run_async` does: the child started, its two pipes
 // read as either has bytes, then its end awaited (its pidfd) and reaped.
-async fun collect_async(program: str, argv: [str]) -> Result<Output, SpawnError> {
-    let h = __spawn(program, argv)
+async fun collect_async(program: str, argv: [str], opts: [str]) -> Result<Output, SpawnError> {
+    let h = __spawn_with(program, argv, opts)
     if h[0] != 0 {
         return Err(spawn_error_from_errno(h[0]))
     }
@@ -187,42 +190,109 @@ async fun collect_async(program: str, argv: [str]) -> Result<Output, SpawnError>
     return Ok(Output { stdout: out, stderr: err, status: status })
 }
 
-// A builder for a subprocess invocation. Start with `command`, chain `arg` /
-// `args`, then call `output`.
+// A builder for a subprocess invocation. Start with `command`, chain `arg`,
+// `args`, `cwd`, `env`, `env_remove`, `env_clear` and `stdin`, then call
+// `output`. A `Command` is a value: each of those gives a new one and leaves
+// the one it was called on as it was, so a command can be the start of
+// several (D147).
 pub struct Command {
     program: str,
     argv: [str],
+    dir: str,             // "": this process's
+    input: str,
+    has_input: bool,      // else this process's stdin
+    env_mode: str,        // "": this process's environment; "keep": with `changes`; "clear": only theirs
+    changes: [str],       // `NAME=value` sets NAME, a bare `NAME` removes it
 }
 
 // Begin building a command for `program`. `argv[0]` is seeded with `program`.
 pub fun command(program: str) -> Command {
-    return Command { program: program, argv: [program] }
+    return Command { program: program, argv: [program], dir: "", input: "", has_input: false, env_mode: "", changes: [] }
 }
 
 impl Command {
     // Append a single argument, returning the extended command.
     fun arg(self, a: str) -> Command {
-        var argv = self.argv
-        argv.push(a)
-        return Command { program: self.program, argv: argv }
+        var c = self
+        c.argv.push(a)
+        return c
     }
 
     // Append several arguments, returning the extended command.
     fun args(self, extra: [str]) -> Command {
-        var argv = self.argv
+        var c = self
         for a in extra {
-            argv.push(a)
+            c.argv.push(a)
         }
-        return Command { program: self.program, argv: argv }
+        return c
+    }
+
+    // The command run in the directory `dir` (one that isn't there is
+    // `NotFound`).
+    fun cwd(self, dir: str) -> Command {
+        var c = self
+        c.dir = dir
+        return c
+    }
+
+    // The command run with the environment variable `name` set to `value`.
+    fun env(self, name: str, value: str) -> Command {
+        var c = self
+        c.changes.push(name + "=" + value)
+        if c.env_mode == "" {
+            c.env_mode = "keep"
+        }
+        return c
+    }
+
+    // The command run without the environment variable `name`.
+    fun env_remove(self, name: str) -> Command {
+        var c = self
+        c.changes.push(name)
+        if c.env_mode == "" {
+            c.env_mode = "keep"
+        }
+        return c
+    }
+
+    // The command run with an empty environment, but for what `env` sets
+    // after this.
+    fun env_clear(self) -> Command {
+        var c = self
+        c.env_mode = "clear"
+        c.changes = []
+        return c
+    }
+
+    // The command run with `text` as its standard input (else it reads this
+    // process's).
+    fun stdin(self, text: str) -> Command {
+        var c = self
+        c.input = text
+        c.has_input = true
+        return c
+    }
+
+    // What the runtime is told besides the arguments (`std.rt.run_with`).
+    fun opts(self) -> [str] {
+        var flag = ""
+        if self.has_input {
+            flag = "1"
+        }
+        var out = [self.dir, flag, self.input, self.env_mode]
+        for ch in self.changes {
+            out.push(ch)
+        }
+        return out
     }
 
     // Spawn the command, wait for it, and collect its output.
     fun output(self) -> Result<Output, SpawnError> {
-        return collect(self.program, self.argv)
+        return collect(self.program, self.argv, self.opts())
     }
 
     // `output`, the task waiting as `run_async` does.
     async fun output_async(self) -> Result<Output, SpawnError> {
-        return await collect_async(self.program, self.argv)
+        return await collect_async(self.program, self.argv, self.opts())
     }
 }

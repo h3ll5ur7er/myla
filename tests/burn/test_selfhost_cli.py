@@ -191,6 +191,18 @@ class SelfHostedCli(_Layout):
         run = subprocess.run([out, "z"], capture_output=True, text=True)
         self.assertEqual(run.stdout, f"2\n{out}\nz\n42\n")
 
+    def test_build_without_the_assembler_on_path(self):
+        # the tools are looked for on PATH (D147): without `as` there, the
+        # build says what it needs
+        empty = os.path.join(self.work, "empty-path")
+        os.makedirs(empty, exist_ok=True)
+        out = os.path.join(self.work, "out", "noas")
+        os.makedirs(os.path.dirname(out), exist_ok=True)
+        proc = subprocess.run([self.myla, "build", "prog.my", "-o", out], cwd=self.work, capture_output=True,
+                              text=True, env=dict(os.environ, PATH=empty))
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("myla: 'as' was not found: building for x86_64-linux here needs GNU as and ld (binutils)", proc.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
