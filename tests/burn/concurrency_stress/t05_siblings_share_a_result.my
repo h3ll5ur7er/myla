@@ -24,15 +24,15 @@ async fun size(rs: [Rec], log: Log) -> int {
     let x = await log.tick()
     var n = 0
     for r in rs {
-        n = n + len(r.name) + len(r.tags)
+        n = n + r.name.len() + r.tags.len()
     }
     return n
 }
 
 async fun extend(rs: [Rec]) -> int {
     var mine = rs
-    push(mine[0].tags, "more")
-    return len(mine[0].tags)
+    mine[0].tags.push("more")
+    return mine[0].tags.len()
 }
 
 #main
@@ -46,7 +46,7 @@ async fun main() {
         async let c = extend(await a)
         async let d = size(await a, log)
         let mine = await a
-        total = total + await b + await c + await d + len(mine[0].tags)
+        total = total + await b + await c + await d + mine[0].tags.len()
         round = round + 1
     }
     print(total)

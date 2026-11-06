@@ -7,8 +7,8 @@ struct P {
 
 fun make(s: str, p: P) -> (int) -> int {
     let xs = [1, 2, 3]
-    let g = (k: int) => k + len(p.tags)
-    return (n: int) => n + len(s) + len(xs) + g(n) + len(p.name)
+    let g = (k: int) => k + p.tags.len()
+    return (n: int) => n + s.len() + xs.len() + g(n) + p.name.len()
 }
 
 async fun use(f: (int) -> int, n: int) -> int {

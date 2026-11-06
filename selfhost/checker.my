@@ -5522,6 +5522,15 @@ impl Checker {
         self.warnings.push(CheckErr { line: at.line, col: at.col, sp: at.sp, msg: msg, decl: self.cur_decl, notes: [Note { label: "help", msg: "call the function of `std` that wraps it; a primitive's behaviour may change with the standard library", line: 0, col: 0, sp: no_span() }] })
     }
 
+    // A builtin called as a function (`push(xs, v)`): deprecated for its
+    // method (`xs.push(v)`, D103, MYLA-221), with a warning, once per place.
+    fun warn_function_form(var self, at: Expr, name: str) {
+        var msg = format("'{}(x, …)' is deprecated: call it as a method, 'x.{}(…)'", name, name)
+        if receiver_only(name) { msg = format("'{}(x)' is deprecated: call it as a method, 'x.{}()'", name, name) }
+        for w in self.warnings { if w.msg == msg && w.line == at.line && w.col == at.col { return } }
+        self.warnings.push(CheckErr { line: at.line, col: at.col, sp: at.sp, msg: msg, decl: self.cur_decl, notes: [Note { label: "help", msg: "`scripts/to_methods.py FILE` rewrites a file's calls; the function forms go once nothing uses them", line: 0, col: 0, sp: no_span() }] })
+    }
+
     #test(checker_on("[int]"))[Ok(0)]
     fun run_phases(var self) -> Result<int32, CheckErr> {
         self.collect_globals()?
@@ -5695,9 +5704,9 @@ impl Checker {
     }
 }
 
-#test()["enum Option<T> { Some(T), None }\nenum Result<T, E> { Ok(T), Err(E) }\nfun get<K, V>(m: [K: V], k: K) -> Option<V> {\n    if contains(m, k) {\n        return Some(m[k])\n    }\n    return None\n}\ntrait Format {\n    fun format(self, spec: str) -> str\n}\n"]
+#test()["enum Option<T> { Some(T), None }\nenum Result<T, E> { Ok(T), Err(E) }\nfun get<K, V>(m: [K: V], k: K) -> Option<V> {\n    if m.contains(k) {\n        return Some(m[k])\n    }\n    return None\n}\ntrait Format {\n    fun format(self, spec: str) -> str\n}\n"]
 fun prelude_src() -> str {
-    return "enum Option<T> { Some(T), None }\nenum Result<T, E> { Ok(T), Err(E) }\nfun get<K, V>(m: [K: V], k: K) -> Option<V> {\n    if contains(m, k) {\n        return Some(m[k])\n    }\n    return None\n}\ntrait Format {\n    fun format(self, spec: str) -> str\n}\n"
+    return "enum Option<T> { Some(T), None }\nenum Result<T, E> { Ok(T), Err(E) }\nfun get<K, V>(m: [K: V], k: K) -> Option<V> {\n    if m.contains(k) {\n        return Some(m[k])\n    }\n    return None\n}\ntrait Format {\n    fun format(self, spec: str) -> str\n}\n"
 }
 
 // The prelude's declarations, with node ids from `first_id`.
@@ -5841,6 +5850,7 @@ impl Checker {
         if name == "" { return self.infer_indirect_call(e, callee, args) }
         if self.redefined.contains(name) { return Err(poisoned()) }   // written against the left-out redefinition (MYLA-110)
         if starts_with_dunder(name) && is_builtin_func(name) { self.warn_primitive(callee, name) }
+        if !as_method && builtin_method_name(name) { self.warn_function_form(callee, name) }
 
         if name == "print" {
             if args.len() != 1 { return Err(terr_at(e.line, e.col, e.sp, "print() takes exactly one argument")) }
@@ -7208,6 +7218,13 @@ impl Reads {
 #test("len")[false]
 pub fun mutating_builtin(m: str) -> bool {
     return m == "push" || m == "pop" || m == "remove" || m == "append" || m == "append_byte"
+}
+
+// Whether the builtin method `m` takes nothing but its receiver.
+#test("len")[true]
+#test("push")[false]
+fun receiver_only(m: str) -> bool {
+    return m == "len" || m == "pop" || m == "keys" || m == "chars" || m == "build"
 }
 
 // Whether `m` names a builtin function that is also a method (D103,

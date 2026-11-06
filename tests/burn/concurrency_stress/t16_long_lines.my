@@ -5,9 +5,9 @@
 async fun line_of(c: str, n: int) -> str {
     var sb = StringBuilder()
     for i in 0..n {
-        append(sb, c)
+        sb.append(c)
     }
-    return build(sb)
+    return sb.build()
 }
 
 #main
@@ -20,7 +20,7 @@ async fun main() {
     var total = 0
     for l in lines {
         print(l)
-        total = total + len(l)
+        total = total + l.len()
     }
     print(total)
 }

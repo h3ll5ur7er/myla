@@ -19,11 +19,11 @@ actor Store {
 
 impl Store {
     fun churn(var self) {
-        if len(self.xs) > 50 {
+        if self.xs.len() > 50 {
             self.xs = []
             self.last = None
         }
-        push(self.xs, 1)
+        self.xs.push(1)
         self.last = Some(self.xs)
     }
 
@@ -44,7 +44,7 @@ impl Store {
                 for y in ys {
                     s = s + y
                 }
-                return s == len(ys)
+                return s == ys.len()
             },
             None => { return true },
         }

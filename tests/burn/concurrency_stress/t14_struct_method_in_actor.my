@@ -36,7 +36,7 @@ impl Tally {
             }
         }
         self.n = self.n + 1
-        push(self.log, self.n)
+        self.log.push(self.n)
         return self.n
     }
 }
@@ -56,7 +56,7 @@ impl Shop {
         return self.t.n
     }
     fun entries(self) -> int {
-        return len(self.t.log)
+        return self.t.log.len()
     }
 }
 

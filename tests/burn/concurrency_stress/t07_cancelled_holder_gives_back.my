@@ -12,24 +12,24 @@ actor Pool {
 
 impl Pool {
     fun acquire(var self) -> int {
-        if len(self.free) == 0 {
+        if self.free.len() == 0 {
             return -1
         }
-        return pop(self.free)
+        return self.free.pop()
     }
     fun release(var self, r: int) {
-        push(self.free, r)
-        push(self.released, r)
+        self.free.push(r)
+        self.released.push(r)
     }
     fun available(self) -> int {
-        return len(self.free)
+        return self.free.len()
     }
     fun duplicates(self) -> int {
         var d = 0
         var i = 0
-        while i < len(self.released) {
+        while i < self.released.len() {
             var j = i + 1
-            while j < len(self.released) {
+            while j < self.released.len() {
                 if self.released[i] == self.released[j] {
                     d = d + 1
                 }

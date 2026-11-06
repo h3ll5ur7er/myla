@@ -68,13 +68,10 @@ fun main() {
     bag.add(5)
     print(bag.count())
     print(Word { text: "hey" }.len())
-    // the function forms still work
-    push(xs, 7)
-    print(len(xs))
 }
 """
 
-_WANT = "3\n3\n2\ntrue\n1\n1\n5\n6\n5\nabyz!\n4\n103\n3\n"
+_WANT = "3\n3\n2\ntrue\n1\n1\n5\n6\n5\nabyz!\n4\n103\n"
 
 
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
@@ -114,6 +111,27 @@ class BuiltinMethods(unittest.TestCase):
                                       text=True)
                 self.assertEqual(proc.returncode, 1, proc.stderr)
                 self.assertIn(want, proc.stderr)
+
+    def test_the_function_forms_are_deprecated(self):
+        # MYLA-221: a builtin called as a function warns, naming its method;
+        # called as a method it doesn't, nor does a function of the program's
+        # own of that name called as a value
+        src = ("fun main() {\n    var xs = [1]\n    push(xs, 2)\n    xs.push(3)\n    print(len(xs))\n"
+               "    print(xs.len())\n    var sb = StringBuilder()\n    append(sb, \"a\")\n    print(build(sb))\n}\n")
+        path = self.write("deprecated.my", src)
+        proc = subprocess.run([self.myla, "check", path, "--stdlib", STDLIB_ROOT], capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        warned = [line for line in proc.stderr.splitlines() if line.startswith("warning: ")]
+        self.assertEqual(warned, [
+            "warning: 'push(x, …)' is deprecated: call it as a method, 'x.push(…)'",
+            "warning: 'len(x)' is deprecated: call it as a method, 'x.len()'",
+            "warning: 'append(x, …)' is deprecated: call it as a method, 'x.append(…)'",
+            "warning: 'build(x)' is deprecated: call it as a method, 'x.build()'",
+        ], proc.stderr)
+        for line in (3, 5, 8, 9):
+            self.assertIn(f"deprecated.my:{line}:", proc.stderr)
+        run = subprocess.run([self.myla, "run", path, "--stdlib", STDLIB_ROOT], capture_output=True, text=True)
+        self.assertEqual((run.stdout, run.returncode), ("3\n3\na\n", 0), run.stderr)
 
     def test_a_mutating_method_changes_an_actor_field(self):
         # D95: a field checked before an `await` and changed after it, by the
