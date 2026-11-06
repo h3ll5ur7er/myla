@@ -1323,7 +1323,8 @@ class SelfHostedCodegenParity(unittest.TestCase):
             self.assertIn(shift, body, body)
         self.assertNotIn("movzbl %al, %eax\n\tmovl %eax, %eax", body, body)
         chars = self._function_asm(asm, "std$rt$str_chars")
-        self.assertRegex(chars, r"movzbl 0\(%r[0-9a-z]+,%r[0-9a-z]+\), %eax", chars)
+        # (into the temporary's register when it has one, MYLA-263)
+        self.assertRegex(chars, r"movzbl 0\(%r[0-9a-z]+,%r[0-9a-z]+\), %(eax|r[0-9]+d|e[a-z]{2})\n", chars)
 
     def test_a_leaf_loop_keeps_six_values_in_caller_saved_registers(self) -> None:
         # MYLA-162: %rsi and %rdi hold values too (no call or copy in their

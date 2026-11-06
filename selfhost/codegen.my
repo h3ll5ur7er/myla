@@ -4420,37 +4420,84 @@ fun reg_of_move(s: str) -> str {
 
 // The load `line` (`movq X, %rax` or `leaq X, %rax`, X not reading %rax)
 // with `reg` as its destination instead; "" when it isn't one (MYLA-125).
+// A narrower load into a general register too: `movl`, `movzbl` and
+// `movzwl` into %eax take the register's 32-bit name, the sign-extending
+// ones into %rax its own (MYLA-263: a byte compared with a byte).
 #test("\tmovq 8(%rbx), %rax", "%r12")["\tmovq 8(%rbx), %r12"]
 #test("\tleaq .L3(%rip), %rax", "%rbx")["\tleaq .L3(%rip), %rbx"]
 #test("\tmovq %rcx, %rax", "%r12")["\tmovq %rcx, %r12"]
 #test("\tmovq 8(%rax), %rax", "%r12")[""]
 #test("\tmovslq %eax, %rax", "%r12")[""]
 #test("\tmovq %rax, %rcx", "%r12")[""]
+#test("\tmovzbl (%r9,%r8,1), %eax", "%rdi")["\tmovzbl (%r9,%r8,1), %edi"]
+#test("\tmovl 8(%rbx), %eax", "%r12")["\tmovl 8(%rbx), %r12d"]
+#test("\tmovsbq 8(%rbx), %rax", "%rsi")["\tmovsbq 8(%rbx), %rsi"]
+#test("\tmovzbl (%rax), %eax", "%rdi")[""]
+#test("\tmovzbl (%rbx), %eax", "%xmm1")[""]
+#test("\tmovsbq 8(%rbx), %rax", "%xmm1")[""]
+#test("\tmovzbl (%rbx), %rax", "%rdi")[""]
+pub fun fold_load(line: str, reg: str) -> str {
+    return retarget_load(line, reg, true)
+}
+
 // The same for the one reader of the loaded value (`load_temp`), which
 // takes it in `reg`: a source reading %rax is fine, as nothing reads the
 // value from %rax after it (MYLA-162).
 #test("\tmovq 8(%rax), %rax", "%rdi")["\tmovq 8(%rax), %rdi"]
-#test("\tmovslq %eax, %rax", "%r12")[""]
+#test("\tmovzbl (%rax), %eax", "%rdi")["\tmovzbl (%rax), %edi"]
+#test("\tmovslq %eax, %rax", "%r12")["\tmovslq %eax, %r12"]
+#test("\tmovq %rax, %rcx", "%r12")[""]
 pub fun fold_load_for_reader(line: str, reg: str) -> str {
-    if !(text_at(line, 0, "\tmovq ") || text_at(line, 0, "\tleaq ")) { return "" }
-    if line.len() < 12 || !text_at(line, line.len() - 6, ", %rax") { return "" }
+    return retarget_load(line, reg, false)
+}
+
+// `fold_load` (`own_src`: the source must not read %rax) and
+// `fold_load_for_reader`.
+fun retarget_load(line: str, reg: str, own_src: bool) -> str {
+    let full = text_at(line, 0, "\tmovq ") || text_at(line, 0, "\tleaq ")
+    let sext = text_at(line, 0, "\tmovslq ") || text_at(line, 0, "\tmovswq ") || text_at(line, 0, "\tmovsbq ")
+    let zext = text_at(line, 0, "\tmovl ") || text_at(line, 0, "\tmovzbl ") || text_at(line, 0, "\tmovzwl ")
+    if !full && !sext && !zext { return "" }
+    var head = 8
+    if full || text_at(line, 0, "\tmovl ") { head = 6 }
+    // into %rax, or into %eax for a zero-extending load
+    if line.len() < head + 6 { return "" }
+    if zext && !text_at(line, line.len() - 6, ", %eax") { return "" }
+    if !zext && !text_at(line, line.len() - 6, ", %rax") { return "" }
+    var dst = reg
+    if !full {
+        // only a general register takes these
+        let r32 = reg32(reg)
+        if r32 == "" { return "" }
+        if zext { dst = r32 }
+    }
+    if own_src {
+        var src = StringBuilder()
+        src.append(line, head, line.len() - 6)
+        let x = src.build()
+        if has_text(x, "%rax") || has_text(x, "%eax") || has_text(x, "%ax") || has_text(x, "%al") { return "" }
+    }
     var out = StringBuilder()
     out.append(line, 0, line.len() - 4)
-    out.append(reg)
+    out.append(dst)
     return out.build()
 }
 
-pub fun fold_load(line: str, reg: str) -> str {
-    if !(text_at(line, 0, "\tmovq ") || text_at(line, 0, "\tleaq ")) { return "" }
-    if line.len() < 12 || !text_at(line, line.len() - 6, ", %rax") { return "" }
-    var src = StringBuilder()
-    src.append(line, 6, line.len() - 6)
-    let x = src.build()
-    if has_text(x, "%rax") || has_text(x, "%eax") || has_text(x, "%ax") || has_text(x, "%al") { return "" }
-    var out = StringBuilder()
-    out.append(line, 0, line.len() - 4)
-    out.append(reg)
-    return out.build()
+// The 32-bit name of the general register `reg`; "" for another.
+#test("%rdi")["%edi"]
+#test("%rbx")["%ebx"]
+#test("%r12")["%r12d"]
+#test("%xmm1")[""]
+#test("%rsp")[""]
+fun reg32(reg: str) -> str {
+    if reg == "%rbx" || reg == "%rcx" || reg == "%rdx" || reg == "%rsi" || reg == "%rdi" {
+        var sb = StringBuilder()
+        sb.append("%e")
+        sb.append(reg, 2, reg.len())
+        return sb.build()
+    }
+    if reg == "%r8" || reg == "%r9" || reg == "%r10" || reg == "%r11" || reg == "%r12" || reg == "%r13" || reg == "%r14" || reg == "%r15" { return reg + "d" }
+    return ""
 }
 
 // Whether `s` holds `t` at byte `at`.
