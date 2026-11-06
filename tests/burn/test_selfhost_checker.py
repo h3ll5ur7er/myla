@@ -350,6 +350,12 @@ SELF_METHOD_WARNINGS: dict[str, tuple[str, list[str]]] = {
 SUPERSEDED: dict[str, str] = {
     # D102: the unsuffixed 2.0 is a float64
     "unit_test_78": "err 3 8 3:8-3:9 type: type mismatch: 'int32' vs 'float64' (no implicit conversion between numeric types)",
+    # D138: a #test case on a function without a result expects [()] (the review of 2026-11-06)
+    "test_without_return": "err 1 9 1:9-1:10 type: '#test' on a function without a result expects '[()]'",
+    # D140: an arm ending in a call of a function without a result is the value (), so the
+    # arms disagree on their type instead of one lacking a value (the review of 2026-11-06)
+    "match_arm_without_value": "err 4 14 4:14-4:15 type: match arms have incompatible types '()' and 'int32'",
+    "unit_test_46": "err 8 14 8:14-8:15 type: match arms have incompatible types '()' and 'int32'",
 }
 
 def _corpus() -> list[str]:
