@@ -423,6 +423,7 @@ class IoErrorCauses(unittest.TestCase):
                 '        Err(IoError.Interrupted) => "interrupted",\n'
                 '        Err(IoError.Cancelled) => "cancelled",\n'
                 '        Err(IoError.Unsupported) => "unsupported",\n'
+                '        Err(IoError.BrokenPipe) => "broken pipe",\n'
                 '        Err(IoError.Other(c)) => f"other {c}",\n'
                 "    }\n"
                 "}\n"

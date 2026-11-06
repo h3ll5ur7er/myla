@@ -327,6 +327,59 @@ pub fun spawn(program: str, argv: [str]) -> [int] {
     return os.spawn(program, argv)
 }
 
+// `__run_with(program, argv, opts)` and `__spawn_with`: `run` and `spawn` as
+// D147 has them. A program named without a `/` is looked for in each
+// directory of this process's PATH ("/bin:/usr/bin" without one; an empty
+// entry is the working directory), as `execvp` looks. `opts`: the directory
+// to run it in ("": this one), "1" or "" for whether its stdin is the text
+// after it (else this process's), then its environment: "" for this
+// process's, "keep" for this process's with the changes after it, "clear"
+// for only what the changes set (a change `NAME=value` sets NAME, a bare
+// `NAME` removes it).
+pub fun run_with(program: str, argv: [str], opts: [str]) -> [uint8] {
+    return os.run_with(program_paths(program), argv, opts)
+}
+
+pub fun spawn_with(program: str, argv: [str], opts: [str]) -> [int] {
+    return os.spawn_with(program_paths(program), argv, opts)
+}
+
+// The paths `program` may be at (D147): itself when it names a path,
+// else in each directory of PATH.
+fun program_paths(program: str) -> [str] {
+    var i = 0
+    while i < program.len() {
+        if program[i] == 47u8 {         // '/'
+            return [program]
+        }
+        i += 1
+    }
+    if program == "" {
+        return [program]
+    }
+    var path = getenv("PATH")
+    if __io_errno() != 0 {
+        path = "/bin:/usr/bin"
+    }
+    var out: [str] = []
+    var start = 0
+    i = 0
+    while i <= path.len() {
+        if i == path.len() || path[i] == 58u8 {   // ':'
+            var sb = StringBuilder()
+            sb.append(path, start, i)
+            var dir = sb.build()
+            if dir == "" {
+                dir = "."
+            }
+            out.push(dir + "/" + program)
+            start = i + 1
+        }
+        i += 1
+    }
+    return out
+}
+
 pub fun reap(pid: int) -> int {
     return os.reap(pid as int64) as int
 }
@@ -888,7 +941,9 @@ fun sb_bigger(holder: int64, cell: int64, need: int64) -> int64 {
 // `print(s)` (`__print_str`) and `print` of the other scalars but floats.
 pub fun print_str(s: str) {
     let c = __addr_of(s)
-    os.write_line(c + 8, __load64(c))
+    if os.write_line(c + 8, __load64(c)) == os.EPIPE {
+        os.broken_pipe()
+    }
 }
 
 pub fun print_int(v: int64) {
@@ -911,10 +966,20 @@ pub fun print_char(c: char) {
     print_str(format("{}", c))
 }
 
-// `__write(fd, s)`: `s`'s bytes to the file descriptor `fd`.
+// `__write(fd, s)`: `s`'s bytes to the file descriptor `fd`; its error for
+// `__io_errno`, 0 when there was none. A closed pipe on the standard output
+// or error ends the program quietly (D146).
 pub fun write(fd: int, s: str) {
     let c = __addr_of(s)
-    os.write_all(fd as int64, c + 8, __load64(c))
+    let r = os.write_all(fd as int64, c + 8, __load64(c))
+    if r == os.EPIPE && (fd == 1 || fd == 2) {
+        os.broken_pipe()
+    }
+    if r < 0 {
+        __set_io_errno(-r)
+    } else {
+        __set_io_errno(0)
+    }
 }
 
 // --- runtime errors ------------------------------------------------------------

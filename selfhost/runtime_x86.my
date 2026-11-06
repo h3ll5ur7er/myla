@@ -88,6 +88,21 @@ impl CodeGen {
         self.raw("	syscall")
         self.raw("	addq $32, %rsp")
         self.raw(".Lsov_done:")
+        // SIGPIPE ignored (D146): a write to a closed pipe reports EPIPE, and
+        // std.rt ends the program for one on the standard output or error.
+        // rt_sigaction(SIGPIPE, {SIG_IGN, 0, 0, 0}, 0, 8)
+        self.raw("	subq $32, %rsp")
+        self.raw("	movq $1, (%rsp)")
+        self.raw("	movq $0, 8(%rsp)")
+        self.raw("	movq $0, 16(%rsp)")
+        self.raw("	movq $0, 24(%rsp)")
+        self.raw("	movq $13, %rax")
+        self.raw("	movl $13, %edi")
+        self.raw("	movq %rsp, %rsi")
+        self.raw("	xorl %edx, %edx")
+        self.raw("	movl $8, %r10d")
+        self.raw("	syscall")
+        self.raw("	addq $32, %rsp")
         if self.frames {
             // the main thread's state block, worker 0's: arch_prctl(
             // ARCH_SET_FS, block), its first word its own address

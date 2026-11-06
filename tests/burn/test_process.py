@@ -137,3 +137,18 @@ class TestSubprocessParity(unittest.TestCase):
             "}\n"
         )
         self.assertEqual((out, err, code), ("a b c\n", "", 0))
+
+    def test_a_child_gets_sigpipe_back(self):
+        # the runtime ignores SIGPIPE (D146), which an exec would keep: a
+        # child's `yes` would report its broken pipe on stderr instead of
+        # stopping as it does anywhere
+        out, err, code = run_source_both_now(
+            "from std.process import run\n\n"
+            "fun main() {\n"
+            "    match run(\"/bin/sh\", [\"-c\", \"yes | head -1\"]) {\n"
+            "        Ok(o) => { print(f\"stdout {o.stdout.len()} bytes, stderr {o.stderr.len()} bytes\") },\n"
+            "        Err(e) => { print(\"failed\") },\n"
+            "    }\n"
+            "}\n"
+        )
+        self.assertEqual((out, err, code), ("stdout 2 bytes, stderr 0 bytes\n", "", 0))

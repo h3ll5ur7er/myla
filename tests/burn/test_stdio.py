@@ -5,16 +5,24 @@ linked against the bundled standard library and then run through both the
 interpreter and the native compiler, which must agree on stdout, stderr, and the
 process exit status (the parity guarantee, extended to the I/O runtime)."""
 import os
+import signal
+import subprocess
+import tempfile
 import unittest
 
 from ._native import (
     CAN_BUILD_NATIVE,
     SKIP_REASON,
+    Program,
     build_and_run_full,
     check_file,
     interpret_full,
+    native_build,
+    run_argv,
     run_source_both,
+    write_program,
 )
+from ._tools import STDLIB_ROOT, selfhost_tool
 
 EXAMPLE = os.path.abspath(
     os.path.join(os.path.dirname(__file__), os.pardir, os.pardir,
@@ -143,6 +151,80 @@ class TestArgsExample(unittest.TestCase):
             check_file(ARGS_EXAMPLE), args=argv_tail, argv0="prog")
         self.assertEqual(native, (self.EXPECTED_OUT, "", 0))
         self.assertEqual(interp, native)
+
+
+
+# D146: a program printing without end into a pipe whose reader has gone ends
+# quietly, as Unix tools do in `yes | head`; a write to another descriptor
+# reports the error instead (`BrokenPipe`), as the runtime ignores SIGPIPE.
+PRINTS_FOREVER = """fun main() {
+    var i = 0
+    while true {
+        print(f"line {i}")
+        i += 1
+    }
+}
+"""
+
+WRITES_TO_FD_3 = """from std.io import write
+from std.fs import IoError
+
+fun main() {
+    match write(3, "to a pipe nobody reads\\n") {
+        Ok(u) => { print("written") },
+        Err(e) => {
+            match e {
+                IoError.BrokenPipe => { print("broken pipe") },
+                _ => { print("another error") },
+            }
+        },
+    }
+    print("still running")
+}
+"""
+
+
+def _argvs(tmp: str, source: str) -> list[tuple[str, list[str], str | None]]:
+    """The interpreter's and the native binary's command lines for `source`."""
+    path = write_program(tmp, source)
+    binary = os.path.join(tmp, "prog")
+    native_build(Program(path), binary)
+    argv, exe = run_argv(binary, binary)
+    return [("interpreter", [selfhost_tool("main"), "run", path, "--stdlib", STDLIB_ROOT], None),
+            ("native", argv, exe)]
+
+
+@unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
+class BrokenPipe(unittest.TestCase):
+    def test_printing_into_a_closed_pipe_ends_quietly(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for name, argv, exe in _argvs(tmp, PRINTS_FOREVER):
+                with self.subTest(run=name):
+                    p = subprocess.Popen(argv, executable=exe, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                    first = p.stdout.readline()
+                    p.stdout.close()
+                    err = p.stderr.read()
+                    code = p.wait(timeout=60)
+                    p.stderr.close()
+                    self.assertEqual(first, b"line 0\n")
+                    self.assertEqual(err, b"")
+                    # SIGPIPE natively; 141, the code a shell shows for it, on
+                    # a target without signals
+                    self.assertIn(code, (-signal.SIGPIPE, 141))
+
+    def test_a_write_to_another_descriptor_reports_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for name, argv, exe in _argvs(tmp, WRITES_TO_FD_3):
+                with self.subTest(run=name):
+                    r, w = os.pipe()
+                    os.close(r)
+                    os.dup2(w, 3)
+                    os.close(w)
+                    try:
+                        p = subprocess.run(argv, executable=exe, pass_fds=(3,), capture_output=True, text=True, timeout=60)
+                    finally:
+                        os.close(3)
+                    self.assertEqual((p.stdout, p.stderr, p.returncode), ("broken pipe\nstill running\n", "", 0))
 
 
 if __name__ == "__main__":

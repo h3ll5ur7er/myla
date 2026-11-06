@@ -790,7 +790,7 @@ fun is_builtin_op_trait(name: str) -> bool {
 #test("B")[false]
 #test("len")[true]
 fun is_builtin_func(name: str) -> bool {
-    return name == "print" || name == "assert" || name == "panic" || name == "unreachable" || name == "len" || name == "push" || name == "pop" || name == "contains" || name == "remove" || name == "keys" || name == "format" || name == "chars" || name == "StringBuilder" || name == "append" || name == "append_byte" || name == "build" || name == "__write" || name == "__exit" || name == "__args" || name == "__read_file" || name == "__io_errno" || name == "__run" || name == "__run_stderr" || name == "__run_exit_code" || name == "__run_signal" || name == "__run_errno" || name == "__write_file" || name == "__read" || name == "__poll" || name == "__list_dir" || name == "__mkdir" || name == "__stat" || name == "__getcwd" || name == "__getenv" || name == "__sqrt" || name == "__f64_bits" || name == "__f64_from_bits" || name == "__unlink" || name == "__rmdir" || name == "__rename" || name == "__task_cancelled" || name == "__yield" || name == "__sleep" || name == "__clock_ns" || name == "__sleep_ns" || name == "__cancel_after" || name == "__disarm" || name == "__wait_readable" || name == "__wait_either" || name == "__spawn" || name == "__reap" || name == "__kill" || name == "__close" || is_raw_memory_primitive(name)
+    return name == "print" || name == "assert" || name == "panic" || name == "unreachable" || name == "len" || name == "push" || name == "pop" || name == "contains" || name == "remove" || name == "keys" || name == "format" || name == "chars" || name == "StringBuilder" || name == "append" || name == "append_byte" || name == "build" || name == "__write" || name == "__exit" || name == "__args" || name == "__read_file" || name == "__io_errno" || name == "__run" || name == "__run_stderr" || name == "__run_exit_code" || name == "__run_signal" || name == "__run_errno" || name == "__write_file" || name == "__read" || name == "__poll" || name == "__list_dir" || name == "__mkdir" || name == "__stat" || name == "__getcwd" || name == "__getenv" || name == "__sqrt" || name == "__f64_bits" || name == "__f64_from_bits" || name == "__unlink" || name == "__rmdir" || name == "__rename" || name == "__task_cancelled" || name == "__yield" || name == "__sleep" || name == "__clock_ns" || name == "__sleep_ns" || name == "__cancel_after" || name == "__disarm" || name == "__wait_readable" || name == "__wait_either" || name == "__spawn" || name == "__run_with" || name == "__spawn_with" || name == "__reap" || name == "__kill" || name == "__close" || is_raw_memory_primitive(name)
 }
 
 // The raw-memory primitives the runtime written in Myla needs (MYLA-162's
@@ -6115,6 +6115,22 @@ impl Checker {
             let a_t = self.expect_value(args[1], Some(Type.TList(Type.TStr)))?
             let a_ok = match a_t { Type.TList(el) => is_str(el), _ => false }
             if !a_ok { return Err(terr_at(e.line, e.col, e.sp, format("__spawn() argv must be a [str], found '{}'", type_name(a_t)))) }
+            return Ok(Some(Type.TList(t_int())))
+        }
+        // `__run` and `__spawn` with the options of D147 (`std.rt.run_with`):
+        // the program looked for in PATH, a directory, stdin, an environment
+        if name == "__run_with" || name == "__spawn_with" {
+            if args.len() != 3 { return Err(terr_at(e.line, e.col, e.sp, format("{}() takes (program: str, argv: [str], opts: [str])", name))) }
+            let p_t = self.expect_value(args[0], Some(Type.TStr))?
+            if !is_str(p_t) { return Err(terr_at(e.line, e.col, e.sp, format("{}() program must be a string, found '{}'", name, type_name(p_t)))) }
+            var k = 1
+            while k < 3 {
+                let a_t = self.expect_value(args[k], Some(Type.TList(Type.TStr)))?
+                let a_ok = match a_t { Type.TList(el) => is_str(el), _ => false }
+                if !a_ok { return Err(terr_at(e.line, e.col, e.sp, format("{}() takes a [str] for its argument {}, found '{}'", name, k + 1, type_name(a_t)))) }
+                k += 1
+            }
+            if name == "__run_with" { return Ok(Some(Type.TList(t_byte()))) }
             return Ok(Some(Type.TList(t_int())))
         }
         if name == "__reap" || name == "__close" || name == "__kill" {

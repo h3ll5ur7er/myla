@@ -55,6 +55,8 @@ SKIP: dict[str, dict[str, str]] = {
         # no processes (D125, Language/Targets): `run` and `spawn` are
         # `Unsupported` there, which test_wasm checks
         "test_process": "WASI has no processes (test_wasm checks they are Unsupported)",
+        "test_stdio.BrokenPipe.test_a_write_to_another_descriptor_reports_it":
+            "a WASI program has the descriptors 0 to 2 only (and its preopened directories)",
     },
 }
 

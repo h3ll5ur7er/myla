@@ -3966,6 +3966,7 @@ pub fun is_builtin_call_name(nm: str) -> bool {
     if nm == "__unlink" || nm == "__rmdir" || nm == "__rename" { return true }
     if nm == "__task_cancelled" || nm == "__clock_ns" || nm == "__sleep_ns" || nm == "__disarm" { return true }
     if nm == "__spawn" || nm == "__reap" || nm == "__kill" || nm == "__close" { return true }
+    if nm == "__run_with" || nm == "__spawn_with" { return true }
     if is_raw_memory_primitive(nm) { return true }
     return false
 }

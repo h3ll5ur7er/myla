@@ -63,6 +63,18 @@ impl CodeGen {
             "\tmov x3, #8",
             "\tmov x8, #134",
             "\tsvc #0",
+            // SIGPIPE ignored (D146): a write to a closed pipe reports EPIPE,
+            // and std.rt ends the program for one on the standard output or
+            // error. rt_sigaction(SIGPIPE, {SIG_IGN, 0, 0, 0}, 0, 8)
+            "\tmov x0, #1",
+            "\tstp x0, xzr, [sp]",
+            "\tstp xzr, xzr, [sp, #16]",
+            "\tmov x0, #13",
+            "\tmov x1, sp",
+            "\tmov x2, #0",
+            "\tmov x3, #8",
+            "\tmov x8, #134",
+            "\tsvc #0",
             "\tadd sp, sp, #32",
         ] { self.raw(line) }
         if self.frames {

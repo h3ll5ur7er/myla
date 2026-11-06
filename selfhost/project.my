@@ -148,6 +148,7 @@ fun io_text(e: IoError) -> str {
         IoError.Interrupted => "interrupted"
         IoError.Cancelled => "cancelled"
         IoError.Unsupported => "not supported on this target"
+        IoError.BrokenPipe => "broken pipe"
         IoError.Other(code) => format("errno {}", code)
     }
 }

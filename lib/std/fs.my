@@ -9,7 +9,8 @@
 // Why a filesystem or I/O operation failed: the causes a program handles on
 // every target (D129). `Unsupported`: the target can't do it at all (wasm32
 // has no processes, D132). `Cancelled`: the task waiting for input was asked
-// to stop (D96). `Other` holds the platform's own code for anything else; its
+// to stop (D96). `BrokenPipe`: a write to a pipe whose reading end is closed
+// (D146). `Other` holds the platform's own code for anything else; its
 // numbers are the platform's, not portable.
 pub enum IoError {
     NotFound,
@@ -21,6 +22,7 @@ pub enum IoError {
     Interrupted,
     Cancelled,
     Unsupported,
+    BrokenPipe,
     Other(int32),
 }
 
@@ -32,6 +34,7 @@ pub enum IoError {
 #test(17)[IoError.AlreadyExists]
 #test(39)[IoError.NotEmpty]
 #test(38)[IoError.Unsupported]
+#test(32)[IoError.BrokenPipe]
 #test(5)[IoError.Other(5)]
 pub fun from_errno(code: int32) -> IoError {
     if code == 2 { return IoError.NotFound }
@@ -43,6 +46,7 @@ pub fun from_errno(code: int32) -> IoError {
     if code == 4 { return IoError.Interrupted }
     if code == 125 { return IoError.Cancelled }
     if code == 38 || code == 95 { return IoError.Unsupported }
+    if code == 32 { return IoError.BrokenPipe }
     return IoError.Other(code)
 }
 
