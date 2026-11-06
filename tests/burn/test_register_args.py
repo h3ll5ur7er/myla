@@ -358,6 +358,49 @@ class RegisterArguments(unittest.TestCase):
         # frame being left
         self.same("relay", BECOME_PARAMS, "2000000\n2000006\n4\n")
 
+    def test_a_generic_become_counts_the_instance(self):
+        # MYLA-272: the checker counts a value of a type parameter as one
+        # word; an instance whose `become` passes more stack words than its
+        # function received is refused where it is built, with the checker's
+        # message (an internal error of the code generator before). The same
+        # function with a type that fits builds, and the interpreter runs both
+        path = self.write("generic_become", GENERIC_BECOME)
+        myla = selfhost_tool("main")
+        ran = subprocess.run([myla, "run", path], capture_output=True, text=True)
+        self.assertEqual((ran.stdout, ran.returncode), ("5\n4\n", 0), ran.stderr)
+        exe = os.path.join(self.tmp.name, "generic_become")
+        for target in ("x86_64-linux", "aarch64-linux", "wasm32-wasi"):
+            with self.subTest(target=target):
+                built = subprocess.run([myla, "build", path, "-o", exe, "--target", target], capture_output=True,
+                                       text=True)
+                self.assertEqual(built.returncode, 1, built.stderr)
+                self.assertNotIn("internal error", built.stderr)
+                self.assertIn("type error: 'become' passes 8 argument words, 2 of them on the stack, but 'start' "
+                              "received 0 there", built.stderr)
+                self.assertIn("generic_become.my:8:", built.stderr)
+                self.assertIn("in 'start' with T = Big", built.stderr)
+        self.same("generic_become_fits", GENERIC_BECOME.replace("print(start(Big { a: 1, b: 2, c: 3, d: 4, e: 5, f: 6, g: 7 }, 5))\n", ""),
+                  "4\n")
+
+
+# a generic `become` whose instance for `Big` passes more words on the stack
+# than `start` received (MYLA-272)
+GENERIC_BECOME = """struct Big { a: int, b: int, c: int, d: int, e: int, f: int, g: int }
+
+fun sum<T>(x: T, k: int) -> int {
+    return k
+}
+
+fun start<T>(x: T, n: int) -> int {
+    become sum(x, n)
+}
+
+fun main() {
+    print(start(Big { a: 1, b: 2, c: 3, d: 4, e: 5, f: 6, g: 7 }, 5))
+    print(start(3, 4))
+}
+"""
+
 
 if __name__ == "__main__":
     unittest.main()

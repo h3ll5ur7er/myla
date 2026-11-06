@@ -49,6 +49,10 @@ fun emit_asm(prog: Loaded, mode: Mode, stdlib_root: str) -> int32 {
             if mode.ssa { g.ssa = true }
             if mode.no_inline { g.inlining = false }
             let asm = g.generate()
+            if g.refused.len() > 0 {
+                eprintln(render(type_errors(prog, g.refused)))
+                return 1
+            }
             if mode.ssa_stats {
                 // D123's prototype: what promoting the scalar slots did
                 let st = g.ssa_stats

@@ -64,7 +64,9 @@ fun compile_asm(file: str, opts: LoadOptions, debug: bool, target: str) -> Resul
     if target == "wasm32-wasi" { g.wasm = true }
     g.set_sources(ch.prog.spans, ch.prog.next_id)
     if debug { g.enable_debug_info(read_gdb_script(opts.stdlib_root)) }
-    return Ok(g.generate())
+    let asm = g.generate()
+    if g.refused.len() > 0 { return Err(render(type_errors(ch.prog, g.refused))) }
+    return Ok(asm)
 }
 
 // Inspect a finished child's status; return true on failure (nonzero exit or a

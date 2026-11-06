@@ -500,7 +500,7 @@ fun root_name(e: Expr) -> str {
 }
 
 // The argument words that travel in registers (D119, System V on x86-64).
-const REG_ARG_WORDS: int32 = 6
+pub const REG_ARG_WORDS: int32 = 6
 
 // Whether `t` is passed by its address, or its words by value: a struct,
 // tuple, enum or function value.
