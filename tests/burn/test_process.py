@@ -152,3 +152,60 @@ class TestSubprocessParity(unittest.TestCase):
             "}\n"
         )
         self.assertEqual((out, err, code), ("stdout 2 bytes, stderr 0 bytes\n", "", 0))
+
+    def test_a_child_s_path_directory_environment_and_input(self):
+        # D147: a name without a `/` found on PATH, the directory, the
+        # environment changed, cleared or kept, stdin given; a Command is a
+        # value its builder methods don't change
+        out, err, code = run_source_both_now(
+            "from std.process import run, command, Output, SpawnError\n\n"
+            "fun text(r: Result<Output, SpawnError>) -> str {\n"
+            "    return match r {\n"
+            "        Ok(o) => {\n"
+            "            var sb = StringBuilder()\n"
+            "            for b in o.stdout { sb.append_byte(b) }\n"
+            "            sb.build()\n"
+            "        }\n"
+            "        Err(SpawnError.NotFound) => \"not found\\n\"\n"
+            "        Err(e) => \"another error\\n\"\n"
+            "    }\n"
+            "}\n\n"
+            "fun main() {\n"
+            "    print(text(run(\"echo\", [\"found on PATH\"])))\n"
+            "    print(text(command(\"pwd\").cwd(\"/\").output()))\n"
+            "    print(text(command(\"pwd\").cwd(\"/no/such/dir\").output()))\n"
+            "    let sh = command(\"/bin/sh\").arg(\"-c\")\n"
+            "    print(text(sh.arg(\"echo $MYLA_A ${HOME:+home}\").env(\"MYLA_A\", \"set\").output()))\n"
+            "    print(text(sh.arg(\"echo ${HOME:-no home}\").env_remove(\"HOME\").output()))\n"
+            "    print(text(command(\"/usr/bin/env\").env_clear().env(\"ONLY\", \"this\").output()))\n"
+            "    print(text(command(\"cat\").stdin(\"fed to its stdin\\n\").output()))\n"
+            "    print(text(run(\"no-such-program-anywhere\", [])))\n"
+            "    print(text(sh.arg(\"echo the base is unchanged\").output()))\n"
+            "}\n"
+        )
+        self.assertEqual((out, err, code), (
+            "found on PATH\n\n/\n\nnot found\n\nset home\n\nno home\n\nONLY=this\n\n"
+            "fed to its stdin\n\nnot found\n\nthe base is unchanged\n\n", "", 0))
+
+    def test_a_child_waited_for_in_a_task(self):
+        # `output_async` with stdin, and `run_async`; with tasks (std.task
+        # imported) and without, where waiting for the child's output is
+        # nothing and the reads block (a program without tasks failed to
+        # build: `await __wait_either` was lowered as a call)
+        for head in ("", "import std.task as task\n"):
+            with self.subTest(tasks=head != ""):
+                out, err, code = run_source_both_now(
+                    head + "from std.process import command, run_async\n\n"
+                    "#main\n"
+                    "async fun main() {\n"
+                    "    match await command(\"cat\").stdin(\"through a task\\n\").output_async() {\n"
+                    "        Ok(o) => { print(o.stdout.len()) },\n"
+                    "        Err(e) => { print(-1) },\n"
+                    "    }\n"
+                    "    match await run_async(\"echo\", [\"found on PATH\"]) {\n"
+                    "        Ok(o) => { print(o.stdout.len()) },\n"
+                    "        Err(e) => { print(-1) },\n"
+                    "    }\n"
+                    "}\n"
+                )
+                self.assertEqual((out, err, code), ("15\n14\n", "", 0))

@@ -1993,6 +1993,16 @@ impl Lower {
                     let d = self.unsupported("an 'await' outside an async function's frame (in an async lambda)")
                     return
                 }
+                // without tasks, waiting for input or for a turn is nothing:
+                // the read after it blocks (D124, as `await_let` says); its
+                // arguments are evaluated
+                if waits_without_tasks(x) {
+                    match x.kind {
+                        ExprKind.Call(c, a) => { for arg in a { self.discard(cg, arg) } },
+                        _ => {},
+                    }
+                    return
+                }
                 self.discard(cg, x)
                 return
             },
@@ -2421,6 +2431,13 @@ impl Lower {
             // one task: the awaited call runs here (D91, MYLA-138)
             ExprKind.Await(x) => {
                 if cg.frames { return self.unsupported("an 'await' outside an async function's frame (in an async lambda)") }
+                if waits_without_tasks(x) {
+                    match x.kind {
+                        ExprKind.Call(c, a) => { for arg in a { self.discard(cg, arg) } },
+                        _ => {},
+                    }
+                    return -1
+                }
                 return self.expr(cg, x)
             },
             ExprKind.Try(inner) => { return self.try_expr(cg, e, inner) },
@@ -5270,6 +5287,18 @@ pub fun compose_ir() -> Routine {
     lw.add(Inst.CallInd(-1, b, [ax]))
     lw.finish(Term.Become)
     return Routine { f: lw.f, wants: lw.wants }
+}
+
+// Whether `x`, awaited, is a wait (`__wait_readable`, `__wait_either`) or a
+// turn for the others (`__yield`), which a program without tasks doesn't do.
+fun waits_without_tasks(x: Expr) -> bool {
+    return match x.kind {
+        ExprKind.Call(c, a) => match c.kind {
+            ExprKind.Name(n) => n == "__wait_readable" || n == "__wait_either" || n == "__yield"
+            _ => false
+        }
+        _ => false
+    }
 }
 
 // `rt name(args)`, or the intrinsic the primitive `name` is (MYLA-264).
