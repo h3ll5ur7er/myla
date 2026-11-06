@@ -2139,8 +2139,9 @@ impl CodeGen {
         // the timers (std.rt's `sleep_frame`, D124): their heap's cell, its
         // count, its lock, the order they were set in; the poller and
         // whether a worker waits in it; how many times a worker left
-        // `exec_idle` (MYLA-275)
-        for v in ["__timers", "__timer_count", "__timer_lock", "__timer_seq", "__exec_poller", "__exec_polling", "__watches", "__watch_count", "__exec_waking", "__exec_gen"] {
+        // `exec_idle` (MYLA-275); the big cells freed where memory isn't
+        // given back (std.rt's `free_big`, D157)
+        for v in ["__timers", "__timer_count", "__timer_lock", "__timer_seq", "__exec_poller", "__exec_polling", "__watches", "__watch_count", "__exec_waking", "__exec_gen", "__big_free"] {
             out.push(v + ":")
             out.push("\t.skip 8")
         }
