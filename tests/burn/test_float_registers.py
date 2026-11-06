@@ -125,6 +125,26 @@ class FloatRegisters(unittest.TestCase):
         homes = re.findall(r"(?:addsd|subsd|mulsd|divsd|ucomisd) %xmm([2-9]|1[0-5]),", body)
         self.assertGreaterEqual(len(homes), 4, body)
 
+    def test_constants_come_from_memory(self):
+        # MYLA-249: a float constant goes into an %xmm register from the
+        # constant pool (`movsd .Lfc…(%rip)`), +0.0 by `xorpd`, not through a
+        # general-purpose register (`movabsq`, then `movq` across); the
+        # program prints what the interpreter does
+        path = self.write("mandel.my", _MANDEL)
+        asm = subprocess.run([selfhost_tool("gen_main"), path, STDLIB_ROOT], capture_output=True, text=True,
+                             check=True).stdout
+        body = _function(asm, "inside")
+        self.assertNotIn("movabsq", body, body)
+        self.assertRegex(body, r"movsd \.Lfc\d+\(%rip\), %xmm\d+")
+        self.assertRegex(body, r"xorpd (%xmm\d+), \1")
+        self.assertRegex(asm, r"\.Lfc\d+:\n\t\.quad 4611686018427387904\n")   # 2.0
+        myla = selfhost_tool("main")
+        exe = os.path.join(self.tmp.name, "mandel")
+        subprocess.run([myla, "build", path, "-o", exe, "--stdlib", STDLIB_ROOT], check=True)
+        native = subprocess.run([exe], capture_output=True, text=True)
+        ran = subprocess.run([myla, "run", path, "--stdlib", STDLIB_ROOT], capture_output=True, text=True)
+        self.assertEqual((native.stdout, native.returncode), (ran.stdout, 0))
+
     def test_floats_print_the_same_natively_and_interpreted(self):
         path = self.write("floats.my", _PROGRAM)
         myla = selfhost_tool("main")

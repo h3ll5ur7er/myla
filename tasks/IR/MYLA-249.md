@@ -9,7 +9,7 @@ labels: [backend, performance, floats, codegen]
 Found by the benchmarks ([[MYLA-242]]): float code runs 4–6 times C's instructions, the largest instruction gap of the twelve programs (mandelbrot 4.3×, n-body 5.9× against C with Myla's semantics at gcc `-O2`). The register allocator ([[MYLA-121]], [[MYLA-134]]) gives float temporaries general-purpose registers. So every float operation moves both operands into `%xmm0`/`%xmm1` with `movq`, operates, and moves the result back: about five instructions and two register-file crossings where C has one `mulsd`.
 
 - [x] Float temporaries and slots allocated in `%xmm` registers, a register class of their own in the linear scan; the operations take their operands where they are
-- [ ] Constants from memory (`movsd .LC(%rip)`) or `xorpd` for 0.0, instead of `movabs` and a move
+- [x] Constants from memory (`movsd .LC(%rip)`) or `xorpd` for 0.0, instead of `movabs` and a move (2026-11-06)
 - [x] Saving and restoring across calls: every `%xmm` register is caller-saved in Myla's convention; a value whose interval holds a call keeps a general-purpose register (a callee-saved one survives the call)
 - [x] Measured: mandelbrot and n-body ([[MYLA-242]]), and that the float formatting stays byte-identical to the interpreter
 
@@ -28,3 +28,4 @@ Found by the benchmarks ([[MYLA-242]]): float code runs 4–6 times C's instruct
   - n-body 1,326 → 230 ms, most of it [[MYLA-248]]'s `sqrt`; its remaining gap is the list field accesses of its loop ([[MYLA-251]]).
   - test_math's 3,700 results stay bit-identical between the interpreter and native code.
 - The bootstrap reaches its fixed point; the burn suite passes (892 tests).
+- **Constants from memory (2026-11-06).** A float constant read where it is used went `movabsq $bits, %rax` then `movq %rax, %xmmN`; now +0.0 is `xorpd %xmmN, %xmmN` and any other is `movsd .Lfc<n>(%rip), %xmmN` from a pool in .rodata, one entry per value (`float_const_into` and `fconst_label` in [[selfhost/ir_x86.my]]), as an operand and as a store into an `%xmm` home. Test first: `test_float_registers.test_constants_come_from_memory` (the mandelbrot loop has no `movabsq`, takes 2.0 from the pool and its zeros by `xorpd`, and prints what the interpreter does) failed on the `movabsq` before. Measured, the same compiler otherwise: mandelbrot 32.9 → 30.4 million instructions (−7.6 %, callgrind at its profile size), its time within noise (about 356 → 341 ms, the median of 9 runs, twice); n-body unchanged (its hot loop has no constant read this way).
