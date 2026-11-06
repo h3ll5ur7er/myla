@@ -2,7 +2,7 @@
 id: MYLA-263
 title: "The calling-convention glue as IR: partial applications, adapters, frame constructors, composition"
 type: improvement
-status: in-progress
+status: review
 priority: high
 labels: [ir, backend, architecture]
 ---
