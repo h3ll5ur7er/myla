@@ -165,15 +165,15 @@ fun main() {
         m[format("k{}", i)] = V { s: format("v{}", i), xs: [i, i + 1] }
         i = i + 1
     }
-    remove(m, "k3")
-    remove(m, "k17")
-    remove(m, "absent")
+    m.remove("k3")
+    m.remove("k17")
+    m.remove("absent")
     let copy = m
-    remove(m, "k0")
+    m.remove("k0")
     print(f"{m.len()} {copy.len()} {m.contains(\"k3\")} {copy.contains(\"k0\")}")
     for k in m.keys() { print(f"{k} {m[k].s} {m[k].xs[1]}") }
     var n: [int: int] = [1: 10, 2: 20, 3: 30]
-    remove(n, 2)
+    n.remove(2)
     for k in n.keys() { print(f"{k}={n[k]}") }
 }
 """,
@@ -278,7 +278,7 @@ PROGRAMS["big"] = (
 )
 
 # a program whose library directory has no `std/` files (MYLA-243, MYLA-268)
-LIBRARY_WITHOUT_THE_RUNTIME = "fun main() {\n    var xs = [\"a\"]\n    xs.push(f\"b{len(xs)}\")\n    print(xs[1])\n}\n"
+LIBRARY_WITHOUT_THE_RUNTIME = "fun main() {\n    var xs = [\"a\"]\n    xs.push(f\"b{xs.len()}\")\n    print(xs[1])\n}\n"
 
 
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)

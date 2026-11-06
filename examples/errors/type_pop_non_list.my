@@ -1,8 +1,8 @@
-//~ type error: requires a list
+//~ type error: has no method 'pop'
 // `pop` only applies to a list value.
 #main
 fun main() {
     var n = 7
-    let x = pop(n)
+    let x = n.pop()
     print(x)
 }

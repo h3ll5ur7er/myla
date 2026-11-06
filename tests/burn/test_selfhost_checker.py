@@ -101,7 +101,6 @@ TYPE_ERRORS: dict[str, str] = {
     "assign_missing_field": _main("var s = S { a: 1 }", "s.b = 2", before=_S),
     "assign_index_of_int": _main("var x = 1", "x[0] = 2"),
     "assign_list_index_str": _main("var xs = [1]", "xs[\"a\"] = 2"),
-    "push_onto_call": _main("push(g(), 1)", before="fun g() -> [int] {\n    return [1]\n}\n"),
     # (`let x = print(1)` was one; since D140 a call without a result is `()`)
     "placeholder_value": _main("let x = _"),
     "lambda_param_type": _main("let f = (x) => x"),
@@ -141,24 +140,19 @@ TYPE_ERRORS: dict[str, str] = {
     "compose_two_args_right": _main("let f = (x: int) => x", "let g = (a: int, b: int) => a", "let h = f >> g"),
     "overload_operand_types": _main("let x = S { a: 1 } + 1", before=_S + "impl Add for S {\n    fun add(self, o: S) -> S {\n        return o\n    }\n}\n"),
     "bounded_operand_types": "fun f<T: Add>(a: T, b: int) -> T {\n    return a + b\n}\nfun main() {}\n",
+    # (push_onto_call, push_arity, contains_arity, contains_on_list,
+    # remove_immutable, build_arity, append_arity, append_to_int, len_arity,
+    # len_of_int and chars_arity were the function forms' argument errors;
+    # since MYLA-221 those builtins are methods only, and the methods' errors
+    # are test_builtin_methods')
     "assert_arity": _main("assert()"),
     "panic_arity": _main("panic()"),
-    "push_arity": _main("var xs = [1]", "push(xs)"),
-    "contains_arity": _main("let b = contains([1: 2])"),
-    "contains_on_list": _main("let b = contains([1], 1)"),
-    "remove_immutable": _main("let m = [1: 2]", "remove(m, 1)"),
     "format_without_args": _main("let s = format()"),
-    "build_arity": _main("let s = build()"),
-    "append_arity": _main("var sb = StringBuilder()", "append(sb)"),
-    "append_to_int": _main("var x = 1", "append(x, \"s\")"),
     "method_arity": _main("let s = S { a: 1 }", "let n = s.f()", before=_SM),
     "method_argument": _main("let s = S { a: 1 }", "let n = s.f(\"x\")", before=_SM),
     "method_type_param": _main("let s = S { a: 1 }", "let n = s.h()", before=_SM),
     "generic_method_argument": _main("let s = S { a: 1 }", "let n = s.g(1, \"x\")", before=_SM),
     "exit_arity": _main("__exit()"),
-    "len_arity": _main("let n = len()"),
-    "len_of_int": _main("let n = len(1)"),
-    "chars_arity": _main("let c = chars()"),
     "function_value_arity": _main("let f = (x: int) => x", "let y = f(1, 2)"),
     "partial_of_int": _main("let x = 1", "let f = x(_)"),
     "partial_generic_method": _main("let s = S { a: 1 }", "let f = s.g(_, 1)", before=_SM),
@@ -355,7 +349,7 @@ SELF_METHOD_WARNINGS: dict[str, tuple[str, list[str]]] = {
 # recording, pinned here.
 SUPERSEDED: dict[str, str] = {
     # D102: the unsuffixed 2.0 is a float64
-    "unit_test_79": "err 3 8 3:8-3:9 type: type mismatch: 'int32' vs 'float64' (no implicit conversion between numeric types)",
+    "unit_test_78": "err 3 8 3:8-3:9 type: type mismatch: 'int32' vs 'float64' (no implicit conversion between numeric types)",
 }
 
 def _corpus() -> list[str]:

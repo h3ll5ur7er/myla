@@ -134,10 +134,10 @@ INTERP_PROGRAMS = {
                                        "print(cs[0].n)", before=_TRACE),
     "store_target_evaluated_once": _main("var xs = [[0, 0], [0, 0]]", "xs[at(\"a\", 1)][at(\"b\", 0)] = at(\"v\", 7)",
                                          "print(xs[1][0])", before=_TRACE),
-    "push_target_evaluated_once": _main("var xs = [[0], [0]]", "push(xs[at(\"a\", 1)], at(\"v\", 7))",
-                                        "print(len(xs[1]))", before=_TRACE),
+    "push_target_evaluated_once": _main("var xs = [[0], [0]]", "xs[at(\"a\", 1)].push(at(\"v\", 7))",
+                                        "print(xs[1].len())", before=_TRACE),
     "string_comparison": _main("let s = \"\"", "print(s == \"\")", "print(\"ab\" != \"ab\")", "print(\"a\" + \"b\" == \"ab\")"),
-    "map_store_inserts": _main("var m = [\"a\": [1]]", "m[\"b\"] = [2, 3]", "print(len(m[\"b\"]))"),
+    "map_store_inserts": _main("var m = [\"a\": [1]]", "m[\"b\"] = [2, 3]", "print(m[\"b\"].len())"),
     # the int64 minimum divided by anything but -1 (found by std.toml, MYLA-89)
     "int64_min_divided": _main("let a: int64 = -9223372036854775807 - 1", "print(a / 10)", "print(a % 10)",
                                "print(a / -10)", "print(a % -7)", "print(a / 3)", "print(a / -1)"),
@@ -200,7 +200,7 @@ CONCURRENCY_PROGRAMS = {
         "async fun count_up(c: Counter, n: int) {\n    for i in 0..n {\n        let x = await c.increment()\n    }\n}\n")),
     "actor_copies_in_and_out": _amain("let b = Box { items: [] }", "var xs = [1, 2]", "await b.put(xs)", "xs[0] = 9",
                                       "var ys = await b.all()", "ys[1] = 7", "print(await b.first())",
-                                      "print(len(await b.all()))", before=(
+                                      "print((await b.all()).len())", before=(
         "actor Box {\n    items: [int]\n}\n"
         "impl Box {\n    fun put(var self, xs: [int]) {\n        self.items = xs\n    }\n"
         "    fun all(self) -> [int] {\n        return self.items\n    }\n"
@@ -244,9 +244,9 @@ CONCURRENCY_PROGRAMS = {
     "async_var_self_method": _amain("var c = C { n: 1 }", "print(await c.bump(5))", "print(c.n)", before=(
         "struct C { n: int }\nimpl C {\n    async fun bump(var self, d: int) -> int {\n"
         "        let x = await fetch(d)\n        self.n = self.n + x\n        return self.n\n    }\n}\n" + _FETCH)),
-    "task_all": _amain("var fs: [async () -> int] = []", "for i in 0..9 {", "    push(fs, async () => await fetch(i))", "}",
-                       "let rs = await task.all(fs)", "print(len(rs))", "print(rs[8])",
-                       "let none: [async () -> str] = []", "print(len(await task.all(none)))",
+    "task_all": _amain("var fs: [async () -> int] = []", "for i in 0..9 {", "    fs.push(async () => await fetch(i))", "}",
+                       "let rs = await task.all(fs)", "print(rs.len())", "print(rs[8])",
+                       "let none: [async () -> str] = []", "print((await task.all(none)).len())",
                        before="import std.task as task\n" + _FETCH),
 }
 
@@ -337,7 +337,7 @@ class SelfHostedInterpParity(unittest.TestCase):
         self.assertGreater(checked, 20)
 
     def test_parity_programs_match_the_oracle(self) -> None:
-        from .test_compiler_parity import PROGRAMS
+        from .test_compiler_parity import PINNED, PROGRAMS
         from .test_selfhost_codegen import PARITY_PROGRAMS
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -346,7 +346,7 @@ class SelfHostedInterpParity(unittest.TestCase):
                     path = os.path.join(tmp, name + ".my")
                     with open(path, "w", encoding="utf-8") as fh:
                         fh.write(PROGRAMS[name])
-                    self.assertEqual(self._myla_run(path), _oracle(path))
+                    self.assertEqual(self._myla_run(path), (PINNED[name], 0) if name in PINNED else _oracle(path))
 
     def test_module_programs_match_the_oracle(self) -> None:
         from .test_selfhost_codegen import MODULE_OUTPUTS_SINCE, MODULE_PROJECTS, _write_project

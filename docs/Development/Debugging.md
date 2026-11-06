@@ -239,7 +239,7 @@ $3 = 2
 - **Heap values inside aggregates** are values only with the pretty-printers, which gdb loads only where `auto-load safe-path` allows (above); otherwise they are pointers to their cells (`print *x`), and a `float32` inside one is a double.
 - **Float results**: `finish` prints nothing for a function returning a float (it is in `%rax`, gdb looks in `%xmm0`); `print/f $rax` right after `finish` shows it.
 - **Calling Myla functions from gdb** (`print myla_add(2, 3)`) isn't supported: Myla's integer arguments travel in System V's registers since D119, but floats travel in general-purpose registers and aggregates by address, so gdb's calls get those wrong ([[MYLA-272]]).
-- Expressions use gdb's Rust syntax: `print xs[i]` works, Myla's `len(xs)` doesn't (`print xs` shows the elements, `print x.len` a cell's length).
+- Expressions use gdb's Rust syntax: `print xs[i]` works, Myla's `xs.len()` doesn't (`print xs` shows the elements, `print x.len` a cell's length).
 
 ## Other tools
 

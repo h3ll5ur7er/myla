@@ -14,7 +14,7 @@ This project plans its work as Genbeya tasks and documents itself in a Genbeya w
 
 ## Writing Myla
 
-Myla resembles Rust and Swift but differs from both in many details (newlines end statements and `;` is only an optional separator, `fun`, `return` required, `E.Variant`, `xs.push(v)` (or `push(xs, v)`), `+=` but no `++`, no references, `int` is `int32`, `float` is `float64`). Before writing or changing any `.my` file, read the `myla` skill (`.agents/skills/myla/SKILL.md`, also in `.claude/skills/myla/`); the full language reference is `docs/Language.md`. Check unfamiliar constructs with `build/myla check file.my` (run `scripts/bootstrap.sh` first if `build/myla` is missing); `build/myla run`, `test` and `build` run, test and compile a file. There is no `python3 myla.py` any more: the Python toolchain was retired (D101).
+Myla resembles Rust and Swift but differs from both in many details (newlines end statements and `;` is only an optional separator, `fun`, `return` required, `E.Variant`, `xs.push(v)` (a method, not `push(xs, v)`), `+=` but no `++`, no references, `int` is `int32`, `float` is `float64`). Before writing or changing any `.my` file, read the `myla` skill (`.agents/skills/myla/SKILL.md`, also in `.claude/skills/myla/`); the full language reference is `docs/Language.md`. Check unfamiliar constructs with `build/myla check file.my` (run `scripts/bootstrap.sh` first if `build/myla` is missing); `build/myla run`, `test` and `build` run, test and compile a file. There is no `python3 myla.py` any more: the Python toolchain was retired (D101).
 
 ## Working agreement
 
