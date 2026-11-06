@@ -196,6 +196,44 @@ fun field_names(fields: [FieldT]) -> [str] {
     return out
 }
 
+// Whether an index is a slice, `a:b` or `a:b:step` (D142).
+#test(expr_of("x"))[false]
+pub fun is_slice_expr(e: Expr) -> bool {
+    return match e.kind { ExprKind.Binary(op, l, r) => op == ":", _ => false }
+}
+
+// What `^n` counts from the end (D142), for an index or a bound that is one.
+#test(expr_of("x"))[None]
+pub fun from_end_of(e: Expr) -> Option<Expr> {
+    return match e.kind {
+        ExprKind.Unary(op, x) => if op == "^" { Some(x) } else { None },
+        _ => None,
+    }
+}
+
+// A slice's parts (D142): its start and stop (a `Hole` when left out, a
+// `^n` for one counted from the end), and its step (a `Hole` for none).
+pub struct SliceParts { start: Expr, stop: Expr, step: Expr }
+
+pub fun slice_parts(e: Expr) -> SliceParts {
+    match e.kind {
+        ExprKind.Binary(op, l, r) => {
+            match l.kind {
+                ExprKind.Binary(op2, a, b) => { if op2 == ":" { return SliceParts { start: a, stop: b, step: r } } },
+                _ => {},
+            }
+            return SliceParts { start: l, stop: r, step: Expr { id: -1, line: e.line, col: e.col, sp: e.sp, kind: ExprKind.Hole } }
+        },
+        _ => {},
+    }
+    return SliceParts { start: e, stop: e, step: e }
+}
+
+// Whether `e` is a part left out (a `Hole`).
+pub fun is_hole_part(e: Expr) -> bool {
+    return match e.kind { ExprKind.Hole => true, _ => false }
+}
+
 // Whether `e` is a call (whose value, without a result, is `()`, D140).
 #test(expr_of("f(1)"))[true]
 #test(expr_of("x"))[false]
@@ -1583,6 +1621,13 @@ impl Checker {
             Type.TBool => Some("bool"),
             Type.TStr => Some("str"),
             Type.TSB => Some("StringBuilder"),
+            // the builtin kinds a program may give methods too (D103, MYLA-221):
+            // a list's or map's are keyed by its kind, as a generic struct's
+            // are by its name, with names no program can declare
+            Type.TChar => Some("char"),
+            Type.TFloat(w) => Some(format("float{}", w)),
+            Type.TList(e) => Some("__list"),
+            Type.TMap(k, v) => Some("__map"),
             _ => None,
         }
     }
@@ -2508,7 +2553,12 @@ impl Checker {
         }
         match key_opt {
             Some(k) => {
-                if tps.len() > 0 { return Err(terr_at(ln, cl, sp, "generic impls on built-in types are not supported yet (only concrete built-in receivers)")) }
+                // generic ones on lists and maps, their parameters bound by the
+                // receiver's type (MYLA-221)
+                let generic_ok = match target { Type.TList(e) => true, Type.TMap(kt, vt) => true, _ => false }
+                if tps.len() > 0 && !generic_ok { return Err(terr_at(ln, cl, sp, "generic impls on built-in types are only for lists and maps")) }
+                // a built-in value is one word, which a method changing it
+                // would have to give back to its caller's place (MYLA-221)
                 for m in methods { if match m.receiver { Some(r) => r == "var self", None => false } { return Err(terr_at(m.line, m.col, m.sp, "'var self' methods on built-in types are not supported yet; use a read-only 'self' receiver")) } }
             },
             None => { return Err(terr_at(ln, cl, sp, format("cannot 'impl' on type '{}': an impl takes structs, enums, and concrete scalar / str / StringBuilder receivers", type_name(target)))) },
@@ -3000,6 +3050,29 @@ impl Checker {
         return Err(terr_at(ln.line, ln.col, ln.sp, format("type mismatch: '{}' vs '{}' (no implicit conversion between numeric types)", type_name(lt), type_name(rt))))
     }
 
+    // A slice's bounds and step: integers, a bound possibly `^n` (D142).
+    fun check_slice(var self, ix: Expr) -> Result<int32, CheckErr> {
+        let p = slice_parts(ix)
+        for b in [p.start, p.stop] {
+            if !is_hole_part(b) {
+                var v = b
+                match from_end_of(b) { Some(n) => { v = n }, None => {} }
+                let bt = self.expect_value(v, Some(t_int()))?
+                if !is_int(bt) { return Err(terr_at(v.line, v.col, v.sp, format("a slice's bounds and step are integers, found '{}'", type_name(bt)))) }
+                self.resolved[b.id] = bt
+            }
+        }
+        if !is_hole_part(p.step) {
+            match from_end_of(p.step) {
+                Some(n) => { return Err(terr_at(p.step.line, p.step.col, p.step.sp, "a slice's step is a plain integer: '^' counts from the end only in a bound")) },
+                None => {},
+            }
+            let st = self.expect_value(p.step, Some(t_int()))?
+            if !is_int(st) { return Err(terr_at(p.step.line, p.step.col, p.step.sp, format("a slice's bounds and step are integers, found '{}'", type_name(st)))) }
+        }
+        return Ok(0)
+    }
+
     #test(checker_on("fun f(n: int) -> int { return n * 2 }"), expr_of("1 + 2 * 3"), "==", expr_of("1 + 2 * 3"), expr_of("1 + 2 * 3"), None)[Ok(Type.TBool)]
     fun infer_binary(var self, e: Expr, op: str, l: Expr, r: Expr, expected: Option<Type>) -> Result<Type, CheckErr> {
         if op == "&&" || op == "||" {
@@ -3242,6 +3315,36 @@ impl Checker {
     #test(checker_on("enum E { A, B(int) }"), expr_of("a.b[0]"), expr_of("a.b[0]"), expr_of("a.b[0]"))[Err(CheckErr { line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 2 }, msg: "unknown name 'a'", decl: -1, notes: [] })]
     fun infer_index(var self, e: Expr, t: Expr, ix: Expr) -> Result<Type, CheckErr> {
         let base = self.expect_value(t, None)?
+        // a slice (D142): the same kind of list or string
+        if is_slice_expr(ix) {
+            match base {
+                Type.TMap(k, v) => { return Err(terr_at(e.line, e.col, e.sp, "a map has no slices")) },
+                Type.TStr => {},
+                Type.TList(el) => {},
+                _ => { return Err(terr_at(e.line, e.col, e.sp, format("type '{}' is not a list and cannot be sliced", type_name(base)))) },
+            }
+            self.check_slice(ix)?
+            self.resolved[ix.id] = Type.TInt(64, true)
+            return Ok(base)
+        }
+        // `^n`, the n-th from the end
+        match from_end_of(ix) {
+            Some(n) => {
+                match base {
+                    Type.TMap(k, v) => { return Err(terr_at(ix.line, ix.col, ix.sp, "'^' counts from the end of a list or a string, not a map")) },
+                    _ => {},
+                }
+                let nt = self.expect_value(n, Some(t_int()))?
+                if !is_int(nt) { return Err(terr_at(n.line, n.col, n.sp, format("an index must be an integer, found '{}'", type_name(nt)))) }
+                self.resolved[ix.id] = nt
+                return match base {
+                    Type.TStr => Ok(t_byte()),
+                    Type.TList(el) => Ok(el),
+                    _ => Err(terr_at(e.line, e.col, e.sp, format("type '{}' is not a list and cannot be indexed with `[...]`", type_name(base)))),
+                }
+            },
+            None => {},
+        }
         match base {
             Type.TMap(k, v) => { self.expect_type(ix, k, "map key")?
             return Ok(v) },
@@ -4701,7 +4804,22 @@ impl Checker {
                 }
             },
             ExprKind.Index(target, index) => {
+                if is_slice_expr(index) { return Err(terr_at(e.line, e.col, e.sp, "a slice can't be assigned to (not yet): assign its elements")) }
                 let base = self.check_lvalue(target)?
+                match from_end_of(index) {
+                    Some(n) => {
+                        match base.ty {
+                            Type.TList(el) => {
+                                let nt = self.expect_value(n, Some(t_int()))?
+                                if !is_int(nt) { return Err(terr_at(n.line, n.col, n.sp, format("an index must be an integer, found '{}'", type_name(nt)))) }
+                                self.resolved[index.id] = nt
+                                return Ok(LValue { ty: el, mutable: base.mutable })
+                            },
+                            _ => {},
+                        }
+                    },
+                    None => {},
+                }
                 match base.ty {
                     Type.TMap(k, v) => { self.expect_type(index, k, "map key")?
             Ok(LValue { ty: v, mutable: base.mutable }) },
@@ -6344,6 +6462,11 @@ impl Checker {
                     if !lv.mutable { return Err(with_notes(terr_at(e.line, e.col, e.sp, format("cannot call the mutating method '{}' on an immutable receiver (declare it with 'var')", field)), self.declared_at(target))) }
                 }
                 self.call_arity(e, sig, 1, args.len(), format("method '{}'", field))?
+                // a list's or map's methods are keyed by its kind: an `impl
+                // [int]`'s take only an `[int32]` (MYLA-221)
+                if (mkey == "__list" || mkey == "__map") && sig.type_params.len() == 0 && !type_eq(recv_type, sig.params[0]) {
+                    return Err(terr_at(e.line, e.col, e.sp, format("method '{}' is for '{}', not '{}'", field, type_name(sig.params[0]), type_name(recv_type))))
+                }
                 if sig.type_params.len() > 0 {
                     let gr = self.infer_generic_method(e, sig, field, recv_type, args)?
                     self.mark_call(e, "method", sig.name, recv == "var self", mkey, sig.decl.is_async)

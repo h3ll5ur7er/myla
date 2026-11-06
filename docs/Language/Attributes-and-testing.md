@@ -107,4 +107,6 @@ The position is that of the expression that fails: an index's `[`, a call's `(` 
 | `assert`, `panic`, `unreachable` | the message | the same |
 | An integer `as char` that isn't a Unicode scalar value (a surrogate, above U+10FFFF) | `invalid char: 55296 is not a Unicode scalar value` | `invalid char` |
 | Running out of the stack | `stack overflow` (no position) | the same (no position; on every target, [[Language/Targets]], [[MYLA-261]]) |
+| A slice's step of 0 | `slice step is zero` | the same |
+| A `str` slice cutting a character | `a slice bound inside a character` | the same |
 | Heap arena exhausted | — | `out of memory` (no position) |

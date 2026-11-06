@@ -1284,6 +1284,21 @@ impl CodeGen {
             self.emit(format("ldr x{}, {}", i, self.a64_cell(stage + 8 * i)))
             i = i + 1
         }
+        if out == 0 {
+            // every word in a register, nothing pointing into this frame: the
+            // frame goes and the target is jumped to, so a `become` through
+            // the thunk runs in constant stack (D87, MYLA-130)
+            if job.fn_off >= 0 {
+                self.emit(format("ldr x16, {}", self.a64_cell(env_cell)))
+                self.emit(format("ldr x9, {}", self.a64_mem("x16", job.fn_off + 8)))
+                self.emit(format("ldr x16, {}", self.a64_mem("x16", job.fn_off)))
+            }
+            self.emit("mov sp, x29")
+            self.emit("ldp x29, x30, [sp], #16")
+            if job.fn_off >= 0 { self.emit("br x16") } else { self.emit(format("b myla_{}", job.target)) }
+            if job.owned.len() > 0 { self.emit_env_drop(job.lifted, job.owned) }
+            return
+        }
         if job.fn_off >= 0 {
             // the function value in the environment: its env into x9
             self.emit(format("ldr x16, {}", self.a64_cell(env_cell)))

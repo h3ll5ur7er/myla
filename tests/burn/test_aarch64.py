@@ -18,7 +18,7 @@ import unittest
 
 from ._native import CAN_BUILD_NATIVE, SKIP_REASON
 from ._tools import STDLIB_ROOT, native_compiler
-from . import test_defer, test_format_specs, test_register_args, test_time, test_unit_type
+from . import test_builtin_impls, test_defer, test_format_specs, test_register_args, test_slices, test_time, test_unit_type
 
 _REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir))
 
@@ -45,9 +45,9 @@ def build_x86(src: str, out: str) -> None:
     subprocess.run(["ld", "-o", out, out + ".o"], check=True)
 
 
-def build_a64(src: str, out: str) -> None:
+def build_a64(src: str, out: str, stdlib: str = STDLIB_ROOT) -> None:
     with open(out + ".s", "wb") as fh:
-        subprocess.run([native_compiler(), src, STDLIB_ROOT, "--target", "aarch64-linux"], stdout=fh, check=True, cwd=_REPO)
+        subprocess.run([native_compiler(), src, stdlib, "--target", "aarch64-linux"], stdout=fh, check=True, cwd=_REPO)
     subprocess.run(["clang", "--target=aarch64-linux-gnu", "-c", "-o", out + ".o", out + ".s"], check=True)
     subprocess.run(["ld.lld", "-static", "-o", out, out + ".o"], check=True)
 
@@ -242,8 +242,29 @@ PROGRAMS["void_is_unit"] = test_unit_type.VOID
 PROGRAMS["format_specs"] = test_format_specs.PROGRAM
 # a `become` passing its parameters on (MYLA-253)
 PROGRAMS["become_params"] = test_register_args.BECOME_PARAMS
+# impl blocks on lists, maps, char and float64 (MYLA-221)
+PROGRAMS["builtin_impls"] = test_builtin_impls.PROGRAM
+# slices and ^ from the end (D142, D143)
+PROGRAMS["slices"] = test_slices.PROGRAM
 # `defer` (D135): every way a scope ends, in plain and async functions
 PROGRAMS["defer"] = test_defer.PROGRAM
+# a `become` through a partial application's thunk, a million deep: the thunk
+# jumps to its function (D87, MYLA-130, MYLA-268)
+PROGRAMS["become_through_a_thunk"] = """
+struct Machine { step: int, next: (Machine, int, int) -> int }
+
+fun hop(k: int, m: Machine, n: int, acc: int) -> int {
+    if n == 0 {
+        return acc
+    }
+    become m.next(m, n - 1, acc + k)
+}
+
+fun main() {
+    let m = Machine { step: 0, next: hop(3, _, _, _) }
+    print(m.next(m, 1000000, 0))
+}
+"""
 
 # a struct of some 33 KB: frames, copies and offsets past what one
 # instruction reaches
@@ -255,6 +276,9 @@ PROGRAMS["big"] = (
     + "fun main() {\n    let a = make(3)\n    let b = a\n    var c = b\n    c.f4199 = 1\n    c.tag = 9\n"
     + "    let xs = [a, c]\n    print(f\"{total(a)} {total(c)} {c.flag} {xs[1].tag} {total(xs[0])}\")\n}\n"
 )
+
+# a program whose library directory has no `std/` files (MYLA-243, MYLA-268)
+LIBRARY_WITHOUT_THE_RUNTIME = "fun main() {\n    var xs = [\"a\"]\n    xs.push(f\"b{len(xs)}\")\n    print(xs[1])\n}\n"
 
 
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
@@ -285,6 +309,18 @@ class Aarch64Parity(unittest.TestCase):
                     with open(path, "w") as fh:
                         fh.write(source.lstrip())
                     self.same(path)
+
+    def test_a_library_without_the_runtime(self):
+        # the runtime and the platform module the tools carry, for aarch64
+        # (MYLA-268): a library directory without them takes theirs
+        with tempfile.TemporaryDirectory() as tmp:
+            os.makedirs(os.path.join(tmp, "lib", "std"))
+            path = os.path.join(tmp, "prog.my")
+            with open(path, "w") as fh:
+                fh.write(LIBRARY_WITHOUT_THE_RUNTIME)
+            exe = os.path.join(tmp, "a64")
+            build_a64(path, exe, os.path.join(tmp, "lib"))
+            self.assertEqual(run(["qemu-aarch64", exe]), ("b1\n", "", 0))
 
     def test_compiler(self):
         # the compiler built for aarch64 makes the same assembly as the one

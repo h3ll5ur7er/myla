@@ -9,10 +9,11 @@
 
 from .ast import Expr, ExprKind, Stmt, StmtKind, Block, Decl, DeclKind, FunData, Param, MatchArm, Pattern, PatternKind, FieldPat, BindElem, ExprOrBlock, ElseTail, FieldInit, MapEntry, Attribute, TypeExpr, TypeKind, bind_elems
 from .tokens import SrcSpan, no_span
-from .checker import Checker, Type, is_raw_memory_primitive, checker_on, builtin_method, builtin_method_name
+from .checker import Checker, Type, is_raw_memory_primitive, checker_on, builtin_method, builtin_method_name, is_slice_expr, from_end_of, slice_parts, is_hole_part
 from .anf import Norm, new_norm, stmt_suspends, body_suspends
 from .util import cp_utf8, format_specs
 from std.fmt import fmt_int, fmt_float, fmt_text
+from std.slice import range_of, str_whole, take_str
 from std.num import f64_literal_bits, f32_round_bits, float_from_bits, pow2, format_float
 from std.io import write
 from std.fs import read_to_string
@@ -470,6 +471,9 @@ impl Interp {
     fun type_name_of(self, te: TypeExpr) -> str {
         return match te.kind {
             TypeKind.TRef(name, args) => name,
+            // an impl on lists or maps (MYLA-221), keyed as the checker keys it
+            TypeKind.TList(e) => "__list",
+            TypeKind.TMap(k, v) => "__map",
             _ => "",
         }
     }
@@ -771,8 +775,15 @@ impl Interp {
             },
             ExprKind.Index(t, i) => {
                 var p = self.place_of(t)
-                if p.steps.len() > 0 { self.read_place(p) }
-                let k = self.eval(i)
+                var k = Value.VUnit
+                match from_end_of(i) {
+                    // `^n`: from the end of the list there (D142)
+                    Some(n) => { k = Value.VInt(value_len(self.read_place(p)) - as_int(self.eval(n))) },
+                    None => {
+                        if p.steps.len() > 0 { self.read_place(p) }
+                        k = self.eval(i)
+                    },
+                }
                 p.steps.push(Step.SIndex(k, e))
                 p
             },
@@ -2498,9 +2509,68 @@ impl Interp {
     #test(interp_on("enum E { A, B(int) }"), expr_of("a.b[0]"), expr_of("a.b[0]"), expr_of("a.b[0]"))[Value.VUnit]
     fun eval_index(var self, e: Expr, tgt: Expr, idx: Expr) -> Value {
         let c = self.eval(tgt)
-        let k = self.eval(idx)
+        if is_slice_expr(idx) { return self.eval_slice(e, c, idx) }
+        let k = self.index_value(c, idx)
         if self.stop() || !self.check_index(c, k, e, false) { return Value.VUnit }
         return index_get(c, k)
+    }
+
+    // An index's value: `^n` counted from the end of `c` (D142).
+    fun index_value(var self, c: Value, idx: Expr) -> Value {
+        match from_end_of(idx) {
+            Some(n) => { return Value.VInt(value_len(c) - as_int(self.eval(n))) },
+            None => {},
+        }
+        return self.eval(idx)
+    }
+
+    // A slice of the list or string `c` (D142, D143): the indices std.slice
+    // gives, the same as native code takes.
+    fun eval_slice(var self, e: Expr, c: Value, idx: Expr) -> Value {
+        let p = slice_parts(idx)
+        let a = self.bound_value(p.start)
+        let b = self.bound_value(p.stop)
+        var step: int64 = 1
+        if !is_hole_part(p.step) { step = as_int(self.eval(p.step)) }
+        if self.stop() { return Value.VUnit }
+        if step == 0 {
+            self.fail(e, "slice step is zero")
+            return Value.VUnit
+        }
+        match c {
+            Value.VStr(s) => {
+                if !str_whole(s, a.0, a.1, a.2, b.0, b.1, b.2, step) {
+                    self.fail(e, "a slice bound inside a character")
+                    return Value.VUnit
+                }
+                return Value.VStr(take_str(s, a.0, a.1, a.2, b.0, b.1, b.2, step))
+            },
+            Value.VList(xs) => {
+                let r = range_of(xs.len() as int64, a.0, a.1, a.2, b.0, b.1, b.2, step)
+                var out: [Value] = []
+                var i = r.first
+                var k: int64 = 0
+                while k < r.count {
+                    out.push(xs[i])
+                    i += r.step
+                    k += 1
+                }
+                return Value.VList(out)
+            },
+            _ => {},
+        }
+        return Value.VUnit
+    }
+
+    // A slice's bound: its value, whether it was given, whether it counts
+    // from the end.
+    fun bound_value(var self, b: Expr) -> (int64, bool, bool) {
+        if is_hole_part(b) { return (0, false, false) }
+        match from_end_of(b) {
+            Some(n) => { return (as_int(self.eval(n)), true, true) },
+            None => {},
+        }
+        return (as_int(self.eval(b)), true, false)
     }
 
     #test(interp_on("[int]"), 0)[None]
@@ -3597,6 +3667,9 @@ fun value_key(v: Value) -> str {
         Value.VSB(b) => "StringBuilder",
         Value.VChar(c) => "char",
         Value.VInt(i) => "int32",
+        Value.VFloat(f) => "float64",
+        Value.VList(xs) => "__list",
+        Value.VMap(ks, vs) => "__map",
         _ => "",
     }
 }
@@ -3613,6 +3686,11 @@ fun type_key_of(t: Type) -> str {
         Type.TBool => "bool",
         Type.TStr => "str",
         Type.TSB => "StringBuilder",
+        // as the checker keys them (MYLA-221)
+        Type.TChar => "char",
+        Type.TFloat(w) => format("float{}", w),
+        Type.TList(e) => "__list",
+        Type.TMap(k, v) => "__map",
         _ => "",
     }
 }

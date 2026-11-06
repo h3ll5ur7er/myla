@@ -146,6 +146,33 @@ class TestNewProject(_Layout):
         self.assertEqual((proc.stdout, proc.stderr, proc.returncode), ("", "", 0))
         self.assertFalse(os.path.exists(os.path.join(root, ".myla")))
 
+    def test_new_lib(self):
+        # MYLA-244: a library project, which another project uses as a path
+        # dependency; it has no program
+        proc = self.myla_cmd("new", "--lib", "shapes")
+        self.assertEqual((proc.stdout, proc.stderr, proc.returncode), ("created library 'shapes' in shapes/\n", "", 0))
+        lib = os.path.join(self.work, "shapes")
+        self.assertFalse(os.path.exists(os.path.join(lib, "src", "main.my")))
+        self.assertTrue(os.path.isfile(os.path.join(lib, "src", "shapes.my")))
+        proc = self.run_in(lib, "check")
+        self.assertEqual((proc.stderr, proc.returncode), ("", 0))
+        proc = self.run_in(lib, "test")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("1/1 passed", proc.stdout + proc.stderr)
+        proc = self.run_in(lib, "run")
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("'shapes' has no program", proc.stderr)
+        proc = self.myla_cmd("new", "useshapes")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        app = os.path.join(self.work, "useshapes")
+        _write(os.path.join(app, "myla.toml"),
+               '[package]\nname = "useshapes"\nversion = "0.1.0"\n\n[dependencies]\nshapes = { path = "../shapes" }\n')
+        _write(os.path.join(app, "src", "main.my"), "import shapes\n\nfun main() {\n    print(shapes.greeting(\"app\"))\n}\n")
+        proc = self.run_in(app, "run")
+        self.assertEqual((proc.stdout, proc.stderr, proc.returncode), ("Hello from shapes, app!\n", "", 0))
+        proc = self.run_in(app, "build")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+
     def test_new_errors(self):
         proc = self.myla_cmd("new", "1abc")
         self.assertEqual(proc.returncode, 1)

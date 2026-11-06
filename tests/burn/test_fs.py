@@ -21,6 +21,9 @@ import unittest
 from ._native import (
     CAN_BUILD_NATIVE,
     SKIP_REASON,
+    assemble,
+    run_argv,
+    target_flags,
     build_and_run_full,
     check_file,
     interpret_full,
@@ -462,16 +465,15 @@ class DirectoryParity(unittest.TestCase):
         path = os.path.join(d, "main.my")
         with open(path, "w", encoding="utf-8") as fh:
             fh.write(source)
-        asm = subprocess.run([self.gen, path, STDLIB_ROOT],
+        asm = subprocess.run([self.gen, path, STDLIB_ROOT, *target_flags()],
                              capture_output=True, text=True, check=True)
         sh_native = os.path.join(d, "sh_native")
         with open(sh_native + ".s", "w", encoding="utf-8") as fh:
             fh.write(asm.stdout)
-        subprocess.run(["as", "--64", "-o", sh_native + ".o", sh_native + ".s"], check=True)
-        subprocess.run(["ld", "-o", sh_native, sh_native + ".o"], check=True)
+        assemble(sh_native + ".s", sh_native)
         return {
             "self-hosted interpreter": [self.interp, path, STDLIB_ROOT],
-            "self-hosted native": [sh_native],
+            "self-hosted native": run_argv(sh_native, sh_native)[0],
         }
 
     def work_dir(self, name: str, impl: str) -> str:

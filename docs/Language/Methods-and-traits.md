@@ -38,7 +38,7 @@ fun main() {
 
 - A method's first parameter is `self` (read-only copy) or `var self` (changes the caller's value, D47).
 - A `var self` method needs a **mutable place** as its receiver: a `var` variable or one of its fields or elements. Calling it on a `let` binding or a temporary is a type error.
-- `impl` works on structs, enums and built-in scalars (`int32`, `bool`, `str`, `StringBuilder`, …). Methods on built-in types must use `self`. Lists, maps and tuples can't have methods.
+- `impl` works on structs, enums, the built-in scalars (`int32`, `float64`, `bool`, `char`, `str`, `StringBuilder`, …), lists and maps: `impl [int] { … }`, `impl [str: int] { … }`, and generic ones, `impl<T> [T] { … }` ([[MYLA-221]]). A list's or map's methods are keyed by its kind, as a generic struct's are by its name: an `impl [int]`'s `total` is a method of every list that only an `[int32]` may call (`method 'total' is for '[int32]', not '[str]'`), and two impls on lists can't both have a `total`. Methods on built-in types must use `self` (a `var self` one would have to give a list or a number back to its caller's place: not yet). Tuples can't have methods.
 - A generic type takes a generic impl that names every parameter in order: `impl<T> Box<T> { … }`. Methods may have their own type parameters.
 - A type may have several `impl` blocks; a method name must be unique per type and differ from every field name. There is no orphan rule (D45): any module may add methods to any type.
 - The only call form is `receiver.method(args)` (D46). There are no static or associated functions (every method takes `self`), and `Type.method` isn't a value; wrap it in a lambda.

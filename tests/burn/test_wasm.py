@@ -20,7 +20,7 @@ import unittest
 from ._native import CAN_BUILD_NATIVE, SKIP_REASON
 from ._tools import STDLIB_ROOT, native_compiler
 from . import test_time
-from .test_aarch64 import PROGRAMS, build_x86, run
+from .test_aarch64 import LIBRARY_WITHOUT_THE_RUNTIME, PROGRAMS, build_x86, run
 
 _REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir))
 RUNNER = os.path.join(_REPO, "tools", "wasm", "run.mjs")
@@ -49,9 +49,9 @@ class WasmTools(unittest.TestCase):
 NODE = ["node", "--stack-size=7000", RUNNER]
 
 
-def build_wasm(src: str, out: str) -> None:
+def build_wasm(src: str, out: str, stdlib: str = STDLIB_ROOT) -> None:
     with open(out + ".s", "wb") as fh:
-        subprocess.run([native_compiler(), src, STDLIB_ROOT, "--target", "wasm32-wasi"], stdout=fh, check=True, cwd=_REPO)
+        subprocess.run([native_compiler(), src, stdlib, "--target", "wasm32-wasi"], stdout=fh, check=True, cwd=_REPO)
     subprocess.run(["clang", "--target=wasm32-wasi", "-mtail-call", "-mbulk-memory", "-mnontrapping-fptoint", "-msign-ext",
                     "-c", "-o", out + ".o", out + ".s"], check=True)
     subprocess.run(["wasm-ld", "--stack-first", "-z", "stack-size=8388608", "-o", out, out + ".o"], check=True)
@@ -66,6 +66,18 @@ class WasmParity(unittest.TestCase):
             build_x86(src, xb)
             build_wasm(src, wb)
             self.assertEqual(run(NODE + [wb]), run([xb]))
+
+    def test_a_library_without_the_runtime(self):
+        # the runtime and the platform module the tools carry, for wasm32
+        # (MYLA-268): a library directory without them takes theirs
+        with tempfile.TemporaryDirectory() as tmp:
+            os.makedirs(os.path.join(tmp, "lib", "std"))
+            path = os.path.join(tmp, "prog.my")
+            with open(path, "w") as fh:
+                fh.write(LIBRARY_WITHOUT_THE_RUNTIME)
+            exe = os.path.join(tmp, "prog.wasm")
+            build_wasm(path, exe, os.path.join(tmp, "lib"))
+            self.assertEqual(run(NODE + [exe]), ("b1\n", "", 0))
 
     def test_a_closure_gets_its_environment_as_a_parameter(self):
         # D130: a function value's environment travels as its last parameter,

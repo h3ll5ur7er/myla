@@ -3098,6 +3098,32 @@
         }
       ]
     },
+    "_index_part": {
+      "type": "CHOICE",
+      "members": [
+        {
+          "type": "SYMBOL",
+          "name": "_bound"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "slice"
+        }
+      ]
+    },
+    "_bound": {
+      "type": "CHOICE",
+      "members": [
+        {
+          "type": "SYMBOL",
+          "name": "from_end"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "_expression"
+        }
+      ]
+    },
     "_primary": {
       "type": "CHOICE",
       "members": [
@@ -4824,7 +4850,7 @@
           },
           {
             "type": "SYMBOL",
-            "name": "_expression"
+            "name": "_index_part"
           },
           {
             "type": "STRING",
@@ -5389,7 +5415,7 @@
           },
           {
             "type": "SYMBOL",
-            "name": "_expression"
+            "name": "_index_part"
           },
           {
             "type": "CHOICE",
@@ -5465,6 +5491,81 @@
     "hole": {
       "type": "STRING",
       "value": "_"
+    },
+    "slice": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "CHOICE",
+          "members": [
+            {
+              "type": "SYMBOL",
+              "name": "_bound"
+            },
+            {
+              "type": "BLANK"
+            }
+          ]
+        },
+        {
+          "type": "STRING",
+          "value": ":"
+        },
+        {
+          "type": "CHOICE",
+          "members": [
+            {
+              "type": "SYMBOL",
+              "name": "_bound"
+            },
+            {
+              "type": "BLANK"
+            }
+          ]
+        },
+        {
+          "type": "CHOICE",
+          "members": [
+            {
+              "type": "SEQ",
+              "members": [
+                {
+                  "type": "STRING",
+                  "value": ":"
+                },
+                {
+                  "type": "CHOICE",
+                  "members": [
+                    {
+                      "type": "SYMBOL",
+                      "name": "_expression"
+                    },
+                    {
+                      "type": "BLANK"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "BLANK"
+            }
+          ]
+        }
+      ]
+    },
+    "from_end": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "STRING",
+          "value": "^"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "_expression"
+        }
+      ]
     },
     "_boolean_17": {
       "type": "STRING",

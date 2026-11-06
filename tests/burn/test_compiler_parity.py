@@ -4,6 +4,7 @@ import os
 import tempfile
 import unittest
 
+from tests.burn._targets import program_excuse
 from tests.burn._native import CAN_BUILD_NATIVE, SKIP_REASON, build_and_run, interpret, selfhost_run
 
 PROGRAMS = {
@@ -3615,6 +3616,8 @@ class TestCompilerParity(unittest.TestCase):
         )
         for name, old, new, expected in programs:
             with self.subTest(program=name):
+                if program_excuse(name):
+                    self.skipTest(program_excuse(name))
                 source = PROGRAMS[name].replace("let deep = 20000", "let deep = 1000000")
                 if old:
                     source = source.replace(old, new)

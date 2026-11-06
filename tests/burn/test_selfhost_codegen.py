@@ -40,7 +40,8 @@ import tempfile
 import unittest
 
 from ._golden import NoGolden, golden
-from ._native import CAN_BUILD_NATIVE, SKIP_REASON
+from ._native import CAN_BUILD_NATIVE, SKIP_REASON, assemble, run_argv, target_flags
+from ._targets import program_excuse
 from ._tools import STDLIB_ROOT, selfhost_tool
 
 _REPO = os.path.abspath(
@@ -438,8 +439,10 @@ MODULE_ERRORS = {
 # is started from this minimal helper (a few MB) rather than from the test
 # process, and the helper reports the program's exit code and peak (KB).
 _MEASURE = (
-    "import os, sys\n"
-    "pid = os.posix_spawn(sys.argv[1], [sys.argv[1]], os.environ)\n"
+    "import os, shutil, sys\n"
+    "argv = sys.argv[1:]\n"
+    "path = argv[0] if '/' in argv[0] else shutil.which(argv[0])\n"
+    "pid = os.posix_spawn(path, argv, os.environ)\n"
     "_, status, usage = os.wait4(pid, 0)\n"
     "sys.stderr.write(f'{os.waitstatus_to_exitcode(status)} {usage.ru_maxrss}\\n')\n"
 )
@@ -679,7 +682,7 @@ class SelfHostedCodegenParity(unittest.TestCase):
 
     def _emit_asm(self, path: str, stdlib_root: str | None = None, flags: tuple = ()) -> str:
         """Assembly for `path`, produced by the self-hosted backend."""
-        extra = ([stdlib_root] if stdlib_root is not None else []) + list(flags)
+        extra = ([stdlib_root] if stdlib_root is not None else []) + list(flags) + target_flags()
         proc = subprocess.run(
             [self._binary, path, *extra], capture_output=True, text=True
         )
@@ -699,20 +702,13 @@ class SelfHostedCodegenParity(unittest.TestCase):
         """Like `_build_and_run`, plus the program's peak memory in MB."""
         with tempfile.TemporaryDirectory() as tmp:
             asm_path = os.path.join(tmp, "out.s")
-            obj_path = os.path.join(tmp, "out.o")
             bin_path = os.path.join(tmp, "out")
             with open(asm_path, "w", encoding="utf-8") as fh:
                 fh.write(asm)
-            subprocess.run(
-                ["as", "--64", "-o", obj_path, asm_path], check=True,
-                capture_output=True, text=True,
-            )
-            subprocess.run(
-                ["ld", "-o", bin_path, obj_path], check=True,
-                capture_output=True, text=True,
-            )
+            assemble(asm_path, bin_path)
+            argv, exe = run_argv(bin_path, bin_path)
             proc = subprocess.run(
-                [sys.executable, "-I", "-S", "-c", _MEASURE, bin_path],
+                [sys.executable, "-I", "-S", "-c", _MEASURE, *argv],
                 capture_output=True, text=True,
             )
             code, peak_kb = proc.stderr.split()[-2:]
@@ -758,9 +754,9 @@ class SelfHostedCodegenParity(unittest.TestCase):
                 asm = os.path.join(tmp, "self.s")
                 with open(asm, "w", encoding="utf-8") as fh:
                     fh.write(self._emit_asm(path))
-                subprocess.run(["as", "--64", "-o", asm + ".o", asm], check=True)
-                subprocess.run(["ld", "-o", asm + ".bin", asm + ".o"], check=True)
-                sh = subprocess.run([asm + ".bin"], capture_output=True, text=True)
+                assemble(asm, asm + ".bin")
+                argv, exe = run_argv(asm + ".bin", asm + ".bin")
+                sh = subprocess.run(argv, executable=exe, capture_output=True, text=True)
                 self.assertEqual((sh.stdout, sh.returncode), (want_out, 1))
                 self.assertTrue(sh.stderr.startswith("runtime error: "), sh.stderr)
                 self.assertTrue(sh.stderr.endswith(f"\n  --> {path}:{line}:{column}\n"),
@@ -774,6 +770,8 @@ class SelfHostedCodegenParity(unittest.TestCase):
                 entries[name] = _write_project(os.path.join(tmp, name), files)
             for name, entry in entries.items():
                 with self.subTest(program=name):
+                    if program_excuse(name):
+                        self.skipTest(program_excuse(name))
                     out, code = self._build_and_run(self._emit_asm(entry, stdlib))
                     if name in MODULE_OUTPUTS_SINCE:
                         expected = MODULE_OUTPUTS_SINCE[name]
@@ -975,8 +973,18 @@ class SelfHostedCodegenParity(unittest.TestCase):
         for name in ("called", "as_value", "partly", "main"):
             self.assertIn(f"myla_{name}:", asm)
 
+    def _x86_only(self) -> None:
+        """Ends the test, skipped, on another target than x86-64 (MYLA-268):
+        what follows reads the x86-64 code, and what ran before holds there
+        too."""
+        if target_flags():
+            self.skipTest("it reads the x86-64 assembly")
+
     def _function_asm(self, asm: str, name: str) -> str:
-        """The lines of `myla_<name>`, up to its `ret`."""
+        """The lines of `myla_<name>`, up to its `ret`. On another target
+        (MYLA-268) the test ends here, skipped: what it reads is the x86-64
+        code, and what ran before (the program's run) holds there too."""
+        self._x86_only()
         lines = asm.split("\n")
         start = lines.index(f"myla_{name}:")
         end = next(i for i in range(start, len(lines)) if lines[i].strip().split(" ")[0] == "ret")
@@ -1089,13 +1097,12 @@ class SelfHostedCodegenParity(unittest.TestCase):
             asm = self._emit_asm(path)
             with tempfile.TemporaryDirectory() as tmp2:
                 asm_path = os.path.join(tmp2, "out.s")
-                obj_path = os.path.join(tmp2, "out.o")
                 bin_path = os.path.join(tmp2, "out")
                 with open(asm_path, "w", encoding="utf-8") as fh:
                     fh.write(asm)
-                subprocess.run(["as", "--64", "-o", obj_path, asm_path], check=True)
-                subprocess.run(["ld", "-o", bin_path, obj_path], check=True)
-                run = subprocess.run([bin_path], capture_output=True, text=True, timeout=30)
+                assemble(asm_path, bin_path)
+                argv, exe = run_argv(bin_path, bin_path)
+                run = subprocess.run(argv, executable=exe, capture_output=True, text=True, timeout=30)
             self.assertEqual((run.stdout, run.returncode), ("10243\n", 1))
             self.assertIn("division by zero", run.stderr)
             self.assertIn("prog.my:5:", run.stderr)
@@ -1692,6 +1699,8 @@ class SelfHostedCodegenParity(unittest.TestCase):
                 fh.write(source)
             asm = self._emit_asm(path)
             self.assertEqual(self._build_and_run(asm), (expected, 0))
+            if target_flags():
+                self.skipTest("-g and the code read are x86-64's (Language/Targets)")
             proc = subprocess.run([self._binary, path, "-g"], capture_output=True, text=True)
             self.assertEqual(proc.returncode, 0, proc.stderr)
             self.assertEqual(self._build_and_run(proc.stdout), (expected, 0))
@@ -1737,6 +1746,8 @@ class SelfHostedCodegenParity(unittest.TestCase):
                 fh.write(source)
             asm = self._emit_asm(path)
             self.assertEqual(self._build_and_run(asm), (expected, 0))
+            if target_flags():
+                self.skipTest("-g and the code read are x86-64's (Language/Targets)")
             proc = subprocess.run([self._binary, path, "-g"], capture_output=True, text=True)
             self.assertEqual(proc.returncode, 0, proc.stderr)
             self.assertEqual(self._build_and_run(proc.stdout), (expected, 0))
@@ -1800,6 +1811,7 @@ class SelfHostedCodegenParity(unittest.TestCase):
                 fh.write(source)
             asm = self._emit_asm(path)
             self.assertEqual(self._build_and_run(asm), ("3000000\n11\n42\n", 0))
+        self._x86_only()
         thunks = [line for line in asm.split("\n") if line.startswith("\tjmp myla_hop") or line == "\tjmp *%r11"]
         self.assertGreaterEqual(len(thunks), 2)
         self.assertNotIn("call myla_hop", asm)
@@ -1881,11 +1893,12 @@ class SelfHostedCodegenParity(unittest.TestCase):
                 exe = os.path.join(tmp, name)
                 with open(exe + ".s", "w", encoding="utf-8") as fh:
                     fh.write(self._emit_asm(path, stdlib))
-                subprocess.run(["gcc", "-nostdlib", "-static", "-o", exe, exe + ".s"], check=True)
+                assemble(exe + ".s", exe)
                 # one worker: the order the self-hosted interpreter has (D92,
                 # D110)
                 env = dict(os.environ, MYLA_THREADS="1")
-                proc = subprocess.run([exe], capture_output=True, text=True, timeout=60, env=env)
+                argv, bin_exe = run_argv(exe, exe)
+                proc = subprocess.run(argv, executable=bin_exe, capture_output=True, text=True, timeout=60, env=env)
                 self.assertEqual((proc.stdout, proc.returncode), (want_out, want_code))
                 self.assertTrue(proc.stderr.startswith(want_err), proc.stderr)
 
@@ -1909,12 +1922,13 @@ class SelfHostedCodegenParity(unittest.TestCase):
                 exe = os.path.join(tmp, name)
                 with open(exe + ".s", "w", encoding="utf-8") as fh:
                     fh.write(self._emit_asm(path, stdlib))
-                subprocess.run(["gcc", "-nostdlib", "-static", "-o", exe, exe + ".s"], check=True)
+                assemble(exe + ".s", exe)
+                argv, bin_exe = run_argv(exe, exe)
                 want = None
                 for workers in ["1", "2", "4", "8", "16"]:
                     for _ in range(4):
                         env = dict(os.environ, MYLA_THREADS=workers)
-                        proc = subprocess.run([exe], capture_output=True, text=True, timeout=60, env=env)
+                        proc = subprocess.run(argv, executable=bin_exe, capture_output=True, text=True, timeout=60, env=env)
                         got = (proc.stdout, proc.returncode)
                         if want is None:
                             want = got
@@ -1932,11 +1946,11 @@ class SelfHostedCodegenParity(unittest.TestCase):
             exe = os.path.join(tmp, "par")
             with open(exe + ".s", "w", encoding="utf-8") as fh:
                 fh.write(self._emit_asm(path, STDLIB_ROOT))
-            subprocess.run(["gcc", "-nostdlib", "-static", "-o", exe, exe + ".s"], check=True)
+            assemble(exe + ".s", exe)
             env = dict(os.environ)
             env.pop("MYLA_THREADS", None)
             proc = subprocess.run(
-                [sys.executable, "-I", "-S", "-c", _CPU_AND_WALL, exe],
+                [sys.executable, "-I", "-S", "-c", _CPU_AND_WALL, *run_argv(exe, exe)[0]],
                 capture_output=True, text=True, env=env,
             )
             out, cpu, wall = proc.stdout, *map(float, proc.stderr.split()[-2:])
@@ -1948,6 +1962,8 @@ class SelfHostedCodegenParity(unittest.TestCase):
 
         for name in PARITY_PROGRAMS:
             with self.subTest(program=name), tempfile.TemporaryDirectory() as tmp:
+                if program_excuse(name):
+                    self.skipTest(program_excuse(name))
                 path = os.path.join(tmp, name + ".my")
                 with open(path, "w", encoding="utf-8") as fh:
                     fh.write(PROGRAMS[name])

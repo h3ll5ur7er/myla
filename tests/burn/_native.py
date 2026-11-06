@@ -31,6 +31,46 @@ CAN_BUILD_NATIVE = (
 
 SKIP_REASON = "native build requires x86-64 Linux with `as` and `ld`"
 
+# The target native builds are for (MYLA-268): the machine's, or the one
+# MYLA_TEST_TARGET names (aarch64-linux, run under qemu-aarch64; wasm32-wasi,
+# run under Node with tools/wasm/run.mjs). scripts/test-target.py runs the
+# suites tests/burn/_targets.py lists for a target with it set.
+TEST_TARGET = os.environ.get("MYLA_TEST_TARGET", "")
+_RUN_MJS = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+                        "tools", "wasm", "run.mjs")
+
+
+def target_flags() -> list[str]:
+    """The `--target` a build for TEST_TARGET takes (none for the machine)."""
+    return ["--target", TEST_TARGET] if TEST_TARGET else []
+
+
+def run_argv(binary: str, argv0: str = "prog", args=()) -> tuple[list[str], str | None]:
+    """The command that runs `binary` with `argv0` as its `argv[0]` and
+    `args`, and the executable for subprocess (None: the command's first)."""
+    if TEST_TARGET == "aarch64-linux":
+        return ["qemu-aarch64", "-0", argv0, binary, *args], None
+    if TEST_TARGET == "wasm32-wasi":
+        return ["node", _RUN_MJS, "--argv0", argv0, binary, *args], None
+    return [argv0, *args], binary
+
+
+def assemble(asm_path: str, out: str) -> None:
+    """Assemble and link the compiler's assembly `asm_path` for TEST_TARGET."""
+    obj = out + ".o"
+    if TEST_TARGET == "aarch64-linux":
+        subprocess.run(["clang", "--target=aarch64-linux-gnu", "-c", "-o", obj, asm_path], check=True,
+                       capture_output=True, text=True)
+        subprocess.run(["ld.lld", "-static", "-o", out, obj], check=True, capture_output=True, text=True)
+    elif TEST_TARGET == "wasm32-wasi":
+        subprocess.run(["clang", "--target=wasm32-wasi", "-mtail-call", "-mbulk-memory", "-mnontrapping-fptoint",
+                        "-msign-ext", "-c", "-o", obj, asm_path], check=True, capture_output=True, text=True)
+        subprocess.run(["wasm-ld", "--stack-first", "-z", "stack-size=8388608", "-o", out, obj], check=True,
+                       capture_output=True, text=True)
+    else:
+        subprocess.run(["as", "--64", "-o", obj, asm_path], check=True, capture_output=True, text=True)
+        subprocess.run(["ld", "-o", out, obj], check=True, capture_output=True, text=True)
+
 
 class Program:
     """A program named by its entry file (what `check_file` gives)."""
@@ -101,7 +141,7 @@ def native_build(program: Program, binary: str, entry_path: str | None = None, d
     `entry_path` names the entry file in runtime-error positions, as `myla
     build <entry_path>` would."""
     cmd = [selfhost_tool("main"), "build", entry_path or program.entry_file, "-o", binary,
-           "--stdlib", STDLIB_ROOT]
+           "--stdlib", STDLIB_ROOT, *target_flags()]
     if debug:
         cmd.append("-g")
     proc = subprocess.run(cmd, capture_output=True, text=True)
@@ -116,7 +156,8 @@ def build_and_run_checker(program: Program, timeout: float | None = None) -> tup
     with tempfile.TemporaryDirectory() as tmp:
         binary = os.path.join(tmp, "prog")
         native_build(program, binary)
-        proc = subprocess.run([binary], capture_output=True, text=True, timeout=timeout)
+        argv, exe = run_argv(binary)
+        proc = subprocess.run(argv, executable=exe, capture_output=True, text=True, timeout=timeout)
         return proc.stdout, proc.returncode
 
 
@@ -136,8 +177,8 @@ def build_and_run_full(program: Program, args=None, argv0="prog",
     with tempfile.TemporaryDirectory() as tmp:
         binary = os.path.join(tmp, "prog")
         native_build(program, binary, entry_path=entry_path)
-        program_argv = [argv0, *(args or [])]
-        proc = subprocess.run(program_argv, executable=binary,
+        program_argv, exe = run_argv(binary, argv0, args or [])
+        proc = subprocess.run(program_argv, executable=exe,
                               capture_output=True, text=True)
         return proc.stdout, proc.stderr, proc.returncode
 

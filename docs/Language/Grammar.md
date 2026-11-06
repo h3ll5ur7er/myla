@@ -125,7 +125,7 @@ defer_stmt  = "defer" block ;                      (* runs as its block ends, D1
 assignment  = place ( "=" | compound_op ) expression ;
 compound_op = "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>=" ;   (* D104 (2): place = place op expression *)
 place       = ( IDENT | "self" | "(" place ")" )
-              ( "." IDENT | "[" expression "]" )* ;
+              ( "." IDENT | "[" index_part "]" )* ;
 ```
 
 ## Expressions
@@ -148,10 +148,12 @@ unary       = ( "-" | "!" | "~" ) unary | "await" unary
             | postfix | lambda ;
               (* the parser also lets a suffix follow a lambda whose body
                  can't take it, as in (x) => x as T [0]; write ((x) => …)[0] *)
-postfix     = primary ( "(" call_args? ")" | "[" NL* expression NL* "]"
+postfix     = primary ( "(" call_args? ")" | "[" NL* index_part NL* "]"
                       | "." ( IDENT | TUPLE_INDEX ) | "?" )* ;
 call_args   = NL+ | NL* call_arg NL* ( "," NL* call_arg NL* )* ( "," NL* )? ;
 call_arg    = "_" | expression ;            (* "_" alone: a partial-application hole *)
+index_part  = bound | bound? ":" bound? ( ":" expression? )? ;   (* D142 *)
+bound       = "^" expression | expression ;   (* "^n": the n-th from the end *)
 
 primary     = INT | FLOAT | CHAR | STRING | fstring | "true" | "false"
             | "self" | IDENT | struct_literal | "(" NL* expression NL* ")"

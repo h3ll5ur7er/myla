@@ -81,7 +81,7 @@ $ myla check               # type-check every file under src/
 $ myla clean               # remove build/ (--deps: also .myla/)
 ```
 
-A dependency on another project by its directory goes into the manifest; its library `src/<name>.my` is then `import <name>`:
+`build/myla new --lib shapes` makes a library instead: `src/shapes.my`, with a public function and its `#test` case, and no program (`myla run` there says `'shapes' has no program`). A dependency on another project by its directory goes into the manifest; its library `src/<name>.my` is then `import <name>`:
 
 ```toml
 [package]

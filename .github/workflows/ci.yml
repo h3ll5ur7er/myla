@@ -63,6 +63,33 @@ jobs:
           MYLA_REQUIRE_TARGETS: "1"
         run: python3 -m unittest discover -s tests/burn -t . -v
 
+  targets:
+    # the parity, runtime-error, error-corpus, I/O and feature suites built
+    # for each other target and run under qemu-aarch64 or Node, with the
+    # exceptions tests/burn/_targets.py lists (MYLA-268)
+    name: Burn suites on ${{ matrix.target }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [aarch64-linux, wasm32-wasi]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+      - name: clang, lld (ld.lld, wasm-ld) and qemu-user
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq clang lld qemu-user
+      - uses: actions/cache@v6
+        with:
+          path: build/test-tools
+          key: test-tools-${{ hashFiles('lib/std/*.my', 'selfhost/*.my', 'tools/**/*.my', 'bootstrap/seed.s') }}
+      - name: The suites for ${{ matrix.target }}
+        run: python3 scripts/test-target.py ${{ matrix.target }}
+
   bootstrap:
     name: Bootstrap fixed point
     runs-on: ubuntu-24.04

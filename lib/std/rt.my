@@ -20,6 +20,8 @@ import .platform as os
 // format specs (D139): the code generator calls std.fmt's functions, which
 // every program carries this way
 import .fmt as fmt
+// slices (D142): the code generator calls std.slice's functions
+import .slice as slice
 
 // `a + b` (`__str_concat`): a new cell holding both strings' bytes.
 pub fun str_concat(a: str, b: str) -> str {

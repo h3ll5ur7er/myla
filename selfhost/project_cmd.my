@@ -220,7 +220,9 @@ pub fun project_clean(deps: bool) -> int32 {
 
 // `myla new <name>`: a directory `<name>` with a manifest, a program that
 // greets and tests its greeting, and a `.gitignore`.
-pub fun project_new(name: str) -> int32 {
+// With `lib`, a library instead (`src/<name>.my`, MYLA-244), which other
+// packages depend on.
+pub fun project_new(name: str, lib: bool) -> int32 {
     let problem = name_error(name)
     if problem != "" {
         eprintln("myla: " + problem)
@@ -237,11 +239,11 @@ pub fun project_new(name: str) -> int32 {
             return 1
         },
     }
-    let files = [
+    var files = [
         (name + "/myla.toml", format("[package]\nname = \"{}\"\nversion = \"0.1.0\"\n\n[dependencies]\n", name)),
         (name + "/.gitignore", "build/\n.myla/\n"),
-        (name + "/src/main.my", main_template(name)),
     ]
+    if lib { files.push((name + "/src/" + name + ".my", lib_template(name))) } else { files.push((name + "/src/main.my", main_template(name))) }
     for f in files {
         let (path, text) = f
         match write_to_file(path, text) {
@@ -252,8 +254,22 @@ pub fun project_new(name: str) -> int32 {
             },
         }
     }
-    write(1, format("created package '{}' in {}/\n", name, name))
+    if lib { write(1, format("created library '{}' in {}/\n", name, name)) } else { write(1, format("created package '{}' in {}/\n", name, name)) }
     return 0
+}
+
+// The `src/<name>.my` that `myla new --lib` writes: a public function with a
+// `#test` case, which a package depending on this one calls as `<name>.greeting`.
+#test("shapes")["// What a package using `shapes` calls: `import shapes`, then\n// `shapes.greeting(\"you\")`.\n#test(\"you\")[\"Hello from shapes, you!\"]\npub fun greeting(name: str) -> str {\n    return f\"Hello from shapes, {name}!\"\n}\n"]
+fun lib_template(name: str) -> str {
+    var sb = StringBuilder()
+    sb.append(format("// What a package using `{}` calls: `import {}`, then\n", name, name))
+    sb.append(format("// `{}.greeting(\"you\")`.\n", name))
+    sb.append("#test(\"you\")[\"Hello from " + name + ", you!\"]\n")
+    sb.append("pub fun greeting(name: str) -> str {\n")
+    sb.append("    return f\"Hello from " + name + ", {name}!\"\n")
+    sb.append("}\n")
+    return sb.build()
 }
 
 // The `src/main.my` that `myla new` writes.

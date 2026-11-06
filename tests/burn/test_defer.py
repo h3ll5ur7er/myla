@@ -10,7 +10,7 @@ import subprocess
 import tempfile
 import unittest
 
-from tests.burn._native import CAN_BUILD_NATIVE, SKIP_REASON, run_source_both_now
+from tests.burn._native import CAN_BUILD_NATIVE, SKIP_REASON, run_argv, run_source_both_now, target_flags
 from tests.burn._tools import STDLIB_ROOT, selfhost_tool
 
 PROGRAM = """import std.task as task
@@ -304,10 +304,10 @@ class Defer(unittest.TestCase):
             with open(path, "w", encoding="utf-8") as fh:
                 fh.write(ONE_WORKER)
             exe = os.path.join(tmp, "one")
-            subprocess.run([myla, "build", path, "-o", exe, "--stdlib", STDLIB_ROOT], check=True)
+            subprocess.run([myla, "build", path, "-o", exe, "--stdlib", STDLIB_ROOT, *target_flags()], check=True)
             env = dict(os.environ, MYLA_THREADS="1")
-            for argv in ([myla, "run", path, "--stdlib", STDLIB_ROOT], [exe]):
-                with self.subTest(argv=argv[1] if len(argv) > 1 else "native"):
+            for runner, argv in (("run", [myla, "run", path, "--stdlib", STDLIB_ROOT]), ("native", run_argv(exe, exe)[0])):
+                with self.subTest(argv=runner):
                     proc = subprocess.run(argv, capture_output=True, text=True, timeout=60, env=env)
                     self.assertEqual((proc.stdout, proc.stderr, proc.returncode), (ONE_WORKER_WANT, "", 0))
 
@@ -325,9 +325,9 @@ class Defer(unittest.TestCase):
             with open(path, "w", encoding="utf-8") as fh:
                 fh.write(src)
             exe = os.path.join(tmp, "p")
-            subprocess.run([myla, "build", path, "-o", exe, "--stdlib", STDLIB_ROOT], check=True)
-            for argv in ([myla, "run", path, "--stdlib", STDLIB_ROOT], [exe]):
-                with self.subTest(argv=argv[1] if len(argv) > 1 else "native"):
+            subprocess.run([myla, "build", path, "-o", exe, "--stdlib", STDLIB_ROOT, *target_flags()], check=True)
+            for runner, argv in (("run", [myla, "run", path, "--stdlib", STDLIB_ROOT]), ("native", run_argv(exe, exe)[0])):
+                with self.subTest(argv=runner):
                     proc = subprocess.run(argv, capture_output=True, text=True, timeout=60)
                     self.assertEqual((proc.stdout, proc.returncode), ("", 1))
                     self.assertIn("runtime error: stop", proc.stderr)

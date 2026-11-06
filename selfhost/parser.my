@@ -1726,6 +1726,9 @@ impl Parser {
             self.depth = self.depth - 1
             return self.mk_expr(kw.line, kw.column, ExprKind.Await(operand))
         }
+        if k == TokenKind.CARET {
+            self.fail_at(self.peek(), "'^' counts from the end only in an index or a slice's bound")
+        }
         if k == TokenKind.MINUS || k == TokenKind.BANG || k == TokenKind.TILDE {
             let op = self.advance()
             self.enter("expression")
@@ -1734,6 +1737,37 @@ impl Parser {
             return self.mk_expr(op.line, op.column, ExprKind.Unary(op.lexeme, operand))
         }
         return self.postfix()
+    }
+
+    // What stands between an index's brackets (D142): an index, `^n` (the
+    // n-th from the end, `Unary("^", n)`), or a slice `a:b` or `a:b:step`
+    // (`Binary(":", a, b)`, the step as `Binary(":", that, step)`), a bound
+    // left out a `Hole`.
+    fun index_or_slice(var self, lb: Token) -> Expr {
+        var first = self.mk_expr(lb.line, lb.column, ExprKind.Hole)
+        if !self.check(TokenKind.COLON) { first = self.bound() }
+        if !self.check(TokenKind.COLON) { return first }
+        let c1 = self.advance()
+        var stop = self.mk_expr(c1.line, c1.column, ExprKind.Hole)
+        if !self.check(TokenKind.COLON) && !self.check(TokenKind.RBRACKET) { stop = self.bound() }
+        var range = self.mk_expr(c1.line, c1.column, ExprKind.Binary(":", first, stop))
+        if self.check(TokenKind.COLON) {
+            let c2 = self.advance()
+            var step = self.mk_expr(c2.line, c2.column, ExprKind.Hole)
+            if !self.check(TokenKind.RBRACKET) { step = self.bound() }
+            range = self.mk_expr(c2.line, c2.column, ExprKind.Binary(":", range, step))
+        }
+        return range
+    }
+
+    // A slice's bound or an index: `^e` or `e`.
+    fun bound(var self) -> Expr {
+        if self.check(TokenKind.CARET) {
+            let c = self.advance()
+            let n = self.expression()
+            return self.mk_expr(c.line, c.column, ExprKind.Unary("^", n))
+        }
+        return self.expression()
     }
 
     #test(parser_on("let x = 1"))[Expr { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 10 }, kind: ExprKind.Hole }]
@@ -1748,7 +1782,7 @@ impl Parser {
                 expr = self.mk_expr_from(st, lp.line, lp.column, ExprKind.Call(expr, args))
             } else if self.check(TokenKind.LBRACKET) {
                 let lb = self.advance()
-                let index = self.expression()
+                let index = self.index_or_slice(lb)
                 self.expect(TokenKind.RBRACKET, "']' to close index")
                 expr = self.mk_expr_from(st, lb.line, lb.column, ExprKind.Index(expr, index))
             } else if self.check(TokenKind.DOT) {

@@ -29,7 +29,7 @@
 
 from std.num import f64_literal_bits, f32_round_bits
 from .ast import Expr, ExprKind, Stmt, StmtKind, Block, FunData, ElseTail, ExprOrBlock, MatchArm, Pattern, PatternKind, FieldInit, MapEntry, BindElem, bind_elems, Param
-from .checker import Type, is_unit, is_raw_memory_primitive, Subst, FuncSig, opt_subst_type, subst_type, builtin_method
+from .checker import Type, is_unit, is_slice_expr, from_end_of, slice_parts, is_hole_part, is_raw_memory_primitive, Subst, FuncSig, opt_subst_type, subst_type, builtin_method
 from .codegen import codegen_on, may_write_expr, is_actor_t, is_sb_t, is_async_t, CodeGen, LamJob, PartialJob, Cap, DropEntry, tfunc_params, tfunc_ret, is_hole_expr, mangle_fn, is_builtin_call_name, is_aggregate, tuple_elems, is_struct_or_enum_t, is_tfunc, is_overloadable_op, arith_method_cg, enum_name_of, is_tstr, is_cmp, place_root, is_aggregate_opt, arms_may_write, is_cell_t, list_elem, is_list_t, is_map_t, is_str_t, map_key, map_val, format_segments, args_have_hole, success_variant, failure_variant
 from .util import format_specs
 from .ir import IrFunc, IrBlock, Inst, Term, Slot, Pos, Instance, ENV_WORD
@@ -690,7 +690,8 @@ impl Lower {
             },
             ExprKind.GetField(t, f) => self.fixed_place(t),
             ExprKind.TupleIndex(t, i) => self.fixed_place(t),
-            ExprKind.Index(t, i) => self.fixed_place(t),
+            // a slice is a new value, not a part (D142)
+            ExprKind.Index(t, i) => !is_slice_expr(i) && self.fixed_place(t),
             _ => false,
         }
     }
@@ -730,6 +731,8 @@ impl Lower {
             ExprKind.GetField(t, f) => { return cg.struct_field_type_t(self.place_type(cg, t), f) },
             ExprKind.Index(b, i) => {
                 let bt = self.place_type(cg, b)
+                // a slice is the same kind of list (D142)
+                if is_slice_expr(i) { return bt }
                 if is_list_t(bt) { return list_elem(bt) }
                 if is_map_t(bt) { return map_val(bt) }
             },
@@ -2054,7 +2057,7 @@ impl Lower {
                 let holder = self.place(cg, base)
                 let cell = self.temp(Type.TPtr)
                 self.add(Inst.Cow(cell, lt, holder))
-                let i = self.expr(cg, idx)
+                let i = self.index_of(cg, cell, idx)
                 let d = self.temp(Type.TPtr)
                 let size = cg.elem_size(list_elem(lt))
                 self.add(Inst.Elem(d, cell, i, size, false, Pos { line: e.line, col: e.col }))
@@ -2339,6 +2342,7 @@ impl Lower {
             },
             ExprKind.MatchE(scrut, arms) => { return self.match_expr(cg, e, scrut, arms, true) },
             ExprKind.Index(base, idx) => {
+                if is_slice_expr(idx) { return self.slice_expr(cg, e, base, idx) }
                 let p = self.elem_read(cg, e, base, idx)
                 if is_aggregate(t) { return self.unsupported("an aggregate element used as a scalar") }
                 let d = self.temp(t)
@@ -3239,6 +3243,85 @@ impl Lower {
         return v
     }
 
+    // An index into the list or string cell `cell`: `^n` counted from its
+    // end (D142), its length less `n`, which the bounds check then holds to
+    // the list as any index.
+    fun index_of(var self, cg: CodeGen, cell: int32, idx: Expr) -> int32 {
+        match from_end_of(idx) {
+            Some(n) => {
+                let i64 = Type.TInt(64, true)
+                let len = self.temp(i64)
+                self.add(Inst.LoadAt(len, cell, 0, 8))
+                let nv = self.expr(cg, n)
+                let n64 = self.temp(i64)
+                self.add(Inst.Cast(n64, cg.type_of(n.id), i64, nv))
+                let d = self.temp(i64)
+                self.add(Inst.Bin(d, "-", i64, i64, len, n64, Pos { line: idx.line, col: idx.col }))
+                return d
+            },
+            None => {},
+        }
+        return self.expr(cg, idx)
+    }
+
+    // A slice of the list or string `base` (D142, D143): std.slice's
+    // `take` or `take_str`, the step checked not to be 0 and a string's
+    // slice to take whole characters, where the slice stands.
+    fun slice_expr(var self, cg: CodeGen, e: Expr, base: Expr, idx: Expr) -> int32 {
+        let bt = cg.type_of(base.id)
+        let i64 = Type.TInt(64, true)
+        let p = slice_parts(idx)
+        let cell = self.expr(cg, base)
+        var vals: [int32] = [cell]
+        for b in [p.start, p.stop] {
+            if is_hole_part(b) {
+                vals.push(self.konst(i64, 0))
+                vals.push(self.konst(Type.TBool, 0))
+                vals.push(self.konst(Type.TBool, 0))
+            } else {
+                var v = b
+                var from_end = false
+                match from_end_of(b) {
+                    Some(n) => {
+                        v = n
+                        from_end = true
+                    },
+                    None => {},
+                }
+                let x = self.expr(cg, v)
+                let x64 = self.temp(i64)
+                self.add(Inst.Cast(x64, cg.type_of(v.id), i64, x))
+                vals.push(x64)
+                vals.push(self.konst(Type.TBool, 1))
+                vals.push(self.konst(Type.TBool, if from_end { 1 } else { 0 }))
+            }
+        }
+        var step = self.konst(i64, 1)
+        if !is_hole_part(p.step) {
+            let sv = self.expr(cg, p.step)
+            step = self.temp(i64)
+            self.add(Inst.Cast(step, cg.type_of(p.step.id), i64, sv))
+            let nz = self.temp(Type.TBool)
+            self.add(Inst.Cmp(nz, "!=", i64, step, self.konst(i64, 0)))
+            self.add(Inst.Check(nz, "step", Pos { line: e.line, col: e.col }))
+        }
+        vals.push(step)
+        if is_tstr(bt) {
+            if !cg.has_func("std$slice$str_whole") { return self.unsupported("a slice without std.slice") }
+            let ok = self.temp(Type.TBool)
+            self.add(Inst.Call(ok, "std$slice$str_whole", vals))
+            self.add(Inst.Check(ok, "boundary", Pos { line: e.line, col: e.col }))
+            return self.call_owning(cg, "std$slice$take_str", vals)
+        }
+        if !cg.has_func("std$slice$take") { return self.unsupported("a slice without std.slice") }
+        let et = list_elem(bt)
+        let name = mangle_fn("std$slice$take", [et])
+        self.f.instances.push(Instance { orig: "std$slice$take", targs: [et] })
+        let d = self.temp(bt)
+        self.add(Inst.Call(d, name, vals))
+        return self.owned_value(cg, d, bt)
+    }
+
     // The address of element `idx` of the list or string `base` (bounds
     // checked at `e`), borrowed from it.
     #test(lower_on(), codegen_on("enum E { A, B(int) }"), expr_of("(a, 'c')"), expr_of("(a, 'c')"), expr_of("(a, 'c')"))[0]
@@ -3246,8 +3329,8 @@ impl Lower {
         let bt = self.place_type(cg, base)
         if !is_list_t(bt) && !is_tstr(bt) && !is_map_t(bt) { return self.unsupported("indexing that type") }
         let cell = self.expr(cg, base)
-        let i = self.expr(cg, idx)
-        if is_map_t(bt) { return self.map_value(cg, e, bt, cell, i) }
+        if is_map_t(bt) { return self.map_value(cg, e, bt, cell, self.expr(cg, idx)) }
+        let i = self.index_of(cg, cell, idx)
         var stride = 1
         if is_list_t(bt) { stride = cg.elem_size(list_elem(bt)) }
         let d = self.temp(Type.TPtr)

@@ -9,7 +9,8 @@ labels: [language, builtins, stdlib]
 D103 ([[MYLA-204]]): `impl` blocks on builtin types are allowed, the builtin collection and string functions become methods, the free forms warn until the repository has moved, then go.
 
 - [x] The list: every builtin function on lists, maps, strings and chars with its method name and whether it takes `var self` (`push`, `insert`, `remove`, `set`, …)
-- [ ] `impl [T]`, `impl Map<K, V>`, `impl str`, `impl char` and the numeric types in the checker; method lookup on builtin receivers; mutating methods need a `var` place, with the same diagnostics as `var self` methods today
+- [x] `impl [T]`, `impl Map<K, V>`, `impl str`, `impl char` and the numeric types in the checker; method lookup on builtin receivers
+- [ ] `var self` methods on builtin types (a list or a number is one word, so the method has to give it back to its caller's place on every way out: a convention of its own)
 - [ ] The free forms give a deprecation warning that names the method
 - [x] The repository's code moved (examples, `tools/`, the standard library; `selfhost/` after a seed update, [[MYLA-218]])
 - [ ] The free forms removed; [[Language]] pages, the skill, `AGENTS.md` ("`push(xs, v)`") and the grammar updated
@@ -43,3 +44,5 @@ Before the standard library round ([[MYLA-211]]), which builds on it. Order: aft
   - The examples, the error corpus, the docs and the test programs in `tests/burn/` still use the function forms, which work. Their recordings are keyed by their text, so moving them needs the recordings to survive it (step 3).
 - **Step 3: the examples, the docs and the test programs use the methods.** [[MYLA-240]] made the recordings survive the rewrite, then moved them with the same script (`scripts/to_methods.py`): 59 files. Programs about the function form (its errors, a local shadowing it, "the function forms still work") keep it until step 4 decides what becomes of them.
 
+
+- **Step 4 (2026-11-05): impls on lists, maps, `char` and the float types.** The checker, the interpreter and the code generator key them as `char`, `float64`/`float32`, `__list` and `__map` (names no program can declare), so a list's methods are those of every list, as a generic struct's are of every instance; `impl<T> [T]` and `impl<K, V> [K: V]` bind their parameters from the receiver. A concrete `impl [int]`'s method on a `[str]` is `method 'total' is for '[int32]', not '[str]'`. `var self` ones stay refused: natively the receiver would have to go back to its caller's place on every way out. [[tests/burn/test_builtin_impls.py]], and the same program on aarch64 and wasm32; `test_selfhost_checker`'s `impl_on_list` and `generic_impl_on_builtin` went.

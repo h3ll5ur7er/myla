@@ -200,6 +200,15 @@ Format specs (D139, [[Language/Collections-and-strings]]): the code every runner
 | `parse_spec(s: str) -> Result<Spec, str>` | The spec's parts (`fill`, `align`, `plus`, `alt`, `zero`, `width`, `prec`, `kind`), or why it isn't one |
 | `fmt_int(v: int64, bits: int32, signed: bool, spec: str) -> str`, `fmt_float(x: float64, text: str, spec: str) -> str`, `fmt_text(text: str, spec: str) -> str` | A hole's text, as a spec makes it (what the compiler calls) |
 
+## std.slice
+
+What a slice takes (D142, D143): the index arithmetic the interpreter and the code generator share, so every runner takes the same elements.
+
+| Function | Result |
+| --- | --- |
+| `range_of(n, start, has_start, start_end, stop, has_stop, stop_end, step) -> Range` | The indices a slice of something `n` long takes: `count` of them from `first`, `step` apart, the bounds clamped |
+| `take<T>(xs: [T], …) -> [T]`, `take_str(s: str, …) -> str`, `str_whole(s: str, …) -> bool` | The elements taken, and whether a string's slice takes whole characters (what the compiler calls) |
+
 ## std.math
 
 Mathematical functions on `float64` ([[MYLA-248]]). `sqrt` is the processor's correctly rounded square root. The rest is written in Myla after fdlibm (the reference implementation behind most C math libraries), so the interpreter and native code give bit-identical results. `tests/burn/test_math.py` holds each to its stated error against the C library, NaN, the infinities and signed zeros included.
