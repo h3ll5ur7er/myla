@@ -2,7 +2,7 @@
 id: MYLA-201
 title: "Decision: the end state of D71 (how many implementations a change needs)"
 type: chore
-status: review
+status: done
 priority: high
 labels: [decision, architecture, bootstrap]
 ---

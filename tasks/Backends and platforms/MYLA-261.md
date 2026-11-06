@@ -2,7 +2,7 @@
 id: MYLA-261
 title: "wasm: the shadow stack below the data, and traps reported as native ones are"
 type: bug
-status: review
+status: done
 priority: high
 labels: [backend, wasm, runtime]
 ---

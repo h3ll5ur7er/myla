@@ -2,7 +2,7 @@
 id: MYLA-258
 title: "Decision: the reactor — sleep, timers, timeouts and suspending I/O"
 type: chore
-status: review
+status: done
 priority: medium
 labels: [decision, concurrency, runtime, io]
 ---

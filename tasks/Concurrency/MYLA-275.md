@@ -2,7 +2,7 @@
 id: MYLA-275
 title: "A busy machine could end a program with \"every task waits for another one\" (the executor's stuck check)"
 type: bug
-status: review
+status: done
 priority: high
 labels: [concurrency, runtime, aarch64]
 ---

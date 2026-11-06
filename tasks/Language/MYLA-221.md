@@ -2,8 +2,8 @@
 id: MYLA-221
 title: "Methods on builtin types; the free collection functions deprecated"
 type: feature
-status: review
-priority: medium
+status: todo
+priority: high
 labels: [language, builtins, stdlib]
 ---
 D103 ([[MYLA-204]]): `impl` blocks on builtin types are allowed, the builtin collection and string functions become methods, the free forms warn until the repository has moved, then go.
@@ -81,3 +81,11 @@ Before the standard library round ([[MYLA-211]]), which builds on it. Order: aft
 - **The checker**: the refusal went; `self = v` is allowed in a built-in value's `var self` method only (`self_assignable`), still "cannot reassign 'self'" in a struct's or a read-only one; an async one is refused ("async 'var self' methods on built-in types are not supported yet"). The interpreter needed nothing: it writes the receiver back to its place.
 - **Test first**: `test_builtin_impls.test_var_self_methods` (refused by the checker before; natively it then crashed with a segmentation fault), a program over a variable, a struct's field through its own `var self` method, list elements wide and narrow (`[int8]`, `[bool]`, `[float32]`), a map's value, `self = v` on a list, an `int`, a `str`, a `bool` and a `float32`, `?` leaving early with the receiver written, a `become` to itself, a copy made before the call unchanged. The same output in the interpreter, natively, on aarch64 (qemu) and on wasm32 (Node). `test_errors`: an async one, a call on a `let`, a `become` on a local, `self = v` in a struct's and in a read-only method.
 - **Docs**: [[Language/Methods-and-traits]] (with an example whose output is checked), D144's row, the skill.
+
+## Reopened (2026-11-06)
+
+**Reopened by [[Project/Review-2026-11]] (R3).** A program's method on a builtin type is picked up by the standard library's own calls in native code but not in the interpreter: `impl<T> [T] { fun len(self) -> int { return 999 } }` makes `xs[1:]` trap in `<myla>/std/slice.my:64` and `impl str { fun len … }` makes `f"{s:>8}"` trap in `std/fmt.my:140`, while the interpreter dispatches std's calls to the builtin; `impl [int] { fun push(var self, v: int) {} }` silently disables `push` for the whole program. Impls are keyed `__list`/`str` program-wide and "a type's own method comes first". Kotlin resolves the other way (members beat extensions); Swift and Rust don't allow inherent methods on foreign types.
+
+- [ ] A decision: the builtin method names are reserved per receiver kind (as they are as function names), or the builtin wins
+- [ ] The checker, the interpreter and the lowering agree; a burn test that an `impl str { fun len }` can't break `std.fmt`
+- [ ] `examples/errors/type_var_self_on_builtin.my` renamed for what it tests (the async case)

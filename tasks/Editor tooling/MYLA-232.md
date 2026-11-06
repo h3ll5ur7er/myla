@@ -2,7 +2,7 @@
 id: MYLA-232
 title: "Drop the tree-sitter bindings and packaging from the repository"
 type: chore
-status: review
+status: done
 priority: low
 labels: [editor, repository, tree-sitter]
 ---

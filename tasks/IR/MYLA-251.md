@@ -2,7 +2,7 @@
 id: MYLA-251
 title: "Loop overhead: checks and widening the IR can prove away"
 type: improvement
-status: review
+status: done
 priority: medium
 labels: [backend, performance, optimisation, ir]
 ---

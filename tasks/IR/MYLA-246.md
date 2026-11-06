@@ -2,7 +2,7 @@
 id: MYLA-246
 title: Small values copied with moves, not rep movsq
 type: improvement
-status: review
+status: done
 priority: high
 labels: [backend, performance, codegen]
 ---

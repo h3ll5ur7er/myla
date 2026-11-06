@@ -2,8 +2,8 @@
 id: MYLA-184
 title: "The #test convention in selfhost/: 1,164 of 1,259 value-returning functions have none"
 type: chore
-status: review
-priority: low
+status: todo
+priority: medium
 labels: [selfhost, tests, docs]
 ---
 Found by the October 2026 review of the whole project ([[Project/Review-2026-10]]). [[Development/Conventions]], the `myla` skill and [[Architecture/Self-hosted-compiler]] say every value-returning function in `selfhost/` carries `#test` cases; `tests/burn/test_examples_tests.py` enforces it only for `examples/`. Counted on 2026-10-31: lexer 21 of 21 untested, parser 103 of 108, checker 296 of 299, lower 85 of 85, interp 180 of 183, codegen 182 of 194. The tests that exist are meaningful.
@@ -57,3 +57,11 @@ The harvester: the Python interpreter runs the self-hosted compiler (`selfhost/g
 - Validation found a bug: the self-hosted interpreter dropped an argument's change to a `var self` receiver ([[MYLA-238]], fixed), and with it a difference in the read-only receiver's order between the interpreters and native code ([[MYLA-237]]).
 - A first version of `generate` let a function that makes directories run with pooled names: seven `myla new` skeletons appeared in the checkout (removed; no tracked file was touched). Generated calls now stop before any I/O primitive runs and work in `build/harvest/sandbox`.
 - Gates: unit 626, integration 2, burn 835 (5 skipped) and the extension's 54 tests pass on commit b4100ff, the last of the third round; the bootstrap reaches its byte-identical fixed point (6,194,029 bytes).
+
+## Reopened (2026-11-06)
+
+**Reopened by [[Project/Review-2026-11]] (R15).** `test_selfhost_coverage` reports 70 percent (1,148 of 1,629), below D109's 80 percent, and only warns; the denominator grew by 343 functions (the runtime in Myla, the IR backends: `ssa.my` 4 percent, `ir_x86.my` 32 percent, `ownership.my` 0) and the harvester that reached 80 left with the Python toolchain. About 480 of the generated cases are bound to the AST and `SrcSpan` shape (a refactor rewrites hundreds of literals) and nothing marks a case as generated.
+
+- [ ] A decision: a ratchet on the count (CI fails when the number of tested functions drops), or the harvester's recording hook ported to `interp.my` so cases regenerate after a refactor
+- [ ] Generated cases marked (`// generated`) so a refactor may drop and regenerate them
+- [ ] [[Development/Testing]] and this task say 70 percent until it is 80

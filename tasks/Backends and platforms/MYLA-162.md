@@ -2,7 +2,7 @@
 id: MYLA-162
 title: The runtime off assembly - Myla runtime and a platform layer
 type: feature
-status: review
+status: done
 priority: medium
 labels: [runtime, platforms]
 ---

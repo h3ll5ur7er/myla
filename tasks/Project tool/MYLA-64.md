@@ -39,3 +39,7 @@ Decided as D73 on [[Project/Decisions]]; the details, with the questions settled
 
 - [x] Manifest format and resolution rules recorded on [[Project/Decisions]]
 - [x] `myla new` + `myla build/run/test` work on a fresh project with one path dependency (`tests/burn/test_project_commands.py`)
+
+## Children
+
+[[MYLA-88]], [[MYLA-89]], [[MYLA-92]], [[MYLA-93]], [[MYLA-94]], [[MYLA-95]], [[MYLA-96]], [[MYLA-97]], [[MYLA-98]], [[MYLA-155]], [[MYLA-195]], [[MYLA-244]]

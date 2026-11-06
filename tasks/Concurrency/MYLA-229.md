@@ -2,7 +2,7 @@
 id: MYLA-229
 title: "`defer`"
 type: feature
-status: review
+status: done
 priority: low
 labels: [concurrency, language]
 ---

@@ -1,7 +1,7 @@
 ---
 id: MYLA-245
 title: "Toolchain modularity: core std, official packages, the compiler as packages"
-type: design
+type: chore
 status: backlog
 priority: medium
 labels: [design, stdlib, project-tool, platforms]

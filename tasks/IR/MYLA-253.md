@@ -2,7 +2,7 @@
 id: MYLA-253
 title: "`become` passing a function-value parameter on to a function fails to lower"
 type: bug
-status: review
+status: done
 priority: low
 labels: [ir, lowering, tail-calls]
 ---

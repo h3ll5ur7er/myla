@@ -1,8 +1,8 @@
 ---
 id: MYLA-144
 title: The concurrency stress tests
-type: test
-status: review
+type: chore
+status: done
 priority: medium
 labels: [concurrency, tests, design]
 ---

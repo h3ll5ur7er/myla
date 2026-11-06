@@ -2,8 +2,8 @@
 id: MYLA-230
 title: "Sleep, timers, timeouts and suspending I/O on a reactor"
 type: feature
-status: review
-priority: low
+status: todo
+priority: high
 labels: [concurrency, runtime, io]
 ---
 D107 ([[MYLA-212]]): waits for the runtime off assembly ([[MYLA-162]]). A reactor (epoll on Linux) in the runtime: `sleep`, timers and timeouts on awaits, and I/O in `std.io`/`std.process` that suspends the task instead of blocking the worker.
@@ -43,3 +43,10 @@ D107 ([[MYLA-212]]): waits for the runtime off assembly ([[MYLA-162]]). A reacto
 
 D124 is built: the clock and `sleep`, `timeout`, cancellation waking sleeps and reads, reads and child processes that suspend the task, natively on the executor's poller (epoll) and in the interpreter (real time, or `MYLA_TIME=virtual`). Left for later, as D124 said: a duration type; writes that suspend (a full pipe); sockets (no `std.net` yet).
 
+## Reopened (2026-11-06)
+
+**Reopened by [[Project/Review-2026-11]] (R1, R5).** (1) `task.timeout(ms, f)` arms its deadline after the child is pushed (`__cancel_after` after the `async let`, [[lib/std/task.my]]); on 2+ workers a child that finishes first leaves a stale `[deadline][frame|1][cell]` in the timers: when it fires, `timers_fire` stores into the freed cell and `cancel_locked` CASes the freed frame: a spurious `None` (3 of 3 runs of a widened program on 4 workers), an unrelated fresh task cancelled through frame reuse, SIGSEGV (3 of 12 runs under load on 16 workers). The interpreter guards it (`state != 2`); native code doesn't. Stale entries keep `__timer_count` nonzero, so the stuck check can never fire afterwards. Fix verified in a patched runtime: `task_end` CASes an "ended without a deadline" flag when it doesn't see the armed one, and `cancel_after` returns an unarmed cell when it sees it; or arm before the push. (2) Two tasks reading the same descriptor with `read_line_async` hang natively (`EPOLL_CTL_ADD` → `EEXIST` → `MOD` replaces the first frame's token; `watch_take` deletes the fd; the orphaned frame never wakes and `__watch_count > 0` suppresses the stuck report); the interpreter prints.
+
+- [ ] The deadline race fixed; a loop of `task.timeout(300, quick)` over a trivial child at 16 workers, asserting no `None`, in the stress suite
+- [ ] `watch_add` chains or refuses a second frame for one descriptor; a test with two readers
+- [ ] [[Language/Concurrency]]'s timeout paragraph says what holds

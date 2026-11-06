@@ -2,7 +2,7 @@
 id: MYLA-239
 title: "Named #test cases: a trailing comment names the case"
 type: improvement
-status: review
+status: done
 priority: low
 labels: [testing, attributes]
 ---

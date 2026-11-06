@@ -2,7 +2,7 @@
 id: MYLA-216
 title: "Decision: CI runs the burn suite against the bootstrapped toolchain"
 type: chore
-status: review
+status: done
 priority: medium
 labels: [decision, ci]
 ---

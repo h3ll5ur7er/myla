@@ -2,7 +2,7 @@
 id: MYLA-281
 title: "wasm32: the file system as the other targets show it"
 type: bug
-status: review
+status: done
 priority: low
 labels: [platforms, wasm, io]
 ---

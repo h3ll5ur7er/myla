@@ -2,7 +2,7 @@
 id: MYLA-169
 title: An awaited var self struct method on an actor field behaves three ways
 type: bug
-status: review
+status: done
 priority: medium
 labels: [concurrency, checker, parity]
 ---

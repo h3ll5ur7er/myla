@@ -2,7 +2,7 @@
 id: MYLA-220
 title: "`float` is float64"
 type: feature
-status: review
+status: done
 priority: medium
 labels: [language, floats]
 ---

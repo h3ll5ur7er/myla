@@ -2,7 +2,7 @@
 id: MYLA-235
 title: "The burn suite compiles with the self-hosted compiler; Python is the fallback"
 type: improvement
-status: review
+status: done
 priority: medium
 labels: [ci, tests]
 ---

@@ -2,7 +2,7 @@
 id: MYLA-225
 title: "One trailing-comma rule"
 type: feature
-status: review
+status: done
 priority: low
 labels: [language, ergonomics, parser]
 ---

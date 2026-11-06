@@ -2,7 +2,7 @@
 id: MYLA-218
 title: "The bootstrap from a committed assembly seed"
 type: feature
-status: review
+status: done
 priority: high
 labels: [bootstrap, selfhost]
 ---

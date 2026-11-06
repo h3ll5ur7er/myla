@@ -2,7 +2,7 @@
 id: MYLA-268
 title: "Every suite on every target, and CI that fails when a target's tools are missing"
 type: improvement
-status: review
+status: done
 priority: medium
 labels: [testing, ci, platforms]
 ---

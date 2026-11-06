@@ -2,7 +2,7 @@
 id: MYLA-158
 title: A WebAssembly target
 type: feature
-status: review
+status: done
 priority: low
 labels: [backend, wasm, design]
 ---

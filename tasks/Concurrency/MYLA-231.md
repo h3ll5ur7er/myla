@@ -2,7 +2,7 @@
 id: MYLA-231
 title: "Depth-first scheduling in every runner; MYLA_SCHED for the stress suite"
 type: improvement
-status: review
+status: done
 priority: medium
 labels: [concurrency, runtime]
 ---

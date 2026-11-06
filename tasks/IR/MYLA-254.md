@@ -1,7 +1,7 @@
 ---
 id: MYLA-254
 title: "The IR's open points: addresses, widths, sizes per target, SSA"
-type: design
+type: chore
 status: done
 priority: medium
 labels: [ir, backend, design, wasm]

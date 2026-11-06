@@ -2,7 +2,7 @@
 id: MYLA-280
 title: "Slices and indexes from the end: `xs[a:b:step]`, `xs[-1]` or `xs[^1]`"
 type: feature
-status: review
+status: done
 priority: medium
 labels: [language, collections, design]
 ---

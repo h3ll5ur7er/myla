@@ -2,7 +2,7 @@
 id: MYLA-237
 title: "A receiver or argument is taken after a later argument that writes its variable"
 type: bug
-status: review
+status: done
 priority: medium
 labels: [backend, parity, evaluation-order]
 ---

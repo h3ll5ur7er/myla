@@ -2,7 +2,7 @@
 id: MYLA-207
 title: "Decision: scheduling order on one worker (FIFO for parity, or depth-first)"
 type: chore
-status: review
+status: done
 priority: medium
 labels: [decision, concurrency, runtime]
 ---

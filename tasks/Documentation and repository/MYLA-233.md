@@ -2,7 +2,7 @@
 id: MYLA-233
 title: "A burn test for the code blocks in the docs"
 type: improvement
-status: review
+status: done
 priority: medium
 labels: [docs, tests]
 ---

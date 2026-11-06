@@ -2,7 +2,7 @@
 id: MYLA-190
 title: std.io writes report errors; unit results; std.process.run with PATH, cwd, env and stdin
 type: improvement
-status: review
+status: done
 priority: low
 labels: [stdlib]
 ---

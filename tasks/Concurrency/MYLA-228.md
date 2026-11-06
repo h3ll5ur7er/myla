@@ -2,7 +2,7 @@
 id: MYLA-228
 title: "A `yield` builtin"
 type: feature
-status: review
+status: done
 priority: low
 labels: [concurrency]
 ---

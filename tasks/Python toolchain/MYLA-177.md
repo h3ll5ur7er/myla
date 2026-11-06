@@ -2,7 +2,7 @@
 id: MYLA-177
 title: "`as char` is unchecked: surrogates and values above 10FFFF"
 type: bug
-status: review
+status: done
 priority: medium
 labels: [checker, chars, parity]
 ---

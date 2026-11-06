@@ -33,3 +33,7 @@ A small IR in between (for the self-hosted backend, D79), with explicit temporar
 
 - [x] An IR design on a wiki page under [[Architecture]]
 - [x] The self-hosted backend lowers every function through it, with the same behaviour on the parity tests, the stress tests and the bootstrap ([[MYLA-107]])
+
+## Children
+
+[[MYLA-103]], [[MYLA-104]], [[MYLA-105]], [[MYLA-106]], [[MYLA-107]], [[MYLA-108]], [[MYLA-109]], [[MYLA-120]], [[MYLA-121]], [[MYLA-122]], [[MYLA-125]], [[MYLA-126]], [[MYLA-128]], [[MYLA-130]], [[MYLA-131]], [[MYLA-133]], [[MYLA-134]], [[MYLA-246]], [[MYLA-247]], [[MYLA-249]], [[MYLA-250]], [[MYLA-251]], [[MYLA-252]], [[MYLA-253]]

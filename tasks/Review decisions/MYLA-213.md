@@ -2,7 +2,7 @@
 id: MYLA-213
 title: "Decision: the tutorial and documentation plan, where it lives and how it is checked"
 type: chore
-status: review
+status: done
 priority: low
 labels: [decision, docs]
 ---

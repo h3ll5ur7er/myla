@@ -2,7 +2,7 @@
 id: MYLA-236
 title: "`#test` on methods"
 type: feature
-status: review
+status: done
 priority: high
 labels: [language, tests]
 ---

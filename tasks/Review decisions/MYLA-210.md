@@ -2,7 +2,7 @@
 id: MYLA-210
 title: "Decision: frame layout by liveness, its approach and timing"
 type: chore
-status: review
+status: done
 priority: medium
 labels: [decision, selfhost, backend]
 ---

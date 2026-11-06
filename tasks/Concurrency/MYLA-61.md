@@ -114,3 +114,7 @@ D89 recorded with the Language pages; the Python interpreter (the semantics, wit
 ## Outcome
 
 Done in [[MYLA-135]] to [[MYLA-149]] (D89 to D96): the language and both checkers, both interpreters, and the self-hosted backend, with stackless frames on a multi-threaded work-stealing executor and actor executors as in Swift (the Python backend refuses concurrency, D91). The concurrency stress tests ([[MYLA-144]], `tests/burn/test_concurrency_stress.py`) hold every implementation, on 1 to 16 workers, to the guarantees on [[Language/Concurrency]]: deadlocks over resources and data races are prevented by design, captures can't be changed (D93), reentrancy across an `await` gets a warning (D95), failures cancel their scope's children (D94), and programs cancel cooperatively (D96).
+
+## Children
+
+[[MYLA-135]], [[MYLA-136]], [[MYLA-137]], [[MYLA-138]], [[MYLA-139]], [[MYLA-140]], [[MYLA-141]], [[MYLA-142]], [[MYLA-143]], [[MYLA-144]], [[MYLA-145]], [[MYLA-146]], [[MYLA-147]], [[MYLA-148]], [[MYLA-149]], [[MYLA-150]], [[MYLA-228]], [[MYLA-229]], [[MYLA-230]], [[MYLA-231]], [[MYLA-267]], [[MYLA-275]], [[MYLA-144]]

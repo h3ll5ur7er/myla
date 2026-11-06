@@ -2,7 +2,7 @@
 id: MYLA-283
 title: "aarch64, wasm32: calls in tail position jump"
 type: improvement
-status: review
+status: done
 priority: low
 labels: [platforms, aarch64, wasm, codegen, performance]
 ---

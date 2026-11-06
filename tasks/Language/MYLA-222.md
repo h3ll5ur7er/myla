@@ -2,7 +2,7 @@
 id: MYLA-222
 title: "`if` as an expression"
 type: feature
-status: review
+status: done
 priority: medium
 labels: [language, ergonomics]
 ---

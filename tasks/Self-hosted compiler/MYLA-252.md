@@ -2,7 +2,7 @@
 id: MYLA-252
 title: Faster strings and builders in the runtime
 type: improvement
-status: review
+status: done
 priority: low
 labels: [runtime, performance, strings]
 ---

@@ -2,7 +2,7 @@
 id: MYLA-282
 title: "aarch64, wasm32: a function value of a function taking a value by copy"
 type: bug
-status: review
+status: done
 priority: medium
 labels: [platforms, aarch64, wasm, codegen]
 ---

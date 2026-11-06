@@ -2,7 +2,7 @@
 id: MYLA-249
 title: Float values in xmm registers
 type: improvement
-status: review
+status: done
 priority: high
 labels: [backend, performance, floats, codegen]
 ---
