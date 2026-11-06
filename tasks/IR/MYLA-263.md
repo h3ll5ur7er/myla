@@ -2,7 +2,7 @@
 id: MYLA-263
 title: "The calling-convention glue as IR: partial applications, adapters, frame constructors, composition"
 type: improvement
-status: review
+status: done
 priority: high
 labels: [ir, backend, architecture]
 ---
@@ -49,3 +49,6 @@ The IR has what they need (`ENV_WORD`, indirect calls, `become`, `frame`), and t
 - **Measured** (callgrind, x86-64, against 0f01b6a, the commit before this task's first part): closures 151.1 → 141.1 million instructions (−6.6 %, the first part's adapters); ackermann, binary_trees, fannkuch, fib, game_of_life, mandelbrot, n_body, quicksort, sieve and string_build unchanged; word_freq 138.6 → 141.5 (+2.1 %). The self-compile 5,107.8 → 5,129.8 million (+0.43 %; the inputs differ by std.rt's new routines, as neither compiler reads the other's library). Both increases are `equal_bytes`: 58.5 → 78.7 million instructions in the self-compile, its tail compared a byte at a time with one instruction more than the assembly did.
 - **A byte load straight into its register.** x86-64 loaded a temporary's value into `%rax` and moved it to the temporary's register; `fold_load` loaded it there directly, but only for `movq` and `leaq`. It takes `movl`, `movzbl` and `movzwl` too (into the register's 32-bit name) and the sign-extending loads, so `equal_bytes`'s byte compare is two loads and a `cmp`, as in the assembly. Measured against 0f01b6a again (the self-compile with each commit's stage-2 compiler): closures −8.9 %, fannkuch −2.4 %, game_of_life −1.5 %, quicksort −0.7 %, binary_trees −0.5 %, string_build −0.2 %, the rest unchanged but word_freq +1.5 % (138.6 → 140.6 million); the self-compile 5,107.8 → 5,123.6 million (+0.31 %, it was +0.43 %). `equal_bytes` is 73.0 million instructions there against the assembly's 58.5: its loops match the assembly's, instruction for instruction, but each call copies its three arguments to other registers and tests the word loop's bound first, about six instructions more a call. That is the register allocator's choice (the arguments' registers are scratch registers in the body); a four-byte step before the byte loop made word_freq's one- to three-letter keys slower (+0.8 %), so it isn't there.
 
+## Evidence (review 2026-11-06)
+
+- The two retain walks (`a64_retain_at`, `wasm_retain_at`) and the unused `PartialJob` imports, left behind by this task, were deleted with [[Project/Review-2026-11]]; nothing called them.

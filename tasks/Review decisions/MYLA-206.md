@@ -2,7 +2,7 @@
 id: MYLA-206
 title: "Decision: the runtime's address-space reservation and the worker stacks' guard pages"
 type: chore
-status: review
+status: done
 priority: low
 labels: [decision, concurrency, runtime]
 ---

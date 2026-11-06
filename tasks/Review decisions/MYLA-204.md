@@ -2,7 +2,7 @@
 id: MYLA-204
 title: "Decision: methods on builtin collections, or free functions only"
 type: chore
-status: review
+status: done
 priority: medium
 labels: [decision, language, builtins]
 ---

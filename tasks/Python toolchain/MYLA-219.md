@@ -2,7 +2,7 @@
 id: MYLA-219
 title: "Retire the Python toolchain"
 type: chore
-status: review
+status: done
 priority: high
 labels: [bootstrap, python, tests]
 ---

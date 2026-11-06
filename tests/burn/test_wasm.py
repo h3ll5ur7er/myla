@@ -221,6 +221,22 @@ class WasmParity(unittest.TestCase):
 
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
 @unittest.skipUnless(HAVE_WASM, WASM_SKIP)
+class WasmImports(unittest.TestCase):
+    def test_the_import_numbers_agree(self):
+        # lib/std/platform_wasm.my numbers the WASI imports it calls (W_FD_WRITE = 1, ...);
+        # selfhost/runtime_wasm.my's wasi_calls() lists them in that order, and
+        # memory.grow follows them: reordering either silently calls the wrong import
+        with open(os.path.join(_REPO, "lib", "std", "platform_wasm.my"), encoding="utf-8") as fh:
+            platform = dict(re.findall(r"^const W_([A-Z_]+): int64 = (\d+)$", fh.read(), flags=re.M))
+        with open(os.path.join(_REPO, "selfhost", "runtime_wasm.my"), encoding="utf-8") as fh:
+            runtime = fh.read()
+        calls = re.search(r"fun wasi_calls\(\)[^{]*\{(.*?)\n\}", runtime, flags=re.S).group(1)
+        names = re.findall(r'\("([a-z_]+)", "', calls)
+        self.assertEqual([platform[n.upper()] for n in names], [str(i + 1) for i in range(len(names))], names)
+        grow = re.search(r"^const W_MEMORY_GROW: int32 = (\d+)$", runtime, flags=re.M).group(1)
+        self.assertEqual((grow, platform["MEMORY_GROW"]), (str(len(names) + 1), str(len(names) + 1)))
+
+
 class WasmTasks(unittest.TestCase):
     def test_stress_programs(self):
         # the concurrency stress programs on one worker (D125), in each order

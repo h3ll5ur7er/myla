@@ -944,7 +944,12 @@ impl Resolver {
                 if t == "" { return "" }
                 return "[" + t + "]"
             },
-            ExprKind.Index(a, i) => { return index_of(self.unalias(self.type_of(a))) },
+            ExprKind.Index(a, i) => {
+                // a slice (`a:b`, `a:b:step`, D142) keeps the list's or string's type
+                let sliced = match i.kind { ExprKind.Binary(op, l, r) => op == ":", _ => false }
+                if sliced { return self.type_of(a) }
+                return index_of(self.unalias(self.type_of(a)))
+            },
             ExprKind.TupleIndex(x, i) => {
                 let elems = tuple_elems(self.unalias(self.type_of(x)))
                 if i < 0 || i >= (elems.len() as int64) { return "" }

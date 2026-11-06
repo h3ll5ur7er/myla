@@ -2,7 +2,7 @@
 id: MYLA-242
 title: "Benchmarks: the gap to C"
 type: improvement
-status: review
+status: done
 priority: medium
 labels: [performance, backend, design]
 ---

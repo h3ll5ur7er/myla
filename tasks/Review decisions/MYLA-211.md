@@ -2,7 +2,7 @@
 id: MYLA-211
 title: "Decision: the standard-library round, its scope, API shape and order"
 type: chore
-status: review
+status: done
 priority: medium
 labels: [decision, stdlib]
 ---

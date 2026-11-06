@@ -2,7 +2,7 @@
 id: MYLA-273
 title: "Mark the superseded parts of decisions"
 type: chore
-status: review
+status: done
 priority: low
 labels: [docs, decisions]
 ---

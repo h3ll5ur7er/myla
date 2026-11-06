@@ -350,6 +350,12 @@ SELF_METHOD_WARNINGS: dict[str, tuple[str, list[str]]] = {
 SUPERSEDED: dict[str, str] = {
     # D102: the unsuffixed 2.0 is a float64
     "unit_test_78": "err 3 8 3:8-3:9 type: type mismatch: 'int32' vs 'float64' (no implicit conversion between numeric types)",
+    # D138: a #test case on a function without a result expects [()] (the review of 2026-11-06)
+    "test_without_return": "err 1 9 1:9-1:10 type: '#test' on a function without a result expects '[()]'",
+    # D140: an arm ending in a call of a function without a result is the value (), so the
+    # arms disagree on their type instead of one lacking a value (the review of 2026-11-06)
+    "match_arm_without_value": "err 4 14 4:14-4:15 type: match arms have incompatible types '()' and 'int32'",
+    "unit_test_46": "err 8 14 8:14-8:15 type: match arms have incompatible types '()' and 'int32'",
 }
 
 def _corpus() -> list[str]:
@@ -447,10 +453,12 @@ class SelfHostedCheckerParity(unittest.TestCase):
 
     def test_corpus_check_parity(self) -> None:
         checked = 0
+        unrecorded = 0
         for path in _corpus():
             try:
                 expected = _oracle(path)
             except NoGolden:
+                unrecorded += 1
                 continue    # a file added to the corpus since has no recording: test_error_corpus holds it to the self-hosted CLI
             if expected is None:
                 continue  # not part of the checker-parity gate
@@ -458,8 +466,9 @@ class SelfHostedCheckerParity(unittest.TestCase):
                 actual = self._myla_check(path)
                 self.assertEqual(actual, expected)
                 checked += 1
-        # Guard against the corpus silently going empty.
-        self.assertGreater(checked, 60)
+        # Guard against the corpus silently going empty; the unrecorded count
+        # (new files held to the CLI's own output) says how far it has drifted
+        self.assertGreater(checked, 60, f"{checked} compared, {unrecorded} without a recording")
 
     def test_type_errors_match_the_oracle(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -2,7 +2,7 @@
 id: MYLA-208
 title: "Decision: the roadmap's scope beside the open backlog"
 type: chore
-status: review
+status: done
 priority: medium
 labels: [decision, roadmap, process]
 ---

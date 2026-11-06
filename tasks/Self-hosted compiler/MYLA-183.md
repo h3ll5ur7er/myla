@@ -2,7 +2,7 @@
 id: MYLA-183
 title: "Frame layout: slots of disjoint scopes share cells"
 type: improvement
-status: review
+status: todo
 priority: medium
 labels: [selfhost, ir, performance]
 ---
@@ -19,3 +19,8 @@ Decided by D112 ([[MYLA-210]]): by scope; a liveness analysis only if the measur
 - Measured on `build/myla` (the CLI, with the interpreter) before and after: all frames 691,408 → 605,424 bytes (1,546 functions, −12 %); `Interp.eval` 2,576 → 1,568 bytes, `Interp.exec_stmt` 2,224 → 960, `Interp.eval_name_call` 4,288 → 3,760. The interpreter's recursion in the 120 MiB main stack (a build without `MAX_CALL_DEPTH`, bisected on `down(n)`): about 9,125 → 12,773 calls (+40 %). `MAX_CALL_DEPTH` stays 2,500, a margin for functions that take more stack per call. A self-compile takes the same time (1.02 s before, 1.04 s after).
 - The burn suite (836 tests) passes and the bootstrap reaches its fixed point (6,233,228 bytes) with the new seed.
 
+## Reopened (2026-11-06)
+
+**Reopened by [[Project/Review-2026-11]] (R18).** `let`s in an `if`/`else` pair take four cells (two 64-byte `let`s in each branch: a 272-byte frame) while match arms share (128 bytes). `declare_as` and `slot_positions` look right, so either `if` blocks get scope 0 or something else is in the frame.
+
+- [ ] Find why the `if`/`else` scopes don't share, fix or document; a frame-size test for the `if` case

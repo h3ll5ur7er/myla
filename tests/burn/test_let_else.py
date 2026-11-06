@@ -139,6 +139,18 @@ class LetElse(unittest.TestCase):
         proc = subprocess.run(run_argv(exe, exe)[0], capture_output=True, text=True, timeout=60)
         self.assertEqual((proc.stdout, proc.stderr.startswith(_PANIC), proc.returncode), (_WANT, True, 1), proc.stderr)
 
+    def test_exit_leaves_the_block(self):
+        # `exit` never returns, so it leaves a let-else's `else` and ends a
+        # function that returns a value, as the Statements page says
+        src = ("from std.process import exit\nimport std.process as process\n\n"
+               "fun f(o: Option<int>) -> int {\n    let Some(v) = o else {\n        exit(3)\n    }\n    return v\n}\n\n"
+               "fun g(n: int) -> int {\n    if n > 0 {\n        return n\n    }\n    process.exit(2)\n}\n\n"
+               "fun main() {\n    print(f(Some(1)))\n    print(g(0))\n}\n")
+        path = self.write("exits.my", src)
+        proc = subprocess.run([self.myla, "run", path, "--stdlib", STDLIB_ROOT], capture_output=True, text=True,
+                              timeout=60)
+        self.assertEqual((proc.stdout, proc.stderr, proc.returncode), ("1\n", "", 2))
+
     def test_errors(self):
         cases = {
             "falls_through": ("fun main() {\n    let o = Some(1)\n    let Some(v) = o else {\n        print(0)\n    }\n    print(v)\n}\n",

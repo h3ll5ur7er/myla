@@ -2,7 +2,7 @@
 id: MYLA-224
 title: "Line continuation inside brackets and after a trailing operator"
 type: feature
-status: review
+status: done
 priority: medium
 labels: [language, ergonomics, parser]
 ---

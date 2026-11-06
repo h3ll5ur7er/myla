@@ -2,7 +2,7 @@
 id: MYLA-172
 title: Tasked programs reserve 128 GiB of address space; worker stacks have no guard page
 type: improvement
-status: review
+status: done
 priority: low
 labels: [concurrency, runtime]
 ---

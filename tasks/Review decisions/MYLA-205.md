@@ -2,7 +2,7 @@
 id: MYLA-205
 title: "Decision: how decisions are recorded (numbering, a provisional state, the page format)"
 type: chore
-status: review
+status: done
 priority: low
 labels: [decision, docs, process]
 ---

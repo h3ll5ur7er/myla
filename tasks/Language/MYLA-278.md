@@ -2,7 +2,7 @@
 id: MYLA-278
 title: "The unit type `()` (D138), and std's \"succeeds or fails\" results as `Result<(), E>`"
 type: feature
-status: review
+status: done
 priority: medium
 labels: [language, types, stdlib]
 ---
@@ -29,3 +29,7 @@ fun save(path: str, text: str) -> Result<(), IoError> {
 The std functions changed in a second commit, once the seed parsed `()`: `make_dir_all` with `make_dir`, which also held an always-0 `Ok`. `write_to_file`'s `Ok` held the number of bytes, which is always `contents.len()`, the caller's own number. Selfhost's own always-0 results (`fetch`, `check_out`, the checker's `Result<int32, CheckErr>` passes) are left as they are: they are internal, and changing them is a sweep of its own.
 
 Left open for the owner: a function without a result type is still not a function returning `()` (D138), so its type still can't be written (`(int) -> ()` is the type of a function that returns the unit value). Swift makes the two the same (`Void` is `()`); here that would be a decision of its own.
+
+## Evidence (review 2026-11-06)
+
+- [x] `#test(...)[()]` on a function without a result (reopened by [[Project/Review-2026-11]]: it was refused although D138 said it works): `check_test_attr` takes `()` as the expected value and names the rule when the case says otherwise; `test_unit_type.test_a_unit_test_on_a_function_without_a_result`

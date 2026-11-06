@@ -2,7 +2,7 @@
 id: MYLA-255
 title: Function parameters with default values
 type: feature
-status: review
+status: done
 priority: low
 labels: [language, ergonomics, design]
 ---

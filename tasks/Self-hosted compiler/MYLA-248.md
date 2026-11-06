@@ -2,7 +2,7 @@
 id: MYLA-248
 title: "std.math: square root and the other mathematical functions"
 type: feature
-status: review
+status: done
 priority: medium
 labels: [stdlib, floats, runtime]
 ---

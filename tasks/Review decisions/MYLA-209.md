@@ -2,7 +2,7 @@
 id: MYLA-209
 title: "Decision: the generated tree-sitter grammar and its bindings in the repository"
 type: chore
-status: review
+status: done
 priority: low
 labels: [decision, editor, repository]
 ---

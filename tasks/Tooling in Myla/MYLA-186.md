@@ -2,7 +2,7 @@
 id: MYLA-186
 title: The __ primitives are callable from user code
 type: bug
-status: review
+status: done
 priority: medium
 labels: [checker, stdlib]
 ---

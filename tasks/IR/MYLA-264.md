@@ -2,7 +2,7 @@
 id: MYLA-264
 title: "The IR as a contract: typed intrinsics and each operation's exact semantics"
 type: improvement
-status: review
+status: done
 priority: high
 labels: [ir, backend, design]
 ---

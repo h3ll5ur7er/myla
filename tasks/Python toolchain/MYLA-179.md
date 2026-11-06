@@ -2,7 +2,7 @@
 id: MYLA-179
 title: Map iteration order differs between the interpreter and native code
 type: improvement
-status: review
+status: done
 priority: low
 labels: [maps, parity, design]
 ---

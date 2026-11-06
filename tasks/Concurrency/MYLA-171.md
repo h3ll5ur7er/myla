@@ -2,7 +2,7 @@
 id: MYLA-171
 title: The reentrancy warning (D95) is bypassed through self methods
 type: improvement
-status: review
+status: done
 priority: medium
 labels: [concurrency, checker, warnings]
 ---

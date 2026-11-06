@@ -2,7 +2,7 @@
 id: MYLA-247
 title: Packed list elements
 type: improvement
-status: review
+status: done
 priority: medium
 labels: [backend, runtime, performance, memory]
 ---

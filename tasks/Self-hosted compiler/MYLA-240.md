@@ -2,7 +2,7 @@
 id: MYLA-240
 title: "Recorded answers survive the migration to builtin methods"
 type: improvement
-status: review
+status: done
 priority: medium
 labels: [tests, golden, migration]
 ---

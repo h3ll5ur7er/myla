@@ -21,7 +21,7 @@
 // `__compose_call` take it as their last parameter.
 
 from .checker import Type, subst_type
-from .codegen import CodeGen, PartialJob, is_aggregate, int_width_cg, is_tfloat32, is_aggregate_opt, is_cell_t, is_tfunc, tls_offset
+from .codegen import CodeGen, is_aggregate, int_width_cg, is_tfloat32, is_aggregate_opt, is_cell_t, is_tfunc, tls_offset
 from .ir import IrFunc, Inst, Term, Slot, ENV_WORD, ends_in_call, Intrinsic, is_xchg, is_rc_dec
 from .ir_x86 import slots_at, frame_size, tail_call_at, drops_after_free, passes_frame_address, frame_addresses
 
@@ -1317,61 +1317,6 @@ fun wasm_after(s: str, at: int32) -> str {
 }
 
 impl CodeGen {
-    // A reference of its own to each heap value of type `t` at `off` bytes
-    // into the value whose address the local `base` holds; `member`: held as
-    // a member (a boxed value as its pointer). What `retain T [%p]` becomes
-    // (`ownership.my`), in place.
-    fun wasm_retain_at(var self, base: int32, off: int32, t: Type, member: bool) {
-        if is_cell_t(t) || (member && self.is_boxed(t)) {
-            // the count at the cell's -8, one up (one worker)
-            var k = 0
-            while k < 2 {
-                self.emit(format("local.get {}", base))
-                self.emit("i32.wrap_i64")
-                self.emit(format("i64.load {}", off))
-                self.emit("i64.const 8")
-                self.emit("i64.sub")
-                self.emit("i32.wrap_i64")
-                k = k + 1
-            }
-            self.emit("i64.load 0")
-            self.emit("i64.const 1")
-            self.emit("i64.add")
-            self.emit("i64.store 0")
-        } else if is_tfunc(t) {
-            self.emit(format("local.get {}", base))
-            self.emit("i32.wrap_i64")
-            self.emit(format("i64.load {}", off + 8))
-            self.wasm_call("call", "__func_retain", 1)
-            self.emit("drop")
-        } else if self.owns_heap(t) {
-            if self.walk_helper(t) {
-                let name = self.register_walk(t, true)
-                self.emit(format("local.get {}", base))
-                self.emit(format("i64.const {}", off))
-                self.emit("i64.add")
-                self.wasm_call("call", name, 1)
-                self.emit("drop")
-                return
-            }
-            var members: [Type] = []
-            match t {
-                Type.TStruct(nm, a) => {
-                    let info = self.struct_info(nm)
-                    let sub = self.type_subst(info.type_params, a)
-                    for fl in info.fields { members.push(subst_type(fl.ty, sub)) }
-                },
-                Type.TTuple(es) => { members = es },
-                _ => {},
-            }
-            var cur = off
-            for m in members {
-                self.wasm_retain_at(base, cur, m, true)
-                cur = cur + self.stored_size(m)
-            }
-        }
-    }
-
     // `myla_<fn>__fnval`, the adapter that calls a plain `fun` as a function
     // value (MYLA-126): built as IR as on every target (`emit_fnval_adapter`,
     // MYLA-263); an async one's makes its frame (D90), taking the environment

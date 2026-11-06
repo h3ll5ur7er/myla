@@ -2,7 +2,7 @@
 id: MYLA-212
 title: "Decision: the next concurrency slice, what goes in and in which order"
 type: chore
-status: review
+status: done
 priority: low
 labels: [decision, concurrency]
 ---

@@ -2,7 +2,7 @@
 id: MYLA-215
 title: "Decision: the language ergonomics round"
 type: chore
-status: review
+status: done
 priority: medium
 labels: [decision, language, ergonomics]
 ---

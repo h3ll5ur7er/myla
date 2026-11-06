@@ -2,7 +2,7 @@
 id: MYLA-243
 title: The standard library inside the toolchain
 type: feature
-status: review
+status: done
 priority: high
 labels: [stdlib, loader, cli, lsp, platforms]
 ---

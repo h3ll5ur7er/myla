@@ -124,6 +124,8 @@ class FormatSpecs(unittest.TestCase):
             "alternate_without_a_kind": ('fun main() {\n    print(f"{5:#}")\n}\n',
                                          "the format spec '#' needs a kind: x, X, b or o"),
             "unknown": ('fun main() {\n    print(f"{5:q}")\n}\n', "invalid format spec 'q'"),
+            "width_too_large": ('fun main() {\n    print(f"{5:9999999999}")\n}\n', "invalid format spec '9999999999': a width above 1000000"),
+            "precision_too_large": ('fun main() {\n    print(f"{1.5:.4294967297}")\n}\n', "invalid format spec '.4294967297': a precision above 1000000"),
             "a_point_without_digits": ('fun main() {\n    print(f"{1.5:.}")\n}\n', "invalid format spec '.'"),
             "in_format": ('fun main() {\n    print(format("{:.1}", 3))\n}\n',
                           "the format spec '.1' needs a float, found 'int32'"),

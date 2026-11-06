@@ -2,7 +2,7 @@
 id: MYLA-238
 title: "The self-hosted interpreter loses an argument's change to a `var self` receiver"
 type: bug
-status: review
+status: done
 priority: high
 labels: [selfhost, interpreter, parity]
 ---

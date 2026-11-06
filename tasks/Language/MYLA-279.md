@@ -2,7 +2,7 @@
 id: MYLA-279
 title: "A function without a result type returns `()` (D140)"
 type: feature
-status: review
+status: done
 priority: medium
 labels: [language, types]
 ---
@@ -32,3 +32,7 @@ fun main() {
 - The lowering gives such a call an empty unit value (`addr`), and lowers `return <a () value>` in a function without a result as the value for its effects, then `return`.
 - The interpreter's "nothing" (`VUnit`) and the empty tuple are one value (`value_eq`).
 - [[tests/burn/test_unit_type.py]] `VOID` (also on aarch64 and wasm32, `PROGRAMS["void_is_unit"]`); `test_selfhost_checker`'s `no_value` case (`let x = print(1)`) is valid now and went; the corpus entry `type_unit_return_without_result` went too (`type_return_from_void` keeps the case that is still an error).
+
+## Evidence (review 2026-11-06)
+
+- [x] A call of a function without a result as a branch value (reopened by [[Project/Review-2026-11]]: `if c { nothing() } else { () }` was refused): the match arm's value is `()` as in `expect_value`; `test_unit_type.test_a_call_without_a_result_as_a_branch_value`

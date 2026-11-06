@@ -160,8 +160,8 @@ The second argument of the compiler is the folder that contains `std/` (by defau
 ## Run the tests
 
 ```bash
-scripts/test.sh fast        # the quick burn tests, about 20 s once the tools are cached
-scripts/test.sh             # all of them (python3 -m unittest discover -s tests/burn -t .), about 2 minutes
+scripts/test.sh fast        # the quick burn tests, about a minute once the tools are cached
+scripts/test.sh             # all of them (python3 -m unittest discover -s tests/burn -t .), about 5 minutes
 ```
 
 What each suite guarantees and the current results: [[Development/Testing]].

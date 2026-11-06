@@ -2,7 +2,7 @@
 id: MYLA-163
 title: "Target: Linux on aarch64"
 type: feature
-status: review
+status: done
 priority: medium
 labels: [backend, platforms]
 ---

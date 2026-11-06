@@ -2,7 +2,7 @@
 id: MYLA-244
 title: "myla new --lib: a library project"
 type: feature
-status: review
+status: done
 priority: low
 labels: [project-tool, cli]
 ---

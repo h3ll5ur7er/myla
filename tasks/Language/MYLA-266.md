@@ -2,7 +2,7 @@
 id: MYLA-266
 title: "Targets and capabilities in the language's specification"
 type: chore
-status: review
+status: done
 priority: high
 labels: [language, docs, platforms, design]
 ---

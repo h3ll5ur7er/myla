@@ -2,7 +2,7 @@
 id: MYLA-203
 title: "Decision: `float` is float32 or float64"
 type: chore
-status: review
+status: done
 priority: medium
 labels: [decision, language, floats]
 ---

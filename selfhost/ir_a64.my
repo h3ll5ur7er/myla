@@ -16,7 +16,7 @@
 // temporaries, the slots and one scratch cell.
 
 from .checker import Type, subst_type
-from .codegen import CodeGen, PartialJob, is_aggregate, int_signed, int_width_cg, is_tfloat32, is_aggregate_opt, is_cell_t, is_tfunc, is_actor_t, tls_offset, TLS_SIZE
+from .codegen import CodeGen, is_aggregate, int_signed, int_width_cg, is_tfloat32, is_aggregate_opt, is_cell_t, is_tfunc, is_actor_t, tls_offset, TLS_SIZE
 from .ir import IrFunc, Inst, Term, Slot, ENV_WORD, ends_in_call, Intrinsic, is_xchg, is_rc_dec, is_rc_atomic
 from .ir_x86 import slots_at, frame_size, tail_call_at, drops_after_free, passes_frame_address, frame_addresses
 
@@ -1084,61 +1084,6 @@ impl CodeGen {
         if self.is_async_fn(n) { self.emit_async_fnval(n) } else { self.emit_fnval_adapter(n) }
     }
 
-
-    // A reference of its own to each heap value of type `t` at `off` bytes
-    // into the value whose address the frame cell `cell` holds (kept there
-    // across the calls); `member`: held as a member (a boxed value as its
-    // pointer). What `retain T [%p]` becomes (`ownership.my`), in place.
-    fun a64_retain_at(var self, cell: int32, off: int32, t: Type, member: bool) {
-        if is_cell_t(t) || (member && self.is_boxed(t)) {
-            self.emit(format("ldr x10, {}", self.a64_cell(cell)))
-            self.emit(format("ldr x10, {}", self.a64_mem("x10", off)))
-            if self.frames && is_actor_t(t) {
-                // an actor's count, atomic with tasks (D92)
-                self.emit("sub x10, x10, #8")
-                let again = self.label()
-                self.emit(format("{}:", again))
-                self.emit("ldaxr x11, [x10]")
-                self.emit("add x11, x11, #1")
-                self.emit("stlxr w12, x11, [x10]")
-                self.emit(format("cbnz w12, {}", again))
-            } else {
-                self.emit("ldur x11, [x10, #-8]")
-                self.emit("add x11, x11, #1")
-                self.emit("stur x11, [x10, #-8]")
-            }
-        } else if is_tfunc(t) {
-            self.emit(format("ldr x10, {}", self.a64_cell(cell)))
-            self.emit(format("ldr x0, {}", self.a64_mem("x10", off + 8)))
-            self.emit("bl __func_retain")
-        } else if self.owns_heap(t) {
-            if self.walk_helper(t) {
-                let name = self.register_walk(t, true)
-                self.emit(format("ldr x0, {}", self.a64_cell(cell)))
-                if off != 0 {
-                    self.a64_imm("x10", off as int64)
-                    self.emit("add x0, x0, x10")
-                }
-                self.emit(format("bl {}", name))
-                return
-            }
-            var members: [Type] = []
-            match t {
-                Type.TStruct(nm, a) => {
-                    let info = self.struct_info(nm)
-                    let sub = self.type_subst(info.type_params, a)
-                    for fl in info.fields { members.push(subst_type(fl.ty, sub)) }
-                },
-                Type.TTuple(es) => { members = es },
-                _ => {},
-            }
-            var cur = off
-            for m in members {
-                self.a64_retain_at(cell, cur, m, true)
-                cur = cur + self.stored_size(m)
-            }
-        }
-    }
 
     fun a64_term(var self, f: IrFunc, fr: A64Frame, t: Term, labels: [str]) {
         match t {

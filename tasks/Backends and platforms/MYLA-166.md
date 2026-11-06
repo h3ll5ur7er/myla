@@ -1,7 +1,7 @@
 ---
 id: MYLA-166
 title: A C FFI - calling C libraries from Myla
-type: design
+type: chore
 status: backlog
 priority: low
 labels: [ffi, language, backend, gui]

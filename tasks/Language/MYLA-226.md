@@ -2,7 +2,7 @@
 id: MYLA-226
 title: "`if let` and `while let`"
 type: feature
-status: review
+status: done
 priority: medium
 labels: [language, ergonomics]
 ---

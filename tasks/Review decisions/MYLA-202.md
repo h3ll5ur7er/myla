@@ -2,7 +2,7 @@
 id: MYLA-202
 title: "Decision: keeping two interpreters, and which one retires first"
 type: chore
-status: review
+status: done
 priority: medium
 labels: [decision, architecture, interpreter]
 ---

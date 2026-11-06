@@ -2,7 +2,7 @@
 id: MYLA-276
 title: "Bootstrap on the machine it runs on: `just bootstrap` on a Raspberry Pi, the machine the default target"
 type: feature
-status: review
+status: done
 priority: high
 labels: [bootstrap, platforms, aarch64, ci]
 ---

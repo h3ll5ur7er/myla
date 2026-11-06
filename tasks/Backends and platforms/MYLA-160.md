@@ -1,8 +1,8 @@
 ---
 id: MYLA-160
 title: "Backends: de-risking D117"
-type: design
-status: review
+type: chore
+status: done
 priority: medium
 labels: [backend, platforms, design]
 ---

@@ -1,51 +1,47 @@
 # Known issues
 
-Open bugs and gaps by component, each with a task that has its steps to reproduce; this page is the overview. A line goes when its task is `done`. Most entries come from the review of 31 October 2026 ([[Project/Review-2026-10]]); the bugs the October review before it found are fixed and signed off.
+Open bugs and gaps by component, each with a task that has its steps to reproduce; this page is the overview. A line goes when its task is `done`. The entries come from the reviews of 31 October ([[Project/Review-2026-10]]) and 6 November 2026 ([[Project/Review-2026-11]]).
 
 [TOC]
 
-## Python toolchain
-
-Retired by D101 ([[MYLA-219]]); its tasks stay in the `Python toolchain` epic.
-
-- `as char` is unchecked: a surrogate crashed the Python interpreter when printed, native code prints garbage ([[MYLA-177]]). *Fixed, in review.*
-- Map removal keeps no tombstones in the Python backend ([[MYLA-151]]); moot since the backend was retired. Natively a `remove` rebuilds the whole table, O(capacity) ([[MYLA-271]]).
-
 ## Self-hosted compiler
 
-
-- The convention that every value-returning function in `selfhost/` has `#test` cases is 8 % true ([[MYLA-184]]). *Fixed, in review: 80 %, mostly generated cases.*
-- Native code took a read-only method receiver, and the Python interpreter a function's argument, after a later argument that writes the same variable ([[MYLA-237]]). *Fixed, in review.*
-- The self-hosted interpreter lost an argument's change to a `var self` receiver ([[MYLA-238]]). *Fixed, in review.*
-
-- A `become` passing a function-value parameter on to a function stops the compiler with an internal error, on every target ([[MYLA-253]]).
+- **x86-64 miscompile:** a function-value parameter in a function that also contains a tail call is read from `%rdi` after the call's argument loads overwrote it: the binary segfaults where aarch64 and the interpreter print the result ([[MYLA-250]]).
+- **Isolation:** a program's `impl [T] { fun len }` or `impl str { fun len }` is picked up by the standard library's own calls natively, not in the interpreter, so slices and format specs trap ([[MYLA-221]]).
+- **Safety:** the raw-memory primitives (`__load64`, `__store64`, `__free`, `__addr_of`, …) are callable from a program with a warning; natively a bare segfault ([[MYLA-285]]).
+- `#test` coverage of `selfhost/` is 70 percent against D109's 80, with no generator left ([[MYLA-184]]); `let`s in an `if`/`else` pair don't share frame cells ([[MYLA-183]]).
+- The optimisation passes have invariants nothing checks ([[MYLA-294]]); the interpreter keeps about 115 KB per sleeping task ([[MYLA-296]]).
 
 ## Backends and platforms
 
 The targets are x86-64 and aarch64 Linux and wasm32 on WASI; macOS and Windows are planned ([[MYLA-62]]). What the two new backends showed ([[Project/Reflection-2026-11]]):
 
-- wasm32: the shadow stack lay above the static data, so a deep overflow of it overwrote data; a trap under `run.mjs` printed `wasm trap: …` and exited 134 ([[MYLA-261]]). *Fixed, in review.*
-- aarch64 and wasm32: a plain function used as a function value with a parameter passed by value stops the compiler (`__fnval` panics; [[MYLA-263]]), as does the lowering's `RtPair` fallback ([[MYLA-264]]).
-- A computed NaN's bits differed between targets (`to_bits(0.0 / 0.0)`, `copysign(1.0, nan)`) ([[MYLA-266]]). *Fixed by D128, in review.*
-- The runtime's lock-free protocols were argued from x86-64's memory order. Unlocks were plain stores, which aarch64 may make visible before a critical section's stores; a task's end and the failure flag lacked an order ([[MYLA-267]]). *Fixed, in review; the stress programs run on arm64 hardware in CI.*
-- The suites besides the stress programs, the examples and the self-compile don't run per target yet ([[MYLA-268]]).
-- On wasm32 there are no processes (`run` gives `SpawnError.Unsupported`, D129), one worker, and input that can't suspend; no page says so yet ([[MYLA-266]]).
+- wasm32: a list or string stops at 2^26 elements with `out of memory`, far below the 4 GiB the memory allows: big cells round to the next power of two and freed big cells aren't reused across classes ([[MYLA-284]]).
+- The reactor's protocols have run only under qemu, which can't reorder memory ([[MYLA-301]]); the burn suite can't run on aarch64 hardware, `wasmtime` and the browser page are tested nowhere in CI ([[MYLA-297]]).
+- The two backends repeat seven helpers and the WASI import numbering ([[MYLA-298]]).
 
 ## Concurrency
 
-- An awaited `var self` struct method on an actor field is accepted and behaves three ways across the implementations ([[MYLA-169]]). *Fixed, in review.*
-- The D95 warning is bypassed through `self` methods ([[MYLA-171]]).
-- Every tasked program reserves 128 GiB of address space; worker stacks have no guard page ([[MYLA-172]]). *Fixed, in review: one arena per worker, reserved in chunks; guard pages and alternate signal stacks.*
+- **Use after free in `task.timeout`:** a child that finishes before its deadline is armed leaves a stale timer that later writes into freed memory: a spurious `None`, an unrelated task cancelled, a segfault on 2+ workers ([[MYLA-230]]).
+- Two tasks reading the same descriptor with `read_line_async` hang natively ([[MYLA-230]]).
+- A non-reentrant actor method kind is still open ([[MYLA-274]]).
 
 ## Tooling in Myla
 
-- The `__` primitives are callable from user code ([[MYLA-186]]). *Fixed, in review.*
+- A NUL byte in a path is silently truncated ([[MYLA-286]]); a write error on stdout other than a broken pipe is invisible ([[MYLA-287]]).
 - The language server's bare completion dumps the workspace, and a long check blocks every request ([[MYLA-188]]).
+- `task.cancel`'s fake signature, `Command.env` without validation, modules without `#test` cases ([[MYLA-295]]).
 
 ## Editor tooling
 
 - The TextMate grammar isn't generated from `grammar/myla.ebnf` ([[MYLA-154]]); the language server's open points on Git dependencies and manifest documents ([[MYLA-155]]); no snippets for `actor` and `async` ([[MYLA-196]]).
 
+## Language
+
+- `if c { Some(n) } else { None }` can't be typed: branches aren't typed against each other ([[MYLA-290]]); a bound `T: Format` can't be formatted ([[MYLA-291]]); a negative slice bound silently means "before the start" ([[MYLA-292]]); two messages don't name the defaults the caller filled in ([[MYLA-293]]); float printing is 17 digits ([[MYLA-300]]).
+
 ## Documentation and repository
 
-No open issues.
+- The recorded Python answers cover only the examples and the error corpus now; 20 new corpus files are held to the CLI's own output ([[MYLA-288]]).
+- 153 seed versions in six days: 110 of the 117 MB pack ([[MYLA-289]]).
+- No example or doc block uses the November features ([[MYLA-299]]).

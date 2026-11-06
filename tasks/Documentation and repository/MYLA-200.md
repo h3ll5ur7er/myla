@@ -2,7 +2,7 @@
 id: MYLA-200
 title: README rework
 type: chore
-status: review
+status: done
 priority: medium
 labels: [docs]
 ---

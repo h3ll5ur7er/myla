@@ -137,7 +137,7 @@ fun main() {
 // Myla has 6 braces: {}
 ```
 
-The lexer rewrites an f-string into a call `format("… {} …", expr, …)`: each hole is cut out by counting braces (skipping nested string and char literals) and lexed again as an expression. So holes accept any expression, and the checker treats the result exactly like `format` ([[Language/Collections-and-strings]]). F-strings are single-line, an empty hole `{}` is an error, and there are no format specifiers. Their text takes the escapes of strings; an escaped brace such as `\u{7B}` is text, not a hole.
+The lexer rewrites an f-string into a call `format("… {} …", expr, …)`: each hole is cut out by counting braces (skipping nested string and char literals) and lexed again as an expression. So holes accept any expression, and the checker treats the result exactly like `format` ([[Language/Collections-and-strings]]). F-strings are single-line, an empty hole `{}` is an error, and a hole may carry a format spec after a colon, `{x:>8.3}` (D139, [[Language/Collections-and-strings]]). Their text takes the escapes of strings; an escaped brace such as `\u{7B}` is text, not a hole.
 
 ## Operators and punctuation
 

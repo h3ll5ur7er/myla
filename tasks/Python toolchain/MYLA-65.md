@@ -182,3 +182,7 @@ module error: cannot resolve import …            module error: cannot resolve 
 - Unit 479 → 503, integration 2 → 2, burn 544 → 545 (5 skipped, as before): all pass.
 - Bootstrap fixed point: 7,964,179 bytes (7,876,416 before).
 - Cost, the stage 3 compiler compiling the same (old) compiler source, best of 5: 1.82 s / 78 MB → 2.01 s / 93 MB (the ranges make every node 16 bytes larger, and nodes sit inline in their parents); the Python `myla check selfhost/gen_main.my`: 1.72 s → 1.88 s.
+
+## Children
+
+[[MYLA-10]], [[MYLA-17]], [[MYLA-28]]

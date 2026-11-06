@@ -2,7 +2,7 @@
 id: MYLA-214
 title: "Decision: board and process rules (done, task types, epics, pull requests)"
 type: chore
-status: review
+status: done
 priority: low
 labels: [decision, process, genbeya]
 ---

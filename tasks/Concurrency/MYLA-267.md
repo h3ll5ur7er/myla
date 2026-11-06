@@ -2,7 +2,7 @@
 id: MYLA-267
 title: "The runtime's memory ordering on weakly ordered CPUs"
 type: chore
-status: review
+status: done
 priority: high
 labels: [concurrency, runtime, platforms]
 ---
@@ -46,3 +46,7 @@ The arm64 hardware run is the CI job's.
 **After the fix, on GitHub's arm64 runner** (CI run 42056099956, commit bf992b0):
 - every stress program passed 60 runs (20 on each of 1, 4 and 16 workers);
 - t18, t19, t20 and t21 each passed 100 runs on 4 workers, where t18 and t20 had crashed in 3 of 100 each.
+
+## Evidence (review 2026-11-06)
+
+- The review found one gap on paper: `exec_idle` read `__exec_seq` with a plain load between `fetch_add(sleepers)` and the queue glance, so on aarch64 the glance could be satisfied first and a push between the two missed until the pusher's own worker took the frame (progress survived; the Native-backend table said a push is never missed). The read is an acquire load now (`__load_acq64`, [[lib/std/rt.my]]). The reactor's protocols on arm64 hardware: [[MYLA-301]].

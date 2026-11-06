@@ -2,7 +2,7 @@
 id: MYLA-223
 title: "Compound assignment"
 type: feature
-status: review
+status: done
 priority: medium
 labels: [language, ergonomics]
 ---
@@ -32,3 +32,6 @@ Order: after [[MYLA-219]] this touches only the self-hosted toolchain (checker, 
 - **Error corpus.** `type_compound_assign_to_let.my` and `parse_compound_assign_target.my`. The four gates that compare every corpus file with the Python recordings (checker, lexer, parser, codegen diagnostics) now leave out files added since; `test_error_corpus` holds those to the self-hosted CLI.
 - **Docs.** [[Language/Statements]] (with a tested example), `AGENTS.md` and the myla skill. The burn suite passes, and the bootstrap reaches its fixed point with the new seed.
 
+## Evidence (review 2026-11-06)
+
+- [x] `ys[^3] += 5` (reopened by [[Project/Review-2026-11]]): the compound-assignment desugar hoists the operand of `^`, not the `^` (`hoisted` in [[selfhost/parser.my]]); `test_compound_assignment` has the case (`ys[^1] += 5`, `ys[^pick(3)] *= 2`)

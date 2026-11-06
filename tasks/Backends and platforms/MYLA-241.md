@@ -1,7 +1,7 @@
 ---
 id: MYLA-241
 title: Myla as a shared library for other languages
-type: design
+type: chore
 status: backlog
 priority: low
 labels: [ffi, library, backend, platforms, design]

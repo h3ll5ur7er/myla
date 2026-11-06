@@ -1,9 +1,9 @@
 ---
 id: MYLA-250
 title: Arguments and results in registers
-type: design
-status: review
-priority: medium
+type: chore
+status: todo
+priority: high
 labels: [backend, performance, calling-convention]
 ---
 Found by the benchmarks ([[MYLA-242]]): call-heavy code runs at gcc `-O0`'s level. fib takes 5× the time of C with Myla's semantics at gcc `-O2`, Ackermann 9×. Arguments are pushed on the stack, the callee loads them from above its frame base and pops them with `ret $8n` ([[MYLA-126]]), and a tail call (`become`, D87) moves them through memory with `push`/`pop` into the caller's argument words. With 16,000 frames deep (Ackermann) that is all memory traffic.
@@ -71,3 +71,10 @@ What the convention didn't do, as follow-ups:
 ## The follow-ups' tasks (2026-11-04)
 
 The convention question these follow-ups belong to (floats in vector registers, 16-byte alignment, and whether Myla's own functions use the platform's C convention at all, D119) is [[MYLA-272]], which also carries the parameter kept in its register and the generic `become` counting a type parameter as one word.
+
+## Reopened (2026-11-06)
+
+**Reopened by [[Project/Review-2026-11]] (R2).** A function-value parameter in a function that also contains a tail call stays in `%rdi`; `CallInd` loads the callee after `pass_words` overwrote `%rdi` with argument 0 ([[selfhost/ir_x86.my]], `pass_words` assumes nothing an argument is read from lives in an argument register). `apply_tail(add, 1, 2, 5)` (`if n == 0 { return f(a, b) }` then `become apply_tail(…)`) prints 72 in the interpreter and on aarch64 and segfaults on x86-64, even when the tail call never runs.
+
+- [ ] Load the indirect callee before the argument words, or give in-place parameters the `late` treatment in `call_arg_index`
+- [ ] The program in `test_register_args.py`

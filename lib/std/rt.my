@@ -3,9 +3,9 @@
 // A native build loads this module with every program (the copy the tools
 // carry when a standard library folder lacks it); a function here is
 // compiled where the code generator calls it in place of the assembly
-// routine it replaced (`myla_runtime_function` in selfhost/lower.my). The
-// routines move here one by one; until a routine's assembly callers move
-// too, both versions exist.
+// routine it replaced (`myla_runtime_function` in selfhost/lower.my). What
+// stays in assembly per target is the machine's own: the program's start,
+// the system-call stubs, the signal handler, the jumps into frames.
 //
 // Raw memory goes through the primitives `__load8`, `__load64`, `__store8`,
 // `__store64`, `__alloc`, `__free`, `__addr_of`, `__str_of`, `__rotl`, and the bulk
@@ -1765,7 +1765,10 @@ fun exec_idle() {
             // last glance (a push after it changes `__exec_seq`, whose low
             // half the wait compares, and the wait returns at once)
             __fetch_add64(__rt_addr("__exec_sleepers"), 1)
-            let seen = __load32(__rt_addr("__exec_seq")) as int64
+            // read with acquire, so the glance's loads can't be satisfied
+            // before it on a weakly ordered CPU (a push between the two would
+            // then be missed until the pusher's own worker takes the frame)
+            let seen = __load_acq64(__rt_addr("__exec_seq")) & 4294967295
             if exec_peek() == 0 {
                 os.park(__rt_addr("__exec_seq"), seen)
             }

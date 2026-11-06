@@ -39,3 +39,7 @@ aarch64 and wasm32 are built. Before macOS and Windows, the boundary around the 
 - [x] [[MYLA-160]]'s questions answered and recorded (D118–D126)
 - [x] At least one target besides x86-64 Linux ([[MYLA-158]], [[MYLA-163]] to [[MYLA-165]]): Linux on aarch64 and wasm32 on WASI (2026-11)
 - [ ] The plan after the first two targets (above) done, then macOS and Windows
+
+## Children
+
+[[MYLA-160]], [[MYLA-161]], [[MYLA-162]], [[MYLA-163]], [[MYLA-164]], [[MYLA-165]], [[MYLA-166]], [[MYLA-167]], [[MYLA-241]], [[MYLA-242]], [[MYLA-254]], [[MYLA-257]], [[MYLA-259]], [[MYLA-260]], [[MYLA-261]], [[MYLA-262]], [[MYLA-263]], [[MYLA-264]], [[MYLA-265]], [[MYLA-266]], [[MYLA-267]], [[MYLA-268]], [[MYLA-269]], [[MYLA-270]], [[MYLA-272]], [[MYLA-276]], [[MYLA-281]], [[MYLA-282]], [[MYLA-283]]
