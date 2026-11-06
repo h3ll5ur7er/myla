@@ -10,7 +10,7 @@ This repository uses [Genbeya](https://github.com/genbeya/genbeya): the board is
 - Workflow: `backlog` → `todo` → `in-progress` → `review` → `done`. Confirmed bugs that should be fixed next are in `todo`, everything else waits in `backlog`. An agent moves a task it has finished to `review`; only the owner moves tasks to `done`, or asks for it explicitly.
 - A finished task records what proves it under one heading, `## Evidence`.
 - One pull request per theme (an epic step or a review round), named after its tasks.
-- A change to the compiler's output (`selfhost/`, `lib/std/`) comes with a new seed: `scripts/update-seed.sh`, then commit the seeds, `bootstrap/seed.s` and `bootstrap/seed-aarch64.s` ([[Development/Bootstrap]]); CI checks them.
+- A pull request that changes the compiler's output (`selfhost/`, `lib/std/`) carries one new seed, in its last commit: `scripts/update-seed.sh`, then commit `bootstrap/seed.s`, `bootstrap/seed-aarch64.s` and `selfhost/embedded_std.my` (D156, [[Development/Bootstrap]]); the commits before it may leave them behind. CI checks the pull request's tip.
 - A new task takes the next free number across all epics. Abandoned tasks move to `done` with a note; tasks are never deleted.
 - Reference tasks, pages and files with `[[MYLA-12]]`, `[[Language/Types]]` and `[[selfhost/checker.my#L10-L20]]`; `![[file#L1-L9]]` on its own line embeds lines.
 - Name the task in commit messages and pull requests: `MYLA-12: Encode interpreter strings with surrogateescape`.
