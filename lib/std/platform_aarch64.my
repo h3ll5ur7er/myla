@@ -29,6 +29,8 @@ pub const TARGET: str = "aarch64-linux"
 pub const EINTR: int64 = -4
 pub const EAGAIN: int64 = -11
 pub const EPIPE: int64 = -32
+// Whether memory unmapped goes back to the system (munmap gives a mapping back).
+pub const RETURNS_MEMORY: bool = true
 
 const SYS_READ: int64 = 63
 const SYS_WRITE: int64 = 64

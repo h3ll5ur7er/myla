@@ -1027,9 +1027,13 @@ fun sb_bigger(holder: int64, cell: int64, need: int64) -> int64 {
     if cap < need {
         cap = need
     }
+    if grew_in_place(cell, cap + 16) {
+        __store64(cell + 8, __load64(cell - 16) - 16)
+        return cell
+    }
     let bigger = __alloc(cap + 16)
     __store64(bigger, len)
-    __store64(bigger + 8, cap)
+    __store64(bigger + 8, __load64(bigger - 16) - 16)
     __copy_bytes(bigger + 16, cell + 16, len)
     __free(cell)
     __store64(holder, bigger)
@@ -1180,9 +1184,14 @@ fun write_err_num(n: int64) {
 // heads at `__free_buckets + size`, the large ones' at `+ 4104 + 8k` for
 // 2^k bytes. A new one comes off that list, else from the arena between
 // `__heap_ptr` and `__heap_end`: a chunk of CHUNK bytes the platform maps
-// when the last one is full (none before the first cell, D106 (B)); a cell
-// bigger than a chunk gets a mapping of its own. So a program holds about
-// as much address space as it uses.
+// when the last one is full (none before the first cell, D106 (B)). A big
+// cell, one that doesn't fit in a chunk, gets a mapping of its own, as big
+// as it needs in whole pages, and gives it back when it is freed (D157);
+// where the platform can't give memory back (wasm32) it goes on
+// `__big_free` instead, for a later big cell it is large enough for (the
+// review of 2026-11-06, R6: a power of two for every size and nothing
+// reused stopped a list at 2^26 elements). So a program holds about as
+// much address space as it uses.
 
 const CHUNK: int64 = 16777216  // 16 MiB, a power of two
 
@@ -1190,6 +1199,10 @@ const CHUNK: int64 = 16777216  // 16 MiB, a power of two
 pub fun alloc(n: int64) -> int64 {
     var size = (n + 7) & -8
     var slot = __rt_addr("__free_buckets") + size
+    if size + 32 > CHUNK {
+        // a big cell: a mapping of its own (D157)
+        return alloc_big(size, 16, 0)
+    }
     if size > 4096 {
         let k = __bsr64(size - 1) + 1
         size = 1i64 << k
@@ -1217,13 +1230,7 @@ pub fun alloc(n: int64) -> int64 {
 // arena (the rest of the old one stays unused).
 fun alloc_mapped(size: int64) -> int64 {
     if size + 16 > CHUNK {
-        let m = os.map_memory(size + 16)
-        if m < 0 {
-            __trap_oom()
-        }
-        __store64(m, size)
-        __store64(m + 8, 1)
-        return m + 16
+        return alloc_big(size, 16, 0)
     }
     let m = os.map_memory(CHUNK)
     if m < 0 {
@@ -1239,6 +1246,12 @@ fun alloc_mapped(size: int64) -> int64 {
 // `__free`: the cell `p` back on the list for its size.
 pub fun free(p: int64) {
     let size = __load64(p - 16)
+    // (a big cell's size is at least CHUNK - 32, an arena's at most half a
+    // chunk)
+    if size + 32 > CHUNK {
+        free_big(p, 16)
+        return
+    }
     var slot = __rt_addr("__free_buckets") + size
     if size > 4096 {
         slot = __rt_addr("__free_buckets") + 4104 + __bsr64(size) * 8
@@ -1260,6 +1273,10 @@ pub fun free(p: int64) {
 pub fun alloc_tasks(n: int64) -> int64 {
     var size = (n + 7) & -8
     var slot = __rt_addr("__free_buckets") + size
+    if size + 32 > CHUNK {
+        // a big cell: a mapping of its own (D157)
+        return alloc_big(size, 32, __rt_get("__worker_id"))
+    }
     if size > 4096 {
         let k = __bsr64(size - 1) + 1
         size = 1i64 << k
@@ -1290,7 +1307,7 @@ pub fun alloc_tasks(n: int64) -> int64 {
 fun alloc_tasks_mapped(size: int64) -> int64 {
     var span = CHUNK
     if size + 32 > CHUNK {
-        span = (size + 32 + CHUNK - 1) & -CHUNK
+        return alloc_big(size, 32, __rt_get("__worker_id"))
     }
     let m = map_aligned(span)
     __store64(m, __rt_get("__worker_id"))
@@ -1301,6 +1318,77 @@ fun alloc_tasks_mapped(size: int64) -> int64 {
     __store64(m + 16, size)
     __store64(m + 24, 1)
     return m + 32
+}
+
+// A big cell of at least `size` bytes, `head` bytes after the start of its
+// mapping (16; with tasks 32, the first word the worker's number, as a
+// chunk's, though nothing reads it): a freed one large enough taken back
+// where the platform keeps memory, else a mapping of whole pages, aligned to
+// a chunk with tasks (`worker` its first word). Its size is all the mapping
+// holds after `head`.
+fun alloc_big(size0: int64, head: int64, worker: int64) -> int64 {
+    let page: int64 = 65536
+    let span = (size0 + head + page - 1) & -page
+    if !os.RETURNS_MEMORY {
+        // (the platforms that keep memory run one worker, D125: no lock)
+        var prev = __rt_addr("__big_free")
+        var c = __load64(prev)
+        while c != 0 {
+            if __load64(c - 16) >= span - head {
+                __store64(prev, __load64(c))
+                __store64(c - 8, 1)
+                return c
+            }
+            prev = c
+            c = __load64(c)
+        }
+    }
+    var m: int64 = 0
+    if head == 32 {
+        m = map_aligned(span)
+        __store64(m, worker)
+    } else {
+        m = os.map_memory(span)
+        if m < 0 {
+            __trap_oom()
+        }
+    }
+    __store64(m + head - 16, span - head)
+    __store64(m + head - 8, 1)
+    return m + head
+}
+
+// Whether the cell `p` now holds at least `want` bytes where it is: a big
+// cell that ends where the memory does, on a platform that doesn't give
+// memory back (wasm32, whose memory grows only at its end), the memory
+// grown under it.
+fun grew_in_place(p: int64, want: int64) -> bool {
+    let size = __load64(p - 16)
+    if os.RETURNS_MEMORY || size + 32 <= CHUNK || want <= size {
+        return false
+    }
+    // the memory's end: a mapping of nothing gives it
+    if os.map_memory(0) != p + size {
+        return false
+    }
+    let page: int64 = 65536
+    let more = (want - size + page - 1) & -page
+    if os.map_memory(more) != p + size {
+        return false
+    }
+    __store64(p - 16, size + more)
+    return true
+}
+
+// The big cell `p` freed: its mapping given back, or kept for a later one
+// where the platform can't give memory back.
+fun free_big(p: int64, head: int64) {
+    if os.RETURNS_MEMORY {
+        os.unmap_memory(p - head, __load64(p - 16) + head)
+        return
+    }
+    __store64(p, __rt_get("__big_free"))
+    __store64(__rt_addr("__big_free"), p)
 }
 
 // `span` bytes (a multiple of CHUNK) mapped at an address that is a
@@ -1333,8 +1421,13 @@ fun alloc_drained(n: int64) -> int64 {
     return alloc_tasks(n)
 }
 
-// `__free` with tasks: another worker's cell onto its owner's list.
+// `__free` with tasks: another worker's cell onto its owner's list; a big
+// one given back wherever it is freed.
 pub fun free_tasks(p: int64) {
+    if __load64(p - 16) + 32 > CHUNK {
+        free_big(p, 32)
+        return
+    }
     let owner = __load64(p & -CHUNK)
     if owner != __rt_get("__worker_id") {
         let slot = __rt_waddr("__remote_free", owner)
@@ -2469,9 +2562,17 @@ pub fun list_grow(cell: int64, stride: int64) -> int64 {
     if cap != 0 {
         bigger = cap * 2
     }
+    // a big cell at the top of a memory that doesn't give memory back
+    // (wasm32) grows where it is: no copy, and no second cell beside it
+    if grew_in_place(cell, bigger * stride + 16) {
+        __store64(cell + 8, (__load64(cell - 16) - 16) / stride)
+        return cell
+    }
     let p = __alloc(bigger * stride + 16)
     __copy_bytes(p, cell, cap * stride + 16)
-    __store64(p + 8, bigger)
+    // the whole cell: its size class (or a big cell's pages) may hold more
+    // than was asked (the review of 2026-11-06, R6)
+    __store64(p + 8, (__load64(p - 16) - 16) / stride)
     __free(cell)
     return p
 }

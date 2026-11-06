@@ -160,6 +160,22 @@ class WasmParity(unittest.TestCase):
             build_wasm(path, wb)
             self.assertEqual(run(NODE + [wb]), ("".join(f"{k}\n" for k in range(40)), "", 0))
 
+    def test_a_list_past_2_27_elements(self):
+        # a list stopped at 2^26 elements (the review of 2026-11-06, R6): every
+        # cell above 4 KB took a power of two, header and all, and the cells
+        # it outgrew stayed; a big cell at the top of the memory now grows
+        # where it is (D157)
+        source = ("fun main() {\n    var xs: [int64] = []\n    var i: int64 = 0\n"
+                  "    while i < 150000000 {\n        xs.push(i)\n        i += 1\n    }\n"
+                  "    print(xs.len())\n    print(xs[xs.len() - 1])\n}\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "big.my")
+            with open(path, "w") as fh:
+                fh.write(source)
+            wb = os.path.join(tmp, "big.wasm")
+            build_wasm(path, wb)
+            self.assertEqual(run(NODE + [wb]), ("150000000\n149999999\n", "", 0))
+
     def test_files(self):
         # files and directories through WASI: written, read, listed, renamed
         # and removed, a relative path against the working directory

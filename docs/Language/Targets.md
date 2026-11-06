@@ -39,7 +39,7 @@ A program learns that its target lacks something from an error: the cause `Unsup
 | A child's end by a signal (`ExitStatus.Signaled`) | Yes | Yes | No processes |
 | The main thread's stack | Up to 120 MiB (the soft limit raised, MYLA-182) | The same (under qemu-user: 8 MiB unless `QEMU_STACK_SIZE` says more) | 8 MiB of shadow stack, and the engine's own call stack (Node: `--stack-size`) |
 | A worker's stack | 8 MiB, with a guard page | The same | One worker: the main stack |
-| Memory | The machine's | The machine's | At most 4 GiB, which the program never gives back; today a list or string stops at 2^26 elements (a cell above 4 KiB takes the next power of two and freed big cells aren't reused by a bigger class, [[MYLA-284]]) |
+| Memory | The machine's; a freed cell bigger than 16 MiB goes back to the system (D157) | The machine's, as on x86-64 | At most 4 GiB, which the program never gives back: a freed big cell is reused by a later one it is large enough for, and a growing list or string at the top of the memory grows where it is (a list of 150 million `int64`s fits, [[MYLA-284]]) |
 | A line printed whole while other workers print | Up to `PIPE_BUF` (4 KiB) per line | The same | One worker: always |
 | Debug information (`myla build -g`) | Yes ([[Development/Debugging]]) | Not yet ([[MYLA-259]]) | Not yet |
 
