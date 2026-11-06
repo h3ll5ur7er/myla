@@ -193,6 +193,9 @@ pub struct CodeGen {
     // the function being emitted is read
     pend_store: str,
     pend_temp: int32,
+    // the line of `text` that is a register's re-extension (`movslq %eax,
+    // %rax`), or -1: one the next instruction may make moot (MYLA-251)
+    ext_at: int32,
     temp_uses: [int32],
     // per temporary, how to recompute it where it is read instead of keeping
     // it in a slot (`remat_texts`; "" for a temporary kept in its slot)
@@ -333,7 +336,7 @@ pub fun new_codegen(c: Checker) -> CodeGen {
         dbg_fn: false, dbg_lines: [], dbg_types: [:], dbg_pending: [], dbg_scopes: [],
         dbg_fn_end: "", dbg_mark: "", dbg_n: 0, dbg_script: "",
         keep_ir: false, wants_ftoa: false, inlining: true, inl_names: [], inl_bodies: [], inl_no: [:], ssa: false, ssa_stats: no_ssa_stats(), refused: [], ir_texts: [], ir_blocked: [], ir_ready: false,
-        pend_store: "", pend_temp: -1, temp_uses: [], temp_remat: [], temp_fconst: [:], fconst_labels: [:], temp_src: [], temp_imm: [], temp_frame: [], temp_mem: [], temp_off: [],
+        pend_store: "", pend_temp: -1, ext_at: -1, temp_uses: [], temp_remat: [], temp_fconst: [:], fconst_labels: [:], temp_src: [], temp_imm: [], temp_frame: [], temp_mem: [], temp_off: [],
         temp_reg: [], slot_reg: [], saved_regs: [], in_frame: false, resume_blocks: [], frames: c.task_line > 0, norm: compiler_norm(), save_base: 0, arg_words: 0, frameless: false, kept_params: [:], keeping: [:], scan_kept: [], scan_args: [], owning: [:], no_owned: [], handed: handed, passed_on: passed_on, tag_enums: [:], a64: false, wasm: false, wasm_arity: [:], wasm_calls: [:], env_records: [],
     }
 }
@@ -956,6 +959,12 @@ impl CodeGen {
         } else if ends_colon(line) {
             self.text.push(line)
         } else {
+            // a register's re-extension that this instruction makes moot
+            // (MYLA-251)
+            let n = self.text.len()
+            if self.ext_at >= 0 && self.ext_at == n - 1 && extension_overwritten(self.text[n - 1], line) { let gone = self.text.pop() }
+            self.ext_at = -1
+            if line.len() > 10 && line[4] == 'l' as uint8 && line[3] == 's' as uint8 && text_at(line, 0, "movslq %") { self.ext_at = self.text.len() }
             self.text.push("\t" + line)
         }
     }
@@ -2563,7 +2572,8 @@ impl CodeGen {
                 self.emit("divq %rcx")
             }
             if op == "%" { self.emit("movq %rdx, %rax") }
-            self.wrap(rt)
+            // neither 0 nor -1: the quotient or remainder is in range
+            if !same_int(lt, rt) { self.wrap(rt) }
         } else if op == "/" || op == "%" {
             self.emit("testq %rcx, %rcx")
             if op == "/" { self.trap("jz", "__trap_div", line, col) } else { self.trap("jz", "__trap_mod", line, col) }
@@ -2586,7 +2596,10 @@ impl CodeGen {
                 self.emit("divq %rcx")
                 if op == "%" { self.emit("movq %rdx, %rax") }
             }
-            self.wrap(rt)
+            // only the minimum's quotient by -1 leaves the range (MYLA-251):
+            // a remainder is smaller than the divisor, an unsigned
+            // quotient than the dividend
+            if (op == "/" && int_signed(lt)) || !same_int(lt, rt) { self.wrap(rt) }
         } else if is_cmp(op) {
             self.emit(format("cmpq {}, %rax", src))
             self.emit(format("{} %al", cmp_set(op, int_signed(lt))))
@@ -2596,14 +2609,15 @@ impl CodeGen {
             if op == "==" { self.emit("sete %al") } else { self.emit("setne %al") }
             self.emit("movzbq %al, %rax")
         } else if op == "&" {
+            // bitwise on extended values gives an extended value (MYLA-251)
             self.emit(format("andq {}, %rax", src))
-            self.wrap(rt)
+            if !same_int(lt, rt) { self.wrap(rt) }
         } else if op == "|" {
             self.emit(format("orq {}, %rax", src))
-            self.wrap(rt)
+            if !same_int(lt, rt) { self.wrap(rt) }
         } else if op == "^" {
             self.emit(format("xorq {}, %rax", src))
-            self.wrap(rt)
+            if !same_int(lt, rt) { self.wrap(rt) }
         } else if op == "<<" || op == ">>" {
             self.emit(format("andq ${}, %rcx", int_width_cg(rt) - 1))
             if op == "<<" {
@@ -2613,7 +2627,8 @@ impl CodeGen {
             } else {
                 self.emit("shrq %cl, %rax")
             }
-            self.wrap(rt)
+            // a right shift of an extended value is one
+            if op == "<<" || !same_int(lt, rt) { self.wrap(rt) }
         }
     }
 
@@ -4481,6 +4496,74 @@ fun retarget_load(line: str, reg: str, own_src: bool) -> str {
     out.append(line, 0, line.len() - 4)
     out.append(dst)
     return out.build()
+}
+
+// Whether `a` and `b` are the same integer type: an operation's result
+// kept in its operands' type.
+#test(Type.TInt(32, true), Type.TInt(32, true))[true]
+#test(Type.TInt(32, true), Type.TInt(64, true))[false]
+#test(Type.TBool, Type.TBool)[false]
+pub fun same_int(a: Type, b: Type) -> bool {
+    return match a {
+        Type.TInt(w, s) => match b {
+            Type.TInt(w2, s2) => w == w2 && s == s2,
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+// Whether `prev`, a register's re-extension (`movslq %r11d, %r11`), is
+// moot because `line`, the instruction after it, writes that register's
+// low 32 bits (clearing the rest) without reading memory through it: the
+// low bits of its result don't depend on the upper half of what it reads
+// (MYLA-251: `(y + n - 1) % n` re-extended `y + n` before taking 1 away).
+#test("\tmovslq %r11d, %r11", "leal -1(%r11), %r11d")[true]
+#test("\tmovslq %eax, %rax", "addl $1, %eax")[true]
+#test("\tmovslq %r11d, %r11", "movl $0, %r11d")[true]
+#test("\tmovslq %r11d, %r11", "negl %r11d")[true]
+#test("\tmovslq %r11d, %r11", "leal -1(%r11), %r10d")[false]
+#test("\tmovslq %r11d, %r11", "movl (%r11), %r11d")[false]
+#test("\tmovslq %r11d, %r11", "cmpl $1, %r11d")[false]
+#test("\tmovslq %r11d, %r11", "leal -1(%r11), %r11")[false]
+#test("\tmovl %r11d, %r11d", "leal -1(%r11), %r11d")[false]
+#test("\tmovslq %r11d, %r11", "addl %r10d, %r11d")[true]
+#test("\tmovslq %r11d, %r11", "sarl $1, %r11d")[false]
+#test("\tmovslq %eax, %r12", "addl $1, %eax")[false]
+#test("\tmovslq %r11d, %r10", "leal -1(%r11), %r11d")[false]
+pub fun extension_overwritten(prev: str, line: str) -> bool {
+    if !text_at(prev, 0, "\tmovslq %") { return false }
+    var at = 8
+    while at < prev.len() && prev[at] != ',' as uint8 { at = at + 1 }
+    if at >= prev.len() { return false }
+    var r = StringBuilder()
+    r.append(prev, 8, at)
+    let r32 = r.build()
+    // into the same register (a folded load may have moved it elsewhere)
+    if !text_at(prev, at, ", " + reg64(r32)) || prev.len() != at + 2 + reg64(r32).len() { return false }
+    var m = 0
+    while m < line.len() && line[m] != ' ' as uint8 { m = m + 1 }
+    var mb = StringBuilder()
+    mb.append(line, 0, m)
+    let op = mb.build()
+    // one operand: the register itself
+    if op == "negl" || op == "notl" { return line == op + " " + r32 }
+    if !(op == "leal" || op == "addl" || op == "subl" || op == "imull" || op == "andl" || op == "orl" || op == "xorl" || op == "shll" || op == "movl") { return false }
+    if !text_at(line, line.len() - r32.len() - 2, ", " + r32) { return false }
+    // a memory operand reads the register's whole value
+    return op == "leal" || !has_text(line, "(")
+}
+
+// The 64-bit name of the general register `r32` names the low half of.
+#test("%eax")["%rax"]
+#test("%r11d")["%r11"]
+fun reg64(r32: str) -> str {
+    var sb = StringBuilder()
+    if text_at(r32, 0, "%e") {
+        sb.append("%r")
+        sb.append(r32, 2, r32.len())
+    } else { sb.append(r32, 0, r32.len() - 1) }
+    return sb.build()
 }
 
 // The 32-bit name of the general register `reg`; "" for another.

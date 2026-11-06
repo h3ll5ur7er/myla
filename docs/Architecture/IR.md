@@ -249,7 +249,7 @@ With function values every function of the compiler, the examples and the parity
 
 - **Compare and branch.** An integer comparison whose only use is the branch ending its block is a `cmpq` and a conditional jump; a branch falls through to whichever successor comes next.
 - **Operands where they are.** The second operand of `+ - * & | ^` and the comparisons is an immediate, the variable's slot a temporary was read from, or the temporary's cell, instead of being loaded into `%rcx`.
-- **Addressing modes.** Loads and stores through a slot's address use the frame directly; an element's address is one `leaq` and folds into the load after it; 32-bit constants load with `movq`; integers wrap to their width in one instruction.
+- **Addressing modes.** Loads and stores through a slot's address use the frame directly; an element's address is one `leaq` and folds into the load after it; 32-bit constants load with `movq`; integers wrap to their width in one instruction, and not at all after an operation whose result can't leave its operands' range (a remainder, an unsigned or constant-divisor quotient, `&`, `|`, `^`, `>>`) or a re-extension the next instruction overwrites ([[MYLA-251]]).
 - **Unreachable blocks** get no code, only their debug scopes.
 
 The compiler's binary got 11% smaller and runs 12% fewer instructions compiling itself ([[MYLA-120]] has the measurements).

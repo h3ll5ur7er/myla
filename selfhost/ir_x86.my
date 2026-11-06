@@ -11,7 +11,7 @@
 
 from .ast import FunData
 from .checker import Type
-from .codegen import CodeGen, CgBinding, int_signed, takes_operand, is_cmp, fold_load, fold_load_for_reader, text_at, has_text, is_aggregate, is_actor_t, is_tfloat32, REG_WORDS, arg_reg, spilled_word, narrow_operand, int_width_cg, tls_offset, TLS_SIZE
+from .codegen import CodeGen, CgBinding, int_signed, same_int, takes_operand, is_cmp, fold_load, fold_load_for_reader, text_at, has_text, is_aggregate, is_actor_t, is_tfloat32, REG_WORDS, arg_reg, spilled_word, narrow_operand, int_width_cg, tls_offset, TLS_SIZE
 from .ir import IrFunc, Inst, Term, Touches, Slot, ENV_WORD, Intrinsic, is_rc_dec, is_rc_atomic, is_cas, is_atomic_at, render_func, touches, use_counts, def_counts, inst_uses, term_uses, successors, ends_in_call
 from .ssa import promote, add_ssa_stats
 from .parser import expr_of, stmt_of, type_expr_of, block_of, pattern_of, fun_of  // AST values for #test cases (MYLA-184)
@@ -790,7 +790,8 @@ impl CodeGen {
                                     let one: int64 = 1
                                     self.emit(format("andq ${}, %rax", (one << (k as int64)) - 1))
                                 }
-                                self.wrap(rt)
+                                // in range already, as `emit_int_op`'s (MYLA-251)
+                                if !same_int(t, rt) { self.wrap(rt) }
                             } else {
                                 self.load_temp(b, "rcx", temp_base)
                                 self.emit_int_op(op, t, rt, pos.line, pos.col, self.temp_imm[b])
@@ -805,7 +806,7 @@ impl CodeGen {
                                 else if int_signed(t) { self.emit(format("sarq ${}, %rax", c)) }
                                 else { self.emit(format("shrq ${}, %rax", c)) }
                             }
-                            self.wrap(rt)
+                            if op == "<<" || !same_int(t, rt) { self.wrap(rt) }
                         } else {
                             self.load_temp(a, "rax", temp_base)
                             self.emit_int_op(op, t, rt, pos.line, pos.col, self.second_operand(op, b, temp_base))

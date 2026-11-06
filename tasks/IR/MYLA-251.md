@@ -2,7 +2,7 @@
 id: MYLA-251
 title: "Loop overhead: checks and widening the IR can prove away"
 type: improvement
-status: in-progress
+status: review
 priority: medium
 labels: [backend, performance, optimisation, ir]
 ---
@@ -16,8 +16,8 @@ Each 32-bit operation is sign-extended again (`movslq`), and `!flag` goes throug
 
 - [x] A list held in a register across a loop; the copy-on-write check once, before the loop, when nothing in the loop shares the list (2026-11-06)
 - [x] Bounds checks dropped where the index is provably in range (a counting loop below `len`), others merged (merging finds next to nothing, below)
-- [ ] Re-extension only where a value's upper bits are read; a negated condition branching directly
-- [ ] Measured: the sieve, Game of Life, fannkuch, quicksort, and the self-compile
+- [x] Re-extension only where a value's upper bits are read; a negated condition branching directly (the extensions left are read whole next, below)
+- [x] Measured: the sieve, Game of Life, fannkuch, quicksort, and the self-compile
 
 ## Done so far (2026-11-03, the optimisation pass of [[MYLA-242]])
 
@@ -55,7 +55,14 @@ These are passes on the IR ([[selfhost/ssa.my]], [[selfhost/inline.my]] are the 
 - **Test first.** `test_native_runtime.test_a_counting_loop_below_a_length_indexes_unchecked` reads the IR of five functions (a sum below `xs.len()`, n_body's pairs below `let n = bodies.len()` from `i + 1`, a `var` copy whose fields are written, a string's bytes, a `for x in xs`); the compiler before marks none of their eight accesses. `test_a_counting_loop_keeps_the_checks_it_needs`: nine loops that must still trap where they did (the list reassigned after `let n = xs.len()`, shadowed in the body, popped in the body or in an enclosing loop, another list indexed, a negative start, `i + 2`, a field of a `var` struct, a string reassigned), at the same position. The first fails on the compiler before; the second passes there too, and guards the proof.
 - **Measured** (callgrind, x86-64, against ba41033): n_body 86.5 → 71.8 million instructions (−17.0 %), closures 137.6 → 127.1 (−7.6 %: `for` loops over lists), string_build 91.6 → 88.7 (−3.2 %), quicksort −0.2 %; the rest unchanged, every output the same; the self-compile 5,123.6 → 5,100.2 million (−0.46 %). The benchmarks the item was written for (sieve, Game of Life, fannkuch) index with `j += i`, `(y + n - 1) % n` or `r - 1` against lengths earlier loops set, which this doesn't follow.
 
+## Re-extension where it can matter (2026-11-06)
+
+- **Where they are.** Sign extensions are 4–8 % of the instructions the loop benchmarks execute (callgrind with `--dump-instr`: sieve 4.4 %, Game of Life 4.1 %, quicksort 5.5 %, fannkuch 7.7 %, a third of fannkuch's and two fifths of quicksort's being sign-extending loads, which cost what a plain load does). The hot ones mostly extend a value that is an index next: the sieve's `j += i` (its 4.3 million), quicksort's and fannkuch's loop counters. An int32 temporary kept with its upper half undefined, extended only where it is read whole, would move those to the index's use, not remove them; removing them needs ranges, as `widen_counters` has for `+ 1`.
+- **What went.** In x86-64's code generation ([[selfhost/codegen.my]] `emit_int_op`, [[selfhost/ir_x86.my]]), no wrap after an operation whose result can't leave its operands' range, the operands being extended already: a remainder, a quotient but a signed one by a variable (the minimum by −1 wraps), `&`, `|`, `^` and `>>`, by a variable or a constant. And `emit` drops `movslq %Rd, %R` when the instruction after it writes `%Rd` without reading memory through `%R` (`extension_overwritten`; `ext_at` remembers the line, so the check costs the other lines two byte compares; one into another register, which a folded load leaves, stays): a 32-bit write clears the upper half, and its low bits don't depend on the upper half of what it reads, as in `(y + n - 1) % n`'s `leal`s. aarch64's and wasm32's extensions stay as they are.
+- **Test first.** `test_loop_overhead.test_a_remainder_and_a_sum_before_it_are_not_re_extended` (no `movslq` after `idivq`'s remainder or before a `leal` overwriting it) failed before; `test_integer_operations_at_the_limits_print_the_same` runs every such operation on int32, uint32, int8, uint8 and int16 values at their limits, by variables and by constants (`a ^ 4294967295u32`, `b & -2147483648`), the minimum divided by −1, natively and interpreted (239 lines, the same).
+- **Measured** (callgrind, against fa6b457): closures 127.1 → 125.1 million instructions (−1.6 %), Game of Life −0.8 %, quicksort −0.3 %, string_build −0.2 %, fannkuch −0.1 %, the rest unchanged; the self-compile 5,100.2 → 5,107.3 million (+0.14 %), the check's own cost, as the compiler's integer code gains little (it was +0.8 % while `emit` looked at every line's text).
+
 ## What is left
 
 - **Bounds checks.** Of the benchmark loops, n_body's index below a length (above); the others' indices are `j += i`, `r - 1`, `(y + n - 1) % n` against lengths that earlier `push` loops set, so dropping their checks needs the lists' lengths followed across loops (that `perm` holds `n` elements), a larger analysis than the item assumed. Merging repeated checks finds next to nothing: counting `elem` instructions of the same list and index in one block over quicksort, fannkuch, sieve and Game of Life gives 1 of 59 (a read sees the list through `load`, a write through `cow`).
-- **Re-extension in general** (only where a value's upper bits are read) is a different representation of int32 temporaries in each backend; the counting loop's step above was the common case that the IR could settle on its own.
+- **Re-extension in general** (only where a value's upper bits are read) is a different representation of int32 temporaries in each backend; measured above, it would move the hot extensions rather than remove them. Removing those needs ranges (that `j + i` can't overflow), like `widen_counters`'s for `+ 1`. aarch64's and wasm32's extensions after a remainder or a bitwise operation could go the way x86-64's did.
