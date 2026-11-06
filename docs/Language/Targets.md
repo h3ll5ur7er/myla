@@ -45,8 +45,6 @@ A program learns that its target lacks something from an error: the cause `Unsup
 
 ## How each target is built
 
-Every target runs the burn suites that build and run programs, x86-64 natively and the others under qemu-aarch64 and Node (`scripts/test-target.py`, [[Development/Testing]], [[MYLA-268]]). What the others are excused from, and why, is in `tests/burn/_targets.py`; besides what the table above lists, these are known gaps:
-
-- Under WASI, reading a directory is `Other`, not `IsADirectory`, and a removed working directory stops Node before the program starts ([[MYLA-281]]).
+Every target runs the burn suites that build and run programs, x86-64 natively and the others under qemu-aarch64 and Node (`scripts/test-target.py`, [[Development/Testing]], [[MYLA-268]]). What the others are excused from, and why, is in `tests/burn/_targets.py`: only what the table above lists (no processes on wasm32, one worker, Node's own memory measured) and the tests that read x86-64 code.
 
 An implementation may leave out what only parallel workers need when only one worker can exist: the deep copies at task boundaries and the atomic counts of actor handles (D133). Values are immutable, so the difference shows only in speed. wasm32 leaves out both: a value crossing between tasks keeps its counts (an argument of a child, a capture of an async lambda, a result), and an actor handle's count is a plain one. A program handing a 20000-element list and a 200-entry map to 6000 children ran in 0.42 to 0.55 s instead of 0.62 to 0.69 s under Node (2026-11-05). The details of each target's code generation, runtime and platform layer are on [[Architecture/Native-backend]].

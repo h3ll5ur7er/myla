@@ -186,7 +186,12 @@ fun wasi_path(path: str) -> str {
 
 // The import `n` on a path of the preopened directory: `(dir, path, len)`
 // as its first three arguments, then `rest` from the fourth on.
+// An empty path names nothing, as on Linux (ENOENT); WASI would take it for
+// the preopened directory itself (MYLA-281).
 fun on_path(n: int64, path: str, flags_first: bool, rest: [int64]) -> int64 {
+    if path.len() == 0 {
+        return -2
+    }
     let p = wasi_path(path)
     let a = __addr_of(p)
     var k: int64 = 0
@@ -245,8 +250,27 @@ fun rw(op: int64, fd: int64, buf: int64, n: int64) -> int64 {
     return __load64(scratch(3)) & LOW32
 }
 
+// A read of a directory is Linux's EISDIR, as `std.io` reports it on every
+// target (MYLA-281): WASI hosts refuse it otherwise (EBADF, a directory's
+// descriptor has no read right), so a refused read of one is that.
 pub fun read(fd: int64, buf: int64, n: int64) -> int64 {
-    return rw(W_FD_READ, fd, buf, n)
+    let r = rw(W_FD_READ, fd, buf, n)
+    if r == -9 && is_dir_fd(fd) {
+        return -21
+    }
+    return r
+}
+
+// Whether the open descriptor `fd` is a directory (its filestat's type at
+// 16, 3).
+fun is_dir_fd(fd: int64) -> bool {
+    let st = __rt_addr("__wasi_stat")
+    arg(0, fd)
+    arg(1, st)
+    if call(W_FD_FILESTAT_GET) < 0 {
+        return false
+    }
+    return __load8(st + 16) as int64 == 3
 }
 
 pub fun write(fd: int64, buf: int64, n: int64) -> int64 {
@@ -305,11 +329,16 @@ pub fun rename(from_path: str, to_path: str) -> int64 {
     return on_path(W_PATH_RENAME, from_path, false, [PREOPEN, ba + 8, __load64(ba)])
 }
 
-// The working directory (`PWD`, else `/`) written to `buf`: its length.
+// The working directory (`PWD`, else `/`) written to `buf`: its length; as
+// Linux's `getcwd`, ENOENT when it was removed (MYLA-281).
 pub fun cwd(buf: int64, n: int64) -> int64 {
     var wd = env_value("PWD")
     if wd == "" {
         wd = "/"
+    }
+    let st = __rt_addr("__wasi_stat")
+    if on_path(W_PATH_FILESTAT_GET, wd, true, [st]) == -2 {
+        return -2
     }
     let a = __addr_of(wd)
     let len = __load64(a)

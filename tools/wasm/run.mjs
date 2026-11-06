@@ -27,7 +27,16 @@ if (!file) {
   process.stderr.write("usage: node run.mjs program.wasm [args…]\n");
   process.exit(2);
 }
-const wasi = new Wasi({ args: [argv0 ?? file, ...rest], env: { ...process.env, PWD: process.cwd() }, fs: new NodeFs(), ...nodeStdio });
+// the working directory as the program sees it (`PWD`): Node's, or, when it
+// was removed (so Node can't say), the one the shell left in the environment,
+// which the program then finds gone (MYLA-281)
+let pwd;
+try {
+  pwd = process.cwd();
+} catch {
+  pwd = process.env.PWD ?? "";
+}
+const wasi = new Wasi({ args: [argv0 ?? file, ...rest], env: { ...process.env, PWD: pwd }, fs: new NodeFs(), ...nodeStdio });
 const module = new WebAssembly.Module(readFileSync(file));
 const instance = new WebAssembly.Instance(module, wasi.imports());
 let code;

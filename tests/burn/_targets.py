@@ -54,14 +54,6 @@ SKIP: dict[str, dict[str, str]] = {
         # no processes (D125, Language/Targets): `run` and `spawn` are
         # `Unsupported` there, which test_wasm checks
         "test_process": "WASI has no processes (test_wasm checks they are Unsupported)",
-        # the file system WASI shows (MYLA-281): reading a directory gives
-        # `Other` for `IsADirectory`, a path's kind differs in the tour, and a
-        # removed working directory stops Node's shim
-        "test_fs.TestReadFileExample.test_a_directory": "reading a directory is Other, not IsADirectory (MYLA-281)",
-        "test_fs.TestWriteToFileParity.test_directory_read_is_a_directory":
-            "reading a directory is Other, not IsADirectory (MYLA-281)",
-        "test_fs.DirectoryParity.test_tour": "a path's kind differs under WASI (MYLA-281)",
-        "test_fs.DirectoryParity.test_current_dir_removed": "a removed working directory stops Node's shim (MYLA-281)",
     },
 }
 
