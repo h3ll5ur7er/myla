@@ -18,7 +18,7 @@
 from .checker import Type, subst_type
 from .codegen import CodeGen, PartialJob, is_aggregate, int_signed, int_width_cg, is_tfloat32, is_aggregate_opt, is_cell_t, is_tfunc, is_actor_t, tls_offset, TLS_SIZE
 from .ir import IrFunc, Inst, Term, Slot, ENV_WORD, ends_in_call
-from .ir_x86 import slots_at, frame_size
+from .ir_x86 import slots_at, frame_size, tail_call_at, drops_after_free, passes_frame_address, frame_addresses
 
 // The argument words that come in registers (x0 to x7).
 const A64_WORDS: int32 = 8
@@ -129,6 +129,7 @@ impl CodeGen {
             }
             si = si + 1
         }
+        var in_frame: [bool] = []
         var k = 0
         while k < f.order.len() {
             let b = f.order[k]
@@ -137,6 +138,19 @@ impl CodeGen {
                 let insts = f.blocks[b].insts
                 let term = f.blocks[b].term
                 var stop = insts.len()
+                // a call whose result the function returns at once, made in
+                // its place (MYLA-283, as x86-64's MYLA-126): its arguments
+                // in registers, none an address in this frame
+                var tail = -1
+                if !f.frame {
+                    tail = tail_call_at(insts, term)
+                    if tail >= 0 && !drops_after_free(f, insts, tail) { tail = -1 }
+                    if tail >= 0 && a64_call_words(insts[tail]) > A64_WORDS { tail = -1 }
+                    if tail >= 0 {
+                        if in_frame.len() == 0 { in_frame = frame_addresses(f) }
+                        if passes_frame_address(insts[tail], in_frame) { tail = -1 }
+                    }
+                }
                 // `become`'s call, and the call before a `suspend`, replace
                 // the function (D87, D90)
                 var becomes = match term { Term.Become => true, _ => false }
@@ -151,6 +165,7 @@ impl CodeGen {
                     _ => {},
                 }
                 if becomes { stop = insts.len() - 1 }
+                if !becomes && tail >= 0 { stop = tail }
                 var i = 0
                 while i < stop {
                     self.a64_inst(f, fr, insts[i])
@@ -159,6 +174,8 @@ impl CodeGen {
                 if becomes {
                     if resume_at >= 0 { self.a64_state(fr, resume_at) }
                     self.a64_tail_call(f, fr, insts[insts.len() - 1])
+                } else if tail >= 0 {
+                    self.a64_tail_call(f, fr, insts[tail])
                 } else {
                     self.a64_term(f, fr, term, labels)
                 }

@@ -23,7 +23,7 @@
 from .checker import Type, subst_type
 from .codegen import CodeGen, PartialJob, is_aggregate, int_width_cg, is_tfloat32, is_aggregate_opt, is_cell_t, is_tfunc, tls_offset
 from .ir import IrFunc, Inst, Term, Slot, ENV_WORD, ends_in_call
-from .ir_x86 import slots_at, frame_size
+from .ir_x86 import slots_at, frame_size, tail_call_at, drops_after_free, passes_frame_address, frame_addresses
 
 // A function being emitted: its argument words, the local of each
 // temporary (`nparams + t`), the scratch locals, the frame's size and each
@@ -181,6 +181,7 @@ impl CodeGen {
         table.append(format("{}", n - 1))
         table.append("}")
         self.emit(table.build())
+        var in_frame: [bool] = []
         i = 0
         while i < n {
             self.emit("end_block")
@@ -200,6 +201,20 @@ impl CodeGen {
             }
             var stop = insts.len()
             if becomes { stop = insts.len() - 1 }
+            // a call whose result the function returns at once, a
+            // `return_call` (MYLA-283, as x86-64's MYLA-126): none of its
+            // arguments an address in this frame (every function's result
+            // is one i64, so any call fits)
+            var tail = -1
+            if !becomes && !f.frame {
+                tail = tail_call_at(insts, term)
+                if tail >= 0 && !drops_after_free(f, insts, tail) { tail = -1 }
+                if tail >= 0 {
+                    if in_frame.len() == 0 { in_frame = frame_addresses(f) }
+                    if passes_frame_address(insts[tail], in_frame) { tail = -1 }
+                }
+                if tail >= 0 { stop = tail }
+            }
             var j = 0
             while j < stop {
                 self.wasm_inst(f, w, insts[j])
@@ -208,6 +223,8 @@ impl CodeGen {
             if becomes {
                 if resume_at >= 0 { self.wasm_state(w, resume_at) }
                 self.wasm_tail_call(f, w, insts[insts.len() - 1])
+            } else if tail >= 0 {
+                self.wasm_tail_call(f, w, insts[tail])
             } else {
                 self.wasm_term(f, w, term, n - 1 - i)
             }

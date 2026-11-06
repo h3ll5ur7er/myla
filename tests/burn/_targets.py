@@ -38,18 +38,8 @@ _X86_TESTS = [
     "test_selfhost_codegen.SelfHostedCodegenParity.test_derived_eq_on_a_plain_enum_compares_tags",
 ]
 
-# A call in tail position jumps on x86-64 only (MYLA-126, an optimisation:
-# D87 guarantees `become`, which every target keeps); these programs recurse
-# millions deep through plain calls (MYLA-283).
-_PLAIN_TAIL_CALLS = "a plain call in tail position takes a frame here (MYLA-283)"
-_TAIL_TESTS = [
-    "test_selfhost_codegen.SelfHostedCodegenParity.test_calls_in_tail_position_reuse_the_frame",
-    "test_selfhost_codegen.SelfHostedCodegenParity.test_tail_calls_hand_over_owned_arguments",
-]
-
 _BOTH = {
     **{t: _X86_CODE for t in _X86_TESTS},
-    **{t: _PLAIN_TAIL_CALLS for t in _TAIL_TESTS},
 }
 
 SKIP: dict[str, dict[str, str]] = {

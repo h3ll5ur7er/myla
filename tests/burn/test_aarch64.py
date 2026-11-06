@@ -271,6 +271,56 @@ fun main() {
     print(g(Pair { a: 7, b: "" }, 0))
 }
 """
+# calls in tail position, a million deep without `become`: each jumps, as on
+# x86-64 (MYLA-283); a function without a result calling one, and one whose
+# result it drops, in tail position too
+PROGRAMS["tail_calls_jump"] = """
+fun count_down(n: int, acc: int) -> int {
+    if n == 0 {
+        return acc
+    }
+    return count_down(n - 1, acc + 1)
+}
+
+fun is_even(n: int) -> bool {
+    if n == 0 {
+        return true
+    }
+    return is_odd(n - 1)
+}
+
+fun is_odd(n: int) -> bool {
+    if n == 0 {
+        return false
+    }
+    return is_even(n - 1)
+}
+
+fun label(n: int, s: str) -> str {
+    if n == 0 {
+        return s
+    }
+    return label(n - 1, s + "x")
+}
+
+fun tick(n: int) -> int {
+    return n + 1
+}
+
+fun quietly(n: int) {
+    if n > 0 {
+        print(n)
+    }
+    let t = tick(n)
+}
+
+fun main() {
+    print(count_down(1000000, 0))
+    print(is_even(1000001))
+    print(label(3, "a"))
+    quietly(5)
+}
+"""
 # a `become` through a partial application's thunk, a million deep: the thunk
 # jumps to its function (D87, MYLA-130, MYLA-268)
 PROGRAMS["become_through_a_thunk"] = """
