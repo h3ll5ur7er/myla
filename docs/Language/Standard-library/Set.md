@@ -35,8 +35,8 @@ fun main() {
 
 | Function | Result |
 | --- | --- |
-| `new<T>() -> Set<T>` | An empty set |
-| `of<T>(xs: [T]) -> Set<T>` | The elements of `xs`, in the order they first occur there |
+| `new<T: Eq + Hash>() -> Set<T>` | An empty set |
+| `of<T: Eq + Hash>(xs: [T]) -> Set<T>` | The elements of `xs`, in the order they first occur there |
 
 | Method | Result |
 | --- | --- |
@@ -54,7 +54,7 @@ The order is the map's: an element inserted again keeps its place, one removed a
 
 ## Elements
 
-An element is what a map key can be: an integer, `char`, `bool` or `str`. The set asks nothing more of `T` than the map does, so once [[MYLA-313]] makes tuples and structs that derive `Eq` and `Hash` keys (D163), they are elements too, with no change to `std.set`.
+An element is what a map key can be: a type that is `Eq` and `Hash` (D163, [[MYLA-313]]): an integer, `char`, `bool`, `str`, a tuple or list of such, or a struct or enum that derives or implements both. The functions and methods say so, `T: Eq + Hash`.
 
 ## Making one
 
