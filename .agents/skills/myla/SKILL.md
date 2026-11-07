@@ -71,7 +71,7 @@ fun main() {
 | `E::A`, `.a` (Swift) to construct | `E.A`, `E.B(1)` | Variants are built with a dot; only `Some`/`None`/`Ok`/`Err` work bare |
 | `Point::new()`, `static func` | a free function `fun new_point() -> Point` | No associated/static functions: every method takes `self` |
 | `&self`, `&mut self`, `&x`, lifetimes | `self`, `var self`, plain values | No references or borrowing; everything is a value (copy-on-write under the hood) |
-| `opt.unwrap()`, `.map(…)`, `.unwrap_or(…)` | `match opt { Some(v) => v, None => 0 }`, `if let Some(v) = opt { … }` or `?` | `Option`/`Result` have no methods; `if let`/`while let` (D104) are sugar over `match` |
+| `opt.unwrap()` | `opt.unwrap_or(0)`, `opt.expect("why")`, `match opt { Some(v) => v, None => 0 }`, `if let Some(v) = opt { … }` or `?` | no `unwrap`: `std.option` (implicit, D164) has `map`, `and_then`, `unwrap_or`, `expect`, …; `if let`/`while let` (D104) are sugar over `match` |
 | `\|x\| x + 1`, `{ x in x + 1 }` | `(x: int) => x + 1`, `(x) => { return x }` | Lambda syntax; parameter types can be omitted only when a function type is expected |
 | `Fn(i32) -> i32`, `(Int) -> Int` | `(int) -> int` | Function types |
 | `println!("{}", x)`, `print("\(x)")` | `print(x)`, `print(f"x = {x}")`, `format("x = {}", x)` | `print` takes exactly one int/float/char/bool/str; holes take Rust's specs, `{x:>8.2}`, `{n:#06x}` (D139), and a type with `impl Format` (`fun format(self, spec: str) -> str`) can stand in one |

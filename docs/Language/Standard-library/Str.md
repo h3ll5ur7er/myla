@@ -1,10 +1,8 @@
 # std.str
 
-Methods on `str` for searching, splitting, trimming, case and replacing ([[MYLA-321]]). They are in an `impl str`, so a call reads like a built-in one: `line.split(",")`. Every program will see them without an import ([[MYLA-320]]).
+Methods on `str` for searching, splitting, trimming, case and replacing ([[MYLA-321]]). They are in an `impl str`, so a call reads like a built-in one: `line.split(",")`. Every program sees them without an import ([[MYLA-320]]).
 
-```myla fragment
-import std.str
-
+```myla
 fun main() {
     let text = "name = Ada\r\nlangs = myla, rust\r\n\r\n"
     for line in text.lines() {
