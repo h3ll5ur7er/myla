@@ -3048,6 +3048,10 @@ impl Checker {
                 let w = match t { Type.TInt(ww, ss) => ww, _ => 32 }
                 let sg = match t { Type.TInt(ww, ss) => ss, _ => true }
                 if !lit_fits(v, big, w, sg, self.neg_lit == e.id) { return Err(terr_at(e.line, e.col, e.sp, format("integer literal {} does not fit in '{}'", int_text(v, big), type_name(t)))) }
+                // recorded here too: a literal typed again by its context
+                // (the other operand, an argument) keeps the type it gets,
+                // which the lowering reads (MYLA-358)
+                self.record_type(e.id, Some(t))
                 Ok(t)
             },
             _ => Err(terr_at(e.line, e.col, e.sp, "expected an integer literal")),   // unreachable
@@ -3067,12 +3071,17 @@ impl Checker {
                     },
                     None => {},
                 }
+                // recorded here too, as an integer literal is (MYLA-358)
                 match expected {
                     Some(et) => {
-                        if is_float(et) { return Ok(et) }
+                        if is_float(et) {
+                            self.record_type(e.id, Some(et))
+                            return Ok(et)
+                        }
                     },
                     None => {},
                 }
+                self.record_type(e.id, Some(t_float()))
                 return Ok(t_float())
             },
             _ => {},

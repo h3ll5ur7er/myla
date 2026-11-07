@@ -8,6 +8,20 @@ from tests.burn._targets import program_excuse
 from tests.burn._native import CAN_BUILD_NATIVE, SKIP_REASON, build_and_run, interpret, selfhost_run
 
 PROGRAMS = {
+    # an unsuffixed literal left of an unsigned operator takes the right
+    # operand's type, natively too (MYLA-358: 10 / m divided as signed)
+    "literal_left_of_unsigned_division": (
+        "#main\nfun main() {\n"
+        "    let m: uint64 = 18446744073709551615u64\n"
+        "    print(10 / m)\n    print(10 % m)\n"
+        "    let big: uint64 = 9223372036854775808u64\n"
+        "    print(100 / big)\n    print(100 % big)\n"
+        "    let n: uint32 = 4000000000u32\n"
+        "    print(7 / n)\n    print(5 + n)\n"
+        "    let k: uint8 = 200u8\n"
+        "    print(255 / k)\n    print(100 < k)\n"
+        "}\n"
+    ),
     # a lambda's parameters typed from a generic call's argument types known
     # so far, its result inferred and binding the rest (MYLA-356)
     "lambda_parameters_from_known_arguments": (
@@ -3833,6 +3847,8 @@ class TestCompilerParity(unittest.TestCase):
 # longer holds (a later decision changed its meaning) or there is none (a
 # program added or changed since): its output, pinned here.
 PINNED = {
+    # MYLA-358: new; the interpreter gives the same
+    "literal_left_of_unsigned_division": "0\n10\n0\n100\n0\n4000000005\n1\ntrue\n",
     # MYLA-356: new, so no recording; the interpreter gives the same
     "lambda_parameters_from_known_arguments": "6\n3\n5\ntrue\n3\n",
     # D102: the unsuffixed 123.456 is a float64 now (the recording's

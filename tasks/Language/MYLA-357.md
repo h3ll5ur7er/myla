@@ -16,8 +16,10 @@ impl [str] {
 }
 ```
 
+The `std.int` lane ([[MYLA-322]]) found a second problem in the harness: it types an unsuffixed literal receiver as `int32`, so `#test(5)[…]` on a method of `impl int8` doesn't build natively. Its cases suffix every receiver (`5i8`).
+
 A smaller thing seen in the same place: a case on a method of `impl [str]` is reported as `__list.width #1`, the internal name, where `[str].width #1` would read better (D116 names a case by the method's checked name).
 
-- [ ] The harness ([[selfhost/harness.my]]) annotates every receiver and argument it binds with the parameter's type
+- [ ] The harness ([[selfhost/harness.my]]) annotates every receiver and argument it binds with the parameter's type, which covers both: `[]` and an unsuffixed literal
 - [ ] A case of every receiver kind with an empty value (`[]`, `[:]`) in `test_test_functions` or the harness's own tests, interpreted and native
 - [ ] The report's name of a method on a built-in type
