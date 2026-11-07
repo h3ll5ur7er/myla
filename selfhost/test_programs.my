@@ -1,0 +1,208 @@
+// test_programs.my — the test programs of a project's `tests/` (D162,
+// MYLA-306): a program whose trailing comment block says what it reads,
+// prints and how it ends, the convention of the documentation's code
+// blocks (D114) with an input and an exit status:
+//
+//   fun main() { … }
+//   // input:
+//   // world
+//   // output:
+//   // hello world
+//   // exit: 0
+//
+// `myla test` runs it (in the interpreter, or built with `--native`) and
+// compares. `// output:` makes a file a test program; `// input:` is its
+// standard input (none: empty); `// exit:` the status it ends with (none:
+// 0); `// stderr:` the start of what it prints on stderr (a runtime error's
+// first lines; none: stderr isn't compared). The sections may come in any
+// order; a line of a section is its text after `// `.
+
+
+pub struct TestProgram { input: str, output: str, exit: int32, stderr: Option<str> }
+
+// The trailing comment block of `source`: its lines, each without its `//`
+// and one space, newest last; [] without one.
+#test("fun main() {}\n// output:\n// hi\n")[["output:", "hi"]]
+#test("fun main() {}\n")[[]]
+#test("// a\nfun main() {}\n//\n// b\n")[["", "b"]]
+pub fun trailing_block(source: str) -> [str] {
+    let lines = split_lines(source)
+    var k = lines.len() - 1
+    while k >= 0 && starts_with_slashes(lines[k]) { k = k - 1 }
+    var out: [str] = []
+    var i = k + 1
+    while i < lines.len() {
+        out.push(comment_text(lines[i]))
+        i = i + 1
+    }
+    return out
+}
+
+// `source`'s lines, a last line without a newline included.
+#test("a\nb\n")[["a", "b"]]
+#test("a\nb")[["a", "b"]]
+#test("")[[]]
+fun split_lines(source: str) -> [str] {
+    var out: [str] = []
+    var line = StringBuilder()
+    var i = 0
+    while i < source.len() {
+        if source[i] == '\n' {
+            out.push(line.build())
+            line = StringBuilder()
+        } else {
+            line.append_byte(source[i])
+        }
+        i = i + 1
+    }
+    let rest = line.build()
+    if rest.len() > 0 { out.push(rest) }
+    return out
+}
+
+#test("// a")[true]
+#test("//")[true]
+#test("fun main() {}")[false]
+#test("")[false]
+fun starts_with_slashes(line: str) -> bool {
+    return line.len() >= 2 && line[0] == '/' && line[1] == '/'
+}
+
+// A comment line's text: after `// `, or after `//`.
+#test("// hello")["hello"]
+#test("//")[""]
+#test("//x")["x"]
+fun comment_text(line: str) -> str {
+    if line.len() >= 3 && line[2] == ' ' { return line[3:] }
+    return line[2:]
+}
+
+// What `source` says a run of it does, read from its trailing block; None
+// when the block has no `// output:` line (the file is no test program).
+#test("fun main() { print(1) }\n// output:\n// 1\n")[Some(TestProgram { input: "", output: "1\n", exit: 0, stderr: None })]
+#test("fun main() {}\n// input:\n// a\n// b\n// output:\n// exit: 3\n// stderr:\n// runtime error: boom\n")[Some(TestProgram { input: "a\nb\n", output: "", exit: 3, stderr: Some("runtime error: boom\n") })]
+#test("fun main() {}\n// a comment\n")[None]
+#test("fun main() {}\n")[None]
+pub fun test_program_of(source: str) -> Option<TestProgram> {
+    let block = trailing_block(source)
+    var has_output = false
+    var section = ""
+    var input = StringBuilder()
+    var output = StringBuilder()
+    var stderr = StringBuilder()
+    var has_stderr = false
+    var exit = 0
+    for line in block {
+        if line == "input:" { section = "input"
+            continue }
+        if line == "output:" {
+            section = "output"
+            has_output = true
+            continue
+        }
+        if line == "stderr:" {
+            section = "stderr"
+            has_stderr = true
+            continue
+        }
+        if starts_with_text(line, "exit: ") {
+            exit = int_of(line[6:])
+            section = ""
+            continue
+        }
+        if section == "input" { input.append(line)
+            input.append("\n") }
+        else if section == "output" { output.append(line)
+            output.append("\n") }
+        else if section == "stderr" { stderr.append(line)
+            stderr.append("\n") }
+    }
+    if !has_output { return None }
+    var err: Option<str> = None
+    if has_stderr { err = Some(stderr.build()) }
+    return Some(TestProgram { input: input.build(), output: output.build(), exit: exit, stderr: err })
+}
+
+#test("exit: 3", "exit: ")[true]
+#test("exit", "exit: ")[false]
+pub fun starts_with_text(s: str, prefix: str) -> bool {
+    if s.len() < prefix.len() { return false }
+    var i = 0
+    while i < prefix.len() {
+        if s[i] != prefix[i] { return false }
+        i = i + 1
+    }
+    return true
+}
+
+// The integer `text` holds (decimal, a `-` allowed); 0 for anything else.
+#test("3")[3]
+#test("-1")[-1]
+#test("x")[0]
+fun int_of(text: str) -> int32 {
+    var n = 0
+    var i = 0
+    var neg = false
+    if text.len() > 0 && text[0] == '-' { neg = true
+        i = 1 }
+    while i < text.len() {
+        let c = text[i]
+        if c < '0' || c > '9' { return 0 }
+        n = n * 10 + (c as int32 - 48)
+        i = i + 1
+    }
+    if neg { return -n }
+    return n
+}
+
+// The report of a run of the test program `name` that printed `stdout` and
+// `stderr` and ended with `code` (a signal as -signal): [] when it did what
+// `tp` says, else its FAIL line and what to show under it, each with its
+// newline.
+#test("tests/t.my", TestProgram { input: "", output: "1\n", exit: 0, stderr: None }, "1\n", "", 0)[[]]
+#test("tests/t.my", TestProgram { input: "", output: "1\n", exit: 0, stderr: None }, "2\n", "", 0)[["FAIL  tests/t.my: output differs\n", "      expected:\n", "      | 1\n", "      got:\n", "      | 2\n"]]
+#test("tests/t.my", TestProgram { input: "", output: "", exit: 0, stderr: None }, "", "runtime error: boom\n", 1)[["FAIL  tests/t.my: exited with status 1, expected 0\n", "      | runtime error: boom\n"]]
+#test("tests/t.my", TestProgram { input: "", output: "", exit: 1, stderr: Some("runtime error: boom\n") }, "", "runtime error: bang\n  --> t.my:1:1\n", 1)[["FAIL  tests/t.my: stderr differs\n", "      expected:\n", "      | runtime error: boom\n", "      got:\n", "      | runtime error: bang\n", "      |   --> t.my:1:1\n"]]
+#test("tests/t.my", TestProgram { input: "", output: "", exit: 0, stderr: None }, "", "", -9)[["FAIL  tests/t.my: killed by signal 9, expected exit status 0\n"]]
+pub fun test_program_report(name: str, tp: TestProgram, stdout: str, stderr: str, code: int32) -> [str] {
+    var out: [str] = []
+    if code < 0 {
+        out.push(format("FAIL  {}: killed by signal {}, expected exit status {}\n", name, -code, tp.exit))
+        for l in text_lines(stderr) { out.push("      | " + l + "\n") }
+        return out
+    }
+    if code != tp.exit {
+        out.push(format("FAIL  {}: exited with status {}, expected {}\n", name, code, tp.exit))
+        for l in text_lines(stderr) { out.push("      | " + l + "\n") }
+        return out
+    }
+    if stdout != tp.output {
+        out.push(format("FAIL  {}: output differs\n", name))
+        out.push("      expected:\n")
+        for l in text_lines(tp.output) { out.push("      | " + l + "\n") }
+        out.push("      got:\n")
+        for l in text_lines(stdout) { out.push("      | " + l + "\n") }
+        return out
+    }
+    match tp.stderr {
+        Some(want) => {
+            if !starts_with_text(stderr, want) {
+                out.push(format("FAIL  {}: stderr differs\n", name))
+                out.push("      expected:\n")
+                for l in text_lines(want) { out.push("      | " + l + "\n") }
+                out.push("      got:\n")
+                for l in text_lines(stderr) { out.push("      | " + l + "\n") }
+                return out
+            }
+        },
+        None => {},
+    }
+    return out
+}
+
+// `text`'s lines, for showing: a last one without its newline counts.
+#test("a\nb\n")[["a", "b"]]
+#test("")[[]]
+fun text_lines(text: str) -> [str] {
+    return split_lines(text)
+}

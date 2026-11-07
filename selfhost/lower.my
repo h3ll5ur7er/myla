@@ -4189,6 +4189,17 @@ impl Lower {
             self.add(Inst.Global(d, nm + "_val", 8))
             return self.owned_value(cg, d, t)
         }
+        // the test runner's environment, natively (D162): the harness of
+        // `myla test --native` sets MYLA_TEST_DIR and MYLA_TEST_PROGRAM for
+        // the case it runs
+        if nm == "__test_dir" || nm == "__test_program" {
+            let var_name = if nm == "__test_dir" { "MYLA_TEST_DIR" } else { "MYLA_TEST_PROGRAM" }
+            let sv = self.temp(Type.TStr)
+            self.add(Inst.Str(sv, var_name))
+            let d = self.temp(t)
+            self.rt_call(cg, d, "__getenv", [sv])
+            return self.owned_value(cg, d, t)
+        }
         if nm == "__run_exit_code" || nm == "__run_signal" || nm == "__run_errno" {
             var sym = nm + "_val"
             if nm == "__run_exit_code" { sym = "__run_exit_val" }

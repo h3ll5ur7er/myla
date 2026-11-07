@@ -19,7 +19,8 @@ from .loader import load_program_opts, load_options, type_errors, warning_report
 from .checker import build_checker_decls
 from .stdroot import default_stdlib_root
 from .diag import Report
-from .driver import cmd_interp
+from .driver import cmd_interp, cmd_test
+from .interp import all_tests
 
 fun main() {
     let argv = args()
@@ -36,8 +37,8 @@ fun main() {
         i += 1
     }
     if cmd == "check" { exit(check_json(argv[2])) }
-    if cmd == "run" { exit(cmd_interp(argv[2], opts, false, rest)) }
-    if cmd == "test" { exit(cmd_interp(argv[2], opts, true, rest)) }
+    if cmd == "run" { exit(cmd_interp(argv[2], opts, rest)) }
+    if cmd == "test" { exit(cmd_test(argv[2], opts, all_tests())) }
     eprintln("play: unknown command '" + cmd + "'")
     exit(2)
 }

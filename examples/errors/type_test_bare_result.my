@@ -1,0 +1,9 @@
+//~ type error: a test function has no result or a 'Result<(), E>'; a case of 'answer' is '#test()[expected]'
+//~ span: #test
+// A test function passes by returning (D162): one with a value to give
+// takes a case naming it.
+#test
+fun answer() -> int {
+    return 42
+}
+fun main() {}

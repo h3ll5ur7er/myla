@@ -305,7 +305,12 @@ class TestCommandParity(_Layout):
         py, my = self.both("{work}/failing.my", {"failing.my": FAILING})
         self.assertEqual(py[1], 1, py)
         self.assertIn("FAIL  quits #1: exited with status 3", py[0])
-        self.assertEqual(my, py)
+        # D162: what a case prints is shown under its FAIL line, not before
+        # the report as the Python CLI printed it
+        self.assertTrue(py[0].startswith("from a test\n"), py[0])
+        want = py[0][len("from a test\n"):].replace("FAIL  noisy #1: expected 3, got 4\n",
+                                                      "FAIL  noisy #1: expected 3, got 4\n      | from a test\n")
+        self.assertEqual(my, (want, py[1]))
 
     def test_the_corpus(self):
         files = _sources_with_tests()

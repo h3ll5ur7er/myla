@@ -46,6 +46,7 @@ flowchart LR
 | `diag.my` | Rendering an error with its source line and carets | below |
 | `repl.my` | `myla repl` | [[Architecture/Self-hosted-compiler]] |
 | `project.my`, `project_cmd.my`, `fetch.my` | The project tool | [[Architecture/Project-tool]] |
+| `test_programs.my`, `harness.my` | A project's test programs, and the harness of `myla test --native` (D162) | [[Language/Attributes-and-testing]], [[Development/Testing]] |
 | `lib/std/*.my` | The standard library, in Myla; `rt.my` is the native runtime, `platform*.my` the platform layer per target | [[Language/Standard-library]] |
 | `lib/debug/myla_gdb.py` | gdb pretty-printers, embedded in `-g` binaries (D82) | [[Development/Debugging]] |
 

@@ -1,0 +1,5 @@
+type error: '#test' can't run an async method (test it through an async test function, D162)
+  --> examples/errors/type_test_async.my:7:5
+  |
+7 |     #test(Fetcher { n: 1 })[10]
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^

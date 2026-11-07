@@ -558,3 +558,70 @@ pub fun names_in_block(b: Block, acc: [str]) -> [str] {
     }
     return out
 }
+
+// --- `#test` expectations (D162, MYLA-304) --------------------------------
+
+// What a case expects of the call: a value, `[panic("message")]` (the call
+// ends in a runtime error with that message), `[exit(n)]` (it ends with
+// that status). The last two are read from the expression's shape, before
+// it is typed; the message and the status are literals.
+pub enum Expected {
+    Value,
+    Panics(str),
+    Exits(int64),
+}
+
+// A call of `panic` or `exit` (`std.process.exit`, by whatever name it is
+// imported) in a case's `[...]`: `Some(name)` of the callee.
+#test(expr_of("panic(\"boom\")"))[Some("panic")]
+#test(expr_of("exit(3)"))[Some("exit")]
+#test(expr_of("div(1, 0)"))[None]
+#test(expr_of("3"))[None]
+pub fun failure_callee(e: Expr) -> Option<str> {
+    match e.kind {
+        ExprKind.Call(callee, args) => {
+            match callee.kind {
+                ExprKind.Name(n) => {
+                    if n == "panic" { return Some("panic") }
+                    if n == "exit" || ends_with_segment(n, "exit") { return Some("exit") }
+                    return None
+                },
+                _ => { return None },
+            }
+        },
+        _ => { return None },
+    }
+}
+
+// Whether the qualified name `n` (`std$process$exit`) ends in the segment `last`.
+#test("std$process$exit", "exit")[true]
+#test("exit", "exit")[false]
+#test("my$exits", "exit")[false]
+fun ends_with_segment(n: str, last: str) -> bool {
+    if n.len() <= last.len() + 1 { return false }
+    let cut = n.len() - last.len()
+    if n[cut - 1] != '$' { return false }
+    var i = 0
+    while i < last.len() {
+        if n[cut + i] != last[i] { return false }
+        i = i + 1
+    }
+    return true
+}
+
+// The expectation an expected value states: `panic("…")` and `exit(n)` with
+// their literal; anything else, a call of `panic` or `exit` with something
+// else included, is a value (the checker refuses the latter).
+#test(expr_of("panic(\"boom\")"))[Expected.Panics("boom")]
+#test(expr_of("exit(3)"))[Expected.Exits(3)]
+#test(expr_of("panic(x)"))[Expected.Value]
+#test(expr_of("Ok(())"))[Expected.Value]
+pub fun expected_failure(e: Expr) -> Expected {
+    let callee = match failure_callee(e) { Some(c) => c, None => { return Expected.Value } }
+    let args = match e.kind { ExprKind.Call(c, xs) => xs, _ => [] }
+    if args.len() != 1 { return Expected.Value }
+    if callee == "panic" {
+        return match args[0].kind { ExprKind.StrLit(m) => Expected.Panics(m), _ => Expected.Value }
+    }
+    return match args[0].kind { ExprKind.IntLit(v, sfx, isc, big) => { if isc { Expected.Value } else { Expected.Exits(v) } }, _ => Expected.Value }
+}

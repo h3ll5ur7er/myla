@@ -1,0 +1,9 @@
+//~ type error: a bare '#test' marks a test function, which takes no parameters; a case of 'double' is '#test(args)[expected]'
+//~ span: #test
+// A test function takes no parameters (D162): a function with some takes
+// cases, `#test(args)[expected]`.
+#test
+fun double(n: int) -> int {
+    return n * 2
+}
+fun main() {}

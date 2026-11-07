@@ -295,6 +295,7 @@ fun main() {
 - The block reads the variables as they are when it runs (`done` above), and sees the names declared before the `defer`: one declared later, or by a block it is left from, isn't the one it means.
 - It may not `return`, `become`, use `?`, `await`, or start a task with `async let`: it runs on the way out, without suspending. `break` and `continue` only reach a loop inside it. A lambda in it is a function of its own.
 - In an async function a block's children end first (the block waits for them as it ends), then its deferred blocks run.
+- A failure (a runtime error, `exit`) ends the program and runs none (D97, D141), except inside a `#test` case under `myla test`, which it ends instead: the case unwinds through its deferred blocks, innermost first, as a `return` would (D162, [[Language/Attributes-and-testing#when-a-case-fails]]).
 - A failure (a panic, a runtime error, `exit`) runs none: it ends the program at once (D97). They run on every way out the program survives (D141); a cancellation only asks a task to stop (D96), so it stops nothing itself.
 - `defer` is a keyword only at the start of a statement before `{`; elsewhere it is an ordinary name.
 - At the top of the REPL the session's scope never ends, so a `defer` typed there doesn't run.

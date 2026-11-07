@@ -24,7 +24,7 @@ async fun twice(n: int) -> int {
 - A synchronous function can call synchronous ones only. There is no blocking wait for an async one.
 - A function type can be async too: `async (int) -> int`; so can a lambda: `async (n: int) => await fetch(n)`. An async function value is called with `await` too. It isn't a synchronous one: `let f: (int) -> int = fetch` is an error.
 - An async function can't be partially applied (`fetch(_)`) or composed with `>>`: either would make a synchronous function value of it.
-- `#test` can't run an async function, `become` can't stand in one, and a trait's methods can't be async.
+- `#test` on an async function runs the case as the entry task of a program of its own (D162, [[Language/Attributes-and-testing#async-cases]]); `become` can't stand in an async function, and a trait's methods can't be async.
 
 ## Child tasks: `async let`
 
