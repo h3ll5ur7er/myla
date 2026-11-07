@@ -1,0 +1,5 @@
+type error: type 'P' does not satisfy the bound 'T: Ord' required by 'new_heap'
+  --> examples/errors/type_generic_call_expected_breaks_bound.my:15:30
+   |
+15 |     let h: Heap<P> = new_heap()
+   |                      ^^^^^^^^^^

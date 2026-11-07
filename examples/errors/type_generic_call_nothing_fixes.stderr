@@ -1,0 +1,5 @@
+type error: cannot infer type parameter(s) T for 'mk' from the arguments; add a type annotation to guide inference
+  --> examples/errors/type_generic_call_nothing_fixes.my:13:15
+   |
+13 |     let b = mk()
+   |             ^^^^

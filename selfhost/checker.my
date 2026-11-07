@@ -1125,22 +1125,95 @@ fun subst_has(subst: [Subst], name: str) -> bool {
     return match subst_get(subst, name) { Some(x) => true, None => false }
 }
 
-// The hint a lambda argument of a generic call gets while the parameter's
-// type still names a type parameter (MYLA-356): when it is a function type
-// whose parameter types are known, the lambda's parameters take them and its
-// result, left open, is inferred from its body; else none.
-#test(Type.TFunc([Type.TInt(32, true)], Some(Type.TParam("U"))))[Some(Type.TFunc([Type.TInt(32, true)], None))]
-#test(Type.TFunc([Type.TParam("T")], Some(Type.TParam("U"))))[None]
-#test(Type.TList(Type.TParam("T")))[None]
-fun lambda_param_hint(want: Type) -> Option<Type> {
-    return match want {
-        Type.TFunc(ps, r) => if list_any_tp(ps) { None } else { Some(Type.TFunc(ps, None)) },
-        Type.TAsync(f) => match lambda_param_hint(f) {
+// Whether `subst` solves every type parameter `t` names. In a callee's
+// signature every one is the callee's own, while what `subst` maps them to
+// may name the caller's, which are known types in the caller's body
+// (MYLA-315): so this, not `contains_type_param` after the substitution,
+// says whether a parameter's type is known.
+#test(Type.TList(Type.TParam("T")), [Subst { name: "T", ty: Type.TParam("T") }])[true]
+#test(Type.TMap(Type.TStr, Type.TParam("V")), [Subst { name: "K", ty: Type.TStr }])[false]
+#test(Type.TFunc([Type.TParam("A")], Some(Type.TParam("B"))), [Subst { name: "A", ty: Type.TBool }])[false]
+#test(Type.TStr, [])[true]
+fun solved_in(t: Type, subst: [Subst]) -> bool {
+    return match t {
+        Type.TParam(n) => subst_has(subst, n),
+        Type.TTuple(es) => all_solved_in(es, subst),
+        Type.TList(e) => solved_in(e, subst),
+        Type.TMap(k, v) => solved_in(k, subst) && solved_in(v, subst),
+        Type.TStruct(n, args) => all_solved_in(args, subst),
+        Type.TEnum(n, args) => all_solved_in(args, subst),
+        Type.TFunc(ps, r) => all_solved_in(ps, subst) && (match r { Some(rt) => solved_in(rt, subst), None => true }),
+        Type.TAsync(f) => solved_in(f, subst),
+        _ => true,
+    }
+}
+
+#test([], [])[true]
+#test([Type.TParam("T"), Type.TStr], [])[false]
+fun all_solved_in(xs: [Type], subst: [Subst]) -> bool {
+    for x in xs { if !solved_in(x, subst) { return false } }
+    return true
+}
+
+// The hint an argument of a generic call or a field of a generic literal
+// gets, for a parameter or field of type `pt` and the type parameters known
+// so far (`subst`): `pt` under them when they solve it. Else for a lambda
+// (`lambda`), when `pt` is a function type whose parameter types they solve,
+// that function type with its result left open: the lambda's parameters take
+// them and its result is inferred from its body (MYLA-356). Else none.
+#test(Type.TList(Type.TParam("T")), [Subst { name: "T", ty: Type.TParam("T") }], false)[Some(Type.TList(Type.TParam("T")))]
+#test(Type.TList(Type.TParam("T")), [], false)[None]
+#test(Type.TFunc([Type.TParam("T")], Some(Type.TParam("U"))), [Subst { name: "T", ty: Type.TInt(32, true) }], true)[Some(Type.TFunc([Type.TInt(32, true)], None))]
+#test(Type.TFunc([Type.TParam("T")], Some(Type.TParam("U"))), [Subst { name: "T", ty: Type.TInt(32, true) }], false)[None]
+#test(Type.TFunc([Type.TParam("T")], Some(Type.TParam("U"))), [], true)[None]
+#test(Type.TAsync(Type.TFunc([Type.TParam("T")], Some(Type.TParam("U")))), [Subst { name: "T", ty: Type.TStr }], true)[Some(Type.TAsync(Type.TFunc([Type.TStr], None)))]
+fun arg_hint(pt: Type, subst: [Subst], lambda: bool) -> Option<Type> {
+    if solved_in(pt, subst) { return Some(subst_type(pt, subst)) }
+    if !lambda { return None }
+    return match pt {
+        Type.TFunc(ps, r) => if all_solved_in(ps, subst) { Some(Type.TFunc(subst_type_list(ps, subst), None)) } else { None },
+        Type.TAsync(f) => match arg_hint(f, subst, true) {
             Some(h) => Some(Type.TAsync(h)),
             None => None,
         },
         _ => None,
     }
+}
+
+// The type parameters a generic call's expected type fixes (MYLA-315): its
+// declared result `ret` unified with `expected`; none when either is missing
+// or they don't fit together, since the expected type is only a hint.
+#test(Some(Type.TStruct("B", [Type.TParam("T")])), Some(Type.TStruct("B", [Type.TInt(32, true)])))[[Subst { name: "T", ty: Type.TInt(32, true) }]]
+#test(Some(Type.TStruct("B", [Type.TParam("T")])), Some(Type.TStruct("C", [Type.TInt(32, true)])))[[]]
+#test(Some(Type.TParam("T")), None)[[]]
+#test(None, Some(Type.TStr))[[]]
+fun expected_subst(ret: Option<Type>, expected: Option<Type>) -> [Subst] {
+    return match ret {
+        Some(rt) => match expected {
+            Some(et) => {
+                let r = unify_param(rt, et, [])
+                if r.ok { r.subst } else { [] }
+            },
+            None => [],
+        },
+        None => [],
+    }
+}
+
+// `first`, then those of `more` it doesn't name: the type parameters the
+// arguments fixed, then the ones the expected type adds (MYLA-315).
+#test([Subst { name: "T", ty: Type.TStr }], [Subst { name: "T", ty: Type.TBool }, Subst { name: "U", ty: Type.TChar }])[[Subst { name: "T", ty: Type.TStr }, Subst { name: "U", ty: Type.TChar }]]
+#test([], [])[[]]
+fun subst_then(first: [Subst], more: [Subst]) -> [Subst] {
+    var out = first
+    for s in more { if !subst_has(first, s.name) { out.push(s) } }
+    return out
+}
+
+#test(expr_of("(x) => x"))[true]
+#test(expr_of("f(x)"))[false]
+fun is_lambda(e: Expr) -> bool {
+    return match e.kind { ExprKind.Lambda(ps, rt, body, asy) => true, _ => false }
 }
 
 #test(Type.TStr)[false]
@@ -3654,7 +3727,11 @@ fun is_type_param(t: Type) -> bool { return match t { Type.TParam(n) => true, _ 
 
 impl Checker {
     // `label` names the construct in a mismatch message ("struct 'Box'").
+    // The expected type's arguments may be the enclosing generic function's
+    // type parameters, known types there: `B { items: [] }` returned as a
+    // `B<T>` (MYLA-315, the second case).
     #test(checker_on("enum E { A, B(int) }"), ["T"], [Type.TParam("T")], [Expr { id: 96, line: 70, col: 26, sp: SrcSpan { sline: 70, scol: 26, eline: 70, ecol: 28 }, kind: ExprKind.IntLit(42, None, false, "") }], None, expr_of("a.b[0]"), "struct 'Box'")[Ok([Type.TInt(32, true)])]
+    #test(checker_on("enum E { A, B(int) }"), ["T"], [Type.TList(Type.TParam("T"))], [expr_of("[]")], Some([Type.TParam("T")]), expr_of("B { items: [] }"), "struct 'B'")[Ok([Type.TParam("T")])]
     fun infer_type_args(var self, params: [str], template_types: [Type], nodes: [Expr], expected_args: Option<[Type]>, e: Expr, label: str) -> Result<[Type], CheckErr> {
         var subst: [Subst] = []
         match expected_args {
@@ -3667,10 +3744,7 @@ impl Checker {
         var i = 0
         while i < nodes.len() {
             let tt = template_types[i]
-            let hint_t = subst_type(tt, subst)
-            var hint: Option<Type> = Some(hint_t)
-            if contains_type_param(hint_t) { hint = None }
-            let vt = self.expect_value(nodes[i], hint)?
+            let vt = self.expect_value(nodes[i], arg_hint(tt, subst, is_lambda(nodes[i])))?
             value_types.push(vt)
             let r = unify_param(tt, vt, subst)
             subst = r.subst
@@ -6243,6 +6317,23 @@ pub fun checker_on(src: str) -> Checker {
     return c
 }
 
+// The messages of the errors `checker_on(src)` finds: cases that check a
+// whole program. Here the expected type (an annotation, a parameter, a
+// return type) types a generic literal's empty list and map in generic code
+// and fixes a generic call's type parameters (MYLA-315).
+#test("struct B<T> { items: [T] }\nfun mk<T>() -> B<T> { return B { items: [] } }\nfun main() { let b: B<int> = mk() }")[[]]
+#test("struct M<T> { m: [str: T], n: [T] }\nfun mk<T>() -> M<T> { return M { m: [:], n: [] } }\nfun size(x: M<int>) -> int { return x.n.len() }\nfun main() { print(size(mk())) }")[[]]
+#test("struct B<T> { items: [T] }\nfun mk<T>() -> B<T> { return B { items: [] } }\nfun again<T>() -> B<T> { return mk() }\nfun main() { let b: B<str> = again() }")[[]]
+#test("struct B<T> { items: [T] }\nimpl<T> B<T> { fun emptied<U>(self) -> B<U> { return B { items: [] } } }\nfun main() { let b = B { items: [1] }\nlet c: B<str> = b.emptied() }")[[]]
+#test("struct B<T> { items: [T] }\nfun of<T>(xs: [T]) -> B<T> { return B { items: xs } }\nfun main() { let b: B<int64> = of([5000000000]) }")[[]]
+#test("struct B<T> { items: [T] }\nfun mk<T>() -> B<T> { return B { items: [] } }\nfun main() { let b = mk() }")[["cannot infer type parameter(s) T for 'mk' from the arguments; add a type annotation to guide inference"]]
+#test("struct B<T> { items: [T] }\nfun of<T>(xs: [T]) -> B<T> { return B { items: xs } }\nfun main() { let b: B<int> = of([\"x\"]) }")[["cannot assign value of type 'B<str>' to binding of type 'B<int32>'"]]
+fun errors_of(src: str) -> [str] {
+    var out: [str] = []
+    for e in checker_on(src).errs { out.push(e.msg) }
+    return out
+}
+
 #test(Type.TStr)[true]
 #test(Type.TBool)[true]
 #test(Type.TParam("T"))[false]
@@ -6721,7 +6812,7 @@ impl Checker {
         }
         let sig = self.functions[fi]
         if sig.type_params.len() > 0 {
-            let gr = self.infer_generic_call(e, name, sig, args)?
+            let gr = self.infer_generic_call(e, name, sig, args, expected)?
             self.mark_call(e, "function", name, sig_mutates(sig), "", sig.decl.is_async)
             return Ok(gr)
         }
@@ -6949,27 +7040,25 @@ impl Checker {
         return Ok(Type.TEnum(enum_name, args_t))
     }
 
-    fun infer_generic_call(var self, e: Expr, name: str, sig: FuncSig, args: [Expr]) -> Result<Option<Type>, CheckErr> {
+    // The type parameters are solved from the arguments, left to right, and
+    // those they leave open from the call's `expected` type, which also
+    // hints an argument whose parameter's type the arguments before it
+    // don't solve (MYLA-315).
+    fun infer_generic_call(var self, e: Expr, name: str, sig: FuncSig, args: [Expr], expected: Option<Type>) -> Result<Option<Type>, CheckErr> {
         if sig_has_error(sig.params, sig.ret) { return Err(poisoned()) }   // its type arguments can't be inferred (MYLA-110)
         self.call_arity(e, sig, 0, args.len(), format("function '{}'", name))?
+        let from_expected = expected_subst(sig.ret, expected)
         var subst: [Subst] = []
         var arg_types: [Type] = []
         var i = 0
         while i < args.len() {
-            let want = subst_type(sig.params[i], subst)
-            var hint: Option<Type> = Some(want)
-            if contains_type_param(want) {
-                hint = match args[i].kind {
-                    ExprKind.Lambda(ps, rt, body, asy) => lambda_param_hint(want),
-                    _ => None,
-                }
-            }
-            let at = self.expect_value(args[i], hint)?
+            let at = self.expect_value(args[i], arg_hint(sig.params[i], subst_then(subst, from_expected), is_lambda(args[i])))?
             arg_types.push(at)
             let r = unify_param(sig.params[i], at, subst)
             subst = r.subst
             i = i + 1
         }
+        subst = subst_then(subst, from_expected)
         var missing: [str] = []
         for tp in sig.type_params { if !subst_has(subst, tp) { missing.push(tp) } }
         if missing.len() > 0 { return Err(terr_at(e.line, e.col, e.sp, format("cannot infer type parameter(s) {} for '{}' from the arguments; add a type annotation to guide inference", join_strs(missing, ", "), name))) }
@@ -7050,7 +7139,7 @@ impl Checker {
                     return Err(terr_at(e.line, e.col, e.sp, format("method '{}' is for '{}', not '{}'", field, type_name(sig.params[0]), type_name(recv_type))))
                 }
                 if sig.type_params.len() > 0 {
-                    let gr = self.infer_generic_method(e, sig, field, recv_type, args)?
+                    let gr = self.infer_generic_method(e, sig, field, recv_type, args, expected)?
                     self.mark_call(e, "method", sig.name, recv == "var self", mkey, sig.decl.is_async)
                     return Ok(gr)
                 }
@@ -7109,8 +7198,11 @@ impl Checker {
         return Err(terr_at(e.line, e.col, e.sp, format("type parameter '{}' has no method '{}': none of its bounds ({}) declares one (an operator trait gives its operators)", pn, field, quoted_list(bound_traits))))
     }
 
-    fun infer_generic_method(var self, e: Expr, sig: FuncSig, method: str, recv_type: Type, args: [Expr]) -> Result<Option<Type>, CheckErr> {
+    // `infer_generic_call` for a method: the receiver solves the impl's type
+    // parameters first.
+    fun infer_generic_method(var self, e: Expr, sig: FuncSig, method: str, recv_type: Type, args: [Expr], expected: Option<Type>) -> Result<Option<Type>, CheckErr> {
         if sig_has_error(sig.params, sig.ret) { return Err(poisoned()) }   // its type arguments can't be inferred (MYLA-110)
+        let from_expected = expected_subst(sig.ret, expected)
         var subst: [Subst] = []
         let r0 = unify_param(sig.params[0], recv_type, subst)
         subst = r0.subst
@@ -7118,20 +7210,13 @@ impl Checker {
         var i = 0
         while i < args.len() {
             let pt = sig.params[i + 1]
-            let want = subst_type(pt, subst)
-            var hint: Option<Type> = Some(want)
-            if contains_type_param(want) {
-                hint = match args[i].kind {
-                    ExprKind.Lambda(ps, rt, body, asy) => lambda_param_hint(want),
-                    _ => None,
-                }
-            }
-            let at = self.expect_value(args[i], hint)?
+            let at = self.expect_value(args[i], arg_hint(pt, subst_then(subst, from_expected), is_lambda(args[i])))?
             arg_types.push(at)
             let r = unify_param(pt, at, subst)
             subst = r.subst
             i = i + 1
         }
+        subst = subst_then(subst, from_expected)
         var missing: [str] = []
         for tp in sig.type_params { if !subst_has(subst, tp) { missing.push(tp) } }
         if missing.len() > 0 { return Err(terr_at(e.line, e.col, e.sp, format("cannot infer type parameter(s) {} for method '{}'; add a type annotation to guide inference", join_strs(missing, ", "), method))) }
