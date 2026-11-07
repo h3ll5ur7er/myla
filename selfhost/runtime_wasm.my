@@ -23,11 +23,12 @@ fun wasi_calls() -> [(str, str, bool)] {
         ("fd_readdir", "iiili", true), ("path_open", "iiiiillii", true), ("path_filestat_get", "iiiii", true),
         ("path_create_directory", "iii", true), ("path_remove_directory", "iii", true), ("path_unlink_file", "iii", true),
         ("path_rename", "iiiiii", true), ("clock_time_get", "ili", true), ("poll_oneoff", "iiii", true), ("proc_exit", "i", false),
-        ("args_sizes_get", "ii", true), ("args_get", "ii", true), ("environ_sizes_get", "ii", true), ("environ_get", "ii", true)]
+        ("args_sizes_get", "ii", true), ("args_get", "ii", true), ("environ_sizes_get", "ii", true), ("environ_get", "ii", true),
+        ("random_get", "ii", true), ("fd_seek", "ilii", true)]
 }
 
 // The number std.platform gives `memory.grow` (after the imports).
-const W_MEMORY_GROW: int32 = 19
+const W_MEMORY_GROW: int32 = 21
 
 impl CodeGen {
     fun emit_runtime_prelude_wasm(var self, entry_name: str) {

@@ -376,6 +376,90 @@ pub fun list_dir(path: str) -> str {
     return __str_of(cell)
 }
 
+// --- file descriptors (MYLA-336) ---------------------------------------------
+//
+// A descriptor is read with `__read` and written with `__write` (below), at
+// its cursor, and closed with `__close`.
+
+// `__open(path, flags, mode)`: the file at `path` opened, its descriptor
+// (closed on exec), or -1 with the errno. `flags`: 1 read, 2 write (both:
+// read and write), 4 create, 8 truncate, 16 append, 32 exclusive (with
+// create: EEXIST when the file is there); without 1 or 2, or with another
+// bit, EINVAL. `mode`: the permissions of a file it creates, less the umask
+// (none on wasm32).
+pub fun open(path: str, flags: int, mode: int) -> int {
+    __set_io_errno(0)
+    if nul_in(path) {
+        return -1
+    }
+    if (flags & 3) == 0 || (flags & -64) != 0 {
+        __set_io_errno(EINVAL)
+        return -1
+    }
+    let r = os.open_file(path, flags as int64, mode as int64)
+    record(r)
+    if r < 0 {
+        return -1
+    }
+    return r as int
+}
+
+// `__seek(fd, offset, whence)`: the cursor of `fd` moved to `offset` bytes
+// from the start (`whence` 0), the cursor (1) or the end (2): the new
+// offset from the start, or -1 with the errno (EINVAL for another whence
+// or an offset before the start, ESPIPE for a pipe).
+pub fun seek(fd: int, offset: int64, whence: int) -> int64 {
+    if whence < 0 || whence > 2 {
+        __set_io_errno(EINVAL)
+        return -1
+    }
+    let r = os.seek(fd as int64, offset, whence as int64)
+    record(r)
+    if r < 0 {
+        return -1
+    }
+    return r
+}
+
+// `__fstat(fd)`: `[size, mode, mtime]` of the open file `fd` (the mode's
+// type bits and permissions as `__stat`'s, the modification time in
+// nanoseconds since 1970), or `[]` with the errno.
+pub fun fstat(fd: int) -> [int64] {
+    let out = __alloc(24)
+    let r = os.fd_stat(fd as int64, out)
+    record(r)
+    var st: [int64] = []
+    if r >= 0 {
+        st = [__load64(out), __load64(out + 8), __load64(out + 16)]
+    }
+    __free(out)
+    return st
+}
+
+// --- entropy (MYLA-336) --------------------------------------------------------
+
+// `__random_bytes(n)`: `n` bytes of the system's entropy (getrandom(2),
+// WASI's `random_get`), or none with the errno (EINVAL for a negative `n`).
+pub fun random_bytes(n: int) -> [uint8] {
+    __set_io_errno(0)
+    var want = n as int64
+    if want < 0 {
+        __set_io_errno(EINVAL)
+        want = 0
+    }
+    let cell = __alloc(want + 16)
+    __store64(cell, 0)
+    __store64(cell + 8, want)
+    if want > 0 {
+        let r = os.random_fill(cell + 16, want)
+        record(r)
+        if r == 0 {
+            __store64(cell, want)
+        }
+    }
+    return __list_of(cell)
+}
+
 // --- the environment ---------------------------------------------------------
 
 // `__getenv`: the value of the first `name=value` entry of the environment
@@ -485,8 +569,36 @@ pub fun reap(pid: int) -> int {
     return os.reap(pid as int64) as int
 }
 
+// `__kill(pid, sig)`: the signal `sig` sent to `pid`, the errno recorded
+// (ESRCH when there's no such process; ENOSYS on wasm32).
 pub fun kill(pid: int, sig: int) {
-    os.kill(pid as int64, sig as int64)
+    record(os.kill(pid as int64, sig as int64))
+}
+
+// `__spawn_piped(program, argv, opts)` (MYLA-336): `spawn_with` with the
+// child's stdin a pipe too, `[errno, pid, in, out, err, exited]`: `in` the
+// write end of its stdin's pipe, `out` and `err` the read ends of its
+// stdout's and stderr's, `exited` its pidfd; `opts` as `run_with` takes
+// them, but for the input, which the pipe is instead. `[errno, 0, -1, -1,
+// -1, -1]` when it couldn't be started (ENOSYS on wasm32).
+pub fun spawn_piped(program: str, argv: [str], opts: [str]) -> [int] {
+    return os.spawn_piped(program_paths(program), argv, opts)
+}
+
+// `__try_reap(pid)` (MYLA-336): the child `pid` reaped if it has ended, as
+// `__reap` gives it (its exit code, or minus its signal), without waiting;
+// 256 while it runs (errno 0), or 256 with the errno (ECHILD: not a child
+// of this process, or already reaped).
+pub fun try_reap(pid: int) -> int {
+    let out = __alloc(8)
+    let r = os.try_reap(pid as int64, out)
+    record(r)
+    var code = 256
+    if r > 0 {
+        code = __load64(out) as int
+    }
+    __free(out)
+    return code
 }
 
 pub fun close(fd: int) {

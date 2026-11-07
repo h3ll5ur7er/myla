@@ -14,8 +14,12 @@
 // as ready at once (a host can't wait for input without blocking), so a
 // read blocks the program as a blocking one would.
 //
-// A file system gives: `open(path, {create, trunc, excl, dir})` a handle,
-// `read(handle, bytes)` and `write(handle, bytes)` how many, `close`,
+// A file system gives: `open(path, {create, trunc, excl, dir, read, write,
+// append})` a handle (`read` and `write` the access asked for, undefined
+// when the program asked for every right, as its own reads and writes of
+// whole files do; MYLA-336), `read(handle, bytes)` and `write(handle,
+// bytes)` how many at the handle's cursor, `seek(handle, offset, whence)`
+// the new cursor (whence 0 the start, 1 the cursor, 2 the end), `close`,
 // `fstat(handle)` and `stat(path, follow)` `{type, size, ino, nlink,
 // mtimeNs}` (type 3 a directory, 4 a regular file, 7 a symbolic link),
 // `readdir(path)` `[{name, type}]`, `mkdir`, `rmdir`, `unlink`,
@@ -25,7 +29,8 @@
 
 export const ERRNO = {
   E2BIG: 1, EACCES: 2, EAGAIN: 6, EBADF: 8, EDQUOT: 19, EEXIST: 20, EFBIG: 22, EINTR: 27, EINVAL: 28,
-  EIO: 29, EISDIR: 31, ENOENT: 44, ENOSPC: 51, ENOSYS: 52, ENOTDIR: 54, ENOTEMPTY: 55, ENOTSUP: 58, EPERM: 63, EPIPE: 64, ENOTCAPABLE: 76,
+  EIO: 29, EISDIR: 31, ENOENT: 44, ENOSPC: 51, ENOSYS: 52, ENOTDIR: 54, ENOTEMPTY: 55, ENOTSUP: 58, EPERM: 63, EPIPE: 64, ESPIPE: 70,
+  ENOTCAPABLE: 76,
 };
 
 // An error's code as WASI's errno.
@@ -202,6 +207,21 @@ export class Wasi {
           this.fds.delete(fd);
           return 0;
         }),
+        fd_seek: g(function (fd, offset, whence, out) {
+          const d = this.fds.get(fd);
+          if (!d) return ERRNO.EBADF;
+          if (d.handle === undefined) return d.dir ? ERRNO.EBADF : ERRNO.ESPIPE;
+          if (whence > 2) return ERRNO.EINVAL;
+          this.view().setBigUint64(out, BigInt(this.fs.seek(d.handle, Number(offset), whence)), true);
+          return 0;
+        }),
+        random_get: g(function (buf, len) {
+          // in pieces of 64 KB, the most getRandomValues fills at once
+          for (let at = 0; at < len; at += 65536) {
+            globalThis.crypto.getRandomValues(this.bytes(buf + at, Math.min(65536, len - at)));
+          }
+          return 0;
+        }),
         fd_filestat_get: g(function (fd, buf) {
           const d = this.fds.get(fd);
           if (!d) return ERRNO.EBADF;
@@ -236,11 +256,19 @@ export class Wasi {
           this.view().setUint32(used, at, true);
           return 0;
         }),
-        path_open: g(function (dirfd, _dirflags, p, len, oflags, _rights, _inherit, _fdflags, out) {
+        path_open: g(function (dirfd, _dirflags, p, len, oflags, rights, _inherit, fdflags, out) {
           const path = this.resolve(dirfd, p, len);
           const want = { create: !!(oflags & 1), dir: !!(oflags & 2), excl: !!(oflags & 4), trunc: !!(oflags & 8) };
+          // the rights to read (bit 1) and write (bit 6) asked for, unless
+          // all were
+          if (rights !== -1n) {
+            want.read = (rights & 2n) !== 0n;
+            want.write = (rights & 64n) !== 0n;
+            want.append = !!(fdflags & 1);
+          }
           let entry;
           if (!want.create && this.fs.stat(path, true).type === 3) {
+            if (want.write) return ERRNO.EISDIR;
             entry = { dir: true, path };
           } else if (want.dir) {
             return ERRNO.ENOTDIR;

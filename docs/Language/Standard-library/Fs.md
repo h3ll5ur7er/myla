@@ -58,3 +58,16 @@ The directory functions rest on seven primitives (D64's pattern: a small system 
 | `__rename(from: str, to: str)` | rename(2) | Nothing |
 
 The system calls named are x86-64 Linux's; aarch64 uses the generic `*at` forms (`openat`, `mkdirat`, `unlinkat`, `renameat2`), wasm32 WASI's (`path_open`, `fd_readdir`, …), translated into the same results. Each sets the errno that `__io_errno()` reads (0 on success), a Linux number on every target (WASI's are mapped onto them). A name can't hold a NUL byte, so NUL separates them. `list_dir` drops `.` and `..` and sorts the names by their bytes, so every file system gives the same list (and the Python interpreter, with `os.listdir`, gave it too).
+
+## Descriptor and entropy primitives
+
+Files opened and read or written a piece at a time, at a cursor, and the system's entropy rest on these ([[MYLA-336]], D64's pattern again; the API over them is [[MYLA-339]]'s `File` and [[MYLA-337]]'s `std.random`). A descriptor is an `int`; `__read(fd, n)` (one read of up to `n` bytes at the cursor, `""` at the end), `__write(fd, s)` (every byte of `s` at the cursor, again after a short write) and `__close(fd)` are the ones `std.io` and `std.process` already use.
+
+| Primitive | Does | Result |
+| --- | --- | --- |
+| `__open(path: str, flags: int, mode: int) -> int` | open(2) with `O_CLOEXEC`; `flags` are Myla's own bits, the same on every target: 1 read, 2 write (both: read and write), 4 create, 8 truncate, 16 append (each write at the end, wherever the cursor is), 32 exclusive (with create: EEXIST when the file is there) | The descriptor, or -1. Without 1 or 2, with another bit, or a NUL in the path: EINVAL. `mode` is the permissions of a file it creates, less the umask |
+| `__seek(fd: int, offset: int64, whence: int) -> int64` | lseek(2): `offset` from the start (`whence` 0), the cursor (1) or the end (2) | The new offset from the start, or -1 (EINVAL for another whence or a place before the start, ESPIPE for a pipe) |
+| `__fstat(fd: int) -> [int64]` | fstat(2) | `[size, mode, mtime]`: the size in bytes, the mode as `__stat` gives it (type bits and permissions), the modification time in nanoseconds since 1970; `[]` on an error |
+| `__random_bytes(n: int) -> [uint8]` | getrandom(2) until `n` bytes are there (a call gives at most 32 MB, and a signal may cut one of 256 bytes or more short) | `n` bytes; `[]` on an error (EINVAL for a negative `n`) |
+
+aarch64 opens with `openat`; wasm32 uses `path_open` (the flags as its open flags, rights and `FDFLAGS_APPEND`), `fd_seek`, `fd_filestat_get` and `random_get`. WASI has no permissions: `mode` is not used there, and the mode `__fstat` gives is made up from the file's kind, as `__stat`'s is (0o100644 for a file, 0o40755 for a directory, 0o644 for anything else). Each sets `__io_errno()` as the directory primitives do; the interpreter calls the same primitives of its own.

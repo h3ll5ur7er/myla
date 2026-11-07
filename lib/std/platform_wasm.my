@@ -45,7 +45,9 @@ const W_ARGS_SIZES_GET: int64 = 15
 const W_ARGS_GET: int64 = 16
 const W_ENVIRON_SIZES_GET: int64 = 17
 const W_ENVIRON_GET: int64 = 18
-const W_MEMORY_GROW: int64 = 19
+const W_RANDOM_GET: int64 = 19
+const W_FD_SEEK: int64 = 20
+const W_MEMORY_GROW: int64 = 21
 
 const ENOSYS: int64 = -38
 const PREOPEN: int64 = 3
@@ -73,6 +75,7 @@ fun call(n: int64) -> int64 {
 #test(76)[13]
 #test(6)[11]
 #test(51)[28]
+#test(70)[29]
 fun errno_linux(e: int64) -> int64 {
     if e == 2 || e == 63 || e == 76 { return 13 }  // EACCES, EPERM, ENOTCAPABLE
     if e == 6 { return 11 }    // EAGAIN
@@ -91,6 +94,7 @@ fun errno_linux(e: int64) -> int64 {
     if e == 55 { return 39 }   // ENOTEMPTY
     if e == 58 { return 95 }   // ENOTSUP
     if e == 64 { return 32 }   // EPIPE
+    if e == 70 { return 29 }   // ESPIPE
     return 5
 }
 
@@ -300,15 +304,22 @@ pub fun file_size(fd: int64) -> int64 {
     return __load64(st + 32)
 }
 
-// The mode of what `path` names, from its file type: a directory 0o40755,
-// a regular file 0o100644, anything else 0o644.
+// The mode of what `path` names, from its file type (`mode_of_type`).
 pub fun mode_of(path: str) -> int64 {
     let st = __rt_addr("__wasi_stat")
     let r = on_path(W_PATH_FILESTAT_GET, path, true, [st])
     if r < 0 {
         return r
     }
-    let t = __load8(st + 16) as int64
+    return mode_of_type(__load8(st + 16) as int64)
+}
+
+// A mode for WASI's file type `t`, which has no permissions: a directory
+// 0o40755, a regular file 0o100644, anything else 0o644.
+#test(3)[16877]
+#test(4)[33188]
+#test(2)[420]
+fun mode_of_type(t: int64) -> int64 {
     if t == 3 {
         return 16877
     }
@@ -316,6 +327,97 @@ pub fun mode_of(path: str) -> int64 {
         return 33188
     }
     return 420
+}
+
+// The file at `path` opened with std.rt's portable `flags` (1 read, 2
+// write, 4 create, 8 truncate, 16 append, 32 exclusive) as `path_open`
+// takes them (MYLA-336): the open flags (CREAT 1, EXCL 4, TRUNC 8), the
+// rights to read or write (`open_rights`) and the descriptor's flags
+// (APPEND 1); WASI has no permissions, so `mode` is not used.
+pub fun open_file(path: str, flags: int64, mode: int64) -> int64 {
+    var oflags: int64 = 0
+    if (flags & 4) != 0 { oflags |= 1 }
+    if (flags & 32) != 0 { oflags |= 4 }
+    if (flags & 8) != 0 { oflags |= 8 }
+    var fdflags: int64 = 0
+    if (flags & 16) != 0 { fdflags = 1 }
+    let rights = open_rights(flags)
+    let fdp = scratch(7)
+    let r = on_path(W_PATH_OPEN, path, true, [oflags, rights, rights, fdflags, fdp])
+    if r < 0 {
+        return r
+    }
+    return __load64(fdp) & LOW32
+}
+
+// The rights a descriptor opened with the portable `flags` asks for: to
+// seek, tell, stat and poll it always, to read it (FD_READ) and to write
+// it (FD_WRITE, FD_DATASYNC, FD_SYNC, FD_ALLOCATE, FD_FILESTAT_SET_SIZE
+// and _TIMES) as the flags say.
+#test(1)[136315054]
+#test(2)[148898301]
+fun open_rights(flags: int64) -> int64 {
+    // FD_SEEK, FD_FDSTAT_SET_FLAGS, FD_TELL, FD_ADVISE, FD_FILESTAT_GET, POLL_FD_READWRITE
+    var r: int64 = 4 | 8 | 32 | 128 | (1i64 << 21) | (1i64 << 27)
+    if (flags & 1) != 0 {
+        r |= 2
+    }
+    if (flags & 2) != 0 {
+        r |= 1 | 16 | 64 | 256 | (1i64 << 22) | (1i64 << 23)
+    }
+    return r
+}
+
+// The cursor of `fd` moved to `offset` from the start (`whence` 0), the
+// cursor (1) or the end (2), WASI's whences too: the new offset.
+pub fun seek(fd: int64, offset: int64, whence: int64) -> int64 {
+    arg(0, fd)
+    arg(1, offset)
+    arg(2, whence)
+    arg(3, scratch(6))
+    let r = call(W_FD_SEEK)
+    if r < 0 {
+        return r
+    }
+    return __load64(scratch(6))
+}
+
+// The size, the mode (`mode_of_type`) and the modification time
+// (nanoseconds since 1970) of the open file `fd`, as three words at `out`:
+// 0, or minus the errno (a filestat: the type at 16, the size at 32, the
+// modification time at 48).
+pub fun fd_stat(fd: int64, out: int64) -> int64 {
+    let st = __rt_addr("__wasi_stat")
+    arg(0, fd)
+    arg(1, st)
+    let r = call(W_FD_FILESTAT_GET)
+    if r < 0 {
+        return r
+    }
+    __store64(out, __load64(st + 32))
+    __store64(out + 8, mode_of_type(__load8(st + 16) as int64))
+    __store64(out + 16, __load64(st + 48))
+    return 0
+}
+
+// `n` bytes from the host's entropy at `buf` (`random_get`, in pieces of
+// 64 KB): 0, or minus the errno.
+pub fun random_fill(buf: int64, n: int64) -> int64 {
+    var done: int64 = 0
+    while done < n {
+        var len = n - done
+        if len > PAGE {
+            len = PAGE
+        }
+        arg(0, buf + done)
+        arg(1, len)
+        let r = call(W_RANDOM_GET)
+        if r < 0 {
+            return r
+        }
+        done += len
+    }
+    return 0
 }
 
 pub fun make_dir(path: str, mode: int64) -> int64 {
@@ -531,11 +633,21 @@ pub fun spawn_with(paths: [str], argv: [str], opts: [str]) -> [int] {
     return spawn("", argv)
 }
 
+// A child with pipes (MYLA-336): none either.
+pub fun spawn_piped(paths: [str], argv: [str], opts: [str]) -> [int] {
+    return [38, 0, -1, -1, -1, -1]
+}
+
 pub fun reap(pid: int64) -> int64 {
     return -1
 }
 
-pub fun kill(pid: int64, sig: int64) {
+pub fun try_reap(pid: int64, out: int64) -> int64 {
+    return ENOSYS
+}
+
+pub fun kill(pid: int64, sig: int64) -> int64 {
+    return ENOSYS
 }
 
 // --- memory --------------------------------------------------------------------

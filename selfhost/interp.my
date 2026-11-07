@@ -3483,6 +3483,40 @@ impl Interp {
             return Value.VList(out)
         }
         if nm == "__reap" { return Value.VInt(__reap(as_int(self.eval(args[0])) as int32) as int64) }
+        // MYLA-336's: entropy, descriptors, a child with pipes; the host's own
+        if nm == "__random_bytes" { return bytes_to_value(__random_bytes(as_int(self.eval(args[0])) as int32)) }
+        if nm == "__open" {
+            let path = as_str(self.eval(args[0]))
+            let flags = as_int(self.eval(args[1])) as int32
+            return Value.VInt(__open(path, flags, as_int(self.eval(args[2])) as int32) as int64)
+        }
+        if nm == "__seek" {
+            let fd = as_int(self.eval(args[0])) as int32
+            let offset = as_int(self.eval(args[1]))
+            return Value.VInt(__seek(fd, offset, as_int(self.eval(args[2])) as int32))
+        }
+        if nm == "__fstat" {
+            var out: [Value] = []
+            for x in __fstat(as_int(self.eval(args[0])) as int32) { out.push(Value.VInt(x)) }
+            return Value.VList(out)
+        }
+        if nm == "__spawn_piped" {
+            let prog = as_str(self.eval(args[0]))
+            var argv: [str] = []
+            match self.eval(args[1]) {
+                Value.VList(xs) => { for x in xs { argv.push(as_str(x)) } },
+                _ => {},
+            }
+            var opts: [str] = []
+            match self.eval(args[2]) {
+                Value.VList(xs) => { for x in xs { opts.push(as_str(x)) } },
+                _ => {},
+            }
+            var out: [Value] = []
+            for x in __spawn_piped(prog, argv, opts) { out.push(Value.VInt(x as int64)) }
+            return Value.VList(out)
+        }
+        if nm == "__try_reap" { return Value.VInt(__try_reap(as_int(self.eval(args[0])) as int32) as int64) }
         if nm == "__close" {
             __close(as_int(self.eval(args[0])) as int32)
             return Value.VUnit

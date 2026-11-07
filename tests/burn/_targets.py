@@ -21,6 +21,7 @@ SUITES = [
     "tests.burn.test_fs",
     "tests.burn.test_stdio",
     "tests.burn.test_process",
+    "tests.burn.test_platform_primitives",
     "tests.burn.test_unit_type",
     "tests.burn.test_defer",
     "tests.burn.test_format_specs",
@@ -59,6 +60,10 @@ SKIP: dict[str, dict[str, str]] = {
         "test_process": "WASI has no processes (test_wasm checks they are Unsupported)",
         "test_stdio.BrokenPipe.test_a_write_to_another_descriptor_reports_it":
             "a WASI program has the descriptors 0 to 2 only (and its preopened directories)",
+        # MYLA-336's children with pipes: `Unsupported` there, which
+        # PipesOnWasm checks; and WASI has no permission bits
+        "test_platform_primitives.Pipes": "WASI has no processes (PipesOnWasm checks they are Unsupported)",
+        "test_platform_primitives.Descriptors.test_the_mode_given": "WASI has no permission bits",
     },
 }
 

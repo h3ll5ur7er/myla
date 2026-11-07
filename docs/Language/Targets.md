@@ -30,6 +30,9 @@ A program learns that its target lacks something from an error: the cause `Unsup
 | | x86-64 Linux | aarch64 Linux | wasm32 on WASI |
 | --- | --- | --- | --- |
 | Child processes (`std.process.run`, `run_async`, `command`) | Yes | Yes | No: `Err(SpawnError.Unsupported)` |
+| A child with pipes for its stdin, stdout and stderr, waited for or not, signalled (the primitives `__spawn_piped`, `__try_reap`, `__kill`, [[MYLA-336]]) | Yes: fork, exec, pipes, a pidfd, `wait4` | Yes: `clone` for the fork | No: ENOSYS, the errno of `Unsupported` |
+| Files opened with flags, read and written at a cursor, seeked, their size, mode and modification time (`__open`, `__seek`, `__fstat`, [[MYLA-336]]) | Yes | Yes (`openat`) | Yes, within what the host shares (`path_open`, `fd_seek`, `fd_filestat_get`); the mode given to a new file isn't used, and the mode read is made up from its kind |
+| The system's entropy (`__random_bytes`, [[MYLA-336]]) | `getrandom` | `getrandom` | The host's `random_get` (Node: `crypto.getRandomValues`) |
 | Workers for tasks | `MYLA_THREADS`, else one per CPU the process may use; at most 32 | The same | One; `MYLA_THREADS` is ignored (D125 (4)) |
 | Input that suspends a task (`read_line_async`, …) | Yes: the task waits, the others run | Yes | No: the read blocks the program (the host can't wait for input without blocking) |
 | `task.sleep`, `task.timeout` | Yes | Yes | Yes (`poll_oneoff`) |

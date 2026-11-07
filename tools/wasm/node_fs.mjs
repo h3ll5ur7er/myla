@@ -2,6 +2,7 @@
 // through Node's synchronous API (MYLA-158).
 
 import fs from "node:fs";
+import { fsError } from "./wasi.mjs";
 
 function typeOf(st) {
   if (st.isDirectory()) return 3;
@@ -18,15 +19,40 @@ function statOf(st) {
 export class NodeFs {
   // Created without truncating: written from the start, as O_CREAT alone
   // does ("a" would append every write wherever the position is, MYLA-298).
-  open(path, { create, trunc, excl }) {
+  // With the access asked for (MYLA-336), `read` and `write` give it, and
+  // `append` writes at the end. A handle keeps its own cursor (Node has no
+  // lseek): a regular file is read and written at it, anything else where
+  // the system's cursor is, and can't seek (ESPIPE).
+  open(path, { create, trunc, excl, read, write, append }) {
     const c = fs.constants;
-    const flags = !create ? "r" : excl ? "wx" : trunc ? "w" : c.O_WRONLY | c.O_CREAT;
-    return fs.openSync(path, flags);
+    let flags = !create ? "r" : excl ? "wx" : trunc ? "w" : c.O_WRONLY | c.O_CREAT;
+    if (read !== undefined) {
+      flags = (read && write ? c.O_RDWR : write ? c.O_WRONLY : c.O_RDONLY) |
+        (create ? c.O_CREAT : 0) | (trunc ? c.O_TRUNC : 0) | (excl ? c.O_EXCL : 0) | (append ? c.O_APPEND : 0);
+    }
+    const fd = fs.openSync(path, flags);
+    return { fd, pos: 0, seekable: fs.fstatSync(fd).isFile(), append: !!append };
   }
-  read(h, u8) { return fs.readSync(h, u8, 0, u8.length, null); }
-  write(h, u8) { return fs.writeSync(h, u8); }
-  close(h) { fs.closeSync(h); }
-  fstat(h) { return statOf(fs.fstatSync(h)); }
+  read(h, u8) {
+    const n = fs.readSync(h.fd, u8, 0, u8.length, h.seekable ? h.pos : null);
+    if (h.seekable) h.pos += n;
+    return n;
+  }
+  write(h, u8) {
+    const n = fs.writeSync(h.fd, u8, 0, u8.length, h.seekable ? h.pos : null);
+    // an appending write went to the end, whatever the cursor said
+    if (h.seekable) h.pos = h.append ? fs.fstatSync(h.fd).size : h.pos + n;
+    return n;
+  }
+  seek(h, offset, whence) {
+    if (!h.seekable) throw fsError("ESPIPE");
+    const at = (whence === 0 ? 0 : whence === 1 ? h.pos : fs.fstatSync(h.fd).size) + offset;
+    if (at < 0) throw fsError("EINVAL");
+    h.pos = at;
+    return at;
+  }
+  close(h) { fs.closeSync(h.fd); }
+  fstat(h) { return statOf(fs.fstatSync(h.fd)); }
   stat(path, follow) { return statOf(follow ? fs.statSync(path) : fs.lstatSync(path)); }
   readdir(path) {
     return fs.readdirSync(path, { withFileTypes: true })
