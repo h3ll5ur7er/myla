@@ -52,4 +52,7 @@ The conventions (D164): operations on built-in types are methods (`s.split(",")`
 | `std.encoding` | [[Language/Standard-library/Encoding]] | Hex and Base64 (standard and URL-safe), strict decoding |
 | `std.url` | [[Language/Standard-library/Url]] | Percent-encoding, query strings, parsing and building URLs |
 | `std.hash` | [[Language/Standard-library/Hash]] | The `Hasher` that `Hash` builds on (wyhash), FNV-1a, CRC-32 and Adler-32 |
+| `std.set` | [[Language/Standard-library/Set]] | `Set<T>` in insertion order: insert, remove, union, intersection, difference |
+| `std.deque` | [[Language/Standard-library/Deque]] | `Deque<T>`, the double-ended queue and the queue: a ring buffer, indexable |
+| `std.heap` | [[Language/Standard-library/Heap]] | Binary heaps: `Heap<T: Ord>`, least or greatest first, and `KeyedHeap<T>` by an `int64` priority |
 | `std.rt` | [[Language/Standard-library/Rt]] | The runtime in Myla; not for programs |

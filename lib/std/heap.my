@@ -1,0 +1,473 @@
+// std.heap: binary heaps, the priority queues (MYLA-330, D164).
+//
+// - `Heap<T>` holds values of an ordered type (`T: Ord`) in a binary heap
+//   over a list: `push` and `pop` take O(log n) time, `peek` O(1), and
+//   `of` builds a heap from a list in O(n) (Floyd's). It gives the least
+//   value first; `max_new` and `max_of` make one that gives the greatest
+//   first.
+// - `KeyedHeap<T>` holds values of any type by an `int64` priority, least
+//   first, as Dijkstra's algorithm and A* want them: its values need no
+//   order of their own.
+//
+// A max-heap is a flag of the heap, not a `Reverse<T>` wrapper: the values
+// go in and come out as they are, and every `T: Ord` works. (A wrapper's
+// `impl<T: Ord> Ord for Reverse<T>` doesn't link natively today when its
+// operators are used, which is what a heap does with it.) The flag costs a
+// test per comparison, 3 to 6 % of a million pushes and pops against a heap
+// that only gives the least; the comparisons are written out in `push` and
+// `sift_down`, as a helper function for them cost 25 %.
+//
+// A constructor needs an expected type, which fixes `T` (MYLA-315):
+// `var h: Heap<int> = heap.new()`, a field, a parameter or a return type.
+
+pub struct Heap<T> {
+    // The heap: each element comes before its children, at 2i + 1 and 2i + 2
+    items: [T],
+    // Whether the greatest comes first
+    max: bool,
+}
+
+// An empty heap that gives the least value first.
+pub fun new<T: Ord>() -> Heap<T> {
+    return Heap { items: [], max: false }
+}
+
+// An empty heap that gives the greatest value first.
+pub fun max_new<T: Ord>() -> Heap<T> {
+    return Heap { items: [], max: true }
+}
+
+// A heap of the elements of `xs` that gives the least first, built in O(n).
+pub fun of<T: Ord>(xs: [T]) -> Heap<T> {
+    return heapified(xs, false)
+}
+
+// A heap of the elements of `xs` that gives the greatest first.
+pub fun max_of<T: Ord>(xs: [T]) -> Heap<T> {
+    return heapified(xs, true)
+}
+
+// Floyd's construction: sift every element that has children down, the
+// last first. Each level has half the elements of the one below it and
+// sifts one step further, so the work is O(n).
+fun heapified<T: Ord>(xs: [T], max: bool) -> Heap<T> {
+    var h = Heap { items: xs, max: max }
+    var i = xs.len() / 2 - 1
+    while i >= 0 {
+        h.sift_down(i, xs.len())
+        i -= 1
+    }
+    return h
+}
+
+impl<T: Ord> Heap<T> {
+    // The number of elements.
+    fun len(self) -> int {
+        return self.items.len()
+    }
+
+    fun is_empty(self) -> bool {
+        return self.items.len() == 0
+    }
+
+    // Adds `x`.
+    fun push(var self, x: T) {
+        // Moves the parents that `x` comes before down, then puts `x` in the
+        // hole they leave.
+        self.items.push(x)
+        let max = self.max
+        var hole = self.items.len() - 1
+        while hole > 0 {
+            let up = (hole - 1) / 2
+            let p = self.items[up]
+            if (max && !(p < x)) || (!max && !(x < p)) {
+                break
+            }
+            self.items[hole] = p
+            hole = up
+        }
+        self.items[hole] = x
+    }
+
+    // Takes the least element (the greatest, for a max-heap), if there is
+    // one.
+    fun pop(var self) -> Option<T> {
+        let n = self.items.len()
+        if n == 0 {
+            return None
+        }
+        let top = self.items[0]
+        let last = self.items.pop()
+        if n > 1 {
+            self.items[0] = last
+            self.sift_down(0, n - 1)
+        }
+        return Some(top)
+    }
+
+    // The element `pop` would take, if there is one.
+    fun peek(self) -> Option<T> {
+        if self.items.len() == 0 {
+            return None
+        }
+        return Some(self.items[0])
+    }
+
+    // The elements in the order `pop` gives them: ascending, or descending
+    // for a max-heap. Sorts in place, in O(n log n).
+    fun into_sorted(self) -> [T] {
+        // Heapsort: the first element goes to the end of the heap, which
+        // shrinks by one, so the list ends up in the order opposite to pop's.
+        var h = self
+        var end = h.items.len() - 1
+        while end > 0 {
+            let top = h.items[0]
+            h.items[0] = h.items[end]
+            h.items[end] = top
+            h.sift_down(0, end)
+            end -= 1
+        }
+        return h.items[::-1]
+    }
+
+    // Restores the heap below `i` among the first `n` elements, where only
+    // the element at `i` may be out of place: moves the children that come
+    // before it up, then puts it in the hole they leave. The heap's own step,
+    // which `pop` and `of` take.
+    fun sift_down(var self, i: int, n: int) {
+        let x = self.items[i]
+        let max = self.max
+        var hole = i
+        while true {
+            var c = 2 * hole + 1
+            if c >= n {
+                break
+            }
+            if c + 1 < n {
+                let l = self.items[c]
+                let r = self.items[c + 1]
+                if (max && l < r) || (!max && r < l) {
+                    c += 1
+                }
+            }
+            let child = self.items[c]
+            if (max && !(x < child)) || (!max && !(child < x)) {
+                break
+            }
+            self.items[hole] = child
+            hole = c
+        }
+        self.items[hole] = x
+    }
+}
+
+// A binary min-heap of values by an `int64` priority. Values of equal
+// priority come out in no set order.
+pub struct KeyedHeap<T> {
+    // The priorities, a heap
+    prio: [int64],
+    // The value of each priority
+    vals: [T],
+}
+
+// An empty keyed heap.
+pub fun keyed_new<T>() -> KeyedHeap<T> {
+    return KeyedHeap { prio: [], vals: [] }
+}
+
+impl<T> KeyedHeap<T> {
+    // The number of elements.
+    fun len(self) -> int {
+        return self.prio.len()
+    }
+
+    fun is_empty(self) -> bool {
+        return self.prio.len() == 0
+    }
+
+    // Adds `value` with priority `priority`.
+    fun push(var self, priority: int64, value: T) {
+        self.prio.push(priority)
+        self.vals.push(value)
+        var hole = self.prio.len() - 1
+        while hole > 0 {
+            let up = (hole - 1) / 2
+            let p = self.prio[up]
+            if p <= priority {
+                break
+            }
+            self.prio[hole] = p
+            self.vals[hole] = self.vals[up]
+            hole = up
+        }
+        self.prio[hole] = priority
+        self.vals[hole] = value
+    }
+
+    // Takes a value of the least priority, with its priority, if there is
+    // one.
+    fun pop(var self) -> Option<(int64, T)> {
+        let n = self.prio.len()
+        if n == 0 {
+            return None
+        }
+        let top = (self.prio[0], self.vals[0])
+        let p = self.prio.pop()
+        let v = self.vals.pop()
+        if n == 1 {
+            return Some(top)
+        }
+        // Sifts the last entry down from the root.
+        let m = n - 1
+        var hole = 0
+        while true {
+            var c = 2 * hole + 1
+            if c >= m {
+                break
+            }
+            if c + 1 < m && self.prio[c + 1] < self.prio[c] {
+                c += 1
+            }
+            let cp = self.prio[c]
+            if p <= cp {
+                break
+            }
+            self.prio[hole] = cp
+            self.vals[hole] = self.vals[c]
+            hole = c
+        }
+        self.prio[hole] = p
+        self.vals[hole] = v
+        return Some(top)
+    }
+
+    // The entry `pop` would take, if there is one.
+    fun peek(self) -> Option<(int64, T)> {
+        if self.prio.len() == 0 {
+            return None
+        }
+        return Some((self.prio[0], self.vals[0]))
+    }
+}
+
+// --- tests -------------------------------------------------------------------
+// The functions are generic, which a `#test` case can't take (D116), so the
+// tests are test functions (D162).
+
+// Whether `xs` and `ys` hold the same elements in the same order.
+fun same<T: Eq>(xs: [T], ys: [T]) -> bool {
+    if xs.len() != ys.len() {
+        return false
+    }
+    for i in 0..xs.len() {
+        if xs[i] != ys[i] {
+            return false
+        }
+    }
+    return true
+}
+
+fun is_some_of<T: Eq>(o: Option<T>, v: T) -> bool {
+    return match o {
+        Some(x) => x == v
+        None => false
+    }
+}
+
+fun is_none<T>(o: Option<T>) -> bool {
+    return match o {
+        Some(_) => false
+        None => true
+    }
+}
+
+// Pseudo-random numbers in 0..m, from a linear congruential generator.
+fun randoms(n: int, m: int, seed: uint32) -> [int] {
+    var out: [int] = []
+    var x = seed
+    for i in 0..n {
+        x = x * 1664525u32 + 1013904223u32
+        out.push(((x >> 8u32) % (m as uint32)) as int)
+    }
+    return out
+}
+
+// How often each value in 0..m occurs in `xs`.
+fun tally(xs: [int], m: int) -> [int] {
+    var t: [int] = []
+    for i in 0..m {
+        t.push(0)
+    }
+    for x in xs {
+        t[x] += 1
+    }
+    return t
+}
+
+// Pops `h` empty.
+fun drained(h: Heap<int>) -> [int] {
+    var g = h
+    var out: [int] = []
+    while let Some(x) = g.pop() {
+        out.push(x)
+    }
+    return out
+}
+
+fun ascending(xs: [int]) -> bool {
+    for i in 1..xs.len() {
+        if xs[i - 1] > xs[i] {
+            return false
+        }
+    }
+    return true
+}
+
+#test
+fun min_first() {
+    var h: Heap<int> = new()
+    assert(h.is_empty() && h.len() == 0, "a new heap is empty")
+    assert(is_none(h.pop()) && is_none(h.peek()), "an empty heap")
+    for x in [5, 1, 4, 1, 3] {
+        h.push(x)
+    }
+    assert(h.len() == 5 && !h.is_empty(), "five elements")
+    assert(is_some_of(h.peek(), 1), "peek")
+    assert(h.len() == 5, "peek takes nothing")
+    assert(same(drained(h), [1, 1, 3, 4, 5]), "least first")
+    assert(h.len() == 5, "a heap is a value")
+    assert(is_some_of(h.pop(), 1) && is_some_of(h.pop(), 1) && h.len() == 3, "pop")
+}
+
+#test
+fun max_first() {
+    var h: Heap<int> = max_new()
+    for x in [5, 1, 4, 1, 3] {
+        h.push(x)
+    }
+    assert(is_some_of(h.peek(), 5), "peek of a max-heap")
+    assert(same(drained(h), [5, 4, 3, 1, 1]), "greatest first")
+    let m: Heap<int> = max_of([2, 9, 7])
+    assert(same(drained(m), [9, 7, 2]), "max_of")
+    assert(same(m.into_sorted(), [9, 7, 2]), "into_sorted of a max-heap: descending")
+}
+
+#test
+fun heapify() {
+    for n in [0, 1, 2, 3, 10, 100, 1001] {
+        let xs = randoms(n, 50, n as uint32)
+        let h: Heap<int> = of(xs)
+        assert(h.len() == n, "of keeps every element")
+        let out = drained(h)
+        assert(ascending(out), f"of then pop is ascending for {n}")
+        assert(same(tally(out, 50), tally(xs, 50)), f"the same elements for {n}")
+        assert(same(h.into_sorted(), out), f"into_sorted is pop's order for {n}")
+        let m: Heap<int> = max_of(xs)
+        assert(same(m.into_sorted(), out[::-1]), f"max_of for {n}")
+    }
+}
+
+#test
+fun interleaved() {
+    // Pushes and pops mixed, checked against a sorted list as the model.
+    var h: Heap<int> = new()
+    var model: [int] = []
+    let xs = randoms(2000, 1000, 7u32)
+    for i in 0..xs.len() {
+        h.push(xs[i])
+        var j = model.len()
+        model.push(xs[i])
+        while j > 0 && model[j - 1] > model[j] {
+            let t = model[j]
+            model[j] = model[j - 1]
+            model[j - 1] = t
+            j -= 1
+        }
+        if i % 3 == 0 {
+            assert(is_some_of(h.pop(), model[0]), "the least comes out")
+            model = model[1:]
+        }
+        assert(h.len() == model.len(), "len")
+    }
+    assert(same(h.into_sorted(), model), "what is left")
+}
+
+// A type with an `Ord` of its own: by `cost`, then by `name`'s length.
+struct Job {
+    cost: int,
+    name: str,
+}
+
+impl Ord for Job {
+    fun cmp(self, other: Job) -> int {
+        if self.cost != other.cost {
+            return self.cost - other.cost
+        }
+        return self.name.len() - other.name.len()
+    }
+}
+
+#test
+fun own_order() {
+    var h: Heap<Job> = new()
+    h.push(Job { cost: 3, name: "c" })
+    h.push(Job { cost: 1, name: "aa" })
+    h.push(Job { cost: 1, name: "a" })
+    var names: [str] = []
+    while let Some(j) = h.pop() {
+        names.push(j.name)
+    }
+    assert(same(names, ["a", "aa", "c"]), "by the type's own cmp")
+}
+
+#test
+fun other_ordered_types() {
+    var f: Heap<float> = max_of([0.5, -2.0, 3.25])
+    f.push(1.0)
+    assert(is_some_of(f.pop(), 3.25) && is_some_of(f.pop(), 1.0), "floats, greatest first")
+    let c: Heap<char> = of("heap".chars())
+    assert(same(c.into_sorted(), ['a', 'e', 'h', 'p']), "chars")
+    var b: Heap<int64> = new()
+    b.push(5000000000)
+    b.push(-5000000000)
+    assert(is_some_of(b.pop(), -5000000000), "int64")
+}
+
+#test
+fun keyed() {
+    var h: KeyedHeap<str> = keyed_new()
+    assert(h.is_empty() && is_none(h.pop()) && is_none(h.peek()), "an empty keyed heap")
+    h.push(5, "five")
+    h.push(5000000000, "big")
+    h.push(-2, "minus two")
+    h.push(3, "three")
+    assert(h.len() == 4 && !h.is_empty(), "four entries")
+    if let Some(e) = h.peek() {
+        assert(e.0 == -2 && e.1 == "minus two", "peek")
+    } else {
+        panic("peek of a keyed heap")
+    }
+    var names: [str] = []
+    var last: int64 = -100
+    while let Some(e) = h.pop() {
+        let (p, name) = e
+        assert(p >= last, "least priority first")
+        last = p
+        names.push(name)
+    }
+    assert(same(names, ["minus two", "three", "five", "big"]), "the values follow their priorities")
+    var k: KeyedHeap<int> = keyed_new()
+    let ps = randoms(1000, 100, 3u32)
+    for i in 0..ps.len() {
+        k.push(ps[i] as int64, i)
+    }
+    last = -1
+    var n = 0
+    while let Some(e) = k.pop() {
+        let (p, i) = e
+        assert(p >= last && ps[i] as int64 == p, "each value keeps its priority")
+        last = p
+        n += 1
+    }
+    assert(n == 1000, "every entry came out")
+}
