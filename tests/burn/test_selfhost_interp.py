@@ -36,7 +36,7 @@ import tempfile
 import time
 import unittest
 
-from ._golden import golden
+from ._golden import golden, recorded_examples
 from ._native import CAN_BUILD_NATIVE
 from ._tools import STDLIB_ROOT, selfhost_tool
 
@@ -49,10 +49,10 @@ EXCLUDED: set[str] = set()
 
 
 def _corpus() -> list[str]:
-    """Every single-file top-level example. The import-driven multi-file
-    packages live in subdirectories and are filtered out by the glob."""
-    files = glob.glob(os.path.join(_REPO, "examples", "*.my"))
-    return sorted(f for f in files if os.path.basename(f) not in EXCLUDED)
+    """Every single-file top-level example the recordings cover (an example
+    added since is held to test_examples_run's expectation, MYLA-288). The
+    import-driven multi-file packages live in subdirectories."""
+    return [f for f in recorded_examples() if os.path.basename(f) not in EXCLUDED]
 
 
 @golden("selfhost_interp.run")
