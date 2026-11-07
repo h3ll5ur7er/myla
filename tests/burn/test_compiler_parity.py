@@ -3783,6 +3783,19 @@ class TestCompilerParity(unittest.TestCase):
         self.assertEqual(out, "7\n")
         self.assertNotEqual(code, 0)
 
+    def test_assert_with_a_computed_message(self):
+        # MYLA-355: a message computed in the failing branch (an f-string, a
+        # concatenation) is a temporary of that branch only: the passing path
+        # mustn't drop it
+        for msg in ('f"bad {t}"', '"bad " + t'):
+            with self.subTest(message=msg):
+                src = ('#main\nfun main() {\n    let t = "a"\n'
+                       f'    assert(t == "a", {msg})\n    print(1)\n'
+                       f'    assert(t == "b", {msg})\n    print(2)\n}}\n')
+                out, code = build_and_run(src)
+                self.assertEqual(out, "1\n")
+                self.assertNotEqual(code, 0)
+
     def test_assert_pass_does_not_abort(self):
         src = "#main\nfun main() {\n    assert(1 < 2)\n    print(42)\n}\n"
         out, code = build_and_run(src)

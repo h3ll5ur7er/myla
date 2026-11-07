@@ -4168,7 +4168,13 @@ impl Lower {
         self.finish(Term.Br(c, ok, bad))
         self.start(bad)
         if args.len() == 2 {
+            // the message is computed only here, so its temporaries are this
+            // branch's alone (MYLA-355): the statement's end, on the passing
+            // path, mustn't drop them; the program ends here, so nothing is
+            let tc = self.temps.len()
+            self.begin_temps()
             let m = self.expr(cg, args[1])
+            while self.temps.len() > tc { let ts = self.temps.pop() }
             self.finish(Term.Panic(m, at))
         } else {
             self.add(Inst.Str(fail, "assertion failed"))
