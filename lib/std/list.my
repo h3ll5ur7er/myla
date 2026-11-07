@@ -1,0 +1,963 @@
+// std.list: methods on lists (MYLA-323, D164).
+//
+// Building, higher-order operations, sorting, searching and combinatorics,
+// as methods of `[T]`. The receiver is a copy, so a method that returns a new
+// list copies the elements only when the list is shared (copy-on-write). A
+// method that changes its list is a `var self` method (`xs.sort()`); one that
+// returns a new list has a past participle or a noun (`xs.sorted()`). The
+// names are Rust's, where Rust has the operation.
+
+// A list of `n` copies of `v` (none when `n` isn't positive).
+pub fun filled<T>(n: int, v: T) -> [T] {
+    var out: [T] = []
+    for i in 0..n { out.push(v) }
+    return out
+}
+
+// ---------------------------------------------------------------------------
+// Building and higher-order operations, for any element type.
+
+impl<T> [T] {
+    // The elements in the opposite order.
+    fun reversed(self) -> [T] {
+        return self[::-1]
+    }
+
+    // The elements, then `other`'s.
+    fun concat(self, other: [T]) -> [T] {
+        var out = self
+        for x in other { out.push(x) }
+        return out
+    }
+
+    // Adds `other`'s elements at the end.
+    fun extend(var self, other: [T]) {
+        for x in other { self.push(x) }
+    }
+
+    // Puts `v` at index `i`, moving the elements from `i` on one place up;
+    // `i` may be the length, which appends.
+    fun insert(var self, i: int, v: T) {
+        let n = self.len()
+        if i < 0 || i > n { panic(f"insert: index {i} out of bounds for a list of {n}") }
+        self.push(v)
+        var j = n
+        while j > i {
+            self[j] = self[j - 1]
+            j -= 1
+        }
+        self[i] = v
+    }
+
+    // Takes out the element at index `i` and returns it, moving the ones
+    // after it one place down.
+    fun remove_at(var self, i: int) -> T {
+        let n = self.len()
+        if i < 0 || i >= n { panic(f"remove_at: index {i} out of bounds for a list of {n}") }
+        let v = self[i]
+        for j in i..n - 1 { self[j] = self[j + 1] }
+        self.pop()
+        return v
+    }
+
+    // Exchanges the elements at `i` and `j`.
+    fun swap(var self, i: int, j: int) {
+        let t = self[i]
+        self[i] = self[j]
+        self[j] = t
+    }
+
+    // Keeps the first `n` elements (all of them when there are fewer).
+    fun truncate(var self, n: int) {
+        while self.len() > n && self.len() > 0 { self.pop() }
+    }
+
+    // `f` of each element.
+    fun map<U>(self, f: (T) -> U) -> [U] {
+        var out: [U] = []
+        for x in self { out.push(f(x)) }
+        return out
+    }
+
+    // The elements for which `keep` holds, in order.
+    fun filter(self, keep: (T) -> bool) -> [T] {
+        var out: [T] = []
+        for x in self {
+            if keep(x) { out.push(x) }
+        }
+        return out
+    }
+
+    // `f(… f(f(init, x0), x1) …, xn)`; `init` for an empty list.
+    fun fold<A>(self, init: A, f: (A, T) -> A) -> A {
+        var acc = init
+        for x in self { acc = f(acc, x) }
+        return acc
+    }
+
+    // Like `fold` from the first element; `None` for an empty list.
+    fun reduce(self, f: (T, T) -> T) -> Option<T> {
+        if self.len() == 0 { return None }
+        var acc = self[0]
+        for i in 1..self.len() { acc = f(acc, self[i]) }
+        return Some(acc)
+    }
+
+    // Whether `pred` holds for some element (false for an empty list).
+    fun any(self, pred: (T) -> bool) -> bool {
+        for x in self {
+            if pred(x) { return true }
+        }
+        return false
+    }
+
+    // Whether `pred` holds for every element (true for an empty list).
+    fun all(self, pred: (T) -> bool) -> bool {
+        for x in self {
+            if !pred(x) { return false }
+        }
+        return true
+    }
+
+    // The first element for which `pred` holds.
+    fun find(self, pred: (T) -> bool) -> Option<T> {
+        for x in self {
+            if pred(x) { return Some(x) }
+        }
+        return None
+    }
+
+    // The index of the first element for which `pred` holds.
+    fun position(self, pred: (T) -> bool) -> Option<int> {
+        for i in 0..self.len() {
+            if pred(self[i]) { return Some(i) }
+        }
+        return None
+    }
+
+    // How many elements `pred` holds for.
+    fun count(self, pred: (T) -> bool) -> int {
+        var n = 0
+        for x in self {
+            if pred(x) { n += 1 }
+        }
+        return n
+    }
+
+    // The least element by `less` (the first of equal ones).
+    fun min_by(self, less: (T, T) -> bool) -> Option<T> {
+        if self.len() == 0 { return None }
+        var best = self[0]
+        for i in 1..self.len() {
+            if less(self[i], best) { best = self[i] }
+        }
+        return Some(best)
+    }
+
+    // The greatest element by `less` (the last of equal ones).
+    fun max_by(self, less: (T, T) -> bool) -> Option<T> {
+        if self.len() == 0 { return None }
+        var best = self[0]
+        for i in 1..self.len() {
+            if !less(self[i], best) { best = self[i] }
+        }
+        return Some(best)
+    }
+
+    // The lists `f` gives for the elements, one after the other.
+    fun flat_map<U>(self, f: (T) -> [U]) -> [U] {
+        var out: [U] = []
+        for x in self {
+            for y in f(x) { out.push(y) }
+        }
+        return out
+    }
+
+    // Pairs of the elements at the same index, as many as the shorter list
+    // has.
+    fun zip<U>(self, other: [U]) -> [(T, U)] {
+        var out: [(T, U)] = []
+        var n = self.len()
+        if other.len() < n { n = other.len() }
+        for i in 0..n { out.push((self[i], other[i])) }
+        return out
+    }
+
+    // Each element with its index.
+    fun enumerate(self) -> [(int, T)] {
+        var out: [(int, T)] = []
+        for i in 0..self.len() { out.push((i, self[i])) }
+        return out
+    }
+
+    // The elements in lists of `n` (the last one shorter when they don't
+    // divide evenly); `n` must be positive.
+    fun chunks(self, n: int) -> [[T]] {
+        if n < 1 { panic(f"chunks: size {n} isn't positive") }
+        var out: [[T]] = []
+        var i = 0
+        while i < self.len() {
+            out.push(self[i:i + n])
+            i += n
+        }
+        return out
+    }
+
+    // Every run of `n` adjacent elements, overlapping, in order (none when
+    // the list is shorter); `n` must be positive.
+    fun windows(self, n: int) -> [[T]] {
+        if n < 1 { panic(f"windows: size {n} isn't positive") }
+        var out: [[T]] = []
+        for i in 0..self.len() - n + 1 { out.push(self[i:i + n]) }
+        return out
+    }
+
+    // Sorts by `less`, "a goes before b", keeping equal elements in the order
+    // they had (a stable merge sort).
+    fun sort_by(var self, less: (T, T) -> bool) {
+        // The list taken out of the caller's place, so that `a` alone holds
+        // it and writing to it copies nothing (as in `sort`, `sort_unstable`).
+        var a = self
+        self = []
+        let n = a.len()
+        // Runs of RUN sorted by insertion, then merged in passes.
+        var lo = 0
+        while lo < n {
+            var hi = lo + RUN
+            if hi > n { hi = n }
+            for i in lo + 1..hi {
+                let v = a[i]
+                var j = i
+                while j > lo && less(v, a[j - 1]) {
+                    a[j] = a[j - 1]
+                    j -= 1
+                }
+                a[j] = v
+            }
+            lo = hi
+        }
+        var width = RUN
+        while width < n {
+            a = merged_by(a, width, less)
+            width *= 2
+        }
+        self = a
+    }
+
+    // The elements sorted by `less`, stably.
+    fun sorted_by(self, less: (T, T) -> bool) -> [T] {
+        var out = self
+        out.sort_by(less)
+        return out
+    }
+
+    // Sorts by the keys `key` gives, stably; `key` is called once for each
+    // element.
+    fun sort_by_key<K: Ord>(var self, key: (T) -> K) {
+        let keys = self.map(key)
+        var order: [int] = []
+        for i in 0..self.len() { order.push(i) }
+        order.sort_by((i, j) => keys[i] < keys[j])
+        let old = self
+        for i in 0..order.len() { self[i] = old[order[i]] }
+    }
+
+    // The index of the first element for which `pred` fails, in a list where
+    // it holds for a first part and fails for the rest.
+    fun partition_point(self, pred: (T) -> bool) -> int {
+        var lo = 0
+        var hi = self.len()
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2
+            if pred(self[mid]) { lo = mid + 1 } else { hi = mid }
+        }
+        return lo
+    }
+
+    // Every order of the elements, n! of them, in the lexicographic order of
+    // their positions (a sorted list's in lexicographic order); equal
+    // elements give equal orders.
+    fun permutations(self) -> [[T]] {
+        var order: [int] = []
+        for i in 0..self.len() { order.push(i) }
+        var out: [[T]] = []
+        while true {
+            var p: [T] = []
+            for i in order { p.push(self[i]) }
+            out.push(p)
+            if !order.next_permutation() { break }
+        }
+        return out
+    }
+
+    // Every choice of `k` of the elements, each in the order of the list, in
+    // the lexicographic order of their positions.
+    fun combinations(self, k: int) -> [[T]] {
+        var out: [[T]] = []
+        let n = self.len()
+        if k < 0 || k > n { return out }
+        var pick: [int] = []
+        for i in 0..k { pick.push(i) }
+        while true {
+            var c: [T] = []
+            for i in pick { c.push(self[i]) }
+            out.push(c)
+            // The last position that can move on, then the ones after it.
+            var i = k - 1
+            while i >= 0 && pick[i] == n - k + i { i -= 1 }
+            if i < 0 { break }
+            pick[i] += 1
+            for j in i + 1..k { pick[j] = pick[j - 1] + 1 }
+        }
+        return out
+    }
+}
+
+// The length of the runs a merge sort starts with, sorted by insertion.
+const RUN: int = 16
+
+// `a`'s runs of `width`, each sorted, merged in pairs into runs of twice
+// that: one pass of the merge sort, taking the left run's element of equal
+// ones (stable).
+fun merged_by<T>(a: [T], width: int, less: (T, T) -> bool) -> [T] {
+    let n = a.len()
+    var out: [T] = []
+    var lo = 0
+    while lo < n {
+        var mid = lo + width
+        if mid > n { mid = n }
+        var hi = mid + width
+        if hi > n { hi = n }
+        var i = lo
+        var j = mid
+        while i < mid && j < hi {
+            if less(a[j], a[i]) {
+                out.push(a[j])
+                j += 1
+            } else {
+                out.push(a[i])
+                i += 1
+            }
+        }
+        while i < mid {
+            out.push(a[i])
+            i += 1
+        }
+        while j < hi {
+            out.push(a[j])
+            j += 1
+        }
+        lo = hi
+    }
+    return out
+}
+
+// ---------------------------------------------------------------------------
+// Elements that can be compared for equality.
+
+impl<T: Eq> [T] {
+    // Whether some element is `v`.
+    fun contains(self, v: T) -> bool {
+        for x in self {
+            if x == v { return true }
+        }
+        return false
+    }
+
+    // The index of the first element that is `v`.
+    fun index_of(self, v: T) -> Option<int> {
+        for i in 0..self.len() {
+            if self[i] == v { return Some(i) }
+        }
+        return None
+    }
+
+    // Removes each element equal to the one before it, so a run of equal
+    // elements keeps its first (all repeats, in a sorted list).
+    fun dedup(var self) {
+        let n = self.len()
+        if n < 2 { return }
+        var w = 1
+        for i in 1..n {
+            if !(self[i] == self[w - 1]) {
+                self[w] = self[i]
+                w += 1
+            }
+        }
+        self.truncate(w)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Elements that can be added.
+
+impl<T: Add> [T] {
+    // The elements added up, starting from `zero` (the sum of none): `xs.sum(0)`,
+    // `xs.sum(0.0)`.
+    fun sum(self, zero: T) -> T {
+        var acc = zero
+        for x in self { acc = acc + x }
+        return acc
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Ordered elements: sorting, searching a sorted list, permutations.
+
+impl<T: Ord> [T] {
+    // Sorts in ascending order, keeping equal elements in the order they had
+    // (a stable merge sort).
+    fun sort(var self) {
+        var a = self
+        self = []
+        let n = a.len()
+        var lo = 0
+        while lo < n {
+            var hi = lo + RUN
+            if hi > n { hi = n }
+            for i in lo + 1..hi {
+                let v = a[i]
+                var j = i
+                while j > lo && v < a[j - 1] {
+                    a[j] = a[j - 1]
+                    j -= 1
+                }
+                a[j] = v
+            }
+            lo = hi
+        }
+        var width = RUN
+        while width < n {
+            a = merged(a, width)
+            width *= 2
+        }
+        self = a
+    }
+
+    // The elements in ascending order, stably.
+    fun sorted(self) -> [T] {
+        var out = self
+        out.sort()
+        return out
+    }
+
+    // Sorts in ascending order, faster than `sort` but without keeping equal
+    // elements in order (an introsort: quicksort, heapsort where it goes
+    // badly, insertion sort for short ranges).
+    fun sort_unstable(var self) {
+        var a = self
+        self = []
+        let n = a.len()
+        // Ranges still to sort, with the depth each may still go to.
+        var limit = 0
+        var m = n
+        while m > 0 {
+            limit += 2
+            m = m / 2
+        }
+        var stack: [int] = [0, n, limit]
+        while stack.len() > 0 {
+            var depth = stack.pop()
+            var hi = stack.pop()
+            var lo = stack.pop()
+            while hi - lo > RUN {
+                if depth == 0 {
+                    // A heapsort of `a[lo:hi]`: the heap built from its
+                    // middle down, then its top moved to the end, each with
+                    // the same sift down.
+                    let n = hi - lo
+                    var k = n / 2
+                    var end = n
+                    while true {
+                        var r = 0
+                        if k > 0 {
+                            k -= 1
+                            r = k
+                        } else {
+                            end -= 1
+                            if end <= 0 { break }
+                            a.swap(lo, lo + end)
+                        }
+                        while true {
+                            var child = 2 * r + 1
+                            if child >= end { break }
+                            if child + 1 < end && a[lo + child] < a[lo + child + 1] { child += 1 }
+                            if !(a[lo + r] < a[lo + child]) { break }
+                            a.swap(lo + r, lo + child)
+                            r = child
+                        }
+                    }
+                    hi = lo
+                    break
+                }
+                depth -= 1
+                // The median of three as the pivot, then Hoare's partition.
+                let mid = lo + (hi - lo) / 2
+                if a[mid] < a[lo] { a.swap(mid, lo) }
+                if a[hi - 1] < a[mid] {
+                    a.swap(hi - 1, mid)
+                    if a[mid] < a[lo] { a.swap(mid, lo) }
+                }
+                let pivot = a[mid]
+                var i = lo
+                var j = hi - 1
+                while i <= j {
+                    while a[i] < pivot { i += 1 }
+                    while pivot < a[j] { j -= 1 }
+                    if i <= j {
+                        let t = a[i]
+                        a[i] = a[j]
+                        a[j] = t
+                        i += 1
+                        j -= 1
+                    }
+                }
+                // The smaller side goes on, the larger waits on the stack.
+                if j + 1 - lo < hi - i {
+                    stack.push(i)
+                    stack.push(hi)
+                    stack.push(depth)
+                    hi = j + 1
+                } else {
+                    stack.push(lo)
+                    stack.push(j + 1)
+                    stack.push(depth)
+                    lo = i
+                }
+            }
+            for i in lo + 1..hi {
+                let v = a[i]
+                var j = i
+                while j > lo && v < a[j - 1] {
+                    a[j] = a[j - 1]
+                    j -= 1
+                }
+                a[j] = v
+            }
+        }
+        self = a
+    }
+
+    // Whether every element is at least the one before it.
+    fun is_sorted(self) -> bool {
+        for i in 1..self.len() {
+            if self[i] < self[i - 1] { return false }
+        }
+        return true
+    }
+
+    // The index of the first element that isn't less than `v`, in a sorted
+    // list: where `v` would go before its equals.
+    fun lower_bound(self, v: T) -> int {
+        var lo = 0
+        var hi = self.len()
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2
+            if self[mid] < v { lo = mid + 1 } else { hi = mid }
+        }
+        return lo
+    }
+
+    // The index of the first element greater than `v`, in a sorted list:
+    // where `v` would go after its equals.
+    fun upper_bound(self, v: T) -> int {
+        var lo = 0
+        var hi = self.len()
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2
+            if v < self[mid] { hi = mid } else { lo = mid + 1 }
+        }
+        return lo
+    }
+
+    // `Ok` of the index of the first element equal to `v` in a sorted list,
+    // or `Err` of the index where `v` would go.
+    fun binary_search(self, v: T) -> Result<int, int> {
+        let i = self.lower_bound(v)
+        if i < self.len() && !(v < self[i]) { return Ok(i) }
+        return Err(i)
+    }
+
+    // Rearranges the elements into the next greater order, lexicographically,
+    // and says whether there was one; after the greatest order it gives the
+    // least (ascending) and false, as C++'s `next_permutation` does.
+    fun next_permutation(var self) -> bool {
+        let n = self.len()
+        var i = n - 2
+        while i >= 0 && !(self[i] < self[i + 1]) { i -= 1 }
+        if i >= 0 {
+            var j = n - 1
+            while !(self[i] < self[j]) { j -= 1 }
+            self.swap(i, j)
+        }
+        var lo = i + 1
+        var hi = n - 1
+        while lo < hi {
+            self.swap(lo, hi)
+            lo += 1
+            hi -= 1
+        }
+        return i >= 0
+    }
+}
+
+// One pass of `sort`'s merge sort, as `merged_by` with `<`.
+fun merged<T: Ord>(a: [T], width: int) -> [T] {
+    let n = a.len()
+    var out: [T] = []
+    var lo = 0
+    while lo < n {
+        var mid = lo + width
+        if mid > n { mid = n }
+        var hi = mid + width
+        if hi > n { hi = n }
+        var i = lo
+        var j = mid
+        while i < mid && j < hi {
+            if a[j] < a[i] {
+                out.push(a[j])
+                j += 1
+            } else {
+                out.push(a[i])
+                i += 1
+            }
+        }
+        while i < mid {
+            out.push(a[i])
+            i += 1
+        }
+        while j < hi {
+            out.push(a[j])
+            j += 1
+        }
+        lo = hi
+    }
+    return out
+}
+
+// ---------------------------------------------------------------------------
+// Lists of strings.
+
+impl [str] {
+    // The strings with `sep` between each two.
+    #test(["a", "b", "c"], ", ")["a, b, c"]
+    #test(["a"], "-")["a"]
+    fun join(self, sep: str) -> str {
+        var sb = StringBuilder()
+        for i in 0..self.len() {
+            if i > 0 { sb.append(sep) }
+            sb.append(self[i])
+        }
+        return sb.build()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests. `#test` can't take a generic function or a method of a generic impl
+// (D116), so these test functions (D162) call them with concrete types. The
+// module doesn't import std.test, which every program would import with it.
+
+// The text of a list, `[1, 2, 3]`, to compare.
+fun shown<T: Format>(xs: [T]) -> str {
+    var sb = StringBuilder()
+    sb.append("[")
+    for i in 0..xs.len() {
+        if i > 0 { sb.append(", ") }
+        sb.append(f"{xs[i]}")
+    }
+    sb.append("]")
+    return sb.build()
+}
+
+fun shown_all<T: Format>(xss: [[T]]) -> str {
+    var sb = StringBuilder()
+    sb.append("[")
+    for i in 0..xss.len() {
+        if i > 0 { sb.append(", ") }
+        sb.append(shown(xss[i]))
+    }
+    sb.append("]")
+    return sb.build()
+}
+
+fun shown_opt<T: Format>(o: Option<T>) -> str {
+    return match o {
+        Some(v) => f"Some({v})"
+        None => "None"
+    }
+}
+
+// Fail the case unless `got` is `want`, naming both.
+fun same(got: str, want: str) {
+    assert(got == want, f"expected {want}, got {got}")
+}
+
+#test
+fun builds() {
+    same(shown(filled(3, 7)), "[7, 7, 7]")
+    same(shown(filled(0, "x")), "[]")
+    same(shown([1, 2, 3].reversed()), "[3, 2, 1]")
+    let empty: [int] = []
+    same(shown(empty.reversed()), "[]")
+    same(shown([1, 2].concat([3, 4])), "[1, 2, 3, 4]")
+    same(shown(empty.concat([5])), "[5]")
+    var xs = [1, 2]
+    xs.extend([3, 4])
+    same(shown(xs), "[1, 2, 3, 4]")
+    xs.insert(0, 0)
+    xs.insert(5, 5)
+    xs.insert(2, 9)
+    same(shown(xs), "[0, 1, 9, 2, 3, 4, 5]")
+    assert(xs.remove_at(2) == 9, "remove_at returns the element")
+    assert(xs.remove_at(0) == 0, "remove_at at the start")
+    assert(xs.remove_at(4) == 5, "remove_at at the end")
+    same(shown(xs), "[1, 2, 3, 4]")
+    xs.swap(0, 3)
+    xs.swap(1, 1)
+    same(shown(xs), "[4, 2, 3, 1]")
+    xs.truncate(9)
+    same(shown(xs), "[4, 2, 3, 1]")
+    xs.truncate(2)
+    same(shown(xs), "[4, 2]")
+    xs.truncate(0)
+    same(shown(xs), "[]")
+    var ys = [1, 1, 2, 3, 3, 3, 1, 4, 4]
+    ys.dedup()
+    same(shown(ys), "[1, 2, 3, 1, 4]")
+    var none: [str] = []
+    none.dedup()
+    same(shown(none), "[]")
+}
+
+#test
+fun searches_by_value() {
+    let xs = ["a", "b", "c", "b"]
+    assert(xs.contains("c"), "contains c")
+    assert(!xs.contains("d"), "doesn't contain d")
+    same(shown_opt(xs.index_of("b")), "Some(1)")
+    same(shown_opt(xs.index_of("z")), "None")
+}
+
+#test
+fun joins() {
+    same(["a", "b", "c"].join(", "), "a, b, c")
+    same(["a"].join("-"), "a")
+    let none: [str] = []
+    same(none.join("-"), "")
+}
+
+#test
+fun maps_and_folds() {
+    let xs = [1, 2, 3, 4, 5]
+    same(shown(xs.map((x) => x * x)), "[1, 4, 9, 16, 25]")
+    same(shown(xs.map((x) => f"<{x}>")), "[<1>, <2>, <3>, <4>, <5>]")
+    same(shown(xs.filter((x) => x % 2 == 1)), "[1, 3, 5]")
+    assert(xs.fold(0, (acc, x) => acc + x) == 15, "fold sums")
+    same(xs.fold("", (acc, x) => acc + f"{x}"), "12345")
+    same(shown_opt(xs.reduce((a, b) => a * b)), "Some(120)")
+    let empty: [int] = []
+    same(shown_opt(empty.reduce((a, b) => a + b)), "None")
+    assert(xs.any((x) => x > 4), "any")
+    assert(!xs.any((x) => x > 5), "not any")
+    assert(!empty.any((x) => true), "any of none")
+    assert(xs.all((x) => x > 0), "all")
+    assert(!xs.all((x) => x > 1), "not all")
+    assert(empty.all((x) => false), "all of none")
+    same(shown_opt(xs.find((x) => x > 2)), "Some(3)")
+    same(shown_opt(xs.find((x) => x > 9)), "None")
+    same(shown_opt(xs.position((x) => x > 2)), "Some(2)")
+    same(shown_opt(xs.position((x) => x > 9)), "None")
+    assert(xs.count((x) => x % 2 == 0) == 2, "count")
+    assert(xs.sum(0) == 15, "sum")
+    assert(empty.sum(0) == 0, "sum of none")
+    assert([0.5, 0.25].sum(0.0) == 0.75, "sum of floats")
+    let words = ["pear", "fig", "banana", "kiwi"]
+    same(shown_opt(words.min_by((a, b) => a.len() < b.len())), "Some(fig)")
+    same(shown_opt(words.max_by((a, b) => a.len() < b.len())), "Some(banana)")
+    // Ties: min_by keeps the first, max_by the last, as Rust's do.
+    same(shown_opt(words.min_by((a, b) => a.len() / 4 < b.len() / 4)), "Some(fig)")
+    same(shown_opt(words.max_by((a, b) => a.len() / 4 < b.len() / 4)), "Some(kiwi)")
+    same(shown_opt(["aa", "bb", "c"].max_by((a, b) => a.len() < b.len())), "Some(bb)")
+    same(shown_opt(["aa", "bb", "c"].min_by((a, b) => a.len() > b.len())), "Some(aa)")
+    let nowords: [str] = []
+    same(shown_opt(nowords.min_by((a, b) => a.len() < b.len())), "None")
+    same(shown(xs.flat_map((x) => filled(x % 3, x))), "[1, 2, 2, 4, 5, 5]")
+}
+
+#test
+fun pairs_and_pieces() {
+    let z = [1, 2, 3].zip(["a", "b"])
+    assert(z.len() == 2, "zip stops at the shorter")
+    assert(z[0].0 == 1 && z[0].1 == "a" && z[1].0 == 2 && z[1].1 == "b", "zip pairs")
+    let e = ["x", "y"].enumerate()
+    assert(e.len() == 2 && e[0].0 == 0 && e[0].1 == "x" && e[1].0 == 1 && e[1].1 == "y", "enumerate")
+    let xs = [1, 2, 3, 4, 5]
+    same(shown_all(xs.chunks(2)), "[[1, 2], [3, 4], [5]]")
+    same(shown_all(xs.chunks(5)), "[[1, 2, 3, 4, 5]]")
+    same(shown_all(xs.windows(3)), "[[1, 2, 3], [2, 3, 4], [3, 4, 5]]")
+    same(shown_all(xs.windows(6)), "[]")
+    let empty: [int] = []
+    same(shown_all(empty.chunks(3)), "[]")
+}
+
+// A key and the order it came in, to see that a sort is stable.
+struct Tagged {
+    key: int,
+    tag: int,
+}
+
+impl Ord for Tagged {
+    fun cmp(self, other: Tagged) -> int {
+        return self.key - other.key
+    }
+}
+
+fun tags(xs: [Tagged]) -> str {
+    var sb = StringBuilder()
+    for t in xs { sb.append(f"{t.key}{t.tag} ") }
+    return sb.build()
+}
+
+// `n` numbers from a fixed sequence, with repeats.
+fun noise(n: int, range: int) -> [int] {
+    var out: [int] = []
+    var state: int64 = 7
+    for i in 0..n {
+        state = (state * 1103515245 + 12345) % 2147483648
+        out.push(((state >> 8) % (range as int64)) as int)
+    }
+    return out
+}
+
+// Whether `xs` is sorted and holds what `ys` holds, by counting: values in
+// 0..range.
+fun sorted_from(xs: [int], ys: [int], range: int) -> bool {
+    if xs.len() != ys.len() || !xs.is_sorted() { return false }
+    var counts = filled(range, 0)
+    for x in xs { counts[x] += 1 }
+    for y in ys { counts[y] -= 1 }
+    return counts.all((c) => c == 0)
+}
+
+#test
+fun sorts() {
+    var xs = [5, 2, 9, 1, 5, 6]
+    xs.sort()
+    same(shown(xs), "[1, 2, 5, 5, 6, 9]")
+    var empty: [int] = []
+    empty.sort()
+    same(shown(empty), "[]")
+    var one = [3]
+    one.sort()
+    same(shown(one), "[3]")
+    same(shown([3, 1, 2].sorted()), "[1, 2, 3]")
+    var desc = [3, 1, 2]
+    desc.sort_by((a, b) => a > b)
+    same(shown(desc), "[3, 2, 1]")
+    var words = ["ccc", "a", "bb", "dd", "e"]
+    words.sort_by_key((w) => w.len())
+    same(shown(words), "[a, e, bb, dd, ccc]")
+    same(shown(["b", "a"].sorted_by((a, b) => a.len() < b.len() || a.len() == b.len() && a[0] < b[0])), "[a, b]")
+    assert([1, 2, 2, 3].is_sorted(), "is_sorted")
+    assert(!([1, 3, 2].is_sorted()), "not is_sorted")
+    assert(empty.is_sorted(), "is_sorted of none")
+    var u = [5, 2, 9, 1, 5, 6]
+    u.sort_unstable()
+    same(shown(u), "[1, 2, 5, 5, 6, 9]")
+    empty.sort_unstable()
+    same(shown(empty), "[]")
+}
+
+#test
+fun sorts_stably() {
+    var ts: [Tagged] = []
+    for i in 0..40 { ts.push(Tagged { key: (i * 7) % 5, tag: i % 10 }) }
+    var a = ts
+    a.sort()
+    var b = ts
+    b.sort_by((x, y) => x.key < y.key)
+    var c = ts
+    c.sort_by_key((t) => t.key)
+    same(tags(a), tags(b))
+    same(tags(a), tags(c))
+    // Within a key, the tags come in the order they had: 0 5 0 5 … for key 0.
+    same(tags(a[0:8]), "00 05 00 05 00 05 00 05 ")
+    same(tags(ts.sorted()), tags(a))
+}
+
+#test
+fun sorts_many() {
+    // Lengths around the runs the sorts start with, and many repeats.
+    for n in [0, 1, 2, 15, 16, 17, 31, 32, 33, 100, 1000, 3000] {
+        for range in [2, 50, 5000] {
+            let ys = noise(n, range)
+            var a = ys
+            a.sort()
+            assert(sorted_from(a, ys, range), f"sort of {n} in 0..{range}")
+            var b = ys
+            b.sort_unstable()
+            assert(sorted_from(b, ys, range), f"sort_unstable of {n} in 0..{range}")
+            var c = ys
+            c.sort_by((x, y) => x > y)
+            assert(sorted_from(c.reversed(), ys, range), f"sort_by of {n} in 0..{range}")
+        }
+    }
+    // Sorted, reversed and equal inputs: the cases a quicksort can get wrong.
+    var up: [int] = []
+    for i in 0..2000 { up.push(i) }
+    var down = up.reversed()
+    down.sort_unstable()
+    assert(sorted_from(down, up, 2000), "sort_unstable of a reversed list")
+    var same_up = up
+    same_up.sort_unstable()
+    assert(sorted_from(same_up, up, 2000), "sort_unstable of a sorted list")
+    var flat = filled(2000, 3)
+    flat.sort_unstable()
+    assert(sorted_from(flat, filled(2000, 3), 4), "sort_unstable of equal values")
+}
+
+#test
+fun searches_sorted() {
+    let xs = [1, 3, 3, 3, 7, 9]
+    assert(xs.lower_bound(3) == 1, "lower_bound 3")
+    assert(xs.upper_bound(3) == 4, "upper_bound 3")
+    assert(xs.lower_bound(0) == 0 && xs.upper_bound(0) == 0, "bounds below")
+    assert(xs.lower_bound(10) == 6 && xs.upper_bound(10) == 6, "bounds above")
+    assert(xs.lower_bound(5) == 4 && xs.upper_bound(5) == 4, "bounds between")
+    assert(xs.partition_point((x) => x < 7) == 4, "partition_point")
+    let found = match xs.binary_search(3) {
+        Ok(i) => i
+        Err(i) => -1
+    }
+    assert(found == 1, "binary_search finds the first 3")
+    let missing = match xs.binary_search(8) {
+        Ok(i) => -1
+        Err(i) => i
+    }
+    assert(missing == 5, "binary_search says where 8 would go")
+    let empty: [int] = []
+    let nowhere = match empty.binary_search(1) {
+        Ok(i) => -1
+        Err(i) => i
+    }
+    assert(nowhere == 0, "binary_search of none")
+}
+
+#test
+fun combines() {
+    same(shown_all([1, 2, 3].permutations()), "[[1, 2, 3], [1, 3, 2], [2, 1, 3], [2, 3, 1], [3, 1, 2], [3, 2, 1]]")
+    let empty: [int] = []
+    same(shown_all(empty.permutations()), "[[]]")
+    assert([1, 2, 3, 4, 5].permutations().len() == 120, "5! permutations")
+    same(shown_all([1, 2, 3, 4].combinations(2)), "[[1, 2], [1, 3], [1, 4], [2, 3], [2, 4], [3, 4]]")
+    same(shown_all([1, 2].combinations(0)), "[[]]")
+    same(shown_all([1, 2].combinations(3)), "[]")
+    same(shown_all(["a", "b", "c"].combinations(3)), "[[a, b, c]]")
+    var p = [1, 2, 2]
+    var seen: [str] = [shown(p)]
+    while p.next_permutation() { seen.push(shown(p)) }
+    same(shown(seen), "[[1, 2, 2], [2, 1, 2], [2, 2, 1]]")
+    same(shown(p), "[1, 2, 2]")
+    var single = [4]
+    assert(!single.next_permutation(), "one element has no next permutation")
+}
