@@ -449,15 +449,14 @@ class Time(unittest.TestCase):
         # built and every push copied it (600 MB, 1.8 s; now under 40 MB)
         from ._tools import selfhost_tool
         cmd = [selfhost_tool("interp_main"), self.source("ten_thousand", TEN_THOUSAND), STDLIB_ROOT]
-        r, w = os.pipe()
-        pid = os.posix_spawn(cmd[0], cmd, os.environ, file_actions=[
-            (os.POSIX_SPAWN_DUP2, w, 1), (os.POSIX_SPAWN_CLOSE, r)])
-        os.close(w)
-        with os.fdopen(r) as fh:
-            out = fh.read()
-        _, status, usage = os.wait4(pid, 0)
-        self.assertEqual((out, os.waitstatus_to_exitcode(status)), ("10000\n", 0))
-        self.assertLess(usage.ru_maxrss / 1024, 150, f"{usage.ru_maxrss / 1024:.0f} MB")
+        # through a minimal helper process: a child's peak RSS counts its
+        # parent's at the fork, and this one's is large in a full run
+        from .test_selfhost_codegen import _MEASURE
+        p = subprocess.run([sys.executable, "-I", "-S", "-c", _MEASURE, *cmd], capture_output=True, text=True,
+                           timeout=120)
+        code, peak_kb = p.stderr.split()[-2:]
+        self.assertEqual((p.stdout, int(code)), ("10000\n", 0))
+        self.assertLess(int(peak_kb) / 1024, 150, f"{int(peak_kb) / 1024:.0f} MB")
 
     def test_sleepers_wake_in_deadline_order(self):
         want = "b\nc\na\n120\ntrue\ntrue\n"

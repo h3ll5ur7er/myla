@@ -39,7 +39,7 @@ import sys
 import tempfile
 import unittest
 
-from ._golden import NoGolden, golden
+from ._golden import NoGolden, golden, recorded_examples
 from ._native import CAN_BUILD_NATIVE, SKIP_REASON, TEST_TARGET, assemble, run_argv, target_flags
 from ._targets import program_excuse
 from ._tools import STDLIB_ROOT, selfhost_tool
@@ -484,10 +484,10 @@ def _write_project(root: str, files: dict[str, str]) -> str:
 
 
 def _corpus() -> list[str]:
-    """Every single-file top-level example. The import-driven multi-file
-    packages live in subdirectories and are filtered out by the glob."""
-    files = glob.glob(os.path.join(_REPO, "examples", "*.my"))
-    return sorted(f for f in files if os.path.basename(f) not in EXCLUDED)
+    """Every single-file top-level example the recordings cover (one added
+    since is held to test_examples_compile's expectation, MYLA-288). The
+    import-driven multi-file packages live in subdirectories."""
+    return [f for f in recorded_examples() if os.path.basename(f) not in EXCLUDED]
 
 
 def _modules(entry: str) -> list[str]:
