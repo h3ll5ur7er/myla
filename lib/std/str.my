@@ -1,0 +1,560 @@
+// std.str: methods on str (MYLA-321, D164).
+//
+// Strings are bytes: positions and lengths count bytes, the
+// whitespace of `trim` and `words` and the case of `to_upper` and
+// `to_lower` are ASCII, and every other byte is left as it is.
+
+impl str {
+    // The first position of `needle`; an empty one is found at 0.
+    #test("hello", "l")[Some(2)]
+    #test("hello", "lo")[Some(3)]
+    #test("hello", "hello")[Some(0)]
+    #test("hello", "x")[None]
+    #test("hello", "hello!")[None] // needle longer than the text
+    #test("hello", "")[Some(0)]
+    #test("", "")[Some(0)]
+    #test("aaab", "aab")[Some(1)] // a partial match before the match
+    #test("größe", "ße")[Some(4)] // byte positions
+    fun find(self, needle: str) -> Option<int> {
+        return self.find_from(needle, 0)
+    }
+
+    // The last position of `needle`; an empty one is found at the end.
+    #test("hello", "l")[Some(3)]
+    #test("abcabc", "abc")[Some(3)]
+    #test("hello", "x")[None]
+    #test("hello", "")[Some(5)]
+    #test("ab", "abc")[None]
+    fun rfind(self, needle: str) -> Option<int> {
+        let m = needle.len()
+        var i = self.len() - m
+        if m == 0 {
+            return Some(i)
+        }
+        let first = needle[0]
+        while i >= 0 {
+            if self[i] == first && at(self, needle, i) {
+                return Some(i)
+            }
+            i -= 1
+        }
+        return None
+    }
+
+    // The first position of `needle` at or after `start`.
+    #test("abcabc", "abc", 1)[Some(3)]
+    #test("abcabc", "abc", 3)[Some(3)]
+    #test("abcabc", "abc", 4)[None]
+    #test("abc", "a", -5)[Some(0)] // a negative start counts as 0
+    #test("abc", "", 3)[Some(3)]
+    #test("abc", "", 4)[None] // past the end
+    fun find_from(self, needle: str, start: int) -> Option<int> {
+        let n = self.len()
+        let m = needle.len()
+        var i = if start < 0 { 0 } else { start }
+        if m == 0 {
+            return if i <= n { Some(i) } else { None }
+        }
+        let first = needle[0]
+        let last = n - m
+        while i <= last {
+            if self[i] == first && at(self, needle, i) {
+                return Some(i)
+            }
+            i += 1
+        }
+        return None
+    }
+
+    #test("hello", "ell")[true]
+    #test("hello", "elk")[false]
+    #test("hello", "")[true]
+    fun contains(self, needle: str) -> bool {
+        return match self.find_from(needle, 0) {
+            Some(_) => true
+            None => false
+        }
+    }
+
+    #test("hello", "he")[true]
+    #test("hello", "lo")[false]
+    #test("he", "hello")[false]
+    #test("hello", "")[true]
+    fun starts_with(self, prefix: str) -> bool {
+        return prefix.len() <= self.len() && at(self, prefix, 0)
+    }
+
+    #test("hello", "lo")[true]
+    #test("hello", "he")[false]
+    #test("lo", "hello")[false]
+    #test("hello", "")[true]
+    fun ends_with(self, suffix: str) -> bool {
+        let i = self.len() - suffix.len()
+        return i >= 0 && at(self, suffix, i)
+    }
+
+    // The number of matches of `needle` that don't overlap. An empty
+    // one matches before every character and at the end.
+    #test("banana", "a")[3]
+    #test("banana", "ana")[1] // matches don't overlap
+    #test("aaaa", "aa")[2]
+    #test("banana", "x")[0]
+    #test("abc", "")[4] // the places replace("", …) inserts at
+    #test("äb", "")[3]
+    fun count(self, needle: str) -> int {
+        let m = needle.len()
+        if m == 0 {
+            return char_count(self) + 1
+        }
+        var k = 0
+        var i = 0
+        while let Some(j) = self.find_from(needle, i) {
+            k += 1
+            i = j + m
+        }
+        return k
+    }
+
+    // The pieces between the matches of `sep`, one more than there are
+    // matches. An empty separator splits into characters, as `chars()`
+    // does, but as strings.
+    #test("a,b,c", ",")[["a", "b", "c"]]
+    #test("a,,b,", ",")[["a", "", "b", ""]]
+    #test("abc", ",")[["abc"]]
+    #test("", ",")[[""]]
+    #test("a::b::c", "::")[["a", "b", "c"]]
+    #test("aé", "")[["a", "é"]] // an empty separator splits into characters
+    #test("", "")[[]]
+    fun split(self, sep: str) -> [str] {
+        return self.splitn(sep, self.len() + 1)
+    }
+
+    // At most `n` pieces, the last one holding the rest of the text.
+    #test("a,b,c", ",", 2)[["a", "b,c"]]
+    #test("a,b,c", ",", 1)[["a,b,c"]]
+    #test("a,b,c", ",", 5)[["a", "b", "c"]]
+    #test("a,b,c", ",", 0)[[]]
+    #test("key = value = x", " = ", 2)[["key", "value = x"]]
+    #test("abc", "", 2)[["a", "bc"]]
+    fun splitn(self, sep: str, n: int) -> [str] {
+        var out: [str] = []
+        if n <= 0 {
+            return out
+        }
+        if sep.len() == 0 {
+            var start = 0
+            var i = 1
+            while i <= self.len() && out.len() < n - 1 {
+                if i == self.len() || !is_cont(self[i]) {
+                    out.push(part(self, start, i))
+                    start = i
+                }
+                i += 1
+            }
+            if start < self.len() {
+                out.push(part(self, start, self.len()))
+            }
+            return out
+        }
+        var start = 0
+        while out.len() < n - 1 {
+            match self.find_from(sep, start) {
+                Some(j) => {
+                    out.push(part(self, start, j))
+                    start = j + sep.len()
+                }
+                None => { break }
+            }
+        }
+        out.push(part(self, start, self.len()))
+        return out
+    }
+
+    // The runs of text between ASCII whitespace.
+    #test("  one two\tthree\n")[["one", "two", "three"]]
+    #test("one")[["one"]]
+    #test(" \t\r\n ")[[]]
+    #test("")[[]]
+    #test("a\u{0b}b\u{0c}c")[["a", "b", "c"]] // vertical tab and form feed
+    fun words(self) -> [str] {
+        var out: [str] = []
+        let n = self.len()
+        var i = 0
+        while i < n {
+            while i < n && is_space(self[i]) {
+                i += 1
+            }
+            let start = i
+            while i < n && !is_space(self[i]) {
+                i += 1
+            }
+            if i > start {
+                out.push(part(self, start, i))
+            }
+        }
+        return out
+    }
+
+    // The lines, without their `\n` or `\r\n`. A final line ending
+    // gives no empty last line.
+    #test("a\nb\nc")[["a", "b", "c"]]
+    #test("a\nb\n")[["a", "b"]] // a final newline gives no empty line
+    #test("a\r\nb\r\n")[["a", "b"]]
+    #test("a\n\nb")[["a", "", "b"]]
+    #test("\n")[[""]]
+    #test("")[[]]
+    #test("a\rb\r")[["a\rb\r"]] // a lone \r doesn't end a line
+    fun lines(self) -> [str] {
+        var out: [str] = []
+        let n = self.len()
+        var start = 0
+        while start < n {
+            var end = n
+            var next = n
+            match self.find_from("\n", start) {
+                Some(j) => {
+                    end = if j > start && self[j - 1] == '\r' { j - 1 } else { j }
+                    next = j + 1
+                }
+                None => {}
+            }
+            out.push(part(self, start, end))
+            start = next
+        }
+        return out
+    }
+
+    // Without ASCII whitespace at either end.
+    #test("  hi there \n")["hi there"]
+    #test("hi")["hi"]
+    #test(" \t ")[""]
+    #test("")[""]
+    fun trim(self) -> str {
+        return part(self, space_end(self), space_start(self))
+    }
+
+    #test("  hi  ")["hi  "]
+    #test("\n\thi")["hi"]
+    fun trim_start(self) -> str {
+        return part(self, space_end(self), self.len())
+    }
+
+    #test("  hi  ")["  hi"]
+    #test("hi\r\n")["hi"]
+    fun trim_end(self) -> str {
+        return part(self, 0, space_start(self))
+    }
+
+    // The rest after `prefix`, if the text starts with it.
+    #test("v1.2", "v")[Some("1.2")]
+    #test("v1.2", "x")[None]
+    #test("v1.2", "")[Some("v1.2")]
+    #test("v", "v1.2")[None]
+    fun strip_prefix(self, prefix: str) -> Option<str> {
+        if self.starts_with(prefix) {
+            return Some(part(self, prefix.len(), self.len()))
+        }
+        return None
+    }
+
+    // The text before `suffix`, if it ends with it.
+    #test("main.my", ".my")[Some("main")]
+    #test("main.my", ".rs")[None]
+    #test("ab", "ab")[Some("")]
+    fun strip_suffix(self, suffix: str) -> Option<str> {
+        if self.ends_with(suffix) {
+            return Some(part(self, 0, self.len() - suffix.len()))
+        }
+        return None
+    }
+
+    // With the ASCII letters a to z made capitals.
+    #test("Hello, World 42")["HELLO, WORLD 42"]
+    #test("größe")["GRößE"] // only ASCII letters change
+    #test("")[""]
+    fun to_upper(self) -> str {
+        return shift_case(self, 'a', 'z')
+    }
+
+    // With the ASCII letters A to Z made small.
+    #test("Hello, World 42")["hello, world 42"]
+    #test("ÄBC")["Äbc"]
+    fun to_lower(self) -> str {
+        return shift_case(self, 'A', 'Z')
+    }
+
+    // The text `n` times; none for `n <= 0`.
+    #test("ab", 3)["ababab"]
+    #test("ab", 1)["ab"]
+    #test("ab", 0)[""]
+    #test("ab", -2)[""]
+    #test("", 5)[""]
+    fun repeat(self, n: int) -> str {
+        var sb = StringBuilder()
+        var i = 0
+        while i < n {
+            sb.append(self)
+            i += 1
+        }
+        return sb.build()
+    }
+
+    // At least `width` characters, with `fill` added in front. The width
+    // counts characters, as a format spec's does.
+    #test("7", 3, '0')["007"]
+    #test("42", 5, ' ')["   42"]
+    #test("hello", 3, ' ')["hello"] // never cut
+    #test("é", 3, '·')["··é"] // the width counts characters
+    fun pad_start(self, width: int, fill: char) -> str {
+        let k = width - char_count(self)
+        if k <= 0 {
+            return self
+        }
+        return format("{}", fill).repeat(k) + self
+    }
+
+    // At least `width` characters, with `fill` added behind.
+    #test("7", 3, '0')["700"]
+    #test("ab", 4, '.')["ab.."]
+    #test("hello", 3, ' ')["hello"]
+    #test("é", 2, '-')["é-"]
+    fun pad_end(self, width: int, fill: char) -> str {
+        let k = width - char_count(self)
+        if k <= 0 {
+            return self
+        }
+        return self + format("{}", fill).repeat(k)
+    }
+
+    // Every match of `old` replaced by `new`. An empty `old` matches
+    // before every character and at the end.
+    #test("a-b-c", "-", "+")["a+b+c"]
+    #test("aaaa", "aa", "b")["bb"]
+    #test("hello", "l", "")["heo"]
+    #test("hello", "x", "y")["hello"]
+    #test("abc", "", "-")["-a-b-c-"] // an empty pattern: around every character
+    #test("", "", "-")["-"]
+    #test("aé", "", "|")["|a|é|"]
+    fun replace(self, old: str, new: str) -> str {
+        return self.replacen(old, new, self.len() + 1)
+    }
+
+    // The first `n` matches of `old` replaced by `new`.
+    #test("a-b-c", "-", "+", 1)["a+b-c"]
+    #test("a-b-c", "-", "+", 5)["a+b+c"]
+    #test("a-b-c", "-", "+", 0)["a-b-c"]
+    #test("abc", "", "-", 2)["-a-bc"]
+    fun replacen(self, old: str, new: str, n: int) -> str {
+        if n <= 0 {
+            return self
+        }
+        var sb = StringBuilder()
+        var done = 0
+        if old.len() == 0 {
+            var i = 0
+            while i <= self.len() {
+                if i == self.len() || !is_cont(self[i]) {
+                    if done < n {
+                        sb.append(new)
+                        done += 1
+                    }
+                }
+                if i < self.len() {
+                    sb.append_byte(self[i])
+                }
+                i += 1
+            }
+            return sb.build()
+        }
+        var start = 0
+        while done < n {
+            match self.find_from(old, start) {
+                Some(j) => {
+                    sb.append(self, start, j)
+                    sb.append(new)
+                    start = j + old.len()
+                    done += 1
+                }
+                None => { break }
+            }
+        }
+        if done == 0 {
+            return self
+        }
+        sb.append(self, start, self.len())
+        return sb.build()
+    }
+}
+
+// Whether `needle` is in `s` at byte `i` (which must leave room for it).
+#test("hello", "ll", 2)[true]
+#test("hello", "ll", 1)[false]
+#test("hello", "", 5)[true]
+fun at(s: str, needle: str, i: int) -> bool {
+    var j = 0
+    let m = needle.len()
+    while j < m {
+        if s[i + j] != needle[j] {
+            return false
+        }
+        j += 1
+    }
+    return true
+}
+
+// The bytes of `s` from `start` up to `end`: any bytes, even part of a
+// character, where a slice `s[start:end]` would stop.
+#test("hello", 1, 3)["el"]
+#test("hello", 0, 5)["hello"]
+#test("hello", 2, 2)[""]
+fun part(s: str, start: int, end: int) -> str {
+    if start == 0 && end == s.len() {
+        return s
+    }
+    var sb = StringBuilder()
+    sb.append(s, start, end)
+    return sb.build()
+}
+
+// A UTF-8 continuation byte, 10xxxxxx: not the start of a character.
+#test(0x80)[true]
+#test(0xBF)[true]
+#test(0xC3)[false]
+#test(0x41)[false]
+fun is_cont(b: uint8) -> bool {
+    return (b & 0xC0) == 0x80
+}
+
+// The number of characters: the bytes that aren't continuation bytes.
+#test("")[0]
+#test("größe")[5]
+fun char_count(s: str) -> int {
+    var k = 0
+    var i = 0
+    while i < s.len() {
+        if !is_cont(s[i]) {
+            k += 1
+        }
+        i += 1
+    }
+    return k
+}
+
+// ASCII whitespace, as C's isspace: space, \t, \n, \v, \f and \r.
+#test(' ')[true]
+#test('\t')[true]
+#test('\r')[true]
+#test(0x0B)[true]
+#test(0x0E)[false]
+#test('a')[false]
+fun is_space(b: uint8) -> bool {
+    return b == ' ' || (b >= 9 && b <= 13)
+}
+
+// The position after the whitespace at the start of `s`.
+#test("  a ")[2]
+#test("   ")[3]
+fun space_end(s: str) -> int {
+    var i = 0
+    while i < s.len() && is_space(s[i]) {
+        i += 1
+    }
+    return i
+}
+
+// The position of the whitespace at the end of `s`, not before
+// `space_end(s)`.
+#test("  a ")[3]
+#test("   ")[3] // not before space_end
+fun space_start(s: str) -> int {
+    var i = s.len()
+    let low = space_end(s)
+    while i > low && is_space(s[i - 1]) {
+        i -= 1
+    }
+    return i
+}
+
+// `s` with the bytes from `low` to `high` moved 32 the other way: up
+// for a to z, down for A to Z.
+#test("aZ!", 'a', 'z')["AZ!"]
+#test("aZ!", 'A', 'Z')["az!"]
+fun shift_case(s: str, low: uint8, high: uint8) -> str {
+    var sb = StringBuilder()
+    var i = 0
+    while i < s.len() {
+        let b = s[i]
+        if b >= low && b <= high {
+            sb.append_byte(b ^ 32)
+        } else {
+            sb.append_byte(b)
+        }
+        i += 1
+    }
+    return sb.build()
+}
+
+#test
+fun split_and_join_round_trip() {
+    let texts = ["", ",", "a", "a,b", ",a,,b,", "é,ü"]
+    for t in texts {
+        let parts = t.split(",")
+        var sb = StringBuilder()
+        var i = 0
+        for p in parts {
+            if i > 0 { sb.append(",") }
+            sb.append(p)
+            i += 1
+        }
+        assert(sb.build() == t, "split, then join, gives the text")
+        assert(parts.len() == t.count(",") + 1, "one part more than separators")
+    }
+}
+
+#test
+fun count_is_what_replace_replaces() {
+    let cases = [("banana", "an"), ("aaaaa", "aa"), ("abc", ""), ("", ""), ("xyz", "q")]
+    for c in cases {
+        let (t, p) = c
+        let marked = t.replace(p, "\u{0}")
+        var zeros = 0
+        var i = 0
+        while i < marked.len() {
+            if marked[i] == 0 { zeros += 1 }
+            i += 1
+        }
+        assert(zeros == t.count(p), "count is the number replace replaces")
+    }
+}
+
+#test
+fun any_bytes() {
+    // A string read from a file can hold any bytes: the methods cut
+    // it anywhere a match says, even inside a character.
+    var sb = StringBuilder()
+    sb.append_byte(0xC3)
+    sb.append("|")
+    sb.append_byte(0xFF)
+    sb.append("|é")
+    let s = sb.build()
+    let parts = s.split("|")
+    assert(parts.len() == 3, "three parts")
+    assert(parts[0].len() == 1 && parts[0][0] == 0xC3, "a lone lead byte")
+    assert(parts[1].len() == 1 && parts[1][0] == 0xFF, "an invalid byte")
+    assert(parts[2] == "é", "a whole character")
+    let tail = "é"
+    var cont = StringBuilder()
+    cont.append_byte(tail[1])
+    let piece = cont.build()
+    assert(match tail.find(piece) { Some(1) => true, _ => false }, "a match inside a character")
+    assert(tail.split(piece).len() == 2, "a split inside a character")
+    assert(s.to_upper().len() == s.len(), "to_upper keeps every byte")
+}
+
+#test
+fun trim_keeps_inner_text() {
+    let s = " \t a  b \r\n"
+    assert(s.trim() == "a  b", "trim")
+    assert(s.trim_start().trim_end() == s.trim(), "trim_start then trim_end")
+    assert(s.words().len() == 2, "words")
+}
