@@ -48,4 +48,5 @@ The conventions (D164): operations on built-in types are methods (`s.split(",")`
 | `std.test` | [[Language/Standard-library/Test]] | Expectations, temporary directories and the program under test, for test functions |
 | `std.json` | [[Language/Standard-library/Json]] | JSON values, parsing and writing |
 | `std.toml` | [[Language/Standard-library/Toml]] | The TOML subset of manifests and lock files |
+| `std.hash` | [[Language/Standard-library/Hash]] | The `Hasher` that `Hash` builds on (wyhash), FNV-1a, CRC-32 and Adler-32 |
 | `std.rt` | [[Language/Standard-library/Rt]] | The runtime in Myla; not for programs |
