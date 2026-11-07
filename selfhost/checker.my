@@ -792,7 +792,16 @@ fun is_builtin_op_trait(name: str) -> bool {
 #test("B")[false]
 #test("len")[true]
 fun is_builtin_func(name: str) -> bool {
-    return name == "print" || name == "assert" || name == "panic" || name == "unreachable" || name == "len" || name == "push" || name == "pop" || name == "contains" || name == "remove" || name == "keys" || name == "format" || name == "chars" || name == "StringBuilder" || name == "append" || name == "append_byte" || name == "build" || name == "__write" || name == "__exit" || name == "__args" || name == "__read_file" || name == "__io_errno" || name == "__run" || name == "__run_stderr" || name == "__run_exit_code" || name == "__run_signal" || name == "__run_errno" || name == "__write_file" || name == "__read" || name == "__poll" || name == "__list_dir" || name == "__mkdir" || name == "__stat" || name == "__getcwd" || name == "__getenv" || name == "__test_dir" || name == "__test_program" || name == "__sqrt" || name == "__f64_bits" || name == "__f64_from_bits" || name == "__unlink" || name == "__rmdir" || name == "__rename" || name == "__task_cancelled" || name == "__yield" || name == "__sleep" || name == "__clock_ns" || name == "__sleep_ns" || name == "__cancel_after" || name == "__disarm" || name == "__wait_readable" || name == "__wait_either" || name == "__spawn" || name == "__run_with" || name == "__spawn_with" || name == "__reap" || name == "__kill" || name == "__close" || is_raw_memory_primitive(name)
+    return name == "print" || name == "assert" || name == "panic" || name == "unreachable" || name == "len" || name == "push" || name == "pop" || name == "contains" || name == "remove" || name == "keys" || name == "format" || name == "chars" || name == "StringBuilder" || name == "append" || name == "append_byte" || name == "build" || name == "__write" || name == "__exit" || name == "__args" || name == "__read_file" || name == "__io_errno" || name == "__run" || name == "__run_stderr" || name == "__run_exit_code" || name == "__run_signal" || name == "__run_errno" || name == "__write_file" || name == "__read" || name == "__poll" || name == "__list_dir" || name == "__mkdir" || name == "__stat" || name == "__getcwd" || name == "__getenv" || name == "__test_dir" || name == "__test_program" || name == "__sqrt" || name == "__f64_bits" || name == "__f64_from_bits" || name == "__unlink" || name == "__rmdir" || name == "__rename" || name == "__task_cancelled" || name == "__yield" || name == "__sleep" || name == "__clock_ns" || name == "__sleep_ns" || name == "__cancel_after" || name == "__disarm" || name == "__wait_readable" || name == "__wait_either" || name == "__spawn" || name == "__run_with" || name == "__spawn_with" || name == "__reap" || name == "__kill" || name == "__close" || is_platform_primitive(name) || is_raw_memory_primitive(name)
+}
+
+// The platform primitives of MYLA-336: entropy, file descriptors and
+// children with pipes, each a function of std.rt (`__open` is
+// `std.rt.open`) over std.platform, and in the interpreter the host's own.
+#test("__open")[true]
+#test("__read")[false]
+pub fun is_platform_primitive(name: str) -> bool {
+    return name == "__random_bytes" || name == "__open" || name == "__seek" || name == "__fstat" || name == "__spawn_piped" || name == "__try_reap"
 }
 
 // The raw-memory primitives the runtime written in Myla needs (MYLA-162's
@@ -6564,6 +6573,7 @@ impl Checker {
             if name == "__reap" { return Ok(Some(t_int())) }
             return Ok(None)
         }
+        if is_platform_primitive(name) { return self.infer_platform_primitive(e, name, args) }
         if name == "__run_stderr" {
             if args.len() > 0 { return Err(terr_at(e.line, e.col, e.sp, "__run_stderr() takes no arguments")) }
             return Ok(Some(Type.TList(t_byte())))
@@ -6793,6 +6803,44 @@ impl Checker {
             self.expect_type(args[1], t_byte(), "append_byte value")?
         }
         return Ok(None)
+    }
+
+    // MYLA-336's primitives (`is_platform_primitive`): `__random_bytes(n)`,
+    // `__open(path, flags, mode)`, `__seek(fd, offset, whence)`,
+    // `__fstat(fd)`, `__spawn_piped(program, argv, opts)`, `__try_reap(pid)`
+    fun infer_platform_primitive(var self, e: Expr, name: str, args: [Expr]) -> Result<Option<Type>, CheckErr> {
+        let i64 = Type.TInt(64, true)
+        let strs = Type.TList(Type.TStr)
+        var want: [Type] = [t_int()]
+        var shape = "n: int"
+        var result = Type.TList(t_byte())
+        if name == "__open" {
+            want = [Type.TStr, t_int(), t_int()]
+            shape = "path: str, flags: int, mode: int"
+            result = t_int()
+        } else if name == "__seek" {
+            want = [t_int(), i64, t_int()]
+            shape = "fd: int, offset: int64, whence: int"
+            result = i64
+        } else if name == "__fstat" {
+            shape = "fd: int"
+            result = Type.TList(i64)
+        } else if name == "__spawn_piped" {
+            want = [Type.TStr, strs, strs]
+            shape = "program: str, argv: [str], opts: [str]"
+            result = Type.TList(t_int())
+        } else if name == "__try_reap" {
+            shape = "pid: int"
+            result = t_int()
+        }
+        if args.len() != want.len() { return Err(terr_at(e.line, e.col, e.sp, format("{}() takes ({})", name, shape))) }
+        var k = 0
+        while k < want.len() {
+            let a_t = self.expect_value(args[k], Some(want[k]))?
+            if !type_eq(a_t, want[k]) { return Err(terr_at(args[k].line, args[k].col, args[k].sp, format("{}() takes ({}): a '{}' here, found '{}'", name, shape, type_name(want[k]), type_name(a_t)))) }
+            k += 1
+        }
+        return Ok(Some(result))
     }
 
     #test(checker_on("[int]"), Expr { id: 16, line: 7, col: 16, sp: SrcSpan { sline: 7, scol: 5, eline: 7, ecol: 18 }, kind: ExprKind.Call(Expr { id: 15, line: 7, col: 5, sp: SrcSpan { sline: 7, scol: 5, eline: 7, ecol: 16 }, kind: ExprKind.Name("unreachable") }, []) }, "unreachable", [])[Ok(None)]
