@@ -2,7 +2,7 @@
 id: MYLA-313
 title: "The Hash trait: every Eq + Hash type is a map key (D163)"
 type: feature
-status: todo
+status: in-progress
 priority: medium
 labels: [maps, tuples, traits, derive]
 ---

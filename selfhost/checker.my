@@ -777,11 +777,12 @@ fun is_arith_op(op: str) -> bool {
 #test(Type.TStruct("P", []), "Eq")[false]
 fun primitive_default_trait(t: Type, trnm: str) -> bool {
     return match t {
-        Type.TInt(w, s) => trnm == "Add" || trnm == "Sub" || trnm == "Mul" || trnm == "Div" || trnm == "Rem" || trnm == "Eq" || trnm == "Ord" || trnm == "Format",
+        Type.TInt(w, s) => trnm == "Add" || trnm == "Sub" || trnm == "Mul" || trnm == "Div" || trnm == "Rem" || trnm == "Eq" || trnm == "Ord" || trnm == "Format" || trnm == "Hash",
+        // a float isn't `Hash`: NaN is unequal to itself (D163)
         Type.TFloat(w) => trnm == "Add" || trnm == "Sub" || trnm == "Mul" || trnm == "Div" || trnm == "Rem" || trnm == "Eq" || trnm == "Ord" || trnm == "Format",
-        Type.TChar => trnm == "Eq" || trnm == "Ord" || trnm == "Format",
-        Type.TBool => trnm == "Eq" || trnm == "Format",
-        Type.TStr => trnm == "Add" || trnm == "Eq" || trnm == "Format",
+        Type.TChar => trnm == "Eq" || trnm == "Ord" || trnm == "Format" || trnm == "Hash",
+        Type.TBool => trnm == "Eq" || trnm == "Format" || trnm == "Hash",
+        Type.TStr => trnm == "Add" || trnm == "Eq" || trnm == "Format" || trnm == "Hash",
         _ => false,
     }
 }
@@ -1860,7 +1861,28 @@ impl Checker {
         return false
     }
     #test(checker_on("[int]"), Type.TInt(32, true), "Add")[Ok(true)]
+    #test(checker_on("[int]"), Type.TTuple([Type.TInt(32, true), Type.TStr]), "Eq")[Ok(true)]
+    #test(checker_on("[int]"), Type.TList(Type.TTuple([Type.TChar, Type.TFloat(64)])), "Eq")[Ok(true)]
+    #test(checker_on("[int]"), Type.TTuple([Type.TInt(32, true), Type.TFloat(64)]), "Hash")[Ok(false)]
+    #test(checker_on("[int]"), Type.TList(Type.TStr), "Hash")[Ok(true)]
+    #test(checker_on("[int]"), Type.TTuple([Type.TStruct("P", [])]), "Eq")[Ok(false)]
     fun type_implements(self, t: Type, trnm: str) -> Result<bool, CheckErr> {
+        // a tuple, and a list, is `Eq` and `Hash` when its elements are
+        // (D163); a type parameter when its bounds say so
+        if trnm == "Eq" || trnm == "Hash" {
+            match t {
+                Type.TTuple(es) => {
+                    for et in es {
+                        if !self.type_implements(et, trnm)? { return Ok(false) }
+                    }
+                    return Ok(true)
+                },
+                Type.TList(et) => { return self.type_implements(et, trnm) },
+                Type.TParam(n) => { return Ok(self.bound_has(n, trnm)) },
+                Type.TError => { return Ok(true) },   // has had its error (MYLA-110)
+                _ => {},
+            }
+        }
         match self.type_key(t) {
             Some(k) => {
                 if self.broken_impls.contains(trnm + "\t" + k) { return Err(poisoned()) }   // its impl or derive failed (MYLA-110)
@@ -3351,8 +3373,15 @@ impl Checker {
             if is_type_param(lt) { return self.infer_bounded_op(e, op, l, r, lt) }
             var hint: Option<Type> = None
             if is_int(lt) || is_float(lt) { hint = Some(lt) }
+            // a tuple's or list's literal takes the left side's type
+            if is_compound_eq(lt) { hint = Some(lt) }
             let rt = self.expect_value(r, hint)?
             let common = self.unify(l, lt, r, rt)?
+            if is_compound_eq(common) {
+                // a tuple or list of `Eq` elements (D163, MYLA-313)
+                if self.type_implements(common, "Eq")? { return Ok(Type.TBool) }
+                return Err(terr_at(e.line, e.col, e.sp, format("cannot compare values of type '{}': {}", type_name(common), self.not_eq_why(common))))
+            }
             if !(is_int(common) || is_float(common) || is_char(common) || is_bool(common) || is_str(common) || is_unit(common)) {
                 return Err(terr_at(e.line, e.col, e.sp, format("cannot compare values of type '{}'", type_name(common))))
             }
@@ -3467,6 +3496,32 @@ impl Checker {
         let rt = self.expect_value(r, None)?
         if !type_eq(lt, rt) { return Err(terr_at(e.line, e.col, e.sp, format("operator '{}' requires both operands to have the same type, found '{}' and '{}'", op, type_name(lt), type_name(rt)))) }
         return Ok(result)
+    }
+
+    // Why the tuple or list type `t` isn't `Eq`: the first element type that
+    // isn't, as the message after "cannot compare values of type …" says it.
+    #test(checker_on("[int]"), Type.TTuple([Type.TInt(32, true), Type.TStruct("P", [])]))["'P' isn't Eq (it needs 'impl Eq for P' or '#derive(Eq)')"]
+    #test(checker_on("[int]"), Type.TList(Type.TMap(Type.TStr, Type.TStr)))["'[str: str]' isn't Eq"]
+    fun not_eq_why(self, t: Type) -> str {
+        var inner: [Type] = []
+        match t {
+            Type.TTuple(es) => { inner = es },
+            Type.TList(et) => { inner = [et] },
+            _ => {},
+        }
+        for et in inner {
+            let ok = match self.type_implements(et, "Eq") {
+                Ok(b) => b,
+                Err(x) => true,
+            }
+            if !ok {
+                if is_compound_eq(et) { return self.not_eq_why(et) }
+                if is_struct_or_enum(et) { return format("'{}' isn't Eq (it needs 'impl Eq for {}' or '#derive(Eq)')", type_name(et), type_name(et)) }
+                if is_type_param(et) { return format("'{}' isn't Eq (it needs the bound '{}: Eq')", type_name(et), type_name(et)) }
+                return format("'{}' isn't Eq", type_name(et))
+            }
+        }
+        return "its elements aren't Eq"
     }
 
     #test(checker_on("[int]"), "T", "Eq")[false]
@@ -3720,6 +3775,20 @@ fun is_struct_or_enum(t: Type) -> bool {
 #test(Type.TBool)[false]
 #test(Type.TParam("T"))[true]
 fun is_type_param(t: Type) -> bool { return match t { Type.TParam(n) => true, _ => false } }
+
+// Whether `t` is a tuple (not the unit type) or a list, which `==` compares
+// element by element when its elements are `Eq` (D163, MYLA-313).
+#test(Type.TTuple([Type.TInt(32, true)]))[true]
+#test(Type.TList(Type.TStr))[true]
+#test(Type.TTuple([]))[false]
+#test(Type.TStr)[false]
+fun is_compound_eq(t: Type) -> bool {
+    return match t {
+        Type.TTuple(es) => es.len() > 0,
+        Type.TList(e) => true,
+        _ => false,
+    }
+}
 
 // =========================================================================
 // Generic type-argument inference (shared by struct lit / variant ctor)
@@ -5348,11 +5417,22 @@ fun is_eq_type(t: Type, eq_names: [str]) -> bool {
         Type.TChar => true,
         Type.TFloat(w) => true,
         Type.TError => true,          // has had its error (MYLA-110)
-        Type.TTuple(es) => es.len() == 0,   // the unit type (D138)
+        // the unit type (D138), and a tuple or list of `Eq` elements (D163)
+        Type.TTuple(es) => all_eq_types(es, eq_names),
+        Type.TList(e) => is_eq_type(e, eq_names),
         Type.TStruct(n, a) => contains_str(eq_names, n),
         Type.TEnum(n, a) => contains_str(eq_names, n),
         _ => false,
     }
+}
+
+#test([Type.TInt(32, true), Type.TStr], [])[true]
+#test([Type.TStruct("Bare", [])], ["Holder"])[false]
+fun all_eq_types(ts: [Type], eq_names: [str]) -> bool {
+    for t in ts {
+        if !is_eq_type(t, eq_names) { return false }
+    }
+    return true
 }
 
 impl Checker {
@@ -5371,7 +5451,7 @@ impl Checker {
                 match self.check_derive_attr(decl, attr) {
                     Ok(x) => {
                         var present = false
-                        for d in targets { if d.line == decl.line && d.col == decl.col { present = true } }
+                        for d in targets { if d.id == decl.id { present = true } }
                         if !present { targets.push(decl) }
                     },
                     Err(e) => {

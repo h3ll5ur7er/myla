@@ -1,0 +1,5 @@
+type error: cannot compare values of type '(int32, Bare)': 'Bare' isn't Eq (it needs 'impl Eq for Bare' or '#derive(Eq)')
+  --> examples/errors/type_tuple_element_not_eq.my:11:13
+   |
+11 |     print(a == (1, Bare { v: 2 }))
+   |           ^^^^^^^^^^^^^^^^^^^^^^^

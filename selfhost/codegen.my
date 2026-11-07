@@ -22,7 +22,7 @@ from .inline import inlinable, inline_calls, same_module, may_inline, merge_bloc
 from .hoist import hoist_cows
 from .ranges import widen_counters
 from .anf import Norm, new_norm
-from .lower import async_fnval_ir, lower_function, lower_lambda, blocked_types, Lowered, myla_runtime_function, derived_eq_ir, walk_ir, drop_entry_ir, dropb_slow_ir, list_drop_slow_ir, map_drop_slow_ir, clone_ir, deep_walk_ir, deep_cell_ir, Routine, Want, env_drop_ir, env_deep_ir, partial_ir, frame_new_ir
+from .lower import async_fnval_ir, lower_function, lower_lambda, blocked_types, Lowered, myla_runtime_function, derived_eq_ir, compound_eq_ir, walk_ir, drop_entry_ir, dropb_slow_ir, list_drop_slow_ir, map_drop_slow_ir, clone_ir, deep_walk_ir, deep_cell_ir, Routine, Want, env_drop_ir, env_deep_ir, partial_ir, frame_new_ir
 import .ir_x86 as ir_x86
 import .ownership as ownership
 import .runtime_x86 as runtime_x86
@@ -101,6 +101,11 @@ pub struct CodeGen {
     // Reference-counting helper worklists: concrete owning types whose per-type
     // drop/clone routines must be emitted (deduped by mangled token).
     need_drop: [Type],
+    // the routines on values of a type that call functions (MYLA-313: the
+    // equality of a tuple or list, a map key's hash and equality), still to
+    // be emitted, and the names of those queued; drained with the functions
+    type_jobs: [Want],
+    type_jobs_seen: [str: bool],
     drop_emitted: [str],
     need_clone: [Type],
     clone_emitted: [str],
@@ -327,7 +332,7 @@ pub fun new_codegen(c: Checker) -> CodeGen {
         lam_jobs: [], lam_seen: [:], partial_jobs: [], fnval_set: [],
         uses_float: false,
         epilogue: "", ret_type: None,
-        need_drop: [], drop_emitted: [], need_clone: [], clone_emitted: [],
+        need_drop: [], type_jobs: [], type_jobs_seen: [:], drop_emitted: [], need_clone: [], clone_emitted: [],
         need_walk: [], need_deep: [], deep_inline: [], deep_clone: [], need_deepc: [], deepc_clone: [], walk_retain: [], walk_emitted: [], helper_seen: [:],
         need_sb: false,
         line_spans: [], prelude_id: 0,
@@ -1943,12 +1948,16 @@ impl CodeGen {
         let ps = self.request_fn("std$rt$print_str", [])
         var draining = true
         while draining {
-            while self.fn_worklist.len() > 0 || self.lam_jobs.len() > 0 {
+            while self.fn_worklist.len() > 0 || self.lam_jobs.len() > 0 || self.type_jobs.len() > 0 {
                 if self.fn_worklist.len() > 0 {
                     let job = self.fn_worklist.pop()
                     self.subst = job.subst
                     self.gen_any_function(self.sig_of(job.orig).decl, job.mangled)
                     self.subst = []
+                } else if self.type_jobs.len() > 0 {
+                    // a routine that may call functions, which join the
+                    // worklist (MYLA-313)
+                    self.emit_type_job(self.type_jobs.pop())
                 } else {
                     let lj = self.lam_jobs.pop()
                     if self.lam_seen.contains(lj.lifted) { continue }
@@ -2419,6 +2428,10 @@ impl CodeGen {
                     _ => {},
                 }
             }
+        }
+        // the routines on its values it calls (MYLA-313)
+        for w in l.wants {
+            if w.kind >= 7 { self.request_wants([w]) }
         }
         for lj in l.lams { self.lam_jobs.push(lj) }
         for pj in l.partials {
@@ -3221,14 +3234,32 @@ impl CodeGen {
         for d in self.decls {
             match d.kind {
                 DeclKind.StructDecl(name, fields, attrs, tps, isp, act) => {
-                    if tps.len() == 0 && attrs_have_derive_eq(attrs) { self.emit_routine(derived_eq_ir(self, name, false), d.id, d.line, d.col) }
+                    if tps.len() == 0 && attrs_have_derive_eq(attrs) {
+                        let r = derived_eq_ir(self, name, false)
+                        self.emit_routine(r.f, d.id, d.line, d.col)
+                        self.request_wants(r.wants)
+                    }
                 },
                 DeclKind.EnumDecl(name, variants, attrs, tps, isp) => {
-                    if tps.len() == 0 && attrs_have_derive_eq(attrs) { self.emit_routine(derived_eq_ir(self, name, true), d.id, d.line, d.col) }
+                    if tps.len() == 0 && attrs_have_derive_eq(attrs) {
+                        let r = derived_eq_ir(self, name, true)
+                        self.emit_routine(r.f, d.id, d.line, d.col)
+                        self.request_wants(r.wants)
+                    }
                 },
                 _ => {},
             }
         }
+    }
+
+    // A routine `type_jobs` holds (see `type_job_name`), built as IR and
+    // emitted, what it calls requested (MYLA-313).
+    fun emit_type_job(var self, w: Want) {
+        let name = type_job_name(w)
+        var r = Routine { f: empty_ir(name), wants: [] }
+        if w.kind == 7 { r = compound_eq_ir(self, w.t, name) }
+        self.emit_routine(r.f, -1, 0, 0)
+        self.request_wants(r.wants)
     }
 
     // An environment's routine built as IR (`myla_<lifted>_env_…`, the label
@@ -3256,6 +3287,14 @@ impl CodeGen {
             if w.kind == 4 { let n4 = self.register_walk(w.t, false) }
             if w.kind == 5 { let n5 = self.register_walk(w.t, true) }
             if w.kind == 6 { self.register_drop(w.t) }
+            if w.kind >= 7 {
+                // drained with the functions, as it may call some
+                let n = type_job_name(w)
+                if !self.type_jobs_seen.contains(n) {
+                    self.type_jobs_seen[n] = true
+                    self.type_jobs.push(w)
+                }
+            }
         }
     }
 
@@ -3263,7 +3302,7 @@ impl CodeGen {
     // (`myla_<its name>`) where the type `decl_id` is declared: checked,
     // its small leaf callees inlined, the functions it calls requested.
     fun emit_routine(var self, f: IrFunc, decl_id: int32, line: int32, col: int32) {
-        let g = self.take_ir(Ok(Lowered { f: f, lams: [], partials: [], fnvals: [], refused: [] }), f.name)
+        let g = self.take_ir(Ok(Lowered { f: f, lams: [], partials: [], fnvals: [], refused: [], wants: [] }), f.name)
         self.emit_ir_at(g, decl_id, line, col, f.name)
     }
 
@@ -4047,6 +4086,18 @@ fun join_tokens(xs: [Type]) -> str {
 #test(".F4.i32R4.i32")["13.F4.i32R4.i32"]
 fun lp(tok: str) -> str {
     return format("{}{}", tok.len(), tok)
+}
+
+// The name of the routine a `Want` of kind 7 or more asks for (MYLA-313):
+// `__eq_<T>` the equality of a tuple or list type.
+#test(Want { kind: 7, t: Type.TTuple([Type.TInt(32, true), Type.TStr]), clone: false })["__eq_.T4.i324.str"]
+pub fun type_job_name(w: Want) -> str {
+    return "__eq_" + mono_token(w.t)
+}
+
+// An IR function `name` with nothing in it yet.
+fun empty_ir(name: str) -> IrFunc {
+    return IrFunc { name: name, ret: None, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false, scope_parent: [-1] }
 }
 
 // The suffix naming a map type's helpers.

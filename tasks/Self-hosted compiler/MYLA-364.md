@@ -2,7 +2,7 @@
 id: MYLA-364
 title: "A derived Eq is lost when two derived types of different modules share a line and column"
 type: bug
-status: todo
+status: review
 priority: high
 labels: [checker, derive, modules]
 ---
@@ -10,5 +10,12 @@ Found by the `std.num` lane ([[MYLA-331]]). `Checker.synthesize_derives` in [[se
 
 Two modules, each with `#derive(Eq) pub enum E { A, B }` at the same line, and `e == E.A` in each.
 
-- [ ] Compare the declarations' ids, not their positions (`d.id == decl.id`)
-- [ ] A burn test: two modules with derived types at the same position, interpreted and native
+- [x] Compare the declarations' ids, not their positions (`d.id == decl.id`)
+- [x] A burn test: two modules with derived types at the same position, interpreted and native
+
+## Evidence
+
+Fixed in [[MYLA-313]]'s branch, where `synthesize_derives` gains `#derive(Hash)`: the derives collected are told apart by their declaration's id (`d.id == decl.id`), so `#derive(Hash)` shares the fix.
+
+- Before: the reproduction (`dup.my` and `main.my`, each `#derive(Eq) pub enum E` at line 2) fails with `type error: operator '==' is not defined for 'dup$E'` under the base commit's `build/myla run`.
+- After: `tests/burn/test_modules.py` `TestDerivesAtTheSamePlace` prints `false`, `true` interpreted and natively; the bootstrap keeps its byte-identical fixed point.

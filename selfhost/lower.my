@@ -30,7 +30,7 @@
 from std.num import f64_literal_bits, f32_round_bits
 from .ast import Expr, ExprKind, Stmt, StmtKind, Block, FunData, ElseTail, ExprOrBlock, MatchArm, Pattern, PatternKind, FieldInit, MapEntry, BindElem, bind_elems, Param
 from .checker import CheckErr, REG_ARG_WORDS, type_name, Type, is_unit, is_slice_expr, from_end_of, slice_parts, is_hole_part, is_raw_memory_primitive, is_platform_primitive, Subst, FuncSig, opt_subst_type, subst_type, builtin_method
-from .codegen import codegen_on, recv_by_address, may_write_expr, is_mutating_builtin, list_has_str, contains_int, is_actor_t, is_sb_t, is_async_t, CodeGen, LamJob, PartialJob, Cap, DropEntry, tfunc_params, tfunc_ret, is_hole_expr, mangle_fn, is_builtin_call_name, is_aggregate, tuple_elems, is_struct_or_enum_t, is_tfunc, is_overloadable_op, arith_method_cg, enum_name_of, is_tstr, is_cmp, place_root, is_aggregate_opt, arms_may_write, is_cell_t, list_elem, is_list_t, is_map_t, is_str_t, map_key, map_val, format_segments, args_have_hole, success_variant, failure_variant
+from .codegen import codegen_on, type_job_name, recv_by_address, may_write_expr, is_mutating_builtin, list_has_str, contains_int, is_actor_t, is_sb_t, is_async_t, CodeGen, LamJob, PartialJob, Cap, DropEntry, tfunc_params, tfunc_ret, is_hole_expr, mangle_fn, is_builtin_call_name, is_aggregate, tuple_elems, is_struct_or_enum_t, is_tfunc, is_overloadable_op, arith_method_cg, enum_name_of, is_tstr, is_cmp, place_root, is_aggregate_opt, arms_may_write, is_cell_t, list_elem, is_list_t, is_map_t, is_str_t, map_key, map_val, format_segments, args_have_hole, success_variant, failure_variant
 from .util import format_specs
 from .tokens import Note, no_span
 from .ir_x86 import slots_at, frame_size
@@ -96,7 +96,7 @@ struct TaskSlot { slot: int32, ty: Type, void: bool, owns: bool, depth: int32, f
 
 // `refused`: what the function can't be built for, at its place (an
 // instance's `become` passing more stack words than it received, MYLA-272).
-pub struct Lowered { f: IrFunc, lams: [LamJob], partials: [PartialJob], fnvals: [str], refused: [CheckErr] }
+pub struct Lowered { f: IrFunc, lams: [LamJob], partials: [PartialJob], fnvals: [str], refused: [CheckErr], wants: [Want] }
 
 // A deferred block (D135): the owners' scope it belongs to, and the names it
 // sees, those of the first `nscopes` scopes, of the last only the first
@@ -218,13 +218,13 @@ pub fun lower_function(cg: CodeGen, fd: FunData, mangled: str) -> Result<Lowered
         },
         None => {},
     }
-    if lw.refused.len() > 0 { return Ok(Lowered { f: lw.f, lams: [], partials: [], fnvals: [], refused: lw.refused }) }
+    if lw.refused.len() > 0 { return Ok(Lowered { f: lw.f, lams: [], partials: [], fnvals: [], refused: lw.refused, wants: [] }) }
     if lw.err != "" { return Err(lw.err) }
     // the end of the body falls through to the epilogue
     lw.drop_owners(0)
     lw.exit_fn(-1, true)
     if lw.err != "" { return Err(lw.err) }
-    return Ok(Lowered { f: lw.f, lams: lw.lams, partials: lw.partials, fnvals: lw.fnvals, refused: lw.refused })
+    return Ok(Lowered { f: lw.f, lams: lw.lams, partials: lw.partials, fnvals: lw.fnvals, refused: lw.refused, wants: lw.wants })
 }
 
 // The IR of a lambda's body, lifted into `job.lifted` (MYLA-106): called with
@@ -333,7 +333,7 @@ pub fun lower_lambda(cg: CodeGen, job: LamJob) -> Result<Lowered, str> {
     } else {
         lw.finish(Term.Ret(-1))
     }
-    return Ok(Lowered { f: lw.f, lams: lw.lams, partials: lw.partials, fnvals: lw.fnvals, refused: lw.refused })
+    return Ok(Lowered { f: lw.f, lams: lw.lams, partials: lw.partials, fnvals: lw.fnvals, refused: lw.refused, wants: lw.wants })
 }
 
 // Whether `t` is a scalar: an integer, float, bool, char or address.
@@ -2633,6 +2633,24 @@ impl Lower {
             if op == "==" { return self.konst(Type.TBool, 1) }
             return self.konst(Type.TBool, 0)
         }
+        if (op == "==" || op == "!=") && is_compound_eq_t(lt) {
+            // a tuple's addresses or a list's cells, to its `__eq_<T>` (D163)
+            var a = -1
+            var b = -1
+            if is_list_t(lt) {
+                a = self.expr(cg, l)
+                b = self.expr(cg, r)
+            } else {
+                a = self.addr(cg, l)
+                b = self.addr(cg, r)
+            }
+            let eq = self.temp(Type.TBool)
+            self.add(Inst.Call(eq, self.want_eq(lt), [a, b]))
+            if op == "==" { return eq }
+            let d = self.temp(Type.TBool)
+            self.add(Inst.Un(d, "!", Type.TBool, eq))
+            return d
+        }
         if is_tstr(lt) {
             if op == "==" || op == "!=" {
                 let a = self.expr(cg, l)
@@ -4722,7 +4740,7 @@ fun routine(name: str, ret: Option<Type>) -> Lower {
 // payload of the variant both have, each component compared as `==` does (a
 // struct or enum by its own `eq`, a boxed one's cell passed, a string's
 // bytes, a float as a float: NaN unequal, 0.0 and -0.0 equal).
-pub fun derived_eq_ir(cg: CodeGen, name: str, is_enum: bool) -> IrFunc {
+pub fun derived_eq_ir(cg: CodeGen, name: str, is_enum: bool) -> Routine {
     var lw = routine(name + ".eq", Some(Type.TBool))
     let sa = lw.new_slot("self", Type.TPtr, 8, 0, false)
     let sb = lw.new_slot("other", Type.TPtr, 8, 1, false)
@@ -4772,15 +4790,126 @@ pub fun derived_eq_ir(cg: CodeGen, name: str, is_enum: bool) -> IrFunc {
     lw.finish(Term.Ret(lw.konst(Type.TBool, 1)))
     lw.start(unequal)
     lw.finish(Term.Ret(lw.konst(Type.TBool, 0)))
-    return lw.f
+    return Routine { f: lw.f, wants: lw.wants }
+}
+
+// `__eq_<T>(a, b) -> bool`, `==` on the tuple or list type `t` (D163,
+// MYLA-313): a tuple's elements in turn, at the two tuples' addresses; a
+// list's lengths and then its elements, of the two lists' cells (the same
+// cell is equal at once). Each element compared as `==` compares it.
+pub fun compound_eq_ir(cg: CodeGen, t: Type, name: str) -> Routine {
+    var lw = routine(name, Some(Type.TBool))
+    // a list's cells are numbers here, to step through
+    var pt = Type.TPtr
+    if is_list_t(t) { pt = Type.TInt(64, true) }
+    let sa = lw.new_slot("a", pt, 8, 0, false)
+    let sb = lw.new_slot("b", pt, 8, 1, false)
+    let unequal = lw.new_block()
+    if is_list_t(t) {
+        let et = list_elem(t)
+        let i64 = Type.TInt(64, true)
+        let pos = Pos { line: 0, col: 0 }
+        let same = lw.temp(Type.TBool)
+        lw.add(Inst.Cmp(same, "==", i64, lw.read_cell(sa), lw.read_cell(sb)))
+        let equal = lw.new_block()
+        let differ = lw.new_block()
+        lw.finish(Term.Br(same, equal, differ))
+        lw.start(differ)
+        let na = lw.temp(i64)
+        lw.add(Inst.LoadAt(na, lw.read_cell(sa), 0, 8))
+        let nb = lw.temp(i64)
+        lw.add(Inst.LoadAt(nb, lw.read_cell(sb), 0, 8))
+        let lens = lw.temp(Type.TBool)
+        lw.add(Inst.Cmp(lens, "==", i64, na, nb))
+        let walk = lw.new_block()
+        lw.finish(Term.Br(lens, walk, unequal))
+        lw.start(walk)
+        let si = lw.new_slot("i", i64, 8, -1, false)
+        let sn = lw.new_slot("n", i64, 8, -1, false)
+        lw.add(Inst.Store(si, lw.int_const(0)))
+        lw.add(Inst.Store(sn, na))
+        let body = lw.new_block()
+        lw.count_test(si, sn, body, equal)
+        lw.start(body)
+        // the elements' addresses: cell + 16 + i * stride
+        let stride = cg.elem_size(et)
+        let i = lw.temp(i64)
+        lw.add(Inst.Load(i, si))
+        let scaled = lw.temp(i64)
+        lw.add(Inst.Bin(scaled, "*", i64, i64, i, lw.int_const(stride), pos))
+        let pa = lw.temp(i64)
+        lw.add(Inst.Bin(pa, "+", i64, i64, lw.read_cell(sa), scaled, pos))
+        let pb = lw.temp(i64)
+        lw.add(Inst.Bin(pb, "+", i64, i64, lw.read_cell(sb), scaled, pos))
+        lw.eq_member(cg, pa, pb, 16, et, unequal, stride)
+        let i2 = lw.temp(i64)
+        lw.add(Inst.Load(i2, si))
+        let i3 = lw.temp(i64)
+        lw.add(Inst.Bin(i3, "+", i64, i64, i2, lw.int_const(1), pos))
+        lw.add(Inst.Store(si, i3))
+        lw.count_test(si, sn, body, equal)
+        lw.start(equal)
+    } else {
+        var off = 0
+        for et in tuple_elems(t) {
+            lw.eq_member(cg, lw.read_ptr(sa), lw.read_ptr(sb), off, et, unequal, 8)
+            off = off + cg.stored_size(et)
+        }
+    }
+    lw.finish(Term.Ret(lw.konst(Type.TBool, 1)))
+    lw.start(unequal)
+    lw.finish(Term.Ret(lw.konst(Type.TBool, 0)))
+    return Routine { f: lw.f, wants: lw.wants }
+}
+
+// Whether `==` on `t` is a `__eq_<T>` routine's: a tuple (not the unit type)
+// or a list (D163).
+#test(Type.TTuple([Type.TInt(32, true)]))[true]
+#test(Type.TList(Type.TStr))[true]
+#test(Type.TTuple([]))[false]
+#test(Type.TStr)[false]
+pub fun is_compound_eq_t(t: Type) -> bool {
+    return match t {
+        Type.TTuple(es) => es.len() > 0,
+        Type.TList(e) => true,
+        _ => false,
+    }
 }
 
 impl Lower {
     // The component of type `ft` at `off` in the values at `a` and `b`
     // compared, on in a new block when equal, to `unequal` when not.
     fun eq_component(var self, cg: CodeGen, a: int32, b: int32, off: int32, ft: Type, unequal: int32) {
+        self.eq_member(cg, a, b, off, ft, unequal, 8)
+    }
+
+    // `eq_component` of a member `width` bytes wide when it is a scalar (a
+    // packed list's element is narrower than 8, D120): a tuple or list
+    // through its `__eq_<T>`, the unit type always equal.
+    fun eq_member(var self, cg: CodeGen, a: int32, b: int32, off: int32, ft: Type, unequal: int32, width: int32) {
+        if is_unit(ft) { return }
         let eq = self.temp(Type.TBool)
-        if is_struct_or_enum_t(ft) {
+        if is_compound_eq_t(ft) {
+            var pa = -1
+            var pb = -1
+            if is_list_t(ft) {
+                pa = self.temp(Type.TPtr)
+                self.add(Inst.LoadAt(pa, a, off, 8))
+                pb = self.temp(Type.TPtr)
+                self.add(Inst.LoadAt(pb, b, off, 8))
+            } else {
+                pa = self.offset(a, off)
+                pb = self.offset(b, off)
+            }
+            self.add(Inst.Call(eq, self.want_eq(ft), [pa, pb]))
+        } else if width < 8 && !is_tstr(ft) && !is_struct_or_enum_t(ft) {
+            // a packed element, read as its own type
+            let xa = self.temp(ft)
+            self.add(Inst.LoadAt(xa, a, off, width))
+            let xb = self.temp(ft)
+            self.add(Inst.LoadAt(xb, b, off, width))
+            self.add(Inst.Cmp(eq, "==", ft, xa, xb))
+        } else if is_struct_or_enum_t(ft) {
             var pa = -1
             var pb = -1
             if cg.is_boxed(ft) {
@@ -4817,6 +4946,15 @@ impl Lower {
         let next = self.new_block()
         self.finish(Term.Br(eq, next, unequal))
         self.start(next)
+    }
+}
+
+impl Lower {
+    // The name of `__eq_<T>`, `==` on the tuple or list type `t`, asked
+    // for (MYLA-313).
+    fun want_eq(var self, t: Type) -> str {
+        self.wants.push(Want { kind: 7, t: t, clone: false })
+        return type_job_name(Want { kind: 7, t: t, clone: false })
     }
 }
 

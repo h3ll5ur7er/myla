@@ -2548,9 +2548,10 @@ impl Interp {
         if i_is_struct_or_enum(lv) { return self.eval_op_overload(op, lv, rv) }
         // string concatenation (`==`/`!=` on strings compare, below)
         if op == "+" && is_vstr(lv) { return Value.VStr(as_str(lv) + as_str(rv)) }
-        // comparisons -> bool
-        if op == "==" { return Value.VBool(value_eq(lv, rv)) }
-        if op == "!=" { return Value.VBool(!value_eq(lv, rv)) }
+        // comparisons -> bool (a tuple's or list's elements each as `==`
+        // compares them, D163)
+        if op == "==" { return Value.VBool(self.values_equal(lv, rv)) }
+        if op == "!=" { return Value.VBool(!self.values_equal(lv, rv)) }
         if is_cmp_op(op) {
             if is_u64(self.resolved_of(l.id)) { return Value.VBool(ucompare(op, as_int(lv), as_int(rv))) }
             return Value.VBool(self.compare(op, lv, rv))
@@ -3202,20 +3203,67 @@ impl Interp {
         return match self.func_decls[fi].body { Some(b) => true, None => false }
     }
 
+    // `a == b` as the language has it: a struct or enum through its own `eq`
+    // when one is written, else (`#derive(Eq)`, whose synthesized `eq` has
+    // no body) member by member; a tuple's and a list's elements in turn
+    // (D163), each compared the same way, as native code compares them.
+    #test(interp_on("[int]"), Value.VTuple([Value.VInt(1), Value.VStr("a")]), Value.VTuple([Value.VInt(1), Value.VStr("a")]))[true]
+    #test(interp_on("[int]"), Value.VList([Value.VInt(1)]), Value.VList([Value.VInt(1), Value.VInt(2)]))[false]
+    #test(interp_on("[int]"), Value.VEnum("Color", "Red", []), Value.VEnum("Color", "Red", []))[true]
+    fun values_equal(var self, a: Value, b: Value) -> bool {
+        return match a {
+            Value.VStruct(n, fns, fvs) => {
+                if self.has_method_body(n, "eq") {
+                    let (rr, fs) = self.call_method(self.func_idx(format("{}.eq", n)), a, [b])
+                    return as_bool(rr)
+                }
+                match b {
+                    Value.VStruct(n2, fns2, fvs2) => n == n2 && self.all_equal(fvs, fvs2),
+                    _ => false,
+                }
+            },
+            Value.VEnum(en, vr, pl) => {
+                if self.has_method_body(en, "eq") {
+                    let (rr, fs) = self.call_method(self.func_idx(format("{}.eq", en)), a, [b])
+                    return as_bool(rr)
+                }
+                match b {
+                    Value.VEnum(en2, vr2, pl2) => en == en2 && vr == vr2 && self.all_equal(pl, pl2),
+                    _ => false,
+                }
+            },
+            Value.VTuple(es) => match b {
+                Value.VTuple(es2) => self.all_equal(es, es2),
+                Value.VUnit => es.len() == 0,
+                _ => false,
+            },
+            Value.VList(xs) => match b {
+                Value.VList(ys) => self.all_equal(xs, ys),
+                _ => false,
+            },
+            _ => value_eq(a, b),
+        }
+    }
+
+    // Whether `a` and `b` are as long and equal element by element
+    // (`values_equal`).
+    fun all_equal(var self, a: [Value], b: [Value]) -> bool {
+        if a.len() != b.len() { return false }
+        var i = 0
+        while i < a.len() {
+            if !self.values_equal(a[i], b[i]) { return false }
+            i = i + 1
+        }
+        return true
+    }
+
     // Dispatch a binary operator on a user-defined struct/enum to its trait
-    // method. `==`/`!=` fall back to structural equality for `#derive(Eq)`
-    // types, whose synthesized `eq` has no body.
+    // method. `==`/`!=` compare as `values_equal` does.
     #test(interp_on("[int]"), "==", Value.VEnum("Color", "Green", []), Value.VEnum("Color", "Blue", []))[Value.VBool(false)]
     fun eval_op_overload(var self, op: str, lv: Value, rv: Value) -> Value {
         let key = value_key(lv)
         if op == "==" || op == "!=" {
-            var eq = false
-            if self.has_method_body(key, "eq") {
-                let (rr, fs) = self.call_method(self.func_idx(format("{}.eq", key)), lv, [rv])
-                eq = as_bool(rr)
-            } else {
-                eq = value_eq(lv, rv)
-            }
+            let eq = self.values_equal(lv, rv)
             if op == "==" { return Value.VBool(eq) }
             return Value.VBool(!eq)
         }

@@ -15,6 +15,89 @@ PROGRAMS = {
     # a method called on a field whose type is a type parameter is found in
     # the interpreter too (MYLA-365)
     "method_on_a_type_parameter_field": 'trait Step { fun step(self) -> int }\nstruct One { n: int }\nimpl Step for One { fun step(self) -> int { return self.n + 1 } }\nstruct Wrap<R> { inner: R }\nimpl<R: Step> Wrap<R> {\n    fun go(self) -> int { return self.inner.step() }\n}\n#main\nfun main() {\n    let w = Wrap { inner: One { n: 4 } }\n    print(w.go())\n}\n',
+    # `==` and `!=` on tuples and lists whose elements are Eq (D163, MYLA-313):
+    # nested, with strings, floats (NaN unequal, 0.0 and -0.0 equal), packed
+    # lists, a struct's own `eq`, derived Eq over tuple and list fields, a bound
+    # `T: Eq` and `contains`
+    "tuple_and_list_equality": (
+        "#derive(Eq)\n"
+        "struct P {\n"
+        "    x: int,\n"
+        "    name: str,\n"
+        "}\n"
+        "\n"
+        "struct Loose {\n"
+        "    v: int,\n"
+        "}\n"
+        "\n"
+        "// equal when their values agree modulo 10\n"
+        "impl Eq for Loose {\n"
+        "    fun eq(self, other: Loose) -> bool {\n"
+        "        return self.v % 10 == other.v % 10\n"
+        "    }\n"
+        "}\n"
+        "\n"
+        "#derive(Eq)\n"
+        "enum Shape {\n"
+        "    Dot,\n"
+        "    Line((int, int), (int, int)),\n"
+        "}\n"
+        "\n"
+        "#derive(Eq)\n"
+        "struct Path {\n"
+        "    steps: [(int, int)],\n"
+        "    tag: (str, bool),\n"
+        "}\n"
+        "\n"
+        "fun same<T: Eq>(a: T, b: T) -> bool {\n"
+        "    return a == b\n"
+        "}\n"
+        "\n"
+        "fun main() {\n"
+        "    let a = (1, 2)\n"
+        "    print(a == (1, 2))\n"
+        "    print(a != (1, 2))\n"
+        "    print(a == (2, 1))\n"
+        "    let s = (1, \"x\", 'c', true)\n"
+        "    print(s == (1, \"x\", 'c', true))\n"
+        "    print(s == (1, \"y\", 'c', true))\n"
+        "    let n = ((1, 2), (3, (4, \"five\")))\n"
+        "    print(n == ((1, 2), (3, (4, \"five\"))))\n"
+        "    print(n == ((1, 2), (3, (4, \"six\"))))\n"
+        "    let big: (int64, uint8) = (5000000000, 200)\n"
+        "    print(big == (5000000000, 200))\n"
+        "    print((0.0, 1.5) == (-0.0, 1.5))\n"
+        "    let nan = 0.0 / 0.0\n"
+        "    print((nan, 1) == (nan, 1))\n"
+        "    print((P { x: 1, name: \"a\" }, 2) == (P { x: 1, name: \"a\" }, 2))\n"
+        "    print((Loose { v: 3 }, 1) == (Loose { v: 13 }, 1))\n"
+        "    print((Loose { v: 3 }, 1) == (Loose { v: 14 }, 1))\n"
+        "    print([1, 2, 3] == [1, 2, 3])\n"
+        "    print([1, 2, 3] == [1, 2])\n"
+        "    print([1, 2, 3] != [1, 2, 4])\n"
+        "    let bytes: [uint8] = [1, 2, 255]\n"
+        "    print(bytes == [1, 2, 255])\n"
+        "    let fs: [float32] = [1.5, 2.5]\n"
+        "    print(fs == [1.5, 2.5])\n"
+        "    print([\"a\", \"b\"] == [\"a\", \"b\"])\n"
+        "    print([(1, \"a\"), (2, \"b\")] == [(1, \"a\"), (2, \"b\")])\n"
+        "    print([[1], [2, 3]] == [[1], [2, 3]])\n"
+        "    print([[1], [2, 3]] == [[1], [2, 4]])\n"
+        "    let empty: [int] = []\n"
+        "    print(empty == [])\n"
+        "    print(Shape.Line((0, 0), (1, 2)) == Shape.Line((0, 0), (1, 2)))\n"
+        "    print(Shape.Line((0, 0), (1, 2)) == Shape.Line((0, 0), (1, 3)))\n"
+        "    print(Shape.Dot == Shape.Dot)\n"
+        "    let p = Path { steps: [(0, 0), (0, 1)], tag: (\"t\", true) }\n"
+        "    print(p == Path { steps: [(0, 0), (0, 1)], tag: (\"t\", true) })\n"
+        "    print(p == Path { steps: [(0, 0)], tag: (\"t\", true) })\n"
+        "    print(same((1, \"a\"), (1, \"a\")))\n"
+        "    print(same([(1, 2)], [(1, 3)]))\n"
+        "    print([(1, 2), (3, 4)].contains((3, 4)))\n"
+        "    let l = [Loose { v: 1 }, Loose { v: 22 }]\n"
+        "    print(l == [Loose { v: 11 }, Loose { v: 2 }])\n"
+        "}\n"
+    ),
     # an unsuffixed literal left of an unsigned operator takes the right
     # operand's type, natively too (MYLA-358: 10 / m divided as signed)
     "literal_left_of_unsigned_division": (
@@ -4039,6 +4122,8 @@ PINNED = {
     # MYLA-365, MYLA-366: new; native code gives the same
     "try_in_a_call_argument": "err bad\n",
     "method_on_a_type_parameter_field": "5\n",
+    # MYLA-313: new; the interpreter gives the same
+    "tuple_and_list_equality": "true\nfalse\nfalse\ntrue\nfalse\ntrue\nfalse\ntrue\ntrue\nfalse\ntrue\ntrue\nfalse\ntrue\nfalse\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\nfalse\ntrue\ntrue\nfalse\ntrue\ntrue\nfalse\ntrue\nfalse\ntrue\ntrue\n",
     # MYLA-358: new; the interpreter gives the same
     "literal_left_of_unsigned_division": "0\n10\n0\n100\n0\n4000000005\n1\ntrue\n",
     # MYLA-356: new, so no recording; the interpreter gives the same
