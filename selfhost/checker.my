@@ -59,6 +59,11 @@ pub enum Type {
 // being checked, whose module is the error's file (-1: unknown).
 pub struct CheckErr { line: int32, col: int32, sp: SrcSpan, msg: str, decl: int32, notes: [Note] }
 
+// Where a declaration of the standard library comes from: its module
+// (`std.str`) and file, as the loader found them, and whether the module is
+// one every program sees without an import (MYLA-320).
+pub struct DeclOrigin { module: str, path: str, implicit: bool }
+
 // An error at a position without a range (one caret).
 #test(27, 27, "x")[CheckErr { line: 27, col: 27, sp: SrcSpan { sline: 0, scol: 0, eline: 0, ecol: 0 }, msg: "x", decl: -1, notes: [] }]
 #test(50, 50, "d2")[CheckErr { line: 50, col: 50, sp: SrcSpan { sline: 0, scol: 0, eline: 0, ecol: 0 }, msg: "d2", decl: -1, notes: [] }]
@@ -1450,6 +1455,7 @@ pub struct Checker {
     errs: [CheckErr],               // the errors of the functions checked so far (MYLA-65, D80)
     warnings: [CheckErr],           // D95: the warnings found, in the order found
     primitives: bool,               // a program may call the raw-memory primitives (`gen_main --primitives`, the toolchain's tests)
+    std_impls: [int32: DeclOrigin], // the standard library's impls by node id (the loader's): their methods are its code (MYLA-320)
     // `#allow` (D161): the warnings the function being checked silences
     // (`primitive`, `primitive:__poll`, `reentrancy`), and the impl block's
     // `#allow`s while its methods are registered
@@ -1530,7 +1536,7 @@ fun new_checker(decls: [Decl]) -> Checker {
         allow_self: false, type_params: [], bounds_cur: [],
         cur_ret: None, has_cur_ret: false, ret_at: None, loop_depth: 0, defer_at: -1,
         frames: [], lambda_infer_active: false, lambda_depth: 0, cur_decl: -1, lambda_infer: [], stmt_match: false,
-        resolved: [:], call_defaults: [:], errs: [], warnings: [], primitives: false, allowed: [], impl_allows: [], method_decl_allows: [], mains: [],
+        resolved: [:], call_defaults: [:], errs: [], warnings: [], primitives: false, std_impls: [:], allowed: [], impl_allows: [], method_decl_allows: [], mains: [],
         skipped_decls: [:], skipped_fns: [:], broken_impls: [:], redefined: [:],
         lost_methods: [:], lost_traits: [:], failed_consts: [:], bodies: false,
         call_kind: "", call_kind_id: -1, call_target: "", call_mutates: false, fun_name: "", handovers: [:], become_words: [], passed_on: [],
@@ -2649,7 +2655,7 @@ impl Checker {
         for m in methods {
             // a method that can't be added is left out, body and all
             var bad: Option<CheckErr> = None
-            match self.method_sig(key, m.name) { Some(x) => { bad = Some(terr_at(m.line, m.col, m.sp, format("duplicate method '{}' for type '{}'", m.name, key))) }, None => {} }
+            match self.method_sig(key, m.name) { Some(x) => { bad = Some(self.duplicate_method(m, key, x)) }, None => {} }
             match bad {
                 Some(x) => {},
                 None => { if contains_str(field_names, m.name) { bad = Some(terr_at(m.line, m.col, m.sp, format("method '{}' collides with a field of '{}'", m.name, key))) } },
@@ -2680,6 +2686,24 @@ impl Checker {
             }
         }
         return Ok(0)
+    }
+
+    // The error of a method `m` that `key` has already, as `first`: with a
+    // note naming the standard library's module and place when the first
+    // one is its, as a method of the modules every program sees is
+    // (MYLA-320; a note's place is in the error's file, so this one's is in
+    // its message).
+    fun duplicate_method(self, m: FunData, key: str, first: FuncSig) -> CheckErr {
+        let e = terr_at(m.line, m.col, m.sp, format("duplicate method '{}' for type '{}'", m.name, key))
+        return match get(self.std_impls, first.decl_id) {
+            Some(o) => {
+                var module = o.module
+                if o.implicit { module = module + ", which every program sees," }
+                let place = format("{}:{}:{}", o.path, first.decl.line, first.decl.col)
+                with_notes(e, [note_at(format("'{}' for '{}' is first defined in {} at {}", m.name, key, module, place), 0, 0, no_span())])
+            },
+            None => e,
+        }
     }
 
     // Leave out an impl whose type is unknown: a missing method or trait impl
@@ -5940,6 +5964,9 @@ impl Checker {
     // Whether the function being checked is the standard library's.
     #test(checker_on("[int]"))[false]
     fun in_std(self) -> bool {
+        // a method of an impl on a built-in type is named after the type
+        // (`str.trim`): its impl's origin tells (MYLA-320)
+        if self.std_impls.contains(self.cur_decl) { return true }
         return self.fun_name.len() >= 4 && self.fun_name[0] == 's' && self.fun_name[1] == 't' && self.fun_name[2] == 'd' && self.fun_name[3] == '$'
     }
 
@@ -6167,12 +6194,19 @@ pub fun build_checker_decls(decls: [Decl], next_id: int32) -> Result<Checker, [C
 // primitives when `primitives` (the toolchain's tests of their code,
 // `gen_main --primitives`).
 pub fun build_checker_with(decls: [Decl], next_id: int32, primitives: bool) -> Result<Checker, [CheckErr]> {
+    return build_checker_std(decls, next_id, primitives, [:])
+}
+
+// `build_checker_with` of a linked program whose standard library's impls,
+// by node id, are `std_impls` (`Loaded.std_impls`, MYLA-320).
+pub fun build_checker_std(decls: [Decl], next_id: int32, primitives: bool, std_impls: [int32: DeclOrigin]) -> Result<Checker, [CheckErr]> {
     let pre = prelude(next_id)
     var all: [Decl] = []
     for d in pre.program.decls { all.push(d) }
     for d in decls { all.push(d) }
     var c = new_checker(all)
     c.primitives = primitives
+    c.std_impls = std_impls
     let r = c.run_all()
     match r { Ok(x) => {}, Err(e) => { return Err(e) } }
     // every call with all its arguments, for whatever runs the program (D136)

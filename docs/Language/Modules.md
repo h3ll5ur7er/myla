@@ -28,6 +28,18 @@ pub import .geometry.vector as vector  // re-export a module (needs `as`)
 - Imports must be explicit; there are no wildcards. A name that collides with another name in the module is an error: rename it with `as`.
 - Import cycles are allowed.
 - A module bound with `import` is used only as `m.member`; it isn't a value. Types and patterns from another module are brought in with `from … import` (dotted type names like `m.Point` aren't supported in type positions).
+- A segment of a module path is a name or a primitive type's keyword (`bool`, `str`, `int8` … `uint64`), so `import std.str as s` and `from std.str import f` work ([[MYLA-320]]); an alias is a name, so `import std.str as str` is a parse error. (`int`, `char` and `float` are names anyway.)
+
+## Implicit imports
+
+The modules of the standard library that give the built-in types their methods, `std.str`, `std.char`, `std.int`, `std.list`, `std.option` and `std.map`, are part of every program without an `import` (D164, [[MYLA-320]]): `s.trim()`, `xs.sorted()` and `m.get_or(k, 0)` work in a file that imports nothing.
+
+- They are loaded as if the program imported them, so their `impl` blocks' methods are there. They bind no name: a public function of one is reached only through an explicit import (`from std.str import f`), and a program may declare a name of theirs for itself.
+- An explicit import of one (`import std.str as s`) still works: it names the same module, loaded once.
+- A program's own method of the same name on the same type is a duplicate, `duplicate method 'trim' for type 'str'`, at the program's method, with a note naming the standard library's module and the place of its method.
+- The modules of `std` don't get them: each imports what it uses, which `myla check lib/std/<module>.my` and the module's own `#test` cases check, as they load the module without the implicit ones. A program whose entry file is a module of the standard library (as `myla check` and `myla test` of such a file have) is one of them.
+- A standard library without one of them (an older `--stdlib` directory) goes without it, silently.
+- What a program doesn't call costs nothing in its binary: code generation starts at `main` and compiles only the functions and methods it reaches. Checking them costs every program a few milliseconds ([[MYLA-320]] has the measurements).
 
 ## Packages (dependencies)
 
