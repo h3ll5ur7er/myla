@@ -2,7 +2,7 @@
 id: MYLA-294
 title: "Hardening the optimisation passes: round caps, single definitions, hoist dominance, intrinsic operand kinds"
 type: improvement
-status: review
+status: done
 priority: medium
 labels: [ir, optimisation, verifier]
 ---

@@ -2,7 +2,7 @@
 id: MYLA-183
 title: "Frame layout: slots of disjoint scopes share cells"
 type: improvement
-status: review
+status: done
 priority: medium
 labels: [selfhost, ir, performance]
 ---

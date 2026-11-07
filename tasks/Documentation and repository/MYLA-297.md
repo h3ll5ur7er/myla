@@ -2,7 +2,7 @@
 id: MYLA-297
 title: "CI gaps per target: the burn suite on aarch64 hardware, wasmtime, the browser page, missing binutils"
 type: chore
-status: review
+status: done
 priority: medium
 labels: [ci, targets]
 ---

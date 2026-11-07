@@ -2,7 +2,7 @@
 id: MYLA-300
 title: "Float printing: the shortest round-trip form by default"
 type: improvement
-status: review
+status: done
 priority: medium
 labels: [floats, printing, decision]
 ---

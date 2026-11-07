@@ -2,7 +2,7 @@
 id: MYLA-295
 title: "Standard-library polish: task.cancel's signature, Command.env's name, tests for io, time, task and toml"
 type: chore
-status: review
+status: done
 priority: low
 labels: [stdlib]
 ---

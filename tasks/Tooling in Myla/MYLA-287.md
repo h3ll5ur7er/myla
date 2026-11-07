@@ -2,7 +2,7 @@
 id: MYLA-287
 title: A write error on stdout other than a broken pipe is invisible
 type: improvement
-status: review
+status: done
 priority: medium
 labels: [stdlib, io, decision]
 ---

@@ -2,7 +2,7 @@
 id: MYLA-298
 title: The backends' duplicated helpers, the WASI numbering in one place, stale comments
 type: chore
-status: review
+status: done
 priority: low
 labels: [aarch64, wasm, cleanup]
 ---

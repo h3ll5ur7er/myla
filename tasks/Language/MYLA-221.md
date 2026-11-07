@@ -2,7 +2,7 @@
 id: MYLA-221
 title: "Methods on builtin types; the free collection functions deprecated"
 type: feature
-status: review
+status: done
 priority: high
 labels: [language, builtins, stdlib]
 ---
