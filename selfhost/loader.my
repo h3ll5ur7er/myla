@@ -525,6 +525,11 @@ impl Loader {
         if p.dots == 0 && p.segments[0] == "std" && self.stdlib_root == "" {
             return Err(at(importer, p.line, p.col, p.sp, format("cannot resolve import '{}': no standard library root was given", dotted(p))))
         }
+        // a root named by `--stdlib` or MYLA_STDLIB that isn't there says so
+        // (the review of 2026-11-06)
+        if p.dots == 0 && p.segments[0] == "std" && self.stdlib_root != EMBEDDED_ROOT && !is_dir(self.stdlib_root) {
+            return Err(at(importer, p.line, p.col, p.sp, format("cannot resolve import '{}': the standard library root '{}' (from --stdlib or MYLA_STDLIB) is not a directory", dotted(p), self.stdlib_root)))
+        }
         return Err(at(importer, p.line, p.col, p.sp, format("cannot resolve import '{}'", dotted(p))))
     }
 

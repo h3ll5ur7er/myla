@@ -48,3 +48,29 @@ class EmbeddedStd(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
+class StdlibRoot(unittest.TestCase):
+    def test_a_root_that_is_not_there_says_so(self):
+        # a std import under a root named by MYLA_STDLIB or --stdlib that
+        # doesn't exist says which, not only that it can't resolve (the
+        # review of 2026-11-06)
+        from tests.burn._tools import selfhost_tool
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "j.my")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write("import std.json as json\n\nfun main() {\n    print(1)\n}\n")
+            missing = os.path.join(tmp, "no-such-lib")
+            want = (f"cannot resolve import 'std.json': the standard library root '{missing}' "
+                    "(from --stdlib or MYLA_STDLIB) is not a directory")
+            for args, env in ((["--stdlib", missing], {}), ([], {"MYLA_STDLIB": missing})):
+                with self.subTest(args=args, env=env):
+                    p = subprocess.run([selfhost_tool("main"), "run", path, *args], capture_output=True, text=True,
+                                       env=dict(os.environ, **env))
+                    self.assertEqual(p.returncode, 1, p.stderr)
+                    self.assertIn(want, p.stderr)
+            # the embedded library, as without either
+            env = {k: v for k, v in os.environ.items() if k != "MYLA_STDLIB"}
+            p = subprocess.run([selfhost_tool("main"), "run", path], capture_output=True, text=True, env=env)
+            self.assertEqual((p.stdout, p.returncode), ("1\n", 0), p.stderr)
