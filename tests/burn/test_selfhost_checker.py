@@ -356,6 +356,8 @@ SUPERSEDED: dict[str, str] = {
     # arms disagree on their type instead of one lacking a value (the review of 2026-11-06)
     "match_arm_without_value": "err 4 14 4:14-4:15 type: match arms have incompatible types '()' and 'int32'",
     "unit_test_46": "err 8 14 8:14-8:15 type: match arms have incompatible types '()' and 'int32'",
+    # D162: an async function takes cases; an async method still doesn't
+    "unit_test_165": "err 5 5 5:5-5:25 type: '#test' can't run an async method (test it through an async test function, D162)",
     # D161: a method takes '#allow' too
     "unit_test_164": "err 5 5 5:5-5:10 type: attribute '#main' can't be applied to a method (a method takes only '#test' and '#allow')",
 }
