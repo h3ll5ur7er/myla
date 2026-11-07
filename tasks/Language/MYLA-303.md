@@ -2,7 +2,7 @@
 id: MYLA-303
 title: "Decision: unit and integration tests beyond #test (test functions, teardown, fixtures, test programs)"
 type: chore
-status: review
+status: done
 priority: high
 labels: [decision, testing, language, project-tool]
 ---
@@ -170,14 +170,21 @@ Each step keeps the examples' rule (every value-returning function has cases) an
 
 ## Decisions asked of the owner
 
-- [ ] 1. A bare `#test` on a parameterless function as the test function (A), with `Result<(), E>` results
-- [ ] 2. A failed case unwinds its deferred blocks under `myla test` (A, D141 amended); `test.temp_dir()` removed by the runner
-- [ ] 3. `std.test`'s first functions; `[panic("…")]` and `[exit(n)]` as expected values (A)
-- [ ] 4. `#test` on async functions as the entry task (A, D116 amended)
-- [ ] 5. `tests/` in a project with test programs (`// input:`, `// output:`, `// exit:`) and `test.program()`
-- [ ] 6. `myla test --native` / `--target` with a generated harness, as step 4
-- [ ] 7. `--only`, `--list`, output on failure only; no skips
+- [x] 1. A bare `#test` on a parameterless function as the test function (A), with `Result<(), E>` results
+- [x] 2. A failed case unwinds its deferred blocks under `myla test` (A, D141 amended); `test.temp_dir()` removed by the runner
+- [x] 3. `std.test`'s first functions; `[panic("…")]` and `[exit(n)]` as expected values (A)
+- [x] 4. `#test` on async functions as the entry task (A, D116 amended)
+- [x] 5. `tests/` in a project with test programs (`// input:`, `// output:`, `// exit:`) and `test.program()`
+- [x] 6. `myla test --native` / `--target` with a generated harness, as step 4
+- [x] 7. `--only`, `--list`, output on failure only; no skips
+
+## Decided (2026-11-07)
+
+The owner took all seven recommendations; D162 records them. The steps are the children below.
 
 ## Children
 
-The implementation tasks are created when the decisions are made: one per step above.
+- [[MYLA-304]] step 1: test functions, failures that unwind, `std.test`, `[panic]`/`[exit]`, `--only`/`--list`, output on failure
+- [[MYLA-305]] step 2: async cases
+- [[MYLA-306]] step 3: `tests/` in a project, test programs, `test.program()`
+- [[MYLA-307]] step 4: `myla test --native` and `--target`

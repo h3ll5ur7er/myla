@@ -18,7 +18,7 @@ from .diag import render, Report
 from .checker import build_checker_with, Checker, CheckErr
 from .codegen import new_codegen
 from .dwarf import read_gdb_script
-from .interp import new_interp, RtError, TestRun, sched_from_env, time_from_env
+from .interp import new_interp, RtError, TestRun, TestOptions, sched_from_env, time_from_env
 from .parser import expr_of, stmt_of, type_expr_of, block_of, pattern_of, fun_of  // AST values for #test cases (MYLA-184)
 
 // Decode a captured `[uint8]` buffer (e.g. a child's stderr) as UTF-8 text.
@@ -92,17 +92,30 @@ fun step_failed(out: Output, label: str) -> bool {
     return false
 }
 
-// `myla run <file> [args]` / `myla test`: interpret the program with argv
-// `[file, args...]`, or run its #test cases; the exit status.
-pub fun cmd_interp(file: str, opts: LoadOptions, tests: bool, prog_args: [str]) -> int32 {
+// `myla test <file> [--only <text>] [--list]`: run (or list) the file's
+// own #test cases, printing the report; the exit status.
+pub fun cmd_test(file: str, opts: LoadOptions, sel: TestOptions) -> int32 {
+    match load_and_check(file, opts) {
+        Ok(ch) => {
+            var it = new_interp(ch.checker, [file])
+            return it.run_tests(sel)
+        },
+        Err(e) => {
+            eprintln(e)
+            return 1
+        },
+    }
+    return 0
+}
+
+// `myla run <file> [args]`: interpret the program with argv
+// `[file, args...]`; the exit status.
+pub fun cmd_interp(file: str, opts: LoadOptions, prog_args: [str]) -> int32 {
     match load_and_check(file, opts) {
         Ok(ch) => {
             var argv = [file]
             for a in prog_args { argv.push(a) }
             var it = new_interp(ch.checker, argv)
-            if tests {
-                return it.run_tests()
-            }
             // a task's failure is reported when it happens, before the
             // other tasks stop (D97, MYLA-170)
             let prog = ch.prog
@@ -128,10 +141,10 @@ pub fun cmd_interp(file: str, opts: LoadOptions, tests: bool, prog_args: [str]) 
 
 // The `#test` cases declared in `file` itself (not in the modules it links),
 // run as `myla test` does in a project (MYLA-94); Err: the diagnostic.
-pub fun own_tests(file: str, opts: LoadOptions) -> Result<TestRun, str> {
+pub fun own_tests(file: str, opts: LoadOptions, sel: TestOptions) -> Result<TestRun, str> {
     let ch = load_and_check(file, opts)?
     var it = new_interp(ch.checker, [file])
-    return Ok(it.run_test_cases())
+    return Ok(it.run_test_cases(sel))
 }
 
 // `myla build <file> -o <out>`: compile to a native binary at `out`.

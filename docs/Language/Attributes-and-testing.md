@@ -9,7 +9,8 @@ An attribute is written on the lines above a declaration: `#name`, optionally fo
 | Attribute | On | Meaning |
 | --- | --- | --- |
 | `#main` | a non-generic function without parameters | The entry point, instead of the function named `main` |
-| `#test(args)[expected]` | a non-generic function or method with a result | One test case; several may be stacked. On a method the receiver is the first argument (D116) |
+| `#test(args)[expected]` | a non-generic function or method | One test case; several may be stacked. On a method the receiver is the first argument (D116). The expected value may be `panic("message")` or `exit(n)`, the failure the call must end in (D162) |
+| `#test` | a non-generic function without parameters, with no result or a `Result<(), E>` | A test function (D162): it passes when it returns, fails on a runtime error, `exit` or `Err(e)` |
 | `#derive(Eq)` | a non-generic struct or enum | Structural equality ([[Language/Methods-and-traits]]); `Eq` is the only trait that can be derived (`cannot derive 'Ord': only 'Eq' is derivable`) |
 | `#allow(name, …)` | a function, a method or an `impl` block | Silences the warnings of that name inside it (D161, below) |
 
@@ -62,6 +63,8 @@ fun main() {
 - The arguments must match the parameters and the single expected value the result type; both are checked at compile time. They may use literals, constants, struct literals, enum constructors and other expressions without local variables.
 - `myla test file.my` runs the cases declared in `file.my` itself, not those of the modules it imports, the standard library's included ([[MYLA-187]]); test a module by naming it. It calls the function for each case in the interpreter and compares the result with the expected value structurally (maps whatever their order). A runtime error (`panic`, a failed `assert` included) fails the case, and so does `exit(n)`; the other cases still run. Once all have run, it prints `PASS  add #1` or `FAIL  add #2: expected 101, got 100` for each (values as the Python interpreter's repr shows them: `True`, `'text'`, chars as code points, `P { x: 1 }`, `E.B(2)`), `FAIL  f #1: runtime error: <message>` or `FAIL  f #1: exited with status 3`, and a summary; the exit status is 1 if anything failed. This is what the Python CLI printed, and `build/myla test` prints the same ([[MYLA-81]]); output from the tests themselves comes before the report.
 - `#test` never affects `run` or `build`.
+- **Selection** (D162): `myla test file.my --only <text>` runs the cases whose function's name contains the text (a method's `Type.method`), `--list` prints the cases' names without running them. There are no skips: a case that must not run is removed.
+- **Output**: what a case prints is kept and shown only when the case fails, under its line, each line after `      | `; a passing case's output isn't shown.
 - **Named cases** ([[MYLA-239]]): a `//` comment after a `#test` attribute on its line names the case, and the report shows the name after the number: `#test(-1, -2)[-3] // sums negatives` reports `PASS  add #2 (sums negatives)`, and a failure `FAIL  add #3 (wrong on purpose): expected 5, got 4`. A case without one is reported as before.
 - **Methods** (D116) take cases too, written above the method inside its `impl`; the receiver is the first argument, and the report names the case `Type.method` (`PASS  Counter.get #1`, `int32.double #1` for a method on `int`):
 
@@ -78,9 +81,116 @@ fun main() {
   }
   ```
 
-  For a `var self` method only the result is compared, not the changed receiver. A method of a generic `impl` or with type parameters of its own, an actor's method (its receiver is a running actor, not a value) and an `async` method can't have cases; `#test` is the only attribute a method takes.
+  For a `var self` method only the result is compared, not the changed receiver. A method of a generic `impl` or with type parameters of its own, an actor's method (its receiver is a running actor, not a value) and an `async` method can't have cases (an async function can, [below](#async-cases)); `#test` is the only attribute a method takes.
 
 Every value-returning function in `examples/` carries tests, and the burn tests enforce that ([[Development/Conventions]]); in `selfhost/` some do ([[MYLA-184]]). A `#test` in an imported module can use that module's own declarations ([[MYLA-11]]).
+
+### Test functions
+
+A test that is a body rather than a line is a function without parameters under a bare `#test` (D162, [[MYLA-303]]): sugar for `#test()[()]`, named by the function's name, reported as `PASS  writes_and_reads`. It passes when it returns and fails on a runtime error (`assert`, `panic`, a failed expectation of `std.test`) or `exit`. Its result is none, or `Result<(), E>`: `Ok(())` passes, `Err(e)` fails the case with `e` shown as `{}` would show it (`FAIL  reads_the_config: IoError.NotFound`), so `?` is the way to say "and that must work". A test function is an ordinary function in every other way: it may be called, it takes `defer`, and `myla build` drops it with the cases.
+
+```myla
+import std.test as test
+import std.fs as fs
+from std.fs import IoError
+
+#test
+fun writes_and_reads() -> Result<(), IoError> {
+    let d = test.temp_dir()
+    fs.write_to_file(d + "/a.txt", "hello")?
+    test.expect_eq(fs.read_to_string(d + "/a.txt")?, "hello")
+    return Ok(())
+}
+
+#test // a port above 65535 is refused
+fun rejects_a_bad_port() {
+    match parse_port("70000") {
+        Some(p) => { test.fail(f"accepted {p}") },
+        None => {},
+    }
+}
+
+fun parse_port(text: str) -> Option<int> {
+    var n = 0
+    for c in text.chars() {
+        if c < '0' || c > '9' { return None }
+        n = n * 10 + (c as int - '0' as int)
+    }
+    if n > 65535 { return None }
+    return Some(n)
+}
+
+fun main() {}
+```
+
+`std.test` ([[Language/Standard-library#stdtest]]) has the checks, `expect(cond, msg)`, `expect_eq(got, want)` ("expected 3, got 4"), `expect_ne` and `fail(msg)`, and `temp_dir()`, a fresh empty directory for the case under `$TMPDIR` (else `/tmp`) that the runner removes when the case ends, passed or failed. A fixture is a value: a function's result, built in the case's arguments (`#test(db_with(3))[3]`) or in the test function's body; nothing is shared between cases.
+
+### When a case fails
+
+A failure (a runtime error, `exit`, a failed expectation) ends the case as a `return` would have (D162, D141 amended): the deferred blocks of every block between the failure and the case's function run, innermost first, then the case is reported as failed. A deferred block that fails itself is noted with the case (`FAIL  t: runtime error: boom; deferred block: runtime error: bang`) and the unwinding goes on. Outside `myla test` nothing changes: a failure ends the program at once and runs no deferred block (D97, D141).
+
+### Async cases
+
+`#test` on an `async fun` (D162, D116 amended) runs the case as the entry task of a program of its own: a test function (`#test` above `async fun counts_in_parallel()`) or a case with arguments (`#test(3)[6]` above `async fun doubled(n: int) -> int`). Every task the case starts ends before the case does, as a program's do; a child's failure fails the case (D97); the interpreter runs the tasks one at a time in its one-worker order (D110), so the case is deterministic. An actor is tested through an async test function that makes it; an actor's method and an async method take no cases (their receiver is a running actor, or the method needs a task).
+
+```myla
+import std.test as test
+
+actor Counter {
+    n: int,
+}
+
+impl Counter {
+    async fun bump(var self, by: int) {
+        self.n = self.n + by
+    }
+
+    async fun get(self) -> int {
+        return self.n
+    }
+}
+
+async fun bump_many(c: Counter, times: int) {
+    var i = 0
+    while i < times {
+        await c.bump(1)
+        i = i + 1
+    }
+}
+
+#test
+async fun counts_in_parallel() {
+    let c = Counter { n: 0 }
+    async let a = bump_many(c, 100)
+    async let b = bump_many(c, 100)
+    await a
+    await b
+    test.expect_eq(await c.get(), 200)
+}
+
+fun main() {}
+```
+
+### Expected failures
+
+A case whose call must fail says so in its expected value: `[panic("division by zero")]` passes when the call ends in a runtime error with exactly that message (`assert`'s message, `panic`'s, an index error's as the interpreter words it), `[exit(3)]` when it ends with that exit status. The message and the status are literals. A call that returns instead, or fails differently, fails the case: `FAIL  div #3: expected runtime error 'division by zero', got 2`.
+
+```myla
+from std.process import exit
+
+#test(1, 0)[panic("division by zero")]
+#test(4, 2)[2]
+fun div(a: int, b: int) -> int {
+    return a / b
+}
+
+#test()[exit(3)]
+fun leaves() {
+    exit(3)
+}
+
+fun main() {}
+```
 
 ## const
 

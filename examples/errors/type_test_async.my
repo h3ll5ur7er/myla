@@ -1,8 +1,12 @@
-//~ type error: '#test' can't run an async function
-//~ span: #test(1)[10]
-// The test runner calls functions synchronously (D89).
-#test(1)[10]
-async fun fetch(n: int) -> int {
-    return n * 10
+//~ type error: '#test' can't run an async method (test it through an async test function, D162)
+//~ span: #test(Fetcher { n: 1 })[10]
+// An async method takes no cases (D116, D162); an async function does, run
+// as the entry task of a program of its own.
+struct Fetcher { n: int }
+impl Fetcher {
+    #test(Fetcher { n: 1 })[10]
+    async fun fetch(self) -> int {
+        return self.n * 10
+    }
 }
 fun main() {}

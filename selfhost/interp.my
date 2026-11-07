@@ -7,7 +7,7 @@
 // runtime needs (integer widths, print/format rendering, casts) comes from the
 // checker's `resolved` side table, keyed by AST node id.
 
-from .ast import Expr, ExprKind, Stmt, StmtKind, Block, Decl, DeclKind, FunData, Param, MatchArm, Pattern, PatternKind, FieldPat, BindElem, ExprOrBlock, ElseTail, FieldInit, MapEntry, Attribute, TypeExpr, TypeKind, bind_elems, names_in_expr, names_in_block
+from .ast import Expr, ExprKind, Stmt, StmtKind, Block, Decl, DeclKind, FunData, Param, MatchArm, Pattern, PatternKind, FieldPat, BindElem, ExprOrBlock, ElseTail, FieldInit, MapEntry, Attribute, TypeExpr, TypeKind, bind_elems, names_in_expr, names_in_block, Expected, expected_failure
 from .tokens import SrcSpan, no_span
 from .checker import Checker, Type, is_raw_memory_primitive, checker_on, builtin_method, builtin_method_name, is_slice_expr, from_end_of, slice_parts, is_hole_part
 from .anf import Norm, new_norm, stmt_suspends, body_suspends
@@ -17,7 +17,7 @@ from std.slice import range_of, str_whole, take_str
 from std.num import f64_literal_bits, f32_round_bits, float_from_bits, pow2, format_float
 from std.io import write, eprint, errno_text
 from std.process import exit
-from std.fs import read_to_string
+from std.fs import read_to_string, make_dir_all, remove_dir_all
 from .parser import expr_of, stmt_of, type_expr_of, block_of, pattern_of, fun_of  // AST values for #test cases (MYLA-184)
 
 // =========================================================================
@@ -224,6 +224,16 @@ pub struct Interp {
     sleep_seq: int64,
     virtual_time: bool,
     vclock: int64,
+    // D162: a `#test` case is running (`myla test`): a failure unwinds its
+    // deferred blocks, which record their own failures in `defer_errs`; its
+    // standard output is kept in `captured` for the report; its scratch
+    // root (`std.test.temp_dir`), made on the first call and removed when
+    // the case ends; the project's program under test (`std.test.program`)
+    testing: bool,
+    defer_errs: [str],
+    captured: [str],
+    test_root: str,
+    test_program: str,
 }
 
 // A runtime error, with the Python interpreter's message; `node` is the id of
@@ -234,6 +244,41 @@ pub struct RtError { msg: str, line: int32, col: int32, sp: SrcSpan, node: int32
 // The results of a run of `#test` cases: a PASS/FAIL line for each case, and
 // how many passed of how many (run_test_cases).
 pub struct TestRun { report: [str], passed: int32, total: int32 }
+
+// What `myla test` was asked (D162): `only`, a text the cases run must have
+// in their function's name ("" for all); `list`, to name the cases
+// without running them; `program`, the path of the project's program for
+// `std.test.program()` ("" outside a project with one).
+pub struct TestOptions { only: str, list: bool, program: str }
+
+pub fun all_tests() -> TestOptions {
+    return TestOptions { only: "", list: false, program: "" }
+}
+
+// Whether the case of the function `name` is selected by `only`: its text
+// in the name (a method's `T.m`).
+#test("add", "")[true]
+#test("P.plus", "plus")[true]
+#test("add", "plus")[false]
+pub fun selected(name: str, only: str) -> bool {
+    if only == "" { return true }
+    if only.len() > name.len() { return false }
+    var i = 0
+    while i + only.len() <= name.len() {
+        var k = 0
+        while k < only.len() && name[i + k] == only[k] { k = k + 1 }
+        if k == only.len() { return true }
+        i = i + 1
+    }
+    return false
+}
+
+// How a case's call ended: with a value, a runtime error, or `exit`.
+enum Outcome {
+    Returned(Value),
+    Failed(str),
+    Exited(int32),
+}
 
 // A partial application's arguments: its filled slots, and `argv` in its holes.
 #test([Value.VInt(2), Value.VUnit], [false, true], [Value.VInt(4)])[[Value.VInt(2), Value.VInt(4)]]
@@ -422,6 +467,7 @@ pub fun new_interp(c: Checker, argv: [str]) -> Interp {
         on_failure: (r: RtError) => false, fail_reported: false,
         depth: 0,
         sleepers: [], deadlines: [], fired: [], fd_waits: [], sleep_seq: 0, virtual_time: false, vclock: 0,
+        testing: false, defer_errs: [], captured: [], test_root: "", test_program: "",
     }
     return it
 }
@@ -596,13 +642,18 @@ impl Interp {
     // exit status: 0 if all pass (or none exist), else 1.
     // `myla test file.my`: the entry file's own cases, not those of the
     // modules it imports (MYLA-187)
-    fun run_tests(var self) -> int32 {
-        let r = self.run_test_cases()
+    fun run_tests(var self, sel: TestOptions) -> int32 {
+        let r = self.run_test_cases(sel)
         if r.total == 0 {
+            if sel.only != "" {
+                write(1, format("no #test cases match '{}'.\n", sel.only))
+                return 1
+            }
             write(1, "no #test cases found.\n")
             return 0
         }
         for line in r.report { write(1, line) }
+        if sel.list { return 0 }
         write(1, format("\n{}/{} passed.\n", r.passed, r.total))
         if r.passed == r.total { return 0 }
         return 1
@@ -612,10 +663,11 @@ impl Interp {
     // of a file, MYLA-187, and in a project, MYLA-94: the entry's names are
     // the ones the loader doesn't qualify with a module id), and collect a
     // PASS/FAIL line for each.
-    #test(interp_on("[int]"))[TestRun { report: [], passed: 0, total: 0 }]
-    fun run_test_cases(var self) -> TestRun {
+    #test(interp_on("[int]"), TestOptions { only: "", list: false, program: "" })[TestRun { report: [], passed: 0, total: 0 }]
+    fun run_test_cases(var self, sel: TestOptions) -> TestRun {
         self.collect()
         self.eval_consts()
+        self.test_program = sel.program
         var report: [str] = []
         var total = 0
         var passed = 0
@@ -625,63 +677,140 @@ impl Interp {
             let name = self.func_names[i]    // a method's is `T.m` (D116)
             var idx = 0
             for attr in fd.attributes {
-                if attr.name == "test" && !is_qualified(name) {
+                if attr.name == "test" && !is_qualified(name) && selected(name, sel.only) {
                     idx = idx + 1
-                    total = total + 1
-                    self.push_scope()
-                    var argv: [Value] = []
-                    for a in attr.args { argv.push(self.eval(a)) }
-                    var expected = Value.VUnit
-                    match attr.outputs {
-                        Some(outs) => { if outs.len() > 0 { expected = self.eval(outs[0]) } },
-                        None => {},
-                    }
-                    self.pop_scope()
-                    var actual = Value.VUnit
-                    match fd.receiver {
-                        // a method's receiver is its first argument (D116)
-                        Some(r) => {
-                            var rest: [Value] = []
-                            var k = 1
-                            while k < argv.len() {
-                                rest.push(argv[k])
-                                k = k + 1
-                            }
-                            let (rv, final_self) = self.call_method(i, argv[0], rest)
-                            actual = rv
-                        },
-                        None => { actual = self.call_func(i, argv) },
-                    }
-                    var detail = ""
-                    match self.ctrl {
-                        Ctrl.CExit => {
-                            // a runtime error or `exit` fails this test only
-                            match self.rt_err {
-                                Some(r) => { detail = "runtime error: " + r.msg },
-                                None => { detail = format("exited with status {}", self.exit_code) },
-                            }
-                            self.ctrl = Ctrl.CNone
-                            self.rt_err = None
-                            self.exit_code = 0
-                        },
-                        _ => {
-                            if !value_eq(actual, expected) { detail = "expected " + py_repr(expected) + ", got " + py_repr(actual) }
-                        },
-                    }
-                    // a named case (a comment after its attribute, MYLA-239)
-                    var case_name = format("{} #{}", name, idx)
+                    // a test function (a bare `#test`, D162) is named by its
+                    // name, a case by its number, both by a comment after
+                    // the attribute (MYLA-239)
+                    let is_fn = match attr.outputs { Some(outs) => false, None => true }
+                    var case_name = name
+                    if !is_fn { case_name = format("{} #{}", name, idx) }
                     if attr.label != "" { case_name = format("{} ({})", case_name, attr.label) }
-                    if detail == "" {
-                        passed = passed + 1
-                        report.push(format("PASS  {}\n", case_name))
+                    total = total + 1
+                    if sel.list {
+                        report.push(case_name + "\n")
                     } else {
-                        report.push(format("FAIL  {}: {}\n", case_name, detail))
+                        let detail = self.run_case(i, fd, attr, is_fn)
+                        if detail == "" {
+                            passed = passed + 1
+                            report.push(format("PASS  {}\n", case_name))
+                        } else {
+                            report.push(format("FAIL  {}: {}\n", case_name, detail))
+                            // what the case printed, under its line
+                            for line in output_lines(self.captured) { report.push("      | " + line + "\n") }
+                        }
                     }
                 }
             }
             i = i + 1
         }
         return TestRun { report: report, passed: passed, total: total }
+    }
+
+    // One case of the function `fi`: its arguments and expected value
+    // evaluated, the call made with the case running (a failure unwinds its
+    // deferred blocks, D162), its scratch directory removed; "" when it
+    // passed, else why it failed.
+    fun run_case(var self, fi: int32, fd: FunData, attr: Attribute, is_fn: bool) -> str {
+        self.push_scope()
+        var argv: [Value] = []
+        for a in attr.args { argv.push(self.eval(a)) }
+        var expected = Value.VUnit
+        var want = Expected.Value
+        match attr.outputs {
+            Some(outs) => {
+                if outs.len() > 0 {
+                    want = expected_failure(outs[0])
+                    match want { Expected.Value => { expected = self.eval(outs[0]) }, _ => {} }
+                }
+            },
+            None => {},
+        }
+        self.pop_scope()
+        self.testing = true
+        self.defer_errs = []
+        self.captured = []
+        var actual = Value.VUnit
+        match fd.receiver {
+            // a method's receiver is its first argument (D116)
+            Some(r) => {
+                var rest: [Value] = []
+                var k = 1
+                while k < argv.len() {
+                    rest.push(argv[k])
+                    k = k + 1
+                }
+                let (rv, final_self) = self.call_method(fi, argv[0], rest)
+                actual = rv
+            },
+            None => {
+                if self.body_suspends_fd(fd) {
+                    // an async case is the entry task of a program of its
+                    // own (D162): the tasks it starts end before it does
+                    let saved = self.scopes
+                    self.reset_tasks()
+                    actual = self.run_as_first_task(fi, argv)
+                    self.scopes = saved
+                } else { actual = self.call_func(fi, argv) }
+            },
+        }
+        self.testing = false
+        var outcome = Outcome.Returned(actual)
+        match self.ctrl {
+            Ctrl.CExit => {
+                // a runtime error or `exit` ends this case only
+                outcome = match self.rt_err {
+                    Some(r) => Outcome.Failed(r.msg),
+                    None => Outcome.Exited(self.exit_code),
+                }
+                self.ctrl = Ctrl.CNone
+                self.rt_err = None
+                self.exit_code = 0
+            },
+            _ => {},
+        }
+        if self.test_root != "" {
+            let gone = remove_dir_all(self.test_root)
+            self.test_root = ""
+        }
+        var parts: [str] = []
+        let returns = match fd.ret_type { Some(t) => true, None => false }
+        match want {
+            Expected.Value => {
+                match outcome {
+                    Outcome.Returned(v) => {
+                        if is_fn {
+                            // a test function's `Err(e)` fails it with `e` (D162)
+                            match v {
+                                Value.VEnum(en, vr, pl) => { if vr == "Err" { parts.push(self.shown(pl[0])) } },
+                                _ => {},
+                            }
+                        } else if !value_eq(v, expected) { parts.push("expected " + py_repr(expected) + ", got " + py_repr(v)) }
+                    },
+                    Outcome.Failed(m) => { parts.push("runtime error: " + m) },
+                    Outcome.Exited(c) => { parts.push(format("exited with status {}", c)) },
+                }
+            },
+            Expected.Panics(m) => {
+                let wanted = format("expected runtime error '{}'", m)
+                match outcome {
+                    Outcome.Returned(v) => { parts.push(wanted + ", " + returned_text(v, returns)) },
+                    Outcome.Failed(got) => { if got != m { parts.push(format("{}, got runtime error '{}'", wanted, got)) } },
+                    Outcome.Exited(c) => { parts.push(format("{}, exited with status {}", wanted, c)) },
+                }
+            },
+            Expected.Exits(n) => {
+                let wanted = format("expected exit status {}", n)
+                match outcome {
+                    Outcome.Returned(v) => { parts.push(wanted + ", " + returned_text(v, returns)) },
+                    Outcome.Failed(got) => { parts.push(format("{}, got runtime error '{}'", wanted, got)) },
+                    Outcome.Exited(c) => { if c as int64 != n { parts.push(format("{}, exited with status {}", wanted, c)) } },
+                }
+            },
+        }
+        // the deferred blocks that failed while the case unwound (D162)
+        for d in self.defer_errs { parts.push("deferred block: runtime error: " + d) }
+        return join_parts(parts)
     }
 
     fun eval_consts(var self) {
@@ -1019,18 +1148,24 @@ impl Interp {
     // The deferred blocks of the innermost scope, the last met first, as it
     // ends (D135): after a `return`'s value, a `?`, `break`, `continue` or
     // the arguments of a `become`, which wait for them; not on a failure or
-    // `exit`, which end the program (D97). Each sees the names declared
-    // before it.
+    // `exit`, which end the program (D97), except under a `#test` case,
+    // which they end instead: the case unwinds through them, and one that
+    // fails itself is noted for the report (D162). Each sees the names
+    // declared before it.
     fun run_defers(var self) {
         let top = self.scopes.len() - 1
         if self.scopes[top].defers.len() == 0 { return }
         let ds = self.scopes[top].defers
         self.scopes[top].defers = []
-        match self.ctrl { Ctrl.CExit => { return }, _ => {} }
+        match self.ctrl { Ctrl.CExit => { if !self.testing { return } }, _ => {} }
         let saved_ctrl = self.ctrl
         let saved_val = self.ctrl_val
         let saved_tail = self.tail
+        let saved_err = self.rt_err
+        let saved_code = self.exit_code
         self.ctrl = Ctrl.CNone
+        self.rt_err = None
+        self.exit_code = 0
         var i = ds.len() - 1
         while i >= 0 {
             let names = self.scopes[top].names
@@ -1055,12 +1190,32 @@ impl Interp {
             }
             self.scopes[top].names = nb
             self.scopes[top].vals = after
-            match self.ctrl { Ctrl.CExit => { return }, _ => {} }
+            match self.ctrl {
+                Ctrl.CExit => {
+                    if !self.testing { return }
+                    self.note_defer_failure()
+                },
+                _ => {},
+            }
             i = i - 1
         }
         self.ctrl = saved_ctrl
         self.ctrl_val = saved_val
         self.tail = saved_tail
+        self.rt_err = saved_err
+        self.exit_code = saved_code
+    }
+
+    // A deferred block of a `#test` case failed: noted for the report, and
+    // the unwinding goes on (D162).
+    fun note_defer_failure(var self) {
+        match self.rt_err {
+            Some(r) => { self.defer_errs.push(r.msg) },
+            None => { self.defer_errs.push(format("exited with status {}", self.exit_code)) },
+        }
+        self.ctrl = Ctrl.CNone
+        self.rt_err = None
+        self.exit_code = 0
     }
 
     // -- concurrency (D89, MYLA-139) --------------------------------------
@@ -1077,16 +1232,47 @@ impl Interp {
 
     // Run the program from its async entry `fi`, as the first task.
     fun run_async(var self, fi: int32) {
+        let v = self.run_as_first_task(fi, [])
+    }
+
+    // The tasks of an earlier run gone, for the next `#test` case of an
+    // async function (D162): each runs as a program of its own.
+    fun reset_tasks(var self) {
+        self.tasks = []
+        self.queue = []
+        self.qhead = 0
+        self.qlen = 0
+        self.cur = -1
+        self.frames = []
+        self.deferred = None
+        self.deferred_place = None
+        self.parked = false
+        self.yielding = false
+        self.entered_async = false
+        self.failing = false
+        self.fail_err = None
+        self.fail_code = 0
+        self.sleepers = []
+        self.deadlines = []
+        self.fired = []
+        self.fd_waits = []
+    }
+
+    // The async function `fi` called with `argv` as the first task, every
+    // task it starts run to its end: its result; a failure of the first task
+    // (its own, or a child's that ended the program, D97) is left in `ctrl`,
+    // `rt_err` and `exit_code` as a synchronous call leaves one.
+    fun run_as_first_task(var self, fi: int32, argv: [Value]) -> Value {
         self.defer = true
         self.deferred = None
-        self.enter_func(fi, [])
+        self.enter_func(fi, argv)
         self.defer = false
         match self.deferred {
             Some(d) => {
                 self.deferred = None
                 self.new_task(d.scopes, d.body)
             },
-            None => { return },
+            None => { return Value.VUnit },
         }
         self.scopes = []
         while true {
@@ -1133,7 +1319,9 @@ impl Interp {
             self.rt_err = self.tasks[0].err
             self.ctrl = Ctrl.CExit
             self.exit_code = self.tasks[0].code
+            return Value.VUnit
         }
+        return self.tasks[0].value
     }
 
     // A task running `body` with the variables `scopes`, ready to run.
@@ -1536,11 +1724,20 @@ impl Interp {
                 _ => {},
             }
         }
-        // its deferred blocks, once its children have ended (D135)
+        // its deferred blocks, once its children have ended (D135); a
+        // failing scope's too under a `#test` case (D162), the failure kept
         let failing = match self.frames[top].pend { Ctrl.CExit => true, _ => false }
         if !failing {
             self.run_defers()
             self.take_ctrl()
+        } else if self.testing {
+            self.ctrl = Ctrl.CExit
+            self.rt_err = self.frames[top].perr
+            self.exit_code = self.frames[top].pcode
+            self.run_defers()
+            self.ctrl = Ctrl.CNone
+            self.rt_err = None
+            self.exit_code = 0
         }
         self.pop_scope()
         self.frames[top].conts.pop()
@@ -3060,6 +3257,17 @@ impl Interp {
         }
     }
 
+    // A value as `{}` shows it: through its `format` when its type has one,
+    // else in its print form, a struct's or enum's as the report's (D162).
+    fun shown(var self, v: Value) -> str {
+        match v {
+            Value.VStruct(n, fns, fvs) => { if self.func_idx(format("{}.format", value_key(v))) < 0 { return without_module_ids(py_repr(v)) } },
+            Value.VEnum(en, vr, pl) => { if self.func_idx(format("{}.format", value_key(v))) < 0 { return without_module_ids(py_repr(v)) } },
+            _ => {},
+        }
+        return self.format_spec_value(v, None, "")
+    }
+
     fun user_format(var self, v: Value, spec: str) -> str {
         let fi = self.func_idx(format("{}.format", value_key(v)))
         let (rr, fs) = self.call_method(fi, v, [Value.VStr(spec)])
@@ -3171,7 +3379,8 @@ impl Interp {
             let fd = as_int(self.eval(args[0])) as int32
             let s = as_str(self.eval(args[1]))
             if self.stop() { return Value.VUnit }
-            write(fd, s)
+            if fd == 1 && self.testing { self.captured.push(s) }
+            else { write(fd, s) }
             return Value.VUnit
         }
         if nm == "__exit" {
@@ -3193,6 +3402,20 @@ impl Interp {
         }
         if nm == "__io_errno" { return Value.VInt(__io_errno() as int64) }
         if nm == "__getcwd" { return Value.VStr(__getcwd()) }
+        if nm == "__test_dir" {
+            // the case's scratch root, made on the first call (D162)
+            if self.test_root == "" && self.testing {
+                var base = __getenv("TMPDIR")
+                if base == "" { base = "/tmp" }
+                let root = format("{}/myla-test-{}", base, __clock_ns())
+                match make_dir_all(root) {
+                    Ok(()) => { self.test_root = root },
+                    Err(err) => { self.fail(e, format("test.temp_dir() could not create {}", root)) },
+                }
+            }
+            return Value.VStr(self.test_root)
+        }
+        if nm == "__test_program" { return Value.VStr(self.test_program) }
         if nm == "__getenv" { return Value.VStr(__getenv(as_str(self.eval(args[0])))) }
         if nm == "__sqrt" { return Value.VFloat(__sqrt(as_float(self.eval(args[0])))) }
         if is_raw_memory_primitive(nm) {
@@ -3540,7 +3763,12 @@ impl Interp {
     // A program's output; one the system won't take ends the program with
     // a runtime error, as natively (D153; a closed pipe ends it quietly in
     // `write`, D146).
-    fun emit(self, s: str) {
+    fun emit(var self, s: str) {
+        // a `#test` case's output is kept for its report (D162)
+        if self.testing {
+            self.captured.push(s)
+            return
+        }
         match write(1, s) {
             Ok(()) => {},
             Err(e) => {
@@ -4599,4 +4827,86 @@ fun hex2(v: int32) -> str {
     sb.append_byte(digits[(v / 16) % 16])
     sb.append_byte(digits[v % 16])
     return sb.build()
+}
+
+// The lines a case printed (`captured`, the pieces as they were written),
+// for the report; a last line without its newline counts.
+#test(["a\nb", "c\n"])[["a", "bc"]]
+#test([])[[]]
+#test(["\n"])[[""]]
+fun output_lines(pieces: [str]) -> [str] {
+    var sb = StringBuilder()
+    for p in pieces { sb.append(p) }
+    let text = sb.build()
+    var out: [str] = []
+    var line = StringBuilder()
+    var i = 0
+    while i < text.len() {
+        if text[i] == '\n' {
+            out.push(line.build())
+            line = StringBuilder()
+        } else {
+            line.append_byte(text[i])
+        }
+        i = i + 1
+    }
+    let rest = line.build()
+    if rest.len() > 0 { out.push(rest) }
+    return out
+}
+
+// How a call that was expected to fail ended instead: with its value, or,
+// for a function without a result, by returning.
+#test(Value.VInt(2), true)["got 2"]
+#test(Value.VUnit, false)["the call returned"]
+fun returned_text(v: Value, returns: bool) -> str {
+    if !returns { return "the call returned" }
+    return "got " + py_repr(v)
+}
+
+#test(["a", "b"])["a; b"]
+#test([])[""]
+fun join_parts(parts: [str]) -> str {
+    var sb = StringBuilder()
+    var i = 0
+    while i < parts.len() {
+        if i > 0 { sb.append("; ") }
+        sb.append(parts[i])
+        i = i + 1
+    }
+    return sb.build()
+}
+
+// `text` with the loader's module ids taken off the names in it:
+// `std$fs$IoError.NotFound` is `IoError.NotFound`.
+#test("std$fs$IoError.NotFound")["IoError.NotFound"]
+#test("P { x: a$Q { y: 1 } }")["P { x: Q { y: 1 } }"]
+#test("plain")["plain"]
+fun without_module_ids(text: str) -> str {
+    var sb = StringBuilder()
+    var word = StringBuilder()
+    var i = 0
+    while i < text.len() {
+        let c = text[i]
+        if c == '$' {
+            word = StringBuilder()
+        } else if is_name_byte(c) {
+            word.append_byte(c)
+        } else {
+            sb.append(word.build())
+            word = StringBuilder()
+            sb.append_byte(c)
+        }
+        i = i + 1
+    }
+    sb.append(word.build())
+    return sb.build()
+}
+
+#test('a')[true]
+#test('_')[true]
+#test('7')[true]
+#test(' ')[false]
+fun is_name_byte(c: uint8) -> bool {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'
 }

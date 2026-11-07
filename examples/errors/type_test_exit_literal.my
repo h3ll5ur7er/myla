@@ -1,0 +1,9 @@
+//~ type error: an expected exit is '[exit(n)]', the status an integer literal
+//~ span: exit("3")
+// An expected exit names its status as an integer literal (D162).
+from std.process import exit
+#test()[exit("3")]
+fun leaves() {
+    exit(3)
+}
+fun main() {}

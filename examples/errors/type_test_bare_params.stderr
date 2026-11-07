@@ -1,0 +1,5 @@
+type error: a bare '#test' marks a test function, which takes no parameters; a case of 'double' is '#test(args)[expected]'
+  --> examples/errors/type_test_bare_params.my:5:1
+  |
+5 | #test
+  | ^^^^^

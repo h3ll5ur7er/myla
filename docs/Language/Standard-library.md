@@ -270,6 +270,21 @@ The clock (D124, [[MYLA-230]]): monotonic, so the difference of two readings is 
 
 The interpreter reads the same clock; with `MYLA_TIME=virtual` it reads one that moves only when no task is ready, to the next sleeper's deadline, so tests of timing logic take no time and order exactly.
 
+## std.test
+
+What a test function needs beyond `#test` (D162, [[MYLA-304]], [[Language/Attributes-and-testing#test-functions]]). Every failure is a runtime error, as `assert`'s is: the case fails the way a program fails, and `myla test` is the one place that goes on after one.
+
+| Function | Meaning |
+| --- | --- |
+| `expect(cond: bool, msg: str = "expectation failed")` | Fails the case with `msg` unless `cond` holds |
+| `expect_eq<T: Eq + Format>(got: T, want: T)` | Fails with `expected <want>, got <got>` unless they are equal; `T` is a type `==` compares and `{}` shows: an integer, float, `char`, `bool`, `str`, or a type implementing `Eq` and `Format` |
+| `expect_ne<T: Eq + Format>(got: T, other: T)` | Fails with `expected two different values, both are <got>` when they are equal |
+| `fail(msg: str)` | Fails the case with `msg` |
+| `temp_dir() -> str` | A fresh, empty directory for the running case under `$TMPDIR` (else `/tmp`); each call gives another, and the runner removes them all when the case ends, passed or failed. A runtime error outside a case (`myla run`) |
+| `program() -> str` | The path of the project's program, which `myla test` builds before the files of `tests/` run ([[MYLA-306]]); a runtime error elsewhere |
+
+The printable primitives count as implementing `Format` for a bound (`expect_eq(3, 4)`); a value `==` doesn't compare (an `Option`, a `Result`, a list) is checked with `expect` on a `match`, or taken apart with `?` in a test function returning `Result<(), E>`.
+
 ## std.json
 
 JSON values, parsing and writing ([[MYLA-79]]), following Python's `json` module: the burn tests compare them on thousands of random and broken texts.
@@ -355,6 +370,7 @@ Not for programs: the runtime written in Myla ([[MYLA-162]], D117), which a nati
 | `print` and `std.io.write` | `print_str`, `print_int`, …, `write`: a line and its newline in one `writev`, so the lines of tasks on other workers don't interleave; a write error is D153's |
 | `std.fs` | `read_file`, `write_file`, `list_dir`, `stat`, `mkdir`, `unlink`, `rmdir`, `rename`, `getcwd` (a path with a NUL byte is EINVAL, D153) |
 | `std.io`'s reader, `std.process.args` and `env` | `read`, `poll`, `args`, `getenv` |
+| `std.test` | `test_dir` and `test_program`: the running case's scratch root and the program under test, "" outside `myla test` (natively, the environment variables `MYLA_TEST_DIR` and `MYLA_TEST_PROGRAM` the harness of `myla test --native` sets) |
 | `std.process.run` and `Command` | `run`, `run_with`, `spawn`, `spawn_with`, `reap`, `kill`, `close` (fork, exec, both outputs read as they come through poll, wait) |
 | the heap | `alloc`, `free` and their tasks' forms (D157) |
 | tasks, timers, the reactor | the executor, `cancel_after`, the timers and the descriptor watches ([[Language/Concurrency]]) |

@@ -14,6 +14,7 @@ from std.io import write, eprintln
 from std.fs import exists, is_dir, list_dir, make_dir_all, write_to_file, current_dir, remove_dir_all
 from .loader import LoadOptions
 from .driver import cmd_build, cmd_interp, own_tests, load_and_check
+from .interp import TestOptions
 from .project import find_manifest, loader_packages, relative_path, parent_dir, name_error, Project
 from .fetch import checked_out_project, fetch
 
@@ -117,12 +118,13 @@ pub fun project_run(base: LoadOptions, prog_args: [str]) -> int32 {
         Some(h) => h
         None => { return 1 }
     }
-    return cmd_interp(shown(h, h.project.root.dir + "/src/main.my"), options(h, base), false, prog_args)
+    return cmd_interp(shown(h, h.project.root.dir + "/src/main.my"), options(h, base), prog_args)
 }
 
-// `myla test`: the `#test` cases of every file under `src/`, each file's own
-// once, a block of results per file that has any, and the total.
-pub fun project_test(base: LoadOptions) -> int32 {
+// `myla test [--only <text>] [--list]`: the `#test` cases of every file
+// under `src/`, each file's own once, a block of results per file that has
+// any, and the total.
+pub fun project_test(base: LoadOptions, sel: TestOptions) -> int32 {
     let h = match locate() {
         Ok(h) => h
         Err(msg) => {
@@ -137,7 +139,7 @@ pub fun project_test(base: LoadOptions) -> int32 {
     var broken = 0
     for path in source_files(h.project.root.dir + "/src") {
         let file = shown(h, path)
-        match own_tests(file, opts) {
+        match own_tests(file, opts, sel) {
             Ok(r) => {
                 if r.total > 0 {
                     write(1, "== " + file + "\n")
@@ -154,7 +156,13 @@ pub fun project_test(base: LoadOptions) -> int32 {
         }
     }
     if total == 0 {
+        if sel.only != "" {
+            write(1, format("no #test cases match '{}'.\n", sel.only))
+            return 1
+        }
         write(1, "no #test cases found.\n")
+    } else if sel.list {
+        return 0
     } else {
         write(1, format("\n{}/{} passed in {}.\n", passed, total, count(files, "file")))
     }

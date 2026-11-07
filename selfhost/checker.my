@@ -19,7 +19,7 @@ from std.fmt import parse_spec, spec_need
 from .ast import Program, Decl, DeclKind, FunData, Param, TypeParam, Field, Variant
 from .ast import Attribute, TypeExpr, TypeKind, Expr, ExprKind, FieldInit, MapEntry
 from .ast import Stmt, StmtKind, Block, ElseTail, BindElem, ExprOrBlock
-from .ast import Pattern, PatternKind, FieldPat, MatchArm
+from .ast import Pattern, PatternKind, FieldPat, MatchArm, Expected, failure_callee, expected_failure
 from .tokens import Note, SrcSpan, no_span, MAX_ERRORS
 
 // =========================================================================
@@ -764,17 +764,19 @@ fun is_arith_op(op: str) -> bool {
     return match arith_trait(op) { Some(x) => true, None => false }
 }
 
-// implicit primitive operator-trait defaults (D52)
+// implicit primitive operator-trait defaults (D52); the printable
+// primitives are `Format` too, as a format hole shows them (D162)
+#test(Type.TInt(32, true), "Format")[true]
 #test(Type.TInt(32, true), "Eq")[true]
 #test(Type.TInt(32, true), "Add")[true]
 #test(Type.TStruct("P", []), "Eq")[false]
 fun primitive_default_trait(t: Type, trnm: str) -> bool {
     return match t {
-        Type.TInt(w, s) => trnm == "Add" || trnm == "Sub" || trnm == "Mul" || trnm == "Div" || trnm == "Rem" || trnm == "Eq" || trnm == "Ord",
-        Type.TFloat(w) => trnm == "Add" || trnm == "Sub" || trnm == "Mul" || trnm == "Div" || trnm == "Rem" || trnm == "Eq" || trnm == "Ord",
-        Type.TChar => trnm == "Eq" || trnm == "Ord",
-        Type.TBool => trnm == "Eq",
-        Type.TStr => trnm == "Add" || trnm == "Eq",
+        Type.TInt(w, s) => trnm == "Add" || trnm == "Sub" || trnm == "Mul" || trnm == "Div" || trnm == "Rem" || trnm == "Eq" || trnm == "Ord" || trnm == "Format",
+        Type.TFloat(w) => trnm == "Add" || trnm == "Sub" || trnm == "Mul" || trnm == "Div" || trnm == "Rem" || trnm == "Eq" || trnm == "Ord" || trnm == "Format",
+        Type.TChar => trnm == "Eq" || trnm == "Ord" || trnm == "Format",
+        Type.TBool => trnm == "Eq" || trnm == "Format",
+        Type.TStr => trnm == "Add" || trnm == "Eq" || trnm == "Format",
         _ => false,
     }
 }
@@ -790,7 +792,7 @@ fun is_builtin_op_trait(name: str) -> bool {
 #test("B")[false]
 #test("len")[true]
 fun is_builtin_func(name: str) -> bool {
-    return name == "print" || name == "assert" || name == "panic" || name == "unreachable" || name == "len" || name == "push" || name == "pop" || name == "contains" || name == "remove" || name == "keys" || name == "format" || name == "chars" || name == "StringBuilder" || name == "append" || name == "append_byte" || name == "build" || name == "__write" || name == "__exit" || name == "__args" || name == "__read_file" || name == "__io_errno" || name == "__run" || name == "__run_stderr" || name == "__run_exit_code" || name == "__run_signal" || name == "__run_errno" || name == "__write_file" || name == "__read" || name == "__poll" || name == "__list_dir" || name == "__mkdir" || name == "__stat" || name == "__getcwd" || name == "__getenv" || name == "__sqrt" || name == "__f64_bits" || name == "__f64_from_bits" || name == "__unlink" || name == "__rmdir" || name == "__rename" || name == "__task_cancelled" || name == "__yield" || name == "__sleep" || name == "__clock_ns" || name == "__sleep_ns" || name == "__cancel_after" || name == "__disarm" || name == "__wait_readable" || name == "__wait_either" || name == "__spawn" || name == "__run_with" || name == "__spawn_with" || name == "__reap" || name == "__kill" || name == "__close" || is_raw_memory_primitive(name)
+    return name == "print" || name == "assert" || name == "panic" || name == "unreachable" || name == "len" || name == "push" || name == "pop" || name == "contains" || name == "remove" || name == "keys" || name == "format" || name == "chars" || name == "StringBuilder" || name == "append" || name == "append_byte" || name == "build" || name == "__write" || name == "__exit" || name == "__args" || name == "__read_file" || name == "__io_errno" || name == "__run" || name == "__run_stderr" || name == "__run_exit_code" || name == "__run_signal" || name == "__run_errno" || name == "__write_file" || name == "__read" || name == "__poll" || name == "__list_dir" || name == "__mkdir" || name == "__stat" || name == "__getcwd" || name == "__getenv" || name == "__test_dir" || name == "__test_program" || name == "__sqrt" || name == "__f64_bits" || name == "__f64_from_bits" || name == "__unlink" || name == "__rmdir" || name == "__rename" || name == "__task_cancelled" || name == "__yield" || name == "__sleep" || name == "__clock_ns" || name == "__sleep_ns" || name == "__cancel_after" || name == "__disarm" || name == "__wait_readable" || name == "__wait_either" || name == "__spawn" || name == "__run_with" || name == "__spawn_with" || name == "__reap" || name == "__kill" || name == "__close" || is_raw_memory_primitive(name)
 }
 
 // The raw-memory primitives the runtime written in Myla needs (MYLA-162's
@@ -804,6 +806,21 @@ pub fun is_raw_memory_primitive(name: str) -> bool {
 // The error for a program's call of the raw-memory primitive `name`.
 fun raw_memory_call(at: Expr, name: str) -> CheckErr {
     return CheckErr { line: at.line, col: at.col, sp: at.sp, msg: format("'{}' reads or writes raw memory: only the standard library may call it", name), decl: -1, notes: [Note { label: "help", msg: "the standard library's types and functions do what it does, safely", line: 0, col: 0, sp: no_span() }] }
+}
+
+// Whether a test function may have the result `r` (D162): none, `()`, or
+// a `Result<(), E>`.
+#test(None)[true]
+#test(Some(Type.TInt(32, true)))[false]
+#test(Some(Type.TEnum("Result", [Type.TTuple([]), Type.TStr])))[true]
+#test(Some(Type.TEnum("Result", [Type.TInt(32, true), Type.TStr])))[false]
+fun is_test_result(r: Option<Type>) -> bool {
+    return match r {
+        None => true,
+        Some(Type.TTuple(ts)) => ts.len() == 0,
+        Some(Type.TEnum(n, args)) => n == "Result" && args.len() == 2 && is_unit(args[0]),
+        Some(x) => false,
+    }
 }
 
 #test("sum")[false]
@@ -5755,6 +5772,7 @@ impl Checker {
             }
             if attr.name != "test" { return Err(terr_at(attr.line, attr.col, attr.sp, format("attribute '#{}' can't be applied to a method (a method takes only '#test' and '#allow')", attr.name))) }
             if self.actors.contains(key) { return Err(terr_at(attr.line, attr.col, attr.sp, "'#test' can't run an actor method (its receiver is an actor, not a value)")) }
+            if fd.is_async { return Err(terr_at(attr.line, attr.col, attr.sp, "'#test' can't run an async method (test it through an async test function, D162)")) }
             if fd.type_params.len() > 0 { return Err(terr_at(attr.line, attr.col, attr.sp, "attribute '#test' cannot be applied to a generic method (it has no single concrete instantiation)")) }
             self.check_test_attr(fd, attr)?
         }
@@ -5790,11 +5808,23 @@ impl Checker {
         return Ok(0)
     }
 
+    // A case, `#test(args)[expected]`, or a test function under a bare
+    // `#test` (D162): a function without parameters, with no result or a
+    // `Result<(), E>`. An expected value may be `panic("message")` or
+    // `exit(n)`, the failure the call must end in.
     fun check_test_attr(var self, fd: FunData, attr: Attribute) -> Result<int32, CheckErr> {
-        if fd.is_async { return Err(terr_at(attr.line, attr.col, attr.sp, "'#test' can't run an async function")) }
         let idx = self.func_idx(fd.name)
         let sig = self.functions[idx]
-        let outs = match attr.outputs { Some(x) => x, None => { return Err(terr_at(attr.line, attr.col, attr.sp, "'#test' requires an expected result, e.g. #test(args)[expected]")) } }
+        let outs = match attr.outputs {
+            Some(x) => x,
+            None => {
+                if attr.args.len() > 0 { return Err(terr_at(attr.line, attr.col, attr.sp, "'#test' requires an expected result, e.g. #test(args)[expected]")) }
+                if sig_has_error(sig.params, sig.ret) { return Err(poisoned()) }
+                if sig.params.len() > 0 { return Err(terr_at(attr.line, attr.col, attr.sp, format("a bare '#test' marks a test function, which takes no parameters; a case of '{}' is '#test(args)[expected]'", fd.name))) }
+                if !is_test_result(sig.ret) { return Err(terr_at(attr.line, attr.col, attr.sp, format("a test function has no result or a 'Result<(), E>'; a case of '{}' is '#test()[expected]'", fd.name))) }
+                return Ok(0)
+            },
+        }
         if attr.args.len() != sig.params.len() {
             var msg = format("'#test' expects {} argument(s), got {}", sig.params.len(), attr.args.len())
             // a case gives every argument, a default's too (D136, MYLA-293)
@@ -5815,6 +5845,20 @@ impl Checker {
         }
         if outs.len() != 1 { self.pop_scope()
             return Err(terr_at(attr.line, attr.col, attr.sp, "'#test' expects exactly one expected value in [...]")) }
+        // an expected failure, `[panic("message")]` or `[exit(n)]` (D162)
+        match failure_callee(outs[0]) {
+            Some(callee) => {
+                self.pop_scope()
+                return match expected_failure(outs[0]) {
+                    Expected.Value => {
+                        if callee == "panic" { Err(terr_at(outs[0].line, outs[0].col, outs[0].sp, "an expected failure is '[panic(\"message\")]', the message a string literal")) }
+                        else { Err(terr_at(outs[0].line, outs[0].col, outs[0].sp, "an expected exit is '[exit(n)]', the status an integer literal")) }
+                    },
+                    _ => Ok(0),
+                }
+            },
+            None => {},
+        }
         // a function without a result gives `()`, so its case says `[()]` (D138)
         let rt = match sig.ret { Some(x) => x, None => Type.TTuple([]) }
         let ot = self.expect_value(outs[0], Some(rt))?
@@ -6274,6 +6318,12 @@ impl Checker {
         }
         if name == "__getcwd" {
             if args.len() > 0 { return Err(terr_at(e.line, e.col, e.sp, "__getcwd() takes no arguments")) }
+            return Ok(Some(Type.TStr))
+        }
+        // the running case's scratch root and the project's program under
+        // test (std.test, D162), "" outside `myla test`
+        if name == "__test_dir" || name == "__test_program" {
+            if args.len() > 0 { return Err(terr_at(e.line, e.col, e.sp, format("{}() takes no arguments", name))) }
             return Ok(Some(Type.TStr))
         }
         // the monotonic clock in nanoseconds, and a sleep of the thread (D124,
