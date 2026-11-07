@@ -3823,9 +3823,10 @@ impl Checker {
     // Whether variant `variant` of the enum `name` leaves one of the enum's
     // type parameters out of its payload, so that a value of it doesn't say
     // the whole type (`Err(e)` of `Result<T, E>`, `None`).
-    #test(checker_on("[int]"), "Option", "None")[true]
-    #test(checker_on("[int]"), "Option", "Some")[false]
-    #test(checker_on("[int]"), "Result", "Ok")[true]
+    #test(checker_on("enum Opt<T> { Has(T), Nothing }"), "Opt", "Nothing")[true]
+    #test(checker_on("enum Opt<T> { Has(T), Nothing }"), "Opt", "Has")[false]
+    #test(checker_on("enum Res<T, E> { Good(T), Bad(E) }"), "Res", "Good")[true]
+    #test(checker_on("enum Res<T, E> { Good(T), Bad(E) }"), "Res", "Missing")[false]
     fun variant_leaves_params(self, name: str, variant: str) -> bool {
         let ei = self.enum_idx(name)
         if ei < 0 { return false }
