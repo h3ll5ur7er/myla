@@ -169,6 +169,19 @@ Timed interleaved against the same sources built with the stack convention (7 ru
 - **The self-compile** (the same compiler source built both ways): 0.95% fewer instructions, the same time, peak memory 135 → 131 MB.
 - **Still open:** fib, Ackermann and n-body (4–8× C) are calls and loops the optimizer of D117 (3) would improve ([[MYLA-251]], D123); binary trees' and quicksort's memory (2.4×, 4.4× C's) come from the allocator's holding and copies.
 
+## Progress: map removal (2026-11-07)
+
+[[MYLA-310]] added a thirteenth program, `map_remove`: n keys inserted and all removed, then a working set of 1,000 live keys sliding over 4n keys, with replaced values and keys removed and inserted again, the keys' final order in the result. The C versions keep the insertion order as Python's dict does (entries in order, an index of their positions, compaction). Its baseline, taken before the fix, is `benchmarks/results/2026-11-07-map-remove-before.json`, the run after it `2026-11-07-map-remove-after.json`.
+
+| `map_remove` (32,000) | Before | After | C, gcc `-O2` | C with Myla's semantics |
+|---|---:|---:|---:|---:|
+| Time | 16,248 ms | 15 ms | 5 ms | 7 ms |
+| Instructions (at 4,000) | 4,361 M | 14.9 M | 5.3 M | 5.8 M |
+
+- **Before**, each `remove` rebuilt the whole table to keep the insertion ranks dense, so emptying a map was quadratic: 41 % of the instructions were the rebuild's `map_set_slot` and 29 % its `zero_bytes`.
+- **After**, a removal leaves a tombstone and a gap in the ranks; `keys` and `for` skip the gaps, and an insert compacts the table when the slots used since the last compaction reach 3/4 of it. The program is 1,100× as fast, 2.2× C with Myla's semantics.
+- **Elsewhere:** word frequency, whose map only grows, runs in the same time natively (603 and 605 ms, the median of 9 interleaved runs; 0.6 % more instructions for the next-rank word) and 3× as fast interpreted (8.3 → 2.8 s at 100,000 words), whose map lookups were linear before.
+
 ## How the first round went
 
 The first round (fib, the sieve, binary trees) checked the method and needed two additions to `run.py`: user and system time and page faults, and names for valgrind's addresses. Instruction counts alone hid both large gaps of the round: the sieve's page faults, and binary trees running C's instruction count in 5.7× C's time. The second turned out to be `rep movsq` copying the three-word `Tree` at every match: a microcoded instruction that starts slowly, and which callgrind counts as one. Copying up to 8 words with moves fixed it ([[MYLA-246]]).

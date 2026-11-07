@@ -20,7 +20,6 @@ The targets are x86-64 and aarch64 Linux and wasm32 on WASI; macOS and Windows a
 - wasm32: a list or string stops at 2^26 elements with `out of memory`, far below the 4 GiB the memory allows: big cells round to the next power of two and freed big cells aren't reused across classes ([[MYLA-284]]).
 - The reactor's protocols have run only under qemu, which can't reorder memory ([[MYLA-301]]); the burn suite can't run on aarch64 hardware, `wasmtime` and the browser page are tested nowhere in CI ([[MYLA-297]]).
 - The two backends repeat seven helpers and the WASI import numbering ([[MYLA-298]]).
-- `m.remove(k)` rebuilds the whole table, so emptying a map is quadratic: 16,000 keys take 3.2 s natively, 13.6 s in the interpreter ([[MYLA-310]], found by [[Project/AoC-2015-2021]]).
 
 ## Concurrency
 
