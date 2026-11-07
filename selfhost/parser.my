@@ -34,22 +34,23 @@ pub struct Parser {
     stopped: bool,              // MAX_ERRORS were recorded (Python's _Stop)
     depth: int32,               // nesting, up to MAX_NESTING (MYLA-182)
     stmt_match: bool,           // the next `match` starts a statement: its arms give no value (MYLA-222)
+    skip_tests: bool,           // `#test` cases are skipped, not parsed (an implicit module's, MYLA-320)
 }
 
 // How deep expressions, types, blocks and patterns may nest (MYLA-182; the
 // Python parser's MAX_NESTING): past it, a parse error, not a stack overflow.
 const MAX_NESTING: int32 = 256
 
-#test([])[Parser { toks: [], pos: 0, allow_struct_lit: true, next_id: 0, errs: [], pending: None, resume: 0, unwinding: false, stopped: false, depth: 0, stmt_match: false }]
+#test([])[Parser { toks: [], pos: 0, allow_struct_lit: true, next_id: 0, errs: [], pending: None, resume: 0, unwinding: false, stopped: false, depth: 0, stmt_match: false, skip_tests: false }]
 pub fun new_parser(toks: [Token]) -> Parser {
-    return Parser { toks: toks, pos: 0, allow_struct_lit: true, next_id: 0, errs: [], pending: None, resume: 0, unwinding: false, stopped: false, depth: 0, stmt_match: false }
+    return Parser { toks: toks, pos: 0, allow_struct_lit: true, next_id: 0, errs: [], pending: None, resume: 0, unwinding: false, stopped: false, depth: 0, stmt_match: false, skip_tests: false }
 }
 
 // A parser at the first token of `src`, the receiver of `#test` cases of the
 // parser's methods (MYLA-184): one without tokens when `src` doesn't lex.
-#test("a")[Parser { toks: [Token { kind: TokenKind.IDENT, lexeme: "a", line: 1, column: 1, eline: 1, ecol: 2, ival: 0, suffix: "", big: "" }, Token { kind: TokenKind.EOF, lexeme: "", line: 1, column: 2, eline: 1, ecol: 2, ival: 0, suffix: "", big: "" }], pos: 0, allow_struct_lit: true, next_id: 0, errs: [], pending: None, resume: 0, unwinding: false, stopped: false, depth: 0, stmt_match: false }]
-#test("d2")[Parser { toks: [Token { kind: TokenKind.IDENT, lexeme: "d2", line: 1, column: 1, eline: 1, ecol: 3, ival: 0, suffix: "", big: "" }, Token { kind: TokenKind.EOF, lexeme: "", line: 1, column: 3, eline: 1, ecol: 3, ival: 0, suffix: "", big: "" }], pos: 0, allow_struct_lit: true, next_id: 0, errs: [], pending: None, resume: 0, unwinding: false, stopped: false, depth: 0, stmt_match: false }]
-#test("right")[Parser { toks: [Token { kind: TokenKind.IDENT, lexeme: "right", line: 1, column: 1, eline: 1, ecol: 6, ival: 0, suffix: "", big: "" }, Token { kind: TokenKind.EOF, lexeme: "", line: 1, column: 6, eline: 1, ecol: 6, ival: 0, suffix: "", big: "" }], pos: 0, allow_struct_lit: true, next_id: 0, errs: [], pending: None, resume: 0, unwinding: false, stopped: false, depth: 0, stmt_match: false }]
+#test("a")[Parser { toks: [Token { kind: TokenKind.IDENT, lexeme: "a", line: 1, column: 1, eline: 1, ecol: 2, ival: 0, suffix: "", big: "" }, Token { kind: TokenKind.EOF, lexeme: "", line: 1, column: 2, eline: 1, ecol: 2, ival: 0, suffix: "", big: "" }], pos: 0, allow_struct_lit: true, next_id: 0, errs: [], pending: None, resume: 0, unwinding: false, stopped: false, depth: 0, stmt_match: false, skip_tests: false }]
+#test("d2")[Parser { toks: [Token { kind: TokenKind.IDENT, lexeme: "d2", line: 1, column: 1, eline: 1, ecol: 3, ival: 0, suffix: "", big: "" }, Token { kind: TokenKind.EOF, lexeme: "", line: 1, column: 3, eline: 1, ecol: 3, ival: 0, suffix: "", big: "" }], pos: 0, allow_struct_lit: true, next_id: 0, errs: [], pending: None, resume: 0, unwinding: false, stopped: false, depth: 0, stmt_match: false, skip_tests: false }]
+#test("right")[Parser { toks: [Token { kind: TokenKind.IDENT, lexeme: "right", line: 1, column: 1, eline: 1, ecol: 6, ival: 0, suffix: "", big: "" }, Token { kind: TokenKind.EOF, lexeme: "", line: 1, column: 6, eline: 1, ecol: 6, ival: 0, suffix: "", big: "" }], pos: 0, allow_struct_lit: true, next_id: 0, errs: [], pending: None, resume: 0, unwinding: false, stopped: false, depth: 0, stmt_match: false, skip_tests: false }]
 pub fun parser_on(src: str) -> Parser {
     return match lex(src) {
         Ok(toks) => new_parser(toks),
@@ -633,6 +634,13 @@ impl Parser {
         while self.check(TokenKind.HASH) {
             let hash_tok = self.advance()
             let name = self.expect(TokenKind.IDENT, "attribute name after '#'").lexeme
+            if self.skip_tests && name == "test" {
+                // its tokens skipped, the case left out
+                if self.match1(TokenKind.LPAREN) { self.skip_group() }
+                if self.match1(TokenKind.LBRACKET) { self.skip_group() }
+                self.skip_newlines()
+                continue
+            }
             var args: [Expr] = []
             var outputs: Option<[Expr]> = None
             if self.match1(TokenKind.LPAREN) {
@@ -651,6 +659,19 @@ impl Parser {
             self.skip_newlines()
         }
         return attrs
+    }
+
+    // Skip to the bracket that closes the one just consumed, past it
+    // (brackets nest; an f-string's are balanced too).
+    #test(parser_on("1, (2)) x"))[()]
+    fun skip_group(var self) {
+        var depth = 1
+        while depth > 0 && !self.check(TokenKind.EOF) {
+            let k = self.peek_kind()
+            if k == TokenKind.LPAREN || k == TokenKind.LBRACKET || k == TokenKind.LBRACE { depth += 1 }
+            if k == TokenKind.RPAREN || k == TokenKind.RBRACKET || k == TokenKind.RBRACE { depth -= 1 }
+            self.skip()
+        }
     }
 
     #test(parser_on("[int]"))[[]]
@@ -2422,8 +2443,15 @@ pub struct Parsed { program: Program, next_id: int32 }
 // type tables are keyed by node id (MYLA-30).
 // Err: the parse errors, in the order found (MYLA-65, D80).
 pub fun parse_ids(toks: [Token], first_id: int32) -> Result<Parsed, [Diag]> {
+    return parse_ids_with(toks, first_id, false)
+}
+
+// parse_ids, skipping the `#test` cases when `skip_tests`: a module whose
+// cases nothing runs (an implicit module of the standard library, MYLA-320).
+pub fun parse_ids_with(toks: [Token], first_id: int32, skip_tests: bool) -> Result<Parsed, [Diag]> {
     var p = new_parser(toks)
     p.next_id = first_id
+    p.skip_tests = skip_tests
     let prog = p.parse_program()
     if p.errs.len() > 0 { return Err(p.errs) }
     return Ok(Parsed { program: prog, next_id: p.next_id })
@@ -2435,8 +2463,14 @@ pub fun parse_ids(toks: [Token], first_id: int32) -> Result<Parsed, [Diag]> {
 #test("d2", 50)[Err([Diag { kind: "parse error", line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 3 }, msg: "expected a declaration (struct/actor/fun/enum/typealias/const/trait/impl/import), found 'd2'" }])]
 #test("right", 24)[Err([Diag { kind: "parse error", line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 6 }, msg: "expected a declaration (struct/actor/fun/enum/typealias/const/trait/impl/import), found 'right'" }])]
 pub fun parse_source_all(src: str, first_id: int32) -> Result<Parsed, [Diag]> {
+    return parse_source_with(src, first_id, false)
+}
+
+// parse_source_all, skipping the `#test` cases when `skip_tests`.
+#test("#test(1)[2]\nfun f(x: int) -> int { return x }", 0, true)[Ok(Parsed { program: Program { decls: [Decl { id: 4, line: 2, col: 1, sp: SrcSpan { sline: 2, scol: 1, eline: 2, ecol: 34 }, kind: DeclKind.FunDecl(FunData { line: 2, col: 1, sp: SrcSpan { sline: 2, scol: 1, eline: 2, ecol: 34 }, name: "f", params: [Param { line: 2, col: 7, sp: SrcSpan { sline: 2, scol: 7, eline: 2, ecol: 13 }, name: "x", ty: Some(TypeExpr { id: 0, line: 2, col: 10, sp: SrcSpan { sline: 2, scol: 10, eline: 2, ecol: 13 }, kind: TypeKind.TRef("int", []) }), default: None }], ret_type: Some(TypeExpr { id: 1, line: 2, col: 18, sp: SrcSpan { sline: 2, scol: 18, eline: 2, ecol: 21 }, kind: TypeKind.TRef("int", []) }), body: Some(Block { line: 2, col: 22, sp: SrcSpan { sline: 2, scol: 22, eline: 2, ecol: 34 }, stmts: [Stmt { id: 3, line: 2, col: 24, sp: SrcSpan { sline: 2, scol: 24, eline: 2, ecol: 32 }, kind: StmtKind.ReturnS(Some(Expr { id: 2, line: 2, col: 31, sp: SrcSpan { sline: 2, scol: 31, eline: 2, ecol: 32 }, kind: ExprKind.Name("x") }), false) }] }), attributes: [], type_params: [], receiver: None, is_pub: false, is_async: false }) }] }, next_id: 5 })]
+pub fun parse_source_with(src: str, first_id: int32, skip_tests: bool) -> Result<Parsed, [Diag]> {
     return match lex(src) {
-        Ok(toks) => parse_ids(toks, first_id),
+        Ok(toks) => parse_ids_with(toks, first_id, skip_tests),
         Err(d) => Err([d]),
     }
 }

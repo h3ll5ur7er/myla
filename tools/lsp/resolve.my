@@ -18,7 +18,7 @@ from std.fs import read_to_string
 from ...selfhost.lexer import lex
 from ...selfhost.parser import parse_source
 from ...selfhost.tokens import Token, TokenKind, no_span
-from ...selfhost.loader import normalize, LoadOptions, load_options, source_text, implicit_modules, in_stdlib
+from ...selfhost.loader import normalize, LoadOptions, load_options, source_text, implicit_modules, is_std_module
 from ...selfhost.ast import Program, Decl, DeclKind, FunData, TypeExpr, TypeKind, Expr, ExprKind, ExprOrBlock, Stmt, StmtKind, Block, ElseTail, Pattern, PatternKind, MatchArm, Param, BindElem, TypeParam, Attribute, ImportPath, ImportItem, FieldInit, FieldPat
 from .symbols import Symbol, SymKind, Range, outline, outline_parsed, type_str
 from .text import LineIndex, line_index, code_points, Pos
@@ -847,7 +847,7 @@ impl Resolver {
     // The methods of the standard library's modules every program sees
     // without an import (MYLA-320), for a file outside the standard library.
     fun implicit_methods(var self) {
-        if self.opts.stdlib_root == "" || in_stdlib(self.path, self.opts.stdlib_root) { return }
+        if self.opts.stdlib_root == "" || is_std_module(self.path, self.opts.stdlib_root) { return }
         for name in implicit_modules() {
             let p = ImportPath { line: 0, col: 0, sp: no_span(), dots: 0, segments: ["std", name] }
             match self.module_file(p) {
