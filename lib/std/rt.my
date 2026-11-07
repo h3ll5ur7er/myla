@@ -564,6 +564,10 @@ pub fun args() -> [str] {
 // --- numbers as text ---------------------------------------------------------
 
 // How many decimal digits `u` has.
+#test(0u64)[1]
+#test(9u64)[1]
+#test(10u64)[2]
+#test(18446744073709551615u64)[20]
 fun digit_count(u: uint64) -> int64 {
     var n: int64 = 1
     var p: uint64 = 10
@@ -1067,6 +1071,8 @@ fun write_failed(code: int64) {
 }
 
 // What the errno `code` of a failed write means (as `strerror` says it).
+#test(28i64)["no space left on device"]
+#test(71i64)["errno 71"]
 fun errno_text(code: int64) -> str {
     if code == 28 {
         return "no space left on device"
@@ -2534,6 +2540,8 @@ fun watchers_of(fd: int64) -> [int64] {
     return out
 }
 
+#test([3i64, 5i64], 5i64)[true]
+#test([], 1i64)[false]
 fun has_word(xs: [int64], x: int64) -> bool {
     for y in xs {
         if y == x {

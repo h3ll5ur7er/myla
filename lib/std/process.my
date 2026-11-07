@@ -201,11 +201,31 @@ pub struct Command {
     has_input: bool,      // else this process's stdin
     env_mode: str,        // "": this process's environment; "keep": with `changes`; "clear": only theirs
     changes: [str],       // `NAME=value` sets NAME, a bare `NAME` removes it
+    bad_name: bool,       // an `env` or `env_remove` name no variable can have
+}
+
+// Whether an environment variable can be called `name`: not empty, without
+// `=` (which ends the name) or a NUL byte (which ends the entry).
+#test("PATH")[true]
+#test("A=B")[false]
+#test("")[false]
+fun env_name_ok(name: str) -> bool {
+    if name.len() == 0 {
+        return false
+    }
+    var i = 0
+    while i < name.len() {
+        if name[i] == '=' || name[i] == 0 {
+            return false
+        }
+        i += 1
+    }
+    return true
 }
 
 // Begin building a command for `program`. `argv[0]` is seeded with `program`.
 pub fun command(program: str) -> Command {
-    return Command { program: program, argv: [program], dir: "", input: "", has_input: false, env_mode: "", changes: [] }
+    return Command { program: program, argv: [program], dir: "", input: "", has_input: false, env_mode: "", changes: [], bad_name: false }
 }
 
 impl Command {
@@ -234,8 +254,14 @@ impl Command {
     }
 
     // The command run with the environment variable `name` set to `value`.
+    // A name no variable can have (empty, or holding `=` or a NUL byte)
+    // makes `output` fail with `SpawnError.Other(22)` (EINVAL) and run
+    // nothing (MYLA-295).
     fun env(self, name: str, value: str) -> Command {
         var c = self
+        if !env_name_ok(name) {
+            c.bad_name = true
+        }
         c.changes.push(name + "=" + value)
         if c.env_mode == "" {
             c.env_mode = "keep"
@@ -243,9 +269,13 @@ impl Command {
         return c
     }
 
-    // The command run without the environment variable `name`.
+    // The command run without the environment variable `name` (a name as
+    // for `env`).
     fun env_remove(self, name: str) -> Command {
         var c = self
+        if !env_name_ok(name) {
+            c.bad_name = true
+        }
         c.changes.push(name)
         if c.env_mode == "" {
             c.env_mode = "keep"
@@ -286,11 +316,17 @@ impl Command {
 
     // Spawn the command, wait for it, and collect its output.
     fun output(self) -> Result<Output, SpawnError> {
+        if self.bad_name {
+            return Err(SpawnError.Other(22))
+        }
         return collect(self.program, self.argv, self.opts())
     }
 
     // `output`, the task waiting as `run_async` does.
     async fun output_async(self) -> Result<Output, SpawnError> {
+        if self.bad_name {
+            return Err(SpawnError.Other(22))
+        }
         return await collect_async(self.program, self.argv, self.opts())
     }
 }
