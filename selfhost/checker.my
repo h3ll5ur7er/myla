@@ -782,7 +782,8 @@ fun primitive_default_trait(t: Type, trnm: str) -> bool {
         Type.TFloat(w) => trnm == "Add" || trnm == "Sub" || trnm == "Mul" || trnm == "Div" || trnm == "Rem" || trnm == "Eq" || trnm == "Ord" || trnm == "Format",
         Type.TChar => trnm == "Eq" || trnm == "Ord" || trnm == "Format" || trnm == "Hash",
         Type.TBool => trnm == "Eq" || trnm == "Format" || trnm == "Hash",
-        Type.TStr => trnm == "Add" || trnm == "Eq" || trnm == "Format" || trnm == "Hash",
+        // a string's `<` is byte-wise (MYLA-318)
+        Type.TStr => trnm == "Add" || trnm == "Eq" || trnm == "Ord" || trnm == "Format" || trnm == "Hash",
         _ => false,
     }
 }
@@ -3497,7 +3498,8 @@ impl Checker {
             if is_int(lt) || is_float(lt) { hint = Some(lt) }
             let rt = self.expect_value(r, hint)?
             let common = self.unify(l, lt, r, rt)?
-            if !(is_int(common) || is_float(common) || is_char(common)) { return Err(terr_at(e.line, e.col, e.sp, "comparison requires numeric or char operands")) }
+            // strings byte by byte, as list_dir sorts them (MYLA-318)
+            if !(is_int(common) || is_float(common) || is_char(common) || is_str(common)) { return Err(terr_at(e.line, e.col, e.sp, "comparison requires numeric or char operands")) }
             return Ok(Type.TBool)
         }
         if op == "<<" || op == ">>" {
@@ -3531,6 +3533,7 @@ impl Checker {
             var hint2: Option<Type> = None
             if is_int(lt) || is_float(lt) { hint2 = Some(lt) }
             let rt = self.expect_value(r, hint2)?
+            match self.char_arith(e, op, l, lt, rt)? { Some(t) => { return Ok(t) }, None => {} }
             let common = self.unify(l, lt, r, rt)?
             if !(is_int(common) || is_float(common)) { return Err(terr_at(e.line, e.col, e.sp, "operator '+' requires numeric or string operands")) }
             return Ok(common)
@@ -3542,7 +3545,12 @@ impl Checker {
         if is_arith_op(op) && is_type_param(lt) { return self.infer_bounded_op(e, op, l, r, lt) }
         var hint2 = hint
         if is_int(lt) || is_float(lt) { hint2 = Some(lt) }
+        // what a char is moved by or measured from isn't the context's type
+        if is_char(lt) { hint2 = None }
         let rt = self.expect_value(r, hint2)?
+        if op == "-" {
+            match self.char_arith(e, op, l, lt, rt)? { Some(t) => { return Ok(t) }, None => {} }
+        }
         let common = self.unify(l, lt, r, rt)?
         if is_float(common) {
             if !is_arith_op(op) { return Err(terr_at(e.line, e.col, e.sp, format("operator '{}' is not defined for floats", op))) }
@@ -3550,6 +3558,29 @@ impl Checker {
         }
         if !is_int(common) { return Err(terr_at(e.line, e.col, e.sp, format("operator '{}' requires integer operands", op))) }
         return Ok(common)
+    }
+
+    // `c - d` on two chars, their distance, an `int32`; `c + n` and `c - n`
+    // with `n` an `int32`, `c` moved by `n`, a char (checked to be one when
+    // it runs, as a cast to char is). None for any other operands, which
+    // `unify` takes: a char literal before another integer type adapts to
+    // it (`'0' + d` with `d: uint8`), anything else is a mismatch (D4, no
+    // implicit mixing; MYLA-318).
+    #test(checker_on("[int]"), expr_of("c - d"), "-", expr_of("c"), Type.TChar, Type.TChar)[Ok(Some(Type.TInt(32, true)))]
+    #test(checker_on("[int]"), expr_of("c + 1"), "+", expr_of("c"), Type.TChar, Type.TInt(32, true))[Ok(Some(Type.TChar))]
+    #test(checker_on("[int]"), expr_of("'0' + b"), "+", expr_of("'0'"), Type.TChar, Type.TInt(8, false))[Ok(None)]
+    #test(checker_on("[int]"), expr_of("n - 1"), "-", expr_of("n"), Type.TInt(32, true), Type.TInt(32, true))[Ok(None)]
+    fun char_arith(var self, e: Expr, op: str, l: Expr, lt: Type, rt: Type) -> Result<Option<Type>, CheckErr> {
+        if !is_char(lt) { return Ok(None) }
+        if is_char(rt) {
+            if op == "-" { return Ok(Some(t_int())) }
+            return Err(terr_at(e.line, e.col, e.sp, "operator '+' can't add two chars: 'c - d' is their distance (an 'int32'), 'c + n' moves 'c' by the 'int32' 'n'"))
+        }
+        if type_eq(rt, t_int()) { return Ok(Some(Type.TChar)) }
+        if is_int(rt) && !(is_flexible_char_lit(l) && int_lit_value(l) <= 127) {
+            return Err(terr_at(e.line, e.col, e.sp, format("operator '{}' moves a char by an 'int32', found '{}' (convert it with 'as int32')", op, type_name(rt))))
+        }
+        return Ok(None)
     }
 
     #test(checker_on("enum E { A, B(int) }"), expr_of("a.b[0]"), "+", expr_of("a.b[0]"), expr_of("a.b[0]"), Type.TStruct("Vec2", []))[Err(CheckErr { line: 1, col: 4, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 7 }, msg: "operator '+' is not defined for 'Vec2': it needs 'impl Add for Vec2'", decl: -1, notes: [] })]
@@ -4950,6 +4981,8 @@ impl Checker {
                         self.key_ok(k, it_expr.line, it_expr.col, it_expr.sp)?
                         k
                     },
+                    // a string's characters, as `s.chars()` gives them (MYLA-318)
+                    Type.TStr => Type.TChar,
                     _ => { return Err(terr_at(it_expr.line, it_expr.col, it_expr.sp, format("`for ... in` requires a list or map, found '{}'", type_name(it)))) },
                 }
             },
@@ -6894,6 +6927,14 @@ pub fun checker_on(src: str) -> Checker {
 #test("fun f<T>(x: T) -> [T: int] { return [x: 1] }")[["map key type must be Eq and Hash, found 'T': it needs the bound 'T: Eq + Hash'"]]
 #test("#derive(Eq, Hash)\nstruct P { x: float }")[["cannot derive Hash for struct 'P': field 'x' has type 'float64', which isn't Hash (a float isn't: NaN is unequal to itself; a hand-written 'impl Hash' may add 'math.to_bits(x)')"]]
 #test("#derive(Hash)\nstruct P { x: int }")[["cannot derive Hash for 'P': it isn't Eq; derive both, '#derive(Eq, Hash)', or write 'impl Eq for P'"]]
+// a string's characters in a `for`, strings ordered and `Ord`, a char's
+// distance and moves (MYLA-318)
+#test("fun main() { for c in \"hé\" { let d: char = c }\nlet s: str = \"x\"\nfor c in s + \"y\" { print(c) } }")[[]]
+#test("fun big<T: Ord>(a: T, b: T) -> T { return if a < b { b } else { a } }\nfun main() { print(big(\"a\", \"b\") >= \"a\" && \"a\" != \"b\") }")[[]]
+#test("fun main() { let d: int = 'p' - 'a'\nlet c: char = 'a' + d\nvar e = c - 1\ne += 2\nlet k: int = e - c\nlet b: uint8 = 3\nlet z: uint8 = '0' + b }")[[]]
+#test("fun main() { let c = 'a'\nlet k: int = c + 1 }")[["cannot assign value of type 'char' to binding of type 'int32'"]]
+#test("fun main() { let c = 'a'\nlet n: uint8 = 1\nprint(c - n) }")[["operator '-' moves a char by an 'int32', found 'uint8' (convert it with 'as int32')"]]
+#test("fun main() { let c = 'a'\nprint(c * 2) }")[["type mismatch: 'char' vs 'int32' (no implicit conversion between numeric types)"]]
 fun errors_of(src: str) -> [str] {
     var out: [str] = []
     for e in checker_on(src).errs { out.push(e.msg) }

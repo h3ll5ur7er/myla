@@ -35,6 +35,7 @@ from .util import format_specs
 from .tokens import Note, no_span
 from .ir_x86 import slots_at, frame_size
 from .ir import IrFunc, IrBlock, Inst, Term, Slot, Pos, Instance, ENV_WORD, Intrinsic, primitive_intrinsic
+from .ir_util import is_char_type
 from .parser import expr_of, stmt_of, type_expr_of, block_of, pattern_of, fun_of  // AST values for #test cases (MYLA-184)
 
 // A name in scope: the slot holding it.
@@ -2389,6 +2390,10 @@ impl Lower {
     // its keys.
     fun for_list(var self, cg: CodeGen, vn: str, it: Expr, body: Block) {
         let it_t = cg.type_of(it.id)
+        if is_tstr(it_t) {
+            self.for_str(cg, vn, it, body)
+            return
+        }
         if (!is_list_t(it_t) && !is_map_t(it_t)) || !lowerable(cg, it_t) {
             let d = self.unsupported("a for loop over that type")
             return
@@ -2460,6 +2465,88 @@ impl Lower {
         self.owners.pop()
     }
 
+    // `for c in s { body }` over a string's characters (MYLA-318): the loop
+    // holds the string, as `for_list` a list, and walks its bytes, an ASCII
+    // byte the character itself, any other decoded by std.rt's
+    // `str_char_at` (U+FFFD for a byte that isn't UTF-8, as `s.chars()`),
+    // without the list `s.chars()` would make. The index moves past the
+    // character before the body runs, so `continue` goes to the test.
+    fun for_str(var self, cg: CodeGen, vn: str, it: Expr, body: Block) {
+        let st = Type.TStr
+        let u64 = Type.TInt(64, false)
+        let i64 = Type.TInt(64, true)
+        let held = self.value_slot(cg, "__iterated", st, true)
+        self.begin_temps()
+        let v = self.expr(cg, it)
+        self.add(Inst.Store(held, v))
+        if self.fixed_place(it) { self.f.slots[held].owns = false } else { self.retain(cg, st, v) }
+        self.end_temps()
+        var loop_owners: [int32] = []
+        self.owners.push(loop_owners)
+        self.own(held)
+        let idx = self.new_slot("__index", u64, 8, -1, false)
+        self.add(Inst.Store(idx, self.konst(u64, 0)))
+        let elem = self.value_slot(cg, vn, Type.TChar, false)
+        let body_b = self.new_block()
+        let ascii = self.new_block()
+        let multi = self.new_block()
+        let run = self.new_block()
+        let cont = self.new_block()
+        let done = self.new_block()
+        self.list_test(idx, held, st, body_b, done)
+        self.start(body_b)
+        let i = self.temp(u64)
+        self.add(Inst.Load(i, idx))
+        let cell = self.temp(st)
+        self.add(Inst.Load(cell, held))
+        // below the length `list_test` compared it with
+        let p = self.temp(Type.TPtr)
+        self.add(Inst.Elem(p, cell, i, 1, true, false, Pos { line: 0, col: 0 }))
+        let byte = self.temp(Type.TInt(8, false))
+        self.add(Inst.Load8(byte, p))
+        let is_ascii = self.temp(Type.TBool)
+        self.add(Inst.Cmp(is_ascii, "<", Type.TInt(8, false), byte, self.konst(Type.TInt(8, false), 128)))
+        self.finish(Term.Br(is_ascii, ascii, multi))
+        self.start(ascii)
+        let c1 = self.temp(Type.TChar)
+        self.add(Inst.Cast(c1, Type.TInt(8, false), Type.TChar, byte))
+        self.add(Inst.Store(elem, c1))
+        let next1 = self.temp(u64)
+        self.add(Inst.Bin(next1, "+", u64, u64, i, self.konst(u64, 1), Pos { line: 0, col: 0 }))
+        self.add(Inst.Store(idx, next1))
+        self.finish(Term.Jmp(run))
+        self.start(multi)
+        // `cp | len << 32`
+        let r = self.temp(i64)
+        self.add(Inst.Call(r, "std$rt$str_char_at", [cell, i]))
+        let cp = self.temp(i64)
+        self.add(Inst.Bin(cp, "&", i64, i64, r, self.konst(i64, 0xFFFFFFFF), Pos { line: 0, col: 0 }))
+        let c2 = self.temp(Type.TChar)
+        self.add(Inst.Cast(c2, i64, Type.TChar, cp))
+        self.add(Inst.Store(elem, c2))
+        let len = self.temp(i64)
+        self.add(Inst.Bin(len, ">>", i64, i64, r, self.konst(i64, 32), Pos { line: 0, col: 0 }))
+        let next2 = self.temp(u64)
+        self.add(Inst.Bin(next2, "+", u64, u64, i, len, Pos { line: 0, col: 0 }))
+        self.add(Inst.Store(idx, next2))
+        self.finish(Term.Jmp(run))
+        self.start(run)
+        let depth = self.owners.len()
+        self.open_scope()
+        self.declare_as(vn, elem, true)
+        self.add(Inst.Bind(vn, elem))
+        self.loops.push(LoopTarget { cont: cont, brk: done, owners: depth, temps: self.temps.len() })
+        for s in body.stmts { self.stmt(cg, s) }
+        self.loops.pop()
+        self.close_scope()
+        self.finish(Term.Jmp(cont))
+        self.start(cont)
+        self.list_test(idx, held, st, body_b, done)
+        self.start(done)
+        self.drop_owners(self.owners.len() - 1)
+        self.owners.pop()
+    }
+
     // A list loop's test, the index in `idx` below the length of the list
     // `held` holds, ending the block: on to `yes` or `no`.
     fun list_test(var self, idx: int32, held: int32, lt: Type, yes: int32, no: int32) {
@@ -2524,20 +2611,7 @@ impl Lower {
                 let src = cg.type_of(x.id)
                 if !is_scalar(src) || !is_scalar(t) { return self.unsupported("a cast of a value that isn't a scalar") }
                 let a = self.expr(cg, x)
-                if char_cast_checked(src, t) {
-                    // a Unicode scalar or a trap (MYLA-177): at most 10FFFF,
-                    // not a surrogate (D800 to DFFF)
-                    let u = Type.TInt(64, false)
-                    let pos = Pos { line: e.line, col: e.col }
-                    let in_range = self.temp(Type.TBool)
-                    self.add(Inst.Cmp(in_range, "<=", u, a, self.konst(u, 1114111)))
-                    self.add(Inst.Check(in_range, "char", pos))
-                    let off = self.temp(u)
-                    self.add(Inst.Bin(off, "-", u, u, a, self.konst(u, 55296), pos))
-                    let not_surrogate = self.temp(Type.TBool)
-                    self.add(Inst.Cmp(not_surrogate, ">=", u, off, self.konst(u, 2048)))
-                    self.add(Inst.Check(not_surrogate, "char", pos))
-                }
+                if char_cast_checked(src, t) { self.check_scalar(a, Pos { line: e.line, col: e.col }) }
                 let d = self.temp(t)
                 self.add(Inst.Cast(d, src, t, a))
                 return d
@@ -2669,8 +2743,20 @@ impl Lower {
                 self.rt_call(cg, d, "__str_concat", [a, b])
                 return self.owned_value(cg, d, Type.TStr)
             }
+            if is_cmp(op) {
+                // byte-wise, std.rt's `str_cmp` against 0 (MYLA-318)
+                let a = self.expr(cg, l)
+                let b = self.expr(cg, r)
+                let i64 = Type.TInt(64, true)
+                let c = self.temp(i64)
+                self.add(Inst.Call(c, "std$rt$str_cmp", [a, b]))
+                let d = self.temp(Type.TBool)
+                self.add(Inst.Cmp(d, op, i64, c, self.konst(i64, 0)))
+                return d
+            }
             return self.unsupported("that operator on strings")
         }
+        if is_char_type(lt) && (op == "+" || op == "-") { return self.char_arith(cg, e, op, l, r) }
         if !is_scalar(lt) || !is_scalar(rt) { return self.unsupported("an operator on values that aren't scalars") }
         let a = self.expr(cg, l)
         let b = self.expr(cg, r)
@@ -2685,6 +2771,47 @@ impl Lower {
         } else {
             self.add(Inst.Bin(d, op, lt, rt, a, b, Pos { line: e.line, col: e.col }))
         }
+        return d
+    }
+
+    // The integer `a` (an `int32` or wider, sign-extended) a Unicode scalar
+    // or a trap at `pos` (MYLA-177): at most 10FFFF, not a surrogate (D800
+    // to DFFF).
+    fun check_scalar(var self, a: int32, pos: Pos) {
+        let u = Type.TInt(64, false)
+        let in_range = self.temp(Type.TBool)
+        self.add(Inst.Cmp(in_range, "<=", u, a, self.konst(u, 1114111)))
+        self.add(Inst.Check(in_range, "char", pos))
+        let off = self.temp(u)
+        self.add(Inst.Bin(off, "-", u, u, a, self.konst(u, 55296), pos))
+        let not_surrogate = self.temp(Type.TBool)
+        self.add(Inst.Cmp(not_surrogate, ">=", u, off, self.konst(u, 2048)))
+        self.add(Inst.Check(not_surrogate, "char", pos))
+    }
+
+    // `c - d` on two chars, the `int32` between their code points; `c + n`
+    // and `c - n` with an `int32` `n`, the char that far from `c`, checked
+    // as a cast to char is (MYLA-318).
+    #test(lower_on(), codegen_on("enum E { A, B(int) }"), expr_of("(a, 'c')"), "-", expr_of("(a, 'c')"), expr_of("(a, 'c')"))[9]
+    fun char_arith(var self, cg: CodeGen, e: Expr, op: str, l: Expr, r: Expr) -> int32 {
+        let i32 = Type.TInt(32, true)
+        let a = self.expr(cg, l)
+        let b = self.expr(cg, r)
+        let ai = self.temp(i32)
+        self.add(Inst.Cast(ai, Type.TChar, i32, a))
+        var bi = b
+        let rt = cg.type_of(r.id)
+        if is_char_type(rt) {
+            bi = self.temp(i32)
+            self.add(Inst.Cast(bi, Type.TChar, i32, b))
+        }
+        let pos = Pos { line: e.line, col: e.col }
+        let v = self.temp(i32)
+        self.add(Inst.Bin(v, op, i32, i32, ai, bi, pos))
+        if is_char_type(rt) { return v }
+        self.check_scalar(v, pos)
+        let d = self.temp(Type.TChar)
+        self.add(Inst.Cast(d, i32, Type.TChar, v))
         return d
     }
 

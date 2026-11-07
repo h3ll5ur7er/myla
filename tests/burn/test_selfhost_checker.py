@@ -133,7 +133,8 @@ TYPE_ERRORS: dict[str, str] = {
     "generic_function_as_value": _main("let f = id", before="fun id<T>(x: T) -> T {\n    return x\n}\n"),
     "negate_string": _main("let x = -\"s\""),
     "complement_float": _main("let x = ~1.5"),
-    "compare_strings": _main("let b = \"a\" < \"b\""),
+    # (compare_strings, `"a" < "b"`, was one; since D165 strings are ordered
+    # byte-wise: the checker's own cases, `errors_of`)
     "shift_float": _main("let x = 1.5 << 1"),
     "shift_by_float": _main("let x = 1 << 1.5"),
     "compose_two_args_left": _main("let f = (a: int, b: int) => a", "let g = (x: int) => x", "let h = f >> g"),
@@ -360,6 +361,8 @@ SUPERSEDED: dict[str, str] = {
     "unit_test_165": "err 5 5 5:5-5:25 type: '#test' can't run an async method (test it through an async test function, D162)",
     # D161: a method takes '#allow' too
     "unit_test_164": "err 5 5 5:5-5:10 type: attribute '#main' can't be applied to a method (a method takes only '#test' and '#allow')",
+    # D165: `'a' - 'b'` is an int32 and `c + n` a char, but two chars don't add
+    "unit_test_3": "err 1 24 1:20-1:29 type: operator '+' can't add two chars: 'c - d' is their distance (an 'int32'), 'c + n' moves 'c' by the 'int32' 'n'",
 }
 
 def _corpus() -> list[str]:

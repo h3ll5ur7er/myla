@@ -1,0 +1,5 @@
+type error: operator '+' can't add two chars: 'c - d' is their distance (an 'int32'), 'c + n' moves 'c' by the 'int32' 'n'
+  --> examples/errors/type_char_plus_char.my:7:13
+  |
+7 |     print(c + 'b')
+  |           ^^^^^^^
