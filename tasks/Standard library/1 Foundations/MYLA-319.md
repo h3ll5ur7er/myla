@@ -2,7 +2,7 @@
 id: MYLA-319
 title: "Decision: the standard library's conventions"
 type: chore
-status: todo
+status: done
 priority: high
 labels: [decision, stdlib, wave-1]
 ---
@@ -18,5 +18,5 @@ Wave 1 of [[Project/Standard-library-roadmap]]. The questions the roadmap leaves
 - **Owns:** `docs/Project/Decisions.md`
 - **Needs:** nothing; it can start as soon as its wave does
 
-- [ ] The owner's decision on each point, recorded as a D number
-- [ ] [[Language/Standard-library]] and the `myla` skill updated with the result
+- [x] The owner's decision on each point, recorded as a D number: D164, the owner's acceptance of all six recommendations (2026-11-07)
+- [x] [[Language/Standard-library]] and the `myla` skill updated with the result

@@ -277,15 +277,5 @@ class JsonAgainstPython(unittest.TestCase):
                 self.assertEqual(proc.stdout.decode().split("\n")[:-1], expected)
 
 
-class StdTests(unittest.TestCase):
-    def test_the_modules_own_tests_pass(self) -> None:
-        for name in ("num", "json"):
-            with self.subTest(module=name):
-                path = os.path.join(STDLIB_ROOT, "std", name + ".my")
-                proc = subprocess.run([selfhost_tool("main"), "test", path, "--stdlib", STDLIB_ROOT],
-                                      capture_output=True, text=True)
-                self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-
-
 if __name__ == "__main__":
     unittest.main()

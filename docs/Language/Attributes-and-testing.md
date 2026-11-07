@@ -123,7 +123,7 @@ fun parse_port(text: str) -> Option<int> {
 fun main() {}
 ```
 
-`std.test` ([[Language/Standard-library#stdtest]]) has the checks, `expect(cond, msg)`, `expect_eq(got, want)` ("expected 3, got 4"), `expect_ne` and `fail(msg)`, and `temp_dir()`, a fresh empty directory for the case under `$TMPDIR` (else `/tmp`) that the runner removes when the case ends, passed or failed. A fixture is a value: a function's result, built in the case's arguments (`#test(db_with(3))[3]`) or in the test function's body; nothing is shared between cases.
+`std.test` ([[Language/Standard-library/Test]]) has the checks, `expect(cond, msg)`, `expect_eq(got, want)` ("expected 3, got 4"), `expect_ne` and `fail(msg)`, and `temp_dir()`, a fresh empty directory for the case under `$TMPDIR` (else `/tmp`) that the runner removes when the case ends, passed or failed. A fixture is a value: a function's result, built in the case's arguments (`#test(db_with(3))[3]`) or in the test function's body; nothing is shared between cases.
 
 ### When a case fails
 
