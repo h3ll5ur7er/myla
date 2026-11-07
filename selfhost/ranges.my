@@ -21,13 +21,19 @@
 // property of its temporary; what changes is whether the slot was stored
 // since.
 
-from .ir import IrFunc, IrBlock, Inst, Term, successors
+from .ir import IrFunc, IrBlock, Inst, Term, Slot, Pos, successors, touches, def_counts
 from .checker import Type
 
 // `f` with the int32 `+ 1`s that can't overflow done on 64 bits.
 pub fun widen_counters(f0: IrFunc) -> IrFunc {
     if f0.frame || f0.order.len() == 0 || !has_loop(f0) { return f0 }
     let ns = f0.slots.len()
+    // the temporaries written once: a fact is keyed by its temporary, which
+    // only a single write makes a property of it (today's lowering writes a
+    // load's, a constant's or a comparison's once; a pass that reuses
+    // temporaries, or `--ssa`'s moves, may not; MYLA-294)
+    var once: [bool] = []
+    for c in def_counts(f0, touches(f0)) { once.push(c == 1) }
     // the slot each `load` reads, by its temporary (-1: none)
     var load_slot: [int32] = []
     var one: [bool] = []
@@ -50,8 +56,8 @@ pub fun widen_counters(f0: IrFunc) -> IrFunc {
     for bo in f0.order {
         for inst in f0.blocks[bo].insts {
             match inst {
-                Inst.Load(d, s) => { load_slot[d] = s },
-                Inst.Const(d, t, v) => { if v == 1 { one[d] = true } },
+                Inst.Load(d, s) => { if once[d] { load_slot[d] = s } },
+                Inst.Const(d, t, v) => { if v == 1 && once[d] { one[d] = true } },
                 Inst.Addr(d, s) => { addressed[s] = true },
                 Inst.Cmp(d, op, t, x, y) => {
                     if is_i32(t) && op == "<" && load_slot[x] >= 0 { compared[load_slot[x]] = true }
@@ -101,7 +107,7 @@ pub fun widen_counters(f0: IrFunc) -> IrFunc {
         rounds = rounds + 1
         for bi in f.order {
             if seen[bi] {
-                let outs = block_out(f, bi, known[bi], load_slot, at)
+                let outs = block_out(f, bi, known[bi], load_slot, at, once)
                 let succ = successors(f.blocks[bi].term)
                 var si = 0
                 while si < succ.len() {
@@ -128,6 +134,9 @@ pub fun widen_counters(f0: IrFunc) -> IrFunc {
             }
         }
     }
+    // the facts must be a fixed point: a partial state could claim a bound
+    // a later round would have taken back (MYLA-294), so give up instead
+    if changed { return f0 }
     // the adds, retyped
     for bi in f.order {
         if seen[bi] && any_true(known[bi]) {
@@ -138,7 +147,7 @@ pub fun widen_counters(f0: IrFunc) -> IrFunc {
             for inst in f.blocks[bi].insts {
                 var keep = inst
                 match inst {
-                    Inst.Load(d, s) => { if at[s] >= 0 { current[d] = true } },
+                    Inst.Load(d, s) => { if at[s] >= 0 && load_slot[d] == s { current[d] = true } },
                     Inst.Store(s, v) => {
                         if at[s] >= 0 {
                             state[at[s]] = false
@@ -185,14 +194,14 @@ fun has_loop(f: IrFunc) -> bool {
 // What the block `bi` knows on leaving it, from `known` on entry (per
 // candidate, `at` their places): which are below some int32, and the
 // candidate its branch's first side adds (-1 for none).
-fun block_out(f: IrFunc, bi: int32, known: [bool], load_slot: [int32], at: [int32]) -> ([bool], int32) {
+fun block_out(f: IrFunc, bi: int32, known: [bool], load_slot: [int32], at: [int32], once: [bool]) -> ([bool], int32) {
     var state = known
     var current: [int32: bool] = [:]
     // the candidate each comparison says is below some int32
     var cond_of: [int32: int32] = [:]
     for inst in f.blocks[bi].insts {
         match inst {
-            Inst.Load(d, s) => { if at[s] >= 0 { current[d] = true } },
+            Inst.Load(d, s) => { if at[s] >= 0 && load_slot[d] == s { current[d] = true } },
             Inst.Store(s, v) => {
                 if at[s] >= 0 {
                     state[at[s]] = false
@@ -205,7 +214,7 @@ fun block_out(f: IrFunc, bi: int32, known: [bool], load_slot: [int32], at: [int3
                 }
             },
             Inst.Cmp(d, op, t, x, y) => {
-                if is_i32(t) {
+                if is_i32(t) && once[d] {
                     if op == "<" && current.contains(x) { cond_of[d] = at[load_slot[x]] }
                     if op == ">" && current.contains(y) { cond_of[d] = at[load_slot[y]] }
                 }
@@ -266,4 +275,37 @@ fun is_i32(t: Type) -> bool {
         Type.TInt(w, sg) => w == 32 && sg
         _ => false
     }
+}
+
+// --- Tests ------------------------------------------------------------------
+
+// `while i < n { i += 1 }` as IR, and whether `widen_counters` makes its
+// `+ 1` a 64-bit add; with `twice`, the temporary the step loads `i` into is
+// written a second time elsewhere, so no fact is keyed by it (MYLA-294).
+#test(false)[true]
+#test(true)[false]
+fun widens_counting_loop(twice: bool) -> bool {
+    let i32 = Type.TInt(32, true)
+    var entry = [Inst.Const(0, i32, 0), Inst.Store(0, 0)]
+    if twice { entry.push(Inst.Load(4, 1)) }
+    let f = IrFunc {
+        name: "f", ret: None,
+        slots: [Slot { name: "i", ty: i32, size: 8, word: -1, owns: false, inline: false, scope: -1 }, Slot { name: "n", ty: i32, size: 8, word: -1, owns: false, inline: false, scope: -1 }],
+        temps: [i32, i32, i32, Type.TBool, i32, i32, i32],
+        blocks: [
+            IrBlock { insts: entry, term: Term.Jmp(1) },
+            IrBlock { insts: [Inst.Load(1, 0), Inst.Load(2, 1), Inst.Cmp(3, "<", i32, 1, 2)], term: Term.Br(3, 2, 3) },
+            IrBlock { insts: [Inst.Load(4, 0), Inst.Const(5, i32, 1), Inst.Bin(6, "+", i32, i32, 4, 5, Pos { line: 0, col: 0 }), Inst.Store(0, 6)], term: Term.Jmp(1) },
+            IrBlock { insts: [], term: Term.Ret(-1) },
+        ],
+        order: [0, 1, 2, 3], instances: [], frame: false, scope_parent: [-1],
+    }
+    let g = widen_counters(f)
+    for inst in g.blocks[2].insts {
+        match inst {
+            Inst.Bin(d, op, lt, rt, x, y, pos) => { return !is_i32(lt) },
+            _ => {},
+        }
+    }
+    return false
 }

@@ -142,7 +142,12 @@ fun hoist_loop(f0: IrFunc, at: [int32], preds: [[int32]], slot_of: [int32], lo: 
         inside[f.order[k]] = true
         k = k + 1
     }
-    // entered at its first block only, from one block outside it
+    // entered at its first block only, from one block outside it. This is
+    // what makes the move sound whatever order the blocks are in (MYLA-294):
+    // every path into `lo`..`hi` goes through `entry`, so the `cow` put
+    // there comes before every use `move_cows` renames, all inside the
+    // range. A block of the cycle emitted outside the range is a predecessor
+    // from outside of the block it jumps back to, which this refuses.
     var entry = -1
     k = lo
     while k <= hi {

@@ -492,6 +492,18 @@ impl CodeGen {
     }
 
     // An intrinsic, done in place (`Intrinsic` says what each means).
+    //
+    // The registers each uses besides its operands' (MYLA-294): `sqrt`,
+    // `f64_round` %rax and %xmm0; `f64_bits`, `f64_from_bits`, `rt_addr`,
+    // the atomics but `cas64`, `rc_inc`, `rc_dec` and `bsr64` %rax; `cas64`
+    // %rax and %rdx; `rt_waddr` and `rotl` %rax and %rcx; `unique` %rcx and
+    // its clone's call; `run_frame` %rax, %rdi and %r11 and the call;
+    // `call_code` %rdi and %r11 and the call. None of %rax, %rcx, %rdx and
+    // %xmm0 is one the allocator hands out (`alloc_regs`), and the three
+    // that touch %rdi or %r11 call, which `clobber_kind` counts (2), so no
+    // value the allocator keeps in a register is lost across one. An
+    // intrinsic that would use %rsi, %rdi or %r8-%r11 without calling has to
+    // be added to `clobber_kind`.
     fun emit_intr(var self, d: int32, op: Intrinsic, args: [int32], temp_base: int32) {
         match op {
             // std.math's primitives inline (MYLA-249): no call
@@ -2959,6 +2971,9 @@ fun clobbers(inst: Inst) -> bool {
 // 2 when `inst` clobbers the caller-saved registers (`clobbers`), 1 when it
 // is a copy between memory blocks, whose `rep movs` or moves go through %rsi
 // and %rdi, else 0 (one match: passing an instruction copies it).
+#test(Inst.Intr(-1, Intrinsic.RunFrame, [1]))[2]
+#test(Inst.Intr(1, Intrinsic.CallCode, [2, 3]))[2]
+#test(Inst.Intr(1, Intrinsic.Cas64, [2, 3, 4]))[0]
 fun clobber_kind(inst: Inst) -> int32 {
     return match inst {
         Inst.Const(d, t, v) => 0,
