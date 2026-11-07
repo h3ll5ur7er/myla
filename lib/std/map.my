@@ -1,0 +1,166 @@
+// std.map: methods on maps, and `counts` (MYLA-324, D164).
+//
+// A map keeps its keys in insertion order (D105): a key written again keeps
+// its place, one removed and added again goes last. `values` and `items`
+// follow that order, as `keys()` and `for k in m` do. The builtins `len`,
+// `contains`, `keys` and `remove` stay the builtins' (D151), and `get(m, k)`
+// the prelude's.
+
+impl<K, V> [K: V] {
+    // The value of `k`, or `default` when the map has no `k`.
+    fun get_or(self, k: K, default: V) -> V {
+        return match get(self, k) {
+            Some(v) => v
+            None => default
+        }
+    }
+
+    // Sets `k` to `f` of its value, or of `default` when the map has no `k`:
+    // `m.update(word, 0, (n) => n + 1)` counts a word.
+    fun update(var self, k: K, default: V, f: (V) -> V) {
+        self[k] = f(self.get_or(k, default))
+    }
+
+    // The values, in the order of their keys.
+    fun values(self) -> [V] {
+        var out: [V] = []
+        for k in self {
+            out.push(self[k])
+        }
+        return out
+    }
+
+    // The entries as `(key, value)` pairs, in insertion order.
+    fun items(self) -> [(K, V)] {
+        var out: [(K, V)] = []
+        for k in self {
+            out.push((k, self[k]))
+        }
+        return out
+    }
+
+    // Adds every entry of `other`, whose value wins for a key both have: a
+    // key of `other`'s that is new goes last, in `other`'s order.
+    fun merge(var self, other: [K: V]) {
+        for k in other {
+            self[k] = other[k]
+        }
+    }
+}
+
+// How often each element of `xs` occurs, the elements in the order they
+// first occur.
+pub fun counts<T>(xs: [T]) -> [T: int] {
+    var out: [T: int] = [:]
+    for x in xs {
+        out.update(x, 0, (n) => n + 1)
+    }
+    return out
+}
+
+// ---- Tests -----------------------------------------------------------------
+//
+// The methods are generic, which `#test` cases can't take (D116), so test
+// functions (D162) try them on concrete types. They don't use `std.test`: a
+// module every program imports imports nothing it doesn't need.
+
+fun ages() -> [str: int] {
+    var m: [str: int] = [:]
+    m["bob"] = 27
+    m["ann"] = 31
+    return m
+}
+
+// `k=v` for every entry, in order, joined by spaces.
+fun shown(m: [str: int]) -> str {
+    var sb = StringBuilder()
+    for kv in m.items() {
+        let (k, v) = kv
+        if sb.len() > 0 { sb.append(" ") }
+        sb.append(f"{k}={v}")
+    }
+    return sb.build()
+}
+
+#test
+fun map_get_or() {
+    let m = ages()
+    assert(m.get_or("ann", 0) == 31, "a key it has")
+    assert(m.get_or("cy", 0) == 0, "a key it lacks")
+    let empty: [int: str] = [:]
+    assert(empty.get_or(7, "none") == "none", "an empty map")
+}
+
+#test
+fun map_update() {
+    var m = ages()
+    m.update("ann", 0, (n) => n + 1)
+    m.update("cy", 10, (n) => n * 2)
+    assert(shown(m) == "bob=27 ann=32 cy=20", "update a key it has and one it lacks")
+}
+
+#test
+fun map_update_a_place() {
+    // the receiver may be any `var` place, an element of a list of maps too
+    var rows: [[str: int]] = [ages()]
+    rows[0].update("bob", 0, (n) => n + 3)
+    assert(rows[0]["bob"] == 30, "update through an element")
+}
+
+#test
+fun map_values() {
+    let vs = ages().values()
+    assert(vs.len() == 2 && vs[0] == 27 && vs[1] == 31, "values in insertion order")
+    let empty: [str: bool] = [:]
+    assert(empty.values().len() == 0, "an empty map's values")
+}
+
+#test
+fun map_items() {
+    let kvs = ages().items()
+    assert(kvs.len() == 2, "one pair per entry")
+    let (k0, v0) = kvs[0]
+    let (k1, v1) = kvs[1]
+    assert(k0 == "bob" && v0 == 27 && k1 == "ann" && v1 == 31, "pairs in insertion order")
+}
+
+#test
+fun map_items_keep_order() {
+    // a key written again keeps its place; one removed and added again goes last
+    var m = ages()
+    m["cy"] = 1
+    m["bob"] = 2
+    m.remove("ann")
+    m["ann"] = 3
+    assert(shown(m) == "bob=2 cy=1 ann=3", "rewritten and re-added keys")
+}
+
+#test
+fun map_merge() {
+    var m = ages()
+    var other: [str: int] = [:]
+    other["cy"] = 5
+    other["ann"] = 40
+    m.merge(other)
+    assert(shown(m) == "bob=27 ann=40 cy=5", "other's values win, new keys go last")
+    assert(shown(other) == "cy=5 ann=40", "the argument stays as it is")
+    let empty: [str: int] = [:]
+    m.merge(empty)
+    assert(shown(m) == "bob=27 ann=40 cy=5", "merging nothing")
+}
+
+#test
+fun counts_strings() {
+    let c = counts(["a", "b", "a", "c", "a"])
+    assert(shown(c) == "a=3 b=1 c=1", "counted in first-seen order")
+}
+
+#test
+fun counts_chars_and_ints() {
+    let cs = counts("hello".chars())
+    assert(cs['l'] == 2 && cs['h'] == 1 && cs.len() == 4, "chars")
+    let ns = counts([3, 1, 3])
+    assert(ns[3] == 2 && ns[1] == 1 && ns.len() == 2, "ints")
+    let none: [int64] = []
+    assert(counts(none).len() == 0, "an empty list")
+}
