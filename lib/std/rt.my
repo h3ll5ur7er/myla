@@ -1089,14 +1089,6 @@ fun map_by_rank(cell: int64, slot_size: int64, next: int64) -> int64 {
     return by_rank
 }
 
-// `__map_rebuild`, which `remove` called after making a tombstone until
-// MYLA-310, when it rebuilt the table: the tombstone stays now, so the map is
-// the cell as it is. Kept for code an older compiler made (the seed's, D101);
-// a compiler of these sources calls nothing after a removal.
-pub fun map_rebuild(cell: int64, slot_size: int64, rank: int64, is_str: int64) -> int64 {
-    return cell
-}
-
 // `keys(m)` (`__map_keys`): a new list of the keys of the map `cell` in the
 // order they were inserted (by rank: without gaps each at its rank, else the
 // gaps skipped), as wide as the list's elements are (`stride` bytes), with a
@@ -1110,9 +1102,26 @@ pub fun map_keys(cell: int64, slot_size: int64, stride: int64, is_str: int64) ->
     if next == count {
         var slot = cell + 16
         let end = slot + __load64(cell + 8) * slot_size
+        // the common case, written out rather than through `map_key_to`:
+        // a call per key cost 14 % on `keys()` of a growing map
         while slot < end {
             if __load64(slot) == 1 {
-                map_key_to(list + 16 + __load64(slot + slot_size - 8) * stride, slot, stride, is_str)
+                let k = __load64(slot + 8)
+                if is_str != 0 {
+                    let rc = k - 8
+                    __store64(rc, __load64(rc) + 1)
+                }
+                let at = list + 16 + __load64(slot + slot_size - 8) * stride
+                if stride == 8 {
+                    __store64(at, k)
+                } else if stride == 4 {
+                    __store32(at, k as uint32)
+                } else if stride == 2 {
+                    __store8(at, k as uint8)
+                    __store8(at + 1, (k >> 8) as uint8)
+                } else {
+                    __store8(at, k as uint8)
+                }
             }
             slot += slot_size
         }
