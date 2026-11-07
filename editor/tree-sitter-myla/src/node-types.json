@@ -2517,6 +2517,10 @@
         {
           "type": "identifier",
           "named": true
+        },
+        {
+          "type": "prim_type",
+          "named": true
         }
       ]
     }
