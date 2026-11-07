@@ -1,0 +1,15 @@
+//~ type error: cannot infer type parameter(s) T for 'mk' from the arguments
+//~ span: mk()
+// A generic constructor's type parameter is fixed by its arguments or by the
+// type the call is expected to have (MYLA-315); here there is neither, so
+// annotate the binding (`let b: B<int> = mk()`).
+struct B<T> {
+    items: [T],
+}
+fun mk<T>() -> B<T> {
+    return B { items: [] }
+}
+fun main() {
+    let b = mk()
+    print(0)
+}

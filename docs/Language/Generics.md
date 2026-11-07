@@ -47,11 +47,51 @@ Type arguments are written only in **type positions**: `Box<int>`, `Result<str, 
 
 1. Arguments are typed left to right. Once a parameter's type is fully known from earlier arguments, it is used as the expected type of the next argument, so `prepend(x, List.Nil)` works.
    A lambda argument needs less: when its parameter's type is a function type whose parameter types are known (`(int) -> U` once `T` is `int`), the lambda takes them and its result is inferred from its body, which binds `U`. So `apply(3, (x) => x * 2)` and `opt.map((x) => x + 1)` need no annotation ([[MYLA-356]]).
-2. The expected type of the whole expression (an annotation, a parameter, a return type) seeds struct literals and enum variants.
+2. The expected type of the whole expression (an annotation, a parameter, a return type, a field, a list's element) seeds struct literals and enum variants, and fixes the type parameters of a generic function's or method's call that its arguments leave open ([[MYLA-315]]): `let d: Deque<int> = deque.new()`, `return mk()` in a function that returns `B<str>`, `f(mk())` where `f` takes a `B<int>`, `Graph { todo: deque.new() }`. What the arguments fix comes first; the expected type only fills the rest, and hints the arguments whose parameter's type the earlier ones leave open, so `let b: B<int64> = of([5000000000])` makes the list an `[int64]`. An expected type that doesn't fit the result is not an error here: the call's type is compared where it is used.
+   Inside generic code a type parameter of the enclosing function is a known type, so the return type `B<T>` gives the field `items: [T]` of `B { items: [] }` its type, as it does an empty map `[:]` or `None`.
 3. The branches of an `if` and the arms of a `match` used as a value are typed against each other when nothing is expected: one whose value can't say its whole type alone (`None`, `[]`, `[:]`, `Err(e)`, `Ok(x)`, a generic enum's variant that leaves a parameter out) is checked after the others, with the first one's type expected, so `let v = if n > 0 { Some(n) } else { None }` is an `Option<int>` ([[MYLA-290]]). When no branch says it (`if c { Ok(1) } else { Err("e") }`), annotate the binding.
-4. A type parameter that nothing determines is an error ("cannot infer type parameter(s) T … add a type annotation").
+4. A type parameter that nothing determines is an error ("cannot infer type parameter(s) T … add a type annotation"): one that neither the arguments nor the expected type fix, such as a call statement's `mk()`, `let b = mk()`, or a parameter the result doesn't name (`fun count<T>() -> int`).
 
-There is no `f<int>(x)` call syntax: annotate the binding instead.
+```myla
+struct B<T> {
+    items: [T],
+}
+
+impl<T> B<T> {
+    fun size(self) -> int {
+        return self.items.len()
+    }
+}
+
+fun mk<T>() -> B<T> {
+    return B { items: [] }
+}
+
+fun names() -> B<str> {
+    return mk()
+}
+
+fun total(b: B<int>) -> int {
+    var t = 0
+    for x in b.items {
+        t += x
+    }
+    return t
+}
+
+fun main() {
+    let a: B<int> = mk()
+    var n = names()
+    n.items.push("x")
+    print(a.size() + n.size())
+    print(total(mk()))
+}
+// output:
+// 1
+// 0
+```
+
+There is no `f<int>(x)` call syntax (D34): annotate the binding instead. Adding it is an open question ([[MYLA-315]]).
 
 ## Restrictions
 

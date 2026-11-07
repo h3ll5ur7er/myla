@@ -1,0 +1,5 @@
+type error: cannot infer type parameter(s) U for method 'emptied'; add a type annotation to guide inference
+  --> examples/errors/type_generic_method_nothing_fixes.my:15:14
+   |
+15 |     b.emptied()
+   |     ^^^^^^^^^^^

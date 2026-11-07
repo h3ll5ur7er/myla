@@ -5,7 +5,8 @@ import tempfile
 import unittest
 
 from tests.burn._targets import program_excuse
-from tests.burn._native import CAN_BUILD_NATIVE, SKIP_REASON, build_and_run, interpret, selfhost_run
+from tests.burn._native import (CAN_BUILD_NATIVE, SKIP_REASON, build_and_run, interpret, run_file_both_now,
+                                selfhost_run, write_program)
 
 PROGRAMS = {
     # an unsuffixed literal left of an unsigned operator takes the right
@@ -36,6 +37,70 @@ PROGRAMS = {
         "    let c = b.map((x) => {\n        return x > 3\n    })\n"
         "    print(c.v)\n"
         "    print(b.map((x) => f\"<{x}>\").map((s) => s.len()).v)\n"
+        "}\n"
+    ),
+    # generic constructors (MYLA-315): the expected type (here the return type
+    # `B<T>`) types a struct literal's empty list, map and `None` inside
+    # generic code, and a call's expected type (an annotation, a parameter, a
+    # return type, a field, a list's element) fixes the type parameters its
+    # arguments leave open, of functions and of generic methods; an argument
+    # takes it as its hint, so `5000000000` is an `int64` there
+    "generic_constructors_from_the_expected_type": (
+        "struct B<T> {\n    items: [T],\n}\n"
+        "struct Q<T> {\n    front: [T],\n    names: [str: T],\n    top: Option<T>,\n}\n"
+        "struct Holder {\n    b: B<int>,\n    q: Q<str>,\n}\n"
+        "struct Pair<T> {\n    left: B<T>,\n    right: B<T>,\n}\n"
+        "fun mk<T>() -> B<T> {\n    return B { items: [] }\n}\n"
+        "fun new_q<T>() -> Q<T> {\n    return Q { front: [], names: [:], top: None }\n}\n"
+        "fun of<T>(xs: [T]) -> B<T> {\n    return B { items: xs }\n}\n"
+        "fun pair<T>() -> Pair<T> {\n    return Pair { left: mk(), right: mk() }\n}\n"
+        "impl<T> B<T> {\n"
+        "    fun add(var self, x: T) {\n        self.items.push(x)\n    }\n"
+        "    fun size(self) -> int {\n        return self.items.len()\n    }\n"
+        "    fun emptied<U>(self) -> B<U> {\n        return mk()\n    }\n"
+        "}\n"
+        "fun total(b: B<int>) -> int {\n    var t = 0\n    for x in b.items {\n        t += x\n    }\n    return t\n}\n"
+        "fun twice<T>(x: T) -> B<T> {\n    var b: B<T> = mk()\n    b.add(x)\n    b.add(x)\n    return b\n}\n"
+        "fun names() -> B<str> {\n    return mk()\n}\n"
+        "#main\nfun main() {\n"
+        "    let a: B<int> = mk()\n    print(a.size())\n"
+        "    var s: B<str> = mk()\n    s.add(\"x\")\n    print(s.size())\n"
+        "    print(total(mk()))\n"
+        "    var h = Holder { b: mk(), q: new_q() }\n    h.b.add(4)\n    h.q.front.push(\"q\")\n"
+        "    print(total(h.b))\n    print(h.q.front[0])\n    print(h.q.top.unwrap_or(\"no top\"))\n"
+        "    h.b = mk()\n    print(h.b.size())\n"
+        "    var n = names()\n    n.add(\"a\")\n    n.add(\"b\")\n    print(n.items[1])\n"
+        "    let t = twice(\"hi\")\n    print(t.items[0] + t.items[1])\n"
+        "    let e: B<bool> = a.emptied()\n    print(e.size())\n"
+        "    let bs: [B<int>] = [mk(), of([1, 2])]\n    print(total(bs[1]))\n"
+        "    let big: B<int64> = of([5000000000])\n    print(big.items[0])\n"
+        "    let w: Option<int64> = Some(5000000000)\n    print(w.unwrap_or(0))\n"
+        "    let p: Pair<char> = pair()\n    print(p.left.size() + p.right.size())\n"
+        "    let q: Q<int> = new_q()\n    print(q.top.unwrap_or(7))\n"
+        "}\n"
+    ),
+    # what MYLA-315 gives in passing: an argument whose parameter's type the
+    # arguments before it leave open takes the expected type's hint (a
+    # literal's width); a type parameter mapped to the enclosing function's is
+    # known, so a lambda there takes its parameter types; a generic literal's
+    # lambda field takes them like a call's lambda argument (MYLA-356)
+    "generic_arguments_hinted_by_the_expected_type": (
+        "struct W<T, U> {\n    x: T,\n    f: (T) -> U,\n}\n"
+        "struct Box<T> {\n    v: T,\n}\n"
+        "impl<T> Box<T> {\n    fun map<U>(self, f: (T) -> U) -> Box<U> {\n        return Box { v: f(self.v) }\n    }\n}\n"
+        "enum Maybe<T> {\n    Just(T),\n    Nothing,\n}\n"
+        "fun first<T>(xs: [T]) -> T {\n    return xs[0]\n}\n"
+        "fun same<T>(b: Box<T>) -> Box<T> {\n    return b.map((x) => x)\n}\n"
+        "fun nothing<T>() -> Maybe<T> {\n    return Maybe.Nothing\n}\n"
+        "fun pick<T>(c: bool, a: T, b: T) -> T {\n    return if c { a } else { b }\n}\n"
+        "#main\nfun main() {\n"
+        "    let w = W { x: 3, f: (x) => x + 1 }\n    print(w.f(w.x))\n"
+        "    let x: int64 = first([5000000000])\n    print(x)\n"
+        "    print(same(Box { v: \"s\" }).v)\n"
+        "    let m: Maybe<int> = nothing()\n"
+        "    let k = match m {\n        Just(v) => v\n        Nothing => -1\n    }\n    print(k)\n"
+        "    let big: int64 = 10\n    print(big + first([2]))\n"
+        "    let p: uint8 = pick(true, 200, 3)\n    print(p)\n"
         "}\n"
     ),
     # a receiver and every argument are taken in order, before a later
@@ -3631,8 +3696,126 @@ STRESS_MAP_OVERWRITE_SRC = (
 )
 
 
+# A program of three modules for `test_generic_constructors_of_a_module`.
+GENERIC_MODULE_DEQUE = """pub struct Deque<T> {
+    front: [T],
+    back: [T],
+}
+
+pub fun new<T>() -> Deque<T> {
+    return Deque { front: [], back: [] }
+}
+
+pub fun of<T>(xs: [T]) -> Deque<T> {
+    return Deque { front: [], back: xs }
+}
+
+impl<T> Deque<T> {
+    fun push_back(var self, x: T) {
+        self.back.push(x)
+    }
+
+    fun push_front(var self, x: T) {
+        self.front.push(x)
+    }
+
+    fun len(self) -> int {
+        return self.front.len() + self.back.len()
+    }
+
+    fun first(self) -> Option<T> {
+        if self.front.len() > 0 {
+            return Some(self.front[^1])
+        }
+        if self.back.len() > 0 {
+            return Some(self.back[0])
+        }
+        return None
+    }
+
+    fun emptied<U>(self) -> Deque<U> {
+        return new()
+    }
+}
+"""
+
+GENERIC_MODULE_SET = """pub struct Set<T> {
+    items: [T],
+}
+
+pub fun new<T>() -> Set<T> {
+    return Set { items: [] }
+}
+
+impl<T: Eq> Set<T> {
+    fun insert(var self, x: T) {
+        for y in self.items {
+            if y == x {
+                return
+            }
+        }
+        self.items.push(x)
+    }
+
+    fun len(self) -> int {
+        return self.items.len()
+    }
+}
+"""
+
+GENERIC_MODULE_MAIN = """import .deque as deque
+import .set as set
+from .deque import Deque
+from .set import Set
+
+struct Graph {
+    todo: Deque<int>,
+    seen: Set<str>,
+}
+
+fun sizes(d: Deque<str>) -> int {
+    return d.len()
+}
+
+fun main() {
+    let d: Deque<int> = deque.new()
+    print(d.len())
+    var s: Set<str> = set.new()
+    s.insert("a")
+    s.insert("b")
+    s.insert("a")
+    print(s.len())
+    var g = Graph { todo: deque.new(), seen: set.new() }
+    g.todo.push_back(3)
+    g.todo.push_front(2)
+    g.seen.insert("x")
+    print(g.todo.len())
+    print(g.todo.first().unwrap_or(0))
+    print(g.seen.len())
+    print(sizes(deque.new()))
+    g.todo = deque.new()
+    print(g.todo.len())
+    let e: Deque<str> = d.emptied()
+    print(e.first().unwrap_or("none"))
+    let big: Deque<int64> = deque.of([5000000000])
+    print(big.first().unwrap_or(0))
+}
+"""
+
+
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
 class TestCompilerParity(unittest.TestCase):
+    def test_generic_constructors_of_a_module(self):
+        # MYLA-315: the shapes std.deque and std.set take (MYLA-330), a module's
+        # `pub fun new<T>() -> Deque<T>` called as `deque.new()` where the
+        # expected type fixes `T`: an annotation, a field, a parameter, an
+        # assignment, a generic method's own type parameter
+        with tempfile.TemporaryDirectory() as tmp:
+            write_program(tmp, GENERIC_MODULE_DEQUE, "deque.my")
+            write_program(tmp, GENERIC_MODULE_SET, "set.my")
+            main = write_program(tmp, GENERIC_MODULE_MAIN)
+            self.assertEqual(run_file_both_now(main), ("0\n2\n2\n2\n1\n0\n0\nnone\n5000000000\n", "", 0))
+
     def test_become_runs_a_million_deep(self):
         # MYLA-128, MYLA-131: every `become` of the parity programs jumps, so
         # they run a million calls deep in the default stack
@@ -3851,6 +4034,11 @@ PINNED = {
     "literal_left_of_unsigned_division": "0\n10\n0\n100\n0\n4000000005\n1\ntrue\n",
     # MYLA-356: new, so no recording; the interpreter gives the same
     "lambda_parameters_from_known_arguments": "6\n3\n5\ntrue\n3\n",
+    # MYLA-315: new; the interpreter gives the same
+    "generic_constructors_from_the_expected_type": "0\n1\n0\n4\nq\nno top\n0\nb\nhihi\n0\n3\n5000000000\n"
+                                                   "5000000000\n0\n7\n",
+    # MYLA-315: new; the interpreter gives the same
+    "generic_arguments_hinted_by_the_expected_type": "4\n5000000000\ns\n-1\n12\n200\n",
     # D102: the unsuffixed 123.456 is a float64 now (the recording's
     # float32 printed 123.456001); floats print in their shortest form (D155)
     "float_arithmetic": "3.75\n-0.75\n3.375\n3.5\n1.5\n-3.5\n0.30000000000000004\n0.3\n2\n100000\n"

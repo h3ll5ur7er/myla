@@ -1,0 +1,5 @@
+type error: cannot infer type parameter(s) T for 'count' from the arguments; add a type annotation to guide inference
+  --> examples/errors/type_generic_call_param_not_in_result.my:10:23
+   |
+10 |     let n: int = count()
+   |                  ^^^^^^^

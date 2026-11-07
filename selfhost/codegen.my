@@ -2006,13 +2006,19 @@ impl CodeGen {
     }
 
     // Solve a generic callee's type arguments (in declaration order) by unifying
-    // its declared parameter types against the concrete argument types.
-    fun solve_targs(self, sig: FuncSig, args: [Expr]) -> [Type] {
+    // its declared parameter types against the concrete argument types, then
+    // its result type against the type of the call `call_id`, which gives
+    // those the checker took from the call's expected type (MYLA-315).
+    fun solve_targs(self, sig: FuncSig, args: [Expr], call_id: int32) -> [Type] {
         var sub: [Subst] = []
         var i = 0
         while i < sig.params.len() && i < args.len() {
             for b in unify_into(sig.params[i], self.type_of(args[i].id)) { sub.push(b) }
             i = i + 1
+        }
+        match sig.ret {
+            Some(rt) => { if self.has_type(call_id) { for b in unify_into(rt, self.type_of(call_id)) { sub.push(b) } } },
+            None => {},
         }
         var out: [Type] = []
         for tp in sig.type_params {

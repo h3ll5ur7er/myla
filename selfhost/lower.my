@@ -1418,7 +1418,7 @@ impl Lower {
             return
         }
         let sig = cg.sig_of(target)
-        let ct = self.call_target(cg, sig, argv)
+        let ct = self.call_target(cg, sig, argv, op.id)
         // a `var self` method of a struct: its final `self` goes back to the
         // receiver, a variable or a field or list element of one, its indices
         // computed once (MYLA-142); nothing else reaches the place meanwhile
@@ -3326,11 +3326,13 @@ impl Lower {
     // With `tail`, by `become`: the parameters it passes heap values to are
     // owned (`find_kept_params`).
     // The function a call of `name` with `argv` calls: a generic one's
-    // instance for the argument types, which the code generator stamps out
-    // once this function is lowered, with its parameter and result types.
-    fun call_target(var self, cg: CodeGen, sig: FuncSig, argv: [Expr]) -> CallTarget {
+    // instance for the types of the arguments and of the call `call_id`
+    // (which fixes what the arguments leave open, MYLA-315), which the code
+    // generator stamps out once this function is lowered, with its parameter
+    // and result types.
+    fun call_target(var self, cg: CodeGen, sig: FuncSig, argv: [Expr], call_id: int32) -> CallTarget {
         if sig.type_params.len() == 0 { return CallTarget { name: sig.name, params: sig.params, ret: sig.ret } }
-        let targs = cg.solve_targs(sig, argv)
+        let targs = cg.solve_targs(sig, argv, call_id)
         self.f.instances.push(Instance { orig: sig.name, targs: targs })
         var sub: [Subst] = []
         var k = 0
@@ -3346,7 +3348,7 @@ impl Lower {
     #test(lower_on(), codegen_on("fun main() { print(1 + 2) }"), expr_of("Some(n)"), "list_sum", [], -1, false)[-1]
     fun direct_call(var self, cg: CodeGen, e: Expr, name: str, argv: [Expr], into: int32, tail: bool) -> int32 {
         let sig = cg.sig_of(name)
-        let ct = self.call_target(cg, sig, argv)
+        let ct = self.call_target(cg, sig, argv, e.id)
         let target = ct.name
         let params = ct.params
         let ret = ct.ret
