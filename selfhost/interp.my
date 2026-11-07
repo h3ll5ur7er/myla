@@ -2934,6 +2934,9 @@ impl Interp {
         // a non-mutating receiver evaluation for key derivation only
         return match recv.kind {
             ExprKind.Name(n) => self.lookup_or_unit(n),
+            // a field of one, such as `self.inner` whose type is a type
+            // parameter: its value's tag (MYLA-365)
+            ExprKind.GetField(t, f) => get_field(self.eval_pure(t), f),
             _ => Value.VUnit,
         }
     }
@@ -2958,6 +2961,7 @@ impl Interp {
     // Call method `fi` on the receiver on top of `self.receivers`, which
     // moves into the method's `self`; yields the result and the final `self`.
     fun call_with_receiver(var self, fi: int32, argv: [Value]) -> (Value, Value) {
+        if self.stop() { return Value.VUnit, self.receivers.pop() }   // as call_func (MYLA-366)
         if !self.enter_call() { return Value.VUnit, self.receivers.pop() }
         let saved = self.scopes
         self.enter_method(fi, argv)
@@ -3654,6 +3658,7 @@ impl Interp {
 
     #test(interp_on("[int]"), Value.VClosure([], ExprOrBlock.EB_Block(Block { line: 0, col: 0, sp: SrcSpan { sline: 0, scol: 0, eline: 0, ecol: 0 }, stmts: [] }), [], [], "inc", true), [Value.VInt(3)])[Value.VUnit]
     fun call_value(var self, v: Value, argv: [Value]) -> Value {
+        if self.stop() { return Value.VUnit }   // as call_func (MYLA-366)
         return match v {
             Value.VClosure(ps, body, cnames, cvals, fname, isfunc) => self.call_closure(ps, body, cnames, cvals, fname, isfunc, argv),
             Value.VCompose(fs) => self.call_compose(fs, argv),
@@ -3763,6 +3768,9 @@ impl Interp {
 
     #test(interp_on("fun k(f: (int) -> int) -> int { return f(2) }; fun z() -> int { return k((x: int) => x + 1) }"), 1, [Value.VChar(53)])[Value.VInt(3)]
     fun call_func(var self, fi: int32, argv: [Value]) -> Value {
+        // an argument that stopped (a `?`, a failure) leaves no call to make
+        // (MYLA-366): its arguments are short
+        if self.stop() { return Value.VUnit }
         if !self.enter_call() { return Value.VUnit }
         let saved = self.scopes
         self.enter_func(fi, argv)

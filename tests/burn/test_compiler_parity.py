@@ -9,6 +9,12 @@ from tests.burn._native import (CAN_BUILD_NATIVE, SKIP_REASON, build_and_run, in
                                 selfhost_run, write_program)
 
 PROGRAMS = {
+    # a `?` in a call's argument returns from the caller in the interpreter
+    # too, instead of calling with the arguments it has (MYLA-366)
+    "try_in_a_call_argument": 'fun inner() -> Result<int, str> { return Err("bad") }\nfun twice(x: int) -> int { return x * 2 }\nfun outer() -> Result<int, str> {\n    return Ok(twice(inner()?))\n}\n#main\nfun main() {\n    match outer() {\n        Ok(v) => print(f"ok {v}"),\n        Err(e) => print(f"err {e}"),\n    }\n}\n',
+    # a method called on a field whose type is a type parameter is found in
+    # the interpreter too (MYLA-365)
+    "method_on_a_type_parameter_field": 'trait Step { fun step(self) -> int }\nstruct One { n: int }\nimpl Step for One { fun step(self) -> int { return self.n + 1 } }\nstruct Wrap<R> { inner: R }\nimpl<R: Step> Wrap<R> {\n    fun go(self) -> int { return self.inner.step() }\n}\n#main\nfun main() {\n    let w = Wrap { inner: One { n: 4 } }\n    print(w.go())\n}\n',
     # an unsuffixed literal left of an unsigned operator takes the right
     # operand's type, natively too (MYLA-358: 10 / m divided as signed)
     "literal_left_of_unsigned_division": (
@@ -4030,6 +4036,9 @@ class TestCompilerParity(unittest.TestCase):
 # longer holds (a later decision changed its meaning) or there is none (a
 # program added or changed since): its output, pinned here.
 PINNED = {
+    # MYLA-365, MYLA-366: new; native code gives the same
+    "try_in_a_call_argument": "err bad\n",
+    "method_on_a_type_parameter_field": "5\n",
     # MYLA-358: new; the interpreter gives the same
     "literal_left_of_unsigned_division": "0\n10\n0\n100\n0\n4000000005\n1\ntrue\n",
     # MYLA-356: new, so no recording; the interpreter gives the same
