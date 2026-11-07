@@ -1000,6 +1000,31 @@ fun literal_prefix(n: Node) -> (str, bool) {
     }
 }
 
+// `n` backwards, without its groups: it matches the reversed texts.
+fun reversed(n: Node) -> Node {
+    return match n {
+        Cat(xs) => {
+            var ys: [Node] = []
+            var i = xs.len() - 1
+            while i >= 0 {
+                ys.push(reversed(xs[i]))
+                i -= 1
+            }
+            Node.Cat(ys)
+        }
+        Alt(xs) => {
+            var ys: [Node] = []
+            for x in xs {
+                ys.push(reversed(x))
+            }
+            Node.Alt(ys)
+        }
+        Rep(sub, min, max, greedy) => Node.Rep(reversed(sub), min, max, greedy)
+        Group(sub, _) => reversed(sub)
+        _ => n
+    }
+}
+
 // Whether every match of `n` starts at the beginning of the text.
 fun anchored_start(n: Node) -> bool {
     return match n {
@@ -1025,6 +1050,13 @@ pub struct Regex {
     anchored: bool,
     // the bytes every match starts with
     prefix: str,
+    // where the program has a `.*?` in front, for an unanchored DFA
+    loop_pc: int,
+    // the program of the reversed pattern, without groups
+    rop: [int],
+    rarg: [int],
+    rarg2: [int],
+    rsets: [bool],
 }
 
 // One match: its byte offsets in the text and its text.
@@ -1052,6 +1084,14 @@ pub fun compile(pattern: str) -> Result<Regex, RegexError> {
     c.node(tree)?
     c.emit(OP_SAVE, 1, 0)?
     c.emit(OP_MATCH, 0, 0)?
+    // `.*?` and then the program, as the start of the forward DFA
+    let loop_pc = c.pc()
+    c.emit(OP_SPLIT, 0, loop_pc + 1)?
+    c.emit(OP_ANY, 0, 0)?
+    c.emit(OP_JMP, loop_pc, 0)?
+    var r = Compiler { op: [], arg: [], arg2: [], sets: [], nsets: 0 }
+    r.node(reversed(tree))?
+    r.emit(OP_MATCH, 0, 0)?
     return Ok(Regex {
         pattern: pattern,
         op: c.op,
@@ -1061,6 +1101,11 @@ pub fun compile(pattern: str) -> Result<Regex, RegexError> {
         names: parsed.1,
         anchored: anchored_start(tree),
         prefix: literal_prefix(tree).0,
+        loop_pc: loop_pc,
+        rop: r.op,
+        rarg: r.arg,
+        rarg2: r.arg2,
+        rsets: r.sets,
     })
 }
 
@@ -1125,38 +1170,29 @@ impl Regex {
         return self.names.len() - 1
     }
 
-    fun vm(self, s: str, nslots: int) -> Vm {
-        let n = self.op.len()
-        var cur: [int] = []
-        var k = 0
-        while k < nslots {
-            cur.push(-1)
-            k += 1
-        }
-        return Vm {
-            op: self.op,
-            arg: self.arg,
-            arg2: self.arg2,
-            sets: self.sets,
-            n: n,
-            nslots: nslots,
-            dense: zeros(2 * n),
-            sparse: zeros(2 * n),
-            counts: [0, 0],
-            slots: zeros(2 * n * nslots),
-            cur: cur,
-            best: cur,
-            stack: [],
+    // A search of `s` that wants `nslots` slots: the DFAs for a text of
+    // `DFA_MIN_TEXT` bytes or more (`engine` 0), or always (1), or never
+    // (-1: the Pike VM alone).
+    fun searcher(self, s: str, nslots: int, engine: int) -> Searcher {
+        let use_dfa = engine > 0 || (engine == 0 && s.len() >= DFA_MIN_TEXT)
+        let start = if self.anchored { 0 } else { self.loop_pc }
+        return Searcher {
             s: s,
+            fwd: new_dfa(self.op, self.arg, self.arg2, self.sets, start, false, s, use_dfa),
+            rev: new_dfa(self.rop, self.rarg, self.rarg2, self.rsets, 0, true, s, use_dfa),
+            vm: new_vm(self, s, nslots),
+            use_dfa: use_dfa,
             anchored: self.anchored,
             prefix: self.prefix,
+            nslots: nslots,
+            slots: [],
         }
     }
 
     // Whether `s` has a match.
     fun is_match(self, s: str) -> bool {
-        var vm = self.vm(s, 0)
-        return vm.run(0)
+        var sr = self.searcher(s, 0, 0)
+        return sr.is_match()
     }
 
     // The leftmost-first match in `s`.
@@ -1170,29 +1206,29 @@ impl Regex {
         if start < 0 || start > s.len() {
             return None
         }
-        var vm = self.vm(s, 2)
-        if !vm.run(start) {
+        var sr = self.searcher(s, 2, 0)
+        if !sr.search(start) {
             return None
         }
-        let a = vm.best[0]
-        let b = vm.best[1]
+        let a = sr.slots[0]
+        let b = sr.slots[1]
         return Some(Match { start: a, end: b, text: substring(s, a, b) })
     }
 
-    // The slots of every successive match that doesn't overlap the one
-    // before, as Go finds them: an empty match right after a match doesn't
-    // count.
-    fun all_slots(self, s: str, nslots: int) -> [[int]] {
+    // The slots of the successive matches (at most `limit` of them, all for
+    // -1) that don't overlap the one before, as Go finds them: an empty
+    // match right after a match doesn't count.
+    fun all_slots(self, s: str, nslots: int, limit: int, engine: int) -> [[int]] {
         var found: [[int]] = []
-        var vm = self.vm(s, nslots)
+        var sr = self.searcher(s, nslots, engine)
         var pos = 0
         var prev_end = -1
-        while pos <= s.len() {
-            if !vm.run(pos) {
+        while pos <= s.len() && (limit < 0 || found.len() < limit) {
+            if !sr.search(pos) {
                 break
             }
-            let a = vm.best[0]
-            let b = vm.best[1]
+            let a = sr.slots[0]
+            let b = sr.slots[1]
             var accept = true
             if b == a {
                 if a == prev_end {
@@ -1204,7 +1240,7 @@ impl Regex {
             }
             prev_end = b
             if accept {
-                found.push(vm.best)
+                found.push(sr.slots)
             }
         }
         return found
@@ -1213,7 +1249,7 @@ impl Regex {
     // Every match in `s`, left to right, none overlapping another.
     fun find_all(self, s: str) -> [Match] {
         var out: [Match] = []
-        for m in self.all_slots(s, 2) {
+        for m in self.all_slots(s, 2, -1, 0) {
             out.push(Match { start: m[0], end: m[1], text: substring(s, m[0], m[1]) })
         }
         return out
@@ -1221,17 +1257,17 @@ impl Regex {
 
     // The groups of the leftmost-first match in `s`.
     fun captures(self, s: str) -> Option<Captures> {
-        var vm = self.vm(s, 2 * self.names.len())
-        if !vm.run(0) {
+        var sr = self.searcher(s, 2 * self.names.len(), 0)
+        if !sr.search(0) {
             return None
         }
-        return Some(Captures { haystack: s, slots: vm.best, names: self.names })
+        return Some(Captures { haystack: s, slots: sr.slots, names: self.names })
     }
 
     // The groups of every match in `s`, as `find_all` finds them.
     fun captures_all(self, s: str) -> [Captures] {
         var out: [Captures] = []
-        for slots in self.all_slots(s, 2 * self.names.len()) {
+        for slots in self.all_slots(s, 2 * self.names.len(), -1, 0) {
             out.push(Captures { haystack: s, slots: slots, names: self.names })
         }
         return out
@@ -1254,11 +1290,7 @@ impl Regex {
         let nslots = if plain { 2 } else { 2 * self.names.len() }
         var sb = StringBuilder()
         var last = 0
-        var done = 0
-        for slots in self.all_slots(s, nslots) {
-            if limit >= 0 && done >= limit {
-                break
-            }
+        for slots in self.all_slots(s, nslots, limit, 0) {
             sb.append(s, last, slots[0])
             if plain {
                 sb.append(with)
@@ -1266,7 +1298,6 @@ impl Regex {
                 sb.append(expanded(with, s, slots, self.names))
             }
             last = slots[1]
-            done += 1
         }
         sb.append(s, last, s.len())
         return sb.build()
@@ -1277,12 +1308,452 @@ impl Regex {
     fun split(self, s: str) -> [str] {
         var pieces: [str] = []
         var last = 0
-        for m in self.all_slots(s, 2) {
+        for m in self.all_slots(s, 2, -1, 0) {
             pieces.push(substring(s, last, m[0]))
             last = m[1]
         }
         pieces.push(substring(s, last, s.len()))
         return pieces
+    }
+}
+
+// --- Searching ----------------------------------------------------------------
+
+// Texts shorter than this are searched by the Pike VM alone: building DFA
+// states costs more than it saves on them (a search costs both about 5 µs
+// at 72 bytes, natively).
+const DFA_MIN_TEXT: int = 96
+
+// One search of a text: the DFAs find where a match ends (forwards) and
+// where it starts (backwards from there), and the Pike VM finds the groups
+// of that match, or does it all when the DFAs give up.
+struct Searcher {
+    s: str,
+    fwd: Dfa,
+    rev: Dfa,
+    vm: Vm,
+    use_dfa: bool,
+    anchored: bool,
+    prefix: str,
+    nslots: int,
+    // the slots of the match found
+    slots: [int],
+}
+
+impl Searcher {
+    fun is_match(var self) -> bool {
+        if self.use_dfa {
+            var lo = 0
+            if self.prefix.len() > 0 && !self.anchored {
+                lo = find_bytes(self.s, self.prefix, 0)
+                if lo < 0 {
+                    return false
+                }
+            }
+            let end = self.fwd.forward(lo, true)
+            if end >= -1 {
+                return end >= 0
+            }
+            self.use_dfa = false
+        }
+        return self.vm.run(0, false)
+    }
+
+    // Searches from `start` for the leftmost-first match; true if there is
+    // one, with its slots in `slots`.
+    fun search(var self, start: int) -> bool {
+        if self.use_dfa {
+            let found = self.dfa_search(start)
+            if found >= 0 {
+                return found == 1
+            }
+            self.use_dfa = false
+        }
+        if !self.vm.run(start, false) {
+            return false
+        }
+        self.slots = self.vm.best
+        return true
+    }
+
+    // 1 if the DFAs find a match, 0 if there is none, -1 if they give up.
+    fun dfa_search(var self, start: int) -> int {
+        if self.anchored && start > 0 {
+            return 0
+        }
+        var lo = start
+        if self.prefix.len() > 0 && !self.anchored {
+            lo = find_bytes(self.s, self.prefix, start)
+            if lo < 0 {
+                return 0
+            }
+        }
+        let end = self.fwd.forward(lo, false)
+        if end == -1 {
+            return 0
+        }
+        if end < 0 {
+            return -1
+        }
+        let begin = self.rev.backward(end, lo)
+        if begin < 0 {
+            return -1
+        }
+        if self.nslots <= 2 {
+            self.slots = [begin, end]
+            return 1
+        }
+        // the groups: the Pike VM, from the start alone
+        if !self.vm.run(begin, true) {
+            return -1
+        }
+        self.slots = self.vm.best
+        return 1
+    }
+}
+
+// The first position at or after `lo` where `needle` (not empty) is in
+// `s`, or -1.
+#test("abcabc", "ca", 0)[2]
+#test("abcabc", "bc", 2)[4]
+#test("abcabc", "cb", 0)[-1]
+#test("ab", "abc", 0)[-1]
+fun find_bytes(s: str, needle: str, lo: int) -> int {
+    let first = needle[0]
+    let m = needle.len()
+    let last = s.len() - m
+    var i = lo
+    while i <= last {
+        if s[i] == first {
+            var k = 1
+            while k < m && s[i + k] == needle[k] {
+                k += 1
+            }
+            if k == m {
+                return i
+            }
+        }
+        i += 1
+    }
+    return -1
+}
+
+// --- The lazy DFA -------------------------------------------------------------
+//
+// A state is the ordered list of the threads of a Pike VM (the instructions
+// that wait for a byte, the match, and assertions not yet decided) and the
+// class of the byte read last. Its transitions are made when first needed:
+// on byte `c`, the assertions are decided, now that the bytes on both sides
+// are known; a match among the threads means a match ends here; and the
+// threads that take `c` give the next state. Forwards, a match drops the
+// threads after it, which have less priority, as the Pike VM does
+// (leftmost-first); backwards, every thread goes on, and the last match
+// seen is the longest.
+
+// The classes of the byte on one side of a position, which is all the
+// assertions ask: none (an end of the text), a newline, a word byte, another.
+const EDGE: int = 0
+const NEWLINE: int = 1
+const WORD: int = 2
+const OTHER: int = 3
+
+// The end of the text, as a transition's byte.
+const END: int = 256
+const STRIDE: int = 257
+
+// More states than this, and the DFA gives up for the Pike VM.
+const MAX_STATES: int = 2000
+
+#test(END)[EDGE]
+#test(10)[NEWLINE]
+#test(95)[WORD]
+#test(32)[OTHER]
+fun class_of(c: int) -> int {
+    if c == END { return EDGE }
+    if c == 10 { return NEWLINE }
+    if c < 128 && is_word_byte(c as uint8) { return WORD }
+    return OTHER
+}
+
+// Whether the assertion `k` holds between bytes of the classes `before`
+// and `after`.
+#test(WORD_BOUNDARY, EDGE, WORD)[true]
+#test(WORD_BOUNDARY, WORD, WORD)[false]
+#test(NOT_WORD_BOUNDARY, OTHER, NEWLINE)[true]
+#test(BEGIN_LINE, NEWLINE, WORD)[true]
+#test(END_LINE, WORD, OTHER)[false]
+#test(END_TEXT, WORD, EDGE)[true]
+fun look_holds(k: int, before: int, after: int) -> bool {
+    if k == BEGIN_TEXT { return before == EDGE }
+    if k == END_TEXT { return after == EDGE }
+    if k == BEGIN_LINE { return before == EDGE || before == NEWLINE }
+    if k == END_LINE { return after == EDGE || after == NEWLINE }
+    if k == WORD_BOUNDARY { return (before == WORD) != (after == WORD) }
+    return (before == WORD) == (after == WORD)
+}
+
+struct Dfa {
+    op: [int],
+    arg: [int],
+    arg2: [int],
+    sets: [bool],
+    start: int,
+    reverse: bool,
+    s: str,
+    // the states: 0 is the dead one
+    keys: [str: int],
+    lists: [[int]],
+    context: [int],
+    // per state and byte (and END): the next state * 2 + 1 if a match ends
+    // before the byte, -1 if not made yet
+    trans: [int],
+    // the start state for each class of the byte before it, -1 if not made
+    starts: [int],
+    // a mark per instruction: the closure that visited it last
+    seen: [int],
+    mark: int,
+    stack: [int],
+    out: [int],
+}
+
+fun new_dfa(op: [int], arg: [int], arg2: [int], sets: [bool], start: int, reverse: bool, s: str, used: bool) -> Dfa {
+    var trans: [int] = []
+    var seen: [int] = []
+    if used {
+        var k = 0
+        while k < STRIDE {
+            trans.push(0)
+            k += 1
+        }
+        seen = zeros(op.len())
+    }
+    let none: [int] = []
+    let dead: [str: int] = ["": 0]
+    return Dfa {
+        op: op,
+        arg: arg,
+        arg2: arg2,
+        sets: sets,
+        start: start,
+        reverse: reverse,
+        s: s,
+        keys: dead,
+        lists: [none],
+        context: [EDGE],
+        trans: trans,
+        starts: [-1, -1, -1, -1],
+        seen: seen,
+        mark: 0,
+        stack: [],
+        out: [],
+    }
+}
+
+impl Dfa {
+    // Appends to `out` the threads from `pc0`, in priority order, each once
+    // per mark. With `decide`, assertions are decided by the classes
+    // `before` and `after`; without, they are threads themselves.
+    fun closure(var self, pc0: int, decide: bool, before: int, after: int) {
+        self.stack.push(pc0)
+        while self.stack.len() > 0 {
+            var pc = self.stack.pop()
+            while true {
+                if self.seen[pc] == self.mark {
+                    break
+                }
+                self.seen[pc] = self.mark
+                let o = self.op[pc]
+                if o == OP_SPLIT {
+                    self.stack.push(self.arg2[pc])
+                    pc = self.arg[pc]
+                } else if o == OP_JMP {
+                    pc = self.arg[pc]
+                } else if o == OP_SAVE {
+                    pc += 1
+                } else if o == OP_LOOK && decide {
+                    if !look_holds(self.arg[pc], before, after) {
+                        break
+                    }
+                    pc += 1
+                } else {
+                    self.out.push(pc)
+                    break
+                }
+            }
+        }
+    }
+
+    // The state of the threads `list` after a byte of class `context`; -1
+    // if there would be too many states.
+    fun state(var self, list: [int], context: int) -> int {
+        if list.len() == 0 {
+            return 0
+        }
+        var sb = StringBuilder()
+        sb.append_byte(context as uint8)
+        for pc in list {
+            sb.append_byte((pc & 255) as uint8)
+            sb.append_byte(((pc >> 8) & 255) as uint8)
+            sb.append_byte(((pc >> 16) & 255) as uint8)
+        }
+        let key = sb.build()
+        match get(self.keys, key) {
+            Some(i) => {
+                return i
+            }
+            None => {}
+        }
+        let i = self.lists.len()
+        if i >= MAX_STATES {
+            return -1
+        }
+        self.keys[key] = i
+        self.lists.push(list)
+        self.context.push(context)
+        var k = 0
+        while k < STRIDE {
+            self.trans.push(-1)
+            k += 1
+        }
+        return i
+    }
+
+    // The start state after a byte of class `context`, or -1.
+    fun start_state(var self, context: int) -> int {
+        let known = self.starts[context]
+        if known >= 0 {
+            return known
+        }
+        self.mark += 1
+        self.out = []
+        self.closure(self.start, false, 0, 0)
+        let i = self.state(self.out, context)
+        if i >= 0 {
+            self.starts[context] = i
+        }
+        return i
+    }
+
+    // Makes the transition of state `si` on `c` (a byte or END); -1 if
+    // there would be too many states.
+    fun transition(var self, si: int, c: int) -> int {
+        let list = self.lists[si]
+        let ctx = self.context[si]
+        let cc = class_of(c)
+        let before = if self.reverse { cc } else { ctx }
+        let after = if self.reverse { ctx } else { cc }
+        // decide the assertions: the threads that wait for a byte, in order
+        self.mark += 1
+        self.out = []
+        for pc in list {
+            self.closure(pc, true, before, after)
+        }
+        let threads = self.out
+        // follow the threads that take `c`
+        self.mark += 1
+        self.out = []
+        var matched = false
+        for pc in threads {
+            let o = self.op[pc]
+            if o == OP_MATCH {
+                matched = true
+                if !self.reverse {
+                    break
+                }
+            } else if c < END {
+                var ok = false
+                if o == OP_BYTE {
+                    ok = c == self.arg[pc]
+                } else if o == OP_SET {
+                    ok = self.sets[self.arg[pc] * 256 + c]
+                } else if o == OP_ANY {
+                    ok = true
+                } else if o == OP_NOT_NL {
+                    ok = c != 10
+                }
+                if ok {
+                    self.closure(pc + 1, false, 0, 0)
+                }
+            }
+        }
+        var next = 0
+        if c < END {
+            next = self.state(self.out, cc)
+            if next < 0 {
+                return -1
+            }
+        }
+        let t = next * 2 + (if matched { 1 } else { 0 })
+        self.trans[si * STRIDE + c] = t
+        return t
+    }
+
+    // Scans forwards from `lo`: the end of the leftmost-first match (the
+    // first end found, with `earliest`), -1 if there is none, -2 if the DFA
+    // gave up.
+    fun forward(var self, lo: int, earliest: bool) -> int {
+        let s = self.s
+        let len = s.len()
+        var si = self.start_state(if lo > 0 { class_of(s[lo - 1] as int) } else { EDGE })
+        if si < 0 {
+            return -2
+        }
+        var last = -1
+        var p = lo
+        while true {
+            let c = if p < len { s[p] as int } else { END }
+            var t = self.trans[si * STRIDE + c]
+            if t < 0 {
+                t = self.transition(si, c)
+                if t < 0 {
+                    return -2
+                }
+            }
+            if (t & 1) == 1 {
+                last = p
+                if earliest {
+                    return p
+                }
+            }
+            si = t >> 1
+            if si == 0 || c == END {
+                return last
+            }
+            p += 1
+        }
+        unreachable()
+    }
+
+    // Scans backwards from `end`, no further than `low`: the first position
+    // from which the text up to `end` matches, -1 if there is none, -2 if
+    // the DFA gave up.
+    fun backward(var self, end: int, low: int) -> int {
+        let s = self.s
+        var si = self.start_state(if end < s.len() { class_of(s[end] as int) } else { EDGE })
+        if si < 0 {
+            return -2
+        }
+        var first = -1
+        var p = end
+        while true {
+            let c = if p > 0 { s[p - 1] as int } else { END }
+            var t = self.trans[si * STRIDE + c]
+            if t < 0 {
+                t = self.transition(si, c)
+                if t < 0 {
+                    return -2
+                }
+            }
+            if (t & 1) == 1 {
+                first = p
+            }
+            si = t >> 1
+            if si == 0 || p == low {
+                return first
+            }
+            p -= 1
+        }
+        unreachable()
     }
 }
 
@@ -1450,6 +1921,34 @@ struct Vm {
     prefix: str,
 }
 
+fun new_vm(re: Regex, s: str, nslots: int) -> Vm {
+    let n = re.op.len()
+    var cur: [int] = []
+    var k = 0
+    while k < nslots {
+        cur.push(-1)
+        k += 1
+    }
+    return Vm {
+        op: re.op,
+        arg: re.arg,
+        arg2: re.arg2,
+        sets: re.sets,
+        n: n,
+        nslots: nslots,
+        dense: zeros(2 * n),
+        sparse: zeros(2 * n),
+        counts: [0, 0],
+        slots: zeros(2 * n * nslots),
+        cur: cur,
+        best: cur,
+        stack: [],
+        s: s,
+        anchored: re.anchored,
+        prefix: re.prefix,
+    }
+}
+
 impl Vm {
     // Whether the assertion `k` holds at `pos`.
     fun look(self, k: int, pos: int) -> bool {
@@ -1521,36 +2020,15 @@ impl Vm {
         }
     }
 
-    // The first position at or after `pos` where the prefix starts, or -1.
-    fun skip_to_prefix(self, pos: int) -> int {
-        let s = self.s
-        let p = self.prefix
-        let first = p[0]
-        let last = s.len() - p.len()
-        var i = pos
-        while i <= last {
-            if s[i] == first {
-                var k = 1
-                while k < p.len() && s[i + k] == p[k] {
-                    k += 1
-                }
-                if k == p.len() {
-                    return i
-                }
-            }
-            i += 1
-        }
-        return -1
-    }
-
     // Searches from `start` for the leftmost-first match; true if there is
-    // one, with its slots in `best`.
-    fun run(var self, start: int) -> bool {
+    // one, with its slots in `best`. With `here`, only a match that starts
+    // at `start`.
+    fun run(var self, start: int, here: bool) -> bool {
         let s = self.s
         let len = s.len()
         let n = self.n
         let nslots = self.nslots
-        let use_prefix = self.prefix.len() > 0 && !self.anchored
+        let use_prefix = self.prefix.len() > 0 && !self.anchored && !here
         var matched = false
         var q = 0
         self.counts[0] = 0
@@ -1558,18 +2036,18 @@ impl Vm {
         var pos = start
         while true {
             if self.counts[q] == 0 {
-                if matched || (self.anchored && pos > 0) {
+                if matched || ((self.anchored || here) && pos > start) {
                     break
                 }
                 if use_prefix {
-                    let at = self.skip_to_prefix(pos)
+                    let at = find_bytes(s, self.prefix, pos)
                     if at < 0 {
                         break
                     }
                     pos = at
                 }
             }
-            if !matched && (!self.anchored || pos == 0) {
+            if !matched && (!self.anchored || pos == 0) && (!here || pos == start) {
                 var k = 0
                 while k < nslots {
                     self.cur[k] = -1
@@ -3463,6 +3941,8 @@ impl Vm {
 #test("é+", "éé")["0-4"] // a character in a pattern is one atom
 #test("(?i)é", "É")["-"] // case folding is ASCII
 #test("\\C", "\n")["0-1"]
+#test("(?m)^\\w+$", "ab\ncd")["0-2"]
+#test("\\bcd\\b", "ab cd")["3-5"]
 fun spans(pattern: str, text: str) -> str {
     let re = match compile(pattern) {
         Ok(r) => r
@@ -3470,24 +3950,42 @@ fun spans(pattern: str, text: str) -> str {
             return f"error: {e}"
         }
     }
-    return match re.captures(text) {
-        Some(c) => {
-            var sb = StringBuilder()
-            var i = 0
-            while i < c.len() {
-                if i > 0 {
-                    sb.append(" ")
-                }
-                match c.get(i) {
-                    Some(m) => sb.append(f"{m.start}-{m.end}")
-                    None => sb.append("-")
-                }
-                i += 1
-            }
-            sb.build()
-        }
-        None => "-"
+    // the Pike VM alone, and the DFAs with it, must agree
+    let n = 2 * re.names.len()
+    var pike = re.searcher(text, n, -1)
+    var dfa = re.searcher(text, n, 1)
+    let found = pike.search(0)
+    if dfa.search(0) != found || (found && shown_slots(dfa.slots) != shown_slots(pike.slots)) {
+        return "the engines disagree: " + shown_slots(dfa.slots)
     }
+    var pike0 = re.searcher(text, 0, -1)
+    var dfa0 = re.searcher(text, 0, 1)
+    if pike0.is_match() != found || dfa0.is_match() != found {
+        return "is_match disagrees"
+    }
+    if !found {
+        return "-"
+    }
+    return shown_slots(pike.slots)
+}
+
+// Slots as start-end pairs, `-` for a group that didn't take part.
+#test([0, 2, -1, -1, 1, 2])["0-2 - 1-2"]
+fun shown_slots(slots: [int]) -> str {
+    var sb = StringBuilder()
+    var i = 0
+    while i + 1 < slots.len() {
+        if i > 0 {
+            sb.append(" ")
+        }
+        if slots[i] < 0 {
+            sb.append("-")
+        } else {
+            sb.append(f"{slots[i]}-{slots[i + 1]}")
+        }
+        i += 2
+    }
+    return sb.build()
 }
 
 // Why `pattern` doesn't compile, or "ok".
@@ -3579,6 +4077,18 @@ fun all_spans(pattern: str, text: str) -> str {
         }
         sb.append(parts[i])
         i += 1
+    }
+    let pike = re.all_slots(text, 2, -1, -1)
+    let dfa = re.all_slots(text, 2, -1, 1)
+    if pike.len() != dfa.len() {
+        return "the engines disagree"
+    }
+    var k = 0
+    while k < pike.len() {
+        if shown_slots(pike[k]) != shown_slots(dfa[k]) {
+            return "the engines disagree"
+        }
+        k += 1
     }
     return sb.build()
 }
@@ -3743,4 +4253,36 @@ fun repeated(s: str, n: int) -> str {
         k += 1
     }
     return sb.build()
+}
+
+// Text of `n` bytes, `a` and `b` in a pseudo-random order.
+fun ab_text(n: int) -> str {
+    var sb = StringBuilder()
+    var seed: uint32 = 7
+    var k = 0
+    while k < n {
+        seed = seed * 1103515245u32 + 12345u32
+        sb.append_byte(if ((seed >> 16) & 1u32) == 1u32 { 'a' } else { 'b' })
+        k += 1
+    }
+    return sb.build()
+}
+
+// A pattern whose DFA has more states than the cache takes: the search
+// goes on in the Pike VM and finds what the Pike VM alone finds.
+#test
+fun dfa_gives_up_for_the_pike_vm() {
+    let text = ab_text(3000)
+    var sr = compiled("a[ab]{14}c").searcher(text, 0, 1)
+    holds(!sr.is_match(), "no c")
+    holds(!sr.use_dfa, "the DFA gave up")
+    let re = compiled("a[ab]{14}b")
+    let auto = re.all_slots(text, 2, -1, 1)
+    let pike = re.all_slots(text, 2, -1, -1)
+    holds(auto.len() == pike.len() && auto.len() > 100, f"{auto.len()} matches")
+    var k = 0
+    while k < pike.len() {
+        holds(shown_slots(auto[k]) == shown_slots(pike[k]), f"match {k}")
+        k += 1
+    }
 }
