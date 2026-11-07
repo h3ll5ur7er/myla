@@ -1,0 +1,109 @@
+// Benchmark (MYLA-310): removing keys from a map. n keys are inserted and
+// all removed again, then a working set of 1,000 live keys slides over 4n
+// keys: each step inserts a key and removes the oldest, now and then
+// replacing a value (its key keeps its place) or removing a key and
+// inserting it again (it moves to the end, D105). The order the keys are
+// left in is part of the result: removal, lookups past removed keys and
+// insertion order together.
+//
+//   map_remove [n]   prints, for the first part, the keys left and the sum
+//                    of the values removed; for the second, the keys left,
+//                    how many lookups found their key and a checksum of the
+//                    keys in their order
+
+from std.process import args
+from std.num import parse_int
+
+const LIVE: int64 = 1000
+
+// The key of step `i`: spread over the integers, so neighbours don't
+// share a slot by accident.
+#test(0)[0]
+#test(1)[2654435761]
+fun key(i: int64) -> int64 {
+    return i * 2654435761 % 4294967296
+}
+
+// n keys inserted, then removed: the even steps' keys first, then the odd
+// ones'. (keys left, the sum of the values removed).
+#test(0)[(0, 0)]
+#test(10)[(0, 90)]
+fun drain(n: int64) -> (int, int64) {
+    var m: [int64: int64] = [:]
+    var i: int64 = 0
+    while i < n {
+        m[key(i)] = 2 * i
+        i += 1
+    }
+    var sum: int64 = 0
+    for start in [0i64, 1i64] {
+        var j: int64 = start
+        while j < n {
+            let k = key(j)
+            sum += m[k]
+            m.remove(k)
+            j += 2
+        }
+    }
+    return (m.len(), sum)
+}
+
+// A window of LIVE keys sliding over `steps` keys. (keys left, lookups
+// that found their key, the checksum of the keys in their order).
+#test(0)[(0, 0, 0)]
+#test(1200)[(1000, 500, 1076701840064178)]
+fun slide(steps: int64) -> (int, int64, int64) {
+    var m: [int64: int64] = [:]
+    var found: int64 = 0
+    var s: int64 = 0
+    while s < steps {
+        m[key(s)] = s
+        if s >= LIVE {
+            m.remove(key(s - LIVE))
+        }
+        if s % 97 == 0 && s >= 500 {
+            // replaced: the key keeps its place
+            m[key(s - 500)] = -s
+        }
+        if s % 89 == 0 && s >= 300 {
+            // removed and inserted again: the key moves to the end
+            let k = key(s - 300)
+            m.remove(k)
+            m[k] = s
+        }
+        if m.contains(key(s - 700)) {
+            found += 1
+        }
+        s += 1
+    }
+    var sum: int64 = 0
+    var place: int64 = 1
+    for k in m {
+        sum += place * (k - m[k])
+        place += 1
+    }
+    return (m.len(), found, sum)
+}
+
+// The size given as the first argument, or `fallback`.
+fun size(fallback: int64) -> int64 {
+    let argv = args()
+    if argv.len() < 2 {
+        return fallback
+    }
+    return match parse_int(argv[1]) {
+        Some(v) => v,
+        None => fallback,
+    }
+}
+
+fun main() {
+    let n = size(32000)
+    let d = drain(n)
+    print(d.0)
+    print(d.1)
+    let w = slide(4 * n)
+    print(w.0)
+    print(w.1)
+    print(w.2)
+}

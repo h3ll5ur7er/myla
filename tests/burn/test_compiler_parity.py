@@ -8,6 +8,36 @@ from tests.burn._targets import program_excuse
 from tests.burn._native import CAN_BUILD_NATIVE, SKIP_REASON, build_and_run, interpret, selfhost_run
 
 PROGRAMS = {
+    # an unsuffixed literal left of an unsigned operator takes the right
+    # operand's type, natively too (MYLA-358: 10 / m divided as signed)
+    "literal_left_of_unsigned_division": (
+        "#main\nfun main() {\n"
+        "    let m: uint64 = 18446744073709551615u64\n"
+        "    print(10 / m)\n    print(10 % m)\n"
+        "    let big: uint64 = 9223372036854775808u64\n"
+        "    print(100 / big)\n    print(100 % big)\n"
+        "    let n: uint32 = 4000000000u32\n"
+        "    print(7 / n)\n    print(5 + n)\n"
+        "    let k: uint8 = 200u8\n"
+        "    print(255 / k)\n    print(100 < k)\n"
+        "}\n"
+    ),
+    # a lambda's parameters typed from a generic call's argument types known
+    # so far, its result inferred and binding the rest (MYLA-356)
+    "lambda_parameters_from_known_arguments": (
+        "struct Box<T> {\n    v: T,\n}\n"
+        "impl<T> Box<T> {\n    fun map<U>(self, f: (T) -> U) -> Box<U> {\n        return Box { v: f(self.v) }\n    }\n}\n"
+        "fun apply<T, U>(x: T, f: (T) -> U) -> U {\n    return f(x)\n}\n"
+        "#main\nfun main() {\n"
+        "    print(apply(3, (x) => x * 2))\n"
+        "    print(apply(\"abc\", (s) => s.len()))\n"
+        "    let b = Box { v: 4 }\n"
+        "    print(b.map((x) => x + 1).v)\n"
+        "    let c = b.map((x) => {\n        return x > 3\n    })\n"
+        "    print(c.v)\n"
+        "    print(b.map((x) => f\"<{x}>\").map((s) => s.len()).v)\n"
+        "}\n"
+    ),
     # a receiver and every argument are taken in order, before a later
     # argument writes their variable through a `var self` method (MYLA-237)
     "argument_values_before_later_writes": (
@@ -3783,6 +3813,19 @@ class TestCompilerParity(unittest.TestCase):
         self.assertEqual(out, "7\n")
         self.assertNotEqual(code, 0)
 
+    def test_assert_with_a_computed_message(self):
+        # MYLA-355: a message computed in the failing branch (an f-string, a
+        # concatenation) is a temporary of that branch only: the passing path
+        # mustn't drop it
+        for msg in ('f"bad {t}"', '"bad " + t'):
+            with self.subTest(message=msg):
+                src = ('#main\nfun main() {\n    let t = "a"\n'
+                       f'    assert(t == "a", {msg})\n    print(1)\n'
+                       f'    assert(t == "b", {msg})\n    print(2)\n}}\n')
+                out, code = build_and_run(src)
+                self.assertEqual(out, "1\n")
+                self.assertNotEqual(code, 0)
+
     def test_assert_pass_does_not_abort(self):
         src = "#main\nfun main() {\n    assert(1 < 2)\n    print(42)\n}\n"
         out, code = build_and_run(src)
@@ -3804,6 +3847,10 @@ class TestCompilerParity(unittest.TestCase):
 # longer holds (a later decision changed its meaning) or there is none (a
 # program added or changed since): its output, pinned here.
 PINNED = {
+    # MYLA-358: new; the interpreter gives the same
+    "literal_left_of_unsigned_division": "0\n10\n0\n100\n0\n4000000005\n1\ntrue\n",
+    # MYLA-356: new, so no recording; the interpreter gives the same
+    "lambda_parameters_from_known_arguments": "6\n3\n5\ntrue\n3\n",
     # D102: the unsuffixed 123.456 is a float64 now (the recording's
     # float32 printed 123.456001); floats print in their shortest form (D155)
     "float_arithmetic": "3.75\n-0.75\n3.375\n3.5\n1.5\n-3.5\n0.30000000000000004\n0.3\n2\n100000\n"

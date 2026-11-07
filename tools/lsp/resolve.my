@@ -17,12 +17,12 @@
 from std.fs import read_to_string
 from ...selfhost.lexer import lex
 from ...selfhost.parser import parse_source
-from ...selfhost.tokens import Token, TokenKind
-from ...selfhost.loader import normalize, LoadOptions, load_options, source_text
+from ...selfhost.tokens import Token, TokenKind, no_span
+from ...selfhost.loader import normalize, LoadOptions, load_options, source_text, implicit_modules, is_std_module
 from ...selfhost.ast import Program, Decl, DeclKind, FunData, TypeExpr, TypeKind, Expr, ExprKind, ExprOrBlock, Stmt, StmtKind, Block, ElseTail, Pattern, PatternKind, MatchArm, Param, BindElem, TypeParam, Attribute, ImportPath, ImportItem, FieldInit, FieldPat
 from .symbols import Symbol, SymKind, Range, outline, outline_parsed, type_str
 from .text import LineIndex, line_index, code_points, Pos
-from .types import base_of, type_args, index_of, iter_of, success_of, result_of, header_params, subst, is_builtin_type, tuple_elems, sig_type_params, sig_param_types, unify
+from .types import base_of, method_key, type_args, index_of, iter_of, success_of, result_of, header_params, subst, is_builtin_type, tuple_elems, sig_type_params, sig_param_types, unify
 
 pub enum DefKind {
     Global(SymKind),       // a declaration of some file
@@ -148,6 +148,7 @@ fun resolve_parsed(path: str, source: str, toks: [Token], program: Program, opts
     r.add_methods(path, symbols)
     if imports {
         for d in program.decls { r.import_decl(d) }
+        r.implicit_methods()
     }
     for d in program.decls { r.decl(d) }
     return Resolution { uses: r.uses, defs: r.defs, ok: true, known: r.known, completion: r.completion }
@@ -833,12 +834,25 @@ impl Resolver {
         self.with_methods[path] = true
         for s in symbols {
             if s.parent >= 0 && kind_is_impl(symbols[s.parent].kind) {
-                let target = base_of(symbols[s.parent].name)
+                let target = method_key(symbols[s.parent].name)
                 if !self.methods.contains(target) {
                     var empty: [Def] = []
                     self.methods[target] = empty
                 }
                 self.methods[target].push(sym_def(path, s))
+            }
+        }
+    }
+
+    // The methods of the standard library's modules every program sees
+    // without an import (MYLA-320), for a file outside the standard library.
+    fun implicit_methods(var self) {
+        if self.opts.stdlib_root == "" || is_std_module(self.path, self.opts.stdlib_root) { return }
+        for name in implicit_modules() {
+            let p = ImportPath { line: 0, col: 0, sp: no_span(), dots: 0, segments: ["std", name] }
+            match self.module_file(p) {
+                Some(file) => { self.add_methods(file, self.module_symbols(file)) },
+                None => {},
             }
         }
     }
@@ -890,7 +904,14 @@ impl Resolver {
         if t == "" { return None }
         var out: [Def] = []
         let b = base_of(t)
-        if b == "" { return Some(out) }              // a list, map, tuple or function
+        let key = method_key(t)
+        if b == "" {                                  // a list, map, tuple or function: its kind's methods
+            match get(self.methods, key) {
+                Some(ms) => { for m in ms { out.push(m) } },
+                None => {},
+            }
+            return Some(out)
+        }
         match get(self.globals, b) {
             Some(g) => {
                 match g.def.kind {
@@ -907,10 +928,10 @@ impl Resolver {
                 }
             },
             None => {
-                if !is_builtin_type(b) && !self.methods.contains(b) { return None }
+                if !is_builtin_type(b) && !self.methods.contains(key) { return None }
             },
         }
-        match get(self.methods, b) {
+        match get(self.methods, key) {
             Some(ms) => { for m in ms { out.push(m) } },
             None => {},
         }
@@ -943,6 +964,13 @@ impl Resolver {
                 let t = self.type_of(es[0])
                 if t == "" { return "" }
                 return "[" + t + "]"
+            },
+            ExprKind.MapLit(es) => {
+                if es.len() == 0 { return "" }
+                let k = self.type_of(es[0].key)
+                let v = self.type_of(es[0].value)
+                if k == "" || v == "" { return "" }
+                return "[" + k + ": " + v + "]"
             },
             ExprKind.Index(a, i) => {
                 // a slice (`a:b`, `a:b:step`, D142) keeps the list's or string's type

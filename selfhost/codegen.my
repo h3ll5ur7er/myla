@@ -15,7 +15,7 @@ from .tokens import no_span
 from std.num import f64_literal_bits, f32_round_bits
 from std.fs import current_dir
 from .loader import Span
-from .checker import CheckErr, Checker, Type, is_builtin_value, is_raw_memory_primitive, FuncSig, StructInfo, EnumInfo, FieldT, VariantT, Subst, subst_type, subst_get, opt_subst_type, CV, type_name, checker_on
+from .checker import CheckErr, Checker, Type, is_builtin_value, is_raw_memory_primitive, is_platform_primitive, FuncSig, StructInfo, EnumInfo, FieldT, VariantT, Subst, subst_type, subst_get, opt_subst_type, CV, type_name, checker_on
 from .ir import render_func, verify, moves, IrFunc, Inst
 from .ssa import SsaStats, no_ssa_stats
 from .inline import inlinable, inline_calls, same_module, may_inline, merge_blocks
@@ -1917,7 +1917,7 @@ impl CodeGen {
     // name the rest of the runtime calls and the function standing for it.
     fun rt_exec(self) -> [(str, str)] {
         // every program's (`__map_lookup`: `remove`'s too)
-        var out = [("__panic_report", "std$rt$panic_report"), ("__list_grow", "std$rt$list_grow"), ("__sb_append_bytes", "std$rt$sb_append_bytes"), ("__map_new", "std$rt$map_new"), ("__map_rebuild", "std$rt$map_rebuild"), ("__map_lookup", "std$rt$map_lookup"), ("__equal_bytes", "std$rt$equal_bytes"), ("__func_retain", "std$rt$func_retain"), ("__func_drop", "std$rt$func_drop")]
+        var out = [("__panic_report", "std$rt$panic_report"), ("__list_grow", "std$rt$list_grow"), ("__sb_append_bytes", "std$rt$sb_append_bytes"), ("__map_new", "std$rt$map_new"), ("__map_lookup", "std$rt$map_lookup"), ("__equal_bytes", "std$rt$equal_bytes"), ("__func_retain", "std$rt$func_retain"), ("__func_drop", "std$rt$func_drop")]
         if self.frames {
             for p in [("__sched_init", "std$rt$sched_init"), ("__workers_count", "std$rt$workers_count"), ("__task_cancel", "std$rt$task_cancel"), ("__task_cancelled", "std$rt$task_cancelled"), ("__failed_wait", "std$rt$failed_wait"), ("__wait_stopped", "std$rt$wait_stopped"), ("__exec_push", "std$rt$exec_push"), ("__exec_yield_push", "std$rt$exec_yield_push"), ("__exec_find", "std$rt$exec_find"), ("__exec_peek", "std$rt$exec_peek"), ("__wake_waiters", "std$rt$wake_waiters"), ("__actor_leave", "std$rt$actor_leave"), ("__task_wait", "std$rt$task_wait"), ("__actor_enter_rt", "std$rt$actor_enter"), ("__exec_loop", "std$rt$exec_run"), ("__deep_str", "std$rt$deep_str"), ("__dclone_str", "std$rt$dclone_str"), ("__dclone_cell", "std$rt$dclone_cell"), ("__deep_env", "std$rt$deep_env"), ("__dclone_env", "std$rt$dclone_env"), ("__panic_report_tasks", "std$rt$panic_report_tasks"), ("myla___sleep", "std$rt$sleep_frame"), ("__cancel_after", "std$rt$cancel_after"), ("__task_end", "std$rt$task_end"), ("myla___wait_fd", "std$rt$wait_fd"), ("myla___wait_fd2", "std$rt$wait_fd2")] { out.push(p) }
         }
@@ -3269,13 +3269,14 @@ impl CodeGen {
     // every list. Copy-on-write clones are per element type (`__clone_list_*`,
     // `clone_ir`): they retain the elements they share (D38).
     //
-    // Map cell: [count:8][cap:8][slot0..]; slot = [state:8][key:8][value…][rank:8]
+    // Map cell: [count:8][cap:8][slot0..][next rank:8]; slot = [state:8][key:8][value…][rank:8]
     // where state 0=empty, 1=occupied, 2=tombstone, and rank is the key's place
-    // in the order of insertion: the occupied slots' ranks are 0 … count - 1
-    // (D105, MYLA-179; a new key takes the count, `__map_rebuild` closes the gap
-    // a removed one leaves, and a grow copies them). Open addressing, linear probing,
-    // multiplicative hashing (`__map_hash`). cap is a power of two. Copy-on-write clones are per type
-    // (`__clone_map_*`, `clone_ir`) and retain the values they share.
+    // in the order of insertion (D105, MYLA-179): a new key takes the next rank,
+    // a removal leaves a tombstone and a gap in the ranks, and a compaction as the
+    // table fills renumbers them 0 … count - 1 (MYLA-310; std.rt's maps). Open
+    // addressing, linear probing, multiplicative hashing. cap is a power of two.
+    // Copy-on-write clones are per type (`__clone_map_*`, `clone_ir`), copy the
+    // whole cell and retain the values they share.
     //
     // StringBuilder cell: [len:8][cap:8][bytes…] (cap is a byte capacity).
 
@@ -3907,7 +3908,7 @@ pub fun is_builtin_call_name(nm: str) -> bool {
     if nm == "__task_cancelled" || nm == "__clock_ns" || nm == "__sleep_ns" || nm == "__disarm" { return true }
     if nm == "__spawn" || nm == "__reap" || nm == "__kill" || nm == "__close" { return true }
     if nm == "__run_with" || nm == "__spawn_with" { return true }
-    if is_raw_memory_primitive(nm) { return true }
+    if is_platform_primitive(nm) || is_raw_memory_primitive(nm) { return true }
     return false
 }
 

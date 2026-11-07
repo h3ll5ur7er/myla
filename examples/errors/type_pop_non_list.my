@@ -1,4 +1,5 @@
 //~ type error: has no method 'pop'
+//~ help: did you mean 'pow'?
 // `pop` only applies to a list value.
 #main
 fun main() {

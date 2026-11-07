@@ -18,10 +18,10 @@ from .lexer import lex
 from .tokens import Token, TokenKind
 from .ast import Decl, DeclKind, Stmt, StmtKind, ElseTail
 from .loader import load_program_opts, load_options, file_of, normalize, Loaded, type_errors
-from .checker import build_checker_decls, Checker
+from .checker import build_checker_std, Checker
 from .diag import render_one, Report, carets
 from .tokens import SrcSpan
-from .interp import new_interp, Value, SessionStep
+from .interp import new_interp, Value, SessionStep, new_mapv, map_keys_of, map_vals_of
 from .util import cp_utf8
 from .parser import expr_of, stmt_of, type_expr_of, block_of, pattern_of, fun_of  // AST values for #test cases (MYLA-184)
 
@@ -95,7 +95,7 @@ impl Session {
                 return -1
             },
         }
-        let c = match build_checker_decls(prog.decls, prog.next_id) {
+        let c = match build_checker_std(prog.decls, prog.next_id, false, prog.std_impls) {
             Ok(c) => c,
             Err(errs) => {
                 report_all(type_errors(prog, errs), t, input)
@@ -271,7 +271,7 @@ fun starts_a_declaration(text: str) -> bool {
 // `P { x: 1 }`, `Color.Red`, `Some(1)`, `[1, 2]`, `["a": 1]`, `[:]`, `(1, 2)`.
 #test(Value.VStr("a\"b"))["\"a\\\"b\""]
 #test(Value.VChar(10))["'\\n'"]
-#test(Value.VMap([], []))["[:]"]
+#test(Value.VMap(new_mapv()))["[:]"]
 #test(Value.VEnum("Option", "Some", [Value.VFloat(1.5)]))["Some(1.5)"]
 #test(Value.VEnum("std$json$Json", "Null", []))["Json.Null"]
 pub fun show(v: Value) -> str {
@@ -286,7 +286,7 @@ pub fun show(v: Value) -> str {
         Value.VTuple(es) => "(" + shows(es) + ")",
         Value.VEnum(en, vr, pl) => show_enum(en, vr, pl),
         Value.VList(xs) => "[" + shows(xs) + "]",
-        Value.VMap(ks, vs) => show_map(ks, vs),
+        Value.VMap(m) => show_map(map_keys_of(m), map_vals_of(m)),
         Value.VSB(bs) => "StringBuilder",
         _ => "<function>",
     }

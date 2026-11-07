@@ -29,7 +29,7 @@
 
 from std.num import f64_literal_bits, f32_round_bits
 from .ast import Expr, ExprKind, Stmt, StmtKind, Block, FunData, ElseTail, ExprOrBlock, MatchArm, Pattern, PatternKind, FieldInit, MapEntry, BindElem, bind_elems, Param
-from .checker import CheckErr, REG_ARG_WORDS, type_name, Type, is_unit, is_slice_expr, from_end_of, slice_parts, is_hole_part, is_raw_memory_primitive, Subst, FuncSig, opt_subst_type, subst_type, builtin_method
+from .checker import CheckErr, REG_ARG_WORDS, type_name, Type, is_unit, is_slice_expr, from_end_of, slice_parts, is_hole_part, is_raw_memory_primitive, is_platform_primitive, Subst, FuncSig, opt_subst_type, subst_type, builtin_method
 from .codegen import codegen_on, recv_by_address, may_write_expr, is_mutating_builtin, list_has_str, contains_int, is_actor_t, is_sb_t, is_async_t, CodeGen, LamJob, PartialJob, Cap, DropEntry, tfunc_params, tfunc_ret, is_hole_expr, mangle_fn, is_builtin_call_name, is_aggregate, tuple_elems, is_struct_or_enum_t, is_tfunc, is_overloadable_op, arith_method_cg, enum_name_of, is_tstr, is_cmp, place_root, is_aggregate_opt, arms_may_write, is_cell_t, list_elem, is_list_t, is_map_t, is_str_t, map_key, map_val, format_segments, args_have_hole, success_variant, failure_variant
 from .util import format_specs
 from .tokens import Note, no_span
@@ -3846,10 +3846,10 @@ impl Lower {
     }
 
     // `remove(m, k)`: the map made unique (copies keep the entry), the
-    // key's entry found; when there is one, it becomes a tombstone, its key
-    // and value are released and the table is rebuilt without it (the keys
-    // after it in the order of insertion moved up, D105), stored back into
-    // the holder.
+    // key's entry found; when there is one, it becomes a tombstone and its
+    // key and value are released. Nothing else moves: its rank becomes a gap
+    // in the order of insertion, which `__map_keys` skips, and the table is
+    // compacted as it fills (std.rt's maps, MYLA-310).
     #test(lower_on(), codegen_on("enum E { A, B(int) }"), expr_of("(a, 'c')"), expr_of("(a, 'c')"))[0]
     fun map_remove(var self, cg: CodeGen, m: Expr, k: Expr) -> int32 {
         let mt = self.place_type(cg, m)
@@ -3872,9 +3872,6 @@ impl Lower {
         let n1 = self.temp(i64)
         self.add(Inst.Bin(n1, "-", i64, i64, n, self.konst(i64, 1), Pos { line: 0, col: 0 }))
         self.add(Inst.StoreAt(cell, 0, n1, 8))
-        let ss = cg.map_slot_size(mt)
-        let rank = self.temp(i64)
-        self.add(Inst.LoadAt(rank, slot, ss - 8, 8))
         for kv in [(8, map_key(mt)), (16, map_val(mt))] {
             let ft = kv.1
             if cg.is_boxed(ft) || is_cell_t(ft) {
@@ -3885,11 +3882,6 @@ impl Lower {
                 self.add(Inst.DropAt(ft, self.offset(slot, kv.0)))
             }
         }
-        let c2 = self.temp(i64)
-        self.add(Inst.LoadAt(c2, h, 0, 8))
-        let rebuilt = self.temp(i64)
-        self.rt_call(cg, rebuilt, "__map_rebuild", [c2, self.int_const(ss), rank, self.int_const(cg.map_is_str(mt))])
-        self.add(Inst.StoreAt(h, 0, rebuilt, 8))
         self.finish(Term.Jmp(done))
         self.start(done)
         return -1
@@ -4168,7 +4160,13 @@ impl Lower {
         self.finish(Term.Br(c, ok, bad))
         self.start(bad)
         if args.len() == 2 {
+            // the message is computed only here, so its temporaries are this
+            // branch's alone (MYLA-355): the statement's end, on the passing
+            // path, mustn't drop them; the program ends here, so nothing is
+            let tc = self.temps.len()
+            self.begin_temps()
             let m = self.expr(cg, args[1])
+            while self.temps.len() > tc { let ts = self.temps.pop() }
             self.finish(Term.Panic(m, at))
         } else {
             self.add(Inst.Str(fail, "assertion failed"))
@@ -4298,6 +4296,10 @@ impl Lower {
                 known = true
                 has_result = true
             }
+        }
+        if is_platform_primitive(nm) {
+            known = true
+            has_result = true
         }
         if !known { return self.unsupported(format("the builtin {}", nm)) }
         // without tasks nothing is ever asked to stop (MYLA-263: no routine)
@@ -4648,7 +4650,7 @@ fun char_cast_checked(src: Type, t: Type) -> bool {
 pub fun myla_runtime_function(name: str) -> str {
     if name == "__str_concat" { return "std$rt$str_concat" }
     if name == "__str_eq" { return "std$rt$str_eq" }
-    if name == "__stat" || name == "__mkdir" || name == "__unlink" || name == "__rmdir" || name == "__rename" || name == "__getcwd" || name == "__read_file" || name == "__write_file" || name == "__list_dir" || name == "__getenv" || name == "__run" || name == "__read" || name == "__poll" || name == "__args" || name == "__int_to_str" || name == "__uint_to_str" || name == "__str_chars" || name == "__map_lookup" || name == "__sb_append" || name == "__print_str" || name == "__print_int" || name == "__print_uint" || name == "__print_bool" || name == "__print_char" || name == "__write" || name == "__map_keys" || name == "__bool_to_str" || name == "__char_to_str" || name == "__clock_ns" || name == "__sleep_ns" || name == "__disarm" || name == "__spawn" || name == "__run_with" || name == "__spawn_with" || name == "__reap" || name == "__kill" || name == "__close" {
+    if name == "__stat" || name == "__mkdir" || name == "__unlink" || name == "__rmdir" || name == "__rename" || name == "__getcwd" || name == "__read_file" || name == "__write_file" || name == "__list_dir" || name == "__getenv" || name == "__run" || name == "__read" || name == "__poll" || name == "__args" || name == "__int_to_str" || name == "__uint_to_str" || name == "__str_chars" || name == "__map_lookup" || name == "__sb_append" || name == "__print_str" || name == "__print_int" || name == "__print_uint" || name == "__print_bool" || name == "__print_char" || name == "__write" || name == "__map_keys" || name == "__bool_to_str" || name == "__char_to_str" || name == "__clock_ns" || name == "__sleep_ns" || name == "__disarm" || name == "__spawn" || name == "__run_with" || name == "__spawn_with" || name == "__reap" || name == "__kill" || name == "__close" || is_platform_primitive(name) {
         // `__stat` -> `std$rt$stat`
         var sb = StringBuilder()
         sb.append(name, 2, name.len())

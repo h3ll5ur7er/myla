@@ -83,7 +83,8 @@ const_decl   = "const" IDENT ":" type "=" expression ;
 import_decl  = "import" import_path ( "as" IDENT )? | from_import ;
 pub_import   = "import" import_path "as" IDENT | from_import ;
 from_import  = "from" import_path "import" import_item ( "," import_item )* ","? ;
-import_path  = ( "." | ".." )* IDENT ( "." IDENT )* ;
+import_path  = ( "." | ".." )* path_segment ( "." path_segment )* ;
+path_segment = IDENT | prim_type ;   (* a type's keyword names a module too, std.str: MYLA-320 *)
 import_item  = IDENT ( "as" IDENT )? ;
 ```
 

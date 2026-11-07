@@ -27,9 +27,9 @@
 
 from std.fs import read_to_string, exists, is_dir, current_dir
 from .stdroot import is_embedded, embedded_text, EMBEDDED_ROOT
-from .parser import parse_source_all, expr_of, stmt_of, type_expr_of, block_of, pattern_of, fun_of
+from .parser import parse_source_with, expr_of, stmt_of, type_expr_of, block_of, pattern_of, fun_of
 from .diag import Report, reports, type_report, chain
-from .checker import CheckErr
+from .checker import CheckErr, DeclOrigin
 from .tokens import SrcSpan, no_span, keywords
 from .ast import Program, Decl, DeclKind, FunData, Param, TypeParam, Field, Variant
 from .ast import ImportPath, ImportItem, TypeExpr, TypeKind, Expr, ExprKind, FieldInit
@@ -51,9 +51,11 @@ struct Module {
 }
 
 // The linked program: every module's declarations, the next free node id
-// (the checker parses the prelude from there), and where each module's node ids
-// start, in increasing order (`file_of`).
-pub struct Loaded { decls: [Decl], next_id: int32, spans: [Span] }
+// (the checker parses the prelude from there), where each module's node ids
+// start, in increasing order (`file_of`), and the impls of the standard
+// library's modules by node id, with their module and file (the checker's
+// `std_impls`: their methods are the standard library's code, MYLA-320).
+pub struct Loaded { decls: [Decl], next_id: int32, spans: [Span], std_impls: [int32: DeclOrigin] }
 
 pub struct Span { first_id: int32, path: str }
 
@@ -150,6 +152,41 @@ struct Loader {
     next_id: int32,
     spans: [Span],
     overrides: [str: str],     // path -> text used instead of the file (an editor's unsaved buffers)
+    skip_tests: bool,          // modules loaded now leave their `#test` cases out (the implicit ones', MYLA-320)
+}
+
+// The modules of the standard library every program sees without an import
+// (D164, MYLA-320), as `std.<name>`: the methods of their impls on the
+// built-in types. They are loaded for a program whose entry file isn't a
+// module of `std` (whose modules import what they use), and bind no name.
+#test()[["str", "char", "int", "list", "option", "map"]]
+pub fun implicit_modules() -> [str] {
+    return ["str", "char", "int", "list", "option", "map"]
+}
+
+#test([0, 2], 2)[true]
+#test([0, 2], 1)[false]
+fun has_index(xs: [int32], k: int32) -> bool {
+    for x in xs {
+        if x == k { return true }
+    }
+    return false
+}
+
+// The order the modules' declarations are merged in: the implicit ones
+// first, so that a program's own method of the name of one of theirs is
+// the duplicate (and the standard library's the first declared), then the
+// others in the order they were loaded.
+#test(4, [3, 1])[[3, 1, 0, 2]]
+#test(2, [])[[0, 1]]
+fun merge_order(n: int32, implicit: [int32]) -> [int32] {
+    var out = implicit
+    var k: int32 = 0
+    while k < n {
+        if !has_index(implicit, k) { out.push(k) }
+        k += 1
+    }
+    return out
 }
 
 // -- paths ------------------------------------------------------------------
@@ -244,6 +281,17 @@ pub fun in_stdlib(path: str, root: str) -> bool {
         if !ra { r = normalize(here + "/" + r) }
     }
     return r != "." && p.len() > r.len() + 1 && starts_with_text(p, r + "/")
+}
+
+// Whether `path` is a module of the standard library rooted at `root`: a
+// file under its `std` directory, or with the embedded library under a copy
+// of it on disk (in_std_tree). Such an entry file gets no implicit modules
+// (MYLA-320); `in_stdlib` takes the whole root, for D152's primitives.
+#test("lib/std/json.my", "lib")[true]
+#test("lib/prog.my", "lib")[false]
+pub fun is_std_module(path: str, root: str) -> bool {
+    if root == EMBEDDED_ROOT { return in_std_tree(path) }
+    return in_stdlib(path, join_path(root, "std"))
 }
 
 // With the embedded library, whether `path` is in a copy of the standard
@@ -415,6 +463,54 @@ fun named(d: Decl) -> Option<NamedDecl> {
     }
 }
 
+fun is_impl(d: Decl) -> bool {
+    return match d.kind {
+        DeclKind.ImplDecl(t, ms, tps, tn, ta, attrs) => true,
+        _ => false,
+    }
+}
+
+// `d` without its `#test` cases, a function's or its methods' (MYLA-320):
+// only `myla test` of its own file runs them.
+fun without_tests(d: Decl) -> Decl {
+    var out = d
+    match d.kind {
+        DeclKind.FunDecl(fd) => { out.kind = DeclKind.FunDecl(fun_without_tests(fd)) },
+        DeclKind.ImplDecl(t, ms, tps, tn, ta, attrs) => {
+            var kept: [FunData] = []
+            for m in ms { kept.push(fun_without_tests(m)) }
+            out.kind = DeclKind.ImplDecl(t, kept, tps, tn, ta, attrs)
+        },
+        _ => {},
+    }
+    return out
+}
+
+#test(fun_of("#test\nfun f() { print(1) }"))[fun_of("\nfun f() { print(1) }")]
+fun fun_without_tests(fd: FunData) -> FunData {
+    var out = fd
+    var attrs: [Attribute] = []
+    for a in fd.attributes {
+        if a.name != "test" { attrs.push(a) }
+    }
+    out.attributes = attrs
+    return out
+}
+
+// The dotted name of the module with id `id` (a standard library's: its
+// names have no `$` of their own).
+#test("std$str")["std.str"]
+#test("std$io")["std.io"]
+fun dotted_id(id: str) -> str {
+    var sb = StringBuilder()
+    var i = 0
+    while i < id.len() {
+        if id[i] == '$' { sb.append_byte('.') } else { sb.append_byte(id[i]) }
+        i += 1
+    }
+    return sb.build()
+}
+
 fun same_binding(a: Binding, b: Binding) -> bool {
     return a.is_module == b.is_module && a.value == b.value
 }
@@ -576,6 +672,30 @@ impl Loader {
         return Ok(None)
     }
 
+    // The implicit modules (`implicit_modules`) the standard library in use
+    // has, each loaded as an import of it would load it: the index of each
+    // module, none for a library without it (an older `--stdlib` directory,
+    // or no library at all). No module binds a name of theirs.
+    fun load_implicit(var self) -> Result<[int32], Report> {
+        var out: [int32] = []
+        // nothing runs their cases, nor those of the modules they import
+        // first (only `myla test` of its own file does), and std.int has
+        // 1,826: they are skipped unparsed
+        self.skip_tests = true
+        defer { self.skip_tests = false }
+        for name in implicit_modules() {
+            let p = ImportPath { line: 0, col: 0, sp: no_span(), dots: 0, segments: ["std", name] }
+            match self.descend(self.entry, p, self.stdlib_root, 0)? {
+                Some(file) => {
+                    let k = self.load(file)?
+                    if !has_index(out, k) { out.push(k) }
+                },
+                None => {},
+            }
+        }
+        return Ok(out)
+    }
+
     // Load `path` and its imports (depth first) once each; its module index.
     fun load(var self, path: str) -> Result<int32, Report> {
         var k = 0
@@ -594,7 +714,7 @@ impl Loader {
             },
         }
         self.spans.push(Span { first_id: self.next_id, path: path })
-        var parsed = match parse_source_all(src, self.next_id) {
+        var parsed = match parse_source_with(src, self.next_id, self.skip_tests) {
             Ok(x) => x,
             Err(ds) => { return Err(reports(ds, path)) },
         }
@@ -1444,8 +1564,12 @@ pub fun load_program_opts(entry: str, opts: LoadOptions) -> Result<Loaded, Repor
     let packages = check_packages(opts.packages)?
     var normalized: [str: str] = [:]
     for p in opts.overrides.keys() { normalized[normalize(p)] = opts.overrides[p] }
-    var ld = Loader { stdlib_root: stdlib, project_root: project_root, packages: packages, entry: e, modules: [], next_id: 0, spans: [], overrides: normalized }
+    var ld = Loader { stdlib_root: stdlib, project_root: project_root, packages: packages, entry: e, modules: [], next_id: 0, spans: [], overrides: normalized, skip_tests: false }
     ld.load(e)?
+    // the standard library's method modules, for a program outside it
+    // (D164, MYLA-320)
+    var implicit: [int32] = []
+    if stdlib != "" && !is_std_module(e, stdlib) { implicit = ld.load_implicit()? }
     // the runtime's functions in Myla (MYLA-162), compiled where a program
     // uses them: the standard library's, else the copy the tools carry
     if opts.runtime {
@@ -1466,10 +1590,21 @@ pub fun load_program_opts(entry: str, opts: LoadOptions) -> Result<Loaded, Repor
     var exports: [str: [str: Binding]] = [:]
     for m in ld.modules { exports[m.id] = m.exports }
     var decls: [Decl] = []
-    for m in ld.modules {
+    var std_impls: [int32: DeclOrigin] = [:]
+    for k in merge_order(ld.modules.len() as int32, implicit) {
+        let m = ld.modules[k]
         var r = Renamer { env: decl_env(m.bindings), aliases: module_env(m.bindings), exports: exports, vals: [], tys: [], path: m.path, err: None }
-        for d in m.decls { decls.push(r.decl(d, m.id)) }
+        let in_std = starts_with_text(m.id, "std$")
+        let is_implicit = has_index(implicit, k)
+        for d0 in m.decls {
+            // an implicit module is never the file being tested, and its
+            // cases (std.int's are 1,826) would be checked for every program
+            var d = d0
+            if is_implicit { d = without_tests(d0) }
+            if in_std && is_impl(d) { std_impls[d.id] = DeclOrigin { module: dotted_id(m.id), path: m.path, implicit: is_implicit } }
+            decls.push(r.decl(d, m.id))
+        }
         match r.err { Some(e) => { return Err(e) }, None => {} }
     }
-    return Ok(Loaded { decls: decls, next_id: ld.next_id, spans: ld.spans })
+    return Ok(Loaded { decls: decls, next_id: ld.next_id, spans: ld.spans, std_impls: std_impls })
 }

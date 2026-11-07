@@ -11,6 +11,8 @@ Where Myla stands, where it is going, why it is the way it is, and what is known
 | [[Project/Known-issues]] | Open bugs and gaps by component, linked to their tasks |
 | [[Project/Review-2026-10]] | The full review of 31 October 2026: findings, bugs (now tasks), proposed improvements |
 | [[Project/Review-2026-11]] | The second review, 6 November 2026: the November work and the 83 tasks that waited in review |
+| [[Project/AoC-2015-2021]] | What solving Advent of Code 2015 to 2021 in Myla showed: nine findings, now tasks, and the helpers the solutions needed |
+| [[Project/Standard-library-roadmap]] | Candidate standard library modules with their use, size and a suggested order, for the owner to review |
 | [[Project/Reflection-2026-11]] | What the aarch64 and wasm32 backends taught about the IR, the platform interface and the language, and what to do before the next target |
 
 The task board in `tasks/` is the backlog; these pages summarise it.

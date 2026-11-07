@@ -34,7 +34,7 @@ export class MemFs {
     return f && new TextDecoder().decode(f.data);
   }
 
-  open(path, { create, trunc, excl }) {
+  open(path, { create, trunc, excl, read, write, append }) {
     let f = this.files.get(path);
     if (this.dirs.has(path)) throw fsError("EISDIR");
     if (f && excl) throw fsError("EEXIST");
@@ -46,10 +46,13 @@ export class MemFs {
     } else if (trunc) {
       f.data = new Uint8Array(0);
     }
-    return { file: f, pos: create && !trunc ? f.data.length : 0 };
+    // the access asked for (MYLA-336): from the start, the end for appending
+    if (read !== undefined) return { file: f, pos: 0, read, write, append: !!append };
+    return { file: f, pos: create && !trunc ? f.data.length : 0, read: true, write: true, append: false };
   }
 
   read(h, u8) {
+    if (!h.read) throw fsError("EBADF");
     const n = Math.max(0, Math.min(u8.length, h.file.data.length - h.pos));
     u8.set(h.file.data.subarray(h.pos, h.pos + n));
     h.pos += n;
@@ -57,6 +60,8 @@ export class MemFs {
   }
 
   write(h, u8) {
+    if (!h.write) throw fsError("EBADF");
+    if (h.append) h.pos = h.file.data.length;
     const end = h.pos + u8.length;
     if (end > h.file.data.length) {
       const grown = new Uint8Array(end);
@@ -66,6 +71,13 @@ export class MemFs {
     h.file.data.set(u8, h.pos);
     h.pos = end;
     return u8.length;
+  }
+
+  seek(h, offset, whence) {
+    const at = (whence === 0 ? 0 : whence === 1 ? h.pos : h.file.data.length) + offset;
+    if (at < 0) throw fsError("EINVAL");
+    h.pos = at;
+    return at;
   }
 
   close() {}
