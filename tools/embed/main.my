@@ -132,10 +132,7 @@ fun module(root: str, paths: [str]) -> str {
 }
 
 fun main() {
-    let spec = (cli.spec("embed")
-        .positional("lib dir")
-        .positional("module file")
-        .flag("check"))
+    let spec = cli.spec("embed").positional("lib dir").positional("module file").flag("check")
     let parsed = match cli.parse(spec, args()[1:]) {
         Ok(a) => a,
         Err(_) => {

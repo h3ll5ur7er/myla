@@ -413,7 +413,8 @@ impl Server {
             None => { return Json.Null },
         }
         match self.resolved_at(d, pos) {
-            Some(def) => { return location(def.path, def.range) },
+            // the prelude's declarations are in no file (MYLA-372)
+            Some(def) => { if def.path == "<prelude>" { return Json.Null } else { return location(def.path, def.range) } },
             None => {},
         }
         match best_match(d.symbols, ident) {

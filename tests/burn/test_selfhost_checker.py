@@ -360,6 +360,14 @@ SUPERSEDED: dict[str, str] = {
     "unit_test_165": "err 5 5 5:5-5:25 type: '#test' can't run an async method (test it through an async test function, D162)",
     # D161: a method takes '#allow' too
     "unit_test_164": "err 5 5 5:5-5:10 type: attribute '#main' can't be applied to a method (a method takes only '#test' and '#allow')",
+    # D163 (MYLA-313): map keys are the Eq + Hash types; tuples and lists are Eq (and Hash) when
+    # their elements are; Hash is derivable
+    "unit_test_76": "err 1 21 1:21-1:35 type: map key type must be Eq and Hash, found 'float64': 'float64' isn't Hash (NaN is unequal to itself)",
+    "unit_test_144": "err 1 9 1:9-1:12 type: cannot derive 'Ord': only 'Eq' and 'Hash' are derivable",
+    "unit_test_156": "ok",
+    "derive_on_generic": "err 1 1 1:1-1:12 type: deriving on generic types is not supported yet (Eq and Hash are derived for concrete structs and enums)",
+    "derive_enum_payload": "ok",
+    "map_literal_key": "ok",
 }
 
 def _corpus() -> list[str]:
@@ -479,7 +487,9 @@ class SelfHostedCheckerParity(unittest.TestCase):
             for name, source in _snippets().items():
                 with self.subTest(case=name):
                     expected = SUPERSEDED.get(name) or _oracle_source(source)
-                    self.assertIn(" type: ", expected, "not a type error in Python")
+                    # a later decision may have made the program valid ("ok", D163)
+                    if name not in SUPERSEDED:
+                        self.assertIn(" type: ", expected, "not a type error in Python")
                     path = os.path.join(tmp, name + ".my")
                     with open(path, "w", encoding="utf-8") as fh:
                         fh.write(source)

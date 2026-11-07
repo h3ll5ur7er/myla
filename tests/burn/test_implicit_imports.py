@@ -140,9 +140,12 @@ class Fixture(unittest.TestCase):
         cls.work = cls._tmp.name
         cls.lib = os.path.join(cls.work, "lib")
         shutil.copytree(STDLIB_ROOT, cls.lib)
+        # each stand-in is added to the real module, which other modules of
+        # `std` use (std.time calls std.option's `expect`, and std.test
+        # imports std.time)
         for name, text in MODULES.items():
-            with open(os.path.join(cls.lib, "std", name + ".my"), "w", encoding="utf-8") as fh:
-                fh.write(text)
+            with open(os.path.join(cls.lib, "std", name + ".my"), "a", encoding="utf-8") as fh:
+                fh.write("\n" + text)
         cls.old = os.path.join(cls.work, "old")
         shutil.copytree(STDLIB_ROOT, cls.old)
         for name in MODULES:
@@ -153,6 +156,14 @@ class Fixture(unittest.TestCase):
     @classmethod
     def tearDownClass(cls) -> None:
         cls._tmp.cleanup()
+
+    def line_of(self, module: str, text: str) -> int:
+        """The line of the fixture library's `std.<module>` where `text` first is."""
+        with open(os.path.join(self.lib, "std", module + ".my"), encoding="utf-8") as fh:
+            for n, line in enumerate(fh, 1):
+                if text in line:
+                    return n
+        raise AssertionError(f"{text!r} not in std.{module}")
 
     def write(self, name: str, text: str) -> str:
         path = os.path.join(self.work, name)
@@ -255,7 +266,7 @@ class ImplicitModules(Fixture):
         self.assertEqual(proc.returncode, 1)
         self.assertIn("type error: duplicate method 'shout' for type 'str'\n  --> " + path + ":2:5", proc.stderr)
         self.assertIn("note: 'shout' for 'str' is first defined in std.str, which every program sees, at "
-                      + os.path.join(self.lib, "std", "str.my") + ":3:5", proc.stderr)
+                      + os.path.join(self.lib, "std", "str.my") + f":{self.line_of('str', 'fun shout')}:5", proc.stderr)
         # the same with the module imported
         path = self.write("dup2.my", "import std.str as s\n\nimpl str {\n    fun shout(self) -> str {\n        return self\n    }\n}\n")
         proc = self.myla_cmd("check", path)

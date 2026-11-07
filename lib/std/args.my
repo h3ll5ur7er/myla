@@ -552,15 +552,17 @@ fun find_byte(s: str, b: char) -> int {
 // --- tests -------------------------------------------------------------------
 
 fun demo() -> Spec {
-    return (spec("prog", "Copies files.")
-        .flag("verbose", 'v', "say more")
-        .flag("quiet", 'q', "say less")
-        .flag("dry-run", '\0', "change nothing")
-        .option("out", 'o', "FILE", "where to write", Some("a.out"))
-        .option("level", 'l', "N", "how hard to try")
-        .positional("input", "the file to read")
-        .positional("mode", "how to copy", false)
-        .many("rest", "more files"))
+    // one call a line: the editor grammar takes no line break before a `.`
+    // inside brackets (grammar/myla.ebnf's header)
+    var s = spec("prog", "Copies files.")
+    s = s.flag("verbose", 'v', "say more")
+    s = s.flag("quiet", 'q', "say less")
+    s = s.flag("dry-run", '\0', "change nothing")
+    s = s.option("out", 'o', "FILE", "where to write", Some("a.out"))
+    s = s.option("level", 'l', "N", "how hard to try")
+    s = s.positional("input", "the file to read")
+    s = s.positional("mode", "how to copy", false)
+    return s.many("rest", "more files")
 }
 
 fun ok(s: Spec, argv: [str]) -> Args {
@@ -683,15 +685,15 @@ fun errors_name_the_argument() {
 }
 
 fun tool() -> Spec {
-    let build = (spec("build", "Compiles a program.")
-        .flag("release", 'r', "optimize")
-        .option("out", 'o', "FILE", "the binary")
-        .positional("file", "the program"))
+    var build = spec("build", "Compiles a program.")
+    build = build.flag("release", 'r', "optimize")
+    build = build.option("out", 'o', "FILE", "the binary")
+    build = build.positional("file", "the program")
     let clean = spec("clean", "Removes the build directory.")
-    return (spec("tool", "Builds things.")
-        .flag("verbose", 'v', "say more")
-        .command("build", build)
-        .command("clean", clean))
+    var t = spec("tool", "Builds things.")
+    t = t.flag("verbose", 'v', "say more")
+    t = t.command("build", build)
+    return t.command("clean", clean)
 }
 
 #test

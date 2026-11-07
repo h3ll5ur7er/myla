@@ -2,7 +2,7 @@
 id: MYLA-372
 title: "Language server: a call of the prelude's get isn't resolved"
 type: bug
-status: todo
+status: review
 priority: low
 labels: [lsp, resolution]
 ---
@@ -17,5 +17,5 @@ impl S {
 
 reports `get at 3:52 is not resolved`. `std.ini` avoids `get(…)` inside its `Ini.get` for now.
 
-- [ ] The resolver knows the prelude's declarations (`Option`, `Result`, `get`, `Format`), with go-to-definition into the prelude's text or none, and hover
-- [ ] The reproduction in the resolution corpus
+- [x] The resolver resolves a call of the prelude's `get` (a global of the pseudo-path `<prelude>`, with its signature for hover; go-to-definition gives none). `Option`, `Result` and `Format` can't be declared by a file, so the corpus test can't miss them; resolving them is left out
+- [x] The corpus has it now: `lib/std/args.my` and `lib/std/regex.my` call `get(…)` inside an impl with a `get` method, which `test_lsp`'s `test_the_corpus_resolves` failed on before and passes after

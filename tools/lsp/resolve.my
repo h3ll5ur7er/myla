@@ -398,6 +398,12 @@ impl Resolver {
         match self.lookup(name) {
             Some(d) => { self.use_at(line, col, name, d) },
             None => {
+                // the prelude's function, declared in no file: a global with
+                // its signature to show and nowhere to go (MYLA-372)
+                if name == "get" {
+                    self.use_at(line, col, name, Def { name: name, path: "<prelude>", range: Range { start: Pos { line: 0, character: 0 }, end: Pos { line: 0, character: 0 } }, kind: DefKind.Global(SymKind.Function), detail: "fun get<K, V>(m: [K: V], k: K) -> Option<V>", ty: "" })
+                    return
+                }
                 if self.modules.contains(name) {
                     let file = self.modules[name]
                     self.use_at(line, col, name, Def { name: name, path: file, range: Range { start: Pos { line: 0, character: 0 }, end: Pos { line: 0, character: 0 } }, kind: DefKind.Module, detail: "", ty: "" })
