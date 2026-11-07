@@ -11,10 +11,14 @@
 // given on the command line would be: `src/main.my`.
 
 from std.io import write, eprintln
-from std.fs import exists, is_dir, list_dir, make_dir_all, write_to_file, current_dir, remove_dir_all
+from std.fs import exists, is_dir, list_dir, make_dir_all, write_to_file, current_dir, remove_dir_all, read_to_string
+from std.process import args, command, ExitStatus
+from std.platform import TARGET
 from .loader import LoadOptions
-from .driver import cmd_build, cmd_interp, own_tests, load_and_check
-from .interp import TestOptions
+from .driver import cmd_build, cmd_interp, own_tests, load_and_check, decode
+from .interp import TestOptions, selected
+from .stdroot import EMBEDDED_ROOT
+from .test_programs import test_program_of, test_program_report
 from .project import find_manifest, loader_packages, relative_path, parent_dir, name_error, Project
 from .fetch import checked_out_project, fetch
 
@@ -123,7 +127,11 @@ pub fun project_run(base: LoadOptions, prog_args: [str]) -> int32 {
 
 // `myla test [--only <text>] [--list]`: the `#test` cases of every file
 // under `src/`, each file's own once, a block of results per file that has
-// any, and the total.
+// any; then the files of `tests/` (D162, MYLA-306): a test program (one
+// whose trailing comment block has `// output:`, test_programs.my) run in
+// the interpreter and compared, the others' cases as `src/`'s; and the
+// total. When the project has a program and a `tests/`, the program is
+// built first to `build/<name>`, which `std.test.program()` names.
 pub fun project_test(base: LoadOptions, sel: TestOptions) -> int32 {
     let h = match locate() {
         Ok(h) => h
@@ -133,13 +141,29 @@ pub fun project_test(base: LoadOptions, sel: TestOptions) -> int32 {
         }
     }
     let opts = options(h, base)
+    let tests_dir = h.project.root.dir + "/tests"
+    var options = sel
+    if is_dir(tests_dir) && h.project.root.has_program && !sel.list {
+        let built = project_build(base, false, TARGET)
+        if built != 0 { return built }
+        options.program = h.project.root.dir + "/build/" + h.project.root.name
+    }
     var passed = 0
     var total = 0
     var files = 0
     var broken = 0
-    for path in source_files(h.project.root.dir + "/src") {
+    var programs: [str] = []
+    var sources = source_files(h.project.root.dir + "/src")
+    for path in source_files(tests_dir) {
+        let text = match read_to_string(path) { Ok(t) => t, Err(e) => "" }
+        match test_program_of(text) {
+            Some(tp) => { programs.push(path) },
+            None => { sources.push(path) },
+        }
+    }
+    for path in sources {
         let file = shown(h, path)
-        match own_tests(file, opts, sel) {
+        match own_tests(file, opts, options) {
             Ok(r) => {
                 if r.total > 0 {
                     write(1, "== " + file + "\n")
@@ -153,6 +177,28 @@ pub fun project_test(base: LoadOptions, sel: TestOptions) -> int32 {
                 eprintln(msg)
                 broken = broken + 1
             },
+        }
+    }
+    var shown_header = false
+    for path in programs {
+        let file = shown(h, path)
+        if !selected(file, sel.only) { continue }
+        if !shown_header {
+            write(1, "== tests/\n")
+            shown_header = true
+        }
+        total = total + 1
+        files = files + 1
+        if sel.list {
+            write(1, file + "\n")
+            continue
+        }
+        let report = run_test_program(h, path, opts)
+        if report.len() == 0 {
+            passed = passed + 1
+            write(1, "PASS  " + file + "\n")
+        } else {
+            for line in report { write(1, line) }
         }
     }
     if total == 0 {
@@ -171,6 +217,35 @@ pub fun project_test(base: LoadOptions, sel: TestOptions) -> int32 {
     }
     if passed == total && broken == 0 { return 0 }
     return 1
+}
+
+// The test program `path` run in the interpreter, through this tool (`myla
+// run` with the project's root and packages, its input on stdin), and its
+// output, exit status and stderr compared with what it says
+// (test_programs.my): [] when it passed, else its report lines.
+fun run_test_program(h: Here, path: str, opts: LoadOptions) -> [str] {
+    let file = shown(h, path)
+    let text = match read_to_string(path) { Ok(t) => t, Err(e) => "" }
+    let tp = match test_program_of(text) {
+        Some(tp) => tp,
+        None => { return [format("FAIL  {}: not a test program\n", file)] },
+    }
+    var argv = ["run", file, "--root", opts.root]
+    if opts.stdlib_root != EMBEDDED_ROOT { argv.push("--stdlib")
+        argv.push(opts.stdlib_root) }
+    for pkg in opts.packages {
+        argv.push("--package")
+        argv.push(pkg.0 + "=" + pkg.1)
+    }
+    let out = match command(args()[0]).args(argv).stdin(tp.input).output() {
+        Ok(o) => o,
+        Err(e) => { return [format("FAIL  {}: could not run '{}' to interpret it\n", file, args()[0])] },
+    }
+    let code = match out.status {
+        ExitStatus.Exited(c) => c,
+        ExitStatus.Signaled(sig) => -sig,
+    }
+    return test_program_report(file, tp, decode(out.stdout), decode(out.stderr), code)
 }
 
 // `myla check`: type-check every file under `src/`, printing each one's

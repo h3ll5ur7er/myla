@@ -171,6 +171,28 @@ async fun counts_in_parallel() {
 fun main() {}
 ```
 
+### Integration tests in a project
+
+In a project ([[Architecture/Project-tool]]) `myla test` runs the files of `tests/` after those of `src/` (D162, [[MYLA-306]]). A file whose trailing comment block has `// output:` is a **test program**: a program run with the `// input:` lines on its standard input, whose output must be the `// output:` lines, whose exit status must be `// exit:` (0 without one) and whose standard error must start with the `// stderr:` lines when there are any (a runtime error's first line, say). It is reported as `PASS  tests/greets.my`, or `FAIL  tests/greets.my: output differs` with the expected and the actual lines under it. Any other file under `tests/` is a file of `#test` cases and test functions, run as a file of `src/` is; both import the project's modules as `src/main.my`'s do. `std.test.program()` is the path of the project's program, which `myla test` builds first, so a test function can run it with `std.process.command(test.program()).stdin("…").output()` and expect on what it printed.
+
+```myla fragment
+// tests/greets.my
+from std.io import stdin
+from names import polite
+
+fun main() {
+    var r = stdin()
+    match r.read_line() {
+        Ok(Some(line)) => { print("hi " + polite(line)) },
+        _ => { print("nobody") },
+    }
+}
+// input:
+// bob
+// output:
+// hi Bob
+```
+
 ### Expected failures
 
 A case whose call must fail says so in its expected value: `[panic("division by zero")]` passes when the call ends in a runtime error with exactly that message (`assert`'s message, `panic`'s, an index error's as the interpreter words it), `[exit(3)]` when it ends with that exit status. The message and the status are literals. A call that returns instead, or fails differently, fails the case: `FAIL  div #3: expected runtime error 'division by zero', got 2`.

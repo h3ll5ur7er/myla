@@ -16,9 +16,10 @@
 // project, `myla clean [--deps]` removes `build/` (and `.myla/`), `myla fetch
 // [--update]` resolves the Git dependencies and writes `myla.lock` (MYLA-95).
 //
-// The options, before or after the file: `--stdlib <dir>`, and `--package
+// The options, before or after the file: `--stdlib <dir>`, `--package
 // name=dir` (repeatable), a dependency whose modules `import name…` finds in
-// `dir` (MYLA-92). `run` passes the other arguments after the file to the
+// `dir` (MYLA-92), and `--root <dir>`, the project root (D162: `myla test`
+// runs a project's test programs through this tool with it). `run` passes the other arguments after the file to the
 // program (its argv is the file, then those), as the Python `myla run` does.
 // What the commands do with a file is in driver.my. The standard library is
 // the one this binary carries, unless `--stdlib` or MYLA_STDLIB name a
@@ -58,6 +59,8 @@ fun usage_lines() -> [str] {
         "options:",
         "  --stdlib <dir>        the directory holding std/ (default: $MYLA_STDLIB, else the standard library built into myla)",
         "  --package <name=dir>  a dependency: imports of <name> resolve in <dir> (repeatable)",
+        "  --root <dir>          with a file: the project root its absolute imports resolve in (default: the file's directory;",
+        "                        what `myla test` gives the test programs of tests/)",
     ]
 }
 
@@ -74,7 +77,7 @@ struct CommandLine { file: str, opts: LoadOptions, output: str, debug: bool, tar
 // follows it (exit status 2; else 1).
 struct CliError { msg: str, usage: bool }
 
-// The arguments after the command; `--stdlib` and `--package` anywhere, `-o`
+// The arguments after the command; `--stdlib`, `--package` and `--root` anywhere, `-o`
 // and `-g` for `build`, `--deps` for `clean`, `--update` for `fetch`,
 // `--only` and `--list` for `test`. The first other argument is the file if
 // it ends in `.my` (else there is none: project mode); then `run` passes the
@@ -96,6 +99,9 @@ fun parse_command_line(argv: [str]) -> Result<CommandLine, CliError> {
                 Ok(pkg) => { cl.opts.packages.push(pkg) },
                 Err(r) => { return Err(CliError { msg: render(r), usage: false }) },
             }
+            j = j + 2
+        } else if a == "--root" && has_value {
+            cl.opts.root = argv[j + 1]
             j = j + 2
         } else if cmd == "build" && a == "-o" && has_value {
             cl.output = argv[j + 1]

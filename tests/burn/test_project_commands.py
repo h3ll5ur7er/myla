@@ -327,3 +327,199 @@ class TestProjectErrors(_Layout):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+GREETER_MAIN = """\
+from std.io import stdin
+from .names import polite
+
+#test("bob")["Mr Bob"]
+pub fun titled(name: str) -> str {
+    return "Mr " + polite(name)
+}
+
+fun main() {
+    var r = stdin()
+    match r.read_line() {
+        Ok(Some(line)) => { print("hello " + titled(line)) },
+        _ => { print("nobody") },
+    }
+}
+"""
+
+GREETER_NAMES = """\
+#test("bob")["Bob"]
+pub fun polite(name: str) -> str {
+    if name.len() == 0 { return name }
+    var up = name[0:1]
+    if up == "b" { up = "B" }
+    return up + name[1:]
+}
+"""
+
+# a test program: its input, its output; it imports the project's library
+GREETER_TEST_GREETS = """\
+from std.io import stdin
+from names import polite
+
+fun main() {
+    var r = stdin()
+    match r.read_line() {
+        Ok(Some(line)) => { print("hi " + polite(line)) },
+        _ => { print("nobody") },
+    }
+}
+// input:
+// bob
+// output:
+// hi Bob
+"""
+
+GREETER_TEST_WRONG = """\
+fun main() {
+    print("one")
+    print("two")
+}
+// output:
+// one
+// three
+"""
+
+GREETER_TEST_EXITS = """\
+from std.process import exit
+fun main() {
+    print("leaving")
+    exit(3)
+}
+// output:
+// leaving
+// exit: 3
+"""
+
+GREETER_TEST_BOOM = """\
+fun main() {
+    panic("boom")
+}
+// output:
+// exit: 1
+// stderr:
+// runtime error: boom
+"""
+
+# a file of test functions driving the built program
+GREETER_TEST_CLI = """\
+import std.test as test
+from std.process import command, ExitStatus
+
+fun run_with(input: str) -> (str, int) {
+    let out = match command(test.program()).stdin(input).output() {
+        Ok(o) => o,
+        Err(e) => { test.fail("could not run the program")
+            return ("", -1) },
+    }
+    var sb = StringBuilder()
+    for b in out.stdout { sb.append_byte(b) }
+    let code = match out.status { ExitStatus.Exited(c) => c, ExitStatus.Signaled(s) => -s }
+    return (sb.build(), code)
+}
+
+#test
+fun greets_by_title() {
+    let (out, code) = run_with("bob\\n")
+    test.expect_eq(out, "hello Mr Bob\\n")
+    test.expect_eq(code, 0)
+}
+
+#test
+fun greets_nobody() {
+    let (out, code) = run_with("")
+    test.expect_eq(out, "nobody\\n")
+}
+
+#test
+fun fails_on_purpose() {
+    let (out, code) = run_with("bob\\n")
+    test.expect_eq(out, "hello bob\\n")
+}
+"""
+
+GREETER_WANT = """\
+== src/main.my
+PASS  titled #1
+== src/names.my
+PASS  polite #1
+== tests/cli.my
+PASS  greets_by_title
+PASS  greets_nobody
+FAIL  fails_on_purpose: runtime error: expected hello bob\\n, got hello Mr Bob\\n
+== tests/
+PASS  tests/boom.my
+PASS  tests/exits.my
+PASS  tests/greets.my
+FAIL  tests/wrong.my: output differs
+      expected:
+      | one
+      | three
+      got:
+      | one
+      | two
+
+7/9 passed in 7 files.
+"""
+
+
+@unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
+class TestTestsDirectory(_Layout):
+    """`myla test` runs the files of `tests/` after `src/` (D162, MYLA-306):
+    test programs compared with their `// input:`, `// output:`, `// exit:`
+    and `// stderr:` blocks, and files of `#test` functions that drive the
+    program `myla test` built first, through `std.test.program()`."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        super().setUpClass()
+        cls.root = os.path.join(cls.work, "greeter")
+        _write(os.path.join(cls.root, "myla.toml"), '[package]\nname = "greeter"\nversion = "0.1.0"\n\n[dependencies]\n')
+        _write(os.path.join(cls.root, "src", "main.my"), GREETER_MAIN)
+        _write(os.path.join(cls.root, "src", "names.my"), GREETER_NAMES)
+        _write(os.path.join(cls.root, "tests", "greets.my"), GREETER_TEST_GREETS)
+        _write(os.path.join(cls.root, "tests", "wrong.my"), GREETER_TEST_WRONG)
+        _write(os.path.join(cls.root, "tests", "exits.my"), GREETER_TEST_EXITS)
+        _write(os.path.join(cls.root, "tests", "boom.my"), GREETER_TEST_BOOM)
+        _write(os.path.join(cls.root, "tests", "cli.my"), GREETER_TEST_CLI)
+
+    def run_in(self, cwd: str, *argv: str) -> subprocess.CompletedProcess:
+        return subprocess.run([self.myla, *argv], cwd=cwd, capture_output=True, text=True)
+
+    def test_test_programs_and_test_files(self):
+        proc = self.run_in(self.root, "test")
+        self.assertEqual(proc.returncode, 1, proc.stderr)
+        self.assertEqual(proc.stdout, GREETER_WANT)
+        self.assertEqual(proc.stderr, "")
+        # the program was built first, for test.program()
+        self.assertTrue(os.path.isfile(os.path.join(self.root, "build", "greeter")))
+
+    def test_list_and_only_cover_the_test_programs(self):
+        proc = self.run_in(self.root, "test", "--list")
+        self.assertEqual((proc.stderr, proc.returncode), ("", 0))
+        self.assertEqual(proc.stdout, "== src/main.my\ntitled #1\n== src/names.my\npolite #1\n"
+                                      "== tests/cli.my\ngreets_by_title\ngreets_nobody\nfails_on_purpose\n"
+                                      "== tests/\ntests/boom.my\ntests/exits.my\ntests/greets.my\ntests/wrong.my\n")
+        proc = self.run_in(self.root, "test", "--only", "greets")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout, "== tests/cli.my\nPASS  greets_by_title\nPASS  greets_nobody\n"
+                                      "== tests/\nPASS  tests/greets.my\n\n3/3 passed in 2 files.\n")
+
+    def test_a_library_project_runs_its_test_programs_too(self):
+        # no program: nothing is built, test.program() is a runtime error,
+        # and the test programs still run
+        lib = os.path.join(self.work, "quiet")
+        _write(os.path.join(lib, "myla.toml"), '[package]\nname = "quiet"\nversion = "0.1.0"\n\n[dependencies]\n')
+        _write(os.path.join(lib, "src", "quiet.my"), "pub fun one() -> int { return 1 }\n")
+        _write(os.path.join(lib, "tests", "one.my"), "from quiet import one\nfun main() { print(one()) }\n// output:\n// 1\n")
+        _write(os.path.join(lib, "tests", "prog.my"), "import std.test as test\n#test\nfun needs_a_program() { print(test.program()) }\n")
+        proc = self.run_in(lib, "test")
+        self.assertEqual(proc.returncode, 1, proc.stderr)
+        self.assertEqual(proc.stdout, "== tests/prog.my\nFAIL  needs_a_program: runtime error: test.program() needs a project "
+                                      "with a program: run 'myla test' in it\n== tests/\nPASS  tests/one.my\n\n1/2 passed in 2 files.\n")
+        self.assertFalse(os.path.exists(os.path.join(lib, "build")))

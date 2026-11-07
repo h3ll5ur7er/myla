@@ -2,7 +2,7 @@
 id: MYLA-306
 title: "Integration tests in a project: tests/, test programs and test.program() (step 3 of MYLA-303)"
 type: feature
-status: todo
+status: in-progress
 priority: high
 labels: [testing, project-tool]
 ---

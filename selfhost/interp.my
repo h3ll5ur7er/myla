@@ -695,7 +695,7 @@ impl Interp {
                             passed = passed + 1
                             report.push(format("PASS  {}\n", case_name))
                         } else {
-                            report.push(format("FAIL  {}: {}\n", case_name, detail))
+                            report.push(format("FAIL  {}: {}\n", case_name, on_one_line(detail)))
                             // what the case printed, under its line
                             for line in output_lines(self.captured) { report.push("      | " + line + "\n") }
                         }
@@ -4909,4 +4909,17 @@ fun without_module_ids(text: str) -> str {
 #test(' ')[false]
 fun is_name_byte(c: uint8) -> bool {
     return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'
+}
+
+// `text` for a report line: its newlines shown as `\n`.
+#test("expected a\n, got b")["expected a\\n, got b"]
+#test("plain")["plain"]
+fun on_one_line(text: str) -> str {
+    var sb = StringBuilder()
+    var i = 0
+    while i < text.len() {
+        if text[i] == '\n' { sb.append("\\n") } else { sb.append_byte(text[i]) }
+        i = i + 1
+    }
+    return sb.build()
 }

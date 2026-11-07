@@ -24,7 +24,7 @@ from .parser import expr_of, stmt_of, type_expr_of, block_of, pattern_of, fun_of
 // Decode a captured `[uint8]` buffer (e.g. a child's stderr) as UTF-8 text.
 #test([])[""]
 #test([0, 1])["\0\u{1}"]
-fun decode(bytes: [uint8]) -> str {
+pub fun decode(bytes: [uint8]) -> str {
     var sb = StringBuilder()
     for b in bytes { sb.append_byte(b) }
     return sb.build()
