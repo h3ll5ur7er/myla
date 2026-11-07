@@ -6033,10 +6033,15 @@ impl Checker {
         var i = 0
         while i < self.method_decls.len() {
             let fd = self.method_decls[i]
-            // the declaration's name is `key.name` (`register_method`)
-            var sb = StringBuilder()
-            sb.append(fd.name, prefix.len(), fd.name.len())
-            let name = sb.build()
+            // the declaration's name is `key.name` (`register_method`); only
+            // the actor's own are cut, as another type's may be shorter than
+            // the prefix (`str.trim` of std.str, D164)
+            var name = ""
+            if self.method_decl_keys[i] == key {
+                var sb = StringBuilder()
+                sb.append(fd.name, prefix.len(), fd.name.len())
+                name = sb.build()
+            }
             if self.method_decl_keys[i] == key && !fd.is_async && !direct.contains(name) {
                 match fd.body {
                     Some(b) => {

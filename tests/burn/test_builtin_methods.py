@@ -110,8 +110,10 @@ class BuiltinMethods(unittest.TestCase):
                              "append() takes 1 or 3 arguments"),
             "push_onto_a_call": ("fun g() -> [int] {\n    return [1]\n}\n\nfun main() {\n    g().push(1)\n}\n",
                                  "invalid assignment target"),
-            "contains_on_a_list": ("fun main() {\n    let b = [1].contains(1)\n}\n",
-                                   "type '[int32]' has no method 'contains'"),
+            # a list's `contains` is std.list's since D164 (MYLA-323): a map's
+            # builtin on a value that has none
+            "contains_on_an_int": ("fun main() {\n    let b = 1.contains(1)\n}\n",
+                                   "type 'int32' has no method 'contains'"),
             "remove_from_a_let": ("fun main() {\n    let m = [1: 2]\n    m.remove(1)\n}\n",
                                   "remove() needs a mutable map (declare it with 'var')"),
             "len_of_an_int": ("fun main() {\n    let n = 1.len()\n}\n", "type 'int32' has no method 'len'"),
