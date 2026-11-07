@@ -2,7 +2,7 @@
 id: MYLA-305
 title: "Async test functions and cases (step 2 of MYLA-303)"
 type: feature
-status: review
+status: done
 priority: high
 labels: [testing, concurrency, interpreter]
 ---

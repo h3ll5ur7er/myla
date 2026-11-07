@@ -2,7 +2,7 @@
 id: MYLA-304
 title: "Test functions, failures that unwind, std.test and selection (step 1 of MYLA-303)"
 type: feature
-status: review
+status: done
 priority: high
 labels: [testing, language, interpreter, std]
 ---

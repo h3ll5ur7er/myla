@@ -2,7 +2,7 @@
 id: MYLA-307
 title: "myla test --native and --target: the native test harness (step 4 of MYLA-303)"
 type: feature
-status: review
+status: done
 priority: high
 labels: [testing, codegen, targets]
 ---
