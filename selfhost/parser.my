@@ -177,7 +177,7 @@ fun suffix_opt(s: str) -> Option<str> {
     return Some(s)
 }
 
-#test(expr_of("Some(n)"), [])[[Expr { id: 2, line: 1, col: 5, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 8 }, kind: ExprKind.Call(Expr { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 5 }, kind: ExprKind.Name("Some") }, [Expr { id: 1, line: 1, col: 6, sp: SrcSpan { sline: 1, scol: 6, eline: 1, ecol: 7 }, kind: ExprKind.Name("n") }]) }]]
+#test(expr_of("Some(n)"), [])[[Expr { id: 2, line: 1, col: 5, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 8 }, kind: ExprKind.Call(Expr { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 5 }, kind: ExprKind.Name("Some") }, [Expr { id: 1, line: 1, col: 6, sp: SrcSpan { sline: 1, scol: 6, eline: 1, ecol: 7 }, kind: ExprKind.Name("n") }], []) }]]
 fun cons_expr(head: Expr, tail: [Expr]) -> [Expr] {
     var out: [Expr] = [head]
     for x in tail {
@@ -194,6 +194,19 @@ fun is_lvalue(e: Expr) -> bool {
         ExprKind.Name(n) => true,
         ExprKind.GetField(t, f) => is_lvalue(t),
         ExprKind.Index(t, i) => is_lvalue(t),
+        _ => false,
+    }
+}
+
+// Whether `e` can take explicit type arguments before its call's `(`: a
+// name or a member, `f`, `m.f` or `x.method` (D169).
+#test(expr_of("f"))[true]
+#test(expr_of("a.b"))[true]
+#test(expr_of("f(x)"))[false]
+fun names_a_callee(e: Expr) -> bool {
+    return match e.kind {
+        ExprKind.Name(n) => true,
+        ExprKind.GetField(t, f) => true,
         _ => false,
     }
 }
@@ -1601,8 +1614,8 @@ impl Parser {
             let op = self.advance()
             let rhs = self.logic_or()
             let spliced = match rhs.kind {
-                ExprKind.Call(callee, args) => ExprKind.Call(callee, cons_expr(expr, args)),
-                _ => ExprKind.Call(rhs, [expr]),
+                ExprKind.Call(callee, args, targs) => ExprKind.Call(callee, cons_expr(expr, args), targs),
+                _ => ExprKind.Call(rhs, [expr], []),
             }
             expr = self.mk_expr_from(st, op.line, op.column, spliced)
         }
@@ -1826,7 +1839,7 @@ impl Parser {
                 let lp = self.advance()
                 let args = self.call_args()
                 self.expect(TokenKind.RPAREN, "')'")
-                expr = self.mk_expr_from(st, lp.line, lp.column, ExprKind.Call(expr, args))
+                expr = self.mk_expr_from(st, lp.line, lp.column, ExprKind.Call(expr, args, []))
             } else if self.check(TokenKind.LBRACKET) {
                 let lb = self.advance()
                 let index = self.index_or_slice(lb)
@@ -1847,11 +1860,87 @@ impl Parser {
             } else if self.check(TokenKind.QUESTION) {
                 let q = self.advance()
                 expr = self.mk_expr_from(st, q.line, q.column, ExprKind.Try(expr))
+            } else if self.check(TokenKind.LT) && names_a_callee(expr) && self.toks[self.pos - 1].kind == TokenKind.IDENT {
+                // `f<T>(…)`, `m.f<T>(…)`, `x.m<T>(…)` (D169): kept when the
+                // type arguments close and a `(` follows, else a comparison
+                match self.explicit_type_args() {
+                    Some(targs) => {
+                        let lp = self.advance()
+                        let args = self.call_args()
+                        self.expect(TokenKind.RPAREN, "')'")
+                        expr = self.mk_expr_from(st, lp.line, lp.column, ExprKind.Call(expr, args, targs))
+                    },
+                    None => { break },
+                }
             } else {
                 break
             }
         }
         return expr
+    }
+
+    // At a `<` after a callee's name: its type arguments, when they parse as
+    // types, close with `>` and the next token is `(` (D169, C#'s and Swift's
+    // rule); else nothing is consumed, no error is kept, and the `<` is a
+    // comparison's. A scan of the tokens first turns most comparisons away
+    // without parsing anything.
+    #test(parser_on("<int>(x)"))[Some([TypeExpr { id: 0, line: 1, col: 2, sp: SrcSpan { sline: 1, scol: 2, eline: 1, ecol: 5 }, kind: TypeKind.TRef("int", []) }])]
+    #test(parser_on("<b"))[None]
+    #test(parser_on("< b > c"))[None]
+    #test(parser_on("< b >= (c)"))[None]
+    #test(parser_on("< b c > (d)"))[None] // the scan passes it, the parse doesn't
+    fun explicit_type_args(var self) -> Option<[TypeExpr]> {
+        let clean = match self.pending { Some(d) => false, None => !self.unwinding && !self.stopped }
+        if !clean || !self.type_args_ahead() { return None }
+        let pos = self.pos
+        let next_id = self.next_id
+        let depth = self.depth
+        let resume = self.resume
+        let targs = self.type_args()
+        let failed = match self.pending { Some(d) => true, None => false }
+        if failed || !self.check(TokenKind.LPAREN) {
+            self.pos = pos
+            self.next_id = next_id
+            self.depth = depth
+            self.resume = resume
+            self.pending = None
+            return None
+        }
+        return Some(targs)
+    }
+
+    // Whether the tokens from the `<` here can be a type-argument list that
+    // closes with a `>` right before a `(`: only tokens that a type has, the
+    // `<` and `>` balanced, no bracket closed that it didn't open.
+    #test(parser_on("<int>(x)"))[true]
+    #test(parser_on("<Box<[int]>>()"))[true]
+    #test(parser_on("<(int) -> str, m.T>(f)"))[true]
+    #test(parser_on("<int>x"))[false]
+    #test(parser_on("< b\n> (c)"))[false]
+    #test(parser_on("< b) > (c)"))[false]
+    #test(parser_on("< 1 > (c)"))[false]
+    fun type_args_ahead(self) -> bool {
+        var angles = 0
+        var brackets = 0
+        var k = self.pos
+        while k < self.toks.len() {
+            let kind = self.toks[k].kind
+            if kind == TokenKind.LT {
+                angles += 1
+            } else if kind == TokenKind.GT {
+                angles -= 1
+                if angles == 0 { return brackets == 0 && k + 1 < self.toks.len() && self.toks[k + 1].kind == TokenKind.LPAREN }
+            } else if kind == TokenKind.LPAREN || kind == TokenKind.LBRACKET {
+                brackets += 1
+            } else if kind == TokenKind.RPAREN || kind == TokenKind.RBRACKET {
+                brackets -= 1
+                if brackets < 0 { return false }
+            } else if !(kind == TokenKind.IDENT || kind == TokenKind.COMMA || kind == TokenKind.DOT || kind == TokenKind.COLON || kind == TokenKind.ARROW || kind == TokenKind.ASYNC || self.is_prim_type(kind)) {
+                return false
+            }
+            k += 1
+        }
+        return false
     }
 
     // `if c { a } else { b }` as a value (D104 (1), MYLA-222): a `match` on

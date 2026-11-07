@@ -428,7 +428,7 @@ pub fun time_from_env() -> str {
 #test(expr_of("fs[0]()"), [])[true]
 fun calls_a_value(op: Expr, scopes: [RtFrame]) -> bool {
     match op.kind {
-        ExprKind.Call(c, args) => {
+        ExprKind.Call(c, args, _) => {
             match c.kind {
                 ExprKind.Name(n) => {
                     for fr in scopes { for k in fr.names { if k == n { return true } } }
@@ -2347,7 +2347,7 @@ impl Interp {
             ExprKind.Name(n) => self.eval_name(e, n),
             ExprKind.Unary(op, x) => self.eval_unary(e, op, x),
             ExprKind.Binary(op, l, r) => self.eval_binary(e, op, l, r),
-            ExprKind.Call(c, args) => self.eval_call(e, c, args),
+            ExprKind.Call(c, args, _) => self.eval_call(e, c, args),
             ExprKind.Cast(x, ty) => self.eval_cast(e, x),
             ExprKind.GetField(tgt, field) => self.eval_getfield(e, tgt, field),
             ExprKind.TupleLit(elems) => self.eval_tuple_lit(elems),
@@ -3104,7 +3104,7 @@ impl Interp {
     fun exec_become(var self, ex: Expr) {
         // a derived `eq` is the interpreter's own comparison, which returns
         match ex.kind {
-            ExprKind.Call(callee, args) => {
+            ExprKind.Call(callee, args, _) => {
                 match callee.kind {
                     ExprKind.GetField(tgt, field) => {
                         if self.derived_eq(self.recv_key(tgt), field, args) {
@@ -3122,7 +3122,7 @@ impl Interp {
             _ => {},
         }
         let t = match ex.kind {
-            ExprKind.Call(callee, args) => self.tail_call(callee, args),
+            ExprKind.Call(callee, args, _) => self.tail_call(callee, args),
             _ => TailCall.TNone,
         }
         if !self.stop() {
@@ -3482,7 +3482,7 @@ impl Interp {
         return argv
     }
 
-    #test(interp_on("[int]"), Expr { id: 133, line: 83, col: 20, sp: SrcSpan { sline: 83, scol: 11, eline: 83, ecol: 22 }, kind: ExprKind.Call(Expr { id: 132, line: 83, col: 11, sp: SrcSpan { sline: 83, scol: 11, eline: 83, ecol: 20 }, kind: ExprKind.Name("page_size") }, []) }, "page_size", [])[Value.VUnit]
+    #test(interp_on("[int]"), Expr { id: 133, line: 83, col: 20, sp: SrcSpan { sline: 83, scol: 11, eline: 83, ecol: 22 }, kind: ExprKind.Call(Expr { id: 132, line: 83, col: 11, sp: SrcSpan { sline: 83, scol: 11, eline: 83, ecol: 20 }, kind: ExprKind.Name("page_size") }, [], []) }, "page_size", [])[Value.VUnit]
     fun eval_name_call(var self, e: Expr, nm: str, args: [Expr]) -> Value {
         if nm == "std$task$cancel" {
             match self.eval(args[0]) {

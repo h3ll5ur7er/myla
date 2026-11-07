@@ -693,8 +693,9 @@ impl Resolver {
                 self.expr(l)
                 self.expr(r)
             },
-            ExprKind.Call(callee, args) => {
+            ExprKind.Call(callee, args, targs) => {
                 self.expr(callee)
+                for t in targs { self.type_expr(t) }      // `mk<Point>()` (D169)
                 for a in args { self.expr(a) }
             },
             ExprKind.GetField(recv, field) => {
@@ -1020,7 +1021,7 @@ impl Resolver {
             },
             ExprKind.Try(x) => { return success_of(self.unalias(self.type_of(x))) },
             ExprKind.GetField(recv, f) => { return self.member_type(recv, f, false) },
-            ExprKind.Call(callee, args) => {
+            ExprKind.Call(callee, args, _) => {
                 match callee.kind {
                     ExprKind.Name(n) => {
                         match self.lookup(n) {

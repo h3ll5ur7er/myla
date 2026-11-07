@@ -1,0 +1,16 @@
+//~ type error: method 'size' takes no type arguments: it has no type parameters of its own, and its impl's come from the receiver
+//~ span: str
+// The impl's type parameters are the receiver's: `b` is a `B<int>`, and
+// `size` declares none of its own (D169).
+struct B<T> {
+    items: [T],
+}
+impl<T> B<T> {
+    fun size(self) -> int {
+        return self.items.len()
+    }
+}
+fun main() {
+    let b = B { items: [1, 2] }
+    print(b.size<str>())
+}

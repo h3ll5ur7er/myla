@@ -1,0 +1,5 @@
+type error: function 'twice' is not generic (it takes no type arguments)
+  --> examples/errors/type_explicit_type_args_not_generic.my:8:17
+  |
+8 |     print(twice<int>(4))
+  |                 ^^^

@@ -168,15 +168,20 @@ unary       = ( "-" | "!" | "~" ) unary @unary_expression | "await" unary @await
               (* the parser also lets a suffix follow a lambda whose body
                  can't take it, as in (x) => x as T [0]; write ((x) => …)[0] *)
 postfix     = primary ( "(" call_args? ")" @call_expression | "[" NL* index_part NL* "]" @index_expression
-                      | "." ( IDENT | TUPLE_INDEX ) @field_expression | "?" @try_expression )* ;
+                      | "." member @field_expression | "?" @try_expression )* ;
+member      = IDENT | TUPLE_INDEX | generic_call ;
 call_args   = NL+ | NL* call_arg NL* ( "," NL* call_arg NL* )* ( "," NL* )? ;
 call_arg    = "_" @hole | expression ;            (* "_" alone: a partial-application hole *)
 index_part  = bound | bound? ":" bound? ( ":" expression? )? @slice ;   (* D142 *)
 bound       = "^" expression @from_end | expression ;   (* "^n": the n-th from the end *)
 
 primary     = INT | FLOAT | CHAR | STRING | fstring | "true" @boolean | "false" @boolean
-            | "self" @self | IDENT | struct_literal | "(" NL* expression NL* ")" @paren_expression
+            | "self" @self | IDENT | generic_call | struct_literal | "(" NL* expression NL* ")" @paren_expression
             | "(" NL* ")" @unit | tuple | list | map | match_expr | if_expr ;   (* "()": the unit value, D138 *)
+generic_call @call_expression = IDENT type_args "(" call_args? ")" ;
+              (* f<T>(…), m.f<T>(…), x.method<T>(…) (D169): after a name, the
+                 parser tries "<" as type arguments, kept when they close and
+                 "(" follows, else "<" compares *)
 fstring     = 'f"' ( FSTRING_TEXT | "{{" @escape_sequence | "}}" @escape_sequence
                    | "{" expression FORMAT_SPEC? "}" @interpolation )* '"' ;
               (* lowered by the lexer to: format(STRING, expression, …) *)
@@ -224,6 +229,8 @@ field_pattern = IDENT ( ":" pattern )? ;
 @conflict place primary lambda_param ;
 @conflict tuple_type ;
 @conflict named_type ;
+@conflict primary generic_call ;      (* "f<" and "x.f<": type arguments, or a comparison (D169) *)
+@conflict member generic_call ;
 @conflict if_stmt if_expr ;
 @conflict unit lambda ;               (* "()" before "=>": a lambda without parameters *)
 

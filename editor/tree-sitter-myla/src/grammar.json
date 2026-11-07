@@ -2970,14 +2970,19 @@
           "name": "_primary"
         },
         {
-          "type": "SYMBOL",
-          "name": "call_expression"
+          "type": "ALIAS",
+          "content": {
+            "type": "SYMBOL",
+            "name": "_call_expression_15"
+          },
+          "named": true,
+          "value": "call_expression"
         },
         {
           "type": "ALIAS",
           "content": {
             "type": "SYMBOL",
-            "name": "_index_expression_15"
+            "name": "_index_expression_16"
           },
           "named": true,
           "value": "index_expression"
@@ -2986,7 +2991,7 @@
           "type": "ALIAS",
           "content": {
             "type": "SYMBOL",
-            "name": "_field_expression_16"
+            "name": "_field_expression_17"
           },
           "named": true,
           "value": "field_expression"
@@ -2994,6 +2999,33 @@
         {
           "type": "SYMBOL",
           "name": "try_expression"
+        }
+      ]
+    },
+    "_member": {
+      "type": "CHOICE",
+      "members": [
+        {
+          "type": "SYMBOL",
+          "name": "identifier"
+        },
+        {
+          "type": "ALIAS",
+          "content": {
+            "type": "SYMBOL",
+            "name": "_tuple_index"
+          },
+          "named": true,
+          "value": "integer"
+        },
+        {
+          "type": "ALIAS",
+          "content": {
+            "type": "SYMBOL",
+            "name": "_generic_call"
+          },
+          "named": true,
+          "value": "call_expression"
         }
       ]
     },
@@ -3179,7 +3211,7 @@
           "type": "ALIAS",
           "content": {
             "type": "SYMBOL",
-            "name": "_boolean_17"
+            "name": "_boolean_18"
           },
           "named": true,
           "value": "boolean"
@@ -3188,7 +3220,7 @@
           "type": "ALIAS",
           "content": {
             "type": "SYMBOL",
-            "name": "_boolean_18"
+            "name": "_boolean_19"
           },
           "named": true,
           "value": "boolean"
@@ -3205,6 +3237,15 @@
         {
           "type": "SYMBOL",
           "name": "identifier"
+        },
+        {
+          "type": "ALIAS",
+          "content": {
+            "type": "SYMBOL",
+            "name": "_generic_call"
+          },
+          "named": true,
+          "value": "call_expression"
         },
         {
           "type": "SYMBOL",
@@ -3240,6 +3281,39 @@
         }
       ]
     },
+    "_generic_call": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "SYMBOL",
+          "name": "identifier"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "type_args"
+        },
+        {
+          "type": "STRING",
+          "value": "("
+        },
+        {
+          "type": "CHOICE",
+          "members": [
+            {
+              "type": "SYMBOL",
+              "name": "call_args"
+            },
+            {
+              "type": "BLANK"
+            }
+          ]
+        },
+        {
+          "type": "STRING",
+          "value": ")"
+        }
+      ]
+    },
     "fstring": {
       "type": "SEQ",
       "members": [
@@ -3260,7 +3334,7 @@
                 "type": "ALIAS",
                 "content": {
                   "type": "SYMBOL",
-                  "name": "_escape_sequence_19"
+                  "name": "_escape_sequence_20"
                 },
                 "named": true,
                 "value": "escape_sequence"
@@ -3269,7 +3343,7 @@
                 "type": "ALIAS",
                 "content": {
                   "type": "SYMBOL",
-                  "name": "_escape_sequence_20"
+                  "name": "_escape_sequence_21"
                 },
                 "named": true,
                 "value": "escape_sequence"
@@ -4367,7 +4441,7 @@
           "type": "ALIAS",
           "content": {
             "type": "SYMBOL",
-            "name": "_boolean_17"
+            "name": "_boolean_18"
           },
           "named": true,
           "value": "boolean"
@@ -4376,7 +4450,7 @@
           "type": "ALIAS",
           "content": {
             "type": "SYMBOL",
-            "name": "_boolean_18"
+            "name": "_boolean_19"
           },
           "named": true,
           "value": "boolean"
@@ -5377,7 +5451,7 @@
         }
       ]
     },
-    "call_expression": {
+    "_call_expression_15": {
       "type": "PREC_LEFT",
       "value": 1,
       "content": {
@@ -5410,7 +5484,7 @@
         ]
       }
     },
-    "_index_expression_15": {
+    "_index_expression_16": {
       "type": "PREC_LEFT",
       "value": 1,
       "content": {
@@ -5459,7 +5533,7 @@
         ]
       }
     },
-    "_field_expression_16": {
+    "_field_expression_17": {
       "type": "PREC_LEFT",
       "value": 1,
       "content": {
@@ -5474,22 +5548,8 @@
             "value": "."
           },
           {
-            "type": "CHOICE",
-            "members": [
-              {
-                "type": "SYMBOL",
-                "name": "identifier"
-              },
-              {
-                "type": "ALIAS",
-                "content": {
-                  "type": "SYMBOL",
-                  "name": "_tuple_index"
-                },
-                "named": true,
-                "value": "integer"
-              }
-            ]
+            "type": "SYMBOL",
+            "name": "_member"
           }
         ]
       }
@@ -5590,11 +5650,11 @@
         }
       ]
     },
-    "_boolean_17": {
+    "_boolean_18": {
       "type": "STRING",
       "value": "true"
     },
-    "_boolean_18": {
+    "_boolean_19": {
       "type": "STRING",
       "value": "false"
     },
@@ -5664,11 +5724,11 @@
         }
       ]
     },
-    "_escape_sequence_19": {
+    "_escape_sequence_20": {
       "type": "STRING",
       "value": "{{"
     },
-    "_escape_sequence_20": {
+    "_escape_sequence_21": {
       "type": "STRING",
       "value": "}}"
     },
@@ -5791,6 +5851,14 @@
     ],
     [
       "named_type"
+    ],
+    [
+      "_primary",
+      "_generic_call"
+    ],
+    [
+      "_member",
+      "_generic_call"
     ],
     [
       "if_stmt",

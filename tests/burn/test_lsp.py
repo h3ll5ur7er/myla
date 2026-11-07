@@ -355,6 +355,16 @@ class ScopeScenarios(LspRequestHelpers):
         self.assertEqual(self.defn(uri, 5, 10), {"uri": uri, "range": rng(1, 7, 8)})    # C
         self.assertEqual(self.defn(uri, 5, 14), {"uri": uri, "range": rng(2, 4, 5)})    # C's n
 
+    def test_explicit_type_arguments(self):
+        # a call's type arguments (D169, MYLA-373) resolve as a type's do
+        uri = self.open("struct P { x: int }\n"                       # 0
+                        "fun mk<T>() -> [T] {\n    return []\n}\n"    # 1
+                        "fun main() {\n"                              # 4
+                        "    let ps = mk<P>()\n"                      # 5
+                        "    print(ps.len())\n}\n")
+        self.assertEqual(self.defn(uri, 5, 16), {"uri": uri, "range": rng(0, 7, 8)})    # P
+        self.assertEqual(self.defn(uri, 5, 13), {"uri": uri, "range": rng(1, 4, 6)})    # mk
+
     def test_unicode_identifiers(self):
         # XID identifiers (MYLA-84); ranges in UTF-16 units, 😀 counting two
         uri = self.open('fun main() {\n    let größe = 1\n    let 日本 = größe\n    print(f"😀{日本}")\n}\n')

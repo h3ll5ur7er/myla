@@ -1,0 +1,9 @@
+//~ type error: function 'twice' is not generic (it takes no type arguments)
+//~ span: int
+// Only a generic function or method takes explicit type arguments (D169).
+fun twice(x: int) -> int {
+    return x * 2
+}
+fun main() {
+    print(twice<int>(4))
+}

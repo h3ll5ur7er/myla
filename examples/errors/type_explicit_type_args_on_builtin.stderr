@@ -1,0 +1,5 @@
+type error: function 'print' is not generic (it takes no type arguments)
+  --> examples/errors/type_explicit_type_args_on_builtin.my:5:11
+  |
+5 |     print<str>("hi")
+  |           ^^^

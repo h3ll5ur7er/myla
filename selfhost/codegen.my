@@ -1199,7 +1199,7 @@ impl CodeGen {
     // returned, so a variable a call in it passes is its last use.
     fun scan_expr(var self, e: Expr, in_return: bool) {
         match e.kind {
-            ExprKind.Call(callee, args) => {
+            ExprKind.Call(callee, args, _) => {
                 // a constructor's payload, or the value `push` appends, is
                 // kept; the call's arguments are counted
                 var stores = false
@@ -1912,7 +1912,7 @@ impl CodeGen {
                     return CtorInfo { ok: true, enum_name: enm, variant: n, args: [] }
                 }
             },
-            ExprKind.Call(callee, args) => {
+            ExprKind.Call(callee, args, _) => {
                 let qn = expr_name(callee_target(callee))
                 let cfield = getfield_name(callee)
                 if cfield != "" && qn != "" && self.is_enum_name(qn) {
@@ -2037,8 +2037,16 @@ impl CodeGen {
     // its declared parameter types against the concrete argument types, then
     // its result type against the type of the call `call_id`, which gives
     // those the checker took from the call's expected type (MYLA-315).
-    fun solve_targs(self, sig: FuncSig, args: [Expr], call_id: int32) -> [Type] {
+    fun solve_targs(self, sig: FuncSig, args: [Expr], call_id: int32, explicit: [TypeExpr]) -> [Type] {
         var sub: [Subst] = []
+        // the explicit type arguments name the last type parameters, a
+        // method's own (D169); the checker kept their types with their nodes
+        let base = sig.type_params.len() - explicit.len()
+        var k = 0
+        while k < explicit.len() && base >= 0 {
+            if self.has_type(explicit[k].id) { sub.push(Subst { name: sig.type_params[base + k], ty: self.type_of(explicit[k].id) }) }
+            k += 1
+        }
         var i = 0
         while i < sig.params.len() && i < args.len() {
             for b in unify_into(sig.params[i], self.type_of(args[i].id)) { sub.push(b) }
@@ -3203,7 +3211,7 @@ impl CodeGen {
                 for v in self.free_expr(l, bound) { out.push(v) }
                 for v in self.free_expr(r, bound) { out.push(v) }
             },
-            ExprKind.Call(c, args) => {
+            ExprKind.Call(c, args, _) => {
                 for v in self.free_expr(c, bound) { out.push(v) }
                 for a in args { for v in self.free_expr(a, bound) { out.push(v) } }
             },
@@ -3688,7 +3696,7 @@ pub fun place_root(e: Expr) -> str {
 #test(expr_of("-n * 2"))[true]
 fun is_new_value(e: Expr) -> bool {
     return match e.kind {
-        ExprKind.Call(c, args) => true,
+        ExprKind.Call(c, args, _) => true,
         ExprKind.Binary(op, l, r) => true,
         ExprKind.ListLit(es) => true,
         ExprKind.MapLit(entries) => true,
@@ -3807,7 +3815,7 @@ pub fun may_write_expr(e: Expr, name: str) -> bool {
         ExprKind.Unary(op, x) => { return may_write_expr(x, name) },
         ExprKind.Await(x) => { return may_write_expr(x, name) },
         ExprKind.Binary(op, l, r) => { return may_write_expr(l, name) || may_write_expr(r, name) },
-        ExprKind.Call(c, args) => {
+        ExprKind.Call(c, args, _) => {
             let writes = match c.kind {
                 ExprKind.GetField(recv, m) => place_root(recv) == name,
                 ExprKind.Name(f) => is_mutating_builtin(f) && args.len() > 0 && place_root(args[0]) == name,

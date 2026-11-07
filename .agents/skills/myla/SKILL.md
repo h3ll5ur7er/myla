@@ -82,7 +82,7 @@ fun main() {
 | `mod x;`, `use a::b;`, `import Foundation` | `from .x import f`, `import a.b as b`, `from std.io import println` | Python-like imports, `pub` exports |
 | `impl Add for P { type Output … fn add(self, o: P) -> P }` | `impl Add for P { fun add(self, other: P) -> P { … } }` | Operator traits have no associated types; `Ord` is `cmp(self, other: Self) -> int` |
 | trait default method bodies | signatures only | `trait T { fun m(self) -> int }` |
-| `f::<int>(x)` | annotate: `let y: Box<int> = …` | No turbofish; type arguments only in type positions |
+| `f::<int>(x)` | `f<int>(x)`, `deque.new<str>()`, `xs.mapped<str>(g)`, or annotate: `let y: Box<int> = …` | No turbofish: type arguments go right after the name (D169); a method's name only its own type parameters. A `<` after a name is a call's only if the `>` is followed by `(`, so `f(a < b, c > (d))` is one generic call: write `f(a < b, c > d)` |
 | `x as f64` from `bool`/`str` | only numeric ↔ numeric and `char` ↔ integer | `as` |
 | a line that starts with an operator (`\n    + b`) | end the line with the operator (`a +`), or wrap the expression in `( )` | A statement goes on after a binary operator that ends a line and inside `( )`/`[ ]` (D104); a line that starts with an operator is a new statement |
 

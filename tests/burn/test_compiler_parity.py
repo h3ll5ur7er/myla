@@ -698,6 +698,97 @@ fun main() {
         "    let p: uint8 = pick(true, 200, 3)\n    print(p)\n"
         "}\n"
     ),
+    # MYLA-373 (D169): explicit type arguments on a call, a function's and a
+    # method's own, where nothing else fixes them (a call statement, `let`
+    # without an annotation, an argument of a generic call); `a < b` and
+    # `f(a < b, c > d)` stay comparisons
+    "explicit_type_arguments": """// explicit type arguments on a call (D169, MYLA-373): a function's and a
+// method's own, a call statement, an argument whose parameter's type is
+// still open, nested arguments closed by `>>`, a type parameter of the
+// enclosing function; comparisons keep their meaning
+struct B<T> {
+    items: [T],
+}
+
+impl<T> B<T> {
+    fun size(self) -> int {
+        return self.items.len()
+    }
+
+    fun mapped<U>(self, f: (T) -> U) -> B<U> {
+        var out: [U] = []
+        for x in self.items {
+            out.push(f(x))
+        }
+        return B { items: out }
+    }
+
+    fun emptied<U>(self) -> B<U> {
+        return B { items: [] }
+    }
+}
+
+fun mk<T>() -> B<T> {
+    return B { items: [] }
+}
+
+fun pair<A, C>(a: A, c: C) -> (A, C) {
+    return (a, c)
+}
+
+fun widen<T>(x: T) -> T {
+    return x
+}
+
+fun count<T>(xs: [T]) -> int {
+    return xs.len()
+}
+
+fun twice<T>(x: T) -> B<T> {
+    var b = mk<T>()
+    b.items.push(x)
+    b.items.push(x)
+    return b
+}
+
+fun both(a: bool, b: bool) -> bool {
+    return a && b
+}
+
+fun main() {
+    let d = mk<int>()
+    print(d.size())
+    var s = mk<str>()
+    s.items.push("x")
+    print(s.size())
+    mk<bool>()
+    print(count<int64>([]))
+    let big = widen<int64>(5000000000)
+    print(big)
+    let p = pair<int64, str>(7, "seven")
+    print(p.0 + 1)
+    print(p.1)
+    let b = B { items: [1, 2, 3] }
+    let m = b.mapped<str>((x) => f"<{x}>")
+    print(m.items[2])
+    print(b.emptied<char>().size())
+    let nested = mk<B<int>>()
+    print(nested.size())
+    print(widen(mk<int>()).size())
+    print(twice<str>("hi").items[1])
+    let one: uint8 = widen<uint8>(200)
+    print(one)
+    // comparisons
+    let x = 1
+    let y = 2
+    print(x < y)
+    print(both(x < y, y > x))
+    print(x < y && y > x)
+    print(if x < y { "lt" } else { "ge" })
+    print(x << 3 > y)
+    print(f"{widen<int>(x) < y}")
+}
+""",
     # a receiver and every argument are taken in order, before a later
     # argument writes their variable through a `var self` method (MYLA-237)
     "argument_values_before_later_writes": (
@@ -4435,6 +4526,27 @@ fun main() {
 """
 
 
+# The main module of `test_explicit_type_arguments_of_a_module` (MYLA-373):
+# a module's generic functions and a generic method of its type, called with
+# explicit type arguments where nothing else would fix them.
+EXPLICIT_MODULE_MAIN = """import .deque as deque
+import .set as set
+
+fun main() {
+    let d = deque.new<int>()
+    print(d.len())
+    var s = set.new<str>()
+    s.insert("a")
+    s.insert("a")
+    print(s.len())
+    print(d.emptied<str>().first().unwrap_or("none"))
+    let big = deque.of<int64>([5000000000])
+    print(big.first().unwrap_or(0))
+    set.new<bool>()
+    print(deque.new<char>().len() < 1)
+}
+"""
+
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
 class TestCompilerParity(unittest.TestCase):
     def test_generic_constructors_of_a_module(self):
@@ -4447,6 +4559,15 @@ class TestCompilerParity(unittest.TestCase):
             write_program(tmp, GENERIC_MODULE_SET, "set.my")
             main = write_program(tmp, GENERIC_MODULE_MAIN)
             self.assertEqual(run_file_both_now(main), ("0\n2\n2\n2\n1\n0\n0\nnone\n5000000000\n", "", 0))
+
+    def test_explicit_type_arguments_of_a_module(self):
+        # MYLA-373: `deque.new<int>()`, `d.emptied<str>()`: the module's member
+        # folds into its qualified name with its type arguments kept
+        with tempfile.TemporaryDirectory() as tmp:
+            write_program(tmp, GENERIC_MODULE_DEQUE, "deque.my")
+            write_program(tmp, GENERIC_MODULE_SET, "set.my")
+            main = write_program(tmp, EXPLICIT_MODULE_MAIN)
+            self.assertEqual(run_file_both_now(main), ("0\n1\nnone\n5000000000\ntrue\n", "", 0))
 
     def test_a_char_moved_past_the_scalars_is_a_runtime_error(self):
         # MYLA-318: `c + n` and `c - n` are checked as `n as char` is, past
@@ -4711,6 +4832,8 @@ PINNED = {
     # MYLA-315: new; the interpreter gives the same
     "generic_constructors_from_the_expected_type": "0\n1\n0\n4\nq\nno top\n0\nb\nhihi\n0\n3\n5000000000\n"
                                                    "5000000000\n0\n7\n",
+    # MYLA-373: new; the interpreter gives the same
+    "explicit_type_arguments": "0\n1\n0\n5000000000\n8\nseven\n<3>\n0\n0\n0\nhi\n200\ntrue\ntrue\ntrue\nlt\ntrue\ntrue\n",
     # MYLA-315: new; the interpreter gives the same
     "generic_arguments_hinted_by_the_expected_type": "4\n5000000000\ns\n-1\n12\n200\n",
     # D102: the unsuffixed 123.456 is a float64 now (the recording's

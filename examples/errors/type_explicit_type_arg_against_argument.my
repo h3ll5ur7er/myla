@@ -1,0 +1,10 @@
+//~ type error: argument type mismatch in call to 'widen': expected 'str', found 'bool'
+//~ span: true
+// The explicit type arguments come first: `T` is `str`, so the argument has
+// to be one (D169).
+fun widen<T>(x: T) -> T {
+    return x
+}
+fun main() {
+    print(widen<str>(true))
+}

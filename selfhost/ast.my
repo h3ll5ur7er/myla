@@ -50,7 +50,7 @@ pub enum ExprKind {
     Name(str),
     Unary(str, Expr),
     Binary(str, Expr, Expr),
-    Call(Expr, [Expr]),
+    Call(Expr, [Expr], [TypeExpr]),    // callee, arguments, explicit type arguments (`mk<int>()`, D169)
     GetField(Expr, str),
     StructLit(str, [FieldInit]),
     TupleLit([Expr]),
@@ -64,6 +64,17 @@ pub enum ExprKind {
     Lambda([Param], Option<TypeExpr>, ExprOrBlock, bool),    // params, return, body, async (D89)
     Await(Expr),                                              // D89
     Hole,
+}
+
+// The explicit type arguments of the call `e` (D169), none for anything else.
+#test(expr_of("f<int, str>(x)"))[[TypeExpr { id: 1, line: 1, col: 3, sp: SrcSpan { sline: 1, scol: 3, eline: 1, ecol: 6 }, kind: TypeKind.TRef("int", []) }, TypeExpr { id: 2, line: 1, col: 8, sp: SrcSpan { sline: 1, scol: 8, eline: 1, ecol: 11 }, kind: TypeKind.TRef("str", []) }]]
+#test(expr_of("f(x)"))[[]]
+#test(expr_of("x"))[[]]
+pub fun call_targs(e: Expr) -> [TypeExpr] {
+    return match e.kind {
+        ExprKind.Call(c, args, targs) => targs,
+        _ => [],
+    }
 }
 
 // --- patterns ------------------------------------------------------------
@@ -303,6 +314,13 @@ fun dump_arm(a: MatchArm) -> str {
 }
 
 #test(expr_of("Some(n)"))["(call (name \"Some\") [(name \"n\")])"]
+#test(expr_of("f<int>(x)"))["(call (name \"f\") [(name \"x\")] [(tref \"int\" [])])"] // explicit type arguments, D169
+#test(expr_of("m.f<[A], B<C>>()"))["(call (getfield (name \"m\") \"f\") [] [(ltype (tref \"A\" [])) (tref \"B\" [(tref \"C\" [])])])"]
+#test(expr_of("a < b > c"))["(binary \">\" (binary \"<\" (name \"a\") (name \"b\")) (name \"c\"))"] // no `(` after the `>`
+#test(expr_of("f(a < b, c > d)"))["(call (name \"f\") [(binary \"<\" (name \"a\") (name \"b\")) (binary \">\" (name \"c\") (name \"d\"))])"]
+#test(expr_of("f(a < b, c > (d))"))["(call (name \"f\") [(call (name \"a\") [(name \"d\")] [(tref \"b\" []) (tref \"c\" [])])])"] // C#'s reading: one generic call
+#test(expr_of("(a) < b > (c)"))["(binary \">\" (binary \"<\" (name \"a\") (name \"b\")) (name \"c\"))"] // a parenthesized callee compares
+#test(expr_of("a < b >= (c)"))["(binary \">=\" (binary \"<\" (name \"a\") (name \"b\")) (name \"c\"))"]
 pub fun dump_expr(e: Expr) -> str {
     return match e.kind {
         ExprKind.IntLit(v, suf, isc, big) => format("(int {} {} {})", int_text(v, big), opt_sstr(suf), bstr(isc)),
@@ -313,7 +331,12 @@ pub fun dump_expr(e: Expr) -> str {
         ExprKind.Unary(op, x) => format("(unary {} {})", sstr(op), dump_expr(x)),
         ExprKind.Await(x) => format("(await {})", dump_expr(x)),
         ExprKind.Binary(op, l, r) => format("(binary {} {} {})", sstr(op), dump_expr(l), dump_expr(r)),
-        ExprKind.Call(c, args) => format("(call {} {})", dump_expr(c), join_map(args, dump_expr)),
+        ExprKind.Call(c, args, targs) => {
+            // explicit type arguments (D169) only when there are some, so the
+            // recorded dumps of the retired parser still hold
+            if targs.len() == 0 { format("(call {} {})", dump_expr(c), join_map(args, dump_expr)) }
+            else { format("(call {} {} {})", dump_expr(c), join_map(args, dump_expr), join_map(targs, dump_type)) }
+        },
         ExprKind.GetField(t, name) => format("(getfield {} {})", dump_expr(t), sstr(name)),
         ExprKind.StructLit(name, fields) => format("(structlit {} {})", sstr(name), join_map(fields, dump_finit)),
         ExprKind.TupleLit(elems) => format("(tuple {})", join_map(elems, dump_expr)),
@@ -492,7 +515,7 @@ pub fun names_in_expr(e: Expr, acc: [str]) -> [str] {
         ExprKind.Unary(op, x) => { out = names_in_expr(x, out) },
         ExprKind.Await(x) => { out = names_in_expr(x, out) },
         ExprKind.Binary(op, l, r) => { out = names_in_expr(r, names_in_expr(l, out)) },
-        ExprKind.Call(c, args) => {
+        ExprKind.Call(c, args, _) => {
             out = names_in_expr(c, out)
             for a in args { out = names_in_expr(a, out) }
         },
@@ -579,7 +602,7 @@ pub enum Expected {
 #test(expr_of("3"))[None]
 pub fun failure_callee(e: Expr) -> Option<str> {
     match e.kind {
-        ExprKind.Call(callee, args) => {
+        ExprKind.Call(callee, args, _) => {
             match callee.kind {
                 ExprKind.Name(n) => {
                     if n == "panic" { return Some("panic") }
@@ -618,7 +641,7 @@ fun ends_with_segment(n: str, last: str) -> bool {
 #test(expr_of("Ok(())"))[Expected.Value]
 pub fun expected_failure(e: Expr) -> Expected {
     let callee = match failure_callee(e) { Some(c) => c, None => { return Expected.Value } }
-    let args = match e.kind { ExprKind.Call(c, xs) => xs, _ => [] }
+    let args = match e.kind { ExprKind.Call(c, xs, _) => xs, _ => [] }
     if args.len() != 1 { return Expected.Value }
     if callee == "panic" {
         return match args[0].kind { ExprKind.StrLit(m) => Expected.Panics(m), _ => Expected.Value }

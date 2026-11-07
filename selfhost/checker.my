@@ -19,7 +19,7 @@ from std.fmt import parse_spec, spec_need
 from .ast import Program, Decl, DeclKind, FunData, Param, TypeParam, Field, Variant
 from .ast import Attribute, TypeExpr, TypeKind, Expr, ExprKind, FieldInit, MapEntry
 from .ast import Stmt, StmtKind, Block, ElseTail, BindElem, ExprOrBlock
-from .ast import Pattern, PatternKind, FieldPat, MatchArm, Expected, failure_callee, expected_failure
+from .ast import Pattern, PatternKind, FieldPat, MatchArm, Expected, failure_callee, expected_failure, call_targs
 from .tokens import Note, SrcSpan, no_span, MAX_ERRORS
 
 // =========================================================================
@@ -243,7 +243,7 @@ pub fun is_hole_part(e: Expr) -> bool {
 #test(expr_of("f(1)"))[true]
 #test(expr_of("x"))[false]
 fun is_call_expr(e: Expr) -> bool {
-    return match e.kind { ExprKind.Call(c, args) => true, _ => false }
+    return match e.kind { ExprKind.Call(c, args, _) => true, _ => false }
 }
 
 // A function's result written as `t`: none for `()`, the same thing (D140).
@@ -1190,6 +1190,40 @@ fun arg_hint(pt: Type, subst: [Subst], lambda: bool) -> Option<Type> {
     }
 }
 
+// The range of a call's explicit type arguments (not empty), which an error
+// about them underlines.
+fun targs_span(targs: [TypeExpr]) -> SrcSpan {
+    let a = targs[0].sp
+    let b = targs[targs.len() - 1].sp
+    return SrcSpan { sline: a.sline, scol: a.scol, eline: b.eline, ecol: b.ecol }
+}
+
+// What a call's callee is, as an error about its type arguments names it.
+#test(expr_of("f"))["function 'f'"]
+#test(expr_of("x.m"))["method 'm'"]
+#test(expr_of("fs[0]"))["this call"]
+fun callee_words(c: Expr) -> str {
+    return match c.kind {
+        ExprKind.Name(n) => format("function '{}'", n),
+        ExprKind.GetField(t, f) => format("method '{}'", f),
+        _ => "this call",
+    }
+}
+
+// Explicit type arguments on the call `e` of something that has no type
+// parameters of its own (D169).
+fun not_generic(e: Expr, what: str) -> CheckErr {
+    let targs = call_targs(e)
+    return terr_at(targs[0].line, targs[0].col, targs_span(targs), format("{} is not generic (it takes no type arguments)", what))
+}
+
+fun is_ok_call(r: Result<Option<Type>, CheckErr>) -> bool {
+    return match r {
+        Ok(t) => true,
+        Err(e) => false,
+    }
+}
+
 // The type parameters a generic call's expected type fixes (MYLA-315): its
 // declared result `ret` unified with `expected`; none when either is missing
 // or they don't fit together, since the expected type is only a hint.
@@ -1451,6 +1485,7 @@ pub struct FuncSig {
     params: [Type],
     ret: Option<Type>,
     type_params: [str],
+    own_type_params: int32,         // how many of them, the last ones, are its own: a method's, not its impl's (D169)
     bounds: [Bound],
     decl: FunData,
     has_decl: bool,
@@ -1585,6 +1620,7 @@ pub struct Checker {
     // over to, and the heap-value parameters one passes on to a function value
     call_kind: str,
     call_kind_id: int32,
+    targs_taken: int32,             // the last call whose explicit type arguments a generic function or method took (D169)
     call_target: str,
     call_mutates: bool,
     fun_name: str,
@@ -1641,7 +1677,7 @@ fun new_checker(decls: [Decl]) -> Checker {
         resolved: [:], call_defaults: [:], errs: [], warnings: [], primitives: false, std_impls: [:], allowed: [], impl_allows: [], method_decl_allows: [], mains: [],
         skipped_decls: [:], skipped_fns: [:], broken_impls: [:], redefined: [:],
         lost_methods: [:], lost_traits: [:], failed_consts: [:], bodies: false,
-        call_kind: "", call_kind_id: -1, call_target: "", call_mutates: false, fun_name: "", handovers: [:], become_words: [], passed_on: [],
+        call_kind: "", call_kind_id: -1, targs_taken: -1, call_target: "", call_mutates: false, fun_name: "", handovers: [:], become_words: [], passed_on: [],
         actors: [:], conc_line: 0, conc_col: 0, conc_sp: no_span(), conc_node: -1, in_async: false, self_assignable: false, actor_self: "", builtin_as_method: false, cur_key: "",
         lams: [], awaited: [:], call_key: "", call_async: false, suspended: -1, task_init: false, in_guard: false, neg_lit: -1,
         task_line: 0, task_col: 0, task_sp: no_span(), task_node: -1,
@@ -1655,7 +1691,7 @@ fun new_checker(decls: [Decl]) -> Checker {
 #test(Expr { id: 16, line: 20, col: 13, sp: SrcSpan { sline: 20, scol: 13, eline: 20, ecol: 14 }, kind: ExprKind.Name("s") })[false]
 fun is_diverging(e: Expr) -> bool {
     return match e.kind {
-        ExprKind.Call(c, args) => match c.kind { ExprKind.Name(n) => is_diverging_builtin(n), _ => false },
+        ExprKind.Call(c, args, _) => match c.kind { ExprKind.Name(n) => is_diverging_builtin(n), _ => false },
         _ => false,
     }
 }
@@ -2294,7 +2330,7 @@ impl Checker {
             DeclKind.EnumDecl(n, variants, attrs, tps, isp) => { self.add_enum(EnumInfo { name: n, type_params: tp_names(tps), variants: [], line: ln, col: cl, sp: sp, id: decl.id }) },
             DeclKind.TypeAliasDecl(n, target, attrs, isp) => { self.aliases.push(AliasRaw { name: n, target: target, line: ln, col: cl, sp: sp, id: decl.id }) },
             DeclKind.ConstDecl(n, ty, value, attrs, isp) => { self.const_decls.push(ConstDeclT { name: n, declared: ty, value: value, line: ln, col: cl, sp: sp, id: decl.id }) },
-            DeclKind.FunDecl(fd) => { self.add_function(FuncSig { name: fd.name, params: [], ret: None, type_params: [], bounds: [], decl: fd, has_decl: true, decl_id: decl.id }) },
+            DeclKind.FunDecl(fd) => { self.add_function(FuncSig { name: fd.name, params: [], ret: None, type_params: [], own_type_params: 0, bounds: [], decl: fd, has_decl: true, decl_id: decl.id }) },
             _ => {},
         }
     }
@@ -2451,7 +2487,7 @@ impl Checker {
                     match fd.ret_type { Some(te) => { rt = result_of(self.resolve_part(te)?) }, None => {} }
                     self.type_params = []
                     let idx = self.func_idx(fd.name)
-                    self.functions[idx] = FuncSig { name: fd.name, params: ps, ret: rt, type_params: tp_names(fd.type_params), bounds: build_bounds(fd.type_params), decl: fd, has_decl: true, decl_id: decl.id }
+                    self.functions[idx] = FuncSig { name: fd.name, params: ps, ret: rt, type_params: tp_names(fd.type_params), own_type_params: fd.type_params.len(), bounds: build_bounds(fd.type_params), decl: fd, has_decl: true, decl_id: decl.id }
                 },
                 _ => {},
             }
@@ -2883,7 +2919,7 @@ impl Checker {
             ret_type: m.ret_type, body: m.body, attributes: m.attributes,
             type_params: synth_typarams(combined_names), receiver: m.receiver, is_pub: false, is_async: m.is_async,
         }
-        let sig = FuncSig { name: mangled, params: params, ret: rt, type_params: combined_names, bounds: combined_bounds, decl: fdecl, has_decl: true, decl_id: impl_id }
+        let sig = FuncSig { name: mangled, params: params, ret: rt, type_params: combined_names, own_type_params: m.type_params.len(), bounds: combined_bounds, decl: fdecl, has_decl: true, decl_id: impl_id }
         self.add_function(sig)
         self.add_method(MethodEntry { key: key, name: m.name, sig: sig })
         self.method_decls.push(fdecl)
@@ -3133,9 +3169,12 @@ impl Checker {
             ExprKind.Name(n) => Ok(Some(self.infer_name(e, n, expected)?)),
             ExprKind.Unary(op, x) => Ok(Some(self.infer_unary(e, op, x, expected)?)),
             ExprKind.Binary(op, l, r) => Ok(Some(self.infer_binary(e, op, l, r, expected)?)),
-            ExprKind.Call(c, args) => {
+            ExprKind.Call(c, args, targs) => {
                 self.call_kind_id = -1
                 let rc = self.infer_call(e, c, args, expected)
+                // explicit type arguments a generic function or method didn't
+                // take (D169): a builtin's, a variant's, a function value's
+                if targs.len() > 0 && self.targs_taken != e.id && is_ok_call(rc) { return Err(not_generic(e, callee_words(c))) }
                 // a call that may suspend stands under `await` (D89); marked
                 // calls succeeded
                 if self.call_kind_id == e.id && (self.call_async || self.actors.len() > 0) { self.check_suspension(e, c)? }
@@ -4122,7 +4161,7 @@ impl Checker {
                     None => false,
                 }
             },
-            ExprKind.Call(callee, args) => {
+            ExprKind.Call(callee, args, _) => {
                 match callee.kind {
                     ExprKind.Name(n) => {
                         if n != "Ok" && n != "Err" { return false }
@@ -4966,7 +5005,7 @@ impl Checker {
         var callee = ve
         var args: [Expr] = []
         match ve.kind {
-            ExprKind.Call(c, a) => {
+            ExprKind.Call(c, a, _) => {
                 callee = c
                 args = a
             },
@@ -5278,7 +5317,7 @@ impl Checker {
                     None => {},
                 }
             },
-            ExprKind.Call(c, args) => {
+            ExprKind.Call(c, args, _) => {
                 self.awaited[op.id] = true
                 self.suspended = -1
                 let t = self.infer_node(op, expected)?
@@ -5336,7 +5375,7 @@ impl Checker {
         match ty { Some(te) => { declared = Some(self.resolve_annotation(te)?) }, None => {} }
         var t: Option<Type> = None
         if !opt_has_error(declared) {
-            match init.kind { ExprKind.Call(c, a) => { self.awaited[init.id] = true }, _ => {} }
+            match init.kind { ExprKind.Call(c, a, _) => { self.awaited[init.id] = true }, _ => {} }
             self.task_init = true
             let it = self.infer(init, declared)
             self.task_init = false
@@ -5803,7 +5842,7 @@ impl Checker {
             var self_t = Type.TEnum(name, [])
             if self.is_struct(name) { self_t = Type.TStruct(name, []) }
             let fdecl = FunData { line: decl.line, col: decl.col, sp: no_span(), name: format("{}.eq", name), params: [], ret_type: None, body: None, attributes: [], type_params: [], receiver: Some("self"), is_pub: false, is_async: false }
-            let sig = FuncSig { name: format("{}.eq", name), params: [self_t, self_t], ret: Some(Type.TBool), type_params: [], bounds: [], decl: fdecl, has_decl: true, decl_id: decl.id }
+            let sig = FuncSig { name: format("{}.eq", name), params: [self_t, self_t], ret: Some(Type.TBool), type_params: [], own_type_params: 0, bounds: [], decl: fdecl, has_decl: true, decl_id: decl.id }
             self.add_method(MethodEntry { key: name, name: "eq", sig: sig })
             self.trait_impls.push(TraitImplPair { trait_name: "Eq", key: name })
             self.user_trait_impls.push(TraitImplPair { trait_name: "Eq", key: name })
@@ -6015,7 +6054,7 @@ fun allowed_warnings(attrs: [Attribute]) -> [str] {
         for a in attr.args {
             match a.kind {
                 ExprKind.Name(n) => { out.push(n) },
-                ExprKind.Call(callee, prims) => {
+                ExprKind.Call(callee, prims, _) => {
                     for p in prims {
                         match p.kind { ExprKind.Name(n) => { out.push("primitive:" + n) }, _ => {} }
                     }
@@ -6424,7 +6463,7 @@ impl Checker {
                         self.warnings.push(CheckErr { line: a.line, col: a.col, sp: a.sp, msg: format("'{}' is no warning's name: '#allow' takes {}", n, quoted_list(warning_names())), decl: self.cur_decl, notes: [] })
                     }
                 },
-                ExprKind.Call(callee, prims) => {
+                ExprKind.Call(callee, prims, _) => {
                     let ok = match callee.kind { ExprKind.Name(n) => n == "primitive", _ => false }
                     if !ok || prims.len() == 0 { return Err(terr_at(a.line, a.col, a.sp, "only 'primitive' takes a list, of the primitives it silences: '#allow(primitive(__poll, __spawn))'")) }
                     for p in prims {
@@ -6906,6 +6945,11 @@ fun count_format_holes(fmt: str, line: int32, col: int32) -> Result<int32, Check
 
 impl Checker {
     #test(checker_on("enum E { A, B(int) }"), expr_of("a.b[0]"), expr_of("a.b[0]"), [Expr { id: 40, line: 23, col: 22, sp: SrcSpan { sline: 23, scol: 22, eline: 23, ecol: 23 }, kind: ExprKind.Name("s") }], None)[Err(CheckErr { line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 2 }, msg: "unknown name 'a'", decl: -1, notes: [] })]
+    // explicit type arguments (D169): they fix what nothing else would, their
+    // count is the function's, and only a generic function takes them
+    #test(checker_on("fun mk<T>() -> [T] { return [] }"), expr_of("mk<int64>()"), expr_of("mk"), [], None)[Ok(Some(Type.TList(Type.TInt(64, true))))]
+    #test(checker_on("fun mk<T>() -> [T] { return [] }"), expr_of("mk<int, str>()"), expr_of("mk"), [], None)[Err(CheckErr { line: 1, col: 4, sp: SrcSpan { sline: 1, scol: 4, eline: 1, ecol: 12 }, msg: "function 'mk' expects 1 type argument(s), got 2", decl: -1, notes: [] })]
+    #test(checker_on("fun two(x: int) -> int { return x }"), expr_of("two<int>(1)"), expr_of("two"), [expr_of("1")], None)[Err(CheckErr { line: 1, col: 5, sp: SrcSpan { sline: 1, scol: 5, eline: 1, ecol: 8 }, msg: "function 'two' is not generic (it takes no type arguments)", decl: -1, notes: [] })]
     fun infer_call(var self, e: Expr, callee: Expr, args: [Expr], expected: Option<Type>) -> Result<Option<Type>, CheckErr> {
         for a in args { match a.kind { ExprKind.Hole => { return Ok(Some(self.infer_partial(e, callee, args)?)) }, _ => {} } }
         // local binding shadows a global function: call as a value
@@ -7337,6 +7381,7 @@ impl Checker {
             self.mark_call(e, "function", name, sig_mutates(sig), "", sig.decl.is_async)
             return Ok(gr)
         }
+        if call_targs(e).len() > 0 { return Err(not_generic(e, format("function '{}'", name))) }
         self.call_arity(e, sig, 0, args.len(), format("function '{}'", name))?
         var i = 0
         while i < args.len() {
@@ -7436,7 +7481,7 @@ impl Checker {
         return Ok(Type.TStr)
     }
 
-    #test(checker_on("[int]"), Expr { id: 1, line: 5, col: 27, sp: SrcSpan { sline: 5, scol: 14, eline: 5, ecol: 29 }, kind: ExprKind.Call(Expr { id: 0, line: 5, col: 14, sp: SrcSpan { sline: 5, scol: 14, eline: 5, ecol: 27 }, kind: ExprKind.Name("StringBuilder") }, []) }, "StringBuilder", [])[Ok(Some(Type.TSB))]
+    #test(checker_on("[int]"), Expr { id: 1, line: 5, col: 27, sp: SrcSpan { sline: 5, scol: 14, eline: 5, ecol: 29 }, kind: ExprKind.Call(Expr { id: 0, line: 5, col: 14, sp: SrcSpan { sline: 5, scol: 14, eline: 5, ecol: 27 }, kind: ExprKind.Name("StringBuilder") }, [], []) }, "StringBuilder", [])[Ok(Some(Type.TSB))]
     fun infer_string_builder(var self, e: Expr, name: str, args: [Expr]) -> Result<Option<Type>, CheckErr> {
         if name == "StringBuilder" {
             if args.len() > 0 { return Err(terr_at(e.line, e.col, e.sp, "StringBuilder() takes no arguments")) }
@@ -7509,7 +7554,7 @@ impl Checker {
         return Ok(Some(result))
     }
 
-    #test(checker_on("[int]"), Expr { id: 16, line: 7, col: 16, sp: SrcSpan { sline: 7, scol: 5, eline: 7, ecol: 18 }, kind: ExprKind.Call(Expr { id: 15, line: 7, col: 5, sp: SrcSpan { sline: 7, scol: 5, eline: 7, ecol: 16 }, kind: ExprKind.Name("unreachable") }, []) }, "unreachable", [])[Ok(None)]
+    #test(checker_on("[int]"), Expr { id: 16, line: 7, col: 16, sp: SrcSpan { sline: 7, scol: 5, eline: 7, ecol: 18 }, kind: ExprKind.Call(Expr { id: 15, line: 7, col: 5, sp: SrcSpan { sline: 7, scol: 5, eline: 7, ecol: 16 }, kind: ExprKind.Name("unreachable") }, [], []) }, "unreachable", [])[Ok(None)]
     fun infer_intrinsic(var self, e: Expr, name: str, args: [Expr]) -> Result<Option<Type>, CheckErr> {
         if name == "assert" {
             if !(args.len() == 1 || args.len() == 2) { return Err(terr_at(e.line, e.col, e.sp, "assert() takes a condition and an optional message")) }
@@ -7567,15 +7612,41 @@ impl Checker {
         return Ok(Type.TEnum(enum_name, args_t))
     }
 
-    // The type parameters are solved from the arguments, left to right, and
+    // The substitution a call's explicit type arguments (D169) start from:
+    // the last `sig.own_type_params` of its type parameters, a method's own
+    // and not its impl's, which the receiver solves. Each argument's type is
+    // kept with its node, where code generation reads the instance.
+    fun explicit_subst(var self, e: Expr, sig: FuncSig, what: str) -> Result<[Subst], CheckErr> {
+        let targs = call_targs(e)
+        var out: [Subst] = []
+        if targs.len() == 0 { return Ok(out) }
+        let own = sig.own_type_params
+        if own == 0 {
+            if sig.type_params.len() > 0 { return Err(terr_at(targs[0].line, targs[0].col, targs_span(targs), format("{} takes no type arguments: it has no type parameters of its own, and its impl's come from the receiver", what))) }
+            return Err(not_generic(e, what))
+        }
+        if targs.len() != own { return Err(terr_at(targs[0].line, targs[0].col, targs_span(targs), format("{} expects {} type argument(s), got {}", what, own, targs.len()))) }
+        let base = sig.type_params.len() - own
+        var i = 0
+        while i < own {
+            let t = self.resolve0(targs[i])?
+            self.resolved[targs[i].id] = t
+            out.push(Subst { name: sig.type_params[base + i], ty: t })
+            i += 1
+        }
+        return Ok(out)
+    }
+
+    // The type parameters are solved from the explicit type arguments
+    // (D169), then from the arguments, left to right, and
     // those they leave open from the call's `expected` type, which also
     // hints an argument whose parameter's type the arguments before it
     // don't solve (MYLA-315).
     fun infer_generic_call(var self, e: Expr, name: str, sig: FuncSig, args: [Expr], expected: Option<Type>) -> Result<Option<Type>, CheckErr> {
         if sig_has_error(sig.params, sig.ret) { return Err(poisoned()) }   // its type arguments can't be inferred (MYLA-110)
+        var subst = self.explicit_subst(e, sig, format("function '{}'", name))?
         self.call_arity(e, sig, 0, args.len(), format("function '{}'", name))?
         let from_expected = expected_subst(sig.ret, expected)
-        var subst: [Subst] = []
         var arg_types: [Type] = []
         var i = 0
         while i < args.len() {
@@ -7599,6 +7670,7 @@ impl Checker {
             j = j + 1
         }
         self.check_call_bounds(sig, subst, e)?
+        self.targs_taken = e.id
         return Ok(opt_subst_type(sig.ret, subst))
     }
 
@@ -7684,6 +7756,7 @@ impl Checker {
                     self.mark_call(e, "method", sig.name, recv == "var self", mkey, sig.decl.is_async)
                     return Ok(gr)
                 }
+                if call_targs(e).len() > 0 { return Err(not_generic(e, format("method '{}'", field))) }
                 var i = 0
                 while i < args.len() {
                     let pt = sig.params[i + 1]
@@ -7739,12 +7812,12 @@ impl Checker {
         return Err(terr_at(e.line, e.col, e.sp, format("type parameter '{}' has no method '{}': none of its bounds ({}) declares one (an operator trait gives its operators)", pn, field, quoted_list(bound_traits))))
     }
 
-    // `infer_generic_call` for a method: the receiver solves the impl's type
-    // parameters first.
+    // `infer_generic_call` for a method: its explicit type arguments give
+    // its own type parameters, and the receiver solves the impl's first.
     fun infer_generic_method(var self, e: Expr, sig: FuncSig, method: str, recv_type: Type, args: [Expr], expected: Option<Type>) -> Result<Option<Type>, CheckErr> {
         if sig_has_error(sig.params, sig.ret) { return Err(poisoned()) }   // its type arguments can't be inferred (MYLA-110)
         let from_expected = expected_subst(sig.ret, expected)
-        var subst: [Subst] = []
+        var subst = self.explicit_subst(e, sig, format("method '{}'", method))?
         let r0 = unify_param(sig.params[0], recv_type, subst)
         subst = r0.subst
         var arg_types: [Type] = []
@@ -7772,6 +7845,7 @@ impl Checker {
             j = j + 1
         }
         self.check_call_bounds(sig, subst, e)?
+        self.targs_taken = e.id
         return Ok(opt_subst_type(sig.ret, subst))
     }
 
@@ -8158,7 +8232,7 @@ fun self_calls(e: Expr) -> [Expr] {
     var subs: [Expr] = []
     match e.kind {
         ExprKind.Lambda(ps, rt, body, asy) => { return [] },
-        ExprKind.Call(c, args) => {
+        ExprKind.Call(c, args, _) => {
             subs.push(c)
             for a in args { subs.push(a) }
         },
@@ -8196,7 +8270,7 @@ fun self_calls(e: Expr) -> [Expr] {
     }
     for x in subs { for c in self_calls(x) { out.push(c) } }
     match e.kind {
-        ExprKind.Call(c, args) => { if self_method(c) != "" { out.push(e) } },
+        ExprKind.Call(c, args, _) => { if self_method(c) != "" { out.push(e) } },
         _ => {},
     }
     return out
@@ -8268,7 +8342,7 @@ impl Effects {
                 }
                 self.expr(t)
             },
-            ExprKind.Call(c, args) => {
+            ExprKind.Call(c, args, _) => {
                 let m = self_method(c)
                 if m != "" { self.calls = add_name(self.calls, m) } else { self.expr(c) }
                 match c.kind {
@@ -8368,7 +8442,7 @@ impl Reads {
                 self.expr(l, locals)
                 self.expr(r, locals)
             },
-            ExprKind.Call(c, args) => {
+            ExprKind.Call(c, args, _) => {
                 // `self.m(…)`: the fields `m` examines (MYLA-171)
                 let m = self_method(c)
                 if m != "" {
@@ -8710,7 +8784,7 @@ impl Reentrancy {
             },
             StmtKind.ExprStmt(e) => {
                 match e.kind {
-                    ExprKind.Call(c, args) => {
+                    ExprKind.Call(c, args, _) => {
                         // `self.f.push(x)`: the builtin as a method (D103)
                         match c.kind {
                             ExprKind.GetField(recv, m) => {
@@ -8774,7 +8848,7 @@ impl Reentrancy {
     fun call_changes(var self, e: Expr) {
         for c in self_calls(e) {
             match c.kind {
-                ExprKind.Call(callee, args) => {
+                ExprKind.Call(callee, args, _) => {
                     match get(self.changes, self_method(callee)) {
                         Some(fs) => {
                             var names: [str] = []
@@ -8947,14 +9021,14 @@ fun fd_expr(e: Expr, t: [int32: [Expr]]) -> Expr {
     let k = match e.kind {
         ExprKind.Unary(op, a) => ExprKind.Unary(op, fd_expr(a, t)),
         ExprKind.Binary(op, a, b) => ExprKind.Binary(op, fd_expr(a, t), fd_expr(b, t)),
-        ExprKind.Call(c, args) => {
+        ExprKind.Call(c, args, targs) => {
             var all = fd_exprs(args, t)
             // the defaults this call leaves to its trailing parameters, which
             // may themselves call something with defaults
             if t.contains(e.id) {
                 for d in t[e.id] { all.push(fd_expr(d, t)) }
             }
-            ExprKind.Call(fd_expr(c, t), all)
+            ExprKind.Call(fd_expr(c, t), all, targs)
         },
         ExprKind.GetField(a, f) => ExprKind.GetField(fd_expr(a, t), f),
         ExprKind.StructLit(n, fs) => {

@@ -28,7 +28,7 @@
 // copies, which the Python backend shares, so both backends behave alike.
 
 from std.num import f64_literal_bits, f32_round_bits
-from .ast import Expr, ExprKind, Stmt, StmtKind, Block, FunData, ElseTail, ExprOrBlock, MatchArm, Pattern, PatternKind, FieldInit, MapEntry, BindElem, bind_elems, Param
+from .ast import Expr, ExprKind, Stmt, StmtKind, Block, FunData, ElseTail, ExprOrBlock, MatchArm, Pattern, PatternKind, FieldInit, MapEntry, BindElem, bind_elems, Param, call_targs
 from .checker import CheckErr, REG_ARG_WORDS, type_name, Type, is_unit, is_slice_expr, from_end_of, slice_parts, is_hole_part, is_raw_memory_primitive, is_platform_primitive, Subst, FuncSig, opt_subst_type, subst_type, builtin_method
 from .codegen import codegen_on, type_job_name, recv_by_address, may_write_expr, is_mutating_builtin, list_has_str, contains_int, is_actor_t, is_sb_t, is_async_t, CodeGen, LamJob, PartialJob, Cap, DropEntry, tfunc_params, tfunc_ret, is_hole_expr, mangle_fn, is_builtin_call_name, is_aggregate, tuple_elems, is_struct_or_enum_t, is_tfunc, is_overloadable_op, arith_method_cg, enum_name_of, is_tstr, is_cmp, place_root, is_aggregate_opt, arms_may_write, is_cell_t, list_elem, is_list_t, is_map_t, is_str_t, map_key, map_val, format_segments, args_have_hole, success_variant, failure_variant
 from .util import format_specs
@@ -1306,7 +1306,7 @@ impl Lower {
     fun await_let(var self, cg: CodeGen, s: Stmt, k: str, name: str, op: Expr) {
         // `await __yield()`: a turn for the others, nothing else (MYLA-228)
         match op.kind {
-            ExprKind.Call(c, a) => {
+            ExprKind.Call(c, a, _) => {
                 match c.kind {
                     ExprKind.Name(n) => {
                         if n == "__yield" {
@@ -1384,7 +1384,7 @@ impl Lower {
         var target = ""
         var argv: [Expr] = []
         match op.kind {
-            ExprKind.Call(callee, args) => {
+            ExprKind.Call(callee, args, _) => {
                 match callee.kind {
                     ExprKind.Name(nm) => {
                         if self.lookup(nm) < 0 && !cg.called_as_value(callee) && cg.is_async_fn(nm) {
@@ -1419,7 +1419,7 @@ impl Lower {
             return
         }
         let sig = cg.sig_of(target)
-        let ct = self.call_target(cg, sig, argv, op.id)
+        let ct = self.call_target(cg, sig, argv, op)
         // a `var self` method of a struct: its final `self` goes back to the
         // receiver, a variable or a field or list element of one, its indices
         // computed once (MYLA-142); nothing else reaches the place meanwhile
@@ -1582,7 +1582,7 @@ impl Lower {
     #test(lower_on(), codegen_on("enum E { A, B(int) }"), stmt_of("x = x + 1"), "let", "b", expr_of("a.b[0]"))[false]
     fun actor_call(var self, cg: CodeGen, s: Stmt, k: str, name: str, op: Expr) -> bool {
         match op.kind {
-            ExprKind.Call(callee, args) => {
+            ExprKind.Call(callee, args, targs) => {
                 match callee.kind {
                     ExprKind.GetField(recv, m) => {
                         let at = cg.type_of(recv.id)
@@ -1599,7 +1599,7 @@ impl Lower {
                         }
                         let r2 = Expr { id: recv.id, line: recv.line, col: recv.col, sp: recv.sp, kind: ExprKind.Name(format("%actor{}", op.id)) }
                         let c2 = Expr { id: callee.id, line: callee.line, col: callee.col, sp: callee.sp, kind: ExprKind.GetField(r2, m) }
-                        let op2 = Expr { id: op.id, line: op.line, col: op.col, sp: op.sp, kind: ExprKind.Call(c2, args2) }
+                        let op2 = Expr { id: op.id, line: op.line, col: op.col, sp: op.sp, kind: ExprKind.Call(c2, args2, targs) }
                         let off = actor_record_offset(cg, at)
                         self.leave_self()
                         self.enter_actor(rs, off)
@@ -1749,7 +1749,7 @@ impl Lower {
     fun frame_of_value(var self, cg: CodeGen, op: Expr) -> int32 {
         if !cg.frames { return -1 }
         match op.kind {
-            ExprKind.Call(callee, args) => {
+            ExprKind.Call(callee, args, _) => {
                 var through_value = false
                 match callee.kind {
                     ExprKind.Name(nm) => { through_value = self.lookup(nm) >= 0 || cg.called_as_value(callee) },
@@ -1972,7 +1972,7 @@ impl Lower {
             return
         }
         match e.kind {
-            ExprKind.Call(callee, args) => {
+            ExprKind.Call(callee, args, _) => {
                 self.tail = true
                 self.tailed = false
                 let v = self.call(cg, e, callee, args, -1)
@@ -2024,7 +2024,7 @@ impl Lower {
                 // arguments are evaluated
                 if waits_without_tasks(x) {
                     match x.kind {
-                        ExprKind.Call(c, a) => { for arg in a { self.discard(cg, arg) } },
+                        ExprKind.Call(c, a, _) => { for arg in a { self.discard(cg, arg) } },
                         _ => {},
                     }
                     return
@@ -2036,7 +2036,7 @@ impl Lower {
                 let v = self.match_expr(cg, e, scrut, arms, false)
                 return
             },
-            ExprKind.Call(callee, args) => {
+            ExprKind.Call(callee, args, _) => {
                 if !cg.ctor_info(e).ok {
                     let v = self.call(cg, e, callee, args, -1)
                     return
@@ -2301,7 +2301,7 @@ impl Lower {
     // `len(xs)`); "" when it is no such length.
     fun len_call_key(self, cg: CodeGen, e: Expr) -> str {
         return match e.kind {
-            ExprKind.Call(c, args) => {
+            ExprKind.Call(c, args, _) => {
                 var of: Option<Expr> = None
                 match c.kind {
                     ExprKind.GetField(t, f) => { if f == "len" && args.len() == 0 { of = Some(t) } },
@@ -2616,7 +2616,7 @@ impl Lower {
                 self.add(Inst.Cast(d, src, t, a))
                 return d
             },
-            ExprKind.Call(callee, args) => {
+            ExprKind.Call(callee, args, _) => {
                 let d = self.call(cg, e, callee, args, -1)
                 if d < 0 { return self.unsupported("a call without a value used as one") }
                 return d
@@ -2654,7 +2654,7 @@ impl Lower {
                 if cg.frames { return self.unsupported("an 'await' outside an async function's frame (in an async lambda)") }
                 if waits_without_tasks(x) {
                     match x.kind {
-                        ExprKind.Call(c, a) => { for arg in a { self.discard(cg, arg) } },
+                        ExprKind.Call(c, a, _) => { for arg in a { self.discard(cg, arg) } },
                         _ => {},
                     }
                     return -1
@@ -2937,7 +2937,7 @@ impl Lower {
                 self.built(slot, into, base)
                 return base
             },
-            ExprKind.Call(callee, args) => {
+            ExprKind.Call(callee, args, _) => {
                 let d = self.call(cg, e, callee, args, into)
                 if d >= 0 { return d }
                 if !is_unit(t) { return self.unsupported("a call without a value used as one") }
@@ -3476,13 +3476,14 @@ impl Lower {
     // With `tail`, by `become`: the parameters it passes heap values to are
     // owned (`find_kept_params`).
     // The function a call of `name` with `argv` calls: a generic one's
-    // instance for the types of the arguments and of the call `call_id`
-    // (which fixes what the arguments leave open, MYLA-315), which the code
+    // instance for the call's explicit type arguments (D169), the types of
+    // the arguments and of the call (which fixes what the arguments leave
+    // open, MYLA-315), which the code
     // generator stamps out once this function is lowered, with its parameter
     // and result types.
-    fun call_target(var self, cg: CodeGen, sig: FuncSig, argv: [Expr], call_id: int32) -> CallTarget {
+    fun call_target(var self, cg: CodeGen, sig: FuncSig, argv: [Expr], call: Expr) -> CallTarget {
         if sig.type_params.len() == 0 { return CallTarget { name: sig.name, params: sig.params, ret: sig.ret } }
-        let targs = cg.solve_targs(sig, argv, call_id)
+        let targs = cg.solve_targs(sig, argv, call.id, call_targs(call))
         self.f.instances.push(Instance { orig: sig.name, targs: targs })
         var sub: [Subst] = []
         var k = 0
@@ -3498,7 +3499,7 @@ impl Lower {
     #test(lower_on(), codegen_on("fun main() { print(1 + 2) }"), expr_of("Some(n)"), "list_sum", [], -1, false)[-1]
     fun direct_call(var self, cg: CodeGen, e: Expr, name: str, argv: [Expr], into: int32, tail: bool) -> int32 {
         let sig = cg.sig_of(name)
-        let ct = self.call_target(cg, sig, argv, e.id)
+        let ct = self.call_target(cg, sig, argv, e)
         let target = ct.name
         let params = ct.params
         let ret = ct.ret
@@ -4813,7 +4814,7 @@ impl Lower {
 #test(expr_of("-n * 2"))[false]
 fun diverges(e: Expr) -> bool {
     return match e.kind {
-        ExprKind.Call(callee, args) => match callee.kind {
+        ExprKind.Call(callee, args, _) => match callee.kind {
             ExprKind.Name(nm) => nm == "panic" || nm == "unreachable"
             _ => false
         }
@@ -6219,7 +6220,7 @@ pub fun env_record_of(drop: str) -> str {
 // turn for the others (`__yield`), which a program without tasks doesn't do.
 fun waits_without_tasks(x: Expr) -> bool {
     return match x.kind {
-        ExprKind.Call(c, a) => match c.kind {
+        ExprKind.Call(c, a, _) => match c.kind {
             ExprKind.Name(n) => n == "__wait_readable" || n == "__wait_either" || n == "__yield"
             _ => false
         }
@@ -6566,7 +6567,7 @@ fun resized_in_part(t: Expr, acc: [str]) -> [str] {
 fun resized_in_expr(e: Expr, acc: [str]) -> [str] {
     var out = acc
     match e.kind {
-        ExprKind.Call(c, args) => {
+        ExprKind.Call(c, args, _) => {
             match c.kind {
                 ExprKind.GetField(recv, m) => {
                     match recv.kind {

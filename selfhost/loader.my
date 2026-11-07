@@ -1284,9 +1284,10 @@ impl Renamer {
                 let a2 = self.expr(a)
                 ExprKind.Binary(op, a2, self.expr(b))
             },
-            ExprKind.Call(c, args) => {
+            ExprKind.Call(c, args, targs) => {
                 let c2 = self.expr(c)
-                ExprKind.Call(c2, self.exprs(args))
+                let args2 = self.exprs(args)
+                ExprKind.Call(c2, args2, self.ty_list(targs))
             },
             ExprKind.StructLit(n, fields) => {
                 var fs: [FieldInit] = []
