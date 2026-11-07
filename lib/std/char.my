@@ -1,0 +1,229 @@
+// std.char: character classes and digits, on `char` (MYLA-322, D164).
+//
+// ASCII only (D164 (2)): a character outside ASCII is in none of the
+// classes, and `to_upper` and `to_lower` leave it as it is. The radix of
+// `to_digit` and `from_digit` is 2 to 36, the digits after 9 being the
+// letters `a` to `z` (either case when read, lower case when written), as
+// in Rust; another radix is a runtime error.
+//
+// Imported into every program by MYLA-320; until then, `import std.char`.
+// It imports nothing, so a program that gets it gets nothing else.
+
+impl char {
+    // `0` to `9`.
+    #test('0')[true]
+    #test('9')[true]
+    #test('/')[false] // the byte before 0
+    #test(':')[false] // the byte after 9
+    #test('a')[false]
+    #test('\u{663}')[false] // ARABIC-INDIC DIGIT THREE: not ASCII
+    fun is_digit(self) -> bool {
+        return self >= '0' && self <= '9'
+    }
+
+    // `a` to `z` and `A` to `Z`.
+    #test('a')[true]
+    #test('z')[true]
+    #test('A')[true]
+    #test('Z')[true]
+    #test('@')[false] // the byte before A
+    #test('[')[false] // the byte after Z
+    #test('`')[false] // the byte before a
+    #test('{')[false] // the byte after z
+    #test('5')[false]
+    #test('é')[false]
+    fun is_alpha(self) -> bool {
+        return (self >= 'a' && self <= 'z') || (self >= 'A' && self <= 'Z')
+    }
+
+    // A letter or a digit.
+    #test('q')[true]
+    #test('Q')[true]
+    #test('7')[true]
+    #test('_')[false]
+    #test(' ')[false]
+    #test('ß')[false]
+    fun is_alnum(self) -> bool {
+        return self.is_alpha() || self.is_digit()
+    }
+
+    // ASCII white space, the set of C's `isspace` and of std.str's trimming:
+    // space, tab, line feed, vertical tab, form feed and carriage return.
+    // (Rust's `is_ascii_whitespace` leaves out the vertical tab.)
+    #test(' ')[true]
+    #test('\t')[true]
+    #test('\n')[true]
+    #test('\u{b}')[true] // vertical tab
+    #test('\u{c}')[true] // form feed
+    #test('\r')[true]
+    #test('\u{1f}')[false] // UNIT SEPARATOR, a control character
+    #test('\0')[false]
+    #test('x')[false]
+    #test('\u{a0}')[false] // NO-BREAK SPACE: not ASCII
+    fun is_space(self) -> bool {
+        return self == ' ' || self == '\t' || self == '\n' || self == '\u{b}' || self == '\u{c}' || self == '\r'
+    }
+
+    // `A` to `Z`.
+    #test('A')[true]
+    #test('Z')[true]
+    #test('a')[false]
+    #test('1')[false]
+    #test('É')[false]
+    fun is_upper(self) -> bool {
+        return self >= 'A' && self <= 'Z'
+    }
+
+    // `a` to `z`.
+    #test('a')[true]
+    #test('z')[true]
+    #test('A')[false]
+    #test('1')[false]
+    #test('é')[false]
+    fun is_lower(self) -> bool {
+        return self >= 'a' && self <= 'z'
+    }
+
+    // The digit's value in `radix` (2 to 36): `0` to `9`, then `a` to `z`
+    // or `A` to `Z` for 10 to 35. `None` if the character isn't a digit of
+    // that radix; a radix outside 2 to 36 is a runtime error.
+    #test('7', 10)[Some(7)]
+    #test('0', 2)[Some(0)]
+    #test('1', 2)[Some(1)]
+    #test('2', 2)[None]
+    #test('9', 8)[None]
+    #test('f', 16)[Some(15)]
+    #test('F', 16)[Some(15)]
+    #test('g', 16)[None]
+    #test('z', 36)[Some(35)]
+    #test('Z', 36)[Some(35)]
+    #test('a', 10)[None]
+    #test(' ', 10)[None]
+    #test('é', 36)[None]
+    #test('1', 1)[panic("to_digit: radix must be from 2 to 36, not 1")]
+    #test('1', 37)[panic("to_digit: radix must be from 2 to 36, not 37")]
+    fun to_digit(self, radix: int) -> Option<int> {
+        if radix < 2 || radix > 36 {
+            panic(f"to_digit: radix must be from 2 to 36, not {radix}")
+        }
+        let c = self as int
+        let d = if self >= '0' && self <= '9' {
+            c - 48
+        } else if self >= 'a' && self <= 'z' {
+            c - 87
+        } else if self >= 'A' && self <= 'Z' {
+            c - 55
+        } else {
+            36
+        }
+        return if d < radix { Some(d) } else { None }
+    }
+
+    // The upper-case letter for a lower-case one; any other character as it
+    // is.
+    #test('a')['A']
+    #test('z')['Z']
+    #test('A')['A']
+    #test('5')['5']
+    #test('{')['{']
+    #test('é')['é'] // not ASCII
+    fun to_upper(self) -> char {
+        return if self.is_lower() { ((self as int) - 32) as char } else { self }
+    }
+
+    // The lower-case letter for an upper-case one; any other character as it
+    // is.
+    #test('A')['a']
+    #test('Z')['z']
+    #test('a')['a']
+    #test('@')['@']
+    #test('É')['É'] // not ASCII
+    fun to_lower(self) -> char {
+        return if self.is_upper() { ((self as int) + 32) as char } else { self }
+    }
+}
+
+// The character for the digit `d` in `radix` (2 to 36): `0` to `9`, then
+// `a` to `z` for 10 to 35. `None` if `d` isn't a digit of that radix
+// (negative, or `radix` or more); a radix outside 2 to 36 is a runtime error.
+#test(0, 10)[Some('0')]
+#test(9, 10)[Some('9')]
+#test(10, 10)[None]
+#test(-1, 10)[None]
+#test(10, 16)[Some('a')]
+#test(15, 16)[Some('f')]
+#test(16, 16)[None]
+#test(35, 36)[Some('z')]
+#test(1, 2)[Some('1')]
+#test(2, 2)[None]
+#test(0, 1)[panic("from_digit: radix must be from 2 to 36, not 1")]
+#test(0, 40)[panic("from_digit: radix must be from 2 to 36, not 40")]
+pub fun from_digit(d: int, radix: int) -> Option<char> {
+    if radix < 2 || radix > 36 {
+        panic(f"from_digit: radix must be from 2 to 36, not {radix}")
+    }
+    if d < 0 || d >= radix {
+        return None
+    }
+    return Some(if d < 10 { (d + 48) as char } else { (d + 87) as char })
+}
+
+// Every digit of every radix reads back as the value it was written from.
+#test
+fun digits_round_trip() {
+    var radix = 2
+    while radix <= 36 {
+        var d = 0
+        while d < radix {
+            match from_digit(d, radix) {
+                Some(c) => {
+                    match c.to_digit(radix) {
+                        Some(back) => holds(back == d, f"digit {d} of radix {radix} read back as {back}")
+                        None => panic(f"digit {d} of radix {radix} didn't read back")
+                    }
+                    match c.to_upper().to_digit(radix) {
+                        Some(back) => holds(back == d, f"upper-case digit {d} of radix {radix} read back as {back}")
+                        None => panic(f"upper-case digit {d} of radix {radix} didn't read back")
+                    }
+                }
+                None => panic(f"no digit {d} in radix {radix}")
+            }
+            d += 1
+        }
+        radix += 1
+    }
+}
+
+// Over all of ASCII the classes agree with each other and with the case
+// mappings, and nothing above ASCII is in any class.
+#test
+fun classes_agree() {
+    var n = 0
+    while n < 300 {
+        let c = n as char
+        holds(c.is_alpha() == (c.is_upper() || c.is_lower()), f"is_alpha of {n}")
+        holds(c.is_alnum() == (c.is_alpha() || c.is_digit()), f"is_alnum of {n}")
+        holds(!(c.is_upper() && c.is_lower()), f"upper and lower at {n}")
+        holds(!(c.is_space() && c.is_alnum()), f"space and alnum at {n}")
+        if c.is_upper() {
+            holds(c.to_lower().is_lower() && c.to_lower().to_upper() == c, f"case of {n}")
+        } else if c.is_lower() {
+            holds(c.to_upper().is_upper() && c.to_upper().to_lower() == c, f"case of {n}")
+        } else {
+            holds(c.to_upper() == c && c.to_lower() == c, f"case of {n}")
+        }
+        if n > 127 {
+            holds(!c.is_alnum() && !c.is_space(), f"{n} is above ASCII")
+        }
+        n += 1
+    }
+}
+
+// The test functions' assertion: `assert(ok, f"…")` doesn't compile
+// natively yet (an IR verifier error on the f-string message), a function
+// call with one does.
+fun holds(ok: bool, what: str) {
+    if !ok {
+        panic(what)
+    }
+}
