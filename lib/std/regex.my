@@ -5,7 +5,9 @@
 // walks the text once and keeps at most one thread per instruction, so a
 // search takes time proportional to the text times the program, whatever
 // the pattern. There are no backreferences and no lookaround, which no
-// linear-time matcher can have.
+// linear-time matcher can have. On a longer text a lazily built DFA finds
+// where a match ends, a DFA of the reversed pattern where it starts, and
+// the Pike VM runs only over the match, for its groups.
 //
 // The syntax is RE2's (and Go's `regexp`'s), the matches are its
 // leftmost-first ones, and the tests compare them with RE2's own search
@@ -60,7 +62,7 @@ pub struct RegexError {
 }
 
 impl RegexError {
-    // The reason in words, as Go's `regexp` words it.
+    // The reason in words, mostly as Go's `regexp` words it.
     fun message(self) -> str {
         return match self.kind {
             MissingParen => "missing closing )"
