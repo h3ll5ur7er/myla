@@ -1,0 +1,410 @@
+// std.test — what a test function needs beyond `#test` (D162, MYLA-304).
+//
+// A test function is a function without parameters under a bare `#test`: it
+// passes when it returns, fails on a runtime error. These are the checks
+// that fail it with a message the report shows (`FAIL  count_rows: expected
+// 3, got 4`), a scratch directory the runner removes when the case ends
+// however it ends, and the path of the project's program for the tests of
+// `tests/` (MYLA-306). Every failure is a runtime error, as `assert`'s is: a
+// case fails the way a program fails, and `myla test` is the one place that
+// goes on after one.
+
+import std.fs as fs
+
+// Fail the case unless `cond` holds.
+pub fun expect(cond: bool, msg: str = "expectation failed") {
+    if !cond { panic(msg) }
+}
+
+// Fail the case unless `got` is `want`, naming both.
+pub fun expect_eq<T: Eq + Format>(got: T, want: T) {
+    if !(got == want) { panic(f"expected {want}, got {got}") }
+}
+
+// Fail the case when `got` is `other`, naming it.
+pub fun expect_ne<T: Eq + Format>(got: T, other: T) {
+    if got == other { panic(f"expected two different values, both are {got}") }
+}
+
+// Fail the case with `msg`.
+pub fun fail(msg: str) {
+    panic(msg)
+}
+
+// A fresh, empty directory for the running case, under the case's scratch
+// root (`$TMPDIR` or `/tmp`), which the runner removes when the case ends,
+// passed or failed; each call gives a new one. Outside `myla test` there is
+// no case, which is a runtime error.
+pub fun temp_dir() -> str {
+    let root = __test_dir()
+    if root == "" { panic("test.temp_dir() needs a running case: run the file with 'myla test'") }
+    let taken = match fs.list_dir(root) {
+        Ok(names) => names.len(),
+        Err(e) => 0,
+    }
+    let path = f"{root}/d{taken}"
+    match fs.make_dir_all(path) {
+        Ok(()) => {},
+        Err(e) => { panic(f"test.temp_dir() could not create {path}") },
+    }
+    return path
+}
+
+// The path of the project's program, built by `myla test` before the files
+// of `tests/` run (MYLA-306); a runtime error elsewhere.
+pub fun program() -> str {
+    let p = __test_program()
+    if p == "" { panic("test.program() needs a project with a program: run 'myla test' in it") }
+    return p
+}
+
+// --- The harness of `myla test --native` (MYLA-307) ----------------------
+//
+// `myla test --native` builds a program from a file and its cases: each
+// case a function giving "" when it passed, else why it failed, and a
+// `#main` that runs them through the functions below. The runner starts a
+// child process of itself for each case (`<harness> --case <n>`), so a
+// runtime error or an `exit` ends that case only, what it printed is kept
+// for the report and its scratch directory (MYLA_TEST_DIR) removed; where
+// no process can be started (wasm32, an emulator) the cases run in the
+// harness itself, in order, and the first runtime error ends the run.
+
+import std.fs as fs
+from std.process import args, exit, command, ExitStatus, Output, env
+from std.io import write, eprint
+from std.time import now_ns
+
+// A case as the report knows it: its name, and what it expects of the
+// call: a value (`kind` 0), a runtime error with `message` (1,
+// `[panic("message")]`), an exit with `code` (2, `[exit(code)]`).
+pub struct Case { name: str, kind: int32, message: str, code: int32 }
+
+// The case `argv` names, `<harness> --case <n>`; -1 when it names none and
+// this process is the runner.
+#test(["h", "--case", "3"])[3]
+#test(["h"])[-1]
+#test(["h", "--case", "x"])[-1]
+pub fun case_index(argv: [str]) -> int32 {
+    if argv.len() != 3 || argv[1] != "--case" { return -1 }
+    var n = 0
+    var i = 0
+    while i < argv[2].len() {
+        let c = argv[2][i]
+        if c < '0' || c > '9' { return -1 }
+        n = n * 10 + (c as int32 - 48)
+        i = i + 1
+    }
+    return n
+}
+
+// A child's end: its case passed (`detail` empty, status 0), or failed
+// with `detail`, told to the runner on stderr (status 1).
+pub fun child_done(detail: str) {
+    if detail == "" { exit(0) }
+    eprint("myla test: " + detail + "\n")
+    exit(1)
+}
+
+// The runner: every case in a child process of `program` (this harness),
+// the report printed as `myla test` prints it; Some(status), 0 when all
+// passed. None when the first child could not be started: the cases run in
+// this process instead (`report_inline`).
+pub fun run_in_children(program: str, cases: [Case]) -> Option<int32> {
+    var passed = 0
+    var k = 0
+    // under an emulator (MYLA_TEST_EMULATOR, from `myla test --target`),
+    // the children run under it too
+    var words: [str] = []
+    match env("MYLA_TEST_EMULATOR") {
+        Some(e) => { words = split_words(e) },
+        None => {},
+    }
+    var exe = program
+    var lead: [str] = []
+    if words.len() > 0 {
+        exe = words[0]
+        var i = 1
+        while i < words.len() {
+            lead.push(words[i])
+            i = i + 1
+        }
+        lead.push(program)
+    }
+    var base = match env("TMPDIR") { Some(d) => d, None => "" }
+    if base == "" { base = "/tmp" }
+    let root = f"{base}/myla-test-{now_ns()}"
+    var lines: [str] = []
+    while k < cases.len() {
+        let dir = f"{root}/c{k}"
+        var argv = lead
+        argv.push("--case")
+        argv.push(f"{k}")
+        let ran = command(exe).args(argv).env("MYLA_TEST_DIR", dir).stdin("").output()
+        var started = true
+        var out = Output { stdout: [], stderr: [], status: ExitStatus.Exited(0) }
+        match ran {
+            Ok(o) => { out = o },
+            Err(e) => { started = false },
+        }
+        if fs.exists(dir) { let gone = fs.remove_dir_all(dir) }
+        if !started {
+            if k == 0 { return None }
+            lines.push(f"FAIL  {cases[k].name}: could not start the case's process\n")
+        } else {
+            let code = match out.status {
+                ExitStatus.Exited(c) => c,
+                ExitStatus.Signaled(s) => -s,
+            }
+            let (detail, shown) = case_detail(cases[k], text(out.stdout), text(out.stderr), code)
+            if detail == "" {
+                passed = passed + 1
+                lines.push(f"PASS  {cases[k].name}\n")
+            } else {
+                lines.push(f"FAIL  {cases[k].name}: {on_one_line(detail)}\n")
+                for l in shown { lines.push("      | " + l + "\n") }
+            }
+        }
+        k = k + 1
+    }
+    if fs.exists(root) { let gone = fs.remove_dir_all(root) }
+    for l in lines { let w = write(1, l) }
+    return Some(summary(passed, cases.len()))
+}
+
+// What a child's run says of its case: the detail ("" when it passed) and
+// the output lines to show under a FAIL line. The child's stderr but the
+// verdict and the runtime error is passed on.
+#test(Case { name: "t", kind: 0, message: "", code: 0 }, "x\n", "", 0)[("", ["x"])]
+#test(Case { name: "t", kind: 0, message: "", code: 0 }, "x\n", "myla test: expected 1, got 2\n", 1)[("expected 1, got 2", ["x"])]
+#test(Case { name: "t", kind: 0, message: "", code: 0 }, "", "runtime error: boom\n  --> t.my:1:1\n", 1)[("runtime error: boom", [])]
+#test(Case { name: "t", kind: 1, message: "boom", code: 0 }, "", "runtime error: boom\n  --> t.my:1:1\n", 1)[("", [])]
+#test(Case { name: "t", kind: 1, message: "list index 3 out of bounds (len 3)", code: 0 }, "", "runtime error: index out of bounds\n", 1)[("expected runtime error 'list index 3 out of bounds (len 3)', got runtime error 'index out of bounds'", [])]
+#test(Case { name: "t", kind: 1, message: "boom", code: 0 }, "", "", 3)[("expected runtime error 'boom', exited with status 3", [])]
+#test(Case { name: "t", kind: 2, message: "", code: 3 }, "", "", 3)[("", [])]
+#test(Case { name: "t", kind: 2, message: "", code: 3 }, "", "", 0)[("expected exit status 3, exited with status 0", [])]
+#test(Case { name: "t", kind: 0, message: "", code: 0 }, "", "", 2)[("exited with status 2", [])]
+#test(Case { name: "t", kind: 0, message: "", code: 0 }, "", "", -9)[("killed by signal 9", [])]
+#test(Case { name: "t", kind: 0, message: "", code: 0 }, "", "runtime error: expected a\n, got b\n\n  --> t.my:1:1\n", 1)[("runtime error: expected a\n, got b\n", [])]
+pub fun case_detail(c: Case, stdout: str, stderr: str, code: int32) -> (str, [str]) {
+    let shown = lines_of(stdout)
+    var verdict = ""
+    var failure = ""
+    var has_failure = false
+    var in_message = false     // a message's further lines, before its position
+    var passed_on = StringBuilder()
+    for l in lines_of(stderr) {
+        if verdict == "" && starts_with(l, "myla test: ") { verdict = after(l, 11)
+            continue }
+        if !has_failure && starts_with(l, "runtime error: ") {
+            failure = after(l, 15)
+            has_failure = true
+            in_message = true
+            continue
+        }
+        if in_message {
+            if starts_with(l, "  --> ") { in_message = false }
+            else { failure = failure + "\n" + l }
+            continue
+        }
+        if has_failure && (starts_with(l, "  --> ") || starts_with(l, "  |") || starts_with(l, "   |")) { continue }
+        passed_on.append(l)
+        passed_on.append("\n")
+    }
+    let rest = passed_on.build()
+    if rest != "" { eprint(rest) }
+    if verdict != "" { return (verdict, shown) }
+    if has_failure {
+        if c.kind == 1 {
+            if starts_with(failure, c.message) || starts_with(c.message, failure) { return ("", shown) }
+            return (f"expected runtime error '{c.message}', got runtime error '{failure}'", shown)
+        }
+        if c.kind == 2 { return (f"expected exit status {c.code}, got runtime error '{failure}'", shown) }
+        return ("runtime error: " + failure, shown)
+    }
+    if code < 0 { return (f"killed by signal {-code}", shown) }
+    if code == 0 {
+        if c.kind == 2 { return (f"expected exit status {c.code}, exited with status 0", shown) }
+        return ("", shown)
+    }
+    if c.kind == 1 { return (f"expected runtime error '{c.message}', exited with status {code}", shown) }
+    if c.kind == 2 {
+        if code == c.code { return ("", shown) }
+        return (f"expected exit status {c.code}, exited with status {code}", shown)
+    }
+    return (f"exited with status {code}", shown)
+}
+
+// A case run in this process (no children here), which gave `detail`: its
+// line printed now, so that a later failure that ends the run leaves it;
+// whether it passed. (A `[panic]` or `[exit]` case can't pass this way:
+// the failure ends the run.)
+pub fun report_inline(c: Case, detail: str) -> bool {
+    if detail == "" {
+        let w = write(1, f"PASS  {c.name}\n")
+        return true
+    }
+    let w = write(1, f"FAIL  {c.name}: {on_one_line(detail)}\n")
+    return false
+}
+
+// The harness ends with `status`.
+pub fun end(status: int32) {
+    exit(status)
+}
+
+// The summary line, and the status to end with.
+pub fun summary(passed: int32, total: int32) -> int32 {
+    let w = write(1, f"\n{passed}/{total} passed.\n")
+    if passed == total { return 0 }
+    return 1
+}
+
+// `bytes` as text.
+fun text(bytes: [uint8]) -> str {
+    var sb = StringBuilder()
+    for b in bytes { sb.append_byte(b) }
+    return sb.build()
+}
+
+#test("a\nb\n")[["a", "b"]]
+#test("a")[["a"]]
+#test("")[[]]
+fun lines_of(text: str) -> [str] {
+    var out: [str] = []
+    var line = StringBuilder()
+    var i = 0
+    while i < text.len() {
+        if text[i] == '\n' {
+            out.push(line.build())
+            line = StringBuilder()
+        } else {
+            line.append_byte(text[i])
+        }
+        i = i + 1
+    }
+    let rest = line.build()
+    if rest.len() > 0 { out.push(rest) }
+    return out
+}
+
+// `s` from its byte `n` on (no slice: the harness of `std.slice` itself
+// must build).
+#test("myla test: x", 11)["x"]
+fun after(s: str, n: int32) -> str {
+    var sb = StringBuilder()
+    sb.append(s, n, s.len())
+    return sb.build()
+}
+
+#test("myla test: x", "myla test: ")[true]
+#test("my", "myla")[false]
+fun starts_with(s: str, prefix: str) -> bool {
+    if s.len() < prefix.len() { return false }
+    var i = 0
+    while i < prefix.len() {
+        if s[i] != prefix[i] { return false }
+        i = i + 1
+    }
+    return true
+}
+
+#test("node run.mjs")[["node", "run.mjs"]]
+fun split_words(text: str) -> [str] {
+    var out: [str] = []
+    var word = StringBuilder()
+    var i = 0
+    while i < text.len() {
+        if text[i] == ' ' {
+            let w = word.build()
+            if w.len() > 0 { out.push(w) }
+            word = StringBuilder()
+        } else {
+            word.append_byte(text[i])
+        }
+        i = i + 1
+    }
+    let w = word.build()
+    if w.len() > 0 { out.push(w) }
+    return out
+}
+
+#test("a\nb")["a\\nb"]
+fun on_one_line(text: str) -> str {
+    var sb = StringBuilder()
+    var i = 0
+    while i < text.len() {
+        if text[i] == '\n' { sb.append("\\n") } else { sb.append_byte(text[i]) }
+        i = i + 1
+    }
+    return sb.build()
+}
+
+// --- Values as the report shows them (the interpreter's forms) -----------
+
+// A string as the report quotes it (Python's repr: single quotes unless
+// the text has one and no double quote; `\n`, `\t`, `\r`, `\\`, the quote
+// and `\xNN` for the other control characters).
+#test("it's")["\"it's\""]
+#test("a\nb")["'a\\nb'"]
+#test("say \"hi\"")["'say \"hi\"'"]
+#test("")["''"]
+pub fun repr_str(s: str) -> str {
+    var has_single = false
+    var has_double = false
+    for c in s.chars() {
+        if c == '\'' { has_single = true }
+        if c == '"' { has_double = true }
+    }
+    var quote = '\''
+    if has_single && !has_double { quote = '"' }
+    var sb = StringBuilder()
+    sb.append(f"{quote}")
+    for c in s.chars() {
+        let cp = c as int32
+        if c == '\\' { sb.append("\\\\") }
+        else if c == quote { sb.append(f"\\{c}") }
+        else if cp == 10 { sb.append("\\n") }
+        else if cp == 9 { sb.append("\\t") }
+        else if cp == 13 { sb.append("\\r") }
+        else if cp < 32 || (cp >= 127 && cp <= 160) || cp == 173 { sb.append(f"\\x{hex2(cp)}") }
+        else { sb.append(f"{c}") }
+    }
+    sb.append(f"{quote}")
+    return sb.build()
+}
+
+#test(24)["18"]
+#test(108)["6c"]
+fun hex2(v: int32) -> str {
+    let digits = "0123456789abcdef"
+    var sb = StringBuilder()
+    sb.append_byte(digits[(v / 16) % 16])
+    sb.append_byte(digits[v % 16])
+    return sb.build()
+}
+
+// `text` with the module ids taken off the names in it, as the report
+// shows an `Err(e)` of a test function: `std$fs$IoError.NotFound` is
+// `IoError.NotFound`.
+#test("std$fs$IoError.NotFound")["IoError.NotFound"]
+#test("plain")["plain"]
+pub fun without_module_ids(text: str) -> str {
+    var sb = StringBuilder()
+    var word = StringBuilder()
+    var i = 0
+    while i < text.len() {
+        let c = text[i]
+        if c == '$' {
+            word = StringBuilder()
+        } else if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' {
+            word.append_byte(c)
+        } else {
+            sb.append(word.build())
+            word = StringBuilder()
+            sb.append_byte(c)
+        }
+        i = i + 1
+    }
+    sb.append(word.build())
+    return sb.build()
+}

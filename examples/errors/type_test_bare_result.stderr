@@ -1,0 +1,5 @@
+type error: a test function has no result or a 'Result<(), E>'; a case of 'answer' is '#test()[expected]'
+  --> examples/errors/type_test_bare_result.my:5:1
+  |
+5 | #test
+  | ^^^^^

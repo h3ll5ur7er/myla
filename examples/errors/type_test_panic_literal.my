@@ -1,0 +1,10 @@
+//~ type error: an expected failure is '[panic("message")]', the message a string literal
+//~ span: panic(MESSAGE)
+// An expected failure names its message as a literal (D162): the case is
+// compared with the runtime error's text before anything runs.
+const MESSAGE: str = "division by zero"
+#test(1, 0)[panic(MESSAGE)]
+fun div(a: int, b: int) -> int {
+    return a / b
+}
+fun main() {}

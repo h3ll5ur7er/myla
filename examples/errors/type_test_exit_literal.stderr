@@ -1,0 +1,5 @@
+type error: an expected exit is '[exit(n)]', the status an integer literal
+  --> examples/errors/type_test_exit_literal.my:5:13
+  |
+5 | #test()[exit("3")]
+  |         ^^^^^^^^^

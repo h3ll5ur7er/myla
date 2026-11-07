@@ -1,0 +1,688 @@
+// harness.my — the program `myla test --native` builds from a file and its
+// `#test` cases (D162, MYLA-307).
+//
+// The harness is the file's own text (its `#main`, if any, blanked) with
+// code appended: for each case a function that calls the tested function
+// with the case's arguments (their source text, copied by span) and gives
+// "" when the result is the expected one, else why not (`expected 3, got
+// 4`, the values as the interpreter's report shows them); for each type a
+// case compares, a structural equality and a repr; and a `#main` that
+// hands the cases to `std.test`'s runner (one child process per case, or
+// the cases in order where no process can be started). The report is the
+// interpreter's, line for line, so `myla test` and `myla test --native`
+// can be held to each other.
+//
+// What differs natively, by design: a runtime error's message carries no
+// values (an expected `[panic("…")]` is compared by prefix), a failed
+// case runs no deferred block (the child process ends), and a value with
+// no form of its own (a function, a StringBuilder) shows as `<function>`
+// or `<StringBuilder>`.
+
+from .ast import Decl, DeclKind, FunData, Attribute, Expr, TypeExpr, TypeKind, Expected, expected_failure
+from .checker import Checker, Type, type_name, FuncSig
+from .tokens import SrcSpan
+from .interp import selected
+from .parser import expr_of, type_expr_of, fun_of   // AST values for #test cases
+
+// A case the harness runs: its report name, what it expects, and the
+// function (its checked name, `T.m` for a method).
+pub struct Case { name: str, kind: Expected, func: str }
+
+// The names of the cases `harness_source` would build, in order, for the
+// report and `--list`.
+pub struct Harness { source: str, cases: [Case] }
+
+// The harness program for the file with the text `text`, checked as `ch`
+// (its declarations `decls`): None when no case of it is selected by
+// `only`.
+pub fun harness_source(text: str, ch: Checker, decls: [Decl], only: str) -> Option<Harness> {
+    var g = Gen { ch: ch, text: text, line_starts: line_starts(text), out: StringBuilder(), imports: [], type_keys: [], type_imports: [], has_async: false, cases: [], case_async: [], case_code: StringBuilder(), next_alias: 0, shown_done: [] }
+    var blanked: [SrcSpan] = []
+    var k = 0
+    for d in decls {
+        match d.kind {
+            DeclKind.FunDecl(fd) => {
+                // the file's entry point goes: the harness has its own
+                // (a `#main` function, or `main`, blanked with its attributes)
+                var is_entry = fd.name == "main"
+                for a in fd.attributes { if a.name == "main" { is_entry = true } }
+                if is_entry && !is_qualified(fd.name) {
+                    for a in fd.attributes { blanked.push(a.sp) }
+                    blanked.push(d.sp)
+                } else if !is_qualified(fd.name) { k = g.cases_of(fd, fd.name, k, only) }
+            },
+            DeclKind.ImplDecl(target, methods, tps, trnm, targs, dattrs) => {
+                let key = impl_key(target)
+                for m in methods {
+                    let name = format("{}.{}", key, m.name)
+                    if !is_qualified(name) { k = g.cases_of(m, name, k, only) }
+                }
+            },
+            _ => {},
+        }
+    }
+    if g.cases.len() == 0 { return None }
+    var sb = StringBuilder()
+    sb.append(blank_spans(text, blanked))
+    sb.append("\n\n// ---- the harness of `myla test --native` (D162) ----\n")
+    sb.append("import std.test as __myla_t\nfrom std.test import Case as __myla_Case\n")
+    sb.append("from std.process import args as __myla_args\n")
+    for imp in g.imports { sb.append(imp) }
+    sb.append(g.out.build())
+    sb.append(g.case_code.build())
+    // the dispatcher and the entry
+    var aw = ""
+    if g.has_async { sb.append("async fun __myla_run_case(k: int32) -> str {\n")
+        aw = "await " }
+    else { sb.append("fun __myla_run_case(k: int32) -> str {\n") }
+    var i = 0
+    while i < g.cases.len() {
+        sb.append(format("    if k == {} {{ return {}__myla_case_{}() }}\n", i, if g.case_async[i] { aw } else { "" }, i))
+        i = i + 1
+    }
+    sb.append("    return \"\"\n}\n\n#main\n")
+    if g.has_async { sb.append("async fun __myla_test_main() {\n") } else { sb.append("fun __myla_test_main() {\n") }
+    sb.append("    let __cases = [\n")
+    for c in g.cases {
+        let (kind, msg, code) = match c.kind {
+            Expected.Value => (0, "", 0),
+            Expected.Panics(m) => (1, m, 0),
+            Expected.Exits(n) => (2, "", n as int32),
+        }
+        sb.append(format("        __myla_Case {{ name: {}, kind: {}, message: {}, code: {} }},\n", str_lit(c.name), kind, str_lit(msg), code))
+    }
+    sb.append("    ]\n")
+    sb.append("    let __argv = __myla_args()\n")
+    sb.append("    let __k = __myla_t.case_index(__argv)\n")
+    sb.append(format("    if __k >= 0 {{ __myla_t.child_done({}__myla_run_case(__k))\n        return }}\n", aw))
+    sb.append("    match __myla_t.run_in_children(__argv[0], __cases) {\n")
+    sb.append("        Some(status) => { __myla_t.end(status) },\n")
+    sb.append("        None => {},\n")
+    sb.append("    }\n")
+    sb.append("    var __passed = 0\n    var __i = 0\n")
+    sb.append("    while __i < __cases.len() {\n")
+    sb.append(format("        if __myla_t.report_inline(__cases[__i], {}__myla_run_case(__i)) {{ __passed = __passed + 1 }}\n", aw))
+    sb.append("        __i = __i + 1\n    }\n")
+    sb.append("    __myla_t.end(__myla_t.summary(__passed, __cases.len()))\n}\n")
+    return Some(Harness { source: sb.build(), cases: g.cases })
+}
+
+// The generator's state: the checked program, the text and where its
+// lines start; the import lines added (a type of another module by an
+// alias), the helpers written (`out`, one equality and one repr per type,
+// keyed by the type's name), the cases and their code.
+struct Gen {
+    ch: Checker,
+    text: str,
+    line_starts: [int32],
+    out: StringBuilder,
+    imports: [str],
+    type_keys: [str],
+    type_imports: [(str, str)],   // a qualified type name -> its alias here
+    has_async: bool,
+    cases: [Case],
+    case_async: [bool],
+    case_code: StringBuilder,
+    next_alias: int32,
+    shown_done: [int32],
+}
+
+impl Gen {
+    // The cases of `fd` (checked as `name`), numbered from `k`: each a
+    // `__myla_case_<k>` function; the next number.
+    fun cases_of(var self, fd: FunData, name: str, k: int32, only: str) -> int32 {
+        var n = k
+        var idx = 0
+        let fi = self.ch.func_idx(name)
+        if fi < 0 { return n }
+        let sig = self.ch.functions[fi]
+        for attr in fd.attributes {
+            if attr.name != "test" { continue }
+            idx = idx + 1
+            if !selected(name, only) { continue }
+            let is_fn = match attr.outputs { Some(outs) => false, None => true }
+            var case_name = name
+            if !is_fn { case_name = format("{} #{}", name, idx) }
+            if attr.label != "" { case_name = format("{} ({})", case_name, attr.label) }
+            var kind = Expected.Value
+            var want = ""
+            match attr.outputs {
+                Some(outs) => {
+                    if outs.len() > 0 {
+                        kind = expected_failure(outs[0])
+                        want = self.slice(outs[0].sp)
+                    }
+                },
+                None => {},
+            }
+            self.cases.push(Case { name: case_name, kind: kind, func: name })
+            self.case_async.push(fd.is_async)
+            if fd.is_async { self.has_async = true }
+            self.case_function(n, fd, name, sig, attr, is_fn, kind, want)
+            n = n + 1
+        }
+        return n
+    }
+
+    // `__myla_case_<k>`: the call with the case's arguments, and the
+    // comparison with its expected value.
+    fun case_function(var self, k: int32, fd: FunData, name: str, sig: FuncSig, attr: Attribute, is_fn: bool, kind: Expected, want: str) {
+        var sb = StringBuilder()
+        if fd.is_async { sb.append(format("async fun __myla_case_{}() -> str {{\n", k)) }
+        else { sb.append(format("fun __myla_case_{}() -> str {{\n", k)) }
+        var aw = ""
+        if fd.is_async { aw = "await " }
+        // the call: a method's receiver is the first argument (D116)
+        var call = ""
+        var first = 0
+        match fd.receiver {
+            Some(r) => {
+                sb.append(format("    var __recv = {}\n", self.slice(attr.args[0].sp)))
+                call = format("__recv.{}(", fd.name)
+                first = 1
+            },
+            None => { call = name + "(" },
+        }
+        var i = first
+        while i < attr.args.len() {
+            if i > first { call = call + ", " }
+            call = call + self.slice(attr.args[i].sp)
+            i = i + 1
+        }
+        call = aw + call + ")"
+        let returns = match sig.ret { Some(t) => true, None => false }
+        if is_fn {
+            // a test function (D162): `Err(e)` fails it with `e` shown
+            match sig.ret {
+                Some(Type.TEnum(en, args)) => {
+                    let show = self.shown_fn(args[1])
+                    sb.append(format("    match {} {{\n        Ok(__x) => {{ return \"\" }},\n        Err(__e) => {{ return {}(__e) }},\n    }}\n", call, show))
+                },
+                _ => { sb.append(format("    {}\n    return \"\"\n", call)) },
+            }
+            sb.append("}\n\n")
+            self.case_code.append(sb.build())
+            return
+        }
+        match kind {
+            Expected.Value => {
+                match sig.ret {
+                    Some(t) => {
+                        let eq = self.eq_fn(t)
+                        let repr = self.repr_fn(t)
+                        sb.append(format("    let __got = {}\n    var __want = __got\n    __want = {}\n", call, want))
+                        sb.append(format("    if !{}(__got, __want) {{ return \"expected \" + {}(__want) + \", got \" + {}(__got) }}\n    return \"\"\n", eq, repr, repr))
+                    },
+                    None => { sb.append(format("    {}\n    return \"\"\n", call)) },
+                }
+            },
+            Expected.Panics(m) => {
+                let wanted = format("expected runtime error {}", str_lit_single(m))
+                sb.append(self.returned_text(call, sig.ret, wanted))
+            },
+            Expected.Exits(n) => {
+                let wanted = format("expected exit status {}", n)
+                sb.append(self.returned_text(call, sig.ret, wanted))
+            },
+        }
+        sb.append("}\n\n")
+        self.case_code.append(sb.build())
+    }
+
+    // The body of a case that expects a failure: the call, and the detail
+    // when it returns instead.
+    fun returned_text(var self, call: str, ret: Option<Type>, wanted: str) -> str {
+        match ret {
+            Some(t) => {
+                let repr = self.repr_fn(t)
+                return format("    let __got = {}\n    return {} + \", got \" + {}(__got)\n", call, str_lit(wanted), repr)
+            },
+            None => { return format("    {}\n    return {}\n", call, str_lit(wanted + ", the call returned")) },
+        }
+    }
+
+    // The text of `sp` in the file.
+    fun slice(self, sp: SrcSpan) -> str {
+        let a = self.offset(sp.sline, sp.scol)
+        let b = self.offset(sp.eline, sp.ecol)
+        return self.text[a:b]
+    }
+
+    // The byte offset of column `col` (1-based, in characters, as the
+    // lexer counts them) of `line`.
+    fun offset(self, line: int32, col: int32) -> int32 {
+        return byte_offset(self.text, self.line_starts, line, col)
+    }
+
+    // --- types ----------------------------------------------------------
+
+    // The index of `t` among the types with helpers, adding it.
+    fun type_index(var self, t: Type) -> int32 {
+        let key = type_name(t)
+        var i = 0
+        while i < self.type_keys.len() {
+            if self.type_keys[i] == key { return i }
+            i = i + 1
+        }
+        self.type_keys.push(key)
+        let n = self.type_keys.len() - 1
+        self.write_helpers(n, t)
+        return n
+    }
+
+    fun eq_fn(var self, t: Type) -> str {
+        return format("__myla_eq_{}", self.type_index(t))
+    }
+
+    fun repr_fn(var self, t: Type) -> str {
+        return format("__myla_repr_{}", self.type_index(t))
+    }
+
+    // The function showing an `Err(e)` of a test function as the report
+    // does: a string as it is, a type with its own `format` through it,
+    // the rest in their print form without module ids.
+    fun shown_fn(var self, t: Type) -> str {
+        let n = self.type_index(t)
+        let name = format("__myla_shown_{}", n)
+        for done in self.shown_done { if done == n { return name } }
+        self.shown_done.push(n)
+        let tt = self.type_text(t)
+        var body = ""
+        match t {
+            Type.TStr => { body = "    return v\n" },
+            _ => {
+                let formats = match self.ch.type_implements(t, "Format") { Ok(b) => b, Err(e) => false }
+                if formats { body = "    return v.format(\"\")\n" }
+                else { body = format("    return __myla_t.without_module_ids(__myla_repr_{}(v))\n", n) }
+            },
+        }
+        self.out.append(format("fun {}(v: {}) -> str {{\n{}}}\n\n", name, tt, body))
+        return name
+    }
+
+    // `t` written as a type here: a struct or enum of another module by an
+    // alias, imported for it.
+    fun type_text(var self, t: Type) -> str {
+        return match t {
+            Type.TInt(w, s) => type_name(t),
+            Type.TFloat(w) => type_name(t),
+            Type.TChar => "char",
+            Type.TBool => "bool",
+            Type.TStr => "str",
+            Type.TSB => "StringBuilder",
+            Type.TStruct(n, args) => self.named_type(n, args),
+            Type.TEnum(n, args) => self.named_type(n, args),
+            Type.TActor(n) => self.named_type(n, []),
+            Type.TTuple(es) => {
+                var parts: [str] = []
+                for e in es { parts.push(self.type_text(e)) }
+                if parts.len() == 1 { format("({},)", parts[0]) } else { "(" + join(parts, ", ") + ")" }
+            },
+            Type.TList(e) => format("[{}]", self.type_text(e)),
+            Type.TMap(k, v) => format("[{}: {}]", self.type_text(k), self.type_text(v)),
+            Type.TFunc(ps, r) => {
+                var parts: [str] = []
+                for p in ps { parts.push(self.type_text(p)) }
+                let rt = match r { Some(x) => self.type_text(x), None => "()" }
+                format("({}) -> {}", join(parts, ", "), rt)
+            },
+            Type.TAsync(inner) => "async " + self.type_text(inner),
+            _ => type_name(t),
+        }
+    }
+
+    // A named type with its arguments: the name as this file sees it, or
+    // an alias of a qualified one (`std$fs$IoError` imported `from std.fs
+    // import IoError as __myla_t1`).
+    fun named_type(var self, n: str, args: [Type]) -> str {
+        var base = n
+        if is_qualified(n) { base = self.alias_of(n) }
+        if args.len() == 0 { return base }
+        var parts: [str] = []
+        for a in args { parts.push(self.type_text(a)) }
+        return format("{}<{}>", base, join(parts, ", "))
+    }
+
+    fun alias_of(var self, qualified: str) -> str {
+        for pair in self.type_imports { if pair.0 == qualified { return pair.1 } }
+        self.next_alias = self.next_alias + 1
+        let alias = format("__myla_t{}", self.next_alias)
+        let (module, name) = split_qualified(qualified)
+        self.imports.push(format("from {} import {} as {}\n", module, name, alias))
+        self.type_imports.push((qualified, alias))
+        return alias
+    }
+
+    // --- the helpers of a type --------------------------------------------
+
+    // `__myla_eq_<n>` and `__myla_repr_<n>` for the type `t`: the
+    // interpreter's `value_eq` and `py_repr`, type by type.
+    fun write_helpers(var self, n: int32, t: Type) {
+        let tt = self.type_text(t)
+        var eq = StringBuilder()
+        var repr = StringBuilder()
+        match t {
+            Type.TInt(w, s) => {
+                eq.append("    return a == b\n")
+                if w == 64 && !s { repr.append("    return format(\"{}\", v as int64)\n") }
+                else { repr.append("    return format(\"{}\", v)\n") }
+            },
+            Type.TFloat(w) => {
+                eq.append("    return a == b\n")
+                if w == 32 { repr.append("    return format(\"{}\", v as float64)\n") }
+                else { repr.append("    return format(\"{}\", v)\n") }
+            },
+            Type.TChar => {
+                eq.append("    return a == b\n")
+                repr.append("    return format(\"{}\", v as int32)\n")
+            },
+            Type.TBool => {
+                eq.append("    return a == b\n")
+                repr.append("    if v { return \"True\" }\n    return \"False\"\n")
+            },
+            Type.TStr => {
+                eq.append("    return a == b\n")
+                repr.append("    return __myla_t.repr_str(v)\n")
+            },
+            Type.TTuple(es) => {
+                if es.len() == 0 {
+                    eq.append("    return true\n")
+                    repr.append("    return \"None\"\n")
+                } else {
+                    var conds: [str] = []
+                    var parts: [str] = []
+                    var i = 0
+                    while i < es.len() {
+                        conds.push(format("{}(a.{}, b.{})", self.eq_fn(es[i]), i, i))
+                        parts.push(format("{}(v.{})", self.repr_fn(es[i]), i))
+                        i = i + 1
+                    }
+                    eq.append("    return " + join(conds, " && ") + "\n")
+                    repr.append("    return \"(\" + " + join(parts, " + \", \" + ") + " + \")\"\n")
+                }
+            },
+            Type.TList(e) => {
+                eq.append("    if a.len() != b.len() { return false }\n    var i = 0\n    while i < a.len() {\n")
+                eq.append(format("        if !{}(a[i], b[i]) {{ return false }}\n        i = i + 1\n    }}\n    return true\n", self.eq_fn(e)))
+                repr.append("    var sb = StringBuilder()\n    sb.append(\"[\")\n    var i = 0\n    while i < v.len() {\n        if i > 0 { sb.append(\", \") }\n")
+                repr.append(format("        sb.append({}(v[i]))\n        i = i + 1\n    }}\n    sb.append(\"]\")\n    return sb.build()\n", self.repr_fn(e)))
+            },
+            Type.TMap(k, v) => {
+                eq.append("    if a.len() != b.len() { return false }\n    for key in a.keys() {\n        if !b.contains(key) { return false }\n")
+                eq.append(format("        if !{}(a[key], b[key]) {{ return false }}\n    }}\n    return true\n", self.eq_fn(v)))
+                repr.append("    var sb = StringBuilder()\n    sb.append(\"[\")\n    var i = 0\n    for key in v.keys() {\n        if i > 0 { sb.append(\", \") }\n")
+                repr.append(format("        sb.append({}(key) + \": \" + {}(v[key]))\n        i = i + 1\n    }}\n    sb.append(\"]\")\n    return sb.build()\n", self.repr_fn(k), self.repr_fn(v)))
+            },
+            Type.TStruct(sn, args) => {
+                let fields = self.ch.struct_field_types(sn, args)
+                var conds: [str] = []
+                var parts: [str] = []
+                for f in fields {
+                    conds.push(format("{}(a.{}, b.{})", self.eq_fn(f.ty), f.name, f.name))
+                    parts.push(format("\"{}: \" + {}(v.{})", f.name, self.repr_fn(f.ty), f.name))
+                }
+                if conds.len() == 0 { eq.append("    return true\n") }
+                else { eq.append("    return " + join(conds, " && ") + "\n") }
+                repr.append(format("    return \"{} {{ \" + {} + \" }}\"\n", sn, if parts.len() == 0 { "\"\"" } else { join(parts, " + \", \" + ") }))
+            },
+            Type.TEnum(en, args) => {
+                let (eq_body, repr_body) = self.enum_helpers(en, args)
+                eq.append(eq_body)
+                repr.append(repr_body)
+            },
+            _ => {
+                // functions, builders, actors: no form of their own
+                eq.append("    return false\n")
+                repr.append(format("    return \"{}\"\n", if is_builder(t) { "<StringBuilder>" } else { "<function>" }))
+            },
+        }
+        self.out.append(format("fun __myla_eq_{}(a: {}, b: {}) -> bool {{\n{}}}\n\n", n, tt, tt, eq.build()))
+        self.out.append(format("fun __myla_repr_{}(v: {}) -> str {{\n{}}}\n\n", n, tt, repr.build()))
+    }
+
+    // The equality and repr of an enum: by variant, with the payloads.
+    fun enum_helpers(var self, en: str, args: [Type]) -> (str, str) {
+        var eq = StringBuilder()
+        var repr = StringBuilder()
+        let variants = self.variants_of(en, args)
+        let written = self.enum_path(en)
+        eq.append("    match a {\n")
+        repr.append("    match v {\n")
+        for variant in variants {
+            let vname = variant.0
+            let payload = variant.1
+            var ps: [str] = []
+            var qs: [str] = []
+            var i = 0
+            while i < payload.len() {
+                ps.push(format("p{}", i))
+                qs.push(format("q{}", i))
+                i = i + 1
+            }
+            let pat = enum_pattern(written, vname, ps)
+            let pat_b = enum_pattern(written, vname, qs)
+            var conds: [str] = []
+            var parts: [str] = []
+            i = 0
+            while i < payload.len() {
+                conds.push(format("{}(p{}, q{})", self.eq_fn(payload[i]), i, i))
+                parts.push(format("{}(p{})", self.repr_fn(payload[i]), i))
+                i = i + 1
+            }
+            var inner = "true"
+            if conds.len() > 0 { inner = join(conds, " && ") }
+            eq.append(format("        {} => {{ match b {{ {} => {{ return {} }}, _ => {{ return false }} }} }},\n", pat, pat_b, inner))
+            if parts.len() == 0 { repr.append(format("        {} => {{ return \"{}.{}\" }},\n", pat, en, vname)) }
+            else { repr.append(format("        {} => {{ return \"{}.{}(\" + {} + \")\" }},\n", pat, en, vname, join(parts, " + \", \" + "))) }
+        }
+        eq.append("    }\n")
+        repr.append("    }\n")
+        return (eq.build(), repr.build())
+    }
+
+    // An enum's variants with their payload types for `args`: `Option`'s
+    // and `Result`'s are built in.
+    fun variants_of(self, en: str, args: [Type]) -> [(str, [Type])] {
+        if en == "Option" { return [("Some", [args[0]]), ("None", [])] }
+        if en == "Result" { return [("Ok", [args[0]]), ("Err", [args[1]])] }
+        var out: [(str, [Type])] = []
+        let ei = self.ch.enum_idx(en)
+        if ei < 0 { return out }
+        for v in self.ch.enums[ei].variants {
+            let payload = match self.ch.enum_variant_payload(en, args, v.name) { Some(p) => p, None => [] }
+            out.push((v.name, payload))
+        }
+        return out
+    }
+
+    // The enum's name in a pattern here: "" for `Option` and `Result`
+    // (their variants stand alone), else the name or its alias.
+    fun enum_path(var self, en: str) -> str {
+        if en == "Option" || en == "Result" { return "" }
+        if is_qualified(en) { return self.alias_of(en) }
+        return en
+    }
+}
+
+// A pattern of the variant `vname` of the enum written `path` binding `ps`.
+#test("E", "B", ["p0", "p1"])["E.B(p0, p1)"]
+#test("E", "A", [])["E.A"]
+#test("", "Some", ["p0"])["Some(p0)"]
+fun enum_pattern(path: str, vname: str, ps: [str]) -> str {
+    var head = vname
+    if path != "" { head = path + "." + vname }
+    if ps.len() == 0 { return head }
+    return head + "(" + join(ps, ", ") + ")"
+}
+
+#test(Type.TSB)[true]
+#test(Type.TStr)[false]
+fun is_builder(t: Type) -> bool {
+    return match t { Type.TSB => true, _ => false }
+}
+
+// The key the checker gives an `impl` target: `int32` for `impl int`, a
+// struct's or enum's name, `__list` and `__map`.
+#test(type_expr_of("int"))["int32"]
+#test(type_expr_of("Counter"))["Counter"]
+#test(type_expr_of("[int]"))["__list"]
+fun impl_key(te: TypeExpr) -> str {
+    return match te.kind {
+        TypeKind.TRef(name, args) => canon(name),
+        TypeKind.TList(e) => "__list",
+        TypeKind.TMap(k, v) => "__map",
+        _ => "",
+    }
+}
+
+#test("int")["int32"]
+#test("float")["float64"]
+#test("P")["P"]
+fun canon(n: str) -> str {
+    if n == "int" { return "int32" }
+    if n == "uint" { return "uint32" }
+    if n == "byte" { return "uint8" }
+    if n == "float" { return "float64" }
+    return n
+}
+
+// Whether `name` is another module's (`std$fs$IoError`).
+#test("std$fs$IoError")[true]
+#test("IoError")[false]
+pub fun is_qualified(name: str) -> bool {
+    var i = 0
+    while i < name.len() {
+        if name[i] == '$' { return true }
+        i = i + 1
+    }
+    return false
+}
+
+// A qualified name as its module's import path and the name: `std$fs$IoError`
+// is (`std.fs`, `IoError`); a module above the project root (`up$up$a$b`,
+// one `up` per level) is imported relatively, `...a.b`.
+#test("std$fs$IoError")[("std.fs", "IoError")]
+#test("util$strings$Shout")[("util.strings", "Shout")]
+#test("up$up$selfhost$diag$Note")[("...selfhost.diag", "Note")]
+fun split_qualified(q: str) -> (str, str) {
+    var parts: [str] = []
+    var word = StringBuilder()
+    var i = 0
+    while i < q.len() {
+        if q[i] == '$' {
+            parts.push(word.build())
+            word = StringBuilder()
+        } else { word.append_byte(word_byte(q, i)) }
+        i = i + 1
+    }
+    let name = word.build()
+    var ups = 0
+    while ups < parts.len() && parts[ups] == "up" { ups = ups + 1 }
+    var module = StringBuilder()
+    if ups > 0 {
+        var d = 0
+        while d <= ups {
+            module.append(".")
+            d = d + 1
+        }
+    }
+    var k = ups
+    while k < parts.len() {
+        if k > ups { module.append(".") }
+        module.append(parts[k])
+        k = k + 1
+    }
+    return (module.build(), name)
+}
+
+fun word_byte(q: str, i: int32) -> uint8 {
+    return q[i]
+}
+
+// The byte offset of each line's start.
+#test("ab\ncd\n")[[0, 3, 6]]
+#test("")[[0]]
+fun line_starts(text: str) -> [int32] {
+    var out = [0]
+    var i = 0
+    while i < text.len() {
+        if text[i] == '\n' { out.push(i + 1) }
+        i = i + 1
+    }
+    return out
+}
+
+// `text` with the spans `spans` blanked (their characters spaces, their
+// newlines kept), so that positions in the rest stay as they were.
+#test("#main\nfun f() {}\n", [SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 6 }])["     \nfun f() {}\n"]
+fun blank_spans(text: str, spans: [SrcSpan]) -> str {
+    if spans.len() == 0 { return text }
+    let starts = line_starts(text)
+    var sb = StringBuilder()
+    var i = 0
+    while i < text.len() {
+        var inside = false
+        for sp in spans {
+            let a = byte_offset(text, starts, sp.sline, sp.scol)
+            let b = byte_offset(text, starts, sp.eline, sp.ecol)
+            if i >= a && i < b { inside = true }
+        }
+        if inside && text[i] != '\n' { sb.append(" ") } else { sb.append_byte(text[i]) }
+        i = i + 1
+    }
+    return sb.build()
+}
+
+#test(["a", "b"], ", ")["a, b"]
+#test([], ", ")[""]
+fun join(parts: [str], sep: str) -> str {
+    var sb = StringBuilder()
+    var i = 0
+    while i < parts.len() {
+        if i > 0 { sb.append(sep) }
+        sb.append(parts[i])
+        i = i + 1
+    }
+    return sb.build()
+}
+
+// `s` as a Myla string literal.
+#test("a\"b\\c\n")["\"a\\\"b\\\\c\\n\""]
+pub fun str_lit(s: str) -> str {
+    var sb = StringBuilder()
+    sb.append("\"")
+    var i = 0
+    while i < s.len() {
+        let c = s[i]
+        if c == '"' { sb.append("\\\"") }
+        else if c == '\\' { sb.append("\\\\") }
+        else if c == '\n' { sb.append("\\n") }
+        else if c == '\t' { sb.append("\\t") }
+        else { sb.append_byte(c) }
+        i = i + 1
+    }
+    sb.append("\"")
+    return sb.build()
+}
+
+// `s` in single quotes inside a literal's text: `'boom'`.
+#test("boom")["'boom'"]
+fun str_lit_single(s: str) -> str {
+    return "'" + s + "'"
+}
+
+// The byte offset of the character column `col` of `line` in `text`
+// (`starts`: where its lines begin).
+#test("héllo wörld", [0], 1, 8)[9]
+#test("ab", [0], 1, 1)[0]
+fun byte_offset(text: str, starts: [int32], line: int32, col: int32) -> int32 {
+    if line < 1 || line > starts.len() { return text.len() }
+    var o = starts[line - 1]
+    var chars = 1
+    while chars < col && o < text.len() && text[o] != '\n' {
+        o = o + 1
+        while o < text.len() && (text[o] & 0xC0) == 0x80 { o = o + 1 }
+        chars = chars + 1
+    }
+    return o
+}

@@ -237,8 +237,9 @@ class FormatSpecs(unittest.TestCase):
         cases = {
             "print_without_format": ("struct P {\n    x: int,\n}\n\nfun main() {\n    print(P { x: 1 })\n}\n",
                                      "print() cannot print a value of type 'P'"),
-            "bound_not_met": ('fun show<T: Format>(x: T) -> str {\n    return f"<{x}>"\n}\n\nfun main() {\n    print(show(5))\n}\n',
-                              "type 'int32' does not satisfy the bound 'T: Format' required by 'show'"),
+            # a primitive counts as `Format` (D162), a struct without an impl doesn't
+            "bound_not_met": ('struct P { x: int }\nfun show<T: Format>(x: T) -> str {\n    return f"<{x}>"\n}\n\nfun main() {\n    print(show(P { x: 1 }))\n}\n',
+                              "type 'P' does not satisfy the bound 'T: Format' required by 'show'"),
             "no_bound": ('fun show<T>(x: T) -> str {\n    return x.format("")\n}\n\nfun main() {\n}\n',
                          "type parameter 'T' has no method 'format': it has no bounds"),
             "no_bound_in_a_hole": ('fun show<T>(x: T) -> str {\n    return f"{x}"\n}\n\nfun main() {\n}\n',
