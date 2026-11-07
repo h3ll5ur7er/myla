@@ -33,12 +33,30 @@ From loosest to tightest. Every binary level is left-associative.
 - **Integer division** truncates toward zero; `%` has the sign of the dividend. Division or remainder by zero is a runtime error. The one quotient that doesn't fit wraps like any overflow: the minimum of a signed type divided by -1 is the minimum again, and its remainder by -1 is 0 (`-2147483648 / -1 == -2147483648`, `-2147483648 % -1 == 0`), on every target.
 - **Float arithmetic** follows IEEE-754: dividing by zero gives ±inf or NaN; `%` is `fmod`, exact (the remainder of the true quotient truncated). A NaN prints as `nan`. Which NaN an operation gives (its sign and payload) isn't observable: `std.math`'s `to_bits`, `copysign` and the other functions that read a float's sign or payload see every NaN as `0x7FF8000000000000` (D128): the processors differ (x86-64's `0.0 / 0.0` is `0xFFF8…`, aarch64's `0x7FF8…`), and `copysign(1.0, 0.0 / 0.0)` is `1` on both.
 - **Overflow** wraps (two's complement) at the operand width, in the interpreter and natively.
-- **Comparison** `< <= > >=`: same numeric type, or two `char`s. On structs and enums: through `Ord` (`a.cmp(b) < 0`).
-- **Equality** `== !=`: same type, one of integer, float, `char`, `bool` or `str`; structs and enums through `Eq`. Tuples, lists and maps can't be compared.
+- **Characters** (D165, [[MYLA-318]]): `c - d` on two `char`s is the distance between their code points, an `int32` (`'p' - 'a' == 15`); `c + n` and `c - n`, with `c` a `char` and `n` an `int32`, are the `char` that far from `c`, checked as a cast to `char` is: one that isn't a Unicode scalar (below 0, a surrogate, past U+10FFFF) is the runtime error `invalid char` where the operator stands. The `char` is the left operand (`n + c` isn't one of them), the integer an `int32` (another type is converted with `as int32`: D4 mixes no types), and two `char`s can't be added. A char literal of at most 127 is still an integer where one is expected, and beside an integer it doesn't move, as before: `s[i] - 'a'` and `'0' + d` with `d: uint8` are `uint8`s, `n + 'a'` with `n: int` an `int32`, and `let k: int = 'a' + 1` is 98; but `'a' + 1` and `'a' + n` with `n: int` are chars now (they were `int32`s).
+- **Comparison** `< <= > >=`: same numeric type, two `char`s, or two strings, byte by byte: the first byte that differs decides, unsigned, and a string that begins another comes first, the order `list_dir` sorts in (D165, [[MYLA-318]]). On structs and enums: through `Ord` (`a.cmp(b) < 0`). `str` is `Ord`, as the numbers and `char` are, so a generic `T: Ord` takes it (`xs.sort()` on a `[str]`, a `Heap<str>`).
+- **Equality** `== !=`: same type, one of integer, float, `char`, `bool` or `str`; structs and enums through `Eq`; tuples and lists of `Eq` elements, element by element (D163). Maps can't be compared.
 - **Logic** `&& || !`: `bool` only.
 - **Bitwise** `& | ^ ~`: integers only.
 - **Shifts** `<<` `>>`: the result has the left operand's type; the amount may be any integer type. A constant amount outside `0 … width-1` is a type error; a run-time amount is masked to the width (`n & (width - 1)`). `>>` is arithmetic on signed types and logical on unsigned ones (D44).
 - **String concatenation** `str + str` makes a new string (D41).
+
+```myla
+fun main() {
+    let c = 'x'
+    print(c - 'a')                  // 23, an int32
+    print(c + 1)                    // the char y
+    var counts = [0, 0, 0]
+    for ch in "abacab" { counts[ch - 'a'] += 1 }
+    print(counts[0])
+    print("apple" < "banana" && "Zebra" < "apple")
+}
+// output:
+// 23
+// y
+// 3
+// true
+```
 
 ## Casts
 

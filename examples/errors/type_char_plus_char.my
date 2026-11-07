@@ -1,0 +1,8 @@
+//~ type error: operator '+' can't add two chars
+//~ span: c + 'b'
+// Two chars have a distance, `c - d` (an int32), and a char moves by an
+// int32, `c + n`; adding two chars means nothing (MYLA-318).
+fun main() {
+    let c = 'a'
+    print(c + 'b')
+}

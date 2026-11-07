@@ -2239,7 +2239,22 @@ impl Interp {
     fun exec_for(var self, var_name: str, start: Option<Expr>, end: Option<Expr>, body: Block, iter: Option<Expr>) {
         match iter {
             Some(it) => {
-                for item in self.iter_items(self.eval(it)) {
+                let v = self.eval(it)
+                match v {
+                    Value.VStr(s) => {
+                        // a string's characters decoded as the loop goes,
+                        // without the list `s.chars()` makes (MYLA-318)
+                        var i = 0
+                        while i < s.len() {
+                            let r = utf8_at(s, i)
+                            if !self.loop_iteration(var_name, Value.VChar(r & 0xFFFFFFFF), body) { return }
+                            i = i + ((r >> 32) as int32)
+                        }
+                        return
+                    },
+                    _ => {},
+                }
+                for item in self.iter_items(v) {
                     if !self.loop_iteration(var_name, item, body) { return }
                 }
             },
@@ -2286,6 +2301,9 @@ impl Interp {
         return match v {
             Value.VList(xs) => xs,
             Value.VMap(m) => map_keys_of(m),
+            // (an async function's loop holds its items: a string's
+            // characters, MYLA-318)
+            Value.VStr(s) => match decode_chars(s) { Value.VList(cs) => cs, _ => empty_values() },
             _ => empty_values(),
         }
     }
@@ -2621,6 +2639,16 @@ impl Interp {
         else if op == "^" { res = a ^ b }
         else if op == "<<" { res = a << shift_count(b, rt) }
         else if op == ">>" { res = shr_typed(a, b, rt) }
+        // `c + n`, `c - n`: a char again, as a cast to char checks it
+        // (MYLA-318; the sum wraps as an int32 does natively)
+        if is_char_type(rt) {
+            let cp = wrap_opt(res, Some(Type.TInt(32, true)))
+            if cp < 0 || cp > 1114111 || (cp >= 55296 && cp <= 57343) {
+                self.fail(e, format("invalid char: {} is not a Unicode scalar value", cp))
+                return Value.VUnit
+            }
+            return Value.VChar(cp)
+        }
         return Value.VInt(wrap_opt(res, rt))
     }
 
@@ -4014,6 +4042,13 @@ fun is_u64(t: Option<Type>) -> bool {
     return match t { Some(Type.TInt(w, sg)) => w == 64 && !sg, _ => false }
 }
 
+#test(Some(Type.TChar))[true]
+#test(Some(Type.TInt(32, true)))[false]
+#test(None)[false]
+fun is_char_type(t: Option<Type>) -> bool {
+    return match t { Some(Type.TChar) => true, _ => false }
+}
+
 #test(Some(Type.TFloat(32)))[true]
 #test(Some(Type.TFloat(64)))[false]
 fun is_float32_type(t: Option<Type>) -> bool {
@@ -4876,6 +4911,46 @@ fun decode_chars(s: str) -> Value {
         out.push(Value.VChar(ch as int64))
     }
     return Value.VList(out)
+}
+
+// The character at byte `i` of `s` and its length in bytes, as
+// `cp | len << 32`: U+FFFD and 1 for a byte that isn't part of a
+// well-formed UTF-8 sequence, as `s.chars()` decodes it (std.rt's
+// `decode_at`; MYLA-318).
+#test("a", 0)[4294967393]
+#test("é", 0)[8589934825]
+#test("x😀", 1)[17179997696]
+#test("\u{FFFD}", 1)[4295032829]
+fun utf8_at(s: str, i: int32) -> int64 {
+    let n = s.len()
+    let b = s[i] as int64
+    if b < 128 { return b | (1i64 << 32) }
+    var need = 0
+    var cp: int64 = 0
+    var least: int64 = 0
+    if b >= 0xC2 && b < 0xE0 {
+        need = 2
+        cp = b & 0x1F
+        least = 0x80
+    } else if b >= 0xE0 && b < 0xF0 {
+        need = 3
+        cp = b & 0x0F
+        least = 0x800
+    } else if b >= 0xF0 && b < 0xF5 {
+        need = 4
+        cp = b & 0x07
+        least = 0x10000
+    }
+    if need == 0 || i + need > n { return 0xFFFD | (1i64 << 32) }
+    var k = 1
+    while k < need {
+        let c = s[i + k] as int64
+        if (c & 0xC0) != 0x80 { return 0xFFFD | (1i64 << 32) }
+        cp = (cp << 6) | (c & 0x3F)
+        k += 1
+    }
+    if cp < least || cp > 0x10FFFF || (cp & -2048) == 0xD800 { return 0xFFFD | (1i64 << 32) }
+    return cp | ((need as int64) << 32)
 }
 
 #test()[[]]

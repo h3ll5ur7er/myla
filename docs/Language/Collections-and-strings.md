@@ -155,8 +155,10 @@ Lists, maps and builders behave like every other value: `let b = a` makes an ind
 | `s.len()` | Number of **bytes** |
 | `s[i]` | The byte at `i`, as a `uint8`; out of bounds is a runtime error; strings can't be assigned into |
 | `a + b` | A new string |
-| `a == b`, `a != b` | Byte-wise equality; there is no `<` on strings |
+| `a == b`, `a != b` | Byte-wise equality |
+| `a < b`, `<=`, `>`, `>=` | Byte-wise order: the first byte that differs decides, unsigned, and a string that begins another comes first (`"ab" < "abc"`, `"Z" < "a"`, `"z" < "é"`), the order `list_dir` sorts in; `str` is `Ord`, so `xs.sort()` and a `Heap<str>` work ([[MYLA-318]]) |
 | `s.chars()` | `[char]`, one element per Unicode scalar; each byte that isn't part of a well-formed UTF-8 sequence (a stray or truncated byte, an overlong form, an encoded surrogate) gives U+FFFD |
+| `for c in s` | Visits the characters, each a `char`, as `s.chars()` gives them, without making the list ([[MYLA-318]]); the bytes are `s[i]` for `i` in `0..s.len()`, or the list `bytes.from_str(s)` ([[Language/Standard-library/Bytes]]) |
 | `format("{} of {}", a, b)` | See below |
 
 Byte comparisons with ASCII char literals type-check directly: `if s[i] == ' ' { … }`.

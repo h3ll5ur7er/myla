@@ -4,7 +4,7 @@ Not for programs: the runtime written in Myla ([[MYLA-162]], D117), which a nati
 
 | Behind | std.rt's functions |
 | --- | --- |
-| `+` and `==` on strings, `chars()`, integers as text in `format` | `str_concat`, `str_eq`, `str_chars`, `int_to_str`, `uint_to_str`, `float_to_str` (D155) |
+| `+`, `==` and `<` on strings, `chars()` and `for c in s`, integers as text in `format` | `str_concat`, `str_eq`, `str_cmp` (MYLA-318), `str_chars`, `str_char_at` (MYLA-318), `int_to_str`, `uint_to_str`, `float_to_str` (D155) |
 | `m[k]`, `contains`, `keys()`, a builder's `append` | `map_lookup`, `map_keys`, `sb_append` |
 | `print` and `std.io.write` | `print_str`, `print_int`, …, `write`: a line and its newline in one `writev`, so the lines of tasks on other workers don't interleave; a write error is D153's |
 | `std.fs` | `read_file`, `write_file`, `list_dir`, `stat`, `mkdir`, `unlink`, `rmdir`, `rename`, `getcwd` (a path with a NUL byte is EINVAL, D153) |

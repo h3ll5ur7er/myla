@@ -1,0 +1,5 @@
+type error: operator '+' moves a char by an 'int32', found 'int64' (convert it with 'as int32')
+  --> examples/errors/type_char_plus_int64.my:8:13
+  |
+8 |     print(c + n)
+  |           ^^^^^

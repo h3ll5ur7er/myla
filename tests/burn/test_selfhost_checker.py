@@ -133,7 +133,8 @@ TYPE_ERRORS: dict[str, str] = {
     "generic_function_as_value": _main("let f = id", before="fun id<T>(x: T) -> T {\n    return x\n}\n"),
     "negate_string": _main("let x = -\"s\""),
     "complement_float": _main("let x = ~1.5"),
-    "compare_strings": _main("let b = \"a\" < \"b\""),
+    # (compare_strings, `"a" < "b"`, was one; since D165 strings are ordered
+    # byte-wise: the checker's own cases, `errors_of`)
     "shift_float": _main("let x = 1.5 << 1"),
     "shift_by_float": _main("let x = 1 << 1.5"),
     "compose_two_args_left": _main("let f = (a: int, b: int) => a", "let g = (x: int) => x", "let h = f >> g"),
@@ -368,6 +369,8 @@ SUPERSEDED: dict[str, str] = {
     "derive_on_generic": "err 1 1 1:1-1:12 type: deriving on generic types is not supported yet (Eq and Hash are derived for concrete structs and enums)",
     "derive_enum_payload": "ok",
     "map_literal_key": "ok",
+    # D165: `'a' - 'b'` is an int32 and `c + n` a char, but two chars don't add
+    "unit_test_3": "err 1 24 1:20-1:29 type: operator '+' can't add two chars: 'c - d' is their distance (an 'int32'), 'c + n' moves 'c' by the 'int32' 'n'",
 }
 
 def _corpus() -> list[str]:
