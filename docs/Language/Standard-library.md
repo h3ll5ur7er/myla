@@ -37,6 +37,7 @@ The conventions (D164): operations on built-in types are methods (`s.split(",")`
 | `std.str` | [[Language/Standard-library/Str]] | Methods on `str`: search, split, trim, case, padding, replace |
 | `std.fmt` | [[Language/Standard-library/Fmt]] | Format specs and the helpers of `Format` impls |
 | `std.math` | [[Language/Standard-library/Math]] | Floating-point functions after fdlibm |
+| `std.list` | [[Language/Standard-library/List]] | Methods on lists: building, `map` and the other higher-order operations, sorting, binary search, permutations and combinations |
 | `std.slice` | [[Language/Standard-library/Slice]] | The index arithmetic of slices |
 | `std.task` | [[Language/Standard-library/Task]] | Child tasks in numbers known at run time, cancellation |
 | `std.time` | [[Language/Standard-library/Time]] | The monotonic clock |
