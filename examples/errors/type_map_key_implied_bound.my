@@ -1,0 +1,18 @@
+//~ type error: type 'P' does not satisfy the bound 'T: Eq' required by 'one', as 'T' is a map key in its signature
+// A type parameter that is a map key in a function's signature is
+// `Eq + Hash` by it (D163): the caller must give such a type. `P` is
+// neither; it passed the checker and stopped native code before (MYLA-313).
+struct P {
+    a: int,
+}
+
+fun one<T>(x: T) -> [T: int] {
+    var m: [T: int] = [:]
+    m[x] = 1
+    return m
+}
+
+#main
+fun main() {
+    print(one(P { a: 1 }).len())
+}

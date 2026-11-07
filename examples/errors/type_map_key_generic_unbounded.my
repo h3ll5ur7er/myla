@@ -1,0 +1,15 @@
+//~ type error: map key type must be Eq and Hash, found 'T': it needs the bound 'T: Eq + Hash'
+// A generic `[K: V]` needs `K: Eq + Hash` (D163). Here only the body keys a
+// map by `T`, so the signature doesn't imply the bound: it must be written.
+fun distinct<T>(xs: [T]) -> int {
+    var seen: [T: bool] = [:]
+    for x in xs {
+        seen[x] = true
+    }
+    return seen.len()
+}
+
+#main
+fun main() {
+    print(distinct([1, 2, 1]))
+}

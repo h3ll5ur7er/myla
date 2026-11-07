@@ -2149,7 +2149,7 @@ impl Lower {
                     let mh = self.place(cg, base)
                     let mc = self.temp(lt)
                     self.add(Inst.Cow(mc, lt, mh))
-                    let k = self.expr(cg, idx)
+                    let k = self.key_operand(cg, lt, idx)
                     return self.map_value(cg, e, lt, mc, k)
                 }
                 if !is_list_t(lt) { return self.unsupported("an assignment to a byte") }
@@ -3621,7 +3621,7 @@ impl Lower {
         let bt = self.place_type(cg, base)
         if !is_list_t(bt) && !is_tstr(bt) && !is_map_t(bt) { return self.unsupported("indexing that type") }
         let cell = self.expr(cg, base)
-        if is_map_t(bt) { return self.map_value(cg, e, bt, cell, self.expr(cg, idx)) }
+        if is_map_t(bt) { return self.map_value(cg, e, bt, cell, self.key_operand(cg, bt, idx)) }
         let i = self.index_of(cg, cell, idx)
         var stride = 1
         if is_list_t(bt) { stride = cg.elem_size(list_elem(bt)) }
@@ -3698,10 +3698,40 @@ impl Lower {
     #test(lower_on(), codegen_on("enum E { A, B(int) }"), Type.TMap(Type.TStr, Type.TInt(32, true)), 32, 33)[2]
     fun map_lookup(var self, cg: CodeGen, mt: Type, cell: int32, key: int32) -> int32 {
         let size = self.int_const(cg.map_slot_size(mt))
-        let is_str = self.int_const(cg.map_is_str(mt))
         let d = self.temp(Type.TPtr)
+        if cg.map_hashed(mt) {
+            // a compound key, at its address (`key_operand`): its routines
+            let kt = map_key(mt)
+            let h = self.temp(Type.TInt(64, true))
+            self.add(Inst.Call(h, self.want_key(9, kt), [key]))
+            self.add(Inst.Call(d, self.want_key(11, kt), [cell, key, h, size]))
+            return d
+        }
+        let is_str = self.int_const(cg.map_is_str(mt))
         self.rt_call(cg, d, "__map_lookup", [cell, key, size, is_str])
         return d
+    }
+
+    // The name of the routine of kind `kind` (`type_job_name`) for the map
+    // key type `kt`, asked for.
+    fun want_key(var self, kind: int32, kt: Type) -> str {
+        self.wants.push(Want { kind: kind, t: kt, clone: false })
+        return type_job_name(Want { kind: kind, t: kt, clone: false })
+    }
+
+    // The key `k` of the map type `mt` evaluated as the map operations take
+    // it: an integer's, `char`'s, `bool`'s or string's value, else its
+    // address (a list's cell in a word of its own); borrowed, its
+    // temporaries the statement's.
+    fun key_operand(var self, cg: CodeGen, mt: Type, k: Expr) -> int32 {
+        if !cg.map_hashed(mt) { return self.expr(cg, k) }
+        let kt = map_key(mt)
+        if cg.is_boxed(kt) { return self.unsupported("a map keyed by a recursive enum") }
+        if is_aggregate(kt) { return self.addr(cg, k) }
+        let v = self.expr(cg, k)
+        let slot = self.new_slot("__key", kt, 8, -1, false)
+        self.add(Inst.Store(slot, v))
+        return self.slot_addr(slot)
     }
 
     // The address of the value of `key` in the map `cell`, borrowed from it;
@@ -3710,7 +3740,7 @@ impl Lower {
     fun map_value(var self, cg: CodeGen, e: Expr, mt: Type, cell: int32, key: int32) -> int32 {
         let slot = self.map_lookup(cg, mt, cell, key)
         self.add(Inst.Check(slot, "key", Pos { line: e.line, col: e.col }))
-        return self.offset(slot, 16)
+        return self.offset(slot, cg.map_val_off(mt))
     }
 
     // A new list of the keys of the map `cell`, each with its reference; the
@@ -3718,6 +3748,11 @@ impl Lower {
     #test(lower_on(), codegen_on("enum E { A, B(int) }"), Type.TMap(Type.TStr, Type.TInt(32, true)), 115)[3]
     fun map_keys(var self, cg: CodeGen, mt: Type, cell: int32) -> int32 {
         let size = self.int_const(cg.map_slot_size(mt))
+        if cg.map_hashed(mt) {
+            let d = self.temp(Type.TList(map_key(mt)))
+            self.add(Inst.Call(d, self.want_key(13, map_key(mt)), [cell, size]))
+            return d
+        }
         let stride = self.int_const(cg.elem_size(map_key(mt)))
         let is_str = self.int_const(cg.map_is_str(mt))
         let d = self.temp(Type.TList(map_key(mt)))
@@ -3762,14 +3797,19 @@ impl Lower {
     fun map_put(var self, cg: CodeGen, mt: Type, holder: int32, key: int32, staged: (int32, int32)) {
         let vt = map_val(mt)
         let size = self.int_const(cg.map_slot_size(mt))
-        let is_str = self.int_const(cg.map_is_str(mt))
         let slot = self.temp(Type.TPtr)
         let had = self.temp(Type.TBool)
         // std.rt's (MYLA-162): room made and the slot found in one call,
-        // whose low bit says whether the key was there
+        // whose low bit says whether the key was there; a compound key's
+        // through its `__mput_<K>`, which copies it in (MYLA-313)
         let i64 = Type.TInt(64, true)
         let r = self.temp(i64)
-        self.add(Inst.Call(r, "std$rt$map_put_slot", [holder, key, size, is_str]))
+        if cg.map_hashed(mt) {
+            self.add(Inst.Call(r, self.want_key(12, map_key(mt)), [holder, key, size]))
+        } else {
+            let is_str = self.int_const(cg.map_is_str(mt))
+            self.add(Inst.Call(r, "std$rt$map_put_slot", [holder, key, size, is_str]))
+        }
         let pos = Pos { line: 0, col: 0 }
         let masked = self.temp(i64)
         self.add(Inst.Bin(masked, "&", i64, i64, r, self.int_const(-2), pos))
@@ -3777,7 +3817,7 @@ impl Lower {
         let bit = self.temp(i64)
         self.add(Inst.Bin(bit, "&", i64, i64, r, self.int_const(1), pos))
         self.add(Inst.Cmp(had, "!=", i64, bit, self.int_const(0)))
-        let p = self.offset(slot, 16)
+        let p = self.offset(slot, cg.map_val_off(mt))
         if cg.owns_heap(vt) {
             let drop_b = self.new_block()
             let join = self.new_block()
@@ -3837,7 +3877,7 @@ impl Lower {
         self.own_temp(slot)
         let h = self.slot_addr(slot)
         for en in entries {
-            let k = self.expr(cg, en.key)
+            let k = self.key_operand(cg, mt, en.key)
             let staged = self.stage(cg, map_val(mt), en.value)
             self.map_put(cg, mt, h, k, staged)
         }
@@ -3854,7 +3894,7 @@ impl Lower {
         let h = self.place(cg, base)
         let cell = self.temp(mt)
         self.add(Inst.Cow(cell, mt, h))
-        let k = self.expr(cg, idx)
+        let k = self.key_operand(cg, mt, idx)
         self.map_put(cg, mt, h, k, staged)
     }
 
@@ -3863,7 +3903,7 @@ impl Lower {
         let mt = self.place_type(cg, m)
         if !is_map_t(mt) { return self.unsupported("contains on that type") }
         let cell = self.expr(cg, m)
-        let key = self.expr(cg, k)
+        let key = self.key_operand(cg, mt, k)
         let slot = self.map_lookup(cg, mt, cell, key)
         let d = self.temp(Type.TBool)
         self.add(Inst.Cmp(d, "!=", Type.TPtr, slot, self.konst(Type.TPtr, 0)))
@@ -3882,7 +3922,7 @@ impl Lower {
         let h = self.place(cg, m)
         let cell = self.temp(mt)
         self.add(Inst.Cow(cell, mt, h))
-        let key = self.expr(cg, k)
+        let key = self.key_operand(cg, mt, k)
         let slot = self.map_lookup(cg, mt, cell, key)
         let i64 = Type.TInt(64, true)
         let found = self.temp(Type.TBool)
@@ -3897,7 +3937,7 @@ impl Lower {
         let n1 = self.temp(i64)
         self.add(Inst.Bin(n1, "-", i64, i64, n, self.konst(i64, 1), Pos { line: 0, col: 0 }))
         self.add(Inst.StoreAt(cell, 0, n1, 8))
-        for kv in [(8, map_key(mt)), (16, map_val(mt))] {
+        for kv in [(cg.map_key_off(mt), map_key(mt)), (cg.map_val_off(mt), map_val(mt))] {
             let ft = kv.1
             if cg.is_boxed(ft) || is_cell_t(ft) {
                 let v = self.temp(ft)
@@ -4947,6 +4987,327 @@ impl Lower {
     }
 }
 
+// --- the routines of a compound map key (D163, MYLA-313) ------------------------
+//
+// A map whose key isn't an integer, `char`, `bool` or `str` (`map_hashed`)
+// reaches its slots through these, built per key type `K` as IR and called
+// with the key's address; std.rt's `map_find_h`, `map_slot_h` and
+// `map_keys_h` do the rest without them, as the slot keeps the key's hash.
+
+const PHI_IR: int64 = -7046029254386353131   // 2^64 / the golden ratio, as std.rt's
+
+// `__khash_<K>(p) -> int64`: the hash of the key at `p` by its words, as
+// `==` sees them: an integer's, `char`'s or `bool`'s value, a string's
+// std.rt `str_hash`, a tuple's and a derived `Hash`'s members in turn (an
+// enum's tag first), a list's length then its elements; a type with its own
+// `impl Hash` through its `hash`. Equal keys give equal hashes as long as a
+// written `hash` keeps D163's promise.
+pub fun key_hash_ir(cg: CodeGen, kt: Type, name: str) -> Routine {
+    let i64 = Type.TInt(64, true)
+    var lw = routine(name, Some(i64))
+    let sp = lw.new_slot("p", i64, 8, 0, false)
+    let sh = lw.new_slot("h", i64, 8, -1, false)
+    lw.add(Inst.Store(sh, lw.konst(i64, PHI_IR)))
+    if is_list_t(kt) {
+        // the cell, its length, then each element at its width
+        let et = list_elem(kt)
+        let cell = lw.temp(i64)
+        lw.add(Inst.LoadAt(cell, lw.read_cell(sp), 0, 8))
+        let sc = lw.new_slot("cell", i64, 8, -1, false)
+        lw.add(Inst.Store(sc, cell))
+        let n = lw.temp(i64)
+        lw.add(Inst.LoadAt(n, lw.read_cell(sc), 0, 8))
+        lw.mix_word(sh, n)
+        let si = lw.new_slot("i", i64, 8, -1, false)
+        let sn = lw.new_slot("n", i64, 8, -1, false)
+        lw.add(Inst.Store(si, lw.int_const(0)))
+        lw.add(Inst.Store(sn, n))
+        let body = lw.new_block()
+        let done = lw.new_block()
+        lw.count_test(si, sn, body, done)
+        lw.start(body)
+        let stride = cg.elem_size(et)
+        let at = lw.entry_at(sc, si, stride)
+        lw.hash_key_member(cg, at, 16, et, sh, stride)
+        let i2 = lw.temp(i64)
+        lw.add(Inst.Load(i2, si))
+        let i3 = lw.temp(i64)
+        lw.add(Inst.Bin(i3, "+", i64, i64, i2, lw.int_const(1), Pos { line: 0, col: 0 }))
+        lw.add(Inst.Store(si, i3))
+        lw.count_test(si, sn, body, done)
+        lw.start(done)
+    } else {
+        lw.hash_key_member(cg, lw.read_cell(sp), 0, kt, sh, 8)
+    }
+    // the high half folded into the low one, which picks the slot
+    let h = lw.read_cell(sh)
+    let u64 = Type.TInt(64, false)
+    let hi = lw.temp(i64)
+    lw.add(Inst.Bin(hi, ">>", u64, u64, h, lw.int_const(32), Pos { line: 0, col: 0 }))
+    let r = lw.temp(i64)
+    lw.add(Inst.Bin(r, "^", i64, i64, lw.read_cell(sh), hi, Pos { line: 0, col: 0 }))
+    lw.finish(Term.Ret(r))
+    return Routine { f: lw.f, wants: lw.wants }
+}
+
+impl Lower {
+    // The word `w` mixed into the hash in the slot `sh`: xor, a multiply by
+    // 2^64/phi, the top bits folded down.
+    fun mix_word(var self, sh: int32, w: int32) {
+        let i64 = Type.TInt(64, true)
+        let u64 = Type.TInt(64, false)
+        let pos = Pos { line: 0, col: 0 }
+        let x = self.temp(i64)
+        self.add(Inst.Bin(x, "^", i64, i64, self.read_cell(sh), w, pos))
+        let m = self.temp(i64)
+        self.add(Inst.Bin(m, "*", i64, i64, x, self.konst(i64, PHI_IR), pos))
+        let top = self.temp(i64)
+        self.add(Inst.Bin(top, ">>", u64, u64, m, self.int_const(29), pos))
+        let f = self.temp(i64)
+        self.add(Inst.Bin(f, "^", i64, i64, m, top, pos))
+        self.add(Inst.Store(sh, f))
+    }
+
+    // The member of type `ft` at `off` from the address `p` mixed into the
+    // hash in `sh` (see `key_hash_ir`); a scalar `width` bytes wide (a packed
+    // list's element).
+    fun hash_key_member(var self, cg: CodeGen, p: int32, off: int32, ft: Type, sh: int32, width: int32) {
+        let i64 = Type.TInt(64, true)
+        if is_unit(ft) { return }
+        if is_tstr(ft) {
+            let c = self.temp(i64)
+            self.add(Inst.LoadAt(c, p, off, 8))
+            let h = self.temp(i64)
+            self.add(Inst.Call(h, "std$rt$str_hash", [c]))
+            self.mix_word(sh, h)
+            return
+        }
+        if is_list_t(ft) {
+            // its own routine, from the word holding its cell
+            let at = self.temp(i64)
+            self.add(Inst.Bin(at, "+", i64, i64, p, self.int_const(off), Pos { line: 0, col: 0 }))
+            let h = self.temp(i64)
+            self.add(Inst.Call(h, self.want_key(9, ft), [at]))
+            self.mix_word(sh, h)
+            return
+        }
+        match ft {
+            Type.TTuple(es) => {
+                var cur = off
+                for et in es {
+                    self.hash_key_member(cg, p, cur, et, sh, 8)
+                    cur = cur + cg.stored_size(et)
+                }
+                return
+            },
+            Type.TStruct(n, a) => {
+                if cg.derives_hash(n) {
+                    let info = cg.struct_info(n)
+                    var cur = off
+                    for f in info.fields {
+                        self.hash_key_member(cg, p, cur, f.ty, sh, 8)
+                        cur = cur + cg.stored_size(f.ty)
+                    }
+                } else {
+                    self.hash_written(cg, p, off, ft, sh)
+                }
+                return
+            },
+            Type.TEnum(n, a) => {
+                if cg.derives_hash(n) && !cg.is_boxed(ft) {
+                    let tag = self.temp(i64)
+                    self.add(Inst.LoadAt(tag, p, off, 8))
+                    self.mix_word(sh, tag)
+                    let et = Type.TEnum(n, [])
+                    let done = self.new_block()
+                    var idx = 0
+                    for v in cg.enum_info(n).variants {
+                        if v.payload.len() > 0 {
+                            let is_v = self.temp(Type.TBool)
+                            let tg = self.temp(i64)
+                            self.add(Inst.LoadAt(tg, p, off, 8))
+                            self.add(Inst.Cmp(is_v, "==", i64, tg, self.konst(i64, idx as int64)))
+                            let this_v = self.new_block()
+                            let next_v = self.new_block()
+                            self.finish(Term.Br(is_v, this_v, next_v))
+                            self.start(this_v)
+                            var j = 0
+                            for pt in v.payload {
+                                self.hash_key_member(cg, p, off + cg.variant_field_offset(et, v.name, j), pt, sh, 8)
+                                j = j + 1
+                            }
+                            self.finish(Term.Jmp(done))
+                            self.start(next_v)
+                        }
+                        idx = idx + 1
+                    }
+                    self.finish(Term.Jmp(done))
+                    self.start(done)
+                } else {
+                    self.hash_written(cg, p, off, ft, sh)
+                }
+                return
+            },
+            _ => {},
+        }
+        // an integer, `char` or `bool`: its value
+        let w = self.temp(i64)
+        if width < 8 {
+            let x = self.temp(ft)
+            self.add(Inst.LoadAt(x, p, off, width))
+            self.add(Inst.Cast(w, ft, i64, x))
+        } else {
+            self.add(Inst.LoadAt(w, p, off, 8))
+        }
+        self.mix_word(sh, w)
+    }
+
+    // A struct's or enum's own `hash` (an `impl Hash` written for it) of the
+    // value at `p + off`, from a hasher of state 0, its state mixed in.
+    fun hash_written(var self, cg: CodeGen, p: int32, off: int32, ft: Type, sh: int32) {
+        let i64 = Type.TInt(64, true)
+        let hasher = Type.TStruct("Hasher", [])
+        let hs = self.new_slot("__hasher", hasher, 8, -1, false)
+        self.add_store(self.slot_addr(hs), 0, self.int_const(0))
+        let rs = self.new_slot("__hashed", hasher, 8, -1, false)
+        var recv = -1
+        if cg.is_boxed(ft) {
+            recv = self.temp(Type.TPtr)
+            self.add(Inst.LoadAt(recv, p, off, 8))
+        } else {
+            let at = self.temp(i64)
+            self.add(Inst.Bin(at, "+", i64, i64, p, self.int_const(off), Pos { line: 0, col: 0 }))
+            recv = self.temp(Type.TPtr)
+            self.add(Inst.Mov(recv, at))
+        }
+        self.add(Inst.CallSret(cg.type_key(ft) + ".hash", self.slot_addr(rs), [recv, self.slot_addr(hs)]))
+        let st = self.temp(i64)
+        self.add(Inst.LoadAt(st, self.slot_addr(rs), 0, 8))
+        self.mix_word(sh, st)
+    }
+}
+
+// `__keq_<K>(a, b) -> bool`: the keys at `a` and `b` compared as `==`
+// compares them.
+pub fun key_eq_ir(cg: CodeGen, kt: Type, name: str) -> Routine {
+    var lw = routine(name, Some(Type.TBool))
+    let sa = lw.new_slot("a", Type.TPtr, 8, 0, false)
+    let sb = lw.new_slot("b", Type.TPtr, 8, 1, false)
+    let unequal = lw.new_block()
+    lw.eq_member(cg, lw.read_ptr(sa), lw.read_ptr(sb), 0, kt, unequal, 8)
+    lw.finish(Term.Ret(lw.konst(Type.TBool, 1)))
+    lw.start(unequal)
+    lw.finish(Term.Ret(lw.konst(Type.TBool, 0)))
+    return Routine { f: lw.f, wants: lw.wants }
+}
+
+// `__mfind_<K>(cell, key, h, slot_size) -> slot`: the slot of the key at
+// `key`, whose hash is `h`, in the map `cell`, or 0: each slot of that hash
+// on its probe (std.rt's `map_find_h`) compared with it.
+pub fun map_find_ir(cg: CodeGen, kt: Type, name: str) -> Routine {
+    let i64 = Type.TInt(64, true)
+    var lw = routine(name, Some(i64))
+    let sc = lw.new_slot("cell", i64, 8, 0, false)
+    let sk = lw.new_slot("key", Type.TPtr, 8, 1, false)
+    let sh = lw.new_slot("h", i64, 8, 2, false)
+    let ss = lw.new_slot("slot_size", i64, 8, 3, false)
+    let sl = lw.new_slot("slot", i64, 8, -1, false)
+    let first = lw.temp(i64)
+    lw.add(Inst.Call(first, "std$rt$map_find_h", [lw.read_cell(sc), lw.read_cell(sh), lw.read_cell(ss), lw.int_const(0)]))
+    lw.add(Inst.Store(sl, first))
+    let test = lw.new_block()
+    lw.finish(Term.Jmp(test))
+    lw.start(test)
+    let none = lw.temp(Type.TBool)
+    lw.add(Inst.Cmp(none, "==", i64, lw.read_cell(sl), lw.int_const(0)))
+    let missing = lw.new_block()
+    let compare = lw.new_block()
+    lw.finish(Term.Br(none, missing, compare))
+    lw.start(compare)
+    let at = lw.temp(i64)
+    lw.add(Inst.Bin(at, "+", i64, i64, lw.read_cell(sl), lw.int_const(16), Pos { line: 0, col: 0 }))
+    let pa = lw.temp(Type.TPtr)
+    lw.add(Inst.Mov(pa, at))
+    let eq = lw.temp(Type.TBool)
+    lw.add(Inst.Call(eq, lw.want_key(10, kt), [pa, lw.read_ptr(sk)]))
+    let found = lw.new_block()
+    let next = lw.new_block()
+    lw.finish(Term.Br(eq, found, next))
+    lw.start(found)
+    lw.finish(Term.Ret(lw.read_cell(sl)))
+    lw.start(next)
+    let after = lw.temp(i64)
+    lw.add(Inst.Call(after, "std$rt$map_find_h", [lw.read_cell(sc), lw.read_cell(sh), lw.read_cell(ss), lw.read_cell(sl)]))
+    lw.add(Inst.Store(sl, after))
+    lw.finish(Term.Jmp(test))
+    lw.start(missing)
+    lw.finish(Term.Ret(lw.int_const(0)))
+    return Routine { f: lw.f, wants: lw.wants }
+}
+
+// `__mput_<K>(holder, key, slot_size) -> slot`: the slot of the key at `key`
+// in the (unique) map the 8 bytes at `holder` point at, plus 1 when it was
+// there; else a new one (std.rt's `map_slot_h`, which makes room), the key's
+// words copied in with references of their own.
+pub fun map_put_ir(cg: CodeGen, kt: Type, name: str) -> Routine {
+    let i64 = Type.TInt(64, true)
+    var lw = routine(name, Some(i64))
+    let so = lw.new_slot("holder", i64, 8, 0, false)
+    let sk = lw.new_slot("key", Type.TPtr, 8, 1, false)
+    let ss = lw.new_slot("slot_size", i64, 8, 2, false)
+    let sh = lw.new_slot("h", i64, 8, -1, false)
+    let h = lw.temp(i64)
+    lw.add(Inst.Call(h, lw.want_key(9, kt), [lw.read_ptr(sk)]))
+    lw.add(Inst.Store(sh, h))
+    let cell = lw.temp(i64)
+    lw.add(Inst.LoadAt(cell, lw.read_cell(so), 0, 8))
+    let slot = lw.temp(i64)
+    lw.add(Inst.Call(slot, lw.want_key(11, kt), [cell, lw.read_ptr(sk), lw.read_cell(sh), lw.read_cell(ss)]))
+    let had = lw.temp(Type.TBool)
+    lw.add(Inst.Cmp(had, "!=", i64, slot, lw.int_const(0)))
+    let was = lw.new_block()
+    let make = lw.new_block()
+    lw.finish(Term.Br(had, was, make))
+    lw.start(was)
+    let tagged = lw.temp(i64)
+    lw.add(Inst.Bin(tagged, "+", i64, i64, slot, lw.int_const(1), Pos { line: 0, col: 0 }))
+    lw.finish(Term.Ret(tagged))
+    lw.start(make)
+    let made = lw.temp(i64)
+    lw.add(Inst.Call(made, "std$rt$map_slot_h", [lw.read_cell(so), lw.read_cell(sh), lw.read_cell(ss)]))
+    let sm = lw.new_slot("made", i64, 8, -1, false)
+    lw.add(Inst.Store(sm, made))
+    let ks = cg.stored_size(kt)
+    if ks > 0 {
+        let at = lw.temp(i64)
+        lw.add(Inst.Bin(at, "+", i64, i64, lw.read_cell(sm), lw.int_const(16), Pos { line: 0, col: 0 }))
+        let dst = lw.temp(Type.TPtr)
+        lw.add(Inst.Mov(dst, at))
+        lw.add(Inst.Copy(dst, lw.read_ptr(sk), ks))
+        lw.entry_member(cg, lw.read_cell(sm), 16, kt, true)
+    }
+    lw.finish(Term.Ret(lw.read_cell(sm)))
+    return Routine { f: lw.f, wants: lw.wants }
+}
+
+// `__mkeys_<K>(cell, slot_size) -> list`: the keys of the map `cell` in the
+// order of insertion (std.rt's `map_keys_h`), each with references of its
+// own.
+pub fun map_keys_ir(cg: CodeGen, kt: Type, name: str) -> Routine {
+    let i64 = Type.TInt(64, true)
+    var lw = routine(name, Some(i64))
+    let sc = lw.new_slot("cell", i64, 8, 0, false)
+    let ss = lw.new_slot("slot_size", i64, 8, 1, false)
+    let sl = lw.new_slot("list", i64, 8, -1, false)
+    let ks = cg.stored_size(kt)
+    let list = lw.temp(i64)
+    lw.add(Inst.Call(list, "std$rt$map_keys_h", [lw.read_cell(sc), lw.read_cell(ss), lw.int_const(ks)]))
+    lw.add(Inst.Store(sl, list))
+    if cg.owns_heap(kt) { lw.each_entry(cg, sl, 0, ks, false, kt, Type.TBool, true) }
+    lw.finish(Term.Ret(lw.read_cell(sl)))
+    return Routine { f: lw.f, wants: lw.wants }
+}
+
 // Whether `==` on `t` is a `__eq_<T>` routine's: a tuple (not the unit type)
 // or a list (D163).
 #test(Type.TTuple([Type.TInt(32, true)]))[true]
@@ -5255,7 +5616,7 @@ pub fun map_drop_slow_ir(cg: CodeGen, mt: Type, name: str, free: str) -> IrFunc 
         let occupied = lw.new_block()
         lw.finish(Term.Br(full, occupied, next))
         lw.start(occupied)
-        if cg.owns_heap(kt) { lw.drop_member(cg, at, 24, kt) }
+        if cg.owns_heap(kt) { lw.drop_member(cg, at, 16 + cg.map_key_off(mt), kt) }
         if cg.owns_heap(vt) {
             // (the slot's address again: a key's drop is a call)
             let i4 = lw.temp(i64)
@@ -5264,7 +5625,7 @@ pub fun map_drop_slow_ir(cg: CodeGen, mt: Type, name: str, free: str) -> IrFunc 
             lw.add(Inst.Bin(sc4, "*", i64, i64, i4, lw.int_const(ss), Pos { line: 0, col: 0 }))
             let at4 = lw.temp(i64)
             lw.add(Inst.Bin(at4, "+", i64, i64, lw.read_cell(sp), sc4, Pos { line: 0, col: 0 }))
-            lw.drop_member(cg, at4, 32, vt)
+            lw.drop_member(cg, at4, 16 + cg.map_val_off(mt), vt)
         }
         lw.finish(Term.Jmp(next))
         lw.start(next)
@@ -5389,8 +5750,8 @@ impl Lower {
             let occupied = self.new_block()
             self.finish(Term.Br(full, occupied, next))
             self.start(occupied)
-            if cg.owns_heap(a) { self.entry_member(cg, self.entry_at(sc, si, stride), 24, a, retain) }
-            if cg.owns_heap(b) { self.entry_member(cg, self.entry_at(sc, si, stride), 32, b, retain) }
+            if cg.owns_heap(a) { self.entry_member(cg, self.entry_at(sc, si, stride), 16 + cg.map_key_off(Type.TMap(a, b)), a, retain) }
+            if cg.owns_heap(b) { self.entry_member(cg, self.entry_at(sc, si, stride), 16 + cg.map_val_off(Type.TMap(a, b)), b, retain) }
         } else {
             self.entry_member(cg, self.entry_at(sc, si, stride), 16, a, retain)
         }
@@ -5606,8 +5967,8 @@ impl Lower {
             let occupied = self.new_block()
             self.finish(Term.Br(full, occupied, next))
             self.start(occupied)
-            if cg.owns_heap(a) { self.deep_member(cg, se, 24, a, clone) }
-            if cg.owns_heap(b) { self.deep_member(cg, se, 32, b, clone) }
+            if cg.owns_heap(a) { self.deep_member(cg, se, 16 + cg.map_key_off(Type.TMap(a, b)), a, clone) }
+            if cg.owns_heap(b) { self.deep_member(cg, se, 16 + cg.map_val_off(Type.TMap(a, b)), b, clone) }
         } else {
             self.deep_member(cg, se, 16, a, clone)
         }

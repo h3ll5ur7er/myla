@@ -162,6 +162,10 @@ pub struct Interp {
     resolved: [int32: Type],
     func_names: [str],
     func_decls: [FunData],
+    // the structs and enums with an `eq` written for them, and those with a
+    // `hash` written for them (not derived), by name (D163, MYLA-313)
+    own_eq: [str: bool],
+    own_hash: [str: bool],
     const_names: [str],
     const_vals: [Value],
     enum_names: [str],
@@ -443,7 +447,7 @@ pub fun new_interp(c: Checker, argv: [str]) -> Interp {
     var it = Interp {
         decls: c.decls,
         resolved: c.resolved,
-        func_names: [], func_decls: [],
+        func_names: [], func_decls: [], own_eq: [:], own_hash: [:],
         const_names: [], const_vals: [],
         enum_names: [],
         scopes: [],
@@ -489,17 +493,35 @@ impl Interp {
     // -- table construction ----------------------------------------------
 
     fun collect(var self) {
+        var derived: [str: bool] = [:]
         for d in self.decls {
             match d.kind {
                 DeclKind.FunDecl(fd) => { self.add_func(fd.name, fd) },
-                DeclKind.EnumDecl(n, variants, attrs, tps, isp) => { self.enum_names.push(n) },
+                DeclKind.EnumDecl(n, variants, attrs, tps, isp) => {
+                    self.enum_names.push(n)
+                    if derives_trait(attrs, "Hash") { derived[n] = true }
+                },
+                DeclKind.StructDecl(n, fields, attrs, tps, isp, act) => {
+                    if derives_trait(attrs, "Hash") { derived[n] = true }
+                },
                 DeclKind.ImplDecl(target, methods, tps, trnm, targs, dattrs) => {
                     let key = canon_type_name(self.type_name_of(target))
-                    for m in methods { self.add_func(format("{}.{}", key, m.name), m) }
+                    for m in methods {
+                        self.add_func(format("{}.{}", key, m.name), m)
+                        let written = match m.body {
+                            Some(b) => true,
+                            None => false,
+                        }
+                        if written && m.name == "eq" { self.own_eq[key] = true }
+                        if written && m.name == "hash" { self.own_hash[key] = true }
+                    }
                 },
                 _ => {},
             }
         }
+        // a derived `hash` is written as source, but hashing by the members
+        // gives the same equal hashes
+        for n in derived.keys() { self.own_hash.remove(n) }
     }
 
     fun add_func(var self, name: str, fd: FunData) {
@@ -866,7 +888,7 @@ impl Interp {
     // is then an insert); fails with the Python interpreter's message if not.
     #test(interp_on("enum E { A, B(int) }"), Value.VList([Value.VInt(7)]), Value.VInt(0), expr_of("a.b[0]"), false)[true]
     fun check_index(var self, c: Value, k: Value, e: Expr, assigning: bool) -> bool {
-        let msg = index_error(c, k, assigning)
+        let msg = index_error(c, k, assigning, self.place_in(c, k))
         if msg.len() > 0 {
             self.fail(e, msg)
             return false
@@ -876,7 +898,7 @@ impl Interp {
 
     // Whether every index on the path to `p` is still valid, without failing.
     #test(interp_on("[int]"), Place { root: "b", steps: [] })[true]
-    fun place_valid(self, p: Place) -> bool {
+    fun place_valid(var self, p: Place) -> bool {
         var v = self.lookup_or_unit(p.root)
         if p.steps.len() > 0 { v = self.deref(v) }
         var i = 0
@@ -885,8 +907,8 @@ impl Interp {
                 Step.SField(f) => { v = get_field(v, f) },
                 Step.SIndex(k, nd) => {
                     let last = i == p.steps.len() - 1
-                    if index_error(v, k, last).len() > 0 { return false }
-                    if !last { v = index_get(v, k) }
+                    if index_error(v, k, last, self.place_in(v, k)).len() > 0 { return false }
+                    if !last { v = index_get(v, k, self.place_in(v, k)) }
                 },
             }
             i = i + 1
@@ -936,7 +958,7 @@ impl Interp {
                 Step.SField(f) => { v = get_field(v, f) },
                 Step.SIndex(k, nd) => {
                     if !self.check_index(v, k, nd, false) { return Value.VUnit }
-                    v = index_get(v, k)
+                    v = index_get(v, k, self.place_in(v, k))
                 },
             }
         }
@@ -1047,7 +1069,9 @@ impl Interp {
                 if is_vmap(self.cell) {
                     var m = map_parts(self.cell)
                     self.cell = Value.VUnit
-                    let j = m.place_or_add(k)
+                    let (found, h) = self.key_place(m, k)
+                    var j = found
+                    if j < 0 { j = m.add_key(k, h) }
                     self.cell = m.vs[j]
                     m.vs[j] = Value.VUnit
                     r = self.update_cell(steps, i + 1, op)
@@ -1090,7 +1114,8 @@ impl Interp {
                 if is_vmap(self.cell) {
                     var m = map_parts(self.cell)
                     self.cell = Value.VUnit
-                    m.take_out(k)
+                    let (j, h) = self.key_place(m, k)
+                    if j >= 0 { m.remove_at(j) }
                     self.cell = Value.VMap(m)
                 }
             },
@@ -2702,7 +2727,10 @@ impl Interp {
         var m = new_mapv()
         for en in entries {
             let k = self.eval(en.key)
-            m.put(k, self.eval(en.value))
+            let (found, h) = self.key_place(m, k)
+            var j = found
+            if j < 0 { j = m.add_key(k, h) }
+            m.vs[j] = self.eval(en.value)
         }
         return Value.VMap(m)
     }
@@ -2713,7 +2741,7 @@ impl Interp {
         if is_slice_expr(idx) { return self.eval_slice(e, c, idx) }
         let k = self.index_value(c, idx)
         if self.stop() || !self.check_index(c, k, e, false) { return Value.VUnit }
-        return index_get(c, k)
+        return index_get(c, k, self.place_in(c, k))
     }
 
     // An index's value: `^n` counted from the end of `c` (D142).
@@ -3244,7 +3272,7 @@ impl Interp {
     fun values_equal(var self, a: Value, b: Value) -> bool {
         return match a {
             Value.VStruct(n, fns, fvs) => {
-                if self.has_method_body(n, "eq") {
+                if self.own_eq.contains(n) {
                     let (rr, fs) = self.call_method(self.func_idx(format("{}.eq", n)), a, [b])
                     return as_bool(rr)
                 }
@@ -3254,7 +3282,7 @@ impl Interp {
                 }
             },
             Value.VEnum(en, vr, pl) => {
-                if self.has_method_body(en, "eq") {
+                if self.own_eq.contains(en) {
                     let (rr, fs) = self.call_method(self.func_idx(format("{}.eq", en)), a, [b])
                     return as_bool(rr)
                 }
@@ -3286,6 +3314,63 @@ impl Interp {
             i = i + 1
         }
         return true
+    }
+
+    // The hash of the map key `v` (D163, MYLA-313): by its structure, as
+    // `value_hash` gives it, but for a struct or enum with a `hash` written
+    // for it, which is called (from a hasher of state 0). Keys `==` finds
+    // equal hash equal as long as a written `hash` keeps D163's promise.
+    fun key_hash(var self, v: Value) -> int64 {
+        return match v {
+            Value.VTuple(es) => self.keys_hash(3, es),
+            Value.VList(xs) => self.keys_hash(mix_key(4, xs.len() as int64), xs),
+            Value.VStruct(n, fns, fvs) => {
+                if self.own_hash.contains(n) { return self.written_hash(n, v) }
+                self.keys_hash(mix_key(5, str_key_hash(n)), fvs)
+            },
+            Value.VEnum(en, vr, pl) => {
+                if self.own_hash.contains(en) { return self.written_hash(en, v) }
+                self.keys_hash(mix_key(6, str_key_hash(vr)), pl)
+            },
+            _ => value_hash(v),
+        }
+    }
+
+    // `key_hash` of each of `xs` mixed into `h` in turn.
+    fun keys_hash(var self, h: int64, xs: [Value]) -> int64 {
+        var g = h
+        for x in xs { g = mix_key(g, self.key_hash(x)) }
+        return g
+    }
+
+    // The state the `hash` written for the type `key` gives `v`.
+    fun written_hash(var self, key: str, v: Value) -> int64 {
+        let h0 = Value.VStruct("Hasher", ["state"], [Value.VInt(0)])
+        let (rv, fs) = self.call_method(self.func_idx(key + ".hash"), v, [h0])
+        return as_int(get_field(rv, "state"))
+    }
+
+    // The place of the key `k` in the map `m`, or -1, and its hash (0 for a
+    // number or a string): a compound key's among those of its hash, by
+    // `==` (`values_equal`).
+    fun key_place(var self, m: MapV, k: Value) -> (int32, int64) {
+        if is_plain_key(k) { return (m.place(k), 0) }
+        let h = self.key_hash(k)
+        var j = m.first_of(h)
+        while j >= 0 {
+            if self.values_equal(m.ks[j], k) { return (j, h) }
+            j = m.nexts[j]
+        }
+        return (-1, h)
+    }
+
+    // The place of `k` in the map value `c` (`key_place`), -1 for none or
+    // for a value that isn't a map.
+    fun place_in(var self, c: Value, k: Value) -> int32 {
+        return match c {
+            Value.VMap(m) => self.key_place(m, k).0,
+            _ => -1,
+        }
     }
 
     // Dispatch a binary operator on a user-defined struct/enum to its trait
@@ -3663,7 +3748,7 @@ impl Interp {
         }
         if nm == "contains" {
             let m = self.eval(args[0])
-            return Value.VBool(map_has(m, self.eval(args[1])))
+            return Value.VBool(self.place_in(m, self.eval(args[1])) >= 0)
         }
         if nm == "remove" {
             let p = self.place_of(args[0])
@@ -4349,10 +4434,12 @@ fun value_len(v: Value) -> int64 {
 
 // Why `c[k]` can't be read (or, `assigning`, written: a missing map key is
 // then an insert), with the Python interpreter's message; "" if it can.
-#test(Value.VStr("a"), Value.VInt(0), false)[""]
-#test(Value.VStr("b"), Value.VInt(0), false)[""]
-#test(Value.VStr("e"), Value.VInt(0), false)[""]
-fun index_error(c: Value, k: Value, assigning: bool) -> str {
+#test(Value.VStr("a"), Value.VInt(0), false, -1)[""]
+#test(Value.VStr("b"), Value.VInt(0), false, -1)[""]
+#test(Value.VStr("e"), Value.VInt(0), false, -1)[""]
+#test(Value.VMap(new_mapv()), Value.VInt(0), false, -1)["map key 0 not found"]
+// (`place`: a map key's place, as `Interp.place_in` finds it)
+fun index_error(c: Value, k: Value, assigning: bool, place: int32) -> str {
     match c {
         Value.VList(xs) => {
             let i = as_int(k)
@@ -4367,7 +4454,7 @@ fun index_error(c: Value, k: Value, assigning: bool) -> str {
             }
         },
         Value.VMap(m) => {
-            if !assigning && m.place(k) < 0 {
+            if !assigning && place < 0 {
                 return format("map key {} not found", py_repr(k))
             }
         },
@@ -4476,8 +4563,12 @@ fun sb_bytes(v: Value) -> [int64] {
 // a removal take constant time, not time in the map's size. The holes are
 // dropped and the places renumbered when they outnumber the entries. An
 // integer, `char` or `bool` key is indexed by its number, as `value_eq`
-// compares them; a string by itself; a key of another kind (none yet) is
-// looked for among the entries.
+// compares them; a string by itself; a key of another kind (a tuple, a
+// struct, an enum, a list: any `Eq + Hash` type, D163, MYLA-313) by its hash
+// (`hashes`, as `Interp.key_hash` gives it): `heads` the first place of
+// each hash, `nexts` the next place of the same hash, -1 at the end. The
+// interpreter finds such a key among those of its hash with `==`
+// (`Interp.key_place`), which may call a type's own `eq`.
 pub struct MapV {
     ks: [Value],
     vs: [Value],
@@ -4485,17 +4576,21 @@ pub struct MapV {
     ints: [int64: int32],
     strs: [str: int32],
     count: int32,
+    hashes: [int64],
+    heads: [int64: int32],
+    nexts: [int32],
 }
 
-#test()[MapV { ks: [], vs: [], here: [], ints: [:], strs: [:], count: 0 }]
+#test()[MapV { ks: [], vs: [], here: [], ints: [:], strs: [:], count: 0, hashes: [], heads: [:], nexts: [] }]
 pub fun new_mapv() -> MapV {
-    return MapV { ks: [], vs: [], here: [], ints: [:], strs: [:], count: 0 }
+    return MapV { ks: [], vs: [], here: [], ints: [:], strs: [:], count: 0, hashes: [], heads: [:], nexts: [] }
 }
 
 // The map of `ks` and `vs`, inserted in that order (a key given again
-// replaces the value, keeping its first place).
-#test([Value.VInt(1)], [Value.VInt(2)])[MapV { ks: [Value.VInt(1)], vs: [Value.VInt(2)], here: [true], ints: [1: 0], strs: [:], count: 1 }]
-#test([Value.VStr("a"), Value.VStr("a")], [Value.VInt(1), Value.VInt(2)])[MapV { ks: [Value.VStr("a")], vs: [Value.VInt(2)], here: [true], ints: [:], strs: ["a": 0], count: 1 }]
+// replaces the value, keeping its first place); a compound key's hash its
+// structure's (`value_hash`).
+#test([Value.VInt(1)], [Value.VInt(2)])[MapV { ks: [Value.VInt(1)], vs: [Value.VInt(2)], here: [true], ints: [1: 0], strs: [:], count: 1, hashes: [0], heads: [:], nexts: [-1] }]
+#test([Value.VStr("a"), Value.VStr("a")], [Value.VInt(1), Value.VInt(2)])[MapV { ks: [Value.VStr("a")], vs: [Value.VInt(2)], here: [true], ints: [:], strs: ["a": 0], count: 1, hashes: [0], heads: [:], nexts: [-1] }]
 pub fun mapv_of(ks: [Value], vs: [Value]) -> MapV {
     var m = new_mapv()
     var i = 0
@@ -4504,6 +4599,21 @@ pub fun mapv_of(ks: [Value], vs: [Value]) -> MapV {
         i = i + 1
     }
     return m
+}
+
+// Whether the attributes `attrs` derive the trait `trnm` (`#derive(...)`).
+fun derives_trait(attrs: [Attribute], trnm: str) -> bool {
+    for a in attrs {
+        if a.name == "derive" {
+            for arg in a.args {
+                match arg.kind {
+                    ExprKind.Name(n) => { if n == trnm { return true } },
+                    _ => {},
+                }
+            }
+        }
+    }
+    return false
 }
 
 // Whether `k` is indexed by its number.
@@ -4518,8 +4628,21 @@ fun is_int_key(k: Value) -> bool {
     }
 }
 
+// Whether `k` is indexed by itself (a number or a string), not by its hash.
+#test(Value.VStr("a"))[true]
+#test(Value.VTuple([Value.VInt(1)]))[false]
+fun is_plain_key(k: Value) -> bool {
+    return match k {
+        Value.VStr(s) => true,
+        _ => is_int_key(k),
+    }
+}
+
 impl MapV {
-    // The place of `k` in `ks` and `vs`, or -1.
+    // The place of `k` in `ks` and `vs`, or -1: a compound key's found
+    // among those of its structure's hash (`value_hash`) by `value_eq`, for
+    // maps made without the interpreter (`mapv_of`); the interpreter's own
+    // go through `Interp.key_place`.
     #test(mapv_of([Value.VInt(5), Value.VInt(7)], [Value.VUnit, Value.VUnit]), Value.VInt(7))[1]
     #test(mapv_of([Value.VInt(97)], [Value.VUnit]), Value.VChar(97))[0]
     #test(mapv_of([Value.VStr("a")], [Value.VUnit]), Value.VStr("b"))[-1]
@@ -4537,21 +4660,47 @@ impl MapV {
                 None => -1,
             }
         }
-        var i = 0
-        while i < self.ks.len() {
-            if self.here[i] && value_eq(self.ks[i], k) { return i }
-            i = i + 1
+        var j = self.first_of(value_hash(k))
+        while j >= 0 {
+            if value_eq(self.ks[j], k) { return j }
+            j = self.nexts[j]
         }
         return -1
     }
 
-    // `k` indexed at the place `j`.
-    fun index(var self, k: Value, j: int32) {
+    // The first place of a compound key whose hash is `h`, or -1.
+    fun first_of(self, h: int64) -> int32 {
+        return match get(self.heads, h) {
+            Some(j) => j,
+            None => -1,
+        }
+    }
+
+    // `k` indexed at the place `j`: by its number or itself, else by its
+    // hash `h`, first among those of `h`.
+    fun index(var self, k: Value, h: int64, j: int32) {
         if let Value.VStr(s) = k {
             self.strs[s] = j
         } else if is_int_key(k) {
             self.ints[as_int(k)] = j
+        } else {
+            self.nexts[j] = self.first_of(h)
+            self.heads[h] = j
         }
+    }
+
+    // A new entry for the key `k` (whose hash, a compound key's, is `h`) at
+    // the end, its value `()`: its place.
+    fun add_key(var self, k: Value, h: int64) -> int32 {
+        let j = self.ks.len()
+        self.ks.push(k)
+        self.vs.push(Value.VUnit)
+        self.here.push(true)
+        self.hashes.push(h)
+        self.nexts.push(-1)
+        self.index(k, h, j)
+        self.count = self.count + 1
+        return j
     }
 
     // The place of `k`, made at the end (its value `()`) when it is missing.
@@ -4560,13 +4709,9 @@ impl MapV {
     fun place_or_add(var self, k: Value) -> int32 {
         let found = self.place(k)
         if found >= 0 { return found }
-        let j = self.ks.len()
-        self.ks.push(k)
-        self.vs.push(Value.VUnit)
-        self.here.push(true)
-        self.index(k, j)
-        self.count = self.count + 1
-        return j
+        var h: int64 = 0
+        if !is_plain_key(k) { h = value_hash(k) }
+        return self.add_key(k, h)
     }
 
     // `k` set to `v`: a new key goes last, a known one keeps its place.
@@ -4575,15 +4720,30 @@ impl MapV {
         self.vs[j] = v
     }
 
-    // `k`'s entry removed (nothing when it is missing): a hole in its place,
-    // the entries compacted once the holes outnumber them.
+    // `k`'s entry removed (nothing when it is missing).
     fun take_out(var self, k: Value) {
         let j = self.place(k)
-        if j < 0 { return }
+        if j >= 0 { self.remove_at(j) }
+    }
+
+    // The entry at the place `j` removed: a hole in its place, the entries
+    // compacted once the holes outnumber them.
+    fun remove_at(var self, j: int32) {
+        let k = self.ks[j]
         if let Value.VStr(s) = k {
             self.strs.remove(s)
         } else if is_int_key(k) {
             self.ints.remove(as_int(k))
+        } else {
+            // out of its hash's chain
+            let h = self.hashes[j]
+            if self.first_of(h) == j {
+                if self.nexts[j] >= 0 { self.heads[h] = self.nexts[j] } else { self.heads.remove(h) }
+            } else {
+                var at = self.first_of(h)
+                while at >= 0 && self.nexts[at] != j { at = self.nexts[at] }
+                if at >= 0 { self.nexts[at] = self.nexts[j] }
+            }
         }
         self.ks[j] = Value.VUnit
         self.vs[j] = Value.VUnit
@@ -4598,22 +4758,75 @@ impl MapV {
         var ks: [Value] = []
         var vs: [Value] = []
         var here: [bool] = []
+        var hashes: [int64] = []
+        let old_hashes = self.hashes
         self.ints = [:]
         self.strs = [:]
+        self.heads = [:]
+        self.nexts = []
         var i = 0
         while i < self.ks.len() {
             if self.here[i] {
-                self.index(self.ks[i], ks.len())
+                self.nexts.push(-1)
+                self.index(self.ks[i], old_hashes[i], ks.len())
                 ks.push(self.ks[i])
                 vs.push(self.vs[i])
                 here.push(true)
+                hashes.push(old_hashes[i])
             }
             i = i + 1
         }
         self.ks = ks
         self.vs = vs
         self.here = here
+        self.hashes = hashes
     }
+}
+
+// The hash of the key `v` by its structure, as `value_eq` compares it: what
+// `Interp.key_hash` gives for a key no type's own `hash` is in.
+#test(Value.VUnit)[7]
+#test(Value.VList([]))[mix_key(4, 0)]
+fun value_hash(v: Value) -> int64 {
+    return match v {
+        Value.VInt(n) => mix_key(1, n),
+        Value.VChar(c) => mix_key(1, c),
+        Value.VBool(b) => mix_key(1, if b { 1 } else { 0 }),
+        Value.VStr(s) => str_key_hash(s),
+        Value.VUnit => 7,
+        Value.VTuple(es) => values_hash(3, es),
+        Value.VList(xs) => values_hash(mix_key(4, xs.len() as int64), xs),
+        Value.VStruct(n, fns, fvs) => values_hash(mix_key(5, str_key_hash(n)), fvs),
+        Value.VEnum(en, vr, pl) => values_hash(mix_key(6, str_key_hash(vr)), pl),
+        Value.VFloat(f) => mix_key(8, f as int64),
+        _ => 9,
+    }
+}
+
+// `value_hash` of each of `xs` mixed into `h` in turn.
+fun values_hash(h: int64, xs: [Value]) -> int64 {
+    var g = h
+    for x in xs { g = mix_key(g, value_hash(x)) }
+    return g
+}
+
+// `w` mixed into the hash `h` (a multiply by 2^64/phi and the top bits
+// folded down, as native code's `__khash_<K>` mixes a word).
+#test(0, 0)[0]
+fun mix_key(h: int64, w: int64) -> int64 {
+    let m = (h ^ w) * -7046029254386353131
+    return m ^ (((m as uint64) >> 29) as int64)
+}
+
+// The bytes of `s` mixed in, eight to a word.
+fun str_key_hash(s: str) -> int64 {
+    var h = mix_key(2, s.len() as int64)
+    var i = 0
+    while i < s.len() {
+        h = mix_key(h, s[i] as int64)
+        i = i + 1
+    }
+    return h
 }
 
 // The keys of `m` in the order of insertion.
@@ -4641,15 +4854,6 @@ fun present(xs: [Value], here: [bool]) -> [Value] {
         i = i + 1
     }
     return out
-}
-
-#test(Value.VMap(mapv_of([Value.VChar(120)], [Value.VInt(2)])), Value.VChar(120))[true]
-#test(Value.VMap(mapv_of([Value.VChar(120)], [Value.VInt(2)])), Value.VChar(121))[false]
-fun map_has(c: Value, k: Value) -> bool {
-    return match c {
-        Value.VMap(m) => m.place(k) >= 0,
-        _ => false,
-    }
 }
 
 #test(Value.VMap(new_mapv()))[Value.VList([])]
@@ -4945,7 +5149,17 @@ fun maps_eq(a: MapV, b: MapV) -> bool {
     var i = 0
     while i < a.ks.len() {
         if a.here[i] {
-            let j = b.place(a.ks[i])
+            var j = -1
+            if is_plain_key(a.ks[i]) {
+                j = b.place(a.ks[i])
+            } else {
+                // among b's keys of the same hash (both the interpreter's)
+                var at = b.first_of(a.hashes[i])
+                while at >= 0 && j < 0 {
+                    if value_eq(b.ks[at], a.ks[i]) { j = at }
+                    at = b.nexts[at]
+                }
+            }
             if j < 0 || !value_eq(a.vs[i], b.vs[j]) { return false }
         }
         i = i + 1
@@ -4983,24 +5197,21 @@ fun get_field(v: Value, field: str) -> Value {
     return Value.VUnit
 }
 
-#test(Value.VStr("a"), Value.VInt(0))[Value.VInt(97)]
-#test(Value.VList([Value.VInt(1), Value.VInt(2)]), Value.VInt(1))[Value.VInt(2)]
-#test(Value.VList([Value.VList([Value.VInt(1), Value.VInt(20)]), Value.VList([Value.VInt(3), Value.VInt(4), Value.VInt(5)])]), Value.VInt(1))[Value.VList([Value.VInt(3), Value.VInt(4), Value.VInt(5)])]
-fun index_get(c: Value, k: Value) -> Value {
+// `c[k]`; a map's value at the place `place` of `k` (`Interp.place_in`).
+#test(Value.VStr("a"), Value.VInt(0), -1)[Value.VInt(97)]
+#test(Value.VList([Value.VInt(1), Value.VInt(2)]), Value.VInt(1), -1)[Value.VInt(2)]
+#test(Value.VList([Value.VList([Value.VInt(1), Value.VInt(20)]), Value.VList([Value.VInt(3), Value.VInt(4), Value.VInt(5)])]), Value.VInt(1), -1)[Value.VList([Value.VInt(3), Value.VInt(4), Value.VInt(5)])]
+#test(Value.VMap(mapv_of([Value.VChar(120)], [Value.VInt(2)])), Value.VChar(120), 0)[Value.VInt(2)]
+fun index_get(c: Value, k: Value, place: int32) -> Value {
     return match c {
         Value.VList(xs) => xs[as_int(k) as int32],
         Value.VStr(s) => Value.VInt(s[as_int(k) as int32] as int64),
-        Value.VMap(m) => map_get(m, k),
+        Value.VMap(m) => {
+            if place < 0 { return Value.VUnit }
+            m.vs[place]
+        },
         _ => Value.VUnit,
     }
-}
-
-#test(mapv_of([Value.VChar(120)], [Value.VInt(2)]), Value.VChar(120))[Value.VInt(2)]
-#test(mapv_of([Value.VChar(120)], [Value.VInt(2)]), Value.VChar(121))[Value.VUnit]
-fun map_get(m: MapV, k: Value) -> Value {
-    let j = m.place(k)
-    if j < 0 { return Value.VUnit }
-    return m.vs[j]
 }
 
 #test([RtFrame { names: [], vals: [], defers: [] }])[[]]

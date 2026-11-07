@@ -1,0 +1,8 @@
+//~ type error: map key type must be Eq and Hash, found '(int32, float64)': 'float64' isn't Hash (NaN is unequal to itself)
+// A tuple is a key when its elements are `Eq` and `Hash` (D163); a float
+// isn't `Hash`.
+#main
+fun main() {
+    var m: [(int, float): str] = [:]
+    m[(1, 0.5)] = "half"
+}

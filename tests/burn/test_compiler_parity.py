@@ -15,6 +15,162 @@ PROGRAMS = {
     # a method called on a field whose type is a type parameter is found in
     # the interpreter too (MYLA-365)
     "method_on_a_type_parameter_field": 'trait Step { fun step(self) -> int }\nstruct One { n: int }\nimpl Step for One { fun step(self) -> int { return self.n + 1 } }\nstruct Wrap<R> { inner: R }\nimpl<R: Step> Wrap<R> {\n    fun go(self) -> int { return self.inner.step() }\n}\n#main\nfun main() {\n    let w = Wrap { inner: One { n: 4 } }\n    print(w.go())\n}\n',
+    # map keys of any Eq + Hash type (D163, MYLA-313): a grid's breadth-first
+    # search on `(int, int)` keys, a struct key with a string, an enum key, a
+    # list key, removed keys added again going last (D105), a type with its own
+    # Eq and Hash, a generic `K: Eq + Hash`, std.map's methods and a copy
+    "compound_map_keys": (
+        "import std.map as maps\n"
+        "\n"
+        "#derive(Eq, Hash)\n"
+        "struct Who {\n"
+        "    name: str,\n"
+        "    age: int,\n"
+        "}\n"
+        "\n"
+        "#derive(Eq, Hash)\n"
+        "enum Dir {\n"
+        "    North,\n"
+        "    East,\n"
+        "    Step(int, int),\n"
+        "}\n"
+        "\n"
+        "// equal when the names agree but for case, and hashed to agree with that\n"
+        "struct Tag {\n"
+        "    text: str,\n"
+        "}\n"
+        "\n"
+        "fun lower(s: str) -> str {\n"
+        "    var sb = StringBuilder()\n"
+        "    var i = 0\n"
+        "    while i < s.len() {\n"
+        "        var b = s[i]\n"
+        "        if b >= 'A' && b <= 'Z' { b = b + 32 }\n"
+        "        sb.append_byte(b)\n"
+        "        i += 1\n"
+        "    }\n"
+        "    return sb.build()\n"
+        "}\n"
+        "\n"
+        "impl Eq for Tag {\n"
+        "    fun eq(self, other: Tag) -> bool {\n"
+        "        return lower(self.text) == lower(other.text)\n"
+        "    }\n"
+        "}\n"
+        "\n"
+        "impl Hash for Tag {\n"
+        "    fun hash(self, h: Hasher) -> Hasher {\n"
+        "        return h.add(lower(self.text))\n"
+        "    }\n"
+        "}\n"
+        "\n"
+        "// the steps from (0, 0) to every open cell of the grid, breadth first\n"
+        "fun bfs(grid: [str]) -> [(int, int): int] {\n"
+        "    var dist: [(int, int): int] = [:]\n"
+        "    dist[(0, 0)] = 0\n"
+        "    var queue = [(0, 0)]\n"
+        "    var head = 0\n"
+        "    while head < queue.len() {\n"
+        "        let (x, y) = queue[head]\n"
+        "        head += 1\n"
+        "        for d in [(1, 0), (-1, 0), (0, 1), (0, -1)] {\n"
+        "            let next = (x + d.0, y + d.1)\n"
+        "            if next.1 < 0 || next.1 >= grid.len() || next.0 < 0 || next.0 >= grid[next.1].len() { continue }\n"
+        "            if grid[next.1][next.0] == '#' || dist.contains(next) { continue }\n"
+        "            dist[next] = dist[(x, y)] + 1\n"
+        "            queue.push(next)\n"
+        "        }\n"
+        "    }\n"
+        "    return dist\n"
+        "}\n"
+        "\n"
+        "fun tally<K: Eq + Hash>(xs: [K]) -> [K: int] {\n"
+        "    var out: [K: int] = [:]\n"
+        "    for x in xs {\n"
+        "        if out.contains(x) { out[x] += 1 } else { out[x] = 1 }\n"
+        "    }\n"
+        "    return out\n"
+        "}\n"
+        "\n"
+        "fun main() {\n"
+        "    let grid = [\"..#....\", \".##.##.\", \"....#..\", \"#.#...#\"]\n"
+        "    let dist = bfs(grid)\n"
+        "    print(f\"{dist.len()} cells, (6, 2) at {dist[(6, 2)]}, (3, 0) at {dist[(3, 0)]}\")\n"
+        "    print(dist.contains((2, 0)))\n"
+        "\n"
+        "    // a struct key with a string in it\n"
+        "    var ages: [Who: str] = [:]\n"
+        "    ages[Who { name: \"ann\", age: 31 }] = \"first\"\n"
+        "    ages[Who { name: \"bob\", age: 27 }] = \"second\"\n"
+        "    ages[Who { name: \"a\" + \"nn\", age: 31 }] = \"again\"\n"
+        "    print(f\"{ages.len()} {ages[Who { name: \"ann\", age: 31 }]}\")\n"
+        "    print(ages.contains(Who { name: \"ann\", age: 32 }))\n"
+        "\n"
+        "    // removed and added again: last (D105)\n"
+        "    var order: [(str, int): bool] = [:]\n"
+        "    for i in 0..6 {\n"
+        "        order[(f\"k{i}\", i)] = true\n"
+        "    }\n"
+        "    order.remove((\"k1\", 1))\n"
+        "    order.remove((\"k4\", 4))\n"
+        "    order[(\"k1\", 1)] = false\n"
+        "    order[(\"k2\", 2)] = false\n"
+        "    var shown: [str] = []\n"
+        "    for k in order { shown.push(f\"{k.0}={order[k]}\") }\n"
+        "    print(shown.join(\" \"))\n"
+        "    var i = 0\n"
+        "    while i < 100 {\n"
+        "        order[(\"x\", i)] = true\n"
+        "        if i % 3 == 0 { order.remove((\"x\", i)) }\n"
+        "        i += 1\n"
+        "    }\n"
+        "    print(f\"{order.len()} {order.keys()[4].0} {order.keys()[5].1}\")\n"
+        "\n"
+        "    // an enum key\n"
+        "    var moves: [Dir: int] = [Dir.North: 1, Dir.Step(1, 2): 2]\n"
+        "    moves[Dir.East] = 3\n"
+        "    moves[Dir.Step(1, 2)] += 10\n"
+        "    print(f\"{moves[Dir.Step(1, 2)]} {moves[Dir.North]} {moves.contains(Dir.Step(2, 1))}\")\n"
+        "\n"
+        "    // a list key, and a nested tuple\n"
+        "    var paths: [[int]: str] = [:]\n"
+        "    paths[[1, 2, 3]] = \"a\"\n"
+        "    paths[[1, 2]] = \"b\"\n"
+        "    paths[[1, 2, 3]] = \"c\"\n"
+        "    print(f\"{paths.len()} {paths[[1, 2, 3]]} {paths[[1, 2]]}\")\n"
+        "    var deep: [((int, char), [str]): int] = [:]\n"
+        "    deep[((1, 'x'), [\"p\", \"q\"])] = 5\n"
+        "    print(deep[((1, 'x'), [\"p\", \"q\"])])\n"
+        "\n"
+        "    // a type with its own Eq and Hash\n"
+        "    var tags: [Tag: int] = [:]\n"
+        "    tags[Tag { text: \"Red\" }] = 1\n"
+        "    tags[Tag { text: \"RED\" }] = 2\n"
+        "    tags[Tag { text: \"blue\" }] = 3\n"
+        "    print(f\"{tags.len()} {tags[Tag { text: \"red\" }]}\")\n"
+        "\n"
+        "    // generic code, std.map's methods and the prelude's get\n"
+        "    let t = tally([(1, 'a'), (2, 'b'), (1, 'a')])\n"
+        "    print(f\"{t[(1, 'a')]} {t[(2, 'b')]}\")\n"
+        "    print(maps.counts([\"x\", \"y\", \"x\"])[\"x\"])\n"
+        "    print(ages.get_or(Who { name: \"cy\", age: 1 }, \"none\"))\n"
+        "    match get(moves, Dir.East) {\n"
+        "        Some(v) => print(v),\n"
+        "        None => print(\"missing\"),\n"
+        "    }\n"
+        "    var grid_counts: [(int, int): int] = [:]\n"
+        "    grid_counts.update((0, 0), 0, (n) => n + 5)\n"
+        "    grid_counts.update((0, 0), 0, (n) => n + 5)\n"
+        "    print(grid_counts[(0, 0)])\n"
+        "    for kv in tags.items() { print(f\"{kv.0.text} {kv.1}\") }\n"
+        "\n"
+        "    // a copy is a value: changing it leaves the original\n"
+        "    var copy = ages\n"
+        "    copy[Who { name: \"dee\", age: 9 }] = \"new\"\n"
+        "    copy.remove(Who { name: \"bob\", age: 27 })\n"
+        "    print(f\"{ages.len()} {copy.len()} {ages.contains(Who { name: \"bob\", age: 27 })}\")\n"
+        "}\n"
+    ),
     # the `Hash` trait (D163, MYLA-313): the built-in types' impls (integers by
     # value, a list with its length), a tuple's, `#derive(Hash)` of structs and
     # enums (the fields in order, a variant's index first), a hand-written impl,
@@ -3842,6 +3998,43 @@ STRESS_FOR_EARLY_RETURN_SRC = (
     "    print(total)\n}\n"
 )
 
+# Maps with compound keys (D163, MYLA-313): a struct key holding a string
+# and a tuple key holding a string and a list, their words in the slots,
+# inserted, overwritten, removed, listed, shared by a copy and dropped,
+# far more often than the arena holds, so the keys' references must be
+# taken and given back.
+STRESS_MAP_COMPOUND_KEY_SRC = (
+    "#derive(Eq, Hash)\n"
+    "struct Who {\n"
+    "    name: str,\n"
+    "    n: int,\n"
+    "}\n"
+    "\n"
+    "#main\n"
+    "fun main() {\n"
+    "    var total = 0\n"
+    "    for r in 0..20000 {\n"
+    "        var m: [Who: [str]] = [:]\n"
+    "        var i = 0\n"
+    "        while i < 12 {\n"
+    "            let w = Who { name: f\"w{i % 5}\", n: r }\n"
+    "            m[w] = [f\"v{i}\", \"x\"]\n"
+    "            i += 1\n"
+    "        }\n"
+    "        let copy = m\n"
+    "        m.remove(Who { name: \"w1\", n: r })\n"
+    "        m[Who { name: f\"w{r % 3}\", n: r }] = [\"again\"]\n"
+    "        for k in m.keys() { total += k.name.len() }\n"
+    "        var pairs: [(str, [int]): int] = [:]\n"
+    "        pairs[(f\"p{r}\", [r, r])] = 1\n"
+    "        pairs[(f\"p{r}\", [r, r])] = 2\n"
+    "        total += pairs[(f\"p{r}\", [r, r])] + copy.len() - m.len()\n"
+    "    }\n"
+    "    print(total)\n"
+    "}\n"
+)
+
+
 STRESS_MAP_OVERWRITE_SRC = (
     # Overwrites map entries holding strings, lists and maps a million times.
     # The self-hosted backend stored the new value without releasing the old
@@ -4017,6 +4210,12 @@ class TestCompilerParity(unittest.TestCase):
             "    print(rename(Named { name: \"\", steps: [1] }, 50000).name.len())\n"
             "}\n")
         self.assertEqual(build_and_run(source, timeout=60), ("50000\n", 0))
+
+    def test_compound_map_keys_are_released(self):
+        # MYLA-313: the keys' words in the slots, retained and released
+        out, code = build_and_run(STRESS_MAP_COMPOUND_KEY_SRC, timeout=60)
+        self.assertEqual((out, code), ("226667\n", 0))
+        self.assertEqual(_self_hosted(STRESS_MAP_COMPOUND_KEY_SRC), out)
 
     def test_overwritten_map_values_are_released(self):
         out, code = build_and_run(STRESS_MAP_OVERWRITE_SRC, timeout=60)
@@ -4201,6 +4400,8 @@ PINNED = {
     # MYLA-365, MYLA-366: new; native code gives the same
     "try_in_a_call_argument": "err bad\n",
     "method_on_a_type_parameter_field": "5\n",
+    # MYLA-313: new; the interpreter gives the same
+    "compound_map_keys": "19 cells, (6, 2) at 10, (3, 0) at 7\nfalse\n2 again\nfalse\nk0=true k2=false k3=true k5=true k1=false\n71 k1 1\n12 1 false\n2 c b\n5\n2 2\n2 1\n2\nnone\n3\n10\nRed 2\nblue 3\n2 2 true\n",
     # MYLA-313: new; the interpreter gives the same
     "hash_trait_and_derive": "0xb5b61ff8e7f24a67 0xb5b61ff8e7f24a67 0xd6456ad28572a8f 0x70bc9b8185eefae3\n0x390831630ea9884a 0x59b81abf6522ad07 0x2a4f1d7cb516c72\n0xff3dc34ebf38684d 0x70bc9b8185eefae3 0xfc4894f325fbbe64\n0xb588589b83562bca 0xb33117f322973c8e\ntrue\ntrue\ntrue\n0x4e0a109fae7c734b\n0xed98eb641d3fbd53\ntrue\ntrue\n0x670e93ec0fc81a67 0x969687c72d6781a0\ntrue\n0xd93bdbded0c7bfaa\n0x547db8c134aeb86a\n0x3da68fd7b9e49217\ntrue\ntrue\n0x9da70211eac47ab5\n",
     # MYLA-313: new; the interpreter gives the same

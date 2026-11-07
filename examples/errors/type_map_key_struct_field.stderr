@@ -1,0 +1,5 @@
+type error: map key type must be Eq and Hash, found 'Bare': 'Bare' isn't Eq (it needs 'impl Eq for Bare' or '#derive(Eq)')
+  --> examples/errors/type_map_key_struct_field.my:9:9
+  |
+9 |     by: [Bare: int],
+  |         ^^^^^^^^^^^

@@ -22,7 +22,7 @@ from .inline import inlinable, inline_calls, same_module, may_inline, merge_bloc
 from .hoist import hoist_cows
 from .ranges import widen_counters
 from .anf import Norm, new_norm
-from .lower import async_fnval_ir, lower_function, lower_lambda, blocked_types, Lowered, myla_runtime_function, derived_eq_ir, compound_eq_ir, tuple_hash_ir, walk_ir, drop_entry_ir, dropb_slow_ir, list_drop_slow_ir, map_drop_slow_ir, clone_ir, deep_walk_ir, deep_cell_ir, Routine, Want, env_drop_ir, env_deep_ir, partial_ir, frame_new_ir
+from .lower import async_fnval_ir, lower_function, lower_lambda, blocked_types, Lowered, myla_runtime_function, derived_eq_ir, compound_eq_ir, tuple_hash_ir, key_hash_ir, key_eq_ir, map_find_ir, map_put_ir, map_keys_ir, walk_ir, drop_entry_ir, dropb_slow_ir, list_drop_slow_ir, map_drop_slow_ir, clone_ir, deep_walk_ir, deep_cell_ir, Routine, Want, env_drop_ir, env_deep_ir, partial_ir, frame_new_ir
 import .ir_x86 as ir_x86
 import .ownership as ownership
 import .runtime_x86 as runtime_x86
@@ -784,6 +784,10 @@ impl CodeGen {
                 let state = self.dbg_base(Type.TInt(64, false), 8)
                 let key = self.dbg_element(k)
                 let value = self.dbg_element(v)
+                if self.map_hashed(t) {
+                    // a compound key's slot keeps its hash (MYLA-313)
+                    return self.dbg_struct_lines("slot", size, ["state", "hash", "key", "value", "order"], [state, state, key, value, state], [0, 8, 16, self.map_val_off(t), size - 8])
+                }
                 return self.dbg_struct_lines("slot", size, ["state", "key", "value", "order"], [state, key, value, state], [0, 8, 16, size - 8])
             },
             _ => {},
@@ -1315,6 +1319,21 @@ impl CodeGen {
             match d.kind {
                 DeclKind.StructDecl(name, fields, attrs, tps, isp, act) => { if name == key { return tps.len() == 0 && attrs_have_derive_eq(attrs) } },
                 DeclKind.EnumDecl(name, variants, attrs, tps, isp) => { if name == key { return tps.len() == 0 && attrs_have_derive_eq(attrs) } },
+                _ => {},
+            }
+        }
+        return false
+    }
+
+    // Whether the struct or enum `key` derives `Hash` (D163): a map key of it
+    // is hashed by its members, not through its `hash` (MYLA-313).
+    #test(codegen_on("#derive(Eq, Hash)\nstruct P { x: int }"), "P")[true]
+    #test(codegen_on("struct P { x: int }"), "P")[false]
+    fun derives_hash(self, key: str) -> bool {
+        for d in self.decls {
+            match d.kind {
+                DeclKind.StructDecl(name, fields, attrs, tps, isp, act) => { if name == key { return attrs_derive(attrs, "Hash") } },
+                DeclKind.EnumDecl(name, variants, attrs, tps, isp) => { if name == key { return attrs_derive(attrs, "Hash") } },
                 _ => {},
             }
         }
@@ -2913,7 +2932,47 @@ impl CodeGen {
     #test(codegen_on("[int]"), Type.TMap(Type.TStr, Type.TInt(32, true)))[32]
     // `[state:8][key:8][value][rank:8]`: the rank is the key's place in the
     // order of insertion, 0 … count - 1 (D105, MYLA-179)
-    fun map_slot_size(self, mt: Type) -> int32 { return 24 + self.stored_size(map_val(mt)) }
+    fun map_slot_size(self, mt: Type) -> int32 {
+        if self.map_hashed(mt) { return 24 + self.map_key_size(mt) + self.stored_size(map_val(mt)) }
+        return 24 + self.stored_size(map_val(mt))
+    }
+
+    // Whether the keys of the map type `mt` have routines of their own (D163,
+    // MYLA-313): any key but an integer, `char`, `bool` or `str`, which keep
+    // std.rt's `map_lookup` and `map_put_slot`. Such a slot is
+    // `[state:8][hash:8][key][value][rank:8]`, its key's words in it as a
+    // value's are, its hash kept so that a compaction needs no routine.
+    #test(codegen_on("[int]"), Type.TMap(Type.TStr, Type.TInt(32, true)))[false]
+    #test(codegen_on("[int]"), Type.TMap(Type.TTuple([Type.TInt(32, true), Type.TInt(32, true)]), Type.TInt(32, true)))[true]
+    fun map_hashed(self, mt: Type) -> bool {
+        return match map_key(mt) {
+            Type.TInt(w, sg) => false,
+            Type.TChar => false,
+            Type.TBool => false,
+            Type.TStr => false,
+            _ => true,
+        }
+    }
+
+    // The bytes of a key of the map type `mt` in its slot.
+    #test(codegen_on("[int]"), Type.TMap(Type.TTuple([Type.TInt(32, true), Type.TStr]), Type.TBool))[16]
+    fun map_key_size(self, mt: Type) -> int32 {
+        if !self.map_hashed(mt) { return 8 }
+        return self.stored_size(map_key(mt))
+    }
+
+    // Where a slot of the map type `mt` holds its key and its value.
+    #test(codegen_on("[int]"), Type.TMap(Type.TStr, Type.TBool))[8]
+    fun map_key_off(self, mt: Type) -> int32 {
+        if self.map_hashed(mt) { return 16 }
+        return 8
+    }
+
+    #test(codegen_on("[int]"), Type.TMap(Type.TTuple([Type.TInt(32, true), Type.TStr]), Type.TBool))[32]
+    fun map_val_off(self, mt: Type) -> int32 {
+        if self.map_hashed(mt) { return 16 + self.map_key_size(mt) }
+        return 16
+    }
     #test(codegen_on("[int]"), Type.TMap(Type.TStr, Type.TInt(32, true)))[1]
     fun map_is_str(self, mt: Type) -> int32 {
         if is_str_t(map_key(mt)) { return 1 }
@@ -3259,6 +3318,11 @@ impl CodeGen {
         var r = Routine { f: empty_ir(name), wants: [] }
         if w.kind == 7 { r = compound_eq_ir(self, w.t, name) }
         if w.kind == 8 { r = tuple_hash_ir(self, w.t, name) }
+        if w.kind == 9 { r = key_hash_ir(self, w.t, name) }
+        if w.kind == 10 { r = key_eq_ir(self, w.t, name) }
+        if w.kind == 11 { r = map_find_ir(self, w.t, name) }
+        if w.kind == 12 { r = map_put_ir(self, w.t, name) }
+        if w.kind == 13 { r = map_keys_ir(self, w.t, name) }
         self.emit_routine(r.f, -1, 0, 0)
         self.request_wants(r.wants)
     }
@@ -3960,10 +4024,15 @@ pub fun is_builtin_call_name(nm: str) -> bool {
 
 #test([])[false]
 fun attrs_have_derive_eq(attrs: [Attribute]) -> bool {
+    return attrs_derive(attrs, "Eq")
+}
+
+// Whether `attrs` derive the trait `trnm`.
+fun attrs_derive(attrs: [Attribute], trnm: str) -> bool {
     for a in attrs {
         if a.name == "derive" {
             for arg in a.args {
-                match arg.kind { ExprKind.Name(n) => { if n == "Eq" { return true } }, _ => {} }
+                match arg.kind { ExprKind.Name(n) => { if n == trnm { return true } }, _ => {} }
             }
         }
     }
@@ -4091,11 +4160,19 @@ fun lp(tok: str) -> str {
 
 // The name of the routine a `Want` of kind 7 or more asks for (MYLA-313):
 // 7 `__eq_<T>`, the equality of a tuple or list type; 8 `__thash_<T>`, a
-// tuple's `hash`.
+// tuple's `hash`; for a map key type `T` with routines of its own
+// (`map_hashed`), 9 `__khash_<T>` its hash, 10 `__keq_<T>` its equality,
+// 11 `__mfind_<T>` its slot, 12 `__mput_<T>` its slot made, 13 `__mkeys_<T>`
+// the keys of a map.
 #test(Want { kind: 7, t: Type.TTuple([Type.TInt(32, true), Type.TStr]), clone: false })["__eq_.T4.i324.str"]
 #test(Want { kind: 8, t: Type.TTuple([Type.TChar]), clone: false })["__thash_.T5.char"]
 pub fun type_job_name(w: Want) -> str {
     if w.kind == 8 { return "__thash_" + mono_token(w.t) }
+    if w.kind == 9 { return "__khash_" + mono_token(w.t) }
+    if w.kind == 10 { return "__keq_" + mono_token(w.t) }
+    if w.kind == 11 { return "__mfind_" + mono_token(w.t) }
+    if w.kind == 12 { return "__mput_" + mono_token(w.t) }
+    if w.kind == 13 { return "__mkeys_" + mono_token(w.t) }
     return "__eq_" + mono_token(w.t)
 }
 
