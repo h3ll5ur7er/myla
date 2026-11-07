@@ -1,6 +1,6 @@
 # std.hash
 
-The `Hasher`, fast hashes and checksums ([[MYLA-327]]). The `Hasher` is what the `Hash` trait builds on (D163, [[MYLA-313]]): a map with keys of a compound type will hash them through it. The module imports nothing.
+The `Hasher`'s methods, fast hashes and checksums ([[MYLA-327]]). The `Hasher` is what the `Hash` trait passes through (D163, [[MYLA-313]]): the struct and the trait are the prelude's, so every module can name them, and this module, which every program outside `std` has without an import (as std.str is, D164), gives the hasher its methods and the built-in types their `Hash` impls. The module imports nothing.
 
 ```myla
 import std.hash as hash
@@ -46,6 +46,45 @@ Every function takes a `str`, and its `_bytes` form a `[uint8]`; the two give th
 | `crc32_update(crc: uint32, s) -> uint32`, `crc32_update_bytes(crc, b)` | The CRC of more bytes: start from 0, and `crc32_update(crc32(a), b)` is `crc32(a + b)` |
 | `adler32(s) -> uint32`, `adler32_bytes(b)` | Adler-32 as zlib computes it (RFC 1950) |
 | `adler32_update(adler: uint32, s) -> uint32`, `adler32_update_bytes(adler, b)` | Start from 1, not 0; `adler32_update(adler32(a), b)` is `adler32(a + b)` |
+
+## The Hash trait
+
+```myla
+import std.hash as hash
+
+#derive(Eq, Hash)
+struct Point {
+    x: int,
+    y: int,
+}
+
+fun digest<T: Hash>(x: T) -> uint64 {
+    return hash.new().add(x).finish()
+}
+
+fun main() {
+    print(digest(Point { x: 1, y: 2 }) == hash.new().add_i32(1).add_i32(2).finish())
+    print(digest((1, 2)) == digest(Point { x: 1, y: 2 }))
+    print(digest([1, 2]) == digest([1, 2]) && digest([1, 2]) != digest([2, 1]))
+}
+// output:
+// true
+// true
+// true
+```
+
+`trait Hash { fun hash(self, h: Hasher) -> Hasher }` and `struct Hasher { state: uint64 }` are in the prelude (with an `impl Eq` for the hasher); this module gives `Hasher` its methods, among them `add<T: Hash>(x) -> Hasher`, which is `x.hash(h)` and is what a `Hash` impl calls for each field: `h.add(self.x).add(self.y)`. So `Hasher` is a name of every module, and `hash.Hasher` isn't one ([[Language/Methods-and-traits#hash]] has the trait, `#derive(Hash)` and the rules).
+
+| Type | Its `hash(h)` |
+| --- | --- |
+| the integers | `h.add_i8(x)` … `h.add_u64(x)`: the value widened to 64 bits |
+| `char`, `bool` | `h.add_char(x)`, `h.add_bool(x)` |
+| `str` | `h.add_str(x)` |
+| `[T]`, `T: Hash` | its length as a `uint64`, then each element's `hash`, so `([1], [2, 3])` and `([1, 2], [3])` differ |
+| a tuple of `Hash` elements | each element's `hash` in turn (the language's own, as no impl can name a tuple) |
+| `#derive(Hash)` | its fields in order; an enum's variant index as a `uint64`, then its payload |
+
+Floats aren't `Hash`. A map doesn't hash its keys through the `Hasher`: an integer, `char`, `bool` or `str` key has std.rt's own hash, and natively a compound key is hashed by its parts, a type's written `hash` called (the interpreter does the same); the order of a map is its insertion order (D105), so no hash shows.
 
 ## The Hasher
 

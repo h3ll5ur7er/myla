@@ -829,3 +829,52 @@ fun hasher_laws() {
     assert(h == new().add_u64(1).add_u64(2), "assignment and chaining agree")
     assert(new().add_char('a') == new().add_u32(97), "a char is its code point")
 }
+
+// The `Hash` impls of the built-in types and `add` (D163, MYLA-313).
+#test
+fun hash_impls() {
+    assert(new().add(7) == new().add_i32(7), "add is the value's own hash")
+    assert(new().add(7) == 7.hash(new()), "h.add(x) is x.hash(h)")
+    assert(new().add(255u8) == new().add_u64(255), "an integer by its value")
+    assert(new().add('a') == new().add_char('a') && new().add(true) == new().add_bool(true), "char and bool")
+    assert(new().add("ab") == new().add_str("ab"), "str")
+    assert(new().add([1, 2]) == new().add_u64(2).add(1).add(2), "a list: its length, then its elements")
+    assert(new().add(([1], [2, 3])) != new().add(([1, 2], [3])), "so lists split differently differ")
+    assert(new().add((1, "x")) == new().add(1).add("x"), "a tuple: its elements in turn")
+    assert(new().add(()) == new(), "the unit type adds nothing")
+}
+
+#derive(Eq, Hash)
+struct Cell {
+    row: int,
+    name: str,
+}
+
+#derive(Eq, Hash)
+enum Move {
+    Stay,
+    Go(int, int),
+}
+
+// A derived `Hash` adds the fields in order, an enum's variant index first;
+// such a type, a tuple and a list are map keys.
+#test
+fun derived_hash_and_keys() {
+    let c = Cell { row: 3, name: "c" }
+    assert(new().add(c) == new().add(3).add("c"), "the fields in order")
+    assert(new().add(Move.Stay) == new().add_u64(0), "a variant without a payload")
+    assert(new().add(Move.Go(1, 2)) == new().add_u64(1).add(1).add(2), "the index, then the payload")
+    var seen: [Cell: int] = [:]
+    seen[c] = 1
+    seen[Cell { row: 3, name: "c" }] = 2
+    seen[Cell { row: 4, name: "c" }] = 3
+    assert(seen.len() == 2 && seen[c] == 2, "equal keys are one key")
+    var grid: [(int, int): Move] = [:]
+    grid[(0, 1)] = Move.Go(0, 1)
+    grid.remove((0, 1))
+    grid[(2, 2)] = Move.Stay
+    grid[(0, 1)] = Move.Stay
+    assert(grid.keys()[1] == (0, 1), "a key removed and added again goes last")
+    var paths: [[str]: bool] = [["a", "b"]: true]
+    assert(paths.contains(["a", "b"]) && !paths.contains(["a"]), "a list key")
+}

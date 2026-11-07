@@ -77,7 +77,7 @@ User-defined named types: `struct Point { x: int, y: int }` and `enum Shape { Ci
 ## Lists and maps
 
 - `[T]`: a list of `T`.
-- `[K: V]`: a hash map. The key type must be an integer type, `char`, `bool` or `str` (D37).
+- `[K: V]`: a hash map. The key type is any type that is `Eq` and `Hash`: an integer type, `char`, `bool`, `str`, a tuple or list of such, or a struct or enum deriving or implementing both (D163; D37 had the primitives only).
 
 Both are reference-counted, copy-on-write values: a copy is cheap, and writing through one copy never changes another. See [[Language/Collections-and-strings]].
 
@@ -109,6 +109,7 @@ Inside a generic declaration, a type parameter `T` stands for any type; only ope
 | `char` | yes | yes | yes (as the glyph) | yes |
 | `bool` | yes | no | `true`/`false` | yes |
 | `str` | yes (bytes) | no | yes | yes |
-| struct, enum | with `Eq` (`impl Eq` or `#derive(Eq)`) | with `Ord` | no | no |
-| `()` | yes (always equal) | no | no | no |
-| tuple, list, map, function, `StringBuilder` | no | no | no | no |
+| struct, enum | with `Eq` (`impl Eq` or `#derive(Eq)`) | with `Ord` | no | with `Eq` and `Hash` (D163) |
+| `()` | yes (always equal) | no | no | yes |
+| tuple, list | when the elements are `Eq` (D163) | no | no | when the elements are `Eq` and `Hash` |
+| map, function, `StringBuilder` | no | no | no | no |

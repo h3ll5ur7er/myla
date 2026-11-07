@@ -16,7 +16,7 @@ Until the Python toolchain was retired (D101, [[MYLA-219]]), the Python interpre
 | `bool`, `str` | `VBool`, `VStr` (a host `str`: bytes) |
 | no value | `VUnit` |
 | struct, tuple, enum | `VStruct(name, field names, values)`, `VTuple(elements)`, `VEnum(enum, variant, payload)` |
-| list, map, builder | `VList(elements)`, `VMap(MapV)`: the keys and values as parallel lists in insertion order, a removed entry leaving a hole, and an index from each key to its place (a native map of the integer, `char` and `bool` keys' numbers, one of the strings), so lookups, inserts and removals take constant time; the holes are compacted away when they outnumber the entries ([[MYLA-310]]), `VSB(bytes)` |
+| list, map, builder | `VList(elements)`, `VMap(MapV)`: the keys and values as parallel lists in insertion order, a removed entry leaving a hole, and an index from each key to its place (a native map of the integer, `char` and `bool` keys' numbers, one of the strings; any other key, D163, by its hash, `Interp.key_hash`: its structure, or the `hash` written for its type, each hash's places chained and the key found among them with `==`, which calls a written `eq`, [[MYLA-313]]), so lookups, inserts and removals take constant time; the holes are compacted away when they outnumber the entries ([[MYLA-310]]), `VSB(bytes)` |
 | function value | `VClosure(params, body, capture names, captured values, function name, is a function)`; `VCompose(functions)` for `f >> g`, `VPartial(callable, argument slots, holes)` for `f(a, _)` |
 | actor handle | `VActor(i)`: its state in `Interp.actors`, so a copy reaches the same actor (D89) |
 | an `async let`'s name | `VTask(i)`: the child in `Interp.tasks` |
