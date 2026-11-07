@@ -1,0 +1,325 @@
+// std.option: methods on `Option<T>` and `Result<T, E>` (MYLA-324, D164).
+//
+// Rust's combinators, with Rust's names: `o.map(f)`, `o.unwrap_or(d)`,
+// `r.map_err(f)`, `r.ok()`. Every method takes `self` and gives a new value;
+// none changes its receiver. A function argument is called at most once, and
+// only when the value is the one it is for (`unwrap_or_else`'s fallback only
+// for a `None`). A lambda passed to `map`, `and_then` or `map_err` needs its
+// parameter's type written (`o.map((x: int) => x + 1)`): the checker infers
+// none while the method's own type parameter is open.
+
+impl<T> Option<T> {
+    // `Some(f(v))` for a `Some(v)`, `None` for a `None`.
+    fun map<U>(self, f: (T) -> U) -> Option<U> {
+        return match self {
+            Some(v) => Some(f(v))
+            None => None
+        }
+    }
+
+    // `f(v)` for a `Some(v)`, `None` for a `None`: a chain of steps that may
+    // each find nothing.
+    fun and_then<U>(self, f: (T) -> Option<U>) -> Option<U> {
+        return match self {
+            Some(v) => f(v)
+            None => None
+        }
+    }
+
+    // The value itself if it is a `Some`, else `f()`.
+    fun or_else(self, f: () -> Option<T>) -> Option<T> {
+        return match self {
+            Some(v) => Some(v)
+            None => f()
+        }
+    }
+
+    // The `Some`'s value, or `default` for a `None`.
+    fun unwrap_or(self, default: T) -> T {
+        return match self {
+            Some(v) => v
+            None => default
+        }
+    }
+
+    // The `Some`'s value, or `f()` for a `None`: for a fallback that costs.
+    fun unwrap_or_else(self, f: () -> T) -> T {
+        return match self {
+            Some(v) => v
+            None => f()
+        }
+    }
+
+    // `Ok(v)` for a `Some(v)`, `Err(err)` for a `None`.
+    fun ok_or<E>(self, err: E) -> Result<T, E> {
+        return match self {
+            Some(v) => Ok(v)
+            None => Err(err)
+        }
+    }
+
+    fun is_some(self) -> bool {
+        return match self {
+            Some(_) => true
+            None => false
+        }
+    }
+
+    fun is_none(self) -> bool {
+        return match self {
+            Some(_) => false
+            None => true
+        }
+    }
+
+    // The `Some`'s value; a `None` fails with `msg` (`panic`).
+    fun expect(self, msg: str) -> T {
+        return match self {
+            Some(v) => v
+            None => panic(msg)
+        }
+    }
+}
+
+impl<T, E> Result<T, E> {
+    // `Ok(f(v))` for an `Ok(v)`; an `Err` stays as it is.
+    fun map<U>(self, f: (T) -> U) -> Result<U, E> {
+        return match self {
+            Ok(v) => Ok(f(v))
+            Err(e) => Err(e)
+        }
+    }
+
+    // `Err(f(e))` for an `Err(e)`; an `Ok` stays as it is: an error made one
+    // of the caller's own before a `?`.
+    fun map_err<F>(self, f: (E) -> F) -> Result<T, F> {
+        return match self {
+            Ok(v) => Ok(v)
+            Err(e) => Err(f(e))
+        }
+    }
+
+    // `f(v)` for an `Ok(v)`; an `Err` stays as it is.
+    fun and_then<U>(self, f: (T) -> Result<U, E>) -> Result<U, E> {
+        return match self {
+            Ok(v) => f(v)
+            Err(e) => Err(e)
+        }
+    }
+
+    // The `Ok`'s value, or `default` for an `Err`.
+    fun unwrap_or(self, default: T) -> T {
+        return match self {
+            Ok(v) => v
+            Err(_) => default
+        }
+    }
+
+    // `Some(v)` for an `Ok(v)`, `None` for an `Err`.
+    fun ok(self) -> Option<T> {
+        return match self {
+            Ok(v) => Some(v)
+            Err(_) => None
+        }
+    }
+
+    // `Some(e)` for an `Err(e)`, `None` for an `Ok`.
+    fun err(self) -> Option<E> {
+        return match self {
+            Ok(_) => None
+            Err(e) => Some(e)
+        }
+    }
+
+    fun is_ok(self) -> bool {
+        return match self {
+            Ok(_) => true
+            Err(_) => false
+        }
+    }
+
+    fun is_err(self) -> bool {
+        return match self {
+            Ok(_) => false
+            Err(_) => true
+        }
+    }
+
+    // The `Ok`'s value; an `Err` fails with `msg` (`panic`). Unlike Rust's,
+    // the message doesn't show the error, which may have no `Format`.
+    fun expect(self, msg: str) -> T {
+        return match self {
+            Ok(v) => v
+            Err(_) => panic(msg)
+        }
+    }
+}
+
+// ---- Tests -----------------------------------------------------------------
+//
+// The methods are generic, which `#test` cases can't take (D116), so test
+// functions (D162) try them on concrete types. They don't use `std.test`: a
+// module every program imports imports nothing it doesn't need.
+
+fun shown(o: Option<int>) -> str {
+    return match o {
+        Some(v) => f"Some({v})"
+        None => "None"
+    }
+}
+
+fun shown_result(r: Result<int, str>) -> str {
+    return match r {
+        Ok(v) => f"Ok({v})"
+        Err(e) => f"Err({e})"
+    }
+}
+
+fun some3() -> Option<int> {
+    return Some(3)
+}
+
+fun none_int() -> Option<int> {
+    return None
+}
+
+fun ok3() -> Result<int, str> {
+    return Ok(3)
+}
+
+fun err_bad() -> Result<int, str> {
+    return Err("bad")
+}
+
+fun half(x: int) -> Option<int> {
+    if x % 2 == 0 { return Some(x / 2) }
+    return None
+}
+
+fun half_result(x: int) -> Result<int, str> {
+    if x % 2 == 0 { return Ok(x / 2) }
+    return Err(f"{x} is odd")
+}
+
+#test
+fun option_map() {
+    assert(shown(some3().map((x: int) => x * 2)) == "Some(6)", "map on Some")
+    assert(shown(none_int().map((x: int) => x * 2)) == "None", "map on None")
+    let named: Option<str> = some3().map((x: int) => f"<{x}>")
+    assert(named.unwrap_or("") == "<3>", "map to another type")
+}
+
+#test
+fun option_and_then() {
+    assert(shown(Some(8).and_then(half)) == "Some(4)", "and_then gives Some")
+    assert(shown(some3().and_then(half)) == "None", "and_then gives None")
+    assert(shown(none_int().and_then(half)) == "None", "and_then on None")
+    assert(shown(Some(8).and_then(half).and_then(half).and_then(half)) == "Some(1)", "a chain")
+}
+
+#test
+fun option_or_else() {
+    assert(shown(some3().or_else(() => Some(7))) == "Some(3)", "or_else on Some")
+    assert(shown(none_int().or_else(() => Some(7))) == "Some(7)", "or_else on None")
+    assert(shown(none_int().or_else(none_int)) == "None", "or_else to None")
+}
+
+#test
+fun option_unwrap_or() {
+    assert(some3().unwrap_or(0) == 3, "unwrap_or on Some")
+    assert(none_int().unwrap_or(0) == 0, "unwrap_or on None")
+    assert(some3().unwrap_or_else(() => 9) == 3, "unwrap_or_else on Some")
+    assert(none_int().unwrap_or_else(() => 9) == 9, "unwrap_or_else on None")
+}
+
+fun never() -> int {
+    panic("the fallback ran for a Some")
+}
+
+#test
+fun option_unwrap_or_else_is_lazy() {
+    assert(some3().unwrap_or_else(never) == 3, "unwrap_or_else on Some")
+}
+
+#test
+fun option_ok_or() {
+    assert(shown_result(some3().ok_or("none")) == "Ok(3)", "ok_or on Some")
+    assert(shown_result(none_int().ok_or("none")) == "Err(none)", "ok_or on None")
+}
+
+#test
+fun option_is_some() {
+    assert(some3().is_some(), "Some is some")
+    assert(!some3().is_none(), "Some isn't none")
+    assert(!none_int().is_some(), "None isn't some")
+    assert(none_int().is_none(), "None is none")
+}
+
+#test()[3]
+fun option_expect_some() -> int {
+    return some3().expect("no value")
+}
+
+#test()[panic("no value")]
+fun option_expect_none() -> int {
+    return none_int().expect("no value")
+}
+
+#test
+fun result_map() {
+    assert(shown_result(ok3().map((x: int) => x + 1)) == "Ok(4)", "map on Ok")
+    assert(shown_result(err_bad().map((x: int) => x + 1)) == "Err(bad)", "map on Err")
+    let named: Result<str, str> = ok3().map((x: int) => f"<{x}>")
+    assert(named.unwrap_or("") == "<3>", "map to another type")
+}
+
+#test
+fun result_map_err() {
+    assert(shown_result(ok3().map_err((e: str) => e + "!")) == "Ok(3)", "map_err on Ok")
+    assert(shown_result(err_bad().map_err((e: str) => e + "!")) == "Err(bad!)", "map_err on Err")
+    let sized: Result<int, int> = err_bad().map_err((e: str) => e.len())
+    match sized {
+        Ok(_) => assert(false, "map_err to another type")
+        Err(n) => assert(n == 3, "map_err to another type")
+    }
+}
+
+#test
+fun result_and_then() {
+    let eight: Result<int, str> = Ok(8)
+    assert(shown_result(eight.and_then(half_result)) == "Ok(4)", "and_then gives Ok")
+    assert(shown_result(ok3().and_then(half_result)) == "Err(3 is odd)", "and_then gives Err")
+    assert(shown_result(err_bad().and_then(half_result)) == "Err(bad)", "and_then on Err")
+}
+
+#test
+fun result_unwrap_or() {
+    assert(ok3().unwrap_or(0) == 3, "unwrap_or on Ok")
+    assert(err_bad().unwrap_or(0) == 0, "unwrap_or on Err")
+}
+
+#test
+fun result_ok_err() {
+    assert(shown(ok3().ok()) == "Some(3)", "ok on Ok")
+    assert(shown(err_bad().ok()) == "None", "ok on Err")
+    assert(ok3().err().is_none(), "err on Ok")
+    assert(err_bad().err().unwrap_or("") == "bad", "err on Err")
+}
+
+#test
+fun result_is_ok() {
+    assert(ok3().is_ok(), "Ok is ok")
+    assert(!ok3().is_err(), "Ok isn't err")
+    assert(!err_bad().is_ok(), "Err isn't ok")
+    assert(err_bad().is_err(), "Err is err")
+}
+
+#test()[3]
+fun result_expect_ok() -> int {
+    return ok3().expect("failed")
+}
+
+#test()[panic("failed")]
+fun result_expect_err() -> int {
+    return err_bad().expect("failed")
+}
