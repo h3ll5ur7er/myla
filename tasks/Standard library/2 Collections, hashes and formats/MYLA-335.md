@@ -2,7 +2,7 @@
 id: MYLA-335
 title: "std.regex: regular expressions in linear time"
 type: feature
-status: backlog
+status: in-progress
 priority: medium
 labels: [stdlib, strings, regex, wave-2]
 ---
