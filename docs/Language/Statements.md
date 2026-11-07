@@ -127,7 +127,7 @@ fun main() {
 
 ## let-else
 
-`let P = e else { … }` matches `e` against a pattern `P` that can fail, such as a variant (`Some(x)`, `Ok(v)`, `Shape.Rect(w, h)`), optionally with alternatives (`|`). When it matches, `P`'s bindings are in scope for the rest of the block. When it doesn't, the `else` block runs, and that block must leave: end it with `return`, `become`, `break`, `continue` or a call that never returns (`panic`, `unreachable`, `exit`). One that can fall through is an error, and so is a pattern that always matches (D137, [[MYLA-256]]). It is sugar over `match`: `match e { P => { the rest of the block }, _ => { … } }`, so a function may also end in a `match` whose every arm returns. It keeps the expected case unindented where `if let` would nest it:
+`let P = e else { … }` matches `e` against a pattern `P` that can fail, such as a variant (`Some(x)`, `Ok(v)`, `Shape.Rect(w, h)`), optionally with alternatives (`|`). When it matches, `P`'s bindings are in scope for the rest of the block. When it doesn't, the `else` block runs, and that block must leave: end it with `return`, `become`, `break`, `continue` or a call that never returns (`panic`, `unreachable`, `exit`). One that can fall through is an error, and so is a pattern that always matches (D137, [[MYLA-256]]). The pattern is one variant pattern: a tuple of patterns, `let (Some(a), b) = t else { … }`, is a parse error (a `let (…)` binds names), so write that as a `match` or an `if let`. It is sugar over `match`: `match e { P => { the rest of the block }, _ => { … } }`, so a function may also end in a `match` whose every arm returns. It keeps the expected case unindented where `if let` would nest it:
 
 ```myla
 fun parse_port(s: str) -> Result<int, str> {

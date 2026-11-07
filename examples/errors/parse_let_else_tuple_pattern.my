@@ -1,0 +1,10 @@
+//~ parse error: a destructuring 'let' binds names, not patterns
+// A let-else takes one variant pattern; a tuple of patterns goes in a
+// `match` or an `if let` (the review of 2026-11-06, R14).
+fun main() {
+    let t = (Some(1), 2)
+    let (Some(a), b) = t else {
+        return
+    }
+    print(a + b)
+}

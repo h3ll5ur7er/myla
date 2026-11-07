@@ -1,0 +1,5 @@
+parse error: a destructuring 'let' binds names, not patterns: for a tuple of patterns write 'match' or 'if let' (a let-else takes one variant pattern, such as 'Some(x)')
+  --> examples/errors/parse_let_else_tuple_pattern.my:6:14
+  |
+6 |     let (Some(a), b) = t else {
+  |              ^
