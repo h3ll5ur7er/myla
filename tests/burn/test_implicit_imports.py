@@ -33,7 +33,9 @@ _REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pa
 # reaches only through an explicit import, and its methods call primitives,
 # as the standard library may (a warning, or for `__alloc` an error, in a
 # program's own code); `std.list` imports `std.option`, as modules of `std`
-# import what they use.
+# import what they use. `std.char`'s case is ill-typed (`is_vowel` takes no
+# argument): only `myla test` of that file checks it, as a program leaves the
+# implicit modules' cases out.
 MODULES = {
     "str": """impl str {
     // the string and an exclamation mark
@@ -61,6 +63,7 @@ pub fun helper() -> int {
 }
 """,
     "char": """impl char {
+    #test('a', 1)[true]
     fun is_vowel(self) -> bool {
         return self == 'a' || self == 'e' || self == 'i' || self == 'o' || self == 'u'
     }
@@ -142,6 +145,10 @@ class Fixture(unittest.TestCase):
                 fh.write(text)
         cls.old = os.path.join(cls.work, "old")
         shutil.copytree(STDLIB_ROOT, cls.old)
+        for name in MODULES:
+            gone = os.path.join(cls.old, "std", name + ".my")
+            if os.path.exists(gone):
+                os.remove(gone)
 
     @classmethod
     def tearDownClass(cls) -> None:
@@ -193,6 +200,14 @@ class ImplicitModules(Fixture):
         runner = ("node", "--stack-size=7000", os.path.join(_REPO, "tools", "wasm", "run.mjs"))
         proc = self.build_run(path, "--target", "wasm32-wasi", runner=runner)
         self.assertEqual((proc.stdout, proc.returncode), (OUTPUT, 0), proc.stderr)
+
+    def test_their_cases_are_left_out(self) -> None:
+        path = self.write("no_cases.my", "fun main() {\n    print('a'.is_vowel())\n}\n")
+        proc = self.myla_cmd("run", path)
+        self.assertEqual((proc.stdout, proc.stderr, proc.returncode), ("true\n", "", 0))
+        proc = self.myla_cmd("test", os.path.join(self.lib, "std", "char.my"))
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("type error", proc.stderr)
 
     def test_test_cases(self) -> None:
         path = self.write("cases.my", "#test(\"a\")[\"a!\"]\nfun loud(s: str) -> str {\n    return s.shout()\n}\n\n"

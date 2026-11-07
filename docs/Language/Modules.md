@@ -39,7 +39,7 @@ The modules of the standard library that give the built-in types their methods, 
 - A program's own method of the same name on the same type is a duplicate, `duplicate method 'trim' for type 'str'`, at the program's method, with a note naming the standard library's module and the place of its method.
 - The modules of `std` don't get them: each imports what it uses, which `myla check lib/std/<module>.my` and the module's own `#test` cases check, as they load the module without the implicit ones. A program whose entry file is a module of the standard library (as `myla check` and `myla test` of such a file have) is one of them.
 - A standard library without one of them (an older `--stdlib` directory) goes without it, silently.
-- What a program doesn't call costs nothing in its binary: code generation starts at `main` and compiles only the functions and methods it reaches. Checking them costs every program a few milliseconds ([[MYLA-320]] has the measurements).
+- What a program doesn't call costs nothing in its binary: code generation starts at `main` and compiles only the functions and methods it reaches. Their `#test` cases are left out unparsed (`myla test` of the module's own file runs them). Checking their methods costs every program about 25 ms, most of it std.int's ([[MYLA-320]] has the measurements).
 
 ## Packages (dependencies)
 
