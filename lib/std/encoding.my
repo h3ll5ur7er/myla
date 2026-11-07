@@ -1,0 +1,391 @@
+// std.encoding: bytes as hex and Base64 text and back (MYLA-329, D164).
+//
+// Hex is RFC 4648's base 16, written in lower case and read in either.
+// Base64 is RFC 4648's, with the standard alphabet (`+` and `/`) or the
+// URL-safe one (`-` and `_`). Decoding is strict: every byte must be of the
+// alphabet, the padding exactly right, and the bits left over in the last
+// character zero, so a text decodes only if it is what encoding gives.
+
+import std.bytes as bytes
+
+// What is wrong with a text to decode, and the position (a byte index) where.
+#derive(Eq)
+pub enum EncodingError {
+    // A length no encoding gives, such as an odd number of hex digits:
+    // the position is the length
+    BadLength(int),
+    // A byte that isn't of the alphabet
+    BadChar(int),
+    // Padding missing, short, superfluous or inside the text: the position
+    // is where the padding starts or should start
+    BadPadding(int),
+    // The last character's unused bits aren't zero
+    TrailingBits(int),
+}
+
+const HEX: str = "0123456789abcdef"
+const STD: str = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+const URL: str = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+
+// `b` as hex, two lower-case digits a byte.
+#test(bytes.from_str(""))[""] // RFC 4648's test vectors
+#test(bytes.from_str("f"))["66"]
+#test(bytes.from_str("fo"))["666f"]
+#test(bytes.from_str("foo"))["666f6f"]
+#test(bytes.from_str("foob"))["666f6f62"]
+#test(bytes.from_str("fooba"))["666f6f6261"]
+#test(bytes.from_str("foobar"))["666f6f626172"]
+#test([0u8, 15u8, 16u8, 255u8])["000f10ff"]
+pub fun hex_encode(b: [uint8]) -> str {
+    var sb = StringBuilder()
+    for x in b {
+        sb.append_byte(HEX[(x >> 4u8) as int])
+        sb.append_byte(HEX[(x & 15u8) as int])
+    }
+    return sb.build()
+}
+
+// The bytes the hex text `s` stands for, its digits in either case.
+#test("666F6F626172")[Ok(bytes.from_str("foobar"))]
+#test("666f6F")[Ok(bytes.from_str("foo"))]
+#test("")[Ok(bytes.from_str(""))]
+#test("000fFF")[Ok([0u8, 15u8, 255u8])]
+#test("666")[Err(EncodingError.BadLength(3))]
+#test("6g")[Err(EncodingError.BadChar(1))]
+#test("66 6")[Err(EncodingError.BadChar(2))] // a bad digit before the odd length
+#test("x")[Err(EncodingError.BadChar(0))]
+pub fun hex_decode(s: str) -> Result<[uint8], EncodingError> {
+    let n = s.len()
+    var out: [uint8] = []
+    var i = 0
+    while i + 1 < n {
+        let hi = hex_digit(s[i])
+        if hi < 0 {
+            return Err(EncodingError.BadChar(i))
+        }
+        let lo = hex_digit(s[i + 1])
+        if lo < 0 {
+            return Err(EncodingError.BadChar(i + 1))
+        }
+        out.push(((hi << 4) | lo) as uint8)
+        i += 2
+    }
+    if i < n {
+        if hex_digit(s[i]) < 0 {
+            return Err(EncodingError.BadChar(i))
+        }
+        return Err(EncodingError.BadLength(n))
+    }
+    return Ok(out)
+}
+
+// `b` in standard Base64, padded with `=` to a multiple of four.
+#test(bytes.from_str(""))[""] // RFC 4648's test vectors
+#test(bytes.from_str("f"))["Zg=="]
+#test(bytes.from_str("fo"))["Zm8="]
+#test(bytes.from_str("foo"))["Zm9v"]
+#test(bytes.from_str("foob"))["Zm9vYg=="]
+#test(bytes.from_str("fooba"))["Zm9vYmE="]
+#test(bytes.from_str("foobar"))["Zm9vYmFy"]
+#test([251u8, 255u8, 191u8])["+/+/"] // the last two characters of the alphabet
+#test([0u8, 0u8, 0u8, 255u8])["AAAA/w=="]
+pub fun base64_encode(b: [uint8]) -> str {
+    return encode64(b, STD, true)
+}
+
+// `b` in URL-safe Base64 (`-` and `_` for `+` and `/`), padded unless `pad`
+// is false.
+#test([251u8, 255u8, 191u8], true)["-_-_"]
+#test([251u8, 255u8], true)["-_8="]
+#test([251u8, 255u8], false)["-_8"]
+#test(bytes.from_str("f"), false)["Zg"]
+#test(bytes.from_str("foobar"), false)["Zm9vYmFy"]
+#test(bytes.from_str(""), false)[""]
+pub fun base64_url_encode(b: [uint8], pad: bool = true) -> str {
+    return encode64(b, URL, pad)
+}
+
+// The bytes the standard Base64 text `s` stands for; the padding is required.
+#test("")[Ok(bytes.from_str(""))] // RFC 4648's test vectors
+#test("Zg==")[Ok(bytes.from_str("f"))]
+#test("Zm8=")[Ok(bytes.from_str("fo"))]
+#test("Zm9v")[Ok(bytes.from_str("foo"))]
+#test("Zm9vYg==")[Ok(bytes.from_str("foob"))]
+#test("Zm9vYmE=")[Ok(bytes.from_str("fooba"))]
+#test("Zm9vYmFy")[Ok(bytes.from_str("foobar"))]
+#test("+/+/")[Ok([251u8, 255u8, 191u8])]
+#test("-_-_")[Err(EncodingError.BadChar(0))] // the URL-safe alphabet
+#test("Zm9v\nYmFy")[Err(EncodingError.BadChar(4))] // no line breaks
+#test("Zg")[Err(EncodingError.BadPadding(2))] // padding missing
+#test("Zg=")[Err(EncodingError.BadPadding(2))] // padding short
+#test("Zm9v=")[Err(EncodingError.BadPadding(4))] // padding superfluous
+#test("Zm8==")[Err(EncodingError.BadPadding(3))] // two where one is due
+#test("Zg==Zg==")[Err(EncodingError.BadPadding(2))] // padding inside
+#test("Zg===")[Err(EncodingError.BadPadding(2))]
+#test("Z===")[Err(EncodingError.BadPadding(1))]
+#test("Zm9vY")[Err(EncodingError.BadLength(5))] // one character can't end a text
+#test("Zm9vY=")[Err(EncodingError.BadPadding(5))]
+#test("Zh==")[Err(EncodingError.TrailingBits(1))] // 'h' leaves a bit set
+#test("Zm9=")[Err(EncodingError.TrailingBits(2))]
+pub fun base64_decode(s: str) -> Result<[uint8], EncodingError> {
+    return decode64(s, false, true)
+}
+
+// The bytes the URL-safe Base64 text `s` stands for, padded or not; a
+// padding there must be complete.
+#test("-_-_")[Ok([251u8, 255u8, 191u8])]
+#test("-_8=")[Ok([251u8, 255u8])]
+#test("-_8")[Ok([251u8, 255u8])]
+#test("Zg")[Ok(bytes.from_str("f"))]
+#test("Zg==")[Ok(bytes.from_str("f"))]
+#test("")[Ok(bytes.from_str(""))]
+#test("Zg=")[Err(EncodingError.BadPadding(2))]
+#test("+/8=")[Err(EncodingError.BadChar(0))] // the standard alphabet
+#test("Zm9vY")[Err(EncodingError.BadLength(5))] // one character can't end a text
+#test("Zh")[Err(EncodingError.TrailingBits(1))]
+pub fun base64_url_decode(s: str) -> Result<[uint8], EncodingError> {
+    return decode64(s, true, false)
+}
+
+// Every encoding of every length up to 300, every byte value among them,
+// decodes to what it encoded.
+#test
+fun round_trips() {
+    var b: [uint8] = []
+    var x: uint32 = 1
+    while b.len() <= 300 {
+        assert(decodes_to(hex_decode(hex_encode(b)), b), f"hex of {b.len()} bytes")
+        assert(decodes_to(base64_decode(base64_encode(b)), b), f"base64 of {b.len()} bytes")
+        assert(decodes_to(base64_url_decode(base64_url_encode(b, true)), b), f"padded base64url of {b.len()} bytes")
+        assert(decodes_to(base64_url_decode(base64_url_encode(b, false)), b), f"base64url of {b.len()} bytes")
+        let text = base64_url_encode(b, false)
+        assert(text.len() == (b.len() * 4 + 2) / 3, f"unpadded length for {b.len()} bytes")
+        x = x * 1664525u32 + 1013904223u32
+        b.push((x >> 24u32) as uint8)
+    }
+}
+
+// Whether `r` is `Ok(want)`.
+fun decodes_to(r: Result<[uint8], EncodingError>, want: [uint8]) -> bool {
+    return match r {
+        Ok(got) => same_bytes(got, want)
+        Err(_) => false
+    }
+}
+
+#test([1u8, 2u8], [1u8, 2u8])[true]
+#test([1u8, 2u8], [1u8])[false]
+#test([1u8, 2u8], [1u8, 3u8])[false]
+fun same_bytes(a: [uint8], b: [uint8]) -> bool {
+    if a.len() != b.len() {
+        return false
+    }
+    var i = 0
+    while i < a.len() {
+        if a[i] != b[i] {
+            return false
+        }
+        i += 1
+    }
+    return true
+}
+
+// `b` in Base64 with the alphabet `alpha`, padded if `pad`.
+#test([102u8], STD, true)["Zg=="]
+#test([102u8, 111u8], URL, false)["Zm8"]
+fun encode64(b: [uint8], alpha: str, pad: bool) -> str {
+    let n = b.len()
+    var sb = StringBuilder()
+    var i = 0
+    while i + 3 <= n {
+        let w = ((b[i] as int) << 16) | ((b[i + 1] as int) << 8) | (b[i + 2] as int)
+        sb.append_byte(alpha[w >> 18])
+        sb.append_byte(alpha[(w >> 12) & 63])
+        sb.append_byte(alpha[(w >> 6) & 63])
+        sb.append_byte(alpha[w & 63])
+        i += 3
+    }
+    if n - i == 1 {
+        let w = b[i] as int
+        sb.append_byte(alpha[w >> 2])
+        sb.append_byte(alpha[(w & 3) << 4])
+        if pad {
+            sb.append("==")
+        }
+    } else if n - i == 2 {
+        let w = ((b[i] as int) << 8) | (b[i + 1] as int)
+        sb.append_byte(alpha[w >> 10])
+        sb.append_byte(alpha[(w >> 4) & 63])
+        sb.append_byte(alpha[(w & 15) << 2])
+        if pad {
+            sb.append_byte('=')
+        }
+    }
+    return sb.build()
+}
+
+// The bytes of the Base64 text `s`, in the URL-safe alphabet if `url`; the
+// padding required if `need_pad`, else allowed.
+#test("Zg", true, false)[Ok([102u8])]
+#test("Zg", false, true)[Err(EncodingError.BadPadding(2))]
+fun decode64(s: str, url: bool, need_pad: bool) -> Result<[uint8], EncodingError> {
+    let n = s.len()
+    // the padding: at most two `=` at the end, of text that `end` ends
+    var end = n
+    while end > 0 && n - end < 2 && s[end - 1] == '=' {
+        end -= 1
+    }
+    let full = end - end % 4
+    let tbl = if url { URL_DIGITS } else { STD_DIGITS }
+    var out: [uint8] = []
+    var i = 0
+    while i < full {
+        let a = digit64(s[i], tbl)
+        let b = digit64(s[i + 1], tbl)
+        let c = digit64(s[i + 2], tbl)
+        let d = digit64(s[i + 3], tbl)
+        if (a | b | c | d) < 0 {
+            var j = i
+            while digit64(s[j], tbl) >= 0 {
+                j += 1
+            }
+            return Err(not_digit(s[j], j))
+        }
+        let w = (a << 18) | (b << 12) | (c << 6) | d
+        out.push((w >> 16) as uint8)
+        out.push((w >> 8) as uint8)
+        out.push(w as uint8)
+        i += 4
+    }
+    // the last two or three characters, if any
+    let rest = end - full
+    var j = full
+    while j < end {
+        if digit64(s[j], tbl) < 0 {
+            return Err(not_digit(s[j], j))
+        }
+        j += 1
+    }
+    let pads = n - end
+    if pads > 0 && (rest < 2 || pads != 4 - rest) {
+        return Err(EncodingError.BadPadding(end))
+    }
+    if rest == 1 {
+        return Err(EncodingError.BadLength(n))
+    }
+    if pads == 0 && rest > 0 && need_pad {
+        return Err(EncodingError.BadPadding(n))
+    }
+    if rest == 2 {
+        let a = digit64(s[full], tbl)
+        let b = digit64(s[full + 1], tbl)
+        if (b & 15) != 0 {
+            return Err(EncodingError.TrailingBits(full + 1))
+        }
+        out.push(((a << 2) | (b >> 4)) as uint8)
+    } else if rest == 3 {
+        let a = digit64(s[full], tbl)
+        let b = digit64(s[full + 1], tbl)
+        let c = digit64(s[full + 2], tbl)
+        if (c & 3) != 0 {
+            return Err(EncodingError.TrailingBits(full + 2))
+        }
+        let w = (a << 10) | (b << 4) | (c >> 2)
+        out.push((w >> 8) as uint8)
+        out.push(w as uint8)
+    }
+    return Ok(out)
+}
+
+// The error for the byte `c` at `i`, which isn't a digit of the alphabet.
+#test('=', 3)[EncodingError.BadPadding(3)]
+#test('*', 0)[EncodingError.BadChar(0)]
+fun not_digit(c: uint8, i: int) -> EncodingError {
+    if c == '=' {
+        return EncodingError.BadPadding(i)
+    }
+    return EncodingError.BadChar(i)
+}
+
+// The digits' values as tables, one byte for each byte from `+` to `z`
+// (from `0` to `f` for hex): the value plus 48, so `0` stands for 0 and
+// `o` for 63, or `.` for a byte that isn't a digit. A lookup makes decoding
+// more than twice as fast as comparing ranges did.
+const STD_DIGITS: str = "n...odefghijklm.......0123456789:;<=>?@ABCDEFGHI......JKLMNOPQRSTUVWXYZ[\\]^_`abc"
+const URL_DIGITS: str = "..n..defghijklm.......0123456789:;<=>?@ABCDEFGHI....o.JKLMNOPQRSTUVWXYZ[\\]^_`abc"
+const HEX_DIGITS: str = "0123456789.......:;<=>?..........................:;<=>?"
+
+// The tables above, built from the alphabets.
+#test
+fun digit_tables() {
+    assert(STD_DIGITS == table(STD, 43u8, 122u8, false), "STD_DIGITS")
+    assert(URL_DIGITS == table(URL, 43u8, 122u8, false), "URL_DIGITS")
+    assert(HEX_DIGITS == table(HEX, 48u8, 102u8, true), "HEX_DIGITS")
+}
+
+// The table of the digits of `alpha` for the bytes from `lo` to `hi`, the
+// upper-case letters as the lower-case ones if `fold`.
+fun table(alpha: str, lo: uint8, hi: uint8, fold: bool) -> str {
+    var sb = StringBuilder()
+    var c = lo
+    while c <= hi {
+        var d = c
+        if fold && c >= 'A' && c <= 'Z' {
+            d = c + 32u8
+        }
+        var v = 46u8
+        for i in 0..alpha.len() {
+            if alpha[i] == d {
+                v = (i + 48) as uint8
+            }
+        }
+        sb.append_byte(v)
+        c += 1u8
+    }
+    return sb.build()
+}
+
+// The value of the Base64 digit `c` by the table `tbl`, or -1 if it isn't
+// one.
+#test('A', STD_DIGITS)[0]
+#test('z', STD_DIGITS)[51]
+#test('9', STD_DIGITS)[61]
+#test('+', STD_DIGITS)[62]
+#test('/', STD_DIGITS)[63]
+#test('-', URL_DIGITS)[62]
+#test('_', URL_DIGITS)[63]
+#test('-', STD_DIGITS)[-1]
+#test('/', URL_DIGITS)[-1]
+#test('=', STD_DIGITS)[-1]
+#test('*', STD_DIGITS)[-1]
+#test('{', STD_DIGITS)[-1]
+fun digit64(c: uint8, tbl: str) -> int {
+    if c < 43u8 || c > 122u8 {
+        return -1
+    }
+    let v = tbl[(c - 43u8) as int]
+    if v == '.' {
+        return -1
+    }
+    return (v - 48u8) as int
+}
+
+// The value of the hex digit `c`, in either case, or -1 if it isn't one.
+#test('0')[0]
+#test('9')[9]
+#test('a')[10]
+#test('F')[15]
+#test('g')[-1]
+#test('G')[-1]
+#test('/')[-1]
+#test('@')[-1]
+fun hex_digit(c: uint8) -> int {
+    if c < 48u8 || c > 102u8 {
+        return -1
+    }
+    let v = HEX_DIGITS[(c - 48u8) as int]
+    if v == '.' {
+        return -1
+    }
+    return (v - 48u8) as int
+}

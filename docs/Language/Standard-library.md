@@ -48,4 +48,7 @@ The conventions (D164): operations on built-in types are methods (`s.split(",")`
 | `std.test` | [[Language/Standard-library/Test]] | Expectations, temporary directories and the program under test, for test functions |
 | `std.json` | [[Language/Standard-library/Json]] | JSON values, parsing and writing |
 | `std.toml` | [[Language/Standard-library/Toml]] | The TOML subset of manifests and lock files |
+| `std.bytes` | [[Language/Standard-library/Bytes]] | Strings as `[uint8]` and back, checking and building UTF-8 |
+| `std.encoding` | [[Language/Standard-library/Encoding]] | Hex and Base64 (standard and URL-safe), strict decoding |
+| `std.url` | [[Language/Standard-library/Url]] | Percent-encoding, query strings, parsing and building URLs |
 | `std.rt` | [[Language/Standard-library/Rt]] | The runtime in Myla; not for programs |

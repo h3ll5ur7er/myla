@@ -1,0 +1,653 @@
+// std.url: percent-encoding, query strings and URLs (MYLA-329, D164).
+//
+// After RFC 3986: the unreserved bytes (letters, digits, `-`, `.`, `_`,
+// `~`) never need encoding, every other byte may be written `%XX`. A query
+// string is HTML's form encoding, which writes a space as `+`. `parse`
+// splits a URI reference into its parts as they are written, checking each
+// against the RFC's grammar, and `Url.to_str` puts them back together.
+
+// What is wrong with a text, and the position (a byte index) where.
+#derive(Eq)
+pub enum UrlError {
+    // A `%` without two hex digits after it
+    BadPercent(int),
+    // A byte that isn't allowed where it stands
+    BadChar(int),
+    // A scheme that is empty or doesn't start with a letter and go on with
+    // letters, digits, `+`, `-` and `.`
+    BadScheme(int),
+    // A host in brackets that has no `]`, isn't an IP literal, or is
+    // followed by something other than a port
+    BadHost(int),
+    // A port that isn't decimal digits, or is past 65535
+    BadPort(int),
+}
+
+// A URI reference's parts (RFC 3986, section 3), percent-encoded as written.
+// `host` is `None` without an authority (`mailto:a@b.c`) and `Some("")` for
+// an empty one (`file:///etc`); an IPv6 host is without its brackets.
+// `user_info`, `query` and `fragment` are `None` without their `@`, `?` or
+// `#`; `scheme` is "" for a relative reference.
+pub struct Url {
+    scheme: str,
+    user_info: Option<str>,
+    host: Option<str>,
+    port: Option<int>,
+    path: str,
+    query: Option<str>,
+    fragment: Option<str>,
+}
+
+// `s` with every byte that is neither unreserved nor in `safe` written as
+// `%XX`, in upper-case hex.
+#test("a b", "")["a%20b"]
+#test("a/b?c", "/")["a/b%3Fc"]
+#test("AZaz09-._~", "")["AZaz09-._~"] // the unreserved bytes
+#test("é", "")["%C3%A9"] // bytes, not characters
+#test("100%", "")["100%25"]
+#test("", "")[""]
+#test("!*'();:@&=+$,/?#[]", "")["%21%2A%27%28%29%3B%3A%40%26%3D%2B%24%2C%2F%3F%23%5B%5D"] // the reserved bytes
+#test("a=b&c", "=&")["a=b&c"]
+pub fun percent_encode(s: str, safe: str = "") -> str {
+    return encode_part(s, safe, false)
+}
+
+// `s` with every `%XX` replaced by its byte; a `+` stays as it is.
+#test("a%20b")[Ok("a b")]
+#test("%c3%A9")[Ok("é")] // either case
+#test("a+b")[Ok("a+b")]
+#test("")[Ok("")]
+#test("%")[Err(UrlError.BadPercent(0))]
+#test("ab%2")[Err(UrlError.BadPercent(2))]
+#test("%zz")[Err(UrlError.BadPercent(0))]
+#test("%2525")[Ok("%25")] // decoded once
+pub fun percent_decode(s: str) -> Result<str, UrlError> {
+    return decode_part(s, 0, s.len(), false)
+}
+
+// The pairs as a query string, `key=value` joined by `&`, each part
+// form-encoded: a space as `+`, every byte but the unreserved ones as `%XX`.
+#test([("q", "a b"), ("lang", "en")])["q=a+b&lang=en"]
+#test([("a&b", "c=d")])["a%26b=c%3Dd"]
+#test([("k", "")])["k="]
+#test([("x", "1+1")])["x=1%2B1"]
+#test([("", "")])["="]
+pub fun query_encode(pairs: [(str, str)]) -> str {
+    var sb = StringBuilder()
+    for p in pairs {
+        if sb.len() > 0 {
+            sb.append_byte('&')
+        }
+        sb.append(encode_part(p.0, "", true))
+        sb.append_byte('=')
+        sb.append(encode_part(p.1, "", true))
+    }
+    return sb.build()
+}
+
+// The pairs of a query string: the pieces between `&`, empty ones skipped,
+// each split at its first `=` (a value of "" without one), `+` read as a
+// space and `%XX` decoded.
+#test("q=a+b&lang=en")[Ok([("q", "a b"), ("lang", "en")])]
+#test("a%26b=c%3Dd")[Ok([("a&b", "c=d")])]
+#test("k&&x=1&")[Ok([("k", ""), ("x", "1")])]
+#test("a=1=2")[Ok([("a", "1=2")])]
+#test("=")[Ok([("", "")])]
+#test("a=%zz")[Err(UrlError.BadPercent(2))]
+#test("x=1&y=%4")[Err(UrlError.BadPercent(6))]
+pub fun query_decode(s: str) -> Result<[(str, str)], UrlError> {
+    let n = s.len()
+    var out: [(str, str)] = []
+    var start = 0
+    while start < n {
+        var end = start
+        while end < n && s[end] != '&' {
+            end += 1
+        }
+        if end > start {
+            var eq = start
+            while eq < end && s[eq] != '=' {
+                eq += 1
+            }
+            let key = decode_part(s, start, eq, true)?
+            var value = ""
+            if eq < end {
+                value = decode_part(s, eq + 1, end, true)?
+            }
+            out.push((key, value))
+        }
+        start = end + 1
+    }
+    return Ok(out)
+}
+
+// The parts of the URI reference `s` (RFC 3986's `URI-reference`), checked
+// against the RFC's grammar but not changed: nothing is decoded or put in
+// lower case. An empty port (`http://h:/`) is `None`.
+#test("ftp://ftp.is.co.za/rfc/rfc1808.txt")[Ok(Url { scheme: "ftp", user_info: None, host: Some("ftp.is.co.za"), port: None, path: "/rfc/rfc1808.txt", query: None, fragment: None })] // RFC 3986, 1.1.2
+#test("http://www.ietf.org/rfc/rfc2396.txt")[Ok(Url { scheme: "http", user_info: None, host: Some("www.ietf.org"), port: None, path: "/rfc/rfc2396.txt", query: None, fragment: None })] // RFC 3986, 1.1.2
+#test("ldap://[2001:db8::7]/c=GB?objectClass?one")[Ok(Url { scheme: "ldap", user_info: None, host: Some("2001:db8::7"), port: None, path: "/c=GB", query: Some("objectClass?one"), fragment: None })] // RFC 3986, 1.1.2
+#test("mailto:John.Doe@example.com")[Ok(Url { scheme: "mailto", user_info: None, host: None, port: None, path: "John.Doe@example.com", query: None, fragment: None })] // RFC 3986, 1.1.2
+#test("news:comp.infosystems.www.servers.unix")[Ok(Url { scheme: "news", user_info: None, host: None, port: None, path: "comp.infosystems.www.servers.unix", query: None, fragment: None })] // RFC 3986, 1.1.2
+#test("tel:+1-816-555-1212")[Ok(Url { scheme: "tel", user_info: None, host: None, port: None, path: "+1-816-555-1212", query: None, fragment: None })] // RFC 3986, 1.1.2
+#test("telnet://192.0.2.16:80/")[Ok(Url { scheme: "telnet", user_info: None, host: Some("192.0.2.16"), port: Some(80), path: "/", query: None, fragment: None })] // RFC 3986, 1.1.2
+#test("urn:oasis:names:specification:docbook:dtd:xml:4.1.2")[Ok(Url { scheme: "urn", user_info: None, host: None, port: None, path: "oasis:names:specification:docbook:dtd:xml:4.1.2", query: None, fragment: None })] // RFC 3986, 1.1.2
+#test("foo://example.com:8042/over/there?name=ferret#nose")[Ok(Url { scheme: "foo", user_info: None, host: Some("example.com"), port: Some(8042), path: "/over/there", query: Some("name=ferret"), fragment: Some("nose") })] // RFC 3986, 3
+#test("https://user:pw@example.com:443/a%20b?x=1#top")[Ok(Url { scheme: "https", user_info: Some("user:pw"), host: Some("example.com"), port: Some(443), path: "/a%20b", query: Some("x=1"), fragment: Some("top") })]
+#test("file:///etc/hosts")[Ok(Url { scheme: "file", user_info: None, host: Some(""), port: None, path: "/etc/hosts", query: None, fragment: None })] // an empty authority
+#test("http://[::1]:8080")[Ok(Url { scheme: "http", user_info: None, host: Some("::1"), port: Some(8080), path: "", query: None, fragment: None })]
+#test("http://[::ffff:192.0.2.128]/")[Ok(Url { scheme: "http", user_info: None, host: Some("::ffff:192.0.2.128"), port: None, path: "/", query: None, fragment: None })]
+#test("http://[v7.fe80::a+en1]/")[Ok(Url { scheme: "http", user_info: None, host: Some("v7.fe80::a+en1"), port: None, path: "/", query: None, fragment: None })] // IPvFuture
+#test("HTTP://h:/?#")[Ok(Url { scheme: "HTTP", user_info: None, host: Some("h"), port: None, path: "/", query: Some(""), fragment: Some("") })]
+#test("//g")[Ok(Url { scheme: "", user_info: None, host: Some("g"), port: None, path: "", query: None, fragment: None })] // RFC 3986, 5.4
+#test("g;x?y#s")[Ok(Url { scheme: "", user_info: None, host: None, port: None, path: "g;x", query: Some("y"), fragment: Some("s") })] // RFC 3986, 5.4
+#test("?y")[Ok(Url { scheme: "", user_info: None, host: None, port: None, path: "", query: Some("y"), fragment: None })] // RFC 3986, 5.4
+#test("../g")[Ok(Url { scheme: "", user_info: None, host: None, port: None, path: "../g", query: None, fragment: None })] // RFC 3986, 5.4
+#test("g:h")[Ok(Url { scheme: "g", user_info: None, host: None, port: None, path: "h", query: None, fragment: None })] // RFC 3986, 5.4
+#test("")[Ok(Url { scheme: "", user_info: None, host: None, port: None, path: "", query: None, fragment: None })]
+#test("http://exa mple.com/")[Err(UrlError.BadChar(10))]
+#test("1http://x")[Err(UrlError.BadScheme(0))]
+#test(":x")[Err(UrlError.BadScheme(0))]
+#test("ht^tp://x")[Err(UrlError.BadScheme(2))]
+#test("http://h:80x/")[Err(UrlError.BadPort(11))]
+#test("http://h:65536/")[Err(UrlError.BadPort(9))]
+#test("http://[::1/")[Err(UrlError.BadHost(7))]
+#test("http://[1:2:3:4:5:6:7:8:9]/")[Err(UrlError.BadHost(7))]
+#test("http://[::1]x/")[Err(UrlError.BadHost(12))]
+#test("http://h/%zz")[Err(UrlError.BadPercent(9))]
+#test("http://h/a#b#c")[Err(UrlError.BadChar(12))]
+#test("http://u@v@h/")[Err(UrlError.BadChar(8))]
+#test("http://h/a b")[Err(UrlError.BadChar(10))]
+#test("http://h:8:9/")[Err(UrlError.BadPort(10))]
+pub fun parse(s: str) -> Result<Url, UrlError> {
+    let n = s.len()
+    // a scheme ends at the first `:`, if no `/`, `?` or `#` comes before it
+    var scheme = ""
+    var i = 0
+    var k = 0
+    while k < n && s[k] != ':' && s[k] != '/' && s[k] != '?' && s[k] != '#' {
+        k += 1
+    }
+    if k < n && s[k] == ':' {
+        check_scheme(s, k)?
+        scheme = s[:k]
+        i = k + 1
+    }
+    // the authority, after `//` and up to the next `/`, `?` or `#`
+    var user_info: Option<str> = None
+    var host: Option<str> = None
+    var port: Option<int> = None
+    if i + 1 < n && s[i] == '/' && s[i + 1] == '/' {
+        let a = i + 2
+        var e = a
+        while e < n && s[e] != '/' && s[e] != '?' && s[e] != '#' {
+            e += 1
+        }
+        var at = e - 1
+        while at >= a && s[at] != '@' {
+            at -= 1
+        }
+        var h = a
+        if at >= a {
+            check(s, a, at, ":")?
+            user_info = Some(s[a:at])
+            h = at + 1
+        }
+        var colon = -1
+        if h < e && s[h] == '[' {
+            var rb = h + 1
+            while rb < e && s[rb] != ']' {
+                rb += 1
+            }
+            if rb == e || !is_ip_literal(s[h + 1:rb]) {
+                return Err(UrlError.BadHost(h))
+            }
+            host = Some(s[h + 1:rb])
+            if rb + 1 < e {
+                if s[rb + 1] != ':' {
+                    return Err(UrlError.BadHost(rb + 1))
+                }
+                colon = rb + 1
+            }
+        } else {
+            var c = h
+            while c < e && s[c] != ':' {
+                c += 1
+            }
+            check(s, h, c, "")?
+            host = Some(s[h:c])
+            if c < e {
+                colon = c
+            }
+        }
+        if colon >= 0 {
+            port = read_port(s, colon + 1, e)?
+        }
+        i = e
+    }
+    // the path, the query after `?` and the fragment after `#`
+    var p = i
+    while p < n && s[p] != '?' && s[p] != '#' {
+        p += 1
+    }
+    check(s, i, p, ":@/")?
+    var query: Option<str> = None
+    var fragment: Option<str> = None
+    var q = p
+    if q < n && s[q] == '?' {
+        var qe = q + 1
+        while qe < n && s[qe] != '#' {
+            qe += 1
+        }
+        check(s, q + 1, qe, ":@/?")?
+        query = Some(s[q + 1:qe])
+        q = qe
+    }
+    if q < n {
+        check(s, q + 1, n, ":@/?")?
+        fragment = Some(s[q + 1:])
+    }
+    return Ok(Url { scheme: scheme, user_info: user_info, host: host, port: port, path: s[i:p], query: query, fragment: fragment })
+}
+
+impl Url {
+    // The URL as text: its parts as they are, an IPv6 host in brackets.
+    #test(Url { scheme: "https", user_info: Some("u"), host: Some("::1"), port: Some(8443), path: "/p", query: Some("q=1"), fragment: Some("f") })["https://u@[::1]:8443/p?q=1#f"]
+    #test(Url { scheme: "mailto", user_info: None, host: None, port: None, path: "a@b.c", query: None, fragment: None })["mailto:a@b.c"]
+    #test(Url { scheme: "", user_info: None, host: None, port: None, path: "", query: Some(""), fragment: None })["?"]
+    fun to_str(self) -> str {
+        var sb = StringBuilder()
+        if self.scheme.len() > 0 {
+            sb.append(self.scheme)
+            sb.append_byte(':')
+        }
+        if let Some(h) = self.host {
+            sb.append("//")
+            if let Some(u) = self.user_info {
+                sb.append(u)
+                sb.append_byte('@')
+            }
+            if in_set(':', h) {
+                sb.append_byte('[')
+                sb.append(h)
+                sb.append_byte(']')
+            } else {
+                sb.append(h)
+            }
+            if let Some(p) = self.port {
+                sb.append(f":{p}")
+            }
+        }
+        sb.append(self.path)
+        if let Some(q) = self.query {
+            sb.append_byte('?')
+            sb.append(q)
+        }
+        if let Some(f) = self.fragment {
+            sb.append_byte('#')
+            sb.append(f)
+        }
+        return sb.build()
+    }
+}
+
+// Every URL of the table above, and a few more, read back as it was.
+#test
+fun round_trips() {
+    let texts = [
+        "ftp://ftp.is.co.za/rfc/rfc1808.txt",
+        "ldap://[2001:db8::7]/c=GB?objectClass?one",
+        "mailto:John.Doe@example.com",
+        "tel:+1-816-555-1212",
+        "telnet://192.0.2.16:80/",
+        "urn:oasis:names:specification:docbook:dtd:xml:4.1.2",
+        "foo://example.com:8042/over/there?name=ferret#nose",
+        "https://user:pw@example.com:443/a%20b?x=1#top",
+        "file:///etc/hosts",
+        "http://[::1]:8080",
+        "//g",
+        "g;x?y#s",
+        "?y",
+        "#s",
+        "../g",
+        "",
+        "http://a/b/c/d;p?q",
+        "s://@h",
+    ]
+    for t in texts {
+        match parse(t) {
+            Ok(u) => { assert(u.to_str() == t, f"{t} read back as {u.to_str()}") }
+            Err(_) => { assert(false, f"{t} didn't parse") }
+        }
+    }
+}
+
+// Whether `h` (without brackets) is an IPv6 address, RFC 3986's
+// `IPv6address`: eight groups of up to four hex digits, `::` once for one or
+// more groups of zeros, the last two groups perhaps an IPv4 address.
+#test("::")[true]
+#test("::1")[true]
+#test("1:2:3:4:5:6:7:8")[true]
+#test("1:2:3:4:5:6:7::")[true]
+#test("::ffff:1.2.3.4")[true]
+#test("1:2:3:4:5:6:1.2.3.4")[true]
+#test("2001:DB8::7")[true]
+#test("1::2::3")[false]
+#test("1:2:3:4:5:6:7:8:9")[false]
+#test("1:2:3:4:5:6:7")[false]
+#test("12345::")[false]
+#test(":1::")[false]
+#test("1:")[false]
+#test("1:2:3:4:5:6:7:1.2.3.4")[false]
+#test("::1.2.3.256")[false]
+#test("::01.2.3.4")[false]
+#test("::1.2.3")[false]
+#test("g::")[false]
+#test("")[false]
+fun is_ipv6(h: str) -> bool {
+    let n = h.len()
+    var i = 0
+    var groups = 0
+    var gap = false
+    if n >= 2 && h[0] == ':' && h[1] == ':' {
+        gap = true
+        i = 2
+    } else if n == 0 || h[0] == ':' {
+        return false
+    }
+    while i < n {
+        let start = i
+        while i < n && hex_digit(h[i]) >= 0 {
+            i += 1
+        }
+        if i < n && h[i] == '.' {
+            if !is_ipv4(h[start:]) {
+                return false
+            }
+            groups += 2
+            break
+        }
+        if i == start || i - start > 4 {
+            return false
+        }
+        groups += 1
+        if i == n {
+            break
+        }
+        if h[i] != ':' {
+            return false
+        }
+        i += 1
+        if i == n {
+            return false
+        }
+        if h[i] == ':' {
+            if gap {
+                return false
+            }
+            gap = true
+            i += 1
+        }
+    }
+    if gap {
+        return groups <= 7
+    }
+    return groups == 8
+}
+
+// Whether `h` is an IPv4 address in RFC 3986's form: four decimal numbers
+// up to 255, without leading zeros, between dots.
+#test("192.0.2.16")[true]
+#test("0.0.0.0")[true]
+#test("255.255.255.255")[true]
+#test("1.2.3")[false]
+#test("1.2.3.4.")[false]
+#test("1.2.3.256")[false]
+#test("1.02.3.4")[false]
+#test("1234.1.1.1")[false]
+#test("1..3.4")[false]
+fun is_ipv4(h: str) -> bool {
+    let n = h.len()
+    var i = 0
+    var count = 0
+    while true {
+        let start = i
+        var v = 0
+        while i < n && i - start < 3 && h[i] >= '0' && h[i] <= '9' {
+            v = v * 10 + (h[i] - '0') as int
+            i += 1
+        }
+        if i == start || v > 255 || (i - start > 1 && h[start] == '0') {
+            return false
+        }
+        count += 1
+        if count == 4 {
+            return i == n
+        }
+        if i == n || h[i] != '.' {
+            return false
+        }
+        i += 1
+    }
+    unreachable()
+}
+
+// Whether `h`, a host in brackets without them, is an IPv6 address or
+// RFC 3986's `IPvFuture`: `v`, hex digits, `.`, then unreserved bytes,
+// sub-delimiters and `:`.
+#test("::1")[true]
+#test("v7.fe80::a+en1")[true]
+#test("V1a.x")[true]
+#test("v.x")[false]
+#test("v1.")[false]
+#test("v1x")[false]
+#test("v1.a/b")[false]
+#test("example.com")[false]
+fun is_ip_literal(h: str) -> bool {
+    let n = h.len()
+    if n == 0 || (h[0] != 'v' && h[0] != 'V') {
+        return is_ipv6(h)
+    }
+    var i = 1
+    while i < n && hex_digit(h[i]) >= 0 {
+        i += 1
+    }
+    if i == 1 || i + 1 >= n || h[i] != '.' {
+        return false
+    }
+    i += 1
+    while i < n {
+        let c = h[i]
+        if !(is_unreserved(c) || is_sub_delim(c) || c == ':') {
+            return false
+        }
+        i += 1
+    }
+    return true
+}
+
+// `Ok(())` if the scheme `s[:k]` is a letter and then letters, digits,
+// `+`, `-` and `.`; the first byte that isn't is the error's position.
+#test("http:", 4)[Ok(())]
+#test("svn+ssh:", 7)[Ok(())]
+#test(":", 0)[Err(UrlError.BadScheme(0))]
+#test("1a:", 2)[Err(UrlError.BadScheme(0))]
+#test("a_b:", 3)[Err(UrlError.BadScheme(1))]
+fun check_scheme(s: str, k: int) -> Result<(), UrlError> {
+    if k == 0 || !is_alpha(s[0]) {
+        return Err(UrlError.BadScheme(0))
+    }
+    for j in 1..k {
+        let c = s[j]
+        if !(is_alpha(c) || (c >= '0' && c <= '9') || c == '+' || c == '-' || c == '.') {
+            return Err(UrlError.BadScheme(j))
+        }
+    }
+    return Ok(())
+}
+
+// `Ok(())` if every byte of `s[start:end]` is unreserved, a sub-delimiter,
+// one of `extra` or part of a `%XX`.
+#test("a%20b", 0, 5, "")[Ok(())]
+#test("a:b", 0, 3, "")[Err(UrlError.BadChar(1))]
+#test("a:b", 0, 3, ":")[Ok(())]
+#test("x%2", 0, 3, "")[Err(UrlError.BadPercent(1))]
+#test("x%2", 0, 2, "")[Err(UrlError.BadPercent(1))]
+fun check(s: str, start: int, end: int, extra: str) -> Result<(), UrlError> {
+    var i = start
+    while i < end {
+        let c = s[i]
+        if c == '%' {
+            if i + 2 >= end || hex_digit(s[i + 1]) < 0 || hex_digit(s[i + 2]) < 0 {
+                return Err(UrlError.BadPercent(i))
+            }
+            i += 3
+        } else {
+            if !(is_unreserved(c) || is_sub_delim(c) || in_set(c, extra)) {
+                return Err(UrlError.BadChar(i))
+            }
+            i += 1
+        }
+    }
+    return Ok(())
+}
+
+// The port `s[start:end]`: `None` if it is empty.
+#test("h:80", 2, 4)[Ok(Some(80))]
+#test("h:", 2, 2)[Ok(None)]
+#test("h:65535", 2, 7)[Ok(Some(65535))]
+#test("h:99999999999", 2, 13)[Err(UrlError.BadPort(2))]
+#test("h:-1", 2, 4)[Err(UrlError.BadPort(2))]
+fun read_port(s: str, start: int, end: int) -> Result<Option<int>, UrlError> {
+    if start == end {
+        return Ok(None)
+    }
+    var v = 0
+    var i = start
+    while i < end {
+        let c = s[i]
+        if c < '0' || c > '9' {
+            return Err(UrlError.BadPort(i))
+        }
+        v = v * 10 + (c - '0') as int
+        if v > 65535 {
+            return Err(UrlError.BadPort(start))
+        }
+        i += 1
+    }
+    return Ok(Some(v))
+}
+
+// `s` percent-encoded but for the unreserved bytes and those of `safe`; a
+// space as `+` if `plus`.
+#test("a b+", "", true)["a+b%2B"]
+#test("a b", "", false)["a%20b"]
+fun encode_part(s: str, safe: str, plus: bool) -> str {
+    var sb = StringBuilder()
+    let n = s.len()
+    var i = 0
+    while i < n {
+        let c = s[i]
+        if is_unreserved(c) || in_set(c, safe) {
+            sb.append_byte(c)
+        } else if plus && c == ' ' {
+            sb.append_byte('+')
+        } else {
+            sb.append_byte('%')
+            sb.append_byte(HEX_UP[(c >> 4u8) as int])
+            sb.append_byte(HEX_UP[(c & 15u8) as int])
+        }
+        i += 1
+    }
+    return sb.build()
+}
+
+// `s[start:end]` with its `%XX` decoded, and a `+` as a space if `plus`.
+#test("k=a+b%21", 2, 8, true)[Ok("a b!")]
+#test("k=a+b", 2, 5, false)[Ok("a+b")]
+#test("k=a%2", 2, 5, true)[Err(UrlError.BadPercent(3))]
+fun decode_part(s: str, start: int, end: int, plus: bool) -> Result<str, UrlError> {
+    var sb = StringBuilder()
+    var i = start
+    while i < end {
+        let c = s[i]
+        if c == '%' {
+            if i + 2 >= end {
+                return Err(UrlError.BadPercent(i))
+            }
+            let hi = hex_digit(s[i + 1])
+            let lo = hex_digit(s[i + 2])
+            if hi < 0 || lo < 0 {
+                return Err(UrlError.BadPercent(i))
+            }
+            sb.append_byte(((hi << 4) | lo) as uint8)
+            i += 3
+        } else {
+            if plus && c == '+' {
+                sb.append_byte(' ')
+            } else {
+                sb.append_byte(c)
+            }
+            i += 1
+        }
+    }
+    return Ok(sb.build())
+}
+
+const HEX_UP: str = "0123456789ABCDEF"
+
+#test('~')[true]
+#test('Z')[true]
+#test('/')[false]
+#test('%')[false]
+fun is_unreserved(c: uint8) -> bool {
+    return is_alpha(c) || (c >= '0' && c <= '9') || c == '-' || c == '.' || c == '_' || c == '~'
+}
+
+// RFC 3986's `sub-delims`: `!$&'()*+,;=`.
+#test('!')[true]
+#test('=')[true]
+#test(':')[false]
+fun is_sub_delim(c: uint8) -> bool {
+    return in_set(c, "!$&'()*+,;=")
+}
+
+#test('q')[true]
+#test('Q')[true]
+#test('1')[false]
+fun is_alpha(c: uint8) -> bool {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+}
+
+// Whether the byte `c` is one of `set`'s.
+#test(':', "a:b")[true]
+#test(':', "")[false]
+fun in_set(c: uint8, set: str) -> bool {
+    let n = set.len()
+    var i = 0
+    while i < n {
+        if set[i] == c {
+            return true
+        }
+        i += 1
+    }
+    return false
+}
+
+// The value of the hex digit `c`, in either case, or -1.
+#test('7')[7]
+#test('b')[11]
+#test('B')[11]
+#test('g')[-1]
+fun hex_digit(c: uint8) -> int {
+    if c >= '0' && c <= '9' {
+        return (c - '0') as int
+    }
+    if c >= 'a' && c <= 'f' {
+        return (c - 'a') as int + 10
+    }
+    if c >= 'A' && c <= 'F' {
+        return (c - 'A') as int + 10
+    }
+    return -1
+}
