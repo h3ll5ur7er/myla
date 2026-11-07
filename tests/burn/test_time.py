@@ -189,6 +189,25 @@ async fun main() {
 }
 """
 
+# 10,000 tasks asleep at once through `task.all` (MYLA-296)
+TEN_THOUSAND = """import std.task as task
+
+async fun nap() -> int {
+    await task.sleep(50)
+    return 1
+}
+
+#main
+async fun main() {
+    var fs: [async () -> int] = []
+    for i in 0..10000 {
+        fs.push(async () => await nap())
+    }
+    let rs = await task.all(fs)
+    print(rs.len())
+}
+"""
+
 # `task.cancel` ends a child's sleep at once
 CANCEL = """import std.task as task
 import std.time as time
@@ -423,6 +442,22 @@ class Time(unittest.TestCase):
     def interpreted(self, name: str, text: str, **env: str) -> tuple[str, str, int, float]:
         from ._tools import selfhost_tool
         return self.run_timed([selfhost_tool("interp_main"), self.source(name, text), STDLIB_ROOT], **env)
+
+    def test_ten_thousand_sleepers_in_the_interpreter(self):
+        # MYLA-296: a lambda copies only the variables it reads; it copied
+        # every one in scope, so each of these 10,000 kept the list being
+        # built and every push copied it (600 MB, 1.8 s; now under 40 MB)
+        from ._tools import selfhost_tool
+        cmd = [selfhost_tool("interp_main"), self.source("ten_thousand", TEN_THOUSAND), STDLIB_ROOT]
+        r, w = os.pipe()
+        pid = os.posix_spawn(cmd[0], cmd, os.environ, file_actions=[
+            (os.POSIX_SPAWN_DUP2, w, 1), (os.POSIX_SPAWN_CLOSE, r)])
+        os.close(w)
+        with os.fdopen(r) as fh:
+            out = fh.read()
+        _, status, usage = os.wait4(pid, 0)
+        self.assertEqual((out, os.waitstatus_to_exitcode(status)), ("10000\n", 0))
+        self.assertLess(usage.ru_maxrss / 1024, 150, f"{usage.ru_maxrss / 1024:.0f} MB")
 
     def test_sleepers_wake_in_deadline_order(self):
         want = "b\nc\na\n120\ntrue\ntrue\n"

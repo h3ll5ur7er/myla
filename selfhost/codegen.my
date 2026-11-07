@@ -10,7 +10,7 @@
 // prelude, simple frame layout, and scalar `_eval`/calls/`print` -- enough to
 // build and run a `hello`-class program through `as`/`ld` with parity.
 
-from .ast import Expr, ExprKind, Stmt, StmtKind, Block, Decl, DeclKind, FunData, Param, ExprOrBlock, ElseTail, TypeExpr, MatchArm, Pattern, PatternKind, FieldPat, FieldInit, MapEntry, Attribute, BindElem, bind_elems
+from .ast import Expr, ExprKind, Stmt, StmtKind, Block, Decl, DeclKind, FunData, Param, ExprOrBlock, ElseTail, TypeExpr, MatchArm, Pattern, PatternKind, FieldPat, FieldInit, MapEntry, Attribute, BindElem, bind_elems, names_in_expr, names_in_block
 from .tokens import no_span
 from std.num import f64_literal_bits, f32_round_bits
 from std.fs import current_dir
@@ -3614,97 +3614,6 @@ fun method_part(name: str) -> str {
         i = i - 1
     }
     return name
-}
-
-// `acc` with the name `e` is, when it is a variable's (MYLA-127).
-#test(expr_of("-n * 2"), [])[[]]
-fun with_name(e: Expr, acc: [str]) -> [str] {
-    return match e.kind {
-        ExprKind.Name(n) => {
-            if list_has_str(acc, n) { return acc }
-            var out = acc
-            out.push(n)
-            out
-        },
-        _ => acc,
-    }
-}
-
-// `acc` with every name the expression or block reads (a lambda captures
-// them, MYLA-127).
-#test(expr_of("-n * 2"), [])[["n"]]
-fun names_in_expr(e: Expr, acc: [str]) -> [str] {
-    var out = with_name(e, acc)
-    match e.kind {
-        ExprKind.Unary(op, x) => { out = names_in_expr(x, out) },
-        ExprKind.Await(x) => { out = names_in_expr(x, out) },
-        ExprKind.Binary(op, l, r) => { out = names_in_expr(r, names_in_expr(l, out)) },
-        ExprKind.Call(c, args) => {
-            out = names_in_expr(c, out)
-            for a in args { out = names_in_expr(a, out) }
-        },
-        ExprKind.GetField(t, f) => { out = names_in_expr(t, out) },
-        ExprKind.StructLit(n, fields) => { for fi in fields { out = names_in_expr(fi.value, out) } },
-        ExprKind.TupleLit(es) => { for x in es { out = names_in_expr(x, out) } },
-        ExprKind.ListLit(es) => { for x in es { out = names_in_expr(x, out) } },
-        ExprKind.MapLit(entries) => {
-            for en in entries { out = names_in_expr(en.value, names_in_expr(en.key, out)) }
-        },
-        ExprKind.TupleIndex(t, i) => { out = names_in_expr(t, out) },
-        ExprKind.Index(t, i) => { out = names_in_expr(i, names_in_expr(t, out)) },
-        ExprKind.MatchE(sc, arms) => {
-            out = names_in_expr(sc, out)
-            for arm in arms {
-                match arm.guard { Some(g) => { out = names_in_expr(g, out) }, None => {} }
-                match arm.body {
-                    ExprOrBlock.EB_Expr(x) => { out = names_in_expr(x, out) },
-                    ExprOrBlock.EB_Block(blk) => { out = names_in_block(blk, out) },
-                }
-            }
-        },
-        ExprKind.Try(x) => { out = names_in_expr(x, out) },
-        ExprKind.Cast(x, ty) => { out = names_in_expr(x, out) },
-        ExprKind.Lambda(ps, rt, body, asy) => {
-            match body {
-                ExprOrBlock.EB_Expr(x) => { out = names_in_expr(x, out) },
-                ExprOrBlock.EB_Block(blk) => { out = names_in_block(blk, out) },
-            }
-        },
-        _ => {},
-    }
-    return out
-}
-
-#test(block_of("{ }"), [])[[]]
-fun names_in_block(b: Block, acc: [str]) -> [str] {
-    var out = acc
-    for st in b.stmts {
-        match st.kind {
-            StmtKind.ExprStmt(e) => { out = names_in_expr(e, out) },
-            StmtKind.VarDecl(k, n, ty, init) => { out = names_in_expr(init, out) },
-            StmtKind.DestructDecl(k, bs, ty, init) => { out = names_in_expr(init, out) },
-            StmtKind.Assign(target, value) => { out = names_in_expr(value, names_in_expr(target, out)) },
-            StmtKind.ReturnS(ov, tail) => { match ov { Some(e) => { out = names_in_expr(e, out) }, None => {} } },
-            StmtKind.IfS(c, then, otherwise) => {
-                out = names_in_block(then, names_in_expr(c, out))
-                match otherwise {
-                    Some(ElseTail.ElseBlock(eb)) => { out = names_in_block(eb, out) },
-                    Some(ElseTail.ElseIf(es)) => { out = names_in_block(Block { line: 0, col: 0, sp: es.sp, stmts: [es] }, out) },
-                    None => {},
-                }
-            },
-            StmtKind.WhileS(c, body) => { out = names_in_block(body, names_in_expr(c, out)) },
-            StmtKind.ForS(v, start, end, body, iter) => {
-                match start { Some(e) => { out = names_in_expr(e, out) }, None => {} }
-                match end { Some(e) => { out = names_in_expr(e, out) }, None => {} }
-                match iter { Some(e) => { out = names_in_expr(e, out) }, None => {} }
-                out = names_in_block(body, out)
-            },
-            StmtKind.DeferS(body) => { out = names_in_block(body, out) },
-            _ => {},
-        }
-    }
-    return out
 }
 
 #test("sum")[false]

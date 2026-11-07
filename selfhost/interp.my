@@ -7,7 +7,7 @@
 // runtime needs (integer widths, print/format rendering, casts) comes from the
 // checker's `resolved` side table, keyed by AST node id.
 
-from .ast import Expr, ExprKind, Stmt, StmtKind, Block, Decl, DeclKind, FunData, Param, MatchArm, Pattern, PatternKind, FieldPat, BindElem, ExprOrBlock, ElseTail, FieldInit, MapEntry, Attribute, TypeExpr, TypeKind, bind_elems
+from .ast import Expr, ExprKind, Stmt, StmtKind, Block, Decl, DeclKind, FunData, Param, MatchArm, Pattern, PatternKind, FieldPat, BindElem, ExprOrBlock, ElseTail, FieldInit, MapEntry, Attribute, TypeExpr, TypeKind, bind_elems, names_in_expr, names_in_block
 from .tokens import SrcSpan, no_span
 from .checker import Checker, Type, is_raw_memory_primitive, checker_on, builtin_method, builtin_method_name, is_slice_expr, from_end_of, slice_parts, is_hole_part
 from .anf import Norm, new_norm, stmt_suspends, body_suspends
@@ -3418,15 +3418,28 @@ impl Interp {
     // A lambda captures every currently-visible local by value (a snapshot).
     // Over-capturing is harmless: unreferenced names are simply never read, and
     // by-value copies give the deep-immutability semantics (D14/D48).
+    // A lambda's value: its body with the variables it reads, copied (by
+    // value, as natively). Only those: a copy of every variable in scope made
+    // each lambda keep the lists around it, and a loop pushing lambdas onto
+    // a list copied the list once per push (10,000 `task.all` sleepers took
+    // 600 MB, MYLA-296).
     fun eval_lambda(self, params: [Param], body: ExprOrBlock) -> Value {
+        let reads = match body {
+            ExprOrBlock.EB_Expr(x) => names_in_expr(x, []),
+            ExprOrBlock.EB_Block(b) => names_in_block(b, []),
+        }
+        var wanted: [str: bool] = [:]
+        for n in reads { wanted[n] = true }
         var cnames: [str] = []
         var cvals: [Value] = []
         var i = 0
         while i < self.scopes.len() {
             var j = 0
             while j < self.scopes[i].names.len() {
-                cnames.push(self.scopes[i].names[j])
-                cvals.push(self.scopes[i].vals[j])
+                if wanted.contains(self.scopes[i].names[j]) {
+                    cnames.push(self.scopes[i].names[j])
+                    cvals.push(self.scopes[i].vals[j])
+                }
                 j = j + 1
             }
             i = i + 1
