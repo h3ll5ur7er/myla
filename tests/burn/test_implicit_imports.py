@@ -103,7 +103,7 @@ pub fun first_or<T>(o: Option<T>, d: T) -> T {
     return o.value_or(d)
 }
 """,
-    "map": """impl<K, V> [K: V] {
+    "map": """impl<K: Eq + Hash, V> [K: V] {
     fun size(self) -> int {
         return self.len()
     }

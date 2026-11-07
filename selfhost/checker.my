@@ -2973,21 +2973,8 @@ impl Checker {
                 }
                 kept.push(Bound { tp: b.tp, traits: good })
             }
-            // a type parameter that is (in) a map key of the signature is
-            // `Eq + Hash` by it (D163, MYLA-313): the callers must give such
-            // a type, and the body may key a map by it
-            var implied = false
-            if self.trait_idx("Hash") >= 0 {
-                for tp in sig.type_params {
-                    if key_param_in(tp, sig.params, sig.ret) {
-                        let grown = with_bound(with_bound(kept, tp, "Eq"), tp, "Hash")
-                        if bound_count(grown) != bound_count(kept) { implied = true }
-                        kept = grown
-                    }
-                }
-            }
             if changed { self.skipped_fns[sig.name] = true }
-            if changed || implied {
+            if changed {
                 var s2 = sig
                 s2.bounds = kept
                 self.functions[fi] = s2
@@ -3012,79 +2999,6 @@ impl Checker {
 #test(Some("Box"))["Box"]
 fun key_or_none(k: Option<str>) -> str {
     return match k { Some(x) => x, None => "None" }
-}
-
-// Whether the type parameter `tp` is a map key, or part of one, in the
-// parameter types `ps` or the result `r` of a signature.
-#test("K", [Type.TMap(Type.TParam("K"), Type.TInt(32, true))], None)[true]
-#test("T", [Type.TList(Type.TParam("T"))], Some(Type.TMap(Type.TTuple([Type.TParam("T"), Type.TStr]), Type.TBool)))[true]
-#test("V", [Type.TMap(Type.TStr, Type.TParam("V"))], None)[false]
-fun key_param_in(tp: str, ps: [Type], r: Option<Type>) -> bool {
-    for p in ps {
-        if key_param_of(tp, p) { return true }
-    }
-    return match r {
-        Some(t) => key_param_of(tp, t),
-        None => false,
-    }
-}
-
-fun key_param_of(tp: str, t: Type) -> bool {
-    return match t {
-        Type.TMap(k, v) => mentions_param(k, tp) || key_param_of(tp, k) || key_param_of(tp, v),
-        Type.TList(e) => key_param_of(tp, e),
-        Type.TTuple(es) => any_key_param(tp, es),
-        Type.TStruct(n, a) => any_key_param(tp, a),
-        Type.TEnum(n, a) => any_key_param(tp, a),
-        Type.TFunc(ps, r) => key_param_in(tp, ps, r),
-        _ => false,
-    }
-}
-
-fun any_key_param(tp: str, ts: [Type]) -> bool {
-    for t in ts {
-        if key_param_of(tp, t) { return true }
-    }
-    return false
-}
-
-// Whether the type parameters `tps` as declared give `tp` the bound `trnm`.
-fun declares_bound(tps: [TypeParam], tp: str, trnm: str) -> bool {
-    for t in tps {
-        if t.name == tp && contains_str(t.bounds, trnm) { return true }
-    }
-    return false
-}
-
-// `bs` with the trait `trnm` among the bounds of `tp`.
-#test([Bound { tp: "K", traits: ["Eq"] }], "K", "Hash")[[Bound { tp: "K", traits: ["Eq", "Hash"] }]]
-#test([], "K", "Eq")[[Bound { tp: "K", traits: ["Eq"] }]]
-fun with_bound(bs: [Bound], tp: str, trnm: str) -> [Bound] {
-    var out: [Bound] = []
-    var found = false
-    for b in bs {
-        if b.tp == tp {
-            found = true
-            if contains_str(b.traits, trnm) {
-                out.push(b)
-            } else {
-                var ts = b.traits
-                ts.push(trnm)
-                out.push(Bound { tp: b.tp, traits: ts })
-            }
-        } else {
-            out.push(b)
-        }
-    }
-    if !found { out.push(Bound { tp: tp, traits: [trnm] }) }
-    return out
-}
-
-// How many traits the bounds `bs` name.
-fun bound_count(bs: [Bound]) -> int32 {
-    var n = 0
-    for b in bs { n = n + b.traits.len() }
-    return n
 }
 
 #test([], [])[[]]
@@ -6830,14 +6744,14 @@ impl Checker {
     }
 }
 
-#test()["enum Option<T> { Some(T), None }\nenum Result<T, E> { Ok(T), Err(E) }\nfun get<K, V>(m: [K: V], k: K) -> Option<V> {\n    if m.contains(k) {\n        return Some(m[k])\n    }\n    return None\n}\ntrait Format {\n    fun format(self, spec: str) -> str\n}\nstruct Hasher {\n    state: uint64,\n}\nimpl Eq for Hasher {\n    fun eq(self, other: Hasher) -> bool {\n        return self.state == other.state\n    }\n}\ntrait Hash {\n    fun hash(self, h: Hasher) -> Hasher\n}\n"]
+#test()["enum Option<T> { Some(T), None }\nenum Result<T, E> { Ok(T), Err(E) }\nfun get<K: Eq + Hash, V>(m: [K: V], k: K) -> Option<V> {\n    if m.contains(k) {\n        return Some(m[k])\n    }\n    return None\n}\ntrait Format {\n    fun format(self, spec: str) -> str\n}\nstruct Hasher {\n    state: uint64,\n}\nimpl Eq for Hasher {\n    fun eq(self, other: Hasher) -> bool {\n        return self.state == other.state\n    }\n}\ntrait Hash {\n    fun hash(self, h: Hasher) -> Hasher\n}\n"]
 // The prelude: what every program has without an import. The `Hasher`'s
 // state and the `Hash` trait are here (D163, MYLA-313), so that every type
 // can be a map key's and every module can name them; the hasher's methods,
 // its algorithm, and the `Hash` impls of the built-in types are std.hash's,
 // an implicit module.
 fun prelude_src() -> str {
-    return "enum Option<T> { Some(T), None }\nenum Result<T, E> { Ok(T), Err(E) }\nfun get<K, V>(m: [K: V], k: K) -> Option<V> {\n    if m.contains(k) {\n        return Some(m[k])\n    }\n    return None\n}\ntrait Format {\n    fun format(self, spec: str) -> str\n}\nstruct Hasher {\n    state: uint64,\n}\nimpl Eq for Hasher {\n    fun eq(self, other: Hasher) -> bool {\n        return self.state == other.state\n    }\n}\ntrait Hash {\n    fun hash(self, h: Hasher) -> Hasher\n}\n"
+    return "enum Option<T> { Some(T), None }\nenum Result<T, E> { Ok(T), Err(E) }\nfun get<K: Eq + Hash, V>(m: [K: V], k: K) -> Option<V> {\n    if m.contains(k) {\n        return Some(m[k])\n    }\n    return None\n}\ntrait Format {\n    fun format(self, spec: str) -> str\n}\nstruct Hasher {\n    state: uint64,\n}\nimpl Eq for Hasher {\n    fun eq(self, other: Hasher) -> bool {\n        return self.state == other.state\n    }\n}\ntrait Hash {\n    fun hash(self, h: Hasher) -> Hasher\n}\n"
 }
 
 // The prelude's declarations, with node ids from `first_id`.
@@ -7696,12 +7610,7 @@ impl Checker {
                         var ok = false
                         match concrete { Type.TParam(pn) => { ok = self.bound_has(pn, tr) }, _ => { ok = self.type_implements(concrete, tr)? } }
                         if !ok {
-                            // a bound a map key of the signature implies (D163)
-                            var why = ""
-                            if (tr == "Eq" || tr == "Hash") && !declares_bound(sig.decl.type_params, b.tp, tr) && key_param_in(b.tp, sig.params, sig.ret) {
-                                why = format(", as '{}' is a map key in its signature", b.tp)
-                            }
-                            return Err(terr_at(e.line, e.col, e.sp, format("type '{}' does not satisfy the bound '{}: {}' required by '{}'{}", type_name(concrete), b.tp, tr, sig.decl.name, why)))
+                            return Err(terr_at(e.line, e.col, e.sp, format("type '{}' does not satisfy the bound '{}: {}' required by '{}'", type_name(concrete), b.tp, tr, sig.decl.name)))
                         }
                     }
                 },

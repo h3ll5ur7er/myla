@@ -92,7 +92,7 @@ Every program has this prelude (`prelude_src` in [[selfhost/checker.my]]):
 ```
 enum Option<T> { Some(T), None }
 enum Result<T, E> { Ok(T), Err(E) }
-fun get<K, V>(m: [K: V], k: K) -> Option<V>
+fun get<K: Eq + Hash, V>(m: [K: V], k: K) -> Option<V>
 ```
 
 `Some`, `None`, `Ok` and `Err` may be used without the enum name. A bare `None` (or `Ok`/`Err`/`Some` whose type arguments can't be inferred) needs the expected type from an annotation, parameter or return type. The `?` operator propagates `None`/`Err` ([[Language/Expressions-and-operators]]).

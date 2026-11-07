@@ -26,7 +26,7 @@ Found by Advent of Code ([[Project/AoC-2015-2021]], F9). None of these blocked a
 
 `#test` on generic functions stays out (D116, [[MYLA-303]]).
 
-## Proposed (D165, 2026-11-07; awaiting the owner's acceptance)
+## Decided (D165, 2026-11-07, the owner's acceptance)
 
 - **`for c in s` goes by `char`.** Each step is a `char`, the one `s.chars()` gives there (U+FFFD for a byte outside a well-formed UTF-8 sequence, so every string can be walked and the two agree on bad bytes). Reasons: it is what `chars()` already means and what the AoC loops do with the characters (compare with `'#'`, count letters); a byte loop has its form already, `s[i]` over `0..s.len()` (or `bytes.from_str(s)`, [[Language/Standard-library/Bytes]]); Swift, Python and Go's `range` walk characters too, Rust has no `for` over a `str` at all. By byte would have made `for c in s` and `for c in s.chars()` differ on any non-ASCII text. There is no `s.bytes()` method: std.str has none ([[Language/Standard-library/Str]]), and a list of bytes would be the cost `for c in s` avoids.
 - **Strings order byte-wise**, unsigned, a prefix first: the order `list_dir` sorts in (`sorted_names` in [[lib/std/fs.my]]), and Rust's and Go's; no locale. `str` is `Ord` like the numbers and `char`, so `xs.sort()` on a `[str]` ([[MYLA-323]]) and a `Heap<str>` ([[MYLA-330]]) work. `Ord`'s `cmp` gives an `int` (-1, 0, 1); as for the other built-in types it isn't a method to call on a `str` (`5.cmp(3)` isn't one either), it is what `<` is natively: std.rt's `str_cmp`, a three-way compare against 0.

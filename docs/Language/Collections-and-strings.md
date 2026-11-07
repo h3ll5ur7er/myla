@@ -124,7 +124,7 @@ fun main() {
 // 2
 ```
 
-- A generic `[K: V]` needs `K: Eq + Hash`. A type parameter that is a map key in a function's signature has the bound by it, so `fun counts<K>(xs: [K]) -> [K: int]` and the methods of `impl<K, V> [K: V]` need not write it, and their callers must give such a type (`type 'P' does not satisfy the bound 'K: Eq' required by 'counts', as 'K' is a map key in its signature`); a map keyed by a type parameter only in the body needs it written, `fun distinct<T: Eq + Hash>(xs: [T]) -> int`.
+- A generic `[K: V]` needs `K: Eq + Hash`, written where the type parameter is declared (D167): `fun counts<K: Eq + Hash>(xs: [K]) -> [K: int]`, `impl<K: Eq + Hash, V> [K: V]`, `fun distinct<T: Eq + Hash>(xs: [T]) -> int`. Without it, a map keyed by the type parameter, in the signature or the body, is the error `map key type must be Eq and Hash, found 'K': it needs the bound 'K: Eq + Hash'`; with it, a caller must give such a type (`type 'P' does not satisfy the bound 'K: Eq' required by 'counts'`).
 - A map finds a key among those of the same hash and compares them with `==`, so a type's own `Eq` decides which keys are the same; its `Hash` must give equal keys equal hashes.
 - The integers', `char`'s, `bool`'s and `str`'s maps keep their hash; any other key is hashed by its parts natively (a type's written `hash` called), and by its parts or that `hash` in the interpreter. Neither is the value `hash` gives, which a map doesn't show: the order is the order of insertion.
 

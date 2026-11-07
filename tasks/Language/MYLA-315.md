@@ -25,7 +25,7 @@ fun main() {
 
 - [x] (1): the expected type seeds a struct literal's fields when its type arguments are type parameters; a test in the checker's cases and a program in every runner
 - [x] (2): a call's expected type fixes the type parameters its arguments leave open, for generic functions and generic methods alike
-- [ ] The owner's decision: whether explicit type arguments on a call (`mk<int>()`) come too (a revision of D34; see "Explicit type arguments" below)
+- [x] The owner's decision: explicit type arguments, parsed speculatively (D169), built as [[MYLA-373]]
 - [x] [[Language/Generics]] updated
 
 ## Cause

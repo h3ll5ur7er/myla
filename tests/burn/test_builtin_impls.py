@@ -50,7 +50,7 @@ impl [str: int] {
     }
 }
 
-impl<K, V> [K: V] {
+impl<K: Eq + Hash, V> [K: V] {
     fun size(self) -> int {
         return self.len()
     }
@@ -163,7 +163,7 @@ impl float32 {
     }
 }
 
-impl<K, V> [K: V] {
+impl<K: Eq + Hash, V> [K: V] {
     fun put_twice(var self, k: K, v: V) {
         self[k] = v
         self[k] = v

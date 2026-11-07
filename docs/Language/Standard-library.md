@@ -26,7 +26,7 @@ The low-level primitives `__write`, `__read`, `__poll`, `__exit`, `__args`, `__r
 
 One page per module (D164). A new module adds its row here.
 
-The conventions (D164): operations on built-in types are methods (`s.split(",")`, `xs.sorted()`), and `std.str`, `std.char`, `std.int`, `std.list`, `std.option` and `std.map` are seen by every program without an import, and `std.hash`, whose methods and impls the `Hash` trait builds on (D163, [[MYLA-313]]) ([[MYLA-320]], [[Language/Modules#implicit-imports]]: their methods, not their functions, which need an import; not in the modules of `std`, which import what they use); everything else is a function of its module (`path.join(a, b)`). Strings are bytes and character classes ASCII. A function that can fail returns a `Result` with its module's error enum.
+The conventions (D164): operations on built-in types are methods (`s.split(",")`, `xs.sorted()`), and `std.str`, `std.char`, `std.int`, `std.list`, `std.option` and `std.map` are seen by every program without an import, and `std.hash`, whose methods and impls the `Hash` trait builds on (D163, D166, [[MYLA-313]]) ([[MYLA-320]], [[Language/Modules#implicit-imports]]: their methods, not their functions, which need an import; not in the modules of `std`, which import what they use); everything else is a function of its module (`path.join(a, b)`). Strings are bytes and character classes ASCII. A function that can fail returns a `Result` with its module's error: a bare enum when the variants carry different data, a struct with a `kind` enum when every error has the same position (D168). A map keyed by a type parameter writes `T: Eq + Hash` (D167).
 
 | Module | Page | Holds |
 | --- | --- | --- |
