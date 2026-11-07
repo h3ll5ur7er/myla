@@ -108,8 +108,8 @@ Three questions for the owner are worth deciding before the first module is writ
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | 33 | Fast hashes | `std.hash` | FNV-1a and a fast 64-bit hash (wyhash or xxHash64) of a `str` or bytes, hash combining: what a `Hash` trait ([[MYLA-313]]) would build on | 6 | 1 |  | 22 | [[MYLA-327]] |
 | 34 | Checksums | `std.hash` | CRC-32 and Adler-32 (gzip, zlib, PNG and zip need them) | 5 | 1 |  | 35 | [[MYLA-327]] |
-| 35 | MD5 and SHA-1 | `std.hash` | one-shot and incremental, as bytes and as hex; legacy but everywhere (Git's object ids, ETags, AoC); tuned, since AoC's MD5 dominated its slowest days | 6 | 2 |  | 20 | [[MYLA-328]] |
-| 36 | SHA-2 and HMAC | `std.hash` | SHA-256, SHA-512, HMAC; one-shot and incremental | 6 | 2 |  | 21 | [[MYLA-328]] |
+| 35 | MD5 and SHA-1 | `std.digest` | one-shot and incremental, as bytes and as hex; legacy but everywhere (Git's object ids, ETags, AoC); tuned, since AoC's MD5 dominated its slowest days | 6 | 2 |  | 20 | [[MYLA-328]] |
+| 36 | SHA-2 and HMAC | `std.digest` | SHA-256, SHA-512, HMAC; one-shot and incremental | 6 | 2 |  | 21 | [[MYLA-328]] |
 | 37 | Hex and Base64 | `std.encoding` | encode and decode, Base64 in the standard and the URL-safe alphabet | 8 | 1 |  | 13 | [[MYLA-329]] |
 | 38 | URLs | `std.url` | percent-encoding, query strings, parsing and building a URL | 5 | 2 |  | 44 | [[MYLA-329]] |
 | 39 | Cryptography | `std.crypto` | authenticated encryption (ChaCha20-Poly1305, AES-GCM), X25519, Ed25519, constant-time comparison; checked against the published vectors, with side channels in mind | 4 | 7 | #15, #36 | 66 | – |
