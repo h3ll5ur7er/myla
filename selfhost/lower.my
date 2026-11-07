@@ -3846,10 +3846,10 @@ impl Lower {
     }
 
     // `remove(m, k)`: the map made unique (copies keep the entry), the
-    // key's entry found; when there is one, it becomes a tombstone, its key
-    // and value are released and the table is rebuilt without it (the keys
-    // after it in the order of insertion moved up, D105), stored back into
-    // the holder.
+    // key's entry found; when there is one, it becomes a tombstone and its
+    // key and value are released. Nothing else moves: its rank becomes a gap
+    // in the order of insertion, which `__map_keys` skips, and the table is
+    // compacted as it fills (std.rt's maps, MYLA-310).
     #test(lower_on(), codegen_on("enum E { A, B(int) }"), expr_of("(a, 'c')"), expr_of("(a, 'c')"))[0]
     fun map_remove(var self, cg: CodeGen, m: Expr, k: Expr) -> int32 {
         let mt = self.place_type(cg, m)
@@ -3872,9 +3872,6 @@ impl Lower {
         let n1 = self.temp(i64)
         self.add(Inst.Bin(n1, "-", i64, i64, n, self.konst(i64, 1), Pos { line: 0, col: 0 }))
         self.add(Inst.StoreAt(cell, 0, n1, 8))
-        let ss = cg.map_slot_size(mt)
-        let rank = self.temp(i64)
-        self.add(Inst.LoadAt(rank, slot, ss - 8, 8))
         for kv in [(8, map_key(mt)), (16, map_val(mt))] {
             let ft = kv.1
             if cg.is_boxed(ft) || is_cell_t(ft) {
@@ -3885,11 +3882,6 @@ impl Lower {
                 self.add(Inst.DropAt(ft, self.offset(slot, kv.0)))
             }
         }
-        let c2 = self.temp(i64)
-        self.add(Inst.LoadAt(c2, h, 0, 8))
-        let rebuilt = self.temp(i64)
-        self.rt_call(cg, rebuilt, "__map_rebuild", [c2, self.int_const(ss), rank, self.int_const(cg.map_is_str(mt))])
-        self.add(Inst.StoreAt(h, 0, rebuilt, 8))
         self.finish(Term.Jmp(done))
         self.start(done)
         return -1
