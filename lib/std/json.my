@@ -435,3 +435,278 @@ fun round_trip(text: str) -> str {
     }
 }
 
+
+// --- Building values ------------------------------------------------------------
+
+// An object with these members, in order (MYLA-332).
+#test([("a", Json.Int(1)), ("b", Json.Null)])[Json.Object([("a", Json.Int(1)), ("b", Json.Null)])]
+pub fun obj(members: [(str, Json)]) -> Json {
+    return Json.Object(members)
+}
+
+// An array of these items.
+#test([Json.Int(1), Json.Str("x")])[Json.Array([Json.Int(1), Json.Str("x")])]
+pub fun arr(items: [Json]) -> Json {
+    return Json.Array(items)
+}
+
+// A number: an `Int` when `x` is a whole number below 2^53 in size (every
+// such float64 is exact), as JavaScript writes `2.0` as `2`; a `Float`
+// otherwise. A larger integer is `Json.Int(n)`, made directly.
+#test(2.5)[Json.Float(2.5)]
+#test(3.0)[Json.Int(3i64)]
+#test(-7.0)[Json.Int(-7i64)]
+#test(1e300)[Json.Float(1e300)]
+pub fun num(x: float64) -> Json {
+    if x > -9007199254740992.0 && x < 9007199254740992.0 {
+        let n = x as int64
+        if n as float64 == x {
+            return Json.Int(n)
+        }
+    }
+    return Json.Float(x)
+}
+
+// A string.
+#test("hi")[Json.Str("hi")]
+pub fun text(s: str) -> Json {
+    return Json.Str(s)
+}
+
+// --- Reading values -------------------------------------------------------------
+
+impl Json {
+    // The integer, if this is an `Int` (a number written without a fraction
+    // or an exponent).
+    #test(Json.Int(5i64))[Some(5i64)]
+    #test(Json.Float(5.0))[None]
+    #test(Json.Str("5"))[None]
+    fun as_int(self) -> Option<int64> {
+        return match self {
+            Json.Int(n) => Some(n)
+            _ => None
+        }
+    }
+
+    // The number, if this is a `Float` or an `Int`.
+    #test(Json.Float(2.5))[Some(2.5)]
+    #test(Json.Int(2i64))[Some(2.0)]
+    #test(Json.Null)[None]
+    fun as_float(self) -> Option<float64> {
+        return match self {
+            Json.Float(f) => Some(f)
+            Json.Int(n) => Some(n as float64)
+            _ => None
+        }
+    }
+
+    // The string, if this is a `Str`.
+    #test(Json.Str("a"))[Some("a")]
+    #test(Json.Int(1i64))[None]
+    fun as_str(self) -> Option<str> {
+        return match self {
+            Json.Str(s) => Some(s)
+            _ => None
+        }
+    }
+
+    // The truth value, if this is a `Bool`.
+    #test(Json.Bool(false))[Some(false)]
+    #test(Json.Null)[None]
+    fun as_bool(self) -> Option<bool> {
+        return match self {
+            Json.Bool(b) => Some(b)
+            _ => None
+        }
+    }
+
+    // The items, if this is an `Array`.
+    #test(Json.Array([Json.Null]))[Some([Json.Null])]
+    #test(Json.Object([]))[None]
+    fun as_list(self) -> Option<[Json]> {
+        return match self {
+            Json.Array(items) => Some(items)
+            _ => None
+        }
+    }
+
+    // The members in order, if this is an `Object`.
+    #test(Json.Object([("k", Json.Int(1i64))]))[Some([("k", Json.Int(1i64))])]
+    #test(Json.Array([]))[None]
+    fun as_object(self) -> Option<[(str, Json)]> {
+        return match self {
+            Json.Object(members) => Some(members)
+            _ => None
+        }
+    }
+}
+
+// The value at `path` inside `v`: keys of objects after dots and indexes of
+// arrays in brackets, such as `a.b[2].c` or `[0].name` ("" is `v` itself). A
+// key is every byte up to the next `.` or `[`, and finds what `field` finds.
+// None if a step finds nothing or the path isn't of that form.
+#test(path_doc(), "a.b[1].c")[Some(Json.Int(2i64))]
+#test(path_doc(), "a.b[0]")[Some(Json.Int(1i64))]
+#test(path_doc(), "list[1][0]")[Some(Json.Str("y"))]
+#test(path_doc(), "")[Some(path_doc())]
+#test(path_doc(), "a.b[2]")[None] // past the end
+#test(path_doc(), "a.x")[None]
+#test(path_doc(), "a[0]")[None] // not an array
+#test(path_doc(), "list.x")[None] // not an object
+#test(path_doc(), "a..b")[None]
+#test(path_doc(), "a.")[None]
+#test(path_doc(), ".a")[None]
+#test(path_doc(), "list[")[None]
+#test(path_doc(), "list[x]")[None]
+#test(path_doc(), "list[]")[None]
+#test(path_doc(), "list[99999999999]")[None]
+#test(Json.Array([Json.Null, Json.Bool(true)]), "[1]")[Some(Json.Bool(true))]
+pub fun at(v: Json, path: str) -> Option<Json> {
+    var cur = v
+    var i = 0
+    let n = path.len()
+    while i < n {
+        if path[i] == '[' {
+            i += 1
+            let start = i
+            var index = 0
+            while i < n && path[i] >= '0' && path[i] <= '9' && i - start < 9 {
+                index = index * 10 + (path[i] - '0') as int32
+                i += 1
+            }
+            if i == start || i >= n || path[i] != ']' {
+                return None
+            }
+            i += 1
+            match cur {
+                Json.Array(items) => {
+                    if index >= items.len() {
+                        return None
+                    }
+                    cur = items[index]
+                }
+                _ => {
+                    return None
+                }
+            }
+        } else {
+            if i > 0 {
+                if path[i] != '.' {
+                    return None
+                }
+                i += 1
+            }
+            let start = i
+            while i < n && path[i] != '.' && path[i] != '[' {
+                i += 1
+            }
+            if i == start {
+                return None
+            }
+            cur = field(cur, path[start:i])?
+        }
+    }
+    return Some(cur)
+}
+
+// {"a": {"b": [1, {"c": 2}]}, "list": [["x"], ["y"]]}, for the cases of `at`.
+fun path_doc() -> Json {
+    let b = Json.Array([Json.Int(1), Json.Object([("c", Json.Int(2))])])
+    let list = Json.Array([Json.Array([Json.Str("x")]), Json.Array([Json.Str("y")])])
+    return Json.Object([("a", Json.Object([("b", b)])), ("list", list)])
+}
+
+// --- Writing with indentation ---------------------------------------------------
+
+// `j` as JSON text with one item or member on a line, each level indented by
+// `indent` more spaces, as `json.dumps(j, indent=indent, ensure_ascii=False)`
+// writes it: `": "` after a key, an empty array or object as `[]` or `{}`.
+// An `indent` of 0 or less starts every item on a line of its own without
+// indenting it.
+#test(Json.Array([Json.Int(1), Json.Array([])]), 2)["[\n  1,\n  []\n]"]
+#test(Json.Object([("a", Json.Object([("b", Json.Null)])), ("c", Json.Object([]))]), 4)["{\n    \"a\": {\n        \"b\": null\n    },\n    \"c\": {}\n}"]
+#test(Json.Array([Json.Str("x"), Json.Float(0.5)]), 0)["[\n\"x\",\n0.5\n]"]
+#test(Json.Str("a\nb"), 2)["\"a\\nb\""]
+pub fun pretty(j: Json, indent: int = 2) -> str {
+    var p = Pretty { w: Writer { sb: StringBuilder() }, indent: if indent > 0 { indent } else { 0 } }
+    p.value(j, 0)
+    return p.w.sb.build()
+}
+
+struct Pretty {
+    w: Writer,
+    indent: int,
+}
+
+impl Pretty {
+    fun value(var self, j: Json, depth: int) {
+        match j {
+            Json.Array(items) => {
+                if items.len() == 0 {
+                    self.w.sb.append("[]")
+                    return
+                }
+                self.w.sb.append_byte('[')
+                var first = true
+                for item in items {
+                    if !first {
+                        self.w.sb.append_byte(',')
+                    }
+                    first = false
+                    self.newline(depth + 1)
+                    self.value(item, depth + 1)
+                }
+                self.newline(depth)
+                self.w.sb.append_byte(']')
+            }
+            Json.Object(members) => {
+                if members.len() == 0 {
+                    self.w.sb.append("{}")
+                    return
+                }
+                self.w.sb.append_byte('{')
+                var first = true
+                for m in members {
+                    if !first {
+                        self.w.sb.append_byte(',')
+                    }
+                    first = false
+                    self.newline(depth + 1)
+                    self.w.string(m.0)
+                    self.w.sb.append(": ")
+                    self.value(m.1, depth + 1)
+                }
+                self.newline(depth)
+                self.w.sb.append_byte('}')
+            }
+            _ => {
+                self.w.value(j)
+            }
+        }
+    }
+
+    // A line end and the indentation of `depth` levels.
+    fun newline(var self, depth: int) {
+        self.w.sb.append_byte('\n')
+        var k = depth * self.indent
+        while k > 0 {
+            self.w.sb.append_byte(' ')
+            k -= 1
+        }
+    }
+}
+
+// What `pretty` writes, `parse` reads back as `to_string` writes it.
+#test
+fun pretty_round_trip() {
+    let text = "{\"a\": [1, 2.5, \"x\\ty\", true, null, {}, []], \"b\": {\"c\": {\"d\": [[]]}}, \"é\": -0.0}"
+    match parse(text) {
+        Ok(v) => {
+            match parse(pretty(v)) {
+                Ok(back) => assert(to_string(back) == to_string(v), pretty(v))
+                Err(e) => assert(false, e.msg)
+            }
+        }
+        Err(e) => assert(false, e.msg)
+    }
+}

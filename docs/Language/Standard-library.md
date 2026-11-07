@@ -48,8 +48,10 @@ The conventions (D164): operations on built-in types are methods (`s.split(",")`
 | `std.task` | [[Language/Standard-library/Task]] | Child tasks in numbers known at run time, cancellation |
 | `std.time` | [[Language/Standard-library/Time]] | The monotonic clock |
 | `std.test` | [[Language/Standard-library/Test]] | Expectations, temporary directories and the program under test, for test functions |
-| `std.json` | [[Language/Standard-library/Json]] | JSON values, parsing and writing |
+| `std.json` | [[Language/Standard-library/Json]] | JSON values, parsing, compact and indented writing, paths, typed getters |
 | `std.toml` | [[Language/Standard-library/Toml]] | The TOML subset of manifests and lock files |
+| `std.csv` | [[Language/Standard-library/Csv]] | RFC 4180 CSV: records, a header row mapped to names, writing |
+| `std.ini` | [[Language/Standard-library/Ini]] | INI files: sections, keys, comments, read and written in order |
 | `std.bytes` | [[Language/Standard-library/Bytes]] | Strings as `[uint8]` and back, checking and building UTF-8 |
 | `std.encoding` | [[Language/Standard-library/Encoding]] | Hex and Base64 (standard and URL-safe), strict decoding |
 | `std.url` | [[Language/Standard-library/Url]] | Percent-encoding, query strings, parsing and building URLs |
