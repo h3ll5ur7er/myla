@@ -1,0 +1,5 @@
+type error: 'len' is a builtin method of 'str': an impl can't define it
+  --> examples/errors/type_builtin_method_name.my:7:5
+  |
+7 |     fun len(self) -> int {
+  |     ^^^^^^^^^^^^^^^^^^^^^^

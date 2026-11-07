@@ -61,6 +61,9 @@ export class Myla {
     try {
       exitCode = wasi.start(instance);
     } catch (e) {
+      // a trap is the program's runtime error; anything else is the page's
+      // own failure, as in run.mjs (MYLA-298)
+      if (!(e instanceof WebAssembly.RuntimeError || e instanceof RangeError)) throw e;
       trap = /call stack/i.test(e.message) ? "runtime error: stack overflow\n" : `runtime error: ${e.message}\n`;
       exitCode = 1;
     }

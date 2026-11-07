@@ -391,6 +391,51 @@ fun main() {
 REMOVE_TOUR_OUTPUT = "ok\nfalse true\nok\nnot found\nis a directory\nnot empty\nok\nfalse\ntrue\nnot found\nok\nfalse\nnot found\nok\n"
 
 
+# A path with a NUL byte names nothing (the review of 2026-11-06, R7: the
+# kernel read it up to the NUL, so "q\u{0}zzz" wrote "q"): every entry point
+# fails with `InvalidInput` and touches no file.
+NUL_PATHS = """from std.fs import write_to_file, read_to_string, make_dir, remove_file, remove_dir, rename, exists, list_dir, IoError
+fun cause(e: IoError) -> str {
+    return match e {
+        IoError.InvalidInput => "invalid input",
+        IoError.NotFound => "not found",
+        _ => "other",
+    }
+}
+fun unit(r: Result<(), IoError>) -> str {
+    return match r {
+        Ok(()) => "ok",
+        Err(e) => cause(e),
+    }
+}
+fun main() {
+    print(unit(write_to_file("q\\u{0}zzz", "x")))
+    print(exists("q"))
+    print(unit(write_to_file("q", "kept")))
+    print(match read_to_string("q\\u{0}other") {
+        Ok(s) => s,
+        Err(e) => cause(e),
+    })
+    print(unit(make_dir("d\\u{0}")))
+    print(unit(remove_file("q\\u{0}")))
+    print(unit(rename("q", "r\\u{0}s")))
+    print(unit(rename("q\\u{0}", "r")))
+    print(unit(remove_dir("q\\u{0}")))
+    print(exists("q\\u{0}"))
+    print(match list_dir(".\\u{0}") {
+        Ok(names) => "listed",
+        Err(e) => cause(e),
+    })
+    print(match read_to_string("q") {
+        Ok(s) => s,
+        Err(e) => cause(e),
+    })
+}
+"""
+NUL_PATHS_OUTPUT = ("invalid input\nfalse\nok\ninvalid input\ninvalid input\ninvalid input\ninvalid input\ninvalid input\n"
+                    "invalid input\nfalse\ninvalid input\nkept\n")
+
+
 def prepare_tree(work: str) -> None:
     """`tree/` with files, nested directories and a link to `outside/`."""
     os.makedirs(os.path.join(work, "tree", "sub", "deeper"))
@@ -424,6 +469,7 @@ class IoErrorCauses(unittest.TestCase):
                 '        Err(IoError.Cancelled) => "cancelled",\n'
                 '        Err(IoError.Unsupported) => "unsupported",\n'
                 '        Err(IoError.BrokenPipe) => "broken pipe",\n'
+                '        Err(IoError.InvalidInput) => "invalid input",\n'
                 '        Err(IoError.Other(c)) => f"other {c}",\n'
                 "    }\n"
                 "}\n"
@@ -522,6 +568,12 @@ class DirectoryParity(unittest.TestCase):
         for impl, result in self.run_all("remove", REMOVE_TOUR, prepare_tree).items():
             with self.subTest(implementation=impl):
                 self.assertEqual(result, (REMOVE_TOUR_OUTPUT, "", 0))
+
+    def test_a_nul_byte_in_a_path(self) -> None:
+        for impl, result in self.run_all("nul", NUL_PATHS).items():
+            with self.subTest(implementation=impl):
+                self.assertEqual(result, (NUL_PATHS_OUTPUT, "", 0))
+                self.assertEqual(sorted(os.listdir(self.work_dir("nul", impl))), ["q"])
 
     def test_many_long_names(self) -> None:
         names = [f"{i:03d}" + "x" * (i - 3) if i >= 3 else "n" * i for i in range(1, 256)]

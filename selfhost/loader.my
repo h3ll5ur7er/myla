@@ -25,7 +25,7 @@
 // directory as if that were `<name>/` in the project root, anything else in
 // the project root and then the stdlib root.
 
-from std.fs import read_to_string, exists, is_dir
+from std.fs import read_to_string, exists, is_dir, current_dir
 from .stdroot import is_embedded, embedded_text, EMBEDDED_ROOT
 from .parser import parse_source_all, expr_of, stmt_of, type_expr_of, block_of, pattern_of, fun_of
 from .diag import Report, reports, type_report, chain
@@ -221,6 +221,76 @@ pub fun normalize(p: str) -> str {
     return joined
 }
 
+// Whether `path` is a file of the standard library at `root`: their raw
+// memory is the library's own (D152), so a check of one as the entry (`myla
+// test lib/std/rt.my`, an editor) allows it. Both relative to the working
+// directory when they aren't absolute.
+#test("lib/std/rt.my", "lib")[true]
+#test("./lib/std/rt.my", "lib/")[true]
+#test("lib2/std/rt.my", "lib")[false]
+#test("prog.my", "lib")[false]
+pub fun in_stdlib(path: str, root: str) -> bool {
+    if root == EMBEDDED_ROOT { return in_std_tree(path) }
+    var p = normalize(path)
+    var r = normalize(root)
+    let pa = p.len() > 0 && p[0] == '/'
+    let ra = r.len() > 0 && r[0] == '/'
+    if pa != ra {
+        let here = match current_dir() {
+            Ok(d) => d,
+            Err(e) => { return false },
+        }
+        if !pa { p = normalize(here + "/" + p) }
+        if !ra { r = normalize(here + "/" + r) }
+    }
+    return r != "." && p.len() > r.len() + 1 && starts_with_text(p, r + "/")
+}
+
+// With the embedded library, whether `path` is in a copy of the standard
+// library on disk (the repository's lib/std): under a directory `std` that
+// holds `rt.my`, which `myla check lib/std/fs.my` checks as `--stdlib lib`
+// would.
+fun in_std_tree(path: str) -> bool {
+    var p = normalize(path)
+    if p.len() == 0 || p[0] != '/' {
+        let here = match current_dir() {
+            Ok(d) => d,
+            Err(e) => { return false },
+        }
+        p = normalize(here + "/" + p)
+    }
+    var end = p.len() - 1
+    while end > 0 {
+        if p[end] == '/' {
+            var sb = StringBuilder()
+            sb.append(p, 0, end)
+            let dir = sb.build()
+            if ends_with_std(dir) && exists(dir + "/rt.my") { return true }
+        }
+        end -= 1
+    }
+    return false
+}
+
+// Whether the directory `dir` is named `std`.
+#test("/a/lib/std")[true]
+#test("/a/libstd")[false]
+#test("/std")[true]
+fun ends_with_std(dir: str) -> bool {
+    let n = dir.len()
+    return n >= 4 && dir[n - 4] == '/' && dir[n - 3] == 's' && dir[n - 2] == 't' && dir[n - 1] == 'd'
+}
+
+fun starts_with_text(s: str, prefix: str) -> bool {
+    if prefix.len() > s.len() { return false }
+    var i = 0
+    while i < prefix.len() {
+        if s[i] != prefix[i] { return false }
+        i = i + 1
+    }
+    return true
+}
+
 #test("/work/myla/lib")[["work", "myla", "lib"]]
 #test("/work/myla/lib/std/task.my")[["work", "myla", "lib", "std", "task.my"]]
 #test("/work/myla/lib/std/process.my")[["work", "myla", "lib", "std", "process.my"]]
@@ -339,7 +409,7 @@ fun named(d: Decl) -> Option<NamedDecl> {
         DeclKind.FunDecl(fd) => Some(NamedDecl { name: fd.name, is_pub: fd.is_pub }),
         DeclKind.EnumDecl(n, v, a, t, p) => Some(NamedDecl { name: n, is_pub: p }),
         DeclKind.TypeAliasDecl(n, t, a, p) => Some(NamedDecl { name: n, is_pub: p }),
-        DeclKind.TraitDecl(n, m, t, p) => Some(NamedDecl { name: n, is_pub: p }),
+        DeclKind.TraitDecl(n, m, t, p, dattrs) => Some(NamedDecl { name: n, is_pub: p }),
         DeclKind.ConstDecl(n, t, v, a, p) => Some(NamedDecl { name: n, is_pub: p }),
         _ => None,
     }
@@ -454,6 +524,11 @@ impl Loader {
         }
         if p.dots == 0 && p.segments[0] == "std" && self.stdlib_root == "" {
             return Err(at(importer, p.line, p.col, p.sp, format("cannot resolve import '{}': no standard library root was given", dotted(p))))
+        }
+        // a root named by `--stdlib` or MYLA_STDLIB that isn't there says so
+        // (the review of 2026-11-06)
+        if p.dots == 0 && p.segments[0] == "std" && self.stdlib_root != EMBEDDED_ROOT && !is_dir(self.stdlib_root) {
+            return Err(at(importer, p.line, p.col, p.sp, format("cannot resolve import '{}': the standard library root '{}' (from --stdlib or MYLA_STDLIB) is not a directory", dotted(p), self.stdlib_root)))
         }
         return Err(at(importer, p.line, p.col, p.sp, format("cannot resolve import '{}'", dotted(p))))
     }
@@ -806,12 +881,12 @@ impl Renamer {
                 DeclKind.ConstDecl(qualify(mid, n), self.ty(t), self.expr(v), attrs, isp)
             },
             DeclKind.FunDecl(fd) => DeclKind.FunDecl(self.function(fd, qualify(mid, fd.name), false, [])),
-            DeclKind.TraitDecl(n, methods, tps, isp) => {
+            DeclKind.TraitDecl(n, methods, tps, isp, dattrs) => {
                 var ms: [FunData] = []
                 for m in methods { ms.push(self.signature(m)) }
-                DeclKind.TraitDecl(qualify(mid, n), ms, tps, isp)
+                DeclKind.TraitDecl(qualify(mid, n), ms, tps, isp, dattrs)
             },
-            DeclKind.ImplDecl(target, methods, tps, itrait, targs) => {
+            DeclKind.ImplDecl(target, methods, tps, itrait, targs, dattrs) => {
                 self.tys = tp_names(tps)
                 self.tys.push("Self")
                 let target2 = self.ty(target)
@@ -822,7 +897,7 @@ impl Renamer {
                 self.tys = []
                 var ms: [FunData] = []
                 for m in methods { ms.push(self.function(m, m.name, true, tp_names(tps))) }
-                DeclKind.ImplDecl(target2, ms, tps2, trait2, targs2)
+                DeclKind.ImplDecl(target2, ms, tps2, trait2, targs2, dattrs)
             },
             _ => d.kind,
         }

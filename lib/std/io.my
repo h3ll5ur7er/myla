@@ -26,19 +26,53 @@ pub fun write(fd: int32, s: str) -> Result<(), IoError> {
 // Write `s` to stdout, followed by a newline. Like `print`, it reports no
 // error: a closed pipe ends the program quietly (D146).
 pub fun println(s: str) {
-    __write(1, s)
-    __write(1, "\n")
+    put(1, s)
+    put(1, "\n")
 }
 
 // Write `s` to stderr (no newline).
 pub fun eprint(s: str) {
-    __write(2, s)
+    put(2, s)
 }
 
 // Write `s` to stderr, followed by a newline.
 pub fun eprintln(s: str) {
-    __write(2, s)
-    __write(2, "\n")
+    put(2, s)
+    put(2, "\n")
+}
+
+// `s` to `fd` by a write without a result: a closed pipe ends the program
+// quietly (D146), another error with a runtime error saying why (D153), as
+// `print` does.
+fun put(fd: int32, s: str) {
+    __write(fd, s)
+    let err = __io_errno()
+    if err != 0 {
+        __write(2, f"runtime error: write failed: {errno_text(err)}\n")
+        __exit(1)
+    }
+}
+
+// What the errno `code` of a failed write means (std.rt's `errno_text`).
+#test(28)["no space left on device"]
+#test(77)["errno 77"]
+pub fun errno_text(code: int32) -> str {
+    if code == 28 {
+        return "no space left on device"
+    }
+    if code == 5 {
+        return "input/output error"
+    }
+    if code == 9 {
+        return "bad file descriptor"
+    }
+    if code == 27 {
+        return "file too large"
+    }
+    if code == 122 {
+        return "disk quota exceeded"
+    }
+    return f"errno {code}"
 }
 
 // --- Reading ------------------------------------------------------------------

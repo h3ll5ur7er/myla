@@ -539,10 +539,10 @@ impl Parser {
         } else if k == TokenKind.ENUM {
             return self.enum_decl(attrs, is_pub)
         } else if k == TokenKind.IMPL {
-            let d = self.impl_decl()
-            if attrs.len() > 0 {
-                self.fail_at(tok, "attributes are not allowed on an 'impl' block")
-            } else if is_pub {
+            // `#allow` may stand on an impl block (D161); the checker says
+            // which attributes it takes
+            let d = self.impl_decl(attrs)
+            if is_pub {
                 self.fail_at(pub_tok, "'pub' is not allowed on an 'impl' block (visibility follows the implemented type)")
             }
             return d
@@ -777,8 +777,8 @@ impl Parser {
         return self.mk_decl(kw.line, kw.column, DeclKind.FunDecl(fd))
     }
 
-    #test(parser_on("a.b[0]"))[Decl { id: 1, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 7 }, kind: DeclKind.ImplDecl(TypeExpr { id: 0, line: 1, col: 2, sp: SrcSpan { sline: 1, scol: 2, eline: 1, ecol: 7 }, kind: TypeKind.TRef("", []) }, [], [], None, []) }]
-    fun impl_decl(var self) -> Decl {
+    #test(parser_on("a.b[0]"), [])[Decl { id: 1, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 7 }, kind: DeclKind.ImplDecl(TypeExpr { id: 0, line: 1, col: 2, sp: SrcSpan { sline: 1, scol: 2, eline: 1, ecol: 7 }, kind: TypeKind.TRef("", []) }, [], [], None, [], []) }]
+    fun impl_decl(var self, attrs: [Attribute]) -> Decl {
         let kw = self.advance()
         let tps = self.generics()
         let first = self.parse_type()
@@ -812,10 +812,10 @@ impl Parser {
             self.skip_separators()
         }
         self.expect(TokenKind.RBRACE, "'}' to close impl block")
-        return self.mk_decl(kw.line, kw.column, DeclKind.ImplDecl(target, methods, tps, trait_name, trait_args))
+        return self.mk_decl(kw.line, kw.column, DeclKind.ImplDecl(target, methods, tps, trait_name, trait_args, attrs))
     }
 
-    #test(parser_on("a.b[0]"), [], false)[Decl { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 7 }, kind: DeclKind.TraitDecl(".", [], [], false) }]
+    #test(parser_on("a.b[0]"), [], false)[Decl { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 7 }, kind: DeclKind.TraitDecl(".", [], [], false, []) }]
     fun trait_decl(var self, attrs: [Attribute], is_pub: bool) -> Decl {
         let kw = self.advance()
         let name = self.expect(TokenKind.IDENT, "trait name").lexeme
@@ -836,7 +836,7 @@ impl Parser {
             self.skip_separators()
         }
         self.expect(TokenKind.RBRACE, "'}' to close trait body")
-        return self.mk_decl(kw.line, kw.column, DeclKind.TraitDecl(name, methods, tps, is_pub))
+        return self.mk_decl(kw.line, kw.column, DeclKind.TraitDecl(name, methods, tps, is_pub, attrs))
     }
 
     // Before a member of an impl or trait body (parser.py: _member): after an
@@ -1202,17 +1202,29 @@ impl Parser {
         // `()`: the unit value (D138)
         if self.match1(TokenKind.RPAREN) { return [] }
         var elems: [BindElem] = [self.binding_elem()]
+        self.no_pattern_in_binding()
         if !self.match1(TokenKind.COMMA) {
             self.fail_at(self.peek(), "expected ',' in destructuring binding (use '(x,)' for a 1-tuple)")
         }
         while !self.check(TokenKind.RPAREN) {
             elems.push(self.binding_elem())
+            self.no_pattern_in_binding()
             if !self.match1(TokenKind.COMMA) {
                 break
             }
         }
         self.expect(TokenKind.RPAREN, "')'")
         return elems
+    }
+
+    // A name followed by `(` or `.` in a destructuring `let`: a variant
+    // pattern, which only a `match` or an `if let` takes inside a tuple (a
+    // let-else takes one variant pattern; the review of 2026-11-06, R14).
+    fun no_pattern_in_binding(var self) {
+        let t = self.peek()
+        if t.kind == TokenKind.LPAREN || t.kind == TokenKind.DOT {
+            self.fail_at(t, "a destructuring 'let' binds names, not patterns: for a tuple of patterns write 'match' or 'if let' (a let-else takes one variant pattern, such as 'Some(x)')")
+        }
     }
 
     #test(parser_on("[int]"))[BindElem.BWild]

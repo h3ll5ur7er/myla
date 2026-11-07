@@ -22,6 +22,7 @@ import .platform as os
 import .fmt as fmt
 // slices (D142): the code generator calls std.slice's functions
 import .slice as slice
+import .num as num
 
 // `a + b` (`__str_concat`): a new cell holding both strings' bytes.
 pub fun str_concat(a: str, b: str) -> str {
@@ -169,9 +170,31 @@ fun record(r: int64) {
     }
 }
 
+// Whether `path` holds a NUL byte, which the kernel would take for its end
+// (`"a\u{0}b"` naming `a`): such a path names nothing, with EINVAL (the
+// review of 2026-11-06, R7; `IoError.InvalidInput`).
+fun nul_in(path: str) -> bool {
+    let p = __addr_of(path)
+    let n = __load64(p)
+    var i: int64 = 0
+    while i < n {
+        if __load8(p + 8 + i) == 0u8 {
+            __set_io_errno(EINVAL)
+            return true
+        }
+        i += 1
+    }
+    return false
+}
+
+const EINVAL: int64 = 22
+
 // `__stat`: the mode of what `path` names (the type bits and permissions),
 // or -1.
 pub fun stat(path: str) -> int {
+    if nul_in(path) {
+        return -1
+    }
     let r = os.mode_of(path)
     record(r)
     if r < 0 {
@@ -182,19 +205,27 @@ pub fun stat(path: str) -> int {
 
 // `__mkdir`: a directory with the permissions `mode`.
 pub fun mkdir(path: str, mode: int) {
-    record(os.make_dir(path, mode as int64))
+    if !nul_in(path) {
+        record(os.make_dir(path, mode as int64))
+    }
 }
 
 pub fun unlink(path: str) {
-    record(os.remove_file(path))
+    if !nul_in(path) {
+        record(os.remove_file(path))
+    }
 }
 
 pub fun rmdir(path: str) {
-    record(os.remove_dir(path))
+    if !nul_in(path) {
+        record(os.remove_dir(path))
+    }
 }
 
 pub fun rename(from_path: str, to_path: str) {
-    record(os.rename(from_path, to_path))
+    if !nul_in(from_path) && !nul_in(to_path) {
+        record(os.rename(from_path, to_path))
+    }
 }
 
 // `__getcwd`: the working directory, or "" with the errno (ENOENT for a
@@ -219,6 +250,9 @@ pub fun getcwd() -> str {
 // until the end.
 pub fun read_file(path: str) -> str {
     __set_io_errno(0)
+    if nul_in(path) {
+        return ""
+    }
     let fd = os.open_read(path)
     if fd < 0 {
         __set_io_errno(-fd)
@@ -261,6 +295,9 @@ pub fun read_file(path: str) -> str {
 // permissions 0644), the errno recorded.
 pub fun write_file(path: str, contents: str) {
     __set_io_errno(0)
+    if nul_in(path) {
+        return
+    }
     let fd = os.open_write(path)
     if fd < 0 {
         __set_io_errno(-fd)
@@ -285,6 +322,9 @@ pub fun write_file(path: str, contents: str) {
 // or "" with the errno.
 pub fun list_dir(path: str) -> str {
     __set_io_errno(0)
+    if nul_in(path) {
+        return ""
+    }
     let fd = os.open_dir(path)
     if fd < 0 {
         __set_io_errno(-fd)
@@ -524,6 +564,10 @@ pub fun args() -> [str] {
 // --- numbers as text ---------------------------------------------------------
 
 // How many decimal digits `u` has.
+#test(0u64)[1]
+#test(9u64)[1]
+#test(10u64)[2]
+#test(18446744073709551615u64)[20]
 fun digit_count(u: uint64) -> int64 {
     var n: int64 = 1
     var p: uint64 = 10
@@ -987,9 +1031,13 @@ fun sb_bigger(holder: int64, cell: int64, need: int64) -> int64 {
     if cap < need {
         cap = need
     }
+    if grew_in_place(cell, cap + 16) {
+        __store64(cell + 8, __load64(cell - 16) - 16)
+        return cell
+    }
     let bigger = __alloc(cap + 16)
     __store64(bigger, len)
-    __store64(bigger + 8, cap)
+    __store64(bigger + 8, __load64(bigger - 16) - 16)
     __copy_bytes(bigger + 16, cell + 16, len)
     __free(cell)
     __store64(holder, bigger)
@@ -1000,11 +1048,48 @@ fun sb_bigger(holder: int64, cell: int64, need: int64) -> int64 {
 
 
 // `print(s)` (`__print_str`) and `print` of the other scalars but floats.
+// A closed pipe ends the program quietly (D146), another error with a
+// runtime error (D153).
 pub fun print_str(s: str) {
     let c = __addr_of(s)
-    if os.write_line(c + 8, __load64(c)) == os.EPIPE {
+    let r = os.write_line(c + 8, __load64(c))
+    if r == os.EPIPE {
         os.broken_pipe()
     }
+    if r < 0 {
+        write_failed(-r)
+    }
+}
+
+// A write without a result that failed: the program ends with a runtime
+// error saying why (D153; `std.io` says the same for its writes).
+fun write_failed(code: int64) {
+    write_err(__addr_of("runtime error: write failed: "))
+    write_err(__addr_of(errno_text(code)))
+    write_err(__addr_of("\n"))
+    os.exit(1)
+}
+
+// What the errno `code` of a failed write means (as `strerror` says it).
+#test(28i64)["no space left on device"]
+#test(71i64)["errno 71"]
+fun errno_text(code: int64) -> str {
+    if code == 28 {
+        return "no space left on device"
+    }
+    if code == 5 {
+        return "input/output error"
+    }
+    if code == 9 {
+        return "bad file descriptor"
+    }
+    if code == 27 {
+        return "file too large"
+    }
+    if code == 122 {
+        return "disk quota exceeded"
+    }
+    return format("errno {}", code)
 }
 
 pub fun print_int(v: int64) {
@@ -1105,9 +1190,14 @@ fun write_err_num(n: int64) {
 // heads at `__free_buckets + size`, the large ones' at `+ 4104 + 8k` for
 // 2^k bytes. A new one comes off that list, else from the arena between
 // `__heap_ptr` and `__heap_end`: a chunk of CHUNK bytes the platform maps
-// when the last one is full (none before the first cell, D106 (B)); a cell
-// bigger than a chunk gets a mapping of its own. So a program holds about
-// as much address space as it uses.
+// when the last one is full (none before the first cell, D106 (B)). A big
+// cell, one that doesn't fit in a chunk, gets a mapping of its own, as big
+// as it needs in whole pages, and gives it back when it is freed (D157);
+// where the platform can't give memory back (wasm32) it goes on
+// `__big_free` instead, for a later big cell it is large enough for (the
+// review of 2026-11-06, R6: a power of two for every size and nothing
+// reused stopped a list at 2^26 elements). So a program holds about as
+// much address space as it uses.
 
 const CHUNK: int64 = 16777216  // 16 MiB, a power of two
 
@@ -1115,6 +1205,10 @@ const CHUNK: int64 = 16777216  // 16 MiB, a power of two
 pub fun alloc(n: int64) -> int64 {
     var size = (n + 7) & -8
     var slot = __rt_addr("__free_buckets") + size
+    if size + 32 > CHUNK {
+        // a big cell: a mapping of its own (D157)
+        return alloc_big(size, 16, 0)
+    }
     if size > 4096 {
         let k = __bsr64(size - 1) + 1
         size = 1i64 << k
@@ -1142,13 +1236,7 @@ pub fun alloc(n: int64) -> int64 {
 // arena (the rest of the old one stays unused).
 fun alloc_mapped(size: int64) -> int64 {
     if size + 16 > CHUNK {
-        let m = os.map_memory(size + 16)
-        if m < 0 {
-            __trap_oom()
-        }
-        __store64(m, size)
-        __store64(m + 8, 1)
-        return m + 16
+        return alloc_big(size, 16, 0)
     }
     let m = os.map_memory(CHUNK)
     if m < 0 {
@@ -1164,6 +1252,12 @@ fun alloc_mapped(size: int64) -> int64 {
 // `__free`: the cell `p` back on the list for its size.
 pub fun free(p: int64) {
     let size = __load64(p - 16)
+    // (a big cell's size is at least CHUNK - 32, an arena's at most half a
+    // chunk)
+    if size + 32 > CHUNK {
+        free_big(p, 16)
+        return
+    }
     var slot = __rt_addr("__free_buckets") + size
     if size > 4096 {
         slot = __rt_addr("__free_buckets") + 4104 + __bsr64(size) * 8
@@ -1185,6 +1279,10 @@ pub fun free(p: int64) {
 pub fun alloc_tasks(n: int64) -> int64 {
     var size = (n + 7) & -8
     var slot = __rt_addr("__free_buckets") + size
+    if size + 32 > CHUNK {
+        // a big cell: a mapping of its own (D157)
+        return alloc_big(size, 32, __rt_get("__worker_id"))
+    }
     if size > 4096 {
         let k = __bsr64(size - 1) + 1
         size = 1i64 << k
@@ -1215,7 +1313,7 @@ pub fun alloc_tasks(n: int64) -> int64 {
 fun alloc_tasks_mapped(size: int64) -> int64 {
     var span = CHUNK
     if size + 32 > CHUNK {
-        span = (size + 32 + CHUNK - 1) & -CHUNK
+        return alloc_big(size, 32, __rt_get("__worker_id"))
     }
     let m = map_aligned(span)
     __store64(m, __rt_get("__worker_id"))
@@ -1226,6 +1324,77 @@ fun alloc_tasks_mapped(size: int64) -> int64 {
     __store64(m + 16, size)
     __store64(m + 24, 1)
     return m + 32
+}
+
+// A big cell of at least `size` bytes, `head` bytes after the start of its
+// mapping (16; with tasks 32, the first word the worker's number, as a
+// chunk's, though nothing reads it): a freed one large enough taken back
+// where the platform keeps memory, else a mapping of whole pages, aligned to
+// a chunk with tasks (`worker` its first word). Its size is all the mapping
+// holds after `head`.
+fun alloc_big(size0: int64, head: int64, worker: int64) -> int64 {
+    let page: int64 = 65536
+    let span = (size0 + head + page - 1) & -page
+    if !os.RETURNS_MEMORY {
+        // (the platforms that keep memory run one worker, D125: no lock)
+        var prev = __rt_addr("__big_free")
+        var c = __load64(prev)
+        while c != 0 {
+            if __load64(c - 16) >= span - head {
+                __store64(prev, __load64(c))
+                __store64(c - 8, 1)
+                return c
+            }
+            prev = c
+            c = __load64(c)
+        }
+    }
+    var m: int64 = 0
+    if head == 32 {
+        m = map_aligned(span)
+        __store64(m, worker)
+    } else {
+        m = os.map_memory(span)
+        if m < 0 {
+            __trap_oom()
+        }
+    }
+    __store64(m + head - 16, span - head)
+    __store64(m + head - 8, 1)
+    return m + head
+}
+
+// Whether the cell `p` now holds at least `want` bytes where it is: a big
+// cell that ends where the memory does, on a platform that doesn't give
+// memory back (wasm32, whose memory grows only at its end), the memory
+// grown under it.
+fun grew_in_place(p: int64, want: int64) -> bool {
+    let size = __load64(p - 16)
+    if os.RETURNS_MEMORY || size + 32 <= CHUNK || want <= size {
+        return false
+    }
+    // the memory's end: a mapping of nothing gives it
+    if os.map_memory(0) != p + size {
+        return false
+    }
+    let page: int64 = 65536
+    let more = (want - size + page - 1) & -page
+    if os.map_memory(more) != p + size {
+        return false
+    }
+    __store64(p - 16, size + more)
+    return true
+}
+
+// The big cell `p` freed: its mapping given back, or kept for a later one
+// where the platform can't give memory back.
+fun free_big(p: int64, head: int64) {
+    if os.RETURNS_MEMORY {
+        os.unmap_memory(p - head, __load64(p - 16) + head)
+        return
+    }
+    __store64(p, __rt_get("__big_free"))
+    __store64(__rt_addr("__big_free"), p)
 }
 
 // `span` bytes (a multiple of CHUNK) mapped at an address that is a
@@ -1258,8 +1427,13 @@ fun alloc_drained(n: int64) -> int64 {
     return alloc_tasks(n)
 }
 
-// `__free` with tasks: another worker's cell onto its owner's list.
+// `__free` with tasks: another worker's cell onto its owner's list; a big
+// one given back wherever it is freed.
 pub fun free_tasks(p: int64) {
+    if __load64(p - 16) + 32 > CHUNK {
+        free_big(p, 32)
+        return
+    }
     let owner = __load64(p & -CHUNK)
     if owner != __rt_get("__worker_id") {
         let slot = __rt_waddr("__remote_free", owner)
@@ -1842,18 +2016,30 @@ pub fun sleep_frame(fr: int64, ms: int64) {
 // `__cancel_after(child, ms)`: the child task whose first frame is `fr`
 // cancelled once `ms` milliseconds passed (D124, `task.timeout`): its flags
 // get "has a deadline" (4), so its end takes the deadline off; the cell
-// `__disarm` reads, which says whether the deadline fired.
+// `__disarm` reads, which says whether the deadline fired. The child may
+// have ended already (on another worker, before this ran): its flags say
+// so (8, `task_end`), and no deadline is set, so none can fire later into
+// a freed frame (the review of 2026-11-06, R1). The flag and the timer go
+// in under the timers' lock, so an end that sees the flag finds the timer.
 pub fun cancel_after(fr: int64, ms: int64) -> int64 {
     let cell = __alloc(8)
     __store64(cell, 0)
     let at = fr + 48
+    let lock = __rt_addr("__timer_lock")
+    take_lock(lock)
     while true {
         let flags = __load64(at)
+        if (flags & 8) != 0 {
+            give_lock(lock)
+            return cell
+        }
         if __cas64(at, flags, flags | 4) {
             break
         }
     }
-    let seq = timer_add(os.clock_ns() + ms * 1000000, fr | 1, cell)
+    let seq = timer_add_locked(os.clock_ns() + ms * 1000000, fr | 1, cell)
+    give_lock(lock)
+    timers_changed()
     return cell
 }
 
@@ -1870,11 +2056,20 @@ pub fun disarm(cell: int64) -> bool {
 // that fired did all it does under their lock, so nothing touches the frame
 // after this), then the frames waiting for it go on, its word saying done.
 pub fun task_end(fr: int64) {
-    if (__load64(fr + 48) & 4) != 0 {
-        let lock = __rt_addr("__timer_lock")
-        take_lock(lock)
-        timers_forget(fr | 1)
-        give_lock(lock)
+    // "ended" (8) unless a deadline was set (4) first: then it is taken off
+    let at = fr + 48
+    while true {
+        let flags = __load64(at)
+        if (flags & 4) != 0 {
+            let lock = __rt_addr("__timer_lock")
+            take_lock(lock)
+            timers_forget(fr | 1)
+            give_lock(lock)
+            break
+        }
+        if __cas64(at, flags, flags | 8) {
+            break
+        }
     }
     wake_waiters(__xchg64(fr + 24, 1))
 }
@@ -1885,6 +2080,21 @@ pub fun task_end(fr: int64) {
 fun timer_add(at0: int64, fr: int64, cell: int64) -> int64 {
     let lock = __rt_addr("__timer_lock")
     take_lock(lock)
+    let seq = timer_add_locked(at0, fr, cell)
+    give_lock(lock)
+    timers_changed()
+    return seq
+}
+
+// A worker polling until a later time woken to wait for a new timer.
+fun timers_changed() {
+    if __rt_get("__exec_polling") != 0 {
+        os.poller_wake(__rt_get("__exec_poller"))
+    }
+}
+
+// `timer_add` with the timers' lock held.
+fun timer_add_locked(at0: int64, fr: int64, cell: int64) -> int64 {
     var at = at0
     if cell == 0 && task_cancelled() != 0 {
         at = 0
@@ -1916,11 +2126,6 @@ fun timer_add(at0: int64, fr: int64, cell: int64) -> int64 {
     __store64(e + 24, cell)
     __store64(c, __load64(c) + 1)
     __store64(__rt_addr("__timer_count"), __load64(c))
-    give_lock(lock)
-    // a worker polling until a later time wakes to wait for this one
-    if __rt_get("__exec_polling") != 0 {
-        os.poller_wake(__rt_get("__exec_poller"))
-    }
     return seq
 }
 
@@ -2169,12 +2374,17 @@ fun poll_events(n: int64) {
     __fetch_add64(__rt_addr("__exec_waking"), 1)
     var i: int64 = 0
     while i < n {
-        let fr = os.poller_event(i)
-        if fr != 0 {
+        // the descriptor's token (`watch_add`): every frame waiting for it
+        // queued, each with its other entries taken off
+        let tok = os.poller_event(i)
+        if tok != 0 {
             take_lock(lock)
-            let mine = watch_take(fr)
+            let frs = watchers_of(tok - 1)
+            for fr in frs {
+                let mine = watch_take(fr)
+            }
             give_lock(lock)
-            if mine {
+            for fr in frs {
                 exec_push(fr)
             }
         }
@@ -2230,7 +2440,10 @@ fun wait_fds(fr: int64, a: int64, b: int64) {
 }
 
 // An entry `[fd][frame]` on `__watches`, the descriptor watched; false when
-// the poller can't watch it (no entry then). The lock held.
+// the poller can't watch it (no entry then). The lock held. A descriptor is
+// watched once whatever number of frames wait for it, its token `fd + 1`
+// (a poller keeps one per descriptor: a second frame's would replace the
+// first's, the review of 2026-11-06, R5), and an event queues them all.
 fun watch_add(fd: int64, fr: int64) -> bool {
     var cell = __rt_get("__watches")
     if cell == 0 || __load64(cell) == __load64(cell + 8) {
@@ -2250,7 +2463,7 @@ fun watch_add(fd: int64, fr: int64) -> bool {
         __store64(__rt_addr("__watches"), bigger)
         cell = bigger
     }
-    if os.poller_watch(__rt_get("__exec_poller"), fd, fr) < 0 {
+    if !watched(fd) && os.poller_watch(__rt_get("__exec_poller"), fd, fd + 1) < 0 {
         return false
     }
     let n = __load64(cell)
@@ -2270,10 +2483,11 @@ fun watch_take(fr: int64) -> bool {
     }
     var n = __load64(cell)
     var found = false
+    var gone: [int64] = []
     var i: int64 = 0
     while i < n {
         if __load64(cell + 24 + i * 16) == fr {
-            os.poller_forget(__rt_get("__exec_poller"), __load64(cell + 16 + i * 16))
+            gone.push(__load64(cell + 16 + i * 16))
             n -= 1
             __copy_bytes(cell + 16 + i * 16, cell + 16 + n * 16, 16)
             found = true
@@ -2283,7 +2497,58 @@ fun watch_take(fr: int64) -> bool {
     }
     __store64(cell, n)
     __store64(__rt_addr("__watch_count"), n)
+    // a descriptor no other frame waits for no longer watched
+    for fd in gone {
+        if !watched(fd) {
+            os.poller_forget(__rt_get("__exec_poller"), fd)
+        }
+    }
     return found
+}
+
+// Whether a frame waits for `fd` (the lock held).
+fun watched(fd: int64) -> bool {
+    let cell = __rt_get("__watches")
+    if cell == 0 {
+        return false
+    }
+    var i: int64 = 0
+    while i < __load64(cell) {
+        if __load64(cell + 16 + i * 16) == fd {
+            return true
+        }
+        i += 1
+    }
+    return false
+}
+
+// The frames waiting for `fd` (the lock held).
+fun watchers_of(fd: int64) -> [int64] {
+    var out: [int64] = []
+    let cell = __rt_get("__watches")
+    if cell == 0 {
+        return out
+    }
+    var i: int64 = 0
+    while i < __load64(cell) {
+        let fr = __load64(cell + 24 + i * 16)
+        if __load64(cell + 16 + i * 16) == fd && !has_word(out, fr) {
+            out.push(fr)
+        }
+        i += 1
+    }
+    return out
+}
+
+#test([3i64, 5i64], 5i64)[true]
+#test([], 1i64)[false]
+fun has_word(xs: [int64], x: int64) -> bool {
+    for y in xs {
+        if y == x {
+            return true
+        }
+    }
+    return false
 }
 
 // Every task waits for another one: the program ends.
@@ -2305,11 +2570,29 @@ pub fun list_grow(cell: int64, stride: int64) -> int64 {
     if cap != 0 {
         bigger = cap * 2
     }
+    // a big cell at the top of a memory that doesn't give memory back
+    // (wasm32) grows where it is: no copy, and no second cell beside it
+    if grew_in_place(cell, bigger * stride + 16) {
+        __store64(cell + 8, elements_in(cell, stride, bigger))
+        return cell
+    }
     let p = __alloc(bigger * stride + 16)
     __copy_bytes(p, cell, cap * stride + 16)
-    __store64(p + 8, bigger)
+    // the whole cell: its size class (or a big cell's pages) may hold more
+    // than was asked (the review of 2026-11-06, R6)
+    __store64(p + 8, elements_in(p, stride, bigger))
     __free(cell)
     return p
+}
+
+// How many elements of `stride` bytes the list cell `p` holds (its size is
+// the word 16 bytes before it), at least `asked`; `asked` for elements of no
+// bytes (a `[()]`).
+fun elements_in(p: int64, stride: int64, asked: int64) -> int64 {
+    if stride == 0 {
+        return asked
+    }
+    return (__load64(p - 16) - 16) / stride
 }
 
 // --- deep copies between tasks (D92, MYLA-148) ---------------------------------------
@@ -2491,9 +2774,12 @@ pub fun fmod(xb: int64, yb: int64) -> int64 {
     return (ux | sx) as int64
 }
 
-// `__float_to_str`: the float64 of the bits `bits` with `digits` significant
-// digits, trailing zeros dropped: plain digits up to its units, then a point
-// and the rest, or `0.` and zeros before them for a magnitude below 1.
+// `__float_to_str`: the float64 of the bits `bits` in the fewest significant
+// digits, up to `digits`, that read back as it (D155; `digits` is 9 for a
+// float32, whose digits read back as that float32), trailing zeros dropped:
+// plain digits up to its units, then a point and the rest, or `0.` and zeros
+// before them for a magnitude below 1; below 1e-4 and from 1e16 on, its
+// digits with a point after the first and the exponent (`1.5e-7`, `1e300`).
 pub fun float_to_str(bits: int64, digits: int64) -> str {
     let mag = bits & 9223372036854775807
     let inf: int64 = 9218868437227405312
@@ -2526,21 +2812,26 @@ pub fun float_to_str(bits: int64, digits: int64) -> str {
             lo = mid + 1
         }
     }
-    var m = fscale(x, digits - 1 + 323 - at) as uint64
-    var low: uint64 = 1
-    var k = digits - 1
-    while k > 0 {
-        low = low * 10u64
-        k -= 1
+    // the fewest digits that read back as it: more digits, correctly
+    // rounded, are never farther from it, so a binary search finds them
+    // (`digits` always do)
+    var lo_n: int64 = 1
+    var hi_n = digits
+    while lo_n < hi_n {
+        let mid = (lo_n + hi_n) >> 1
+        if digits_reading_back(x, at, mid, mag as uint64, digits == 9).0 != 0u64 {
+            hi_n = mid
+        } else {
+            lo_n = mid + 1
+        }
     }
-    if m >= low * 10u64 {
-        m = m / 10u64
-        at += 1
+    var n = lo_n
+    var dn = decimal_digits(x, at, n)
+    if n < digits {
+        dn = digits_reading_back(x, at, n, mag as uint64, digits == 9)
     }
-    if m < low {
-        m = low
-    }
-    var n = digits
+    var m = dn.0
+    at = dn.1
     while n > 1 {
         let q = m / 10u64
         if m != q * 10u64 {
@@ -2553,6 +2844,9 @@ pub fun float_to_str(bits: int64, digits: int64) -> str {
     var sign: int64 = 0
     if bits < 0 {
         sign = 1
+    }
+    if exp < -4 || exp >= 16 {
+        return exponent_form(m, n, exp, sign == 1)
     }
     var len: int64 = 0
     var dot: int64 = -1
@@ -2608,4 +2902,89 @@ pub fun float_to_str(bits: int64, digits: int64) -> str {
         }
     }
     return __str_of(p)
+}
+
+// `x`'s `n` significant digits, rounded, as an integer, and the index of its
+// decimal exponent (`at`, one more when rounding carried into a new digit).
+fun decimal_digits(x: float64, at0: int64, n: int64) -> (uint64, int64) {
+    var at = at0
+    var m = fscale(x, n - 1 + 323 - at) as uint64
+    var low: uint64 = 1
+    var k = n - 1
+    while k > 0 {
+        low = low * 10u64
+        k -= 1
+    }
+    if m >= low * 10u64 {
+        m = m / 10u64
+        at += 1
+    }
+    if m < low {
+        m = low
+    }
+    return (m, at)
+}
+
+// `x`'s `n` significant digits that read back as it, and the index of their
+// exponent, or 0 for none: the rounded digits, or one either side of them
+// (the scaling's rounding can be one off in the last place).
+fun digits_reading_back(x: float64, at0: int64, n: int64, mag: uint64, f32: bool) -> (uint64, int64) {
+    let d = decimal_digits(x, at0, n)
+    let e = d.1 - 323 - (n - 1)
+    if reads_back(d.0, e, mag, f32) {
+        return d
+    }
+    if reads_back(d.0 - 1u64, e, mag, f32) {
+        return (d.0 - 1u64, d.1)
+    }
+    if reads_back(d.0 + 1u64, e, mag, f32) {
+        return (d.0 + 1u64, d.1)
+    }
+    return (0u64, d.1)
+}
+
+// Whether `m` times 10 to the `e` reads back as the float64 of the bits `mag`
+// (non-negative), or as its float32 (`f32`), as a literal does.
+fun reads_back(m: uint64, e: int64, mag: uint64, f32: bool) -> bool {
+    var b: uint64 = 0
+    if m < 9007199254740992u64 && e >= -22 && e <= 22 {
+        // both exact, so the one rounding of the product or quotient is the
+        // literal's (Clinger's fast path)
+        var ae = e
+        if ae < 0 {
+            ae = -ae
+        }
+        let k = pow10_hi(323 + ae)
+        var y = m as float64
+        if e >= 0 {
+            y = y * k
+        } else {
+            y = y / k
+        }
+        b = __f64_bits(y)
+    } else {
+        b = num.f64_literal_bits(uint_to_str(m) + "e" + int_to_str(e))
+    }
+    if f32 {
+        b = num.f32_round_bits(b)
+    }
+    return b == mag
+}
+
+// The `n` digits of `m` with a point after the first (none for one digit),
+// then `e` and the exponent `exp` (D155).
+fun exponent_form(m0: uint64, n: int64, exp: int64, negative: bool) -> str {
+    let ds = uint_to_str(m0)
+    var sb = StringBuilder()
+    if negative {
+        sb.append("-")
+    }
+    sb.append(ds, 0, 1)
+    if n > 1 {
+        sb.append(".")
+        sb.append(ds, 1, n as int32)
+    }
+    sb.append("e")
+    sb.append(int_to_str(exp))
+    return sb.build()
 }

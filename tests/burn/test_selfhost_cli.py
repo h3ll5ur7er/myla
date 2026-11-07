@@ -19,7 +19,7 @@ import sys
 import tempfile
 import unittest
 
-from ._golden import golden
+from ._golden import golden, recorded_examples
 from ._native import CAN_BUILD_NATIVE, SKIP_REASON
 from ._tools import STDLIB_ROOT, selfhost_tool
 
@@ -136,10 +136,12 @@ class SelfHostedCli(_Layout):
         for command in ("run", "check"):
             with self.subTest(command=command):
                 mine = self.myla_cmd(command, "warned.my")
-                python = python_cli([command, "warned.my"], {"warned.my": WARNED}, self.work)
-                self.assertEqual((mine.stdout, mine.stderr, mine.returncode), python)
+                py_out, py_err, py_code = python_cli([command, "warned.my"], {"warned.my": WARNED}, self.work)
+                # the Python CLI's, but for the warning's name (D161)
+                py_err = py_err.replace("warning: ", "warning[reentrancy]: ")
+                self.assertEqual((mine.stdout, mine.stderr, mine.returncode), (py_out, py_err, py_code))
                 self.assertEqual(mine.returncode, 0)
-                self.assertIn("warning: 'self.stock' was checked before an 'await'", mine.stderr)
+                self.assertIn("warning[reentrancy]: 'self.stock' was checked before an 'await'", mine.stderr)
                 self.assertIn("note: other calls to the actor may run at this 'await'", mine.stderr)
         self.assertEqual(self.myla_cmd("run", "warned.my").stdout, "true\n")
 
@@ -268,7 +270,7 @@ fun after() -> int { return 7 }
 
 
 def _sources_with_tests() -> list[str]:
-    files = (glob.glob(os.path.join(_REPO, "examples", "*.my")) + glob.glob(os.path.join(_REPO, "selfhost", "*.my"))
+    files = (recorded_examples() + glob.glob(os.path.join(_REPO, "selfhost", "*.my"))
              + glob.glob(os.path.join(_REPO, "tools", "*", "*.my"))
              + glob.glob(os.path.join(_REPO, "lib", "std", "*.my")))
     out = []

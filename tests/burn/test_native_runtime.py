@@ -72,6 +72,93 @@ KEPT_CHECKS = [
     ("a_string", 'var s = "abc"\n    let n = s.len()\n    s = "a"\n    for i in 0..n { print(s[i]) }', "97\n", "6:28"),
 ]
 
+# A list too big for a chunk of the arena has a mapping of its own, given
+# back to the system when it is freed (D157), with tasks too, where it may be
+# freed on another worker (the review of 2026-11-06, R6, R29: it stayed
+# resident for the program's life).
+BIG_LIST_FREED = """from std.fs import read_to_string
+
+// The resident memory in MB, from /proc/self/status's VmRSS (in kB).
+fun rss_mb() -> int {
+    let text = match read_to_string("/proc/self/status") {
+        Ok(t) => t,
+        Err(e) => { return -1 },
+    }
+    var i = 0
+    while i + 6 < text.len() {
+        if text[i:i + 6] == "VmRSS:" {
+            var n = 0
+            var j = i + 6
+            while j < text.len() && text[j] != 10u8 {
+                let c = text[j]
+                if c >= 48u8 && c <= 57u8 { n = n * 10 + (c as int - 48) }
+                j += 1
+            }
+            return n / 1024
+        }
+        i += 1
+    }
+    return -1
+}
+
+fun fill(n: int) -> int {
+    var xs: [int64] = []
+    for i in 0..n { xs.push(i as int64) }
+    return xs.len()
+}
+
+fun main() {
+    print(fill(40000000))
+    print(rss_mb() < 100)
+}
+"""
+
+BIG_LIST_FREED_TASKS = """from std.fs import read_to_string
+
+// The resident memory in MB, from /proc/self/status's VmRSS (in kB).
+fun rss_mb() -> int {
+    let text = match read_to_string("/proc/self/status") {
+        Ok(t) => t,
+        Err(e) => { return -1 },
+    }
+    var i = 0
+    while i + 6 < text.len() {
+        if text[i:i + 6] == "VmRSS:" {
+            var n = 0
+            var j = i + 6
+            while j < text.len() && text[j] != 10u8 {
+                let c = text[j]
+                if c >= 48u8 && c <= 57u8 { n = n * 10 + (c as int - 48) }
+                j += 1
+            }
+            return n / 1024
+        }
+        i += 1
+    }
+    return -1
+}
+
+fun fill(n: int) -> int {
+    var xs: [int64] = []
+    for i in 0..n { xs.push(i as int64) }
+    return xs.len()
+}
+
+import std.task as task
+
+async fun fill_async(n: int) -> int {
+    await task.yield()
+    return fill(n)
+}
+
+#main
+async fun main() {
+    async let a = fill_async(40000000)
+    print(await a)
+    print(rss_mb() < 100)
+}
+"""
+
 # Counting loops whose index is known to be below the length index without a
 # check, and run as before (MYLA-251).
 UNCHECKED = """\
@@ -216,6 +303,13 @@ class NativeRuntime(unittest.TestCase):
                     self.assertEqual((proc.stdout, proc.stderr, proc.returncode),
                                      ("1\n", f"runtime error: {message}\n{where}\n", 1))
                     self.assertEqual(where, self.interpreter_position(name))
+
+    def test_a_freed_big_list_gives_its_memory_back(self):
+        for name, source in (("big_list", BIG_LIST_FREED), ("big_list_tasks", BIG_LIST_FREED_TASKS)):
+            for backend, binary in self.binaries(name, source):
+                with self.subTest(program=name, backend=backend):
+                    proc = subprocess.run([binary], capture_output=True, text=True, timeout=120)
+                    self.assertEqual((proc.stdout, proc.returncode), ("40000000\ntrue\n", 0), proc.stderr)
 
     def test_a_counting_loop_keeps_the_checks_it_needs(self):
         for name, body, out, position in KEPT_CHECKS:

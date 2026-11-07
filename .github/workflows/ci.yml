@@ -88,7 +88,40 @@ jobs:
           path: build/test-tools
           key: test-tools-${{ hashFiles('lib/std/*.my', 'selfhost/*.my', 'tools/**/*.my', 'bootstrap/seed.s') }}
       - name: The suites for ${{ matrix.target }}
+        # missing target tools fail the job instead of skipping every suite
+        # (MYLA-297)
+        env:
+          MYLA_REQUIRE_TARGETS: "1"
         run: python3 scripts/test-target.py ${{ matrix.target }}
+
+  wasm-page:
+    # the playground page (tools/wasm/page.html) in Chromium through
+    # Playwright: its example run, a type error shown, a runtime error and
+    # an endless recursion (D158, MYLA-297)
+    name: The wasm playground page in a browser
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+      - name: clang and lld (wasm-ld)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq clang lld
+      - name: Playwright with its Chromium
+        run: |
+          npm install --no-save --no-audit --no-fund playwright@1.63.0
+          npx playwright install --with-deps chromium
+      - uses: actions/cache@v6
+        with:
+          path: build/test-tools
+          key: test-tools-${{ hashFiles('lib/std/*.my', 'selfhost/*.my', 'tools/**/*.my', 'bootstrap/seed.s') }}
+      - name: The page's test (fails, not skips, without Playwright)
+        env:
+          MYLA_REQUIRE_BROWSER: "1"
+        run: python3 -m unittest tests.burn.test_wasm.WasmBrowser tests.burn.test_wasm.BrowserTools -v
 
   bootstrap:
     name: Bootstrap fixed point
@@ -145,6 +178,12 @@ jobs:
       # of 20 of t18, MYLA-267), and its three parts on their own
       - name: Closures across tasks, 100 runs each on 4 workers
         run: python3 scripts/stress-native.py --runs 100 --workers 4 --only t18_closures_cross_tasks --only t19_closures_to_children --only t20_siblings_clone_a_closure --only t21_composition_to_a_child
+      # the litmus programs of the runtime's protocols (MYLA-301): a child's
+      # result and its awaiter, park and push, cancel and sleep, timers armed
+      # and fired, descriptors watched; which qemu, in the targets job, can't
+      # reorder (MYLA-297)
+      - name: The runtime's litmus programs, 1,000 runs each on 4 and 16 workers
+        run: python3 scripts/stress-native.py --runs 1000 --workers 4,16 --only t23_results_seen_by_their_awaiter --only t24_cancelled_sleepers --only t25_timers_fire --only t26_tasks_yield --only t27_children_read_as_they_write
 
   vscode-extension:
     name: VS Code extension (typecheck, lint, tests, .vsix)

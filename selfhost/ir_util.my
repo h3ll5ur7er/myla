@@ -1,0 +1,60 @@
+// ir_util.my: the small helpers the backends share (ir_x86.my, ir_a64.my,
+// ir_wasm.my; MYLA-298): which blocks a function reaches, a constant wrapped
+// to its width, and tests on lists and types.
+
+from .checker import Type
+from .ir import IrFunc, successors
+
+// The blocks reachable from the entry.
+pub fun reachable_blocks(f: IrFunc) -> [bool] {
+    var reach: [bool] = []
+    for b in f.blocks { reach.push(false) }
+    if f.blocks.len() == 0 { return reach }
+    var work: [int32] = [0]
+    reach[0] = true
+    while work.len() > 0 {
+        let b = work.pop()
+        for s in successors(f.blocks[b].term) {
+            if !reach[s] {
+                reach[s] = true
+                work.push(s)
+            }
+        }
+    }
+    return reach
+}
+
+// `v` wrapped to a `w`-bit integer, signed or not, held in 64 bits.
+#test(0, 32, true)[0]
+#test(41, 32, true)[41]
+#test(1114111, 64, false)[1114111]
+#test(130, 8, true)[-126]
+#test(-1, 16, false)[65535]
+#test(2147483648, 32, true)[-2147483648]
+#test(-5, 64, true)[-5]
+pub fun wrapped(v: int64, w: int32, signed: bool) -> int64 {
+    if w >= 64 { return v }
+    let m = v & ((1i64 << (w as int64)) - 1)
+    if signed && ((m >> ((w - 1) as int64)) & 1) == 1 { return m - (1i64 << (w as int64)) }
+    return m
+}
+
+// Whether `xs` holds `x`.
+#test([1, 3], 3)[true]
+#test([1, 3], 2)[false]
+pub fun int_in(xs: [int32], x: int32) -> bool {
+    for y in xs { if y == x { return true } }
+    return false
+}
+
+#test(Type.TFloat(32))[true]
+#test(Type.TInt(32, true))[false]
+pub fun is_float_type(t: Type) -> bool {
+    return match t { Type.TFloat(w) => true, _ => false }
+}
+
+#test(Type.TChar)[true]
+#test(Type.TBool)[false]
+pub fun is_char_type(t: Type) -> bool {
+    return match t { Type.TChar => true, _ => false }
+}

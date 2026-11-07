@@ -7,7 +7,7 @@
 // runtime needs (integer widths, print/format rendering, casts) comes from the
 // checker's `resolved` side table, keyed by AST node id.
 
-from .ast import Expr, ExprKind, Stmt, StmtKind, Block, Decl, DeclKind, FunData, Param, MatchArm, Pattern, PatternKind, FieldPat, BindElem, ExprOrBlock, ElseTail, FieldInit, MapEntry, Attribute, TypeExpr, TypeKind, bind_elems
+from .ast import Expr, ExprKind, Stmt, StmtKind, Block, Decl, DeclKind, FunData, Param, MatchArm, Pattern, PatternKind, FieldPat, BindElem, ExprOrBlock, ElseTail, FieldInit, MapEntry, Attribute, TypeExpr, TypeKind, bind_elems, names_in_expr, names_in_block
 from .tokens import SrcSpan, no_span
 from .checker import Checker, Type, is_raw_memory_primitive, checker_on, builtin_method, builtin_method_name, is_slice_expr, from_end_of, slice_parts, is_hole_part
 from .anf import Norm, new_norm, stmt_suspends, body_suspends
@@ -15,7 +15,8 @@ from .util import cp_utf8, format_specs
 from std.fmt import fmt_int, fmt_float, fmt_text
 from std.slice import range_of, str_whole, take_str
 from std.num import f64_literal_bits, f32_round_bits, float_from_bits, pow2, format_float
-from std.io import write
+from std.io import write, eprint, errno_text
+from std.process import exit
 from std.fs import read_to_string
 from .parser import expr_of, stmt_of, type_expr_of, block_of, pattern_of, fun_of  // AST values for #test cases (MYLA-184)
 
@@ -435,6 +436,9 @@ pub fun interp_on(src: str) -> Interp {
     return it
 }
 
+// The interpreter runs a program's I/O itself, through the standard
+// library's primitives (D161: their warning silenced here, MYLA-285).
+#allow(primitive)
 impl Interp {
     // -- table construction ----------------------------------------------
 
@@ -443,7 +447,7 @@ impl Interp {
             match d.kind {
                 DeclKind.FunDecl(fd) => { self.add_func(fd.name, fd) },
                 DeclKind.EnumDecl(n, variants, attrs, tps, isp) => { self.enum_names.push(n) },
-                DeclKind.ImplDecl(target, methods, tps, trnm, targs) => {
+                DeclKind.ImplDecl(target, methods, tps, trnm, targs, dattrs) => {
                     let key = canon_type_name(self.type_name_of(target))
                     for m in methods { self.add_func(format("{}.{}", key, m.name), m) }
                 },
@@ -2533,6 +2537,11 @@ impl Interp {
         var step: int64 = 1
         if !is_hole_part(p.step) { step = as_int(self.eval(p.step)) }
         if self.stop() { return Value.VUnit }
+        // a plain negative bound is an error, as a negative index is (D154)
+        if (a.1 && !a.2 && a.0 < 0) || (b.1 && !b.2 && b.0 < 0) {
+            self.fail(e, "index out of bounds")
+            return Value.VUnit
+        }
         if step == 0 {
             self.fail(e, "slice step is zero")
             return Value.VUnit
@@ -3153,7 +3162,8 @@ impl Interp {
         if nm == "print" {
             let v = self.eval(args[0])
             if self.stop() { return Value.VUnit }
-            self.emit(format_typed(v, self.resolved_of(args[0].id)))
+            // a struct or enum through its `format` (D159), the rest as before
+            self.emit(self.format_spec_value(v, self.resolved_of(args[0].id), ""))
             self.emit("\n")
             return Value.VUnit
         }
@@ -3412,15 +3422,28 @@ impl Interp {
     // A lambda captures every currently-visible local by value (a snapshot).
     // Over-capturing is harmless: unreferenced names are simply never read, and
     // by-value copies give the deep-immutability semantics (D14/D48).
+    // A lambda's value: its body with the variables it reads, copied (by
+    // value, as natively). Only those: a copy of every variable in scope made
+    // each lambda keep the lists around it, and a loop pushing lambdas onto
+    // a list copied the list once per push (10,000 `task.all` sleepers took
+    // 600 MB, MYLA-296).
     fun eval_lambda(self, params: [Param], body: ExprOrBlock) -> Value {
+        let reads = match body {
+            ExprOrBlock.EB_Expr(x) => names_in_expr(x, []),
+            ExprOrBlock.EB_Block(b) => names_in_block(b, []),
+        }
+        var wanted: [str: bool] = [:]
+        for n in reads { wanted[n] = true }
         var cnames: [str] = []
         var cvals: [Value] = []
         var i = 0
         while i < self.scopes.len() {
             var j = 0
             while j < self.scopes[i].names.len() {
-                cnames.push(self.scopes[i].names[j])
-                cvals.push(self.scopes[i].vals[j])
+                if wanted.contains(self.scopes[i].names[j]) {
+                    cnames.push(self.scopes[i].names[j])
+                    cvals.push(self.scopes[i].vals[j])
+                }
                 j = j + 1
             }
             i = i + 1
@@ -3514,8 +3537,18 @@ impl Interp {
 
     // -- output -----------------------------------------------------------
 
+    // A program's output; one the system won't take ends the program with
+    // a runtime error, as natively (D153; a closed pipe ends it quietly in
+    // `write`, D146).
     fun emit(self, s: str) {
-        write(1, s)
+        match write(1, s) {
+            Ok(()) => {},
+            Err(e) => {
+                let code = __io_errno()
+                eprint(f"runtime error: write failed: {errno_text(code)}\n")
+                exit(1)
+            },
+        }
     }
 }
 

@@ -30,7 +30,7 @@ fun main() {
 
 - A statement goes on across a line break (D104 (3), [[MYLA-224]]):
   - inside `( )` and `[ ]`: call arguments, parameters, parenthesised expressions, tuples, indexes, list and map literals (but a `{ }` block inside them has statements again, so a lambda's body or a `match` inside an argument list works as everywhere else);
-  - after a binary operator that ends the line (`+`, `&&`, `|>`, …), except `>`, which also closes a generic type (`let x: Option<int>` ends its line);
+  - after a binary operator that ends the line (`+`, `&&`, `|>`, …), except `>`, which also closes a generic type (`let x: Option<int>` ends its line), and `as`, whose type goes on its line (`x as` at a line's end is an error: expected a type);
   - inside struct literals, struct and enum bodies, `impl`/`trait` bodies and between match arms, as before.
 - A line that starts with an operator still starts a new statement, so a chain puts the operator at the end of the line. A line inside brackets that starts with a word only a statement or declaration starts (`let`, `return`, `fun`, `while`, `for`, …) ends the bracket that was never closed, so a missing `)` gives one error and the parser goes on.
 

@@ -801,6 +801,11 @@ pub fun is_raw_memory_primitive(name: str) -> bool {
     return name == "__load8" || name == "__load64" || name == "__store8" || name == "__store64" || name == "__alloc" || name == "__addr_of" || name == "__str_of" || name == "__copy_bytes" || name == "__equal_bytes" || name == "__syscall" || name == "__syscall5" || name == "__set_io_errno" || name == "__free" || name == "__environ" || name == "__set_run_status" || name == "__set_run_stderr" || name == "__argv" || name == "__load32" || name == "__store32" || name == "__list_addr" || name == "__list_of" || name == "__rotl" || name == "__rt_addr" || name == "__rt_get" || name == "__bsr64" || name == "__trap_oom" || name == "__rt_waddr" || name == "__cas64" || name == "__xchg64" || name == "__fetch_add64" || name == "__pause" || name == "__run_frame" || name == "__f64_round" || name == "__load_acq64" || name == "__store_rel64" || name == "__call_code"
 }
 
+// The error for a program's call of the raw-memory primitive `name`.
+fun raw_memory_call(at: Expr, name: str) -> CheckErr {
+    return CheckErr { line: at.line, col: at.col, sp: at.sp, msg: format("'{}' reads or writes raw memory: only the standard library may call it", name), decl: -1, notes: [Note { label: "help", msg: "the standard library's types and functions do what it does, safely", line: 0, col: 0, sp: no_span() }] }
+}
+
 #test("sum")[false]
 #test("panic")[true]
 #test("push")[false]
@@ -1028,7 +1033,7 @@ fun negated_misfit(x: Expr) -> str {
 
 fun impl_eq_target_name(d: Decl) -> Option<str> {
     match d.kind {
-        DeclKind.ImplDecl(tg, m, tp, tn, ta) => {
+        DeclKind.ImplDecl(tg, m, tp, tn, ta, dattrs) => {
             let is_eq = match tn { Some(t) => t == "Eq", None => false }
             if !is_eq { return None }
             match tg.kind {
@@ -1104,6 +1109,73 @@ fun contains_type_param(t: Type) -> bool {
         Type.TAsync(f) => contains_type_param(f),
         _ => false,
     }
+}
+
+// The names of the parameters from `start` on, when every one of them has
+// a default (the defaults a `#test` case leaves out); else none.
+fun defaulted_from(params: [Param], start: int32) -> [str] {
+    var out: [str] = []
+    var i = start
+    while i < params.len() {
+        match params[i].default {
+            Some(d) => { out.push(params[i].name) },
+            None => { return [] },
+        }
+        i += 1
+    }
+    return out
+}
+
+// `'a'`, `'a' and 'b'`, `'a', 'b' and 'c'`.
+#test(["x"])["'x'"]
+#test(["x", "y"])["'x' and 'y'"]
+#test(["x", "y", "z"])["'x', 'y' and 'z'"]
+fun quoted_list(names: [str]) -> str {
+    var sb = StringBuilder()
+    var i = 0
+    while i < names.len() {
+        if i > 0 { sb.append(if i == names.len() - 1 { " and " } else { ", " }) }
+        sb.append(f"'{names[i]}'")
+        i += 1
+    }
+    return sb.build()
+}
+
+#test(None)[true]
+#test(Some(Type.TStr))[false]
+fun is_none_type(t: Option<Type>) -> bool {
+    return match t { Some(x) => false, None => true }
+}
+
+// Whether an arm's body never gives a value (it returns, panics, ...).
+fun arm_diverges(body: ExprOrBlock) -> bool {
+    return match body {
+        ExprOrBlock.EB_Expr(x) => is_diverging(x),
+        ExprOrBlock.EB_Block(b) => block_returns(b),
+    }
+}
+
+// Whether the type parameter `p` occurs in `t`.
+#test(Type.TList(Type.TParam("T")), "T")[true]
+#test(Type.TList(Type.TParam("T")), "E")[false]
+#test(Type.TStr, "T")[false]
+fun mentions_param(t: Type, p: str) -> bool {
+    return match t {
+        Type.TParam(n) => n == p,
+        Type.TTuple(es) => list_mentions(es, p),
+        Type.TList(e) => mentions_param(e, p),
+        Type.TMap(k, v) => mentions_param(k, p) || mentions_param(v, p),
+        Type.TStruct(n, args) => list_mentions(args, p),
+        Type.TEnum(n, args) => list_mentions(args, p),
+        Type.TFunc(ps, r) => list_mentions(ps, p) || (match r { Some(rt) => mentions_param(rt, p), None => false }),
+        Type.TAsync(f) => mentions_param(f, p),
+        _ => false,
+    }
+}
+
+fun list_mentions(xs: [Type], p: str) -> bool {
+    for x in xs { if mentions_param(x, p) { return true } }
+    return false
 }
 
 #test([])[false]
@@ -1275,7 +1347,7 @@ pub struct Frame { names: [str], binds: [Binding] }
 // A `become` in function `func` calling `target` (a function value's call
 // when `value`; `mutates`: a `var self` method's), with the types of its
 // arguments (the receiver first), for `check_become_words` (D119).
-pub struct BecomeWords { func: str, target: str, value: bool, mutates: bool, args: [Type], line: int32, col: int32, sp: SrcSpan, decl: int32 }
+pub struct BecomeWords { func: str, target: str, value: bool, mutates: bool, args: [Type], defaults: [str], line: int32, col: int32, sp: SrcSpan, decl: int32 }
 
 // `become` (D87; types.py: _check_become): a `become` that hands a heap value
 // over to a parameter, the first of each, and one that passes a heap-value
@@ -1342,6 +1414,13 @@ pub struct Checker {
     call_defaults: [int32: [Expr]], // call node id -> the defaults it leaves to its trailing parameters (D136)
     errs: [CheckErr],               // the errors of the functions checked so far (MYLA-65, D80)
     warnings: [CheckErr],           // D95: the warnings found, in the order found
+    primitives: bool,               // a program may call the raw-memory primitives (`gen_main --primitives`, the toolchain's tests)
+    // `#allow` (D161): the warnings the function being checked silences
+    // (`primitive`, `primitive:__poll`, `reentrancy`), and the impl block's
+    // `#allow`s while its methods are registered
+    allowed: [str],
+    impl_allows: [Attribute],
+    method_decl_allows: [[Attribute]],  // each method's impl block's `#allow`s (D161)
     // going on after a declaration's error (MYLA-110, D84; types.py: Checker):
     // the declarations left out and the functions not checked (by
     // name: a function with a bad bound); the `trait\tkey` pairs whose impl or
@@ -1416,7 +1495,7 @@ fun new_checker(decls: [Decl]) -> Checker {
         allow_self: false, type_params: [], bounds_cur: [],
         cur_ret: None, has_cur_ret: false, ret_at: None, loop_depth: 0, defer_at: -1,
         frames: [], lambda_infer_active: false, lambda_depth: 0, cur_decl: -1, lambda_infer: [], stmt_match: false,
-        resolved: [:], call_defaults: [:], errs: [], warnings: [], mains: [],
+        resolved: [:], call_defaults: [:], errs: [], warnings: [], primitives: false, allowed: [], impl_allows: [], method_decl_allows: [], mains: [],
         skipped_decls: [:], skipped_fns: [:], broken_impls: [:], redefined: [:],
         lost_methods: [:], lost_traits: [:], failed_consts: [:], bodies: false,
         call_kind: "", call_kind_id: -1, call_target: "", call_mutates: false, fun_name: "", handovers: [:], become_words: [], passed_on: [],
@@ -1857,7 +1936,7 @@ fun decl_kind_name(d: Decl) -> str {
         DeclKind.TypeAliasDecl(n, tt, a, p) => n,
         DeclKind.ConstDecl(n, tt, vv, a, p) => n,
         DeclKind.FunDecl(fd) => fd.name,
-        DeclKind.TraitDecl(n, m, t, p) => n,
+        DeclKind.TraitDecl(n, m, t, p, dattrs) => n,
         _ => "",
     }
 }
@@ -1988,9 +2067,9 @@ impl Checker {
                     fail = Some(terr_at(ln, cl, sp, "imports need the module loader: this file was type-checked on its own (use 'myla check' or 'myla run')"))
                     true
                 },
-                DeclKind.ImplDecl(tg, m, tp, tn, ta) => { self.impl_decls.push(decl)
+                DeclKind.ImplDecl(tg, m, tp, tn, ta, dattrs) => { self.impl_decls.push(decl)
             true },
-                DeclKind.TraitDecl(n, m, tp, isp) => {
+                DeclKind.TraitDecl(n, m, tp, isp, dattrs) => {
                     if is_builtin_op_trait(n) { fail = Some(terr_at(ln, cl, sp, format("'{}' is a built-in operator trait and cannot be redeclared", n))) }
                     else { for td in self.trait_decls { if decl_kind_name(td) == n { fail = Some(terr_at(ln, cl, sp, format("duplicate trait '{}'", n))) } } }
                     match fail { Some(x) => {}, None => { self.trait_decls.push(decl) } }
@@ -2317,7 +2396,7 @@ impl Checker {
         for decl in self.trait_decls {
             self.cur_decl = decl.id
             match decl.kind {
-                DeclKind.TraitDecl(name, methods, tps, isp) => {
+                DeclKind.TraitDecl(name, methods, tps, isp, dattrs) => {
                     // check trait type params: no Self, no dup
                     var seen: [str] = []
                     var tp_fail: Option<CheckErr> = None
@@ -2423,8 +2502,11 @@ impl Checker {
         for decl in self.impl_decls {
             self.cur_decl = decl.id
             match decl.kind {
-                DeclKind.ImplDecl(target_te, methods, tps, trait_name, trait_args_te) => {
-                    self.resolve_impl(decl, target_te, methods, tps, trait_name, trait_args_te)?
+                DeclKind.ImplDecl(target_te, methods, tps, trait_name, trait_args_te, dattrs) => {
+                    self.impl_allows = allow_attrs(dattrs)
+                    let r = self.resolve_impl(decl, target_te, methods, tps, trait_name, trait_args_te)
+                    self.impl_allows = []
+                    r?
                 },
                 _ => {},
             }
@@ -2459,6 +2541,17 @@ impl Checker {
             }
         }
         if target_ok {
+            // a builtin method's name is the builtin's on its kind: a program
+            // can't define it there, as it can't a builtin function (the
+            // review of 2026-11-06, R3: the program's `len` was called by the
+            // standard library's own code, natively)
+            for m in methods {
+                if builtin_method(target, m.name) {
+                    self.record(terr_at(m.line, m.col, m.sp, format("'{}' is a builtin method of '{}': an impl can't define it", m.name, type_name(target))))?
+                    self.lose_impl(methods, trait_name)
+                    return Ok(0)
+                }
+            }
             key_opt = self.type_key(target)
             match self.check_impl_target(ln, cl, sp, target, key_opt, tps, methods) {
                 Ok(x) => {},
@@ -2616,6 +2709,7 @@ impl Checker {
         self.method_decls.push(fdecl)
         self.method_decl_keys.push(key)
         self.method_decl_ids.push(impl_id)
+        self.method_decl_allows.push(self.impl_allows)
         return Ok(0)
     }
 
@@ -3533,23 +3627,39 @@ impl Checker {
 impl Checker {
     fun infer_match(var self, e: Expr, scrut: Expr, arms: [MatchArm], expected: Option<Type>, as_stmt: bool) -> Result<Option<Type>, CheckErr> {
         let st = self.expect_value(scrut, None)?
-        var bodies: [ArmBody] = []
+        // an arm whose value can't say its type alone (`None`, `[]`,
+        // `Err(e)`) takes the type of the first arm that can, when nothing
+        // is expected (MYLA-290): those arms are checked last
+        var later: [bool] = []
+        var any_later = false
+        var any_now = false
         for arm in arms {
-            self.push_scope()
-            self.check_pattern(arm.pattern, st)?
-            match arm.guard {
-                Some(g) => {
-                    let saved_guard = self.in_guard
-                    self.in_guard = true
-                    let gr = self.expect_type(g, Type.TBool, "match guard")
-                    self.in_guard = saved_guard
-                    gr?
-                },
-                None => {},
+            let l = !as_stmt && is_none_type(expected) && self.arm_needs_context(arm.body)
+            later.push(l)
+            if l { any_later = true } else { any_now = true }
+        }
+        var bodies: [ArmBody] = []
+        var i = 0
+        while i < arms.len() {
+            if any_later && any_now && later[i] {
+                bodies.push(ArmBody.ABDiverge)
+            } else {
+                bodies.push(self.check_arm(arms[i], st, expected, as_stmt)?)
             }
-            let ab = self.check_arm_body(arm.body, expected, as_stmt)?
-            self.pop_scope()
-            bodies.push(ab)
+            i += 1
+        }
+        if any_later && any_now {
+            var hint = expected
+            for ab in bodies {
+                if is_none_type(hint) {
+                    match ab { ArmBody.ABValue(ot, node) => { hint = ot }, _ => {} }
+                }
+            }
+            i = 0
+            while i < arms.len() {
+                if later[i] { bodies[i] = self.check_arm(arms[i], st, hint, as_stmt)? }
+                i += 1
+            }
         }
         self.check_exhaustive(e, st, arms)?
         match self.check_redundant(arms, st) {
@@ -3590,6 +3700,107 @@ impl Checker {
             Err(err) => { return Err(if_worded(err, arms)) },
         }
         return Ok(Some(result))
+    }
+
+    // One arm: its pattern against the scrutinee's type `st`, its guard, its body.
+    fun check_arm(var self, arm: MatchArm, st: Type, expected: Option<Type>, as_stmt: bool) -> Result<ArmBody, CheckErr> {
+        self.push_scope()
+        self.check_pattern(arm.pattern, st)?
+        match arm.guard {
+            Some(g) => {
+                let saved_guard = self.in_guard
+                self.in_guard = true
+                let gr = self.expect_type(g, Type.TBool, "match guard")
+                self.in_guard = saved_guard
+                gr?
+            },
+            None => {},
+        }
+        let ab = self.check_arm_body(arm.body, expected, as_stmt)?
+        self.pop_scope()
+        return Ok(ab)
+    }
+
+    // Whether an arm's value can't give its type without an expected one
+    // (MYLA-290): `None`, `E.V` of a generic enum, `[]`, `[:]`, a variant
+    // that leaves a type parameter open (`Ok(x)`, `Err(e)`), or an inner
+    // `if` or `match` whose arms all can't.
+    #test(checker_on("[int]"), ExprOrBlock.EB_Expr(expr_of("None")))[true]
+    #test(checker_on("[int]"), ExprOrBlock.EB_Expr(expr_of("Some(1)")))[false]
+    #test(checker_on("[int]"), ExprOrBlock.EB_Expr(expr_of("Err(1)")))[true]
+    #test(checker_on("[int]"), ExprOrBlock.EB_Expr(expr_of("[]")))[true]
+    #test(checker_on("[int]"), ExprOrBlock.EB_Expr(expr_of("[1]")))[false]
+    fun arm_needs_context(self, body: ExprOrBlock) -> bool {
+        let value = match body {
+            ExprOrBlock.EB_Expr(ex) => ex,
+            ExprOrBlock.EB_Block(bl) => {
+                if bl.stmts.len() == 0 { return false }
+                match bl.stmts[bl.stmts.len() - 1].kind {
+                    StmtKind.ExprStmt(ex) => ex,
+                    _ => { return false },
+                }
+            },
+        }
+        return self.needs_context(value)
+    }
+
+    fun needs_context(self, ex: Expr) -> bool {
+        match ex.kind {
+            ExprKind.Name(n) => {
+                if n != "None" { return false }
+                return match self.lookup(n) { Some(b) => false, None => true }
+            },
+            ExprKind.ListLit(es) => { return es.len() == 0 },
+            ExprKind.MapLit(es) => { return es.len() == 0 },
+            ExprKind.GetField(target, field) => {
+                return match self.enum_name_ref(target) {
+                    Some(en) => self.variant_leaves_params(en, field),
+                    None => false,
+                }
+            },
+            ExprKind.Call(callee, args) => {
+                match callee.kind {
+                    ExprKind.Name(n) => {
+                        if n != "Ok" && n != "Err" { return false }
+                        return match self.lookup(n) { Some(b) => false, None => true }
+                    },
+                    ExprKind.GetField(target, field) => {
+                        return match self.enum_name_ref(target) {
+                            Some(en) => self.variant_leaves_params(en, field),
+                            None => false,
+                        }
+                    },
+                    _ => { return false },
+                }
+            },
+            ExprKind.MatchE(sc, arms) => {
+                if arms.len() == 0 { return false }
+                for arm in arms {
+                    if !self.arm_needs_context(arm.body) && !arm_diverges(arm.body) { return false }
+                }
+                return true
+            },
+            _ => { return false },
+        }
+        return false
+    }
+
+    // Whether variant `variant` of the enum `name` leaves one of the enum's
+    // type parameters out of its payload, so that a value of it doesn't say
+    // the whole type (`Err(e)` of `Result<T, E>`, `None`).
+    #test(checker_on("[int]"), "Option", "None")[true]
+    #test(checker_on("[int]"), "Option", "Some")[false]
+    #test(checker_on("[int]"), "Result", "Ok")[true]
+    fun variant_leaves_params(self, name: str, variant: str) -> bool {
+        let ei = self.enum_idx(name)
+        if ei < 0 { return false }
+        let payload = match self.enum_variant_payload(name, [], variant) { Some(p) => p, None => { return false } }
+        for tp in self.enums[ei].type_params {
+            var seen = false
+            for t in payload { if mentions_param(t, tp) { seen = true } }
+            if !seen { return true }
+        }
+        return false
     }
 
     // The arms of a statement match (`as_stmt`) need no value, so their last
@@ -4458,15 +4669,17 @@ impl Checker {
         }
         // and the defaults the call leaves to its trailing parameters (D136),
         // as their parameters' types say (the defaults may not be checked yet)
+        var defaults: [str] = []
         if self.call_defaults.contains(ve.id) {
             let fi = self.func_idx(target)
             var k = ats.len()
             for d in self.call_defaults[ve.id] {
                 if fi >= 0 && k < self.functions[fi].params.len() { ats.push(self.functions[fi].params[k]) } else { ats.push(Type.TBool) }
+                if fi >= 0 && k < self.functions[fi].decl.params.len() { defaults.push(self.functions[fi].decl.params[k].name) }
                 k = k + 1
             }
         }
-        self.become_words.push(BecomeWords { func: self.fun_name, target: target, value: kind == "value", mutates: self.call_mutates, args: ats, line: ve.line, col: ve.col, sp: ve.sp, decl: self.cur_decl })
+        self.become_words.push(BecomeWords { func: self.fun_name, target: target, value: kind == "value", mutates: self.call_mutates, args: ats, defaults: defaults, line: ve.line, col: ve.col, sp: ve.sp, decl: self.cur_decl })
         return Ok(0)
     }
 
@@ -4502,7 +4715,9 @@ impl Checker {
                 i = i + 1
             }
             if passed > REG_ARG_WORDS && passed > received {
-                let msg = format("'become' passes {} argument words, {} of them on the stack, but '{}' received {} there", passed, passed - REG_ARG_WORDS, b.func, max_int(received - REG_ARG_WORDS, 0))
+                var msg = format("'become' passes {} argument words, {} of them on the stack, but '{}' received {} there", passed, passed - REG_ARG_WORDS, b.func, max_int(received - REG_ARG_WORDS, 0))
+                // the defaults the call leaves are passed too (D136, MYLA-293)
+                if b.defaults.len() > 0 { msg = format("{}, counting the defaults of {} the call leaves out", msg, quoted_list(b.defaults)) }
                 self.errs.push(CheckErr { line: b.line, col: b.col, sp: b.sp, msg: msg, decl: b.decl, notes: [] })
             }
         }
@@ -5118,6 +5333,52 @@ impl Checker {
     }
 }
 
+// The warnings `#allow` can silence (D161), each by the name its output
+// shows (`warning[primitive]: …`, `diag.warning_name`).
+#test()[["primitive", "reentrancy"]]
+fun warning_names() -> [str] {
+    return ["primitive", "reentrancy"]
+}
+
+#test("primitive")[true]
+#test("unused")[false]
+fun is_warning_name(n: str) -> bool {
+    return contains_str(warning_names(), n)
+}
+
+// The `#allow` attributes among `attrs`.
+fun allow_attrs(attrs: [Attribute]) -> [Attribute] {
+    var out: [Attribute] = []
+    for a in attrs { if a.name == "allow" { out.push(a) } }
+    return out
+}
+
+fun concat_attrs(a: [Attribute], b: [Attribute]) -> [Attribute] {
+    var out = a
+    for x in b { out.push(x) }
+    return out
+}
+
+// What the `#allow`s among `attrs` silence: a warning's name, or
+// `primitive:__name` for one primitive.
+fun allowed_warnings(attrs: [Attribute]) -> [str] {
+    var out: [str] = []
+    for attr in allow_attrs(attrs) {
+        for a in attr.args {
+            match a.kind {
+                ExprKind.Name(n) => { out.push(n) },
+                ExprKind.Call(callee, prims) => {
+                    for p in prims {
+                        match p.kind { ExprKind.Name(n) => { out.push("primitive:" + n) }, _ => {} }
+                    }
+                },
+                _ => {},
+            }
+        }
+    }
+    return out
+}
+
 fun decl_attrs(d: Decl) -> [Attribute] {
     return match d.kind {
         DeclKind.StructDecl(n, f, a, t, p, act) => a,
@@ -5125,6 +5386,8 @@ fun decl_attrs(d: Decl) -> [Attribute] {
         DeclKind.TypeAliasDecl(n, tt, a, p) => a,
         DeclKind.ConstDecl(n, tt, vv, a, p) => a,
         DeclKind.FunDecl(fd) => fd.attributes,
+        DeclKind.ImplDecl(t, m, tp, tn, ta, attrs) => attrs,
+        DeclKind.TraitDecl(n, m, tp, p, attrs) => attrs,
         _ => empty_attrs(),
     }
 }
@@ -5454,8 +5717,14 @@ impl Checker {
     fun check_attributes(var self, decl: Decl) -> Result<int32, CheckErr> {
         let attrs = decl_attrs(decl)
         let is_fun = match decl.kind { DeclKind.FunDecl(fd) => true, _ => false }
+        let is_impl = match decl.kind { DeclKind.ImplDecl(a, b, c, d, e, f) => true, _ => false }
         for attr in attrs {
             if attr.name == "derive" { continue }
+            if attr.name == "allow" {
+                if !is_fun && !is_impl { return Err(terr_at(attr.line, attr.col, attr.sp, "'#allow' stands on a function or an impl block (a struct's or actor's code is in its impl)")) }
+                self.check_allow(attr)?
+                continue
+            }
             if attr.name != "main" && attr.name != "test" { return Err(terr_at(attr.line, attr.col, attr.sp, format("unknown attribute '#{}'", attr.name))) }
             if !is_fun { return Err(terr_at(attr.line, attr.col, attr.sp, format("attribute '#{}' may only be applied to functions", attr.name))) }
             match decl.kind {
@@ -5480,10 +5749,43 @@ impl Checker {
     #test(checker_on("struct P { x: int, y: int }"), fun_of("fun g() { print(1) }"), "App")[Ok(0)]
     fun check_method_attributes(var self, fd: FunData, key: str) -> Result<int32, CheckErr> {
         for attr in fd.attributes {
-            if attr.name != "test" { return Err(terr_at(attr.line, attr.col, attr.sp, format("attribute '#{}' can't be applied to a method (a method takes only '#test')", attr.name))) }
+            if attr.name == "allow" {
+                self.check_allow(attr)?
+                continue
+            }
+            if attr.name != "test" { return Err(terr_at(attr.line, attr.col, attr.sp, format("attribute '#{}' can't be applied to a method (a method takes only '#test' and '#allow')", attr.name))) }
             if self.actors.contains(key) { return Err(terr_at(attr.line, attr.col, attr.sp, "'#test' can't run an actor method (its receiver is an actor, not a value)")) }
             if fd.type_params.len() > 0 { return Err(terr_at(attr.line, attr.col, attr.sp, "attribute '#test' cannot be applied to a generic method (it has no single concrete instantiation)")) }
             self.check_test_attr(fd, attr)?
+        }
+        return Ok(0)
+    }
+
+    // `#allow(name, …)` (D161): each argument a warning's name, or
+    // `primitive(__a, __b)` for some primitives only. A name no warning has
+    // is a warning itself; an error can't be allowed, so a raw-memory
+    // primitive (D152) in the list is one.
+    fun check_allow(var self, attr: Attribute) -> Result<int32, CheckErr> {
+        if attr.args.len() == 0 { return Err(terr_at(attr.line, attr.col, attr.sp, "'#allow' names the warnings it silences, as in '#allow(primitive)'")) }
+        match attr.outputs { Some(x) => { return Err(terr_at(attr.line, attr.col, attr.sp, "'#allow' takes no expected values in [...]")) }, None => {} }
+        for a in attr.args {
+            match a.kind {
+                ExprKind.Name(n) => {
+                    if !is_warning_name(n) {
+                        self.warnings.push(CheckErr { line: a.line, col: a.col, sp: a.sp, msg: format("'{}' is no warning's name: '#allow' takes {}", n, quoted_list(warning_names())), decl: self.cur_decl, notes: [] })
+                    }
+                },
+                ExprKind.Call(callee, prims) => {
+                    let ok = match callee.kind { ExprKind.Name(n) => n == "primitive", _ => false }
+                    if !ok || prims.len() == 0 { return Err(terr_at(a.line, a.col, a.sp, "only 'primitive' takes a list, of the primitives it silences: '#allow(primitive(__poll, __spawn))'")) }
+                    for p in prims {
+                        let pname = match p.kind { ExprKind.Name(n) => n, _ => "" }
+                        if pname == "" || !is_builtin_func(pname) || !starts_with_dunder(pname) { return Err(terr_at(p.line, p.col, p.sp, "'#allow(primitive(…))' lists primitives, such as '__poll'")) }
+                        if is_raw_memory_primitive(pname) { return Err(terr_at(p.line, p.col, p.sp, format("'{}' reads or writes raw memory, which is an error outside the standard library: '#allow' silences warnings only", pname))) }
+                    }
+                },
+                _ => { return Err(terr_at(a.line, a.col, a.sp, "'#allow' takes warning names, as in '#allow(primitive)' or '#allow(primitive(__poll))'")) },
+            }
         }
         return Ok(0)
     }
@@ -5493,7 +5795,13 @@ impl Checker {
         let idx = self.func_idx(fd.name)
         let sig = self.functions[idx]
         let outs = match attr.outputs { Some(x) => x, None => { return Err(terr_at(attr.line, attr.col, attr.sp, "'#test' requires an expected result, e.g. #test(args)[expected]")) } }
-        if attr.args.len() != sig.params.len() { return Err(terr_at(attr.line, attr.col, attr.sp, format("'#test' expects {} argument(s), got {}", sig.params.len(), attr.args.len()))) }
+        if attr.args.len() != sig.params.len() {
+            var msg = format("'#test' expects {} argument(s), got {}", sig.params.len(), attr.args.len())
+            // a case gives every argument, a default's too (D136, MYLA-293)
+            let left = defaulted_from(fd.params, attr.args.len())
+            if left.len() > 0 { msg = format("{}: a case gives every argument, the defaults of {} too", msg, quoted_list(left)) }
+            return Err(terr_at(attr.line, attr.col, attr.sp, msg))
+        }
         if sig_has_error(sig.params, sig.ret) { return Err(poisoned()) }   // the signature failed (MYLA-110)
         self.push_scope()
         var i = 0
@@ -5543,7 +5851,11 @@ impl Checker {
         }
         var i = 0
         while i < self.method_decls.len() {
-            if !self.skipped_fns.contains(self.method_decls[i].name) { self.check_body(self.method_decl_ids[i], self.method_decls[i], self.method_decl_keys[i]) }
+            if !self.skipped_fns.contains(self.method_decls[i].name) {
+                self.impl_allows = self.method_decl_allows[i]
+                self.check_body(self.method_decl_ids[i], self.method_decls[i], self.method_decl_keys[i])
+                self.impl_allows = []
+            }
             i = i + 1
         }
         self.check_passed_on()
@@ -5553,10 +5865,18 @@ impl Checker {
         return Ok(0)
     }
 
+    // Whether the function being checked is the standard library's.
+    #test(checker_on("[int]"))[false]
+    fun in_std(self) -> bool {
+        return self.fun_name.len() >= 4 && self.fun_name[0] == 's' && self.fun_name[1] == 't' && self.fun_name[2] == 'd' && self.fun_name[3] == '$'
+    }
+
     // A call of a `__` primitive outside the standard library: allowed, with
     // a warning (D100, MYLA-186), once per place (types.py: _warn_primitive).
+    // A file of the standard library checked on its own (`primitives`) gets none.
     fun warn_primitive(var self, at: Expr, name: str) {
-        if self.fun_name.len() >= 4 && self.fun_name[0] == 's' && self.fun_name[1] == 't' && self.fun_name[2] == 'd' && self.fun_name[3] == '$' { return }
+        if self.in_std() || self.primitives { return }
+        if contains_str(self.allowed, "primitive") || contains_str(self.allowed, "primitive:" + name) { return }
         let msg = format("'{}' is a primitive of the standard library, not meant to be called from a program", name)
         for w in self.warnings { if w.msg == msg && w.line == at.line && w.col == at.col { return } }
         self.warnings.push(CheckErr { line: at.line, col: at.col, sp: at.sp, msg: msg, decl: self.cur_decl, notes: [Note { label: "help", msg: "call the function of `std` that wraps it; a primitive's behaviour may change with the standard library", line: 0, col: 0, sp: no_span() }] })
@@ -5580,6 +5900,8 @@ impl Checker {
         if self.full() { return }
         self.reset_state(id)
         self.cur_key = key
+        // its own `#allow`s and, for a method, its impl block's
+        self.allowed = allowed_warnings(concat_attrs(fd.attributes, self.impl_allows))
         match self.check_function(fd) {
             Ok(x) => {
                 // an actor's async method: its state changed after an `await`
@@ -5590,7 +5912,9 @@ impl Checker {
                             let (changes, examines) = self.self_effects(self.actor_self)
                             var r = Reentrancy { epoch: 0, checked: [:], locals: [:], awaits: [], out: [], changes: changes, examines: examines }
                             r.block(b)
-                            for w in r.out { self.warnings.push(CheckErr { line: w.line, col: w.col, sp: w.sp, msg: w.msg, decl: id, notes: w.notes }) }
+                            if !contains_str(self.allowed, "reentrancy") {
+                                for w in r.out { self.warnings.push(CheckErr { line: w.line, col: w.col, sp: w.sp, msg: w.msg, decl: id, notes: w.notes }) }
+                            }
                         },
                         None => {},
                     }
@@ -5764,11 +6088,19 @@ pub fun check_program(user: Program) -> Result<[CheckErr], [CheckErr]> {
 // ids are below `next_id`), with the prelude parsed after it so every id stays
 // unique, and return the populated checker (MYLA-30), or its errors (D80).
 pub fun build_checker_decls(decls: [Decl], next_id: int32) -> Result<Checker, [CheckErr]> {
+    return build_checker_with(decls, next_id, false)
+}
+
+// `build_checker_decls`, a program allowed to call the raw-memory
+// primitives when `primitives` (the toolchain's tests of their code,
+// `gen_main --primitives`).
+pub fun build_checker_with(decls: [Decl], next_id: int32, primitives: bool) -> Result<Checker, [CheckErr]> {
     let pre = prelude(next_id)
     var all: [Decl] = []
     for d in pre.program.decls { all.push(d) }
     for d in decls { all.push(d) }
     var c = new_checker(all)
+    c.primitives = primitives
     let r = c.run_all()
     match r { Ok(x) => {}, Err(e) => { return Err(e) } }
     // every call with all its arguments, for whatever runs the program (D136)
@@ -5880,12 +6212,19 @@ impl Checker {
         let name = match callee.kind { ExprKind.Name(nm) => nm, _ => "" }
         if name == "" { return self.infer_indirect_call(e, callee, args) }
         if self.redefined.contains(name) { return Err(poisoned()) }   // written against the left-out redefinition (MYLA-110)
-        if starts_with_dunder(name) && is_builtin_func(name) { self.warn_primitive(callee, name) }
+        if starts_with_dunder(name) && is_builtin_func(name) {
+            // raw memory outside the standard library: an error (the review
+            // of 2026-11-06, R4: natively a bare crash); the others warn (D100)
+            if is_raw_memory_primitive(name) && !self.primitives && !self.in_std() { return Err(raw_memory_call(callee, name)) }
+            self.warn_primitive(callee, name)
+        }
         if !as_method && builtin_method_name(name) { return Err(function_form(callee, name)) }
 
         if name == "print" {
             if args.len() != 1 { return Err(terr_at(e.line, e.col, e.sp, "print() takes exactly one argument")) }
             let at = self.expect_value(args[0], None)?
+            // a type with its own form prints as `{x}` would (D159)
+            if self.has_format(at)? { return Ok(None) }
             if !is_printable(at) { return Err(terr_at(e.line, e.col, e.sp, format("print() cannot print a value of type '{}'", type_name(at)))) }
             return Ok(None)
         }
@@ -6312,6 +6651,16 @@ impl Checker {
         return Ok(None)
     }
 
+    // Whether a value of type `t` has its own form: a type of the program's
+    // implementing `Format`, or a type parameter bound by it (D139, D159).
+    fun has_format(self, t: Type) -> Result<bool, CheckErr> {
+        if is_struct_or_enum(t) { return self.type_implements(t, "Format") }
+        return match t {
+            Type.TParam(pn) => Ok(self.bound_has(pn, "Format")),
+            _ => Ok(false),
+        }
+    }
+
     #test(checker_on("enum E { A, B(int) }"), expr_of("a.b[0]"), [Expr { id: 244, line: 126, col: 19, sp: SrcSpan { sline: 126, scol: 19, eline: 126, ecol: 45 }, kind: ExprKind.StrLit("braces {{}} stay literal") }])[Ok(Type.TStr)]
     fun infer_format(var self, e: Expr, args: [Expr]) -> Result<Type, CheckErr> {
         if args.len() == 0 { return Err(terr_at(e.line, e.col, e.sp, "format() needs a string literal format and its arguments")) }
@@ -6326,7 +6675,8 @@ impl Checker {
             let at = self.expect_value(args[i], None)?
             let spec = specs[i - 1]
             // a type of the program's with its own form (D139): the spec is its
-            if is_struct_or_enum(at) && self.type_implements(at, "Format")? {
+            // and a type parameter bound by it (MYLA-291)
+            if self.has_format(at)? {
                 i = i + 1
                 continue
             }
@@ -6487,6 +6837,11 @@ impl Checker {
     #test(checker_on("enum E { A, B(int) }"), expr_of("a.b[0]"), expr_of("a.b[0]"), expr_of("a.b[0]"), "total", [], None)[Err(CheckErr { line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 2 }, msg: "unknown name 'a'", decl: -1, notes: [] })]
     fun infer_method_call(var self, e: Expr, callee: Expr, target: Expr, field: str, args: [Expr], expected: Option<Type>) -> Result<Option<Type>, CheckErr> {
         let recv_type = self.expect_value(target, None)?
+        // a type parameter's bounds give it their traits' methods (MYLA-291)
+        match recv_type {
+            Type.TParam(pn) => { return self.bound_method_call(e, target, pn, field, args) },
+            _ => {},
+        }
         let key_opt = self.type_key(recv_type)
         var sig_opt: Option<FuncSig> = None
         match key_opt { Some(k) => { sig_opt = self.method_sig(k, field) }, None => {} }
@@ -6543,6 +6898,45 @@ impl Checker {
             },
         }
         return Err(terr_at(e.line, e.col, e.sp, format("type '{}' has no method '{}'", type_name(recv_type), field)))
+    }
+
+    // `x.m(args)` on a value of the type parameter `pn`: the method `m` of a
+    // trait among its bounds, with `Self` the parameter (MYLA-291). The
+    // backends call the concrete type's method, as they do for an operator
+    // on a bounded parameter; the bound was checked where the function was
+    // called.
+    fun bound_method_call(var self, e: Expr, target: Expr, pn: str, field: str, args: [Expr]) -> Result<Option<Type>, CheckErr> {
+        let me = Type.TParam(pn)
+        var bound_traits: [str] = []
+        for b in self.bounds_cur {
+            if b.tp != pn { continue }
+            for tr in b.traits {
+                bound_traits.push(tr)
+                let ti = self.trait_idx(tr)
+                // an operator trait's (`Add`, `Ord`, ...) are its operators
+                if ti < 0 || self.traits[ti].builtin || self.traits[ti].type_params.len() > 0 { continue }
+                for m in self.traits[ti].methods {
+                    if m.name != field { continue }
+                    if m.receiver == "var self" {
+                        if !is_lvalue_shape(target) { return Err(terr_at(e.line, e.col, e.sp, format("method '{}' mutates its receiver ('var self'); it needs a mutable variable (or one of its fields/elements), not a temporary", field))) }
+                        let lv = self.check_lvalue(target)?
+                        if !lv.mutable { return Err(with_notes(terr_at(e.line, e.col, e.sp, format("cannot call the mutating method '{}' on an immutable receiver (declare it with 'var')", field)), self.declared_at(target))) }
+                    }
+                    if args.len() != m.params.len() - 1 { return Err(terr_at(e.line, e.col, e.sp, format("method '{}' expects {} argument(s), got {}", field, m.params.len() - 1, args.len()))) }
+                    var i = 0
+                    while i < args.len() {
+                        let pt = subst_self(m.params[i + 1], me, [])
+                        let at = self.expect_value(args[i], Some(pt))?
+                        if !type_eq(at, pt) { return Err(terr_at(args[i].line, args[i].col, args[i].sp, format("argument type mismatch in call to '{}': expected '{}', found '{}'", field, type_name(pt), type_name(at)))) }
+                        i += 1
+                    }
+                    self.mark_call(e, "method", "", m.receiver == "var self", "", false)
+                    return Ok(match m.ret { Some(rt) => Some(subst_self(rt, me, [])), None => None })
+                }
+            }
+        }
+        if bound_traits.len() == 0 { return Err(terr_at(e.line, e.col, e.sp, format("type parameter '{}' has no method '{}': it has no bounds (write '{}: Trait' to call a trait's methods)", pn, field, pn))) }
+        return Err(terr_at(e.line, e.col, e.sp, format("type parameter '{}' has no method '{}': none of its bounds ({}) declares one (an operator trait gives its operators)", pn, field, quoted_list(bound_traits))))
     }
 
     fun infer_generic_method(var self, e: Expr, sig: FuncSig, method: str, recv_type: Type, args: [Expr]) -> Result<Option<Type>, CheckErr> {
@@ -7681,8 +8075,8 @@ impl Checker {
 fun fd_decl(d: Decl, t: [int32: [Expr]]) -> Decl {
     let k = match d.kind {
         DeclKind.FunDecl(f) => DeclKind.FunDecl(fd_fun(f, t)),
-        DeclKind.ImplDecl(target, ms, tps, tr, targs) => DeclKind.ImplDecl(target, fd_funs(ms, t), tps, tr, targs),
-        DeclKind.TraitDecl(n, ms, tps, p) => DeclKind.TraitDecl(n, fd_funs(ms, t), tps, p),
+        DeclKind.ImplDecl(target, ms, tps, tr, targs, dattrs) => DeclKind.ImplDecl(target, fd_funs(ms, t), tps, tr, targs, dattrs),
+        DeclKind.TraitDecl(n, ms, tps, p, dattrs) => DeclKind.TraitDecl(n, fd_funs(ms, t), tps, p, dattrs),
         DeclKind.ConstDecl(n, te, e, attrs, p) => DeclKind.ConstDecl(n, te, fd_expr(e, t), attrs, p),
         _ => d.kind,
     }

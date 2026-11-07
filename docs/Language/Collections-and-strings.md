@@ -59,7 +59,7 @@ fun main() {
 // dlrow ,olleh
 ```
 
-- A slice's bounds are clamped to the list, so a slice never fails: `xs[2:99]` is the rest, `xs[5:2]` is empty, and a plain negative bound is before the start (only `^` counts from the end). A single index out of range is still an error, `xs[^0]` and `xs[^6]` of five elements too (D143).
+- A slice's bounds are clamped to the list: `xs[2:99]` is the rest, `xs[5:2]` is empty. A plain negative bound is the runtime error `index out of bounds`, as a negative index is (`xs[1:-1]`: write `xs[1:^1]`, D154); only `^` counts from the end. A single index out of range is still an error, `xs[^0]` and `xs[^6]` of five elements too (D143).
 - The step is a signed integer, not 0 (`slice step is zero` when the program runs). With a negative step the bounds left out are the end and the start, as in Python: `xs[^1:0:-2]` is `[50, 30]`.
 - A `str` is sliced by bytes, as `s[i]` and `s.len()` count them: a slice whose bound falls inside a character is a runtime error (`a slice bound inside a character`), and with a step other than 1 every byte taken must be a whole character (ASCII).
 - `xs[^1] = v` assigns as any index does; a slice is a value to read: assigning to one (`xs[1:3] = ys`) isn't part of the language yet. Maps have no slices.
@@ -108,7 +108,7 @@ The builtin collection and string operations are methods (D103, [[MYLA-221]]).
 | `chars()` | strings |
 | `append(s)`, `append(s, start, end)`, `append_byte(b)`, `build()` | `StringBuilder` (`append`, `append_byte`: a `var` place) |
 
-A type's own method of the same name (`impl str { fun len(self) … }`) comes first, and a local named `chars` doesn't hide `s.chars()`. They have no function form: `push(xs, v)` is the error "'push' is a method: call it as 'x.push(…)'" (the function forms went once the repository had moved, D103; `scripts/to_methods.py` rewrites a file). The names stay reserved, so a program can't declare a function `push` of its own, but a local closure of that name is called as one.
+These names are the builtins' on their kinds of value: an `impl` can't define one there (`impl str { fun len(self) … }` is the error "'len' is a builtin method of 'str': an impl can't define it", D151), while a struct's own `len` is its own; and a local named `chars` doesn't hide `s.chars()`. They have no function form: `push(xs, v)` is the error "'push' is a method: call it as 'x.push(…)'" (the function forms went once the repository had moved, D103; `scripts/to_methods.py` rewrites a file). The names stay reserved, so a program can't declare a function `push` of its own, but a local closure of that name is called as one.
 
 ## Value semantics and copy-on-write
 
@@ -137,7 +137,7 @@ How values are rendered:
 
 - integers in decimal, unsigned ones without a sign;
 - `bool` as `true`/`false`; `char` as its UTF-8 glyph;
-- floats in plain positional decimal, never in exponent form: the value rounded to 9 significant digits for `float32` or 17 for `float64` (enough to read it back exactly), with trailing zeros trimmed. So `6.0` prints `6`, `0.5` prints `0.5`, but `0.1f64` prints `0.10000000000000001` and `1e20` (a `float32`) prints `100000002000000000000`. Special values print `nan`, `inf`, `-inf` and `-0`.
+- floats in the fewest significant digits that read back as the same value, a `float32`'s as that `float32` (D155): `6.0` prints `6`, `0.5` prints `0.5`, `0.1` prints `0.1`, `0.1 + 0.2` prints `0.30000000000000004`, and `0.1f32 + 0.2f32` prints `0.3`. In plain positional decimal from 1e-4 up to 1e16, outside it the digits with a point after the first and the exponent: `1.5e-7`, `1e16`, `1e300`, `3.4028235e38`. Special values print `nan`, `inf`, `-inf` and `-0`.
 
 ### Format specs
 
@@ -197,7 +197,7 @@ fun main() {
 // 2026-11-05 05.11.2026 [  2026-11-05]
 ```
 
-`print(x)` still takes the five scalar types: a struct goes through `print(f"{x}")`.
+A generic function prints a `T: Format` the same way, `f"<{x}>"` ([[Language/Methods-and-traits#bounds]]). `print(x)` of a value with its own form prints `x.format("")` and a newline, as `print(f"{x}")` does (D159): a struct or enum implementing `Format`, or a `T: Format`. A struct without one is still an error: `print() cannot print a value of type 'P'`.
 
 The interpreter and the native backend share the float algorithm and constant tables, so their output is byte-identical (D56, [[Architecture/Native-backend]]).
 

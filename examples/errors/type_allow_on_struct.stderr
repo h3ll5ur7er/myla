@@ -1,0 +1,5 @@
+type error: '#allow' stands on a function or an impl block (a struct's or actor's code is in its impl)
+  --> examples/errors/type_allow_on_struct.my:4:1
+  |
+4 | #allow(primitive)
+  | ^^^^^^^^^^^^^^^^^

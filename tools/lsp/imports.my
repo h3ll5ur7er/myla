@@ -377,7 +377,7 @@ pub fun module_exports(spot: ImportSpot, file: str, opts: LoadOptions) -> [Symbo
             DeclKind.StructDecl(name, fields, attrs, tps, is_pub, act) => { if is_pub { public[name] = true } },
             DeclKind.EnumDecl(name, variants, attrs, tps, is_pub) => { if is_pub { public[name] = true } },
             DeclKind.TypeAliasDecl(name, target, attrs, is_pub) => { if is_pub { public[name] = true } },
-            DeclKind.TraitDecl(name, methods, tps, is_pub) => { if is_pub { public[name] = true } },
+            DeclKind.TraitDecl(name, methods, tps, is_pub, dattrs) => { if is_pub { public[name] = true } },
             DeclKind.ConstDecl(name, ty, value, attrs, is_pub) => { if is_pub { public[name] = true } },
             DeclKind.FunDecl(fd) => { if fd.is_pub { public[fd.name] = true } },
             DeclKind.ImportDecl(p, items, alias, is_pub) => {

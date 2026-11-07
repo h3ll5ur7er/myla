@@ -5,7 +5,7 @@
 compiled; a user's type implementing `Format` gets the spec's text as it is.
 The formatting is Myla (`std.fmt`, `std.num`), so the interpreter and every
 backend print the same bytes. (A float without a precision prints as `print`
-prints it: 17 significant digits, so 0.1 is 0.10000000000000001.)"""
+prints it: in its shortest round-trip form, so 0.1 is 0.1, D155.)"""
 import os
 import subprocess
 import tempfile
@@ -108,13 +108,143 @@ ffffffffffffffff 18446744073709551615
 """
 
 
+# MYLA-291 (the review of 2026-11-06, R22): a bound gives a type parameter its
+# trait's methods, `Format`'s in a hole too
+BOUNDS = """struct P {
+    x: int,
+}
+
+impl Format for P {
+    fun format(self, spec: str) -> str {
+        return if spec == "" { f"P({self.x})" } else { f"P[{spec}]" }
+    }
+}
+
+trait Area {
+    fun area(self) -> int
+    fun bigger(self, other: Self) -> bool
+}
+
+impl Area for P {
+    fun area(self) -> int {
+        return self.x * self.x
+    }
+    fun bigger(self, other: P) -> bool {
+        return self.x > other.x
+    }
+}
+
+impl Area for int {
+    fun area(self) -> int {
+        return self * self
+    }
+    fun bigger(self, other: int) -> bool {
+        return self > other
+    }
+}
+
+fun show<T: Format>(x: T) -> str {
+    return f"<{x}> <{x:>6}> {x.format("")}"
+}
+
+fun list_all<T: Format>(xs: [T]) -> str {
+    var sb = StringBuilder()
+    for x in xs { sb.append(f"{x};") }
+    return sb.build()
+}
+
+fun larger<T: Area>(a: T, b: T) -> T {
+    return if a.bigger(b) { a } else { b }
+}
+
+fun total<T: Area>(xs: [T]) -> int {
+    var n = 0
+    for x in xs { n += x.area() }
+    return n
+}
+
+fun relay<T: Area + Format>(x: T) -> str {
+    return f"{show(x)} {total([x, x])}"
+}
+
+fun main() {
+    print(show(P { x: 4 }))
+    print(list_all([P { x: 1 }, P { x: 2 }]))
+    print(larger(P { x: 2 }, P { x: 5 }).x)
+    print(larger(3, 9))
+    print(total([1, 2, 3]))
+    print(total([P { x: 3 }]))
+    print(relay(P { x: 2 }))
+}
+"""
+
+BOUNDS_WANT = "<P(4)> <P[>6]> P(4)\nP(1);P(2);\n5\n9\n14\n9\n<P(2)> <P[>6]> P(2) 8\n"
+
+
+# D159: `print(x)` of a value with its own form prints `x.format("")`
+PRINT_FORMAT = """struct P {
+    x: int,
+}
+
+impl Format for P {
+    fun format(self, spec: str) -> str {
+        return f"P({self.x})"
+    }
+}
+
+enum Light {
+    On,
+    Off,
+}
+
+impl Format for Light {
+    fun format(self, spec: str) -> str {
+        return match self {
+            Light.On => "on",
+            Light.Off => "off",
+        }
+    }
+}
+
+fun show<T: Format>(x: T) {
+    print(x)
+}
+
+fun main() {
+    print(P { x: 3 })
+    let l = Light.Off
+    print(l)
+    show(Light.On)
+    show(P { x: 9 })
+    let ps = [P { x: 1 }, P { x: 2 }]
+    for p in ps { print(p) }
+}
+"""
+
+
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
 class FormatSpecs(unittest.TestCase):
     def test_in_the_interpreter_and_natively(self):
         self.assertEqual(run_source_both_now(PROGRAM), (WANT, "", 0))
 
+    def test_a_bound_gives_its_traits_methods(self):
+        self.assertEqual(run_source_both_now(BOUNDS), (BOUNDS_WANT, "", 0))
+
+    def test_print_of_a_type_with_its_own_form(self):
+        self.assertEqual(run_source_both_now(PRINT_FORMAT), ("P(3)\noff\non\nP(9)\nP(1)\nP(2)\n", "", 0))
+
     def test_errors(self):
         cases = {
+            "print_without_format": ("struct P {\n    x: int,\n}\n\nfun main() {\n    print(P { x: 1 })\n}\n",
+                                     "print() cannot print a value of type 'P'"),
+            "bound_not_met": ('fun show<T: Format>(x: T) -> str {\n    return f"<{x}>"\n}\n\nfun main() {\n    print(show(5))\n}\n',
+                              "type 'int32' does not satisfy the bound 'T: Format' required by 'show'"),
+            "no_bound": ('fun show<T>(x: T) -> str {\n    return x.format("")\n}\n\nfun main() {\n}\n',
+                         "type parameter 'T' has no method 'format': it has no bounds"),
+            "no_bound_in_a_hole": ('fun show<T>(x: T) -> str {\n    return f"{x}"\n}\n\nfun main() {\n}\n',
+                                   "format() cannot render a value of type 'T'"),
+            "operator_trait": ('fun add2<T: Add>(x: T) -> T {\n    return x.add(x)\n}\n\nfun main() {\n}\n',
+                               "type parameter 'T' has no method 'add': none of its bounds ('Add') declares one"),
             "precision_on_an_int": ('fun main() {\n    print(f"{5:.2}")\n}\n',
                                     "the format spec '.2' needs a float, found 'int32'"),
             "kind_on_a_float": ('fun main() {\n    print(f"{1.5:x}")\n}\n',

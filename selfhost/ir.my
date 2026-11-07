@@ -491,6 +491,34 @@ pub fun intrinsic_arity(op: Intrinsic) -> int32 {
     }
 }
 
+// Whether `op` is one of the atomics on a 64-bit word, all of whose
+// operands are words: an address, or an `int64`/`uint64` value.
+#test(Intrinsic.Cas64)[true]
+#test(Intrinsic.Sqrt)[false]
+pub fun is_word_atomic(op: Intrinsic) -> bool {
+    return match op {
+        Intrinsic.Cas64 => true
+        Intrinsic.Xchg64 => true
+        Intrinsic.FetchAdd64 => true
+        Intrinsic.LoadAcq64 => true
+        Intrinsic.StoreRel64 => true
+        _ => false
+    }
+}
+
+// Whether a temporary of type `t` is a 64-bit word: an address or a 64-bit
+// integer.
+#test(Type.TPtr)[true]
+#test(Type.TInt(64, false))[true]
+#test(Type.TInt(32, true))[false]
+fun is_word(t: Type) -> bool {
+    return match t {
+        Type.TPtr => true
+        Type.TInt(w, s) => w == 64
+        _ => false
+    }
+}
+
 // Whether the intrinsic gives a value.
 #test(Intrinsic.RcDec)[true]
 #test(Intrinsic.RcInc)[false]
@@ -641,6 +669,13 @@ pub fun verify(f: IrFunc) -> str {
                 Inst.Intr(d, op, args) => {
                     if args.len() != intrinsic_arity(op) { return format("L{}: intr {} takes {} arguments, given {}", bi, intrinsic_name(op), intrinsic_arity(op), args.len()) }
                     if d >= 0 && !intrinsic_gives(op) { return format("L{}: intr {} gives no value, but writes %t{}", bi, intrinsic_name(op), d) }
+                    // and of the kinds it takes: an atomic's operands are
+                    // 64-bit words (MYLA-294; a `cas64` on an int32 passed)
+                    if is_word_atomic(op) {
+                        for a in args {
+                            if !is_word(f.temps[a]) { return format("L{}: intr {} takes 64-bit words, given %t{} ({})", bi, intrinsic_name(op), a, type_name(f.temps[a])) }
+                        }
+                    }
                 },
                 _ => {},
             }
@@ -1398,6 +1433,8 @@ fun prepend(x: int32, xs: [int32]) -> [int32] {
 #test([Inst.Bin(2, "+", Type.TInt(64, false), Type.TInt(64, false), 2, 1, Pos { line: 0, col: 0 })])["L0: arithmetic on an address (%t2 = %t2 + %t1); only offset moves one"]
 #test([Inst.Intr(-1, Intrinsic.Cas64, [1, 1])])["L0: intr cas64 takes 3 arguments, given 2"]
 #test([Inst.Intr(1, Intrinsic.Pause, [])])["L0: intr pause gives no value, but writes %t1"]
+#test([Inst.Intr(1, Intrinsic.LoadAcq64, [0])])["L0: intr load_acq64 takes 64-bit words, given %t0 (str)"]
+#test([Inst.Intr(-1, Intrinsic.StoreRel64, [2, 2])])[""]
 #test([Inst.Intr(-1, Intrinsic.RcDec, [1])])[""]
 fun verify_block(insts: [Inst]) -> str {
     return verify(test_func([IrBlock { insts: insts, term: Term.Ret(-1) }]))
@@ -1441,7 +1478,7 @@ fun verify_join(left: [Inst], right: [Inst], after: [Inst]) -> str {
     ]))
 }
 
-#test([])[IrFunc { name: "f", ret: None, slots: [Slot { name: "s", ty: Type.TStr, size: 8, word: -1, owns: true, inline: false, scope: -1 }, Slot { name: "b", ty: Type.TStr, size: 8, word: -1, owns: false, inline: false, scope: -1 }], temps: [Type.TStr, Type.TBool], blocks: [], order: [], instances: [], frame: false, scope_parent: [-1] }]
+#test([])[IrFunc { name: "f", ret: None, slots: [Slot { name: "s", ty: Type.TStr, size: 8, word: -1, owns: true, inline: false, scope: -1 }, Slot { name: "b", ty: Type.TStr, size: 8, word: -1, owns: false, inline: false, scope: -1 }], temps: [Type.TStr, Type.TBool, Type.TPtr], blocks: [], order: [], instances: [], frame: false, scope_parent: [-1] }]
 fun test_func(blocks: [IrBlock]) -> IrFunc {
     var order: [int32] = []
     var i = 0

@@ -4,13 +4,41 @@
 
 ## Attributes
 
-An attribute is written on the lines above a declaration: `#name`, optionally followed by `(arguments)` and `[outputs]`. The set is fixed; any other name is a type error. Attributes aren't allowed on `impl` blocks or imports.
+An attribute is written on the lines above a declaration: `#name`, optionally followed by `(arguments)` and `[outputs]`. The set is fixed; any other name is a type error. An `impl` block takes `#allow` only; imports take none.
 
 | Attribute | On | Meaning |
 | --- | --- | --- |
 | `#main` | a non-generic function without parameters | The entry point, instead of the function named `main` |
 | `#test(args)[expected]` | a non-generic function or method with a result | One test case; several may be stacked. On a method the receiver is the first argument (D116) |
 | `#derive(Eq)` | a non-generic struct or enum | Structural equality ([[Language/Methods-and-traits]]); `Eq` is the only trait that can be derived (`cannot derive 'Ord': only 'Eq' is derivable`) |
+| `#allow(name, …)` | a function, a method or an `impl` block | Silences the warnings of that name inside it (D161, below) |
+
+## Warnings and #allow
+
+A warning doesn't stop the program: `myla check` reports it and succeeds, `myla run` and `myla build` report it and go on. Each has a name, shown in its output (`warning[primitive]: …`) and given as the diagnostic's code in the editor (D161):
+
+| Name | Warns about |
+| --- | --- |
+| `primitive` | a call of one of the standard library's I/O primitives (`__poll`, `__spawn`, …) outside it (D100); the raw-memory ones are errors instead (D152) |
+| `reentrancy` | an actor's async method changing a field after an `await` on the strength of what it read before (D95, [[Language/Concurrency]]) |
+
+`#allow(name)` on a function, a method or an `impl` block silences the warnings of that name in its body (the impl's: in all its methods). `#allow(primitive(__poll, __spawn))` silences only those primitives. Several names go in one `#allow`, `#allow(primitive, reentrancy)`. A struct or an actor has no code of its own: its methods are in its `impl`, which takes the `#allow`.
+
+```myla
+// the interpreter of a small language runs its I/O itself
+#allow(primitive(__getcwd))
+fun where() -> str {
+    return __getcwd()
+}
+
+fun main() {
+    print(where().len() > 0)
+}
+// output:
+// true
+```
+
+An error can't be allowed: `#allow(primitive(__load64))` is the error "'__load64' reads or writes raw memory, which is an error outside the standard library: '#allow' silences warnings only". A name no warning has (`#allow(unused)`) is a warning itself, so a misspelt `#allow` doesn't go unnoticed. The interpreter's `impl` block in [[selfhost/interp.my]] carries `#allow(primitive)`: it runs a program's I/O through the primitives (MYLA-285).
 
 ## #test
 

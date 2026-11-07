@@ -10,7 +10,7 @@ This repository uses [Genbeya](https://github.com/genbeya/genbeya): the board is
 - Workflow: `backlog` → `todo` → `in-progress` → `review` → `done`. Confirmed bugs that should be fixed next are in `todo`, everything else waits in `backlog`. An agent moves a task it has finished to `review`; only the owner moves tasks to `done`, or asks for it explicitly.
 - A finished task records what proves it under one heading, `## Evidence`.
 - One pull request per theme (an epic step or a review round), named after its tasks.
-- A change to the compiler's output (`selfhost/`, `lib/std/`) comes with a new seed: `scripts/update-seed.sh`, then commit the seeds, `bootstrap/seed.s` and `bootstrap/seed-aarch64.s` ([[Development/Bootstrap]]); CI checks them.
+- A pull request that changes the compiler's output (`selfhost/`, `lib/std/`) carries one new seed, in its last commit: `scripts/update-seed.sh`, then commit `bootstrap/seed.s`, `bootstrap/seed-aarch64.s` and `selfhost/embedded_std.my` (D156, [[Development/Bootstrap]]); the commits before it may leave them behind. CI checks the pull request's tip.
 - A new task takes the next free number across all epics. Abandoned tasks move to `done` with a note; tasks are never deleted.
 - Reference tasks, pages and files with `[[MYLA-12]]`, `[[Language/Types]]` and `[[selfhost/checker.my#L10-L20]]`; `![[file#L1-L9]]` on its own line embeds lines.
 - Name the task in commit messages and pull requests: `MYLA-12: Encode interpreter strings with surrogateescape`.
@@ -48,7 +48,11 @@ Every language feature appears in at least one runnable example, and every known
 
 ## Parity
 
-The language is defined by its reference documentation, [[Language]] and [[Project/Decisions]]; the self-hosted toolchain is its implementation. Its interpreter (`myla run`) and its native code must print the same for every program: when they differ, one of them is wrong; fix the one that disagrees with the documentation and say so in the commit. The burn tests also compare the lexer, parser, checker, interpreter and native code with the answers the retired Python toolchain gave, recorded before it was removed ([[Development/Testing]]).
+The language is defined by its reference documentation, [[Language]] and [[Project/Decisions]]; the self-hosted toolchain is its implementation. Its interpreter (`myla run`) and its native code must print the same for every program: when they differ, one of them is wrong; fix the one that disagrees with the documentation and say so in the commit. What the tests hold the toolchain to, since the Python toolchain was retired ([[MYLA-219]], [[MYLA-288]]):
+
+- **Native code and the other targets:** the self-hosted interpreter's output for the same program, and, for the examples, a hard expectation both are held to (`test_examples_run.EXPECTED`).
+- **Diagnostics:** hard expectations: the error corpus's `//~` directives and, for a file the recordings don't cover, its whole rendered diagnostic in a sibling `.stderr` file (`TestPinnedDiagnostics`); a test's own `assertIn` of a message.
+- **The recorded answers** of the retired toolchain ([[Development/Testing#recorded-answers]]) still check the files they cover, the examples as they were at the retirement (`RECORDED_EXAMPLES`) and the recorded snippets; nothing new is held to them, and they shrink as those files change.
 
 ## Decisions
 

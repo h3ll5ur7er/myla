@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -39,6 +40,20 @@ def _excused(suite: unittest.TestSuite) -> unittest.TestSuite:
     return out
 
 
+# What each target's runs need besides the host's `as` and `ld` (the
+# compiler is built natively): with none of them every suite would skip and
+# the summary still say they passed (MYLA-297).
+TOOLS = {
+    "aarch64-linux": ["clang", "ld.lld", "qemu-aarch64"],
+    "wasm32-wasi": ["clang", "wasm-ld", "node"],
+}
+
+
+def missing_tools(target: str) -> list[str]:
+    """The tools `target`'s runs need that aren't on PATH."""
+    return [t for t in ["as", "ld", *TOOLS.get(target, [])] if shutil.which(t) is None]
+
+
 def run_one(module: str) -> int:
     """Run one suite in this process (the target is in MYLA_TEST_TARGET)."""
     suite = _excused(unittest.defaultTestLoader.loadTestsFromName(module))
@@ -57,6 +72,13 @@ def main() -> int:
     os.chdir(ROOT)
     if args.one:
         return run_one(args.modules[0])
+    missing = missing_tools(args.target)
+    if missing:
+        msg = f"{args.target}: missing {', '.join(missing)}: the suites would skip"
+        if os.environ.get("MYLA_REQUIRE_TARGETS"):
+            print(msg, file=sys.stderr)
+            return 1
+        print(f"warning: {msg}", file=sys.stderr)
     modules = [m if m.startswith("tests.") else "tests.burn." + m for m in args.modules] or _targets.SUITES
 
     def run(module: str) -> tuple[str, int, float, str]:

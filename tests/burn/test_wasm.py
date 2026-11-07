@@ -160,6 +160,22 @@ class WasmParity(unittest.TestCase):
             build_wasm(path, wb)
             self.assertEqual(run(NODE + [wb]), ("".join(f"{k}\n" for k in range(40)), "", 0))
 
+    def test_a_list_past_2_27_elements(self):
+        # a list stopped at 2^26 elements (the review of 2026-11-06, R6): every
+        # cell above 4 KB took a power of two, header and all, and the cells
+        # it outgrew stayed; a big cell at the top of the memory now grows
+        # where it is (D157)
+        source = ("fun main() {\n    var xs: [int64] = []\n    var i: int64 = 0\n"
+                  "    while i < 150000000 {\n        xs.push(i)\n        i += 1\n    }\n"
+                  "    print(xs.len())\n    print(xs[xs.len() - 1])\n}\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "big.my")
+            with open(path, "w") as fh:
+                fh.write(source)
+            wb = os.path.join(tmp, "big.wasm")
+            build_wasm(path, wb)
+            self.assertEqual(run(NODE + [wb]), ("150000000\n149999999\n", "", 0))
+
     def test_files(self):
         # files and directories through WASI: written, read, listed, renamed
         # and removed, a relative path against the working directory
@@ -237,12 +253,22 @@ class WasmImports(unittest.TestCase):
         self.assertEqual((grow, platform["MEMORY_GROW"]), (str(len(names) + 1), str(len(names) + 1)))
 
 
+# the stress programs that start child processes, which WASI has none of
+# (run_async is `Err(SpawnError.Unsupported)` there, which
+# WasmCapabilities.test_no_processes_is_unsupported checks)
+NEEDS_PROCESSES = {
+    "t27_children_read_as_they_write": "child processes, which WASI doesn't have",
+}
+
+
 class WasmTasks(unittest.TestCase):
     def test_stress_programs(self):
         # the concurrency stress programs on one worker (D125), in each order
         from .test_concurrency_stress import EXPECTED, SCHEDULES, _DIR
         for name, want in EXPECTED.items():
             with self.subTest(program=name), tempfile.TemporaryDirectory() as tmp:
+                if name in NEEDS_PROCESSES:
+                    self.skipTest(NEEDS_PROCESSES[name])
                 wb = os.path.join(tmp, name + ".wasm")
                 build_wasm(os.path.join(_DIR, name + ".my"), wb)
                 for extra in [{}] + [{"MYLA_SCHED": sched} for sched in SCHEDULES]:
@@ -352,8 +378,8 @@ class WasmPage(unittest.TestCase):
         got = self.page([{"op": "check", "files": warn}, {"op": "check", "files": bad}])
         out, err, code = self.native("check", warn)
         self.assertEqual(got[0]["ok"], True)
-        self.assertEqual([d["severity"] for d in got[0]["diagnostics"]], ["warning"] * err.count("warning:"))
-        self.assertEqual(err.count("warning:"), 1)
+        self.assertEqual([d["severity"] for d in got[0]["diagnostics"]], ["warning"] * err.count("warning[primitive]:"))
+        self.assertEqual(err.count("warning[primitive]:"), 1)
         w = got[0]["diagnostics"][0]
         self.assertEqual((w["line"], w["col"]), (2, 11))
         self.assertIn("'__clock_ns' is a primitive", w["message"])
@@ -368,6 +394,16 @@ def _have_playwright() -> bool:
         return False
     p = subprocess.run(["node", "-e", "require('playwright')"], capture_output=True)
     return p.returncode == 0
+
+
+@unittest.skipUnless(os.environ.get("MYLA_REQUIRE_BROWSER"), "MYLA_REQUIRE_BROWSER is not set")
+class BrowserTools(unittest.TestCase):
+    """CI's wasm-page job sets MYLA_REQUIRE_BROWSER, so a missing Playwright
+    fails there instead of skipping the page's test unnoticed (MYLA-297)."""
+
+    def test_playwright_is_there(self):
+        self.assertTrue(_have_playwright(), "the browser test needs Node's playwright with its Chromium")
+        self.assertTrue(HAVE_WASM, WASM_SKIP)
 
 
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)

@@ -143,6 +143,16 @@ class DefaultParams(unittest.TestCase):
                                "type error: this function value expects 2 argument(s), got 1"),
             "trait": ("trait T {\n    fun m(self, k: int = 1) -> int\n}\n\nfun main() {\n}\n",
                       "type error: the methods of a trait can't have default values"),
+            # the messages name the defaults the caller left (MYLA-293)
+            "test_case": ("#test(1)[3]\nfun k(a: int, b: int = 2) -> int {\n    return a + b\n}\n\nfun main() {\n}\n",
+                          "type error: '#test' expects 2 argument(s), got 1: a case gives every argument, "
+                          "the defaults of 'b' too"),
+            "become_words": ("fun g(a: int64, b: int64, c: int64, d: int64, e: int64, f: int64, x: int64 = 1, y: int64 = 2)"
+                             " -> int64 {\n    return a + x + y\n}\n\n"
+                             "fun h(a: int64, b: int64, c: int64, d: int64, e: int64, f: int64) -> int64 {\n"
+                             "    become g(a, b, c, d, e, f)\n}\n\nfun main() {\n    print(h(1, 2, 3, 4, 5, 6))\n}\n",
+                             "type error: 'become' passes 8 argument words, 2 of them on the stack, but 'h' received 0"
+                             " there, counting the defaults of 'x' and 'y' the call leaves out"),
         }
         for name, (src, want) in cases.items():
             with self.subTest(case=name):

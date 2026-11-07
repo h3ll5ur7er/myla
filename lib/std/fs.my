@@ -23,6 +23,7 @@ pub enum IoError {
     Cancelled,
     Unsupported,
     BrokenPipe,
+    InvalidInput,
     Other(int32),
 }
 
@@ -35,6 +36,7 @@ pub enum IoError {
 #test(39)[IoError.NotEmpty]
 #test(38)[IoError.Unsupported]
 #test(32)[IoError.BrokenPipe]
+#test(22)[IoError.InvalidInput]
 #test(5)[IoError.Other(5)]
 pub fun from_errno(code: int32) -> IoError {
     if code == 2 { return IoError.NotFound }
@@ -47,6 +49,7 @@ pub fun from_errno(code: int32) -> IoError {
     if code == 125 { return IoError.Cancelled }
     if code == 38 || code == 95 { return IoError.Unsupported }
     if code == 32 { return IoError.BrokenPipe }
+    if code == 22 { return IoError.InvalidInput }
     return IoError.Other(code)
 }
 
@@ -63,9 +66,9 @@ pub fun read_to_string(path: str) -> Result<str, IoError> {
 
 // Write `contents` to `path`, creating or truncating the file (mode 0644). The
 // bytes are written verbatim (as UTF-8): `Ok(())` once all of them are
-// (D138); on failure (open/write) an `IoError` with the cause. Runs as raw open/write/close syscalls
-// natively and as Python file IO in the interpreter, with identical
-// (errno-keyed) error mapping.
+// (D138); on failure (open/write) an `IoError` with the cause, the same in
+// the interpreter and natively (both are std.rt's open/write/close over
+// std.platform).
 pub fun write_to_file(path: str, contents: str) -> Result<(), IoError> {
     __write_file(path, contents)
     let err = __io_errno()

@@ -187,6 +187,32 @@ class TestSubprocessParity(unittest.TestCase):
             "found on PATH\n\n/\n\nnot found\n\nset home\n\nno home\n\nONLY=this\n\n"
             "fed to its stdin\n\nnot found\n\nthe base is unchanged\n\n", "", 0))
 
+    def test_an_environment_name_no_variable_can_have(self):
+        # MYLA-295: `env("A=B", "c")` would set A to "B=c"; such a name (and
+        # an empty one, or one with a NUL) fails the spawn, which runs nothing
+        out, err, code = run_source_both_now(
+            "from std.process import command, Output, SpawnError\n\n"
+            "fun said(r: Result<Output, SpawnError>) -> str {\n"
+            "    return match r {\n"
+            "        Ok(o) => {\n"
+            "            var sb = StringBuilder()\n"
+            "            for b in o.stdout { sb.append_byte(b) }\n"
+            "            sb.build()\n"
+            "        }\n"
+            "        Err(SpawnError.InvalidInput) => \"invalid name\\n\"\n"
+            "        Err(e) => \"another error\\n\"\n"
+            "    }\n"
+            "}\n\n"
+            "fun main() {\n"
+            "    let env = command(\"/usr/bin/env\").env_clear()\n"
+            "    print(said(env.env(\"A=B\", \"c\").output()))\n"
+            "    print(said(env.env(\"\", \"c\").output()))\n"
+            "    print(said(env.env_remove(\"X=Y\").output()))\n"
+            "    print(said(env.env(\"A\", \"B=c\").output()))\n"
+            "}\n"
+        )
+        self.assertEqual((out, err, code), ("invalid name\n\ninvalid name\n\ninvalid name\n\nA=B=c\n\n", "", 0))
+
     def test_a_child_waited_for_in_a_task(self):
         # `output_async` with stdin, and `run_async`; with tasks (std.task
         # imported) and without, where waiting for the child's output is

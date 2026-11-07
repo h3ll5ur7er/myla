@@ -1,0 +1,5 @@
+type error: parameter 'b' needs a default: the parameters after one with a default have one too
+  --> examples/errors/type_default_not_trailing.my:5:19
+  |
+5 | fun f(a: int = 1, b: int) -> int {
+  |                   ^^^^^^

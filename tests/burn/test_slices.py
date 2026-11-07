@@ -43,7 +43,7 @@ fun main() {
     print(shown(xs[^1:0:-2]))
     print(shown(xs[2:99]))
     print(shown(xs[5:2]))
-    print(shown(xs[-3:2]))
+    print(shown(xs[^9:2]))
     print(shown(xs[:]))
     let k = 2
     print(shown(xs[k:k + 2]))
@@ -110,6 +110,11 @@ class Slices(unittest.TestCase):
             "a_step_over_a_character": ("fun main() {\n    let t = \"aö\"\n    print(t[::-1])\n}\n", "a slice bound inside a character"),
             "past_the_start": ("fun main() {\n    let xs = [1, 2]\n    print(xs[^3])\n}\n", "out of bounds"),
             "zero_from_the_end": ("fun main() {\n    let xs = [1, 2]\n    print(xs[^0])\n}\n", "out of bounds"),
+            # a plain negative bound, as a negative index (D154: it meant
+            # "before the start" and hid the slip `^` catches)
+            "a_negative_stop": ("fun main() {\n    let xs = [1, 2, 3]\n    print(xs[1:-1].len())\n}\n", "index out of bounds"),
+            "a_negative_start": ("fun main() {\n    let n = -2\n    let xs = [1, 2, 3]\n    print(xs[n:].len())\n}\n", "index out of bounds"),
+            "a_negative_bound_of_a_string": ("fun main() {\n    let t = \"abc\"\n    print(t[:-1:-1])\n}\n", "index out of bounds"),
         }
         myla = selfhost_tool("main")
         with tempfile.TemporaryDirectory() as tmp:

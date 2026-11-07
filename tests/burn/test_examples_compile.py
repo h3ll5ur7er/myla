@@ -1,12 +1,15 @@
 """Burn test: every example, compiled natively, prints the same as the interpreter.
 
 This is the core v0.0.3 guarantee — the x86-64 compiler and the tree-walking
-interpreter agree on observable output.
+interpreter agree on observable output. Both are held to the same hard
+expectation, test_examples_run.EXPECTED (MYLA-288: the retired Python
+toolchain's recorded answers can't cover a new or changed example).
 """
 import os
 import unittest
 
-from tests.burn._native import CAN_BUILD_NATIVE, SKIP_REASON, build_and_run, interpret
+from tests.burn._native import CAN_BUILD_NATIVE, SKIP_REASON, build_and_run
+from tests.burn.test_examples_run import EXPECTED
 
 EXAMPLES_DIR = os.path.abspath(
     os.path.join(os.path.dirname(__file__), os.pardir, os.pardir, "examples")
@@ -20,6 +23,7 @@ EXAMPLES = [
     "lists.my", "maps.my", "strings.my", "methods.my", "closures.my",
     "pipelines.my", "traits.my", "floats.my", "chars.my",
     "generic_traits.my", "interpolation.my", "traits_on_builtins.my", "semicolons.my",
+    "slices_and_formats.my", "branches_and_defaults.my", "time_and_math.my",
 ]
 # Examples the compiler doesn't build yet: concurrency (D89, MYLA-137).
 NOT_YET = {"concurrency.my"}
@@ -49,7 +53,7 @@ def _make(name: str):
             source = fh.read()
         native_out, code = build_and_run(source)
         self.assertEqual(code, 0, f"{name} exited with {code}")
-        self.assertEqual(native_out, interpret(source))
+        self.assertEqual(native_out, EXPECTED[name])
     return test
 
 

@@ -48,10 +48,11 @@ SKIP: dict[str, dict[str, str]] = {
     "wasm32-wasi": {
         **_BOTH,
         "test_selfhost_codegen.SelfHostedCodegenParity.test_children_run_in_parallel": "one worker (D125 (4))",
-        "test_selfhost_codegen.SelfHostedCodegenParity.test_stress_programs_reclaim_memory":
-            "the peak measured is Node's, not the program's",
+        # the linear memory (run.mjs's MYLA_WASM_MEMORY_OUT, MYLA-297) counts
+        # each 16 MiB chunk whole once used, and the 8 MiB shadow stack: 80 MB
+        # for this program, whose native peak RSS (touched pages) is 18 MB
         "test_selfhost_codegen.SelfHostedCodegenParity.test_deep_task_trees_and_awaits":
-            "the peak measured is Node's, not the program's",
+            "a chunk counts whole in the linear memory (80 MB; 18 MB of pages touched natively)",
         # no processes (D125, Language/Targets): `run` and `spawn` are
         # `Unsupported` there, which test_wasm checks
         "test_process": "WASI has no processes (test_wasm checks they are Unsupported)",

@@ -1,0 +1,5 @@
+parse error: expected '=' after the pattern of an 'if let', found 'o'
+  --> examples/errors/parse_if_let_needs_equals.my:5:20
+  |
+5 |     if let Some(v) o {
+  |                    ^

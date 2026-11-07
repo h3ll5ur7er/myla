@@ -1,0 +1,5 @@
+type error: the branches of an 'if' have incompatible types 'int32' and 'str'
+  --> examples/errors/type_if_branches_differ.my:7:39
+  |
+7 |     let label = if n > 0 { n } else { "none" }
+  |                                       ^^^^^^

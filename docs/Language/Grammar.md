@@ -52,7 +52,7 @@ The lexer also checks what this grammar can't say: an integer literal fits 64 bi
 program = SEP* ( declaration ( SEP+ declaration )* SEP* )? ;
 SEP          = NL | ";" ;
 
-declaration  = attribute* "pub"? item_decl | impl_decl | import_decl | "pub" pub_import ;
+declaration  = attribute* ( "pub"? item_decl | impl_decl ) | import_decl | "pub" pub_import ;
 item_decl    = struct_decl | enum_decl | fun_decl | trait_decl | typealias_decl | const_decl ;
 
 attribute    = "#" IDENT ( "(" expr_list? ")" )? ( "[" expr_list? "]" )? NL* ;

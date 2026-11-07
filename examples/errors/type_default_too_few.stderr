@@ -1,0 +1,5 @@
+type error: function 'f' expects 1 to 2 argument(s), got 0
+  --> examples/errors/type_default_too_few.my:9:12
+  |
+9 |     print(f())
+  |           ^^^

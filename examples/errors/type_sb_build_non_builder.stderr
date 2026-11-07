@@ -1,0 +1,5 @@
+type error: type 'str' has no method 'build'
+  --> examples/errors/type_sb_build_non_builder.my:6:18
+  |
+6 |     print(s.build())
+  |           ^^^^^^^^^

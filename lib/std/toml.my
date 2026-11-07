@@ -100,6 +100,9 @@ fun pos_of(text: str, start: int32, end: int32) -> TomlPos {
 }
 
 // The line and column of byte offset `at` in `s`.
+#test("ab\ncd", 4)[(2, 2)]
+#test("é=1", 2)[(1, 2)]
+#test("x", 9)[(1, 2)]
 fun line_col(s: str, at: int32) -> (int32, int32) {
     var line = 1
     var col = 1
@@ -140,6 +143,8 @@ struct Parser {
 }
 
 // One string for a key path, unambiguous whatever the keys hold.
+#test(["a", "b:c"])["1:a3:b:c"]
+#test([])[""]
 fun path_key(path: [str]) -> str {
     var sb = StringBuilder()
     for k in path {
@@ -149,6 +154,7 @@ fun path_key(path: [str]) -> str {
     return sb.build()
 }
 
+#test(["a"], "b")[["a", "b"]]
 fun with_key(path: [str], key: str) -> [str] {
     var out = path
     out.push(key)
@@ -157,6 +163,9 @@ fun with_key(path: [str], key: str) -> [str] {
 
 // A key path as TOML writes it, for messages: keys that aren't bare quoted,
 // with '"', '\' and control characters escaped, so a message is one line.
+#test(["server", "port"])["server.port"]
+#test(["a b", "q\""])["\"a b\".\"q\\\"\""]
+#test(["tab\t"])["\"tab\\u0009\""]
 fun dotted(path: [str]) -> str {
     var sb = StringBuilder()
     for k in path {
@@ -185,6 +194,8 @@ fun dotted(path: [str]) -> str {
 }
 
 // `n` (below 65536) as four hex digits.
+#test(9)["0009"]
+#test(65535)["FFFF"]
 fun hex4(n: int32) -> str {
     let digits = "0123456789ABCDEF"
     var sb = StringBuilder()
@@ -200,6 +211,9 @@ fun is_bare_char(c: uint8) -> bool {
     return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '-'
 }
 
+#test("a_b-1")[true]
+#test("a.b")[false]
+#test("")[false]
 fun is_bare_key(k: str) -> bool {
     if k.len() == 0 { return false }
     var i = 0

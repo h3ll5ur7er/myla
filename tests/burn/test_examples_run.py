@@ -44,8 +44,8 @@ EXPECTED = {
                     "6\n100\n42\n"),
     "pipelines.my": "11\n8\n21\n14\n15\n42\n18\n11\n12\n20\n",
     "traits.my": "4\n6\ntrue\ntrue\nvec\ntrue\nfalse\ntrue\ntrue\n60\n3\n4\n8\n3\n",
-    "floats.my": ("0.5\n3.1415926535897931\n3.75\n3.5\n1.5\n-3.1415926535897931\n"
-                  "0.30000000000000004\n0.300000012\ninf\ntrue\nfalse\n9\n3\n3\n"),
+    "floats.my": ("0.5\n3.141592653589793\n3.75\n3.5\n1.5\n-3.141592653589793\n"
+                  "0.30000000000000004\n0.3\ninf\ntrue\nfalse\n9\n3\n3\n"),
     "chars.my": "a\nλ\n😀\ntrue\nfalse\n65\nλ\ntrue\n2\n1\n5\n3\n104\n233\n955\n",
     "generic_traits.my": "0\n1\n-1\n0\n1\n-1\n",
     "interpolation.my": ("myla scored 42\n2 + 3 = 5\nset is { 1, 2 }\n"
@@ -53,6 +53,12 @@ EXPECTED = {
     "traits_on_builtins.my": ("49\nhaha 67\n42\nI'm a teapot\nThis is not the error you are looking for. It is the answer to life, the universe, and everything.\nThis is not the error you are looking for. It is 13\nThis is not the error you are looking for. It is 15\nSuccess\n"),
     "semicolons.my": "12\nsize\n7\n15\n21\n42\n",
     "concurrency.my": "40\n30\n200\ntrue\nfalse\n150\n50\n31\n",
+    # the November features (MYLA-299)
+    "slices_and_formats.my": ("50\n3\n30\nalym\n3.14 [   42] [007] 0xff\n19.99 or about 19\n"
+                              "0.30000000000000004\n0.25\n"),
+    "branches_and_defaults.my": ("2\npositive\n3\nport 443\nbad port: not a digit: x\n"
+                                 "Hello, Myla!\nHello, Myla?\n2\n1\nlift-off\n"),
+    "time_and_math.my": "1.41\ntrue\n3.141592653589793\nanswered 7\ngave up\n7\ntrue\n",
 }
 
 def run_file(path: str) -> str:

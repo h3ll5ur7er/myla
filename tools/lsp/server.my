@@ -12,9 +12,9 @@
 from std.io import stdin
 from std.json import Json, field
 from std.fs import read_to_string
-from ...selfhost.loader import load_program_opts, normalize, type_errors, warning_reports, source_text
-from ...selfhost.diag import Report, all_reports, caret_range
-from ...selfhost.checker import build_checker_decls
+from ...selfhost.loader import load_program_opts, normalize, type_errors, warning_reports, source_text, in_stdlib
+from ...selfhost.diag import Report, all_reports, caret_range, warning_name
+from ...selfhost.checker import build_checker_with
 from ...selfhost.tokens import SrcSpan
 from .protocol import Channel, Incoming, send, response, error_response, notification, str_field, field_or_null
 from .text import lines_of, to_lsp, word_end, uri_path, path_uri, Pos
@@ -199,7 +199,8 @@ impl Server {
         match load_program_opts(path, ctx.opts) {
             Err(r) => { found = Some(r) },
             Ok(prog) => {
-                match build_checker_decls(prog.decls, prog.next_id) {
+                // a file of the standard library may use its primitives (D152)
+                match build_checker_with(prog.decls, prog.next_id, in_stdlib(path, ctx.opts.stdlib_root)) {
                     Ok(c) => { warned = warning_reports(prog, c.warnings) },
                     Err(errs) => { found = Some(type_errors(prog, errs)) },
                 }
@@ -734,7 +735,7 @@ fun diagnostic(r: Report, text: str, uri: str) -> Json {
     var severity: int64 = 1
     if r.kind == "warning" { severity = 2 }
     var fields = [("range", text_range(lines, r.line, r.col, r.sp)), ("message", Json.Str(msg)), ("severity", Json.Int(severity)),
-                  ("source", Json.Str("myla")), ("code", Json.Str(kind_code(r.kind)))]
+                  ("source", Json.Str("myla")), ("code", Json.Str(diagnostic_code(r)))]
     if related.len() > 0 { fields.push(("relatedInformation", Json.Array(related))) }
     return Json.Object(fields)
 }
@@ -759,6 +760,16 @@ fun text_range(lines: [str], line: int32, at_col: int32, sp: SrcSpan) -> Json {
         end = to_lsp(lines, line, last)
     }
     return Json.Object([("start", position(start)), ("end", position(end))])
+}
+
+// A diagnostic's code: a warning's name, which `#allow` takes (D161), else
+// the first word of its kind (`type`, `parse`, …).
+fun diagnostic_code(r: Report) -> str {
+    if r.kind == "warning" {
+        let name = warning_name(r.msg)
+        if name != "" { return name }
+    }
+    return kind_code(r.kind)
 }
 
 // "type error" -> "type"

@@ -10,7 +10,7 @@
 // as `runtime error: stack overflow`, anything else as `runtime error:
 // <the engine's message>`, with exit code 1 (MYLA-261, as myla.mjs).
 
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { Wasi } from "./wasi.mjs";
 import { NodeFs, nodeStdio } from "./node_fs.mjs";
 
@@ -46,5 +46,11 @@ try {
   if (!(e instanceof WebAssembly.RuntimeError || e instanceof RangeError)) throw e;
   process.stderr.write(/call stack/i.test(e.message) ? "runtime error: stack overflow\n" : `runtime error: ${e.message}\n`);
   code = 1;
+}
+// MYLA_WASM_MEMORY_OUT: a file to write the program's linear memory size
+// to, in bytes, at its end: its peak, as a wasm memory only grows (the test
+// harness's peak-memory bounds, MYLA-297; Node's own peak RSS is no measure)
+if (process.env.MYLA_WASM_MEMORY_OUT) {
+  writeFileSync(process.env.MYLA_WASM_MEMORY_OUT, `${instance.exports.memory.buffer.byteLength}\n`);
 }
 process.exitCode = code;

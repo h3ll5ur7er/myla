@@ -2,7 +2,7 @@
 id: MYLA-250
 title: Arguments and results in registers
 type: chore
-status: todo
+status: review
 priority: high
 labels: [backend, performance, calling-convention]
 ---
@@ -76,5 +76,11 @@ The convention question these follow-ups belong to (floats in vector registers, 
 
 **Reopened by [[Project/Review-2026-11]] (R2).** A function-value parameter in a function that also contains a tail call stays in `%rdi`; `CallInd` loads the callee after `pass_words` overwrote `%rdi` with argument 0 ([[selfhost/ir_x86.my]], `pass_words` assumes nothing an argument is read from lives in an argument register). `apply_tail(add, 1, 2, 5)` (`if n == 0 { return f(a, b) }` then `become apply_tail(…)`) prints 72 in the interpreter and on aarch64 and segfaults on x86-64, even when the tail call never runs.
 
-- [ ] Load the indirect callee before the argument words, or give in-place parameters the `late` treatment in `call_arg_index`
-- [ ] The program in `test_register_args.py`
+- [x] Load the indirect callee before the argument words, or give in-place parameters the `late` treatment in `call_arg_index`
+- [x] The program in `test_register_args.py`
+
+## Fixed (2026-11-07)
+
+- The register allocator ([[selfhost/ir_x86.my]]) asked whether a value is a call's function value (read after the arguments are in their registers, so not in one of them) only at the value's last read. `apply_tail`'s `f` is last read by the `become`, which wanted it in `%rdi`, its argument register, so the indirect call before it read `%rdi` after loading the first argument there. Now a value any indirect call reads as its function value (`called_value`, `read_late`) takes no argument register anywhere.
+- `test_register_args.test_a_function_value_parameter_survives_a_tail_call`: `apply_tail(add, 1, 2, 5)` and `apply_tail(add, 1, 2, 0)` print `96` and `3` interpreted and natively; natively the compiler before crashed.
+

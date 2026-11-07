@@ -1,0 +1,11 @@
+//~ type error: a deferred block can't 'await': it runs as its block ends, without suspending
+// A deferred block runs where its block ends, which may be a `return` or a
+// `?`: it can't suspend there (D135).
+import std.task as task
+
+#main
+async fun main() {
+    defer {
+        await task.sleep(1)
+    }
+}

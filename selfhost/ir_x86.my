@@ -13,6 +13,7 @@ from .ast import FunData
 from .checker import Type
 from .codegen import CodeGen, CgBinding, int_signed, same_int, takes_operand, is_cmp, fold_load, fold_load_for_reader, text_at, has_text, is_aggregate, is_actor_t, is_tfloat32, REG_WORDS, arg_reg, spilled_word, narrow_operand, int_width_cg, tls_offset, TLS_SIZE
 from .ir import IrFunc, Inst, Term, Touches, Slot, ENV_WORD, Intrinsic, is_rc_dec, is_rc_atomic, is_cas, is_atomic_at, render_func, touches, use_counts, def_counts, inst_uses, term_uses, successors, ends_in_call
+from .ir_util import reachable_blocks, wrapped
 from .ssa import promote, add_ssa_stats
 from .parser import expr_of, stmt_of, type_expr_of, block_of, pattern_of, fun_of  // AST values for #test cases (MYLA-184)
 
@@ -491,6 +492,18 @@ impl CodeGen {
     }
 
     // An intrinsic, done in place (`Intrinsic` says what each means).
+    //
+    // The registers each uses besides its operands' (MYLA-294): `sqrt`,
+    // `f64_round` %rax and %xmm0; `f64_bits`, `f64_from_bits`, `rt_addr`,
+    // the atomics but `cas64`, `rc_inc`, `rc_dec` and `bsr64` %rax; `cas64`
+    // %rax and %rdx; `rt_waddr` and `rotl` %rax and %rcx; `unique` %rcx and
+    // its clone's call; `run_frame` %rax, %rdi and %r11 and the call;
+    // `call_code` %rdi and %r11 and the call. None of %rax, %rcx, %rdx and
+    // %xmm0 is one the allocator hands out (`alloc_regs`), and the three
+    // that touch %rdi or %r11 call, which `clobber_kind` counts (2), so no
+    // value the allocator keeps in a register is lost across one. An
+    // intrinsic that would use %rsi, %rdi or %r8-%r11 without calling has to
+    // be added to `clobber_kind`.
     fun emit_intr(var self, d: int32, op: Intrinsic, args: [int32], temp_base: int32) {
         match op {
             // std.math's primitives inline (MYLA-249): no call
@@ -2072,6 +2085,12 @@ impl CodeGen {
         // it clobbers anything (`reads_then_calls`), and the instruction
         var callpos: [bool] = []
         var callinst: [Inst] = []
+        // per value, whether a call reads it as its function value, after
+        // its arguments are in their registers: no argument register for it
+        // anywhere, not only where it is last read (the review of 2026-11-06,
+        // R2: a parameter the `become` after it passes on wanted %rdi)
+        var read_late: [bool] = []
+        while read_late.len() < nv { read_late.push(false) }
         var pos = 0
         for b in f.order {
             if !reach[b] { continue }
@@ -2111,6 +2130,11 @@ impl CodeGen {
                     },
                     Inst.Store(sl, v) => { if cand[nt + sl] { tv.push(-1 - (nt + sl)) } },
                     _ => {},
+                }
+                let fv = called_value(inst)
+                if fv >= 0 {
+                    if fv < nv { read_late[fv] = true }
+                    if src_slot[fv] >= 0 && nt + src_slot[fv] < nv { read_late[nt + src_slot[fv]] = true }
                 }
                 k = tc.wat[ii]
                 while k < tc.wat[ii + 1] {
@@ -2285,7 +2309,7 @@ impl CodeGen {
                         let single = rnext[rhead[v]] < 0
                         let vend = rlast[v]
                         var want = ""
-                        var late = false
+                        var late = read_late[v]
                         if rlast[v] % 2 == 0 && callpos[rlast[v] / 2] {
                             let k = call_arg_index(callinst[rlast[v] / 2], v, nt, src_slot)
                             if k == 99 { late = true } else if k >= 0 && k < REG_WORDS { want = arg_reg(k) }
@@ -2947,6 +2971,9 @@ fun clobbers(inst: Inst) -> bool {
 // 2 when `inst` clobbers the caller-saved registers (`clobbers`), 1 when it
 // is a copy between memory blocks, whose `rep movs` or moves go through %rsi
 // and %rdi, else 0 (one match: passing an instruction copies it).
+#test(Inst.Intr(-1, Intrinsic.RunFrame, [1]))[2]
+#test(Inst.Intr(1, Intrinsic.CallCode, [2, 3]))[2]
+#test(Inst.Intr(1, Intrinsic.Cas64, [2, 3, 4]))[0]
 fun clobber_kind(inst: Inst) -> int32 {
     return match inst {
         Inst.Const(d, t, v) => 0,
@@ -3117,26 +3144,6 @@ fun negated_cond(cond: str) -> str {
     return cond
 }
 
-// Which blocks of `f` the entry block reaches.
-fun reachable_blocks(f: IrFunc) -> [bool] {
-    var reach: [bool] = []
-    for b in f.blocks { reach.push(false) }
-    if f.blocks.len() == 0 { return reach }
-    var work: [int32] = [0]
-    reach[0] = true
-    while work.len() > 0 {
-        let b = work[work.len() - 1]
-        work.pop()
-        for s in successors(f.blocks[b].term) {
-            if !reach[s] {
-                reach[s] = true
-                work.push(s)
-            }
-        }
-    }
-    return reach
-}
-
 // The instruction loading the integer `v` into a register, up to its name:
 // `movq` sign-extends a 32-bit immediate, shorter than `movabsq` (MYLA-120).
 #test(5)["movq $5, %"]
@@ -3145,21 +3152,6 @@ fun reachable_blocks(f: IrFunc) -> [bool] {
 fun int_const_text(v: int64) -> str {
     if v >= -2147483648 && v <= 2147483647 { return format("movq ${}, %", v) }
     return format("movabsq ${}, %", v)
-}
-
-// The constant `v` as a `w`-bit integer (signed or not) holds it in 64 bits,
-// as `wrap` leaves it in %rax.
-#test(0, 32, true)[0]
-#test(41, 32, true)[41]
-#test(1114111, 64, false)[1114111]
-fun wrapped(v: int64, w: int32, signed: bool) -> int64 {
-    if w == 64 { return v }
-    if signed {
-        let shift = 64 - w
-        return (v << shift) >> shift
-    }
-    let one: int64 = 1
-    return v & ((one << w) - 1)
 }
 
 // Whether all `n` reads of the temporary `t`, written by `insts[at]`, come
@@ -3598,6 +3590,17 @@ fun reads_then_calls(inst: Inst) -> bool {
             _ => false
         },
         _ => false,
+    }
+}
+
+// The temporary holding the function value an indirect call calls, or -1.
+#test(Inst.CallInd(-1, 4, [3]))[4]
+#test(Inst.Call(-1, "f", [3]))[-1]
+fun called_value(inst: Inst) -> int32 {
+    return match inst {
+        Inst.CallInd(d, fv, args) => fv,
+        Inst.CallIndSret(fv, r, args) => fv,
+        _ => -1,
     }
 }
 

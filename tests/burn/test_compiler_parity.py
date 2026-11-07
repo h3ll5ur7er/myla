@@ -3805,14 +3805,14 @@ class TestCompilerParity(unittest.TestCase):
 # program added or changed since): its output, pinned here.
 PINNED = {
     # D102: the unsuffixed 123.456 is a float64 now (the recording's
-    # float32 printed 123.456001)
-    "float_arithmetic": "3.75\n-0.75\n3.375\n3.5\n1.5\n-3.5\n0.30000000000000004\n0.300000012\n2\n100000\n"
+    # float32 printed 123.456001); floats print in their shortest form (D155)
+    "float_arithmetic": "3.75\n-0.75\n3.375\n3.5\n1.5\n-3.5\n0.30000000000000004\n0.3\n2\n100000\n"
                         "123.456\n0.0009765625\n",
-    # the program says float32 since D102; the output is the recording's
-    "float32_overflow_gives_infinity": "inf\n-inf\ninf\nnan\n340282347000000000000000000000000000000\n",
-    # (a float prints in plain digits: the largest double has 309)
-    "float64_overflow_gives_infinity": "inf\n-inf\n350000000000000000000000000000000000000\nnan\n"
-                                       + "17976931348623157" + "0" * 292 + "\n",
+    # the program says float32 since D102; the output is the recording's, its
+    # float in the shortest form (D155)
+    "float32_overflow_gives_infinity": "inf\n-inf\ninf\nnan\n3.4028235e38\n",
+    # (a float prints in its shortest form, with an exponent from 1e16, D155)
+    "float64_overflow_gives_infinity": "inf\n-inf\n3.5e38\nnan\n1.7976931348623157e308\n",
     # the builtins outside the closures' scope are methods since MYLA-221;
     # the output is the recording's
     "local_closure_shadows_a_builtin": "42\n7\n3\npushed!\n3\n2\n",

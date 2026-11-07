@@ -1,0 +1,6 @@
+type error: '__load64' reads or writes raw memory: only the standard library may call it
+  --> examples/errors/type_raw_memory_call.my:7:11
+  |
+7 |     print(__load64(0))
+  |           ^^^^^^^^
+help: the standard library's types and functions do what it does, safely

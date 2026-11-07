@@ -1,0 +1,45 @@
+// 22. `task.timeout` of a child that ends before its deadline is set (on
+// another worker) leaves no deadline behind: one set too late used to fire
+// later into the child's freed frame and the freed cell of its `timeout`,
+// which by then were another task's and another `timeout`'s (the review of
+// 2026-11-06, R1: a spurious `None`, a fresh task cancelled, a crash).
+// First many quick children under a 100 ms deadline, which may time out
+// for real on a busy machine (not counted); then, while what they left
+// behind would fire, children under deadlines of 5 s, none of which may.
+import std.task as task
+
+async fun quick(k: int) -> int {
+    return k
+}
+
+async fun first(n: int) -> int {
+    for k in 0..n {
+        let r = await task.timeout(100, async () => await quick(k))
+    }
+    return 0
+}
+
+async fun then(n: int) -> int {
+    var nones = 0
+    for k in 0..n {
+        match await task.timeout(5000, async () => await quick(k)) {
+            Some(v) => {},
+            None => { nones += 1 },
+        }
+    }
+    return nones
+}
+
+#main
+async fun main() {
+    async let a = first(20000)
+    async let b = first(20000)
+    async let c = first(20000)
+    async let d = first(20000)
+    let left = await a + await b + await c + await d
+    async let e = then(20000)
+    async let f = then(20000)
+    async let g = then(20000)
+    async let h = then(20000)
+    print(f"{left + await e + await f + await g + await h} timed out")
+}

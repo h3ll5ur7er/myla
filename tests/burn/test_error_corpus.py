@@ -67,6 +67,7 @@ from ._tools import STDLIB_ROOT, selfhost_tool
 ERRORS_DIR = os.path.abspath(
     os.path.join(os.path.dirname(__file__), os.pardir, os.pardir, "examples", "errors")
 )
+_REPO = os.path.dirname(os.path.dirname(ERRORS_DIR))
 
 _DIRECTIVE = re.compile(r"//~\s*(lex|parse|module|type|runtime)\s+error:\s*(.*?)\s*$")
 _NATIVE = re.compile(r"//~\s*native:\s*(.*?)\s*$")
@@ -299,6 +300,61 @@ class TestErrorCorpus(unittest.TestCase):
                              ("cannot assign to an immutable binding (declare it with 'var')", 4, "x = 2"))
             self.assertEqual(diag["notes"], [("note", "'x' is declared here")])
             self.assertIsNone(_expected_diagnostic("parse", path))
+
+
+def _rendered_stderr(phase: str, name: str) -> str:
+    """The whole of what `myla check` (`myla run` for a runtime error) of the
+    corpus file `name` writes to stderr, run from the repository so that the
+    file is named `examples/errors/<name>`."""
+    command = "run" if phase == "runtime" else "check"
+    proc = subprocess.run([selfhost_tool("main"), command, os.path.join("examples", "errors", name), "--stdlib", "lib"],
+                          capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=60, cwd=_REPO)
+    return proc.stderr
+
+
+def _unrecorded() -> list[str]:
+    """The corpus files the retired toolchain's recordings don't cover."""
+    out = []
+    for name in _corpus():
+        path = os.path.join(ERRORS_DIR, name)
+        with open(path, encoding="utf-8") as fh:
+            phase, _ = _directive(fh.read())
+        try:
+            _diagnostic(phase, path)
+        except (NoGolden, unittest.SkipTest):
+            out.append(name)
+    return out
+
+
+@unittest.skipUnless(CAN_BUILD_NATIVE, "the self-hosted CLI needs a native build")
+class TestPinnedDiagnostics(unittest.TestCase):
+    """A corpus file without a recording is held to its whole rendered
+    diagnostic, carets and notes, in `<name>.stderr` beside it: an answer
+    written down once and reviewed, not the CLI's own output (MYLA-288).
+    MYLA_PIN_DIAGNOSTICS=1 writes the missing ones."""
+
+    def test_every_unrecorded_file_is_pinned(self):
+        names = _unrecorded()
+        self.assertGreater(len(names), 20)
+        for name in names:
+            with self.subTest(file=name):
+                path = os.path.join(ERRORS_DIR, name)
+                with open(path, encoding="utf-8") as fh:
+                    phase, _ = _directive(fh.read())
+                got = _rendered_stderr(phase, name)
+                pinned = path[:-3] + ".stderr"
+                if not os.path.exists(pinned) and os.environ.get("MYLA_PIN_DIAGNOSTICS"):
+                    with open(pinned, "w", encoding="utf-8") as fh:
+                        fh.write(got)
+                self.assertTrue(os.path.exists(pinned), f"{name} has no recording and no {os.path.basename(pinned)}")
+                with open(pinned, encoding="utf-8") as fh:
+                    self.assertEqual(got, fh.read())
+
+    def test_no_stray_pins(self):
+        names = set(_unrecorded())
+        for f in os.listdir(ERRORS_DIR):
+            if f.endswith(".stderr"):
+                self.assertIn(f[:-7] + ".my", names, f"{f} pins a file that has a recording, or none")
 
 
 def _make(name: str):

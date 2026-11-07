@@ -39,7 +39,7 @@ fun main() {
 ```
 
 - Parameter names may not shadow built-in type names (`int`, `str`, …) and may not repeat.
-- Inside the body a `T` value can only be bound, copied, passed, stored, returned and matched by binding. Operators need a bound ([[Language/Methods-and-traits]]); `print(x)` on a `T` is an error.
+- Inside the body a `T` value can only be bound, copied, passed, stored, returned and matched by binding. Operators need a bound ([[Language/Methods-and-traits]]); `print(x)` on a `T` without a `Format` bound is an error.
 
 ## Type arguments
 
@@ -47,7 +47,8 @@ Type arguments are written only in **type positions**: `Box<int>`, `Result<str, 
 
 1. Arguments are typed left to right. Once a parameter's type is fully known from earlier arguments, it is used as the expected type of the next argument, so `prepend(x, List.Nil)` works.
 2. The expected type of the whole expression (an annotation, a parameter, a return type) seeds struct literals and enum variants.
-3. A type parameter that nothing determines is an error ("cannot infer type parameter(s) T … add a type annotation").
+3. The branches of an `if` and the arms of a `match` used as a value are typed against each other when nothing is expected: one whose value can't say its whole type alone (`None`, `[]`, `[:]`, `Err(e)`, `Ok(x)`, a generic enum's variant that leaves a parameter out) is checked after the others, with the first one's type expected, so `let v = if n > 0 { Some(n) } else { None }` is an `Option<int>` ([[MYLA-290]]). When no branch says it (`if c { Ok(1) } else { Err("e") }`), annotate the binding.
+4. A type parameter that nothing determines is an error ("cannot infer type parameter(s) T … add a type annotation").
 
 There is no `f<int>(x)` call syntax: annotate the binding instead.
 

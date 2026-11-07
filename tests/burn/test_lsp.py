@@ -21,7 +21,7 @@ import sys
 import tempfile
 import unittest
 
-from ._golden import golden
+from ._golden import golden, recorded_examples
 from ._native import CAN_BUILD_NATIVE, SKIP_REASON
 
 _REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir))
@@ -665,6 +665,8 @@ class TestResolutionCorpus(unittest.TestCase):
                         continue
                     if member:
                         continue    # a member, or an attribute's name
+                    if not source_lines[line - 1][column - 1:].startswith(lexeme):
+                        continue    # the lexer's own, as the `format` an f-string expands to (MYLA-299)
                     prefix = source_lines[line - 1][:column - 1]
                     pos = (line - 1, len(prefix.encode("utf-16-le")) // 2)
                     self.assertIn(pos, known, f"{lexeme} at {line}:{column} is not resolved")
@@ -674,8 +676,7 @@ class TestResolutionCorpus(unittest.TestCase):
     def test_members_agree_with_the_checker(self) -> None:
         """Where the server resolves `x.f` or `x.m(…)` in an example, it is the
         field or method of the type the Python checker gives `x` (step 6)."""
-        import glob
-        files = sorted(glob.glob(os.path.join(_REPO, "examples", "*.my")))
+        files = recorded_examples()
         out = subprocess.run([myla_tool("tools/lsp/main.my", "lsp"), "--stdlib", STDLIB_ROOT, "--resolve",
                               *files], capture_output=True, text=True, check=True).stdout
         uses = {}

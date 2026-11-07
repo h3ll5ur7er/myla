@@ -1,0 +1,36 @@
+// 23. Litmus (MYLA-301): a child's result, a heap value it built, is what
+// the task awaiting it reads, whichever worker each ran on: `wait_task`
+// reads the child's task word with acquire, after `task_end`'s exchange
+// (MYLA-267). 1,024 leaves, each a child building a list and a string.
+struct Made {
+    xs: [int],
+    name: str,
+}
+
+async fun make(k: int) -> Made {
+    var xs: [int] = []
+    for i in 0..8 {
+        xs.push(k * 8 + i)
+    }
+    return Made { xs: xs, name: f"n{k}" }
+}
+
+async fun tree(k: int, depth: int) -> int {
+    if depth == 0 {
+        async let m = make(k)
+        let got = await m
+        var sum = got.name.len()
+        for x in got.xs {
+            sum += x
+        }
+        return sum
+    }
+    async let l = tree(k * 2, depth - 1)
+    async let r = tree(k * 2 + 1, depth - 1)
+    return await l + await r
+}
+
+#main
+async fun main() {
+    print(await tree(0, 10))
+}

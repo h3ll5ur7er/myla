@@ -1,0 +1,55 @@
+// std.time, `task.sleep`, `task.timeout` and `task.yield`, and std.math.
+// See docs/Language/Concurrency.md and docs/Language/Standard-library.md.
+import std.task as task
+import std.time as time
+import std.math as math
+
+// The length of the hypotenuse, rounded to two places.
+#test(3.0, 4.0)[5.0]
+fun hypotenuse(a: float, b: float) -> float {
+    return math.round(math.hypot(a, b) * 100.0) / 100.0
+}
+
+async fun slow_answer() -> int {
+    await task.sleep(1000)
+    return 42
+}
+
+async fun quick_answer() -> int {
+    await task.sleep(1)
+    return 7
+}
+
+// Counts to `n`, giving the other tasks a turn at each step.
+async fun polite_count(n: int) -> int {
+    var k = 0
+    while k < n {
+        await task.yield()
+        k += 1
+    }
+    return k
+}
+
+#test(None)["gave up"]
+#test(Some(3))["answered 3"]
+fun shown(r: Option<int>) -> str {
+    return match r {
+        Some(v) => f"answered {v}",
+        None => "gave up",
+    }
+}
+
+#main
+async fun main() {
+    print(hypotenuse(1.0, 1.0))
+    print(math.sqrt(2.0) * math.sqrt(2.0) - 2.0 < 0.000001)
+    print(math.PI)
+    let start = time.now_ms()
+    print(shown(await task.timeout(500, async () => await quick_answer())))
+    print(shown(await task.timeout(20, async () => await slow_answer())))
+    async let a = polite_count(3)
+    async let b = polite_count(4)
+    print(await a + await b)
+    // the slow answer was cancelled at its timeout, not waited for
+    print(time.now_ms() - start < 900)
+}

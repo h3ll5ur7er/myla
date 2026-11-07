@@ -1,0 +1,5 @@
+type error: the pattern of this let-else always matches: use 'let' instead, or 'match'
+  --> examples/errors/type_let_else_irrefutable.my:9:9
+  |
+9 |     let Only(v) = One.Only(3) else {
+  |         ^^^^^^^

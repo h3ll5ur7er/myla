@@ -1,0 +1,10 @@
+//~ type error: '#allow' stands on a function or an impl block
+// A struct has no code of its own: its methods are in its `impl`, which
+// takes the `#allow` (D161).
+#allow(primitive)
+struct P {
+    x: int,
+}
+
+fun main() {
+}

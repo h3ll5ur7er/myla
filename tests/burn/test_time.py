@@ -189,6 +189,25 @@ async fun main() {
 }
 """
 
+# 10,000 tasks asleep at once through `task.all` (MYLA-296)
+TEN_THOUSAND = """import std.task as task
+
+async fun nap() -> int {
+    await task.sleep(50)
+    return 1
+}
+
+#main
+async fun main() {
+    var fs: [async () -> int] = []
+    for i in 0..10000 {
+        fs.push(async () => await nap())
+    }
+    let rs = await task.all(fs)
+    print(rs.len())
+}
+"""
+
 # `task.cancel` ends a child's sleep at once
 CANCEL = """import std.task as task
 import std.time as time
@@ -248,6 +267,32 @@ async fun main() {
     let lines = await r
     let ticks = await t
     print(f"{lines} lines, {ticks} ticks")
+}
+"""
+
+# two tasks reading lines from standard input at once: both wait for the one
+# descriptor, and every line is read by one of them (the review of
+# 2026-11-06, R5: the second watch replaced the first, which waited for ever)
+TWO_READERS = """import std.io as io
+
+async fun reader() -> int {
+    var r = io.stdin()
+    var n = 0
+    while true {
+        match await r.read_line_async() {
+            Ok(Some(line)) => { n = n + 1 },
+            Ok(None) => { return n },
+            Err(e) => { return -100 },
+        }
+    }
+    return n
+}
+
+#main
+async fun main() {
+    async let a = reader()
+    async let b = reader()
+    print(await a + await b)
 }
 """
 
@@ -398,6 +443,21 @@ class Time(unittest.TestCase):
         from ._tools import selfhost_tool
         return self.run_timed([selfhost_tool("interp_main"), self.source(name, text), STDLIB_ROOT], **env)
 
+    def test_ten_thousand_sleepers_in_the_interpreter(self):
+        # MYLA-296: a lambda copies only the variables it reads; it copied
+        # every one in scope, so each of these 10,000 kept the list being
+        # built and every push copied it (600 MB, 1.8 s; now under 40 MB)
+        from ._tools import selfhost_tool
+        cmd = [selfhost_tool("interp_main"), self.source("ten_thousand", TEN_THOUSAND), STDLIB_ROOT]
+        # through a minimal helper process: a child's peak RSS counts its
+        # parent's at the fork, and this one's is large in a full run
+        from .test_selfhost_codegen import _MEASURE
+        p = subprocess.run([sys.executable, "-I", "-S", "-c", _MEASURE, *cmd], capture_output=True, text=True,
+                           timeout=120)
+        code, peak_kb = p.stderr.split()[-2:]
+        self.assertEqual((p.stdout, int(code)), ("10000\n", 0))
+        self.assertLess(int(peak_kb) / 1024, 150, f"{int(peak_kb) / 1024:.0f} MB")
+
     def test_sleepers_wake_in_deadline_order(self):
         want = "b\nc\na\n120\ntrue\ntrue\n"
         exe = self.native("order", ORDER)
@@ -486,6 +546,15 @@ class Time(unittest.TestCase):
                 self.assertEqual([l for l in lines if l.startswith("line")], ["line 0", "line 1", "line 2"])
                 # ticks before the first line came: the worker wasn't blocked
                 self.assertEqual(lines[0], "t")
+
+    def test_two_readers_of_one_descriptor(self):
+        exe = self.native("two_readers", TWO_READERS)
+        from ._tools import selfhost_tool
+        interp = [selfhost_tool("interp_main"), self.source("two_readers", TWO_READERS), STDLIB_ROOT]
+        for label, cmd, env in [("native 1", [exe], {"MYLA_THREADS": "1"}), ("native 4", [exe], {"MYLA_THREADS": "4"}),
+                                ("interpreter", interp, {})]:
+            with self.subTest(runner=label):
+                self.assertEqual(self.fed(cmd, FEEDER, **env), "3\n")
 
     def test_a_time_limit_around_a_read(self):
         exe = self.native("read_timeout", READ_TIMEOUT)

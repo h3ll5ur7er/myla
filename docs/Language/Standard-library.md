@@ -10,7 +10,7 @@ These names are reserved: no declaration may reuse them. The ones on a receiver 
 
 | Function | Signature | Notes |
 | --- | --- | --- |
-| `print(x)` | one integer, float, `char`, `bool` or `str` | Writes the value and a newline to stdout |
+| `print(x)` | one integer, float, `char`, `bool` or `str`, or a value whose type implements `Format` (D159) | Writes the value and a newline to stdout |
 | `x.len()` | list, map, `str` or `StringBuilder` → `int` | A method; strings and builders: bytes |
 | `xs.push(v)`, `xs.pop()` | list | Methods; need a `var` place |
 | `m.contains(k)`, `m.keys()`, `m.remove(k)` | map | Methods; `remove` needs a `var` place |
@@ -20,7 +20,7 @@ These names are reserved: no declaration may reuse them. The ones on a receiver 
 | `StringBuilder()`, `sb.append(s)`, `sb.append(s, start, end)`, `sb.append_byte(b)`, `sb.build()` | | Methods but `StringBuilder()`; `append(s, start, end)` adds the bytes `s[start..end]` ([[Language/Collections-and-strings]]) |
 | `assert(cond[, msg])`, `panic(msg)`, `unreachable()` | | See [[Language/Attributes-and-testing]] |
 
-The low-level primitives `__write`, `__read`, `__poll`, `__exit`, `__args`, `__read_file`, `__write_file`, `__list_dir`, `__mkdir`, `__stat`, `__getcwd`, `__getenv`, `__sqrt`, `__f64_bits`, `__f64_from_bits`, `__unlink`, `__rmdir`, `__rename`, `__io_errno`, `__run`, `__run_stderr`, `__run_exit_code`, `__run_signal`, `__run_errno` and `__task_cancelled`, and the primitives behind `std.time`, `std.task`'s timers and `std.process`'s child processes (`__clock_ns`, `__sleep`, `__spawn`, …) exist for the standard library; call the `std` functions instead. A call of one from a program outside the standard library compiles, with a warning (D100, [[MYLA-186]]): it is for code that knows what it does, such as a new std function in the making.
+The low-level primitives `__write`, `__read`, `__poll`, `__exit`, `__args`, `__read_file`, `__write_file`, `__list_dir`, `__mkdir`, `__stat`, `__getcwd`, `__getenv`, `__sqrt`, `__f64_bits`, `__f64_from_bits`, `__unlink`, `__rmdir`, `__rename`, `__io_errno`, `__run`, `__run_stderr`, `__run_exit_code`, `__run_signal`, `__run_errno` and `__task_cancelled`, and the primitives behind `std.time`, `std.task`'s timers and `std.process`'s child processes (`__clock_ns`, `__sleep`, `__spawn`, …) exist for the standard library; call the `std` functions instead. A call of one from a program outside the standard library compiles, with the warning `primitive` (D100, [[MYLA-186]]): it is for code that knows what it does, such as a new std function in the making, which says so with `#allow(primitive)` or `#allow(primitive(__poll))` (D161, [[Language/Attributes-and-testing#warnings-and-allow]]).
 
 ## std.io
 
@@ -45,7 +45,7 @@ fun main() {
 
 Output isn't buffered: what a program wrote is out before it waits for input.
 
-A write to the standard output or error whose pipe nobody reads any more (`myla run prog.my | head -1`) ends the program quietly, as Unix tools stop: natively by SIGPIPE, on wasm32 with the exit code 141 a shell shows for it (D146). `print`, `println`, `eprint` and `eprintln` report no error otherwise. A write to any other descriptor gives the error to the program instead: the runtime ignores SIGPIPE, and gives a child it starts the default back.
+A write to the standard output or error whose pipe nobody reads any more (`myla run prog.my | head -1`) ends the program quietly, as Unix tools stop: natively by SIGPIPE, on wasm32 with the exit code 141 a shell shows for it (D146). Any other error of `print`, `println`, `eprint` and `eprintln`, which have no result (a full disk: `prog > /dev/full`), ends the program with `runtime error: write failed: <cause>` and status 1 (D153); `write` gives it to the program. A write to any other descriptor gives the error to the program instead: the runtime ignores SIGPIPE, and gives a child it starts the default back.
 
 ### Reading
 
@@ -95,7 +95,7 @@ In a task, each read has an async version that waits for the input with the task
 | `command(program)` → `Command` | Builder: `.arg(a)`, `.args([…])`, `.cwd(dir)`, `.env(name, value)`, `.env_remove(name)`, `.env_clear()`, `.stdin(text)`, then `.output()` or `.output_async()` (async, as `run_async`) (D147). A `Command` is a value: each builder method gives a new one and leaves the one it was called on as it was. Without `stdin` the child reads this process's stdin; with it, the whole text; `env_clear()` starts from an empty environment, which later `env` calls add to. On wasm32 all of it is `Unsupported` |
 | `struct Output { stdout: [uint8], stderr: [uint8], status: ExitStatus }` | Output is raw bytes |
 | `enum ExitStatus { Exited(int32), Signaled(int32) }` | |
-| `enum SpawnError { NotFound, PermissionDenied, Unsupported, Cancelled, Other(int32) }` | Why a program couldn't be run (D129): not there, not allowed, no processes on this target, or the waiting task was stopped; `Other` holds the platform's own code for anything else |
+| `enum SpawnError { NotFound, PermissionDenied, Unsupported, Cancelled, InvalidInput, Other(int32) }` | Why a program couldn't be run (D129): not there, not allowed (EACCES or EPERM), no processes on this target, or the waiting task was stopped; `InvalidInput`: what no process can take, such as a `Command` given an environment variable name no variable can have (empty, with `=` or a NUL byte), which then runs nothing (D160); `Other` holds the platform's own code for anything else |
 
 ```myla
 from std.process import command, ExitStatus
@@ -134,7 +134,7 @@ fun main() {
 | `remove_dir(path: str) -> Result<(), IoError>` | Removes an empty directory; one that isn't is `NotEmpty` |
 | `remove_dir_all(path: str) -> Result<(), IoError>` | Removes the path and, for a directory, everything in it, like `rm -r`; symbolic links are removed, not followed |
 | `rename(from_path: str, to: str) -> Result<(), IoError>` | Renames or moves within one file system, replacing a file at `to` |
-| `enum IoError { NotFound, PermissionDenied, AlreadyExists, NotADirectory, IsADirectory, NotEmpty, Interrupted, Cancelled, Unsupported, BrokenPipe, Other(int32) }` | Why an operation failed, the same causes on every target (D129); `Cancelled`: a task's read stopped by `task.cancel` or a timeout (D96); `Unsupported`: the target can't do it; `BrokenPipe`: a write to a pipe nobody reads any more (D146); `Other` holds the platform's own code for anything else, whose numbers aren't portable |
+| `enum IoError { NotFound, PermissionDenied, AlreadyExists, NotADirectory, IsADirectory, NotEmpty, Interrupted, Cancelled, Unsupported, BrokenPipe, InvalidInput, Other(int32) }` | Why an operation failed, the same causes on every target (D129); `Cancelled`: a task's read stopped by `task.cancel` or a timeout (D96); `Unsupported`: the target can't do it; `BrokenPipe`: a write to a pipe nobody reads any more (D146); `InvalidInput`: a path with a NUL byte in it, which names nothing; `PermissionDenied` is EACCES and EPERM both; `Other` holds the platform's own code for anything else, whose numbers aren't portable |
 
 The file's bytes become the string unchanged, even when they aren't valid UTF-8: strings work on bytes, and `chars` gives U+FFFD for the invalid ones ([[Language/Collections-and-strings]], [[MYLA-12]]).
 
@@ -190,7 +190,7 @@ Numbers from text and back ([[MYLA-79]]). The conversions are exact, computed wi
 | `pow2(k: int32) -> float64` | 2^k exactly, for -1022 <= k <= 1023 |
 | `f64_literal_bits(text) -> uint64`, `f32_round_bits(bits) -> uint64`, `float_from_bits(bits) -> float64` | The bit-level steps (for the compiler) |
 
-`format("{}", x)` writes a float with up to 17 significant digits (`0.10000000000000001`); `format_float` is the short form.
+`format("{}", x)` writes a float as `print` does, in its shortest round-trip form (`0.1`, `1e300`, D155); `format_float` is Python's `repr` of it (`1.0`, `1e+300`).
 
 ## std.fmt
 
@@ -346,5 +346,20 @@ What TOML has beyond the subset is an error naming it: "floats are not supported
 
 ## std.rt
 
-Not for programs: the runtime written in Myla ([[MYLA-162]], D117), which a native build loads with every program and compiles where the code generator calls it in place of the assembly routine it replaces. So far string concatenation and equality (`str_concat`, `str_eq`) and the file system behind `std.fs` (`read_file`, `write_file`, `list_dir`, `stat`, `mkdir`, `unlink`, `rmdir`, `rename`, `getcwd`, on Linux's system calls) `std.process.env`'s `getenv` `std.io`'s reader (`read`, `poll`), `std.process.args`'s `args`, integers as text (`int_to_str`, `uint_to_str`, behind `format`), a string's characters (`str_chars`, behind `chars()`), a map's lookup (`map_lookup`, behind `m[k]` and `contains`), a string builder's append (`sb_append`), a map's keys (`map_keys`), `print` of every scalar but a float and `std.io.write` (`print_str`, `print_int`, …, `write`; a line and its newline in one `writev`, so the lines of tasks on other workers don't interleave) and the process runner behind `std.process.run` (`run`: fork, exec, both outputs read as they come through poll, wait). It works on raw memory through primitives the interpreter doesn't have (`__load8`, `__load32`, `__load64`, `__store8`, `__store32`, `__store64`, a list's cell and back (`__list_addr`, `__list_of`, the list type from the context), `__alloc`, `__free`, `__addr_of`, `__str_of`, and the bulk `__copy_bytes` and `__equal_bytes`, which each backend does natively; the atomics `__cas64`, `__xchg64` and `__fetch_add64`, full barriers, and `__load_acq64` and `__store_rel64`, a load with acquire and a store with release ordering: `ldar` and `stlr` on aarch64, plain moves on x86-64, whose ordering gives both, MYLA-267), makes system calls through `__syscall(n, a, b, c)` and records the errno `std.io` reports with `__set_io_errno` reads the arguments and the environment through `__argv()` and `__environ()` and leaves a run's stderr and status with `__set_run_stderr` and `__set_run_status`; addresses are `int64`. A standard library root without `std/rt.my` gets the copy the tools carry: the assembly routines it replaced are gone from the code generator. Under it, `std.platform` is the platform layer, one module per target ([[lib/std/platform.my]] for x86-64 Linux, [[lib/std/platform_aarch64.my]], [[lib/std/platform_wasm.my]]; the loader takes the target's for `std/platform.my`): every system call std.rt makes, the numbers, flags and record layouts with them, and the process runner (fork, exec, poll, wait), behind functions that give a result or a negative errno (`open_read`, `read`, `write_line`, `mode_of`, `dir_read`, `run`, `cpus_allowed`, `park`, `unpark_one`, `exit`, …). A port to another system gives that module again; std.rt stays as it is. Its interface is Linux's (negative errnos, `getdents64` records, `st_mode` bits), which wasm32's module imitates; [[MYLA-265]] is to make it Myla's.
+Not for programs: the runtime written in Myla ([[MYLA-162]], D117), which a native build loads with every program and compiles where the code generator calls it in place of the assembly routine it replaced. A standard library root without `std/rt.my` gets the copy the tools carry. Its parts, by what they are behind ([[Architecture/Native-backend#runtime-helpers]] lists the entries the generated code calls):
+
+| Behind | std.rt's functions |
+| --- | --- |
+| `+` and `==` on strings, `chars()`, integers as text in `format` | `str_concat`, `str_eq`, `str_chars`, `int_to_str`, `uint_to_str`, `float_to_str` (D155) |
+| `m[k]`, `contains`, `keys()`, a builder's `append` | `map_lookup`, `map_keys`, `sb_append` |
+| `print` and `std.io.write` | `print_str`, `print_int`, …, `write`: a line and its newline in one `writev`, so the lines of tasks on other workers don't interleave; a write error is D153's |
+| `std.fs` | `read_file`, `write_file`, `list_dir`, `stat`, `mkdir`, `unlink`, `rmdir`, `rename`, `getcwd` (a path with a NUL byte is EINVAL, D153) |
+| `std.io`'s reader, `std.process.args` and `env` | `read`, `poll`, `args`, `getenv` |
+| `std.process.run` and `Command` | `run`, `run_with`, `spawn`, `spawn_with`, `reap`, `kill`, `close` (fork, exec, both outputs read as they come through poll, wait) |
+| the heap | `alloc`, `free` and their tasks' forms (D157) |
+| tasks, timers, the reactor | the executor, `cancel_after`, the timers and the descriptor watches ([[Language/Concurrency]]) |
+
+It works on raw memory through primitives only the standard library may call (D152): `__load8`, `__load32`, `__load64`, `__store8`, `__store32`, `__store64`; a list's cell and back (`__list_addr`, `__list_of`, the list type from the context); `__alloc`, `__free`, `__addr_of`, `__str_of`; the bulk `__copy_bytes` and `__equal_bytes`, which each backend does natively; the atomics `__cas64`, `__xchg64` and `__fetch_add64`, full barriers, and `__load_acq64` and `__store_rel64`, a load with acquire and a store with release ordering (`ldar` and `stlr` on aarch64, plain moves on x86-64, whose ordering gives both, MYLA-267). It makes system calls through `__syscall(n, a, b, c)`, records the errno `std.io` reports with `__set_io_errno`, reads the arguments and the environment through `__argv()` and `__environ()`, and leaves a run's stderr and status with `__set_run_stderr` and `__set_run_status`; addresses are `int64`.
+
+Under it, `std.platform` is the platform layer, one module per target ([[lib/std/platform.my]] for x86-64 Linux, [[lib/std/platform_aarch64.my]], [[lib/std/platform_wasm.my]]; the loader takes the target's for `std/platform.my`): every system call std.rt makes, the numbers, flags and record layouts with them, and the process runner (fork, exec, poll, wait), behind functions that give a result or a negative errno (`open_read`, `read`, `write_line`, `mode_of`, `dir_read`, `run`, `cpus_allowed`, `park`, `unpark_one`, `exit`, …). A port to another system gives that module again; std.rt stays as it is. Its interface is Linux's (negative errnos, `getdents64` records, `st_mode` bits), which wasm32's module imitates; [[MYLA-265]] is to make it Myla's.
 

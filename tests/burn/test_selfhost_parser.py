@@ -22,7 +22,7 @@ import subprocess
 import tempfile
 import unittest
 
-from ._golden import NoGolden, answer_for_file, golden, recorded
+from ._golden import NoGolden, answer_for_file, golden, recorded, recorded_examples
 from ._native import CAN_BUILD_NATIVE, SKIP_REASON
 from ._continuation import continues_a_line
 from ._tools import selfhost_tool
@@ -105,7 +105,6 @@ SYNTAX_ERRORS = {
     "fstring_hole_lex_error": 'fun main() {\n    let s = f"a{1x}"\n}\n',
     "expect": "fun main( {\n}\n",
     "end_of_statement": "fun main() {\n    let x = 1 let y = 2\n}\n",
-    "impl_attribute": "struct S { a: int }\n#test\nimpl S {\n}\n",
     "impl_pub": "struct S { a: int }\npub impl S {\n}\n",
     "import_attribute": "#test\nimport foo\n",
     "pub_import_without_alias": "pub import foo\n",
@@ -346,7 +345,7 @@ class SelfHostedParserParity(unittest.TestCase):
 
     def test_garbled_sources_match_the_oracle(self) -> None:
         several = 0
-        for path in sorted(glob.glob(os.path.join(_REPO, "examples", "*.my"))):
+        for path in recorded_examples():
             with open(recorded(path), encoding="utf-8") as fh:
                 source = fh.read()
             for seed in range(4):
