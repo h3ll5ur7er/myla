@@ -197,7 +197,7 @@ fun main() {
 // 2026-11-05 05.11.2026 [  2026-11-05]
 ```
 
-`print(x)` still takes the five scalar types: a struct goes through `print(f"{x}")`.
+A generic function prints a `T: Format` the same way, `f"<{x}>"` ([[Language/Methods-and-traits#bounds]]). `print(x)` still takes the five scalar types and `str`: a struct goes through `print(f"{x}")`.
 
 The interpreter and the native backend share the float algorithm and constant tables, so their output is byte-identical (D56, [[Architecture/Native-backend]]).
 

@@ -6561,6 +6561,16 @@ impl Checker {
                 i = i + 1
                 continue
             }
+            // and a type parameter bound by it (MYLA-291)
+            match at {
+                Type.TParam(pn) => {
+                    if self.bound_has(pn, "Format") {
+                        i = i + 1
+                        continue
+                    }
+                },
+                _ => {},
+            }
             if !is_printable(at) { return Err(terr_at(args[i].line, args[i].col, args[i].sp, format("format() cannot render a value of type '{}'", type_name(at)))) }
             if spec != "" {
                 let sp = match parse_spec(spec) {
@@ -6718,6 +6728,11 @@ impl Checker {
     #test(checker_on("enum E { A, B(int) }"), expr_of("a.b[0]"), expr_of("a.b[0]"), expr_of("a.b[0]"), "total", [], None)[Err(CheckErr { line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 2 }, msg: "unknown name 'a'", decl: -1, notes: [] })]
     fun infer_method_call(var self, e: Expr, callee: Expr, target: Expr, field: str, args: [Expr], expected: Option<Type>) -> Result<Option<Type>, CheckErr> {
         let recv_type = self.expect_value(target, None)?
+        // a type parameter's bounds give it their traits' methods (MYLA-291)
+        match recv_type {
+            Type.TParam(pn) => { return self.bound_method_call(e, target, pn, field, args) },
+            _ => {},
+        }
         let key_opt = self.type_key(recv_type)
         var sig_opt: Option<FuncSig> = None
         match key_opt { Some(k) => { sig_opt = self.method_sig(k, field) }, None => {} }
@@ -6774,6 +6789,45 @@ impl Checker {
             },
         }
         return Err(terr_at(e.line, e.col, e.sp, format("type '{}' has no method '{}'", type_name(recv_type), field)))
+    }
+
+    // `x.m(args)` on a value of the type parameter `pn`: the method `m` of a
+    // trait among its bounds, with `Self` the parameter (MYLA-291). The
+    // backends call the concrete type's method, as they do for an operator
+    // on a bounded parameter; the bound was checked where the function was
+    // called.
+    fun bound_method_call(var self, e: Expr, target: Expr, pn: str, field: str, args: [Expr]) -> Result<Option<Type>, CheckErr> {
+        let me = Type.TParam(pn)
+        var bound_traits: [str] = []
+        for b in self.bounds_cur {
+            if b.tp != pn { continue }
+            for tr in b.traits {
+                bound_traits.push(tr)
+                let ti = self.trait_idx(tr)
+                // an operator trait's (`Add`, `Ord`, ...) are its operators
+                if ti < 0 || self.traits[ti].builtin || self.traits[ti].type_params.len() > 0 { continue }
+                for m in self.traits[ti].methods {
+                    if m.name != field { continue }
+                    if m.receiver == "var self" {
+                        if !is_lvalue_shape(target) { return Err(terr_at(e.line, e.col, e.sp, format("method '{}' mutates its receiver ('var self'); it needs a mutable variable (or one of its fields/elements), not a temporary", field))) }
+                        let lv = self.check_lvalue(target)?
+                        if !lv.mutable { return Err(with_notes(terr_at(e.line, e.col, e.sp, format("cannot call the mutating method '{}' on an immutable receiver (declare it with 'var')", field)), self.declared_at(target))) }
+                    }
+                    if args.len() != m.params.len() - 1 { return Err(terr_at(e.line, e.col, e.sp, format("method '{}' expects {} argument(s), got {}", field, m.params.len() - 1, args.len()))) }
+                    var i = 0
+                    while i < args.len() {
+                        let pt = subst_self(m.params[i + 1], me, [])
+                        let at = self.expect_value(args[i], Some(pt))?
+                        if !type_eq(at, pt) { return Err(terr_at(args[i].line, args[i].col, args[i].sp, format("argument type mismatch in call to '{}': expected '{}', found '{}'", field, type_name(pt), type_name(at)))) }
+                        i += 1
+                    }
+                    self.mark_call(e, "method", "", m.receiver == "var self", "", false)
+                    return Ok(match m.ret { Some(rt) => Some(subst_self(rt, me, [])), None => None })
+                }
+            }
+        }
+        if bound_traits.len() == 0 { return Err(terr_at(e.line, e.col, e.sp, format("type parameter '{}' has no method '{}': it has no bounds (write '{}: Trait' to call a trait's methods)", pn, field, pn))) }
+        return Err(terr_at(e.line, e.col, e.sp, format("type parameter '{}' has no method '{}': none of its bounds ({}) declares one (an operator trait gives its operators)", pn, field, quoted_list(bound_traits))))
     }
 
     fun infer_generic_method(var self, e: Expr, sig: FuncSig, method: str, recv_type: Type, args: [Expr]) -> Result<Option<Type>, CheckErr> {

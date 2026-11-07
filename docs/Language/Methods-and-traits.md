@@ -139,4 +139,38 @@ fun main() {
 // 6
 ```
 
-A type parameter may carry bounds `T: Add + Eq` (built-in or user traits, D53). The bound is checked where the function is called, against the concrete type (primitives count as implementing their built-in operator traits). Inside the body, a bound permits that trait's **operators** on `T`; methods of a user trait can't be called on a `T` yet, because method lookup needs a concrete type.
+A type parameter may carry bounds `T: Add + Eq` (built-in or user traits, D53). The bound is checked where the function is called, against the concrete type (primitives count as implementing their built-in operator traits). Inside the body, a bound permits that trait's **operators** on `T` (`Add`, `Eq`, `Ord`, …: their methods are their operators) and the **methods** of a user trait or of `Format`, with `Self` the type parameter; a `T: Format` goes in a format hole as its type does ([[MYLA-291]]). The interpreter calls the method of the value's type, native code the method of the type the copy is made for ([[Architecture/Monomorphization]]).
+
+```myla
+trait Shape {
+    fun area(self) -> int
+}
+
+struct Sq {
+    side: int,
+}
+
+impl Shape for Sq {
+    fun area(self) -> int {
+        return self.side * self.side
+    }
+}
+
+impl Format for Sq {
+    fun format(self, spec: str) -> str {
+        return f"Sq({self.side})"
+    }
+}
+
+fun describe<T: Shape + Format>(x: T) -> str {
+    return f"{x} has area {x.area()}"
+}
+
+fun main() {
+    print(describe(Sq { side: 3 }))
+}
+// output:
+// Sq(3) has area 9
+```
+
+A method a bound doesn't give is an error at the call: `type parameter 'T' has no method 'area': it has no bounds`.
