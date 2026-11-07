@@ -170,7 +170,8 @@ class LspScenarios:
         self.open(self.main, src)
         got = self.client.diagnostics(1, full=True)[_uri(self.main)]
         self.assertEqual(len(got), 1)
-        self.assertEqual((got[0]["severity"], got[0]["code"]), (2, "warning"))
+        # the code is the warning's name, the one `#allow` takes (D161)
+        self.assertEqual((got[0]["severity"], got[0]["code"]), (2, "reentrancy"))
         self.assertEqual(got[0]["range"], {"start": {"line": 18, "character": 8},
                                            "end": {"line": 18, "character": 18}})
         self.assertIn("'self.stock' was checked before an 'await'", got[0]["message"])

@@ -1,0 +1,5 @@
+type error: '__load64' reads or writes raw memory, which is an error outside the standard library: '#allow' silences warnings only
+  --> examples/errors/type_allow_raw_memory.my:4:18
+  |
+4 | #allow(primitive(__load64))
+  |                  ^^^^^^^^

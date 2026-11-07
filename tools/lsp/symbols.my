@@ -152,11 +152,11 @@ impl Builder {
                 let k = self.add(d.line, d.col, name, SymKind.Enum, header(is_pub, "enum", name, tps), name, false, -1, variants.len() > 0)
                 for v in variants { self.add(v.line, v.col, v.name, SymKind.EnumMember, variant_detail(v), v.name, false, k, false) }
             },
-            DeclKind.TraitDecl(name, methods, tps, is_pub) => {
+            DeclKind.TraitDecl(name, methods, tps, is_pub, dattrs) => {
                 let k = self.add(d.line, d.col, name, SymKind.Interface, header(is_pub, "trait", name, tps), name, false, -1, methods.len() > 0)
                 for m in methods { self.fun_symbol(m, k) }
             },
-            DeclKind.ImplDecl(target, methods, tps, tr, targs) => {
+            DeclKind.ImplDecl(target, methods, tps, tr, targs, dattrs) => {
                 let t = type_str(target)
                 let k = self.add(d.line, d.col, t, SymKind.Impl, impl_header(target, tps, tr, targs), type_head(target), true, -1, methods.len() > 0)
                 for m in methods { self.fun_symbol(m, k) }

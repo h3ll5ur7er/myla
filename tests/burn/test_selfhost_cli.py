@@ -136,10 +136,12 @@ class SelfHostedCli(_Layout):
         for command in ("run", "check"):
             with self.subTest(command=command):
                 mine = self.myla_cmd(command, "warned.my")
-                python = python_cli([command, "warned.my"], {"warned.my": WARNED}, self.work)
-                self.assertEqual((mine.stdout, mine.stderr, mine.returncode), python)
+                py_out, py_err, py_code = python_cli([command, "warned.my"], {"warned.my": WARNED}, self.work)
+                # the Python CLI's, but for the warning's name (D161)
+                py_err = py_err.replace("warning: ", "warning[reentrancy]: ")
+                self.assertEqual((mine.stdout, mine.stderr, mine.returncode), (py_out, py_err, py_code))
                 self.assertEqual(mine.returncode, 0)
-                self.assertIn("warning: 'self.stock' was checked before an 'await'", mine.stderr)
+                self.assertIn("warning[reentrancy]: 'self.stock' was checked before an 'await'", mine.stderr)
                 self.assertIn("note: other calls to the actor may run at this 'await'", mine.stderr)
         self.assertEqual(self.myla_cmd("run", "warned.my").stdout, "true\n")
 

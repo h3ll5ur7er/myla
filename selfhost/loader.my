@@ -409,7 +409,7 @@ fun named(d: Decl) -> Option<NamedDecl> {
         DeclKind.FunDecl(fd) => Some(NamedDecl { name: fd.name, is_pub: fd.is_pub }),
         DeclKind.EnumDecl(n, v, a, t, p) => Some(NamedDecl { name: n, is_pub: p }),
         DeclKind.TypeAliasDecl(n, t, a, p) => Some(NamedDecl { name: n, is_pub: p }),
-        DeclKind.TraitDecl(n, m, t, p) => Some(NamedDecl { name: n, is_pub: p }),
+        DeclKind.TraitDecl(n, m, t, p, dattrs) => Some(NamedDecl { name: n, is_pub: p }),
         DeclKind.ConstDecl(n, t, v, a, p) => Some(NamedDecl { name: n, is_pub: p }),
         _ => None,
     }
@@ -881,12 +881,12 @@ impl Renamer {
                 DeclKind.ConstDecl(qualify(mid, n), self.ty(t), self.expr(v), attrs, isp)
             },
             DeclKind.FunDecl(fd) => DeclKind.FunDecl(self.function(fd, qualify(mid, fd.name), false, [])),
-            DeclKind.TraitDecl(n, methods, tps, isp) => {
+            DeclKind.TraitDecl(n, methods, tps, isp, dattrs) => {
                 var ms: [FunData] = []
                 for m in methods { ms.push(self.signature(m)) }
-                DeclKind.TraitDecl(qualify(mid, n), ms, tps, isp)
+                DeclKind.TraitDecl(qualify(mid, n), ms, tps, isp, dattrs)
             },
-            DeclKind.ImplDecl(target, methods, tps, itrait, targs) => {
+            DeclKind.ImplDecl(target, methods, tps, itrait, targs, dattrs) => {
                 self.tys = tp_names(tps)
                 self.tys.push("Self")
                 let target2 = self.ty(target)
@@ -897,7 +897,7 @@ impl Renamer {
                 self.tys = []
                 var ms: [FunData] = []
                 for m in methods { ms.push(self.function(m, m.name, true, tp_names(tps))) }
-                DeclKind.ImplDecl(target2, ms, tps2, trait2, targs2)
+                DeclKind.ImplDecl(target2, ms, tps2, trait2, targs2, dattrs)
             },
             _ => d.kind,
         }

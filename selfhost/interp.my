@@ -436,6 +436,9 @@ pub fun interp_on(src: str) -> Interp {
     return it
 }
 
+// The interpreter runs a program's I/O itself, through the standard
+// library's primitives (D161: their warning silenced here, MYLA-285).
+#allow(primitive)
 impl Interp {
     // -- table construction ----------------------------------------------
 
@@ -444,7 +447,7 @@ impl Interp {
             match d.kind {
                 DeclKind.FunDecl(fd) => { self.add_func(fd.name, fd) },
                 DeclKind.EnumDecl(n, variants, attrs, tps, isp) => { self.enum_names.push(n) },
-                DeclKind.ImplDecl(target, methods, tps, trnm, targs) => {
+                DeclKind.ImplDecl(target, methods, tps, trnm, targs, dattrs) => {
                     let key = canon_type_name(self.type_name_of(target))
                     for m in methods { self.add_func(format("{}.{}", key, m.name), m) }
                 },

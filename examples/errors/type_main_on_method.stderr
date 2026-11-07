@@ -1,0 +1,5 @@
+type error: attribute '#main' can't be applied to a method (a method takes only '#test' and '#allow')
+  --> examples/errors/type_main_on_method.my:9:5
+  |
+9 |     #main
+  |     ^^^^^

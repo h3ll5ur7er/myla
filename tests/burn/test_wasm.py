@@ -378,8 +378,8 @@ class WasmPage(unittest.TestCase):
         got = self.page([{"op": "check", "files": warn}, {"op": "check", "files": bad}])
         out, err, code = self.native("check", warn)
         self.assertEqual(got[0]["ok"], True)
-        self.assertEqual([d["severity"] for d in got[0]["diagnostics"]], ["warning"] * err.count("warning:"))
-        self.assertEqual(err.count("warning:"), 1)
+        self.assertEqual([d["severity"] for d in got[0]["diagnostics"]], ["warning"] * err.count("warning[primitive]:"))
+        self.assertEqual(err.count("warning[primitive]:"), 1)
         w = got[0]["diagnostics"][0]
         self.assertEqual((w["line"], w["col"]), (2, 11))
         self.assertIn("'__clock_ns' is a primitive", w["message"])

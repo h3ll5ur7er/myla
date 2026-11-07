@@ -177,7 +177,7 @@ pub fun render_one(r: Report) -> str {
         }
     }
     var sb = StringBuilder()
-    sb.append(located(format("{}: {}", r.kind, r.msg), r.path, r.line, r.col, r.sp, src))
+    sb.append(located(format("{}: {}", kind_shown(r.kind, r.msg), r.msg), r.path, r.line, r.col, r.sp, src))
     for n in r.notes {
         sb.append("\n" + located(format("{}: {}", n.label, n.msg), r.path, n.line, n.col, n.sp, src))
     }
@@ -207,4 +207,40 @@ fun located(header: str, path: str, line: int32, col: int32, sp: SrcSpan, src: O
         None => {},
     }
     return sb.build()
+}
+
+// A report's kind as it is shown: a warning with its name, the one
+// `#allow(…)` takes (D161), `warning[primitive]`.
+#test("warning", "'__poll' is a primitive of the standard library, not meant to be called from a program")["warning[primitive]"]
+#test("type error", "x")["type error"]
+pub fun kind_shown(kind: str, msg: str) -> str {
+    if kind != "warning" { return kind }
+    let name = warning_name(msg)
+    return if name == "" { kind } else { f"warning[{name}]" }
+}
+
+// The name of the warning whose message is `msg` (D161): the one place that
+// maps the checker's warnings to the names `#allow` takes ("" for none).
+#test("'__poll' is a primitive of the standard library, not meant to be called from a program")["primitive"]
+#test("'self.n' was checked before an 'await' and is changed after it: another call to this actor may have changed it meanwhile")["reentrancy"]
+#test("'self.n' is set from a value read before an 'await': another call to this actor may have changed it meanwhile")["reentrancy"]
+#test("'unused' is no warning's name: '#allow' takes 'primitive' and 'reentrancy'")[""]
+pub fun warning_name(msg: str) -> str {
+    if has_text(msg, "is a primitive of the standard library") { return "primitive" }
+    if has_text(msg, "another call to this actor may have changed it meanwhile") { return "reentrancy" }
+    return ""
+}
+
+// Whether `s` holds `part`.
+#test("abc", "bc")[true]
+#test("abc", "cb")[false]
+fun has_text(s: str, part: str) -> bool {
+    var i = 0
+    while i + part.len() <= s.len() {
+        var j = 0
+        while j < part.len() && s[i + j] == part[j] { j += 1 }
+        if j == part.len() { return true }
+        i += 1
+    }
+    return false
 }

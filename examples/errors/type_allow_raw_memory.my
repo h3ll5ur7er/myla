@@ -1,0 +1,6 @@
+//~ type error: '__load64' reads or writes raw memory, which is an error outside the standard library: '#allow' silences warnings only
+// `#allow` silences warnings; a raw-memory primitive outside the standard
+// library is an error (D152, D161).
+#allow(primitive(__load64))
+fun main() {
+}

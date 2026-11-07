@@ -105,7 +105,6 @@ SYNTAX_ERRORS = {
     "fstring_hole_lex_error": 'fun main() {\n    let s = f"a{1x}"\n}\n',
     "expect": "fun main( {\n}\n",
     "end_of_statement": "fun main() {\n    let x = 1 let y = 2\n}\n",
-    "impl_attribute": "struct S { a: int }\n#test\nimpl S {\n}\n",
     "impl_pub": "struct S { a: int }\npub impl S {\n}\n",
     "import_attribute": "#test\nimport foo\n",
     "pub_import_without_alias": "pub import foo\n",
