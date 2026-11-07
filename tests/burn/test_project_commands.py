@@ -510,6 +510,14 @@ class TestTestsDirectory(_Layout):
         self.assertEqual(proc.stdout, "== tests/cli.my\nPASS  greets_by_title\nPASS  greets_nobody\n"
                                       "== tests/\nPASS  tests/greets.my\n\n3/3 passed in 2 files.\n")
 
+    def test_natively(self):
+        # the same report, the program and the test programs built and run
+        # natively, the test files through the harness (MYLA-307)
+        proc = self.run_in(self.root, "test", "--native")
+        self.assertEqual(proc.returncode, 1, proc.stderr)
+        self.assertEqual(proc.stdout, GREETER_WANT)
+        self.assertEqual(proc.stderr, "")
+
     def test_a_library_project_runs_its_test_programs_too(self):
         # no program: nothing is built, test.program() is a runtime error,
         # and the test programs still run

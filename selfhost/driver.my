@@ -19,6 +19,10 @@ from .checker import build_checker_with, Checker, CheckErr
 from .codegen import new_codegen
 from .dwarf import read_gdb_script
 from .interp import new_interp, RtError, TestRun, TestOptions, sched_from_env, time_from_env
+from .harness import harness_source, Harness
+from std.process import command, env
+from std.time import now_ns
+from std.fs import make_dir_all, remove_dir_all, exists, read_to_string
 from .parser import expr_of, stmt_of, type_expr_of, block_of, pattern_of, fun_of  // AST values for #test cases (MYLA-184)
 
 // Decode a captured `[uint8]` buffer (e.g. a child's stderr) as UTF-8 text.
@@ -106,6 +110,196 @@ pub fun cmd_test(file: str, opts: LoadOptions, sel: TestOptions) -> int32 {
         },
     }
     return 0
+}
+
+// `myla test <file> --native [--target <t>]`: the file's own cases run
+// natively through a harness (harness.my, D162, MYLA-307), the report the
+// interpreter's; the exit status.
+pub fun cmd_test_native(file: str, opts: LoadOptions, sel: TestOptions, target: str) -> int32 {
+    let r = match native_tests(file, opts, sel, target) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln(e)
+            return 1
+        },
+    }
+    if r.total == 0 {
+        if sel.only != "" {
+            write(1, format("no #test cases match '{}'.\n", sel.only))
+            return 1
+        }
+        write(1, "no #test cases found.\n")
+        return 0
+    }
+    for line in r.report { write(1, line) }
+    write(1, format("\n{}/{} passed.\n", r.passed, r.total))
+    if r.passed == r.total { return 0 }
+    return 1
+}
+
+// The `#test` cases declared in `file` itself run natively for `target`:
+// the harness built in a scratch directory and run (through the emulator
+// MYLA_EMULATOR names, or qemu-aarch64, for another target), its report
+// read back. A harness that ends before its summary (no child processes
+// there: a failure ended the run) reports the case it stopped at with the
+// error, and the rest as not run.
+pub fun native_tests(file: str, opts: LoadOptions, sel: TestOptions, target: str) -> Result<TestRun, str> {
+    let ch = load_and_check(file, opts)?
+    let text = match read_to_string(file) {
+        Ok(t) => t,
+        Err(e) => { return Err("myla: cannot read " + file) },
+    }
+    let h = match harness_source(text, ch.checker, ch.prog.decls, sel.only) {
+        Some(h) => h,
+        None => { return Ok(TestRun { report: [], passed: 0, total: 0 }) },
+    }
+    var base = match env("TMPDIR") { Some(d) => d, None => "" }
+    if base == "" { base = "/tmp" }
+    let dir = format("{}/myla-test-{}", base, now_ns())
+    match make_dir_all(dir) {
+        Ok(()) => {},
+        Err(e) => { return Err("myla: cannot create " + dir) },
+    }
+    let out = dir + "/harness"
+    var nopts = opts
+    nopts.overrides[file] = h.source
+    if cmd_build(file, out, nopts, false, target) != 0 {
+        // the harness kept, for a look at the code added to the file
+        let kept = write_to_file(out + ".my", h.source)
+        return Err(format("myla: the test harness of {} didn't build: its errors above are at positions past the file's end, in the code added to it (kept at {}.my)", file, out))
+    }
+    var argv = emulator(target)
+    argv.push(out)
+    var rest: [str] = []
+    var i = 1
+    while i < argv.len() {
+        rest.push(argv[i])
+        i = i + 1
+    }
+    var emu = ""
+    if argv.len() > 1 { emu = join_words(emulator(target)) }
+    let ran = command(argv[0]).args(rest).env("MYLA_TEST_PROGRAM", sel.program).env("MYLA_TEST_EMULATOR", emu).stdin("").output()
+    let gone = remove_dir_all(dir)
+    let o = match ran {
+        Ok(o) => o,
+        Err(e) => { return Err(format("myla: cannot run the test harness with '{}'", argv[0])) },
+    }
+    let err = decode(o.stderr)
+    let code = match o.status { ExitStatus.Exited(c) => c, ExitStatus.Signaled(s) => -s }
+    return Ok(harness_report(h, decode(o.stdout), err, code))
+}
+
+// The command the harness runs under: none for this machine's target, else
+// MYLA_EMULATOR's words, else qemu-aarch64 for aarch64 Linux.
+#test("x86_64-linux")[[]]
+pub fun emulator(target: str) -> [str] {
+    if target == TARGET { return [] }
+    match env("MYLA_EMULATOR") {
+        Some(words) => { if words != "" { return split_words(words) } },
+        None => {},
+    }
+    if target == "aarch64-linux" { return ["qemu-aarch64"] }
+    return []
+}
+
+#test(["node", "run.mjs"])["node run.mjs"]
+fun join_words(words: [str]) -> str {
+    var sb = StringBuilder()
+    var i = 0
+    while i < words.len() {
+        if i > 0 { sb.append(" ") }
+        sb.append(words[i])
+        i = i + 1
+    }
+    return sb.build()
+}
+
+#test("node run.mjs")[["node", "run.mjs"]]
+#test("qemu-aarch64")[["qemu-aarch64"]]
+fun split_words(text: str) -> [str] {
+    var out: [str] = []
+    var word = StringBuilder()
+    var i = 0
+    while i < text.len() {
+        if text[i] == ' ' {
+            let w = word.build()
+            if w.len() > 0 { out.push(w) }
+            word = StringBuilder()
+        } else {
+            word.append_byte(text[i])
+        }
+        i = i + 1
+    }
+    let w = word.build()
+    if w.len() > 0 { out.push(w) }
+    return out
+}
+
+// The harness's report from what it printed: its lines, and the summary's
+// counts; when it ended without one (status `code`, its stderr `err`), the
+// case it stopped at failed with the runtime error on stderr, the rest
+// weren't run.
+pub fun harness_report(h: Harness, stdout: str, err: str, code: int32) -> TestRun {
+    var lines: [str] = []
+    var passed = 0
+    var ended = false
+    for l in report_lines(stdout) {
+        if ended { continue }
+        if l == "" { ended = true
+            continue }
+        if starts_with_pass(l) { passed = passed + 1 }
+        lines.push(l + "\n")
+    }
+    let total = h.cases.len()
+    if ended { return TestRun { report: lines, passed: passed, total: total } }
+    // the run stopped: which case, and why
+    var ran = 0
+    for l in lines { if !is_shown_line(l) { ran = ran + 1 } }
+    if ran < total {
+        var why = format("the harness ended with status {}", code)
+        for l in report_lines(err) {
+            if l.len() > 15 && l[0:15] == "runtime error: " { why = l
+                break }
+        }
+        lines.push(format("FAIL  {}: {}\n", h.cases[ran].name, why))
+        var k = ran + 1
+        while k < total {
+            lines.push(format("FAIL  {}: not run (an earlier failure ended the run)\n", h.cases[k].name))
+            k = k + 1
+        }
+    }
+    return TestRun { report: lines, passed: passed, total: total }
+}
+
+#test("PASS  f #1")[true]
+#test("FAIL  f #1: x")[false]
+fun starts_with_pass(l: str) -> bool {
+    return l.len() >= 6 && l[0:6] == "PASS  "
+}
+
+#test("      | out")[true]
+#test("PASS  f")[false]
+fun is_shown_line(l: str) -> bool {
+    return l.len() >= 6 && l[0:6] == "      "
+}
+
+#test("a\nb\n")[["a", "b"]]
+fun report_lines(text: str) -> [str] {
+    var out: [str] = []
+    var line = StringBuilder()
+    var i = 0
+    while i < text.len() {
+        if text[i] == '\n' {
+            out.push(line.build())
+            line = StringBuilder()
+        } else {
+            line.append_byte(text[i])
+        }
+        i = i + 1
+    }
+    let rest = line.build()
+    if rest.len() > 0 { out.push(rest) }
+    return out
 }
 
 // `myla run <file> [args]`: interpret the program with argv

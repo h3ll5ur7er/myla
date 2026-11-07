@@ -283,7 +283,7 @@ What a test function needs beyond `#test` (D162, [[MYLA-304]], [[Language/Attrib
 | `temp_dir() -> str` | A fresh, empty directory for the running case under `$TMPDIR` (else `/tmp`); each call gives another, and the runner removes them all when the case ends, passed or failed. A runtime error outside a case (`myla run`) |
 | `program() -> str` | The path of the project's program, which `myla test` builds before the files of `tests/` run ([[MYLA-306]]); a runtime error elsewhere |
 
-The printable primitives count as implementing `Format` for a bound (`expect_eq(3, 4)`); a value `==` doesn't compare (an `Option`, a `Result`, a list) is checked with `expect` on a `match`, or taken apart with `?` in a test function returning `Result<(), E>`.
+The printable primitives count as implementing `Format` for a bound (`expect_eq(3, 4)`); a value `==` doesn't compare (an `Option`, a `Result`, a list) is checked with `expect` on a `match`, or taken apart with `?` in a test function returning `Result<(), E>`. The module's other public functions (`Case`, `case_index`, `child_done`, `run_in_children`, `report_inline`, `summary`, `end`, `case_detail`, `repr_str`, `without_module_ids`) are the runner of the harness `myla test --native` builds ([[Language/Attributes-and-testing#native-runs]]), not for programs.
 
 ## std.json
 

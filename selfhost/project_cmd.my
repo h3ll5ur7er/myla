@@ -12,10 +12,10 @@
 
 from std.io import write, eprintln
 from std.fs import exists, is_dir, list_dir, make_dir_all, write_to_file, current_dir, remove_dir_all, read_to_string
-from std.process import args, command, ExitStatus
-from std.platform import TARGET
+from std.process import args, command, env, ExitStatus
+from std.time import now_ns
 from .loader import LoadOptions
-from .driver import cmd_build, cmd_interp, own_tests, load_and_check, decode
+from .driver import cmd_build, cmd_interp, own_tests, native_tests, emulator, load_and_check, decode
 from .interp import TestOptions, selected
 from .stdroot import EMBEDDED_ROOT
 from .test_programs import test_program_of, test_program_report
@@ -132,7 +132,7 @@ pub fun project_run(base: LoadOptions, prog_args: [str]) -> int32 {
 // the interpreter and compared, the others' cases as `src/`'s; and the
 // total. When the project has a program and a `tests/`, the program is
 // built first to `build/<name>`, which `std.test.program()` names.
-pub fun project_test(base: LoadOptions, sel: TestOptions) -> int32 {
+pub fun project_test(base: LoadOptions, sel: TestOptions, native: bool, target: str) -> int32 {
     let h = match locate() {
         Ok(h) => h
         Err(msg) => {
@@ -144,10 +144,11 @@ pub fun project_test(base: LoadOptions, sel: TestOptions) -> int32 {
     let tests_dir = h.project.root.dir + "/tests"
     var options = sel
     if is_dir(tests_dir) && h.project.root.has_program && !sel.list {
-        let built = project_build(base, false, TARGET)
+        let built = project_build(base, false, target)
         if built != 0 { return built }
         options.program = h.project.root.dir + "/build/" + h.project.root.name
     }
+    let run_natively = native && !sel.list
     var passed = 0
     var total = 0
     var files = 0
@@ -163,7 +164,8 @@ pub fun project_test(base: LoadOptions, sel: TestOptions) -> int32 {
     }
     for path in sources {
         let file = shown(h, path)
-        match own_tests(file, opts, options) {
+        let result = if run_natively { native_tests(file, opts, options, target) } else { own_tests(file, opts, options) }
+        match result {
             Ok(r) => {
                 if r.total > 0 {
                     write(1, "== " + file + "\n")
@@ -193,7 +195,7 @@ pub fun project_test(base: LoadOptions, sel: TestOptions) -> int32 {
             write(1, file + "\n")
             continue
         }
-        let report = run_test_program(h, path, opts)
+        let report = if run_natively { run_test_program_natively(h, path, opts, target) } else { run_test_program(h, path, opts) }
         if report.len() == 0 {
             passed = passed + 1
             write(1, "PASS  " + file + "\n")
@@ -217,6 +219,48 @@ pub fun project_test(base: LoadOptions, sel: TestOptions) -> int32 {
     }
     if passed == total && broken == 0 { return 0 }
     return 1
+}
+
+// The test program `path` built for `target` and run (under the emulator,
+// for another target), and compared as `run_test_program` compares.
+fun run_test_program_natively(h: Here, path: str, opts: LoadOptions, target: str) -> [str] {
+    let file = shown(h, path)
+    let text = match read_to_string(path) { Ok(t) => t, Err(e) => "" }
+    let tp = match test_program_of(text) {
+        Some(tp) => tp,
+        None => { return [format("FAIL  {}: not a test program\n", file)] },
+    }
+    var base = match env("TMPDIR") { Some(d) => d, None => "" }
+    if base == "" { base = "/tmp" }
+    let dir = format("{}/myla-test-{}", base, now_ns())
+    match make_dir_all(dir) {
+        Ok(()) => {},
+        Err(e) => { return [format("FAIL  {}: cannot create {}\n", file, dir)] },
+    }
+    let out = dir + "/program"
+    if cmd_build(file, out, opts, false, target) != 0 {
+        let gone = remove_dir_all(dir)
+        return [format("FAIL  {}: didn't build\n", file)]
+    }
+    var argv = emulator(target)
+    argv.push(out)
+    var rest: [str] = []
+    var i = 1
+    while i < argv.len() {
+        rest.push(argv[i])
+        i = i + 1
+    }
+    let ran = command(argv[0]).args(rest).stdin(tp.input).output()
+    let gone = remove_dir_all(dir)
+    let o = match ran {
+        Ok(o) => o,
+        Err(e) => { return [format("FAIL  {}: cannot run it with '{}'\n", file, argv[0])] },
+    }
+    let code = match o.status {
+        ExitStatus.Exited(c) => c,
+        ExitStatus.Signaled(sig) => -sig,
+    }
+    return test_program_report(file, tp, decode(o.stdout), decode(o.stderr), code)
 }
 
 // The test program `path` run in the interpreter, through this tool (`myla

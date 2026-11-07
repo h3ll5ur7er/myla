@@ -32,7 +32,7 @@ from .repl import repl
 from .loader import load_options, LoadOptions, parse_package_flag
 from .stdroot import default_stdlib_root
 from .diag import render
-from .driver import cmd_build, cmd_interp, cmd_test, load_and_check
+from .driver import cmd_build, cmd_interp, cmd_test, cmd_test_native, load_and_check
 from .interp import TestOptions, all_tests
 from .project_cmd import project_build, project_run, project_test, project_check, project_clean, project_new, project_fetch, ends_with
 
@@ -42,8 +42,9 @@ fun usage_lines() -> [str] {
         "usage: myla <command> [<file.my>] [options]",
         "commands on a file:",
         "  run   <file.my> [options] [args...]  interpret a program with these arguments",
-        "  test  <file.my> [--only <text>] [--list] [options]  run its #test cases (--only: those whose function's name has the text;",
-        "                                       --list: name them without running them)",
+        "  test  <file.my> [--only <text>] [--list] [--native] [--target <t>] [options]  run its #test cases (--only: those whose",
+        "                                       function's name has the text; --list: name them without running them; --native:",
+        "                                       natively, through a harness built for this machine or --target's)",
         "  build <file.my> [-o <out>] [-g] [--target <t>] [options]  compile to a binary (-g: debug information for gdb;",
         "                                       <t>: x86_64-linux, aarch64-linux or wasm32-wasi; the default " + TARGET + ", this machine's)",
         "  check <file.my> [options]            type-check it",
@@ -52,7 +53,8 @@ fun usage_lines() -> [str] {
         "  new   [--lib] <name>                 create a project in the directory <name> (--lib: a library)",
         "  build [-g] [--target <t>] [options]  compile src/main.my to build/<name>",
         "  run   [options] [args...]            interpret src/main.my with these arguments",
-        "  test  [--only <text>] [--list] [options]  run the #test cases of every file under src/",
+        "  test  [--only <text>] [--list] [--native] [--target <t>] [options]  run the #test cases of every file under src/,",
+        "                                       then the test programs and test files of tests/",
         "  check [options]                      type-check every file under src/",
         "  clean [--deps]                       remove build/ (--deps: and the fetched dependencies, .myla/)",
         "  fetch [--update]                     resolve the Git dependencies, check them out and write myla.lock",
@@ -71,21 +73,22 @@ fun usage() {
 // A command's arguments: its file ("" in project mode), the load options,
 // `build`'s output and `-g`, `clean`'s `--deps`, `fetch`'s `--update`, `new`'s
 // name, `test`'s selection (D162), and the program's arguments (`run`).
-struct CommandLine { file: str, opts: LoadOptions, output: str, debug: bool, target: str, deps: bool, update: bool, name: str, lib: bool, tests: TestOptions, rest: [str] }
+struct CommandLine { file: str, opts: LoadOptions, output: str, debug: bool, target: str, deps: bool, update: bool, name: str, lib: bool, tests: TestOptions, native: bool, rest: [str] }
 
 // A command line that can't be run: the message, and whether the usage
 // follows it (exit status 2; else 1).
 struct CliError { msg: str, usage: bool }
 
 // The arguments after the command; `--stdlib`, `--package` and `--root` anywhere, `-o`
-// and `-g` for `build`, `--deps` for `clean`, `--update` for `fetch`,
-// `--only` and `--list` for `test`. The first other argument is the file if
+// and `-g` for `build`, `--target` for `build` and `test`, `--deps` for
+// `clean`, `--update` for `fetch`, `--only`, `--list` and `--native` for
+// `test`. The first other argument is the file if
 // it ends in `.my` (else there is none: project mode); then `run` passes the
 // rest to the program, `new` takes one name, and other commands reject them.
 #test(["/work/myla/selfhost/main.my", "new", "freshlib", "more"])[Err(CliError { msg: "myla: unknown option 'more'", usage: true })]
 fun parse_command_line(argv: [str]) -> Result<CommandLine, CliError> {
     let cmd = argv[1]
-    var cl = CommandLine { file: "", opts: load_options(default_stdlib_root()), output: "a.out", debug: false, target: TARGET, deps: false, update: false, name: "", lib: false, tests: all_tests(), rest: [] }
+    var cl = CommandLine { file: "", opts: load_options(default_stdlib_root()), output: "a.out", debug: false, target: TARGET, deps: false, update: false, name: "", lib: false, tests: all_tests(), native: false, rest: [] }
     var positional = 0
     var j = 2
     while j < argv.len() {
@@ -109,8 +112,12 @@ fun parse_command_line(argv: [str]) -> Result<CommandLine, CliError> {
         } else if cmd == "build" && a == "-g" {
             cl.debug = true
             j = j + 1
-        } else if cmd == "build" && a == "--target" && has_value {
+        } else if cmd == "test" && a == "--native" {
+            cl.native = true
+            j = j + 1
+        } else if (cmd == "build" || cmd == "test") && a == "--target" && has_value {
             cl.target = argv[j + 1]
+            cl.native = true
             if cl.target != "x86_64-linux" && cl.target != "aarch64-linux" && cl.target != "wasm32-wasi" {
                 return Err(CliError { msg: "myla: unknown target '" + cl.target + "' (x86_64-linux, aarch64-linux, wasm32-wasi)", usage: false })
             }
@@ -168,7 +175,7 @@ fun main() {
         usage()
         exit(2)
     }
-    var cl = CommandLine { file: "", opts: load_options(""), output: "", debug: false, target: TARGET, deps: false, update: false, name: "", lib: false, tests: all_tests(), rest: [] }
+    var cl = CommandLine { file: "", opts: load_options(""), output: "", debug: false, target: TARGET, deps: false, update: false, name: "", lib: false, tests: all_tests(), native: false, rest: [] }
     match parse_command_line(argv) {
         Ok(c) => { cl = c },
         Err(e) => {
@@ -196,7 +203,7 @@ fun main() {
         // project mode (MYLA-94)
         if cmd == "build" { exit(project_build(cl.opts, cl.debug, cl.target)) }
         if cmd == "run" { exit(project_run(cl.opts, cl.rest)) }
-        if cmd == "test" { exit(project_test(cl.opts, cl.tests)) }
+        if cmd == "test" { exit(project_test(cl.opts, cl.tests, cl.native, cl.target)) }
         exit(project_check(cl.opts))
     }
     if cmd == "build" {
@@ -214,6 +221,9 @@ fun main() {
             },
         }
     }
-    if cmd == "test" { exit(cmd_test(cl.file, cl.opts, cl.tests)) }
+    if cmd == "test" {
+        if cl.native && !cl.tests.list { exit(cmd_test_native(cl.file, cl.opts, cl.tests, cl.target)) }
+        exit(cmd_test(cl.file, cl.opts, cl.tests))
+    }
     exit(cmd_interp(cl.file, cl.opts, cl.rest))
 }
