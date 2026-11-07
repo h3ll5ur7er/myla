@@ -52,4 +52,5 @@ The conventions (D164): operations on built-in types are methods (`s.split(",")`
 | `std.encoding` | [[Language/Standard-library/Encoding]] | Hex and Base64 (standard and URL-safe), strict decoding |
 | `std.url` | [[Language/Standard-library/Url]] | Percent-encoding, query strings, parsing and building URLs |
 | `std.hash` | [[Language/Standard-library/Hash]] | The `Hasher` that `Hash` builds on (wyhash), FNV-1a, CRC-32 and Adler-32 |
+| `std.args` | [[Language/Standard-library/Args]] | Command-line arguments: a declarative spec of flags, options, positionals and subcommands, parsing, the generated help |
 | `std.rt` | [[Language/Standard-library/Rt]] | The runtime in Myla; not for programs |
