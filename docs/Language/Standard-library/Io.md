@@ -1,6 +1,6 @@
 # std.io
 
-Writing and buffered reading ([[MYLA-78]]).
+Writing, buffered reading ([[MYLA-78]]) and streams ([[MYLA-338]]).
 
 ```myla
 from std.io import println, eprintln, write
@@ -27,7 +27,7 @@ A write to the standard output or error whose pipe nobody reads any more (`myla 
 
 ## Reading
 
-Reading goes through a buffered `Reader` ([[MYLA-78]]). Keep it in a `var`, or in a field of a struct whose `var self` methods read from it (Myla has no references, so a function can't take a reader to read from). A read blocks until there is input or the input ends; the bytes come back verbatim, and an error is the errno as an `IoError` from `std.fs`.
+Reading goes through a buffered `Reader` ([[MYLA-78]]), a `Buffered` over the descriptor (below). Keep it in a `var`, or in a field of a struct whose `var self` methods read from it (Myla has no references, so a function can't take a reader to read from). A read blocks until there is input or the input ends; the bytes come back verbatim, and an error is the errno as an `IoError` from `std.fs`.
 
 | Item | Result |
 | --- | --- |
@@ -60,3 +60,138 @@ fun main() {
 A protocol that frames messages with a `Content-Length` header reads the header lines with `read_line` and the body with `read_exact`; `tests/burn/test_stdin.py` has an example.
 
 In a task, each read has an async version that waits for the input with the task suspended, so the other tasks run meanwhile (D124, [[MYLA-230]]): `await r.read_line_async()`, `await r.read_exact_async(n)`, `await r.read_to_end_async()`, `await r.fill_async(want)`. They give what the blocking reads give; outside a task they block as those do. A task asked to stop (`task.cancel`, a `task.timeout` that ran out) stops waiting at once and gets `Err(IoError.Cancelled)` (ECANCELED). Natively the executor's poller watches the descriptor (a regular file, which it can't watch, is always ready); the interpreter looks at the waiting tasks' descriptors before each turn.
+
+## Streams
+
+A stream is a value, as everything in Myla is ([[MYLA-338]]). Keep it in a `var` and use it through its methods, which take `var self`. An adapter owns the stream it wraps: `buffered(r)` takes `r` and holds it. There are no trait objects, so a function over any stream is generic, and it takes the stream by value.
+
+```myla
+from std.io import from_str, buffered, buffered_writer, memory_stream, copy, SeekFrom
+from std.fs import IoError
+
+// Two writes gathered in a buffer, then the bytes they made.
+fun greeting() -> Result<str, IoError> {
+    var w = buffered_writer(memory_stream())
+    w.write_str("hello, ")?
+    w.write_str("world")?
+    let m = w.into_inner()?
+    return Ok(m.text())
+}
+
+// The last `n` bytes of `text`, by a seek and a copy.
+fun last(text: str, n: int64) -> Result<str, IoError> {
+    var m = from_str(text)
+    m.seek(SeekFrom.End(-n))?
+    let out = copy(m, memory_stream())?
+    return Ok(out.text())
+}
+
+fun main() {
+    var r = buffered(from_str("fig 3\npear 5\nplum"))
+    while true {
+        match r.read_line() {
+            Ok(Some(line)) => print(f"line: {line}")
+            _ => { break }
+        }
+    }
+    print(greeting().unwrap_or("failed"))
+    print(last("0123456789", 3).unwrap_or("failed"))
+}
+// output:
+// line: fig 3
+// line: pear 5
+// line: plum
+// hello, world
+// 789
+```
+
+### The traits
+
+| Trait | Methods |
+| --- | --- |
+| `Read` | `read(var self, n: int) -> Result<[uint8], IoError>`: up to `n` bytes from the cursor on, `[]` at the end (and for `n <= 0`); fewer than `n` isn't the end. `read_str(var self, n: int) -> Result<str, IoError>`: the same as a `str`, `""` at the end |
+| `Write` | `write(var self, b: [uint8]) -> Result<int, IoError>`: all of `b`, or the error that stopped it; `b.len()`. `write_str(var self, s: str) -> Result<int, IoError>`: the bytes of `s`. `flush(var self) -> Result<(), IoError>`: whatever is buffered passed on |
+| `Seek` | `seek(var self, pos: SeekFrom) -> Result<int64, IoError>`: the cursor moved to `SeekFrom.Start(k)`, `Current(k)` or `End(k)`; the new offset from the start. Before the start is `InvalidInput`; past the end is allowed |
+| `Pollable` | `descriptor(self) -> int32`: the descriptor a task can wait for. A `Buffered` over a `Pollable` stream has `ready` and the async reads |
+
+Each of `Read` and `Write` has a method for `[uint8]` and one for `str`. Strings are bytes (D164), and the two kinds hold the same bytes, but one becomes the other only byte by byte. A descriptor reads and writes a `str`, a memory stream holds a `[uint8]`, so each stream gives both the cheap way: a `Buffered` reads text with `read_str`, and text from a descriptor isn't converted at all. A stream that has only one kind gives the other by converting it (the example below).
+
+### Streams of this module
+
+| Item | What it is |
+| --- | --- |
+| `fd_stream(fd: int32) -> FdStream` | A descriptor, unbuffered: each read and write is a system call. `Read`, `Write`, `Seek` (a pipe can't: `Other(29)`, ESPIPE), `Pollable`. A write to a closed pipe is `BrokenPipe`, but on the standard output or error, where it ends the program quietly (D146) |
+| `memory_stream() -> MemoryStream`, `from_bytes(b: [uint8])`, `from_str(s: str)` | Bytes in memory and a cursor at the start. `Read`, `Write` (over the bytes at the cursor, and on past the end; a gap a seek past the end left is zeros), `Seek` |
+| `m.bytes() -> [uint8]`, `m.text() -> str`, `m.position() -> int64` | All its bytes, wherever the cursor is; as text; the cursor |
+| `buffered(r: R) -> Buffered<R>` | A buffer in front of `r`: `read_line`, `read_exact`, `read_to_end` and `fill` as `Reader` has them (`Reader` is `Buffered<FdStream>`), `into_inner()` (the stream, without the bytes still buffered). `Read`; `Seek` if `r` can (the buffer dropped; `Current` counts from the next byte a read gives); `Pollable`, `ready` and the async reads if `r` is `Pollable` |
+| `buffered_writer(w: W) -> BufferedWriter<W>`, `buffered_writer_with(w, capacity: int32)` | A buffer in front of `w`, 8 KiB or `capacity` bytes: writes are gathered and passed on when it is full, on `flush` and on `into_inner() -> Result<W, IoError>` (flushed). `Write`; `Seek` if `w` can (after the buffer is passed on). Nothing flushes it when the program ends |
+
+### Any stream
+
+| Function | Result |
+| --- | --- |
+| `read_all<R: Read>(r: R) -> Result<[uint8], IoError>` | Everything `r` gives up to its end |
+| `copy<R: Read, W: Write>(r: R, w: W) -> Result<W, IoError>` | Everything `r` gives up to its end written to `w`, which is flushed and given back |
+
+They take the streams by value, so the caller's `var` doesn't move: a memory stream read by `read_all` is where it was. A descriptor's offset, which the platform keeps, does move. `copy` gives the writer back, which is the way to the bytes of a memory stream it wrote, or to a `BufferedWriter`'s stream.
+
+### A stream of your own
+
+A type is a stream when it implements the traits. `Read` takes both methods; the one it hasn't got natively converts the other:
+
+```myla
+from std.io import Read, buffered, read_all
+from std.fs import IoError
+
+// `left` more copies of one byte.
+struct Repeat {
+    byte: uint8,
+    left: int,
+}
+
+impl Read for Repeat {
+    fun read(var self, n: int) -> Result<[uint8], IoError> {
+        var out: [uint8] = []
+        while out.len() < n && self.left > 0 {
+            out.push(self.byte)
+            self.left -= 1
+        }
+        return Ok(out)
+    }
+
+    fun read_str(var self, n: int) -> Result<str, IoError> {
+        var sb = StringBuilder()
+        for b in self.read(n)? { sb.append_byte(b) }
+        return Ok(sb.build())
+    }
+}
+
+fun main() {
+    match read_all(Repeat { byte: 'z', left: 5000 }) {
+        Ok(b) => print(b.len())
+        Err(_) => print("failed")
+    }
+    var r = buffered(Repeat { byte: 'a', left: 3 })
+    match r.read_exact(2) {
+        Ok(Some(s)) => print(s)
+        _ => print("too short")
+    }
+}
+// output:
+// 5000
+// aa
+```
+
+An adapter is a generic struct, `struct Buffered<R>` (a struct's parameters can't have bounds), with `impl<R: Read> Buffered<R>`, and `impl<R: Read> Read for Buffered<R>` so that adapters stack. Another impl block may ask for more, `impl<R: Read + Pollable> Buffered<R>`, and its methods are there only for such an `R`. `Buffered` keeps its stream as the one element of a list and takes it out for each read: a stream that is a plain field would share its bytes with the copy a read works on, and a read that changes them would copy them all each time.
+
+### Speed
+
+Natively on x86-64, 50 MB of lines of up to 120 bytes, best of three ([[MYLA-338]]):
+
+| What | Time |
+| --- | --- |
+| `stdin().read_line()` over all of it | 75 ms (96 ms before streams) |
+| `read_line` through a `Buffered<MemoryStream>` | 128 ms |
+| 1 000 000 `write_str` of 48 bytes into a `BufferedWriter<MemoryStream>` | 143 ms |
+| `copy(fd_stream(0), fd_stream(1))`, to `/dev/null` | 13 ms |
+| `copy` from one memory stream to another | 256 ms |

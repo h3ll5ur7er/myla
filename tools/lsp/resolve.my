@@ -447,8 +447,25 @@ impl Resolver {
         }
     }
 
+    // The trait of an impl: the first of its name after the impl's start
+    // that no bound took, as a bound may name it too (`impl<R: Read> Read
+    // for …`, MYLA-338).
+    fun use_impl_trait(var self, line: int32, col: int32, name: str) {
+        var k = self.ident_after(line, col, name)
+        while k >= 0 && self.used.contains(k) {
+            k = self.ident_after(self.toks[k].line, self.toks[k].column + 1, name)
+        }
+        if k >= 0 { self.use_name(self.toks[k].line, self.toks[k].column, name) }
+    }
+
     fun type_params(var self, tps: [TypeParam]) {
         for tp in tps { self.declare(tp.line, tp.col, tp.name, DefKind.TypeParam, "") }
+        // a bound, `<R: Read>`, uses its trait (one of the program's; a
+        // built-in one has no declaration); the AST keeps no position of
+        // its own for it, so it is the first of its name after the parameter
+        for tp in tps {
+            for b in tp.bounds { self.use_name(tp.line, tp.col, b) }
+        }
     }
 
     fun decl(var self, d: Decl) {
@@ -480,7 +497,7 @@ impl Resolver {
                 self.type_params(tps)
                 self.type_expr(target)
                 match tr {
-                    Some(t) => { self.use_name(d.line, d.col, t) },
+                    Some(t) => { self.use_impl_trait(d.line, d.col, t) },
                     None => {},
                 }
                 for t in targs { self.type_expr(t) }

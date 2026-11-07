@@ -30,7 +30,7 @@ The conventions (D164): operations on built-in types are methods (`s.split(",")`
 
 | Module | Page | Holds |
 | --- | --- | --- |
-| `std.io` | [[Language/Standard-library/Io]] | Writing to a descriptor, the buffered `Reader`, async reads |
+| `std.io` | [[Language/Standard-library/Io]] | Writing to a descriptor, the buffered `Reader`, async reads; the stream traits `Read`, `Write`, `Seek`, memory streams, `Buffered`, `BufferedWriter`, `copy` |
 | `std.fs` | [[Language/Standard-library/Fs]] | Whole-file reads and writes, directories, `IoError` |
 | `std.process` | [[Language/Standard-library/Process]] | Arguments, the environment, exit, running programs (`run`, `command`) |
 | `std.char` | [[Language/Standard-library/Char]] | Character classes, case and digits, as methods on `char` (ASCII) |
