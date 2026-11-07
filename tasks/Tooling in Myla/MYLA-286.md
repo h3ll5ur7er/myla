@@ -2,7 +2,7 @@
 id: MYLA-286
 title: A NUL byte in a path is silently truncated
 type: bug
-status: review
+status: done
 priority: medium
 labels: [stdlib, fs, safety]
 ---

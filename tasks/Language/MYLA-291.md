@@ -2,7 +2,7 @@
 id: MYLA-291
 title: "A bound `T: Format` can't be formatted"
 type: improvement
-status: review
+status: done
 priority: low
 labels: [checker, traits, generics]
 ---

@@ -2,7 +2,7 @@
 id: MYLA-302
 title: The burn suite's timing and memory bounds on a busy runner
 type: chore
-status: review
+status: done
 priority: low
 labels: [tests]
 ---

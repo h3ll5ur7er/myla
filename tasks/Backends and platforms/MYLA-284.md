@@ -2,7 +2,7 @@
 id: MYLA-284
 title: "Big cells in the allocator: a list on wasm32 stops at 2^26 elements"
 type: bug
-status: review
+status: done
 priority: medium
 labels: [runtime, allocator, wasm]
 ---

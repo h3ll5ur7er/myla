@@ -2,7 +2,7 @@
 id: MYLA-292
 title: "Negative slice bounds: an error, or before the start"
 type: improvement
-status: review
+status: done
 priority: low
 labels: [slices, decision]
 ---

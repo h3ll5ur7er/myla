@@ -2,7 +2,7 @@
 id: MYLA-289
 title: "A seed policy: one seed per pull request, or seeds out of the history"
 type: improvement
-status: review
+status: done
 priority: high
 labels: [bootstrap, repository, decision]
 ---

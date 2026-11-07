@@ -2,7 +2,7 @@
 id: MYLA-293
 title: "Defaults in messages: `become`'s word count and `#test`'s arity"
 type: improvement
-status: review
+status: done
 priority: low
 labels: [diagnostics, defaults]
 ---

@@ -2,7 +2,7 @@
 id: MYLA-250
 title: Arguments and results in registers
 type: chore
-status: review
+status: done
 priority: high
 labels: [backend, performance, calling-convention]
 ---

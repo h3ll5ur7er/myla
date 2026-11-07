@@ -2,7 +2,7 @@
 id: MYLA-290
 title: "Branches of an `if` or `match` typed against each other: `if c {{ Some(n) }} else {{ None }}`"
 type: improvement
-status: review
+status: done
 priority: medium
 labels: [checker, inference]
 ---

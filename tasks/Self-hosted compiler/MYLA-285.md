@@ -2,7 +2,7 @@
 id: MYLA-285
 title: Raw-memory primitives are callable from a program with a warning
 type: bug
-status: review
+status: done
 priority: high
 labels: [checker, safety]
 ---

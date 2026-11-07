@@ -2,7 +2,7 @@
 id: MYLA-301
 title: Litmus programs for the runtime's lock-free protocols on arm64 hardware
 type: improvement
-status: review
+status: done
 priority: medium
 labels: [concurrency, memory-ordering, tests]
 ---
