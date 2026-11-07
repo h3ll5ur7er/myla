@@ -1111,6 +1111,24 @@ fun subst_has(subst: [Subst], name: str) -> bool {
     return match subst_get(subst, name) { Some(x) => true, None => false }
 }
 
+// The hint a lambda argument of a generic call gets while the parameter's
+// type still names a type parameter (MYLA-356): when it is a function type
+// whose parameter types are known, the lambda's parameters take them and its
+// result, left open, is inferred from its body; else none.
+#test(Type.TFunc([Type.TInt(32, true)], Some(Type.TParam("U"))))[Some(Type.TFunc([Type.TInt(32, true)], None))]
+#test(Type.TFunc([Type.TParam("T")], Some(Type.TParam("U"))))[None]
+#test(Type.TList(Type.TParam("T")))[None]
+fun lambda_param_hint(want: Type) -> Option<Type> {
+    return match want {
+        Type.TFunc(ps, r) => if list_any_tp(ps) { None } else { Some(Type.TFunc(ps, None)) },
+        Type.TAsync(f) => match lambda_param_hint(f) {
+            Some(h) => Some(Type.TAsync(h)),
+            None => None,
+        },
+        _ => None,
+    }
+}
+
 #test(Type.TStr)[false]
 #test(Type.TParam("A"))[true]
 #test(Type.TParam("B"))[true]
@@ -6843,7 +6861,12 @@ impl Checker {
         while i < args.len() {
             let want = subst_type(sig.params[i], subst)
             var hint: Option<Type> = Some(want)
-            if contains_type_param(want) { hint = None }
+            if contains_type_param(want) {
+                hint = match args[i].kind {
+                    ExprKind.Lambda(ps, rt, body, asy) => lambda_param_hint(want),
+                    _ => None,
+                }
+            }
             let at = self.expect_value(args[i], hint)?
             arg_types.push(at)
             let r = unify_param(sig.params[i], at, subst)
@@ -7000,7 +7023,12 @@ impl Checker {
             let pt = sig.params[i + 1]
             let want = subst_type(pt, subst)
             var hint: Option<Type> = Some(want)
-            if contains_type_param(want) { hint = None }
+            if contains_type_param(want) {
+                hint = match args[i].kind {
+                    ExprKind.Lambda(ps, rt, body, asy) => lambda_param_hint(want),
+                    _ => None,
+                }
+            }
             let at = self.expect_value(args[i], hint)?
             arg_types.push(at)
             let r = unify_param(pt, at, subst)

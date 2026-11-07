@@ -46,6 +46,7 @@ fun main() {
 Type arguments are written only in **type positions**: `Box<int>`, `Result<str, IoError>`, `[Option<T>]` (D34). At a call or construction they are inferred:
 
 1. Arguments are typed left to right. Once a parameter's type is fully known from earlier arguments, it is used as the expected type of the next argument, so `prepend(x, List.Nil)` works.
+   A lambda argument needs less: when its parameter's type is a function type whose parameter types are known (`(int) -> U` once `T` is `int`), the lambda takes them and its result is inferred from its body, which binds `U`. So `apply(3, (x) => x * 2)` and `opt.map((x) => x + 1)` need no annotation ([[MYLA-356]]).
 2. The expected type of the whole expression (an annotation, a parameter, a return type) seeds struct literals and enum variants.
 3. The branches of an `if` and the arms of a `match` used as a value are typed against each other when nothing is expected: one whose value can't say its whole type alone (`None`, `[]`, `[:]`, `Err(e)`, `Ok(x)`, a generic enum's variant that leaves a parameter out) is checked after the others, with the first one's type expected, so `let v = if n > 0 { Some(n) } else { None }` is an `Option<int>` ([[MYLA-290]]). When no branch says it (`if c { Ok(1) } else { Err("e") }`), annotate the binding.
 4. A type parameter that nothing determines is an error ("cannot infer type parameter(s) T … add a type annotation").

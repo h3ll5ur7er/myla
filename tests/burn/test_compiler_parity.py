@@ -8,6 +8,22 @@ from tests.burn._targets import program_excuse
 from tests.burn._native import CAN_BUILD_NATIVE, SKIP_REASON, build_and_run, interpret, selfhost_run
 
 PROGRAMS = {
+    # a lambda's parameters typed from a generic call's argument types known
+    # so far, its result inferred and binding the rest (MYLA-356)
+    "lambda_parameters_from_known_arguments": (
+        "struct Box<T> {\n    v: T,\n}\n"
+        "impl<T> Box<T> {\n    fun map<U>(self, f: (T) -> U) -> Box<U> {\n        return Box { v: f(self.v) }\n    }\n}\n"
+        "fun apply<T, U>(x: T, f: (T) -> U) -> U {\n    return f(x)\n}\n"
+        "#main\nfun main() {\n"
+        "    print(apply(3, (x) => x * 2))\n"
+        "    print(apply(\"abc\", (s) => s.len()))\n"
+        "    let b = Box { v: 4 }\n"
+        "    print(b.map((x) => x + 1).v)\n"
+        "    let c = b.map((x) => {\n        return x > 3\n    })\n"
+        "    print(c.v)\n"
+        "    print(b.map((x) => f\"<{x}>\").map((s) => s.len()).v)\n"
+        "}\n"
+    ),
     # a receiver and every argument are taken in order, before a later
     # argument writes their variable through a `var self` method (MYLA-237)
     "argument_values_before_later_writes": (
@@ -3817,6 +3833,8 @@ class TestCompilerParity(unittest.TestCase):
 # longer holds (a later decision changed its meaning) or there is none (a
 # program added or changed since): its output, pinned here.
 PINNED = {
+    # MYLA-356: new, so no recording; the interpreter gives the same
+    "lambda_parameters_from_known_arguments": "6\n3\n5\ntrue\n3\n",
     # D102: the unsuffixed 123.456 is a float64 now (the recording's
     # float32 printed 123.456001); floats print in their shortest form (D155)
     "float_arithmetic": "3.75\n-0.75\n3.375\n3.5\n1.5\n-3.5\n0.30000000000000004\n0.3\n2\n100000\n"
