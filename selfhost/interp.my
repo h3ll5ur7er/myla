@@ -35,7 +35,7 @@ pub enum Value {
     VTuple([Value]),
     VEnum(str, str, [Value]),              // enum name, variant, payload
     VList([Value]),
-    VMap([Value], [Value]),                // parallel key/value arrays
+    VMap(MapV),                            // the entries in insertion order, indexed (MYLA-310)
     VSB([int64]),                          // StringBuilder: raw byte buffer
     VClosure([Param], ExprOrBlock, [str], [Value], str, bool),  // params, body, capNames, capVals, funcName, isFunc
     VCompose([Value]),                     // composed functions, applied left-to-right
@@ -59,7 +59,7 @@ impl Value {
             VTuple(t) => f"VTuple()"
             VEnum(name, variant, fields) => f"VEnum({name}, {variant})"
             VList(l) => f"VList()"
-            VMap(keys, values) => f"VMap()"
+            VMap(m) => f"VMap()"
             VSB(sb) => f"VSB()"
             VClosure(params, body, capNames, capVals, funcName, isFunc) => f"VClosure({funcName}, {isFunc})"
             VCompose(c) => f"VCompose()"
@@ -1045,20 +1045,14 @@ impl Interp {
             },
             Step.SIndex(k, nd) => {
                 if is_vmap(self.cell) {
-                    var ks = map_key_values(self.cell)
-                    var vs = map_val_values(self.cell)
+                    var m = map_parts(self.cell)
                     self.cell = Value.VUnit
-                    var j = key_index(ks, k)
-                    if j < 0 {
-                        ks.push(k)
-                        vs.push(Value.VUnit)
-                        j = ks.len() - 1
-                    }
-                    self.cell = vs[j]
-                    vs[j] = Value.VUnit
+                    let j = m.place_or_add(k)
+                    self.cell = m.vs[j]
+                    m.vs[j] = Value.VUnit
                     r = self.update_cell(steps, i + 1, op)
-                    vs[j] = self.cell
-                    self.cell = Value.VMap(ks, vs)
+                    m.vs[j] = self.cell
+                    self.cell = Value.VMap(m)
                 } else if is_vlist(self.cell) {
                     var xs = list_values(self.cell)
                     self.cell = Value.VUnit
@@ -1093,8 +1087,12 @@ impl Interp {
                 return last
             },
             PlaceOp.ORemove(k) => {
-                let m = self.cell
-                self.cell = map_remove(m, k)
+                if is_vmap(self.cell) {
+                    var m = map_parts(self.cell)
+                    self.cell = Value.VUnit
+                    m.take_out(k)
+                    self.cell = Value.VMap(m)
+                }
             },
             PlaceOp.OAppend(piece) => {
                 var b = sb_bytes(self.cell)
@@ -2262,7 +2260,7 @@ impl Interp {
     fun iter_items(self, v: Value) -> [Value] {
         return match v {
             Value.VList(xs) => xs,
-            Value.VMap(ks, vs) => ks,
+            Value.VMap(m) => map_keys_of(m),
             _ => empty_values(),
         }
     }
@@ -2696,15 +2694,16 @@ impl Interp {
         return Value.VStruct(name, names, vals)
     }
 
-    #test(interp_on("[int]"), [])[Value.VMap([], [])]
+    // `[k: v, …]`: a key given again replaces the value and keeps the
+    // first one's place, as `m[k] = v` would.
+    #test(interp_on("[int]"), [])[Value.VMap(new_mapv())]
     fun eval_map_lit(var self, entries: [MapEntry]) -> Value {
-        var ks: [Value] = []
-        var vs: [Value] = []
+        var m = new_mapv()
         for en in entries {
-            ks.push(self.eval(en.key))
-            vs.push(self.eval(en.value))
+            let k = self.eval(en.key)
+            m.put(k, self.eval(en.value))
         }
-        return Value.VMap(ks, vs)
+        return Value.VMap(m)
     }
 
     #test(interp_on("enum E { A, B(int) }"), expr_of("a.b[0]"), expr_of("a.b[0]"), expr_of("a.b[0]"))[Value.VUnit]
@@ -3948,7 +3947,7 @@ fun value_key(v: Value) -> str {
         Value.VInt(i) => "int32",
         Value.VFloat(f) => "float64",
         Value.VList(xs) => "__list",
-        Value.VMap(ks, vs) => "__map",
+        Value.VMap(m) => "__map",
         _ => "",
     }
 }
@@ -4220,7 +4219,7 @@ fun eb_dummy() -> ExprOrBlock {
 fun value_len(v: Value) -> int64 {
     return match v {
         Value.VList(xs) => xs.len() as int64,
-        Value.VMap(ks, vs) => ks.len() as int64,
+        Value.VMap(m) => m.count as int64,
         Value.VStr(s) => s.len() as int64,
         Value.VSB(b) => b.len() as int64,
         _ => 0,
@@ -4246,8 +4245,8 @@ fun index_error(c: Value, k: Value, assigning: bool) -> str {
                 return format("string index {} out of bounds (len {})", i, str_.len())
             }
         },
-        Value.VMap(ks, vs) => {
-            if !assigning && !map_has(c, k) {
+        Value.VMap(m) => {
+            if !assigning && m.place(k) < 0 {
                 return format("map key {} not found", py_repr(k))
             }
         },
@@ -4268,12 +4267,12 @@ fun list_values(v: Value) -> [Value] {
     }
 }
 
-#test(Value.VMap([], []))[true]
+#test(Value.VMap(new_mapv()))[true]
 #test(Value.VList([Value.VInt(1), Value.VInt(2)]))[false]
 #test(Value.VList([Value.VInt(1), Value.VInt(2), Value.VInt(3)]))[false]
 fun is_vmap(v: Value) -> bool {
     return match v {
-        Value.VMap(ks, vs) => true,
+        Value.VMap(m) => true,
         _ => false,
     }
 }
@@ -4298,19 +4297,14 @@ fun is_vstruct(v: Value) -> bool {
     }
 }
 
-#test(Value.VMap([], []))[[]]
-fun map_key_values(v: Value) -> [Value] {
+// The entries of a map value (none for any other value), for
+// `Interp.update_cell`: the caller releases the map, then changes them.
+#test(Value.VMap(new_mapv()))[new_mapv()]
+#test(Value.VInt(1))[new_mapv()]
+fun map_parts(v: Value) -> MapV {
     return match v {
-        Value.VMap(ks, vs) => ks,
-        _ => empty_values(),
-    }
-}
-
-#test(Value.VMap([], []))[[]]
-fun map_val_values(v: Value) -> [Value] {
-    return match v {
-        Value.VMap(ks, vs) => vs,
-        _ => empty_values(),
+        Value.VMap(m) => m,
+        _ => new_mapv(),
     }
 }
 
@@ -4355,64 +4349,193 @@ fun sb_bytes(v: Value) -> [int64] {
     }
 }
 
-// The index of key `k` in `ks`, or -1.
-#test([], Value.VChar(120))[-1]
-#test([Value.VChar(120)], Value.VChar(120))[0]
-fun key_index(ks: [Value], k: Value) -> int32 {
-    var i = 0
-    while i < ks.len() {
-        if value_eq(ks[i], k) { return i }
-        i = i + 1
-    }
-    return -1
+// A map's entries (`Value.VMap`, MYLA-310): its keys and values in the
+// order of insertion (D105), a removed one leaving a hole (`here` false),
+// and an index from each key to its place, so that a lookup, an insert and
+// a removal take constant time, not time in the map's size. The holes are
+// dropped and the places renumbered when they outnumber the entries. An
+// integer, `char` or `bool` key is indexed by its number, as `value_eq`
+// compares them; a string by itself; a key of another kind (none yet) is
+// looked for among the entries.
+pub struct MapV {
+    ks: [Value],
+    vs: [Value],
+    here: [bool],
+    ints: [int64: int32],
+    strs: [str: int32],
+    count: int32,
 }
 
-#test(Value.VMap([Value.VChar(120)], [Value.VInt(2)]), Value.VChar(120))[true]
-fun map_has(c: Value, k: Value) -> bool {
-    return match c {
-        Value.VMap(ks, vs) => keys_contain(ks, k),
+#test()[MapV { ks: [], vs: [], here: [], ints: [:], strs: [:], count: 0 }]
+pub fun new_mapv() -> MapV {
+    return MapV { ks: [], vs: [], here: [], ints: [:], strs: [:], count: 0 }
+}
+
+// The map of `ks` and `vs`, inserted in that order (a key given again
+// replaces the value, keeping its first place).
+#test([Value.VInt(1)], [Value.VInt(2)])[MapV { ks: [Value.VInt(1)], vs: [Value.VInt(2)], here: [true], ints: [1: 0], strs: [:], count: 1 }]
+#test([Value.VStr("a"), Value.VStr("a")], [Value.VInt(1), Value.VInt(2)])[MapV { ks: [Value.VStr("a")], vs: [Value.VInt(2)], here: [true], ints: [:], strs: ["a": 0], count: 1 }]
+pub fun mapv_of(ks: [Value], vs: [Value]) -> MapV {
+    var m = new_mapv()
+    var i = 0
+    while i < ks.len() {
+        m.put(ks[i], vs[i])
+        i = i + 1
+    }
+    return m
+}
+
+// Whether `k` is indexed by its number.
+#test(Value.VChar(97))[true]
+#test(Value.VStr("a"))[false]
+fun is_int_key(k: Value) -> bool {
+    return match k {
+        Value.VInt(n) => true,
+        Value.VChar(c) => true,
+        Value.VBool(b) => true,
         _ => false,
     }
 }
 
-#test([Value.VChar(120)], Value.VChar(120))[true]
-fun keys_contain(ks: [Value], k: Value) -> bool {
-    return key_index(ks, k) >= 0
-}
+impl MapV {
+    // The place of `k` in `ks` and `vs`, or -1.
+    #test(mapv_of([Value.VInt(5), Value.VInt(7)], [Value.VUnit, Value.VUnit]), Value.VInt(7))[1]
+    #test(mapv_of([Value.VInt(97)], [Value.VUnit]), Value.VChar(97))[0]
+    #test(mapv_of([Value.VStr("a")], [Value.VUnit]), Value.VStr("b"))[-1]
+    #test(mapv_of([Value.VTuple([Value.VInt(1)])], [Value.VUnit]), Value.VTuple([Value.VInt(1)]))[0]
+    fun place(self, k: Value) -> int32 {
+        if let Value.VStr(s) = k {
+            return match get(self.strs, s) {
+                Some(j) => j,
+                None => -1,
+            }
+        }
+        if is_int_key(k) {
+            return match get(self.ints, as_int(k)) {
+                Some(j) => j,
+                None => -1,
+            }
+        }
+        var i = 0
+        while i < self.ks.len() {
+            if self.here[i] && value_eq(self.ks[i], k) { return i }
+            i = i + 1
+        }
+        return -1
+    }
 
-#test(Value.VMap([Value.VInt(1), Value.VInt(2)], [Value.VInt(10), Value.VInt(20)]), Value.VInt(1))[Value.VMap([Value.VInt(2)], [Value.VInt(20)])]
-#test(Value.VMap([Value.VInt(1), Value.VInt(2)], [Value.VInt(999), Value.VInt(200)]), Value.VInt(2))[Value.VMap([Value.VInt(1)], [Value.VInt(999)])]
-#test(Value.VMap([Value.VInt(1), Value.VInt(3)], [Value.VInt(10), Value.VInt(30)]), Value.VInt(999))[Value.VMap([Value.VInt(1), Value.VInt(3)], [Value.VInt(10), Value.VInt(30)])]
-fun map_remove(c: Value, k: Value) -> Value {
-    return match c {
-        Value.VMap(ks, vs) => map_without(ks, vs, k),
-        _ => c,
+    // `k` indexed at the place `j`.
+    fun index(var self, k: Value, j: int32) {
+        if let Value.VStr(s) = k {
+            self.strs[s] = j
+        } else if is_int_key(k) {
+            self.ints[as_int(k)] = j
+        }
+    }
+
+    // The place of `k`, made at the end (its value `()`) when it is missing.
+    #test(new_mapv(), Value.VInt(3))[0]
+    #test(mapv_of([Value.VInt(5), Value.VInt(7)], [Value.VUnit, Value.VUnit]), Value.VInt(5))[0]
+    fun place_or_add(var self, k: Value) -> int32 {
+        let found = self.place(k)
+        if found >= 0 { return found }
+        let j = self.ks.len()
+        self.ks.push(k)
+        self.vs.push(Value.VUnit)
+        self.here.push(true)
+        self.index(k, j)
+        self.count = self.count + 1
+        return j
+    }
+
+    // `k` set to `v`: a new key goes last, a known one keeps its place.
+    fun put(var self, k: Value, v: Value) {
+        let j = self.place_or_add(k)
+        self.vs[j] = v
+    }
+
+    // `k`'s entry removed (nothing when it is missing): a hole in its place,
+    // the entries compacted once the holes outnumber them.
+    fun take_out(var self, k: Value) {
+        let j = self.place(k)
+        if j < 0 { return }
+        if let Value.VStr(s) = k {
+            self.strs.remove(s)
+        } else if is_int_key(k) {
+            self.ints.remove(as_int(k))
+        }
+        self.ks[j] = Value.VUnit
+        self.vs[j] = Value.VUnit
+        self.here[j] = false
+        self.count = self.count - 1
+        let holes = self.ks.len() - self.count
+        if holes >= 16 && holes > self.count { self.compact() }
+    }
+
+    // The holes dropped: the entries at the places 0 … count - 1, in order.
+    fun compact(var self) {
+        var ks: [Value] = []
+        var vs: [Value] = []
+        var here: [bool] = []
+        self.ints = [:]
+        self.strs = [:]
+        var i = 0
+        while i < self.ks.len() {
+            if self.here[i] {
+                self.index(self.ks[i], ks.len())
+                ks.push(self.ks[i])
+                vs.push(self.vs[i])
+                here.push(true)
+            }
+            i = i + 1
+        }
+        self.ks = ks
+        self.vs = vs
+        self.here = here
     }
 }
 
-#test([Value.VInt(1), Value.VInt(2)], [Value.VInt(10), Value.VInt(20)], Value.VInt(1))[Value.VMap([Value.VInt(2)], [Value.VInt(20)])]
-#test([Value.VInt(1), Value.VInt(2)], [Value.VInt(999), Value.VInt(200)], Value.VInt(2))[Value.VMap([Value.VInt(1)], [Value.VInt(999)])]
-#test([Value.VInt(1), Value.VInt(3)], [Value.VInt(10), Value.VInt(30)], Value.VInt(999))[Value.VMap([Value.VInt(1), Value.VInt(3)], [Value.VInt(10), Value.VInt(30)])]
-fun map_without(ks: [Value], vs: [Value], k: Value) -> Value {
-    var nks: [Value] = []
-    var nvs: [Value] = []
+// The keys of `m` in the order of insertion.
+#test(new_mapv())[[]]
+#test(mapv_of([Value.VStr("a"), Value.VStr("c"), Value.VStr("d")], [Value.VInt(10), Value.VInt(3), Value.VInt(4)]))[[Value.VStr("a"), Value.VStr("c"), Value.VStr("d")]]
+pub fun map_keys_of(m: MapV) -> [Value] {
+    if m.count == m.ks.len() { return m.ks }
+    return present(m.ks, m.here)
+}
+
+// The values of `m`, in the same order.
+#test(mapv_of([Value.VInt(0), Value.VInt(1)], [Value.VInt(5), Value.VInt(6)]))[[Value.VInt(5), Value.VInt(6)]]
+pub fun map_vals_of(m: MapV) -> [Value] {
+    if m.count == m.ks.len() { return m.vs }
+    return present(m.vs, m.here)
+}
+
+// The elements of `xs` whose place is `here`.
+#test([Value.VInt(1), Value.VUnit, Value.VInt(3)], [true, false, true])[[Value.VInt(1), Value.VInt(3)]]
+fun present(xs: [Value], here: [bool]) -> [Value] {
+    var out: [Value] = []
     var i = 0
-    while i < ks.len() {
-        if !value_eq(ks[i], k) {
-            nks.push(ks[i])
-            nvs.push(vs[i])
-        }
+    while i < xs.len() {
+        if here[i] { out.push(xs[i]) }
         i = i + 1
     }
-    return Value.VMap(nks, nvs)
+    return out
 }
 
-#test(Value.VMap([], []))[Value.VList([])]
-#test(Value.VMap([Value.VInt(0), Value.VInt(1), Value.VInt(2)], [Value.VInt(1), Value.VInt(2), Value.VInt(3)]))[Value.VList([Value.VInt(0), Value.VInt(1), Value.VInt(2)])]
-#test(Value.VMap([Value.VStr("a"), Value.VStr("c"), Value.VStr("d")], [Value.VInt(10), Value.VInt(3), Value.VInt(4)]))[Value.VList([Value.VStr("a"), Value.VStr("c"), Value.VStr("d")])]
+#test(Value.VMap(mapv_of([Value.VChar(120)], [Value.VInt(2)])), Value.VChar(120))[true]
+#test(Value.VMap(mapv_of([Value.VChar(120)], [Value.VInt(2)])), Value.VChar(121))[false]
+fun map_has(c: Value, k: Value) -> bool {
+    return match c {
+        Value.VMap(m) => m.place(k) >= 0,
+        _ => false,
+    }
+}
+
+#test(Value.VMap(new_mapv()))[Value.VList([])]
+#test(Value.VMap(mapv_of([Value.VInt(0), Value.VInt(1), Value.VInt(2)], [Value.VInt(1), Value.VInt(2), Value.VInt(3)])))[Value.VList([Value.VInt(0), Value.VInt(1), Value.VInt(2)])]
 fun map_keys(c: Value) -> Value {
     return match c {
-        Value.VMap(ks, vs) => Value.VList(ks),
+        Value.VMap(m) => Value.VList(map_keys_of(m)),
         _ => Value.VList(empty_values()),
     }
 }
@@ -4563,7 +4686,7 @@ fun value_eq(a: Value, b: Value) -> bool {
         Value.VTuple(es) => match b { Value.VTuple(es2) => values_eq(es, es2), Value.VUnit => es.len() == 0, _ => false },
         Value.VEnum(en, vr, pl) => match b { Value.VEnum(en2, vr2, pl2) => en == en2 && vr == vr2 && values_eq(pl, pl2), _ => false },
         Value.VList(xs) => match b { Value.VList(ys) => values_eq(xs, ys), _ => false },
-        Value.VMap(ks, vs) => match b { Value.VMap(ks2, vs2) => maps_eq(ks, vs, ks2, vs2), _ => false },
+        Value.VMap(m) => match b { Value.VMap(m2) => maps_eq(m, m2), _ => false },
         _ => false,
     }
 }
@@ -4573,7 +4696,7 @@ fun value_eq(a: Value, b: Value) -> bool {
 // `P { x: 1 }`, `E.B(1)`, `(a, b)`, `[a]`, `[k: v]`.
 #test(Value.VBool(true))["True"]
 #test(Value.VList([Value.VInt(1), Value.VChar(97)]))["[1, 97]"]
-#test(Value.VMap([], []))["[]"]
+#test(Value.VMap(new_mapv()))["[]"]
 #test(Value.VEnum("E", "B", [Value.VStr("it's")]))["E.B(\"it's\")"]
 // (Also the key in a "map key … not found" message.)
 #test(Value.VStr("a b"))["'a\\xa0b'"]
@@ -4589,7 +4712,7 @@ pub fun py_repr(v: Value) -> str {
         Value.VTuple(es) => "(" + reprs(es) + ")",
         Value.VEnum(en, vr, pl) => enum_repr(en, vr, pl),
         Value.VList(xs) => "[" + reprs(xs) + "]",
-        Value.VMap(ks, vs) => map_repr(ks, vs),
+        Value.VMap(m) => map_repr(map_keys_of(m), map_vals_of(m)),
         Value.VSB(bs) => "StringBuilder(" + bytes_repr(bs) + ")",
         Value.VClosure(ps, body, cn, cv, fname, is_func) => format("<closure {} param(s), {} capture(s)>", ps.len(), cn.len()),
         _ => "<function>",
@@ -4692,23 +4815,18 @@ fun bytes_repr(bs: [int64]) -> str {
 
 // Two maps hold the same entries, in whatever order (a #test's expected map
 // against the actual one, as the Python interpreter compares dicts).
-#test([Value.VChar(53)], [Value.VChar(53)], [Value.VChar(53)], [Value.VChar(53)])[true]
-#test([Value.VChar(90)], [Value.VChar(90)], [Value.VChar(90)], [Value.VChar(90)])[true]
-#test([Value.VChar(97)], [Value.VChar(97)], [Value.VChar(97)], [Value.VChar(97)])[true]
-fun maps_eq(ks: [Value], vs: [Value], ks2: [Value], vs2: [Value]) -> bool {
-    if ks.len() != ks2.len() { return false }
+#test(mapv_of([Value.VChar(53)], [Value.VChar(53)]), mapv_of([Value.VChar(53)], [Value.VChar(53)]))[true]
+#test(mapv_of([Value.VInt(1), Value.VInt(2)], [Value.VInt(10), Value.VInt(20)]), mapv_of([Value.VInt(2), Value.VInt(1)], [Value.VInt(20), Value.VInt(10)]))[true]
+#test(mapv_of([Value.VInt(1), Value.VInt(2)], [Value.VInt(10), Value.VInt(20)]), mapv_of([Value.VInt(2), Value.VInt(1)], [Value.VInt(20), Value.VInt(11)]))[false]
+#test(mapv_of([Value.VStr("a")], [Value.VInt(1)]), mapv_of([Value.VStr("b")], [Value.VInt(1)]))[false]
+fun maps_eq(a: MapV, b: MapV) -> bool {
+    if a.count != b.count { return false }
     var i = 0
-    while i < ks.len() {
-        var found = false
-        var j = 0
-        while j < ks2.len() && !found {
-            if value_eq(ks[i], ks2[j]) {
-                if !value_eq(vs[i], vs2[j]) { return false }
-                found = true
-            }
-            j = j + 1
+    while i < a.ks.len() {
+        if a.here[i] {
+            let j = b.place(a.ks[i])
+            if j < 0 || !value_eq(a.vs[i], b.vs[j]) { return false }
         }
-        if !found { return false }
         i = i + 1
     }
     return true
@@ -4751,19 +4869,17 @@ fun index_get(c: Value, k: Value) -> Value {
     return match c {
         Value.VList(xs) => xs[as_int(k) as int32],
         Value.VStr(s) => Value.VInt(s[as_int(k) as int32] as int64),
-        Value.VMap(ks, vs) => map_get(ks, vs, k),
+        Value.VMap(m) => map_get(m, k),
         _ => Value.VUnit,
     }
 }
 
-#test([Value.VChar(120)], [Value.VInt(2)], Value.VChar(120))[Value.VInt(2)]
-fun map_get(ks: [Value], vs: [Value], k: Value) -> Value {
-    var i = 0
-    while i < ks.len() {
-        if value_eq(ks[i], k) { return vs[i] }
-        i = i + 1
-    }
-    return Value.VUnit
+#test(mapv_of([Value.VChar(120)], [Value.VInt(2)]), Value.VChar(120))[Value.VInt(2)]
+#test(mapv_of([Value.VChar(120)], [Value.VInt(2)]), Value.VChar(121))[Value.VUnit]
+fun map_get(m: MapV, k: Value) -> Value {
+    let j = m.place(k)
+    if j < 0 { return Value.VUnit }
+    return m.vs[j]
 }
 
 #test([RtFrame { names: [], vals: [], defers: [] }])[[]]
