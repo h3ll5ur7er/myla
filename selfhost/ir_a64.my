@@ -8,9 +8,9 @@
 // here is worth tuning. What stays is the instruction selection, the calls
 // and frames, and the runtime's entry points.
 //
-// Myla's convention on aarch64 (D119, as on x86-64): the argument words in
-// x0 to x7, the rest on the stack (the caller's outgoing area, at its sp);
-// a result in x0; an aggregate result's address as the first word; a
+// Myla's own convention on aarch64 (D130; C's only at a C boundary): the
+// argument words in x0 to x7, the rest on the stack (the caller's outgoing
+// area, at its sp); a result in x0; an aggregate result's address as the first word; a
 // function value's environment in x9. Frame: `stp x29, x30` at the top,
 // x29 the frame base, the cells above sp: the outgoing words, then the
 // temporaries, the slots and one scratch cell.
@@ -19,6 +19,7 @@ from .checker import Type, subst_type
 from .codegen import CodeGen, is_aggregate, int_signed, int_width_cg, is_tfloat32, is_aggregate_opt, is_cell_t, is_tfunc, is_actor_t, tls_offset, TLS_SIZE
 from .ir import IrFunc, Inst, Term, Slot, ENV_WORD, ends_in_call, Intrinsic, is_xchg, is_rc_dec, is_rc_atomic
 from .ir_x86 import slots_at, frame_size, tail_call_at, drops_after_free, passes_frame_address, frame_addresses
+from .ir_util import int_in, is_char_type, is_float_type, reachable_blocks, wrapped
 
 // The argument words that come in registers (x0 to x7).
 const A64_WORDS: int32 = 8
@@ -67,13 +68,13 @@ impl CodeGen {
         let save28 = cur + 8
         cur = cur + 16
         let size = (cur + 15) / 16 * 16
-        let reach = a64_reachable(f)
+        let reach = reachable_blocks(f)
         var resumes: [int32] = []
         if f.frame {
             var bi = 0
             while bi < f.blocks.len() {
                 if reach[bi] {
-                    match f.blocks[bi].term { Term.Suspend(rb) => { if !a64_has(resumes, rb) { resumes.push(rb) } }, _ => {} }
+                    match f.blocks[bi].term { Term.Suspend(rb) => { if !int_in(resumes, rb) { resumes.push(rb) } }, _ => {} }
                 }
                 bi = bi + 1
             }
@@ -338,7 +339,7 @@ impl CodeGen {
             Inst.Const(d, t, v) => {
                 var x = v
                 match t {
-                    Type.TInt(w, s) => { x = a64_wrapped(v, w, s) },
+                    Type.TInt(w, s) => { x = wrapped(v, w, s) },
                     _ => {},
                 }
                 self.a64_imm("x10", x)
@@ -768,13 +769,13 @@ impl CodeGen {
 
     // The value in x10, of type `src`, `as tgt`, in x10.
     fun a64_cast(var self, src: Type, tgt: Type) {
-        if a64_is_char(tgt) { return }
-        if a64_is_char(src) {
+        if is_char_type(tgt) { return }
+        if is_char_type(src) {
             self.a64_wrap("x10", tgt)
             return
         }
-        let ft = a64_is_float(tgt)
-        let fs = a64_is_float(src)
+        let ft = is_float_type(tgt)
+        let fs = is_float_type(src)
         if ft {
             self.uses_float = true
             if fs {
@@ -1077,10 +1078,9 @@ impl CodeGen {
     }
 
     // `myla_<fn>__fnval`, the adapter that calls a plain `fun` as a function
-    // value (MYLA-126): a parameter passed owned gets a reference of its own,
-    // then the jump to the function (the environment in x9 unused).
+    // value (MYLA-126): built as IR as on every target (MYLA-263), an async
+    // function's or a plain one's.
     fun emit_fnval_thunk_a64(var self, n: str) {
-        // as on every target (MYLA-263)
         if self.is_async_fn(n) { self.emit_async_fnval(n) } else { self.emit_fnval_adapter(n) }
     }
 
@@ -1128,47 +1128,6 @@ fun a64_call_words(inst: Inst) -> int32 {
     }
 }
 
-// The blocks reachable from the entry.
-fun a64_reachable(f: IrFunc) -> [bool] {
-    var seen: [bool] = []
-    for b in f.blocks { seen.push(false) }
-    if f.blocks.len() == 0 { return seen }
-    var work = [0]
-    seen[0] = true
-    while work.len() > 0 {
-        let b = work.pop()
-        var next: [int32] = []
-        match f.blocks[b].term {
-            Term.Jmp(x) => { next.push(x) },
-            Term.Br(c, x, y) => {
-                next.push(x)
-                next.push(y)
-            },
-            Term.Suspend(x) => { next.push(x) },
-            _ => {},
-        }
-        for x in next {
-            if !seen[x] {
-                seen[x] = true
-                work.push(x)
-            }
-        }
-    }
-    return seen
-}
-
-// `v` wrapped to a `w`-bit integer, signed or not.
-#test(130, 8, true)[-126]
-#test(-1, 16, false)[65535]
-#test(2147483648, 32, true)[-2147483648]
-#test(-5, 64, true)[-5]
-fun a64_wrapped(v: int64, w: int32, s: bool) -> int64 {
-    if w >= 64 { return v }
-    let m = v & ((1i64 << (w as int64)) - 1)
-    if s && ((m >> ((w - 1) as int64)) & 1) == 1 { return m - (1i64 << (w as int64)) }
-    return m
-}
-
 // The 32-bit name of the 64-bit register `r` (`x10` → `w10`).
 #test("x10")["w10"]
 fun a64_wname(r: str) -> str {
@@ -1210,44 +1169,4 @@ fun a64_fcond(op: str) -> str {
     if op == "<=" { return "ls" }
     if op == ">" { return "gt" }
     return "ge"
-}
-
-// Whether `xs` holds `x`.
-#test([1, 3], 3)[true]
-#test([1, 3], 2)[false]
-fun a64_has(xs: [int32], x: int32) -> bool {
-    for y in xs { if y == x { return true } }
-    return false
-}
-
-#test(Type.TFloat(32))[true]
-#test(Type.TInt(32, true))[false]
-fun a64_is_float(t: Type) -> bool {
-    return match t { Type.TFloat(w) => true, _ => false }
-}
-
-#test(Type.TChar)[true]
-fun a64_is_char(t: Type) -> bool {
-    return match t { Type.TChar => true, _ => false }
-}
-
-// Whether `s` starts with `prefix`.
-#test("__rt_addr:x", "__rt_addr:")[true]
-#test("__rt", "__rt_addr:")[false]
-fun a64_starts(s: str, prefix: str) -> bool {
-    if s.len() < prefix.len() { return false }
-    var i = 0
-    while i < prefix.len() {
-        if s[i] != prefix[i] { return false }
-        i = i + 1
-    }
-    return true
-}
-
-// `s` from byte `at` on.
-#test("__cow:clone", 6)["clone"]
-fun a64_after(s: str, at: int32) -> str {
-    var sb = StringBuilder()
-    sb.append(s, at, s.len())
-    return sb.build()
 }

@@ -24,6 +24,7 @@ from .checker import Type, subst_type
 from .codegen import CodeGen, is_aggregate, int_width_cg, is_tfloat32, is_aggregate_opt, is_cell_t, is_tfunc, tls_offset
 from .ir import IrFunc, Inst, Term, Slot, ENV_WORD, ends_in_call, Intrinsic, is_xchg, is_rc_dec
 from .ir_x86 import slots_at, frame_size, tail_call_at, drops_after_free, passes_frame_address, frame_addresses
+from .ir_util import int_in, is_char_type, is_float_type, reachable_blocks, wrapped
 
 // A function being emitted: its argument words, the local of each
 // temporary (`nparams + t`), the scratch locals, the frame's size and each
@@ -72,7 +73,7 @@ impl CodeGen {
         cur = cur + 8
         let size = (cur + 15) / 16 * 16
         // the blocks reached, numbered in the order they are laid out
-        let reach = wasm_reachable(f)
+        let reach = reachable_blocks(f)
         var num: [int32] = []
         for b in f.blocks { num.push(-1) }
         var order: [int32] = []
@@ -85,7 +86,7 @@ impl CodeGen {
         var resumes: [int32] = []
         if f.frame {
             for b in order {
-                match f.blocks[b].term { Term.Suspend(rb) => { if !wasm_has(resumes, rb) { resumes.push(rb) } }, _ => {} }
+                match f.blocks[b].term { Term.Suspend(rb) => { if !int_in(resumes, rb) { resumes.push(rb) } }, _ => {} }
             }
         }
         let t = f.temps.len()
@@ -359,7 +360,7 @@ impl CodeGen {
             Inst.Const(d, t, v) => {
                 var x = v
                 match t {
-                    Type.TInt(bits, s) => { x = wasm_wrapped(v, bits, s) },
+                    Type.TInt(bits, s) => { x = wrapped(v, bits, s) },
                     _ => {},
                 }
                 self.emit(format("i64.const {}", x))
@@ -870,13 +871,13 @@ impl CodeGen {
 
     // The value on the stack, of type `src`, `as tgt`.
     fun wasm_cast(var self, w: WFn, src: Type, tgt: Type) {
-        if wasm_is_char(tgt) { return }
-        if wasm_is_char(src) {
+        if is_char_type(tgt) { return }
+        if is_char_type(src) {
             self.wasm_wrap(tgt)
             return
         }
-        let ft = wasm_is_float(tgt)
-        let fs = wasm_is_float(src)
+        let ft = is_float_type(tgt)
+        let fs = is_float_type(src)
         if ft {
             self.uses_float = true
             if fs {
@@ -1217,45 +1218,6 @@ fun has_env_slot(f: IrFunc) -> bool {
     return false
 }
 
-// The blocks reachable from the entry (and a frame function's resume points).
-fun wasm_reachable(f: IrFunc) -> [bool] {
-    var seen: [bool] = []
-    for b in f.blocks { seen.push(false) }
-    if f.blocks.len() == 0 { return seen }
-    var work = [0]
-    seen[0] = true
-    while work.len() > 0 {
-        let b = work.pop()
-        var next: [int32] = []
-        match f.blocks[b].term {
-            Term.Jmp(x) => { next.push(x) },
-            Term.Br(c, x, y) => {
-                next.push(x)
-                next.push(y)
-            },
-            Term.Suspend(x) => { next.push(x) },
-            _ => {},
-        }
-        for x in next {
-            if !seen[x] {
-                seen[x] = true
-                work.push(x)
-            }
-        }
-    }
-    return seen
-}
-
-// `v` wrapped to a `w`-bit integer, signed or not.
-#test(130, 8, true)[-126]
-#test(-1, 16, false)[65535]
-fun wasm_wrapped(v: int64, w: int32, s: bool) -> int64 {
-    if w >= 64 { return v }
-    let m = v & ((1i64 << (w as int64)) - 1)
-    if s && ((m >> ((w - 1) as int64)) & 1) == 1 { return m - (1i64 << (w as int64)) }
-    return m
-}
-
 // The i64 comparison for `op`.
 #test("<", false)["lt_u"]
 #test(">=", true)["ge_s"]
@@ -1279,41 +1241,6 @@ fun wasm_fcmp(op: str) -> str {
     if op == "<=" { return "le" }
     if op == ">" { return "gt" }
     return "ge"
-}
-
-// Whether `xs` holds `x`.
-#test([2, 5], 5)[true]
-fun wasm_has(xs: [int32], x: int32) -> bool {
-    for y in xs { if y == x { return true } }
-    return false
-}
-
-fun wasm_is_float(t: Type) -> bool {
-    return match t { Type.TFloat(w) => true, _ => false }
-}
-
-fun wasm_is_char(t: Type) -> bool {
-    return match t { Type.TChar => true, _ => false }
-}
-
-// Whether `s` starts with `prefix`.
-#test("__cow:x", "__cow:")[true]
-fun wasm_starts(s: str, prefix: str) -> bool {
-    if s.len() < prefix.len() { return false }
-    var i = 0
-    while i < prefix.len() {
-        if s[i] != prefix[i] { return false }
-        i = i + 1
-    }
-    return true
-}
-
-// `s` from byte `at` on.
-#test("__cow:clone", 6)["clone"]
-fun wasm_after(s: str, at: int32) -> str {
-    var sb = StringBuilder()
-    sb.append(s, at, s.len())
-    return sb.build()
 }
 
 impl CodeGen {

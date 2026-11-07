@@ -13,6 +13,7 @@ from .ast import FunData
 from .checker import Type
 from .codegen import CodeGen, CgBinding, int_signed, same_int, takes_operand, is_cmp, fold_load, fold_load_for_reader, text_at, has_text, is_aggregate, is_actor_t, is_tfloat32, REG_WORDS, arg_reg, spilled_word, narrow_operand, int_width_cg, tls_offset, TLS_SIZE
 from .ir import IrFunc, Inst, Term, Touches, Slot, ENV_WORD, Intrinsic, is_rc_dec, is_rc_atomic, is_cas, is_atomic_at, render_func, touches, use_counts, def_counts, inst_uses, term_uses, successors, ends_in_call
+from .ir_util import reachable_blocks, wrapped
 from .ssa import promote, add_ssa_stats
 from .parser import expr_of, stmt_of, type_expr_of, block_of, pattern_of, fun_of  // AST values for #test cases (MYLA-184)
 
@@ -3128,26 +3129,6 @@ fun negated_cond(cond: str) -> str {
     return cond
 }
 
-// Which blocks of `f` the entry block reaches.
-fun reachable_blocks(f: IrFunc) -> [bool] {
-    var reach: [bool] = []
-    for b in f.blocks { reach.push(false) }
-    if f.blocks.len() == 0 { return reach }
-    var work: [int32] = [0]
-    reach[0] = true
-    while work.len() > 0 {
-        let b = work[work.len() - 1]
-        work.pop()
-        for s in successors(f.blocks[b].term) {
-            if !reach[s] {
-                reach[s] = true
-                work.push(s)
-            }
-        }
-    }
-    return reach
-}
-
 // The instruction loading the integer `v` into a register, up to its name:
 // `movq` sign-extends a 32-bit immediate, shorter than `movabsq` (MYLA-120).
 #test(5)["movq $5, %"]
@@ -3156,21 +3137,6 @@ fun reachable_blocks(f: IrFunc) -> [bool] {
 fun int_const_text(v: int64) -> str {
     if v >= -2147483648 && v <= 2147483647 { return format("movq ${}, %", v) }
     return format("movabsq ${}, %", v)
-}
-
-// The constant `v` as a `w`-bit integer (signed or not) holds it in 64 bits,
-// as `wrap` leaves it in %rax.
-#test(0, 32, true)[0]
-#test(41, 32, true)[41]
-#test(1114111, 64, false)[1114111]
-fun wrapped(v: int64, w: int32, signed: bool) -> int64 {
-    if w == 64 { return v }
-    if signed {
-        let shift = 64 - w
-        return (v << shift) >> shift
-    }
-    let one: int64 = 1
-    return v & ((one << w) - 1)
 }
 
 // Whether all `n` reads of the temporary `t`, written by `insts[at]`, come

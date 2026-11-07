@@ -102,18 +102,19 @@ Two primitives give the one-sided orders: `__load_acq64` (`ldar`) and `__store_r
 
 ## Runtime helpers
 
-The table names x86-64's runtime entry points as the generated code calls them (the other targets have the same names); most are std.rt's functions now (`.set` to `myla_std$rt$…`), the per-type ones IR functions ([[MYLA-162]]).
+The generated code reaches the runtime four ways, the same on every target ([[MYLA-162]], [[MYLA-263]]): std.rt's functions under their Myla names (`myla_std$rt$stat`; lowering maps a primitive's name to its function, `__stat` to `std$rt$stat`, in `myla_runtime_function` of [[selfhost/lower.my]]); a few of them also under the name the code calls (`.set __alloc, myla_std$rt$alloc`); the per-type routines, built as IR; and the target's runtime file for what Myla can't express. Checked against the assembly of the compiler itself (2026-11-07, [[MYLA-298]]).
 
-| Group | Helpers |
+| Group | Entries |
 | --- | --- |
-| Process | `_start`, `__panic` (a task's failure handed to `__task_fail` with tasks, then std.rt's `panic_report`: `runtime error: <message>` and the position to stderr, exit 1, allocating nothing), the runtime-error entries `__trap_index`, `__trap_key`, `__trap_pop`, `__trap_div`, `__trap_mod`, `__trap_match`, `__trap_oom` (each passes its message to `__panic`, [[MYLA-17]]; see below); every output goes through `std.platform`'s `write_all` (loops over short writes, retries `EINTR`/`EAGAIN`) |
-| Printing | `__print_int`, `__print_uint`, `__print_bool`, `__print_str`, `__print_nl`, `__float_to_str`, `__char_to_str` (a value and its newline go out with one `writev`, `__print_line`, [[MYLA-137]]) |
-| Strings | `__str_eq`, `__str_concat`, `__int_to_str`, `__uint_to_str`, `__bool_to_str`, `__str_chars` (UTF-8 decode; U+FFFD for each byte outside a well-formed sequence) |
-| Heap | `__alloc`, `__free` (std.rt's `alloc`, `free`, `alloc_tasks`, `free_tasks`), `__func_retain`, `__func_drop` |
-| Collections | per type: `__drop_list_T`, `__clone_list_T`, `__grow_list_T` (doubling, minimum 4); `__new_map_*`, `__put_map_*`, `__find_map_*`, `__clone_map_*`, `__grow_map_*`, `__drop_map_*`, `__keys_map_*`, `__remove_map_*` (rebuilds the table); `__sb_new`, `__sb_drop`, `__sb_clone`, `__sb_grow`, `__sb_extend`, `__sb_build` |
-| I/O | `__write`, `__read` (one read into a fresh str cell of capacity n, retried on EINTR; [[MYLA-78]]), `__args`, `__read_file` (open/fstat/read loop/close), `__write_file` (open O_WRONLY\|O_CREAT\|O_TRUNC 0644, write loop), `__list_dir` (open O_DIRECTORY, getdents64 into a 4 KB stack buffer, names appended to a str cell that doubles when full), `__mkdir`, `__stat` (`st_mode` from stat(2)); the three share a path copy onto the stack ([[MYLA-88]]) |
-| Processes | `__run`: builds a C argv, creates stdout, stderr and an O_CLOEXEC "exec error" pipe, forks, `dup2`s and `execve`s in the child; the parent drains both pipes with `poll`, reads the exec-error pipe to learn execve's errno, and decodes the `wait4` status into exit code or signal |
-| Floats | `__fmod` (x87 `fprem`), `__two_prod` (Dekker), `__fscale`, and the power-of-ten tables `__pow10_hi`/`__pow10_lo` |
+| Start and failure | the runtime file's `_start`, `__panic` and the trap entries `__trap_index`, `__trap_key`, `__trap_pop`, `__trap_div`, `__trap_mod`, `__trap_match`, `__trap_step`, `__trap_char`, `__trap_boundary`, `__trap_oom`, each passing its message to `__panic` (see below), which hands a task's failure to `__task_fail` or calls std.rt's `panic_report` (`.set __panic_report`): `runtime error: <message>` and the position to stderr, exit 1, allocating nothing |
+| Printing | std.rt's `print_str` (`.set __print_str`), `print_int`, `print_uint`, `print_bool`, `print_char`, `float_to_str`, `char_to_str`; every output through `std.platform`'s `write_all` (short writes, `EINTR`, `EAGAIN`; a write error is D153's) |
+| Strings | std.rt's `str_eq`, `str_concat`, `int_to_str`, `uint_to_str`, `bool_to_str`, `str_chars` (UTF-8 decode, U+FFFD for each byte outside a well-formed sequence), `equal_bytes` (`.set __equal_bytes`) |
+| Heap | std.rt's `alloc` and `free` (`.set __alloc`, `__free`), `alloc_tasks`, `free_tasks` (D157), `func_retain`, `func_drop` (`.set __func_retain`, `__func_drop`) |
+| Collections | per type, as IR: `__drop_list_T`, `__clone_list_T`, `__drop_map_K_V`, `__clone_map_K_V`, `__dropb_E` (a boxed enum's), `__walkd_T` and `__walkr_T` (a deep copy between tasks, the drop of what it walked); std.rt's `list_grow`, `map_new`, `map_lookup`, `map_rebuild` (each under `.set __<name>`), `map_keys`, `sb_append`, `sb_append_bytes`; the builder's `__sb_drop`, `__sb_clone` and `__str_drop` |
+| I/O | std.rt's `write`, `read`, `poll`, `args`, `read_file`, `write_file`, `list_dir`, `mkdir`, `stat`, `unlink`, `rmdir`, `rename`, `getcwd`, `getenv`, `clock_ns`, `sleep_ns`, over `std.platform` |
+| Processes | std.rt's `run`, `run_with`, `spawn`, `spawn_with`, `reap`, `kill`, `close` |
+| Floats | std.rt's `float_to_str` with `two_prod` and `fscale`, its `fmod`, and the tables of powers of ten `__pow10_hi`/`__pow10_lo` it reads |
+| Function values | `__compose_call` and `__compose_env_drop` (IR, [[MYLA-263]]) |
 
 The system calls are `std.platform`'s, one module per target: [[lib/std/platform.my]] (x86-64's numbers), [[lib/std/platform_aarch64.my]] (the generic table) and [[lib/std/platform_wasm.my]] (WASI's imports). Its interface is Linux's (negative errnos, `getdents64` records, `st_mode` bits); [[MYLA-265]] is to make it Myla's.
 

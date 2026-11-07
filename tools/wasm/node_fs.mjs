@@ -16,8 +16,11 @@ function statOf(st) {
 }
 
 export class NodeFs {
+  // Created without truncating: written from the start, as O_CREAT alone
+  // does ("a" would append every write wherever the position is, MYLA-298).
   open(path, { create, trunc, excl }) {
-    const flags = create ? (excl ? "wx" : trunc ? "w" : "a") : "r";
+    const c = fs.constants;
+    const flags = !create ? "r" : excl ? "wx" : trunc ? "w" : c.O_WRONLY | c.O_CREAT;
     return fs.openSync(path, flags);
   }
   read(h, u8) { return fs.readSync(h, u8, 0, u8.length, null); }
