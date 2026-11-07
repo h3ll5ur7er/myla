@@ -1,0 +1,688 @@
+// std.glob: glob patterns and directory walks (MYLA-326, D164).
+//
+// A pattern is matched a component at a time, the components being what the
+// slashes separate, so a `/` in a path is matched only by a `/` in the
+// pattern. In a component, `*` matches any run of characters, `?` one
+// character, `[abc]`, `[a-z]` one of a set and `[!...]` (or `[^...]`) one
+// outside it, and `\` makes the character after it literal. A component
+// that is exactly `**` matches any number of components, none included. As
+// in shells, a name that starts with `.` is matched only by a component
+// that starts with a literal `.`: `*`, `?`, a set and `**` don't match one.
+//
+// The matching takes no exponential time: a component is matched with two
+// pointers, the last `*` taking one more character on a mismatch, and the
+// components with a table over (pattern component, path component).
+//
+// `walk` and `glob` read directories through `std.fs`, which has no way to
+// tell a symbolic link from what it names: a link to a directory counts as
+// a directory, so both go into it, and a link back to a directory above it
+// is gone round until the path holds 40 links (Linux's limit).
+
+import std.fs as fs
+from std.fs import IoError
+import std.path as path
+import std.time as time  // for the tests' directory names
+
+// A piece of a pattern component.
+enum Tok {
+    Lit(uint8),
+    Any,
+    Star,
+    // the code point ranges, two numbers each, and whether the set is negated
+    Class([int32], bool),
+}
+
+// A pattern component: `**`, a literal name (`text`, its escapes removed)
+// or tokens.
+struct Comp {
+    globstar: bool,
+    literal: bool,
+    text: str,
+    toks: [Tok],
+}
+
+// A compiled pattern, to match many paths with.
+pub struct Pattern {
+    absolute: bool,
+    comps: [Comp],
+    globstars: int,
+}
+
+// The code point of the UTF-8 character at `i` of `s` and its length in
+// bytes; a byte that doesn't start a valid character is a character of its
+// own.
+fun decode(s: str, i: int) -> (int32, int) {
+    let b = s[i] as int32
+    if b < 0x80 {
+        return (b, 1)
+    }
+    var len = 0
+    var cp: int32 = 0
+    if b >= 0xC2 && b < 0xE0 {
+        len = 2
+        cp = b & 0x1F
+    } else if b >= 0xE0 && b < 0xF0 {
+        len = 3
+        cp = b & 0x0F
+    } else if b >= 0xF0 && b < 0xF5 {
+        len = 4
+        cp = b & 0x07
+    } else {
+        return (b, 1)
+    }
+    if i + len > s.len() {
+        return (b, 1)
+    }
+    for k in 1..len {
+        let c = s[i + k] as int32
+        if (c & 0xC0) != 0x80 {
+            return (b, 1)
+        }
+        cp = (cp << 6) | (c & 0x3F)
+    }
+    return (cp, len)
+}
+
+// The set of the `[` at `i` of `c`, and the position after its `]`; None
+// when there is no `]` to close it, and the `[` is literal.
+fun class_at(c: str, i: int) -> Option<(Tok, int)> {
+    let n = c.len()
+    var j = i + 1
+    var neg = false
+    if j < n && (c[j] == '!' || c[j] == '^') {
+        neg = true
+        j += 1
+    }
+    var ranges: [int32] = []
+    var first = true
+    while j < n {
+        if c[j] == ']' && !first {
+            return Some((Tok.Class(ranges, neg), j + 1))
+        }
+        first = false
+        if c[j] == '\\' && j + 1 < n {
+            j += 1
+        }
+        let (lo, len) = decode(c, j)
+        j += len
+        var hi = lo
+        if j + 1 < n && c[j] == '-' && c[j + 1] != ']' {
+            j += 1
+            if c[j] == '\\' && j + 1 < n {
+                j += 1
+            }
+            let (h, hlen) = decode(c, j)
+            hi = h
+            j += hlen
+        }
+        ranges.push(lo)
+        ranges.push(hi)
+    }
+    return None
+}
+
+// The component `c` of a pattern, compiled.
+fun compile_comp(c: str) -> Comp {
+    if c == "**" {
+        return Comp { globstar: true, literal: false, text: c, toks: [] }
+    }
+    var toks: [Tok] = []
+    var literal = true
+    var sb = StringBuilder()
+    let n = c.len()
+    var i = 0
+    while i < n {
+        let b = c[i]
+        if b == '*' {
+            literal = false
+            if toks.len() == 0 || !is_star(toks[^1]) {
+                toks.push(Tok.Star)
+            }
+            i += 1
+        } else if b == '?' {
+            literal = false
+            toks.push(Tok.Any)
+            i += 1
+        } else if b == '\\' && i + 1 < n {
+            toks.push(Tok.Lit(c[i + 1]))
+            sb.append_byte(c[i + 1])
+            i += 2
+        } else if b == '[' {
+            match class_at(c, i) {
+                Some((tok, next)) => {
+                    literal = false
+                    toks.push(tok)
+                    i = next
+                }
+                None => {
+                    toks.push(Tok.Lit(b))
+                    sb.append_byte(b)
+                    i += 1
+                }
+            }
+        } else {
+            toks.push(Tok.Lit(b))
+            sb.append_byte(b)
+            i += 1
+        }
+    }
+    return Comp { globstar: false, literal: literal, text: sb.build(), toks: toks }
+}
+
+fun is_star(t: Tok) -> bool {
+    return match t {
+        Star => true
+        _ => false
+    }
+}
+
+// The non-empty components of `p`, which the slashes separate.
+fun split(p: str) -> [str] {
+    var out: [str] = []
+    var start = 0
+    for i in 0..p.len() + 1 {
+        if i == p.len() || p[i] == '/' {
+            if i > start {
+                out.push(p[start:i])
+            }
+            start = i + 1
+        }
+    }
+    return out
+}
+
+// `pattern` compiled, to match many paths with `matches`.
+pub fun compile(pattern: str) -> Pattern {
+    var comps: [Comp] = []
+    var globstars = 0
+    for c in split(pattern) {
+        let comp = compile_comp(c)
+        if comp.globstar {
+            if comps.len() > 0 && comps[^1].globstar {
+                continue
+            }
+            globstars += 1
+        }
+        comps.push(comp)
+    }
+    return Pattern { absolute: path.is_absolute(pattern), comps: comps, globstars: globstars }
+}
+
+// Whether `cp` is in the ranges `r`.
+fun in_ranges(r: [int32], cp: int32) -> bool {
+    var k = 0
+    while k < r.len() {
+        if cp >= r[k] && cp <= r[k + 1] {
+            return true
+        }
+        k += 2
+    }
+    return false
+}
+
+// Whether the component `c` matches the name `name` (no `**`).
+fun comp_matches(c: Comp, name: str) -> bool {
+    if c.literal {
+        return c.text == name
+    }
+    let toks = c.toks
+    let m = toks.len()
+    let n = name.len()
+    if n > 0 && name[0] == '.' {
+        let dot = match toks[0] {
+            Lit(b) => b == '.'
+            _ => false
+        }
+        if !dot {
+            return false
+        }
+    }
+    var p = 0
+    var s = 0
+    var star_p = -1
+    var star_s = 0
+    while s < n {
+        var moved = false
+        if p < m {
+            match toks[p] {
+                Star => {
+                    star_p = p
+                    star_s = s
+                    p += 1
+                    moved = true
+                }
+                Lit(b) => {
+                    if name[s] == b {
+                        p += 1
+                        s += 1
+                        moved = true
+                    }
+                }
+                Any => {
+                    let (cp, len) = decode(name, s)
+                    s += len
+                    p += 1
+                    moved = true
+                }
+                Class(r, neg) => {
+                    let (cp, len) = decode(name, s)
+                    if in_ranges(r, cp) != neg {
+                        s += len
+                        p += 1
+                        moved = true
+                    }
+                }
+            }
+        }
+        if !moved {
+            if star_p < 0 {
+                return false
+            }
+            // the last `*` takes one more character
+            let (cp, len) = decode(name, star_s)
+            star_s += len
+            s = star_s
+            p = star_p + 1
+        }
+    }
+    while p < m && is_star(toks[p]) {
+        p += 1
+    }
+    return p == m
+}
+
+impl Pattern {
+    // Whether the path matches the pattern: both absolute or both relative,
+    // and the components matching. Empty components don't count, so `a//b/`
+    // is `a/b`; `.` and `..` are names like any other.
+    fun matches(self, p: str) -> bool {
+        if self.absolute != path.is_absolute(p) {
+            return false
+        }
+        let names = split(p)
+        let pc = self.comps
+        let m = pc.len()
+        let n = names.len()
+        if self.globstars == 0 {
+            if m != n {
+                return false
+            }
+            for i in 0..m {
+                if !comp_matches(pc[i], names[i]) {
+                    return false
+                }
+            }
+            return true
+        }
+        // ok[i * (n + 1) + j]: whether the pattern's components from i match
+        // the path's from j
+        let w = n + 1
+        var ok: [bool] = []
+        for k in 0..(m + 1) * w {
+            ok.push(false)
+        }
+        ok[m * w + n] = true
+        var i = m - 1
+        while i >= 0 {
+            var j = n
+            while j >= 0 {
+                var v = false
+                if pc[i].globstar {
+                    v = ok[(i + 1) * w + j] ||
+                        (j < n && names[j][0] != '.' && ok[i * w + j + 1])
+                } else if j < n && ok[(i + 1) * w + j + 1] {
+                    v = comp_matches(pc[i], names[j])
+                }
+                ok[i * w + j] = v
+                j -= 1
+            }
+            i -= 1
+        }
+        return ok[0]
+    }
+}
+
+// Whether `p` matches `pattern`. See the top of the module for the pattern's
+// syntax; empty components don't count, and both must be absolute or both
+// relative.
+#test("*.my", "main.my")[true]
+#test("*.my", "src/main.my")[false] // `*` doesn't match a `/`
+#test("src/*.my", "src/main.my")[true]
+#test("*", "")[false]
+#test("", "")[true]
+#test("*", ".hidden")[false] // a leading `.` needs a literal one
+#test(".*", ".hidden")[true]
+#test("\\.*", ".hidden")[true]
+#test("?hidden", ".hidden")[false]
+#test("[.]hidden", ".hidden")[false]
+#test("a*", "a.b")[true] // a `.` inside a name is any character
+#test("?.c", "a.c")[true]
+#test("?.c", "ab.c")[false]
+#test("?.c", "é.c")[true] // `?` is a character, not a byte
+#test("[abc].c", "b.c")[true]
+#test("[abc].c", "d.c")[false]
+#test("[a-z]1", "q1")[true]
+#test("[a-z]1", "Q1")[false]
+#test("[!a-z]1", "Q1")[true]
+#test("[^a-z]1", "q1")[false]
+#test("[]a]", "]")[true] // a `]` first is in the set
+#test("[!]a]", "]")[false]
+#test("[a-]", "-")[true] // so is a `-` last
+#test("[\\]]", "]")[true]
+#test("[à-ï]", "é")[true]
+#test("[ab", "[ab")[true] // a `[` without its `]` is literal
+#test("\\*", "*")[true]
+#test("\\*", "a")[false]
+#test("a\\", "a\\")[true] // a trailing `\` is literal
+#test("**", "a/b/c")[true]
+#test("**", "")[true]
+#test("**/*.my", "main.my")[true] // `**` matches no directory too
+#test("**/*.my", "a/b/main.my")[true]
+#test("a/**/z", "a/z")[true]
+#test("a/**/z", "a/b/c/z")[true]
+#test("a/**/z", "a/b/c/y")[false]
+#test("a/**", "a")[true]
+#test("**/*.my", ".git/x.my")[false] // nor a hidden directory
+#test("**/**/x", "a/x")[true]
+#test("a**b", "axyb")[true] // `**` inside a name is `*`
+#test("a**b", "ax/yb")[false]
+#test("/a/*", "/a/b")[true]
+#test("/a/*", "a/b")[false]
+#test("a/*", "/a/b")[false]
+#test("a//b/", "a/b")[true]
+#test("./a", "./a")[true]
+#test("a*a*a*a*b", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")[false]
+#test("*a*b*c*", "xaxbxcx")[true]
+pub fun matches(pattern: str, p: str) -> bool {
+    return compile(pattern).matches(p)
+}
+
+// `rel` and the name below it.
+fun below(rel: str, name: str) -> str {
+    if rel == "" {
+        return name
+    }
+    return path.join(rel, name)
+}
+
+// Every path below the directory `dir`, relative to it, in sorted order:
+// a directory comes before what it holds, and the names of a directory are
+// sorted by their bytes (as `fs.list_dir` sorts them). Hidden names are
+// there too. A directory that can't be read is an error; a symbolic link to
+// a directory counts as one (see the top of the module).
+pub fun walk(dir: str) -> Result<[str], IoError> {
+    var out: [str] = []
+    var stack: [str] = []
+    let top = fs.list_dir(dir)?
+    var k = top.len() - 1
+    while k >= 0 {
+        stack.push(top[k])
+        k -= 1
+    }
+    while stack.len() > 0 {
+        let rel = stack.pop()
+        out.push(rel)
+        let full = path.join(dir, rel)
+        if fs.is_dir(full) {
+            let names = fs.list_dir(full)?
+            var i = names.len() - 1
+            while i >= 0 {
+                stack.push(rel + "/" + names[i])
+                i -= 1
+            }
+        }
+    }
+    return Ok(out)
+}
+
+// The paths that match `pattern`, found below the working directory (or
+// below the root for an absolute pattern), in the order of `walk`.
+pub fun glob(pattern: str) -> Result<[str], IoError> {
+    return glob_in(".", pattern)
+}
+
+// The paths that match `pattern`, relative to `dir` (for an absolute
+// pattern, absolute), in the order of `walk`: the paths `p` that exist with
+// `matches(pattern, p)`, but a component without wildcards is looked up,
+// not listed, so it may be `.` or `..`. A directory that isn't there, or
+// isn't one, has no matches; one that can't be read is an error.
+pub fun glob_in(dir: str, pattern: str) -> Result<[str], IoError> {
+    let pat = compile(pattern)
+    var g = Globber { dir: dir, pat: pat, out: [] }
+    g.expand(0, if pat.absolute { "/" } else { "" })?
+    return Ok(deduped(sorted_paths(g.out)))
+}
+
+// The state of one `glob_in`.
+struct Globber {
+    dir: str,
+    pat: Pattern,
+    out: [str],
+}
+
+impl Globber {
+    // The file system's path of `rel`.
+    fun full(self, rel: str) -> str {
+        if self.pat.absolute {
+            return rel
+        }
+        if rel == "" {
+            return self.dir
+        }
+        return path.join(self.dir, rel)
+    }
+
+    // The names in the directory `rel`: none when it isn't there or isn't
+    // a directory.
+    fun names(self, rel: str) -> Result<[str], IoError> {
+        return match fs.list_dir(self.full(rel)) {
+            Ok(names) => Ok(names)
+            Err(IoError.NotFound) | Err(IoError.NotADirectory) => Ok([])
+            Err(e) => Err(e)
+        }
+    }
+
+    // Adds the matches of the components from `i` on, below `rel`, which
+    // matched the ones before.
+    fun expand(var self, i: int, rel: str) -> Result<(), IoError> {
+        let comps = self.pat.comps
+        if i == comps.len() {
+            if rel != "" {
+                self.out.push(rel)
+            }
+            return Ok(())
+        }
+        let c = comps[i]
+        let last = i + 1 == comps.len()
+        if c.globstar {
+            self.expand(i + 1, rel)?
+            for name in self.names(rel)? {
+                if name[0] == '.' {
+                    continue
+                }
+                let p = below(rel, name)
+                if fs.is_dir(self.full(p)) {
+                    self.expand(i, p)?
+                } else if last {
+                    self.out.push(p)
+                }
+            }
+            return Ok(())
+        }
+        if c.literal {
+            let p = below(rel, c.text)
+            if last {
+                if fs.exists(self.full(p)) {
+                    self.out.push(p)
+                }
+            } else if fs.is_dir(self.full(p)) {
+                self.expand(i + 1, p)?
+            }
+            return Ok(())
+        }
+        for name in self.names(rel)? {
+            if comp_matches(c, name) {
+                let p = below(rel, name)
+                if last {
+                    self.out.push(p)
+                } else if fs.is_dir(self.full(p)) {
+                    self.expand(i + 1, p)?
+                }
+            }
+        }
+        return Ok(())
+    }
+}
+
+// Whether the path `a` comes before `b` in the order of `walk`: by bytes,
+// a `/` before every other byte, so a directory's paths follow it at once.
+fun path_before(a: str, b: str) -> bool {
+    var i = 0
+    while i < a.len() && i < b.len() {
+        if a[i] != b[i] {
+            if a[i] == '/' {
+                return true
+            }
+            if b[i] == '/' {
+                return false
+            }
+            return a[i] < b[i]
+        }
+        i += 1
+    }
+    return a.len() < b.len()
+}
+
+// `ps` sorted by `path_before` (a merge sort).
+fun sorted_paths(ps: [str]) -> [str] {
+    if ps.len() <= 1 {
+        return ps
+    }
+    let h = ps.len() / 2
+    let l = sorted_paths(ps[:h])
+    let r = sorted_paths(ps[h:])
+    var out: [str] = []
+    var a = 0
+    var b = 0
+    while a < l.len() || b < r.len() {
+        if b >= r.len() || (a < l.len() && !path_before(r[b], l[a])) {
+            out.push(l[a])
+            a += 1
+        } else {
+            out.push(r[b])
+            b += 1
+        }
+    }
+    return out
+}
+
+// The sorted `ps` without repeats.
+fun deduped(ps: [str]) -> [str] {
+    var out: [str] = []
+    for p in ps {
+        if out.len() == 0 || out[^1] != p {
+            out.push(p)
+        }
+    }
+    return out
+}
+
+// ---------------------------------------------------------------------------
+// Tests of `walk` and `glob`, on a tree they make under /tmp and remove. The
+// module doesn't import std.test, which every program would import with it.
+
+// The paths, `a, b`, to compare.
+fun shown(ps: [str]) -> str {
+    var sb = StringBuilder()
+    for i in 0..ps.len() {
+        if i > 0 {
+            sb.append(", ")
+        }
+        sb.append(ps[i])
+    }
+    return sb.build()
+}
+
+fun same(got: [str], want: str) {
+    assert(shown(got) == want, f"expected [{want}], got [{shown(got)}]")
+}
+
+// A pattern that would take exponential time with naive backtracking.
+#test
+fun no_blowup() {
+    var sb = StringBuilder()
+    for i in 0..10000 {
+        sb.append("a")
+    }
+    let a = sb.build()
+    assert(!matches("a*a*a*a*a*b", a), "a*a*a*a*a*b")
+    assert(matches("a*a*a*a*a*a", a), "a*a*a*a*a*a")
+    assert(!matches("**/a/**/a/**/a/**/b", "a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a"), "**/a/**/a/**/a/**/b")
+    assert(matches("**/a/**/a/**/a", "a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a"), "**/a/**/a/**/a")
+}
+
+// A new directory with a small tree in it.
+fun tree(tag: str) -> Result<str, IoError> {
+    let root = f"/tmp/myla-glob-{tag}-{time.now_ns()}"
+    fs.make_dir_all(root + "/a/b")?
+    fs.make_dir_all(root + "/src/lib")?
+    fs.make_dir_all(root + "/src/.git")?
+    for f in ["a.txt", "b.my", ".hidden", "a-c", "src/main.my", "src/lib/x.my", "src/lib/y.txt", "src/.git/h.my"] {
+        fs.write_to_file(root + "/" + f, "")?
+    }
+    return Ok(root)
+}
+
+#test
+fun walks() -> Result<(), IoError> {
+    let root = tree("walk")?
+    defer { fs.remove_dir_all(root) }
+    same(walk(root)?, ".hidden, a, a/b, a-c, a.txt, b.my, src, src/.git, src/.git/h.my, src/lib, src/lib/x.my, src/lib/y.txt, src/main.my")
+    same(walk(root + "/src/lib")?, "x.my, y.txt")
+    same(walk(root + "/a/b")?, "")
+    let missing = match walk(root + "/nope") {
+        Err(IoError.NotFound) => true
+        _ => false
+    }
+    assert(missing, "walk of a missing directory")
+    let file = match walk(root + "/a.txt") {
+        Err(IoError.NotADirectory) => true
+        _ => false
+    }
+    assert(file, "walk of a file")
+    return Ok(())
+}
+
+#test
+fun globs() -> Result<(), IoError> {
+    let root = tree("glob")?
+    defer { fs.remove_dir_all(root) }
+    same(glob_in(root, "*.my")?, "b.my")
+    same(glob_in(root, "*")?, "a, a-c, a.txt, b.my, src")
+    same(glob_in(root, ".*")?, ".hidden")
+    same(glob_in(root, "**/*.my")?, "b.my, src/lib/x.my, src/main.my")
+    same(glob_in(root, "**/**/*.txt")?, "a.txt, src/lib/y.txt")
+    same(glob_in(root, "src/**")?, "src, src/lib, src/lib/x.my, src/lib/y.txt, src/main.my")
+    same(glob_in(root, "src/.git/*")?, "src/.git/h.my")
+    same(glob_in(root, "*/*")?, "a/b, src/lib, src/main.my")
+    same(glob_in(root, "[ab]*")?, "a, a-c, a.txt, b.my")
+    same(glob_in(root, "a/b")?, "a/b")
+    same(glob_in(root, "a/../b.my")?, "a/../b.my")
+    same(glob_in(root, "nope/*")?, "")
+    same(glob_in(root, "a.txt/*")?, "")
+    same(glob_in(root + "/nope", "*")?, "")
+    same(glob_in(root, root + "/s*/*.my")?, root + "/src/main.my")
+    same(glob(root + "/*.txt")?, root + "/a.txt")
+    // what `glob_in` finds is what `walk` and `matches` find
+    let all = walk(root)?
+    for pat in ["*", "**", "**/*.my", "src/*", "*/*", "**/lib/*", "?.*", "[!a]*"] {
+        var want: [str] = []
+        for p in all {
+            if matches(pat, p) {
+                want.push(p)
+            }
+        }
+        same(glob_in(root, pat)?, shown(want))
+    }
+    return Ok(())
+}
