@@ -1,0 +1,7 @@
+//~ type error: cannot compare values of type '[[str: int32]]': '[str: int32]' isn't Eq
+// `==` on a list compares its elements in turn (D163); maps aren't Eq.
+#main
+fun main() {
+    let a: [[str: int]] = [["x": 1]]
+    print(a == a)
+}

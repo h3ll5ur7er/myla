@@ -1,0 +1,5 @@
+type error: map key type must be Eq and Hash, found 'Pos': 'Pos' isn't Hash (it needs 'impl Hash for Pos' or '#derive(Hash)')
+  --> examples/errors/type_map_key_not_hash.my:12:15
+   |
+12 |     var seen: [Pos: bool] = [:]
+   |               ^^^^^^^^^^^

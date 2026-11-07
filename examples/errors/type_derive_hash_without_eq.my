@@ -1,0 +1,14 @@
+//~ type error: cannot derive Hash for 'Pos': it isn't Eq; derive both, '#derive(Eq, Hash)', or write 'impl Eq for Pos'
+// `#derive(Hash)` needs an `Eq` of the type, derived or written (D163): a
+// map compares the keys whose hashes agree.
+#derive(Hash)
+struct Pos {
+    x: int,
+    y: int,
+}
+
+#main
+fun main() {
+    let p = Pos { x: 0, y: 0 }
+    print(p.x)
+}

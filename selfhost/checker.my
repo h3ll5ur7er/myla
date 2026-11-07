@@ -777,11 +777,12 @@ fun is_arith_op(op: str) -> bool {
 #test(Type.TStruct("P", []), "Eq")[false]
 fun primitive_default_trait(t: Type, trnm: str) -> bool {
     return match t {
-        Type.TInt(w, s) => trnm == "Add" || trnm == "Sub" || trnm == "Mul" || trnm == "Div" || trnm == "Rem" || trnm == "Eq" || trnm == "Ord" || trnm == "Format",
+        Type.TInt(w, s) => trnm == "Add" || trnm == "Sub" || trnm == "Mul" || trnm == "Div" || trnm == "Rem" || trnm == "Eq" || trnm == "Ord" || trnm == "Format" || trnm == "Hash",
+        // a float isn't `Hash`: NaN is unequal to itself (D163)
         Type.TFloat(w) => trnm == "Add" || trnm == "Sub" || trnm == "Mul" || trnm == "Div" || trnm == "Rem" || trnm == "Eq" || trnm == "Ord" || trnm == "Format",
-        Type.TChar => trnm == "Eq" || trnm == "Ord" || trnm == "Format",
-        Type.TBool => trnm == "Eq" || trnm == "Format",
-        Type.TStr => trnm == "Add" || trnm == "Eq" || trnm == "Format",
+        Type.TChar => trnm == "Eq" || trnm == "Ord" || trnm == "Format" || trnm == "Hash",
+        Type.TBool => trnm == "Eq" || trnm == "Format" || trnm == "Hash",
+        Type.TStr => trnm == "Add" || trnm == "Eq" || trnm == "Format" || trnm == "Hash",
         _ => false,
     }
 }
@@ -1065,9 +1066,15 @@ fun negated_misfit(x: Expr) -> str {
 
 
 fun impl_eq_target_name(d: Decl) -> Option<str> {
+    return impl_target_name(d, "Eq")
+}
+
+// The type an `impl <trnm> for T` declaration `d` is for, by name; none for
+// another declaration.
+fun impl_target_name(d: Decl, trnm: str) -> Option<str> {
     match d.kind {
         DeclKind.ImplDecl(tg, m, tp, tn, ta, dattrs) => {
-            let is_eq = match tn { Some(t) => t == "Eq", None => false }
+            let is_eq = match tn { Some(t) => t == trnm, None => false }
             if !is_eq { return None }
             match tg.kind {
                 TypeKind.TRef(nm, args) => { return Some(nm) },
@@ -1435,6 +1442,9 @@ pub struct VariantT { name: str, payload: [Type] }
 pub struct EnumInfo { name: str, type_params: [str], variants: [VariantT], line: int32, col: int32, sp: SrcSpan, id: int32 }
 
 pub struct Bound { tp: str, traits: [str] }
+// A map's key type met before every impl was known, checked once they are
+// (D163): where, and in which declaration.
+pub struct PendingKey { t: Type, line: int32, col: int32, sp: SrcSpan, decl: int32 }
 pub struct FuncSig {
     name: str,
     params: [Type],
@@ -1507,6 +1517,13 @@ pub struct Checker {
     method_decl_keys: [str],
     method_decl_ids: [int32],       // each method's impl declaration
     impl_decls: [Decl],
+    next_id: int32,            // the first node id no declaration has: a derived impl's (MYLA-313)
+    // map key types (D163): those met before the impls were known, whether
+    // they are, and whether a function's bounds are in force (its signature
+    // and body are being checked)
+    pending_keys: [PendingKey],
+    keys_ready: bool,
+    key_ctx: bool,
     traits: [TraitInfo],
     trait_decls: [Decl],
     trait_impls: [TraitImplPair],
@@ -1615,7 +1632,7 @@ fun new_checker(decls: [Decl]) -> Checker {
         decls: decls,
         structs: [], enums: [], recursive_enums: [],
         functions: [], methods: [], method_decls: [], method_decl_keys: [], method_decl_ids: [],
-        impl_decls: [], traits: [], trait_decls: [], trait_impls: [], user_trait_impls: [],
+        impl_decls: [], next_id: 1000000000, pending_keys: [], keys_ready: false, key_ctx: false, traits: [], trait_decls: [], trait_impls: [], user_trait_impls: [],
         aliases: [], alias_cache: [], const_decls: [], consts: [], const_values: [:], const_done: [], const_folding: [],
         allow_self: false, type_params: [], bounds_cur: [],
         cur_ret: None, has_cur_ret: false, ret_at: None, loop_depth: 0, defer_at: -1,
@@ -1862,7 +1879,28 @@ impl Checker {
         return false
     }
     #test(checker_on("[int]"), Type.TInt(32, true), "Add")[Ok(true)]
+    #test(checker_on("[int]"), Type.TTuple([Type.TInt(32, true), Type.TStr]), "Eq")[Ok(true)]
+    #test(checker_on("[int]"), Type.TList(Type.TTuple([Type.TChar, Type.TFloat(64)])), "Eq")[Ok(true)]
+    #test(checker_on("[int]"), Type.TTuple([Type.TInt(32, true), Type.TFloat(64)]), "Hash")[Ok(false)]
+    #test(checker_on("[int]"), Type.TList(Type.TStr), "Hash")[Ok(true)]
+    #test(checker_on("[int]"), Type.TTuple([Type.TStruct("P", [])]), "Eq")[Ok(false)]
     fun type_implements(self, t: Type, trnm: str) -> Result<bool, CheckErr> {
+        // a tuple, and a list, is `Eq` and `Hash` when its elements are
+        // (D163); a type parameter when its bounds say so
+        if trnm == "Eq" || trnm == "Hash" {
+            match t {
+                Type.TTuple(es) => {
+                    for et in es {
+                        if !self.type_implements(et, trnm)? { return Ok(false) }
+                    }
+                    return Ok(true)
+                },
+                Type.TList(et) => { return self.type_implements(et, trnm) },
+                Type.TParam(n) => { return Ok(self.bound_has(n, trnm)) },
+                Type.TError => { return Ok(true) },   // has had its error (MYLA-110)
+                _ => {},
+            }
+        }
         match self.type_key(t) {
             Some(k) => {
                 if self.broken_impls.contains(trnm + "\t" + k) { return Err(poisoned()) }   // its impl or derive failed (MYLA-110)
@@ -2095,9 +2133,7 @@ impl Checker {
             TypeKind.TMap(k, v) => {
                 let kt = self.resolve(k, visiting)?
                 let vt = self.resolve(v, visiting)?
-                if !is_map_key(kt) && !contains_type_param(kt) && !has_error(kt) {
-                    return Err(terr_at(ln, cl, sp, format("map key type must be a primitive (integer, char, bool, or str), found '{}'", type_name(kt))))
-                }
+                self.check_key(kt, ln, cl, sp)?
                 Ok(Type.TMap(kt, vt))
             },
             TypeKind.TFn(params, ret, asy) => {
@@ -2936,8 +2972,21 @@ impl Checker {
                 }
                 kept.push(Bound { tp: b.tp, traits: good })
             }
-            if changed {
-                self.skipped_fns[sig.name] = true
+            // a type parameter that is (in) a map key of the signature is
+            // `Eq + Hash` by it (D163, MYLA-313): the callers must give such
+            // a type, and the body may key a map by it
+            var implied = false
+            if self.trait_idx("Hash") >= 0 {
+                for tp in sig.type_params {
+                    if key_param_in(tp, sig.params, sig.ret) {
+                        let grown = with_bound(with_bound(kept, tp, "Eq"), tp, "Hash")
+                        if bound_count(grown) != bound_count(kept) { implied = true }
+                        kept = grown
+                    }
+                }
+            }
+            if changed { self.skipped_fns[sig.name] = true }
+            if changed || implied {
                 var s2 = sig
                 s2.bounds = kept
                 self.functions[fi] = s2
@@ -2962,6 +3011,79 @@ impl Checker {
 #test(Some("Box"))["Box"]
 fun key_or_none(k: Option<str>) -> str {
     return match k { Some(x) => x, None => "None" }
+}
+
+// Whether the type parameter `tp` is a map key, or part of one, in the
+// parameter types `ps` or the result `r` of a signature.
+#test("K", [Type.TMap(Type.TParam("K"), Type.TInt(32, true))], None)[true]
+#test("T", [Type.TList(Type.TParam("T"))], Some(Type.TMap(Type.TTuple([Type.TParam("T"), Type.TStr]), Type.TBool)))[true]
+#test("V", [Type.TMap(Type.TStr, Type.TParam("V"))], None)[false]
+fun key_param_in(tp: str, ps: [Type], r: Option<Type>) -> bool {
+    for p in ps {
+        if key_param_of(tp, p) { return true }
+    }
+    return match r {
+        Some(t) => key_param_of(tp, t),
+        None => false,
+    }
+}
+
+fun key_param_of(tp: str, t: Type) -> bool {
+    return match t {
+        Type.TMap(k, v) => mentions_param(k, tp) || key_param_of(tp, k) || key_param_of(tp, v),
+        Type.TList(e) => key_param_of(tp, e),
+        Type.TTuple(es) => any_key_param(tp, es),
+        Type.TStruct(n, a) => any_key_param(tp, a),
+        Type.TEnum(n, a) => any_key_param(tp, a),
+        Type.TFunc(ps, r) => key_param_in(tp, ps, r),
+        _ => false,
+    }
+}
+
+fun any_key_param(tp: str, ts: [Type]) -> bool {
+    for t in ts {
+        if key_param_of(tp, t) { return true }
+    }
+    return false
+}
+
+// Whether the type parameters `tps` as declared give `tp` the bound `trnm`.
+fun declares_bound(tps: [TypeParam], tp: str, trnm: str) -> bool {
+    for t in tps {
+        if t.name == tp && contains_str(t.bounds, trnm) { return true }
+    }
+    return false
+}
+
+// `bs` with the trait `trnm` among the bounds of `tp`.
+#test([Bound { tp: "K", traits: ["Eq"] }], "K", "Hash")[[Bound { tp: "K", traits: ["Eq", "Hash"] }]]
+#test([], "K", "Eq")[[Bound { tp: "K", traits: ["Eq"] }]]
+fun with_bound(bs: [Bound], tp: str, trnm: str) -> [Bound] {
+    var out: [Bound] = []
+    var found = false
+    for b in bs {
+        if b.tp == tp {
+            found = true
+            if contains_str(b.traits, trnm) {
+                out.push(b)
+            } else {
+                var ts = b.traits
+                ts.push(trnm)
+                out.push(Bound { tp: b.tp, traits: ts })
+            }
+        } else {
+            out.push(b)
+        }
+    }
+    if !found { out.push(Bound { tp: tp, traits: [trnm] }) }
+    return out
+}
+
+// How many traits the bounds `bs` name.
+fun bound_count(bs: [Bound]) -> int32 {
+    var n = 0
+    for b in bs { n = n + b.traits.len() }
+    return n
 }
 
 #test([], [])[[]]
@@ -3353,8 +3475,15 @@ impl Checker {
             if is_type_param(lt) { return self.infer_bounded_op(e, op, l, r, lt) }
             var hint: Option<Type> = None
             if is_int(lt) || is_float(lt) { hint = Some(lt) }
+            // a tuple's or list's literal takes the left side's type
+            if is_compound_eq(lt) { hint = Some(lt) }
             let rt = self.expect_value(r, hint)?
             let common = self.unify(l, lt, r, rt)?
+            if is_compound_eq(common) {
+                // a tuple or list of `Eq` elements (D163, MYLA-313)
+                if self.type_implements(common, "Eq")? { return Ok(Type.TBool) }
+                return Err(terr_at(e.line, e.col, e.sp, format("cannot compare values of type '{}': {}", type_name(common), self.not_eq_why(common))))
+            }
             if !(is_int(common) || is_float(common) || is_char(common) || is_bool(common) || is_str(common) || is_unit(common)) {
                 return Err(terr_at(e.line, e.col, e.sp, format("cannot compare values of type '{}'", type_name(common))))
             }
@@ -3471,6 +3600,128 @@ impl Checker {
         return Ok(result)
     }
 
+    // Why the tuple or list type `t` isn't `Eq`: the first element type that
+    // isn't, as the message after "cannot compare values of type …" says it.
+    #test(checker_on("[int]"), Type.TTuple([Type.TInt(32, true), Type.TStruct("P", [])]))["'P' isn't Eq (it needs 'impl Eq for P' or '#derive(Eq)')"]
+    #test(checker_on("[int]"), Type.TList(Type.TMap(Type.TStr, Type.TStr)))["'[str: str]' isn't Eq"]
+    fun not_eq_why(self, t: Type) -> str {
+        return self.not_trait_why(t, "Eq")
+    }
+
+    // The key type `kt` of a map type met at `ln`, `cl` (D163, MYLA-313): an
+    // integer, `char`, `bool` or `str`, or any type that is `Eq` and `Hash`;
+    // one with a type parameter by the bounds of the function it is in (a
+    // struct's field's isn't checked until a function uses it). Met before
+    // the impls are known, it waits for `check_pending_keys`.
+    fun check_key(var self, kt: Type, ln: int32, cl: int32, sp: SrcSpan) -> Result<int32, CheckErr> {
+        if !self.keys_ready && !is_map_key(kt) && !contains_type_param(kt) && !has_error(kt) {
+            self.pending_keys.push(PendingKey { t: kt, line: ln, col: cl, sp: sp, decl: self.cur_decl })
+            return Ok(0)
+        }
+        return self.key_ok(kt, ln, cl, sp)
+    }
+
+    // `check_key` once the impls are known.
+    fun key_ok(self, kt: Type, ln: int32, cl: int32, sp: SrcSpan) -> Result<int32, CheckErr> {
+        if is_map_key(kt) || has_error(kt) { return Ok(0) }
+        if contains_type_param(kt) {
+            // (a signature's own map keys imply their bounds, see
+            // `validate_bounds`)
+            if !self.key_ctx { return Ok(0) }
+        }
+        let why = self.key_why(kt)?
+        if why == "" { return Ok(0) }
+        return Err(terr_at(ln, cl, sp, format("map key type must be Eq and Hash, found '{}': {}", type_name(kt), why)))
+    }
+
+    // Why `kt` can't be a map's key ("" when it can).
+    fun key_why(self, kt: Type) -> Result<str, CheckErr> {
+        if !self.type_implements(kt, "Eq")? {
+            match kt {
+                Type.TParam(n) => { return Ok(format("it needs the bound '{}: Eq + Hash'", n)) },
+                _ => { return Ok(self.not_trait_why(kt, "Eq")) },
+            }
+        }
+        if !self.type_implements(kt, "Hash")? {
+            match kt {
+                Type.TParam(n) => { return Ok(format("it needs the bound '{}: Eq + Hash'", n)) },
+                _ => { return Ok(self.not_trait_why(kt, "Hash")) },
+            }
+        }
+        return Ok("")
+    }
+
+    // `check_key` of every map type in `t`.
+    fun check_keys_in(var self, t: Type, ln: int32, cl: int32, sp: SrcSpan) -> Result<int32, CheckErr> {
+        match t {
+            Type.TMap(k, v) => {
+                self.check_key(k, ln, cl, sp)?
+                self.check_keys_in(k, ln, cl, sp)?
+                self.check_keys_in(v, ln, cl, sp)?
+            },
+            Type.TList(e) => { self.check_keys_in(e, ln, cl, sp)? },
+            Type.TTuple(es) => { for e in es { self.check_keys_in(e, ln, cl, sp)? } },
+            Type.TStruct(n, a) => { for e in a { self.check_keys_in(e, ln, cl, sp)? } },
+            Type.TEnum(n, a) => { for e in a { self.check_keys_in(e, ln, cl, sp)? } },
+            Type.TFunc(ps, r) => {
+                for e in ps { self.check_keys_in(e, ln, cl, sp)? }
+                match r {
+                    Some(x) => { self.check_keys_in(x, ln, cl, sp)? },
+                    None => {},
+                }
+            },
+            _ => {},
+        }
+        return Ok(0)
+    }
+
+    // The map key types met before the impls were known, checked (D163).
+    fun check_pending_keys(var self) -> Result<int32, CheckErr> {
+        self.keys_ready = true
+        let pending = self.pending_keys
+        self.pending_keys = []
+        for p in pending {
+            self.cur_decl = p.decl
+            match self.key_why(p.t) {
+                Ok(why) => {
+                    if why != "" { self.record(terr_at(p.line, p.col, p.sp, format("map key type must be Eq and Hash, found '{}': {}", type_name(p.t), why)))? }
+                },
+                Err(e) => { self.record(e)? },
+            }
+        }
+        return Ok(0)
+    }
+
+    // `not_eq_why` for `Hash`: a float isn't, as NaN is unequal to itself.
+    #test(checker_on("[int]"), Type.TTuple([Type.TInt(32, true), Type.TFloat(64)]))["'float64' isn't Hash (NaN is unequal to itself)"]
+    fun not_hash_why(self, t: Type) -> str {
+        return self.not_trait_why(t, "Hash")
+    }
+
+    // Why the tuple or list type `t` isn't `trnm` (`Eq` or `Hash`).
+    fun not_trait_why(self, t: Type, trnm: str) -> str {
+        var inner: [Type] = []
+        match t {
+            Type.TTuple(es) => { inner = es },
+            Type.TList(et) => { inner = [et] },
+            _ => { inner = [t] },
+        }
+        for et in inner {
+            let ok = match self.type_implements(et, trnm) {
+                Ok(b) => b,
+                Err(x) => true,
+            }
+            if !ok {
+                if is_compound_eq(et) { return self.not_trait_why(et, trnm) }
+                if is_struct_or_enum(et) { return format("'{}' isn't {} (it needs 'impl {} for {}' or '#derive({})')", type_name(et), trnm, trnm, type_name(et), trnm) }
+                if is_type_param(et) { return format("'{}' isn't {} (it needs the bound '{}: {}')", type_name(et), trnm, type_name(et), trnm) }
+                if is_float(et) && trnm == "Hash" { return format("'{}' isn't Hash (NaN is unequal to itself)", type_name(et)) }
+                return format("'{}' isn't {}", type_name(et), trnm)
+            }
+        }
+        return format("its elements aren't {}", trnm)
+    }
+
     #test(checker_on("[int]"), "T", "Eq")[false]
     fun bound_has(self, pname: str, trnm: str) -> bool {
         for b in self.bounds_cur { if b.tp == pname { if contains_str(b.traits, trnm) { return true } } }
@@ -3566,7 +3817,7 @@ impl Checker {
         let k0 = entries[0].key
         let v0 = entries[0].value
         var key_t = self.expect_value(k0, exp_k)?
-        if !is_map_key(key_t) { return Err(terr_at(k0.line, k0.col, k0.sp, format("map key type must be a primitive (integer, char, bool, or str), found '{}'", type_name(key_t)))) }
+        self.check_key(key_t, k0.line, k0.col, k0.sp)?
         var val_t = self.expect_value(v0, exp_v)?
         var i = 1
         while i < entries.len() {
@@ -3613,7 +3864,8 @@ impl Checker {
             None => {},
         }
         match base {
-            Type.TMap(k, v) => { self.expect_type(ix, k, "map key")?
+            Type.TMap(k, v) => { self.key_ok(k, e.line, e.col, e.sp)?
+                self.expect_type(ix, k, "map key")?
             return Ok(v) },
             Type.TStr => {
                 let it = self.expect_value(ix, Some(t_int()))?
@@ -3722,6 +3974,20 @@ fun is_struct_or_enum(t: Type) -> bool {
 #test(Type.TBool)[false]
 #test(Type.TParam("T"))[true]
 fun is_type_param(t: Type) -> bool { return match t { Type.TParam(n) => true, _ => false } }
+
+// Whether `t` is a tuple (not the unit type) or a list, which `==` compares
+// element by element when its elements are `Eq` (D163, MYLA-313).
+#test(Type.TTuple([Type.TInt(32, true)]))[true]
+#test(Type.TList(Type.TStr))[true]
+#test(Type.TTuple([]))[false]
+#test(Type.TStr)[false]
+fun is_compound_eq(t: Type) -> bool {
+    return match t {
+        Type.TTuple(es) => es.len() > 0,
+        Type.TList(e) => true,
+        _ => false,
+    }
+}
 
 // =========================================================================
 // Generic type-argument inference (shared by struct lit / variant ctor)
@@ -4680,7 +4946,10 @@ impl Checker {
                 let it = self.expect_value(it_expr, None)?
                 loop_t = match it {
                     Type.TList(el) => el,
-                    Type.TMap(k, v) => k,
+                    Type.TMap(k, v) => {
+                        self.key_ok(k, it_expr.line, it_expr.col, it_expr.sp)?
+                        k
+                    },
                     _ => { return Err(terr_at(it_expr.line, it_expr.col, it_expr.sp, format("`for ... in` requires a list or map, found '{}'", type_name(it)))) },
                 }
             },
@@ -5220,7 +5489,8 @@ impl Checker {
                     None => {},
                 }
                 match base.ty {
-                    Type.TMap(k, v) => { self.expect_type(index, k, "map key")?
+                    Type.TMap(k, v) => { self.key_ok(k, e.line, e.col, e.sp)?
+                        self.expect_type(index, k, "map key")?
             Ok(LValue { ty: v, mutable: base.mutable }) },
                     Type.TStr => Err(terr_at(e.line, e.col, e.sp, "strings are immutable; `s[i]` cannot be assigned to")),
                     Type.TList(el) => {
@@ -5296,6 +5566,13 @@ impl Checker {
         self.fun_name = fd.name
         self.type_params = sig.type_params
         self.bounds_cur = sig.bounds
+        self.key_ctx = true
+        // a generic map type's key needs its bounds (D163)
+        for pt in sig.params { self.check_keys_in(pt, fd.line, fd.col, fd.sp)? }
+        match sig.ret {
+            Some(rt) => { self.check_keys_in(rt, fd.line, fd.col, fd.sp)? },
+            None => {},
+        }
         self.frames = []
         self.push_scope()
         self.check_defaults(fd, sig)?
@@ -5324,6 +5601,7 @@ impl Checker {
                 if self.has_cur_ret && !block_returns(b) {
                     self.type_params = []
                     self.bounds_cur = []
+                    self.key_ctx = false
                     return Err(terr_at(fd.line, fd.col, fd.sp, format("function '{}' may finish without returning a '{}'", fd.name, opt_type_name(sig.ret))))
                 }
             },
@@ -5331,6 +5609,7 @@ impl Checker {
         }
         self.type_params = []
         self.bounds_cur = []
+        self.key_ctx = false
         return Ok(0)
     }
 }
@@ -5350,11 +5629,153 @@ fun is_eq_type(t: Type, eq_names: [str]) -> bool {
         Type.TChar => true,
         Type.TFloat(w) => true,
         Type.TError => true,          // has had its error (MYLA-110)
-        Type.TTuple(es) => es.len() == 0,   // the unit type (D138)
+        // the unit type (D138), and a tuple or list of `Eq` elements (D163)
+        Type.TTuple(es) => all_eq_types(es, eq_names),
+        Type.TList(e) => is_eq_type(e, eq_names),
         Type.TStruct(n, a) => contains_str(eq_names, n),
         Type.TEnum(n, a) => contains_str(eq_names, n),
         _ => false,
     }
+}
+
+// Whether `t` is `Hash` for a derived impl's field, the structs and enums
+// among `hash_names` being so (D163): not a float, nor anything holding one.
+#test(Type.TTuple([Type.TInt(32, true), Type.TStr]), [])[true]
+#test(Type.TList(Type.TFloat(64)), [])[false]
+#test(Type.TStruct("P", []), ["P"])[true]
+fun is_hash_type(t: Type, hash_names: [str]) -> bool {
+    return match t {
+        Type.TInt(w, s) => true,
+        Type.TBool => true,
+        Type.TStr => true,
+        Type.TChar => true,
+        Type.TError => true,          // has had its error (MYLA-110)
+        Type.TTuple(es) => all_hash_types(es, hash_names),
+        Type.TList(e) => is_hash_type(e, hash_names),
+        Type.TStruct(n, a) => contains_str(hash_names, n),
+        Type.TEnum(n, a) => contains_str(hash_names, n),
+        _ => false,
+    }
+}
+
+fun all_hash_types(ts: [Type], hash_names: [str]) -> bool {
+    for t in ts {
+        if !is_hash_type(t, hash_names) { return false }
+    }
+    return true
+}
+
+// What a refusal of a field of type `t` adds when `t` is or holds a float.
+#test(Type.TFloat(64))[" (a float isn't: NaN is unequal to itself; a hand-written 'impl Hash' may add 'math.to_bits(x)')"]
+#test(Type.TStr)[""]
+fun float_note(t: Type) -> str {
+    if holds_float(t) { return " (a float isn't: NaN is unequal to itself; a hand-written 'impl Hash' may add 'math.to_bits(x)')" }
+    return ""
+}
+
+#test(Type.TTuple([Type.TStr, Type.TList(Type.TFloat(32))]))[true]
+#test(Type.TInt(8, true))[false]
+fun holds_float(t: Type) -> bool {
+    return match t {
+        Type.TFloat(w) => true,
+        Type.TTuple(es) => {
+            for e in es {
+                if holds_float(e) { return true }
+            }
+            false
+        },
+        Type.TList(e) => holds_float(e),
+        _ => false,
+    }
+}
+
+// Whether the derive attributes among `attrs` name the trait `trnm`.
+fun derives(attrs: [Attribute], trnm: str) -> bool {
+    for a in attrs {
+        if a.name == "derive" {
+            for arg in a.args {
+                match arg.kind {
+                    ExprKind.Name(n) => { if n == trnm { return true } },
+                    _ => {},
+                }
+            }
+        }
+    }
+    return false
+}
+
+// Whether `d` is an inherent `impl <name> { … }`.
+fun impl_of_type(d: Decl, name: str) -> bool {
+    return match d.kind {
+        DeclKind.ImplDecl(tg, m, tp, tn, ta, dattrs) => match tn {
+            Some(t) => false,
+            None => match tg.kind {
+                TypeKind.TRef(nm, args) => nm == name,
+                _ => false,
+            },
+        },
+        _ => false,
+    }
+}
+
+// The source of a derived `impl Hash` (D163) for a type `parts` describes
+// (`derived_parts`), for a placeholder type `Derived` that `impl_for`
+// names: a struct's fields, or an enum's variant index and payload.
+#test([("x", -1), ("y", -1)])["impl Hash for Derived {\n    fun hash(self, hasher: Hasher) -> Hasher {\n        return hasher.add(self.x).add(self.y)\n    }\n}\n"]
+#test([("A", 0), ("B", 2)])["impl Hash for Derived {\n    fun hash(self, hasher: Hasher) -> Hasher {\n        return match self {\n            A => hasher.add_u64(0)\n            B(field0, field1) => hasher.add_u64(1).add(field0).add(field1)\n        }\n    }\n}\n"]
+fun derived_hash_src(parts: [(str, int32)]) -> str {
+    var sb = StringBuilder()
+    sb.append("impl Hash for Derived {\n    fun hash(self, hasher: Hasher) -> Hasher {\n")
+    let is_enum = parts.len() > 0 && parts[0].1 >= 0
+    if !is_enum {
+        sb.append("        return hasher")
+        for p in parts { sb.append(f".add(self.{p.0})") }
+        sb.append("\n")
+    } else {
+        sb.append("        return match self {\n")
+        var i = 0
+        for p in parts {
+            sb.append(f"            {p.0}")
+            if p.1 > 0 {
+                sb.append("(")
+                var k = 0
+                while k < p.1 {
+                    if k > 0 { sb.append(", ") }
+                    sb.append(f"field{k}")
+                    k += 1
+                }
+                sb.append(")")
+            }
+            sb.append(f" => hasher.add_u64({i})")
+            var k = 0
+            while k < p.1 {
+                sb.append(f".add(field{k})")
+                k += 1
+            }
+            sb.append("\n")
+            i += 1
+        }
+        sb.append("        }\n")
+    }
+    sb.append("    }\n}\n")
+    return sb.build()
+}
+
+// The impl `d` (`impl Hash for Derived`), for the type `name` instead.
+fun impl_for(d: Decl, name: str) -> Decl {
+    return match d.kind {
+        DeclKind.ImplDecl(tg, m, tp, tn, ta, dattrs) => Decl { id: d.id, line: d.line, col: d.col, sp: d.sp, kind: DeclKind.ImplDecl(TypeExpr { id: tg.id, line: tg.line, col: tg.col, sp: tg.sp, kind: TypeKind.TRef(name, []) }, m, tp, tn, ta, dattrs) },
+        _ => d,
+    }
+}
+
+#test([Type.TInt(32, true), Type.TStr], [])[true]
+#test([Type.TStruct("Bare", [])], ["Holder"])[false]
+fun all_eq_types(ts: [Type], eq_names: [str]) -> bool {
+    for t in ts {
+        if !is_eq_type(t, eq_names) { return false }
+    }
+    return true
 }
 
 impl Checker {
@@ -5373,20 +5794,29 @@ impl Checker {
                 match self.check_derive_attr(decl, attr) {
                     Ok(x) => {
                         var present = false
-                        for d in targets { if d.line == decl.line && d.col == decl.col { present = true } }
+                        for d in targets { if d.id == decl.id { present = true } }
                         if !present { targets.push(decl) }
                     },
                     Err(e) => {
                         self.record(e)?
                         // Eq is broken for the type: its uses stop silently (MYLA-110)
-                        if is_se { self.broken_impls["Eq\t" + decl_kind_name(decl)] = true }
+                        if is_se {
+                            self.broken_impls["Eq\t" + decl_kind_name(decl)] = true
+                            self.broken_impls["Hash\t" + decl_kind_name(decl)] = true
+                        }
                     },
                 }
             }
         }
         if targets.len() == 0 { return Ok(0) }
+        var eq_targets: [Decl] = []
+        var hash_targets: [Decl] = []
+        for d in targets {
+            if derives(decl_attrs(d), "Eq") { eq_targets.push(d) }
+            if derives(decl_attrs(d), "Hash") { hash_targets.push(d) }
+        }
         var eq_names: [str] = []
-        for d in targets { eq_names.push(decl_kind_name(d)) }
+        for d in eq_targets { eq_names.push(decl_kind_name(d)) }
         // an `impl Eq` for a type that doesn't exist may have been meant for
         // any of them: a type that isn't Eq is then no news (MYLA-110)
         var lost_eq = false
@@ -5399,7 +5829,7 @@ impl Checker {
                 None => {},
             }
         }
-        for decl in targets {
+        for decl in eq_targets {
             self.cur_decl = decl.id
             let name = decl_kind_name(decl)
             // explicit `impl Eq for name`? (it stands)
@@ -5431,6 +5861,123 @@ impl Checker {
             self.trait_impls.push(TraitImplPair { trait_name: "Eq", key: name })
             self.user_trait_impls.push(TraitImplPair { trait_name: "Eq", key: name })
         }
+        if hash_targets.len() > 0 { self.derive_hashes(hash_targets, eq_names)? }
+        return Ok(0)
+    }
+
+    // `#derive(Hash)` (D163, MYLA-313) of each of `targets`: an `impl Hash`
+    // written for it, as source, and checked and run as any other, its
+    // fields added in order (`h.add(self.x).add(self.y)`), an enum's variant
+    // index first and then its payload. The type must be `Eq` (`eq_names`,
+    // derived or written) and its fields `Hash`; a float field isn't.
+    fun derive_hashes(var self, targets: [Decl], eq_names: [str]) -> Result<int32, CheckErr> {
+        var hash_names: [str] = []
+        for d in targets { hash_names.push(decl_kind_name(d)) }
+        var lost = false
+        var has_hasher = false
+        for d in self.impl_decls {
+            match impl_target_name(d, "Hash") {
+                Some(nm) => {
+                    if !contains_str(hash_names, nm) { hash_names.push(nm) }
+                    if !self.names_a_type(nm) { lost = true }
+                },
+                None => {},
+            }
+            if impl_of_type(d, "Hasher") { has_hasher = true }
+        }
+        for decl in targets {
+            self.cur_decl = decl.id
+            let name = decl_kind_name(decl)
+            var explicit = false
+            for d in self.impl_decls {
+                match impl_target_name(d, "Hash") {
+                    Some(nm) => { if nm == name { explicit = true } },
+                    None => {},
+                }
+            }
+            if explicit {
+                self.record(terr_at(decl.line, decl.col, decl.sp, format("type '{}' both derives Hash and has an explicit 'impl Hash for {}'", name, name)))?
+                continue
+            }
+            if self.broken_impls.contains("Eq\t" + name) {
+                // its Eq failed, with its own error
+                self.broken_impls["Hash\t" + name] = true
+                continue
+            }
+            if !contains_str(eq_names, name) {
+                self.record(terr_at(decl.line, decl.col, decl.sp, format("cannot derive Hash for '{}': it isn't Eq; derive both, '#derive(Eq, Hash)', or write 'impl Eq for {}'", name, name)))?
+                self.broken_impls["Hash\t" + name] = true
+                continue
+            }
+            match self.check_derivable_hash(decl, name, hash_names) {
+                Ok(x) => {},
+                Err(e) => {
+                    if !lost { self.record(e)? }
+                    self.broken_impls["Hash\t" + name] = true
+                    continue
+                },
+            }
+            if !has_hasher {
+                // without std.hash (a module of `std` that doesn't import
+                // it, a program checked without the standard library) the
+                // type is `Hash`, a map's key, but has no `hash` to call:
+                // the runners hash a derived key by its members
+                self.trait_impls.push(TraitImplPair { trait_name: "Hash", key: name })
+                self.user_trait_impls.push(TraitImplPair { trait_name: "Hash", key: name })
+                continue
+            }
+            let src = derived_hash_src(self.derived_parts(name))
+            match parse_source(src, self.next_id) {
+                Ok(p) => {
+                    self.next_id = p.next_id
+                    for d in p.program.decls {
+                        let made = impl_for(d, name)
+                        self.decls.push(made)
+                        self.impl_decls.push(made)
+                    }
+                },
+                Err(d) => { panic("a derived Hash impl does not parse") },
+            }
+        }
+        return Ok(0)
+    }
+
+    // What a derived `hash` of the struct or enum `name` adds: a struct's
+    // field names; an enum's variants, each its name and payload's length.
+    #test(checker_on("enum E { A, B(int, str) }"), "E")[[("A", 0), ("B", 2)]]
+    #test(checker_on("struct P { x: int, y: str }"), "P")[[("x", -1), ("y", -1)]]
+    fun derived_parts(self, name: str) -> [(str, int32)] {
+        var out: [(str, int32)] = []
+        let si = self.struct_idx(name)
+        if si >= 0 {
+            for f in self.structs[si].fields { out.push((f.name, -1)) }
+            return out
+        }
+        let ei = self.enum_idx(name)
+        if ei >= 0 {
+            for v in self.enums[ei].variants { out.push((v.name, v.payload.len() as int32)) }
+        }
+        return out
+    }
+
+    fun check_derivable_hash(self, decl: Decl, name: str, hash_names: [str]) -> Result<int32, CheckErr> {
+        let si = self.struct_idx(name)
+        if si >= 0 {
+            for f in self.structs[si].fields {
+                if !is_hash_type(f.ty, hash_names) { return Err(terr_at(decl.line, decl.col, decl.sp, format("cannot derive Hash for struct '{}': field '{}' has type '{}', which isn't Hash{}", name, f.name, type_name(f.ty), float_note(f.ty)))) }
+            }
+            return Ok(0)
+        }
+        let ei = self.enum_idx(name)
+        if ei >= 0 {
+            for v in self.enums[ei].variants {
+                var i = 0
+                for pt in v.payload {
+                    if !is_hash_type(pt, hash_names) { return Err(terr_at(decl.line, decl.col, decl.sp, format("cannot derive Hash for enum '{}': payload #{} of variant '{}' has type '{}', which isn't Hash{}", name, i, v.name, type_name(pt), float_note(pt)))) }
+                    i = i + 1
+                }
+            }
+        }
         return Ok(0)
     }
 
@@ -5442,7 +5989,7 @@ impl Checker {
             DeclKind.EnumDecl(n, v, a, t, p) => t.len() > 0,
             _ => false,
         }
-        if has_tps { return Err(terr_at(attr.line, attr.col, attr.sp, "deriving on generic types is not supported yet (Eq is derived for concrete structs and enums)")) }
+        if has_tps { return Err(terr_at(attr.line, attr.col, attr.sp, "deriving on generic types is not supported yet (Eq and Hash are derived for concrete structs and enums)")) }
         return self.validate_derive_attr(attr)
     }
 
@@ -5460,7 +6007,7 @@ impl Checker {
         if attr.args.len() == 0 { return Err(terr_at(attr.line, attr.col, attr.sp, "'#derive' needs at least one trait, e.g. #derive(Eq)")) }
         for a in attr.args {
             match a.kind {
-                ExprKind.Name(id) => { if id != "Eq" { return Err(terr_at(a.line, a.col, a.sp, format("cannot derive '{}': only 'Eq' is derivable", id))) } },
+                ExprKind.Name(id) => { if id != "Eq" && id != "Hash" { return Err(terr_at(a.line, a.col, a.sp, format("cannot derive '{}': only 'Eq' and 'Hash' are derivable", id))) } },
                 _ => { return Err(terr_at(a.line, a.col, a.sp, "'#derive' arguments must be trait names")) },
             }
         }
@@ -6074,6 +6621,7 @@ impl Checker {
         self.synthesize_derives()?
         self.resolve_impls()?
         self.validate_bounds()?
+        self.check_pending_keys()?
         self.fold_consts()?
         return Ok(0)
     }
@@ -6188,6 +6736,7 @@ impl Checker {
         if self.awaited.len() > 0 { self.awaited = [:] }
         self.task_init = false
         self.in_guard = false
+        self.key_ctx = false
     }
 
     // Collect `e`, an error in the declaration being checked.
@@ -6248,9 +6797,14 @@ impl Checker {
     }
 }
 
-#test()["enum Option<T> { Some(T), None }\nenum Result<T, E> { Ok(T), Err(E) }\nfun get<K, V>(m: [K: V], k: K) -> Option<V> {\n    if m.contains(k) {\n        return Some(m[k])\n    }\n    return None\n}\ntrait Format {\n    fun format(self, spec: str) -> str\n}\n"]
+#test()["enum Option<T> { Some(T), None }\nenum Result<T, E> { Ok(T), Err(E) }\nfun get<K, V>(m: [K: V], k: K) -> Option<V> {\n    if m.contains(k) {\n        return Some(m[k])\n    }\n    return None\n}\ntrait Format {\n    fun format(self, spec: str) -> str\n}\nstruct Hasher {\n    state: uint64,\n}\nimpl Eq for Hasher {\n    fun eq(self, other: Hasher) -> bool {\n        return self.state == other.state\n    }\n}\ntrait Hash {\n    fun hash(self, h: Hasher) -> Hasher\n}\n"]
+// The prelude: what every program has without an import. The `Hasher`'s
+// state and the `Hash` trait are here (D163, MYLA-313), so that every type
+// can be a map key's and every module can name them; the hasher's methods,
+// its algorithm, and the `Hash` impls of the built-in types are std.hash's,
+// an implicit module.
 fun prelude_src() -> str {
-    return "enum Option<T> { Some(T), None }\nenum Result<T, E> { Ok(T), Err(E) }\nfun get<K, V>(m: [K: V], k: K) -> Option<V> {\n    if m.contains(k) {\n        return Some(m[k])\n    }\n    return None\n}\ntrait Format {\n    fun format(self, spec: str) -> str\n}\n"
+    return "enum Option<T> { Some(T), None }\nenum Result<T, E> { Ok(T), Err(E) }\nfun get<K, V>(m: [K: V], k: K) -> Option<V> {\n    if m.contains(k) {\n        return Some(m[k])\n    }\n    return None\n}\ntrait Format {\n    fun format(self, spec: str) -> str\n}\nstruct Hasher {\n    state: uint64,\n}\nimpl Eq for Hasher {\n    fun eq(self, other: Hasher) -> bool {\n        return self.state == other.state\n    }\n}\ntrait Hash {\n    fun hash(self, h: Hasher) -> Hasher\n}\n"
 }
 
 // The prelude's declarations, with node ids from `first_id`.
@@ -6297,6 +6851,7 @@ pub fun build_checker_std(decls: [Decl], next_id: int32, primitives: bool, std_i
     var c = new_checker(all)
     c.primitives = primitives
     c.std_impls = std_impls
+    c.next_id = pre.next_id
     let r = c.run_all()
     match r { Ok(x) => {}, Err(e) => { return Err(e) } }
     // every call with all its arguments, for whatever runs the program (D136)
@@ -6330,6 +6885,15 @@ pub fun checker_on(src: str) -> Checker {
 #test("struct B<T> { items: [T] }\nfun of<T>(xs: [T]) -> B<T> { return B { items: xs } }\nfun main() { let b: B<int64> = of([5000000000]) }")[[]]
 #test("struct B<T> { items: [T] }\nfun mk<T>() -> B<T> { return B { items: [] } }\nfun main() { let b = mk() }")[["cannot infer type parameter(s) T for 'mk' from the arguments; add a type annotation to guide inference"]]
 #test("struct B<T> { items: [T] }\nfun of<T>(xs: [T]) -> B<T> { return B { items: xs } }\nfun main() { let b: B<int> = of([\"x\"]) }")[["cannot assign value of type 'B<str>' to binding of type 'B<int32>'"]]
+// tuples and lists compared, and map keys of any `Eq + Hash` type (D163)
+#test("fun main() { print((1, \"a\") == (1, \"a\") && [(1, 2)] != [(2, 1)]) }")[[]]
+#test("struct P { x: int }\nfun main() { print((1, P { x: 1 }) == (1, P { x: 1 })) }")[["cannot compare values of type '(int32, P)': 'P' isn't Eq (it needs 'impl Eq for P' or '#derive(Eq)')"]]
+#test("fun main() { var m: [(int, int): int] = [:]\nm[(1, 2)] = 3\nvar n: [[str]: bool] = [[\"a\"]: true] }")[[]]
+#test("#derive(Eq)\nstruct P { x: int }\nfun main() { var m: [P: int] = [:] }")[["map key type must be Eq and Hash, found 'P': 'P' isn't Hash (it needs 'impl Hash for P' or '#derive(Hash)')"]]
+#test("struct Q { m: [(int, float): int] }")[["map key type must be Eq and Hash, found '(int32, float64)': 'float64' isn't Hash (NaN is unequal to itself)"]]
+#test("fun f<T>(x: T) -> [T: int] { return [x: 1] }")[["map key type must be Eq and Hash, found 'T': it needs the bound 'T: Eq + Hash'"]]
+#test("#derive(Eq, Hash)\nstruct P { x: float }")[["cannot derive Hash for struct 'P': field 'x' has type 'float64', which isn't Hash (a float isn't: NaN is unequal to itself; a hand-written 'impl Hash' may add 'math.to_bits(x)')"]]
+#test("#derive(Hash)\nstruct P { x: int }")[["cannot derive Hash for 'P': it isn't Eq; derive both, '#derive(Eq, Hash)', or write 'impl Eq for P'"]]
 fun errors_of(src: str) -> [str] {
     var out: [str] = []
     for e in checker_on(src).errs { out.push(e.msg) }
@@ -6864,6 +7428,7 @@ impl Checker {
         match kv { Some(x) => {}, None => { return Err(terr_at(args[0].line, args[0].col, args[0].sp, format("{}() requires a map, found '{}'", name, type_name(map_t)))) } }
         let mk = match map_t { Type.TMap(k, v) => k, _ => Type.TStr }
         let mv = match map_t { Type.TMap(k, v) => v, _ => Type.TStr }
+        self.key_ok(mk, e.line, e.col, e.sp)?
         if name == "keys" { return Ok(Some(Type.TList(mk))) }
         self.expect_type(args[1], mk, "map key")?
         if name == "contains" { return Ok(Some(Type.TBool)) }
@@ -7089,7 +7654,14 @@ impl Checker {
                     for tr in b.traits {
                         var ok = false
                         match concrete { Type.TParam(pn) => { ok = self.bound_has(pn, tr) }, _ => { ok = self.type_implements(concrete, tr)? } }
-                        if !ok { return Err(terr_at(e.line, e.col, e.sp, format("type '{}' does not satisfy the bound '{}: {}' required by '{}'", type_name(concrete), b.tp, tr, sig.decl.name))) }
+                        if !ok {
+                            // a bound a map key of the signature implies (D163)
+                            var why = ""
+                            if (tr == "Eq" || tr == "Hash") && !declares_bound(sig.decl.type_params, b.tp, tr) && key_param_in(b.tp, sig.params, sig.ret) {
+                                why = format(", as '{}' is a map key in its signature", b.tp)
+                            }
+                            return Err(terr_at(e.line, e.col, e.sp, format("type '{}' does not satisfy the bound '{}: {}' required by '{}'{}", type_name(concrete), b.tp, tr, sig.decl.name, why)))
+                        }
                     }
                 },
                 None => {},
@@ -7106,6 +7678,18 @@ impl Checker {
         // a type parameter's bounds give it their traits' methods (MYLA-291)
         match recv_type {
             Type.TParam(pn) => { return self.bound_method_call(e, target, pn, field, args) },
+            // a tuple of `Hash` elements is `Hash` itself (D163): no impl can
+            // name a tuple, so its `hash` is the language's
+            Type.TTuple(es) => {
+                if field == "hash" {
+                    if !self.type_implements(recv_type, "Hash")? { return Err(terr_at(e.line, e.col, e.sp, format("type '{}' has no method 'hash': {}", type_name(recv_type), self.not_hash_why(recv_type)))) }
+                    if args.len() != 1 { return Err(terr_at(e.line, e.col, e.sp, format("method 'hash' expects 1 argument(s), got {}", args.len()))) }
+                    let hasher = Type.TStruct("Hasher", [])
+                    let ht = self.expect_value(args[0], Some(hasher))?
+                    if !type_eq(ht, hasher) { return Err(terr_at(args[0].line, args[0].col, args[0].sp, format("argument type mismatch in call to 'hash': expected 'Hasher', found '{}'", type_name(ht)))) }
+                    return Ok(Some(hasher))
+                }
+            },
             _ => {},
         }
         let key_opt = self.type_key(recv_type)

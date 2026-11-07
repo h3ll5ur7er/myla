@@ -1,0 +1,14 @@
+//~ type error: map key type must be Eq and Hash, found 'Pos': 'Pos' isn't Hash (it needs 'impl Hash for Pos' or '#derive(Hash)')
+// A map's key type is any type that is `Eq` and `Hash` (D163): `Pos`
+// derives `Eq` only.
+#derive(Eq)
+struct Pos {
+    x: int,
+    y: int,
+}
+
+#main
+fun main() {
+    var seen: [Pos: bool] = [:]
+    seen[Pos { x: 0, y: 0 }] = true
+}

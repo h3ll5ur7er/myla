@@ -25,14 +25,13 @@ const LO32: uint64 = 0xFFFFFFFF
 
 // --- the Hasher -------------------------------------------------------------
 
-// The running state of a hash: a value, passed through each `add` and given
-// back by it, since Myla has no `var` parameters. Two hashers with the same
-// seed that were given the same values in the same order are equal and
-// finish equal.
-#derive(Eq)
-pub struct Hasher {
-    state: uint64,
-}
+// The running state of a hash is the prelude's `Hasher { state: uint64 }`
+// (MYLA-313), so the `Hash` trait can name it in every module: a value,
+// passed through each `add` and given back by it, since Myla has no `var`
+// parameters. Two hashers with the same seed that were given the same values
+// in the same order are equal and finish equal. This module is implicit (as
+// std.str is, D164): its methods on `Hasher` and its `Hash` impls of the
+// built-in types are in every program.
 
 // `with_seed(0)`'s state, computed once (the cases of `new` and `with_seed`
 // check it).
@@ -140,6 +139,109 @@ impl Hasher {
     #test(new().add_str("abc"))[0x2a4f1d7cb516c72u64]
     fun finish(self) -> uint64 {
         return self.state
+    }
+
+    // Adds a value of any `Hash` type through its `hash` (D163): what a
+    // `Hash` impl calls for each of its fields, `h.add(self.x).add(self.y)`.
+    // `h.add(x)` is `x.hash(h)`.
+    fun add<T: Hash>(self, x: T) -> Hasher {
+        return x.hash(self)
+    }
+}
+
+// --- the Hash impls of the built-in types ------------------------------------
+//
+// The integers, `char`, `bool` and `str` add themselves as the `add`
+// methods above do; a list adds its length and then its elements, so that
+// `([1], [2, 3])` and `([1, 2], [3])` differ. A tuple's is the language's
+// own (its elements in turn), as no impl can name a tuple of any length.
+// Floats aren't `Hash` (NaN is unequal to itself): a hand-written impl may
+// add `math.to_bits(x)`.
+
+impl Hash for int8 {
+    #test(-1i8, new())[Hasher { state: 0x70bc9b8185eefae3u64 }]
+    fun hash(self, h: Hasher) -> Hasher {
+        return h.add_i8(self)
+    }
+}
+
+impl Hash for int16 {
+    #test(-1i16, new())[Hasher { state: 0x70bc9b8185eefae3u64 }]
+    fun hash(self, h: Hasher) -> Hasher {
+        return h.add_i16(self)
+    }
+}
+
+impl Hash for int32 {
+    #test(-1, new())[Hasher { state: 0x70bc9b8185eefae3u64 }]
+    fun hash(self, h: Hasher) -> Hasher {
+        return h.add_i32(self)
+    }
+}
+
+impl Hash for int64 {
+    #test(-1i64, new())[Hasher { state: 0x70bc9b8185eefae3u64 }]
+    fun hash(self, h: Hasher) -> Hasher {
+        return h.add_i64(self)
+    }
+}
+
+impl Hash for uint8 {
+    #test(255u8, new())[Hasher { state: 0xd6456ad28572a8fu64 }]
+    fun hash(self, h: Hasher) -> Hasher {
+        return h.add_u8(self)
+    }
+}
+
+impl Hash for uint16 {
+    #test(255u16, new())[Hasher { state: 0xd6456ad28572a8fu64 }]
+    fun hash(self, h: Hasher) -> Hasher {
+        return h.add_u16(self)
+    }
+}
+
+impl Hash for uint32 {
+    #test(255u32, new())[Hasher { state: 0xd6456ad28572a8fu64 }]
+    fun hash(self, h: Hasher) -> Hasher {
+        return h.add_u32(self)
+    }
+}
+
+impl Hash for uint64 {
+    #test(0u64, new())[Hasher { state: 0x42bc986dc5eec4d3u64 }]
+    fun hash(self, h: Hasher) -> Hasher {
+        return h.add_u64(self)
+    }
+}
+
+impl Hash for char {
+    #test('\u{1}', new())[Hasher { state: 0x59b81abf6522ad07u64 }]
+    fun hash(self, h: Hasher) -> Hasher {
+        return h.add_char(self)
+    }
+}
+
+impl Hash for bool {
+    #test(true, new())[Hasher { state: 0x59b81abf6522ad07u64 }]
+    fun hash(self, h: Hasher) -> Hasher {
+        return h.add_bool(self)
+    }
+}
+
+impl Hash for str {
+    #test("abc", new())[Hasher { state: 0x2a4f1d7cb516c72u64 }]
+    fun hash(self, h: Hasher) -> Hasher {
+        return h.add_str(self)
+    }
+}
+
+impl<T: Hash> Hash for [T] {
+    fun hash(self, h: Hasher) -> Hasher {
+        var g = h.add_u64(self.len() as uint64)
+        for x in self {
+            g = x.hash(g)
+        }
+        return g
     }
 }
 
@@ -726,4 +828,53 @@ fun hasher_laws() {
     h = h.add_u64(2)
     assert(h == new().add_u64(1).add_u64(2), "assignment and chaining agree")
     assert(new().add_char('a') == new().add_u32(97), "a char is its code point")
+}
+
+// The `Hash` impls of the built-in types and `add` (D163, MYLA-313).
+#test
+fun hash_impls() {
+    assert(new().add(7) == new().add_i32(7), "add is the value's own hash")
+    assert(new().add(7) == 7.hash(new()), "h.add(x) is x.hash(h)")
+    assert(new().add(255u8) == new().add_u64(255), "an integer by its value")
+    assert(new().add('a') == new().add_char('a') && new().add(true) == new().add_bool(true), "char and bool")
+    assert(new().add("ab") == new().add_str("ab"), "str")
+    assert(new().add([1, 2]) == new().add_u64(2).add(1).add(2), "a list: its length, then its elements")
+    assert(new().add(([1], [2, 3])) != new().add(([1, 2], [3])), "so lists split differently differ")
+    assert(new().add((1, "x")) == new().add(1).add("x"), "a tuple: its elements in turn")
+    assert(new().add(()) == new(), "the unit type adds nothing")
+}
+
+#derive(Eq, Hash)
+struct Cell {
+    row: int,
+    name: str,
+}
+
+#derive(Eq, Hash)
+enum Move {
+    Stay,
+    Go(int, int),
+}
+
+// A derived `Hash` adds the fields in order, an enum's variant index first;
+// such a type, a tuple and a list are map keys.
+#test
+fun derived_hash_and_keys() {
+    let c = Cell { row: 3, name: "c" }
+    assert(new().add(c) == new().add(3).add("c"), "the fields in order")
+    assert(new().add(Move.Stay) == new().add_u64(0), "a variant without a payload")
+    assert(new().add(Move.Go(1, 2)) == new().add_u64(1).add(1).add(2), "the index, then the payload")
+    var seen: [Cell: int] = [:]
+    seen[c] = 1
+    seen[Cell { row: 3, name: "c" }] = 2
+    seen[Cell { row: 4, name: "c" }] = 3
+    assert(seen.len() == 2 && seen[c] == 2, "equal keys are one key")
+    var grid: [(int, int): Move] = [:]
+    grid[(0, 1)] = Move.Go(0, 1)
+    grid.remove((0, 1))
+    grid[(2, 2)] = Move.Stay
+    grid[(0, 1)] = Move.Stay
+    assert(grid.keys()[1] == (0, 1), "a key removed and added again goes last")
+    var paths: [[str]: bool] = [["a", "b"]: true]
+    assert(paths.contains(["a", "b"]) && !paths.contains(["a"]), "a list key")
 }

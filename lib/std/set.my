@@ -3,9 +3,9 @@
 // `Set<T>` is a map from its elements to `()`, so it has the map's order,
 // the order in which the elements were first inserted (D105), and its
 // average constant time for `insert`, `remove` and `contains` (MYLA-310). An
-// element is what a map key can be: an integer, `char`, `bool` or `str`.
-// The set asks nothing more of `T` than the map does, so it takes the
-// tuples and structs that MYLA-313 makes keys (D163) as they come.
+// element is what a map key can be: a type that is `Eq` and `Hash` (D163,
+// MYLA-313), an integer, `char`, `bool`, `str`, a tuple or list of such, a
+// struct or enum with `#derive(Eq, Hash)`; so `T: Eq + Hash`.
 //
 // A constructor needs an expected type, which fixes `T` (MYLA-315):
 // `var s: Set<str> = set.new()`, a field, a parameter or a return type.
@@ -16,12 +16,12 @@ pub struct Set<T> {
 }
 
 // An empty set.
-pub fun new<T>() -> Set<T> {
+pub fun new<T: Eq + Hash>() -> Set<T> {
     return Set { m: [:] }
 }
 
 // The set of the elements of `xs`, in the order they first occur there.
-pub fun of<T>(xs: [T]) -> Set<T> {
+pub fun of<T: Eq + Hash>(xs: [T]) -> Set<T> {
     var m: [T: ()] = [:]
     for x in xs {
         m[x] = ()
@@ -29,7 +29,7 @@ pub fun of<T>(xs: [T]) -> Set<T> {
     return Set { m: m }
 }
 
-impl<T> Set<T> {
+impl<T: Eq + Hash> Set<T> {
     // Adds `x`; true if it wasn't in the set. An element already there
     // keeps its place.
     fun insert(var self, x: T) -> bool {
@@ -204,4 +204,24 @@ fun many_elements() {
         }
     }
     assert(n == s.len(), "contains agrees with len")
+}
+
+#derive(Eq, Hash)
+struct Spot {
+    name: str,
+    at: (int, int),
+}
+
+// Tuples and structs are elements as they are map keys (D163, MYLA-313).
+#test
+fun compound_elements() {
+    var cells: Set<(int, int)> = of([(0, 0), (1, 2), (0, 0)])
+    assert(cells.len() == 2 && cells.contains((1, 2)), "a tuple element")
+    assert(cells.insert((2, 1)) && !cells.insert((1, 2)), "insert says whether it was new")
+    var spots: Set<Spot> = new()
+    spots.insert(Spot { name: "a", at: (1, 1) })
+    spots.insert(Spot { name: "a", at: (1, 1) })
+    spots.insert(Spot { name: "b", at: (1, 1) })
+    assert(spots.len() == 2, "equal structs are one element")
+    assert(spots.remove(Spot { name: "a", at: (1, 1) }) && spots.items()[0].name == "b", "remove by value")
 }

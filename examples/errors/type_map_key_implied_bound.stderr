@@ -1,0 +1,5 @@
+type error: type 'P' does not satisfy the bound 'T: Eq' required by 'one', as 'T' is a map key in its signature
+  --> examples/errors/type_map_key_implied_bound.my:17:14
+   |
+17 |     print(one(P { a: 1 }).len())
+   |           ^^^^^^^^^^^^^^^

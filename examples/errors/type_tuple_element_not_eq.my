@@ -1,0 +1,12 @@
+//~ type error: cannot compare values of type '(int32, Bare)': 'Bare' isn't Eq (it needs 'impl Eq for Bare' or '#derive(Eq)')
+// `==` on a tuple compares its elements in turn, so each must be Eq
+// (D163): `Bare` is neither derived nor given an `impl Eq`.
+struct Bare {
+    v: int,
+}
+
+#main
+fun main() {
+    let a = (1, Bare { v: 2 })
+    print(a == (1, Bare { v: 2 }))
+}
