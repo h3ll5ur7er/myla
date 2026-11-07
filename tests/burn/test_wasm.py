@@ -253,12 +253,22 @@ class WasmImports(unittest.TestCase):
         self.assertEqual((grow, platform["MEMORY_GROW"]), (str(len(names) + 1), str(len(names) + 1)))
 
 
+# the stress programs that start child processes, which WASI has none of
+# (run_async is `Err(SpawnError.Unsupported)` there, which
+# WasmCapabilities.test_no_processes_is_unsupported checks)
+NEEDS_PROCESSES = {
+    "t27_children_read_as_they_write": "child processes, which WASI doesn't have",
+}
+
+
 class WasmTasks(unittest.TestCase):
     def test_stress_programs(self):
         # the concurrency stress programs on one worker (D125), in each order
         from .test_concurrency_stress import EXPECTED, SCHEDULES, _DIR
         for name, want in EXPECTED.items():
             with self.subTest(program=name), tempfile.TemporaryDirectory() as tmp:
+                if name in NEEDS_PROCESSES:
+                    self.skipTest(NEEDS_PROCESSES[name])
                 wb = os.path.join(tmp, name + ".wasm")
                 build_wasm(os.path.join(_DIR, name + ".my"), wb)
                 for extra in [{}] + [{"MYLA_SCHED": sched} for sched in SCHEDULES]:
