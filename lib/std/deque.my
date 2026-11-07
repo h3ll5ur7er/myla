@@ -1,0 +1,335 @@
+// std.deque: a double-ended queue, which is the queue too (MYLA-330, D164).
+//
+// `Deque<T>` is a ring buffer: a list of slots whose length is a power of
+// two, the slot of the front element, and the number of elements. Pushing
+// and popping at either end take constant time, growth doubles the slots
+// (amortized constant time), and an element is reached by its index in
+// constant time.
+//
+// A generic `T` has no value to fill an empty slot with, so the slots of a
+// new or grown buffer hold copies of elements already there (a doubling
+// appends the slots as they are, which also unwraps the elements that wrap
+// around). A slot keeps its value until it's written again: what a deque
+// holds on to is bounded by its slots, as a list's is by its capacity.
+//
+// A constructor needs an expected type, which fixes `T` (MYLA-315):
+// `var q: Deque<int> = deque.new()`, a field, a parameter or a return type.
+
+pub struct Deque<T> {
+    // The slots: none, or a power of two of them
+    buf: [T],
+    // The slot of the front element
+    head: int,
+    // The number of elements
+    n: int,
+    // The number of slots the first growth makes, from `with_capacity`
+    want: int,
+}
+
+// An empty deque.
+pub fun new<T>() -> Deque<T> {
+    return Deque { buf: [], head: 0, n: 0, want: 0 }
+}
+
+// An empty deque whose first push makes room for `n` elements, so that it
+// doesn't grow again before it holds more.
+pub fun with_capacity<T>(n: int) -> Deque<T> {
+    return Deque { buf: [], head: 0, n: 0, want: n }
+}
+
+// A deque of the elements of `xs`, `xs[0]` at the front.
+pub fun of<T>(xs: [T]) -> Deque<T> {
+    if xs.len() == 0 {
+        return new()
+    }
+    var slots = 4
+    while slots < xs.len() {
+        slots *= 2
+    }
+    var buf = xs
+    while buf.len() < slots {
+        buf.push(xs[0])
+    }
+    return Deque { buf: buf, head: 0, n: xs.len(), want: 0 }
+}
+
+impl<T> Deque<T> {
+    // The number of elements.
+    fun len(self) -> int {
+        return self.n
+    }
+
+    fun is_empty(self) -> bool {
+        return self.n == 0
+    }
+
+    // Adds `v` at the back.
+    fun push_back(var self, v: T) {
+        if self.n == self.buf.len() {
+            self.grow(v)
+        }
+        self.buf[(self.head + self.n) & (self.buf.len() - 1)] = v
+        self.n += 1
+    }
+
+    // Adds `v` at the front.
+    fun push_front(var self, v: T) {
+        if self.n == self.buf.len() {
+            self.grow(v)
+        }
+        self.head = (self.head - 1) & (self.buf.len() - 1)
+        self.buf[self.head] = v
+        self.n += 1
+    }
+
+    // Takes the element at the back, if there is one.
+    fun pop_back(var self) -> Option<T> {
+        if self.n == 0 {
+            return None
+        }
+        self.n -= 1
+        return Some(self.buf[(self.head + self.n) & (self.buf.len() - 1)])
+    }
+
+    // Takes the element at the front, if there is one.
+    fun pop_front(var self) -> Option<T> {
+        if self.n == 0 {
+            return None
+        }
+        let v = self.buf[self.head]
+        self.head = (self.head + 1) & (self.buf.len() - 1)
+        self.n -= 1
+        return Some(v)
+    }
+
+    // The element at the front, if there is one.
+    fun front(self) -> Option<T> {
+        if self.n == 0 {
+            return None
+        }
+        return Some(self.buf[self.head])
+    }
+
+    // The element at the back, if there is one.
+    fun back(self) -> Option<T> {
+        if self.n == 0 {
+            return None
+        }
+        return Some(self.buf[(self.head + self.n - 1) & (self.buf.len() - 1)])
+    }
+
+    // The element `i` places from the front (0 is the front), if `i` is an
+    // index of the deque.
+    fun get(self, i: int) -> Option<T> {
+        if i < 0 || i >= self.n {
+            return None
+        }
+        return Some(self.buf[(self.head + i) & (self.buf.len() - 1)])
+    }
+
+    // Sets the element `i` places from the front to `v`; an `i` out of
+    // bounds is a failure, as it is for a list.
+    fun set(var self, i: int, v: T) {
+        if i < 0 || i >= self.n {
+            panic(f"deque index {i} out of bounds for length {self.n}")
+        }
+        self.buf[(self.head + i) & (self.buf.len() - 1)] = v
+    }
+
+    // The elements, front to back.
+    fun items(self) -> [T] {
+        var out: [T] = []
+        let mask = self.buf.len() - 1
+        for i in 0..self.n {
+            out.push(self.buf[(self.head + i) & mask])
+        }
+        return out
+    }
+
+    // Doubles the slots; `push_back` and `push_front` call it when every
+    // slot is taken. The first growth makes 4 slots, or the power of two
+    // that `with_capacity` asked for. A doubling appends a copy of the slots,
+    // so the elements that wrapped around the end follow the others again.
+    fun grow(var self, v: T) {
+        let cap = self.buf.len()
+        if cap == 0 {
+            var slots = 4
+            while slots < self.want {
+                slots *= 2
+            }
+            for i in 0..slots {
+                self.buf.push(v)
+            }
+            return
+        }
+        for i in 0..cap {
+            self.buf.push(self.buf[i])
+        }
+    }
+}
+
+// --- tests -------------------------------------------------------------------
+// The functions are generic, which a `#test` case can't take (D116), so the
+// tests are test functions (D162).
+
+// Whether `xs` and `ys` hold the same elements in the same order.
+fun same<T: Eq>(xs: [T], ys: [T]) -> bool {
+    if xs.len() != ys.len() {
+        return false
+    }
+    for i in 0..xs.len() {
+        if xs[i] != ys[i] {
+            return false
+        }
+    }
+    return true
+}
+
+fun prepended<T>(v: T, xs: [T]) -> [T] {
+    var out = [v]
+    for x in xs {
+        out.push(x)
+    }
+    return out
+}
+
+fun is_some_of<T: Eq>(o: Option<T>, v: T) -> bool {
+    return match o {
+        Some(x) => x == v
+        None => false
+    }
+}
+
+fun is_none<T>(o: Option<T>) -> bool {
+    return match o {
+        Some(_) => false
+        None => true
+    }
+}
+
+#test
+fun both_ends() {
+    var d: Deque<int> = new()
+    assert(d.is_empty() && d.len() == 0, "a new deque is empty")
+    assert(is_none(d.pop_front()) && is_none(d.pop_back()), "popping an empty deque")
+    assert(is_none(d.front()) && is_none(d.back()), "the ends of an empty deque")
+    d.push_back(2)
+    d.push_back(3)
+    d.push_front(1)
+    d.push_front(0)
+    assert(d.len() == 4 && !d.is_empty(), "four elements")
+    assert(same(d.items(), [0, 1, 2, 3]), "front to back")
+    assert(is_some_of(d.front(), 0) && is_some_of(d.back(), 3), "the ends")
+    assert(is_some_of(d.pop_front(), 0), "pop_front")
+    assert(is_some_of(d.pop_back(), 3), "pop_back")
+    assert(is_some_of(d.pop_back(), 2), "pop_back again")
+    assert(is_some_of(d.pop_back(), 1), "the last one from the back")
+    assert(is_none(d.pop_front()) && d.is_empty(), "empty again")
+    d.push_front(7)
+    assert(is_some_of(d.pop_back(), 7), "pushed at the front, popped at the back")
+}
+
+#test
+fun as_a_queue() {
+    var q: Deque<str> = new()
+    var out: [str] = []
+    for i in 0..100 {
+        q.push_back(f"{i}")
+        if i % 3 == 2 {
+            if let Some(s) = q.pop_front() {
+                out.push(s)
+            }
+        }
+    }
+    while let Some(s) = q.pop_front() {
+        out.push(s)
+    }
+    assert(out.len() == 100, "every element came out")
+    for i in 0..100 {
+        assert(out[i] == f"{i}", "first in, first out")
+    }
+}
+
+#test
+fun indexing() {
+    var d: Deque<int> = new()
+    for i in 0..10 {
+        d.push_back(i)
+    }
+    for i in 0..6 {
+        d.pop_front()
+        d.push_back(10 + i)
+    }
+    // The front has moved on 6 slots, so the elements wrap around.
+    for i in 0..10 {
+        assert(is_some_of(d.get(i), 6 + i), f"get({i})")
+    }
+    assert(is_none(d.get(10)) && is_none(d.get(-1)), "out of bounds")
+    d.set(0, 100)
+    d.set(9, 109)
+    assert(is_some_of(d.front(), 100) && is_some_of(d.back(), 109), "set")
+    assert(same(d.items(), [100, 7, 8, 9, 10, 11, 12, 13, 14, 109]), "items after set")
+}
+
+#test
+fun growth_keeps_order() {
+    // Grow while the elements wrap around, from either end.
+    var d: Deque<int> = new()
+    var model: [int] = []
+    for i in 0..300 {
+        if i % 5 == 0 {
+            d.push_front(i)
+            model = prepended(i, model)
+        } else {
+            d.push_back(i)
+            model.push(i)
+        }
+        if i % 7 == 0 {
+            if let Some(v) = d.pop_front() {
+                assert(v == model[0], "pop_front agrees with the model")
+                model = model[1:]
+            }
+        }
+        if i % 11 == 0 {
+            if let Some(v) = d.pop_back() {
+                assert(v == model.pop(), "pop_back agrees with the model")
+            }
+        }
+        assert(d.len() == model.len(), "len agrees with the model")
+    }
+    assert(same(d.items(), model), "items agree with the model")
+    for i in 0..model.len() {
+        assert(is_some_of(d.get(i), model[i]), "get agrees with the model")
+    }
+}
+
+#test
+fun built_from_a_list() {
+    let d: Deque<int> = of([1, 2, 3, 4, 5])
+    assert(d.len() == 5 && same(d.items(), [1, 2, 3, 4, 5]), "of")
+    var e: Deque<char> = of([])
+    assert(e.is_empty(), "of an empty list")
+    e.push_front('b')
+    e.push_front('a')
+    assert(same(e.items(), ['a', 'b']), "pushing onto an empty one")
+    var f = d
+    f.push_front(0)
+    f.push_back(6)
+    assert(same(f.items(), [0, 1, 2, 3, 4, 5, 6]), "pushing onto one built from a list")
+    assert(same(d.items(), [1, 2, 3, 4, 5]), "a copy is a value of its own")
+}
+
+#test
+fun with_a_capacity() {
+    var d: Deque<int> = with_capacity(100)
+    assert(d.is_empty(), "empty")
+    d.push_back(1)
+    assert(d.buf.len() == 128, "the first growth makes the capacity, a power of two")
+    for i in 0..99 {
+        d.push_front(i)
+    }
+    assert(d.buf.len() == 128 && d.len() == 100, "no growth up to the capacity")
+    var z: Deque<int> = with_capacity(0)
+    z.push_back(1)
+    assert(z.buf.len() == 4 && is_some_of(z.pop_back(), 1), "a capacity of 0")
+}
