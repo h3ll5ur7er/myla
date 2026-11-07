@@ -2884,6 +2884,19 @@ impl Interp {
             return Value.VBool(value_eq(a, b))
         }
         let fi = self.func_idx(format("{}.{}", key, method))
+        if fi < 0 && method == "hash" && args.len() == 1 {
+            // a tuple's `hash` is the language's (D163): its elements' in turn
+            let rv = self.eval(recv)
+            match rv {
+                Value.VTuple(es) => {
+                    let h = self.eval(args[0])
+                    if self.stop() { return Value.VUnit }
+                    return self.hash_all(es, h)
+                },
+                Value.VUnit => { return self.eval(args[0]) },
+                _ => {},
+            }
+        }
         if fi >= 0 {
             // the receiver first (once), then the arguments, as in Python;
             // an actor's handle is passed as it is: its methods change the actor
@@ -2914,6 +2927,24 @@ impl Interp {
         // not a method: a struct field holding a closure, called indirectly
         let fv = get_field(self.eval(recv), method)
         return self.call_value(fv, self.eval_args(args))
+    }
+
+    // The hasher `h` given each of `xs` in turn, through its type's `hash`
+    // (a tuple's its elements', D163).
+    fun hash_all(var self, xs: [Value], h: Value) -> Value {
+        var g = h
+        for x in xs {
+            match x {
+                Value.VTuple(es) => { g = self.hash_all(es, g) },
+                Value.VUnit => {},
+                _ => {
+                    let (rv, fs) = self.call_method(self.func_idx(value_key(x) + ".hash"), x, [g])
+                    g = rv
+                },
+            }
+            if self.stop() { return Value.VUnit }
+        }
+        return g
     }
 
     // The runtime method-dispatch key for a receiver: its checker-resolved type

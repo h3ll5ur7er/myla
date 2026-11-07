@@ -157,11 +157,13 @@ struct Loader {
 
 // The modules of the standard library every program sees without an import
 // (D164, MYLA-320), as `std.<name>`: the methods of their impls on the
-// built-in types. They are loaded for a program whose entry file isn't a
-// module of `std` (whose modules import what they use), and bind no name.
-#test()[["str", "char", "int", "list", "option", "map"]]
+// built-in types, and std.hash's on the prelude's `Hasher` with the `Hash`
+// impls of the built-in types (D163, MYLA-313). They are loaded for a
+// program whose entry file isn't a module of `std` (whose modules import
+// what they use), and bind no name.
+#test()[["str", "char", "int", "list", "option", "map", "hash"]]
 pub fun implicit_modules() -> [str] {
-    return ["str", "char", "int", "list", "option", "map"]
+    return ["str", "char", "int", "list", "option", "map", "hash"]
 }
 
 #test([0, 2], 2)[true]

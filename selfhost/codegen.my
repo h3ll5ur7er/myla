@@ -22,7 +22,7 @@ from .inline import inlinable, inline_calls, same_module, may_inline, merge_bloc
 from .hoist import hoist_cows
 from .ranges import widen_counters
 from .anf import Norm, new_norm
-from .lower import async_fnval_ir, lower_function, lower_lambda, blocked_types, Lowered, myla_runtime_function, derived_eq_ir, compound_eq_ir, walk_ir, drop_entry_ir, dropb_slow_ir, list_drop_slow_ir, map_drop_slow_ir, clone_ir, deep_walk_ir, deep_cell_ir, Routine, Want, env_drop_ir, env_deep_ir, partial_ir, frame_new_ir
+from .lower import async_fnval_ir, lower_function, lower_lambda, blocked_types, Lowered, myla_runtime_function, derived_eq_ir, compound_eq_ir, tuple_hash_ir, walk_ir, drop_entry_ir, dropb_slow_ir, list_drop_slow_ir, map_drop_slow_ir, clone_ir, deep_walk_ir, deep_cell_ir, Routine, Want, env_drop_ir, env_deep_ir, partial_ir, frame_new_ir
 import .ir_x86 as ir_x86
 import .ownership as ownership
 import .runtime_x86 as runtime_x86
@@ -3258,6 +3258,7 @@ impl CodeGen {
         let name = type_job_name(w)
         var r = Routine { f: empty_ir(name), wants: [] }
         if w.kind == 7 { r = compound_eq_ir(self, w.t, name) }
+        if w.kind == 8 { r = tuple_hash_ir(self, w.t, name) }
         self.emit_routine(r.f, -1, 0, 0)
         self.request_wants(r.wants)
     }
@@ -4089,9 +4090,12 @@ fun lp(tok: str) -> str {
 }
 
 // The name of the routine a `Want` of kind 7 or more asks for (MYLA-313):
-// `__eq_<T>` the equality of a tuple or list type.
+// 7 `__eq_<T>`, the equality of a tuple or list type; 8 `__thash_<T>`, a
+// tuple's `hash`.
 #test(Want { kind: 7, t: Type.TTuple([Type.TInt(32, true), Type.TStr]), clone: false })["__eq_.T4.i324.str"]
+#test(Want { kind: 8, t: Type.TTuple([Type.TChar]), clone: false })["__thash_.T5.char"]
 pub fun type_job_name(w: Want) -> str {
+    if w.kind == 8 { return "__thash_" + mono_token(w.t) }
     return "__eq_" + mono_token(w.t)
 }
 

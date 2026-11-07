@@ -336,8 +336,10 @@ class ImplicitCompletion(LspRequestHelpers, unittest.TestCase):
     def test_methods_of_the_implicit_modules(self) -> None:
         head = ("fun main() {\n    let s = \"hi\"\n    let c = 'a'\n    let n: int = 2\n    let xs = [1, 2]\n"
                 "    let m = [\"a\": 1]\n")
-        for typed, expected in (("s.", ["begins", "scratch", "shout"]), ("c.", ["is_vowel"]), ("n.", ["doubled"]),
-                                ("xs.", ["head_or", "second"]), ("m.", ["size"])):
+        # (std.hash is implicit too: its `Hash` impls give `hash`, MYLA-313)
+        for typed, expected in (("s.", ["begins", "hash", "scratch", "shout"]), ("c.", ["hash", "is_vowel"]),
+                                ("n.", ["doubled", "hash"]),
+                                ("xs.", ["hash", "head_or", "second"]), ("m.", ["size"])):
             with self.subTest(typed=typed):
                 uri = self.open(head + "    " + typed + "\n}\n", name=typed[:-1] + ".my")
                 self.assertEqual(self.labels(uri, 6, 4 + len(typed)), expected)

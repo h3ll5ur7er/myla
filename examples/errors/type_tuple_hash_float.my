@@ -1,0 +1,9 @@
+//~ type error: type '(int32, float64)' has no method 'hash': 'float64' isn't Hash (NaN is unequal to itself)
+// A tuple is `Hash` when its elements are (D163); a float isn't.
+import std.hash as hash
+
+#main
+fun main() {
+    let t = (1, 2.5)
+    print(t.hash(hash.new()).finish())
+}

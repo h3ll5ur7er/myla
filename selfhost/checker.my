@@ -1064,9 +1064,15 @@ fun negated_misfit(x: Expr) -> str {
 
 
 fun impl_eq_target_name(d: Decl) -> Option<str> {
+    return impl_target_name(d, "Eq")
+}
+
+// The type an `impl <trnm> for T` declaration `d` is for, by name; none for
+// another declaration.
+fun impl_target_name(d: Decl, trnm: str) -> Option<str> {
     match d.kind {
         DeclKind.ImplDecl(tg, m, tp, tn, ta, dattrs) => {
-            let is_eq = match tn { Some(t) => t == "Eq", None => false }
+            let is_eq = match tn { Some(t) => t == trnm, None => false }
             if !is_eq { return None }
             match tg.kind {
                 TypeKind.TRef(nm, args) => { return Some(nm) },
@@ -1506,6 +1512,7 @@ pub struct Checker {
     method_decl_keys: [str],
     method_decl_ids: [int32],       // each method's impl declaration
     impl_decls: [Decl],
+    next_id: int32,            // the first node id no declaration has: a derived impl's (MYLA-313)
     traits: [TraitInfo],
     trait_decls: [Decl],
     trait_impls: [TraitImplPair],
@@ -1614,7 +1621,7 @@ fun new_checker(decls: [Decl]) -> Checker {
         decls: decls,
         structs: [], enums: [], recursive_enums: [],
         functions: [], methods: [], method_decls: [], method_decl_keys: [], method_decl_ids: [],
-        impl_decls: [], traits: [], trait_decls: [], trait_impls: [], user_trait_impls: [],
+        impl_decls: [], next_id: 1000000000, traits: [], trait_decls: [], trait_impls: [], user_trait_impls: [],
         aliases: [], alias_cache: [], const_decls: [], consts: [], const_values: [:], const_done: [], const_folding: [],
         allow_self: false, type_params: [], bounds_cur: [],
         cur_ret: None, has_cur_ret: false, ret_at: None, loop_depth: 0, defer_at: -1,
@@ -3503,25 +3510,37 @@ impl Checker {
     #test(checker_on("[int]"), Type.TTuple([Type.TInt(32, true), Type.TStruct("P", [])]))["'P' isn't Eq (it needs 'impl Eq for P' or '#derive(Eq)')"]
     #test(checker_on("[int]"), Type.TList(Type.TMap(Type.TStr, Type.TStr)))["'[str: str]' isn't Eq"]
     fun not_eq_why(self, t: Type) -> str {
+        return self.not_trait_why(t, "Eq")
+    }
+
+    // `not_eq_why` for `Hash`: a float isn't, as NaN is unequal to itself.
+    #test(checker_on("[int]"), Type.TTuple([Type.TInt(32, true), Type.TFloat(64)]))["'float64' isn't Hash (NaN is unequal to itself)"]
+    fun not_hash_why(self, t: Type) -> str {
+        return self.not_trait_why(t, "Hash")
+    }
+
+    // Why the tuple or list type `t` isn't `trnm` (`Eq` or `Hash`).
+    fun not_trait_why(self, t: Type, trnm: str) -> str {
         var inner: [Type] = []
         match t {
             Type.TTuple(es) => { inner = es },
             Type.TList(et) => { inner = [et] },
-            _ => {},
+            _ => { inner = [t] },
         }
         for et in inner {
-            let ok = match self.type_implements(et, "Eq") {
+            let ok = match self.type_implements(et, trnm) {
                 Ok(b) => b,
                 Err(x) => true,
             }
             if !ok {
-                if is_compound_eq(et) { return self.not_eq_why(et) }
-                if is_struct_or_enum(et) { return format("'{}' isn't Eq (it needs 'impl Eq for {}' or '#derive(Eq)')", type_name(et), type_name(et)) }
-                if is_type_param(et) { return format("'{}' isn't Eq (it needs the bound '{}: Eq')", type_name(et), type_name(et)) }
-                return format("'{}' isn't Eq", type_name(et))
+                if is_compound_eq(et) { return self.not_trait_why(et, trnm) }
+                if is_struct_or_enum(et) { return format("'{}' isn't {} (it needs 'impl {} for {}' or '#derive({})')", type_name(et), trnm, trnm, type_name(et), trnm) }
+                if is_type_param(et) { return format("'{}' isn't {} (it needs the bound '{}: {}')", type_name(et), trnm, type_name(et), trnm) }
+                if is_float(et) && trnm == "Hash" { return format("'{}' isn't Hash (NaN is unequal to itself)", type_name(et)) }
+                return format("'{}' isn't {}", type_name(et), trnm)
             }
         }
-        return "its elements aren't Eq"
+        return format("its elements aren't {}", trnm)
     }
 
     #test(checker_on("[int]"), "T", "Eq")[false]
@@ -5426,6 +5445,137 @@ fun is_eq_type(t: Type, eq_names: [str]) -> bool {
     }
 }
 
+// Whether `t` is `Hash` for a derived impl's field, the structs and enums
+// among `hash_names` being so (D163): not a float, nor anything holding one.
+#test(Type.TTuple([Type.TInt(32, true), Type.TStr]), [])[true]
+#test(Type.TList(Type.TFloat(64)), [])[false]
+#test(Type.TStruct("P", []), ["P"])[true]
+fun is_hash_type(t: Type, hash_names: [str]) -> bool {
+    return match t {
+        Type.TInt(w, s) => true,
+        Type.TBool => true,
+        Type.TStr => true,
+        Type.TChar => true,
+        Type.TError => true,          // has had its error (MYLA-110)
+        Type.TTuple(es) => all_hash_types(es, hash_names),
+        Type.TList(e) => is_hash_type(e, hash_names),
+        Type.TStruct(n, a) => contains_str(hash_names, n),
+        Type.TEnum(n, a) => contains_str(hash_names, n),
+        _ => false,
+    }
+}
+
+fun all_hash_types(ts: [Type], hash_names: [str]) -> bool {
+    for t in ts {
+        if !is_hash_type(t, hash_names) { return false }
+    }
+    return true
+}
+
+// What a refusal of a field of type `t` adds when `t` is or holds a float.
+#test(Type.TFloat(64))[" (a float isn't: NaN is unequal to itself; a hand-written 'impl Hash' may add 'math.to_bits(x)')"]
+#test(Type.TStr)[""]
+fun float_note(t: Type) -> str {
+    if holds_float(t) { return " (a float isn't: NaN is unequal to itself; a hand-written 'impl Hash' may add 'math.to_bits(x)')" }
+    return ""
+}
+
+#test(Type.TTuple([Type.TStr, Type.TList(Type.TFloat(32))]))[true]
+#test(Type.TInt(8, true))[false]
+fun holds_float(t: Type) -> bool {
+    return match t {
+        Type.TFloat(w) => true,
+        Type.TTuple(es) => {
+            for e in es {
+                if holds_float(e) { return true }
+            }
+            false
+        },
+        Type.TList(e) => holds_float(e),
+        _ => false,
+    }
+}
+
+// Whether the derive attributes among `attrs` name the trait `trnm`.
+fun derives(attrs: [Attribute], trnm: str) -> bool {
+    for a in attrs {
+        if a.name == "derive" {
+            for arg in a.args {
+                match arg.kind {
+                    ExprKind.Name(n) => { if n == trnm { return true } },
+                    _ => {},
+                }
+            }
+        }
+    }
+    return false
+}
+
+// Whether `d` is an inherent `impl <name> { … }`.
+fun impl_of_type(d: Decl, name: str) -> bool {
+    return match d.kind {
+        DeclKind.ImplDecl(tg, m, tp, tn, ta, dattrs) => match tn {
+            Some(t) => false,
+            None => match tg.kind {
+                TypeKind.TRef(nm, args) => nm == name,
+                _ => false,
+            },
+        },
+        _ => false,
+    }
+}
+
+// The source of a derived `impl Hash` (D163) for a type `parts` describes
+// (`derived_parts`), for a placeholder type `Derived` that `impl_for`
+// names: a struct's fields, or an enum's variant index and payload.
+#test([("x", -1), ("y", -1)])["impl Hash for Derived {\n    fun hash(self, hasher: Hasher) -> Hasher {\n        return hasher.add(self.x).add(self.y)\n    }\n}\n"]
+#test([("A", 0), ("B", 2)])["impl Hash for Derived {\n    fun hash(self, hasher: Hasher) -> Hasher {\n        return match self {\n            A => hasher.add_u64(0)\n            B(field0, field1) => hasher.add_u64(1).add(field0).add(field1)\n        }\n    }\n}\n"]
+fun derived_hash_src(parts: [(str, int32)]) -> str {
+    var sb = StringBuilder()
+    sb.append("impl Hash for Derived {\n    fun hash(self, hasher: Hasher) -> Hasher {\n")
+    let is_enum = parts.len() > 0 && parts[0].1 >= 0
+    if !is_enum {
+        sb.append("        return hasher")
+        for p in parts { sb.append(f".add(self.{p.0})") }
+        sb.append("\n")
+    } else {
+        sb.append("        return match self {\n")
+        var i = 0
+        for p in parts {
+            sb.append(f"            {p.0}")
+            if p.1 > 0 {
+                sb.append("(")
+                var k = 0
+                while k < p.1 {
+                    if k > 0 { sb.append(", ") }
+                    sb.append(f"field{k}")
+                    k += 1
+                }
+                sb.append(")")
+            }
+            sb.append(f" => hasher.add_u64({i})")
+            var k = 0
+            while k < p.1 {
+                sb.append(f".add(field{k})")
+                k += 1
+            }
+            sb.append("\n")
+            i += 1
+        }
+        sb.append("        }\n")
+    }
+    sb.append("    }\n}\n")
+    return sb.build()
+}
+
+// The impl `d` (`impl Hash for Derived`), for the type `name` instead.
+fun impl_for(d: Decl, name: str) -> Decl {
+    return match d.kind {
+        DeclKind.ImplDecl(tg, m, tp, tn, ta, dattrs) => Decl { id: d.id, line: d.line, col: d.col, sp: d.sp, kind: DeclKind.ImplDecl(TypeExpr { id: tg.id, line: tg.line, col: tg.col, sp: tg.sp, kind: TypeKind.TRef(name, []) }, m, tp, tn, ta, dattrs) },
+        _ => d,
+    }
+}
+
 #test([Type.TInt(32, true), Type.TStr], [])[true]
 #test([Type.TStruct("Bare", [])], ["Holder"])[false]
 fun all_eq_types(ts: [Type], eq_names: [str]) -> bool {
@@ -5457,14 +5607,23 @@ impl Checker {
                     Err(e) => {
                         self.record(e)?
                         // Eq is broken for the type: its uses stop silently (MYLA-110)
-                        if is_se { self.broken_impls["Eq\t" + decl_kind_name(decl)] = true }
+                        if is_se {
+                            self.broken_impls["Eq\t" + decl_kind_name(decl)] = true
+                            self.broken_impls["Hash\t" + decl_kind_name(decl)] = true
+                        }
                     },
                 }
             }
         }
         if targets.len() == 0 { return Ok(0) }
+        var eq_targets: [Decl] = []
+        var hash_targets: [Decl] = []
+        for d in targets {
+            if derives(decl_attrs(d), "Eq") { eq_targets.push(d) }
+            if derives(decl_attrs(d), "Hash") { hash_targets.push(d) }
+        }
         var eq_names: [str] = []
-        for d in targets { eq_names.push(decl_kind_name(d)) }
+        for d in eq_targets { eq_names.push(decl_kind_name(d)) }
         // an `impl Eq` for a type that doesn't exist may have been meant for
         // any of them: a type that isn't Eq is then no news (MYLA-110)
         var lost_eq = false
@@ -5477,7 +5636,7 @@ impl Checker {
                 None => {},
             }
         }
-        for decl in targets {
+        for decl in eq_targets {
             self.cur_decl = decl.id
             let name = decl_kind_name(decl)
             // explicit `impl Eq for name`? (it stands)
@@ -5509,6 +5668,120 @@ impl Checker {
             self.trait_impls.push(TraitImplPair { trait_name: "Eq", key: name })
             self.user_trait_impls.push(TraitImplPair { trait_name: "Eq", key: name })
         }
+        if hash_targets.len() > 0 { self.derive_hashes(hash_targets, eq_names)? }
+        return Ok(0)
+    }
+
+    // `#derive(Hash)` (D163, MYLA-313) of each of `targets`: an `impl Hash`
+    // written for it, as source, and checked and run as any other, its
+    // fields added in order (`h.add(self.x).add(self.y)`), an enum's variant
+    // index first and then its payload. The type must be `Eq` (`eq_names`,
+    // derived or written) and its fields `Hash`; a float field isn't.
+    fun derive_hashes(var self, targets: [Decl], eq_names: [str]) -> Result<int32, CheckErr> {
+        var hash_names: [str] = []
+        for d in targets { hash_names.push(decl_kind_name(d)) }
+        var lost = false
+        var has_hasher = false
+        for d in self.impl_decls {
+            match impl_target_name(d, "Hash") {
+                Some(nm) => {
+                    if !contains_str(hash_names, nm) { hash_names.push(nm) }
+                    if !self.names_a_type(nm) { lost = true }
+                },
+                None => {},
+            }
+            if impl_of_type(d, "Hasher") { has_hasher = true }
+        }
+        for decl in targets {
+            self.cur_decl = decl.id
+            let name = decl_kind_name(decl)
+            var explicit = false
+            for d in self.impl_decls {
+                match impl_target_name(d, "Hash") {
+                    Some(nm) => { if nm == name { explicit = true } },
+                    None => {},
+                }
+            }
+            if explicit {
+                self.record(terr_at(decl.line, decl.col, decl.sp, format("type '{}' both derives Hash and has an explicit 'impl Hash for {}'", name, name)))?
+                continue
+            }
+            if self.broken_impls.contains("Eq\t" + name) {
+                // its Eq failed, with its own error
+                self.broken_impls["Hash\t" + name] = true
+                continue
+            }
+            if !contains_str(eq_names, name) {
+                self.record(terr_at(decl.line, decl.col, decl.sp, format("cannot derive Hash for '{}': it isn't Eq; derive both, '#derive(Eq, Hash)', or write 'impl Eq for {}'", name, name)))?
+                self.broken_impls["Hash\t" + name] = true
+                continue
+            }
+            match self.check_derivable_hash(decl, name, hash_names) {
+                Ok(x) => {},
+                Err(e) => {
+                    if !lost { self.record(e)? }
+                    self.broken_impls["Hash\t" + name] = true
+                    continue
+                },
+            }
+            if !has_hasher {
+                // only a module of `std` can lack std.hash (it is implicit)
+                self.record(terr_at(decl.line, decl.col, decl.sp, format("cannot derive Hash for '{}' without std.hash's 'Hasher' methods: import std.hash", name)))?
+                self.broken_impls["Hash\t" + name] = true
+                continue
+            }
+            let src = derived_hash_src(self.derived_parts(name))
+            match parse_source(src, self.next_id) {
+                Ok(p) => {
+                    self.next_id = p.next_id
+                    for d in p.program.decls {
+                        let made = impl_for(d, name)
+                        self.decls.push(made)
+                        self.impl_decls.push(made)
+                    }
+                },
+                Err(d) => { panic("a derived Hash impl does not parse") },
+            }
+        }
+        return Ok(0)
+    }
+
+    // What a derived `hash` of the struct or enum `name` adds: a struct's
+    // field names; an enum's variants, each its name and payload's length.
+    #test(checker_on("enum E { A, B(int, str) }"), "E")[[("A", 0), ("B", 2)]]
+    #test(checker_on("struct P { x: int, y: str }"), "P")[[("x", -1), ("y", -1)]]
+    fun derived_parts(self, name: str) -> [(str, int32)] {
+        var out: [(str, int32)] = []
+        let si = self.struct_idx(name)
+        if si >= 0 {
+            for f in self.structs[si].fields { out.push((f.name, -1)) }
+            return out
+        }
+        let ei = self.enum_idx(name)
+        if ei >= 0 {
+            for v in self.enums[ei].variants { out.push((v.name, v.payload.len() as int32)) }
+        }
+        return out
+    }
+
+    fun check_derivable_hash(self, decl: Decl, name: str, hash_names: [str]) -> Result<int32, CheckErr> {
+        let si = self.struct_idx(name)
+        if si >= 0 {
+            for f in self.structs[si].fields {
+                if !is_hash_type(f.ty, hash_names) { return Err(terr_at(decl.line, decl.col, decl.sp, format("cannot derive Hash for struct '{}': field '{}' has type '{}', which isn't Hash{}", name, f.name, type_name(f.ty), float_note(f.ty)))) }
+            }
+            return Ok(0)
+        }
+        let ei = self.enum_idx(name)
+        if ei >= 0 {
+            for v in self.enums[ei].variants {
+                var i = 0
+                for pt in v.payload {
+                    if !is_hash_type(pt, hash_names) { return Err(terr_at(decl.line, decl.col, decl.sp, format("cannot derive Hash for enum '{}': payload #{} of variant '{}' has type '{}', which isn't Hash{}", name, i, v.name, type_name(pt), float_note(pt)))) }
+                    i = i + 1
+                }
+            }
+        }
         return Ok(0)
     }
 
@@ -5520,7 +5793,7 @@ impl Checker {
             DeclKind.EnumDecl(n, v, a, t, p) => t.len() > 0,
             _ => false,
         }
-        if has_tps { return Err(terr_at(attr.line, attr.col, attr.sp, "deriving on generic types is not supported yet (Eq is derived for concrete structs and enums)")) }
+        if has_tps { return Err(terr_at(attr.line, attr.col, attr.sp, "deriving on generic types is not supported yet (Eq and Hash are derived for concrete structs and enums)")) }
         return self.validate_derive_attr(attr)
     }
 
@@ -5538,7 +5811,7 @@ impl Checker {
         if attr.args.len() == 0 { return Err(terr_at(attr.line, attr.col, attr.sp, "'#derive' needs at least one trait, e.g. #derive(Eq)")) }
         for a in attr.args {
             match a.kind {
-                ExprKind.Name(id) => { if id != "Eq" { return Err(terr_at(a.line, a.col, a.sp, format("cannot derive '{}': only 'Eq' is derivable", id))) } },
+                ExprKind.Name(id) => { if id != "Eq" && id != "Hash" { return Err(terr_at(a.line, a.col, a.sp, format("cannot derive '{}': only 'Eq' and 'Hash' are derivable", id))) } },
                 _ => { return Err(terr_at(a.line, a.col, a.sp, "'#derive' arguments must be trait names")) },
             }
         }
@@ -6326,9 +6599,14 @@ impl Checker {
     }
 }
 
-#test()["enum Option<T> { Some(T), None }\nenum Result<T, E> { Ok(T), Err(E) }\nfun get<K, V>(m: [K: V], k: K) -> Option<V> {\n    if m.contains(k) {\n        return Some(m[k])\n    }\n    return None\n}\ntrait Format {\n    fun format(self, spec: str) -> str\n}\n"]
+#test()["enum Option<T> { Some(T), None }\nenum Result<T, E> { Ok(T), Err(E) }\nfun get<K, V>(m: [K: V], k: K) -> Option<V> {\n    if m.contains(k) {\n        return Some(m[k])\n    }\n    return None\n}\ntrait Format {\n    fun format(self, spec: str) -> str\n}\nstruct Hasher {\n    state: uint64,\n}\nimpl Eq for Hasher {\n    fun eq(self, other: Hasher) -> bool {\n        return self.state == other.state\n    }\n}\ntrait Hash {\n    fun hash(self, h: Hasher) -> Hasher\n}\n"]
+// The prelude: what every program has without an import. The `Hasher`'s
+// state and the `Hash` trait are here (D163, MYLA-313), so that every type
+// can be a map key's and every module can name them; the hasher's methods,
+// its algorithm, and the `Hash` impls of the built-in types are std.hash's,
+// an implicit module.
 fun prelude_src() -> str {
-    return "enum Option<T> { Some(T), None }\nenum Result<T, E> { Ok(T), Err(E) }\nfun get<K, V>(m: [K: V], k: K) -> Option<V> {\n    if m.contains(k) {\n        return Some(m[k])\n    }\n    return None\n}\ntrait Format {\n    fun format(self, spec: str) -> str\n}\n"
+    return "enum Option<T> { Some(T), None }\nenum Result<T, E> { Ok(T), Err(E) }\nfun get<K, V>(m: [K: V], k: K) -> Option<V> {\n    if m.contains(k) {\n        return Some(m[k])\n    }\n    return None\n}\ntrait Format {\n    fun format(self, spec: str) -> str\n}\nstruct Hasher {\n    state: uint64,\n}\nimpl Eq for Hasher {\n    fun eq(self, other: Hasher) -> bool {\n        return self.state == other.state\n    }\n}\ntrait Hash {\n    fun hash(self, h: Hasher) -> Hasher\n}\n"
 }
 
 // The prelude's declarations, with node ids from `first_id`.
@@ -6375,6 +6653,7 @@ pub fun build_checker_std(decls: [Decl], next_id: int32, primitives: bool, std_i
     var c = new_checker(all)
     c.primitives = primitives
     c.std_impls = std_impls
+    c.next_id = pre.next_id
     let r = c.run_all()
     match r { Ok(x) => {}, Err(e) => { return Err(e) } }
     // every call with all its arguments, for whatever runs the program (D136)
@@ -7179,6 +7458,18 @@ impl Checker {
         // a type parameter's bounds give it their traits' methods (MYLA-291)
         match recv_type {
             Type.TParam(pn) => { return self.bound_method_call(e, target, pn, field, args) },
+            // a tuple of `Hash` elements is `Hash` itself (D163): no impl can
+            // name a tuple, so its `hash` is the language's
+            Type.TTuple(es) => {
+                if field == "hash" {
+                    if !self.type_implements(recv_type, "Hash")? { return Err(terr_at(e.line, e.col, e.sp, format("type '{}' has no method 'hash': {}", type_name(recv_type), self.not_hash_why(recv_type)))) }
+                    if args.len() != 1 { return Err(terr_at(e.line, e.col, e.sp, format("method 'hash' expects 1 argument(s), got {}", args.len()))) }
+                    let hasher = Type.TStruct("Hasher", [])
+                    let ht = self.expect_value(args[0], Some(hasher))?
+                    if !type_eq(ht, hasher) { return Err(terr_at(args[0].line, args[0].col, args[0].sp, format("argument type mismatch in call to 'hash': expected 'Hasher', found '{}'", type_name(ht)))) }
+                    return Ok(Some(hasher))
+                }
+            },
             _ => {},
         }
         let key_opt = self.type_key(recv_type)

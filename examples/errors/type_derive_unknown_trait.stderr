@@ -1,0 +1,5 @@
+type error: cannot derive 'Ord': only 'Eq' and 'Hash' are derivable
+  --> examples/errors/type_derive_unknown_trait.my:3:9
+  |
+3 | #derive(Ord)
+  |         ^^^

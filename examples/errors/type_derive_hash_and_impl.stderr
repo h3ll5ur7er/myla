@@ -1,0 +1,5 @@
+type error: type 'Pos' both derives Hash and has an explicit 'impl Hash for Pos'
+  --> examples/errors/type_derive_hash_and_impl.my:4:1
+  |
+4 | struct Pos {
+  | ^^^^^^^^^^^^

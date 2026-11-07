@@ -15,6 +15,85 @@ PROGRAMS = {
     # a method called on a field whose type is a type parameter is found in
     # the interpreter too (MYLA-365)
     "method_on_a_type_parameter_field": 'trait Step { fun step(self) -> int }\nstruct One { n: int }\nimpl Step for One { fun step(self) -> int { return self.n + 1 } }\nstruct Wrap<R> { inner: R }\nimpl<R: Step> Wrap<R> {\n    fun go(self) -> int { return self.inner.step() }\n}\n#main\nfun main() {\n    let w = Wrap { inner: One { n: 4 } }\n    print(w.go())\n}\n',
+    # the `Hash` trait (D163, MYLA-313): the built-in types' impls (integers by
+    # value, a list with its length), a tuple's, `#derive(Hash)` of structs and
+    # enums (the fields in order, a variant's index first), a hand-written impl,
+    # and `Hasher.add`, each against the hasher's own adds
+    "hash_trait_and_derive": (
+        "import std.hash as hash\n"
+        "\n"
+        "#derive(Eq, Hash)\n"
+        "struct Pos {\n"
+        "    x: int,\n"
+        "    y: int,\n"
+        "}\n"
+        "\n"
+        "#derive(Eq, Hash)\n"
+        "struct Named {\n"
+        "    name: str,\n"
+        "    at: Pos,\n"
+        "    tags: [str],\n"
+        "    pair: (int64, char),\n"
+        "}\n"
+        "\n"
+        "#derive(Eq, Hash)\n"
+        "enum Cell {\n"
+        "    Wall,\n"
+        "    Open(int),\n"
+        "    Door(str, Pos),\n"
+        "}\n"
+        "\n"
+        "// a hand-written impl, and a float hashed through its bits\n"
+        "struct Reading {\n"
+        "    at: int,\n"
+        "    value: float,\n"
+        "}\n"
+        "\n"
+        "impl Eq for Reading {\n"
+        "    fun eq(self, other: Reading) -> bool {\n"
+        "        return self.at == other.at\n"
+        "    }\n"
+        "}\n"
+        "\n"
+        "impl Hash for Reading {\n"
+        "    fun hash(self, h: Hasher) -> Hasher {\n"
+        "        return h.add(self.at)\n"
+        "    }\n"
+        "}\n"
+        "\n"
+        "fun digest<T: Hash>(x: T) -> uint64 {\n"
+        "    return x.hash(hash.new()).finish()\n"
+        "}\n"
+        "\n"
+        "fun main() {\n"
+        "    print(f\"{digest(5):#x} {digest(5i64):#x} {digest(255u8):#x} {digest(-1i8):#x}\")\n"
+        "    print(f\"{digest('a'):#x} {digest(true):#x} {digest(\"abc\"):#x}\")\n"
+        "    let big: int64 = 5000000000\n"
+        "    let top: uint64 = 18446744073709551615\n"
+        "    print(f\"{digest(big):#x} {digest(top):#x} {digest([big, 1]):#x}\")\n"
+        "    print(f\"{digest([1, 2, 3]):#x} {digest([\"a\", \"b\"]):#x}\")\n"
+        "    // a list adds its length: these differ\n"
+        "    print(digest(([1], [2, 3])) != digest(([1, 2], [3])))\n"
+        "    let p = Pos { x: 1, y: 2 }\n"
+        "    print(digest(p) == hash.new().add_i32(1).add_i32(2).finish())\n"
+        "    print(digest(p) == digest((1, 2)))\n"
+        "    print(f\"{digest(p):#x}\")\n"
+        "    let n = Named { name: \"n\", at: p, tags: [\"a\", \"b\"], pair: (big, 'z') }\n"
+        "    print(f\"{digest(n):#x}\")\n"
+        "    print(digest(n) == hash.new().add_str(\"n\").add(p).add([\"a\", \"b\"]).add_i64(big).add_char('z').finish())\n"
+        "    print(digest(Cell.Wall) == hash.new().add_u64(0).finish())\n"
+        "    print(f\"{digest(Cell.Open(3)):#x} {digest(Cell.Door(\"d\", p)):#x}\")\n"
+        "    print(digest(Cell.Door(\"d\", p)) == hash.new().add_u64(2).add_str(\"d\").add(p).finish())\n"
+        "    print(f\"{digest(((1, 'a'), [true, false], ())):#x}\")\n"
+        "    print(f\"{(1, \"x\").hash(hash.new()).finish():#x}\")\n"
+        "    print(f\"{[(1, 2), (3, 4)].hash(hash.new()).finish():#x}\")\n"
+        "    print(digest(Reading { at: 3, value: 0.5 }) == digest(Reading { at: 3, value: 9.0 }))\n"
+        "    print(hash.new().add(7) == hash.new().add_i32(7))\n"
+        "    var h = hash.new()\n"
+        "    h = h.add(p).add((3, \"q\")).add(Cell.Wall)\n"
+        "    print(f\"{h.finish():#x}\")\n"
+        "}\n"
+    ),
     # `==` and `!=` on tuples and lists whose elements are Eq (D163, MYLA-313):
     # nested, with strings, floats (NaN unequal, 0.0 and -0.0 equal), packed
     # lists, a struct's own `eq`, derived Eq over tuple and list fields, a bound
@@ -4122,6 +4201,8 @@ PINNED = {
     # MYLA-365, MYLA-366: new; native code gives the same
     "try_in_a_call_argument": "err bad\n",
     "method_on_a_type_parameter_field": "5\n",
+    # MYLA-313: new; the interpreter gives the same
+    "hash_trait_and_derive": "0xb5b61ff8e7f24a67 0xb5b61ff8e7f24a67 0xd6456ad28572a8f 0x70bc9b8185eefae3\n0x390831630ea9884a 0x59b81abf6522ad07 0x2a4f1d7cb516c72\n0xff3dc34ebf38684d 0x70bc9b8185eefae3 0xfc4894f325fbbe64\n0xb588589b83562bca 0xb33117f322973c8e\ntrue\ntrue\ntrue\n0x4e0a109fae7c734b\n0xed98eb641d3fbd53\ntrue\ntrue\n0x670e93ec0fc81a67 0x969687c72d6781a0\ntrue\n0xd93bdbded0c7bfaa\n0x547db8c134aeb86a\n0x3da68fd7b9e49217\ntrue\ntrue\n0x9da70211eac47ab5\n",
     # MYLA-313: new; the interpreter gives the same
     "tuple_and_list_equality": "true\nfalse\nfalse\ntrue\nfalse\ntrue\nfalse\ntrue\ntrue\nfalse\ntrue\ntrue\nfalse\ntrue\nfalse\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\nfalse\ntrue\ntrue\nfalse\ntrue\ntrue\nfalse\ntrue\nfalse\ntrue\ntrue\n",
     # MYLA-358: new; the interpreter gives the same

@@ -3052,6 +3052,11 @@ impl Lower {
                 }
                 if !cg.has_func(mname) {
                     if field == "eq" && args.len() == 1 && cg.derived_eq_routine(key) { return self.derived_eq(cg, mname, recv, args[0], tail) }
+                    // a tuple's `hash` is the language's (D163)
+                    let rt = cg.type_of(recv.id)
+                    if field == "hash" && args.len() == 1 && (is_unit(rt) || is_compound_eq_t(rt)) && !is_list_t(rt) && !tail {
+                        return self.tuple_hash(cg, rt, recv, args[0], into)
+                    }
                     return self.indirect_call(cg, e, callee, args, tail)
                 }
                 var argv: [Expr] = [recv]
@@ -4860,6 +4865,86 @@ pub fun compound_eq_ir(cg: CodeGen, t: Type, name: str) -> Routine {
     lw.start(unequal)
     lw.finish(Term.Ret(lw.konst(Type.TBool, 0)))
     return Routine { f: lw.f, wants: lw.wants }
+}
+
+// `__thash_<T>(t, state) -> uint64`, a tuple's `hash` (D163, MYLA-313): the
+// tuple at its address given, element by element, to its element type's
+// `hash`, from the hasher whose state is `state`; the state it ends with.
+pub fun tuple_hash_ir(cg: CodeGen, t: Type, name: str) -> Routine {
+    let u64 = Type.TInt(64, false)
+    var lw = routine(name, Some(u64))
+    let sp = lw.new_slot("t", Type.TPtr, 8, 0, false)
+    let ss = lw.new_slot("state", u64, 8, 1, false)
+    var off = 0
+    for et in tuple_elems(t) {
+        let st = lw.temp(u64)
+        lw.add(Inst.Load(st, ss))
+        let next = lw.hash_member(cg, lw.read_ptr(sp), off, et, st)
+        lw.add(Inst.Store(ss, next))
+        off = off + cg.stored_size(et)
+    }
+    let r = lw.temp(u64)
+    lw.add(Inst.Load(r, ss))
+    lw.finish(Term.Ret(r))
+    return Routine { f: lw.f, wants: lw.wants }
+}
+
+impl Lower {
+    // The state of the hasher whose state is `state` once it was given the
+    // member of type `ft` at `off` in the value at `p` through `ft`'s `hash`
+    // (a tuple's through its `__thash_<T>`, a list's through its impl's
+    // instance; a scalar by value, an aggregate by address).
+    fun hash_member(var self, cg: CodeGen, p: int32, off: int32, ft: Type, state: int32) -> int32 {
+        let u64 = Type.TInt(64, false)
+        if is_unit(ft) { return state }
+        if is_compound_eq_t(ft) && !is_list_t(ft) {
+            let r = self.temp(u64)
+            self.wants.push(Want { kind: 8, t: ft, clone: false })
+            self.add(Inst.Call(r, type_job_name(Want { kind: 8, t: ft, clone: false }), [self.offset(p, off), state]))
+            return r
+        }
+        let hasher = Type.TStruct("Hasher", [])
+        let hs = self.new_slot("__hasher", hasher, 8, -1, false)
+        self.add_store(self.slot_addr(hs), 0, state)
+        let rs = self.new_slot("__hashed", hasher, 8, -1, false)
+        var recv = -1
+        if is_struct_or_enum_t(ft) && !cg.is_boxed(ft) {
+            recv = self.offset(p, off)
+        } else {
+            recv = self.temp(ft)
+            self.add(Inst.LoadAt(recv, p, off, 8))
+        }
+        var name = cg.type_key(ft) + ".hash"
+        if is_list_t(ft) {
+            name = mangle_fn("__list.hash", [list_elem(ft)])
+            self.f.instances.push(Instance { orig: "__list.hash", targs: [list_elem(ft)] })
+        }
+        self.add(Inst.CallSret(name, self.slot_addr(rs), [recv, self.slot_addr(hs)]))
+        let r = self.temp(u64)
+        self.add(Inst.LoadAt(r, self.slot_addr(rs), 0, 8))
+        return r
+    }
+
+    // `t.hash(h)` of a tuple `t` (D163): its `__thash_<T>` from `h`'s state,
+    // the hasher it ends with built in `into` or a slot of its own.
+    fun tuple_hash(var self, cg: CodeGen, t: Type, recv: Expr, h: Expr, into: int32) -> int32 {
+        let u64 = Type.TInt(64, false)
+        let pt = self.addr(cg, recv)
+        let ph = self.addr(cg, h)
+        let st = self.temp(u64)
+        self.add(Inst.LoadAt(st, ph, 0, 8))
+        var r = st
+        if !is_unit(t) {
+            r = self.temp(u64)
+            self.wants.push(Want { kind: 8, t: t, clone: false })
+            self.add(Inst.Call(r, type_job_name(Want { kind: 8, t: t, clone: false }), [pt, st]))
+        }
+        let slot = self.build_slot(cg, "__hasher", Type.TStruct("Hasher", []), into)
+        let base = self.slot_addr(slot)
+        self.add_store(base, 0, r)
+        self.built(slot, into, base)
+        return base
+    }
 }
 
 // Whether `==` on `t` is a `__eq_<T>` routine's: a tuple (not the unit type)
