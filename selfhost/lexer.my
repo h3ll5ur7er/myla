@@ -904,7 +904,7 @@ fun hex_upper(v: int64) -> str {
 #test("[1: 2].len()")[-1]
 #test("m[\"a:b\"]:x")[8]
 #test("f((a: int) => a)")[-1]
-fun spec_colon(t: str) -> int32 {
+pub fun spec_colon(t: str) -> int32 {
     var depth = 0
     var quote: uint8 = 0
     var i = 0

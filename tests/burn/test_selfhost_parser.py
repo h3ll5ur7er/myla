@@ -22,7 +22,7 @@ import subprocess
 import tempfile
 import unittest
 
-from ._golden import NoGolden, answer_for_file, golden, recorded
+from ._golden import NoGolden, answer_for_file, golden, recorded, recorded_examples
 from ._native import CAN_BUILD_NATIVE, SKIP_REASON
 from ._continuation import continues_a_line
 from ._tools import selfhost_tool
@@ -346,7 +346,7 @@ class SelfHostedParserParity(unittest.TestCase):
 
     def test_garbled_sources_match_the_oracle(self) -> None:
         several = 0
-        for path in sorted(glob.glob(os.path.join(_REPO, "examples", "*.my"))):
+        for path in recorded_examples():
             with open(recorded(path), encoding="utf-8") as fh:
                 source = fh.read()
             for seed in range(4):

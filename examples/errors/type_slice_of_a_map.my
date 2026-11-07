@@ -1,0 +1,6 @@
+//~ type error: a map has no slices
+// Lists and strings have slices, maps don't (D142).
+fun main() {
+    let m: [str: int] = ["a": 1]
+    let s = m[0:1]
+}

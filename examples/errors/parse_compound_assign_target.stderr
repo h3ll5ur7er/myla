@@ -1,0 +1,5 @@
+parse error: invalid assignment target
+  --> examples/errors/parse_compound_assign_target.my:10:10
+   |
+10 |     count() += 1
+   |     ^^^^^^^

@@ -1,0 +1,5 @@
+type error: comparison requires numeric or char operands
+  --> examples/errors/type_unit_ordering.my:4:16
+  |
+4 |     let b = () < ()
+  |             ^^^^^^^

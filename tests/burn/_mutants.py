@@ -13,10 +13,9 @@ example that changes, or a new one, has none until it is recorded again.
 """
 from __future__ import annotations
 
-import glob
 import os
 
-from tests.burn._golden import golden
+from tests.burn._golden import golden, recorded_examples
 
 _REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir))
 
@@ -99,7 +98,7 @@ def _mutate(src: str, edit: str, where: list) -> str:
 def mutants() -> list[tuple[str, str, str]]:
     """(name, source, the first error's message) for every mutant."""
     out = []
-    for path in sorted(glob.glob(os.path.join(_REPO, "examples", "*.my"))):
+    for path in recorded_examples():
         with open(path, encoding="utf-8") as fh:
             src = fh.read()
         for name, edit, where, first in _example_edits(path):

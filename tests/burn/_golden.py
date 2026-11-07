@@ -50,6 +50,27 @@ RECORDED_REPO = "/home/user/myla"
 RECORDED_CORPUS = os.path.join(_REPO, "tests", "burn", "data", "recorded_corpus")
 
 
+# The examples the recordings cover: those of the retired toolchain's last
+# state (`backup/python-toolchain-final`, d94f948). An example added since
+# has no recorded answer and is held to expectations of its own
+# (test_examples_run, test_examples_compile), so the gates that ask the
+# recordings about every example walk these (MYLA-288, MYLA-299).
+RECORDED_EXAMPLES = (
+    "attributes.my", "chars.my", "closures.my", "concurrency.my", "constants.my",
+    "control_flow.my", "enums.my", "floats.my", "functions.my", "generic-types.my",
+    "generic_traits.my", "generics.my", "hello.my", "interpolation.my", "lists.my",
+    "loops.my", "maps.my", "methods.my", "operators.my", "option-result.my",
+    "pipelines.my", "recursion.my", "regressions.my", "semicolons.my", "strings.my",
+    "structs.my", "traits.my", "traits_on_builtins.my", "tuples.my", "types_and_aliases.my",
+    "unicode.my", "variables.my",
+)
+
+
+def recorded_examples() -> list[str]:
+    """The paths of RECORDED_EXAMPLES, sorted."""
+    return [os.path.join(_REPO, "examples", n) for n in RECORDED_EXAMPLES]
+
+
 def recorded(path: str) -> str:
     """The file at `path` (under the repository) as the recordings saw it:
     its copy in RECORDED_CORPUS when it was rewritten since, else itself."""

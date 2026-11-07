@@ -1,0 +1,5 @@
+type error: 'become' passes 7 argument words, 1 of them on the stack, but 'step' received 0 there
+  --> examples/errors/type_become_stack_words_by_value.my:15:15
+   |
+15 |     become far(p, a, b, c, d)
+   |            ^^^^^^^^^^^^^^^^^^

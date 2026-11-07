@@ -48,7 +48,11 @@ Every language feature appears in at least one runnable example, and every known
 
 ## Parity
 
-The language is defined by its reference documentation, [[Language]] and [[Project/Decisions]]; the self-hosted toolchain is its implementation. Its interpreter (`myla run`) and its native code must print the same for every program: when they differ, one of them is wrong; fix the one that disagrees with the documentation and say so in the commit. The burn tests also compare the lexer, parser, checker, interpreter and native code with the answers the retired Python toolchain gave, recorded before it was removed ([[Development/Testing]]).
+The language is defined by its reference documentation, [[Language]] and [[Project/Decisions]]; the self-hosted toolchain is its implementation. Its interpreter (`myla run`) and its native code must print the same for every program: when they differ, one of them is wrong; fix the one that disagrees with the documentation and say so in the commit. What the tests hold the toolchain to, since the Python toolchain was retired ([[MYLA-219]], [[MYLA-288]]):
+
+- **Native code and the other targets:** the self-hosted interpreter's output for the same program, and, for the examples, a hard expectation both are held to (`test_examples_run.EXPECTED`).
+- **Diagnostics:** hard expectations: the error corpus's `//~` directives and, for a file the recordings don't cover, its whole rendered diagnostic in a sibling `.stderr` file (`TestPinnedDiagnostics`); a test's own `assertIn` of a message.
+- **The recorded answers** of the retired toolchain ([[Development/Testing#recorded-answers]]) still check the files they cover, the examples as they were at the retirement (`RECORDED_EXAMPLES`) and the recorded snippets; nothing new is held to them, and they shrink as those files change.
 
 ## Decisions
 

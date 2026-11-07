@@ -1,0 +1,5 @@
+type error: a slice's bounds and step are integers, found 'str'
+  --> examples/errors/type_slice_bound_not_int.my:5:16
+  |
+5 |     let s = xs["a":2]
+  |                ^^^

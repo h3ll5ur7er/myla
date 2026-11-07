@@ -1,0 +1,5 @@
+parse error: expected 'else' after a let-else's value: a pattern that can fail to match needs one, found '\n'
+  --> examples/errors/parse_let_else_needs_else.my:6:1
+  |
+6 |     print(v)
+  | ^

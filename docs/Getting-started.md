@@ -146,7 +146,8 @@ Each file in `examples/` is a runnable program with `#test` cases on its functio
 4. Abstraction: `methods.my`, `closures.my`, `pipelines.my`, `generics.my`, `generic-types.my`, `traits.my`, `traits_on_builtins.my`, `generic_traits.my`, `operators.my`
 5. Programs: `attributes.my`, `semicolons.my`, the folders `modules/`, `args/`, `readfile/`, `stdio/` and `subprocess/`
 6. Concurrency: `concurrency.my`
-7. What the checker rejects: `examples/errors/`, one program per error, its expected message in its first line; and `regressions.my`, the accepted programs that once broke
+7. The newer forms (November 2026, [[MYLA-299]]): `branches_and_defaults.my` (`if` as a value, `if let`, `while let`, let-else, `+=`, `defer`, default parameter values), `slices_and_formats.my` (slices and `^`, format specs, a type's own `Format`, how floats print), `time_and_math.my` (`std.time`, `task.sleep`, `task.timeout`, `task.yield`, `std.math`)
+8. What the checker rejects: `examples/errors/`, one program per error, its expected message in its first line; and `regressions.my`, the accepted programs that once broke
 
 ## Use the compiler directly
 

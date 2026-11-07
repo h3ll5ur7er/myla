@@ -1,0 +1,5 @@
+type error: a map has no slices
+  --> examples/errors/type_slice_of_a_map.my:5:14
+  |
+5 |     let s = m[0:1]
+  |             ^^^^^^

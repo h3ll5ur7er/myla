@@ -19,7 +19,7 @@ import sys
 import tempfile
 import unittest
 
-from ._golden import golden
+from ._golden import golden, recorded_examples
 from ._native import CAN_BUILD_NATIVE, SKIP_REASON
 from ._tools import STDLIB_ROOT, selfhost_tool
 
@@ -268,7 +268,7 @@ fun after() -> int { return 7 }
 
 
 def _sources_with_tests() -> list[str]:
-    files = (glob.glob(os.path.join(_REPO, "examples", "*.my")) + glob.glob(os.path.join(_REPO, "selfhost", "*.my"))
+    files = (recorded_examples() + glob.glob(os.path.join(_REPO, "selfhost", "*.my"))
              + glob.glob(os.path.join(_REPO, "tools", "*", "*.my"))
              + glob.glob(os.path.join(_REPO, "lib", "std", "*.my")))
     out = []

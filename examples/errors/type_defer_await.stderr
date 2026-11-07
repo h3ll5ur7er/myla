@@ -1,0 +1,5 @@
+type error: a deferred block can't 'await': it runs as its block ends, without suspending
+  --> examples/errors/type_defer_await.my:9:9
+  |
+9 |         await task.sleep(1)
+  |         ^^^^^^^^^^^^^^^^^^^

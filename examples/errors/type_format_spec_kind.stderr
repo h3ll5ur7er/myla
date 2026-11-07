@@ -1,0 +1,5 @@
+type error: the format spec '.2' needs a float, found 'int32'
+  --> examples/errors/type_format_spec_kind.my:5:14
+  |
+5 |     print(f"{5:.2}")
+  |              ^

@@ -9,7 +9,7 @@
 // declares and by their neighbours: a call, a method call, a field after
 // `.`, an attribute after `#`, an import path, a PascalCase type name.
 
-from ...selfhost.lexer import lex
+from ...selfhost.lexer import lex, spec_colon
 from ...selfhost.tokens import Token, TokenKind
 from .symbols import Symbol, SymKind, document_symbols
 from .text import lines_of
@@ -373,7 +373,15 @@ fun fstring_spans(line: str, ln: int32, i: int32) -> [Span] {
             j = j + 2
         } else if c == '{' {
             if j > seg { out.push(Span { line: ln, start: seg, end: j, ty: T_STRING, mods: 0 }) }
-            j = hole_end(line, j)
+            let end = hole_end(line, j)
+            // a format spec, `:` to the `}` (D139), is the string's text
+            if end - 1 > j + 1 {
+                var sb = StringBuilder()
+                sb.append(line, j + 1, end - 1)
+                let cut = spec_colon(sb.build())
+                if cut >= 0 { out.push(Span { line: ln, start: j + 1 + cut, end: end - 1, ty: T_STRING, mods: 0 }) }
+            }
+            j = end
             seg = j
         } else {
             j = j + 1

@@ -1,0 +1,6 @@
+//~ type error: a slice's bounds and step are integers, found 'str'
+// A slice's bounds count elements (D142).
+fun main() {
+    let xs = [1, 2, 3]
+    let s = xs["a":2]
+}

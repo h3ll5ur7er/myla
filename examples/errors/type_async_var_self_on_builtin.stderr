@@ -1,0 +1,5 @@
+type error: async 'var self' methods on built-in types are not supported yet
+  --> examples/errors/type_async_var_self_on_builtin.my:6:5
+  |
+6 |     async fun inc(var self) {
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^

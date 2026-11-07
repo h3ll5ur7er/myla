@@ -1,0 +1,6 @@
+//~ type error: the format spec '.2' needs a float, found 'int32'
+// A hole's spec is checked against its value's type when the program is
+// compiled: a precision is a float's (D139).
+fun main() {
+    print(f"{5:.2}")
+}

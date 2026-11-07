@@ -1,0 +1,5 @@
+type error: a deferred block can't 'break' out of itself
+  --> examples/errors/type_defer_break.my:7:13
+  |
+7 |             break
+  |             ^^^^^

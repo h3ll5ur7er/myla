@@ -1,0 +1,5 @@
+parse error: an 'if' used as a value needs an 'else'
+  --> examples/errors/parse_if_expression_needs_else.my:6:16
+  |
+6 |     let sign = if n > 0 { 1 }
+  |                ^^

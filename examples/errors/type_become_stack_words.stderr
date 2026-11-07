@@ -1,0 +1,5 @@
+type error: 'become' passes 7 argument words, 1 of them on the stack, but 'start' received 0 there
+  --> examples/errors/type_become_stack_words.my:10:16
+   |
+10 |     become sum7(n, 2, 3, 4, 5, 6, 7)
+   |            ^^^^^^^^^^^^^^^^^^^^^^^^^

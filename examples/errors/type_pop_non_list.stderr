@@ -1,0 +1,5 @@
+type error: type 'int32' has no method 'pop'
+  --> examples/errors/type_pop_non_list.my:6:18
+  |
+6 |     let x = n.pop()
+  |             ^^^^^^^

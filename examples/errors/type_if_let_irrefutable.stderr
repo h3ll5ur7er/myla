@@ -1,0 +1,5 @@
+type error: the pattern of this 'if let' always matches: use 'let' instead
+  --> examples/errors/type_if_let_irrefutable.my:7:12
+  |
+7 |     if let (a, b) = pair {
+  |            ^^^^^^
