@@ -16,5 +16,7 @@ fun g() -> uint64 {
 // FAIL  g #1: expected 1, got -1
 ```
 
+The native harness's `__myla_repr` for a `uint64` does `format("{}", v as int64)` (found by [[MYLA-331]]); the interpreter's runner likewise prints it as signed.
+
 - [ ] The report's value text by the value's type, unsigned as `print` does, in the interpreter's runner and the native harness
 - [ ] A test of a failing case with a large `uint64`, alone and inside a struct and a tuple
