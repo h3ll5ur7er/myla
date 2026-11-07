@@ -1,10 +1,83 @@
-// std.time — the clock (D124, MYLA-230).
+// std.time — the clock (D124, MYLA-230), durations, instants and civil time
+// in UTC (MYLA-334).
 //
-// A monotonic clock: it never goes back and doesn't follow changes to the
-// date, so the difference of two readings is the time that passed. Its zero
-// is some fixed point in the past, not a date. The interpreter reads the same
-// clock, or with MYLA_TIME=virtual one that moves only when every task
-// sleeps (`std.task.sleep`), for tests that take no time.
+// - `now_ns` and `now_ms` read a monotonic clock: it never goes back and
+//   doesn't follow changes to the date, so the difference of two readings is
+//   the time that passed. Its zero is some fixed point in the past, not a
+//   date. The interpreter reads the same clock, or with MYLA_TIME=virtual one
+//   that moves only when every task sleeps (`std.task.sleep`), for tests that
+//   take no time. An `Instant` is a reading of it.
+// - A `Duration` is a span of time in nanoseconds, an `int64`: about 292
+//   years either way. It prints as Go prints one, `1.5s`, `250ms`, `2h3m4s`.
+// - A `DateTime` is a civil time in UTC, from the year down to the
+//   nanosecond, in the proleptic Gregorian calendar from year 1 to 9999.
+//   `now_utc` reads the wall clock (`__wall_ns`: CLOCK_REALTIME, WASI's
+//   realtime clock), which follows the date and so can go back. Days are
+//   counted with Howard Hinnant's `days_from_civil` and `civil_from_days`
+//   (http://howardhinnant.github.io/date_algorithms.html). There are no leap
+//   seconds: every day has 86400 of them, as in Unix time, and a second of 60
+//   doesn't parse. There are no time zones yet (they need tzdata): an offset
+//   in a text is applied, and the result is in UTC.
+// - `parse_rfc3339` and `parse_iso8601` read a date and time,
+//   `format_rfc3339`, `format_rfc3339_millis`, `format_iso8601_basic` and
+//   `format_date` write one. A failure is a `TimeError`.
+
+import .option as option_m  // `expect` in the cases
+
+// `text` given the fill, alignment (left by default) and width of a format
+// spec, `[[fill]align][width]`, as `std.fmt.pad` gives them; the rest of a
+// spec is ignored. Not `std.fmt`'s own: importing it and `std.num` would
+// cost every program that imports `std.time`, `std.test` among them, 16 ms
+// of checking.
+#test("ab", ">4")["  ab"]
+#test("ab", "*^6")["**ab**"]
+#test("µs", "<4")["µs  "]
+#test("abc", "2")["abc"]
+#test("ab", "")["ab"]
+fun pad(text: str, spec: str) -> str {
+    let cs = spec.chars()
+    var fill = ' '
+    var align = '<'
+    var i = 0
+    if cs.len() >= 2 && (cs[1] == '<' || cs[1] == '>' || cs[1] == '^') {
+        fill = cs[0]
+        align = cs[1]
+        i = 2
+    } else if cs.len() >= 1 && (cs[0] == '<' || cs[0] == '>' || cs[0] == '^') {
+        align = cs[0]
+        i = 1
+    }
+    var width = 0
+    while i < cs.len() && cs[i] >= '0' && cs[i] <= '9' && width < 1000000 {
+        width = width * 10 + (cs[i] as int - 48)
+        i += 1
+    }
+    let gap = width - text.chars().len()
+    if gap <= 0 {
+        return text
+    }
+    var left = 0
+    if align == '>' {
+        left = gap
+    } else if align == '^' {
+        left = gap / 2
+    }
+    var sb = StringBuilder()
+    var k = 0
+    while k < gap {
+        if k == left {
+            sb.append(text)
+        }
+        sb.append(f"{fill}")
+        k += 1
+    }
+    if left == gap {
+        sb.append(text)
+    }
+    return sb.build()
+}
+
+// --- the clock ------------------------------------------------------------------
 
 // The clock, in nanoseconds.
 pub fun now_ns() -> int64 {
@@ -14,4 +87,990 @@ pub fun now_ns() -> int64 {
 // The clock, in milliseconds.
 pub fun now_ms() -> int64 {
     return __clock_ns() / 1000000
+}
+
+// --- Duration -------------------------------------------------------------------
+
+const NS_PER_US: int64 = 1000
+const NS_PER_MS: int64 = 1000000
+const NS_PER_S: int64 = 1000000000
+const NS_PER_MIN: int64 = 60000000000
+const NS_PER_H: int64 = 3600000000000
+
+// A span of time in nanoseconds, positive or negative. Arithmetic wraps as
+// `int64` does, past about 292 years.
+#derive(Eq)
+pub struct Duration {
+    ns: int64,
+}
+
+// `n` nanoseconds.
+#test(3i64)[Duration { ns: 3i64 }]
+pub fun nanos(n: int64) -> Duration {
+    return Duration { ns: n }
+}
+
+// `n` microseconds.
+#test(3i64)[Duration { ns: 3000i64 }]
+pub fun micros(n: int64) -> Duration {
+    return Duration { ns: n * NS_PER_US }
+}
+
+// `n` milliseconds.
+#test(250i64)[Duration { ns: 250000000i64 }]
+pub fun millis(n: int64) -> Duration {
+    return Duration { ns: n * NS_PER_MS }
+}
+
+// `n` seconds.
+#test(-2i64)[Duration { ns: -2000000000i64 }]
+pub fun seconds(n: int64) -> Duration {
+    return Duration { ns: n * NS_PER_S }
+}
+
+// `n` minutes.
+#test(2i64)[Duration { ns: 120000000000i64 }]
+pub fun minutes(n: int64) -> Duration {
+    return Duration { ns: n * NS_PER_MIN }
+}
+
+// `n` hours.
+#test(1i64)[Duration { ns: 3600000000000i64 }]
+pub fun hours(n: int64) -> Duration {
+    return Duration { ns: n * NS_PER_H }
+}
+
+impl Duration {
+    // The whole nanoseconds, microseconds, milliseconds and seconds, each
+    // rounded toward zero.
+    #test(Duration { ns: 1500i64 })[1500i64]
+    fun as_nanos(self) -> int64 {
+        return self.ns
+    }
+
+    #test(Duration { ns: -1999i64 })[-1i64]
+    fun as_micros(self) -> int64 {
+        return self.ns / NS_PER_US
+    }
+
+    #test(Duration { ns: 2999999i64 })[2i64]
+    fun as_millis(self) -> int64 {
+        return self.ns / NS_PER_MS
+    }
+
+    #test(Duration { ns: 1500000000i64 })[1i64]
+    #test(Duration { ns: -1500000000i64 })[-1i64]
+    fun as_secs(self) -> int64 {
+        return self.ns / NS_PER_S
+    }
+
+    // The seconds as a float: the whole seconds and the rest added, so
+    // durations of centuries keep their nanoseconds as well as a float can.
+    #test(Duration { ns: 1500000000i64 })[1.5]
+    #test(Duration { ns: -250000000i64 })[-0.25]
+    fun as_secs_f64(self) -> float64 {
+        let whole = self.ns / NS_PER_S
+        let rest = self.ns % NS_PER_S
+        return whole as float64 + rest as float64 / 1000000000.0
+    }
+
+    // The duration without its sign (the most negative one stays as it is).
+    #test(Duration { ns: -5i64 })[Duration { ns: 5i64 }]
+    fun abs(self) -> Duration {
+        if self.ns < 0 {
+            return Duration { ns: 0 - self.ns }
+        }
+        return self
+    }
+
+    // The duration `k` times, and divided by `k` (rounded toward zero; `k`
+    // of 0 is a runtime error).
+    #test(Duration { ns: 250000000i64 }, 6i64)[Duration { ns: 1500000000i64 }]
+    fun mul_int(self, k: int64) -> Duration {
+        return Duration { ns: self.ns * k }
+    }
+
+    #test(Duration { ns: 1000000000i64 }, 3i64)[Duration { ns: 333333333i64 }]
+    fun div_int(self, k: int64) -> Duration {
+        return Duration { ns: self.ns / k }
+    }
+}
+
+impl Add for Duration {
+    #test(Duration { ns: 1i64 }, Duration { ns: 2i64 })[Duration { ns: 3i64 }]
+    fun add(self, other: Duration) -> Duration {
+        return Duration { ns: self.ns + other.ns }
+    }
+}
+
+impl Sub for Duration {
+    #test(Duration { ns: 1i64 }, Duration { ns: 3i64 })[Duration { ns: -2i64 }]
+    fun sub(self, other: Duration) -> Duration {
+        return Duration { ns: self.ns - other.ns }
+    }
+}
+
+impl Ord for Duration {
+    #test(Duration { ns: 1i64 }, Duration { ns: 3i64 })[-1]
+    #test(Duration { ns: 3i64 }, Duration { ns: 3i64 })[0]
+    fun cmp(self, other: Duration) -> int {
+        return cmp64(self.ns, other.ns)
+    }
+}
+
+// Go's form (`time.Duration.String`): `0s`; below a second one unit, `ns`,
+// `µs` or `ms`, with a fraction; from a second on hours, minutes and
+// seconds, the leading zero ones left out, `1.5s`, `1m0s`, `2h3m4s`. The
+// fraction has no trailing zeros. A spec gives it a width (`pad`).
+impl Format for Duration {
+    #test(Duration { ns: 0i64 }, "")["0s"]
+    #test(Duration { ns: 1i64 }, "")["1ns"]
+    #test(Duration { ns: 1100i64 }, "")["1.1µs"]
+    #test(Duration { ns: 250000000i64 }, "")["250ms"]
+    #test(Duration { ns: 1500000000i64 }, "")["1.5s"]
+    #test(Duration { ns: 60000000000i64 }, "")["1m0s"]
+    #test(Duration { ns: 7384000000000i64 }, "")["2h3m4s"]
+    #test(Duration { ns: -1234567i64 }, "")["-1.234567ms"]
+    #test(Duration { ns: 3600000000001i64 }, "")["1h0m0.000000001s"]
+    #test(Duration { ns: -9223372036854775807i64 - 1 }, "")["-2562047h47m16.854775808s"]
+    #test(Duration { ns: 250000000i64 }, ">7")["  250ms"]
+    fun format(self, spec: str) -> str {
+        return pad(duration_text(self.ns), spec)
+    }
+}
+
+// The text of `format`, before its spec.
+fun duration_text(d: int64) -> str {
+    if d == 0 {
+        return "0s"
+    }
+    var u = d as uint64
+    if d < 0 {
+        u = (0 - d) as uint64  // the most negative wraps to itself: 2^63
+    }
+    var out = ""
+    if u < 1000 {
+        out = f"{u}ns"
+    } else if u < 1000000 {
+        out = with_fraction(u, 3) + "µs"
+    } else if u < 1000000000 {
+        out = with_fraction(u, 6) + "ms"
+    } else {
+        let secs = u / 1000000000
+        out = f"{secs % 60}" + fraction(u % 1000000000, 9) + "s"
+        let mins = secs / 60
+        if mins > 0 {
+            out = f"{mins % 60}m" + out
+            let hrs = mins / 60
+            if hrs > 0 {
+                out = f"{hrs}h" + out
+            }
+        }
+    }
+    if d < 0 {
+        return "-" + out
+    }
+    return out
+}
+
+// `u` with its last `digits` digits as a fraction: 1234 and 3 are `1.234`.
+#test(1500u64, 3)["1.5"]
+#test(2000u64, 3)["2"]
+fun with_fraction(u: uint64, digits: int) -> str {
+    let scale = pow10(digits) as uint64
+    return f"{u / scale}" + fraction(u % scale, digits)
+}
+
+// `.` and the `digits` digits of `part` without the trailing zeros, or ""
+// when it is 0: 5 of 3 digits is `.005`, 500 is `.5`.
+#test(5u64, 3)[".005"]
+#test(500u64, 3)[".5"]
+#test(0u64, 9)[""]
+#test(123456789u64, 9)[".123456789"]
+fun fraction(part: uint64, digits: int) -> str {
+    if part == 0 {
+        return ""
+    }
+    var ds: [uint8] = []
+    var p = part
+    var k = 0
+    while k < digits {
+        ds.push(('0' as uint8) + (p % 10) as uint8)
+        p = p / 10
+        k += 1
+    }
+    var first = 0
+    while ds[first] == '0' {
+        first += 1
+    }
+    var sb = StringBuilder()
+    sb.append_byte('.')
+    var i = digits - 1
+    while i >= first {
+        sb.append_byte(ds[i])
+        i -= 1
+    }
+    return sb.build()
+}
+
+#test(0)[1i64]
+#test(9)[1000000000i64]
+fun pow10(n: int) -> int64 {
+    var r: int64 = 1
+    var k = 0
+    while k < n {
+        r = r * 10
+        k += 1
+    }
+    return r
+}
+
+#test(1i64, 2i64)[-1]
+#test(2i64, 2i64)[0]
+#test(3i64, 2i64)[1]
+fun cmp64(a: int64, b: int64) -> int {
+    if a < b {
+        return -1
+    }
+    if a > b {
+        return 1
+    }
+    return 0
+}
+
+// --- Instant --------------------------------------------------------------------
+
+// A reading of the monotonic clock, `now_ns`: for measuring the time between
+// two moments, not for telling the date.
+#derive(Eq)
+pub struct Instant {
+    ns: int64,
+}
+
+// The clock now.
+pub fun now() -> Instant {
+    return Instant { ns: __clock_ns() }
+}
+
+impl Instant {
+    // The time since this reading: not negative, as the clock doesn't go back.
+    fun elapsed(self) -> Duration {
+        return Duration { ns: __clock_ns() - self.ns }
+    }
+
+    // The time from `earlier` to this reading (negative if `earlier` is later).
+    #test(Instant { ns: 5i64 }, Instant { ns: 2i64 })[Duration { ns: 3i64 }]
+    fun since(self, earlier: Instant) -> Duration {
+        return Duration { ns: self.ns - earlier.ns }
+    }
+
+    // The reading `d` later.
+    #test(Instant { ns: 5i64 }, Duration { ns: -2i64 })[Instant { ns: 3i64 }]
+    fun add(self, d: Duration) -> Instant {
+        return Instant { ns: self.ns + d.ns }
+    }
+}
+
+impl Ord for Instant {
+    #test(Instant { ns: 5i64 }, Instant { ns: 2i64 })[1]
+    fun cmp(self, other: Instant) -> int {
+        return cmp64(self.ns, other.ns)
+    }
+}
+
+// --- errors ---------------------------------------------------------------------
+
+// Why a time couldn't be made or read.
+#derive(Eq)
+pub enum TimeError {
+    // the text doesn't have the form at this byte offset
+    Syntax(int),
+    // this field is outside its range: "year", "month", "day", "hour",
+    // "minute", "second" (a leap second's 60 too) or "offset"
+    Field(str),
+    // the time is outside the years 1 to 9999
+    OutOfRange,
+}
+
+impl TimeError {
+    // The reason in words.
+    #test(TimeError.Syntax(4))["bad date or time at byte 4"]
+    #test(TimeError.Field("month"))["month out of range"]
+    fun message(self) -> str {
+        return match self {
+            Syntax(at) => f"bad date or time at byte {at}"
+            Field(name) => f"{name} out of range"
+            OutOfRange => "time outside the years 1 to 9999"
+        }
+    }
+}
+
+impl Format for TimeError {
+    fun format(self, spec: str) -> str {
+        return pad(self.message(), spec)
+    }
+}
+
+// --- the calendar ---------------------------------------------------------------
+
+// `a` divided by `b > 0`, rounded down, and the remainder that goes with it
+// (never negative).
+#test(-1i64, 7i64)[-1i64]
+#test(7i64, 7i64)[1i64]
+fun floor_div(a: int64, b: int64) -> int64 {
+    let q = a / b
+    if a % b < 0 {
+        return q - 1
+    }
+    return q
+}
+
+#test(-1i64, 7i64)[6i64]
+#test(14i64, 7i64)[0i64]
+fun floor_mod(a: int64, b: int64) -> int64 {
+    let r = a % b
+    if r < 0 {
+        return r + b
+    }
+    return r
+}
+
+// The days from 1970-01-01 to the date (Hinnant's `days_from_civil`), for
+// any year of the proleptic Gregorian calendar.
+#test(1970i64, 1i64, 1i64)[0i64]
+#test(2000i64, 3i64, 1i64)[11017i64]
+#test(1i64, 1i64, 1i64)[-719162i64]
+#test(9999i64, 12i64, 31i64)[2932896i64]
+#test(1969i64, 12i64, 31i64)[-1i64]
+fun days_from_civil(year: int64, month: int64, day: int64) -> int64 {
+    var y = year
+    if month <= 2 {
+        y -= 1
+    }
+    let era = floor_div(y, 400)
+    let yoe = y - era * 400                  // [0, 399]
+    var mp = month - 3                       // March is 0
+    if month <= 2 {
+        mp = month + 9
+    }
+    let doy = (153 * mp + 2) / 5 + day - 1   // [0, 365]
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy  // [0, 146096]
+    return era * 146097 + doe - 719468
+}
+
+// The date (year, month, day) `z` days after 1970-01-01 (Hinnant's
+// `civil_from_days`).
+#test(0i64)[(1970i64, 1i64, 1i64)]
+#test(11017i64)[(2000i64, 3i64, 1i64)]
+#test(-719162i64)[(1i64, 1i64, 1i64)]
+#test(2932896i64)[(9999i64, 12i64, 31i64)]
+#test(-1i64)[(1969i64, 12i64, 31i64)]
+fun civil_from_days(z: int64) -> (int64, int64, int64) {
+    let zz = z + 719468
+    let era = floor_div(zz, 146097)
+    let doe = zz - era * 146097                                       // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365  // [0, 399]
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100)                 // [0, 365]
+    let mp = (5 * doy + 2) / 153                                      // [0, 11]
+    let day = doy - (153 * mp + 2) / 5 + 1
+    var month = mp + 3
+    if mp >= 10 {
+        month = mp - 9
+    }
+    var year = yoe + era * 400
+    if month <= 2 {
+        year += 1
+    }
+    return (year, month, day)
+}
+
+// Whether `year` has a February 29th.
+#test(2000)[true]
+#test(1900)[false]
+#test(2024)[true]
+#test(2023)[false]
+pub fun is_leap_year(year: int) -> bool {
+    return year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
+}
+
+// The days of the month, 28 to 31 (0 for a month that isn't one).
+#test(2024, 2)[29]
+#test(2023, 2)[28]
+#test(2023, 4)[30]
+#test(2023, 12)[31]
+#test(2023, 13)[0]
+pub fun days_in_month(year: int, month: int) -> int {
+    if month == 2 {
+        if is_leap_year(year) {
+            return 29
+        }
+        return 28
+    }
+    if month == 4 || month == 6 || month == 9 || month == 11 {
+        return 30
+    }
+    if month >= 1 && month <= 12 {
+        return 31
+    }
+    return 0
+}
+
+// --- DateTime -------------------------------------------------------------------
+
+// The Unix seconds of 0001-01-01T00:00:00Z and of 9999-12-31T23:59:59Z.
+const MIN_UNIX: int64 = -62135596800
+const MAX_UNIX: int64 = 253402300799
+
+// A day of the week.
+#derive(Eq)
+pub enum Weekday {
+    Monday,
+    Tuesday,
+    Wednesday,
+    Thursday,
+    Friday,
+    Saturday,
+    Sunday,
+}
+
+impl Weekday {
+    // ISO 8601's number of the day: Monday is 1, Sunday 7.
+    #test(Weekday.Monday)[1]
+    #test(Weekday.Sunday)[7]
+    fun number(self) -> int {
+        return match self {
+            Monday => 1
+            Tuesday => 2
+            Wednesday => 3
+            Thursday => 4
+            Friday => 5
+            Saturday => 6
+            Sunday => 7
+        }
+    }
+
+    // Its English name, `Monday`.
+    #test(Weekday.Thursday)["Thursday"]
+    fun name(self) -> str {
+        return match self {
+            Monday => "Monday"
+            Tuesday => "Tuesday"
+            Wednesday => "Wednesday"
+            Thursday => "Thursday"
+            Friday => "Friday"
+            Saturday => "Saturday"
+            Sunday => "Sunday"
+        }
+    }
+}
+
+impl Format for Weekday {
+    fun format(self, spec: str) -> str {
+        return pad(self.name(), spec)
+    }
+}
+
+// A civil time in UTC: `year` 1 to 9999, `month` 1 to 12, `day` 1 to 31,
+// `hour` 0 to 23, `minute` and `second` 0 to 59, `nanosecond` 0 to
+// 999999999. Made by `datetime`, `date`, `from_unix`, `now_utc` or a parse,
+// it is always a valid one.
+#derive(Eq)
+pub struct DateTime {
+    year: int,
+    month: int,
+    day: int,
+    hour: int,
+    minute: int,
+    second: int,
+    nanosecond: int,
+}
+
+// The time from its fields, if they make one.
+#test(2026, 11, 7, 17, 0, 0, 0)[Ok(DateTime { year: 2026, month: 11, day: 7, hour: 17, minute: 0, second: 0, nanosecond: 0 })]
+#test(2023, 2, 29, 0, 0, 0, 0)[Err(TimeError.Field("day"))]
+#test(2024, 1, 1, 0, 0, 60, 0)[Err(TimeError.Field("second"))]
+#test(0, 1, 1, 0, 0, 0, 0)[Err(TimeError.Field("year"))]
+#test(2024, 1, 1, 0, 0, 0, 1000000000)[Err(TimeError.Field("nanosecond"))]
+pub fun datetime(year: int, month: int, day: int, hour: int, minute: int, second: int, nanosecond: int) -> Result<DateTime, TimeError> {
+    if year < 1 || year > 9999 {
+        return Err(TimeError.Field("year"))
+    }
+    if month < 1 || month > 12 {
+        return Err(TimeError.Field("month"))
+    }
+    if day < 1 || day > days_in_month(year, month) {
+        return Err(TimeError.Field("day"))
+    }
+    if hour < 0 || hour > 23 {
+        return Err(TimeError.Field("hour"))
+    }
+    if minute < 0 || minute > 59 {
+        return Err(TimeError.Field("minute"))
+    }
+    if second < 0 || second > 59 {
+        return Err(TimeError.Field("second"))
+    }
+    if nanosecond < 0 || nanosecond > 999999999 {
+        return Err(TimeError.Field("nanosecond"))
+    }
+    return Ok(DateTime { year: year, month: month, day: day, hour: hour, minute: minute, second: second, nanosecond: nanosecond })
+}
+
+// Midnight of a date, if it is one.
+#test(2024, 2, 29)[Ok(DateTime { year: 2024, month: 2, day: 29, hour: 0, minute: 0, second: 0, nanosecond: 0 })]
+#test(2024, 13, 1)[Err(TimeError.Field("month"))]
+pub fun date(year: int, month: int, day: int) -> Result<DateTime, TimeError> {
+    return datetime(year, month, day, 0, 0, 0, 0)
+}
+
+// The time `secs` seconds and `nanos` nanoseconds after
+// 1970-01-01T00:00:00Z (either may be negative), if it falls in the years 1
+// to 9999.
+#test(0i64, 0i64)[Ok(DateTime { year: 1970, month: 1, day: 1, hour: 0, minute: 0, second: 0, nanosecond: 0 })]
+#test(1794070800i64, 123000000i64)[Ok(DateTime { year: 2026, month: 11, day: 7, hour: 17, minute: 0, second: 0, nanosecond: 123000000 })]
+#test(0i64, -1i64)[Ok(DateTime { year: 1969, month: 12, day: 31, hour: 23, minute: 59, second: 59, nanosecond: 999999999 })]
+#test(-62135596800i64, 0i64)[Ok(DateTime { year: 1, month: 1, day: 1, hour: 0, minute: 0, second: 0, nanosecond: 0 })]
+#test(253402300799i64, 999999999i64)[Ok(DateTime { year: 9999, month: 12, day: 31, hour: 23, minute: 59, second: 59, nanosecond: 999999999 })]
+#test(253402300799i64, 1000000000i64)[Err(TimeError.OutOfRange)]
+#test(-62135596801i64, 0i64)[Err(TimeError.OutOfRange)]
+#test(9223372036854775807i64, 0i64)[Err(TimeError.OutOfRange)]
+pub fun from_unix(secs: int64, nanos: int64) -> Result<DateTime, TimeError> {
+    // far outside, before the carry of the nanoseconds could overflow
+    if secs < MIN_UNIX - 20000000000 || secs > MAX_UNIX + 20000000000 {
+        return Err(TimeError.OutOfRange)
+    }
+    let s = secs + floor_div(nanos, NS_PER_S)
+    if s < MIN_UNIX || s > MAX_UNIX {
+        return Err(TimeError.OutOfRange)
+    }
+    let days = floor_div(s, 86400)
+    let rest = floor_mod(s, 86400)
+    let (y, m, d) = civil_from_days(days)
+    return Ok(DateTime { year: y as int, month: m as int, day: d as int, hour: (rest / 3600) as int, minute: (rest / 60 % 60) as int, second: (rest % 60) as int, nanosecond: floor_mod(nanos, NS_PER_S) as int })
+}
+
+// The time `ns` nanoseconds after 1970-01-01T00:00:00Z: every `int64` is
+// one, from 1677 to 2262.
+#test(-1i64)[DateTime { year: 1969, month: 12, day: 31, hour: 23, minute: 59, second: 59, nanosecond: 999999999 }]
+#test(-9223372036854775807i64 - 1)[DateTime { year: 1677, month: 9, day: 21, hour: 0, minute: 12, second: 43, nanosecond: 145224192 }]
+pub fun from_unix_ns(ns: int64) -> DateTime {
+    return match from_unix(floor_div(ns, NS_PER_S), floor_mod(ns, NS_PER_S)) {
+        Ok(t) => t
+        Err(_) => { unreachable() }
+    }
+}
+
+// The wall clock now, in UTC. It follows changes to the date, so two
+// readings can go back: measure with an `Instant`.
+pub fun now_utc() -> DateTime {
+    return from_unix_ns(__wall_ns())
+}
+
+impl DateTime {
+    // The whole seconds since 1970-01-01T00:00:00Z (negative before), without
+    // the nanoseconds.
+    #test(DateTime { year: 2026, month: 11, day: 7, hour: 17, minute: 0, second: 0, nanosecond: 5 })[1794070800i64]
+    #test(DateTime { year: 1, month: 1, day: 1, hour: 0, minute: 0, second: 0, nanosecond: 0 })[-62135596800i64]
+    fun to_unix(self) -> int64 {
+        let days = days_from_civil(self.year as int64, self.month as int64, self.day as int64)
+        return days * 86400 + (self.hour * 3600 + self.minute * 60 + self.second) as int64
+    }
+
+    // The nanoseconds since 1970-01-01T00:00:00Z, if they fit an `int64`
+    // (from 1677 to 2262).
+    #test(DateTime { year: 1970, month: 1, day: 1, hour: 0, minute: 0, second: 1, nanosecond: 5 })[Ok(1000000005i64)]
+    #test(DateTime { year: 2263, month: 1, day: 1, hour: 0, minute: 0, second: 0, nanosecond: 0 })[Err(TimeError.OutOfRange)]
+    #test(DateTime { year: 1677, month: 9, day: 21, hour: 0, minute: 12, second: 43, nanosecond: 145224192 })[Ok(-9223372036854775807i64 - 1)]
+    #test(DateTime { year: 1677, month: 9, day: 21, hour: 0, minute: 12, second: 43, nanosecond: 145224191 })[Err(TimeError.OutOfRange)]
+    #test(DateTime { year: 2262, month: 4, day: 11, hour: 23, minute: 47, second: 16, nanosecond: 854775807 })[Ok(9223372036854775807i64)]
+    #test(DateTime { year: 2262, month: 4, day: 11, hour: 23, minute: 47, second: 16, nanosecond: 854775808 })[Err(TimeError.OutOfRange)]
+    fun to_unix_ns(self) -> Result<int64, TimeError> {
+        let s = self.to_unix()
+        // the ends, 1677-09-21T00:12:43.145224192Z and
+        // 2262-04-11T23:47:16.854775807Z, are in seconds that only partly
+        // fit; at the lower one `s * NS_PER_S` wraps, and adding the
+        // nanoseconds wraps it back (D4)
+        if s < -9223372036 || s > 9223372035 {
+            if s == 9223372036 && self.nanosecond <= 854775807 || s == -9223372037 && self.nanosecond >= 145224192 {
+                return Ok(s * NS_PER_S + self.nanosecond as int64)
+            }
+            return Err(TimeError.OutOfRange)
+        }
+        return Ok(s * NS_PER_S + self.nanosecond as int64)
+    }
+
+    // The day of the week.
+    #test(DateTime { year: 1970, month: 1, day: 1, hour: 0, minute: 0, second: 0, nanosecond: 0 })[Weekday.Thursday]
+    #test(DateTime { year: 2026, month: 11, day: 7, hour: 23, minute: 0, second: 0, nanosecond: 0 })[Weekday.Saturday]
+    #test(DateTime { year: 1, month: 1, day: 1, hour: 0, minute: 0, second: 0, nanosecond: 0 })[Weekday.Monday]
+    fun weekday(self) -> Weekday {
+        let days = days_from_civil(self.year as int64, self.month as int64, self.day as int64)
+        return match floor_mod(days + 3, 7) {
+            0 => Weekday.Monday
+            1 => Weekday.Tuesday
+            2 => Weekday.Wednesday
+            3 => Weekday.Thursday
+            4 => Weekday.Friday
+            5 => Weekday.Saturday
+            _ => Weekday.Sunday
+        }
+    }
+
+    // The day of the year, 1 to 366.
+    #test(DateTime { year: 2024, month: 12, day: 31, hour: 0, minute: 0, second: 0, nanosecond: 0 })[366]
+    #test(DateTime { year: 2023, month: 3, day: 1, hour: 0, minute: 0, second: 0, nanosecond: 0 })[60]
+    fun day_of_year(self) -> int {
+        let y = self.year as int64
+        return (days_from_civil(y, self.month as int64, self.day as int64) - days_from_civil(y, 1, 1) + 1) as int
+    }
+
+    // The time `d` later (earlier for a negative `d`), if it falls in the
+    // years 1 to 9999.
+    #test(DateTime { year: 2024, month: 2, day: 28, hour: 23, minute: 0, second: 0, nanosecond: 0 }, Duration { ns: 3600000000000i64 })[Ok(DateTime { year: 2024, month: 2, day: 29, hour: 0, minute: 0, second: 0, nanosecond: 0 })]
+    #test(DateTime { year: 1970, month: 1, day: 1, hour: 0, minute: 0, second: 0, nanosecond: 0 }, Duration { ns: -1i64 })[Ok(DateTime { year: 1969, month: 12, day: 31, hour: 23, minute: 59, second: 59, nanosecond: 999999999 })]
+    #test(DateTime { year: 9999, month: 12, day: 31, hour: 23, minute: 59, second: 59, nanosecond: 0 }, Duration { ns: 1000000000i64 })[Err(TimeError.OutOfRange)]
+    fun add(self, d: Duration) -> Result<DateTime, TimeError> {
+        return from_unix(self.to_unix() + floor_div(d.ns, NS_PER_S), self.nanosecond as int64 + floor_mod(d.ns, NS_PER_S))
+    }
+
+    // The time from `other` to this one, negative if `other` is later. Past
+    // about 292 years either way it saturates, to the longest `Duration` of
+    // its sign, as Go's `Time.Sub` does.
+    #test(DateTime { year: 2024, month: 3, day: 1, hour: 0, minute: 0, second: 0, nanosecond: 0 }, DateTime { year: 2024, month: 2, day: 28, hour: 0, minute: 0, second: 0, nanosecond: 1 })[Duration { ns: 172799999999999i64 }]
+    #test(DateTime { year: 1, month: 1, day: 1, hour: 0, minute: 0, second: 0, nanosecond: 0 }, DateTime { year: 2000, month: 1, day: 1, hour: 0, minute: 0, second: 0, nanosecond: 0 })[Duration { ns: -9223372036854775807i64 - 1 }]
+    fun diff(self, other: DateTime) -> Duration {
+        let ds = self.to_unix() - other.to_unix()
+        let dn = (self.nanosecond - other.nanosecond) as int64
+        if ds > 9223372035 {
+            return Duration { ns: 9223372036854775807 }
+        }
+        if ds < -9223372035 {
+            return Duration { ns: -9223372036854775807 - 1 }
+        }
+        return Duration { ns: ds * NS_PER_S + dn }
+    }
+}
+
+impl Ord for DateTime {
+    #test(DateTime { year: 2024, month: 3, day: 1, hour: 0, minute: 0, second: 0, nanosecond: 0 }, DateTime { year: 2024, month: 2, day: 28, hour: 0, minute: 0, second: 0, nanosecond: 1 })[1]
+    #test(DateTime { year: 2024, month: 3, day: 1, hour: 0, minute: 0, second: 0, nanosecond: 0 }, DateTime { year: 2024, month: 3, day: 1, hour: 0, minute: 0, second: 0, nanosecond: 1 })[-1]
+    fun cmp(self, other: DateTime) -> int {
+        let c = cmp64(self.to_unix(), other.to_unix())
+        if c != 0 {
+            return c
+        }
+        return cmp64(self.nanosecond as int64, other.nanosecond as int64)
+    }
+}
+
+// RFC 3339's form, `format_rfc3339`; a spec gives it a width.
+impl Format for DateTime {
+    #test(DateTime { year: 2026, month: 11, day: 7, hour: 17, minute: 0, second: 0, nanosecond: 0 }, "")["2026-11-07T17:00:00Z"]
+    fun format(self, spec: str) -> str {
+        return pad(format_rfc3339(self), spec)
+    }
+}
+
+// --- writing --------------------------------------------------------------------
+
+// RFC 3339 in UTC, `2026-11-07T17:00:00Z`, with the nanoseconds as a
+// fraction without trailing zeros when there are any, `…00.5Z` (Go's
+// RFC3339Nano).
+#test(DateTime { year: 2026, month: 11, day: 7, hour: 17, minute: 0, second: 0, nanosecond: 0 })["2026-11-07T17:00:00Z"]
+#test(DateTime { year: 1, month: 2, day: 3, hour: 4, minute: 5, second: 6, nanosecond: 500000000 })["0001-02-03T04:05:06.5Z"]
+#test(DateTime { year: 9999, month: 12, day: 31, hour: 23, minute: 59, second: 59, nanosecond: 999999999 })["9999-12-31T23:59:59.999999999Z"]
+pub fun format_rfc3339(t: DateTime) -> str {
+    return format_date(t) + "T" + clock_text(t, ":") + fraction(t.nanosecond as uint64, 9) + "Z"
+}
+
+// RFC 3339 in UTC with exactly three digits of the second's fraction,
+// `2026-11-07T17:00:00.123Z` (rounded down), as `std.log` writes it.
+#test(DateTime { year: 2026, month: 11, day: 7, hour: 17, minute: 0, second: 0, nanosecond: 0 })["2026-11-07T17:00:00.000Z"]
+#test(DateTime { year: 2026, month: 11, day: 7, hour: 17, minute: 0, second: 0, nanosecond: 123999999 })["2026-11-07T17:00:00.123Z"]
+pub fun format_rfc3339_millis(t: DateTime) -> str {
+    return f"{format_date(t)}T{clock_text(t, ":")}.{t.nanosecond / 1000000:03}Z"
+}
+
+// ISO 8601's basic form in UTC, `20261107T170000Z`, the fraction as in
+// `format_rfc3339`.
+#test(DateTime { year: 2026, month: 11, day: 7, hour: 17, minute: 0, second: 0, nanosecond: 0 })["20261107T170000Z"]
+#test(DateTime { year: 2026, month: 11, day: 7, hour: 17, minute: 0, second: 0, nanosecond: 120000 })["20261107T170000.00012Z"]
+pub fun format_iso8601_basic(t: DateTime) -> str {
+    return f"{t.year:04}{t.month:02}{t.day:02}T" + clock_text(t, "") + fraction(t.nanosecond as uint64, 9) + "Z"
+}
+
+// The date alone, `2026-11-07`, ISO 8601's extended form.
+#test(DateTime { year: 33, month: 1, day: 9, hour: 17, minute: 0, second: 0, nanosecond: 0 })["0033-01-09"]
+pub fun format_date(t: DateTime) -> str {
+    return f"{t.year:04}-{t.month:02}-{t.day:02}"
+}
+
+// `hh:mm:ss`, with `sep` between the fields.
+fun clock_text(t: DateTime, sep: str) -> str {
+    return f"{t.hour:02}{sep}{t.minute:02}{sep}{t.second:02}"
+}
+
+// --- reading --------------------------------------------------------------------
+
+// A text being read, and where.
+struct Scan {
+    s: str,
+    i: int,
+}
+
+impl Scan {
+    // The byte here, or -1 at the end.
+    fun peek(self) -> int {
+        if self.i < self.s.len() {
+            return self.s[self.i] as int
+        }
+        return -1
+    }
+
+    // Past the byte `c` if it is here.
+    fun eat(var self, c: uint8) -> bool {
+        if self.peek() == c as int {
+            self.i += 1
+            return true
+        }
+        return false
+    }
+
+    // Past a byte that must be `c`, or `Syntax` here.
+    fun expect(var self, c: uint8) -> Result<(), TimeError> {
+        if self.eat(c) {
+            return Ok(())
+        }
+        return Err(TimeError.Syntax(self.i))
+    }
+
+    // Whether the byte here is a digit.
+    fun at_digit(self) -> bool {
+        let c = self.peek()
+        return c >= 48 && c <= 57
+    }
+
+    // The number of `n` digits here.
+    fun digits(var self, n: int) -> Result<int, TimeError> {
+        var v = 0
+        var k = 0
+        while k < n {
+            if !self.at_digit() {
+                return Err(TimeError.Syntax(self.i))
+            }
+            v = v * 10 + (self.peek() - 48)
+            self.i += 1
+            k += 1
+        }
+        return Ok(v)
+    }
+
+    // The digits of a fraction as nanoseconds: at least one, those past the
+    // ninth read but dropped.
+    fun fraction(var self) -> Result<int, TimeError> {
+        if !self.at_digit() {
+            return Err(TimeError.Syntax(self.i))
+        }
+        var v = 0
+        var k = 0
+        while self.at_digit() {
+            if k < 9 {
+                v = v * 10 + (self.peek() - 48)
+            }
+            self.i += 1
+            k += 1
+        }
+        while k < 9 {
+            v = v * 10
+            k += 1
+        }
+        return Ok(v)
+    }
+}
+
+// RFC 3339's date and time, `2026-11-07T17:00:00Z`, `…00.123+01:00`: four
+// digits of year, `-`, month, `-`, day, `T` (or `t` or a space), hour, `:`,
+// minute, `:`, second, an optional fraction after `.`, and `Z` (or `z`) or
+// an offset `+hh:mm` or `-hh:mm`, which is taken away to give UTC.
+// A leap second (`:60`) is a `Field("second")`.
+#test("2026-11-07T17:00:00Z")[Ok(DateTime { year: 2026, month: 11, day: 7, hour: 17, minute: 0, second: 0, nanosecond: 0 })]
+#test("2026-11-07t18:30:00.123456789123+01:30")[Ok(DateTime { year: 2026, month: 11, day: 7, hour: 17, minute: 0, second: 0, nanosecond: 123456789 })]
+#test("2026-12-31 23:00:00-01:00")[Ok(DateTime { year: 2027, month: 1, day: 1, hour: 0, minute: 0, second: 0, nanosecond: 0 })]
+#test("1985-04-12T23:20:50.52Z")[Ok(DateTime { year: 1985, month: 4, day: 12, hour: 23, minute: 20, second: 50, nanosecond: 520000000 })]
+#test("2026-11-07T17:00:00")[Err(TimeError.Syntax(19))]
+#test("2026-11-07T17:00Z")[Err(TimeError.Syntax(16))]
+#test("2026-11-07T17:00:00.Z")[Err(TimeError.Syntax(20))]
+#test("2026-11-07T17:00:00Zx")[Err(TimeError.Syntax(20))]
+#test("20261107T170000Z")[Err(TimeError.Syntax(4))]
+#test("2026-02-29T00:00:00Z")[Err(TimeError.Field("day"))]
+#test("2016-12-31T23:59:60Z")[Err(TimeError.Field("second"))]
+#test("2026-11-07T17:00:00+24:00")[Err(TimeError.Field("offset"))]
+#test("0001-01-01T00:00:00+00:01")[Err(TimeError.OutOfRange)]
+pub fun parse_rfc3339(s: str) -> Result<DateTime, TimeError> {
+    return parse_time(s, true)
+}
+
+// ISO 8601's date and time in its extended form, `2026-11-07T17:00:00Z`, or
+// its basic one, `20261107T170000Z`: RFC 3339's forms and also a date alone
+// (midnight), a time without seconds (`T17:00`), a fraction after `,`, an
+// offset of hours alone (`+01`) or without the colon (`+0100`), and no zone
+// at all, which is taken as UTC (there are no local times yet). The time
+// takes the date's form: colons with dashes, none without.
+#test("2026-11-07")[Ok(DateTime { year: 2026, month: 11, day: 7, hour: 0, minute: 0, second: 0, nanosecond: 0 })]
+#test("20261107T1700")[Ok(DateTime { year: 2026, month: 11, day: 7, hour: 17, minute: 0, second: 0, nanosecond: 0 })]
+#test("20261107T180000,5+0100")[Ok(DateTime { year: 2026, month: 11, day: 7, hour: 17, minute: 0, second: 0, nanosecond: 500000000 })]
+#test("2026-11-07T17:00")[Ok(DateTime { year: 2026, month: 11, day: 7, hour: 17, minute: 0, second: 0, nanosecond: 0 })]
+#test("2026-11-07T15:00:00-02")[Ok(DateTime { year: 2026, month: 11, day: 7, hour: 17, minute: 0, second: 0, nanosecond: 0 })]
+#test("2026-11-07T17:00:00.25Z")[Ok(DateTime { year: 2026, month: 11, day: 7, hour: 17, minute: 0, second: 0, nanosecond: 250000000 })]
+#test("2026-1107")[Err(TimeError.Syntax(7))]
+#test("2026-11-07T1700")[Err(TimeError.Syntax(13))]
+#test("2026-11-07X")[Err(TimeError.Syntax(10))]
+pub fun parse_iso8601(s: str) -> Result<DateTime, TimeError> {
+    return parse_time(s, false)
+}
+
+// The parser of both: `strict` for RFC 3339.
+fun parse_time(s: str, strict: bool) -> Result<DateTime, TimeError> {
+    var sc = Scan { s: s, i: 0 }
+    let year = sc.digits(4)?
+    let extended = sc.eat('-')
+    if strict && !extended {
+        return Err(TimeError.Syntax(sc.i))
+    }
+    let month = sc.digits(2)?
+    if extended {
+        sc.expect('-')?
+    }
+    let day = sc.digits(2)?
+    var hour = 0
+    var minute = 0
+    var second = 0
+    var nano = 0
+    var offset = 0  // minutes east of UTC
+    if strict || sc.peek() != -1 {
+        if !(sc.eat('T') || sc.eat('t') || sc.eat(' ')) {
+            return Err(TimeError.Syntax(sc.i))
+        }
+        hour = sc.digits(2)?
+        if extended {
+            sc.expect(':')?
+        }
+        minute = sc.digits(2)?
+        // the seconds: required by RFC 3339
+        var has_seconds = strict
+        if !strict {
+            has_seconds = if extended { sc.peek() == ':' as int } else { sc.at_digit() }
+        }
+        if has_seconds {
+            if extended {
+                sc.expect(':')?
+            }
+            second = sc.digits(2)?
+            if sc.eat('.') || !strict && sc.eat(',') {
+                nano = sc.fraction()?
+            }
+        }
+        if sc.eat('Z') || sc.eat('z') {
+            offset = 0
+        } else if sc.peek() == '+' as int || sc.peek() == '-' as int {
+            var sign = 1
+            if sc.eat('-') {
+                sign = -1
+            } else {
+                sc.i += 1
+            }
+            let oh = sc.digits(2)?
+            var om = 0
+            if strict {
+                sc.expect(':')?
+                om = sc.digits(2)?
+            } else if sc.eat(':') || sc.at_digit() {
+                om = sc.digits(2)?
+            }
+            if oh > 23 || om > 59 {
+                return Err(TimeError.Field("offset"))
+            }
+            offset = sign * (oh * 60 + om)
+        } else if strict {
+            return Err(TimeError.Syntax(sc.i))
+        }
+    }
+    if sc.peek() != -1 {
+        return Err(TimeError.Syntax(sc.i))
+    }
+    let local = datetime(year, month, day, hour, minute, second, nano)?
+    if offset == 0 {
+        return Ok(local)
+    }
+    return from_unix(local.to_unix() - (offset as int64) * 60, nano as int64)
+}
+
+// --- the clocks -----------------------------------------------------------------
+
+// The monotonic clock doesn't go back, and the wall clock tells a date of
+// this century.
+#test
+fun clocks_read() {
+    let a = now()
+    let b = now()
+    assert(b >= a, "the monotonic clock went back")
+    assert(a.elapsed() >= nanos(0), "a negative elapsed time")
+    assert(b.since(a) == b.since(a.add(nanos(0))), "since")
+    let t = now_utc()
+    assert(t.year >= 2026 && t.year < 2100, f"the wall clock says {t}")
+    let back = from_unix(t.to_unix(), t.nanosecond as int64).expect("in range")
+    assert(back == t, "now_utc round-trips")
+}
+
+// --- whole-range checks ---------------------------------------------------------
+
+// A failed check of day `z` (the message is made only then).
+fun check(ok: bool, what: str, z: int64) {
+    if !ok {
+        panic(f"{what} of day {z}")
+    }
+}
+
+// Every day from 1970 to 2100, at a second that moves through the day: the
+// fields round-trip through Unix time, each day follows the one before, and
+// the weekdays and days of the year go round; every 7th day also
+// round-trips through RFC 3339's text.
+#test
+fun unix_round_trip_1970_to_2100() {
+    let last = days_from_civil(2100, 12, 31)
+    var prev = DateTime { year: 1969, month: 12, day: 31, hour: 0, minute: 0, second: 0, nanosecond: 0 }
+    var z: int64 = 0
+    while z <= last {
+        let secs = z * 86400 + (z * 7919) % 86400
+        let t = from_unix(secs, z).expect("in range")
+        check(t.to_unix() == secs, "to_unix", z)
+        check(t.nanosecond as int64 == z, "nanosecond", z)
+        let next_day = if prev.day == days_in_month(prev.year, prev.month) { 1 } else { prev.day + 1 }
+        check(t.day == next_day, "day", z)
+        check(t.weekday().number() == (floor_mod(z + 3, 7) + 1) as int, "weekday", z)
+        if t.month == 1 && t.day == 1 {
+            check(t.day_of_year() == 1, "day_of_year", z)
+        } else {
+            check(t.day_of_year() == prev.day_of_year() + 1, "day_of_year", z)
+        }
+        if z % 7 == 0 {
+            check(parse_rfc3339(format_rfc3339(t)).expect("parses") == t, "RFC 3339", z)
+        }
+        prev = t
+        z += 1
+    }
+}
+
+// Every 97th day across the whole range of years, both ways through the
+// calendar.
+#test
+fun civil_days_whole_range() {
+    var z = days_from_civil(1, 1, 1)
+    let last = days_from_civil(9999, 12, 31)
+    while z <= last {
+        let (y, m, d) = civil_from_days(z)
+        check(y >= 1 && y <= 9999 && m >= 1 && m <= 12 && d >= 1 && d <= days_in_month(y as int, m as int) as int64, "civil_from_days", z)
+        check(days_from_civil(y, m, d) == z, "days_from_civil", z)
+        z += 97
+    }
 }

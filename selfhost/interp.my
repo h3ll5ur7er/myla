@@ -3339,6 +3339,8 @@ impl Interp {
             return Value.VUnit
         }
         if nm == "__clock_ns" { return Value.VInt(self.now()) }
+        // the wall clock (MYLA-334): the host's, also under MYLA_TIME=virtual
+        if nm == "__wall_ns" { return Value.VInt(__wall_ns()) }
         // waiting for input (D124): parked until `fd` is readable, unless it
         // is now or the task was asked to stop; outside any task, nothing
         if nm == "__wait_readable" {

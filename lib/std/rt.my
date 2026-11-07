@@ -2189,6 +2189,12 @@ pub fun clock_ns() -> int64 {
     return os.clock_ns()
 }
 
+// `__wall_ns`: the wall clock, nanoseconds since 1970-01-01T00:00:00Z
+// (MYLA-334, `std.time.now_utc`).
+pub fun wall_ns() -> int64 {
+    return os.wall_ns()
+}
+
 // `__sleep_ns`: the thread asleep for `n` nanoseconds (`await __sleep(ms)`
 // in a program without tasks, the interpreter's sleeping tasks).
 pub fun sleep_ns(n: int64) {
