@@ -40,7 +40,7 @@ import tempfile
 import unittest
 
 from ._golden import NoGolden, golden
-from ._native import CAN_BUILD_NATIVE, SKIP_REASON, assemble, run_argv, target_flags
+from ._native import CAN_BUILD_NATIVE, SKIP_REASON, TEST_TARGET, assemble, run_argv, target_flags
 from ._targets import program_excuse
 from ._tools import STDLIB_ROOT, selfhost_tool
 
@@ -708,6 +708,14 @@ class SelfHostedCodegenParity(unittest.TestCase):
                 fh.write(asm)
             assemble(asm_path, bin_path)
             argv, exe = run_argv(bin_path, bin_path)
+            if TEST_TARGET == "wasm32-wasi":
+                # the program's linear memory at its end, its peak: Node's
+                # own RSS would measure Node (MYLA-297)
+                mem = os.path.join(tmp, "memory")
+                proc = subprocess.run(argv, capture_output=True, text=True,
+                                      env=dict(os.environ, MYLA_WASM_MEMORY_OUT=mem))
+                with open(mem, encoding="utf-8") as fh:
+                    return proc.stdout, proc.returncode, int(fh.read()) / (1024 * 1024)
             proc = subprocess.run(
                 [sys.executable, "-I", "-S", "-c", _MEASURE, *argv],
                 capture_output=True, text=True,

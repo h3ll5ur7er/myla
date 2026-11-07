@@ -1,0 +1,25 @@
+// 24. Litmus (MYLA-301): a child asleep for a minute, cancelled as soon as
+// it starts, wakes at once and sees it was cancelled (D96, D124), however
+// the cancel and the sleep's arming meet on the workers. A cancel the timers
+// missed would leave the program asleep for the minute.
+import std.task as task
+
+async fun sleeper() -> int {
+    await task.sleep(60000)
+    return if task.cancelled() { 1 } else { 0 }
+}
+
+async fun group(n: int) -> int {
+    if n == 0 {
+        return 0
+    }
+    async let a = sleeper()
+    async let rest = group(n - 1)
+    task.cancel(a)
+    return await a + await rest
+}
+
+#main
+async fun main() {
+    print(await group(200))
+}

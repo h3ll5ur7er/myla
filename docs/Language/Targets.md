@@ -6,7 +6,7 @@ What a Myla program can count on wherever it runs, and what depends on the targe
 | --- | --- | --- |
 | Linux on x86-64 | `x86_64-linux` | The machine: a static executable, no libc |
 | Linux on aarch64 | `aarch64-linux` | The machine (a Raspberry Pi 4 or 5 with a 64-bit OS, an ARM server): a static executable, no libc |
-| WebAssembly on WASI preview 1 | `wasm32-wasi` | A WASI host: `node tools/wasm/run.mjs`, wasmtime, or a web page through `tools/wasm/myla.mjs` (D125) |
+| WebAssembly on WASI preview 1 | `wasm32-wasi` | Node: `node tools/wasm/run.mjs`, or a web page through `tools/wasm/myla.mjs` (D125). Node is the host the suites test (D158); another WASI preview 1 host such as wasmtime should run the programs too, but nothing checks it |
 
 [TOC]
 

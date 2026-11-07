@@ -1,0 +1,27 @@
+// 26. Litmus (MYLA-301): tasks giving their turn over and over (D107), each
+// pushed on the ready queue and taken again, on whichever worker: no task
+// lost on the queue, none run twice, every worker parking and woken.
+import std.task as task
+
+async fun turns() -> int {
+    var n = 0
+    for i in 0..50 {
+        await task.yield()
+        n += 1
+    }
+    return n
+}
+
+async fun tree(depth: int) -> int {
+    if depth == 0 {
+        return await turns()
+    }
+    async let l = tree(depth - 1)
+    async let r = tree(depth - 1)
+    return await l + await r
+}
+
+#main
+async fun main() {
+    print(await tree(7))
+}

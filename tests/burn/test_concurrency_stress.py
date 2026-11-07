@@ -96,6 +96,16 @@ EXPECTED = {
     # 22. a deadline set after its child ended is not set at all: none fires
     # later into freed memory (the review of 2026-11-06, R1)
     "t22_timeout_of_a_quick_child": ("0 timed out\n", 0),
+    # 23-27. litmus programs for the runtime's lock-free protocols, small
+    # enough to run 1,000 times on arm64 hardware (MYLA-301): a child's
+    # result seen by its awaiter, cancelled sleepers woken, timers armed and
+    # fired from every worker, tasks yielding through the ready queue, child
+    # processes' pipes watched by the poller
+    "t23_results_seen_by_their_awaiter": ("33554346\n", 0),
+    "t24_cancelled_sleepers": ("200\n", 0),
+    "t25_timers_fire": ("128\n", 0),
+    "t26_tasks_yield": ("6400\n", 0),
+    "t27_children_read_as_they_write": ("86\n", 0),
 }
 
 

@@ -1,0 +1,26 @@
+// 27. Litmus (MYLA-301): child processes run at once, their output pipes
+// watched by the executor's poller while the tasks wait (`wait_fds`,
+// `poll_events`, `watch_take`): every task woken for its own descriptors,
+// each output whole.
+from std.process import run_async
+
+async fun echo(k: int) -> int {
+    return match await run_async("echo", [f"{k}"]) {
+        Ok(o) => o.stdout.len(),
+        Err(e) => -1000,
+    }
+}
+
+async fun tree(k: int, depth: int) -> int {
+    if depth == 0 {
+        return await echo(k)
+    }
+    async let l = tree(k * 2, depth - 1)
+    async let r = tree(k * 2 + 1, depth - 1)
+    return await l + await r
+}
+
+#main
+async fun main() {
+    print(await tree(0, 5))
+}

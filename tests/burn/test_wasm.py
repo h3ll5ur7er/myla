@@ -386,6 +386,16 @@ def _have_playwright() -> bool:
     return p.returncode == 0
 
 
+@unittest.skipUnless(os.environ.get("MYLA_REQUIRE_BROWSER"), "MYLA_REQUIRE_BROWSER is not set")
+class BrowserTools(unittest.TestCase):
+    """CI's wasm-page job sets MYLA_REQUIRE_BROWSER, so a missing Playwright
+    fails there instead of skipping the page's test unnoticed (MYLA-297)."""
+
+    def test_playwright_is_there(self):
+        self.assertTrue(_have_playwright(), "the browser test needs Node's playwright with its Chromium")
+        self.assertTrue(HAVE_WASM, WASM_SKIP)
+
+
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
 @unittest.skipUnless(HAVE_WASM, WASM_SKIP)
 @unittest.skipUnless(_have_playwright(), "the browser test needs Node's playwright with its Chromium")

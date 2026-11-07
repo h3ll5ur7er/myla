@@ -1,0 +1,25 @@
+// 25. Litmus (MYLA-301): many tasks arming short timers at once, from every
+// worker, each woken once and in time: the timers' heap under its lock
+// (`timer_add`, `timers_fire`) loses and repeats none.
+import std.task as task
+
+async fun nap(k: int) -> int {
+    for i in 0..20 {
+        await task.sleep((k + i) % 3)
+    }
+    return 1
+}
+
+async fun tree(k: int, depth: int) -> int {
+    if depth == 0 {
+        return await nap(k)
+    }
+    async let l = tree(k * 2, depth - 1)
+    async let r = tree(k * 2 + 1, depth - 1)
+    return await l + await r
+}
+
+#main
+async fun main() {
+    print(await tree(0, 7))
+}
