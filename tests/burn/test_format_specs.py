@@ -181,6 +181,47 @@ fun main() {
 BOUNDS_WANT = "<P(4)> <P[>6]> P(4)\nP(1);P(2);\n5\n9\n14\n9\n<P(2)> <P[>6]> P(2) 8\n"
 
 
+# D159: `print(x)` of a value with its own form prints `x.format("")`
+PRINT_FORMAT = """struct P {
+    x: int,
+}
+
+impl Format for P {
+    fun format(self, spec: str) -> str {
+        return f"P({self.x})"
+    }
+}
+
+enum Light {
+    On,
+    Off,
+}
+
+impl Format for Light {
+    fun format(self, spec: str) -> str {
+        return match self {
+            Light.On => "on",
+            Light.Off => "off",
+        }
+    }
+}
+
+fun show<T: Format>(x: T) {
+    print(x)
+}
+
+fun main() {
+    print(P { x: 3 })
+    let l = Light.Off
+    print(l)
+    show(Light.On)
+    show(P { x: 9 })
+    let ps = [P { x: 1 }, P { x: 2 }]
+    for p in ps { print(p) }
+}
+"""
+
+
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
 class FormatSpecs(unittest.TestCase):
     def test_in_the_interpreter_and_natively(self):
@@ -189,8 +230,13 @@ class FormatSpecs(unittest.TestCase):
     def test_a_bound_gives_its_traits_methods(self):
         self.assertEqual(run_source_both_now(BOUNDS), (BOUNDS_WANT, "", 0))
 
+    def test_print_of_a_type_with_its_own_form(self):
+        self.assertEqual(run_source_both_now(PRINT_FORMAT), ("P(3)\noff\non\nP(9)\nP(1)\nP(2)\n", "", 0))
+
     def test_errors(self):
         cases = {
+            "print_without_format": ("struct P {\n    x: int,\n}\n\nfun main() {\n    print(P { x: 1 })\n}\n",
+                                     "print() cannot print a value of type 'P'"),
             "bound_not_met": ('fun show<T: Format>(x: T) -> str {\n    return f"<{x}>"\n}\n\nfun main() {\n    print(show(5))\n}\n',
                               "type 'int32' does not satisfy the bound 'T: Format' required by 'show'"),
             "no_bound": ('fun show<T>(x: T) -> str {\n    return x.format("")\n}\n\nfun main() {\n}\n',

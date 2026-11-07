@@ -197,7 +197,7 @@ fun main() {
 // 2026-11-05 05.11.2026 [  2026-11-05]
 ```
 
-A generic function prints a `T: Format` the same way, `f"<{x}>"` ([[Language/Methods-and-traits#bounds]]). `print(x)` still takes the five scalar types and `str`: a struct goes through `print(f"{x}")`.
+A generic function prints a `T: Format` the same way, `f"<{x}>"` ([[Language/Methods-and-traits#bounds]]). `print(x)` of a value with its own form prints `x.format("")` and a newline, as `print(f"{x}")` does (D159): a struct or enum implementing `Format`, or a `T: Format`. A struct without one is still an error: `print() cannot print a value of type 'P'`.
 
 The interpreter and the native backend share the float algorithm and constant tables, so their output is byte-identical (D56, [[Architecture/Native-backend]]).
 

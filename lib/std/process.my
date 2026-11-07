@@ -50,13 +50,16 @@ pub struct Output {
 
 // Why a process could not be started (D129): the program isn't there, may
 // not be run, or the target has no processes at all (`Unsupported`, wasm32);
-// `Cancelled`: the task waiting for it was asked to stop (D96); `Other` holds
-// the platform's own code for anything else.
+// `Cancelled`: the task waiting for it was asked to stop (D96);
+// `InvalidInput`: what no process can take, such as an environment variable
+// name with `=` in it (D160); `Other` holds the platform's own code for
+// anything else.
 pub enum SpawnError {
     NotFound,
     PermissionDenied,
     Unsupported,
     Cancelled,
+    InvalidInput,
     Other(int32),
 }
 
@@ -65,11 +68,13 @@ pub enum SpawnError {
 #test(2)[SpawnError.NotFound]
 #test(38)[SpawnError.Unsupported]
 #test(12)[SpawnError.Other(12)]
+#test(22)[SpawnError.InvalidInput]
 fun spawn_error_from_errno(code: int32) -> SpawnError {
     if code == 2 { return SpawnError.NotFound }
     if code == 13 || code == 1 { return SpawnError.PermissionDenied }
     if code == 38 { return SpawnError.Unsupported }
     if code == 125 { return SpawnError.Cancelled }
+    if code == 22 { return SpawnError.InvalidInput }
     return SpawnError.Other(code)
 }
 
@@ -255,7 +260,7 @@ impl Command {
 
     // The command run with the environment variable `name` set to `value`.
     // A name no variable can have (empty, or holding `=` or a NUL byte)
-    // makes `output` fail with `SpawnError.Other(22)` (EINVAL) and run
+    // makes `output` fail with `SpawnError.InvalidInput` (D160) and run
     // nothing (MYLA-295).
     fun env(self, name: str, value: str) -> Command {
         var c = self
@@ -317,7 +322,7 @@ impl Command {
     // Spawn the command, wait for it, and collect its output.
     fun output(self) -> Result<Output, SpawnError> {
         if self.bad_name {
-            return Err(SpawnError.Other(22))
+            return Err(SpawnError.InvalidInput)
         }
         return collect(self.program, self.argv, self.opts())
     }
@@ -325,7 +330,7 @@ impl Command {
     // `output`, the task waiting as `run_async` does.
     async fun output_async(self) -> Result<Output, SpawnError> {
         if self.bad_name {
-            return Err(SpawnError.Other(22))
+            return Err(SpawnError.InvalidInput)
         }
         return await collect_async(self.program, self.argv, self.opts())
     }

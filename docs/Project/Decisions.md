@@ -1,17 +1,19 @@
 # Decisions
 
-The locked design decisions, newest first: the first ones while the language was designed (June 2026), the later ones as it grew (to D158 in November 2026). They are the "why" behind the rules on the [[Language]] pages. A decision is settled: changing one means adding a new numbered decision that supersedes it, not editing the old row.
+The locked design decisions, newest first: the first ones while the language was designed (June 2026), the later ones as it grew (to D160 in November 2026). They are the "why" behind the rules on the [[Language]] pages. A decision is settled: changing one means adding a new numbered decision that supersedes it, not editing the old row.
 
 Links in the early rows point at the design documents in [[Archive]], where those decisions are discussed in detail; the later rows link their tasks.
 
 ## Adding a decision
 
-Add a row at the top with the next number (D159, …), today's date, the decision and the reason, and update the affected [[Language]] or [[Architecture]] pages. Decisions that tasks need are referenced from the task (for example [[MYLA-6]] asks for one on float-to-integer casts).
+Add a row at the top with the next number (D161, …), today's date, the decision and the reason, and update the affected [[Language]] or [[Architecture]] pages. Decisions that tasks need are referenced from the task (for example [[MYLA-6]] asks for one on float-to-integer casts).
 
 ## Log
 
 | # | Date | Decision | Rationale |
 |---|------|----------|-----------|
+| D160 | 2026-11-07 | **`SpawnError.InvalidInput`** (the owner's decision on [[MYLA-295]]): a spawn given what no process can take, an environment variable's name that is empty or holds `=` or a NUL byte (or EINVAL from the system), is `Err(SpawnError.InvalidInput)`, as `IoError.InvalidInput` is for a path with a NUL byte (D153); the command runs nothing | `Other(22)` said it in the platform's numbers; an exhaustive match on `SpawnError` names the new cause |
+| D159 | 2026-11-07 | **`print(x)` takes a value with its own form** (the owner's decision on [[MYLA-291]]): a struct or enum implementing `Format`, or a `T: Format`, prints `x.format("")` and a newline, as `print(f"{x}")` does; the other non-scalar types stay an error | `print(f"{x}")` took it and `print(x)` didn't: the trait's main use read worse than its workaround |
 | D158 | 2026-11-07 | **Node is the tested wasm32 host** (the owner's decision on [[MYLA-297]]): the target suites run wasm32 programs under Node's WASI only; the Targets page says other WASI hosts such as `wasmtime` should work but are untested, and CI runs the browser page with Playwright | A host claimed and never run is a promise nothing checks |
 | D157 | 2026-11-07 | **Whole free big cells go back to the system** (the owner's decision on [[MYLA-284]], amending D106): a cell larger than an arena chunk is its own mapping, unmapped when freed on the native targets; the small-cell arenas stay per worker and keep their memory | A big list freed should not stay resident for the program's life; the fast path for small cells is unchanged |
 | D156 | 2026-11-07 | **One seed per pull request** (the owner's decision on [[MYLA-289]]): a branch's commits may leave `bootstrap/seed*.s` behind the sources; the pull request's last commit brings them up to date, and CI and the pre-push hook check the tip only. A seed is still updated mid-branch when a new primitive must be in it before the standard library can use it | 153 seed versions in six days were 110 of the pack's 117 MB; one per pull request keeps the self-certifying chain in the tree at about a twentieth of the growth |

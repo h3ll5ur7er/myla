@@ -4309,6 +4309,15 @@ impl Lower {
     #test(lower_on(), codegen_on("enum E { A, B(int) }"), expr_of("(a, 'c')"))[-1]
     fun print(var self, cg: CodeGen, arg: Expr) -> int32 {
         let t = cg.type_of(arg.id)
+        // a type with its own form: printed as `print(f"{x}")` (D159)
+        if is_struct_or_enum_t(t) {
+            let text = Expr { id: arg.id, line: arg.line, col: arg.col, sp: arg.sp, kind: ExprKind.StrLit("{}") }
+            let s = self.format_call(cg, [text, arg])
+            let f = myla_runtime_function("__print_str")
+            if cg.has_func(f) && !cg.owning.contains(f) { self.add(Inst.Call(-1, f, [s])) }
+            else { self.add(Inst.Print(Type.TStr, s)) }
+            return -1
+        }
         if !is_scalar(t) && !is_tstr(t) { return self.unsupported("print of a value that isn't a scalar or a string") }
         let v = self.expr(cg, arg)
         // std.rt's printing where the program has it, a float aside

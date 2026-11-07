@@ -6117,6 +6117,8 @@ impl Checker {
         if name == "print" {
             if args.len() != 1 { return Err(terr_at(e.line, e.col, e.sp, "print() takes exactly one argument")) }
             let at = self.expect_value(args[0], None)?
+            // a type with its own form prints as `{x}` would (D159)
+            if self.has_format(at)? { return Ok(None) }
             if !is_printable(at) { return Err(terr_at(e.line, e.col, e.sp, format("print() cannot print a value of type '{}'", type_name(at)))) }
             return Ok(None)
         }
@@ -6543,6 +6545,16 @@ impl Checker {
         return Ok(None)
     }
 
+    // Whether a value of type `t` has its own form: a type of the program's
+    // implementing `Format`, or a type parameter bound by it (D139, D159).
+    fun has_format(self, t: Type) -> Result<bool, CheckErr> {
+        if is_struct_or_enum(t) { return self.type_implements(t, "Format") }
+        return match t {
+            Type.TParam(pn) => Ok(self.bound_has(pn, "Format")),
+            _ => Ok(false),
+        }
+    }
+
     #test(checker_on("enum E { A, B(int) }"), expr_of("a.b[0]"), [Expr { id: 244, line: 126, col: 19, sp: SrcSpan { sline: 126, scol: 19, eline: 126, ecol: 45 }, kind: ExprKind.StrLit("braces {{}} stay literal") }])[Ok(Type.TStr)]
     fun infer_format(var self, e: Expr, args: [Expr]) -> Result<Type, CheckErr> {
         if args.len() == 0 { return Err(terr_at(e.line, e.col, e.sp, "format() needs a string literal format and its arguments")) }
@@ -6557,19 +6569,10 @@ impl Checker {
             let at = self.expect_value(args[i], None)?
             let spec = specs[i - 1]
             // a type of the program's with its own form (D139): the spec is its
-            if is_struct_or_enum(at) && self.type_implements(at, "Format")? {
+            // and a type parameter bound by it (MYLA-291)
+            if self.has_format(at)? {
                 i = i + 1
                 continue
-            }
-            // and a type parameter bound by it (MYLA-291)
-            match at {
-                Type.TParam(pn) => {
-                    if self.bound_has(pn, "Format") {
-                        i = i + 1
-                        continue
-                    }
-                },
-                _ => {},
             }
             if !is_printable(at) { return Err(terr_at(args[i].line, args[i].col, args[i].sp, format("format() cannot render a value of type '{}'", type_name(at)))) }
             if spec != "" {

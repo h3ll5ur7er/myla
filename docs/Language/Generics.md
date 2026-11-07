@@ -39,7 +39,7 @@ fun main() {
 ```
 
 - Parameter names may not shadow built-in type names (`int`, `str`, …) and may not repeat.
-- Inside the body a `T` value can only be bound, copied, passed, stored, returned and matched by binding. Operators need a bound ([[Language/Methods-and-traits]]); `print(x)` on a `T` is an error.
+- Inside the body a `T` value can only be bound, copied, passed, stored, returned and matched by binding. Operators need a bound ([[Language/Methods-and-traits]]); `print(x)` on a `T` without a `Format` bound is an error.
 
 ## Type arguments
 

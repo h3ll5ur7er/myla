@@ -199,7 +199,7 @@ class TestSubprocessParity(unittest.TestCase):
             "            for b in o.stdout { sb.append_byte(b) }\n"
             "            sb.build()\n"
             "        }\n"
-            "        Err(SpawnError.Other(22)) => \"invalid name\\n\"\n"
+            "        Err(SpawnError.InvalidInput) => \"invalid name\\n\"\n"
             "        Err(e) => \"another error\\n\"\n"
             "    }\n"
             "}\n\n"

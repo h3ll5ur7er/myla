@@ -10,7 +10,7 @@ These names are reserved: no declaration may reuse them. The ones on a receiver 
 
 | Function | Signature | Notes |
 | --- | --- | --- |
-| `print(x)` | one integer, float, `char`, `bool` or `str` | Writes the value and a newline to stdout |
+| `print(x)` | one integer, float, `char`, `bool` or `str`, or a value whose type implements `Format` (D159) | Writes the value and a newline to stdout |
 | `x.len()` | list, map, `str` or `StringBuilder` → `int` | A method; strings and builders: bytes |
 | `xs.push(v)`, `xs.pop()` | list | Methods; need a `var` place |
 | `m.contains(k)`, `m.keys()`, `m.remove(k)` | map | Methods; `remove` needs a `var` place |
@@ -95,7 +95,7 @@ In a task, each read has an async version that waits for the input with the task
 | `command(program)` → `Command` | Builder: `.arg(a)`, `.args([…])`, `.cwd(dir)`, `.env(name, value)`, `.env_remove(name)`, `.env_clear()`, `.stdin(text)`, then `.output()` or `.output_async()` (async, as `run_async`) (D147). A `Command` is a value: each builder method gives a new one and leaves the one it was called on as it was. Without `stdin` the child reads this process's stdin; with it, the whole text; `env_clear()` starts from an empty environment, which later `env` calls add to. On wasm32 all of it is `Unsupported` |
 | `struct Output { stdout: [uint8], stderr: [uint8], status: ExitStatus }` | Output is raw bytes |
 | `enum ExitStatus { Exited(int32), Signaled(int32) }` | |
-| `enum SpawnError { NotFound, PermissionDenied, Unsupported, Cancelled, Other(int32) }` | Why a program couldn't be run (D129): not there, not allowed (EACCES or EPERM), no processes on this target, or the waiting task was stopped; `Other` holds the platform's own code for anything else, `Other(22)` (EINVAL) for a `Command` given an environment variable name no variable can have (empty, with `=` or a NUL byte), which runs nothing |
+| `enum SpawnError { NotFound, PermissionDenied, Unsupported, Cancelled, InvalidInput, Other(int32) }` | Why a program couldn't be run (D129): not there, not allowed (EACCES or EPERM), no processes on this target, or the waiting task was stopped; `InvalidInput`: what no process can take, such as a `Command` given an environment variable name no variable can have (empty, with `=` or a NUL byte), which then runs nothing (D160); `Other` holds the platform's own code for anything else |
 
 ```myla
 from std.process import command, ExitStatus

@@ -3159,7 +3159,8 @@ impl Interp {
         if nm == "print" {
             let v = self.eval(args[0])
             if self.stop() { return Value.VUnit }
-            self.emit(format_typed(v, self.resolved_of(args[0].id)))
+            // a struct or enum through its `format` (D159), the rest as before
+            self.emit(self.format_spec_value(v, self.resolved_of(args[0].id), ""))
             self.emit("\n")
             return Value.VUnit
         }
