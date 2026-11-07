@@ -18,7 +18,7 @@ from .lexer import lex
 from .tokens import Token, TokenKind
 from .ast import Decl, DeclKind, Stmt, StmtKind, ElseTail
 from .loader import load_program_opts, load_options, file_of, normalize, Loaded, type_errors
-from .checker import build_checker_decls, Checker
+from .checker import build_checker_std, Checker
 from .diag import render_one, Report, carets
 from .tokens import SrcSpan
 from .interp import new_interp, Value, SessionStep, new_mapv, map_keys_of, map_vals_of
@@ -95,7 +95,7 @@ impl Session {
                 return -1
             },
         }
-        let c = match build_checker_decls(prog.decls, prog.next_id) {
+        let c = match build_checker_std(prog.decls, prog.next_id, false, prog.std_impls) {
             Ok(c) => c,
             Err(errs) => {
                 report_all(type_errors(prog, errs), t, input)

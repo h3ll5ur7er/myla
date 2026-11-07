@@ -1652,7 +1652,7 @@
         },
         {
           "type": "SYMBOL",
-          "name": "identifier"
+          "name": "_path_segment"
         },
         {
           "type": "REPEAT",
@@ -1665,10 +1665,23 @@
               },
               {
                 "type": "SYMBOL",
-                "name": "identifier"
+                "name": "_path_segment"
               }
             ]
           }
+        }
+      ]
+    },
+    "_path_segment": {
+      "type": "CHOICE",
+      "members": [
+        {
+          "type": "SYMBOL",
+          "name": "identifier"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "prim_type"
         }
       ]
     },

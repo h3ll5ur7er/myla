@@ -17,6 +17,27 @@ pub fun base_of(t: str) -> str {
     return part(t, 0, i)
 }
 
+// The key the methods of a type's impls are kept under: its name, `int32`
+// for `int` and `float64` for `float` (aliases the impls may use), `[]` for a
+// list type and `[:]` for a map type, whose impls are by kind (D103); ""
+// for a tuple or function type.
+#test("Box<int>")["Box"]
+#test("int")["int32"]
+#test("[T]")["[]"]
+#test("[str: [int]]")["[:]"]
+#test("(int, str)")[""]
+pub fun method_key(t: str) -> str {
+    let b = base_of(t)
+    if b == "int" { return "int32" }
+    if b == "float" { return "float64" }
+    if b != "" { return b }
+    if t.len() >= 2 && t[0] == '[' && t[t.len() - 1] == ']' {
+        if split_top(part(t, 1, t.len() - 1), ':').len() == 2 { return "[:]" }
+        return "[]"
+    }
+    return ""
+}
+
 // The type arguments of `Name<A, B>` (top level only).
 #test("Result<[int], (str, E)>")[["[int]", "(str, E)"]]
 #test("P")[[]]

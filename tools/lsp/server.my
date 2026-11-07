@@ -14,7 +14,7 @@ from std.json import Json, field
 from std.fs import read_to_string
 from ...selfhost.loader import load_program_opts, normalize, type_errors, warning_reports, source_text, in_stdlib
 from ...selfhost.diag import Report, all_reports, caret_range, warning_name
-from ...selfhost.checker import build_checker_with
+from ...selfhost.checker import build_checker_std
 from ...selfhost.tokens import SrcSpan
 from .protocol import Channel, Incoming, send, response, error_response, notification, str_field, field_or_null
 from .text import lines_of, to_lsp, word_end, uri_path, path_uri, Pos
@@ -200,7 +200,7 @@ impl Server {
             Err(r) => { found = Some(r) },
             Ok(prog) => {
                 // a file of the standard library may use its primitives (D152)
-                match build_checker_with(prog.decls, prog.next_id, in_stdlib(path, ctx.opts.stdlib_root)) {
+                match build_checker_std(prog.decls, prog.next_id, in_stdlib(path, ctx.opts.stdlib_root), prog.std_impls) {
                     Ok(c) => { warned = warning_reports(prog, c.warnings) },
                     Err(errs) => { found = Some(type_errors(prog, errs)) },
                 }

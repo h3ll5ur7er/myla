@@ -16,7 +16,7 @@
 from std.process import args, exit
 from std.io import println, eprintln
 from .loader import load_program_opts, load_options, type_errors, warning_reports
-from .checker import build_checker_decls
+from .checker import build_checker_std
 from .stdroot import default_stdlib_root
 from .diag import Report
 from .driver import cmd_interp, cmd_test
@@ -54,7 +54,7 @@ fun check_json(file: str) -> int32 {
             failed = true
         },
         Ok(prog) => {
-            match build_checker_decls(prog.decls, prog.next_id) {
+            match build_checker_std(prog.decls, prog.next_id, false, prog.std_impls) {
                 Ok(c) => { for w in warning_reports(prog, c.warnings) { for j in report_json(w, "warning") { out.push(j) } } },
                 Err(errs) => {
                     for j in report_json(type_errors(prog, errs), "error") { out.push(j) }
