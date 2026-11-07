@@ -801,12 +801,14 @@ fun is_builtin_func(name: str) -> bool {
 }
 
 // The platform primitives of MYLA-336: entropy, file descriptors and
-// children with pipes, each a function of std.rt (`__open` is
-// `std.rt.open`) over std.platform, and in the interpreter the host's own.
+// children with pipes, and MYLA-334's wall clock, each a function of std.rt
+// (`__open` is `std.rt.open`) over std.platform, and in the interpreter the
+// host's own.
 #test("__open")[true]
+#test("__wall_ns")[true]
 #test("__read")[false]
 pub fun is_platform_primitive(name: str) -> bool {
-    return name == "__random_bytes" || name == "__open" || name == "__seek" || name == "__fstat" || name == "__spawn_piped" || name == "__try_reap"
+    return name == "__random_bytes" || name == "__open" || name == "__seek" || name == "__fstat" || name == "__spawn_piped" || name == "__try_reap" || name == "__wall_ns"
 }
 
 // The raw-memory primitives the runtime written in Myla needs (MYLA-162's
@@ -6946,7 +6948,8 @@ impl Checker {
 
     // MYLA-336's primitives (`is_platform_primitive`): `__random_bytes(n)`,
     // `__open(path, flags, mode)`, `__seek(fd, offset, whence)`,
-    // `__fstat(fd)`, `__spawn_piped(program, argv, opts)`, `__try_reap(pid)`
+    // `__fstat(fd)`, `__spawn_piped(program, argv, opts)`, `__try_reap(pid)`,
+    // and MYLA-334's `__wall_ns()`
     fun infer_platform_primitive(var self, e: Expr, name: str, args: [Expr]) -> Result<Option<Type>, CheckErr> {
         let i64 = Type.TInt(64, true)
         let strs = Type.TList(Type.TStr)
@@ -6971,6 +6974,10 @@ impl Checker {
         } else if name == "__try_reap" {
             shape = "pid: int"
             result = t_int()
+        } else if name == "__wall_ns" {
+            want = []
+            shape = ""
+            result = i64
         }
         if args.len() != want.len() { return Err(terr_at(e.line, e.col, e.sp, format("{}() takes ({})", name, shape))) }
         var k = 0

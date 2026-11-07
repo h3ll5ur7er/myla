@@ -113,7 +113,7 @@ The generated code reaches the runtime four ways, the same on every target ([[MY
 | Strings | std.rt's `str_eq`, `str_concat`, `int_to_str`, `uint_to_str`, `bool_to_str`, `str_chars` (UTF-8 decode, U+FFFD for each byte outside a well-formed sequence), `equal_bytes` (`.set __equal_bytes`) |
 | Heap | std.rt's `alloc` and `free` (`.set __alloc`, `__free`), `alloc_tasks`, `free_tasks` (D157), `func_retain`, `func_drop` (`.set __func_retain`, `__func_drop`) |
 | Collections | per type, as IR: `__drop_list_T`, `__clone_list_T`, `__drop_map_K_V`, `__clone_map_K_V`, `__dropb_E` (a boxed enum's), `__walkd_T` and `__walkr_T` (a deep copy between tasks, the drop of what it walked); std.rt's `list_grow`, `map_new`, `map_lookup` (each under `.set __<name>`), `map_put_slot`, `map_keys`, `sb_append`, `sb_append_bytes`; the builder's `__sb_drop`, `__sb_clone` and `__str_drop` |
-| I/O | std.rt's `write`, `read`, `poll`, `args`, `read_file`, `write_file`, `list_dir`, `mkdir`, `stat`, `unlink`, `rmdir`, `rename`, `getcwd`, `getenv`, `clock_ns`, `sleep_ns`, over `std.platform` |
+| I/O | std.rt's `write`, `read`, `poll`, `args`, `read_file`, `write_file`, `list_dir`, `mkdir`, `stat`, `unlink`, `rmdir`, `rename`, `getcwd`, `getenv`, `clock_ns`, `wall_ns`, `sleep_ns`, over `std.platform` |
 | Processes | std.rt's `run`, `run_with`, `spawn`, `spawn_with`, `reap`, `kill`, `close` |
 | Floats | std.rt's `float_to_str` with `two_prod` and `fscale`, its `fmod`, and the tables of powers of ten `__pow10_hi`/`__pow10_lo` it reads |
 | Function values | `__compose_call` and `__compose_env_drop` (IR, [[MYLA-263]]) |
