@@ -47,4 +47,7 @@ A **notifier** (`std.task.notifier()`, [[Language/Concurrency#Waiting until woke
 
 - On several workers a hand-off between two tasks moves the woken task to another worker most of the time (the executor's stealing, not the notifier); a "run the woken task next on this worker" policy would help ping-pong.
 - A partial deadlock (some tasks waiting on each other while others run) isn't detected.
-- Found by [[MYLA-351]]: on several workers, more than one idle worker can see every task waiting, and each `exec_stuck` writes `every task waits for another one` before the exit, so stderr may hold the line twice. That happened in 5 of 80 runs of t29 on 4 and 16 workers. A minimal case is 64 tasks that `await task.yield()` and then `await n.wait()` on one notifier, under `task.all`, on 16 workers (2 of 60 runs). `test_what_they_report` can fail by chance on 4 workers for this reason. A fix: claim the report (an exchange on a flag) before writing it.
+
+## Fixed at the integration (wave 4, part 3)
+
+Found by [[MYLA-351]]: on several workers, more than one idle worker could see every task waiting, and each `exec_stuck` wrote `every task waits for another one`, so stderr held the line two or three times (t29: 5 of 80 runs on 4 and 16 workers; t34: 19 of 80). `exec_stuck` in [[lib/std/rt.my]] now claims the report with an exchange on `__parked`'s second word (the code generator gives `__parked` 16 bytes); the first worker writes it and ends the program, the others wait for that. The minimal case (64 tasks that yield, then wait on one notifier, under `task.all`, 16 workers) gave exactly one line in 100 of 100 runs; `test_what_they_report` now checks t29 and t34 on 1, 4 and 16 workers.

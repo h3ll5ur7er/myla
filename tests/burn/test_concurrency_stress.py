@@ -146,6 +146,8 @@ EXPECTED = {
 # there that is checked)
 EXPECTED_STDERR = {
     "t29_nobody_left_to_wake": "runtime error: every task waits for another one\n",
+    # once, however many idle workers see it (exec_stuck claims the report)
+    "t34_channels_nobody_left": "runtime error: every task waits for another one\n",
 }
 
 
@@ -181,7 +183,7 @@ class ConcurrencyStress(unittest.TestCase):
                 with open(exe + ".s", "w", encoding="utf-8") as fh:
                     fh.write(asm)
                 subprocess.run(["gcc", "-nostdlib", "-static", "-o", exe, exe + ".s"], check=True)
-                for workers in ["1", "4"]:
+                for workers in ["1", "4", "16"]:
                     p = subprocess.run([exe], capture_output=True, text=True, timeout=_WATCHDOG,
                                        env=dict(os.environ, MYLA_THREADS=workers))
                     self.assertEqual(p.stderr, want, f"{workers} workers")

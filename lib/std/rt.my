@@ -3285,8 +3285,16 @@ fun has_word(xs: [int64], x: int64) -> bool {
     return false
 }
 
-// Every task waits for another one: the program ends.
+// Every task waits for another one: the program ends. Each idle worker can
+// see it at once; the first to claim the report (`__parked`'s second word)
+// writes it and ends the program, the others wait for that end, so the line
+// is written once (MYLA-387).
 fun exec_stuck() {
+    if __xchg64(__rt_addr("__parked") + 8, 1) != 0 {
+        while true {
+            os.sleep_ns(1000000)
+        }
+    }
     let msg = __addr_of("runtime error: every task waits for another one\n")
     os.write_all(2, msg + 8, __load64(msg))
     os.exit(1)

@@ -2237,9 +2237,10 @@ impl CodeGen {
         // a timer entry being swapped (std.rt's `timer_sift`, the lock held)
         out.push("__timer_tmp:")
         out.push("\t.skip 32")
-        // the waiters parked on notifiers (std.rt's `park_frame`, MYLA-387)
+        // the waiters parked on notifiers (std.rt's `park_frame`, MYLA-387),
+        // and the claim on the stuck report (`exec_stuck`)
         out.push("__parked:")
-        out.push("\t.skip 8")
+        out.push("\t.skip 16")
         if self.frames {
             // each worker's queue: `[lock][head][tail]`, a cache line each
             out.push("\t.balign 64")
