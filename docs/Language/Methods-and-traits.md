@@ -230,7 +230,7 @@ A bound may name a **generic trait with its arguments**, `I: Iterator<T>` or `I:
 
 ## Iterators
 
-An iterator is a value with a `next`: it implements the prelude's `trait Iterator<T> { fun next(var self) -> Option<T> }` (D171). `for x in e` over a type that implements `Iterator<T>` is
+An iterator is a value with a `next`: it implements the prelude's `trait Iterator<T> { fun next(var self) -> Option<T> }` (D171). The adapters and consumers over one, chained with `|>`, are [[Language/Standard-library/Iter]]'s. `for x in e` over a type that implements `Iterator<T>` is
 
 ```myla fragment
 var it = e

@@ -353,6 +353,32 @@ fun merged_by<T>(a: [T], width: int, less: (T, T) -> bool) -> [T] {
 }
 
 // ---------------------------------------------------------------------------
+// An iterator over the elements (D171): `xs.iter()` starts a lazy pipeline
+// of `std.iter`. The methods above stay eager.
+
+// The elements of a list, first to last. It holds the list (a copy, which
+// costs nothing unless one of them changes) and the next index.
+pub struct ListIter<T> {
+    xs: [T],
+    at: int,
+}
+
+impl<T> Iterator<T> for ListIter<T> {
+    fun next(var self) -> Option<T> {
+        if self.at >= self.xs.len() { return None }
+        self.at += 1
+        return Some(self.xs[self.at - 1])
+    }
+}
+
+impl<T> [T] {
+    // An iterator over the elements, first to last.
+    fun iter(self) -> ListIter<T> {
+        return ListIter { xs: self, at: 0 }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Elements that can be compared for equality.
 
 impl<T: Eq> [T] {
@@ -798,6 +824,28 @@ fun pairs_and_pieces() {
     same(shown_all(xs.windows(6)), "[]")
     let empty: [int] = []
     same(shown_all(empty.chunks(3)), "[]")
+}
+
+// `while let`, not `for x in xs.iter()`: one `for` over an iterator anywhere
+// in a program has the checker rebuild every function's body (`fill_in`),
+// which a module every program checks shouldn't cost it.
+#test
+fun iterates() {
+    var seen: [str] = []
+    var words = ["a", "b", "c"].iter()
+    while let Some(s) = words.next() { seen.push(s) }
+    same(seen.join(""), "abc")
+    var it = [1, 2].iter()
+    var copy = it
+    same(shown_opt(it.next()), "Some(1)")
+    same(shown_opt(it.next()), "Some(2)")
+    same(shown_opt(it.next()), "None")
+    var n = 0
+    while let Some(x) = copy.next() { n += x }
+    assert(n == 3, "a copy keeps its own position")
+    let empty: [int] = []
+    var e = empty.iter()
+    same(shown_opt(e.next()), "None")
 }
 
 // A key and the order it came in, to see that a sort is stable.

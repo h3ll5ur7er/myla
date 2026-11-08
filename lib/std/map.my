@@ -6,6 +6,8 @@
 // `contains`, `keys` and `remove` stay the builtins' (D151), and `get(m, k)`
 // the prelude's.
 
+import std.list as list_m // `m.iter()` is an iterator over `items()`
+
 impl<K: Eq + Hash, V> [K: V] {
     // The value of `k`, or `default` when the map has no `k`.
     fun get_or(self, k: K, default: V) -> V {
@@ -37,6 +39,13 @@ impl<K: Eq + Hash, V> [K: V] {
             out.push((k, self[k]))
         }
         return out
+    }
+
+    // An iterator over the entries as `(key, value)` pairs, in insertion
+    // order (D171): `m.iter()` starts a lazy pipeline of `std.iter`. It
+    // holds the pairs `items()` gives.
+    fun iter(self) -> list_m.ListIter<(K, V)> {
+        return self.items().iter()
     }
 
     // Adds every entry of `other`, whose value wins for a key both have: a
@@ -147,6 +156,23 @@ fun map_merge() {
     let empty: [str: int] = [:]
     m.merge(empty)
     assert(shown(m) == "bob=27 ann=40 cy=5", "merging nothing")
+}
+
+#test
+fun map_iter() {
+    var m = ages()
+    m["cy"] = 5
+    m["bob"] = 28
+    // `while let`, not `for`: see `iterates` in std.list
+    var sb = StringBuilder()
+    var it = m.iter()
+    while let Some((k, v)) = it.next() {
+        sb.append(f"{k}={v};")
+    }
+    assert(sb.build() == "bob=28;ann=31;cy=5;", "pairs in insertion order")
+    let empty: [str: int] = [:]
+    var none = empty.iter()
+    assert(match none.next() { Some(_) => false, None => true }, "an empty map's")
 }
 
 #test

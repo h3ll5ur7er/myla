@@ -575,6 +575,100 @@ fun main() {
     print(count)
 }
 """,
+    # std.iter (MYLA-381): the library's adapters and consumers from a program,
+    # which also covers the implicit `xs.iter()` (std.list) and `m.iter()` (std.map)
+    "std_iter_pipelines": """// `std.iter` from a program (D171, MYLA-381): pipelines with `|>` into the
+// module's functions, the implicit `xs.iter()` and `m.iter()`, a user
+// iterator and a user `Add` type in them, a function returning a pipeline
+// by its module's type names, adapters over adapters
+import std.iter as iter
+import std.list as list
+
+struct Countdown {
+    n: int,
+}
+
+impl Iterator<int> for Countdown {
+    fun next(var self) -> Option<int> {
+        if self.n == 0 { return None }
+        self.n -= 1
+        return Some(self.n + 1)
+    }
+}
+
+struct V2 {
+    x: int,
+    y: int,
+}
+
+impl Add for V2 {
+    fun add(self, other: V2) -> V2 {
+        return V2 { x: self.x + other.x, y: self.y + other.y }
+    }
+}
+
+fun evens(n: int) -> iter.Filter<iter.Range, int> {
+    return iter.range(0, n) |> iter.filter((x) => x % 2 == 0)
+}
+
+fun squares(xs: [int]) -> iter.Map<list.ListIter<int>, int, int> {
+    return xs.iter() |> iter.map((x) => x * x)
+}
+
+fun main() {
+    let xs = [1, 2, 3, 4, 5, 6]
+    let k = 3
+    print(xs.iter() |> iter.map((x) => x * k) |> iter.filter((x) => x % 2 == 0) |> iter.sum(0))
+    print(iter.range(0, 10) |> iter.map((x) => (x as int64) * 1000000000) |> iter.sum(0))
+    print(evens(10) |> iter.count())
+    for s in squares([1, 2, 3]) |> iter.map((n) => f"<{n}>") { print(s) }
+    let v = [V2 { x: 1, y: 2 }, V2 { x: 3, y: 4 }].iter() |> iter.sum(V2 { x: 0, y: 0 })
+    print(f"{v.x} {v.y}")
+    print(Countdown { n: 4 } |> iter.map((x) => f"{x}") |> iter.fold("", (a, s) => a + s))
+    var m: [str: int] = [:]
+    m["b"] = 2
+    m["a"] = 1
+    m["c"] = 3
+    print(m.iter() |> iter.map((kv) => f"{kv.0}{kv.1}") |> iter.to_list() |> list_join())
+    print(m.iter() |> iter.filter((kv) => kv.1 > 1) |> iter.map((kv) => kv.0) |> iter.chain(["z"].iter()) |> iter.to_list() |> list_join())
+    let lines = ["one two", "", "three four five"]
+    let words = lines.iter() |> iter.flat_map((l) => l.words().iter()) |> iter.enumerate() |> iter.map((p) => f"{p.0}:{p.1}") |> iter.to_list()
+    print(list_join(words))
+    let pairs = iter.zip(iter.repeat("x"), Countdown { n: 3 }) |> iter.map((p) => f"{p.0}{p.1}") |> iter.to_list()
+    print(list_join(pairs))
+    let fib = iter.from_fn((0, 1), (s) => Some((s.0, (s.1, s.0 + s.1))))
+    print(fib |> iter.skip(5) |> iter.take(5) |> iter.map((n) => f"{n}") |> iter.to_list() |> list_join())
+    print(fib |> iter.take_while((n) => n < 30) |> iter.count())
+    print(fib |> iter.skip_while((n) => n < 30) |> iter.find((n) => n % 2 == 0) |> show())
+    print(xs.iter() |> iter.any((x) => x > 5))
+    print(xs.iter() |> iter.all((x) => x > 5))
+    print(["pear", "fig", "plum"].iter() |> iter.min() |> show_str())
+    print(["pear", "fig", "plum"].iter() |> iter.max() |> show_str())
+    let none: [int] = []
+    print(none.iter() |> iter.max() |> show())
+    // a pipeline is a value: each consumer runs its own copy
+    let odd = xs.iter() |> iter.filter((x) => x % 2 == 1)
+    print(f"{odd |> iter.count()} {odd |> iter.sum(0)}")
+}
+
+fun list_join(xs: [str]) -> str {
+    return xs.join(",")
+}
+
+fun show(o: Option<int>) -> str {
+    return match o {
+        Some(v) => f"{v}"
+        None => "none"
+    }
+}
+
+fun show_str(o: Option<str>) -> str {
+    return match o {
+        Some(v) => v
+        None => "none"
+    }
+}
+""",
     # `<` `<=` `>` `>=` on strings, byte by byte (unsigned) as list_dir sorts,
     # past whole words of eight, and `str` is `Ord`: sort, sorted,
     # sort_unstable, binary_search, a generic `T: Ord`, a Heap<str> (MYLA-318)
@@ -5467,6 +5561,8 @@ PINNED = {
     "iterators": '3\n2\n1\n10\n10\n0\n12\n18\n24\n30\n36\n270\n10\n3\n5 4 4 3\nin the loop 3\n3\nquick,brown,jumps\n3\nx!\nyy!\nzzz!\np\nq\n60\n10\n9\n-1\n55\n107\n208\n',
     "iterators_async": '26\n8\n8\n',
     "iterator_adapters": '0\n10\n20\ntick\ntick\n0\n1\n7\n8\n<1>\n<2>\nstep 2\nstep 1\n10\n3\n12\nstep 3\nstep 2\nstep 1\nstep 3\n10\n9\n',
+    # MYLA-381: new
+    "std_iter_pipelines": '36\n45000000000\n5\n<1>\n<4>\n<9>\n4 6\n4321\nb2,a1,c3\nb,c,z\n0:one,1:two,2:three,3:four,4:five\nx3,x2,x1\n5,8,13,21,34\n9\n34\ntrue\nfalse\nfig\nplum\nnone\n3 9\n',
     # MYLA-367: new; native code gave "undefined reference to 'myla_Box.eq'"
     "operators_of_generic_impls": 'true\ntrue\nfalse\ntrue\nfalse\ntrue\ntrue\n<a> <42> <s>\n<a>\n',
     "string_ordering": 'true true false false\ntrue true false false\nfalse false true true\ntrue true false false\nfalse true false true\nfalse true false true\ntrue true false false\nfalse false true true\nfalse false true true\ntrue true false false\ntrue true false false\ntrue true false false\n,Apple,apple,apples,banana,fig,pear,z,é\n,Apple,apple,apples,banana,fig,pear,z,é\ntrue\na,b,b,c,d\n5\nlime\na,c,m,x\ntrue\na,b\n',

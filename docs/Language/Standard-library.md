@@ -44,6 +44,7 @@ The conventions (D164): operations on built-in types are methods (`s.split(",")`
 | `std.fmt` | [[Language/Standard-library/Fmt]] | Format specs and the helpers of `Format` impls |
 | `std.math` | [[Language/Standard-library/Math]] | Floating-point functions after fdlibm |
 | `std.list` | [[Language/Standard-library/List]] | Methods on lists: building, `map` and the other higher-order operations, sorting, binary search, permutations and combinations |
+| `std.iter` | [[Language/Standard-library/Iter]] | Lazy adapters and consumers over `Iterator<T>`, chained with `\|>`: `range`, `repeat`, `from_fn`; `map`, `filter`, `take`, `skip`, `zip`, `chain`, `flat_map`, …; `to_list`, `count`, `sum`, `fold`, `find`, `min`, `max`, … |
 | `std.slice` | [[Language/Standard-library/Slice]] | The index arithmetic of slices |
 | `std.option` | [[Language/Standard-library/Option]] | Methods on `Option` and `Result`: `map`, `and_then`, `unwrap_or`, `ok_or`, `map_err`, `expect`, … |
 | `std.map` | [[Language/Standard-library/Map]] | Methods on maps (`get_or`, `update`, `values`, `items`, `merge`) and `counts` |
