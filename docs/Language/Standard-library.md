@@ -67,6 +67,7 @@ The conventions (D164): operations on built-in types are methods (`s.split(",")`
 | `std.graph` | [[Language/Standard-library/Graph]] | Searches over a neighbour function: BFS, DFS, Dijkstra, A*, topological sort, connected components, and dense forms over numbered nodes |
 | `std.bitset` | [[Language/Standard-library/Bitset]] | `BitSet`, fixed or growable sets of small integers over `uint64` words: `popcount`, union, intersection, difference, complement |
 | `std.unionfind` | [[Language/Standard-library/Unionfind]] | `UnionFind`, disjoint sets with path compression and union by rank |
+| `std.btree` | [[Language/Standard-library/Btree]] | B+ trees: `SortedMap<K: Ord, V>` and `SortedSet<T: Ord>` in key order, `floor`, `ceiling`, `range`, `first`, `last` |
 | `std.digest` | [[Language/Standard-library/Digest]] | MD5, SHA-1, SHA-2 and HMAC, one-shot and incremental, as bytes and as hex |
 | `std.random` | [[Language/Standard-library/Random]] | `Rng`, a seeded generator (xoshiro256**): seeded or from the system's entropy, integers in a range without bias, floats, shuffles, choices |
 | `std.uuid` | [[Language/Standard-library/Uuid]] | UUIDs of RFC 9562, version 4 (random) and 7 (a time), parsing and the canonical text |

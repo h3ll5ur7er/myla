@@ -1,0 +1,1380 @@
+// std.btree: a sorted map and a sorted set (MYLA-343, D164).
+//
+// `SortedMap<K, V>` maps keys of an ordered type (`K: Ord`) to values and
+// keeps them in key order; `SortedSet<T>` is a map to `()`. Both are B+
+// trees: `insert`, `get`, `remove`, `floor` and `ceiling` take O(log n)
+// time, `first` and `last` too, and `range` and the in-order lists walk
+// the leaves, which are linked.
+//
+// Myla has no references, so the tree is an arena: its nodes are a list,
+// and a node names its children by their index there. A node holds its
+// keys and, in a leaf, their values, or, in an inner node, the indexes of
+// its children, each in a list of its own. An update changes the nodes on
+// its path in place, as each is the only copy of itself; a nested tree of
+// enum values copies the path instead, which made a million inserts 4.7
+// times as slow. A node that a removal frees goes on a list of free slots,
+// which the next new node takes.
+//
+// Updates are top-down, in one pass: an insert splits each full node on its
+// way down before it enters it, and a removal fills up each node at its
+// minimum before it enters it, from a sibling or by merging the two. So the
+// leaf it ends at has room, or a key to spare, and nothing travels back up.
+//
+// A constructor needs an expected type, which fixes `K` and `V` (MYLA-315):
+// `var m: SortedMap<str, int> = btree.new()`, a field, a parameter or a
+// return type.
+
+// The most children an inner node has. It is even, so that a full node
+// splits into two halves that each have the minimum. Tuned by measurement:
+// see docs/Language/Standard-library/Btree.md.
+const ORDER: int = 64
+// The most keys of a node, and the fewest of a node other than the root
+const MAX_KEYS: int = ORDER - 1
+const MIN_KEYS: int = MAX_KEYS / 2
+// A search within a node halves its range down to this many keys, then
+// goes on one key at a time, which branches more predictably.
+const WINDOW: int = 8
+
+// A node of the tree. A leaf has its keys' values and the next leaf; an
+// inner node has one child more than it has keys, and its child `i` holds
+// the keys from its key `i - 1` (inclusive) to its key `i` (exclusive).
+struct Node<K, V> {
+    keys: [K],
+    // A leaf's values, one per key; none in an inner node
+    vals: [V],
+    // An inner node's children, indexes in the arena; none in a leaf
+    kids: [int],
+    // A leaf's next leaf in key order, -1 for the last
+    next: int,
+}
+
+// The tree that both types are.
+struct Tree<K, V> {
+    // The arena; a free slot holds an empty node
+    nodes: [Node<K, V>],
+    // The free slots of the arena
+    free: [int],
+    root: int,
+    // The number of inner levels above the leaves; every leaf is this deep
+    height: int,
+    // The number of keys
+    count: int,
+}
+
+fun blank<K, V>() -> Node<K, V> {
+    return Node { keys: [], vals: [], kids: [], next: -1 }
+}
+
+fun empty_tree<K: Ord, V>() -> Tree<K, V> {
+    return Tree { nodes: [blank()], free: [], root: 0, height: 0, count: 0 }
+}
+
+// A tree of the strictly ascending `keys` with their `vals`, built level by
+// level in O(n): the leaves first, as evenly filled as their number allows.
+fun tree_of_sorted<K: Ord, V>(keys: [K], vals: [V]) -> Tree<K, V> {
+    let n = keys.len()
+    var t: Tree<K, V> = empty_tree()
+    if n == 0 {
+        return t
+    }
+    t.nodes = []
+    t.count = n
+    // The nodes of the level being built, and the least key under each
+    var level: [int] = []
+    var least: [K] = []
+    let leaves = (n + MAX_KEYS - 1) / MAX_KEYS
+    var at = 0
+    for j in 0..leaves {
+        let end = at + (n - at) / (leaves - j)
+        let next = if j + 1 < leaves { t.nodes.len() + 1 } else { -1 }
+        t.nodes.push(Node { keys: keys[at:end], vals: vals[at:end], kids: [], next: next })
+        level.push(t.nodes.len() - 1)
+        least.push(keys[at])
+        at = end
+    }
+    while level.len() > 1 {
+        let c = level.len()
+        let groups = (c + ORDER - 1) / ORDER
+        var up: [int] = []
+        var up_least: [K] = []
+        at = 0
+        for j in 0..groups {
+            let end = at + (c - at) / (groups - j)
+            t.nodes.push(Node { keys: least[at + 1:end], vals: [], kids: level[at:end], next: -1 })
+            up.push(t.nodes.len() - 1)
+            up_least.push(least[at])
+            at = end
+        }
+        level = up
+        least = up_least
+        t.height += 1
+    }
+    t.root = level[0]
+    return t
+}
+
+impl<K: Ord, V> Tree<K, V> {
+    // The index of the first key of node `n` greater than `k`: the child an
+    // inner node's search goes on in.
+    fun upper(self, n: int, k: K) -> int {
+        let ks = self.nodes[n].keys
+        var lo = 0
+        var hi = ks.len()
+        while hi - lo > WINDOW {
+            let mid = (lo + hi) >> 1
+            if k < ks[mid] {
+                hi = mid
+            } else {
+                lo = mid + 1
+            }
+        }
+        while lo < hi && !(k < ks[lo]) {
+            lo += 1
+        }
+        return lo
+    }
+
+    // The index of the first key of node `n` not less than `k`: where a
+    // leaf has `k` or would put it.
+    fun lower(self, n: int, k: K) -> int {
+        let ks = self.nodes[n].keys
+        var lo = 0
+        var hi = ks.len()
+        while hi - lo > WINDOW {
+            let mid = (lo + hi) >> 1
+            if ks[mid] < k {
+                lo = mid + 1
+            } else {
+                hi = mid
+            }
+        }
+        while lo < hi && ks[lo] < k {
+            lo += 1
+        }
+        return lo
+    }
+
+    // The leaf whose range holds `k`.
+    fun leaf(self, k: K) -> int {
+        var n = self.root
+        for h in 0..self.height {
+            n = self.nodes[n].kids[self.upper(n, k)]
+        }
+        return n
+    }
+
+    fun get(self, k: K) -> Option<V> {
+        let n = self.leaf(k)
+        let i = self.lower(n, k)
+        if i < self.nodes[n].keys.len() && !(k < self.nodes[n].keys[i]) {
+            return Some(self.nodes[n].vals[i])
+        }
+        return None
+    }
+
+    // The entry at `i` of leaf `n`.
+    fun entry(self, n: int, i: int) -> (K, V) {
+        return (self.nodes[n].keys[i], self.nodes[n].vals[i])
+    }
+
+    fun first(self) -> Option<(K, V)> {
+        if self.count == 0 {
+            return None
+        }
+        return Some(self.entry(self.first_leaf(), 0))
+    }
+
+    fun last(self) -> Option<(K, V)> {
+        if self.count == 0 {
+            return None
+        }
+        var n = self.root
+        for h in 0..self.height {
+            n = self.nodes[n].kids[^1]
+        }
+        return Some(self.entry(n, self.nodes[n].keys.len() - 1))
+    }
+
+    // The entry of the greatest key not greater than `k`.
+    fun floor(self, k: K) -> Option<(K, V)> {
+        // The subtree just left of the path, and its height: every key there
+        // is less than `k`, and greater than those left of it.
+        var left = -1
+        var left_height = 0
+        var n = self.root
+        for h in 0..self.height {
+            let i = self.upper(n, k)
+            if i > 0 {
+                left = self.nodes[n].kids[i - 1]
+                left_height = self.height - h - 1
+            }
+            n = self.nodes[n].kids[i]
+        }
+        let i = self.upper(n, k)
+        if i > 0 {
+            return Some(self.entry(n, i - 1))
+        }
+        if left < 0 {
+            return None
+        }
+        n = left
+        for h in 0..left_height {
+            n = self.nodes[n].kids[^1]
+        }
+        return Some(self.entry(n, self.nodes[n].keys.len() - 1))
+    }
+
+    // The entry of the least key not less than `k`.
+    fun ceiling(self, k: K) -> Option<(K, V)> {
+        let n = self.leaf(k)
+        let i = self.lower(n, k)
+        if i < self.nodes[n].keys.len() {
+            return Some(self.entry(n, i))
+        }
+        // The next leaf's keys are past the separator that sent `k` left of
+        // it, so its first is the least greater than `k`.
+        let next = self.nodes[n].next
+        if next < 0 {
+            return None
+        }
+        return Some(self.entry(next, 0))
+    }
+
+    // The entries from `lo` (inclusive) to `hi` (exclusive), in order.
+    fun range_entries(self, lo: K, hi: K) -> [(K, V)] {
+        var out: [(K, V)] = []
+        if !(lo < hi) {
+            return out
+        }
+        var n = self.leaf(lo)
+        var i = self.lower(n, lo)
+        while n >= 0 {
+            let ks = self.nodes[n].keys
+            while i < ks.len() {
+                if !(ks[i] < hi) {
+                    return out
+                }
+                out.push((ks[i], self.nodes[n].vals[i]))
+                i += 1
+            }
+            n = self.nodes[n].next
+            i = 0
+        }
+        return out
+    }
+
+    // The keys from `lo` (inclusive) to `hi` (exclusive), in order.
+    fun range_keys(self, lo: K, hi: K) -> [K] {
+        var out: [K] = []
+        if !(lo < hi) {
+            return out
+        }
+        var n = self.leaf(lo)
+        var i = self.lower(n, lo)
+        while n >= 0 {
+            let ks = self.nodes[n].keys
+            while i < ks.len() {
+                if !(ks[i] < hi) {
+                    return out
+                }
+                out.push(ks[i])
+                i += 1
+            }
+            n = self.nodes[n].next
+            i = 0
+        }
+        return out
+    }
+
+    // The first leaf.
+    fun first_leaf(self) -> int {
+        var n = self.root
+        for h in 0..self.height {
+            n = self.nodes[n].kids[0]
+        }
+        return n
+    }
+
+    fun keys(self) -> [K] {
+        var out: [K] = []
+        var n = self.first_leaf()
+        while n >= 0 {
+            for k in self.nodes[n].keys {
+                out.push(k)
+            }
+            n = self.nodes[n].next
+        }
+        return out
+    }
+
+    fun values(self) -> [V] {
+        var out: [V] = []
+        var n = self.first_leaf()
+        while n >= 0 {
+            for v in self.nodes[n].vals {
+                out.push(v)
+            }
+            n = self.nodes[n].next
+        }
+        return out
+    }
+
+    fun items(self) -> [(K, V)] {
+        var out: [(K, V)] = []
+        var n = self.first_leaf()
+        while n >= 0 {
+            let ks = self.nodes[n].keys
+            let vs = self.nodes[n].vals
+            for i in 0..ks.len() {
+                out.push((ks[i], vs[i]))
+            }
+            n = self.nodes[n].next
+        }
+        return out
+    }
+
+    // Sets `k` to `v`; the value it had, if it was there.
+    fun insert(var self, k: K, v: V) -> Option<V> {
+        if self.nodes[self.root].keys.len() == MAX_KEYS {
+            let r = self.alloc(Node { keys: [], vals: [], kids: [self.root], next: -1 })
+            self.root = r
+            self.height += 1
+            self.split_child(r, 0)
+        }
+        var n = self.root
+        for h in 0..self.height {
+            var i = self.upper(n, k)
+            if self.nodes[self.nodes[n].kids[i]].keys.len() == MAX_KEYS {
+                self.split_child(n, i)
+                if !(k < self.nodes[n].keys[i]) {
+                    i += 1
+                }
+            }
+            n = self.nodes[n].kids[i]
+        }
+        let i = self.lower(n, k)
+        if i < self.nodes[n].keys.len() && !(k < self.nodes[n].keys[i]) {
+            let old = self.nodes[n].vals[i]
+            self.nodes[n].vals[i] = v
+            return Some(old)
+        }
+        // The lists are taken out of the node, so that each is the only copy
+        // of itself and the shift writes it in place, without a lookup of the
+        // node per write: a sixth faster.
+        var ks = self.nodes[n].keys
+        var vs = self.nodes[n].vals
+        self.nodes[n].keys = []
+        self.nodes[n].vals = []
+        var j = ks.len()
+        ks.push(k)
+        vs.push(v)
+        while j > i {
+            ks[j] = ks[j - 1]
+            vs[j] = vs[j - 1]
+            j -= 1
+        }
+        ks[i] = k
+        vs[i] = v
+        self.nodes[n].keys = ks
+        self.nodes[n].vals = vs
+        self.count += 1
+        return None
+    }
+
+    // Removes `k`; the value it had, if it was there.
+    fun remove(var self, k: K) -> Option<V> {
+        var n = self.root
+        var h = self.height
+        while h > 0 {
+            var i = self.upper(n, k)
+            if self.nodes[self.nodes[n].kids[i]].keys.len() <= MIN_KEYS {
+                i = self.fill_child(n, i)
+            }
+            let c = self.nodes[n].kids[i]
+            if self.nodes[n].keys.len() == 0 {
+                // A merge took the root's last key: its one child is the root.
+                self.release(n)
+                self.root = c
+                self.height -= 1
+            }
+            n = c
+            h -= 1
+        }
+        let i = self.lower(n, k)
+        if i == self.nodes[n].keys.len() || k < self.nodes[n].keys[i] {
+            return None
+        }
+        let old = self.nodes[n].vals[i]
+        var ks = self.nodes[n].keys
+        var vs = self.nodes[n].vals
+        self.nodes[n].keys = []
+        self.nodes[n].vals = []
+        for j in i + 1..ks.len() {
+            ks[j - 1] = ks[j]
+            vs[j - 1] = vs[j]
+        }
+        ks.pop()
+        vs.pop()
+        self.nodes[n].keys = ks
+        self.nodes[n].vals = vs
+        self.count -= 1
+        return Some(old)
+    }
+
+    // A slot for `node`: a free one, or a new one.
+    fun alloc(var self, node: Node<K, V>) -> int {
+        if self.free.len() > 0 {
+            let i = self.free.pop()
+            self.nodes[i] = node
+            return i
+        }
+        self.nodes.push(node)
+        return self.nodes.len() - 1
+    }
+
+    // Frees the slot of node `n`.
+    fun release(var self, n: int) {
+        self.nodes[n] = blank()
+        self.free.push(n)
+    }
+
+    // Splits the full child `i` of node `p` into two halves, the second a
+    // new child `i + 1`.
+    fun split_child(var self, p: int, i: int) {
+        let c = self.nodes[p].kids[i]
+        let m = MAX_KEYS / 2
+        let sep = self.nodes[c].keys[m]
+        var r = 0
+        if self.nodes[c].kids.len() == 0 {
+            // A leaf: the separator is the right half's first key, and stays
+            // there.
+            let right: Node<K, V> = Node { keys: self.nodes[c].keys[m:], vals: self.nodes[c].vals[m:], kids: [], next: self.nodes[c].next }
+            self.nodes[c].keys = self.nodes[c].keys[:m]
+            self.nodes[c].vals = self.nodes[c].vals[:m]
+            r = self.alloc(right)
+            self.nodes[c].next = r
+        } else {
+            // An inner node: the separator moves up.
+            let right: Node<K, V> = Node { keys: self.nodes[c].keys[m + 1:], vals: [], kids: self.nodes[c].kids[m + 1:], next: -1 }
+            self.nodes[c].keys = self.nodes[c].keys[:m]
+            self.nodes[c].kids = self.nodes[c].kids[:m + 1]
+            r = self.alloc(right)
+        }
+        self.nodes[p].keys = inserted(self.nodes[p].keys, i, sep)
+        self.nodes[p].kids = inserted(self.nodes[p].kids, i + 1, r)
+    }
+
+    // Gives child `i` of node `p`, which has the fewest keys a node may
+    // have, one more: a key from a sibling that can spare one, else all of
+    // a sibling's, merged with it. Returns the index the child's keys are
+    // at now, which a merge with its left sibling makes `i - 1`.
+    fun fill_child(var self, p: int, i: int) -> int {
+        let c = self.nodes[p].kids[i]
+        let leaf = self.nodes[c].kids.len() == 0
+        if i > 0 {
+            let l = self.nodes[p].kids[i - 1]
+            if self.nodes[l].keys.len() > MIN_KEYS {
+                // The left sibling's last key comes over.
+                if leaf {
+                    let k = self.nodes[l].keys.pop()
+                    let v = self.nodes[l].vals.pop()
+                    self.nodes[c].keys = inserted(self.nodes[c].keys, 0, k)
+                    self.nodes[c].vals = inserted(self.nodes[c].vals, 0, v)
+                    self.nodes[p].keys[i - 1] = k
+                } else {
+                    let k = self.nodes[l].keys.pop()
+                    let kid = self.nodes[l].kids.pop()
+                    self.nodes[c].keys = inserted(self.nodes[c].keys, 0, self.nodes[p].keys[i - 1])
+                    self.nodes[c].kids = inserted(self.nodes[c].kids, 0, kid)
+                    self.nodes[p].keys[i - 1] = k
+                }
+                return i
+            }
+        }
+        if i + 1 < self.nodes[p].kids.len() {
+            let r = self.nodes[p].kids[i + 1]
+            if self.nodes[r].keys.len() > MIN_KEYS {
+                // The right sibling's first key comes over.
+                if leaf {
+                    self.nodes[c].keys.push(self.nodes[r].keys[0])
+                    self.nodes[c].vals.push(self.nodes[r].vals[0])
+                    self.nodes[r].keys = self.nodes[r].keys[1:]
+                    self.nodes[r].vals = self.nodes[r].vals[1:]
+                    self.nodes[p].keys[i] = self.nodes[r].keys[0]
+                } else {
+                    self.nodes[c].keys.push(self.nodes[p].keys[i])
+                    self.nodes[c].kids.push(self.nodes[r].kids[0])
+                    self.nodes[p].keys[i] = self.nodes[r].keys[0]
+                    self.nodes[r].keys = self.nodes[r].keys[1:]
+                    self.nodes[r].kids = self.nodes[r].kids[1:]
+                }
+                return i
+            }
+        }
+        if i > 0 {
+            self.merge_children(p, i - 1)
+            return i - 1
+        }
+        self.merge_children(p, i)
+        return i
+    }
+
+    // Merges child `i + 1` of node `p` into child `i`, with the key between
+    // them in an inner node, and frees it.
+    fun merge_children(var self, p: int, i: int) {
+        let l = self.nodes[p].kids[i]
+        let r = self.nodes[p].kids[i + 1]
+        if self.nodes[l].kids.len() == 0 {
+            for k in self.nodes[r].keys {
+                self.nodes[l].keys.push(k)
+            }
+            for v in self.nodes[r].vals {
+                self.nodes[l].vals.push(v)
+            }
+            self.nodes[l].next = self.nodes[r].next
+        } else {
+            self.nodes[l].keys.push(self.nodes[p].keys[i])
+            for k in self.nodes[r].keys {
+                self.nodes[l].keys.push(k)
+            }
+            for kid in self.nodes[r].kids {
+                self.nodes[l].kids.push(kid)
+            }
+        }
+        self.nodes[p].keys = removed(self.nodes[p].keys, i)
+        self.nodes[p].kids = removed(self.nodes[p].kids, i + 1)
+        self.release(r)
+    }
+
+    // What is wrong with the tree, "" if nothing: the checks of the tests.
+    fun fault(self) -> str {
+        var seen = 0
+        var leaves: [int] = []
+        // The nodes to visit, with their depth and their bounds, if any
+        var todo: [(int, int, Option<K>, Option<K>)] = [(self.root, 0, None, None)]
+        while todo.len() > 0 {
+            let (n, depth, lo, hi) = todo.pop()
+            let nd = self.nodes[n]
+            let ks = nd.keys
+            if n != self.root && (ks.len() < MIN_KEYS || ks.len() > MAX_KEYS) {
+                return f"node {n} has {ks.len()} keys"
+            }
+            for i in 1..ks.len() {
+                if !(ks[i - 1] < ks[i]) {
+                    return f"node {n}: its keys are out of order"
+                }
+            }
+            if ks.len() > 0 {
+                if let Some(b) = lo {
+                    if ks[0] < b {
+                        return f"node {n}: a key below its range"
+                    }
+                }
+                if let Some(b) = hi {
+                    if !(ks[^1] < b) {
+                        return f"node {n}: a key above its range"
+                    }
+                }
+            }
+            if depth == self.height {
+                if nd.kids.len() != 0 || nd.vals.len() != ks.len() {
+                    return f"leaf {n} has {nd.vals.len()} values and {nd.kids.len()} children"
+                }
+                seen += ks.len()
+                leaves.push(n)
+            } else {
+                if nd.kids.len() != ks.len() + 1 || nd.vals.len() != 0 || ks.len() == 0 {
+                    return f"inner node {n} has {ks.len()} keys and {nd.kids.len()} children"
+                }
+                // Pushed last first, so that the leaves come off in order.
+                var j = nd.kids.len() - 1
+                while j >= 0 {
+                    let a = if j > 0 { Some(ks[j - 1]) } else { lo }
+                    let b = if j < ks.len() { Some(ks[j]) } else { hi }
+                    todo.push((nd.kids[j], depth + 1, a, b))
+                    j -= 1
+                }
+            }
+        }
+        if seen != self.count {
+            return f"{seen} keys in the leaves, the count says {self.count}"
+        }
+        for j in 0..leaves.len() {
+            let want = if j + 1 < leaves.len() { leaves[j + 1] } else { -1 }
+            if self.nodes[leaves[j]].next != want {
+                return f"leaf {leaves[j]} links to {self.nodes[leaves[j]].next}, not {want}"
+            }
+        }
+        let used = self.nodes.len() - self.free.len()
+        let inner = self.inner_count()
+        if used != leaves.len() + inner {
+            return f"{used} slots in use for {leaves.len() + inner} nodes"
+        }
+        return ""
+    }
+
+    // The number of inner nodes.
+    fun inner_count(self) -> int {
+        var count = 0
+        var level = [self.root]
+        for h in 0..self.height {
+            count += level.len()
+            var below: [int] = []
+            for n in level {
+                for c in self.nodes[n].kids {
+                    below.push(c)
+                }
+            }
+            level = below
+        }
+        return count
+    }
+}
+
+// `xs` with `x` put in at `i`.
+fun inserted<T>(xs: [T], i: int, x: T) -> [T] {
+    var out: [T] = xs[:i]
+    out.push(x)
+    for j in i..xs.len() {
+        out.push(xs[j])
+    }
+    return out
+}
+
+// `xs` without its element at `i`.
+fun removed<T>(xs: [T], i: int) -> [T] {
+    var out: [T] = xs[:i]
+    for j in i + 1..xs.len() {
+        out.push(xs[j])
+    }
+    return out
+}
+
+// --- SortedMap -------------------------------------------------------------
+
+// A map that keeps its keys in order.
+pub struct SortedMap<K, V> {
+    t: Tree<K, V>,
+}
+
+// An empty sorted map.
+pub fun new<K: Ord, V>() -> SortedMap<K, V> {
+    return SortedMap { t: empty_tree() }
+}
+
+// The map of the pairs in `pairs`; of a key given twice, the later value.
+pub fun of<K: Ord, V>(pairs: [(K, V)]) -> SortedMap<K, V> {
+    var t: Tree<K, V> = empty_tree()
+    for p in pairs {
+        t.insert(p.0, p.1)
+    }
+    return SortedMap { t: t }
+}
+
+impl<K: Ord, V> SortedMap<K, V> {
+    // Sets `k` to `v`; the value `k` had, if it was there.
+    fun insert(var self, k: K, v: V) -> Option<V> {
+        return self.t.insert(k, v)
+    }
+
+    // The value of `k`, if it is there.
+    fun get(self, k: K) -> Option<V> {
+        return self.t.get(k)
+    }
+
+    fun contains(self, k: K) -> bool {
+        return match self.t.get(k) {
+            Some(_) => true
+            None => false
+        }
+    }
+
+    // Removes `k`; the value it had, if it was there.
+    fun remove(var self, k: K) -> Option<V> {
+        return self.t.remove(k)
+    }
+
+    // The number of keys.
+    fun len(self) -> int {
+        return self.t.count
+    }
+
+    fun is_empty(self) -> bool {
+        return self.t.count == 0
+    }
+
+    // The least key and its value.
+    fun first(self) -> Option<(K, V)> {
+        return self.t.first()
+    }
+
+    // The greatest key and its value.
+    fun last(self) -> Option<(K, V)> {
+        return self.t.last()
+    }
+
+    // The greatest key not greater than `k`, and its value.
+    fun floor(self, k: K) -> Option<(K, V)> {
+        return self.t.floor(k)
+    }
+
+    // The least key not less than `k`, and its value.
+    fun ceiling(self, k: K) -> Option<(K, V)> {
+        return self.t.ceiling(k)
+    }
+
+    // The keys from `lo` (inclusive) to `hi` (exclusive) with their values,
+    // in order.
+    fun range(self, lo: K, hi: K) -> [(K, V)] {
+        return self.t.range_entries(lo, hi)
+    }
+
+    // The keys, in order.
+    fun keys(self) -> [K] {
+        return self.t.keys()
+    }
+
+    // The values, in the order of their keys.
+    fun values(self) -> [V] {
+        return self.t.values()
+    }
+
+    // The keys with their values, in order.
+    fun items(self) -> [(K, V)] {
+        return self.t.items()
+    }
+
+    // Takes the least key and its value.
+    fun pop_first(var self) -> Option<(K, V)> {
+        let e = self.t.first()
+        if let Some(kv) = e {
+            self.t.remove(kv.0)
+        }
+        return e
+    }
+
+    // Takes the greatest key and its value.
+    fun pop_last(var self) -> Option<(K, V)> {
+        let e = self.t.last()
+        if let Some(kv) = e {
+            self.t.remove(kv.0)
+        }
+        return e
+    }
+}
+
+// --- SortedSet -------------------------------------------------------------
+
+// A set that keeps its elements in order.
+pub struct SortedSet<T> {
+    t: Tree<T, ()>,
+}
+
+// An empty sorted set.
+pub fun set_new<T: Ord>() -> SortedSet<T> {
+    return SortedSet { t: empty_tree() }
+}
+
+// The set of the elements of `xs`.
+pub fun set_of<T: Ord>(xs: [T]) -> SortedSet<T> {
+    var t: Tree<T, ()> = empty_tree()
+    for x in xs {
+        t.insert(x, ())
+    }
+    return SortedSet { t: t }
+}
+
+// The set of the strictly ascending `xs`, built in O(n).
+fun set_of_sorted<T: Ord>(xs: [T]) -> SortedSet<T> {
+    var units: [()] = []
+    for x in xs {
+        units.push(())
+    }
+    return SortedSet { t: tree_of_sorted(xs, units) }
+}
+
+// The element of an entry, if there is one.
+fun key_of<T>(e: Option<(T, ())>) -> Option<T> {
+    return match e {
+        Some(kv) => Some(kv.0)
+        None => None
+    }
+}
+
+impl<T: Ord> SortedSet<T> {
+    // Adds `x`; true if it wasn't in the set.
+    fun insert(var self, x: T) -> bool {
+        return match self.t.insert(x, ()) {
+            Some(_) => false
+            None => true
+        }
+    }
+
+    // Removes `x`; true if it was in the set.
+    fun remove(var self, x: T) -> bool {
+        return match self.t.remove(x) {
+            Some(_) => true
+            None => false
+        }
+    }
+
+    fun contains(self, x: T) -> bool {
+        return match self.t.get(x) {
+            Some(_) => true
+            None => false
+        }
+    }
+
+    // The number of elements.
+    fun len(self) -> int {
+        return self.t.count
+    }
+
+    fun is_empty(self) -> bool {
+        return self.t.count == 0
+    }
+
+    // The least element.
+    fun first(self) -> Option<T> {
+        return key_of(self.t.first())
+    }
+
+    // The greatest element.
+    fun last(self) -> Option<T> {
+        return key_of(self.t.last())
+    }
+
+    // The greatest element not greater than `x`.
+    fun floor(self, x: T) -> Option<T> {
+        return key_of(self.t.floor(x))
+    }
+
+    // The least element not less than `x`.
+    fun ceiling(self, x: T) -> Option<T> {
+        return key_of(self.t.ceiling(x))
+    }
+
+    // The elements from `lo` (inclusive) to `hi` (exclusive), in order.
+    fun range(self, lo: T, hi: T) -> [T] {
+        return self.t.range_keys(lo, hi)
+    }
+
+    // The elements, in order.
+    fun items(self) -> [T] {
+        return self.t.keys()
+    }
+
+    // Takes the least element.
+    fun pop_first(var self) -> Option<T> {
+        let e = key_of(self.t.first())
+        if let Some(x) = e {
+            self.t.remove(x)
+        }
+        return e
+    }
+
+    // Takes the greatest element.
+    fun pop_last(var self) -> Option<T> {
+        let e = key_of(self.t.last())
+        if let Some(x) = e {
+            self.t.remove(x)
+        }
+        return e
+    }
+
+    // The elements of either set, in order. A merge of the two, in
+    // O(n + m).
+    fun union(self, other: SortedSet<T>) -> SortedSet<T> {
+        let a = self.t.keys()
+        let b = other.t.keys()
+        var out: [T] = []
+        var i = 0
+        var j = 0
+        while i < a.len() && j < b.len() {
+            if a[i] < b[j] {
+                out.push(a[i])
+                i += 1
+            } else if b[j] < a[i] {
+                out.push(b[j])
+                j += 1
+            } else {
+                out.push(a[i])
+                i += 1
+                j += 1
+            }
+        }
+        for x in a[i:] {
+            out.push(x)
+        }
+        for x in b[j:] {
+            out.push(x)
+        }
+        return set_of_sorted(out)
+    }
+
+    // The elements of both sets, in order, in O(n + m).
+    fun intersection(self, other: SortedSet<T>) -> SortedSet<T> {
+        let a = self.t.keys()
+        let b = other.t.keys()
+        var out: [T] = []
+        var i = 0
+        var j = 0
+        while i < a.len() && j < b.len() {
+            if a[i] < b[j] {
+                i += 1
+            } else if b[j] < a[i] {
+                j += 1
+            } else {
+                out.push(a[i])
+                i += 1
+                j += 1
+            }
+        }
+        return set_of_sorted(out)
+    }
+
+    // The elements of this set that `other` hasn't, in order, in O(n + m).
+    fun difference(self, other: SortedSet<T>) -> SortedSet<T> {
+        let a = self.t.keys()
+        let b = other.t.keys()
+        var out: [T] = []
+        var i = 0
+        var j = 0
+        while i < a.len() {
+            if j == b.len() || a[i] < b[j] {
+                out.push(a[i])
+                i += 1
+            } else if b[j] < a[i] {
+                j += 1
+            } else {
+                i += 1
+                j += 1
+            }
+        }
+        return set_of_sorted(out)
+    }
+
+    // Whether every element of this set is in `other`.
+    fun is_subset(self, other: SortedSet<T>) -> bool {
+        if self.t.count > other.t.count {
+            return false
+        }
+        let b = other.t.keys()
+        var j = 0
+        for x in self.t.keys() {
+            while j < b.len() && b[j] < x {
+                j += 1
+            }
+            if j == b.len() || x < b[j] {
+                return false
+            }
+            j += 1
+        }
+        return true
+    }
+}
+
+// --- tests -------------------------------------------------------------------
+// The functions are generic, which a `#test` case can't take (D116), so the
+// tests are test functions (D162).
+
+// Whether `xs` and `ys` hold the same elements in the same order.
+fun same<T: Eq>(xs: [T], ys: [T]) -> bool {
+    if xs.len() != ys.len() {
+        return false
+    }
+    for i in 0..xs.len() {
+        if xs[i] != ys[i] {
+            return false
+        }
+    }
+    return true
+}
+
+fun is_some_of<T: Eq>(o: Option<T>, v: T) -> bool {
+    return match o {
+        Some(x) => x == v
+        None => false
+    }
+}
+
+fun is_none<T>(o: Option<T>) -> bool {
+    return match o {
+        Some(_) => false
+        None => true
+    }
+}
+
+// The key of an entry, or `d`.
+fun key_or<K, V>(e: Option<(K, V)>, d: K) -> K {
+    return match e {
+        Some(kv) => kv.0
+        None => d
+    }
+}
+
+// The value of an entry, or `d`.
+fun value_or<K, V>(e: Option<(K, V)>, d: V) -> V {
+    return match e {
+        Some(kv) => kv.1
+        None => d
+    }
+}
+
+// A small linear congruential generator: the tests' randomness.
+struct Lcg {
+    x: uint32,
+}
+
+impl Lcg {
+    // The next number in 0..m.
+    fun below(var self, m: int) -> int {
+        self.x = self.x * 1664525u32 + 1013904223u32
+        return ((self.x >> 8u32) % (m as uint32)) as int
+    }
+}
+
+// The model the tests check a `SortedMap<int, int>` against: a value per
+// key in 0..size, -1 for a key that isn't there. Each update takes constant
+// time, so the model costs the interpreter little; its ordered queries scan.
+struct Model {
+    vals: [int],
+    count: int,
+}
+
+fun model_of(size: int) -> Model {
+    var vals: [int] = []
+    for i in 0..size {
+        vals.push(-1)
+    }
+    return Model { vals: vals, count: 0 }
+}
+
+impl Model {
+    fun get(self, k: int) -> Option<int> {
+        if k < 0 || k >= self.vals.len() || self.vals[k] < 0 {
+            return None
+        }
+        return Some(self.vals[k])
+    }
+
+    fun insert(var self, k: int, v: int) -> Option<int> {
+        let old = self.get(k)
+        if self.vals[k] < 0 {
+            self.count += 1
+        }
+        self.vals[k] = v
+        return old
+    }
+
+    fun remove(var self, k: int) -> Option<int> {
+        let old = self.get(k)
+        if self.vals[k] >= 0 {
+            self.count -= 1
+        }
+        self.vals[k] = -1
+        return old
+    }
+
+    // The entry of the greatest key not greater than `k`.
+    fun floor(self, k: int) -> Option<(int, int)> {
+        var i = if k < self.vals.len() { k } else { self.vals.len() - 1 }
+        while i >= 0 {
+            if self.vals[i] >= 0 {
+                return Some((i, self.vals[i]))
+            }
+            i -= 1
+        }
+        return None
+    }
+
+    // The entry of the least key not less than `k`.
+    fun ceiling(self, k: int) -> Option<(int, int)> {
+        var i = if k > 0 { k } else { 0 }
+        while i < self.vals.len() {
+            if self.vals[i] >= 0 {
+                return Some((i, self.vals[i]))
+            }
+            i += 1
+        }
+        return None
+    }
+
+    // The entries from `lo` to `hi`, in order.
+    fun range(self, lo: int, hi: int) -> [(int, int)] {
+        var out: [(int, int)] = []
+        var i = if lo > 0 { lo } else { 0 }
+        while i < hi && i < self.vals.len() {
+            if self.vals[i] >= 0 {
+                out.push((i, self.vals[i]))
+            }
+            i += 1
+        }
+        return out
+    }
+}
+
+fun same_entry(a: Option<(int, int)>, b: Option<(int, int)>) -> bool {
+    return match (a, b) {
+        (Some(x), Some(y)) => x.0 == y.0 && x.1 == y.1
+        (None, None) => true
+        _ => false
+    }
+}
+
+fun same_value(a: Option<int>, b: Option<int>) -> bool {
+    return match (a, b) {
+        (Some(x), Some(y)) => x == y
+        (None, None) => true
+        _ => false
+    }
+}
+
+fun same_items(xs: [(int, int)], ys: [(int, int)]) -> bool {
+    if xs.len() != ys.len() {
+        return false
+    }
+    for i in 0..xs.len() {
+        if xs[i].0 != ys[i].0 || xs[i].1 != ys[i].1 {
+            return false
+        }
+    }
+    return true
+}
+
+// Checks every query of `m` about `k` against the model.
+fun queries_agree(m: SortedMap<int, int>, model: Model, k: int) -> bool {
+    let want = model.get(k)
+    return same_value(m.get(k), want) && m.contains(k) == !is_none(want) &&
+        same_entry(m.floor(k), model.floor(k)) &&
+        same_entry(m.ceiling(k), model.ceiling(k)) &&
+        same_items(m.range(k, k + 20), model.range(k, k + 20))
+}
+
+#test
+fun map_basics() {
+    var m: SortedMap<str, int> = new()
+    assert(m.is_empty() && m.len() == 0, "a new map is empty")
+    assert(is_none(m.get("a")) && !m.contains("a"), "nothing in it")
+    assert(is_none(m.insert("pear", 1)), "a new key")
+    assert(is_none(m.insert("fig", 2)), "another")
+    assert(is_some_of(m.insert("pear", 3), 1), "a key already there gives its old value")
+    assert(m.len() == 2 && !m.is_empty(), "two keys")
+    assert(is_some_of(m.get("pear"), 3) && m.contains("fig") && !m.contains("lime"), "get, contains")
+    assert(is_some_of(m.remove("pear"), 3), "remove gives the value")
+    assert(is_none(m.remove("pear")) && is_none(m.remove("lime")), "removing what isn't there")
+    assert(m.len() == 1 && same(m.keys(), ["fig"]), "one left")
+    let o: SortedMap<str, int> = of([("b", 1), ("a", 2), ("b", 3)])
+    assert(same(o.keys(), ["a", "b"]) && same(o.values(), [2, 3]), "of: the later value of a key")
+    assert(m.t.fault() == "" && o.t.fault() == "", "the trees are sound")
+}
+
+#test
+fun map_order() {
+    var m: SortedMap<int, str> = new()
+    assert(is_none(m.first()) && is_none(m.last()), "an empty map has no ends")
+    assert(is_none(m.floor(3)) && is_none(m.ceiling(3)), "nor neighbours")
+    assert(m.range(0, 10).len() == 0 && is_none(m.pop_first()) && is_none(m.pop_last()), "nor a range")
+    for k in [50, 10, 40, 20, 30] {
+        m.insert(k, f"v{k}")
+    }
+    assert(same(m.keys(), [10, 20, 30, 40, 50]), "keys in order")
+    assert(same(m.values(), ["v10", "v20", "v30", "v40", "v50"]), "values in the keys' order")
+    let it = m.items()
+    assert(it.len() == 5 && it[0].0 == 10 && it[4].1 == "v50", "items")
+    assert(key_or(m.first(), 0) == 10 && value_or(m.first(), "") == "v10", "first")
+    assert(key_or(m.last(), 0) == 50, "last")
+    assert(key_or(m.floor(30), 0) == 30, "floor of a key is the key")
+    assert(key_or(m.floor(35), 0) == 30, "floor between keys")
+    assert(key_or(m.floor(99), 0) == 50 && is_none(m.floor(9)), "floor past the ends")
+    assert(key_or(m.ceiling(30), 0) == 30, "ceiling of a key is the key")
+    assert(value_or(m.ceiling(31), "") == "v40", "ceiling between keys")
+    assert(key_or(m.ceiling(1), 0) == 10 && is_none(m.ceiling(51)), "ceiling past the ends")
+    let r = m.range(20, 50)
+    assert(r.len() == 3 && r[0].0 == 20 && r[2].0 == 40, "a range is half-open")
+    assert(m.range(21, 30).len() == 0 && m.range(30, 30).len() == 0 && m.range(40, 20).len() == 0, "empty ranges")
+    assert(m.range(-100, 100).len() == 5, "a range past both ends")
+    assert(key_or(m.pop_first(), 0) == 10, "pop_first")
+    assert(value_or(m.pop_last(), "") == "v50", "pop_last")
+    assert(same(m.keys(), [20, 30, 40]) && m.len() == 3, "what is left")
+}
+
+#test
+fun map_is_a_value() {
+    var a: SortedMap<int, int> = new()
+    for i in 0..500 {
+        a.insert(i, i)
+    }
+    var b = a
+    for i in 0..250 {
+        b.remove(i * 2)
+    }
+    b.insert(1000, 1)
+    assert(a.len() == 500 && b.len() == 251, "a copy changes alone")
+    assert(a.contains(0) && !b.contains(0) && !a.contains(1000), "each its own keys")
+    assert(a.t.fault() == "" && b.t.fault() == "", "both sound")
+}
+
+// Thousands of random inserts and removes against the model, with the
+// tree's invariants checked after each step: the keys in order and in the
+// ranges of their nodes, every node but the root at least half full, all
+// leaves at the same depth, linked in order, and no slot lost.
+#test
+fun against_a_model() {
+    var m: SortedMap<int, int> = new()
+    var model = model_of(600)
+    var rng = Lcg { x: 12345u32 }
+    for step in 0..4000 {
+        // Inserts outweigh removes for the first half, then the other way.
+        let k = rng.below(600)
+        let grow = if step < 2000 { 3 } else { 1 }
+        if rng.below(4) < grow {
+            assert(same_value(m.insert(k, step), model.insert(k, step)), f"insert {k}")
+        } else {
+            assert(same_value(m.remove(k), model.remove(k)), f"remove {k}")
+        }
+        assert(m.len() == model.count, f"len after step {step}")
+        let fault = m.t.fault()
+        assert(fault == "", f"step {step}: {fault}")
+        assert(queries_agree(m, model, rng.below(640) - 20), f"queries after step {step}")
+    }
+    assert(same_items(m.items(), model.range(0, 600)), "the same entries at the end")
+}
+
+// A tree of three levels, filled in random order and emptied again from
+// both ends and the middle, so that inner nodes split, borrow and merge.
+#test
+fun deep_tree() {
+    var m: SortedMap<int, int> = new()
+    var model = model_of(40000)
+    var rng = Lcg { x: 99u32 }
+    var step = 0
+    while m.len() < 8000 {
+        let k = rng.below(40000)
+        assert(same_value(m.insert(k, step), model.insert(k, step)), "insert")
+        step += 1
+        if step % 500 == 0 {
+            let fault = m.t.fault()
+            assert(fault == "", f"filling, step {step}: {fault}")
+        }
+    }
+    assert(m.t.height == 2, "three levels")
+    assert(m.t.fault() == "" && same_items(m.items(), model.range(0, 40000)), "filled")
+    for i in 0..200 {
+        assert(queries_agree(m, model, rng.below(40000)), "queries")
+    }
+    // No key is below `lo` or from `hi` on: where the model's scans start.
+    var lo = 0
+    var hi = 40000
+    while !m.is_empty() {
+        let which = rng.below(3)
+        if which == 0 {
+            let e = m.pop_first()
+            assert(same_entry(e, model.ceiling(lo)), "pop_first")
+            lo = key_or(e, 0)
+            model.remove(lo)
+        } else if which == 1 {
+            let e = m.pop_last()
+            assert(same_entry(e, model.floor(hi - 1)), "pop_last")
+            hi = key_or(e, 0)
+            model.remove(hi)
+        } else {
+            let k = rng.below(40000)
+            assert(same_value(m.remove(k), model.remove(k)), "remove")
+        }
+        step += 1
+        if step % 500 == 0 {
+            let fault = m.t.fault()
+            assert(fault == "" && m.len() == model.count, f"emptying, step {step}: {fault}")
+        }
+    }
+    assert(m.t.height == 0 && m.t.fault() == "" && model.count == 0, "empty again")
+    m.insert(7, 7)
+    assert(m.t.nodes.len() < 400 && same(m.keys(), [7]), "the slots are reused")
+}
+
+#test
+fun set_basics() {
+    var s: SortedSet<str> = set_new()
+    assert(s.is_empty() && s.len() == 0, "a new set is empty")
+    assert(s.insert("pear") && s.insert("fig") && !s.insert("pear"), "insert says whether it was new")
+    assert(s.len() == 2 && s.contains("fig") && !s.contains("lime"), "contains")
+    assert(s.remove("pear") && !s.remove("pear") && !s.remove("lime"), "remove says whether it was there")
+    assert(same(s.items(), ["fig"]), "the one left")
+    let c: SortedSet<char> = set_of("sorted".chars())
+    assert(same(c.items(), ['d', 'e', 'o', 'r', 's', 't']), "in order, once each")
+    assert(is_some_of(c.first(), 'd') && is_some_of(c.last(), 't'), "first, last")
+    assert(is_some_of(c.floor('p'), 'o') && is_some_of(c.ceiling('p'), 'r'), "floor, ceiling")
+    assert(is_none(c.floor('a')) && is_none(c.ceiling('u')), "past the ends")
+    assert(same(c.range('e', 's'), ['e', 'o', 'r']), "range")
+    var p: SortedSet<int> = set_of([3, 1, 2])
+    assert(is_some_of(p.pop_first(), 1) && is_some_of(p.pop_last(), 3) && same(p.items(), [2]), "pops")
+    assert(is_some_of(p.pop_last(), 2) && is_none(p.pop_last()) && is_none(p.pop_first()), "popped empty")
+}
+
+#test
+fun set_algebra() {
+    let a: SortedSet<int> = set_of([4, 1, 3, 2])
+    let b: SortedSet<int> = set_of([6, 4, 2])
+    assert(same(a.union(b).items(), [1, 2, 3, 4, 6]), "union")
+    assert(same(a.intersection(b).items(), [2, 4]), "intersection")
+    assert(same(a.difference(b).items(), [1, 3]) && same(b.difference(a).items(), [6]), "difference")
+    let e: SortedSet<int> = set_new()
+    assert(a.union(e).len() == 4 && a.intersection(e).is_empty() && e.difference(a).is_empty(), "with the empty set")
+    assert(e.is_subset(a) && a.is_subset(a) && a.intersection(b).is_subset(b), "subsets")
+    assert(!a.is_subset(b) && !b.is_subset(a), "not subsets")
+    // Big enough for the built trees to have levels.
+    var x: SortedSet<int> = set_new()
+    var y: SortedSet<int> = set_new()
+    for i in 0..6000 {
+        x.insert(i * 2)
+        y.insert(i * 3)
+    }
+    let u = x.union(y)
+    let n = x.intersection(y)
+    let d = x.difference(y)
+    assert(u.len() == 10000 && n.len() == 2000 && d.len() == 4000, "sizes")
+    assert(u.t.fault() == "" && n.t.fault() == "" && d.t.fault() == "", "built trees are sound")
+    assert(u.contains(9) && !u.contains(7) && n.contains(6) && !n.contains(4) && d.contains(4), "members")
+    var grown = d
+    for i in 0..3000 {
+        grown.insert(i * 5 + 1)
+        grown.remove(i * 4)
+    }
+    assert(grown.t.fault() == "", "a built tree takes updates")
+    assert(n.is_subset(x) && n.is_subset(y) && !u.is_subset(x), "subsets of big sets")
+}
+
+// A type with an `Ord` of its own: by `cost`, then by `name`'s length.
+struct Job {
+    cost: int,
+    name: str,
+}
+
+impl Ord for Job {
+    fun cmp(self, other: Job) -> int {
+        if self.cost != other.cost {
+            return self.cost - other.cost
+        }
+        return self.name.len() - other.name.len()
+    }
+}
+
+#test
+fun other_ordered_keys() {
+    var jobs: SortedMap<Job, int> = new()
+    jobs.insert(Job { cost: 3, name: "c" }, 1)
+    jobs.insert(Job { cost: 1, name: "aa" }, 2)
+    jobs.insert(Job { cost: 1, name: "a" }, 3)
+    jobs.insert(Job { cost: 1, name: "b" }, 4)
+    var names: [str] = []
+    for j in jobs.keys() {
+        names.push(j.name)
+    }
+    assert(same(names, ["a", "aa", "c"]), "by the type's own cmp; an equal key is replaced")
+    assert(same(jobs.values(), [4, 2, 1]), "the later value")
+    let big: SortedSet<int64> = set_of([5000000000, -5000000000, 0])
+    assert(is_some_of(big.first(), -5000000000) && is_some_of(big.floor(4999999999), 0), "int64")
+    let f: SortedMap<float, str> = of([(0.5, "half"), (-2.0, "minus two")])
+    assert(value_or(f.first(), "") == "minus two", "floats")
+}
