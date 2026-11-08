@@ -24,6 +24,7 @@ SUITES = [
     "tests.burn.test_platform_primitives",
     "tests.burn.test_net",
     "tests.burn.test_term",
+    "tests.burn.test_http",
     "tests.burn.test_unit_type",
     "tests.burn.test_defer",
     "tests.burn.test_format_specs",
