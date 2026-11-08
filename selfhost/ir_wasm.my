@@ -245,7 +245,7 @@ impl CodeGen {
     // A call of `name` with `n` words (checked against its definition when
     // the module is put together).
     fun wasm_call(var self, op: str, name: str, n: int32) {
-        match get(self.wasm_calls, name) {
+        match self.wasm_calls.get(name) {
             Some(m) => { if m != n { self.wasm_calls[name] = -1 } },
             None => { self.wasm_calls[name] = n },
         }

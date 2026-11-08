@@ -2945,7 +2945,7 @@ impl Checker {
     // its message).
     fun duplicate_method(self, m: FunData, key: str, first: FuncSig) -> CheckErr {
         let e = terr_at(m.line, m.col, m.sp, format("duplicate method '{}' for type '{}'", m.name, key))
-        return match get(self.std_impls, first.decl_id) {
+        return match self.std_impls.get(first.decl_id) {
             Some(o) => {
                 var module = o.module
                 if o.implicit { module = module + ", which every program sees," }
@@ -3177,7 +3177,7 @@ fun bound_arity_msg(tp: str, tr: str, want: [str], args: [Type]) -> str {
 #test([:], "C", "Iterator", Type.TStruct("C", []))[None]
 #test(["Iterator\tL": ImplArgs { target: Type.TStruct("L", [Type.TParam("T")]), args: [Type.TTuple([Type.TParam("T"), Type.TStr])] }], "L", "Iterator", Type.TStruct("L", [Type.TChar]))[Some([Type.TTuple([Type.TChar, Type.TStr])])]
 pub fun impl_trait_args(impls: [str: ImplArgs], key: str, trnm: str, t: Type) -> Option<[Type]> {
-    return match get(impls, trnm + "\t" + key) {
+    return match impls.get(trnm + "\t" + key) {
         Some(ia) => Some(subst_type_list(ia.args, unify_param(ia.target, t, []).subst)),
         None => None,
     }
@@ -6471,7 +6471,7 @@ impl Checker {
                 if self.const_decl_idx(n) < 0 { return Err(terr_at(e.line, e.col, e.sp, format("'{}' is not a constant and cannot appear in a const initializer", n))) }
                 self.ensure_const(n)?
                 if self.failed_consts.contains(n) { return Err(poisoned()) }
-                return match get(self.const_values, n) { Some(v) => Ok(v), None => Ok(CV.CVUnknown) }
+                return match self.const_values.get(n) { Some(v) => Ok(v), None => Ok(CV.CVUnknown) }
             },
             ExprKind.Unary(op, x) => {
                 let v = self.fold_const_expr(x)?
@@ -6501,7 +6501,7 @@ impl Checker {
 
     #test(checker_on("[int]"), Expr { id: 7, line: 11, col: 25, sp: SrcSpan { sline: 11, scol: 25, eline: 11, ecol: 28 }, kind: ExprKind.Name("KIB") })[Type.TInt(32, true)]
     fun node_type(self, e: Expr) -> Type {
-        return match get(self.resolved, e.id) { Some(t) => t, None => t_int() }
+        return match self.resolved.get(e.id) { Some(t) => t, None => t_int() }
     }
 
     #test(checker_on("fun f(n: int) -> int { return n * 2 }"), expr_of("1 + 2 * 3"), ">", expr_of("1 + 2 * 3"), expr_of("1 + 2 * 3"), Type.TBool)[Ok(CV.CVBool(false))]
@@ -6970,7 +6970,7 @@ impl Checker {
             var ch: [str] = []
             var ex: [str] = []
             while k < reached.len() {
-                match get(direct, reached[k]) {
+                match direct.get(reached[k]) {
                     Some(e) => {
                         for f in e.changes { ch = add_name(ch, f) }
                         for f in e.examines { ex = add_name(ex, f) }
@@ -8630,7 +8630,7 @@ pub struct PartialTgt { params: [Type], ret: Option<Type>, name: str }
 #test(["get": 0, "fläche": 1, "crlf_len": 2, "accent": 3, "bytes_of": 4, "main": 5], "main")[5]
 #test(["get": 0, "total": 1, "count": 2, "nth": 3, "doubled": 4, "last": 5, "set_first": 6, "copy_is_independent": 7, "grid_get": 8, "bump_cell": 9, "ysum": 10, "main": 11], "main")[11]
 fun index_in(m: [str: int32], name: str) -> int32 {
-    return match get(m, name) {
+    return match m.get(name) {
         Some(i) => i
         None => -1
     }
@@ -8922,7 +8922,7 @@ impl Reads {
                 // `self.m(…)`: the fields `m` examines (MYLA-171)
                 let m = self_method(c)
                 if m != "" {
-                    match get(self.examines, m) {
+                    match self.examines.get(m) {
                         Some(fs) => { for f in fs { self.fields = add_name(self.fields, f) } },
                         None => {},
                     }
@@ -9132,7 +9132,7 @@ impl Reentrancy {
     fun taint(self, r: Reads) -> [str] {
         var out = r.fields
         for n in r.names {
-            match get(self.locals, n) {
+            match self.locals.get(n) {
                 Some(t) => { for f in t.fields { out = add_name(out, f) } },
                 None => {},
             }
@@ -9145,11 +9145,11 @@ impl Reentrancy {
     fun check(var self, e: Expr) -> [Expr] {
         let r = self.scan(e)
         for n in r.names {
-            match get(self.locals, n) {
+            match self.locals.get(n) {
                 Some(t) => {
                     for f in t.fields {
                         var prev = -1
-                        match get(self.checked, f) { Some(p) => { prev = p }, None => {} }
+                        match self.checked.get(f) { Some(p) => { prev = p }, None => {} }
                         if t.epoch > prev { self.checked[f] = t.epoch } else { self.checked[f] = prev }
                     }
                 },
@@ -9325,7 +9325,7 @@ impl Reentrancy {
         for c in self_calls(e) {
             match c.kind {
                 ExprKind.Call(callee, args, _) => {
-                    match get(self.changes, self_method(callee)) {
+                    match self.changes.get(self_method(callee)) {
                         Some(fs) => {
                             var names: [str] = []
                             for a in args { for n in self.scan(a).names { names = add_name(names, n) } }
@@ -9341,7 +9341,7 @@ impl Reentrancy {
 
     fun write(var self, f: str, names: [str], at: Expr) {
         // a change settles the field's check: what comes after depends on it
-        match get(self.checked, f) {
+        match self.checked.get(f) {
             Some(c) => {
                 self.checked.remove(f)
                 if c < self.epoch {
@@ -9352,7 +9352,7 @@ impl Reentrancy {
             None => {},
         }
         for n in names {
-            match get(self.locals, n) {
+            match self.locals.get(n) {
                 Some(t) => {
                     if has_name(t.fields, f) && t.epoch < self.epoch {
                         self.warn(format("'self.{}' is set from a value read before an 'await': another call to this actor may have changed it meanwhile", f), at, self.awaits[t.epoch], "read it again after the 'await'")

@@ -196,7 +196,7 @@ impl Norm {
                 if kind == "async" {
                     if self.wrap_children {
                         var ret: Option<Type> = None
-                        match get(self.resolved, init.id) {
+                        match self.resolved.get(init.id) {
                             Some(t) => { ret = Some(t) },
                             None => {},
                         }
@@ -593,7 +593,7 @@ impl Norm {
     }
 
     fun copy_type(var self, src: int32, to: int32) {
-        match get(self.resolved, src) {
+        match self.resolved.get(src) {
             Some(t) => { self.resolved[to] = t },
             None => {},
         }

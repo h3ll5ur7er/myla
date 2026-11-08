@@ -783,7 +783,7 @@ impl Loader {
         var seen: [str: str] = [:]
         for m in self.modules {
             if m.id == "" { continue }
-            match get(seen, m.id) {
+            match seen.get(m.id) {
                 Some(other) => { return Err(at(m.path, 0, 0, no_span(), format("module id collision '{}' between {} and {}", m.id, other, m.path))) },
                 None => {},
             }
@@ -821,7 +821,7 @@ impl Loader {
                         DeclKind.ImportDecl(p, items, alias, isp) => {
                             if isp {
                                 for b in reexports(src, items, alias) {
-                                    let cur = get(m.exports, b.name)
+                                    let cur = m.exports.get(b.name)
                                     let fresh = match cur { Some(c) => !same_binding(c, b.binding), None => true }
                                     if fresh {
                                         m.exports[b.name] = b.binding
@@ -861,7 +861,7 @@ impl Loader {
                             if nb.missing {
                                 return Err(at(m.path, imp.line, imp.col, imp.sp, format("module '{}' does not export '{}' (declarations are private unless marked 'pub')", dotted(p), nb.name)))
                             }
-                            let clash = match get(bindings, nb.name) { Some(c) => !same_binding(c, nb.binding), None => false }
+                            let clash = match bindings.get(nb.name) { Some(c) => !same_binding(c, nb.binding), None => false }
                             if clash {
                                 return Err(at(m.path, imp.line, imp.col, imp.sp, format("import of '{}' collides with an existing name in this module — rename with 'as'", nb.name)))
                             }
@@ -894,7 +894,7 @@ fun reexports(src: Module, items: Option<[ImportItem]>, alias: Option<str>) -> [
         },
         Some(its) => {
             for it in its {
-                match get(src.exports, it.name) {
+                match src.exports.get(it.name) {
                     Some(b) => { out.push(NameBinding { name: alias_or(it.alias, it.name), binding: b, missing: false }) },
                     None => {},
                 }
@@ -915,7 +915,7 @@ fun import_bindings(src: Module, p: ImportPath, items: Option<[ImportItem]>, ali
         },
         Some(its) => {
             for it in its {
-                match get(src.exports, it.name) {
+                match src.exports.get(it.name) {
                     Some(b) => { out.push(NameBinding { name: alias_or(it.alias, it.name), binding: b, missing: false }) },
                     None => { out.push(NameBinding { name: it.name, binding: Binding { is_module: false, value: "" }, missing: true }) },
                 }
@@ -1007,7 +1007,7 @@ impl Renamer {
     #test(Renamer { env: ["Clock": "Clock", "Watch": "Watch", "main": "main"], aliases: [:], exports: ["": [:]], vals: [], tys: ["Self"], path: "examples/errors/type_become_mutating_receiver.my", err: None, kinds: [:] }, "Watch")["Watch"]
     fun type_name(self, n: str) -> str {
         if !has(self.tys, n) {
-            match get(self.env, n) { Some(q) => { return q }, None => {} }
+            match self.env.get(n) { Some(q) => { return q }, None => {} }
         }
         return n
     }
@@ -1195,7 +1195,7 @@ impl Renamer {
         var k = parts.len() - 1
         var mid = ""
         while k >= 1 && mid == "" {
-            match get(self.aliases, join(parts[:k], ".")) {
+            match self.aliases.get(join(parts[:k], ".")) {
                 Some(m) => { mid = m },
                 None => { k -= 1 },
             }
@@ -1208,8 +1208,8 @@ impl Renamer {
             let name = parts[k]
             let last = k == parts.len() - 1
             var exports: [str: Binding] = [:]
-            match get(self.exports, mid) { Some(x) => { exports = x }, None => {} }
-            match get(exports, name) {
+            match self.exports.get(mid) { Some(x) => { exports = x }, None => {} }
+            match exports.get(name) {
                 Some(b) => {
                     if b.is_module {
                         if last {
@@ -1218,7 +1218,7 @@ impl Renamer {
                         }
                         mid = b.value
                     } else {
-                        let kind = match get(self.kinds, b.value) { Some(w) => w, None => "declaration" }
+                        let kind = match self.kinds.get(b.value) { Some(w) => w, None => "declaration" }
                         let fits = if want_type { is_type_kind(kind) } else { kind == "trait" }
                         if !last || !fits {
                             let what = if want_type { "a type" } else { "a trait" }
@@ -1337,8 +1337,8 @@ impl Renamer {
             ExprKind.Name(n) => {
                 // a type parameter is the function's, as in `T.zero()` (D172)
                 if !has(self.vals, n) && !has(self.tys, n) {
-                    match get(self.env, n) { Some(q) => { return mk_expr(e, ExprKind.Name(q)) }, None => {} }
-                    match get(self.aliases, n) {
+                    match self.env.get(n) { Some(q) => { return mk_expr(e, ExprKind.Name(q)) }, None => {} }
+                    match self.aliases.get(n) {
                         Some(m) => { self.fail(e.line, e.col, e.sp, format("module '{}' cannot be used as a value — access a member with '{}.<name>'", n, n)) },
                         None => {},
                     }
@@ -1454,7 +1454,7 @@ impl Renamer {
                 key = key + "." + names[cnt - 1 - s]
                 s = s + 1
             }
-            match get(self.aliases, key) {
+            match self.aliases.get(key) {
                 Some(m) => {
                     mid = m
                     found = true
@@ -1472,8 +1472,8 @@ impl Renamer {
         while s < cnt && qualified == "" {
             let name = names[cnt - 1 - s]
             var exports: [str: Binding] = [:]
-            match get(self.exports, mid) { Some(x) => { exports = x }, None => {} }
-            match get(exports, name) {
+            match self.exports.get(mid) { Some(x) => { exports = x }, None => {} }
+            match exports.get(name) {
                 Some(b) => {
                     if b.is_module { mid = b.value } else { qualified = b.value }
                 },
@@ -1557,7 +1557,7 @@ fun module_env(bindings: [str: Binding]) -> [str: str] {
 // The text `path` has before its file's: an editor's unsaved buffer
 // (`overrides`), or the embedded standard library's (MYLA-243).
 pub fun source_text(path: str, overrides: [str: str]) -> Option<str> {
-    match get(overrides, path) {
+    match overrides.get(path) {
         Some(text) => { return Some(text) },
         None => {},
     }

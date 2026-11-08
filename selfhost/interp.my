@@ -2149,7 +2149,7 @@ impl Interp {
     // Whether `s` has an `await` or an `async let` (by statement).
     #test(interp_on("[int]"), Stmt { id: 89, line: 44, col: 5, sp: SrcSpan { sline: 44, scol: 5, eline: 44, ecol: 20 }, kind: StmtKind.VarDecl("let", "s", None, Expr { id: 88, line: 44, col: 13, sp: SrcSpan { sline: 44, scol: 13, eline: 44, ecol: 20 }, kind: ExprKind.StrLit("hello") }) })[false]
     fun suspends(var self, s: Stmt) -> bool {
-        match get(self.suspending, s.id) { Some(r) => { return r }, None => {} }
+        match self.suspending.get(s.id) { Some(r) => { return r }, None => {} }
         let r = stmt_suspends(s)
         self.suspending[s.id] = r
         return r
@@ -2163,7 +2163,7 @@ impl Interp {
     fun normalized(var self, b: Block) -> Block {
         if b.stmts.len() == 0 { return b }
         let key = b.stmts[0].id
-        match get(self.bodies, key) { Some(nb) => { return nb }, None => {} }
+        match self.bodies.get(key) { Some(nb) => { return nb }, None => {} }
         self.norm.resolved = self.resolved
         self.resolved = [:]
         let nb = self.norm.block(b)
@@ -2174,7 +2174,7 @@ impl Interp {
     }
 
     fun lambda_body(var self, e: Expr) -> Block {
-        match get(self.bodies, e.id) { Some(nb) => { return nb }, None => {} }
+        match self.bodies.get(e.id) { Some(nb) => { return nb }, None => {} }
         self.norm.resolved = self.resolved
         self.resolved = [:]
         let nb = self.norm.returning(e, false)
@@ -2185,7 +2185,7 @@ impl Interp {
     }
 
     fun task_body(var self, init: Expr) -> Block {
-        match get(self.bodies, init.id) { Some(nb) => { return nb }, None => {} }
+        match self.bodies.get(init.id) { Some(nb) => { return nb }, None => {} }
         self.norm.resolved = self.resolved
         self.resolved = [:]
         let nb = self.norm.returning(init, true)
@@ -2877,7 +2877,7 @@ impl Interp {
 
     #test(interp_on("[int]"), 0)[None]
     fun resolved_of(self, id: int32) -> Option<Type> {
-        return get(self.resolved, id)
+        return self.resolved.get(id)
     }
 
     // -- calls ------------------------------------------------------------
@@ -2900,7 +2900,7 @@ impl Interp {
             },
             ExprKind.GetField(tgt, field) => {
                 // `T.zero()`, `int.zero()`: a function of the type (D172)
-                match get(self.static_calls, e.id) {
+                match self.static_calls.get(e.id) {
                     Some(st) => { return self.eval_static_call(e, st, field, args) },
                     None => {},
                 }
@@ -3113,7 +3113,7 @@ impl Interp {
         if !self.type_env || fi < 0 || self.tparams[fi].len() == 0 { return None }
         let tps = self.tparams[fi]
         var sub: [Subst] = []
-        match get(self.call_types, id) {
+        match self.call_types.get(id) {
             Some(ts) => {
                 var i = 0
                 while i < tps.len() && i < ts.len() {
@@ -3124,7 +3124,7 @@ impl Interp {
             None => {
                 match self_t {
                     Some(st) => {
-                        match get(self.impl_selfs, self.func_names[fi]) {
+                        match self.impl_selfs.get(self.func_names[fi]) {
                             Some(pat) => { sub = unify_param(pat, self.env_type(st), []).subst },
                             None => {},
                         }
@@ -3155,7 +3155,7 @@ impl Interp {
                 for b in sub {
                     let tn = type_name(b.ty)
                     var k = -1
-                    match get(self.type_ix, tn) {
+                    match self.type_ix.get(tn) {
                         Some(x) => { k = x },
                         None => {
                             k = self.types.len()
@@ -4980,13 +4980,13 @@ impl MapV {
     #test(mapv_of([Value.VTuple([Value.VInt(1)])], [Value.VUnit]), Value.VTuple([Value.VInt(1)]))[0]
     fun place(self, k: Value) -> int32 {
         if let Value.VStr(s) = k {
-            return match get(self.strs, s) {
+            return match self.strs.get(s) {
                 Some(j) => j,
                 None => -1,
             }
         }
         if is_int_key(k) {
-            return match get(self.ints, as_int(k)) {
+            return match self.ints.get(as_int(k)) {
                 Some(j) => j,
                 None => -1,
             }
@@ -5001,7 +5001,7 @@ impl MapV {
 
     // The first place of a compound key whose hash is `h`, or -1.
     fun first_of(self, h: int64) -> int32 {
-        return match get(self.heads, h) {
+        return match self.heads.get(h) {
             Some(j) => j,
             None => -1,
         }

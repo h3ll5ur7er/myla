@@ -9,8 +9,8 @@
 //
 // Built-in (not user-shadowable): `len`, indexing `m[k]` (read and as an
 // assignment target), `contains`, `remove`, `keys`, and `for k in m`. The
-// prelude adds `get(m, k) -> Option<V>`. A read `m[k]` of an absent key traps
-// (see examples/errors/); use `get` or `contains` to probe safely.
+// implicit std.map adds `m.get(k) -> Option<V>`. A read `m[k]` of an absent key
+// traps (see examples/errors/); use `get` or `contains` to probe safely.
 
 #test([1, 2, 3])[6]
 #test([])[0]
@@ -54,7 +54,7 @@ fun empty_len() -> int {
 fun get_present() -> int {
     let m = [1: 2, 3: 4]
     var r = -1
-    match get(m, 1) {
+    match m.get(1) {
         Some(v) => { r = v }
         None => { r = -1 }
     }
@@ -65,7 +65,7 @@ fun get_present() -> int {
 fun get_absent() -> int {
     let m = [1: 2, 3: 4]
     var r = 0
-    match get(m, 99) {
+    match m.get(99) {
         Some(v) => { r = v }
         None => { r = -1 }
     }
@@ -193,7 +193,7 @@ fun main() {
     print(m.contains("b"))          // 0 (false)
     print(m.contains("c"))          // 1 (true)
 
-    match get(m, "c") {
+    match m.get("c") {
         Some(v) => { print(v) }      // 3
         None => { print(-1) }
     }
