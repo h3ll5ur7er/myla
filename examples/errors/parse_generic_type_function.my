@@ -1,0 +1,20 @@
+//~ parse error: a function of a generic type is called on the type's name alone, 'Box.zero()'
+// `Box<int>.zero()` would read as a comparison: a generic type's function
+// is called as `Box.zero()`, its arguments or the expected type giving
+// `Box`'s type arguments (D172).
+trait Zero {
+    fun zero() -> Self
+}
+
+struct Box<T> {
+    v: T,
+}
+
+impl<T: Zero> Zero for Box<T> {
+    fun zero() -> Box<T> { return Box { v: T.zero() } }
+}
+
+fun main() {
+    let b = Box<int>.zero()
+    print(1)
+}

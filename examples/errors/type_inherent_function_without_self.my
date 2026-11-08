@@ -1,0 +1,13 @@
+//~ type error: function 'f' in 'impl P' has no 'self': only a trait's functions go without one
+//~ help: write a free function 'fun f(…)', or declare it in a trait and implement that for 'P'
+// A type has no static methods: a function without `self` belongs to a
+// trait and its impls (D172), not to an `impl` of no trait.
+struct P { x: int }
+
+impl P {
+    fun f(a: int) -> int { return a }
+}
+
+fun main() {
+    print(1)
+}

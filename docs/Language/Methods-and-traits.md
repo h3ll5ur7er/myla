@@ -1,6 +1,6 @@
 # Methods and traits
 
-The checker lowers every method to a function named `Type.method` with `self` as its first parameter (`Checker.resolve_impls` in [[selfhost/checker.my]]).
+The checker lowers every method to a function named `Type.method` with `self` as its first parameter, and a trait's function without `self` to one named the same way without it (`Checker.resolve_impls` in [[selfhost/checker.my]]; [Functions without self](#functions-without-self), D172).
 
 [TOC]
 
@@ -63,7 +63,7 @@ fun main() {
 ```
 - A generic type takes a generic impl that names every parameter in order: `impl<T> Box<T> { … }`. Methods may have their own type parameters.
 - A type may have several `impl` blocks; a method name must be unique per type and differ from every field name. There is no orphan rule (D45): any module may add methods to any type.
-- The only call form is `receiver.method(args)` (D46). There are no static or associated functions (every method takes `self`), and `Type.method` isn't a value; wrap it in a lambda.
+- A method's call form is `receiver.method(args)` (D46). A type has no static methods of its own (every method in an `impl` of no trait takes `self`); a trait's functions without `self` are called on the type, `int.zero()` ([Functions without self](#functions-without-self), D172). `Type.method` isn't a value; wrap it in a lambda.
 
 ## Traits
 
@@ -88,12 +88,121 @@ fun main() {
 // true
 ```
 
-- A trait lists method signatures; there are no default bodies. `Self` is the implementing type, and it means nothing outside a trait declaration (`'Self' is only valid inside a trait declaration`).
+- A trait lists method signatures, and functions without `self` ([below](#functions-without-self)); there are no default bodies. `Self` is the implementing type, and it means nothing outside a trait declaration (`'Self' is only valid inside a trait declaration`).
 - `impl Trait for T` must provide exactly the trait's methods, with the same receivers and with parameter and result types equal to the signature after `Self` is replaced by `T`.
 - A type implements a trait at most once.
 - **Generic traits** (D55) take type parameters, `trait Comparable<T> { fun compare(self, other: T) -> int }`, implemented as `impl Comparable<int32> for Version`. Still at most one impl per trait and type, whatever the arguments, so calls never need overload resolution.
 - The prelude has one, `trait Iterator<T> { fun next(var self) -> Option<T> }`, which `for` loops over ([Iterators](#iterators), D171).
 - There are no trait objects and no dynamic dispatch: traits are checked at compile time and methods are called statically.
+
+## Functions without self
+
+```myla
+trait Zero {
+    fun zero() -> Self
+}
+
+impl Zero for int {
+    fun zero() -> int { return 0 }
+}
+
+struct Money {
+    cents: int64,
+}
+
+impl Zero for Money {
+    fun zero() -> Money { return Money { cents: 0 } }
+}
+
+impl Add for Money {
+    fun add(self, other: Money) -> Money { return Money { cents: self.cents + other.cents } }
+}
+
+fun total<T: Zero + Add>(xs: [T]) -> T {
+    var s = T.zero()
+    for x in xs { s = s + x }
+    return s
+}
+
+fun main() {
+    print(int.zero())
+    print(total([1, 2, 3]))
+    print(total([Money { cents: 150 }, Money { cents: 250 }]).cents)
+    let none: [Money] = []
+    print(total(none).cents)
+}
+// output:
+// 0
+// 6
+// 400
+// 0
+```
+
+A trait may declare, and its impls define, a **function without `self`** (D172, [[MYLA-384]]): `fun zero() -> Self`, `fun parse(text: str) -> Result<Self, ParseError>`. `Self` in its signature is the implementing type, as in a method's. It is called on a type, not on a value:
+
+- on a type that implements the trait: a struct or enum (`Money.zero()`, a module's `m.Money.zero()`), a built-in type (`int.zero()`, `str.zero()`, and a type keyword before `.`, `int64.zero()`), or an alias of one;
+- on a type parameter bounded by the trait: `T.zero()` under `T: Zero`, inside a generic function, a generic impl's methods and functions, and their lambdas.
+
+The call is resolved statically, by the one impl the type has (D55): the checker types it by the function's signature with `Self` replaced; natively each generic instance calls its own type's function ([[Architecture/Monomorphization]]); the interpreter binds a generic function's type parameters in its frame when a program calls such a function on one, and calls the function of the type `T` is bound to.
+
+A generic type's function is called on the type's name alone, `Box.zero()`: its type arguments come from the arguments and the expected type, as a generic function's do (`let b: Box<int> = Box.zero()`); `Box<int>.zero()` would read as a comparison and is an error. A list or map type can't stand before `.` (`[int].zero()`): a generic function names it, `make<[int]>()` with `fun make<T: Zero>() -> T { return T.zero() }`.
+
+```myla
+trait Parse {
+    fun parse(text: str) -> Option<Self>
+    fun kind() -> str
+}
+
+impl Parse for int {
+    fun parse(text: str) -> Option<int> {
+        if text.len() == 0 { return None }
+        var n = 0
+        for c in text {
+            if c < '0' || c > '9' { return None }
+            n = n * 10 + (c - '0')
+        }
+        return Some(n)
+    }
+
+    fun kind() -> str { return "int" }
+}
+
+// a generic impl: its function calls its `T`'s
+impl<T: Parse> Parse for [T] {
+    fun parse(text: str) -> Option<[T]> {
+        var out: [T] = []
+        for part in text.split(",") { out.push(T.parse(part)?) }
+        return Some(out)
+    }
+
+    fun kind() -> str { return "list of " + T.kind() }
+}
+
+fun decode<T: Parse>(text: str) -> Option<T> {
+    return T.parse(text)
+}
+
+fun describe<T: Parse>() -> str {
+    return T.kind()
+}
+
+fun main() {
+    let xs: Option<[int]> = decode("1,2,3")
+    print(xs.unwrap_or([]).len())
+    print(describe<[[int]]>())
+}
+// output:
+// 3
+// list of list of int
+```
+
+- Only a trait's functions go without `self`: an `impl` of no trait can't have one (`function 'f' in 'impl P' has no 'self': only a trait's functions go without one`), so a type has no static methods of its own; write a free function. The reason not to allow them: a type's own constructors read as well as free functions of its module (`deque.new()`), and keeping them out keeps one way of writing them.
+- An impl gives the function as the trait declares it, without a receiver; a method of the trait keeps its receiver (`has receiver 'self' but the trait declares a function without 'self'`).
+- A function without `self` isn't called on a value (`'zero' is a function of 'int32' without 'self': call it on the type, 'int32.zero(…)', not on a value`), and a method isn't called on a type (`'area' is a method of 'Sq' (it takes 'self'): call it on a value`).
+- On a type that doesn't implement the trait, `type 'str' has no function 'zero'`, with the trait that declares one named; on a type parameter without the bound, `type parameter 'T' has no function 'zero': it has no bounds`.
+- What a name before `.` means: a local variable first (a method call on its value), then a type parameter of the function, a type, and a module bound by `import … as` (the loader folds `m.f` and `m.T.f` into the module's names first; a type and a module of one name in one file is already an error, `import of 'm' collides with an existing name`).
+- An enum's function can't have a variant's name (`Color.Red()` is the variant).
+- `T.zero` without a call isn't a value; wrap the call in a lambda, `() => T.zero()`. A `become` can't call one yet.
 
 ## Operator overloading
 

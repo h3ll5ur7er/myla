@@ -1,0 +1,14 @@
+//~ type error: 'int32.zero' names a type's function, not a value: call it, 'int32.zero(…)', or wrap the call in a lambda
+// A type's function is called (D172); a lambda makes a value of a call.
+trait Zero {
+    fun zero() -> Self
+}
+
+impl Zero for int {
+    fun zero() -> int { return 0 }
+}
+
+fun main() {
+    let f = int.zero
+    print(f())
+}

@@ -1,0 +1,5 @@
+type error: 'area' is a method of 'Sq' (it takes 'self'): call it on a value, 'x.area(…)'
+  --> examples/errors/type_trait_method_on_a_type.my:17:18
+   |
+17 |     print(Sq.area())
+   |           ^^^^^^^^^

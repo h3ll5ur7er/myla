@@ -1,0 +1,13 @@
+//~ type error: type parameter 'T' has no function 'zero': it has no bounds (write 'T: Trait' to call a trait's functions)
+// `T.zero()` needs a bound whose trait declares `zero` (D172).
+trait Zero {
+    fun zero() -> Self
+}
+
+fun make<T>() -> T {
+    return T.zero()
+}
+
+fun main() {
+    print(1)
+}

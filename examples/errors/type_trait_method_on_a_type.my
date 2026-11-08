@@ -1,0 +1,18 @@
+//~ type error: 'area' is a method of 'Sq' (it takes 'self'): call it on a value, 'x.area(…)'
+// A method takes `self`, so it is called on a value, not on its type
+// (D172).
+trait Shape {
+    fun area(self) -> int
+}
+
+struct Sq {
+    side: int,
+}
+
+impl Shape for Sq {
+    fun area(self) -> int { return self.side * self.side }
+}
+
+fun main() {
+    print(Sq.area())
+}

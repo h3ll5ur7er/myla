@@ -1,0 +1,5 @@
+type error: type parameter 'T' has no function 'zero': it has no bounds (write 'T: Trait' to call a trait's functions)
+  --> examples/errors/type_trait_function_unbounded_type_parameter.my:8:18
+  |
+8 |     return T.zero()
+  |            ^^^^^^^^

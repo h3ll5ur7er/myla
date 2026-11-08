@@ -1,0 +1,15 @@
+//~ type error: 'zero' is a function of 'int32' without 'self': call it on the type, 'int32.zero(…)', not on a value
+// A trait's function without `self` is called on a type (D172), not on a
+// value of it.
+trait Zero {
+    fun zero() -> Self
+}
+
+impl Zero for int {
+    fun zero() -> int { return 0 }
+}
+
+fun main() {
+    let n = 5
+    print(n.zero())
+}

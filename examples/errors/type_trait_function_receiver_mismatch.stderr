@@ -1,0 +1,5 @@
+type error: method 'zero' in impl of trait 'Zero' for 'Money' has receiver 'self' but the trait declares a function without 'self'
+  --> examples/errors/type_trait_function_receiver_mismatch.my:13:5
+   |
+13 |     fun zero(self) -> Money { return Money { cents: 0 } }
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

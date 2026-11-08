@@ -1,0 +1,5 @@
+parse error: a function of a generic type is called on the type's name alone, 'Box.zero()': its arguments or the expected type give the type arguments
+  --> examples/errors/parse_generic_type_function.my:18:16
+   |
+18 |     let b = Box<int>.zero()
+   |                ^

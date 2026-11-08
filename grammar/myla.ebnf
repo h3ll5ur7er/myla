@@ -97,7 +97,9 @@ type_params  = "<" IDENT ( "," IDENT )* ","? ">" ;
 
 impl_decl    = "impl" generics? ( type | named_type "for" type ) "{" SEP* ( method SEP* )* "}" ;
 method       = attribute* method_head block ;
-method_head  = "async"? "fun" IDENT generics? "(" NL* receiver NL* ( "," NL* param NL* )* ( "," NL* )? ")" ( "->" type )? ;
+method_head  = "async"? "fun" IDENT generics? "(" NL* method_params? ")" ( "->" type )? ;
+method_params = ( receiver | param ) NL* ( "," NL* param NL* )* ( "," NL* )? ;
+              (* without a receiver: a trait's function, called on a type, D172 *)
 receiver     = "self" | "var" "self" ;
 
 trait_decl   = "trait" IDENT type_params? "{" SEP* ( method_head SEP* )* "}" ;
@@ -178,7 +180,8 @@ bound       = "^" expression @from_end | expression ;   (* "^n": the n-th from t
 
 primary     = INT | FLOAT | CHAR | STRING | fstring | "true" @boolean | "false" @boolean
             | "self" @self | IDENT | generic_call | struct_literal | "(" NL* expression NL* ")" @paren_expression
-            | "(" NL* ")" @unit | tuple | list | map | match_expr | if_expr ;   (* "()": the unit value, D138 *)
+            | "(" NL* ")" @unit | tuple | list | map | match_expr | if_expr
+            | prim_type "." member @field_expression ;   (* "()": the unit value, D138; int64.zero(): a type's function, D172 *)
 generic_call @call_expression = IDENT type_args "(" call_args? ")" ;
               (* f<T>(…), m.f<T>(…), x.method<T>(…) (D169): after a name, the
                  parser tries "<" as type arguments, kept when they close and
