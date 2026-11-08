@@ -39,7 +39,7 @@ fun main() {
 
 | Function | Result |
 | --- | --- |
-| `v4() -> Uuid` | A random UUID, version 4: 122 bits of the system's entropy (`__random_bytes`). A system that gives none is a failure |
+| `v4() -> Uuid` | A random UUID, version 4: 122 bits of the system's entropy (`__random_bytes`). A system that gives none is a failure, not an `Err`, as for `random.from_os()` |
 | `v7() -> Uuid` | A UUID of the time now, version 7: the wall clock's Unix time in milliseconds (`time.now_utc()`) and 74 bits of the system's entropy. A clock before 1970 is a failure |
 | `generator(rng: random.Rng) -> Generator` | A source of UUIDs whose random bits come from `rng`: `generator(random.seeded(1))` makes the same UUIDs on every run |
 | `parse(s: str) -> Result<Uuid, UuidError>` | The UUID in the text `s`, in the canonical form, the hex digits in either case. Braces, a `urn:uuid:` and the form without hyphens are errors |

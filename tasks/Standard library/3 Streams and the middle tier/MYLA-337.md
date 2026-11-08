@@ -31,3 +31,7 @@ Built from master after wave 2 (1dd86a6).
 - **Burn tests:** after `scripts/bootstrap.sh`, `python3 -m unittest tests.burn.test_std_modules tests.burn.test_doc_blocks` passes (6 tests). Both pages' doc blocks run.
 - **Measured** natively on x86-64, best of five: 100 million `next_u64` take 290 ms, about 345 million numbers a second. The reference C code at `gcc -O2` takes 126 ms, about 790 million a second. 10 million `int_in(1, 7)` take 50 ms. A million `g.v4().to_str()` take 220 ms. Check time of a hello-world (median of 15): 41 ms, 46 ms with `import std.random`, 49 ms with `std.time`, 52 ms with `std.uuid` (which imports both).
 - **Found on the way:** a failed case shows a `uint64` of 2^63 or more as negative (`expected Uuid { hi: -7957569208247565536, … }`), interpreted and native. This is [[MYLA-361]], already filed.
+
+## Decided (2026-11-08)
+
+The owner kept the panics: `random.from_os()`, `uuid.v4()` and `uuid.v7()` fail when the system gives no entropy (or v7's clock is before 1970) instead of returning a `Result`, an exception to D164 (3). [[Language/Standard-library/Random]] and [[Language/Standard-library/Uuid]] say so.

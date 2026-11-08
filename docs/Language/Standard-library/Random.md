@@ -54,7 +54,7 @@ fun main() {
 | Function | Result |
 | --- | --- |
 | `seeded(seed: uint64) -> Rng` | A generator whose state SplitMix64 makes from `seed`: the same seed gives the same numbers, on every target and in the interpreter. Any seed is good, 0 too |
-| `from_os() -> Rng` | A generator seeded from 32 bytes of the system's entropy (`__random_bytes`: getrandom(2), WASI's `random_get`), so other numbers on every run. A system that gives none is a failure |
+| `from_os() -> Rng` | A generator seeded from 32 bytes of the system's entropy (`__random_bytes`: getrandom(2), WASI's `random_get`), so other numbers on every run. A system that gives none is a failure, not an `Err`: no program can go on without entropy, as with Rust's `thread_rng` and Python's `os.urandom` (an exception to D164 (3), the owner's choice, [[MYLA-337]]) |
 
 Every method moves the generator on, so each needs a `var` place.
 
