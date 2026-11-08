@@ -799,7 +799,7 @@ fun is_builtin_op_trait(name: str) -> bool {
 #test("B")[false]
 #test("len")[true]
 fun is_builtin_func(name: str) -> bool {
-    return name == "print" || name == "assert" || name == "panic" || name == "unreachable" || name == "len" || name == "push" || name == "pop" || name == "contains" || name == "remove" || name == "keys" || name == "format" || name == "chars" || name == "StringBuilder" || name == "append" || name == "append_byte" || name == "build" || name == "__write" || name == "__exit" || name == "__args" || name == "__read_file" || name == "__io_errno" || name == "__run" || name == "__run_stderr" || name == "__run_exit_code" || name == "__run_signal" || name == "__run_errno" || name == "__write_file" || name == "__read" || name == "__poll" || name == "__list_dir" || name == "__mkdir" || name == "__stat" || name == "__getcwd" || name == "__getenv" || name == "__test_dir" || name == "__test_program" || name == "__sqrt" || name == "__f64_bits" || name == "__f64_from_bits" || name == "__unlink" || name == "__rmdir" || name == "__rename" || name == "__task_cancelled" || name == "__yield" || name == "__sleep" || name == "__clock_ns" || name == "__sleep_ns" || name == "__cancel_after" || name == "__disarm" || name == "__wait_readable" || name == "__wait_either" || name == "__spawn" || name == "__run_with" || name == "__spawn_with" || name == "__reap" || name == "__kill" || name == "__close" || is_platform_primitive(name) || is_raw_memory_primitive(name)
+    return name == "print" || name == "assert" || name == "panic" || name == "unreachable" || name == "len" || name == "push" || name == "pop" || name == "contains" || name == "remove" || name == "keys" || name == "format" || name == "chars" || name == "StringBuilder" || name == "append" || name == "append_byte" || name == "build" || name == "__write" || name == "__exit" || name == "__args" || name == "__read_file" || name == "__io_errno" || name == "__run" || name == "__run_stderr" || name == "__run_exit_code" || name == "__run_signal" || name == "__run_errno" || name == "__write_file" || name == "__read" || name == "__poll" || name == "__list_dir" || name == "__mkdir" || name == "__stat" || name == "__getcwd" || name == "__getenv" || name == "__test_dir" || name == "__test_program" || name == "__sqrt" || name == "__f64_bits" || name == "__f64_from_bits" || name == "__unlink" || name == "__rmdir" || name == "__rename" || name == "__task_cancelled" || name == "__yield" || name == "__sleep" || name == "__clock_ns" || name == "__sleep_ns" || name == "__cancel_after" || name == "__disarm" || name == "__wait_readable" || name == "__wait_either" || name == "__wait_socket" || name == "__spawn" || name == "__run_with" || name == "__spawn_with" || name == "__reap" || name == "__kill" || name == "__close" || is_platform_primitive(name) || is_raw_memory_primitive(name)
 }
 
 // The platform primitives of MYLA-336: entropy, file descriptors and
@@ -810,7 +810,41 @@ fun is_builtin_func(name: str) -> bool {
 #test("__wall_ns")[true]
 #test("__read")[false]
 pub fun is_platform_primitive(name: str) -> bool {
-    return name == "__random_bytes" || name == "__open" || name == "__seek" || name == "__fstat" || name == "__spawn_piped" || name == "__try_reap" || name == "__wall_ns"
+    return name == "__random_bytes" || name == "__open" || name == "__seek" || name == "__fstat" || name == "__spawn_piped" || name == "__try_reap" || name == "__wall_ns" || is_net_primitive(name)
+}
+
+// The socket primitives of MYLA-346 (std.net's), platform primitives too:
+// each a function of std.rt over std.platform's socket functions, and in
+// the interpreter the host's own. The reactor's wait for a socket,
+// `__wait_socket`, is awaited, as `__wait_readable` is.
+#test("__sock_open")[true]
+#test("__net_config")[true]
+#test("__wait_socket")[false]
+pub fun is_net_primitive(name: str) -> bool {
+    if name.len() < 7 || name[0] != '_' || name[1] != '_' { return false }
+    return name == "__sock_open" || name == "__sock_set_nonblocking" || name == "__sock_bind" || name == "__sock_listen" || name == "__sock_accept" || name == "__sock_connect" || name == "__sock_error" || name == "__sock_send" || name == "__sock_recv" || name == "__sock_send_to" || name == "__sock_recv_from" || name == "__sock_addr" || name == "__sock_shutdown" || name == "__sock_option" || name == "__sock_poll" || name == "__sock_close" || name == "__net_config"
+}
+
+// A socket primitive's parameters, as its messages show them and as types,
+// and its result type.
+#test("__sock_close")[("h: int", [Type.TInt(32, true)], Type.TInt(32, true))]
+#test("__net_config")[("which: int", [Type.TInt(32, true)], Type.TStr)]
+fun net_primitive_sig(name: str) -> (str, [Type], Type) {
+    let i = t_int()
+    let s = Type.TStr
+    if name == "__sock_open" { return ("family: int, kind: int", [i, i], i) }
+    if name == "__sock_set_nonblocking" { return ("h: int, on: int", [i, i], i) }
+    if name == "__sock_bind" || name == "__sock_connect" { return ("h: int, addr: str", [i, s], i) }
+    if name == "__sock_listen" { return ("h: int, backlog: int", [i, i], i) }
+    if name == "__sock_accept" || name == "__sock_error" || name == "__sock_close" { return ("h: int", [i], i) }
+    if name == "__sock_send" { return ("h: int, s: str, start: int", [i, s, i], i) }
+    if name == "__sock_recv" || name == "__sock_recv_from" { return ("h: int, n: int", [i, i], s) }
+    if name == "__sock_send_to" { return ("h: int, s: str, addr: str", [i, s, s], i) }
+    if name == "__sock_addr" { return ("h: int, peer: int", [i, i], s) }
+    if name == "__sock_shutdown" { return ("h: int, how: int", [i, i], i) }
+    if name == "__sock_option" { return ("h: int, opt: int, value: int", [i, i, i], i) }
+    if name == "__sock_poll" { return ("h: int, events: int, timeout_ms: int", [i, i, i], i) }
+    return ("which: int", [i], s)
 }
 
 // The raw-memory primitives the runtime written in Myla needs (MYLA-162's
@@ -7502,6 +7536,19 @@ impl Checker {
             if !self.awaited.contains(e.id) { return Err(terr_at(e.line, e.col, e.sp, "a call to '__wait_either' needs 'await'")) }
             return Ok(None)
         }
+        // the running task waiting until the socket `h` is ready for
+        // `events` (1 to receive, 2 to send; MYLA-346, `std.net`'s async
+        // forms); without tasks, the thread waits in `__sock_poll`
+        if name == "__wait_socket" {
+            if args.len() != 2 { return Err(terr_at(e.line, e.col, e.sp, "__wait_socket() takes (h: int, events: int)")) }
+            for a in args {
+                let a_t = self.expect_value(a, Some(t_int()))?
+                if !type_eq(a_t, t_int()) { return Err(terr_at(a.line, a.col, a.sp, format("__wait_socket() takes an 'int', found '{}'", type_name(a_t)))) }
+            }
+            self.suspended = e.id
+            if !self.awaited.contains(e.id) { return Err(terr_at(e.line, e.col, e.sp, "a call to '__wait_socket' needs 'await'")) }
+            return Ok(None)
+        }
         // the running task waiting until `fd` is readable (D124, `std.io`'s
         // async reads)
         if name == "__wait_readable" {
@@ -7718,7 +7765,12 @@ impl Checker {
         var want: [Type] = [t_int()]
         var shape = "n: int"
         var result = Type.TList(t_byte())
-        if name == "__open" {
+        if is_net_primitive(name) {
+            let sig = net_primitive_sig(name)
+            shape = sig.0
+            want = sig.1
+            result = sig.2
+        } else if name == "__open" {
             want = [Type.TStr, t_int(), t_int()]
             shape = "path: str, flags: int, mode: int"
             result = t_int()

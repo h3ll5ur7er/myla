@@ -498,6 +498,250 @@ pub fun random_bytes(n: int) -> [uint8] {
     return __list_of(cell)
 }
 
+// --- sockets (MYLA-346) ------------------------------------------------------------
+//
+// The primitives of std.net, each over the platform's socket functions
+// (`os.sock_*`). A socket is a handle (`int`) that only these take: data is
+// sent and received on it, and `__sock_close` closes it, as a port where
+// sockets aren't descriptors (Winsock) needs. An address is a portable
+// record, a string of 7 or 19 bytes: the family (4 or 6), the port (two
+// bytes, big-endian), the address's 4 or 16 bytes. Each sets the errno
+// `__io_errno` reads, 0 on success; a negative handle is EBADF.
+
+const EBADF: int64 = 9
+
+// A platform result as a primitive's: the errno recorded, -1 for an error.
+fun sock_result(r: int64) -> int {
+    record(r)
+    if r < 0 {
+        return -1
+    }
+    return r as int
+}
+
+// `__sock_open(family, kind)`: a new socket of the family `family` (4 or
+// 6) and the kind `kind` (1 stream, 2 datagrams), blocking: its handle, or
+// -1 (EAFNOSUPPORT for another family, EINVAL for another kind).
+pub fun sock_open(family: int, kind: int) -> int {
+    return sock_result(os.sock_open(family as int64, kind as int64))
+}
+
+// `__sock_set_nonblocking(h, on)`: the socket `h` non-blocking (`on` 1) or
+// blocking (0): 0, or -1.
+pub fun sock_set_nonblocking(h: int, on: int) -> int {
+    if h < 0 {
+        return sock_result(-EBADF)
+    }
+    return sock_result(os.sock_nonblocking(h as int64, on as int64))
+}
+
+// `__sock_bind(h, addr)`: the socket bound to the address record `addr`.
+pub fun sock_bind(h: int, addr: str) -> int {
+    if h < 0 {
+        return sock_result(-EBADF)
+    }
+    return sock_result(os.sock_bind(h as int64, addr))
+}
+
+// `__sock_listen(h, backlog)`: the stream socket listening.
+pub fun sock_listen(h: int, backlog: int) -> int {
+    if h < 0 {
+        return sock_result(-EBADF)
+    }
+    return sock_result(os.sock_listen(h as int64, backlog as int64))
+}
+
+// `__sock_accept(h)`: the next connection of the listening socket `h`, a
+// new socket (blocking), or -1 (EAGAIN when `h` is non-blocking and none is
+// queued); retried on EINTR.
+pub fun sock_accept(h: int) -> int {
+    if h < 0 {
+        return sock_result(-EBADF)
+    }
+    var r = os.sock_accept(h as int64)
+    while r == os.EINTR {
+        r = os.sock_accept(h as int64)
+    }
+    return sock_result(r)
+}
+
+// `__sock_connect(h, addr)`: the socket connected to the address record
+// `addr`: 0, or -1; EINPROGRESS (115) for a non-blocking socket, whose
+// connection goes on: once it is writable, `__sock_error` says how it went.
+pub fun sock_connect(h: int, addr: str) -> int {
+    if h < 0 {
+        return sock_result(-EBADF)
+    }
+    return sock_result(os.sock_connect(h as int64, addr))
+}
+
+// `__sock_error(h)`: the error pending on the socket, taken (0 for none,
+// else its errno), or -1 when it can't be read.
+pub fun sock_error(h: int) -> int {
+    if h < 0 {
+        return sock_result(-EBADF)
+    }
+    return sock_result(os.sock_error(h as int64))
+}
+
+// `__sock_send(h, s, start)`: the bytes of `s` from `start` on sent on the
+// connected socket, in one call: how many went (fewer when a non-blocking
+// socket's buffer filled), or -1 (EAGAIN: none fitted; EPIPE or ECONNRESET:
+// the peer went away; no signal). Retried on EINTR.
+pub fun sock_send(h: int, s: str, start: int) -> int {
+    if h < 0 {
+        return sock_result(-EBADF)
+    }
+    let c = __addr_of(s)
+    let n = __load64(c)
+    let at = start as int64
+    if at < 0 || at > n {
+        return sock_result(-EINVAL)
+    }
+    var r = os.sock_send(h as int64, c + 8 + at, n - at)
+    while r == os.EINTR {
+        r = os.sock_send(h as int64, c + 8 + at, n - at)
+    }
+    return sock_result(r)
+}
+
+// `__sock_recv(h, n)`: what one receive of at most `n` bytes gives: empty
+// at the end of the stream, for `n <= 0`, or with the errno (EAGAIN: nothing
+// there yet on a non-blocking socket). Retried on EINTR.
+pub fun sock_recv(h: int, n: int) -> str {
+    var want = n as int64
+    if want < 0 {
+        want = 0
+    }
+    let cell = __alloc(want + 8)
+    var got: int64 = 0
+    __set_io_errno(0)
+    if h < 0 {
+        __set_io_errno(EBADF)
+    } else if want > 0 {
+        got = os.sock_recv(h as int64, cell + 8, want)
+        while got == os.EINTR {
+            got = os.sock_recv(h as int64, cell + 8, want)
+        }
+        if got < 0 {
+            __set_io_errno(-got)
+            got = 0
+        }
+    }
+    __store64(cell, got)
+    return __str_of(cell)
+}
+
+// `__sock_send_to(h, s, addr)`: `s` sent as one datagram to the address
+// record `addr`: how many bytes, or -1. Retried on EINTR.
+pub fun sock_send_to(h: int, s: str, addr: str) -> int {
+    if h < 0 {
+        return sock_result(-EBADF)
+    }
+    let c = __addr_of(s)
+    var r = os.sock_send_to(h as int64, c + 8, __load64(c), addr)
+    while r == os.EINTR {
+        r = os.sock_send_to(h as int64, c + 8, __load64(c), addr)
+    }
+    return sock_result(r)
+}
+
+// `__sock_recv_from(h, n)`: the next datagram, at most `n` bytes of it (the
+// rest dropped): 19 bytes holding its sender's address record (7 of them
+// for IPv4), then its bytes; "" with the errno (EAGAIN: none yet on a
+// non-blocking socket). Retried on EINTR.
+pub fun sock_recv_from(h: int, n: int) -> str {
+    var want = n as int64
+    if want < 0 {
+        want = 0
+    }
+    let cell = __alloc(want + 8 + 24)
+    __store64(cell + 8, 0)
+    __store64(cell + 16, 0)
+    __store64(cell + 24, 0)
+    var got: int64 = -EBADF
+    if h >= 0 {
+        got = os.sock_recv_from(h as int64, cell + 27, want, cell + 8)
+        while got == os.EINTR {
+            got = os.sock_recv_from(h as int64, cell + 27, want, cell + 8)
+        }
+    }
+    record(got)
+    if got < 0 {
+        __store64(cell, 0)
+    } else {
+        __store64(cell, 19 + got)
+    }
+    return __str_of(cell)
+}
+
+// `__sock_addr(h, peer)`: the address record of the socket's own end
+// (`peer` 0) or of its peer (1), or "" with the errno (ENOTCONN: no peer).
+pub fun sock_addr(h: int, peer: int) -> str {
+    let cell = __alloc(8 + 19)
+    var r: int64 = -EBADF
+    if h >= 0 {
+        r = os.sock_addr(h as int64, peer as int64, cell + 8)
+    }
+    record(r)
+    if r < 0 {
+        __store64(cell, 0)
+    } else {
+        __store64(cell, r)
+    }
+    return __str_of(cell)
+}
+
+// `__sock_shutdown(h, how)`: the socket's receiving (`how` 1), sending (2)
+// or both (3) ended: 0, or -1.
+pub fun sock_shutdown(h: int, how: int) -> int {
+    if h < 0 {
+        return sock_result(-EBADF)
+    }
+    return sock_result(os.sock_shutdown(h as int64, how as int64))
+}
+
+// `__sock_option(h, opt, value)`: the option `opt` (1 no delay, 2
+// broadcast, 3 a listener's address reused) set to `value` (0 or 1).
+pub fun sock_option(h: int, opt: int, value: int) -> int {
+    if h < 0 {
+        return sock_result(-EBADF)
+    }
+    return sock_result(os.sock_option(h as int64, opt as int64, value as int64))
+}
+
+// `__sock_poll(h, events, timeout_ms)`: waiting, the thread blocked, at most
+// `timeout_ms` milliseconds (negative: no limit) until the socket is ready
+// for `events` (1 to receive or accept, 2 to send or a connect's end): the
+// events ready (an error or a hang-up counts as each), 0 when the time ran
+// out, or -1. Retried on EINTR.
+pub fun sock_poll(h: int, events: int, timeout_ms: int) -> int {
+    if h < 0 {
+        return sock_result(-EBADF)
+    }
+    var r = os.sock_poll(h as int64, events as int64, timeout_ms as int64)
+    while r == os.EINTR {
+        r = os.sock_poll(h as int64, events as int64, timeout_ms as int64)
+    }
+    return sock_result(r)
+}
+
+// `__sock_close(h)`: the socket closed: 0, or -1.
+pub fun sock_close(h: int) -> int {
+    if h < 0 {
+        return sock_result(-EBADF)
+    }
+    return sock_result(os.sock_close(h as int64))
+}
+
+// `__net_config(which)`: the path of the hosts file (`which` 0), or the
+// resolver's configuration as resolv.conf text (1), as the platform keeps
+// them; "" for none.
+pub fun net_config(which: int) -> str {
+    __set_io_errno(0)
+    return os.net_config(which as int64)
+}
+
 // --- the environment ---------------------------------------------------------
 
 // `__getenv`: the value of the first `name=value` entry of the environment
@@ -2623,7 +2867,7 @@ fun cancel_locked(t: int64) {
     if ws != 0 {
         var k: int64 = 0
         while k < __load64(ws) {
-            let wf = __load64(ws + 24 + k * 16)
+            let wf = __load64(ws + 24 + k * WATCH)
             if task_below(__load64(wf + 40), t) {
                 // every entry of the frame taken (and unwatched), so it is
                 // queued once
@@ -2807,26 +3051,43 @@ fun poll_events(n: int64) {
 }
 
 // --- descriptors: frames waiting for input (D124) --------------------------------
-// `__watches`: `[count][cap]` and then `[fd][frame]` entries, under the
-// timers' lock; `__watch_count` its count.
+// `__watches`: `[count][cap]` and then `[fd][frame][events]` entries, under
+// the timers' lock; `__watch_count` its count. `events` is 0 for a
+// descriptor waited for until it is readable (`os.poller_watch`), else what
+// a socket is waited for (1 to receive, 2 to send; `os.poller_watch_socket`,
+// MYLA-346).
+
+// The bytes of an entry of `__watches`.
+const WATCH: int64 = 24
 
 // `myla___wait_fd(frame, fd)`: the frame waiting until `fd` is readable (its
 // input there or ended): watched by the poller, which queues it then (its
 // frame function suspends after this call). A task asked to stop waits no
 // time, nor for what the poller can't watch (a regular file: always ready).
 pub fun wait_fd(fr: int64, fd: int64) {
-    wait_fds(fr, fd, -1)
+    wait_fds(fr, fd, -1, 0)
 }
 
 // `myla___wait_fd2(frame, a, b)`: the frame waiting until `a` or `b` is
 // readable (a child's stdout and stderr, `std.process.run_async`).
 pub fun wait_fd2(fr: int64, a: int64, b: int64) {
-    wait_fds(fr, a, b)
+    wait_fds(fr, a, b, 0)
+}
+
+// `myla___wait_sock(frame, h, events)` (`__wait_socket`, MYLA-346): the
+// frame waiting until the socket `h` is ready for `events` (1 to receive or
+// accept, 2 to send or a connect's end; an error or a hang-up counts as
+// either), watched by the poller through the platform's socket functions.
+// A wake-up may come early (another frame's event on the same socket): the
+// caller tries its operation again and waits again on EAGAIN.
+pub fun wait_sock(fr: int64, h: int64, events: int64) {
+    wait_fds(fr, h, -1, events & 3)
 }
 
 // The frame waiting for `a`, and `b` too unless it is negative: an entry
-// for each, so the first event takes both (`watch_take`).
-fun wait_fds(fr: int64, a: int64, b: int64) {
+// for each, so the first event takes both (`watch_take`); `events` as an
+// entry's (0: readable descriptors).
+fun wait_fds(fr: int64, a: int64, b: int64, events: int64) {
     // (its flags read under the lock, `task_cancel`)
     let lock = __rt_addr("__timer_lock")
     take_lock(lock)
@@ -2846,9 +3107,9 @@ fun wait_fds(fr: int64, a: int64, b: int64) {
     if __rt_get("__exec_poller") == 0 {
         __store64(__rt_addr("__exec_poller"), os.poller_new())
     }
-    var ready = !watch_add(a, fr)
+    var ready = !watch_add(a, fr, events)
     if b >= 0 && !ready {
-        ready = !watch_add(b, fr)
+        ready = !watch_add(b, fr, events)
     }
     if ready {
         // one the poller can't watch (a regular file): ready now
@@ -2860,12 +3121,14 @@ fun wait_fds(fr: int64, a: int64, b: int64) {
     give_lock(lock)
 }
 
-// An entry `[fd][frame]` on `__watches`, the descriptor watched; false when
-// the poller can't watch it (no entry then). The lock held. A descriptor is
-// watched once whatever number of frames wait for it, its token `fd + 1`
-// (a poller keeps one per descriptor: a second frame's would replace the
-// first's, the review of 2026-11-06, R5), and an event queues them all.
-fun watch_add(fd: int64, fr: int64) -> bool {
+// An entry `[fd][frame][events]` on `__watches`, the descriptor watched;
+// false when the poller can't watch it (no entry then). The lock held. A
+// descriptor is watched once whatever number of frames wait for it, its
+// token `fd + 1` (a poller keeps one per descriptor: a second frame's would
+// replace the first's, the review of 2026-11-06, R5), and an event queues
+// them all. A socket is armed again for every waiter, with the union of
+// what they all wait for (one receiving, another sending).
+fun watch_add(fd: int64, fr: int64, events: int64) -> bool {
     var cell = __rt_get("__watches")
     if cell == 0 || __load64(cell) == __load64(cell + 8) {
         var cap: int64 = 8
@@ -2874,22 +3137,27 @@ fun watch_add(fd: int64, fr: int64) -> bool {
             n = __load64(cell)
             cap = __load64(cell + 8) * 2
         }
-        let bigger = __alloc(16 + cap * 16)
+        let bigger = __alloc(16 + cap * WATCH)
         __store64(bigger, n)
         __store64(bigger + 8, cap)
         if cell != 0 {
-            __copy_bytes(bigger + 16, cell + 16, n * 16)
+            __copy_bytes(bigger + 16, cell + 16, n * WATCH)
             __free(cell)
         }
         __store64(__rt_addr("__watches"), bigger)
         cell = bigger
     }
-    if !watched(fd) && os.poller_watch(__rt_get("__exec_poller"), fd, fd + 1) < 0 {
+    if events != 0 {
+        if os.poller_watch_socket(__rt_get("__exec_poller"), fd, events | watched_events(fd), fd + 1) < 0 {
+            return false
+        }
+    } else if !watched(fd) && os.poller_watch(__rt_get("__exec_poller"), fd, fd + 1) < 0 {
         return false
     }
     let n = __load64(cell)
-    __store64(cell + 16 + n * 16, fd)
-    __store64(cell + 24 + n * 16, fr)
+    __store64(cell + 16 + n * WATCH, fd)
+    __store64(cell + 24 + n * WATCH, fr)
+    __store64(cell + 32 + n * WATCH, events)
     __store64(cell, n + 1)
     __store64(__rt_addr("__watch_count"), n + 1)
     return true
@@ -2905,12 +3173,14 @@ fun watch_take(fr: int64) -> bool {
     var n = __load64(cell)
     var found = false
     var gone: [int64] = []
+    var socks: [int64] = []
     var i: int64 = 0
     while i < n {
-        if __load64(cell + 24 + i * 16) == fr {
-            gone.push(__load64(cell + 16 + i * 16))
+        if __load64(cell + 24 + i * WATCH) == fr {
+            gone.push(__load64(cell + 16 + i * WATCH))
+            socks.push(__load64(cell + 32 + i * WATCH))
             n -= 1
-            __copy_bytes(cell + 16 + i * 16, cell + 16 + n * 16, 16)
+            __copy_bytes(cell + 16 + i * WATCH, cell + 16 + n * WATCH, WATCH)
             found = true
         } else {
             i += 1
@@ -2919,10 +3189,17 @@ fun watch_take(fr: int64) -> bool {
     __store64(cell, n)
     __store64(__rt_addr("__watch_count"), n)
     // a descriptor no other frame waits for no longer watched
-    for fd in gone {
+    var k = 0
+    while k < gone.len() {
+        let fd = gone[k]
         if !watched(fd) {
-            os.poller_forget(__rt_get("__exec_poller"), fd)
+            if socks[k] != 0 {
+                os.poller_forget_socket(__rt_get("__exec_poller"), fd)
+            } else {
+                os.poller_forget(__rt_get("__exec_poller"), fd)
+            }
         }
+        k += 1
     }
     return found
 }
@@ -2935,12 +3212,30 @@ fun watched(fd: int64) -> bool {
     }
     var i: int64 = 0
     while i < __load64(cell) {
-        if __load64(cell + 16 + i * 16) == fd {
+        if __load64(cell + 16 + i * WATCH) == fd {
             return true
         }
         i += 1
     }
     return false
+}
+
+// What the frames waiting for the socket `h` wait for, together (the lock
+// held).
+fun watched_events(h: int64) -> int64 {
+    let cell = __rt_get("__watches")
+    var ev: int64 = 0
+    if cell == 0 {
+        return ev
+    }
+    var i: int64 = 0
+    while i < __load64(cell) {
+        if __load64(cell + 16 + i * WATCH) == h {
+            ev |= __load64(cell + 32 + i * WATCH)
+        }
+        i += 1
+    }
+    return ev
 }
 
 // The frames waiting for `fd` (the lock held).
@@ -2952,8 +3247,8 @@ fun watchers_of(fd: int64) -> [int64] {
     }
     var i: int64 = 0
     while i < __load64(cell) {
-        let fr = __load64(cell + 24 + i * 16)
-        if __load64(cell + 16 + i * 16) == fd && !has_word(out, fr) {
+        let fr = __load64(cell + 24 + i * WATCH)
+        if __load64(cell + 16 + i * WATCH) == fd && !has_word(out, fr) {
             out.push(fr)
         }
         i += 1

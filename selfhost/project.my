@@ -150,6 +150,16 @@ fun io_text(e: IoError) -> str {
         IoError.Unsupported => "not supported on this target"
         IoError.BrokenPipe => "broken pipe"
         IoError.InvalidInput => "invalid input (a NUL byte in a path)"
+        IoError.ConnectionRefused => "connection refused"
+        IoError.ConnectionReset => "connection reset"
+        IoError.ConnectionAborted => "connection aborted"
+        IoError.NotConnected => "not connected"
+        IoError.AddrInUse => "address in use"
+        IoError.AddrNotAvailable => "address not available"
+        IoError.TimedOut => "timed out"
+        IoError.HostUnreachable => "host unreachable"
+        IoError.NetworkUnreachable => "network unreachable"
+        IoError.InvalidData => "invalid data"
         IoError.Other(code) => format("errno {}", code)
     }
 }

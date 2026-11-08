@@ -1,0 +1,1687 @@
+// std.net — TCP and UDP sockets, IP addresses and name lookup (MYLA-346).
+//
+// - An `IpAddr` is an IPv4 or IPv6 address and a `SocketAddr` one with a
+//   port: Myla values, parsed by `parse_ip` and `parse_addr` and printed by
+//   their `Format` (IPv6 in RFC 5952's short form, `[v6]:port` with a port).
+// - `listen` gives a `TcpListener`, whose `accept` gives a `TcpStream`, as
+//   `connect` does: a `Read` and a `Write` of `std.io`, so `buffered`,
+//   `copy` and `read_all` take it. `udp_bind` gives a `UdpSocket`, which
+//   sends and receives datagrams. A socket is an opaque handle inside them;
+//   nothing here is a file descriptor. Close a socket yourself (`close`).
+// - Every operation that waits has an async twin (`accept_async`,
+//   `connect_async`, `read_async`, `write_str_async`, `recv_from_async`, …)
+//   that waits with the task suspended, the other tasks running (D124);
+//   outside a task it blocks as its twin does. A task asked to stop stops
+//   waiting and gets `IoError.Cancelled`.
+// - `lookup` finds a name's addresses without libc: the hosts file first,
+//   then a DNS query over UDP to the system's name servers; a `Resolver`
+//   says which file and which servers.
+// - A failure is an `IoError` of `std.fs`, its causes portable
+//   (`ConnectionRefused`, `AddrInUse`, `TimedOut`, …). On wasm32 (WASI
+//   preview 1 has no sockets) every operation is `Unsupported`.
+//
+// Everything that depends on the system goes through the `__sock_*`
+// primitives (std.rt over std.platform's socket functions): a port to
+// another system, Windows among them, gives those again, and this module
+// stays as it is. [[Language/Standard-library/Net]] says what a port must
+// provide.
+
+from .fs import IoError, from_errno, read_to_string
+from .io import Read, Write
+import .fmt as fmt
+
+// --- addresses ---------------------------------------------------------------------
+
+// An IP address: IPv4's four bytes, or IPv6's eight 16-bit groups.
+#derive(Eq, Hash)
+pub enum IpAddr {
+    V4(uint8, uint8, uint8, uint8),
+    V6(uint16, uint16, uint16, uint16, uint16, uint16, uint16, uint16),
+}
+
+// An IP address and a port (0 to 65535).
+#derive(Eq, Hash)
+pub struct SocketAddr {
+    ip: IpAddr,
+    port: int,
+}
+
+// Why a text isn't an address.
+#derive(Eq)
+pub enum AddrParseError {
+    Empty,
+    InvalidIp,
+    InvalidPort,
+    MissingPort,
+}
+
+impl AddrParseError {
+    // The reason in words.
+    #test(AddrParseError.InvalidPort)["invalid port"]
+    fun message(self) -> str {
+        return match self {
+            Empty => "empty address"
+            InvalidIp => "invalid IP address"
+            InvalidPort => "invalid port"
+            MissingPort => "missing port"
+        }
+    }
+}
+
+impl Format for AddrParseError {
+    fun format(self, spec: str) -> str {
+        return fmt.pad(self.message(), spec)
+    }
+}
+
+// `ip` and `port` as a socket address.
+pub fun addr(ip: IpAddr, port: int) -> SocketAddr {
+    return SocketAddr { ip: ip, port: port }
+}
+
+// 127.0.0.1, this machine over IPv4.
+pub fun loopback() -> IpAddr {
+    return IpAddr.V4(127, 0, 0, 1)
+}
+
+// ::1, this machine over IPv6.
+pub fun loopback_v6() -> IpAddr {
+    return IpAddr.V6(0, 0, 0, 0, 0, 0, 0, 1)
+}
+
+// 0.0.0.0: every IPv4 address of this machine, to bind to.
+pub fun unspecified() -> IpAddr {
+    return IpAddr.V4(0, 0, 0, 0)
+}
+
+// ::, every IPv6 address of this machine (and IPv4's too, mapped), to bind to.
+pub fun unspecified_v6() -> IpAddr {
+    return IpAddr.V6(0, 0, 0, 0, 0, 0, 0, 0)
+}
+
+impl IpAddr {
+    #test(IpAddr.V4(1u8, 2u8, 3u8, 4u8))[true]
+    fun is_ipv4(self) -> bool {
+        return match self {
+            V4(_, _, _, _) => true
+            V6(_, _, _, _, _, _, _, _) => false
+        }
+    }
+
+    fun is_ipv6(self) -> bool {
+        return !self.is_ipv4()
+    }
+
+    // 127.0.0.0/8 or ::1.
+    #test(IpAddr.V4(127u8, 1u8, 2u8, 3u8))[true]
+    #test(IpAddr.V6(0u16, 0u16, 0u16, 0u16, 0u16, 0u16, 0u16, 1u16))[true]
+    #test(IpAddr.V4(10u8, 0u8, 0u8, 1u8))[false]
+    fun is_loopback(self) -> bool {
+        return match self {
+            V4(a, _, _, _) => a == 127
+            V6(a, b, c, d, e, f, g, h) => a == 0 && b == 0 && c == 0 && d == 0 && e == 0 && f == 0 && g == 0 && h == 1
+        }
+    }
+
+    // 0.0.0.0 or ::.
+    fun is_unspecified(self) -> bool {
+        let b = self.octets()
+        for x in b {
+            if x != 0 {
+                return false
+            }
+        }
+        return true
+    }
+
+    // The address's bytes in network order: 4 for IPv4, 16 for IPv6.
+    #test(IpAddr.V6(8193u16, 3512u16, 0u16, 0u16, 0u16, 0u16, 0u16, 258u16))[[32u8, 1u8, 13u8, 184u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 1u8, 2u8]]
+    fun octets(self) -> [uint8] {
+        return match self {
+            V4(a, b, c, d) => [a, b, c, d]
+            V6(a, b, c, d, e, f, g, h) => {
+                var out: [uint8] = []
+                for x in [a, b, c, d, e, f, g, h] {
+                    out.push((x >> 8) as uint8)
+                    out.push((x & 255) as uint8)
+                }
+                out
+            }
+        }
+    }
+}
+
+// The IPv6 address of the 8 groups `g`.
+fun v6_of(g: [int]) -> IpAddr {
+    return IpAddr.V6(g[0] as uint16, g[1] as uint16, g[2] as uint16, g[3] as uint16, g[4] as uint16, g[5] as uint16, g[6] as uint16, g[7] as uint16)
+}
+
+// The address of the 4 or 16 `bytes` in network order.
+fun ip_of_bytes(bytes: [uint8]) -> IpAddr {
+    if bytes.len() == 4 {
+        return IpAddr.V4(bytes[0], bytes[1], bytes[2], bytes[3])
+    }
+    var g: [int] = []
+    var i = 0
+    while i < 16 {
+        g.push((bytes[i] as int) * 256 + (bytes[i + 1] as int))
+        i += 2
+    }
+    return v6_of(g)
+}
+
+// IPv4 as `a.b.c.d`; IPv6 in RFC 5952's form: lower-case hex without leading
+// zeros, the longest run of two or more zero groups (the first of equal
+// ones) as `::`, an IPv4-mapped address as `::ffff:a.b.c.d`.
+impl Format for IpAddr {
+    #test(IpAddr.V4(192u8, 168u8, 0u8, 1u8), "")["192.168.0.1"]
+    #test(IpAddr.V6(0u16, 0u16, 0u16, 0u16, 0u16, 0u16, 0u16, 1u16), "")["::1"]
+    #test(IpAddr.V6(8193u16, 3512u16, 0u16, 0u16, 1u16, 0u16, 0u16, 1u16), "")["2001:db8::1:0:0:1"]
+    #test(IpAddr.V6(0u16, 0u16, 0u16, 0u16, 0u16, 65535u16, 49320u16, 1u16), "")["::ffff:192.168.0.1"]
+    #test(IpAddr.V4(10u8, 0u8, 0u8, 1u8), ">10")["  10.0.0.1"]
+    fun format(self, spec: str) -> str {
+        return fmt.pad(ip_text(self.octets()), spec)
+    }
+}
+
+// `ip:port`, with an IPv6 address in brackets: `[::1]:8080`.
+impl Format for SocketAddr {
+    #test(SocketAddr { ip: IpAddr.V4(127u8, 0u8, 0u8, 1u8), port: 80 }, "")["127.0.0.1:80"]
+    #test(SocketAddr { ip: IpAddr.V6(0u16, 0u16, 0u16, 0u16, 0u16, 0u16, 0u16, 1u16), port: 8080 }, "")["[::1]:8080"]
+    fun format(self, spec: str) -> str {
+        let ip = ip_text(self.ip.octets())
+        if self.ip.is_ipv4() {
+            return fmt.pad(f"{ip}:{self.port}", spec)
+        }
+        return fmt.pad(f"[{ip}]:{self.port}", spec)
+    }
+}
+
+// The address of the 4 or 16 bytes `b` as text.
+fun ip_text(b: [uint8]) -> str {
+    if b.len() == 4 {
+        return f"{b[0]}.{b[1]}.{b[2]}.{b[3]}"
+    }
+    var g: [int] = []
+    var i = 0
+    while i < 16 {
+        g.push((b[i] as int) * 256 + (b[i + 1] as int))
+        i += 2
+    }
+    if g[0] == 0 && g[1] == 0 && g[2] == 0 && g[3] == 0 && g[4] == 0 && g[5] == 65535 {
+        return f"::ffff:{b[12]}.{b[13]}.{b[14]}.{b[15]}"
+    }
+    // the longest run of zero groups, two at least
+    var best = -1
+    var best_len = 1
+    var k = 0
+    while k < 8 {
+        if g[k] == 0 {
+            var end = k
+            while end < 8 && g[end] == 0 {
+                end += 1
+            }
+            if end - k > best_len {
+                best = k
+                best_len = end - k
+            }
+            k = end
+        } else {
+            k += 1
+        }
+    }
+    if best < 0 {
+        return groups_text(g, 0, 8)
+    }
+    return groups_text(g, 0, best) + "::" + groups_text(g, best + best_len, 8)
+}
+
+// The groups `g[start:end]` in hex, joined by `:`.
+fun groups_text(g: [int], start: int, end: int) -> str {
+    var sb = StringBuilder()
+    var i = start
+    while i < end {
+        if i > start {
+            sb.append(":")
+        }
+        sb.append(hex16(g[i]))
+        i += 1
+    }
+    return sb.build()
+}
+
+// `v` (0 to 65535) in lower-case hex without leading zeros.
+#test(0)["0"]
+#test(3512)["db8"]
+#test(65535)["ffff"]
+fun hex16(v: int) -> str {
+    let digits = "0123456789abcdef"
+    var sb = StringBuilder()
+    var started = false
+    var shift = 12
+    while shift >= 0 {
+        let d = (v >> shift) & 15
+        if d != 0 || started || shift == 0 {
+            sb.append_byte(digits[d])
+            started = true
+        }
+        shift -= 4
+    }
+    return sb.build()
+}
+
+// --- parsing addresses ---------------------------------------------------------
+
+// An IPv4 address, `a.b.c.d` (each 0 to 255 in decimal, without leading
+// zeros), or an IPv6 one in RFC 4291's forms: eight hex groups, `::` for a
+// run of zero groups, the last 32 bits in IPv4's form (`::ffff:1.2.3.4`).
+// No zone (`%eth0`) and no brackets.
+pub fun parse_ip(s: str) -> Result<IpAddr, AddrParseError> {
+    if s.len() == 0 {
+        return Err(AddrParseError.Empty)
+    }
+    match v4_bytes(s) {
+        Some(b) => { return Ok(IpAddr.V4(b[0], b[1], b[2], b[3])) }
+        None => {}
+    }
+    match v6_groups(s) {
+        Some(g) => { return Ok(v6_of(g)) }
+        None => {}
+    }
+    return Err(AddrParseError.InvalidIp)
+}
+
+// An address and a port: `1.2.3.4:80`, `[::1]:8080` (an IPv6 address in
+// brackets).
+pub fun parse_addr(s: str) -> Result<SocketAddr, AddrParseError> {
+    if s.len() == 0 {
+        return Err(AddrParseError.Empty)
+    }
+    var host = ""
+    var port_text = ""
+    if s[0] == '[' {
+        let close = find_byte(s, ']', 0)
+        if close < 0 {
+            return Err(AddrParseError.InvalidIp)
+        }
+        host = s[1:close]
+        if close + 1 >= s.len() {
+            return Err(AddrParseError.MissingPort)
+        }
+        if s[close + 1] != ':' {
+            return Err(AddrParseError.InvalidPort)
+        }
+        port_text = s[close + 2:]
+        let ip = parse_ip(host)?
+        if ip.is_ipv4() {
+            return Err(AddrParseError.InvalidIp)
+        }
+        return Ok(SocketAddr { ip: ip, port: parse_port(port_text)? })
+    }
+    let colon = find_byte(s, ':', 0)
+    if colon < 0 {
+        return match parse_ip(s) {
+            Ok(_) => Err(AddrParseError.MissingPort)
+            Err(e) => Err(e)
+        }
+    }
+    if find_byte(s, ':', colon + 1) >= 0 {
+        // an IPv6 address without brackets: no port can be told apart
+        return match parse_ip(s) {
+            Ok(_) => Err(AddrParseError.MissingPort)
+            Err(e) => Err(e)
+        }
+    }
+    let ip = parse_ip(s[:colon])?
+    return Ok(SocketAddr { ip: ip, port: parse_port(s[colon + 1:])? })
+}
+
+// What `parse_ip` makes of `s`, printed again, or why it failed (the cases'
+// view of both).
+#test("127.0.0.1")["127.0.0.1"]
+#test("0.0.0.0")["0.0.0.0"]
+#test("255.255.255.255")["255.255.255.255"]
+#test("256.0.0.1")["invalid IP address"]
+#test("1.2.3")["invalid IP address"]
+#test("1.2.3.4.5")["invalid IP address"]
+#test("01.2.3.4")["invalid IP address"]
+#test("1..3.4")["invalid IP address"]
+#test("")["empty address"]
+#test("::")["::"]
+#test("::1")["::1"]
+#test("1::")["1::"]
+#test("2001:DB8:0:0:8:800:200C:417A")["2001:db8::8:800:200c:417a"]
+#test("2001:db8:0:0:0:0:2:1")["2001:db8::2:1"]
+#test("2001:0db8:0000:0000:0001:0000:0000:0001")["2001:db8::1:0:0:1"]
+#test("1:0:0:2:0:0:0:3")["1:0:0:2::3"]
+#test("1:2:3:4:5:6:7:8")["1:2:3:4:5:6:7:8"]
+#test("1:0:3:4:5:6:7:8")["1:0:3:4:5:6:7:8"]
+#test("::ffff:10.1.2.3")["::ffff:10.1.2.3"]
+#test("64:ff9b::192.0.2.33")["64:ff9b::c000:221"]
+#test("1:2:3:4:5:6:7")["invalid IP address"]
+#test("1:2:3:4:5:6:7:8:9")["invalid IP address"]
+#test("1::2::3")["invalid IP address"]
+#test("12345::1")["invalid IP address"]
+#test(":1")["invalid IP address"]
+#test("1:")["invalid IP address"]
+#test("::g")["invalid IP address"]
+#test("::1.2.3.4:5")["invalid IP address"]
+#test("fe80::1%eth0")["invalid IP address"]
+fun ip_round_trip(s: str) -> str {
+    return match parse_ip(s) {
+        Ok(ip) => f"{ip}"
+        Err(e) => e.message()
+    }
+}
+
+// What `parse_addr` makes of `s`, printed again, or why it failed.
+#test("127.0.0.1:80")["127.0.0.1:80"]
+#test("10.0.0.1:65535")["10.0.0.1:65535"]
+#test("[::1]:8080")["[::1]:8080"]
+#test("[2001:db8::0:1]:53")["[2001:db8::1]:53"]
+#test("[::ffff:1.2.3.4]:0")["[::ffff:1.2.3.4]:0"]
+#test("127.0.0.1")["missing port"]
+#test("127.0.0.1:")["invalid port"]
+#test("127.0.0.1:65536")["invalid port"]
+#test("127.0.0.1:-1")["invalid port"]
+#test("127.0.0.1:8a")["invalid port"]
+#test("::1")["missing port"]
+#test("::1:80")["missing port"]
+#test("[::1]")["missing port"]
+#test("[::1]80")["invalid port"]
+#test("[::1:80")["invalid IP address"]
+#test("[1.2.3.4]:80")["invalid IP address"]
+#test("example.com:80")["invalid IP address"]
+#test("")["empty address"]
+fun addr_round_trip(s: str) -> str {
+    return match parse_addr(s) {
+        Ok(a) => f"{a}"
+        Err(e) => e.message()
+    }
+}
+
+// The four bytes of an IPv4 address in dotted decimal.
+fun v4_bytes(s: str) -> Option<[uint8]> {
+    var out: [uint8] = []
+    var i = 0
+    while out.len() < 4 {
+        var v = 0
+        var digits = 0
+        while i < s.len() && s[i] >= '0' && s[i] <= '9' {
+            if digits > 0 && v == 0 {
+                return None
+            }
+            v = v * 10 + ((s[i] - '0') as int)
+            digits += 1
+            if v > 255 {
+                return None
+            }
+            i += 1
+        }
+        if digits == 0 {
+            return None
+        }
+        out.push(v as uint8)
+        if out.len() < 4 {
+            if i >= s.len() || s[i] != '.' {
+                return None
+            }
+            i += 1
+        }
+    }
+    if i != s.len() {
+        return None
+    }
+    return Some(out)
+}
+
+// The eight groups of an IPv6 address.
+fun v6_groups(s: str) -> Option<[int]> {
+    let gap = find_pair(s)
+    if gap < 0 {
+        let g = groups(s, true)?
+        if g.len() != 8 {
+            return None
+        }
+        return Some(g)
+    }
+    if find_pair(s[gap + 2:]) >= 0 {
+        return None
+    }
+    let tail_text = s[gap + 2:]
+    let head = groups(s[:gap], tail_text.len() == 0)?
+    let tail = groups(tail_text, true)?
+    if head.len() + tail.len() > 7 {
+        return None
+    }
+    var out = head
+    while out.len() + tail.len() < 8 {
+        out.push(0)
+    }
+    for t in tail {
+        out.push(t)
+    }
+    return Some(out)
+}
+
+// The `:`-separated hex groups of `s` ("" has none); the last may be an
+// IPv4 address (two groups) when `last` says `s` ends the address.
+fun groups(s: str, last: bool) -> Option<[int]> {
+    var out: [int] = []
+    if s.len() == 0 {
+        return Some(out)
+    }
+    var start = 0
+    while true {
+        var end = find_byte(s, ':', start)
+        if end < 0 {
+            end = s.len()
+        }
+        let part = s[start:end]
+        if end == s.len() && last && find_byte(part, '.', 0) >= 0 {
+            let b = v4_bytes(part)?
+            out.push((b[0] as int) * 256 + (b[1] as int))
+            out.push((b[2] as int) * 256 + (b[3] as int))
+            return Some(out)
+        }
+        if part.len() == 0 || part.len() > 4 {
+            return None
+        }
+        var v = 0
+        var i = 0
+        while i < part.len() {
+            let d = hex_digit(part[i])
+            if d < 0 {
+                return None
+            }
+            v = v * 16 + d
+            i += 1
+        }
+        out.push(v)
+        if end == s.len() {
+            return Some(out)
+        }
+        start = end + 1
+        if start == s.len() {
+            return None
+        }
+    }
+    return None
+}
+
+// The value of the hex digit `c`, or -1.
+#test('7')[7]
+#test('B')[11]
+#test('g')[-1]
+fun hex_digit(c: uint8) -> int {
+    if c >= '0' && c <= '9' {
+        return (c - '0') as int
+    }
+    if c >= 'a' && c <= 'f' {
+        return (c - 'a') as int + 10
+    }
+    if c >= 'A' && c <= 'F' {
+        return (c - 'A') as int + 10
+    }
+    return -1
+}
+
+// A port: decimal digits, 0 to 65535.
+fun parse_port(s: str) -> Result<int, AddrParseError> {
+    if s.len() == 0 || s.len() > 5 {
+        return Err(AddrParseError.InvalidPort)
+    }
+    var v = 0
+    var i = 0
+    while i < s.len() {
+        if s[i] < '0' || s[i] > '9' {
+            return Err(AddrParseError.InvalidPort)
+        }
+        v = v * 10 + ((s[i] - '0') as int)
+        i += 1
+    }
+    if v > 65535 {
+        return Err(AddrParseError.InvalidPort)
+    }
+    return Ok(v)
+}
+
+// The first offset of the byte `c` in `s` from `start` on, or -1.
+fun find_byte(s: str, c: uint8, start: int) -> int {
+    var i = start
+    while i < s.len() {
+        if s[i] == c {
+            return i
+        }
+        i += 1
+    }
+    return -1
+}
+
+// The offset of the first `::` in `s`, or -1.
+#test("1::2")[1]
+#test("1:2")[-1]
+fun find_pair(s: str) -> int {
+    var i = 0
+    while i + 1 < s.len() {
+        if s[i] == ':' && s[i + 1] == ':' {
+            return i
+        }
+        i += 1
+    }
+    return -1
+}
+
+// --- the platform's address records --------------------------------------------
+// What the `__sock_*` primitives take and give for an address: the family
+// (4 or 6), the port (two bytes, big-endian), the address's bytes.
+
+#test(SocketAddr { ip: IpAddr.V4(127u8, 0u8, 0u8, 1u8), port: 258 })[[4u8, 1u8, 2u8, 127u8, 0u8, 0u8, 1u8]]
+fun record_bytes(a: SocketAddr) -> [uint8] {
+    var out: [uint8] = [4]
+    if a.ip.is_ipv6() {
+        out = [6]
+    }
+    out.push(((a.port >> 8) & 255) as uint8)
+    out.push((a.port & 255) as uint8)
+    for b in a.ip.octets() {
+        out.push(b)
+    }
+    return out
+}
+
+fun record(a: SocketAddr) -> str {
+    return text_of(record_bytes(a))
+}
+
+// The address of the record at `at` in `r`, if there is one.
+fun from_record(r: str, at: int) -> Option<SocketAddr> {
+    if r.len() < at + 7 {
+        return None
+    }
+    let port = (r[at + 1] as int) * 256 + (r[at + 2] as int)
+    var n = 0
+    if r[at] == 4u8 {
+        n = 4
+    } else if r[at] == 6u8 && r.len() >= at + 19 {
+        n = 16
+    } else {
+        return None
+    }
+    var b: [uint8] = []
+    var i = 0
+    while i < n {
+        b.push(r[at + 3 + i])
+        i += 1
+    }
+    return Some(SocketAddr { ip: ip_of_bytes(b), port: port })
+}
+
+// A round trip through a record, for the cases.
+#test("127.0.0.1:80")["127.0.0.1:80"]
+#test("[2001:db8::1]:65535")["[2001:db8::1]:65535"]
+fun record_round_trip(s: str) -> str {
+    return match parse_addr(s) {
+        Ok(a) => match from_record(record(a), 0) {
+            Some(b) => f"{b}"
+            None => "none"
+        }
+        Err(e) => e.message()
+    }
+}
+
+// --- sockets ---------------------------------------------------------------------
+
+// What a wait is for: to receive (or accept), to send (or a connect's end).
+const READABLE: int = 1
+const WRITABLE: int = 2
+const STREAM: int = 1
+const DATAGRAM: int = 2
+const EINTR: int = 4
+const EAGAIN: int = 11
+const ECONNABORTED: int = 103
+const EINPROGRESS: int = 115
+// the socket options of `__sock_option`
+const NO_DELAY: int = 1
+const BROADCAST: int = 2
+const REUSE_ADDR: int = 3
+
+// The cause of the last primitive's failure.
+fun last_error() -> IoError {
+    return from_errno(__io_errno())
+}
+
+// The family of the platform's records for `ip`.
+fun family_of(ip: IpAddr) -> int {
+    if ip.is_ipv4() {
+        return 4
+    }
+    return 6
+}
+
+// A new socket for `ip`'s family, non-blocking: every wait is this
+// module's, in `__sock_poll` or the reactor.
+fun new_socket(ip: IpAddr, kind: int) -> Result<int, IoError> {
+    let h = __sock_open(family_of(ip), kind)
+    if h < 0 {
+        return Err(last_error())
+    }
+    return made(h)
+}
+
+// The new socket `h` non-blocking, or closed with the error.
+fun made(h: int) -> Result<int, IoError> {
+    if __sock_set_nonblocking(h, 1) < 0 {
+        return failed(h, __io_errno())
+    }
+    return Ok(h)
+}
+
+// The socket `h` closed, and the error `errno` given.
+fun failed<T>(h: int, errno: int) -> Result<T, IoError> {
+    let gone = __sock_close(h)
+    return Err(from_errno(errno))
+}
+
+// The thread blocked until the socket `h` is ready for `events`, within
+// `ms` milliseconds (negative: no limit): `TimedOut` when they ran out.
+fun wait_ready(h: int, events: int, ms: int) -> Result<(), IoError> {
+    let r = __sock_poll(h, events, ms)
+    if r < 0 {
+        return Err(last_error())
+    }
+    if r == 0 {
+        return Err(IoError.TimedOut)
+    }
+    return Ok(())
+}
+
+// The address of the socket `h`'s own end, or of its peer.
+fun addr_of(h: int, peer: int) -> Result<SocketAddr, IoError> {
+    let r = __sock_addr(h, peer)
+    if r.len() == 0 {
+        return Err(last_error())
+    }
+    return match from_record(r, 0) {
+        Some(a) => Ok(a)
+        None => Err(IoError.InvalidData)
+    }
+}
+
+// The socket `h` closed.
+fun close_handle(h: int) -> Result<(), IoError> {
+    if h < 0 {
+        return Ok(())
+    }
+    if __sock_close(h) < 0 {
+        return Err(last_error())
+    }
+    return Ok(())
+}
+
+// The option `opt` of the socket `h` on or off.
+fun set_option(h: int, opt: int, on: bool) -> Result<(), IoError> {
+    var v = 0
+    if on {
+        v = 1
+    }
+    if __sock_option(h, opt, v) < 0 {
+        return Err(last_error())
+    }
+    return Ok(())
+}
+
+// The bytes of `s`.
+fun bytes_of(s: str) -> [uint8] {
+    var out: [uint8] = []
+    var i = 0
+    while i < s.len() {
+        out.push(s[i])
+        i += 1
+    }
+    return out
+}
+
+// The bytes `b` as a string.
+fun text_of(b: [uint8]) -> str {
+    var sb = StringBuilder()
+    for x in b {
+        sb.append_byte(x)
+    }
+    return sb.build()
+}
+
+// --- TCP -----------------------------------------------------------------------
+
+// A socket listening for TCP connections.
+pub struct TcpListener {
+    handle: int,
+    // how long `accept` waits, in milliseconds (negative: as long as it takes)
+    timeout_ms: int,
+}
+
+// Which way of a stream `shutdown` ends.
+#derive(Eq)
+pub enum Shutdown {
+    Read,
+    Write,
+    Both,
+}
+
+// A TCP connection: a `Read` and a `Write`. Each read gives what one
+// receive gives (fewer bytes than asked is no end; `[]` is); each write
+// sends every byte. A copy of a stream is the same connection.
+pub struct TcpStream {
+    handle: int,
+    read_ms: int,
+    write_ms: int,
+}
+
+// A socket listening on `a` (port 0: one the system picks, which
+// `local_addr` tells): `AddrInUse` when another listens there,
+// `AddrNotAvailable` for an address that isn't this machine's. Its address
+// is reused while old connections to it linger (SO_REUSEADDR on POSIX).
+pub fun listen(a: SocketAddr) -> Result<TcpListener, IoError> {
+    let h = new_socket(a.ip, STREAM)?
+    let reuse = set_option(h, REUSE_ADDR, true)
+    if __sock_bind(h, record(a)) < 0 || __sock_listen(h, 128) < 0 {
+        return failed(h, __io_errno())
+    }
+    return Ok(TcpListener { handle: h, timeout_ms: -1 })
+}
+
+// A stream of the connection just accepted on `h`.
+fun accepted(h: int) -> Result<TcpStream, IoError> {
+    let s = made(h)?
+    return Ok(TcpStream { handle: s, read_ms: -1, write_ms: -1 })
+}
+
+impl TcpListener {
+    // The next connection: its stream (`peer_addr` says from where).
+    // `TimedOut` when `set_timeout`'s time ran out first.
+    fun accept(self) -> Result<TcpStream, IoError> {
+        while true {
+            let h = __sock_accept(self.handle)
+            if h >= 0 {
+                return accepted(h)
+            }
+            let err = __io_errno()
+            if err == EAGAIN {
+                wait_ready(self.handle, READABLE, self.timeout_ms)?
+            } else if err != ECONNABORTED && err != EINTR {
+                return Err(from_errno(err))
+            }
+        }
+        unreachable()
+    }
+
+    // `accept`, the task waiting for the connection.
+    async fun accept_async(self) -> Result<TcpStream, IoError> {
+        while true {
+            let h = __sock_accept(self.handle)
+            if h >= 0 {
+                return accepted(h)
+            }
+            let err = __io_errno()
+            if err == EAGAIN {
+                await __wait_socket(self.handle, READABLE)
+                if __task_cancelled() {
+                    return Err(IoError.Cancelled)
+                }
+            } else if err != ECONNABORTED && err != EINTR {
+                return Err(from_errno(err))
+            }
+        }
+        unreachable()
+    }
+
+    // The address it listens on.
+    fun local_addr(self) -> Result<SocketAddr, IoError> {
+        return addr_of(self.handle, 0)
+    }
+
+    // How long `accept` waits at most, in milliseconds (negative: as long as
+    // it takes, the default).
+    fun set_timeout(var self, ms: int) {
+        self.timeout_ms = ms
+    }
+
+    // The socket closed: it listens no more. A second close does nothing.
+    fun close(var self) -> Result<(), IoError> {
+        let h = self.handle
+        self.handle = -1
+        return close_handle(h)
+    }
+}
+
+// A connection to `a`: `ConnectionRefused` when nobody listens there,
+// `HostUnreachable`, `NetworkUnreachable`, `TimedOut`.
+pub fun connect(a: SocketAddr) -> Result<TcpStream, IoError> {
+    return connect_timeout(a, -1)
+}
+
+// `connect`, waiting at most `ms` milliseconds for the connection
+// (negative: as long as the system does): `TimedOut` then.
+pub fun connect_timeout(a: SocketAddr, ms: int) -> Result<TcpStream, IoError> {
+    let h = new_socket(a.ip, STREAM)?
+    if __sock_connect(h, record(a)) < 0 {
+        let err = __io_errno()
+        if err != EINPROGRESS && err != EAGAIN && err != EINTR {
+            return failed(h, err)
+        }
+        match wait_ready(h, WRITABLE, ms) {
+            Ok(()) => {}
+            Err(e) => {
+                let gone = __sock_close(h)
+                return Err(e)
+            }
+        }
+        let pending = __sock_error(h)
+        if pending < 0 {
+            return failed(h, __io_errno())
+        }
+        if pending > 0 {
+            return failed(h, pending)
+        }
+    }
+    return Ok(TcpStream { handle: h, read_ms: -1, write_ms: -1 })
+}
+
+// `connect`, the task waiting for the connection.
+pub async fun connect_async(a: SocketAddr) -> Result<TcpStream, IoError> {
+    let h = new_socket(a.ip, STREAM)?
+    if __sock_connect(h, record(a)) < 0 {
+        let err = __io_errno()
+        if err != EINPROGRESS && err != EAGAIN && err != EINTR {
+            return failed(h, err)
+        }
+        // woken early (another waiter of the socket), it waits again
+        var ready = false
+        while !ready {
+            await __wait_socket(h, WRITABLE)
+            if __task_cancelled() {
+                let gone = __sock_close(h)
+                return Err(IoError.Cancelled)
+            }
+            ready = __sock_poll(h, WRITABLE, 0) > 0
+        }
+        let pending = __sock_error(h)
+        if pending < 0 {
+            return failed(h, __io_errno())
+        }
+        if pending > 0 {
+            return failed(h, pending)
+        }
+    }
+    return Ok(TcpStream { handle: h, read_ms: -1, write_ms: -1 })
+}
+
+// A connection to the host `host` (a name, looked up with `lookup`, or an
+// address) on `port`: each of its addresses tried in turn, the last one's
+// error given when none answered.
+pub fun connect_host(host: str, port: int) -> Result<TcpStream, IoError> {
+    let ips = lookup(host)?
+    var last = IoError.NotFound
+    for ip in ips {
+        match connect(SocketAddr { ip: ip, port: port }) {
+            Ok(s) => { return Ok(s) }
+            Err(e) => { last = e }
+        }
+    }
+    return Err(last)
+}
+
+impl Read for TcpStream {
+    // One receive of at most `n` bytes, waiting until there are some (as
+    // long as `set_read_timeout` allows); `[]` once the peer ended the
+    // stream.
+    fun read(var self, n: int) -> Result<[uint8], IoError> {
+        let s = self.read_str(n)?
+        return Ok(bytes_of(s))
+    }
+
+    fun read_str(var self, n: int) -> Result<str, IoError> {
+        if n <= 0 {
+            return Ok("")
+        }
+        while true {
+            let s = __sock_recv(self.handle, n)
+            let err = __io_errno()
+            if err == 0 {
+                return Ok(s)
+            }
+            if err != EAGAIN {
+                return Err(from_errno(err))
+            }
+            wait_ready(self.handle, READABLE, self.read_ms)?
+        }
+        unreachable()
+    }
+}
+
+impl Write for TcpStream {
+    fun write(var self, b: [uint8]) -> Result<int, IoError> {
+        return self.write_str(text_of(b))
+    }
+
+    // Every byte of `s` sent, waiting while the socket's buffer is full (as
+    // long as `set_write_timeout` allows). A peer that went away is
+    // `BrokenPipe` or `ConnectionReset`.
+    fun write_str(var self, s: str) -> Result<int, IoError> {
+        var at = 0
+        while at < s.len() {
+            let r = __sock_send(self.handle, s, at)
+            if r >= 0 {
+                at += r
+            } else {
+                let err = __io_errno()
+                if err != EAGAIN {
+                    return Err(from_errno(err))
+                }
+                wait_ready(self.handle, WRITABLE, self.write_ms)?
+            }
+        }
+        return Ok(s.len())
+    }
+
+    // Nothing to do: nothing is buffered here.
+    fun flush(var self) -> Result<(), IoError> {
+        return Ok(())
+    }
+}
+
+impl TcpStream {
+    // `read`, the task waiting for the bytes.
+    async fun read_async(var self, n: int) -> Result<[uint8], IoError> {
+        let s = await self.read_str_async(n)
+        return Ok(bytes_of(s?))
+    }
+
+    // `read_str`, the task waiting for the bytes.
+    async fun read_str_async(var self, n: int) -> Result<str, IoError> {
+        if n <= 0 {
+            return Ok("")
+        }
+        while true {
+            let s = __sock_recv(self.handle, n)
+            let err = __io_errno()
+            if err == 0 {
+                return Ok(s)
+            }
+            if err != EAGAIN {
+                return Err(from_errno(err))
+            }
+            await __wait_socket(self.handle, READABLE)
+            if __task_cancelled() {
+                return Err(IoError.Cancelled)
+            }
+        }
+        unreachable()
+    }
+
+    // `write`, the task waiting while the socket's buffer is full.
+    async fun write_async(var self, b: [uint8]) -> Result<int, IoError> {
+        return await self.write_str_async(text_of(b))
+    }
+
+    // `write_str`, the task waiting while the socket's buffer is full.
+    async fun write_str_async(var self, s: str) -> Result<int, IoError> {
+        var at = 0
+        while at < s.len() {
+            let r = __sock_send(self.handle, s, at)
+            if r >= 0 {
+                at += r
+            } else {
+                let err = __io_errno()
+                if err != EAGAIN {
+                    return Err(from_errno(err))
+                }
+                await __wait_socket(self.handle, WRITABLE)
+                if __task_cancelled() {
+                    return Err(IoError.Cancelled)
+                }
+            }
+        }
+        return Ok(s.len())
+    }
+
+    // The address of the other end.
+    fun peer_addr(self) -> Result<SocketAddr, IoError> {
+        return addr_of(self.handle, 1)
+    }
+
+    // The address of this end.
+    fun local_addr(self) -> Result<SocketAddr, IoError> {
+        return addr_of(self.handle, 0)
+    }
+
+    // The reading, the writing or both ended: after `Write` the peer reads
+    // the end of the stream.
+    fun shutdown(self, how: Shutdown) -> Result<(), IoError> {
+        let k = match how {
+            Read => 1
+            Write => 2
+            Both => 3
+        }
+        if __sock_shutdown(self.handle, k) < 0 {
+            return Err(last_error())
+        }
+        return Ok(())
+    }
+
+    // Small writes sent at once rather than gathered (TCP_NODELAY).
+    fun set_nodelay(self, on: bool) -> Result<(), IoError> {
+        return set_option(self.handle, NO_DELAY, on)
+    }
+
+    // How long a read waits at most, in milliseconds (negative: as long as
+    // it takes, the default): `TimedOut` then. The async reads don't time
+    // out: `task.timeout` does that for them.
+    fun set_read_timeout(var self, ms: int) {
+        self.read_ms = ms
+    }
+
+    // How long a write waits at most for room, in milliseconds.
+    fun set_write_timeout(var self, ms: int) {
+        self.write_ms = ms
+    }
+
+    // The connection closed (every copy of the stream with it). A second
+    // close does nothing.
+    fun close(var self) -> Result<(), IoError> {
+        let h = self.handle
+        self.handle = -1
+        return close_handle(h)
+    }
+}
+
+// --- UDP -----------------------------------------------------------------------
+
+// A UDP socket: datagrams sent to and received from any address.
+pub struct UdpSocket {
+    handle: int,
+    read_ms: int,
+}
+
+// A UDP socket bound to `a` (port 0: one the system picks).
+pub fun udp_bind(a: SocketAddr) -> Result<UdpSocket, IoError> {
+    let h = new_socket(a.ip, DATAGRAM)?
+    if __sock_bind(h, record(a)) < 0 {
+        return failed(h, __io_errno())
+    }
+    return Ok(UdpSocket { handle: h, read_ms: -1 })
+}
+
+// The datagram `r` (`__sock_recv_from`'s: its sender's record in the first
+// 19 bytes, then its bytes) as its bytes and sender.
+fun datagram(r: str) -> Result<(str, SocketAddr), IoError> {
+    return match from_record(r, 0) {
+        Some(a) => Ok((tail_of(r, 19), a))
+        None => Err(IoError.InvalidData)
+    }
+}
+
+// The bytes of `s` from `start` on: any bytes, where a slice would insist
+// on a character's boundary.
+fun tail_of(s: str, start: int) -> str {
+    var sb = StringBuilder()
+    sb.append(s, start, s.len())
+    return sb.build()
+}
+
+impl UdpSocket {
+    // `b` sent to `to` as one datagram: its length.
+    fun send_to(self, b: [uint8], to: SocketAddr) -> Result<int, IoError> {
+        return self.send_str_to(text_of(b), to)
+    }
+
+    fun send_str_to(self, s: str, to: SocketAddr) -> Result<int, IoError> {
+        let rec = record(to)
+        while true {
+            let r = __sock_send_to(self.handle, s, rec)
+            if r >= 0 {
+                return Ok(r)
+            }
+            let err = __io_errno()
+            if err != EAGAIN {
+                return Err(from_errno(err))
+            }
+            wait_ready(self.handle, WRITABLE, -1)?
+        }
+        unreachable()
+    }
+
+    // The next datagram, at most `n` bytes of it (the rest dropped), and its
+    // sender; waiting as long as `set_read_timeout` allows.
+    fun recv_from(self, n: int) -> Result<([uint8], SocketAddr), IoError> {
+        let (s, a) = self.recv_str_from(n)?
+        return Ok((bytes_of(s), a))
+    }
+
+    fun recv_str_from(self, n: int) -> Result<(str, SocketAddr), IoError> {
+        while true {
+            let r = __sock_recv_from(self.handle, n)
+            if r.len() > 0 {
+                return datagram(r)
+            }
+            let err = __io_errno()
+            if err != EAGAIN {
+                return Err(from_errno(err))
+            }
+            wait_ready(self.handle, READABLE, self.read_ms)?
+        }
+        unreachable()
+    }
+
+    // `recv_from`, the task waiting for the datagram.
+    async fun recv_from_async(self, n: int) -> Result<([uint8], SocketAddr), IoError> {
+        let got = await self.recv_str_from_async(n)
+        let (s, a) = got?
+        return Ok((bytes_of(s), a))
+    }
+
+    async fun recv_str_from_async(self, n: int) -> Result<(str, SocketAddr), IoError> {
+        while true {
+            let r = __sock_recv_from(self.handle, n)
+            if r.len() > 0 {
+                return datagram(r)
+            }
+            let err = __io_errno()
+            if err != EAGAIN {
+                return Err(from_errno(err))
+            }
+            await __wait_socket(self.handle, READABLE)
+            if __task_cancelled() {
+                return Err(IoError.Cancelled)
+            }
+        }
+        unreachable()
+    }
+
+    // The address it is bound to.
+    fun local_addr(self) -> Result<SocketAddr, IoError> {
+        return addr_of(self.handle, 0)
+    }
+
+    // How long a receive waits at most, in milliseconds (negative: as long
+    // as it takes): `TimedOut` then.
+    fun set_read_timeout(var self, ms: int) {
+        self.read_ms = ms
+    }
+
+    // Datagrams to a broadcast address allowed (SO_BROADCAST).
+    fun set_broadcast(self, on: bool) -> Result<(), IoError> {
+        return set_option(self.handle, BROADCAST, on)
+    }
+
+    // The socket closed. A second close does nothing.
+    fun close(var self) -> Result<(), IoError> {
+        let h = self.handle
+        self.handle = -1
+        return close_handle(h)
+    }
+}
+
+// --- names ---------------------------------------------------------------------
+//
+// Without libc there is no getaddrinfo: a name is looked for in the hosts
+// file, then asked of the name servers over UDP (RFC 1035), an A query and
+// then an AAAA one.
+
+// Where `lookup` looks: the hosts file at `hosts_path` ("" for none), then
+// the name servers `servers`, each asked `attempts` times at most and
+// waited for `timeout_ms` milliseconds a query.
+pub struct Resolver {
+    hosts_path: str,
+    servers: [SocketAddr],
+    timeout_ms: int,
+    attempts: int,
+}
+
+// The system's: its hosts file and the name servers of its resolver's
+// configuration (on Linux /etc/hosts and /etc/resolv.conf).
+pub fun system_resolver() -> Resolver {
+    return Resolver { hosts_path: __net_config(0), servers: nameservers(__net_config(1)), timeout_ms: 2000, attempts: 2 }
+}
+
+// One of the hosts file `hosts_path` and the name servers `servers`.
+pub fun resolver(hosts_path: str, servers: [SocketAddr]) -> Resolver {
+    return Resolver { hosts_path: hosts_path, servers: servers, timeout_ms: 2000, attempts: 2 }
+}
+
+// The addresses of the name `name`, through `system_resolver()`.
+pub fun lookup(name: str) -> Result<[IpAddr], IoError> {
+    return system_resolver().lookup(name)
+}
+
+impl Resolver {
+    // The addresses of `name`: an address itself; the hosts file's entries
+    // for it; else what the first name server that answers gives, IPv4's
+    // first. `NotFound` when there are none (or no name server to ask),
+    // `TimedOut` when no server answered, `InvalidData` when none gave a
+    // usable answer, `InvalidInput` for a name DNS can't carry.
+    fun lookup(self, name: str) -> Result<[IpAddr], IoError> {
+        match parse_ip(name) {
+            Ok(ip) => { return Ok([ip]) }
+            Err(_) => {}
+        }
+        let q = dns_name(name)?
+        if self.hosts_path != "" {
+            match read_to_string(self.hosts_path) {
+                Ok(text) => {
+                    var bare = name
+                    if bare[bare.len() - 1] == '.' {
+                        bare = bare[:bare.len() - 1]
+                    }
+                    let found = hosts_lookup(text, bare)
+                    if found.len() > 0 {
+                        return Ok(found)
+                    }
+                }
+                Err(_) => {}
+            }
+        }
+        if self.servers.len() == 0 {
+            return Err(IoError.NotFound)
+        }
+        var out = self.ask(q, 1)?
+        match self.ask(q, 28) {
+            Ok(more) => {
+                for ip in more {
+                    out.push(ip)
+                }
+            }
+            Err(e) => {
+                if out.len() == 0 {
+                    return Err(e)
+                }
+            }
+        }
+        if out.len() == 0 {
+            return Err(IoError.NotFound)
+        }
+        return Ok(out)
+    }
+
+    // The records of type `qtype` (1: A, 28: AAAA) of the encoded name `q`,
+    // from the first server that answers.
+    fun ask(self, q: str, qtype: int) -> Result<[IpAddr], IoError> {
+        var last = IoError.TimedOut
+        var attempt = 0
+        while attempt < self.attempts {
+            for server in self.servers {
+                match self.ask_one(server, q, qtype) {
+                    Ok(ips) => { return Ok(ips) }
+                    // the name isn't there: no other server is asked
+                    Err(IoError.NotFound) => { return Err(IoError.NotFound) }
+                    Err(e) => { last = e }
+                }
+            }
+            attempt += 1
+        }
+        return Err(last)
+    }
+
+    // One query of `server`, its answer waited for (a datagram from
+    // elsewhere, or with another id, is ignored).
+    fun ask_one(self, server: SocketAddr, q: str, qtype: int) -> Result<[IpAddr], IoError> {
+        let r = __random_bytes(2)
+        var id = 4660
+        if r.len() == 2 {
+            id = (r[0] as int) * 256 + (r[1] as int)
+        }
+        var any = unspecified()
+        if server.ip.is_ipv6() {
+            any = unspecified_v6()
+        }
+        var sock = udp_bind(SocketAddr { ip: any, port: 0 })?
+        defer { let c = sock.close() }
+        sock.set_read_timeout(self.timeout_ms)
+        let sent = sock.send_str_to(dns_query(id, q, qtype), server)?
+        while true {
+            let (msg, sender) = sock.recv_str_from(4096)?
+            if sender == server {
+                match dns_answers(msg, id, qtype) {
+                    Ok(ips) => { return Ok(ips) }
+                    Err(IoError.Interrupted) => {}
+                    Err(e) => { return Err(e) }
+                }
+            }
+        }
+        unreachable()
+    }
+}
+
+// The addresses the hosts file `text` gives `name` (its case ignored), in
+// the file's order. A line is an address and its names; `#` starts a
+// comment; the line ends of Windows' file too.
+#test("127.0.0.1 localhost\n::1 localhost ip6-localhost\n", "localhost")[[IpAddr.V4(127u8, 0u8, 0u8, 1u8), IpAddr.V6(0u16, 0u16, 0u16, 0u16, 0u16, 0u16, 0u16, 1u16)]]
+#test("# a comment\r\n10.0.0.7\tdb  DB.example # the database\r\n", "db.EXAMPLE")[[IpAddr.V4(10u8, 0u8, 0u8, 7u8)]]
+#test("10.0.0.7 db\nnot-an-ip db\n10.0.0.7 db\n", "db")[[IpAddr.V4(10u8, 0u8, 0u8, 7u8)]]
+#test("10.0.0.7 db\n", "web")[[]]
+pub fun hosts_lookup(text: str, name: str) -> [IpAddr] {
+    var out: [IpAddr] = []
+    let want = lower(name)
+    for line in lines(text) {
+        let f = fields(line)
+        if f.len() < 2 {
+            continue
+        }
+        match parse_ip(f[0]) {
+            Ok(ip) => {
+                var i = 1
+                while i < f.len() {
+                    if lower(f[i]) == want && !has_ip(out, ip) {
+                        out.push(ip)
+                    }
+                    i += 1
+                }
+            }
+            Err(_) => {}
+        }
+    }
+    return out
+}
+
+// The name servers of the resolver's configuration `text` (resolv.conf's
+// `nameserver` lines), each on port 53.
+#test("# by NetworkManager\nsearch example.com\nnameserver 10.0.0.1\nnameserver ::1\nnameserver bogus\n")[[SocketAddr { ip: IpAddr.V4(10u8, 0u8, 0u8, 1u8), port: 53 }, SocketAddr { ip: IpAddr.V6(0u16, 0u16, 0u16, 0u16, 0u16, 0u16, 0u16, 1u16), port: 53 }]]
+#test("")[[]]
+pub fun nameservers(text: str) -> [SocketAddr] {
+    var out: [SocketAddr] = []
+    for line in lines(text) {
+        let f = fields(line)
+        if f.len() >= 2 && f[0] == "nameserver" {
+            match parse_ip(f[1]) {
+                Ok(ip) => { out.push(SocketAddr { ip: ip, port: 53 }) }
+                Err(_) => {}
+            }
+        }
+    }
+    return out
+}
+
+fun has_ip(xs: [IpAddr], ip: IpAddr) -> bool {
+    for x in xs {
+        if x == ip {
+            return true
+        }
+    }
+    return false
+}
+
+// The lines of `text`, a comment (`#` on) and a `\r` taken off each.
+fun lines(text: str) -> [str] {
+    var out: [str] = []
+    var start = 0
+    var i = 0
+    while i <= text.len() {
+        if i == text.len() || text[i] == '\n' {
+            var end = i
+            let hash = find_byte(text[start:end], '#', 0)
+            if hash >= 0 {
+                end = start + hash
+            }
+            if end > start && text[end - 1] == '\r' {
+                end -= 1
+            }
+            out.push(text[start:end])
+            start = i + 1
+        }
+        i += 1
+    }
+    return out
+}
+
+// The words of `line`, split at spaces, tabs and `\r`.
+fun fields(line: str) -> [str] {
+    var out: [str] = []
+    var i = 0
+    while i < line.len() {
+        while i < line.len() && (line[i] == ' ' || line[i] == '\t' || line[i] == '\r') {
+            i += 1
+        }
+        let start = i
+        while i < line.len() && line[i] != ' ' && line[i] != '\t' && line[i] != '\r' {
+            i += 1
+        }
+        if i > start {
+            out.push(line[start:i])
+        }
+    }
+    return out
+}
+
+// `s` with ASCII's capital letters made small.
+#test("Db.Example")["db.example"]
+fun lower(s: str) -> str {
+    var sb = StringBuilder()
+    var i = 0
+    while i < s.len() {
+        let c = s[i]
+        if c >= 'A' && c <= 'Z' {
+            sb.append_byte(c + 32)
+        } else {
+            sb.append_byte(c)
+        }
+        i += 1
+    }
+    return sb.build()
+}
+
+// --- DNS messages (RFC 1035) ---------------------------------------------------
+
+// `name` in DNS's wire form: each label (1 to 63 bytes) after its length,
+// then a zero; a trailing dot is allowed. `InvalidInput` for an empty
+// label, a longer one, or a name past 253 bytes.
+fun dns_name(name: str) -> Result<str, IoError> {
+    var n = name
+    if n.len() > 0 && n[n.len() - 1] == '.' {
+        n = n[:n.len() - 1]
+    }
+    if n.len() == 0 || n.len() > 253 {
+        return Err(IoError.InvalidInput)
+    }
+    var sb = StringBuilder()
+    var start = 0
+    while start <= n.len() {
+        var end = find_byte(n, '.', start)
+        if end < 0 {
+            end = n.len()
+        }
+        let k = end - start
+        if k == 0 || k > 63 {
+            return Err(IoError.InvalidInput)
+        }
+        sb.append_byte(k as uint8)
+        sb.append(n, start, end)
+        start = end + 1
+    }
+    sb.append_byte(0u8)
+    return Ok(sb.build())
+}
+
+// A query with the id `id` for the records of type `qtype` (1: A, 28:
+// AAAA, class IN) of the encoded name `q`, recursion desired.
+fun dns_query(id: int, q: str, qtype: int) -> str {
+    var sb = StringBuilder()
+    for b in [id >> 8, id & 255, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0] {
+        sb.append_byte((b & 255) as uint8)
+    }
+    sb.append(q)
+    for b in [qtype >> 8, qtype & 255, 0, 1] {
+        sb.append_byte((b & 255) as uint8)
+    }
+    return sb.build()
+}
+
+// The addresses of type `qtype` in the response `msg` to the query `id`.
+// `Interrupted` for a message that isn't that response (another id, not a
+// response: the caller waits on); `NotFound` for "no such name" or no
+// records of the type; `InvalidData` for a malformed message or a server's
+// failure.
+fun dns_answers(msg: str, id: int, qtype: int) -> Result<[IpAddr], IoError> {
+    if msg.len() < 12 {
+        return Err(IoError.InvalidData)
+    }
+    if u16_at(msg, 0) != id || (msg[2] & 128u8) == 0u8 {
+        return Err(IoError.Interrupted)
+    }
+    let rcode = (msg[3] & 15u8) as int
+    if rcode == 3 {
+        return Err(IoError.NotFound)
+    }
+    if rcode != 0 {
+        return Err(IoError.InvalidData)
+    }
+    let questions = u16_at(msg, 4)
+    let answers = u16_at(msg, 6)
+    var at = 12
+    var k = 0
+    while k < questions {
+        at = skip_name(msg, at)
+        if at < 0 || at + 4 > msg.len() {
+            return Err(IoError.InvalidData)
+        }
+        at += 4
+        k += 1
+    }
+    var out: [IpAddr] = []
+    k = 0
+    while k < answers {
+        at = skip_name(msg, at)
+        if at < 0 || at + 10 > msg.len() {
+            return Err(IoError.InvalidData)
+        }
+        let rtype = u16_at(msg, at)
+        let rclass = u16_at(msg, at + 2)
+        let len = u16_at(msg, at + 8)
+        at += 10
+        if at + len > msg.len() {
+            return Err(IoError.InvalidData)
+        }
+        if rclass == 1 && rtype == qtype && ((qtype == 1 && len == 4) || (qtype == 28 && len == 16)) {
+            var b: [uint8] = []
+            var i = 0
+            while i < len {
+                b.push(msg[at + i])
+                i += 1
+            }
+            out.push(ip_of_bytes(b))
+        }
+        at += len
+        k += 1
+    }
+    if out.len() == 0 {
+        return Err(IoError.NotFound)
+    }
+    return Ok(out)
+}
+
+// The 16-bit big-endian number at `at` in `s`.
+fun u16_at(s: str, at: int) -> int {
+    return (s[at] as int) * 256 + (s[at + 1] as int)
+}
+
+// The offset after the (possibly compressed) name at `at` in `msg`, or -1.
+fun skip_name(msg: str, at0: int) -> int {
+    var at = at0
+    while at < msg.len() {
+        let n = msg[at] as int
+        if n == 0 {
+            return at + 1
+        }
+        if (n & 192) == 192 {
+            // a pointer ends the name
+            if at + 2 > msg.len() {
+                return -1
+            }
+            return at + 2
+        }
+        if (n & 192) != 0 {
+            return -1
+        }
+        at += 1 + n
+    }
+    return -1
+}
+
+// --- the cases' helpers --------------------------------------------------------
+
+// The bytes of `s` in hex.
+fun hex_of(s: str) -> str {
+    let digits = "0123456789abcdef"
+    var sb = StringBuilder()
+    var i = 0
+    while i < s.len() {
+        sb.append_byte(digits[(s[i] >> 4) as int])
+        sb.append_byte(digits[(s[i] & 15u8) as int])
+        i += 1
+    }
+    return sb.build()
+}
+
+// The encoded name of `name` in hex, or the error's name.
+#test("example.com")["076578616d706c6503636f6d00"]
+#test("example.com.")["076578616d706c6503636f6d00"]
+#test("a..b")["invalid"]
+#test("")["invalid"]
+#test(".")["invalid"]
+fun dns_name_hex(name: str) -> str {
+    return match dns_name(name) {
+        Ok(q) => hex_of(q)
+        Err(_) => "invalid"
+    }
+}
+
+// A query, in hex.
+#test(4660, "a.b", 1)["123401000001000000000000016101620000010001"]
+#test(1, "x", 28)["000101000001000000000000017800001c0001"]
+fun dns_query_hex(id: int, name: str, qtype: int) -> str {
+    return match dns_name(name) {
+        Ok(q) => hex_of(dns_query(id, q, qtype))
+        Err(_) => "invalid"
+    }
+}
+
+// The bytes of the hex text `h` as a string.
+fun unhex(h: str) -> str {
+    var sb = StringBuilder()
+    var i = 0
+    while i + 1 < h.len() {
+        sb.append_byte((hex_digit(h[i]) * 16 + hex_digit(h[i + 1])) as uint8)
+        i += 2
+    }
+    return sb.build()
+}
+
+// What `dns_answers` makes of the message in hex `h`, as text.
+// The answers: a CNAME through a pointer, then two A records; a response
+// with another id; NXDOMAIN; SERVFAIL; a message cut short; an AAAA one.
+#test("1234818000010003000000000377777703636f6d0000010001c00c0005000100000e10000704626c6f67c010c02500010001000000050004c0000201c02500010001000000050004c0000202", 4660, 1)["192.0.2.1 192.0.2.2"]
+#test("1235818000010000000000000377777703636f6d0000010001", 4660, 1)["Interrupted"]
+#test("1234010000010000000000000377777703636f6d0000010001", 4660, 1)["Interrupted"]
+#test("1234818300010000000000000377777703636f6d0000010001", 4660, 1)["NotFound"]
+#test("1234818200010000000000000377777703636f6d0000010001", 4660, 1)["InvalidData"]
+#test("1234818000010001000000000377777703636f6d0000010001c00c000100010000", 4660, 1)["InvalidData"]
+#test("12348180000100000000000003777777", 4660, 1)["InvalidData"]
+#test("1234818000010001000000000377777703636f6d00001c0001c00c001c00010000003c001020010db8000000000000000000000001", 4660, 28)["2001:db8::1"]
+#test("1234818000010001000000000377777703636f6d00001c0001c00c001c00010000003c001020010db8000000000000000000000001", 4660, 1)["NotFound"]
+fun dns_answers_text(h: str, id: int, qtype: int) -> str {
+    return match dns_answers(unhex(h), id, qtype) {
+        Ok(ips) => {
+            var sb = StringBuilder()
+            for ip in ips {
+                if sb.len() > 0 {
+                    sb.append(" ")
+                }
+                sb.append(f"{ip}")
+            }
+            sb.build()
+        }
+        Err(IoError.Interrupted) => "Interrupted"
+        Err(IoError.NotFound) => "NotFound"
+        Err(IoError.InvalidData) => "InvalidData"
+        Err(_) => "other"
+    }
+}

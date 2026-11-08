@@ -32,6 +32,7 @@ A program learns that its target lacks something from an error: the cause `Unsup
 | Child processes (`std.process.run`, `run_async`, `command`) | Yes | Yes | No: `Err(SpawnError.Unsupported)` |
 | A child with pipes for its stdin, stdout and stderr, waited for or not, signalled (the primitives `__spawn_piped`, `__try_reap`, `__kill`, [[MYLA-336]]) | Yes: fork, exec, pipes, a pidfd, `wait4` | Yes: `clone` for the fork | No: ENOSYS, the errno of `Unsupported` |
 | Files opened with flags, read and written at a cursor, seeked, their size, mode and modification time (`__open`, `__seek`, `__fstat`, [[MYLA-336]]) | Yes | Yes (`openat`) | Yes, within what the host shares (`path_open`, `fd_seek`, `fd_filestat_get`); the mode given to a new file isn't used, and the mode read is made up from its kind |
+| Sockets: TCP, UDP, name lookup (`std.net`, the `__sock_*` primitives, [[MYLA-346]]) | Yes: the BSD socket calls, epoll for the reactor | Yes (the same calls; under qemu-user too) | No: `Unsupported` (WASI preview 1 has no sockets) |
 | The system's entropy (`__random_bytes`, [[MYLA-336]]) | `getrandom` | `getrandom` | The host's `random_get` (Node: `crypto.getRandomValues`) |
 | The wall clock (`__wall_ns`, `std.time.now_utc`, [[MYLA-334]]) | `clock_gettime(CLOCK_REALTIME)` | The same | `clock_time_get` with the realtime clock (Node: `Date.now()`, so milliseconds) |
 | Workers for tasks | `MYLA_THREADS`, else one per CPU the process may use; at most 32 | The same | One; `MYLA_THREADS` is ignored (D125 (4)) |
@@ -46,6 +47,10 @@ A program learns that its target lacks something from an error: the cause `Unsup
 | Memory | The machine's; a freed cell bigger than 16 MiB goes back to the system (D157) | The machine's, as on x86-64 | At most 4 GiB, which the program never gives back: a freed big cell is reused by a later one it is large enough for, and a growing list or string at the top of the memory grows where it is (a list of 150 million `int64`s fits, [[MYLA-284]]) |
 | A line printed whole while other workers print | Up to `PIPE_BUF` (4 KiB) per line | The same | One worker: always |
 | Debug information (`myla build -g`) | Yes ([[Development/Debugging]]) | Not yet ([[MYLA-259]]) | Not yet |
+
+## Sockets on another system
+
+`std.net` never sees a file descriptor or a `sockaddr` ([[Language/Standard-library/Net#porting-sockets-to-another-system]]). A port, Windows' over Winsock next, gives `std.platform`'s socket functions again (`sock_open` to `sock_close`, `sock_poll`, `net_config`, and the poller's `poller_watch_socket` and `poller_forget_socket`): each gives 0 or more or minus an errno, its codes mapped onto Linux's numbers (`WSAECONNREFUSED` onto ECONNREFUSED, `WSAEWOULDBLOCK` onto EAGAIN, or EINPROGRESS for a connect); addresses cross as a portable record; a socket starts blocking and is made non-blocking explicitly; data is sent and received, never read or written, and a socket has its own close. Readiness is 1 to receive or accept, 2 to send or a connect's end, an error or a hang-up both: `WSAPoll` for `sock_poll`, and for the reactor `WSAPoll` beside its wake-up event or IOCP. The hosts file's path and the name servers come from `net_config`, as Windows keeps both elsewhere.
 
 ## How each target is built
 
