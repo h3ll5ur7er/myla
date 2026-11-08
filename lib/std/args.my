@@ -27,6 +27,7 @@
 
 // std.str isn't imported: its cases would run as this module's (MYLA-360);
 // the one string helper needed is at the end.
+import std.map as map_m // `m.get(k)`
 import std.option as option_m
 from std.io import println, eprintln
 from std.process import exit
@@ -259,7 +260,7 @@ impl Args {
             }
             i -= 1
         }
-        return get(self.defaults, name)
+        return self.defaults.get(name)
     }
 
     // `get(name)`, or `d` when it is `None`.
@@ -279,7 +280,7 @@ impl Args {
             }
         }
         if out.len() == 0 {
-            if let Some(d) = get(self.defaults, name) {
+            if let Some(d) = self.defaults.get(name) {
                 out.push(d)
             }
         }
@@ -479,7 +480,7 @@ fun empty_args(s: Spec) -> Args {
 // A panic unless the spec declares `name`, as a flag if `flag`, else as
 // something with a value.
 fun declared(a: Args, name: str, flag: bool) {
-    match get(a.names, name) {
+    match a.names.get(name) {
         Some(is_flag) => {
             if flag && !is_flag {
                 panic(f"args: '{name}' is not a flag")

@@ -1,0 +1,1187 @@
+// std.term — the terminal: whether a stream is one, its size, raw mode,
+// styles and colours, escape sequences, keys and a line editor (MYLA-350).
+//
+// - `is_tty(stream)` says whether a standard stream is a terminal, `size()`
+//   gives the terminal's columns and rows.
+// - `raw_mode()` puts the terminal on the standard input in raw mode (keys
+//   one at a time, no echo, Ctrl-C a key) and gives a `RawMode`, whose
+//   `restore()` puts it back: `defer { let r = raw.restore() }`.
+// - `style()` builds a `Style` (`style().fg(Color.Red).bold()`), whose
+//   `paint(text)` wraps a text in its escape sequences; `colors(stream)`
+//   says whether a stream should get them. `strip` takes escape sequences
+//   out again, and `width` counts the columns a text takes.
+// - `cursor_up`, `move_to`, `clear_line` and the others give the escape
+//   sequences that move the cursor and clear.
+// - `key_reader()` reads keys from a terminal in raw mode, `parse_key` decodes
+//   them from bytes; a `LineEdit` is a line being edited, and an `Editor`
+//   reads lines with editing and history (what `myla repl` uses).
+//
+// Everything that depends on the system goes through the `__term_*`
+// primitives (std.rt over std.platform): never an ioctl or a termios byte
+// here. A port to another system, Windows among them, gives those again and
+// this module stays as it is. On wasm32 nothing is a terminal, the size is
+// unknown and raw mode is `Unsupported`. [[Language/Standard-library/Term]]
+// says what a port must provide.
+
+import .fmt as fmt
+from .io import write
+
+const ESC: str = "\u{1b}"
+const EINTR: int = 4
+const ENOTTY: int = 25
+const ENOSYS: int = 38
+
+// --- streams -----------------------------------------------------------------
+
+// A standard stream.
+#derive(Eq, Hash)
+pub enum Stream {
+    Stdin,
+    Stdout,
+    Stderr,
+}
+
+// The descriptor of the stream `s`.
+#test(Stream.Stdin)[0]
+#test(Stream.Stderr)[2]
+fun fd_of(s: Stream) -> int {
+    return match s {
+        Stdin => 0
+        Stdout => 1
+        Stderr => 2
+    }
+}
+
+// Why the terminal can't do what was asked.
+#derive(Eq)
+pub enum TermError {
+    NotATerminal,
+    Unsupported,
+    Interrupted,
+    Other(int),
+}
+
+impl TermError {
+    // The reason in words.
+    #test(TermError.NotATerminal)["not a terminal"]
+    #test(TermError.Unsupported)["terminals are not supported on this target"]
+    #test(TermError.Interrupted)["interrupted"]
+    #test(TermError.Other(5))["terminal error 5"]
+    fun message(self) -> str {
+        return match self {
+            NotATerminal => "not a terminal"
+            Unsupported => "terminals are not supported on this target"
+            Interrupted => "interrupted"
+            Other(code) => f"terminal error {code}"
+        }
+    }
+}
+
+impl Format for TermError {
+    fun format(self, spec: str) -> str {
+        return fmt.pad(self.message(), spec)
+    }
+}
+
+// The error of the errno `e`.
+#test(25)[TermError.NotATerminal]
+#test(9)[TermError.NotATerminal]
+#test(38)[TermError.Unsupported]
+#test(5)[TermError.Other(5)]
+fun error_of(e: int) -> TermError {
+    if e == ENOTTY || e == 9 {
+        return TermError.NotATerminal
+    }
+    if e == ENOSYS {
+        return TermError.Unsupported
+    }
+    return TermError.Other(e)
+}
+
+// Whether the stream `s` is a terminal (never on wasm32).
+pub fun is_tty(s: Stream) -> bool {
+    return __term_is_tty(fd_of(s)) == 1
+}
+
+// The size of the terminal: its columns and rows, from the standard output,
+// else the standard error, else the input; `None` when none is a terminal.
+pub fun size() -> Option<(int, int)> {
+    for s in [Stream.Stdout, Stream.Stderr, Stream.Stdin] {
+        match size_of(s) {
+            Some(cr) => { return Some(cr) }
+            None => {}
+        }
+    }
+    return None
+}
+
+// The columns and rows of the terminal the stream `s` is, or `None` (not a
+// terminal, or one that doesn't know its size).
+pub fun size_of(s: Stream) -> Option<(int, int)> {
+    return unpack_size(__term_size(fd_of(s)))
+}
+
+// `__term_size`'s columns and rows.
+#test(6619169)[Some((101, 33))]
+#test(-1)[None]
+#test(0)[None]
+fun unpack_size(r: int) -> Option<(int, int)> {
+    if r <= 0 || (r >> 16) == 0 || (r & 65535) == 0 {
+        return None
+    }
+    return Some((r >> 16, r & 65535))
+}
+
+// Escape sequences written to the stream `s` interpreted: turned on where
+// the system must be asked to (a Windows console); false when `s` isn't a
+// terminal.
+pub fun enable_ansi(s: Stream) -> bool {
+    return __term_vt(fd_of(s)) == 0
+}
+
+// Whether the stream `s` should get colours and styles: it is a terminal
+// that interprets escape sequences (`enable_ansi`), `TERM` isn't `dumb` and
+// `NO_COLOR` is unset or empty (no-color.org).
+pub fun colors(s: Stream) -> bool {
+    return color_wanted(__getenv("TERM"), __getenv("NO_COLOR")) && is_tty(s) && enable_ansi(s)
+}
+
+// Whether the environment's `TERM` and `NO_COLOR` allow colours.
+#test("xterm-256color", "")[true]
+#test("dumb", "")[false]
+#test("xterm", "1")[false]
+fun color_wanted(term: str, no_color: str) -> bool {
+    return term != "dumb" && no_color == ""
+}
+
+// --- raw mode ----------------------------------------------------------------
+
+// The terminal in raw mode, with the mode it had before: `restore` puts
+// that back.
+pub struct RawMode {
+    fd: int,
+    saved: str,
+}
+
+// The terminal on the standard input in raw mode: each key comes as it is
+// typed, not echoed, Ctrl-C and Ctrl-Z as keys rather than signals, special
+// keys as escape sequences (`key_reader`, `parse_key`); output is unchanged.
+// `NotATerminal` when the input isn't one, `Unsupported` on wasm32.
+pub fun raw_mode() -> Result<RawMode, TermError> {
+    let saved = __term_get(0)
+    if saved.len() == 0 {
+        return Err(error_of(__io_errno()))
+    }
+    if __term_raw(0) < 0 {
+        return Err(error_of(__io_errno()))
+    }
+    return Ok(RawMode { fd: 0, saved: saved })
+}
+
+impl RawMode {
+    // The terminal back in the mode it had before `raw_mode`.
+    fun restore(self) -> Result<(), TermError> {
+        if __term_set(self.fd, self.saved) < 0 {
+            return Err(error_of(__io_errno()))
+        }
+        return Ok(())
+    }
+}
+
+// --- colours and styles --------------------------------------------------------
+
+// A colour: the terminal's own (`Default`), one of the 16 named ones, one of
+// the 256 of the extended palette (`Index`), or 24-bit (`Rgb`).
+#derive(Eq, Hash)
+pub enum Color {
+    Default,
+    Black,
+    Red,
+    Green,
+    Yellow,
+    Blue,
+    Magenta,
+    Cyan,
+    White,
+    BrightBlack,
+    BrightRed,
+    BrightGreen,
+    BrightYellow,
+    BrightBlue,
+    BrightMagenta,
+    BrightCyan,
+    BrightWhite,
+    Index(int),
+    Rgb(int, int, int),
+}
+
+// How text looks: its colours and attributes. Build one with `style()` and
+// its methods, which each give a new `Style`.
+#derive(Eq)
+pub struct Style {
+    fore: Color,
+    back: Color,
+    attrs: int,
+}
+
+const BOLD: int = 1
+const DIM: int = 2
+const ITALIC: int = 4
+const UNDERLINE: int = 8
+const REVERSE: int = 16
+const STRIKE: int = 32
+
+// The plain style: the terminal's colours, no attributes.
+pub fun style() -> Style {
+    return Style { fore: Color.Default, back: Color.Default, attrs: 0 }
+}
+
+impl Style {
+    // This style with the foreground colour `c`.
+    fun fg(self, c: Color) -> Style {
+        return Style { fore: c, back: self.back, attrs: self.attrs }
+    }
+
+    // This style with the background colour `c`.
+    fun bg(self, c: Color) -> Style {
+        return Style { fore: self.fore, back: c, attrs: self.attrs }
+    }
+
+    fun bold(self) -> Style {
+        return self.with(BOLD)
+    }
+
+    fun dim(self) -> Style {
+        return self.with(DIM)
+    }
+
+    fun italic(self) -> Style {
+        return self.with(ITALIC)
+    }
+
+    fun underline(self) -> Style {
+        return self.with(UNDERLINE)
+    }
+
+    // Foreground and background swapped.
+    fun reverse(self) -> Style {
+        return self.with(REVERSE)
+    }
+
+    // Struck through.
+    fun strike(self) -> Style {
+        return self.with(STRIKE)
+    }
+
+    fun with(self, a: int) -> Style {
+        return Style { fore: self.fore, back: self.back, attrs: self.attrs | a }
+    }
+
+    // Whether this is the plain style.
+    #test(Style { fore: Color.Default, back: Color.Default, attrs: 0 })[true]
+    #test(Style { fore: Color.Red, back: Color.Default, attrs: 0 })[false]
+    fun is_plain(self) -> bool {
+        return self.attrs == 0 && self.fore == Color.Default && self.back == Color.Default
+    }
+
+    // The escape sequence (SGR) that sets this style from the plain one;
+    // "" for the plain style.
+    #test(Style { fore: Color.Default, back: Color.Default, attrs: 0 })[""]
+    #test(Style { fore: Color.Red, back: Color.Default, attrs: 1 })["\u{1b}[1;31m"]
+    #test(Style { fore: Color.BrightCyan, back: Color.Blue, attrs: 8 })["\u{1b}[4;96;44m"]
+    #test(Style { fore: Color.Index(208), back: Color.Rgb(1, 2, 3), attrs: 0 })["\u{1b}[38;5;208;48;2;1;2;3m"]
+    #test(Style { fore: Color.Default, back: Color.Default, attrs: 63 })["\u{1b}[1;2;3;4;7;9m"]
+    fun sgr(self) -> str {
+        if self.is_plain() {
+            return ""
+        }
+        var codes: [str] = []
+        let attrs = [(BOLD, "1"), (DIM, "2"), (ITALIC, "3"), (UNDERLINE, "4"), (REVERSE, "7"), (STRIKE, "9")]
+        for a in attrs {
+            if (self.attrs & a.0) != 0 {
+                codes.push(a.1)
+            }
+        }
+        if self.fore != Color.Default {
+            codes.push(color_code(self.fore, 30))
+        }
+        if self.back != Color.Default {
+            codes.push(color_code(self.back, 40))
+        }
+        var sb = StringBuilder()
+        sb.append(ESC + "[")
+        var i = 0
+        while i < codes.len() {
+            if i > 0 {
+                sb.append(";")
+            }
+            sb.append(codes[i])
+            i += 1
+        }
+        sb.append("m")
+        return sb.build()
+    }
+
+    // `text` in this style: its escape sequence, the text, the reset;
+    // `text` itself for the plain style.
+    #test(Style { fore: Color.Green, back: Color.Default, attrs: 0 }, "ok")["\u{1b}[32mok\u{1b}[0m"]
+    #test(Style { fore: Color.Default, back: Color.Default, attrs: 0 }, "ok")["ok"]
+    fun paint(self, text: str) -> str {
+        if self.is_plain() {
+            return text
+        }
+        return self.sgr() + text + reset()
+    }
+}
+
+// The SGR parameter of the colour `c`, foreground (`base` 30) or background
+// (40).
+#test(Color.Black, 30)["30"]
+#test(Color.White, 40)["47"]
+#test(Color.BrightBlack, 30)["90"]
+#test(Color.BrightWhite, 40)["107"]
+#test(Color.Default, 30)["39"]
+#test(Color.Index(7), 30)["38;5;7"]
+#test(Color.Rgb(255, 0, 9), 40)["48;2;255;0;9"]
+fun color_code(c: Color, base: int) -> str {
+    let n = match c {
+        Default => 9
+        Black => 0
+        Red => 1
+        Green => 2
+        Yellow => 3
+        Blue => 4
+        Magenta => 5
+        Cyan => 6
+        White => 7
+        BrightBlack => 60
+        BrightRed => 61
+        BrightGreen => 62
+        BrightYellow => 63
+        BrightBlue => 64
+        BrightMagenta => 65
+        BrightCyan => 66
+        BrightWhite => 67
+        Index(i) => { return f"{base + 8};5;{i}" }
+        Rgb(r, g, b) => { return f"{base + 8};2;{r};{g};{b}" }
+    }
+    return f"{base + n}"
+}
+
+// `text` in the foreground colour `c`.
+#test("x", Color.Red)["\u{1b}[31mx\u{1b}[0m"]
+pub fun colored(text: str, c: Color) -> str {
+    return style().fg(c).paint(text)
+}
+
+// The escape sequence back to the plain style.
+pub fun reset() -> str {
+    return ESC + "[0m"
+}
+
+// --- the cursor and the screen -------------------------------------------------
+
+// The cursor `n` lines up ("" for `n <= 0`, as for the others).
+#test(2)["\u{1b}[2A"]
+#test(0)[""]
+pub fun cursor_up(n: int) -> str {
+    return csi_n(n, "A")
+}
+
+pub fun cursor_down(n: int) -> str {
+    return csi_n(n, "B")
+}
+
+#test(3)["\u{1b}[3C"]
+pub fun cursor_right(n: int) -> str {
+    return csi_n(n, "C")
+}
+
+pub fun cursor_left(n: int) -> str {
+    return csi_n(n, "D")
+}
+
+// `ESC [ n x`, or "" when `n` isn't positive.
+fun csi_n(n: int, x: str) -> str {
+    if n <= 0 {
+        return ""
+    }
+    return f"{ESC}[{n}{x}"
+}
+
+// The cursor to the column `col` of its line (1 the first).
+#test(1)["\u{1b}[1G"]
+pub fun cursor_column(col: int) -> str {
+    return f"{ESC}[{col}G"
+}
+
+// The cursor to the row `row` and column `col` (1, 1 the top left).
+#test(3, 7)["\u{1b}[3;7H"]
+pub fun move_to(row: int, col: int) -> str {
+    return f"{ESC}[{row};{col}H"
+}
+
+// The screen cleared, the cursor at its top left.
+pub fun clear_screen() -> str {
+    return ESC + "[2J" + ESC + "[H"
+}
+
+// The cursor's line cleared (the cursor stays).
+pub fun clear_line() -> str {
+    return ESC + "[2K"
+}
+
+// The cursor's line cleared from the cursor to its end.
+pub fun clear_to_end() -> str {
+    return ESC + "[K"
+}
+
+pub fun hide_cursor() -> str {
+    return ESC + "[?25l"
+}
+
+pub fun show_cursor() -> str {
+    return ESC + "[?25h"
+}
+
+// --- the width of text -----------------------------------------------------------
+
+// `s` without its escape sequences: CSI (`ESC [` … a final byte, styles and
+// cursor moves), OSC (`ESC ]` … BEL or `ESC \`, titles and links), and the
+// two-byte ones.
+#test("\u{1b}[1;31mred\u{1b}[0m")["red"]
+#test("a\u{1b}]8;;http://x\u{7}link\u{1b}]8;;\u{1b}\\b")["alinkb"]
+#test("\u{1b}7x\u{1b}8")["x"]
+#test("plain")["plain"]
+#test("cut\u{1b}[")["cut"]
+pub fun strip(s: str) -> str {
+    var sb = StringBuilder()
+    var i = 0
+    let n = s.len()
+    var begin = 0
+    while i < n {
+        if s[i] != 27u8 {
+            i += 1
+            continue
+        }
+        sb.append(s, begin, i)
+        i = escape_end(s, i)
+        begin = i
+    }
+    sb.append(s, begin, n)
+    return sb.build()
+}
+
+// Where the escape sequence that starts at `s[i]` (an ESC) ends: the index
+// after it (`s.len()` when it is cut short).
+#test("\u{1b}[31mx", 0)[5]
+#test("\u{1b}]0;t\u{7}x", 0)[6]
+#test("\u{1b}]0;t\u{1b}\\x", 0)[7]
+#test("\u{1b}", 0)[1]
+fun escape_end(s: str, i: int) -> int {
+    let n = s.len()
+    if i + 1 >= n {
+        return n
+    }
+    let k = s[i + 1]
+    if k == '[' {
+        var j = i + 2
+        while j < n && !(s[j] >= 64u8 && s[j] <= 126u8) {
+            j += 1
+        }
+        if j < n {
+            return j + 1
+        }
+        return n
+    }
+    if k == ']' || k == 'P' || k == '_' || k == '^' || k == 'X' {
+        // up to BEL or ST (`ESC \`)
+        var j = i + 2
+        while j < n {
+            if s[j] == 7u8 {
+                return j + 1
+            }
+            if s[j] == 27u8 && j + 1 < n && s[j + 1] == '\\' {
+                return j + 2
+            }
+            j += 1
+        }
+        return n
+    }
+    return i + 2
+}
+
+// The columns `s` takes on a terminal, its escape sequences left out: a
+// wide (East Asian) character or an emoji takes two, a combining mark or a
+// control character none.
+#test("\u{1b}[1mhi\u{1b}[0m")[2]
+#test("größe")[5]
+#test("日本")[4]
+#test("e\u{301}")[1]
+#test("")[0]
+pub fun width(s: str) -> int {
+    var w = 0
+    for c in strip(s) {
+        w += char_width(c)
+    }
+    return w
+}
+
+// The columns the character `c` takes: 0, 1 or 2.
+#test('a')[1]
+#test('\t')[0]
+#test('\u{300}')[0]
+#test('中')[2]
+#test('😀')[2]
+#test('\u{ff21}')[2]
+pub fun char_width(c: char) -> int {
+    let v = c as int32
+    if v < 32 || (v >= 127 && v < 160) {
+        return 0
+    }
+    if (v >= 0x300 && v < 0x370) || (v >= 0x200B && v < 0x2010) || (v >= 0x20D0 && v < 0x2100) || (v >= 0xFE00 && v < 0xFE10) || (v >= 0xFE20 && v < 0xFE30) {
+        return 0
+    }
+    if (v >= 0x1100 && v < 0x1160) || (v >= 0x2E80 && v < 0x303F) || (v >= 0x3041 && v < 0x3400) || (v >= 0x3400 && v < 0x4DC0) || (v >= 0x4E00 && v < 0xA000) || (v >= 0xA000 && v < 0xA4D0) || (v >= 0xAC00 && v < 0xD7A4) || (v >= 0xF900 && v < 0xFB00) || (v >= 0xFE30 && v < 0xFE50) || (v >= 0xFF00 && v < 0xFF61) || (v >= 0xFFE0 && v < 0xFFE7) || (v >= 0x1F300 && v < 0x1F650) || (v >= 0x1F900 && v < 0x1FA00) || (v >= 0x20000 && v < 0x3FFFE) {
+        return 2
+    }
+    return 1
+}
+
+// --- keys ----------------------------------------------------------------------
+
+// A key typed on a terminal in raw mode.
+#derive(Eq, Hash)
+pub enum Key {
+    Char(char),
+    Ctrl(char),
+    Alt(char),
+    Enter,
+    Tab,
+    Backspace,
+    Escape,
+    Up,
+    Down,
+    Left,
+    Right,
+    Home,
+    End,
+    PageUp,
+    PageDown,
+    Insert,
+    Delete,
+    F(int),
+    Unknown(str),
+}
+
+// The first key in the bytes `s` and how many bytes it takes, or `None`
+// when `s` is the start of one cut short (an escape sequence, a character's
+// UTF-8). Control bytes are `Ctrl` of their letter (1 is `Ctrl('a')`, 3
+// `Ctrl('c')`), CR and LF `Enter`, DEL and BS `Backspace`; `ESC [` and `ESC
+// O` sequences are the arrows, `Home`, `End`, `Insert`, `Delete`, `PageUp`,
+// `PageDown` and `F(1)` to `F(12)`, their modifiers left out; ESC and a
+// character is `Alt` of it.
+#test("a")[Some((Key.Char('a'), 1))]
+#test("\r")[Some((Key.Enter, 1))]
+#test("\u{3}")[Some((Key.Ctrl('c'), 1))]
+#test("\u{7f}")[Some((Key.Backspace, 1))]
+#test("\u{1b}[A")[Some((Key.Up, 3))]
+#test("\u{1b}[1;5D")[Some((Key.Left, 6))]
+#test("\u{1b}[3~x")[Some((Key.Delete, 4))]
+#test("\u{1b}[15~")[Some((Key.F(5), 5))]
+#test("\u{1b}OH")[Some((Key.Home, 3))]
+#test("\u{1b}OP")[Some((Key.F(1), 3))]
+#test("\u{1b}b")[Some((Key.Alt('b'), 2))]
+#test("\u{1b}[")[None]
+#test("\u{1b}")[None]
+#test("é")[Some((Key.Char('é'), 2))]
+#test("\u{1b}[9z")[Some((Key.Unknown("\u{1b}[9z"), 4))]
+pub fun parse_key(s: str) -> Option<(Key, int)> {
+    if s.len() == 0 {
+        return None
+    }
+    let b = s[0]
+    if b == 27u8 {
+        return parse_escape(s)
+    }
+    if b == 13u8 || b == 10u8 {
+        return Some((Key.Enter, 1))
+    }
+    if b == 9u8 {
+        return Some((Key.Tab, 1))
+    }
+    if b == 127u8 || b == 8u8 {
+        return Some((Key.Backspace, 1))
+    }
+    if b < 32u8 {
+        return Some((Key.Ctrl(ctrl_char(b as int)), 1))
+    }
+    if b < 128u8 {
+        return Some((Key.Char((b as int32) as char), 1))
+    }
+    let n = utf8_len(b)
+    var k = 1
+    while k < n && k < s.len() && s[k] >= 0x80u8 && s[k] < 0xC0u8 {
+        k += 1
+    }
+    if n == 0 || (k < n && k < s.len()) {
+        // not UTF-8: the bytes up to the next that could start a key
+        return Some((Key.Unknown(part(s, 0, k)), k))
+    }
+    if s.len() < n {
+        return None
+    }
+    let text = part(s, 0, n)
+    for c in text {
+        return Some((Key.Char(c), n))
+    }
+    return Some((Key.Unknown(text), n))
+}
+
+// The bytes `s[a:b]`, a character cut or not (input may not be UTF-8).
+#test("abc", 1, 3)["bc"]
+fun part(s: str, a: int, b: int) -> str {
+    var sb = StringBuilder()
+    sb.append(s, a, b)
+    return sb.build()
+}
+
+// The letter of the control byte `b` (1 to 31; 0 is '@').
+#test(1)['a']
+#test(26)['z']
+#test(0)['@']
+#test(28)['\\']
+fun ctrl_char(b: int) -> char {
+    if b >= 1 && b <= 26 {
+        return 'a' + (b - 1)
+    }
+    return '@' + b
+}
+
+// The length of a UTF-8 sequence that starts with `b`, 0 for a byte that
+// can't start one.
+#test(0xC3u8)[2]
+#test(0xF0u8)[4]
+#test(0x80u8)[0]
+fun utf8_len(b: uint8) -> int {
+    if b >= 0xC2u8 && b < 0xE0u8 {
+        return 2
+    }
+    if b >= 0xE0u8 && b < 0xF0u8 {
+        return 3
+    }
+    if b >= 0xF0u8 && b < 0xF5u8 {
+        return 4
+    }
+    return 0
+}
+
+// An escape sequence at the start of `s` (`s[0]` is ESC).
+fun parse_escape(s: str) -> Option<(Key, int)> {
+    if s.len() < 2 {
+        return None
+    }
+    let k = s[1]
+    if k == '[' {
+        var j = 2
+        while j < s.len() && s[j] >= 0x30u8 && s[j] <= 0x3Fu8 {
+            j += 1
+        }
+        if j >= s.len() {
+            return None
+        }
+        return Some((csi_key(s[2:j], s[j]), j + 1))
+    }
+    if k == 'O' {
+        if s.len() < 3 {
+            return None
+        }
+        let key = match s[2] {
+            65u8 => Key.Up
+            66u8 => Key.Down
+            67u8 => Key.Right
+            68u8 => Key.Left
+            72u8 => Key.Home
+            70u8 => Key.End
+            80u8 => Key.F(1)
+            81u8 => Key.F(2)
+            82u8 => Key.F(3)
+            83u8 => Key.F(4)
+            _ => Key.Unknown(part(s, 0, 3))
+        }
+        return Some((key, 3))
+    }
+    if k == 27u8 {
+        return Some((Key.Escape, 1))
+    }
+    if k >= 32u8 && k < 127u8 {
+        return Some((Key.Alt((k as int32) as char), 2))
+    }
+    return Some((Key.Escape, 1))
+}
+
+// The key of the CSI sequence with the parameters `params` and the final
+// byte `fin`.
+#test("", 66u8)[Key.Down]
+#test("1;2", 70u8)[Key.End]
+#test("5", 126u8)[Key.PageUp]
+#test("24", 126u8)[Key.F(12)]
+fun csi_key(params: str, fin: uint8) -> Key {
+    if fin == 'A' { return Key.Up }
+    if fin == 'B' { return Key.Down }
+    if fin == 'C' { return Key.Right }
+    if fin == 'D' { return Key.Left }
+    if fin == 'H' { return Key.Home }
+    if fin == 'F' { return Key.End }
+    if fin == '~' {
+        var n = 0
+        var i = 0
+        while i < params.len() && params[i] >= '0' && params[i] <= '9' {
+            n = n * 10 + (params[i] - '0') as int
+            i += 1
+        }
+        if n == 1 || n == 7 { return Key.Home }
+        if n == 2 { return Key.Insert }
+        if n == 3 { return Key.Delete }
+        if n == 4 || n == 8 { return Key.End }
+        if n == 5 { return Key.PageUp }
+        if n == 6 { return Key.PageDown }
+        if n >= 11 && n <= 15 { return Key.F(n - 10) }
+        if n >= 17 && n <= 21 { return Key.F(n - 11) }
+        if n == 23 || n == 24 { return Key.F(n - 12) }
+    }
+    return Key.Unknown(ESC + "[" + params + f"{(fin as int32) as char}")
+}
+
+// What a sequence cut short is once no more bytes come: a lone ESC is
+// `Escape`, anything else `Unknown`.
+#test("\u{1b}")[(Key.Escape, 1)]
+#test("\u{1b}[1")[(Key.Unknown("\u{1b}[1"), 3)]
+fun cut_key(s: str) -> (Key, int) {
+    if s.len() == 1 && s[0] == 27u8 {
+        return (Key.Escape, 1)
+    }
+    return (Key.Unknown(s), s.len())
+}
+
+// Keys read from the standard input (a terminal in raw mode, `raw_mode`).
+pub struct KeyReader {
+    fd: int,
+    buf: str,
+}
+
+// The keys typed on the standard input.
+pub fun key_reader() -> KeyReader {
+    return KeyReader { fd: 0, buf: "" }
+}
+
+// How long the rest of an escape sequence may take to come before what
+// came is taken as it is (a lone ESC is the Escape key), in milliseconds.
+const KEY_WAIT_MS: int = 50
+
+impl KeyReader {
+    // The next key, the program waiting for it; `None` at the end of the
+    // input.
+    fun next(var self) -> Result<Option<Key>, TermError> {
+        while true {
+            if self.buf.len() > 0 {
+                match parse_key(self.buf) {
+                    Some((k, n)) => {
+                        self.buf = part(self.buf, n, self.buf.len())
+                        return Ok(Some(k))
+                    }
+                    None => {
+                        if __poll(self.fd, KEY_WAIT_MS) == 0 {
+                            let kn = cut_key(self.buf)
+                            self.buf = part(self.buf, kn.1, self.buf.len())
+                            return Ok(Some(kn.0))
+                        }
+                    }
+                }
+            }
+            let got = __read(self.fd, 256)
+            if got.len() == 0 {
+                let e = __io_errno()
+                if e == EINTR {
+                    continue
+                }
+                if e != 0 {
+                    return Err(error_of(e))
+                }
+                if self.buf.len() == 0 {
+                    return Ok(None)
+                }
+                let kn = cut_key(self.buf)
+                self.buf = part(self.buf, kn.1, self.buf.len())
+                return Ok(Some(kn.0))
+            }
+            self.buf = self.buf + got
+        }
+        unreachable()
+    }
+}
+
+// --- editing a line ------------------------------------------------------------------
+
+// A line being edited: its characters, the cursor (before `chars[cursor]`),
+// and where in the history it is (`hist` the history's length for the new
+// line, whose text waits in `draft` meanwhile).
+pub struct LineEdit {
+    chars: [char],
+    cursor: int,
+    hist: int,
+    draft: [char],
+}
+
+// What a key did to the line.
+#derive(Eq)
+pub enum EditStep {
+    Editing,
+    Accept,
+    EndOfInput,
+    Cancel,
+}
+
+// A new, empty line; `history` is the length of the history it may go back
+// through.
+pub fun line_edit(history: int) -> LineEdit {
+    return LineEdit { chars: [], cursor: 0, hist: history, draft: [] }
+}
+
+impl LineEdit {
+    // The line's text.
+    #test(LineEdit { chars: ['h', 'i'], cursor: 0, hist: 0, draft: [] })["hi"]
+    fun text(self) -> str {
+        return text_of(self.chars)
+    }
+
+    // The key `k` applied with the history `history` (oldest first): typing
+    // inserts at the cursor; Enter accepts; Ctrl-D ends the input on an
+    // empty line and deletes otherwise; Ctrl-C cancels. Moves: Left, Right,
+    // Home, End and Ctrl-B, F, A, E; Alt-B and Alt-F a word. Deleting:
+    // Backspace, Delete, Ctrl-K to the end, Ctrl-U to the start, Ctrl-W the
+    // word before the cursor. Up and Down (Ctrl-P, Ctrl-N) go through the
+    // history; Tab inserts four spaces.
+    fun apply(var self, k: Key, history: [str]) -> EditStep {
+        match k {
+            Char(c) => { self.insert([c]) }
+            Tab => { self.insert([' ', ' ', ' ', ' ']) }
+            Enter => { return EditStep.Accept }
+            Ctrl(c) => { return self.control(c, history) }
+            Backspace => { self.delete_back() }
+            Delete => { self.delete_here() }
+            Left => { self.move_to(self.cursor - 1) }
+            Right => { self.move_to(self.cursor + 1) }
+            Home => { self.cursor = 0 }
+            End => { self.cursor = self.chars.len() }
+            Up => { self.go_history(self.hist - 1, history) }
+            Down => { self.go_history(self.hist + 1, history) }
+            Alt(c) => {
+                if c == 'b' { self.cursor = word_start(self.chars, self.cursor) }
+                if c == 'f' { self.cursor = word_end(self.chars, self.cursor) }
+            }
+            _ => {}
+        }
+        return EditStep.Editing
+    }
+
+    fun control(var self, c: char, history: [str]) -> EditStep {
+        if c == 'c' { return EditStep.Cancel }
+        if c == 'd' {
+            if self.chars.len() == 0 { return EditStep.EndOfInput }
+            self.delete_here()
+        }
+        if c == 'm' || c == 'j' { return EditStep.Accept }
+        if c == 'a' { self.cursor = 0 }
+        if c == 'e' { self.cursor = self.chars.len() }
+        if c == 'b' { self.move_to(self.cursor - 1) }
+        if c == 'f' { self.move_to(self.cursor + 1) }
+        if c == 'k' { self.chars = self.chars[:self.cursor] }
+        if c == 'u' {
+            self.chars = self.chars[self.cursor:]
+            self.cursor = 0
+        }
+        if c == 'w' {
+            let begin = word_start(self.chars, self.cursor)
+            self.chars = spliced(self.chars, begin, self.cursor, [])
+            self.cursor = begin
+        }
+        if c == 'p' { self.go_history(self.hist - 1, history) }
+        if c == 'n' { self.go_history(self.hist + 1, history) }
+        return EditStep.Editing
+    }
+
+    fun insert(var self, cs: [char]) {
+        self.chars = spliced(self.chars, self.cursor, self.cursor, cs)
+        self.cursor += cs.len()
+    }
+
+    fun delete_back(var self) {
+        if self.cursor > 0 {
+            self.chars = spliced(self.chars, self.cursor - 1, self.cursor, [])
+            self.cursor -= 1
+        }
+    }
+
+    fun delete_here(var self) {
+        if self.cursor < self.chars.len() {
+            self.chars = spliced(self.chars, self.cursor, self.cursor + 1, [])
+        }
+    }
+
+    fun move_to(var self, at: int) {
+        if at >= 0 && at <= self.chars.len() {
+            self.cursor = at
+        }
+    }
+
+    // The line become the history's entry `at` (its length: the new line
+    // again), the cursor at its end.
+    fun go_history(var self, at: int, history: [str]) {
+        if at < 0 || at > history.len() || at == self.hist {
+            return
+        }
+        if self.hist >= history.len() {
+            self.draft = self.chars
+        }
+        self.hist = at
+        if at == history.len() {
+            self.chars = self.draft
+        } else {
+            self.chars = history[at].chars()
+        }
+        self.cursor = self.chars.len()
+    }
+
+    // What redraws the line after `prompt` on a terminal `cols` columns
+    // wide, from the start of its row: the prompt, as much of the text as
+    // fits with the cursor in view (it scrolls sideways), the rest of the
+    // row cleared, the cursor in its place.
+    #test(LineEdit { chars: ['a', 'b'], cursor: 1, hist: 0, draft: [] }, "> ", 80)["\r> ab\u{1b}[K\r\u{1b}[3C"]
+    #test(LineEdit { chars: [], cursor: 0, hist: 0, draft: [] }, "", 80)["\r\u{1b}[K\r"]
+    #test(LineEdit { chars: ['a', 'b', 'c', 'd', 'e', 'f'], cursor: 6, hist: 0, draft: [] }, "> ", 6)["\r> def\u{1b}[K\r\u{1b}[5C"]
+    #test(LineEdit { chars: ['a', 'b', 'c', 'd', 'e', 'f'], cursor: 0, hist: 0, draft: [] }, "> ", 6)["\r> abc\u{1b}[K\r\u{1b}[2C"]
+    fun render(self, prompt: str, cols: int) -> str {
+        let pw = width(prompt)
+        var room = cols - pw - 1
+        if room < 1 {
+            room = 1
+        }
+        var start = 0
+        while start < self.cursor && span_width(self.chars, start, self.cursor) > room {
+            start += 1
+        }
+        var end = start
+        var w = 0
+        while end < self.chars.len() && w + char_width(self.chars[end]) <= room {
+            w += char_width(self.chars[end])
+            end += 1
+        }
+        return "\r" + prompt + text_of(self.chars[start:end]) + clear_to_end() + "\r" + cursor_right(pw + span_width(self.chars, start, self.cursor))
+    }
+}
+
+// The characters `cs` as a string.
+#test(['a', 'é'])["aé"]
+fun text_of(cs: [char]) -> str {
+    var sb = StringBuilder()
+    for c in cs {
+        sb.append(f"{c}")
+    }
+    return sb.build()
+}
+
+// `cs` with `cs[a:b]` replaced by `ins`.
+#test(['a', 'b', 'c'], 1, 2, ['x', 'y'])[['a', 'x', 'y', 'c']]
+#test(['a', 'b'], 0, 2, ['z'])[['z']]
+fun spliced(cs: [char], a: int, b: int, ins: [char]) -> [char] {
+    var out: [char] = []
+    var i = 0
+    while i < a {
+        out.push(cs[i])
+        i += 1
+    }
+    for c in ins {
+        out.push(c)
+    }
+    i = b
+    while i < cs.len() {
+        out.push(cs[i])
+        i += 1
+    }
+    return out
+}
+
+// The columns of `cs[a:b]`.
+fun span_width(cs: [char], a: int, b: int) -> int {
+    var w = 0
+    var i = a
+    while i < b {
+        w += char_width(cs[i])
+        i += 1
+    }
+    return w
+}
+
+// Where the word before `at` starts (spaces before it skipped).
+#test(['a', 'b', ' ', 'c', 'd'], 5)[3]
+#test(['a', 'b', ' ', ' '], 4)[0]
+fun word_start(cs: [char], at: int) -> int {
+    var i = at
+    while i > 0 && cs[i - 1] == ' ' {
+        i -= 1
+    }
+    while i > 0 && cs[i - 1] != ' ' {
+        i -= 1
+    }
+    return i
+}
+
+// Where the word after `at` ends.
+#test(['a', 'b', ' ', 'c', 'd'], 0)[2]
+#test(['a', 'b', ' ', 'c', 'd'], 2)[5]
+fun word_end(cs: [char], at: int) -> int {
+    var i = at
+    while i < cs.len() && cs[i] == ' ' {
+        i += 1
+    }
+    while i < cs.len() && cs[i] != ' ' {
+        i += 1
+    }
+    return i
+}
+
+// Keys typed and their result: how a sequence of keys edits a line.
+#test
+fun editing_a_line() {
+    let hist = ["first", "second"]
+    var ed = line_edit(hist.len())
+    for k in [Key.Char('a'), Key.Char('c'), Key.Left, Key.Char('b'), Key.End, Key.Char('!')] {
+        assert(ed.apply(k, hist) == EditStep.Editing, "editing")
+    }
+    assert(ed.text() == "abc!", ed.text())
+    assert(ed.apply(Key.Backspace, hist) == EditStep.Editing && ed.text() == "abc", "backspace")
+    let s = ed.apply(Key.Home, hist)
+    let d = ed.apply(Key.Delete, hist)
+    assert(ed.text() == "bc" && ed.cursor == 0, "delete")
+    let u = ed.apply(Key.Up, hist)
+    assert(ed.text() == "second" && ed.cursor == 6, "up")
+    let u2 = ed.apply(Key.Ctrl('p'), hist)
+    let u3 = ed.apply(Key.Up, hist)
+    assert(ed.text() == "first", "up twice, the oldest stays")
+    let d2 = ed.apply(Key.Down, hist)
+    let d3 = ed.apply(Key.Down, hist)
+    assert(ed.text() == "bc", "down to the draft")
+    let w = ed.apply(Key.Char(' '), hist)
+    let w2 = ed.apply(Key.Char('x'), hist)
+    let w3 = ed.apply(Key.Ctrl('w'), hist)
+    assert(ed.text() == "bc ", "a word deleted")
+    let k = ed.apply(Key.Ctrl('a'), hist)
+    let k2 = ed.apply(Key.Right, hist)
+    let k3 = ed.apply(Key.Ctrl('k'), hist)
+    assert(ed.text() == "b", "killed to the end")
+    assert(ed.apply(Key.Ctrl('d'), hist) == EditStep.Editing, "ctrl-d deletes on a line with text")
+    let k4 = ed.apply(Key.Ctrl('u'), hist)
+    assert(ed.text() == "", "killed to the start")
+    assert(ed.apply(Key.Ctrl('c'), hist) == EditStep.Cancel, "ctrl-c")
+    assert(ed.apply(Key.Ctrl('d'), hist) == EditStep.EndOfInput, "ctrl-d on an empty line")
+    assert(ed.apply(Key.Enter, hist) == EditStep.Accept, "enter")
+}
+
+// Lines read with editing and history from a terminal: the keys from the
+// standard input in raw mode, the line drawn on `out`.
+pub struct Editor {
+    out: Stream,
+    history: [str],
+    keys: KeyReader,
+}
+
+// An editor drawing on the stream `out` (the standard error for a prompt
+// that isn't the program's output), with an empty history.
+pub fun editor(out: Stream) -> Editor {
+    return Editor { out: out, history: [], keys: key_reader() }
+}
+
+// Whether `s` holds only spaces, tabs and line ends.
+#test(" \t")[true]
+#test(" x")[false]
+fun is_blank(s: str) -> bool {
+    for i in 0..s.len() {
+        if s[i] != ' ' && s[i] != '\t' && s[i] != '\n' && s[i] != '\r' {
+            return false
+        }
+    }
+    return true
+}
+
+// The most lines an editor's history keeps.
+const HISTORY_MAX: int = 1000
+
+impl Editor {
+    // The line `line` added to the history (not a blank one, nor the last
+    // one again).
+    fun add_history(var self, line: str) {
+        if is_blank(line) {
+            return
+        }
+        if self.history.len() > 0 && self.history[self.history.len() - 1] == line {
+            return
+        }
+        self.history.push(line)
+        if self.history.len() > HISTORY_MAX {
+            self.history = self.history[1:]
+        }
+    }
+
+    // A line read after `prompt`, edited as `LineEdit.apply` says, the
+    // terminal raw while it is; `None` for Ctrl-D on an empty line or the
+    // input's end, `Interrupted` for Ctrl-C. The line isn't added to the
+    // history (`add_history` does).
+    fun read_line(var self, prompt: str) -> Result<Option<str>, TermError> {
+        let raw = raw_mode()?
+        defer {
+            let r = raw.restore()
+        }
+        let cols = self.columns()
+        let fd = fd_of(self.out)
+        var ed = line_edit(self.history.len())
+        let drawn = write(fd, ed.render(prompt, cols))
+        while true {
+            let k = match self.keys.next()? {
+                Some(k) => k
+                None => {
+                    let nl = write(fd, "\n")
+                    if ed.chars.len() == 0 {
+                        return Ok(None)
+                    }
+                    return Ok(Some(ed.text()))
+                }
+            }
+            if k == Key.Ctrl('l') {
+                let cleared = write(fd, clear_screen())
+            }
+            let step = ed.apply(k, self.history)
+            if step == EditStep.Accept {
+                let nl = write(fd, ed.render(prompt, cols) + "\n")
+                return Ok(Some(ed.text()))
+            }
+            if step == EditStep.EndOfInput {
+                return Ok(None)
+            }
+            if step == EditStep.Cancel {
+                let nl = write(fd, "^C\n")
+                return Err(TermError.Interrupted)
+            }
+            let again = write(fd, ed.render(prompt, cols))
+        }
+        unreachable()
+    }
+
+    // The width to draw in: the output's terminal's, else 80.
+    fun columns(self) -> int {
+        return match size_of(self.out) {
+            Some(cr) => cr.0
+            None => 80
+        }
+    }
+}

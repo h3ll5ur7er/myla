@@ -224,7 +224,7 @@ impl Server {
                 for r in all_reports(first) {
                     let target = self.uri_of(r.path, path, uri)
                     var group: [Json] = []
-                    match get(groups, target) {
+                    match groups.get(target) {
                         Some(g) => { group = g },
                         None => {},
                     }
@@ -237,7 +237,7 @@ impl Server {
         for r in warned {
             let target = self.uri_of(r.path, path, uri)
             var group: [Json] = []
-            match get(groups, target) {
+            match groups.get(target) {
                 Some(g) => { group = g },
                 None => {},
             }
@@ -254,7 +254,7 @@ impl Server {
             None => {},
         }
         var stale: [str] = []
-        match get(self.elsewhere, uri) {
+        match self.elsewhere.get(uri) {
             Some(us) => { stale = us },
             None => {},
         }
@@ -297,12 +297,12 @@ impl Server {
     // features; positions after the edit may be off until it parses again).
     fun doc_of(var self, params: Json) -> Option<Doc> {
         let uri = str_field(field_or_null(params, "textDocument"), "uri")
-        let text = match get(self.docs, uri) {
+        let text = match self.docs.get(uri) {
             Some(t) => t,
             None => { return None },
         }
         let path = normalize(uri_path(uri))
-        match get(self.good, uri) {
+        match self.good.get(uri) {
             Some(g) => {
                 if g.text == text { return Some(Doc { uri: uri, path: path, text: text, symbols: g.symbols }) }
             },
@@ -315,7 +315,7 @@ impl Server {
             },
             None => {},
         }
-        return match get(self.good, uri) {
+        return match self.good.get(uri) {
             Some(g) => {
                 var t = text
                 if !lexes(text) { t = g.text }
@@ -327,11 +327,11 @@ impl Server {
 
     // Keep the document's current text as its last good one if it parses.
     fun remember(var self, uri: str) {
-        let text = match get(self.docs, uri) {
+        let text = match self.docs.get(uri) {
             Some(t) => t,
             None => { return },
         }
-        match get(self.good, uri) {
+        match self.good.get(uri) {
             Some(g) => {
                 if g.text == text { return }
             },
@@ -376,7 +376,7 @@ impl Server {
     // through the imports as the loader finds them; made again when its text
     // changed or a notification came.
     fun resolution(var self, d: Doc) -> Resolution {
-        match get(self.resolved, d.uri) {
+        match self.resolved.get(d.uri) {
             Some(r) => {
                 if r.stamp == self.stamp && r.text == d.text { return r.res }
             },
@@ -413,8 +413,7 @@ impl Server {
             None => { return Json.Null },
         }
         match self.resolved_at(d, pos) {
-            // the prelude's declarations are in no file (MYLA-372)
-            Some(def) => { if def.path == "<prelude>" { return Json.Null } else { return location(def.path, def.range) } },
+            Some(def) => { return location(def.path, def.range) },
             None => {},
         }
         match best_match(d.symbols, ident) {
@@ -533,7 +532,7 @@ impl Server {
         var data: [Json] = []
         // the current text, even when it doesn't lex (none then): the last
         // good text's tokens would be in the wrong places
-        match get(self.docs, str_field(field_or_null(params, "textDocument"), "uri")) {
+        match self.docs.get(str_field(field_or_null(params, "textDocument"), "uri")) {
             Some(text) => {
                 for n in semantic_tokens(text) { data.push(Json.Int(n)) }
             },
@@ -550,7 +549,7 @@ impl Server {
         }
         let pos = position_of(params)
         // inside an import: modules, or a module's public names (MYLA-243)
-        let current = match get(self.docs, d.uri) {
+        let current = match self.docs.get(d.uri) {
             Some(t) => t,
             None => d.text,
         }
@@ -612,7 +611,7 @@ impl Server {
     // What completes at `pos` in the document's current text (see
     // completion_attempts): nothing found when no attempt parses.
     fun completion_context(var self, d: Doc, pos: Pos) -> Completion {
-        let text = match get(self.docs, d.uri) {
+        let text = match self.docs.get(d.uri) {
             Some(t) => t,
             None => d.text,
         }

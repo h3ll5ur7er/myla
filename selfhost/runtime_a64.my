@@ -210,6 +210,21 @@ impl CodeGen {
             "\tsvc #0",
             "\tadd sp, sp, #32",
             "\tret",
+            // __on_signal(sig), on any thread's stack: the signal's number
+            // written as a byte to the self-pipe of std.signal (MYLA-350,
+            // the first word of `__sig_pipe`, non-blocking); the kernel's
+            // trampoline gives every register back
+            "__on_signal:",
+            "\tsub sp, sp, #16",
+            "\tstrb w0, [sp]",
+            "\tadrp x1, __sig_pipe",
+            "\tldr x0, [x1, :lo12:__sig_pipe]",
+            "\tmov x1, sp",
+            "\tmov x2, #1",
+            "\tmov x8, #64",
+            "\tsvc #0",
+            "\tadd sp, sp, #16",
+            "\tret",
             ".Lmsg_sov:",
             "\t.ascii \"runtime error: stack overflow\\n\"",
             "\t.p2align 2",

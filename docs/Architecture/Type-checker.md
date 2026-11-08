@@ -10,7 +10,7 @@
 
 ## Passes
 
-The loader adds the prelude (`Option`, `Result`, `get`, `Format`, `Hasher` and `Hash`, `Iterator`) and `build_checker_decls` makes the checker, whose `run_all` runs the passes:
+The loader adds the prelude (`Option`, `Result`, `Format`, `Hasher` and `Hash`, `Iterator`) and `build_checker_decls` makes the checker, whose `run_all` runs the passes:
 
 ```mermaid
 flowchart TD

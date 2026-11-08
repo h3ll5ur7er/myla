@@ -2,7 +2,7 @@
 
 `selfhost/codegen.my` is the Myla-written x86-64 backend and
 `selfhost/gen_main.my` the thin driver: it loads and links a program's modules,
-type-checks it (with the same `Option`/`Result`/`get` prelude the Python `run`
+type-checks it (with the same `Option`/`Result` prelude the Python `run`
 injects), generates GAS assembly, and writes that assembly to
 stdout. A host wrapper then runs `as`/`ld` over it to produce a real ELF binary
 (see docs/Development/Testing.md).

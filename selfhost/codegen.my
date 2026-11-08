@@ -278,10 +278,10 @@ pub fun new_codegen(c: Checker) -> CodeGen {
     var handed: [str: [int32]] = [:]
     for k in c.handovers.keys() {
         let h = c.handovers[k]
-        handed[h.func] = with_int(int_list(get(handed, h.func)), h.index)
+        handed[h.func] = with_int(int_list(handed.get(h.func)), h.index)
     }
     var passed_on: [str: [int32]] = [:]
-    for p in c.passed_on { passed_on[p.func] = with_int(int_list(get(passed_on, p.func)), p.index) }
+    for p in c.passed_on { passed_on[p.func] = with_int(int_list(passed_on.get(p.func)), p.index) }
     var const_strs: [str: str] = [:]
     for n in c.const_values.keys() {
         match c.const_values[n] {
@@ -412,7 +412,7 @@ impl CodeGen {
     fun position_label(var self, line: int32, col: int32) -> str {
         let key = format("{}:{}:{}", self.cur_path, line, col)
         var lab = ""
-        match get(self.pos_labels, key) {
+        match self.pos_labels.get(key) {
             Some(l) => { lab = l },
             None => {
                 lab = format(".Lpos{}", self.pos_labels.len())
@@ -617,7 +617,7 @@ impl CodeGen {
     // The label of the type DIE `key` names, registered the first time.
     #test(codegen_on("[int]"), "byte", "byte", Type.TBool, "", 0, 0)[".Ldty0"]
     fun dbg_type(var self, key: str, kind: str, ty: Type, target: str, n: int32, m: int32) -> str {
-        match get(self.dbg_types, key) {
+        match self.dbg_types.get(key) {
             Some(l) => { return l },
             None => {},
         }
@@ -1023,7 +1023,7 @@ impl CodeGen {
 
     #test(codegen_on("[int]"), "héλ")[-1]
     fun str_index(self, text: str) -> int32 {
-        return match get(self.str_ix, text) {
+        return match self.str_ix.get(text) {
             Some(i) => i
             None => -1
         }
@@ -1046,7 +1046,7 @@ impl CodeGen {
     // -- lookups ----------------------------------------------------------
 
     fun sig_of(self, name: str) -> FuncSig {
-        return match get(self.func_ix, name) {
+        return match self.func_ix.get(name) {
             Some(i) => self.funcs[i]
             None => self.funcs[0]
         }
@@ -1096,7 +1096,7 @@ impl CodeGen {
             if !self.keeping.contains(u.callee) { continue }
             var first = 0
             if u.recv >= 0 { first = 1 }
-            var ss = match get(score, u.callee) {
+            var ss = match score.get(u.callee) {
                 Some(xs) => xs,
                 None => {
                     var zeros: [int32] = []
@@ -1114,22 +1114,22 @@ impl CodeGen {
         self.scan_args = []
         for sig in self.funcs {
             if !sig.has_decl { continue }
-            let kept = match get(self.kept_params, sig.name) {
+            let kept = match self.kept_params.get(sig.name) {
                 Some(fl) => fl,
                 None => {
                     var no: [bool] = []
                     no
                 },
             }
-            let ss = match get(score, method_part(sig.name)) {
+            let ss = match score.get(method_part(sig.name)) {
                 Some(xs) => xs,
                 None => {
                     var zeros: [int32] = []
                     zeros
                 },
             }
-            let handed = int_list(get(self.handed, sig.name))
-            let passed = int_list(get(self.passed_on, sig.name))
+            let handed = int_list(self.handed.get(sig.name))
+            let passed = int_list(self.passed_on.get(sig.name))
             var flags: [bool] = []
             var any = false
             var i = 0
@@ -1307,7 +1307,7 @@ impl CodeGen {
     // a scalar that owns heap memory (a string, list, map or builder).
     fun owned_param(self, sig: FuncSig, i: int32, t: Type) -> bool {
         if is_aggregate(t) || !self.owns_heap(t) || recv_by_address(sig, i, t) { return false }
-        return match get(self.kept_params, sig.name) {
+        return match self.kept_params.get(sig.name) {
             Some(flags) => i < flags.len() && flags[i],
             None => false,
         }
@@ -1317,7 +1317,7 @@ impl CodeGen {
     // value: a struct, tuple or enum a `become` hands over to it (D88), its
     // words in the argument words.
     fun byval_param(self, sig: FuncSig, i: int32, t: Type) -> bool {
-        return self.handed.len() > 0 && is_aggregate(t) && contains_int(int_list(get(self.handed, sig.name)), i)
+        return self.handed.len() > 0 && is_aggregate(t) && contains_int(int_list(self.handed.get(sig.name)), i)
     }
 
     // Whether `myla_<key>.eq` is the routine `emit_derived_eq` writes for a
@@ -1394,7 +1394,7 @@ impl CodeGen {
     fun owned_params(self, sig: FuncSig, params: [Type]) -> [bool] {
         if !self.owning.contains(sig.name) { return self.no_owned }
         var out: [bool] = []
-        let flags = match get(self.kept_params, sig.name) {
+        let flags = match self.kept_params.get(sig.name) {
             Some(fl) => fl,
             None => {
                 var no: [bool] = []
@@ -1433,21 +1433,21 @@ impl CodeGen {
     // (identity outside a specialized generic body).
     #test(codegen_on("[int]"), 23)[Type.TInt(32, true)]
     fun type_of(self, id: int32) -> Type {
-        match get(self.resolved, id) { Some(t) => { return subst_type(t, self.subst) }, None => {} }
+        match self.resolved.get(id) { Some(t) => { return subst_type(t, self.subst) }, None => {} }
         return Type.TInt(32, true)
     }
 
     // -- type layout ------------------------------------------------------
 
     fun struct_info(self, name: str) -> StructInfo {
-        return match get(self.struct_ix, name) {
+        return match self.struct_ix.get(name) {
             Some(i) => self.structs[i]
             None => self.structs[0]
         }
     }
 
     fun enum_info(self, name: str) -> EnumInfo {
-        return match get(self.enum_ix, name) {
+        return match self.enum_ix.get(name) {
             Some(i) => self.enums[i]
             None => self.enums[0]
         }
@@ -2059,9 +2059,9 @@ impl CodeGen {
         }
         // a function without `self` of a generic impl, `T.zero()` (D172):
         // the type it is called on gives the impl's type parameters
-        match get(self.static_calls, call_id) {
+        match self.static_calls.get(call_id) {
             Some(st) => {
-                match get(self.static_selfs, sig.name) {
+                match self.static_selfs.get(sig.name) {
                     Some(pat) => { for b in unify_into(pat, subst_type(st, self.subst)) { sub.push(b) } },
                     None => {},
                 }
@@ -2217,6 +2217,12 @@ impl CodeGen {
         // 1 once a stack overflow is being reported (`__on_segv`)
         out.push("__segv_once:")
         out.push("\t.skip 8")
+        // the self-pipe of caught signals (std.platform's `signal_listen`,
+        // MYLA-350): its write end, which `__on_signal` writes to, its read
+        // end plus one, how many listen, a lock, SIGINT's and SIGTERM's
+        // handlers from before
+        out.push("__sig_pipe:")
+        out.push("\t.skip 48")
         // a runtime error's line and column as digits (std.rt's
         // `write_err_num`)
         out.push("__panic_buf:")

@@ -183,7 +183,7 @@ fun globals_of(path: str, symbols: [Symbol]) -> [str: Global] {
         let s = symbols[i]
         if s.parent == -1 && !kind_is_impl(s.kind) && !out.contains(s.name) {
             var ms: [Def] = []
-            match get(members, i) { Some(x) => { ms = x }, None => {} }
+            match members.get(i) { Some(x) => { ms = x }, None => {} }
             out[s.name] = Global { def: sym_def(path, s), members: ms }
         }
         i = i + 1
@@ -292,7 +292,7 @@ impl Resolver {
                     Some(list) => {
                         let exported = globals_of(file, symbols)
                         for it in list {
-                            match get(exported, it.name) {
+                            match exported.get(it.name) {
                                 Some(g) => {
                                     var shown = it.name
                                     match it.alias { Some(a) => { shown = a }, None => {} }
@@ -393,7 +393,7 @@ impl Resolver {
             }
             i = i - 1
         }
-        return match get(self.globals, name) {
+        return match self.globals.get(name) {
             Some(g) => Some(g.def),
             None => None,
         }
@@ -403,12 +403,6 @@ impl Resolver {
         match self.lookup(name) {
             Some(d) => { self.use_at(line, col, name, d) },
             None => {
-                // the prelude's function, declared in no file: a global with
-                // its signature to show and nowhere to go (MYLA-372)
-                if name == "get" {
-                    self.use_at(line, col, name, Def { name: name, path: "<prelude>", range: Range { start: Pos { line: 0, character: 0 }, end: Pos { line: 0, character: 0 } }, kind: DefKind.Global(SymKind.Function), detail: "fun get<K: Eq + Hash, V>(m: [K: V], k: K) -> Option<V>", ty: "" })
-                    return
-                }
                 if self.modules.contains(name) {
                     let file = self.modules[name]
                     self.use_at(line, col, name, Def { name: name, path: file, range: Range { start: Pos { line: 0, character: 0 }, end: Pos { line: 0, character: 0 } }, kind: DefKind.Module, detail: "", ty: "" })
@@ -419,7 +413,7 @@ impl Resolver {
 
     // The member `name` of the global `owner` (a field, variant or method).
     fun member_of(self, owner: str, name: str) -> Option<Def> {
-        match get(self.globals, owner) {
+        match self.globals.get(owner) {
             Some(g) => {
                 for m in g.members {
                     if m.name == name { return Some(m) }
@@ -580,7 +574,7 @@ impl Resolver {
     fun module_type(var self, line: int32, col: int32, parts: [str]) {
         self.use_name(line, col, parts[0])
         let last = parts[parts.len() - 1]
-        match get(self.modules, parts[parts.len() - 2]) {
+        match self.modules.get(parts[parts.len() - 2]) {
             Some(file) => {
                 match self.module_member(file, last) {
                     Some(d) => {
@@ -823,7 +817,7 @@ impl Resolver {
                             DefKind.TypeParam => {
                                 named = true
                                 for b in split_bounds(od.detail) {
-                                    match get(self.globals, b) {
+                                    match self.globals.get(b) {
                                         Some(g) => { for m in g.members { members.push(m) } },
                                         None => {},
                                     }
@@ -938,7 +932,7 @@ impl Resolver {
         var out = t
         var n = 0
         while n < 8 {
-            match get(self.globals, base_of(out)) {
+            match self.globals.get(base_of(out)) {
                 Some(g) => {
                     match g.def.kind {
                         DefKind.Global(SymKind.TypeAlias) => { out = g.def.detail },
@@ -956,7 +950,7 @@ impl Resolver {
     // variants, and the methods of its impls (static ones among them).
     fun members_named(self, name: str) -> [Def] {
         var out: [Def] = []
-        match get(self.globals, name) {
+        match self.globals.get(name) {
             Some(g) => {
                 match g.def.kind {
                     DefKind.Global(SymKind.Enum) => { for m in g.members { out.push(m) } },
@@ -965,7 +959,7 @@ impl Resolver {
             },
             None => {},
         }
-        match get(self.methods, method_key(name)) {
+        match self.methods.get(method_key(name)) {
             Some(ms) => { for m in ms { out.push(m) } },
             None => {},
         }
@@ -982,13 +976,13 @@ impl Resolver {
         let b = base_of(t)
         let key = method_key(t)
         if b == "" {                                  // a list, map, tuple or function: its kind's methods
-            match get(self.methods, key) {
+            match self.methods.get(key) {
                 Some(ms) => { for m in ms { out.push(m) } },
                 None => {},
             }
             return Some(out)
         }
-        match get(self.globals, b) {
+        match self.globals.get(b) {
             Some(g) => {
                 match g.def.kind {
                     DefKind.Global(SymKind.Struct) => {
@@ -1007,7 +1001,7 @@ impl Resolver {
                 if !is_builtin_type(b) && !self.methods.contains(key) { return None }
             },
         }
-        match get(self.methods, key) {
+        match self.methods.get(key) {
             Some(ms) => { for m in ms { out.push(m) } },
             None => {},
         }
@@ -1201,7 +1195,7 @@ impl Resolver {
             Some(t) => t,
             None => { return [] },
         }
-        match get(self.known, file) {
+        match self.known.get(file) {
             Some(o) => {
                 if o.text == text { return o.symbols }
             },

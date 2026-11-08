@@ -23,6 +23,8 @@ SUITES = [
     "tests.burn.test_process",
     "tests.burn.test_platform_primitives",
     "tests.burn.test_net",
+    "tests.burn.test_term",
+    "tests.burn.test_http",
     "tests.burn.test_unit_type",
     "tests.burn.test_defer",
     "tests.burn.test_format_specs",
@@ -69,6 +71,10 @@ SKIP: dict[str, dict[str, str]] = {
         # `Unsupported`; the addresses, the hosts file and the warnings run
         **{f"test_net.{c}": "WASI has no sockets (NetOnWasm checks they are Unsupported)"
            for c in ["Tcp", "Udp", "Dns", "Errors", "Primitives"]},
+        # MYLA-350: WASI preview 1 has no terminal modes and no signals, which
+        # TermOnWasm checks are `Unsupported` (nothing a terminal, no size)
+        **{f"test_term.{c}": "WASI has no terminals or signals (TermOnWasm checks they are Unsupported)"
+           for c in ["Terminal", "Signals", "Primitives"]},
     },
 }
 

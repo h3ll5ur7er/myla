@@ -2732,7 +2732,7 @@ impl Lower {
             return self.read_var(slot)
         }
         // a str const is its folded value, a static string (MYLA-84)
-        match get(cg.const_strs, n) {
+        match cg.const_strs.get(n) {
             Some(text) => {
                 let d = self.temp(Type.TStr)
                 self.add(Inst.Str(d, text))
@@ -3228,7 +3228,7 @@ impl Lower {
             ExprKind.GetField(recv, field) => {
                 // `T.zero()`, `int.zero()`: the function of the type this
                 // instance calls it on (D172)
-                match get(cg.static_calls, e.id) {
+                match cg.static_calls.get(e.id) {
                     Some(st) => {
                         let fname = format("{}.{}", cg.type_key(subst_type(st, cg.subst)), field)
                         if !cg.has_func(fname) { return self.unsupported("a call of a type's function it has no impl of") }

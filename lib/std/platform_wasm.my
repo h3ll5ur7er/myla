@@ -729,6 +729,44 @@ pub fun net_config(which: int64) -> str {
     return ""
 }
 
+// --- the terminal and signals (MYLA-350): none -----------------------------------------
+// WASI preview 1 can't tell a terminal from a file, has no terminal modes
+// and no signals: nothing is a terminal, its size is unknown, and raw mode,
+// escape sequences turned on and signals fail with ENOSYS, which std.term
+// and std.signal report as `Unsupported`.
+
+pub fun term_is_tty(fd: int64) -> int64 {
+    return 0
+}
+
+pub fun term_size(fd: int64) -> int64 {
+    return ENOSYS
+}
+
+pub fun term_get_mode(fd: int64, buf: int64) -> int64 {
+    return ENOSYS
+}
+
+pub fun term_set_mode(fd: int64, mode: str) -> int64 {
+    return ENOSYS
+}
+
+pub fun term_make_raw(fd: int64) -> int64 {
+    return ENOSYS
+}
+
+pub fun term_enable_vt(fd: int64) -> int64 {
+    return ENOSYS
+}
+
+pub fun signal_listen(on: int64) -> int64 {
+    return ENOSYS
+}
+
+pub fun signal_take(h: int64) -> int64 {
+    return ENOSYS
+}
+
 // --- memory --------------------------------------------------------------------
 
 // `n` bytes of fresh, zeroed memory: the pages the linear memory grew by.

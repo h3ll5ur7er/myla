@@ -10,10 +10,14 @@
 // value is shown as Myla source would write it. An input continues while it
 // has an open bracket. Errors are reported against the input's own lines and
 // leave the session as it was. The prompts go to stderr, values and the
-// program's output to stdout.
+// program's output to stdout. On a terminal each line is edited with
+// std.term's `Editor` (moves, deletes, history, Ctrl-C to drop the input,
+// MYLA-350); from a pipe or a file, lines are read as they are.
 
 from std.io import stdin, write, eprint, eprintln
 from std.num import format_float
+import std.term as term
+from std.term import Stream, TermError
 from .lexer import lex
 from .tokens import Token, TokenKind
 from .ast import Decl, DeclKind, Stmt, StmtKind, ElseTail
@@ -43,6 +47,7 @@ struct Text { source: str, start: int32 }
 // inputs may import the `packages` (name, directory).
 pub fun repl(stdlib: str, packages: [(str, str)]) -> int32 {
     var s = Session { stdlib: stdlib, packages: packages, decls: "", levels: [], names: [], vals: [] }
+    if term.is_tty(Stream.Stdin) && term.is_tty(Stream.Stderr) { return s.on_terminal() }
     var input = stdin()
     while true {
         eprint("myla> ")
@@ -76,6 +81,51 @@ pub fun repl(stdlib: str, packages: [(str, str)]) -> int32 {
 }
 
 impl Session {
+    // The session on a terminal (MYLA-350): each line read with `std.term`'s
+    // editor (moves, deletes, history; the terminal raw only while a line is
+    // typed), the prompts drawn on stderr. Ctrl-C drops the input typed so
+    // far, Ctrl-D on an empty line ends the session.
+    fun on_terminal(var self) -> int32 {
+        var ed = term.editor(Stream.Stderr)
+        while true {
+            var text = ""
+            var more = true
+            var prompt = "myla> "
+            var dropped = false
+            while more {
+                match ed.read_line(prompt) {
+                    Ok(Some(line)) => {
+                        ed.add_history(line)
+                        if text != "" { text = text + "\n" }
+                        text = text + line
+                        more = open_brackets(text)
+                    },
+                    Ok(None) => {
+                        if text == "" {
+                            eprintln("")
+                            return 0
+                        }
+                        more = false
+                    },
+                    Err(TermError.Interrupted) => {
+                        dropped = true
+                        more = false
+                    },
+                    Err(e) => {
+                        eprintln(format("myla: the terminal: {}", e))
+                        return 1
+                    },
+                }
+                prompt = "...   "
+            }
+            if !dropped && !is_blank(text) {
+                let code = self.enter(text)
+                if code >= 0 { return code }
+            }
+        }
+        return 0
+    }
+
     // Check and run one input; the exit status when it ends the session,
     // else -1.
     #test(Session { stdlib: "/work/myla/lib", packages: [], decls: "", levels: [], names: [], vals: [] }, "let xs = [1]")[-1]

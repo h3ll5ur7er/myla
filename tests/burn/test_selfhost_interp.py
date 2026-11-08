@@ -2,7 +2,7 @@
 
 `selfhost/interp.my` is the Myla-written tree-walking interpreter;
 `selfhost/interp_main.my` loads a program, type-checks it (with the same
-`Option`/`Result`/`get` prelude the Python `run` injects), then interprets it — producing the same stdout and exit status
+`Option`/`Result` prelude the Python `run` injects), then interprets it — producing the same stdout and exit status
 as `myla run` (the Python interpreter). This test asserts that, for every
 runnable example in the corpus, the self-hosted interpreter's (stdout, exit
 code) is identical to the Python oracle's. That is the v0.8 interpreter-parity

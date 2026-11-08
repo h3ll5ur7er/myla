@@ -217,7 +217,7 @@ impl CodeGen {
         for name in self.wasm_calls.keys() {
             let to = wasm_resolve(alias, name)
             let n = self.wasm_calls[name]
-            match get(self.wasm_arity, to) {
+            match self.wasm_arity.get(to) {
                 Some(m) => { if n != m { panic(format("internal error: wasm: {} ({}) takes {} words, called with {}", name, to, m, n)) } },
                 None => { panic(format("internal error: wasm: {} ({}) is called but not defined", name, to)) },
             }

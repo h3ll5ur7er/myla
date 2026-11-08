@@ -14,13 +14,12 @@ These names are reserved: no declaration may reuse them. The ones on a receiver 
 | `x.len()` | list, map, `str` or `StringBuilder` → `int` | A method; strings and builders: bytes |
 | `xs.push(v)`, `xs.pop()` | list | Methods; need a `var` place |
 | `m.contains(k)`, `m.keys()`, `m.remove(k)` | map | Methods; `remove` needs a `var` place |
-| `get(m, k)` | map → `Option<V>` | The one entry here that is a prelude function, not a built-in: an ordinary generic function every program sees (a declaration of another `get` is a duplicate), so its errors read like any call's |
 | `s.chars()` | `str` → `[char]` | A method |
 | `format(fmt, args…)` | → `str` | `fmt` is a literal; see [[Language/Collections-and-strings]] |
 | `StringBuilder()`, `sb.append(s)`, `sb.append(s, start, end)`, `sb.append_byte(b)`, `sb.build()` | | Methods but `StringBuilder()`; `append(s, start, end)` adds the bytes `s[start..end]` ([[Language/Collections-and-strings]]) |
 | `assert(cond[, msg])`, `panic(msg)`, `unreachable()` | | See [[Language/Attributes-and-testing]] |
 
-The low-level primitives `__write`, `__read`, `__poll`, `__exit`, `__args`, `__read_file`, `__write_file`, `__list_dir`, `__mkdir`, `__stat`, `__getcwd`, `__getenv`, `__sqrt`, `__f64_bits`, `__f64_from_bits`, `__unlink`, `__rmdir`, `__rename`, `__io_errno`, `__run`, `__run_stderr`, `__run_exit_code`, `__run_signal`, `__run_errno` and `__task_cancelled`, and the primitives behind `std.time`, `std.task`'s timers, `std.process`'s child processes and `std.net`'s sockets (`__clock_ns`, `__sleep`, `__spawn`, `__sock_open`, …) exist for the standard library; call the `std` functions instead. A call of one from a program outside the standard library compiles, with the warning `primitive` (D100, [[MYLA-186]]): it is for code that knows what it does, such as a new std function in the making, which says so with `#allow(primitive)` or `#allow(primitive(__poll))` (D161, [[Language/Attributes-and-testing#warnings-and-allow]]).
+The low-level primitives `__write`, `__read`, `__poll`, `__exit`, `__args`, `__read_file`, `__write_file`, `__list_dir`, `__mkdir`, `__stat`, `__getcwd`, `__getenv`, `__sqrt`, `__f64_bits`, `__f64_from_bits`, `__unlink`, `__rmdir`, `__rename`, `__io_errno`, `__run`, `__run_stderr`, `__run_exit_code`, `__run_signal`, `__run_errno` and `__task_cancelled`, and the primitives behind `std.time`, `std.task`'s timers, `std.process`'s child processes, `std.net`'s sockets, `std.term`'s terminal and `std.signal`'s signals (`__clock_ns`, `__sleep`, `__spawn`, `__sock_open`, `__term_raw`, `__signal_listen`, …) exist for the standard library; call the `std` functions instead. A call of one from a program outside the standard library compiles, with the warning `primitive` (D100, [[MYLA-186]]): it is for code that knows what it does, such as a new std function in the making, which says so with `#allow(primitive)` or `#allow(primitive(__poll))` (D161, [[Language/Attributes-and-testing#warnings-and-allow]]).
 
 ## Modules
 
@@ -36,6 +35,9 @@ The conventions (D164): operations on built-in types are methods (`s.split(",")`
 | `std.glob` | [[Language/Standard-library/Glob]] | Glob patterns (`*`, `?`, `**`, sets), directory walks, `glob` |
 | `std.process` | [[Language/Standard-library/Process]] | Arguments, the environment, exit, running programs (`run`, `command`), children streamed through pipes (`spawn`, `Child`, `pipe`) |
 | `std.net` | [[Language/Standard-library/Net]] | TCP and UDP sockets (`listen`, `connect`, `TcpStream` a `Read` and `Write`, `udp_bind`), their async forms on the reactor, `IpAddr` and `SocketAddr` parsed and printed, name lookup through the hosts file and DNS |
+| `std.http` | [[Language/Standard-library/Http]] | An HTTP/1.1 client (`fetch`, `post`, `send(request(…))`, a keep-alive `Client`, redirects, gzip bodies) and server (`serve`, `serve_with`, a task a connection), sync and async; requests, responses, headers and chunked bodies parsed and written |
+| `std.term` | [[Language/Standard-library/Term]] | The terminal: `is_tty`, `size`, raw mode (`raw_mode`, `restore`), styles and colours (`style().fg(c).bold().paint(s)`), cursor sequences, `strip` and `width`, keys (`parse_key`, `key_reader`), a line editor (`LineEdit`, `Editor`) |
+| `std.signal` | [[Language/Standard-library/Signal]] | SIGINT and SIGTERM as events a task awaits: `listen()`, `Signals.next()`, `interrupted()` |
 | `std.char` | [[Language/Standard-library/Char]] | Character classes, case and digits, as methods on `char` (ASCII) |
 | `std.int` | [[Language/Standard-library/Int]] | Methods on every integer type: `gcd`, `pow`, Euclidean division, checked, wrapping, saturating and overflowing arithmetic, `mulmod`, `powmod`, `modinv` |
 | `std.num` | [[Language/Standard-library/Num]] | Exact parsing and printing of integers and floats; integers in any radix and width, with `ParseIntError` |
@@ -48,7 +50,7 @@ The conventions (D164): operations on built-in types are methods (`s.split(",")`
 | `std.iter` | [[Language/Standard-library/Iter]] | Lazy adapters and consumers over `Iterator<T>`, chained with `\|>`: `range`, `repeat`, `from_fn`; `map`, `filter`, `take`, `skip`, `zip`, `chain`, `flat_map`, …; `to_list`, `count`, `sum`, `fold`, `find`, `min`, `max`, … |
 | `std.slice` | [[Language/Standard-library/Slice]] | The index arithmetic of slices |
 | `std.option` | [[Language/Standard-library/Option]] | Methods on `Option` and `Result`: `map`, `and_then`, `unwrap_or`, `ok_or`, `map_err`, `expect`, … |
-| `std.map` | [[Language/Standard-library/Map]] | Methods on maps (`get_or`, `update`, `values`, `items`, `merge`) and `counts` |
+| `std.map` | [[Language/Standard-library/Map]] | Methods on maps (`get`, `get_or`, `update`, `values`, `items`, `merge`) and `counts` |
 | `std.task` | [[Language/Standard-library/Task]] | Child tasks in numbers known at run time, cancellation |
 | `std.time` | [[Language/Standard-library/Time]] | The monotonic and wall clocks, `Duration`, `Instant`, `DateTime` in UTC, RFC 3339 and ISO 8601 |
 | `std.log` | [[Language/Standard-library/Log]] | `error`, `warn`, `info`, `debug` to the standard error with a time, the level from `MYLA_LOG` |

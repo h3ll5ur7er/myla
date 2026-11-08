@@ -343,6 +343,21 @@ class ScopeScenarios(LspRequestHelpers):
         self.assertEqual(self.hover(uri, 11, 52), "v: int")
         self.assertEqual(self.refs(uri, 0, 13), [(uri, 0, 13, 16), (uri, 8, 18, 21), (uri, 11, 14, 17)])
 
+    def test_a_file_s_own_get(self):
+        # the prelude's free `get(m, k)` went for `m.get(k)` (MYLA-393): a
+        # file may declare a `get`, and a call of it is its own
+        uri = self.open("fun get(url: str) -> str {\n"                  # 0
+                        "    return url\n"
+                        "}\n"
+                        "fun main() {\n"                                # 3
+                        "    let m = [\"k\": \"v\"]\n"
+                        "    print(get(\"x\"))\n"                       # 5
+                        "    print(m.get(\"k\").unwrap_or(\"\"))\n"
+                        "}\n", name="own_get.my")
+        self.assertEqual(self.defn(uri, 5, 11), {"uri": uri, "range": rng(0, 4, 7)})
+        self.assertEqual(self.hover(uri, 5, 11), "fun get(url: str) -> str")
+        self.assertEqual(self.refs(uri, 0, 4), [(uri, 0, 4, 7), (uri, 5, 10, 13)])
+
     def test_names_in_a_method_s_test_cases(self):
         # a method's `#test` cases (D116) resolve in the module's scope
         uri = self.open("const BASE: int = 2\n"

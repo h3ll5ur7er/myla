@@ -10,6 +10,8 @@
 // `parse_doc` also keeps where each key and its value are, so a program that
 // checks the document (the project tool, MYLA-93) can point at them.
 
+import std.map as map_m // `m.get(k)`
+
 // A TOML value. A table keeps its keys in the order they were defined (a
 // table that a header like `[a.b]` creates on the way counts from there).
 pub enum Toml {
@@ -78,7 +80,7 @@ pub fun parse_doc(text: str) -> Result<TomlDoc, TomlError> {
 // inside an inline table), or the header that opened the table (the first
 // header on the way to it, if none opened it). None if nothing defined it.
 pub fun key_pos(d: TomlDoc, path: [str]) -> Option<TomlPos> {
-    return match get(d.spans, path_key(path)) {
+    return match d.spans.get(path_key(path)) {
         Some(sp) => Some(pos_of(d.text, sp.0, sp.1))
         None => None
     }
@@ -87,7 +89,7 @@ pub fun key_pos(d: TomlDoc, path: [str]) -> Option<TomlPos> {
 // Where the value of the key path `path` is (for a table opened by a header,
 // the header).
 pub fun value_pos(d: TomlDoc, path: [str]) -> Option<TomlPos> {
-    return match get(d.spans, path_key(path)) {
+    return match d.spans.get(path_key(path)) {
         Some(sp) => Some(pos_of(d.text, sp.2, sp.3))
         None => None
     }
@@ -377,7 +379,7 @@ impl Parser {
             prefix = with_key(prefix, path[k])
             let last = k == path.len() - 1
             let pk = path_key(prefix)
-            match get(self.kinds, pk) {
+            match self.kinds.get(pk) {
                 Some(kind) => {
                     if kind == CLOSED { return Err(self.error(format("'{}' is not a table that can be extended", dotted(prefix)), at)) }
                     if last {

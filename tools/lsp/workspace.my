@@ -162,7 +162,7 @@ impl Workspace {
     // The text of `path`: its open document's, else the file's ("" when it
     // can't be read).
     fun text_of(self, path: str, overrides: [str: str]) -> str {
-        return match get(overrides, path) {
+        return match overrides.get(path) {
             Some(t) => t,
             None => match read_to_string(path) {
                 Ok(t) => t,
@@ -174,7 +174,7 @@ impl Workspace {
     // The cache entry for `path`, made again when its text changed.
     fun cached(var self, path: str, overrides: [str: str]) -> Cached {
         let text = self.text_of(path, overrides)
-        match get(self.cache, path) {
+        match self.cache.get(path) {
             Some(c) => {
                 if c.text == text { return c }
             },
@@ -219,7 +219,7 @@ impl Workspace {
         var out: [Location] = []
         for path in self.files(extra) {
             let c = self.cached(path, overrides)
-            match get(c.idents, name) {
+            match c.idents.get(name) {
                 Some(ranges) => {
                     for r in ranges {
                         if !c.locals.contains(start_key(r)) { out.push(Location { path: path, range: r }) }

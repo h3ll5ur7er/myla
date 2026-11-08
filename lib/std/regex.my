@@ -14,6 +14,8 @@
 // tests. Strings are bytes (D164): a class matches one byte, `.` matches one
 // byte, case folding is ASCII, and positions are byte offsets.
 
+import std.map as map_m // `m.get(k)`
+
 // --- Errors -------------------------------------------------------------------
 
 // What is wrong with a pattern.
@@ -1599,7 +1601,7 @@ impl Dfa {
             sb.append_byte(((pc >> 16) & 255) as uint8)
         }
         let key = sb.build()
-        match get(self.keys, key) {
+        match self.keys.get(key) {
             Some(i) => {
                 return i
             }
