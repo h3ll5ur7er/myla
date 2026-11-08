@@ -1,0 +1,5 @@
+type error: `for ... in` requires a list, a map, a string, a range or an Iterator, found 'I' (it needs the bound 'I: Iterator<T>')
+  --> examples/errors/type_for_over_unbounded_type_parameter.my:5:14
+  |
+5 |     for x in it { n += 1 }
+  |              ^^

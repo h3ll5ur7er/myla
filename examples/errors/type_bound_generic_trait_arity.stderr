@@ -1,0 +1,5 @@
+type error: trait 'Iterator' expects 1 type argument(s) in the bound 'I: Iterator', got 0 (write 'I: Iterator<T>')
+  --> examples/errors/type_bound_generic_trait_arity.my:4:1
+  |
+4 | fun count<I: Iterator>(it: I) -> int {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

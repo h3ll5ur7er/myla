@@ -955,8 +955,8 @@ fun mk_expr_at(e: Expr, pos: Expr, k: ExprKind) -> Expr {
 }
 
 #test([])[[]]
-#test([TypeParam { line: 4, col: 8, sp: SrcSpan { sline: 4, scol: 8, eline: 4, ecol: 9 }, name: "T", bounds: [] }])[["T"]]
-#test([TypeParam { line: 8, col: 6, sp: SrcSpan { sline: 8, scol: 6, eline: 8, ecol: 7 }, name: "T", bounds: [] }])[["T"]]
+#test([TypeParam { line: 4, col: 8, sp: SrcSpan { sline: 4, scol: 8, eline: 4, ecol: 9 }, name: "T", bounds: [], bound_args: [] }])[["T"]]
+#test([TypeParam { line: 8, col: 6, sp: SrcSpan { sline: 8, scol: 6, eline: 8, ecol: 7 }, name: "T", bounds: [], bound_args: [] }])[["T"]]
 fun tp_names(tps: [TypeParam]) -> [str] {
     var out: [str] = []
     for tp in tps { out.push(tp.name) }
@@ -1068,12 +1068,15 @@ impl Renamer {
     #test(Renamer { env: ["main": "main"], aliases: [:], exports: ["": [:]], vals: [], tys: ["Self"], path: "examples/hello.my", err: None, kinds: [:] }, [])[[]]
     #test(Renamer { env: ["main": "main"], aliases: [:], exports: ["": [:]], vals: [], tys: ["Self"], path: "examples/loops.my", err: None, kinds: [:] }, [])[[]]
     #test(Renamer { env: ["main": "main"], aliases: [:], exports: ["": [:]], vals: [], tys: ["Self"], path: "examples/variables.my", err: None, kinds: [:] }, [])[[]]
-    fun bounds(self, tps: [TypeParam]) -> [TypeParam] {
+    fun bounds(var self, tps: [TypeParam]) -> [TypeParam] {
         var out: [TypeParam] = []
         for tp in tps {
             var bs: [str] = []
             for b in tp.bounds { bs.push(self.type_name(b)) }
-            out.push(TypeParam { line: tp.line, col: tp.col, sp: tp.sp, name: tp.name, bounds: bs })
+            // a generic trait's arguments are types (D171)
+            var bargs: [[TypeExpr]] = []
+            for a in tp.bound_args { bargs.push(self.ty_list(a)) }
+            out.push(TypeParam { line: tp.line, col: tp.col, sp: tp.sp, name: tp.name, bounds: bs, bound_args: bargs })
         }
         return out
     }

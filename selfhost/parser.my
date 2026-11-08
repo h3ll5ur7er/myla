@@ -697,13 +697,17 @@ impl Parser {
         while true {
             let tok = self.expect(TokenKind.IDENT, "type parameter name")
             var bounds: [str] = []
+            var bound_args: [[TypeExpr]] = []
             if self.match1(TokenKind.COLON) {
                 bounds.push(self.expect(TokenKind.IDENT, "trait name in type-parameter bound").lexeme)
+                // a generic trait's arguments, `I: Iterator<T>` (D171)
+                bound_args.push(self.type_args())
                 while self.match1(TokenKind.PLUS) {
                     bounds.push(self.expect(TokenKind.IDENT, "trait name after '+'").lexeme)
+                    bound_args.push(self.type_args())
                 }
             }
-            params.push(TypeParam { line: tok.line, col: tok.column, sp: self.span_from(tok.line, tok.column), name: tok.lexeme, bounds: bounds })
+            params.push(TypeParam { line: tok.line, col: tok.column, sp: self.span_from(tok.line, tok.column), name: tok.lexeme, bounds: bounds, bound_args: bound_args })
             if !self.match1(TokenKind.COMMA) || self.check(TokenKind.GT) {
                 break
             }

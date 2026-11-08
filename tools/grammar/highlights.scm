@@ -22,6 +22,7 @@
 (named_type (identifier) @type)
 (type_params (identifier) @type)
 (generic (identifier) @type)
+(trait_bound (identifier) @type)
 (struct_decl (identifier) @type)
 (enum_decl (identifier) @type)
 (trait_decl (identifier) @type)

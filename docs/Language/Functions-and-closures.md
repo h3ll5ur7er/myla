@@ -52,7 +52,7 @@ fun main() {
 - **Defaults belong to the declaration,** not to the function's type: a function value of `connect` is a `(str, int, int) -> str` and takes every argument, and a partial application lists every position (`connect(_, 8080, 3)`).
 - **Errors:** a parameter without a default after one with a default; a default of another type; one that names another parameter, `self` included (a method's default can't read its receiver: it is evaluated by the caller, before the call); a default on a parameter whose type mentions a type parameter, which the caller couldn't evaluate; defaults on a trait's methods, as a call through a bound can't know an implementation's. Too few or too many arguments say how many the function takes (`expects 1 to 3 argument(s)`).
 - **`#test`** cases give every argument.
-- **Implementation:** once the program is checked, every call that leaves arguments out gets its defaults (the checker's `fill_defaults`), so the interpreter and every backend see each call whole; `become`'s word rule counts them (D131).
+- **Implementation:** once the program is checked, every call that leaves arguments out gets its defaults (the checker's `fill_in`), so the interpreter and every backend see each call whole; `become`'s word rule counts them (D131).
 
 ## Function values
 

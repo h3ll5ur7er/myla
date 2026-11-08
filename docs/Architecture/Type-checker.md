@@ -10,7 +10,7 @@
 
 ## Passes
 
-The loader adds the prelude (`Option`, `Result`, `get`) and `build_checker_decls` makes the checker, whose `run_all` runs the passes:
+The loader adds the prelude (`Option`, `Result`, `get`, `Format`, `Hasher` and `Hash`, `Iterator`) and `build_checker_decls` makes the checker, whose `run_all` runs the passes:
 
 ```mermaid
 flowchart TD
@@ -75,7 +75,7 @@ A suggestion is the candidate closest to the name in edits (inserting, deleting,
 Inference is local and bidirectional: `infer` takes an expression and an expected type, returns the expression's type and records it in `resolved`, keyed by the node's id. The `expected` type is a hint, not a constraint; the caller compares the result.
 
 - **Flexible literals.** An unsuffixed integer literal takes the expected integer type; `unify` lets a literal operand adopt the other operand's type. ASCII char literals may become integers the same way.
-- **Generic calls** solve type parameters left to right with `unify_param`, using each solved parameter type as the hint for the next argument (`arg_hint`), then take those the arguments leave open from the call's expected type, its declared result unified with it (`expected_subst`, [[MYLA-315]]), and verify every argument against the substituted parameter types (`infer_generic_call`, `infer_generic_method`). Struct literals and enum constructors do the same with `infer_type_args`, seeded by the expected type. A parameter's type counts as known when the substitution solves every type parameter it names (`solved_in`), not when the substituted type has none left: in generic code it maps them to the enclosing function's, which are known types there. The native backend finds a call's instance the same way, from its arguments' types and then its own (`solve_targs`).
+- **Generic calls** solve type parameters left to right with `unify_param`, using each solved parameter type as the hint for the next argument (`arg_hint`), then take those the arguments leave open from the call's expected type, its declared result unified with it (`expected_subst`, [[MYLA-315]]), and verify every argument against the substituted parameter types (`infer_generic_call`, `infer_generic_method`). Struct literals and enum constructors do the same with `infer_type_args`, seeded by the expected type. A parameter's type counts as known when the substitution solves every type parameter it names (`solved_in`), not when the substituted type has none left: in generic code it maps them to the enclosing function's, which are known types there. The native backend finds a call's instance the same way, from its arguments' types and then its own (`solve_targs`). After each argument the bounds naming a generic trait with its arguments fix what they can (`solve_bounds`, D171): `I: Iterator<T>` with `I` known gives `T` by `I`'s one impl, whose arguments `impl_args` keeps by `trait\tkey` (`trait_args_of`, `impl_trait_args`); `check_call_bounds` then holds the argument to those arguments, and `solve_targs` solves an instance's the same way.
 - **Lambdas** take parameter types from annotations or from an expected `TFunc`. Without an expected type, a block body's result type is collected from its `return`s (`lambda_infer`).
 - **Captures**: while a lambda body is checked, every name that resolves to a scope outside the lambda's parameter scope is added to each enclosing lambda's capture list (the Python checker's `_record_capture`). Each lambda also gets a unique lifted name for the native backend.
 - **match** checks each arm in its own scope, then exhaustiveness and redundancy, then unifies the non-diverging arm values. Exhaustiveness and redundancy use Maranget's usefulness over pattern matrices: patterns are normalized to constructors (enum variants, `true`/`false`, the single constructor of a tuple or struct, literals) and wildcards, a match is exhaustive when a wildcard row isn't useful against the unguarded arms, and an arm is redundant when it isn't useful against the unguarded arms before it (`useful`, [[MYLA-14]]).
@@ -92,6 +92,7 @@ The checker checks these forms and records what they mean (their types in `resol
 | `a + b` on a struct/enum | `a.add(b)`; `==` → `a.eq(b)`, `!=` → `!a.eq(b)`, `<` → `a.cmp(b) < 0` | `infer_operator_overload` |
 | `#derive(Eq)` | an `impl Eq` (field-wise `&&`, or a `match` on `(self, other)`), registered as a structural impl | `synthesize_derives` |
 | `recv.m(x)` | a call of the method `Type.m` | `infer_method_call` |
+| `for x in e`, `e` an iterator (D171) | `if true { var %iter<id> = e; while true { match %iter<id>.next() { Some(x) => { body }, None => { break } } } }`, built with new node ids and checked in place of the `for`; unlike the forms above, `fill_in` puts it in the program where the `for` was, after the check, so the interpreter, the lowering and every backend run that loop | `check_for_iterator` |
 
 Operators on a bounded type parameter (`T: Add`) are resolved once `T` is concrete: by the interpreter at run time, by the code generator under its substitution ([[Architecture/Monomorphization]]).
 

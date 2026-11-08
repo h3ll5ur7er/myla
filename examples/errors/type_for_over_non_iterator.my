@@ -1,0 +1,22 @@
+//~ type error: `for ... in` requires a list, a map, a string, a range or an Iterator, found 'Countdown' (it needs 'impl Iterator<T> for Countdown')
+//~ span: c
+// `for` loops over a type that implements the prelude's `Iterator<T>`
+// (D171); a `next` method of its own isn't enough.
+struct Countdown {
+    n: int,
+}
+
+impl Countdown {
+    fun next(var self) -> Option<int> {
+        if self.n == 0 { return None }
+        self.n -= 1
+        return Some(self.n)
+    }
+}
+
+fun main() {
+    let c = Countdown { n: 3 }
+    for x in c {
+        print(x)
+    }
+}
