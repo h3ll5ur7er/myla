@@ -35,7 +35,7 @@ A **notifier** (`std.task.notifier()`, [[Language/Concurrency#Waiting until woke
   - five `#test` functions and `limit`'s three cases in `std.task`, interpreted, `--native` and `--target aarch64-linux`;
   - a program printing the wake order matched the interpreter on one worker in the default, fifo, seed:1, seed:2 and seed:7 orders;
   - the no-tasks lowering (`park_alone`, `notify_alone`) by a program on the primitives: same output interpreted, natively, on aarch64 and wasm32.
-  - Suites: see the report below.
+  - suites: `scripts/test.sh fast` 689 tests OK (2 skipped); `test_compiler_parity`, `test_concurrency_stress`, `test_selfhost_cases`, `test_time`, `test_task_yield`, `test_std_modules` 227 tests OK; `scripts/test-target.py aarch64-linux test_compiler_parity` and `wasm32-wasi test_compiler_parity` OK; `test_doc_blocks` OK (the new pages' programs run).
 - **Measurements** (x86-64, 4 CPUs, native):
   - ping-pong through two notifiers, 1,000,000 round trips: 4.8 M round trips/s on 1 worker, 0.42–0.43 M on 4 (the woken frame is usually stolen by an idle worker: each hand-off crosses cores; 7 s user over 2.4 s);
   - eight tasks parked 2 s, then `notify_all`: 0.000–0.001 s user+sys on 1 and 4 workers (polling: 50 ms on one, 240 ms on four);
