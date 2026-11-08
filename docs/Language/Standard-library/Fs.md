@@ -1,6 +1,6 @@
 # std.fs
 
-The file system: whole files and directories.
+The file system: whole files, files read and written a piece at a time, metadata, temporary files and directories.
 
 | Function | Result |
 | --- | --- |
@@ -42,6 +42,109 @@ fun main() {
 // output:
 // no src directory
 ```
+
+## Files
+
+A `File` is an open file, read and written at its cursor a piece at a time, so a file bigger than memory goes through in pieces ([[MYLA-339]]). It is a stream of `std.io` ([[Language/Standard-library/Io#streams]]): it implements `Read`, `Write` and `Seek` (and `Pollable`), so `buffered`, `buffered_writer`, `copy` and `read_all` take it. It buffers nothing: each `read` and `write` is a system call, and a `Buffered` or `BufferedWriter` in front of it gathers small pieces.
+
+| Item | Result |
+| --- | --- |
+| `open(path: str) -> Result<File, IoError>` | The file, open for reading |
+| `create(path: str) -> Result<File, IoError>` | The file, open for writing: created (mode 0644 less the umask) or emptied |
+| `open_append(path: str) -> Result<File, IoError>` | The file, open for appending: created when it isn't there, and every write goes to its end, wherever the cursor is |
+| `options() -> OpenOptions` | Options that choose nothing yet, for any other way: `options().read(true).write(true).create(true).open(path)` |
+| `o.read(on)`, `o.write(on)`, `o.append(on)`, `o.truncate(on)`, `o.create(on)`, `o.create_new(on)` | The options with one choice changed: to read; to write at the cursor; to write at the end (it writes, too); to empty the file; to create it when it isn't there; to create it and fail with `AlreadyExists` when it is (one step, so no other program comes in between) |
+| `o.mode(perms: int32) -> OpenOptions` | The permissions of a file it creates (0644 unless chosen; less the umask) |
+| `o.open(path: str) -> Result<File, IoError>` | The file, opened as chosen; neither reading nor writing is `InvalidInput` |
+| `f.read(n)`, `f.read_str(n)` | One read of up to `n` bytes at the cursor, as `[uint8]` or `str`; `[]` or `""` at the end (`Read`) |
+| `f.write(b)`, `f.write_str(s)` | All the bytes at the cursor, their count (`Write`) |
+| `f.flush() -> Result<(), IoError>` | Nothing to do, as nothing is buffered: `Ok(())` (`Write`) |
+| `f.seek(pos: SeekFrom) -> Result<int64, IoError>` | The cursor moved: `SeekFrom.Start(k)`, `Current(k)`, `End(k)`; the new offset. Before the start is `InvalidInput` (`Seek`) |
+| `f.len() -> Result<int64, IoError>` | The file's size in bytes now |
+| `f.metadata() -> Result<Metadata, IoError>` | Its size, kind, permissions and modification time now |
+| `f.close() -> Result<(), IoError>` | Closes it; every later operation on it, a second `close` too, is `Other(9)` (EBADF) |
+| `f.descriptor() -> int32` | The platform's descriptor (`Pollable`) |
+
+A file a function opens is closed by that function: Myla has no destructors, so nothing closes it when it goes out of scope, and an open file stays open until `close` or the end of the program. `defer` right after the open is the idiom:
+
+```myla fragment
+var f = fs.open(path)?
+defer { let closed = f.close() }
+```
+
+A `File` is a value, and a copy of it holds the same descriptor, with the same cursor, as the platform keeps it. So a reader can take a copy while the function keeps the file to close: `var r = buffered(f)` reads through `f`'s descriptor. `close` closes the descriptor for every copy. The file closed fails each later operation with `Other(9)` (EBADF), and so does a copy of it, until a file opened later gets the descriptor's number from the platform: don't use a copy after `close`. A failure is always an `IoError`, never a crash. A write to a file opened only to read is `Other(9)` too.
+
+```myla
+import std.fs as fs
+from std.fs import IoError
+from std.io import SeekFrom, buffered
+
+// A file written, appended to, read back by lines, and its size.
+fun notes() -> Result<(), IoError> {
+    let dir = fs.make_temp_dir()?
+    defer { let gone = fs.remove_dir_all(dir) }
+    let path = dir + "/notes.txt"
+    var f = fs.create(path)?
+    f.write_str("one\ntwo\n")?
+    f.close()?
+    var log = fs.open_append(path)?
+    log.write_str("three\n")?
+    log.close()?
+    var file = fs.open(path)?
+    defer { let closed = file.close() }
+    var lines = buffered(file)
+    while let Some(line) = lines.read_line()? {
+        print(line)
+    }
+    file.seek(SeekFrom.Start(4))?
+    print(file.read_str(3)?)
+    let m = fs.metadata(path)?
+    print(f"{m.size} bytes, a file: {m.is_file()}")
+    return Ok(())
+}
+
+fun main() {
+    match notes() {
+        Ok(()) => {},
+        Err(e) => { print("failed") },
+    }
+}
+// output:
+// one
+// two
+// three
+// two
+// 14 bytes, a file: true
+```
+
+Copying a stream of any size is a loop over a buffer: `copy` from `std.io` reads 4 KiB at a time, and a loop of `read_str(1 << 20)` and `write_str` with 1 MiB copies 4 GB from `/dev/zero` to `/dev/null` in the memory of a program that copies 1 MiB (below).
+
+## Metadata
+
+| Item | Result |
+| --- | --- |
+| `metadata(path: str) -> Result<Metadata, IoError>` | What the path names, symbolic links followed; a missing path is `NotFound` |
+| `struct Metadata { size: int64, kind: FileKind, permissions: int32, modified_ns: int64 }` | The size in bytes, the kind, the permission bits (`mode & 0o7777`), the last modification in nanoseconds since 1970 (`std.time.from_unix_ns(m.modified_ns)` is its `DateTime`) |
+| `m.is_file() -> bool`, `m.is_dir() -> bool` | Whether it is a regular file, a directory |
+| `enum FileKind { File, Dir, CharDevice, BlockDevice, Fifo, Socket, Other }` | The kind, from the mode's type bits |
+
+The platform layer gives the size and the time of an open descriptor only (`__fstat`), so `metadata(path)` opens a file or a directory to read it, and a file the program may not read is `PermissionDenied`. It doesn't open anything else, where opening could wait (a FIFO) or do something (a device): their size and time are 0, their kind and permissions are there. On wasm32 there are no permissions: the mode is made up from the kind (0o644 for a file, 0o755 for a directory, [[Language/Targets]]), and so a device's or a FIFO's kind is `Other`.
+
+## Temporary files and directories
+
+| Function | Result |
+| --- | --- |
+| `temp_root() -> str` | The directory for temporary files: `$TMPDIR` when it is set and not empty, else `/tmp`, without a trailing `/` |
+| `make_temp_dir() -> Result<str, IoError>` | A new, empty directory in `temp_root()`, named `myla-` and 16 random hexadecimal digits, mode 0700: its path |
+| `make_temp_dir_in(dir: str, prefix: str) -> Result<str, IoError>` | The same in `dir`, named `prefix` and the digits |
+| `make_temp_file() -> Result<(str, File), IoError>` | A new, empty file in `temp_root()`, named `myla-` and 16 random hexadecimal digits, mode 0600, open for reading and writing: its path and the file |
+| `make_temp_file_in(dir: str, prefix: str) -> Result<(str, File), IoError>` | The same in `dir` |
+
+The digits come from the system's entropy (`__random_bytes`), and the name is made in one step that fails when it is taken (mkdir, or open with create and exclusive), so no other program can slip in a file or a link of its own; a taken name is tried again with new digits, up to 100 times, then it is `AlreadyExists`. Nothing removes them: the caller does, with `remove_dir_all` or `remove_file`, best in a `defer`. In a test, `std.test`'s `temp_dir()` and `temp_file()` make them in the case's scratch directory, which the runner removes ([[Language/Standard-library/Test]]).
+
+## Measurements
+
+On x86-64 natively, with a loop of `read_str(1 << 20)` and `write_str` through two `File`s, best of three (2026-11-08): 4 GiB (4,096 reads of 1 MiB) from `/dev/zero` to `/dev/null` in 96 ms, at a maximum resident set of 8.6 MB, where 1 MiB takes 8.5 MB and 1 GiB 8.5 MB: the memory doesn't grow with the size. A 256 MiB file of random bytes to a new file (in the page cache) in 139 ms, 1.9 GB/s.
 
 ## Directory primitives
 
