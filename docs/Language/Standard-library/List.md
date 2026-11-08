@@ -76,6 +76,14 @@ A lambda's parameter types can be left out: the receiver's element type gives th
 
 `chunks` and `windows` take a positive size; another is a runtime error.
 
+## An iterator
+
+| Item | Meaning |
+| --- | --- |
+| `iter() -> ListIter<T>` | An iterator over the elements, first to last (D171): the source of a lazy pipeline of [[Language/Standard-library/Iter]], `xs.iter() \|> iter.map(f) \|> iter.sum(0)`. `ListIter<T>` implements `Iterator<T>`; it holds the list, which costs nothing unless one of them changes, and the next index |
+
+The methods above stay eager (D171): `xs.map(f)` builds its list at once. Natively a pipeline of `std.iter` is faster and needs no list for each step; interpreted the eager methods are faster ([[Language/Standard-library/Iter#speed]]). A function that returns a list's iterator names its type through the module: `import std.list as list`, then `-> list.ListIter<int>` (D170).
+
 ## Sorting
 
 | Item | Meaning |
