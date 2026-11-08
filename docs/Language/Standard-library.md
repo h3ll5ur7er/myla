@@ -34,7 +34,7 @@ The conventions (D164): operations on built-in types are methods (`s.split(",")`
 | `std.fs` | [[Language/Standard-library/Fs]] | Whole-file reads and writes, `File` streams (`Read`, `Write`, `Seek`), metadata, directories, temporary files and directories, `IoError` |
 | `std.path` | [[Language/Standard-library/Path]] | Paths as strings: `join`, `parent`, `file_name`, extensions, `normalize`, `relative` |
 | `std.glob` | [[Language/Standard-library/Glob]] | Glob patterns (`*`, `?`, `**`, sets), directory walks, `glob` |
-| `std.process` | [[Language/Standard-library/Process]] | Arguments, the environment, exit, running programs (`run`, `command`) |
+| `std.process` | [[Language/Standard-library/Process]] | Arguments, the environment, exit, running programs (`run`, `command`), children streamed through pipes (`spawn`, `Child`, `pipe`) |
 | `std.char` | [[Language/Standard-library/Char]] | Character classes, case and digits, as methods on `char` (ASCII) |
 | `std.int` | [[Language/Standard-library/Int]] | Methods on every integer type: `gcd`, `pow`, Euclidean division, checked, wrapping, saturating and overflowing arithmetic, `mulmod`, `powmod`, `modinv` |
 | `std.num` | [[Language/Standard-library/Num]] | Exact parsing and printing of integers and floats; integers in any radix and width, with `ParseIntError` |
