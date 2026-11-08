@@ -220,6 +220,20 @@ impl CodeGen {
         self.raw("__sig_restorer:")
         self.raw("	movq $15, %rax")
         self.raw("	syscall")
+        // __on_signal(sig), on any thread's stack: the signal's number
+        // written as a byte to the self-pipe of std.signal (MYLA-350, the
+        // first word of `__sig_pipe`, non-blocking), all the handler does;
+        // the kernel gives every register back on its return
+        self.raw("__on_signal:")
+        self.raw("	subq $8, %rsp")
+        self.raw("	movb %dil, (%rsp)")
+        self.raw("	movq __sig_pipe(%rip), %rdi")
+        self.raw("	movq %rsp, %rsi")
+        self.raw("	movl $1, %edx")
+        self.raw("	movl $1, %eax")
+        self.raw("	syscall")
+        self.raw("	addq $8, %rsp")
+        self.raw("	ret")
         self.raw(".Lmsg_sov:")
         self.raw("	.ascii \"runtime error: stack overflow\\n\"")
         self.raw("")

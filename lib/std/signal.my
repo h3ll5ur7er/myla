@@ -1,0 +1,157 @@
+// std.signal — the interrupt and terminate signals as events a program
+// awaits (MYLA-350).
+//
+// - Until a program asks, a signal does what it always did: Ctrl-C (an
+//   interrupt) and a request to terminate end the program.
+// - `listen()` catches both from then on: a `Signals` value, whose
+//   `next()` the program awaits (the task suspended, the others running);
+//   each signal waits there until it is taken, in the order they came.
+//   `close()` gives the default back once nobody else listens.
+// - `interrupted()` is the three in one: it waits for the first interrupt
+//   or termination, and the next Ctrl-C ends the program again.
+// - Only what every system has: an interrupt (SIGINT; Ctrl-C and Ctrl-Break
+//   on Windows) and a request to terminate (SIGTERM; closing the console,
+//   logging off or shutting down on Windows). No SIGUSR1, SIGHUP or SIGCHLD.
+//
+// Everything that depends on the system goes through the primitives
+// `__signal_listen` and `__signal_take` (std.rt over std.platform): the
+// platform gives a handle that becomes readable when a signal comes, which
+// the reactor waits for as it waits for input. On wasm32 (WASI has no
+// signals) `listen` is `Unsupported`. [[Language/Standard-library/Signal]]
+// says what a port must provide.
+
+import .fmt as fmt
+
+// A signal a program can catch everywhere.
+#derive(Eq, Hash)
+pub enum Signal {
+    Interrupt,
+    Terminate,
+}
+
+impl Format for Signal {
+    fun format(self, spec: str) -> str {
+        return fmt.pad(signal_name(self), spec)
+    }
+}
+
+// A signal's name in words.
+#test(Signal.Interrupt)["interrupt"]
+#test(Signal.Terminate)["terminate"]
+fun signal_name(s: Signal) -> str {
+    return match s {
+        Interrupt => "interrupt"
+        Terminate => "terminate"
+    }
+}
+
+// Why signals can't be caught or waited for.
+#derive(Eq)
+pub enum SignalError {
+    Unsupported,
+    Cancelled,
+    Other(int),
+}
+
+impl SignalError {
+    // The reason in words.
+    #test(SignalError.Unsupported)["signals are not supported on this target"]
+    #test(SignalError.Cancelled)["the wait was cancelled"]
+    #test(SignalError.Other(9))["signal error 9"]
+    fun message(self) -> str {
+        return match self {
+            Unsupported => "signals are not supported on this target"
+            Cancelled => "the wait was cancelled"
+            Other(code) => f"signal error {code}"
+        }
+    }
+}
+
+impl Format for SignalError {
+    fun format(self, spec: str) -> str {
+        return fmt.pad(self.message(), spec)
+    }
+}
+
+// The interrupt and terminate signals being caught: what `listen` gives.
+pub struct Signals {
+    handle: int,
+}
+
+// The interrupt and terminate signals caught from now on, until `close`:
+// they no longer end the program but wait in the `Signals` for `next`.
+pub fun listen() -> Result<Signals, SignalError> {
+    let h = __signal_listen(1)
+    if h < 0 {
+        return Err(error_of(__io_errno()))
+    }
+    return Ok(Signals { handle: h })
+}
+
+impl Signals {
+    // The next signal, the task waiting for it (the other tasks run; outside
+    // a task the program waits). `Cancelled` when the task is asked to stop
+    // while it waits.
+    async fun next(self) -> Result<Signal, SignalError> {
+        await __wait_readable(self.handle)
+        if __task_cancelled() {
+            return Err(SignalError.Cancelled)
+        }
+        return signal_of(__signal_take(self.handle), __io_errno())
+    }
+
+    // The next signal if one came, without waiting.
+    fun try_next(self) -> Option<Signal> {
+        if __poll(self.handle, 0) == 0 {
+            return None
+        }
+        return match signal_of(__signal_take(self.handle), __io_errno()) {
+            Ok(s) => Some(s)
+            Err(e) => None
+        }
+    }
+
+    // No longer listening: once nobody listens, the signals end the program
+    // again, and those not taken are dropped. Close a `Signals` once.
+    fun close(self) {
+        let r = __signal_listen(0)
+    }
+}
+
+// The first interrupt or termination from now on, the task waiting for it:
+// `listen`, `next` and `close` in one. A second Ctrl-C after it ends the
+// program as before.
+pub async fun interrupted() -> Result<Signal, SignalError> {
+    let s = listen()?
+    let got = await s.next()
+    s.close()
+    return got
+}
+
+// The signal `__signal_take` gave (2 or 15), or the error of its errno.
+#test(2, 0)[Ok(Signal.Interrupt)]
+#test(15, 0)[Ok(Signal.Terminate)]
+#test(-1, 38)[Err(SignalError.Unsupported)]
+#test(-1, 9)[Err(SignalError.Other(9))]
+fun signal_of(n: int, errno: int) -> Result<Signal, SignalError> {
+    if n == 2 {
+        return Ok(Signal.Interrupt)
+    }
+    if n == 15 {
+        return Ok(Signal.Terminate)
+    }
+    if n < 0 {
+        return Err(error_of(errno))
+    }
+    return Err(SignalError.Other(n))
+}
+
+// The error of the errno `e` (ENOSYS: the target has no signals).
+#test(38)[SignalError.Unsupported]
+#test(24)[SignalError.Other(24)]
+fun error_of(e: int) -> SignalError {
+    if e == 38 {
+        return SignalError.Unsupported
+    }
+    return SignalError.Other(e)
+}

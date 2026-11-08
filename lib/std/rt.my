@@ -742,6 +742,94 @@ pub fun net_config(which: int) -> str {
     return os.net_config(which as int64)
 }
 
+// --- the terminal and signals (MYLA-350) -----------------------------------------------
+//
+// The primitives of std.term and std.signal, each over the platform's
+// functions of the same name (`os.term_*`, `os.signal_*`). A terminal is
+// named by a descriptor (0 to 2 in std.term); its mode is an opaque string
+// the platform fills. Each sets the errno `__io_errno` reads, 0 on success:
+// ENOTTY (25) for a descriptor that isn't a terminal, ENOSYS (38) where the
+// target has none (wasm32).
+
+// `__term_is_tty(fd)`: 1 when the descriptor is a terminal, else 0.
+pub fun term_is_tty(fd: int) -> int {
+    __set_io_errno(0)
+    if fd < 0 {
+        return 0
+    }
+    return os.term_is_tty(fd as int64) as int
+}
+
+// `__term_size(fd)`: the terminal's columns times 65536 plus its rows, or -1.
+pub fun term_size(fd: int) -> int {
+    var r: int64 = -EBADF
+    if fd >= 0 {
+        r = os.term_size(fd as int64)
+    }
+    return sock_result(r)
+}
+
+// `__term_get(fd)`: the terminal's mode as the platform keeps it, or ""
+// with the errno.
+pub fun term_get(fd: int) -> str {
+    let cell = __alloc(8 + 64)
+    var r: int64 = -EBADF
+    if fd >= 0 {
+        r = os.term_get_mode(fd as int64, cell + 8)
+    }
+    record(r)
+    if r < 0 {
+        __store64(cell, 0)
+    } else {
+        __store64(cell, r)
+    }
+    return __str_of(cell)
+}
+
+// `__term_set(fd, mode)`: the terminal back in the mode `__term_get` gave:
+// 0, or -1.
+pub fun term_set(fd: int, mode: str) -> int {
+    if fd < 0 {
+        return sock_result(-EBADF)
+    }
+    return sock_result(os.term_set_mode(fd as int64, mode))
+}
+
+// `__term_raw(fd)`: the terminal in raw mode (no echo, a key at a time, no
+// signal keys): 0, or -1.
+pub fun term_raw(fd: int) -> int {
+    if fd < 0 {
+        return sock_result(-EBADF)
+    }
+    return sock_result(os.term_make_raw(fd as int64))
+}
+
+// `__term_vt(fd)`: escape sequences written to the terminal interpreted
+// from now on (turned on where the platform must): 0, or -1.
+pub fun term_vt(fd: int) -> int {
+    if fd < 0 {
+        return sock_result(-EBADF)
+    }
+    return sock_result(os.term_enable_vt(fd as int64))
+}
+
+// `__signal_listen(on)`: the interrupt and terminate signals caught (`on`
+// 1: the handle they arrive on, or -1), or let go (0: their defaults back
+// once nobody listens).
+pub fun signal_listen(on: int) -> int {
+    return sock_result(os.signal_listen(on as int64))
+}
+
+// `__signal_take(h)`: the next signal on the handle `h`, the thread
+// waiting for one: 2 (an interrupt) or 15 (termination); 0 when the handle
+// ended, or -1.
+pub fun signal_take(h: int) -> int {
+    if h < 0 {
+        return sock_result(-EBADF)
+    }
+    return sock_result(os.signal_take(h as int64))
+}
+
 // --- the environment ---------------------------------------------------------
 
 // `__getenv`: the value of the first `name=value` entry of the environment

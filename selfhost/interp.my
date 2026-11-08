@@ -9,7 +9,7 @@
 
 from .ast import Expr, ExprKind, Stmt, StmtKind, Block, Decl, DeclKind, FunData, Param, MatchArm, Pattern, PatternKind, FieldPat, BindElem, ExprOrBlock, ElseTail, FieldInit, MapEntry, Attribute, TypeExpr, TypeKind, TypeParam, bind_elems, names_in_expr, names_in_block, Expected, expected_failure
 from .tokens import SrcSpan, no_span
-from .checker import Checker, Type, Subst, subst_type, subst_get, unify_param, type_name, is_raw_memory_primitive, is_net_primitive, checker_on, builtin_method, builtin_method_name, is_slice_expr, from_end_of, slice_parts, is_hole_part
+from .checker import Checker, Type, Subst, subst_type, subst_get, unify_param, type_name, is_raw_memory_primitive, is_net_primitive, is_term_primitive, checker_on, builtin_method, builtin_method_name, is_slice_expr, from_end_of, slice_parts, is_hole_part
 from .anf import Norm, new_norm, stmt_suspends, body_suspends
 from .util import cp_utf8, format_specs
 from std.fmt import fmt_int, fmt_float, fmt_text
@@ -3734,6 +3734,26 @@ impl Interp {
         return Value.VInt(r as int64)
     }
 
+    // MYLA-350's terminal and signal primitives (`is_term_primitive`): the
+    // host's own, so the interpreted program has the interpreter's terminal
+    // and signals
+    fun term_primitive(var self, nm: str, args: [Expr]) -> Value {
+        let fd = as_int(self.eval(args[0])) as int32
+        var mode = ""
+        if nm == "__term_set" { mode = as_str(self.eval(args[1])) }
+        if self.stop() { return Value.VUnit }
+        if nm == "__term_get" { return Value.VStr(__term_get(fd)) }
+        var r = -1
+        if nm == "__term_is_tty" { r = __term_is_tty(fd) }
+        if nm == "__term_size" { r = __term_size(fd) }
+        if nm == "__term_set" { r = __term_set(fd, mode) }
+        if nm == "__term_raw" { r = __term_raw(fd) }
+        if nm == "__term_vt" { r = __term_vt(fd) }
+        if nm == "__signal_listen" { r = __signal_listen(fd) }
+        if nm == "__signal_take" { r = __signal_take(fd) }
+        return Value.VInt(r as int64)
+    }
+
     #test(interp_on("[int]"), Expr { id: 133, line: 83, col: 20, sp: SrcSpan { sline: 83, scol: 11, eline: 83, ecol: 22 }, kind: ExprKind.Call(Expr { id: 132, line: 83, col: 11, sp: SrcSpan { sline: 83, scol: 11, eline: 83, ecol: 20 }, kind: ExprKind.Name("page_size") }, [], []) }, "page_size", [])[Value.VUnit]
     fun eval_name_call(var self, e: Expr, nm: str, args: [Expr]) -> Value {
         if nm == "std$task$cancel" {
@@ -3986,6 +4006,7 @@ impl Interp {
             return Value.VList(out)
         }
         if is_net_primitive(nm) { return self.net_primitive(nm, args) }
+        if is_term_primitive(nm) { return self.term_primitive(nm, args) }
         if nm == "__try_reap" { return Value.VInt(__try_reap(as_int(self.eval(args[0])) as int32) as int64) }
         if nm == "__close" {
             __close(as_int(self.eval(args[0])) as int32)

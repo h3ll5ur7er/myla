@@ -1237,6 +1237,226 @@ fun small_file(path: str) -> str {
     return __str_of(cell)
 }
 
+// --- the terminal and signals (MYLA-350) ---------------------------------------------
+// What std.term and std.signal rest on, through std.rt's `__term_*` and
+// `__signal_*` primitives. A terminal is a descriptor's: ioctl on the
+// kernel's `struct termios` (36 bytes: the input, output, control and local
+// flags, the line discipline, 19 control characters) and on its window
+// size. A terminal's saved mode is a block of bytes std.term never looks
+// into, which a port fills with its own (Windows: the console's modes).
+// Signals come through a self-pipe: the runtime's `__on_signal` (the
+// backend's assembly) writes each caught signal's number as a byte to the
+// pipe whose write end is the first word of `__sig_pipe`, and the reactor
+// waits for the read end as it waits for input. `__sig_pipe`'s words: the
+// write end, the read end plus one (0 before the first listener), how many
+// listen, a lock, and what SIGINT and SIGTERM did before the first listener
+// (their handlers: 0 the default, 1 ignored).
+
+const TCGETS: int64 = 21505
+const TCSETS: int64 = 21506
+const TIOCGWINSZ: int64 = 21523
+const TERMIOS_SIZE: int64 = 36
+const SIGINT: int64 = 2
+const SIGTERM: int64 = 15
+const O_NONBLOCK: int64 = 2048
+const F_SETFL: int64 = 4
+const SYS_FCNTL: int64 = 72
+
+// Whether the descriptor `fd` is a terminal: 1 or 0.
+pub fun term_is_tty(fd: int64) -> int64 {
+    let t = __alloc(64)
+    let r = __syscall(SYS_IOCTL, fd, TCGETS, t)
+    __free(t)
+    if r < 0 {
+        return 0
+    }
+    return 1
+}
+
+// The size of the terminal `fd`: its columns from bit 16 up, its rows in
+// the low 16 bits (TIOCGWINSZ's `ws_col` and `ws_row`), or minus the errno
+// (ENOTTY for a descriptor that isn't one). A port reads its console's
+// window (Windows: GetConsoleScreenBufferInfo's `srWindow`).
+pub fun term_size(fd: int64) -> int64 {
+    let w = __alloc(16)
+    var r = __syscall(SYS_IOCTL, fd, TIOCGWINSZ, w)
+    if r >= 0 {
+        let rows = (__load8(w) as int64) | ((__load8(w + 1) as int64) << 8)
+        var cols = (__load8(w + 2) as int64) | ((__load8(w + 3) as int64) << 8)
+        if cols > 32767 {
+            cols = 32767                                // what an `int` holds shifted
+        }
+        r = (cols << 16) | rows
+    }
+    __free(w)
+    return r
+}
+
+// The mode of the terminal `fd`, written at `buf` (at most 64 bytes, which
+// the caller gives back to `term_set_mode` as they are): how many bytes, or
+// minus the errno.
+pub fun term_get_mode(fd: int64, buf: int64) -> int64 {
+    let r = __syscall(SYS_IOCTL, fd, TCGETS, buf)
+    if r < 0 {
+        return r
+    }
+    return TERMIOS_SIZE
+}
+
+// The terminal `fd` set to the mode `term_get_mode` gave, at once: 0, or
+// minus the errno (EINVAL for a block of another size).
+pub fun term_set_mode(fd: int64, mode: str) -> int64 {
+    let p = __addr_of(mode)
+    if __load64(p) != TERMIOS_SIZE {
+        return -22
+    }
+    return __syscall(SYS_IOCTL, fd, TCSETS, p + 8)
+}
+
+// The terminal `fd` made raw from its mode now: keys come one at a time as
+// they are typed, not echoed; Ctrl-C and Ctrl-Z are bytes, not signals; a
+// CR stays a CR; special keys arrive as their escape sequences. Output is
+// as before (a "\n" still starts a line). 0, or minus the errno. A port does
+// the same to its console (Windows: SetConsoleMode on the input without
+// ENABLE_LINE_INPUT, ENABLE_ECHO_INPUT and ENABLE_PROCESSED_INPUT, and with
+// ENABLE_VIRTUAL_TERMINAL_INPUT).
+pub fun term_make_raw(fd: int64) -> int64 {
+    let t = __alloc(64)
+    var r = __syscall(SYS_IOCTL, fd, TCGETS, t)
+    if r >= 0 {
+        __store32(t, raw_iflag(__load32(t)))
+        __store32(t + 8, __load32(t + 8) | 48u32)       // CS8
+        __store32(t + 12, raw_lflag(__load32(t + 12)))
+        __store8(t + 17 + 5, 0u8)                       // VTIME: no timer
+        __store8(t + 17 + 6, 1u8)                       // VMIN: a byte at a time
+        r = __syscall(SYS_IOCTL, fd, TCSETS, t)
+    }
+    __free(t)
+    return r
+}
+
+// A raw terminal's input flags: without BRKINT, ICRNL, INPCK, ISTRIP and
+// IXON (as `cfmakeraw` and line editors set them).
+#test(1280u32)[0u32]
+#test(1290u32)[8u32]
+fun raw_iflag(f: uint32) -> uint32 {
+    return f & ~(2u32 | 256u32 | 16u32 | 32u32 | 1024u32)
+}
+
+// A raw terminal's local flags: without ECHO, ICANON, IEXTEN and ISIG.
+#test(35387u32)[2608u32]
+fun raw_lflag(f: uint32) -> uint32 {
+    return f & ~(8u32 | 2u32 | 32768u32 | 1u32)
+}
+
+// Escape sequences written to `fd` interpreted from now on: 0 for a
+// terminal, which on Linux always does, or minus the errno. A port turns
+// them on (Windows: ENABLE_VIRTUAL_TERMINAL_PROCESSING on the console's
+// output mode).
+pub fun term_enable_vt(fd: int64) -> int64 {
+    if term_is_tty(fd) == 0 {
+        return -25                                      // ENOTTY
+    }
+    return 0
+}
+
+// The interrupt and terminate signals caught (`on` 1), or back to what
+// they did before once the last of those who asked lets go (`on` 0). Caught, each
+// goes to the pipe whose read end `on` 1 gives, as a byte: 2 for an
+// interrupt, 15 for termination; let go, what is queued is dropped. A port
+// gives the same handle and bytes (Windows: a pipe its
+// SetConsoleCtrlHandler routine writes CTRL_C_EVENT and CTRL_BREAK_EVENT to
+// as 2, CTRL_CLOSE_EVENT, CTRL_LOGOFF_EVENT and CTRL_SHUTDOWN_EVENT as 15).
+pub fun signal_listen(on: int64) -> int64 {
+    let st = __rt_addr("__sig_pipe")
+    while __xchg64(st + 24, 1) != 0 {
+        __pause()
+    }
+    var r: int64 = 0
+    if on != 0 {
+        if __load64(st + 8) == 0 {
+            let fds = __alloc(8)
+            r = __syscall(SYS_PIPE2, fds, 524288, 0)    // O_CLOEXEC
+            if r >= 0 {
+                let rd = __load32(fds) as int64
+                let wr = __load32(fds + 4) as int64
+                __syscall(SYS_FCNTL, wr, F_SETFL, O_NONBLOCK)  // the handler never waits
+                __store64(st, wr)
+                __store64(st + 8, rd + 1)
+            }
+            __free(fds)
+        }
+        if r >= 0 {
+            if __load64(st + 16) == 0 {
+                catch_signal(SIGINT, __rt_addr("__on_signal"), st + 32)
+                catch_signal(SIGTERM, __rt_addr("__on_signal"), st + 40)
+            }
+            __store64(st + 16, __load64(st + 16) + 1)
+            r = __load64(st + 8) - 1
+        }
+    } else if __load64(st + 16) > 0 {
+        __store64(st + 16, __load64(st + 16) - 1)
+        if __load64(st + 16) == 0 {
+            catch_signal(SIGINT, __load64(st + 32), 0)
+            catch_signal(SIGTERM, __load64(st + 40), 0)
+            drain(__load64(st + 8) - 1)
+        }
+    }
+    __store_rel64(st + 24, 0)
+    return r
+}
+
+// The signal `sig` handled by the code at `handler` (0: its default, 1:
+// ignored), the system calls it interrupts restarted; what handled it
+// before written at `saved` (unless 0).
+fun catch_signal(sig: int64, handler: int64, saved: int64) {
+    let act = __alloc(64)
+    __store64(act, handler)
+    __store64(act + 8, 0)
+    __store64(act + 16, 0)
+    __store64(act + 24, 0)
+    if handler > 1 {
+        __store64(act + 8, 335544320)                  // SA_RESTORER | SA_RESTART
+        __store64(act + 16, __rt_addr("__sig_restorer"))
+    }
+    var old: int64 = 0
+    if saved != 0 {
+        old = act + 32
+    }
+    __syscall5(SYS_RT_SIGACTION, sig, act, old, 8, 0)
+    if saved != 0 {
+        __store64(saved, __load64(old))
+    }
+    __free(act)
+}
+
+// What the pipe's read end `fd` holds, read and dropped, without waiting.
+fun drain(fd: int64) {
+    let buf = __alloc(64)
+    __syscall(SYS_FCNTL, fd, F_SETFL, O_NONBLOCK)
+    while __syscall(SYS_READ, fd, buf, 64) > 0 {
+    }
+    __syscall(SYS_FCNTL, fd, F_SETFL, 0)
+    __free(buf)
+}
+
+// The next signal caught on the handle `h` that `signal_listen` gave, the
+// thread waiting for one: 2 or 15, 0 when the pipe ended, or minus the
+// errno.
+pub fun signal_take(h: int64) -> int64 {
+    let b = __alloc(8)
+    __store64(b, 0)
+    var r = __syscall(SYS_READ, h, b, 1)
+    while r == EINTR {
+        r = __syscall(SYS_READ, h, b, 1)
+    }
+    if r > 0 {
+        r = __load8(b) as int64
+    }
+    __free(b)
+    return r
+}
+
 // --- memory --------------------------------------------------------------------
 
 // `n` bytes of fresh memory, zeroed, readable and writable (private,
