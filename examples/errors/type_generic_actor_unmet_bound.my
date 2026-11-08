@@ -1,0 +1,19 @@
+//~ type error: does not satisfy the bound 'T: Add'
+// A method of a bounded impl of a generic actor needs an instance whose type
+// argument meets the bound (MYLA-386)
+actor Total<T> {
+    sum: T,
+}
+
+impl<T: Add> Total<T> {
+    fun add(var self, x: T) -> T {
+        self.sum = self.sum + x
+        return self.sum
+    }
+}
+
+#main
+async fun main() {
+    let t = Total { sum: true }
+    let s = await t.add(false)
+}

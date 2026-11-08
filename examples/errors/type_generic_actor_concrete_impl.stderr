@@ -1,0 +1,5 @@
+type error: cannot 'impl' on a concrete generic instantiation; write 'impl<T> Cell<T> { ... }' to cover every instance
+  --> examples/errors/type_generic_actor_concrete_impl.my:8:1
+  |
+8 | impl Cell<int> {
+  | ^^^^^^^^^^^^^^^^

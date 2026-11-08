@@ -1,0 +1,5 @@
+type error: actor 'Pair': expected 'int32', found 'str'
+  --> examples/errors/type_generic_actor_field_types.my:11:29
+   |
+11 |     let p = Pair { a: 1, b: "two" }
+   |                             ^^^^^

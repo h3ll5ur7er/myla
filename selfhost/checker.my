@@ -43,8 +43,9 @@ pub enum Type {
     // inside: a separate variant keeps every other type as small as before
     TAsync(Type),
     // an actor's handle (D89): a reference to its state, which only its own
-    // methods reach; its fields are those of the struct it is declared like
-    TActor(str),
+    // methods reach; its fields are those of the struct it is declared like;
+    // name, type args (MYLA-386)
+    TActor(str, [Type]),
     TParam(str),
     TSelf,
     // the type of a declaration's part that failed to check (MYLA-110, D84;
@@ -269,6 +270,7 @@ pub fun is_unit(t: Type) -> bool {
 #test(Type.TStr)["str"]
 #test(Type.TStruct("Rect", []))["Rect"]
 #test(Type.TFunc([Type.TInt(32, true), Type.TInt(32, true)], Some(Type.TInt(32, true))))["(int32, int32) -> int32"]
+#test(Type.TActor("Cell", [Type.TStr]))["Cell<str>"]
 pub fun type_name(t: Type) -> str {
     return match t {
         Type.TInt(w, signed) => format("{}{}", if_str(signed, "int", "uint"), w),
@@ -278,7 +280,7 @@ pub fun type_name(t: Type) -> str {
         Type.TStr => "str",
         Type.TSB => "StringBuilder",
         Type.TStruct(n, args) => generic_name(n, args),
-        Type.TActor(n) => generic_name(n, []),
+        Type.TActor(n, args) => generic_name(n, args),
         Type.TEnum(n, args) => generic_name(n, args),
         Type.TParam(n) => n,
         Type.TSelf => "Self",
@@ -296,10 +298,12 @@ pub fun type_name(t: Type) -> str {
 #test(Type.TSB)[false]
 #test(Type.TStr)[false]
 #test(Type.TError)[true]
+#test(Type.TActor("Cell", [Type.TError]))[true]
 fun has_error(t: Type) -> bool {
     return match t {
         Type.TError => true,
         Type.TStruct(n, a) => list_has_error(a),
+        Type.TActor(n, a) => list_has_error(a),
         Type.TEnum(n, a) => list_has_error(a),
         Type.TTuple(es) => list_has_error(es),
         Type.TList(e) => has_error(e),
@@ -511,7 +515,7 @@ pub const REG_ARG_WORDS: int32 = 6
 // number, `bool`, `char`, `str`, `StringBuilder`, a list or a map; not a
 // struct, enum, tuple or actor handle (D144).
 #test(Type.TList(Type.TStr))[true]
-#test(Type.TActor("A"))[false]
+#test(Type.TActor("A", []))[false]
 #test(Type.TStruct("P", []))[false]
 pub fun is_builtin_value(t: Type) -> bool {
     return match t {
@@ -592,6 +596,9 @@ fun opt_type_eq(a: Option<Type>, b: Option<Type>) -> bool {
 #test(Type.TStr, Type.TStr)[true]
 #test(Type.TBool, Type.TBool)[true]
 #test(Type.TBool, Type.TStr)[false]
+#test(Type.TActor("Cell", [Type.TInt(32, true)]), Type.TActor("Cell", [Type.TInt(32, true)]))[true]
+#test(Type.TActor("Cell", [Type.TInt(32, true)]), Type.TActor("Cell", [Type.TStr]))[false]
+#test(Type.TActor("Cell", [Type.TInt(32, true)]), Type.TStruct("Cell", [Type.TInt(32, true)]))[false]
 fun type_eq(a: Type, b: Type) -> bool {
     return match a {
         Type.TInt(w1, s1) => match b { Type.TInt(w2, s2) => w1 == w2 && s1 == s2, _ => false },
@@ -601,7 +608,7 @@ fun type_eq(a: Type, b: Type) -> bool {
         Type.TStr => match b { Type.TStr => true, _ => false },
         Type.TSB => match b { Type.TSB => true, _ => false },
         Type.TStruct(n1, a1) => match b { Type.TStruct(n2, a2) => n1 == n2 && type_list_eq(a1, a2), _ => false },
-        Type.TActor(n1) => match b { Type.TActor(n2) => n1 == n2, _ => false },
+        Type.TActor(n1, a1) => match b { Type.TActor(n2, a2) => n1 == n2 && type_list_eq(a1, a2), _ => false },
         Type.TEnum(n1, a1) => match b { Type.TEnum(n2, a2) => n1 == n2 && type_list_eq(a1, a2), _ => false },
         Type.TTuple(e1) => match b { Type.TTuple(e2) => type_list_eq(e1, e2), _ => false },
         Type.TList(e1) => match b { Type.TList(e2) => type_eq(e1, e2), _ => false },
@@ -989,11 +996,13 @@ fun map_kv_hint(expected: Option<Type>) -> Option<[Type]> {
 #test(None, "Box")[None]
 #test(None, "Pair")[None]
 #test(Some(Type.TStruct("Box", [Type.TInt(32, true)])), "Box")[Some([Type.TInt(32, true)])]
+#test(Some(Type.TActor("Cell", [Type.TStr])), "Cell")[Some([Type.TStr])]
 fun struct_args_hint(expected: Option<Type>, name: str) -> Option<[Type]> {
     match expected {
         Some(et) => {
             match et {
                 Type.TStruct(en, args) => { if en == name { return Some(args) } },
+                Type.TActor(en, args) => { if en == name { return Some(args) } },
                 _ => {},
             }
             return None
@@ -1178,6 +1187,7 @@ fun subst_has(subst: [Subst], name: str) -> bool {
 #test(Type.TMap(Type.TStr, Type.TParam("V")), [Subst { name: "K", ty: Type.TStr }])[false]
 #test(Type.TFunc([Type.TParam("A")], Some(Type.TParam("B"))), [Subst { name: "A", ty: Type.TBool }])[false]
 #test(Type.TStr, [])[true]
+#test(Type.TActor("Cell", [Type.TParam("T")]), [])[false]
 fun solved_in(t: Type, subst: [Subst]) -> bool {
     return match t {
         Type.TParam(n) => subst_has(subst, n),
@@ -1185,6 +1195,7 @@ fun solved_in(t: Type, subst: [Subst]) -> bool {
         Type.TList(e) => solved_in(e, subst),
         Type.TMap(k, v) => solved_in(k, subst) && solved_in(v, subst),
         Type.TStruct(n, args) => all_solved_in(args, subst),
+        Type.TActor(n, args) => all_solved_in(args, subst),
         Type.TEnum(n, args) => all_solved_in(args, subst),
         Type.TFunc(ps, r) => all_solved_in(ps, subst) && (match r { Some(rt) => solved_in(rt, subst), None => true }),
         Type.TAsync(f) => solved_in(f, subst),
@@ -1297,6 +1308,7 @@ fun is_lambda(e: Expr) -> bool {
 #test(Type.TStr)[false]
 #test(Type.TParam("A"))[true]
 #test(Type.TParam("B"))[true]
+#test(Type.TActor("Cell", [Type.TParam("T")]))[true]
 fun contains_type_param(t: Type) -> bool {
     return match t {
         Type.TParam(n) => true,
@@ -1304,6 +1316,7 @@ fun contains_type_param(t: Type) -> bool {
         Type.TList(e) => contains_type_param(e),
         Type.TMap(k, v) => contains_type_param(k) || contains_type_param(v),
         Type.TStruct(n, args) => list_any_tp(args),
+        Type.TActor(n, args) => list_any_tp(args),
         Type.TEnum(n, args) => list_any_tp(args),
         Type.TFunc(ps, r) => list_any_tp(ps) || (match r { Some(rt) => contains_type_param(rt), None => false }),
         Type.TAsync(f) => contains_type_param(f),
@@ -1359,6 +1372,7 @@ fun arm_diverges(body: ExprOrBlock) -> bool {
 #test(Type.TList(Type.TParam("T")), "T")[true]
 #test(Type.TList(Type.TParam("T")), "E")[false]
 #test(Type.TStr, "T")[false]
+#test(Type.TActor("Cell", [Type.TParam("T")]), "T")[true]
 fun mentions_param(t: Type, p: str) -> bool {
     return match t {
         Type.TParam(n) => n == p,
@@ -1366,6 +1380,7 @@ fun mentions_param(t: Type, p: str) -> bool {
         Type.TList(e) => mentions_param(e, p),
         Type.TMap(k, v) => mentions_param(k, p) || mentions_param(v, p),
         Type.TStruct(n, args) => list_mentions(args, p),
+        Type.TActor(n, args) => list_mentions(args, p),
         Type.TEnum(n, args) => list_mentions(args, p),
         Type.TFunc(ps, r) => list_mentions(ps, p) || (match r { Some(rt) => mentions_param(rt, p), None => false }),
         Type.TAsync(f) => mentions_param(f, p),
@@ -1389,6 +1404,7 @@ fun list_any_tp(xs: [Type]) -> bool {
 #test(Type.TSB, [])[Type.TSB]
 #test(Type.TList(Type.TParam("T")), [])[Type.TList(Type.TParam("T"))]
 #test(Type.TTuple([Type.TTuple([Type.TInt(32, true), Type.TInt(32, true)]), Type.TInt(32, true)]), [])[Type.TTuple([Type.TTuple([Type.TInt(32, true), Type.TInt(32, true)]), Type.TInt(32, true)])]
+#test(Type.TActor("Cell", [Type.TParam("T")]), [Subst { name: "T", ty: Type.TStr }])[Type.TActor("Cell", [Type.TStr])]
 pub fun subst_type(t: Type, subst: [Subst]) -> Type {
     return match t {
         Type.TParam(n) => match subst_get(subst, n) { Some(x) => x, None => t },
@@ -1396,6 +1412,7 @@ pub fun subst_type(t: Type, subst: [Subst]) -> Type {
         Type.TList(e) => Type.TList(subst_type(e, subst)),
         Type.TMap(k, v) => Type.TMap(subst_type(k, subst), subst_type(v, subst)),
         Type.TStruct(n, args) => Type.TStruct(n, subst_type_list(args, subst)),
+        Type.TActor(n, args) => Type.TActor(n, subst_type_list(args, subst)),
         Type.TEnum(n, args) => Type.TEnum(n, subst_type_list(args, subst)),
         Type.TFunc(ps, r) => Type.TFunc(subst_type_list(ps, subst), match r { Some(rt) => Some(subst_type(rt, subst)), None => None }),
         Type.TAsync(f) => Type.TAsync(subst_type(f, subst)),
@@ -1433,6 +1450,8 @@ pub struct UniRes { ok: bool, subst: [Subst] }
 #test(Type.TParam("T"), Type.TStr, [])[UniRes { ok: true, subst: [Subst { name: "T", ty: Type.TStr }] }]
 #test(Type.TParam("T"), Type.TStruct("P", []), [])[UniRes { ok: true, subst: [Subst { name: "T", ty: Type.TStruct("P", []) }] }]
 #test(Type.TParam("B"), Type.TInt(32, true), [Subst { name: "A", ty: Type.TInt(32, true) }])[UniRes { ok: true, subst: [Subst { name: "A", ty: Type.TInt(32, true) }, Subst { name: "B", ty: Type.TInt(32, true) }] }]
+#test(Type.TActor("Cell", [Type.TParam("T")]), Type.TActor("Cell", [Type.TStr]), [])[UniRes { ok: true, subst: [Subst { name: "T", ty: Type.TStr }] }]
+#test(Type.TActor("Cell", [Type.TParam("T")]), Type.TStruct("Cell", [Type.TStr]), [])[UniRes { ok: false, subst: [] }]
 pub fun unify_param(ptype: Type, at: Type, subst: [Subst]) -> UniRes {
     return match ptype {
         Type.TParam(n) => {
@@ -1470,6 +1489,13 @@ pub fun unify_param(ptype: Type, at: Type, subst: [Subst]) -> UniRes {
         },
         Type.TEnum(pn, pa) => match at {
             Type.TEnum(an, aa) => {
+                if pn != an || pa.len() != aa.len() { return UniRes { ok: false, subst: subst } }
+                unify_list(pa, aa, subst)
+            },
+            _ => UniRes { ok: false, subst: subst },
+        },
+        Type.TActor(pn, pa) => match at {
+            Type.TActor(an, aa) => {
                 if pn != an || pa.len() != aa.len() { return UniRes { ok: false, subst: subst } }
                 unify_list(pa, aa, subst)
             },
@@ -1957,7 +1983,7 @@ impl Checker {
     fun type_key(self, t: Type) -> Option<str> {
         return match t {
             Type.TStruct(n, a) => Some(n),
-            Type.TActor(n) => Some(n),
+            Type.TActor(n, a) => Some(n),
             Type.TEnum(n, a) => Some(n),
             Type.TInt(w, s) => Some(int_type_name(w, s)),
             Type.TBool => Some("bool"),
@@ -2264,11 +2290,12 @@ impl Checker {
             if params.len() > 0 || args.len() > 0 {
                 if args.len() != params.len() { return Err(terr_at(ln, cl, sp, format("type '{}' expects {} type argument(s), got {}", name, params.len(), args.len()))) }
                 let ra = self.resolve_list(args, visiting)?
+                if si >= 0 && self.is_actor(name) { return Ok(Type.TActor(name, ra)) }
                 if si >= 0 { return Ok(Type.TStruct(name, ra)) }
                 return Ok(Type.TEnum(name, ra))
             }
             let none_args: [Type] = []
-            if si >= 0 && self.is_actor(name) { return Ok(Type.TActor(name)) }
+            if si >= 0 && self.is_actor(name) { return Ok(Type.TActor(name, none_args)) }
             if si >= 0 { return Ok(Type.TStruct(name, none_args)) }
             return Ok(Type.TEnum(name, none_args))
         }
@@ -2373,7 +2400,6 @@ impl Checker {
         match decl.kind {
             DeclKind.StructDecl(n, fields, attrs, tps, isp, act) => {
                 if !act { return None }
-                if tps.len() > 0 { return Some(terr_at(decl.line, decl.col, decl.sp, "an actor can't have type parameters")) }
                 if attrs.len() > 0 { return Some(terr_at(attrs[0].line, attrs[0].col, attrs[0].sp, "an actor can't have attributes")) }
                 self.actors[n] = true
                 self.met_concurrency(decl.line, decl.col, decl.sp, decl.id)
@@ -2732,6 +2758,7 @@ impl Checker {
 #test(Type.TStr, Type.TStruct("Size", []), [])[Type.TStr]
 #test(Type.TSelf, Type.TStruct("Size", []), [])[Type.TStruct("Size", [])]
 #test(Type.TSelf, Type.TStruct("Money", []), [Subst { name: "T", ty: Type.TInt(32, true) }])[Type.TStruct("Money", [])]
+#test(Type.TActor("Cell", [Type.TSelf]), Type.TStr, [])[Type.TActor("Cell", [Type.TStr])]
 fun subst_self(t: Type, target: Type, pmap: [Subst]) -> Type {
     return match t {
         Type.TSelf => target,
@@ -2758,6 +2785,11 @@ fun subst_self(t: Type, target: Type, pmap: [Subst]) -> Type {
             var o: [Type] = []
             for x in a { o.push(subst_self(x, target, pmap)) }
             Type.TEnum(n, o)
+        },
+        Type.TActor(n, a) => {
+            var o: [Type] = []
+            for x in a { o.push(subst_self(x, target, pmap)) }
+            Type.TActor(n, o)
         },
         _ => t,
     }
@@ -2973,9 +3005,9 @@ impl Checker {
 
     // Whether an impl may add methods to `target` (types.py: _check_impl_target).
     fun check_impl_target(self, ln: int32, cl: int32, sp: SrcSpan, target: Type, key_opt: Option<str>, tps: [TypeParam], methods: [FunData]) -> Result<int32, CheckErr> {
-        let is_agg = match target { Type.TStruct(n, a) => true, Type.TEnum(n, a) => true, Type.TActor(n) => true, _ => false }
+        let is_agg = match target { Type.TStruct(n, a) => true, Type.TEnum(n, a) => true, Type.TActor(n, a) => true, _ => false }
         if is_agg {
-            let targs = match target { Type.TStruct(n, a) => a, Type.TEnum(n, a) => a, _ => empty_types() }
+            let targs = match target { Type.TStruct(n, a) => a, Type.TEnum(n, a) => a, Type.TActor(n, a) => a, _ => empty_types() }
             if tps.len() > 0 {
                 var want: [Type] = []
                 for p in tps { want.push(Type.TParam(p.name)) }
@@ -3792,6 +3824,7 @@ impl Checker {
             Type.TList(e) => { self.check_keys_in(e, ln, cl, sp)? },
             Type.TTuple(es) => { for e in es { self.check_keys_in(e, ln, cl, sp)? } },
             Type.TStruct(n, a) => { for e in a { self.check_keys_in(e, ln, cl, sp)? } },
+            Type.TActor(n, a) => { for e in a { self.check_keys_in(e, ln, cl, sp)? } },
             Type.TEnum(n, a) => { for e in a { self.check_keys_in(e, ln, cl, sp)? } },
             Type.TFunc(ps, r) => {
                 for e in ps { self.check_keys_in(e, ln, cl, sp)? }
@@ -4130,7 +4163,7 @@ impl Checker {
                 let vt = self.expect_value(init.value, Some(ft))?
                 if !type_eq(vt, ft) { return Err(terr_at(init.line, init.col, init.sp, format("field '{}': expected '{}', found '{}'", init.name, type_name(ft), type_name(vt)))) }
             }
-            if self.is_actor(sname) { return Ok(Type.TActor(sname)) }
+            if self.is_actor(sname) { return Ok(Type.TActor(sname, [])) }
             return Ok(Type.TStruct(sname, []))
         }
         // generic struct: solve type args from fields (declaration order)
@@ -4141,7 +4174,8 @@ impl Checker {
             ttypes.push(f.ty)
         }
         var exp_args: Option<[Type]> = struct_args_hint(expected, sname)
-        let args = self.infer_type_args(info.type_params, ttypes, nodes, exp_args, e, format("struct '{}'", sname))?
+        let args = self.infer_type_args(info.type_params, ttypes, nodes, exp_args, e, format("{} '{}'", if_str(self.is_actor(sname), "actor", "struct"), sname))?
+        if self.is_actor(sname) { return Ok(Type.TActor(sname, args)) }
         return Ok(Type.TStruct(sname, args))
     }
 }
@@ -8181,7 +8215,7 @@ impl Checker {
         match self.lookup(n) { Some(b) => { return Ok(None) }, None => {} }
         if contains_str(self.type_params, n) { return Ok(Some(Type.TParam(n))) }
         if self.is_struct(n) {
-            if self.is_actor(n) { return Ok(Some(Type.TActor(n))) }
+            if self.is_actor(n) { return Ok(Some(Type.TActor(n, []))) }
             return Ok(Some(Type.TStruct(n, [])))
         }
         if self.is_enum(n) { return Ok(Some(Type.TEnum(n, []))) }
@@ -8586,10 +8620,11 @@ fun func_to_partial_res(t: Type, e: Expr) -> Result<PartialTgt, CheckErr> {
 // The struct an actor's type is declared like, for its fields; any other type
 // as it is.
 #test(Type.TStruct("C", []))[Type.TStruct("C", [])]
-#test(Type.TActor("Account"))[Type.TStruct("Account", [])]
+#test(Type.TActor("Account", []))[Type.TStruct("Account", [])]
+#test(Type.TActor("Cell", [Type.TStr]))[Type.TStruct("Cell", [Type.TStr])]
 #test(Type.TStruct("Pair", [Type.TInt(32, true), Type.TBool]))[Type.TStruct("Pair", [Type.TInt(32, true), Type.TBool])]
 fun struct_view(t: Type) -> Type {
-    return match t { Type.TActor(n) => Type.TStruct(n, []), _ => t }
+    return match t { Type.TActor(n, a) => Type.TStruct(n, a), _ => t }
 }
 
 // Whether `t` is an async function type (D89).

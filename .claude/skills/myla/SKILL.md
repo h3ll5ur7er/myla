@@ -152,6 +152,7 @@ async fun main() {
 - `async fun` can suspend; a call of it, or of an actor's method from outside, must be awaited (`await f(x)`), and only in async code. The entry point is `#main async fun main()`.
 - `async let x = e` starts a child task; read it once with `await x`. A scope waits for its children. Only async functions have them, and a lambda can't `await` or `task.cancel` them.
 - An actor's state is reached only through `self` in its own methods; one method runs at a time, but an `await` inside an async method lets other calls in (a warning flags a field checked before an `await` and changed after it, D95).
+- An actor may be generic (MYLA-386): `actor Cell<T> { value: T }` with `impl<T> Cell<T> { … }`, a bound on an impl of its own (`impl<T: Add> Cell<T>`, never on the declaration); made like a generic struct (`Cell { value: 0 }`, or `let c: Cell<str> = …` when the fields don't fix `T`) and named with its arguments (`Cell<int>`, `fun make<T>() -> Cell<T>`).
 - Values cross between tasks and actors as deep copies; nothing mutable is shared but an actor. Captures can't be changed (D93).
 - `std.task`: `await task.all(fs)` runs a list of `async () -> T` functions as children; `task.cancel(a)` asks the child `a` to stop and `task.cancelled()` is how a task checks (cooperative, D96); `await task.yield()` gives the other tasks a turn (a long loop's way to let a failure elsewhere end the program).
 - A failure (panic, runtime error, `exit`) in any task ends the program at once: the others stop at their next `await` (D97).

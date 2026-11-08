@@ -403,7 +403,7 @@ fun member_lowerable(t: Type, blocked: [str]) -> bool {
             None => true
         }
         Type.TAsync(f) => member_lowerable(f, blocked)
-        Type.TActor(n) => !has_name(blocked, n)
+        Type.TActor(n, a) => !has_name(blocked, n) && all_lowerable(a, blocked)
         _ => false
     }
 }
@@ -503,19 +503,21 @@ fun has_receiver(fd: FunData) -> bool {
 }
 
 // Where an actor's executor begins in its cell: after its fields.
-#test(codegen_on("struct P { x: int, y: int }"), Type.TActor("Account"))[16]
+#test(codegen_on("struct P { x: int, y: int }"), Type.TActor("Account", []))[16]
 fun actor_record_offset(cg: CodeGen, t: Type) -> int32 {
-    return (cg.size(Type.TStruct(actor_name(t), [])) + 7) / 8 * 8
+    return (cg.size(actor_fields(t)) + 7) / 8 * 8
+}
+
+// The struct whose fields the actor type `t` holds: a generic actor's with
+// its type arguments (MYLA-386).
+#test(Type.TActor("Cell", [Type.TStr]))[Type.TStruct("Cell", [Type.TStr])]
+#test(Type.TActor("Account", []))[Type.TStruct("Account", [])]
+fun actor_fields(t: Type) -> Type {
+    return match t { Type.TActor(n, a) => Type.TStruct(n, a), _ => t }
 }
 
 // The function a call calls (Lower.call_target).
 struct CallTarget { name: str, params: [Type], ret: Option<Type> }
-
-// The name of the actor type `t` (D89).
-#test(Type.TActor("Account"))["Account"]
-fun actor_name(t: Type) -> str {
-    return match t { Type.TActor(n) => n, _ => "" }
-}
 
 impl Lower {
     // `load [%p + off]` added, as wide as what `p` points at: an element of

@@ -1,0 +1,12 @@
+//~ type error: 'value' belongs to the actor 'Cell': only its own methods reach it
+// A generic actor's fields, typed by its type parameter, are its own too
+// (MYLA-386)
+actor Cell<T> {
+    value: T,
+}
+
+fun peek(c: Cell<str>) -> str {
+    return c.value
+}
+
+fun main() {}

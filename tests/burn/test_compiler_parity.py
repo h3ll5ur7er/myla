@@ -4899,6 +4899,607 @@ fun main() {
         "    var s = Stack { items: xs }\n    print(show(s.take()))\n"
         "    print(s.items.len())\n    print(xs.len())\n}\n"
     ),
+    # MYLA-386: generic actors. A `Cell<T>` with `int`, `str`, `[int]` and
+    # `float64` from several tasks, a bound on a second impl
+    "generic_actor_cell": """// MYLA-386: a generic actor, `Cell<T>`, made with `int`, `str` and `[int]`
+// and called from several tasks: its fields typed by `T`, its arguments and
+// results deep copies, one call at a time
+actor Cell<T> {
+    value: T,
+    writes: int,
+}
+
+impl<T> Cell<T> {
+    fun get(self) -> T {
+        return self.value
+    }
+
+    fun put(var self, v: T) -> T {
+        let old = self.value
+        self.value = v
+        self.writes += 1
+        return old
+    }
+
+    fun update(var self, f: (T) -> T) -> T {
+        self.value = f(self.value)
+        self.writes += 1
+        return self.value
+    }
+
+    fun count(self) -> int {
+        return self.writes
+    }
+}
+
+// a bound on the impl gives `T` its operators
+impl<T: Add> Cell<T> {
+    fun add(var self, x: T) -> T {
+        self.value = self.value + x
+        self.writes += 1
+        return self.value
+    }
+}
+
+async fun add_up(c: Cell<int>, n: int) -> int {
+    var last = 0
+    for i in 0..n {
+        last = await c.update((x) => x + 1)
+    }
+    return last
+}
+
+async fun grow(c: Cell<str>, n: int) -> int {
+    for i in 0..n {
+        let s = await c.add("ab")
+    }
+    return n
+}
+
+#main
+async fun main() {
+    let n = Cell { value: 0, writes: 0 }
+    let s = Cell { value: "", writes: 0 }
+    async let a = add_up(n, 500)
+    async let b = add_up(n, 500)
+    async let c = grow(s, 100)
+    async let d = grow(s, 50)
+    let x = await a
+    let y = await b
+    print(await c + await d)
+    print(await n.get())
+    print(await n.count())
+    let text = await s.get()
+    print(text.len())
+    print(await s.count())
+    let old = await s.put("reset")
+    print(old.len())
+    print(await s.get())
+    // a list: a copy goes in, a copy comes out
+    let l: Cell<[int]> = Cell { value: [1, 2], writes: 0 }
+    var mine = await l.get()
+    mine.push(3)
+    print(mine.len())
+    print((await l.get()).len())
+    let m = await l.update((xs) => {
+        var ys = xs
+        ys.push(7)
+        return ys
+    })
+    print(m.len())
+    let h = l
+    print((await h.get())[2])
+    let f = Cell { value: 1.5, writes: 0 }
+    print(await f.add(2.25))
+}
+""",
+    # ... a queue whose async methods await inside (another actor, a turn,
+    # another instance of the same type)
+    "generic_actor_queue": """// MYLA-386: a generic queue actor whose async methods await inside: `push`
+// notes each item in a log (another actor), `pop` gives the other tasks a
+// turn until an item is there, `move_to` hands its items to another queue of
+// the same type, one awaited call at a time
+import std.task as task
+
+actor Log {
+    lines: int,
+}
+
+impl Log {
+    fun note(var self) -> int {
+        self.lines += 1
+        return self.lines
+    }
+
+    fun count(self) -> int {
+        return self.lines
+    }
+}
+
+actor Queue<T> {
+    items: [T],
+    head: int,
+    log: Log,
+}
+
+impl<T> Queue<T> {
+    async fun push(var self, x: T) -> int {
+        self.items.push(x)
+        let n = await self.log.note()
+        return n
+    }
+
+    fun take(var self) -> Option<T> {
+        if self.head >= self.items.len() { return None }
+        self.head += 1
+        return Some(self.items[self.head - 1])
+    }
+
+    async fun pop(var self) -> T {
+        while true {
+            if let Some(x) = self.take() { return x }
+            await task.yield()
+        }
+        unreachable()
+    }
+
+    fun size(self) -> int {
+        return self.items.len() - self.head
+    }
+
+    // `take` checks and changes `head` in one step: the warning's walk
+    // sees a check before the `await` and a change after it (D95)
+    #allow(reentrancy)
+    async fun move_to(var self, other: Queue<T>) -> int {
+        var moved = 0
+        while let Some(x) = self.take() {
+            let n = await other.push(x)
+            moved += 1
+        }
+        return moved
+    }
+}
+
+async fun produce(q: Queue<int>, start: int, n: int) -> int {
+    for i in start..start + n {
+        let k = await q.push(i)
+    }
+    return n
+}
+
+async fun consume(q: Queue<int>, n: int) -> int {
+    var sum = 0
+    for i in 0..n {
+        sum += await q.pop()
+    }
+    return sum
+}
+
+async fun words(q: Queue<str>, w: str, n: int) -> int {
+    for i in 0..n {
+        let k = await q.push(f"{w}{i}")
+    }
+    return n
+}
+
+#main
+async fun main() {
+    let log = Log { lines: 0 }
+    let q: Queue<int> = Queue { items: [], head: 0, log: log }
+    async let total = consume(q, 300)
+    async let a = produce(q, 0, 100)
+    async let b = produce(q, 100, 100)
+    async let c = produce(q, 200, 100)
+    print(await a + await b + await c)
+    print(await total)
+    print(await q.size())
+    let empty: [str] = []
+    let w = Queue { items: empty, head: 0, log: log }
+    async let x = words(w, "ab", 20)
+    async let y = words(w, "c", 30)
+    print(await x + await y)
+    var chars = 0
+    for i in 0..50 {
+        chars += (await w.pop()).len()
+    }
+    print(chars)
+    let w2: Queue<str> = Queue { items: ["p", "qq"], head: 0, log: log }
+    let w3: Queue<str> = Queue { items: [], head: 0, log: log }
+    print(await w2.move_to(w3))
+    print(await w3.size())
+    print(await w3.pop())
+    print(await log.count())
+}
+""",
+    # ... a list of structs, a map and a generic struct inside, deep copies
+    # in and out
+    "generic_actor_of_structs": """// MYLA-386: a generic actor holding a list of structs (and one holding a map
+// and a generic struct): the rows go in and come out as deep copies, so a
+// caller's change to what it got doesn't reach the actor
+
+struct Order {
+    id: int,
+    item: str,
+    tags: [str],
+}
+
+struct Box<T> {
+    v: T,
+}
+
+actor Store<T> {
+    rows: [T],
+    last: Option<T>,
+}
+
+impl<T> Store<T> {
+    fun add(var self, x: T) -> int {
+        self.rows.push(x)
+        self.last = Some(x)
+        return self.rows.len()
+    }
+
+    fun all(self) -> [T] {
+        return self.rows
+    }
+
+    fun at(self, i: int) -> T {
+        return self.rows[i]
+    }
+
+    fun keep(var self, f: (T) -> bool) -> int {
+        var out: [T] = []
+        for r in self.rows {
+            if f(r) { out.push(r) }
+        }
+        self.rows = out
+        return out.len()
+    }
+
+    fun newest(self) -> Option<T> {
+        return self.last
+    }
+}
+
+actor Index<K, V> {
+    m: [K: V],
+    boxes: [Box<V>],
+}
+
+impl<K: Eq + Hash, V> Index<K, V> {
+    fun put(var self, k: K, v: V) -> int {
+        self.m[k] = v
+        self.boxes.push(Box { v: v })
+        return self.m.len()
+    }
+
+    fun get(self, k: K) -> Option<V> {
+        if self.m.contains(k) { return Some(self.m[k]) }
+        return None
+    }
+
+    fun boxed(self) -> [Box<V>] {
+        return self.boxes
+    }
+}
+
+async fun fill(s: Store<Order>, start: int, n: int) -> int {
+    for i in start..start + n {
+        let k = await s.add(Order { id: i, item: f"item{i}", tags: ["new"] })
+    }
+    return n
+}
+
+#main
+async fun main() {
+    let empty: [Order] = []
+    let s = Store { rows: empty, last: None }
+    async let a = fill(s, 0, 40)
+    async let b = fill(s, 40, 40)
+    print(await a + await b)
+    var rows = await s.all()
+    var ids = 0
+    for r in rows { ids += r.id }
+    print(ids)
+    rows[0].tags.push("changed")
+    rows[0].item = "mine"
+    let first = await s.at(0)
+    print(first.tags.len())
+    print(first.item == "mine")
+    print(await s.keep((o) => o.id % 10 == 0))
+    let again = await s.all()
+    print(again.len())
+    var kept = 0
+    for o in again { kept += o.id }
+    print(kept)
+    match await s.newest() {
+        Some(o) => print(o.tags[0]),
+        None => print("none"),
+    }
+    // two type arguments, a map and a list of a generic struct
+    let ix = Index { m: [1: "one"], boxes: [] }
+    async let p = ix.put(2, "two")
+    async let q = ix.put(3, "three")
+    print(await p + await q)
+    print((await ix.get(3)).unwrap_or("-"))
+    print((await ix.get(9)).unwrap_or("-"))
+    print((await ix.boxed()).len())
+    let named: Index<str, Order> = Index { m: [:], boxes: [] }
+    let n = await named.put("x", Order { id: 5, item: "pen", tags: [] })
+    match await named.get("x") {
+        Some(o) => print(o.item),
+        None => print("none"),
+    }
+}
+""",
+    # ... passed to and returned from generic functions, in a generic
+    # struct's field and a list, an actor of an actor
+    "generic_actor_in_generic_code": """// MYLA-386: generic actors passed to and returned from generic functions,
+// held in a generic struct's field and in a list, one instance per type
+// argument natively; a copy of a handle reaches the same actor
+
+actor Slot<T> {
+    v: T,
+    changes: int,
+}
+
+impl<T> Slot<T> {
+    fun get(self) -> T {
+        return self.v
+    }
+
+    fun set(var self, v: T) -> T {
+        let old = self.v
+        self.v = v
+        self.changes += 1
+        return old
+    }
+
+    fun sets(self) -> int {
+        return self.changes
+    }
+
+    async fun copy_to(self, other: Slot<T>) -> T {
+        let old = await other.set(self.v)
+        return old
+    }
+}
+
+struct Named<T> {
+    name: str,
+    slot: Slot<T>,
+}
+
+fun make<T>(v: T) -> Slot<T> {
+    return Slot { v: v, changes: 0 }
+}
+
+fun named<T>(name: str, v: T) -> Named<T> {
+    return Named { name: name, slot: make(v) }
+}
+
+async fun swap<T>(a: Slot<T>, b: Slot<T>) {
+    let x = await a.get()
+    let y = await b.set(x)
+    let z = await a.set(y)
+}
+
+async fun read_all<T>(ns: [Named<T>]) -> [T] {
+    var out: [T] = []
+    for n in ns {
+        out.push(await n.slot.get())
+    }
+    return out
+}
+
+async fun bump_all(ns: [Named<int>], k: int) -> int {
+    var done = 0
+    for n in ns {
+        let old = await n.slot.set(await n.slot.get() + k)
+        done += 1
+    }
+    return done
+}
+
+fun pick<T>(xs: [Slot<T>], i: int) -> Slot<T> {
+    return xs[i]
+}
+
+#main
+async fun main() {
+    let a = make(1)
+    let b: Slot<int> = make(2)
+    await swap(a, b)
+    print(await a.get())
+    print(await b.get())
+    let s = make<str>("left")
+    let t = make("right")
+    await swap(s, t)
+    print(await s.get() + " " + await t.get())
+    let ns = [named("x", 10), named("y", 20)]
+    async let p = bump_all(ns, 1)
+    let q = await p
+    print(q)
+    let vs = await read_all(ns)
+    print(vs[0] + vs[1])
+    let words = [named("w", "hello")]
+    print((await read_all(words))[0])
+    // the same actor through a copy of its handle, and through a list
+    let slots = [a, b, make(9)]
+    let same = pick(slots, 0)
+    let old = await same.set(100)
+    print(await a.get())
+    print(await a.sets())
+    print(await pick(slots, 2).get())
+    // an async method of a generic actor calling another instance
+    let u = make([1, 2, 3])
+    let w = make([0])
+    let before = await u.copy_to(w)
+    print(before.len())
+    print((await w.get()).len())
+    let pairs = make((1, "one"))
+    print((await pairs.get()).1)
+    let nested = make(make(5))
+    print(await (await nested.get()).get())
+}
+""",
+    # ... a bounded impl calling `T.zero()`, a method with a type parameter of
+    # its own, children of an async method, `task.all` over its calls
+    "generic_actor_bounds_and_children": """// MYLA-386: a generic actor's bounded impl calling `T.zero()`, a method
+// with a type parameter of its own (`mapped<U>`), an async method whose
+// children work on what it read, and `task.all` over its calls
+import std.task as task
+
+trait Zero {
+    fun zero() -> Self
+}
+
+impl Zero for int {
+    fun zero() -> int { return 0 }
+}
+
+impl Zero for str {
+    fun zero() -> str { return "" }
+}
+
+actor Acc<T> {
+    items: [T],
+}
+
+impl<T> Acc<T> {
+    fun mapped<U>(self, f: (T) -> U) -> [U] {
+        var out: [U] = []
+        for x in self.items { out.push(f(x)) }
+        return out
+    }
+
+    fun push(var self, x: T) -> int {
+        self.items.push(x)
+        return self.items.len()
+    }
+
+    async fun split_count(self, f: async (T) -> int) -> int {
+        let xs = self.items
+        async let a = count_all(xs, f)
+        async let b = count_all(xs, f)
+        return await a + await b
+    }
+}
+
+impl<T: Zero + Add> Acc<T> {
+    fun total(self) -> T {
+        var s = T.zero()
+        for x in self.items { s = s + x }
+        return s
+    }
+}
+
+async fun count_all<T>(xs: [T], f: async (T) -> int) -> int {
+    var n = 0
+    for x in xs { n += await f(x) }
+    return n
+}
+
+async fun weigh(s: str) -> int {
+    return s.len()
+}
+
+async fun one(x: int) -> int {
+    return x
+}
+
+#main
+async fun main() {
+    let a = Acc { items: [1, 2, 3] }
+    let b = Acc { items: ["x", "yy"] }
+    var fs: [async () -> int] = []
+    for i in 0..10 {
+        fs.push(async () => await a.push(i))
+    }
+    let rs = await task.all(fs)
+    print(rs.len())
+    print(await a.total())
+    print(await b.total())
+    let strs = await a.mapped<str>((x) => f"<{x}>")
+    print(strs.len())
+    print(strs[0])
+    print(await b.split_count(weigh))
+    print(await a.split_count(one))
+}
+""",
+    # ... an actor holding another of its type argument, and one that links
+    # to others of its own type
+    "generic_actors_nested": """// MYLA-386: a generic actor whose field is another generic actor of its
+// type argument, awaited from its async method, and one that links to
+// others of its own type (a handle is a reference, so it may)
+actor Cell<T> {
+    value: T,
+}
+
+impl<T> Cell<T> {
+    fun get(self) -> T {
+        return self.value
+    }
+
+    fun set(var self, v: T) {
+        self.value = v
+    }
+}
+
+actor Pipe<T> {
+    out: Cell<T>,
+    seen: int,
+}
+
+impl<T> Pipe<T> {
+    async fun send(var self, v: T) -> int {
+        await self.out.set(v)
+        self.seen += 1
+        return self.seen
+    }
+}
+
+actor Node<T> {
+    v: T,
+    next: Option<Node<T>>,
+}
+
+impl<T> Node<T> {
+    fun value(self) -> T {
+        return self.v
+    }
+
+    fun link(self) -> Option<Node<T>> {
+        return self.next
+    }
+}
+
+async fun walk<T>(n: Node<T>) -> [T] {
+    var out: [T] = []
+    var cur: Option<Node<T>> = Some(n)
+    while let Some(c) = cur {
+        out.push(await c.value())
+        cur = await c.link()
+    }
+    return out
+}
+
+#main
+async fun main() {
+    let c: Cell<str> = Cell { value: "a" }
+    let p = Pipe { out: c, seen: 0 }
+    let k = await p.send("b")
+    let k2 = await p.send("c")
+    print(await c.get())
+    print(k2)
+    let last = Node { v: 3, next: None }
+    let mid = Node { v: 2, next: Some(last) }
+    let first = Node { v: 1, next: Some(mid) }
+    let vs = await walk(first)
+    print(vs.len())
+    print(vs[0] + vs[1] + vs[2])
+}
+""",
 }
 
 # A program that allocates far more recursive-enum cells (~12M) than the heap
@@ -6190,6 +6791,13 @@ PINNED = {
     # the builtins outside the closures' scope are methods since MYLA-221;
     # the output is the recording's
     "local_closure_shadows_a_builtin": "42\n7\n3\npushed!\n3\n2\n",
+    # MYLA-386: generic actors
+    "generic_actor_cell": "150\n1000\n1000\n300\n150\n300\nreset\n3\n2\n3\n7\n3.75\n",
+    "generic_actor_queue": "300\n44850\n0\n50\n150\n2\n2\np\n352\n",
+    "generic_actor_of_structs": "80\n3160\n1\nfalse\n8\n8\n280\nnew\n5\nthree\n-\n2\npen\n",
+    "generic_actor_in_generic_code": "2\n1\nright left\n2\n32\nhello\n100\n2\n9\n1\n3\none\n5\n",
+    "generic_actor_bounds_and_children": "10\n51\nxyy\n13\n<1>\n6\n102\n",
+    "generic_actors_nested": "c\n2\n3\n6\n",
 }
 
 

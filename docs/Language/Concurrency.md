@@ -136,7 +136,7 @@ async fun main() {
 
 - `actor` declares a type like a struct, and `impl` gives it methods. Making one (`Counter { count: 0 }`) starts the actor and gives a **handle**. Copying the handle copies the reference: `let d = c` reaches the same actor. It is the only reference type in Myla.
 - Its fields are reachable only through `self`, in its own methods. Outside them, `c.count` (read or assigned) and a pattern `Counter { count }` are errors. So is a lambda in its methods that captures `self`, as the lambda could run elsewhere.
-- An actor can't have type parameters or attributes (no `#derive`), and can't implement a trait, whose methods are called without `await`.
+- An actor can't have attributes (no `#derive`), and can't implement a trait, whose methods are called without `await`. It may have type parameters ([generic actors](#generic-actors)).
 - From outside, every method call is awaited (`await c.increment()`), also of a method declared without `async`; and the handle needn't be a `var` to call a `var self` method. The call runs on the actor, one call at a time, so its methods never race with each other. Its arguments go in, and its result comes out, as copies.
 - Inside its methods, a call on `self` is an ordinary call (`self.get()`), since the actor is already running it, unless the method is `async`.
 - An `async let` in an actor's method can't reach the actor's state through `self` (`an 'async let' can't reach the actor's state through 'self': its child task runs off the actor`): neither a field nor a synchronous method, since the child runs elsewhere while the actor runs other calls ([[MYLA-168]]). Read what the child needs into a `let` before the `async let`: the method reads it on the actor, and the child gets a copy. Passing `self` itself, the handle, or calling an `async` method of it is fine.
@@ -160,6 +160,74 @@ impl Account {
 ```
 
 - The compiler warns when an actor's async method changes a field after an `await` on the strength of what it read before (D95): a field examined by a condition (`if`, `while`, a `match`'s scrutinee or guard, directly or through a local read from it) before an `await` and changed after it without being examined again, or set from a local read before an `await`. Without the second check above, `self.balance = self.balance - amount` gets `warning[reentrancy]: 'self.balance' was checked before an 'await' and is changed after it: another call to this actor may have changed it meanwhile`, with a note at the `await`; `#allow(reentrancy)` on the method or its `impl` silences it where the program knows better (D161, [[Language/Attributes-and-testing#warnings-and-allow]]). The actor's own synchronous methods count ([[MYLA-171]]): a call `self.take()` changes every field `take` changes, through the methods it calls in turn, and a call `self.has_stock()` examines every field its body examines, so `if !self.has_stock() { … }` before the `await` and `self.take()` after it get the same warning. Checking again after the `await`, or changing the field before it (reserving, and giving it back if need be), are the two ways out. The program is still built and run. (The walk sees `self` and its methods only: a change made through another actor, or by an async method of the same actor, isn't followed.)
+
+### Generic actors
+
+An actor may have type parameters, as a struct may ([[MYLA-386]]): `actor Cell<T> { … }`, with its methods, synchronous or `async`, in `impl<T> Cell<T> { … }`, and those that need a bound in an impl of their own, `impl<T: Add> Cell<T>`.
+
+```myla
+actor Cell<T> {
+    value: T,
+    writes: int,
+}
+
+impl<T> Cell<T> {
+    fun get(self) -> T {
+        return self.value
+    }
+
+    fun put(var self, v: T) -> T {
+        let old = self.value
+        self.value = v
+        self.writes += 1
+        return old
+    }
+}
+
+impl<T: Add> Cell<T> {
+    fun add(var self, x: T) -> T {
+        self.value = self.value + x
+        self.writes += 1
+        return self.value
+    }
+}
+
+async fun fill(c: Cell<str>, n: int) -> int {
+    for i in 0..n {
+        let s = await c.add("ab")
+    }
+    return n
+}
+
+fun make<T>(v: T) -> Cell<T> {
+    return Cell { value: v, writes: 0 }
+}
+
+#main
+async fun main() {
+    let n = Cell { value: 1, writes: 0 }        // a Cell<int>
+    let s: Cell<str> = make("")
+    async let a = fill(s, 3)
+    async let b = fill(s, 2)
+    print(await a + await b)
+    print((await s.get()).len())
+    print(await n.add(41))
+    let old = await s.put("new")
+    print(await s.get())
+}
+// output:
+// 5
+// 10
+// 42
+// new
+```
+
+- `Cell { value: 1, writes: 0 }` starts one, its type arguments inferred as a generic struct's are: from its fields, or from the expected type (`let s: Cell<str> = Cell { value: "", writes: 0 }`, a parameter's or a field's type, a generic function's result). One that nothing fixes is an error (`cannot infer type parameter(s) T; add a type annotation to guide inference`).
+- Elsewhere its type names its arguments: `Cell<int>`, `[Cell<T>]`, a field `slot: Cell<T>` of a generic struct, `fun make<T>(v: T) -> Cell<T>`. Generic code passes, keeps and returns its handles like any other value, and every copy of a handle reaches the same actor.
+- An impl covers every instance: `impl Cell<int>` is an error, as for a struct (`cannot 'impl' on a concrete generic instantiation`). A bounded impl's methods are there for the instances whose arguments meet the bound: `await t.add(false)` on a `Cell<bool>` is `type 'bool' does not satisfy the bound 'T: Add' required by 'Cell.add'`. A method may have type parameters of its own (`fun mapped<U>(self, f: (T) -> U) -> [U]`), and `T.zero()` works under `T: Zero` (D172).
+- The rest is as for every actor: its fields, `T`s among them, are reached only through `self`; calls from outside are awaited and run one at a time per instance; arguments and results cross as deep copies, so a `T` that holds a list or a string is copied at the boundary and one of scalars costs nothing more; its async methods get the D95 warning (above), through its generic synchronous methods too.
+- No rule limits the type arguments, since every value is sendable ([below](#what-crosses-copies-and-sendable-values)); an actor's handle is one too, so `Cell<Cell<int>>` and an actor that links to others of its own type, `actor Node<T> { v: T, next: Option<Node<T>> }`, are fine.
+- Natively each instance has its own copy of the methods it calls and of its cell's layout and copies (`Cell.get__4.i32`, `Cell.get__4.str`, [[Architecture/Monomorphization]]); the interpreter runs one body for all, by erasure.
 
 ## What Myla guarantees, and what it doesn't
 

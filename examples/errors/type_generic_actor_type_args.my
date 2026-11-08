@@ -1,0 +1,10 @@
+//~ type error: type 'Cell' expects 1 type argument(s), got 0
+// A generic actor's type names its type arguments, as a generic struct's
+// does (MYLA-386)
+actor Cell<T> {
+    value: T,
+}
+
+fun peek(c: Cell) {}
+
+fun main() {}
