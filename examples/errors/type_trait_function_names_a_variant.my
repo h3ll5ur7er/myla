@@ -1,0 +1,19 @@
+//~ type error: function 'Red' collides with a variant of 'Color': 'Color.Red()' would build the variant
+// `Color.Red()` names the variant, so an enum's function without `self`
+// can't have a variant's name (D172).
+trait Paint {
+    fun Red() -> Self
+}
+
+enum Color {
+    Red,
+    Blue,
+}
+
+impl Paint for Color {
+    fun Red() -> Color { return Color.Blue }
+}
+
+fun main() {
+    print(1)
+}

@@ -1,0 +1,94 @@
+// trait_functions.my — a trait's functions without `self` (D172).
+//
+// A trait may declare, and its impls define, a function without a
+// receiver; `Self` in its signature is the implementing type. It is called
+// on a type, `int.zero()`, `Money.zero()`, or on a type parameter bounded
+// by the trait, `T.zero()`: the call is resolved statically, by the one
+// impl the type has (D55), natively per generic instance.
+
+trait Zero {
+    fun zero() -> Self
+}
+
+impl Zero for int {
+    #test()[0]
+    fun zero() -> int { return 0 }
+}
+
+struct Money {
+    cents: int64,
+}
+
+impl Zero for Money {
+    #test()[Money { cents: 0 }]
+    fun zero() -> Money { return Money { cents: 0 } }
+}
+
+impl Add for Money {
+    #test(Money { cents: 1 }, Money { cents: 2 })[Money { cents: 3 }]
+    fun add(self, other: Money) -> Money { return Money { cents: self.cents + other.cents } }
+}
+
+// No zero to pass in: the type gives it
+fun total<T: Zero + Add>(xs: [T]) -> T {
+    var s = T.zero()
+    for x in xs { s = s + x }
+    return s
+}
+
+#test([1, 2, 3])[6]
+#test([])[0]
+fun total_ints(xs: [int]) -> int {
+    return total(xs)
+}
+
+// A value made from text with no value in hand: the shape of decoding
+trait Parse {
+    fun parse(text: str) -> Option<Self>
+}
+
+impl Parse for int {
+    #test("42")[Some(42)]
+    #test("4x")[None]
+    #test("")[None]
+    fun parse(text: str) -> Option<int> {
+        if text.len() == 0 { return None }
+        var n = 0
+        for c in text {
+            if c < '0' || c > '9' { return None }
+            n = n * 10 + (c - '0')
+        }
+        return Some(n)
+    }
+}
+
+impl<T: Parse> Parse for [T] {
+    fun parse(text: str) -> Option<[T]> {
+        var out: [T] = []
+        for part in text.split(",") { out.push(T.parse(part)?) }
+        return Some(out)
+    }
+}
+
+fun parse_as<T: Parse>(text: str) -> Option<T> {
+    return T.parse(text)
+}
+
+#test("1,2,3")[6]
+#test("1,x")[-1]
+fun sum_of(text: str) -> int {
+    let xs: Option<[int]> = parse_as(text)
+    return match xs {
+        Some(v) => total(v)
+        None => -1
+    }
+}
+
+fun main() {
+    print(int.zero())
+    print(total([Money { cents: 150 }, Money { cents: 250 }]).cents)
+    print(total_ints([4, 5]))
+    print(int.parse("17").unwrap_or(0))
+    print(sum_of("10,20,30"))
+    print(sum_of("10,y"))
+}

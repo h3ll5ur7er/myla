@@ -1,0 +1,6 @@
+type error: type 'str' has no function 'zero'
+  --> examples/errors/type_trait_function_not_implemented.my:13:19
+   |
+13 |     print(str.zero())
+   |           ^^^^^^^^^^
+help: trait 'Zero' declares it: 'impl Zero for str' would give 'str' one

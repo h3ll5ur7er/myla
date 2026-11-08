@@ -1,0 +1,14 @@
+//~ type error: 'zero' is a function of trait 'Zero' without 'self': call it on the type, 'T.zero(…)', not on a value
+// Under a bound, a trait's function without `self` is the type
+// parameter's (D172): `T.zero()`, not `x.zero()`.
+trait Zero {
+    fun zero() -> Self
+}
+
+fun reset<T: Zero>(x: T) -> T {
+    return x.zero()
+}
+
+fun main() {
+    print(1)
+}

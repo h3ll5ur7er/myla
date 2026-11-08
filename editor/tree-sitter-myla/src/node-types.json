@@ -1590,6 +1590,10 @@
           "named": true
         },
         {
+          "type": "prim_type",
+          "named": true
+        },
+        {
           "type": "self",
           "named": true
         },
@@ -3832,19 +3836,15 @@
           "named": true
         },
         {
+          "type": "method_params",
+          "named": true
+        },
+        {
           "type": "named_type",
           "named": true
         },
         {
-          "type": "param",
-          "named": true
-        },
-        {
           "type": "prim_type",
-          "named": true
-        },
-        {
-          "type": "receiver",
           "named": true
         },
         {
@@ -3853,6 +3853,25 @@
         },
         {
           "type": "unit_type",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "method_params",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": true,
+      "types": [
+        {
+          "type": "param",
+          "named": true
+        },
+        {
+          "type": "receiver",
           "named": true
         }
       ]

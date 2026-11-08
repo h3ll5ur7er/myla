@@ -365,6 +365,26 @@ class ScopeScenarios(LspRequestHelpers):
         self.assertEqual(self.defn(uri, 5, 16), {"uri": uri, "range": rng(0, 7, 8)})    # P
         self.assertEqual(self.defn(uri, 5, 13), {"uri": uri, "range": rng(1, 4, 6)})    # mk
 
+    def test_trait_functions_without_self(self):
+        # D172 (MYLA-384): `T.zero()` is the bound's trait's function, `int.zero()`
+        # and `Money.zero()` their impls'; the type parameter shows its bounds
+        uri = self.open("trait Zero {\n    fun zero() -> Self\n}\n"                       # 0
+                        "impl Zero for int {\n    fun zero() -> int { return 0 }\n}\n"     # 3
+                        "struct Money { c: int }\n"                                        # 6
+                        "impl Zero for Money {\n    fun zero() -> Money { return Money { c: 0 } }\n}\n"   # 7
+                        "fun make<T: Zero>() -> T {\n    return T.zero()\n}\n"            # 10
+                        "fun main() {\n"                                                   # 13
+                        "    print(int.zero())\n"                                          # 14
+                        "    print(Money.zero().c)\n}\n")                                  # 15
+        self.assertEqual(self.defn(uri, 11, 13), {"uri": uri, "range": rng(1, 8, 12)})    # T.zero: the trait's
+        self.assertEqual(self.hover(uri, 11, 13), "fun zero() -> Self")
+        self.assertEqual(self.defn(uri, 11, 11), {"uri": uri, "range": rng(10, 9, 10)})   # T
+        self.assertEqual(self.hover(uri, 11, 11), "type parameter T: Zero")
+        self.assertEqual(self.defn(uri, 14, 15), {"uri": uri, "range": rng(4, 8, 12)})    # int.zero: its impl's
+        self.assertEqual(self.hover(uri, 14, 15), "fun zero() -> int")
+        self.assertEqual(self.defn(uri, 15, 17), {"uri": uri, "range": rng(8, 8, 12)})    # Money.zero
+        self.assertEqual(self.defn(uri, 15, 24), {"uri": uri, "range": rng(6, 15, 16)})   # its result's field
+
     def test_a_module_s_type_by_the_module_s_name(self):
         # `m.T` in a type (D170, MYLA-371): `T` is the module's declaration,
         # `m` the module

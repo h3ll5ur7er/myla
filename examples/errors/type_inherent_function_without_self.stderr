@@ -1,0 +1,6 @@
+type error: function 'f' in 'impl P' has no 'self': only a trait's functions go without one
+  --> examples/errors/type_inherent_function_without_self.my:8:5
+  |
+8 |     fun f(a: int) -> int { return a }
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+help: write a free function 'fun f(…)', or declare it in a trait and implement that for 'P'

@@ -3169,6 +3169,16 @@ impl Lower {
                 return self.direct_call(cg, e, nm, args, into, tail)
             },
             ExprKind.GetField(recv, field) => {
+                // `T.zero()`, `int.zero()`: the function of the type this
+                // instance calls it on (D172)
+                match get(cg.static_calls, e.id) {
+                    Some(st) => {
+                        let fname = format("{}.{}", cg.type_key(subst_type(st, cg.subst)), field)
+                        if !cg.has_func(fname) { return self.unsupported("a call of a type's function it has no impl of") }
+                        return self.direct_call(cg, e, fname, args, into, tail)
+                    },
+                    None => {},
+                }
                 let key = cg.type_key(cg.type_of(recv.id))
                 let mname = format("{}.{}", key, field)
                 // a builtin function called as a method of its first argument
