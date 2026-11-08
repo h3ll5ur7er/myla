@@ -47,10 +47,11 @@ Type arguments are written in **type positions**: `Box<int>`, `Result<str, IoErr
 
 1. Arguments are typed left to right. Once a parameter's type is fully known from earlier arguments, it is used as the expected type of the next argument, so `prepend(x, List.Nil)` works.
    A lambda argument needs less: when its parameter's type is a function type whose parameter types are known (`(int) -> U` once `T` is `int`), the lambda takes them and its result is inferred from its body, which binds `U`. So `apply(3, (x) => x * 2)` and `opt.map((x) => x + 1)` need no annotation ([[MYLA-356]]).
+   A bound naming a generic trait with its arguments, `I: Iterator<T>`, fixes them once its parameter is known: the type an argument gives `I` has one impl of `Iterator` (D55), whose argument is `T` ([[Language/Methods-and-traits#bounds]], D171). So `fun count<I: Iterator<T>, T>(it: I) -> int` needs nothing else, and in `map(it, (x) => x * 3)` the lambda's `x` is the iterator's `T`. Native code solves the instance's `T` the same way.
 2. The expected type of the whole expression (an annotation, a parameter, a return type, a field, a list's element) seeds struct literals and enum variants, and fixes the type parameters of a generic function's or method's call that its arguments leave open ([[MYLA-315]]): `let d: Deque<int> = deque.new()`, `return mk()` in a function that returns `B<str>`, `f(mk())` where `f` takes a `B<int>`, `Graph { todo: deque.new() }`. What the arguments fix comes first; the expected type only fills the rest, and hints the arguments whose parameter's type the earlier ones leave open, so `let b: B<int64> = of([5000000000])` makes the list an `[int64]`. An expected type that doesn't fit the result is not an error here: the call's type is compared where it is used.
    Inside generic code a type parameter of the enclosing function is a known type, so the return type `B<T>` gives the field `items: [T]` of `B { items: [] }` its type, as it does an empty map `[:]` or `None`.
 3. The branches of an `if` and the arms of a `match` used as a value are typed against each other when nothing is expected: one whose value can't say its whole type alone (`None`, `[]`, `[:]`, `Err(e)`, `Ok(x)`, a generic enum's variant that leaves a parameter out) is checked after the others, with the first one's type expected, so `let v = if n > 0 { Some(n) } else { None }` is an `Option<int>` ([[MYLA-290]]). When no branch says it (`if c { Ok(1) } else { Err("e") }`), annotate the binding.
-4. A type parameter that nothing determines is an error ("cannot infer type parameter(s) T … add a type annotation"): one that neither the explicit type arguments, the arguments nor the expected type fix, such as a call statement's `mk()`, `let b = mk()`, or a parameter the result doesn't name (`fun count<T>() -> int`); `mk<int>()` and `count<str>()` name it.
+4. A type parameter that nothing determines is an error ("cannot infer type parameter(s) T … add a type annotation"): one that neither the explicit type arguments, the arguments nor the expected type fix, such as a call statement's `mk()`, `let b = mk()`, or a parameter the result doesn't name and no bound fixes (`fun count<T>() -> int`); `mk<int>()` and `count<str>()` name it.
 
 ```myla
 struct B<T> {
@@ -89,6 +90,39 @@ fun main() {
 // output:
 // 1
 // 0
+```
+
+A type parameter only a bound names, fixed by the bound:
+
+```myla
+struct Up {
+    i: int,
+    stop: int,
+}
+
+impl Iterator<int> for Up {
+    fun next(var self) -> Option<int> {
+        if self.i >= self.stop { return None }
+        self.i += 1
+        return Some(self.i - 1)
+    }
+}
+
+// `T` is what `I`'s impl of Iterator says
+fun to_list<I: Iterator<T>, T>(it: I) -> [T] {
+    var out: [T] = []
+    for x in it { out.push(x) }
+    return out
+}
+
+fun main() {
+    let xs = to_list(Up { i: 2, stop: 5 })
+    print(xs.len())
+    print(xs[0] + xs[2])
+}
+// output:
+// 3
+// 6
 ```
 
 ### Explicit type arguments

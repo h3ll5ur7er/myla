@@ -1476,7 +1476,13 @@ pub struct StructInfo { name: str, type_params: [str], fields: [FieldT], line: i
 pub struct VariantT { name: str, payload: [Type] }
 pub struct EnumInfo { name: str, type_params: [str], variants: [VariantT], line: int32, col: int32, sp: SrcSpan, id: int32 }
 
-pub struct Bound { tp: str, traits: [str] }
+// `args`: each trait's type arguments, `I: Iterator<T>` (D171), [] for one
+// without them
+pub struct Bound { tp: str, traits: [str], args: [[Type]] }
+// The trait arguments of an impl of a generic trait, `impl<T> Iterator<T> for
+// ListIter<T>` (D55, D171): its target and its arguments, both in its own type
+// parameters, which a type of the target's solves.
+pub struct ImplArgs { target: Type, args: [Type] }
 // A map's key type met before every impl was known, checked once they are
 // (D163): where, and in which declaration.
 pub struct PendingKey { t: Type, line: int32, col: int32, sp: SrcSpan, decl: int32 }
@@ -1564,6 +1570,8 @@ pub struct Checker {
     trait_decls: [Decl],
     trait_impls: [TraitImplPair],
     user_trait_impls: [TraitImplPair],
+    impl_args: [str: ImplArgs],     // a generic trait's impls' arguments, by `trait\tkey` (D171)
+    for_iters: [int32: Stmt],       // a `for` over an iterator, by its id: the loop it is (D171, `check_for_iterator`)
     aliases: [AliasRaw],
     alias_cache: [AliasCached],
     const_decls: [ConstDeclT],
@@ -1669,7 +1677,7 @@ fun new_checker(decls: [Decl]) -> Checker {
         decls: decls,
         structs: [], enums: [], recursive_enums: [],
         functions: [], methods: [], method_decls: [], method_decl_keys: [], method_decl_ids: [],
-        impl_decls: [], next_id: 1000000000, pending_keys: [], keys_ready: false, key_ctx: false, traits: [], trait_decls: [], trait_impls: [], user_trait_impls: [],
+        impl_decls: [], next_id: 1000000000, pending_keys: [], keys_ready: false, key_ctx: false, traits: [], trait_decls: [], trait_impls: [], user_trait_impls: [], impl_args: [:], for_iters: [:],
         aliases: [], alias_cache: [], const_decls: [], consts: [], const_values: [:], const_done: [], const_folding: [],
         allow_self: false, type_params: [], bounds_cur: [],
         cur_ret: None, has_cur_ret: false, ret_at: None, loop_depth: 0, defer_at: -1,
@@ -2121,8 +2129,8 @@ fun int_type_name(w: int32, signed: bool) -> str {
 }
 
 #test([])[[]]
-#test([TypeParam { line: 4, col: 8, sp: SrcSpan { sline: 4, scol: 8, eline: 4, ecol: 9 }, name: "T", bounds: [] }])[["T"]]
-#test([TypeParam { line: 10, col: 16, sp: SrcSpan { sline: 10, scol: 16, eline: 10, ecol: 17 }, name: "S", bounds: [] }])[["S"]]
+#test([TypeParam { line: 4, col: 8, sp: SrcSpan { sline: 4, scol: 8, eline: 4, ecol: 9 }, name: "T", bounds: [], bound_args: [] }])[["T"]]
+#test([TypeParam { line: 10, col: 16, sp: SrcSpan { sline: 10, scol: 16, eline: 10, ecol: 17 }, name: "S", bounds: [], bound_args: [] }])[["S"]]
 fun tp_names(tps: [TypeParam]) -> [str] {
     var out: [str] = []
     for tp in tps { out.push(tp.name) }
@@ -2366,22 +2374,35 @@ impl Checker {
             None => Err(terr_at(p.line, p.col, p.sp, format("parameter '{}' needs a type", p.name))),   // unreachable: the parser requires one
         }
     }
+
+    // The bounds of `tps`, a generic trait's arguments (`I: Iterator<T>`,
+    // D171) resolved under the type parameters in force.
+    #test(checker_on("[int]"), [])[Ok([])]
+    #test(checker_on("[int]"), [TypeParam { line: 59, col: 14, sp: SrcSpan { sline: 59, scol: 14, eline: 59, ecol: 19 }, name: "T", bounds: ["Eq"], bound_args: [[]] }])[Ok([Bound { tp: "T", traits: ["Eq"], args: [[]] }])]
+    #test(checker_on("[int]"), [TypeParam { line: 1, col: 5, sp: SrcSpan { sline: 1, scol: 5, eline: 1, ecol: 6 }, name: "I", bounds: ["Iterator", "Eq"], bound_args: [[type_expr_of("[str]")], []] }])[Ok([Bound { tp: "I", traits: ["Iterator", "Eq"], args: [[Type.TList(Type.TStr)], []] }])]
+    fun bounds_of(var self, tps: [TypeParam]) -> Result<[Bound], CheckErr> {
+        var out: [Bound] = []
+        for tp in tps {
+            if tp.bounds.len() == 0 { continue }
+            var args: [[Type]] = []
+            var i = 0
+            while i < tp.bounds.len() {
+                var ts: [Type] = []
+                if i < tp.bound_args.len() { for a in tp.bound_args[i] { ts.push(self.resolve_part(a)?) } }
+                args.push(ts)
+                i += 1
+            }
+            out.push(Bound { tp: tp.name, traits: tp.bounds, args: args })
+        }
+        return Ok(out)
+    }
 }
 
 #test([])[[]]
-#test([TypeParam { line: 59, col: 14, sp: SrcSpan { sline: 59, scol: 14, eline: 59, ecol: 19 }, name: "T", bounds: ["Eq"] }])[[Bound { tp: "T", traits: ["Eq"] }]]
-#test([TypeParam { line: 54, col: 12, sp: SrcSpan { sline: 54, scol: 12, eline: 54, ecol: 18 }, name: "T", bounds: ["Ord"] }])[[Bound { tp: "T", traits: ["Ord"] }]]
-fun build_bounds(tps: [TypeParam]) -> [Bound] {
-    var out: [Bound] = []
-    for tp in tps { if tp.bounds.len() > 0 { out.push(Bound { tp: tp.name, traits: tp.bounds }) } }
-    return out
-}
-
-#test([])[[]]
-#test(["T"])[[TypeParam { line: 0, col: 0, sp: SrcSpan { sline: 0, scol: 0, eline: 0, ecol: 0 }, name: "T", bounds: [] }]]
+#test(["T"])[[TypeParam { line: 0, col: 0, sp: SrcSpan { sline: 0, scol: 0, eline: 0, ecol: 0 }, name: "T", bounds: [], bound_args: [] }]]
 fun synth_typarams(names: [str]) -> [TypeParam] {
     var out: [TypeParam] = []
-    for n in names { out.push(TypeParam { line: 0, col: 0, sp: no_span(), name: n, bounds: [] }) }
+    for n in names { out.push(TypeParam { line: 0, col: 0, sp: no_span(), name: n, bounds: [], bound_args: [] }) }
     return out
 }
 
@@ -2485,9 +2506,10 @@ impl Checker {
                     for p in fd.params { ps.push(self.param_part(p)?) }
                     var rt: Option<Type> = None
                     match fd.ret_type { Some(te) => { rt = result_of(self.resolve_part(te)?) }, None => {} }
+                    let bs = self.bounds_of(fd.type_params)?
                     self.type_params = []
                     let idx = self.func_idx(fd.name)
-                    self.functions[idx] = FuncSig { name: fd.name, params: ps, ret: rt, type_params: tp_names(fd.type_params), own_type_params: fd.type_params.len(), bounds: build_bounds(fd.type_params), decl: fd, has_decl: true, decl_id: decl.id }
+                    self.functions[idx] = FuncSig { name: fd.name, params: ps, ret: rt, type_params: tp_names(fd.type_params), own_type_params: fd.type_params.len(), bounds: bs, decl: fd, has_decl: true, decl_id: decl.id }
                 },
                 _ => {},
             }
@@ -2801,6 +2823,9 @@ impl Checker {
                         return Ok(0)
                     }
                     self.user_trait_impls.push(TraitImplPair { trait_name: tn, key: key })
+                    // what a bound naming the trait with arguments compares
+                    // and solves (D171)
+                    if conforms && trait_args.len() > 0 { self.impl_args[tn + "\t" + key] = ImplArgs { target: target, args: trait_args } }
                 }
             },
             None => {},
@@ -2902,9 +2927,9 @@ impl Checker {
         var combined_names: [str] = []
         for t in impl_tps { combined_names.push(t.name) }
         for t in m.type_params { combined_names.push(t.name) }
-        let combined_bounds = merge_bounds(build_bounds(impl_tps), build_bounds(m.type_params))
         self.record_result(self.check_type_params(combined_names, m.line, m.col, m.sp))?
         self.type_params = combined_names
+        let combined_bounds = merge_bounds(self.bounds_of(impl_tps)?, self.bounds_of(m.type_params)?)
         let self_t = self.resolve_part(target_te)?
         var params: [Type] = [self_t]
         for p in m.params { params.push(self.param_part(p)?) }
@@ -2999,15 +3024,29 @@ impl Checker {
                     continue
                 }
                 var good: [str] = []
-                for tr in b.traits {
-                    if self.trait_idx(tr) < 0 {
+                var good_args: [[Type]] = []
+                var j = 0
+                while j < b.traits.len() {
+                    let tr = b.traits[j]
+                    let args = b.args[j]
+                    j += 1
+                    let ti = self.trait_idx(tr)
+                    if ti < 0 {
                         self.record(terr_at(sig.decl.line, sig.decl.col, sig.decl.sp, format("unknown trait '{}' in bound '{}: {}'", tr, b.tp, tr)))?
                         changed = true
-                    } else {
-                        good.push(tr)
+                        continue
                     }
+                    // a generic trait takes its arguments, as in an impl (D171)
+                    let want = self.traits[ti].type_params
+                    if args.len() != want.len() {
+                        self.record(terr_at(sig.decl.line, sig.decl.col, sig.decl.sp, bound_arity_msg(b.tp, tr, want, args)))?
+                        changed = true
+                        continue
+                    }
+                    good.push(tr)
+                    good_args.push(args)
                 }
-                kept.push(Bound { tp: b.tp, traits: good })
+                kept.push(Bound { tp: b.tp, traits: good, args: good_args })
             }
             if changed { self.skipped_fns[sig.name] = true }
             if changed {
@@ -3035,6 +3074,28 @@ impl Checker {
 #test(Some("Box"))["Box"]
 fun key_or_none(k: Option<str>) -> str {
     return match k { Some(x) => x, None => "None" }
+}
+
+// The error of a bound naming the trait `tr`, whose type parameters are
+// `want`, with the arguments `args` (D171).
+#test("I", "Iterator", ["T"], [])["trait 'Iterator' expects 1 type argument(s) in the bound 'I: Iterator', got 0 (write 'I: Iterator<T>')"]
+#test("T", "Eq", [], [Type.TStr])["trait 'Eq' expects 0 type argument(s) in the bound 'T: Eq<str>', got 1 (write 'T: Eq')"]
+fun bound_arity_msg(tp: str, tr: str, want: [str], args: [Type]) -> str {
+    var expected = tr
+    if want.len() > 0 { expected = format("{}<{}>", tr, join_strs(want, ", ")) }
+    return format("trait '{}' expects {} type argument(s) in the bound '{}: {}', got {} (write '{}: {}')", tr, want.len(), tp, generic_name(tr, args), args.len(), tp, expected)
+}
+
+// The arguments of the generic trait `trnm` as `t`, whose type key is `key`,
+// implements it (D55, D171): its impl's, the impl's type parameters solved by
+// `t`; None without one. The code generator's too, on the instances' types.
+#test([:], "C", "Iterator", Type.TStruct("C", []))[None]
+#test(["Iterator\tL": ImplArgs { target: Type.TStruct("L", [Type.TParam("T")]), args: [Type.TTuple([Type.TParam("T"), Type.TStr])] }], "L", "Iterator", Type.TStruct("L", [Type.TChar]))[Some([Type.TTuple([Type.TChar, Type.TStr])])]
+pub fun impl_trait_args(impls: [str: ImplArgs], key: str, trnm: str, t: Type) -> Option<[Type]> {
+    return match get(impls, trnm + "\t" + key) {
+        Some(ia) => Some(subst_type_list(ia.args, unify_param(ia.target, t, []).subst)),
+        None => None,
+    }
 }
 
 #test([], [])[[]]
@@ -3712,6 +3773,63 @@ impl Checker {
         return false
     }
 
+    // The arguments of the generic trait `trnm` as `t` implements it: its
+    // one impl's (D55), or a type parameter's bound's (D171); None when it
+    // has neither.
+    #test(checker_on("[int]"), Type.TParam("I"), "Iterator")[None]
+    #test(checker_on("enum Option<T> { Some(T), None }\ntrait Iterator<T> {\n    fun next(var self) -> Option<T>\n}\nstruct C { n: int }\nimpl Iterator<int> for C {\n    fun next(var self) -> Option<int> { return None }\n}"), Type.TStruct("C", []), "Iterator")[Some([Type.TInt(32, true)])]
+    #test(checker_on("enum Option<T> { Some(T), None }\ntrait Iterator<T> {\n    fun next(var self) -> Option<T>\n}\nstruct L<T> { xs: [T] }\nimpl<T> Iterator<T> for L<T> {\n    fun next(var self) -> Option<T> { return None }\n}"), Type.TStruct("L", [Type.TStr]), "Iterator")[Some([Type.TStr])]
+    fun trait_args_of(self, t: Type, trnm: str) -> Option<[Type]> {
+        match t {
+            Type.TParam(pn) => {
+                for b in self.bounds_cur {
+                    if b.tp != pn { continue }
+                    var j = 0
+                    while j < b.traits.len() {
+                        if b.traits[j] == trnm { return Some(b.args[j]) }
+                        j += 1
+                    }
+                }
+                return None
+            },
+            _ => {},
+        }
+        return match self.type_key(t) {
+            Some(k) => impl_trait_args(self.impl_args, k, trnm, t),
+            None => None,
+        }
+    }
+
+    // `subst` and what the bounds fix once their type parameters are known:
+    // `I: Iterator<T>` with `I` a type gives `T` by `I`'s one impl of the
+    // trait (D55, D171). A disagreement is left to `check_call_bounds`.
+    #test(checker_on("[int]"), [], [])[[]]
+    #test(checker_on("enum Option<T> { Some(T), None }\ntrait Iterator<T> {\n    fun next(var self) -> Option<T>\n}\nstruct C { n: int }\nimpl Iterator<int> for C {\n    fun next(var self) -> Option<int> { return None }\n}"), [Bound { tp: "I", traits: ["Iterator"], args: [[Type.TParam("T")]] }], [Subst { name: "I", ty: Type.TStruct("C", []) }])[[Subst { name: "I", ty: Type.TStruct("C", []) }, Subst { name: "T", ty: Type.TInt(32, true) }]]
+    fun solve_bounds(self, bounds: [Bound], subst: [Subst]) -> [Subst] {
+        var s = subst
+        for b in bounds {
+            let known = subst_get(s, b.tp)
+            if match known { Some(x) => false, None => true } { continue }
+            let t = match known { Some(x) => x, None => Type.TError }
+            var j = 0
+            while j < b.traits.len() {
+                if b.args[j].len() > 0 {
+                    match self.trait_args_of(t, b.traits[j]) {
+                        Some(have) => {
+                            if have.len() == b.args[j].len() {
+                                let r = unify_list(b.args[j], have, s)
+                                if r.ok { s = r.subst }
+                            }
+                        },
+                        None => {},
+                    }
+                }
+                j += 1
+            }
+        }
+        return s
+    }
+
     #test(checker_on("enum E { A, B(int) }"), expr_of("a.b[0]"), Type.TFunc([Type.TInt(32, true)], Some(Type.TStr)), expr_of("a.b[0]"))[Err(CheckErr { line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 2 }, msg: "unknown name 'a'", decl: -1, notes: [] })]
     fun infer_compose(var self, e: Expr, lt: Type, r: Expr) -> Result<Type, CheckErr> {
         let lparams = func_params_of(lt)
@@ -3958,6 +4076,16 @@ fun is_struct_or_enum(t: Type) -> bool {
 #test(Type.TBool)[false]
 #test(Type.TParam("T"))[true]
 fun is_type_param(t: Type) -> bool { return match t { Type.TParam(n) => true, _ => false } }
+
+// What a type `for` can't loop over lacks to be an iterator (D171).
+#test(Type.TInt(32, true))[""]
+#test(Type.TStruct("P", []))[" (it needs 'impl Iterator<T> for P')"]
+#test(Type.TParam("I"))[" (it needs the bound 'I: Iterator<T>')"]
+fun iterator_hint(t: Type) -> str {
+    if is_struct_or_enum(t) { return format(" (it needs 'impl Iterator<T> for {}')", type_name(t)) }
+    if is_type_param(t) { return format(" (it needs the bound '{}: Iterator<T>')", type_name(t)) }
+    return ""
+}
 
 // Whether `t` is a tuple (not the unit type) or a list, which `==` compares
 // element by element when its elements are `Eq` (D163, MYLA-313).
@@ -4936,7 +5064,10 @@ impl Checker {
                     },
                     // a string's characters, as `s.chars()` gives them (MYLA-318)
                     Type.TStr => Type.TChar,
-                    _ => { return Err(terr_at(it_expr.line, it_expr.col, it_expr.sp, format("`for ... in` requires a list or map, found '{}'", type_name(it)))) },
+                    _ => {
+                        if self.is_iterator(it)? { return self.check_for_iterator(s, var_name, body, it_expr, it) }
+                        return Err(terr_at(it_expr.line, it_expr.col, it_expr.sp, format("`for ... in` requires a list, a map, a string, a range or an Iterator, found '{}'{}", type_name(it), iterator_hint(it))))
+                    },
                 }
             },
             None => {
@@ -4955,6 +5086,72 @@ impl Checker {
         self.loop_depth = self.loop_depth - 1
         self.pop_scope()
         return Ok(0)
+    }
+
+    // Whether `t` implements `Iterator` (D171): an impl's, or a type
+    // parameter's bound.
+    #test(checker_on("[int]"), Type.TStr)[Ok(false)]
+    #test(checker_on("enum Option<T> { Some(T), None }\ntrait Iterator<T> {\n    fun next(var self) -> Option<T>\n}\nstruct C { n: int }\nimpl Iterator<int> for C {\n    fun next(var self) -> Option<int> { return None }\n}"), Type.TStruct("C", []))[Ok(true)]
+    fun is_iterator(self, t: Type) -> Result<bool, CheckErr> {
+        return match t {
+            Type.TParam(pn) => Ok(self.bound_has(pn, "Iterator")),
+            _ => self.type_implements(t, "Iterator"),
+        }
+    }
+
+    // `for x in e` over an iterator of the type `it_t` (D171) is `var it = e;
+    // while let Some(x) = it.next() { body }`: that loop, built here with new
+    // node ids and checked in place of the `for`, inside a block of its own
+    // (an `if true`), which `fill_in` puts where the `for` was, so the
+    // interpreters and the code generator run it as they run one written so.
+    // The hidden variable, `%iter<id>`, is one no program can name.
+    #test(checker_on("enum Option<T> { Some(T), None }\ntrait Iterator<T> {\n    fun next(var self) -> Option<T>\n}\nstruct C { n: int }\nimpl Iterator<int> for C {\n    fun next(var self) -> Option<int> { return None }\n}"), stmt_of("for v in c { print(v) }"), "v", block_of("{ print(v) }"), expr_of("c"), Type.TStruct("C", []))[Ok(0)]
+    fun check_for_iterator(var self, s: Stmt, var_name: str, body: Block, it_expr: Expr, it_t: Type) -> Result<int32, CheckErr> {
+        let name = format("%iter{}", s.id)
+        let ln = it_expr.line
+        let cl = it_expr.col
+        let sp = it_expr.sp
+        let recv = Expr { id: self.fresh_id(), line: ln, col: cl, sp: sp, kind: ExprKind.Name(name) }
+        let callee = Expr { id: self.fresh_id(), line: ln, col: cl, sp: sp, kind: ExprKind.GetField(recv, "next") }
+        let call = Expr { id: self.fresh_id(), line: ln, col: cl, sp: sp, kind: ExprKind.Call(callee, [], []) }
+        var bind = PatternKind.PBind(var_name)
+        if var_name == "_" { bind = PatternKind.PWild }
+        let elem = Pattern { id: self.fresh_id(), line: s.line, col: s.col, sp: s.sp, kind: bind }
+        let some = Pattern { id: self.fresh_id(), line: s.line, col: s.col, sp: s.sp, kind: PatternKind.PEnum(None, "Some", [elem], true) }
+        let none = Pattern { id: self.fresh_id(), line: ln, col: cl, sp: sp, kind: PatternKind.PEnum(None, "None", [], false) }
+        let stop = Stmt { id: self.fresh_id(), line: ln, col: cl, sp: sp, kind: StmtKind.BreakS }
+        let arms = [
+            MatchArm { line: body.line, col: body.col, sp: body.sp, pattern: some, guard: None, body: ExprOrBlock.EB_Block(body) },
+            MatchArm { line: ln, col: cl, sp: sp, pattern: none, guard: None, body: ExprOrBlock.EB_Block(Block { line: ln, col: cl, sp: sp, stmts: [stop] }) },
+        ]
+        let m = Expr { id: self.fresh_id(), line: s.line, col: s.col, sp: s.sp, kind: ExprKind.MatchE(call, arms) }
+        let step = Stmt { id: self.fresh_id(), line: s.line, col: s.col, sp: s.sp, kind: StmtKind.ExprStmt(m) }
+        self.push_scope()
+        self.define_at(name, it_t, true, ln, cl, sp)
+        self.loop_depth = self.loop_depth + 1
+        self.check_stmt(step)?
+        self.loop_depth = self.loop_depth - 1
+        self.pop_scope()
+        let decl = Stmt { id: self.fresh_id(), line: ln, col: cl, sp: sp, kind: StmtKind.VarDecl("var", name, None, it_expr) }
+        let loop = Stmt { id: self.fresh_id(), line: s.line, col: s.col, sp: s.sp, kind: StmtKind.WhileS(self.true_lit(s), Block { line: body.line, col: body.col, sp: body.sp, stmts: [step] }) }
+        let own = Block { line: s.line, col: s.col, sp: s.sp, stmts: [decl, loop] }
+        self.for_iters[s.id] = Stmt { id: self.fresh_id(), line: s.line, col: s.col, sp: s.sp, kind: StmtKind.IfS(self.true_lit(s), own, None) }
+        return Ok(0)
+    }
+
+    // A new `true` at `s`, typed.
+    fun true_lit(var self, s: Stmt) -> Expr {
+        let e = Expr { id: self.fresh_id(), line: s.line, col: s.col, sp: s.sp, kind: ExprKind.BoolLit(true) }
+        self.resolved[e.id] = Type.TBool
+        return e
+    }
+
+    // A node id no declaration has (`next_id`), for a node the checker builds.
+    #test(checker_on("[int]"))[1000000000]
+    fun fresh_id(var self) -> int32 {
+        let id = self.next_id
+        self.next_id += 1
+        return id
     }
 
     #test(checker_on("fun f(n: int) -> int { return n * 2 }"), stmt_of("let x = 1"), Some(Expr { id: 28, line: 26, col: 12, sp: SrcSpan { sline: 26, scol: 12, eline: 26, ecol: 15 }, kind: ExprKind.Name("acc") }))[Err(CheckErr { line: 26, col: 12, sp: SrcSpan { sline: 26, scol: 12, eline: 26, ecol: 15 }, msg: "unknown name 'acc'", decl: -1, notes: [] })]
@@ -6783,14 +6980,14 @@ impl Checker {
     }
 }
 
-#test()["enum Option<T> { Some(T), None }\nenum Result<T, E> { Ok(T), Err(E) }\nfun get<K: Eq + Hash, V>(m: [K: V], k: K) -> Option<V> {\n    if m.contains(k) {\n        return Some(m[k])\n    }\n    return None\n}\ntrait Format {\n    fun format(self, spec: str) -> str\n}\nstruct Hasher {\n    state: uint64,\n}\nimpl Eq for Hasher {\n    fun eq(self, other: Hasher) -> bool {\n        return self.state == other.state\n    }\n}\ntrait Hash {\n    fun hash(self, h: Hasher) -> Hasher\n}\n"]
+#test()["enum Option<T> { Some(T), None }\nenum Result<T, E> { Ok(T), Err(E) }\nfun get<K: Eq + Hash, V>(m: [K: V], k: K) -> Option<V> {\n    if m.contains(k) {\n        return Some(m[k])\n    }\n    return None\n}\ntrait Format {\n    fun format(self, spec: str) -> str\n}\nstruct Hasher {\n    state: uint64,\n}\nimpl Eq for Hasher {\n    fun eq(self, other: Hasher) -> bool {\n        return self.state == other.state\n    }\n}\ntrait Hash {\n    fun hash(self, h: Hasher) -> Hasher\n}\ntrait Iterator<T> {\n    fun next(var self) -> Option<T>\n}\n"]
 // The prelude: what every program has without an import. The `Hasher`'s
 // state and the `Hash` trait are here (D163, MYLA-313), so that every type
 // can be a map key's and every module can name them; the hasher's methods,
 // its algorithm, and the `Hash` impls of the built-in types are std.hash's,
-// an implicit module.
+// an implicit module. `Iterator<T>` is here for `for` over one (D171).
 fun prelude_src() -> str {
-    return "enum Option<T> { Some(T), None }\nenum Result<T, E> { Ok(T), Err(E) }\nfun get<K: Eq + Hash, V>(m: [K: V], k: K) -> Option<V> {\n    if m.contains(k) {\n        return Some(m[k])\n    }\n    return None\n}\ntrait Format {\n    fun format(self, spec: str) -> str\n}\nstruct Hasher {\n    state: uint64,\n}\nimpl Eq for Hasher {\n    fun eq(self, other: Hasher) -> bool {\n        return self.state == other.state\n    }\n}\ntrait Hash {\n    fun hash(self, h: Hasher) -> Hasher\n}\n"
+    return "enum Option<T> { Some(T), None }\nenum Result<T, E> { Ok(T), Err(E) }\nfun get<K: Eq + Hash, V>(m: [K: V], k: K) -> Option<V> {\n    if m.contains(k) {\n        return Some(m[k])\n    }\n    return None\n}\ntrait Format {\n    fun format(self, spec: str) -> str\n}\nstruct Hasher {\n    state: uint64,\n}\nimpl Eq for Hasher {\n    fun eq(self, other: Hasher) -> bool {\n        return self.state == other.state\n    }\n}\ntrait Hash {\n    fun hash(self, h: Hasher) -> Hasher\n}\ntrait Iterator<T> {\n    fun next(var self) -> Option<T>\n}\n"
 }
 
 // The prelude's declarations, with node ids from `first_id`.
@@ -6841,7 +7038,7 @@ pub fun build_checker_std(decls: [Decl], next_id: int32, primitives: bool, std_i
     let r = c.run_all()
     match r { Ok(x) => {}, Err(e) => { return Err(e) } }
     // every call with all its arguments, for whatever runs the program (D136)
-    c.fill_defaults()
+    c.fill_in()
     return Ok(c)
 }
 
@@ -7653,10 +7850,11 @@ impl Checker {
             let at = self.expect_value(args[i], arg_hint(sig.params[i], subst_then(subst, from_expected), is_lambda(args[i])))?
             arg_types.push(at)
             let r = unify_param(sig.params[i], at, subst)
-            subst = r.subst
+            // what a bound fixes is known for the next argument's hint (D171)
+            subst = self.solve_bounds(sig.bounds, r.subst)
             i = i + 1
         }
-        subst = subst_then(subst, from_expected)
+        subst = self.solve_bounds(sig.bounds, subst_then(subst, from_expected))
         var missing: [str] = []
         for tp in sig.type_params { if !subst_has(subst, tp) { missing.push(tp) } }
         if missing.len() > 0 { return Err(terr_at(e.line, e.col, e.sp, format("cannot infer type parameter(s) {} for '{}' from the arguments; add a type annotation to guide inference", join_strs(missing, ", "), name))) }
@@ -7678,12 +7876,23 @@ impl Checker {
         for b in sig.bounds {
             match subst_get(subst, b.tp) {
                 Some(concrete) => {
-                    for tr in b.traits {
+                    var j = 0
+                    while j < b.traits.len() {
+                        let tr = b.traits[j]
                         var ok = false
                         match concrete { Type.TParam(pn) => { ok = self.bound_has(pn, tr) }, _ => { ok = self.type_implements(concrete, tr)? } }
-                        if !ok {
-                            return Err(terr_at(e.line, e.col, e.sp, format("type '{}' does not satisfy the bound '{}: {}' required by '{}'", type_name(concrete), b.tp, tr, sig.decl.name)))
+                        // a generic trait's arguments are its impl's (D171)
+                        let want = subst_type_list(b.args[j], subst)
+                        var have = want
+                        if ok && want.len() > 0 {
+                            match self.trait_args_of(concrete, tr) { Some(h) => { have = h }, None => {} }
                         }
+                        if !ok || !type_list_eq(have, want) {
+                            var msg = format("type '{}' does not satisfy the bound '{}: {}' required by '{}'", type_name(concrete), b.tp, generic_name(tr, want), sig.decl.name)
+                            if ok { msg = format("{}: it implements '{}'", msg, generic_name(tr, have)) }
+                            return Err(terr_at(e.line, e.col, e.sp, msg))
+                        }
+                        j += 1
                     }
                 },
                 None => {},
@@ -7783,11 +7992,22 @@ impl Checker {
         var bound_traits: [str] = []
         for b in self.bounds_cur {
             if b.tp != pn { continue }
-            for tr in b.traits {
+            var bj = 0
+            while bj < b.traits.len() {
+                let tr = b.traits[bj]
+                // a generic trait's methods with its arguments, `I: Iterator<T>` (D171)
+                let targs = b.args[bj]
+                bj += 1
                 bound_traits.push(tr)
                 let ti = self.trait_idx(tr)
                 // an operator trait's (`Add`, `Ord`, ...) are its operators
-                if ti < 0 || self.traits[ti].builtin || self.traits[ti].type_params.len() > 0 { continue }
+                if ti < 0 || self.traits[ti].builtin || self.traits[ti].type_params.len() != targs.len() { continue }
+                var pmap: [Subst] = []
+                var k = 0
+                while k < targs.len() {
+                    pmap.push(Subst { name: self.traits[ti].type_params[k], ty: targs[k] })
+                    k += 1
+                }
                 for m in self.traits[ti].methods {
                     if m.name != field { continue }
                     if m.receiver == "var self" {
@@ -7798,13 +8018,13 @@ impl Checker {
                     if args.len() != m.params.len() - 1 { return Err(terr_at(e.line, e.col, e.sp, format("method '{}' expects {} argument(s), got {}", field, m.params.len() - 1, args.len()))) }
                     var i = 0
                     while i < args.len() {
-                        let pt = subst_self(m.params[i + 1], me, [])
+                        let pt = subst_self(m.params[i + 1], me, pmap)
                         let at = self.expect_value(args[i], Some(pt))?
                         if !type_eq(at, pt) { return Err(terr_at(args[i].line, args[i].col, args[i].sp, format("argument type mismatch in call to '{}': expected '{}', found '{}'", field, type_name(pt), type_name(at)))) }
                         i += 1
                     }
                     self.mark_call(e, "method", "", m.receiver == "var self", "", false)
-                    return Ok(match m.ret { Some(rt) => Some(subst_self(rt, me, [])), None => None })
+                    return Ok(match m.ret { Some(rt) => Some(subst_self(rt, me, pmap)), None => None })
                 }
             }
         }
@@ -7819,7 +8039,7 @@ impl Checker {
         let from_expected = expected_subst(sig.ret, expected)
         var subst = self.explicit_subst(e, sig, format("method '{}'", method))?
         let r0 = unify_param(sig.params[0], recv_type, subst)
-        subst = r0.subst
+        subst = self.solve_bounds(sig.bounds, r0.subst)
         var arg_types: [Type] = []
         var i = 0
         while i < args.len() {
@@ -7827,10 +8047,10 @@ impl Checker {
             let at = self.expect_value(args[i], arg_hint(pt, subst_then(subst, from_expected), is_lambda(args[i])))?
             arg_types.push(at)
             let r = unify_param(pt, at, subst)
-            subst = r.subst
+            subst = self.solve_bounds(sig.bounds, r.subst)
             i = i + 1
         }
-        subst = subst_then(subst, from_expected)
+        subst = self.solve_bounds(sig.bounds, subst_then(subst, from_expected))
         var missing: [str] = []
         for tp in sig.type_params { if !subst_has(subst, tp) { missing.push(tp) } }
         if missing.len() > 0 { return Err(terr_at(e.line, e.col, e.sp, format("cannot infer type parameter(s) {} for method '{}'; add a type annotation to guide inference", join_strs(missing, ", "), method))) }
@@ -8910,25 +9130,30 @@ fun starts_with_dunder(name: str) -> bool {
 }
 
 // =========================================================================
-// Default arguments (D136, MYLA-255): filled in once the program is checked
+// Default arguments (D136, MYLA-255) and loops over iterators (D171): filled
+// in once the program is checked
 // =========================================================================
 //
 // The checker records, for each call that leaves trailing parameters out,
 // the defaults of those parameters (`call_defaults`, keyed by the call's node
-// id). `fill_defaults` rewrites every function and method body and every
-// constant, so that call carries them as arguments of its own: the
-// interpreter, the lowering and everything after them see each call with all
-// its arguments. The rebuilt nodes keep their ids, so the side tables (types,
-// the calls' targets) still apply; a default's nodes are shared by the calls
-// it fills, as they have one type.
+// id), and for each `for` over an iterator the loop it stands for
+// (`for_iters`, keyed by the `for`'s id). `fill_in` rewrites every function
+// and method body and every constant, so that call carries them as arguments
+// of its own and the `for` is that loop: the interpreter, the lowering and
+// everything after them see each call with all its arguments, and a loop
+// over an iterator as one written with `while`. The rebuilt nodes keep their
+// ids, so the side tables (types, the calls' targets) still apply; a
+// default's nodes are shared by the calls it fills, as they have one type.
+
+pub struct Fills { defaults: [int32: [Expr]], fors: [int32: Stmt] }
 
 impl Checker {
-    // Every recorded call given its defaults, in the declarations, the
-    // functions' and methods' signatures and the method bodies the checker
-    // keeps apart.
-    fun fill_defaults(var self) {
-        if self.call_defaults.len() == 0 { return }
-        let t = self.call_defaults
+    // Every recorded call given its defaults and every loop over an iterator
+    // made the loop it stands for, in the declarations, the functions' and
+    // methods' signatures and the method bodies the checker keeps apart.
+    fun fill_in(var self) {
+        if self.call_defaults.len() == 0 && self.for_iters.len() == 0 { return }
+        let t = Fills { defaults: self.call_defaults, fors: self.for_iters }
         var ds: [Decl] = []
         for d in self.decls { ds.push(fd_decl(d, t)) }
         self.decls = ds
@@ -8947,7 +9172,7 @@ impl Checker {
     }
 }
 
-fun fd_decl(d: Decl, t: [int32: [Expr]]) -> Decl {
+fun fd_decl(d: Decl, t: Fills) -> Decl {
     let k = match d.kind {
         DeclKind.FunDecl(f) => DeclKind.FunDecl(fd_fun(f, t)),
         DeclKind.ImplDecl(target, ms, tps, tr, targs, dattrs) => DeclKind.ImplDecl(target, fd_funs(ms, t), tps, tr, targs, dattrs),
@@ -8958,32 +9183,36 @@ fun fd_decl(d: Decl, t: [int32: [Expr]]) -> Decl {
     return Decl { id: d.id, line: d.line, col: d.col, sp: d.sp, kind: k }
 }
 
-fun fd_funs(ms: [FunData], t: [int32: [Expr]]) -> [FunData] {
+fun fd_funs(ms: [FunData], t: Fills) -> [FunData] {
     var out: [FunData] = []
     for m in ms { out.push(fd_fun(m, t)) }
     return out
 }
 
-fun fd_fun(f: FunData, t: [int32: [Expr]]) -> FunData {
+fun fd_fun(f: FunData, t: Fills) -> FunData {
     var g = f
     g.body = match f.body { Some(b) => Some(fd_block(b, t)), None => None }
     return g
 }
 
-fun fd_block(b: Block, t: [int32: [Expr]]) -> Block {
+fun fd_block(b: Block, t: Fills) -> Block {
     var ss: [Stmt] = []
     for s in b.stmts { ss.push(fd_stmt(s, t)) }
     return Block { line: b.line, col: b.col, sp: b.sp, stmts: ss }
 }
 
-fun fd_stmt(s: Stmt, t: [int32: [Expr]]) -> Stmt {
+fun fd_stmt(s: Stmt, t: Fills) -> Stmt {
     let k = match s.kind {
         StmtKind.VarDecl(kind, name, te, init) => StmtKind.VarDecl(kind, name, te, fd_expr(init, t)),
         StmtKind.DestructDecl(kind, b, te, init) => StmtKind.DestructDecl(kind, b, te, fd_expr(init, t)),
         StmtKind.Assign(place, value) => StmtKind.Assign(fd_expr(place, t), fd_expr(value, t)),
         StmtKind.IfS(c, then, el) => StmtKind.IfS(fd_expr(c, t), fd_block(then, t), fd_else(el, t)),
         StmtKind.WhileS(c, body) => StmtKind.WhileS(fd_expr(c, t), fd_block(body, t)),
-        StmtKind.ForS(v, start, end, body, iter) => StmtKind.ForS(v, fd_opt(start, t), fd_opt(end, t), fd_block(body, t), fd_opt(iter, t)),
+        StmtKind.ForS(v, start, end, body, iter) => {
+            // over an iterator: the loop the checker built (D171)
+            if t.fors.contains(s.id) { return fd_stmt(t.fors[s.id], t) }
+            StmtKind.ForS(v, fd_opt(start, t), fd_opt(end, t), fd_block(body, t), fd_opt(iter, t))
+        },
         StmtKind.ReturnS(v, tail) => StmtKind.ReturnS(fd_opt(v, t), tail),
         StmtKind.ExprStmt(e) => StmtKind.ExprStmt(fd_expr(e, t)),
         StmtKind.DeferS(b) => StmtKind.DeferS(fd_block(b, t)),
@@ -8992,7 +9221,7 @@ fun fd_stmt(s: Stmt, t: [int32: [Expr]]) -> Stmt {
     return Stmt { id: s.id, line: s.line, col: s.col, sp: s.sp, kind: k }
 }
 
-fun fd_else(el: Option<ElseTail>, t: [int32: [Expr]]) -> Option<ElseTail> {
+fun fd_else(el: Option<ElseTail>, t: Fills) -> Option<ElseTail> {
     return match el {
         Some(ElseTail.ElseBlock(b)) => Some(ElseTail.ElseBlock(fd_block(b, t))),
         Some(ElseTail.ElseIf(s)) => Some(ElseTail.ElseIf(fd_stmt(s, t))),
@@ -9000,24 +9229,24 @@ fun fd_else(el: Option<ElseTail>, t: [int32: [Expr]]) -> Option<ElseTail> {
     }
 }
 
-fun fd_opt(e: Option<Expr>, t: [int32: [Expr]]) -> Option<Expr> {
+fun fd_opt(e: Option<Expr>, t: Fills) -> Option<Expr> {
     return match e { Some(x) => Some(fd_expr(x, t)), None => None }
 }
 
-fun fd_exprs(es: [Expr], t: [int32: [Expr]]) -> [Expr] {
+fun fd_exprs(es: [Expr], t: Fills) -> [Expr] {
     var out: [Expr] = []
     for e in es { out.push(fd_expr(e, t)) }
     return out
 }
 
-fun fd_body(b: ExprOrBlock, t: [int32: [Expr]]) -> ExprOrBlock {
+fun fd_body(b: ExprOrBlock, t: Fills) -> ExprOrBlock {
     return match b {
         ExprOrBlock.EB_Expr(x) => ExprOrBlock.EB_Expr(fd_expr(x, t)),
         ExprOrBlock.EB_Block(bl) => ExprOrBlock.EB_Block(fd_block(bl, t)),
     }
 }
 
-fun fd_expr(e: Expr, t: [int32: [Expr]]) -> Expr {
+fun fd_expr(e: Expr, t: Fills) -> Expr {
     let k = match e.kind {
         ExprKind.Unary(op, a) => ExprKind.Unary(op, fd_expr(a, t)),
         ExprKind.Binary(op, a, b) => ExprKind.Binary(op, fd_expr(a, t), fd_expr(b, t)),
@@ -9025,8 +9254,8 @@ fun fd_expr(e: Expr, t: [int32: [Expr]]) -> Expr {
             var all = fd_exprs(args, t)
             // the defaults this call leaves to its trailing parameters, which
             // may themselves call something with defaults
-            if t.contains(e.id) {
-                for d in t[e.id] { all.push(fd_expr(d, t)) }
+            if t.defaults.contains(e.id) {
+                for d in t.defaults[e.id] { all.push(fd_expr(d, t)) }
             }
             ExprKind.Call(fd_expr(c, t), all, targs)
         },

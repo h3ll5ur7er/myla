@@ -2159,6 +2159,10 @@
         {
           "type": "identifier",
           "named": true
+        },
+        {
+          "type": "trait_bound",
+          "named": true
         }
       ]
     }
@@ -4592,6 +4596,25 @@
         },
         {
           "type": "identifier",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "trait_bound",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": true,
+      "types": [
+        {
+          "type": "identifier",
+          "named": true
+        },
+        {
+          "type": "type_args",
           "named": true
         }
       ]

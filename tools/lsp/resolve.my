@@ -471,6 +471,8 @@ impl Resolver {
         // its own for it, so it is the first of its name after the parameter
         for tp in tps {
             for b in tp.bounds { self.use_name(tp.line, tp.col, b) }
+            // a generic trait's arguments, `I: Iterator<T>` (D171)
+            for args in tp.bound_args { for a in args { self.type_expr(a) } }
         }
     }
 
@@ -652,7 +654,10 @@ impl Resolver {
                 match iter {
                     Some(e) => {
                         self.expr(e)
-                        each = iter_of(self.unalias(self.type_of(e)))
+                        let t = self.unalias(self.type_of(e))
+                        each = iter_of(t)
+                        // an iterator's: what its `next` gives (D171)
+                        if each == "" { each = success_of(self.unalias(self.method_result(t, "next"))) }
                     },
                     None => {
                         match start {
@@ -1092,6 +1097,25 @@ impl Resolver {
             types.push(bound[n])
         }
         return subst(ret, names, types)
+    }
+
+    // The result of the method `name` of a value of type `t`, "" when
+    // unknown.
+    fun method_result(self, t: str, name: str) -> str {
+        match self.value_members(t) {
+            Some(ms) => {
+                for m in ms {
+                    if m.name == name {
+                        return match m.kind {
+                            DefKind.Global(SymKind.Method) => subst(result_of(m.detail), ["Self"], [t]),
+                            _ => "",
+                        }
+                    }
+                }
+            },
+            None => {},
+        }
+        return ""
     }
 
     // The type of `recv.name`, or of `recv.name(…)` when `called`.

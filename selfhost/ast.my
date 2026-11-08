@@ -138,7 +138,9 @@ pub enum StmtKind {
 
 // --- declarations --------------------------------------------------------
 
-pub struct TypeParam { line: int32, col: int32, sp: SrcSpan, name: str, bounds: [str] }
+// `bound_args`: each bound's type arguments, `I: Iterator<T>` (D171), [] for
+// a trait without them
+pub struct TypeParam { line: int32, col: int32, sp: SrcSpan, name: str, bounds: [str], bound_args: [[TypeExpr]] }
 pub struct Field { line: int32, col: int32, sp: SrcSpan, name: str, ty: TypeExpr }
 pub struct Variant { line: int32, col: int32, sp: SrcSpan, name: str, payload: [TypeExpr] }
 pub struct ImportPath { line: int32, col: int32, sp: SrcSpan, dots: int32, segments: [str] }
@@ -421,7 +423,15 @@ pub fun dump_stmt(s: Stmt) -> str {
 }
 
 fun dump_typaram(tp: TypeParam) -> str {
-    return format("(tp {} {})", sstr(tp.name), join_map(tp.bounds, sstr))
+    var bs: [str] = []
+    var i = 0
+    while i < tp.bounds.len() {
+        var b = sstr(tp.bounds[i])
+        if i < tp.bound_args.len() && tp.bound_args[i].len() > 0 { b = format("(bound {} {})", b, join_map(tp.bound_args[i], dump_type)) }
+        bs.push(b)
+        i += 1
+    }
+    return format("(tp {} {})", sstr(tp.name), wrap_list(bs))
 }
 
 fun dump_field(f: Field) -> str {

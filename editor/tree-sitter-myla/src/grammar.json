@@ -1017,7 +1017,7 @@
                 },
                 {
                   "type": "SYMBOL",
-                  "name": "identifier"
+                  "name": "trait_bound"
                 },
                 {
                   "type": "REPEAT",
@@ -1030,12 +1030,33 @@
                       },
                       {
                         "type": "SYMBOL",
-                        "name": "identifier"
+                        "name": "trait_bound"
                       }
                     ]
                   }
                 }
               ]
+            },
+            {
+              "type": "BLANK"
+            }
+          ]
+        }
+      ]
+    },
+    "trait_bound": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "SYMBOL",
+          "name": "identifier"
+        },
+        {
+          "type": "CHOICE",
+          "members": [
+            {
+              "type": "SYMBOL",
+              "name": "type_args"
             },
             {
               "type": "BLANK"

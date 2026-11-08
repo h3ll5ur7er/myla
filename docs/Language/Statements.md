@@ -202,6 +202,7 @@ fun main() {
 
 - A range's bounds are integers of one type (literals adopt), and the loop variable has that type.
 - Iterating a list visits its elements; iterating a map visits its keys in the order they were first inserted (D105); iterating a string visits its characters, each a `char`, as `s.chars()` gives them (U+FFFD for a byte that isn't part of a well-formed UTF-8 sequence), without making that list (D165, [[MYLA-318]]). A string's bytes are `s[i]` for `i` in `0..s.len()`.
+- Iterating a value whose type implements the prelude's `Iterator<T>` calls its `next` until it gives `None`: `for x in e` is `var it = e; while let Some(x) = it.next() { … }`, so it loops over a copy of `e`, and the loop variable is a `T` (D171, [[Language/Methods-and-traits#iterators]]). A type parameter loops so with the bound `I: Iterator<T>`. Any other type is an error (`` `for ... in` requires a list, a map, a string, a range or an Iterator ``).
 - The loop variable is immutable. The loop works on a snapshot: changing the list inside the loop doesn't change what is visited.
 - `break` and `continue` apply to the innermost loop; outside a loop they are a type error.
 

@@ -91,7 +91,8 @@ variant      = IDENT ( "(" type ( "," type )* ","? ")" )? ;
 fun_decl     = "async"? "fun" IDENT generics? "(" NL* ( param NL* ( "," NL* param NL* )* ( "," NL* )? )? ")" ( "->" type )? block ;
 param        = IDENT ":" type ( "=" expression )? ;   (* a default: D136 *)
 generics     = "<" generic ( "," generic )* ","? ">" ;
-generic      = IDENT ( ":" IDENT ( "+" IDENT )* )? ;
+generic      = IDENT ( ":" trait_bound ( "+" trait_bound )* )? ;
+trait_bound  = IDENT type_args? ;   (* a generic trait with its arguments, I: Iterator<T>: D171 *)
 type_params  = "<" IDENT ( "," IDENT )* ","? ">" ;
 
 impl_decl    = "impl" generics? ( type | named_type "for" type ) "{" SEP* ( method SEP* )* "}" ;

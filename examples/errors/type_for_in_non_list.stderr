@@ -1,0 +1,5 @@
+type error: `for ... in` requires a list, a map, a string, a range or an Iterator, found 'int32'
+  --> examples/errors/type_for_in_non_list.my:7:14
+  |
+7 |     for x in n {
+  |              ^

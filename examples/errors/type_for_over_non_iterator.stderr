@@ -1,0 +1,5 @@
+type error: `for ... in` requires a list, a map, a string, a range or an Iterator, found 'Countdown' (it needs 'impl Iterator<T> for Countdown')
+  --> examples/errors/type_for_over_non_iterator.my:19:14
+   |
+19 |     for x in c {
+   |              ^
