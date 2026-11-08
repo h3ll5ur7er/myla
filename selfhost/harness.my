@@ -312,7 +312,7 @@ impl Gen {
             Type.TSB => "StringBuilder",
             Type.TStruct(n, args) => self.named_type(n, args),
             Type.TEnum(n, args) => self.named_type(n, args),
-            Type.TActor(n) => self.named_type(n, []),
+            Type.TActor(n, a) => self.named_type(n, a),
             Type.TTuple(es) => {
                 var parts: [str] = []
                 for e in es { parts.push(self.type_text(e)) }

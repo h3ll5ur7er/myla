@@ -1,0 +1,5 @@
+type error: 'value' belongs to the actor 'Cell': only its own methods reach it
+  --> examples/errors/type_generic_actor_field_from_outside.my:9:13
+  |
+9 |     return c.value
+  |            ^^^^^^^

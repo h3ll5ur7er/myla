@@ -4482,12 +4482,12 @@ fun value_key(v: Value) -> str {
 }
 
 #test(Type.TInt(32, true))["int32"]
-#test(Type.TActor("Account"))["Account"]
+#test(Type.TActor("Account", []))["Account"]
 #test(Type.TStruct("Box", [Type.TInt(32, true)]))["Box"]
 fun type_key_of(t: Type) -> str {
     return match t {
         Type.TStruct(n, a) => n,
-        Type.TActor(n) => n,
+        Type.TActor(n, a) => n,
         Type.TEnum(n, a) => n,
         Type.TInt(w, s) => int_type_name_i(w, s),
         Type.TBool => "bool",

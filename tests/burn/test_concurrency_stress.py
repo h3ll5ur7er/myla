@@ -106,6 +106,9 @@ EXPECTED = {
     "t25_timers_fire": ("128\n", 0),
     "t26_tasks_yield": ("6400\n", 0),
     "t27_children_read_as_they_write": ("86\n", 0),
+    # 28. a generic actor is an actor (MYLA-386): each instance serves its
+    # callers one at a time from 32 tasks, and a list sent in is a copy
+    "t28_generic_actor_from_many_tasks": ("32 200000 200000 19999900000 0\n8000 8000 41240\n", 0),
 }
 
 
