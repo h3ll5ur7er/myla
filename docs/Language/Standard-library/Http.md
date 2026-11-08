@@ -72,15 +72,15 @@ async fun main() {
 
 | Function | Result |
 | --- | --- |
-| `fetch(url: str) -> Result<Response, HttpError>` | `GET url`, over a connection of its own |
+| `get(url: str) -> Result<Response, HttpError>`, `fetch(url)` | `GET url`, over a connection of its own (`fetch` is the same, its first name) |
 | `post(url: str, body: str)` | `POST url` with the body |
 | `send(r: Request)` | The request `r`, over a connection of its own (`Connection: close`) |
-| `fetch_async(url)`, `post_async(url, body)`, `send_async(r)` (async) | The same, the task waiting |
+| `get_async(url)`, `fetch_async(url)`, `post_async(url, body)`, `send_async(r)` (async) | The same, the task waiting |
 | `client() -> Client` | A client that keeps its connection open between requests (keep-alive) |
 | `Client`: `send(r)`, `get(url)`, `post(url, body)`, and `send_async`, `get_async`, `post_async` (async) | A request over the connection kept from the last one, when it goes to the same host and port and the server allowed it, else over a new one |
 | `Client`: `close()` | The kept connection closed |
 
-The one-shot GET is `fetch`, not `get`: the prelude's `get(m, k)` (a map's value) takes the name `get` in every module, so a module can't declare its own ([[MYLA-347]]). A `Client`'s method can be `get`.
+The one-shot GET is `get`, and `fetch` is the same: the module was first written while the prelude's free `get(m, k)` took the name in the file being tested; maps have `m.get(k)` since [[MYLA-393]].
 
 `request(method: str, url: str) -> Request` makes a request, which these methods change, each giving a new one:
 

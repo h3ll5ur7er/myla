@@ -98,7 +98,7 @@ async fun main() {
     let base = f"http://127.0.0.1:{port}"
     print(show(http.fetch(base + "/plain")))
     print(show(http.fetch(base + "/chunked")))
-    print(show(http.fetch(base + "/close")))
+    print(show(http.get(base + "/close")))
     print(show(http.fetch(base + "/gzip")))
     print(show(http.send(http.request("GET", base + "/gzip").with_decompress(false))))
     print(show(http.fetch(base + "/gzip-chunked")))

@@ -2225,8 +2225,12 @@ pub async fun send_async(r: Request) -> Result<Response, HttpError> {
     return res
 }
 
-// `GET url` (not `get`: the prelude's `get(m, k)` takes that name in every
-// module).
+// `GET url`, over a connection of its own; `fetch` is the same.
+pub fun get(url: str) -> Result<Response, HttpError> {
+    return send(request("GET", url))
+}
+
+// `GET url`: `get` by its older name (MYLA-347, MYLA-393).
 pub fun fetch(url: str) -> Result<Response, HttpError> {
     return send(request("GET", url))
 }
@@ -2238,6 +2242,11 @@ pub fun post(url: str, body: str) -> Result<Response, HttpError> {
 
 // `fetch`, the task waiting.
 pub async fun fetch_async(url: str) -> Result<Response, HttpError> {
+    return await send_async(request("GET", url))
+}
+
+// `get`, the task waiting.
+pub async fun get_async(url: str) -> Result<Response, HttpError> {
     return await send_async(request("GET", url))
 }
 
