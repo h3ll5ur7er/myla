@@ -74,7 +74,7 @@ fun main() {
     ages["bob"] = 27
     print(ages["ann"])
     print(ages.contains("cy"))
-    match get(ages, "bob") {
+    match ages.get("bob") {
         Some(a) => print(a)
         None => print("unknown")
     }
@@ -91,7 +91,7 @@ fun main() {
 | Operation | Notes |
 | --- | --- |
 | `[k: v, …]`, `[:]` | A key is of any type that is `Eq` and `Hash` (below); `[:]` needs an expected type. A key given twice keeps its first place and takes the last value, as `m[k] = v` would |
-| `m[k]` | A missing key is a runtime error; use `get(m, k) -> Option<V>` (a prelude function) to ask safely |
+| `m[k]` | A missing key is a runtime error; use `m.get(k) -> Option<V>` ([[Language/Standard-library/Map]], [[MYLA-393]]) to ask safely |
 | `m[k] = v` | Inserts or replaces; needs a `var` place |
 | `m.contains(k)`, `m.keys() -> [K]`, `m.len()` | `keys` gives the keys in the order `for` visits them |
 | `m.remove(k)` | Needs a `var` place; removing a missing key does nothing. Like `m[k]`, `m[k] = v` and `contains`, it takes constant time on average ([[MYLA-310]]) |

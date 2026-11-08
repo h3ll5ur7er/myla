@@ -6,12 +6,14 @@
 // <message>` (diag.canonical) for each error, in the order found (MYLA-65,
 // D80), each followed by its notes (diag.canonical_note).
 // (The checker gate covers single-file programs that lex + parse cleanly; the
-// only diagnostic class it emits is `type`.)
+// only diagnostic class it emits is `type`.) It loads no module: a program
+// has the prelude, and std.map's `get` (`map_get_src`).
 
 from std.process import args, exit
 from std.fs import read_to_string
 from std.io import println, eprintln
 from .parser import parse_source_all
+from .ast import Program, Decl
 from .checker import check_program
 from .diag import canonical_err, canonical, canonical_note
 
@@ -23,7 +25,12 @@ fun check_and_report(src: str) {
             return
         },
     }
-    match check_program(parsed.program) {
+    var decls: [Decl] = parsed.program.decls
+    match parse_source_all(map_get_src(), parsed.next_id) {
+        Ok(p) => { for d in p.program.decls { decls.push(d) } },
+        Err(ds) => { panic("std.map's get does not parse") },
+    }
+    match check_program(Program { decls: decls }) {
         Ok(ws) => {
             // its warnings first (D95), as `check --canonical` prints them
             for w in ws {
@@ -39,6 +46,14 @@ fun check_and_report(src: str) {
             }
         },
     }
+}
+
+// std.map's `m.get(k)`, a method of an implicit module (D164) where the
+// prelude had the free `get(m, k)` the recorded corpus calls (MYLA-393): a
+// program checked without the loader has it as the CLI's would.
+#test()["impl<K: Eq + Hash, V> [K: V] {\n    fun get(self, k: K) -> Option<V> {\n        if self.contains(k) {\n            return Some(self[k])\n        }\n        return None\n    }\n}\n"]
+fun map_get_src() -> str {
+    return "impl<K: Eq + Hash, V> [K: V] {\n    fun get(self, k: K) -> Option<V> {\n        if self.contains(k) {\n            return Some(self[k])\n        }\n        return None\n    }\n}\n"
 }
 
 // `s` from byte `i` on.

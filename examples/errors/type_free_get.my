@@ -1,0 +1,11 @@
+//~ type error: unknown function 'get'
+//~ help: a map's lookup is the method 'm.get(k)'
+// The prelude's free `get(m, k)` went for the method `m.get(k)` of
+// `std.map` (MYLA-393): the error names the method.
+fun main() {
+    let m = ["a": 1]
+    match get(m, "a") {
+        Some(v) => print(v)
+        None => print(0)
+    }
+}

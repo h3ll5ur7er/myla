@@ -3,15 +3,24 @@
 // A map keeps its keys in insertion order (D105): a key written again keeps
 // its place, one removed and added again goes last. `values` and `items`
 // follow that order, as `keys()` and `for k in m` do. The builtins `len`,
-// `contains`, `keys` and `remove` stay the builtins' (D151), and `get(m, k)`
-// the prelude's.
+// `contains`, `keys` and `remove` stay the builtins' (D151); `get` is here,
+// the prelude's free `get(m, k)` gone (MYLA-393).
 
 import std.list as list_m // `m.iter()` is an iterator over `items()`
 
 impl<K: Eq + Hash, V> [K: V] {
+    // The value of `k`, or `None` when the map has no `k` (a read `m[k]` of
+    // a key it lacks is a runtime error).
+    fun get(self, k: K) -> Option<V> {
+        if self.contains(k) {
+            return Some(self[k])
+        }
+        return None
+    }
+
     // The value of `k`, or `default` when the map has no `k`.
     fun get_or(self, k: K, default: V) -> V {
-        return match get(self, k) {
+        return match self.get(k) {
             Some(v) => v
             None => default
         }
@@ -89,6 +98,41 @@ fun shown(m: [str: int]) -> str {
         sb.append(f"{k}={v}")
     }
     return sb.build()
+}
+
+// Whether `o` is `Some(v)`; `none` whether it is `None` (an `Option` has
+// no `==`).
+fun holds<T: Eq>(o: Option<T>, v: T) -> bool {
+    return match o {
+        Some(x) => x == v
+        None => false
+    }
+}
+
+fun none<T>(o: Option<T>) -> bool {
+    return match o {
+        Some(x) => false
+        None => true
+    }
+}
+
+#test
+fun map_get() {
+    let m = ages()
+    assert(holds(m.get("ann"), 31), "a key it has")
+    assert(none(m.get("cy")), "a key it lacks")
+    var ints: [int: str] = [:]
+    ints[7] = "seven"
+    assert(holds(ints.get(7), "seven") && none(ints.get(8)), "an int key")
+    let pairs: [(int, str): bool] = [(1, "a"): true]
+    assert(holds(pairs.get((1, "a")), true) && none(pairs.get((1, "b"))), "a tuple key")
+    let lists: [[int]: int] = [[1, 2]: 3]
+    assert(holds(lists.get([1, 2]), 3) && none(lists.get([2, 1])), "a list key")
+    var gone = ages()
+    gone.remove("bob")
+    assert(none(gone.get("bob")), "a removed key")
+    let empty: [str: int] = [:]
+    assert(none(empty.get("")), "an empty map")
 }
 
 #test

@@ -1449,7 +1449,7 @@ fun main() {
         "    print(f\"{t[(1, 'a')]} {t[(2, 'b')]}\")\n"
         "    print(maps.counts([\"x\", \"y\", \"x\"])[\"x\"])\n"
         "    print(ages.get_or(Who { name: \"cy\", age: 1 }, \"none\"))\n"
-        "    match get(moves, Dir.East) {\n"
+        "    match moves.get(Dir.East) {\n"
         "        Some(v) => print(v),\n"
         "        None => print(\"missing\"),\n"
         "    }\n"
@@ -2086,7 +2086,7 @@ fun main() {
     "map_get_contains": (
         "fun probe(m: [int: int], k: int) -> int {\n"
         "    var r = -1\n"
-        "    match get(m, k) {\n        Some(v) => { r = v }\n        None => { r = -1 }\n    }\n"
+        "    match m.get(k) {\n        Some(v) => { r = v }\n        None => { r = -1 }\n    }\n"
         "    return r\n}\n"
         "#main\nfun main() {\n"
         "    let m = [1: 100, 2: 200]\n"
@@ -2514,7 +2514,7 @@ fun main() {
         "}\n"
         "\n"
         "fun describe(m: [str: int], k: str) -> str {\n"
-        "    return match get(m, k) {\n"
+        "    return match m.get(k) {\n"
         '        Some(v) => f"{k}={v}"\n'
         '        None => f"{k} missing"\n'
         "    }\n"

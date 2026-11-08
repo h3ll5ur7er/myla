@@ -135,7 +135,7 @@ impl Sampler {
     }
 
     fun times_seen(self, key: str) -> int32 {
-        return match get(self.seen, key) {
+        return match self.seen.get(key) {
             Some(n) => n,
             None => 0,
         }

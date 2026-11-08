@@ -14,7 +14,6 @@ These names are reserved: no declaration may reuse them. The ones on a receiver 
 | `x.len()` | list, map, `str` or `StringBuilder` → `int` | A method; strings and builders: bytes |
 | `xs.push(v)`, `xs.pop()` | list | Methods; need a `var` place |
 | `m.contains(k)`, `m.keys()`, `m.remove(k)` | map | Methods; `remove` needs a `var` place |
-| `get(m, k)` | map → `Option<V>` | The one entry here that is a prelude function, not a built-in: an ordinary generic function every program sees (a declaration of another `get` is a duplicate), so its errors read like any call's |
 | `s.chars()` | `str` → `[char]` | A method |
 | `format(fmt, args…)` | → `str` | `fmt` is a literal; see [[Language/Collections-and-strings]] |
 | `StringBuilder()`, `sb.append(s)`, `sb.append(s, start, end)`, `sb.append_byte(b)`, `sb.build()` | | Methods but `StringBuilder()`; `append(s, start, end)` adds the bytes `s[start..end]` ([[Language/Collections-and-strings]]) |
@@ -51,7 +50,7 @@ The conventions (D164): operations on built-in types are methods (`s.split(",")`
 | `std.iter` | [[Language/Standard-library/Iter]] | Lazy adapters and consumers over `Iterator<T>`, chained with `\|>`: `range`, `repeat`, `from_fn`; `map`, `filter`, `take`, `skip`, `zip`, `chain`, `flat_map`, …; `to_list`, `count`, `sum`, `fold`, `find`, `min`, `max`, … |
 | `std.slice` | [[Language/Standard-library/Slice]] | The index arithmetic of slices |
 | `std.option` | [[Language/Standard-library/Option]] | Methods on `Option` and `Result`: `map`, `and_then`, `unwrap_or`, `ok_or`, `map_err`, `expect`, … |
-| `std.map` | [[Language/Standard-library/Map]] | Methods on maps (`get_or`, `update`, `values`, `items`, `merge`) and `counts` |
+| `std.map` | [[Language/Standard-library/Map]] | Methods on maps (`get`, `get_or`, `update`, `values`, `items`, `merge`) and `counts` |
 | `std.task` | [[Language/Standard-library/Task]] | Child tasks in numbers known at run time, cancellation |
 | `std.time` | [[Language/Standard-library/Time]] | The monotonic and wall clocks, `Duration`, `Instant`, `DateTime` in UTC, RFC 3339 and ISO 8601 |
 | `std.log` | [[Language/Standard-library/Log]] | `error`, `warn`, `info`, `debug` to the standard error with a time, the level from `MYLA_LOG` |

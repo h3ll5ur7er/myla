@@ -869,7 +869,7 @@ pub fun resolve_project(manifest: str, lock: Lock, allow_unlocked: bool) -> Resu
                     is_git = true
                 },
             }
-            match get(requests, d.name) {
+            match requests.get(d.name) {
                 Some(first) => {
                     if first.key != key {
                         var by = ""
