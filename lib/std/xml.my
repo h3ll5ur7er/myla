@@ -1,0 +1,2443 @@
+// std.xml: a non-validating XML 1.0 parser and writer (MYLA-348, D164).
+//
+// The parser checks that a document is well-formed: elements nest and close,
+// attributes are unique, names and characters are those XML allows, and
+// references are to a character or to one of the five predefined entities
+// (`lt`, `gt`, `amp`, `apos`, `quot`). It reads text, CDATA sections,
+// comments, processing instructions and the XML declaration. A DOCTYPE is
+// read and skipped, its internal subset included, but not used: there are no
+// declared entities and no default attributes, so a reference to an entity
+// the subset declares is an error. There are no namespaces either: a prefix
+// stays part of the name (`svg:rect`). Before parsing, CRLF and a lone CR
+// become LF, as XML asks (2.11), and in an attribute value a literal tab, LF
+// or CR becomes a space (3.3.3).
+//
+// The text is UTF-8 (a byte order mark is skipped); a declaration may also
+// name US-ASCII or ISO-8859-1, which is converted. Strings are bytes (D164),
+// but the parser checks that the text is well-formed UTF-8 and holds only
+// XML's characters.
+//
+// The pull reader (`reader`, `stream_reader`) gives one `Event` at a time;
+// `parse` and `parse_document` build a tree of `Element`s from its events.
+// `to_string` and `pretty` write a tree back, escaped.
+
+from std.io import Read
+from std.fs import IoError
+import std.str as str_m
+import std.list as list_m
+import std.option as option_m
+
+// --- Errors -------------------------------------------------------------------
+
+// What is wrong with a text.
+#derive(Eq)
+pub enum XmlErrorKind {
+    // The text ends inside markup or with an element still open
+    UnexpectedEnd,
+    // Something else stands where the text says (`'='`, `'>'`, "a quote",
+    // "whitespace", …)
+    Expected(str),
+    // A character XML doesn't allow (a control character, U+FFFE, U+FFFF) or
+    // bytes that aren't UTF-8
+    InvalidChar,
+    // A name expected: a tag's, an attribute's, a target's
+    InvalidName,
+    // An end tag that doesn't match the open element, or one with none open
+    MismatchedTag,
+    // An attribute given twice in one tag
+    DuplicateAttribute,
+    // A `&` that doesn't start a reference, or a character reference to a
+    // character XML doesn't allow
+    InvalidReference,
+    // A reference to an entity other than the five predefined ones
+    UndefinedEntity,
+    // A `<` in an attribute value
+    LtInAttribute,
+    // A `--` inside a comment
+    InvalidComment,
+    // A `]]>` in text
+    CDataEndInText,
+    // An XML declaration (or a processing instruction named `xml` in any
+    // case) after the start of the text
+    MisplacedDeclaration,
+    // An XML declaration without a version, or a malformed one
+    InvalidDeclaration,
+    // An encoding other than UTF-8, US-ASCII and ISO-8859-1, or UTF-16
+    UnsupportedEncoding,
+    // Text before or after the root element
+    TextOutsideRoot,
+    // A second root element
+    MultipleRoots,
+    // A text without an element
+    NoRoot,
+    // A DOCTYPE after the start or a second one, or CDATA outside the root
+    MisplacedMarkup,
+    // The stream failed (`io_error()` of the stream reader says why)
+    Io,
+}
+
+// An error and where it is: line and column count from 1, the column in
+// characters, as for `std.json`'s and `std.csv`'s errors. A line ends at LF,
+// CRLF or a lone CR.
+#derive(Eq)
+pub struct XmlError {
+    kind: XmlErrorKind,
+    line: int,
+    col: int,
+}
+
+impl XmlError {
+    // The reason in words.
+    #test(XmlError { kind: XmlErrorKind.MismatchedTag, line: 1, col: 4 })["an end tag that doesn't match the open element"]
+    #test(XmlError { kind: XmlErrorKind.Expected("'='"), line: 2, col: 1 })["expected '='"]
+    fun message(self) -> str {
+        return match self.kind {
+            UnexpectedEnd => "the text ends inside markup or with an element open"
+            Expected(what) => f"expected {what}"
+            InvalidChar => "a character XML doesn't allow"
+            InvalidName => "a name expected"
+            MismatchedTag => "an end tag that doesn't match the open element"
+            DuplicateAttribute => "an attribute given twice"
+            InvalidReference => "a malformed reference, or one to a character XML doesn't allow"
+            UndefinedEntity => "a reference to an undefined entity"
+            LtInAttribute => "'<' in an attribute value"
+            InvalidComment => "'--' inside a comment"
+            CDataEndInText => "']]>' in text"
+            MisplacedDeclaration => "an XML declaration after the start of the text"
+            InvalidDeclaration => "a malformed XML declaration"
+            UnsupportedEncoding => "an encoding other than UTF-8, US-ASCII and ISO-8859-1"
+            TextOutsideRoot => "text outside the root element"
+            MultipleRoots => "a second root element"
+            NoRoot => "no root element"
+            MisplacedMarkup => "a DOCTYPE or CDATA section where it can't stand"
+            Io => "the stream failed"
+        }
+    }
+}
+
+impl Format for XmlError {
+    // `line:col: what`, e.g. `1:9: an end tag that doesn't match the open element`.
+    #test(XmlError { kind: XmlErrorKind.UndefinedEntity, line: 3, col: 7 }, "")["3:7: a reference to an undefined entity"]
+    fun format(self, spec: str) -> str {
+        return f"{self.line}:{self.col}: {self.message()}"
+    }
+}
+
+// --- The tree -----------------------------------------------------------------
+
+// A piece of an element's content. Text holds the characters with the
+// references replaced; CDATA sections and the text around them are one
+// `Text`, and no two `Text`s follow each other.
+#derive(Eq)
+pub enum Node {
+    Element(Element),
+    Text(str),
+    Comment(str),
+    // a processing instruction: its target and its data
+    Pi(str, str),
+}
+
+// An element: its name, its attributes in the order written, and its content.
+#derive(Eq)
+pub struct Element {
+    name: str,
+    attrs: [(str, str)],
+    children: [Node],
+}
+
+// The XML declaration's values: `encoding` and `standalone` are "" when it
+// doesn't give them.
+#derive(Eq)
+pub struct Declaration {
+    version: str,
+    encoding: str,
+    standalone: str,
+}
+
+// A whole document: the declaration, the DOCTYPE's text (what stands between
+// `<!DOCTYPE` and its `>`, trimmed), the comments and processing instructions
+// before and after the root element, and the root.
+pub struct Document {
+    declaration: Option<Declaration>,
+    doctype: Option<str>,
+    prolog: [Node],
+    root: Element,
+    epilog: [Node],
+}
+
+// An element made of its parts, for writing: `xml.Element { … }` can't be
+// written outside the module.
+#test("a", [("k", "v")], [Node.Text("t")])[Element { name: "a", attrs: [("k", "v")], children: [Node.Text("t")] }]
+#test("e", [], [])[Element { name: "e", attrs: [], children: [] }]
+pub fun element(name: str, attrs: [(str, str)], children: [Node]) -> Element {
+    return Element { name: name, attrs: attrs, children: children }
+}
+
+impl Element {
+    // The value of the attribute `name`.
+    #test(Element { name: "a", attrs: [("x", "1"), ("y", "2")], children: [] }, "y")[Some("2")]
+    #test(Element { name: "a", attrs: [("x", "1")], children: [] }, "z")[None]
+    fun attr(self, name: str) -> Option<str> {
+        for a in self.attrs {
+            if a.0 == name {
+                return Some(a.1)
+            }
+        }
+        return None
+    }
+
+    // The child elements, in order.
+    #test(Element { name: "a", attrs: [], children: [Node.Text("t"), Node.Element(Element { name: "b", attrs: [], children: [] })] })[[Element { name: "b", attrs: [], children: [] }]]
+    fun elements(self) -> [Element] {
+        var out: [Element] = []
+        for c in self.children {
+            match c {
+                Element(e) => out.push(e)
+                _ => {}
+            }
+        }
+        return out
+    }
+
+    // The first child element named `name`.
+    #test(Element { name: "a", attrs: [], children: [Node.Element(Element { name: "b", attrs: [("n", "1")], children: [] }), Node.Element(Element { name: "b", attrs: [("n", "2")], children: [] })] }, "b")[Some(Element { name: "b", attrs: [("n", "1")], children: [] })]
+    #test(Element { name: "a", attrs: [], children: [] }, "b")[None]
+    fun find(self, name: str) -> Option<Element> {
+        for c in self.children {
+            match c {
+                Element(e) => {
+                    if e.name == name {
+                        return Some(e)
+                    }
+                }
+                _ => {}
+            }
+        }
+        return None
+    }
+
+    // The child elements named `name`, in order.
+    #test(Element { name: "a", attrs: [], children: [Node.Element(Element { name: "b", attrs: [], children: [] }), Node.Element(Element { name: "c", attrs: [], children: [] }), Node.Element(Element { name: "b", attrs: [("n", "2")], children: [] })] }, "b")[[Element { name: "b", attrs: [], children: [] }, Element { name: "b", attrs: [("n", "2")], children: [] }]]
+    fun find_all(self, name: str) -> [Element] {
+        var out: [Element] = []
+        for c in self.children {
+            match c {
+                Element(e) => {
+                    if e.name == name {
+                        out.push(e)
+                    }
+                }
+                _ => {}
+            }
+        }
+        return out
+    }
+
+    // The text inside the element, its descendants' included, in order.
+    #test(Element { name: "a", attrs: [], children: [Node.Text("x "), Node.Element(Element { name: "b", attrs: [], children: [Node.Text("y")] }), Node.Comment("c"), Node.Text(" z")] })["x y z"]
+    fun text(self) -> str {
+        var sb = StringBuilder()
+        var stack: [[Node]] = [self.children]
+        var at: [int] = [0]
+        while stack.len() > 0 {
+            let k = stack.len() - 1
+            let j = at[k]
+            if j >= stack[k].len() {
+                let gone = stack.pop()
+                let gone_at = at.pop()
+                continue
+            }
+            at[k] = j + 1
+            match stack[k][j] {
+                Text(t) => sb.append(t)
+                Element(e) => {
+                    stack.push(e.children)
+                    at.push(0)
+                }
+                _ => {}
+            }
+        }
+        return sb.build()
+    }
+}
+
+// --- Parsing to a tree ----------------------------------------------------------
+
+// The root element of the document `text`. Comments and processing
+// instructions outside it, the declaration and the DOCTYPE are dropped.
+#test("<a x=\"1\">hi<b/></a>")[Ok(Element { name: "a", attrs: [("x", "1")], children: [Node.Text("hi"), Node.Element(Element { name: "b", attrs: [], children: [] })] })]
+#test("<a>&lt;&amp;&#65;&#x42;&quot;&apos;&gt;</a>")[Ok(Element { name: "a", attrs: [], children: [Node.Text("<&AB\"'>")] })]
+#test("<a>x<![CDATA[<y>&amp;]]>z</a>")[Ok(Element { name: "a", attrs: [], children: [Node.Text("x<y>&amp;z")] })] // CDATA joins the text
+#test("<a>1\r\n2\r3</a>")[Ok(Element { name: "a", attrs: [], children: [Node.Text("1\n2\n3")] })] // line ends
+#test("<a x='a\tb\nc\r\nd&#10;'/>")[Ok(Element { name: "a", attrs: [("x", "a b c d\n")], children: [] })] // attribute values
+#test("<?xml version=\"1.0\"?>\n<!-- c --><r><!--in--><?pi data?></r>\n<?after?>")[Ok(Element { name: "r", attrs: [], children: [Node.Comment("in"), Node.Pi("pi", "data")] })]
+#test("<!DOCTYPE r [ <!ELEMENT r (#PCDATA)> <!ATTLIST r a CDATA \"]>\"> ]><r/>")[Ok(Element { name: "r", attrs: [], children: [] })] // the subset is skipped
+#test("<!DOCTYPE r [<!ENTITY e \"\u{FFFF}\">]><r/>")[Err(XmlError { kind: XmlErrorKind.InvalidChar, line: 1, col: 26 })] // but its characters are checked
+#test("\u{FEFF}<é:ü a-b.c='&#x10FFFF;'>λ</é:ü>")[Ok(Element { name: "é:ü", attrs: [("a-b.c", "\u{10FFFF}")], children: [Node.Text("λ")] })] // a BOM, names in any script
+#test("<a><![CDATA[]]></a>")[Ok(Element { name: "a", attrs: [], children: [] })] // an empty CDATA section is no text
+#test("")[Err(XmlError { kind: XmlErrorKind.NoRoot, line: 1, col: 1 })]
+#test("<a><b></a>")[Err(XmlError { kind: XmlErrorKind.MismatchedTag, line: 1, col: 7 })]
+#test("<a>\n  <b>&nbsp;</b></a>")[Err(XmlError { kind: XmlErrorKind.UndefinedEntity, line: 2, col: 6 })]
+#test("<a x='1' x='2'/>")[Err(XmlError { kind: XmlErrorKind.DuplicateAttribute, line: 1, col: 10 })]
+#test("<a x='1'y='2'/>")[Err(XmlError { kind: XmlErrorKind.Expected("whitespace"), line: 1, col: 9 })]
+#test("<a x=1/>")[Err(XmlError { kind: XmlErrorKind.Expected("a quote"), line: 1, col: 6 })]
+#test("<a x='<'/>")[Err(XmlError { kind: XmlErrorKind.LtInAttribute, line: 1, col: 7 })]
+#test("<a>]]></a>")[Err(XmlError { kind: XmlErrorKind.CDataEndInText, line: 1, col: 4 })]
+#test("<a>&#0;</a>")[Err(XmlError { kind: XmlErrorKind.InvalidReference, line: 1, col: 4 })]
+#test("<a>& b</a>")[Err(XmlError { kind: XmlErrorKind.InvalidReference, line: 1, col: 4 })]
+#test("<a>\u{1}</a>")[Err(XmlError { kind: XmlErrorKind.InvalidChar, line: 1, col: 4 })]
+#test("<a><!-- a -- b --></a>")[Err(XmlError { kind: XmlErrorKind.InvalidComment, line: 1, col: 11 })]
+#test("<a/><b/>")[Err(XmlError { kind: XmlErrorKind.MultipleRoots, line: 1, col: 5 })]
+#test("<a/>text")[Err(XmlError { kind: XmlErrorKind.TextOutsideRoot, line: 1, col: 5 })]
+#test(" <?xml version='1.0'?><a/>")[Err(XmlError { kind: XmlErrorKind.MisplacedDeclaration, line: 1, col: 2 })]
+#test("<?xml encoding='UTF-8'?><a/>")[Err(XmlError { kind: XmlErrorKind.InvalidDeclaration, line: 1, col: 7 })]
+#test("<?xml version='1.0' encoding='EBCDIC'?><a/>")[Err(XmlError { kind: XmlErrorKind.UnsupportedEncoding, line: 1, col: 31 })]
+#test("<a><b>")[Err(XmlError { kind: XmlErrorKind.UnexpectedEnd, line: 1, col: 7 })]
+#test("<a></a")[Err(XmlError { kind: XmlErrorKind.UnexpectedEnd, line: 1, col: 7 })]
+#test("<a>é<![CDATA[x</a>")[Err(XmlError { kind: XmlErrorKind.UnexpectedEnd, line: 1, col: 19 })] // at the end; the column counts characters
+pub fun parse(text: str) -> Result<Element, XmlError> {
+    return Ok(parse_document(text)?.root)
+}
+
+// The document `text`, with its declaration, DOCTYPE, and the comments and
+// processing instructions outside the root.
+pub fun parse_document(text: str) -> Result<Document, XmlError> {
+    var r = reader(text)
+    var b = new_builder()
+    while !b.add(r.read_event()?) {}
+    return Ok(b.document())
+}
+
+// The document the stream `r` holds, read in chunks as `stream_reader` reads
+// it.
+pub fun parse_stream<R: Read>(r: R) -> Result<Document, XmlError> {
+    var sr = stream_reader(r)
+    var b = new_builder()
+    while !b.add(sr.read_event()?) {}
+    return Ok(b.document())
+}
+
+// Builds a document from the events of a reader.
+struct Builder {
+    decl: Option<Declaration>,
+    doctype: Option<str>,
+    prolog: [Node],
+    epilog: [Node],
+    stack: [Element],
+    root: [Element],    // the root once it has ended
+    // the texts and CDATA sections since the last other event: the first,
+    // and the others
+    has_text: bool,
+    text: str,
+    more: [str],
+}
+
+fun new_builder() -> Builder {
+    return Builder { decl: None, doctype: None, prolog: [], epilog: [], stack: [], root: [], has_text: false, text: "", more: [] }
+}
+
+impl Builder {
+    // Takes one event; whether it was the last (`Eof`).
+    fun add(var self, ev: Event) -> bool {
+        match ev {
+            Text(t) => {
+                self.take(t)
+                return false
+            }
+            CData(t) => {
+                self.take(t)
+                return false
+            }
+            _ => {
+                if self.has_text {
+                    self.flush()
+                }
+            }
+        }
+        match ev {
+            Start(name, attrs) => self.stack.push(Element { name: name, attrs: attrs, children: [] })
+            End(_) => {
+                let e = self.stack.pop()
+                if self.stack.len() == 0 {
+                    self.root.push(e)
+                } else {
+                    self.stack[^1].children.push(Node.Element(e))
+                }
+            }
+            Comment(t) => self.misc(Node.Comment(t))
+            Pi(target, data) => self.misc(Node.Pi(target, data))
+            Declaration(d) => { self.decl = Some(d) }
+            Doctype(t) => { self.doctype = Some(t) }
+            Eof => { return true }
+            _ => {}
+        }
+        return false
+    }
+
+    // The texts since the last markup as one `Text` of the open element
+    // (none if they are empty: an empty CDATA section is no text).
+    fun flush(var self) {
+        var t = self.text
+        if self.more.len() > 0 {
+            var sb = StringBuilder()
+            sb.append(t)
+            for piece in self.more {
+                sb.append(piece)
+            }
+            t = sb.build()
+            self.more = []
+        }
+        self.has_text = false
+        self.text = ""
+        if t.len() > 0 {
+            self.stack[^1].children.push(Node.Text(t))
+        }
+    }
+
+    fun take(var self, t: str) {
+        if self.has_text {
+            self.more.push(t)
+        } else {
+            self.text = t
+            self.has_text = true
+        }
+    }
+
+    // A comment or processing instruction, in the open element or outside
+    // the root.
+    fun misc(var self, n: Node) {
+        if self.stack.len() > 0 {
+            self.stack[^1].children.push(n)
+        } else if self.root.len() > 0 {
+            self.epilog.push(n)
+        } else {
+            self.prolog.push(n)
+        }
+    }
+
+    // The document (after `Eof`, which comes only after the root).
+    fun document(self) -> Document {
+        return Document { declaration: self.decl, doctype: self.doctype, prolog: self.prolog, root: self.root[0], epilog: self.epilog }
+    }
+}
+
+// --- The pull reader --------------------------------------------------------------
+
+// What the reader finds next. `Start` holds the name and the attributes in
+// order (values with their references replaced), and an empty element
+// `<a/>` gives a `Start` and an `End`. `Text` is character data with its
+// references replaced; whitespace outside the root element gives no event.
+// `Doctype` holds what stands between `<!DOCTYPE` and its `>`, trimmed.
+// After the root element has ended and only comments, processing
+// instructions and whitespace follow, `Eof`; it comes again if asked for.
+pub enum Event {
+    Declaration(Declaration),
+    Doctype(str),
+    Start(str, [(str, str)]),
+    End(str),
+    Text(str),
+    CData(str),
+    Comment(str),
+    Pi(str, str),
+    Eof,
+}
+
+// Up to this many attributes, a tag's names are compared with each other as
+// they come; past them, the rest by a map at the end of the tag.
+const MANY_ATTRS: int = 32
+
+// The index of the first attribute whose name an attribute before it has,
+// or -1: past the first MANY_ATTRS (whose names differ).
+fun repeated(attrs: [(str, str)]) -> int {
+    var seen: [str: bool] = [:]
+    var k = 0
+    while k < attrs.len() {
+        if seen.contains(attrs[k].0) {
+            return k
+        }
+        seen[attrs[k].0] = true
+        k += 1
+    }
+    return -1
+}
+
+// Where the reader is.
+const BEGIN: int = 0      // nothing read: a byte order mark may come
+const START: int = 1      // at the start: the declaration may come
+const PROLOG: int = 2     // before the root element
+const IN_ROOT: int = 3    // inside the root element
+const AFTER: int = 4      // after the root element
+const DONE: int = 5       // `Eof` given (or, as an iterator, an error)
+
+// A pull reader over a text in memory: `read_event` gives the next event.
+// It is a value: keep it in a `var`. It is an `Iterator` of
+// `Result<Event, XmlError>` too, which ends before `Eof` and after an error.
+pub struct XmlReader {
+    s: str,
+    i: int,
+    // `s` holds the rest of the document; false while a stream reader feeds
+    // it, and then an error may only mean that more bytes are needed
+    whole: bool,
+    // the position of `s[0]`, and whether the byte before it was a CR
+    base_line: int,
+    base_col: int,
+    base_cr: bool,
+    state: int,
+    stack: [str],
+    pending_end: bool,  // the last `Start` was an empty element's
+    seen_doctype: bool,
+    latin1: bool,       // the declaration named ISO-8859-1
+}
+
+// A pull reader at the start of `text`.
+pub fun reader(text: str) -> XmlReader {
+    return XmlReader { s: text, i: 0, whole: true, base_line: 1, base_col: 1, base_cr: false, state: BEGIN, stack: [], pending_end: false, seen_doctype: false, latin1: false }
+}
+
+impl XmlReader {
+    // The next event, or why the text isn't well-formed.
+    #test(reader("<a k='v'>t</a>"))[Ok(Event.Start("a", [("k", "v")]))]
+    #test(reader("x"))[Err(XmlError { kind: XmlErrorKind.TextOutsideRoot, line: 1, col: 1 })]
+    fun read_event(var self) -> Result<Event, XmlError> {
+        if self.pending_end {
+            self.pending_end = false
+            return Ok(self.close())
+        }
+        if self.state == DONE {
+            return Ok(Event.Eof)
+        }
+        if self.state == BEGIN {
+            self.begin()?
+        }
+        let s = self.s
+        let n = s.len()
+        var i = self.i
+        if self.state != IN_ROOT {
+            i = skip_space(s, i)
+            if i > self.i {
+                self.i = i
+                if self.state == START {
+                    self.state = PROLOG
+                }
+            }
+            if i >= n {
+                if !self.whole {
+                    return Err(self.error(XmlErrorKind.UnexpectedEnd, i))
+                }
+                if self.state == AFTER {
+                    self.state = DONE
+                    return Ok(Event.Eof)
+                }
+                return Err(self.error(XmlErrorKind.NoRoot, i))
+            }
+            if s[i] != '<' {
+                return Err(self.error(XmlErrorKind.TextOutsideRoot, i))
+            }
+        } else if i >= n {
+            return Err(self.error(XmlErrorKind.UnexpectedEnd, i))
+        } else if s[i] != '<' {
+            return self.text(i)
+        }
+        let r = self.markup(i)
+        if self.state == START {
+            match r {
+                Ok(_) => { self.state = PROLOG }
+                Err(_) => {}
+            }
+        }
+        return r
+    }
+
+    // The byte order mark, and UTF-16, which isn't read.
+    fun begin(var self) -> Result<(), XmlError> {
+        let s = self.s
+        let i = self.i
+        if starts_at(s, i, "\u{FEFF}") {
+            self.i = i + 3
+        } else if i + 1 < s.len() {
+            let a = s[i]
+            let b = s[i + 1]
+            if (a == 0xFEu8 && b == 0xFFu8) || (a == 0xFFu8 && b == 0xFEu8) || (a == 0u8 && b == '<') || (a == '<' && b == 0u8) {
+                return Err(self.error(XmlErrorKind.UnsupportedEncoding, i))
+            }
+        }
+        self.state = START
+        return Ok(())
+    }
+
+    // The markup at `at` (a `<`).
+    fun markup(var self, at: int) -> Result<Event, XmlError> {
+        let s = self.s
+        if at + 1 >= s.len() {
+            return Err(self.error(XmlErrorKind.UnexpectedEnd, at + 1))
+        }
+        let c = s[at + 1]
+        if c == '?' {
+            return self.pi(at)
+        }
+        if c == '!' {
+            if starts_at(s, at, "<!--") {
+                let r = self.scan_comment(at)?
+                self.i = r.1
+                return Ok(Event.Comment(r.0))
+            }
+            if starts_at(s, at, "<![CDATA[") {
+                if self.state != IN_ROOT {
+                    return Err(self.error(XmlErrorKind.MisplacedMarkup, at))
+                }
+                return self.cdata(at)
+            }
+            if starts_at(s, at, "<!DOCTYPE") {
+                if (self.state != START && self.state != PROLOG) || self.seen_doctype {
+                    return Err(self.error(XmlErrorKind.MisplacedMarkup, at))
+                }
+                return self.doctype(at)
+            }
+            if is_cut(s, at, "<!--") || is_cut(s, at, "<![CDATA[") || is_cut(s, at, "<!DOCTYPE") {
+                return Err(self.error(XmlErrorKind.UnexpectedEnd, s.len()))
+            }
+            return Err(self.error(XmlErrorKind.Expected("a comment, CDATA or DOCTYPE"), at))
+        }
+        if c == '/' {
+            return self.end_tag(at)
+        }
+        return self.start_tag(at)
+    }
+
+    // A start tag at `at`.
+    fun start_tag(var self, at: int) -> Result<Event, XmlError> {
+        if self.state == AFTER {
+            return Err(self.error(XmlErrorKind.MultipleRoots, at))
+        }
+        let s = self.s
+        let n = s.len()
+        let ns = at + 1
+        var i = name_end(s, ns)
+        if i == ns {
+            return Err(self.name_error(ns))
+        }
+        let name = piece(s, ns, i)
+        var attrs: [(str, str)] = []
+        var far: [int] = []     // the offsets of the names past the first MANY_ATTRS
+        var empty = false
+        while true {
+            let ws = i
+            i = skip_space(s, i)
+            if i >= n {
+                return Err(self.error(XmlErrorKind.UnexpectedEnd, i))
+            }
+            let c = s[i]
+            if c == '>' {
+                i += 1
+                break
+            }
+            if c == '/' {
+                if i + 1 >= n {
+                    return Err(self.error(XmlErrorKind.UnexpectedEnd, i + 1))
+                }
+                if s[i + 1] != '>' {
+                    return Err(self.error(XmlErrorKind.Expected("'>'"), i + 1))
+                }
+                empty = true
+                i += 2
+                break
+            }
+            if i == ws {
+                return Err(self.error(XmlErrorKind.Expected("whitespace"), i))
+            }
+            let an = i
+            i = name_end(s, i)
+            if i == an {
+                return Err(self.name_error(an))
+            }
+            let aname = piece(s, an, i)
+            i = skip_space(s, i)
+            if i >= n {
+                return Err(self.error(XmlErrorKind.UnexpectedEnd, i))
+            }
+            if s[i] != '=' {
+                return Err(self.error(XmlErrorKind.Expected("'='"), i))
+            }
+            i = skip_space(s, i + 1)
+            if i >= n {
+                return Err(self.error(XmlErrorKind.UnexpectedEnd, i))
+            }
+            if s[i] != '"' && s[i] != '\'' {
+                return Err(self.error(XmlErrorKind.Expected("a quote"), i))
+            }
+            let v = self.attr_value(i)?
+            if attrs.len() < MANY_ATTRS {
+                for a in attrs {
+                    if a.0 == aname {
+                        return Err(self.error(XmlErrorKind.DuplicateAttribute, an))
+                    }
+                }
+            } else {
+                far.push(an)
+            }
+            attrs.push((aname, v.0))
+            i = v.1
+        }
+        if far.len() > 0 {
+            let k = repeated(attrs)
+            if k >= 0 {
+                return Err(self.error(XmlErrorKind.DuplicateAttribute, far[k - MANY_ATTRS]))
+            }
+        }
+        self.i = i
+        self.stack.push(name)
+        self.state = IN_ROOT
+        self.pending_end = empty
+        return Ok(Event.Start(name, attrs))
+    }
+
+    // The value of the attribute whose quote is at `at`, and the offset
+    // after its closing quote.
+    fun attr_value(self, at: int) -> Result<(str, int), XmlError> {
+        let s = self.s
+        let n = s.len()
+        let q = s[at]
+        var i = at + 1
+        var run = i
+        var sb = StringBuilder()
+        var built = false
+        while true {
+            while i < n {
+                let c = s[i]
+                if c < 0x20u8 || c >= 0x80u8 || c == q || c == '<' || c == '&' {
+                    break
+                }
+                i += 1
+            }
+            if i >= n {
+                return Err(self.error(XmlErrorKind.UnexpectedEnd, i))
+            }
+            let c = s[i]
+            if c == q {
+                break
+            }
+            if c == '<' {
+                return Err(self.error(XmlErrorKind.LtInAttribute, i))
+            }
+            if c == '&' {
+                sb.append(s, run, i)
+                built = true
+                let r = self.reference(i)?
+                sb.append(r.0)
+                i = r.1
+                run = i
+            } else if c == '\t' || c == '\n' || c == '\r' {
+                sb.append(s, run, i)
+                sb.append_byte(' ')
+                built = true
+                if c == '\r' && i + 1 < n && s[i + 1] == '\n' {
+                    i += 2
+                } else {
+                    i += 1
+                }
+                run = i
+            } else if c < 0x80u8 {
+                return Err(self.error(XmlErrorKind.InvalidChar, i))
+            } else {
+                let k = char_len(s, i)
+                if k == 0 {
+                    return Err(self.error(XmlErrorKind.InvalidChar, i))
+                }
+                i += k
+            }
+        }
+        if built {
+            sb.append(s, run, i)
+            return Ok((sb.build(), i + 1))
+        }
+        return Ok((s[at + 1:i], i + 1))
+    }
+
+    // An end tag at `at`.
+    fun end_tag(var self, at: int) -> Result<Event, XmlError> {
+        if self.state != IN_ROOT {
+            return Err(self.error(XmlErrorKind.MismatchedTag, at))
+        }
+        let s = self.s
+        let n = s.len()
+        let ns = at + 2
+        var i = name_end(s, ns)
+        if i == ns {
+            return Err(self.name_error(ns))
+        }
+        let ne = i
+        i = skip_space(s, i)
+        if i >= n {
+            return Err(self.error(XmlErrorKind.UnexpectedEnd, i))
+        }
+        if s[i] != '>' {
+            return Err(self.error(XmlErrorKind.Expected("'>'"), i))
+        }
+        if !same_bytes(s, ns, ne, self.stack[^1]) {
+            return Err(self.error(XmlErrorKind.MismatchedTag, at))
+        }
+        self.i = i + 1
+        return Ok(self.close())
+    }
+
+    // The `End` of the open element.
+    fun close(var self) -> Event {
+        let name = self.stack.pop()
+        if self.stack.len() == 0 {
+            self.state = AFTER
+        }
+        return Event.End(name)
+    }
+
+    // Text from `start` up to the next markup. While a stream feeds the
+    // reader, the text up to the end of the bytes so far (but for a
+    // reference, a `]` or a CR there, which need what follows).
+    fun text(var self, start: int) -> Result<Event, XmlError> {
+        let s = self.s
+        let n = s.len()
+        var i = start
+        var run = start         // the bytes from `run` to `i` are taken as they are
+        var sb = StringBuilder()
+        var built = false       // `sb` holds the text up to `run`
+        var cut = -1            // where text that may go on stops (a stream's)
+        while i < n {
+            var c = s[i]
+            while c >= 0x20u8 && c < 0x80u8 && c != '<' && c != '&' && c != ']' {
+                i += 1
+                if i >= n {
+                    break
+                }
+                c = s[i]
+            }
+            if i >= n || c == '<' {
+                break
+            }
+            if c == '&' {
+                match self.reference(i) {
+                    Ok(r) => {
+                        sb.append(s, run, i)
+                        built = true
+                        sb.append(r.0)
+                        i = r.1
+                        run = i
+                    }
+                    Err(e) => {
+                        if self.whole {
+                            return Err(e)
+                        }
+                        cut = i
+                        break
+                    }
+                }
+            } else if c == ']' {
+                if i + 2 < n {
+                    if s[i + 1] == ']' && s[i + 2] == '>' {
+                        return Err(self.error(XmlErrorKind.CDataEndInText, i))
+                    }
+                } else if !self.whole {
+                    cut = i
+                    break
+                }
+                i += 1
+            } else if c == '\r' {
+                if i + 1 >= n && !self.whole {
+                    cut = i
+                    break
+                }
+                sb.append(s, run, i)
+                sb.append_byte('\n')
+                built = true
+                i += 1
+                if i < n && s[i] == '\n' {
+                    i += 1
+                }
+                run = i
+            } else if c == '\t' || c == '\n' {
+                i += 1
+            } else if c < 0x80u8 {
+                return Err(self.error(XmlErrorKind.InvalidChar, i))
+            } else {
+                let k = char_len(s, i)
+                if k == 0 {
+                    return Err(self.error(XmlErrorKind.InvalidChar, i))
+                }
+                i += k
+            }
+        }
+        var end = i
+        if cut >= 0 {
+            end = cut
+        } else if i >= n && !self.whole {
+            end = n
+        }
+        if end == start {
+            return Err(self.error(XmlErrorKind.UnexpectedEnd, end))
+        }
+        self.i = end
+        if built {
+            sb.append(s, run, end)
+            return Ok(Event.Text(sb.build()))
+        }
+        return Ok(Event.Text(s[start:end]))
+    }
+
+    // What the reference at `at` (its `&`) stands for, and the offset after
+    // its `;`.
+    fun reference(self, at: int) -> Result<(str, int), XmlError> {
+        let s = self.s
+        let n = s.len()
+        var i = at + 1
+        if i < n && s[i] == '#' {
+            i += 1
+            var hex = false
+            if i < n && s[i] == 'x' {
+                hex = true
+                i += 1
+            }
+            let digits = i
+            var v = 0
+            while i < n {
+                let d = digit_value(s[i], hex)
+                if d < 0 {
+                    break
+                }
+                if v < 0x110000 {
+                    v = v * (if hex { 16 } else { 10 }) + d
+                }
+                i += 1
+            }
+            if i >= n {
+                return Err(self.error(XmlErrorKind.UnexpectedEnd, i))
+            }
+            if i == digits || s[i] != ';' || !is_xml_char(v) {
+                return Err(self.error(XmlErrorKind.InvalidReference, at))
+            }
+            return Ok((encode(v), i + 1))
+        }
+        let end = name_end(s, i)
+        if end >= n {
+            return Err(self.error(XmlErrorKind.UnexpectedEnd, end))
+        }
+        if end == i || s[end] != ';' {
+            return Err(self.error(XmlErrorKind.InvalidReference, at))
+        }
+        let t = predefined(s, i, end)
+        if t == "" {
+            return Err(self.error(XmlErrorKind.UndefinedEntity, at))
+        }
+        return Ok((t, end + 1))
+    }
+
+    // A comment at `at`: its text and the offset after its `-->`.
+    fun scan_comment(self, at: int) -> Result<(str, int), XmlError> {
+        let s = self.s
+        let n = s.len()
+        var i = at + 4
+        let start = i
+        var run = i
+        var sb = StringBuilder()
+        var built = false
+        while true {
+            while i < n {
+                let c = s[i]
+                if c < 0x20u8 || c >= 0x80u8 || c == '-' {
+                    break
+                }
+                i += 1
+            }
+            if i >= n {
+                return Err(self.error(XmlErrorKind.UnexpectedEnd, n))
+            }
+            let c = s[i]
+            if c == '-' {
+                if i + 1 >= n {
+                    return Err(self.error(XmlErrorKind.UnexpectedEnd, n))
+                }
+                if s[i + 1] == '-' {
+                    if i + 2 >= n {
+                        return Err(self.error(XmlErrorKind.UnexpectedEnd, n))
+                    }
+                    if s[i + 2] == '>' {
+                        break
+                    }
+                    return Err(self.error(XmlErrorKind.InvalidComment, i))
+                }
+                i += 1
+            } else {
+                let k = self.special_char(i)?
+                if k == 0 {
+                    // a CR
+                    sb.append(s, run, i)
+                    sb.append_byte('\n')
+                    built = true
+                    i = past_cr(s, i)
+                    run = i
+                } else {
+                    i += k
+                }
+            }
+        }
+        var t = s[start:i]
+        if built {
+            sb.append(s, run, i)
+            t = sb.build()
+        }
+        return Ok((t, i + 3))
+    }
+
+    // The length of the character at `i`, a control character or one past
+    // ASCII, or 0 for a CR (which the caller turns into LF); an error if XML
+    // doesn't allow it.
+    fun special_char(self, i: int) -> Result<int, XmlError> {
+        let c = self.s[i]
+        if c == '\r' {
+            return Ok(0)
+        }
+        if c == '\t' || c == '\n' || (c >= 0x20u8 && c < 0x80u8) {
+            return Ok(1)
+        }
+        if c < 0x80u8 {
+            return Err(self.error(XmlErrorKind.InvalidChar, i))
+        }
+        let k = char_len(self.s, i)
+        if k == 0 {
+            return Err(self.error(XmlErrorKind.InvalidChar, i))
+        }
+        return Ok(k)
+    }
+
+    // The characters from `start` up to `term`, with line ends made LF, and
+    // the offset after `term`.
+    fun scan_until(self, start: int, term: str) -> Result<(str, int), XmlError> {
+        let s = self.s
+        let n = s.len()
+        let t0 = term[0]
+        var i = start
+        var run = i
+        var sb = StringBuilder()
+        var built = false
+        while true {
+            while i < n {
+                let c = s[i]
+                if c < 0x20u8 || c >= 0x80u8 || c == t0 {
+                    break
+                }
+                i += 1
+            }
+            if i >= n {
+                return Err(self.error(XmlErrorKind.UnexpectedEnd, n))
+            }
+            if s[i] == t0 {
+                if starts_at(s, i, term) {
+                    break
+                }
+                if is_cut(s, i, term) {
+                    return Err(self.error(XmlErrorKind.UnexpectedEnd, n))
+                }
+                i += 1
+            } else {
+                let k = self.special_char(i)?
+                if k == 0 {
+                    sb.append(s, run, i)
+                    sb.append_byte('\n')
+                    built = true
+                    i = past_cr(s, i)
+                    run = i
+                } else {
+                    i += k
+                }
+            }
+        }
+        if built {
+            sb.append(s, run, i)
+            return Ok((sb.build(), i + term.len()))
+        }
+        return Ok((s[start:i], i + term.len()))
+    }
+
+    // A CDATA section at `at`.
+    fun cdata(var self, at: int) -> Result<Event, XmlError> {
+        let r = self.scan_until(at + 9, "]]>")?
+        self.i = r.1
+        return Ok(Event.CData(r.0))
+    }
+
+    // A processing instruction, or the XML declaration, at `at`.
+    fun pi(var self, at: int) -> Result<Event, XmlError> {
+        let r = self.scan_pi(at)?
+        if r.2 < 0 {
+            return self.declaration(at, -r.2)
+        }
+        self.i = r.2
+        return Ok(Event.Pi(r.0, r.1))
+    }
+
+    // A processing instruction at `at`: its target, its data and the offset
+    // after its `?>`; for the XML declaration, where it may stand, the
+    // offset after `<?xml`, negated.
+    fun scan_pi(self, at: int) -> Result<(str, str, int), XmlError> {
+        let s = self.s
+        let n = s.len()
+        let ts = at + 2
+        var i = name_end(s, ts)
+        if i == ts {
+            return Err(self.name_error(ts))
+        }
+        let target = piece(s, ts, i)
+        if target.len() == 3 && target.to_lower() == "xml" {
+            if self.state == START && target == "xml" {
+                return Ok(("", "", -i))
+            }
+            return Err(self.error(XmlErrorKind.MisplacedDeclaration, at))
+        }
+        if i >= n {
+            return Err(self.error(XmlErrorKind.UnexpectedEnd, n))
+        }
+        if starts_at(s, i, "?>") {
+            return Ok((target, "", i + 2))
+        }
+        if !is_space(s[i]) {
+            if is_cut(s, i, "?>") {
+                return Err(self.error(XmlErrorKind.UnexpectedEnd, n))
+            }
+            return Err(self.error(XmlErrorKind.Expected("whitespace or '?>'"), i))
+        }
+        i = skip_space(s, i)
+        let r = self.scan_until(i, "?>")?
+        return Ok((target, r.0, r.1))
+    }
+
+    // The XML declaration whose `<?xml` is at `at`, from `after` on.
+    fun declaration(var self, at: int, after: int) -> Result<Event, XmlError> {
+        let s = self.s
+        let n = s.len()
+        var i = after
+        var d = Declaration { version: "", encoding: "", standalone: "" }
+        var seen = 0                // 1: version, 2: encoding, 3: standalone
+        var enc_at = 0
+        while true {
+            let ws = i
+            i = skip_space(s, i)
+            if i >= n {
+                return Err(self.error(XmlErrorKind.UnexpectedEnd, n))
+            }
+            if s[i] == '?' {
+                if i + 1 >= n {
+                    return Err(self.error(XmlErrorKind.UnexpectedEnd, n))
+                }
+                if s[i + 1] != '>' {
+                    return Err(self.error(XmlErrorKind.Expected("'?>'"), i))
+                }
+                i += 2
+                break
+            }
+            if i == ws {
+                return Err(self.error(XmlErrorKind.Expected("whitespace"), i))
+            }
+            let ns = i
+            i = name_end(s, i)
+            let name = piece(s, ns, i)
+            i = skip_space(s, i)
+            if i >= n {
+                return Err(self.error(XmlErrorKind.UnexpectedEnd, n))
+            }
+            if s[i] != '=' {
+                return Err(self.error(XmlErrorKind.Expected("'='"), i))
+            }
+            i = skip_space(s, i + 1)
+            if i >= n {
+                return Err(self.error(XmlErrorKind.UnexpectedEnd, n))
+            }
+            let q = s[i]
+            if q != '"' && q != '\'' {
+                return Err(self.error(XmlErrorKind.Expected("a quote"), i))
+            }
+            let vs = i + 1
+            i = vs
+            while i < n && s[i] != q {
+                i += 1
+            }
+            if i >= n {
+                return Err(self.error(XmlErrorKind.UnexpectedEnd, n))
+            }
+            let value = s[vs:i]
+            i += 1
+            if name == "version" && seen == 0 && version_ok(value) {
+                d.version = value
+                seen = 1
+            } else if name == "encoding" && seen == 1 && enc_name_ok(value) {
+                d.encoding = value
+                enc_at = vs
+                seen = 2
+            } else if name == "standalone" && (seen == 1 || seen == 2) && (value == "yes" || value == "no") {
+                d.standalone = value
+                seen = 3
+            } else {
+                return Err(self.error(XmlErrorKind.InvalidDeclaration, ns))
+            }
+        }
+        if seen == 0 {
+            return Err(self.error(XmlErrorKind.InvalidDeclaration, after))
+        }
+        if d.encoding != "" {
+            let e = d.encoding.to_lower()
+            if e == "iso-8859-1" || e == "latin1" || e == "latin-1" || e == "iso_8859-1" || e == "l1" {
+                self.s = s[0:i] + latin1_to_utf8(s[i:])
+                self.latin1 = true
+            } else if e != "utf-8" && e != "utf8" && e != "us-ascii" && e != "ascii" {
+                return Err(self.error(XmlErrorKind.UnsupportedEncoding, enc_at))
+            }
+        }
+        self.i = i
+        self.state = PROLOG
+        return Ok(Event.Declaration(d))
+    }
+
+    // A DOCTYPE at `at`, its internal subset skipped.
+    fun doctype(var self, at: int) -> Result<Event, XmlError> {
+        let s = self.s
+        let n = s.len()
+        var i = at + 9
+        if i >= n {
+            return Err(self.error(XmlErrorKind.UnexpectedEnd, n))
+        }
+        if !is_space(s[i]) {
+            return Err(self.error(XmlErrorKind.Expected("whitespace"), i))
+        }
+        i = skip_space(s, i)
+        let ns = i
+        i = name_end(s, i)
+        if i == ns {
+            return Err(self.name_error(ns))
+        }
+        let ws = i
+        i = skip_space(s, i)
+        if i > ws && (starts_at(s, i, "SYSTEM") || starts_at(s, i, "PUBLIC")) {
+            let public = s[i] == 'P'
+            i += 6
+            if public {
+                i = self.literal(i, true)?
+            }
+            i = self.literal(i, false)?
+            i = skip_space(s, i)
+        }
+        if i < n && s[i] == '[' {
+            i = self.subset(i + 1)?
+            i = skip_space(s, i)
+        }
+        if i >= n {
+            return Err(self.error(XmlErrorKind.UnexpectedEnd, n))
+        }
+        if s[i] != '>' {
+            return Err(self.error(XmlErrorKind.Expected("'>'"), i))
+        }
+        self.i = i + 1
+        self.seen_doctype = true
+        return Ok(Event.Doctype(s[at + 9:i].trim()))
+    }
+
+    // A quoted literal after whitespace from `at` on (a public id's
+    // characters if `pubid`); the offset after its closing quote.
+    fun literal(self, at: int, pubid: bool) -> Result<int, XmlError> {
+        let s = self.s
+        let n = s.len()
+        var i = skip_space(s, at)
+        if i >= n {
+            return Err(self.error(XmlErrorKind.UnexpectedEnd, n))
+        }
+        if i == at {
+            return Err(self.error(XmlErrorKind.Expected("whitespace"), i))
+        }
+        let q = s[i]
+        if q != '"' && q != '\'' {
+            return Err(self.error(XmlErrorKind.Expected("a quote"), i))
+        }
+        i += 1
+        while i < n && s[i] != q {
+            if pubid && !is_pubid_char(s[i]) {
+                return Err(self.error(XmlErrorKind.InvalidChar, i))
+            }
+            let k = self.special_char(i)?
+            i += if k == 0 { 1 } else { k }
+        }
+        if i >= n {
+            return Err(self.error(XmlErrorKind.UnexpectedEnd, n))
+        }
+        return Ok(i + 1)
+    }
+
+    // An internal subset from `at` on, skipped: its declarations, comments,
+    // processing instructions and parameter-entity references. The offset
+    // after its `]`.
+    fun subset(self, at: int) -> Result<int, XmlError> {
+        let s = self.s
+        let n = s.len()
+        var i = at
+        while true {
+            i = skip_space(s, i)
+            if i >= n {
+                return Err(self.error(XmlErrorKind.UnexpectedEnd, n))
+            }
+            let c = s[i]
+            if c == ']' {
+                return Ok(i + 1)
+            }
+            if starts_at(s, i, "<!--") {
+                i = self.scan_comment(i)?.1
+            } else if starts_at(s, i, "<?") {
+                let r = self.scan_pi(i)?
+                if r.2 < 0 {
+                    return Err(self.error(XmlErrorKind.MisplacedDeclaration, i))
+                }
+                i = r.2
+            } else if starts_at(s, i, "<!") {
+                // a declaration, up to the `>` outside its quotes
+                i += 2
+                while i < n && s[i] != '>' {
+                    if s[i] == '"' || s[i] == '\'' {
+                        let q = s[i]
+                        i += 1
+                        while i < n && s[i] != q {
+                            let k = self.special_char(i)?
+                            i += if k == 0 { 1 } else { k }
+                        }
+                        if i >= n {
+                            return Err(self.error(XmlErrorKind.UnexpectedEnd, n))
+                        }
+                    }
+                    let k = self.special_char(i)?
+                    i += if k == 0 { 1 } else { k }
+                }
+                if i >= n {
+                    return Err(self.error(XmlErrorKind.UnexpectedEnd, n))
+                }
+                i += 1
+            } else if c == '%' {
+                let e = name_end(s, i + 1)
+                if e >= n {
+                    return Err(self.error(XmlErrorKind.UnexpectedEnd, n))
+                }
+                if e == i + 1 || s[e] != ';' {
+                    return Err(self.error(XmlErrorKind.InvalidReference, i))
+                }
+                i = e + 1
+            } else {
+                return Err(self.error(XmlErrorKind.Expected("a markup declaration"), i))
+            }
+        }
+        unreachable()
+    }
+
+    // The error for a missing name at `at`: the end, a character XML
+    // doesn't allow, or another one.
+    fun name_error(self, at: int) -> XmlError {
+        let s = self.s
+        if at >= s.len() {
+            return self.error(XmlErrorKind.UnexpectedEnd, at)
+        }
+        if s[at] >= 0x80u8 && char_len(s, at) == 0 {
+            return self.error(XmlErrorKind.InvalidChar, at)
+        }
+        return self.error(XmlErrorKind.InvalidName, at)
+    }
+
+    // An error at byte offset `at`: its line and column counted from the
+    // start, as an error is rare. While a stream feeds the reader, a
+    // position isn't needed yet.
+    fun error(self, kind: XmlErrorKind, at: int) -> XmlError {
+        if !self.whole {
+            return XmlError { kind: kind, line: 0, col: 0 }
+        }
+        let p = advance(self.s, at, Pos { line: self.base_line, col: self.base_col, cr: self.base_cr })
+        return XmlError { kind: kind, line: p.line, col: p.col }
+    }
+}
+
+impl Iterator<Result<Event, XmlError>> for XmlReader {
+    // The next event; none after the root and after an error.
+    fun next(var self) -> Option<Result<Event, XmlError>> {
+        if self.state == DONE {
+            return None
+        }
+        let r = self.read_event()
+        match r {
+            Ok(ev) => {
+                match ev {
+                    Eof => { return None }
+                    _ => { return Some(Ok(ev)) }
+                }
+            }
+            Err(e) => {
+                self.state = DONE
+                return Some(Err(e))
+            }
+        }
+    }
+}
+
+// A line, a column and whether the last byte was a CR.
+struct Pos {
+    line: int,
+    col: int,
+    cr: bool,
+}
+
+// `p` moved over the bytes of `s` up to `end`.
+fun advance(s: str, end: int, p: Pos) -> Pos {
+    var line = p.line
+    var col = p.col
+    var cr = p.cr
+    var k = 0
+    while k < end && k < s.len() {
+        let c = s[k]
+        if c == '\n' {
+            if !cr {
+                line += 1
+                col = 1
+            }
+            cr = false
+        } else if c == '\r' {
+            line += 1
+            col = 1
+            cr = true
+        } else {
+            if c < 0x80u8 || c >= 0xC0u8 {
+                col += 1    // not a UTF-8 continuation byte
+            }
+            cr = false
+        }
+        k += 1
+    }
+    return Pos { line: line, col: col, cr: cr }
+}
+
+// --- Reading a stream -----------------------------------------------------------
+
+const CHUNK: int = 65536
+
+// A pull reader over a stream (`Read`), read in chunks of 64 KiB and more:
+// `read_event` as `XmlReader` has it, and an `Iterator` of the same. A text
+// may come as several `Text` events, split where a chunk ended. An error is
+// given once the stream has ended (its position is where it is, but the rest
+// of the stream is read first); a failure of the stream is an `Io` error,
+// and `io_error()` gives its cause.
+pub struct XmlStreamReader<R> {
+    src: [R],           // the stream, as `std.io`'s `Buffered` keeps it
+    lex: XmlReader,
+    chunk: int,         // the next read's size: doubled while an event needs more
+    io: Option<IoError>,
+}
+
+// A pull reader of the document the stream `r` holds.
+pub fun stream_reader<R: Read>(r: R) -> XmlStreamReader<R> {
+    var lex = reader("")
+    lex.whole = false
+    return XmlStreamReader { src: [r], lex: lex, chunk: CHUNK, io: None }
+}
+
+impl<R: Read> XmlStreamReader<R> {
+    // The next event, or why the document isn't well-formed.
+    fun read_event(var self) -> Result<Event, XmlError> {
+        while true {
+            if self.lex.state == BEGIN && !self.lex.whole && self.lex.s.len() < 4 {
+                self.fill()?
+                continue
+            }
+            let r = self.lex.read_event()
+            if self.lex.whole {
+                return r
+            }
+            match r {
+                Ok(ev) => {
+                    self.chunk = CHUNK
+                    return Ok(ev)
+                }
+                Err(_) => { self.fill()? }
+            }
+        }
+        unreachable()
+    }
+
+    // Why the stream failed, if it did.
+    fun io_error(self) -> Option<IoError> {
+        return self.io
+    }
+
+    // The bytes read so far but not used dropped, and the next chunk read
+    // after the rest. A chunk may end inside a character: the event there
+    // fails, and is read again once the next chunk is in.
+    fun fill(var self) -> Result<(), XmlError> {
+        var r = self.src.pop()
+        let got = r.read_str(self.chunk)
+        self.src.push(r)
+        let lex = self.lex
+        let p = advance(lex.s, lex.i, Pos { line: lex.base_line, col: lex.base_col, cr: lex.base_cr })
+        match got {
+            Ok(b) => {
+                var sb = StringBuilder()
+                sb.append(lex.s, lex.i, lex.s.len())
+                if b.len() == 0 {
+                    self.lex.whole = true
+                } else if lex.latin1 {
+                    sb.append(latin1_to_utf8(b))
+                } else {
+                    sb.append(b)
+                }
+                self.lex.s = sb.build()
+                self.lex.i = 0
+                self.lex.base_line = p.line
+                self.lex.base_col = p.col
+                self.lex.base_cr = p.cr
+                if self.chunk < 0x1000000 {
+                    self.chunk *= 2
+                }
+                return Ok(())
+            }
+            Err(e) => {
+                self.io = Some(e)
+                let q = advance(lex.s, lex.i, Pos { line: lex.base_line, col: lex.base_col, cr: lex.base_cr })
+                return Err(XmlError { kind: XmlErrorKind.Io, line: q.line, col: q.col })
+            }
+        }
+    }
+}
+
+impl<R: Read> Iterator<Result<Event, XmlError>> for XmlStreamReader<R> {
+    // The next event; none after the root and after an error.
+    fun next(var self) -> Option<Result<Event, XmlError>> {
+        if self.lex.state == DONE {
+            return None
+        }
+        let r = self.read_event()
+        match r {
+            Ok(ev) => {
+                match ev {
+                    Eof => { return None }
+                    _ => { return Some(Ok(ev)) }
+                }
+            }
+            Err(e) => {
+                self.lex.state = DONE
+                return Some(Err(e))
+            }
+        }
+    }
+}
+
+// --- Characters and names ---------------------------------------------------------
+
+// Whether `c` is XML's whitespace.
+fun is_space(c: uint8) -> bool {
+    return c == ' ' || c == '\n' || c == '\t' || c == '\r'
+}
+
+// The offset of the first byte from `i` on that isn't whitespace.
+fun skip_space(s: str, i: int) -> int {
+    var k = i
+    let n = s.len()
+    while k < n && is_space(s[k]) {
+        k += 1
+    }
+    return k
+}
+
+// The offset after a CR at `i` and the LF after it, if there is one.
+fun past_cr(s: str, i: int) -> int {
+    if i + 1 < s.len() && s[i + 1] == '\n' {
+        return i + 2
+    }
+    return i + 1
+}
+
+// Whether `p` stands in `s` at `i`.
+#test("<!--x", 0, "<!--")[true]
+#test("<!-", 0, "<!--")[false]
+fun starts_at(s: str, i: int, p: str) -> bool {
+    if i + p.len() > s.len() {
+        return false
+    }
+    var k = 0
+    while k < p.len() {
+        if s[i + k] != p[k] {
+            return false
+        }
+        k += 1
+    }
+    return true
+}
+
+// Whether the text ends at `i` with a beginning of `p` (cut short).
+#test("a<!-", 1, "<!--")[true]
+#test("a<!x", 1, "<!--")[false]
+fun is_cut(s: str, i: int, p: str) -> bool {
+    let n = s.len()
+    if n - i >= p.len() {
+        return false
+    }
+    var k = 0
+    while i + k < n {
+        if s[i + k] != p[k] {
+            return false
+        }
+        k += 1
+    }
+    return true
+}
+
+// The bytes of `s` from `a` to `b`: a slice, but where `b` is inside bytes
+// that aren't UTF-8 (where a slice can't end).
+#test("ab", 0, 1)["a"]
+fun piece(s: str, a: int, b: int) -> str {
+    if b < s.len() && s[b] >= 0x80u8 && s[b] < 0xC0u8 {
+        var sb = StringBuilder()
+        sb.append(s, a, b)
+        return sb.build()
+    }
+    return s[a:b]
+}
+
+// Whether the bytes of `s` from `a` to `b` are `t`.
+fun same_bytes(s: str, a: int, b: int, t: str) -> bool {
+    if b - a != t.len() {
+        return false
+    }
+    var k = 0
+    while k < t.len() {
+        if s[a + k] != t[k] {
+            return false
+        }
+        k += 1
+    }
+    return true
+}
+
+// The text of a predefined entity named by the bytes from `a` to `b`, or ""
+// for another name.
+fun predefined(s: str, a: int, b: int) -> str {
+    let len = b - a
+    let c = s[a]
+    if len == 2 && s[a + 1] == 't' {
+        if c == 'l' {
+            return "<"
+        }
+        if c == 'g' {
+            return ">"
+        }
+    } else if len == 3 && c == 'a' && s[a + 1] == 'm' && s[a + 2] == 'p' {
+        return "&"
+    } else if len == 4 {
+        if same_bytes(s, a, b, "apos") {
+            return "'"
+        }
+        if same_bytes(s, a, b, "quot") {
+            return "\""
+        }
+    }
+    return ""
+}
+
+// The value of the digit `c` (hex if `hex`), or -1.
+#test('7', false)[7]
+#test('b', true)[11]
+#test('b', false)[-1]
+#test('G', true)[-1]
+fun digit_value(c: uint8, hex: bool) -> int {
+    if c >= '0' && c <= '9' {
+        return (c - '0') as int
+    }
+    if hex && c >= 'a' && c <= 'f' {
+        return (c - 'a') as int + 10
+    }
+    if hex && c >= 'A' && c <= 'F' {
+        return (c - 'A') as int + 10
+    }
+    return -1
+}
+
+// Whether `c` is a character XML 1.0 allows (2.2).
+#test(9)[true]
+#test(0)[false]
+#test(0xD800)[false]
+#test(0xFFFE)[false]
+#test(0x10FFFF)[true]
+#test(0x110000)[false]
+fun is_xml_char(c: int) -> bool {
+    if c < 0x20 {
+        return c == 9 || c == 10 || c == 13
+    }
+    return c <= 0xD7FF || (c >= 0xE000 && c <= 0xFFFD) || (c >= 0x10000 && c <= 0x10FFFF)
+}
+
+// The number of bytes of the UTF-8 sequence that starts with `c`.
+fun utf8_len(c: uint8) -> int {
+    if c < 0xE0u8 {
+        return 2
+    }
+    if c < 0xF0u8 {
+        return 3
+    }
+    return 4
+}
+
+// The character at `i` (at least 0x80), or -1 if the bytes there aren't a
+// whole, shortest UTF-8 sequence of a scalar value.
+#test("é", 0)[0xE9]
+#test("\u{10348}", 0)[0x10348]
+fun decode(s: str, i: int) -> int {
+    let n = s.len()
+    let c = s[i] as int
+    if c < 0xC2 || c > 0xF4 {
+        return -1
+    }
+    let len = utf8_len(s[i])
+    if i + len > n {
+        return -1
+    }
+    var v = 0
+    if len == 2 {
+        v = c & 0x1F
+    } else if len == 3 {
+        v = c & 0x0F
+    } else {
+        v = c & 0x07
+    }
+    var k = 1
+    while k < len {
+        let d = s[i + k] as int
+        if d < 0x80 || d >= 0xC0 {
+            return -1
+        }
+        v = (v << 6) | (d & 0x3F)
+        k += 1
+    }
+    if (len == 3 && v < 0x800) || (len == 4 && (v < 0x10000 || v > 0x10FFFF)) || (v >= 0xD800 && v <= 0xDFFF) {
+        return -1
+    }
+    return v
+}
+
+// The length of the character XML allows at `i` (at least 0x80), or 0.
+#test("é", 0)[2]
+#test("\u{FFFE}", 0)[0]
+#test("\u{FFFD}", 0)[3]
+fun char_len(s: str, i: int) -> int {
+    let v = decode(s, i)
+    if v < 0 || v == 0xFFFE || v == 0xFFFF {
+        return 0
+    }
+    return utf8_len(s[i])
+}
+
+// The UTF-8 bytes of the scalar value `c`.
+#test(0x41)["A"]
+#test(0xE9)["é"]
+#test(0x20AC)["€"]
+#test(0x1F600)["😀"]
+fun encode(c: int) -> str {
+    var sb = StringBuilder()
+    if c < 0x80 {
+        sb.append_byte(c as uint8)
+    } else if c < 0x800 {
+        sb.append_byte((0xC0 | (c >> 6)) as uint8)
+        sb.append_byte((0x80 | (c & 0x3F)) as uint8)
+    } else if c < 0x10000 {
+        sb.append_byte((0xE0 | (c >> 12)) as uint8)
+        sb.append_byte((0x80 | ((c >> 6) & 0x3F)) as uint8)
+        sb.append_byte((0x80 | (c & 0x3F)) as uint8)
+    } else {
+        sb.append_byte((0xF0 | (c >> 18)) as uint8)
+        sb.append_byte((0x80 | ((c >> 12) & 0x3F)) as uint8)
+        sb.append_byte((0x80 | ((c >> 6) & 0x3F)) as uint8)
+        sb.append_byte((0x80 | (c & 0x3F)) as uint8)
+    }
+    return sb.build()
+}
+
+// ISO-8859-1 bytes as UTF-8.
+#test("plain")["plain"]
+fun latin1_to_utf8(s: str) -> str {
+    var sb = StringBuilder()
+    var run = 0
+    var i = 0
+    while i < s.len() {
+        let c = s[i]
+        if c >= 0x80u8 {
+            sb.append(s, run, i)
+            sb.append_byte(0xC0u8 | (c >> 6))
+            sb.append_byte(0x80u8 | (c & 0x3Fu8))
+            run = i + 1
+        }
+        i += 1
+    }
+    sb.append(s, run, s.len())
+    return sb.build()
+}
+
+// The end of the name that starts at `start` (XML 1.0, fifth edition), or
+// `start` if none does.
+#test("abc def", 0)[3]
+#test("a:b-c.d_9>", 0)[9]
+#test("9a", 0)[0]
+#test("-a", 0)[0]
+#test("é·x", 0)[5]
+fun name_end(s: str, start: int) -> int {
+    let n = s.len()
+    var i = start
+    while i < n {
+        let c = s[i]
+        if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' || c == ':' {
+            i += 1
+        } else if i > start && ((c >= '0' && c <= '9') || c == '-' || c == '.') {
+            i += 1
+        } else if c >= 0x80u8 {
+            let v = decode(s, i)
+            if v < 0 {
+                return i
+            }
+            if i == start {
+                if !is_name_start(v) {
+                    return i
+                }
+            } else if !is_name_start(v) && !is_name_rest(v) {
+                return i
+            }
+            i += utf8_len(c)
+        } else {
+            return i
+        }
+    }
+    return i
+}
+
+// Whether the character `c` (past ASCII) may start a name.
+fun is_name_start(c: int) -> bool {
+    return (c >= 0xC0 && c <= 0xD6) || (c >= 0xD8 && c <= 0xF6) || (c >= 0xF8 && c <= 0x2FF) ||
+        (c >= 0x370 && c <= 0x37D) || (c >= 0x37F && c <= 0x1FFF) || (c >= 0x200C && c <= 0x200D) ||
+        (c >= 0x2070 && c <= 0x218F) || (c >= 0x2C00 && c <= 0x2FEF) || (c >= 0x3001 && c <= 0xD7FF) ||
+        (c >= 0xF900 && c <= 0xFDCF) || (c >= 0xFDF0 && c <= 0xFFFD) || (c >= 0x10000 && c <= 0xEFFFF)
+}
+
+// Whether the character `c` (past ASCII) may stand in a name after its first.
+fun is_name_rest(c: int) -> bool {
+    return c == 0xB7 || (c >= 0x300 && c <= 0x36F) || (c >= 0x203F && c <= 0x2040)
+}
+
+// Whether `c` may stand in a public identifier.
+fun is_pubid_char(c: uint8) -> bool {
+    if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') {
+        return true
+    }
+    return c == ' ' || c == '\r' || c == '\n' || c == '-' || c == '\'' || c == '(' || c == ')' ||
+        c == '+' || c == ',' || c == '.' || c == '/' || c == ':' || c == '=' || c == '?' ||
+        c == ';' || c == '!' || c == '*' || c == '#' || c == '@' || c == '$' || c == '_' || c == '%'
+}
+
+// Whether `v` is a version number, `1.` and digits.
+#test("1.0")[true]
+#test("1.10")[true]
+#test("1.")[false]
+#test("2.0")[false]
+fun version_ok(v: str) -> bool {
+    if v.len() < 3 || v[0] != '1' || v[1] != '.' {
+        return false
+    }
+    var k = 2
+    while k < v.len() {
+        if v[k] < '0' || v[k] > '9' {
+            return false
+        }
+        k += 1
+    }
+    return true
+}
+
+// Whether `v` is an encoding's name: a letter, then letters, digits, `.`,
+// `_` and `-`.
+#test("UTF-8")[true]
+#test("8859")[false]
+#test("")[false]
+fun enc_name_ok(v: str) -> bool {
+    if v.len() == 0 || !((v[0] >= 'a' && v[0] <= 'z') || (v[0] >= 'A' && v[0] <= 'Z')) {
+        return false
+    }
+    var k = 1
+    while k < v.len() {
+        let c = v[k]
+        if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-') {
+            return false
+        }
+        k += 1
+    }
+    return true
+}
+
+// --- Writing ------------------------------------------------------------------
+
+// The element as XML text, without a declaration: attributes in double
+// quotes, an element without content as `<a/>`, text and attribute values
+// escaped as `escape_text` and `escape_attr` escape them. Names, comments and
+// processing instructions are written as they are: a comment holding `--`
+// or a name that isn't one gives text that doesn't parse.
+#test(Element { name: "a", attrs: [("x", "1 < 2 & \"3\"")], children: [Node.Text("a<b&c>"), Node.Element(Element { name: "b", attrs: [], children: [] }), Node.Comment(" c "), Node.Pi("p", "d"), Node.Pi("q", "")] })["<a x=\"1 &lt; 2 &amp; &quot;3&quot;\">a&lt;b&amp;c&gt;<b/><!-- c --><?p d?><?q?></a>"]
+pub fun to_string(e: Element) -> str {
+    var w = new_writer()
+    w.tree(e, false, 0)
+    return w.sb.build()
+}
+
+// The element as text with each child element on a line of its own,
+// indented by `indent` more spaces a level (with 0 or less, not indented).
+// An element that holds text other than whitespace is written as `to_string`
+// writes it, so that its text stays as it is; the whitespace-only text
+// between child elements is dropped.
+#test(Element { name: "a", attrs: [], children: [Node.Text("\n "), Node.Element(Element { name: "b", attrs: [("k", "v")], children: [Node.Text("x "), Node.Element(Element { name: "i", attrs: [], children: [Node.Text("y")] })] }), Node.Comment("c"), Node.Element(Element { name: "c", attrs: [], children: [Node.Element(Element { name: "d", attrs: [], children: [] })] }), Node.Element(Element { name: "e", attrs: [], children: [Node.Text("  ")] })] }, 2)["<a>\n  <b k=\"v\">x <i>y</i></b>\n  <!--c-->\n  <c>\n    <d/>\n  </c>\n  <e/>\n</a>"]
+#test(Element { name: "a", attrs: [], children: [Node.Element(Element { name: "b", attrs: [], children: [] })] }, 0)["<a>\n<b/>\n</a>"]
+pub fun pretty(e: Element, indent: int = 2) -> str {
+    var w = new_writer()
+    w.tree(e, true, if indent > 0 { indent } else { 0 })
+    return w.sb.build()
+}
+
+// `s` as element text: `&`, `<` and `>` as references, and a CR as `&#13;`
+// (which would be read as a line end).
+#test("a<b & c>d")["a&lt;b &amp; c&gt;d"]
+#test("x\r\ny")["x&#13;\ny"]
+#test("plain")["plain"]
+pub fun escape_text(s: str) -> str {
+    var w = new_writer()
+    w.escaped(s, false)
+    return w.sb.build()
+}
+
+// `s` as an attribute value in double quotes: `&`, `<`, `>` and `"` as
+// references, and a tab, LF or CR as a character reference (which would be
+// read as a space).
+#test("say \"hi\" & <go>")["say &quot;hi&quot; &amp; &lt;go&gt;"]
+#test("a\tb\nc\rd 'e'")["a&#9;b&#10;c&#13;d 'e'"]
+pub fun escape_attr(s: str) -> str {
+    var w = new_writer()
+    w.escaped(s, true)
+    return w.sb.build()
+}
+
+const SPACES: str = "                                                                "
+
+// Writes text; `tree`'s stack of the open elements, the index of each one's
+// next child, and whether each is written as `to_string` writes it.
+struct Writer {
+    sb: StringBuilder,
+    open: [Element],
+    next: [int],
+    inline: [bool],
+}
+
+fun new_writer() -> Writer {
+    return Writer { sb: StringBuilder(), open: [], next: [], inline: [] }
+}
+
+impl Writer {
+    // `s` escaped for text or, with `attr`, an attribute value.
+    fun escaped(var self, s: str, attr: bool) {
+        var run = 0
+        var i = 0
+        let n = s.len()
+        while i < n {
+            let c = s[i]
+            if c > '>' || (c >= ' ' && c != '"' && c != '&' && c != '<' && c != '>') {
+                i += 1      // nothing to escape
+                continue
+            }
+            var r = ""
+            if c == '&' {
+                r = "&amp;"
+            } else if c == '<' {
+                r = "&lt;"
+            } else if c == '>' {
+                r = "&gt;"
+            } else if c == '\r' {
+                r = "&#13;"
+            } else if attr && c == '"' {
+                r = "&quot;"
+            } else if attr && c == '\t' {
+                r = "&#9;"
+            } else if attr && c == '\n' {
+                r = "&#10;"
+            }
+            if r != "" {
+                self.sb.append(s, run, i)
+                self.sb.append(r)
+                run = i + 1
+            }
+            i += 1
+        }
+        self.sb.append(s, run, n)
+    }
+
+    // The start tag of `e` up to its `>` (not written).
+    fun open_tag(var self, e: Element) {
+        self.sb.append_byte('<')
+        self.sb.append(e.name)
+        for a in e.attrs {
+            self.sb.append_byte(' ')
+            self.sb.append(a.0)
+            self.sb.append("=\"")
+            self.escaped(a.1, true)
+            self.sb.append_byte('"')
+        }
+    }
+
+    fun close_tag(var self, e: Element) {
+        self.sb.append("</")
+        self.sb.append(e.name)
+        self.sb.append_byte('>')
+    }
+
+    // A comment or processing instruction (an element or text isn't one).
+    fun misc(var self, n: Node) {
+        match n {
+            Comment(t) => {
+                self.sb.append("<!--")
+                self.sb.append(t)
+                self.sb.append("-->")
+            }
+            Pi(target, data) => {
+                self.sb.append("<?")
+                self.sb.append(target)
+                if data != "" {
+                    self.sb.append_byte(' ')
+                    self.sb.append(data)
+                }
+                self.sb.append("?>")
+            }
+            _ => {}
+        }
+    }
+
+    // A line end and the indentation of `depth`.
+    fun line(var self, depth: int, indent: int) {
+        self.sb.append_byte('\n')
+        var k = depth * indent
+        while k > 0 {
+            let m = if k < SPACES.len() { k } else { SPACES.len() }
+            self.sb.append(SPACES, 0, m)
+            k -= m
+        }
+    }
+
+    // The tree `root`, as `to_string` writes it or, with `pretty`, as
+    // `pretty` writes it: a loop over the stack of the open elements, not a
+    // recursion, so that any depth can be written.
+    fun tree(var self, root: Element, pretty: bool, indent: int) {
+        self.start(root, !pretty)
+        while self.open.len() > 0 {
+            let k = self.open.len() - 1
+            let e = self.open[k]
+            let j = self.next[k]
+            let flat = self.inline[k]
+            if j >= e.children.len() {
+                if !flat {
+                    self.line(k, indent)
+                }
+                self.close_tag(e)
+                let a = self.open.pop()
+                let b = self.next.pop()
+                let c = self.inline.pop()
+                continue
+            }
+            self.next[k] = j + 1
+            match e.children[j] {
+                Element(child) => {
+                    if !flat {
+                        self.line(k + 1, indent)
+                    }
+                    self.start(child, flat)
+                }
+                Text(t) => {
+                    if flat {
+                        self.escaped(t, false)
+                    }
+                }
+                other => {
+                    if !flat {
+                        self.line(k + 1, indent)
+                    }
+                    self.misc(other)
+                }
+            }
+        }
+    }
+
+    // The start tag of `e`, and `e` on the stack if it has content to
+    // write; `flat` if its parent is written flat. In a pretty element,
+    // text other than whitespace makes it flat, and whitespace isn't written.
+    fun start(var self, e: Element, flat: bool) {
+        self.open_tag(e)
+        var shown = 0
+        var is_flat = flat
+        for c in e.children {
+            match c {
+                Text(t) => {
+                    if !is_blank(t) {
+                        is_flat = true
+                    }
+                }
+                _ => { shown += 1 }
+            }
+        }
+        if e.children.len() == 0 || (!is_flat && shown == 0) {
+            self.sb.append("/>")
+            return
+        }
+        self.sb.append_byte('>')
+        self.open.push(e)
+        self.next.push(0)
+        self.inline.push(is_flat)
+    }
+}
+
+// Whether `s` is only whitespace.
+fun is_blank(s: str) -> bool {
+    return skip_space(s, 0) == s.len()
+}
+
+// --- Test functions ---------------------------------------------------------------
+
+// The events of `text` written as one line each, or the error.
+fun events_of(text: str) -> [str] {
+    var out: [str] = []
+    var r = reader(text)
+    while true {
+        match r.read_event() {
+            Ok(ev) => {
+                out.push(show(ev))
+                match ev {
+                    Eof => { return out }
+                    _ => {}
+                }
+            }
+            Err(e) => {
+                out.push(f"error {e}")
+                return out
+            }
+        }
+    }
+    unreachable()
+}
+
+// An event as a line of text.
+fun show(ev: Event) -> str {
+    return match ev {
+        Declaration(d) => f"decl {d.version} {d.encoding} {d.standalone}"
+        Doctype(t) => f"doctype {t}"
+        Start(name, attrs) => {
+            var sb = StringBuilder()
+            sb.append("start ")
+            sb.append(name)
+            for a in attrs {
+                sb.append(f" {a.0}={a.1}")
+            }
+            sb.build()
+        }
+        End(name) => f"end {name}"
+        Text(t) => f"text {t}"
+        CData(t) => f"cdata {t}"
+        Comment(t) => f"comment {t}"
+        Pi(t, d) => f"pi {t} {d}"
+        Eof => "eof"
+    }
+}
+
+#test
+fun pull_events() {
+    let got = events_of("<?xml version='1.0' encoding='utf-8' standalone='yes'?>\n<!DOCTYPE r SYSTEM 'r.dtd'>\n<!--c--><r a='1'><e/>t&amp;<![CDATA[<x>]]></r> <?p q?>\n")
+    let want = ["decl 1.0 utf-8 yes", "doctype r SYSTEM 'r.dtd'", "comment c", "start r a=1", "start e", "end e", "text t&", "cdata <x>", "end r", "pi p q", "eof"]
+    assert(got == want, got.join("|"))
+    assert(events_of("<a>") == ["start a", "error 1:4: the text ends inside markup or with an element open"], "an element left open")
+}
+
+#test
+fun iterator() {
+    var names: [str] = []
+    var errors = 0
+    for ev in reader("<a><b/><c>x</c></a>") {
+        match ev {
+            Ok(Start(name, _)) => names.push(name)
+            Ok(_) => {}
+            Err(_) => { errors += 1 }
+        }
+    }
+    assert(names == ["a", "b", "c"] && errors == 0, names.join(" "))
+    var n = 0
+    for ev in reader("<a></b>") {
+        n += 1
+    }
+    assert(n == 2, "an error ends the iterator") // the start, then the error
+}
+
+#test
+fun documents() {
+    match parse_document("<?xml version=\"1.0\"?><!DOCTYPE r><!--a--><r/><?z?><!--b-->") {
+        Ok(d) => {
+            match d.declaration {
+                Some(decl) => assert(decl.version == "1.0" && decl.encoding == "", "the declaration")
+                None => assert(false, "no declaration")
+            }
+            assert(d.doctype.unwrap_or("") == "r", "the doctype")
+            assert(d.prolog == [Node.Comment("a")], "the prolog")
+            assert(d.epilog == [Node.Pi("z", ""), Node.Comment("b")], "the epilog")
+            assert(d.root.name == "r", "the root")
+        }
+        Err(e) => assert(false, f"{e}")
+    }
+}
+
+#test
+fun latin1() {
+    var sb = StringBuilder()
+    sb.append("<?xml version='1.0' encoding='ISO-8859-1'?><a b='\"")
+    sb.append_byte(0xE9u8)
+    sb.append("\"'>caf")
+    sb.append_byte(0xE9u8)
+    sb.append("</a>")
+    match parse(sb.build()) {
+        Ok(e) => assert(to_string(e) == "<a b=\"&quot;é&quot;\">café</a>", to_string(e))
+        Err(e) => assert(false, f"{e}")
+    }
+    // without the declaration, the byte isn't UTF-8
+    var bad = StringBuilder()
+    bad.append("<a>")
+    bad.append_byte(0xE9u8)
+    bad.append("</a>")
+    match parse(bad.build()) {
+        Ok(_) => assert(false, "a byte that isn't UTF-8")
+        Err(e) => assert(e.kind == XmlErrorKind.InvalidChar && e.col == 4, f"{e}")
+    }
+    // a lone continuation byte right after a name, where a slice can't end
+    for head in ["<a", "<a b", "<?p", "<?xml version"] {
+        var sb2 = StringBuilder()
+        sb2.append(head)
+        sb2.append_byte(0xA9u8)
+        sb2.append("='1'?><a/>")
+        match parse(sb2.build()) {
+            Ok(_) => assert(false, head)
+            Err(e) => {}
+        }
+    }
+}
+
+// What `to_string` writes, `parse` reads back as it was.
+#test
+fun round_trip() {
+    let e = element("r", [("a", "x \"y\" & 'z' <\t\n\r>")], [
+        Node.Text("t <&> ]]> \r\n end"),
+        Node.Element(element("é", [], [Node.Pi("p", "d"), Node.Comment(" c ")])),
+        Node.Text("\u{10FFFF}"),
+    ])
+    let text = to_string(e)
+    match parse(text) {
+        Ok(back) => assert(back == e, to_string(back))
+        Err(err) => assert(false, f"{err}: {text}")
+    }
+    match parse(pretty(e)) {
+        Ok(back) => assert(back == e, "mixed content stays as it is")
+        Err(err) => assert(false, f"{err}")
+    }
+}
+
+// A stream that gives its bytes in pieces of 1 to `most` bytes, or fails
+// once `fail_at` bytes are given (-1: never).
+struct Trickle {
+    data: str,
+    pos: int,
+    step: int,
+    most: int,
+    fail_at: int,
+}
+
+impl Read for Trickle {
+    fun read(var self, n: int) -> Result<[uint8], IoError> {
+        let s = self.read_str(n)?
+        var out: [uint8] = []
+        var k = 0
+        while k < s.len() {
+            out.push(s[k])
+            k += 1
+        }
+        return Ok(out)
+    }
+
+    fun read_str(var self, n: int) -> Result<str, IoError> {
+        if self.fail_at >= 0 && self.pos >= self.fail_at {
+            return Err(IoError.BrokenPipe)
+        }
+        self.step = self.step % self.most + 1
+        var end = self.pos + self.step
+        if end > self.pos + n {
+            end = self.pos + n
+        }
+        if end > self.data.len() {
+            end = self.data.len()
+        }
+        var out = StringBuilder()
+        out.append(self.data, self.pos, end)
+        self.pos = end
+        return Ok(out.build())
+    }
+}
+
+// The events a stream reader gives for `text` in pieces of 1 to `most`
+// bytes, texts that follow each other joined.
+fun stream_events(text: str, most: int) -> [str] {
+    var out: [str] = []
+    var r = stream_reader(Trickle { data: text, pos: 0, step: 0, most: most, fail_at: -1 })
+    var pending = ""
+    while true {
+        match r.read_event() {
+            Ok(ev) => {
+                match ev {
+                    Text(t) => { pending = pending + t }
+                    _ => {
+                        if pending != "" {
+                            out.push(show(Event.Text(pending)))
+                            pending = ""
+                        }
+                        out.push(show(ev))
+                        match ev {
+                            Eof => { return out }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                if pending != "" {
+                    out.push(show(Event.Text(pending)))
+                }
+                out.push(f"error {e}")
+                return out
+            }
+        }
+    }
+    unreachable()
+}
+
+#test
+fun streams() {
+    let texts = [
+        "\u{FEFF}<?xml version='1.0'?>\r\n<!DOCTYPE r [<!ENTITY x 'y'>]><r a='1&#x20AC;\r\n'>t\r\nü€😀 &lt;&amp;]] ]> <![CDATA[x]]]]><e/><!--c\r--><?p d\r\n?></r>\r\n",
+        "<a>\r\n\r\n]]]</a>",
+        "<a>&#1234567;</a>",
+        "<a>x</a><b/>",
+        "<?xml version='1.0' encoding='latin1'?><a>x</a>",
+        "\n\n  <a>\n<b>&bad;</b></a>",
+        "<a>]]></a>",
+        "<a>",
+        "",
+    ]
+    // ISO-8859-1, its bytes past ASCII held back where a chunk cuts them
+    for pad in 0..8 {
+        var sb = StringBuilder()
+        sb.append("<?xml version='1.0' encoding='ISO-8859-1'")
+        sb.append(" ".repeat(pad))
+        sb.append("?><a>")
+        for k in 0..12 {
+            sb.append_byte(0xC3u8)
+            sb.append_byte(0xA9u8)
+        }
+        sb.append("</a>")
+        let latin = sb.build()
+        for most in 1..24 {
+            assert(stream_events(latin, most) == events_of(latin), f"ISO-8859-1 in pieces of {most}")
+        }
+    }
+    for t in texts {
+        let want = events_of(t)
+        for most in [1, 2, 3, 7, 64] {
+            let got = stream_events(t, most)
+            assert(got == want, f"{most}: {got.join("|")} for {want.join("|")}")
+        }
+    }
+    // a text split by the chunks is one `Text` in the tree
+    let doc = "<a>a long text, &amp; <![CDATA[more]]> of it<b/></a>"
+    match parse_stream(Trickle { data: doc, pos: 0, step: 0, most: 3, fail_at: -1 }) {
+        Ok(d) => assert(d.root.children == [Node.Text("a long text, & more of it"), Node.Element(element("b", [], []))], to_string(d.root))
+        Err(e) => assert(false, f"{e}")
+    }
+}
+
+#test
+fun stream_failure() {
+    var r = stream_reader(Trickle { data: "<a>\n<b>xyz</b></a>", pos: 0, step: 0, most: 1, fail_at: 6 })
+    while true {
+        match r.read_event() {
+            Ok(_) => {}
+            Err(e) => {
+                assert(e.kind == XmlErrorKind.Io && e.line == 2, f"{e}")
+                match r.io_error() {
+                    Some(IoError.BrokenPipe) => {}
+                    _ => assert(false, "the cause")
+                }
+                return
+            }
+        }
+    }
+}
+
+// Nesting has no limit: the reader, the tree builder and the writer loop
+// over stacks, not recursions (natively a million levels work). 1000 here:
+// on wasm32 the runtime releases a value nested 2000 deep by a recursion
+// that overflows its stack.
+#test
+fun deep() {
+    let text = nested(1000)
+    match parse(text) {
+        Ok(e) => {
+            assert(to_string(e) == text, "written back")
+            assert(e.text() == "x", "the text")
+        }
+        Err(e) => assert(false, f"{e}")
+    }
+    match parse(nested(100)) {
+        Ok(e) => {
+            let lines = pretty(e, 1).split("\n")
+            // three lines a level, but one for the innermost, which holds text
+            assert(lines.len() == 3 * 99 + 1 && lines[2 * 98 + 1] == " ".repeat(99) + "<b/>", "indented")
+            assert(lines[99 * 2] == " ".repeat(99) + "<a><b/>x</a>", "flat")
+        }
+        Err(e) => assert(false, f"{e}")
+    }
+}
+
+// `n` elements `a`, each in the one before, each starting with `<b/>`, and
+// the innermost holding the text "x".
+fun nested(n: int) -> str {
+    var sb = StringBuilder()
+    for k in 0..n {
+        sb.append("<a><b/>")
+    }
+    sb.append("x")
+    for k in 0..n {
+        sb.append("</a>")
+    }
+    return sb.build()
+}
+
+// Past MANY_ATTRS attributes, a repeated name is found by a map.
+#test
+fun many_attributes() {
+    var sb = StringBuilder()
+    sb.append("<a")
+    for k in 0..40 {
+        sb.append(f" n{k}='{k}'")
+    }
+    let fine = sb.build() + "/>"
+    match parse(fine) {
+        Ok(e) => assert(e.attrs.len() == 40 && e.attr("n39").unwrap_or("") == "39", "40 attributes")
+        Err(e) => assert(false, f"{e}")
+    }
+    sb.append(" n3='again'/>")
+    match parse(sb.build()) {
+        Ok(_) => assert(false, "a repeated name")
+        Err(e) => assert(e.kind == XmlErrorKind.DuplicateAttribute && e.col == fine.len(), f"{e}")
+    }
+}

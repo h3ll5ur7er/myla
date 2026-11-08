@@ -56,6 +56,7 @@ The conventions (D164): operations on built-in types are methods (`s.split(",")`
 | `std.toml` | [[Language/Standard-library/Toml]] | The TOML subset of manifests and lock files |
 | `std.csv` | [[Language/Standard-library/Csv]] | RFC 4180 CSV: records, a header row mapped to names, writing |
 | `std.ini` | [[Language/Standard-library/Ini]] | INI files: sections, keys, comments, read and written in order |
+| `std.xml` | [[Language/Standard-library/Xml]] | Well-formed XML 1.0 without a DTD: a tree, a pull reader over a text or a stream, writing with escaping and indentation |
 | `std.bytes` | [[Language/Standard-library/Bytes]] | Strings as `[uint8]` and back, checking and building UTF-8 |
 | `std.encoding` | [[Language/Standard-library/Encoding]] | Hex and Base64 (standard and URL-safe), strict decoding |
 | `std.url` | [[Language/Standard-library/Url]] | Percent-encoding, query strings, parsing and building URLs |
