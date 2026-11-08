@@ -1,0 +1,118 @@
+// 28. Litmus (MYLA-387): tasks parked on notifiers and woken by others,
+// thousands of times, however the wakes and the parks meet on the workers:
+// eight pairs play ping-pong, a token goes round a ring of sixteen tasks,
+// and sixteen tasks pass a barrier a hundred times (each listening before
+// it arrives, the last one waking the others with `notify_all`). A wake
+// lost would leave a task parked for good: the program would end with
+// "every task waits for another one" instead of its totals.
+import std.task as task
+
+async fun ping(mine: task.Notifier, theirs: task.Notifier, n: int) -> int {
+    var k = 0
+    for i in 0..n {
+        theirs.notify_one()
+        if await mine.wait() { k += 1 }
+    }
+    return k
+}
+
+async fun pong(mine: task.Notifier, theirs: task.Notifier, n: int) -> int {
+    var k = 0
+    for i in 0..n {
+        if await mine.wait() { k += 1 }
+        theirs.notify_one()
+    }
+    return k
+}
+
+async fun pairs(n: int, rounds: int) -> int {
+    var fs: [async () -> int] = []
+    for p in 0..n {
+        let a = task.notifier()
+        let b = task.notifier()
+        fs.push(async () => await ping(a, b, rounds))
+        fs.push(async () => await pong(b, a, rounds))
+    }
+    var total = 0
+    for k in await task.all(fs) { total += k }
+    return total
+}
+
+// One task of the ring: waits for the token, passes it on, `laps` times.
+async fun relay(mine: task.Notifier, next: task.Notifier, laps: int, first: bool) -> int {
+    var passed = 0
+    if first { next.notify_one() }
+    for i in 0..laps {
+        if await mine.wait() { passed += 1 }
+        if !first || i + 1 < laps { next.notify_one() }
+    }
+    return passed
+}
+
+async fun ring(size: int, laps: int) -> int {
+    var ns: [task.Notifier] = []
+    for i in 0..size { ns.push(task.notifier()) }
+    var fs: [async () -> int] = []
+    for i in 0..size {
+        let mine = ns[i]
+        let next = ns[(i + 1) % size]
+        let first = i == 0
+        fs.push(async () => await relay(mine, next, laps, first))
+    }
+    var total = 0
+    for k in await task.all(fs) { total += k }
+    return total
+}
+
+actor Count {
+    here: int,
+    size: int,
+    rounds: int,
+}
+
+impl Count {
+    // Whether this arrival is the round's last (the count starts again).
+    fun arrive(var self) -> bool {
+        self.here += 1
+        if self.here < self.size { return false }
+        self.here = 0
+        self.rounds += 1
+        return true
+    }
+
+    fun done(self) -> int {
+        return self.rounds
+    }
+}
+
+async fun pass(c: Count, go: task.Notifier, rounds: int) -> int {
+    var woken = 0
+    for r in 0..rounds {
+        let l = go.listen()
+        if await c.arrive() {
+            go.notify_all()
+        } else if await l.wait() {
+            woken += 1
+        }
+    }
+    return woken
+}
+
+async fun barrier(size: int, rounds: int) -> int {
+    let c = Count { here: 0, size: size, rounds: 0 }
+    let go = task.notifier()
+    var fs: [async () -> int] = []
+    for i in 0..size {
+        fs.push(async () => await pass(c, go, rounds))
+    }
+    var woken = 0
+    for k in await task.all(fs) { woken += k }
+    return woken + await c.done()
+}
+
+#main
+async fun main() {
+    print(await pairs(8, 1000))
+    print(await ring(16, 200))
+    print(await barrier(16, 100))
+}

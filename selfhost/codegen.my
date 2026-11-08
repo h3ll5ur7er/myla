@@ -16,6 +16,7 @@ from std.num import f64_literal_bits, f32_round_bits
 from std.fs import current_dir
 from .loader import Span
 from .checker import CheckErr, Checker, Type, is_builtin_value, is_raw_memory_primitive, is_platform_primitive, FuncSig, StructInfo, EnumInfo, FieldT, VariantT, Subst, subst_type, subst_get, opt_subst_type, CV, type_name, checker_on, ImplArgs, impl_trait_args
+from .checker import is_notify_primitive
 from .ir import render_func, verify, moves, IrFunc, Inst
 from .ssa import SsaStats, no_ssa_stats
 from .inline import inlinable, inline_calls, same_module, may_inline, merge_blocks
@@ -2236,6 +2237,9 @@ impl CodeGen {
         // a timer entry being swapped (std.rt's `timer_sift`, the lock held)
         out.push("__timer_tmp:")
         out.push("\t.skip 32")
+        // the waiters parked on notifiers (std.rt's `park_frame`, MYLA-387)
+        out.push("__parked:")
+        out.push("\t.skip 8")
         if self.frames {
             // each worker's queue: `[lock][head][tail]`, a cache line each
             out.push("\t.balign 64")
@@ -4075,6 +4079,7 @@ pub fun is_builtin_call_name(nm: str) -> bool {
     if nm == "__spawn" || nm == "__reap" || nm == "__kill" || nm == "__close" { return true }
     if nm == "__run_with" || nm == "__spawn_with" { return true }
     if is_platform_primitive(nm) || is_raw_memory_primitive(nm) { return true }
+    if is_notify_primitive(nm) { return true }
     return false
 }
 

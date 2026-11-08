@@ -137,6 +137,8 @@ parallel:
 
 Use an external watchdog so the test cannot hang the suite.
 
+In Myla, a task waits for another only through a notifier ([[Language/Concurrency#Waiting until woken]], [[MYLA-387]]), so a protocol deadlock is the program's: Myla detects it when every task waits with nobody left to wake one (`every task waits for another one`, status 1; `t29_nobody_left_to_wake`), and documents that a cycle among some tasks while others run isn't seen. `t28_parked_and_woken` holds the notifiers to losing no wake-up over thousands of park and wake rounds on 1 to 16 workers.
+
 ## 6. Reentrancy Across an Await
 
 This is particularly relevant to actors that can process other messages while a method is suspended.

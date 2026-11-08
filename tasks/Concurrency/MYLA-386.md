@@ -31,7 +31,7 @@ Found by the channels lane ([[MYLA-351]]): `actor Box<T>` is refused ("an actor 
   - `generic_actors_nested`: an actor holding another of its type argument, and one linking to others of its own type.
 
   All six pass interpreted and natively, and also under `MYLA_TEST_TARGET=aarch64-linux` (qemu) and `wasm32-wasi` (node): 6/6 on each target.
-- **Stress test.** `tests/burn/concurrency_stress/t28_generic_actor_from_many_tasks.my`: 32 tasks call a `Tally<int>` and a `Tally<[str]>` 208,000 times in all. A list sent in is changed after the call, and the actor keeps its copy. `test_concurrency_stress` passes (4 tests): the interpreter, native code on 1, 4 and 16 workers (3 runs each), and the `fifo` and `seed:1..3` orders in both. It also passes by hand on aarch64 with 4 and 16 workers, and on wasm32.
+- **Stress test.** `tests/burn/concurrency_stress/t30_generic_actor_from_many_tasks.my`: 32 tasks call a `Tally<int>` and a `Tally<[str]>` 208,000 times in all. A list sent in is changed after the call, and the actor keeps its copy. `test_concurrency_stress` passes (4 tests): the interpreter, native code on 1, 4 and 16 workers (3 runs each), and the `fifo` and `seed:1..3` orders in both. It also passes by hand on aarch64 with 4 and 16 workers, and on wasm32.
 - **Checker.**
   - New `#test` cases in [[selfhost/checker.my]], [[selfhost/codegen.my]] and [[selfhost/lower.my]]: 691/691, 343/343 and 115/115.
   - `test_selfhost_checker.test_warnings_in_generic_actors`: D95 in a generic actor gives the same warnings as the same actor over `int`. That covers a check through `self.has()`, a change through `self.take() -> T` inside `Some(…)`, a list of `T`s set from a stale read, and quiet after a re-check.

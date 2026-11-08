@@ -897,6 +897,300 @@ fun main() {
     print(t)
 }
 """,
+    # MYLA-387: tasks parked on notifiers until another task wakes them, on
+    # every number of workers the same output
+    "notifier_ping_pong": """// MYLA-387: two tasks play ping-pong through two notifiers; an actor's
+// log sees the turns alternate, every wait woken
+import std.task as task
+
+actor Log {
+    turns: [int],
+}
+
+impl Log {
+    fun turn(var self, who: int) {
+        self.turns.push(who)
+    }
+
+    fun alternated(self) -> bool {
+        var i = 0
+        while i < self.turns.len() {
+            if self.turns[i] != i % 2 { return false }
+            i += 1
+        }
+        return true
+    }
+
+    fun count(self) -> int {
+        return self.turns.len()
+    }
+}
+
+async fun ping(log: Log, mine: task.Notifier, theirs: task.Notifier, n: int) -> int {
+    var woken = 0
+    for i in 0..n {
+        await log.turn(0)
+        theirs.notify_one()
+        if await mine.wait() { woken += 1 }
+    }
+    return woken
+}
+
+async fun pong(log: Log, mine: task.Notifier, theirs: task.Notifier, n: int) -> int {
+    var woken = 0
+    for i in 0..n {
+        if await mine.wait() { woken += 1 }
+        await log.turn(1)
+        theirs.notify_one()
+    }
+    return woken
+}
+
+#main
+async fun main() {
+    let log = Log { turns: [] }
+    let a = task.notifier()
+    let b = task.notifier()
+    async let x = ping(log, a, b, 500)
+    async let y = pong(log, b, a, 500)
+    print(await x + await y)
+    print(await log.count())
+    print(await log.alternated())
+    // the handles are values: a copy reaches the same notifier
+    let c = a
+    c.notify_one()
+    print(await a.wait_timeout(0))
+    print(a == c && a != b)
+}
+""",
+    "notifier_notify_all": """// MYLA-387: a hundred waiters, each listening before it says it is
+// there, all woken by one `notify_all`; a second round on the same notifier
+import std.task as task
+
+actor Door {
+    here: int,
+}
+
+impl Door {
+    fun arrive(var self) -> int {
+        self.here += 1
+        return self.here
+    }
+}
+
+async fun waiter(door: Door, go: task.Notifier, all_here: task.Notifier, k: int, i: int) -> int {
+    let l = go.listen()
+    if (await door.arrive()) == k { all_here.notify_one() }
+    if await l.wait() { return i }
+    return -1000
+}
+
+async fun round(k: int, go: task.Notifier) -> int {
+    let door = Door { here: 0 }
+    let all_here = task.notifier()
+    var fs: [async () -> int] = []
+    for i in 0..k {
+        fs.push(async () => await waiter(door, go, all_here, k, i))
+    }
+    async let rs = task.all(fs)
+    let ok = await all_here.wait()
+    go.notify_all()
+    var sum = 0
+    for r in await rs { sum += r }
+    return sum
+}
+
+#main
+async fun main() {
+    let go = task.notifier()
+    print(await round(100, go))
+    print(await round(7, go))
+    // nothing left behind: no permit
+    print(await go.wait_timeout(0))
+}
+""",
+    "notifier_wake_before_wait": """// MYLA-387: a wake before the wait isn't lost: each `notify_one` leaves a
+// permit when nobody waits, which a later wait takes at once; a
+// `notify_all` leaves none, but a listener taken before it sees it
+import std.task as task
+
+async fun late_waiter(n: task.Notifier) -> bool {
+    await task.sleep(5)
+    return await n.wait()
+}
+
+#main
+async fun main() {
+    let p = task.notifier()
+    p.notify_one()
+    p.notify_one()
+    p.notify_one()
+    var got = 0
+    for i in 0..3 {
+        if await p.wait() { got += 1 }
+    }
+    print(got)
+    print(await p.wait_timeout(0))
+    p.notify_all()
+    print(await p.wait_timeout(0))
+    let l = p.listen()
+    p.notify_all()
+    print(await l.wait())
+    print(await l.wait_timeout(0))
+    // the wake comes before the other task waits
+    let q = task.notifier()
+    async let w = late_waiter(q)
+    q.notify_one()
+    print(await w)
+}
+""",
+    "notifier_cancelled_waiter": """// MYLA-387: a waiter asked to stop (D96) stops waiting at once, its wait
+// giving false, and sees that it was asked; one asked before it waits
+// doesn't wait at all; a notify after that is a permit for the next wait
+import std.task as task
+
+async fun forever(n: task.Notifier) -> str {
+    let woken = await n.wait()
+    return f"woken {woken}, cancelled {task.cancelled()}"
+}
+
+async fun nested(n: task.Notifier) -> str {
+    async let inner = forever(n)
+    return await inner
+}
+
+#main
+async fun main() {
+    let c = task.notifier()
+    async let w = forever(c)
+    await task.yield()
+    task.cancel(w)
+    print(await w)
+    async let w2 = forever(c)
+    task.cancel(w2)
+    print(await w2)
+    // the request reaches a child of the cancelled task
+    async let w3 = nested(c)
+    await task.sleep(2)
+    task.cancel(w3)
+    print(await w3)
+    c.notify_one()
+    print(await c.wait_timeout(0))
+}
+""",
+    "notifier_timed_out_wait": """// MYLA-387: a wait with a time limit ends when it passes (false), or when
+// it is woken first (true); a timed-out wait leaves nothing behind
+import std.task as task
+
+async fun limited(n: task.Notifier, ms: int) -> bool {
+    return await n.wait_timeout(ms)
+}
+
+async fun later(n: task.Notifier) {
+    await task.sleep(5)
+    n.notify_one()
+}
+
+#main
+async fun main() {
+    let t = task.notifier()
+    async let late = limited(t, 20)
+    print(await late)
+    async let early = limited(t, 60000)
+    async let waker = later(t)
+    print(await early)
+    await waker
+    t.notify_one()
+    print(await t.wait_timeout(0))
+    print(await t.wait_timeout(-3))
+    // several limits on one notifier, the shortest first
+    async let a = limited(t, 30)
+    async let b = limited(t, 10)
+    async let c = limited(t, 60000)
+    await task.sleep(50)
+    t.notify_one()
+    print(f"{await a} {await b} {await c}")
+}
+""",
+    "notifier_wakes_a_receiver": """// MYLA-387: a channel's way: a receiver that finds the queue empty leaves
+// its notifier with the actor in the same call, and a send wakes the one
+// that has waited longest; closing wakes them all
+import std.task as task
+
+actor Queue {
+    items: [int],
+    head: int,
+    waiting: [task.Notifier],
+    closed: bool,
+}
+
+impl Queue {
+    fun take(var self, me: task.Notifier) -> Option<int> {
+        if self.head < self.items.len() {
+            self.head += 1
+            return Some(self.items[self.head - 1])
+        }
+        if self.closed { return Some(-1) }
+        self.waiting.push(me)
+        return None
+    }
+
+    fun put(var self, x: int) {
+        self.items.push(x)
+        if self.waiting.len() > 0 {
+            let n = self.waiting[0]
+            self.waiting = self.waiting[1:]
+            n.notify_one()
+        }
+    }
+
+    fun close(var self) {
+        self.closed = true
+        for n in self.waiting { n.notify_one() }
+        self.waiting = []
+    }
+}
+
+async fun receive(q: Queue) -> int {
+    let me = task.notifier()
+    var sum = 0
+    while true {
+        match await q.take(me) {
+            Some(x) => {
+                if x < 0 { return sum }
+                sum += x
+            }
+            None => { let woken = await me.wait() }
+        }
+    }
+    return sum
+}
+
+async fun send(q: Queue, base: int, n: int) {
+    for i in 0..n {
+        await q.put(base + i)
+        if i % 7 == 0 { await task.yield() }
+    }
+}
+
+#main
+async fun main() {
+    let q = Queue { items: [], head: 0, waiting: [], closed: false }
+    var rs: [async () -> int] = []
+    for k in 0..4 {
+        rs.push(async () => await receive(q))
+    }
+    async let got = task.all(rs)
+    async let s1 = send(q, 0, 300)
+    async let s2 = send(q, 1000, 300)
+    await s1
+    await s2
+    await q.close()
+    var total = 0
+    for x in await got { total += x }
+    print(total)
+}
+""",
     "iterators_async": """// `for` over an iterator in an async function (D171, MYLA-380): an `await`
 // in the body, `break` and `continue`, and a loop without an `await`
 import std.task as task
@@ -6744,6 +7038,13 @@ PINNED = {
     "wait_with_no_descriptor": 'before\nafter\n2\n',
     # MYLA-380: new
     "iterators": '3\n2\n1\n10\n10\n0\n12\n18\n24\n30\n36\n270\n10\n3\n5 4 4 3\nin the loop 3\n3\nquick,brown,jumps\n3\nx!\nyy!\nzzz!\np\nq\n60\n10\n9\n-1\n55\n107\n208\n',
+    # MYLA-387's notifiers: what the program says each line is
+    "notifier_ping_pong": "1000\n1000\ntrue\ntrue\ntrue\n",
+    "notifier_notify_all": "4950\n21\nfalse\n",
+    "notifier_wake_before_wait": "3\nfalse\nfalse\ntrue\ntrue\ntrue\n",
+    "notifier_cancelled_waiter": "woken false, cancelled true\n" * 3 + "true\n",
+    "notifier_timed_out_wait": "false\ntrue\ntrue\nfalse\nfalse false true\n",
+    "notifier_wakes_a_receiver": "389700\n",
     "iterators_async": '26\n8\n8\n',
     "iterator_adapters": '0\n10\n20\ntick\ntick\n0\n1\n7\n8\n<1>\n<2>\nstep 2\nstep 1\n10\n3\n12\nstep 3\nstep 2\nstep 1\nstep 3\n10\n9\n',
     # MYLA-381: new
