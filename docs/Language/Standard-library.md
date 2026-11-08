@@ -61,6 +61,7 @@ The conventions (D164): operations on built-in types are methods (`s.split(",")`
 | `std.set` | [[Language/Standard-library/Set]] | `Set<T>` in insertion order: insert, remove, union, intersection, difference |
 | `std.deque` | [[Language/Standard-library/Deque]] | `Deque<T>`, the double-ended queue and the queue: a ring buffer, indexable |
 | `std.heap` | [[Language/Standard-library/Heap]] | Binary heaps: `Heap<T: Ord>`, least or greatest first, and `KeyedHeap<T>` by an `int64` priority |
+| `std.btree` | [[Language/Standard-library/Btree]] | B+ trees: `SortedMap<K: Ord, V>` and `SortedSet<T: Ord>` in key order, `floor`, `ceiling`, `range`, `first`, `last` |
 | `std.digest` | [[Language/Standard-library/Digest]] | MD5, SHA-1, SHA-2 and HMAC, one-shot and incremental, as bytes and as hex |
 | `std.args` | [[Language/Standard-library/Args]] | Command-line arguments: a declarative spec of flags, options, positionals and subcommands, parsing, the generated help |
 | `std.rt` | [[Language/Standard-library/Rt]] | The runtime in Myla; not for programs |
