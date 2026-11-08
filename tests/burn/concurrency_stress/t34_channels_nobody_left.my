@@ -1,0 +1,43 @@
+// 34. A channel's waits park (MYLA-351, MYLA-387): they don't look again
+// and again. A hundred receivers wait on an empty channel and are woken one
+// value each; a sender waits on a full one until a receiver makes room. Then
+// a receiver waits on a channel nobody will send to, and its parent on a
+// rendezvous nobody will receive from: every task waits, with nobody left
+// to wake one, so the program ends with "every task waits for another one"
+// (status 1). A wait that looked again would never end.
+import std.task as task
+from std.task import Channel
+
+async fun receive(ch: Channel<int>) -> int {
+    return match await ch.recv() {
+        Some(x) => x
+        None => -1
+    }
+}
+
+#main
+async fun main() {
+    let ch: Channel<int> = task.channel(1)
+    var fs: [async () -> int] = []
+    for i in 0..100 {
+        fs.push(async () => await receive(ch))
+    }
+    async let rs = task.all(fs)
+    await task.sleep(5)
+    for i in 0..100 {
+        let r = await ch.send(i)
+    }
+    var sum = 0
+    for r in await rs { sum += r }
+    print(sum)
+    let full: Channel<int> = task.channel(1)
+    let r1 = await full.send(1)
+    async let room = receive(full)
+    let r2 = await full.send(2)
+    print(f"{await room} {await full.len()}")
+    let never: Channel<int> = task.channel(4)
+    async let lonely = receive(never)
+    let nobody: Channel<int> = task.channel(0)
+    let stuck = await nobody.send(1)
+    print(await lonely)
+}

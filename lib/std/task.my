@@ -1,5 +1,7 @@
 // std.task — running a number of child tasks known only at run time (D89,
-// docs/Language/Concurrency.md).
+// docs/Language/Concurrency.md), notifiers that park a task until another
+// wakes it (MYLA-387), and on them channels, worker pools and the first of
+// several (MYLA-351, further below).
 //
 // `all(fs)` runs each async function value of `fs` as a child task, all of
 // them at once, and gives their results in the order of `fs`, whichever
@@ -275,4 +277,1116 @@ async fun a_wait_times_out() {
     async let w = wakes(n, 1)
     assert(await n.wait_timeout(60000))
     await w
+}
+
+// --- channels ----------------------------------------------------------------------
+//
+// A channel is a queue that tasks share. Nothing mutable is shared but an
+// actor (D89), so the queue lives in one: `Queue<T>`, a generic actor
+// (MYLA-386), holds the values and the tasks waiting for them. `Channel<T>`
+// is the handle the tasks use: copying it copies the actor's handle.
+//
+// An operation that can go on at once is one call of the actor. One that
+// can't (a receive from an empty channel, a send to a full one) registers
+// its task as a waiter in that same call, in a slot of the actor with a
+// notifier of its own, and the task parks on it (MYLA-387) until the other
+// side serves it: a send hands its value straight to the oldest waiting
+// receiver; a receive moves the oldest waiting sender's value into the room
+// it made, or on a rendezvous takes it; `close` ends every wait. The
+// outcome stays in the slot until the woken task takes it (`settle`), which
+// frees the slot. Looking and registering are one step, and so are serving
+// and waking, so no wake is lost and no task looks again and again.
+//
+// A wait that ends without a wake (its time limit passed, or its task was
+// asked to stop) settles too. Still waiting, the waiter is taken off, and a
+// sender's value is taken back, never delivered. Served meanwhile, it takes
+// its outcome: a value handed to a receiver as it gave up is still that
+// receiver's, so no value sits unseen while the wake went to a task that
+// left, and the others' waits are untouched. That late wake stays on the
+// slot's notifier as a permit, which ends a wait of the slot's next waiter
+// early: `settle` says `Pending`, and it waits again. Slots and
+// their notifiers are reused, so a channel makes no more notifiers than it
+// ever had tasks waiting at once (a notifier lives as long as the program).
+
+// Why a channel's operation didn't go through.
+#derive(Eq)
+pub enum ChannelError {
+    // the channel was closed: nothing more goes in
+    Closed,
+    // a bounded channel holds as many values as it may (`try_send`)
+    Full,
+    // the channel holds no value now (`try_recv`)
+    Empty,
+    // the time given passed first (`send_timeout`, `recv_timeout`)
+    TimedOut,
+    // the waiting task was asked to stop (D96)
+    Cancelled,
+}
+
+impl ChannelError {
+    // The reason in words.
+    #test(ChannelError.Closed)["channel closed"]
+    #test(ChannelError.Full)["channel full"]
+    #test(ChannelError.Empty)["channel empty"]
+    #test(ChannelError.TimedOut)["timed out"]
+    #test(ChannelError.Cancelled)["cancelled"]
+    fun message(self) -> str {
+        return match self {
+            Closed => "channel closed"
+            Full => "channel full"
+            Empty => "channel empty"
+            TimedOut => "timed out"
+            Cancelled => "cancelled"
+        }
+    }
+}
+
+impl Format for ChannelError {
+    // The message; the spec is ignored.
+    #test(ChannelError.Closed, "")["channel closed"]
+    fun format(self, spec: str) -> str {
+        return self.message()
+    }
+}
+
+// The states of a slot of a channel's queue: no waiter, a receiver or a
+// sender waiting, and the three outcomes a waiter is served with (a value,
+// its value delivered, the channel closed).
+const FREE: int = 0
+const RECEIVING: int = 1
+const SENDING: int = 2
+const GOT: int = 3
+const DELIVERED: int = 4
+const SHUT: int = 5
+
+// A waiter's place in a channel's queue: the notifier it waits on (the
+// slot's, kept for its later waiters), its state, and the value it sends or
+// was handed. `seq` counts the waiters the slot had: an entry of the
+// queues of waiters with an older count is that of a waiter that gave up.
+struct Slot<T> {
+    n: Notifier,
+    seq: int,
+    state: int,
+    value: Option<T>,
+}
+
+// What a step on a channel's queue gave (`Queue`'s methods).
+enum Step<T> {
+    // the value went in, or to a receiver
+    Sent,
+    Got(T),
+    // a try found no room, or no value
+    Full,
+    Empty,
+    Closed,
+    // registered as the waiter in the slot: wait on the notifier, then
+    // `settle`
+    Wait(int, Notifier),
+    // `settle`: not served yet, wait again
+    Pending,
+    // `settle`: gave up, taken off (a sender's value taken back)
+    Gone,
+}
+
+// A first-in first-out queue: a list and the index of its front. Taking
+// from the front moves the index; the list drops what was taken once that
+// is half of it, so each value is copied once more on average. (`std.deque`
+// would do, but importing it costs every program that imports `std.task`
+// about 2.5 ms of checking.)
+struct Fifo<T> {
+    xs: [T],
+    head: int,
+}
+
+impl<T> Fifo<T> {
+    fun len(self) -> int {
+        return self.xs.len() - self.head
+    }
+
+    fun push(var self, x: T) {
+        self.xs.push(x)
+    }
+
+    fun pop(var self) -> Option<T> {
+        if self.head >= self.xs.len() {
+            return None
+        }
+        let x = self.xs[self.head]
+        self.head += 1
+        if self.head >= 32 && self.head * 2 >= self.xs.len() {
+            self.xs = self.xs[self.head:]
+            self.head = 0
+        }
+        return Some(x)
+    }
+}
+
+// A channel's queue: the values sent and not yet received, and the tasks
+// waiting to receive or to send, oldest first.
+actor Queue<T> {
+    items: Fifo<T>,
+    // at most this many values: -1 any number, 0 a rendezvous
+    cap: int,
+    closed: bool,
+    // the slots of the waiting receivers and senders, each with its `seq`
+    receivers: Fifo<(int, int)>,
+    senders: Fifo<(int, int)>,
+    slots: [Slot<T>],
+    // the slots no waiter has
+    free: [int],
+}
+
+// A channel's queue holding at most `cap` values (-1: any number).
+fun queue<T>(cap: int) -> Queue<T> {
+    return Queue { items: Fifo { xs: [], head: 0 }, cap: cap, closed: false, receivers: Fifo { xs: [], head: 0 }, senders: Fifo { xs: [], head: 0 }, slots: [], free: [] }
+}
+
+impl<T> Queue<T> {
+    // A send of `x`: to the oldest waiting receiver, or into the queue if
+    // there is room; else, with `wait`, the sender a waiter (on a
+    // rendezvous until a receiver takes `x`).
+    fun send(var self, x: T, wait: bool) -> Step<T> {
+        if self.closed {
+            return Step.Closed
+        }
+        let r = self.oldest(true)
+        if r >= 0 {
+            self.serve(r, GOT, Some(x))
+            return Step.Sent
+        }
+        if self.cap < 0 || self.items.len() < self.cap {
+            self.items.push(x)
+            return Step.Sent
+        }
+        if !wait {
+            return Step.Full
+        }
+        return self.enlist(SENDING, Some(x))
+    }
+
+    // A receive: the oldest value, its room going to the oldest waiting
+    // sender's value; on a rendezvous, that sender's value; else, with
+    // `wait`, the receiver a waiter.
+    fun recv(var self, wait: bool) -> Step<T> {
+        if let Some(x) = self.items.pop() {
+            let s = self.oldest(false)
+            if s >= 0 {
+                if let Some(v) = self.slots[s].value {
+                    self.items.push(v)
+                }
+                self.serve(s, DELIVERED, None)
+            }
+            return Step.Got(x)
+        }
+        let s = self.oldest(false)
+        if s >= 0 {
+            let v = self.slots[s].value
+            self.serve(s, DELIVERED, None)
+            if let Some(x) = v {
+                return Step.Got(x)
+            }
+        }
+        if self.closed {
+            return Step.Closed
+        }
+        if !wait {
+            return Step.Empty
+        }
+        return self.enlist(RECEIVING, None)
+    }
+
+    // Closed: no more sends, and every waiter served with `Closed` (a
+    // waiting sender's value not delivered). The values in it stay.
+    fun close(var self) {
+        self.closed = true
+        var r = self.oldest(true)
+        while r >= 0 {
+            self.serve(r, SHUT, None)
+            r = self.oldest(true)
+        }
+        var s = self.oldest(false)
+        while s >= 0 {
+            self.serve(s, SHUT, None)
+            s = self.oldest(false)
+        }
+    }
+
+    fun len(self) -> int {
+        return self.items.len()
+    }
+
+    // The entries in the queues of waiters (the tests').
+    fun queued(self) -> int {
+        return self.receivers.len() + self.senders.len()
+    }
+
+    // The outcome of the waiter in slot `s`, whose wait ended, and the slot
+    // freed; `stop`: it ended without a wake (its time passed, or its task
+    // was asked to stop). Not served yet: `Gone`, taken off, with `stop`,
+    // else `Pending` (the wake was an earlier waiter's, left behind).
+    fun settle(var self, s: int, stop: bool) -> Step<T> {
+        let st = self.slots[s].state
+        if st == RECEIVING || st == SENDING {
+            if !stop {
+                return Step.Pending
+            }
+            self.release(s)
+            return Step.Gone
+        }
+        let v = self.slots[s].value
+        self.release(s)
+        if st == GOT {
+            if let Some(x) = v {
+                return Step.Got(x)
+            }
+        }
+        if st == DELIVERED {
+            return Step.Sent
+        }
+        return Step.Closed
+    }
+
+    // The slot of the oldest receiver (`receiving`) or sender still
+    // waiting, taken off its queue, or -1; the entries of waiters that gave
+    // up are dropped on the way.
+    fun oldest(var self, receiving: bool) -> int {
+        if (receiving && self.receivers.len() == 0) || (!receiving && self.senders.len() == 0) {
+            return -1
+        }
+        while true {
+            var e: Option<(int, int)> = None
+            if receiving {
+                e = self.receivers.pop()
+            } else {
+                e = self.senders.pop()
+            }
+            match e {
+                Some(p) => {
+                    if self.slots[p.0].seq == p.1 {
+                        return p.0
+                    }
+                }
+                None => {
+                    return -1
+                }
+            }
+        }
+        unreachable()
+    }
+
+    // The running task registered as a waiter in `state` (with the value it
+    // sends): a free slot, or a new one with a notifier of its own.
+    fun enlist(var self, state: int, v: Option<T>) -> Step<T> {
+        var s = self.slots.len()
+        if self.free.len() > 0 {
+            s = self.free.pop()
+        } else {
+            self.slots.push(Slot { n: notifier(), seq: 0, state: FREE, value: None })
+        }
+        self.slots[s].state = state
+        self.slots[s].value = v
+        let e = (s, self.slots[s].seq)
+        // the entries of waiters that gave up are dropped when their queue
+        // holds more than twice as many as there are waiters
+        let busy = 2 * (self.slots.len() - self.free.len()) + 16
+        if state == RECEIVING {
+            self.receivers.push(e)
+            if self.receivers.len() > busy {
+                self.receivers = self.live(self.receivers)
+            }
+        } else {
+            self.senders.push(e)
+            if self.senders.len() > busy {
+                self.senders = self.live(self.senders)
+            }
+        }
+        return Step.Wait(s, self.slots[s].n)
+    }
+
+    // The entries of `q` whose waiters still wait, in their order.
+    fun live(self, q: Fifo<(int, int)>) -> Fifo<(int, int)> {
+        var out: [(int, int)] = []
+        for i in q.head..q.xs.len() {
+            let e = q.xs[i]
+            if self.slots[e.0].seq == e.1 {
+                out.push(e)
+            }
+        }
+        return Fifo { xs: out, head: 0 }
+    }
+
+    // The waiter in slot `s` served with the outcome `state` (and its
+    // value), kept until it settles, and woken.
+    fun serve(var self, s: int, state: int, v: Option<T>) {
+        self.slots[s].state = state
+        self.slots[s].value = v
+        self.slots[s].n.notify_one()
+    }
+
+    // Slot `s` without its waiter, for the next one.
+    fun release(var self, s: int) {
+        self.slots[s].state = FREE
+        self.slots[s].value = None
+        self.slots[s].seq += 1
+        self.free.push(s)
+    }
+}
+
+// A channel: a queue of `T`s between tasks, oldest first. Copying it copies
+// the way to the same queue, so tasks share a channel by passing it on.
+pub struct Channel<T> {
+    q: Queue<T>,
+}
+
+// A channel holding at most `cap` values: `send` waits while it is full. A
+// capacity of 0 (or less) makes a rendezvous: `send` waits until a receiver
+// has taken its value. Its type comes from where it goes:
+// `let ch: task.Channel<int> = task.channel(4)`, or `task.channel<int>(4)`.
+pub fun channel<T>(cap: int) -> Channel<T> {
+    var c = cap
+    if c < 0 {
+        c = 0
+    }
+    return Channel { q: queue(c) }
+}
+
+// A channel holding any number of values: `send` never waits.
+pub fun unbounded<T>() -> Channel<T> {
+    return Channel { q: queue(-1) }
+}
+
+impl<T> Channel<T> {
+    // Sends `x`, waiting while a bounded channel is full (and on a
+    // rendezvous until a receiver took it). `Err(Closed)` when the channel
+    // is closed (also while it waits), `Err(Cancelled)` when the task was
+    // asked to stop while it waited: either way `x` wasn't sent.
+    async fun send(self, x: T) -> Result<(), ChannelError> {
+        return await send_within(self.q, x, -1, ChannelError.Full)
+    }
+
+    // `send`, giving up with `Err(TimedOut)` when `ms` milliseconds passed
+    // before `x` went in (on a rendezvous, before a receiver took it); with
+    // `ms <= 0`, unless it goes in at once.
+    async fun send_timeout(self, x: T, ms: int) -> Result<(), ChannelError> {
+        return await send_within(self.q, x, limit(ms), ChannelError.TimedOut)
+    }
+
+    // Sends `x` if the channel has room now: `Err(Full)` or `Err(Closed)`
+    // if not. A rendezvous has room only when a receiver waits.
+    async fun try_send(self, x: T) -> Result<(), ChannelError> {
+        return await send_within(self.q, x, 0, ChannelError.Full)
+    }
+
+    // The next value, waiting while the channel is empty; `None` once it is
+    // closed and every value sent was received, or when the task was asked
+    // to stop while it waited (`cancelled()` tells which).
+    async fun recv(self) -> Option<T> {
+        return match await recv_within(self.q, -1, ChannelError.Empty) {
+            Ok(x) => Some(x)
+            Err(e) => None
+        }
+    }
+
+    // `recv`, telling why there was no value: `Closed`, `Cancelled`, or
+    // `TimedOut` when `ms` milliseconds passed first (with `ms <= 0`, when
+    // there is none now).
+    async fun recv_timeout(self, ms: int) -> Result<T, ChannelError> {
+        return await recv_within(self.q, limit(ms), ChannelError.TimedOut)
+    }
+
+    // The next value if there is one now (on a rendezvous, if a sender
+    // waits): `Err(Empty)`, or `Err(Closed)` once closed and drained.
+    async fun try_recv(self) -> Result<T, ChannelError> {
+        return await recv_within(self.q, 0, ChannelError.Empty)
+    }
+
+    // Closes the channel: later sends give `Err(Closed)`, and so do the
+    // sends waiting now; receivers get what is left and then `None`.
+    // Closing it again does nothing.
+    async fun close(self) {
+        await self.q.close()
+    }
+
+    // How many values it holds now (a rendezvous none: a waiting sender
+    // keeps its value until a receiver takes it).
+    async fun len(self) -> int {
+        return await self.q.len()
+    }
+}
+
+// A send of `x` on `q`, waiting at most `ms` milliseconds (-1: no limit, 0:
+// not at all); `none` the error when it couldn't in that time.
+async fun send_within<T>(q: Queue<T>, x: T, ms: int, none: ChannelError) -> Result<(), ChannelError> {
+    var r = await q.send(x, ms != 0 && !__task_cancelled())
+    if let Wait(s, n) = r {
+        r = await waited(q, s, n, ms)
+    }
+    return match r {
+        Sent => Ok(())
+        Closed => Err(ChannelError.Closed)
+        _ => Err(given_up(ms, none))
+    }
+}
+
+// A receive on `q`, as `send_within` sends.
+async fun recv_within<T>(q: Queue<T>, ms: int, none: ChannelError) -> Result<T, ChannelError> {
+    var r = await q.recv(ms != 0 && !__task_cancelled())
+    if let Wait(s, n) = r {
+        r = await waited(q, s, n, ms)
+    }
+    return match r {
+        Got(x) => Ok(x)
+        Closed => Err(ChannelError.Closed)
+        _ => Err(given_up(ms, none))
+    }
+}
+
+// Why an operation that could wait `ms` milliseconds didn't go through: its
+// task was asked to stop, or `none` (the time passed, or there was none).
+fun given_up(ms: int, none: ChannelError) -> ChannelError {
+    if ms != 0 && __task_cancelled() {
+        return ChannelError.Cancelled
+    }
+    return none
+}
+
+// The waiter in slot `s` of `q` parked on `n` until it is served, at most
+// `ms` milliseconds (-1: no limit), or until its task is asked to stop: its
+// outcome, or `Gone`.
+async fun waited<T>(q: Queue<T>, s: int, n: Notifier, ms: int) -> Step<T> {
+    var until = -1i64
+    if ms > 0 {
+        until = __clock_ns() + (ms as int64) * 1000000i64
+    }
+    while true {
+        var woken = false
+        if ms < 0 {
+            woken = await n.wait()
+        } else {
+            woken = await n.wait_timeout(left_ms(until))
+        }
+        let r = await q.settle(s, !woken)
+        match r {
+            Pending => {}
+            _ => {
+                return r
+            }
+        }
+    }
+    unreachable()
+}
+
+// The milliseconds from now until `until` on the clock of `__clock_ns`,
+// rounded up; 0 once it has passed.
+fun left_ms(until: int64) -> int {
+    let ns = until - __clock_ns()
+    if ns <= 0i64 {
+        return 0
+    }
+    return ((ns + 999999i64) / 1000000i64) as int
+}
+
+// --- worker pools ----------------------------------------------------------------
+
+// The jobs of a `pool`: the index of the next one, until `end`.
+actor Tickets {
+    next: int,
+    end: int,
+}
+
+impl Tickets {
+    // The next job's index, or -1 when every job was taken.
+    fun take(var self) -> int {
+        if self.next >= self.end {
+            return -1
+        }
+        self.next += 1
+        return self.next - 1
+    }
+}
+
+// `f` of every job of `jobs`, by `n` workers at once (at least 1, at most
+// one a job), each taking the next job when it has finished one: the
+// results in the order of `jobs`. Each worker gets a copy of `jobs` (D89).
+// The pool doesn't look at `cancelled()` itself: when it is cancelled, `f`
+// is, and decides what to return.
+pub async fun pool<J, R>(n: int, jobs: [J], f: async (J) -> R) -> [R] {
+    if jobs.len() == 0 {
+        return []
+    }
+    var k = n
+    if k < 1 {
+        k = 1
+    }
+    if k > jobs.len() {
+        k = jobs.len()
+    }
+    let tickets = Tickets { next: 0, end: jobs.len() }
+    var ws: [async () -> [(int, R)]] = []
+    for w in 0..k {
+        ws.push(async () => await pool_worker(tickets, jobs, f))
+    }
+    var slots: [Option<R>] = []
+    for i in 0..jobs.len() {
+        slots.push(None)
+    }
+    for done in await all(ws) {
+        for p in done {
+            slots[p.0] = Some(p.1)
+        }
+    }
+    var out: [R] = []
+    for s in slots {
+        if let Some(r) = s {
+            out.push(r)
+        }
+    }
+    return out
+}
+
+// One worker of a `pool`: the jobs it took, by index, and their results.
+async fun pool_worker<J, R>(tickets: Tickets, jobs: [J], f: async (J) -> R) -> [(int, R)] {
+    var done: [(int, R)] = []
+    var i = await tickets.take()
+    while i >= 0 {
+        done.push((i, await f(jobs[i])))
+        i = await tickets.take()
+    }
+    return done
+}
+
+// `n` workers at once (at least 1), each taking a job from `jobs` and
+// sending `f` of it to `results`, until `jobs` is closed and drained: the
+// results go out in the order they are finished. `results` is closed when
+// the last worker has ended. The number of results sent. A worker stops
+// before its next job when the task is cancelled, or when `results` is
+// closed; a result its `send` gave up on (`results` closed, or the task
+// cancelled while `results` was full) is dropped and not counted.
+pub async fun workers<J, R>(n: int, jobs: Channel<J>, results: Channel<R>, f: async (J) -> R) -> int {
+    var k = n
+    if k < 1 {
+        k = 1
+    }
+    var ws: [async () -> int] = []
+    for w in 0..k {
+        ws.push(async () => await serve(jobs, results, f))
+    }
+    var sent = 0
+    for d in await all(ws) {
+        sent += d
+    }
+    await results.close()
+    return sent
+}
+
+// One of `workers`: the number of results it sent.
+async fun serve<J, R>(jobs: Channel<J>, results: Channel<R>, f: async (J) -> R) -> int {
+    var sent = 0
+    while !__task_cancelled() {
+        match await jobs.recv() {
+            Some(j) => {
+                let r = await f(j)
+                match await results.send(r) {
+                    Ok(()) => { sent += 1 }
+                    Err(e) => { return sent }
+                }
+            }
+            None => { return sent }
+        }
+    }
+    return sent
+}
+
+// --- the first of several --------------------------------------------------------
+
+// The index and the result of the function of `fs` that finishes first,
+// all of them run as child tasks at once; `None` when `fs` is empty. The
+// others are then cancelled (D96) and awaited, and their results dropped.
+// Each function sends its index to a channel when it has finished, and
+// `first` waits on it: it goes on as soon as the first one sends.
+pub async fun first<T>(fs: [async () -> T]) -> Option<(int, T)> {
+    if fs.len() == 0 {
+        return None
+    }
+    let finished: Channel<int> = unbounded()
+    var gs: [async () -> T] = []
+    for i in 0..fs.len() {
+        let f = fs[i]
+        gs.push(async () => await run_in(finished, i, f))
+    }
+    async let rs = all(gs)
+    // `None` only when this task was asked to stop: its children then were
+    // too, and the first to finish is the first in the channel
+    let w = await finished.recv()
+    // `cancel(rs)` as `timeout` cancels: a deadline that has passed (the
+    // checker takes `cancel` itself only from outside this module)
+    let t = __cancel_after(rs, 0)
+    let results = await rs
+    let fired = __disarm(t)
+    var winner = 0
+    if let Some(i) = w {
+        winner = i
+    } else if let Ok(i) = await finished.try_recv() {
+        winner = i
+    }
+    return Some((winner, results[winner]))
+}
+
+// `f` of a `first`, which sends its index `i` to `finished` when it ends.
+async fun run_in<T>(finished: Channel<int>, i: int, f: async () -> T) -> T {
+    let r = await f()
+    let sent = await finished.send(i)
+    return r
+}
+
+// --- the tests of channels, pools and the first of several -----------------------
+
+// A step in words, to compare.
+#test(Step.Got(3))["got 3"]
+#test(Step.Wait(1, Notifier { id: 0i64 }))["wait 1"]
+fun said(r: Step<int>) -> str {
+    return match r {
+        Sent => "sent"
+        Got(x) => f"got {x}"
+        Full => "full"
+        Empty => "empty"
+        Closed => "closed"
+        Wait(s, n) => f"wait {s}"
+        Pending => "pending"
+        Gone => "gone"
+    }
+}
+
+// The slot of a `Wait`, -1 for any other step.
+#test(Step.Wait(4, Notifier { id: 0i64 }))[4]
+#test(Step.Sent)[-1]
+fun slot_of(r: Step<int>) -> int {
+    return match r {
+        Wait(s, n) => s
+        _ => -1
+    }
+}
+
+// The end of a waiter's wait, as `waited` ends it: `woken` is whether it was
+// woken.
+async fun settle_after<T>(q: Queue<T>, r: Step<T>, woken: bool) -> Step<T> {
+    return match r {
+        Wait(s, n) => await q.settle(s, !woken)
+        _ => r
+    }
+}
+
+// The notifier of a `Wait`.
+fun notifier_of<T>(r: Step<T>) -> Notifier {
+    return match r {
+        Wait(s, n) => n
+        _ => notifier()
+    }
+}
+
+// A channel's steps, one at a time, as `Channel`'s methods take them.
+#test
+async fun the_steps() {
+    let q: Queue<int> = queue(1)
+    // a receiver finds it empty and waits; a send hands it the value
+    let w = await q.recv(true)
+    assert(said(w) == "wait 0", "the first waiter")
+    assert(said(await q.send(5, true)) == "sent", "handed over")
+    assert((await q.len()) == 0, "straight to the receiver")
+    assert(await notifier_of(w).wait_timeout(0), "woken")
+    assert(said(await settle_after(q, w, true)) == "got 5", "the receiver's value")
+    // served after its wait ended (it timed out, or was cancelled): the
+    // value is still its own, and its notifier keeps the wake
+    let late = await q.recv(true)
+    assert(said(await q.send(6, true)) == "sent", "to a receiver about to give up")
+    assert(said(await settle_after(q, late, false)) == "got 6", "the value of a receiver that gave up once served")
+    // the slot again: the wake left behind ends a wait at once, and settling
+    // says the receiver wasn't served yet
+    let again = await q.recv(true)
+    assert(slot_of(again) == slot_of(late), "a slot reused")
+    assert(await notifier_of(again).wait_timeout(0), "the wake left behind")
+    assert(said(await settle_after(q, again, true)) == "pending", "not served: wait again")
+    assert(said(await settle_after(q, again, false)) == "gone", "gave up")
+    // a receiver that gave up is passed over
+    let quitter = await q.recv(true)
+    let stayer = await q.recv(true)
+    assert(slot_of(stayer) != slot_of(quitter), "two waiters")
+    assert(said(await settle_after(q, quitter, false)) == "gone", "gave up before a value came")
+    assert(said(await q.send(7, true)) == "sent", "past the one that gave up")
+    assert(said(await settle_after(q, stayer, true)) == "got 7", "to the one still waiting")
+    // waiters that give up don't pile up behind one that waits on
+    let patient = await q.recv(true)
+    for i in 0..1000 {
+        let w = await q.recv(true)
+        let gone = await settle_after(q, w, false)
+    }
+    assert((await q.queued()) < 40, "the entries of those that gave up dropped")
+    assert(said(await q.send(70, true)) == "sent", "to the patient one")
+    assert(said(await settle_after(q, patient, true)) == "got 70", "still first")
+    // full: a sender waits, and a receive moves its value in
+    assert(said(await q.send(8, true)) == "sent", "room for one")
+    let blocked = await q.send(9, true)
+    assert(slot_of(blocked) >= 0, "no room for two")
+    assert(said(await q.send(10, false)) == "full", "a try doesn't wait")
+    assert(said(await q.recv(true)) == "got 8", "the first")
+    assert((await q.len()) == 1, "the waiting sender's value moved in")
+    assert(said(await settle_after(q, blocked, true)) == "sent", "the sender done")
+    // a sender that gives up takes its value back
+    let impatient = await q.send(11, true)
+    assert(said(await settle_after(q, impatient, false)) == "gone", "taken back")
+    assert(said(await q.recv(false)) == "got 9", "what was sent")
+    assert(said(await q.recv(false)) == "empty", "and nothing more")
+    // closing ends every wait
+    let left = await q.recv(true)
+    await q.close()
+    await q.close()
+    assert(said(await settle_after(q, left, true)) == "closed", "a waiting receiver")
+    assert(said(await q.send(12, true)) == "closed", "no more sends")
+    assert(said(await q.recv(true)) == "closed", "closed and drained")
+}
+
+// A rendezvous's steps: a value goes from a sender to a receiver directly.
+#test
+async fun the_steps_of_a_rendezvous() {
+    let q: Queue<int> = queue(0)
+    assert(said(await q.send(1, false)) == "full", "nobody receives")
+    let a = await q.send(1, true)
+    assert(slot_of(a) >= 0, "the sender waits")
+    assert((await q.len()) == 0, "it holds nothing")
+    assert(said(await q.recv(false)) == "got 1", "from the waiting sender")
+    assert(said(await settle_after(q, a, true)) == "sent", "received")
+    let b = await q.send(2, true)
+    assert(said(await settle_after(q, b, false)) == "gone", "gave up")
+    assert(said(await q.recv(false)) == "empty", "its value taken back")
+    let c = await q.recv(true)
+    assert(said(await q.send(3, false)) == "sent", "a receiver waits")
+    assert(said(await settle_after(q, c, true)) == "got 3", "it got it")
+    let d = await q.send(4, true)
+    let e = await q.send(5, true)
+    await q.close()
+    assert(said(await settle_after(q, d, true)) == "closed", "a waiting sender, closed")
+    assert(said(await settle_after(q, e, true)) == "closed", "and the next")
+    assert(said(await q.recv(true)) == "closed", "neither value delivered")
+}
+
+// A result of a channel's operation in words, to compare.
+fun sent_said(r: Result<(), ChannelError>) -> str {
+    return match r {
+        Ok(()) => "ok"
+        Err(e) => e.message()
+    }
+}
+
+fun got_said(r: Result<int, ChannelError>) -> str {
+    return match r {
+        Ok(x) => f"{x}"
+        Err(e) => e.message()
+    }
+}
+
+fun ints_said(xs: [int]) -> str {
+    var sb = StringBuilder()
+    for i in 0..xs.len() {
+        if i > 0 {
+            sb.append(" ")
+        }
+        sb.append(f"{xs[i]}")
+    }
+    return sb.build()
+}
+
+fun is_none<T>(o: Option<T>) -> bool {
+    return match o {
+        Some(x) => false
+        None => true
+    }
+}
+
+// A channel of `cap` (-1: unbounded).
+fun ints_of(cap: int) -> Channel<int> {
+    if cap < 0 {
+        return unbounded()
+    }
+    return channel(cap)
+}
+
+async fun send_all(ch: Channel<int>, xs: [int]) -> int {
+    var sent = 0
+    for x in xs {
+        if sent_said(await ch.send(x)) == "ok" {
+            sent += 1
+        }
+    }
+    return sent
+}
+
+async fun recv_all<T>(ch: Channel<T>) -> [T] {
+    var out: [T] = []
+    while let Some(x) = await ch.recv() {
+        out.push(x)
+    }
+    return out
+}
+
+#test
+async fun channel_in_order() {
+    for cap in [-1, 0, 1, 3] {
+        let ch = ints_of(cap)
+        var xs: [int] = []
+        for i in 0..60 {
+            xs.push(i * 7 % 61)
+        }
+        async let got = recv_all(ch)
+        let sent = await send_all(ch, xs)
+        await ch.close()
+        assert(sent == 60, f"capacity {cap}: every value sent")
+        assert(await got == xs, f"capacity {cap}: received in order")
+        assert(is_none(await ch.recv()), f"capacity {cap}: none after close")
+        assert(sent_said(await ch.send(1)) == "channel closed", f"capacity {cap}: send after close")
+    }
+}
+
+struct Named {
+    name: str,
+    tags: [str],
+}
+
+async fun send_strs(ch: Channel<str>, n: int) {
+    for i in 0..n {
+        let r = await ch.send(f"s{i}")
+    }
+    await ch.close()
+}
+
+// Channels of strings, lists and structs, values copied in and out.
+#test
+async fun any_element_type() {
+    let strs: Channel<str> = channel(2)
+    async let p = send_strs(strs, 5)
+    let got = await recv_all(strs)
+    await p
+    assert(got.len() == 5 && got[0] == "s0" && got[4] == "s4", "strings")
+    let lists: Channel<[int]> = channel(0)
+    var xs = [1, 2]
+    async let l = recv_all(lists)
+    let r1 = await lists.send(xs)
+    xs.push(3)
+    let r2 = await lists.send(xs)
+    await lists.close()
+    assert(await l == [[1, 2], [1, 2, 3]], "lists, as they were sent")
+    let named: Channel<Named> = unbounded()
+    let r3 = await named.send(Named { name: "a", tags: ["x", "y"] })
+    match await named.try_recv() {
+        Ok(v) => assert(v.name == "a" && v.tags == ["x", "y"], "a struct")
+        Err(e) => assert(false, "a struct sent")
+    }
+}
+
+#test
+async fun close_drains() {
+    let ch: Channel<int> = channel(4)
+    let sent = await send_all(ch, [1, 2, 3])
+    await ch.close()
+    await ch.close()
+    assert(sent == 3 && (await ch.len()) == 3, "three held")
+    assert(ints_said(await recv_all(ch)) == "1 2 3", "what was left, then the end")
+    assert(got_said(await ch.try_recv()) == "channel closed", "drained")
+}
+
+#test
+async fun trying() {
+    let ch: Channel<int> = channel(1)
+    assert(got_said(await ch.try_recv()) == "channel empty", "nothing yet")
+    assert(sent_said(await ch.try_send(1)) == "ok", "room for one")
+    assert(sent_said(await ch.try_send(2)) == "channel full", "no room for two")
+    assert(got_said(await ch.try_recv()) == "1", "the one")
+    let r: Channel<int> = channel(0)
+    assert(sent_said(await r.try_send(1)) == "channel full", "a rendezvous without a receiver")
+    assert(got_said(await r.try_recv()) == "channel empty", "and without a sender")
+    let neg: Channel<int> = channel(-3)
+    assert(sent_said(await neg.try_send(1)) == "channel full", "a negative capacity is a rendezvous")
+}
+
+#test
+async fun timing_out() {
+    let ch: Channel<int> = channel(1)
+    assert(got_said(await ch.recv_timeout(5)) == "timed out", "nothing came")
+    assert(got_said(await ch.recv_timeout(0)) == "timed out", "no time to wait")
+    assert(sent_said(await ch.send_timeout(1, 5)) == "ok", "room")
+    assert(sent_said(await ch.send_timeout(2, 5)) == "timed out", "no room came")
+    assert(sent_said(await ch.send_timeout(2, 0)) == "timed out", "no time for room")
+    let r: Channel<int> = channel(0)
+    assert(sent_said(await r.send_timeout(7, 5)) == "timed out", "no receiver came")
+    assert(got_said(await r.try_recv()) == "channel empty", "the value taken back")
+    // a timeout around a wait that doesn't end on its own: the wait is
+    // cancelled, and nothing was taken
+    let e: Channel<int> = unbounded()
+    match await timeout(5, async () => await e.recv()) {
+        Some(x) => assert(false, "a value from nowhere")
+        None => {}
+    }
+    let sent = await send_all(e, [9])
+    assert(got_said(await e.try_recv()) == "9", "the value after the timeout")
+}
+
+async fun recv_later(ch: Channel<int>, ms: int) -> Option<int> {
+    await sleep(ms)
+    return await ch.recv()
+}
+
+async fun send_later(ch: Channel<int>, ms: int, x: int) -> Result<(), ChannelError> {
+    await sleep(ms)
+    return await ch.send(x)
+}
+
+// A wait wakes when the other side comes, well before its time limit.
+#test
+async fun woken_in_time() {
+    let ch: Channel<int> = channel(0)
+    let t0 = __clock_ns()
+    async let r = recv_later(ch, 5)
+    assert(sent_said(await ch.send_timeout(1, 60000)) == "ok", "a receiver came")
+    match await r {
+        Some(x) => assert(x == 1, "the value")
+        None => assert(false, "a value")
+    }
+    async let s = send_later(ch, 5, 2)
+    assert(got_said(await ch.recv_timeout(60000)) == "2", "a sender came")
+    assert(sent_said(await s) == "ok", "it was received")
+    assert(__clock_ns() - t0 < 30000000000i64, "long before the limit")
+}
+
+async fun waits_to_recv(ch: Channel<int>) -> (bool, bool) {
+    let got = await ch.recv()
+    return (is_none(got), cancelled())
+}
+
+async fun waits_to_send(ch: Channel<int>, x: int) -> str {
+    return sent_said(await ch.send(x))
+}
+
+// A cancelled wait ends; a cancelled sender's value isn't sent.
+#test
+async fun cancelled_waits() {
+    let ch: Channel<int> = channel(0)
+    // `cancel(r)` as `first` cancels (`cancel` is the checker's only from
+    // outside this module)
+    async let r = waits_to_recv(ch)
+    await sleep(2)
+    let tr = __cancel_after(r, 0)
+    let stopped = await r
+    let fired_r = __disarm(tr)
+    assert(stopped == (true, true), "a receiver asked to stop gets none")
+    async let s = waits_to_send(ch, 5)
+    await sleep(2)
+    let ts = __cancel_after(s, 0)
+    let said_s = await s
+    let fired_s = __disarm(ts)
+    assert(said_s == "cancelled", "a sender asked to stop")
+    assert(got_said(await ch.try_recv()) == "channel empty", "its value taken back")
+    async let closing = waits_to_send(ch, 6)
+    await sleep(2)
+    await ch.close()
+    assert(await closing == "channel closed", "a sender waiting when it closes")
+}
+
+async fun square_later(x: int) -> int {
+    await sleep((x * 7) % 5)
+    return x * x
+}
+
+#test
+async fun pool_in_order() {
+    var xs: [int] = []
+    var want: [int] = []
+    for i in 0..30 {
+        xs.push(i)
+        want.push(i * i)
+    }
+    for n in [0, 1, 4, 100] {
+        let got = await pool(n, xs, async (x: int) => await square_later(x))
+        assert(got == want, f"{n} workers: in the order of the jobs")
+    }
+    let no_jobs: [int] = []
+    let none = await pool(3, no_jobs, async (x: int) => x)
+    assert(none.len() == 0, "no jobs")
+}
+
+#test
+async fun workers_as_they_finish() {
+    let jobs: Channel<int> = channel(2)
+    let results: Channel<int> = unbounded()
+    var xs: [int] = []
+    for i in 0..40 {
+        xs.push(i)
+    }
+    async let sent = send_all(jobs, xs)
+    async let done = workers(4, jobs, results, async (x: int) => await square_later(x))
+    let n = await sent
+    await jobs.close()
+    assert((await done) == 40 && n == 40, "every job done")
+    var seen: [int] = []
+    for i in 0..40 {
+        seen.push(0)
+    }
+    var odd = 0
+    for r in await recv_all(results) {
+        var x = 0
+        while x < 40 && x * x < r {
+            x += 1
+        }
+        if x < 40 && x * x == r {
+            seen[x] += 1
+        } else {
+            odd += 1
+        }
+    }
+    var once = true
+    for k in seen {
+        if k != 1 {
+            once = false
+        }
+    }
+    assert(odd == 0 && once, "every result once, then closed")
+}
+
+async fun sleep_then(ms: int, v: int) -> int {
+    await sleep(ms)
+    if cancelled() {
+        return -v
+    }
+    return v
+}
+
+#test
+async fun the_first() {
+    let t0 = __clock_ns()
+    var fs: [async () -> int] = []
+    fs.push(async () => await sleep_then(10000, 1))
+    fs.push(async () => await sleep_then(5, 2))
+    fs.push(async () => await sleep_then(10000, 3))
+    match await first(fs) {
+        Some(p) => assert(p.0 == 1 && p.1 == 2, "the quick one")
+        None => assert(false, "a winner")
+    }
+    assert(__clock_ns() - t0 < 5000000000i64, "the others cancelled")
+    let none: [async () -> int] = []
+    assert(is_none(await first(none)), "no functions")
+}
+
+#test
+async fun all_and_timeout() {
+    var fs: [async () -> int] = []
+    for i in 0..9 {
+        fs.push(async () => await sleep_then(9 - i, i))
+    }
+    assert(ints_said(await all(fs)) == "0 1 2 3 4 5 6 7 8", "in the order of the functions")
+    match await timeout(5000, async () => await sleep_then(1, 4)) {
+        Some(v) => assert(v == 4, "its result")
+        None => assert(false, "in time")
+    }
+    match await timeout(5, async () => await sleep_then(10000, 4)) {
+        Some(v) => assert(false, "too late")
+        None => {}
+    }
 }

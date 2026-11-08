@@ -9,7 +9,7 @@ labels: [runtime, concurrency, primitives]
 Found by the channels lane ([[MYLA-351]]). No primitive parks a task until a condition holds, so a waiting `send`, `recv` or `task.first` looks again: 32 turns, then sleeps of 1, 2 and 4 ms. That costs about 240 ms of CPU for eight tasks idle 2 s on four workers, wakes 1–3 ms late, and caps a channel at about 600,000 messages a second on four workers (3.1 M on one).
 
 - [x] A park and a wake primitive (a wait queue an actor's method can hold, or a "notify" handle), in `std.rt`'s executor and the interpreter's scheduler, natively on every target; cancellation (D96) ends a park
-- [ ] `std.task`'s channels, pool and `first` on it, measured against the polling version (the channels lane's, [[MYLA-351]]: its `pause` loop gives way to a notifier)
+- [x] `std.task`'s channels, pool and `first` on it, measured against the polling version (the channels lane's, [[MYLA-351]]: its `pause` loop gives way to a notifier)
 
 ## The design
 
@@ -41,8 +41,10 @@ A **notifier** (`std.task.notifier()`, [[Language/Concurrency#Waiting until woke
   - eight tasks parked 2 s, then `notify_all`: 0.000–0.001 s user+sys on 1 and 4 workers (polling: 50 ms on one, 240 ms on four);
   - an unbounded actor queue whose empty `take` registers the receiver's notifier: 6.0 M messages/s on 1 worker, 1.4 M on 4 (MYLA-351's polling bounded channel: 3.1 M and 0.6 M).
 
+- **Channels, `pool` and `first` on notifiers** ([[MYLA-351]], redone on `3f1487e`). A channel is a generic actor whose waiters park on one notifier each, served directly by the other side; a wait that gives up after it was served takes its outcome. `first` waits on a channel, and `pool` never polled. Measured against the polling version on the same machine, natively, best of 5: a channel of 16 between two tasks carries 3.30 M msg/s on 1 worker and 721,000 on 4 (8 producers and 8 consumers over 256: 968,000) (polling: 3.09 M, 472,000 and 771,000). Eight tasks idle 2 s on empty channels take 0 to 1 ms of CPU (polling: 52 and 213 ms), and a parked receiver wakes in 3 µs on 1 worker and 15 µs on 4 (polling: 1.3 to 2.2 ms). Stress programs t31 to t34.
+
 ## Not done
 
-- The channels, `pool` and `first` of [[MYLA-351]] on notifiers: that branch's `pause` is to give way to registering a notifier with the channel's actor (deregistering on a timeout or cancel, and passing a wake on when it was already taken).
 - On several workers a hand-off between two tasks moves the woken task to another worker most of the time (the executor's stealing, not the notifier); a "run the woken task next on this worker" policy would help ping-pong.
 - A partial deadlock (some tasks waiting on each other while others run) isn't detected.
+- Found by [[MYLA-351]]: on several workers, more than one idle worker can see every task waiting, and each `exec_stuck` writes `every task waits for another one` before the exit, so stderr may hold the line twice. That happened in 5 of 80 runs of t29 on 4 and 16 workers. A minimal case is 64 tasks that `await task.yield()` and then `await n.wait()` on one notifier, under `task.all`, on 16 workers (2 of 60 runs). `test_what_they_report` can fail by chance on 4 workers for this reason. A fix: claim the report (an exchange on a flag) before writing it.
