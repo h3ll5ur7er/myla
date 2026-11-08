@@ -12,3 +12,5 @@ Before choosing a fix, a profile of where the time goes: environment lookups by 
 
 - [ ] A profile of `fib` and of a map-heavy and a string-heavy program under `myla run`
 - [ ] The fixes it points to, each measured
+
+Measured while fixing PR #46's CI (2026-11-08): `run_async`'s copy of 200 KB of a child's output, a loop of `out.push(chunk[i] as uint8)` in `std.process`, takes about 1.35 s under `myla run` on master and 1.5 s after wave 2 (about 12 % slower). `test_time`'s process program timed its whole run against 3 s and went over on CI; it now times only the timeout it guards. A primitive for `str` to `[uint8]` ([[MYLA-369]]) would take that loop out of interpreted code entirely.
