@@ -15,3 +15,7 @@ Found while tuning `std.digest` ([[MYLA-328]]), whose MD5 runs at 287 MB/s again
 The lane's reproductions and generator are in its scratch folder; the first is 16 locals loaded from a list, then a loop over `a = a + m0 + … + m7; a = ((a << 7u32) | (a >> 25u32)) + m8 + … + m15`.
 
 - [ ] Each measured on `std.digest`'s benchmarks and the `benchmarks/` suite before and after
+
+## Comments
+
+- 2026-11-08, wave 3 ([[MYLA-343]]): a signed division by the constant 2 is `cqto; idiv`, not a shift. `(lo + hi) / 2` in a binary search cost about a fifth of a B-tree lookup against `>> 1` (430 against 341 ms for 1M gets). Reproduction: `fun mid(a: int, b: int) -> int { return (a + b) / 2 }`, then `objdump -d`.

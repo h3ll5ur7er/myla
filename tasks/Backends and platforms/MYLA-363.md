@@ -10,3 +10,7 @@ Found by the `std.glob` lane ([[MYLA-326]]). `std.fs` has no `lstat`, and `__lis
 
 - [ ] A primitive for a link's own kind (`__lstat`, or `d_type` passed out of `__list_dir`) on every target
 - [ ] `fs.is_symlink(path)`, and `walk` that doesn't follow links (with an option to)
+
+## Comments
+
+- 2026-11-08: a path's `stat` is filed with the other wave 3 primitives, [[MYLA-378]].
