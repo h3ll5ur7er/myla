@@ -61,6 +61,10 @@ The conventions (D164): operations on built-in types are methods (`s.split(",")`
 | `std.set` | [[Language/Standard-library/Set]] | `Set<T>` in insertion order: insert, remove, union, intersection, difference |
 | `std.deque` | [[Language/Standard-library/Deque]] | `Deque<T>`, the double-ended queue and the queue: a ring buffer, indexable |
 | `std.heap` | [[Language/Standard-library/Heap]] | Binary heaps: `Heap<T: Ord>`, least or greatest first, and `KeyedHeap<T>` by an `int64` priority |
+| `std.grid` | [[Language/Standard-library/Grid]] | `Grid<T>`, a 2D array of cells: read from text and printed, `at` and `set` with bounds, 4 and 8 neighbours, `(x, y)` positions |
+| `std.graph` | [[Language/Standard-library/Graph]] | Searches over a neighbour function: BFS, DFS, Dijkstra, A*, topological sort, connected components, and dense forms over numbered nodes |
+| `std.bitset` | [[Language/Standard-library/Bitset]] | `BitSet`, fixed or growable sets of small integers over `uint64` words: `popcount`, union, intersection, difference, complement |
+| `std.unionfind` | [[Language/Standard-library/Unionfind]] | `UnionFind`, disjoint sets with path compression and union by rank |
 | `std.digest` | [[Language/Standard-library/Digest]] | MD5, SHA-1, SHA-2 and HMAC, one-shot and incremental, as bytes and as hex |
 | `std.args` | [[Language/Standard-library/Args]] | Command-line arguments: a declarative spec of flags, options, positionals and subcommands, parsing, the generated help |
 | `std.rt` | [[Language/Standard-library/Rt]] | The runtime in Myla; not for programs |
