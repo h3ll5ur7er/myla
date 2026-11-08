@@ -12,6 +12,7 @@ printed is shown under its FAIL line only. `--only <text>` and `--list`
 select and name the cases. A `#test` on an async function runs the case as
 the entry task of a program of its own (MYLA-305)."""
 import os
+import re
 import subprocess
 import tempfile
 import unittest
@@ -376,8 +377,9 @@ class TestTestFunctions(unittest.TestCase):
             proc = subprocess.run([exe], capture_output=True, text=True, cwd=tmp,
                                   env={**os.environ, "MYLA_TEST_DIR": case_dir})
             self.assertEqual(proc.returncode, 0, proc.stderr)
-            self.assertEqual(proc.stdout, case_dir + "/d0\n")
-            self.assertTrue(os.path.isdir(os.path.join(case_dir, "d0")))
+            # `d` and 16 random hexadecimal digits (std.fs.make_temp_dir_in, MYLA-339)
+            self.assertRegex(proc.stdout, "^" + re.escape(case_dir) + "/d[0-9a-f]{16}\n$")
+            self.assertTrue(os.path.isdir(proc.stdout.strip()))
 
 
 if __name__ == "__main__":
