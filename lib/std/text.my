@@ -1,0 +1,851 @@
+// std.text: a scanner for hand-written parsers, the integers in a line, and
+// text layout (MYLA-341, D164).
+
+import std.option as option_m // `ok`; `unwrap_or` and `is_none` in the test functions
+import std.num as num
+
+// Importing `std.str`, `std.char` or `std.list` here would bring their cases
+// along, and with `--native` the harness wouldn't build (MYLA-360): the few
+// helpers this module needs from them (`words`, `pad_start`, `pad_end`,
+// `join`) are written out privately until then.
+
+// --- Errors -------------------------------------------------------------------
+
+// What a scanner didn't find.
+#derive(Eq)
+pub enum ScanErrorKind {
+    // `expect`: this literal isn't next
+    Expected(str),
+    // `int`, `long`: no digit, after an optional sign
+    NoInt,
+    // `int`, `long`: digits out of the type's range
+    Overflow,
+    // `ident`: no ASCII letter or `_`
+    NoIdent,
+    // `error`: a parser's own message
+    Other(str),
+}
+
+// An error and where it is: `pos` is the byte offset, line and column count
+// from 1, the column in characters, as for `std.json`'s errors.
+#derive(Eq)
+pub struct ScanError {
+    kind: ScanErrorKind,
+    pos: int,
+    line: int,
+    col: int,
+}
+
+impl ScanError {
+    // The reason in words.
+    #test(ScanError { kind: ScanErrorKind.Expected(", "), pos: 0, line: 1, col: 1 })["expected ', '"]
+    #test(ScanError { kind: ScanErrorKind.NoInt, pos: 0, line: 1, col: 1 })["expected an integer"]
+    #test(ScanError { kind: ScanErrorKind.Overflow, pos: 0, line: 1, col: 1 })["integer out of range"]
+    #test(ScanError { kind: ScanErrorKind.NoIdent, pos: 0, line: 1, col: 1 })["expected an identifier"]
+    #test(ScanError { kind: ScanErrorKind.Other("no such valve"), pos: 0, line: 1, col: 1 })["no such valve"]
+    fun message(self) -> str {
+        return match self.kind {
+            Expected(lit) => f"expected '{lit}'"
+            NoInt => "expected an integer"
+            Overflow => "integer out of range"
+            NoIdent => "expected an identifier"
+            Other(m) => m
+        }
+    }
+}
+
+impl Format for ScanError {
+    // `line:col: message`, e.g. `2:7: expected an integer`.
+    #test(ScanError { kind: ScanErrorKind.NoInt, pos: 9, line: 2, col: 7 }, "")["2:7: expected an integer"]
+    fun format(self, spec: str) -> str {
+        return f"{self.line}:{self.col}: {self.message()}"
+    }
+}
+
+// --- The scanner -----------------------------------------------------------------
+
+// A position in a text, moved forward by reading. `pos` is a byte offset; a
+// parser may set it back to an earlier one to try another way.
+pub struct Scanner {
+    text: str,
+    pos: int,
+}
+
+// A scanner at the start of `text`.
+#test("ab")[Scanner { text: "ab", pos: 0 }]
+pub fun scanner(text: str) -> Scanner {
+    return Scanner { text: text, pos: 0 }
+}
+
+// The character that starts at byte `i` of `s` (inside it) and its length in
+// bytes; U+FFFD and 1 for a byte that isn't part of a well-formed UTF-8
+// sequence (an overlong form, a surrogate, past U+10FFFF, cut short), as
+// `for c in s` decodes.
+#test("a", 0)[('a', 1)]
+#test("aé", 1)[('é', 2)]
+#test("€", 0)[('€', 3)]
+#test("\u{1F600}", 0)[('\u{1F600}', 4)]
+#test("é", 1)[('\u{FFFD}', 1)] // a continuation byte
+#test("€", 1)[('\u{FFFD}', 1)]
+fun char_at(s: str, i: int) -> (char, int) {
+    let b = s[i] as uint32
+    if b < 128u32 {
+        return (b as char, 1)
+    }
+    var need = 0
+    var cp: uint32 = 0
+    var least: uint32 = 0
+    if b >= 0xC2u32 && b < 0xE0u32 {
+        need = 2
+        cp = b & 0x1Fu32
+        least = 0x80u32
+    } else if b >= 0xE0u32 && b < 0xF0u32 {
+        need = 3
+        cp = b & 0x0Fu32
+        least = 0x800u32
+    } else if b >= 0xF0u32 && b < 0xF5u32 {
+        need = 4
+        cp = b & 0x07u32
+        least = 0x10000u32
+    }
+    if need == 0 || i + need > s.len() {
+        return ('\u{FFFD}', 1)
+    }
+    var k = 1
+    while k < need {
+        let c = s[i + k] as uint32
+        if (c & 0xC0u32) != 0x80u32 {
+            return ('\u{FFFD}', 1)
+        }
+        cp = (cp << 6u32) | (c & 0x3Fu32)
+        k += 1
+    }
+    if cp < least || cp > 0x10FFFFu32 || (cp >= 0xD800u32 && cp < 0xE000u32) {
+        return ('\u{FFFD}', 1)
+    }
+    return (cp as char, need)
+}
+
+// ASCII whitespace: space, tab, line feed, vertical tab, form feed, carriage
+// return, as `trim` and `words` take it.
+fun is_space_byte(b: uint8) -> bool {
+    return b == ' ' || (b >= 9u8 && b <= 13u8)
+}
+
+fun is_digit_byte(b: uint8) -> bool {
+    return b >= '0' && b <= '9'
+}
+
+fun is_ident_start(b: uint8) -> bool {
+    return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || b == '_'
+}
+
+// Where the integer at `i` of `s` ends: an optional `-` or `+`, then digits;
+// `i` itself if there is none.
+fun int_end(s: str, i: int) -> int {
+    let n = s.len()
+    var j = i
+    if j < n && (s[j] == '-' || s[j] == '+') {
+        j += 1
+    }
+    let digits = j
+    while j < n && is_digit_byte(s[j]) {
+        j += 1
+    }
+    if j == digits {
+        return i
+    }
+    return j
+}
+
+// The integer `s[start:end]`, an optional sign and then digits, if it is in
+// `int`'s range. Up to 9 digits it always is, and is added up here; a longer
+// one is `std.num`'s to judge, which knows the range exactly. Reading the
+// short ones in place, without a slice and a `Result` each, makes `ints`
+// three times as fast.
+#test("-17", 0, 3)[Some(-17)]
+#test("x+5", 1, 3)[Some(5)]
+#test("999999999", 0, 9)[Some(999999999)]
+#test("-2147483648", 0, 11)[Some(-2147483647 - 1)]
+#test("2147483648", 0, 10)[None]
+fun int32_in(s: str, start: int, end: int) -> Option<int> {
+    let digits = if s[start] == '-' || s[start] == '+' { end - start - 1 } else { end - start }
+    if digits <= 9 {
+        return Some(small_value(s, start, end) as int)
+    }
+    return num.parse_int32(s[start:end]).ok()
+}
+
+// `int32_in` for `int64`: up to 18 digits always fit.
+#test("-123456789012345678", 0, 19)[Some(-123456789012345678i64)]
+#test("9223372036854775807", 0, 19)[Some(9223372036854775807i64)]
+#test("9223372036854775808", 0, 19)[None]
+fun int64_in(s: str, start: int, end: int) -> Option<int64> {
+    let digits = if s[start] == '-' || s[start] == '+' { end - start - 1 } else { end - start }
+    if digits <= 18 {
+        return Some(small_value(s, start, end))
+    }
+    return num.parse_int_radix(s[start:end], 10).ok()
+}
+
+// The value of `s[start:end]`: an optional sign, then at most 18 digits.
+fun small_value(s: str, start: int, end: int) -> int64 {
+    var k = start
+    let neg = s[k] == '-'
+    if neg || s[k] == '+' {
+        k += 1
+    }
+    var v: int64 = 0
+    while k < end {
+        v = v * 10 + (s[k] - '0') as int64
+        k += 1
+    }
+    if neg {
+        return 0i64 - v
+    }
+    return v
+}
+
+impl Scanner {
+    // Whether the whole text is read.
+    #test(scanner(""))[true]
+    #test(scanner("a"))[false]
+    #test(Scanner { text: "ab", pos: 2 })[true]
+    fun at_end(self) -> bool {
+        return self.pos >= self.text.len()
+    }
+
+    // The text not read yet.
+    #test(Scanner { text: "abc", pos: 1 })["bc"]
+    #test(Scanner { text: "abc", pos: 3 })[""]
+    fun rest(self) -> str {
+        return self.text[self.pos:]
+    }
+
+    // The next character, without reading it; `None` at the end. A byte
+    // that isn't part of a well-formed UTF-8 sequence is U+FFFD, as for
+    // `for c in s`.
+    #test(scanner("ab"))[Some('a')]
+    #test(scanner("é!"))[Some('é')]
+    #test(scanner(""))[None]
+    fun peek(self) -> Option<char> {
+        if self.pos >= self.text.len() {
+            return None
+        }
+        let (c, _) = char_at(self.text, self.pos)
+        return Some(c)
+    }
+
+    // The next character, read; `None` at the end.
+    #test(scanner("ab"))[Some('a')]
+    #test(scanner("\u{1F600}"))[Some('\u{1F600}')]
+    #test(scanner(""))[None]
+    fun next(var self) -> Option<char> {
+        if self.pos >= self.text.len() {
+            return None
+        }
+        let (c, k) = char_at(self.text, self.pos)
+        self.pos += k
+        return Some(c)
+    }
+
+    // The characters from here for which `pred` holds, read.
+    #test(scanner("123abc"), (c: char) => c >= '0' && c <= '9')["123"]
+    #test(scanner("abc"), (c: char) => c >= '0' && c <= '9')[""]
+    #test(scanner("ééx"), (c: char) => c != 'x')["éé"]
+    #test(scanner("abc"), (c: char) => true)["abc"]
+    fun take_while(var self, pred: (char) -> bool) -> str {
+        let s = self.text
+        let n = s.len()
+        let start = self.pos
+        var i = start
+        while i < n {
+            let (c, k) = char_at(s, i)
+            if !pred(c) {
+                break
+            }
+            i += k
+        }
+        self.pos = i
+        return s[start:i]
+    }
+
+    // Reads past ASCII whitespace, line ends included.
+    fun skip_space(var self) {
+        let s = self.text
+        var i = self.pos
+        while i < s.len() && is_space_byte(s[i]) {
+            i += 1
+        }
+        self.pos = i
+    }
+
+    // Reads `lit` if it comes next; whether it did.
+    #test(scanner("turn on 3"), "turn ")[true]
+    #test(scanner("turn"), "turn on")[false]
+    #test(scanner("x"), "")[true]
+    fun eat(var self, lit: str) -> bool {
+        let s = self.text
+        let n = lit.len()
+        if self.pos + n > s.len() {
+            return false
+        }
+        var k = 0
+        while k < n {
+            if s[self.pos + k] != lit[k] {
+                return false
+            }
+            k += 1
+        }
+        self.pos += n
+        return true
+    }
+
+    // Reads `lit`, which must come next. If it doesn't, the error is at the
+    // scanner's position, and nothing is read.
+    #test(scanner("x=1"), "x=")[Ok(())]
+    #test(scanner("y=1"), "x=")[Err(ScanError { kind: ScanErrorKind.Expected("x="), pos: 0, line: 1, col: 1 })]
+    #test(scanner("x"), "x=")[Err(ScanError { kind: ScanErrorKind.Expected("x="), pos: 0, line: 1, col: 1 })]
+    fun expect(var self, lit: str) -> Result<(), ScanError> {
+        if self.eat(lit) {
+            return Ok(())
+        }
+        return Err(self.error(ScanErrorKind.Expected(lit)))
+    }
+
+    // Reads a decimal `int`: an optional `-` or `+`, then digits, as
+    // `std.num`'s `parse_int32` takes them. It stops at the first byte that
+    // isn't a digit. On an error nothing is read.
+    #test(scanner("42"))[Ok(42)]
+    #test(scanner("-17,"))[Ok(-17)]
+    #test(scanner("+5"))[Ok(5)]
+    #test(scanner("007"))[Ok(7)]
+    #test(scanner("12abc"))[Ok(12)] // stops at the first byte that isn't a digit
+    #test(scanner("1_000"))[Ok(1)]
+    #test(scanner("2147483647"))[Ok(2147483647)]
+    #test(scanner("-2147483648"))[Ok(-2147483647 - 1)]
+    #test(scanner("2147483648"))[Err(ScanError { kind: ScanErrorKind.Overflow, pos: 0, line: 1, col: 1 })]
+    #test(scanner("abc"))[Err(ScanError { kind: ScanErrorKind.NoInt, pos: 0, line: 1, col: 1 })]
+    #test(scanner("-"))[Err(ScanError { kind: ScanErrorKind.NoInt, pos: 0, line: 1, col: 1 })]
+    #test(scanner("- 5"))[Err(ScanError { kind: ScanErrorKind.NoInt, pos: 0, line: 1, col: 1 })] // no space after a sign
+    #test(scanner(" 5"))[Err(ScanError { kind: ScanErrorKind.NoInt, pos: 0, line: 1, col: 1 })] // nor before the number
+    #test(scanner(""))[Err(ScanError { kind: ScanErrorKind.NoInt, pos: 0, line: 1, col: 1 })]
+    fun int(var self) -> Result<int, ScanError> {
+        let end = int_end(self.text, self.pos)
+        if end == self.pos {
+            return Err(self.error(ScanErrorKind.NoInt))
+        }
+        match int32_in(self.text, self.pos, end) {
+            Some(v) => {
+                self.pos = end
+                return Ok(v)
+            }
+            None => {
+                return Err(self.error(ScanErrorKind.Overflow))
+            }
+        }
+    }
+
+    // Reads a decimal `int64` as `int` reads an `int`.
+    #test(scanner("3000000000"))[Ok(3000000000i64)]
+    #test(scanner("9223372036854775807"))[Ok(9223372036854775807i64)]
+    #test(scanner("-9223372036854775808"))[Ok(-9223372036854775807i64 - 1i64)]
+    #test(scanner("9223372036854775808"))[Err(ScanError { kind: ScanErrorKind.Overflow, pos: 0, line: 1, col: 1 })]
+    #test(scanner("x"))[Err(ScanError { kind: ScanErrorKind.NoInt, pos: 0, line: 1, col: 1 })]
+    fun long(var self) -> Result<int64, ScanError> {
+        let end = int_end(self.text, self.pos)
+        if end == self.pos {
+            return Err(self.error(ScanErrorKind.NoInt))
+        }
+        match int64_in(self.text, self.pos, end) {
+            Some(v) => {
+                self.pos = end
+                return Ok(v)
+            }
+            None => {
+                return Err(self.error(ScanErrorKind.Overflow))
+            }
+        }
+    }
+
+    // Reads an identifier: an ASCII letter or `_`, then ASCII letters,
+    // digits and `_`s.
+    #test(scanner("foo_1 bar"))[Ok("foo_1")]
+    #test(scanner("_x"))[Ok("_x")]
+    #test(scanner("A"))[Ok("A")]
+    #test(scanner("1x"))[Err(ScanError { kind: ScanErrorKind.NoIdent, pos: 0, line: 1, col: 1 })]
+    #test(scanner("é"))[Err(ScanError { kind: ScanErrorKind.NoIdent, pos: 0, line: 1, col: 1 })] // ASCII letters only
+    #test(scanner(""))[Err(ScanError { kind: ScanErrorKind.NoIdent, pos: 0, line: 1, col: 1 })]
+    fun ident(var self) -> Result<str, ScanError> {
+        let s = self.text
+        let start = self.pos
+        if start >= s.len() || !is_ident_start(s[start]) {
+            return Err(self.error(ScanErrorKind.NoIdent))
+        }
+        var i = start + 1
+        while i < s.len() && (is_ident_start(s[i]) || is_digit_byte(s[i])) {
+            i += 1
+        }
+        self.pos = i
+        return Ok(s[start:i])
+    }
+
+    // An error of `kind` at the scanner's position, for a parser's own
+    // errors: `Err(sc.error(ScanErrorKind.Other("no such valve")))`.
+    #test(Scanner { text: "ab\ncdé\nx", pos: 7 }, ScanErrorKind.Other("bad"))[ScanError { kind: ScanErrorKind.Other("bad"), pos: 7, line: 2, col: 4 }] // the column counts characters
+    #test(Scanner { text: "ab\ncdé\nx", pos: 8 }, ScanErrorKind.NoInt)[ScanError { kind: ScanErrorKind.NoInt, pos: 8, line: 3, col: 1 }]
+    #test(Scanner { text: "", pos: 0 }, ScanErrorKind.NoInt)[ScanError { kind: ScanErrorKind.NoInt, pos: 0, line: 1, col: 1 }]
+    fun error(self, kind: ScanErrorKind) -> ScanError {
+        // counted from the start when asked for, as an error is rare
+        var line = 1
+        var col = 1
+        var k = 0
+        while k < self.pos && k < self.text.len() {
+            let c = self.text[k]
+            if c == '\n' {
+                line += 1
+                col = 1
+            } else if c < 128u8 || c >= 192u8 {
+                col += 1 // not a UTF-8 continuation byte
+            }
+            k += 1
+        }
+        return ScanError { kind: kind, pos: self.pos, line: line, col: col }
+    }
+}
+
+// A line read field by field, as a puzzle's input is: an error moves nothing.
+#test
+fun scanner_reads_a_line() {
+    var sc = scanner("Sensor at x=2, y=-18: closest")
+    sc.expect("Sensor at x=").expect("the start")
+    let x = sc.int().unwrap_or(99)
+    assert(x == 2, f"x is {x}")
+    assert(!sc.eat(" y="), "no ' y=' here")
+    match sc.expect(", z=") {
+        Ok(_) => assert(false, "', z=' isn't next")
+        Err(e) => assert(e.pos == 13 && e.col == 14 && sc.pos == 13, f"{e} at {sc.pos}")
+    }
+    sc.expect(", y=").expect("y")
+    match sc.ident() {
+        Ok(_) => assert(false, "no identifier")
+        Err(e) => assert(e.pos == 17 && sc.pos == 17, f"{e} at {sc.pos}")
+    }
+    let y = sc.int().unwrap_or(99)
+    assert(y == -18, f"y is {y}")
+    assert(sc.next().unwrap_or('?') == ':', "the colon")
+    sc.skip_space()
+    assert(sc.ident().unwrap_or("?") == "closest", "the word")
+    assert(sc.at_end(), "at the end")
+    assert(sc.next().is_none(), "nothing after the end")
+}
+
+// `next` steps over a character's bytes, and over a stray byte alone.
+#test
+fun scanner_steps_by_characters() {
+    var sb = StringBuilder()
+    sb.append("é")
+    sb.append_byte(255u8)
+    sb.append("x")
+    var sc = scanner(sb.build())
+    assert(sc.next().unwrap_or('?') == 'é' && sc.pos == 2, "é is two bytes")
+    assert(sc.peek().unwrap_or('?') == '\u{FFFD}' && sc.pos == 2, "peek reads nothing")
+    assert(sc.next().unwrap_or('?') == '\u{FFFD}' && sc.pos == 3, "a stray byte is U+FFFD")
+    assert(sc.next().unwrap_or('?') == 'x' && sc.at_end(), "then x")
+}
+
+// `skip_space` reads whitespace and line ends, and nothing else.
+#test
+fun scanner_skips_space() {
+    var sc = scanner(" \t\r\n 7 x")
+    sc.skip_space()
+    assert(sc.pos == 5, f"at {sc.pos}")
+    sc.skip_space()
+    assert(sc.pos == 5, "nothing more to skip")
+    assert(sc.int().unwrap_or(0) == 7, "the number")
+    sc.skip_space()
+    assert(sc.rest() == "x", "the rest")
+    let e = sc.long()
+    match e {
+        Ok(_) => assert(false, "x is no number")
+        Err(err) => assert(format("{}", err) == "2:4: expected an integer", format("{}", err))
+    }
+}
+
+// --- The integers in a line ------------------------------------------------------
+
+// Every integer in `line`, in order. A `-` right before a digit is a sign,
+// unless an ASCII letter or digit comes before it: then it joins words or
+// numbers, as in a date or a range (`"5-3"` is `[5, 3]`). A number out of
+// `int`'s range is a runtime error: `longs` reads `int64`s.
+#test("x=-3, y=12")[[-3, 12]]
+#test("5-3")[[5, 3]] // a `-` after a digit is no sign
+#test("1-3 a: abc")[[1, 3]] // a range
+#test("1518-11-01 00:05")[[1518, 11, 1, 0, 5]] // a date
+#test("aaaaa-bbb-z-y-x-123[abxyz]")[[123]] // a `-` after a letter is no sign
+#test("x=10..-5")[[10, -5]]
+#test("p=<-3,4>")[[-3, 4]]
+#test("--5")[[-5]]
+#test("- 5")[[5]]
+#test("+5")[[5]]
+#test("1.5")[[1, 5]] // no fractions
+#test("a1b22c333")[[1, 22, 333]]
+#test("007 -0")[[7, 0]]
+#test("2147483647 -2147483648")[[2147483647, -2147483647 - 1]]
+#test("no digits")[[]]
+#test("")[[]]
+#test("3000000000")[panic("std.text.ints: 3000000000 is out of int's range (longs reads int64)")]
+pub fun ints(line: str) -> [int] {
+    var out: [int] = []
+    var i = 0
+    while true {
+        let (start, end) = next_int(line, i)
+        if start < 0 {
+            break
+        }
+        match int32_in(line, start, end) {
+            Some(v) => out.push(v)
+            None => panic(f"std.text.ints: {line[start:end]} is out of int's range (longs reads int64)")
+        }
+        i = end
+    }
+    return out
+}
+
+// The bytes `start` to `end` of the first integer at or after `i` in `s`,
+// with its sign as `ints` decides it; `(-1, -1)` if there is none.
+#test("a,-12c", 0)[(2, 5)]
+#test("ab-12c", 0)[(3, 5)] // no sign after a letter
+#test("ab-12c", 3)[(3, 5)]
+#test("x5-3", 2)[(3, 4)]
+#test("xyz", 0)[(-1, -1)]
+fun next_int(s: str, i: int) -> (int, int) {
+    let n = s.len()
+    var j = i
+    while j < n && !is_digit_byte(s[j]) {
+        j += 1
+    }
+    if j == n {
+        return (-1, -1)
+    }
+    var start = j
+    if j > i && s[j - 1] == '-' && (j < 2 || !is_alnum_byte(s[j - 2])) {
+        start = j - 1
+    }
+    while j < n && is_digit_byte(s[j]) {
+        j += 1
+    }
+    return (start, j)
+}
+
+fun is_alnum_byte(b: uint8) -> bool {
+    return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9')
+}
+
+// Every integer in `line` as an `int64`, as `ints` finds them.
+#test("3000000000 x=-9223372036854775808")[[3000000000i64, -9223372036854775807i64 - 1i64]]
+#test("5-3")[[5i64, 3i64]]
+#test("")[[]]
+#test("99999999999999999999")[panic("std.text.longs: 99999999999999999999 is out of int64's range")]
+pub fun longs(line: str) -> [int64] {
+    var out: [int64] = []
+    var i = 0
+    while true {
+        let (start, end) = next_int(line, i)
+        if start < 0 {
+            break
+        }
+        match int64_in(line, start, end) {
+            Some(v) => out.push(v)
+            None => panic(f"std.text.longs: {line[start:end]} is out of int64's range")
+        }
+        i = end
+    }
+    return out
+}
+
+// --- Layout -----------------------------------------------------------------------
+
+// The words of `text` in lines of at most `width` bytes, filled greedily.
+// Words are the runs between ASCII whitespace, line ends included, and one
+// space joins them. A word longer than `width` is not broken: it stands on a
+// line of its own. A width below 1 is a runtime error.
+#test("The quick brown fox jumps over the lazy dog", 10)[["The quick", "brown fox", "jumps over", "the lazy", "dog"]]
+#test("a b c", 1)[["a", "b", "c"]]
+#test("tiny supercalifragilistic word", 8)[["tiny", "supercalifragilistic", "word"]] // a long word stays whole
+#test("  lots   of\n\nspace  ", 80)[["lots of space"]]
+#test("abc def", 7)[["abc def"]]
+#test("abc def", 6)[["abc", "def"]]
+#test("öö öö", 5)[["öö", "öö"]] // the width counts bytes
+#test("", 10)[[]]
+#test(" \n ", 10)[[]]
+#test("x", 0)[panic("std.text.wrap: the width must be at least 1, not 0")]
+pub fun wrap(text: str, width: int) -> [str] {
+    if width < 1 {
+        panic(f"std.text.wrap: the width must be at least 1, not {width}")
+    }
+    var out: [str] = []
+    var sb = StringBuilder()
+    var len = 0
+    let n = text.len()
+    var i = 0
+    while i < n {
+        // the next word, `text[start:i]` (`words`, written out: MYLA-360)
+        while i < n && is_space_byte(text[i]) {
+            i += 1
+        }
+        let start = i
+        while i < n && !is_space_byte(text[i]) {
+            i += 1
+        }
+        let w = i - start
+        if w == 0 {
+            break
+        }
+        if len > 0 && len + 1 + w > width {
+            out.push(sb.build())
+            sb = StringBuilder()
+            len = 0
+        }
+        if len > 0 {
+            sb.append_byte(' ')
+            len += 1
+        }
+        sb.append(text, start, i)
+        len += w
+    }
+    if len > 0 {
+        out.push(sb.build())
+    }
+    return out
+}
+
+// `wrap`'s lines joined by `\n`, without one at the end.
+#test("a b c d", 3)["a b\nc d"]
+#test("", 3)[""]
+pub fun fill(text: str, width: int) -> str {
+    let lines = wrap(text, width)
+    var sb = StringBuilder()
+    var k = 0
+    while k < lines.len() {
+        if k > 0 {
+            sb.append_byte('\n')
+        }
+        sb.append(lines[k])
+        k += 1
+    }
+    return sb.build()
+}
+
+// How `columns` lines up a column's cells.
+#derive(Eq)
+pub enum Align {
+    Left,
+    Right,
+}
+
+// The rows as lines of aligned columns, joined by `\n` without one at the
+// end. A column is as wide as its widest cell, counted in characters as
+// `pad_start` counts them; `sep` goes between columns. `align` says how each
+// column is aligned, `Left` for those it leaves out. A row may have fewer
+// cells than others: its line ends after its last. The last cell of a line
+// isn't padded when it is aligned left, so no line ends in spaces it didn't
+// have.
+#test([["name", "qty"], ["apple", "3"], ["kiwi", "12"]], [Align.Left, Align.Right], "  ")["name   qty\napple    3\nkiwi    12"]
+#test([["a", "b"], ["ccc", "d"]], [Align.Left], "  ")["a    b\nccc  d"]
+#test([["a", "b", "c"], ["dd"]], [Align.Left], "  ")["a   b  c\ndd"] // a short row
+#test([["1", "2"]], [Align.Left], " | ")["1 | 2"]
+#test([["é", "x"], ["ab", "y"]], [Align.Left], " ")["é  x\nab y"] // characters, not bytes
+#test([["7", "x"], ["100", "y"]], [Align.Right], " ")["  7 x\n100 y"]
+#test([["ab", "c"], ["d", "e"]], [], "  ")["ab  c\nd   e"] // every column left
+#test([], [Align.Right], "  ")[""]
+pub fun columns(rows: [[str]], align: [Align], sep: str = "  ") -> str {
+    var widths: [int] = []
+    for row in rows {
+        var j = 0
+        while j < row.len() {
+            let w = char_count(row[j])
+            if j == widths.len() {
+                widths.push(w)
+            } else if w > widths[j] {
+                widths[j] = w
+            }
+            j += 1
+        }
+    }
+    var sb = StringBuilder()
+    var r = 0
+    while r < rows.len() {
+        if r > 0 {
+            sb.append_byte('\n')
+        }
+        let row = rows[r]
+        var j = 0
+        while j < row.len() {
+            if j > 0 {
+                sb.append(sep)
+            }
+            let cell = row[j]
+            let pad = widths[j] - char_count(cell)
+            let right = j < align.len() && align[j] == Align.Right
+            if right {
+                sb.append(spaces(pad))
+            }
+            sb.append(cell)
+            if !right && j < row.len() - 1 {
+                sb.append(spaces(pad))
+            }
+            j += 1
+        }
+        r += 1
+    }
+    return sb.build()
+}
+
+// `columns` puts two spaces between columns unless told otherwise; a test
+// function, as a case gives every argument.
+#test
+fun columns_by_default() {
+    assert(columns([["ab", "c"], ["d", "e"]], [Align.Right]) == "ab  c\n d  e", "two spaces")
+}
+
+// `n` spaces, none for `n <= 0`.
+#test(3)["   "]
+#test(-1)[""]
+fun spaces(n: int) -> str {
+    var sb = StringBuilder()
+    var k = 0
+    while k < n {
+        sb.append_byte(' ')
+        k += 1
+    }
+    return sb.build()
+}
+
+// The characters in `s`: its bytes but UTF-8 continuation bytes, as
+// `pad_start` counts them.
+#test("abc")[3]
+#test("größe")[5]
+#test("")[0]
+fun char_count(s: str) -> int {
+    var n = 0
+    var i = 0
+    while i < s.len() {
+        let b = s[i]
+        if b < 128u8 || b >= 192u8 {
+            n += 1
+        }
+        i += 1
+    }
+    return n
+}
+
+// `text` with `prefix` before every line that holds more than ASCII
+// whitespace. Lines end at `\n`, as in Python's `textwrap.indent`.
+#test("a\nb\n", "  ")["  a\n  b\n"]
+#test("a\n\n  \nb", "> ")["> a\n\n  \n> b"] // lines of whitespace get no prefix
+#test("a\r\nb", "-")["-a\r\n-b"]
+#test("one line", "    ")["    one line"]
+#test("", "  ")[""]
+pub fun indent(text: str, prefix: str) -> str {
+    var sb = StringBuilder()
+    let n = text.len()
+    var start = 0
+    while start < n {
+        let end = line_end(text, start)
+        var blank = true
+        var k = start
+        while k < end && blank {
+            blank = is_space_byte(text[k])
+            k += 1
+        }
+        if !blank {
+            sb.append(prefix)
+        }
+        sb.append(text, start, end)
+        start = end
+    }
+    return sb.build()
+}
+
+// Where the line that starts at `start` of `s` ends: past its `\n`, or at
+// the end of `s`.
+#test("ab\ncd", 0)[3]
+#test("ab\ncd", 3)[5]
+#test("\n", 0)[1]
+fun line_end(s: str, start: int) -> int {
+    var i = start
+    while i < s.len() {
+        if s[i] == '\n' {
+            return i + 1
+        }
+        i += 1
+    }
+    return s.len()
+}
+
+// `text` without the leading whitespace its lines have in common, by the
+// rules of Python's `textwrap.dedent`: whitespace is spaces and tabs, which
+// differ (a tab doesn't match spaces); a line of only spaces and tabs is
+// made empty and doesn't count; lines end at `\n`.
+#test("    a\n      b\n    c\n")["a\n  b\nc\n"]
+#test("  a\n\tb\n")["  a\n\tb\n"] // spaces and a tab: no common margin
+#test("  a\n  \n  b")["a\n\nb"] // a line of whitespace is emptied
+#test("  a\n      \n  b\n")["a\n\nb\n"]
+#test("\n    x\n  y")["\n  x\ny"]
+#test("x\n  y")["x\n  y"]
+#test("  \t a\n  \t b")["a\nb"]
+#test("\t\ta\n\t b")["\ta\n b"]
+#test("  a\r\n  b\r\n")["a\r\nb\r\n"]
+#test("   ")[""]
+#test("")[""]
+pub fun dedent(text: str) -> str {
+    let n = text.len()
+    // the margin: the bytes `text[m:m + mlen]`, the common start of the
+    // leading whitespace of the lines that hold something else
+    var m = -1
+    var mlen = 0
+    var start = 0
+    while start < n {
+        let end = line_end(text, start)
+        let ws = margin_end(text, start, end)
+        if ws < end && text[ws] != '\n' {
+            if m < 0 {
+                m = start
+                mlen = ws - start
+            } else {
+                var k = 0
+                while k < mlen && k < ws - start && text[m + k] == text[start + k] {
+                    k += 1
+                }
+                mlen = k
+            }
+        }
+        start = end
+    }
+    var sb = StringBuilder()
+    start = 0
+    while start < n {
+        let end = line_end(text, start)
+        let ws = margin_end(text, start, end)
+        if ws == end || text[ws] == '\n' {
+            // only spaces and tabs: emptied, its line end kept
+            if end > start && text[end - 1] == '\n' {
+                sb.append_byte('\n')
+            }
+        } else {
+            sb.append(text, start + mlen, end)
+        }
+        start = end
+    }
+    return sb.build()
+}
+
+// Past the spaces and tabs at the start of the line `s[start:end]`.
+fun margin_end(s: str, start: int, end: int) -> int {
+    var i = start
+    while i < end && (s[i] == ' ' || s[i] == '\t') {
+        i += 1
+    }
+    return i
+}

@@ -39,6 +39,7 @@ The conventions (D164): operations on built-in types are methods (`s.split(",")`
 | `std.int` | [[Language/Standard-library/Int]] | Methods on every integer type: `gcd`, `pow`, Euclidean division, checked, wrapping, saturating and overflowing arithmetic, `mulmod`, `powmod`, `modinv` |
 | `std.num` | [[Language/Standard-library/Num]] | Exact parsing and printing of integers and floats; integers in any radix and width, with `ParseIntError` |
 | `std.str` | [[Language/Standard-library/Str]] | Methods on `str`: search, split, trim, case, padding, replace |
+| `std.text` | [[Language/Standard-library/Text]] | A `Scanner` for hand-written parsers, `ints` (every integer in a line), word wrap, aligned columns, `indent` and `dedent` |
 | `std.fmt` | [[Language/Standard-library/Fmt]] | Format specs and the helpers of `Format` impls |
 | `std.math` | [[Language/Standard-library/Math]] | Floating-point functions after fdlibm |
 | `std.list` | [[Language/Standard-library/List]] | Methods on lists: building, `map` and the other higher-order operations, sorting, binary search, permutations and combinations |
