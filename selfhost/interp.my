@@ -3538,11 +3538,13 @@ impl Interp {
         // the wall clock (MYLA-334): the host's, also under MYLA_TIME=virtual
         if nm == "__wall_ns" { return Value.VInt(__wall_ns()) }
         // waiting for input (D124): parked until `fd` is readable, unless it
-        // is now or the task was asked to stop; outside any task, nothing
+        // is now or the task was asked to stop; outside any task, nothing.
+        // A negative descriptor, which poll(2) ignores, is ready at once, as
+        // natively, where the poller can't watch it (`wait_fds` in std.rt)
         if nm == "__wait_readable" {
             let fd = as_int(self.eval(args[0])) as int32
             if self.stop() { return Value.VUnit }
-            if self.cur < 0 || self.cur >= self.tasks.len() || self.tasks[self.cur].requested || __poll(fd, 0) != 0 { return Value.VUnit }
+            if self.cur < 0 || self.cur >= self.tasks.len() || self.tasks[self.cur].requested || fd < 0 || __poll(fd, 0) != 0 { return Value.VUnit }
             self.fd_waits.push(FdWait { fd: fd, fd2: -1, task: self.cur })
             self.tasks[self.cur].state = 1
             self.parked = true
@@ -3552,7 +3554,8 @@ impl Interp {
             let fa = as_int(self.eval(args[0])) as int32
             let fb = as_int(self.eval(args[1])) as int32
             if self.stop() { return Value.VUnit }
-            if self.cur < 0 || self.cur >= self.tasks.len() || self.tasks[self.cur].requested || __poll(fa, 0) != 0 || __poll(fb, 0) != 0 { return Value.VUnit }
+            // (`fb` negative is "only `fa`", as natively)
+            if self.cur < 0 || self.cur >= self.tasks.len() || self.tasks[self.cur].requested || fa < 0 || __poll(fa, 0) != 0 || (fb >= 0 && __poll(fb, 0) != 0) { return Value.VUnit }
             self.fd_waits.push(FdWait { fd: fa, fd2: fb, task: self.cur })
             self.tasks[self.cur].state = 1
             self.parked = true

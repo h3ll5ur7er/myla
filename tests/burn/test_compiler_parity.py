@@ -135,6 +135,27 @@ async fun main() {
     }
 }
 """,
+    "wait_with_no_descriptor": """// `await __wait_readable(fd)` with no descriptor to watch (-1) returns at
+// once, as natively: the poller can't watch it, so it counts as ready; the
+// same for `__wait_either` with its first one -1
+import std.task as task
+
+async fun other() -> int {
+    await task.yield()
+    return 2
+}
+
+#allow(primitive)
+#main
+async fun main() {
+    print("before")
+    await __wait_readable(-1)
+    print("after")
+    async let o = other()
+    await __wait_either(-1, -1)
+    print(await o)
+}
+""",
     "operators_of_generic_impls": """// `==`, `!=`, `<` and the others, and a format hole, on a generic struct
 // whose `Eq`, `Ord` and `Format` impls are generic: the operator calls the
 // method's instance for the struct's type arguments (MYLA-367)
@@ -4994,6 +5015,8 @@ PINNED = {
     # MYLA-318: new; native code gives the same
     "for_over_a_string_async": '6\na\nb\n',
     # MYLA-318: new; native code gives the same
+    # MYLA-340's lane: the interpreter waited forever, natively it returned
+    "wait_with_no_descriptor": 'before\nafter\n2\n',
     # MYLA-367: new; native code gave "undefined reference to 'myla_Box.eq'"
     "operators_of_generic_impls": 'true\ntrue\nfalse\ntrue\nfalse\ntrue\ntrue\n<a> <42> <s>\n<a>\n',
     "string_ordering": 'true true false false\ntrue true false false\nfalse false true true\ntrue true false false\nfalse true false true\nfalse true false true\ntrue true false false\nfalse false true true\nfalse false true true\ntrue true false false\ntrue true false false\ntrue true false false\n,Apple,apple,apples,banana,fig,pear,z,é\n,Apple,apple,apples,banana,fig,pear,z,é\ntrue\na,b,b,c,d\n5\nlime\na,c,m,x\ntrue\na,b\n',
