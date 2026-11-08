@@ -178,7 +178,7 @@ Three questions for the owner are worth deciding before the first module is writ
 | --- | --- | --- | --- |
 | 1 Foundations | [[MYLA-325]] first (the integrator), then [[MYLA-321]], [[MYLA-322]], [[MYLA-323]], [[MYLA-324]] | [[MYLA-319]] (the owner's decision), then [[MYLA-320]]; [[MYLA-310]] beside it | [[MYLA-336]] |
 | 2 Collections, hashes and formats | [[MYLA-326]], [[MYLA-327]], [[MYLA-328]], [[MYLA-329]], [[MYLA-331]], [[MYLA-332]], [[MYLA-333]], [[MYLA-334]], [[MYLA-335]], [[MYLA-338]]; [[MYLA-330]] once MYLA-310 and MYLA-315 are in | [[MYLA-315]], then [[MYLA-313]] (after MYLA-327), then [[MYLA-318]] | |
-| 3 Streams and the middle tier | [[MYLA-337]], [[MYLA-339]] and [[MYLA-340]] (after MYLA-336 and MYLA-338), [[MYLA-341]], [[MYLA-342]] (after MYLA-330), [[MYLA-343]], [[MYLA-344]], [[MYLA-345]] | [[MYLA-353]] (a decision) | |
+| 3 Streams and the middle tier | [[MYLA-337]], [[MYLA-339]] and [[MYLA-340]] (after MYLA-336 and MYLA-338), [[MYLA-341]], [[MYLA-342]] (after MYLA-330), [[MYLA-343]], [[MYLA-344]], [[MYLA-345]] | [[MYLA-353]] (a decision); the fixes the lanes needed, [[MYLA-360]], [[MYLA-367]], [[MYLA-374]], [[MYLA-375]] | [[MYLA-378]] (what the lanes found missing) |
 | 4 Networks and larger formats | [[MYLA-347]] (after MYLA-346), [[MYLA-348]], [[MYLA-349]], [[MYLA-351]], [[MYLA-352]], [[MYLA-354]] (a decision) | | [[MYLA-346]], then [[MYLA-350]] |
 | Later | No tasks yet: #10, #32, #39, #40, #55, #67 | | |
 

@@ -1,0 +1,660 @@
+// std.graph: searches of a graph given by its neighbour function (MYLA-342,
+// D164).
+//
+// No graph is stored: a search asks `next(u)` for the nodes an edge leads to
+// from `u`, as it reaches `u`, so the graph can be a grid, a puzzle's states
+// or a list of edges alike, and only the part a search reaches is made. A
+// weighted edge is a `(node, weight)` pair, its weight an `int64` (a path's
+// cost is a sum, and `std.heap`'s priorities are `int64`s), and weights must
+// not be negative.
+//
+// A node is any type a map key can be, `T: Eq + Hash` (D163, D167): an
+// integer, a string, a tuple such as a grid position `(x, y)`, or a struct
+// that derives both. The searches keep a map keyed by node; `bfs_dense` and
+// `dijkstra_dense` take nodes numbered 0 to n - 1 and keep lists instead,
+// four to ten times faster on a grid (`std.grid`'s `index` and `pos` number
+// its cells).
+//
+// The results: a map from each node reached to its distance, in the order
+// the search settled them (D105), or a `Path` of nodes from the start to a
+// goal with its cost; `None` when no goal is reachable.
+
+import std.deque as deque
+from std.deque import Deque
+import std.heap as heap
+from std.heap import KeyedHeap
+
+// A path found by a search: its nodes from the start to the goal, both
+// included, and its cost, the sum of its edges' weights (the number of its
+// edges, for `bfs_path`).
+pub struct Path<T> {
+    nodes: [T],
+    cost: int64,
+}
+
+// Why a graph has no order.
+pub enum GraphError {
+    // The graph has a cycle, so no topological order exists
+    Cycle,
+}
+
+impl GraphError {
+    #test(GraphError.Cycle)["the graph has a cycle"]
+    fun message(self) -> str {
+        return match self {
+            Cycle => "the graph has a cycle"
+        }
+    }
+}
+
+impl Format for GraphError {
+    #test(GraphError.Cycle, "")["the graph has a cycle"]
+    fun format(self, spec: str) -> str {
+        return self.message()
+    }
+}
+
+// The number of edges of a shortest path from `start` to each node it
+// reaches, in the order a breadth-first search reaches them: `start` first,
+// at 0.
+pub fun bfs<T: Eq + Hash>(start: T, next: (T) -> [T]) -> [T: int] {
+    var dist: [T: int] = [:]
+    dist[start] = 0
+    var todo: Deque<T> = deque.new()
+    todo.push_back(start)
+    while let Some(u) = todo.pop_front() {
+        let d = dist[u] + 1
+        for v in next(u) {
+            if !dist.contains(v) {
+                dist[v] = d
+                todo.push_back(v)
+            }
+        }
+    }
+    return dist
+}
+
+// A path of the fewest edges from `start` to a node for which `goal` is
+// true, if one is reachable; `start` itself if it is a goal.
+pub fun bfs_path<T: Eq + Hash>(start: T, goal: (T) -> bool, next: (T) -> [T]) -> Option<Path<T>> {
+    if goal(start) {
+        return Some(Path { nodes: [start], cost: 0 })
+    }
+    var prev: [T: T] = [:]
+    prev[start] = start
+    var todo: Deque<T> = deque.new()
+    todo.push_back(start)
+    while let Some(u) = todo.pop_front() {
+        for v in next(u) {
+            if !prev.contains(v) {
+                prev[v] = u
+                if goal(v) {
+                    let nodes = walk_back(prev, start, v)
+                    return Some(Path { nodes: nodes, cost: (nodes.len() - 1) as int64 })
+                }
+                todo.push_back(v)
+            }
+        }
+    }
+    return None
+}
+
+// The nodes reachable from `start` in depth-first preorder: a node before
+// the nodes reached through it, its neighbours in the order `next` gives
+// them, as a recursive search visits them (without its depth of recursion).
+pub fun dfs<T: Eq + Hash>(start: T, next: (T) -> [T]) -> [T] {
+    var seen: [T: ()] = [:]
+    var order: [T] = []
+    var stack = [start]
+    while stack.len() > 0 {
+        let u = stack.pop()
+        if seen.contains(u) {
+            continue
+        }
+        seen[u] = ()
+        order.push(u)
+        // Pushed last to first, so that the first neighbour is visited first
+        let vs = next(u)
+        var i = vs.len() - 1
+        while i >= 0 {
+            if !seen.contains(vs[i]) {
+                stack.push(vs[i])
+            }
+            i -= 1
+        }
+    }
+    return order
+}
+
+// The cost of a cheapest path from `start` to each node it reaches, in the
+// order Dijkstra's algorithm settles them, cheapest first. `next(u)` gives
+// the edges from `u` with their weights.
+pub fun dijkstra<T: Eq + Hash>(start: T, next: (T) -> [(T, int64)]) -> [T: int64] {
+    var dist: [T: int64] = [:]
+    // The cheapest cost found so far of each node reached, settled or not.
+    // A node goes on the heap only with a cost cheaper than it had, so the
+    // entry of its cost here is settled once and any other is stale.
+    var best: [T: int64] = [:]
+    best[start] = 0
+    var todo: KeyedHeap<T> = heap.keyed_new()
+    todo.push(0, start)
+    while let Some(e) = todo.pop() {
+        let (d, u) = e
+        if d > best[u] {
+            continue
+        }
+        dist[u] = d
+        for edge in next(u) {
+            let (v, w) = edge
+            let c = d + w
+            if !best.contains(v) || c < best[v] {
+                best[v] = c
+                todo.push(c, v)
+            }
+        }
+    }
+    return dist
+}
+
+// A cheapest path from `start` to a node for which `goal` is true, if one
+// is reachable. Dijkstra's algorithm, stopping at the first goal it settles.
+pub fun dijkstra_path<T: Eq + Hash>(start: T, goal: (T) -> bool, next: (T) -> [(T, int64)]) -> Option<Path<T>> {
+    return astar(start, goal, next, (u: T) => 0i64)
+}
+
+// A cheapest path from `start` to a node for which `goal` is true, if one
+// is reachable, by A*: `h(u)` estimates the cost from `u` to the nearest
+// goal, and the path is cheapest when it never estimates more than the true
+// cost (the Manhattan distance on a grid of steps that cost at least 1).
+// With `h` always 0 it is Dijkstra's algorithm.
+pub fun astar<T: Eq + Hash>(start: T, goal: (T) -> bool, next: (T) -> [(T, int64)], h: (T) -> int64) -> Option<Path<T>> {
+    // The cheapest cost found so far of each node reached, and the node it
+    // was reached from. A node goes on the heap with its cost then, so an
+    // entry whose cost has since been beaten is skipped; a node may be
+    // reopened, which keeps the path cheapest for an `h` that is admissible
+    // but not consistent.
+    var cost: [T: int64] = [:]
+    var prev: [T: T] = [:]
+    cost[start] = 0
+    prev[start] = start
+    var todo: KeyedHeap<(T, int64)> = heap.keyed_new()
+    todo.push(h(start), (start, 0))
+    while let Some(e) = todo.pop() {
+        let (_, entry) = e
+        let (u, g) = entry
+        if g > cost[u] {
+            continue
+        }
+        if goal(u) {
+            return Some(Path { nodes: walk_back(prev, start, u), cost: g })
+        }
+        for edge in next(u) {
+            let (v, w) = edge
+            let c = g + w
+            if !cost.contains(v) || c < cost[v] {
+                cost[v] = c
+                prev[v] = u
+                todo.push(c + h(v), (v, c))
+            }
+        }
+    }
+    return None
+}
+
+// The nodes of `nodes`, and every node their edges reach, in an order in
+// which each node comes before the nodes its edges lead to; `Cycle` if no
+// such order exists. Of the nodes that may come next, the one first in
+// `nodes` (then in the order they were reached) comes first, so sorted
+// `nodes` give the least order.
+pub fun topo_sort<T: Eq + Hash>(nodes: [T], next: (T) -> [T]) -> Result<[T], GraphError> {
+    let g = numbered(nodes, next)
+    var indegree: [int] = []
+    for i in 0..g.nodes.len() {
+        indegree.push(0)
+    }
+    for out in g.edges {
+        for v in out {
+            indegree[v] += 1
+        }
+    }
+    // The nodes that may come next, the least number first
+    var ready: KeyedHeap<int> = heap.keyed_new()
+    for i in 0..g.nodes.len() {
+        if indegree[i] == 0 {
+            ready.push(i as int64, i)
+        }
+    }
+    var order: [T] = []
+    while let Some(e) = ready.pop() {
+        let (_, u) = e
+        order.push(g.nodes[u])
+        for v in g.edges[u] {
+            indegree[v] -= 1
+            if indegree[v] == 0 {
+                ready.push(v as int64, v)
+            }
+        }
+    }
+    if order.len() < g.nodes.len() {
+        return Err(GraphError.Cycle)
+    }
+    return Ok(order)
+}
+
+// The connected components of the graph of `nodes` and every node their
+// edges reach, an edge joining its two ends whichever way it points: each
+// component's nodes in breadth-first order from its first node, the
+// components in the order of their first nodes in `nodes`.
+pub fun components<T: Eq + Hash>(nodes: [T], next: (T) -> [T]) -> [[T]] {
+    let g = numbered(nodes, next)
+    // Each edge both ways
+    var both: [[int]] = []
+    for i in 0..g.nodes.len() {
+        both.push([])
+    }
+    for u in 0..g.edges.len() {
+        for v in g.edges[u] {
+            both[u].push(v)
+            both[v].push(u)
+        }
+    }
+    var seen: [bool] = []
+    for i in 0..g.nodes.len() {
+        seen.push(false)
+    }
+    var out: [[T]] = []
+    var todo: Deque<int> = deque.new()
+    for s in 0..g.nodes.len() {
+        if seen[s] {
+            continue
+        }
+        var part: [T] = []
+        seen[s] = true
+        todo.push_back(s)
+        while let Some(u) = todo.pop_front() {
+            part.push(g.nodes[u])
+            for v in both[u] {
+                if !seen[v] {
+                    seen[v] = true
+                    todo.push_back(v)
+                }
+            }
+        }
+        out.push(part)
+    }
+    return out
+}
+
+// `bfs` over the nodes 0 to `n` - 1: the number of edges of a shortest path
+// from `start` to each node, -1 for one it doesn't reach.
+pub fun bfs_dense(n: int, start: int, next: (int) -> [int]) -> [int] {
+    var dist: [int] = []
+    for i in 0..n {
+        dist.push(-1)
+    }
+    dist[start] = 0
+    var todo: Deque<int> = deque.new()
+    todo.push_back(start)
+    while let Some(u) = todo.pop_front() {
+        let d = dist[u] + 1
+        for v in next(u) {
+            if dist[v] < 0 {
+                dist[v] = d
+                todo.push_back(v)
+            }
+        }
+    }
+    return dist
+}
+
+// `dijkstra` over the nodes 0 to `n` - 1: the cost of a cheapest path from
+// `start` to each node, -1 for one it doesn't reach.
+pub fun dijkstra_dense(n: int, start: int, next: (int) -> [(int, int64)]) -> [int64] {
+    var dist: [int64] = []
+    var best: [int64] = []
+    for i in 0..n {
+        dist.push(-1)
+        best.push(-1)
+    }
+    best[start] = 0
+    var todo: KeyedHeap<int> = heap.keyed_new()
+    todo.push(0, start)
+    while let Some(e) = todo.pop() {
+        let (d, u) = e
+        if dist[u] >= 0 {
+            continue
+        }
+        dist[u] = d
+        for edge in next(u) {
+            let (v, w) = edge
+            let c = d + w
+            if best[v] < 0 || c < best[v] {
+                best[v] = c
+                todo.push(c, v)
+            }
+        }
+    }
+    return dist
+}
+
+// The path from `start` to `end` that `prev` gives, each node mapped to the
+// node it was reached from, `start` to itself.
+fun walk_back<T: Eq + Hash>(prev: [T: T], start: T, end: T) -> [T] {
+    var back = [end]
+    var at = end
+    while at != start {
+        at = prev[at]
+        back.push(at)
+    }
+    var nodes: [T] = []
+    var i = back.len() - 1
+    while i >= 0 {
+        nodes.push(back[i])
+        i -= 1
+    }
+    return nodes
+}
+
+// A graph of numbered nodes: the nodes, and the numbers of the nodes each
+// one's edges lead to.
+struct Numbered<T> {
+    nodes: [T],
+    edges: [[int]],
+}
+
+// The graph of `nodes` and every node their edges reach, numbered in the
+// order of `nodes`, then in the order they were reached.
+fun numbered<T: Eq + Hash>(nodes: [T], next: (T) -> [T]) -> Numbered<T> {
+    var number: [T: int] = [:]
+    var all: [T] = []
+    for u in nodes {
+        if !number.contains(u) {
+            number[u] = all.len()
+            all.push(u)
+        }
+    }
+    var edges: [[int]] = []
+    var i = 0
+    while i < all.len() {
+        var out: [int] = []
+        for v in next(all[i]) {
+            if !number.contains(v) {
+                number[v] = all.len()
+                all.push(v)
+            }
+            out.push(number[v])
+        }
+        edges.push(out)
+        i += 1
+    }
+    return Numbered { nodes: all, edges: edges }
+}
+
+// --- tests -------------------------------------------------------------------
+// The functions are generic, which a `#test` case can't take (D116), so the
+// tests are test functions (D162).
+
+// The edges of a small directed graph by letter.
+fun letters(u: str) -> [str] {
+    return match u {
+        "a" => ["b", "c"]
+        "b" => ["d"]
+        "c" => ["d", "e"]
+        "d" => ["f"]
+        "e" => ["f"]
+        "g" => ["a"]
+        _ => []
+    }
+}
+
+// A maze of 8 by 5 cells, row by row, `#` a wall.
+const MAZE: str = "S..#.....#.#.##..#...#...####.#.......#E"
+
+// Whether the cell `p` of the maze is open.
+fun open(p: (int, int)) -> bool {
+    let (x, y) = p
+    return y >= 0 && y < 5 && x >= 0 && x < 8 && MAZE[y * 8 + x] != '#'
+}
+
+fun steps(p: (int, int)) -> [(int, int)] {
+    let (x, y) = p
+    var out: [(int, int)] = []
+    for q in [(x, y - 1), (x + 1, y), (x, y + 1), (x - 1, y)] {
+        if open(q) {
+            out.push(q)
+        }
+    }
+    return out
+}
+
+fun has<T: Eq>(xs: [T], v: T) -> bool {
+    for x in xs {
+        if x == v {
+            return true
+        }
+    }
+    return false
+}
+
+#test
+fun breadth_first() {
+    let d = bfs("a", letters)
+    assert(d.keys() == ["a", "b", "c", "d", "e", "f"], "the order reached")
+    assert(d["a"] == 0 && d["d"] == 2 && d["f"] == 3 && !d.contains("g"), "the distances")
+    let m = bfs((0, 0), steps)
+    assert(m[(7, 4)] == 15 && m.len() == 27 && !m.contains((3, 0)), "the maze")
+    let p = match bfs_path((0, 0), (q: (int, int)) => q == (7, 4), steps) {
+        Some(p) => p
+        None => panic("the maze has a way out")
+    }
+    assert(p.cost == 15 && p.nodes.len() == 16 && p.nodes[0] == (0, 0) && p.nodes[15] == (7, 4), "the path")
+    for i in 1..p.nodes.len() {
+        assert(has(steps(p.nodes[i - 1]), p.nodes[i]), "each step an edge")
+    }
+    match bfs_path("a", (u: str) => u == "g", letters) {
+        Some(_) => assert(false, "g is not reachable from a")
+        None => {}
+    }
+    match bfs_path("e", (u: str) => u == "e", letters) {
+        Some(q) => assert(q.cost == 0 && q.nodes == ["e"], "the start is a goal")
+        None => assert(false, "the start")
+    }
+}
+
+#test
+fun depth_first() {
+    assert(dfs("a", letters) == ["a", "b", "d", "f", "c", "e"], "preorder")
+    assert(dfs("g", letters) == ["g", "a", "b", "d", "f", "c", "e"], "from g")
+    assert(dfs("f", letters) == ["f"], "a sink")
+    // A long chain, deeper than a recursion would like
+    let chain = dfs(0, (i: int) => if i < 200000 { [i + 1] } else { [] })
+    assert(chain.len() == 200001 && chain[200000] == 200000, "a chain")
+}
+
+// A weighted grid of 10 by 10, row by row: entering a cell costs its digit.
+const RISK: str = "1163751742138137367221365113283694931569746341711113191281371359912421312542163912931385212311944581"
+
+fun risk(p: (int, int)) -> int64 {
+    let (x, y) = p
+    return (RISK[y * 10 + x] - '0') as int64
+}
+
+fun risk_edges(p: (int, int)) -> [((int, int), int64)] {
+    let (x, y) = p
+    var out: [((int, int), int64)] = []
+    for q in [(x, y - 1), (x + 1, y), (x, y + 1), (x - 1, y)] {
+        let (a, b) = q
+        if a >= 0 && b >= 0 && a < 10 && b < 10 {
+            out.push((q, risk(q)))
+        }
+    }
+    return out
+}
+
+#test
+fun weighted() {
+    // Advent of Code 2021, day 15's example: the lowest total risk is 40
+    let d = dijkstra((0, 0), risk_edges)
+    assert(d[(9, 9)] == 40 && d[(0, 0)] == 0 && d.len() == 100, "dijkstra")
+    var last: int64 = 0
+    for k in d.keys() {
+        assert(d[k] >= last, "settled cheapest first")
+        last = d[k]
+    }
+    let goal = (q: (int, int)) => q == (9, 9)
+    let p = match dijkstra_path((0, 0), goal, risk_edges) {
+        Some(p) => p
+        None => panic("a path")
+    }
+    assert(p.cost == 40 && p.nodes[0] == (0, 0) && p.nodes[p.nodes.len() - 1] == (9, 9), "dijkstra_path")
+    var sum: int64 = 0
+    for i in 1..p.nodes.len() {
+        sum += risk(p.nodes[i])
+    }
+    assert(sum == 40, "the path costs its cost")
+    let manhattan = (q: (int, int)) => {
+        let (x, y) = q
+        return (18 - x - y) as int64
+    }
+    let a = match astar((0, 0), goal, risk_edges, manhattan) {
+        Some(a) => a
+        None => panic("a path")
+    }
+    assert(a.cost == 40, "astar")
+    let zero = (q: (int, int)) => 0i64
+    match astar((0, 0), (q: (int, int)) => q == (10, 10), risk_edges, zero) {
+        Some(_) => assert(false, "outside the grid")
+        None => {}
+    }
+    let cities = (u: str) => match u {
+        "a" => [("b", 7i64), ("c", 2i64)]
+        "c" => [("b", 3i64), ("d", 9i64)]
+        "b" => [("d", 1i64)]
+        _ => []
+    }
+    let c = dijkstra("a", cities)
+    assert(c.keys() == ["a", "c", "b", "d"] && c["b"] == 5 && c["d"] == 6, "a cheaper way round")
+}
+
+// A* with the Manhattan distance agrees with Dijkstra's algorithm on random
+// weighted grids with walls.
+#test
+fun astar_against_dijkstra() {
+    var x: int64 = 7
+    for round in 0..12 {
+        let n = 6 + round
+        var w: [int64] = []
+        for i in 0..n * n {
+            x = (x * 1103515245 + 12345) % 2147483648
+            w.push(if x % 5 == 0 { 0 } else { 1 + x % 9 })
+        }
+        w[0] = 1
+        let edges = (p: (int, int)) => {
+            let (px, py) = p
+            var out: [((int, int), int64)] = []
+            for q in [(px, py - 1), (px + 1, py), (px, py + 1), (px - 1, py)] {
+                let (a, b) = q
+                if a >= 0 && b >= 0 && a < n && b < n && w[b * n + a] > 0 {
+                    out.push((q, w[b * n + a]))
+                }
+            }
+            return out
+        }
+        let target = (n - 1, n - 1)
+        let d = dijkstra((0, 0), edges)
+        let h = (p: (int, int)) => {
+            let (px, py) = p
+            return ((n - 1 - px) + (n - 1 - py)) as int64
+        }
+        let found = astar((0, 0), (p: (int, int)) => p == target, edges, h)
+        match found {
+            Some(p) => assert(d.contains(target) && d[target] == p.cost, "the same cost")
+            None => assert(!d.contains(target), "both find none")
+        }
+        let dense = dijkstra_dense(n * n, 0, (i: int) => {
+            var out: [(int, int64)] = []
+            for e in edges((i % n, i / n)) {
+                let (q, c) = e
+                let (a, b) = q
+                out.push((b * n + a, c))
+            }
+            return out
+        })
+        for i in 0..n * n {
+            let p = (i % n, i / n)
+            if d.contains(p) {
+                assert(dense[i] == d[p], "dijkstra_dense agrees")
+            } else {
+                assert(dense[i] == -1, "dijkstra_dense: unreachable")
+            }
+        }
+    }
+}
+
+#test
+fun topological() {
+    let order = match topo_sort(["a", "g"], letters) {
+        Ok(o) => o
+        Err(e) => panic(e.message())
+    }
+    assert(order == ["g", "a", "b", "c", "d", "e", "f"], "the least order")
+    // Advent of Code 2018, day 7's example: CABDFE
+    let steps = (u: char) => match u {
+        'C' => ['A', 'F']
+        'A' => ['B', 'D']
+        'B' => ['E']
+        'D' => ['E']
+        'F' => ['E']
+        _ => []
+    }
+    match topo_sort(['A', 'B', 'C', 'D', 'E', 'F'], steps) {
+        Ok(o) => assert(o == ['C', 'A', 'B', 'D', 'F', 'E'], "the least order of the example")
+        Err(_) => assert(false, "no cycle")
+    }
+    let cyclic = (i: int) => [(i + 1) % 3]
+    match topo_sort([0], cyclic) {
+        Ok(_) => assert(false, "a cycle")
+        Err(e) => assert(e.message() == "the graph has a cycle", "Cycle")
+    }
+    match topo_sort([5, 4], (i: int) => if i > 0 { [i - 1] } else { [] }) {
+        Ok(o) => assert(o == [5, 4, 3, 2, 1, 0], "nodes reached through edges are included")
+        Err(_) => assert(false, "a chain")
+    }
+}
+
+#test
+fun connected() {
+    let parts = components(["e", "g", "z"], letters)
+    assert(parts == [["e", "f", "c", "d", "a", "b", "g"], ["z"]], "an edge joins both ways")
+    let pairs = (i: int) => if i % 2 == 0 { [i + 1] } else { [] }
+    assert(components([0, 1, 2, 3, 4], pairs) == [[0, 1], [2, 3], [4, 5]], "pairs")
+    let walls = components([(0, 0), (4, 0), (7, 4)], steps)
+    assert(walls.len() == 1 && walls[0].len() == 27, "the maze is one piece")
+}
+
+#test
+fun dense() {
+    // The maze's cells numbered y * 8 + x
+    let d = bfs_dense(40, 0, (i: int) => {
+        var out: [int] = []
+        for q in steps((i % 8, i / 8)) {
+            let (x, y) = q
+            out.push(y * 8 + x)
+        }
+        return out
+    })
+    assert(d[4 * 8 + 7] == 15 && d[3] == -1 && d[0] == 0, "the maze, densely")
+    var reached = 0
+    for v in d {
+        if v >= 0 {
+            reached += 1
+        }
+    }
+    assert(reached == 27, "as many as bfs reaches")
+    let w = dijkstra_dense(4, 0, (i: int) => match i {
+        0 => [(1, 7i64), (2, 2i64)]
+        2 => [(1, 3i64)]
+        _ => []
+    })
+    assert(w == [0i64, 5i64, 2i64, -1i64], "dijkstra_dense")
+}

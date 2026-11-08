@@ -1,0 +1,233 @@
+// std.unionfind: disjoint sets of the integers 0 to n - 1 (MYLA-342, D164).
+//
+// `UnionFind` is a forest: each element points at its parent, a root at
+// itself, and a root stands for its set. `find` follows the parents to the
+// root and points every element it passed at the root (path compression);
+// `union` hangs the root of the lower tree under the other (union by rank).
+// Together they make a run of operations take nearly constant time each
+// (the inverse Ackermann function of n).
+//
+// `find` changes the forest, so it and every method that calls it take
+// `var self`: a union-find is a value, and its compressed paths are part of
+// it. Elements of another type are numbered first, with a `[T: int]` map.
+
+pub struct UnionFind {
+    // The parent of each element; a root is its own parent
+    parent: [int],
+    // An upper bound of the height of each root's tree
+    rank: [uint8],
+    // The number of elements of each root's set
+    size: [int],
+    // The number of sets
+    nsets: int,
+}
+
+// `n` elements, each in a set of its own.
+#test(4)[UnionFind { parent: [0, 1, 2, 3], rank: [0u8, 0u8, 0u8, 0u8], size: [1, 1, 1, 1], nsets: 4 }]
+#test(0)[UnionFind { parent: [], rank: [], size: [], nsets: 0 }]
+pub fun new(n: int) -> UnionFind {
+    var parent: [int] = []
+    var rank: [uint8] = []
+    var size: [int] = []
+    for i in 0..n {
+        parent.push(i)
+        rank.push(0)
+        size.push(1)
+    }
+    return UnionFind { parent: parent, rank: rank, size: size, nsets: n }
+}
+
+impl UnionFind {
+    // The number of elements.
+    #test(new(5))[5]
+    fun len(self) -> int {
+        return self.parent.len()
+    }
+
+    // The number of disjoint sets.
+    #test(new(5))[5]
+    fun sets(self) -> int {
+        return self.nsets
+    }
+
+    // Adds an element in a set of its own; its number, the old `len()`.
+    #test(new(3))[3]
+    fun add(var self) -> int {
+        let x = self.parent.len()
+        self.parent.push(x)
+        self.rank.push(0)
+        self.size.push(1)
+        self.nsets += 1
+        return x
+    }
+
+    // The root of the set `x` is in, which stands for the set: two elements
+    // are in the same set when `find` gives the same root. Points the
+    // elements on the way at the root.
+    #test(new(4), 2)[2]
+    fun find(var self, x: int) -> int {
+        var root = x
+        while self.parent[root] != root {
+            root = self.parent[root]
+        }
+        var at = x
+        while self.parent[at] != root {
+            let up = self.parent[at]
+            self.parent[at] = root
+            at = up
+        }
+        return root
+    }
+
+    // Joins the sets of `a` and `b`; true if they were two sets.
+    #test(new(4), 1, 2)[true]
+    #test(new(4), 3, 3)[false]
+    fun union(var self, a: int, b: int) -> bool {
+        var ra = self.find(a)
+        var rb = self.find(b)
+        if ra == rb {
+            return false
+        }
+        if self.rank[ra] < self.rank[rb] {
+            let t = ra
+            ra = rb
+            rb = t
+        }
+        self.parent[rb] = ra
+        self.size[ra] += self.size[rb]
+        if self.rank[ra] == self.rank[rb] {
+            self.rank[ra] += 1
+        }
+        self.nsets -= 1
+        return true
+    }
+
+    // Whether `a` and `b` are in the same set.
+    #test(new(4), 1, 2)[false]
+    #test(new(4), 2, 2)[true]
+    fun same(var self, a: int, b: int) -> bool {
+        return self.find(a) == self.find(b)
+    }
+
+    // The number of elements in the set of `x`.
+    #test(new(4), 0)[1]
+    fun size_of(var self, x: int) -> int {
+        let r = self.find(x)
+        return self.size[r]
+    }
+
+    // The sets, each in ascending order, in the order of their least
+    // elements.
+    #test(new(3))[[[0], [1], [2]]]
+    fun groups(var self) -> [[int]] {
+        // The group of each root, numbered as the roots are first met
+        var slot: [int] = []
+        for i in 0..self.parent.len() {
+            slot.push(-1)
+        }
+        var out: [[int]] = []
+        for i in 0..self.parent.len() {
+            let r = self.find(i)
+            if slot[r] < 0 {
+                slot[r] = out.len()
+                out.push([])
+            }
+            out[slot[r]].push(i)
+        }
+        return out
+    }
+}
+
+// --- tests -------------------------------------------------------------------
+
+#test
+fun unions_and_finds() {
+    var u = new(10)
+    assert(u.union(0, 1) && u.union(2, 3) && u.union(1, 3), "three unions of different sets")
+    assert(!u.union(0, 2), "already one set")
+    assert(u.same(0, 3) && u.same(3, 0) && !u.same(0, 4), "same")
+    assert(u.find(0) == u.find(2) && u.find(4) == 4, "find gives the root")
+    assert(u.size_of(2) == 4 && u.size_of(9) == 1, "size_of")
+    assert(u.sets() == 7 && u.len() == 10, "seven sets of ten elements")
+    u.union(9, 5)
+    u.union(7, 5)
+    assert(u.groups() == [[0, 1, 2, 3], [4], [5, 7, 9], [6], [8]], "groups")
+    assert(u.add() == 10 && u.len() == 11 && u.sets() == 6, "add")
+    assert(u.union(10, 4) && u.size_of(4) == 2, "the new element joins")
+}
+
+#test
+fun ranks_and_paths() {
+    // A chain built by union by rank stays shallow, and find flattens it
+    var u = new(1024)
+    var step = 1
+    while step < 1024 {
+        var i = 0
+        while i + step < 1024 {
+            u.union(i, i + step)
+            i += 2 * step
+        }
+        step *= 2
+    }
+    assert(u.sets() == 1 && u.size_of(777) == 1024, "one set")
+    var most = 0
+    for r in u.rank {
+        if r as int > most {
+            most = r as int
+        }
+    }
+    assert(most == 10, f"rank grows to log2(n), found {most}")
+    let root = u.find(1023)
+    for i in 0..1024 {
+        u.find(i)
+    }
+    for i in 0..1024 {
+        assert(u.parent[i] == root, "every element points at the root after a find")
+    }
+}
+
+// A union-find against a model that labels every element with its set.
+#test
+fun against_a_model() {
+    let n = 300
+    var u = new(n)
+    var label: [int] = []
+    for i in 0..n {
+        label.push(i)
+    }
+    var x: int64 = 12345
+    for k in 0..600 {
+        x = (x * 1103515245 + 12345) % 2147483648
+        let a = (x % n as int64) as int
+        x = (x * 1103515245 + 12345) % 2147483648
+        let b = (x % n as int64) as int
+        let joined = u.union(a, b)
+        assert(joined == (label[a] != label[b]), "union says whether it joined two sets")
+        let old = label[b]
+        let to = label[a]
+        for i in 0..n {
+            if label[i] == old {
+                label[i] = to
+            }
+        }
+        if k % 50 == 0 {
+            for i in 0..n {
+                let j = (i * 7 + k) % n
+                assert(u.same(i, j) == (label[i] == label[j]), "same agrees with the model")
+            }
+        }
+    }
+    var distinct: [int: ()] = [:]
+    for l in label {
+        distinct[l] = ()
+    }
+    assert(u.sets() == distinct.len(), "the number of sets")
+    var total = 0
+    for g in u.groups() {
+        total += g.len()
+        for e in g {
+            assert(label[e] == label[g[0]], "a group is one set")
+        }
+    }
+    assert(total == n, "the groups hold every element once")
+}

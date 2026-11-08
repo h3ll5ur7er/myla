@@ -2833,6 +2833,7 @@ impl Lower {
         var method = ""
         if op == "==" || op == "!=" { method = "eq" } else if is_cmp(op) { method = "cmp" } else { return self.unsupported("an arithmetic operator on a user type used as a scalar") }
         let name = format("{}.{}", key, method)
+        let callee = self.method_instance(cg, name, [l, r])
         // by value when a `become` hands one over to it (D88; a derived `eq`
         // is the code generator's routine, which takes addresses)
         var byval = [false, false]
@@ -2848,7 +2849,7 @@ impl Lower {
             k = k + 1
         }
         let res = self.temp(Type.TInt(64, true))
-        self.add(Inst.Call(res, name, vals))
+        self.add(Inst.Call(res, callee, vals))
         if op == "==" { return res }
         let d = self.temp(Type.TBool)
         if op == "!=" {
@@ -3823,7 +3824,7 @@ impl Lower {
     }
 
     // The slot of `key` in the map `cell` of type `mt`, or 0 when it is missing.
-    #test(lower_on(), codegen_on("enum E { A, B(int) }"), Type.TMap(Type.TStr, Type.TInt(32, true)), 32, 33)[2]
+    #test(lower_on(), codegen_on("enum E { A, B(int) }"), Type.TMap(Type.TStr, Type.TInt(32, true)), 32, 33)[1]
     fun map_lookup(var self, cg: CodeGen, mt: Type, cell: int32, key: int32) -> int32 {
         let size = self.int_const(cg.map_slot_size(mt))
         let d = self.temp(Type.TPtr)
@@ -4234,14 +4235,33 @@ impl Lower {
         let sv = self.temp(Type.TStr)
         self.add(Inst.Str(sv, spec))
         vals.push(sv)
-        return self.call_owning(cg, name, vals)
+        return self.call_owning_as(cg, name, self.method_instance(cg, name, [arg]), vals)
+    }
+
+    // The function an operator or a format hole calls for the method `name`
+    // of a user type (MYLA-367): the method itself, or, for a generic impl's,
+    // its instance for the type arguments the operands' types give (as a
+    // call's are solved), which is made then. Named by the type's key alone,
+    // no instance was made and the program didn't link.
+    fun method_instance(var self, cg: CodeGen, name: str, args: [Expr]) -> str {
+        if !cg.has_func(name) { return name }
+        let sig = cg.sig_of(name)
+        if sig.type_params.len() == 0 { return name }
+        let targs = cg.solve_targs(sig, args, -1, [])
+        self.f.instances.push(Instance { orig: sig.name, targs: targs })
+        return mangle_fn(sig.name, targs)
+    }
+
+    fun call_owning(var self, cg: CodeGen, name: str, vals: [int32]) -> int32 {
+        return self.call_owning_as(cg, name, name, vals)
     }
 
     // A call of the function `name` with the argument words `vals` (each
     // one word, the receiver's address first for a method), each parameter
     // that keeps its argument given a reference of its own (MYLA-127); the
-    // string it returns, owned by the statement.
-    fun call_owning(var self, cg: CodeGen, name: str, vals: [int32]) -> int32 {
+    // string it returns, owned by the statement; `callee` is the instance
+    // called when `name` is generic.
+    fun call_owning_as(var self, cg: CodeGen, name: str, callee: str, vals: [int32]) -> int32 {
         let sig = cg.sig_of(name)
         var params: [Type] = []
         var first = 0
@@ -4255,7 +4275,7 @@ impl Lower {
             i = i + 1
         }
         let d = self.temp(Type.TStr)
-        self.add(Inst.Call(d, name, vals))
+        self.add(Inst.Call(d, callee, vals))
         return self.owned_value(cg, d, Type.TStr)
     }
 

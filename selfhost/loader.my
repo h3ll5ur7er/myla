@@ -1701,11 +1701,14 @@ pub fun load_program_opts(entry: str, opts: LoadOptions) -> Result<Loaded, Repor
         var r = Renamer { env: decl_env(m.bindings), aliases: module_env(m.bindings), exports: exports, vals: [], tys: [], path: m.path, err: None, kinds: kinds }
         let in_std = starts_with_text(m.id, "std$")
         let is_implicit = has_index(implicit, k)
+        // only the entry's cases are the program's: an imported module's
+        // methods on a built-in type are named as the entry's own
+        // (`str.bang`), so its cases would run as the entry's, and an implicit
+        // module's (std.int's are 1,826) be checked for every program (MYLA-360)
+        let tested = m.path == ld.entry
         for d0 in m.decls {
-            // an implicit module is never the file being tested, and its
-            // cases (std.int's are 1,826) would be checked for every program
             var d = d0
-            if is_implicit { d = without_tests(d0) }
+            if is_implicit || !tested { d = without_tests(d0) }
             if in_std && is_impl(d) { std_impls[d.id] = DeclOrigin { module: dotted_id(m.id), path: m.path, implicit: is_implicit } }
             decls.push(r.decl(d, m.id))
         }

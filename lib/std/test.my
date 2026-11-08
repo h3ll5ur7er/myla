@@ -33,21 +33,62 @@ pub fun fail(msg: str) {
 
 // A fresh, empty directory for the running case, under the case's scratch
 // root (`$TMPDIR` or `/tmp`), which the runner removes when the case ends,
-// passed or failed; each call gives a new one. Outside `myla test` there is
-// no case, which is a runtime error.
+// passed or failed; each call gives a new one (`std.fs`'s
+// `make_temp_dir_in`: `d` and 16 random hexadecimal digits). Outside `myla
+// test` there is no case, which is a runtime error.
 pub fun temp_dir() -> str {
+    let root = case_root("temp_dir")
+    match fs.make_temp_dir_in(root, "d") {
+        Ok(path) => { return path },
+        Err(e) => { panic(f"test.temp_dir() could not create a directory in {root}") },
+    }
+    unreachable()
+}
+
+// A fresh, empty file for the running case, in the case's scratch root,
+// which the runner removes when the case ends; each call gives a new one
+// (`std.fs`'s `make_temp_file_in`: `f` and 16 random hexadecimal digits,
+// mode 0600). Outside `myla test` it is a runtime error.
+pub fun temp_file() -> str {
+    let root = case_root("temp_file")
+    match fs.make_temp_file_in(root, "f") {
+        Ok((path, file)) => {
+            var f = file
+            let closed = f.close()
+            return path
+        },
+        Err(e) => { panic(f"test.temp_file() could not create a file in {root}") },
+    }
+    unreachable()
+}
+
+// The running case's scratch root, made if it isn't there yet; a runtime
+// error for `test.<what>()` outside a case.
+fun case_root(what: str) -> str {
     let root = __test_dir()
-    if root == "" { panic("test.temp_dir() needs a running case: run the file with 'myla test'") }
-    let taken = match fs.list_dir(root) {
-        Ok(names) => names.len(),
-        Err(e) => 0,
-    }
-    let path = f"{root}/d{taken}"
-    match fs.make_dir_all(path) {
+    if root == "" { panic(f"test.{what}() needs a running case: run the file with 'myla test'") }
+    match fs.make_dir_all(root) {
         Ok(()) => {},
-        Err(e) => { panic(f"test.temp_dir() could not create {path}") },
+        Err(e) => { panic(f"test.{what}() could not create {root}") },
     }
-    return path
+    return root
+}
+
+// Two directories and a file for the case, each new and empty, in the
+// case's root. (Where the harness runs the cases in itself, as on wasm32,
+// there is no case root, and so nothing to test.)
+#test
+fun temp_dirs_and_files() {
+    if __test_dir() == "" { return }
+    let d = temp_dir()
+    let e = temp_dir()
+    expect_ne(d, e)
+    expect(fs.is_dir(d) && fs.is_dir(e), "two directories")
+    expect(match fs.list_dir(d) { Ok(names) => names.len() == 0, Err(_) => false }, "an empty one")
+    let f = temp_file()
+    expect(fs.is_file(f), "a file")
+    expect(match fs.read_to_string(f) { Ok(s) => s == "", Err(_) => false }, "an empty one")
+    expect(starts_with(f, __test_dir() + "/"), "in the case's root")
 }
 
 // The path of the project's program, built by `myla test` before the files

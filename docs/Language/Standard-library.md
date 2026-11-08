@@ -31,14 +31,16 @@ The conventions (D164): operations on built-in types are methods (`s.split(",")`
 | Module | Page | Holds |
 | --- | --- | --- |
 | `std.io` | [[Language/Standard-library/Io]] | Writing to a descriptor, the buffered `Reader`, async reads; the stream traits `Read`, `Write`, `Seek`, memory streams, `Buffered`, `BufferedWriter`, `copy` |
-| `std.fs` | [[Language/Standard-library/Fs]] | Whole-file reads and writes, directories, `IoError` |
+| `std.fs` | [[Language/Standard-library/Fs]] | Whole-file reads and writes, `File` streams (`Read`, `Write`, `Seek`), metadata, directories, temporary files and directories, `IoError` |
 | `std.path` | [[Language/Standard-library/Path]] | Paths as strings: `join`, `parent`, `file_name`, extensions, `normalize`, `relative` |
 | `std.glob` | [[Language/Standard-library/Glob]] | Glob patterns (`*`, `?`, `**`, sets), directory walks, `glob` |
-| `std.process` | [[Language/Standard-library/Process]] | Arguments, the environment, exit, running programs (`run`, `command`) |
+| `std.process` | [[Language/Standard-library/Process]] | Arguments, the environment, exit, running programs (`run`, `command`), children streamed through pipes (`spawn`, `Child`, `pipe`) |
 | `std.char` | [[Language/Standard-library/Char]] | Character classes, case and digits, as methods on `char` (ASCII) |
 | `std.int` | [[Language/Standard-library/Int]] | Methods on every integer type: `gcd`, `pow`, Euclidean division, checked, wrapping, saturating and overflowing arithmetic, `mulmod`, `powmod`, `modinv` |
 | `std.num` | [[Language/Standard-library/Num]] | Exact parsing and printing of integers and floats; integers in any radix and width, with `ParseIntError` |
+| `std.bigint` | [[Language/Standard-library/Bigint]] | `BigInt`, integers of any size: arithmetic with Karatsuba and recursive division, `pow`, the three divisions, parsing and printing in any radix |
 | `std.str` | [[Language/Standard-library/Str]] | Methods on `str`: search, split, trim, case, padding, replace |
+| `std.text` | [[Language/Standard-library/Text]] | A `Scanner` for hand-written parsers, `ints` (every integer in a line), word wrap, aligned columns, `indent` and `dedent` |
 | `std.fmt` | [[Language/Standard-library/Fmt]] | Format specs and the helpers of `Format` impls |
 | `std.math` | [[Language/Standard-library/Math]] | Floating-point functions after fdlibm |
 | `std.list` | [[Language/Standard-library/List]] | Methods on lists: building, `map` and the other higher-order operations, sorting, binary search, permutations and combinations |
@@ -61,6 +63,14 @@ The conventions (D164): operations on built-in types are methods (`s.split(",")`
 | `std.set` | [[Language/Standard-library/Set]] | `Set<T>` in insertion order: insert, remove, union, intersection, difference |
 | `std.deque` | [[Language/Standard-library/Deque]] | `Deque<T>`, the double-ended queue and the queue: a ring buffer, indexable |
 | `std.heap` | [[Language/Standard-library/Heap]] | Binary heaps: `Heap<T: Ord>`, least or greatest first, and `KeyedHeap<T>` by an `int64` priority |
+| `std.grid` | [[Language/Standard-library/Grid]] | `Grid<T>`, a 2D array of cells: read from text and printed, `at` and `set` with bounds, 4 and 8 neighbours, `(x, y)` positions |
+| `std.graph` | [[Language/Standard-library/Graph]] | Searches over a neighbour function: BFS, DFS, Dijkstra, A*, topological sort, connected components, and dense forms over numbered nodes |
+| `std.bitset` | [[Language/Standard-library/Bitset]] | `BitSet`, fixed or growable sets of small integers over `uint64` words: `popcount`, union, intersection, difference, complement |
+| `std.unionfind` | [[Language/Standard-library/Unionfind]] | `UnionFind`, disjoint sets with path compression and union by rank |
+| `std.btree` | [[Language/Standard-library/Btree]] | B+ trees: `SortedMap<K: Ord, V>` and `SortedSet<T: Ord>` in key order, `floor`, `ceiling`, `range`, `first`, `last` |
 | `std.digest` | [[Language/Standard-library/Digest]] | MD5, SHA-1, SHA-2 and HMAC, one-shot and incremental, as bytes and as hex |
+| `std.random` | [[Language/Standard-library/Random]] | `Rng`, a seeded generator (xoshiro256**): seeded or from the system's entropy, integers in a range without bias, floats, shuffles, choices |
+| `std.uuid` | [[Language/Standard-library/Uuid]] | UUIDs of RFC 9562, version 4 (random) and 7 (a time), parsing and the canonical text |
+| `std.compress` | [[Language/Standard-library/Compress]] | DEFLATE decompression and the gzip and zlib formats: `inflate`, `gunzip`, `zlib_decompress`, and `Read` streams over any stream |
 | `std.args` | [[Language/Standard-library/Args]] | Command-line arguments: a declarative spec of flags, options, positionals and subcommands, parsing, the generated help |
 | `std.rt` | [[Language/Standard-library/Rt]] | The runtime in Myla; not for programs |

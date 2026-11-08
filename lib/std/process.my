@@ -1,6 +1,10 @@
 // std.process — process control (D29): the command-line arguments, the
 // environment, termination, and child processes (D73, D129, D147).
 
+from .io import Read, Write, Pollable, buffered
+from .fs import IoError, from_errno
+import .bytes as bytes_m
+
 // The process command-line arguments, captured at startup. `args()[0]` is the
 // program name as invoked; the remainder are its arguments.
 pub fun args() -> [str] {
@@ -34,6 +38,7 @@ pub fun env(name: str) -> Option<str> {
 // when you know it is UTF-8.
 
 // How a finished child terminated.
+#derive(Eq)
 pub enum ExitStatus {
     // Exited normally with this status code (0 = success).
     Exited(int32),
@@ -54,6 +59,7 @@ pub struct Output {
 // `InvalidInput`: what no process can take, such as an environment variable
 // name with `=` in it (D160); `Other` holds the platform's own code for
 // anything else.
+#derive(Eq)
 pub enum SpawnError {
     NotFound,
     PermissionDenied,
@@ -61,6 +67,28 @@ pub enum SpawnError {
     Cancelled,
     InvalidInput,
     Other(int32),
+}
+
+impl SpawnError {
+    // The reason in words.
+    #test(SpawnError.NotFound)["program not found"]
+    #test(SpawnError.Other(12))["could not start the program: errno 12"]
+    fun message(self) -> str {
+        return match self {
+            NotFound => "program not found"
+            PermissionDenied => "permission denied"
+            Unsupported => "no processes on this target"
+            Cancelled => "cancelled"
+            InvalidInput => "invalid input"
+            Other(code) => f"could not start the program: errno {code}"
+        }
+    }
+}
+
+impl Format for SpawnError {
+    fun format(self, spec: str) -> str {
+        return self.message()
+    }
 }
 
 // The cause of a (nonzero) spawn error code (Linux's numbers, as from
@@ -207,6 +235,7 @@ pub struct Command {
     env_mode: str,        // "": this process's environment; "keep": with `changes`; "clear": only theirs
     changes: [str],       // `NAME=value` sets NAME, a bare `NAME` removes it
     bad_name: bool,       // an `env` or `env_remove` name no variable can have
+    in_mode: Option<Stdio>, // set by `stdin_from`; None: `output` inherits, `spawn` pipes
 }
 
 // Whether an environment variable can be called `name`: not empty, without
@@ -230,7 +259,7 @@ fun env_name_ok(name: str) -> bool {
 
 // Begin building a command for `program`. `argv[0]` is seeded with `program`.
 pub fun command(program: str) -> Command {
-    return Command { program: program, argv: [program], dir: "", input: "", has_input: false, env_mode: "", changes: [], bad_name: false }
+    return Command { program: program, argv: [program], dir: "", input: "", has_input: false, env_mode: "", changes: [], bad_name: false, in_mode: None }
 }
 
 impl Command {
@@ -303,16 +332,39 @@ impl Command {
         var c = self
         c.input = text
         c.has_input = true
+        c.in_mode = None
         return c
     }
 
-    // What the runtime is told besides the arguments (`std.rt.run_with`).
+    // The command's standard input a pipe this process writes (`Stdio.Piped`,
+    // which `output` can't write, so there it is empty), this process's
+    // (`Inherit`) or empty (`Null`), instead of a text `stdin` gave.
+    fun stdin_from(self, how: Stdio) -> Command {
+        var c = self
+        c.input = ""
+        c.has_input = false
+        c.in_mode = Some(how)
+        return c
+    }
+
+    // What the runtime is told besides the arguments (`std.rt.run_with`),
+    // the input as `output` takes it.
     fun opts(self) -> [str] {
+        return match self.in_mode {
+            Some(Stdio.Inherit) => self.opts_with(false, "")
+            Some(_) => self.opts_with(true, "")
+            None => self.opts_with(self.has_input, self.input)
+        }
+    }
+
+    // The options with this input: `text` when `given`, else this process's
+    // standard input.
+    fun opts_with(self, given: bool, text: str) -> [str] {
         var flag = ""
-        if self.has_input {
+        if given {
             flag = "1"
         }
-        var out = [self.dir, flag, self.input, self.env_mode]
+        var out = [self.dir, flag, text, self.env_mode]
         for ch in self.changes {
             out.push(ch)
         }
@@ -334,4 +386,1137 @@ impl Command {
         }
         return await collect_async(self.program, self.argv, self.opts())
     }
+}
+
+// --- A child running beside this process (MYLA-340) ---------------------------
+//
+// `Command.spawn` starts the program and gives a `Child` without waiting for
+// it. Its standard input is a pipe this process writes (`ChildStdin`, a
+// `Write`) unless the command says otherwise, and its standard output and
+// error are pipes this process reads (`ChildStdout` and `ChildStderr`,
+// `Read`s). The primitives make the child's output and error a pipe always:
+// they can't be this process's or nothing (MYLA-336's `__spawn_piped` and
+// `__spawn_with` take no descriptors).
+//
+// A child and its pipes are values. The `Child` holds each stream until
+// `take_stdin`, `take_stdout` or `take_stderr` gives it out; from then on the
+// caller holds it, and closes it. `wait` closes what the `Child` still holds:
+// the input first (the child sees its end), the output and error after it
+// read them to their end (dropping the bytes), so a child that writes much
+// to a stream nobody took doesn't stop. A stream used after `close` gives
+// `IoError.Other(9)` (EBADF), as a closed descriptor does; nothing is closed
+// twice through the same place. A copy of a stream or a `Child` is another
+// name for the same descriptor or process: closing or waiting through one
+// doesn't tell the other.
+
+// Where a child's standard input comes from: a pipe this process writes,
+// this process's own, or nothing (it ends at once).
+#derive(Eq)
+pub enum Stdio {
+    Piped,
+    Inherit,
+    Null,
+}
+
+// How many bytes one read of a child's pipe asks for.
+const PIPE_CHUNK: int32 = 65536
+
+// EBADF: what a stream that was closed gives.
+const CLOSED: int32 = 9
+
+// One read of up to `n` bytes of `fd` ("" at the end), or why not.
+fun read_fd(fd: int32, n: int32) -> Result<str, IoError> {
+    if fd < 0 {
+        return Err(from_errno(CLOSED))
+    }
+    if n <= 0 {
+        return Ok("")
+    }
+    let chunk = __read(fd, n)
+    let err = __io_errno()
+    if err != 0 {
+        return Err(from_errno(err))
+    }
+    return Ok(chunk)
+}
+
+// All of `s` written to `fd`: its length, or why not.
+fun write_fd(fd: int32, s: str) -> Result<int, IoError> {
+    if fd < 0 {
+        return Err(from_errno(CLOSED))
+    }
+    __write(fd, s)
+    let err = __io_errno()
+    if err != 0 {
+        return Err(from_errno(err))
+    }
+    return Ok(s.len())
+}
+
+// `fd` closed, or why not (one closed already: EBADF).
+fun close_fd(fd: int32) -> Result<(), IoError> {
+    if fd < 0 {
+        return Err(from_errno(CLOSED))
+    }
+    __close(fd)
+    let err = __io_errno()
+    if err != 0 {
+        return Err(from_errno(err))
+    }
+    return Ok(())
+}
+
+// The status of a child that ended, from what `__reap` gives.
+#test(0)[ExitStatus.Exited(0)]
+#test(3)[ExitStatus.Exited(3)]
+#test(-9)[ExitStatus.Signaled(9)]
+fun status_of(code: int) -> ExitStatus {
+    if code < 0 {
+        return ExitStatus.Signaled(-code)
+    }
+    return ExitStatus.Exited(code)
+}
+
+// The write end of a child's standard input. `Write`: a write blocks until
+// the child has taken what doesn't fit in the pipe; one to a child that
+// closed its input or ended is `BrokenPipe`. `close` ends the child's input.
+pub struct ChildStdin {
+    fd: int32,           // -1 once closed
+}
+
+impl Write for ChildStdin {
+    fun write(var self, b: [uint8]) -> Result<int, IoError> {
+        return write_fd(self.fd, bytes_m.to_str(b))
+    }
+
+    fun write_str(var self, s: str) -> Result<int, IoError> {
+        return write_fd(self.fd, s)
+    }
+
+    // Nothing to do: nothing is buffered.
+    fun flush(var self) -> Result<(), IoError> {
+        if self.fd < 0 {
+            return Err(from_errno(CLOSED))
+        }
+        return Ok(())
+    }
+}
+
+impl ChildStdin {
+    // The pipe closed: the child reads the end of its input. A second close
+    // is `Other(9)`.
+    fun close(var self) -> Result<(), IoError> {
+        let r = close_fd(self.fd)
+        self.fd = -1
+        return r
+    }
+}
+
+// The read end of a child's standard output. `Read`: a read blocks until the
+// child wrote something or closed its output; `""` (`[]`) at the end.
+// `Pollable`, so a `Buffered` over it reads lines, and has the async reads
+// that wait with the task suspended (`std.io`).
+pub struct ChildStdout {
+    fd: int32,           // -1 once closed
+}
+
+impl Read for ChildStdout {
+    fun read(var self, n: int) -> Result<[uint8], IoError> {
+        let s = read_fd(self.fd, n)?
+        return Ok(bytes_m.from_str(s))
+    }
+
+    fun read_str(var self, n: int) -> Result<str, IoError> {
+        return read_fd(self.fd, n)
+    }
+}
+
+impl Pollable for ChildStdout {
+    fun descriptor(self) -> int32 {
+        return self.fd
+    }
+}
+
+impl ChildStdout {
+    // The pipe closed; what the child writes to it from then on fails
+    // there (it gets SIGPIPE). A second close is `Other(9)`.
+    fun close(var self) -> Result<(), IoError> {
+        let r = close_fd(self.fd)
+        self.fd = -1
+        return r
+    }
+}
+
+// The read end of a child's standard error, as `ChildStdout` is of its
+// output.
+pub struct ChildStderr {
+    fd: int32,           // -1 once closed
+}
+
+impl Read for ChildStderr {
+    fun read(var self, n: int) -> Result<[uint8], IoError> {
+        let s = read_fd(self.fd, n)?
+        return Ok(bytes_m.from_str(s))
+    }
+
+    fun read_str(var self, n: int) -> Result<str, IoError> {
+        return read_fd(self.fd, n)
+    }
+}
+
+impl Pollable for ChildStderr {
+    fun descriptor(self) -> int32 {
+        return self.fd
+    }
+}
+
+impl ChildStderr {
+    // The pipe closed, as `ChildStdout.close` closes it.
+    fun close(var self) -> Result<(), IoError> {
+        let r = close_fd(self.fd)
+        self.fd = -1
+        return r
+    }
+}
+
+// A program started by `Command.spawn`, running beside this process until
+// it ends and is waited for. The streams it still holds are its fields; take
+// them with `take_stdin`, `take_stdout` and `take_stderr`, which give each
+// once (a copy read from a field would be a second holder of the pipe).
+pub struct Child {
+    pid: int32,
+    exited: int32,                  // a descriptor readable once it ended (a pidfd); -1: none, or reaped
+    stdin: Option<ChildStdin>,
+    stdout: Option<ChildStdout>,
+    stderr: Option<ChildStderr>,
+    status: Option<ExitStatus>,     // once reaped
+}
+
+// A child from what `__spawn_piped` (`piped`) or `__spawn_with` gave.
+fun child_of(h: [int], piped: bool) -> Child {
+    if piped {
+        return Child { pid: h[1], exited: h[5], stdin: Some(ChildStdin { fd: h[2] }), stdout: Some(ChildStdout { fd: h[3] }), stderr: Some(ChildStderr { fd: h[4] }), status: None }
+    }
+    return Child { pid: h[1], exited: h[4], stdin: None, stdout: Some(ChildStdout { fd: h[2] }), stderr: Some(ChildStderr { fd: h[3] }), status: None }
+}
+
+impl Child {
+    // The child's process ID.
+    fun id(self) -> int32 {
+        return self.pid
+    }
+
+    // The write end of the child's input, given out once: `None` after
+    // that, and when the input isn't a pipe (`stdin` gave a text,
+    // `stdin_from` `Inherit` or `Null`).
+    fun take_stdin(var self) -> Option<ChildStdin> {
+        let s = self.stdin
+        self.stdin = None
+        return s
+    }
+
+    // The read end of the child's output, given out once.
+    fun take_stdout(var self) -> Option<ChildStdout> {
+        let s = self.stdout
+        self.stdout = None
+        return s
+    }
+
+    // The read end of the child's error output, given out once.
+    fun take_stderr(var self) -> Option<ChildStderr> {
+        let s = self.stderr
+        self.stderr = None
+        return s
+    }
+
+    // The child's status if it has ended (it is reaped then), `None` while
+    // it runs; it doesn't wait. Once it gave the status it gives it again.
+    // A child a copy of this `Child` reaped is `Other(10)` (ECHILD).
+    fun try_wait(var self) -> Result<Option<ExitStatus>, IoError> {
+        if let Some(st) = self.status {
+            return Ok(Some(st))
+        }
+        let code = __try_reap(self.pid)
+        if code == 256 {
+            let err = __io_errno()
+            if err != 0 {
+                self.forget_exited()
+                return Err(from_errno(err))
+            }
+            return Ok(None)
+        }
+        let st = status_of(code)
+        self.status = Some(st)
+        self.forget_exited()
+        return Ok(Some(st))
+    }
+
+    // The descriptor that tells the child's end closed.
+    fun forget_exited(var self) {
+        if self.exited >= 0 {
+            __close(self.exited)
+            self.exited = -1
+        }
+    }
+
+    // The child waited for (blocking) and reaped: its status. First the
+    // input it still holds is closed, so a child reading it to its end
+    // finishes, and the output and error it holds are read to their end and
+    // dropped (which waits for every process that holds them, as `output`
+    // does). Once it gave the status it gives it again.
+    fun wait(var self) -> Result<ExitStatus, IoError> {
+        self.close_input()
+        let held = self.drain(false)?
+        return self.reap()
+    }
+
+    // `wait`, keeping what the output and error it still holds give: an
+    // `Output` (a stream taken before is empty in it).
+    fun wait_with_output(var self) -> Result<Output, IoError> {
+        self.close_input()
+        let (out, err) = self.drain(true)?
+        let st = self.reap()?
+        return Ok(Output { stdout: bytes_m.from_str(out), stderr: bytes_m.from_str(err), status: st })
+    }
+
+    // The signal SIGKILL sent to the child, which ends it; `wait` reaps it
+    // then (`Signaled(9)`). A child that was reaped already isn't signalled
+    // (its ID may be another process's by now): `Ok`.
+    fun kill(var self) -> Result<(), IoError> {
+        if let Some(st) = self.status {
+            return Ok(())
+        }
+        if self.pid <= 0 {
+            return Err(IoError.InvalidInput)   // not a child: 0 and -1 would signal many
+        }
+        __kill(self.pid, 9)
+        let err = __io_errno()
+        if err != 0 {
+            return Err(from_errno(err))
+        }
+        return Ok(())
+    }
+
+    // The input the child still holds closed.
+    fun close_input(var self) {
+        if let Some(w) = self.stdin {
+            __close(w.fd)
+        }
+        self.stdin = None
+    }
+
+    // The output and error the child still holds read to their end and
+    // closed: their bytes when `keep`.
+    fun drain(var self, keep: bool) -> Result<(str, str), IoError> {
+        var ofd = -1
+        var efd = -1
+        if let Some(r) = self.stdout {
+            ofd = r.fd
+        }
+        if let Some(r) = self.stderr {
+            efd = r.fd
+        }
+        self.stdout = None
+        self.stderr = None
+        var out = StringBuilder()
+        var err = StringBuilder()
+        var turn = 0
+        while ofd >= 0 || efd >= 0 {
+            var fd = ofd
+            if ofd < 0 {
+                fd = efd
+            } else if efd >= 0 {
+                // either may be the one with bytes: the other waits a little
+                // in turn while neither has
+                fd = -1
+                while fd < 0 {
+                    if __poll(ofd, 0) != 0 {
+                        fd = ofd
+                    } else if __poll(efd, 0) != 0 {
+                        fd = efd
+                    } else {
+                        let idle = if turn % 2 == 0 { ofd } else { efd }
+                        __poll(idle, 2)
+                        turn += 1
+                    }
+                }
+            }
+            let chunk = __read(fd, PIPE_CHUNK)
+            let e = __io_errno()
+            if e != 0 {
+                if ofd >= 0 { __close(ofd) }
+                if efd >= 0 { __close(efd) }
+                return Err(from_errno(e))
+            }
+            if chunk.len() == 0 {
+                __close(fd)
+                if fd == ofd { ofd = -1 } else { efd = -1 }
+            } else if keep {
+                if fd == ofd { out.append(chunk) } else { err.append(chunk) }
+            }
+        }
+        return Ok((out.build(), err.build()))
+    }
+
+    // The child reaped once it ended, blocking until it has: its pidfd
+    // waited for, or, without one (a kernel before 5.3), wait4 itself.
+    fun reap(var self) -> Result<ExitStatus, IoError> {
+        while true {
+            match self.try_wait()? {
+                Some(st) => { return Ok(st) }
+                None => {
+                    if self.exited < 0 {
+                        let st = status_of(__reap(self.pid))
+                        self.status = Some(st)
+                        return Ok(st)
+                    }
+                    __poll(self.exited, -1)
+                }
+            }
+        }
+        unreachable()
+    }
+
+    // --- In a task: waiting without blocking the worker (D124) ---------------
+    // Each waits as its blocking twin does, the task suspended while the
+    // child runs, the other tasks running; outside a task it blocks as the
+    // twin does. A task asked to stop stops waiting: `Err(IoError.Cancelled)`,
+    // the child left running (`kill` and `wait` end it).
+
+    // `wait`, the task waiting.
+    async fun wait_async(var self) -> Result<ExitStatus, IoError> {
+        self.close_input()
+        let drained = await self.drain_async(false)
+        let held = drained?
+        return await self.reap_async()
+    }
+
+    // `wait_with_output`, the task waiting.
+    async fun wait_with_output_async(var self) -> Result<Output, IoError> {
+        self.close_input()
+        let drained = await self.drain_async(true)
+        let (out, err) = drained?
+        let reaped = await self.reap_async()
+        let st = reaped?
+        return Ok(Output { stdout: bytes_m.from_str(out), stderr: bytes_m.from_str(err), status: st })
+    }
+
+    // `drain`, the task waiting for either stream. Stopped, it gives the
+    // streams back to the child, the bytes read so far dropped.
+    async fun drain_async(var self, keep: bool) -> Result<(str, str), IoError> {
+        var ofd = -1
+        var efd = -1
+        if let Some(r) = self.stdout {
+            ofd = r.fd
+        }
+        if let Some(r) = self.stderr {
+            efd = r.fd
+        }
+        var out = StringBuilder()
+        var err = StringBuilder()
+        while ofd >= 0 || efd >= 0 {
+            if ofd >= 0 && efd >= 0 {
+                await __wait_either(ofd, efd)
+            } else if ofd >= 0 {
+                await __wait_readable(ofd)
+            } else {
+                await __wait_readable(efd)
+            }
+            if __task_cancelled() {
+                self.stdout = if ofd >= 0 { Some(ChildStdout { fd: ofd }) } else { None }
+                self.stderr = if efd >= 0 { Some(ChildStderr { fd: efd }) } else { None }
+                return Err(IoError.Cancelled)
+            }
+            var k = 0
+            while k < 2 {
+                let fd = if k == 0 { ofd } else { efd }
+                if fd >= 0 && __poll(fd, 0) != 0 {
+                    let chunk = __read(fd, PIPE_CHUNK)
+                    let e = __io_errno()
+                    if e != 0 {
+                        if ofd >= 0 { __close(ofd) }
+                        if efd >= 0 { __close(efd) }
+                        self.stdout = None
+                        self.stderr = None
+                        return Err(from_errno(e))
+                    }
+                    if chunk.len() == 0 {
+                        __close(fd)
+                        if k == 0 { ofd = -1 } else { efd = -1 }
+                    } else if keep {
+                        if k == 0 { out.append(chunk) } else { err.append(chunk) }
+                    }
+                }
+                k += 1
+            }
+        }
+        self.stdout = None
+        self.stderr = None
+        return Ok((out.build(), err.build()))
+    }
+
+    // `reap`, the task waiting for the child's end.
+    async fun reap_async(var self) -> Result<ExitStatus, IoError> {
+        if self.exited >= 0 {
+            match self.try_wait()? {
+                Some(st) => { return Ok(st) }
+                None => {}
+            }
+            await __wait_readable(self.exited)
+            if __task_cancelled() {
+                return Err(IoError.Cancelled)
+            }
+        }
+        return self.reap()
+    }
+}
+
+impl Command {
+    // The command started, not waited for: a `Child` whose output and error
+    // are pipes, and whose input is a pipe too unless `stdin` gave a text or
+    // `stdin_from` `Inherit` or `Null`. The errors are `output`'s; on wasm32
+    // `Unsupported`.
+    fun spawn(self) -> Result<Child, SpawnError> {
+        if self.bad_name {
+            return Err(SpawnError.InvalidInput)
+        }
+        let piped = match self.in_mode {
+            Some(Stdio.Piped) => true
+            Some(_) => false
+            None => !self.has_input
+        }
+        if piped {
+            let h = __spawn_piped(self.program, self.argv, self.opts_with(false, ""))
+            if h[0] != 0 {
+                return Err(spawn_error_from_errno(h[0]))
+            }
+            return Ok(child_of(h, true))
+        }
+        let h = __spawn_with(self.program, self.argv, self.opts())
+        if h[0] != 0 {
+            return Err(spawn_error_from_errno(h[0]))
+        }
+        return Ok(child_of(h, false))
+    }
+
+    // This command's output fed to `next`'s input, as a shell's `a | b`:
+    // a `Pipeline` to run.
+    fun pipe(self, next: Command) -> Pipeline {
+        return Pipeline { first: self, second: next }
+    }
+}
+
+// --- Two children joined by a pipe ----------------------------------------------
+//
+// The primitives can't give a child a descriptor as its input, so the first
+// child's output doesn't go to the second straight: this process copies it,
+// a piece of 16 KiB at a time, and between two pieces reads whatever the
+// second child wrote (and both children's errors), so neither stops on a
+// full pipe nobody reads. A second child that writes more than four times
+// what it reads, or writes without reading, could still fill its output
+// while a piece waits for room in its input; the copy then waits.
+
+// `first | second`, from `Command.pipe`.
+pub struct Pipeline {
+    first: Command,
+    second: Command,
+}
+
+// What a pipeline's two children gave: the first's output is empty in
+// `first` (it went to the second), the pipeline's output is `second.stdout`.
+pub struct PipelineOutput {
+    first: Output,
+    second: Output,
+}
+
+// How many bytes of the first child's output go to the second in one write.
+const PIECE: int32 = 16384
+
+// The copy between the children, and what it collects.
+struct Pump {
+    src: int32,          // the first child's output
+    to: int32,           // the second child's input
+    fds: [int32],        // collected: the second's output, the first's error, the second's error
+    out: StringBuilder,
+    first_err: StringBuilder,
+    second_err: StringBuilder,
+}
+
+impl Pump {
+    // One read from collected descriptor `k` if it has bytes or has ended,
+    // waiting up to `ms` milliseconds: whether it had (or the errno).
+    fun pull(var self, k: int, ms: int) -> Result<bool, int32> {
+        let fd = self.fds[k]
+        if fd < 0 || __poll(fd, ms) == 0 {
+            return Ok(false)
+        }
+        let chunk = __read(fd, PIPE_CHUNK)
+        let e = __io_errno()
+        if e != 0 {
+            return Err(e)
+        }
+        if chunk.len() == 0 {
+            __close(fd)
+            self.fds[k] = -1
+        } else if k == 0 {
+            self.out.append(chunk)
+        } else if k == 1 {
+            self.first_err.append(chunk)
+        } else {
+            self.second_err.append(chunk)
+        }
+        return Ok(true)
+    }
+
+    // Whatever the collected descriptors have read, without waiting.
+    fun pull_ready(var self) -> Result<bool, int32> {
+        var any = false
+        var k = 0
+        while k < 3 {
+            if self.pull(k, 0)? {
+                any = true
+            }
+            k += 1
+        }
+        return Ok(any)
+    }
+
+    // The second child's input closed, and the first child's output: the
+    // first finds out at its next write, as in a shell (SIGPIPE).
+    fun stop_feeding(var self) {
+        if self.to >= 0 {
+            __close(self.to)
+            self.to = -1
+        }
+        if self.src >= 0 {
+            __close(self.src)
+            self.src = -1
+        }
+    }
+
+    // `chunk` written to the second child, a piece at a time, what it wrote
+    // read between two pieces. A second child that stopped reading
+    // (`BrokenPipe`) ends the copy.
+    fun feed(var self, chunk: str) -> Result<(), int32> {
+        var at = 0
+        while at < chunk.len() && self.to >= 0 {
+            var end = at + PIECE
+            if end > chunk.len() {
+                end = chunk.len()
+            }
+            if at == 0 && end == chunk.len() {
+                __write(self.to, chunk)
+            } else {
+                var sb = StringBuilder()
+                sb.append(chunk, at, end)
+                __write(self.to, sb.build())
+            }
+            let e = __io_errno()
+            if e == 32 {
+                self.stop_feeding()
+                return Ok(())
+            }
+            if e != 0 {
+                return Err(e)
+            }
+            at = end
+            self.pull_ready()?
+        }
+        return Ok(())
+    }
+
+    // Copied and collected until every descriptor reached its end.
+    fun run(var self) -> Result<(), int32> {
+        var turn = 0
+        while self.src >= 0 || self.fds[0] >= 0 || self.fds[1] >= 0 || self.fds[2] >= 0 {
+            var moved = self.pull_ready()?
+            if self.src >= 0 && __poll(self.src, 0) != 0 {
+                moved = true
+                let chunk = __read(self.src, PIPE_CHUNK)
+                let e = __io_errno()
+                if e != 0 {
+                    return Err(e)
+                }
+                if chunk.len() == 0 {
+                    self.stop_feeding()
+                } else {
+                    self.feed(chunk)?
+                }
+            }
+            if !moved {
+                // nothing has bytes: wait a little on one, each in turn
+                var open: [int32] = []
+                if self.src >= 0 {
+                    open.push(self.src)
+                }
+                for fd in self.fds {
+                    if fd >= 0 {
+                        open.push(fd)
+                    }
+                }
+                __poll(open[turn % open.len()], 2)
+                turn += 1
+            }
+        }
+        return Ok(())
+    }
+
+    // Every descriptor still open closed.
+    fun close_all(var self) {
+        self.stop_feeding()
+        var k = 0
+        while k < 3 {
+            if self.fds[k] >= 0 {
+                __close(self.fds[k])
+                self.fds[k] = -1
+            }
+            k += 1
+        }
+    }
+}
+
+// The descriptor of a stream a child holds, -1 when none.
+fun out_fd(s: Option<ChildStdout>) -> int32 {
+    return match s {
+        Some(r) => r.fd
+        None => -1
+    }
+}
+
+fun err_fd(s: Option<ChildStderr>) -> int32 {
+    return match s {
+        Some(r) => r.fd
+        None => -1
+    }
+}
+
+impl Pipeline {
+    // Both children run, the first's output copied to the second's input,
+    // and waited for: what each gave. The first takes its input as `output`
+    // does (`stdin`, `stdin_from`, else this process's); the second's
+    // `stdin` and `stdin_from` aren't used. When the second ends before
+    // its input, the first gets SIGPIPE at its next write (`Signaled(13)`),
+    // as in a shell. A child that can't be started is its `SpawnError`
+    // (the other is killed and reaped); a failed read or write while
+    // copying is `Other` of its errno, both children killed.
+    fun output(self) -> Result<PipelineOutput, SpawnError> {
+        var a = self.first.spawn_for_output()?
+        var b = match self.second.stdin_from(Stdio.Piped).spawn() {
+            Ok(c) => c
+            Err(e) => {
+                a.kill()
+                a.wait()
+                return Err(e)
+            }
+        }
+        var pump = Pump {
+            src: out_fd(a.take_stdout()),
+            to: -1,
+            fds: [out_fd(b.take_stdout()), err_fd(a.take_stderr()), err_fd(b.take_stderr())],
+            out: StringBuilder(),
+            first_err: StringBuilder(),
+            second_err: StringBuilder(),
+        }
+        if let Some(w) = b.take_stdin() {
+            pump.to = w.fd
+        }
+        let copied = pump.run()
+        pump.close_all()
+        var failed: int32 = 0
+        match copied {
+            Ok(()) => {}
+            Err(e) => {
+                failed = e
+                a.kill()
+                b.kill()
+            }
+        }
+        let sa = a.wait()
+        let sb = b.wait()
+        if failed != 0 {
+            return Err(SpawnError.Other(failed))
+        }
+        let none: [uint8] = []
+        let first = Output { stdout: none, stderr: bytes_m.from_str(pump.first_err.build()), status: wait_status(sa) }
+        let second = Output { stdout: bytes_m.from_str(pump.out.build()), stderr: bytes_m.from_str(pump.second_err.build()), status: wait_status(sb) }
+        return Ok(PipelineOutput { first: first, second: second })
+    }
+}
+
+impl Command {
+    // The command started with its input as `output` takes it (a text,
+    // this process's, or nothing for `Null` and `Piped`): never a pipe.
+    fun spawn_for_output(self) -> Result<Child, SpawnError> {
+        let how = match self.in_mode {
+            Some(Stdio.Inherit) => Stdio.Inherit
+            Some(_) => Stdio.Null
+            None => Stdio.Inherit
+        }
+        if self.has_input {
+            return self.spawn()
+        }
+        return self.stdin_from(how).spawn()
+    }
+}
+
+// The status a `wait` of a pipeline's child gave (one of its own children
+// can't fail to be reaped: `Signaled(0)` if it did).
+fun wait_status(r: Result<ExitStatus, IoError>) -> ExitStatus {
+    return match r {
+        Ok(st) => st
+        Err(_) => ExitStatus.Signaled(0)
+    }
+}
+
+// --- Tests of the children (D162) ---------------------------------------------
+//
+// Each starts real programs (`cat`, `sh`, `head`, …). Where the target has
+// no processes (wasm32) the first spawn is `Unsupported`, which is what the
+// test checks there before it returns.
+
+fun holds(ok: bool, what: str) {
+    if !ok {
+        panic(what)
+    }
+}
+
+// Whether `r` failed only because the target has no processes; any other
+// failure ends the test.
+fun no_processes<T>(r: Result<T, SpawnError>, what: str) -> bool {
+    return match r {
+        Ok(_) => false
+        Err(SpawnError.Unsupported) => true
+        Err(e) => panic(f"{what}: {e}")
+    }
+}
+
+fun input(s: Option<ChildStdin>) -> ChildStdin {
+    return match s {
+        Some(w) => w
+        None => panic("no input pipe")
+    }
+}
+
+fun output_of(s: Option<ChildStdout>) -> ChildStdout {
+    return match s {
+        Some(r) => r
+        None => panic("no output pipe")
+    }
+}
+
+fun error_of(s: Option<ChildStderr>) -> ChildStderr {
+    return match s {
+        Some(r) => r
+        None => panic("no error pipe")
+    }
+}
+
+// Everything `r` gives, read a piece at a time.
+fun read_rest<R: Read>(r: R) -> str {
+    var src = r
+    var sb = StringBuilder()
+    while true {
+        match src.read_str(4096) {
+            Ok(s) => {
+                if s.len() == 0 {
+                    break
+                }
+                sb.append(s)
+            }
+            Err(_) => panic("a read failed")
+        }
+    }
+    return sb.build()
+}
+
+fun ok<T>(r: Result<T, IoError>) -> bool {
+    return match r {
+        Ok(_) => true
+        Err(_) => false
+    }
+}
+
+// Whether `r` is the error of a stream that was closed.
+fun is_closed<T>(r: Result<T, IoError>) -> bool {
+    return match r {
+        Err(IoError.Other(9)) => true
+        _ => false
+    }
+}
+
+// The child of a spawn that worked.
+fun running(r: Result<Child, SpawnError>) -> Child {
+    return match r {
+        Ok(c) => c
+        Err(e) => panic(f"spawn: {e}")
+    }
+}
+
+fun none<T>(o: Option<T>) -> bool {
+    return match o {
+        Some(_) => false
+        None => true
+    }
+}
+
+fun wrote(r: Result<int, IoError>) -> int {
+    return match r {
+        Ok(n) => n
+        Err(_) => -1
+    }
+}
+
+fun polled(r: Result<Option<ExitStatus>, IoError>) -> Option<ExitStatus> {
+    return match r {
+        Ok(o) => o
+        Err(_) => panic("try_wait failed")
+    }
+}
+
+fun waited(r: Result<ExitStatus, IoError>) -> ExitStatus {
+    return match r {
+        Ok(st) => st
+        Err(_) => panic("wait failed")
+    }
+}
+
+fun line(r: Result<Option<str>, IoError>) -> str {
+    return match r {
+        Ok(Some(s)) => s
+        Ok(None) => "<end>"
+        Err(_) => "<error>"
+    }
+}
+
+// A child's input written, closed, and its output read back.
+#test
+fun child_round_trip() {
+    let started = command("cat").spawn()
+    if no_processes(started, "cat") {
+        return
+    }
+    var child = running(started)
+    var w = input(child.take_stdin())
+    var r = output_of(child.take_stdout())
+    holds(none(child.take_stdin()), "the input is given out once")
+    holds(wrote(w.write_str("hello\n")) == 6, "write_str gives its length")
+    holds(wrote(w.write([98u8, 121u8, 116u8, 101u8, 115u8])) == 5, "write gives its length")
+    holds(ok(w.flush()), "flush")
+    holds(ok(w.close()), "close the input")
+    holds(read_rest(r) == "hello\nbytes", "what cat gave back")
+    holds(ok(r.close()), "close the output")
+    holds(waited(child.wait()) == ExitStatus.Exited(0), "cat ended well")
+    holds(waited(child.wait()) == ExitStatus.Exited(0), "a second wait gives it again")
+}
+
+// A stream used after it was closed is an error, not a crash.
+#test
+fun closed_streams() {
+    let started = command("cat").spawn()
+    if no_processes(started, "cat") {
+        return
+    }
+    var child = running(started)
+    var w = input(child.take_stdin())
+    var r = output_of(child.take_stdout())
+    var e = error_of(child.take_stderr())
+    holds(ok(w.close()), "close")
+    holds(is_closed(w.close()), "a second close")
+    holds(is_closed(w.write_str("late")), "a write after close")
+    holds(is_closed(w.write([1u8])), "a byte write after close")
+    holds(is_closed(w.flush()), "a flush after close")
+    holds(read_rest(r) == "", "cat saw the end at once")
+    holds(ok(r.close()), "close the output")
+    holds(is_closed(r.read_str(10)), "a read after close")
+    holds(is_closed(r.read(10)), "a byte read after close")
+    holds(is_closed(r.close()), "a second close of the output")
+    holds(ok(e.close()), "close the error")
+    holds(is_closed(e.read_str(1)), "a read of the error after close")
+    holds(waited(child.wait()) == ExitStatus.Exited(0), "cat ended well")
+}
+
+// Lines in and out one at a time: the child's output is a stream, not a
+// result that comes at the end.
+#test
+fun child_line_by_line() {
+    let started = command("cat").spawn()
+    if no_processes(started, "cat") {
+        return
+    }
+    var child = running(started)
+    var w = input(child.take_stdin())
+    var lines = buffered(output_of(child.take_stdout()))
+    w.write_str("one\n")
+    holds(line(lines.read_line()) == "one", "the first line back before the second went")
+    w.write_str("two\n")
+    holds(line(lines.read_line()) == "two", "the second line")
+    w.close()
+    holds(line(lines.read_line()) == "<end>", "then the end")
+    holds(waited(child.wait()) == ExitStatus.Exited(0), "cat ended well")
+}
+
+// `try_wait` while it runs and after, `kill`, and the status a kill gives.
+#test
+fun child_killed() {
+    let started = command("sleep").arg("5").spawn()
+    if no_processes(started, "sleep") {
+        return
+    }
+    var child = running(started)
+    holds(child.id() > 0, "a process ID")
+    holds(none(polled(child.try_wait())), "still running")
+    holds(ok(child.kill()), "kill")
+    holds(waited(child.wait()) == ExitStatus.Signaled(9), "ended by SIGKILL")
+    holds(match polled(child.try_wait()) { Some(st) => st == ExitStatus.Signaled(9), None => false }, "try_wait gives it then")
+    holds(ok(child.kill()), "a kill after the end does nothing")
+}
+
+// `wait` with the streams still held: the input closed (or cat would wait
+// for it), the output and error read and dropped (or sh would stop on the
+// full pipes).
+#test
+fun wait_closes_what_it_holds() {
+    let started = command("sh").args(["-c", "cat; head -c 300000 /dev/zero; head -c 300000 /dev/zero >&2; exit 3"]).spawn()
+    if no_processes(started, "sh") {
+        return
+    }
+    var child = running(started)
+    holds(waited(child.wait()) == ExitStatus.Exited(3), "it ended with 3")
+    holds(none(child.take_stdout()) && none(child.take_stderr()), "nothing held after")
+}
+
+// `wait_with_output` keeps what it reads; a text `stdin` is the input.
+#test
+fun wait_with_output_and_text_input() {
+    let started = command("sh").args(["-c", "printf out; printf err >&2; read x; printf \"$x\""]).stdin("got\n").spawn()
+    if no_processes(started, "sh") {
+        return
+    }
+    var child = running(started)
+    holds(none(child.take_stdin()), "a text input is no pipe")
+    match child.wait_with_output() {
+        Ok(out) => {
+            holds(bytes_m.to_str(out.stdout) == "outgot", "the output")
+            holds(bytes_m.to_str(out.stderr) == "err", "the error")
+            holds(out.status == ExitStatus.Exited(0), "the status")
+        }
+        Err(_) => panic("wait_with_output failed")
+    }
+}
+
+// `stdin_from`: nothing, this process's, a pipe; `output` takes them too.
+#test
+fun input_modes() {
+    let started = command("cat").stdin_from(Stdio.Null).spawn()
+    if no_processes(started, "cat") {
+        return
+    }
+    var child = running(started)
+    holds(none(child.take_stdin()), "Null is no pipe")
+    match child.wait_with_output() {
+        Ok(out) => holds(out.stdout.len() == 0 && out.status == ExitStatus.Exited(0), "cat read nothing")
+        Err(_) => panic("wait_with_output failed")
+    }
+    var quiet = running(command("sh").args(["-c", "exit 0"]).stdin_from(Stdio.Inherit).spawn())
+    holds(none(quiet.take_stdin()), "Inherit is no pipe")
+    holds(waited(quiet.wait()) == ExitStatus.Exited(0), "sh ended well")
+    var piped = running(command("cat").stdin("text").stdin_from(Stdio.Piped).spawn())
+    var w = input(piped.take_stdin())
+    holds(ok(w.close()), "Piped after a text is a pipe")
+    holds(waited(piped.wait()) == ExitStatus.Exited(0), "cat ended at the closed input")
+    match command("cat").stdin_from(Stdio.Null).output() {
+        Ok(out) => holds(out.stdout.len() == 0, "output with Null reads nothing")
+        Err(_) => panic("output failed")
+    }
+    match command("cat").stdin("x").stdin_from(Stdio.Piped).output() {
+        Ok(out) => holds(out.stdout.len() == 0, "output with Piped has nobody to write")
+        Err(_) => panic("output failed")
+    }
+}
+
+// The errors of a spawn.
+#test
+fun spawn_errors() {
+    let missing = command("/no/such/program").spawn()
+    if match missing { Err(SpawnError.Unsupported) => true, _ => false } {
+        return
+    }
+    holds(match missing { Err(SpawnError.NotFound) => true, _ => false }, "not there")
+    holds(match command("cat").env("A=B", "x").spawn() { Err(SpawnError.InvalidInput) => true, _ => false }, "a bad name runs nothing")
+    holds(match command("cat").pipe(command("/no/such/program")).output() { Err(SpawnError.NotFound) => true, _ => false }, "a pipeline's second not there")
+}
+
+// `head | wc -c`: 16 MiB through this process. `head | tr`: 512 KiB (8
+// pipes full) out of the second child, collected while the copy goes on.
+// And both children's errors.
+#test
+fun pipeline_of_two() {
+    let counted = command("head").args(["-c", "16777216", "/dev/zero"]).pipe(command("wc").arg("-c")).output()
+    if no_processes(counted, "head | wc") {
+        return
+    }
+    match counted {
+        Ok(out) => {
+            holds(bytes_m.to_str(out.second.stdout) == "16777216\n", f"all of it: {bytes_m.to_str(out.second.stdout)}")
+            holds(out.first.stdout.len() == 0, "the first's output went to the second")
+            holds(out.first.status == ExitStatus.Exited(0) && out.second.status == ExitStatus.Exited(0), "both ended well")
+        }
+        Err(e) => panic(f"pipeline: {e}")
+    }
+    match command("head").args(["-c", "524288", "/dev/zero"]).pipe(command("tr").args(["\\0", "a"])).output() {
+        Ok(out) => {
+            holds(out.second.stdout.len() == 524288, f"all of it: {out.second.stdout.len()}")
+            holds(out.second.stdout[0] == 'a' && out.second.stdout[524287] == 'a', "translated")
+        }
+        Err(e) => panic(f"pipeline: {e}")
+    }
+    match command("sh").args(["-c", "echo a >&2; echo data"]).pipe(command("sh").args(["-c", "cat; echo b >&2; exit 2"])).output() {
+        Ok(out) => {
+            holds(bytes_m.to_str(out.second.stdout) == "data\n", "the data")
+            holds(bytes_m.to_str(out.first.stderr) == "a\n" && bytes_m.to_str(out.second.stderr) == "b\n", "both errors")
+            holds(out.second.status == ExitStatus.Exited(2), "the second's status")
+        }
+        Err(e) => panic(f"pipeline: {e}")
+    }
+}
+
+// A second child that ends early: the first gets SIGPIPE, as in a shell.
+#test
+fun pipeline_cut_short() {
+    let result = command("head").args(["-c", "50000000", "/dev/zero"]).pipe(command("head").args(["-c", "5"])).output()
+    if no_processes(result, "head | head") {
+        return
+    }
+    match result {
+        Ok(out) => {
+            holds(out.second.stdout.len() == 5, "five bytes")
+            holds(out.first.status == ExitStatus.Signaled(13), "the first stopped by SIGPIPE")
+            holds(out.second.status == ExitStatus.Exited(0), "the second ended well")
+        }
+        Err(e) => panic(f"pipeline: {e}")
+    }
+}
+
+// The waits in a task.
+#test
+async fun child_waited_in_a_task() {
+    let started = command("sh").args(["-c", "sleep 0.1; printf done; printf e >&2; exit 4"]).spawn()
+    if no_processes(started, "sh") {
+        return
+    }
+    var child = running(started)
+    match await child.wait_with_output_async() {
+        Ok(out) => {
+            holds(bytes_m.to_str(out.stdout) == "done" && bytes_m.to_str(out.stderr) == "e", "what it wrote")
+            holds(out.status == ExitStatus.Exited(4), "its status")
+        }
+        Err(_) => panic("wait_with_output_async failed")
+    }
+    var other = running(command("cat").spawn())
+    var w = input(other.take_stdin())
+    w.write_str("x")
+    w.close()
+    holds(read_rest(output_of(other.take_stdout())) == "x", "cat's output")
+    let st = await other.wait_async()
+    holds(waited(st) == ExitStatus.Exited(0), "cat's status")
 }

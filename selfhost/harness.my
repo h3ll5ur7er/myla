@@ -471,7 +471,9 @@ impl Gen {
             }
             var inner = "true"
             if conds.len() > 0 { inner = join(conds, " && ") }
-            eq.append(format("        {} => {{ match b {{ {} => {{ return {} }}, _ => {{ return false }} }} }},\n", pat, pat_b, inner))
+            // with one variant `b` has no other: a `_` arm would be unreachable
+            if variants.len() == 1 { eq.append(format("        {} => {{ match b {{ {} => {{ return {} }} }} }},\n", pat, pat_b, inner)) }
+            else { eq.append(format("        {} => {{ match b {{ {} => {{ return {} }}, _ => {{ return false }} }} }},\n", pat, pat_b, inner)) }
             if parts.len() == 0 { repr.append(format("        {} => {{ return \"{}.{}\" }},\n", pat, en, vname)) }
             else { repr.append(format("        {} => {{ return \"{}.{}(\" + {} + \")\" }},\n", pat, en, vname, join(parts, " + \", \" + "))) }
         }
@@ -673,7 +675,9 @@ fun str_lit_single(s: str) -> str {
 
 // The byte offset of the character column `col` of `line` in `text`
 // (`starts`: where its lines begin).
-#test("héllo wörld", [0], 1, 8)[9]
+#test("héllo wörld", [0], 1, 8)[8]   // `ö`, after the two bytes of `é`
+#test("héllo wörld", [0], 1, 9)[10]
+#test("a\nbé", [0, 2], 2, 3)[5]
 #test("ab", [0], 1, 1)[0]
 fun byte_offset(text: str, starts: [int32], line: int32, col: int32) -> int32 {
     if line < 1 || line > starts.len() { return text.len() }

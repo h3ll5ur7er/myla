@@ -1,0 +1,539 @@
+// std.bitset: sets of small non-negative integers, a bit each (MYLA-342,
+// D164).
+//
+// A `BitSet` keeps the integer `i` as bit `i % 64` of the word `i / 64`, so
+// a set of integers below n takes n / 8 bytes, and the set operations work
+// 64 integers at a time. A growable set (`new`, `of`) makes room for
+// whatever is inserted; a fixed one (`fixed(n)`) holds 0 to n - 1, and
+// inserting another integer is a failure, as indexing a list past its end
+// is.
+//
+// Every set has one form, so `#derive(Eq, Hash)` is the set's equality and
+// a `BitSet` is a map key and a `Set` element (the state of a search over
+// subsets): a growable set has no zero word at its end, and a fixed set of
+// size n has (n + 63) / 64 words with the bits from n on clear. Two growable
+// sets are equal when they hold the same integers, two fixed ones when they
+// also have the same size; a fixed set never equals a growable one.
+
+#derive(Eq, Hash)
+pub struct BitSet {
+    words: [uint64],
+    // The integers it holds without growing: 0 to bits - 1. For a growable
+    // set, 64 times the words
+    bits: int,
+    // Whether inserting past `bits` is a failure rather than growth
+    fixed: bool,
+}
+
+// An empty growable set.
+#test()[BitSet { words: [], bits: 0, fixed: false }]
+pub fun new() -> BitSet {
+    return BitSet { words: [], bits: 0, fixed: false }
+}
+
+// An empty set that holds the integers 0 to `n` - 1 and no others.
+#test(0)[BitSet { words: [], bits: 0, fixed: true }]
+#test(65)[BitSet { words: [0u64, 0u64], bits: 65, fixed: true }]
+#test(-1)[panic("bit set size -1 is negative")]
+pub fun fixed(n: int) -> BitSet {
+    if n < 0 {
+        panic(f"bit set size {n} is negative")
+    }
+    var words: [uint64] = []
+    for i in 0..(n + 63) / 64 {
+        words.push(0)
+    }
+    return BitSet { words: words, bits: n, fixed: true }
+}
+
+// A growable set of the integers of `xs`.
+#test([3, 64, 3])[BitSet { words: [8u64, 1u64], bits: 128, fixed: false }]
+#test([-2])[panic("bit set element -2 is negative")]
+pub fun of(xs: [int]) -> BitSet {
+    var b = new()
+    for x in xs {
+        b.insert(x)
+    }
+    return b
+}
+
+impl BitSet {
+    // Adds `i`; true if it wasn't in the set. A growable set makes room for
+    // it; a fixed one fails for an `i` it can't hold, as does a negative `i`.
+    #test(new(), 70)[true]
+    #test(of([70]), 70)[false]
+    #test(fixed(8), 7)[true]
+    #test(fixed(8), 8)[panic("bit set element 8 out of range for size 8")]
+    #test(new(), -1)[panic("bit set element -1 is negative")]
+    fun insert(var self, i: int) -> bool {
+        if i >= self.bits || i < 0 {
+            self.reserve(i)
+        }
+        let bit = 1u64 << (i & 63)
+        let w = self.words[i >> 6]
+        self.words[i >> 6] = w | bit
+        return w & bit == 0
+    }
+
+    // Removes `i`; true if it was in the set.
+    #test(of([5, 6]), 5)[true]
+    #test(of([5, 6]), 7)[false]
+    #test(of([5, 6]), 700)[false]
+    #test(of([5, 6]), -1)[false]
+    fun remove(var self, i: int) -> bool {
+        if i < 0 || i >= self.bits {
+            return false
+        }
+        let bit = 1u64 << (i & 63)
+        let w = self.words[i >> 6]
+        if w & bit == 0 {
+            return false
+        }
+        self.words[i >> 6] = w & ~bit
+        if !self.fixed && w == bit {
+            self.trim()
+        }
+        return true
+    }
+
+    // Inserts `i` if it isn't in the set and removes it if it is; true if
+    // it is in the set now.
+    #test(of([1]), 1)[false]
+    #test(of([1]), 2)[true]
+    fun toggle(var self, i: int) -> bool {
+        if self.remove(i) {
+            return false
+        }
+        self.insert(i)
+        return true
+    }
+
+    // Whether `i` is in the set; false for an integer it can't hold.
+    #test(of([0, 63, 64, 200]), 63)[true]
+    #test(of([0, 63, 64, 200]), 64)[true]
+    #test(of([0, 63, 64, 200]), 65)[false]
+    #test(of([0, 63, 64, 200]), 9999)[false]
+    #test(of([0, 63, 64, 200]), -1)[false]
+    fun contains(self, i: int) -> bool {
+        if i < 0 || i >= self.bits {
+            return false
+        }
+        return self.words[i >> 6] & (1u64 << (i & 63)) != 0
+    }
+
+    // The number of integers in the set.
+    #test(new())[0]
+    #test(of([0, 1, 2, 63, 64, 127, 128, 1000]))[8]
+    fun popcount(self) -> int {
+        var n = 0
+        for w in self.words {
+            n += ones(w)
+        }
+        return n
+    }
+
+    #test(new())[true]
+    #test(of([9]))[false]
+    #test(fixed(100))[true]
+    fun is_empty(self) -> bool {
+        for w in self.words {
+            if w != 0 {
+                return false
+            }
+        }
+        return true
+    }
+
+    // The integers it holds without growing, 0 to `capacity()` - 1: the
+    // size of a fixed set; for a growable one, a multiple of 64 above its
+    // greatest integer.
+    #test(fixed(10))[10]
+    #test(of([10]))[64]
+    #test(of([10, 64]))[128]
+    fun capacity(self) -> int {
+        return self.bits
+    }
+
+    // An empty set of this one's kind and size.
+    #test(of([1, 2]))[BitSet { words: [], bits: 0, fixed: false }]
+    #test(fixed(3).union(of([1])))[BitSet { words: [0u64], bits: 3, fixed: true }]
+    fun cleared(self) -> BitSet {
+        if self.fixed {
+            return fixed(self.bits)
+        }
+        return new()
+    }
+
+    // The integers in the set, ascending.
+    #test(of([200, 3, 64, 0]))[[0, 3, 64, 200]]
+    #test(fixed(5))[[]]
+    fun items(self) -> [int] {
+        var out: [int] = []
+        for k in 0..self.words.len() {
+            var w = self.words[k]
+            while w != 0 {
+                out.push(k * 64 + lowest(w))
+                w = w & (w - 1)
+            }
+        }
+        return out
+    }
+
+    // The least integer of the set that is `i` or more, if there is one.
+    // `b.next_from(0)` is the least; with `next_from(x + 1)` a loop visits
+    // the set in order without making a list.
+    #test(of([3, 64, 200]), 0)[Some(3)]
+    #test(of([3, 64, 200]), 4)[Some(64)]
+    #test(of([3, 64, 200]), 65)[Some(200)]
+    #test(of([3, 64, 200]), 201)[None]
+    #test(of([3, 64, 200]), -5)[Some(3)]
+    fun next_from(self, i: int) -> Option<int> {
+        let start = if i < 0 { 0 } else { i }
+        if start >= self.bits {
+            return None
+        }
+        var k = start >> 6
+        var w = self.words[k] & (0xffffffffffffffffu64 << (start & 63))
+        while true {
+            if w != 0 {
+                return Some(k * 64 + lowest(w))
+            }
+            k += 1
+            if k >= self.words.len() {
+                return None
+            }
+            w = self.words[k]
+        }
+        unreachable()
+    }
+
+    // The integers of either set, in a set of this one's kind: a growable
+    // set grows to hold them, and a fixed one fails if it can't, as
+    // `insert` does.
+    #test(of([1, 2]), of([2, 100]))[of([1, 2, 100])]
+    #test(fixed(3), of([1]))[BitSet { words: [2u64], bits: 3, fixed: true }]
+    #test(fixed(3), of([100]))[panic("bit set element 100 out of range for size 3")]
+    fun union(self, other: BitSet) -> BitSet {
+        var out = self
+        let n = other.used()
+        if n == 0 {
+            return out
+        }
+        let top = (n - 1) * 64 + highest(other.words[n - 1])
+        if top >= out.bits {
+            out.reserve(top)
+        }
+        for k in 0..n {
+            out.words[k] = out.words[k] | other.words[k]
+        }
+        return out
+    }
+
+    // The integers of both sets, in a set of this one's kind and size.
+    #test(of([1, 2, 100]), of([2, 100, 5]))[of([2, 100])]
+    #test(of([1, 100]), of([1]))[of([1])]
+    fun intersection(self, other: BitSet) -> BitSet {
+        var out = self
+        for k in 0..out.words.len() {
+            out.words[k] = if k < other.words.len() { out.words[k] & other.words[k] } else { 0u64 }
+        }
+        out.trim()
+        return out
+    }
+
+    // This set's integers that `other` hasn't, in a set of this one's kind
+    // and size.
+    #test(of([1, 2, 100]), of([2, 7]))[of([1, 100])]
+    #test(of([1, 100]), of([100]))[of([1])]
+    fun difference(self, other: BitSet) -> BitSet {
+        var out = self
+        let n = if other.words.len() < out.words.len() { other.words.len() } else { out.words.len() }
+        for k in 0..n {
+            out.words[k] = out.words[k] & ~other.words[k]
+        }
+        out.trim()
+        return out
+    }
+
+    // The integers of one set but not of both, in a set of this one's kind,
+    // as for `union`.
+    #test(of([1, 2, 100]), of([2, 7]))[of([1, 7, 100])]
+    #test(of([1, 100]), of([100]))[of([1])]
+    fun symmetric_difference(self, other: BitSet) -> BitSet {
+        var out = self.union(other)
+        let n = if other.words.len() < self.words.len() { other.words.len() } else { self.words.len() }
+        for k in 0..n {
+            out.words[k] = self.words[k] ^ other.words[k]
+        }
+        out.trim()
+        return out
+    }
+
+    // The integers of 0 to n - 1 that a fixed set of size n hasn't. The
+    // complement of a growable set would have no end, so that is a failure.
+    #test(fixed(5).union(of([0, 2])))[BitSet { words: [26u64], bits: 5, fixed: true }]
+    #test(fixed(70))[BitSet { words: [0xffffffffffffffffu64, 63u64], bits: 70, fixed: true }]
+    #test(of([1]))[panic("the complement of a growable bit set")]
+    fun complemented(self) -> BitSet {
+        if !self.fixed {
+            panic("the complement of a growable bit set")
+        }
+        var out = self
+        for k in 0..out.words.len() {
+            out.words[k] = ~out.words[k]
+        }
+        if self.bits & 63 != 0 {
+            let last = out.words.len() - 1
+            out.words[last] = out.words[last] & ((1u64 << (self.bits & 63)) - 1)
+        }
+        return out
+    }
+
+    // Whether every integer of this set is in `other`.
+    #test(of([1, 300]), of([1, 2, 300]))[true]
+    #test(of([1, 300]), of([1, 2]))[false]
+    #test(new(), new())[true]
+    #test(fixed(500), new())[true]
+    fun is_subset(self, other: BitSet) -> bool {
+        for k in 0..self.words.len() {
+            let o = if k < other.words.len() { other.words[k] } else { 0u64 }
+            if self.words[k] & ~o != 0 {
+                return false
+            }
+        }
+        return true
+    }
+
+    // Whether the sets have no integer in common.
+    #test(of([1, 300]), of([2, 299]))[true]
+    #test(of([1, 300]), of([300]))[false]
+    fun is_disjoint(self, other: BitSet) -> bool {
+        let n = if other.words.len() < self.words.len() { other.words.len() } else { self.words.len() }
+        for k in 0..n {
+            if self.words[k] & other.words[k] != 0 {
+                return false
+            }
+        }
+        return true
+    }
+
+    // The number of words up to the last that isn't zero; the set's own
+    // step, as are `trim` and `reserve`.
+    #test(fixed(500).union(of([3, 200])))[4]
+    #test(fixed(500))[0]
+    fun used(self) -> int {
+        var n = self.words.len()
+        while n > 0 && self.words[n - 1] == 0 {
+            n -= 1
+        }
+        return n
+    }
+
+    // Drops the zero words at the end of a growable set, which keeps it in
+    // its one form.
+    fun trim(var self) {
+        if self.fixed {
+            return
+        }
+        while self.words.len() > 0 && self.words[self.words.len() - 1] == 0 {
+            self.words.pop()
+        }
+        self.bits = self.words.len() * 64
+    }
+
+    // Makes room for `i`, which a fixed set must already have.
+    fun reserve(var self, i: int) {
+        if i < 0 {
+            panic(f"bit set element {i} is negative")
+        }
+        if self.fixed {
+            if i >= self.bits {
+                panic(f"bit set element {i} out of range for size {self.bits}")
+            }
+            return
+        }
+        while self.words.len() <= i >> 6 {
+            self.words.push(0)
+        }
+        self.bits = self.words.len() * 64
+    }
+}
+
+// The number of bits set in `w`.
+#test(0u64)[0]
+#test(0xffffffffffffffffu64)[64]
+#test(0x8000000000000001u64)[2]
+#test(0x5555u64)[8]
+fun ones(w: uint64) -> int {
+    var x = w - ((w >> 1) & 0x5555555555555555u64)
+    x = (x & 0x3333333333333333u64) + ((x >> 2) & 0x3333333333333333u64)
+    x = (x + (x >> 4)) & 0x0f0f0f0f0f0f0f0fu64
+    return ((x * 0x0101010101010101u64) >> 56) as int
+}
+
+// The index of the highest bit set in `w`, which isn't zero.
+#test(1u64)[0]
+#test(0x8000000000000000u64)[63]
+#test(0x50u64)[6]
+fun highest(w: uint64) -> int {
+    var n = 0
+    var x = w
+    if x >> 32 != 0 {
+        n += 32
+        x = x >> 32
+    }
+    if x >> 16 != 0 {
+        n += 16
+        x = x >> 16
+    }
+    if x >> 8 != 0 {
+        n += 8
+        x = x >> 8
+    }
+    if x >> 4 != 0 {
+        n += 4
+        x = x >> 4
+    }
+    if x >> 2 != 0 {
+        n += 2
+        x = x >> 2
+    }
+    if x >> 1 != 0 {
+        n += 1
+    }
+    return n
+}
+
+// The index of the lowest bit set in `w`, which isn't zero.
+#test(1u64)[0]
+#test(0x8000000000000000u64)[63]
+#test(0x50u64)[4]
+fun lowest(w: uint64) -> int {
+    return ones((w & (0u64 - w)) - 1)
+}
+
+// --- tests -------------------------------------------------------------------
+
+#test
+fun growing() {
+    var b = new()
+    assert(b.is_empty() && b.capacity() == 0, "a new set holds nothing")
+    assert(b.insert(1000) && b.capacity() == 1024, "grows to the word of 1000")
+    assert(b.insert(3) && !b.insert(3), "insert says whether it was new")
+    assert(b.contains(1000) && b.contains(3) && !b.contains(4), "contains")
+    assert(b.popcount() == 2 && b.items() == [3, 1000], "two integers")
+    assert(b.remove(1000) && !b.contains(1000) && b.popcount() == 1, "remove")
+    assert(b == of([3]) && b.capacity() == 64, "the same as a set that never grew")
+    assert(b.toggle(3) == false && b.is_empty() && b == new(), "toggle out")
+    assert(b.toggle(64) && b.items() == [64], "toggle in")
+    assert(b.cleared() == new(), "cleared")
+}
+
+#test
+fun fixed_sets() {
+    var b = fixed(130)
+    assert(b.capacity() == 130 && b.is_empty(), "a fixed set of 130")
+    for i in 0..130 {
+        if i % 3 == 0 {
+            b.insert(i)
+        }
+    }
+    assert(b.popcount() == 44, "the multiples of 3 below 130")
+    let c = b.complemented()
+    assert(c.popcount() == 86 && c.capacity() == 130, "the complement stays within the size")
+    assert(c.intersection(b).is_empty() && c.union(b).popcount() == 130, "a set and its complement")
+    assert(!c.contains(129) && c.contains(128) && !c.contains(130), "the edge of the size")
+    assert(c.complemented() == b, "twice is the set")
+    assert(b.remove(129) && b.capacity() == 130 && b.cleared() == fixed(130), "a fixed set keeps its size")
+    assert(b != of(b.items()) && b.items() == of(b.items()).items(), "fixed and growable aren't equal")
+    var d = fixed(64)
+    assert(d.complemented().popcount() == 64, "a whole word")
+    d.insert(63)
+    assert(d.items() == [63], "the last bit of a whole word")
+}
+
+// The operations against a `[bool]` model, on sets of up to 300 integers.
+#test
+fun against_a_model() {
+    var x: int64 = 99
+    for round in 0..40 {
+        var a = new()
+        var b = fixed(300)
+        var ma: [bool] = []
+        var mb: [bool] = []
+        for i in 0..400 {
+            ma.push(false)
+            mb.push(false)
+        }
+        let span = 1 + round * 7
+        for k in 0..round * 3 {
+            x = (x * 1103515245 + 12345) % 2147483648
+            let i = (x % span as int64) as int
+            a.insert(i)
+            ma[i] = true
+            x = (x * 1103515245 + 12345) % 2147483648
+            let j = (x % 300) as int
+            b.insert(j)
+            mb[j] = true
+            if k % 4 == 3 {
+                a.remove(j)
+                ma[j] = false
+            }
+        }
+        let u = a.union(b)
+        let n = a.intersection(b)
+        let d = a.difference(b)
+        let s = a.symmetric_difference(b)
+        var sub = true
+        var dis = true
+        var count = 0
+        for i in 0..400 {
+            assert(a.contains(i) == ma[i], "contains")
+            assert(u.contains(i) == (ma[i] || mb[i]), "union")
+            assert(n.contains(i) == (ma[i] && mb[i]), "intersection")
+            assert(d.contains(i) == (ma[i] && !mb[i]), "difference")
+            assert(s.contains(i) == (ma[i] != mb[i]), "symmetric difference")
+            if ma[i] && !mb[i] {
+                sub = false
+            }
+            if ma[i] && mb[i] {
+                dis = false
+            }
+            if ma[i] {
+                count += 1
+            }
+        }
+        assert(a.is_subset(b) == sub && a.is_disjoint(b) == dis, "is_subset, is_disjoint")
+        assert(a.popcount() == count && a.items().len() == count, "popcount, items")
+        assert(a == of(a.items()) && u == of(u.items()) && n == of(n.items()), "one form")
+        assert(d == of(d.items()) && s == of(s.items()), "one form after difference")
+        var seen = 0
+        var at = a.next_from(0)
+        while let Some(i) = at {
+            assert(ma[i], "next_from visits the set")
+            seen += 1
+            at = a.next_from(i + 1)
+        }
+        assert(seen == count, "next_from visits each once")
+        assert(u.items() == b.union(a).items() && s.items() == b.symmetric_difference(a).items(), "commutative")
+    }
+}
+
+// Equal sets are one map key.
+#test
+fun as_keys() {
+    var m: [BitSet: int] = [:]
+    m[of([1, 2])] = 1
+    m[of([2, 1, 300]).difference(of([300]))] = 2
+    var f = fixed(10)
+    f.insert(2)
+    f.insert(1)
+    m[f] = 3
+    var g = fixed(10)
+    g.insert(1)
+    g.toggle(2)
+    m[g] = 4
+    m[new()] = 5
+    m[of([7]).intersection(of([8]))] = 6
+    assert(m.len() == 3 && m[of([1, 2])] == 2 && m[f] == 4 && m[new()] == 6, "equal sets, one key")
+}

@@ -117,6 +117,25 @@ class TestNative(unittest.TestCase):
             self.assertEqual(proc.returncode, 1, proc.stderr)
             self.assertEqual(proc.stdout, "no #test cases match 'nothing_has_this'.\n")
 
+    def test_the_harness_passes_its_own_cases(self):
+        proc = _myla(["test", os.path.join(_REPO, "selfhost", "harness.my")], _REPO)
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+
+    def test_an_enum_of_one_variant(self):
+        # the harness's equality of an enum had a `_` arm, unreachable with one variant
+        source = ("enum E { Only(int) }\n\n"
+                  "#test(1)[E.Only(1)]\n#test(2)[E.Only(3)]\n"
+                  "fun f(x: int) -> E { return E.Only(x) }\n\n"
+                  "#test(1)[Ok(E.Only(1))]\n"
+                  "fun g(x: int) -> Result<E, str> { return Ok(E.Only(x)) }\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = _write(tmp, "one.my", source)
+            interp = _myla(["test", path], tmp)
+            native = _myla(["test", path, "--native"], tmp)
+            self.assertEqual(native.stderr, "")
+            self.assertEqual((native.stdout, native.returncode), (interp.stdout, interp.returncode))
+            self.assertIn("2/3 passed.", native.stdout)
+
     def test_a_harness_that_does_not_build_is_kept(self):
         # a case calling `main`, which the harness blanks
         source = "#test()[1]\nfun one() -> int { main()\n    return 1 }\nfun main() {}\n"

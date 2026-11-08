@@ -5,6 +5,13 @@
 // carried in a `Result`, so callers compose them with `?` (D16/D36). The
 // underlying open/read/close go through the platform layer (`std.platform`),
 // natively and in the interpreter alike, with one errno-keyed error mapping.
+//
+// `File` (MYLA-339) is a descriptor opened by path, a stream of `std.io`'s
+// `Read`, `Write` and `Seek`. `std.io` imports `IoError` from here, and this
+// module imports the traits from there: Myla allows the cycle, and it keeps
+// both modules' names where they were.
+
+from .io import Read, Write, Seek, SeekFrom, Pollable, buffered, buffered_writer, copy
 
 // Why a filesystem or I/O operation failed: the causes a program handles on
 // every target (D129). `Unsupported`: the target can't do it at all (wasm32
@@ -90,9 +97,9 @@ pub fun write_to_file(path: str, contents: str) -> Result<(), IoError> {
 // itself), remove an empty directory and rename (MYLA-96). Each sets the errno
 // that `__io_errno` reads.
 //
-// The helpers below have no `#test` cases: `myla test` runs the cases of every
-// linked module, and every program that prints links this one through
-// `std.io`. `tests/unit/test_fs.py` and `tests/burn/test_fs.py` cover them.
+// `tests/burn/test_fs.py` covers them on every target, and the test functions
+// at the end of this file use them (`myla test` runs only the cases of the
+// file it is given, not those of the modules it links).
 
 const S_IFMT: int32 = 0xF000
 const S_IFDIR: int32 = 0x4000
@@ -280,4 +287,732 @@ fun sorted_names(names: [str]) -> [str] {
         }
     }
     return out
+}
+
+// --- Files a piece at a time (MYLA-339) -------------------------------------------
+//
+// `__open(path, flags, mode)` opens a descriptor with Myla's own flags, the
+// same on every target (the constants below); `__read`, `__write`,
+// `__seek`, `__fstat` and `__close` work on it (MYLA-336). Each sets the
+// errno `__io_errno` reads, but `__close`, which reports nothing.
+
+const O_READ: int32 = 1
+const O_WRITE: int32 = 2
+const O_CREATE: int32 = 4
+const O_TRUNCATE: int32 = 8
+const O_APPEND: int32 = 16
+const O_EXCLUSIVE: int32 = 32
+
+// An open file: a descriptor of the platform, read and written at its
+// cursor. It is unbuffered: each `read` and `write` is a system call, so put
+// a `std.io` `Buffered` or `BufferedWriter` in front of it for small pieces.
+//
+// Myla has no destructors, so a file stays open until `close` or the end of
+// the program: `defer { let c = f.close() }` right after opening it. A `File`
+// is a value, and a copy holds the same descriptor, with the same cursor
+// (the platform keeps it). `close` closes it for every copy: the one closed
+// fails each later operation with `Other(9)` (EBADF), and so does a copy,
+// until a file opened later gets the descriptor's number. So don't use a
+// copy after `close`.
+pub struct File {
+    fd: int32,
+}
+
+// The file at `path`, open for reading.
+pub fun open(path: str) -> Result<File, IoError> {
+    return open_fd(path, O_READ, 0o644)
+}
+
+// The file at `path`, open for writing: created (mode 0644, less the umask)
+// or truncated.
+pub fun create(path: str) -> Result<File, IoError> {
+    return open_fd(path, O_WRITE | O_CREATE | O_TRUNCATE, 0o644)
+}
+
+// The file at `path`, open for appending: created (mode 0644, less the
+// umask) when it isn't there, and every write goes to its end, wherever the
+// cursor is.
+pub fun open_append(path: str) -> Result<File, IoError> {
+    return open_fd(path, O_WRITE | O_CREATE | O_APPEND, 0o644)
+}
+
+// The file at `path`, opened with `flags` (Myla's own bits) and, for one it
+// creates, the permissions `mode`.
+fun open_fd(path: str, flags: int32, mode: int32) -> Result<File, IoError> {
+    let fd = __open(path, flags, mode)
+    if fd < 0 {
+        return Err(from_errno(__io_errno()))
+    }
+    return Ok(File { fd: fd })
+}
+
+// How `open` opens a file, for what `open`, `create` and `open_append` don't
+// cover: `options()`, then a method for each choice, then `open`:
+// `fs.options().read(true).write(true).create(true).open(path)`.
+#derive(Eq)
+pub struct OpenOptions {
+    bits: int32,    // Myla's open flags, `create_new` as the exclusive bit
+    perms: int32,   // the permissions of a file it creates
+}
+
+// Options that choose nothing yet (opening with them is `InvalidInput`:
+// choose reading, writing or both), and mode 0644 for a file they create.
+pub fun options() -> OpenOptions {
+    return OpenOptions { bits: 0, perms: 0o644 }
+}
+
+impl OpenOptions {
+    // Open for reading.
+    #test(options(), true)[OpenOptions { bits: 1, perms: 0o644 }]
+    #test(OpenOptions { bits: 3, perms: 0o644 }, false)[OpenOptions { bits: 2, perms: 0o644 }]
+    fun read(self, on: bool) -> OpenOptions {
+        return OpenOptions { bits: with_bit(self.bits, O_READ, on), perms: self.perms }
+    }
+
+    // Open for writing, at the cursor.
+    #test(options(), true)[OpenOptions { bits: 2, perms: 0o644 }]
+    fun write(self, on: bool) -> OpenOptions {
+        return OpenOptions { bits: with_bit(self.bits, O_WRITE, on), perms: self.perms }
+    }
+
+    // Open for writing, every write at the end of the file.
+    #test(options(), true)[OpenOptions { bits: 16, perms: 0o644 }]
+    fun append(self, on: bool) -> OpenOptions {
+        return OpenOptions { bits: with_bit(self.bits, O_APPEND, on), perms: self.perms }
+    }
+
+    // Empty the file when it is opened.
+    #test(options(), true)[OpenOptions { bits: 8, perms: 0o644 }]
+    fun truncate(self, on: bool) -> OpenOptions {
+        return OpenOptions { bits: with_bit(self.bits, O_TRUNCATE, on), perms: self.perms }
+    }
+
+    // Create the file when it isn't there.
+    #test(options(), true)[OpenOptions { bits: 4, perms: 0o644 }]
+    fun create(self, on: bool) -> OpenOptions {
+        return OpenOptions { bits: with_bit(self.bits, O_CREATE, on), perms: self.perms }
+    }
+
+    // Create the file, and fail with `AlreadyExists` when it is there (one
+    // step, so no other program comes in between).
+    #test(options(), true)[OpenOptions { bits: 32, perms: 0o644 }]
+    fun create_new(self, on: bool) -> OpenOptions {
+        return OpenOptions { bits: with_bit(self.bits, O_EXCLUSIVE, on), perms: self.perms }
+    }
+
+    // The permissions of a file `open` creates (less the umask; unused on
+    // wasm32, which has none).
+    #test(options(), 0o600)[OpenOptions { bits: 0, perms: 0o600 }]
+    fun mode(self, perms: int32) -> OpenOptions {
+        return OpenOptions { bits: self.bits, perms: perms }
+    }
+
+    // The file at `path`, opened as chosen.
+    fun open(self, path: str) -> Result<File, IoError> {
+        return open_fd(path, open_flags(self.bits), self.perms)
+    }
+}
+
+// `bits` with `bit` set (`on`) or cleared.
+#test(5, 2, true)[7]
+#test(7, 2, false)[5]
+#test(5, 2, false)[5]
+fun with_bit(bits: int32, bit: int32, on: bool) -> int32 {
+    if on {
+        return bits | bit
+    }
+    return bits & ~bit
+}
+
+// The flags `__open` gets for the options' `bits`: appending writes, and
+// `create_new` creates.
+#test(1)[1]
+#test(16)[18]
+#test(32)[36]
+#test(3)[3]
+fun open_flags(bits: int32) -> int32 {
+    var flags = bits
+    if (bits & O_APPEND) != 0 {
+        flags = flags | O_WRITE
+    }
+    if (bits & O_EXCLUSIVE) != 0 {
+        flags = flags | O_CREATE
+    }
+    return flags
+}
+
+impl File {
+    // The file's size in bytes now.
+    fun len(self) -> Result<int64, IoError> {
+        let m = self.metadata()?
+        return Ok(m.size)
+    }
+
+    // The file's size, kind, permissions and modification time now.
+    fun metadata(self) -> Result<Metadata, IoError> {
+        let st = __fstat(self.fd)
+        if st.len() != 3 {
+            return Err(from_errno(__io_errno()))
+        }
+        return Ok(metadata_of(st[0], st[1] as int32, st[2]))
+    }
+
+    // Close the file. Every later operation on it, and a second `close`,
+    // is `Other(9)` (EBADF).
+    fun close(var self) -> Result<(), IoError> {
+        // `__close` reports nothing, so `__fstat` tells a closed descriptor
+        let st = __fstat(self.fd)
+        let fd = self.fd
+        self.fd = -1
+        if st.len() != 3 {
+            return Err(from_errno(__io_errno()))
+        }
+        __close(fd)
+        return Ok(())
+    }
+}
+
+impl Read for File {
+    fun read(var self, n: int) -> Result<[uint8], IoError> {
+        let s = self.read_str(n)?
+        return Ok(bytes_of(s))
+    }
+
+    // One read of at most `n` bytes at the cursor; "" at the end.
+    fun read_str(var self, n: int) -> Result<str, IoError> {
+        if n <= 0 {
+            return Ok("")
+        }
+        let chunk = __read(self.fd, n)
+        let err = __io_errno()
+        if err != 0 {
+            return Err(from_errno(err))
+        }
+        return Ok(chunk)
+    }
+}
+
+impl Write for File {
+    fun write(var self, b: [uint8]) -> Result<int, IoError> {
+        return self.write_str(text_of(b))
+    }
+
+    // Every byte of `s` at the cursor (or at the end, for a file opened to
+    // append).
+    fun write_str(var self, s: str) -> Result<int, IoError> {
+        __write(self.fd, s)
+        let err = __io_errno()
+        if err != 0 {
+            return Err(from_errno(err))
+        }
+        return Ok(s.len())
+    }
+
+    // Nothing to do: a `File` buffers nothing, and what it wrote is the
+    // platform's to keep.
+    fun flush(var self) -> Result<(), IoError> {
+        return Ok(())
+    }
+}
+
+impl Seek for File {
+    fun seek(var self, pos: SeekFrom) -> Result<int64, IoError> {
+        let (offset, whence) = match pos {
+            Start(k) => (k, 0)
+            Current(k) => (k, 1)
+            End(k) => (k, 2)
+        }
+        let r = __seek(self.fd, offset, whence)
+        if r < 0 {
+            return Err(from_errno(__io_errno()))
+        }
+        return Ok(r)
+    }
+}
+
+impl Pollable for File {
+    fun descriptor(self) -> int32 {
+        return self.fd
+    }
+}
+
+// The bytes of `s`.
+fun bytes_of(s: str) -> [uint8] {
+    var out: [uint8] = []
+    for i in 0..s.len() {
+        out.push(s[i])
+    }
+    return out
+}
+
+// The bytes `b` as text.
+fun text_of(b: [uint8]) -> str {
+    var sb = StringBuilder()
+    for x in b {
+        sb.append_byte(x)
+    }
+    return sb.build()
+}
+
+// --- Metadata (MYLA-339) ------------------------------------------------------------
+
+// What a path names, symbolic links followed.
+#derive(Eq)
+pub enum FileKind {
+    File,
+    Dir,
+    CharDevice,
+    BlockDevice,
+    Fifo,
+    Socket,
+    Other,
+}
+
+// What the file system knows of a file: its size in bytes, its kind, its
+// permission bits (`mode & 0o7777`) and when it was last changed, in
+// nanoseconds since 1970 (`std.time.from_unix_ns` makes a `DateTime` of it).
+#derive(Eq)
+pub struct Metadata {
+    size: int64,
+    kind: FileKind,
+    permissions: int32,
+    modified_ns: int64,
+}
+
+impl Metadata {
+    // Whether it is a regular file.
+    #test(metadata_of(3, 0o100644, 0))[true]
+    #test(metadata_of(0, 0o40755, 0))[false]
+    fun is_file(self) -> bool {
+        return self.kind == FileKind.File
+    }
+
+    // Whether it is a directory.
+    #test(metadata_of(0, 0o40755, 0))[true]
+    #test(metadata_of(3, 0o100644, 0))[false]
+    fun is_dir(self) -> bool {
+        return self.kind == FileKind.Dir
+    }
+}
+
+// The metadata of what `path` names (symbolic links followed). A missing
+// path is `NotFound`. The size and time come from opening it to read, as
+// the platform layer has no other way yet: a file the program may not read
+// is `PermissionDenied`. Only files and directories are opened; for
+// anything else (a device, a FIFO, a socket), where opening could wait or
+// do something, the size and the time are 0.
+pub fun metadata(path: str) -> Result<Metadata, IoError> {
+    let mode = __stat(path)
+    if mode < 0 {
+        return Err(from_errno(__io_errno()))
+    }
+    let kind = kind_of(mode)
+    if kind != FileKind.File && kind != FileKind.Dir {
+        return Ok(metadata_of(0, mode, 0))
+    }
+    var f = open(path)?
+    let m = f.metadata()
+    let closed = f.close()
+    return m
+}
+
+// The metadata `__fstat`'s three values (`[size, mode, mtime]`) make.
+#test(5, 0o100600, 7)[Metadata { size: 5, kind: FileKind.File, permissions: 0o600, modified_ns: 7 }]
+#test(0, 0o41777, 0)[Metadata { size: 0, kind: FileKind.Dir, permissions: 0o1777, modified_ns: 0 }]
+fun metadata_of(size: int64, mode: int32, modified_ns: int64) -> Metadata {
+    return Metadata { size: size, kind: kind_of(mode), permissions: mode & 0o7777, modified_ns: modified_ns }
+}
+
+// The kind the type bits of `mode` name (wasm32's made-up 0o644 has none:
+// `Other`).
+#test(0o100644)[FileKind.File]
+#test(0o40755)[FileKind.Dir]
+#test(0o20666)[FileKind.CharDevice]
+#test(0o60660)[FileKind.BlockDevice]
+#test(0o10644)[FileKind.Fifo]
+#test(0o140755)[FileKind.Socket]
+#test(0o120777)[FileKind.Other]
+#test(0o644)[FileKind.Other]
+fun kind_of(mode: int32) -> FileKind {
+    let t = mode & S_IFMT
+    if t == S_IFREG { return FileKind.File }
+    if t == S_IFDIR { return FileKind.Dir }
+    if t == 0x2000 { return FileKind.CharDevice }
+    if t == 0x6000 { return FileKind.BlockDevice }
+    if t == 0x1000 { return FileKind.Fifo }
+    if t == 0xC000 { return FileKind.Socket }
+    return FileKind.Other
+}
+
+// --- Temporary files and directories (MYLA-339) ---------------------------------
+//
+// A new name is a prefix and 16 hexadecimal digits from the system's
+// entropy (`__random_bytes`), made in one step that fails when the name is
+// taken (mkdir, `O_EXCL`), so no other program can slip in a file of its
+// own; a taken name is tried again with another. Nothing removes them: the
+// caller does (`remove_dir_all`, `remove_file`), or `std.test`'s runner.
+
+// How many taken names a temporary file or directory tries before it gives
+// up with `AlreadyExists`.
+const TEMP_TRIES: int32 = 100
+
+// The directory for temporary files: `$TMPDIR` when it is set and not
+// empty, else `/tmp`, without a trailing `/`.
+pub fun temp_root() -> str {
+    return root_of(__getenv("TMPDIR"))
+}
+
+// The temporary root `$TMPDIR` names.
+#test("")["/tmp"]
+#test("/var/tmp")["/var/tmp"]
+#test("/var/tmp//")["/var/tmp"]
+#test("/")["/"]
+fun root_of(env: str) -> str {
+    if env == "" {
+        return "/tmp"
+    }
+    var end = env.len()
+    while end > 1 && env[end - 1] == '/' {
+        end -= 1
+    }
+    // not a slice, which links `std.slice`: its own harness links this
+    var sb = StringBuilder()
+    sb.append(env, 0, end)
+    return sb.build()
+}
+
+// A new, empty directory under `temp_root()`, named `myla-` and 16 random
+// hexadecimal digits, mode 0700: its path.
+pub fun make_temp_dir() -> Result<str, IoError> {
+    return make_temp_dir_in(temp_root(), "myla-")
+}
+
+// A new, empty directory in `dir`, named `prefix` and 16 random hexadecimal
+// digits, mode 0700: its path.
+pub fun make_temp_dir_in(dir: str, prefix: str) -> Result<str, IoError> {
+    let made = make_unique(dir, prefix, (k: int32) => random_suffix(), (p: str) => mkdir_fd(p))?
+    return Ok(made.0)
+}
+
+// A new, empty file under `temp_root()`, named `myla-` and 16 random
+// hexadecimal digits, mode 0600, open for reading and writing: its path and
+// the file.
+pub fun make_temp_file() -> Result<(str, File), IoError> {
+    return make_temp_file_in(temp_root(), "myla-")
+}
+
+// A new, empty file in `dir`, named `prefix` and 16 random hexadecimal
+// digits, mode 0600, open for reading and writing: its path and the file.
+pub fun make_temp_file_in(dir: str, prefix: str) -> Result<(str, File), IoError> {
+    let made = make_unique(dir, prefix, (k: int32) => random_suffix(), (p: str) => new_file_fd(p))?
+    return Ok((made.0, File { fd: made.1 }))
+}
+
+// `make` tried on `dir`/`prefix` and a suffix from `suffix` (given the
+// try's number), again while the name is taken: the path made and what
+// `make` gave (at least 0; -1 with the errno for a failure).
+fun make_unique(dir: str, prefix: str, suffix: (int32) -> Result<str, IoError>, make: (str) -> int32) -> Result<(str, int32), IoError> {
+    var k = 0
+    while true {
+        let path = joined(dir, prefix + suffix(k)?)
+        let r = make(path)
+        if r >= 0 {
+            return Ok((path, r))
+        }
+        let err = __io_errno()
+        if err != 17 || k + 1 >= TEMP_TRIES {
+            return Err(from_errno(err))
+        }
+        k += 1
+    }
+    unreachable()
+}
+
+// Make the directory `path`, mode 0700: 0, or -1 with the errno.
+fun mkdir_fd(path: str) -> int32 {
+    __mkdir(path, 0o700)
+    if __io_errno() == 0 {
+        return 0
+    }
+    return -1
+}
+
+// Create the file `path` (it mustn't be there), mode 0600, open to read and
+// write: its descriptor, or -1 with the errno.
+fun new_file_fd(path: str) -> int32 {
+    return __open(path, O_READ | O_WRITE | O_CREATE | O_EXCLUSIVE, 0o600)
+}
+
+// 16 random hexadecimal digits.
+fun random_suffix() -> Result<str, IoError> {
+    let b = __random_bytes(8)
+    if b.len() != 8 {
+        return Err(from_errno(__io_errno()))
+    }
+    return Ok(hex_of(b))
+}
+
+// The bytes `b` as hexadecimal digits, two each.
+#test([0u8, 15u8, 160u8, 255u8])["000fa0ff"]
+fun hex_of(b: [uint8]) -> str {
+    let digits = "0123456789abcdef"
+    var sb = StringBuilder()
+    for x in b {
+        sb.append_byte(digits[(x >> 4) as int32])
+        sb.append_byte(digits[(x & 15) as int32])
+    }
+    return sb.build()
+}
+
+// `name` in the directory `dir`.
+#test("/tmp", "a")["/tmp/a"]
+#test("/", "a")["/a"]
+#test("", "a")["a"]
+fun joined(dir: str, name: str) -> str {
+    if dir == "" {
+        return name
+    }
+    if dir[dir.len() - 1] == '/' {
+        return dir + name
+    }
+    return dir + "/" + name
+}
+
+// --- Test functions (D162) ----------------------------------------------------------
+//
+// Each makes its files in a temporary directory of its own and removes it
+// in a `defer` (a module of `std` can't use `std.test.temp_dir`).
+
+// The name of a result's error, "ok" for a value.
+fun error_of<T>(r: Result<T, IoError>) -> str {
+    return match r {
+        Ok(_) => "ok"
+        Err(e) => error_name(e)
+    }
+}
+
+// The line a read gave, "<none>" at the end.
+#test(Some("a"))["a"]
+#test(None)["<none>"]
+fun line(o: Option<str>) -> str {
+    return match o {
+        Some(s) => s
+        None => "<none>"
+    }
+}
+
+// The name of `e`, `Other` with its code.
+#test(IoError.NotFound)["NotFound"]
+#test(IoError.Other(9))["Other(9)"]
+fun error_name(e: IoError) -> str {
+    return match e {
+        NotFound => "NotFound"
+        PermissionDenied => "PermissionDenied"
+        AlreadyExists => "AlreadyExists"
+        NotADirectory => "NotADirectory"
+        IsADirectory => "IsADirectory"
+        NotEmpty => "NotEmpty"
+        Interrupted => "Interrupted"
+        Cancelled => "Cancelled"
+        Unsupported => "Unsupported"
+        BrokenPipe => "BrokenPipe"
+        InvalidInput => "InvalidInput"
+        Other(code) => f"Other({code})"
+    }
+}
+
+// Written, closed, opened again, read, measured and sought.
+#test
+fun file_round_trip() -> Result<(), IoError> {
+    let dir = make_temp_dir()?
+    defer { let gone = remove_dir_all(dir) }
+    let path = dir + "/a.txt"
+    var w = create(path)?
+    assert(w.write_str("hello, ")? == 7, "write_str gives the count")
+    assert(w.write([119u8, 111u8, 114u8, 108u8, 100u8])? == 5, "write gives the count")
+    w.flush()?
+    assert(w.len()? == 12, "the length after two writes")
+    w.close()?
+    assert(read_to_string(path)? == "hello, world", "what create and write made")
+    var r = open(path)?
+    defer { let c = r.close() }
+    assert(r.read_str(5)? == "hello", "a read at the start")
+    assert(text_of(r.read(2)?) == ", ", "a read as bytes")
+    assert(r.seek(SeekFrom.Current(-2))? == 5, "a seek back")
+    assert(r.read_str(100)? == ", world", "a read past the end gives what's there")
+    assert(r.read_str(100)? == "", "and then the end")
+    assert(r.seek(SeekFrom.End(-5))? == 7, "a seek from the end")
+    assert(r.read_str(5)? == "world", "the last five")
+    assert(r.seek(SeekFrom.Start(0))? == 0, "a seek to the start")
+    assert(r.read_str(0)? == "", "a read of none")
+    assert(error_of(r.seek(SeekFrom.Current(-1))) == "InvalidInput", "before the start")
+    assert(error_of(r.write_str("x")) == "Other(9)", "a file open to read can't be written")
+    let m = r.metadata()?
+    assert(m.size == 12 && m.is_file() && !m.is_dir(), "its metadata")
+    assert(m.modified_ns > 0, "a modification time")
+    return Ok(())
+}
+
+// `create` empties a file, `open_append` writes at its end wherever the cursor is.
+#test
+fun create_and_append() -> Result<(), IoError> {
+    let dir = make_temp_dir()?
+    defer { let gone = remove_dir_all(dir) }
+    let path = dir + "/log"
+    write_to_file(path, "old contents")?
+    var c = create(path)?
+    c.write_str("one\n")?
+    c.close()?
+    var a = open_append(path)?
+    a.write_str("two\n")?
+    a.seek(SeekFrom.Start(0))?
+    a.write_str("three\n")?
+    a.close()?
+    assert(read_to_string(path)? == "one\ntwo\nthree\n", "appended at the end")
+    var fresh = open_append(dir + "/new")?
+    fresh.write_str("x")?
+    fresh.close()?
+    assert(read_to_string(dir + "/new")? == "x", "open_append creates")
+    assert(error_of(open(dir + "/missing")) == "NotFound", "open of a missing file")
+    assert(error_of(create(dir + "/no/such/dir")) == "NotFound", "create in a missing directory")
+    assert(error_of(create(dir)) == "IsADirectory", "create of a directory")
+    return Ok(())
+}
+
+// What `options()` chooses opens as chosen.
+#test
+fun open_options() -> Result<(), IoError> {
+    let dir = make_temp_dir()?
+    defer { let gone = remove_dir_all(dir) }
+    let path = dir + "/f"
+    assert(error_of(options().read(true).open(path)) == "NotFound", "no create: not there")
+    assert(error_of(options().create(true).open(path)) == "InvalidInput", "neither read nor write")
+    var rw = options().read(true).write(true).create(true).mode(0o600).open(path)?
+    rw.write_str("abcdef")?
+    rw.seek(SeekFrom.Start(2))?
+    assert(rw.read_str(2)? == "cd", "read where it wrote")
+    rw.write_str("XY")?
+    rw.close()?
+    assert(read_to_string(path)? == "abcdXY", "written at the cursor")
+    let m = metadata(path)?
+    // wasm32 has no permissions: the mode it reads is made up from the kind
+    assert(m.permissions == 0o600 || m.permissions == 0o644, "the mode of a new file")
+    assert(error_of(options().write(true).create_new(true).open(path)) == "AlreadyExists", "create_new of a file that's there")
+    var t = options().write(true).truncate(true).open(path)?
+    t.close()?
+    assert(read_to_string(path)? == "", "truncated")
+    var n = options().write(true).create_new(true).open(dir + "/g")?
+    n.close()?
+    assert(is_file(dir + "/g"), "create_new makes it")
+    return Ok(())
+}
+
+// A closed file fails every operation with EBADF, and so does a copy of it.
+#test
+fun closing() -> Result<(), IoError> {
+    let dir = make_temp_dir()?
+    defer { let gone = remove_dir_all(dir) }
+    var f = create(dir + "/f")?
+    let copy = f
+    f.close()?
+    assert(error_of(f.close()) == "Other(9)", "a second close")
+    assert(error_of(f.write_str("x")) == "Other(9)", "a write after close")
+    assert(error_of(f.read_str(1)) == "Other(9)", "a read after close")
+    assert(error_of(f.seek(SeekFrom.Start(0))) == "Other(9)", "a seek after close")
+    assert(error_of(f.len()) == "Other(9)", "the length after close")
+    var c = copy
+    assert(error_of(c.write_str("x")) == "Other(9)", "a copy's write after close")
+    assert(error_of(c.close()) == "Other(9)", "a copy's close")
+    return Ok(())
+}
+
+// The metadata of paths: a file, a directory, a missing one.
+#test
+fun metadata_of_paths() -> Result<(), IoError> {
+    let dir = make_temp_dir()?
+    defer { let gone = remove_dir_all(dir) }
+    write_to_file(dir + "/f", "12345")?
+    let f = metadata(dir + "/f")?
+    assert(f.size == 5 && f.kind == FileKind.File, "a file's size and kind")
+    let d = metadata(dir)?
+    assert(d.kind == FileKind.Dir && d.is_dir(), "a directory")
+    assert(error_of(metadata(dir + "/nothing")) == "NotFound", "a missing path")
+    var w = open_append(dir + "/f")?
+    w.write_str("678")?
+    assert(w.len()? == 8, "the length follows the writes")
+    w.close()?
+    assert(metadata(dir + "/f")?.size == 8, "and the path's metadata")
+    return Ok(())
+}
+
+// Temporary names are new each time, under the root, and taken ones are
+// tried again.
+#test
+fun temporary_names() -> Result<(), IoError> {
+    let a = make_temp_dir()?
+    defer { let gone = remove_dir_all(a) }
+    let b = make_temp_dir()?
+    defer { let gone = remove_dir_all(b) }
+    assert(a != b, "two directories")
+    assert(is_dir(a) && list_dir(a)?.len() == 0, "a new, empty directory")
+    assert(a.len() == temp_root().len() + 1 + 5 + 16, "the root, myla- and 16 digits")
+    let (p, f0) = make_temp_file_in(a, "t-")?
+    var f = f0
+    f.write_str("data")?
+    f.seek(SeekFrom.Start(0))?
+    assert(f.read_str(10)? == "data", "a temporary file reads and writes")
+    f.close()?
+    assert(p.len() == a.len() + 1 + 2 + 16, "in the directory, with its prefix")
+    let (q, g) = make_temp_file()?
+    var h = g
+    h.close()?
+    remove_file(q)?
+    // a name that's taken is tried again with the next suffix
+    make_dir(a + "/x-0")?
+    let made = make_unique(a, "x-", (k: int32) => Ok(f"{k}"), (p: str) => mkdir_fd(p))?
+    assert(made.0 == a + "/x-1", "the second name")
+    let failed = make_unique(a, "x-", (k: int32) => Ok("0"), (p: str) => mkdir_fd(p))
+    assert(error_of(failed) == "AlreadyExists", "gives up on a name always taken")
+    assert(error_of(make_temp_dir_in(a + "/none", "y")) == "NotFound", "in a missing directory")
+    return Ok(())
+}
+
+// A `File` is a stream: `std.io`'s adapters and `copy` take it.
+#test
+fun file_streams() -> Result<(), IoError> {
+    let dir = make_temp_dir()?
+    defer { let gone = remove_dir_all(dir) }
+    var w = buffered_writer(create(dir + "/lines")?)
+    w.write_str("first\n")?
+    w.write_str("second\nthird")?
+    var inner = w.into_inner()?
+    inner.close()?
+    var r = buffered(open(dir + "/lines")?)
+    assert(line(r.read_line()?) == "first", "a line")
+    assert(line(r.read_line()?) == "second", "another")
+    assert(line(r.read_line()?) == "third", "a last line without a newline")
+    assert(line(r.read_line()?) == "<none>", "the end")
+    var src = open(dir + "/lines")?
+    var out = copy(src, create(dir + "/copy")?)?
+    out.close()?
+    src.close()?
+    assert(read_to_string(dir + "/copy")? == "first\nsecond\nthird", "copied")
+    return Ok(())
+}
+
+// The directory functions over a tree in a temporary directory.
+#test
+fun directories() -> Result<(), IoError> {
+    let dir = make_temp_dir()?
+    defer { let gone = remove_dir_all(dir) }
+    make_dir_all(dir + "/a/b/c")?
+    write_to_file(dir + "/a/f", "")?
+    assert(list_dir(dir + "/a")? == ["b", "f"], "sorted names")
+    assert(error_of(make_dir(dir + "/a")) == "AlreadyExists", "a directory that's there")
+    assert(error_of(remove_dir(dir + "/a")) == "NotEmpty", "a directory that isn't empty")
+    rename(dir + "/a/f", dir + "/g")?
+    assert(is_file(dir + "/g") && !exists(dir + "/a/f"), "renamed")
+    remove_dir_all(dir + "/a")?
+    assert(!exists(dir + "/a"), "removed with what was in it")
+    return Ok(())
 }

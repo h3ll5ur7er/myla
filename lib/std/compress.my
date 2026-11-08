@@ -1,0 +1,1595 @@
+// std.compress: DEFLATE decompression, and the gzip and zlib formats
+// around it (MYLA-344).
+//
+// Inflate is RFC 1951: stored blocks, and blocks of fixed and of dynamic
+// Huffman codes, with a window of 32 KiB. gzip (RFC 1952) and zlib
+// (RFC 1950) are the containers: a header, the DEFLATE stream, and a
+// trailer whose checksum (CRC-32, Adler-32) and length are checked. Corrupt
+// input of every kind is an error, never a panic or a hang.
+//
+// One decoder, `Inflate`, does the work: it is given compressed bytes
+// (`feed`) and decodes as far as they go (`run`). The functions `inflate`,
+// `gunzip` and `zlib_decompress` give it all of their input at once; the
+// streams `inflate_reader`, `gzip_reader` and `zlib_reader` give it what
+// their inner stream reads, chunk by chunk.
+
+from std.io import Read, from_bytes
+from std.fs import IoError
+
+// Why compressed data couldn't be decompressed (D168: the variants carry no
+// position, so it is a bare enum).
+pub enum CompressError {
+    // The input ended inside the stream
+    Truncated,
+    // Not a gzip or zlib header: the magic bytes, the method, reserved
+    // flags, or zlib's header check
+    BadHeader,
+    // A zlib stream that needs a preset dictionary (FDICT)
+    PresetDictionary,
+    // A block of the reserved type 3
+    BadBlockType,
+    // A stored block whose length and its complement don't match
+    BadStoredLength,
+    // A dynamic block's code lengths: too many codes, a repeat with nothing
+    // to repeat or past the end, lengths that over-subscribe a code or leave
+    // it incomplete (but for a single code of length 1), no code for the end
+    // of the block
+    BadCodeLengths,
+    // A code its block's Huffman code doesn't have, or a length or distance
+    // symbol DEFLATE doesn't define
+    BadCode,
+    // A distance back past the start of the output
+    DistanceTooFar,
+    // The CRC-32 or Adler-32 of the output, or gzip's header CRC, isn't the
+    // one the stream gives
+    ChecksumMismatch,
+    // The output's length isn't the one the gzip trailer gives
+    LengthMismatch,
+    // Bytes after the end of the stream
+    TrailingData,
+    // The stream it reads from failed
+    Io(IoError),
+}
+
+impl CompressError {
+    // The reason in words.
+    #test(CompressError.Truncated)["compressed data ends too early"]
+    #test(CompressError.DistanceTooFar)["distance too far back"]
+    #test(CompressError.Io(IoError.NotFound))["read failed: NotFound"]
+    #test(CompressError.Io(IoError.Other(5)))["read failed: Other(5)"]
+    fun message(self) -> str {
+        return match self {
+            Truncated => "compressed data ends too early"
+            BadHeader => "not a gzip or zlib header"
+            PresetDictionary => "zlib stream needs a preset dictionary"
+            BadBlockType => "invalid block type"
+            BadStoredLength => "stored block length doesn't match its complement"
+            BadCodeLengths => "invalid code lengths"
+            BadCode => "invalid code"
+            DistanceTooFar => "distance too far back"
+            ChecksumMismatch => "checksum mismatch"
+            LengthMismatch => "length mismatch"
+            TrailingData => "data after the end of the stream"
+            Io(e) => f"read failed: {io_name(e)}"
+        }
+    }
+
+    // A number for each error (the errno of an `Io`), to compare them.
+    fun code(self) -> int32 {
+        return match self {
+            Truncated => -1
+            BadHeader => -2
+            PresetDictionary => -3
+            BadBlockType => -4
+            BadStoredLength => -5
+            BadCodeLengths => -6
+            BadCode => -7
+            DistanceTooFar => -8
+            ChecksumMismatch => -9
+            LengthMismatch => -10
+            TrailingData => -11
+            Io(e) => io_code(e)
+        }
+    }
+}
+
+// `IoError` isn't `Eq`, so the impl is written: two errors are equal when
+// they are the same error, an `Io` with the same cause.
+impl Eq for CompressError {
+    fun eq(self, other: CompressError) -> bool {
+        return self.code() == other.code()
+    }
+}
+
+impl Format for CompressError {
+    // The message; the spec is ignored.
+    #test(CompressError.BadCode, "")["invalid code"]
+    fun format(self, spec: str) -> str {
+        return self.message()
+    }
+}
+
+// The name of an `IoError`'s cause.
+#test(IoError.BrokenPipe)["BrokenPipe"]
+fun io_name(e: IoError) -> str {
+    return match e {
+        NotFound => "NotFound"
+        PermissionDenied => "PermissionDenied"
+        AlreadyExists => "AlreadyExists"
+        NotADirectory => "NotADirectory"
+        IsADirectory => "IsADirectory"
+        NotEmpty => "NotEmpty"
+        Interrupted => "Interrupted"
+        Cancelled => "Cancelled"
+        Unsupported => "Unsupported"
+        BrokenPipe => "BrokenPipe"
+        InvalidInput => "InvalidInput"
+        Other(c) => f"Other({c})"
+    }
+}
+
+// The errno of an `IoError`, as std.fs's `from_errno` reads it (an `Other`
+// with a number it names stays apart: 1000 more).
+#test(IoError.NotFound)[2]
+#test(IoError.Other(2))[1002]
+fun io_code(e: IoError) -> int32 {
+    return match e {
+        NotFound => 2
+        PermissionDenied => 13
+        AlreadyExists => 17
+        NotADirectory => 20
+        IsADirectory => 21
+        NotEmpty => 39
+        Interrupted => 4
+        Cancelled => 125
+        Unsupported => 38
+        BrokenPipe => 32
+        InvalidInput => 22
+        Other(c) => 1000 + c
+    }
+}
+
+// --- Huffman codes ------------------------------------------------------------------
+
+// Bits a code's first table is indexed by; a longer code is decoded bit by
+// bit from `count` and `sym`.
+const FAST: int32 = 10
+const FAST_MASK: uint64 = 1023
+
+// A canonical Huffman code, as DEFLATE builds it from code lengths.
+struct Huff {
+    // 2^FAST entries, by the next FAST bits of the input (DEFLATE packs
+    // codes from the low bit on): `symbol << 4 | length` for a code of at
+    // most FAST bits, 0 for the start of a longer one (or of none)
+    fast: [int32],
+    // count[l]: the number of codes of length l, 0 to 15
+    count: [int32],
+    // the symbols in the code's order: by length, then by value
+    sym: [int32],
+}
+
+// The code that gives each symbol `s` from 0 to `n - 1` the length
+// `lens[start + s]` (0: no code), and how many codes of length 15 it lacks
+// to be complete: 0 for a complete code, more for an incomplete one, less
+// than 0 for lengths that are over-subscribed (no code at all).
+fun build_huff(lens: [int32], start: int, n: int) -> (Huff, int32) {
+    var count: [int32] = []
+    for l in 0..16 { count.push(0) }
+    for s in 0..n { count[lens[start + s]] += 1 }
+    var left = 1
+    for l in 1..16 {
+        left = (left << 1) - count[l]
+        if left < 0 {
+            return (Huff { fast: [], count: count, sym: [] }, left)
+        }
+    }
+    var offs: [int32] = [0, 0]
+    for l in 1..15 { offs.push(offs[l] + count[l]) }
+    var sym: [int32] = []
+    for s in 0..n { sym.push(0) }
+    for s in 0..n {
+        let l = lens[start + s]
+        if l != 0 {
+            sym[offs[l]] = s
+            offs[l] += 1
+        }
+    }
+    var fast: [int32] = []
+    let size = 1 << FAST
+    for i in 0..size { fast.push(0) }
+    var code = 0
+    var k = 0
+    for l in 1..FAST + 1 {
+        for j in 0..count[l] {
+            let entry = (sym[k] << 4) | l
+            var r = reversed(code, l)
+            while r < size {
+                fast[r] = entry
+                r += 1 << l
+            }
+            code += 1
+            k += 1
+        }
+        code = code << 1
+    }
+    return (Huff { fast: fast, count: count, sym: sym }, left)
+}
+
+// Whether the code `h` of `n` symbols, `left` short of complete (as
+// `build_huff` gives them), is one a block may use: complete, empty (a block
+// without distance codes; decoding a symbol of it fails), or a single code
+// of length 1, as zlib has it.
+fun usable(h: Huff, left: int32, n: int) -> bool {
+    if left < 0 { return false }
+    if left == 0 { return true }
+    let codes = n - h.count[0]
+    return codes == 0 || (codes == 1 && h.count[1] == 1)
+}
+
+// The low `n` bits of `x` in the opposite order.
+#test(1, 3)[4]
+#test(6, 3)[3]
+#test(0b1011, 4)[0b1101]
+fun reversed(x: int32, n: int32) -> int32 {
+    var r = 0
+    var v = x
+    for i in 0..n {
+        r = (r << 1) | (v & 1)
+        v = v >> 1
+    }
+    return r
+}
+
+// The next symbol of `h` in `bits` (the low bit first), bit by bit:
+// `symbol << 4 | length`, or -1 if `bits` starts no code of `h`.
+fun slow_decode(h: Huff, bits: uint64) -> int32 {
+    var code = 0
+    var first = 0
+    var index = 0
+    var b = bits
+    for l in 1..16 {
+        code = code | ((b & 1u64) as int32)
+        b = b >> 1u64
+        let c = h.count[l]
+        if code - first < c {
+            return (h.sym[index + code - first] << 4) | l
+        }
+        index += c
+        first = (first + c) << 1
+        code = code << 1
+    }
+    return -1
+}
+
+// --- The decoder --------------------------------------------------------------------
+
+// The containers.
+const RAW: int32 = 0
+const ZLIB: int32 = 1
+const GZIP: int32 = 2
+
+// Where the decoder is.
+const AT_HEADER: int32 = 0     // the container's header
+const AT_BLOCK: int32 = 1      // a block's header
+const AT_STORED: int32 = 2     // a stored block's lengths
+const IN_STORED: int32 = 3     // a stored block's bytes, `left` of them
+const IN_HUFF: int32 = 4       // a block of Huffman codes
+const AT_TRAILER: int32 = 5    // the container's trailer
+const AT_NEXT: int32 = 6       // gzip: another member, or the end
+const AT_END: int32 = 7
+
+// What `run` stopped for.
+const PRODUCED: int32 = 0      // the output reached its target
+const NEED_INPUT: int32 = 1    // more input, or the end of it
+const FINISHED: int32 = 2      // the end of the stream
+
+const WINDOW: int32 = 32768
+const WINDOW_MASK: int32 = 32767
+// Bytes of input a block's header may take (a dynamic one: at most 14 +
+// 19 * 3 + 316 * 14 bits); with fewer, and more to come, the decoder waits.
+const LOOKAHEAD: int32 = 1024
+
+// A DEFLATE decoder in one of the containers, given its input in pieces.
+struct Inflate {
+    format: int32,
+    stage: int32,
+    inp: [uint8],       // input given and not yet consumed: inp[ipos:]
+    ipos: int32,
+    eof: bool,          // no more input will come
+    bits: uint64,       // input bits taken from inp and not yet used, the low first
+    nbits: int32,
+    // The output: what is in `out`, and before it, once `out` has been
+    // handed out, the window of the output before it: the end of `prev`, the
+    // last `out` handed out, if that was at least WINDOW bytes long
+    // (`in_prev`); else `ring`, made then, which ends at `wp`. A back
+    // reference reaches into both.
+    ring: [uint8],
+    wp: int32,
+    prev: [uint8],
+    in_prev: bool,
+    hist: int32,        // bytes of this stream in the window, up to WINDOW
+    base: int32,        // where this stream starts in `out` (gzip: a member)
+    out: [uint8],       // output not yet handed out: out[opos:]
+    opos: int32,
+    ck: uint32,         // the checksum of this member's output up to out[ck_from]
+    ck_from: int32,
+    size: uint32,       // and its length, modulo 2^32
+    last: bool,         // the block is the final one
+    left: int32,        // bytes left in a stored block
+    lit: Huff,
+    dist: Huff,
+    fixed: [Huff],      // the fixed codes, once built: literal/length, distance
+    lbase: [int32],     // length symbol 257 + i: base length and extra bits
+    lext: [int32],
+    dbase: [int32],     // distance symbol i: base distance and extra bits
+    dext: [int32],
+    crc_t: [uint32],    // gzip: `crc_tables()`
+    err: Option<CompressError>,
+}
+
+fun no_huff() -> Huff {
+    return Huff { fast: [], count: [], sym: [] }
+}
+
+// A decoder of the container `format`, with no input yet.
+fun new_inflate(format: int32) -> Inflate {
+    var lbase: [int32] = []
+    var lext: [int32] = []
+    var len = 3
+    for i in 0..28 {
+        var x = 0
+        if i >= 8 { x = (i - 4) / 4 }
+        lbase.push(len)
+        lext.push(x)
+        len += 1 << x
+    }
+    lbase.push(258)
+    lext.push(0)
+    var dbase: [int32] = []
+    var dext: [int32] = []
+    var d = 1
+    for i in 0..30 {
+        var x = 0
+        if i >= 4 { x = (i - 2) / 2 }
+        dbase.push(d)
+        dext.push(x)
+        d += 1 << x
+    }
+    var stage = AT_HEADER
+    if format == RAW { stage = AT_BLOCK }
+    var ck: uint32 = 0
+    if format == ZLIB { ck = 1 }
+    var crc_t: [uint32] = []
+    if format == GZIP { crc_t = crc_tables() }
+    return Inflate {
+        format: format, stage: stage,
+        inp: [], ipos: 0, eof: false, bits: 0, nbits: 0,
+        ring: [], wp: 0, prev: [], in_prev: false, hist: 0, base: 0, out: [], opos: 0,
+        ck: ck, ck_from: 0, size: 0, last: false, left: 0,
+        lit: no_huff(), dist: no_huff(), fixed: [],
+        lbase: lbase, lext: lext, dbase: dbase, dext: dext,
+        crc_t: crc_t, err: None,
+    }
+}
+
+impl Inflate {
+    // More input; `eof`: it is the last.
+    fun feed(var self, b: [uint8], eof: bool) {
+        if eof { self.eof = true }
+        if b.len() == 0 { return }
+        if self.ipos >= self.inp.len() {
+            self.inp = b
+        } else {
+            var rest = self.inp[self.ipos:]
+            for x in b { rest.push(x) }
+            self.inp = rest
+        }
+        self.ipos = 0
+    }
+
+    // Whether output is waiting to be handed out.
+    fun pending(self) -> bool {
+        return self.opos < self.out.len()
+    }
+
+    // Up to `n` bytes of the output waiting.
+    fun take(var self, n: int) -> [uint8] {
+        let have = self.out.len() - self.opos
+        if self.opos == 0 && n >= have {
+            let all = self.out
+            self.empty_out()
+            return all
+        }
+        var end = self.out.len()
+        if n < have { end = self.opos + n }
+        let part = self.out[self.opos:end]
+        self.opos = end
+        if self.opos == self.out.len() { self.empty_out() }
+        return part
+    }
+
+    // `out` emptied, all of it handed out: kept as the window for the back
+    // references to come, or its bytes added to the ring if it is shorter.
+    fun empty_out(var self) {
+        let n = self.out.len()
+        if n >= WINDOW {
+            self.prev = self.out
+            self.in_prev = true
+        } else {
+            if self.in_prev {
+                self.to_ring(self.prev)
+                self.prev = []
+                self.in_prev = false
+            }
+            self.to_ring(self.out)
+        }
+        self.hist = clamp_hist(self.hist + n - self.base)
+        self.base = 0
+        self.out = []
+        self.opos = 0
+        self.ck_from = 0
+    }
+
+    // The last WINDOW bytes of `b` (or all of them) added to the ring.
+    fun to_ring(var self, b: [uint8]) {
+        var ring = self.ring
+        self.ring = []
+        if ring.len() == 0 {
+            for k in 0..WINDOW { ring.push(0) }
+        }
+        let n = b.len()
+        var i = n - WINDOW
+        if i < 0 { i = 0 }
+        var wp = self.wp
+        while i < n {
+            ring[wp] = b[i]
+            wp = (wp + 1) & WINDOW_MASK
+            i += 1
+        }
+        self.ring = ring
+        self.wp = wp
+    }
+
+    // Input bytes into the bit buffer, as many as fit.
+    fun refill(var self) {
+        while self.nbits <= 56 && self.ipos < self.inp.len() {
+            self.bits = self.bits | ((self.inp[self.ipos] as uint64) << (self.nbits as uint64))
+            self.ipos += 1
+            self.nbits += 8
+        }
+    }
+
+    // The next `n` bits (at most 32), the first the lowest; or `Truncated`.
+    fun take_bits(var self, n: int32) -> Result<int32, CompressError> {
+        if self.nbits < n { self.refill() }
+        if self.nbits < n { return Err(CompressError.Truncated) }
+        let v = (self.bits & ((1u64 << (n as uint64)) - 1u64)) as int32
+        self.bits = self.bits >> (n as uint64)
+        self.nbits -= n
+        return Ok(v)
+    }
+
+    // The next symbol of `h`, or an error.
+    fun take_sym(var self, h: Huff) -> Result<int32, CompressError> {
+        if self.nbits < 15 { self.refill() }
+        var e = h.fast[(self.bits & FAST_MASK) as int]
+        if e == 0 { e = slow_decode(h, self.bits) }
+        if e < 0 { return Err(bad_code(self.nbits)) }
+        let l = e & 15
+        if l > self.nbits { return Err(CompressError.Truncated) }
+        self.bits = self.bits >> (l as uint64)
+        self.nbits -= l
+        return Ok(e >> 4)
+    }
+
+    // To the next byte boundary, and the whole bytes in the bit buffer given
+    // back to the input: they are the last ones taken from it, in `inp`
+    // still unless some came from the input before the last `feed`.
+    fun unread(var self) {
+        let drop = self.nbits & 7
+        self.bits = self.bits >> (drop as uint64)
+        self.nbits -= drop
+        let k = self.nbits >> 3
+        if k <= self.ipos {
+            self.ipos -= k
+        } else {
+            var b: [uint8] = []
+            for i in 0..k {
+                b.push((self.bits & 255u64) as uint8)
+                self.bits = self.bits >> 8u64
+            }
+            for x in self.inp[self.ipos:] { b.push(x) }
+            self.inp = b
+            self.ipos = 0
+        }
+        self.bits = 0
+        self.nbits = 0
+    }
+
+    // Input bytes waiting.
+    fun avail(self) -> int32 {
+        return self.inp.len() - self.ipos
+    }
+
+    // Decode until `target` bytes of output are waiting, the input runs out
+    // or the stream ends: PRODUCED, NEED_INPUT or FINISHED. A failure is
+    // kept: every later call gives it again.
+    fun run(var self, target: int) -> Result<int32, CompressError> {
+        match self.err {
+            Some(e) => { return Err(e) }
+            None => {}
+        }
+        var status = PRODUCED
+        while self.out.len() - self.opos < target && status == PRODUCED {
+            match self.step(target) {
+                Ok(s) => { status = s }
+                Err(e) => {
+                    self.err = Some(e)
+                    return Err(e)
+                }
+            }
+        }
+        self.sum()
+        if self.stage == AT_END { status = FINISHED }
+        return Ok(status)
+    }
+
+    // One step of `run`: what the stage takes.
+    fun step(var self, target: int) -> Result<int32, CompressError> {
+        if self.stage == AT_HEADER { return self.header() }
+        if self.stage == AT_BLOCK { return self.block_header() }
+        if self.stage == AT_STORED { return self.stored_header() }
+        if self.stage == IN_STORED { return self.stored(target) }
+        if self.stage == IN_HUFF { return self.huff(target) }
+        if self.stage == AT_TRAILER { return self.trailer() }
+        if self.stage == AT_NEXT { return self.next_member() }
+        return Ok(FINISHED)
+    }
+
+    // The checksum and length brought up to the end of the output.
+    fun sum(var self) {
+        let n = self.out.len()
+        if self.format == RAW || self.ck_from >= n { return }
+        if self.format == GZIP {
+            self.ck = crc32_part(self.crc_t, self.ck, self.out, self.ck_from, n)
+        } else {
+            self.ck = adler32_part(self.ck, self.out, self.ck_from, n)
+        }
+        self.size = self.size + ((n - self.ck_from) as uint32)
+        self.ck_from = n
+    }
+
+    // A container's header.
+    fun header(var self) -> Result<int32, CompressError> {
+        var end = -1
+        if self.format == GZIP {
+            end = gzip_header(self.crc_t, self.inp, self.ipos)?
+        } else {
+            end = zlib_header(self.inp, self.ipos)?
+        }
+        if end < 0 {
+            if self.eof { return Err(CompressError.Truncated) }
+            return Ok(NEED_INPUT)
+        }
+        self.ipos = end
+        self.stage = AT_BLOCK
+        return Ok(PRODUCED)
+    }
+
+    // A block's header: its type, and a dynamic block's codes.
+    fun block_header(var self) -> Result<int32, CompressError> {
+        if !self.eof && self.avail() < LOOKAHEAD { return Ok(NEED_INPUT) }
+        self.last = self.take_bits(1)? == 1
+        let kind = self.take_bits(2)?
+        if kind == 0 {
+            self.stage = AT_STORED
+        } else if kind == 1 {
+            if self.fixed.len() == 0 { self.fixed = fixed_codes() }
+            self.lit = self.fixed[0]
+            self.dist = self.fixed[1]
+            self.stage = IN_HUFF
+        } else if kind == 2 {
+            self.dynamic_codes()?
+            self.stage = IN_HUFF
+        } else {
+            return Err(CompressError.BadBlockType)
+        }
+        return Ok(PRODUCED)
+    }
+
+    // A dynamic block's codes, from the code lengths it starts with.
+    fun dynamic_codes(var self) -> Result<(), CompressError> {
+        let nlen = self.take_bits(5)? + 257
+        let ndist = self.take_bits(5)? + 1
+        let ncode = self.take_bits(4)? + 4
+        if nlen > 286 || ndist > 30 { return Err(CompressError.BadCodeLengths) }
+        let order: [int32] = [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15]
+        var cl: [int32] = []
+        for i in 0..19 { cl.push(0) }
+        for i in 0..ncode { cl[order[i]] = self.take_bits(3)? }
+        let (lencode, lleft) = build_huff(cl, 0, 19)
+        if lleft != 0 { return Err(CompressError.BadCodeLengths) }
+        var lens: [int32] = []
+        while lens.len() < nlen + ndist {
+            let sym = self.take_sym(lencode)?
+            if sym < 16 {
+                lens.push(sym)
+            } else {
+                var len = 0
+                var rep = 0
+                if sym == 16 {
+                    if lens.len() == 0 { return Err(CompressError.BadCodeLengths) }
+                    len = lens[^1]
+                    rep = 3 + self.take_bits(2)?
+                } else if sym == 17 {
+                    rep = 3 + self.take_bits(3)?
+                } else {
+                    rep = 11 + self.take_bits(7)?
+                }
+                if lens.len() + rep > nlen + ndist { return Err(CompressError.BadCodeLengths) }
+                for i in 0..rep { lens.push(len) }
+            }
+        }
+        if lens[256] == 0 { return Err(CompressError.BadCodeLengths) }
+        let (lit, left) = build_huff(lens, 0, nlen)
+        if !usable(lit, left, nlen) { return Err(CompressError.BadCodeLengths) }
+        let (dist, dleft) = build_huff(lens, nlen, ndist)
+        if !usable(dist, dleft, ndist) { return Err(CompressError.BadCodeLengths) }
+        self.lit = lit
+        self.dist = dist
+        return Ok(())
+    }
+
+    // A stored block's LEN and NLEN.
+    fun stored_header(var self) -> Result<int32, CompressError> {
+        self.unread()
+        if self.avail() < 4 {
+            if self.eof { return Err(CompressError.Truncated) }
+            return Ok(NEED_INPUT)
+        }
+        let p = self.ipos
+        let len = (self.inp[p] as int32) | ((self.inp[p + 1] as int32) << 8)
+        let nlen = (self.inp[p + 2] as int32) | ((self.inp[p + 3] as int32) << 8)
+        if len != (nlen ^ 0xFFFF) { return Err(CompressError.BadStoredLength) }
+        self.ipos = p + 4
+        self.left = len
+        self.stage = IN_STORED
+        return Ok(PRODUCED)
+    }
+
+    // A stored block's bytes.
+    fun stored(var self, target: int) -> Result<int32, CompressError> {
+        var out = self.out
+        self.out = []
+        var ipos = self.ipos
+        let inp = self.inp
+        let ilen = inp.len()
+        var left = self.left
+        while left > 0 && ipos < ilen && out.len() - self.opos < target {
+            out.push(inp[ipos])
+            ipos += 1
+            left -= 1
+        }
+        self.out = out
+        self.ipos = ipos
+        self.left = left
+        if left == 0 {
+            self.end_block()
+            return Ok(PRODUCED)
+        }
+        if ipos >= ilen {
+            if self.eof { return Err(CompressError.Truncated) }
+            return Ok(NEED_INPUT)
+        }
+        return Ok(PRODUCED)
+    }
+
+    // After a block: the next one, or the trailer.
+    fun end_block(var self) {
+        if !self.last {
+            self.stage = AT_BLOCK
+        } else {
+            self.unread()
+            if self.format == RAW { self.stage = AT_END } else { self.stage = AT_TRAILER }
+        }
+    }
+
+    // A block of Huffman codes: literals, and lengths and distances back.
+    fun huff(var self, target: int) -> Result<int32, CompressError> {
+        var out = self.out
+        self.out = []
+        let ring = self.ring
+        let wp = self.wp
+        let in_prev = self.in_prev
+        let prev = self.prev
+        let plen = prev.len()
+        // a back reference reaches `before + out.len()` bytes back
+        let before = self.hist - self.base
+        let inp = self.inp
+        let ilen = inp.len()
+        let lit = self.lit
+        let dist = self.dist
+        let lfast = lit.fast
+        let dfast = dist.fast
+        let lbase = self.lbase
+        let lext = self.lext
+        let dbase = self.dbase
+        let dext = self.dext
+        var limit = 0x7FFFFFFF
+        if target < 0x7FFFFFFF - self.opos { limit = self.opos + target }
+        let eof = self.eof
+        var bits = self.bits
+        var nbits = self.nbits
+        var ipos = self.ipos
+        var status = PRODUCED
+        var ended = false
+        while out.len() < limit {
+            if nbits < 48 {
+                while nbits <= 56 && ipos < ilen {
+                    bits = bits | ((inp[ipos] as uint64) << (nbits as uint64))
+                    ipos += 1
+                    nbits += 8
+                }
+                if nbits < 48 && !eof {
+                    status = NEED_INPUT
+                    break
+                }
+            }
+            var e = lfast[(bits & FAST_MASK) as int]
+            if e == 0 {
+                e = slow_decode(lit, bits)
+                if e < 0 { return Err(bad_code(nbits)) }
+            }
+            var l = e & 15
+            if l > nbits { return Err(CompressError.Truncated) }
+            bits = bits >> (l as uint64)
+            nbits -= l
+            var sym = e >> 4
+            if sym < 256 {
+                out.push(sym as uint8)
+                continue
+            }
+            if sym == 256 {
+                ended = true
+                break
+            }
+            sym -= 257
+            if sym >= 29 { return Err(CompressError.BadCode) }
+            var len = lbase[sym]
+            let lx = lext[sym]
+            if lx > 0 {
+                if lx > nbits { return Err(CompressError.Truncated) }
+                len += (bits & ((1u64 << (lx as uint64)) - 1u64)) as int32
+                bits = bits >> (lx as uint64)
+                nbits -= lx
+            }
+            e = dfast[(bits & FAST_MASK) as int]
+            if e == 0 {
+                e = slow_decode(dist, bits)
+                if e < 0 { return Err(bad_code(nbits)) }
+            }
+            l = e & 15
+            if l > nbits { return Err(CompressError.Truncated) }
+            bits = bits >> (l as uint64)
+            nbits -= l
+            let dsym = e >> 4
+            if dsym >= 30 { return Err(CompressError.BadCode) }
+            var d = dbase[dsym]
+            let dx = dext[dsym]
+            if dx > 0 {
+                if dx > nbits { return Err(CompressError.Truncated) }
+                d += (bits & ((1u64 << (dx as uint64)) - 1u64)) as int32
+                bits = bits >> (dx as uint64)
+                nbits -= dx
+            }
+            if d > before + out.len() { return Err(CompressError.DistanceTooFar) }
+            var src = out.len() - d
+            var k = 0
+            while src < 0 && k < len {
+                if in_prev { out.push(prev[plen + src]) } else { out.push(ring[(wp + src) & WINDOW_MASK]) }
+                src += 1
+                k += 1
+            }
+            while k < len {
+                out.push(out[src])
+                src += 1
+                k += 1
+            }
+        }
+        self.out = out
+        self.bits = bits
+        self.nbits = nbits
+        self.ipos = ipos
+        if ended { self.end_block() }
+        return Ok(status)
+    }
+
+    // A container's trailer: the checksum, and gzip's length.
+    fun trailer(var self) -> Result<int32, CompressError> {
+        var need = 4
+        if self.format == GZIP { need = 8 }
+        if self.avail() < need {
+            if self.eof { return Err(CompressError.Truncated) }
+            return Ok(NEED_INPUT)
+        }
+        self.sum()
+        let p = self.ipos
+        if self.format == GZIP {
+            if le32(self.inp, p) != self.ck { return Err(CompressError.ChecksumMismatch) }
+            if le32(self.inp, p + 4) != self.size { return Err(CompressError.LengthMismatch) }
+            self.stage = AT_NEXT
+        } else {
+            if be32(self.inp, p) != self.ck { return Err(CompressError.ChecksumMismatch) }
+            self.stage = AT_END
+        }
+        self.ipos = p + need
+        return Ok(PRODUCED)
+    }
+
+    // gzip: after a member, another one or the end of the input. Zero bytes
+    // there are padding, as gzip and Python take them.
+    fun next_member(var self) -> Result<int32, CompressError> {
+        while self.avail() > 0 && self.inp[self.ipos] == 0u8 { self.ipos += 1 }
+        if self.avail() == 0 {
+            if self.eof {
+                self.stage = AT_END
+                return Ok(FINISHED)
+            }
+            return Ok(NEED_INPUT)
+        }
+        if self.inp[self.ipos] != 0x1Fu8 { return Err(CompressError.TrailingData) }
+        self.ck = 0
+        self.size = 0
+        self.ck_from = self.out.len()
+        self.hist = 0
+        self.base = self.out.len()
+        self.stage = AT_HEADER
+        return Ok(PRODUCED)
+    }
+}
+
+// The bytes of output a back reference may reach: all there are, up to the
+// window.
+#test(5)[5]
+#test(70000)[32768]
+fun clamp_hist(n: int32) -> int32 {
+    if n > WINDOW { return WINDOW }
+    return n
+}
+
+// A code that isn't there: 15 bits, the longest code, that start none, or
+// the input's end, if that came first.
+#test(0)[CompressError.Truncated]
+#test(14)[CompressError.Truncated]
+#test(15)[CompressError.BadCode]
+fun bad_code(nbits: int32) -> CompressError {
+    if nbits < 15 { return CompressError.Truncated }
+    return CompressError.BadCode
+}
+
+// The fixed codes of RFC 1951 3.2.6: literal/length, then distance. Both
+// have codes for the symbols DEFLATE doesn't use (286 and 287, 30 and 31),
+// which are `BadCode`.
+fun fixed_codes() -> [Huff] {
+    var lens: [int32] = []
+    for s in 0..288 {
+        if s < 144 {
+            lens.push(8)
+        } else if s < 256 {
+            lens.push(9)
+        } else if s < 280 {
+            lens.push(7)
+        } else {
+            lens.push(8)
+        }
+    }
+    let (lit, _) = build_huff(lens, 0, 288)
+    var dl: [int32] = []
+    for s in 0..32 { dl.push(5) }
+    let (dist, _) = build_huff(dl, 0, 32)
+    return [lit, dist]
+}
+
+// The little-endian 32-bit number at `b[p]`.
+#test([1u8, 2u8, 3u8, 4u8], 0)[0x04030201u32]
+fun le32(b: [uint8], p: int32) -> uint32 {
+    return (b[p] as uint32) | ((b[p + 1] as uint32) << 8u32) |
+        ((b[p + 2] as uint32) << 16u32) | ((b[p + 3] as uint32) << 24u32)
+}
+
+// The big-endian 32-bit number at `b[p]`.
+#test([1u8, 2u8, 3u8, 4u8], 0)[0x01020304u32]
+fun be32(b: [uint8], p: int32) -> uint32 {
+    return ((b[p] as uint32) << 24u32) | ((b[p + 1] as uint32) << 16u32) |
+        ((b[p + 2] as uint32) << 8u32) | (b[p + 3] as uint32)
+}
+
+// The end of a gzip header at `b[p]`, -1 if `b` ends inside it.
+// `t`: `crc_tables()`, for the header's CRC.
+fun gzip_header(t: [uint32], b: [uint8], p: int32) -> Result<int32, CompressError> {
+    let n = b.len()
+    if n - p < 10 {
+        if n > p && b[p] != 0x1Fu8 { return Err(CompressError.BadHeader) }
+        if n > p + 1 && b[p + 1] != 0x8Bu8 { return Err(CompressError.BadHeader) }
+        return Ok(-1)
+    }
+    if b[p] != 0x1Fu8 || b[p + 1] != 0x8Bu8 || b[p + 2] != 8u8 { return Err(CompressError.BadHeader) }
+    let flags = b[p + 3]
+    if (flags & 0xE0u8) != 0u8 { return Err(CompressError.BadHeader) }
+    var q = p + 10
+    if (flags & 4u8) != 0u8 {
+        if n - q < 2 { return Ok(-1) }
+        q += 2 + ((b[q] as int32) | ((b[q + 1] as int32) << 8))
+        if q > n { return Ok(-1) }
+    }
+    if (flags & 8u8) != 0u8 {
+        q = past_zero(b, q)
+        if q < 0 { return Ok(-1) }
+    }
+    if (flags & 16u8) != 0u8 {
+        q = past_zero(b, q)
+        if q < 0 { return Ok(-1) }
+    }
+    if (flags & 2u8) != 0u8 {
+        if n - q < 2 { return Ok(-1) }
+        let crc = crc32_part(t, 0, b, p, q) & 0xFFFFu32
+        let want = (b[q] as uint32) | ((b[q + 1] as uint32) << 8u32)
+        if crc != want { return Err(CompressError.ChecksumMismatch) }
+        q += 2
+    }
+    return Ok(q)
+}
+
+// The offset past the first zero byte of `b` from `p` on, or -1.
+#test([1u8, 0u8, 2u8], 0)[2]
+#test([1u8, 2u8], 0)[-1]
+fun past_zero(b: [uint8], p: int32) -> int32 {
+    var i = p
+    while i < b.len() {
+        if b[i] == 0u8 { return i + 1 }
+        i += 1
+    }
+    return -1
+}
+
+// The end of a zlib header at `b[p]`, -1 if `b` ends inside it.
+fun zlib_header(b: [uint8], p: int32) -> Result<int32, CompressError> {
+    if b.len() - p < 2 { return Ok(-1) }
+    let cmf = b[p] as int32
+    let flg = b[p + 1] as int32
+    if (cmf * 256 + flg) % 31 != 0 || (cmf & 15) != 8 || (cmf >> 4) > 7 {
+        return Err(CompressError.BadHeader)
+    }
+    if (flg & 0x20) != 0 { return Err(CompressError.PresetDictionary) }
+    return Ok(p + 2)
+}
+
+// --- The checksums ------------------------------------------------------------------
+//
+// CRC-32 and Adler-32 as std.hash computes them (`crc32_update_bytes`,
+// `adler32_update_bytes`), here for now: a module of std that imports
+// std.hash can't run its cases natively (MYLA-360), and D166 moves them to a
+// module of their own (MYLA-359). These take a part of the bytes, and the
+// decoder keeps the CRC's tables.
+
+// CRC-32's eight tables of slicing by 8: entry k * 256 + x is the register
+// after the byte x and k zero bytes (the first, k = 0, every CRC-32 has).
+fun crc_tables() -> [uint32] {
+    var t: [uint32] = []
+    for x in 0..256 {
+        var c = x as uint32
+        for i in 0..8 {
+            if (c & 1u32) != 0u32 { c = 0xEDB88320u32 ^ (c >> 1u32) } else { c = c >> 1u32 }
+        }
+        t.push(c)
+    }
+    var k = 256
+    while k < 2048 {
+        let prev = t[k - 256]
+        t.push((prev >> 8u32) ^ t[(prev & 0xFFu32) as int])
+        k += 1
+    }
+    return t
+}
+
+// The CRC-32 (CRC-32/ISO-HDLC, as zlib, gzip and PNG compute it) of the
+// bytes behind `crc` followed by b[from:to]; `t`: `crc_tables()`.
+#test(crc_tables(), 0u32, text("123456789"), 0, 9)[0xCBF43926u32]
+#test(crc_tables(), 0u32, text("x123456789y"), 1, 10)[0xCBF43926u32]
+#test(crc_tables(), crc32_part(crc_tables(), 0u32, text("1234"), 0, 4), text("56789"), 0, 5)[0xCBF43926u32]
+#test(crc_tables(), 0u32, text("The quick brown fox jumps over the lazy dog"), 0, 43)[0x414FA339u32]
+#test(crc_tables(), 0u32, text(""), 0, 0)[0u32]
+fun crc32_part(t: [uint32], crc: uint32, b: [uint8], from_i: int32, to: int32) -> uint32 {
+    var c = crc ^ 0xFFFFFFFFu32
+    var i = from_i
+    while i + 8 <= to {
+        c = c ^ ((b[i] as uint32) | ((b[i + 1] as uint32) << 8u32) | ((b[i + 2] as uint32) << 16u32) |
+            ((b[i + 3] as uint32) << 24u32))
+        c = t[1792 + (c & 0xFFu32) as int] ^ t[1536 + ((c >> 8u32) & 0xFFu32) as int] ^
+            t[1280 + ((c >> 16u32) & 0xFFu32) as int] ^ t[1024 + (c >> 24u32) as int] ^
+            t[768 + b[i + 4] as int] ^ t[512 + b[i + 5] as int] ^ t[256 + b[i + 6] as int] ^ t[b[i + 7] as int]
+        i += 8
+    }
+    while i < to {
+        c = t[((c ^ (b[i] as uint32)) & 0xFFu32) as int] ^ (c >> 8u32)
+        i += 1
+    }
+    return c ^ 0xFFFFFFFFu32
+}
+
+// The Adler-32 (RFC 1950) of the bytes behind `adler` followed by
+// b[from:to]: start from 1. The sums are reduced once every 5552 bytes, the
+// most after which they still fit 32 bits.
+#test(1u32, text("Wikipedia"), 0, 9)[0x11E60398u32]
+#test(adler32_part(1u32, text("Wiki"), 0, 4), text("Wikipedia"), 4, 9)[0x11E60398u32]
+#test(1u32, text("123456789"), 0, 9)[0x091E01DEu32]
+#test(1u32, text(""), 0, 0)[1u32]
+fun adler32_part(adler: uint32, bytes: [uint8], from_i: int32, to: int32) -> uint32 {
+    var a = adler & 0xFFFFu32
+    var b = adler >> 16u32
+    var i = from_i
+    while i < to {
+        var end = i + 5552
+        if end > to { end = to }
+        while i < end {
+            a += bytes[i] as uint32
+            b += a
+            i += 1
+        }
+        a = a % 65521u32
+        b = b % 65521u32
+    }
+    return (b << 16u32) | a
+}
+
+// --- All at once --------------------------------------------------------------------
+
+// The output of `b` as one stream of the container `format`, every byte of it.
+fun decompress(b: [uint8], format: int32) -> Result<[uint8], CompressError> {
+    var d = new_inflate(format)
+    d.feed(b, true)
+    let status = d.run(0x7FFFFFFF)?
+    if status != FINISHED { return Err(CompressError.Truncated) }
+    if d.avail() > 0 { return Err(CompressError.TrailingData) }
+    return Ok(d.out)
+}
+
+// The bytes the raw DEFLATE stream `b` (RFC 1951, no header) stands for.
+// Bytes after its end are `TrailingData`.
+#test(unhex("0300"))[Ok(text(""))] // the empty stream: one fixed block
+#test(unhex("010500faff68656c6c6f"))[Ok(text("hello"))] // stored
+#test(unhex("cb48cdc9c90700"))[Ok(text("hello"))] // fixed codes
+#test(unhex("358ccb0d80300cc55679dc117b708701821a91a8a5416da0627b3e12371f6c4f4d734cdcc37f48ea9e18d5a9f4106b18d12c072e68428ecb0e50e10ef30e5aec64b8f0639414500da2abbc8fc82004a5ed49a1f9936abc861b"))[Ok(text("Twinkle, twinkle, little star, how I wonder what you are! Up above the world so high, like a diamond in the sky."))] // dynamic codes
+#test(unhex("4a4c02000000ffff4b4e0100"))[Ok(text("abcd"))] // a fixed block, an empty stored one, a fixed one
+#test(unhex("4b4c1c05c40200"))[Ok(run_of(97u8, 300))] // distance 1, length 258
+#test(unhex("4b040200"))[Ok(text("aaaa"))]
+#test(unhex(""))[Err(CompressError.Truncated)]
+#test(unhex("cb48cdc9c9"))[Err(CompressError.Truncated)] // no end of block
+#test(unhex("010500faff6865"))[Err(CompressError.Truncated)] // a stored block cut short
+#test(unhex("07"))[Err(CompressError.BadBlockType)]
+#test(unhex("010500feff68656c6c6f"))[Err(CompressError.BadStoredLength)]
+#test(unhex("030200"))[Err(CompressError.DistanceTooFar)] // a match before any output
+#test(unhex("4b044200"))[Err(CompressError.DistanceTooFar)] // distance 2 after one byte
+#test(unhex("1b0300"))[Err(CompressError.BadCode)] // literal/length symbol 286
+#test(unhex("4b043e00"))[Err(CompressError.BadCode)] // distance symbol 30
+#test(unhex("05009204"))[Err(CompressError.BadCodeLengths)] // an over-subscribed code-length code
+#test(unhex("05000224"))[Err(CompressError.BadCodeLengths)] // a repeat with nothing before it
+#test(unhex("050080e47f1b"))[Err(CompressError.BadCodeLengths)] // no code for the end of the block
+#test(unhex("05c081080000000020d6fd258e"))[Ok(text("aa"))] // a dynamic block without distance codes
+#test(unhex("0dc0010900000080a0adfe3f515a"))[Ok(text("aaaa"))] // one distance code, of length 1
+#test(unhex("05c0010500000000a0ffaf03"))[Ok(text(""))] // one literal/length code, of length 1
+#test(unhex("0580010500000080febf0e"))[Err(CompressError.BadCodeLengths)] // one code, of length 2
+#test(unhex("05c0010900000080a0adfe3f1102"))[Err(CompressError.BadCodeLengths)] // codes of lengths 1 and 2
+#test(unhex("0dc0010900000080a0adfe3f519900"))[Err(CompressError.BadCodeLengths)] // one distance code, of length 2
+#test(unhex("030000"))[Err(CompressError.TrailingData)]
+pub fun inflate(b: [uint8]) -> Result<[uint8], CompressError> {
+    return decompress(b, RAW)
+}
+
+// The bytes the gzip data `b` (RFC 1952) stands for: every member's, one
+// after the other (zero bytes after one are padding, as for gzip). The
+// header's fields (name, comment, time, extra) are checked as far as they
+// have checks and skipped.
+#test(unhex("1f8b08000000000002ffcb48cdc9c9e7020020303a3606000000"))[Ok(text("hello\n"))]
+#test(unhex("1f8b08000000000002ff03000000000000000000"))[Ok(text(""))]
+#test(unhex("1f8b081e0000000000ff040061620100612e747874006e6f746500e1f9cb48cdc9c9e7020020303a3606000000"))[Ok(text("hello\n"))] // FEXTRA, FNAME, FCOMMENT, FHCRC
+#test(unhex("1f8b08000000000002ffcbcf4b5500004961ac23040000001f8b08000000000002ff2b29cf0700668aca1103000000"))[Ok(text("one two"))] // two members
+#test(unhex("1f8b081e0000000000ff040061620100612e747874006e6f746500e1f8cb48cdc9c9e7020020303a3606000000"))[Err(CompressError.ChecksumMismatch)] // the header's CRC
+#test(unhex("1f8b08000000000002ffcb48cdc9c9e7020020303a3706000000"))[Err(CompressError.ChecksumMismatch)]
+#test(unhex("1f8b08000000000002ffcb48cdc9c9e7020020303a3607000000"))[Err(CompressError.LengthMismatch)]
+#test(unhex(""))[Err(CompressError.Truncated)]
+#test(unhex("1f8b0800000000"))[Err(CompressError.Truncated)] // in the header
+#test(unhex("1f8b08080000000002ff612e74"))[Err(CompressError.Truncated)] // in the name
+#test(unhex("1f8b08000000000002ffcb48cdc9c9e7020020303a36060000"))[Err(CompressError.Truncated)] // in the trailer
+#test(unhex("1f8b08000000000002ffcb48cdc9c9e7020020303a36060000001f8b"))[Err(CompressError.Truncated)] // a second member cut short
+#test(unhex("1f8c08000000000002ff03000000000000000000"))[Err(CompressError.BadHeader)]
+#test(unhex("1f8b07000000000002ff03000000000000000000"))[Err(CompressError.BadHeader)] // not DEFLATE
+#test(unhex("1f8b08200000000002ff03000000000000000000"))[Err(CompressError.BadHeader)] // a reserved flag
+#test(unhex("78"))[Err(CompressError.BadHeader)]
+#test(unhex("1f8b08000000000002ff0300000000000000000000"))[Ok(text(""))] // zeros after a member: padding
+#test(unhex("1f8b08000000000002ff030000000000000000000000ab"))[Err(CompressError.TrailingData)]
+pub fun gunzip(b: [uint8]) -> Result<[uint8], CompressError> {
+    return decompress(b, GZIP)
+}
+
+// The bytes the zlib stream `b` (RFC 1950) stands for.
+#test(unhex("7801010500faff68656c6c6f062c0215"))[Ok(text("hello"))]
+#test(unhex("7801cb48cdc9c9d751c840a200442806d5"))[Ok(text("hello, hello, hello"))]
+#test(unhex("78dacb48cdc9c9d751c840a200442806d5"))[Ok(text("hello, hello, hello"))]
+#test(unhex("789c030000000001"))[Ok(text(""))]
+#test(unhex("789c030000000002"))[Err(CompressError.ChecksumMismatch)]
+#test(unhex("789c0300000000"))[Err(CompressError.Truncated)]
+#test(unhex("78"))[Err(CompressError.Truncated)]
+#test(unhex("789d030000000001"))[Err(CompressError.BadHeader)] // the header check
+#test(unhex("7709030000000001"))[Err(CompressError.BadHeader)] // a method that isn't DEFLATE
+#test(unhex("881c030000000001"))[Err(CompressError.BadHeader)] // a window of 64 KiB
+#test(unhex("78bb0000000103000000000001"))[Err(CompressError.PresetDictionary)]
+#test(unhex("789c03000000000100"))[Err(CompressError.TrailingData)]
+pub fun zlib_decompress(b: [uint8]) -> Result<[uint8], CompressError> {
+    return decompress(b, ZLIB)
+}
+
+// --- As a stream --------------------------------------------------------------------
+
+// How many bytes a read of the inner stream asks for, and how much output a
+// read decodes ahead at least.
+const IN_CHUNK: int32 = 32768
+const OUT_CHUNK: int32 = 65536
+
+// A stream of the decompressed bytes of the stream it reads (`Read`). It
+// reads its inner stream in chunks, so that stream is read past the end of
+// the compressed data. A corrupt stream is `IoError.InvalidInput`, and
+// `error()` says why; a failure of the inner stream is its own `IoError`.
+pub struct Decoder<R> {
+    src: [R],           // the inner stream, as `Buffered` keeps it
+    core: Inflate,
+}
+
+// A stream of what the raw DEFLATE stream `r` gives decompressed; it ends
+// where the DEFLATE stream ends.
+pub fun inflate_reader<R: Read>(r: R) -> Decoder<R> {
+    return Decoder { src: [r], core: new_inflate(RAW) }
+}
+
+// A stream of what the gzip data `r` gives decompressed, member after
+// member, up to the end of `r`.
+pub fun gzip_reader<R: Read>(r: R) -> Decoder<R> {
+    return Decoder { src: [r], core: new_inflate(GZIP) }
+}
+
+// A stream of what the zlib stream `r` gives decompressed; it ends where
+// the zlib stream ends.
+pub fun zlib_reader<R: Read>(r: R) -> Decoder<R> {
+    return Decoder { src: [r], core: new_inflate(ZLIB) }
+}
+
+impl<R: Read> Decoder<R> {
+    // Why the stream failed, if it did.
+    fun error(self) -> Option<CompressError> {
+        return self.core.err
+    }
+
+    // The inner stream (read past the compressed data, see above).
+    fun into_inner(self) -> R {
+        return self.src[0]
+    }
+
+    // Everything up to the end of the stream, or why it couldn't be read.
+    fun read_to_end(var self) -> Result<[uint8], CompressError> {
+        var all: [uint8] = []
+        while self.ready()? {
+            if all.len() == 0 {
+                all = self.core.take(0x7FFFFFFF)
+            } else {
+                for b in self.core.take(0x7FFFFFFF) { all.push(b) }
+            }
+        }
+        return Ok(all)
+    }
+
+    // Whether output is waiting, decoded for it if need be; false at the end.
+    fun ready(var self) -> Result<bool, CompressError> {
+        match self.core.err {
+            Some(e) => { return Err(e) }
+            None => {}
+        }
+        while !self.core.pending() {
+            let status = self.core.run(OUT_CHUNK)?
+            if status == FINISHED && !self.core.pending() { return Ok(false) }
+            if status == NEED_INPUT {
+                var r = self.src.pop()
+                let got = r.read(IN_CHUNK)
+                self.src.push(r)
+                match got {
+                    Ok(b) => { self.core.feed(b, b.len() == 0) }
+                    Err(e) => {
+                        self.core.err = Some(CompressError.Io(e))
+                        return Err(CompressError.Io(e))
+                    }
+                }
+            }
+        }
+        return Ok(true)
+    }
+
+    // `ready` with the error as an `IoError`.
+    fun fill(var self) -> Result<bool, IoError> {
+        return match self.ready() {
+            Ok(more) => Ok(more)
+            Err(CompressError.Io(e)) => Err(e)
+            Err(_) => Err(IoError.InvalidInput)
+        }
+    }
+}
+
+impl<R: Read> Read for Decoder<R> {
+    fun read(var self, n: int) -> Result<[uint8], IoError> {
+        if n <= 0 { return Ok([]) }
+        if !self.fill()? { return Ok([]) }
+        return Ok(self.core.take(n))
+    }
+
+    fun read_str(var self, n: int) -> Result<str, IoError> {
+        let b = self.read(n)?
+        var sb = StringBuilder()
+        for x in b { sb.append_byte(x) }
+        return Ok(sb.build())
+    }
+}
+
+// --- Test helpers ---------------------------------------------------------------
+
+// The bytes of `s`.
+fun text(s: str) -> [uint8] {
+    var out: [uint8] = []
+    for i in 0..s.len() { out.push(s[i]) }
+    return out
+}
+
+// `n` bytes `b`.
+#test(7u8, 2)[[7u8, 7u8]]
+fun run_of(b: uint8, n: int) -> [uint8] {
+    var out: [uint8] = []
+    for i in 0..n { out.push(b) }
+    return out
+}
+
+// The bytes the hex digits of `s` stand for (lower case, whole bytes).
+#test("00ff1a")[[0u8, 255u8, 26u8]]
+fun unhex(s: str) -> [uint8] {
+    var out: [uint8] = []
+    var i = 0
+    while i + 1 < s.len() {
+        out.push(((hex_digit(s[i]) << 4) | hex_digit(s[i + 1])) as uint8)
+        i += 2
+    }
+    return out
+}
+
+fun hex_digit(c: uint8) -> int32 {
+    if c >= '0' && c <= '9' { return (c - '0') as int32 }
+    return (c - 'a') as int32 + 10
+}
+
+// The input in pieces of 1 to `most` bytes, or a failure once `fail_at`
+// bytes are read (-1: never).
+struct Trickle {
+    data: [uint8],
+    pos: int,
+    step: int,
+    most: int,
+    fail_at: int,
+}
+
+fun trickle(b: [uint8], most: int) -> Trickle {
+    return Trickle { data: b, pos: 0, step: 0, most: most, fail_at: -1 }
+}
+
+impl Read for Trickle {
+    fun read(var self, n: int) -> Result<[uint8], IoError> {
+        if self.fail_at >= 0 && self.pos >= self.fail_at { return Err(IoError.BrokenPipe) }
+        self.step = self.step % self.most + 1
+        var end = self.pos + self.step
+        if end > self.pos + n { end = self.pos + n }
+        if end > self.data.len() { end = self.data.len() }
+        let out = self.data[self.pos:end]
+        self.pos = end
+        return Ok(out)
+    }
+
+    fun read_str(var self, n: int) -> Result<str, IoError> {
+        let b = self.read(n)?
+        var sb = StringBuilder()
+        for x in b { sb.append_byte(x) }
+        return Ok(sb.build())
+    }
+}
+
+// Everything `d` gives, in reads of 1 to `most` bytes; None on an error or
+// a read that gives more than it was asked for.
+fun read_pieces<R: Read>(d: Decoder<R>, most: int) -> Option<[uint8]> {
+    var r = d
+    var all: [uint8] = []
+    var k = 0
+    while true {
+        k = k % most + 1
+        match r.read(k) {
+            Ok(b) => {
+                if b.len() == 0 { return Some(all) }
+                if b.len() > k { return None }
+                for x in b { all.push(x) }
+            }
+            Err(_) => { return None }
+        }
+    }
+    unreachable()
+}
+
+// The `IoError` a read of `d` ends with as its errno, and the code of the
+// error `error()` gives then; (0, 0) if the stream ends well.
+fun read_error<R: Read>(d: Decoder<R>) -> (int32, int32) {
+    var r = d
+    while true {
+        match r.read(1000) {
+            Ok(b) => { if b.len() == 0 { return (0, 0) } }
+            Err(e) => {
+                let why = match r.error() {
+                    Some(c) => c.code()
+                    None => 0
+                }
+                return (io_code(e), why)
+            }
+        }
+    }
+    unreachable()
+}
+
+// Whether a function's output and a stream's are the same bytes.
+fun agree(a: Result<[uint8], CompressError>, b: Option<[uint8]>) -> bool {
+    return match (a, b) {
+        (Ok(x), Some(y)) => x == y
+        _ => false
+    }
+}
+
+// A result as text, to compare it (the modules of std have no `==` on
+// `Result` and `Option`).
+fun shown(r: Result<[uint8], CompressError>) -> str {
+    return match r {
+        Ok(b) => "ok " + shown_bytes(b)
+        Err(e) => "error " + e.message()
+    }
+}
+
+fun shown_some(r: Option<[uint8]>) -> str {
+    return match r {
+        Some(b) => "ok " + shown_bytes(b)
+        None => "none"
+    }
+}
+
+fun shown_bytes(b: [uint8]) -> str {
+    var sb = StringBuilder()
+    for x in b { sb.append(f"{x} ") }
+    return sb.build()
+}
+
+// Streams read in pieces, from an inner stream that gives pieces, give what
+// the functions give.
+#test
+fun reads_in_pieces() {
+    let gz = unhex("1f8b08000000000002ffcbcf4b5500004961ac23040000001f8b08000000000002ff2b29cf0700668aca1103000000")
+    let raw = unhex("358ccb0d80300cc55679dc117b708701821a91a8a5416da0627b3e12371f6c4f4d734cdcc37f48ea9e18d5a9f4106b18d12c072e68428ecb0e50e10ef30e5aec64b8f0639414500da2abbc8fc82004a5ed49a1f9936abc861b")
+    let zl = unhex("7801cb48cdc9c9d751c840a200442806d5")
+    let fields = unhex("1f8b081e0000000000ff040061620100612e747874006e6f746500e1f9cb48cdc9c9e7020020303a3606000000")
+    for most in [1, 2, 7, 100] {
+        assert(agree(gunzip(gz), read_pieces(gzip_reader(trickle(gz, most)), most)), f"gzip in pieces of {most}")
+        assert(agree(gunzip(fields), read_pieces(gzip_reader(trickle(fields, most)), most)), f"a gzip header in pieces of {most}")
+        assert(agree(inflate(raw), read_pieces(inflate_reader(trickle(raw, most)), most)), f"inflate in pieces of {most}")
+        assert(agree(zlib_decompress(zl), read_pieces(zlib_reader(trickle(zl, most)), most)), f"zlib in pieces of {most}")
+    }
+    var d = gzip_reader(from_bytes(gz))
+    assert(shown(d.read_to_end()) == shown(Ok(text("one two"))), "read_to_end")
+    assert(shown(d.read_to_end()) == shown(Ok([])), "read_to_end at the end")
+    var s = zlib_reader(from_bytes(zl))
+    let five = match s.read_str(5) {
+        Ok(t) => t
+        Err(_) => "<error>"
+    }
+    assert(five == "hello", "read_str")
+}
+
+// A raw stream ends where DEFLATE's stream ends, before what follows it.
+#test
+fun raw_stream_ends() {
+    var b = unhex("cb48cdc9c90700")
+    for x in text(" and more") { b.push(x) }
+    assert(shown_some(read_pieces(inflate_reader(from_bytes(b)), 3)) == shown(Ok(text("hello"))), "inflate_reader")
+    assert(shown(inflate(b)) == shown(Err(CompressError.TrailingData)), "inflate")
+}
+
+// A corrupt stream is `InvalidInput` (22), and `error()` says why; a
+// failure of the inner stream is its own (BrokenPipe, 32).
+#test
+fun reader_errors() {
+    let bad_crc = unhex("1f8b08000000000002ffcb48cdc9c9e7020020303a3706000000")
+    assert(read_error(gzip_reader(from_bytes(bad_crc))) == (22, CompressError.ChecksumMismatch.code()), "checksum")
+    let cut = unhex("cb48cdc9c9")
+    assert(read_error(inflate_reader(trickle(cut, 2))) == (22, CompressError.Truncated.code()), "truncated")
+    let far = unhex("030200")
+    assert(read_error(inflate_reader(from_bytes(far))) == (22, CompressError.DistanceTooFar.code()), "distance")
+    let header = unhex("789d030000000001")
+    assert(read_error(zlib_reader(from_bytes(header))) == (22, CompressError.BadHeader.code()), "a header")
+    let gz = unhex("1f8b08000000000002ffcb48cdc9c9e7020020303a3606000000")
+    var failing = trickle(gz, 3)
+    failing.fail_at = 12
+    assert(read_error(gzip_reader(failing)) == (32, 32), "an inner failure")
+    var r = gzip_reader(from_bytes(bad_crc))
+    let first = r.read(100)
+    let failed = match first {
+        Err(IoError.InvalidInput) => true
+        _ => false
+    }
+    assert(failed, "the checksum")
+    let again = r.read(100)
+    let stays = match again {
+        Err(IoError.InvalidInput) => true
+        _ => false
+    }
+    assert(stays, "the error stays")
+    assert(shown(r.read_to_end()) == shown(Err(CompressError.ChecksumMismatch)), "read_to_end gives it")
+}
+
+// A DEFLATE stream written bit by bit, as RFC 1951 3.1.1 packs it.
+struct BitWriter {
+    out: [uint8],
+    acc: uint64,
+    n: int,
+}
+
+fun bit_writer() -> BitWriter {
+    return BitWriter { out: [], acc: 0, n: 0 }
+}
+
+impl BitWriter {
+    // The low `k` bits of `v`, the lowest first.
+    fun put(var self, v: int, k: int) {
+        self.acc = self.acc | ((v as uint64) << (self.n as uint64))
+        self.n += k
+        while self.n >= 8 {
+            self.out.push((self.acc & 255u64) as uint8)
+            self.acc = self.acc >> 8u64
+            self.n -= 8
+        }
+    }
+
+    // A Huffman code of `k` bits, its highest bit first.
+    fun code(var self, c: int, k: int) {
+        self.put(reversed(c, k), k)
+    }
+
+    // A literal/length symbol of the fixed code.
+    fun fixed(var self, s: int) {
+        if s < 144 {
+            self.code(0x30 + s, 8)
+        } else if s < 256 {
+            self.code(0x190 + s - 144, 9)
+        } else if s < 280 {
+            self.code(s - 256, 7)
+        } else {
+            self.code(0xC0 + s - 280, 8)
+        }
+    }
+
+    // The header of a block of fixed codes.
+    fun fixed_block(var self, last: bool) {
+        self.put(if last { 1 } else { 0 }, 1)
+        self.put(1, 2)
+    }
+
+    // A stored block of `b`, its lengths from the next byte boundary.
+    fun stored(var self, b: [uint8], last: bool) {
+        self.put(if last { 1 } else { 0 }, 1)
+        self.put(0, 2)
+        if self.n > 0 { self.put(0, 8 - self.n) }
+        self.put(b.len() & 0xFFFF, 16)
+        self.put(b.len() ^ 0xFFFF, 16)
+        for x in b { self.out.push(x) }
+    }
+
+    fun done(self) -> [uint8] {
+        var b = self.out
+        if self.n > 0 { b.push((self.acc & 255u64) as uint8) }
+        return b
+    }
+}
+
+// Back references across the reads of a stream: the window is kept when
+// the output is handed out (in `ring`, and in `prev` once a run gave at
+// least 32 KiB), and a distance of 32768 reaches as far back as DEFLATE
+// allows.
+#test
+fun window_across_reads() {
+    var data: [uint8] = []
+    for i in 0..33000 { data.push(((i * 7 + i / 251) & 255) as uint8) }
+    var w = bit_writer()
+    w.stored(data, false)
+    var more: [uint8] = []
+    for i in 0..1000 { more.push((i & 255) as uint8) }
+    w.stored(more, false)
+    for x in more { data.push(x) }
+    w.fixed_block(true)
+    for k in 0..300 {
+        w.fixed(285)            // length 258
+        w.code(29, 5)           // distance 24577 + 8191 = 32768
+        w.put(8191, 13)
+    }
+    w.fixed(65)
+    w.fixed(257)                // length 3, distance 1
+    w.code(0, 5)
+    w.fixed(256)
+    for k in 0..300 * 258 { data.push(data[data.len() - 32768]) }
+    for k in 0..4 { data.push(65) }
+    let stream = w.done()
+    assert(agree(Ok(data), read_pieces(inflate_reader(from_bytes(stream)), 5000)), "reads of up to 5000 bytes")
+    assert(agree(Ok(data), read_pieces(inflate_reader(trickle(stream, 5000)), 70000)), "reads of up to 70000 bytes, from pieces of up to 5000")
+    // a distance one past the start of the output, and one that reaches it
+    for d in [1001, 1000] {
+        var far = bit_writer()
+        far.stored(more, false)
+        far.fixed_block(true)
+        far.fixed(257)
+        far.code(19, 5)         // distance 769 + 8 extra bits
+        far.put(d - 769, 8)
+        far.fixed(256)
+        let got = inflate(far.done())
+        if d > 1000 {
+            assert(shown(got) == shown(Err(CompressError.DistanceTooFar)), "too far")
+        } else {
+            var want = more
+            for k in 0..3 { want.push(more[k]) }
+            assert(agree(got, Some(want)), "as far as the start")
+        }
+    }
+}
+
+// The trailer of a stream longer than the lookahead, read in small pieces:
+// the bytes the bit buffer holds at the end of the last block came partly
+// from earlier pieces, and go back in front of the input.
+#test
+fun trailer_after_pieces() {
+    var data: [uint8] = []
+    for i in 0..2000 { data.push(((i * 13) & 255) as uint8) }
+    var w = bit_writer()
+    w.stored(data, false)
+    w.fixed_block(true)
+    for k in 0..1500 {          // the last block longer than the lookahead
+        let c = (k * 7) & 255
+        w.fixed(c)
+        data.push(c as uint8)
+    }
+    for k in 0..20 {
+        w.fixed(285)            // length 258
+        w.code(21, 5)           // distance 1537 + 463 = 2000
+        w.put(463, 9)
+    }
+    w.fixed(256)
+    for k in 0..20 * 258 { data.push(data[data.len() - 2000]) }
+    let body = w.done()
+    let n = data.len()
+    var z: [uint8] = [0x78u8, 0x01u8]
+    for x in body { z.push(x) }
+    let adler = adler32_part(1, data, 0, n)
+    for sh in [24u32, 16u32, 8u32, 0u32] { z.push(((adler >> sh) & 255u32) as uint8) }
+    var g = unhex("1f8b08000000000000ff")
+    for x in body { g.push(x) }
+    let crc = crc32_part(crc_tables(), 0, data, 0, n)
+    for sh in [0u32, 8u32, 16u32, 24u32] { g.push(((crc >> sh) & 255u32) as uint8) }
+    for sh in [0u32, 8u32, 16u32, 24u32] { g.push((((n as uint32) >> sh) & 255u32) as uint8) }
+    assert(agree(zlib_decompress(z), Some(data)), "zlib_decompress")
+    assert(agree(gunzip(g), Some(data)), "gunzip")
+    for most in [1, 5, 13] {
+        assert(agree(Ok(data), read_pieces(zlib_reader(trickle(z, most)), 4000)), f"zlib in pieces of {most}")
+        assert(agree(Ok(data), read_pieces(gzip_reader(trickle(g, most)), 4000)), f"gzip in pieces of {most}")
+    }
+}

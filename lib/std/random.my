@@ -1,0 +1,501 @@
+// std.random: pseudo-random numbers from a seeded generator (MYLA-337).
+//
+// An `Rng` is xoshiro256** (Blackman and Vigna, "Scrambled linear
+// pseudorandom number generators", 2018; https://prng.di.unimi.it/): 256 bits
+// of state, a period of 2^256 - 1, and each number made by shifts, rotations,
+// xors and two multiplications of 64-bit words. PCG64 was the other choice;
+// its 128-bit multiplication would be four 64-bit ones here, as Myla has no
+// 128-bit integers. `seeded(n)` fills the state from SplitMix64 started at
+// `n`, as the authors recommend, so that any seed, 0 too, gives a good
+// state; `from_os()` fills it from the system's entropy (`__random_bytes`).
+// It isn't for secrets: anyone who sees four numbers can work out the rest.
+//
+// A generator is a value. Its methods are `var self` methods that move it
+// on, and a copy goes on from where the original was: two copies give the
+// same numbers. A function that draws numbers takes the generator in a
+// struct field and draws in its own `var self` method, or returns it.
+//
+// - `int_in`, `int64_in` and `below` give every value of their range the
+//   same chance: Lemire's method ("Fast random integer generation in an
+//   interval", 2019) multiplies a random word by the size of the range, keeps
+//   the high half, and draws again in the rare case that the low half lies
+//   in the few values that would make some results more likely.
+// - `float` is a multiple of 2^-53 in [0, 1), from the top 53 bits.
+// - `shuffled` is Fisher and Yates's shuffle (Durstenfeld's form); each
+//   order is as likely as any other.
+
+// The generator: xoshiro256**'s four words of state, never all zero.
+#derive(Eq)
+pub struct Rng {
+    s0: uint64,
+    s1: uint64,
+    s2: uint64,
+    s3: uint64,
+}
+
+// SplitMix64's step: its state moves on by the golden ratio.
+const GOLDEN: uint64 = 0x9e3779b97f4a7c15
+
+// SplitMix64's output for the state `z` (Steele, Lea and Flood, 2014;
+// splitmix64.c at https://prng.di.unimi.it/).
+#test(0x9e3779b97f4a7c15u64)[16294208416658607535u64]
+fun mix64(z: uint64) -> uint64 {
+    var x = z
+    x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9
+    x = (x ^ (x >> 27)) * 0x94d049bb133111eb
+    return x ^ (x >> 31)
+}
+
+// The first `n` outputs of SplitMix64 started at `seed`.
+// splitmix64.c's own outputs for the seed 1234567 (also those of Java's
+// SplittableRandom):
+#test(1234567u64, 5)[[6457827717110365317u64, 3203168211198807973u64, 9817491932198370423u64, 4593380528125082431u64, 16408922859458223821u64]]
+fun splitmix64_firsts(seed: uint64, n: int) -> [uint64] {
+    var x = seed
+    var out: [uint64] = []
+    for i in 0..n {
+        x = x + GOLDEN
+        out.push(mix64(x))
+    }
+    return out
+}
+
+// A generator whose state SplitMix64 makes from `seed`: the same seed gives
+// the same numbers on every target.
+#test(42u64)[Rng { s0: 13679457532755275413u64, s1: 2949826092126892291u64, s2: 5139283748462763858u64, s3: 6349198060258255764u64 }]
+#test(0u64)[Rng { s0: 16294208416658607535u64, s1: 7960286522194355700u64, s2: 487617019471545679u64, s3: 17909611376780542444u64 }]
+pub fun seeded(seed: uint64) -> Rng {
+    let a = seed + GOLDEN
+    let b = a + GOLDEN
+    let c = b + GOLDEN
+    let d = c + GOLDEN
+    return Rng { s0: mix64(a), s1: mix64(b), s2: mix64(c), s3: mix64(d) }
+}
+
+// A generator seeded from the system's entropy (getrandom(2), WASI's
+// `random_get`): different numbers on every run. A system that gives none
+// is a failure.
+pub fun from_os() -> Rng {
+    let b = __random_bytes(32)
+    if b.len() != 32 {
+        panic("from_os: the system gave no random bytes")
+    }
+    var w: [uint64] = [0, 0, 0, 0]
+    for i in 0..32 {
+        w[i / 8] = w[i / 8] | ((b[i] as uint64) << ((i % 8) * 8) as uint64)
+    }
+    if (w[0] | w[1] | w[2] | w[3]) == 0 {
+        // the one state xoshiro can't leave; 2^-256 to happen
+        return seeded(0)
+    }
+    return Rng { s0: w[0], s1: w[1], s2: w[2], s3: w[3] }
+}
+
+// The high 64 bits of the 128-bit product of `a` and `b`.
+#test(0xffffffffffffffffu64, 0xffffffffffffffffu64)[0xfffffffffffffffeu64]
+#test(0x100000000u64, 0x100000000u64)[1u64]
+#test(12345u64, 67890u64)[0u64]
+#test(0x123456789abcdef0u64, 0xfedcba9876543210u64)[0x121fa00ad77d7422u64]
+fun mul_hi(a: uint64, b: uint64) -> uint64 {
+    let a_lo = a & 0xffffffff
+    let a_hi = a >> 32
+    let b_lo = b & 0xffffffff
+    let b_hi = b >> 32
+    let ll = a_lo * b_lo
+    let lh = a_lo * b_hi
+    let hl = a_hi * b_lo
+    let mid = (ll >> 32) + (lh & 0xffffffff) + (hl & 0xffffffff)
+    return a_hi * b_hi + (lh >> 32) + (hl >> 32) + (mid >> 32)
+}
+
+impl Rng {
+    // The next 64 random bits. xoshiro256**'s reference outputs for the
+    // state 1, 2, 3, 4 (`firsts` has ten of them):
+    #test(Rng { s0: 1u64, s1: 2u64, s2: 3u64, s3: 4u64 })[11520u64]
+    #test(seeded(42))[1546998764402558742u64]
+    fun next_u64(var self) -> uint64 {
+        let x = self.s1 * 5
+        let result = ((x << 7) | (x >> 57)) * 9
+        let t = self.s1 << 17
+        self.s2 ^= self.s0
+        self.s3 ^= self.s1
+        self.s1 ^= self.s2
+        self.s0 ^= self.s3
+        self.s2 ^= t
+        self.s3 = (self.s3 << 45) | (self.s3 >> 19)
+        return result
+    }
+
+    // The next 32 random bits: the high half of `next_u64`'s.
+    #test(seeded(42))[360188718u32]
+    fun next_u32(var self) -> uint32 {
+        return (self.next_u64() >> 32) as uint32
+    }
+
+    // A number in 0..n, each as likely; `n` must not be 0.
+    #test(seeded(42), 0xffffffffffffffffu64)[1546998764402558741u64]
+    #test(seeded(42), 1u64)[0u64]
+    #test(seeded(42), 0u64)[panic("below: the range 0..0 is empty")]
+    fun below(var self, n: uint64) -> uint64 {
+        if n == 0 {
+            panic("below: the range 0..0 is empty")
+        }
+        var x = self.next_u64()
+        if x * n < n {
+            // the values of the low half that would favour some results
+            let t = (0u64 - n) % n
+            while x * n < t {
+                x = self.next_u64()
+            }
+        }
+        return mul_hi(x, n)
+    }
+
+    // A number in lo..hi (`hi` not included, as in a `for` loop's range),
+    // each as likely. An empty range, `hi <= lo`, is a failure.
+    #test(seeded(42), 1, 7)[1] // a die
+    #test(seeded(42), -2147483648, 2147483647)[-1787294931]
+    #test(seeded(42), 5, 6)[5]
+    #test(seeded(42), 3, 3)[panic("int_in: the range 3..3 is empty")]
+    fun int_in(var self, lo: int, hi: int) -> int {
+        if hi <= lo {
+            panic(f"int_in: the range {lo}..{hi} is empty")
+        }
+        // the size of the range, which fits a uint32 even when the
+        // difference overflows an int
+        let n = (hi - lo) as uint32
+        var m = self.next_u32() as uint64 * n as uint64
+        if (m as uint32) < n {
+            let t = (0u32 - n) % n
+            while (m as uint32) < t {
+                m = self.next_u32() as uint64 * n as uint64
+            }
+        }
+        // wraps back into the range when the offset is past the int's top
+        return lo + (m >> 32) as int
+    }
+
+    // A number in lo..hi, each as likely, for `int64`s. An empty range,
+    // `hi <= lo`, is a failure.
+    #test(seeded(42), -1000000000000000000i64, 1000000000000000000i64)[-832274057880235478i64]
+    #test(seeded(42), -9223372036854775807i64 - 1, 9223372036854775807i64)[-7676373272452217067i64]
+    #test(seeded(42), 0i64, 0i64)[panic("int64_in: the range 0..0 is empty")]
+    fun int64_in(var self, lo: int64, hi: int64) -> int64 {
+        if hi <= lo {
+            panic(f"int64_in: the range {lo}..{hi} is empty")
+        }
+        return lo + self.below((hi - lo) as uint64) as int64
+    }
+
+    // A number in [0, 1): one of the 2^53 multiples of 2^-53 there, each as
+    // likely.
+    #test(seeded(42))[0.08386297105988216]
+    #test(Rng { s0: 1u64, s1: 2u64, s2: 3u64, s3: 4u64 })[5.551115123125783e-16]
+    fun float(var self) -> float {
+        return (self.next_u64() >> 11) as float / 9007199254740992.0
+    }
+
+    // `true` or `false`, each as likely: the top bit of `next_u64`.
+    #test(seeded(42))[false]
+    #test(seeded(7))[true]
+    fun boolean(var self) -> bool {
+        return self.next_u64() >> 63 == 1
+    }
+
+    // The elements of `xs` in a random order, each order as likely.
+    fun shuffled<T>(var self, xs: [T]) -> [T] {
+        var ys = xs
+        var i = ys.len() - 1
+        while i > 0 {
+            let j = self.int_in(0, i + 1)
+            let t = ys[i]
+            ys[i] = ys[j]
+            ys[j] = t
+            i -= 1
+        }
+        return ys
+    }
+
+    // An element of `xs`, each as likely; `None` when `xs` is empty.
+    fun choice<T>(var self, xs: [T]) -> Option<T> {
+        if xs.len() == 0 {
+            return None
+        }
+        return Some(xs[self.int_in(0, xs.len())])
+    }
+}
+
+// --- tests -------------------------------------------------------------------
+// `shuffled` and `choice` are generic, which a `#test` case can't take
+// (D116), and the spreads are counts over many draws, so these are test
+// functions (D162). The expected sequences come from a port of the reference
+// C code (splitmix64.c and xoshiro256starstar.c).
+
+// The first `n` numbers of `r`.
+// xoshiro256starstar.c's outputs for the state 1, 2, 3, 4, as the Rust crate
+// rand_xoshiro pins them:
+#test(Rng { s0: 1u64, s1: 2u64, s2: 3u64, s3: 4u64 }, 10)[[11520u64, 0u64, 1509978240u64, 1215971899390074240u64, 1216172134540287360u64, 607988272756665600u64, 16172922978634559625u64, 8476171486693032832u64, 10595114339597558777u64, 2904607092377533576u64]]
+#test(seeded(42), 5)[[1546998764402558742u64, 6990951692964543102u64, 12544586762248559009u64, 17057574109182124193u64, 18295552978065317476u64]]
+#test(seeded(0), 3)[[11091344671253066420u64, 13793997310169335082u64, 1900383378846508768u64]]
+fun firsts(r: Rng, n: int) -> [uint64] {
+    var g = r
+    var out: [uint64] = []
+    for i in 0..n {
+        out.push(g.next_u64())
+    }
+    return out
+}
+
+// `n` numbers of `r.int_in(lo, hi)`.
+#test(seeded(42), 1, 7, 10)[[1, 3, 5, 6, 6, 5, 5, 6, 5, 4]]
+#test(seeded(42), -2147483648, 2147483647, 3)[[-1787294931, -519775867, 773280561]]
+fun ints_in(r: Rng, lo: int, hi: int, n: int) -> [int] {
+    var g = r
+    var out: [int] = []
+    for i in 0..n {
+        out.push(g.int_in(lo, hi))
+    }
+    return out
+}
+
+// `n` numbers of `r.float()`.
+#test(seeded(42), 3)[[0.08386297105988216, 0.3789802506626686, 0.6800434110281394]]
+fun floats(r: Rng, n: int) -> [float] {
+    var g = r
+    var out: [float] = []
+    for i in 0..n {
+        out.push(g.float())
+    }
+    return out
+}
+
+// `n` numbers of `r.boolean()`.
+#test(seeded(42), 10)[[false, false, true, true, true, true, true, true, true, true]]
+fun booleans(r: Rng, n: int) -> [bool] {
+    var g = r
+    var out: [bool] = []
+    for i in 0..n {
+        out.push(g.boolean())
+    }
+    return out
+}
+
+fun same<T: Eq>(xs: [T], ys: [T]) -> bool {
+    if xs.len() != ys.len() {
+        return false
+    }
+    for i in 0..xs.len() {
+        if xs[i] != ys[i] {
+            return false
+        }
+    }
+    return true
+}
+
+fun is_some_of<T: Eq>(o: Option<T>, v: T) -> bool {
+    return match o {
+        Some(x) => x == v
+        None => false
+    }
+}
+
+fun is_none<T>(o: Option<T>) -> bool {
+    return match o {
+        Some(_) => false
+        None => true
+    }
+}
+
+// The numbers 0..n.
+fun upto(n: int) -> [int] {
+    var out: [int] = []
+    for i in 0..n {
+        out.push(i)
+    }
+    return out
+}
+
+// Whether `xs` holds each of 0..xs.len() once.
+fun is_permutation(xs: [int]) -> bool {
+    var seen: [bool] = []
+    for i in 0..xs.len() {
+        seen.push(false)
+    }
+    for x in xs {
+        if x < 0 || x >= xs.len() || seen[x] {
+            return false
+        }
+        seen[x] = true
+    }
+    return true
+}
+
+// Whether each count of `counts` is within `slack` of `want`.
+fun all_near(counts: [int], want: int, slack: int) -> bool {
+    for c in counts {
+        if c < want - slack || c > want + slack {
+            return false
+        }
+    }
+    return true
+}
+
+fun zeros(n: int) -> [int] {
+    var out: [int] = []
+    for i in 0..n {
+        out.push(0)
+    }
+    return out
+}
+
+#test
+fun a_copy_replays() {
+    var a = seeded(9)
+    a.next_u64()
+    var b = a
+    let x = a.next_u64()
+    assert(b.next_u64() == x, "a copy goes on from where the original was")
+    assert(a == b, "and has the same state")
+    var c = seeded(9)
+    c.next_u64()
+    assert(c.next_u64() == x && c == b, "a seed gives the same numbers again")
+    assert(seeded(1) != seeded(2), "another seed, another state")
+}
+
+#test
+fun from_os_differs() {
+    var a = from_os()
+    var b = from_os()
+    assert(a != b, "two generators from the system's entropy")
+    assert(a.next_u64() != b.next_u64(), "give other numbers (2^-64 to fail)")
+    var c = from_os()
+    let x = c.int_in(10, 20)
+    assert(x >= 10 && x < 20, "and work as any other")
+}
+
+#test
+fun shuffled_reference() {
+    var r = seeded(42)
+    let xs = r.shuffled(upto(10))
+    assert(same(xs, [9, 1, 4, 2, 8, 7, 6, 5, 3, 0]), "the reference port's shuffle of 0..10")
+    let e: [str] = []
+    assert(r.shuffled(e).len() == 0, "nothing to shuffle")
+    assert(same(r.shuffled(["x"]), ["x"]), "one element")
+    let words = r.shuffled(["a", "b", "c", "d"])
+    assert(words.len() == 4, "strings")
+}
+
+#test
+fun shuffled_is_a_permutation() {
+    var r = seeded(5)
+    let xs = upto(100)
+    for k in 0..50 {
+        let ys = r.shuffled(xs)
+        assert(is_permutation(ys), "each element once")
+    }
+    assert(same(xs, upto(100)), "the list given isn't changed")
+}
+
+#test
+fun shuffled_spreads_evenly() {
+    // the six orders of three elements, 12000 shuffles: 2000 each, give or
+    // take 200 (about five standard deviations)
+    var r = seeded(11)
+    var counts = zeros(6)
+    for k in 0..12000 {
+        let p = r.shuffled([0, 1, 2])
+        counts[p[0] * 2 + (if p[1] > p[2] { 1 } else { 0 })] += 1
+    }
+    assert(all_near(counts, 2000, 200), "each order as likely")
+    // where the first element goes, over ten places
+    var at = zeros(10)
+    for k in 0..5000 {
+        let p = r.shuffled(upto(10))
+        for i in 0..10 {
+            if p[i] == 0 {
+                at[i] += 1
+            }
+        }
+    }
+    assert(all_near(at, 500, 110), "every place as likely")
+}
+
+#test
+fun choice_spreads_evenly() {
+    var r = seeded(3)
+    let none: [int] = []
+    assert(is_none(r.choice(none)), "an empty list has no element")
+    assert(is_some_of(r.choice(["only"]), "only"), "one element")
+    let xs = [10, 11, 12, 13, 14]
+    var counts = zeros(5)
+    for k in 0..10000 {
+        match r.choice(xs) {
+            Some(x) => { counts[x - 10] += 1 }
+            None => { assert(false, "a list with elements") }
+        }
+    }
+    assert(all_near(counts, 2000, 200), "each element as likely")
+}
+
+#test
+fun int_in_spreads_evenly() {
+    var r = seeded(8)
+    var counts = zeros(6)
+    for k in 0..12000 {
+        let d = r.int_in(1, 7)
+        assert(d >= 1 && d < 7, "in the range")
+        counts[d - 1] += 1
+    }
+    assert(all_near(counts, 2000, 200), "each face as likely")
+    for k in 0..1000 {
+        let x = r.int_in(-3, 2)
+        assert(x >= -3 && x < 2, "a range below zero")
+    }
+}
+
+#test
+fun int_in_has_no_modulo_bias() {
+    // A range of 3 * 2^30 numbers: a 32-bit word modulo its size would hit
+    // the first third twice as often as the others, half of the draws
+    // instead of a third.
+    var r = seeded(12)
+    var low = 0
+    for k in 0..3000 {
+        if r.int_in(-2147483648, 1073741824) < -1073741824 {
+            low += 1
+        }
+    }
+    assert(low > 850 && low < 1150, "a third in the first third")
+    // the same for 64 bits, a range of 3 * 2^62
+    var low64 = 0
+    for k in 0..3000 {
+        if r.below(0xc000000000000000u64) < 0x4000000000000000u64 {
+            low64 += 1
+        }
+    }
+    assert(low64 > 850 && low64 < 1150, "a third in the first third, 64 bits")
+}
+
+#test
+fun float_in_unit_interval() {
+    var r = seeded(4)
+    var sum = 0.0
+    var below_half = 0
+    for k in 0..10000 {
+        let x = r.float()
+        assert(x >= 0.0 && x < 1.0, "in [0, 1)")
+        sum += x
+        if x < 0.5 {
+            below_half += 1
+        }
+    }
+    assert(sum > 4900.0 && sum < 5100.0, "a mean of a half")
+    assert(below_half > 4800 && below_half < 5200, "half below a half")
+    var heads = 0
+    for k in 0..10000 {
+        if r.boolean() {
+            heads += 1
+        }
+    }
+    assert(heads > 4800 && heads < 5200, "a fair coin")
+}
