@@ -27,7 +27,30 @@ pub import .geometry.vector as vector  // re-export a module (needs `as`)
 - `from a.b import c` resolves `c` as a module (`a/b/c.my`) before looking for an item `c` exported by `a.b`.
 - Imports must be explicit; there are no wildcards. A name that collides with another name in the module is an error: rename it with `as`.
 - Import cycles are allowed.
-- A module bound with `import` is used only as `m.member`; it isn't a value. Types and patterns from another module are brought in with `from … import` (dotted type names like `m.Point` aren't supported in type positions).
+- A module bound with `import` is used only as `m.member`; it isn't a value. Patterns and struct literals name another module's types brought in with `from … import`.
+- In a type, `m.T` names the type `T` that the module bound as `m` exports, the same type `from … import T` binds (D170, [[MYLA-371]]): `fun cli() -> args.Spec`, `let e: num.ParseIntError = …`, `[args.Spec]`, `deque.Deque<int>`. A module bound by its whole path (`import std.deque`) is written so too, `std.deque.Deque<int>`, and so is a module a module re-exports (`shapes.dq.Deque<int>` after `pub import .deque as dq` in `shapes`). A name that isn't a module bound in the file is an error (`unknown module 'geo' in the type 'geo.Point'`), and so is a type the module doesn't export (`module 'std.args' does not export a type 'Option'`) or a member that isn't a type (`'args.parse' is a function of module 'std.args', not a type`).
+
+```myla
+import std.num as num
+
+fun why(e: num.ParseIntError) -> str {
+    return match e {
+        Empty => "empty"
+        InvalidDigit(i) => f"no digit at {i}"
+        Overflow => "too big"
+    }
+}
+
+fun main() {
+    let r: Result<int32, num.ParseIntError> = num.parse_int32("4x")
+    match r {
+        Ok(v) => print(v)
+        Err(e) => print(why(e))
+    }
+}
+// output:
+// no digit at 1
+```
 - A segment of a module path is a name or a primitive type's keyword (`bool`, `str`, `int8` … `uint64`), so `import std.str as s` and `from std.str import f` work ([[MYLA-320]]); an alias is a name, so `import std.str as str` is a parse error. (`int`, `char` and `float` are names anyway.)
 
 ## Implicit imports

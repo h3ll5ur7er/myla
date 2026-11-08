@@ -789,6 +789,66 @@ fun main() {
     print(f"{widen<int>(x) < y}")
 }
 """,
+    # MYLA-371 (D170): the standard library's types named through their
+    # modules, `args.Spec`, `num.ParseIntError`, `deque.Deque<int>`, and
+    # `std.deque.Deque<int>` through a module bound by its whole path
+    "std_module_types_by_the_module_name": """// a module's type by its module's name in a type position (D170, MYLA-371):
+// a return type, a parameter, an annotation, a field, a list's element, a
+// generic type's argument, a function type, a module bound by its whole path
+import std.args as args
+import std.num as num
+import std.deque as deque
+import std.deque
+
+struct Tool {
+    spec: args.Spec,
+    queue: deque.Deque<int>,
+}
+
+fun cli() -> args.Spec {
+    return args.spec("tool", "does things").flag("verbose", 'v')
+}
+
+fun why(e: num.ParseIntError) -> str {
+    return match e {
+        Empty => "empty"
+        InvalidDigit(i) => f"digit at {i}"
+        Overflow => "overflow"
+    }
+}
+
+fun total(qs: [deque.Deque<int>]) -> int {
+    var n = 0
+    for q in qs {
+        n += q.len()
+    }
+    return n
+}
+
+fun main() {
+    let e: num.ParseIntError = num.ParseIntError.InvalidDigit(2)
+    print(why(e))
+    let r: Result<int32, num.ParseIntError> = num.parse_int32("")
+    match r {
+        Ok(v) => print(v)
+        Err(x) => print(why(x))
+    }
+    var t = Tool { spec: cli(), queue: deque.new() }
+    t.queue.push_back(4)
+    t.queue.push_back(5)
+    let qs: [deque.Deque<int>] = [t.queue, deque.of([1])]
+    print(total(qs))
+    let f: (std.deque.Deque<int>) -> int = (q) => q.len()
+    print(f(t.queue))
+    let argv = ["-v"]
+    match args.parse(t.spec, argv) {
+        Ok(a) => print(a.flag("verbose"))
+        Err(x) => print("bad")
+    }
+    let big = deque.new<deque.Deque<str>>()
+    print(big.len())
+}
+""",
     # a receiver and every argument are taken in order, before a later
     # argument writes their variable through a `var self` method (MYLA-237)
     "argument_values_before_later_writes": (
@@ -4547,6 +4607,69 @@ fun main() {
 }
 """
 
+# `test_module_types_by_the_module_name` (MYLA-371): a module that re-exports
+# another, and a main module naming both modules' types as `m.T` and through
+# the re-export as `m.n.T`.
+MODULE_TYPES_SHAPES = """pub import .deque as dq
+
+pub struct Shape {
+    name: str,
+    sides: int,
+}
+
+pub typealias Named = (str, int)
+
+pub fun tri() -> Shape {
+    return Shape { name: "tri", sides: 3 }
+}
+"""
+
+MODULE_TYPES_MAIN = """import .deque as deque
+import .set as set
+import .shapes as shapes
+
+struct Graph {
+    todo: deque.Deque<int>,
+    seen: set.Set<str>,
+}
+
+fun sizes(ds: [deque.Deque<str>]) -> int {
+    var n = 0
+    for d in ds {
+        n += d.len()
+    }
+    return n
+}
+
+fun fresh() -> shapes.dq.Deque<int> {
+    return deque.of([7, 8])
+}
+
+fun describe(s: shapes.Shape) -> shapes.Named {
+    return (s.name, s.sides)
+}
+
+fun main() {
+    var g = Graph { todo: fresh(), seen: set.new() }
+    g.todo.push_front(6)
+    g.seen.insert("x")
+    print(g.todo.len())
+    print(g.todo.first().unwrap_or(0))
+    print(g.seen.len())
+    let d: deque.Deque<str> = deque.of(["a", "b"])
+    print(sizes([d, d, deque.new<str>()]))
+    let n = describe(shapes.tri())
+    print(f"{n.0} {n.1}")
+    let pick: (shapes.dq.Deque<int>) -> int = (q) => q.len()
+    print(pick(g.todo))
+    let o: Option<set.Set<str>> = Some(g.seen)
+    match o {
+        Some(s) => print(s.len())
+        None => print(-1)
+    }
+}
+"""
+
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
 class TestCompilerParity(unittest.TestCase):
     def test_generic_constructors_of_a_module(self):
@@ -4568,6 +4691,18 @@ class TestCompilerParity(unittest.TestCase):
             write_program(tmp, GENERIC_MODULE_SET, "set.my")
             main = write_program(tmp, EXPLICIT_MODULE_MAIN)
             self.assertEqual(run_file_both_now(main), ("0\n1\nnone\n5000000000\ntrue\n", "", 0))
+
+    def test_module_types_by_the_module_name(self):
+        # MYLA-371 (D170): `deque.Deque<int>` in a field, a list's element, a
+        # return type through a re-export (`shapes.dq.Deque<int>`), a
+        # function type and a generic type's argument; a struct and a type
+        # alias of the module's own (`shapes.Shape`, `shapes.Named`)
+        with tempfile.TemporaryDirectory() as tmp:
+            write_program(tmp, GENERIC_MODULE_DEQUE, "deque.my")
+            write_program(tmp, GENERIC_MODULE_SET, "set.my")
+            write_program(tmp, MODULE_TYPES_SHAPES, "shapes.my")
+            main = write_program(tmp, MODULE_TYPES_MAIN)
+            self.assertEqual(run_file_both_now(main), ("3\n6\n1\n4\ntri 3\n3\n1\n", "", 0))
 
     def test_a_char_moved_past_the_scalars_is_a_runtime_error(self):
         # MYLA-318: `c + n` and `c - n` are checked as `n as char` is, past
@@ -4832,6 +4967,8 @@ PINNED = {
     # MYLA-315: new; the interpreter gives the same
     "generic_constructors_from_the_expected_type": "0\n1\n0\n4\nq\nno top\n0\nb\nhihi\n0\n3\n5000000000\n"
                                                    "5000000000\n0\n7\n",
+    # MYLA-371: new; the interpreter gives the same
+    "std_module_types_by_the_module_name": "digit at 2\nempty\n3\n2\ntrue\n0\n",
     # MYLA-373: new; the interpreter gives the same
     "explicit_type_arguments": "0\n1\n0\n5000000000\n8\nseven\n<3>\n0\n0\n0\nhi\n200\ntrue\ntrue\ntrue\nlt\ntrue\ntrue\n",
     # MYLA-315: new; the interpreter gives the same

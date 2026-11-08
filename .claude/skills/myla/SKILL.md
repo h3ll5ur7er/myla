@@ -80,6 +80,7 @@ fun main() {
 | `i32`, `u8`, `f64`, `Int`, `Double` as types | `int32`, `uint8`, `float64` (or `float`), `int` | Type names are spelled out; suffixes are short (`5i64`, `2f64`) |
 | `#[derive(PartialEq, Hash)]`, `#[test]` | `#derive(Eq, Hash)`, `#test(args)[expected]` | Attributes |
 | `mod x;`, `use a::b;`, `import Foundation` | `from .x import f`, `import a.b as b`, `from std.io import println` | Python-like imports, `pub` exports |
+| `args::Spec`, a second `from std.args import Spec` just for a type | `import std.args as args`, then `fun cli() -> args.Spec`, `[deque.Deque<int>]` | In a type, `m.T` is the module's exported type (D170); in an expression `m.f(x)`, but not `m.T { … }` (struct literals and patterns need `from … import`) |
 | `impl Add for P { type Output … fn add(self, o: P) -> P }` | `impl Add for P { fun add(self, other: P) -> P { … } }` | Operator traits have no associated types; `Ord` is `cmp(self, other: Self) -> int` |
 | trait default method bodies | signatures only | `trait T { fun m(self) -> int }` |
 | `f::<int>(x)` | `f<int>(x)`, `deque.new<str>()`, `xs.mapped<str>(g)`, or annotate: `let y: Box<int> = …` | No turbofish: type arguments go right after the name (D169); a method's name only its own type parameters. A `<` after a name is a call's only if the `>` is followed by `(`, so `f(a < b, c > (d))` is one generic call: write `f(a < b, c > d)` |

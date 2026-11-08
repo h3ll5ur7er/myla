@@ -997,7 +997,10 @@ impl Parser {
 
     // -- types -------------------------------------------------------------
 
-    #test(parser_on("a.b[0]"))[TypeExpr { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 2 }, kind: TypeKind.TRef("a", []) }]
+    #test(parser_on("a.b[0]"))[TypeExpr { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 4 }, kind: TypeKind.TRef("a.b", []) }]
+    #test(parser_on("args.Spec"))[TypeExpr { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 10 }, kind: TypeKind.TRef("args.Spec", []) }] // a module's type, D170
+    #test(parser_on("std.deque.Deque<int>"))[TypeExpr { id: 1, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 21 }, kind: TypeKind.TRef("std.deque.Deque", [TypeExpr { id: 0, line: 1, col: 17, sp: SrcSpan { sline: 1, scol: 17, eline: 1, ecol: 20 }, kind: TypeKind.TRef("int", []) }]) }]
+    #test(parser_on("m.0"))[TypeExpr { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 2 }, kind: TypeKind.TRef("m", []) }]
     fun parse_type(var self) -> TypeExpr {
         self.enter("type")
         let t = self.parse_type_inner()
@@ -1005,7 +1008,7 @@ impl Parser {
         return t
     }
 
-    #test(parser_on("a.b[0]"))[TypeExpr { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 2 }, kind: TypeKind.TRef("a", []) }]
+    #test(parser_on("a.b[0]"))[TypeExpr { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 4 }, kind: TypeKind.TRef("a.b", []) }]
     fun parse_type_inner(var self) -> TypeExpr {
         let tok = self.peek()
         let k = tok.kind
@@ -1046,8 +1049,15 @@ impl Parser {
         }
         if k == TokenKind.IDENT {
             self.skip()
+            // `m.T`, `a.b.T`: a module's type by the module's name (D170),
+            // which the loader resolves
+            var name = tok.lexeme
+            while self.check(TokenKind.DOT) && self.peek_kind_at(1) == TokenKind.IDENT {
+                self.skip()
+                name = name + "." + self.advance().lexeme
+            }
             let args = self.type_args()
-            return self.mk_type(tok.line, tok.column, TypeKind.TRef(tok.lexeme, args))
+            return self.mk_type(tok.line, tok.column, TypeKind.TRef(name, args))
         }
         self.fail_at(tok, format("expected a type, found '{}'", tok.lexeme))
         return self.mk_type(tok.line, tok.column, TypeKind.TRef("", []))

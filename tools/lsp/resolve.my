@@ -549,7 +549,8 @@ impl Resolver {
     fun type_expr(var self, t: TypeExpr) {
         match t.kind {
             TypeKind.TRef(name, args) => {
-                self.use_name(t.line, t.col, name)
+                let parts = name.split(".")
+                if parts.len() > 1 { self.module_type(t.line, t.col, parts) } else { self.use_name(t.line, t.col, name) }
                 for a in args { self.type_expr(a) }
             },
             TypeKind.TTuple(es) => { for e in es { self.type_expr(e) } },
@@ -562,6 +563,32 @@ impl Resolver {
                 for p in ps { self.type_expr(p) }
                 self.type_expr(r)
             },
+        }
+    }
+
+    // `m.T` in a type at (line, col) (D170): `m` is the module, `T` its
+    // declaration. The module is the segment before `T` as the file imports
+    // it (its alias, or its path's last segment).
+    fun module_type(var self, line: int32, col: int32, parts: [str]) {
+        self.use_name(line, col, parts[0])
+        let last = parts[parts.len() - 1]
+        match get(self.modules, parts[parts.len() - 2]) {
+            Some(file) => {
+                match self.module_member(file, last) {
+                    Some(d) => {
+                        // past the segments before it, so `set.set` finds the second
+                        var before = 0
+                        var i = 0
+                        while i < parts.len() - 1 {
+                            before += parts[i].len() + 1
+                            i += 1
+                        }
+                        self.use_at(line, col + before, last, d)
+                    },
+                    None => {},
+                }
+            },
+            None => {},
         }
     }
 

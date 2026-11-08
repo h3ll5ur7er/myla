@@ -93,7 +93,7 @@ import_item  = IDENT ( "as" IDENT )? ;
 ```ebnf
 type          = prim_type | named_type | "[" type "]" | "[" type ":" type "]"
               | "(" ")" | tuple_type | function_type ;   (* "()": the unit type, D138 *)
-named_type    = IDENT type_args? ;
+named_type    = IDENT ( "." IDENT )* type_args? ;   (* m.T: a module's type, D170 *)
 type_args     = "<" type ( "," type )* ","? ">" ;
 prim_type     = "bool" | "str" | "int8" | "int16" | "int32" | "int64"
               | "uint8" | "uint16" | "uint32" | "uint64" ;
@@ -207,5 +207,5 @@ field_pattern = IDENT ( ":" pattern )? ;
 - **`>>`.** Two touching `>` are a shift in expressions and two closers in types.
 - **Nesting.** Expressions, types, blocks and patterns nest at most 256 levels deep (`MAX_NESTING` in the parser): deeper is a parse error, `expression nested too deeply` (or `type`, `block`, `pattern`), at the token where it goes past, not a crash of the parser or the language server ([[MYLA-182]]).
 - **`|`.** Bitwise or in expressions, alternative in patterns.
-- **`.`.** `t.0` is a tuple index (a `.` followed by an integer token), `x.f` a field, `E.V` a variant, `m.f` a module member (resolved by the loader).
+- **`.`.** `t.0` is a tuple index (a `.` followed by an integer token), `x.f` a field, `E.V` a variant, `m.f` a module member (resolved by the loader); in a type, `m.T` is a module's type (D170, resolved by the loader too).
 - **Greedy bodies.** A lambda's expression body, like every operand, extends as far as it can: `(x) => x + 1 |> f` is a lambda whose body is `x + 1 |> f`.

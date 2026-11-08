@@ -203,6 +203,16 @@ fun has(xs: [str], s: str) -> bool {
     return false
 }
 
+// Whether `s` has the byte `b`.
+#test("args.Spec", '.')[true]
+#test("Spec", '.')[false]
+fun contains_byte(s: str, b: uint8) -> bool {
+    for i in 0..s.len() {
+        if s[i] == b { return true }
+    }
+    return false
+}
+
 #test("examples/maps.my", 47)[["examples", "maps.my"]]
 #test("examples/errors/type_match_arms_disagree.my", 47)[["examples", "errors", "type_match_arms_disagree.my"]]
 #test("examples/errors/type_literal_past_int8_max_annotated.my/..", 47)[["examples", "errors", "type_literal_past_int8_max_annotated.my", ".."]]
@@ -463,6 +473,28 @@ fun named(d: Decl) -> Option<NamedDecl> {
         DeclKind.ConstDecl(n, t, v, a, p) => Some(NamedDecl { name: n, is_pub: p }),
         _ => None,
     }
+}
+
+// What the named declaration `d` declares, as an error about `m.T` says it.
+#test(Decl { id: 0, line: 1, col: 1, sp: no_span(), kind: DeclKind.FunDecl(fun_of("fun f() {}")) })["function"]
+fun decl_kind_word(d: Decl) -> str {
+    return match d.kind {
+        DeclKind.StructDecl(n, f, a, t, p, act) => if act { "actor" } else { "struct" },
+        DeclKind.FunDecl(fd) => "function",
+        DeclKind.EnumDecl(n, v, a, t, p) => "enum",
+        DeclKind.TypeAliasDecl(n, t, a, p) => "type alias",
+        DeclKind.TraitDecl(n, m, t, p, dattrs) => "trait",
+        DeclKind.ConstDecl(n, t, v, a, p) => "constant",
+        _ => "declaration",
+    }
+}
+
+// Whether a declaration of kind `kind` (`decl_kind_word`) is a type.
+#test("struct")[true]
+#test("type alias")[true]
+#test("function")[false]
+fun is_type_kind(kind: str) -> bool {
+    return kind == "struct" || kind == "actor" || kind == "enum" || kind == "type alias"
 }
 
 fun is_impl(d: Decl) -> bool {
@@ -908,6 +940,7 @@ struct Renamer {
     tys: [str],                         // type parameter names in scope
     path: str,
     err: Option<Report>,
+    kinds: [str: str],                  // qualified name -> what it declares ("struct", "function", …), for `m.T` (D170)
 }
 
 #test(expr_of("-n * 2"), ExprKind.IntLit(0, None, false, ""))[Expr { id: 3, line: 1, col: 4, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 7 }, kind: ExprKind.IntLit(0, None, false, "") }]
@@ -969,9 +1002,9 @@ impl Renamer {
         }
     }
 
-    #test(Renamer { env: ["main": "main"], aliases: [:], exports: ["": [:]], vals: ["x"], tys: ["Self"], path: "examples/variables.my", err: None }, "str")["str"]
-    #test(Renamer { env: ["P": "P", "main": "main"], aliases: [:], exports: ["": [:]], vals: [], tys: ["Self"], path: "examples/errors/type_recover_unknown_trait_impl.my", err: None }, "Show")["Show"]
-    #test(Renamer { env: ["Clock": "Clock", "Watch": "Watch", "main": "main"], aliases: [:], exports: ["": [:]], vals: [], tys: ["Self"], path: "examples/errors/type_become_mutating_receiver.my", err: None }, "Watch")["Watch"]
+    #test(Renamer { env: ["main": "main"], aliases: [:], exports: ["": [:]], vals: ["x"], tys: ["Self"], path: "examples/variables.my", err: None, kinds: [:] }, "str")["str"]
+    #test(Renamer { env: ["P": "P", "main": "main"], aliases: [:], exports: ["": [:]], vals: [], tys: ["Self"], path: "examples/errors/type_recover_unknown_trait_impl.my", err: None, kinds: [:] }, "Show")["Show"]
+    #test(Renamer { env: ["Clock": "Clock", "Watch": "Watch", "main": "main"], aliases: [:], exports: ["": [:]], vals: [], tys: ["Self"], path: "examples/errors/type_become_mutating_receiver.my", err: None, kinds: [:] }, "Watch")["Watch"]
     fun type_name(self, n: str) -> str {
         if !has(self.tys, n) {
             match get(self.env, n) { Some(q) => { return q }, None => {} }
@@ -1014,7 +1047,12 @@ impl Renamer {
                 let target2 = self.ty(target)
                 let targs2 = self.ty_list(targs)
                 var trait2 = itrait
-                match itrait { Some(tn) => { trait2 = Some(self.type_name(tn)) }, None => {} }
+                match itrait {
+                    Some(tn) => {
+                        if contains_byte(tn, '.') { trait2 = Some(self.module_type(tn, target, false)) } else { trait2 = Some(self.type_name(tn)) }
+                    },
+                    None => {},
+                }
                 let tps2 = self.bounds(tps)
                 self.tys = []
                 var ms: [FunData] = []
@@ -1027,9 +1065,9 @@ impl Renamer {
     }
 
     // type parameters with their bounds (trait names) renamed
-    #test(Renamer { env: ["main": "main"], aliases: [:], exports: ["": [:]], vals: [], tys: ["Self"], path: "examples/hello.my", err: None }, [])[[]]
-    #test(Renamer { env: ["main": "main"], aliases: [:], exports: ["": [:]], vals: [], tys: ["Self"], path: "examples/loops.my", err: None }, [])[[]]
-    #test(Renamer { env: ["main": "main"], aliases: [:], exports: ["": [:]], vals: [], tys: ["Self"], path: "examples/variables.my", err: None }, [])[[]]
+    #test(Renamer { env: ["main": "main"], aliases: [:], exports: ["": [:]], vals: [], tys: ["Self"], path: "examples/hello.my", err: None, kinds: [:] }, [])[[]]
+    #test(Renamer { env: ["main": "main"], aliases: [:], exports: ["": [:]], vals: [], tys: ["Self"], path: "examples/loops.my", err: None, kinds: [:] }, [])[[]]
+    #test(Renamer { env: ["main": "main"], aliases: [:], exports: ["": [:]], vals: [], tys: ["Self"], path: "examples/variables.my", err: None, kinds: [:] }, [])[[]]
     fun bounds(self, tps: [TypeParam]) -> [TypeParam] {
         var out: [TypeParam] = []
         for tp in tps {
@@ -1040,9 +1078,9 @@ impl Renamer {
         return out
     }
 
-    #test(Renamer { env: ["main": "main"], aliases: [:], exports: ["": [:]], vals: [], tys: ["Self"], path: "examples/hello.my", err: None }, [])[[]]
-    #test(Renamer { env: ["main": "main"], aliases: [:], exports: ["": [:]], vals: [], tys: ["Self"], path: "examples/loops.my", err: None }, [])[[]]
-    #test(Renamer { env: ["main": "main"], aliases: [:], exports: ["": [:]], vals: [], tys: ["Self"], path: "examples/variables.my", err: None }, [])[[]]
+    #test(Renamer { env: ["main": "main"], aliases: [:], exports: ["": [:]], vals: [], tys: ["Self"], path: "examples/hello.my", err: None, kinds: [:] }, [])[[]]
+    #test(Renamer { env: ["main": "main"], aliases: [:], exports: ["": [:]], vals: [], tys: ["Self"], path: "examples/loops.my", err: None, kinds: [:] }, [])[[]]
+    #test(Renamer { env: ["main": "main"], aliases: [:], exports: ["": [:]], vals: [], tys: ["Self"], path: "examples/variables.my", err: None, kinds: [:] }, [])[[]]
     fun params(var self, ps: [Param]) -> [Param] {
         var out: [Param] = []
         for p in ps {
@@ -1084,9 +1122,9 @@ impl Renamer {
     }
 
     // `#test` cases are expressions in the module's scope (MYLA-11)
-    #test(Renamer { env: ["main": "main"], aliases: [:], exports: ["": [:]], vals: [], tys: ["Self"], path: "examples/hello.my", err: None }, [])[[]]
-    #test(Renamer { env: ["main": "main"], aliases: [:], exports: ["": [:]], vals: [], tys: ["Self"], path: "examples/loops.my", err: None }, [])[[]]
-    #test(Renamer { env: ["main": "main"], aliases: [:], exports: ["": [:]], vals: [], tys: ["Self"], path: "examples/variables.my", err: None }, [])[[]]
+    #test(Renamer { env: ["main": "main"], aliases: [:], exports: ["": [:]], vals: [], tys: ["Self"], path: "examples/hello.my", err: None, kinds: [:] }, [])[[]]
+    #test(Renamer { env: ["main": "main"], aliases: [:], exports: ["": [:]], vals: [], tys: ["Self"], path: "examples/loops.my", err: None, kinds: [:] }, [])[[]]
+    #test(Renamer { env: ["main": "main"], aliases: [:], exports: ["": [:]], vals: [], tys: ["Self"], path: "examples/variables.my", err: None, kinds: [:] }, [])[[]]
     fun attributes(var self, attrs: [Attribute]) -> [Attribute] {
         var out: [Attribute] = []
         for a in attrs {
@@ -1112,10 +1150,13 @@ impl Renamer {
 
     // -- types --
 
-    #test(Renamer { env: ["add": "add", "inc_byte": "inc_byte", "run": "run"], aliases: [:], exports: ["": [:]], vals: [], tys: ["Self"], path: "examples/attributes.my", err: None }, type_expr_of("int"))[TypeExpr { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 4 }, kind: TypeKind.TRef("int", []) }]
-    fun ty(self, t: TypeExpr) -> TypeExpr {
+    #test(Renamer { env: ["add": "add", "inc_byte": "inc_byte", "run": "run"], aliases: [:], exports: ["": [:]], vals: [], tys: ["Self"], path: "examples/attributes.my", err: None, kinds: [:] }, type_expr_of("int"))[TypeExpr { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 4 }, kind: TypeKind.TRef("int", []) }]
+    fun ty(var self, t: TypeExpr) -> TypeExpr {
         let k = match t.kind {
-            TypeKind.TRef(n, args) => TypeKind.TRef(self.type_name(n), self.ty_list(args)),
+            TypeKind.TRef(n, args) => {
+                let q = if contains_byte(n, '.') { self.module_type(n, t, true) } else { self.type_name(n) }
+                TypeKind.TRef(q, self.ty_list(args))
+            },
             TypeKind.TTuple(es) => TypeKind.TTuple(self.ty_list(es)),
             TypeKind.TList(e) => TypeKind.TList(self.ty(e)),
             TypeKind.TMap(a, b) => TypeKind.TMap(self.ty(a), self.ty(b)),
@@ -1124,25 +1165,80 @@ impl Renamer {
         return TypeExpr { id: t.id, line: t.line, col: t.col, sp: t.sp, kind: k }
     }
 
-    #test(Renamer { env: ["main": "main"], aliases: [:], exports: ["": [:]], vals: ["x"], tys: ["Self"], path: "examples/variables.my", err: None }, [])[[]]
-    #test(Renamer { env: ["P": "P"], aliases: [:], exports: ["": [:]], vals: [], tys: [], path: "examples/errors/type_reassign_self.my", err: None }, [])[[]]
-    #test(Renamer { env: ["P": "P"], aliases: [:], exports: ["": [:]], vals: [], tys: [], path: "examples/errors/type_method_duplicate.my", err: None }, [])[[]]
-    fun ty_list(self, ts: [TypeExpr]) -> [TypeExpr] {
+    #test(Renamer { env: ["main": "main"], aliases: [:], exports: ["": [:]], vals: ["x"], tys: ["Self"], path: "examples/variables.my", err: None, kinds: [:] }, [])[[]]
+    #test(Renamer { env: ["P": "P"], aliases: [:], exports: ["": [:]], vals: [], tys: [], path: "examples/errors/type_reassign_self.my", err: None, kinds: [:] }, [])[[]]
+    #test(Renamer { env: ["P": "P"], aliases: [:], exports: ["": [:]], vals: [], tys: [], path: "examples/errors/type_method_duplicate.my", err: None, kinds: [:] }, [])[[]]
+    fun ty_list(var self, ts: [TypeExpr]) -> [TypeExpr] {
         var out: [TypeExpr] = []
         for t in ts { out.push(self.ty(t)) }
         return out
     }
 
-    #test(Renamer { env: ["main": "main"], aliases: [:], exports: ["": [:]], vals: [], tys: ["Self"], path: "examples/hello.my", err: None }, None)[None]
-    #test(Renamer { env: ["main": "main"], aliases: [:], exports: ["": [:]], vals: [], tys: ["Self"], path: "examples/loops.my", err: None }, None)[None]
-    #test(Renamer { env: ["main": "main"], aliases: [:], exports: ["": [:]], vals: [], tys: ["Self"], path: "examples/variables.my", err: None }, None)[None]
-    fun opt_ty(self, t: Option<TypeExpr>) -> Option<TypeExpr> {
+    #test(Renamer { env: ["main": "main"], aliases: [:], exports: ["": [:]], vals: [], tys: ["Self"], path: "examples/hello.my", err: None, kinds: [:] }, None)[None]
+    #test(Renamer { env: ["main": "main"], aliases: [:], exports: ["": [:]], vals: [], tys: ["Self"], path: "examples/loops.my", err: None, kinds: [:] }, None)[None]
+    #test(Renamer { env: ["main": "main"], aliases: [:], exports: ["": [:]], vals: [], tys: ["Self"], path: "examples/variables.my", err: None, kinds: [:] }, None)[None]
+    fun opt_ty(var self, t: Option<TypeExpr>) -> Option<TypeExpr> {
         return match t { Some(x) => Some(self.ty(x)), None => None }
+    }
+
+    // `m.T` in a type (D170): the qualified name of the type `T` that the
+    // module bound as `m` exports, as `from m import T` would bind it. `m`
+    // is the longest prefix that names a module (`std.deque.Deque` after
+    // `import std.deque`); a segment after it may be a module the one before
+    // re-exports (`shapes.dq.Deque`). With `want_type` false, a trait (the
+    // trait of `impl m.Show for P`).
+    fun module_type(var self, n: str, t: TypeExpr, want_type: bool) -> str {
+        let parts = split_on(n, '.')
+        var k = parts.len() - 1
+        var mid = ""
+        while k >= 1 && mid == "" {
+            match get(self.aliases, join(parts[:k], ".")) {
+                Some(m) => { mid = m },
+                None => { k -= 1 },
+            }
+        }
+        if mid == "" {
+            self.fail(t.line, t.col, t.sp, format("unknown module '{}' in the type '{}': a type of another module is named through its 'import … as {}'", parts[0], n, parts[0]))
+            return n
+        }
+        while k < parts.len() {
+            let name = parts[k]
+            let last = k == parts.len() - 1
+            var exports: [str: Binding] = [:]
+            match get(self.exports, mid) { Some(x) => { exports = x }, None => {} }
+            match get(exports, name) {
+                Some(b) => {
+                    if b.is_module {
+                        if last {
+                            self.fail(t.line, t.col, t.sp, format("'{}' is a module, not a type", n))
+                            return n
+                        }
+                        mid = b.value
+                    } else {
+                        let kind = match get(self.kinds, b.value) { Some(w) => w, None => "declaration" }
+                        let fits = if want_type { is_type_kind(kind) } else { kind == "trait" }
+                        if !last || !fits {
+                            let what = if want_type { "a type" } else { "a trait" }
+                            self.fail(t.line, t.col, t.sp, format("'{}' is a {} of module '{}', not {}", join(parts[:k + 1], "."), kind, dotted_id(mid), what))
+                            return n
+                        }
+                        return b.value
+                    }
+                },
+                None => {
+                    let what = if want_type { "a type" } else { "a trait" }
+                    self.fail(t.line, t.col, t.sp, format("module '{}' does not export {} '{}' (declarations are private unless marked 'pub')", dotted_id(mid), what, name))
+                    return n
+                },
+            }
+            k += 1
+        }
+        return n
     }
 
     // -- statements --
 
-    #test(Renamer { env: ["add": "add", "inc_byte": "inc_byte", "run": "run"], aliases: [:], exports: ["": [:]], vals: [], tys: ["Self"], path: "examples/attributes.my", err: None }, block_of("{ }"))[Block { line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 4 }, stmts: [] }]
+    #test(Renamer { env: ["add": "add", "inc_byte": "inc_byte", "run": "run"], aliases: [:], exports: ["": [:]], vals: [], tys: ["Self"], path: "examples/attributes.my", err: None, kinds: [:] }, block_of("{ }"))[Block { line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 4 }, stmts: [] }]
     fun block(var self, b: Block) -> Block {
         let saved = self.vals
         var out: [Stmt] = []
@@ -1151,7 +1247,7 @@ impl Renamer {
         return Block { line: b.line, col: b.col, sp: b.sp, stmts: out }
     }
 
-    #test(Renamer { env: ["add": "add", "inc_byte": "inc_byte", "run": "run"], aliases: [:], exports: ["": [:]], vals: [], tys: ["Self"], path: "examples/attributes.my", err: None }, stmt_of("return a"))[Stmt { id: 1, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 9 }, kind: StmtKind.ReturnS(Some(Expr { id: 0, line: 1, col: 8, sp: SrcSpan { sline: 1, scol: 8, eline: 1, ecol: 9 }, kind: ExprKind.Name("a") }), false) }]
+    #test(Renamer { env: ["add": "add", "inc_byte": "inc_byte", "run": "run"], aliases: [:], exports: ["": [:]], vals: [], tys: ["Self"], path: "examples/attributes.my", err: None, kinds: [:] }, stmt_of("return a"))[Stmt { id: 1, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 9 }, kind: StmtKind.ReturnS(Some(Expr { id: 0, line: 1, col: 8, sp: SrcSpan { sline: 1, scol: 8, eline: 1, ecol: 9 }, kind: ExprKind.Name("a") }), false) }]
     fun stmt(var self, s: Stmt) -> Stmt {
         let k = match s.kind {
             StmtKind.VarDecl(kind, n, t, init) => {
@@ -1197,9 +1293,9 @@ impl Renamer {
         return Stmt { id: s.id, line: s.line, col: s.col, sp: s.sp, kind: k }
     }
 
-    #test(Renamer { env: ["main": "main"], aliases: [:], exports: ["": [:]], vals: [], tys: ["Self"], path: "examples/errors/type_if_cond_not_bool.my", err: None }, None)[None]
-    #test(Renamer { env: ["main": "main"], aliases: [:], exports: ["": [:]], vals: [], tys: ["Self"], path: "examples/errors/type_continue_outside_loop.my", err: None }, None)[None]
-    #test(Renamer { env: ["f": "f", "main": "main"], aliases: [:], exports: ["": [:]], vals: ["n"], tys: ["Self"], path: "examples/errors/type_missing_return_path.my", err: None }, None)[None]
+    #test(Renamer { env: ["main": "main"], aliases: [:], exports: ["": [:]], vals: [], tys: ["Self"], path: "examples/errors/type_if_cond_not_bool.my", err: None, kinds: [:] }, None)[None]
+    #test(Renamer { env: ["main": "main"], aliases: [:], exports: ["": [:]], vals: [], tys: ["Self"], path: "examples/errors/type_continue_outside_loop.my", err: None, kinds: [:] }, None)[None]
+    #test(Renamer { env: ["f": "f", "main": "main"], aliases: [:], exports: ["": [:]], vals: ["n"], tys: ["Self"], path: "examples/errors/type_missing_return_path.my", err: None, kinds: [:] }, None)[None]
     fun else_tail(var self, t: Option<ElseTail>) -> Option<ElseTail> {
         return match t {
             Some(ElseTail.ElseBlock(b)) => Some(ElseTail.ElseBlock(self.block(b))),
@@ -1217,18 +1313,18 @@ impl Renamer {
 
     // -- expressions --
 
-    #test(Renamer { env: ["main": "main"], aliases: [:], exports: ["": [:]], vals: [], tys: ["Self"], path: "examples/errors/runtime_pop_empty.my", err: None }, [])[[]]
-    #test(Renamer { env: ["main": "main"], aliases: [:], exports: ["": [:]], vals: [], tys: ["Self"], path: "examples/errors/runtime_str_range_oob.my", err: None }, [])[[]]
-    #test(Renamer { env: ["main": "main"], aliases: [:], exports: ["": [:]], vals: [], tys: ["Self"], path: "examples/errors/type_list_empty_no_type.my", err: None }, [])[[]]
+    #test(Renamer { env: ["main": "main"], aliases: [:], exports: ["": [:]], vals: [], tys: ["Self"], path: "examples/errors/runtime_pop_empty.my", err: None, kinds: [:] }, [])[[]]
+    #test(Renamer { env: ["main": "main"], aliases: [:], exports: ["": [:]], vals: [], tys: ["Self"], path: "examples/errors/runtime_str_range_oob.my", err: None, kinds: [:] }, [])[[]]
+    #test(Renamer { env: ["main": "main"], aliases: [:], exports: ["": [:]], vals: [], tys: ["Self"], path: "examples/errors/type_list_empty_no_type.my", err: None, kinds: [:] }, [])[[]]
     fun exprs(var self, es: [Expr]) -> [Expr] {
         var out: [Expr] = []
         for e in es { out.push(self.expr(e)) }
         return out
     }
 
-    #test(Renamer { env: ["main": "main"], aliases: [:], exports: ["": [:]], vals: ["sum"], tys: ["Self"], path: "examples/loops.my", err: None }, None)[None]
-    #test(Renamer { env: ["main": "main"], aliases: [:], exports: ["": [:]], vals: ["n"], tys: ["Self"], path: "examples/errors/type_for_in_non_list.my", err: None }, None)[None]
-    #test(Renamer { env: ["average": "average", "main": "main"], aliases: [:], exports: ["": [:]], vals: ["xs", "sum"], tys: ["Self"], path: "examples/floats.my", err: None }, None)[None]
+    #test(Renamer { env: ["main": "main"], aliases: [:], exports: ["": [:]], vals: ["sum"], tys: ["Self"], path: "examples/loops.my", err: None, kinds: [:] }, None)[None]
+    #test(Renamer { env: ["main": "main"], aliases: [:], exports: ["": [:]], vals: ["n"], tys: ["Self"], path: "examples/errors/type_for_in_non_list.my", err: None, kinds: [:] }, None)[None]
+    #test(Renamer { env: ["average": "average", "main": "main"], aliases: [:], exports: ["": [:]], vals: ["xs", "sum"], tys: ["Self"], path: "examples/floats.my", err: None, kinds: [:] }, None)[None]
     fun opt_expr(var self, e: Option<Expr>) -> Option<Expr> {
         return match e { Some(x) => Some(self.expr(x)), None => None }
     }
@@ -1322,7 +1418,7 @@ impl Renamer {
     // `alias.member[.field…]`: the module prefix (the longest one that names a
     // module) folds into the qualified member; what follows stays field
     // accesses. The new nodes reuse the ids of the ones they replace.
-    #test(Renamer { env: ["Account": "Account", "fetch": "fetch", "deposit_ones": "deposit_ones", "main": "main"], aliases: [:], exports: ["": [:]], vals: ["self"], tys: ["Self"], path: "examples/concurrency.my", err: None }, expr_of("-n * 2"))[None]
+    #test(Renamer { env: ["Account": "Account", "fetch": "fetch", "deposit_ones": "deposit_ones", "main": "main"], aliases: [:], exports: ["": [:]], vals: ["self"], tys: ["Self"], path: "examples/concurrency.my", err: None, kinds: [:] }, expr_of("-n * 2"))[None]
     fun module_access(var self, e: Expr) -> Option<Expr> {
         var names: [str] = []       // field names, outermost first
         var nodes: [Expr] = []      // their GetField nodes
@@ -1400,15 +1496,15 @@ impl Renamer {
 
     // -- patterns: enum and struct names --
 
-    #test(Renamer { env: ["Shape": "Shape", "f": "f", "main": "main"], aliases: [:], exports: ["": [:]], vals: ["s"], tys: ["Self"], path: "examples/errors/type_match_arms_disagree.my", err: None }, [])[[]]
-    #test(Renamer { env: ["Shape": "Shape", "f": "f", "main": "main"], aliases: [:], exports: ["": [:]], vals: ["s"], tys: ["Self"], path: "examples/errors/type_match_nonexhaustive.my", err: None }, [])[[]]
+    #test(Renamer { env: ["Shape": "Shape", "f": "f", "main": "main"], aliases: [:], exports: ["": [:]], vals: ["s"], tys: ["Self"], path: "examples/errors/type_match_arms_disagree.my", err: None, kinds: [:] }, [])[[]]
+    #test(Renamer { env: ["Shape": "Shape", "f": "f", "main": "main"], aliases: [:], exports: ["": [:]], vals: ["s"], tys: ["Self"], path: "examples/errors/type_match_nonexhaustive.my", err: None, kinds: [:] }, [])[[]]
     fun patterns(var self, ps: [Pattern]) -> [Pattern] {
         var out: [Pattern] = []
         for p in ps { out.push(self.pattern(p)) }
         return out
     }
 
-    #test(Renamer { env: ["big": "big", "size": "size", "main": "main"], aliases: [:], exports: ["": [:]], vals: ["n"], tys: ["Self"], path: "examples/errors/type_await_in_guard.my", err: None }, pattern_of("_"))[Pattern { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 2 }, kind: PatternKind.PWild }]
+    #test(Renamer { env: ["big": "big", "size": "size", "main": "main"], aliases: [:], exports: ["": [:]], vals: ["n"], tys: ["Self"], path: "examples/errors/type_await_in_guard.my", err: None, kinds: [:] }, pattern_of("_"))[Pattern { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 2 }, kind: PatternKind.PWild }]
     fun pattern(var self, p: Pattern) -> Pattern {
         let k = match p.kind {
             PatternKind.PLit(x) => PatternKind.PLit(self.expr(x)),
@@ -1592,11 +1688,17 @@ pub fun load_program_opts(entry: str, opts: LoadOptions) -> Result<Loaded, Repor
     ld.build_bindings()?
     var exports: [str: [str: Binding]] = [:]
     for m in ld.modules { exports[m.id] = m.exports }
+    var kinds: [str: str] = [:]
+    for m in ld.modules {
+        for d in m.decls {
+            match named(d) { Some(nd) => { kinds[qualify(m.id, nd.name)] = decl_kind_word(d) }, None => {} }
+        }
+    }
     var decls: [Decl] = []
     var std_impls: [int32: DeclOrigin] = [:]
     for k in merge_order(ld.modules.len() as int32, implicit) {
         let m = ld.modules[k]
-        var r = Renamer { env: decl_env(m.bindings), aliases: module_env(m.bindings), exports: exports, vals: [], tys: [], path: m.path, err: None }
+        var r = Renamer { env: decl_env(m.bindings), aliases: module_env(m.bindings), exports: exports, vals: [], tys: [], path: m.path, err: None, kinds: kinds }
         let in_std = starts_with_text(m.id, "std$")
         let is_implicit = has_index(implicit, k)
         for d0 in m.decls {

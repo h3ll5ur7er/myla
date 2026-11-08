@@ -1,0 +1,5 @@
+module error: module 'std.args' does not export a type 'Option' (declarations are private unless marked 'pub')
+  --> examples/errors/module_type_not_exported.my:7:14
+  |
+7 | fun first(o: args.Option) -> int {
+  |              ^^^^^^^^^^^

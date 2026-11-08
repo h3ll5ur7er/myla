@@ -115,7 +115,7 @@ import_item  = IDENT ( "as" IDENT )? ;
 
 type          = prim_type | named_type | "[" type "]" @list_type | "[" type ":" type "]" @map_type
               | "(" ")" @unit_type | tuple_type | function_type ;   (* "()": the unit type, D138 *)
-named_type    = IDENT type_args? ;
+named_type    = IDENT ( "." IDENT )* type_args? ;   (* m.T: a module's type, D170 *)
 type_args     = "<" type ( "," type )* ","? ">" ;
 prim_type     = "bool" | "str" | "int8" | "int16" | "int32" | "int64"
               | "uint8" | "uint16" | "uint32" | "uint64" ;
