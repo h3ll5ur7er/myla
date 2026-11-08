@@ -1101,8 +1101,7 @@ pub fun inflate(b: [uint8]) -> Result<[uint8], CompressError> {
 #test(unhex("1f8b0800000000"))[Err(CompressError.Truncated)] // in the header
 #test(unhex("1f8b08080000000002ff612e74"))[Err(CompressError.Truncated)] // in the name
 #test(unhex("1f8b08000000000002ffcb48cdc9c9e7020020303a36060000"))[Err(CompressError.Truncated)] // in the trailer
-#test(unhex("1f8b08000000000002ffcb48cdc9c9e7020020303a3606000000"
-    + "1f8b"))[Err(CompressError.Truncated)] // a second member cut short
+#test(unhex("1f8b08000000000002ffcb48cdc9c9e7020020303a36060000001f8b"))[Err(CompressError.Truncated)] // a second member cut short
 #test(unhex("1f8c08000000000002ff03000000000000000000"))[Err(CompressError.BadHeader)]
 #test(unhex("1f8b07000000000002ff03000000000000000000"))[Err(CompressError.BadHeader)] // not DEFLATE
 #test(unhex("1f8b08200000000002ff03000000000000000000"))[Err(CompressError.BadHeader)] // a reserved flag

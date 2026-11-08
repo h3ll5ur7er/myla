@@ -468,7 +468,7 @@ fun scanner_skips_space() {
     let e = sc.long()
     match e {
         Ok(_) => assert(false, "x is no number")
-        Err(err) => assert(format("{}", err) == "2:4: expected an integer", format("{}", err))
+        Err(err) => assert(f"{err}" == "2:4: expected an integer", f"{err}")
     }
 }
 

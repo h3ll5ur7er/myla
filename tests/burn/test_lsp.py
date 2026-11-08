@@ -689,6 +689,8 @@ class TestResolutionCorpus(unittest.TestCase):
                 for lexeme, line, column, member in _identifiers(path):
                     if lexeme not in declared:
                         continue
+                    if lexeme in ("int", "float"):
+                        continue    # the type names that are identifiers, never resolved, also a method's name (`r.float()`, `sc.int()`)
                     if member:
                         continue    # a member, or an attribute's name
                     if not source_lines[line - 1][column - 1:].startswith(lexeme):
