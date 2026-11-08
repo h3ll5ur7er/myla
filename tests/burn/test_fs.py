@@ -471,6 +471,7 @@ class IoErrorCauses(unittest.TestCase):
                 '        Err(IoError.BrokenPipe) => "broken pipe",\n'
                 '        Err(IoError.InvalidInput) => "invalid input",\n'
                 '        Err(IoError.Other(c)) => f"other {c}",\n'
+                '        Err(_) => "a network cause",\n'
                 "    }\n"
                 "}\n"
                 "fun main() {\n"

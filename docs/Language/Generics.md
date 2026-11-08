@@ -40,6 +40,7 @@ fun main() {
 
 - Parameter names may not shadow built-in type names (`int`, `str`, …) and may not repeat.
 - Inside the body a `T` value can only be bound, copied, passed, stored, returned and matched by binding. Operators need a bound ([[Language/Methods-and-traits]]); `print(x)` on a `T` without a `Format` bound is an error.
+- A bound's trait gives `T` its functions without `self` too: `T.zero()` under `T: Zero` makes a `T` with no value in hand, the function of the type `T` stands for in each call ([[Language/Methods-and-traits#functions-without-self]], D172).
 
 ## Type arguments
 
@@ -179,7 +180,7 @@ fun main() {
 
 | Backend | Strategy |
 | --- | --- |
-| Interpreter | Erasure: one body serves every instantiation; operators on erased values dispatch on the runtime value |
+| Interpreter | Erasure: one body serves every instantiation; operators on erased values dispatch on the runtime value. A program that calls a trait's function on a type parameter (`T.zero()`, D172), which has no value to dispatch on, has its generic functions' frames bind their type parameters to the types the checker solved at each call |
 | Native backend | Monomorphizes during code generation with a substitution map (the retired Python backend stamped out copies in a separate pass and checked the concrete program again) |
 
 Each instantiation gets its own name, whatever the type arguments are called ([[MYLA-9]], [[Architecture/Monomorphization]]).

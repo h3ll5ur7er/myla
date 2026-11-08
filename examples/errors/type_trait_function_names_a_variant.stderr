@@ -1,0 +1,5 @@
+type error: function 'Red' collides with a variant of 'Color': 'Color.Red()' would build the variant
+  --> examples/errors/type_trait_function_names_a_variant.my:14:5
+   |
+14 |     fun Red() -> Color { return Color.Blue }
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

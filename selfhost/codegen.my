@@ -82,6 +82,10 @@ pub struct CodeGen {
     recursive_enums: [str],
     funcs: [FuncSig],
     impl_args: [str: ImplArgs],     // a generic trait's impls' arguments, which a bound fixes a type parameter by (D171)
+    // the calls of functions without `self`, by id, with the type each is
+    // called on, and each such function's impl target (D172)
+    static_calls: [int32: Type],
+    static_selfs: [str: Type],
     text: [str],
     rodata: [str],
     strdata: [str],                 // static `str` cells (static_str)
@@ -327,6 +331,7 @@ pub fun new_codegen(c: Checker) -> CodeGen {
         recursive_enums: c.recursive_enums,
         funcs: c.functions,
         impl_args: c.impl_args,
+        static_calls: c.static_calls, static_selfs: c.static_selfs,
         text: [], rodata: [], strdata: [],
         label_n: 0, str_n: 0,
         str_texts: [], str_labels: [],
@@ -1217,9 +1222,11 @@ impl CodeGen {
                             ExprKind.Name(q) => self.is_enum_name(q),
                             _ => false,
                         }
-                        if enum_ctor { stores = true } else {
+                        // (a type's function without `self` has no receiver, D172)
+                        let on_type = self.static_calls.contains(e.id)
+                        if enum_ctor && !on_type { stores = true } else {
                             callee_name = f
-                            recv = t.id
+                            if !on_type { recv = t.id }
                         }
                     },
                     _ => {},
@@ -1917,7 +1924,8 @@ impl CodeGen {
             ExprKind.Call(callee, args, _) => {
                 let qn = expr_name(callee_target(callee))
                 let cfield = getfield_name(callee)
-                if cfield != "" && qn != "" && self.is_enum_name(qn) {
+                // (an enum's function without `self` isn't a variant, D172)
+                if cfield != "" && qn != "" && self.is_enum_name(qn) && !self.static_calls.contains(e.id) {
                     return CtorInfo { ok: true, enum_name: enm, variant: cfield, args: args }
                 }
                 let un = expr_name(callee)
@@ -1945,7 +1953,7 @@ impl CodeGen {
         // every program's (`__map_lookup`: `remove`'s too)
         var out = [("__panic_report", "std$rt$panic_report"), ("__list_grow", "std$rt$list_grow"), ("__sb_append_bytes", "std$rt$sb_append_bytes"), ("__map_new", "std$rt$map_new"), ("__map_lookup", "std$rt$map_lookup"), ("__equal_bytes", "std$rt$equal_bytes"), ("__func_retain", "std$rt$func_retain"), ("__func_drop", "std$rt$func_drop")]
         if self.frames {
-            for p in [("__sched_init", "std$rt$sched_init"), ("__workers_count", "std$rt$workers_count"), ("__task_cancel", "std$rt$task_cancel"), ("__task_cancelled", "std$rt$task_cancelled"), ("__failed_wait", "std$rt$failed_wait"), ("__wait_stopped", "std$rt$wait_stopped"), ("__exec_push", "std$rt$exec_push"), ("__exec_yield_push", "std$rt$exec_yield_push"), ("__exec_find", "std$rt$exec_find"), ("__exec_peek", "std$rt$exec_peek"), ("__wake_waiters", "std$rt$wake_waiters"), ("__actor_leave", "std$rt$actor_leave"), ("__task_wait", "std$rt$task_wait"), ("__actor_enter_rt", "std$rt$actor_enter"), ("__exec_loop", "std$rt$exec_run"), ("__deep_str", "std$rt$deep_str"), ("__dclone_str", "std$rt$dclone_str"), ("__dclone_cell", "std$rt$dclone_cell"), ("__deep_env", "std$rt$deep_env"), ("__dclone_env", "std$rt$dclone_env"), ("__panic_report_tasks", "std$rt$panic_report_tasks"), ("myla___sleep", "std$rt$sleep_frame"), ("__cancel_after", "std$rt$cancel_after"), ("__task_end", "std$rt$task_end"), ("myla___wait_fd", "std$rt$wait_fd"), ("myla___wait_fd2", "std$rt$wait_fd2")] { out.push(p) }
+            for p in [("__sched_init", "std$rt$sched_init"), ("__workers_count", "std$rt$workers_count"), ("__task_cancel", "std$rt$task_cancel"), ("__task_cancelled", "std$rt$task_cancelled"), ("__failed_wait", "std$rt$failed_wait"), ("__wait_stopped", "std$rt$wait_stopped"), ("__exec_push", "std$rt$exec_push"), ("__exec_yield_push", "std$rt$exec_yield_push"), ("__exec_find", "std$rt$exec_find"), ("__exec_peek", "std$rt$exec_peek"), ("__wake_waiters", "std$rt$wake_waiters"), ("__actor_leave", "std$rt$actor_leave"), ("__task_wait", "std$rt$task_wait"), ("__actor_enter_rt", "std$rt$actor_enter"), ("__exec_loop", "std$rt$exec_run"), ("__deep_str", "std$rt$deep_str"), ("__dclone_str", "std$rt$dclone_str"), ("__dclone_cell", "std$rt$dclone_cell"), ("__deep_env", "std$rt$deep_env"), ("__dclone_env", "std$rt$dclone_env"), ("__panic_report_tasks", "std$rt$panic_report_tasks"), ("myla___sleep", "std$rt$sleep_frame"), ("__cancel_after", "std$rt$cancel_after"), ("__task_end", "std$rt$task_end"), ("myla___wait_fd", "std$rt$wait_fd"), ("myla___wait_fd2", "std$rt$wait_fd2"), ("myla___wait_sock", "std$rt$wait_sock")] { out.push(p) }
         }
         return out
     }
@@ -2048,6 +2056,17 @@ impl CodeGen {
         while k < explicit.len() && base >= 0 {
             if self.has_type(explicit[k].id) { sub.push(Subst { name: sig.type_params[base + k], ty: self.type_of(explicit[k].id) }) }
             k += 1
+        }
+        // a function without `self` of a generic impl, `T.zero()` (D172):
+        // the type it is called on gives the impl's type parameters
+        match get(self.static_calls, call_id) {
+            Some(st) => {
+                match get(self.static_selfs, sig.name) {
+                    Some(pat) => { for b in unify_into(pat, subst_type(st, self.subst)) { sub.push(b) } },
+                    None => {},
+                }
+            },
+            None => {},
         }
         var i = 0
         while i < sig.params.len() && i < args.len() {

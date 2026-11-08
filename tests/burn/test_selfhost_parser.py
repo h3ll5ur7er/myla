@@ -270,6 +270,17 @@ SUPERSEDED: dict[str, str] = {
 }
 
 
+# The retired parser's error for a method without a receiver: since D172
+# (MYLA-384) a trait's or impl's function may have none, so the parse goes on
+# where the recording stopped, and its later errors can differ. Where a
+# recording has it, the parse is held to erring as the recording did.
+_RECEIVER_ERROR = "a method's first parameter must be 'self' or 'var self'"
+
+
+def _receiverless(expected: str) -> bool:
+    return _RECEIVER_ERROR in expected
+
+
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
 class SelfHostedParserParity(unittest.TestCase):
     _binary: str | None = None
@@ -323,7 +334,11 @@ class SelfHostedParserParity(unittest.TestCase):
             with self.subTest(case=name):
                 expected = SUPERSEDED.get(name) or _canonical(source)
                 self.assertTrue(expected.startswith("err "), "not an error in Python")
-                self.assertEqual(self._myla_parse_source(source), expected)
+                mine = self._myla_parse_source(source)
+                if _receiverless(expected):
+                    self.assertTrue(mine.startswith("err "), mine)
+                    continue
+                self.assertEqual(mine, expected)
 
     def test_big_integer_literals_match_the_oracle(self) -> None:
         self.assertEqual(self._myla_parse_source(BIG_LITERALS), _canonical(BIG_LITERALS))
@@ -341,7 +356,12 @@ class SelfHostedParserParity(unittest.TestCase):
         for cut in sorted(cuts):
             prefix = CONCURRENCY[:cut]
             with self.subTest(cut=cut):
-                self.assertEqual(self._myla_parse_source(prefix), _canonical(prefix))
+                expected = _canonical(prefix)
+                mine = self._myla_parse_source(prefix)
+                if _receiverless(expected):
+                    self.assertTrue(mine.startswith("err "), mine)
+                    continue
+                self.assertEqual(mine, expected)
 
     def test_garbled_sources_match_the_oracle(self) -> None:
         several = 0
@@ -353,7 +373,7 @@ class SelfHostedParserParity(unittest.TestCase):
                 with self.subTest(file=os.path.basename(path), seed=seed):
                     expected = _canonical(garbled)
                     mine = self._myla_parse_source(garbled)
-                    if self._continued(garbled):
+                    if self._continued(garbled) or _receiverless(expected):
                         # a line break the lexer leaves out since D104 (3): the
                         # recording parsed other tokens; errors still, no crash
                         self.assertEqual(mine.startswith("err "), expected.startswith("err "), mine)
@@ -376,7 +396,12 @@ class SelfHostedParserParity(unittest.TestCase):
             for cut in sorted(cuts):
                 prefix = source[:cut]
                 with self.subTest(file=name, cut=cut):
-                    self.assertEqual(self._myla_parse_source(prefix), _canonical(prefix))
+                    expected = _canonical(prefix)
+                    mine = self._myla_parse_source(prefix)
+                    if _receiverless(expected):
+                        self.assertTrue(mine.startswith("err "), mine)
+                        continue
+                    self.assertEqual(mine, expected)
 
 
 if __name__ == "__main__":

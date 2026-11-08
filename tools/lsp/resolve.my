@@ -355,9 +355,14 @@ impl Resolver {
     // Declare `name` (of type `ty`) at or after (line, col) in the innermost
     // scope.
     fun declare(var self, line: int32, col: int32, name: str, kind: DefKind, ty: str) {
+        self.declare_detail(line, col, name, kind, ty, "")
+    }
+
+    // `declare` with what hover shows of it (a type parameter's bounds).
+    fun declare_detail(var self, line: int32, col: int32, name: str, kind: DefKind, ty: str, detail: str) {
         let k = self.ident_after(line, col, name)
         if k < 0 { return }
-        let d = Def { name: name, path: self.path, range: self.range_of(k), kind: kind, detail: "", ty: ty }
+        let d = Def { name: name, path: self.path, range: self.range_of(k), kind: kind, detail: detail, ty: ty }
         self.defs.push(d)
         if self.scopes.len() > 0 { self.scopes[self.scopes.len() - 1].push(d) }
     }
@@ -465,7 +470,8 @@ impl Resolver {
     }
 
     fun type_params(var self, tps: [TypeParam]) {
-        for tp in tps { self.declare(tp.line, tp.col, tp.name, DefKind.TypeParam, "") }
+        // its bounds, whose traits' functions `T.f()` calls (D172)
+        for tp in tps { self.declare_detail(tp.line, tp.col, tp.name, DefKind.TypeParam, "", join_bounds(tp.bounds)) }
         // a bound, `<R: Read>`, uses its trait (one of the program's; a
         // built-in one has no declaration); the AST keeps no position of
         // its own for it, so it is the first of its name after the parameter
@@ -813,11 +819,25 @@ impl Resolver {
                                 named = true
                                 members = self.members_named(n)
                             },
+                            // `T.zero()`: its bounds' traits' members (D172)
+                            DefKind.TypeParam => {
+                                named = true
+                                for b in split_bounds(od.detail) {
+                                    match get(self.globals, b) {
+                                        Some(g) => { for m in g.members { members.push(m) } },
+                                        None => {},
+                                    }
+                                }
+                            },
                             _ => {},
                         }
                     },
                     None => {
-                        if self.modules.contains(n) {
+                        // `int.zero()`: a built-in type's impls (D172)
+                        if is_builtin_type(n) {
+                            named = true
+                            members = self.members_named(n)
+                        } else if self.modules.contains(n) {
                             named = true
                             let file = self.modules[n]
                             for s in self.module_symbols(file) {
@@ -945,7 +965,7 @@ impl Resolver {
             },
             None => {},
         }
-        match get(self.methods, name) {
+        match get(self.methods, method_key(name)) {
             Some(ms) => { for m in ms { out.push(m) } },
             None => {},
         }
@@ -1130,7 +1150,8 @@ impl Resolver {
                             _ => {},
                         }
                     },
-                    None => {},
+                    // `int.zero()` (D172)
+                    None => { if is_builtin_type(n) && called { return self.named_member_type(n, name) } },
                 }
             },
             _ => {},
@@ -1309,11 +1330,35 @@ pub fun render_local(d: Def) -> str {
     match d.kind {
         DefKind.Local(k) => { return k + " " + typed },
         DefKind.Param => { return typed },
-        DefKind.TypeParam => { return "type parameter " + d.name },
+        DefKind.TypeParam => {
+            if d.detail != "" { return "type parameter " + d.name + ": " + d.detail }
+            return "type parameter " + d.name
+        },
         DefKind.Module => { return "module " + d.name },
         DefKind.Global(k) => {},
     }
     return d.name
+}
+
+// A type parameter's bounds as hover shows them, `Zero + Add`, and back.
+#test(["Zero", "Add"])["Zero + Add"]
+#test([])[""]
+fun join_bounds(bs: [str]) -> str {
+    var out = ""
+    for b in bs {
+        if out != "" { out = out + " + " }
+        out = out + b
+    }
+    return out
+}
+
+#test("Zero + Add")[["Zero", "Add"]]
+#test("")[[]]
+fun split_bounds(s: str) -> [str] {
+    var out: [str] = []
+    if s == "" { return out }
+    for part in s.split(" + ") { out.push(part) }
+    return out
 }
 
 fun kind_name(k: DefKind) -> str {

@@ -20,7 +20,7 @@ These names are reserved: no declaration may reuse them. The ones on a receiver 
 | `StringBuilder()`, `sb.append(s)`, `sb.append(s, start, end)`, `sb.append_byte(b)`, `sb.build()` | | Methods but `StringBuilder()`; `append(s, start, end)` adds the bytes `s[start..end]` ([[Language/Collections-and-strings]]) |
 | `assert(cond[, msg])`, `panic(msg)`, `unreachable()` | | See [[Language/Attributes-and-testing]] |
 
-The low-level primitives `__write`, `__read`, `__poll`, `__exit`, `__args`, `__read_file`, `__write_file`, `__list_dir`, `__mkdir`, `__stat`, `__getcwd`, `__getenv`, `__sqrt`, `__f64_bits`, `__f64_from_bits`, `__unlink`, `__rmdir`, `__rename`, `__io_errno`, `__run`, `__run_stderr`, `__run_exit_code`, `__run_signal`, `__run_errno` and `__task_cancelled`, and the primitives behind `std.time`, `std.task`'s timers and `std.process`'s child processes (`__clock_ns`, `__sleep`, `__spawn`, …) exist for the standard library; call the `std` functions instead. A call of one from a program outside the standard library compiles, with the warning `primitive` (D100, [[MYLA-186]]): it is for code that knows what it does, such as a new std function in the making, which says so with `#allow(primitive)` or `#allow(primitive(__poll))` (D161, [[Language/Attributes-and-testing#warnings-and-allow]]).
+The low-level primitives `__write`, `__read`, `__poll`, `__exit`, `__args`, `__read_file`, `__write_file`, `__list_dir`, `__mkdir`, `__stat`, `__getcwd`, `__getenv`, `__sqrt`, `__f64_bits`, `__f64_from_bits`, `__unlink`, `__rmdir`, `__rename`, `__io_errno`, `__run`, `__run_stderr`, `__run_exit_code`, `__run_signal`, `__run_errno` and `__task_cancelled`, and the primitives behind `std.time`, `std.task`'s timers, `std.process`'s child processes and `std.net`'s sockets (`__clock_ns`, `__sleep`, `__spawn`, `__sock_open`, …) exist for the standard library; call the `std` functions instead. A call of one from a program outside the standard library compiles, with the warning `primitive` (D100, [[MYLA-186]]): it is for code that knows what it does, such as a new std function in the making, which says so with `#allow(primitive)` or `#allow(primitive(__poll))` (D161, [[Language/Attributes-and-testing#warnings-and-allow]]).
 
 ## Modules
 
@@ -35,6 +35,7 @@ The conventions (D164): operations on built-in types are methods (`s.split(",")`
 | `std.path` | [[Language/Standard-library/Path]] | Paths as strings: `join`, `parent`, `file_name`, extensions, `normalize`, `relative` |
 | `std.glob` | [[Language/Standard-library/Glob]] | Glob patterns (`*`, `?`, `**`, sets), directory walks, `glob` |
 | `std.process` | [[Language/Standard-library/Process]] | Arguments, the environment, exit, running programs (`run`, `command`), children streamed through pipes (`spawn`, `Child`, `pipe`) |
+| `std.net` | [[Language/Standard-library/Net]] | TCP and UDP sockets (`listen`, `connect`, `TcpStream` a `Read` and `Write`, `udp_bind`), their async forms on the reactor, `IpAddr` and `SocketAddr` parsed and printed, name lookup through the hosts file and DNS |
 | `std.char` | [[Language/Standard-library/Char]] | Character classes, case and digits, as methods on `char` (ASCII) |
 | `std.int` | [[Language/Standard-library/Int]] | Methods on every integer type: `gcd`, `pow`, Euclidean division, checked, wrapping, saturating and overflowing arithmetic, `mulmod`, `powmod`, `modinv` |
 | `std.num` | [[Language/Standard-library/Num]] | Exact parsing and printing of integers and floats; integers in any radix and width, with `ParseIntError` |
@@ -56,6 +57,8 @@ The conventions (D164): operations on built-in types are methods (`s.split(",")`
 | `std.toml` | [[Language/Standard-library/Toml]] | The TOML subset of manifests and lock files |
 | `std.csv` | [[Language/Standard-library/Csv]] | RFC 4180 CSV: records, a header row mapped to names, writing |
 | `std.ini` | [[Language/Standard-library/Ini]] | INI files: sections, keys, comments, read and written in order |
+| `std.yaml` | [[Language/Standard-library/Yaml]] | The safe subset of YAML 1.2: block and flow collections, quoted and block scalars, the core schema, writing; anchors, tags and second documents refused |
+| `std.xml` | [[Language/Standard-library/Xml]] | Well-formed XML 1.0 without a DTD: a tree, a pull reader over a text or a stream, writing with escaping and indentation |
 | `std.bytes` | [[Language/Standard-library/Bytes]] | Strings as `[uint8]` and back, checking and building UTF-8 |
 | `std.encoding` | [[Language/Standard-library/Encoding]] | Hex and Base64 (standard and URL-safe), strict decoding |
 | `std.url` | [[Language/Standard-library/Url]] | Percent-encoding, query strings, parsing and building URLs |
@@ -72,6 +75,7 @@ The conventions (D164): operations on built-in types are methods (`s.split(",")`
 | `std.digest` | [[Language/Standard-library/Digest]] | MD5, SHA-1, SHA-2 and HMAC, one-shot and incremental, as bytes and as hex |
 | `std.random` | [[Language/Standard-library/Random]] | `Rng`, a seeded generator (xoshiro256**): seeded or from the system's entropy, integers in a range without bias, floats, shuffles, choices |
 | `std.uuid` | [[Language/Standard-library/Uuid]] | UUIDs of RFC 9562, version 4 (random) and 7 (a time), parsing and the canonical text |
-| `std.compress` | [[Language/Standard-library/Compress]] | DEFLATE decompression and the gzip and zlib formats: `inflate`, `gunzip`, `zlib_decompress`, and `Read` streams over any stream |
+| `std.compress` | [[Language/Standard-library/Compress]] | DEFLATE and the gzip and zlib formats: `inflate`, `gunzip`, `zlib_decompress` and `Read` streams over any stream; `deflate`, `gzip`, `zlib_compress` at levels 0 to 9 and `Write` streams |
+| `std.archive` | [[Language/Standard-library/Archive]] | tar archives read and written (ustar, pax, GNU long names), zip archives read (stored, deflate), safe entry names |
 | `std.args` | [[Language/Standard-library/Args]] | Command-line arguments: a declarative spec of flags, options, positionals and subcommands, parsing, the generated help |
 | `std.rt` | [[Language/Standard-library/Rt]] | The runtime in Myla; not for programs |

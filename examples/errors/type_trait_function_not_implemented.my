@@ -1,0 +1,14 @@
+//~ type error: type 'str' has no function 'zero'
+//~ help: trait 'Zero' declares it: 'impl Zero for str' would give 'str' one
+// A type's function is its impl's (D172): `str` doesn't implement `Zero`.
+trait Zero {
+    fun zero() -> Self
+}
+
+impl Zero for int {
+    fun zero() -> int { return 0 }
+}
+
+fun main() {
+    print(str.zero())
+}

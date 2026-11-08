@@ -31,6 +31,17 @@ pub enum IoError {
     Unsupported,
     BrokenPipe,
     InvalidInput,
+    // the network's (MYLA-346, std.net)
+    ConnectionRefused,
+    ConnectionReset,
+    ConnectionAborted,
+    NotConnected,
+    AddrInUse,
+    AddrNotAvailable,
+    TimedOut,
+    HostUnreachable,
+    NetworkUnreachable,
+    InvalidData,
     Other(int32),
 }
 
@@ -44,6 +55,9 @@ pub enum IoError {
 #test(38)[IoError.Unsupported]
 #test(32)[IoError.BrokenPipe]
 #test(22)[IoError.InvalidInput]
+#test(111)[IoError.ConnectionRefused]
+#test(98)[IoError.AddrInUse]
+#test(97)[IoError.Unsupported]
 #test(5)[IoError.Other(5)]
 pub fun from_errno(code: int32) -> IoError {
     if code == 2 { return IoError.NotFound }
@@ -57,6 +71,29 @@ pub fun from_errno(code: int32) -> IoError {
     if code == 38 || code == 95 { return IoError.Unsupported }
     if code == 32 { return IoError.BrokenPipe }
     if code == 22 { return IoError.InvalidInput }
+    return net_error(code)
+}
+
+// The network's causes (MYLA-346): ECONNREFUSED, ECONNRESET (and EPIPE's
+// cousin on a socket), ECONNABORTED, ENOTCONN, EADDRINUSE, EADDRNOTAVAIL,
+// ETIMEDOUT, EHOSTUNREACH, ENETUNREACH, EBADMSG; EAFNOSUPPORT and
+// EPROTONOSUPPORT (no IPv6 here) are `Unsupported`.
+#test(104)[IoError.ConnectionReset]
+#test(110)[IoError.TimedOut]
+#test(74)[IoError.InvalidData]
+#test(7)[IoError.Other(7)]
+fun net_error(code: int32) -> IoError {
+    if code == 111 { return IoError.ConnectionRefused }
+    if code == 104 { return IoError.ConnectionReset }
+    if code == 103 { return IoError.ConnectionAborted }
+    if code == 107 { return IoError.NotConnected }
+    if code == 98 { return IoError.AddrInUse }
+    if code == 99 { return IoError.AddrNotAvailable }
+    if code == 110 { return IoError.TimedOut }
+    if code == 113 { return IoError.HostUnreachable }
+    if code == 101 { return IoError.NetworkUnreachable }
+    if code == 74 { return IoError.InvalidData }
+    if code == 97 || code == 93 { return IoError.Unsupported }
     return IoError.Other(code)
 }
 
@@ -817,6 +854,16 @@ fun error_name(e: IoError) -> str {
         Unsupported => "Unsupported"
         BrokenPipe => "BrokenPipe"
         InvalidInput => "InvalidInput"
+        ConnectionRefused => "ConnectionRefused"
+        ConnectionReset => "ConnectionReset"
+        ConnectionAborted => "ConnectionAborted"
+        NotConnected => "NotConnected"
+        AddrInUse => "AddrInUse"
+        AddrNotAvailable => "AddrNotAvailable"
+        TimedOut => "TimedOut"
+        HostUnreachable => "HostUnreachable"
+        NetworkUnreachable => "NetworkUnreachable"
+        InvalidData => "InvalidData"
         Other(code) => f"Other({code})"
     }
 }

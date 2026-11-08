@@ -539,6 +539,37 @@ impl Lower {
         return 8
     }
 
+    // A program without tasks waiting for a socket (`await __wait_socket(h,
+    // events)`, MYLA-346): the thread blocked in `__sock_poll(h, events, -1)`
+    // until it is ready, as a blocking operation would be.
+    fun poll_socket(var self, cg: CodeGen, h: int32, ev: int32) {
+        let forever = self.int_const(-1)
+        let d = self.temp(Type.TInt(32, true))
+        self.rt_call(cg, d, "__sock_poll", [h, ev, forever])
+    }
+
+    // Whether `x`, awaited without tasks, is a socket's wait, which is then
+    // lowered as `poll_socket`.
+    fun socket_wait_without_tasks(var self, cg: CodeGen, x: Expr) -> bool {
+        match x.kind {
+            ExprKind.Call(c, a, _) => {
+                match c.kind {
+                    ExprKind.Name(n) => {
+                        if n == "__wait_socket" {
+                            let h = self.expr(cg, a[0])
+                            let ev = self.expr(cg, a[1])
+                            self.poll_socket(cg, h, ev)
+                            return true
+                        }
+                    },
+                    _ => {},
+                }
+            },
+            _ => {},
+        }
+        return false
+    }
+
     // A runtime helper's call: the function of the runtime written in Myla
     // (`std.rt`, MYLA-162) when the program has it (a native build) and it
     // takes nothing owned, else the assembly routine.
@@ -1315,6 +1346,30 @@ impl Lower {
                             self.enter_self()
                             return
                         }
+                        // `await __wait_socket(h, events)`: waiting for the
+                        // socket, the others running (MYLA-346); with no
+                        // tasks, the thread waits in `__sock_poll`
+                        if n == "__wait_socket" {
+                            let h = self.expr(cg, a[0])
+                            let ev = self.expr(cg, a[1])
+                            if !cg.frames {
+                                self.poll_socket(cg, h, ev)
+                                return
+                            }
+                            let h64 = self.temp(Type.TInt(64, true))
+                            self.add(Inst.Cast(h64, Type.TInt(32, true), Type.TInt(64, true), h))
+                            let ev64 = self.temp(Type.TInt(64, true))
+                            self.add(Inst.Cast(ev64, Type.TInt(32, true), Type.TInt(64, true), ev))
+                            self.leave_self()
+                            let me = self.temp(Type.TPtr)
+                            self.add(Inst.Frame(me))
+                            self.add(Inst.Call(-1, "__wait_sock", [me, h64, ev64]))
+                            let after = self.new_block()
+                            self.finish(Term.Suspend(after))
+                            self.start(after)
+                            self.enter_self()
+                            return
+                        }
                         // `await __wait_readable(fd)`: waiting for input, the
                         // others running (D124); with no tasks, nothing (the
                         // read after it blocks)
@@ -2021,7 +2076,8 @@ impl Lower {
                 }
                 // without tasks, waiting for input or for a turn is nothing:
                 // the read after it blocks (D124, as `await_let` says); its
-                // arguments are evaluated
+                // arguments are evaluated. A socket's wait blocks in a poll
+                if self.socket_wait_without_tasks(cg, x) { return }
                 if waits_without_tasks(x) {
                     match x.kind {
                         ExprKind.Call(c, a, _) => { for arg in a { self.discard(cg, arg) } },
@@ -2652,6 +2708,7 @@ impl Lower {
             // one task: the awaited call runs here (D91, MYLA-138)
             ExprKind.Await(x) => {
                 if cg.frames { return self.unsupported("an 'await' outside an async function's frame (in an async lambda)") }
+                if self.socket_wait_without_tasks(cg, x) { return -1 }
                 if waits_without_tasks(x) {
                     match x.kind {
                         ExprKind.Call(c, a, _) => { for arg in a { self.discard(cg, arg) } },
@@ -3169,6 +3226,16 @@ impl Lower {
                 return self.direct_call(cg, e, nm, args, into, tail)
             },
             ExprKind.GetField(recv, field) => {
+                // `T.zero()`, `int.zero()`: the function of the type this
+                // instance calls it on (D172)
+                match get(cg.static_calls, e.id) {
+                    Some(st) => {
+                        let fname = format("{}.{}", cg.type_key(subst_type(st, cg.subst)), field)
+                        if !cg.has_func(fname) { return self.unsupported("a call of a type's function it has no impl of") }
+                        return self.direct_call(cg, e, fname, args, into, tail)
+                    },
+                    None => {},
+                }
                 let key = cg.type_key(cg.type_of(recv.id))
                 let mname = format("{}.{}", key, field)
                 // a builtin function called as a method of its first argument

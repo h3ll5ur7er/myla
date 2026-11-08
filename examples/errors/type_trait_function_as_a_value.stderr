@@ -1,0 +1,5 @@
+type error: 'int32.zero' names a type's function, not a value: call it, 'int32.zero(…)', or wrap the call in a lambda
+  --> examples/errors/type_trait_function_as_a_value.my:12:16
+   |
+12 |     let f = int.zero
+   |             ^^^^^^^^

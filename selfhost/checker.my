@@ -799,7 +799,7 @@ fun is_builtin_op_trait(name: str) -> bool {
 #test("B")[false]
 #test("len")[true]
 fun is_builtin_func(name: str) -> bool {
-    return name == "print" || name == "assert" || name == "panic" || name == "unreachable" || name == "len" || name == "push" || name == "pop" || name == "contains" || name == "remove" || name == "keys" || name == "format" || name == "chars" || name == "StringBuilder" || name == "append" || name == "append_byte" || name == "build" || name == "__write" || name == "__exit" || name == "__args" || name == "__read_file" || name == "__io_errno" || name == "__run" || name == "__run_stderr" || name == "__run_exit_code" || name == "__run_signal" || name == "__run_errno" || name == "__write_file" || name == "__read" || name == "__poll" || name == "__list_dir" || name == "__mkdir" || name == "__stat" || name == "__getcwd" || name == "__getenv" || name == "__test_dir" || name == "__test_program" || name == "__sqrt" || name == "__f64_bits" || name == "__f64_from_bits" || name == "__unlink" || name == "__rmdir" || name == "__rename" || name == "__task_cancelled" || name == "__yield" || name == "__sleep" || name == "__clock_ns" || name == "__sleep_ns" || name == "__cancel_after" || name == "__disarm" || name == "__wait_readable" || name == "__wait_either" || name == "__spawn" || name == "__run_with" || name == "__spawn_with" || name == "__reap" || name == "__kill" || name == "__close" || is_platform_primitive(name) || is_raw_memory_primitive(name)
+    return name == "print" || name == "assert" || name == "panic" || name == "unreachable" || name == "len" || name == "push" || name == "pop" || name == "contains" || name == "remove" || name == "keys" || name == "format" || name == "chars" || name == "StringBuilder" || name == "append" || name == "append_byte" || name == "build" || name == "__write" || name == "__exit" || name == "__args" || name == "__read_file" || name == "__io_errno" || name == "__run" || name == "__run_stderr" || name == "__run_exit_code" || name == "__run_signal" || name == "__run_errno" || name == "__write_file" || name == "__read" || name == "__poll" || name == "__list_dir" || name == "__mkdir" || name == "__stat" || name == "__getcwd" || name == "__getenv" || name == "__test_dir" || name == "__test_program" || name == "__sqrt" || name == "__f64_bits" || name == "__f64_from_bits" || name == "__unlink" || name == "__rmdir" || name == "__rename" || name == "__task_cancelled" || name == "__yield" || name == "__sleep" || name == "__clock_ns" || name == "__sleep_ns" || name == "__cancel_after" || name == "__disarm" || name == "__wait_readable" || name == "__wait_either" || name == "__wait_socket" || name == "__spawn" || name == "__run_with" || name == "__spawn_with" || name == "__reap" || name == "__kill" || name == "__close" || is_platform_primitive(name) || is_raw_memory_primitive(name)
 }
 
 // The platform primitives of MYLA-336: entropy, file descriptors and
@@ -810,7 +810,41 @@ fun is_builtin_func(name: str) -> bool {
 #test("__wall_ns")[true]
 #test("__read")[false]
 pub fun is_platform_primitive(name: str) -> bool {
-    return name == "__random_bytes" || name == "__open" || name == "__seek" || name == "__fstat" || name == "__spawn_piped" || name == "__try_reap" || name == "__wall_ns"
+    return name == "__random_bytes" || name == "__open" || name == "__seek" || name == "__fstat" || name == "__spawn_piped" || name == "__try_reap" || name == "__wall_ns" || is_net_primitive(name)
+}
+
+// The socket primitives of MYLA-346 (std.net's), platform primitives too:
+// each a function of std.rt over std.platform's socket functions, and in
+// the interpreter the host's own. The reactor's wait for a socket,
+// `__wait_socket`, is awaited, as `__wait_readable` is.
+#test("__sock_open")[true]
+#test("__net_config")[true]
+#test("__wait_socket")[false]
+pub fun is_net_primitive(name: str) -> bool {
+    if name.len() < 7 || name[0] != '_' || name[1] != '_' { return false }
+    return name == "__sock_open" || name == "__sock_set_nonblocking" || name == "__sock_bind" || name == "__sock_listen" || name == "__sock_accept" || name == "__sock_connect" || name == "__sock_error" || name == "__sock_send" || name == "__sock_recv" || name == "__sock_send_to" || name == "__sock_recv_from" || name == "__sock_addr" || name == "__sock_shutdown" || name == "__sock_option" || name == "__sock_poll" || name == "__sock_close" || name == "__net_config"
+}
+
+// A socket primitive's parameters, as its messages show them and as types,
+// and its result type.
+#test("__sock_close")[("h: int", [Type.TInt(32, true)], Type.TInt(32, true))]
+#test("__net_config")[("which: int", [Type.TInt(32, true)], Type.TStr)]
+fun net_primitive_sig(name: str) -> (str, [Type], Type) {
+    let i = t_int()
+    let s = Type.TStr
+    if name == "__sock_open" { return ("family: int, kind: int", [i, i], i) }
+    if name == "__sock_set_nonblocking" { return ("h: int, on: int", [i, i], i) }
+    if name == "__sock_bind" || name == "__sock_connect" { return ("h: int, addr: str", [i, s], i) }
+    if name == "__sock_listen" { return ("h: int, backlog: int", [i, i], i) }
+    if name == "__sock_accept" || name == "__sock_error" || name == "__sock_close" { return ("h: int", [i], i) }
+    if name == "__sock_send" { return ("h: int, s: str, start: int", [i, s, i], i) }
+    if name == "__sock_recv" || name == "__sock_recv_from" { return ("h: int, n: int", [i, i], s) }
+    if name == "__sock_send_to" { return ("h: int, s: str, addr: str", [i, s, s], i) }
+    if name == "__sock_addr" { return ("h: int, peer: int", [i, i], s) }
+    if name == "__sock_shutdown" { return ("h: int, how: int", [i, i], i) }
+    if name == "__sock_option" { return ("h: int, opt: int, value: int", [i, i, i], i) }
+    if name == "__sock_poll" { return ("h: int, events: int, timeout_ms: int", [i, i, i], i) }
+    return ("which: int", [i], s)
 }
 
 // The raw-memory primitives the runtime written in Myla needs (MYLA-162's
@@ -1378,6 +1412,15 @@ fun subst_type_list(xs: [Type], subst: [Subst]) -> [Type] {
     return out
 }
 
+// The type arguments `subst` gives the type parameters `tps`, in their
+// order: a type parameter it leaves open stays itself (D172, `call_types`).
+#test(["T", "U"], [Subst { name: "U", ty: Type.TStr }])[[Type.TParam("T"), Type.TStr]]
+fun type_args_in(tps: [str], subst: [Subst]) -> [Type] {
+    var out: [Type] = []
+    for tp in tps { out.push(subst_type(Type.TParam(tp), subst)) }
+    return out
+}
+
 #test(None, [])[None]
 #test(Some(Type.TStruct("Counter", [])), [])[Some(Type.TStruct("Counter", []))]
 #test(Some(Type.TFunc([Type.TParam("T")], Some(Type.TParam("T")))), [Subst { name: "T", ty: Type.TInt(32, true) }])[Some(Type.TFunc([Type.TInt(32, true)], Some(Type.TInt(32, true))))]
@@ -1390,7 +1433,7 @@ pub struct UniRes { ok: bool, subst: [Subst] }
 #test(Type.TParam("T"), Type.TStr, [])[UniRes { ok: true, subst: [Subst { name: "T", ty: Type.TStr }] }]
 #test(Type.TParam("T"), Type.TStruct("P", []), [])[UniRes { ok: true, subst: [Subst { name: "T", ty: Type.TStruct("P", []) }] }]
 #test(Type.TParam("B"), Type.TInt(32, true), [Subst { name: "A", ty: Type.TInt(32, true) }])[UniRes { ok: true, subst: [Subst { name: "A", ty: Type.TInt(32, true) }, Subst { name: "B", ty: Type.TInt(32, true) }] }]
-fun unify_param(ptype: Type, at: Type, subst: [Subst]) -> UniRes {
+pub fun unify_param(ptype: Type, at: Type, subst: [Subst]) -> UniRes {
     return match ptype {
         Type.TParam(n) => {
             match subst_get(subst, n) {
@@ -1572,6 +1615,17 @@ pub struct Checker {
     user_trait_impls: [TraitImplPair],
     impl_args: [str: ImplArgs],     // a generic trait's impls' arguments, by `trait\tkey` (D171)
     for_iters: [int32: Stmt],       // a `for` over an iterator, by its id: the loop it is (D171, `check_for_iterator`)
+    // functions without `self` (D172): each one's impl target, by its name
+    // (`Box.zero`: `Box<T>`), which solves the impl's type parameters; the
+    // calls of one, `T.zero()` or `int.zero()`, by the call's id: the type
+    // it is called on, in the caller's type parameters; whether one is
+    // called on a type parameter, which the interpreter then binds at each
+    // generic call, with the type arguments the checker solved there (by
+    // the call's id, in the order of the callee's type parameters)
+    static_selfs: [str: Type],
+    static_calls: [int32: Type],
+    on_type_params: bool,
+    call_types: [int32: [Type]],
     aliases: [AliasRaw],
     alias_cache: [AliasCached],
     const_decls: [ConstDeclT],
@@ -1678,6 +1732,7 @@ fun new_checker(decls: [Decl]) -> Checker {
         structs: [], enums: [], recursive_enums: [],
         functions: [], methods: [], method_decls: [], method_decl_keys: [], method_decl_ids: [],
         impl_decls: [], next_id: 1000000000, pending_keys: [], keys_ready: false, key_ctx: false, traits: [], trait_decls: [], trait_impls: [], user_trait_impls: [], impl_args: [:], for_iters: [:],
+        static_selfs: [:], static_calls: [:], on_type_params: false, call_types: [:],
         aliases: [], alias_cache: [], const_decls: [], consts: [], const_values: [:], const_done: [], const_folding: [],
         allow_self: false, type_params: [], bounds_cur: [],
         cur_ret: None, has_cur_ret: false, ret_at: None, loop_depth: 0, defer_at: -1,
@@ -2653,13 +2708,16 @@ impl Checker {
                         }
                         self.allow_self = true
                         self.type_params = tp_names(tps)
-                        var params: [Type] = [Type.TSelf]
+                        // a function without `self` (D172, receiver ""): its
+                        // parameters only
+                        let recv = match m.receiver { Some(r) => r, None => "" }
+                        var params: [Type] = []
+                        if recv != "" { params.push(Type.TSelf) }
                         for p in m.params { params.push(self.param_part(p)?) }
                         var rt: Option<Type> = None
                         match m.ret_type { Some(te) => { rt = result_of(self.resolve_part(te)?) }, None => {} }
                         self.allow_self = false
                         self.type_params = []
-                        let recv = match m.receiver { Some(r) => r, None => "self" }
                         msigs.push(TraitMethodSig { name: m.name, params: params, ret: rt, receiver: recv })
                     }
                     self.traits.push(TraitInfo { name: name, methods: msigs, type_params: tp_names(tps), builtin: false, line: decl.line, col: decl.col })
@@ -2842,6 +2900,16 @@ impl Checker {
                 Some(x) => {},
                 None => { if contains_str(field_names, m.name) { bad = Some(terr_at(m.line, m.col, m.sp, format("method '{}' collides with a field of '{}'", m.name, key))) } },
             }
+            // a function without `self` (D172) is a trait's: called as
+            // `P.f()`, which a variant's name would take
+            let no_self = match m.receiver { Some(r) => false, None => true }
+            match bad {
+                Some(x) => {},
+                None => {
+                    if no_self && match trait_name { Some(tn) => false, None => true } { bad = Some(self.inherent_function(m, key)) }
+                    else if no_self && self.enum_has_variant(key, m.name) { bad = Some(terr_at(m.line, m.col, m.sp, format("function '{}' collides with a variant of '{}': '{}.{}()' would build the variant", m.name, key, key, m.name))) }
+                },
+            }
             match bad {
                 Some(e) => { self.record(e)? },
                 None => { self.register_method(target_te, key, tps, m, decl.id)? },
@@ -2888,6 +2956,14 @@ impl Checker {
         }
     }
 
+    // The error of a function without `self` in an impl of no trait: only a
+    // trait's functions go without one (D172), a type has no static methods.
+    #test(checker_on("[int]"), fun_of("fun f() { print(1) }"), "P")[CheckErr { line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 21 }, msg: "function 'f' in 'impl P' has no 'self': only a trait's functions go without one", decl: -1, notes: [Note { label: "help", msg: "write a free function 'fun f(…)', or declare it in a trait and implement that for 'P'", line: 0, col: 0, sp: SrcSpan { sline: 0, scol: 0, eline: 0, ecol: 0 } }] }]
+    fun inherent_function(self, m: FunData, key: str) -> CheckErr {
+        let e = terr_at(m.line, m.col, m.sp, format("function '{}' in 'impl {}' has no 'self': only a trait's functions go without one", m.name, key))
+        return with_notes(e, [Note { label: "help", msg: format("write a free function 'fun {}(…)', or declare it in a trait and implement that for '{}'", m.name, key), line: 0, col: 0, sp: no_span() }])
+    }
+
     // Leave out an impl whose type is unknown: a missing method or trait impl
     // of its names ends a check silently (MYLA-110).
     fun lose_impl(var self, methods: [FunData], trait_name: Option<str>) {
@@ -2931,13 +3007,19 @@ impl Checker {
         self.type_params = combined_names
         let combined_bounds = merge_bounds(self.bounds_of(impl_tps)?, self.bounds_of(m.type_params)?)
         let self_t = self.resolve_part(target_te)?
-        var params: [Type] = [self_t]
+        // a function without `self` (D172) takes its parameters only; the
+        // type it is called on is its impl's target, which solves the impl's
+        // type parameters
+        let has_self = match m.receiver { Some(r) => true, None => false }
+        var params: [Type] = []
+        if has_self { params.push(self_t) } else { self.static_selfs[mangled] = self_t }
         for p in m.params { params.push(self.param_part(p)?) }
         var rt: Option<Type> = None
         match m.ret_type { Some(te) => { rt = result_of(self.resolve_part(te)?) }, None => {} }
         self.type_params = []
         // synthesize a self parameter so the body checker binds `self`
-        var sparams: [Param] = [Param { line: m.line, col: m.col, sp: no_span(), name: "self", ty: Some(target_te), default: None }]
+        var sparams: [Param] = []
+        if has_self { sparams.push(Param { line: m.line, col: m.col, sp: no_span(), name: "self", ty: Some(target_te), default: None }) }
         for p in m.params { sparams.push(p) }
         let fdecl = FunData {
             line: m.line, col: m.col, sp: m.sp, name: mangled, params: sparams,
@@ -2983,8 +3065,11 @@ impl Checker {
                 continue
             }
             let sig = match sig_opt { Some(x) => x, None => { return Ok(false) } }
-            let recv = match sig.decl.receiver { Some(r) => r, None => "self" }
+            let recv = match sig.decl.receiver { Some(r) => r, None => "" }
             if recv != tm.receiver {
+                // a function without `self` (D172) on one side
+                if recv == "" { return Err(terr_at(sig.decl.line, sig.decl.col, sig.decl.sp, format("'{}' in impl of trait '{}' for '{}' has no receiver but the trait declares '{}'", tm.name, trinfo.name, key, tm.receiver))) }
+                if tm.receiver == "" { return Err(terr_at(sig.decl.line, sig.decl.col, sig.decl.sp, format("method '{}' in impl of trait '{}' for '{}' has receiver '{}' but the trait declares a function without 'self'", tm.name, trinfo.name, key, recv))) }
                 return Err(terr_at(sig.decl.line, sig.decl.col, sig.decl.sp, format("method '{}' in impl of trait '{}' for '{}' has receiver '{}' but the trait declares '{}'", tm.name, trinfo.name, key, recv, tm.receiver)))
             }
             var exp_params: [Type] = []
@@ -2996,7 +3081,7 @@ impl Checker {
             }
             if !type_list_eq(sig.params, exp_params) || !opt_type_eq(sig.ret, exp_ret) {
                 var rest: [Type] = []
-                var k = 1
+                var k = if tm.receiver == "" { 0 } else { 1 }
                 while k < exp_params.len() {
                     rest.push(exp_params[k])
                     k = k + 1
@@ -4000,6 +4085,11 @@ impl Checker {
                 }
                 return Err(terr_at(e.line, e.col, e.sp, format("cannot infer type argument(s) for '{}.{}'; annotate the binding (e.g. ': {}<...>')", enum_name, field, enum_name)))
             },
+            None => {},
+        }
+        // a type's function isn't a value (D172)
+        match self.static_target(target)? {
+            Some(st) => { return Err(terr_at(e.line, e.col, e.sp, format("'{}.{}' names a type's function, not a value: call it, '{}.{}(…)', or wrap the call in a lambda", type_name(st), field, type_name(st), field))) },
             None => {},
         }
         let base = self.expect_value(target, None)?
@@ -7085,6 +7175,20 @@ pub fun checker_on(src: str) -> Checker {
 #test("fun main() { let c = 'a'\nlet k: int = c + 1 }")[["cannot assign value of type 'char' to binding of type 'int32'"]]
 #test("fun main() { let c = 'a'\nlet n: uint8 = 1\nprint(c - n) }")[["operator '-' moves a char by an 'int32', found 'uint8' (convert it with 'as int32')"]]
 #test("fun main() { let c = 'a'\nprint(c * 2) }")[["type mismatch: 'char' vs 'int32' (no implicit conversion between numeric types)"]]
+// a trait's functions without `self` (D172, MYLA-384): on a built-in type,
+// a type keyword, a struct, a generic struct solved by the expected type,
+// a bounded type parameter, and the errors around them
+#test("trait Z { fun zero() -> Self }\nimpl Z for int { fun zero() -> int { return 0 } }\nfun main() { let a: int = int.zero()\nlet b: int32 = int32.zero() }")[[]]
+#test("trait Z { fun zero() -> Self }\nimpl Z for int { fun zero() -> int { return 0 } }\nfun total<T: Z + Add>(xs: [T]) -> T { var s = T.zero()\nfor x in xs { s = s + x }\nreturn s }\nfun main() { print(total([1, 2])) }")[[]]
+#test("trait Z { fun zero() -> Self }\nimpl Z for int { fun zero() -> int { return 0 } }\nstruct B<T> { v: T }\nimpl<T: Z> Z for B<T> { fun zero() -> B<T> { return B { v: T.zero() } } }\nfun main() { let b: B<int> = B.zero()\nprint(b.v) }")[[]]
+#test("enum R<T> { Good(T), Bad(str) }\ntrait P { fun parse(t: str) -> R<Self> }\nimpl P for bool { fun parse(t: str) -> R<bool> { return R.Good(t == \"true\") } }\nfun get<T: P>(t: str) -> R<T> { return T.parse(t) }\nfun main() { let r: R<bool> = get(\"true\")\nlet s = bool.parse(1) }")[["argument type mismatch in call to 'bool.parse': expected 'str', found 'int32'"]]
+#test("trait Z { fun zero() -> Self }\nimpl Z for int { fun zero() -> int { return 0 } }\nfun main() { let n = 1\nprint(n.zero()) }")[["'zero' is a function of 'int32' without 'self': call it on the type, 'int32.zero(…)', not on a value"]]
+#test("trait Z { fun zero() -> Self }\nimpl Z for int { fun zero() -> int { return 0 } }\nfun f<T>() -> T { return T.zero() }")[["type parameter 'T' has no function 'zero': it has no bounds (write 'T: Trait' to call a trait's functions)"]]
+#test("trait Z { fun zero() -> Self }\nimpl Z for int { fun zero() -> int { return 0 } }\nfun f<T: Add>() -> T { return T.zero() }")[["type parameter 'T' has no function 'zero': none of its bounds ('Add') declares one"]]
+#test("trait Z { fun zero() -> Self }\nimpl Z for int { fun zero() -> int { return 0 } }\nfun main() { print(str.zero()) }")[["type 'str' has no function 'zero'"]]
+#test("trait Z { fun zero() -> Self }\nimpl Z for int { fun zero() -> int { return 0 } }\nfun f<T: Z>() -> T { return T.zero(1) }")[["function 'T.zero' expects 0 argument(s), got 1"]]
+#test("struct P { x: int }\nimpl P { fun f() -> int { return 1 } }")[["function 'f' in 'impl P' has no 'self': only a trait's functions go without one"]]
+#test("trait S { fun a(self) -> int }\nstruct Q { x: int }\nimpl S for Q { fun a() -> int { return 1 } }")[["'a' in impl of trait 'S' for 'Q' has no receiver but the trait declares 'self'"]]
 fun errors_of(src: str) -> [str] {
     var out: [str] = []
     for e in checker_on(src).errs { out.push(e.msg) }
@@ -7162,7 +7266,16 @@ impl Checker {
         match callee.kind {
             ExprKind.GetField(target, field) => {
                 match self.enum_name_ref(target) {
-                    Some(en) => { return Ok(Some(self.infer_variant_ctor(e, en, field, args, expected)?)) },
+                    Some(en) => {
+                        // a function of the enum's (D172), where no variant has its name
+                        let fun_of_enum = match self.method_sig(en, field) { Some(sg) => !self.enum_has_variant(en, field), None => false }
+                        if !fun_of_enum { return Ok(Some(self.infer_variant_ctor(e, en, field, args, expected)?)) }
+                    },
+                    None => {},
+                }
+                // `T.f(args)`, `int.zero()`: a function without `self` (D172)
+                match self.static_target(target)? {
+                    Some(st) => { return self.infer_static_call(e, st, field, args, expected) },
                     None => {},
                 }
                 // a builtin function called as a method of its first argument
@@ -7502,6 +7615,19 @@ impl Checker {
             if !self.awaited.contains(e.id) { return Err(terr_at(e.line, e.col, e.sp, "a call to '__wait_either' needs 'await'")) }
             return Ok(None)
         }
+        // the running task waiting until the socket `h` is ready for
+        // `events` (1 to receive, 2 to send; MYLA-346, `std.net`'s async
+        // forms); without tasks, the thread waits in `__sock_poll`
+        if name == "__wait_socket" {
+            if args.len() != 2 { return Err(terr_at(e.line, e.col, e.sp, "__wait_socket() takes (h: int, events: int)")) }
+            for a in args {
+                let a_t = self.expect_value(a, Some(t_int()))?
+                if !type_eq(a_t, t_int()) { return Err(terr_at(a.line, a.col, a.sp, format("__wait_socket() takes an 'int', found '{}'", type_name(a_t)))) }
+            }
+            self.suspended = e.id
+            if !self.awaited.contains(e.id) { return Err(terr_at(e.line, e.col, e.sp, "a call to '__wait_socket' needs 'await'")) }
+            return Ok(None)
+        }
         // the running task waiting until `fd` is readable (D124, `std.io`'s
         // async reads)
         if name == "__wait_readable" {
@@ -7718,7 +7844,12 @@ impl Checker {
         var want: [Type] = [t_int()]
         var shape = "n: int"
         var result = Type.TList(t_byte())
-        if name == "__open" {
+        if is_net_primitive(name) {
+            let sig = net_primitive_sig(name)
+            shape = sig.0
+            want = sig.1
+            result = sig.2
+        } else if name == "__open" {
             want = [Type.TStr, t_int(), t_int()]
             shape = "path: str, flags: int, mode: int"
             result = t_int()
@@ -7869,6 +8000,7 @@ impl Checker {
         }
         self.check_call_bounds(sig, subst, e)?
         self.targs_taken = e.id
+        self.call_types[e.id] = type_args_in(sig.type_params, subst)
         return Ok(opt_subst_type(sig.ret, subst))
     }
 
@@ -7946,8 +8078,9 @@ impl Checker {
                 return Err(with_notes(terr_at(e.line, e.col, e.sp, format("type '{}' has no method '{}'", type_name(recv_type), field)), did_you_mean(field, self.method_names(key_opt))))
             },
             Some(sig) => {
-                let recv = match sig.decl.receiver { Some(r) => r, None => "self" }
+                let recv = match sig.decl.receiver { Some(r) => r, None => "" }
                 let mkey = match key_opt { Some(k) => k, None => "" }
+                if recv == "" { return Err(terr_at(e.line, e.col, e.sp, format("'{}' is a function of '{}' without 'self': call it on the type, '{}.{}(…)', not on a value", field, type_name(recv_type), type_name(recv_type), field))) }
                 // an actor's handle needn't be mutable: its methods change the actor (D89)
                 if recv == "var self" && !self.is_actor(mkey) {
                     if !is_lvalue_shape(target) { return Err(terr_at(e.line, e.col, e.sp, format("method '{}' mutates its receiver ('var self'); it needs a mutable variable (or one of its fields/elements), not a temporary", field))) }
@@ -8010,6 +8143,7 @@ impl Checker {
                 }
                 for m in self.traits[ti].methods {
                     if m.name != field { continue }
+                    if m.receiver == "" { return Err(terr_at(e.line, e.col, e.sp, format("'{}' is a function of trait '{}' without 'self': call it on the type, '{}.{}(…)', not on a value", field, tr, pn, field))) }
                     if m.receiver == "var self" {
                         if !is_lvalue_shape(target) { return Err(terr_at(e.line, e.col, e.sp, format("method '{}' mutates its receiver ('var self'); it needs a mutable variable (or one of its fields/elements), not a temporary", field))) }
                         let lv = self.check_lvalue(target)?
@@ -8030,6 +8164,127 @@ impl Checker {
         }
         if bound_traits.len() == 0 { return Err(terr_at(e.line, e.col, e.sp, format("type parameter '{}' has no method '{}': it has no bounds (write '{}: Trait' to call a trait's methods)", pn, field, pn))) }
         return Err(terr_at(e.line, e.col, e.sp, format("type parameter '{}' has no method '{}': none of its bounds ({}) declares one (an operator trait gives its operators)", pn, field, quoted_list(bound_traits))))
+    }
+
+    // The type `target` names when it is the type of a call `target.f(…)`
+    // (D172): a type parameter in scope, a struct or enum (a generic one
+    // without its arguments, which the call solves), a built-in type or an
+    // alias; None for a variable, which a local of the name is.
+    #test(checker_on("[int]"), expr_of("int"))[Ok(Some(Type.TInt(32, true)))]
+    #test(checker_on("[int]"), expr_of("char"))[Ok(Some(Type.TChar))]
+    #test(checker_on("struct Box<T> { v: T }"), expr_of("Box"))[Ok(Some(Type.TStruct("Box", [])))]
+    #test(checker_on("[int]"), expr_of("x"))[Ok(None)]
+    #test(checker_on("[int]"), expr_of("a.b"))[Ok(None)]
+    fun static_target(var self, target: Expr) -> Result<Option<Type>, CheckErr> {
+        let n = match target.kind { ExprKind.Name(x) => x, _ => "" }
+        if n == "" { return Ok(None) }
+        match self.lookup(n) { Some(b) => { return Ok(None) }, None => {} }
+        if contains_str(self.type_params, n) { return Ok(Some(Type.TParam(n))) }
+        if self.is_struct(n) {
+            if self.is_actor(n) { return Ok(Some(Type.TActor(n))) }
+            return Ok(Some(Type.TStruct(n, [])))
+        }
+        if self.is_enum(n) { return Ok(Some(Type.TEnum(n, []))) }
+        let builtin = match prim_type(n) { Some(t) => true, None => n == "int" || n == "float" }
+        if builtin || self.alias_idx(n) >= 0 { return Ok(Some(self.resolve_ref(n, [], target.line, target.col, target.sp, [])?)) }
+        return Ok(None)
+    }
+
+    // `P.f(args)` on the type `st` (D172): its function `f` without `self`,
+    // a generic impl's type parameters solved as a generic function's are,
+    // from the arguments and the expected type; on a type parameter,
+    // `bound_static_call`. The backends call the function of the type the
+    // call is made for, by `static_calls`.
+    #test(checker_on("trait Z { fun zero() -> Self }\nimpl Z for int { fun zero() -> int { return 0 } }"), expr_of("int.zero()"), Type.TInt(32, true), "zero", [], None)[Ok(Some(Type.TInt(32, true)))]
+    #test(checker_on("[int]"), expr_of("int.zero()"), Type.TInt(32, true), "zero", [], None)[Err(CheckErr { line: 1, col: 9, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 11 }, msg: "type 'int32' has no function 'zero'", decl: -1, notes: [] })]
+    fun infer_static_call(var self, e: Expr, st: Type, field: str, args: [Expr], expected: Option<Type>) -> Result<Option<Type>, CheckErr> {
+        match st { Type.TParam(pn) => { return self.bound_static_call(e, pn, field, args) }, _ => {} }
+        let tn = type_name(st)
+        let key = match self.type_key(st) { Some(k) => k, None => "" }
+        let sig = match self.method_sig(key, field) {
+            Some(x) => x,
+            None => {
+                if self.lost_methods.contains(field) { return Err(poisoned()) }   // maybe a left-out impl's (MYLA-110)
+                return Err(with_notes(terr_at(e.line, e.col, e.sp, format("type '{}' has no function '{}'", tn, field)), self.static_hint(field, tn)))
+            },
+        }
+        match sig.decl.receiver {
+            Some(r) => { return Err(terr_at(e.line, e.col, e.sp, format("'{}' is a method of '{}' (it takes '{}'): call it on a value, 'x.{}(…)'", field, tn, r, field))) },
+            None => {},
+        }
+        self.static_calls[e.id] = st
+        let what = format("{}.{}", tn, field)
+        if sig.type_params.len() > 0 { return self.infer_generic_call(e, what, sig, args, expected) }
+        self.call_arity(e, sig, 0, args.len(), format("function '{}'", what))?
+        if call_targs(e).len() > 0 { return Err(not_generic(e, format("function '{}'", what))) }
+        var i = 0
+        while i < args.len() {
+            let pt = sig.params[i]
+            if !has_error(pt) {   // else the parameter's type failed (MYLA-110)
+                let at = self.expect_value(args[i], Some(pt))?
+                if !type_eq(at, pt) { return Err(terr_at(args[i].line, args[i].col, args[i].sp, format("argument type mismatch in call to '{}': expected '{}', found '{}'", what, type_name(pt), type_name(at)))) }
+            }
+            i = i + 1
+        }
+        return Ok(sig.ret)
+    }
+
+    // `T.f(args)` on the type parameter `pn` (D172): the function `f`
+    // without `self` of a trait among its bounds, with `Self` the parameter.
+    #test(checker_on("[int]"), expr_of("T.zero()"), "T", "zero", [])[Err(CheckErr { line: 1, col: 7, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 9 }, msg: "type parameter 'T' has no function 'zero': it has no bounds (write 'T: Trait' to call a trait's functions)", decl: -1, notes: [] })]
+    fun bound_static_call(var self, e: Expr, pn: str, field: str, args: [Expr]) -> Result<Option<Type>, CheckErr> {
+        let me = Type.TParam(pn)
+        var bound_traits: [str] = []
+        for b in self.bounds_cur {
+            if b.tp != pn { continue }
+            var bj = 0
+            while bj < b.traits.len() {
+                let tr = b.traits[bj]
+                let targs = b.args[bj]
+                bj += 1
+                bound_traits.push(tr)
+                let ti = self.trait_idx(tr)
+                if ti < 0 || self.traits[ti].builtin || self.traits[ti].type_params.len() != targs.len() { continue }
+                var pmap: [Subst] = []
+                var k = 0
+                while k < targs.len() {
+                    pmap.push(Subst { name: self.traits[ti].type_params[k], ty: targs[k] })
+                    k += 1
+                }
+                for m in self.traits[ti].methods {
+                    if m.name != field { continue }
+                    if m.receiver != "" { return Err(terr_at(e.line, e.col, e.sp, format("'{}' is a method of trait '{}' (it takes '{}'): call it on a value of type '{}', 'x.{}(…)'", field, tr, m.receiver, pn, field))) }
+                    if args.len() != m.params.len() { return Err(terr_at(e.line, e.col, e.sp, format("function '{}.{}' expects {} argument(s), got {}", pn, field, m.params.len(), args.len()))) }
+                    if call_targs(e).len() > 0 { return Err(not_generic(e, format("function '{}.{}'", pn, field))) }
+                    var i = 0
+                    while i < args.len() {
+                        let pt = subst_self(m.params[i], me, pmap)
+                        let at = self.expect_value(args[i], Some(pt))?
+                        if !type_eq(at, pt) { return Err(terr_at(args[i].line, args[i].col, args[i].sp, format("argument type mismatch in call to '{}.{}': expected '{}', found '{}'", pn, field, type_name(pt), type_name(at)))) }
+                        i += 1
+                    }
+                    self.static_calls[e.id] = me
+                    self.on_type_params = true
+                    return Ok(match m.ret { Some(rt) => Some(subst_self(rt, me, pmap)), None => None })
+                }
+            }
+        }
+        if bound_traits.len() == 0 { return Err(terr_at(e.line, e.col, e.sp, format("type parameter '{}' has no function '{}': it has no bounds (write '{}: Trait' to call a trait's functions)", pn, field, pn))) }
+        return Err(terr_at(e.line, e.col, e.sp, format("type parameter '{}' has no function '{}': none of its bounds ({}) declares one", pn, field, quoted_list(bound_traits))))
+    }
+
+    // Notes naming the traits that declare a function `field` without
+    // `self`, for a type `tn` that has none (D172).
+    #test(checker_on("trait Z { fun zero() -> Self }"), "zero", "str")[[Note { label: "help", msg: "trait 'Z' declares it: 'impl Z for str' would give 'str' one", line: 0, col: 0, sp: SrcSpan { sline: 0, scol: 0, eline: 0, ecol: 0 } }]]
+    #test(checker_on("trait Z { fun zero(self) -> Self }"), "zero", "str")[[]]
+    fun static_hint(self, field: str, tn: str) -> [Note] {
+        var out: [Note] = []
+        for t in self.traits {
+            for m in t.methods {
+                if m.name == field && m.receiver == "" { out.push(Note { label: "help", msg: format("trait '{}' declares it: 'impl {} for {}' would give '{}' one", t.name, t.name, tn, tn), line: 0, col: 0, sp: no_span() }) }
+            }
+        }
+        return out
     }
 
     // `infer_generic_call` for a method: its explicit type arguments give
@@ -8066,6 +8321,7 @@ impl Checker {
         }
         self.check_call_bounds(sig, subst, e)?
         self.targs_taken = e.id
+        self.call_types[e.id] = type_args_in(sig.type_params, subst)
         return Ok(opt_subst_type(sig.ret, subst))
     }
 

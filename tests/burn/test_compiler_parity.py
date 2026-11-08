@@ -9,6 +9,471 @@ from tests.burn._native import (CAN_BUILD_NATIVE, SKIP_REASON, Program, build_an
                                 run_file_both_now, selfhost_run, write_program)
 
 PROGRAMS = {
+    # D172 (MYLA-384): the task's `Zero`: `int.zero()`, a type keyword's
+    # `int64.zero()`, a struct's, and `T.zero()` under `T: Zero + Add`
+    "trait_functions_zero": """// D172 (MYLA-384): a trait function without `self`, called on a type
+// (`int.zero()`, `int64.zero()`, `Money.zero()`) and on a type parameter
+// bounded by the trait (`T.zero()`)
+trait Zero {
+    fun zero() -> Self
+}
+
+impl Zero for int {
+    fun zero() -> int { return 0 }
+}
+
+impl Zero for int64 {
+    fun zero() -> int64 { return 0 }
+}
+
+impl Zero for float {
+    fun zero() -> float { return 0.0 }
+}
+
+impl Zero for str {
+    fun zero() -> str { return "" }
+}
+
+struct Money {
+    cents: int64,
+}
+
+impl Zero for Money {
+    fun zero() -> Money { return Money { cents: 0 } }
+}
+
+impl Add for Money {
+    fun add(self, other: Money) -> Money { return Money { cents: self.cents + other.cents } }
+}
+
+fun total<T: Zero + Add>(xs: [T]) -> T {
+    var s = T.zero()
+    for x in xs { s = s + x }
+    return s
+}
+
+fun main() {
+    print(int.zero())
+    print(int64.zero() + 5000000000)
+    print(total([1, 2, 3]))
+    print(total([5000000000i64, 1i64]))
+    print(total([1.5, 2.25]))
+    print(total(["ab", "c"]).len())
+    print(total([Money { cents: 150 }, Money { cents: 250 }]).cents)
+    let none: [Money] = []
+    print(total(none).cents)
+    let empty: [int] = []
+    print(total(empty))
+    print(Money.zero().cents)
+}
+""",
+    # a `Default` over structs, enums and built-in types; `T.default()` in a
+    # generic function, a generic method, a generic impl's own function, a
+    # list's impl, a lambda keeping its function's `T`
+    "trait_functions_default": """// D172 (MYLA-384): a `Default` trait over structs, enums and built-in
+// types; `T.default()` in a generic function, a generic method, a generic
+// impl's own function (`Box<T>`'s calls its `T`'s), a list's impl, and a
+// lambda that keeps its function's `T`
+trait Default {
+    fun default() -> Self
+}
+
+#derive(Eq)
+enum Color {
+    Red,
+    Green,
+    Blue,
+}
+
+impl Default for Color {
+    fun default() -> Color { return Color.Green }
+}
+
+impl Default for bool {
+    fun default() -> bool { return false }
+}
+
+impl Default for int {
+    fun default() -> int { return 7 }
+}
+
+impl Default for str {
+    fun default() -> str { return "none" }
+}
+
+impl Default for char {
+    fun default() -> char { return 'x' }
+}
+
+struct Point {
+    x: int,
+    y: int,
+}
+
+impl Default for Point {
+    fun default() -> Point { return Point { x: int.default(), y: 1 } }
+}
+
+struct Box<T> {
+    v: T,
+}
+
+impl<T: Default> Default for Box<T> {
+    fun default() -> Box<T> { return Box { v: T.default() } }
+}
+
+impl<T: Default> Box<T> {
+    fun reset(var self) { self.v = T.default() }
+
+    fun or_default(self, keep: bool) -> T {
+        if keep { return self.v }
+        return T.default()
+    }
+}
+
+impl<T: Default> Default for [T] {
+    fun default() -> [T] { return [T.default(), T.default()] }
+}
+
+fun make<T: Default>() -> T {
+    return T.default()
+}
+
+fun pair<T: Default>() -> (T, T) {
+    return (make(), T.default())
+}
+
+fun later<T: Default>() -> () -> T {
+    return () => T.default()
+}
+
+fun boxed<T: Default>() -> Box<T> {
+    return Box.default()
+}
+
+fun main() {
+    print(Color.default() == Color.Green)
+    print(bool.default())
+    print(char.default())
+    let p = Point.default()
+    print(f"{p.x} {p.y}")
+    let b: Box<int> = Box.default()
+    print(b.v)
+    let bs: Box<str> = boxed()
+    print(bs.v)
+    let bb = boxed<Box<Color>>()
+    print(bb.v.v == Color.Green)
+    var c = Box { v: 3 }
+    c.reset()
+    print(c.v)
+    print(Box { v: "kept" }.or_default(false))
+    print(Box { v: "kept" }.or_default(true))
+    let ps = pair<Point>()
+    print(ps.0.x + ps.1.y)
+    let xs = make<[int]>()
+    print(xs.len())
+    let nested = make<[Box<char>]>()
+    print(nested[1].v)
+    let f = later<str>()
+    print(f())
+    print(later<[Color]>()().len())
+}
+""",
+    # a function taking arguments and returning `Result<Self, E>`, the
+    # shape MYLA-385's `FromJson` takes: `?` through nested types, a generic
+    # impl for lists
+    "trait_functions_parse": """// D172 (MYLA-384): a trait function taking arguments and returning
+// `Result<Self, E>`, the shape `FromJson` takes (MYLA-385): a value made
+// from text with no value in hand, by its type, `?` through nested
+// types, a generic impl for lists, and `T.parse` in generic code
+#derive(Eq)
+enum ParseError {
+    Empty,
+    Bad(str),
+}
+
+trait Parse {
+    fun parse(text: str) -> Result<Self, ParseError>
+}
+
+impl Parse for int {
+    fun parse(text: str) -> Result<int, ParseError> {
+        if text.len() == 0 { return Err(ParseError.Empty) }
+        var n = 0
+        for c in text {
+            if c < '0' || c > '9' { return Err(ParseError.Bad(text)) }
+            n = n * 10 + (c - '0')
+        }
+        return Ok(n)
+    }
+}
+
+impl Parse for bool {
+    fun parse(text: str) -> Result<bool, ParseError> {
+        if text == "true" { return Ok(true) }
+        if text == "false" { return Ok(false) }
+        return Err(ParseError.Bad(text))
+    }
+}
+
+struct Point {
+    x: int,
+    y: int,
+}
+
+impl Parse for Point {
+    fun parse(text: str) -> Result<Point, ParseError> {
+        let parts = text.split(",")
+        if parts.len() != 2 { return Err(ParseError.Bad(text)) }
+        return Ok(Point { x: int.parse(parts[0])?, y: int.parse(parts[1])? })
+    }
+}
+
+impl<T: Parse> Parse for [T] {
+    fun parse(text: str) -> Result<[T], ParseError> {
+        var out: [T] = []
+        if text.len() == 0 { return Ok(out) }
+        for part in text.split(";") { out.push(T.parse(part)?) }
+        return Ok(out)
+    }
+}
+
+fun decode<T: Parse>(text: str) -> Result<T, ParseError> {
+    return T.parse(text)
+}
+
+fun decode_or<T: Parse>(text: str, fallback: T) -> T {
+    return match T.parse(text) {
+        Ok(v) => v
+        Err(e) => fallback
+    }
+}
+
+fun why(e: ParseError) -> str {
+    return match e {
+        Empty => "empty"
+        Bad(t) => f"bad '{t}'"
+    }
+}
+
+fun show(r: Result<Point, ParseError>) -> str {
+    return match r {
+        Ok(p) => f"({p.x}, {p.y})"
+        Err(e) => why(e)
+    }
+}
+
+fun main() {
+    print(int.parse("42").unwrap_or(-1))
+    print(int.parse("4x").is_err())
+    print(show(Point.parse("3,4")))
+    print(show(Point.parse("3,")))
+    print(show(Point.parse("3")))
+    print(show(decode("10,20")))
+    let r: Result<bool, ParseError> = decode("true")
+    print(r.unwrap_or(false))
+    print(decode_or("nope", true))
+    let ps: Result<[Point], ParseError> = decode("1,2;3,4;5,6")
+    match ps {
+        Ok(xs) => print(xs[2].x + xs[0].y)
+        Err(e) => print(why(e))
+    }
+    let bad: Result<[Point], ParseError> = decode("1,2;x,4")
+    match bad {
+        Ok(xs) => print(xs.len())
+        Err(e) => print(why(e))
+    }
+    let deep = decode_or<[[int]]>("", [[9]])
+    print(deep.len())
+    let flags = decode<[bool]>("true;false;true")
+    print(flags.is_ok())
+    let wrong = decode<[bool]>("true;maybe")
+    match wrong {
+        Ok(xs) => print(xs.len())
+        Err(e) => print(why(e))
+    }
+}
+""",
+    # a trait with both methods and functions without `self`, in generic
+    # functions, a generic struct's methods and a method's own type parameter
+    "trait_functions_with_methods": """// D172 (MYLA-384): a trait with both methods and functions without
+// `self`; `T.f()` beside `x.m()` in a generic function, in a generic
+// struct's methods (its impl's `T`), in a method with its own type
+// parameter, and an operator through the impl
+trait Shape {
+    fun unit() -> Self
+    fun named(label: str, size: int) -> Self
+    fun kind() -> str
+    fun area(self) -> int
+    fun scaled(self, k: int) -> Self
+}
+
+struct Sq {
+    side: int,
+}
+
+struct Rect {
+    w: int,
+    h: int,
+}
+
+impl Shape for Sq {
+    fun unit() -> Sq { return Sq { side: 1 } }
+    fun named(label: str, size: int) -> Sq { return Sq { side: size + label.len() } }
+    fun kind() -> str { return "square" }
+    fun area(self) -> int { return self.side * self.side }
+    fun scaled(self, k: int) -> Sq { return Sq { side: self.side * k } }
+}
+
+impl Shape for Rect {
+    fun unit() -> Rect { return Rect { w: 1, h: 2 } }
+    fun named(label: str, size: int) -> Rect { return Rect { w: size, h: label.len() } }
+    fun kind() -> str { return "rectangle" }
+    fun area(self) -> int { return self.w * self.h }
+    fun scaled(self, k: int) -> Rect { return Rect { w: self.w * k, h: self.h * k } }
+}
+
+fun describe<T: Shape>(x: T) -> str {
+    return f"{T.kind()} of {x.area()}, unit {T.unit().area()}"
+}
+
+fun grown<T: Shape>(times: int) -> T {
+    var s = T.unit()
+    var i = 0
+    while i < times {
+        s = s.scaled(2)
+        i += 1
+    }
+    return s
+}
+
+struct Shelf<T> {
+    items: [T],
+}
+
+impl<T: Shape> Shelf<T> {
+    fun add_unit(var self) { self.items.push(T.unit()) }
+
+    fun add_named(var self, label: str) { self.items.push(T.named(label, self.items.len())) }
+
+    fun total(self) -> int {
+        var n = 0
+        for x in self.items { n += x.area() }
+        return n
+    }
+
+    fun label(self) -> str { return f"a shelf of {T.kind()}s" }
+
+    fun paired<U: Shape>(self) -> (T, U) { return (T.unit(), U.unit()) }
+}
+
+fun main() {
+    print(describe(Sq { side: 3 }))
+    print(describe(Rect { w: 2, h: 5 }))
+    print(grown<Sq>(3).side)
+    let r: Rect = grown(2)
+    print(r.area())
+    var shelf = Shelf { items: [Sq { side: 2 }] }
+    shelf.add_unit()
+    shelf.add_named("ab")
+    print(shelf.total())
+    print(shelf.label())
+    let empty: Shelf<Rect> = Shelf { items: [] }
+    print(empty.label())
+    let (a, b) = shelf.paired<Rect>()
+    print(a.area() + b.area())
+    print(Sq.named("abc", 1).area())
+    print(Rect.kind())
+}
+""",
+    # a generic function with `T.default()` that calls itself by `become`
+    "trait_functions_become": """// D172 (MYLA-384): `T.default()` in a generic function that `become`s
+// itself: the tail call keeps the type its frame binds
+trait Default {
+    fun default() -> Self
+}
+
+impl Default for int {
+    fun default() -> int { return 7 }
+}
+
+impl Default for str {
+    fun default() -> str { return "s" }
+}
+
+fun count_down<T: Default>(n: int, acc: [T]) -> [T] {
+    if n == 0 { return acc }
+    var more = acc
+    more.push(T.default())
+    become count_down(n - 1, more)
+}
+
+fun main() {
+    let empty: [str] = []
+    print(count_down(3, empty).len())
+    let none: [int] = []
+    let xs = count_down(100000, none)
+    print(xs[99999])
+}
+""",
+    # `T.zero()` in async code: across an `await`, in a child task, in an
+    # async function's lambda (the interpreter's async evaluator)
+    "trait_functions_async": """// D172 (MYLA-384): `T.zero()` in async code: an async generic function,
+// across an `await`, in a child task, and in an async function's lambda
+import std.task as task
+
+trait Zero {
+    fun zero() -> Self
+    fun label() -> str
+}
+
+impl Zero for int {
+    fun zero() -> int { return 0 }
+    fun label() -> str { return "int" }
+}
+
+impl Zero for str {
+    fun zero() -> str { return "" }
+    fun label() -> str { return "str" }
+}
+
+struct Pair<T> {
+    a: T,
+    b: T,
+}
+
+impl<T: Zero> Zero for Pair<T> {
+    fun zero() -> Pair<T> { return Pair { a: T.zero(), b: T.zero() } }
+    fun label() -> str { return "pair of " + T.label() }
+}
+
+async fun sum<T: Zero + Add>(xs: [T]) -> T {
+    var s = T.zero()
+    for x in xs {
+        await task.yield()
+        s = s + x
+    }
+    return s
+}
+
+async fun named<T: Zero>() -> str {
+    await task.yield()
+    let f = () => T.label()
+    return f()
+}
+
+#main
+async fun main() {
+    print(await sum([1, 2, 3]))
+    print(await sum(["a", "b", "c"]))
+    async let n = sum([10, 20])
+    async let l = named<Pair<Pair<str>>>()
+    print(await n)
+    print(await l)
+    let p: Pair<int> = Pair.zero()
+    print(p.a)
+}
+""",
     # `for c in s` visits a string's characters as `s.chars()` gives them,
     # U+FFFD for a byte that isn't UTF-8 (MYLA-318): ASCII and longer
     # sequences, an empty string, a temporary, break, continue, a return from
@@ -154,6 +619,31 @@ async fun main() {
     async let o = other()
     await __wait_either(-1, -1)
     print(await o)
+}
+""",
+    "method_on_a_generic_temporary": """// a method on a temporary whose type is a type parameter: the interpreter
+// keys it by the value, as it has no type to go by (MYLA-391)
+trait Shape {
+    fun area(self) -> int
+    fun scaled(self, k: int) -> Self
+}
+struct Sq {
+    side: int,
+}
+impl Shape for Sq {
+    fun area(self) -> int { return self.side * self.side }
+    fun scaled(self, k: int) -> Sq { return Sq { side: self.side * k } }
+}
+fun bigger<T: Shape>(x: T) -> int {
+    return x.scaled(2).area()
+}
+fun twice<T: Shape>(x: T) -> T {
+    return x.scaled(2)
+}
+
+fun main() {
+    print(bigger(Sq { side: 3 }))
+    print(twice(Sq { side: 1 }).scaled(5).area())
 }
 """,
     "operators_of_generic_impls": """// `==`, `!=`, `<` and the others, and a format hole, on a generic struct
@@ -5264,8 +5754,90 @@ fun main() {
 }
 """
 
+TRAIT_FUNCTIONS_ZERO = """// the trait, its impl for a built-in type and generic code over it (D172)
+pub trait Zero {
+    fun zero() -> Self
+    fun label() -> str
+}
+
+impl Zero for int {
+    fun zero() -> int { return 0 }
+    fun label() -> str { return "int" }
+}
+
+pub fun sum<T: Zero + Add>(xs: [T]) -> T {
+    var s = T.zero()
+    for x in xs { s = s + x }
+    return s
+}
+
+pub fun label_of<T: Zero>() -> str {
+    return T.label()
+}
+"""
+
+TRAIT_FUNCTIONS_MONEY = """// a type of this module with an impl of another module's trait (D172)
+from .zero import Zero
+
+pub struct Money {
+    cents: int64,
+}
+
+impl Zero for Money {
+    fun zero() -> Money { return Money { cents: 0 } }
+    fun label() -> str { return "money" }
+}
+
+impl Add for Money {
+    fun add(self, other: Money) -> Money { return Money { cents: self.cents + other.cents } }
+}
+
+pub struct Wallet<T> {
+    held: [T],
+}
+
+impl<T: Zero> Zero for Wallet<T> {
+    fun zero() -> Wallet<T> { return Wallet { held: [T.zero()] } }
+    fun label() -> str { return "wallet of " + T.label() }
+}
+"""
+
+TRAIT_FUNCTIONS_MAIN = """// D172 (MYLA-384): the trait in one module, an impl in another, the
+// calls in a third: on a type imported by name, on a module's type
+// (`m.Money.zero()`), on a built-in type, and through the trait's module's
+// generic functions
+import .zero as z
+import .money as m
+from .money import Money, Wallet
+
+fun main() {
+    print(Money.zero().cents)
+    print(m.Money.zero().cents)
+    print(m.Money.label())
+    print(int.label())
+    print(z.sum([Money { cents: 5000000000 }, Money { cents: 7 }]).cents)
+    print(z.sum([1, 2, 3]))
+    print(z.label_of<Wallet<Wallet<Money>>>())
+    let w: Wallet<int> = Wallet.zero()
+    print(w.held.len())
+    let mw: m.Wallet<Money> = m.Wallet.zero()
+    print(mw.held[0].cents)
+}
+"""
+
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
 class TestCompilerParity(unittest.TestCase):
+    def test_trait_functions_across_modules(self):
+        # D172 (MYLA-384): the trait in one module, an impl in another, the
+        # calls in a third: on a type imported by name, on a module's type
+        # (`m.Money.zero()`), on a built-in type, and through the trait's
+        # module's generic functions
+        with tempfile.TemporaryDirectory() as tmp:
+            write_program(tmp, TRAIT_FUNCTIONS_ZERO, "zero.my")
+            write_program(tmp, TRAIT_FUNCTIONS_MONEY, "money.my")
+            main = write_program(tmp, TRAIT_FUNCTIONS_MAIN)
+            self.assertEqual(run_file_both_now(main), ('0\n0\nmoney\nint\n5000000007\n6\nwallet of wallet of money\n1\n0\n', "", 0))
+
     def test_generic_constructors_of_a_module(self):
         # MYLA-315: the shapes std.deque and std.set take (MYLA-330), a module's
         # `pub fun new<T>() -> Deque<T>` called as `deque.new()` where the
@@ -5550,6 +6122,18 @@ class TestCompilerParity(unittest.TestCase):
 # longer holds (a later decision changed its meaning) or there is none (a
 # program added or changed since): its output, pinned here.
 PINNED = {
+    # MYLA-384: new; native code gives the same
+    "trait_functions_zero": '0\n5000000000\n6\n5000000001\n3.75\n3\n400\n0\n0\n0\n',
+    # MYLA-384: new; native code gives the same
+    "trait_functions_default": 'true\nfalse\nx\n7 1\n7\nnone\ntrue\n7\nnone\nkept\n8\n2\nx\nnone\n2\n',
+    # MYLA-384: new; native code gives the same
+    "trait_functions_parse": "42\ntrue\n(3, 4)\nempty\nbad '3'\n(10, 20)\ntrue\ntrue\n7\nbad 'x'\n0\ntrue\nbad 'maybe'\n",
+    # MYLA-384: new; native code gives the same
+    "trait_functions_with_methods": 'square of 9, unit 1\nrectangle of 10, unit 2\n8\n32\n21\na shelf of squares\na shelf of rectangles\n3\n16\nrectangle\n',
+    # MYLA-384: new; native code gives the same
+    "trait_functions_become": '3\n7\n',
+    # MYLA-384: new; native code gives the same
+    "trait_functions_async": '6\nabc\n30\npair of pair of str\n0\n',
     # MYLA-318: new; native code gives the same
     "for_over_a_string": '15\n15\nh|é|l|l|o|,| |w|ö|r|l|d| |😀|!|\n5\nD\n-\nh\ni\nb\no\nb\na\nb\nc\nx\ny\nxyzz\n97,65533,65533,98,65533,65533\ntrue\n9\nr\n2\n',
     # MYLA-318: new; native code gives the same
@@ -5563,6 +6147,8 @@ PINNED = {
     "iterator_adapters": '0\n10\n20\ntick\ntick\n0\n1\n7\n8\n<1>\n<2>\nstep 2\nstep 1\n10\n3\n12\nstep 3\nstep 2\nstep 1\nstep 3\n10\n9\n',
     # MYLA-381: new
     "std_iter_pipelines": '36\n45000000000\n5\n<1>\n<4>\n<9>\n4 6\n4321\nb2,a1,c3\nb,c,z\n0:one,1:two,2:three,3:four,4:five\nx3,x2,x1\n5,8,13,21,34\n9\n34\ntrue\nfalse\nfig\nplum\nnone\n3 9\n',
+    # MYLA-391: the interpreter printed 'ERR: VUnit'
+    "method_on_a_generic_temporary": '36\n100\n',
     # MYLA-367: new; native code gave "undefined reference to 'myla_Box.eq'"
     "operators_of_generic_impls": 'true\ntrue\nfalse\ntrue\nfalse\ntrue\ntrue\n<a> <42> <s>\n<a>\n',
     "string_ordering": 'true true false false\ntrue true false false\nfalse false true true\ntrue true false false\nfalse true false true\nfalse true false true\ntrue true false false\nfalse false true true\nfalse false true true\ntrue true false false\ntrue true false false\ntrue true false false\n,Apple,apple,apples,banana,fig,pear,z,é\n,Apple,apple,apples,banana,fig,pear,z,é\ntrue\na,b,b,c,d\n5\nlime\na,c,m,x\ntrue\na,b\n',

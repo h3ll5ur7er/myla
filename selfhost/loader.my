@@ -1335,7 +1335,8 @@ impl Renamer {
     fun expr(var self, e: Expr) -> Expr {
         match e.kind {
             ExprKind.Name(n) => {
-                if !has(self.vals, n) {
+                // a type parameter is the function's, as in `T.zero()` (D172)
+                if !has(self.vals, n) && !has(self.tys, n) {
                     match get(self.env, n) { Some(q) => { return mk_expr(e, ExprKind.Name(q)) }, None => {} }
                     match get(self.aliases, n) {
                         Some(m) => { self.fail(e.line, e.col, e.sp, format("module '{}' cannot be used as a value — access a member with '{}.<name>'", n, n)) },
@@ -1439,7 +1440,7 @@ impl Renamer {
         }
         var root = ""
         match cur.kind { ExprKind.Name(n) => { root = n }, _ => { return None } }
-        if has(self.vals, root) { return None }
+        if has(self.vals, root) || has(self.tys, root) { return None }
         let cnt = names.len() as int32
         // segment s (innermost first) is names[cnt - 1 - s]
         var k = cnt

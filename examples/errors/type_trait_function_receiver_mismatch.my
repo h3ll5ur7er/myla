@@ -1,0 +1,18 @@
+//~ type error: method 'zero' in impl of trait 'Zero' for 'Money' has receiver 'self' but the trait declares a function without 'self'
+// An impl gives a trait's function without `self` as the trait declares
+// it (D172).
+trait Zero {
+    fun zero() -> Self
+}
+
+struct Money {
+    cents: int,
+}
+
+impl Zero for Money {
+    fun zero(self) -> Money { return Money { cents: 0 } }
+}
+
+fun main() {
+    print(1)
+}

@@ -930,17 +930,24 @@ impl Parser {
         let tps = self.generics()
         self.expect(TokenKind.LPAREN, "'('")
         var receiver: Option<str> = None
+        // without `self`, a function of the type (D172): its first parameter
+        // needs no comma before it; the checker allows it in a trait and its
+        // impls only
+        var first = false
         if self.match1(TokenKind.VAR) {
             self.expect(TokenKind.SELF, "'self' after 'var' in method receiver")
             receiver = Some("var self")
         } else if self.match1(TokenKind.SELF) {
             receiver = Some("self")
-        } else {
-            self.fail_at(self.peek(), "a method's first parameter must be 'self' or 'var self'")
+        } else if self.check(TokenKind.IDENT) {
+            first = true
+        } else if !self.check(TokenKind.RPAREN) {
+            self.fail_at(self.peek(), "a method's first parameter must be 'self', 'var self' or a parameter")
         }
         var params: [Param] = []
         // a trailing comma, as in a function's parameter list (D104 (4), MYLA-225)
-        while self.match1(TokenKind.COMMA) && !self.check(TokenKind.RPAREN) {
+        while (first || self.match1(TokenKind.COMMA)) && !self.check(TokenKind.RPAREN) {
+            first = false
             let pname = self.expect(TokenKind.IDENT, "parameter name")
             self.expect(TokenKind.COLON, "':'")
             let ptype = self.parse_type()
@@ -1884,7 +1891,13 @@ impl Parser {
                         self.expect(TokenKind.RPAREN, "')'")
                         expr = self.mk_expr_from(st, lp.line, lp.column, ExprKind.Call(expr, args, targs))
                     },
-                    None => { break },
+                    None => {
+                        // `Box<int>.zero()`: a generic type's function is
+                        // called on its name alone (D172)
+                        let named = match expr.kind { ExprKind.Name(n) => true, _ => false }
+                        if named && self.type_args_then(TokenKind.DOT) { self.fail_at(self.peek(), "a function of a generic type is called on the type's name alone, 'Box.zero()': its arguments or the expected type give the type arguments") }
+                        break
+                    },
                 }
             } else {
                 break
@@ -1934,6 +1947,13 @@ impl Parser {
     #test(parser_on("< b) > (c)"))[false]
     #test(parser_on("< 1 > (c)"))[false]
     fun type_args_ahead(self) -> bool {
+        return self.type_args_then(TokenKind.LPAREN)
+    }
+
+    // `type_args_ahead` with the token `follow` after the `>`.
+    #test(parser_on("<int>.zero()"), TokenKind.DOT)[true]
+    #test(parser_on("<int>(x)"), TokenKind.DOT)[false]
+    fun type_args_then(self, follow: TokenKind) -> bool {
         var angles = 0
         var brackets = 0
         var k = self.pos
@@ -1943,7 +1963,7 @@ impl Parser {
                 angles += 1
             } else if kind == TokenKind.GT {
                 angles -= 1
-                if angles == 0 { return brackets == 0 && k + 1 < self.toks.len() && self.toks[k + 1].kind == TokenKind.LPAREN }
+                if angles == 0 { return brackets == 0 && k + 1 < self.toks.len() && self.toks[k + 1].kind == follow }
             } else if kind == TokenKind.LPAREN || kind == TokenKind.LBRACKET {
                 brackets += 1
             } else if kind == TokenKind.RPAREN || kind == TokenKind.RBRACKET {
@@ -2101,6 +2121,12 @@ impl Parser {
         if k == TokenKind.SELF {
             self.skip()
             return self.mk_expr(tok.line, tok.column, ExprKind.Name("self"))
+        }
+        // a type keyword before `.`: a function of the type, `int64.zero()`
+        // (D172), named as `int.zero()` is
+        if self.is_prim_type(k) && self.peek_kind_at(1) == TokenKind.DOT {
+            self.skip()
+            return self.mk_expr(tok.line, tok.column, ExprKind.Name(tok.lexeme))
         }
         if k == TokenKind.MATCH {
             return self.match_expr()

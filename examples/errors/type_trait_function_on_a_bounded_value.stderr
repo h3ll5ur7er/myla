@@ -1,0 +1,5 @@
+type error: 'zero' is a function of trait 'Zero' without 'self': call it on the type, 'T.zero(…)', not on a value
+  --> examples/errors/type_trait_function_on_a_bounded_value.my:9:18
+  |
+9 |     return x.zero()
+  |            ^^^^^^^^
