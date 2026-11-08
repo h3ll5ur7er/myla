@@ -1,0 +1,427 @@
+// std.grid: a two-dimensional array of cells (MYLA-342, D164).
+//
+// A `Grid<T>` has a width, a height and `width * height` cells, row by row:
+// the cell at `(x, y)` is `cells[y * width + x]`. `x` counts columns from
+// the left and `y` rows from the top, so "up" is `y - 1`, as text reads.
+//
+// A position is an `(int, int)` tuple `(x, y)`, not a struct: a tuple is a
+// map key and a `Set` element as it is (D163), is written and taken apart
+// without an import (`(x + 1, y)`, `let (x, y) = p`), and is the node a
+// search of `std.graph` over the grid wants. A struct key costs the same
+// (measured, MYLA-342), but its literal needs a `from std.grid import`.
+//
+// A constructor's `T` comes from its arguments; `parse` makes a
+// `Grid<char>` of text and `parse_with` a grid of anything a character maps
+// to.
+
+pub struct Grid<T> {
+    width: int,
+    height: int,
+    // The cells, row by row
+    cells: [T],
+}
+
+// Why a text or a list of rows isn't a grid.
+#derive(Eq)
+pub enum GridError {
+    // The row (from 1) with another number of cells than the first, its
+    // number of cells and the first row's
+    Ragged(int, int, int),
+}
+
+impl GridError {
+    #test(GridError.Ragged(3, 4, 5))["row 3 has 4 cells, row 1 has 5"]
+    #test(GridError.Ragged(2, 1, 0))["row 2 has 1 cell, row 1 has 0"]
+    fun message(self) -> str {
+        return match self {
+            Ragged(row, n, first) => {
+                let cells = if n == 1 { "cell" } else { "cells" }
+                f"row {row} has {n} {cells}, row 1 has {first}"
+            }
+        }
+    }
+}
+
+impl Format for GridError {
+    #test(GridError.Ragged(2, 0, 1), "")["row 2 has 0 cells, row 1 has 1"]
+    fun format(self, spec: str) -> str {
+        return self.message()
+    }
+}
+
+// A grid of `width` by `height` cells, each `fill`. A negative size is a
+// failure.
+pub fun new<T>(width: int, height: int, fill: T) -> Grid<T> {
+    if width < 0 || height < 0 {
+        panic(f"grid size {width} by {height} is negative")
+    }
+    var cells: [T] = []
+    for i in 0..width * height {
+        cells.push(fill)
+    }
+    return Grid { width: width, height: height, cells: cells }
+}
+
+// The grid of `rows`, `rows[y][x]` the cell at `(x, y)`; every row must
+// have as many cells as the first.
+pub fun of<T>(rows: [[T]]) -> Result<Grid<T>, GridError> {
+    var cells: [T] = []
+    let width = if rows.len() > 0 { rows[0].len() } else { 0 }
+    for y in 0..rows.len() {
+        if rows[y].len() != width {
+            return Err(GridError.Ragged(y + 1, rows[y].len(), width))
+        }
+        for v in rows[y] {
+            cells.push(v)
+        }
+    }
+    return Ok(Grid { width: width, height: rows.len(), cells: cells })
+}
+
+// The grid of the characters of `text`, a line a row. A `"\r\n"` ends a
+// line too, and a line break at the end is no row of its own. The empty
+// text is the grid of no cells.
+pub fun parse(text: str) -> Result<Grid<char>, GridError> {
+    return parse_with(text, (c: char) => c)
+}
+
+// The grid of `text` as `parse` reads it, each character mapped by `f`.
+pub fun parse_with<T>(text: str, f: (char) -> T) -> Result<Grid<T>, GridError> {
+    var cells: [T] = []
+    var width = 0
+    var height = 0
+    var start = 0
+    while start < text.len() {
+        var end = start
+        while end < text.len() && text[end] != '\n' {
+            end += 1
+        }
+        var stop = end
+        if stop > start && text[stop - 1] == '\r' {
+            stop -= 1
+        }
+        var n = 0
+        for c in text[start:stop] {
+            cells.push(f(c))
+            n += 1
+        }
+        height += 1
+        if height == 1 {
+            width = n
+        } else if n != width {
+            return Err(GridError.Ragged(height, n, width))
+        }
+        start = end + 1
+    }
+    return Ok(Grid { width: width, height: height, cells: cells })
+}
+
+impl<T> Grid<T> {
+    // Whether `p` is a position of the grid.
+    fun in_bounds(self, p: (int, int)) -> bool {
+        let (x, y) = p
+        return x >= 0 && x < self.width && y >= 0 && y < self.height
+    }
+
+    // The cell at `p`, if `p` is in bounds.
+    fun at(self, p: (int, int)) -> Option<T> {
+        let (x, y) = p
+        if x < 0 || x >= self.width || y < 0 || y >= self.height {
+            return None
+        }
+        return Some(self.cells[y * self.width + x])
+    }
+
+    // Sets the cell at `p` to `v`; a `p` out of bounds is a failure, as it
+    // is for a list.
+    fun set(var self, p: (int, int), v: T) {
+        let (x, y) = p
+        if x < 0 || x >= self.width || y < 0 || y >= self.height {
+            panic(f"grid position ({x}, {y}) out of bounds for {self.width} by {self.height}")
+        }
+        self.cells[y * self.width + x] = v
+    }
+
+    // The positions next to `p` across an edge that are in bounds: up,
+    // right, down, left.
+    fun neighbours4(self, p: (int, int)) -> [(int, int)] {
+        let (x, y) = p
+        var out: [(int, int)] = []
+        if y > 0 {
+            out.push((x, y - 1))
+        }
+        if x + 1 < self.width {
+            out.push((x + 1, y))
+        }
+        if y + 1 < self.height {
+            out.push((x, y + 1))
+        }
+        if x > 0 {
+            out.push((x - 1, y))
+        }
+        return out
+    }
+
+    // The positions next to `p` across an edge or a corner that are in
+    // bounds, clockwise from up: up, up-right, right, down-right, down,
+    // down-left, left, up-left.
+    fun neighbours8(self, p: (int, int)) -> [(int, int)] {
+        let (x, y) = p
+        let up = y > 0
+        let right = x + 1 < self.width
+        let down = y + 1 < self.height
+        let left = x > 0
+        var out: [(int, int)] = []
+        if up {
+            out.push((x, y - 1))
+        }
+        if up && right {
+            out.push((x + 1, y - 1))
+        }
+        if right {
+            out.push((x + 1, y))
+        }
+        if down && right {
+            out.push((x + 1, y + 1))
+        }
+        if down {
+            out.push((x, y + 1))
+        }
+        if down && left {
+            out.push((x - 1, y + 1))
+        }
+        if left {
+            out.push((x - 1, y))
+        }
+        if up && left {
+            out.push((x - 1, y - 1))
+        }
+        return out
+    }
+
+    // The index of `p` in `cells`, `y * width + x`: a node number for the
+    // searches of `std.graph` over integers (`bfs_dense`, `dijkstra_dense`).
+    fun index(self, p: (int, int)) -> int {
+        let (x, y) = p
+        return y * self.width + x
+    }
+
+    // The position of the cell `cells[i]`.
+    fun pos(self, i: int) -> (int, int) {
+        return (i % self.width, i / self.width)
+    }
+
+    // Every position, row by row.
+    fun positions(self) -> [(int, int)] {
+        var out: [(int, int)] = []
+        for y in 0..self.height {
+            for x in 0..self.width {
+                out.push((x, y))
+            }
+        }
+        return out
+    }
+
+    // The cells of row `y`, left to right.
+    fun row(self, y: int) -> [T] {
+        return self.cells[y * self.width:(y + 1) * self.width]
+    }
+
+    // The cells of column `x`, top to bottom.
+    fun column(self, x: int) -> [T] {
+        var out: [T] = []
+        for y in 0..self.height {
+            out.push(self.cells[y * self.width + x])
+        }
+        return out
+    }
+
+    // The grid of `f` of each cell.
+    fun map<U>(self, f: (T) -> U) -> Grid<U> {
+        var cells: [U] = []
+        for v in self.cells {
+            cells.push(f(v))
+        }
+        return Grid { width: self.width, height: self.height, cells: cells }
+    }
+
+    // The grid flipped about its diagonal: the cell at `(x, y)` goes to
+    // `(y, x)`, rows become columns.
+    fun transposed(self) -> Grid<T> {
+        var cells: [T] = []
+        for x in 0..self.width {
+            for y in 0..self.height {
+                cells.push(self.cells[y * self.width + x])
+            }
+        }
+        return Grid { width: self.height, height: self.width, cells: cells }
+    }
+}
+
+impl<T: Eq> Grid<T> {
+    // The first position, row by row, whose cell is `v`.
+    fun find(self, v: T) -> Option<(int, int)> {
+        for i in 0..self.cells.len() {
+            if self.cells[i] == v {
+                return Some((i % self.width, i / self.width))
+            }
+        }
+        return None
+    }
+
+    // Every position whose cell is `v`, row by row.
+    fun find_all(self, v: T) -> [(int, int)] {
+        var out: [(int, int)] = []
+        for i in 0..self.cells.len() {
+            if self.cells[i] == v {
+                out.push((i % self.width, i / self.width))
+            }
+        }
+        return out
+    }
+}
+
+impl<T: Format> Grid<T> {
+    // The grid as text, a line a row, each cell as `{}` formats it, with no
+    // line break after the last row: `parse` reads a `Grid<char>`'s text
+    // back.
+    fun text(self) -> str {
+        var sb = StringBuilder()
+        for y in 0..self.height {
+            if y > 0 {
+                sb.append("\n")
+            }
+            for x in 0..self.width {
+                sb.append(f"{self.cells[y * self.width + x]}")
+            }
+        }
+        return sb.build()
+    }
+}
+
+// --- tests -------------------------------------------------------------------
+// The grid is generic, which a `#test` case can't take (D116), so most tests
+// are test functions (D162).
+
+// The grid of an `Ok`; a failure for an `Err`.
+fun ok<T>(r: Result<Grid<T>, GridError>) -> Grid<T> {
+    return match r {
+        Ok(g) => g
+        Err(e) => panic(e.message())
+    }
+}
+
+// Whether `o` is `Some(v)`.
+fun is<T: Eq>(o: Option<T>, v: T) -> bool {
+    return match o {
+        Some(x) => x == v
+        None => false
+    }
+}
+
+// Whether `r` is `Err(e)`.
+fun is_err<T>(r: Result<Grid<T>, GridError>, e: GridError) -> bool {
+    return match r {
+        Ok(_) => false
+        Err(x) => x == e
+    }
+}
+
+// Whether `o` is `None`.
+fun none<T>(o: Option<T>) -> bool {
+    return match o {
+        Some(_) => false
+        None => true
+    }
+}
+
+const MAZE: str = "#####\n#S..#\n#.#E#\n#####\n"
+
+#test
+fun parse_and_print() {
+    let g = ok(parse(MAZE))
+    assert(g.width == 5 && g.height == 4, "the size")
+    assert(is(g.at((1, 1)), 'S') && is(g.at((3, 2)), 'E'), "at")
+    assert(none(g.at((5, 0))) && none(g.at((0, -1))), "at out of bounds")
+    assert(g.text() + "\n" == MAZE, "text gives the text back")
+    let digits = ok(parse_with("123\n456", (c: char) => c - '0'))
+    assert(is(digits.at((2, 1)), 6) && digits.text() == "123\n456", "parse_with")
+    match parse_with("12\n3", (c: char) => c) {
+        Ok(_) => assert(false, "ragged")
+        Err(e) => assert(e.message() == "row 2 has 1 cell, row 1 has 2", "the error")
+    }
+    let e: Grid<int> = new(0, 0, 7)
+    assert(e.text() == "" && e.positions() == [], "the empty grid")
+}
+
+// `parse`'s results, as a test function: the native harness can't compare an
+// enum of one variant yet, as `#test` cases would (it adds a `_` arm, which is
+// unreachable).
+#test
+fun parsing() {
+    let g = ok(parse("ab\ncd\n"))
+    assert(g.width == 2 && g.height == 2 && g.cells == ['a', 'b', 'c', 'd'], "a line break at the end")
+    assert(ok(parse("#.\r\n.#")).cells == ['#', '.', '.', '#'], "CRLF")
+    let e = ok(parse(""))
+    assert(e.width == 0 && e.height == 0 && e.cells == [], "the empty text")
+    let u = ok(parse("é·\n··"))
+    assert(u.width == 2 && u.cells == ['é', '·', '·', '·'], "a cell a character")
+    let blank = ok(parse("\n"))
+    assert(blank.width == 0 && blank.height == 1, "one empty line")
+    assert(is_err(parse("abc\nab\nabc"), GridError.Ragged(2, 2, 3)), "a short row")
+    assert(is_err(parse("ab\n\nab"), GridError.Ragged(2, 0, 2)), "an empty row")
+    assert(is_err(parse("a\nb\ncd\n"), GridError.Ragged(3, 2, 1)), "a long row")
+    assert(is_err(of([[1, 2], [3]]), GridError.Ragged(2, 1, 2)), "of")
+    let none_rows: Grid<int> = ok(of([]))
+    assert(none_rows.width == 0 && none_rows.height == 0, "no rows")
+}
+
+#test
+fun cells() {
+    var g = new(3, 2, 0)
+    assert(g.cells == [0, 0, 0, 0, 0, 0], "filled")
+    g.set((2, 1), 5)
+    g.set((0, 1), 4)
+    assert(is(g.at((2, 1)), 5) && g.cells[g.index((2, 1))] == 5, "set and index")
+    assert(g.pos(5) == (2, 1) && g.index(g.pos(4)) == 4, "pos")
+    assert(g.row(1) == [4, 0, 5] && g.column(2) == [0, 5], "row and column")
+    assert(g.in_bounds((2, 1)) && !g.in_bounds((3, 1)) && !g.in_bounds((-1, 0)) && !g.in_bounds((0, 2)), "in_bounds")
+    assert(g.positions() == [(0, 0), (1, 0), (2, 0), (0, 1), (1, 1), (2, 1)], "positions")
+    let t = g.transposed()
+    assert(t.width == 2 && t.height == 3 && is(t.at((1, 2)), 5) && t.row(2) == [0, 5], "transposed")
+    let s = g.map((v: int) => if v > 0 { '#' } else { '.' })
+    assert(s.text() == "...\n#.#", "map")
+    assert(is(s.find('#'), (0, 1)) && none(s.find('x')), "find")
+    assert(s.find_all('#') == [(0, 1), (2, 1)] && s.find_all('.').len() == 4, "find_all")
+    let r = ok(of([[1, 2], [3, 4], [5, 6]]))
+    assert(r.width == 2 && r.height == 3 && is(r.at((1, 2)), 6), "of")
+}
+
+#test
+fun neighbours() {
+    let g = new(3, 3, '.')
+    assert(g.neighbours4((1, 1)) == [(1, 0), (2, 1), (1, 2), (0, 1)], "four in the middle")
+    assert(g.neighbours4((0, 0)) == [(1, 0), (0, 1)], "two in a corner")
+    assert(g.neighbours4((2, 1)) == [(2, 0), (2, 2), (1, 1)], "three on an edge")
+    assert(g.neighbours8((1, 1)) == [(1, 0), (2, 0), (2, 1), (2, 2), (1, 2), (0, 2), (0, 1), (0, 0)], "eight in the middle")
+    assert(g.neighbours8((2, 2)) == [(2, 1), (1, 2), (1, 1)], "three in a corner")
+    assert(new(1, 1, 0).neighbours8((0, 0)) == [], "none in a grid of one cell")
+}
+
+// The number of cells of a new grid of `w` by `h`.
+#test(3, 4)[12]
+#test(0, 5)[0]
+#test(-1, 2)[panic("grid size -1 by 2 is negative")]
+fun new_cells(w: int, h: int) -> int {
+    return new(w, h, 'x').cells.len()
+}
+
+// The cells of a 2 by 2 grid of zeros after a 1 is set at `(x, y)`.
+#test(1, 1)[[0, 0, 0, 1]]
+#test(2, 0)[panic("grid position (2, 0) out of bounds for 2 by 2")]
+#test(0, -1)[panic("grid position (0, -1) out of bounds for 2 by 2")]
+fun set_one(x: int, y: int) -> [int] {
+    var g = new(2, 2, 0)
+    g.set((x, y), 1)
+    return g.cells
+}
