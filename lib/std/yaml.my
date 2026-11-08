@@ -1,0 +1,1622 @@
+// std.yaml: the safe subset of YAML 1.2 (MYLA-349, D164).
+//
+// `parse` reads one document into a `Yaml` value and `to_string` writes one
+// back. The subset is block and flow mappings and sequences; plain,
+// single-quoted and double-quoted scalars (with escapes, over several lines);
+// literal `|` and folded `>` block scalars with their indentation and
+// chomping indicators; comments; and a leading `---` and a trailing `...`.
+// Anchors, aliases, tags, directives, explicit keys (`?`), collections as
+// keys and a second document are left out: each is an error that names it,
+// never a silent misreading. Plain scalars are resolved by the YAML 1.2 core
+// schema, so `yes`, `no`, `on` and `off` are strings, and `012` is twelve.
+// The tests compare the module with the cases of the YAML test suite that
+// the subset covers (tests/burn/test_yaml.py).
+
+import std.str as str_m
+import std.list as list_m
+import std.option as option_m
+from .num import parse_int, parse_float, format_float
+from .json import Json
+import std.json as json_m
+
+// A YAML value. A plain scalar is resolved by the core schema: `null`, `~` or
+// nothing is `Null`, `true` and `false` are a `Bool`, a decimal, `0o` or `0x`
+// integer that fits in int64 is an `Int` (a larger one a `Float`), a decimal
+// with a fraction or an exponent, `.inf` or `.nan` is a `Float`, anything else
+// a `Str`; a quoted or block scalar is always a `Str`. A map keeps its entries
+// in order; its keys are the text of scalars, so `1: a` has the key "1".
+#derive(Eq)
+pub enum Yaml {
+    Null,
+    Bool(bool),
+    Int(int64),
+    Float(float64),
+    Str(str),
+    List([Yaml]),
+    Map([(str, Yaml)]),
+}
+
+// What is wrong with a text, or what in it the subset leaves out.
+#derive(Eq)
+pub enum YamlErrorKind {
+    // `&name`: anchors are left out
+    Anchor,
+    // `*name`: aliases are left out
+    Alias,
+    // `!tag`: tags are left out
+    Tag,
+    // `%YAML` or `%TAG` before a document: directives are left out
+    Directive,
+    // A second document after `---` or `...`
+    MultipleDocuments,
+    // `? key`: explicit keys are left out
+    ExplicitKey,
+    // A flow sequence or mapping used as a key
+    ComplexKey,
+    // A tab where indentation must be spaces
+    Tab,
+    // A line indented where its block doesn't allow it
+    Indentation,
+    // A line in a block mapping that isn't `key: value`
+    MissingColon,
+    // A block collection that starts on the line of its key, `a: b: c` or
+    // `a: - b`
+    InlineCollection,
+    // An implicit key over more than one line
+    MultilineKey,
+    // A key the mapping already has
+    DuplicateKey,
+    // A quoted scalar without its closing quote
+    UnclosedQuote,
+    // A `\` in a double-quoted scalar that isn't an escape, or one of a code
+    // point that isn't a Unicode scalar
+    InvalidEscape,
+    // A flow sequence or mapping without its closing bracket
+    UnclosedFlow,
+    // Something other than `,` or the closing bracket after an entry of a
+    // flow collection
+    MissingComma,
+    // A block scalar header other than `|` or `>` with an indentation digit
+    // and a chomping indicator
+    BlockScalarHeader,
+    // A character that can't start or continue anything here
+    Unexpected,
+    // Collections nested more than 100 deep
+    TooDeep,
+}
+
+// An error and where it is: line and column count from 1, the column in
+// characters, as for `std.json`'s errors.
+#derive(Eq)
+pub struct YamlError {
+    kind: YamlErrorKind,
+    line: int,
+    col: int,
+}
+
+impl YamlError {
+    // The reason in words.
+    #test(YamlError { kind: YamlErrorKind.Anchor, line: 1, col: 4 })["anchors ('&') are not supported"]
+    #test(YamlError { kind: YamlErrorKind.DuplicateKey, line: 2, col: 1 })["a key the mapping already has"]
+    fun message(self) -> str {
+        return match self.kind {
+            Anchor => "anchors ('&') are not supported"
+            Alias => "aliases ('*') are not supported"
+            Tag => "tags ('!') are not supported"
+            Directive => "directives ('%') are not supported"
+            MultipleDocuments => "multiple documents are not supported"
+            ExplicitKey => "explicit keys ('?') are not supported"
+            ComplexKey => "a collection as a key is not supported"
+            Tab => "a tab in indentation"
+            Indentation => "bad indentation"
+            MissingColon => "a key without ':' in a block mapping"
+            InlineCollection => "a block collection can't start on the line of its key"
+            MultilineKey => "an implicit key on more than one line"
+            DuplicateKey => "a key the mapping already has"
+            UnclosedQuote => "a quoted scalar without its closing quote"
+            InvalidEscape => "an invalid escape in a double-quoted scalar"
+            UnclosedFlow => "a flow collection without its closing bracket"
+            MissingComma => "',' or the closing bracket expected in a flow collection"
+            BlockScalarHeader => "an invalid block scalar header"
+            Unexpected => "an unexpected character"
+            TooDeep => "collections nested too deeply"
+        }
+    }
+}
+
+impl Format for YamlError {
+    // `line:col: what`, e.g. `1:4: anchors ('&') are not supported`.
+    #test(YamlError { kind: YamlErrorKind.Tag, line: 3, col: 7 }, "")["3:7: tags ('!') are not supported"]
+    fun format(self, spec: str) -> str {
+        return f"{self.line}:{self.col}: {self.message()}"
+    }
+}
+
+// --- Parsing ------------------------------------------------------------------
+
+// How deeply collections may nest: the parser recurses a few frames a level,
+// and the interpreters run it on their own stack (std.json allows 200).
+const MAX_DEPTH: int = 100
+
+// Where a block value is: after `- `, after `key:`, or after `---`.
+const SEQ_ENTRY: int = 0
+const MAP_VALUE: int = 1
+const DOCUMENT: int = 2
+
+struct Parser {
+    s: str,
+    i: int,
+    // the offset of the current line's first byte
+    line_start: int,
+    depth: int,
+}
+
+// A scalar or a flow collection: its value, and a scalar's text (a key is
+// its text, not its value).
+struct Item {
+    v: Yaml,
+    text: str,
+    scalar: bool,
+    quoted: bool,
+}
+
+// The entries of a mapping, with an index of their keys once there are many.
+struct Entries {
+    list: [(str, Yaml)],
+    index: [str: bool],
+}
+
+impl Entries {
+    // Adds an entry; false if the key is there already.
+    fun add(var self, key: str, v: Yaml) -> bool {
+        let n = self.list.len()
+        if n < 8 {
+            for e in self.list {
+                if e.0 == key { return false }
+            }
+        } else {
+            if n == 8 {
+                for e in self.list { self.index[e.0] = true }
+            }
+            if self.index.contains(key) { return false }
+            self.index[key] = true
+        }
+        self.list.push((key, v))
+        return true
+    }
+}
+
+fun new_entries() -> Entries {
+    return Entries { list: [], index: [:] }
+}
+
+// The YAML document that `text` holds: one document, with an optional `---`
+// before it and `...` after it. An empty document is `Null`. Line ends may be
+// LF, CRLF or CR.
+#test("a: 1\nb: [x, 'y z']\n")[Ok(Yaml.Map([("a", Yaml.Int(1i64)), ("b", Yaml.List([Yaml.Str("x"), Yaml.Str("y z")]))]))]
+#test("- 1.5\n- ~\n- true\n- \"yes\"\n- yes\n")[Ok(Yaml.List([Yaml.Float(1.5), Yaml.Null, Yaml.Bool(true), Yaml.Str("yes"), Yaml.Str("yes")]))]
+#test("--- |\n  line\n  next\n...\n")[Ok(Yaml.Str("line\nnext\n"))]
+#test("a:\r\n  - x\r\n  - y\r\n")[Ok(Yaml.Map([("a", Yaml.List([Yaml.Str("x"), Yaml.Str("y")]))]))] // CRLF
+#test("# only a comment\n")[Ok(Yaml.Null)]
+#test("\u{feff}--- a\n")[Ok(Yaml.Str("a"))] // a byte order mark
+#test("a: &x 1")[Err(YamlError { kind: YamlErrorKind.Anchor, line: 1, col: 4 })]
+#test("a: *x")[Err(YamlError { kind: YamlErrorKind.Alias, line: 1, col: 4 })]
+#test("- !!str 1")[Err(YamlError { kind: YamlErrorKind.Tag, line: 1, col: 3 })]
+#test("%YAML 1.2\n---\na\n")[Err(YamlError { kind: YamlErrorKind.Directive, line: 1, col: 1 })]
+#test("a\n---\nb\n")[Err(YamlError { kind: YamlErrorKind.MultipleDocuments, line: 2, col: 1 })]
+#test("a: 1\na: 2\n")[Err(YamlError { kind: YamlErrorKind.DuplicateKey, line: 2, col: 1 })]
+#test("a: b: c")[Err(YamlError { kind: YamlErrorKind.InlineCollection, line: 1, col: 5 })]
+#test("a:\n  b: [1]\n   c: 2\n")[Err(YamlError { kind: YamlErrorKind.Indentation, line: 3, col: 4 })]
+#test("é: \"ü")[Err(YamlError { kind: YamlErrorKind.UnclosedQuote, line: 1, col: 4 })] // columns count characters
+pub fun parse(text: str) -> Result<Yaml, YamlError> {
+    var p = Parser { s: text, i: 0, line_start: 0, depth: 0 }
+    if has_bom(text) {
+        p.i = 3
+        p.line_start = 3
+    }
+    p.skip_to_content()
+    if p.ch(p.i) == '%' && p.i == p.line_start {
+        return Err(p.error(YamlErrorKind.Directive, p.i))
+    }
+    var v = Yaml.Null
+    if p.marker_at(p.i) && p.s[p.i] == '-' {
+        p.i += 3
+        v = p.block_value(-1, DOCUMENT)?
+    } else if !p.at_end() && !p.marker_at(p.i) {
+        v = p.node(-1, p.line_start)?
+    }
+    p.skip_to_content()
+    if p.marker_at(p.i) && p.s[p.i] == '.' {
+        p.i += 3
+        p.rest_of_line()?
+        p.skip_to_content()
+        if !p.at_end() { return Err(p.error(YamlErrorKind.MultipleDocuments, p.i)) }
+    }
+    if p.marker_at(p.i) { return Err(p.error(YamlErrorKind.MultipleDocuments, p.i)) }
+    if !p.at_end() { return Err(p.error(YamlErrorKind.Unexpected, p.i)) }
+    return Ok(v)
+}
+
+// Whether `s` starts with a byte order mark, U+FEFF.
+fun has_bom(s: str) -> bool {
+    return s.len() >= 3 && s[0] == 0xEFu8 && s[1] == 0xBBu8 && s[2] == 0xBFu8
+}
+
+fun is_ws(c: uint8) -> bool {
+    return c == ' ' || c == '\t'
+}
+
+fun is_break(c: uint8) -> bool {
+    return c == '\n' || c == '\r'
+}
+
+// White space, a line break or the end of the text (0).
+fun is_blank(c: uint8) -> bool {
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == 0u8
+}
+
+fun is_flow_indicator(c: uint8) -> bool {
+    return c == ',' || c == '[' || c == ']' || c == '{' || c == '}'
+}
+
+impl Parser {
+    // An error at byte offset `at`.
+    fun error(self, kind: YamlErrorKind, at: int) -> YamlError {
+        var line = 1
+        var col = 1
+        var k = 0
+        while k < at && k < self.s.len() {
+            let c = self.s[k]
+            if c == '\n' || (c == '\r' && self.ch(k + 1) != '\n') {
+                line += 1
+                col = 1
+            } else if c != '\r' && (c < 128u8 || c >= 192u8) {
+                col += 1                        // not a UTF-8 continuation byte
+            }
+            k += 1
+        }
+        return YamlError { kind: kind, line: line, col: col }
+    }
+
+    // The byte at `k`, 0 past the end.
+    fun ch(self, k: int) -> uint8 {
+        if k < self.s.len() { return self.s[k] }
+        return 0u8
+    }
+
+    fun at_end(self) -> bool {
+        return self.i >= self.s.len()
+    }
+
+    fun col(self) -> int {
+        return self.i - self.line_start
+    }
+
+    // The spaces that indent the current line.
+    fun indent(self) -> int {
+        var k = self.line_start
+        while self.ch(k) == ' ' { k += 1 }
+        return k - self.line_start
+    }
+
+    // Whether only spaces come between `origin` and `to`.
+    fun spaces_between(self, origin: int, to: int) -> bool {
+        var k = origin
+        while k < to {
+            if self.s[k] != ' ' { return false }
+            k += 1
+        }
+        return true
+    }
+
+    // Whether a document marker, `---` or `...`, starts a line at `k`.
+    fun marker_at(self, k: int) -> bool {
+        if k + 3 > self.s.len() { return false }
+        if k > 0 && !is_break(self.s[k - 1]) && !(k == 3 && has_bom(self.s)) { return false }
+        let c = self.s[k]
+        if c != '-' && c != '.' { return false }
+        return self.s[k + 1] == c && self.s[k + 2] == c && is_blank(self.ch(k + 3))
+    }
+
+    // The offset after the line break at `k` (CRLF, LF or CR); `k` if there
+    // is none.
+    fun after_break(self, k: int) -> int {
+        let c = self.ch(k)
+        if c == '\r' && self.ch(k + 1) == '\n' { return k + 2 }
+        if c == '\n' || c == '\r' { return k + 1 }
+        return k
+    }
+
+    // Moves past white space, comments and line breaks to the next content.
+    fun skip_to_content(var self) {
+        let n = self.s.len()
+        while self.i < n {
+            let c = self.s[self.i]
+            if c == ' ' || c == '\t' {
+                self.i += 1
+            } else if c == '#' && (self.i == self.line_start || is_ws(self.s[self.i - 1])) {
+                while self.i < n && !is_break(self.s[self.i]) { self.i += 1 }
+            } else if c == '\n' {
+                self.i += 1
+                self.line_start = self.i
+            } else if c == '\r' {
+                self.i += 1
+                if self.ch(self.i) == '\n' { self.i += 1 }
+                self.line_start = self.i
+            } else {
+                return
+            }
+        }
+    }
+
+    // Moves past white space and a comment to the end of the line; an error
+    // if anything else is left on it.
+    fun rest_of_line(var self) -> Result<(), YamlError> {
+        let start = self.i
+        while is_ws(self.ch(self.i)) { self.i += 1 }
+        let c = self.ch(self.i)
+        if c == '#' && (self.i > start || self.i == self.line_start) {
+            while !self.at_end() && !is_break(self.s[self.i]) { self.i += 1 }
+            return Ok(())
+        }
+        if is_break(c) || self.at_end() { return Ok(()) }
+        return Err(self.error(YamlErrorKind.Unexpected, self.i))
+    }
+
+    fun enter(var self) -> Result<(), YamlError> {
+        self.depth += 1
+        if self.depth > MAX_DEPTH { return Err(self.error(YamlErrorKind.TooDeep, self.i)) }
+        return Ok(())
+    }
+
+    // An error for a construct the subset leaves out, if one starts here.
+    fun left_out(self, flow: bool) -> Option<YamlError> {
+        let c = self.ch(self.i)
+        if c == '&' { return Some(self.error(YamlErrorKind.Anchor, self.i)) }
+        if c == '*' { return Some(self.error(YamlErrorKind.Alias, self.i)) }
+        if c == '!' { return Some(self.error(YamlErrorKind.Tag, self.i)) }
+        let next = self.ch(self.i + 1)
+        if c == '?' && (is_blank(next) || (flow && is_flow_indicator(next))) {
+            return Some(self.error(YamlErrorKind.ExplicitKey, self.i))
+        }
+        return None
+    }
+
+    // --- Block structure ------------------------------------------------------
+
+    // The value after `- `, `key:` or `---` (`kind`), in a collection
+    // indented `n` (-1 for the document): on this line, on the lines below,
+    // or none.
+    fun block_value(var self, n: int, kind: int) -> Result<Yaml, YamlError> {
+        let start = self.i
+        while is_ws(self.ch(self.i)) { self.i += 1 }
+        let c = self.ch(self.i)
+        if c == '#' || is_break(c) || self.at_end() {
+            self.skip_to_content()
+            if self.at_end() || self.marker_at(self.i) { return Ok(Yaml.Null) }
+            let ind = self.indent()
+            if ind > n { return self.node(n, self.line_start) }
+            if ind == n && kind == MAP_VALUE && self.ch(self.i) == '-' && is_blank(self.ch(self.i + 1)) {
+                if !self.spaces_between(self.line_start, self.i) { return Err(self.error(YamlErrorKind.Tab, self.i)) }
+                return self.block_seq(n)
+            }
+            return Ok(Yaml.Null)
+        }
+        if c == '|' || c == '>' { return self.block_scalar(n) }
+        if kind == SEQ_ENTRY { return self.node(n, start) }
+        if c == '-' && is_blank(self.ch(self.i + 1)) { return Err(self.error(YamlErrorKind.InlineCollection, self.i)) }
+        let at = self.i
+        let line = self.line_start
+        let item = self.item(n, false)?
+        let after = self.i
+        while is_ws(self.ch(self.i)) { self.i += 1 }
+        if self.ch(self.i) == ':' && is_blank(self.ch(self.i + 1)) {
+            if !item.scalar { return Err(self.error(YamlErrorKind.ComplexKey, at)) }
+            if self.line_start != line { return Err(self.error(YamlErrorKind.MultilineKey, at)) }
+            return Err(self.error(YamlErrorKind.InlineCollection, self.i))
+        }
+        self.i = after
+        self.rest_of_line()?
+        return Ok(item.v)
+    }
+
+    // A node whose first character is the current one, in a collection
+    // indented `n`, where a block collection may start (the indentation
+    // measured from `origin`): a sequence, a mapping, a block scalar or a flow
+    // node.
+    fun node(var self, n: int, origin: int) -> Result<Yaml, YamlError> {
+        let m = self.col()
+        let c = self.ch(self.i)
+        if c == '-' && is_blank(self.ch(self.i + 1)) {
+            if !self.spaces_between(origin, self.i) { return Err(self.error(YamlErrorKind.Tab, self.i)) }
+            return self.block_seq(m)
+        }
+        if c == '|' || c == '>' { return self.block_scalar(n) }
+        if c == ':' && is_blank(self.ch(self.i + 1)) {
+            if !self.spaces_between(origin, self.i) { return Err(self.error(YamlErrorKind.Tab, self.i)) }
+            return self.block_map(m, "", self.i)       // an empty key
+        }
+        let start = self.i
+        let line = self.line_start
+        let item = self.item(n, false)?
+        let after = self.i
+        while is_ws(self.ch(self.i)) { self.i += 1 }
+        if self.ch(self.i) == ':' && is_blank(self.ch(self.i + 1)) {
+            if !item.scalar { return Err(self.error(YamlErrorKind.ComplexKey, start)) }
+            if self.line_start != line { return Err(self.error(YamlErrorKind.MultilineKey, start)) }
+            if !self.spaces_between(origin, start) { return Err(self.error(YamlErrorKind.Tab, start)) }
+            return self.block_map(m, item.text, start)
+        }
+        self.i = after
+        self.rest_of_line()?
+        return Ok(item.v)
+    }
+
+    // A block sequence whose entries are indented `m`, the current position
+    // at its first `-`.
+    fun block_seq(var self, m: int) -> Result<Yaml, YamlError> {
+        self.enter()?
+        var items: [Yaml] = []
+        while true {
+            self.i += 1
+            items.push(self.block_value(m, SEQ_ENTRY)?)
+            self.skip_to_content()
+            if self.at_end() || self.marker_at(self.i) { break }
+            let ind = self.indent()
+            if ind < m { break }
+            if ind > m { return Err(self.error(YamlErrorKind.Indentation, self.i)) }
+            if self.ch(self.i) != '-' || !is_blank(self.ch(self.i + 1)) { break }
+            if !self.spaces_between(self.line_start, self.i) { return Err(self.error(YamlErrorKind.Tab, self.i)) }
+        }
+        self.depth -= 1
+        return Ok(Yaml.List(items))
+    }
+
+    // A block mapping whose keys are indented `m`, the current position at
+    // the `:` after its first key, `first` (which starts at `key_at`).
+    fun block_map(var self, m: int, first: str, key_at: int) -> Result<Yaml, YamlError> {
+        self.enter()?
+        var entries = new_entries()
+        var key = first
+        var at = key_at
+        while true {
+            self.i += 1
+            let v = self.block_value(m, MAP_VALUE)?
+            if !entries.add(key, v) { return Err(self.error(YamlErrorKind.DuplicateKey, at)) }
+            self.skip_to_content()
+            if self.at_end() || self.marker_at(self.i) { break }
+            let ind = self.indent()
+            if ind < m { break }
+            if ind > m { return Err(self.error(YamlErrorKind.Indentation, self.i)) }
+            if !self.spaces_between(self.line_start, self.i) { return Err(self.error(YamlErrorKind.Tab, self.i)) }
+            at = self.i
+            key = self.block_key(m)?
+        }
+        self.depth -= 1
+        return Ok(Yaml.Map(entries.list))
+    }
+
+    // The key of the next entry of a block mapping indented `m`; the current
+    // position moves to the `:` after it.
+    fun block_key(var self, m: int) -> Result<str, YamlError> {
+        let start = self.i
+        let c = self.ch(self.i)
+        if c == ':' && is_blank(self.ch(self.i + 1)) { return Ok("") }
+        if c == '-' && is_blank(self.ch(self.i + 1)) { return Err(self.error(YamlErrorKind.Unexpected, start)) }
+        let line = self.line_start
+        let item = self.item(m, false)?
+        while is_ws(self.ch(self.i)) { self.i += 1 }
+        if self.ch(self.i) != ':' || !is_blank(self.ch(self.i + 1)) {
+            if item.scalar && self.line_start != line { return Err(self.error(YamlErrorKind.MultilineKey, start)) }
+            return Err(self.error(YamlErrorKind.MissingColon, start))
+        }
+        if !item.scalar { return Err(self.error(YamlErrorKind.ComplexKey, start)) }
+        if self.line_start != line { return Err(self.error(YamlErrorKind.MultilineKey, start)) }
+        return Ok(item.text)
+    }
+
+    // A scalar or a flow collection, in a block indented `n`; `flow`: inside
+    // a flow collection. A plain scalar that might be an implicit key ends at
+    // its first line's `: `.
+    fun item(var self, n: int, flow: bool) -> Result<Item, YamlError> {
+        match self.left_out(flow) {
+            Some(e) => { return Err(e) }
+            None => {}
+        }
+        let c = self.ch(self.i)
+        if c == '[' {
+            return Ok(Item { v: self.flow_seq(n)?, text: "", scalar: false, quoted: false })
+        }
+        if c == '{' {
+            return Ok(Item { v: self.flow_map(n)?, text: "", scalar: false, quoted: false })
+        }
+        if c == '"' {
+            let t = self.double_quoted(n)?
+            return Ok(Item { v: Yaml.Str(t), text: t, scalar: true, quoted: true })
+        }
+        if c == '\'' {
+            let t = self.single_quoted(n)?
+            return Ok(Item { v: Yaml.Str(t), text: t, scalar: true, quoted: true })
+        }
+        if !self.plain_start(flow) { return Err(self.error(YamlErrorKind.Unexpected, self.i)) }
+        let t = self.plain(n, flow)
+        return Ok(Item { v: resolve(t), text: t, scalar: true, quoted: false })
+    }
+
+    // --- Plain scalars --------------------------------------------------------
+
+    // Whether a plain scalar can start here: not with an indicator, unless
+    // it is `-`, `?` or `:` before a character that can follow one.
+    fun plain_start(self, flow: bool) -> bool {
+        let c = self.ch(self.i)
+        if is_blank(c) { return false }
+        if c == '-' || c == '?' || c == ':' {
+            let next = self.ch(self.i + 1)
+            return !is_blank(next) && !(flow && is_flow_indicator(next))
+        }
+        return !(c == ',' || c == '[' || c == ']' || c == '{' || c == '}' || c == '#' || c == '&' || c == '*' ||
+            c == '!' || c == '|' || c == '>' || c == '\'' || c == '"' || c == '%' || c == '@' || c == '`')
+    }
+
+    // Where the plain scalar's text on this line, from `k`, ends (white space
+    // after it left out): at the line's end, at ` #`, at `: ` or, in flow
+    // context, at a flow indicator or a `:` before one.
+    fun plain_line_end(self, k: int, flow: bool) -> int {
+        let n = self.s.len()
+        var j = k
+        var last = k
+        while j < n {
+            let c = self.s[j]
+            if c == ' ' || c == '\t' {
+                j += 1
+            } else {
+                if c == '\n' || c == '\r' { return last }
+                if c == '#' && j > k && is_ws(self.s[j - 1]) { return last }
+                if c == ':' {
+                    let next = self.ch(j + 1)
+                    if is_blank(next) || (flow && is_flow_indicator(next)) { return last }
+                }
+                if flow && is_flow_indicator(c) { return last }
+                j += 1
+                last = j
+            }
+        }
+        return last
+    }
+
+    // A plain scalar, its lines folded: a line break between two lines is a
+    // space, and k empty lines are k line feeds. The lines after the first
+    // are indented more than `n`.
+    fun plain(var self, n: int, flow: bool) -> str {
+        let start = self.i
+        var end = self.plain_line_end(start, flow)
+        var next = self.plain_next(end, n, flow)
+        if next.0 < 0 {
+            self.i = end
+            return self.s[start:end]            // one line, the common case
+        }
+        var sb = StringBuilder()
+        var seg = start
+        while next.0 >= 0 {
+            sb.append(self.s, seg, end)
+            sb.append(fold_text(next.2))
+            seg = next.0
+            end = next.1
+            self.line_start = next.3
+            next = self.plain_next(end, n, flow)
+        }
+        self.i = end
+        sb.append(self.s, seg, end)
+        return sb.build()
+    }
+
+    // The line that continues a plain scalar whose text so far ends at
+    // `end`: where its text starts and ends, the line breaks before it and
+    // where the line starts; -1 first if none does.
+    fun plain_next(self, end: int, n: int, flow: bool) -> (int, int, int, int) {
+        let none = (-1, 0, 0, 0)
+        var j = end
+        while is_ws(self.ch(j)) { j += 1 }
+        if !is_break(self.ch(j)) { return none }
+        var breaks = 0
+        var ls = j
+        var sp = 0
+        while is_break(self.ch(j)) {
+            j = self.after_break(j)
+            breaks += 1
+            ls = j
+            while self.ch(j) == ' ' { j += 1 }
+            sp = j - ls
+            while is_ws(self.ch(j)) { j += 1 }
+        }
+        if j >= self.s.len() || sp <= n || self.marker_at(ls) { return none }
+        let c = self.s[j]
+        if c == '#' { return none }
+        if c == ':' && (is_blank(self.ch(j + 1)) || (flow && is_flow_indicator(self.ch(j + 1)))) { return none }
+        if flow && is_flow_indicator(c) { return none }
+        let e = self.plain_line_end(j, flow)
+        if e == j { return none }
+        return (j, e, breaks, ls)
+    }
+
+    // --- Quoted scalars -------------------------------------------------------
+
+    // At a line break inside a quoted scalar opened at `open`, in a block
+    // indented `n`: moves past it, the empty lines after it and the white
+    // space that starts the next line; the number of line breaks.
+    fun quoted_breaks(var self, n: int, open: int) -> Result<int, YamlError> {
+        var breaks = 0
+        while is_break(self.ch(self.i)) {
+            self.i = self.after_break(self.i)
+            breaks += 1
+            self.line_start = self.i
+            if self.marker_at(self.i) { return Err(self.error(YamlErrorKind.UnclosedQuote, open)) }
+            while self.ch(self.i) == ' ' { self.i += 1 }
+            let sp = self.i - self.line_start
+            while is_ws(self.ch(self.i)) { self.i += 1 }
+            if self.at_end() { return Err(self.error(YamlErrorKind.UnclosedQuote, open)) }
+            if !is_break(self.s[self.i]) && sp <= n { return Err(self.error(YamlErrorKind.Indentation, self.i)) }
+        }
+        return Ok(breaks)
+    }
+
+    // A single-quoted scalar, the current position at its quote: `''` is a
+    // quote, and lines fold as in a plain scalar.
+    fun single_quoted(var self, n: int) -> Result<str, YamlError> {
+        let open = self.i
+        self.i += 1
+        var sb = StringBuilder()
+        var run = self.i
+        while true {
+            if self.at_end() { return Err(self.error(YamlErrorKind.UnclosedQuote, open)) }
+            let c = self.s[self.i]
+            if c == '\'' {
+                sb.append(self.s, run, self.i)
+                if self.ch(self.i + 1) != '\'' {
+                    self.i += 1
+                    return Ok(sb.build())
+                }
+                sb.append_byte('\'')
+                self.i += 2
+                run = self.i
+            } else if is_break(c) {
+                var e = self.i
+                while e > run && is_ws(self.s[e - 1]) { e -= 1 }
+                sb.append(self.s, run, e)
+                let breaks = self.quoted_breaks(n, open)?
+                sb.append(fold_text(breaks))
+                run = self.i
+            } else {
+                self.i += 1
+            }
+        }
+        unreachable()
+    }
+
+    // A double-quoted scalar, the current position at its quote: escapes,
+    // and lines fold as in a plain scalar, except after a `\` that ends a
+    // line.
+    fun double_quoted(var self, n: int) -> Result<str, YamlError> {
+        let open = self.i
+        self.i += 1
+        var sb = StringBuilder()
+        var run = self.i
+        while true {
+            if self.at_end() { return Err(self.error(YamlErrorKind.UnclosedQuote, open)) }
+            let c = self.s[self.i]
+            if c == '"' {
+                sb.append(self.s, run, self.i)
+                self.i += 1
+                return Ok(sb.build())
+            }
+            if c == '\\' {
+                sb.append(self.s, run, self.i)
+                let e = self.ch(self.i + 1)
+                if is_break(e) {
+                    self.i += 1
+                    let breaks = self.quoted_breaks(n, open)?
+                    sb.append("\n".repeat(breaks - 1))  // the escaped break itself is dropped
+                } else {
+                    let esc = self.escape()?
+                    sb.append(esc)
+                }
+                run = self.i
+            } else if is_break(c) {
+                var e = self.i
+                while e > run && is_ws(self.s[e - 1]) { e -= 1 }
+                sb.append(self.s, run, e)
+                let breaks = self.quoted_breaks(n, open)?
+                sb.append(fold_text(breaks))
+                run = self.i
+            } else {
+                self.i += 1
+            }
+        }
+        unreachable()
+    }
+
+    // The text of the escape at the current `\`; moves past it.
+    fun escape(var self) -> Result<str, YamlError> {
+        let at = self.i
+        let e = self.ch(self.i + 1)
+        self.i += 2
+        var digits = 0
+        if e == 'x' { digits = 2 } else if e == 'u' { digits = 4 } else if e == 'U' { digits = 8 }
+        if digits > 0 {
+            var cp: int64 = 0
+            var k = 0
+            while k < digits {
+                let d = hex_digit(self.ch(self.i + k))
+                if d < 0 { return Err(self.error(YamlErrorKind.InvalidEscape, at)) }
+                cp = cp * 16i64 + d as int64
+                k += 1
+            }
+            self.i += digits
+            if cp > 1114111i64 || (cp >= 55296i64 && cp < 57344i64) {
+                return Err(self.error(YamlErrorKind.InvalidEscape, at))
+            }
+            return Ok(utf8(cp as int))
+        }
+        let t = match e {
+            '0' => "\0"
+            'a' => "\u{7}"
+            'b' => "\u{8}"
+            't' => "\t"
+            '\t' => "\t"
+            'n' => "\n"
+            'v' => "\u{b}"
+            'f' => "\u{c}"
+            'r' => "\r"
+            'e' => "\u{1b}"
+            ' ' => " "
+            '"' => "\""
+            '/' => "/"
+            '\\' => "\\"
+            'N' => "\u{85}"
+            '_' => "\u{a0}"
+            'L' => "\u{2028}"
+            'P' => "\u{2029}"
+            _ => ""
+        }
+        if t.len() == 0 && e != '0' { return Err(self.error(YamlErrorKind.InvalidEscape, at)) }
+        return Ok(t)
+    }
+
+    // --- Block scalars --------------------------------------------------------
+
+    // A literal (`|`) or folded (`>`) block scalar in a collection indented
+    // `n`, the current position at its indicator. Ends at the start of the
+    // first line that isn't part of it.
+    fun block_scalar(var self, n: int) -> Result<Yaml, YamlError> {
+        let folded = self.s[self.i] == '>'
+        self.i += 1
+        var chomp = 0                           // -1 strip, 0 clip, 1 keep
+        var explicit = 0
+        var k = 0
+        while k < 2 {
+            let c = self.ch(self.i)
+            if c >= '1' && c <= '9' && explicit == 0 {
+                explicit = (c - '0') as int
+            } else if (c == '-' || c == '+') && chomp == 0 {
+                chomp = if c == '-' { -1 } else { 1 }
+            } else {
+                break
+            }
+            self.i += 1
+            k += 1
+        }
+        let c = self.ch(self.i)
+        if !is_blank(c) { return Err(self.error(YamlErrorKind.BlockScalarHeader, self.i)) }
+        self.rest_of_line()?
+        if self.at_end() { return Ok(Yaml.Str("")) }
+        self.i = self.after_break(self.i)
+        self.line_start = self.i
+        let base = if n < 0 { 0 } else { n }
+        var indent = base + explicit
+        if explicit == 0 {
+            // the first line with content sets it; no empty line before it
+            // may have more spaces
+            var j = self.i
+            var most = 0
+            while true {
+                let ls = j
+                while self.ch(j) == ' ' { j += 1 }
+                let sp = j - ls
+                if is_break(self.ch(j)) {
+                    if sp > most { most = sp }
+                    j = self.after_break(j)
+                } else if j >= self.s.len() {
+                    indent = if most > sp { most } else { sp }  // no content at all
+                    break
+                } else {
+                    indent = sp
+                    if sp > n && most > sp {
+                        return Err(self.error(YamlErrorKind.Indentation, ls + most))
+                    }
+                    break
+                }
+            }
+            if indent <= n { indent = n + 1 }
+        }
+        var sb = StringBuilder()
+        var empties = 0                         // empty lines since the last content line
+        var content = false
+        var more = false                        // whether the last content line was more indented
+        while !self.at_end() {
+            let ls = self.i
+            var j = ls
+            while self.ch(j) == ' ' && j - ls < indent { j += 1 }
+            if j - ls < indent || j >= self.s.len() {
+                // fewer spaces than the indentation: an empty line (the end
+                // of the text ends one too), or the scalar's end
+                var t = j
+                var tab = false
+                while is_ws(self.ch(t)) {
+                    if self.s[t] == '\t' { tab = true }
+                    t += 1
+                }
+                if !is_break(self.ch(t)) && t < self.s.len() {
+                    self.i = ls
+                    break
+                }
+                if tab { return Err(self.error(YamlErrorKind.Tab, j)) }
+                empties += 1
+                self.i = self.after_break(t)
+                self.line_start = self.i
+                continue
+            }
+            if indent == 0 && self.marker_at(ls) {
+                self.i = ls
+                break
+            }
+            let c2 = self.s[j]
+            if is_break(c2) {
+                empties += 1                    // an empty line at full indentation
+                self.i = self.after_break(j)
+                self.line_start = self.i
+                continue
+            }
+            var e = j
+            while e < self.s.len() && !is_break(self.s[e]) { e += 1 }
+            let spaced = c2 == ' ' || c2 == '\t'
+            if !content {
+                sb.append("\n".repeat(empties))      // leading empty lines are kept
+            } else if folded && !more && !spaced {
+                sb.append(fold_text(empties + 1))    // folded between two plain lines
+            } else {
+                sb.append("\n".repeat(empties + 1))
+            }
+            sb.append(self.s, j, e)
+            content = true
+            more = spaced
+            empties = 0
+            self.i = self.after_break(e)
+            self.line_start = self.i
+        }
+        // the last content line's break (the end of the text ends it too)
+        if chomp >= 0 && content { sb.append_byte('\n') }
+        if chomp == 1 { sb.append("\n".repeat(empties)) }
+        return Ok(Yaml.Str(sb.build()))
+    }
+
+    // --- Flow collections -----------------------------------------------------
+
+    // Moves past white space, comments and line breaks inside a flow
+    // collection opened at `open`, in a block indented `n`.
+    fun flow_skip(var self, n: int, open: int) -> Result<(), YamlError> {
+        while true {
+            if self.at_end() { return Err(self.error(YamlErrorKind.UnclosedFlow, open)) }
+            let c = self.s[self.i]
+            if c == ' ' || c == '\t' {
+                self.i += 1
+            } else if c == '#' && (self.i == self.line_start || is_ws(self.s[self.i - 1])) {
+                while !self.at_end() && !is_break(self.s[self.i]) { self.i += 1 }
+            } else if is_break(c) {
+                self.i = self.after_break(self.i)
+                self.line_start = self.i
+                if self.marker_at(self.i) { return Err(self.error(YamlErrorKind.UnclosedFlow, open)) }
+                while self.ch(self.i) == ' ' { self.i += 1 }
+                let sp = self.i - self.line_start
+                var k = self.i
+                while is_ws(self.ch(k)) { k += 1 }
+                let c2 = self.ch(k)
+                if sp <= n && !is_blank(c2) && c2 != '#' {
+                    let kind = if k > self.i { YamlErrorKind.Tab } else { YamlErrorKind.Indentation }
+                    return Err(self.error(kind, self.i))
+                }
+            } else {
+                return Ok(())
+            }
+        }
+        unreachable()
+    }
+
+    // The value after a `:` in a flow collection closed by `close`: a node,
+    // or none before `,` or the closing bracket.
+    fun flow_value(var self, n: int, open: int, close: uint8) -> Result<Yaml, YamlError> {
+        self.flow_skip(n, open)?
+        let c = self.s[self.i]
+        if c == ',' || c == close { return Ok(Yaml.Null) }
+        let item = self.item(n, true)?
+        return Ok(item.v)
+    }
+
+    // A flow sequence, the current position at its `[`. An entry `k: v` is a
+    // mapping of one entry.
+    fun flow_seq(var self, n: int) -> Result<Yaml, YamlError> {
+        self.enter()?
+        let open = self.i
+        self.i += 1
+        var items: [Yaml] = []
+        while true {
+            self.flow_skip(n, open)?
+            let c = self.s[self.i]
+            if c == ']' {
+                self.i += 1
+                break
+            }
+            let start = self.i
+            if c == ':' && (is_blank(self.ch(self.i + 1)) || is_flow_indicator(self.ch(self.i + 1))) {
+                self.i += 1
+                let v = self.flow_value(n, open, ']')?
+                items.push(Yaml.Map([("", v)]))
+            } else {
+                let line = self.line_start
+                let item = self.item(n, true)?
+                self.flow_skip(n, open)?
+                let d = self.s[self.i]
+                if d == ':' && (item.quoted || !item.scalar || is_blank(self.ch(self.i + 1)) || is_flow_indicator(self.ch(self.i + 1))) {
+                    if !item.scalar { return Err(self.error(YamlErrorKind.ComplexKey, start)) }
+                    if self.line_start != line { return Err(self.error(YamlErrorKind.MultilineKey, start)) }
+                    self.i += 1
+                    let v = self.flow_value(n, open, ']')?
+                    items.push(Yaml.Map([(item.text, v)]))
+                } else {
+                    items.push(item.v)
+                }
+            }
+            self.flow_skip(n, open)?
+            let d = self.s[self.i]
+            if d == ',' {
+                self.i += 1
+            } else if d != ']' {
+                return Err(self.error(YamlErrorKind.MissingComma, self.i))
+            }
+        }
+        self.depth -= 1
+        return Ok(Yaml.List(items))
+    }
+
+    // A flow mapping, the current position at its `{`. A key without `:` has
+    // the value `Null`.
+    fun flow_map(var self, n: int) -> Result<Yaml, YamlError> {
+        self.enter()?
+        let open = self.i
+        self.i += 1
+        var entries = new_entries()
+        while true {
+            self.flow_skip(n, open)?
+            let c = self.s[self.i]
+            if c == '}' {
+                self.i += 1
+                break
+            }
+            let start = self.i
+            var key = ""
+            var quoted = false
+            if !(c == ':' && (is_blank(self.ch(self.i + 1)) || is_flow_indicator(self.ch(self.i + 1)))) {
+                let item = self.item(n, true)?
+                if !item.scalar { return Err(self.error(YamlErrorKind.ComplexKey, start)) }
+                key = item.text
+                quoted = item.quoted
+                self.flow_skip(n, open)?
+            }
+            var v = Yaml.Null
+            let d = self.s[self.i]
+            if d == ':' && (quoted || is_blank(self.ch(self.i + 1)) || is_flow_indicator(self.ch(self.i + 1))) {
+                self.i += 1
+                v = self.flow_value(n, open, '}')?
+            }
+            if !entries.add(key, v) { return Err(self.error(YamlErrorKind.DuplicateKey, start)) }
+            self.flow_skip(n, open)?
+            let e = self.s[self.i]
+            if e == ',' {
+                self.i += 1
+            } else if e != '}' {
+                return Err(self.error(YamlErrorKind.MissingComma, self.i))
+            }
+        }
+        self.depth -= 1
+        return Ok(Yaml.Map(entries.list))
+    }
+}
+
+// The text that `breaks` folded line breaks stand for: one is a space, k + 1
+// are k line feeds.
+#test(1)[" "]
+#test(3)["\n\n"]
+fun fold_text(breaks: int) -> str {
+    if breaks == 1 { return " " }
+    return "\n".repeat(breaks - 1)
+}
+
+// The value of a hex digit, or -1.
+fun hex_digit(c: uint8) -> int {
+    if c >= '0' && c <= '9' { return (c - '0') as int }
+    if c >= 'a' && c <= 'f' { return (c - 'a') as int + 10 }
+    if c >= 'A' && c <= 'F' { return (c - 'A') as int + 10 }
+    return -1
+}
+
+// The UTF-8 encoding of the code point `cp`.
+#test(65)["A"]
+#test(233)["é"]
+#test(8364)["€"]
+#test(128512)["😀"]
+fun utf8(cp: int) -> str {
+    var sb = StringBuilder()
+    if cp < 128 {
+        sb.append_byte(cp as uint8)
+    } else if cp < 2048 {
+        sb.append_byte((192 | (cp >> 6)) as uint8)
+        sb.append_byte((128 | (cp & 63)) as uint8)
+    } else if cp < 65536 {
+        sb.append_byte((224 | (cp >> 12)) as uint8)
+        sb.append_byte((128 | ((cp >> 6) & 63)) as uint8)
+        sb.append_byte((128 | (cp & 63)) as uint8)
+    } else {
+        sb.append_byte((240 | (cp >> 18)) as uint8)
+        sb.append_byte((128 | ((cp >> 12) & 63)) as uint8)
+        sb.append_byte((128 | ((cp >> 6) & 63)) as uint8)
+        sb.append_byte((128 | (cp & 63)) as uint8)
+    }
+    return sb.build()
+}
+
+// --- The core schema ------------------------------------------------------------
+
+// The value of a plain scalar by the YAML 1.2 core schema.
+#test("")[Yaml.Null]
+#test("~")[Yaml.Null]
+#test("NULL")[Yaml.Null]
+#test("True")[Yaml.Bool(true)]
+#test("false")[Yaml.Bool(false)]
+#test("yes")[Yaml.Str("yes")] // YAML 1.1 read a bool
+#test("-12")[Yaml.Int(-12i64)]
+#test("+7")[Yaml.Int(7i64)]
+#test("012")[Yaml.Int(12i64)] // YAML 1.1 read octal 10
+#test("0o17")[Yaml.Int(15i64)]
+#test("0x1F")[Yaml.Int(31i64)]
+#test("0x")[Yaml.Str("0x")]
+#test("1_000")[Yaml.Str("1_000")] // YAML 1.1 read 1000
+#test("9223372036854775808")[Yaml.Float(9223372036854775808.0)]
+#test("1.5")[Yaml.Float(1.5)]
+#test("-.5")[Yaml.Float(-0.5)]
+#test("1.")[Yaml.Float(1.0)]
+#test("1e3")[Yaml.Float(1000.0)]
+#test("+1.5E-2")[Yaml.Float(0.015)]
+#test("-.inf")[Yaml.Float(-1.0 / 0.0)]
+#test(".")[Yaml.Str(".")]
+#test("1.2.3")[Yaml.Str("1.2.3")]
+#test("e3")[Yaml.Str("e3")]
+#test("3:20")[Yaml.Str("3:20")] // YAML 1.1 read 200
+pub fun resolve(text: str) -> Yaml {
+    let n = text.len()
+    if n == 0 { return Yaml.Null }
+    let c = text[0]
+    if c == 'n' || c == 'N' || c == '~' {
+        if text == "~" || text == "null" || text == "Null" || text == "NULL" { return Yaml.Null }
+        return Yaml.Str(text)
+    }
+    if c == 't' || c == 'T' {
+        if text == "true" || text == "True" || text == "TRUE" { return Yaml.Bool(true) }
+        return Yaml.Str(text)
+    }
+    if c == 'f' || c == 'F' {
+        if text == "false" || text == "False" || text == "FALSE" { return Yaml.Bool(false) }
+        return Yaml.Str(text)
+    }
+    if !((c >= '0' && c <= '9') || c == '-' || c == '+' || c == '.') { return Yaml.Str(text) }
+    if n > 2 && c == '0' && (text[1] == 'o' || text[1] == 'x') {
+        let base: int64 = if text[1] == 'o' { 8i64 } else { 16i64 }
+        var v: int64 = 0
+        var f: float64 = 0.0
+        var big = false
+        var k = 2
+        while k < n {
+            let d = hex_digit(text[k])
+            if d < 0 || d as int64 >= base { return Yaml.Str(text) }
+            if v > (9223372036854775807i64 - d as int64) / base { big = true }
+            v = v * base + d as int64
+            f = f * base as float64 + d as float64
+            k += 1
+        }
+        return if big { Yaml.Float(f) } else { Yaml.Int(v) }
+    }
+    // [-+]?(\.[0-9]+|[0-9]+(\.[0-9]*)?)([eE][-+]?[0-9]+)? and the infinities
+    var k = 0
+    var neg = false
+    if c == '-' || c == '+' {
+        neg = c == '-'
+        k = 1
+    }
+    let rest = text[k:]
+    if rest == ".inf" || rest == ".Inf" || rest == ".INF" {
+        return Yaml.Float(if neg { -1.0 / 0.0 } else { 1.0 / 0.0 })
+    }
+    if k == 0 && (rest == ".nan" || rest == ".NaN" || rest == ".NAN") { return Yaml.Float(0.0 / 0.0) }
+    let int_start = k
+    while k < n && text[k] >= '0' && text[k] <= '9' { k += 1 }
+    let int_end = k
+    var frac_start = k
+    var frac_end = k
+    var dot = false
+    if k < n && text[k] == '.' {
+        dot = true
+        k += 1
+        frac_start = k
+        while k < n && text[k] >= '0' && text[k] <= '9' { k += 1 }
+        frac_end = k
+    }
+    if int_end == int_start && frac_end == frac_start { return Yaml.Str(text) }
+    let exp_start = k
+    if k < n && (text[k] == 'e' || text[k] == 'E') {
+        k += 1
+        if k < n && (text[k] == '-' || text[k] == '+') { k += 1 }
+        let digits = k
+        while k < n && text[k] >= '0' && text[k] <= '9' { k += 1 }
+        if k == digits { return Yaml.Str(text) }
+    }
+    if k < n { return Yaml.Str(text) }
+    var sb = StringBuilder()
+    if neg { sb.append_byte('-') }
+    if int_end == int_start { sb.append_byte('0') } else { sb.append(text, int_start, int_end) }
+    if !dot && exp_start == n {
+        let digits = sb.build()
+        return match parse_int(digits) {
+            Some(v) => Yaml.Int(v)
+            None => Yaml.Float(parse_float(digits).unwrap_or(0.0))  // too large for int64
+        }
+    }
+    sb.append_byte('.')
+    if frac_end == frac_start { sb.append_byte('0') } else { sb.append(text, frac_start, frac_end) }
+    sb.append(text, exp_start, n)
+    return Yaml.Float(parse_float(sb.build()).unwrap_or(0.0))
+}
+
+// --- Writing ------------------------------------------------------------------
+
+// `v` as a YAML document in block style, ending with a line break: a map's
+// entries as `key: value`, a list's items as `- item`, each level indented
+// two more spaces, an empty map or list as `{}` or `[]`. A string is plain
+// unless it would read back as something else (a number, `true`, `null`, …,
+// or YAML 1.1's `yes`, `no`, `on` and `off`) or holds a character that plain
+// scalars can't: then it is double-quoted, with escapes. `parse` reads the
+// text back as `v`, except NaN, which isn't equal to itself.
+#test(Yaml.Map([("a", Yaml.Int(1i64)), ("b", Yaml.List([Yaml.Str("x"), Yaml.Null]))]))["a: 1\nb:\n  - x\n  - null\n"]
+#test(Yaml.List([Yaml.Map([("k", Yaml.Str("v")), ("size", Yaml.Float(2.0))]), Yaml.List([Yaml.Bool(true)])]))["- k: v\n  size: 2.0\n- - true\n"]
+#test(Yaml.Map([("e", Yaml.Map([])), ("l", Yaml.List([]))]))["e: {}\nl: []\n"]
+#test(Yaml.Str("plain text"))["plain text\n"]
+#test(Yaml.Str("123"))["\"123\"\n"]
+#test(Yaml.Str("on"))["\"on\"\n"]
+#test(Yaml.Str("a: b\n\tc \"d\""))["\"a: b\\n\\tc \\\"d\\\"\"\n"]
+#test(Yaml.Float(-1.0 / 0.0))["-.inf\n"]
+#test(Yaml.Map([("true", Yaml.Str("")), ("", Yaml.Null)]))["\"true\": \"\"\n\"\": null\n"]
+pub fun to_string(v: Yaml) -> str {
+    var w = Writer { sb: StringBuilder() }
+    match v {
+        Yaml.Map(es) => {
+            if es.len() > 0 { w.map_lines(es, 0, false) } else { w.sb.append("{}\n") }
+        }
+        Yaml.List(xs) => {
+            if xs.len() > 0 { w.list_lines(xs, 0, false) } else { w.sb.append("[]\n") }
+        }
+        _ => {
+            w.scalar(v)
+            w.sb.append_byte('\n')
+        }
+    }
+    return w.sb.build()
+}
+
+struct Writer {
+    sb: StringBuilder,
+}
+
+impl Writer {
+    fun spaces(var self, k: int) {
+        var q = 0
+        while q < k {
+            self.sb.append_byte(' ')
+            q += 1
+        }
+    }
+
+    // The entries of a map, a line each at `indent`; `inline`: the first
+    // one continues the current line (after `- `).
+    fun map_lines(var self, es: [(str, Yaml)], indent: int, inline: bool) {
+        var first = true
+        for e in es {
+            if !(first && inline) { self.spaces(indent) }
+            first = false
+            self.string(e.0)
+            self.sb.append_byte(':')
+            self.after_key(e.1, indent)
+        }
+    }
+
+    // The items of a list, a line each at `indent`.
+    fun list_lines(var self, xs: [Yaml], indent: int, inline: bool) {
+        var first = true
+        for x in xs {
+            if !(first && inline) { self.spaces(indent) }
+            first = false
+            self.sb.append("- ")
+            match x {
+                Yaml.Map(es) if es.len() > 0 => self.map_lines(es, indent + 2, true)
+                Yaml.List(ys) if ys.len() > 0 => self.list_lines(ys, indent + 2, true)
+                _ => {
+                    self.scalar(x)
+                    self.sb.append_byte('\n')
+                }
+            }
+        }
+    }
+
+    // A map's value after its `key:`.
+    fun after_key(var self, v: Yaml, indent: int) {
+        match v {
+            Yaml.Map(es) if es.len() > 0 => {
+                self.sb.append_byte('\n')
+                self.map_lines(es, indent + 2, false)
+            }
+            Yaml.List(xs) if xs.len() > 0 => {
+                self.sb.append_byte('\n')
+                self.list_lines(xs, indent + 2, false)
+            }
+            _ => {
+                self.sb.append_byte(' ')
+                self.scalar(v)
+                self.sb.append_byte('\n')
+            }
+        }
+    }
+
+    // A scalar, or an empty map or list.
+    fun scalar(var self, v: Yaml) {
+        match v {
+            Yaml.Null => self.sb.append("null")
+            Yaml.Bool(b) => self.sb.append(if b { "true" } else { "false" })
+            Yaml.Int(n) => self.sb.append(f"{n}")
+            Yaml.Float(f) => self.sb.append(float_text(f))
+            Yaml.Str(s) => self.string(s)
+            Yaml.List(_) => self.sb.append("[]")
+            Yaml.Map(_) => self.sb.append("{}")
+        }
+    }
+
+    // A string, plain if it reads back as itself, else double-quoted.
+    fun string(var self, s: str) {
+        if plain_safe(s) {
+            self.sb.append(s)
+            return
+        }
+        self.sb.append_byte('"')
+        var run = 0
+        var i = 0
+        let n = s.len()
+        while i < n {
+            let c = s[i]
+            var esc = ""
+            var skip = 1
+            if c == '"' { esc = "\\\"" }
+            else if c == '\\' { esc = "\\\\" }
+            else if c == '\n' { esc = "\\n" }
+            else if c == '\t' { esc = "\\t" }
+            else if c == '\r' { esc = "\\r" }
+            else if c == 0u8 { esc = "\\0" }
+            else if c < 32u8 || c == 127u8 { esc = "\\x" + hex2(c as int) }
+            else if c >= 0xC2u8 {
+                skip = special_len(s, i)
+                if skip == 2 {
+                    esc = "\\x" + hex2(s[i + 1] as int)  // a C1 control character
+                } else if skip == 3 {
+                    esc = if c == 0xEFu8 { "\\uFEFF" } else if s[i + 2] == 0xA8u8 { "\\L" } else { "\\P" }
+                }
+            }
+            if esc.len() > 0 {
+                self.sb.append(s, run, i)
+                self.sb.append(esc)
+                i += skip
+                run = i
+            } else {
+                i += 1
+            }
+        }
+        self.sb.append(s, run, n)
+        self.sb.append_byte('"')
+    }
+}
+
+// The length of the character at `i` if it is one that a plain scalar can't
+// hold and a double-quoted one escapes: a C1 control, U+2028, U+2029 or
+// U+FEFF; 0 for any other.
+#test("a\u{85}", 1)[2]
+#test("\u{2029}", 0)[3]
+#test("\u{feff}", 0)[3]
+#test("€", 0)[0]
+#test("é", 0)[0]
+fun special_len(s: str, i: int) -> int {
+    let n = s.len()
+    let c = s[i]
+    if c == 0xC2u8 && i + 1 < n && s[i + 1] >= 0x80u8 && s[i + 1] < 0xA0u8 { return 2 }
+    if c == 0xE2u8 && i + 2 < n && s[i + 1] == 0x80u8 && (s[i + 2] == 0xA8u8 || s[i + 2] == 0xA9u8) { return 3 }
+    if c == 0xEFu8 && i + 2 < n && s[i + 1] == 0xBBu8 && s[i + 2] == 0xBFu8 { return 3 }
+    return 0
+}
+
+// Two lowercase hex digits for a byte.
+fun hex2(b: int) -> str {
+    let digits = "0123456789abcdef"
+    return digits[b >> 4:(b >> 4) + 1] + digits[b & 15:(b & 15) + 1]
+}
+
+// A float as the core schema writes it.
+#test(0.5)["0.5"]
+#test(3.0)["3.0"]
+#test(1e300)["1e+300"]
+#test(0.0 / 0.0)[".nan"]
+#test(1.0 / 0.0)[".inf"]
+fun float_text(f: float64) -> str {
+    let t = format_float(f)
+    if t == "nan" { return ".nan" }
+    if t == "inf" { return ".inf" }
+    if t == "-inf" { return "-.inf" }
+    return t
+}
+
+// Whether `s` written plain reads back as the same string, in any position
+// of a block document (a key, a value, an item, the document).
+#test("hello world")[true]
+#test("über")[true]
+#test("a:b")[true]
+#test("")[false]
+#test("12")[false]
+#test("null")[false]
+#test("Yes")[false]
+#test("- a")[false]
+#test("a: b")[false]
+#test("a #b")[false]
+#test("a ")[false]
+#test("...")[false]
+#test("x\n")[false]
+#test("€ and —")[true]
+#test("a\u{2028}b")[false]
+fun plain_safe(s: str) -> bool {
+    let n = s.len()
+    if n == 0 { return false }
+    let c = s[0]
+    if c == ' ' || c == '\t' || c == '-' || c == '?' || c == ':' || c == ',' || c == '[' || c == ']' ||
+        c == '{' || c == '}' || c == '#' || c == '&' || c == '*' || c == '!' || c == '|' || c == '>' ||
+        c == '\'' || c == '"' || c == '%' || c == '@' || c == '`' {
+        return false
+    }
+    let last = s[n - 1]
+    if last == ' ' || last == '\t' || last == ':' { return false }
+    if s.starts_with("...") { return false }
+    var i = 0
+    while i < n {
+        let b = s[i]
+        if b < 32u8 || b == 127u8 { return false }
+        if b == ':' && s[i + 1] == ' ' { return false }
+        if b == '#' && s[i - 1] == ' ' { return false }
+        if b >= 0xC2u8 && special_len(s, i) > 0 { return false }
+        i += 1
+    }
+    match resolve(s) {
+        Yaml.Str(_) => {}
+        _ => { return false }
+    }
+    if n > 3 { return true }
+    // YAML 1.1's booleans, which its readers would take for one
+    return match s {
+        "y" | "Y" | "yes" | "Yes" | "YES" | "n" | "N" | "no" | "No" | "NO" => false
+        "on" | "On" | "ON" | "off" | "Off" | "OFF" => false
+        _ => true
+    }
+}
+
+// What `to_string` writes, `parse` reads back as the same value.
+#test
+fun write_round_trip() {
+    let v = Yaml.Map([
+        ("name", Yaml.Str("demo")),
+        ("count", Yaml.Int(-3i64)),
+        ("ratio", Yaml.Float(0.25)),
+        ("flags", Yaml.List([Yaml.Bool(true), Yaml.Null, Yaml.Str("no"), Yaml.Str("0x10")])),
+        ("nested", Yaml.List([Yaml.Map([("a", Yaml.List([]))]), Yaml.List([Yaml.Str("x"), Yaml.Map([])])])),
+        ("text", Yaml.Str(" lead, \"quote\"\n\ttab \\ é\u{85}\u{2028}")),
+        ("1", Yaml.Str("key that looks like a number")),
+        ("deep", Yaml.Map([("deeper", Yaml.Map([("deepest", Yaml.Str("- not a list"))]))])),
+    ])
+    match parse(to_string(v)) {
+        Ok(back) => assert(back == v, to_string(v))
+        Err(e) => assert(false, f"{e}\n{to_string(v)}")
+    }
+}
+
+// --- Building and reading values --------------------------------------------------
+
+// The value of `key` in a map (the only one: a map's keys are unique); None
+// if `v` isn't a map or has no such key.
+#test(Yaml.Map([("a", Yaml.Int(1i64))]), "a")[Some(Yaml.Int(1i64))]
+#test(Yaml.Map([("a", Yaml.Int(1i64))]), "b")[None]
+#test(Yaml.List([]), "a")[None]
+pub fun field(v: Yaml, key: str) -> Option<Yaml> {
+    match v {
+        Yaml.Map(es) => {
+            for e in es {
+                if e.0 == key { return Some(e.1) }
+            }
+        }
+        _ => {}
+    }
+    return None
+}
+
+impl Yaml {
+    // The integer, if this is an `Int`.
+    #test(Yaml.Int(5i64))[Some(5i64)]
+    #test(Yaml.Float(5.0))[None]
+    fun as_int(self) -> Option<int64> {
+        return match self {
+            Yaml.Int(n) => Some(n)
+            _ => None
+        }
+    }
+
+    // The number, if this is a `Float` or an `Int`.
+    #test(Yaml.Float(2.5))[Some(2.5)]
+    #test(Yaml.Int(2i64))[Some(2.0)]
+    #test(Yaml.Null)[None]
+    fun as_float(self) -> Option<float64> {
+        return match self {
+            Yaml.Float(f) => Some(f)
+            Yaml.Int(n) => Some(n as float64)
+            _ => None
+        }
+    }
+
+    // The string, if this is a `Str`.
+    #test(Yaml.Str("a"))[Some("a")]
+    #test(Yaml.Int(1i64))[None]
+    fun as_str(self) -> Option<str> {
+        return match self {
+            Yaml.Str(s) => Some(s)
+            _ => None
+        }
+    }
+
+    // The truth value, if this is a `Bool`.
+    #test(Yaml.Bool(false))[Some(false)]
+    #test(Yaml.Str("false"))[None]
+    fun as_bool(self) -> Option<bool> {
+        return match self {
+            Yaml.Bool(b) => Some(b)
+            _ => None
+        }
+    }
+
+    // The items, if this is a `List`.
+    #test(Yaml.List([Yaml.Null]))[Some([Yaml.Null])]
+    #test(Yaml.Map([]))[None]
+    fun as_list(self) -> Option<[Yaml]> {
+        return match self {
+            Yaml.List(items) => Some(items)
+            _ => None
+        }
+    }
+
+    // The entries in order, if this is a `Map`.
+    #test(Yaml.Map([("k", Yaml.Int(1i64))]))[Some([("k", Yaml.Int(1i64))])]
+    #test(Yaml.List([]))[None]
+    fun as_map(self) -> Option<[(str, Yaml)]> {
+        return match self {
+            Yaml.Map(es) => Some(es)
+            _ => None
+        }
+    }
+}
+
+// --- std.json's values ----------------------------------------------------------
+
+// `v` as a JSON value: a list is an `Array`, a map an `Object`, the rest the
+// same.
+#test(Yaml.Map([("a", Yaml.List([Yaml.Int(1i64), Yaml.Float(0.5), Yaml.Null, Yaml.Bool(true), Yaml.Str("s")]))]))[Json.Object([("a", Json.Array([Json.Int(1i64), Json.Float(0.5), Json.Null, Json.Bool(true), Json.Str("s")]))])]
+pub fun to_json(v: Yaml) -> Json {
+    return match v {
+        Yaml.Null => Json.Null
+        Yaml.Bool(b) => Json.Bool(b)
+        Yaml.Int(n) => Json.Int(n)
+        Yaml.Float(f) => Json.Float(f)
+        Yaml.Str(s) => Json.Str(s)
+        Yaml.List(xs) => Json.Array(xs.map((x: Yaml) => to_json(x)))
+        Yaml.Map(es) => Json.Object(es.map((e: (str, Yaml)) => (e.0, to_json(e.1))))
+    }
+}
+
+// A JSON value as a YAML value. A JSON object may repeat a key, which a YAML
+// map can't: `to_string` writes both, and `parse` refuses the text.
+#test(Json.Array([Json.Object([("k", Json.Str("v"))]), Json.Int(2i64), Json.Float(1.5), Json.Bool(false), Json.Null]))[Yaml.List([Yaml.Map([("k", Yaml.Str("v"))]), Yaml.Int(2i64), Yaml.Float(1.5), Yaml.Bool(false), Yaml.Null])]
+pub fun from_json(j: Json) -> Yaml {
+    return match j {
+        Json.Null => Yaml.Null
+        Json.Bool(b) => Yaml.Bool(b)
+        Json.Int(n) => Yaml.Int(n)
+        Json.Float(f) => Yaml.Float(f)
+        Json.Str(s) => Yaml.Str(s)
+        Json.Array(xs) => Yaml.List(xs.map((x: Json) => from_json(x)))
+        Json.Object(es) => Yaml.Map(es.map((e: (str, Json)) => (e.0, from_json(e.1))))
+    }
+}
+
+// --- More cases -------------------------------------------------------------------
+
+// `text` parsed and written as JSON, or the error (for the #test cases).
+#test("a: b\n  c\n\n  d\ne: 'it''s'\n")["{\"a\":\"b c\\nd\",\"e\":\"it's\"}"] // folded plain lines
+#test("- \"a\\tb\\x41\\u00e9\\U0001F600\\\n  c\"\n- \"x\n\n  y\"\n")["[\"a\\tbAé😀c\",\"x\\ny\"]"]
+#test("{a: 1, b: [2, 3], 'c': , d}")["{\"a\":1,\"b\":[2,3],\"c\":null,\"d\":null}"]
+#test("[a: 1, \"b\":2, {c: d}, ]")["[{\"a\":1},{\"b\":2},{\"c\":\"d\"}]"]
+#test("k:\n- a\n- b\nl: x\n")["{\"k\":[\"a\",\"b\"],\"l\":\"x\"}"] // a sequence at its key's indentation
+#test("- - a\n  - b\n- c: d\n  e: f\n")["[[\"a\",\"b\"],{\"c\":\"d\",\"e\":\"f\"}]"] // compact nesting
+#test("a: |\n  x\n   y\n\n  z\nb: >\n  folded\n  text\n\n  next\n   kept\nc: |-\n  s\n\nd: |+\n  k\n\n")["{\"a\":\"x\\n y\\n\\nz\\n\",\"b\":\"folded text\\nnext\\n kept\\n\",\"c\":\"s\",\"d\":\"k\\n\\n\"}"]
+#test("a: |2\n   x\n")["{\"a\":\" x\\n\"}"] // an indentation indicator
+#test("a: 1 # note\n# line\nb: '#not'\n")["{\"a\":1,\"b\":\"#not\"}"]
+#test(": v\n")["{\"\":\"v\"}"] // an empty key
+#test("a:\n")["{\"a\":null}"]
+#test("--- 3\n...\n")["3"]
+#test("a: 0x10\nb: .nan\nc: -.INF\n")["{\"a\":16,\"b\":NaN,\"c\":-Infinity}"]
+#test("[a, b")["1:1: a flow collection without its closing bracket"]
+#test("[a b c, d e]")["[\"a b c\",\"d e\"]"]
+#test("{a: 1 b}")["{\"a\":\"1 b\"}"] // spaces inside a plain scalar
+#test("{a: \"1\" b}")["1:9: ',' or the closing bracket expected in a flow collection"]
+#test("[a]: b")["1:1: a collection as a key is not supported"]
+#test("? a\n: b\n")["1:1: explicit keys ('?') are not supported"]
+#test("- a\nb: c\n")["2:1: an unexpected character"]
+#test("a:\n\t- b\n")["2:2: a tab in indentation"]
+#test("\"a\\q\"")["1:3: an invalid escape in a double-quoted scalar"]
+#test("a: |x\n")["1:5: an invalid block scalar header"]
+#test("a: 1\n b: 2\n")["1:4: an implicit key on more than one line"] // "1 b" is the key
+#test("a\nb: c")["1:1: an implicit key on more than one line"]
+#test("key\nother")["\"key other\""]
+#test("--- a\n--- b\n")["2:1: multiple documents are not supported"]
+#test("a: 1\nb\nc: 2\n")["2:1: a key without ':' in a block mapping"]
+fun json_text(text: str) -> str {
+    return match parse(text) {
+        Ok(v) => json_m.to_string(to_json(v))
+        Err(e) => f"{e}"
+    }
+}
+
+// Nesting deeper than the limit is an error, not a crash.
+#test
+fun nesting_limit() {
+    let ok = "[".repeat(100) + "]".repeat(100)
+    let deep = "[".repeat(101) + "]".repeat(101)
+    match parse(ok) {
+        Ok(_) => {}
+        Err(e) => assert(false, f"{e}")
+    }
+    match parse(deep) {
+        Ok(_) => assert(false, "parsed")
+        Err(e) => assert(e.kind == YamlErrorKind.TooDeep, f"{e}")
+    }
+    match parse("- ".repeat(100) + "x") {
+        Ok(_) => {}
+        Err(e) => assert(false, f"{e}")
+    }
+    match parse("- ".repeat(101) + "x") {
+        Ok(_) => assert(false, "parsed")
+        Err(e) => assert(e.kind == YamlErrorKind.TooDeep, f"{e}")
+    }
+}
