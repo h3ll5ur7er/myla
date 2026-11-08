@@ -1,0 +1,390 @@
+// std.uuid: universally unique identifiers, RFC 9562 (MYLA-337).
+//
+// A `Uuid` is 128 bits, kept as two `uint64`s, the first eight bytes in `hi`
+// (big-endian, as the text reads). Its text is the canonical 8-4-4-4-12 form
+// in lowercase hex, `017f22e2-79b0-7cc3-98c4-dc0c0c07398f`.
+//
+// - Version 4 is random: 122 random bits, with the version (4 bits) and the
+//   variant (2 bits, `10`) in their places.
+// - Version 7 is a Unix time in milliseconds in the first 48 bits, then the
+//   version, 12 random bits, the variant and 62 random bits. UUIDs made in
+//   later milliseconds sort after earlier ones, as bytes, as text and with
+//   `cmp`; within one millisecond their order is random.
+//
+// `v4()` and `v7()` take the random bits from the system's entropy and v7's
+// time from the wall clock (`std.time`). A `Generator` takes them from an
+// `Rng` of `std.random` and v7's time from its caller, so a seeded one makes
+// the same UUIDs on every run, for tests.
+
+import std.random as random
+import std.time as time
+
+// A UUID: the first eight bytes in `hi`, the last eight in `lo`.
+#derive(Eq, Hash)
+pub struct Uuid {
+    hi: uint64,
+    lo: uint64,
+}
+
+// Why a text or a list of bytes isn't a UUID.
+#derive(Eq)
+pub enum UuidError {
+    // the text has this many bytes, not 36
+    Length(int),
+    // not a hex digit, or not the hyphen, at this byte offset
+    Syntax(int),
+    // the list has this many bytes, not 16
+    ByteLength(int),
+}
+
+impl UuidError {
+    // The reason in words.
+    #test(UuidError.Length(5))["a UUID has 36 characters, not 5"]
+    #test(UuidError.Syntax(8))["bad UUID at byte 8"]
+    #test(UuidError.ByteLength(3))["a UUID has 16 bytes, not 3"]
+    fun message(self) -> str {
+        return match self {
+            Length(n) => f"a UUID has 36 characters, not {n}"
+            Syntax(at) => f"bad UUID at byte {at}"
+            ByteLength(n) => f"a UUID has 16 bytes, not {n}"
+        }
+    }
+}
+
+impl Format for UuidError {
+    fun format(self, spec: str) -> str {
+        return self.message()
+    }
+}
+
+// The variant's bits, `10`, at the top of `lo`.
+const VARIANT: uint64 = 0x8000000000000000
+const VARIANT_MASK: uint64 = 0x3fffffffffffffff
+// The largest Unix time in milliseconds that 48 bits hold, in the year 10889.
+const MAX_MS: int64 = 0xffffffffffff
+
+// The nil UUID, every bit 0.
+#test()[Uuid { hi: 0u64, lo: 0u64 }]
+pub fun nil() -> Uuid {
+    return Uuid { hi: 0, lo: 0 }
+}
+
+// The max UUID, every bit 1.
+#test()[Uuid { hi: 0xffffffffffffffffu64, lo: 0xffffffffffffffffu64 }]
+pub fun max() -> Uuid {
+    return Uuid { hi: 0xffffffffffffffff, lo: 0xffffffffffffffff }
+}
+
+// A version 4 UUID of the random bits in `a` and `b`; the bits where the
+// version and the variant go are dropped. RFC 9562's example (A.3):
+#test(0x919108f752d1f320u64, 0x5bacf847db4148a8u64)[Uuid { hi: 0x919108f752d14320u64, lo: 0x9bacf847db4148a8u64 }]
+fun v4_of(a: uint64, b: uint64) -> Uuid {
+    return Uuid { hi: (a & 0xffffffffffff0fff) | 0x4000, lo: (b & VARIANT_MASK) | VARIANT }
+}
+
+// A version 7 UUID of the time `ms` (0 to MAX_MS) and the random bits in `a`
+// (the low 12) and `b` (the low 62). RFC 9562's example (A.6):
+#test(1645557742000i64, 0xcc3u64, 0x18c4dc0c0c07398fu64)[Uuid { hi: 0x017f22e279b07cc3u64, lo: 0x98c4dc0c0c07398fu64 }]
+fun v7_of(ms: int64, a: uint64, b: uint64) -> Uuid {
+    return Uuid { hi: ((ms as uint64) << 16) | 0x7000 | (a & 0xfff), lo: (b & VARIANT_MASK) | VARIANT }
+}
+
+// The words of `b[at:at + 8]`, big-endian.
+#test([1u8, 2u8, 3u8, 4u8, 5u8, 6u8, 7u8, 8u8, 9u8], 1)[0x0203040506070809u64]
+fun word(b: [uint8], at: int) -> uint64 {
+    var w: uint64 = 0
+    for i in 0..8 {
+        w = (w << 8) | b[at + i] as uint64
+    }
+    return w
+}
+
+// 16 bytes of the system's entropy as two words. A system that gives none is
+// a failure.
+fun os_words(name: str) -> (uint64, uint64) {
+    let b = __random_bytes(16)
+    if b.len() != 16 {
+        panic(f"{name}: the system gave no random bytes")
+    }
+    return (word(b, 0), word(b, 8))
+}
+
+// A random UUID, version 4, from the system's entropy.
+pub fun v4() -> Uuid {
+    let (a, b) = os_words("v4")
+    return v4_of(a, b)
+}
+
+// A UUID of the time now, version 7: the wall clock's Unix time in
+// milliseconds and random bits from the system's entropy. A clock before
+// 1970 is a failure.
+pub fun v7() -> Uuid {
+    let t = time.now_utc()
+    let ms = t.to_unix() * 1000 + (t.nanosecond / 1000000) as int64
+    check_ms(ms)
+    let (a, b) = os_words("v7")
+    return v7_of(ms, a, b)
+}
+
+fun check_ms(ms: int64) {
+    if ms < 0 || ms > MAX_MS {
+        panic(f"v7: the time {ms} ms is outside 0 to {MAX_MS}")
+    }
+}
+
+// A source of UUIDs whose random bits come from `rng`.
+pub struct Generator {
+    rng: random.Rng,
+}
+
+// A generator drawing from `rng`: `generator(random.seeded(1))` makes the
+// same UUIDs on every run, `generator(random.from_os())` others each time.
+pub fun generator(rng: random.Rng) -> Generator {
+    return Generator { rng: rng }
+}
+
+impl Generator {
+    // A random UUID, version 4, of two numbers of the generator's `Rng`.
+    #test(generator(random.seeded(1)))[Uuid { hi: 0xb3f2af6d0fc740c5u64, lo: 0x853b559647364ceau64 }]
+    fun v4(var self) -> Uuid {
+        let a = self.rng.next_u64()
+        let b = self.rng.next_u64()
+        return v4_of(a, b)
+    }
+
+    // A UUID of the Unix time `unix_ms` in milliseconds, version 7, and two
+    // numbers of the generator's `Rng`. A time outside 0 to 2^48 - 1 (the
+    // year 10889) is a failure.
+    #test(generator(random.seeded(1)), 1645557742000i64)[Uuid { hi: 0x017f22e279b070c5u64, lo: 0x853b559647364ceau64 }]
+    #test(generator(random.seeded(1)), -1i64)[panic("v7: the time -1 ms is outside 0 to 281474976710655")]
+    #test(generator(random.seeded(1)), 281474976710656i64)[panic("v7: the time 281474976710656 ms is outside 0 to 281474976710655")]
+    fun v7(var self, unix_ms: int64) -> Uuid {
+        check_ms(unix_ms)
+        let a = self.rng.next_u64()
+        let b = self.rng.next_u64()
+        return v7_of(unix_ms, a, b)
+    }
+}
+
+// --- reading and writing --------------------------------------------------------
+
+const HEX: str = "0123456789abcdef"
+
+// The value of the hex digit `c`, in either case; 16 for any other byte.
+#test('7')[7u64]
+#test('a')[10u64]
+#test('F')[15u64]
+#test('g')[16u64]
+fun hex_value(c: uint8) -> uint64 {
+    if c >= '0' && c <= '9' { return (c - '0') as uint64 }
+    if c >= 'a' && c <= 'f' { return (c - 'a') as uint64 + 10 }
+    if c >= 'A' && c <= 'F' { return (c - 'A') as uint64 + 10 }
+    return 16
+}
+
+// The UUID in the text `s`, in the canonical 8-4-4-4-12 form, the hex
+// digits in either case. Nothing else is read: no braces, no `urn:uuid:`
+// and no form without the hyphens.
+#test("017f22e2-79b0-7cc3-98c4-dc0c0c07398f")[Ok(Uuid { hi: 0x017f22e279b07cc3u64, lo: 0x98c4dc0c0c07398fu64 })]
+#test("919108F7-52D1-4320-9BAC-F847DB4148A8")[Ok(Uuid { hi: 0x919108f752d14320u64, lo: 0x9bacf847db4148a8u64 })]
+#test("00000000-0000-0000-0000-000000000000")[Ok(Uuid { hi: 0u64, lo: 0u64 })]
+#test("ffffffff-ffff-ffff-ffff-ffffffffffff")[Ok(Uuid { hi: 0xffffffffffffffffu64, lo: 0xffffffffffffffffu64 })]
+#test("")[Err(UuidError.Length(0))]
+#test("017f22e279b07cc398c4dc0c0c07398f")[Err(UuidError.Length(32))]
+#test("{017f22e2-79b0-7cc3-98c4-dc0c0c07398f}")[Err(UuidError.Length(38))]
+#test("017f22e2_79b0-7cc3-98c4-dc0c0c07398f")[Err(UuidError.Syntax(8))]
+#test("017f22e2-79b0-7cc3-98c4-dc0c0c07398g")[Err(UuidError.Syntax(35))]
+#test("017f22e2-79b0-7cc3-98c4-dc0c0c07398-")[Err(UuidError.Syntax(35))]
+#test("-17f22e2-79b0-7cc3-98c4-dc0c0c07398f")[Err(UuidError.Syntax(0))]
+pub fun parse(s: str) -> Result<Uuid, UuidError> {
+    if s.len() != 36 {
+        return Err(UuidError.Length(s.len()))
+    }
+    var hi: uint64 = 0
+    var lo: uint64 = 0
+    var k = 0
+    for i in 0..36 {
+        if i == 8 || i == 13 || i == 18 || i == 23 {
+            if s[i] != '-' {
+                return Err(UuidError.Syntax(i))
+            }
+            continue
+        }
+        let d = hex_value(s[i])
+        if d == 16 {
+            return Err(UuidError.Syntax(i))
+        }
+        if k < 16 {
+            hi = (hi << 4) | d
+        } else {
+            lo = (lo << 4) | d
+        }
+        k += 1
+    }
+    return Ok(Uuid { hi: hi, lo: lo })
+}
+
+// The UUID of the 16 bytes `b`, in their order (`u.bytes()` gives them).
+#test([0x01u8, 0x7fu8, 0x22u8, 0xe2u8, 0x79u8, 0xb0u8, 0x7cu8, 0xc3u8, 0x98u8, 0xc4u8, 0xdcu8, 0x0cu8, 0x0cu8, 0x07u8, 0x39u8, 0x8fu8])[Ok(Uuid { hi: 0x017f22e279b07cc3u64, lo: 0x98c4dc0c0c07398fu64 })]
+#test([1u8, 2u8])[Err(UuidError.ByteLength(2))]
+pub fun from_bytes(b: [uint8]) -> Result<Uuid, UuidError> {
+    if b.len() != 16 {
+        return Err(UuidError.ByteLength(b.len()))
+    }
+    return Ok(Uuid { hi: word(b, 0), lo: word(b, 8) })
+}
+
+impl Uuid {
+    // The canonical text: 8-4-4-4-12 lowercase hex digits.
+    #test(Uuid { hi: 0x017f22e279b07cc3u64, lo: 0x98c4dc0c0c07398fu64 })["017f22e2-79b0-7cc3-98c4-dc0c0c07398f"]
+    #test(Uuid { hi: 0u64, lo: 0u64 })["00000000-0000-0000-0000-000000000000"]
+    #test(Uuid { hi: 0xffffffffffffffffu64, lo: 0xffffffffffffffffu64 })["ffffffff-ffff-ffff-ffff-ffffffffffff"]
+    fun to_str(self) -> str {
+        var sb = StringBuilder()
+        for i in 0..32 {
+            if i == 8 || i == 12 || i == 16 || i == 20 {
+                sb.append_byte('-')
+            }
+            let w = if i < 16 { self.hi } else { self.lo }
+            let d = (w >> ((15 - i % 16) * 4) as uint64) & 15
+            sb.append_byte(HEX[d as int])
+        }
+        return sb.build()
+    }
+
+    // The 16 bytes, `hi`'s first, each word's most significant byte first.
+    #test(Uuid { hi: 0x0102030405060708u64, lo: 0x090a0b0c0d0e0f10u64 })[[1u8, 2u8, 3u8, 4u8, 5u8, 6u8, 7u8, 8u8, 9u8, 10u8, 11u8, 12u8, 13u8, 14u8, 15u8, 16u8]]
+    fun bytes(self) -> [uint8] {
+        var out: [uint8] = []
+        for i in 0..16 {
+            let w = if i < 8 { self.hi } else { self.lo }
+            out.push(((w >> ((7 - i % 8) * 8) as uint64) & 0xff) as uint8)
+        }
+        return out
+    }
+
+    // The version, the four bits after the first 12 of the third group: 4
+    // for a random UUID, 7 for one of a time; 0 for the nil UUID, 15 for the
+    // max one.
+    #test(Uuid { hi: 0x017f22e279b07cc3u64, lo: 0x98c4dc0c0c07398fu64 })[7]
+    #test(Uuid { hi: 0x919108f752d14320u64, lo: 0x9bacf847db4148a8u64 })[4]
+    #test(Uuid { hi: 0u64, lo: 0u64 })[0]
+    fun version(self) -> int {
+        return ((self.hi >> 12) & 15) as int
+    }
+
+    // The Unix time in milliseconds of a version 7 UUID; `None` for another
+    // version.
+    #test(Uuid { hi: 0x017f22e279b07cc3u64, lo: 0x98c4dc0c0c07398fu64 })[Some(1645557742000i64)]
+    #test(Uuid { hi: 0x919108f752d14320u64, lo: 0x9bacf847db4148a8u64 })[None]
+    fun unix_ms(self) -> Option<int64> {
+        if self.version() != 7 {
+            return None
+        }
+        return Some((self.hi >> 16) as int64)
+    }
+}
+
+// The canonical text, `to_str`; the spec is ignored.
+impl Format for Uuid {
+    #test(Uuid { hi: 0x919108f752d14320u64, lo: 0x9bacf847db4148a8u64 }, "")["919108f7-52d1-4320-9bac-f847db4148a8"]
+    fun format(self, spec: str) -> str {
+        return self.to_str()
+    }
+}
+
+// The order of the bytes, which is the order of the texts too: -1, 0 or 1.
+impl Ord for Uuid {
+    #test(Uuid { hi: 1u64, lo: 0xffffffffffffffffu64 }, Uuid { hi: 2u64, lo: 0u64 })[-1]
+    #test(Uuid { hi: 0xffffffffffffffffu64, lo: 0u64 }, Uuid { hi: 1u64, lo: 0u64 })[1]
+    #test(Uuid { hi: 5u64, lo: 0x8000000000000000u64 }, Uuid { hi: 5u64, lo: 1u64 })[1]
+    #test(Uuid { hi: 5u64, lo: 1u64 }, Uuid { hi: 5u64, lo: 1u64 })[0]
+    fun cmp(self, other: Uuid) -> int {
+        if self.hi != other.hi {
+            return if self.hi < other.hi { -1 } else { 1 }
+        }
+        if self.lo != other.lo {
+            return if self.lo < other.lo { -1 } else { 1 }
+        }
+        return 0
+    }
+}
+
+// --- tests -------------------------------------------------------------------
+// The UUIDs of the system's entropy and the clock differ on every run, and
+// a generator's are many, so these are test functions (D162).
+
+fun is_rfc_variant(u: Uuid) -> bool {
+    return u.lo >> 62 == 2
+}
+
+// Whether `r` is `Ok(u)`.
+fun reads_back(r: Result<Uuid, UuidError>, u: Uuid) -> bool {
+    return match r {
+        Ok(v) => v == u
+        Err(_) => false
+    }
+}
+
+// The time of a version 7 UUID; -1 for another version.
+fun ms_of(u: Uuid) -> int64 {
+    return match u.unix_ms() {
+        Some(m) => m
+        None => -1i64
+    }
+}
+
+#test
+fun v4_from_the_system() {
+    let a = v4()
+    let b = v4()
+    assert(a.version() == 4 && b.version() == 4, "version 4")
+    assert(is_rfc_variant(a) && is_rfc_variant(b), "the variant of RFC 9562")
+    assert(a != b, "two random UUIDs (2^-122 to fail)")
+    assert(reads_back(parse(a.to_str()), a), "the text reads back")
+    assert(reads_back(from_bytes(a.bytes()), a), "the bytes read back")
+}
+
+#test
+fun v7_from_the_clock() {
+    let t = time.now_utc()
+    let before = t.to_unix() * 1000 + (t.nanosecond / 1000000) as int64
+    let a = v7()
+    let b = v7()
+    assert(a.version() == 7 && is_rfc_variant(a), "version 7, RFC 9562's variant")
+    let ms = ms_of(a)
+    assert(ms >= before && ms < before + 60000, "the time now")
+    assert(a != b, "two UUIDs of one millisecond differ")
+    assert(a.to_str().len() == 36, "the canonical text")
+}
+
+#test
+fun generator_v7_sorts_by_time() {
+    var g = generator(random.seeded(2))
+    var prev = g.v7(0)
+    for ms in 1..200 {
+        let u = g.v7(ms as int64 * 1000)
+        assert(prev.cmp(u) == -1 && u.cmp(prev) == 1, "a later millisecond sorts after")
+        assert(prev.to_str() < u.to_str(), "and so does its text")
+        assert(ms_of(u) == ms as int64 * 1000, "the time reads back")
+        prev = u
+    }
+    assert(ms_of(g.v7(MAX_MS)) == MAX_MS, "the last millisecond 48 bits hold")
+}
+
+#test
+fun generator_is_seeded() {
+    var g = generator(random.seeded(1))
+    let a = g.v4()
+    let b = g.v4()
+    assert(a.to_str() == "b3f2af6d-0fc7-40c5-853b-559647364cea", "the first of seed 1")
+    assert(b.to_str() == "92f89756-082a-4514-a42e-1c7bc266a3a7", "the second")
+    var h = generator(random.seeded(1))
+    assert(h.v4() == a, "the same seed, the same UUIDs")
+    for k in 0..100 {
+        let u = g.v4()
+        assert(u.version() == 4 && is_rfc_variant(u), "version and variant")
+        assert(reads_back(parse(u.to_str()), u), "the text reads back")
+        assert(reads_back(from_bytes(u.bytes()), u), "the bytes read back")
+    }
+}
