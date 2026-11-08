@@ -1,0 +1,25 @@
+//~ type error: type 'Words' does not satisfy the bound 'I: Iterator<int32>' required by 'total': it implements 'Iterator<str>'
+//~ span: total(words)
+// A bound naming a generic trait with its arguments (D171) holds the
+// argument to the trait's arguments of its one impl (D55): `Words` is an
+// iterator of strings, not of integers.
+struct Words {
+    s: str,
+}
+
+impl Iterator<str> for Words {
+    fun next(var self) -> Option<str> {
+        return None
+    }
+}
+
+fun total<I: Iterator<int>>(it: I) -> int {
+    var s = 0
+    for x in it { s += x }
+    return s
+}
+
+fun main() {
+    let words = Words { s: "a b" }
+    print(total(words))
+}

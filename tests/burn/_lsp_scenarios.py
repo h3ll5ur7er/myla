@@ -443,6 +443,18 @@ class LspRequestScenarios(LspRequestHelpers):
         self.assertEqual(hover(1, 12), "```myla\nB(int)\n```")
         self.assertIsNone(hover(4, 6))                     # `return`
 
+    def test_a_bound_with_type_arguments_and_a_loop_over_an_iterator(self):
+        # D171: a bound naming a generic trait with its arguments, and the
+        # variable of a `for` over an iterator, typed by its `next`
+        uri = self.open("struct P { x: int }\nstruct It { n: int }\n"
+                        "impl Iterator<P> for It {\n    fun next(var self) -> Option<P> {\n        return None\n    }\n}\n"
+                        "fun first<I: Iterator<P>>(it: I) -> int {\n    return 0\n}\n"
+                        "fun main() {\n    for p in (It { n: 1 }) {\n        print(p.x)\n    }\n}\n")
+        h = self.at("textDocument/hover", uri, 7, 5)
+        self.assertEqual(h["contents"]["value"], "```myla\nfun first<I: Iterator<P>>(it: I) -> int\n```")
+        self.assertEqual(self.labels(uri, 12, 16), {"x"})
+        self.assertEqual(self.at("textDocument/definition", uri, 7, 22), {"uri": uri, "range": rng(0, 7, 8)})
+
     # -- completion ------------------------------------------------------------
 
     def labels(self, uri, line, character):

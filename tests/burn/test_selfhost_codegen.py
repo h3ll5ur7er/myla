@@ -668,6 +668,9 @@ SUPERSEDED: dict[str, str] = {
         "parse error: expected variable name, found '='\n  --> {dir}/lib.my:7:9\n  |\n7 |     let = 2\n  |         ^\n\n"
         "error: aborting due to 3 previous errors"),
     "newline_token": "type error: unknown name 'x'\n  --> {dir}/main.my:3:11\n  |\n3 |     print(x)\n  |           ^",
+    # D171: `for` loops over strings, ranges and iterators too, and says so
+    "error_at_module_member": ("type error: `for ... in` requires a list, a map, a string, a range or an Iterator, found 'int32'\n"
+                               "  --> {dir}/main.my:3:14\n  |\n3 |     for x in lib.N {\n  |              ^^^^^"),
 }
 
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)

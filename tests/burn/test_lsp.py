@@ -681,7 +681,10 @@ class TestResolutionCorpus(unittest.TestCase):
                         if parts[-1] != "global" and parts[-1] != "module":
                             self.assertEqual(parts[4], path, line)
                             dl, dc = parts[5].split(":")
-                            self.assertLess((int(dl), int(dc)), pos, line)
+                            # a bound may name a type parameter declared after
+                            # it in the same list, `<I: Iterator<T>, T>` (D171)
+                            if not (parts[-1] == "typeparam" and int(dl) == pos[0]):
+                                self.assertLess((int(dl), int(dc)), pos, line)
                 with open(path, encoding="utf-8") as fh:
                     text = fh.read()
                 source_lines = text.splitlines()

@@ -1,0 +1,10 @@
+//~ type error: trait 'Iterator' expects 1 type argument(s) in the bound 'I: Iterator', got 0 (write 'I: Iterator<T>')
+// A bound naming a generic trait gives its arguments, as an impl does
+// (D171): `I: Iterator<T>`, not `I: Iterator`.
+fun count<I: Iterator>(it: I) -> int {
+    return 0
+}
+
+fun main() {
+    print(1)
+}

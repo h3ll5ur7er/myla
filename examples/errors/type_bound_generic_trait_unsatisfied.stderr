@@ -1,0 +1,5 @@
+type error: type 'Words' does not satisfy the bound 'I: Iterator<int32>' required by 'total': it implements 'Iterator<str>'
+  --> examples/errors/type_bound_generic_trait_unsatisfied.my:24:16
+   |
+24 |     print(total(words))
+   |           ^^^^^^^^^^^^

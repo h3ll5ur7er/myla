@@ -204,6 +204,377 @@ fun main() {
     print(b)
 }
 """,
+    # D171, MYLA-380: the prelude's Iterator<T>, bounds naming a generic trait
+    # with its arguments, `for` over an iterator
+    "iterators": """// The prelude's `Iterator<T>` (D171, MYLA-380): a user iterator, generic
+// adapters with bounded impls (`impl<I: Iterator<T>, T, U> Iterator<U> for
+// Map<I, T, U>`), `for` over them with `break`, `continue` and `return`, a
+// copied iterator keeping its own position, bounded generic functions and a
+// method, and a `T` that only the bound's impl fixes (D55)
+struct Countdown {
+    n: int,
+}
+
+impl Iterator<int> for Countdown {
+    fun next(var self) -> Option<int> {
+        if self.n == 0 { return None }
+        self.n -= 1
+        return Some(self.n + 1)
+    }
+}
+
+struct Upto {
+    i: int,
+    stop: int,
+}
+
+impl Iterator<int> for Upto {
+    fun next(var self) -> Option<int> {
+        if self.i >= self.stop { return None }
+        self.i += 1
+        return Some(self.i - 1)
+    }
+}
+
+fun upto(a: int, b: int) -> Upto {
+    return Upto { i: a, stop: b }
+}
+
+struct Map<I, T, U> {
+    inner: I,
+    f: (T) -> U,
+}
+
+impl<I: Iterator<T>, T, U> Iterator<U> for Map<I, T, U> {
+    fun next(var self) -> Option<U> {
+        return match self.inner.next() {
+            Some(v) => Some(self.f(v))
+            None => None
+        }
+    }
+}
+
+struct Filter<I, T> {
+    inner: I,
+    keep: (T) -> bool,
+}
+
+impl<I: Iterator<T>, T> Iterator<T> for Filter<I, T> {
+    fun next(var self) -> Option<T> {
+        while let Some(v) = self.inner.next() {
+            if self.keep(v) { return Some(v) }
+        }
+        return None
+    }
+}
+
+fun map<I: Iterator<T>, T, U>(it: I, f: (T) -> U) -> Map<I, T, U> {
+    return Map { inner: it, f: f }
+}
+
+fun filter<I: Iterator<T>, T>(it: I, keep: (T) -> bool) -> Filter<I, T> {
+    return Filter { inner: it, keep: keep }
+}
+
+struct ListIter<T> {
+    xs: [T],
+    i: int,
+}
+
+impl<T> Iterator<T> for ListIter<T> {
+    fun next(var self) -> Option<T> {
+        if self.i >= self.xs.len() { return None }
+        self.i += 1
+        return Some(self.xs[self.i - 1])
+    }
+}
+
+fun iter_of<T>(xs: [T]) -> ListIter<T> {
+    return ListIter { xs: xs, i: 0 }
+}
+
+// The words of a string, each a new string
+struct Words {
+    s: str,
+    i: int,
+}
+
+impl Iterator<str> for Words {
+    fun next(var self) -> Option<str> {
+        while self.i < self.s.len() && self.s[self.i] == ' ' { self.i += 1 }
+        if self.i >= self.s.len() { return None }
+        let start = self.i
+        while self.i < self.s.len() && self.s[self.i] != ' ' { self.i += 1 }
+        return Some(self.s[start:self.i])
+    }
+}
+
+fun words(s: str) -> Words {
+    return Words { s: s, i: 0 }
+}
+
+fun total<I: Iterator<int>>(it: I) -> int {
+    var s = 0
+    for x in it { s += x }
+    return s
+}
+
+// `T` is fixed by `I`'s one impl of `Iterator` (D55): nothing else names it
+fun count<I: Iterator<T>, T>(it: I) -> int {
+    var n = 0
+    var c = it
+    while let Some(_) = c.next() { n += 1 }
+    return n
+}
+
+fun to_list<I: Iterator<T>, T>(it: I) -> [T] {
+    var out: [T] = []
+    for x in it { out.push(x) }
+    return out
+}
+
+fun first_over<I: Iterator<int>>(it: I, limit: int) -> Option<int> {
+    for x in it {
+        if x > limit { return Some(x) }
+    }
+    return None
+}
+
+struct Acc {
+    sum: int,
+}
+
+impl Acc {
+    fun add_all<I: Iterator<int>>(var self, it: I) {
+        for x in it { self.sum += x }
+    }
+}
+
+fun main() {
+    for x in (Countdown { n: 3 }) { print(x) }
+    print(total(upto(0, 5)))
+    print(total(Countdown { n: 4 }))
+    // an adapter over an adapter, with break and continue
+    let evens = filter(map(upto(0, 20), (x: int) => x * 3), (x: int) => x % 2 == 0)
+    for x in evens {
+        if x == 6 { continue }
+        if x > 40 { break }
+        print(x)
+    }
+    print(total(evens))
+    print(count(evens))
+    print(count(words("one two  three ")))
+    // a copy keeps its own position; `for` loops over a copy
+    var a = Countdown { n: 5 }
+    let first = a.next().unwrap_or(-1)
+    var b = a
+    let second = b.next().unwrap_or(-1)
+    print(f"{first} {second} {a.next().unwrap_or(-1)} {b.next().unwrap_or(-1)}")
+    for x in a {
+        print(f"in the loop {x}")
+        break
+    }
+    print(a.next().unwrap_or(-1))
+    // strings through the adapters
+    let long = filter(words("a quick brown fox jumps"), (w: str) => w.len() > 3)
+    print(to_list(long).join(","))
+    let lens = to_list(map(words("ab cde f"), (w: str) => w.len()))
+    print(lens.len())
+    for w in map(words("x yy zzz"), (w: str) => w + "!") { print(w) }
+    // a generic iterator over a list's elements
+    for s in iter_of(["p", "q"]) { print(s) }
+    print(total(iter_of([10, 20, 30])))
+    // nested loops, a return from inside one, a lambda, a method's bound
+    var pairs = 0
+    for i in upto(0, 4) {
+        for j in upto(0, i) { pairs += j + 1 }
+    }
+    print(pairs)
+    print(first_over(Countdown { n: 9 }, 6).unwrap_or(-1))
+    print(first_over(Countdown { n: 3 }, 6).unwrap_or(-1))
+    let sum_to = (n: int) => total(upto(0, n + 1))
+    print(sum_to(10))
+    var acc = Acc { sum: 1 }
+    acc.add_all(Countdown { n: 3 })
+    acc.add_all(iter_of([100]))
+    print(acc.sum)
+    // ranges, lists, maps and strings keep their own loops
+    var t = 0
+    for i in 0..3 { t += i }
+    for x in [4, 5] { t += x }
+    for k in ["k": 1] { t += k.len() }
+    for c in "ab" { t += c as int }
+    print(t)
+}
+""",
+    "iterators_async": """// `for` over an iterator in an async function (D171, MYLA-380): an `await`
+// in the body, `break` and `continue`, and a loop without an `await`
+import std.task as task
+
+struct Upto {
+    i: int,
+    stop: int,
+}
+
+impl Iterator<int> for Upto {
+    fun next(var self) -> Option<int> {
+        if self.i >= self.stop { return None }
+        self.i += 1
+        return Some(self.i - 1)
+    }
+}
+
+async fun double(x: int) -> int {
+    await task.yield()
+    return x * 2
+}
+
+async fun sum_doubled(n: int) -> int {
+    var s = 0
+    for x in (Upto { i: 0, stop: n }) {
+        if x == 2 { continue }
+        if x == 6 { break }
+        s += await double(x)
+    }
+    return s
+}
+
+async fun plain(n: int) -> int {
+    var s = 0
+    for x in (Upto { i: 0, stop: n }) { s += x }
+    return s + await double(1)
+}
+
+#main
+async fun main() {
+    async let a = sum_doubled(10)
+    async let b = plain(4)
+    print(await a)
+    print(await b)
+    print(await sum_doubled(4))
+}
+""",
+    "iterator_adapters": """// Adapters over adapters (D171, MYLA-380): a chain whose `next` calls its
+// parts', a lambda whose parameter only the bound types, `for _`, a
+// `T: Add` beside `I: Iterator<T>`, a loop over a field, twice, a `defer`
+// in the body, a lambda with a loop
+struct Upto {
+    i: int,
+    stop: int,
+}
+
+impl Iterator<int> for Upto {
+    fun next(var self) -> Option<int> {
+        if self.i >= self.stop { return None }
+        self.i += 1
+        return Some(self.i - 1)
+    }
+}
+
+fun upto(a: int, b: int) -> Upto {
+    return Upto { i: a, stop: b }
+}
+
+struct Map<I, T, U> {
+    inner: I,
+    f: (T) -> U,
+}
+
+impl<I: Iterator<T>, T, U> Iterator<U> for Map<I, T, U> {
+    fun next(var self) -> Option<U> {
+        return match self.inner.next() {
+            Some(v) => Some(self.f(v))
+            None => None
+        }
+    }
+}
+
+fun map<I: Iterator<T>, T, U>(it: I, f: (T) -> U) -> Map<I, T, U> {
+    return Map { inner: it, f: f }
+}
+
+// a chain whose own loop goes over its parts
+struct Chain<A, B, T> {
+    a: A,
+    b: B,
+    first: bool,
+}
+
+impl<A: Iterator<T>, B: Iterator<T>, T> Iterator<T> for Chain<A, B, T> {
+    fun next(var self) -> Option<T> {
+        if self.first {
+            match self.a.next() {
+                Some(v) => { return Some(v) },
+                None => { self.first = false },
+            }
+        }
+        return self.b.next()
+    }
+}
+
+fun chain<A: Iterator<T>, B: Iterator<T>, T>(a: A, b: B) -> Chain<A, B, T> {
+    return Chain { a: a, b: b, first: true }
+}
+
+// an iterator of strings
+struct Steps {
+    n: int,
+}
+
+impl Iterator<str> for Steps {
+    fun next(var self) -> Option<str> {
+        if self.n == 0 { return None }
+        self.n -= 1
+        return Some(f"step {self.n + 1}")
+    }
+}
+
+fun sum_all<I: Iterator<T>, T: Add>(it: I, zero: T) -> T {
+    var s = zero
+    for x in it { s = s + x }
+    return s
+}
+
+struct Holder {
+    it: Upto,
+}
+
+impl Holder {
+    fun twice(self) -> int {
+        var n = 0
+        for x in self.it { n += x }
+        for x in self.it { n += x }
+        return n
+    }
+}
+
+fun main() {
+    // a lambda whose parameter's type only the bound gives
+    for x in map(upto(0, 3), (x) => x * 10) { print(x) }
+    for _ in upto(0, 2) { print("tick") }
+    for s in chain(upto(0, 2), upto(7, 9)) { print(s) }
+    for s in chain(map(upto(1, 3), (n) => f"<{n}>"), Steps { n: 2 }) { print(s) }
+    print(sum_all(upto(1, 5), 0))
+    print(sum_all(map(upto(1, 4), (n) => n as float * 0.5), 0.0))
+    print(Holder { it: upto(0, 4) }.twice())
+    var steps = Steps { n: 3 }
+    for s in steps { print(s) }
+    print(steps.next().unwrap_or("none"))
+    let f = (n: int) => {
+        var t = 0
+        for x in upto(0, n) { t += x }
+        return t
+    }
+    print(f(5))
+    var count = 0
+    for x in upto(0, 10) {
+        defer { count += 1 }
+        if x % 3 == 0 { continue }
+        if x == 8 { break }
+    }
+    print(count)
+}
+""",
     # `<` `<=` `>` `>=` on strings, byte by byte (unsigned) as list_dir sorts,
     # past whole words of eight, and `str` is `Ord`: sort, sorted,
     # sort_unstable, binary_search, a generic `T: Ord`, a Heap<str> (MYLA-318)
@@ -4034,6 +4405,66 @@ STRESS_LOOPCTL_SRC = (
 )
 
 
+# MYLA-380: a million pipelines of new strings through a generic adapter,
+# with `continue`, `break` and a `return` from inside a loop over an
+# iterator: a missed drop of the iterator, of what `next` gives or of the
+# adapter's results would exhaust the arena
+STRESS_ITERATORS_SRC = """struct ListIter<T> {
+    xs: [T],
+    i: int,
+}
+
+impl<T> Iterator<T> for ListIter<T> {
+    fun next(var self) -> Option<T> {
+        if self.i >= self.xs.len() { return None }
+        self.i += 1
+        return Some(self.xs[self.i - 1])
+    }
+}
+
+struct Map<I, T, U> {
+    inner: I,
+    f: (T) -> U,
+}
+
+impl<I: Iterator<T>, T, U> Iterator<U> for Map<I, T, U> {
+    fun next(var self) -> Option<U> {
+        return match self.inner.next() {
+            Some(v) => Some(self.f(v))
+            None => None
+        }
+    }
+}
+
+fun make(n: int, k: int) -> [str] {
+    var out: [str] = []
+    for i in 0..n { out.push(f"item-{i}-{k}-padding") }
+    return out
+}
+
+fun first_long<I: Iterator<str>>(it: I) -> int {
+    for s in it {
+        if s.len() > 22 { return s.len() }
+    }
+    return 0
+}
+
+fun main() {
+    var total = 0
+    for k in 0..1000000 {
+        let words = Map { inner: ListIter { xs: make(8, k), i: 0 }, f: (s: str) => s + "!" }
+        for w in words {
+            if w.len() % 2 == 0 { continue }
+            total += w.len()
+            if total % 5 == 0 { break }
+        }
+        total += first_long(words)
+    }
+    print(total)
+}
+"""
+
+
 # MYLA-105: strings churned through every ownership path the IR lowers (an
 # owned temporary per concatenation, reassignment in a loop, an early return
 # with an owner in scope, struct fields, a match on a string, a break): a
@@ -4842,6 +5273,21 @@ class TestCompilerParity(unittest.TestCase):
         expected = sum((i if i > 1 else 5) % 3 + i % 7 + 3 for i in range(1000000))
         self.assertEqual(out.strip(), str(expected))
 
+    def test_iterators_release_what_they_yield(self):
+        out, code = build_and_run(STRESS_ITERATORS_SRC, timeout=60)
+        self.assertEqual(code, 0, "arena exhausted: a loop over an iterator leaked")
+        total = 0
+        for k in range(1000000):
+            words = [f"item-{i}-{k}-padding!" for i in range(8)]
+            for w in words:
+                if len(w) % 2 == 0:
+                    continue
+                total += len(w)
+                if total % 5 == 0:
+                    break
+            total += next((len(w) for w in words if len(w) > 22), 0)
+        self.assertEqual(out.strip(), str(total))
+
     def test_large_cells_of_new_sizes_are_reused(self):
         out, code = build_and_run(STRESS_LARGE_SIZES_SRC, timeout=60)
         self.assertEqual(code, 0, "arena exhausted — large cells were not reused")
@@ -5017,6 +5463,10 @@ PINNED = {
     # MYLA-318: new; native code gives the same
     # MYLA-340's lane: the interpreter waited forever, natively it returned
     "wait_with_no_descriptor": 'before\nafter\n2\n',
+    # MYLA-380: new
+    "iterators": '3\n2\n1\n10\n10\n0\n12\n18\n24\n30\n36\n270\n10\n3\n5 4 4 3\nin the loop 3\n3\nquick,brown,jumps\n3\nx!\nyy!\nzzz!\np\nq\n60\n10\n9\n-1\n55\n107\n208\n',
+    "iterators_async": '26\n8\n8\n',
+    "iterator_adapters": '0\n10\n20\ntick\ntick\n0\n1\n7\n8\n<1>\n<2>\nstep 2\nstep 1\n10\n3\n12\nstep 3\nstep 2\nstep 1\nstep 3\n10\n9\n',
     # MYLA-367: new; native code gave "undefined reference to 'myla_Box.eq'"
     "operators_of_generic_impls": 'true\ntrue\nfalse\ntrue\nfalse\ntrue\ntrue\n<a> <42> <s>\n<a>\n',
     "string_ordering": 'true true false false\ntrue true false false\nfalse false true true\ntrue true false false\nfalse true false true\nfalse true false true\ntrue true false false\nfalse false true true\nfalse false true true\ntrue true false false\ntrue true false false\ntrue true false false\n,Apple,apple,apples,banana,fig,pear,z,é\n,Apple,apple,apples,banana,fig,pear,z,é\ntrue\na,b,b,c,d\n5\nlime\na,c,m,x\ntrue\na,b\n',

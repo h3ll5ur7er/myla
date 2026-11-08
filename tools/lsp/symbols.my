@@ -329,6 +329,8 @@ fun type_params_str(tps: [TypeParam]) -> str {
         for b in tp.bounds {
             if j == 0 { sb.append(": ") } else { sb.append(" + ") }
             sb.append(b)
+            // a generic trait's arguments, `I: Iterator<T>` (D171)
+            if j < tp.bound_args.len() && tp.bound_args[j].len() > 0 { sb.append("<" + type_list(tp.bound_args[j]) + ">") }
             j = j + 1
         }
         i = i + 1

@@ -67,7 +67,8 @@ variant      = IDENT ( "(" type ( "," type )* ","? ")" )? ;
 fun_decl     = "async"? "fun" IDENT generics? "(" NL* ( param NL* ( "," NL* param NL* )* ( "," NL* )? )? ")" ( "->" type )? block ;
 param        = IDENT ":" type ( "=" expression )? ;   (* a default: D136 *)
 generics     = "<" generic ( "," generic )* ","? ">" ;
-generic      = IDENT ( ":" IDENT ( "+" IDENT )* )? ;
+generic      = IDENT ( ":" trait_bound ( "+" trait_bound )* )? ;
+trait_bound  = IDENT type_args? ;   (* a generic trait with its arguments, I: Iterator<T>: D171 *)
 type_params  = "<" IDENT ( "," IDENT )* ","? ">" ;
 
 impl_decl    = "impl" generics? ( type | named_type "for" type ) "{" SEP* ( method SEP* )* "}" ;
@@ -204,7 +205,7 @@ field_pattern = IDENT ( ":" pattern )? ;
 - **Struct literal or block.** In `if`, `while`, `for` and `match` heads and in match guards struct literals are off, so `{` starts the body. Parentheses turn them back on, and so does a lambda's body. The tree-sitter grammar keeps both readings until one fails (a declared conflict).
 - **Parenthesis.** `( … ) =>` is a lambda (decided by scanning to the matching `)`), `(e)` is grouping, `(e,)` and `(a, b)` are tuples. In types, `(…) -> R` is a function type and `(T,)` a tuple.
 - **`<`.** In types it opens type arguments; in expressions it is a comparison, except after a name, a module's member or a method's name, where the parser tries it as a call's type arguments (D169, C#'s and Swift's rule): it keeps them when they parse as types, close with `>` and a `(` follows right away, and otherwise goes back and reads a comparison, keeping no error from the attempt. So `mk<int>()`, `m.f<A, B>(x)` and `xs.mapped<str>(f)` are calls, while `a < b`, `a < b > c` and `f(a < b, c > d)` are comparisons. Two cases read differently from before: `a < b > (c)` is a call of `a` (as a comparison it was never well typed, since a `bool` isn't ordered), and so is `f(a < b, c > (d))`, one argument: write `f(a < b, c > d)` or `f((a < b), c > (d))` for two comparisons. The tree-sitter grammar keeps both readings until one fails (a declared conflict). After a cast's type a `<` opens type arguments: `a as T < b` is a parse error.
-- **`>>`.** Two touching `>` are a shift in expressions and two closers in types.
+- **`>>`.** Two touching `>` are a shift in expressions and two closers in types, as in a bound's type arguments at the end of a list of type parameters (`fun total<I: Iterator<int>>(it: I)`, D171).
 - **Nesting.** Expressions, types, blocks and patterns nest at most 256 levels deep (`MAX_NESTING` in the parser): deeper is a parse error, `expression nested too deeply` (or `type`, `block`, `pattern`), at the token where it goes past, not a crash of the parser or the language server ([[MYLA-182]]).
 - **`|`.** Bitwise or in expressions, alternative in patterns.
 - **`.`.** `t.0` is a tuple index (a `.` followed by an integer token), `x.f` a field, `E.V` a variant, `m.f` a module member (resolved by the loader); in a type, `m.T` is a module's type (D170, resolved by the loader too).

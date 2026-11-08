@@ -92,6 +92,7 @@ fun main() {
 - `impl Trait for T` must provide exactly the trait's methods, with the same receivers and with parameter and result types equal to the signature after `Self` is replaced by `T`.
 - A type implements a trait at most once.
 - **Generic traits** (D55) take type parameters, `trait Comparable<T> { fun compare(self, other: T) -> int }`, implemented as `impl Comparable<int32> for Version`. Still at most one impl per trait and type, whatever the arguments, so calls never need overload resolution.
+- The prelude has one, `trait Iterator<T> { fun next(var self) -> Option<T> }`, which `for` loops over ([Iterators](#iterators), D171).
 - There are no trait objects and no dynamic dispatch: traits are checked at compile time and methods are called statically.
 
 ## Operator overloading
@@ -224,3 +225,79 @@ fun main() {
 ```
 
 A method a bound doesn't give is an error at the call: `type parameter 'T' has no method 'area': it has no bounds`.
+
+A bound may name a **generic trait with its arguments**, `I: Iterator<T>` or `I: Iterator<int>`, in a function's, a method's and an impl's type parameters (D171). Inside the body the trait's methods take its arguments: `it.next()` on an `I: Iterator<T>` is an `Option<T>`. At the call the argument's type must implement the trait with those arguments: its one impl (D55) gives them, so a `Words` that is an `Iterator<str>` doesn't satisfy `I: Iterator<int>` (`type 'Words' does not satisfy the bound 'I: Iterator<int32>' required by 'total': it implements 'Iterator<str>'`). The same impl **fixes a type parameter only the bound names**: in `fun count<I: Iterator<T>, T>(it: I) -> int`, the argument's type gives `I`, and `I`'s impl of `Iterator` gives `T`, for the arguments after it too, so a lambda there takes `T` without an annotation ([[Language/Generics]]). A generic trait without its arguments is an error (`trait 'Iterator' expects 1 type argument(s) in the bound 'I: Iterator', got 0 (write 'I: Iterator<T>')`), as are arguments on a trait that has none.
+
+## Iterators
+
+An iterator is a value with a `next`: it implements the prelude's `trait Iterator<T> { fun next(var self) -> Option<T> }` (D171). `for x in e` over a type that implements `Iterator<T>` is
+
+```myla fragment
+var it = e
+while let Some(x) = it.next() {
+    // the loop's body
+}
+```
+
+so the loop works on a **copy** of `e`, and `break`, `continue`, `return` and `?` in its body do what they do in that `while`. An iterator is a value like any other: `let b = a` copies its position, and `a.next()` doesn't move `b` (Swift's behaviour, not Rust's moves). Lists, maps, strings and ranges keep their own loops ([[Language/Statements#loops]]).
+
+```myla
+struct Countdown {
+    n: int,
+}
+
+impl Iterator<int> for Countdown {
+    fun next(var self) -> Option<int> {
+        if self.n == 0 { return None }
+        self.n -= 1
+        return Some(self.n + 1)
+    }
+}
+
+// An adapter: an iterator over another one, its impl bounded by the trait
+// with its arguments
+struct Map<I, T, U> {
+    inner: I,
+    f: (T) -> U,
+}
+
+impl<I: Iterator<T>, T, U> Iterator<U> for Map<I, T, U> {
+    fun next(var self) -> Option<U> {
+        return match self.inner.next() {
+            Some(v) => Some(self.f(v))
+            None => None
+        }
+    }
+}
+
+fun map<I: Iterator<T>, T, U>(it: I, f: (T) -> U) -> Map<I, T, U> {
+    return Map { inner: it, f: f }
+}
+
+fun total<I: Iterator<int>>(it: I) -> int {
+    var s = 0
+    for x in it { s += x }
+    return s
+}
+
+fun main() {
+    for x in map(Countdown { n: 3 }, (x) => x * 10) {
+        if x == 20 { continue }
+        print(x)
+    }
+    var a = Countdown { n: 5 }
+    let first = a.next().unwrap_or(0)
+    let b = a
+    print(f"{first} {total(a)} {total(b)}")
+}
+// output:
+// 30
+// 10
+// 5 10 10
+```
+
+- A type is an iterator only through an impl of `Iterator` (or, for a type parameter, its bound): a `next` method of its own isn't enough (`` `for ... in` requires a list, a map, a string, a range or an Iterator, found 'Countdown' (it needs 'impl Iterator<T> for Countdown') ``).
+- An adapter's type is a nest of generics (`Map<Countdown, int, int>`); a local needs no annotation, but a function that returns one spells it. There are no trait objects, so a list can't hold iterators of different types.
+- The checker checks the loop as the `while` above, with a hidden variable no program can name, and gives the interpreters and the code generator that loop in place of the `for` (`check_for_iterator`, `fill_in` in [[selfhost/checker.my]]): both run it as they run one written so, natively each `next` the concrete type's ([[Architecture/Monomorphization]]).
+- Interpreted, each `next` is a method call with its `var self` copied back, nested once per adapter: a lazy `Range → Map → Filter` sum ran some 19 times slower than a hand-written loop and 4 times slower than `xs.map(…).filter(…)`, where natively it ran 2.2 times slower than the loop, 4.3 times faster than the eager methods, in constant memory ([[MYLA-380]]).
+

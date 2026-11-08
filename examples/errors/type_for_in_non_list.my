@@ -1,5 +1,6 @@
 //~ type error: requires a list
-// `for v in <expr>` iterates a list; a range needs the `start..end` form.
+// `for v in <expr>` iterates a list, a map, a string or an iterator (D171);
+// a range needs the `start..end` form.
 #main
 fun main() {
     let n = 5

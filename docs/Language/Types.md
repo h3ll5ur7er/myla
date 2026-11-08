@@ -93,7 +93,13 @@ Every program has this prelude (`prelude_src` in [[selfhost/checker.my]]):
 enum Option<T> { Some(T), None }
 enum Result<T, E> { Ok(T), Err(E) }
 fun get<K: Eq + Hash, V>(m: [K: V], k: K) -> Option<V>
+trait Format { fun format(self, spec: str) -> str }
+struct Hasher { state: uint64 }
+trait Hash { fun hash(self, h: Hasher) -> Hasher }
+trait Iterator<T> { fun next(var self) -> Option<T> }
 ```
+
+(`Format`: [[Language/Collections-and-strings]]; `Hasher` and `Hash`: D163, [[Language/Methods-and-traits#hash]]; `Iterator`, which `for` loops over: D171, [[Language/Methods-and-traits#iterators]].)
 
 `Some`, `None`, `Ok` and `Err` may be used without the enum name. A bare `None` (or `Ok`/`Err`/`Some` whose type arguments can't be inferred) needs the expected type from an annotation, parameter or return type. The `?` operator propagates `None`/`Err` ([[Language/Expressions-and-operators]]).
 

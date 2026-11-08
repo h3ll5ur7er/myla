@@ -15,7 +15,7 @@ from .tokens import no_span
 from std.num import f64_literal_bits, f32_round_bits
 from std.fs import current_dir
 from .loader import Span
-from .checker import CheckErr, Checker, Type, is_builtin_value, is_raw_memory_primitive, is_platform_primitive, FuncSig, StructInfo, EnumInfo, FieldT, VariantT, Subst, subst_type, subst_get, opt_subst_type, CV, type_name, checker_on
+from .checker import CheckErr, Checker, Type, is_builtin_value, is_raw_memory_primitive, is_platform_primitive, FuncSig, StructInfo, EnumInfo, FieldT, VariantT, Subst, subst_type, subst_get, opt_subst_type, CV, type_name, checker_on, ImplArgs, impl_trait_args
 from .ir import render_func, verify, moves, IrFunc, Inst
 from .ssa import SsaStats, no_ssa_stats
 from .inline import inlinable, inline_calls, same_module, may_inline, merge_blocks
@@ -81,6 +81,7 @@ pub struct CodeGen {
     enums: [EnumInfo],
     recursive_enums: [str],
     funcs: [FuncSig],
+    impl_args: [str: ImplArgs],     // a generic trait's impls' arguments, which a bound fixes a type parameter by (D171)
     text: [str],
     rodata: [str],
     strdata: [str],                 // static `str` cells (static_str)
@@ -325,6 +326,7 @@ pub fun new_codegen(c: Checker) -> CodeGen {
         enums: c.enums,
         recursive_enums: c.recursive_enums,
         funcs: c.functions,
+        impl_args: c.impl_args,
         text: [], rodata: [], strdata: [],
         label_n: 0, str_n: 0,
         str_texts: [], str_labels: [],
@@ -2055,6 +2057,31 @@ impl CodeGen {
         match sig.ret {
             Some(rt) => { if self.has_type(call_id) { for b in unify_into(rt, self.type_of(call_id)) { sub.push(b) } } },
             None => {},
+        }
+        // a type parameter only a bound names, `T` of `I: Iterator<T>`, by
+        // `I`'s one impl of the trait (D55, D171), as the checker solved it
+        for b in sig.bounds {
+            match subst_get(sub, b.tp) {
+                Some(t) => {
+                    var j = 0
+                    while j < b.traits.len() {
+                        if b.args[j].len() > 0 {
+                            match impl_trait_args(self.impl_args, self.type_key(t), b.traits[j], t) {
+                                Some(have) => {
+                                    var k = 0
+                                    while k < have.len() && k < b.args[j].len() {
+                                        for x in unify_into(b.args[j][k], have[k]) { sub.push(x) }
+                                        k += 1
+                                    }
+                                },
+                                None => {},
+                            }
+                        }
+                        j += 1
+                    }
+                },
+                None => {},
+            }
         }
         var out: [Type] = []
         for tp in sig.type_params {

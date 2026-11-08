@@ -1,0 +1,65 @@
+// iterators.my — the prelude's `Iterator<T>` (D171).
+//
+// A type implements `trait Iterator<T> { fun next(var self) -> Option<T> }`
+// and `for x in it` loops over it: `var c = it; while let Some(x) = c.next()`.
+// An adapter wraps another iterator, its impl bounded by a generic trait
+// with its arguments (`I: Iterator<T>`); the one impl a type has (D55) fixes
+// `T`. An iterator is a value: a copy keeps its own position.
+
+struct Countdown {
+    n: int,
+}
+
+impl Iterator<int> for Countdown {
+    #test(Countdown { n: 2 })[Some(2)]
+    #test(Countdown { n: 0 })[None]
+    fun next(var self) -> Option<int> {
+        if self.n == 0 { return None }
+        self.n -= 1
+        return Some(self.n + 1)
+    }
+}
+
+// Only the values `keep` accepts
+struct Filter<I, T> {
+    inner: I,
+    keep: (T) -> bool,
+}
+
+impl<I: Iterator<T>, T> Iterator<T> for Filter<I, T> {
+    fun next(var self) -> Option<T> {
+        while let Some(v) = self.inner.next() {
+            if self.keep(v) { return Some(v) }
+        }
+        return None
+    }
+}
+
+fun total<I: Iterator<int>>(it: I) -> int {
+    var s = 0
+    for x in it { s += x }
+    return s
+}
+
+#test(5)[15]
+#test(0)[0]
+fun triangle(n: int) -> int {
+    return total(Countdown { n: n })
+}
+
+#test(10)[30]
+fun even_sum(n: int) -> int {
+    return total(Filter { inner: Countdown { n: n }, keep: (x: int) => x % 2 == 0 })
+}
+
+fun main() {
+    for x in (Countdown { n: 3 }) { print(x) }     // 3 2 1
+    print(triangle(5))                               // 15
+    print(even_sum(10))                              // 30
+    var c = Countdown { n: 4 }
+    let first = c.next().unwrap_or(0)
+    var copy = c
+    let second = copy.next().unwrap_or(0)
+    print(first + second)                            // 4 + 3
+    print(c.next().unwrap_or(0))                     // 3: the copy moved on, not `c`
+}
