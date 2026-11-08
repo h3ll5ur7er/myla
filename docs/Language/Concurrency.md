@@ -1,6 +1,6 @@
 # Concurrency
 
-> **D89 to D97, built** ([[MYLA-61]], [[MYLA-135]] to [[MYLA-150]]). The checker checks what this page describes. The interpreter runs it with tasks taking turns at each `await` (the retired Python interpreter ran a thread per task). The compiler builds every concurrent program (D91): its async functions as stackless state machines on heap frames, its tasks in parallel on a pool of OS threads, one per CPU unless the environment variable `MYLA_THREADS` says how many (at most 32; with `MYLA_THREADS=1` in the same order as the self-hosted interpreter's, see [[#Order of tasks]]), its actors with executors of their own (D92, [[Architecture/Native-backend]]). Suspension points are child tasks, actor calls, `task.yield`, `task.sleep` and `task.timeout` (D124), and natively the reads that suspend (`std.io`'s `read_line_async` and the other `*_async` reads, a process's output through `std.process.run_async`). Any number of tasks may wait on one descriptor: the poller watches it once and its input wakes them all, each reading what is there or waiting again ([[MYLA-230]]). A timer fires when a worker reaches the top of its loop: on one worker, a `task.sleep(5)` beside a task computing for 300 ms wakes after the 300 ms. On wasm32 one worker runs every task (D125 (4): `MYLA_THREADS` is ignored there, in the one-worker order) and input never suspends.
+> **D89 to D97, built** ([[MYLA-61]], [[MYLA-135]] to [[MYLA-150]]). The checker checks what this page describes. The interpreter runs it with tasks taking turns at each `await` (the retired Python interpreter ran a thread per task). The compiler builds every concurrent program (D91): its async functions as stackless state machines on heap frames, its tasks in parallel on a pool of OS threads, one per CPU unless the environment variable `MYLA_THREADS` says how many (at most 32; with `MYLA_THREADS=1` in the same order as the self-hosted interpreter's, see [[#Order of tasks]]), its actors with executors of their own (D92, [[Architecture/Native-backend]]). Suspension points are child tasks, actor calls, `task.yield`, `task.sleep` and `task.timeout` (D124), a notifier's waits ([[MYLA-387]], [[#Waiting until woken]]), and natively the reads that suspend (`std.io`'s `read_line_async` and the other `*_async` reads, a process's output through `std.process.run_async`). Any number of tasks may wait on one descriptor: the poller watches it once and its input wakes them all, each reading what is there or waiting again ([[MYLA-230]]). A timer fires when a worker reaches the top of its loop: on one worker, a `task.sleep(5)` beside a task computing for 300 ms wakes after the 300 ms. On wasm32 one worker runs every task (D125 (4): `MYLA_THREADS` is ignored there, in the one-worker order) and input never suspends.
 
 Myla's concurrency follows Swift's: `async` functions that may suspend, `await` at every suspension, structured tasks that never outlive the scope that starts them, and `actor`s, whose state only their own methods touch. Tasks run in parallel on several threads. A value crossing into another task or actor is copied, so tasks share nothing but actors (D89). How many workers a target has (one on wasm32), and whether input suspends a task there, is on [[Language/Targets]].
 
@@ -91,11 +91,70 @@ async fun run(pool: Pool) -> str {
 - `task.cancel(a)` takes the name of an `async let` of this function (`task.cancel() takes the name of an 'async let'`); a lambda in it can't cancel it (`a lambda can't cancel the child task 'a' of its function`). It sets a flag and goes on: it doesn't wait, and the child isn't stopped. It can only be called: `let stop = task.cancel` is an error (D97 (4)), since the compiler takes the call itself.
 - `task.cancelled()` is true in a task that was asked to stop, or whose parent (or theirs) was: a request reaches the whole tree below the child, its children started later too. Outside a task that was asked, and in a program without tasks, it is false.
 - `await a` still gives what the child returned, and a scope still waits for its children: whatever the child does when asked, it runs to its end, so it can give back what it holds. Cancelling a child that has ended does nothing.
-- The flag is the program's: unlike a failure (D97), it stops nothing at a suspension point, with one exception: a cancelled task's `await task.sleep(ms)` ends at once, and so does a sleep it starts later (D124), so a child asleep when asked can look at the flag without waiting out its sleep.
+- The flag is the program's: unlike a failure (D97), it stops nothing at a suspension point, with two exceptions: a cancelled task's `await task.sleep(ms)` ends at once, and so does a sleep it starts later (D124), so a child asleep when asked can look at the flag without waiting out its sleep; and so does its wait on a notifier, which gives `false` ([[#Waiting until woken]]).
 
 ### A time limit: `task.timeout`
 
 `await task.timeout(ms, f)` runs the async function value `f` as a child task and gives `Some` of its result, or `None` when `ms` milliseconds passed first (D124). At that moment the child is cancelled as `task.cancel` does it (its sleeps end), and `timeout` awaits it before it returns either way: the time limit is a request too, so a child that computes without looking at `task.cancelled()` keeps `timeout` waiting. Natively the limit is a deadline on the executor's timers, taken off when the child ends first, and not set at all when the child ended before `timeout` came to set it (on another worker); with `MYLA_TIME=virtual` the interpreter's clock moves only when every task sleeps, so a child that computes without sleeping never reaches its limit there.
+
+## Waiting until woken
+
+A task that waits for something another task does (a value put in a queue, a slot given back, a turn) parks on a **notifier** until that task wakes it ([[MYLA-387]], [[Language/Standard-library/Task#Notifiers]]). A parked task costs nothing: eight tasks parked for 2 s use no measurable CPU, where looking again every few milliseconds cost 240 ms on four workers, and it goes on as soon as it is woken.
+
+```myla
+import std.task as task
+
+actor Box {
+    value: int,
+    waiting: [task.Notifier],
+}
+
+impl Box {
+    // The value once it is set, or -1 with `me` kept to be woken: the look
+    // and the registration are one call, so no wake can come between them
+    fun take(var self, me: task.Notifier) -> int {
+        if self.value >= 0 { return self.value }
+        self.waiting.push(me)
+        return -1
+    }
+
+    fun set(var self, v: int) {
+        self.value = v
+        for n in self.waiting { n.notify_one() }
+        self.waiting = []
+    }
+}
+
+async fun reader(b: Box) -> int {
+    let me = task.notifier()
+    while true {
+        let v = await b.take(me)
+        if v >= 0 { return v }
+        let woken = await me.wait()
+    }
+    unreachable()
+}
+
+#main
+async fun main() {
+    let b = Box { value: -1, waiting: [] }
+    async let r1 = reader(b)
+    async let r2 = reader(b)
+    await task.sleep(5)
+    await b.set(42)
+    print(await r1 + await r2)
+}
+// output:
+// 84
+```
+
+- `task.notifier()` makes one. A `Notifier` is a handle, as an actor's is: a copy reaches the same notifier, so tasks share one by passing it on, and an actor's methods can keep the notifiers of the tasks waiting for it (above) and wake them.
+- `n.notify_one()` wakes the task that has waited longest; when none waits, it leaves a **permit**, which the next wait takes and ends at once. Permits add up, one per `notify_one`, so a wake that comes before the wait (the reader above may be woken between `take` and `wait`) is never lost, and every `notify_one` ends exactly one wait.
+- `n.notify_all()` wakes every task waiting now and leaves no permit. A task that looks at a condition and then waits for a broadcast takes `let l = n.listen()` before it looks and waits with `await l.wait()`, which ends at once if a `notify_all` came in between.
+- `await n.wait()` gives `true` when the task was woken; `await n.wait_timeout(ms)` gives `false` when `ms` milliseconds passed first (and with `ms <= 0` doesn't wait: whether a permit was there). A wait may end while the condition is still false, another task having got there first: the waiter looks again, in a loop.
+- A task asked to stop (D96) stops waiting at once, its wait giving `false`, and a wait it starts later doesn't wait; `task.cancelled()` tells it why. A failure elsewhere (D97) ends the program, and the tasks parked in it with it.
+- A program whose every task waits, on notifiers or on each other, with no time limit, sleeper or input left to wake one, ends with the runtime error `every task waits for another one` (status 1), natively and in the interpreter. A cycle among some tasks while others go on isn't seen: it lasts as long as they do.
+- Natively a notifier lives as long as the program, and parking and waking take the lock the executor's timers use. On one worker native code wakes tasks in the interpreter's order, so a program prints the same in both in every `MYLA_SCHED` order.
 
 ## Actors
 
@@ -170,8 +229,8 @@ The concurrency stress tests ([[Development/Concurrency-stress-tests]], [[MYLA-1
 | Shared mutation through aliases | Prevented: nothing mutable is shared but an actor, whose methods run one at a time; a lambda can't change what it captures (D93) |
 | Check-then-act | One step in a synchronous actor method; across an `await` in an async one, a warning (D95) |
 | An invariant over several objects | Holds when they live in one actor; across actors, no transaction keeps it (a limit) |
-| Deadlock over resources | Prevented: no locks, reentrant actors whose executors never block a worker (D92) |
-| Waiting cycles | Prevented: no channels, a task only awaits its own children and its earlier siblings |
+| Deadlock over resources | Prevented: no locks, reentrant actors whose executors never block a worker (D92); a task waiting on a notifier nobody will wake is the program's own (see the next row) |
+| Waiting cycles | Prevented among tasks and actors: a task only awaits its own children and its earlier siblings. Through notifiers ([[#Waiting until woken]]) a program can wait for ever; when every task waits, it ends with `every task waits for another one`, while a cycle among some tasks lasts as long as the others run |
 | A failure while siblings run | It ends the program at once: every other task stops at its next suspension point, then the failure is reported (D94, D97), wherever its parent waits; a task looping without one isn't stopped |
 | Cancellation and resource cleanup by the program | Cooperative: `task.cancel(a)` asks, the child checks `task.cancelled()` where it can stop and gives back what it holds, wherever it was asked (D96) |
 | A stale result | The program's to decide (a request number, or cancelling the old request, which checks before publishing), as everywhere |

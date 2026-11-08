@@ -240,10 +240,12 @@ pub struct Interp {
     deadlines: [Deadline],
     fired: [bool],
     fd_waits: [FdWait],
-    // MYLA-387: the notifiers, the waits on them and those parked now (as
-    // native code's `__parked`)
+    // MYLA-387: the notifiers, the waits on them (`free_waits`: the slots
+    // `__woken` gave back) and those parked now (as native code's
+    // `__parked`)
     notifs: [Notif],
     pwaits: [PWait],
+    free_waits: [int32],
     parked_waits: [int32],
     sleep_seq: int64,
     virtual_time: bool,
@@ -512,7 +514,7 @@ pub fun new_interp(c: Checker, argv: [str]) -> Interp {
         failing: false, fail_err: None, fail_code: 0,
         on_failure: (r: RtError) => false, fail_reported: false,
         depth: 0,
-        sleepers: [], deadlines: [], fired: [], fd_waits: [], notifs: [], pwaits: [], parked_waits: [], sleep_seq: 0, virtual_time: false, vclock: 0,
+        sleepers: [], deadlines: [], fired: [], fd_waits: [], notifs: [], pwaits: [], free_waits: [], parked_waits: [], sleep_seq: 0, virtual_time: false, vclock: 0,
         testing: false, defer_errs: [], captured: [], test_root: "", test_program: "",
         static_calls: c.static_calls, impl_selfs: c.static_selfs, call_types: [:], type_env: c.on_type_params,
         tparams: [], types: [], type_ix: [:], env_next: None, env_fi: -1, env_tail: None, env_tail_fi: -1,
@@ -1339,6 +1341,7 @@ impl Interp {
         self.fd_waits = []
         self.notifs = []
         self.pwaits = []
+        self.free_waits = []
         self.parked_waits = []
     }
 
@@ -1886,8 +1889,8 @@ impl Interp {
     // stop; a failure (D97) wakes every wait, which then stops.
 
     // `__notifier()`, `__notify(n, all)`, `__notify_gen(n)`, `__waiter(n,
-    // since, ms)`, `__park(w)` and `__woken(w)`, the call `e`.
-    fun notify_primitive(var self, e: Expr, nm: str, args: [Expr]) -> Value {
+    // since, ms)`, `__park(w)` and `__woken(w)`.
+    fun notify_primitive(var self, nm: str, args: [Expr]) -> Value {
         var ints: [int64] = []
         var all = false
         for a in args {
@@ -1907,24 +1910,31 @@ impl Interp {
             return Value.VUnit
         }
         if nm == "__waiter" {
-            self.pwaits.push(PWait { task: -1, n: ints[0] as int32, since: ints[1], ms: ints[2], state: 0 })
+            let w = PWait { task: -1, n: ints[0] as int32, since: ints[1], ms: ints[2], state: 0 }
+            if self.free_waits.len() > 0 {
+                let wi = self.free_waits.pop()
+                self.pwaits[wi] = w
+                return Value.VInt(wi as int64)
+            }
+            self.pwaits.push(w)
             return Value.VInt((self.pwaits.len() - 1) as int64)
         }
         if nm == "__woken" {
             let st = self.pwaits[ints[0] as int32].state
+            self.free_waits.push(ints[0] as int32)
             if st == 2 { return Value.VInt(1) }
             if st == 4 { return Value.VInt(2) }
             return Value.VInt(0)
         }
-        self.park(e, ints[0] as int32)
+        self.park(ints[0] as int32)
         return Value.VUnit
     }
 
-    // `__park(w)` (the call `e`): the running task parked on the wait `w`,
+    // `__park(w)`: the running task parked on the wait `w`,
     // or ready again at once when it needn't wait, as native code queues
     // it; outside any task nobody can wake it, so it ends at once, after
     // its time, or never (every task waits).
-    fun park(var self, e: Expr, wi: int32) {
+    fun park(var self, wi: int32) {
         let ni = self.pwaits[wi].n
         let outside = self.cur < 0 || self.cur >= self.tasks.len()
         var st = 1
@@ -3966,7 +3976,7 @@ impl Interp {
             return Value.VBool(self.cur < self.tasks.len() && self.tasks[self.cur].requested)
         }
         // std.task's notifiers (MYLA-387)
-        if is_notify_primitive(nm) { return self.notify_primitive(e, nm, args) }
+        if is_notify_primitive(nm) { return self.notify_primitive(nm, args) }
         // nothing but the turn its `await` gives (MYLA-228)
         if nm == "__yield" { return Value.VUnit }
         // the running task asleep (D124): parked until its time, which

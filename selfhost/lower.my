@@ -4601,12 +4601,13 @@ impl Lower {
             known = true
             has_result = true
         }
-        // a notifier's (MYLA-387); without tasks, `__notify` wakes nobody
-        if is_notify_primitive(nm) && nm != "__park" {
+        // a notifier's (MYLA-387); without tasks, `__notify` wakes nobody and
+        // an awaited `__park` (a statement, not `await_let`'s) can't be woken
+        if is_notify_primitive(nm) && (nm != "__park" || !cg.frames) {
             var vs: [int32] = []
             for a in args { vs.push(self.expr(cg, a)) }
-            if nm == "__notify" {
-                if cg.frames { self.rt_call(cg, -1, nm, vs) } else { self.rt_call(cg, -1, "__notify_alone", vs) }
+            if nm == "__notify" || nm == "__park" {
+                if cg.frames { self.rt_call(cg, -1, nm, vs) } else { self.rt_call(cg, -1, nm + "_alone", vs) }
                 return -1
             }
             let d = self.temp(t)
