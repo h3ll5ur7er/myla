@@ -235,10 +235,10 @@ async fun child_that_fails() {
 async fun a_childs_failure_fails_the_case() {
     defer { print("case's defer") }
     async let k = child_that_fails()
-    var i = 0
-    while i < 10 {
+    // until the child's failure stops it, at an `await` (D97): ten yields
+    // were a race natively, where the child runs on another worker
+    while true {
         await task.yield()
-        i = i + 1
     }
     print("not reached")
 }
