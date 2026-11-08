@@ -1,6 +1,6 @@
 # std.compress
 
-DEFLATE decompression, and the gzip and zlib formats around it ([[MYLA-344]]). The compressor is [[MYLA-352]].
+DEFLATE decompression ([[MYLA-344]]) and compression ([[MYLA-352]]), and the gzip and zlib formats around them. tar and zip archives are [[Language/Standard-library/Archive]].
 
 ```myla
 import std.compress as compress
@@ -59,7 +59,7 @@ Each takes the whole compressed input and gives the whole output. The input must
 | `gunzip(b: [uint8]) -> Result<[uint8], CompressError>` | The gzip data `b` (RFC 1952) decompressed: every member, one after the other. Zero bytes after a member are padding, as for `gzip` |
 | `zlib_decompress(b: [uint8]) -> Result<[uint8], CompressError>` | The zlib stream `b` (RFC 1950) decompressed |
 
-The names are the operations' usual ones; the compressor will add `deflate`, `gzip` and `zlib_compress`. A `str` read from a file is turned into bytes with `bytes.from_str` ([[Language/Standard-library/Bytes]]).
+The names are the operations' usual ones; [compressing](#compressing) has the other direction. A `str` read from a file is turned into bytes with `bytes.from_str` ([[Language/Standard-library/Bytes]]).
 
 ## Streams
 
@@ -93,6 +93,86 @@ fun main() {
 
 `io.copy` takes the decoder by value, so the caller's `d` can't say why it failed; a loop over `d.read_str(n)` can.
 
+## Compressing
+
+```myla
+import std.compress as compress
+import std.bytes as bytes
+import std.io as io
+
+fun main() {
+    let text = bytes.from_str("to be or not to be, that is the question: to be or not to be")
+    for level in [0, 1, 6, 9] {
+        print(f"level {level}: {compress.deflate(text, level).len()} bytes")
+    }
+    let gz = compress.gzip(text)
+    print(bytes.to_str(compress.gunzip(gz).unwrap_or([])))
+
+    // as a stream: what is written is compressed into the stream it owns
+    var w = compress.zlib_writer(io.memory_stream(), 9)
+    for i in 0..1000 {
+        match w.write_str(f"line {i}\n") {
+            Ok(_) => {}
+            Err(e) => print("write failed")
+        }
+    }
+    match w.finish() {
+        Ok(m) => {
+            let z = m.bytes()
+            let back = compress.zlib_decompress(z).unwrap_or([])
+            print(f"{back.len()} bytes in {z.len()}")
+        }
+        Err(e) => print("finish failed")
+    }
+}
+// output:
+// level 0: 65 bytes
+// level 1: 42 bytes
+// level 6: 41 bytes
+// level 9: 41 bytes
+// to be or not to be, that is the question: to be or not to be
+// 8890 bytes in 1985
+```
+
+The level is zlib's: 0 stores the bytes as they are, 1 is the fastest, 9 the smallest, 6 the default; a level below 0 is 6 (zlib's -1), one above 9 is 9. Compressing can't fail.
+
+| Function | Result |
+| --- | --- |
+| `deflate(b: [uint8], level: int = 6) -> [uint8]` | The raw DEFLATE stream (RFC 1951) of `b` |
+| `gzip(b: [uint8], level: int = 6) -> [uint8]` | gzip data (RFC 1952) of `b`: one member, without a name or a time (0), the system "unknown" (255) |
+| `zlib_compress(b: [uint8], level: int = 6) -> [uint8]` | The zlib stream (RFC 1950) of `b`, without a preset dictionary |
+
+An `Encoder<W>` is a `Write` stream ([[Language/Standard-library/Io#streams]]) that compresses what is written to it and writes the compressed bytes to the stream `W` it owns, so a file is compressed as it is written, whatever its length. It gathers 64 KiB of input before it compresses, and 64 KiB of output before it writes; it keeps the input of the block it is gathering and the 32 KiB window before it. What the functions make and what a writer makes of the same bytes, in pieces of any size, are the same bytes, unless it was flushed.
+
+| Item | What it is |
+| --- | --- |
+| `deflate_writer<W: Write>(w: W, level: int = 6) -> Encoder<W>` | A writer of raw DEFLATE |
+| `gzip_writer<W: Write>(w: W, level: int = 6) -> Encoder<W>` | A writer of gzip data, one member |
+| `zlib_writer<W: Write>(w: W, level: int = 6) -> Encoder<W>` | A writer of a zlib stream |
+| `e.write(b)`, `e.write_str(s)` | `Write`: the bytes taken; an error is the inner stream's |
+| `e.flush()` | `Write`: everything written so far compressed and written, ending with an empty stored block, as zlib's `Z_SYNC_FLUSH` does, so the output so far decodes to all of the input so far; then the inner stream flushed. Each flush costs a few bytes and the block it ends |
+| `e.finish() -> Result<W, IoError>` | The end of the stream (the last block, the trailer) written, and the inner stream, flushed. Nothing finishes an `Encoder` when the program ends: finish it |
+
+```myla fragment
+import std.compress as compress
+import std.io as io
+
+// The standard input, gzipped, to the standard output.
+fun main() {
+    match io.copy(io.fd_stream(0), compress.gzip_writer(io.fd_stream(1), 9)) {
+        Ok(w) => {
+            match w.finish() {
+                Ok(_) => {}
+                Err(_) => io.eprintln("write failed")
+            }
+        }
+        Err(_) => io.eprintln("write failed")
+    }
+}
+```
+
+`io.copy` flushes the writer it is given once at its end, which costs five bytes here.
+
 ## Errors
 
 `CompressError` is a bare enum (D168), with `message()` and `Format`; it is `Eq` (two `Io` errors are equal when their causes are). Corrupt input of every kind is one of them, never a panic or a hang.
@@ -124,6 +204,14 @@ Huffman codes are decoded with a table indexed by the next 10 bits: an entry giv
 
 CRC-32 and Adler-32 are std.hash's algorithms ([[Language/Standard-library/Hash#the-checksums]]), written here for now over a part of the output, with the CRC's tables kept in the decoder. A module of `std` that imports std.hash can't run its cases natively ([[MYLA-360]]), and the checksums move to a module of their own ([[MYLA-359]], D166), which this module will call.
 
+### The compressor
+
+`Deflate` is zlib's algorithm. A hash of each position's next three bytes (the top 15 bits of their product with Knuth's multiplier) heads a chain of the earlier positions with that hash, in a table of 32768 heads and one of 32768 links, by position modulo 32768. A match search walks the chain, back to 32767 bytes, as far as the level's `chain` entries (a quarter of them once a match is `good`), and stops at a match of `nice` bytes; a candidate is compared byte by byte only once its bytes at the current best length and the one before it match. Levels 1 to 3 take the longest match at each position, and put its strings into the chains only if it is short; levels 4 to 9 match lazily: a match is written only if the next position has no longer one, else its first byte is a literal and the next position's match waits in its turn. A match of three bytes more than 4096 bytes back is a literal (zlib's `TOO_FAR`). The levels' numbers are zlib's table. Unlike zlib, a chain may end at position 0, so the bytes at the very start can be matched.
+
+A block gathers 16383 symbols (a literal, or a length and a distance, each an `int32`), counting their frequencies. Then it is written in the smallest of three forms, each costed in bits: its own Huffman codes (a dynamic block), whose code-length header is run-length coded across the two codes; the fixed codes; or stored, the block's input as it is, in pieces of 65535 bytes, which is why the input of a block is kept. The codes are optimal (two queues over the sorted frequencies) until one is longer than 15 bits (7 for the code-length code); then the lengths are moved up as JPEG's Annex K.3 does, which keeps the code complete. A code of fewer than two symbols gets a second one of length 1, so every decoder takes it.
+
+A writer appends its input to the input it holds, byte by byte, and compresses it once it has 64 KiB more, leaving the 262 bytes a match search wants ahead of it; the end, or a flush, compresses the rest. Once the window and the block start more than 256 KiB into the input it holds, the input before them is dropped and the positions in the chains move down by the same multiple of 32768, so the links keep their places.
+
 ## Speed
 
 Natively on x86-64, the best of five runs, decompressing 100 MB (100,000,000 bytes) of mixed text (the repository's sources, pages and tests, repeated), compressed at level 6 to 25 MB, on a machine shared with other work:
@@ -141,8 +229,22 @@ Natively on x86-64, the best of five runs, decompressing 100 MB (100,000,000 byt
 
 So `gunzip` is about 1.2 times as slow as `gzip -d`. Most of its time goes to the bytes of back references, a list `push` each, with its check of the capacity; the checksum takes about a tenth. A stream costs the copies a `Read` implies: the inner stream's chunks, the output of each read that isn't all the decoder had, and from a descriptor the conversions between `str` and `[uint8]`.
 
+Compressing the same 100 MB, natively, the best of five runs, in memory (the program's own clock), against GNU gzip 1.12 (the whole program, `gzip -N -c < file > /dev/null`) and Python's `zlib.compress`:
+
+| Level | `gzip(b, level)` | `gzip_writer`, writes of 64 KiB | `gzip -N` | `zlib.compress` | Ratio: `gzip(b, level)` | `gzip -N` |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 | 1507 ms, 66 MB/s | 2146 ms, 47 MB/s | 1400 ms, 71 MB/s | 1110 ms, 90 MB/s | 31.07 % | 31.22 % |
+| 6 | 5068 ms, 20 MB/s | 5639 ms, 18 MB/s | 3962 ms, 25 MB/s | 3451 ms, 29 MB/s | 25.30 % | 25.32 % |
+| 9 | 12919 ms, 7.7 MB/s | 13513 ms, 7.4 MB/s | 10127 ms, 9.9 MB/s | 8815 ms, 11.3 MB/s | 25.11 % | 25.12 % |
+
+So `gzip` is 1.1 times as slow as `gzip -1` and 1.3 times as slow as `gzip -6` and `-9`, and its output is a little smaller at each level. At the lazy levels most of the time goes to the chains' walks; checking the byte before the best length too took level 6 from about 650 to about 570 ms on 10 MB. A writer costs the copy of its input into the window, a `push` a byte, and the slides.
+
 ## Tests
 
 The module's cases are vectors made by Python's `zlib` and `gzip` and by hand (the error cases and the edge cases of incomplete and empty codes, each checked to be one Python's `zlib` accepts or rejects alike, for the same reason), and test functions for the streams: read in pieces of 1 to 100 bytes from inner streams that give 1 to 100 bytes a read, back references of 32768 bytes across the window, the bit buffer given back at a trailer, and the errors. All 92 cases pass interpreted, natively, on aarch64 under qemu and on wasm32 under Node.
 
 `tests/burn/test_compress.py` compresses text, random bytes, long runs and a mix of them with `gzip -1` to `-9`, `zlib.compress` at levels 0 to 9, raw DEFLATE at every level and with each strategy, smaller windows, a low memory level and several members, and decompresses each natively with the functions, as a stream, and as a stream over 1 to 13 bytes a read in reads of 1 to 997 bytes; a few interpreted. It corrupts 400 of them (a bit flipped, a byte changed or added, the data cut short) and checks that each fails where Python fails, with Python's output where it doesn't.
+
+The compressor's cases (MYLA-352) are outputs checked against Python's `zlib` (the same bytes as zlib's where zlib's chains reach, the empty stream, stored blocks, the headers of each container), the Huffman code's lengths with and without the limit, the run-length coding of a header and the cost of a stored block; and test functions: inputs of six kinds at levels of each kind through every container and back, the sizes of the levels and of stored blocks, a writer given its input in pieces of 1 to 70000 bytes making what the functions make, and flushes. All 139 cases pass interpreted, natively, on aarch64 under qemu and on wasm32 under Node.
+
+`tests/burn/test_archive.py` compresses text, random bytes, long runs, a mix of them and matches exactly 32768 bytes back (and one byte further) at every level, in each container, with the functions and with a writer given pieces of 1 to 9973 bytes, and 3 MB of text, and decompresses each with Python's `zlib`, `gzip -d` and this module; the output may be at most 2 % bigger than zlib's at the same level (it is smaller on text).

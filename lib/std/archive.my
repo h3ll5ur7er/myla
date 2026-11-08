@@ -1,0 +1,1218 @@
+// std.archive: tar archives, read and written, and zip archives, read
+// (MYLA-352).
+//
+// tar is POSIX's ustar format. A name longer than ustar's fields hold (100
+// bytes, or a prefix of 155 and a name of 100 split at a `/`), a link
+// longer than 100 bytes, and a number too big for its octal field are
+// written in a pax extended header (typeflag `x`, POSIX.1-2001) before the
+// entry, as Python's `tarfile` and GNU tar's `--format=pax` write them.
+// Reading takes ustar, the pax headers (`x`, and the global `g`), GNU's long
+// names and links (`L`, `K`, which GNU tar's default format writes), GNU's
+// base-256 numbers, and the old v7 headers.
+//
+// zip is read from its central directory: stored and deflate entries, the
+// CRC-32 checked. ZIP64, encryption and other methods are errors.
+//
+// Entry names use `/` inside an archive, whatever the system. Extracting is
+// the caller's work, through std.path and std.fs; `safe_path` says whether a
+// name stays under the directory it is joined to.
+
+import std.compress as compress
+from std.compress import CompressError
+from std.io import Read, Write, from_bytes, memory_stream
+from std.fs import IoError
+import std.path as path_m
+import std.time as time
+import std.hash as hash_m
+import std.option as option_m
+import std.str as str_m
+
+// Why an archive couldn't be read or written (D168: the variants carry
+// different data, so it is a bare enum).
+pub enum ArchiveError {
+    // The archive ends inside a header or an entry's data
+    Truncated,
+    // A tar header whose checksum is wrong or whose number fields aren't
+    // numbers, a pax record that isn't one; a zip record without its
+    // signature, or whose lengths point outside the archive
+    BadHeader,
+    // An entry to write whose name is empty or holds a NUL byte, or whose
+    // link holds one
+    BadName,
+    // No end of a zip central directory: not a zip archive
+    NotZip,
+    // A ZIP64 archive (more than 65535 entries, or past 4 GiB)
+    Zip64,
+    // An encrypted zip entry
+    Encrypted,
+    // A zip entry compressed by a method other than stored (0) and deflate
+    // (8): its number
+    Unsupported(int32),
+    // A zip entry's CRC-32 isn't its data's
+    ChecksumMismatch,
+    // A zip entry's data isn't as long as its directory says
+    LengthMismatch,
+    // A zip entry's deflate data that doesn't decompress
+    Compress(CompressError),
+    // `safe_path`: a name that would leave the directory
+    UnsafeName,
+    // The stream failed
+    Io(IoError),
+}
+
+impl ArchiveError {
+    // The reason in words.
+    #test(ArchiveError.Truncated)["archive ends too early"]
+    #test(ArchiveError.Unsupported(12))["unsupported compression method 12"]
+    #test(ArchiveError.Compress(CompressError.BadCode))["entry doesn't decompress: invalid code"]
+    #test(ArchiveError.Io(IoError.NotFound))["read failed: NotFound"]
+    fun message(self) -> str {
+        return match self {
+            Truncated => "archive ends too early"
+            BadHeader => "invalid header"
+            BadName => "invalid entry name"
+            NotZip => "not a zip archive"
+            Zip64 => "ZIP64 archives are not supported"
+            Encrypted => "encrypted entries are not supported"
+            Unsupported(m) => f"unsupported compression method {m}"
+            ChecksumMismatch => "checksum mismatch"
+            LengthMismatch => "length mismatch"
+            Compress(e) => f"entry doesn't decompress: {e.message()}"
+            UnsafeName => "entry name leaves the directory"
+            Io(e) => f"read failed: {io_name(e)}"
+        }
+    }
+}
+
+// Two errors are equal when they say the same (`IoError` and
+// `CompressError` have no derived `Eq`).
+impl Eq for ArchiveError {
+    fun eq(self, other: ArchiveError) -> bool {
+        return self.message() == other.message()
+    }
+}
+
+impl Format for ArchiveError {
+    // The message; the spec is ignored.
+    #test(ArchiveError.Zip64, "")["ZIP64 archives are not supported"]
+    fun format(self, spec: str) -> str {
+        return self.message()
+    }
+}
+
+// The name of an `IoError`'s cause.
+#test(IoError.Other(5))["Other(5)"]
+fun io_name(e: IoError) -> str {
+    return match e {
+        NotFound => "NotFound"
+        PermissionDenied => "PermissionDenied"
+        AlreadyExists => "AlreadyExists"
+        NotADirectory => "NotADirectory"
+        IsADirectory => "IsADirectory"
+        NotEmpty => "NotEmpty"
+        Interrupted => "Interrupted"
+        Cancelled => "Cancelled"
+        Unsupported => "Unsupported"
+        BrokenPipe => "BrokenPipe"
+        InvalidInput => "InvalidInput"
+        Other(c) => f"Other({c})"
+    }
+}
+
+// --- Entries ------------------------------------------------------------------------
+
+// What an entry is.
+#derive(Eq)
+pub enum EntryKind {
+    File,
+    Dir,
+    Symlink,
+    Hardlink,
+    // Another tar type, by its typeflag: a device (`3`, `4`), a FIFO (`6`),
+    // GNU's sparse files (`S`), …
+    Other(uint8),
+}
+
+// An entry of an archive. `name` is relative, its parts split by `/`,
+// without a `/` at its end for a directory; `mode` is the permission bits
+// (0o644); `mtime` seconds since 1970 (UTC); `link` the target of a symbolic
+// or hard link; `data` a file's bytes. zip has no owners: uid and gid are 0
+// and the names empty.
+#derive(Eq)
+pub struct Entry {
+    name: str,
+    kind: EntryKind,
+    mode: int32,
+    mtime: int64,
+    uid: int32,
+    gid: int32,
+    uname: str,
+    gname: str,
+    link: str,
+    data: [uint8],
+}
+
+// A file `name` holding `data`, mode 0o644, time 0.
+pub fun file(name: str, data: [uint8]) -> Entry {
+    return Entry {
+        name: name, kind: EntryKind.File, mode: 0o644, mtime: 0, uid: 0, gid: 0,
+        uname: "", gname: "", link: "", data: data,
+    }
+}
+
+// A directory `name`, mode 0o755.
+pub fun dir(name: str) -> Entry {
+    var e = file(name, [])
+    e.kind = EntryKind.Dir
+    e.mode = 0o755
+    return e
+}
+
+// A symbolic link `name` to `target`, mode 0o777.
+pub fun symlink(name: str, target: str) -> Entry {
+    var e = file(name, [])
+    e.kind = EntryKind.Symlink
+    e.mode = 0o777
+    e.link = target
+    return e
+}
+
+// `s` without the `/`s at its end.
+#test("a/b//")["a/b"]
+#test("/")[""]
+#test("a")["a"]
+fun no_trailing_slash(s: str) -> str {
+    var n = s.len()
+    while n > 0 && s[n - 1] == '/' { n -= 1 }
+    return s[:n]
+}
+
+// Whether an entry's name, joined to a directory, stays under it: it isn't
+// empty and holds no NUL byte, doesn't start at a root (`/`, `\`) or with a
+// drive (`C:`), and has no part `..`. `/` and `\` both split it into parts,
+// as Windows reads a path.
+#test("a/b.txt")[true]
+#test("./a/./b")[true]
+#test("a/..b/c..")[true]
+#test("")[false]
+#test("../a")[false]
+#test("a/../../b")[false]
+#test("a/..")[false]
+#test("..")[false]
+#test("a\\..\\..\\b")[false]
+#test("/etc/passwd")[false]
+#test("\\server\\share")[false]
+#test("C:/Windows")[false]
+#test("c:x")[false]
+#test("a\0b")[false]
+pub fun is_safe_name(name: str) -> bool {
+    let n = name.len()
+    if n == 0 || name[0] == '/' || name[0] == '\\' { return false }
+    if n >= 2 && name[1] == ':' && is_letter(name[0]) { return false }
+    var start = 0
+    for i in 0..n + 1 {
+        if i == n || name[i] == '/' || name[i] == '\\' {
+            if i - start == 2 && name[start] == '.' && name[start + 1] == '.' { return false }
+            start = i + 1
+        } else if name[i] == 0u8 {
+            return false
+        }
+    }
+    return true
+}
+
+fun is_letter(c: uint8) -> bool {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+}
+
+// The path of the entry `name` under the directory `dir` (std.path's
+// `join`), if the name is safe (`is_safe_name`), else `UnsafeName`.
+#test("out", "a/b.txt")[Ok("out/a/b.txt")]
+#test("out/", "d")[Ok("out/d")]
+#test("out", "../x")[Err(ArchiveError.UnsafeName)]
+#test("out", "/x")[Err(ArchiveError.UnsafeName)]
+pub fun safe_path(dir: str, name: str) -> Result<str, ArchiveError> {
+    if !is_safe_name(name) { return Err(ArchiveError.UnsafeName) }
+    return Ok(path_m.join(dir, name))
+}
+
+// --- Bytes --------------------------------------------------------------------------
+
+// The bytes of `s`.
+fun bytes_of(s: str) -> [uint8] {
+    var out: [uint8] = []
+    for i in 0..s.len() { out.push(s[i]) }
+    return out
+}
+
+// `b[from_i:to]` as a `str`.
+fun text_of(b: [uint8], from_i: int, to: int) -> str {
+    var sb = StringBuilder()
+    for i in from_i..to { sb.append_byte(b[i]) }
+    return sb.build()
+}
+
+// The bytes of `b[at:at + width]` up to the first NUL, as a `str`.
+#test([97u8, 98u8, 0u8, 99u8], 0, 4)["ab"]
+#test([97u8, 98u8, 99u8], 1, 2)["bc"]
+fun c_str(b: [uint8], at: int, width: int) -> str {
+    var end = at
+    while end < at + width && b[end] != 0u8 { end += 1 }
+    return text_of(b, at, end)
+}
+
+// The little-endian numbers of two and four bytes at `b[p]`.
+#test([1u8, 2u8], 0)[513]
+fun le16(b: [uint8], p: int) -> int {
+    return (b[p] as int) | ((b[p + 1] as int) << 8)
+}
+
+#test([1u8, 2u8, 3u8, 0x84u8], 0)[0x84030201u32]
+fun le32(b: [uint8], p: int) -> uint32 {
+    return (b[p] as uint32) | ((b[p + 1] as uint32) << 8u32) | ((b[p + 2] as uint32) << 16u32) |
+        ((b[p + 3] as uint32) << 24u32)
+}
+
+// The decimal digits of `n` (at least 0).
+#test(0)[1]
+#test(9)[1]
+#test(10)[2]
+#test(12345)[5]
+fun digits(n: int64) -> int {
+    var d = 1
+    var v = n
+    while v >= 10 {
+        v = v / 10
+        d += 1
+    }
+    return d
+}
+
+// --- tar: writing -------------------------------------------------------------------
+
+const BLOCK: int = 512
+// The largest number an octal field of 12 bytes (11 digits) and one of 8
+// bytes (7 digits) hold.
+const OCTAL_11: int64 = 8589934591
+const OCTAL_7: int64 = 2097151
+
+// A tar header being built, field after field.
+struct Header {
+    b: [uint8],
+}
+
+impl Header {
+    // The bytes of `s` in a field of `width` bytes, the rest NUL (cut to the
+    // field if longer).
+    fun text(var self, s: str, width: int) {
+        for i in 0..width {
+            if i < s.len() { self.b.push(s[i]) } else { self.b.push(0) }
+        }
+    }
+
+    // `v` in octal in a field of `width` bytes: `width - 1` digits and a NUL.
+    fun num(var self, v: int64, width: int) {
+        self.text(octal(v, width - 1), width)
+    }
+}
+
+// `v` in octal, `n` digits, zeros in front.
+#test(420, 7)["0000644"]
+#test(0, 3)["000"]
+#test(8589934591, 11)["77777777777"]
+fun octal(v: int64, n: int) -> str {
+    var d: [uint8] = []
+    var x = v
+    for i in 0..n {
+        d.push(('0' as uint8) + ((x & 7) as uint8))
+        x = x >> 3
+    }
+    var sb = StringBuilder()
+    for i in 0..n { sb.append_byte(d[n - 1 - i]) }
+    return sb.build()
+}
+
+// A pax record, `len key=value\n`, its length counting itself.
+#test("path", "abc")["12 path=abc\n"]
+#test("path", "123456")["15 path=123456\n"]
+#test("k", "1234")["9 k=1234\n"]
+#test("k", "12345")["11 k=12345\n"] // 10 bytes, and a digit more
+fun pax_record(key: str, value: str) -> str {
+    let base = key.len() + value.len() + 3
+    var n = base + digits(base as int64)
+    if digits(n as int64) > digits(base as int64) { n = base + digits(n as int64) }
+    return f"{n} {key}={value}\n"
+}
+
+// `name` as ustar's prefix and name fields: the prefix empty if it fits
+// the 100 bytes of the name, else split at a `/` into at most 155 and 100
+// bytes; None if it can't be.
+#test("a/b")[Some(("", "a/b"))]
+#test("a".repeat(100))[Some(("", "a".repeat(100)))]
+#test("a".repeat(100) + "/b")[Some(("a".repeat(100), "b"))]
+#test("a/" + "b".repeat(100))[Some(("a", "b".repeat(100)))]
+#test("a/" + "b".repeat(101))[None]
+#test("a".repeat(156) + "/b")[None]
+#test("a".repeat(101))[None]
+fun ustar_split(name: str) -> Option<(str, str)> {
+    let n = name.len()
+    if n <= 100 { return Some(("", name)) }
+    var i = n - 1
+    if i > 155 { i = 155 }
+    while i > 0 {
+        if name[i] == '/' {
+            let rest = n - i - 1
+            if rest <= 100 && rest > 0 { return Some((name[:i], name[i + 1:])) }
+            return None
+        }
+        i -= 1
+    }
+    return None
+}
+
+// The typeflag of a kind.
+#test(EntryKind.File)['0' as uint8]
+#test(EntryKind.Other(51u8))[51u8]
+fun type_flag(k: EntryKind) -> uint8 {
+    return match k {
+        File => '0'
+        Hardlink => '1'
+        Symlink => '2'
+        Dir => '5'
+        Other(c) => c
+    }
+}
+
+// A header block of `name` (and `prefix`), the type `flag`, `size` bytes
+// of data, and the rest of `e`'s fields: numbers that don't fit are 0 here
+// (a pax record has them).
+fun header_block(e: Entry, prefix: str, name: str, flag: uint8, size: int64) -> [uint8] {
+    var h = Header { b: [] }
+    h.text(name, 100)
+    h.num((e.mode & 0o7777) as int64, 8)
+    h.num(if e.uid >= 0 && (e.uid as int64) <= OCTAL_7 { e.uid as int64 } else { 0 }, 8)
+    h.num(if e.gid >= 0 && (e.gid as int64) <= OCTAL_7 { e.gid as int64 } else { 0 }, 8)
+    h.num(if size <= OCTAL_11 { size } else { 0 }, 12)
+    h.num(if e.mtime >= 0 && e.mtime <= OCTAL_11 { e.mtime } else { 0 }, 12)
+    h.text("        ", 8)           // the checksum, spaces while it is summed
+    h.b.push(flag)
+    h.text(e.link, 100)
+    h.text("ustar", 6)              // "ustar\0", version "00"
+    h.text("00", 2)
+    h.text(e.uname, 32)
+    h.text(e.gname, 32)
+    h.num(0, 8)                     // devmajor, devminor
+    h.num(0, 8)
+    h.text(prefix, 155)
+    h.text("", 12)
+    var sum = 0
+    for x in h.b { sum += x as int }
+    var b = h.b
+    let ck = octal(sum as int64, 6)
+    for i in 0..6 { b[148 + i] = ck[i] }
+    b[154] = 0
+    b[155] = ' '
+    return b
+}
+
+// The blocks of `data`: its bytes, then zeros to the end of a block.
+fun data_blocks(data: [uint8]) -> [uint8] {
+    var out = data
+    while out.len() % BLOCK != 0 { out.push(0) }
+    return out
+}
+
+// Whether `s` holds a NUL byte.
+#test("a\0")[true]
+#test("ab")[false]
+fun has_nul(s: str) -> bool {
+    for i in 0..s.len() {
+        if s[i] == 0u8 { return true }
+    }
+    return false
+}
+
+// The blocks of the entry `e`: a pax header first if a field doesn't fit
+// ustar's, its header, its data.
+fun entry_blocks(e: Entry) -> Result<[uint8], ArchiveError> {
+    if e.name.len() == 0 || has_nul(e.name) || has_nul(e.link) { return Err(ArchiveError.BadName) }
+    var name = e.name
+    if e.kind == EntryKind.Dir && !name.ends_with("/") { name = name + "/" }
+    var data = e.data
+    if e.kind == EntryKind.Dir || e.kind == EntryKind.Symlink || e.kind == EntryKind.Hardlink { data = [] }
+    let size = data.len() as int64
+    var pax = StringBuilder()
+    var prefix = ""
+    var short = name
+    match ustar_split(name) {
+        Some((p, n)) => {
+            prefix = p
+            short = n
+        }
+        None => {
+            pax.append(pax_record("path", name))
+        }
+    }
+    if e.link.len() > 100 { pax.append(pax_record("linkpath", e.link)) }
+    if size > OCTAL_11 { pax.append(pax_record("size", f"{size}")) }
+    if e.mtime < 0 || e.mtime > OCTAL_11 { pax.append(pax_record("mtime", f"{e.mtime}")) }
+    if e.uid < 0 || (e.uid as int64) > OCTAL_7 { pax.append(pax_record("uid", f"{e.uid}")) }
+    if e.gid < 0 || (e.gid as int64) > OCTAL_7 { pax.append(pax_record("gid", f"{e.gid}")) }
+    if e.uname.len() > 32 { pax.append(pax_record("uname", e.uname)) }
+    if e.gname.len() > 32 { pax.append(pax_record("gname", e.gname)) }
+    var out: [uint8] = []
+    if pax.len() > 0 {
+        let records = bytes_of(pax.build())
+        // the pax header's own name, as Python's tarfile writes it
+        let ph = file("././@PaxHeader", [])
+        out = header_block(ph, "", ph.name, 'x', records.len() as int64)
+        for x in data_blocks(records) { out.push(x) }
+    }
+    for x in header_block(e, prefix, short, type_flag(e.kind), size) { out.push(x) }
+    for x in data_blocks(data) { out.push(x) }
+    return Ok(out)
+}
+
+// A stream that writes a tar archive to the stream it owns, entry after
+// entry; `finish` ends it.
+pub struct TarWriter<W> {
+    sink: [W],
+}
+
+// A tar writer to `w`.
+pub fun tar_writer<W: Write>(w: W) -> TarWriter<W> {
+    return TarWriter { sink: [w] }
+}
+
+impl<W: Write> TarWriter<W> {
+    // `b` written to the stream.
+    fun out(var self, b: [uint8]) -> Result<(), ArchiveError> {
+        var w = self.sink.pop()
+        let r = w.write(b)
+        self.sink.push(w)
+        return match r {
+            Ok(_) => Ok(())
+            Err(e) => Err(ArchiveError.Io(e))
+        }
+    }
+
+    // The entry `e` added: `BadName` if its name is empty or holds a NUL.
+    fun add(var self, e: Entry) -> Result<(), ArchiveError> {
+        let b = entry_blocks(e)?
+        return self.out(b)
+    }
+
+    // The end of the archive, two zero blocks, written, and the stream,
+    // flushed.
+    fun finish(self) -> Result<W, ArchiveError> {
+        var me = self
+        var zero: [uint8] = []
+        for i in 0..2 * BLOCK { zero.push(0) }
+        me.out(zero)?
+        var w = me.sink.pop()
+        match w.flush() {
+            Ok(()) => {}
+            Err(e) => { return Err(ArchiveError.Io(e)) }
+        }
+        return Ok(w)
+    }
+}
+
+// The tar archive of `entries`, in their order.
+#test([])[Ok(zero_blocks(2))]
+#test([file("", [])])[Err(ArchiveError.BadName)]
+pub fun tar_write(entries: [Entry]) -> Result<[uint8], ArchiveError> {
+    var t = tar_writer(memory_stream())
+    for e in entries { t.add(e)? }
+    let m = t.finish()?
+    return Ok(m.bytes())
+}
+
+// `n` blocks of zeros.
+fun zero_blocks(n: int) -> [uint8] {
+    var out: [uint8] = []
+    for i in 0..n * BLOCK { out.push(0) }
+    return out
+}
+
+// --- tar: reading -------------------------------------------------------------------
+
+// The number in the tar field `b[at:at + width]`: octal digits between
+// spaces, up to a NUL (none: 0), or, if its first byte is 0x80 or 0xFF, the
+// rest of it in base 256, big-endian (GNU; 0xFF: negative); None if it is
+// neither.
+#test(text_bytes("0000644\0"), 0, 8)[Some(420i64)]
+#test(text_bytes("  17 \0xx"), 0, 8)[Some(15i64)]
+#test(text_bytes("\0\0\0\0"), 0, 4)[Some(0i64)]
+#test([0x80u8, 0u8, 1u8, 0u8], 0, 4)[Some(256i64)]
+#test([0xFFu8, 0xFFu8, 0xFFu8, 0xFEu8], 0, 4)[Some(-2i64)]
+#test(text_bytes("12 3\0"), 0, 5)[None]
+#test(text_bytes("0009\0"), 0, 5)[None]
+fun tar_number(b: [uint8], at: int, width: int) -> Option<int64> {
+    let first = b[at]
+    if first == 0x80u8 || first == 0xFFu8 {
+        var v: int64 = 0
+        for i in at + 1..at + width { v = (v << 8) | (b[i] as int64) }
+        if first == 0xFFu8 {
+            var top: int64 = 1
+            for i in 1..width { top = top << 8 }
+            v = v - top
+        }
+        return Some(v)
+    }
+    var end = at
+    while end < at + width && b[end] != 0u8 { end += 1 }
+    var i = at
+    while i < end && b[i] == ' ' { i += 1 }
+    var j = end
+    while j > i && b[j - 1] == ' ' { j -= 1 }
+    var v: int64 = 0
+    for k in i..j {
+        let c = b[k]
+        if c < '0' || c > '7' { return None }
+        v = v * 8 + ((c - '0') as int64)
+    }
+    return Some(v)
+}
+
+// The bytes of `s` (for the cases).
+fun text_bytes(s: str) -> [uint8] {
+    return bytes_of(s)
+}
+
+// Whether the header's checksum is right: the sum of its bytes, the
+// checksum's field taken as spaces, unsigned or signed (old tars).
+fun checksum_ok(h: [uint8]) -> bool {
+    let want = match tar_number(h, 148, 8) {
+        Some(v) => v
+        None => { return false }
+    }
+    var unsigned: int64 = 0
+    var signed: int64 = 0
+    for i in 0..BLOCK {
+        var x = h[i] as int64
+        if i >= 148 && i < 156 { x = 32 }
+        unsigned += x
+        if x >= 128 { signed += x - 256 } else { signed += x }
+    }
+    return want == unsigned || want == signed
+}
+
+// The records of a pax header, `len key=value\n` each.
+#test(text_bytes("12 path=abc\n8 a=1=2\n"))[Ok([("path", "abc"), ("a", "1=2")])]
+#test(text_bytes("12 path=abc"))[Err(ArchiveError.BadHeader)]
+#test(text_bytes("x path=abc\n"))[Err(ArchiveError.BadHeader)]
+#test(text_bytes("5 abc\n"))[Err(ArchiveError.BadHeader)]
+fun pax_records(b: [uint8]) -> Result<[(str, str)], ArchiveError> {
+    var out: [(str, str)] = []
+    var p = 0
+    let n = b.len()
+    while p < n {
+        if b[p] == 0u8 { break }       // padding
+        var len = 0
+        var q = p
+        while q < n && b[q] >= '0' && b[q] <= '9' && len < 100000000 {
+            len = len * 10 + ((b[q] - '0') as int)
+            q += 1
+        }
+        if q == p || q >= n || b[q] != ' ' || len <= q - p + 1 || p + len > n || b[p + len - 1] != '\n' {
+            return Err(ArchiveError.BadHeader)
+        }
+        var eq = q + 1
+        while eq < p + len - 1 && b[eq] != '=' { eq += 1 }
+        if eq >= p + len - 1 { return Err(ArchiveError.BadHeader) }
+        out.push((text_of(b, q + 1, eq), text_of(b, eq + 1, p + len - 1)))
+        p += len
+    }
+    return Ok(out)
+}
+
+// The integer part of a pax number (`1700000000.25`, `-3`), or None.
+#test("1700000000.25")[Some(1700000000i64)]
+#test("-3")[Some(-3i64)]
+#test("12")[Some(12i64)]
+#test("")[None]
+#test("1x")[None]
+fun pax_int(s: str) -> Option<int64> {
+    var i = 0
+    var neg = false
+    if s.len() > 0 && s[0] == '-' {
+        neg = true
+        i = 1
+    }
+    let start = i
+    var v: int64 = 0
+    while i < s.len() && s[i] >= '0' && s[i] <= '9' {
+        v = v * 10 + ((s[i] - '0') as int64)
+        i += 1
+    }
+    if i == start || (i < s.len() && s[i] != '.') { return None }
+    if neg { return Some(-v) }
+    return Some(v)
+}
+
+// A stream of the entries of the tar archive its inner stream reads, an
+// `Iterator`: `Some(Ok(entry))` for each, `Some(Err(e))` once if the
+// archive is broken, then None.
+pub struct TarReader<R> {
+    src: [R],
+    buf: [uint8],       // read and not yet used: buf[pos:]
+    pos: int,
+    eof: bool,          // the inner stream has ended
+    done: bool,         // the end of the archive, or an error, given
+    global: [str: str], // the global pax records so far
+}
+
+// A reader of the tar archive `r`.
+pub fun tar_reader<R: Read>(r: R) -> TarReader<R> {
+    return TarReader { src: [r], buf: [], pos: 0, eof: false, done: false, global: [:] }
+}
+
+impl<R: Read> TarReader<R> {
+    // The next `n` bytes, fewer only at the end of the inner stream.
+    fun take(var self, n: int) -> Result<[uint8], ArchiveError> {
+        if self.buf.len() - self.pos < n && !self.eof {
+            var buf = self.buf[self.pos:]
+            self.buf = []
+            self.pos = 0
+            while buf.len() < n && !self.eof {
+                var r = self.src.pop()
+                let got = r.read(65536)
+                self.src.push(r)
+                match got {
+                    Ok(b) => {
+                        if b.len() == 0 { self.eof = true }
+                        if buf.len() == 0 { buf = b } else { for x in b { buf.push(x) } }
+                    }
+                    Err(e) => {
+                        self.buf = buf
+                        return Err(ArchiveError.Io(e))
+                    }
+                }
+            }
+            self.buf = buf
+        }
+        var end = self.pos + n
+        if end > self.buf.len() { end = self.buf.len() }
+        let out = self.buf[self.pos:end]
+        self.pos = end
+        return Ok(out)
+    }
+
+    // The data of `size` bytes after a header, and the padding to its
+    // block (which may be missing at the end of the stream).
+    fun data(var self, size: int64) -> Result<[uint8], ArchiveError> {
+        if size < 0 || size > 0x7FFFFFFF { return Err(ArchiveError.BadHeader) }
+        let n = size as int
+        let d = self.take(n)?
+        if d.len() < n { return Err(ArchiveError.Truncated) }
+        let pad = (BLOCK - n % BLOCK) % BLOCK
+        let p = self.take(pad)?
+        return Ok(d)
+    }
+
+    // The next entry, None at the end of the archive.
+    fun next_entry(var self) -> Result<Option<Entry>, ArchiveError> {
+        var pax: [str: str] = [:]
+        for k in self.global.keys() { pax[k] = self.global[k] }
+        var long_name = ""
+        var long_link = ""
+        while true {
+            let h = self.take(BLOCK)?
+            if h.len() == 0 { return Ok(None) }
+            if h.len() < BLOCK { return Err(ArchiveError.Truncated) }
+            var zero = true
+            for x in h {
+                if x != 0u8 {
+                    zero = false
+                    break
+                }
+            }
+            if zero { return Ok(None) }
+            if !checksum_ok(h) { return Err(ArchiveError.BadHeader) }
+            let flag = h[156]
+            var size = match tar_number(h, 124, 12) {
+                Some(v) => v
+                None => { return Err(ArchiveError.BadHeader) }
+            }
+            if flag == 'x' || flag == 'g' {
+                let records = pax_records(self.data(size)?)?
+                for kv in records {
+                    let (k, v) = kv
+                    pax[k] = v
+                    if flag == 'g' { self.global[k] = v }
+                }
+                continue
+            }
+            if flag == 'L' || flag == 'K' {
+                let d = self.data(size)?
+                let s = c_str(d, 0, d.len())
+                if flag == 'L' { long_name = s } else { long_link = s }
+                continue
+            }
+            if pax.contains("size") {
+                size = match pax_int(pax["size"]) {
+                    Some(v) => v
+                    None => { return Err(ArchiveError.BadHeader) }
+                }
+            }
+            var name = c_str(h, 0, 100)
+            let posix = h[257] == 'u' && h[258] == 's' && h[259] == 't' && h[260] == 'a' && h[261] == 'r' &&
+                h[262] == 0u8
+            if posix && h[345] != 0u8 { name = c_str(h, 345, 155) + "/" + name }
+            if long_name.len() > 0 { name = long_name }
+            if pax.contains("path") { name = pax["path"] }
+            var link = c_str(h, 157, 100)
+            if long_link.len() > 0 { link = long_link }
+            if pax.contains("linkpath") { link = pax["linkpath"] }
+            var kind = match flag {
+                0 | '0' | '7' => EntryKind.File
+                '1' => EntryKind.Hardlink
+                '2' => EntryKind.Symlink
+                '5' => EntryKind.Dir
+                _ => EntryKind.Other(flag)
+            }
+            if flag == 0u8 && name.ends_with("/") { kind = EntryKind.Dir }
+            // only files, and the types tar doesn't know, have data
+            var data: [uint8] = []
+            let has_data = match kind {
+                File => true
+                Other(c) => c != '3' && c != '4' && c != '6'
+                _ => false
+            }
+            if has_data { data = self.data(size)? }
+            var e = file(name, data)
+            if kind == EntryKind.Dir { e.name = no_trailing_slash(name) }
+            e.kind = kind
+            e.link = link
+            e.mode = (tar_number(h, 100, 8).unwrap_or(0) & 0o7777) as int32
+            e.uid = tar_number(h, 108, 8).unwrap_or(0) as int32
+            e.gid = tar_number(h, 116, 8).unwrap_or(0) as int32
+            e.mtime = tar_number(h, 136, 12).unwrap_or(0)
+            e.uname = c_str(h, 265, 32)
+            e.gname = c_str(h, 297, 32)
+            if pax.contains("mtime") { e.mtime = pax_int(pax["mtime"]).unwrap_or(e.mtime) }
+            if pax.contains("uid") { e.uid = pax_int(pax["uid"]).unwrap_or(e.uid as int64) as int32 }
+            if pax.contains("gid") { e.gid = pax_int(pax["gid"]).unwrap_or(e.gid as int64) as int32 }
+            if pax.contains("uname") { e.uname = pax["uname"] }
+            if pax.contains("gname") { e.gname = pax["gname"] }
+            return Ok(Some(e))
+        }
+        unreachable()
+    }
+}
+
+impl<R: Read> Iterator<Result<Entry, ArchiveError>> for TarReader<R> {
+    fun next(var self) -> Option<Result<Entry, ArchiveError>> {
+        if self.done { return None }
+        return match self.next_entry() {
+            Ok(Some(e)) => Some(Ok(e))
+            Ok(None) => {
+                self.done = true
+                None
+            }
+            Err(e) => {
+                self.done = true
+                Some(Err(e))
+            }
+        }
+    }
+}
+
+// Every entry of the tar archive `b`, or the first error.
+#test(zero_blocks(2))[Ok([])]
+#test([])[Ok([])]
+#test(zero_blocks(1)[:100])[Err(ArchiveError.Truncated)]
+pub fun tar_read(b: [uint8]) -> Result<[Entry], ArchiveError> {
+    var r = tar_reader(from_bytes(b))
+    var out: [Entry] = []
+    while let Some(e) = r.next() { out.push(e?) }
+    return Ok(out)
+}
+
+// --- zip ----------------------------------------------------------------------------
+
+// An entry of a zip archive's central directory: where its data is and how
+// it is stored, before it is read. `method` 0 is stored, 8 deflate;
+// `flags` bit 0 says it is encrypted; `size` and `csize` are its lengths
+// whole and compressed; `offset` is where its local header starts.
+#derive(Eq)
+pub struct ZipFile {
+    name: str,
+    kind: EntryKind,
+    mode: int32,
+    mtime: int64,
+    method: int32,
+    flags: int32,
+    crc: uint32,
+    csize: int64,
+    size: int64,
+    offset: int64,
+}
+
+const ZIP_END: uint32 = 0x06054b50
+const ZIP_END64_LOCATOR: uint32 = 0x07064b50
+const ZIP_CENTRAL: uint32 = 0x02014b50
+const ZIP_LOCAL: uint32 = 0x04034b50
+
+// An MS-DOS date and time (local time, taken here as UTC) as seconds since
+// 1970; 0 if it isn't a date.
+#test(0x5721, 0x6000)[1693569600i64] // 2023-09-01 12:00:00
+#test(0, 0)[0i64]
+fun dos_time(date: int, t: int) -> int64 {
+    let d = time.datetime((date >> 9) + 1980, (date >> 5) & 15, date & 31, t >> 11, (t >> 5) & 63, (t & 31) * 2, 0)
+    return match d {
+        Ok(v) => v.to_unix()
+        Err(_) => 0
+    }
+}
+
+// The modification time of an extended-timestamp field (0x5455) among the
+// extra fields `b[from_i:to]`, if there is one.
+fun extra_mtime(b: [uint8], from_i: int, to: int) -> Option<int64> {
+    var p = from_i
+    while p + 4 <= to {
+        let id = le16(b, p)
+        let n = le16(b, p + 2)
+        if p + 4 + n > to { return None }
+        if id == 0x5455 && n >= 5 && (b[p + 4] & 1u8) != 0u8 {
+            return Some(((le32(b, p + 5) as int32) as int64))
+        }
+        p += 4 + n
+    }
+    return None
+}
+
+// The entries of the zip archive `b`, from its central directory, in its
+// order. Bytes before the archive (a self-extracting program's) are allowed.
+pub fun zip_list(b: [uint8]) -> Result<[ZipFile], ArchiveError> {
+    let n = b.len()
+    // the end of the central directory: 22 bytes and a comment
+    var e = n - 22
+    var lowest = n - 22 - 65535
+    if lowest < 0 { lowest = 0 }
+    while e >= lowest && le32(b, e) != ZIP_END { e -= 1 }
+    if e < lowest { return Err(ArchiveError.NotZip) }
+    if e >= 20 && le32(b, e - 20) == ZIP_END64_LOCATOR { return Err(ArchiveError.Zip64) }
+    let count = le16(b, e + 10)
+    let cd_size = le32(b, e + 12)
+    let cd_off = le32(b, e + 16)
+    if count == 0xFFFF || cd_size == 0xFFFFFFFFu32 || cd_off == 0xFFFFFFFFu32 { return Err(ArchiveError.Zip64) }
+    let shift = (e as int64) - (cd_size as int64) - (cd_off as int64)
+    if shift < 0 { return Err(ArchiveError.BadHeader) }
+    var q = (cd_off as int64 + shift) as int
+    var out: [ZipFile] = []
+    for i in 0..count {
+        if q + 46 > e || le32(b, q) != ZIP_CENTRAL { return Err(ArchiveError.BadHeader) }
+        let made_by = le16(b, q + 4) >> 8
+        let flags = le16(b, q + 8)
+        let method = le16(b, q + 10)
+        let crc = le32(b, q + 16)
+        let csize = le32(b, q + 20)
+        let size = le32(b, q + 24)
+        let nlen = le16(b, q + 28)
+        let elen = le16(b, q + 30)
+        let clen = le16(b, q + 32)
+        let attrs = le32(b, q + 38)
+        let off = le32(b, q + 42)
+        if csize == 0xFFFFFFFFu32 || size == 0xFFFFFFFFu32 || off == 0xFFFFFFFFu32 { return Err(ArchiveError.Zip64) }
+        let next = q + 46 + nlen + elen + clen
+        if next > e { return Err(ArchiveError.BadHeader) }
+        let raw_name = text_of(b, q + 46, q + 46 + nlen)
+        var kind = EntryKind.File
+        var mode: int32 = 0o644
+        let unix = (attrs >> 16u32) as int32
+        if made_by == 3 && unix != 0 {
+            let fmt = unix & 0o170000
+            if fmt == 0o040000 {
+                kind = EntryKind.Dir
+            } else if fmt == 0o120000 {
+                kind = EntryKind.Symlink
+            }
+            mode = unix & 0o7777
+        } else if raw_name.ends_with("/") || (attrs & 0x10u32) != 0u32 {
+            kind = EntryKind.Dir
+            mode = 0o755
+        }
+        if raw_name.ends_with("/") { kind = EntryKind.Dir }
+        var name = raw_name
+        if kind == EntryKind.Dir { name = no_trailing_slash(raw_name) }
+        let start = q + 46 + nlen
+        let mtime = extra_mtime(b, start, start + elen).unwrap_or(dos_time(le16(b, q + 14), le16(b, q + 12)))
+        out.push(ZipFile {
+            name: name, kind: kind, mode: mode, mtime: mtime, method: method, flags: flags, crc: crc,
+            csize: csize as int64, size: size as int64, offset: (off as int64) + shift,
+        })
+        q = next
+    }
+    return Ok(out)
+}
+
+// The data of the entry `f` of the zip archive `b`, decompressed, its
+// length and CRC-32 checked.
+pub fun zip_data(b: [uint8], f: ZipFile) -> Result<[uint8], ArchiveError> {
+    if (f.flags & 1) != 0 { return Err(ArchiveError.Encrypted) }
+    let n = b.len() as int64
+    if f.offset < 0 || f.csize < 0 { return Err(ArchiveError.BadHeader) }
+    if f.offset + 30 > n { return Err(ArchiveError.Truncated) }
+    let p = f.offset as int
+    if le32(b, p) != ZIP_LOCAL { return Err(ArchiveError.BadHeader) }
+    let start = (p + 30 + le16(b, p + 26) + le16(b, p + 28)) as int64
+    if start + f.csize > n { return Err(ArchiveError.Truncated) }
+    let raw = b[start as int:(start + f.csize) as int]
+    var data: [uint8] = []
+    if f.method == 0 {
+        data = raw
+    } else if f.method == 8 {
+        data = match compress.inflate(raw) {
+            Ok(d) => d
+            Err(e) => { return Err(ArchiveError.Compress(e)) }
+        }
+    } else {
+        return Err(ArchiveError.Unsupported(f.method))
+    }
+    if (data.len() as int64) != f.size { return Err(ArchiveError.LengthMismatch) }
+    if hash_m.crc32_bytes(data) != f.crc { return Err(ArchiveError.ChecksumMismatch) }
+    return Ok(data)
+}
+
+// Every entry of the zip archive `b` with its data, or the first error. A
+// symbolic link's target is its `link`.
+// Python's zipfile: "a.txt" stored, then "d/" and "d/b.txt" deflated
+// (2021-01-01 00:00, mode 0o644; the directory 0o755)
+#test(unhex("504b03041400000000000000215286a61036050000000500000005000000612e74787468656c6c6f504b010214031400" +
+    "000000000000215286a610360500000005000000050000000000000000000000a48100000000612e747874504b050600" +
+    "0000000100010033000000280000000000"))[Ok([zip_entry("a.txt", text_bytes("hello"), 1609459200)])]
+#test(unhex("504b03041400000008000000215200000000020000000000000002000000642f0300504b030414000000080000002152" +
+    "e3513d8d0a0000001700000007000000642f622e747874cb48cdc9c957c8402701504b01021403140000000800000021" +
+    "52000000000200000000000000020000000000000000001000ed4100000000642f504b01021403140000000800000021" +
+    "52e3513d8d0a00000017000000070000000000000000000000a48122000000642f622e747874504b0506000000000200" +
+    "020065000000510000000000"))[Ok([zip_dir("d", 1609459200), zip_entry("d/b.txt", text_bytes("hello hello hello hello"), 1609459200)])]
+#test(unhex("504b03041400000000000000215286a61036050000000500000005000000612e74787468656c6c70504b010214031400" +
+    "000000000000215286a610360500000005000000050000000000000000000000a48100000000612e747874504b050600" +
+    "0000000100010033000000280000000000"))[Err(ArchiveError.ChecksumMismatch)] // a byte of the data changed
+#test(unhex("504b03041400000000000000215286a61036050000000500000005000000612e74787468656c6c6f504b010214031400" +
+    "000000000000215286a610360500000005000000050000000000000000000000a48100000000612e747874504b050600" +
+    "00000001"))[Err(ArchiveError.NotZip)] // cut short
+#test(text_bytes("PK"))[Err(ArchiveError.NotZip)]
+pub fun zip_read(b: [uint8]) -> Result<[Entry], ArchiveError> {
+    var out: [Entry] = []
+    for f in zip_list(b)? {
+        var data = zip_data(b, f)?
+        var e = file(f.name, data)
+        e.kind = f.kind
+        e.mode = f.mode
+        e.mtime = f.mtime
+        if f.kind == EntryKind.Symlink {
+            e.link = text_of(data, 0, data.len())
+            e.data = []
+        } else if f.kind == EntryKind.Dir {
+            e.data = []
+        }
+        out.push(e)
+    }
+    return Ok(out)
+}
+
+// --- Test helpers -------------------------------------------------------------------
+
+// The bytes the hex digits of `s` stand for (lower case, whole bytes).
+#test("00ff1a")[[0u8, 255u8, 26u8]]
+fun unhex(s: str) -> [uint8] {
+    var out: [uint8] = []
+    var i = 0
+    while i + 1 < s.len() {
+        out.push(((hex_digit(s[i]) << 4) | hex_digit(s[i + 1])) as uint8)
+        i += 2
+    }
+    return out
+}
+
+fun hex_digit(c: uint8) -> int32 {
+    if c >= '0' && c <= '9' { return (c - '0') as int32 }
+    return (c - 'a') as int32 + 10
+}
+
+// A directory entry as zip_read gives one: mode 0o755 and the time `mtime`.
+fun zip_dir(name: str, mtime: int64) -> Entry {
+    var e = dir(name)
+    e.mtime = mtime
+    return e
+}
+
+// A file entry as zip_read gives one: mode 0o644 and the time `mtime`.
+fun zip_entry(name: str, data: [uint8], mtime: int64) -> Entry {
+    var e = file(name, data)
+    e.mtime = mtime
+    return e
+}
+
+// `n` bytes of every value.
+fun some_bytes(n: int) -> [uint8] {
+    var out: [uint8] = []
+    for i in 0..n { out.push(((i * 7 + i / 256) & 255) as uint8) }
+    return out
+}
+
+// Entries of every kind and field, among them names, a link and numbers too
+// long for ustar's fields.
+fun sample_entries() -> [Entry] {
+    var a = file("a.txt", some_bytes(1000))
+    a.mtime = 1700000000
+    a.uid = 1000
+    a.gid = 100
+    a.uname = "ann"
+    a.gname = "staff"
+    a.mode = 0o600
+    let split = file("p/" + "n".repeat(150) + "/file.txt", text_bytes("in ustar's prefix"))
+    let long = file("d/" + "x".repeat(200), some_bytes(512))
+    let link = symlink("link", "t/".repeat(80))
+    var hard = file("hard", [])
+    hard.kind = EntryKind.Hardlink
+    hard.link = "a.txt"
+    var odd = file("odd", some_bytes(3))
+    odd.mtime = -5
+    odd.uid = 3000000
+    odd.uname = "u".repeat(40)
+    var fifo = file("fifo", [])
+    fifo.kind = EntryKind.Other('6')
+    return [a, dir("d"), long, split, link, hard, odd, fifo, file("empty", [])]
+}
+
+// What tar_write writes, tar_read reads back, whole and through a stream
+// that gives it in small pieces.
+#test
+fun tar_round_trip() -> Result<(), ArchiveError> {
+    let entries = sample_entries()
+    let tar = tar_write(entries)?
+    assert(tar.len() % 512 == 0, "whole blocks")
+    let back = tar_read(tar)?
+    assert(back.len() == entries.len(), "as many entries")
+    for i in 0..back.len() {
+        assert(back[i] == entries[i], f"entry {i}, {entries[i].name}")
+    }
+    var r = tar_reader(Pieces { data: tar, pos: 0, step: 0 })
+    var k = 0
+    while let Some(e) = r.next() {
+        assert(e? == entries[k], f"entry {k} in pieces")
+        k += 1
+    }
+    assert(k == entries.len(), "every entry in pieces")
+    return Ok(())
+}
+
+// The headers as ustar has them: the name, the checksum, the magic, a pax
+// header before a long name.
+#test
+fun tar_headers() -> Result<(), ArchiveError> {
+    let tar = tar_write([file("hi.txt", text_bytes("hi"))])?
+    assert(c_str(tar, 0, 100) == "hi.txt", "the name")
+    assert(c_str(tar, 100, 8) == "0000644", "the mode")
+    assert(c_str(tar, 124, 12) == "00000000002", "the size")
+    assert(c_str(tar, 257, 6) == "ustar" && c_str(tar, 263, 2) == "00", "the magic")
+    assert(checksum_ok(tar[:512]), "the checksum")
+    assert(tar.len() == 512 * 4, "a header, a block of data, two zero blocks")
+    let long = tar_write([file("x".repeat(120), [])])?
+    assert(long[156] == 'x', "a pax header first")
+    assert(text_of(long, 512, 642) == "130 path=" + "x".repeat(120) + "\n", "its record")
+    assert(long[1024 + 156] == '0', "then the entry")
+    var bad = tar
+    bad[0] = 'H'
+    assert(match tar_read(bad) {
+        Err(BadHeader) => true
+        _ => false
+    }, "a wrong checksum")
+    return Ok(())
+}
+
+// GNU tar's long names and links (`L`, `K`) and a global pax header (`g`),
+// made by hand.
+#test
+fun tar_gnu_and_global() -> Result<(), ArchiveError> {
+    let name = "g/" + "y".repeat(130)
+    let target = "z".repeat(120)
+    var b: [uint8] = []
+    var nm = text_bytes(name)
+    nm.push(0)
+    let ll = file("././@LongLink", [])
+    for x in header_block(ll, "", ll.name, 'L', nm.len() as int64) { b.push(x) }
+    for x in data_blocks(nm) { b.push(x) }
+    var tg = text_bytes(target)
+    tg.push(0)
+    for x in header_block(ll, "", ll.name, 'K', tg.len() as int64) { b.push(x) }
+    for x in data_blocks(tg) { b.push(x) }
+    let records = text_bytes(pax_record("uname", "global"))
+    let gh = file("pax_global_header", [])
+    for x in header_block(gh, "", gh.name, 'g', records.len() as int64) { b.push(x) }
+    for x in data_blocks(records) { b.push(x) }
+    let s = symlink(name[:100], target[:100])
+    for x in header_block(s, "", s.name, '2', 0) { b.push(x) }
+    let f = file("plain", text_bytes("data"))
+    for x in header_block(f, "", f.name, '0', 4) { b.push(x) }
+    for x in data_blocks(f.data) { b.push(x) }
+    let got = tar_read(b)?
+    assert(got.len() == 2, "two entries")
+    assert(got[0].name == name && got[0].link == target && got[0].kind == EntryKind.Symlink, "the long name and link")
+    assert(got[0].uname == "global" && got[1].uname == "global", "the global record, for every entry after it")
+    assert(got[1].name == "plain" && got[1].data == text_bytes("data"), "a plain entry, no zero blocks at the end")
+    let cut = tar_read(b[:b.len() - 512 + 2])
+    assert(match cut {
+        Err(Truncated) => true
+        _ => false
+    }, "the data cut short")
+    return Ok(())
+}
+
+// The input in pieces of 1 to 700 bytes.
+struct Pieces {
+    data: [uint8],
+    pos: int,
+    step: int,
+}
+
+impl Read for Pieces {
+    fun read(var self, n: int) -> Result<[uint8], IoError> {
+        self.step = self.step % 700 + 1
+        var end = self.pos + self.step
+        if end > self.pos + n { end = self.pos + n }
+        if end > self.data.len() { end = self.data.len() }
+        let out = self.data[self.pos:end]
+        self.pos = end
+        return Ok(out)
+    }
+
+    fun read_str(var self, n: int) -> Result<str, IoError> {
+        let b = self.read(n)?
+        return Ok(text_of(b, 0, b.len()))
+    }
+}
+
+// zip_list gives the directory without reading the data; zip_data reads
+// one entry.
+#test
+fun zip_directory() -> Result<(), ArchiveError> {
+    let z = unhex("504b03041400000008000000215200000000020000000000000002000000642f0300504b030414000000080000002152e3513d8d0a0000001700000007000000642f622e747874cb48cdc9c957c8402701504b0102140314000000080000002152000000000200000000000000020000000000000000001000ed4100000000642f504b0102140314000000080000002152e3513d8d0a00000017000000070000000000000000000000a48122000000642f622e747874504b0506000000000200020065000000510000000000")
+    let files = zip_list(z)?
+    assert(files.len() == 2 && files[1].name == "d/b.txt" && files[1].method == 8, "the directory")
+    assert(files[1].size == 23 && files[1].csize == 10 && files[1].crc == 0x8D3D51E3u32, "the sizes and the CRC")
+    let data = zip_data(z, files[1])?
+    assert(data == text_bytes("hello hello hello hello"), "the data")
+    // bytes before the archive: the offsets move with them
+    var prefixed = text_bytes("#!/bin/sh\nexit 0\n")
+    for x in z { prefixed.push(x) }
+    let moved = zip_list(prefixed)?
+    assert(zip_data(prefixed, moved[1])? == data, "after a prefix")
+    var method = files[1]
+    method.method = 12
+    assert(match zip_data(z, method) {
+        Err(Unsupported(12)) => true
+        _ => false
+    }, "bzip2")
+    var secret = files[1]
+    secret.flags = 1
+    assert(match zip_data(z, secret) {
+        Err(Encrypted) => true
+        _ => false
+    }, "encrypted")
+    return Ok(())
+}

@@ -1,5 +1,5 @@
-// std.compress: DEFLATE decompression, and the gzip and zlib formats
-// around it (MYLA-344).
+// std.compress: DEFLATE decompression (MYLA-344) and compression
+// (MYLA-352), and the gzip and zlib formats around it.
 //
 // Inflate is RFC 1951: stored blocks, and blocks of fixed and of dynamic
 // Huffman codes, with a window of 32 KiB. gzip (RFC 1952) and zlib
@@ -12,9 +12,15 @@
 // `gunzip` and `zlib_decompress` give it all of their input at once; the
 // streams `inflate_reader`, `gzip_reader` and `zlib_reader` give it what
 // their inner stream reads, chunk by chunk.
+//
+// The compressor, `Deflate`, is given its input whole (`deflate`, `gzip`,
+// `zlib_compress`) or in pieces, through the stream `Encoder` that
+// `deflate_writer`, `gzip_writer` and `zlib_writer` make.
 
-from std.io import Read, from_bytes
+from std.io import Read, Write, from_bytes, memory_stream, MemoryStream
 from std.fs import IoError
+import std.list as list_m
+import std.option as option_m
 
 // Why compressed data couldn't be decompressed (D168: the variants carry no
 // position, so it is a bare enum).
@@ -1237,6 +1243,1132 @@ impl<R: Read> Read for Decoder<R> {
     }
 }
 
+// --- Compression --------------------------------------------------------------------
+//
+// DEFLATE as zlib makes it (MYLA-352): LZ77 over a window of 32 KiB, with a
+// hash chain of the strings of three bytes, matched greedily at levels 1 to
+// 3 and lazily at 4 to 9, then each block of up to 16383 symbols written
+// with the codes that make it smallest: its own (dynamic) Huffman codes,
+// limited to 15 bits, the fixed ones, or none (stored). Level 0 stores.
+
+const MIN_MATCH: int32 = 3
+const MAX_MATCH: int32 = 258
+// The input a match search wants ahead of it: the longest match and the
+// next string's three bytes. With less, and more to come, the compressor
+// waits for more input.
+const MIN_LOOKAHEAD: int32 = 262
+const HASH_MASK: int32 = 32767
+// Knuth's multiplier (2654435761) as an `int32`: the hash of three bytes is
+// the top 15 bits of their product with it.
+const HASH_MUL: int32 = -1640531535
+// The farthest back a match may start: the chain's entry of a position is
+// overwritten by the one 32768 bytes after it.
+const MAX_DIST: int32 = 32767
+// Symbols a block gathers before it is written (zlib's, at its default
+// memory level).
+const BLOCK_SYMS: int32 = 16383
+// A match of three bytes farther back than this costs more than its three
+// literals (zlib's rule).
+const TOO_FAR: int32 = 4096
+// The most bytes a stored block holds.
+const STORED_MAX: int32 = 65535
+// The writer: input gathered before it is compressed, output gathered
+// before it is passed on, and the window kept when the input is slid down.
+const IN_BATCH: int32 = 65536
+const OUT_BATCH: int32 = 65536
+const SLIDE_MIN: int32 = 262144
+
+// The order in which a dynamic block's header gives the lengths of the
+// code-length code (RFC 1951 3.2.7).
+fun cl_order() -> [int32] {
+    return [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15]
+}
+
+// A level as the compressor takes it: below 0 the default, 6, as zlib's
+// -1; above 9, 9.
+#test(-1)[6]
+#test(0)[0]
+#test(7)[7]
+#test(12)[9]
+fun clamp_level(level: int) -> int32 {
+    if level < 0 { return 6 }
+    if level > 9 { return 9 }
+    return level
+}
+
+// zlib's table of how hard each level looks for matches: a match this long
+// is good enough to search a quarter of the chain for a longer one (good),
+// long enough not to look for a better one at the next byte (lazy; at the
+// greedy levels, too long to put its strings in the chain), long enough to
+// stop at (nice); the most chain entries looked at (chain); and whether
+// matching is lazy (1) or greedy (0).
+#test(1)[[4, 4, 8, 4, 0]]
+#test(6)[[8, 16, 128, 128, 1]]
+#test(9)[[32, 258, 258, 4096, 1]]
+fun level_config(level: int32) -> [int32] {
+    let table: [[int32]] = [
+        [0, 0, 0, 0, 0],
+        [4, 4, 8, 4, 0],
+        [4, 5, 16, 8, 0],
+        [4, 6, 32, 32, 0],
+        [4, 4, 16, 16, 1],
+        [8, 16, 32, 32, 1],
+        [8, 16, 128, 128, 1],
+        [8, 32, 128, 256, 1],
+        [32, 128, 258, 1024, 1],
+        [32, 258, 258, 4096, 1],
+    ]
+    return table[level]
+}
+
+// `n` zeros.
+#test(3)[[0, 0, 0]]
+fun zeros(n: int) -> [int32] {
+    var out: [int32] = []
+    for i in 0..n { out.push(0) }
+    return out
+}
+
+// The lengths of a Huffman code for symbols of the frequencies `freq` (0:
+// unused, no code), none longer than `limit` bits. The code is optimal
+// (two queues over the sorted frequencies) unless that makes a code
+// longer than `limit`; then the lengths are moved up as JPEG's Annex K.3
+// does, which keeps the code complete, and the shortest go to the most
+// frequent symbols. One symbol gets length 1; none, no lengths.
+#test([1, 1, 2, 4], 15)[[3, 3, 2, 1]]
+#test([0, 5, 0, 5], 15)[[0, 1, 0, 1]]
+#test([0, 7, 0], 15)[[0, 1, 0]]
+#test([0, 0], 15)[[0, 0]]
+#test([1, 1, 2, 3, 5, 8, 13, 21], 15)[[7, 7, 6, 5, 4, 3, 2, 1]]
+#test([1, 1, 2, 3, 5, 8, 13, 21], 4)[[4, 4, 4, 4, 4, 4, 3, 1]]
+fun code_lengths(freq: [int32], limit: int32) -> [int32] {
+    let n = freq.len()
+    var lens = zeros(n)
+    // frequency and symbol in one key, to sort them (a frequency is at most
+    // a block's symbols, a symbol below 512)
+    var keys: [int32] = []
+    for s in 0..n {
+        if freq[s] > 0 { keys.push(freq[s] * 512 + s) }
+    }
+    let m = keys.len()
+    if m == 0 { return lens }
+    if m == 1 {
+        lens[keys[0] & 511] = 1
+        return lens
+    }
+    keys.sort()
+    // the leaves 0 to m - 1 by weight, the inner nodes m to 2m - 2 in the
+    // order they are made, which is by weight too
+    var w: [int32] = []
+    for k in keys { w.push(k >> 9) }
+    var parent = zeros(2 * m - 1)
+    var i = 0
+    var j = m
+    while w.len() < 2 * m - 1 {
+        let next = w.len()
+        var a = 0
+        if i < m && (j >= next || w[i] <= w[j]) {
+            a = i
+            i += 1
+        } else {
+            a = j
+            j += 1
+        }
+        var b = 0
+        if i < m && (j >= next || w[i] <= w[j]) {
+            b = i
+            i += 1
+        } else {
+            b = j
+            j += 1
+        }
+        parent[a] = next
+        parent[b] = next
+        w.push(w[a] + w[b])
+    }
+    var depth = zeros(2 * m - 1)
+    var k = 2 * m - 3
+    while k >= 0 {
+        depth[k] = depth[parent[k]] + 1
+        k -= 1
+    }
+    var maxd = 0
+    for x in 0..m {
+        if depth[x] > maxd { maxd = depth[x] }
+    }
+    var top = maxd
+    if top < limit { top = limit }
+    var count = zeros(top + 1)
+    for x in 0..m { count[depth[x]] += 1 }
+    // Two codes of the deepest length too long: one up in their parent's
+    // place, the other below a shorter code, which becomes two
+    var d = maxd
+    while d > limit {
+        while count[d] > 0 {
+            var q = d - 2
+            while count[q] == 0 { q -= 1 }
+            count[d] -= 2
+            count[d - 1] += 1
+            count[q + 1] += 2
+            count[q] -= 1
+        }
+        d -= 1
+    }
+    // the least frequent symbols, first in `keys`, get the longest codes
+    var len = top
+    for x in 0..m {
+        while count[len] == 0 { len -= 1 }
+        lens[keys[x] & 511] = len
+        count[len] -= 1
+    }
+    return lens
+}
+
+// `lens` with at least two codes, each of length 1 if it had fewer: a
+// complete code, which every decoder takes, at no cost (the codes added
+// have no symbols to code).
+#test([0, 0, 0])[[1, 1, 0]]
+#test([0, 0, 1])[[1, 0, 1]]
+#test([1, 0, 0])[[1, 1, 0]]
+#test([2, 2, 1])[[2, 2, 1]]
+fun two_codes(lens: [int32]) -> [int32] {
+    var used = 0
+    var first = -1
+    for s in 0..lens.len() {
+        if lens[s] > 0 {
+            used += 1
+            if first < 0 { first = s }
+        }
+    }
+    var out = lens
+    if used == 0 {
+        out[0] = 1
+        out[1] = 1
+    } else if used == 1 {
+        out[first] = 1
+        if first == 0 { out[1] = 1 } else { out[0] = 1 }
+    }
+    return out
+}
+
+// The canonical codes of the lengths `lens` (RFC 1951 3.2.2), each with its
+// bits reversed: DEFLATE writes a code's highest bit first, and the writer
+// puts the lowest bits first.
+#test([2, 1, 3, 3])[[1, 0, 3, 7]]
+#test([0, 1, 0, 1])[[0, 0, 0, 1]]
+fun canonical_codes(lens: [int32]) -> [int32] {
+    var count = zeros(16)
+    for l in lens { count[l] += 1 }
+    count[0] = 0
+    var next = zeros(16)
+    var code = 0
+    for b in 1..16 {
+        code = (code + count[b - 1]) << 1
+        next[b] = code
+    }
+    var codes = zeros(lens.len())
+    for s in 0..lens.len() {
+        let l = lens[s]
+        if l > 0 {
+            codes[s] = reversed(next[l], l)
+            next[l] += 1
+        }
+    }
+    return codes
+}
+
+// The code lengths `lens` run-length coded as a dynamic block's header has
+// them (RFC 1951 3.2.7): each entry a symbol of the code-length code, 0 to
+// 18, and the value of its extra bits shifted left by 5.
+#test([8, 8, 8, 8, 8, 0, 0, 0])[[8, 16 | (1 << 5), 17]]
+#test([3, 3, 3])[[3, 3, 3]]
+#test([0, 0])[[0, 0]]
+#test(zeros(150))[[18 | (127 << 5), 18 | (1 << 5)]]
+#test(zeros(140))[[18 | (127 << 5), 0, 0]]
+#test(zeros(141))[[18 | (127 << 5), 17]]
+fun rle_lengths(lens: [int32]) -> [int32] {
+    var out: [int32] = []
+    let n = lens.len()
+    var i = 0
+    while i < n {
+        let l = lens[i]
+        var run = 1
+        while i + run < n && lens[i + run] == l { run += 1 }
+        i += run
+        if l == 0 {
+            while run >= 11 {
+                var r = run
+                if r > 138 { r = 138 }
+                out.push(18 | ((r - 11) << 5))
+                run -= r
+            }
+            if run >= 3 {
+                out.push(17 | ((run - 3) << 5))
+                run = 0
+            }
+        } else {
+            out.push(l)
+            run -= 1
+            while run >= 3 {
+                var r = run
+                if r > 6 { r = 6 }
+                out.push(16 | ((r - 3) << 5))
+                run -= r
+            }
+        }
+        while run > 0 {
+            out.push(l)
+            run -= 1
+        }
+    }
+    return out
+}
+
+// The bits a stored block of `n` bytes takes after `nacc` bits of a byte:
+// its header, the padding to the byte, its lengths and bytes, and so for
+// each further block of at most 65535 bytes it needs.
+#test(0, 0)[40]
+#test(5, 0)[80]
+#test(5, 6)[82]
+#test(65536, 0)[65536 * 8 + 80]
+fun stored_bits(n: int32, nacc: int32) -> int32 {
+    var chunks = (n + STORED_MAX - 1) / STORED_MAX
+    if chunks < 1 { chunks = 1 }
+    let pad = (8 - ((nacc + 3) & 7)) & 7
+    return 3 + pad + 32 + (chunks - 1) * 40 + n * 8
+}
+
+// The longest match for the string at `s` in `buf` among the earlier ones
+// of its hash chain, from `cand` on, that is longer than `best0`:
+// `distance << 9 | length`, or 0 if there is none. It looks at `max_chain`
+// entries of the chain (a quarter of them if `best0` is `good` already), and
+// stops at a match of `nice0` bytes.
+fun longest_match(buf: [uint8], prev: [int32], s: int32, cand0: int32, best0: int32, good: int32,
+        max_chain: int32, nice0: int32) -> int32 {
+    var max_len = buf.len() - s
+    if max_len > MAX_MATCH { max_len = MAX_MATCH }
+    var best = best0
+    if best >= max_len { return 0 }
+    var nice = nice0
+    if nice > max_len { nice = max_len }
+    var chain = max_chain
+    if best >= good { chain = chain >> 2 }
+    var limit = s - MAX_DIST - 1
+    if limit < -1 { limit = -1 }
+    let c0 = buf[s]
+    let c1 = buf[s + 1]
+    var scan_end = buf[s + best]
+    var scan_end1 = buf[s + best - 1]
+    var cand = cand0
+    var dist = 0
+    while true {
+        // the bytes at the best length and before it first: most candidates
+        // differ there
+        if buf[cand + best] == scan_end && buf[cand + best - 1] == scan_end1 && buf[cand] == c0 &&
+                buf[cand + 1] == c1 {
+            var k = 2
+            while k < max_len && buf[cand + k] == buf[s + k] { k += 1 }
+            if k > best {
+                best = k
+                dist = s - cand
+                if k >= nice { break }
+                scan_end = buf[s + best]
+                scan_end1 = buf[s + best - 1]
+            }
+        }
+        cand = prev[cand & WINDOW_MASK]
+        if cand <= limit { break }
+        chain -= 1
+        if chain == 0 { break }
+    }
+    if dist == 0 { return 0 }
+    return (dist << 9) | best
+}
+
+// A DEFLATE compressor in one of the containers, given its input in pieces
+// (`input`) or all at once (`buf`).
+struct Deflate {
+    format: int32,
+    level: int32,
+    good: int32,        // the level's `level_config`
+    lazy: int32,
+    nice: int32,
+    chain: int32,
+    slow: bool,
+    // The input from buf[0] on: the window of 32 KiB before `pos`, the
+    // block being gathered (from `block_start`), what isn't compressed yet.
+    buf: [uint8],
+    pos: int32,
+    block_start: int32,
+    head: [int32],      // by a string's hash: the last position it was at, or -1
+    prev: [int32],      // by a position & 32767: the one before it in its hash's chain
+    // lazy matching: the match at pos - 1, and whether that byte waits to
+    // be written (a literal, or the start of that match)
+    match_len: int32,
+    match_dist: int32,
+    pending: bool,
+    // the block: each symbol a byte, or `distance << 8 | (length - 3)`,
+    // and the frequencies of the literal/length and distance symbols
+    syms: [int32],
+    lfreq: [int32],
+    dfreq: [int32],
+    // the output: whole bytes, then `nacc` bits in `acc`, the lowest first
+    out: [uint8],
+    acc: uint64,
+    nacc: int32,
+    started: bool,      // the container's header written
+    lcode_of: [int32],  // length - 3: its length code (0 to 28)
+    dcode_of: [int32],  // distance - 1: its distance code, as `dist_code` reads it
+    lbase: [int32],     // length code: base length and extra bits
+    lext: [int32],
+    dbase: [int32],     // distance code: base distance and extra bits
+    dext: [int32],
+    fixed_lc: [int32],  // the fixed codes, reversed, and their lengths
+    fixed_ll: [int32],
+    fixed_dc: [int32],
+    fixed_dl: [int32],
+    ck: uint32,         // the checksum of the input, and its length modulo 2^32
+    size: uint32,
+    crc_t: [uint32],    // gzip: `crc_tables()`
+}
+
+// A compressor of the container `format` at `level`, with no input yet.
+fun new_deflate(format: int32, level: int) -> Deflate {
+    let lv = clamp_level(level)
+    let cfg = level_config(lv)
+    var lbase: [int32] = []
+    var lext: [int32] = []
+    var len = 3
+    for i in 0..28 {
+        var x = 0
+        if i >= 8 { x = (i - 4) / 4 }
+        lbase.push(len)
+        lext.push(x)
+        len += 1 << x
+    }
+    lbase.push(258)
+    lext.push(0)
+    var dbase: [int32] = []
+    var dext: [int32] = []
+    var d = 1
+    for i in 0..30 {
+        var x = 0
+        if i >= 4 { x = (i - 2) / 2 }
+        dbase.push(d)
+        dext.push(x)
+        d += 1 << x
+    }
+    var lcode_of = zeros(256)
+    for c in 0..29 {
+        for k in 0..(1 << lext[c]) {
+            let i = lbase[c] - 3 + k
+            if i < 256 { lcode_of[i] = c }
+        }
+    }
+    var dcode_of = zeros(512)
+    for c in 0..30 {
+        var x = dbase[c] - 1
+        let hi = x + (1 << dext[c])
+        while x < hi {
+            if x < 256 {
+                dcode_of[x] = c
+                x += 1
+            } else {
+                dcode_of[256 + (x >> 7)] = c
+                x += 128
+            }
+        }
+    }
+    var fl: [int32] = []
+    for s in 0..288 {
+        if s < 144 {
+            fl.push(8)
+        } else if s < 256 {
+            fl.push(9)
+        } else if s < 280 {
+            fl.push(7)
+        } else {
+            fl.push(8)
+        }
+    }
+    var fd: [int32] = []
+    for s in 0..30 { fd.push(5) }
+    var head: [int32] = []
+    for i in 0..HASH_MASK + 1 { head.push(-1) }
+    var ck: uint32 = 0
+    if format == ZLIB { ck = 1 }
+    var crc_t: [uint32] = []
+    if format == GZIP { crc_t = crc_tables() }
+    return Deflate {
+        format: format, level: lv,
+        good: cfg[0], lazy: cfg[1], nice: cfg[2], chain: cfg[3], slow: cfg[4] == 1,
+        buf: [], pos: 0, block_start: 0, head: head, prev: head,
+        match_len: 2, match_dist: 0, pending: false,
+        syms: [], lfreq: zeros(286), dfreq: zeros(30),
+        out: [], acc: 0, nacc: 0, started: false,
+        lcode_of: lcode_of, dcode_of: dcode_of,
+        lbase: lbase, lext: lext, dbase: dbase, dext: dext,
+        fixed_lc: canonical_codes(fl), fixed_ll: fl, fixed_dc: canonical_codes(fd), fixed_dl: fd,
+        ck: ck, size: 0, crc_t: crc_t,
+    }
+}
+
+impl Deflate {
+    // The checksum and the length brought up to the input `b` after them.
+    fun sum_in(var self, b: [uint8]) {
+        if self.format == GZIP {
+            self.ck = crc32_part(self.crc_t, self.ck, b, 0, b.len())
+        } else if self.format == ZLIB {
+            self.ck = adler32_part(self.ck, b, 0, b.len())
+        }
+        self.size = self.size + (b.len() as uint32)
+    }
+
+    // More input, after the input before it.
+    fun input(var self, b: [uint8]) {
+        if b.len() == 0 { return }
+        self.sum_in(b)
+        self.slide()
+        if self.buf.len() == 0 {
+            self.buf = b
+            return
+        }
+        var buf = self.buf
+        self.buf = []
+        for x in b { buf.push(x) }
+        self.buf = buf
+    }
+
+    // The input before the window and the block dropped, once that is worth
+    // a copy, and the positions moved down with it. They move by a multiple
+    // of 32768, so the chain's entries keep their places in `prev`.
+    fun slide(var self) {
+        var keep = self.pos - 32768
+        if self.block_start < keep { keep = self.block_start }
+        if keep < SLIDE_MIN { return }
+        keep = (keep >> 15) << 15
+        self.buf = self.buf[keep:]
+        self.pos -= keep
+        self.block_start -= keep
+        var head = self.head
+        self.head = []
+        for i in 0..head.len() {
+            let v = head[i] - keep
+            if v < 0 { head[i] = -1 } else { head[i] = v }
+        }
+        self.head = head
+        var prev = self.prev
+        self.prev = []
+        for i in 0..prev.len() {
+            let v = prev[i] - keep
+            if v < 0 { prev[i] = -1 } else { prev[i] = v }
+        }
+        self.prev = prev
+    }
+
+    // The low `k` bits of `v` (at most 32) after the bits written.
+    fun put(var self, v: int32, k: int32) {
+        self.acc = self.acc | (((v as uint32) as uint64) << (self.nacc as uint64))
+        self.nacc += k
+        if self.nacc >= 32 {
+            let a = self.acc
+            self.out.push((a & 255u64) as uint8)
+            self.out.push(((a >> 8u64) & 255u64) as uint8)
+            self.out.push(((a >> 16u64) & 255u64) as uint8)
+            self.out.push(((a >> 24u64) & 255u64) as uint8)
+            self.acc = a >> 32u64
+            self.nacc -= 32
+        }
+    }
+
+    // To the next byte boundary, every bit written out.
+    fun align(var self) {
+        self.nacc += (8 - (self.nacc & 7)) & 7
+        while self.nacc > 0 {
+            self.out.push((self.acc & 255u64) as uint8)
+            self.acc = self.acc >> 8u64
+            self.nacc -= 8
+        }
+    }
+
+    // The container's header, once.
+    fun header(var self) {
+        if self.started { return }
+        self.started = true
+        if self.format == GZIP {
+            var xfl: uint8 = 0
+            if self.level == 9 { xfl = 2 }
+            if self.level < 2 { xfl = 4 }
+            // no name, no time; the system "unknown" (255), as Python writes it
+            for b in [0x1Fu8, 0x8Bu8, 8u8, 0u8, 0u8, 0u8, 0u8, 0u8, xfl, 255u8] { self.out.push(b) }
+        } else if self.format == ZLIB {
+            var flevel = 3
+            if self.level < 2 {
+                flevel = 0
+            } else if self.level < 6 {
+                flevel = 1
+            } else if self.level == 6 {
+                flevel = 2
+            }
+            var h = 0x7800 | (flevel << 6)
+            h += 31 - h % 31
+            self.out.push((h >> 8) as uint8)
+            self.out.push((h & 255) as uint8)
+        }
+    }
+
+    // The container's trailer, after the last block.
+    fun trailer(var self) {
+        if self.format == GZIP {
+            for sh in [0u32, 8u32, 16u32, 24u32] { self.out.push(((self.ck >> sh) & 255u32) as uint8) }
+            for sh in [0u32, 8u32, 16u32, 24u32] { self.out.push(((self.size >> sh) & 255u32) as uint8) }
+        } else if self.format == ZLIB {
+            for sh in [24u32, 16u32, 8u32, 0u32] { self.out.push(((self.ck >> sh) & 255u32) as uint8) }
+        }
+    }
+
+    // Compress the input given: all of it if `all` (its end, or a flush),
+    // else as far as it leaves a match search the lookahead it wants. Each
+    // block that fills is written.
+    fun run(var self, all: bool) {
+        self.header()
+        while true {
+            var end = -1
+            if self.level == 0 {
+                end = self.run_stored()
+            } else if self.slow {
+                end = self.run_slow(all)
+            } else {
+                end = self.run_fast(all)
+            }
+            if end < 0 { return }
+            self.write_block(end, false)
+        }
+    }
+
+    // Level 0: the input taken as it is, in blocks of 65535 bytes; the end
+    // of a full block, or -1.
+    fun run_stored(var self) -> int32 {
+        self.pos = self.buf.len()
+        if self.pos - self.block_start >= STORED_MAX { return self.block_start + STORED_MAX }
+        return -1
+    }
+
+    // Greedy matching (levels 1 to 3): at each byte the longest match there,
+    // or a literal. The end of the block if it filled, else -1.
+    fun run_fast(var self, all: bool) -> int32 {
+        let buf = self.buf
+        let n = buf.len()
+        var head = self.head
+        self.head = []
+        var prev = self.prev
+        self.prev = []
+        var syms = self.syms
+        self.syms = []
+        var lfreq = self.lfreq
+        self.lfreq = []
+        var dfreq = self.dfreq
+        self.dfreq = []
+        let lcode_of = self.lcode_of
+        let dcode_of = self.dcode_of
+        let max_insert = self.lazy
+        let good = self.good
+        let nice = self.nice
+        let chain = self.chain
+        var s = self.pos
+        var end = -1
+        while true {
+            let look = n - s
+            if look < MIN_LOOKAHEAD && !all { break }
+            if look == 0 { break }
+            var cand = -1
+            if look >= MIN_MATCH {
+                let h = (((((buf[s] as int32) << 16) | ((buf[s + 1] as int32) << 8) | (buf[s + 2] as int32)) *
+                    HASH_MUL) >> 17) & HASH_MASK
+                cand = head[h]
+                prev[s & WINDOW_MASK] = cand
+                head[h] = s
+            }
+            var mlen = 0
+            var mdist = 0
+            if cand >= 0 && s - cand <= MAX_DIST {
+                let m = longest_match(buf, prev, s, cand, MIN_MATCH - 1, good, chain, nice)
+                mlen = m & 511
+                mdist = m >> 9
+            }
+            if mlen >= MIN_MATCH {
+                syms.push((mdist << 8) | (mlen - 3))
+                lfreq[257 + lcode_of[mlen - 3]] += 1
+                let dd = mdist - 1
+                if dd < 256 { dfreq[dcode_of[dd]] += 1 } else { dfreq[dcode_of[256 + (dd >> 7)]] += 1 }
+                if mlen <= max_insert && look - mlen >= MIN_MATCH {
+                    var p = s + 1
+                    let stop = s + mlen
+                    while p < stop {
+                        let h = (((((buf[p] as int32) << 16) | ((buf[p + 1] as int32) << 8) | (buf[p + 2] as int32)) *
+                            HASH_MUL) >> 17) & HASH_MASK
+                        prev[p & WINDOW_MASK] = head[h]
+                        head[h] = p
+                        p += 1
+                    }
+                }
+                s += mlen
+            } else {
+                let c = buf[s] as int32
+                syms.push(c)
+                lfreq[c] += 1
+                s += 1
+            }
+            if syms.len() >= BLOCK_SYMS {
+                end = s
+                break
+            }
+        }
+        self.head = head
+        self.prev = prev
+        self.syms = syms
+        self.lfreq = lfreq
+        self.dfreq = dfreq
+        self.pos = s
+        return end
+    }
+
+    // Lazy matching (levels 4 to 9), as zlib's `deflate_slow`: the match at
+    // a byte is written only if the next byte has no longer one; else that
+    // byte is a literal, and the next byte's match waits in its turn. The
+    // end of the block if it filled, else -1.
+    fun run_slow(var self, all: bool) -> int32 {
+        let buf = self.buf
+        let n = buf.len()
+        var head = self.head
+        self.head = []
+        var prev = self.prev
+        self.prev = []
+        var syms = self.syms
+        self.syms = []
+        var lfreq = self.lfreq
+        self.lfreq = []
+        var dfreq = self.dfreq
+        self.dfreq = []
+        let lcode_of = self.lcode_of
+        let dcode_of = self.dcode_of
+        let lazy = self.lazy
+        let good = self.good
+        let nice = self.nice
+        let chain = self.chain
+        var s = self.pos
+        var mlen = self.match_len
+        var mdist = self.match_dist
+        var pending = self.pending
+        var end = -1
+        while true {
+            let look = n - s
+            if look < MIN_LOOKAHEAD && !all { break }
+            if look == 0 {
+                if pending {
+                    let c = buf[s - 1] as int32
+                    syms.push(c)
+                    lfreq[c] += 1
+                    pending = false
+                }
+                mlen = MIN_MATCH - 1
+                break
+            }
+            var cand = -1
+            if look >= MIN_MATCH {
+                let h = (((((buf[s] as int32) << 16) | ((buf[s + 1] as int32) << 8) | (buf[s + 2] as int32)) *
+                    HASH_MUL) >> 17) & HASH_MASK
+                cand = head[h]
+                prev[s & WINDOW_MASK] = cand
+                head[h] = s
+            }
+            let prev_len = mlen
+            let prev_dist = mdist
+            mlen = MIN_MATCH - 1
+            if cand >= 0 && prev_len < lazy && s - cand <= MAX_DIST {
+                let m = longest_match(buf, prev, s, cand, prev_len, good, chain, nice)
+                if m > 0 {
+                    mlen = m & 511
+                    mdist = m >> 9
+                    if mlen == MIN_MATCH && mdist > TOO_FAR { mlen = MIN_MATCH - 1 }
+                }
+            }
+            if prev_len >= MIN_MATCH && mlen <= prev_len {
+                // the match at s - 1, and its strings into the chain
+                syms.push((prev_dist << 8) | (prev_len - 3))
+                lfreq[257 + lcode_of[prev_len - 3]] += 1
+                let dd = prev_dist - 1
+                if dd < 256 { dfreq[dcode_of[dd]] += 1 } else { dfreq[dcode_of[256 + (dd >> 7)]] += 1 }
+                let max_insert = n - MIN_MATCH
+                let stop = s + prev_len - 1
+                var p = s + 1
+                while p < stop {
+                    if p <= max_insert {
+                        let h = (((((buf[p] as int32) << 16) | ((buf[p + 1] as int32) << 8) | (buf[p + 2] as int32)) *
+                            HASH_MUL) >> 17) & HASH_MASK
+                        prev[p & WINDOW_MASK] = head[h]
+                        head[h] = p
+                    }
+                    p += 1
+                }
+                s = stop
+                pending = false
+                mlen = MIN_MATCH - 1
+                if syms.len() >= BLOCK_SYMS {
+                    end = s
+                    break
+                }
+            } else if pending {
+                let c = buf[s - 1] as int32
+                syms.push(c)
+                lfreq[c] += 1
+                s += 1
+                if syms.len() >= BLOCK_SYMS {
+                    end = s - 1
+                    break
+                }
+            } else {
+                pending = true
+                s += 1
+            }
+        }
+        self.head = head
+        self.prev = prev
+        self.syms = syms
+        self.lfreq = lfreq
+        self.dfreq = dfreq
+        self.pos = s
+        self.match_len = mlen
+        self.match_dist = mdist
+        self.pending = pending
+        return end
+    }
+
+    // The block of the symbols gathered, which stand for buf[block_start:end],
+    // written as whichever of its own codes, the fixed codes or stored bytes
+    // is smallest (level 0: stored); `last`: the final block.
+    fun write_block(var self, end: int32, last: bool) {
+        let start = self.block_start
+        if self.level == 0 {
+            self.write_stored(start, end, last)
+        } else {
+            var lfreq = self.lfreq
+            lfreq[256] = 1
+            let dfreq = self.dfreq
+            let llens = two_codes(code_lengths(lfreq, 15))
+            let dlens = two_codes(code_lengths(dfreq, 15))
+            // the data: its codes and extra bits, by both codes
+            var dyn = 0
+            var fixed = 0
+            for s in 0..286 {
+                let f = lfreq[s]
+                if f > 0 {
+                    dyn += f * llens[s]
+                    fixed += f * self.fixed_ll[s]
+                    if s > 256 {
+                        dyn += f * self.lext[s - 257]
+                        fixed += f * self.lext[s - 257]
+                    }
+                }
+            }
+            for c in 0..30 {
+                let f = dfreq[c]
+                if f > 0 {
+                    dyn += f * (dlens[c] + self.dext[c])
+                    fixed += f * (5 + self.dext[c])
+                }
+            }
+            // the header of a dynamic block
+            var hlit = 286
+            while hlit > 257 && llens[hlit - 1] == 0 { hlit -= 1 }
+            var hdist = 30
+            while hdist > 1 && dlens[hdist - 1] == 0 { hdist -= 1 }
+            var all_lens = llens[:hlit]
+            for x in dlens[:hdist] { all_lens.push(x) }
+            let rle = rle_lengths(all_lens)
+            var clfreq = zeros(19)
+            for e in rle { clfreq[e & 31] += 1 }
+            let cllens = two_codes(code_lengths(clfreq, 7))
+            let order = cl_order()
+            var hclen = 19
+            while hclen > 4 && cllens[order[hclen - 1]] == 0 { hclen -= 1 }
+            dyn += 3 + 14 + 3 * hclen
+            for c in 0..19 { dyn += clfreq[c] * cllens[c] }
+            dyn += clfreq[16] * 2 + clfreq[17] * 3 + clfreq[18] * 7
+            fixed += 3
+            let stored = stored_bits(end - start, self.nacc)
+            if stored <= dyn && stored <= fixed {
+                self.write_stored(start, end, last)
+            } else if fixed <= dyn {
+                self.put(if last { 1 } else { 0 }, 1)
+                self.put(1, 2)
+                self.write_codes(self.fixed_lc, self.fixed_ll, self.fixed_dc, self.fixed_dl)
+            } else {
+                self.put(if last { 1 } else { 0 }, 1)
+                self.put(2, 2)
+                self.put(hlit - 257, 5)
+                self.put(hdist - 1, 5)
+                self.put(hclen - 4, 4)
+                for i in 0..hclen { self.put(cllens[order[i]], 3) }
+                let clcodes = canonical_codes(cllens)
+                for e in rle {
+                    let sym = e & 31
+                    self.put(clcodes[sym], cllens[sym])
+                    if sym == 16 {
+                        self.put(e >> 5, 2)
+                    } else if sym == 17 {
+                        self.put(e >> 5, 3)
+                    } else if sym == 18 {
+                        self.put(e >> 5, 7)
+                    }
+                }
+                self.write_codes(canonical_codes(llens), llens, canonical_codes(dlens), dlens)
+            }
+        }
+        // a new block
+        self.syms = []
+        var lf = self.lfreq
+        self.lfreq = []
+        for i in 0..286 { lf[i] = 0 }
+        self.lfreq = lf
+        var df = self.dfreq
+        self.dfreq = []
+        for i in 0..30 { df[i] = 0 }
+        self.dfreq = df
+        self.block_start = end
+    }
+
+    // buf[from_i:to] as stored blocks of up to 65535 bytes (one, if it is
+    // empty); `last`: the final one is the stream's.
+    fun write_stored(var self, from_i: int32, to: int32, last: bool) {
+        var p = from_i
+        while true {
+            var n = to - p
+            if n > STORED_MAX { n = STORED_MAX }
+            let fin = last && p + n == to
+            self.put(if fin { 1 } else { 0 }, 1)
+            self.put(0, 2)
+            self.align()
+            var out = self.out
+            self.out = []
+            out.push((n & 255) as uint8)
+            out.push((n >> 8) as uint8)
+            out.push(((n & 255) ^ 255) as uint8)
+            out.push(((n >> 8) ^ 255) as uint8)
+            let buf = self.buf
+            for i in p..p + n { out.push(buf[i]) }
+            self.out = out
+            p += n
+            if p >= to { break }
+        }
+    }
+
+    // The block's symbols and its end, in the codes `lc` (literal/length,
+    // reversed) of the lengths `ll`, and `dc` (distance) of `dl`.
+    fun write_codes(var self, lc: [int32], ll: [int32], dc: [int32], dl: [int32]) {
+        let syms = self.syms
+        let lcode_of = self.lcode_of
+        let dcode_of = self.dcode_of
+        let lbase = self.lbase
+        let lext = self.lext
+        let dbase = self.dbase
+        let dext = self.dext
+        var out = self.out
+        self.out = []
+        var acc = self.acc
+        var nacc = self.nacc
+        for i in 0..syms.len() {
+            let v = syms[i]
+            if v < 256 {
+                acc = acc | ((lc[v] as uint64) << (nacc as uint64))
+                nacc += ll[v]
+            } else {
+                let len3 = v & 255
+                let c = lcode_of[len3]
+                acc = acc | ((lc[257 + c] as uint64) << (nacc as uint64))
+                nacc += ll[257 + c]
+                let lx = lext[c]
+                if lx > 0 {
+                    acc = acc | (((len3 + 3 - lbase[c]) as uint64) << (nacc as uint64))
+                    nacc += lx
+                }
+                if nacc >= 32 {
+                    out.push((acc & 255u64) as uint8)
+                    out.push(((acc >> 8u64) & 255u64) as uint8)
+                    out.push(((acc >> 16u64) & 255u64) as uint8)
+                    out.push(((acc >> 24u64) & 255u64) as uint8)
+                    acc = acc >> 32u64
+                    nacc -= 32
+                }
+                let d = (v >> 8) - 1
+                var dcd = 0
+                if d < 256 { dcd = dcode_of[d] } else { dcd = dcode_of[256 + (d >> 7)] }
+                acc = acc | ((dc[dcd] as uint64) << (nacc as uint64))
+                nacc += dl[dcd]
+                let dx = dext[dcd]
+                if dx > 0 {
+                    acc = acc | (((d + 1 - dbase[dcd]) as uint64) << (nacc as uint64))
+                    nacc += dx
+                }
+            }
+            if nacc >= 32 {
+                out.push((acc & 255u64) as uint8)
+                out.push(((acc >> 8u64) & 255u64) as uint8)
+                out.push(((acc >> 16u64) & 255u64) as uint8)
+                out.push(((acc >> 24u64) & 255u64) as uint8)
+                acc = acc >> 32u64
+                nacc -= 32
+            }
+        }
+        self.out = out
+        self.acc = acc
+        self.nacc = nacc
+        self.put(lc[256], ll[256])
+    }
+
+    // The end of the input: everything compressed, the final block, the
+    // trailer.
+    fun finish(var self) {
+        self.run(true)
+        self.write_block(self.pos, true)
+        self.align()
+        self.trailer()
+    }
+
+    // A sync flush, as zlib's Z_SYNC_FLUSH: everything given compressed
+    // and written, then an empty stored block, so the output so far ends on
+    // a byte and decodes to all of the input so far.
+    fun sync_flush(var self) {
+        self.run(true)
+        if self.pos > self.block_start || self.syms.len() > 0 { self.write_block(self.pos, false) }
+        self.write_stored(self.pos, self.pos, false)
+    }
+
+    // The output so far, handed out.
+    fun take_out(var self) -> [uint8] {
+        let o = self.out
+        self.out = []
+        return o
+    }
+}
+
+// `b` compressed at `level` as one stream of the container `format`.
+fun compress(b: [uint8], format: int32, level: int) -> [uint8] {
+    var d = new_deflate(format, level)
+    d.sum_in(b)
+    d.buf = b
+    d.finish()
+    return d.out
+}
+
+// The raw DEFLATE stream (RFC 1951) of `b`, compressed at `level`: 0
+// stores, 1 is the fastest, 9 the smallest; below 0 is the default, 6.
+#test(text(""), 6)[unhex("0300")]
+#test(text(""), 0)[unhex("010000ffff")]
+#test(text("a"), 0)[unhex("010100feff61")]
+#test(text("hello"), 1)[unhex("cb48cdc9c90700")] // fixed codes
+#test(run_of(97u8, 300), 6)[unhex("4b1c05440300")] // zlib: 4b4c1c05c40200, its chains end before position 0
+#test(run_of(97u8, 300), 1)[unhex("4b1c0544870000")] // greedy: the second match from the first
+pub fun deflate(b: [uint8], level: int = 6) -> [uint8] {
+    return compress(b, RAW, level)
+}
+
+// The gzip data (RFC 1952) of `b`: one member, compressed at `level`,
+// without a name or a time.
+#test(text(""), 6)[unhex("1f8b08000000000000ff03000000000000000000")]
+#test(text("hello\n"), 9)[unhex("1f8b08000000000002ffcb48cdc9c9e7020020303a3606000000")]
+pub fun gzip(b: [uint8], level: int = 6) -> [uint8] {
+    return compress(b, GZIP, level)
+}
+
+// The zlib stream (RFC 1950) of `b`, compressed at `level`.
+#test(text(""), 6)[unhex("789c030000000001")]
+#test(text("hello"), 0)[unhex("7801010500faff68656c6c6f062c0215")]
+#test(text("hello"), 6)[unhex("789ccb48cdc9c90700062c0215")]
+#test(run_of(97u8, 300), -1)[unhex("789c4b1c05440300d8a871ad")]
+pub fun zlib_compress(b: [uint8], level: int = 6) -> [uint8] {
+    return compress(b, ZLIB, level)
+}
+
+// --- Compressing as a stream --------------------------------------------------------
+
+// A stream that compresses what is written to it (`Write`) and writes the
+// compressed bytes to the stream it owns. `flush` ends what it has on a
+// byte, as zlib's sync flush does; `finish` ends the stream and gives the
+// inner stream back. Nothing finishes it when the program ends: finish it.
+pub struct Encoder<W> {
+    sink: [W],          // the inner stream, as `BufferedWriter` keeps it
+    core: Deflate,
+}
+
+// A stream that writes the raw DEFLATE stream of what is written to it, to
+// `w`, compressed at `level`.
+pub fun deflate_writer<W: Write>(w: W, level: int = 6) -> Encoder<W> {
+    return Encoder { sink: [w], core: new_deflate(RAW, level) }
+}
+
+// A stream that writes gzip data, one member, to `w`.
+pub fun gzip_writer<W: Write>(w: W, level: int = 6) -> Encoder<W> {
+    return Encoder { sink: [w], core: new_deflate(GZIP, level) }
+}
+
+// A stream that writes a zlib stream to `w`.
+pub fun zlib_writer<W: Write>(w: W, level: int = 6) -> Encoder<W> {
+    return Encoder { sink: [w], core: new_deflate(ZLIB, level) }
+}
+
+impl<W: Write> Encoder<W> {
+    // The compressed bytes made so far written to the inner stream.
+    fun push_out(var self) -> Result<(), IoError> {
+        if self.core.out.len() == 0 { return Ok(()) }
+        let b = self.core.take_out()
+        var w = self.sink.pop()
+        let r = w.write(b)
+        self.sink.push(w)
+        return match r {
+            Ok(_) => Ok(())
+            Err(e) => Err(e)
+        }
+    }
+
+    // The end of the stream written (the final block, the trailer), and the
+    // inner stream, flushed.
+    fun finish(self) -> Result<W, IoError> {
+        var me = self
+        me.core.finish()
+        me.push_out()?
+        var w = me.sink.pop()
+        w.flush()?
+        return Ok(w)
+    }
+}
+
+impl<W: Write> Write for Encoder<W> {
+    fun write(var self, b: [uint8]) -> Result<int, IoError> {
+        self.core.input(b)
+        if self.core.buf.len() - self.core.pos >= IN_BATCH { self.core.run(false) }
+        if self.core.out.len() >= OUT_BATCH { self.push_out()? }
+        return Ok(b.len())
+    }
+
+    fun write_str(var self, s: str) -> Result<int, IoError> {
+        var b: [uint8] = []
+        for i in 0..s.len() { b.push(s[i]) }
+        return self.write(b)
+    }
+
+    // Everything written so far compressed and passed on, ending on a byte
+    // (a sync flush), then the inner stream flushed.
+    fun flush(var self) -> Result<(), IoError> {
+        self.core.sync_flush()
+        self.push_out()?
+        var w = self.sink.pop()
+        let r = w.flush()
+        self.sink.push(w)
+        return r
+    }
+}
+
 // --- Test helpers ---------------------------------------------------------------
 
 // The bytes of `s`.
@@ -1591,5 +2723,160 @@ fun trailer_after_pieces() {
     for most in [1, 5, 13] {
         assert(agree(Ok(data), read_pieces(zlib_reader(trickle(z, most)), 4000)), f"zlib in pieces of {most}")
         assert(agree(Ok(data), read_pieces(gzip_reader(trickle(g, most)), 4000)), f"gzip in pieces of {most}")
+    }
+}
+
+// `n` bytes of noise from `seed` (the top byte of an LCG), with every
+// value: what compresses least.
+#test(3, 1)[[60u8, 94u8, 129u8]]
+fun noise(n: int, seed: int) -> [uint8] {
+    var out: [uint8] = []
+    var x = seed as uint32
+    for i in 0..n {
+        x = x * 1664525u32 + 1013904223u32
+        out.push((x >> 24u32) as uint8)
+    }
+    return out
+}
+
+// Inputs of each kind for the round trips: none, one byte, text, noise,
+// runs, and a mix of them longer than the window and than a block.
+fun samples() -> [[uint8]] {
+    let words = text("the quick brown fox jumps over the lazy dog; pack my box with five dozen liquor jugs. ")
+    var prose: [uint8] = []
+    var k = 0
+    while prose.len() < 6000 {
+        for x in words[(k * 7) % 40:] { prose.push(x) }
+        prose.push(((k * 31) & 63) as uint8 + 48u8)
+        k += 1
+    }
+    var runs: [uint8] = []
+    for i in 0..60 {
+        for j in 0..(i * 37) % 300 + 1 { runs.push((i & 3) as uint8) }
+    }
+    var mixed: [uint8] = []
+    var r = 0
+    while mixed.len() < 40000 {
+        let part = match r % 3 {
+            0 => prose[(r * 211) % 3000:(r * 211) % 3000 + 1500]
+            1 => noise(300 + r % 200, r)
+            _ => run_of((r * 13) as uint8, 500)
+        }
+        for x in part { mixed.push(x) }
+        r += 1
+    }
+    return [text(""), text("x"), prose, noise(3000, 7), runs, mixed]
+}
+
+// Every kind of input at levels of each kind comes back from the
+// decompressor, in each container.
+#test
+fun compresses_and_back() {
+    let inputs = samples()
+    for i in 0..inputs.len() {
+        let b = inputs[i]
+        for level in [0, 2, 4, 9] {
+            assert(agree(inflate(deflate(b, level)), Some(b)), f"deflate of input {i} at level {level}")
+        }
+        if b.len() < 10000 {
+            assert(agree(gunzip(gzip(b, 1)), Some(b)), f"gzip of input {i}")
+            assert(agree(zlib_decompress(zlib_compress(b, 6)), Some(b)), f"zlib of input {i}")
+        }
+    }
+}
+
+// The levels trade speed for size, noise is stored rather than coded, and
+// text shrinks.
+#test
+fun sizes() {
+    let inputs = samples()
+    let prose = inputs[2]
+    let mixed = inputs[5]
+    let fast = deflate(mixed, 1).len()
+    let small = deflate(mixed, 9).len()
+    assert(small <= deflate(mixed, 6).len() && deflate(mixed, 6).len() <= fast, "level 9 <= 6 <= 1")
+    assert(fast < mixed.len() / 2, f"mixed input at level 1: {fast} of {mixed.len()}")
+    assert(deflate(prose, 6).len() < prose.len() / 4, "text at level 6")
+    let n = noise(20000, 3)
+    assert(deflate(n, 6).len() <= n.len() + 10, "noise is stored")
+    assert(deflate(n, 0).len() == n.len() + 5, "level 0: one stored block")
+    let big = noise(70000, 5)
+    assert(deflate(big, 0).len() == big.len() + 10, "level 0: blocks of 65535 bytes")
+    assert(gzip(prose) == gzip(prose, 6) && deflate(prose, -1) == deflate(prose, 6), "the default level, 6")
+    assert(deflate(prose, 12) == deflate(prose, 9), "above 9: 9")
+}
+
+// The bytes `data` written to an `Encoder` in pieces of 1 to `most` bytes,
+// as bytes and as text by turns, then finished: what the inner stream got.
+fun written<W: Write>(e: Encoder<W>, data: [uint8], most: int) -> Result<W, IoError> {
+    var w = e
+    var p = 0
+    var k = 0
+    while p < data.len() {
+        k = k % most + 1
+        var end = p + k
+        if end > data.len() { end = data.len() }
+        if k % 2 == 0 {
+            w.write(data[p:end])?
+        } else {
+            var sb = StringBuilder()
+            for x in data[p:end] { sb.append_byte(x) }
+            w.write_str(sb.build())?
+        }
+        p = end
+    }
+    return w.finish()
+}
+
+// Bytes from a memory stream, or none.
+fun stream_bytes(r: Result<MemoryStream, IoError>) -> Option<[uint8]> {
+    return match r {
+        Ok(m) => Some(m.bytes())
+        Err(_) => None
+    }
+}
+
+// What a writer writes, whatever the pieces it is given, is what the
+// functions make, and decompresses to its input.
+#test
+fun writes_as_a_stream() {
+    let inputs = samples()
+    let mixed = inputs[5]
+    for level in [0, 1, 6] {
+        for most in [1000, 70000] {
+            let gz = stream_bytes(written(gzip_writer(memory_stream(), level), mixed, most))
+            assert(shown_some(gz) == shown(Ok(gzip(mixed, level))), f"gzip_writer at level {level}, pieces of {most}")
+            assert(agree(gunzip(gz.unwrap_or([])), Some(mixed)), f"gunzip at level {level}")
+        }
+    }
+    let zl = stream_bytes(written(zlib_writer(memory_stream(), 9), inputs[2], 100)).unwrap_or([])
+    assert(agree(zlib_decompress(zl), Some(inputs[2])), "zlib_writer")
+    let raw = stream_bytes(written(deflate_writer(memory_stream(), 4), inputs[4], 7)).unwrap_or([])
+    assert(agree(inflate(raw), Some(inputs[4])), "deflate_writer")
+    let none = stream_bytes(written(gzip_writer(memory_stream(), 6), [], 5)).unwrap_or([])
+    assert(none == gzip([], 6), "nothing written")
+}
+
+// A flush passes on everything written so far, ending on a byte: with a
+// final block after it, it decodes to all of that.
+#test
+fun flushes() {
+    let inputs = samples()
+    let mixed = inputs[5]
+    for level in [0, 3, 6] {
+        var e = deflate_writer(memory_stream(), level)
+        let r1 = e.write(mixed[:30000])
+        let f1 = e.flush()
+        var so_far = e.sink[0].bytes()
+        let n1 = so_far.len()
+        assert(n1 > 4 && so_far[n1 - 4:] == [0u8, 0u8, 255u8, 255u8], "an empty stored block ends it")
+        so_far.push(3)
+        so_far.push(0)
+        assert(agree(inflate(so_far), Some(mixed[:30000])), f"the output at the flush, at level {level}")
+        let r2 = e.write(mixed[30000:])
+        let f2 = e.flush()
+        let f3 = e.flush()
+        let all = stream_bytes(e.finish()).unwrap_or([])
+        assert(agree(inflate(all), Some(mixed)), f"the whole stream, at level {level}")
     }
 }
