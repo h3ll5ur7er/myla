@@ -2658,8 +2658,9 @@ pub fun sleep_ns(n: int64) {
 // is its count, read without the lock to see whether there are any. A
 // sleeper's entry holds its frame and no cell; a deadline's holds the
 // child task's first frame with its low bit set and the cell its `timeout`
-// reads (1 once the deadline fired). A worker that finds no frame while
-// there are timers polls (`exec_poll`) instead of parking.
+// reads (1 once the deadline fired); a wait's time limit (MYLA-387) its
+// waiter (`waiter`) with the bit 2 set and no cell. A worker that finds no
+// frame while there are timers polls (`exec_poll`) instead of parking.
 
 const TIMER: int64 = 32
 
@@ -2831,6 +2832,11 @@ fun timers_fire() {
         if (fr & 1) != 0 {
             __store64(rec, 1)
             cancel_locked(fr - 1)
+        } else if (fr & 2) != 0 {
+            // a wait on a notifier whose time passed (MYLA-387)
+            let w = fr - 2
+            unpark_locked(w, 3, false)
+            due.push(__load64(w))
         } else {
             due.push(fr)
         }
@@ -2878,6 +2884,18 @@ fun cancel_locked(t: int64) {
             }
         }
     }
+    // waiting on a notifier (MYLA-387): taken off it (and its time limit
+    // off the timers), queued, its wait cancelled
+    var pw = __rt_get("__parked")
+    while pw != 0 {
+        let next = __load64(pw + 32)
+        let wf = __load64(pw)
+        if task_below(__load64(wf + 40), t) {
+            unpark_locked(pw, 4, true)
+            exec_push(wf)
+        }
+        pw = next
+    }
     let cell = __rt_get("__timers")
     if cell == 0 {
         return
@@ -2888,7 +2906,7 @@ fun cancel_locked(t: int64) {
     while i < n {
         let e = cell + 16 + i * TIMER
         let fr = __load64(e + 16)
-        if (fr & 1) == 0 && task_below(__load64(fr + 40), t) {
+        if (fr & 3) == 0 && task_below(__load64(fr + 40), t) {
             __store64(e, 0)
             woke = true
         }
@@ -3272,6 +3290,235 @@ fun exec_stuck() {
     let msg = __addr_of("runtime error: every task waits for another one\n")
     os.write_all(2, msg + 8, __load64(msg))
     os.exit(1)
+}
+
+// --- notifiers: tasks parked until another wakes them (MYLA-387) -----------------
+// A notifier (`std.task.notifier`) is the record `[permits][generation][first
+// waiter][last]`, never freed: a handle is its address, so a copy reaches the
+// same one. A wait is a waiter, the cell `[frame][notifier][next][previous]
+// [next parked][previous parked][state][since][ms]` (WAITER bytes) that
+// `waiter` makes and `woken` frees: while it is parked it is on its
+// notifier's list, oldest first, and on `__parked`, every parked waiter's
+// list, which a cancel looks through. Its state: 0 made, 1 parked, then 2
+// notified, 3 timed out, 4 cancelled. `notify_one` wakes the oldest waiter,
+// or with none adds a permit, which the next wait takes at once (none is
+// lost when the wake comes before the wait); `notify_all` wakes every waiter
+// and counts a generation, which a wait `since` an older one sees at once.
+// Everything here is under the timers' lock: a wait's time limit is a timer
+// (the waiter tagged 2) and a cancel ends a wait, both under it already.
+
+const WAITER: int64 = 72
+
+// `__notifier()`: a new notifier, with no permit and no waiter.
+pub fun notifier() -> int64 {
+    let n = __alloc(32)
+    zero_words(n, 32)
+    return n
+}
+
+// `__notify_gen(n)`: how many times `notify_all` woke the notifier `n`'s
+// waiters so far (`std.task`'s `listen`).
+pub fun notify_gen(n: int64) -> int64 {
+    let lock = __rt_addr("__timer_lock")
+    take_lock(lock)
+    let g = __load64(n + 8)
+    give_lock(lock)
+    return g
+}
+
+// `__waiter(n, since, ms)`: a wait on the notifier `n`, `since` its
+// generation (-1: any), for at most `ms` milliseconds (negative: no limit),
+// to park (`__park`) and then read (`__woken`).
+pub fun waiter(n: int64, since: int64, ms: int) -> int64 {
+    let w = __alloc(WAITER)
+    zero_words(w, WAITER)
+    __store64(w + 8, n)
+    __store64(w + 56, since)
+    __store64(w + 64, ms as int64)
+    return w
+}
+
+// `__woken(w)`: how the wait `w` ended, 1 notified, 0 its time passed, 2 its
+// task was asked to stop (D96); the waiter freed.
+pub fun woken(w: int64) -> int {
+    let st = __load64(w + 48)
+    __free(w)
+    if st == 2 {
+        return 1
+    }
+    if st == 4 {
+        return 2
+    }
+    return 0
+}
+
+// The state the wait `w` ends with at once (the lock held, if there are
+// tasks), else 1 (it parks): a permit there (taken), a `notify_all` since
+// its generation, no time to wait.
+fun park_now(w: int64) -> int64 {
+    let n = __load64(w + 8)
+    let permits = __load64(n)
+    if permits > 0 {
+        __store64(n, permits - 1)
+        return 2
+    }
+    let since = __load64(w + 56)
+    if since >= 0 && __load64(n + 8) != since {
+        return 2
+    }
+    if __load64(w + 64) == 0 {
+        return 3
+    }
+    return 1
+}
+
+// `myla___park(frame, w)`: the frame parked on the wait `w`'s notifier until
+// it is woken, its time passes or its task is asked to stop (its frame
+// function suspends after this call); queued at once when it needn't wait.
+pub fun park_frame(fr: int64, w: int64) {
+    let lock = __rt_addr("__timer_lock")
+    take_lock(lock)
+    // (its flags read under the lock, `task_cancel`)
+    var st: int64 = 4
+    if task_cancelled() == 0 {
+        st = park_now(w)
+    }
+    if st != 1 {
+        __store64(w + 48, st)
+        give_lock(lock)
+        exec_push(fr)
+        return
+    }
+    __store64(w, fr)
+    __store64(w + 48, 1)
+    // last on its notifier's list
+    let n = __load64(w + 8)
+    let last = __load64(n + 24)
+    __store64(w + 24, last)
+    if last != 0 {
+        __store64(last + 16, w)
+    } else {
+        __store64(n + 16, w)
+    }
+    __store64(n + 24, w)
+    // first on every parked waiter's
+    let head = __rt_get("__parked")
+    __store64(w + 32, head)
+    if head != 0 {
+        __store64(head + 40, w)
+    }
+    __store64(__rt_addr("__parked"), w)
+    let ms = __load64(w + 64)
+    if ms > 0 {
+        let seq = timer_add_locked(os.clock_ns() + ms * 1000000, w | 2, 0)
+    }
+    give_lock(lock)
+    if ms > 0 {
+        timers_changed()
+    }
+}
+
+// `__park(w)` without tasks: nobody else can wake it, so the wait ends at
+// once, after its time, or never (every task waits).
+pub fun park_alone(w: int64) {
+    var st = park_now(w)
+    if st == 1 {
+        let ms = __load64(w + 64)
+        if ms < 0 {
+            exec_stuck()
+        }
+        os.sleep_ns(ms * 1000000)
+        st = 3
+    }
+    __store64(w + 48, st)
+}
+
+// The parked waiter `w` taken off its notifier's list and `__parked`, its
+// time limit off the timers (`forget`: unless a timer fired it), its state
+// `st` (the lock held).
+fun unpark_locked(w: int64, st: int64, forget: bool) {
+    let n = __load64(w + 8)
+    let next = __load64(w + 16)
+    let prev = __load64(w + 24)
+    if prev != 0 {
+        __store64(prev + 16, next)
+    } else {
+        __store64(n + 16, next)
+    }
+    if next != 0 {
+        __store64(next + 24, prev)
+    } else {
+        __store64(n + 24, prev)
+    }
+    let gnext = __load64(w + 32)
+    let gprev = __load64(w + 40)
+    if gprev != 0 {
+        __store64(gprev + 32, gnext)
+    } else {
+        __store64(__rt_addr("__parked"), gnext)
+    }
+    if gnext != 0 {
+        __store64(gnext + 40, gprev)
+    }
+    if forget && __load64(w + 64) > 0 {
+        timers_forget(w | 2)
+    }
+    __store64(w + 48, st)
+}
+
+// `__notify(n, all)`: the oldest task waiting on the notifier `n` woken, or
+// a permit added when none waits; `all`: every task waiting woken and the
+// generation counted, no permit. The frames woken are queued so that the
+// one that waited longest runs first, as the timers queue sleepers.
+pub fun notify(n: int64, all: bool) {
+    let lock = __rt_addr("__timer_lock")
+    take_lock(lock)
+    if !all {
+        let w = __load64(n + 16)
+        if w == 0 {
+            __store64(n, __load64(n) + 1)
+            give_lock(lock)
+            return
+        }
+        let fr = __load64(w)
+        unpark_locked(w, 2, true)
+        give_lock(lock)
+        exec_push(fr)
+        return
+    }
+    __store64(n + 8, __load64(n + 8) + 1)
+    if __load64(n + 16) == 0 {
+        give_lock(lock)
+        return
+    }
+    var due: [int64] = []
+    while __load64(n + 16) != 0 {
+        let w = __load64(n + 16)
+        due.push(__load64(w))
+        unpark_locked(w, 2, true)
+    }
+    give_lock(lock)
+    if __rt_get("__exec_sched") == 1 {
+        for fr in due {
+            exec_push(fr)
+        }
+    } else {
+        var i = due.len()
+        while i > 0 {
+            i -= 1
+            exec_push(due[i])
+        }
+    }
+}
+
+// `__notify(n, all)` without tasks: no task waits (`park_alone` parks
+// none), so a permit added, or the generation counted.
+pub fun notify_alone(n: int64, all: bool) {
+    if all {
+        __store64(n + 8, __load64(n + 8) + 1)
+    } else {
+        __store64(n, __load64(n) + 1)
+    }
 }
 
 // --- lists -----------------------------------------------------------------------

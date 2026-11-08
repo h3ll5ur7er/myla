@@ -106,6 +106,17 @@ EXPECTED = {
     "t25_timers_fire": ("128\n", 0),
     "t26_tasks_yield": ("6400\n", 0),
     "t27_children_read_as_they_write": ("86\n", 0),
+    # 28-29. tasks parked on notifiers (MYLA-387): thousands of park and wake
+    # rounds lose no wake-up; parked tasks count for the stuck detection
+    # only once nobody is left to wake them
+    "t28_parked_and_woken": ("16000\n3200\n1600\n", 0),
+    "t29_nobody_left_to_wake": ("200\nfalse\n", 1),
+}
+
+# program -> what it writes to standard error (the others write nothing
+# there that is checked)
+EXPECTED_STDERR = {
+    "t29_nobody_left_to_wake": "runtime error: every task waits for another one\n",
 }
 
 
@@ -125,6 +136,26 @@ class ConcurrencyStress(unittest.TestCase):
     def test_every_program_has_its_expectation(self):
         programs = sorted(f[:-3] for f in os.listdir(_DIR) if f.endswith(".my"))
         self.assertEqual(programs, sorted(EXPECTED))
+
+    @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
+    def test_what_they_report(self):
+        from ._tools import selfhost_tool
+        interp = selfhost_tool("interp_main")
+        gen = selfhost_tool("gen_main")
+        for name, want in EXPECTED_STDERR.items():
+            src = os.path.join(_DIR, name + ".my")
+            with self.subTest(program=name), tempfile.TemporaryDirectory() as tmp:
+                p = subprocess.run([interp, src, STDLIB_ROOT], capture_output=True, text=True, timeout=_WATCHDOG)
+                self.assertEqual(p.stderr, want, "interpreted")
+                exe = os.path.join(tmp, name)
+                asm = subprocess.run([gen, src, STDLIB_ROOT], capture_output=True, text=True, check=True).stdout
+                with open(exe + ".s", "w", encoding="utf-8") as fh:
+                    fh.write(asm)
+                subprocess.run(["gcc", "-nostdlib", "-static", "-o", exe, exe + ".s"], check=True)
+                for workers in ["1", "4"]:
+                    p = subprocess.run([exe], capture_output=True, text=True, timeout=_WATCHDOG,
+                                       env=dict(os.environ, MYLA_THREADS=workers))
+                    self.assertEqual(p.stderr, want, f"{workers} workers")
 
     @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
     def test_the_self_hosted_interpreter(self):

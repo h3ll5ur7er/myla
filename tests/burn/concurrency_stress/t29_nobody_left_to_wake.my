@@ -1,0 +1,33 @@
+// 29. The executor's stuck detection and parked tasks (MYLA-387): two
+// hundred tasks parked on a notifier are no deadlock while the entry can
+// still wake them; a wait with a time limit is none either, even with
+// every other task parked; but once every task waits on a notifier nobody
+// is left to wake, the program ends with "every task waits for another
+// one" (status 1) instead of hanging.
+import std.task as task
+
+async fun parked(n: task.Notifier) -> int {
+    if await n.wait() { return 1 }
+    return 0
+}
+
+#main
+async fun main() {
+    let n = task.notifier()
+    var fs: [async () -> int] = []
+    for i in 0..200 {
+        fs.push(async () => await parked(n))
+    }
+    async let rs = task.all(fs)
+    await task.sleep(5)
+    for i in 0..200 {
+        n.notify_one()
+    }
+    var k = 0
+    for r in await rs { k += r }
+    print(k)
+    let never = task.notifier()
+    async let a = parked(never)
+    print(await never.wait_timeout(20))
+    print(await a)
+}

@@ -93,3 +93,186 @@ pub async fun timeout<T>(ms: int, f: async () -> T) -> Option<T> {
     return None
 }
 
+// --- waiting until woken: notifiers (MYLA-387) ------------------------------------
+//
+// A task that waits for a condition another task makes true (a value in a
+// channel, a slot free in a pool) parks on a notifier until that task wakes
+// it, without looking again and again: a parked task costs no CPU and wakes
+// as soon as it is woken. A notifier is a handle, as an actor's is: copying
+// it copies the reference, so tasks share one by passing it on, and an
+// actor's method can keep the notifiers of the tasks waiting for it in its
+// fields and wake them (the channel's way: the receiver that finds it empty
+// leaves its notifier with the actor in the same call, and the sender's call
+// wakes it). Natively a notifier lives as long as the program.
+//
+// `notify_one` wakes the task that has waited longest, or, when none waits,
+// leaves a permit, which the next wait takes and ends at once; permits add
+// up, one per `notify_one`, so a wake-up that comes before the wait isn't
+// lost, and every `notify_one` ends exactly one wait. `notify_all` wakes
+// every task waiting now and leaves no permit: a task that looks at its
+// condition and then waits takes a `listen()` before it looks, whose waits
+// end at once if a `notify_all` came in between. A wait may end with the
+// condition still false (another task got there first): the waiter looks
+// again, in a loop. A task asked to stop (D96) stops waiting at once (its
+// wait gives `false`), and a failure (D97) ends the program with every
+// parked task in it; a program whose every task waits, with nobody left to
+// wake one, ends with the runtime error "every task waits for another one".
+
+// A notifier: tasks wait on it until another task, or an actor's method,
+// wakes them.
+#derive(Eq, Hash)
+pub struct Notifier {
+    id: int64,
+}
+
+// A notifier as seen from the moment of `Notifier.listen`: its waits end at
+// once if a `notify_all` woke the notifier's waiters since then.
+#derive(Eq, Hash)
+pub struct Listener {
+    id: int64,
+    gen: int64,
+}
+
+// A new notifier, with no permit and no task waiting.
+pub fun notifier() -> Notifier {
+    return Notifier { id: __notifier() }
+}
+
+impl Notifier {
+    // Wakes the task that has waited longest on this notifier, or leaves a
+    // permit for the next wait when none waits.
+    fun notify_one(self) {
+        __notify(self.id, false)
+    }
+
+    // Wakes every task waiting on this notifier now (no permit is left).
+    fun notify_all(self) {
+        __notify(self.id, true)
+    }
+
+    // `await n.wait()`: the running task parked until another wakes it, the
+    // other tasks running meanwhile; at once with a permit. True when it was
+    // woken, false when the task was asked to stop (D96).
+    async fun wait(self) -> bool {
+        return await wait_on(self.id, -1i64, -1)
+    }
+
+    // `wait`, for at most `ms` milliseconds: false when they passed first (or
+    // the task was asked to stop). With `ms <= 0` it doesn't wait: whether a
+    // permit was there to take.
+    async fun wait_timeout(self, ms: int) -> bool {
+        return await wait_on(self.id, -1i64, limit(ms))
+    }
+
+    // The notifier from now on: a wait on the listener also ends at once
+    // when a `notify_all` came after this.
+    fun listen(self) -> Listener {
+        return Listener { id: self.id, gen: __notify_gen(self.id) }
+    }
+}
+
+impl Listener {
+    // `Notifier.wait`, ending at once when a `notify_all` came since the
+    // `listen`.
+    async fun wait(self) -> bool {
+        return await wait_on(self.id, self.gen, -1)
+    }
+
+    // `Notifier.wait_timeout`, ending at once when a `notify_all` came since
+    // the `listen`.
+    async fun wait_timeout(self, ms: int) -> bool {
+        return await wait_on(self.id, self.gen, limit(ms))
+    }
+}
+
+// A time limit for `__waiter`: none negative, so `ms <= 0` is 0 (no wait).
+#test(-5)[0]
+#test(0)[0]
+#test(7)[7]
+fun limit(ms: int) -> int {
+    if ms < 0 {
+        return 0
+    }
+    return ms
+}
+
+// One wait on the notifier `n` (since its generation `since`, -1 any; for
+// at most `ms` milliseconds, -1 no limit): whether it was woken.
+async fun wait_on(n: int64, since: int64, ms: int) -> bool {
+    let w = __waiter(n, since, ms)
+    await __park(w)
+    return __woken(w) == 1
+}
+
+// A waiter that sees whether it was woken, and whether it was asked to stop.
+async fun waits_on(n: Notifier) -> (bool, bool) {
+    let woken = await n.wait()
+    return (woken, cancelled())
+}
+
+// `notify_one` `k` times, after a turn for the others.
+async fun wakes(n: Notifier, k: int) {
+    await yield()
+    for i in 0..k {
+        n.notify_one()
+    }
+}
+
+// Wakes before the waits are kept, one permit each.
+#test
+async fun permits_add_up() {
+    let n = notifier()
+    n.notify_one()
+    n.notify_one()
+    assert(await n.wait())
+    assert(await n.wait_timeout(0))
+    assert(!(await n.wait_timeout(0)))
+}
+
+// Each `notify_one` wakes one waiter, and leaves no permit behind.
+#test
+async fun notify_one_wakes_one() {
+    let n = notifier()
+    async let a = waits_on(n)
+    async let b = waits_on(n)
+    async let w = wakes(n, 2)
+    await w
+    assert(await a == (true, false))
+    assert(await b == (true, false))
+    assert(!(await n.wait_timeout(0)))
+}
+
+// `notify_all` leaves no permit, but a listener taken before it sees it.
+#test
+async fun notify_all_and_listeners() {
+    let n = notifier()
+    n.notify_all()
+    assert(!(await n.wait_timeout(0)))
+    let l = n.listen()
+    n.notify_all()
+    assert(await l.wait())
+    assert(await l.wait_timeout(10))
+    assert(!(await n.listen().wait_timeout(0)))
+}
+
+// A waiter asked to stop (here by `timeout`) stops waiting.
+#test
+async fun a_cancelled_wait_ends() {
+    let n = notifier()
+    let r = await timeout(5, async () => await waits_on(n))
+    let stopped = match r {
+        Some(x) => false
+        None => true
+    }
+    assert(stopped)
+}
+
+// A wait's time limit passes; a wake before it ends the wait first.
+#test
+async fun a_wait_times_out() {
+    let n = notifier()
+    assert(!(await n.wait_timeout(5)))
+    async let w = wakes(n, 1)
+    assert(await n.wait_timeout(60000))
+    await w
+}

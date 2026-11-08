@@ -9,6 +9,7 @@
 
 from .ast import Expr, ExprKind, Stmt, StmtKind, Block, Decl, DeclKind, FunData, Param, MatchArm, Pattern, PatternKind, FieldPat, BindElem, ExprOrBlock, ElseTail, FieldInit, MapEntry, Attribute, TypeExpr, TypeKind, TypeParam, bind_elems, names_in_expr, names_in_block, Expected, expected_failure
 from .tokens import SrcSpan, no_span
+from .checker import is_notify_primitive
 from .checker import Checker, Type, Subst, subst_type, subst_get, unify_param, type_name, is_raw_memory_primitive, is_net_primitive, checker_on, builtin_method, builtin_method_name, is_slice_expr, from_end_of, slice_parts, is_hole_part
 from .anf import Norm, new_norm, stmt_suspends, body_suspends
 from .util import cp_utf8, format_specs
@@ -134,8 +135,20 @@ struct AFrame { scopes: [RtFrame], conts: [Cont], place: Option<Place>, pend: Ct
 struct Task { frames: [AFrame], state: int32, value: Value, failed: bool, err: Option<RtError>, code: int32, awaited: bool, waiters: [int32], cancelled: bool, kids: [int32], requested: bool }
 
 // A task asleep (`std.task.sleep`, D124): until `at` on the interpreter's
-// clock (`Interp.now`), `seq` the order tasks went to sleep in.
-struct Sleeper { at: int64, seq: int64, task: int32 }
+// clock (`Interp.now`), `seq` the order tasks went to sleep in; `wait` the
+// wait on a notifier whose time limit it is (MYLA-387), else -1.
+struct Sleeper { at: int64, seq: int64, task: int32, wait: int32 }
+
+// A notifier (`std.task.notifier`, MYLA-387): its permits (each a
+// `notify_one` nobody waited for, which the next wait takes), how many
+// `notify_all`s it had, the waits parked on it (`Interp.pwaits`), oldest
+// first.
+struct Notif { permits: int64, gen: int64, waits: [int32] }
+
+// A wait on the notifier `n` (`__waiter`): its task once it parks, the
+// generation it waits from (-1: any), its time limit in milliseconds (-1:
+// none), its state: 0 made, 1 parked, 2 notified, 3 timed out, 4 cancelled.
+struct PWait { task: int32, n: int32, since: int64, ms: int64, state: int32 }
 
 // A task waiting for input on `fd` (D124, `std.io`'s async reads).
 // `events` 0: until `fd` (or `fd2`) is readable; else until the socket `fd`
@@ -227,6 +240,11 @@ pub struct Interp {
     deadlines: [Deadline],
     fired: [bool],
     fd_waits: [FdWait],
+    // MYLA-387: the notifiers, the waits on them and those parked now (as
+    // native code's `__parked`)
+    notifs: [Notif],
+    pwaits: [PWait],
+    parked_waits: [int32],
     sleep_seq: int64,
     virtual_time: bool,
     vclock: int64,
@@ -494,7 +512,7 @@ pub fun new_interp(c: Checker, argv: [str]) -> Interp {
         failing: false, fail_err: None, fail_code: 0,
         on_failure: (r: RtError) => false, fail_reported: false,
         depth: 0,
-        sleepers: [], deadlines: [], fired: [], fd_waits: [], sleep_seq: 0, virtual_time: false, vclock: 0,
+        sleepers: [], deadlines: [], fired: [], fd_waits: [], notifs: [], pwaits: [], parked_waits: [], sleep_seq: 0, virtual_time: false, vclock: 0,
         testing: false, defer_errs: [], captured: [], test_root: "", test_program: "",
         static_calls: c.static_calls, impl_selfs: c.static_selfs, call_types: [:], type_env: c.on_type_params,
         tparams: [], types: [], type_ix: [:], env_next: None, env_fi: -1, env_tail: None, env_tail_fi: -1,
@@ -1319,6 +1337,9 @@ impl Interp {
         self.deadlines = []
         self.fired = []
         self.fd_waits = []
+        self.notifs = []
+        self.pwaits = []
+        self.parked_waits = []
     }
 
     // The async function `fi` called with `argv` as the first task, every
@@ -1376,6 +1397,15 @@ impl Interp {
             }
             self.frames = []
             self.scopes = []
+        }
+        // no task ready, none asleep or waiting for input, and the first
+        // not done: every task waits on a notifier nobody can wake
+        // (MYLA-387), as native code's `exec_stuck` reports it
+        if self.tasks[0].state != 2 && !self.failing {
+            self.rt_err = Some(RtError { msg: "every task waits for another one", line: 0, col: 0, sp: no_span(), node: -1 })
+            self.ctrl = Ctrl.CExit
+            self.exit_code = 1
+            return Value.VUnit
         }
         // the first task's failure is the program's
         if self.tasks[0].failed {
@@ -1449,6 +1479,7 @@ impl Interp {
             }
             if best < 0 { break }
             let t = self.sleepers[best].task
+            let wi = self.sleepers[best].wait
             var rest: [Sleeper] = []
             var j = 0
             while j < self.sleepers.len() {
@@ -1456,6 +1487,8 @@ impl Interp {
                 j = j + 1
             }
             self.sleepers = rest
+            // a wait whose time passed: off its notifier (MYLA-387)
+            if wi >= 0 { self.unpark(wi, 3, false) }
             self.tasks[t].state = 0
             due.push(t)
         }
@@ -1834,7 +1867,167 @@ impl Interp {
             }
             self.fd_waits = rest
         }
+        // waiting on a notifier (MYLA-387): the wait cancelled, ready
+        for wi in self.parked_waits {
+            if self.pwaits[wi].task == id {
+                self.unpark(wi, 4, true)
+                self.ready(id)
+            }
+        }
         for k in self.tasks[id].kids { self.request_cancel(k) }
+    }
+
+    // -- notifiers (MYLA-387) -------------------------------------------
+    //
+    // As native code's (std.rt's `park_frame`, `notify`): a wait takes a
+    // permit, or sees a `notify_all` since its generation, or parks on its
+    // notifier until `notify_one` (oldest first) or `notify_all` wakes it,
+    // its time limit passes (a sleeper of its own) or its task is asked to
+    // stop; a failure (D97) wakes every wait, which then stops.
+
+    // `__notifier()`, `__notify(n, all)`, `__notify_gen(n)`, `__waiter(n,
+    // since, ms)`, `__park(w)` and `__woken(w)`, the call `e`.
+    fun notify_primitive(var self, e: Expr, nm: str, args: [Expr]) -> Value {
+        var ints: [int64] = []
+        var all = false
+        for a in args {
+            match self.eval(a) {
+                Value.VBool(b) => { all = b },
+                v => { ints.push(as_int(v)) },
+            }
+        }
+        if self.stop() { return Value.VUnit }
+        if nm == "__notifier" {
+            self.notifs.push(Notif { permits: 0, gen: 0, waits: [] })
+            return Value.VInt((self.notifs.len() - 1) as int64)
+        }
+        if nm == "__notify_gen" { return Value.VInt(self.notifs[ints[0] as int32].gen) }
+        if nm == "__notify" {
+            self.notify(ints[0] as int32, all)
+            return Value.VUnit
+        }
+        if nm == "__waiter" {
+            self.pwaits.push(PWait { task: -1, n: ints[0] as int32, since: ints[1], ms: ints[2], state: 0 })
+            return Value.VInt((self.pwaits.len() - 1) as int64)
+        }
+        if nm == "__woken" {
+            let st = self.pwaits[ints[0] as int32].state
+            if st == 2 { return Value.VInt(1) }
+            if st == 4 { return Value.VInt(2) }
+            return Value.VInt(0)
+        }
+        self.park(e, ints[0] as int32)
+        return Value.VUnit
+    }
+
+    // `__park(w)` (the call `e`): the running task parked on the wait `w`,
+    // or ready again at once when it needn't wait, as native code queues
+    // it; outside any task nobody can wake it, so it ends at once, after
+    // its time, or never (every task waits).
+    fun park(var self, e: Expr, wi: int32) {
+        let ni = self.pwaits[wi].n
+        let outside = self.cur < 0 || self.cur >= self.tasks.len()
+        var st = 1
+        if !outside && (self.tasks[self.cur].requested || self.tasks[self.cur].cancelled) {
+            st = 4
+        } else if self.notifs[ni].permits > 0 {
+            self.notifs[ni].permits = self.notifs[ni].permits - 1
+            st = 2
+        } else if self.pwaits[wi].since >= 0 && self.notifs[ni].gen != self.pwaits[wi].since {
+            st = 2
+        } else if self.pwaits[wi].ms == 0 {
+            st = 3
+        }
+        if outside {
+            if st == 1 {
+                let ms = self.pwaits[wi].ms
+                if ms < 0 {
+                    self.rt_err = Some(RtError { msg: "every task waits for another one", line: 0, col: 0, sp: no_span(), node: -1 })
+                    self.ctrl = Ctrl.CExit
+                    self.exit_code = 1
+                    return
+                }
+                if self.virtual_time { self.vclock = self.vclock + ms * 1000000 } else { __sleep_ns(ms * 1000000) }
+                st = 3
+            }
+            self.pwaits[wi].state = st
+            return
+        }
+        self.parked = true
+        if st != 1 {
+            self.pwaits[wi].state = st
+            self.ready(self.cur)
+            return
+        }
+        self.pwaits[wi].state = 1
+        self.pwaits[wi].task = self.cur
+        self.notifs[ni].waits.push(wi)
+        self.parked_waits.push(wi)
+        let ms = self.pwaits[wi].ms
+        if ms > 0 {
+            self.sleepers.push(Sleeper { at: self.now() + ms * 1000000, seq: self.sleep_seq, task: self.cur, wait: wi })
+            self.sleep_seq = self.sleep_seq + 1
+        }
+        self.tasks[self.cur].state = 1
+    }
+
+    // The parked wait `w` off its notifier and the parked ones, its time
+    // limit off the sleepers (`forget`: unless it is the one that woke
+    // it), its state `st`, its task no longer waiting (not yet ready).
+    fun unpark(var self, wi: int32, st: int32, forget: bool) {
+        let ni = self.pwaits[wi].n
+        var rest: [int32] = []
+        for x in self.notifs[ni].waits {
+            if x != wi { rest.push(x) }
+        }
+        self.notifs[ni].waits = rest
+        var left: [int32] = []
+        for x in self.parked_waits {
+            if x != wi { left.push(x) }
+        }
+        self.parked_waits = left
+        if forget && self.pwaits[wi].ms > 0 {
+            var keep: [Sleeper] = []
+            for z in self.sleepers {
+                if z.wait != wi { keep.push(z) }
+            }
+            self.sleepers = keep
+        }
+        self.pwaits[wi].state = st
+        self.tasks[self.pwaits[wi].task].state = 0
+    }
+
+    // `__notify(n, all)`: the oldest wait on the notifier `n` woken, or a
+    // permit added when none waits; `all`: every wait woken and the
+    // generation counted, no permit. Made ready so that the one that waited
+    // longest runs first, as native code queues them.
+    fun notify(var self, ni: int32, all: bool) {
+        if !all {
+            if self.notifs[ni].waits.len() == 0 {
+                self.notifs[ni].permits = self.notifs[ni].permits + 1
+                return
+            }
+            let wi = self.notifs[ni].waits[0]
+            self.unpark(wi, 2, true)
+            self.ready(self.pwaits[wi].task)
+            return
+        }
+        self.notifs[ni].gen = self.notifs[ni].gen + 1
+        let ws = self.notifs[ni].waits
+        var due: [int32] = []
+        for wi in ws {
+            self.unpark(wi, 2, true)
+            due.push(self.pwaits[wi].task)
+        }
+        if self.sched == SCHED_FIFO {
+            for t in due { self.ready(t) }
+        } else {
+            var i = due.len()
+            while i > 0 {
+                i = i - 1
+                self.ready(due[i])
+            }
+        }
     }
 
     // The current task waits for the task `id` to end.
@@ -2078,6 +2271,13 @@ impl Interp {
             self.fail_err = err
             self.fail_code = code
             self.cancel_task(0)
+            // the tasks parked on notifiers stop too (MYLA-387): nobody may
+            // wake them now
+            for wi in self.parked_waits {
+                let pt = self.pwaits[wi].task
+                self.unpark(wi, 4, true)
+                self.ready(pt)
+            }
             match err {
                 Some(r) => { self.fail_reported = self.on_failure(r) },
                 None => {},
@@ -3765,6 +3965,8 @@ impl Interp {
         if nm == "__task_cancelled" {
             return Value.VBool(self.cur < self.tasks.len() && self.tasks[self.cur].requested)
         }
+        // std.task's notifiers (MYLA-387)
+        if is_notify_primitive(nm) { return self.notify_primitive(e, nm, args) }
         // nothing but the turn its `await` gives (MYLA-228)
         if nm == "__yield" { return Value.VUnit }
         // the running task asleep (D124): parked until its time, which
@@ -3780,7 +3982,7 @@ impl Interp {
             var d = ms
             // no time at all in a task already asked to stop
             if d < 0 || self.tasks[self.cur].requested { d = 0 }
-            self.sleepers.push(Sleeper { at: self.now() + d * 1000000, seq: self.sleep_seq, task: self.cur })
+            self.sleepers.push(Sleeper { at: self.now() + d * 1000000, seq: self.sleep_seq, task: self.cur, wait: -1 })
             self.sleep_seq = self.sleep_seq + 1
             self.tasks[self.cur].state = 1
             self.parked = true
