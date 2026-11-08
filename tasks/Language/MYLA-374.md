@@ -19,10 +19,11 @@ It passed interpreted. Natively: "unreachable match arm (a previous arm already 
 
 - [x] `enum_helpers` in [[selfhost/harness.my]] leaves out the `_` arm when the enum has one variant
 - [x] A burn test: a one-variant enum, as a result and inside a `Result`, natively the same report as interpreted
-- [x] The harness's own cases pass and are run by a burn test (`byte_offset`'s first case expected 9 for the byte offset of `ö`, which is 8: the cases had never been run)
+- [x] The harness's own cases pass and are run by a burn test, and so are every toolchain file's (`test_selfhost_cases`) (`byte_offset`'s first case expected 9 for the byte offset of `ö`, which is 8: the cases had never been run)
 
 ## Evidence
 
 - Test first: `test_an_enum_of_one_variant` failed before the change, and passes after it. `myla test selfhost/harness.my` gave 24/25 before (`byte_offset #1: expected 9, got 8`). The checker counts columns in characters (`let s = "é"; let x: int = "a"` reports column 18), so 8 is right. Now 27/27, with two new cases. `test_the_harness_passes_its_own_cases` runs them.
 - `python3 -m unittest tests.burn.test_test_native tests.burn.test_test_functions`: 14 tests OK, before the two harness-case tests were added; both of those pass too.
 - `scripts/bootstrap.sh`: byte-identical fixed point (14,322,660 bytes).
+- `tests/burn/test_selfhost_cases.py` (new): every file of `selfhost/` and `tools/` with `#test` cases passes them, four files at a time, in 30 s. Nothing ran them before: `test_selfhost_cli`'s corpus skips every toolchain file, since each one has changed since the Python recordings. The first full run found one more stale case, `lower.my`'s `map_lookup` (it counts temporaries, and MYLA-313 added one), which is fixed. All 34 `selfhost/` files and the tools' files pass (checker 633, interp 371, codegen 342, …).
