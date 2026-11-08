@@ -2217,6 +2217,12 @@ impl CodeGen {
         // 1 once a stack overflow is being reported (`__on_segv`)
         out.push("__segv_once:")
         out.push("\t.skip 8")
+        // the self-pipe of caught signals (std.platform's `signal_listen`,
+        // MYLA-350): its write end, which `__on_signal` writes to, its read
+        // end plus one, how many listen, a lock, SIGINT's and SIGTERM's
+        // handlers from before
+        out.push("__sig_pipe:")
+        out.push("\t.skip 48")
         // a runtime error's line and column as digits (std.rt's
         // `write_err_num`)
         out.push("__panic_buf:")

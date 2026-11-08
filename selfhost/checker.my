@@ -810,7 +810,32 @@ fun is_builtin_func(name: str) -> bool {
 #test("__wall_ns")[true]
 #test("__read")[false]
 pub fun is_platform_primitive(name: str) -> bool {
-    return name == "__random_bytes" || name == "__open" || name == "__seek" || name == "__fstat" || name == "__spawn_piped" || name == "__try_reap" || name == "__wall_ns" || is_net_primitive(name)
+    return name == "__random_bytes" || name == "__open" || name == "__seek" || name == "__fstat" || name == "__spawn_piped" || name == "__try_reap" || name == "__wall_ns" || is_net_primitive(name) || is_term_primitive(name)
+}
+
+// The terminal and signal primitives of MYLA-350 (std.term's and
+// std.signal's), platform primitives too: each a function of std.rt over
+// std.platform's, and in the interpreter the host's own.
+#test("__term_raw")[true]
+#test("__signal_take")[true]
+#test("__term_vt")[true]
+#test("__terminal")[false]
+pub fun is_term_primitive(name: str) -> bool {
+    if name.len() < 9 || name[0] != '_' || name[1] != '_' { return false }
+    return name == "__term_is_tty" || name == "__term_size" || name == "__term_get" || name == "__term_set" || name == "__term_raw" || name == "__term_vt" || name == "__signal_listen" || name == "__signal_take"
+}
+
+// A terminal or signal primitive's parameters, as its messages show them
+// and as types, and its result type.
+#test("__term_get")[("fd: int", [Type.TInt(32, true)], Type.TStr)]
+#test("__signal_listen")[("on: int", [Type.TInt(32, true)], Type.TInt(32, true))]
+fun term_primitive_sig(name: str) -> (str, [Type], Type) {
+    let i = t_int()
+    if name == "__term_get" { return ("fd: int", [i], Type.TStr) }
+    if name == "__term_set" { return ("fd: int, mode: str", [i, Type.TStr], i) }
+    if name == "__signal_listen" { return ("on: int", [i], i) }
+    if name == "__signal_take" { return ("h: int", [i], i) }
+    return ("fd: int", [i], i)
 }
 
 // The socket primitives of MYLA-346 (std.net's), platform primitives too:
@@ -7846,6 +7871,11 @@ impl Checker {
         var result = Type.TList(t_byte())
         if is_net_primitive(name) {
             let sig = net_primitive_sig(name)
+            shape = sig.0
+            want = sig.1
+            result = sig.2
+        } else if is_term_primitive(name) {
+            let sig = term_primitive_sig(name)
             shape = sig.0
             want = sig.1
             result = sig.2
