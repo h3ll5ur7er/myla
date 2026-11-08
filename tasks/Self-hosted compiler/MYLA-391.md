@@ -1,0 +1,17 @@
+---
+id: MYLA-391
+title: "Interpreter: a method on a temporary whose type is a type parameter"
+type: bug
+status: review
+priority: medium
+labels: [interpreter, generics, parity]
+---
+Found by the MYLA-384 lane. Interpreted, `x.scaled(2).area()` with `x: T` (`T: Shape`) printed `ERR: VUnit` and the program exited 0; natively it printed `36`. The interpreter erases types, so `recv_key` keys a method call by its receiver's type, or for a type parameter by the receiver's value read again without effects (`eval_pure`: a name or a field of one). A call has neither, and gave `VUnit`.
+
+- [x] `eval_method_call` ([[selfhost/interp.my]]): when `key_by_type` finds no key without evaluating (a type parameter's temporary), the receiver is evaluated once and the method keyed by its value
+- [x] A parity program
+
+## Evidence
+
+- Test first: `method_on_a_generic_temporary` in `test_compiler_parity` (`x.scaled(2).area()` in a generic function, and `twice(…).scaled(5).area()` on the result of a generic call) failed interpreted (`ERR: VUnit`); now both runners print `36 100`.
+- `key_by_type`'s case; `build/myla test selfhost/interp.my`; `test_compiler_parity`; `scripts/bootstrap.sh`: byte-identical fixed point.

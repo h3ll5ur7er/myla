@@ -621,6 +621,31 @@ async fun main() {
     print(await o)
 }
 """,
+    "method_on_a_generic_temporary": """// a method on a temporary whose type is a type parameter: the interpreter
+// keys it by the value, as it has no type to go by (MYLA-391)
+trait Shape {
+    fun area(self) -> int
+    fun scaled(self, k: int) -> Self
+}
+struct Sq {
+    side: int,
+}
+impl Shape for Sq {
+    fun area(self) -> int { return self.side * self.side }
+    fun scaled(self, k: int) -> Sq { return Sq { side: self.side * k } }
+}
+fun bigger<T: Shape>(x: T) -> int {
+    return x.scaled(2).area()
+}
+fun twice<T: Shape>(x: T) -> T {
+    return x.scaled(2)
+}
+
+fun main() {
+    print(bigger(Sq { side: 3 }))
+    print(twice(Sq { side: 1 }).scaled(5).area())
+}
+""",
     "operators_of_generic_impls": """// `==`, `!=`, `<` and the others, and a format hole, on a generic struct
 // whose `Eq`, `Ord` and `Format` impls are generic: the operator calls the
 // method's instance for the struct's type arguments (MYLA-367)
@@ -6122,6 +6147,8 @@ PINNED = {
     "iterator_adapters": '0\n10\n20\ntick\ntick\n0\n1\n7\n8\n<1>\n<2>\nstep 2\nstep 1\n10\n3\n12\nstep 3\nstep 2\nstep 1\nstep 3\n10\n9\n',
     # MYLA-381: new
     "std_iter_pipelines": '36\n45000000000\n5\n<1>\n<4>\n<9>\n4 6\n4321\nb2,a1,c3\nb,c,z\n0:one,1:two,2:three,3:four,4:five\nx3,x2,x1\n5,8,13,21,34\n9\n34\ntrue\nfalse\nfig\nplum\nnone\n3 9\n',
+    # MYLA-391: the interpreter printed 'ERR: VUnit'
+    "method_on_a_generic_temporary": '36\n100\n',
     # MYLA-367: new; native code gave "undefined reference to 'myla_Box.eq'"
     "operators_of_generic_impls": 'true\ntrue\nfalse\ntrue\nfalse\ntrue\ntrue\n<a> <42> <s>\n<a>\n',
     "string_ordering": 'true true false false\ntrue true false false\nfalse false true true\ntrue true false false\nfalse true false true\nfalse true false true\ntrue true false false\nfalse false true true\nfalse false true true\ntrue true false false\ntrue true false false\ntrue true false false\n,Apple,apple,apples,banana,fig,pear,z,é\n,Apple,apple,apples,banana,fig,pear,z,é\ntrue\na,b,b,c,d\n5\nlime\na,c,m,x\ntrue\na,b\n',

@@ -2975,6 +2975,19 @@ impl Interp {
 
     #test(interp_on("enum E { A, B(int) }"), expr_of("a.b[0]"), expr_of("a.b[0]"), "get", [])[Value.VUnit]
     fun eval_method_call(var self, e: Expr, recv: Expr, method: str, args: [Expr]) -> Value {
+        // a temporary whose type is a type parameter (`x.scaled(2).area()`
+        // with `x: T`) has no type to key by and no place to read again:
+        // evaluated once, keyed by its value (MYLA-391)
+        if !self.key_by_type(recv) {
+            let rv = self.eval(recv)
+            if self.stop() { return Value.VUnit }
+            let vfi = self.func_idx(format("{}.{}", value_key(rv), method))
+            if vfi >= 0 {
+                let argv = self.eval_args(args)
+                if self.stop() { return Value.VUnit }
+                return self.call_method(vfi, rv, argv).0
+            }
+        }
         let key = self.recv_key(recv)
         // a derived `eq` has no body: structural equality, as `==` (MYLA-132)
         if self.derived_eq(key, method, args) {
@@ -3169,6 +3182,25 @@ impl Interp {
             None => {},
         }
         return value_key(self.eval_pure(recv))
+    }
+
+    // Whether `recv_key` finds `recv`'s key without evaluating a call: its
+    // type names one, its frame binds its type parameter, or it is a name or
+    // a field of one (`eval_pure`).
+    #test(interp_on("enum E { A, B(int) }"), expr_of("a.b"))[true]
+    fun key_by_type(self, recv: Expr) -> bool {
+        match self.resolved_of(recv.id) {
+            Some(t) => {
+                if type_key_of(t) != "" { return true }
+                if self.type_env && type_key_of(self.env_type(t)) != "" { return true }
+            },
+            None => {},
+        }
+        return match recv.kind {
+            ExprKind.Name(n) => true,
+            ExprKind.GetField(t, f) => self.key_by_type(t),
+            _ => false,
+        }
     }
 
     #test(interp_on("enum E { A, B(int) }"), expr_of("a.b[0]"))[Value.VUnit]
