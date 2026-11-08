@@ -180,6 +180,16 @@ fun did_you_mean(name: str, cands: [str]) -> [Note] {
     return [Note { label: "help", msg: format("did you mean '{}'?", best), line: 0, col: 0, sp: no_span() }]
 }
 
+// The notes of an unknown function `name`: for `get`, the method that took
+// the place of the prelude's free `get(m, k)` (MYLA-393); for any other
+// name, the closest of `cands`.
+#test("get", ["got"])[[Note { label: "help", msg: "a map's lookup is the method 'm.get(k)', not a function", line: 0, col: 0, sp: no_span() }]]
+#test("pirnt", ["print"])[[Note { label: "help", msg: "did you mean 'print'?", line: 0, col: 0, sp: no_span() }]]
+fun unknown_function_notes(name: str, cands: [str]) -> [Note] {
+    if name == "get" { return [Note { label: "help", msg: "a map's lookup is the method 'm.get(k)', not a function", line: 0, col: 0, sp: no_span() }] }
+    return did_you_mean(name, cands)
+}
+
 // The names of the primitive types, as types.py's _PRIMITIVES has them.
 #test()[["bool", "str", "StringBuilder", "int8", "int16", "int32", "int64", "uint8", "uint16", "uint32", "uint64", "float32", "float64", "char"]]
 fun primitive_type_names() -> [str] {
@@ -7070,14 +7080,16 @@ impl Checker {
     }
 }
 
-#test()["enum Option<T> { Some(T), None }\nenum Result<T, E> { Ok(T), Err(E) }\nfun get<K: Eq + Hash, V>(m: [K: V], k: K) -> Option<V> {\n    if m.contains(k) {\n        return Some(m[k])\n    }\n    return None\n}\ntrait Format {\n    fun format(self, spec: str) -> str\n}\nstruct Hasher {\n    state: uint64,\n}\nimpl Eq for Hasher {\n    fun eq(self, other: Hasher) -> bool {\n        return self.state == other.state\n    }\n}\ntrait Hash {\n    fun hash(self, h: Hasher) -> Hasher\n}\ntrait Iterator<T> {\n    fun next(var self) -> Option<T>\n}\n"]
+#test()["enum Option<T> { Some(T), None }\nenum Result<T, E> { Ok(T), Err(E) }\ntrait Format {\n    fun format(self, spec: str) -> str\n}\nstruct Hasher {\n    state: uint64,\n}\nimpl Eq for Hasher {\n    fun eq(self, other: Hasher) -> bool {\n        return self.state == other.state\n    }\n}\ntrait Hash {\n    fun hash(self, h: Hasher) -> Hasher\n}\ntrait Iterator<T> {\n    fun next(var self) -> Option<T>\n}\n"]
 // The prelude: what every program has without an import. The `Hasher`'s
 // state and the `Hash` trait are here (D163, MYLA-313), so that every type
 // can be a map key's and every module can name them; the hasher's methods,
 // its algorithm, and the `Hash` impls of the built-in types are std.hash's,
-// an implicit module. `Iterator<T>` is here for `for` over one (D171).
+// an implicit module. `Iterator<T>` is here for `for` over one (D171). A
+// map's `get` is std.map's method `m.get(k)`: the free `get(m, k)` that was
+// here went, so a file may declare a `get` of its own (MYLA-393).
 fun prelude_src() -> str {
-    return "enum Option<T> { Some(T), None }\nenum Result<T, E> { Ok(T), Err(E) }\nfun get<K: Eq + Hash, V>(m: [K: V], k: K) -> Option<V> {\n    if m.contains(k) {\n        return Some(m[k])\n    }\n    return None\n}\ntrait Format {\n    fun format(self, spec: str) -> str\n}\nstruct Hasher {\n    state: uint64,\n}\nimpl Eq for Hasher {\n    fun eq(self, other: Hasher) -> bool {\n        return self.state == other.state\n    }\n}\ntrait Hash {\n    fun hash(self, h: Hasher) -> Hasher\n}\ntrait Iterator<T> {\n    fun next(var self) -> Option<T>\n}\n"
+    return "enum Option<T> { Some(T), None }\nenum Result<T, E> { Ok(T), Err(E) }\ntrait Format {\n    fun format(self, spec: str) -> str\n}\nstruct Hasher {\n    state: uint64,\n}\nimpl Eq for Hasher {\n    fun eq(self, other: Hasher) -> bool {\n        return self.state == other.state\n    }\n}\ntrait Hash {\n    fun hash(self, h: Hasher) -> Hasher\n}\ntrait Iterator<T> {\n    fun next(var self) -> Option<T>\n}\n"
 }
 
 // The prelude's declarations, with node ids from `first_id`.
@@ -7696,7 +7708,7 @@ impl Checker {
                 },
                 None => {},
             }
-            return Err(with_notes(terr_at(e.line, e.col, e.sp, format("unknown function '{}'", name)), did_you_mean(name, self.callable_names())))
+            return Err(with_notes(terr_at(e.line, e.col, e.sp, format("unknown function '{}'", name)), unknown_function_notes(name, self.callable_names())))
         }
         let sig = self.functions[fi]
         if sig.type_params.len() > 0 {

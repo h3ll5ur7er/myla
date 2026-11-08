@@ -16,7 +16,7 @@ the toolchain that built it); a host that cannot build one skips the gate.
 
 The gate covers single-file programs that lex + parse cleanly and do not import
 other modules (the self-hosted `check_main` has no module loader; it injects only
-the `Option`/`Result`/`get` prelude, matching a no-import `myla check`). Files
+the `Option`/`Result` prelude, matching a no-import `myla check`). Files
 that fail to lex/parse, or that use `import`, are excluded — they belong to the
 lexer/parser gates or the runtime corpus, not the checker-parity gate.
 """

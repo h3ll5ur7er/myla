@@ -1,0 +1,6 @@
+type error: unknown function 'get'
+  --> examples/errors/type_free_get.my:7:14
+  |
+7 |     match get(m, "a") {
+  |           ^^^^^^^^^^^
+help: a map's lookup is the method 'm.get(k)', not a function
