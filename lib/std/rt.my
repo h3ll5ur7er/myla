@@ -2835,6 +2835,14 @@ fun wait_fds(fr: int64, a: int64, b: int64) {
         exec_push(fr)
         return
     }
+    // no descriptor (-1, a closed stream's): ready now on every target, as
+    // the interpreter has it (MYLA-375); wasm32's poller would watch it and
+    // never wake
+    if a < 0 {
+        give_lock(lock)
+        exec_push(fr)
+        return
+    }
     if __rt_get("__exec_poller") == 0 {
         __store64(__rt_addr("__exec_poller"), os.poller_new())
     }
