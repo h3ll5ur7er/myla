@@ -3824,7 +3824,7 @@ impl Lower {
     }
 
     // The slot of `key` in the map `cell` of type `mt`, or 0 when it is missing.
-    #test(lower_on(), codegen_on("enum E { A, B(int) }"), Type.TMap(Type.TStr, Type.TInt(32, true)), 32, 33)[2]
+    #test(lower_on(), codegen_on("enum E { A, B(int) }"), Type.TMap(Type.TStr, Type.TInt(32, true)), 32, 33)[1]
     fun map_lookup(var self, cg: CodeGen, mt: Type, cell: int32, key: int32) -> int32 {
         let size = self.int_const(cg.map_slot_size(mt))
         let d = self.temp(Type.TPtr)
