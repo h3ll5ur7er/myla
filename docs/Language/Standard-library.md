@@ -38,6 +38,7 @@ The conventions (D164): operations on built-in types are methods (`s.split(",")`
 | `std.char` | [[Language/Standard-library/Char]] | Character classes, case and digits, as methods on `char` (ASCII) |
 | `std.int` | [[Language/Standard-library/Int]] | Methods on every integer type: `gcd`, `pow`, Euclidean division, checked, wrapping, saturating and overflowing arithmetic, `mulmod`, `powmod`, `modinv` |
 | `std.num` | [[Language/Standard-library/Num]] | Exact parsing and printing of integers and floats; integers in any radix and width, with `ParseIntError` |
+| `std.bigint` | [[Language/Standard-library/Bigint]] | `BigInt`, integers of any size: arithmetic with Karatsuba and recursive division, `pow`, the three divisions, parsing and printing in any radix |
 | `std.str` | [[Language/Standard-library/Str]] | Methods on `str`: search, split, trim, case, padding, replace |
 | `std.fmt` | [[Language/Standard-library/Fmt]] | Format specs and the helpers of `Format` impls |
 | `std.math` | [[Language/Standard-library/Math]] | Floating-point functions after fdlibm |
