@@ -2,7 +2,7 @@
 id: MYLA-353
 title: "Decision: iterators and for over a trait"
 type: chore
-status: backlog
+status: done
 priority: low
 labels: [decision, language, stdlib, wave-4]
 ---
@@ -11,7 +11,7 @@ Wave 4 of [[Project/Standard-library-roadmap]], roadmap #21. Whether Myla gets a
 - **Needs:** nothing; it can start as soon as its wave does
 
 - [x] Options and a recommendation written here for the owner
-- [ ] The decision recorded
+- [x] The decision recorded: D171, built as [[MYLA-380]] and [[MYLA-381]]
 
 ## Options (for the owner, 2026-11-08)
 
@@ -92,3 +92,7 @@ Alternatives:
 
 - B instead of A: nicer call sites, but a new trait feature first.
 - No iterators at all: keep the eager list methods, which are faster interpreted, 4 times slower natively, and build every intermediate list.
+
+## Decided (D171, 2026-11-08)
+
+The owner chose the recommendation, A: the trait in the prelude, generic-trait bounds, `for` over an `Iterator`, and `std.iter`'s functions chained with `|>`. In the owner's words, an additional thin wrapper type (C) "should be easy to add if someone requests it". The compiler part is [[MYLA-380]], with a seed of its own; `std.iter` is [[MYLA-381]], after it.
