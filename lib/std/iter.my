@@ -1,0 +1,641 @@
+// std.iter: lazy adapters and consumers over the prelude's `Iterator<T>`
+// (MYLA-381, D171).
+//
+// The functions take an iterator first, so they chain with `|>`:
+//
+//     xs.iter() |> iter.map((x) => x * 3) |> iter.filter((x) => x % 2 == 0) |> iter.sum(0)
+//
+// An adapter is a struct that holds the iterator it wraps and its closure,
+// and its `next` asks the inner one for a value only when it needs one, so a
+// pipeline builds no list until a consumer such as `to_list` asks for it. A
+// closure can't change what it captures (D48, D93), so all the state of an
+// adapter is in its struct. An iterator is a value: a copy keeps its own
+// position. The sources of the built-in types are methods of the implicit
+// modules: `xs.iter()` (`std.list`) and `m.iter()` (`std.map`).
+//
+// A struct's type parameters must all appear in its impl's target, so an
+// adapter that gives back the inner iterator's own values names their type
+// too (`Take<I, T>`), though only its `inner: I` holds them.
+//
+// The loops here are `while let Some(x) = c.next()`, not `for x in it`: one
+// `for` over an iterator anywhere in a program has the checker rebuild every
+// function's body once (`fill_in`, about 8 ms for a hello world), which
+// importing this module shouldn't cost a program that has none.
+
+import std.list as list_m     // `xs.iter()` in the tests
+import std.map as map_m       // `m.iter()` in the tests
+import std.option as option_m // `unwrap_or` in the tests
+
+// ---------------------------------------------------------------------------
+// Sources.
+
+// The integers from `start` up to but not including `end`.
+pub struct Range {
+    at: int,
+    end: int,
+}
+
+impl Iterator<int> for Range {
+    fun next(var self) -> Option<int> {
+        if self.at >= self.end { return None }
+        self.at += 1
+        return Some(self.at - 1)
+    }
+}
+
+// `start`, `start + 1`, … up to but not including `end`: none when `end`
+// isn't greater than `start`. `for i in a..b` is the loop; this is the
+// iterator, to start a pipeline with.
+pub fun range(start: int, end: int) -> Range {
+    return Range { at: start, end: end }
+}
+
+// `v` again and again, without end.
+pub struct Repeat<T> {
+    v: T,
+}
+
+impl<T> Iterator<T> for Repeat<T> {
+    fun next(var self) -> Option<T> {
+        return Some(self.v)
+    }
+}
+
+// `v` without end: follow it with `take` or a consumer that stops (`find`,
+// `any`, `all`), or `zip` it with a finite iterator.
+pub fun repeat<T>(v: T) -> Repeat<T> {
+    return Repeat { v: v }
+}
+
+// The values that `step` makes from a state.
+pub struct FromFn<S, T> {
+    state: S,
+    step: (S) -> Option<(T, S)>,
+}
+
+impl<S, T> Iterator<T> for FromFn<S, T> {
+    fun next(var self) -> Option<T> {
+        return match self.step(self.state) {
+            Some((v, s)) => {
+                self.state = s
+                Some(v)
+            }
+            None => None
+        }
+    }
+}
+
+// The values `step` gives, starting from `state`: `step(s)` is
+// `Some((value, next state))`, or `None` to end. A closure can't keep state
+// of its own (D48), so the state goes in and comes back out.
+pub fun from_fn<S, T>(state: S, step: (S) -> Option<(T, S)>) -> FromFn<S, T> {
+    return FromFn { state: state, step: step }
+}
+
+// ---------------------------------------------------------------------------
+// Adapters.
+
+pub struct Map<I, T, U> {
+    inner: I,
+    f: (T) -> U,
+}
+
+impl<I: Iterator<T>, T, U> Iterator<U> for Map<I, T, U> {
+    fun next(var self) -> Option<U> {
+        return match self.inner.next() {
+            Some(v) => Some(self.f(v))
+            None => None
+        }
+    }
+}
+
+// `f` of each value.
+pub fun map<I: Iterator<T>, T, U>(it: I, f: (T) -> U) -> Map<I, T, U> {
+    return Map { inner: it, f: f }
+}
+
+pub struct Filter<I, T> {
+    inner: I,
+    keep: (T) -> bool,
+}
+
+impl<I: Iterator<T>, T> Iterator<T> for Filter<I, T> {
+    fun next(var self) -> Option<T> {
+        while let Some(v) = self.inner.next() {
+            if self.keep(v) { return Some(v) }
+        }
+        return None
+    }
+}
+
+// The values for which `keep` holds.
+pub fun filter<I: Iterator<T>, T>(it: I, keep: (T) -> bool) -> Filter<I, T> {
+    return Filter { inner: it, keep: keep }
+}
+
+pub struct Take<I, T> {
+    inner: I,
+    left: int,
+}
+
+impl<I: Iterator<T>, T> Iterator<T> for Take<I, T> {
+    fun next(var self) -> Option<T> {
+        if self.left <= 0 { return None }
+        self.left -= 1
+        return self.inner.next()
+    }
+}
+
+// The first `n` values (all of them when there are fewer). It asks the inner
+// iterator for no more than `n`, so it ends an infinite one.
+pub fun take<I: Iterator<T>, T>(it: I, n: int) -> Take<I, T> {
+    return Take { inner: it, left: n }
+}
+
+pub struct Skip<I, T> {
+    inner: I,
+    left: int,
+}
+
+impl<I: Iterator<T>, T> Iterator<T> for Skip<I, T> {
+    fun next(var self) -> Option<T> {
+        while self.left > 0 {
+            self.left -= 1
+            if let None = self.inner.next() { return None }
+        }
+        return self.inner.next()
+    }
+}
+
+// The values after the first `n`; the first call of `next` skips them.
+pub fun skip<I: Iterator<T>, T>(it: I, n: int) -> Skip<I, T> {
+    return Skip { inner: it, left: n }
+}
+
+pub struct TakeWhile<I, T> {
+    inner: I,
+    pred: (T) -> bool,
+    done: bool,
+}
+
+impl<I: Iterator<T>, T> Iterator<T> for TakeWhile<I, T> {
+    fun next(var self) -> Option<T> {
+        if self.done { return None }
+        if let Some(v) = self.inner.next() {
+            if self.pred(v) { return Some(v) }
+        }
+        self.done = true
+        return None
+    }
+}
+
+// The values up to the first for which `pred` doesn't hold, which it takes
+// from the inner iterator but doesn't give.
+pub fun take_while<I: Iterator<T>, T>(it: I, pred: (T) -> bool) -> TakeWhile<I, T> {
+    return TakeWhile { inner: it, pred: pred, done: false }
+}
+
+pub struct SkipWhile<I, T> {
+    inner: I,
+    pred: (T) -> bool,
+    skipping: bool,
+}
+
+impl<I: Iterator<T>, T> Iterator<T> for SkipWhile<I, T> {
+    fun next(var self) -> Option<T> {
+        if !self.skipping { return self.inner.next() }
+        self.skipping = false
+        while let Some(v) = self.inner.next() {
+            if !self.pred(v) { return Some(v) }
+        }
+        return None
+    }
+}
+
+// The values from the first for which `pred` doesn't hold on: `pred` isn't
+// asked again after that.
+pub fun skip_while<I: Iterator<T>, T>(it: I, pred: (T) -> bool) -> SkipWhile<I, T> {
+    return SkipWhile { inner: it, pred: pred, skipping: true }
+}
+
+pub struct Enumerate<I, T> {
+    inner: I,
+    i: int,
+}
+
+impl<I: Iterator<T>, T> Iterator<(int, T)> for Enumerate<I, T> {
+    fun next(var self) -> Option<(int, T)> {
+        return match self.inner.next() {
+            Some(v) => {
+                self.i += 1
+                Some((self.i - 1, v))
+            }
+            None => None
+        }
+    }
+}
+
+// Each value with its index, from 0: `(0, a)`, `(1, b)`, …
+pub fun enumerate<I: Iterator<T>, T>(it: I) -> Enumerate<I, T> {
+    return Enumerate { inner: it, i: 0 }
+}
+
+pub struct Zip<A, B, T, U> {
+    a: A,
+    b: B,
+}
+
+impl<A: Iterator<T>, B: Iterator<U>, T, U> Iterator<(T, U)> for Zip<A, B, T, U> {
+    fun next(var self) -> Option<(T, U)> {
+        return match self.a.next() {
+            Some(x) => match self.b.next() {
+                Some(y) => Some((x, y))
+                None => None
+            }
+            None => None
+        }
+    }
+}
+
+// Pairs of a value of `a` and one of `b`, until either ends (`b` isn't asked
+// once `a` has ended).
+pub fun zip<A: Iterator<T>, T, B: Iterator<U>, U>(a: A, b: B) -> Zip<A, B, T, U> {
+    return Zip { a: a, b: b }
+}
+
+pub struct Chain<A, B, T> {
+    a: A,
+    b: B,
+    in_a: bool,
+}
+
+impl<A: Iterator<T>, B: Iterator<T>, T> Iterator<T> for Chain<A, B, T> {
+    fun next(var self) -> Option<T> {
+        if self.in_a {
+            if let Some(v) = self.a.next() { return Some(v) }
+            self.in_a = false
+        }
+        return self.b.next()
+    }
+}
+
+// The values of `a`, then those of `b`, two iterators of the same element
+// type (of different kinds, if need be: a list's and a range's).
+pub fun chain<A: Iterator<T>, T, B: Iterator<T>>(a: A, b: B) -> Chain<A, B, T> {
+    return Chain { a: a, b: b, in_a: true }
+}
+
+pub struct FlatMap<I, T, J, U> {
+    inner: I,
+    f: (T) -> J,
+    cur: Option<J>,
+}
+
+impl<I: Iterator<T>, T, J: Iterator<U>, U> Iterator<U> for FlatMap<I, T, J, U> {
+    fun next(var self) -> Option<U> {
+        while true {
+            if let Some(c) = self.cur {
+                var j = c
+                if let Some(v) = j.next() {
+                    self.cur = Some(j)
+                    return Some(v)
+                }
+                self.cur = None
+            }
+            match self.inner.next() {
+                Some(x) => { self.cur = Some(self.f(x)) }
+                None => { return None }
+            }
+        }
+        unreachable()
+    }
+}
+
+// The values of the iterators `f` gives for the values, one after the other:
+// `iter.flat_map(words, (w) => w.chars().iter())`.
+pub fun flat_map<I: Iterator<T>, T, J: Iterator<U>, U>(it: I, f: (T) -> J) -> FlatMap<I, T, J, U> {
+    return FlatMap { inner: it, f: f, cur: None }
+}
+
+// ---------------------------------------------------------------------------
+// Consumers: they run the iterator to its end, or until they know the answer.
+
+// The values, in a list.
+pub fun to_list<I: Iterator<T>, T>(it: I) -> [T] {
+    var out: [T] = []
+    var c = it
+    while let Some(x) = c.next() { out.push(x) }
+    return out
+}
+
+// How many values there are.
+pub fun count<I: Iterator<T>, T>(it: I) -> int {
+    var n = 0
+    var c = it
+    while let Some(_) = c.next() { n += 1 }
+    return n
+}
+
+// The values added up, starting from `zero`, the sum of none: `iter.sum(0)`,
+// `iter.sum(0.0)`, as `xs.sum(0)` takes it.
+pub fun sum<I: Iterator<T>, T: Add>(it: I, zero: T) -> T {
+    var acc = zero
+    var c = it
+    while let Some(x) = c.next() { acc = acc + x }
+    return acc
+}
+
+// `f(… f(f(init, x0), x1) …, xn)`; `init` when there are no values.
+pub fun fold<I: Iterator<T>, T, A>(it: I, init: A, f: (A, T) -> A) -> A {
+    var acc = init
+    var c = it
+    while let Some(x) = c.next() { acc = f(acc, x) }
+    return acc
+}
+
+// Whether `pred` holds for some value (false when there are none). It stops
+// at the first that it holds for.
+pub fun any<I: Iterator<T>, T>(it: I, pred: (T) -> bool) -> bool {
+    var c = it
+    while let Some(x) = c.next() {
+        if pred(x) { return true }
+    }
+    return false
+}
+
+// Whether `pred` holds for every value (true when there are none). It stops
+// at the first that it doesn't hold for.
+pub fun all<I: Iterator<T>, T>(it: I, pred: (T) -> bool) -> bool {
+    var c = it
+    while let Some(x) = c.next() {
+        if !pred(x) { return false }
+    }
+    return true
+}
+
+// The first value for which `pred` holds.
+pub fun find<I: Iterator<T>, T>(it: I, pred: (T) -> bool) -> Option<T> {
+    var c = it
+    while let Some(x) = c.next() {
+        if pred(x) { return Some(x) }
+    }
+    return None
+}
+
+// The least value (the first of equal ones); `None` when there are none.
+pub fun min<I: Iterator<T>, T: Ord>(it: I) -> Option<T> {
+    var c = it
+    var best = match c.next() {
+        Some(v) => v
+        None => { return None }
+    }
+    while let Some(x) = c.next() {
+        if x < best { best = x }
+    }
+    return Some(best)
+}
+
+// The greatest value (the last of equal ones); `None` when there are none.
+pub fun max<I: Iterator<T>, T: Ord>(it: I) -> Option<T> {
+    var c = it
+    var best = match c.next() {
+        Some(v) => v
+        None => { return None }
+    }
+    while let Some(x) = c.next() {
+        if x >= best { best = x }
+    }
+    return Some(best)
+}
+
+// ---- Tests -----------------------------------------------------------------
+//
+// The functions are generic, which `#test` cases can't take (D116), so test
+// functions (D162) try them on concrete types. They don't use `std.test`,
+// which a program that imports this module would load with it.
+
+// The text of a list, `[1, 2, 3]`, to compare.
+fun shown<T: Format>(xs: [T]) -> str {
+    var sb = StringBuilder()
+    sb.append("[")
+    for i in 0..xs.len() {
+        if i > 0 { sb.append(", ") }
+        sb.append(f"{xs[i]}")
+    }
+    sb.append("]")
+    return sb.build()
+}
+
+fun shown_opt<T: Format>(o: Option<T>) -> str {
+    return match o {
+        Some(v) => f"Some({v})"
+        None => "None"
+    }
+}
+
+// `a:b` for each pair, joined by spaces.
+fun pairs<T: Format, U: Format>(xs: [(T, U)]) -> str {
+    var sb = StringBuilder()
+    for p in xs {
+        let (a, b) = p
+        if sb.len() > 0 { sb.append(" ") }
+        sb.append(f"{a}:{b}")
+    }
+    return sb.build()
+}
+
+// Fail the case unless `got` is `want`, naming both.
+fun same(got: str, want: str) {
+    assert(got == want, f"expected {want}, got {got}")
+}
+
+// 1, 2, …, `n`, and a failure when it is asked for one more: an adapter
+// that asks its inner iterator for a value it doesn't need fails a case.
+struct Strict {
+    at: int,
+    n: int,
+}
+
+impl Iterator<int> for Strict {
+    fun next(var self) -> Option<int> {
+        if self.at == self.n { panic(f"asked for value {self.n + 1} of {self.n}") }
+        self.at += 1
+        return Some(self.at)
+    }
+}
+
+fun strict(n: int) -> Strict {
+    return Strict { at: 0, n: n }
+}
+
+#test
+fun sources() {
+    same(shown(to_list([1, 2, 3].iter())), "[1, 2, 3]")
+    let none: [str] = []
+    same(shown(to_list(none.iter())), "[]")
+    same(shown(to_list(range(2, 6))), "[2, 3, 4, 5]")
+    same(shown(to_list(range(3, 3))), "[]")
+    same(shown(to_list(range(5, 1))), "[]")
+    same(shown(to_list(range(-2, 1))), "[-2, -1, 0]")
+    same(shown(to_list(take(repeat("ab"), 3))), "[ab, ab, ab]")
+    // the powers of two below 100: the state is the next power
+    let powers = from_fn(1, (p) => if p >= 100 { None } else { Some((p, p * 2)) })
+    same(shown(to_list(powers)), "[1, 2, 4, 8, 16, 32, 64]")
+    // Fibonacci numbers: the state is a pair
+    let fib = from_fn((0, 1), (s) => {
+        let (a, b) = s
+        return Some((a, (b, a + b)))
+    })
+    same(shown(to_list(take(fib, 10))), "[0, 1, 1, 2, 3, 5, 8, 13, 21, 34]")
+    // a string's characters, through the list `chars()` makes
+    same(shown(to_list("añb".chars().iter())), "[a, ñ, b]")
+}
+
+#test
+fun map_iter_in_order() {
+    var m: [str: int] = [:]
+    m["b"] = 2
+    m["a"] = 1
+    m["c"] = 3
+    m["b"] = 20
+    same(pairs(to_list(m.iter())), "b:20 a:1 c:3")
+    m.remove("a")
+    m["a"] = 4
+    same(pairs(to_list(m.iter())), "b:20 c:3 a:4")
+    let empty: [int: bool] = [:]
+    assert(count(empty.iter()) == 0, "an empty map")
+}
+
+#test
+fun maps_and_filters() {
+    let xs = [1, 2, 3, 4, 5]
+    same(shown(to_list(map(xs.iter(), (x) => x * x))), "[1, 4, 9, 16, 25]")
+    same(shown(to_list(map(xs.iter(), (x) => f"<{x}>"))), "[<1>, <2>, <3>, <4>, <5>]")
+    same(shown(to_list(filter(xs.iter(), (x) => x % 2 == 1))), "[1, 3, 5]")
+    same(shown(to_list(filter(xs.iter(), (x) => x > 9))), "[]")
+}
+
+#test
+fun takes_and_skips() {
+    let xs = [1, 2, 3, 4, 5]
+    same(shown(to_list(take(xs.iter(), 2))), "[1, 2]")
+    same(shown(to_list(take(xs.iter(), 9))), "[1, 2, 3, 4, 5]")
+    same(shown(to_list(take(xs.iter(), 0))), "[]")
+    same(shown(to_list(take(xs.iter(), -1))), "[]")
+    same(shown(to_list(take(strict(3), 3))), "[1, 2, 3]")
+    same(shown(to_list(skip(xs.iter(), 2))), "[3, 4, 5]")
+    same(shown(to_list(skip(xs.iter(), 9))), "[]")
+    same(shown(to_list(skip(xs.iter(), 0))), "[1, 2, 3, 4, 5]")
+    same(shown(to_list(take(skip(strict(5), 2), 3))), "[3, 4, 5]")
+    same(shown(to_list(take(skip(range(0, 100), 10), 3))), "[10, 11, 12]")
+    same(shown(to_list(take_while(xs.iter(), (x) => x < 3))), "[1, 2]")
+    same(shown(to_list(take_while(xs.iter(), (x) => x < 9))), "[1, 2, 3, 4, 5]")
+    same(shown(to_list(take_while(strict(4), (x) => x != 2))), "[1]")
+    same(shown(to_list(skip_while(xs.iter(), (x) => x < 3))), "[3, 4, 5]")
+    same(shown(to_list(skip_while([1, 5, 1].iter(), (x) => x < 3))), "[5, 1]")
+    same(shown(to_list(skip_while(xs.iter(), (x) => x < 9))), "[]")
+}
+
+#test
+fun takes_from_an_infinite_iterator() {
+    same(shown(to_list(take(repeat(7), 4))), "[7, 7, 7, 7]")
+    same(shown(to_list(take(map(repeat(1), (x) => x + 1), 2))), "[2, 2]")
+    let triples = from_fn(1, (n) => Some((n, n * 3)))
+    same(shown(to_list(take_while(triples, (n) => n < 50))), "[1, 3, 9, 27]")
+    let first = find(from_fn(1, (n) => Some((n, n + 1))), (n) => n * n > 50)
+    same(shown_opt(first), "Some(8)")
+}
+
+#test
+fun pairs_up() {
+    same(pairs(to_list(enumerate(["a", "b", "c"].iter()))), "0:a 1:b 2:c")
+    let none: [int] = []
+    same(pairs(to_list(enumerate(none.iter()))), "")
+    same(pairs(to_list(zip([1, 2, 3].iter(), ["x", "y"].iter()))), "1:x 2:y")
+    same(pairs(to_list(zip(range(0, 3), repeat(true)))), "0:true 1:true 2:true")
+    // `b` isn't asked once `a` has ended
+    same(pairs(to_list(zip(range(0, 2), strict(2)))), "0:1 1:2")
+}
+
+#test
+fun chains_and_flattens() {
+    same(shown(to_list(chain([1, 2].iter(), range(7, 9)))), "[1, 2, 7, 8]")
+    let none: [int] = []
+    same(shown(to_list(chain(none.iter(), none.iter()))), "[]")
+    same(shown(to_list(chain(none.iter(), [3].iter()))), "[3]")
+    same(shown(to_list(take(chain([0].iter(), strict(2)), 3))), "[0, 1, 2]")
+    same(shown(to_list(flat_map(range(0, 4), (n) => range(0, n)))), "[0, 0, 1, 0, 1, 2]")
+    same(shown(to_list(flat_map(["ab", "", "c"].iter(), (w) => w.chars().iter()))), "[a, b, c]")
+    same(shown(to_list(flat_map(none.iter(), (n) => range(0, n)))), "[]")
+    same(shown(to_list(take(flat_map(repeat(2), (n) => range(0, n)), 5))), "[0, 1, 0, 1, 0]")
+}
+
+#test
+fun consumes() {
+    let xs = [3, 1, 4, 1, 5]
+    assert(count(xs.iter()) == 5, "count")
+    assert(count(filter(xs.iter(), (x) => x == 1)) == 2, "count after filter")
+    assert(sum(xs.iter(), 0) == 14, "sum")
+    assert(sum(map(xs.iter(), (x) => x as int64), 0) == 14i64, "sum of int64")
+    assert(sum([0.5, 0.25].iter(), 0.0) == 0.75, "sum of floats")
+    let none: [int] = []
+    assert(sum(none.iter(), 0) == 0, "sum of none")
+    assert(fold(xs.iter(), 0, (acc, x) => acc * 10 + x) == 31415, "fold")
+    same(fold(xs.iter(), "", (acc, x) => acc + f"{x}"), "31415")
+    assert(fold(none.iter(), 9, (acc, x) => acc + x) == 9, "fold of none")
+    assert(any(xs.iter(), (x) => x > 4), "any")
+    assert(!any(xs.iter(), (x) => x > 5), "not any")
+    assert(!any(none.iter(), (x) => true), "any of none")
+    assert(any(strict(3), (x) => x == 3), "any stops at the one it holds for")
+    assert(all(xs.iter(), (x) => x > 0), "all")
+    assert(!all(xs.iter(), (x) => x > 1), "not all")
+    assert(all(none.iter(), (x) => false), "all of none")
+    same(shown_opt(find(xs.iter(), (x) => x > 3)), "Some(4)")
+    same(shown_opt(find(xs.iter(), (x) => x > 9)), "None")
+    same(shown_opt(find(strict(2), (x) => x == 2)), "Some(2)")
+}
+
+#test
+fun least_and_greatest() {
+    let xs = [3, 1, 4, 1, 5]
+    same(shown_opt(min(xs.iter())), "Some(1)")
+    same(shown_opt(max(xs.iter())), "Some(5)")
+    let none: [int] = []
+    same(shown_opt(min(none.iter())), "None")
+    same(shown_opt(max(none.iter())), "None")
+    same(shown_opt(min(["pear", "fig", "plum"].iter())), "Some(fig)")
+    same(shown_opt(max(["pear", "fig", "plum"].iter())), "Some(plum)")
+    same(shown_opt(max(map(range(0, 5), (x) => (x - 2) * (x - 2)))), "Some(4)")
+}
+
+#test
+fun copies_keep_their_position() {
+    var a = range(0, 5)
+    let first = a.next().unwrap_or(-1)
+    var b = a
+    let second = b.next().unwrap_or(-1)
+    assert(first == 0 && second == 1, "the copy goes on from where it was")
+    same(shown(to_list(a)), "[1, 2, 3, 4]")
+    same(shown(to_list(b)), "[2, 3, 4]")
+    // a pipeline is a value too: consuming it doesn't consume the variable
+    let evens = range(0, 7) |> filter((x) => x % 2 == 0)
+    assert(count(evens) == 4 && sum(evens, 0) == 12, "a pipeline consumed twice")
+}
+
+#test
+fun pipes() {
+    let xs = [1, 2, 3, 4, 5, 6]
+    let total = xs.iter() |> map((x) => x * 3) |> filter((x) => x % 2 == 0) |> sum(0)
+    assert(total == 36, f"the pipeline gave {total}")
+    let words = ["a", "bb", "ccc", "dd"].iter() |> enumerate() |> filter((p) => p.1.len() == 2) |> map((p) => f"{p.0}{p.1}") |> to_list()
+    same(shown(words), "[1bb, 3dd]")
+    let firsts = range(1, 100) |> map((n) => n * n) |> skip_while((n) => n < 10) |> take(3) |> to_list()
+    same(shown(firsts), "[16, 25, 36]")
+    // a loop over a pipeline (`while let`: see the header)
+    var sb = StringBuilder()
+    var labels = zip(range(0, 3), ["x", "y", "z"].iter()) |> map((p) => f"{p.1}{p.0}")
+    while let Some(s) = labels.next() {
+        sb.append(s)
+    }
+    same(sb.build(), "x0y1z2")
+}

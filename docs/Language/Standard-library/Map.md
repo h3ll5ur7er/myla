@@ -46,6 +46,7 @@ fun main() {
 | `m.update(k: K, default: V, f: (V) -> V)` | Sets `k` to `f` of its value, or of `default` when the map has no `k` (a new key goes last); needs a `var` place |
 | `m.values() -> [V]` | The values, in the order of their keys |
 | `m.items() -> [(K, V)]` | The entries as `(key, value)` pairs, in insertion order |
+| `m.iter() -> ListIter<(K, V)>` | An iterator over the same pairs, in the same order (D171): the source of a lazy pipeline of [[Language/Standard-library/Iter]], `m.iter() \|> iter.filter((kv) => kv.1 > 0)`. It is `items()`'s list as `std.list`'s `ListIter`, so it holds a copy of the entries the map had when it was made |
 | `m.merge(other: [K: V])` | Adds every entry of `other`, whose value wins for a key both have; `other`'s new keys go last, in its order; needs a `var` place |
 | `counts<T: Eq + Hash>(xs: [T]) -> [T: int]` | How often each element of `xs` occurs, the elements in the order they first occur |
 
