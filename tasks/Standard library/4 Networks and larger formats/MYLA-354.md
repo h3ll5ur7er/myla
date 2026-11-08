@@ -2,7 +2,7 @@
 id: MYLA-354
 title: "Decision: serialisation by derive"
 type: chore
-status: backlog
+status: done
 priority: low
 labels: [decision, language, stdlib, wave-4]
 ---
@@ -11,7 +11,7 @@ Wave 4 of [[Project/Standard-library-roadmap]], roadmap #58. Whether `#derive(Js
 - **Needs:** [[MYLA-332]]
 
 - [x] Options and a recommendation written here for the owner
-- [ ] The decision recorded
+- [x] The decision recorded: D172, built as [[MYLA-384]] and [[MYLA-385]]
 
 ## Options (for the owner, 2026-11-08)
 
@@ -72,3 +72,7 @@ Alternatives:
 
 - **B or C instead of A:** no language change, but no generic `decode<T>`; you write either a made-up function name or a dummy value.
 - **No derive:** keep writing the conversions by hand, as today.
+
+## Decided (D172, 2026-11-08)
+
+The owner chose the recommendation ("i was actually thinking to request that not too long ago"). The language part, trait functions without `self`, is [[MYLA-384]], with a seed of its own; `#derive(Json)` with `json.encode` and `json.decode<T>` is [[MYLA-385]], after it.
