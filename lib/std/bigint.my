@@ -1,0 +1,1442 @@
+// std.bigint — arbitrary-precision integers (MYLA-345).
+//
+// A `BigInt` is a sign and a magnitude: a list of 32-bit limbs, least
+// significant first, with no high zero limbs, so zero is the empty list and
+// never negative. A product of two limbs and a carry fits a `uint64`. Every
+// value has one form, so the derived `Eq` and `Hash` compare and hash it, and
+// a `BigInt` can be a map key.
+//
+// - Addition and subtraction are linear. Multiplication is schoolbook below
+//   `KARATSUBA` limbs of the shorter operand and Karatsuba's above; an
+//   operand more than twice as long as the other is cut into pieces of the
+//   other's length.
+// - Division is Knuth's algorithm D (TAOCP 4.3.1), quadratic; from
+//   `BURNIKEL` limbs of both the divisor and the quotient on it is Burnikel
+//   and Ziegler's recursive division ("Fast recursive division", 1998),
+//   which takes a small multiple of a multiplication's time. `/` and `%` truncate, as they do on Myla's
+//   integers: the quotient is rounded toward zero and the remainder has the
+//   dividend's sign. `div_floor` and `mod_floor` round down, as Python's
+//   `//` and `%` do; `div_euclid` and `rem_euclid` give a remainder that is
+//   never negative.
+// - Text in any radix from 2 to 36 is read and written by divide and conquer
+//   on the powers radix^(k * 2^i), where radix^k is the largest power that
+//   fits a limb: a number is split in halves by one division (written) or
+//   joined from halves by one multiplication (read), so both are as fast as
+//   a division or a multiplication of the whole, not quadratic.
+
+import .fmt as fmt          // `parse_spec` and `spec_need` for `Format`
+
+const B32: uint64 = 4294967296          // the limb's base, 2^32
+const MASK: uint64 = 4294967295         // 2^32 - 1
+
+// Below this many limbs in the shorter operand, multiplication is
+// schoolbook, and squaring below `KARATSUBA_SQR` limbs (measured: the
+// page's "Speed").
+const KARATSUBA: int = 64
+const KARATSUBA_SQR: int = 128
+
+// Below this many limbs in the divisor, division is Knuth's algorithm D.
+const BURNIKEL: int = 80
+
+// Below this many limbs, text is written by repeated division by radix^k,
+// and below this many digits read by repeated multiplication.
+const TEXT_LIMBS: int = 40
+const TEXT_DIGITS: int = 360
+
+// An integer of any size: its sign and its magnitude (see the top).
+#derive(Eq, Hash)
+pub struct BigInt {
+    negative: bool,
+    mag: [uint32],
+}
+
+// --- magnitudes -------------------------------------------------------------
+// A magnitude is a `[uint32]`, least significant limb first. The functions
+// take and give normalized ones (no high zero limbs) unless they say not.
+
+// `n` copies of `v`: std.list's `filled`, which a module of std that runs
+// its cases natively can't import yet (MYLA-360)
+#test(2, 7u32)[[7u32, 7u32]]
+fun filled(n: int, v: uint32) -> [uint32] {
+    var out: [uint32] = []
+    for i in 0..n {
+        out.push(v)
+    }
+    return out
+}
+
+// The magnitude of zero.
+fun empty() -> [uint32] {
+    let e: [uint32] = []
+    return e
+}
+
+// `a` without its high zero limbs.
+#test([1u32, 0u32, 0u32])[[1u32]]
+fun mag_norm(a: [uint32]) -> [uint32] {
+    var r = a
+    while r.len() > 0 && r[r.len() - 1] == 0 {
+        r.pop()
+    }
+    return r
+}
+
+// The magnitude of `x`.
+#test(4294967296u64)[[0u32, 1u32]]
+#test(0u64)[empty()]
+fun mag_of(x: uint64) -> [uint32] {
+    if x == 0 {
+        return empty()
+    }
+    if x < B32 {
+        return [x as uint32]
+    }
+    return [x as uint32, (x >> 32) as uint32]
+}
+
+// -1, 0 or 1 as `a` is less than, equal to or greater than `b`.
+#test([1u32, 2u32], [2u32, 1u32])[1]
+#test([5u32], [1u32, 1u32])[-1]
+#test([7u32], [7u32])[0]
+fun mag_cmp(a: [uint32], b: [uint32]) -> int {
+    if a.len() != b.len() {
+        return if a.len() < b.len() { -1 } else { 1 }
+    }
+    var i = a.len() - 1
+    while i >= 0 {
+        if a[i] != b[i] {
+            return if a[i] < b[i] { -1 } else { 1 }
+        }
+        i -= 1
+    }
+    return 0
+}
+
+// a + b
+#test([4294967295u32, 4294967295u32], [1u32])[[0u32, 0u32, 1u32]]
+#test([1u32], [2u32, 3u32])[[3u32, 3u32]]
+fun mag_add(a: [uint32], b: [uint32]) -> [uint32] {
+    if a.len() < b.len() {
+        return mag_add(b, a)
+    }
+    var out: [uint32] = []
+    var carry: uint64 = 0
+    let nb = b.len()
+    for i in 0..nb {
+        let t = a[i] as uint64 + b[i] as uint64 + carry
+        out.push(t as uint32)
+        carry = t >> 32
+    }
+    var i = nb
+    let na = a.len()
+    while i < na {
+        let t = a[i] as uint64 + carry
+        out.push(t as uint32)
+        carry = t >> 32
+        i += 1
+    }
+    if carry > 0 {
+        out.push(1)
+    }
+    return out
+}
+
+// a - b, for a >= b
+#test([0u32, 0u32, 1u32], [1u32])[[4294967295u32, 4294967295u32]]
+#test([5u32, 7u32], [5u32, 7u32])[empty()]
+fun mag_sub(a: [uint32], b: [uint32]) -> [uint32] {
+    var out: [uint32] = []
+    var borrow: uint64 = 0
+    let nb = b.len()
+    for i in 0..nb {
+        let x = a[i] as uint64
+        let y = b[i] as uint64 + borrow
+        out.push((x - y) as uint32)
+        borrow = if x < y { 1 } else { 0 }
+    }
+    var i = nb
+    let na = a.len()
+    while i < na {
+        let x = a[i] as uint64
+        out.push((x - borrow) as uint32)
+        borrow = if x < borrow { 1 } else { 0 }
+        i += 1
+    }
+    return mag_norm(out)
+}
+
+// a * m + add
+#test([4294967295u32], 4294967295u32, 4294967295u32)[[0u32, 4294967295u32]]
+#test(empty(), 7u32, 0u32)[empty()]
+fun mag_mul_small(a: [uint32], m: uint32, add: uint32) -> [uint32] {
+    var out: [uint32] = []
+    var carry = add as uint64
+    let mm = m as uint64
+    for x in a {
+        let t = x as uint64 * mm + carry
+        out.push(t as uint32)
+        carry = t >> 32
+    }
+    if carry > 0 {
+        out.push(carry as uint32)
+    }
+    return mag_norm(out)
+}
+
+// a / d and a % d, for d > 0
+#test([0u32, 1u32], 3u32)[([1431655765u32], 1u32)]
+fun mag_divmod_small(a: [uint32], d: uint32) -> ([uint32], uint32) {
+    let n = a.len()
+    var q = filled(n, 0u32)
+    let dd = d as uint64
+    var rem: uint64 = 0
+    var i = n - 1
+    while i >= 0 {
+        let cur = (rem << 32) | a[i] as uint64
+        q[i] = (cur / dd) as uint32
+        rem = cur % dd
+        i -= 1
+    }
+    return (mag_norm(q), rem as uint32)
+}
+
+// a * 2^s
+#test([2147483648u32, 1u32], 33)[[0u32, 0u32, 3u32]]
+fun mag_shl(a: [uint32], s: int) -> [uint32] {
+    if a.len() == 0 {
+        return a
+    }
+    var out = filled(s / 32, 0u32)
+    let bits = (s % 32) as uint64
+    if bits == 0 {
+        for x in a {
+            out.push(x)
+        }
+        return out
+    }
+    var carry: uint64 = 0
+    for x in a {
+        let t = (x as uint64 << bits) | carry
+        out.push(t as uint32)
+        carry = t >> 32
+    }
+    if carry > 0 {
+        out.push(carry as uint32)
+    }
+    return out
+}
+
+// a / 2^s, rounded down
+#test([0u32, 0u32, 3u32], 33)[[2147483648u32, 1u32]]
+#test([5u32], 40)[empty()]
+fun mag_shr(a: [uint32], s: int) -> [uint32] {
+    let skip = s / 32
+    if skip >= a.len() {
+        return empty()
+    }
+    let bits = (s % 32) as uint64
+    if bits == 0 {
+        return a[skip:]
+    }
+    var out: [uint32] = []
+    var i = skip
+    let n = a.len()
+    while i < n {
+        var t = a[i] as uint64 >> bits
+        if i + 1 < n {
+            t = t | ((a[i + 1] as uint64 << (32 - bits)) & MASK)
+        }
+        out.push(t as uint32)
+        i += 1
+    }
+    return mag_norm(out)
+}
+
+// The number of bits of `a` (0 for zero).
+#test([0u32, 1u32])[33]
+fun mag_bitlen(a: [uint32]) -> int {
+    if a.len() == 0 {
+        return 0
+    }
+    var top = a[a.len() - 1]
+    var n = (a.len() - 1) * 32
+    while top > 0 {
+        top = top >> 1
+        n += 1
+    }
+    return n
+}
+
+// a * b, schoolbook
+#test([4294967295u32, 4294967295u32], [4294967295u32])[[1u32, 4294967295u32, 4294967294u32]]
+fun mul_school(a: [uint32], b: [uint32]) -> [uint32] {
+    let na = a.len()
+    let nb = b.len()
+    var out = filled(na + nb, 0u32)
+    for i in 0..na {
+        let x = a[i] as uint64
+        if x == 0 {
+            continue
+        }
+        var carry: uint64 = 0
+        for j in 0..nb {
+            let t = out[i + j] as uint64 + x * (b[j] as uint64) + carry
+            out[i + j] = t as uint32
+            carry = t >> 32
+        }
+        out[i + nb] = carry as uint32
+    }
+    return mag_norm(out)
+}
+
+// z0 + (z1 - z0 - z2) * B32^m + z2 * B32^(2m), Karatsuba's three products
+// joined in one pass, for z0 < B32^(2m) and z1 >= z0 + z2, when the sum has
+// at most `len` limbs (the middle's carry may run up to the top)
+#test([1u32], [9u32], [2u32], 1, 3)[[1u32, 6u32, 2u32]]
+#test(empty(), [4294967295u32, 0u32, 1u32], [4294967295u32, 4294967295u32], 1, 5)[[0u32, 0u32, 0u32, 0u32, 1u32]]
+fun karatsuba_join(z0: [uint32], z1: [uint32], z2: [uint32], m: int, len: int) -> [uint32] {
+    var out: [uint32] = []
+    for x in z0 {
+        out.push(x)
+    }
+    while out.len() < 2 * m {
+        out.push(0)
+    }
+    for x in z2 {
+        out.push(x)
+    }
+    while out.len() < len {
+        out.push(0)
+    }
+    let n0 = z0.len()
+    let n2 = z2.len()
+    var carry: int64 = 0
+    var i = 0
+    let n1 = z1.len()
+    while i < n1 {
+        var v = out[m + i] as int64 + z1[i] as int64 + carry
+        if i < n0 {
+            v -= z0[i] as int64
+        }
+        if i < n2 {
+            v -= z2[i] as int64
+        }
+        out[m + i] = (v & 4294967295) as uint32
+        carry = v >> 32
+        i += 1
+    }
+    var k = m + n1
+    while carry != 0 {
+        let v = out[k] as int64 + carry
+        out[k] = (v & 4294967295) as uint32
+        carry = v >> 32
+        k += 1
+    }
+    return mag_norm(out)
+}
+
+// a * b, Karatsuba's, for a.len() >= b.len() > a.len() / 2
+fun mul_karatsuba(a: [uint32], b: [uint32]) -> [uint32] {
+    let m = a.len() / 2
+    let a0 = mag_norm(a[:m])
+    let a1 = a[m:]
+    let b0 = mag_norm(b[:m])
+    let b1 = b[m:]
+    let z1 = mag_mul(mag_add(a0, a1), mag_add(b0, b1))
+    return karatsuba_join(mag_mul(a0, b0), z1, mag_mul(a1, b1), m, a.len() + b.len())
+}
+
+// a * b
+#test([3u32], empty())[empty()]
+#test([0u32, 1u32], [0u32, 1u32])[[0u32, 0u32, 1u32]]
+fun mag_mul(a: [uint32], b: [uint32]) -> [uint32] {
+    if a.len() < b.len() {
+        return mag_mul(b, a)
+    }
+    let nb = b.len()
+    if nb == 0 {
+        return b
+    }
+    if nb < KARATSUBA {
+        return mul_school(a, b)
+    }
+    if 2 * nb > a.len() {
+        return mul_karatsuba(a, b)
+    }
+    // a is much longer: multiply b by pieces of a of b's length, adding
+    // each product in at its place
+    var out: [uint32] = []
+    var off = 0
+    let na = a.len()
+    while off < na {
+        let end = if off + nb < na { off + nb } else { na }
+        let p = mag_mul(mag_norm(a[off:end]), b)
+        let np = p.len()
+        while out.len() < off + np + 1 {
+            out.push(0)
+        }
+        var carry: uint64 = 0
+        for i in 0..np {
+            let t = out[off + i] as uint64 + p[i] as uint64 + carry
+            out[off + i] = t as uint32
+            carry = t >> 32
+        }
+        var k = off + np
+        while carry > 0 {
+            let t = out[k] as uint64 + carry
+            out[k] = t as uint32
+            carry = t >> 32
+            k += 1
+        }
+        off = end
+    }
+    return mag_norm(out)
+}
+
+// The number of high zero bits of the limb `x`, for x > 0.
+#test(1u32)[31]
+#test(2147483648u32)[0]
+fun leading_zeros(x: uint32) -> int {
+    var n = 0
+    var v = x
+    while v < 2147483648 {
+        v = v << 1
+        n += 1
+    }
+    return n
+}
+
+// u / v and u % v by Knuth's algorithm D, for v.len() >= 2. The top limb of
+// v is shifted to have its high bit set; each quotient limb is estimated
+// from the top two limbs of the remainder and the top limb of v, corrected
+// by the next one, and found at most one too large by the multiply and
+// subtract, which then adds v back.
+#test([0u32, 0u32, 1u32], [1u32, 1u32])[([4294967295u32], [1u32])]
+fun div_knuth(u: [uint32], v: [uint32]) -> ([uint32], [uint32]) {
+    let n = v.len()
+    let m = u.len() - n
+    let s = leading_zeros(v[n - 1])
+    let vn = mag_shl(v, s)
+    var un = mag_shl(u, s)
+    while un.len() < u.len() + 1 {
+        un.push(0)
+    }
+    var q = filled(m + 1, 0u32)
+    let vtop = vn[n - 1] as uint64
+    let vnext = vn[n - 2] as uint64
+    let nv = vn.len()
+    var j = m
+    while j >= 0 {
+        let num = (un[j + n] as uint64 << 32) | un[j + n - 1] as uint64
+        var qhat = num / vtop
+        var rhat = num - qhat * vtop
+        while qhat >= B32 || qhat * vnext > ((rhat << 32) | un[j + n - 2] as uint64) {
+            qhat -= 1
+            rhat += vtop
+            if rhat >= B32 {
+                break
+            }
+        }
+        // un[j .. j + n] -= qhat * vn
+        var carry: uint64 = 0
+        var borrow: uint64 = 0
+        for i in 0..nv {
+            let p = qhat * (vn[i] as uint64) + carry
+            carry = p >> 32
+            let x = un[i + j] as uint64
+            let y = (p & MASK) + borrow
+            un[i + j] = (x - y) as uint32
+            borrow = if x < y { 1 } else { 0 }
+        }
+        let x = un[j + n] as uint64
+        let y = carry + borrow
+        un[j + n] = (x - y) as uint32
+        if x < y {
+            // qhat was one too large: add vn back
+            qhat -= 1
+            var c: uint64 = 0
+            for i in 0..nv {
+                let t = un[i + j] as uint64 + vn[i] as uint64 + c
+                un[i + j] = t as uint32
+                c = t >> 32
+            }
+            un[j + n] = (un[j + n] as uint64 + c) as uint32
+        }
+        q[j] = qhat as uint32
+        j -= 1
+    }
+    return (mag_norm(q), mag_shr(mag_norm(un[:n]), s))
+}
+
+// u / v and u % v, for v > 0, without the recursive division
+fun div_basic(u: [uint32], v: [uint32]) -> ([uint32], [uint32]) {
+    if mag_cmp(u, v) < 0 {
+        return (empty(), u)
+    }
+    if v.len() == 1 {
+        let qr = mag_divmod_small(u, v[0])
+        return (qr.0, mag_of(qr.1 as uint64))
+    }
+    return div_knuth(u, v)
+}
+
+// hi * B32^n + lo, for lo < B32^n
+#test([1u32], [2u32], 2)[[2u32, 0u32, 1u32]]
+#test(empty(), [2u32], 2)[[2u32]]
+fun join(hi: [uint32], lo: [uint32], n: int) -> [uint32] {
+    if hi.len() == 0 {
+        return lo
+    }
+    var out = lo
+    while out.len() < n {
+        out.push(0)
+    }
+    for x in hi {
+        out.push(x)
+    }
+    return out
+}
+
+// The `i`th block of `n` limbs of `a`, a % B32^((i + 1) * n) / B32^(i * n)
+fun block(a: [uint32], i: int, n: int) -> [uint32] {
+    return mag_norm(a[i * n:(i + 1) * n])
+}
+
+// a / b and a % b, for a < b * B32^n where b has n limbs and its top bit
+// set: Burnikel and Ziegler's D_2n_1n, as two divisions of 3 halves by 2
+fun div_2n1n(a: [uint32], b: [uint32], n: int) -> ([uint32], [uint32]) {
+    if n % 2 == 1 || n < BURNIKEL {
+        return div_basic(a, b)
+    }
+    let h = n / 2
+    let first = div_3n2n(a[h:], b, h)
+    let second = div_3n2n(join(first.1, block(a, 0, h), h), b, h)
+    return (join(first.0, second.0, h), second.1)
+}
+
+// a / b and a % b, for a < b * B32^h where b has 2h limbs and its top bit
+// set: Burnikel and Ziegler's D_3n_2n. The quotient's estimate from the top
+// halves is at most two too large.
+fun div_3n2n(a: [uint32], b: [uint32], h: int) -> ([uint32], [uint32]) {
+    let b1 = b[h:]
+    let b2 = mag_norm(b[:h])
+    let a12 = mag_norm(a[h:])
+    let est = if mag_cmp(mag_norm(a[2 * h:]), b1) < 0 {
+        div_2n1n(a12, b1, h)
+    } else {
+        // the quotient B32^h - 1, and a12 - b1 * B32^h + b1
+        (filled(h, 4294967295u32), mag_add(mag_sub(a12, join(b1, empty(), h)), b1))
+    }
+    var q = est.0
+    let d = mag_mul(q, b2)
+    var r = join(est.1, block(a, 0, h), h)
+    while mag_cmp(r, d) < 0 {
+        q = mag_sub(q, [1u32])
+        r = mag_add(r, b)
+    }
+    return (q, mag_sub(r, d))
+}
+
+// u / v and u % v by Burnikel and Ziegler's recursive division: v shifted
+// to n limbs with its top bit set, where n is a multiple of a power of two
+// that halves down to below `BURNIKEL`, and u cut into blocks of n limbs,
+// divided two at a time from the top.
+fun div_recursive(u: [uint32], v: [uint32]) -> ([uint32], [uint32]) {
+    let s = v.len()
+    var m = 1
+    while m <= s / BURNIKEL {
+        m = m * 2
+    }
+    let n = (s + m - 1) / m * m
+    let sigma = n * 32 - mag_bitlen(v)
+    let b = mag_shl(v, sigma)
+    let a = mag_shl(u, sigma)
+    // blocks enough for a top block below B32^n / 2, so below b
+    var t = (mag_bitlen(a) + n * 32) / (n * 32)
+    if t < 2 {
+        t = 2
+    }
+    var z = join(block(a, t - 1, n), block(a, t - 2, n), n)
+    var qs: [[uint32]] = []          // the quotient's blocks, the top first
+    var i = t - 2
+    while i >= 1 {
+        let qr = div_2n1n(z, b, n)
+        qs.push(qr.0)
+        z = join(qr.1, block(a, i - 1, n), n)
+        i -= 1
+    }
+    let last = div_2n1n(z, b, n)
+    qs.push(last.0)
+    var q: [uint32] = []
+    var k = qs.len() - 1
+    while k >= 0 {
+        q = join(qs[k], q, n * (qs.len() - 1 - k))
+        k -= 1
+    }
+    return (mag_norm(q), mag_shr(last.1, sigma))
+}
+
+// u / v and u % v, for v > 0
+#test([0u32, 0u32, 1u32], [3u32])[([1431655765u32, 1431655765u32], [1u32])]
+#test([5u32], [0u32, 1u32])[(empty(), [5u32])]
+fun mag_divmod(u: [uint32], v: [uint32]) -> ([uint32], [uint32]) {
+    if v.len() == 0 {
+        panic("bigint: division by zero")
+    }
+    if v.len() >= BURNIKEL && u.len() - v.len() >= BURNIKEL {
+        return div_recursive(u, v)
+    }
+    return div_basic(u, v)
+}
+
+// a * a, schoolbook: the products of two different limbs once, doubled,
+// and then the squares of the limbs
+#test([4294967295u32, 4294967295u32])[[1u32, 0u32, 4294967294u32, 4294967295u32]]
+fun sqr_school(a: [uint32]) -> [uint32] {
+    let n = a.len()
+    var out = filled(2 * n, 0u32)
+    for i in 0..n {
+        let x = a[i] as uint64
+        var carry: uint64 = 0
+        var j = i + 1
+        while j < n {
+            let t = out[i + j] as uint64 + x * (a[j] as uint64) + carry
+            out[i + j] = t as uint32
+            carry = t >> 32
+            j += 1
+        }
+        out[i + n] = carry as uint32
+    }
+    var top: uint64 = 0
+    let nout = out.len()
+    for i in 0..nout {
+        let t = out[i] as uint64
+        out[i] = ((t << 1) | top) as uint32
+        top = t >> 31
+    }
+    var carry: uint64 = 0
+    for i in 0..n {
+        let x = a[i] as uint64
+        let sq = x * x
+        let lo = out[2 * i] as uint64 + (sq & MASK) + carry
+        out[2 * i] = lo as uint32
+        let hi = out[2 * i + 1] as uint64 + (sq >> 32) + (lo >> 32)
+        out[2 * i + 1] = hi as uint32
+        carry = hi >> 32
+    }
+    return mag_norm(out)
+}
+
+// a * a
+#test([0u32, 1u32])[[0u32, 0u32, 1u32]]
+fun mag_sqr(a: [uint32]) -> [uint32] {
+    let n = a.len()
+    if n < KARATSUBA_SQR {
+        return sqr_school(a)
+    }
+    let m = n / 2
+    let a0 = mag_norm(a[:m])
+    let a1 = a[m:]
+    return karatsuba_join(mag_sqr(a0), mag_sqr(mag_add(a0, a1)), mag_sqr(a1), m, 2 * n)
+}
+
+// --- text -----------------------------------------------------------------------
+
+// A radix outside 2 to 36 is a runtime error of the function `name`.
+fun check_radix(name: str, radix: int) {
+    if radix < 2 || radix > 36 {
+        panic(f"bigint.{name}: radix {radix} is not between 2 and 36")
+    }
+}
+
+// The number of digits of `radix` in a chunk, the most whose power fits a limb.
+#test(10u32)[9]
+#test(2u32)[31]
+#test(36u32)[6]
+fun chunk_digits(radix: uint32) -> int {
+    var k = 0
+    var p: uint64 = 1
+    while p * (radix as uint64) < B32 {
+        p = p * (radix as uint64)
+        k += 1
+    }
+    return k
+}
+
+// The value of the digit `c` in a radix up to 36, letters in either case;
+// 36 for a byte that is no digit.
+#test('7')[7u32]
+#test('z')[35u32]
+#test('A')[10u32]
+#test('/')[36u32]
+fun digit_value(c: uint8) -> uint32 {
+    if c >= '0' && c <= '9' { return (c - '0') as uint32 }
+    if c >= 'a' && c <= 'z' { return (c - 'a') as uint32 + 10 }
+    if c >= 'A' && c <= 'Z' { return (c - 'A') as uint32 + 10 }
+    return 36
+}
+
+// The powers base^(2^i) from i = 0 for as long as base^(2^i) has at most
+// half of `limbs` limbs.
+fun powers(base: uint32, limbs: int) -> [[uint32]] {
+    var pows: [[uint32]] = [[base]]
+    while 2 * (2 * pows[^1].len() - 1) <= limbs + 1 {
+        pows.push(mag_sqr(pows[^1]))
+    }
+    return pows
+}
+
+// The magnitude written in the digits s[lo:hi] of `radix`, checked to be
+// digits, radix^k being base and pows[i] base^(2^i): the high digits' value
+// times a power of the radix, and the low ones'.
+fun read_digits(s: str, lo: int, hi: int, radix: uint32, k: int, pows: [[uint32]]) -> [uint32] {
+    let n = hi - lo
+    if n <= TEXT_DIGITS || n <= k {
+        var acc = empty()
+        var chunk: uint32 = 0
+        var count = 0
+        var scale: uint32 = 1
+        var i = lo
+        while i < hi {
+            chunk = chunk * radix + digit_value(s[i])
+            scale = scale * radix
+            count += 1
+            if count == k {
+                acc = mag_mul_small(acc, scale, chunk)
+                chunk = 0
+                count = 0
+                scale = 1
+            }
+            i += 1
+        }
+        if count > 0 {
+            acc = mag_mul_small(acc, scale, chunk)
+        }
+        return acc
+    }
+    var i = 0
+    while i + 1 < pows.len() && k * (2 << i) < n {
+        i += 1
+    }
+    let w = k * (1 << i)
+    let high = read_digits(s, lo, hi - w, radix, k, pows)
+    let low = read_digits(s, hi - w, hi, radix, k, pows)
+    return mag_add(mag_mul(high, pows[i]), low)
+}
+
+// Why a string isn't an integer: it has no digits, or a byte that isn't a
+// digit of the radix (at this byte index).
+#derive(Eq)
+pub enum ParseBigIntError {
+    Empty,
+    InvalidDigit(int),
+}
+
+impl ParseBigIntError {
+    // The reason in words.
+    #test(ParseBigIntError.Empty)["no digits"]
+    #test(ParseBigIntError.InvalidDigit(3))["invalid digit at byte 3"]
+    fun message(self) -> str {
+        return match self {
+            Empty => "no digits"
+            InvalidDigit(at) => f"invalid digit at byte {at}"
+        }
+    }
+}
+
+impl Format for ParseBigIntError {
+    #test(ParseBigIntError.Empty, "")["no digits"]
+    #test(ParseBigIntError.InvalidDigit(0), ">25")["  invalid digit at byte 0"]
+    fun format(self, spec: str) -> str {
+        return fmt.pad(self.message(), spec)
+    }
+}
+
+// The integer written in `s` in `radix`: an optional `+` or `-`, then one or
+// more digits, a letter of either case for a digit past 9. A radix outside 2
+// to 36 is a runtime error.
+#test("ff", 16)[Ok(BigInt { negative: false, mag: [255u32] })]
+#test("-100000000", 16)[Ok(BigInt { negative: true, mag: [0u32, 1u32] })]
+#test("-0", 2)[Ok(zero())]
+#test("+", 10)[Err(ParseBigIntError.Empty)]
+#test("12a", 10)[Err(ParseBigIntError.InvalidDigit(2))]
+#test("z", 37)[panic("bigint.parse_radix: radix 37 is not between 2 and 36")]
+pub fun parse_radix(s: str, radix: int) -> Result<BigInt, ParseBigIntError> {
+    check_radix("parse_radix", radix)
+    var lo = 0
+    var neg = false
+    if s.len() > 0 && (s[0] == '-' || s[0] == '+') {
+        neg = s[0] == '-'
+        lo = 1
+    }
+    let n = s.len()
+    if lo == n {
+        return Err(ParseBigIntError.Empty)
+    }
+    let r = radix as uint32
+    for i in lo..n {
+        if digit_value(s[i]) >= r {
+            return Err(ParseBigIntError.InvalidDigit(i))
+        }
+    }
+    let k = chunk_digits(r)
+    var base: uint32 = 1
+    for i in 0..k {
+        base = base * r
+    }
+    // limbs for n - lo digits, about (n - lo) / k of them
+    let pows = powers(base, (n - lo) / k + 1)
+    return Ok(make(neg, read_digits(s, lo, n, r, k, pows)))
+}
+
+// The decimal integer in `s`: an optional `+` or `-`, then one or more digits.
+#test("0")[Ok(zero())]
+#test("-4294967296")[Ok(BigInt { negative: true, mag: [0u32, 1u32] })]
+#test("007")[Ok(BigInt { negative: false, mag: [7u32] })]
+#test("")[Err(ParseBigIntError.Empty)]
+#test("-")[Err(ParseBigIntError.Empty)]
+#test("1 2")[Err(ParseBigIntError.InvalidDigit(1))]
+#test("--1")[Err(ParseBigIntError.InvalidDigit(1))]
+pub fun parse(s: str) -> Result<BigInt, ParseBigIntError> {
+    return parse_radix(s, 10)
+}
+
+// Writes magnitudes in a radix: chunks of k digits, the value of a limb.
+struct Printer {
+    sb: StringBuilder,
+    radix: uint32,
+    k: int,
+    base: uint32,                   // radix^k
+    pows: [[uint32]],               // base^(2^i)
+    upper: bool,
+}
+
+impl Printer {
+    // The digits of `x`, `width` of them with leading zeros, or as many as
+    // it has (none for zero) when `width` is 0.
+    fun chunk(var self, x: uint32, width: int) {
+        var buf: [uint8] = []
+        var v = x
+        let r = self.radix
+        while v > 0 {
+            let d = (v % r) as uint8
+            if d < 10 {
+                buf.push('0' + d)
+            } else if self.upper {
+                buf.push('A' + d - 10)
+            } else {
+                buf.push('a' + d - 10)
+            }
+            v = v / r
+        }
+        var pad = width - buf.len()
+        while pad > 0 {
+            self.sb.append_byte('0')
+            pad -= 1
+        }
+        var i = buf.len() - 1
+        while i >= 0 {
+            self.sb.append_byte(buf[i])
+            i -= 1
+        }
+    }
+
+    // The digits of `a` by repeated division by the base: `width` of them
+    // with leading zeros, or as many as it has when `width` is 0.
+    fun small(var self, a: [uint32], width: int) {
+        var chunks: [uint32] = []
+        var n = a
+        while n.len() > 0 {
+            let qr = mag_divmod_small(n, self.base)
+            chunks.push(qr.1)
+            n = qr.0
+        }
+        var i = chunks.len() - 1
+        if width > 0 {
+            var pad = width - chunks.len() * self.k
+            while pad > 0 {
+                self.sb.append_byte('0')
+                pad -= 1
+            }
+        } else if i >= 0 {
+            self.chunk(chunks[i], 0)
+            i -= 1
+        }
+        while i >= 0 {
+            self.chunk(chunks[i], self.k)
+            i -= 1
+        }
+    }
+
+    // The digits of `a > 0`, without leading zeros: those of a / pows[i]
+    // and of the remainder, for the pows[i] with about half of a's limbs.
+    fun top(var self, a: [uint32]) {
+        if a.len() <= TEXT_LIMBS {
+            self.small(a, 0)
+            return
+        }
+        var i = 0
+        while i + 1 < self.pows.len() && 2 * self.pows[i + 1].len() <= a.len() + 1 {
+            i += 1
+        }
+        let qr = mag_divmod(a, self.pows[i])
+        self.top(qr.0)
+        self.padded(qr.1, i)
+    }
+
+    // The k * 2^i digits of `a < pows[i]`, with leading zeros.
+    fun padded(var self, a: [uint32], i: int) {
+        if i == 0 || a.len() <= TEXT_LIMBS {
+            self.small(a, self.k * (1 << i))
+            return
+        }
+        let qr = mag_divmod(a, self.pows[i - 1])
+        self.padded(qr.0, i - 1)
+        self.padded(qr.1, i - 1)
+    }
+}
+
+// The digits of `a` in a radix 2^bits, read off its bits from the top.
+fun power_of_two_digits(a: [uint32], bits: int, upper: bool) -> str {
+    var sb = StringBuilder()
+    let total = mag_bitlen(a)
+    var d = (total + bits - 1) / bits - 1
+    let mask: uint64 = (1 << (bits as uint64)) - 1
+    while d >= 0 {
+        let pos = d * bits
+        let limb = pos / 32
+        var v = a[limb] as uint64 >> ((pos % 32) as uint64)
+        if limb + 1 < a.len() {
+            v = v | (a[limb + 1] as uint64 << ((32 - pos % 32) as uint64))
+        }
+        let digit = (v & mask) as uint8
+        if digit < 10 {
+            sb.append_byte('0' + digit)
+        } else if upper {
+            sb.append_byte('A' + digit - 10)
+        } else {
+            sb.append_byte('a' + digit - 10)
+        }
+        d -= 1
+    }
+    return sb.build()
+}
+
+// The digits of the magnitude `a` in `radix`, letters past 9 in upper case
+// when `upper`; "0" for zero.
+fun mag_text(a: [uint32], radix: uint32, upper: bool) -> str {
+    if a.len() == 0 {
+        return "0"
+    }
+    var bits = 0
+    while (1u32 << (bits as uint32)) < radix {
+        bits += 1
+    }
+    if (1u32 << (bits as uint32)) == radix {
+        return power_of_two_digits(a, bits, upper)
+    }
+    let k = chunk_digits(radix)
+    var base: uint32 = 1
+    for i in 0..k {
+        base = base * radix
+    }
+    var p = Printer { sb: StringBuilder(), radix: radix, k: k, base: base, pows: [], upper: upper }
+    if a.len() > TEXT_LIMBS {
+        p.pows = powers(base, a.len())
+    }
+    p.top(a)
+    return p.sb.build()
+}
+
+// --- BigInt ---------------------------------------------------------------------
+
+// The integer with sign `neg` and magnitude `mag`: zero is never negative.
+fun make(neg: bool, mag: [uint32]) -> BigInt {
+    return BigInt { negative: neg && mag.len() > 0, mag: mag }
+}
+
+// Zero.
+#test()[BigInt { negative: false, mag: empty() }]
+pub fun zero() -> BigInt {
+    return BigInt { negative: false, mag: empty() }
+}
+
+// The integer `n`.
+#test(-1i64)[BigInt { negative: true, mag: [1u32] }]
+#test(0i64)[zero()]
+#test(-9223372036854775807i64 - 1)[BigInt { negative: true, mag: [0u32, 2147483648u32] }]
+pub fun from_int(n: int64) -> BigInt {
+    if n < 0 {
+        return make(true, mag_of((0 - n) as uint64))
+    }
+    return make(false, mag_of(n as uint64))
+}
+
+// The integer `n`.
+#test(18446744073709551615u64)[BigInt { negative: false, mag: [4294967295u32, 4294967295u32] }]
+pub fun from_uint(n: uint64) -> BigInt {
+    return make(false, mag_of(n))
+}
+
+// a + b with the signs given
+fun add_signed(aneg: bool, a: [uint32], bneg: bool, b: [uint32]) -> BigInt {
+    if aneg == bneg {
+        return make(aneg, mag_add(a, b))
+    }
+    if mag_cmp(a, b) >= 0 {
+        return make(aneg, mag_sub(a, b))
+    }
+    return make(bneg, mag_sub(b, a))
+}
+
+impl BigInt {
+    // Whether it is zero, below zero.
+    #test(BigInt { negative: false, mag: empty() })[true]
+    fun is_zero(self) -> bool {
+        return self.mag.len() == 0
+    }
+
+    #test(BigInt { negative: true, mag: [3u32] })[true]
+    #test(BigInt { negative: false, mag: [3u32] })[false]
+    fun is_negative(self) -> bool {
+        return self.negative
+    }
+
+    // -1, 0 or 1.
+    #test(BigInt { negative: true, mag: [3u32] })[-1]
+    #test(BigInt { negative: false, mag: empty() })[0]
+    #test(BigInt { negative: false, mag: [0u32, 9u32] })[1]
+    fun signum(self) -> int {
+        if self.negative {
+            return -1
+        }
+        return if self.mag.len() == 0 { 0 } else { 1 }
+    }
+
+    // The integer with the other sign (zero stays zero).
+    #test(BigInt { negative: false, mag: [3u32] })[BigInt { negative: true, mag: [3u32] }]
+    #test(BigInt { negative: false, mag: empty() })[zero()]
+    fun neg(self) -> BigInt {
+        return make(!self.negative, self.mag)
+    }
+
+    // The integer without its sign.
+    #test(BigInt { negative: true, mag: [3u32] })[BigInt { negative: false, mag: [3u32] }]
+    fun abs(self) -> BigInt {
+        return BigInt { negative: false, mag: self.mag }
+    }
+
+    // The integer to the power `exp`, by squaring from the exponent's top
+    // bit; 0^0 is 1.
+    #test(BigInt { negative: true, mag: [2u32] }, 33u32)[BigInt { negative: true, mag: [0u32, 2u32] }]
+    #test(BigInt { negative: true, mag: [2u32] }, 2u32)[BigInt { negative: false, mag: [4u32] }]
+    #test(BigInt { negative: false, mag: empty() }, 0u32)[BigInt { negative: false, mag: [1u32] }]
+    fun pow(self, exp: uint32) -> BigInt {
+        var r: [uint32] = [1u32]
+        var bit: uint32 = 2147483648
+        while bit > 0 && (exp & bit) == 0 {
+            bit = bit >> 1
+        }
+        while bit > 0 {
+            r = mag_sqr(r)
+            if (exp & bit) != 0 {
+                r = mag_mul(r, self.mag)
+            }
+            bit = bit >> 1
+        }
+        return make(self.negative && (exp & 1) == 1, mag_norm(r))
+    }
+
+    // The quotient rounded toward zero and the remainder with the sign of
+    // `self`, as `/` and `%` give them; a zero divisor is a runtime error.
+    #test(BigInt { negative: true, mag: [7u32] }, BigInt { negative: false, mag: [2u32] })[(BigInt { negative: true, mag: [3u32] }, BigInt { negative: true, mag: [1u32] })]
+    #test(BigInt { negative: false, mag: [7u32] }, BigInt { negative: true, mag: [2u32] })[(BigInt { negative: true, mag: [3u32] }, BigInt { negative: false, mag: [1u32] })]
+    #test(BigInt { negative: false, mag: [7u32] }, BigInt { negative: false, mag: empty() })[panic("bigint: division by zero")]
+    fun div_rem(self, other: BigInt) -> (BigInt, BigInt) {
+        let qr = mag_divmod(self.mag, other.mag)
+        return (make(self.negative != other.negative, qr.0), make(self.negative, qr.1))
+    }
+
+    // The quotient rounded down and the remainder with the sign of `other`,
+    // as Python's `//` and `%` give them.
+    #test(BigInt { negative: true, mag: [7u32] }, BigInt { negative: false, mag: [2u32] })[BigInt { negative: true, mag: [4u32] }]
+    #test(BigInt { negative: true, mag: [6u32] }, BigInt { negative: false, mag: [2u32] })[BigInt { negative: true, mag: [3u32] }]
+    fun div_floor(self, other: BigInt) -> BigInt {
+        let qr = self.div_rem(other)
+        if !qr.1.is_zero() && qr.1.negative != other.negative {
+            return qr.0 - from_int(1)
+        }
+        return qr.0
+    }
+
+    #test(BigInt { negative: true, mag: [7u32] }, BigInt { negative: false, mag: [2u32] })[BigInt { negative: false, mag: [1u32] }]
+    #test(BigInt { negative: false, mag: [7u32] }, BigInt { negative: true, mag: [2u32] })[BigInt { negative: true, mag: [1u32] }]
+    fun mod_floor(self, other: BigInt) -> BigInt {
+        let r = self % other
+        if !r.is_zero() && r.negative != other.negative {
+            return r + other
+        }
+        return r
+    }
+
+    // The quotient and remainder of Euclidean division: the remainder is
+    // never negative, from 0 to |other| - 1.
+    #test(BigInt { negative: true, mag: [7u32] }, BigInt { negative: true, mag: [2u32] })[BigInt { negative: false, mag: [4u32] }]
+    #test(BigInt { negative: false, mag: [7u32] }, BigInt { negative: true, mag: [2u32] })[BigInt { negative: true, mag: [3u32] }]
+    fun div_euclid(self, other: BigInt) -> BigInt {
+        let qr = self.div_rem(other)
+        if qr.1.negative {
+            return if other.negative { qr.0 + from_int(1) } else { qr.0 - from_int(1) }
+        }
+        return qr.0
+    }
+
+    #test(BigInt { negative: true, mag: [7u32] }, BigInt { negative: true, mag: [2u32] })[BigInt { negative: false, mag: [1u32] }]
+    fun rem_euclid(self, other: BigInt) -> BigInt {
+        let r = self % other
+        if r.negative {
+            return r + other.abs()
+        }
+        return r
+    }
+
+    // self * 2^n; a negative `n` is a runtime error.
+    #test(BigInt { negative: true, mag: [3u32] }, 32)[BigInt { negative: true, mag: [0u32, 3u32] }]
+    fun shl(self, n: int) -> BigInt {
+        if n < 0 {
+            panic(f"bigint.shl: a negative shift {n}")
+        }
+        return make(self.negative, mag_shl(self.mag, n))
+    }
+
+    // self / 2^n rounded down, as Python's `>>`: -1 stays -1. A negative
+    // `n` is a runtime error.
+    #test(BigInt { negative: false, mag: [0u32, 3u32] }, 33)[BigInt { negative: false, mag: [1u32] }]
+    #test(BigInt { negative: true, mag: [5u32] }, 1)[BigInt { negative: true, mag: [3u32] }]
+    #test(BigInt { negative: true, mag: [1u32] }, 100)[BigInt { negative: true, mag: [1u32] }]
+    fun shr(self, n: int) -> BigInt {
+        if n < 0 {
+            panic(f"bigint.shr: a negative shift {n}")
+        }
+        let q = mag_shr(self.mag, n)
+        if self.negative && mag_cmp(mag_shl(q, n), self.mag) != 0 {
+            return make(true, mag_add(q, [1u32]))
+        }
+        return make(self.negative, q)
+    }
+
+    // The number of bits of the magnitude (0 for zero).
+    #test(BigInt { negative: true, mag: [0u32, 1u32] })[33]
+    fun bit_len(self) -> int {
+        return mag_bitlen(self.mag)
+    }
+
+    // The value as an `int64` or a `uint64`, if it fits.
+    #test(BigInt { negative: true, mag: [0u32, 2147483648u32] })[Some(-9223372036854775807i64 - 1)]
+    #test(BigInt { negative: false, mag: [0u32, 2147483648u32] })[None]
+    #test(BigInt { negative: false, mag: [5u32] })[Some(5i64)]
+    fun to_int64(self) -> Option<int64> {
+        if self.mag.len() > 2 {
+            return None
+        }
+        let u = self.mag_u64()
+        if self.negative {
+            if u > 9223372036854775808 {
+                return None
+            }
+            return Some((0 - u) as int64)
+        }
+        if u > 9223372036854775807 {
+            return None
+        }
+        return Some(u as int64)
+    }
+
+    #test(BigInt { negative: false, mag: [0u32, 2147483648u32] })[Some(9223372036854775808u64)]
+    #test(BigInt { negative: true, mag: [1u32] })[None]
+    #test(BigInt { negative: false, mag: [0u32, 0u32, 1u32] })[None]
+    fun to_uint64(self) -> Option<uint64> {
+        if self.mag.len() > 2 || self.negative {
+            return None
+        }
+        return Some(self.mag_u64())
+    }
+
+    // the low 64 bits of the magnitude
+    fun mag_u64(self) -> uint64 {
+        var u: uint64 = 0
+        if self.mag.len() > 0 {
+            u = self.mag[0] as uint64
+        }
+        if self.mag.len() > 1 {
+            u = u | (self.mag[1] as uint64 << 32)
+        }
+        return u
+    }
+
+    // The digits in `radix` (2 to 36), letters in lower case, after a "-"
+    // when it is negative. A radix outside 2 to 36 is a runtime error.
+    #test(BigInt { negative: true, mag: [255u32] }, 16)["-ff"]
+    #test(BigInt { negative: false, mag: [0u32, 1u32] }, 36)["1z141z4"]
+    #test(BigInt { negative: false, mag: empty() }, 2)["0"]
+    fun to_str_radix(self, radix: int) -> str {
+        check_radix("to_str_radix", radix)
+        let digits = mag_text(self.mag, radix as uint32, false)
+        return if self.negative { "-" + digits } else { digits }
+    }
+}
+
+impl Add for BigInt {
+    #test(BigInt { negative: false, mag: [4294967295u32] }, BigInt { negative: false, mag: [1u32] })[BigInt { negative: false, mag: [0u32, 1u32] }]
+    #test(BigInt { negative: false, mag: [3u32] }, BigInt { negative: true, mag: [5u32] })[BigInt { negative: true, mag: [2u32] }]
+    #test(BigInt { negative: false, mag: [5u32] }, BigInt { negative: true, mag: [5u32] })[zero()]
+    fun add(self, other: BigInt) -> BigInt {
+        return add_signed(self.negative, self.mag, other.negative, other.mag)
+    }
+}
+
+impl Sub for BigInt {
+    #test(BigInt { negative: false, mag: [0u32, 1u32] }, BigInt { negative: false, mag: [1u32] })[BigInt { negative: false, mag: [4294967295u32] }]
+    #test(BigInt { negative: true, mag: [3u32] }, BigInt { negative: true, mag: [5u32] })[BigInt { negative: false, mag: [2u32] }]
+    fun sub(self, other: BigInt) -> BigInt {
+        return add_signed(self.negative, self.mag, !other.negative, other.mag)
+    }
+}
+
+impl Mul for BigInt {
+    #test(BigInt { negative: true, mag: [4294967295u32] }, BigInt { negative: false, mag: [4294967295u32] })[BigInt { negative: true, mag: [1u32, 4294967294u32] }]
+    #test(BigInt { negative: true, mag: [7u32] }, BigInt { negative: false, mag: empty() })[zero()]
+    fun mul(self, other: BigInt) -> BigInt {
+        return make(self.negative != other.negative, mag_mul(self.mag, other.mag))
+    }
+}
+
+impl Div for BigInt {
+    #test(BigInt { negative: true, mag: [7u32] }, BigInt { negative: false, mag: [2u32] })[BigInt { negative: true, mag: [3u32] }]
+    fun div(self, other: BigInt) -> BigInt {
+        return self.div_rem(other).0
+    }
+}
+
+impl Rem for BigInt {
+    #test(BigInt { negative: true, mag: [7u32] }, BigInt { negative: false, mag: [2u32] })[BigInt { negative: true, mag: [1u32] }]
+    fun rem(self, other: BigInt) -> BigInt {
+        return self.div_rem(other).1
+    }
+}
+
+impl Ord for BigInt {
+    #test(BigInt { negative: true, mag: [7u32] }, BigInt { negative: false, mag: [2u32] })[-1]
+    #test(BigInt { negative: true, mag: [7u32] }, BigInt { negative: true, mag: [2u32] })[-1]
+    #test(BigInt { negative: false, mag: [0u32, 1u32] }, BigInt { negative: false, mag: [7u32] })[1]
+    #test(BigInt { negative: true, mag: [7u32] }, BigInt { negative: true, mag: [7u32] })[0]
+    fun cmp(self, other: BigInt) -> int {
+        if self.negative != other.negative {
+            return if self.negative { -1 } else { 1 }
+        }
+        let c = mag_cmp(self.mag, other.mag)
+        return if self.negative { -c } else { c }
+    }
+}
+
+// `text` filled out to the spec's width, right-aligned unless it says
+// otherwise
+fun fill_to(text: str, sp: fmt.Spec) -> str {
+    let gap = sp.width - text.len()
+    if gap <= 0 {
+        return text
+    }
+    var left = gap
+    if sp.align == '<' {
+        left = 0
+    } else if sp.align == '^' {
+        left = gap / 2
+    }
+    var sb = StringBuilder()
+    for i in 0..left {
+        sb.append(sp.fill)
+    }
+    sb.append(text)
+    for i in left..gap {
+        sb.append(sp.fill)
+    }
+    return sb.build()
+}
+
+// In decimal, or in hex, binary or octal with the kinds `x`, `X`, `b` and
+// `o` (`#` adds the prefix 0x, 0b or 0o); `+` writes the sign of a number
+// that isn't negative, `0` zeros after the sign up to the width; fill,
+// alignment (right by default) and width as for an integer. A precision is a
+// runtime error, as is a spec that isn't one.
+impl Format for BigInt {
+    #test(BigInt { negative: true, mag: [0u32, 1u32] }, "")["-4294967296"]
+    #test(BigInt { negative: false, mag: [255u32] }, "#x")["0xff"]
+    #test(BigInt { negative: false, mag: [255u32] }, "X")["FF"]
+    #test(BigInt { negative: true, mag: [5u32] }, "08b")["-0000101"]
+    #test(BigInt { negative: false, mag: [42u32] }, "+")["+42"]
+    #test(BigInt { negative: false, mag: [42u32] }, "*^6")["**42**"]
+    #test(BigInt { negative: false, mag: [42u32] }, "<4")["42  "]
+    #test(BigInt { negative: false, mag: [42u32] }, ".2")[panic("invalid format spec '.2' for a BigInt: it needs a float")]
+    fun format(self, spec: str) -> str {
+        if spec == "" {
+            return self.to_str_radix(10)
+        }
+        let sp = match fmt.parse_spec(spec) {
+            Ok(sp) => sp
+            Err(why) => { panic(why) }
+        }
+        let need = fmt.spec_need(sp, 0)
+        if need != "" {
+            panic(f"invalid format spec '{spec}' for a BigInt: it {need}")
+        }
+        var radix: uint32 = 10
+        var prefix = ""
+        if sp.kind == 'x' || sp.kind == 'X' {
+            radix = 16
+            prefix = "0x"
+        } else if sp.kind == 'b' {
+            radix = 2
+            prefix = "0b"
+        } else if sp.kind == 'o' {
+            radix = 8
+            prefix = "0o"
+        }
+        if !sp.alt {
+            prefix = ""
+        }
+        let digits = mag_text(self.mag, radix, sp.kind == 'X')
+        let sign = if self.negative { "-" } else if sp.plus { "+" } else { "" }
+        if sp.zero && sp.align == 0 {
+            var sb = StringBuilder()
+            sb.append(sign)
+            sb.append(prefix)
+            for i in sign.len() + prefix.len() + digits.len()..sp.width {
+                sb.append_byte('0')
+            }
+            sb.append(digits)
+            return sb.build()
+        }
+        return fill_to(sign + prefix + digits, sp)
+    }
+}
+
+// --- cases checked against Python's integers --------------------------------
+// The expected values are Python's (MYLA-345's evidence says how); a
+// large result is compared by its number of digits and its first and last 15.
+
+// base^exp + add
+fun val(base: int64, exp: uint32, add: int64) -> BigInt {
+    return from_int(base).pow(exp) + from_int(add)
+}
+
+// The decimal digits of `x` in short: their number, the first and the last 15.
+#test(BigInt { negative: true, mag: [12u32] })["3:-12..-12"]
+fun ident(x: BigInt) -> str {
+    let s = f"{x}"
+    let tail = if s.len() > 15 { s.len() - 15 } else { 0 }
+    return f"{s.len()}:{s[:15]}..{s[tail:]}"
+}
+
+// The number in `s`, which must be one.
+fun num(s: str) -> BigInt {
+    return match parse(s) {
+        Ok(v) => v
+        Err(e) => { panic(f"not a number: {s}") }
+    }
+}
+
+// The result of `op` on `a` and `b`, written in decimal: "add", "sub",
+// "mul", "cmp", and for the divisions the quotient and the remainder,
+// truncated ("div"), rounded down ("floor") or Euclidean ("euclid").
+#test("add", "-711065361995567209171001043709354361953857647344459591", "-2195035648906918420067070661")["-711065361995567209171001045904390010860776067411530252"]
+#test("sub", "-83376023505442641500033949638785925437064742593", "-73082942005242272155834027")["-83376023505442641499960866696780683164908908566"]
+#test("mul", "-939007553832575680728962711879922270416677", "-1656013122810900881005968755531242")["1555008831565308771019340028854963359599982224541160070828111559707831322834"]
+#test("div", "-66451556960844468143585079636774733623285348342179", "758580393738898320941328159339489361")["-87599887249019 -536656168278266228874051422840155320"]
+#test("div", "6024645231753719762503456705270162999890988280884047962854", "1130431817725840078671381844556551155")["5329507836990888035861 333056417010399760261512365926993399"]
+#test("floor", "48811309487700194597821534041038833052295380915", "-3716078478891273869253412133725715996")["-13135166484 -146167409660883120514117747266497149"]
+#test("floor", "-5751253379497", "945477911137039753093211")["-1 945477911131288499713714"]
+#test("euclid", "-60383034958337641527426951905895882825234", "-935098005576")["64574017480812620767465846903 795173505894"]
+#test("euclid", "435355118626403680848632174616728948506874335151900", "-461298321065076967689245393264661987")["-943760466375048 12777548012503002184070143444251524"]
+#test("cmp", "44660197776421328802992157998496682158558193593", "-2934899592960364253554366603")["1"]
+fun calc(op: str, a: str, b: str) -> str {
+    let x = num(a)
+    let y = num(b)
+    if op == "add" { return f"{x + y}" }
+    if op == "sub" { return f"{x - y}" }
+    if op == "mul" { return f"{x * y}" }
+    if op == "cmp" { return f"{x.cmp(y)}" }
+    if op == "div" { return f"{x / y} {x % y}" }
+    if op == "floor" { return f"{x.div_floor(y)} {x.mod_floor(y)}" }
+    if op == "euclid" { return f"{x.div_euclid(y)} {x.rem_euclid(y)}" }
+    panic(f"no operation {op}")
+}
+
+// The product of base^exp + add and base2^exp2 + add2 in short (see
+// `ident`), past Karatsuba's size: balanced, a long operand by a short one,
+// and a square of limbs all ones.
+#test(3i64, 1500u32, 1i64, -7i64, 1300u32, -2i64)["1815:203860975497057..993686696729998"]
+#test(3i64, 8200u32, 0i64, 7i64, 1500u32, 3i64)["5181:109988865539496..704696244116004"]
+#test(2i64, 4096u32, -1i64, 2i64, 4096u32, -1i64)["2467:109074813561941..984669407412225"]
+fun big_product(base: int64, exp: uint32, add: int64, base2: int64, exp2: uint32, add2: int64) -> str {
+    return ident(val(base, exp, add) * val(base2, exp2, add2))
+}
+
+// The square of base^exp + add in short, past the size of Karatsuba's
+// squaring: limbs all ones.
+#test(2i64, 4352u32, -1i64)["2621:146245415023281..193654113665025"]
+fun big_square(base: int64, exp: uint32, add: int64) -> str {
+    return ident(val(base, exp, add).pow(2))
+}
+
+// The quotient and remainder of base^exp + add by base2^exp2 + add2 in
+// short, past the recursive division's size; also limbs all ones, a
+// quotient of all nines and a divisor next to the dividend.
+#test(3i64, 3600u32, 5i64, 7i64, 950u32, -1i64)["915:621411057985110..231337908533984 803:409202814833305..174826947739974"]
+#test(-3i64, 3601u32, 0i64, 2i64, 2700u32, 1i64)["907:-21510472625358..314042293797526 814:-22056730492192..006773282982701"]
+#test(2i64, 6400u32, -1i64, 2i64, 3200u32, 1i64)["964:197690647898256..297002238181375 1:0..0"]
+#test(10i64, 1700u32, -1i64, 10i64, 820u32, -3i64)["881:100000000000000..000000000000000 61:899999999999999..999999999999999"]
+#test(7i64, 1000u32, 0i64, 7i64, 1000u32, -1i64)["1:1..1 1:1..1"]
+fun big_quotient(base: int64, exp: uint32, add: int64, base2: int64, exp2: uint32, add2: int64) -> str {
+    let qr = val(base, exp, add).div_rem(val(base2, exp2, add2))
+    return f"{ident(qr.0)} {ident(qr.1)}"
+}
+
+// Whether `x` written in `radix` reads back as `x`.
+#test(BigInt { negative: true, mag: [0u32, 1u32] }, 36)[true]
+fun reads_back(x: BigInt, radix: int) -> bool {
+    return match parse_radix(x.to_str_radix(radix), radix) {
+        Ok(v) => v == x
+        Err(e) => false
+    }
+}
+
+// 3^4000 printed by divide and conquer and read back, in decimal, hex and
+// base 7; shifted right as Python's `>>` does.
+#test
+fun big_text() {
+    let x = from_int(3).pow(4000)
+    let s = f"{x}"
+    assert(ident(x) == "1909:305505391259850..355101820880001", "3^4000 printed")
+    assert(num(s) == x, "3^4000 read back")
+    assert(num("-" + s).shr(100) == x.neg().div_floor(from_int(2).pow(100)), "-3^4000 >> 100")
+    assert(ident(x.neg().shr(100)) == "1880:-24100125949914..270128993964610", "-3^4000 >> 100 printed")
+    assert(reads_back(x, 16), "3^4000 in hex and back")
+    assert(reads_back(x, 7), "3^4000 in base 7 and back")
+}
+
+// A `BigInt` as a map key: equal values made in different ways hash alike;
+// and the operators of `Ord`.
+#test
+fun keys_and_order() {
+    var m: [BigInt: str] = [:]
+    m[from_int(2).pow(100)] = "a"
+    m[num("-1")] = "b"
+    m[zero()] = "c"
+    m[num("1267650600228229401496703205376")] = "d"
+    assert(m.len() == 3, "three keys")
+    assert(m[from_int(1).shl(100)] == "d", "2^100 found")
+    assert(m[from_int(5) - from_int(6)] == "b", "-1 found")
+    assert(m[from_int(7) * zero()] == "c", "zero found")
+    assert(from_int(2).pow(64) > from_uint(18446744073709551615), "2^64 > 2^64 - 1")
+    assert(num("-5") < from_int(-4) && from_int(-4) <= from_int(-4), "the order of negatives")
+}
