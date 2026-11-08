@@ -1,0 +1,17 @@
+//~ type error: argument type mismatch in call to 'set': expected 'int32', found 'str'
+// A generic actor's method takes its instance's type argument (MYLA-386)
+actor Cell<T> {
+    value: T,
+}
+
+impl<T> Cell<T> {
+    fun set(var self, v: T) {
+        self.value = v
+    }
+}
+
+#main
+async fun main() {
+    let c = Cell { value: 1 }
+    await c.set("one")
+}

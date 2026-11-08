@@ -16,6 +16,7 @@ from std.num import f64_literal_bits, f32_round_bits
 from std.fs import current_dir
 from .loader import Span
 from .checker import CheckErr, Checker, Type, is_builtin_value, is_raw_memory_primitive, is_platform_primitive, FuncSig, StructInfo, EnumInfo, FieldT, VariantT, Subst, subst_type, subst_get, opt_subst_type, CV, type_name, checker_on, ImplArgs, impl_trait_args
+from .checker import is_notify_primitive
 from .ir import render_func, verify, moves, IrFunc, Inst
 from .ssa import SsaStats, no_ssa_stats
 from .inline import inlinable, inline_calls, same_module, may_inline, merge_blocks
@@ -1414,7 +1415,7 @@ impl CodeGen {
     fun type_key(self, t: Type) -> str {
         return match t {
             Type.TStruct(n, a) => n,
-            Type.TActor(n) => n,
+            Type.TActor(n, a) => n,
             Type.TEnum(n, a) => n,
             Type.TInt(w, s) => int_type_name_cg(w, s),
             Type.TBool => "bool",
@@ -1505,7 +1506,7 @@ impl CodeGen {
             Type.TStr => { return true },
             Type.TFunc(ps, r) => { return true },
             Type.TAsync(f) => { return true },
-            Type.TActor(n) => { return true },
+            Type.TActor(n, a) => { return true },
             Type.TStruct(n, a) => {
                 if list_has_str(seen, n) { return false }
                 let info = self.struct_info(n)
@@ -2242,6 +2243,10 @@ impl CodeGen {
         // a timer entry being swapped (std.rt's `timer_sift`, the lock held)
         out.push("__timer_tmp:")
         out.push("\t.skip 32")
+        // the waiters parked on notifiers (std.rt's `park_frame`, MYLA-387),
+        // and the claim on the stuck report (`exec_stuck`)
+        out.push("__parked:")
+        out.push("\t.skip 16")
         if self.frames {
             // each worker's queue: `[lock][head][tail]`, a cache line each
             out.push("\t.balign 64")
@@ -3489,9 +3494,9 @@ impl CodeGen {
                         self.emit_routine(dropb_slow_ir(self, t, "inline", slow, free), -1, 0, 0)
                     },
                     // an actor's cell: its fields, as a struct's (same token)
-                    Type.TActor(n) => {
+                    Type.TActor(n, a) => {
                         atomic = self.frames
-                        self.emit_routine(dropb_slow_ir(self, Type.TStruct(n, []), "", slow, free), -1, 0, 0)
+                        self.emit_routine(dropb_slow_ir(self, Type.TStruct(n, a), "", slow, free), -1, 0, 0)
                     },
                     _ => {},
                 }
@@ -3899,15 +3904,17 @@ pub fun may_write_expr(e: Expr, name: str) -> bool {
 #test(Type.TStruct("Glyph", []))["Glyph"]
 #test(Type.TStruct("Pair", [Type.TInt(32, true), Type.TBool]))["Pair"]
 fun struct_name_of(t: Type) -> str {
-    return match t { Type.TStruct(n, a) => n, Type.TActor(n) => n, _ => "" }
+    return match t { Type.TStruct(n, a) => n, Type.TActor(n, a) => n, _ => "" }
 }
 
-#test(Type.TActor("Account"))[[]]
+#test(Type.TActor("Account", []))[[]]
+#test(Type.TActor("Cell", [Type.TStr]))[[Type.TStr]]
 #test(Type.TEnum("List", [Type.TInt(32, true)]))[[Type.TInt(32, true)]]
 #test(Type.TStruct("Pair", [Type.TInt(32, true), Type.TBool]))[[Type.TInt(32, true), Type.TBool]]
 fun type_args_of(t: Type) -> [Type] {
     return match t {
         Type.TStruct(n, a) => a,
+        Type.TActor(n, a) => a,
         Type.TEnum(n, a) => a,
         _ => [],
     }
@@ -3995,10 +4002,10 @@ pub fun is_async_t(t: Type) -> bool {
 
 // Whether `t` is an actor's handle: a cell holding its fields (D89).
 #test(Type.TInt(32, true))[false]
-#test(Type.TActor("Account"))[true]
+#test(Type.TActor("Account", []))[true]
 #test(Type.TEnum("List", []))[false]
 pub fun is_actor_t(t: Type) -> bool {
-    return match t { Type.TActor(n) => true, _ => false }
+    return match t { Type.TActor(n, a) => true, _ => false }
 }
 
 #test(expr_of("-n * 2"))[false]
@@ -4079,6 +4086,7 @@ pub fun is_builtin_call_name(nm: str) -> bool {
     if nm == "__spawn" || nm == "__reap" || nm == "__kill" || nm == "__close" { return true }
     if nm == "__run_with" || nm == "__spawn_with" { return true }
     if is_platform_primitive(nm) || is_raw_memory_primitive(nm) { return true }
+    if is_notify_primitive(nm) { return true }
     return false
 }
 
@@ -4274,7 +4282,7 @@ fun mono_token(t: Type) -> str {
         Type.TFloat(w) => format(".f{}", w),
         Type.TSB => ".sb",
         Type.TStruct(n, a) => agg_token(n, a),
-        Type.TActor(n) => agg_token(n, []),
+        Type.TActor(n, a) => agg_token(n, a),
         Type.TEnum(n, a) => agg_token(n, a),
         Type.TTuple(es) => ".T" + join_tokens(es),
         Type.TList(e) => ".L" + lp(mono_token(e)),
@@ -4300,6 +4308,7 @@ fun parts_of(t: Type) -> [Type] {
     return match t {
         Type.TTuple(es) => es,
         Type.TStruct(n, a) => a,
+        Type.TActor(n, a) => a,
         Type.TEnum(n, a) => a,
         Type.TList(e) => [e],
         Type.TMap(k, v) => [k, v],

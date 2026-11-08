@@ -1,0 +1,5 @@
+type error: argument type mismatch in call to 'set': expected 'int32', found 'str'
+  --> examples/errors/type_generic_actor_mismatch.my:16:17
+   |
+16 |     await c.set("one")
+   |                 ^^^^^

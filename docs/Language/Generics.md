@@ -1,6 +1,6 @@
 # Generics
 
-Functions, structs, enums, impls and traits may take type parameters. Generic code is checked once against opaque type parameters, then run by erasure in the interpreter and **monomorphized** (one concrete copy per instantiation) for native code (D13, [[Architecture/Monomorphization]]).
+Functions, structs, enums, actors, impls and traits may take type parameters. Generic code is checked once against opaque type parameters, then run by erasure in the interpreter and **monomorphized** (one concrete copy per instantiation) for native code (D13, [[Architecture/Monomorphization]]).
 
 [TOC]
 
@@ -40,6 +40,7 @@ fun main() {
 
 - Parameter names may not shadow built-in type names (`int`, `str`, …) and may not repeat.
 - Inside the body a `T` value can only be bound, copied, passed, stored, returned and matched by binding. Operators need a bound ([[Language/Methods-and-traits]]); `print(x)` on a `T` without a `Format` bound is an error.
+- An actor takes them as a struct does, `actor Cell<T> { value: T }` with `impl<T> Cell<T> { … }`: an instance per type argument, each serving its own calls one at a time ([[Language/Concurrency#generic-actors]], [[MYLA-386]]).
 - A bound's trait gives `T` its functions without `self` too: `T.zero()` under `T: Zero` makes a `T` with no value in hand, the function of the type `T` stands for in each call ([[Language/Methods-and-traits#functions-without-self]], D172).
 
 ## Type arguments
@@ -173,7 +174,8 @@ fun main() {
 
 - Generic functions can't be used as values or partially applied.
 - `#main`, `#test` and `#derive` can't be applied to generic declarations.
-- An `impl` on a generic type is either generic over all its parameters in order (`impl<T> Box<T>`) or not allowed (`impl Box<int>` is an error).
+- An `impl` on a generic type (a struct, enum or actor) is either generic over all its parameters in order (`impl<T> Box<T>`) or not allowed (`impl Box<int>` is an error).
+- A struct's or actor's own type parameters take no bounds (`struct S<T: Add>` is a parse error): the impl that needs one says it, `impl<T: Add> S<T>`.
 - A generic `impl` on a built-in type is for lists and maps: `impl<T> [T] { fun second(self) -> T { … } }`, `impl<K: Eq + Hash, V> [K: V]` (a key needs its bound written, D167), their type parameters bound by the receiver's type ([[MYLA-221]]).
 
 ## How generics run
