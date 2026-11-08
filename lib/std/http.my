@@ -1,0 +1,2990 @@
+// std.http: an HTTP/1.1 client and server over std.net (MYLA-347).
+//
+// - A `Request` and a `Response` are values: a start line's parts, `Headers`
+//   (their names compared without case, kept in order, repeats allowed), a
+//   body and the trailers of a chunked one. A body is a `str` of bytes,
+//   any bytes (D164); `text()` gives it as UTF-8, `bytes()` as `[uint8]`.
+// - The client: `fetch(url)` (a GET: the prelude's `get` takes that name),
+//   `post(url, body)`, `send(request(method,
+//   url).with_header(…).with_body(…).with_timeout(ms))`, and a `Client`
+//   that keeps its connection open between requests (keep-alive). Every one
+//   has an async twin on the reactor (`fetch_async`, `send_async`, …).
+//   Redirects are followed, five by default; a gzip or deflate body is
+//   decoded through std.compress, and `Accept-Encoding: gzip, deflate` is
+//   sent unless the request says otherwise.
+// - The server: `serve(addr, handler)`, `handler` a function from a
+//   `Request` to a `Response`; `serve_with` takes a listener, options and
+//   an async handler, and stops after a number of requests or when its task
+//   is cancelled. A pool of `workers` tasks serves the connections, one each
+//   at a time, with keep-alive.
+// - Only plain HTTP: `https` is `Unsupported` until TLS. A failure is an
+//   `HttpError`; on wasm32, which has no sockets, every exchange is
+//   `Unsupported("sockets")`.
+//
+// HTTP's line end is CRLF: it is always written, and a bare LF is accepted
+// when reading. Everything goes through std.net, nothing through the
+// platform. The parsing is one incremental `Parser`, which the functions
+// that read a whole message (`parse_request`, `parse_response`) and the
+// connections (sync and async) share.
+
+import std.net as net
+from std.net import TcpStream, TcpListener, SocketAddr, IpAddr
+from std.fs import IoError
+from std.io import Read, Write
+import std.url as url_m
+import std.compress as compress
+from std.compress import CompressError
+import std.bytes as bytes_m
+import std.task as task
+import std.time as time
+import std.str as str_m
+import std.list as list_m
+import std.option as option_m
+
+// --- errors --------------------------------------------------------------------------
+
+// Why a request or response couldn't be sent, read or served (D168: the
+// variants carry different data, so it is a bare enum).
+pub enum HttpError {
+    // A URL that doesn't parse, or has no host: the text
+    InvalidUrl(str),
+    // What isn't supported: `https`, another scheme, a transfer coding
+    // other than chunked, an HTTP version other than 1.x, sockets (wasm32)
+    Unsupported(str),
+    // The connection failed: its cause
+    Io(IoError),
+    // The time given ran out
+    TimedOut,
+    // The peer closed the connection before a message began
+    Closed,
+    // The connection ended inside a message
+    Truncated,
+    // A request line or status line that isn't one
+    BadStartLine,
+    // A header line without a colon or with a bad name; a header to send
+    // whose name isn't a token or whose value holds CR, LF or NUL
+    BadHeader,
+    // A Content-Length that isn't a number, or two that differ
+    BadLength,
+    // A chunked body whose size lines or chunk ends are wrong
+    BadChunk,
+    // The head (or the trailers) past the limit
+    HeadersTooLarge,
+    // The body past the limit
+    BodyTooLarge,
+    // More redirects than the request allows
+    TooManyRedirects,
+    // A gzip or deflate body that doesn't decompress
+    Decode(CompressError),
+}
+
+impl HttpError {
+    // The reason in words.
+    #test(HttpError.TimedOut)["timed out"]
+    #test(HttpError.Unsupported("https"))["unsupported: https"]
+    #test(HttpError.Io(IoError.ConnectionRefused))["connection failed: ConnectionRefused"]
+    #test(HttpError.Decode(CompressError.Truncated))["body doesn't decompress: compressed data ends too early"]
+    #test(HttpError.InvalidUrl("x y"))["invalid URL: x y"]
+    fun message(self) -> str {
+        return match self {
+            InvalidUrl(u) => f"invalid URL: {u}"
+            Unsupported(what) => f"unsupported: {what}"
+            Io(e) => f"connection failed: {io_name(e)}"
+            TimedOut => "timed out"
+            Closed => "connection closed"
+            Truncated => "connection closed inside a message"
+            BadStartLine => "malformed request or status line"
+            BadHeader => "malformed header"
+            BadLength => "invalid Content-Length"
+            BadChunk => "malformed chunked body"
+            HeadersTooLarge => "headers too large"
+            BodyTooLarge => "body too large"
+            TooManyRedirects => "too many redirects"
+            Decode(e) => f"body doesn't decompress: {e.message()}"
+        }
+    }
+}
+
+// Two errors are equal when they say the same (`IoError` has no `Eq`).
+impl Eq for HttpError {
+    fun eq(self, other: HttpError) -> bool {
+        return self.message() == other.message()
+    }
+}
+
+impl Format for HttpError {
+    // The message; the spec is ignored.
+    #test(HttpError.BodyTooLarge, "")["body too large"]
+    fun format(self, spec: str) -> str {
+        return self.message()
+    }
+}
+
+// The name of an `IoError`'s cause.
+#test(IoError.Other(5))["Other(5)"]
+#test(IoError.TimedOut)["TimedOut"]
+fun io_name(e: IoError) -> str {
+    return match e {
+        NotFound => "NotFound"
+        PermissionDenied => "PermissionDenied"
+        AlreadyExists => "AlreadyExists"
+        NotADirectory => "NotADirectory"
+        IsADirectory => "IsADirectory"
+        NotEmpty => "NotEmpty"
+        Interrupted => "Interrupted"
+        Cancelled => "Cancelled"
+        Unsupported => "Unsupported"
+        BrokenPipe => "BrokenPipe"
+        InvalidInput => "InvalidInput"
+        ConnectionRefused => "ConnectionRefused"
+        ConnectionReset => "ConnectionReset"
+        ConnectionAborted => "ConnectionAborted"
+        NotConnected => "NotConnected"
+        AddrInUse => "AddrInUse"
+        AddrNotAvailable => "AddrNotAvailable"
+        TimedOut => "TimedOut"
+        HostUnreachable => "HostUnreachable"
+        NetworkUnreachable => "NetworkUnreachable"
+        InvalidData => "InvalidData"
+        Other(c) => f"Other({c})"
+    }
+}
+
+// A socket's failure as an `HttpError`: a timeout is `TimedOut`, a target
+// without sockets `Unsupported("sockets")`.
+fun io_error(e: IoError) -> HttpError {
+    return match e {
+        TimedOut => HttpError.TimedOut
+        Unsupported => HttpError.Unsupported("sockets")
+        _ => HttpError.Io(e)
+    }
+}
+
+// --- bytes and text ------------------------------------------------------------------
+
+const CR: uint8 = 13
+const LF: uint8 = 10
+const SP: uint8 = 32
+const HT: uint8 = 9
+
+// The first position of the byte `b` in `s` at or after `start`, or -1.
+#test("ab\ncd\n", 10u8, 0)[2]
+#test("ab\ncd\n", 10u8, 3)[5]
+#test("abc", 10u8, 0)[-1]
+fun find_byte(s: str, b: uint8, start: int) -> int {
+    let n = s.len()
+    var i = start
+    while i < n {
+        if s[i] == b {
+            return i
+        }
+        i += 1
+    }
+    return -1
+}
+
+// The bytes of `s` from `a` to `b`: a builder copies them, so a bound
+// inside a UTF-8 character is no error (MYLA-390).
+#test("hello", 1, 3)["el"]
+#test("hello", 0, 5)["hello"]
+#test("hello", 2, 2)[""]
+fun part(s: str, a: int, b: int) -> str {
+    if a == 0 && b == s.len() {
+        return s
+    }
+    var sb = StringBuilder()
+    sb.append(s, a, b)
+    return sb.build()
+}
+
+// `s` without the spaces and tabs (HTTP's optional whitespace) at its ends.
+#test("  a b \t")["a b"]
+#test("\t")[""]
+#test("x")["x"]
+fun trim_ows(s: str) -> str {
+    var a = 0
+    var b = s.len()
+    while a < b && (s[a] == SP || s[a] == HT) {
+        a += 1
+    }
+    while b > a && (s[b - 1] == SP || s[b - 1] == HT) {
+        b -= 1
+    }
+    return part(s, a, b)
+}
+
+// The ASCII lower case of the byte `b`.
+fun lower_byte(b: uint8) -> uint8 {
+    if b >= 65 && b <= 90 {
+        return b + 32
+    }
+    return b
+}
+
+// Whether `a` and `b` are the same but for ASCII case: how header names,
+// and the tokens of `Connection` and `Transfer-Encoding`, compare.
+#test("Content-Length", "content-length")[true]
+#test("Host", "Hosts")[false]
+#test("a", "b")[false]
+fun same_name(a: str, b: str) -> bool {
+    if a.len() != b.len() {
+        return false
+    }
+    var i = 0
+    while i < a.len() {
+        if lower_byte(a[i]) != lower_byte(b[i]) {
+            return false
+        }
+        i += 1
+    }
+    return true
+}
+
+// Whether `b` may stand in a token (RFC 9110, section 5.6.2): a method, a
+// header's name.
+fun token_byte(b: uint8) -> bool {
+    if (b >= 48 && b <= 57) || (b >= 65 && b <= 90) || (b >= 97 && b <= 122) {
+        return true
+    }
+    return find_byte("!#$%&'*+-.^_`|~", b, 0) >= 0
+}
+
+// Whether `s` is a token: not empty, token bytes only.
+#test("GET")[true]
+#test("X-Custom_1")[true]
+#test("")[false]
+#test("Bad Name")[false]
+#test("a:b")[false]
+fun is_token(s: str) -> bool {
+    if s.len() == 0 {
+        return false
+    }
+    var i = 0
+    while i < s.len() {
+        if !token_byte(s[i]) {
+            return false
+        }
+        i += 1
+    }
+    return true
+}
+
+// Whether `s` may be sent as a header's value: no CR, LF or NUL.
+#test("text/plain; charset=utf-8")[true]
+#test("a\r\nX-Injected: 1")[false]
+#test("")[true]
+fun is_value(s: str) -> bool {
+    var i = 0
+    while i < s.len() {
+        let b = s[i]
+        if b == CR || b == LF || b == 0 {
+            return false
+        }
+        i += 1
+    }
+    return true
+}
+
+// The decimal number `s`, digits only: -1 if it isn't one, -2 if it is
+// past the largest `int`.
+#test("0")[0]
+#test("1234")[1234]
+#test("")[-1]
+#test("12a")[-1]
+#test("-1")[-1]
+#test("99999999999")[-2]
+fun parse_decimal(s: str) -> int {
+    if s.len() == 0 {
+        return -1
+    }
+    var v: int64 = 0
+    var i = 0
+    while i < s.len() {
+        let b = s[i]
+        if b < 48 || b > 57 {
+            return -1
+        }
+        v = v * 10 + (b - 48) as int64
+        if v > 2147483647 {
+            return -2
+        }
+        i += 1
+    }
+    return v as int
+}
+
+// The hexadecimal number `s`: -1 if it isn't one, -2 if it is past the
+// largest `int`.
+#test("ff")[255]
+#test("1A")[26]
+#test("0")[0]
+#test("")[-1]
+#test("g")[-1]
+#test("100000000")[-2]
+fun parse_hex(s: str) -> int {
+    if s.len() == 0 {
+        return -1
+    }
+    var v: int64 = 0
+    var i = 0
+    while i < s.len() {
+        let b = lower_byte(s[i])
+        var d: int64 = 0
+        if b >= 48 && b <= 57 {
+            d = (b - 48) as int64
+        } else if b >= 97 && b <= 102 {
+            d = (b - 87) as int64
+        } else {
+            return -1
+        }
+        v = v * 16 + d
+        if v > 2147483647 {
+            return -2
+        }
+        i += 1
+    }
+    return v as int
+}
+
+// `n` in lower-case hex.
+#test(255)["ff"]
+#test(0)["0"]
+#test(65536)["10000"]
+fun hex(n: int) -> str {
+    if n == 0 {
+        return "0"
+    }
+    let digits = "0123456789abcdef"
+    var out: [uint8] = []
+    var v = n
+    while v > 0 {
+        out.push(digits[v % 16])
+        v = v / 16
+    }
+    var sb = StringBuilder()
+    var i = out.len() - 1
+    while i >= 0 {
+        sb.append_byte(out[i])
+        i -= 1
+    }
+    return sb.build()
+}
+
+// The pieces of a comma-separated header value (or of several), trimmed
+// and in lower case, the empty ones left out: `Connection`'s,
+// `Transfer-Encoding`'s, `Content-Encoding`'s.
+#test(["keep-alive, Upgrade", "close"])[["keep-alive", "upgrade", "close"]]
+#test([" , gzip ,"])[["gzip"]]
+#test([])[[]]
+fun tokens(values: [str]) -> [str] {
+    var out: [str] = []
+    for v in values {
+        for piece in v.split(",") {
+            let t = trim_ows(piece)
+            if t.len() > 0 {
+                out.push(t.to_lower())
+            }
+        }
+    }
+    return out
+}
+
+// `s` as UTF-8: each byte that doesn't begin a valid sequence (a shortest
+// form, no surrogate, nothing past U+10FFFF) becomes U+FFFD. Valid text is
+// given back as it is.
+#test("héllo")["héllo"]
+#test("\u{FF}")["ÿ"] // U+00FF is two valid bytes
+#test("")[""]
+fun lossy_utf8(s: str) -> str {
+    let n = s.len()
+    var i = 0
+    while i < n {
+        let k = utf8_length(s, i)
+        if k == 0 {
+            break
+        }
+        i += k
+    }
+    if i == n {
+        return s
+    }
+    var sb = StringBuilder()
+    sb.append(s, 0, i)
+    while i < n {
+        let k = utf8_length(s, i)
+        if k == 0 {
+            sb.append("\u{FFFD}")
+            i += 1
+        } else {
+            sb.append(s, i, i + k)
+            i += k
+        }
+    }
+    return sb.build()
+}
+
+// The length of the valid UTF-8 sequence at `i` in `s`, or 0.
+#test("a", 0)[1]
+#test("é", 0)[2]
+#test("\u{1F600}", 0)[4]
+fun utf8_length(s: str, i: int) -> int {
+    let n = s.len()
+    let b = s[i]
+    if b < 128 {
+        return 1
+    }
+    var k = 0
+    var lo: uint8 = 128
+    var hi: uint8 = 191
+    if b >= 194 && b <= 223 {
+        k = 2
+    } else if b >= 224 && b <= 239 {
+        k = 3
+        if b == 224 {
+            lo = 160
+        } else if b == 237 {
+            hi = 159
+        }
+    } else if b >= 240 && b <= 244 {
+        k = 4
+        if b == 240 {
+            lo = 144
+        } else if b == 244 {
+            hi = 143
+        }
+    } else {
+        return 0
+    }
+    if i + k > n {
+        return 0
+    }
+    if s[i + 1] < lo || s[i + 1] > hi {
+        return 0
+    }
+    var j = 2
+    while j < k {
+        if s[i + j] < 128 || s[i + j] > 191 {
+            return 0
+        }
+        j += 1
+    }
+    return k
+}
+
+// --- headers -------------------------------------------------------------------------
+
+// A message's header fields, in the order they came or were added; a name
+// may repeat. Names are compared without ASCII case and kept as written.
+#derive(Eq)
+pub struct Headers {
+    items: [(str, str)],
+}
+
+// No headers.
+pub fun headers() -> Headers {
+    return Headers { items: [] }
+}
+
+impl Headers {
+    // The value of the first field named `name`.
+    #test(Headers { items: [("Content-Type", "text/html"), ("X-A", "1"), ("x-a", "2")] }, "x-A")[Some("1")]
+    #test(Headers { items: [("Content-Type", "text/html")] }, "Host")[None]
+    fun get(self, name: str) -> Option<str> {
+        for kv in self.items {
+            if same_name(kv.0, name) {
+                return Some(kv.1)
+            }
+        }
+        return None
+    }
+
+    // The values of every field named `name`, in order.
+    #test(Headers { items: [("Set-Cookie", "a=1"), ("Host", "h"), ("set-cookie", "b=2")] }, "SET-COOKIE")[["a=1", "b=2"]]
+    #test(Headers { items: [("Host", "h")] }, "Accept")[[]]
+    fun get_all(self, name: str) -> [str] {
+        var out: [str] = []
+        for kv in self.items {
+            if same_name(kv.0, name) {
+                out.push(kv.1)
+            }
+        }
+        return out
+    }
+
+    // Whether a field is named `name`.
+    #test(Headers { items: [("Host", "h")] }, "host")[true]
+    #test(Headers { items: [("Host", "h")] }, "Hos")[false]
+    fun has(self, name: str) -> bool {
+        for kv in self.items {
+            if same_name(kv.0, name) {
+                return true
+            }
+        }
+        return false
+    }
+
+    // Whether the comma-separated values of the fields named `name` hold
+    // `token`, without case: `has_token("Connection", "close")`.
+    #test(Headers { items: [("Connection", "keep-alive, Close")] }, "connection", "close")[true]
+    #test(Headers { items: [("Connection", "closed")] }, "Connection", "close")[false]
+    #test(Headers { items: [("TE", "trailers"), ("Transfer-Encoding", "gzip"), ("transfer-encoding", "chunked")] }, "Transfer-Encoding", "chunked")[true]
+    fun has_token(self, name: str, token: str) -> bool {
+        for t in tokens(self.get_all(name)) {
+            if same_name(t, token) {
+                return true
+            }
+        }
+        return false
+    }
+
+    // A field added at the end.
+    fun add(var self, name: str, value: str) {
+        self.items.push((name, value))
+    }
+
+    // The fields named `name` replaced by one with `value`, where the first
+    // of them was (at the end if there was none).
+    fun set(var self, name: str, value: str) {
+        var out: [(str, str)] = []
+        var done = false
+        for kv in self.items {
+            if same_name(kv.0, name) {
+                if !done {
+                    out.push((kv.0, value))
+                    done = true
+                }
+            } else {
+                out.push(kv)
+            }
+        }
+        if !done {
+            out.push((name, value))
+        }
+        self.items = out
+    }
+
+    // Every field named `name` taken out.
+    fun remove(var self, name: str) {
+        var out: [(str, str)] = []
+        for kv in self.items {
+            if !same_name(kv.0, name) {
+                out.push(kv)
+            }
+        }
+        self.items = out
+    }
+
+    // How many fields there are.
+    #test(Headers { items: [("A", "1"), ("a", "2")] })[2]
+    fun len(self) -> int {
+        return self.items.len()
+    }
+}
+
+// The headers `a` and the ones of `b` after them.
+fun joined(a: Headers, b: Headers) -> Headers {
+    var h = a
+    for kv in b.items {
+        h.items.push(kv)
+    }
+    return h
+}
+
+// The standard reason phrase of `status` (RFC 9110), "" for one it doesn't
+// name.
+#test(200)["OK"]
+#test(404)["Not Found"]
+#test(431)["Request Header Fields Too Large"]
+#test(299)[""]
+pub fun reason(status: int) -> str {
+    return match status {
+        100 => "Continue"
+        101 => "Switching Protocols"
+        200 => "OK"
+        201 => "Created"
+        202 => "Accepted"
+        203 => "Non-Authoritative Information"
+        204 => "No Content"
+        205 => "Reset Content"
+        206 => "Partial Content"
+        300 => "Multiple Choices"
+        301 => "Moved Permanently"
+        302 => "Found"
+        303 => "See Other"
+        304 => "Not Modified"
+        307 => "Temporary Redirect"
+        308 => "Permanent Redirect"
+        400 => "Bad Request"
+        401 => "Unauthorized"
+        403 => "Forbidden"
+        404 => "Not Found"
+        405 => "Method Not Allowed"
+        406 => "Not Acceptable"
+        408 => "Request Timeout"
+        409 => "Conflict"
+        410 => "Gone"
+        411 => "Length Required"
+        412 => "Precondition Failed"
+        413 => "Content Too Large"
+        414 => "URI Too Long"
+        415 => "Unsupported Media Type"
+        416 => "Range Not Satisfiable"
+        417 => "Expectation Failed"
+        422 => "Unprocessable Content"
+        426 => "Upgrade Required"
+        428 => "Precondition Required"
+        429 => "Too Many Requests"
+        431 => "Request Header Fields Too Large"
+        500 => "Internal Server Error"
+        501 => "Not Implemented"
+        502 => "Bad Gateway"
+        503 => "Service Unavailable"
+        504 => "Gateway Timeout"
+        505 => "HTTP Version Not Supported"
+        _ => ""
+    }
+}
+
+// --- requests and responses ----------------------------------------------------------
+
+// The default limits: a head (or trailers) of 64 KiB; a body of 1 GiB for
+// the client, 16 MiB for the server.
+const MAX_HEAD: int = 65536
+const CLIENT_MAX_BODY: int = 1073741824
+const SERVER_MAX_BODY: int = 16777216
+
+// An HTTP request. The client sends one (`url` the absolute URL); the
+// server's handler is given one (`url` the request target as it came,
+// `/path?query`, and `peer` the client's address). The fields after
+// `trailers` are the client's: how long the whole exchange may take
+// (milliseconds, negative: no limit), how many redirects it follows (0:
+// none, the 3xx response is given back), whether it asks for and decodes
+// gzip and deflate bodies, and the response's limits.
+pub struct Request {
+    method: str,
+    url: str,
+    version: str,
+    headers: Headers,
+    body: str,
+    trailers: Headers,
+    peer: Option<SocketAddr>,
+    timeout_ms: int,
+    max_redirects: int,
+    decompress: bool,
+    max_header_bytes: int,
+    max_body_bytes: int,
+}
+
+// A request with the method `method` (`GET`, `POST`, …, as written) for
+// `url`: no headers but those `send` adds, no body, no time limit, up to
+// five redirects followed, compressed bodies asked for and decoded.
+pub fun request(method: str, url: str) -> Request {
+    return Request {
+        method: method,
+        url: url,
+        version: "HTTP/1.1",
+        headers: headers(),
+        body: "",
+        trailers: headers(),
+        peer: None,
+        timeout_ms: -1,
+        max_redirects: 5,
+        decompress: true,
+        max_header_bytes: MAX_HEAD,
+        max_body_bytes: CLIENT_MAX_BODY,
+    }
+}
+
+impl Request {
+    // The request with a header field added.
+    fun with_header(self, name: str, value: str) -> Request {
+        var r = self
+        r.headers.add(name, value)
+        return r
+    }
+
+    // The request with the body `body`.
+    fun with_body(self, body: str) -> Request {
+        var r = self
+        r.body = body
+        return r
+    }
+
+    // The request with a time limit for the whole exchange, redirects
+    // included, in milliseconds (negative: none).
+    fun with_timeout(self, ms: int) -> Request {
+        var r = self
+        r.timeout_ms = ms
+        return r
+    }
+
+    // The request following at most `n` redirects (0: none).
+    fun with_redirects(self, n: int) -> Request {
+        var r = self
+        r.max_redirects = n
+        return r
+    }
+
+    // The request asking for compressed bodies and decoding them (`true`,
+    // the default), or neither.
+    fun with_decompress(self, on: bool) -> Request {
+        var r = self
+        r.decompress = on
+        return r
+    }
+
+    // The request accepting a response head of at most `header_bytes` bytes
+    // and a body of at most `body_bytes` (as received, before decoding).
+    fun with_limits(self, header_bytes: int, body_bytes: int) -> Request {
+        var r = self
+        r.max_header_bytes = header_bytes
+        r.max_body_bytes = body_bytes
+        return r
+    }
+
+    // The first value of the header field `name`.
+    fun header(self, name: str) -> Option<str> {
+        return self.headers.get(name)
+    }
+
+    // The path of the URL or target, without its query: `/a/b` of
+    // `/a/b?c=1`; `/` for none.
+    #test(request("GET", "/a/b?c=1"))["/a/b"]
+    #test(request("GET", "http://example.com"))["/"]
+    #test(request("GET", "http://example.com/x%20y?q"))["/x%20y"]
+    #test(request("OPTIONS", "*"))["*"]
+    fun path(self) -> str {
+        let t = self.url
+        if t.starts_with("/") {
+            let q = find_byte(t, 63, 0)
+            return if q < 0 { t } else { part(t, 0, q) }
+        }
+        return match url_m.parse(t) {
+            Ok(u) => if u.path == "" { "/" } else { u.path }
+            Err(_) => t
+        }
+    }
+
+    // The query's pairs, decoded (`+` a space, `%XX` its byte); none when
+    // there is no query or it doesn't decode.
+    #test(request("GET", "/s?q=a+b&n=1"))[[("q", "a b"), ("n", "1")]]
+    #test(request("GET", "/s"))[[]]
+    fun query(self) -> [(str, str)] {
+        let t = self.url
+        let q = find_byte(t, 63, 0)
+        if q < 0 {
+            return []
+        }
+        var end = find_byte(t, 35, q)
+        if end < 0 {
+            end = t.len()
+        }
+        return match url_m.query_decode(part(t, q + 1, end)) {
+            Ok(pairs) => pairs
+            Err(_) => []
+        }
+    }
+
+    // The body as UTF-8 text (`lossy_utf8`).
+    fun text(self) -> str {
+        return lossy_utf8(self.body)
+    }
+
+    // The body's bytes.
+    fun bytes(self) -> [uint8] {
+        return bytes_m.from_str(self.body)
+    }
+}
+
+// An HTTP response: the status, its reason phrase, the version, headers,
+// the body and the trailers of a chunked one. The client sets `url` to the
+// URL it came from, after the redirects.
+#derive(Eq)
+pub struct Response {
+    status: int,
+    reason: str,
+    version: str,
+    headers: Headers,
+    body: str,
+    trailers: Headers,
+    url: str,
+}
+
+// A response with the status `status`, its standard reason phrase, and
+// the body `body`; the server adds the framing (`Content-Length`).
+#test(200, "hi")[Response { status: 200, reason: "OK", version: "HTTP/1.1", headers: Headers { items: [] }, body: "hi", trailers: Headers { items: [] }, url: "" }]
+pub fun response(status: int, body: str) -> Response {
+    return Response {
+        status: status,
+        reason: reason(status),
+        version: "HTTP/1.1",
+        headers: headers(),
+        body: body,
+        trailers: headers(),
+        url: "",
+    }
+}
+
+impl Response {
+    // The response with a header field added.
+    fun with_header(self, name: str, value: str) -> Response {
+        var r = self
+        r.headers.add(name, value)
+        return r
+    }
+
+    // The response with a trailer field added: it is sent chunked then, to
+    // an HTTP/1.1 client.
+    fun with_trailer(self, name: str, value: str) -> Response {
+        var r = self
+        r.trailers.add(name, value)
+        return r
+    }
+
+    // The first value of the header field `name`.
+    fun header(self, name: str) -> Option<str> {
+        return self.headers.get(name)
+    }
+
+    // Whether the status is a success, 200 to 299.
+    #test(response(204, ""))[true]
+    #test(response(404, ""))[false]
+    fun is_success(self) -> bool {
+        return self.status >= 200 && self.status < 300
+    }
+
+    // The body as UTF-8 text: valid text as it is, each byte that isn't
+    // valid UTF-8 replaced by U+FFFD.
+    #test(response(200, "caf\u{E9}"))["café"]
+    fun text(self) -> str {
+        return lossy_utf8(self.body)
+    }
+
+    // The body's bytes.
+    #test(response(200, "hi"))[[104u8, 105u8]]
+    fun bytes(self) -> [uint8] {
+        return bytes_m.from_str(self.body)
+    }
+}
+
+// --- the parser ----------------------------------------------------------------------
+
+// What the parser reads next.
+const S_START: int = 0
+const S_HEAD: int = 1
+const S_LENGTH: int = 2
+const S_CHUNK_SIZE: int = 3
+const S_CHUNK_DATA: int = 4
+const S_CHUNK_END: int = 5
+const S_TRAILER: int = 6
+const S_UNTIL_CLOSE: int = 7
+const S_DONE: int = 8
+
+// The longest chunk-size line (with its extensions) taken.
+const MAX_CHUNK_LINE: int = 4096
+
+// A message read as its bytes come: `advance` takes what has come and
+// gives how far it got. A line is taken whole, so a part of one is left to
+// the next call with more bytes after it; a body's bytes are taken as they
+// come.
+struct Parser {
+    request: bool,
+    // a response's: its request's method (a response to `HEAD` has no body)
+    method: str,
+    max_head: int,
+    max_body: int,
+    state: int,
+    // the bytes of the head so far (then of the trailers)
+    seen: int,
+    started: bool,
+    // the start line's three parts: method, target, version; or version,
+    // status, reason
+    first: str,
+    second: str,
+    third: str,
+    status: int,
+    headers: Headers,
+    trailers: Headers,
+    body: StringBuilder,
+    body_len: int,
+    left: int,
+    failed: bool,
+    err: HttpError,
+    // a request that asked for `100 Continue` before its body
+    expect_continue: bool,
+    // a message whose end is the connection's (a response without a length)
+    until_close: bool,
+    // a message after which the connection can't be used again
+    close_after: bool,
+}
+
+// A parser of a request (`request`) or of the response to a request with
+// the method `method`.
+fun parser(request: bool, method: str, max_head: int, max_body: int) -> Parser {
+    return Parser {
+        request: request,
+        method: method,
+        max_head: max_head,
+        max_body: max_body,
+        state: S_START,
+        seen: 0,
+        started: false,
+        first: "",
+        second: "",
+        third: "",
+        status: 0,
+        headers: headers(),
+        trailers: headers(),
+        body: StringBuilder(),
+        body_len: 0,
+        left: 0,
+        failed: false,
+        err: HttpError.Closed,
+        expect_continue: false,
+        until_close: false,
+        close_after: false,
+    }
+}
+
+impl Parser {
+    fun fail(var self, e: HttpError) {
+        if !self.failed {
+            self.failed = true
+            self.err = e
+        }
+    }
+
+    fun done(self) -> bool {
+        return self.state == S_DONE
+    }
+
+    // What of `data` from `start` on makes the message, taken: the position
+    // after it. Stops at the message's end, at a failure, or where only a
+    // part of a line is left.
+    fun advance(var self, data: str, start: int) -> int {
+        let n = data.len()
+        var at = start
+        while self.state != S_DONE && !self.failed {
+            let s = self.state
+            if s == S_LENGTH || s == S_CHUNK_DATA {
+                var k = n - at
+                if k > self.left {
+                    k = self.left
+                }
+                if k == 0 {
+                    return at
+                }
+                self.body.append(data, at, at + k)
+                self.body_len += k
+                self.left -= k
+                at += k
+                if self.left == 0 {
+                    self.state = if s == S_LENGTH { S_DONE } else { S_CHUNK_END }
+                }
+            } else if s == S_UNTIL_CLOSE {
+                let k = n - at
+                if k == 0 {
+                    return at
+                }
+                if self.body_len + k > self.max_body {
+                    self.fail(HttpError.BodyTooLarge)
+                    return at
+                }
+                self.body.append(data, at, n)
+                self.body_len += k
+                return n
+            } else {
+                let nl = find_byte(data, LF, at)
+                if nl < 0 {
+                    let partial = n - at
+                    if partial > 0 {
+                        self.started = true
+                    }
+                    if s == S_CHUNK_SIZE || s == S_CHUNK_END {
+                        if partial > MAX_CHUNK_LINE {
+                            self.fail(HttpError.BadChunk)
+                        }
+                    } else if self.seen + partial > self.max_head {
+                        self.fail(HttpError.HeadersTooLarge)
+                    }
+                    return at
+                }
+                self.started = true
+                var end = nl
+                if end > at && data[end - 1] == CR {
+                    end -= 1
+                }
+                let line = part(data, at, end)
+                let used = nl + 1 - at
+                at = nl + 1
+                self.line(line, used)
+            }
+        }
+        return at
+    }
+
+    // One line of the head, a chunk's size or end, or a trailer.
+    fun line(var self, line: str, used: int) {
+        let s = self.state
+        if s == S_START || s == S_HEAD || s == S_TRAILER {
+            self.seen += used
+            if self.seen > self.max_head {
+                self.fail(HttpError.HeadersTooLarge)
+                return
+            }
+        }
+        if s == S_START {
+            // empty lines before a message are skipped (RFC 9112, 2.2)
+            if line.len() > 0 {
+                self.start_line(line)
+                self.state = S_HEAD
+            }
+        } else if s == S_HEAD {
+            if line.len() == 0 {
+                self.framing()
+            } else {
+                self.field(line, false)
+            }
+        } else if s == S_CHUNK_SIZE {
+            var end = 0
+            while end < line.len() && line[end] != 59 && line[end] != SP && line[end] != HT {
+                end += 1
+            }
+            let size = parse_hex(part(line, 0, end))
+            if size == -1 {
+                self.fail(HttpError.BadChunk)
+            } else if size == -2 || self.body_len + size > self.max_body {
+                self.fail(HttpError.BodyTooLarge)
+            } else if size == 0 {
+                self.seen = 0
+                self.state = S_TRAILER
+            } else {
+                self.left = size
+                self.state = S_CHUNK_DATA
+            }
+        } else if s == S_CHUNK_END {
+            if line.len() == 0 {
+                self.state = S_CHUNK_SIZE
+            } else {
+                self.fail(HttpError.BadChunk)
+            }
+        } else if s == S_TRAILER {
+            if line.len() == 0 {
+                self.state = S_DONE
+            } else {
+                self.field(line, true)
+            }
+        }
+    }
+
+    // A request line (method, target, version) or a status line (version,
+    // status, reason).
+    fun start_line(var self, line: str) {
+        let a = find_byte(line, SP, 0)
+        if a <= 0 {
+            self.fail(HttpError.BadStartLine)
+            return
+        }
+        if self.request {
+            let b = find_byte(line, SP, a + 1)
+            if b < 0 || b == a + 1 || find_byte(line, SP, b + 1) >= 0 {
+                self.fail(HttpError.BadStartLine)
+                return
+            }
+            self.first = part(line, 0, a)
+            self.second = part(line, a + 1, b)
+            self.third = part(line, b + 1, line.len())
+            if !is_token(self.first) || !is_value(self.second) {
+                self.fail(HttpError.BadStartLine)
+                return
+            }
+            self.version(self.third)
+        } else {
+            self.first = part(line, 0, a)
+            if !self.version(self.first) {
+                return
+            }
+            let code = part(line, a + 1, if a + 4 < line.len() { a + 4 } else { line.len() })
+            let status = parse_decimal(code)
+            if code.len() != 3 || status < 100 {
+                self.fail(HttpError.BadStartLine)
+                return
+            }
+            if a + 4 < line.len() && line[a + 4] != SP {
+                self.fail(HttpError.BadStartLine)
+                return
+            }
+            self.second = code
+            self.status = status
+            self.third = if a + 5 <= line.len() { part(line, a + 5, line.len()) } else { "" }
+        }
+    }
+
+    // Whether `v` is `HTTP/1.x`: another `HTTP/d.d` is `Unsupported`,
+    // anything else `BadStartLine`.
+    fun version(var self, v: str) -> bool {
+        if v.len() != 8 || !v.starts_with("HTTP/") || v[6] != 46 || v[5] < 48 || v[5] > 57 || v[7] < 48 || v[7] > 57 {
+            self.fail(HttpError.BadStartLine)
+            return false
+        }
+        if v[5] != 49 {
+            self.fail(HttpError.Unsupported(v))
+            return false
+        }
+        return true
+    }
+
+    // A header (or trailer) line: `name: value`; a line that begins with a
+    // space or a tab goes on the previous one's value (obsolete folding).
+    fun field(var self, line: str, trailer: bool) {
+        if line[0] == SP || line[0] == HT {
+            var h = if trailer { self.trailers } else { self.headers }
+            if h.items.len() == 0 {
+                self.fail(HttpError.BadHeader)
+                return
+            }
+            let last = h.items[^1]
+            let more = trim_ows(line)
+            h.items[h.items.len() - 1] = (last.0, if last.1.len() == 0 { more } else { last.1 + " " + more })
+            if trailer {
+                self.trailers = h
+            } else {
+                self.headers = h
+            }
+            return
+        }
+        let colon = find_byte(line, 58, 0)
+        if colon <= 0 {
+            self.fail(HttpError.BadHeader)
+            return
+        }
+        let name = part(line, 0, colon)
+        if !is_token(name) {
+            self.fail(HttpError.BadHeader)
+            return
+        }
+        let value = trim_ows(part(line, colon + 1, line.len()))
+        if trailer {
+            self.trailers.items.push((name, value))
+        } else {
+            self.headers.items.push((name, value))
+        }
+    }
+
+    // The end of the head: how the body is framed (RFC 9112, section 6.3).
+    fun framing(var self) {
+        if !self.request {
+            let st = self.status
+            if same_name(self.method, "HEAD") || (st >= 100 && st < 200) || st == 204 || st == 304 {
+                self.state = S_DONE
+                return
+            }
+        }
+        let codings = tokens(self.headers.get_all("Transfer-Encoding"))
+        if codings.len() > 0 {
+            for c in codings {
+                if c != "chunked" && c != "identity" {
+                    self.fail(HttpError.Unsupported(f"transfer coding {c}"))
+                    return
+                }
+            }
+            if self.headers.has("Content-Length") {
+                // both: the length is ignored, and the connection can't be
+                // trusted after the message
+                self.close_after = true
+            }
+            if codings[^1] == "chunked" {
+                self.state = S_CHUNK_SIZE
+                self.continue_check()
+                return
+            }
+            if self.request {
+                self.fail(HttpError.BadHeader)
+                return
+            }
+            self.until_close = true
+            self.state = S_UNTIL_CLOSE
+            return
+        }
+        let lengths = self.headers.get_all("Content-Length")
+        if lengths.len() > 0 {
+            var n = -1
+            for v in lengths {
+                for piece in v.split(",") {
+                    let k = parse_decimal(trim_ows(piece))
+                    if k == -2 {
+                        self.fail(HttpError.BodyTooLarge)
+                        return
+                    }
+                    if k < 0 || (n >= 0 && k != n) {
+                        self.fail(HttpError.BadLength)
+                        return
+                    }
+                    n = k
+                }
+            }
+            if n > self.max_body {
+                self.fail(HttpError.BodyTooLarge)
+                return
+            }
+            self.left = n
+            self.state = if n == 0 { S_DONE } else { S_LENGTH }
+            self.continue_check()
+            return
+        }
+        if self.request {
+            self.state = S_DONE
+        } else {
+            self.until_close = true
+            self.state = S_UNTIL_CLOSE
+        }
+    }
+
+    // A request whose body is still to come and that asked for `100
+    // Continue` first.
+    fun continue_check(var self) {
+        if self.request && self.state != S_DONE {
+            match self.headers.get("Expect") {
+                Some(v) => {
+                    self.expect_continue = same_name(trim_ows(v), "100-continue")
+                }
+                None => {}
+            }
+        }
+    }
+
+    // The end of the input: the end of a body that lasts until it, else a
+    // message cut short (`Closed` if nothing of it had come).
+    fun at_end(var self) {
+        if self.state == S_UNTIL_CLOSE {
+            self.state = S_DONE
+        } else if self.state != S_DONE {
+            self.fail(if self.started { HttpError.Truncated } else { HttpError.Closed })
+        }
+    }
+
+    // The request read.
+    fun to_request(self) -> Request {
+        var r = request(self.first, self.second)
+        r.version = self.third
+        r.headers = self.headers
+        r.body = self.body.build()
+        r.trailers = self.trailers
+        return r
+    }
+
+    // The response read.
+    fun to_response(self) -> Response {
+        return Response {
+            status: self.status,
+            reason: self.third,
+            version: self.first,
+            headers: self.headers,
+            body: self.body.build(),
+            trailers: self.trailers,
+            url: "",
+        }
+    }
+}
+
+// A whole message in `text`, read by `p`: what follows it is ignored.
+fun parse_whole(p: Parser, text: str) -> Result<Parser, HttpError> {
+    var q = p
+    let at = q.advance(text, 0)
+    if !q.failed && !q.done() {
+        q.at_end()
+    }
+    if q.failed {
+        return Err(q.err)
+    }
+    return Ok(q)
+}
+
+// The request in `text`: its request line, headers and body (by its
+// `Content-Length`, or chunked with trailers). A bare LF ends a line as
+// CRLF does; what follows the request is ignored.
+pub fun parse_request(text: str) -> Result<Request, HttpError> {
+    let p = parse_whole(parser(true, "", MAX_HEAD, CLIENT_MAX_BODY), text)?
+    return Ok(p.to_request())
+}
+
+// The response in `text` to a request with the method `method` (a response
+// to `HEAD` has no body): its status line, headers and body (by its
+// `Content-Length`, chunked with trailers, or up to the end of `text`).
+pub fun parse_response(text: str, method: str = "GET") -> Result<Response, HttpError> {
+    let p = parse_whole(parser(false, method, MAX_HEAD, CLIENT_MAX_BODY), text)?
+    return Ok(p.to_response())
+}
+
+// The body `body` chunked (RFC 9112, section 7.1): chunks of at most 64
+// KiB, the last chunk, the trailers and the end.
+#test("hello", Headers { items: [] })["5\r\nhello\r\n0\r\n\r\n"]
+#test("", Headers { items: [("X-Sum", "0")] })["0\r\nX-Sum: 0\r\n\r\n"]
+fun chunked(body: str, trailers: Headers) -> str {
+    var sb = StringBuilder()
+    var at = 0
+    while at < body.len() {
+        var end = at + 65536
+        if end > body.len() {
+            end = body.len()
+        }
+        sb.append(hex(end - at))
+        sb.append("\r\n")
+        sb.append(body, at, end)
+        sb.append("\r\n")
+        at = end
+    }
+    sb.append("0\r\n")
+    for kv in trailers.items {
+        sb.append(f"{kv.0}: {kv.1}\r\n")
+    }
+    sb.append("\r\n")
+    return sb.build()
+}
+
+// The header lines of `h`, checked: `BadHeader` for a name that isn't a
+// token or a value with CR, LF or NUL.
+fun header_lines(sb: StringBuilder, h: Headers) -> Result<StringBuilder, HttpError> {
+    var out = sb
+    for kv in h.items {
+        if !is_token(kv.0) || !is_value(kv.1) {
+            return Err(HttpError.BadHeader)
+        }
+        out.append(kv.0)
+        out.append(": ")
+        out.append(kv.1)
+        out.append("\r\n")
+    }
+    return Ok(out)
+}
+
+// --- writing messages ----------------------------------------------------------------
+
+// Where a request goes: the host to connect to, its port, the request
+// target (origin form, `/path?query`) and the `Host` header's value.
+struct Target {
+    host: str,
+    port: int,
+    path: str,
+    host_header: str,
+}
+
+// The target of the URL `u`: an `http` URL, or `InvalidUrl`, or
+// `Unsupported` for `https` and every other scheme.
+fun target_of(u: str) -> Result<Target, HttpError> {
+    let parsed = match url_m.parse(u) {
+        Ok(p) => p
+        Err(_) => { return Err(HttpError.InvalidUrl(u)) }
+    }
+    let scheme = parsed.scheme.to_lower()
+    if scheme == "https" {
+        return Err(HttpError.Unsupported("https"))
+    }
+    if scheme == "" {
+        return Err(HttpError.InvalidUrl(u))
+    }
+    if scheme != "http" {
+        return Err(HttpError.Unsupported(f"the scheme {scheme}"))
+    }
+    let host = parsed.host.unwrap_or("")
+    if host == "" {
+        return Err(HttpError.InvalidUrl(u))
+    }
+    let port = parsed.port.unwrap_or(80)
+    var path = if parsed.path == "" { "/" } else { parsed.path }
+    match parsed.query {
+        Some(q) => { path = path + "?" + q }
+        None => {}
+    }
+    var hh = if find_byte(host, 58, 0) >= 0 { "[" + host + "]" } else { host }
+    match parsed.port {
+        Some(p) => {
+            if p != 80 {
+                hh = f"{hh}:{p}"
+            }
+        }
+        None => {}
+    }
+    return Ok(Target { host: host, port: port, path: path, host_header: hh })
+}
+
+// A test helper: the target's parts in one line.
+fun shown_target(u: str) -> str {
+    return match target_of(u) {
+        Ok(t) => f"{t.host} {t.port} {t.path} {t.host_header}"
+        Err(e) => e.message()
+    }
+}
+
+#test
+fun targets() {
+    assert(shown_target("http://example.com") == "example.com 80 / example.com", "no path")
+    assert(shown_target("http://Example.com:8080/a/b?x=1#frag") == "Example.com 8080 /a/b?x=1 Example.com:8080", "a port, a query, a fragment")
+    assert(shown_target("HTTP://h:80/") == "h 80 / h", "port 80 isn't in Host")
+    assert(shown_target("http://[::1]:9000/p") == "::1 9000 /p [::1]:9000", "IPv6")
+    assert(shown_target("https://example.com/") == "unsupported: https", "https")
+    assert(shown_target("ftp://example.com/") == "unsupported: the scheme ftp", "ftp")
+    assert(shown_target("/relative") == "invalid URL: /relative", "relative")
+    assert(shown_target("http:///nohost") == "invalid URL: http:///nohost", "no host")
+    assert(shown_target("http://exa mple.com/") == "invalid URL: http://exa mple.com/", "a space")
+}
+
+// Whether a request with the method `method` carries a body even when
+// empty (a `Content-Length: 0`).
+fun method_has_body(method: str) -> bool {
+    return same_name(method, "POST") || same_name(method, "PUT") || same_name(method, "PATCH")
+}
+
+// The request `r` as it is sent to `t`, its head and its body apart (a
+// large body isn't copied after the head): the request line, `Host` first
+// unless `r` has one, `Accept-Encoding` if it decompresses, `Connection:
+// close` unless `keep`, the framing, and the body (chunked if `r` says
+// `Transfer-Encoding: chunked`, with its trailers).
+fun request_text(r: Request, t: Target, keep: bool) -> Result<(str, str), HttpError> {
+    if !is_token(r.method) {
+        return Err(HttpError.BadStartLine)
+    }
+    var h = headers()
+    if !r.headers.has("Host") {
+        h.add("Host", t.host_header)
+    }
+    h = joined(h, r.headers)
+    if r.decompress && !h.has("Accept-Encoding") {
+        h.add("Accept-Encoding", "gzip, deflate")
+    }
+    if !keep && !h.has("Connection") {
+        h.add("Connection", "close")
+    }
+    let chunk = h.has_token("Transfer-Encoding", "chunked")
+    if !chunk && !h.has("Content-Length") && (r.body.len() > 0 || method_has_body(r.method)) {
+        h.add("Content-Length", f"{r.body.len()}")
+    }
+    var sb = StringBuilder()
+    sb.append(r.method)
+    sb.append(" ")
+    sb.append(t.path)
+    sb.append(" HTTP/1.1\r\n")
+    sb = header_lines(sb, h)?
+    sb.append("\r\n")
+    if chunk {
+        let checked = header_lines(StringBuilder(), r.trailers)?
+        return Ok((sb.build(), chunked(r.body, r.trailers)))
+    }
+    return Ok((sb.build(), r.body))
+}
+
+// The request `r` as a `Client` sends it: the request line with the URL's
+// target, a `Host` header from the URL unless `r` has one, `Accept-Encoding:
+// gzip, deflate` if `r` decompresses and has none, `Content-Length` when
+// there is a body (or the method is `POST`, `PUT` or `PATCH`) and no
+// framing of its own, then the body. `send` adds `Connection: close`. A URL
+// that starts with `/` (or is `*`) is sent as the target as it is, with an
+// empty `Host` unless `r` has one.
+pub fun format_request(r: Request) -> Result<str, HttpError> {
+    let t = if r.url.starts_with("/") || r.url == "*" {
+        Target { host: "", port: 80, path: r.url, host_header: "" }
+    } else {
+        target_of(r.url)?
+    }
+    let p = request_text(r, t, true)?
+    return Ok(p.0 + p.1)
+}
+
+// Whether the status `s` has no body: 1xx, 204, 304.
+fun no_body_status(s: int) -> bool {
+    return (s >= 100 && s < 200) || s == 204 || s == 304
+}
+
+// The head of the response `r` as the server sends it, and its body: the
+// status line (version 1.1), `r`'s headers but its framing, then
+// `Content-Length`, or `Transfer-Encoding: chunked` when it has trailers
+// and `chunk_ok` (an HTTP/1.1 client); `Connection: close` if `close`,
+// `Connection: keep-alive` if `keep_10` (an HTTP/1.0 client kept). To a
+// `HEAD` (`head_only`) the head alone, with the body's length unless `r`
+// gives one.
+fun response_parts(r: Response, head_only: bool, close: bool, keep_10: bool, chunk_ok: bool) -> Result<(str, str), HttpError> {
+    if r.status < 100 || r.status > 999 || !is_value(r.reason) {
+        return Err(HttpError.BadStartLine)
+    }
+    let quiet = no_body_status(r.status)
+    let chunk = !quiet && !head_only && chunk_ok && r.trailers.len() > 0
+    var h = r.headers
+    if !(head_only && h.has("Content-Length")) {
+        h.remove("Content-Length")
+    }
+    h.remove("Transfer-Encoding")
+    if close {
+        if !h.has_token("Connection", "close") {
+            h.remove("Connection")
+            h.add("Connection", "close")
+        }
+    } else if keep_10 && !h.has("Connection") {
+        h.add("Connection", "keep-alive")
+    }
+    if chunk {
+        h.add("Transfer-Encoding", "chunked")
+    } else if !quiet && !h.has("Content-Length") {
+        h.add("Content-Length", f"{r.body.len()}")
+    }
+    var sb = StringBuilder()
+    sb.append(f"HTTP/1.1 {r.status}")
+    let why = if r.reason == "" { reason(r.status) } else { r.reason }
+    if why != "" {
+        sb.append(" ")
+        sb.append(why)
+    }
+    sb.append("\r\n")
+    sb = header_lines(sb, h)?
+    sb.append("\r\n")
+    if chunk {
+        let checked = header_lines(StringBuilder(), r.trailers)?
+        return Ok((sb.build(), chunked(r.body, r.trailers)))
+    }
+    if quiet || head_only {
+        return Ok((sb.build(), ""))
+    }
+    return Ok((sb.build(), r.body))
+}
+
+// The response `r` as the server sends it to an HTTP/1.1 client: the status
+// line (`r.reason`, or the status's standard phrase), `r`'s headers but
+// their framing, `Content-Length` (none for 1xx, 204 and 304), or
+// `Transfer-Encoding: chunked` and the trailers when `r` has trailers;
+// then the body.
+pub fun format_response(r: Response) -> Result<str, HttpError> {
+    let p = response_parts(r, false, false, false, true)?
+    return Ok(p.0 + p.1)
+}
+
+// --- the body's content coding -------------------------------------------------------
+
+// The body `body` decoded by the `Content-Encoding` of `h` (gzip, x-gzip,
+// deflate as zlib or raw, identity), the codings taken off in reverse;
+// with an unknown one it is left as it is. The headers lose
+// `Content-Encoding` and `Content-Length` once it is decoded.
+fun decode_body(h: Headers, body: str) -> Result<(Headers, str), HttpError> {
+    let codings = tokens(h.get_all("Content-Encoding"))
+    if codings.len() == 0 || body.len() == 0 {
+        return Ok((h, body))
+    }
+    for c in codings {
+        if c != "gzip" && c != "x-gzip" && c != "deflate" && c != "identity" {
+            return Ok((h, body))
+        }
+    }
+    var b = bytes_m.from_str(body)
+    var i = codings.len() - 1
+    while i >= 0 {
+        let c = codings[i]
+        if c == "gzip" || c == "x-gzip" {
+            b = match compress.gunzip(b) {
+                Ok(out) => out
+                Err(e) => { return Err(HttpError.Decode(e)) }
+            }
+        } else if c == "deflate" {
+            b = match compress.zlib_decompress(b) {
+                Ok(out) => out
+                Err(e) => {
+                    // some servers send raw DEFLATE
+                    match compress.inflate(b) {
+                        Ok(out) => out
+                        Err(_) => { return Err(HttpError.Decode(e)) }
+                    }
+                }
+            }
+        }
+        i -= 1
+    }
+    var out = h
+    out.remove("Content-Encoding")
+    out.remove("Content-Length")
+    return Ok((out, bytes_m.to_str(b)))
+}
+
+// --- connections ---------------------------------------------------------------------
+
+// How much one read asks for.
+const READ_SIZE: int = 65536
+
+// A connection and what has been read from it but not taken yet.
+struct Wire {
+    stream: TcpStream,
+    buf: str,
+    pos: int,
+}
+
+// A wire over `s`, nothing read yet.
+fun wire(s: TcpStream) -> Wire {
+    return Wire { stream: s, buf: "", pos: 0 }
+}
+
+// The milliseconds left until `deadline` (from `time.now_ms`; negative:
+// none, -1), `TimedOut` once it has passed.
+fun left_until(deadline: int64) -> Result<int, HttpError> {
+    if deadline < 0 {
+        return Ok(-1)
+    }
+    let left = deadline - time.now_ms()
+    if left <= 0 {
+        return Err(HttpError.TimedOut)
+    }
+    return Ok(left as int)
+}
+
+// The deadline of a time limit of `ms` milliseconds from now (negative:
+// none).
+fun deadline_of(ms: int) -> int64 {
+    if ms < 0 {
+        return -1
+    }
+    return time.now_ms() + ms as int64
+}
+
+impl Wire {
+    // Whether bytes are waiting that no message took yet.
+    fun buffered(self) -> bool {
+        return self.pos < self.buf.len()
+    }
+
+    // `chunk` kept after what is left of the buffer.
+    fun keep(var self, chunk: str) {
+        if self.pos >= self.buf.len() {
+            self.buf = chunk
+        } else {
+            var sb = StringBuilder()
+            sb.append(self.buf, self.pos, self.buf.len())
+            sb.append(chunk)
+            self.buf = sb.build()
+        }
+        self.pos = 0
+    }
+
+    // More bytes read, by `deadline`: false at the end of the stream.
+    fun fill(var self, deadline: int64) -> Result<bool, HttpError> {
+        let ms = left_until(deadline)?
+        self.stream.set_read_timeout(ms)
+        let chunk = match self.stream.read_str(READ_SIZE) {
+            Ok(c) => c
+            Err(e) => { return Err(io_error(e)) }
+        }
+        if chunk.len() == 0 {
+            return Ok(false)
+        }
+        self.keep(chunk)
+        return Ok(true)
+    }
+
+    // `fill`, the task waiting.
+    async fun fill_async(var self) -> Result<bool, HttpError> {
+        let chunk = match await self.stream.read_str_async(READ_SIZE) {
+            Ok(c) => c
+            Err(e) => { return Err(io_error(e)) }
+        }
+        if chunk.len() == 0 {
+            return Ok(false)
+        }
+        self.keep(chunk)
+        return Ok(true)
+    }
+
+    // Every byte of `s` sent, by `deadline`.
+    fun send(var self, s: str, deadline: int64) -> Result<(), HttpError> {
+        let ms = left_until(deadline)?
+        self.stream.set_write_timeout(ms)
+        return match self.stream.write_str(s) {
+            Ok(_) => Ok(())
+            Err(e) => Err(io_error(e))
+        }
+    }
+
+    // `send`, the task waiting.
+    async fun send_async(var self, s: str) -> Result<(), HttpError> {
+        return match await self.stream.write_str_async(s) {
+            Ok(_) => Ok(())
+            Err(e) => Err(io_error(e))
+        }
+    }
+
+    // A head and a body sent, the task waiting: together when the body is
+    // small, else one after the other (not copied after the head).
+    async fun send_parts_async(var self, parts: (str, str)) -> Result<(), HttpError> {
+        if parts.1.len() <= ONE_WRITE {
+            return await self.send_async(parts.0 + parts.1)
+        }
+        let head = await self.send_async(parts.0)
+        head?
+        return await self.send_async(parts.1)
+    }
+
+    // A message read with `p`, by `deadline`.
+    fun read_message(var self, p: Parser, deadline: int64) -> Result<Parser, HttpError> {
+        var q = p
+        while true {
+            self.pos = q.advance(self.buf, self.pos)
+            if q.failed {
+                return Err(q.err)
+            }
+            if q.done() {
+                return Ok(q)
+            }
+            if !self.fill(deadline)? {
+                q.at_end()
+                if q.failed {
+                    return Err(q.err)
+                }
+                return Ok(q)
+            }
+        }
+        unreachable()
+    }
+
+    // `read_message`, the task waiting. A request that asked for it gets
+    // `100 Continue` before its body is read.
+    async fun read_message_async(var self, p: Parser) -> Result<Parser, HttpError> {
+        var q = p
+        while true {
+            self.pos = q.advance(self.buf, self.pos)
+            if q.failed {
+                return Err(q.err)
+            }
+            if q.done() {
+                return Ok(q)
+            }
+            if q.expect_continue {
+                q.expect_continue = false
+                if q.body_len == 0 {
+                    let sent = await self.send_async("HTTP/1.1 100 Continue\r\n\r\n")
+                    sent?
+                }
+            }
+            let more = await self.fill_async()
+            if !more? {
+                q.at_end()
+                if q.failed {
+                    return Err(q.err)
+                }
+                return Ok(q)
+            }
+        }
+        unreachable()
+    }
+
+    // The connection closed.
+    fun close(var self) {
+        let c = self.stream.close()
+    }
+}
+
+// Whether a connection may be used again after a message of the version
+// `version` with the headers `h` (HTTP/1.1 unless `Connection: close`,
+// HTTP/1.0 only with `Connection: keep-alive`).
+#test("HTTP/1.1", Headers { items: [] })[true]
+#test("HTTP/1.1", Headers { items: [("Connection", "Close")] })[false]
+#test("HTTP/1.0", Headers { items: [] })[false]
+#test("HTTP/1.0", Headers { items: [("Connection", "keep-alive")] })[true]
+fun persistent(version: str, h: Headers) -> bool {
+    if h.has_token("Connection", "close") {
+        return false
+    }
+    if version == "HTTP/1.0" {
+        return h.has_token("Connection", "keep-alive")
+    }
+    return true
+}
+
+// The addresses of `host`: itself if it is one, else `net.lookup`'s.
+fun addresses(host: str) -> Result<[IpAddr], HttpError> {
+    return match net.parse_ip(host) {
+        Ok(ip) => Ok([ip])
+        Err(_) => {
+            match net.lookup(host) {
+                Ok(ips) => Ok(ips)
+                Err(e) => Err(io_error(e))
+            }
+        }
+    }
+}
+
+// A connection to `t`, each address tried in turn, by `deadline`.
+fun dial(t: Target, deadline: int64) -> Result<TcpStream, HttpError> {
+    let ips = addresses(t.host)?
+    var last = HttpError.Io(IoError.NotFound)
+    for ip in ips {
+        let ms = left_until(deadline)?
+        match net.connect_timeout(net.addr(ip, t.port), ms) {
+            Ok(s) => {
+                let nd = s.set_nodelay(true)
+                return Ok(s)
+            }
+            Err(e) => { last = io_error(e) }
+        }
+    }
+    return Err(last)
+}
+
+// `dial`, the task waiting.
+async fun dial_async(t: Target) -> Result<TcpStream, HttpError> {
+    let ips = addresses(t.host)?
+    var last = HttpError.Io(IoError.NotFound)
+    for ip in ips {
+        match await net.connect_async(net.addr(ip, t.port)) {
+            Ok(s) => {
+                let nd = s.set_nodelay(true)
+                return Ok(s)
+            }
+            Err(e) => { last = io_error(e) }
+        }
+    }
+    return Err(last)
+}
+
+// --- the client ----------------------------------------------------------------------
+
+// A client: the connection of its last request, kept open for the next
+// one to the same host and port while the server allows (keep-alive).
+// `close` closes it.
+pub struct Client {
+    conn: Option<Wire>,
+    host: str,
+    port: int,
+    keep_alive: bool,
+}
+
+// A client that keeps its connections open between requests.
+pub fun client() -> Client {
+    return Client { conn: None, host: "", port: 0, keep_alive: true }
+}
+
+// The request after a redirect `resp` to `r` (from the URL `from`): the
+// `Location` resolved against `from`; a 303, or a 301 or 302 to a `POST`,
+// becomes a `GET` without a body; another host doesn't get `Authorization`
+// and `Cookie`. `None` when `resp` isn't a redirect.
+fun redirected(r: Request, resp: Response) -> Option<Request> {
+    let s = resp.status
+    if s != 301 && s != 302 && s != 303 && s != 307 && s != 308 {
+        return None
+    }
+    let loc = match resp.headers.get("Location") {
+        Some(l) => l
+        None => { return None }
+    }
+    var next = r
+    next.url = resolve(r.url, loc)
+    if (s == 303 && !same_name(r.method, "HEAD")) || ((s == 301 || s == 302) && same_name(r.method, "POST")) {
+        next.method = "GET"
+        next.body = ""
+        next.headers.remove("Content-Length")
+        next.headers.remove("Content-Type")
+        next.headers.remove("Transfer-Encoding")
+    }
+    next.headers.remove("Host")
+    if authority(next.url) != authority(r.url) {
+        next.headers.remove("Authorization")
+        next.headers.remove("Cookie")
+    }
+    return Some(next)
+}
+
+// The scheme and authority of the URL `u`, `http://host:port`, "" for a
+// relative one.
+#test("http://a.example:81/x?y")["http://a.example:81"]
+#test("http://a.example")["http://a.example"]
+#test("/x")[""]
+fun authority(u: str) -> str {
+    let s = find_byte(u, 58, 0)
+    if s <= 0 || !u.starts_with(part(u, 0, s) + "://") {
+        return ""
+    }
+    var i = s + 3
+    while i < u.len() && u[i] != 47 && u[i] != 63 && u[i] != 35 {
+        i += 1
+    }
+    return part(u, 0, i)
+}
+
+// The reference `loc` (a redirect's `Location`) resolved against the URL
+// `base` (RFC 3986, section 5.2, without dot segments): an absolute URL as
+// it is, `//host/p` with `base`'s scheme, `/p` on `base`'s authority, `p`
+// beside `base`'s last segment, `?q` on `base`'s path.
+#test("http://h/a/b?x", "http://o/z")["http://o/z"]
+#test("http://h:8/a/b?x", "/c")["http://h:8/c"]
+#test("http://h/a/b?x", "c")["http://h/a/c"]
+#test("http://h", "c")["http://h/c"]
+#test("http://h/a/b?x", "?y")["http://h/a/b?y"]
+#test("http://h/a", "//o/p")["http://o/p"]
+fun resolve(base: str, loc: str) -> str {
+    let auth = authority(base)
+    if auth == "" || authority(loc) != "" {
+        return loc
+    }
+    if loc.starts_with("//") {
+        return part(auth, 0, find_byte(auth, 58, 0) + 1) + loc
+    }
+    var path = part(base, auth.len(), base.len())
+    var cut = 0
+    while cut < path.len() && path[cut] != 63 && path[cut] != 35 {
+        cut += 1
+    }
+    path = part(path, 0, cut)
+    if loc.starts_with("/") {
+        return auth + loc
+    }
+    if loc.starts_with("?") {
+        return auth + (if path == "" { "/" } else { path }) + loc
+    }
+    var slash = path.len() - 1
+    while slash >= 0 && path[slash] != 47 {
+        slash -= 1
+    }
+    let dir = if slash < 0 { "/" } else { part(path, 0, slash + 1) }
+    return auth + dir + loc
+}
+
+impl Client {
+    // The response to `r`, redirects followed (as many as `r` allows), its
+    // body decoded if `r` decompresses. The connection is kept for the
+    // next request when the server allows; one kept from before that the
+    // server closed meanwhile is opened again, once.
+    fun send(var self, r: Request) -> Result<Response, HttpError> {
+        let deadline = deadline_of(r.timeout_ms)
+        var req = r
+        var hops = 0
+        while true {
+            let t = target_of(req.url)?
+            let resp = self.exchange(req, t, deadline)?
+            if req.max_redirects > 0 {
+                match redirected(req, resp) {
+                    Some(next) => {
+                        if hops >= req.max_redirects {
+                            return Err(HttpError.TooManyRedirects)
+                        }
+                        hops += 1
+                        req = next
+                        continue
+                    }
+                    None => {}
+                }
+            }
+            return Ok(resp)
+        }
+        unreachable()
+    }
+
+    // `send`, the task waiting; a time limit is `task.timeout`'s.
+    async fun send_async(var self, r: Request) -> Result<Response, HttpError> {
+        if r.timeout_ms < 0 {
+            return await self.follow_async(r)
+        }
+        let me = self
+        let f: async () -> (Client, Result<Response, HttpError>) = async () => {
+            var c = me
+            let res = await c.follow_async(r)
+            return (c, res)
+        }
+        match await task.timeout(r.timeout_ms, f) {
+            Some(done) => {
+                self.conn = done.0.conn
+                self.host = done.0.host
+                self.port = done.0.port
+                return done.1
+            }
+            None => {
+                // the child closed its connection when it stopped
+                self.conn = None
+                return Err(HttpError.TimedOut)
+            }
+        }
+    }
+
+    // `send`'s redirects, the task waiting.
+    async fun follow_async(var self, r: Request) -> Result<Response, HttpError> {
+        var req = r
+        var hops = 0
+        while true {
+            let t = target_of(req.url)?
+            let got = await self.exchange_async(req, t)
+            let resp = got?
+            if req.max_redirects > 0 {
+                match redirected(req, resp) {
+                    Some(next) => {
+                        if hops >= req.max_redirects {
+                            return Err(HttpError.TooManyRedirects)
+                        }
+                        hops += 1
+                        req = next
+                        continue
+                    }
+                    None => {}
+                }
+            }
+            return Ok(resp)
+        }
+        unreachable()
+    }
+
+    // `GET url`.
+    fun get(var self, url: str) -> Result<Response, HttpError> {
+        return self.send(request("GET", url))
+    }
+
+    // `POST url` with the body `body`.
+    fun post(var self, url: str, body: str) -> Result<Response, HttpError> {
+        return self.send(request("POST", url).with_body(body))
+    }
+
+    // `get`, the task waiting.
+    async fun get_async(var self, url: str) -> Result<Response, HttpError> {
+        return await self.send_async(request("GET", url))
+    }
+
+    // `post`, the task waiting.
+    async fun post_async(var self, url: str, body: str) -> Result<Response, HttpError> {
+        return await self.send_async(request("POST", url).with_body(body))
+    }
+
+    // The kept connection closed, if there is one.
+    fun close(var self) {
+        match self.conn {
+            Some(w) => {
+                var c = w
+                c.close()
+            }
+            None => {}
+        }
+        self.conn = None
+    }
+
+    // The kept connection if it goes to `t` (closed if it goes elsewhere),
+    // and whether there was one.
+    fun kept(var self, t: Target) -> Option<Wire> {
+        let w = self.conn
+        self.conn = None
+        match w {
+            Some(c) => {
+                if self.host == t.host && self.port == t.port {
+                    return Some(c)
+                }
+                var old = c
+                old.close()
+            }
+            None => {}
+        }
+        return None
+    }
+
+    // What follows a response read with `p` for `r`: the connection kept
+    // or closed, the response made and decoded.
+    fun finish(var self, w: Wire, p: Parser, r: Request, t: Target) -> Result<Response, HttpError> {
+        var resp = p.to_response()
+        var c = w
+        let reusable = !p.until_close && !p.close_after && resp.status != 101 && !r.headers.has_token("Connection", "close")
+        if self.keep_alive && reusable && persistent(resp.version, resp.headers) {
+            self.conn = Some(c)
+            self.host = t.host
+            self.port = t.port
+        } else {
+            c.close()
+        }
+        resp.url = r.url
+        if r.decompress {
+            let d = decode_body(resp.headers, resp.body)?
+            resp.headers = d.0
+            resp.body = d.1
+        }
+        return Ok(resp)
+    }
+
+    // One request and its response (the 1xx responses before it skipped),
+    // over the kept connection or a new one.
+    fun exchange(var self, r: Request, t: Target, deadline: int64) -> Result<Response, HttpError> {
+        let text = request_text(r, t, self.keep_alive)?
+        var reused = false
+        var w = match self.kept(t) {
+            Some(c) => {
+                reused = true
+                c
+            }
+            None => wire(dial(t, deadline)?)
+        }
+        while true {
+            match w.round_trip(text, r, deadline) {
+                Ok(p) => { return self.finish(w, p, r, t) }
+                Err(e) => {
+                    w.close()
+                    if !reused || !retryable(e) {
+                        return Err(e)
+                    }
+                    reused = false
+                    w = wire(dial(t, deadline)?)
+                }
+            }
+        }
+        unreachable()
+    }
+
+    // `exchange`, the task waiting.
+    async fun exchange_async(var self, r: Request, t: Target) -> Result<Response, HttpError> {
+        let text = request_text(r, t, self.keep_alive)?
+        var reused = false
+        var w = match self.kept(t) {
+            Some(c) => {
+                reused = true
+                c
+            }
+            None => {
+                let s = await dial_async(t)
+                wire(s?)
+            }
+        }
+        while true {
+            match await w.round_trip_async(text, r) {
+                Ok(p) => { return self.finish(w, p, r, t) }
+                Err(e) => {
+                    w.close()
+                    if !reused || !retryable(e) {
+                        return Err(e)
+                    }
+                    reused = false
+                    let s = await dial_async(t)
+                    w = wire(s?)
+                }
+            }
+        }
+        unreachable()
+    }
+}
+
+// Whether a request over a kept connection that failed so is sent again on
+// a new one: the server had closed it (nothing of a response came).
+fun retryable(e: HttpError) -> bool {
+    return match e {
+        Closed => true
+        Io(c) => {
+            match c {
+                ConnectionReset => true
+                BrokenPipe => true
+                ConnectionAborted => true
+                _ => false
+            }
+        }
+        _ => false
+    }
+}
+
+// The bytes of a body up to which it is sent with its head in one write.
+const ONE_WRITE: int = 16384
+
+impl Wire {
+    // The request's head and body (`text`) sent and the response to `r`
+    // read, the informational (1xx but 101) responses before it skipped.
+    fun round_trip(var self, text: (str, str), r: Request, deadline: int64) -> Result<Parser, HttpError> {
+        if text.1.len() <= ONE_WRITE {
+            self.send(text.0 + text.1, deadline)?
+        } else {
+            self.send(text.0, deadline)?
+            self.send(text.1, deadline)?
+        }
+        while true {
+            let p = self.read_message(parser(false, r.method, r.max_header_bytes, r.max_body_bytes), deadline)?
+            if p.status >= 200 || p.status == 101 {
+                return Ok(p)
+            }
+        }
+        unreachable()
+    }
+
+    // `round_trip`, the task waiting.
+    async fun round_trip_async(var self, text: (str, str), r: Request) -> Result<Parser, HttpError> {
+        let sent = await self.send_parts_async(text)
+        sent?
+        while true {
+            let got = await self.read_message_async(parser(false, r.method, r.max_header_bytes, r.max_body_bytes))
+            let p = got?
+            if p.status >= 200 || p.status == 101 {
+                return Ok(p)
+            }
+        }
+        unreachable()
+    }
+}
+
+// The response to `r`, over a connection of its own, closed after it
+// (`Connection: close`).
+pub fun send(r: Request) -> Result<Response, HttpError> {
+    var c = Client { conn: None, host: "", port: 0, keep_alive: false }
+    let res = c.send(r)
+    c.close()
+    return res
+}
+
+// `send`, the task waiting.
+pub async fun send_async(r: Request) -> Result<Response, HttpError> {
+    var c = Client { conn: None, host: "", port: 0, keep_alive: false }
+    let res = await c.send_async(r)
+    c.close()
+    return res
+}
+
+// `GET url` (not `get`: the prelude's `get(m, k)` takes that name in every
+// module).
+pub fun fetch(url: str) -> Result<Response, HttpError> {
+    return send(request("GET", url))
+}
+
+// `POST url` with the body `body`.
+pub fun post(url: str, body: str) -> Result<Response, HttpError> {
+    return send(request("POST", url).with_body(body))
+}
+
+// `fetch`, the task waiting.
+pub async fun fetch_async(url: str) -> Result<Response, HttpError> {
+    return await send_async(request("GET", url))
+}
+
+// `post`, the task waiting.
+pub async fun post_async(url: str, body: str) -> Result<Response, HttpError> {
+    return await send_async(request("POST", url).with_body(body))
+}
+
+// --- the server ----------------------------------------------------------------------
+
+// How a server serves: how many connections at once (`workers`, each a
+// task), how many requests before it stops (negative: no limit), the
+// limits of a request's head and body, and how long a connection takes
+// requests (milliseconds after it was accepted; negative: as long as the
+// client keeps it). Past `keep_alive_ms` a connection waiting for its next
+// request is closed, and one still busy is closed after its response
+// (which says `Connection: close` from a second before the time), so idle
+// clients can't hold every worker for long.
+pub struct ServerOptions {
+    workers: int,
+    max_requests: int,
+    max_header_bytes: int,
+    max_body_bytes: int,
+    keep_alive_ms: int,
+}
+
+// The defaults: 64 workers, no request limit, a head of 64 KiB, a body of
+// 16 MiB, connections kept for 60 s.
+pub fun server_options() -> ServerOptions {
+    return ServerOptions {
+        workers: 64,
+        max_requests: -1,
+        max_header_bytes: MAX_HEAD,
+        max_body_bytes: SERVER_MAX_BODY,
+        keep_alive_ms: 60000,
+    }
+}
+
+// The count of a server's requests, which its workers share.
+actor Tally {
+    limit: int,
+    taken: int,
+    served: int,
+    workers: int,
+    ended: int,
+}
+
+impl Tally {
+    // A request may be served (one more taken), unless the limit is reached.
+    fun take(var self) -> bool {
+        if self.limit >= 0 && self.taken >= self.limit {
+            return false
+        }
+        self.taken += 1
+        return true
+    }
+
+    // A request taken was answered.
+    fun answered(var self) {
+        self.served += 1
+    }
+
+    // A worker stopped.
+    fun worker_ended(var self) {
+        self.ended += 1
+    }
+
+    // Whether the server is done: every request it may serve answered, or
+    // every worker stopped.
+    fun finished(self) -> bool {
+        return (self.limit >= 0 && self.served >= self.limit) || self.ended >= self.workers
+    }
+
+    fun count(self) -> int {
+        return self.served
+    }
+}
+
+// The status a request that failed so is answered with.
+#test(HttpError.HeadersTooLarge)[431]
+#test(HttpError.BodyTooLarge)[413]
+#test(HttpError.Unsupported("transfer coding gzip"))[501]
+#test(HttpError.Unsupported("HTTP/2.0"))[505]
+#test(HttpError.BadHeader)[400]
+fun error_status(e: HttpError) -> int {
+    return match e {
+        HeadersTooLarge => 431
+        BodyTooLarge => 413
+        Unsupported(what) => if what.starts_with("HTTP/") { 505 } else { 501 }
+        _ => 400
+    }
+}
+
+// Whether a request that couldn't be read so gets an answer: not when the
+// connection closed or failed.
+#test(HttpError.Closed)[false]
+#test(HttpError.Io(IoError.ConnectionReset))[false]
+#test(HttpError.BadHeader)[true]
+fun answerable(e: HttpError) -> bool {
+    return match e {
+        Closed => false
+        Io(_) => false
+        TimedOut => false
+        _ => true
+    }
+}
+
+// The answer to a request that couldn't be read: its status, its reason
+// as the body, and `Connection: close`.
+fun error_response(e: HttpError) -> str {
+    let status = error_status(e)
+    let body = e.message() + "\n"
+    return f"HTTP/1.1 {status} {reason(status)}\r\nContent-Type: text/plain\r\nContent-Length: {body.len()}\r\nConnection: close\r\n\r\n{body}"
+}
+
+// A connection's guard: after `ms` milliseconds its reading is shut, so a
+// wait for its next request ends (as at the end of the stream); its
+// writing goes on. Nothing when cancelled first (the connection ended).
+async fun guard(s: TcpStream, ms: int) -> bool {
+    await task.sleep(ms)
+    if task.cancelled() {
+        return false
+    }
+    let shut = s.shutdown(net.Shutdown.Read)
+    return true
+}
+
+// The connection `s` served (`serve_requests`), under a guard when
+// `o.keep_alive_ms` limits it: one child task a connection, where a
+// `task.timeout` around each wait for a request would cost one a request
+// (half the requests a second of a keep-alive client).
+async fun serve_connection(s: TcpStream, o: ServerOptions, handler: async (Request) -> Response, tally: Tally) -> (bool, int) {
+    if o.keep_alive_ms < 0 {
+        return await serve_requests(s, o, handler, tally, -1)
+    }
+    async let g = guard(s, o.keep_alive_ms)
+    // a busy connection is told to close a little before the guard shuts it
+    var margin = o.keep_alive_ms / 10
+    if margin > 1000 {
+        margin = 1000
+    }
+    let done = await serve_requests(s, o, handler, tally, time.now_ms() + (o.keep_alive_ms - margin) as int64)
+    task.cancel(g)
+    let fired = await g
+    return done
+}
+
+// The connection `s` served, request after request, until it ends: a
+// client that closes it, a request that can't be read (answered with its
+// status), one that asks to close, a response after `close_at` (from
+// `time.now_ms`; negative: never), the server's limit reached. Whether the
+// worker goes on, and the requests answered. Only a server with a limit
+// counts its requests in `tally` as they come: two actor calls a request.
+async fun serve_requests(s: TcpStream, o: ServerOptions, handler: async (Request) -> Response, tally: Tally, close_at: int64) -> (bool, int) {
+    let counted = o.max_requests >= 0
+    var answered = 0
+    var w = wire(s)
+    let nd = s.set_nodelay(true)
+    let peer = match s.peer_addr() {
+        Ok(a) => Some(a)
+        Err(_) => None
+    }
+    while true {
+        let got = await w.read_message_async(parser(true, "", o.max_header_bytes, o.max_body_bytes))
+        let p = match got {
+            Ok(p) => p
+            Err(e) => {
+                if answerable(e) {
+                    let sent = await w.send_async(error_response(e))
+                }
+                return (true, answered)
+            }
+        }
+        if counted && !(await tally.take()) {
+            return (false, answered)
+        }
+        var req = p.to_request()
+        req.peer = peer
+        var close = p.close_after || !persistent(req.version, req.headers)
+        var parts: Result<(str, str), HttpError> = Err(HttpError.BadHeader)
+        if req.version == "HTTP/1.1" && !req.headers.has("Host") {
+            close = true
+            parts = response_parts(response(400, "a request without Host\n"), false, true, false, false)
+        } else {
+            let resp = await handler(req)
+            close = close || resp.headers.has_token("Connection", "close") || (close_at >= 0 && time.now_ms() >= close_at)
+            let keep_10 = !close && req.version == "HTTP/1.0"
+            parts = response_parts(resp, same_name(req.method, "HEAD"), close, keep_10, req.version == "HTTP/1.1")
+        }
+        var sent: Result<(), HttpError> = Ok(())
+        match parts {
+            Ok(two) => {
+                sent = await w.send_parts_async(two)
+            }
+            Err(e) => {
+                // the handler's response can't be sent (a header with CR
+                // or LF): a 500 instead
+                close = true
+                let body = f"invalid response: {e.message()}\n"
+                sent = await w.send_async(f"HTTP/1.1 500 Internal Server Error\r\nContent-Length: {body.len()}\r\nConnection: close\r\n\r\n{body}")
+            }
+        }
+        answered += 1
+        if counted {
+            await tally.answered()
+        }
+        if close || !sent_ok(sent) {
+            return (true, answered)
+        }
+    }
+    unreachable()
+}
+
+fun sent_ok(r: Result<(), HttpError>) -> bool {
+    return match r {
+        Ok(_) => true
+        Err(_) => false
+    }
+}
+
+// A worker: connections accepted on `l` and served, one after the other,
+// until the server's limit or a cancellation; the requests it answered.
+async fun worker(l: TcpListener, o: ServerOptions, handler: async (Request) -> Response, tally: Tally) -> Result<int, HttpError> {
+    var answered = 0
+    while true {
+        if task.cancelled() {
+            break
+        }
+        let got = await l.accept_async()
+        match got {
+            Ok(s) => {
+                let done = await serve_connection(s, o, handler, tally)
+                answered += done.1
+                var c = s
+                let gone = c.close()
+                if !done.0 {
+                    break
+                }
+            }
+            Err(e) => {
+                // decided outside a nested `match`: an `await` in a match
+                // inside a match arm doesn't build natively (reported)
+                let fate = accept_fate(e)
+                if fate == STOP {
+                    break
+                }
+                if fate == FAIL {
+                    await tally.worker_ended()
+                    return Err(io_error(e))
+                }
+                if fate == LATER {
+                    await task.sleep(10)
+                }
+            }
+        }
+    }
+    await tally.worker_ended()
+    return Ok(answered)
+}
+
+// What a worker does after accepting failed so.
+const AGAIN: int = 0
+const LATER: int = 1
+const STOP: int = 2
+const FAIL: int = 3
+
+// A connection aborted before it was accepted, or a signal: again; too
+// many open descriptors (EMFILE, ENFILE): a little later; cancelled: stop;
+// anything else fails.
+#test(IoError.Cancelled)[2]
+#test(IoError.ConnectionAborted)[0]
+#test(IoError.Other(24))[1]
+#test(IoError.Other(9))[3]
+#test(IoError.Unsupported)[3]
+fun accept_fate(e: IoError) -> int {
+    return match e {
+        Cancelled => STOP
+        ConnectionAborted => AGAIN
+        ConnectionReset => AGAIN
+        Interrupted => AGAIN
+        Other(code) => if code == 24 || code == 23 { LATER } else { FAIL }
+        _ => FAIL
+    }
+}
+
+// Every worker, until each has stopped: the requests they answered, or
+// the first one's error.
+async fun run_workers(l: TcpListener, o: ServerOptions, handler: async (Request) -> Response, tally: Tally) -> Result<int, HttpError> {
+    var fs: [async () -> Result<int, HttpError>] = []
+    for i in 0..worker_count(o) {
+        fs.push(async () => await worker(l, o, handler, tally))
+    }
+    var total = 0
+    for r in await task.all(fs) {
+        match r {
+            Ok(k) => { total += k }
+            Err(e) => { return Err(e) }
+        }
+    }
+    return Ok(total)
+}
+
+// The workers `o` asks for, at least one.
+#test(ServerOptions { workers: 0, max_requests: -1, max_header_bytes: 1, max_body_bytes: 1, keep_alive_ms: 1 })[1]
+#test(ServerOptions { workers: 8, max_requests: -1, max_header_bytes: 1, max_body_bytes: 1, keep_alive_ms: 1 })[8]
+fun worker_count(o: ServerOptions) -> int {
+    return if o.workers < 1 { 1 } else { o.workers }
+}
+
+// Requests on the listener `l` answered by `handler`, as `o` says: up to
+// `o.workers` connections at once, each served by a task, with keep-alive.
+// It stops when `o.max_requests` requests were answered (the connections
+// still open then are closed), when its task is cancelled (`task.cancel`,
+// `task.timeout`), or when accepting fails. The number of requests
+// answered. A request that can't be read is answered with 400, 413, 431,
+// 501 or 505 and its connection closed; the listener stays open.
+pub async fun serve_with(l: TcpListener, o: ServerOptions, handler: async (Request) -> Response) -> Result<int, HttpError> {
+    let tally = Tally { limit: o.max_requests, taken: 0, served: 0, workers: worker_count(o), ended: 0 }
+    if o.max_requests < 0 {
+        return await run_workers(l, o, handler, tally)
+    }
+    // the workers can't stop each other: this task stops them once the
+    // limit is reached (cancelling their waits), looking every millisecond
+    async let pool = run_workers(l, o, handler, tally)
+    while !(await tally.finished()) {
+        await task.sleep(1)
+    }
+    task.cancel(pool)
+    let r = await pool
+    let served = await tally.count()
+    match r {
+        Ok(_) => {}
+        Err(e) => {
+            if served < o.max_requests {
+                return Err(e)
+            }
+        }
+    }
+    return Ok(served)
+}
+
+// Requests on `addr` answered by `handler`, with the default options,
+// until the task is cancelled.
+pub async fun serve(addr: SocketAddr, handler: (Request) -> Response) -> Result<(), HttpError> {
+    var l = match net.listen(addr) {
+        Ok(l) => l
+        Err(e) => { return Err(io_error(e)) }
+    }
+    let r = await serve_with(l, server_options(), async (req: Request) => handler(req))
+    let c = l.close()
+    return match r {
+        Ok(_) => Ok(())
+        Err(e) => Err(e)
+    }
+}
+
+// `n` requests on the listener `l` answered by `handler`, then the
+// requests answered: the form for tests and one-off servers.
+pub async fun serve_n(l: TcpListener, n: int, handler: (Request) -> Response) -> Result<int, HttpError> {
+    var o = server_options()
+    o.max_requests = n
+    return await serve_with(l, o, async (req: Request) => handler(req))
+}
+
+// --- tests of the pure parts ---------------------------------------------------------
+
+// A test helper: a request's parts in one line, or its error.
+fun shown_request(text: str) -> str {
+    return match parse_request(text) {
+        Ok(r) => {
+            var sb = StringBuilder()
+            sb.append(f"{r.method} {r.url} {r.version}")
+            for kv in r.headers.items {
+                sb.append(f" [{kv.0}={kv.1}]")
+            }
+            sb.append(f" body={r.body}")
+            for kv in r.trailers.items {
+                sb.append(f" trailer[{kv.0}={kv.1}]")
+            }
+            sb.build()
+        }
+        Err(e) => f"error: {e}"
+    }
+}
+
+// A test helper: a response's parts in one line, or its error.
+fun shown_response(text: str, method: str) -> str {
+    return match parse_response(text, method) {
+        Ok(r) => {
+            var sb = StringBuilder()
+            sb.append(f"{r.version} {r.status} {r.reason}")
+            for kv in r.headers.items {
+                sb.append(f" [{kv.0}={kv.1}]")
+            }
+            sb.append(f" body={r.body}")
+            for kv in r.trailers.items {
+                sb.append(f" trailer[{kv.0}={kv.1}]")
+            }
+            sb.build()
+        }
+        Err(e) => f"error: {e}"
+    }
+}
+
+#test("GET / HTTP/1.1\r\nHost: a\r\n\r\n")["GET / HTTP/1.1 [Host=a] body="]
+#test("GET /x?y=1 HTTP/1.0\nHost:  a \nAccept: */*\n\n")["GET /x?y=1 HTTP/1.0 [Host=a] [Accept=*/*] body="] // bare LF, spaces trimmed
+#test("\r\n\r\nGET / HTTP/1.1\r\n\r\n")["GET / HTTP/1.1 body="] // empty lines before it
+#test("POST /p HTTP/1.1\r\nContent-Length: 5\r\n\r\nhelloEXTRA")["POST /p HTTP/1.1 [Content-Length=5] body=hello"]
+#test("POST /p HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n5;ext=1\r\nhello\r\n6\r\n world\r\n0\r\nX-Sum: 11\r\n\r\n")["POST /p HTTP/1.1 [Transfer-Encoding=chunked] body=hello world trailer[X-Sum=11]"]
+#test("GET / HTTP/1.1\r\nX-Long: a\r\n  b\r\n\r\n")["GET / HTTP/1.1 [X-Long=a b] body="] // obsolete folding
+#test("GET / HTTP/1.1\r\nSet: 1\r\nset: 2\r\n\r\n")["GET / HTTP/1.1 [Set=1] [set=2] body="] // repeats kept in order
+#test("GET /HTTP/1.1\r\n\r\n")["error: malformed request or status line"]
+#test("GET  / HTTP/1.1\r\n\r\n")["error: malformed request or status line"]
+#test("GET / HTTP/2.0\r\n\r\n")["error: unsupported: HTTP/2.0"]
+#test("GET / HTTX/1.1\r\n\r\n")["error: malformed request or status line"]
+#test("G(T / HTTP/1.1\r\n\r\n")["error: malformed request or status line"]
+#test("GET / HTTP/1.1\r\nNo colon\r\n\r\n")["error: malformed header"]
+#test("GET / HTTP/1.1\r\nBad Name: 1\r\n\r\n")["error: malformed header"]
+#test("GET / HTTP/1.1\r\nName : 1\r\n\r\n")["error: malformed header"] // a space before the colon
+#test("GET / HTTP/1.1\r\n  folded\r\n\r\n")["error: malformed header"]
+#test("POST / HTTP/1.1\r\nContent-Length: 1x\r\n\r\n")["error: invalid Content-Length"]
+#test("POST / HTTP/1.1\r\nContent-Length: 2\r\nContent-Length: 3\r\n\r\nabc")["error: invalid Content-Length"]
+#test("POST / HTTP/1.1\r\nContent-Length: 3, 3\r\n\r\nabc")["POST / HTTP/1.1 [Content-Length=3, 3] body=abc"]
+#test("POST / HTTP/1.1\r\nContent-Length: 99999999999\r\n\r\n")["error: body too large"]
+#test("POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\n")["error: malformed chunked body"]
+#test("POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabcX\r\n0\r\n\r\n")["error: malformed chunked body"]
+#test("POST / HTTP/1.1\r\nTransfer-Encoding: gzip\r\n\r\n")["error: unsupported: transfer coding gzip"]
+#test("POST / HTTP/1.1\r\nContent-Length: 10\r\n\r\nshort")["error: connection closed inside a message"]
+#test("GET / HTTP/1.1\r\nHost: a\r\n")["error: connection closed inside a message"]
+#test("")["error: connection closed"]
+fun request_cases(text: str) -> str {
+    return shown_request(text)
+}
+
+#test("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nhi", "GET")["HTTP/1.1 200 OK [Content-Length=2] body=hi"]
+#test("HTTP/1.1 404 Not Found\r\n\r\nuntil the end", "GET")["HTTP/1.1 404 Not Found body=until the end"] // no length: the end
+#test("HTTP/1.0 200\r\n\r\n", "GET")["HTTP/1.0 200  body="] // no reason
+#test("HTTP/1.1 200 \r\n\r\n", "GET")["HTTP/1.1 200  body="]
+#test("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n", "HEAD")["HTTP/1.1 200 OK [Content-Length=2] body="] // HEAD: no body
+#test("HTTP/1.1 204 No Content\r\n\r\nX", "GET")["HTTP/1.1 204 No Content body="]
+#test("HTTP/1.1 304 Not Modified\r\nContent-Length: 9\r\n\r\n", "GET")["HTTP/1.1 304 Not Modified [Content-Length=9] body="]
+#test("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nWiki\r\n5\r\npedia\r\nE\r\n in\r\n\r\nchunks.\r\n0\r\n\r\n", "GET")["HTTP/1.1 200 OK [Transfer-Encoding=chunked] body=Wikipedia in\r\n\r\nchunks."]
+#test("HTTP/1.1 200 OK\nTransfer-Encoding: chunked\n\n3\nabc\n0\nExpires: never\n\n", "GET")["HTTP/1.1 200 OK [Transfer-Encoding=chunked] body=abc trailer[Expires=never]"] // bare LF
+#test("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nab", "GET")["error: connection closed inside a message"]
+#test("HTTP/1.1 2000 OK\r\n\r\n", "GET")["error: malformed request or status line"]
+#test("HTTP/1.1 20 OK\r\n\r\n", "GET")["error: malformed request or status line"]
+#test("HTTP/1.1 099 OK\r\n\r\n", "GET")["error: malformed request or status line"]
+#test("HTTP/1.1 200OK\r\n\r\n", "GET")["error: malformed request or status line"]
+#test("SSH-2.0-OpenSSH\r\n", "GET")["error: malformed request or status line"]
+#test("HTTP/3.0 200 OK\r\n\r\n", "GET")["error: unsupported: HTTP/3.0"]
+#test("garbage", "GET")["error: connection closed inside a message"]
+fun response_cases(text: str, method: str) -> str {
+    return shown_response(text, method)
+}
+
+// A test helper: `format_request`'s text, or its error.
+fun formatted_request(r: Request) -> str {
+    return match format_request(r) {
+        Ok(s) => s
+        Err(e) => f"error: {e}"
+    }
+}
+
+#test
+fun requests_formatted() {
+    let get = request("GET", "http://example.com:8080/a?b=1").with_decompress(false)
+    assert(formatted_request(get) == "GET /a?b=1 HTTP/1.1\r\nHost: example.com:8080\r\n\r\n", "a GET")
+    let post = request("POST", "http://h/p").with_header("Content-Type", "text/plain").with_body("hi")
+    assert(formatted_request(post) == "POST /p HTTP/1.1\r\nHost: h\r\nContent-Type: text/plain\r\nAccept-Encoding: gzip, deflate\r\nContent-Length: 2\r\n\r\nhi", "a POST")
+    let empty = request("PUT", "http://h/p").with_decompress(false)
+    assert(formatted_request(empty) == "PUT /p HTTP/1.1\r\nHost: h\r\nContent-Length: 0\r\n\r\n", "an empty PUT")
+    let own_host = request("GET", "http://h/").with_header("host", "other").with_decompress(false)
+    assert(formatted_request(own_host) == "GET / HTTP/1.1\r\nhost: other\r\n\r\n", "a Host of its own")
+    var chunk = request("POST", "http://h/").with_header("Transfer-Encoding", "chunked").with_body("abc").with_decompress(false)
+    chunk.trailers.add("X-T", "1")
+    assert(formatted_request(chunk) == "POST / HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n0\r\nX-T: 1\r\n\r\n", "chunked")
+    let bad = request("GET", "http://h/").with_header("X", "a\r\nInjected: 1")
+    assert(formatted_request(bad) == "error: malformed header", "CRLF in a value")
+    var bad_trailer = chunk
+    bad_trailer.trailers.add("Y", "1\r\n\r\nGET /smuggled HTTP/1.1")
+    assert(formatted_request(bad_trailer) == "error: malformed header", "CRLF in a trailer")
+    assert(formatted_request(request("GET", "http://h/").with_header("Bad Name", "1")) == "error: malformed header", "a bad name")
+    assert(formatted_request(request("GE T", "http://h/")) == "error: malformed request or status line", "a bad method")
+    assert(formatted_request(request("GET", "https://h/")) == "error: unsupported: https", "https")
+    let origin = request("GET", "/only/a/path").with_decompress(false)
+    assert(formatted_request(origin) == "GET /only/a/path HTTP/1.1\r\nHost: \r\n\r\n", "a target as it is")
+    // and back: what is formatted parses to the same request
+    match parse_request(formatted_request(post)) {
+        Ok(back) => {
+            assert(back.method == "POST" && back.url == "/p" && back.body == "hi", "parsed back")
+            assert(back.headers.get("content-type").unwrap_or("") == "text/plain", "its header")
+        }
+        Err(e) => assert(false, f"parsed back: {e}")
+    }
+}
+
+// A test helper: `format_response`'s text, or its error.
+fun formatted_response(r: Response) -> str {
+    return match format_response(r) {
+        Ok(s) => s
+        Err(e) => f"error: {e}"
+    }
+}
+
+#test
+fun responses_formatted() {
+    assert(formatted_response(response(200, "hi")) == "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nhi", "200")
+    let typed = response(404, "no").with_header("Content-Type", "text/plain").with_header("Content-Length", "99")
+    assert(formatted_response(typed) == "HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\nContent-Length: 2\r\n\r\nno", "the length is the body's")
+    assert(formatted_response(response(204, "ignored")) == "HTTP/1.1 204 No Content\r\n\r\n", "204 has no body")
+    var odd = response(299, "")
+    assert(formatted_response(odd) == "HTTP/1.1 299\r\nContent-Length: 0\r\n\r\n", "no reason phrase")
+    odd.reason = "Fine"
+    assert(formatted_response(odd) == "HTTP/1.1 299 Fine\r\nContent-Length: 0\r\n\r\n", "a reason of its own")
+    let trailed = response(200, "data").with_trailer("X-Checksum", "abc")
+    assert(formatted_response(trailed) == "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\ndata\r\n0\r\nX-Checksum: abc\r\n\r\n", "trailers: chunked")
+    assert(formatted_response(response(200, "").with_header("X", "a\nb")) == "error: malformed header", "LF in a value")
+    assert(formatted_response(response(42, "")) == "error: malformed request or status line", "a bad status")
+    // the server's forms: HEAD, close, keep-alive for HTTP/1.0, trailers to HTTP/1.0
+    match response_parts(response(200, "body"), true, true, false, true) {
+        Ok(p) => assert(p.0 == "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 4\r\n\r\n" && p.1 == "", "HEAD and close")
+        Err(e) => assert(false, "HEAD")
+    }
+    match response_parts(trailed, false, false, true, false) {
+        Ok(p) => assert(p.0 == "HTTP/1.1 200 OK\r\nConnection: keep-alive\r\nContent-Length: 4\r\n\r\n" && p.1 == "data", "HTTP/1.0 kept, no chunks")
+        Err(e) => assert(false, "HTTP/1.0")
+    }
+    // and back
+    match parse_response(formatted_response(trailed)) {
+        Ok(back) => {
+            assert(back.status == 200 && back.body == "data", "parsed back")
+            assert(back.trailers.get("x-checksum").unwrap_or("") == "abc", "its trailer")
+        }
+        Err(e) => assert(false, f"parsed back: {e}")
+    }
+}
+
+// The parser fed a message a few bytes at a time gives what it gives
+// whole: lines cut anywhere, chunk sizes and CRLFs too.
+#test
+fun parsed_in_pieces() {
+    let texts = [
+        "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nX-A: 1\r\n\r\n4\r\nWiki\r\n5;x=y\r\npedia\r\n0\r\nT: 2\r\n\r\n",
+        "HTTP/1.1 200 OK\r\nContent-Length: 11\r\n\r\nhello world",
+        "HTTP/1.0 200 OK\nServer: x\n\nuntil the end",
+    ]
+    for text in texts {
+        let whole = shown_response(text, "GET")
+        for size in [1, 2, 3, 7, 64] {
+            var p = parser(false, "GET", MAX_HEAD, CLIENT_MAX_BODY)
+            var buf = ""
+            var at = 0
+            var fed = 0
+            while !p.done() && !p.failed {
+                if fed >= text.len() {
+                    p.at_end()
+                    break
+                }
+                var end = fed + size
+                if end > text.len() {
+                    end = text.len()
+                }
+                // what is left, then the next piece, as a wire keeps them
+                buf = part(buf, at, buf.len()) + part(text, fed, end)
+                at = 0
+                fed = end
+                at = p.advance(buf, at)
+            }
+            assert(!p.failed, f"pieces of {size}: {p.err}")
+            let r = p.to_response()
+            assert(r.body == parse_response(text).unwrap_or(response(0, "")).body, f"the body in pieces of {size}")
+            assert(r.trailers == parse_response(text).unwrap_or(response(0, "")).trailers, f"the trailers in pieces of {size}")
+            assert(whole.len() > 0, "shown")
+        }
+    }
+}
+
+// Headers changed in place: added at the end, set where the first was,
+// removed, all without case.
+#test
+fun headers_changed() {
+    var h = headers()
+    assert(h.len() == 0 && h == Headers { items: [] }, "none")
+    h.add("Accept", "a")
+    h.add("X-A", "1")
+    h.add("accept", "b")
+    h.set("ACCEPT", "c")
+    assert(h == Headers { items: [("Accept", "c"), ("X-A", "1")] }, "set where the first was")
+    h.set("Host", "h")
+    assert(h.items[^1] == ("Host", "h"), "set at the end when new")
+    h.remove("x-a")
+    assert(h == Headers { items: [("Accept", "c"), ("Host", "h")] }, "removed")
+}
+
+// A request's defaults and its builder; the server's defaults.
+#test
+fun builders() {
+    let r = request("PUT", "http://h/x")
+    assert(r.method == "PUT" && r.url == "http://h/x" && r.version == "HTTP/1.1" && r.body == "", "the parts")
+    assert(r.headers.len() == 0 && r.trailers.len() == 0, "no headers")
+    assert(r.timeout_ms == -1 && r.max_redirects == 5 && r.decompress, "the client's defaults")
+    assert(r.max_header_bytes == 65536 && r.max_body_bytes == 1073741824, "the limits")
+    let b = r.with_header("A", "1").with_header("a", "2").with_body("data").with_timeout(250).with_redirects(0).with_decompress(false).with_limits(100, 200)
+    assert(b.headers == Headers { items: [("A", "1"), ("a", "2")] } && b.header("A").unwrap_or("") == "1", "headers")
+    assert(b.body == "data" && b.timeout_ms == 250 && b.max_redirects == 0 && !b.decompress, "body, time, redirects")
+    assert(b.max_header_bytes == 100 && b.max_body_bytes == 200, "limits")
+    assert(r.body == "" && r.headers.len() == 0, "the original unchanged")
+    let o = server_options()
+    assert(o.workers == 64 && o.max_requests == -1 && o.keep_alive_ms == 60000, "the server's defaults")
+    assert(o.max_header_bytes == 65536 && o.max_body_bytes == 16777216, "the server's limits")
+    let resp = response(201, "made").with_header("Location", "/x").with_trailer("T", "1")
+    assert(resp.header("location").unwrap_or("") == "/x" && resp.trailers.len() == 1 && resp.reason == "Created", "a response built")
+    match parse_request("GET /p?q=1 HTTP/1.1\r\nHost: h\r\n\r\n") {
+        Ok(p) => assert(p.method == "GET" && p.path() == "/p" && p.query() == [("q", "1")] && p.header("host").unwrap_or("") == "h", "parsed")
+        Err(e) => assert(false, f"parse_request: {e}")
+    }
+}
+
+// The bytes `b` as a string.
+fun of_bytes(b: [uint8]) -> str {
+    var sb = StringBuilder()
+    for x in b {
+        sb.append_byte(x)
+    }
+    return sb.build()
+}
+
+// Bytes that aren't UTF-8 become U+FFFD, one each; valid ones stay.
+#test
+fun lossy_text() {
+    assert(lossy_utf8(of_bytes([97u8, 255u8, 98u8])) == "a\u{FFFD}b", "0xFF")
+    assert(lossy_utf8(of_bytes([195u8])) == "\u{FFFD}", "cut short")
+    assert(lossy_utf8(of_bytes([192u8, 128u8])) == "\u{FFFD}\u{FFFD}", "an overlong NUL")
+    assert(lossy_utf8(of_bytes([237u8, 160u8, 128u8, 104u8])) == "\u{FFFD}\u{FFFD}\u{FFFD}h", "a surrogate")
+    assert(lossy_utf8(of_bytes([240u8, 159u8, 152u8, 128u8])) == "\u{1F600}", "four bytes")
+    assert(lossy_utf8(of_bytes([244u8, 144u8, 128u8, 128u8])) == "\u{FFFD}\u{FFFD}\u{FFFD}\u{FFFD}", "past U+10FFFF")
+    let r = response(200, of_bytes([104u8, 105u8, 255u8]))
+    assert(r.text() == "hi\u{FFFD}" && r.bytes() == [104u8, 105u8, 255u8], "a response's text and bytes")
+}
+
+// The limits: a head past `max_head` (even one that never ends a line), a
+// body past `max_body` (by its length, by its chunks, until the end).
+#test
+fun limits() {
+    var p = parser(true, "", 32, 100)
+    let at = p.advance("GET / HTTP/1.1\r\nX-Big: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\r\n\r\n", 0)
+    assert(p.failed && p.err == HttpError.HeadersTooLarge, "a head too large")
+    var q = parser(true, "", 32, 100)
+    let at2 = q.advance("GET /aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 0)
+    assert(q.failed && q.err == HttpError.HeadersTooLarge, "a line that doesn't end")
+    var r = parser(true, "", 1000, 4)
+    let at3 = r.advance("POST / HTTP/1.1\r\nContent-Length: 5\r\n\r\nhello", 0)
+    assert(r.failed && r.err == HttpError.BodyTooLarge, "a length too large")
+    var s = parser(true, "", 1000, 4)
+    let at4 = s.advance("POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n2\r\nde\r\n0\r\n\r\n", 0)
+    assert(s.failed && s.err == HttpError.BodyTooLarge, "chunks too large")
+    var t = parser(false, "GET", 1000, 4)
+    let at5 = t.advance("HTTP/1.1 200 OK\r\n\r\nhello", 0)
+    assert(t.failed && t.err == HttpError.BodyTooLarge, "until the end, too large")
+    var u = parser(true, "", 1000, 4)
+    let at6 = u.advance("POST / HTTP/1.1\r\nContent-Length: 4\r\n\r\nabcd", 0)
+    assert(u.done() && !u.failed, "at the limit")
+}
+
+// The framing's corner cases: pipelined requests, a length beside
+// chunked, `Expect: 100-continue`.
+#test
+fun framing() {
+    let two = "GET /1 HTTP/1.1\r\nHost: a\r\n\r\nGET /2 HTTP/1.1\r\nHost: a\r\n\r\n"
+    var p = parser(true, "", MAX_HEAD, 100)
+    let at = p.advance(two, 0)
+    assert(p.done() && p.to_request().url == "/1" && at == 28, "the first of two")
+    var q = parser(true, "", MAX_HEAD, 100)
+    let end = q.advance(two, at)
+    assert(q.done() && q.to_request().url == "/2" && end == two.len(), "the second")
+    var both = parser(true, "", MAX_HEAD, 100)
+    let x = both.advance("POST / HTTP/1.1\r\nContent-Length: 99\r\nTransfer-Encoding: chunked\r\n\r\n1\r\na\r\n0\r\n\r\n", 0)
+    assert(both.done() && both.close_after && both.to_request().body == "a", "chunked wins, and the connection closes")
+    var ask = parser(true, "", MAX_HEAD, 100)
+    let y = ask.advance("PUT / HTTP/1.1\r\nExpect: 100-Continue\r\nContent-Length: 2\r\n\r\n", 0)
+    assert(ask.expect_continue && !ask.done(), "100-continue asked")
+    var resp = parser(false, "GET", MAX_HEAD, 100)
+    let z = resp.advance("HTTP/1.1 200 OK\r\nTransfer-Encoding: identity\r\n\r\nrest", 0)
+    resp.at_end()
+    assert(resp.done() && resp.until_close && resp.to_response().body == "rest", "a coding without chunked: until the end")
+}
+
+// Bodies decoded by their `Content-Encoding`.
+#test
+fun content_codings() {
+    let text = "hello hello hello hello"
+    let gz = bytes_m.to_str(compress.gzip(bytes_m.from_str(text)))
+    let zl = bytes_m.to_str(compress.zlib_compress(bytes_m.from_str(text)))
+    let raw = bytes_m.to_str(compress.deflate(bytes_m.from_str(text)))
+    let cases = [("gzip", gz), ("x-gzip", gz), ("deflate", zl), ("Deflate", raw)]
+    for c in cases {
+        let h = Headers { items: [("Content-Encoding", c.0), ("Content-Length", "1"), ("X", "y")] }
+        match decode_body(h, c.1) {
+            Ok(d) => {
+                assert(d.1 == text, f"{c.0} decoded")
+                assert(d.0 == Headers { items: [("X", "y")] }, f"{c.0}: the coding's headers gone")
+            }
+            Err(e) => assert(false, f"{c.0}: {e}")
+        }
+    }
+    let twice = bytes_m.to_str(compress.gzip(bytes_m.from_str(zl)))
+    match decode_body(Headers { items: [("Content-Encoding", "deflate, gzip")] }, twice) {
+        Ok(d) => assert(d.1 == text, "two codings, in reverse")
+        Err(e) => assert(false, f"two codings: {e}")
+    }
+    match decode_body(Headers { items: [("Content-Encoding", "br")] }, "xyz") {
+        Ok(d) => assert(d.1 == "xyz" && d.0.has("Content-Encoding"), "an unknown coding: as it is")
+        Err(e) => assert(false, "br")
+    }
+    match decode_body(Headers { items: [("Content-Encoding", "gzip")] }, "not gzip") {
+        Ok(d) => assert(false, "corrupt gzip")
+        Err(e) => assert(e == HttpError.Decode(CompressError.BadHeader), f"corrupt gzip: {e}")
+    }
+}
+
+// Redirects: which statuses, the method and body after each, the headers
+// that don't go to another host.
+#test
+fun redirects() {
+    let post = request("POST", "http://a/form").with_body("x=1").with_header("Content-Type", "text/plain").with_header("Authorization", "secret")
+    let cases = [(301, "GET", ""), (302, "GET", ""), (303, "GET", ""), (307, "POST", "x=1"), (308, "POST", "x=1")]
+    for c in cases {
+        let resp = response(c.0, "").with_header("Location", "/done")
+        match redirected(post, resp) {
+            Some(next) => {
+                assert(next.url == "http://a/done", f"{c.0}: where")
+                assert(next.method == c.1 && next.body == c.2, f"{c.0}: the method and body")
+                assert(next.headers.has("Authorization"), f"{c.0}: the same host keeps Authorization")
+            }
+            None => assert(false, f"{c.0}: a redirect")
+        }
+    }
+    match redirected(request("GET", "http://a/").with_header("Authorization", "s"), response(302, "").with_header("Location", "http://b/")) {
+        Some(next) => assert(!next.headers.has("Authorization") && next.url == "http://b/", "another host")
+        None => assert(false, "another host")
+    }
+    match redirected(post, response(200, "").with_header("Location", "/x")) {
+        Some(_) => assert(false, "200 isn't a redirect")
+        None => {}
+    }
+    match redirected(post, response(302, "")) {
+        Some(_) => assert(false, "no Location")
+        None => {}
+    }
+}
