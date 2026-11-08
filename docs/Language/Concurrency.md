@@ -63,6 +63,8 @@ async fun squares(n: int) -> [int] {
 - It gives the results in the order of `fs`, so the outcome doesn't depend on which finished first.
 - It is written in Myla with `async let` alone ([[lib/std/task.my]]), so every implementation that runs `async let` runs it.
 
+For tasks that hand values to each other while they run, `std.task` has channels (`let ch: task.Channel<int> = task.channel(4)`, `await ch.send(x)`, `await ch.recv()`), worker pools (`task.pool`, `task.workers`) and `task.first`, the first of several to finish ([[Language/Standard-library/Task#Channels]], [[MYLA-351]]). A channel is a [generic actor](#generic-actors) whose waiting senders and receivers park on [notifiers](#waiting-until-woken).
+
 ## Asking a child to stop: `task.cancel` and `task.cancelled`
 
 Cancelling is cooperative (D96): `task.cancel(a)` asks the child task of `async let a` to stop, and the child decides where it can stop safely, by checking `task.cancelled()`:
@@ -297,8 +299,8 @@ The concurrency stress tests ([[Development/Concurrency-stress-tests]], [[MYLA-1
 | Shared mutation through aliases | Prevented: nothing mutable is shared but an actor, whose methods run one at a time; a lambda can't change what it captures (D93) |
 | Check-then-act | One step in a synchronous actor method; across an `await` in an async one, a warning (D95) |
 | An invariant over several objects | Holds when they live in one actor; across actors, no transaction keeps it (a limit) |
-| Deadlock over resources | Prevented: no locks, reentrant actors whose executors never block a worker (D92); a task waiting on a notifier nobody will wake is the program's own (see the next row) |
-| Waiting cycles | Prevented among tasks and actors: a task only awaits its own children and its earlier siblings. Through notifiers ([[#Waiting until woken]]) a program can wait for ever; when every task waits, it ends with `every task waits for another one`, while a cycle among some tasks lasts as long as the others run |
+| Deadlock over resources | Prevented: no locks, reentrant actors whose executors never block a worker (D92); a task waiting on a channel or a notifier nobody will serve is the program's own (see the next row) |
+| Waiting cycles | Prevented among tasks and actors: a task only awaits its own children and its earlier siblings. Through `std.task`'s channels and notifiers ([[#Waiting until woken]], [[Language/Standard-library/Task#Channels]]) a program can wait for ever: two tasks that both send first over two rendezvous channels wait for each other (`t05_channels_wait_for_each_other`). When every task waits, the program ends with `every task waits for another one`, while a cycle among some tasks lasts as long as the others run; a time limit (`send_timeout`, `recv_timeout`) is the program's way out |
 | A failure while siblings run | It ends the program at once: every other task stops at its next suspension point, then the failure is reported (D94, D97), wherever its parent waits; a task looping without one isn't stopped |
 | Cancellation and resource cleanup by the program | Cooperative: `task.cancel(a)` asks, the child checks `task.cancelled()` where it can stop and gives back what it holds, wherever it was asked (D96) |
 | A stale result | The program's to decide (a request number, or cancelling the old request, which checks before publishing), as everywhere |

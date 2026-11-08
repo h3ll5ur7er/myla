@@ -34,6 +34,10 @@ EXPECTED = {
     # 5. a child may await an earlier sibling (MYLA-148): no cycle can form
     "t05_child_awaits_sibling": ("2\n", 0),
     "t05_siblings_share_a_result": ("60780\n", 0),
+    # ... but channels (MYLA-351) can wait for each other: a time limit on
+    # the waits is the program's way out, the values taken back
+    "t05_channels_wait_for_each_other": (
+        "send timed out, send timed out, left 0 0\ngot world, got hello\n", 0),
     # 6. an actor's state checked again after an `await` (without the second
     # check a warning says it may have changed, D95)
     "t06_recheck_after_the_await": ("successes 1 stock 0\n", 0),
@@ -114,6 +118,28 @@ EXPECTED = {
     # 30. a generic actor is an actor (MYLA-386): each instance serves its
     # callers one at a time from 32 tasks, and a list sent in is a copy
     "t30_generic_actor_from_many_tasks": ("32 200000 200000 19999900000 0\n8000 8000 41240\n", 0),
+    # 31-34. std.task's channels, pools and time limits (MYLA-351), a generic
+    # actor whose waiters park on notifiers: every value through a channel
+    # between many producers and consumers received exactly once, also when
+    # some of them are cancelled in the middle or time out over and over
+    # (receivers and senders); a pool's results in order, a cancelled one's
+    # every job done once or left; the first of several, the rest
+    # cancelled; and waits that park, so a program whose every task waits on
+    # a channel ends with "every task waits for another one"
+    "t31_channel_many_to_many": ("3200 sent, 3200 received, 0 twice, 0 missing\n" * 4, 0),
+    "t32_channel_cancelled_midway": (
+        "capacity 2: the others sent all true, received as sent true\n"
+        "capacity 0: the others sent all true, received as sent true\n"
+        "capacity -1: the others sent all true, received as sent true\n", 0),
+    "t33_pools_and_the_first": (
+        "pool in order true\n"
+        "cancelled workers, every job once true\n"
+        "timing out receivers, every value once true\n"
+        "timing out senders, received as sent true true\n"
+        "function 11 gave 110\n", 0),
+    # (its stderr isn't in EXPECTED_STDERR: on several workers more than one
+    # idle worker may report "every task waits for another one", see MYLA-387)
+    "t34_channels_nobody_left": ("4950\n1 1\n", 1),
 }
 
 # program -> what it writes to standard error (the others write nothing
