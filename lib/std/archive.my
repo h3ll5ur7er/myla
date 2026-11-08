@@ -115,6 +115,16 @@ fun io_name(e: IoError) -> str {
         Unsupported => "Unsupported"
         BrokenPipe => "BrokenPipe"
         InvalidInput => "InvalidInput"
+        ConnectionRefused => "ConnectionRefused"
+        ConnectionReset => "ConnectionReset"
+        ConnectionAborted => "ConnectionAborted"
+        NotConnected => "NotConnected"
+        AddrInUse => "AddrInUse"
+        AddrNotAvailable => "AddrNotAvailable"
+        TimedOut => "TimedOut"
+        HostUnreachable => "HostUnreachable"
+        NetworkUnreachable => "NetworkUnreachable"
+        InvalidData => "InvalidData"
         Other(c) => f"Other({c})"
     }
 }

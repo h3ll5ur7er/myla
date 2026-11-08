@@ -130,6 +130,16 @@ fun io_name(e: IoError) -> str {
         Unsupported => "Unsupported"
         BrokenPipe => "BrokenPipe"
         InvalidInput => "InvalidInput"
+        ConnectionRefused => "ConnectionRefused"
+        ConnectionReset => "ConnectionReset"
+        ConnectionAborted => "ConnectionAborted"
+        NotConnected => "NotConnected"
+        AddrInUse => "AddrInUse"
+        AddrNotAvailable => "AddrNotAvailable"
+        TimedOut => "TimedOut"
+        HostUnreachable => "HostUnreachable"
+        NetworkUnreachable => "NetworkUnreachable"
+        InvalidData => "InvalidData"
         Other(c) => f"Other({c})"
     }
 }
@@ -151,6 +161,16 @@ fun io_code(e: IoError) -> int32 {
         Unsupported => 38
         BrokenPipe => 32
         InvalidInput => 22
+        ConnectionRefused => 111
+        ConnectionReset => 104
+        ConnectionAborted => 103
+        NotConnected => 107
+        AddrInUse => 98
+        AddrNotAvailable => 99
+        TimedOut => 110
+        HostUnreachable => 113
+        NetworkUnreachable => 101
+        InvalidData => 74
         Other(c) => 1000 + c
     }
 }

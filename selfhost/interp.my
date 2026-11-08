@@ -9,7 +9,7 @@
 
 from .ast import Expr, ExprKind, Stmt, StmtKind, Block, Decl, DeclKind, FunData, Param, MatchArm, Pattern, PatternKind, FieldPat, BindElem, ExprOrBlock, ElseTail, FieldInit, MapEntry, Attribute, TypeExpr, TypeKind, TypeParam, bind_elems, names_in_expr, names_in_block, Expected, expected_failure
 from .tokens import SrcSpan, no_span
-from .checker import Checker, Type, Subst, subst_type, subst_get, unify_param, type_name, is_raw_memory_primitive, checker_on, builtin_method, builtin_method_name, is_slice_expr, from_end_of, slice_parts, is_hole_part
+from .checker import Checker, Type, Subst, subst_type, subst_get, unify_param, type_name, is_raw_memory_primitive, is_net_primitive, checker_on, builtin_method, builtin_method_name, is_slice_expr, from_end_of, slice_parts, is_hole_part
 from .anf import Norm, new_norm, stmt_suspends, body_suspends
 from .util import cp_utf8, format_specs
 from std.fmt import fmt_int, fmt_float, fmt_text
@@ -138,7 +138,9 @@ struct Task { frames: [AFrame], state: int32, value: Value, failed: bool, err: O
 struct Sleeper { at: int64, seq: int64, task: int32 }
 
 // A task waiting for input on `fd` (D124, `std.io`'s async reads).
-struct FdWait { fd: int32, fd2: int32, task: int32 }
+// `events` 0: until `fd` (or `fd2`) is readable; else until the socket `fd`
+// is ready for them (`__wait_socket`, MYLA-346)
+struct FdWait { fd: int32, fd2: int32, task: int32, events: int32 }
 
 // A task's deadline (`std.task.timeout`, D124): at `at` the task `task` is
 // cancelled and `Interp.fired[rec]` says so.
@@ -1490,7 +1492,7 @@ impl Interp {
         var rest: [FdWait] = []
         var woke = false
         for w in self.fd_waits {
-            if __poll(w.fd, 0) != 0 || (w.fd2 >= 0 && __poll(w.fd2, 0) != 0) {
+            if fd_wait_over(w) {
                 self.tasks[w.task].state = 0
                 self.ready(w.task)
                 woke = true
@@ -3699,6 +3701,39 @@ impl Interp {
         return argv
     }
 
+    // MYLA-346's socket primitives (`is_net_primitive`): the host's own,
+    // each argument evaluated in order
+    fun net_primitive(var self, nm: str, args: [Expr]) -> Value {
+        var ints: [int32] = []
+        var strs: [str] = []
+        for a in args {
+            match self.eval(a) {
+                Value.VStr(x) => { strs.push(x) },
+                v => { ints.push(as_int(v) as int32) },
+            }
+        }
+        if self.stop() { return Value.VUnit }
+        if nm == "__sock_recv" { return Value.VStr(__sock_recv(ints[0], ints[1])) }
+        if nm == "__sock_recv_from" { return Value.VStr(__sock_recv_from(ints[0], ints[1])) }
+        if nm == "__sock_addr" { return Value.VStr(__sock_addr(ints[0], ints[1])) }
+        if nm == "__net_config" { return Value.VStr(__net_config(ints[0])) }
+        var r = -1
+        if nm == "__sock_open" { r = __sock_open(ints[0], ints[1]) }
+        if nm == "__sock_set_nonblocking" { r = __sock_set_nonblocking(ints[0], ints[1]) }
+        if nm == "__sock_bind" { r = __sock_bind(ints[0], strs[0]) }
+        if nm == "__sock_listen" { r = __sock_listen(ints[0], ints[1]) }
+        if nm == "__sock_accept" { r = __sock_accept(ints[0]) }
+        if nm == "__sock_connect" { r = __sock_connect(ints[0], strs[0]) }
+        if nm == "__sock_error" { r = __sock_error(ints[0]) }
+        if nm == "__sock_send" { r = __sock_send(ints[0], strs[0], ints[1]) }
+        if nm == "__sock_send_to" { r = __sock_send_to(ints[0], strs[0], strs[1]) }
+        if nm == "__sock_shutdown" { r = __sock_shutdown(ints[0], ints[1]) }
+        if nm == "__sock_option" { r = __sock_option(ints[0], ints[1], ints[2]) }
+        if nm == "__sock_poll" { r = __sock_poll(ints[0], ints[1], ints[2]) }
+        if nm == "__sock_close" { r = __sock_close(ints[0]) }
+        return Value.VInt(r as int64)
+    }
+
     #test(interp_on("[int]"), Expr { id: 133, line: 83, col: 20, sp: SrcSpan { sline: 83, scol: 11, eline: 83, ecol: 22 }, kind: ExprKind.Call(Expr { id: 132, line: 83, col: 11, sp: SrcSpan { sline: 83, scol: 11, eline: 83, ecol: 20 }, kind: ExprKind.Name("page_size") }, [], []) }, "page_size", [])[Value.VUnit]
     fun eval_name_call(var self, e: Expr, nm: str, args: [Expr]) -> Value {
         if nm == "std$task$cancel" {
@@ -3762,7 +3797,23 @@ impl Interp {
             let fd = as_int(self.eval(args[0])) as int32
             if self.stop() { return Value.VUnit }
             if self.cur < 0 || self.cur >= self.tasks.len() || self.tasks[self.cur].requested || fd < 0 || __poll(fd, 0) != 0 { return Value.VUnit }
-            self.fd_waits.push(FdWait { fd: fd, fd2: -1, task: self.cur })
+            self.fd_waits.push(FdWait { fd: fd, fd2: -1, task: self.cur, events: 0 })
+            self.tasks[self.cur].state = 1
+            self.parked = true
+            return Value.VUnit
+        }
+        // waiting for a socket (MYLA-346): as for input, through the host's
+        // `__sock_poll`; outside any task the thread waits in it
+        if nm == "__wait_socket" {
+            let h = as_int(self.eval(args[0])) as int32
+            let ev = as_int(self.eval(args[1])) as int32
+            if self.stop() { return Value.VUnit }
+            if self.cur < 0 || self.cur >= self.tasks.len() {
+                let r = __sock_poll(h, ev, -1)
+                return Value.VUnit
+            }
+            if self.tasks[self.cur].requested || h < 0 || __sock_poll(h, ev, 0) != 0 { return Value.VUnit }
+            self.fd_waits.push(FdWait { fd: h, fd2: -1, task: self.cur, events: ev })
             self.tasks[self.cur].state = 1
             self.parked = true
             return Value.VUnit
@@ -3773,7 +3824,7 @@ impl Interp {
             if self.stop() { return Value.VUnit }
             // (`fb` negative is "only `fa`", as natively)
             if self.cur < 0 || self.cur >= self.tasks.len() || self.tasks[self.cur].requested || fa < 0 || __poll(fa, 0) != 0 || (fb >= 0 && __poll(fb, 0) != 0) { return Value.VUnit }
-            self.fd_waits.push(FdWait { fd: fa, fd2: fb, task: self.cur })
+            self.fd_waits.push(FdWait { fd: fa, fd2: fb, task: self.cur, events: 0 })
             self.tasks[self.cur].state = 1
             self.parked = true
             return Value.VUnit
@@ -3934,6 +3985,7 @@ impl Interp {
             for x in __spawn_piped(prog, argv, opts) { out.push(Value.VInt(x as int64)) }
             return Value.VList(out)
         }
+        if is_net_primitive(nm) { return self.net_primitive(nm, args) }
         if nm == "__try_reap" { return Value.VInt(__try_reap(as_int(self.eval(args[0])) as int32) as int64) }
         if nm == "__close" {
             __close(as_int(self.eval(args[0])) as int32)
@@ -4302,6 +4354,14 @@ fun format_value(v: Value) -> str {
         Value.VChar(c) => cp_utf8(c as int32),
         _ => format("ERR: {}", v.to_string()),
     }
+}
+
+// Whether the wait `w` is over: its descriptor readable, or its socket
+// ready for what it waits for (the host's `__poll`, `__sock_poll`).
+#allow(primitive)
+fun fd_wait_over(w: FdWait) -> bool {
+    if w.events != 0 { return __sock_poll(w.fd, w.events, 0) != 0 }
+    return __poll(w.fd, 0) != 0 || (w.fd2 >= 0 && __poll(w.fd2, 0) != 0)
 }
 
 #test(Value.VInt(0))[0]

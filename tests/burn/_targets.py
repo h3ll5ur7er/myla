@@ -22,6 +22,7 @@ SUITES = [
     "tests.burn.test_stdio",
     "tests.burn.test_process",
     "tests.burn.test_platform_primitives",
+    "tests.burn.test_net",
     "tests.burn.test_unit_type",
     "tests.burn.test_defer",
     "tests.burn.test_format_specs",
@@ -64,6 +65,10 @@ SKIP: dict[str, dict[str, str]] = {
         # PipesOnWasm checks; and WASI has no permission bits
         "test_platform_primitives.Pipes": "WASI has no processes (PipesOnWasm checks they are Unsupported)",
         "test_platform_primitives.Descriptors.test_the_mode_given": "WASI has no permission bits",
+        # MYLA-346: WASI preview 1 has no sockets, which NetOnWasm checks are
+        # `Unsupported`; the addresses, the hosts file and the warnings run
+        **{f"test_net.{c}": "WASI has no sockets (NetOnWasm checks they are Unsupported)"
+           for c in ["Tcp", "Udp", "Dns", "Errors", "Primitives"]},
     },
 }
 
