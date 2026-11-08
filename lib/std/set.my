@@ -1,0 +1,227 @@
+// std.set: a set of values in insertion order (MYLA-330, D164).
+//
+// `Set<T>` is a map from its elements to `()`, so it has the map's order,
+// the order in which the elements were first inserted (D105), and its
+// average constant time for `insert`, `remove` and `contains` (MYLA-310). An
+// element is what a map key can be: a type that is `Eq` and `Hash` (D163,
+// MYLA-313), an integer, `char`, `bool`, `str`, a tuple or list of such, a
+// struct or enum with `#derive(Eq, Hash)`; so `T: Eq + Hash`.
+//
+// A constructor needs an expected type, which fixes `T` (MYLA-315):
+// `var s: Set<str> = set.new()`, a field, a parameter or a return type.
+// `for x in s` isn't possible yet (MYLA-353): write `for x in s.items()`.
+
+pub struct Set<T> {
+    m: [T: ()],
+}
+
+// An empty set.
+pub fun new<T: Eq + Hash>() -> Set<T> {
+    return Set { m: [:] }
+}
+
+// The set of the elements of `xs`, in the order they first occur there.
+pub fun of<T: Eq + Hash>(xs: [T]) -> Set<T> {
+    var m: [T: ()] = [:]
+    for x in xs {
+        m[x] = ()
+    }
+    return Set { m: m }
+}
+
+impl<T: Eq + Hash> Set<T> {
+    // Adds `x`; true if it wasn't in the set. An element already there
+    // keeps its place.
+    fun insert(var self, x: T) -> bool {
+        let n = self.m.len()
+        self.m[x] = ()
+        return self.m.len() > n
+    }
+
+    // Removes `x`; true if it was in the set.
+    fun remove(var self, x: T) -> bool {
+        let n = self.m.len()
+        self.m.remove(x)
+        return self.m.len() < n
+    }
+
+    fun contains(self, x: T) -> bool {
+        return self.m.contains(x)
+    }
+
+    // The number of elements.
+    fun len(self) -> int {
+        return self.m.len()
+    }
+
+    fun is_empty(self) -> bool {
+        return self.m.len() == 0
+    }
+
+    // The elements, in insertion order.
+    fun items(self) -> [T] {
+        return self.m.keys()
+    }
+
+    // The elements of either set: this one's, then `other`'s that this one
+    // hasn't, each in its set's order.
+    fun union(self, other: Set<T>) -> Set<T> {
+        var m = self.m
+        for x in other.m {
+            m[x] = ()
+        }
+        return Set { m: m }
+    }
+
+    // The elements of both sets, in this one's order.
+    fun intersection(self, other: Set<T>) -> Set<T> {
+        var m: [T: ()] = [:]
+        for x in self.m {
+            if other.m.contains(x) {
+                m[x] = ()
+            }
+        }
+        return Set { m: m }
+    }
+
+    // This set's elements that `other` hasn't, in this one's order.
+    fun difference(self, other: Set<T>) -> Set<T> {
+        var m: [T: ()] = [:]
+        for x in self.m {
+            if !other.m.contains(x) {
+                m[x] = ()
+            }
+        }
+        return Set { m: m }
+    }
+
+    // Whether every element of this set is in `other`.
+    fun is_subset(self, other: Set<T>) -> bool {
+        if self.m.len() > other.m.len() {
+            return false
+        }
+        for x in self.m {
+            if !other.m.contains(x) {
+                return false
+            }
+        }
+        return true
+    }
+}
+
+// --- tests -------------------------------------------------------------------
+// The functions are generic, which a `#test` case can't take (D116), so the
+// tests are test functions (D162).
+
+// Whether `xs` and `ys` hold the same elements in the same order.
+fun same<T: Eq>(xs: [T], ys: [T]) -> bool {
+    if xs.len() != ys.len() {
+        return false
+    }
+    for i in 0..xs.len() {
+        if xs[i] != ys[i] {
+            return false
+        }
+    }
+    return true
+}
+
+#test
+fun insert_remove_contains() {
+    var s: Set<str> = new()
+    assert(s.is_empty() && s.len() == 0, "a new set is empty")
+    assert(s.insert("pear"), "a new element")
+    assert(s.insert("fig"), "another")
+    assert(!s.insert("pear"), "an element already there")
+    assert(s.len() == 2 && !s.is_empty(), "two elements")
+    assert(s.contains("fig") && !s.contains("lime"), "contains")
+    assert(s.remove("pear"), "removing an element")
+    assert(!s.remove("pear"), "removing it again")
+    assert(!s.remove("lime"), "removing what was never there")
+    assert(!s.contains("pear") && s.len() == 1, "after the removal")
+    assert(same(s.items(), ["fig"]), "the one left")
+}
+
+#test
+fun insertion_order() {
+    var s: Set<int> = new()
+    for x in [5, 3, 9, 3, 1, 5] {
+        s.insert(x)
+    }
+    assert(same(s.items(), [5, 3, 9, 1]), "first insertion decides")
+    s.remove(3)
+    s.insert(3)
+    assert(same(s.items(), [5, 9, 1, 3]), "removed and inserted again goes last")
+    assert(same(of(['b', 'a', 'b', 'c']).items(), ['b', 'a', 'c']), "of keeps the first of each")
+    let e: Set<bool> = of([])
+    assert(e.is_empty(), "of an empty list")
+}
+
+#test
+fun set_algebra() {
+    let a: Set<int> = of([1, 2, 3, 4])
+    let b: Set<int> = of([6, 4, 2])
+    assert(same(a.union(b).items(), [1, 2, 3, 4, 6]), "union")
+    assert(same(b.union(a).items(), [6, 4, 2, 1, 3]), "union from the other side")
+    assert(same(a.intersection(b).items(), [2, 4]), "intersection")
+    assert(same(b.intersection(a).items(), [4, 2]), "intersection in the receiver's order")
+    assert(same(a.difference(b).items(), [1, 3]), "difference")
+    assert(same(b.difference(a).items(), [6]), "difference the other way")
+    assert(same(a.items(), [1, 2, 3, 4]) && same(b.items(), [6, 4, 2]), "the operands are unchanged")
+    let e: Set<int> = new()
+    assert(a.union(e).len() == 4 && a.intersection(e).is_empty(), "with the empty set")
+    assert(e.is_subset(a) && e.is_subset(e), "the empty set is a subset of all")
+    assert(of([4, 2]).is_subset(b) && !b.is_subset(of([4, 2])), "is_subset")
+    assert(a.is_subset(a) && !a.is_subset(b), "a set is a subset of itself")
+    assert(a.intersection(b).is_subset(a) && a.difference(b).intersection(b).is_empty(), "laws")
+}
+
+#test
+fun many_elements() {
+    var s: Set<int64> = new()
+    var x: int64 = 1
+    for i in 0..3000 {
+        s.insert(x % 1000)
+        x = x * 6364136223846793005 + 1442695040888963407
+        if x < 0 {
+            x = -x
+        }
+    }
+    assert(s.len() <= 1000, "at most 1000 distinct")
+    var removed = 0
+    for i in 0..1000 {
+        if i % 3 == 0 && s.remove(i as int64) {
+            removed += 1
+        }
+    }
+    for y in s.items() {
+        assert(y % 3 != 0, "the multiples of 3 are gone")
+    }
+    var n = 0
+    for i in 0..1000 {
+        if s.contains(i as int64) {
+            n += 1
+        }
+    }
+    assert(n == s.len(), "contains agrees with len")
+}
+
+#derive(Eq, Hash)
+struct Spot {
+    name: str,
+    at: (int, int),
+}
+
+// Tuples and structs are elements as they are map keys (D163, MYLA-313).
+#test
+fun compound_elements() {
+    var cells: Set<(int, int)> = of([(0, 0), (1, 2), (0, 0)])
+    assert(cells.len() == 2 && cells.contains((1, 2)), "a tuple element")
+    assert(cells.insert((2, 1)) && !cells.insert((1, 2)), "insert says whether it was new")
+    var spots: Set<Spot> = new()
+    spots.insert(Spot { name: "a", at: (1, 1) })
+    spots.insert(Spot { name: "a", at: (1, 1) })
+    spots.insert(Spot { name: "b", at: (1, 1) })
+    assert(spots.len() == 2, "equal structs are one element")
+    assert(spots.remove(Spot { name: "a", at: (1, 1) }) && spots.items()[0].name == "b", "remove by value")
+}

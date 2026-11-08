@@ -908,6 +908,16 @@ pub fun clock_ns() -> int64 {
     return t
 }
 
+// The wall clock, in nanoseconds since 1970-01-01T00:00:00Z (it follows
+// changes to the date, so it can go back).
+pub fun wall_ns() -> int64 {
+    let ts = __alloc(16)
+    __syscall(SYS_CLOCK_GETTIME, 0, ts, 0)  // CLOCK_REALTIME
+    let t = __load64(ts) * 1000000000 + __load64(ts + 8)
+    __free(ts)
+    return t
+}
+
 // The calling thread asleep for `n` nanoseconds (again after an
 // interruption, for what is left).
 pub fun sleep_ns(n: int64) {

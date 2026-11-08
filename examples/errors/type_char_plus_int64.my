@@ -1,0 +1,9 @@
+//~ type error: operator '+' moves a char by an 'int32', found 'int64' (convert it with 'as int32')
+//~ span: c + n
+// A char moves by an int32 only: another integer type is converted with
+// `as int32` first, as D4 mixes no types (MYLA-318).
+fun main() {
+    let c = 'a'
+    let n: int64 = 2
+    print(c + n)
+}

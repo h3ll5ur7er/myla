@@ -1,0 +1,801 @@
+// std.args: command-line arguments (MYLA-333, D164).
+//
+// A `Spec` says what a program's arguments are: flags, options with values,
+// positionals, the rest of the arguments, subcommands. It is built by
+// methods that each give a new spec back:
+//
+//   let s = (args.spec("prog", "what it does")
+//       .flag("verbose", 'v', "say more")
+//       .option("out", 'o', "FILE", "where to write", Some("a.out"))
+//       .positional("input", "the file to read"))
+//
+// `parse(s, argv)` reads the arguments (without the program's name) into an
+// `Args`, which a program asks by name: `a.flag("verbose")`, `a.get("out")`,
+// `a.all("input")`, `a.command()`. Myla has no references or reflection, so
+// the names are the link between the spec and the result; asking for a name
+// the spec doesn't declare is a panic, as it is a mistake in the program.
+//
+// The forms are getopt's and GNU's: `--out x`, `--out=x`, `-o x`, `-ox`,
+// short flags grouped (`-vq`, `-vox`), `--` to end the options, and options
+// anywhere among the positionals. An option given twice keeps both values
+// (`all`), the later one wins for `get`. A value is the next argument
+// whatever it looks like (`-o -x` gives `-o` the value `-x`). `-` alone is a
+// positional. `--help`, and `-h` unless the spec gives `h` to an option of
+// its own, give `Err(ArgsError.Help(text))` with the generated help.
+//
+// Strings are bytes: a short name is one ASCII character.
+
+// std.str isn't imported: its cases would run as this module's (MYLA-360);
+// the one string helper needed is at the end.
+import std.option as option_m
+from std.io import println, eprintln
+from std.process import exit
+
+// What went wrong while reading the arguments, each naming the argument: an
+// option as it was written (`--out`, `-o`), a positional by its name in the
+// spec, any other argument as it was given.
+#derive(Eq)
+pub enum ArgsError {
+    // `--help` or `-h`: the generated help text, to print
+    Help(str),
+    // An option the spec doesn't declare
+    UnknownOption(str),
+    // An option at the end of the arguments, without its value
+    MissingValue(str),
+    // A flag given a value, `--verbose=1`
+    UnexpectedValue(str),
+    // A required positional that wasn't given
+    MissingPositional(str),
+    // An argument past the positionals of a spec without `many` or commands
+    UnexpectedPositional(str),
+    // A command the spec doesn't declare
+    UnknownCommand(str),
+}
+
+// A flag (`value` is "") or an option (`value` names its value in the help).
+struct OptSpec {
+    name: str,
+    short: char,
+    value: str,
+    help: str,
+    default: Option<str>,
+}
+
+// A positional, or with `many` the rest of the arguments.
+struct PosSpec {
+    name: str,
+    help: str,
+    required: bool,
+}
+
+struct CmdSpec {
+    name: str,
+    spec: Spec,
+}
+
+// What a program's arguments are, built by `spec` and the methods below.
+pub struct Spec {
+    name: str,
+    about: str,
+    opts: [OptSpec],
+    pos: [PosSpec],
+    rest: [PosSpec],
+    commands: [CmdSpec],
+}
+
+// The arguments as `parse` read them, asked by the names of the spec.
+pub struct Args {
+    // the flags given, a name for each time
+    flags: [str],
+    // the values given, in order, with their names
+    values: [(str, str)],
+    defaults: [str: str],
+    // every name the spec declares: true for a flag
+    names: [str: bool],
+    // the command and its arguments, if one was given (a list, as a struct
+    // can't hold itself)
+    sub: [(str, Args)],
+}
+
+// A spec without arguments: `name` is the program's name in the help and
+// `about` its first line.
+pub fun spec(name: str, about: str = "") -> Spec {
+    return Spec { name: name, about: about, opts: [], pos: [], rest: [], commands: [] }
+}
+
+impl Spec {
+    // A flag, `--name`, and with a `short` other than '\0' `-short`.
+    fun flag(self, name: str, short: char = '\0', help: str = "") -> Spec {
+        var s = self
+        s.opts.push(OptSpec { name: name, short: short, value: "", help: help, default: None })
+        return s
+    }
+
+    // An option with a value, `--name value`, `--name=value`, and with a
+    // `short` other than '\0' `-short value` and `-shortvalue`; `value`
+    // names the value in the help ("" is "VALUE"). `default` is what `get`
+    // gives when the option isn't given.
+    fun option(self, name: str, short: char = '\0', value: str = "VALUE", help: str = "", default: Option<str> = None) -> Spec {
+        var s = self
+        var v = value
+        if v == "" {
+            v = "VALUE"
+        }
+        s.opts.push(OptSpec { name: name, short: short, value: v, help: help, default: default })
+        return s
+    }
+
+    // The next positional argument, in the order they are declared.
+    fun positional(self, name: str, help: str = "", required: bool = true) -> Spec {
+        var s = self
+        s.pos.push(PosSpec { name: name, help: help, required: required })
+        return s
+    }
+
+    // The arguments past the positionals, none or many, for `all(name)`.
+    fun many(self, name: str, help: str = "") -> Spec {
+        var s = self
+        s.rest = [PosSpec { name: name, help: help, required: false }]
+        return s
+    }
+
+    // A subcommand: the first argument past the positionals, if it is
+    // `name`, and the arguments after it are `sub`'s. The help lists it
+    // with `sub`'s `about`.
+    fun command(self, name: str, sub: Spec) -> Spec {
+        var s = self
+        s.commands.push(CmdSpec { name: name, spec: sub })
+        return s
+    }
+
+    // The usage line, `usage: prog [options] <input> [<files>...]`.
+    fun usage(self) -> str {
+        var sb = StringBuilder()
+        sb.append("usage: ")
+        sb.append(self.name)
+        sb.append(" [options]")
+        for p in self.pos {
+            if p.required {
+                sb.append(f" <{p.name}>")
+            } else {
+                sb.append(f" [<{p.name}>]")
+            }
+        }
+        for p in self.rest {
+            sb.append(f" [<{p.name}>...]")
+        }
+        if self.commands.len() > 0 {
+            sb.append(" [<command>]")
+        }
+        return sb.build()
+    }
+
+    // The help text: `about`, the usage line, then the arguments, the
+    // options and the commands, each with its help in one aligned column.
+    fun help(self) -> str {
+        var arg_rows: [(str, str)] = []
+        for p in self.pos {
+            arg_rows.push((f"<{p.name}>", p.help))
+        }
+        for p in self.rest {
+            arg_rows.push((f"<{p.name}>...", p.help))
+        }
+        var opt_rows: [(str, str)] = []
+        for o in self.opts {
+            var left = "    --" + o.name
+            if o.short != '\0' {
+                left = f"-{o.short}, --{o.name}"
+            }
+            if o.value != "" {
+                left = left + " " + o.value
+            }
+            var text = o.help
+            if let Some(d) = o.default {
+                if text != "" {
+                    text = text + " "
+                }
+                text = text + f"(default: {d})"
+            }
+            opt_rows.push((left, text))
+        }
+        if long_index(self, "help") < 0 {
+            var left = "    --help"
+            if short_index(self, 'h') < 0 {
+                left = "-h, --help"
+            }
+            opt_rows.push((left, "print this help"))
+        }
+        var cmd_rows: [(str, str)] = []
+        for c in self.commands {
+            cmd_rows.push((c.name, c.spec.about))
+        }
+        var width = 0
+        for rows in [arg_rows, opt_rows, cmd_rows] {
+            for r in rows {
+                if r.0.len() > width {
+                    width = r.0.len()
+                }
+            }
+        }
+        var sb = StringBuilder()
+        if self.about != "" {
+            sb.append(self.about)
+            sb.append("\n\n")
+        }
+        sb.append(self.usage())
+        sb.append(section("Arguments", arg_rows, width))
+        sb.append(section("Options", opt_rows, width))
+        sb.append(section("Commands", cmd_rows, width))
+        return sb.build()
+    }
+}
+
+impl Args {
+    // Whether the flag `name` was given.
+    fun flag(self, name: str) -> bool {
+        return self.count(name) > 0
+    }
+
+    // How many times the flag `name` was given (`-vvv` is 3).
+    fun count(self, name: str) -> int {
+        declared(self, name, true)
+        var n = 0
+        for f in self.flags {
+            if f == name {
+                n += 1
+            }
+        }
+        return n
+    }
+
+    // The value of the option or positional `name`: the last one given, or
+    // the option's default, or `None`.
+    fun get(self, name: str) -> Option<str> {
+        declared(self, name, false)
+        var i = self.values.len() - 1
+        while i >= 0 {
+            if self.values[i].0 == name {
+                return Some(self.values[i].1)
+            }
+            i -= 1
+        }
+        return get(self.defaults, name)
+    }
+
+    // `get(name)`, or `d` when it is `None`.
+    fun get_or(self, name: str, d: str) -> str {
+        return self.get(name).unwrap_or(d)
+    }
+
+    // Every value given for `name`, in order: an option given several
+    // times, the arguments of `many`. With none given, the option's default
+    // if it has one.
+    fun all(self, name: str) -> [str] {
+        declared(self, name, false)
+        var out: [str] = []
+        for v in self.values {
+            if v.0 == name {
+                out.push(v.1)
+            }
+        }
+        if out.len() == 0 {
+            if let Some(d) = get(self.defaults, name) {
+                out.push(d)
+            }
+        }
+        return out
+    }
+
+    // The command given and its arguments, or `None`.
+    fun command(self) -> Option<(str, Args)> {
+        if self.sub.len() == 0 {
+            return None
+        }
+        return Some(self.sub[0])
+    }
+}
+
+impl ArgsError {
+    // The error as a sentence, `unknown option '--frob'`; for `Help`, the
+    // help text.
+    #test(ArgsError.UnknownOption("--frob"))["unknown option '--frob'"]
+    #test(ArgsError.MissingValue("-o"))["option '-o' needs a value"]
+    #test(ArgsError.UnexpectedValue("--verbose"))["flag '--verbose' takes no value"]
+    #test(ArgsError.MissingPositional("input"))["missing argument <input>"]
+    #test(ArgsError.UnexpectedPositional("x.txt"))["unexpected argument 'x.txt'"]
+    #test(ArgsError.UnknownCommand("bild"))["unknown command 'bild'"]
+    #test(ArgsError.Help("usage: p"))["usage: p"]
+    fun message(self) -> str {
+        return match self {
+            Help(text) => text
+            UnknownOption(o) => f"unknown option '{o}'"
+            MissingValue(o) => f"option '{o}' needs a value"
+            UnexpectedValue(o) => f"flag '{o}' takes no value"
+            MissingPositional(p) => f"missing argument <{p}>"
+            UnexpectedPositional(a) => f"unexpected argument '{a}'"
+            UnknownCommand(c) => f"unknown command '{c}'"
+        }
+    }
+}
+
+impl Format for ArgsError {
+    fun format(self, spec: str) -> str {
+        return self.message()
+    }
+}
+
+// The arguments `argv` (without the program's name: `process.args()[1:]`)
+// as `s` declares them.
+pub fun parse(s: Spec, argv: [str]) -> Result<Args, ArgsError> {
+    return parse_from(s, argv, 0)
+}
+
+// `argv[start:]` as `s` declares them.
+fun parse_from(s: Spec, argv: [str], start: int) -> Result<Args, ArgsError> {
+    var a = empty_args(s)
+    let n = argv.len()
+    var i = start
+    var next = 0
+    var options = true
+    while i < n {
+        let arg = argv[i]
+        i += 1
+        if options && arg == "--" {
+            options = false
+        } else if options && arg.len() > 2 && arg[0] == '-' && arg[1] == '-' {
+            // --name, --name=value, --name value
+            var name = arg[2:]
+            var value: Option<str> = None
+            let eq = find_byte(name, '=')
+            if eq >= 0 {
+                value = Some(name[eq + 1:])
+                name = name[:eq]
+            }
+            let k = long_index(s, name)
+            if k < 0 {
+                if name == "help" {
+                    return Err(ArgsError.Help(s.help()))
+                }
+                return Err(ArgsError.UnknownOption("--" + name))
+            }
+            let o = s.opts[k]
+            if o.value == "" {
+                if value.is_some() {
+                    return Err(ArgsError.UnexpectedValue("--" + name))
+                }
+                a.flags.push(o.name)
+            } else if let Some(v) = value {
+                a.values.push((o.name, v))
+            } else if i < n {
+                a.values.push((o.name, argv[i]))
+                i += 1
+            } else {
+                return Err(ArgsError.MissingValue("--" + name))
+            }
+        } else if options && arg.len() > 1 && arg[0] == '-' {
+            // -v, -vq, -o value, -ovalue, -vo value
+            var j = 1
+            while j < arg.len() {
+                if arg[j] >= 0x80 {
+                    return Err(ArgsError.UnknownOption(arg))
+                }
+                let c = arg[j] as char
+                j += 1
+                let k = short_index(s, c)
+                if k < 0 {
+                    if c == 'h' {
+                        return Err(ArgsError.Help(s.help()))
+                    }
+                    return Err(ArgsError.UnknownOption(f"-{c}"))
+                }
+                let o = s.opts[k]
+                if o.value == "" {
+                    a.flags.push(o.name)
+                } else {
+                    if j < arg.len() {
+                        a.values.push((o.name, arg[j:]))
+                    } else if i < n {
+                        a.values.push((o.name, argv[i]))
+                        i += 1
+                    } else {
+                        return Err(ArgsError.MissingValue(f"-{c}"))
+                    }
+                    j = arg.len()
+                }
+            }
+        } else if next < s.pos.len() {
+            a.values.push((s.pos[next].name, arg))
+            next += 1
+        } else if s.rest.len() > 0 {
+            a.values.push((s.rest[0].name, arg))
+        } else if s.commands.len() > 0 {
+            var k = 0
+            while k < s.commands.len() && s.commands[k].name != arg {
+                k += 1
+            }
+            if k == s.commands.len() {
+                return Err(ArgsError.UnknownCommand(arg))
+            }
+            var sub = s.commands[k].spec
+            sub.name = s.name + " " + arg
+            a.sub = [(arg, parse_from(sub, argv, i)?)]
+            i = n
+        } else {
+            return Err(ArgsError.UnexpectedPositional(arg))
+        }
+    }
+    while next < s.pos.len() {
+        if s.pos[next].required {
+            return Err(ArgsError.MissingPositional(s.pos[next].name))
+        }
+        next += 1
+    }
+    return Ok(a)
+}
+
+// The index in `opts` of the option `--name`, or -1.
+fun long_index(s: Spec, name: str) -> int {
+    var i = 0
+    while i < s.opts.len() {
+        if s.opts[i].name == name {
+            return i
+        }
+        i += 1
+    }
+    return -1
+}
+
+// The index in `opts` of the option `-c`, or -1.
+fun short_index(s: Spec, c: char) -> int {
+    var i = 0
+    while i < s.opts.len() {
+        if c != '\0' && s.opts[i].short == c {
+            return i
+        }
+        i += 1
+    }
+    return -1
+}
+
+// `Args` without values for `s`: its names and defaults.
+fun empty_args(s: Spec) -> Args {
+    var names: [str: bool] = [:]
+    var defaults: [str: str] = [:]
+    for o in s.opts {
+        names[o.name] = o.value == ""
+        if let Some(d) = o.default {
+            defaults[o.name] = d
+        }
+    }
+    for p in s.pos {
+        names[p.name] = false
+    }
+    for p in s.rest {
+        names[p.name] = false
+    }
+    return Args { flags: [], values: [], defaults: defaults, names: names, sub: [] }
+}
+
+// A panic unless the spec declares `name`, as a flag if `flag`, else as
+// something with a value.
+fun declared(a: Args, name: str, flag: bool) {
+    match get(a.names, name) {
+        Some(is_flag) => {
+            if flag && !is_flag {
+                panic(f"args: '{name}' is not a flag")
+            }
+            if !flag && is_flag {
+                panic(f"args: '{name}' is a flag, not a value")
+            }
+        }
+        None => panic(f"args: '{name}' is not an argument of the spec"),
+    }
+}
+
+// A section of the help, if it has rows: a blank line, `title:`, then each
+// row's left part, padded to `width` when a text follows, and its text.
+fun section(title: str, rows: [(str, str)], width: int) -> str {
+    if rows.len() == 0 {
+        return ""
+    }
+    var sb = StringBuilder()
+    sb.append(f"\n\n{title}:")
+    for r in rows {
+        sb.append("\n  ")
+        sb.append(r.0)
+        if r.1 != "" {
+            var pad = width - r.0.len() + 2
+            while pad > 0 {
+                sb.append_byte(' ')
+                pad -= 1
+            }
+            sb.append(r.1)
+        }
+    }
+    return sb.build()
+}
+
+// `parse(s, argv)`, or the end of the program: for `--help` the help on
+// stdout and exit status 0, for an error `prog: <message>` and the usage
+// line on stderr and exit status 2.
+pub fun parse_or_exit(s: Spec, argv: [str]) -> Args {
+    match parse(s, argv) {
+        Ok(a) => { return a },
+        Err(ArgsError.Help(text)) => {
+            println(text)
+            exit(0)
+        },
+        Err(e) => {
+            eprintln(f"{s.name}: {e.message()}")
+            eprintln(s.usage())
+            exit(2)
+        },
+    }
+    unreachable()
+}
+
+// The index of the first byte `b` in `s`, or -1.
+#test("a=b", '=')[1]
+#test("ab", '=')[-1]
+#test("", '=')[-1]
+fun find_byte(s: str, b: char) -> int {
+    var i = 0
+    while i < s.len() {
+        if s[i] == (b as uint8) {
+            return i
+        }
+        i += 1
+    }
+    return -1
+}
+
+// --- tests -------------------------------------------------------------------
+
+fun demo() -> Spec {
+    // one call a line: the editor grammar takes no line break before a `.`
+    // inside brackets (grammar/myla.ebnf's header)
+    var s = spec("prog", "Copies files.")
+    s = s.flag("verbose", 'v', "say more")
+    s = s.flag("quiet", 'q', "say less")
+    s = s.flag("dry-run", '\0', "change nothing")
+    s = s.option("out", 'o', "FILE", "where to write", Some("a.out"))
+    s = s.option("level", 'l', "N", "how hard to try")
+    s = s.positional("input", "the file to read")
+    s = s.positional("mode", "how to copy", false)
+    return s.many("rest", "more files")
+}
+
+fun ok(s: Spec, argv: [str]) -> Args {
+    match parse(s, argv) {
+        Ok(a) => { return a },
+        Err(e) => panic(f"parse failed: {e.message()}"),
+    }
+    unreachable()
+}
+
+fun err(s: Spec, argv: [str]) -> ArgsError {
+    match parse(s, argv) {
+        Ok(_) => panic("parse succeeded"),
+        Err(e) => { return e },
+    }
+    unreachable()
+}
+
+fun is(o: Option<str>, v: str) -> bool {
+    return match o {
+        Some(x) => x == v
+        None => false
+    }
+}
+
+fun same(xs: [str], ys: [str]) -> bool {
+    if xs.len() != ys.len() {
+        return false
+    }
+    var i = 0
+    while i < xs.len() {
+        if xs[i] != ys[i] {
+            return false
+        }
+        i += 1
+    }
+    return true
+}
+
+#test
+fun positionals_and_defaults() {
+    let a = ok(demo(), ["in.txt"])
+    assert(is(a.get("input"), "in.txt"), "the positional")
+    assert(a.get("mode").is_none(), "an optional positional not given")
+    assert(a.get_or("mode", "fast") == "fast", "get_or")
+    assert(is(a.get("out"), "a.out"), "the default")
+    assert(same(a.all("out"), ["a.out"]), "all gives the default")
+    assert(a.get("level").is_none(), "an option without a default")
+    assert(same(a.all("level"), []), "all without a value")
+    assert(!a.flag("verbose") && !a.flag("dry-run"), "no flags")
+    assert(same(a.all("rest"), []), "no rest")
+    assert(a.command().is_none(), "no command")
+}
+
+#test
+fun long_and_short_forms() {
+    for argv in [["--out", "x", "i"], ["--out=x", "i"], ["-o", "x", "i"], ["-ox", "i"], ["i", "-o", "x"]] {
+        let a = ok(demo(), argv)
+        assert(is(a.get("out"), "x"), "the value of out")
+        assert(is(a.get("input"), "i"), "the input")
+    }
+    let e = ok(demo(), ["--out=", "i"])
+    assert(is(e.get("out"), ""), "an empty value")
+    let eq = ok(demo(), ["--out=a=b", "i"])
+    assert(is(eq.get("out"), "a=b"), "the value after the first =")
+    let dash = ok(demo(), ["-o", "-v", "i"])
+    assert(is(dash.get("out"), "-v") && !dash.flag("verbose"), "a value is the next argument")
+}
+
+#test
+fun grouped_flags() {
+    let a = ok(demo(), ["-vq", "i"])
+    assert(a.flag("verbose") && a.flag("quiet"), "-vq")
+    let b = ok(demo(), ["-vol2", "i"])
+    assert(b.flag("verbose") && is(b.get("out"), "l2") && b.get("level").is_none(), "-vol2: o takes the rest")
+    let c = ok(demo(), ["-vvv", "--verbose", "--dry-run", "i"])
+    assert(c.count("verbose") == 4 && c.count("quiet") == 0 && c.flag("dry-run"), "counted flags")
+}
+
+#test
+fun repeated_options_and_many() {
+    let a = ok(demo(), ["-o", "1", "i", "--out", "2", "m", "r1", "-o3", "r2"])
+    assert(same(a.all("out"), ["1", "2", "3"]), "every value, in order")
+    assert(is(a.get("out"), "3"), "the last one wins")
+    assert(is(a.get("mode"), "m"), "the second positional")
+    assert(same(a.all("rest"), ["r1", "r2"]), "the rest")
+    assert(same(a.all("input"), ["i"]), "all of a positional")
+}
+
+#test
+fun double_dash_ends_the_options() {
+    let a = ok(demo(), ["-v", "--", "-q", "--out", "-"])
+    assert(a.flag("verbose") && !a.flag("quiet"), "options before -- only")
+    assert(is(a.get("input"), "-q") && is(a.get("mode"), "--out"), "positionals after --")
+    assert(same(a.all("rest"), ["-"]), "- alone")
+    let b = ok(demo(), ["i", "--", "--"])
+    assert(is(b.get("mode"), "--"), "a second -- is a positional")
+    let c = ok(demo(), ["-"])
+    assert(is(c.get("input"), "-"), "- is a positional")
+}
+
+#test
+fun errors_name_the_argument() {
+    assert(err(demo(), ["--frob", "i"]) == ArgsError.UnknownOption("--frob"), "unknown long")
+    assert(err(demo(), ["--frob=1", "i"]) == ArgsError.UnknownOption("--frob"), "unknown long with a value")
+    assert(err(demo(), ["-vx", "i"]) == ArgsError.UnknownOption("-x"), "unknown short in a group")
+    assert(err(demo(), ["i", "--out"]) == ArgsError.MissingValue("--out"), "missing value, long")
+    assert(err(demo(), ["i", "-vo"]) == ArgsError.MissingValue("-o"), "missing value, short")
+    assert(err(demo(), ["--verbose=yes", "i"]) == ArgsError.UnexpectedValue("--verbose"), "a flag with a value")
+    assert(err(demo(), []) == ArgsError.MissingPositional("input"), "missing positional")
+    assert(err(demo(), ["-v"]) == ArgsError.MissingPositional("input"), "missing positional after a flag")
+    let two = spec("two").positional("a").positional("b")
+    assert(err(two, ["x"]) == ArgsError.MissingPositional("b"), "the second one missing")
+    assert(err(two, ["x", "y", "z"]) == ArgsError.UnexpectedPositional("z"), "one too many")
+    assert(err(spec("none"), ["z"]) == ArgsError.UnexpectedPositional("z"), "no positionals at all")
+    assert(err(demo(), ["-vé", "i"]) == ArgsError.UnknownOption("-vé"), "a short name past ASCII: the whole argument")
+    let e = spec("e").option("z", 'z', "")
+    assert(err(e, ["-z"]) == ArgsError.MissingValue("-z"), "a value named \"\" is still a value")
+    assert(e.help() == "usage: e [options]\n\nOptions:\n  -z, --z VALUE\n  -h, --help     print this help", f"VALUE: {e.help()}")
+}
+
+fun tool() -> Spec {
+    var build = spec("build", "Compiles a program.")
+    build = build.flag("release", 'r', "optimize")
+    build = build.option("out", 'o', "FILE", "the binary")
+    build = build.positional("file", "the program")
+    let clean = spec("clean", "Removes the build directory.")
+    var t = spec("tool", "Builds things.")
+    t = t.flag("verbose", 'v', "say more")
+    t = t.command("build", build)
+    return t.command("clean", clean)
+}
+
+#test
+fun subcommands() {
+    let a = ok(tool(), ["-v", "build", "-r", "x.my", "-o", "x"])
+    assert(a.flag("verbose"), "the parent's flag")
+    match a.command() {
+        Some((name, sub)) => {
+            assert(name == "build", "the command's name")
+            assert(sub.flag("release") && is(sub.get("file"), "x.my") && is(sub.get("out"), "x"), "its arguments")
+        }
+        None => assert(false, "a command"),
+    }
+    let b = ok(tool(), ["clean"])
+    assert(match b.command() { Some((n, _)) => n == "clean", None => false }, "clean")
+    assert(ok(tool(), []).command().is_none(), "no command")
+    assert(err(tool(), ["bild"]) == ArgsError.UnknownCommand("bild"), "an unknown command")
+    assert(err(tool(), ["build"]) == ArgsError.MissingPositional("file"), "the command's positional")
+    assert(err(tool(), ["build", "-v", "x"]) == ArgsError.UnknownOption("-v"), "the parent's flag after the command")
+    assert(err(tool(), ["clean", "x"]) == ArgsError.UnexpectedPositional("x"), "the command's extra argument")
+}
+
+#test
+fun help_is_an_error_with_the_text() {
+    assert(err(demo(), ["--help"]) == ArgsError.Help(demo().help()), "--help")
+    assert(err(demo(), ["i", "-vh"]) == ArgsError.Help(demo().help()), "-h in a group")
+    let mine = spec("p").flag("here", 'h', "an h of its own")
+    let a = ok(mine, ["-h"])
+    assert(a.flag("here"), "-h is the spec's own")
+    assert(err(mine, ["--help"]) == ArgsError.Help(mine.help()), "--help still")
+    match err(tool(), ["build", "--help"]) {
+        Help(text) => assert(text == "Compiles a program.\n\nusage: tool build [options] <file>\n\nArguments:\n  <file>          the program\n\nOptions:\n  -r, --release   optimize\n  -o, --out FILE  the binary\n  -h, --help      print this help", f"the command's help: {text}"),
+        _ => assert(false, "help"),
+    }
+    let after = ok(demo(), ["--", "--help"])
+    assert(is(after.get("input"), "--help"), "--help after -- is a positional")
+}
+
+#test
+fun help_text() {
+    let want = "Copies files.\n" +
+        "\n" +
+        "usage: prog [options] <input> [<mode>] [<rest>...]\n" +
+        "\n" +
+        "Arguments:\n" +
+        "  <input>         the file to read\n" +
+        "  <mode>          how to copy\n" +
+        "  <rest>...       more files\n" +
+        "\n" +
+        "Options:\n" +
+        "  -v, --verbose   say more\n" +
+        "  -q, --quiet     say less\n" +
+        "      --dry-run   change nothing\n" +
+        "  -o, --out FILE  where to write (default: a.out)\n" +
+        "  -l, --level N   how hard to try\n" +
+        "  -h, --help      print this help"
+    assert(demo().help() == want, f"the help:\n{demo().help()}")
+    let tool_want = "Builds things.\n" +
+        "\n" +
+        "usage: tool [options] [<command>]\n" +
+        "\n" +
+        "Options:\n" +
+        "  -v, --verbose  say more\n" +
+        "  -h, --help     print this help\n" +
+        "\n" +
+        "Commands:\n" +
+        "  build          Compiles a program.\n" +
+        "  clean          Removes the build directory."
+    assert(tool().help() == tool_want, f"the help:\n{tool().help()}")
+    let bare = spec("bare").positional("x").flag("x-ray", 'x').option("y")
+    let bare_want = "usage: bare [options] <x>\n" +
+        "\n" +
+        "Arguments:\n" +
+        "  <x>\n" +
+        "\n" +
+        "Options:\n" +
+        "  -x, --x-ray\n" +
+        "      --y VALUE\n" +
+        "  -h, --help     print this help"
+    assert(bare.help() == bare_want, f"the help:\n{bare.help()}")
+    let own = spec("own").flag("help", 'h', "my own help")
+    assert(own.help() == "usage: own [options]\n\nOptions:\n  -h, --help  my own help", f"the help:\n{own.help()}")
+}
+
+#test
+fun usage_lines() {
+    assert(demo().usage() == "usage: prog [options] <input> [<mode>] [<rest>...]", "demo")
+    assert(spec("x").usage() == "usage: x [options]", "only --help")
+}
+
+// Asking for a name the spec doesn't declare, or for a flag's value, is a
+// panic: the cases of `undeclared` and `undeclared_flag`.
+#test("nope")[panic("args: 'nope' is not an argument of the spec")]
+#test("verbose")[panic("args: 'verbose' is a flag, not a value")]
+#test("out")["a.out"]
+fun undeclared(name: str) -> str {
+    return ok(demo(), ["i"]).get_or(name, "")
+}
+
+#test("nope")[panic("args: 'nope' is not an argument of the spec")]
+#test("out")[panic("args: 'out' is not a flag")]
+#test("verbose")[false]
+fun undeclared_flag(name: str) -> bool {
+    return ok(demo(), ["i"]).flag(name)
+}

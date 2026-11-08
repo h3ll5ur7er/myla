@@ -1,0 +1,5 @@
+type error: cannot assign value of type 'B<str>' to binding of type 'B<int32>'
+  --> examples/errors/type_generic_call_arguments_before_expected.my:12:5
+   |
+12 |     let b: B<int> = of(["x"])
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^

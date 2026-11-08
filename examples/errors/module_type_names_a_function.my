@@ -1,0 +1,12 @@
+//~ module error: 'args.parse' is a function of module 'std.args', not a type
+//~ span: args.parse
+// In a type position, `m.T` must name one of the module's types (D170).
+import std.args as args
+
+fun run(p: args.parse) -> int {
+    return 0
+}
+
+fun main() {
+    print(0)
+}

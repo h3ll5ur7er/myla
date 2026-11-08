@@ -40,7 +40,7 @@ pub fun has_await(e: Expr) -> bool {
         ExprKind.Await(x) => true,
         ExprKind.Unary(op, x) => has_await(x),
         ExprKind.Binary(op, l, r) => has_await(l) || has_await(r),
-        ExprKind.Call(c, args) => has_await(c) || any_await(args),
+        ExprKind.Call(c, args, _) => has_await(c) || any_await(args),
         ExprKind.GetField(t, f) => has_await(t),
         ExprKind.StructLit(n, fs) => fields_await(fs),
         ExprKind.TupleLit(es) => any_await(es),
@@ -174,7 +174,7 @@ impl Norm {
     fun returning(var self, e: Expr, awaited: bool) -> Block {
         var value = e
         match e.kind {
-            ExprKind.Call(c, a) => {
+            ExprKind.Call(c, a, _) => {
                 if awaited {
                     value = self.fresh(e, ExprKind.Await(e))
                     self.copy_type(e.id, value.id)
@@ -202,7 +202,7 @@ impl Norm {
                         }
                         var body = init
                         match init.kind {
-                            ExprKind.Call(c, a) => {
+                            ExprKind.Call(c, a, _) => {
                                 body = self.fresh(init, ExprKind.Await(init))
                                 self.copy_type(init.id, body.id)
                             },
@@ -220,7 +220,7 @@ impl Norm {
                         let lam = self.fresh(init, ExprKind.Lambda([], None, lbody, true))
                         self.resolved[lam.id] = Type.TAsync(Type.TFunc([], ret))
                         self.children[lam.id] = true
-                        let call = self.fresh(init, ExprKind.Call(lam, []))
+                        let call = self.fresh(init, ExprKind.Call(lam, [], []))
                         self.copy_type(init.id, call.id)
                         self.out.push(self.with_stmt(s, StmtKind.VarDecl(kind, name, ty, call)))
                         return
@@ -361,9 +361,9 @@ impl Norm {
                 let r2 = self.expr(r)
                 with_kind(e, ExprKind.Binary(op, l2, r2))
             },
-            ExprKind.Call(c, args) => {
+            ExprKind.Call(c, args, targs) => {
                 let c2 = self.callee(c, args)
-                with_kind(e, ExprKind.Call(c2, self.seq(args)))
+                with_kind(e, ExprKind.Call(c2, self.seq(args), targs))
             },
             ExprKind.GetField(t, f) => with_kind(e, ExprKind.GetField(self.expr(t), f)),
             ExprKind.StructLit(n, fs) => {
@@ -423,9 +423,9 @@ impl Norm {
     // What `await` waits for: a name, or a call whose parts are ready.
     fun await_operand(var self, x: Expr) -> Expr {
         return match x.kind {
-            ExprKind.Call(c, args) => {
+            ExprKind.Call(c, args, targs) => {
                 let c2 = self.callee(c, args)
-                with_kind(x, ExprKind.Call(c2, self.seq(args)))
+                with_kind(x, ExprKind.Call(c2, self.seq(args), targs))
             },
             _ => x,
         }

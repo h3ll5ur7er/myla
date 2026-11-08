@@ -12,9 +12,9 @@ Every expression has a type known before the program runs. Types are resolved by
 | `uint8` `uint16` `uint32` `uint64` | unsigned | Arithmetic wraps modulo 2^width; printed without sign |
 | `int` | alias of `int32` | The default for integer literals |
 | `float32` `float64` | IEEE-754 | `float` is an alias of `float64`, the default for float literals (D102) |
-| `char` | a Unicode scalar (0…0x10FFFF, no surrogates) | Compares with `<`; no arithmetic (cast to an integer) |
+| `char` | a Unicode scalar (0…0x10FFFF, no surrogates) | Compares with `<`; `c - d` is an `int32`, `c + n` and `c - n` with an `int32` are a `char` ([[Language/Expressions-and-operators#typing-rules]]) |
 | `bool` | `true`, `false` | Conditions must be `bool`; there is no truthiness |
-| `str` | immutable UTF-8 bytes | `len` counts bytes; `s[i]` is a `uint8` |
+| `str` | immutable UTF-8 bytes | `len` counts bytes; `s[i]` is a `uint8`; `for c in s` visits the characters; `<` orders byte-wise |
 | `StringBuilder` | a growable byte buffer | Value semantics, copy-on-write |
 
 There is no implicit conversion: `int32 + int64` is a type error, and so is `float32 + float64`. Literals are flexible (they adopt the type the context expects), and `x as T` converts explicitly ([[Language/Expressions-and-operators]]).
@@ -77,7 +77,7 @@ User-defined named types: `struct Point { x: int, y: int }` and `enum Shape { Ci
 ## Lists and maps
 
 - `[T]`: a list of `T`.
-- `[K: V]`: a hash map. The key type must be an integer type, `char`, `bool` or `str` (D37).
+- `[K: V]`: a hash map. The key type is any type that is `Eq` and `Hash`: an integer type, `char`, `bool`, `str`, a tuple or list of such, or a struct or enum deriving or implementing both (D163; D37 had the primitives only).
 
 Both are reference-counted, copy-on-write values: a copy is cheap, and writing through one copy never changes another. See [[Language/Collections-and-strings]].
 
@@ -92,7 +92,7 @@ Every program has this prelude (`prelude_src` in [[selfhost/checker.my]]):
 ```
 enum Option<T> { Some(T), None }
 enum Result<T, E> { Ok(T), Err(E) }
-fun get<K, V>(m: [K: V], k: K) -> Option<V>
+fun get<K: Eq + Hash, V>(m: [K: V], k: K) -> Option<V>
 ```
 
 `Some`, `None`, `Ok` and `Err` may be used without the enum name. A bare `None` (or `Ok`/`Err`/`Some` whose type arguments can't be inferred) needs the expected type from an annotation, parameter or return type. The `?` operator propagates `None`/`Err` ([[Language/Expressions-and-operators]]).
@@ -108,7 +108,8 @@ Inside a generic declaration, a type parameter `T` stands for any type; only ope
 | integers, floats | yes | yes | yes | integers only |
 | `char` | yes | yes | yes (as the glyph) | yes |
 | `bool` | yes | no | `true`/`false` | yes |
-| `str` | yes (bytes) | no | yes | yes |
-| struct, enum | with `Eq` (`impl Eq` or `#derive(Eq)`) | with `Ord` | no | no |
-| `()` | yes (always equal) | no | no | no |
-| tuple, list, map, function, `StringBuilder` | no | no | no | no |
+| `str` | yes (bytes) | yes (bytes, MYLA-318) | yes | yes |
+| struct, enum | with `Eq` (`impl Eq` or `#derive(Eq)`) | with `Ord` | no | with `Eq` and `Hash` (D163) |
+| `()` | yes (always equal) | no | no | yes |
+| tuple, list | when the elements are `Eq` (D163) | no | no | when the elements are `Eq` and `Hash` |
+| map, function, `StringBuilder` | no | no | no | no |

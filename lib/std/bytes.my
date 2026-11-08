@@ -1,0 +1,198 @@
+// std.bytes: strings and bytes (MYLA-329, D164).
+//
+// A `str` is bytes (D164), so these move between `str` and `[uint8]` as the
+// bytes are, any bytes; `is_utf8`, `utf8_error`, `encode_char` and
+// `decode_char` are where UTF-8 is checked and built.
+
+// The bytes of `s`, as they are.
+#test("ab")[[97u8, 98u8]]
+#test("é")[[195u8, 169u8]] // a character's two bytes
+#test("")[[]]
+pub fun from_str(s: str) -> [uint8] {
+    let n = s.len()
+    var out: [uint8] = []
+    var i = 0
+    while i < n {
+        out.push(s[i])
+        i += 1
+    }
+    return out
+}
+
+// The bytes `b` as a string, as they are: they needn't be UTF-8.
+#test([104u8, 105u8])["hi"]
+#test([195u8, 169u8])["é"]
+#test([])[""]
+pub fun to_str(b: [uint8]) -> str {
+    // A builder grows by doubling, in place where it can, and `build` copies
+    // its bytes once: a few allocations for the whole list, not one a byte.
+    var sb = StringBuilder()
+    for x in b {
+        sb.append_byte(x)
+    }
+    return sb.build()
+}
+
+// Whether `b` is UTF-8: shortest forms, no surrogates, nothing past U+10FFFF.
+#test([104u8, 195u8, 169u8])[true]
+#test([])[true]
+#test([240u8, 159u8, 152u8, 128u8])[true] // U+1F600
+#test([195u8])[false] // cut short
+#test([192u8, 128u8])[false] // an overlong NUL
+#test([237u8, 160u8, 128u8])[false] // the surrogate U+D800
+#test([244u8, 144u8, 128u8, 128u8])[false] // past U+10FFFF
+#test([128u8])[false] // a continuation byte alone
+#test([255u8])[false]
+pub fun is_utf8(b: [uint8]) -> bool {
+    return match utf8_error(b) {
+        Some(_) => false
+        None => true
+    }
+}
+
+// The position of the first byte that doesn't start a UTF-8 character, so
+// `b[:i]` is the longest valid prefix; `None` if `b` is all UTF-8.
+#test([104u8, 105u8])[None]
+#test([104u8, 255u8, 105u8])[Some(1)]
+#test([104u8, 226u8, 130u8])[Some(1)] // "h" and two bytes of "€"
+#test([226u8, 130u8, 172u8, 226u8, 65u8])[Some(3)] // "€", then a lead byte without its continuation
+#test([224u8, 128u8, 128u8])[Some(0)] // overlong
+#test([239u8, 191u8, 191u8, 244u8, 143u8, 191u8, 191u8])[None] // U+FFFF and U+10FFFF
+pub fun utf8_error(b: [uint8]) -> Option<int> {
+    let n = b.len()
+    var i = 0
+    while i < n {
+        if b[i] < 128u8 {
+            i += 1
+        } else {
+            let k = seq_len(b, i)
+            if k == 0 {
+                return Some(i)
+            }
+            i += k
+        }
+    }
+    return None
+}
+
+// The UTF-8 bytes of `c`, one to four.
+#test('a')[[97u8]]
+#test('é')[[195u8, 169u8]]
+#test('€')[[226u8, 130u8, 172u8]]
+#test('\u{1F600}')[[240u8, 159u8, 152u8, 128u8]]
+#test('\u{7F}')[[127u8]]
+#test('\u{80}')[[194u8, 128u8]]
+#test('\u{7FF}')[[223u8, 191u8]]
+#test('\u{800}')[[224u8, 160u8, 128u8]]
+#test('\u{FFFF}')[[239u8, 191u8, 191u8]]
+#test('\u{10000}')[[240u8, 144u8, 128u8, 128u8]]
+#test('\u{10FFFF}')[[244u8, 143u8, 191u8, 191u8]]
+pub fun encode_char(c: char) -> [uint8] {
+    let u = c as uint32
+    if u < 128u32 {
+        return [u as uint8]
+    }
+    if u < 2048u32 {
+        return [(192u32 | (u >> 6u32)) as uint8, cont(u)]
+    }
+    if u < 65536u32 {
+        return [(224u32 | (u >> 12u32)) as uint8, cont(u >> 6u32), cont(u)]
+    }
+    return [(240u32 | (u >> 18u32)) as uint8, cont(u >> 12u32), cont(u >> 6u32), cont(u)]
+}
+
+// The character that starts at `b[at]` and its length in bytes; `None` if
+// no UTF-8 character starts there, or `at` is outside `b`.
+#test([97u8, 195u8, 169u8], 1)[Some(('é', 2))]
+#test([97u8, 195u8, 169u8], 0)[Some(('a', 1))]
+#test([97u8, 195u8, 169u8], 2)[None] // a continuation byte
+#test([97u8, 195u8, 169u8], 3)[None] // the end
+#test([97u8], -1)[None]
+#test([240u8, 159u8, 152u8, 128u8], 0)[Some(('\u{1F600}', 4))]
+#test([226u8, 130u8], 0)[None] // cut short
+pub fun decode_char(b: [uint8], at: int) -> Option<(char, int)> {
+    if at < 0 || at >= b.len() {
+        return None
+    }
+    let k = seq_len(b, at)
+    if k == 0 {
+        return None
+    }
+    let lead = b[at] as uint32
+    var u = lead
+    if k == 2 {
+        u = lead & 31u32
+    } else if k == 3 {
+        u = lead & 15u32
+    } else if k == 4 {
+        u = lead & 7u32
+    }
+    var j = 1
+    while j < k {
+        u = (u << 6u32) | ((b[at + j] as uint32) & 63u32)
+        j += 1
+    }
+    return Some((u as char, k))
+}
+
+// A continuation byte: `0b10` and the low six bits of `u`.
+#test(8364u32)[172u8]
+fun cont(u: uint32) -> uint8 {
+    return (128u32 | (u & 63u32)) as uint8
+}
+
+// The length of the UTF-8 character at `b[i]` (inside `b`), or 0 if none
+// starts there: the well-formed sequences of the Unicode Standard's table
+// 3-7, which leave out overlong forms, surrogates and what is past U+10FFFF.
+#test([97u8], 0)[1]
+#test([226u8, 130u8, 172u8], 0)[3]
+#test([226u8, 130u8, 172u8], 1)[0]
+#test([237u8, 159u8, 191u8], 0)[3] // U+D7FF, the last before the surrogates
+#test([237u8, 160u8, 128u8], 0)[0] // U+D800
+#test([240u8, 143u8, 191u8, 191u8], 0)[0] // an overlong U+FFFF
+#test([193u8, 191u8], 0)[0] // an overlong U+7F
+fun seq_len(b: [uint8], i: int) -> int {
+    let c = b[i]
+    if c < 128u8 {
+        return 1
+    }
+    // the lead byte gives the length and the range of the second byte
+    var k = 0
+    var lo = 128u8
+    var hi = 191u8
+    if c >= 194u8 && c <= 223u8 {
+        k = 2
+    } else if c >= 224u8 && c <= 239u8 {
+        k = 3
+        if c == 224u8 {
+            lo = 160u8
+        } else if c == 237u8 {
+            hi = 159u8
+        }
+    } else if c >= 240u8 && c <= 244u8 {
+        k = 4
+        if c == 240u8 {
+            lo = 144u8
+        } else if c == 244u8 {
+            hi = 143u8
+        }
+    } else {
+        return 0
+    }
+    if i + k > b.len() {
+        return 0
+    }
+    let second = b[i + 1]
+    if second < lo || second > hi {
+        return 0
+    }
+    var j = 2
+    while j < k {
+        let x = b[i + j]
+        if x < 128u8 || x > 191u8 {
+            return 0
+        }
+        j += 1
+    }
+    return k
+}

@@ -5,9 +5,605 @@ import tempfile
 import unittest
 
 from tests.burn._targets import program_excuse
-from tests.burn._native import CAN_BUILD_NATIVE, SKIP_REASON, build_and_run, interpret, selfhost_run
+from tests.burn._native import (CAN_BUILD_NATIVE, SKIP_REASON, Program, build_and_run, build_and_run_full, interpret,
+                                run_file_both_now, selfhost_run, write_program)
 
 PROGRAMS = {
+    # `for c in s` visits a string's characters as `s.chars()` gives them,
+    # U+FFFD for a byte that isn't UTF-8 (MYLA-318): ASCII and longer
+    # sequences, an empty string, a temporary, break, continue, a return from
+    # the loop, the string changed in the body, nested loops, a closure
+    # capturing the character, a struct's field
+    "for_over_a_string": """// `for c in s` visits the characters of a string, as `s.chars()` does
+// (MYLA-318), U+FFFD for a byte that isn't part of a well-formed sequence
+fun vowels(s: str) -> int {
+    var n = 0
+    for c in s {
+        if c == 'a' || c == 'e' || c == 'i' || c == 'o' || c == 'u' { n += 1 }
+    }
+    return n
+}
+
+fun first_upper(s: str) -> Option<char> {
+    for c in s {
+        if c >= 'A' && c <= 'Z' { return Some(c) }
+    }
+    return None
+}
+
+fun greeting(name: str) -> str {
+    return "hi " + name
+}
+
+fun main() {
+    let s = "héllo, wörld 😀!"
+    var n = 0
+    var sb = StringBuilder()
+    for c in s {
+        n += 1
+        sb.append(f"{c}|")
+    }
+    print(n)
+    print(s.chars().len())
+    print(sb.build())
+    print(vowels("education"))
+    print(first_upper("abcDef").unwrap_or('-'))
+    print(first_upper("abc").unwrap_or('-'))
+    // an empty string, a temporary, break and continue
+    for c in "" { print(c) }
+    for c in greeting("bob") {
+        if c == ' ' { continue }
+        if c == 'b' && n > 100 { break }
+        print(c)
+    }
+    for c in "abcdef" {
+        if c == 'd' { break }
+        print(c)
+    }
+    // the loop sees the string it started with
+    var t = "xy"
+    for c in t {
+        t = t + "z"
+        print(c)
+    }
+    print(t)
+    // bytes that aren't UTF-8 are U+FFFD each, as in chars()
+    var bad = StringBuilder()
+    bad.append("a")
+    bad.append_byte(255u8)
+    bad.append_byte(0xC3u8)
+    bad.append("b")
+    bad.append_byte(0xE2u8)
+    bad.append_byte(0x82u8)
+    let b = bad.build()
+    var codes: [int] = []
+    for c in b { codes.push(c as int) }
+    var same: [int] = []
+    for c in b.chars() { same.push(c as int) }
+    print(codes.map((x: int) => f"{x}").join(","))
+    print(codes == same)
+    // nested, and a closure capturing the character
+    var pairs = 0
+    for a in "abc" {
+        for z in "xyz" {
+            if a != z { pairs += 1 }
+        }
+    }
+    print(pairs)
+    var fs: [() -> char] = []
+    for c in "qr" { fs.push(() => c) }
+    print(fs[1]())
+    // a struct's field
+    print(count_in(Line { text: "a-b-c", sep: '-' }))
+}
+
+struct Line {
+    text: str,
+    sep: char,
+}
+
+fun count_in(l: Line) -> int {
+    var k = 0
+    for c in l.text {
+        if c == l.sep { k += 1 }
+    }
+    return k
+}
+""",
+    # (the async interpreter's loop holds the characters; native code walks
+    # the bytes in the frame)
+    "for_over_a_string_async": """import std.task as task
+
+async fun count(s: str) -> int {
+    var n = 0
+    for c in s {
+        await task.yield()
+        if c == 'é' { continue }
+        n += 1
+    }
+    return n
+}
+
+#main
+async fun main() {
+    async let a = count("héllo")
+    async let b = count("😀😀")
+    print(await a + await b)
+    for c in "ab" {
+        await task.yield()
+        print(c)
+    }
+}
+""",
+    # `<` `<=` `>` `>=` on strings, byte by byte (unsigned) as list_dir sorts,
+    # past whole words of eight, and `str` is `Ord`: sort, sorted,
+    # sort_unstable, binary_search, a generic `T: Ord`, a Heap<str> (MYLA-318)
+    "string_ordering": """import std.heap as heap
+from std.heap import Heap
+
+// `<`, `<=`, `>`, `>=` on strings order them byte by byte, as list_dir
+// sorts, and `str` is `Ord` (MYLA-318): sort, sorted, a Heap<str>, a
+// generic `T: Ord`
+fun largest<T: Ord>(xs: [T]) -> T {
+    var best = xs[0]
+    for x in xs {
+        if x > best { best = x }
+    }
+    return best
+}
+
+fun order(a: str, b: str) -> str {
+    return f"{a < b} {a <= b} {a > b} {a >= b}"
+}
+
+struct Named {
+    name: str,
+}
+
+fun main() {
+    print(order("apple", "banana"))
+    print(order("ab", "abc"))
+    print(order("abc", "ab"))
+    print(order("", "a"))
+    print(order("", ""))
+    print(order("same", "same"))
+    print(order("Zebra", "apple"))
+    // bytes above 127 order after ASCII, unsigned
+    print(order("é", "z"))
+    print(order("\\u{1F600}", "\\u{FFFF}"))
+    // past the first 8 and 16 bytes
+    print(order("abcdefghij", "abcdefghik"))
+    print(order("abcdefgh12345678x", "abcdefgh12345678y"))
+    print(order("abcdefgh", "abcdefgh\\0"))
+    var words = ["pear", "Apple", "fig", "apple", "", "banana", "apples", "é", "z"]
+    print(words.sorted().join(","))
+    words.sort()
+    print(words.join(","))
+    print(words.is_sorted())
+    var u = ["d", "b", "a", "c", "b"]
+    u.sort_unstable()
+    print(u.join(","))
+    print(words.binary_search("fig").unwrap_or(-1))
+    print(largest(["kiwi", "lime", "date"]))
+    var h: Heap<str> = heap.new()
+    for w in ["m", "c", "x", "a"] { h.push(w) }
+    var out: [str] = []
+    while let Some(w) = h.pop() { out.push(w) }
+    print(out.join(","))
+    let n = Named { name: "bo" }
+    print(n.name < "bob" && "bob" > n.name)
+    let m = ["b": 1, "a": 2]
+    var ks = m.keys()
+    ks.sort()
+    print(ks.join(","))
+}
+""",
+    # `char - char` is an int32, `char + int32` and `char - int32` a char
+    # (MYLA-318); a char literal before an integer of another type, or in an
+    # integer context, is still that integer
+    "char_arithmetic": """// `char - char` is the distance, an int32; `char + int32` and
+// `char - int32` move a char, checked to stay a Unicode scalar (MYLA-318)
+fun caesar(s: str, k: int) -> str {
+    var sb = StringBuilder()
+    for c in s {
+        if c >= 'a' && c <= 'z' {
+            sb.append(f"{'a' + (c - 'a' + k) % 26}")
+        } else {
+            sb.append(f"{c}")
+        }
+    }
+    return sb.build()
+}
+
+fun letter(i: int) -> char {
+    return 'a' + i
+}
+
+fun main() {
+    print('p' - 'a')
+    print('a' - 'p')
+    let c = 'x'
+    let d: int = c - 'a'
+    print(d)
+    print(c + 1)
+    print(c - 23)
+    print('a' + 1)
+    let n = 2
+    print('a' + n)
+    print(letter(25))
+    var e = 'a'
+    e += 3
+    e -= 1
+    print(e)
+    print('é' - 'e')
+    print('\\u{1F600}' + 1)
+    print(('\\u{10FFFF}' - '\\0') == 1114111)
+    print(caesar("hello, world", 13))
+    // an int context still makes a char literal an integer, and a byte a byte
+    let k: int = 'a' + 1
+    print(k)
+    let s = "az"
+    print(s[1] - 'a')
+    var counts = [0, 0, 0]
+    for ch in "abacab" { counts[ch - 'a'] += 1 }
+    print(counts.map((x: int) => f"{x}").join(","))
+}
+""",
+    # the library side of MYLA-318: std.list's `filled`, std.set, std.map's
+    # `get_or`, std.option's `unwrap_or` on parse_int's result
+    "aoc_library_helpers": """import std.list as list
+import std.set as set
+import std.num as num
+from std.set import Set
+
+// The library side of MYLA-318's gaps: a list of n equal values
+// (std.list's `filled`), a set (std.set), a lookup with a default
+// (std.map's `get_or`) and `unwrap_or` on an `Option` (std.option)
+fun main() {
+    var grid = list.filled(3, list.filled(4, '.'))
+    grid[1][2] = '#'
+    for row in grid {
+        var sb = StringBuilder()
+        for c in row { sb.append(f"{c}") }
+        print(sb.build())
+    }
+    var seen: Set<(int, int)> = set.new()
+    print(seen.insert((1, 2)))
+    print(seen.insert((1, 2)))
+    print(seen.contains((1, 2)))
+    print(seen.len())
+    var counts: [char: int] = [:]
+    for c in "hello" { counts[c] = counts.get_or(c, 0) + 1 }
+    print(counts.get_or('l', 0))
+    print(counts.get_or('z', 0))
+    print(num.parse_int("42").unwrap_or(-1))
+    print(num.parse_int("4x2").unwrap_or(-1))
+}
+""",
+    # a `?` in a call's argument returns from the caller in the interpreter
+    # too, instead of calling with the arguments it has (MYLA-366)
+    "try_in_a_call_argument": 'fun inner() -> Result<int, str> { return Err("bad") }\nfun twice(x: int) -> int { return x * 2 }\nfun outer() -> Result<int, str> {\n    return Ok(twice(inner()?))\n}\n#main\nfun main() {\n    match outer() {\n        Ok(v) => print(f"ok {v}"),\n        Err(e) => print(f"err {e}"),\n    }\n}\n',
+    # a method called on a field whose type is a type parameter is found in
+    # the interpreter too (MYLA-365)
+    "method_on_a_type_parameter_field": 'trait Step { fun step(self) -> int }\nstruct One { n: int }\nimpl Step for One { fun step(self) -> int { return self.n + 1 } }\nstruct Wrap<R> { inner: R }\nimpl<R: Step> Wrap<R> {\n    fun go(self) -> int { return self.inner.step() }\n}\n#main\nfun main() {\n    let w = Wrap { inner: One { n: 4 } }\n    print(w.go())\n}\n',
+    # map keys of any Eq + Hash type (D163, MYLA-313): a grid's breadth-first
+    # search on `(int, int)` keys, a struct key with a string, an enum key, a
+    # list key, removed keys added again going last (D105), a type with its own
+    # Eq and Hash, a generic `K: Eq + Hash`, std.map's methods and a copy
+    "compound_map_keys": (
+        "import std.map as maps\n"
+        "\n"
+        "#derive(Eq, Hash)\n"
+        "struct Who {\n"
+        "    name: str,\n"
+        "    age: int,\n"
+        "}\n"
+        "\n"
+        "#derive(Eq, Hash)\n"
+        "enum Dir {\n"
+        "    North,\n"
+        "    East,\n"
+        "    Step(int, int),\n"
+        "}\n"
+        "\n"
+        "// equal when the names agree but for case, and hashed to agree with that\n"
+        "struct Tag {\n"
+        "    text: str,\n"
+        "}\n"
+        "\n"
+        "fun lower(s: str) -> str {\n"
+        "    var sb = StringBuilder()\n"
+        "    var i = 0\n"
+        "    while i < s.len() {\n"
+        "        var b = s[i]\n"
+        "        if b >= 'A' && b <= 'Z' { b = b + 32 }\n"
+        "        sb.append_byte(b)\n"
+        "        i += 1\n"
+        "    }\n"
+        "    return sb.build()\n"
+        "}\n"
+        "\n"
+        "impl Eq for Tag {\n"
+        "    fun eq(self, other: Tag) -> bool {\n"
+        "        return lower(self.text) == lower(other.text)\n"
+        "    }\n"
+        "}\n"
+        "\n"
+        "impl Hash for Tag {\n"
+        "    fun hash(self, h: Hasher) -> Hasher {\n"
+        "        return h.add(lower(self.text))\n"
+        "    }\n"
+        "}\n"
+        "\n"
+        "// the steps from (0, 0) to every open cell of the grid, breadth first\n"
+        "fun bfs(grid: [str]) -> [(int, int): int] {\n"
+        "    var dist: [(int, int): int] = [:]\n"
+        "    dist[(0, 0)] = 0\n"
+        "    var queue = [(0, 0)]\n"
+        "    var head = 0\n"
+        "    while head < queue.len() {\n"
+        "        let (x, y) = queue[head]\n"
+        "        head += 1\n"
+        "        for d in [(1, 0), (-1, 0), (0, 1), (0, -1)] {\n"
+        "            let next = (x + d.0, y + d.1)\n"
+        "            if next.1 < 0 || next.1 >= grid.len() || next.0 < 0 || next.0 >= grid[next.1].len() { continue }\n"
+        "            if grid[next.1][next.0] == '#' || dist.contains(next) { continue }\n"
+        "            dist[next] = dist[(x, y)] + 1\n"
+        "            queue.push(next)\n"
+        "        }\n"
+        "    }\n"
+        "    return dist\n"
+        "}\n"
+        "\n"
+        "fun tally<K: Eq + Hash>(xs: [K]) -> [K: int] {\n"
+        "    var out: [K: int] = [:]\n"
+        "    for x in xs {\n"
+        "        if out.contains(x) { out[x] += 1 } else { out[x] = 1 }\n"
+        "    }\n"
+        "    return out\n"
+        "}\n"
+        "\n"
+        "fun main() {\n"
+        "    let grid = [\"..#....\", \".##.##.\", \"....#..\", \"#.#...#\"]\n"
+        "    let dist = bfs(grid)\n"
+        "    print(f\"{dist.len()} cells, (6, 2) at {dist[(6, 2)]}, (3, 0) at {dist[(3, 0)]}\")\n"
+        "    print(dist.contains((2, 0)))\n"
+        "\n"
+        "    // a struct key with a string in it\n"
+        "    var ages: [Who: str] = [:]\n"
+        "    ages[Who { name: \"ann\", age: 31 }] = \"first\"\n"
+        "    ages[Who { name: \"bob\", age: 27 }] = \"second\"\n"
+        "    ages[Who { name: \"a\" + \"nn\", age: 31 }] = \"again\"\n"
+        "    print(f\"{ages.len()} {ages[Who { name: \"ann\", age: 31 }]}\")\n"
+        "    print(ages.contains(Who { name: \"ann\", age: 32 }))\n"
+        "\n"
+        "    // removed and added again: last (D105)\n"
+        "    var order: [(str, int): bool] = [:]\n"
+        "    for i in 0..6 {\n"
+        "        order[(f\"k{i}\", i)] = true\n"
+        "    }\n"
+        "    order.remove((\"k1\", 1))\n"
+        "    order.remove((\"k4\", 4))\n"
+        "    order[(\"k1\", 1)] = false\n"
+        "    order[(\"k2\", 2)] = false\n"
+        "    var shown: [str] = []\n"
+        "    for k in order { shown.push(f\"{k.0}={order[k]}\") }\n"
+        "    print(shown.join(\" \"))\n"
+        "    var i = 0\n"
+        "    while i < 100 {\n"
+        "        order[(\"x\", i)] = true\n"
+        "        if i % 3 == 0 { order.remove((\"x\", i)) }\n"
+        "        i += 1\n"
+        "    }\n"
+        "    print(f\"{order.len()} {order.keys()[4].0} {order.keys()[5].1}\")\n"
+        "\n"
+        "    // an enum key\n"
+        "    var moves: [Dir: int] = [Dir.North: 1, Dir.Step(1, 2): 2]\n"
+        "    moves[Dir.East] = 3\n"
+        "    moves[Dir.Step(1, 2)] += 10\n"
+        "    print(f\"{moves[Dir.Step(1, 2)]} {moves[Dir.North]} {moves.contains(Dir.Step(2, 1))}\")\n"
+        "\n"
+        "    // a list key, and a nested tuple\n"
+        "    var paths: [[int]: str] = [:]\n"
+        "    paths[[1, 2, 3]] = \"a\"\n"
+        "    paths[[1, 2]] = \"b\"\n"
+        "    paths[[1, 2, 3]] = \"c\"\n"
+        "    print(f\"{paths.len()} {paths[[1, 2, 3]]} {paths[[1, 2]]}\")\n"
+        "    var deep: [((int, char), [str]): int] = [:]\n"
+        "    deep[((1, 'x'), [\"p\", \"q\"])] = 5\n"
+        "    print(deep[((1, 'x'), [\"p\", \"q\"])])\n"
+        "\n"
+        "    // a type with its own Eq and Hash\n"
+        "    var tags: [Tag: int] = [:]\n"
+        "    tags[Tag { text: \"Red\" }] = 1\n"
+        "    tags[Tag { text: \"RED\" }] = 2\n"
+        "    tags[Tag { text: \"blue\" }] = 3\n"
+        "    print(f\"{tags.len()} {tags[Tag { text: \"red\" }]}\")\n"
+        "\n"
+        "    // generic code, std.map's methods and the prelude's get\n"
+        "    let t = tally([(1, 'a'), (2, 'b'), (1, 'a')])\n"
+        "    print(f\"{t[(1, 'a')]} {t[(2, 'b')]}\")\n"
+        "    print(maps.counts([\"x\", \"y\", \"x\"])[\"x\"])\n"
+        "    print(ages.get_or(Who { name: \"cy\", age: 1 }, \"none\"))\n"
+        "    match get(moves, Dir.East) {\n"
+        "        Some(v) => print(v),\n"
+        "        None => print(\"missing\"),\n"
+        "    }\n"
+        "    var grid_counts: [(int, int): int] = [:]\n"
+        "    grid_counts.update((0, 0), 0, (n) => n + 5)\n"
+        "    grid_counts.update((0, 0), 0, (n) => n + 5)\n"
+        "    print(grid_counts[(0, 0)])\n"
+        "    for kv in tags.items() { print(f\"{kv.0.text} {kv.1}\") }\n"
+        "\n"
+        "    // a copy is a value: changing it leaves the original\n"
+        "    var copy = ages\n"
+        "    copy[Who { name: \"dee\", age: 9 }] = \"new\"\n"
+        "    copy.remove(Who { name: \"bob\", age: 27 })\n"
+        "    print(f\"{ages.len()} {copy.len()} {ages.contains(Who { name: \"bob\", age: 27 })}\")\n"
+        "}\n"
+    ),
+    # the `Hash` trait (D163, MYLA-313): the built-in types' impls (integers by
+    # value, a list with its length), a tuple's, `#derive(Hash)` of structs and
+    # enums (the fields in order, a variant's index first), a hand-written impl,
+    # and `Hasher.add`, each against the hasher's own adds
+    "hash_trait_and_derive": (
+        "import std.hash as hash\n"
+        "\n"
+        "#derive(Eq, Hash)\n"
+        "struct Pos {\n"
+        "    x: int,\n"
+        "    y: int,\n"
+        "}\n"
+        "\n"
+        "#derive(Eq, Hash)\n"
+        "struct Named {\n"
+        "    name: str,\n"
+        "    at: Pos,\n"
+        "    tags: [str],\n"
+        "    pair: (int64, char),\n"
+        "}\n"
+        "\n"
+        "#derive(Eq, Hash)\n"
+        "enum Cell {\n"
+        "    Wall,\n"
+        "    Open(int),\n"
+        "    Door(str, Pos),\n"
+        "}\n"
+        "\n"
+        "// a hand-written impl, and a float hashed through its bits\n"
+        "struct Reading {\n"
+        "    at: int,\n"
+        "    value: float,\n"
+        "}\n"
+        "\n"
+        "impl Eq for Reading {\n"
+        "    fun eq(self, other: Reading) -> bool {\n"
+        "        return self.at == other.at\n"
+        "    }\n"
+        "}\n"
+        "\n"
+        "impl Hash for Reading {\n"
+        "    fun hash(self, h: Hasher) -> Hasher {\n"
+        "        return h.add(self.at)\n"
+        "    }\n"
+        "}\n"
+        "\n"
+        "fun digest<T: Hash>(x: T) -> uint64 {\n"
+        "    return x.hash(hash.new()).finish()\n"
+        "}\n"
+        "\n"
+        "fun main() {\n"
+        "    print(f\"{digest(5):#x} {digest(5i64):#x} {digest(255u8):#x} {digest(-1i8):#x}\")\n"
+        "    print(f\"{digest('a'):#x} {digest(true):#x} {digest(\"abc\"):#x}\")\n"
+        "    let big: int64 = 5000000000\n"
+        "    let top: uint64 = 18446744073709551615\n"
+        "    print(f\"{digest(big):#x} {digest(top):#x} {digest([big, 1]):#x}\")\n"
+        "    print(f\"{digest([1, 2, 3]):#x} {digest([\"a\", \"b\"]):#x}\")\n"
+        "    // a list adds its length: these differ\n"
+        "    print(digest(([1], [2, 3])) != digest(([1, 2], [3])))\n"
+        "    let p = Pos { x: 1, y: 2 }\n"
+        "    print(digest(p) == hash.new().add_i32(1).add_i32(2).finish())\n"
+        "    print(digest(p) == digest((1, 2)))\n"
+        "    print(f\"{digest(p):#x}\")\n"
+        "    let n = Named { name: \"n\", at: p, tags: [\"a\", \"b\"], pair: (big, 'z') }\n"
+        "    print(f\"{digest(n):#x}\")\n"
+        "    print(digest(n) == hash.new().add_str(\"n\").add(p).add([\"a\", \"b\"]).add_i64(big).add_char('z').finish())\n"
+        "    print(digest(Cell.Wall) == hash.new().add_u64(0).finish())\n"
+        "    print(f\"{digest(Cell.Open(3)):#x} {digest(Cell.Door(\"d\", p)):#x}\")\n"
+        "    print(digest(Cell.Door(\"d\", p)) == hash.new().add_u64(2).add_str(\"d\").add(p).finish())\n"
+        "    print(f\"{digest(((1, 'a'), [true, false], ())):#x}\")\n"
+        "    print(f\"{(1, \"x\").hash(hash.new()).finish():#x}\")\n"
+        "    print(f\"{[(1, 2), (3, 4)].hash(hash.new()).finish():#x}\")\n"
+        "    print(digest(Reading { at: 3, value: 0.5 }) == digest(Reading { at: 3, value: 9.0 }))\n"
+        "    print(hash.new().add(7) == hash.new().add_i32(7))\n"
+        "    var h = hash.new()\n"
+        "    h = h.add(p).add((3, \"q\")).add(Cell.Wall)\n"
+        "    print(f\"{h.finish():#x}\")\n"
+        "}\n"
+    ),
+    # `==` and `!=` on tuples and lists whose elements are Eq (D163, MYLA-313):
+    # nested, with strings, floats (NaN unequal, 0.0 and -0.0 equal), packed
+    # lists, a struct's own `eq`, derived Eq over tuple and list fields, a bound
+    # `T: Eq` and `contains`
+    "tuple_and_list_equality": (
+        "#derive(Eq)\n"
+        "struct P {\n"
+        "    x: int,\n"
+        "    name: str,\n"
+        "}\n"
+        "\n"
+        "struct Loose {\n"
+        "    v: int,\n"
+        "}\n"
+        "\n"
+        "// equal when their values agree modulo 10\n"
+        "impl Eq for Loose {\n"
+        "    fun eq(self, other: Loose) -> bool {\n"
+        "        return self.v % 10 == other.v % 10\n"
+        "    }\n"
+        "}\n"
+        "\n"
+        "#derive(Eq)\n"
+        "enum Shape {\n"
+        "    Dot,\n"
+        "    Line((int, int), (int, int)),\n"
+        "}\n"
+        "\n"
+        "#derive(Eq)\n"
+        "struct Path {\n"
+        "    steps: [(int, int)],\n"
+        "    tag: (str, bool),\n"
+        "}\n"
+        "\n"
+        "fun same<T: Eq>(a: T, b: T) -> bool {\n"
+        "    return a == b\n"
+        "}\n"
+        "\n"
+        "fun main() {\n"
+        "    let a = (1, 2)\n"
+        "    print(a == (1, 2))\n"
+        "    print(a != (1, 2))\n"
+        "    print(a == (2, 1))\n"
+        "    let s = (1, \"x\", 'c', true)\n"
+        "    print(s == (1, \"x\", 'c', true))\n"
+        "    print(s == (1, \"y\", 'c', true))\n"
+        "    let n = ((1, 2), (3, (4, \"five\")))\n"
+        "    print(n == ((1, 2), (3, (4, \"five\"))))\n"
+        "    print(n == ((1, 2), (3, (4, \"six\"))))\n"
+        "    let big: (int64, uint8) = (5000000000, 200)\n"
+        "    print(big == (5000000000, 200))\n"
+        "    print((0.0, 1.5) == (-0.0, 1.5))\n"
+        "    let nan = 0.0 / 0.0\n"
+        "    print((nan, 1) == (nan, 1))\n"
+        "    print((P { x: 1, name: \"a\" }, 2) == (P { x: 1, name: \"a\" }, 2))\n"
+        "    print((Loose { v: 3 }, 1) == (Loose { v: 13 }, 1))\n"
+        "    print((Loose { v: 3 }, 1) == (Loose { v: 14 }, 1))\n"
+        "    print([1, 2, 3] == [1, 2, 3])\n"
+        "    print([1, 2, 3] == [1, 2])\n"
+        "    print([1, 2, 3] != [1, 2, 4])\n"
+        "    let bytes: [uint8] = [1, 2, 255]\n"
+        "    print(bytes == [1, 2, 255])\n"
+        "    let fs: [float32] = [1.5, 2.5]\n"
+        "    print(fs == [1.5, 2.5])\n"
+        "    print([\"a\", \"b\"] == [\"a\", \"b\"])\n"
+        "    print([(1, \"a\"), (2, \"b\")] == [(1, \"a\"), (2, \"b\")])\n"
+        "    print([[1], [2, 3]] == [[1], [2, 3]])\n"
+        "    print([[1], [2, 3]] == [[1], [2, 4]])\n"
+        "    let empty: [int] = []\n"
+        "    print(empty == [])\n"
+        "    print(Shape.Line((0, 0), (1, 2)) == Shape.Line((0, 0), (1, 2)))\n"
+        "    print(Shape.Line((0, 0), (1, 2)) == Shape.Line((0, 0), (1, 3)))\n"
+        "    print(Shape.Dot == Shape.Dot)\n"
+        "    let p = Path { steps: [(0, 0), (0, 1)], tag: (\"t\", true) }\n"
+        "    print(p == Path { steps: [(0, 0), (0, 1)], tag: (\"t\", true) })\n"
+        "    print(p == Path { steps: [(0, 0)], tag: (\"t\", true) })\n"
+        "    print(same((1, \"a\"), (1, \"a\")))\n"
+        "    print(same([(1, 2)], [(1, 3)]))\n"
+        "    print([(1, 2), (3, 4)].contains((3, 4)))\n"
+        "    let l = [Loose { v: 1 }, Loose { v: 22 }]\n"
+        "    print(l == [Loose { v: 11 }, Loose { v: 2 }])\n"
+        "}\n"
+    ),
     # an unsuffixed literal left of an unsigned operator takes the right
     # operand's type, natively too (MYLA-358: 10 / m divided as signed)
     "literal_left_of_unsigned_division": (
@@ -38,6 +634,221 @@ PROGRAMS = {
         "    print(b.map((x) => f\"<{x}>\").map((s) => s.len()).v)\n"
         "}\n"
     ),
+    # generic constructors (MYLA-315): the expected type (here the return type
+    # `B<T>`) types a struct literal's empty list, map and `None` inside
+    # generic code, and a call's expected type (an annotation, a parameter, a
+    # return type, a field, a list's element) fixes the type parameters its
+    # arguments leave open, of functions and of generic methods; an argument
+    # takes it as its hint, so `5000000000` is an `int64` there
+    "generic_constructors_from_the_expected_type": (
+        "struct B<T> {\n    items: [T],\n}\n"
+        "struct Q<T> {\n    front: [T],\n    names: [str: T],\n    top: Option<T>,\n}\n"
+        "struct Holder {\n    b: B<int>,\n    q: Q<str>,\n}\n"
+        "struct Pair<T> {\n    left: B<T>,\n    right: B<T>,\n}\n"
+        "fun mk<T>() -> B<T> {\n    return B { items: [] }\n}\n"
+        "fun new_q<T>() -> Q<T> {\n    return Q { front: [], names: [:], top: None }\n}\n"
+        "fun of<T>(xs: [T]) -> B<T> {\n    return B { items: xs }\n}\n"
+        "fun pair<T>() -> Pair<T> {\n    return Pair { left: mk(), right: mk() }\n}\n"
+        "impl<T> B<T> {\n"
+        "    fun add(var self, x: T) {\n        self.items.push(x)\n    }\n"
+        "    fun size(self) -> int {\n        return self.items.len()\n    }\n"
+        "    fun emptied<U>(self) -> B<U> {\n        return mk()\n    }\n"
+        "}\n"
+        "fun total(b: B<int>) -> int {\n    var t = 0\n    for x in b.items {\n        t += x\n    }\n    return t\n}\n"
+        "fun twice<T>(x: T) -> B<T> {\n    var b: B<T> = mk()\n    b.add(x)\n    b.add(x)\n    return b\n}\n"
+        "fun names() -> B<str> {\n    return mk()\n}\n"
+        "#main\nfun main() {\n"
+        "    let a: B<int> = mk()\n    print(a.size())\n"
+        "    var s: B<str> = mk()\n    s.add(\"x\")\n    print(s.size())\n"
+        "    print(total(mk()))\n"
+        "    var h = Holder { b: mk(), q: new_q() }\n    h.b.add(4)\n    h.q.front.push(\"q\")\n"
+        "    print(total(h.b))\n    print(h.q.front[0])\n    print(h.q.top.unwrap_or(\"no top\"))\n"
+        "    h.b = mk()\n    print(h.b.size())\n"
+        "    var n = names()\n    n.add(\"a\")\n    n.add(\"b\")\n    print(n.items[1])\n"
+        "    let t = twice(\"hi\")\n    print(t.items[0] + t.items[1])\n"
+        "    let e: B<bool> = a.emptied()\n    print(e.size())\n"
+        "    let bs: [B<int>] = [mk(), of([1, 2])]\n    print(total(bs[1]))\n"
+        "    let big: B<int64> = of([5000000000])\n    print(big.items[0])\n"
+        "    let w: Option<int64> = Some(5000000000)\n    print(w.unwrap_or(0))\n"
+        "    let p: Pair<char> = pair()\n    print(p.left.size() + p.right.size())\n"
+        "    let q: Q<int> = new_q()\n    print(q.top.unwrap_or(7))\n"
+        "}\n"
+    ),
+    # what MYLA-315 gives in passing: an argument whose parameter's type the
+    # arguments before it leave open takes the expected type's hint (a
+    # literal's width); a type parameter mapped to the enclosing function's is
+    # known, so a lambda there takes its parameter types; a generic literal's
+    # lambda field takes them like a call's lambda argument (MYLA-356)
+    "generic_arguments_hinted_by_the_expected_type": (
+        "struct W<T, U> {\n    x: T,\n    f: (T) -> U,\n}\n"
+        "struct Box<T> {\n    v: T,\n}\n"
+        "impl<T> Box<T> {\n    fun map<U>(self, f: (T) -> U) -> Box<U> {\n        return Box { v: f(self.v) }\n    }\n}\n"
+        "enum Maybe<T> {\n    Just(T),\n    Nothing,\n}\n"
+        "fun first<T>(xs: [T]) -> T {\n    return xs[0]\n}\n"
+        "fun same<T>(b: Box<T>) -> Box<T> {\n    return b.map((x) => x)\n}\n"
+        "fun nothing<T>() -> Maybe<T> {\n    return Maybe.Nothing\n}\n"
+        "fun pick<T>(c: bool, a: T, b: T) -> T {\n    return if c { a } else { b }\n}\n"
+        "#main\nfun main() {\n"
+        "    let w = W { x: 3, f: (x) => x + 1 }\n    print(w.f(w.x))\n"
+        "    let x: int64 = first([5000000000])\n    print(x)\n"
+        "    print(same(Box { v: \"s\" }).v)\n"
+        "    let m: Maybe<int> = nothing()\n"
+        "    let k = match m {\n        Just(v) => v\n        Nothing => -1\n    }\n    print(k)\n"
+        "    let big: int64 = 10\n    print(big + first([2]))\n"
+        "    let p: uint8 = pick(true, 200, 3)\n    print(p)\n"
+        "}\n"
+    ),
+    # MYLA-373 (D169): explicit type arguments on a call, a function's and a
+    # method's own, where nothing else fixes them (a call statement, `let`
+    # without an annotation, an argument of a generic call); `a < b` and
+    # `f(a < b, c > d)` stay comparisons
+    "explicit_type_arguments": """// explicit type arguments on a call (D169, MYLA-373): a function's and a
+// method's own, a call statement, an argument whose parameter's type is
+// still open, nested arguments closed by `>>`, a type parameter of the
+// enclosing function; comparisons keep their meaning
+struct B<T> {
+    items: [T],
+}
+
+impl<T> B<T> {
+    fun size(self) -> int {
+        return self.items.len()
+    }
+
+    fun mapped<U>(self, f: (T) -> U) -> B<U> {
+        var out: [U] = []
+        for x in self.items {
+            out.push(f(x))
+        }
+        return B { items: out }
+    }
+
+    fun emptied<U>(self) -> B<U> {
+        return B { items: [] }
+    }
+}
+
+fun mk<T>() -> B<T> {
+    return B { items: [] }
+}
+
+fun pair<A, C>(a: A, c: C) -> (A, C) {
+    return (a, c)
+}
+
+fun widen<T>(x: T) -> T {
+    return x
+}
+
+fun count<T>(xs: [T]) -> int {
+    return xs.len()
+}
+
+fun twice<T>(x: T) -> B<T> {
+    var b = mk<T>()
+    b.items.push(x)
+    b.items.push(x)
+    return b
+}
+
+fun both(a: bool, b: bool) -> bool {
+    return a && b
+}
+
+fun main() {
+    let d = mk<int>()
+    print(d.size())
+    var s = mk<str>()
+    s.items.push("x")
+    print(s.size())
+    mk<bool>()
+    print(count<int64>([]))
+    let big = widen<int64>(5000000000)
+    print(big)
+    let p = pair<int64, str>(7, "seven")
+    print(p.0 + 1)
+    print(p.1)
+    let b = B { items: [1, 2, 3] }
+    let m = b.mapped<str>((x) => f"<{x}>")
+    print(m.items[2])
+    print(b.emptied<char>().size())
+    let nested = mk<B<int>>()
+    print(nested.size())
+    print(widen(mk<int>()).size())
+    print(twice<str>("hi").items[1])
+    let one: uint8 = widen<uint8>(200)
+    print(one)
+    // comparisons
+    let x = 1
+    let y = 2
+    print(x < y)
+    print(both(x < y, y > x))
+    print(x < y && y > x)
+    print(if x < y { "lt" } else { "ge" })
+    print(x << 3 > y)
+    print(f"{widen<int>(x) < y}")
+}
+""",
+    # MYLA-371 (D170): the standard library's types named through their
+    # modules, `args.Spec`, `num.ParseIntError`, `deque.Deque<int>`, and
+    # `std.deque.Deque<int>` through a module bound by its whole path
+    "std_module_types_by_the_module_name": """// a module's type by its module's name in a type position (D170, MYLA-371):
+// a return type, a parameter, an annotation, a field, a list's element, a
+// generic type's argument, a function type, a module bound by its whole path
+import std.args as args
+import std.num as num
+import std.deque as deque
+import std.deque
+
+struct Tool {
+    spec: args.Spec,
+    queue: deque.Deque<int>,
+}
+
+fun cli() -> args.Spec {
+    return args.spec("tool", "does things").flag("verbose", 'v')
+}
+
+fun why(e: num.ParseIntError) -> str {
+    return match e {
+        Empty => "empty"
+        InvalidDigit(i) => f"digit at {i}"
+        Overflow => "overflow"
+    }
+}
+
+fun total(qs: [deque.Deque<int>]) -> int {
+    var n = 0
+    for q in qs {
+        n += q.len()
+    }
+    return n
+}
+
+fun main() {
+    let e: num.ParseIntError = num.ParseIntError.InvalidDigit(2)
+    print(why(e))
+    let r: Result<int32, num.ParseIntError> = num.parse_int32("")
+    match r {
+        Ok(v) => print(v)
+        Err(x) => print(why(x))
+    }
+    var t = Tool { spec: cli(), queue: deque.new() }
+    t.queue.push_back(4)
+    t.queue.push_back(5)
+    let qs: [deque.Deque<int>] = [t.queue, deque.of([1])]
+    print(total(qs))
+    let f: (std.deque.Deque<int>) -> int = (q) => q.len()
+    print(f(t.queue))
+    let argv = ["-v"]
+    match args.parse(t.spec, argv) {
+        Ok(a) => print(a.flag("verbose"))
+        Err(x) => print("bad")
+    }
+    let big = deque.new<deque.Deque<str>>()
+    print(big.len())
+}
+""",
     # a receiver and every argument are taken in order, before a later
     # argument writes their variable through a `var self` method (MYLA-237)
     "argument_values_before_later_writes": (
@@ -3609,6 +4420,43 @@ STRESS_FOR_EARLY_RETURN_SRC = (
     "    print(total)\n}\n"
 )
 
+# Maps with compound keys (D163, MYLA-313): a struct key holding a string
+# and a tuple key holding a string and a list, their words in the slots,
+# inserted, overwritten, removed, listed, shared by a copy and dropped,
+# far more often than the arena holds, so the keys' references must be
+# taken and given back.
+STRESS_MAP_COMPOUND_KEY_SRC = (
+    "#derive(Eq, Hash)\n"
+    "struct Who {\n"
+    "    name: str,\n"
+    "    n: int,\n"
+    "}\n"
+    "\n"
+    "#main\n"
+    "fun main() {\n"
+    "    var total = 0\n"
+    "    for r in 0..20000 {\n"
+    "        var m: [Who: [str]] = [:]\n"
+    "        var i = 0\n"
+    "        while i < 12 {\n"
+    "            let w = Who { name: f\"w{i % 5}\", n: r }\n"
+    "            m[w] = [f\"v{i}\", \"x\"]\n"
+    "            i += 1\n"
+    "        }\n"
+    "        let copy = m\n"
+    "        m.remove(Who { name: \"w1\", n: r })\n"
+    "        m[Who { name: f\"w{r % 3}\", n: r }] = [\"again\"]\n"
+    "        for k in m.keys() { total += k.name.len() }\n"
+    "        var pairs: [(str, [int]): int] = [:]\n"
+    "        pairs[(f\"p{r}\", [r, r])] = 1\n"
+    "        pairs[(f\"p{r}\", [r, r])] = 2\n"
+    "        total += pairs[(f\"p{r}\", [r, r])] + copy.len() - m.len()\n"
+    "    }\n"
+    "    print(total)\n"
+    "}\n"
+)
+
+
 STRESS_MAP_OVERWRITE_SRC = (
     # Overwrites map entries holding strings, lists and maps a million times.
     # The self-hosted backend stored the new value without releasing the old
@@ -3631,8 +4479,248 @@ STRESS_MAP_OVERWRITE_SRC = (
 )
 
 
+# A program of three modules for `test_generic_constructors_of_a_module`.
+GENERIC_MODULE_DEQUE = """pub struct Deque<T> {
+    front: [T],
+    back: [T],
+}
+
+pub fun new<T>() -> Deque<T> {
+    return Deque { front: [], back: [] }
+}
+
+pub fun of<T>(xs: [T]) -> Deque<T> {
+    return Deque { front: [], back: xs }
+}
+
+impl<T> Deque<T> {
+    fun push_back(var self, x: T) {
+        self.back.push(x)
+    }
+
+    fun push_front(var self, x: T) {
+        self.front.push(x)
+    }
+
+    fun len(self) -> int {
+        return self.front.len() + self.back.len()
+    }
+
+    fun first(self) -> Option<T> {
+        if self.front.len() > 0 {
+            return Some(self.front[^1])
+        }
+        if self.back.len() > 0 {
+            return Some(self.back[0])
+        }
+        return None
+    }
+
+    fun emptied<U>(self) -> Deque<U> {
+        return new()
+    }
+}
+"""
+
+GENERIC_MODULE_SET = """pub struct Set<T> {
+    items: [T],
+}
+
+pub fun new<T>() -> Set<T> {
+    return Set { items: [] }
+}
+
+impl<T: Eq> Set<T> {
+    fun insert(var self, x: T) {
+        for y in self.items {
+            if y == x {
+                return
+            }
+        }
+        self.items.push(x)
+    }
+
+    fun len(self) -> int {
+        return self.items.len()
+    }
+}
+"""
+
+GENERIC_MODULE_MAIN = """import .deque as deque
+import .set as set
+from .deque import Deque
+from .set import Set
+
+struct Graph {
+    todo: Deque<int>,
+    seen: Set<str>,
+}
+
+fun sizes(d: Deque<str>) -> int {
+    return d.len()
+}
+
+fun main() {
+    let d: Deque<int> = deque.new()
+    print(d.len())
+    var s: Set<str> = set.new()
+    s.insert("a")
+    s.insert("b")
+    s.insert("a")
+    print(s.len())
+    var g = Graph { todo: deque.new(), seen: set.new() }
+    g.todo.push_back(3)
+    g.todo.push_front(2)
+    g.seen.insert("x")
+    print(g.todo.len())
+    print(g.todo.first().unwrap_or(0))
+    print(g.seen.len())
+    print(sizes(deque.new()))
+    g.todo = deque.new()
+    print(g.todo.len())
+    let e: Deque<str> = d.emptied()
+    print(e.first().unwrap_or("none"))
+    let big: Deque<int64> = deque.of([5000000000])
+    print(big.first().unwrap_or(0))
+}
+"""
+
+
+# The main module of `test_explicit_type_arguments_of_a_module` (MYLA-373):
+# a module's generic functions and a generic method of its type, called with
+# explicit type arguments where nothing else would fix them.
+EXPLICIT_MODULE_MAIN = """import .deque as deque
+import .set as set
+
+fun main() {
+    let d = deque.new<int>()
+    print(d.len())
+    var s = set.new<str>()
+    s.insert("a")
+    s.insert("a")
+    print(s.len())
+    print(d.emptied<str>().first().unwrap_or("none"))
+    let big = deque.of<int64>([5000000000])
+    print(big.first().unwrap_or(0))
+    set.new<bool>()
+    print(deque.new<char>().len() < 1)
+}
+"""
+
+# `test_module_types_by_the_module_name` (MYLA-371): a module that re-exports
+# another, and a main module naming both modules' types as `m.T` and through
+# the re-export as `m.n.T`.
+MODULE_TYPES_SHAPES = """pub import .deque as dq
+
+pub struct Shape {
+    name: str,
+    sides: int,
+}
+
+pub typealias Named = (str, int)
+
+pub fun tri() -> Shape {
+    return Shape { name: "tri", sides: 3 }
+}
+"""
+
+MODULE_TYPES_MAIN = """import .deque as deque
+import .set as set
+import .shapes as shapes
+
+struct Graph {
+    todo: deque.Deque<int>,
+    seen: set.Set<str>,
+}
+
+fun sizes(ds: [deque.Deque<str>]) -> int {
+    var n = 0
+    for d in ds {
+        n += d.len()
+    }
+    return n
+}
+
+fun fresh() -> shapes.dq.Deque<int> {
+    return deque.of([7, 8])
+}
+
+fun describe(s: shapes.Shape) -> shapes.Named {
+    return (s.name, s.sides)
+}
+
+fun main() {
+    var g = Graph { todo: fresh(), seen: set.new() }
+    g.todo.push_front(6)
+    g.seen.insert("x")
+    print(g.todo.len())
+    print(g.todo.first().unwrap_or(0))
+    print(g.seen.len())
+    let d: deque.Deque<str> = deque.of(["a", "b"])
+    print(sizes([d, d, deque.new<str>()]))
+    let n = describe(shapes.tri())
+    print(f"{n.0} {n.1}")
+    let pick: (shapes.dq.Deque<int>) -> int = (q) => q.len()
+    print(pick(g.todo))
+    let o: Option<set.Set<str>> = Some(g.seen)
+    match o {
+        Some(s) => print(s.len())
+        None => print(-1)
+    }
+}
+"""
+
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
 class TestCompilerParity(unittest.TestCase):
+    def test_generic_constructors_of_a_module(self):
+        # MYLA-315: the shapes std.deque and std.set take (MYLA-330), a module's
+        # `pub fun new<T>() -> Deque<T>` called as `deque.new()` where the
+        # expected type fixes `T`: an annotation, a field, a parameter, an
+        # assignment, a generic method's own type parameter
+        with tempfile.TemporaryDirectory() as tmp:
+            write_program(tmp, GENERIC_MODULE_DEQUE, "deque.my")
+            write_program(tmp, GENERIC_MODULE_SET, "set.my")
+            main = write_program(tmp, GENERIC_MODULE_MAIN)
+            self.assertEqual(run_file_both_now(main), ("0\n2\n2\n2\n1\n0\n0\nnone\n5000000000\n", "", 0))
+
+    def test_explicit_type_arguments_of_a_module(self):
+        # MYLA-373: `deque.new<int>()`, `d.emptied<str>()`: the module's member
+        # folds into its qualified name with its type arguments kept
+        with tempfile.TemporaryDirectory() as tmp:
+            write_program(tmp, GENERIC_MODULE_DEQUE, "deque.my")
+            write_program(tmp, GENERIC_MODULE_SET, "set.my")
+            main = write_program(tmp, EXPLICIT_MODULE_MAIN)
+            self.assertEqual(run_file_both_now(main), ("0\n1\nnone\n5000000000\ntrue\n", "", 0))
+
+    def test_module_types_by_the_module_name(self):
+        # MYLA-371 (D170): `deque.Deque<int>` in a field, a list's element, a
+        # return type through a re-export (`shapes.dq.Deque<int>`), a
+        # function type and a generic type's argument; a struct and a type
+        # alias of the module's own (`shapes.Shape`, `shapes.Named`)
+        with tempfile.TemporaryDirectory() as tmp:
+            write_program(tmp, GENERIC_MODULE_DEQUE, "deque.my")
+            write_program(tmp, GENERIC_MODULE_SET, "set.my")
+            write_program(tmp, MODULE_TYPES_SHAPES, "shapes.my")
+            main = write_program(tmp, MODULE_TYPES_MAIN)
+            self.assertEqual(run_file_both_now(main), ("3\n6\n1\n4\ntri 3\n3\n1\n", "", 0))
+
+    def test_a_char_moved_past_the_scalars_is_a_runtime_error(self):
+        # MYLA-318: `c + n` and `c - n` are checked as `n as char` is, past
+        # U+10FFFF, into the surrogates, below 0 (the sum wraps as an int32),
+        # at the operator; the native message has no values (MYLA-17)
+        cases = (("'\\u{10FFFF}', 1", "1114112"), ("'\\u{D7FF}', 1", "55296"), ("'a', -98", "-1"),
+                 ("'a', 2147483647", "-2147483552"))
+        for args, value in cases:
+            with self.subTest(args=args), tempfile.TemporaryDirectory() as tmp:
+                path = write_program(tmp, "fun moved(c: char, n: int) -> char {\n    return c + n\n}\n"
+                                          f"fun main() {{\n    print(moved('a', 1))\n    print(moved({args}))\n}}\n")
+                out, err, code = selfhost_run(path)
+                self.assertEqual((out, code), ("b\n", 1))
+                self.assertEqual(err.splitlines()[:2], [f"runtime error: invalid char: {value} is not a Unicode scalar value",
+                                                        f"  --> {path}:2:14"])
+                self.assertEqual(build_and_run_full(Program(path), entry_path=path),
+                                 ("b\n", f"runtime error: invalid char\n  --> {path}:2:14\n", 1))
+
     def test_become_runs_a_million_deep(self):
         # MYLA-128, MYLA-131: every `become` of the parity programs jumps, so
         # they run a million calls deep in the default stack
@@ -3666,6 +4754,12 @@ class TestCompilerParity(unittest.TestCase):
             "    print(rename(Named { name: \"\", steps: [1] }, 50000).name.len())\n"
             "}\n")
         self.assertEqual(build_and_run(source, timeout=60), ("50000\n", 0))
+
+    def test_compound_map_keys_are_released(self):
+        # MYLA-313: the keys' words in the slots, retained and released
+        out, code = build_and_run(STRESS_MAP_COMPOUND_KEY_SRC, timeout=60)
+        self.assertEqual((out, code), ("226667\n", 0))
+        self.assertEqual(_self_hosted(STRESS_MAP_COMPOUND_KEY_SRC), out)
 
     def test_overwritten_map_values_are_released(self):
         out, code = build_and_run(STRESS_MAP_OVERWRITE_SRC, timeout=60)
@@ -3847,10 +4941,38 @@ class TestCompilerParity(unittest.TestCase):
 # longer holds (a later decision changed its meaning) or there is none (a
 # program added or changed since): its output, pinned here.
 PINNED = {
+    # MYLA-318: new; native code gives the same
+    "for_over_a_string": '15\n15\nh|é|l|l|o|,| |w|ö|r|l|d| |😀|!|\n5\nD\n-\nh\ni\nb\no\nb\na\nb\nc\nx\ny\nxyzz\n97,65533,65533,98,65533,65533\ntrue\n9\nr\n2\n',
+    # MYLA-318: new; native code gives the same
+    "for_over_a_string_async": '6\na\nb\n',
+    # MYLA-318: new; native code gives the same
+    "string_ordering": 'true true false false\ntrue true false false\nfalse false true true\ntrue true false false\nfalse true false true\nfalse true false true\ntrue true false false\nfalse false true true\nfalse false true true\ntrue true false false\ntrue true false false\ntrue true false false\n,Apple,apple,apples,banana,fig,pear,z,é\n,Apple,apple,apples,banana,fig,pear,z,é\ntrue\na,b,b,c,d\n5\nlime\na,c,m,x\ntrue\na,b\n',
+    # MYLA-318: new; native code gives the same
+    "char_arithmetic": '15\n-15\n23\ny\na\nb\nc\nz\nc\n132\n😁\ntrue\nuryyb, jbeyq\n98\n25\n3,2,1\n',
+    # MYLA-318: new; native code gives the same
+    "aoc_library_helpers": '....\n..#.\n....\ntrue\nfalse\ntrue\n1\n2\n0\n42\n-1\n',
+    # MYLA-365, MYLA-366: new; native code gives the same
+    "try_in_a_call_argument": "err bad\n",
+    "method_on_a_type_parameter_field": "5\n",
+    # MYLA-313: new; the interpreter gives the same
+    "compound_map_keys": "19 cells, (6, 2) at 10, (3, 0) at 7\nfalse\n2 again\nfalse\nk0=true k2=false k3=true k5=true k1=false\n71 k1 1\n12 1 false\n2 c b\n5\n2 2\n2 1\n2\nnone\n3\n10\nRed 2\nblue 3\n2 2 true\n",
+    # MYLA-313: new; the interpreter gives the same
+    "hash_trait_and_derive": "0xb5b61ff8e7f24a67 0xb5b61ff8e7f24a67 0xd6456ad28572a8f 0x70bc9b8185eefae3\n0x390831630ea9884a 0x59b81abf6522ad07 0x2a4f1d7cb516c72\n0xff3dc34ebf38684d 0x70bc9b8185eefae3 0xfc4894f325fbbe64\n0xb588589b83562bca 0xb33117f322973c8e\ntrue\ntrue\ntrue\n0x4e0a109fae7c734b\n0xed98eb641d3fbd53\ntrue\ntrue\n0x670e93ec0fc81a67 0x969687c72d6781a0\ntrue\n0xd93bdbded0c7bfaa\n0x547db8c134aeb86a\n0x3da68fd7b9e49217\ntrue\ntrue\n0x9da70211eac47ab5\n",
+    # MYLA-313: new; the interpreter gives the same
+    "tuple_and_list_equality": "true\nfalse\nfalse\ntrue\nfalse\ntrue\nfalse\ntrue\ntrue\nfalse\ntrue\ntrue\nfalse\ntrue\nfalse\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\nfalse\ntrue\ntrue\nfalse\ntrue\ntrue\nfalse\ntrue\nfalse\ntrue\ntrue\n",
     # MYLA-358: new; the interpreter gives the same
     "literal_left_of_unsigned_division": "0\n10\n0\n100\n0\n4000000005\n1\ntrue\n",
     # MYLA-356: new, so no recording; the interpreter gives the same
     "lambda_parameters_from_known_arguments": "6\n3\n5\ntrue\n3\n",
+    # MYLA-315: new; the interpreter gives the same
+    "generic_constructors_from_the_expected_type": "0\n1\n0\n4\nq\nno top\n0\nb\nhihi\n0\n3\n5000000000\n"
+                                                   "5000000000\n0\n7\n",
+    # MYLA-371: new; the interpreter gives the same
+    "std_module_types_by_the_module_name": "digit at 2\nempty\n3\n2\ntrue\n0\n",
+    # MYLA-373: new; the interpreter gives the same
+    "explicit_type_arguments": "0\n1\n0\n5000000000\n8\nseven\n<3>\n0\n0\n0\nhi\n200\ntrue\ntrue\ntrue\nlt\ntrue\ntrue\n",
+    # MYLA-315: new; the interpreter gives the same
+    "generic_arguments_hinted_by_the_expected_type": "4\n5000000000\ns\n-1\n12\n200\n",
     # D102: the unsuffixed 123.456 is a float64 now (the recording's
     # float32 printed 123.456001); floats print in their shortest form (D155)
     "float_arithmetic": "3.75\n-0.75\n3.375\n3.5\n1.5\n-3.5\n0.30000000000000004\n0.3\n2\n100000\n"

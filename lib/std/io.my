@@ -75,29 +75,86 @@ pub fun errno_text(code: int32) -> str {
     return f"errno {code}"
 }
 
-// --- Reading ------------------------------------------------------------------
+// --- Streams (MYLA-338) ---------------------------------------------------------
+//
+// Myla has no references, so a stream is a value kept in a `var` (or a field
+// of one) and used through its `var self` methods. An adapter owns the stream
+// it wraps, by value: `Buffered<R>` holds its `R`. There are no trait
+// objects, so a function that takes "any stream" is generic, and takes the
+// stream by value (`read_all`, `copy`).
+//
+// `Read` and `Write` each have a method for bytes as `[uint8]` and one for
+// bytes as `str` (strings are bytes, D164): a descriptor reads and writes
+// `str`, a memory stream holds `[uint8]`, and turning one into the other
+// goes byte by byte. So a stream gives each its own way, and text through a
+// `Buffered` over a descriptor isn't converted at all.
+
+// A source of bytes.
+pub trait Read {
+    // Up to `n` bytes from the cursor on, which moves past them; `[]` at the
+    // end of the input (and for `n <= 0`). Fewer than `n` doesn't mean the
+    // end: only `[]` does.
+    fun read(var self, n: int) -> Result<[uint8], IoError>
+    // `read`, the bytes as a `str` (any bytes; it may end inside a
+    // character); "" at the end.
+    fun read_str(var self, n: int) -> Result<str, IoError>
+}
+
+// A sink of bytes.
+pub trait Write {
+    // All of `b`, or the error that stopped it; `b.len()`.
+    fun write(var self, b: [uint8]) -> Result<int, IoError>
+    // `write` of the bytes of `s`; `s.len()`.
+    fun write_str(var self, s: str) -> Result<int, IoError>
+    // Whatever is buffered passed on.
+    fun flush(var self) -> Result<(), IoError>
+}
+
+// Where a seek goes: so many bytes from the start, the cursor or the end.
+#derive(Eq)
+pub enum SeekFrom {
+    Start(int64),
+    Current(int64),
+    End(int64),
+}
+
+// A stream with a cursor that can be moved.
+pub trait Seek {
+    // The cursor moved; its new offset from the start. Before the start is
+    // `InvalidInput`; past the end is allowed.
+    fun seek(var self, pos: SeekFrom) -> Result<int64, IoError>
+}
+
+// A stream that is a descriptor of the platform, which a task can wait for
+// (`ready` and the async reads of `Buffered`).
+pub trait Pollable {
+    fun descriptor(self) -> int32
+}
 
 // How many bytes one `read` asks for at least.
 const CHUNK: int32 = 4096
 
-// A buffered reader over a file descriptor. Keep it in a `var` (or a field of
-// one) and read through its methods; the bytes they return are verbatim, and
-// a read blocks until input is there or the input ends.
-pub struct Reader {
-    fd: int32,
-    buf: str,      // bytes read but not returned yet: buf[pos..]
-    pos: int32,
-    eof: bool,     // the input has ended
+// The bytes of `s`.
+fun bytes_of(s: str) -> [uint8] {
+    var out: [uint8] = []
+    let n = s.len()
+    var i = 0
+    while i < n {
+        out.push(s[i])
+        i += 1
+    }
+    return out
 }
 
-// A reader of the standard input.
-pub fun stdin() -> Reader {
-    return reader(0)
-}
-
-// A reader of file descriptor `fd`.
-pub fun reader(fd: int32) -> Reader {
-    return Reader { fd: fd, buf: "", pos: 0, eof: false }
+// The bytes of `b` from `start` up to `end`, as text.
+fun text_of(b: [uint8], start: int32, end: int32) -> str {
+    var sb = StringBuilder()
+    var i = start
+    while i < end {
+        sb.append_byte(b[i])
+        i += 1
+    }
+    return sb.build()
 }
 
 // The bytes of `s` from `start` up to `end`.
@@ -107,27 +164,304 @@ fun slice(s: str, start: int32, end: int32) -> str {
     return sb.build()
 }
 
-impl Reader {
+// --- A descriptor -----------------------------------------------------------------
+
+// A file descriptor of the platform as a stream, unbuffered: each `read` and
+// `write` is a system call. `Buffered` puts a buffer in front of it.
+pub struct FdStream {
+    fd: int32,
+}
+
+// A stream of file descriptor `fd` (0 the standard input, 1 the output, 2 the
+// error output).
+pub fun fd_stream(fd: int32) -> FdStream {
+    return FdStream { fd: fd }
+}
+
+impl Read for FdStream {
+    // One read of at most `n` bytes; it blocks until there are some or the
+    // input ends.
+    fun read(var self, n: int) -> Result<[uint8], IoError> {
+        let s = self.read_str(n)?          // not inside the call: MYLA-338's report
+        return Ok(bytes_of(s))
+    }
+
+    fun read_str(var self, n: int) -> Result<str, IoError> {
+        if n <= 0 { return Ok("") }
+        let chunk = __read(self.fd, n)
+        let err = __io_errno()
+        if err != 0 { return Err(from_errno(err)) }
+        return Ok(chunk)
+    }
+}
+
+impl Write for FdStream {
+    fun write(var self, b: [uint8]) -> Result<int, IoError> {
+        return self.write_str(text_of(b, 0, b.len()))
+    }
+
+    // A closed pipe is `BrokenPipe`, but on the standard output or error,
+    // where it ends the program quietly, as `write` does (D146).
+    fun write_str(var self, s: str) -> Result<int, IoError> {
+        __write(self.fd, s)
+        let err = __io_errno()
+        if err != 0 { return Err(from_errno(err)) }
+        return Ok(s.len())
+    }
+
+    // Nothing to do: nothing is buffered.
+    fun flush(var self) -> Result<(), IoError> {
+        return Ok(())
+    }
+}
+
+impl Seek for FdStream {
+    // A pipe or a terminal can't seek: `Other(29)` (ESPIPE).
+    fun seek(var self, pos: SeekFrom) -> Result<int64, IoError> {
+        let (offset, whence) = match pos {
+            Start(k) => (k, 0)
+            Current(k) => (k, 1)
+            End(k) => (k, 2)
+        }
+        let r = __seek(self.fd, offset, whence)
+        if r < 0 { return Err(from_errno(__io_errno())) }
+        return Ok(r)
+    }
+}
+
+impl Pollable for FdStream {
+    fun descriptor(self) -> int32 {
+        return self.fd
+    }
+}
+
+// --- In memory --------------------------------------------------------------------
+
+// Bytes in memory and a cursor: read from them, write into them (over what
+// is there, and on past the end), seek in them.
+pub struct MemoryStream {
+    data: [uint8],
+    pos: int32,
+}
+
+// An empty memory stream.
+pub fun memory_stream() -> MemoryStream {
+    return MemoryStream { data: [], pos: 0 }
+}
+
+// A memory stream of `b`, the cursor at the start.
+pub fun from_bytes(b: [uint8]) -> MemoryStream {
+    return MemoryStream { data: b, pos: 0 }
+}
+
+// A memory stream of the bytes of `s`, the cursor at the start.
+pub fun from_str(s: str) -> MemoryStream {
+    return from_bytes(bytes_of(s))
+}
+
+impl MemoryStream {
+    // Every byte it holds, wherever the cursor is.
+    fun bytes(self) -> [uint8] {
+        return self.data
+    }
+
+    // Every byte it holds, as text.
+    #test(from_str("abc"))["abc"]
+    #test(memory_stream())[""]
+    fun text(self) -> str {
+        return text_of(self.data, 0, self.data.len())
+    }
+
+    // The cursor's offset from the start.
+    #test(from_str("abc"))[0i64]
+    fun position(self) -> int64 {
+        return self.pos as int64
+    }
+
+    // Where a read of `n` bytes from the cursor ends.
+    fun read_end(self, n: int32) -> int32 {
+        let len = self.data.len()
+        if n <= 0 || self.pos >= len { return self.pos }
+        if n < len - self.pos { return self.pos + n }
+        return len
+    }
+
+    // Zeros from the end up to the cursor, after a seek past the end.
+    fun fill_gap(var self) {
+        while self.data.len() < self.pos {
+            self.data.push(0)
+        }
+    }
+}
+
+impl Read for MemoryStream {
+    #test(from_str("abc"), 2)[Ok([97u8, 98u8])]
+    #test(from_str("abc"), 9)[Ok([97u8, 98u8, 99u8])]
+    fun read(var self, n: int) -> Result<[uint8], IoError> {
+        let end = self.read_end(n)
+        if end == self.pos { return Ok([]) }
+        let out = self.data[self.pos:end]
+        self.pos = end
+        return Ok(out)
+    }
+
+    #test(from_str("abc"), 2)[Ok("ab")]
+    #test(from_str("abc"), 0)[Ok("")]
+    fun read_str(var self, n: int) -> Result<str, IoError> {
+        let end = self.read_end(n)
+        let out = text_of(self.data, self.pos, end)
+        self.pos = end
+        return Ok(out)
+    }
+}
+
+impl Write for MemoryStream {
+    // Over the bytes at the cursor, and on past the end; a gap left by a
+    // seek past the end is filled with zeros.
+    #test(from_str("abc"), [120u8])[Ok(1)]
+    fun write(var self, b: [uint8]) -> Result<int, IoError> {
+        self.fill_gap()
+        let n = b.len()
+        var i = 0
+        let over = self.data.len() - self.pos
+        while i < n && i < over {
+            self.data[self.pos + i] = b[i]
+            i += 1
+        }
+        while i < n {
+            self.data.push(b[i])
+            i += 1
+        }
+        self.pos = self.pos + n
+        return Ok(n)
+    }
+
+    #test(memory_stream(), "xyz")[Ok(3)]
+    fun write_str(var self, s: str) -> Result<int, IoError> {
+        self.fill_gap()
+        let n = s.len()
+        var i = 0
+        let over = self.data.len() - self.pos
+        while i < n && i < over {
+            self.data[self.pos + i] = s[i]
+            i += 1
+        }
+        while i < n {
+            self.data.push(s[i])
+            i += 1
+        }
+        self.pos = self.pos + n
+        return Ok(n)
+    }
+
+    fun flush(var self) -> Result<(), IoError> {
+        return Ok(())
+    }
+}
+
+impl Seek for MemoryStream {
+    #test(from_str("abc"), SeekFrom.End(-1))[Ok(2i64)]
+    #test(from_str("abc"), SeekFrom.Current(-1))[Err(IoError.InvalidInput)]
+    fun seek(var self, pos: SeekFrom) -> Result<int64, IoError> {
+        let to = match pos {
+            Start(k) => k
+            Current(k) => (self.pos as int64) + k
+            End(k) => (self.data.len() as int64) + k
+        }
+        if to < 0 || to > 2147483647 { return Err(IoError.InvalidInput) }
+        self.pos = to as int32
+        return Ok(to)
+    }
+}
+
+// --- Buffered reading -------------------------------------------------------------
+
+// A reader with a buffer in front of the stream `R` it owns: lines, exact
+// counts and the rest, as text (the bytes verbatim). Keep it in a `var` (or
+// a field of one) and read through its methods. It is a `Read` itself.
+//
+// The stream is the one element of `src`, and `pull` takes it out for a
+// read and puts it back: a stream that is a plain field would be shared
+// with the copy a read works on, so a read that changes its bytes (an
+// adapter's own buffer) would copy them all each time; and the interpreter
+// can't call the method of a field whose type is a type parameter
+// (`self.inner.read(n)`, MYLA-338's report).
+pub struct Buffered<R> {
+    src: [R],
+    buf: str,      // bytes read but not returned yet: buf[pos..]
+    pos: int32,
+    eof: bool,     // the input has ended
+}
+
+// A buffered reader of the stream `r`.
+pub fun buffered<R: Read>(r: R) -> Buffered<R> {
+    return Buffered { src: [r], buf: "", pos: 0, eof: false }
+}
+
+// A buffered reader of a file descriptor: what `stdin()` and `reader(fd)`
+// give, and what `std.io` had before streams.
+pub typealias Reader = Buffered<FdStream>
+
+// A reader of the standard input.
+pub fun stdin() -> Reader {
+    return reader(0)
+}
+
+// A reader of file descriptor `fd`.
+pub fun reader(fd: int32) -> Reader {
+    return buffered(fd_stream(fd))
+}
+
+impl<R: Read> Buffered<R> {
+    // One read of the stream, of up to `n` bytes.
+    fun pull(var self, n: int32) -> Result<str, IoError> {
+        var r = self.src.pop()
+        let got = r.read_str(n)
+        self.src.push(r)
+        return got
+    }
+
     // Read at least `want` more bytes if the input has them (one `read` of at
-    // least CHUNK bytes, which may return fewer); false at the end of the
+    // least CHUNK bytes, which may give fewer); false at the end of the
     // input. The bytes already returned are dropped from the buffer.
     fun fill(var self, want: int32) -> Result<bool, IoError> {
         if self.eof { return Ok(false) }
         var n = CHUNK
         if want > n { n = want }
-        let chunk = __read(self.fd, n)
-        let err = __io_errno()
-        if err != 0 { return Err(from_errno(err)) }
+        let chunk = self.pull(n)?
         if chunk.len() == 0 {
             self.eof = true
             return Ok(false)
         }
-        if self.pos > 0 {
-            self.buf = slice(self.buf, self.pos, self.buf.len())
-            self.pos = 0
+        if self.pos >= self.buf.len() {
+            self.buf = chunk
+        } else {
+            var sb = StringBuilder()
+            sb.append(self.buf, self.pos, self.buf.len())
+            sb.append(chunk)
+            self.buf = sb.build()
         }
-        self.buf = self.buf + chunk
+        self.pos = 0
         return Ok(true)
+    }
+
+    // The offset of the first "\n" in the buffer from `start` on, or -1.
+    fun newline_from(self, start: int32) -> int32 {
+        let buf = self.buf
+        let n = buf.len()
+        var i = start
+        while i < n {
+            if buf[i] == '\n' { return i }
+            i += 1
+        }
+        return -1
+    }
+
+    // The line up to `end`, past the "\n" there if there is one.
+    fun take_line(var self, end: int32) -> str {
+        let line = slice(self.buf, self.pos, end)
+        if end < self.buf.len() { self.pos = end + 1 } else { self.pos = end }
+        return line
     }
 
     // The next line, without its "\n" (a "\r" before it is kept); a last line
@@ -136,17 +470,7 @@ impl Reader {
         var scanned = 0                    // bytes after pos known not to be "\n"
         var found = -1
         while found < 0 {
-            let buf = self.buf
-            let n = buf.len()
-            var i = self.pos + scanned
-            while i < n {
-                if buf[i] == '\n' {
-                    found = i
-                    i = n
-                } else {
-                    i = i + 1
-                }
-            }
+            found = self.newline_from(self.pos + scanned)
             if found < 0 {
                 scanned = self.buf.len() - self.pos
                 if !self.fill(1)? {
@@ -155,9 +479,7 @@ impl Reader {
                 }
             }
         }
-        let line = slice(self.buf, self.pos, found)
-        if found < self.buf.len() { self.pos = found + 1 } else { self.pos = found }     // past the "\n"
-        return Ok(Some(line))
+        return Ok(Some(self.take_line(found)))
     }
 
     // Exactly the next `n` bytes ("" for n <= 0); None if the input ends
@@ -172,27 +494,86 @@ impl Reader {
         return Ok(Some(out))
     }
 
-    // Whether a read won't block: bytes are buffered, or within `timeout_ms`
-    // milliseconds (0: don't wait; negative: wait as long as it takes) input
-    // arrives, the input ends or reading fails (MYLA-80).
-    fun ready(self, timeout_ms: int32) -> bool {
-        if self.pos < self.buf.len() || self.eof { return true }
-        return __poll(self.fd, timeout_ms) != 0
-    }
-
     // Everything up to the end of the input ("" if it has ended).
     fun read_to_end(var self) -> Result<str, IoError> {
         var sb = StringBuilder()
-        sb.append(slice(self.buf, self.pos, self.buf.len()))
+        sb.append(self.buf, self.pos, self.buf.len())
         while !self.eof {
-            let chunk = __read(self.fd, CHUNK)
-            let err = __io_errno()
-            if err != 0 { return Err(from_errno(err)) }      // the buffer stays as it was
+            let chunk = self.pull(CHUNK)?   // the buffer stays as it was
             if chunk.len() == 0 { self.eof = true } else { sb.append(chunk) }
         }
         self.buf = ""
         self.pos = 0
         return Ok(sb.build())
+    }
+
+    // The stream it reads, without the bytes still in the buffer.
+    fun into_inner(self) -> R {
+        return self.src[0]
+    }
+}
+
+impl<R: Read> Read for Buffered<R> {
+    fun read(var self, n: int) -> Result<[uint8], IoError> {
+        let s = self.read_str(n)?          // not inside the call: MYLA-338's report
+        return Ok(bytes_of(s))
+    }
+
+    // From the buffer; a read of at least CHUNK bytes with nothing buffered
+    // goes straight to the stream.
+    fun read_str(var self, n: int) -> Result<str, IoError> {
+        if n <= 0 { return Ok("") }
+        if self.pos >= self.buf.len() {
+            if self.eof { return Ok("") }
+            if n >= CHUNK {
+                let chunk = self.pull(n)?
+                if chunk.len() == 0 { self.eof = true }
+                return Ok(chunk)
+            }
+            if !self.fill(n)? { return Ok("") }
+        }
+        var end = self.buf.len()
+        if n < end - self.pos { end = self.pos + n }
+        let out = slice(self.buf, self.pos, end)
+        self.pos = end
+        return Ok(out)
+    }
+}
+
+impl<R: Read + Seek> Seek for Buffered<R> {
+    // The stream's cursor moved, the buffer dropped; `Current` counts from
+    // the next byte a read would give, not from where the stream is.
+    fun seek(var self, pos: SeekFrom) -> Result<int64, IoError> {
+        var to = pos
+        match pos {
+            Current(k) => { to = SeekFrom.Current(k - ((self.buf.len() - self.pos) as int64)) }
+            _ => {}
+        }
+        var r = self.src.pop()
+        let got = r.seek(to)
+        self.src.push(r)
+        let at = got?
+        self.buf = ""
+        self.pos = 0
+        self.eof = false
+        return Ok(at)
+    }
+}
+
+impl<R: Pollable> Pollable for Buffered<R> {
+    fun descriptor(self) -> int32 {
+        let r = self.src[0]
+        return r.descriptor()
+    }
+}
+
+impl<R: Read + Pollable> Buffered<R> {
+    // Whether a read won't block: bytes are buffered, or within `timeout_ms`
+    // milliseconds (0: don't wait; negative: wait as long as it takes) input
+    // arrives, the input ends or reading fails (MYLA-80).
+    fun ready(self, timeout_ms: int32) -> bool {
+        if self.pos < self.buf.len() || self.eof { return true }
+        return __poll(self.descriptor(), timeout_ms) != 0
     }
 
     // --- In a task: waiting for input without blocking the worker (D124) ---
@@ -205,7 +586,7 @@ impl Reader {
     // `fill`, the task waiting for the input.
     async fun fill_async(var self, want: int32) -> Result<bool, IoError> {
         if self.eof { return Ok(false) }
-        await __wait_readable(self.fd)
+        await __wait_readable(self.descriptor())
         if __task_cancelled() { return Err(IoError.Cancelled) }
         return self.fill(want)
     }
@@ -215,17 +596,7 @@ impl Reader {
         var scanned = 0
         var found = -1
         while found < 0 {
-            let buf = self.buf
-            let n = buf.len()
-            var i = self.pos + scanned
-            while i < n {
-                if buf[i] == '\n' {
-                    found = i
-                    i = n
-                } else {
-                    i = i + 1
-                }
-            }
+            found = self.newline_from(self.pos + scanned)
             if found < 0 {
                 scanned = self.buf.len() - self.pos
                 let more = await self.fill_async(1)
@@ -235,9 +606,7 @@ impl Reader {
                 }
             }
         }
-        let line = slice(self.buf, self.pos, found)
-        if found < self.buf.len() { self.pos = found + 1 } else { self.pos = found }
-        return Ok(Some(line))
+        return Ok(Some(self.take_line(found)))
     }
 
     // `read_exact`, the task waiting for the input.
@@ -255,17 +624,441 @@ impl Reader {
     // `read_to_end`, the task waiting for the input.
     async fun read_to_end_async(var self) -> Result<str, IoError> {
         var sb = StringBuilder()
-        sb.append(slice(self.buf, self.pos, self.buf.len()))
+        sb.append(self.buf, self.pos, self.buf.len())
+        let fd = self.descriptor()
         while !self.eof {
-            await __wait_readable(self.fd)
+            await __wait_readable(fd)
             if __task_cancelled() { return Err(IoError.Cancelled) }
-            let chunk = __read(self.fd, CHUNK)
-            let err = __io_errno()
-            if err != 0 { return Err(from_errno(err)) }
+            let chunk = self.pull(CHUNK)?
             if chunk.len() == 0 { self.eof = true } else { sb.append(chunk) }
         }
         self.buf = ""
         self.pos = 0
         return Ok(sb.build())
     }
+}
+
+// --- Buffered writing -------------------------------------------------------------
+
+// How many bytes a `buffered_writer` keeps before it passes them on.
+const WRITE_BUFFER: int32 = 8192
+
+// A writer with a buffer in front of the stream `W` it owns: small writes
+// are gathered, and passed on when the buffer is full, on `flush` and on
+// `into_inner`. Nothing flushes it at the end of a program: flush it. The
+// stream is the one element of `sink`, as `Buffered`'s is of `src`.
+pub struct BufferedWriter<W> {
+    sink: [W],
+    buf: StringBuilder,
+    cap: int32,
+}
+
+// A buffered writer to `w`, with a buffer of 8 KiB.
+pub fun buffered_writer<W: Write>(w: W) -> BufferedWriter<W> {
+    return buffered_writer_with(w, WRITE_BUFFER)
+}
+
+// A buffered writer to `w` that keeps up to `capacity` bytes (at least 1).
+pub fun buffered_writer_with<W: Write>(w: W, capacity: int32) -> BufferedWriter<W> {
+    var cap = capacity
+    if cap < 1 { cap = 1 }
+    return BufferedWriter { sink: [w], buf: StringBuilder(), cap: cap }
+}
+
+impl<W: Write> BufferedWriter<W> {
+    // One write of `s` to the stream.
+    fun push_out(var self, s: str) -> Result<int, IoError> {
+        var w = self.sink.pop()
+        let r = w.write_str(s)
+        self.sink.push(w)
+        return r
+    }
+
+    // The buffer passed on, without flushing the stream.
+    fun drain(var self) -> Result<(), IoError> {
+        if self.buf.len() == 0 { return Ok(()) }
+        self.push_out(self.buf.build())?
+        self.buf = StringBuilder()
+        return Ok(())
+    }
+
+    // Room for `n` more bytes: the buffer passed on if they don't fit;
+    // whether they go in it (false: they are as many as it holds, or more,
+    // and go straight on).
+    fun make_room(var self, n: int32) -> Result<bool, IoError> {
+        if self.buf.len() + n <= self.cap { return Ok(true) }
+        self.drain()?
+        return Ok(n < self.cap)
+    }
+
+    // The stream it writes, flushed.
+    fun into_inner(self) -> Result<W, IoError> {
+        var me = self
+        me.flush()?
+        return Ok(me.sink[0])
+    }
+}
+
+impl<W: Write> Write for BufferedWriter<W> {
+    fun write(var self, b: [uint8]) -> Result<int, IoError> {
+        if !self.make_room(b.len())? { return self.push_out(text_of(b, 0, b.len())) }
+        for x in b { self.buf.append_byte(x) }
+        return Ok(b.len())
+    }
+
+    fun write_str(var self, s: str) -> Result<int, IoError> {
+        if !self.make_room(s.len())? { return self.push_out(s) }
+        self.buf.append(s)
+        return Ok(s.len())
+    }
+
+    // The buffer passed on, then the stream flushed.
+    fun flush(var self) -> Result<(), IoError> {
+        self.drain()?
+        var w = self.sink.pop()
+        let r = w.flush()
+        self.sink.push(w)
+        return r
+    }
+}
+
+impl<W: Write + Seek> Seek for BufferedWriter<W> {
+    // The buffer passed on, then the stream's cursor moved.
+    fun seek(var self, pos: SeekFrom) -> Result<int64, IoError> {
+        self.drain()?
+        var w = self.sink.pop()
+        let got = w.seek(pos)
+        self.sink.push(w)
+        return got
+    }
+}
+
+// --- Any stream ---------------------------------------------------------------------
+
+// Everything `r` gives up to its end. The stream is taken by value: the
+// caller's copy doesn't move (a descriptor's offset, which the platform
+// keeps, does).
+pub fun read_all<R: Read>(r: R) -> Result<[uint8], IoError> {
+    var src = r
+    var out: [uint8] = []
+    while true {
+        let chunk = src.read(CHUNK)?
+        if chunk.len() == 0 { break }
+        for b in chunk { out.push(b) }
+    }
+    return Ok(out)
+}
+
+// Everything `r` gives up to its end written to `w`, which is flushed and
+// given back (the way to the bytes of a `MemoryStream` or a
+// `BufferedWriter`'s stream). Both are taken by value, as in `read_all`.
+pub fun copy<R: Read, W: Write>(r: R, w: W) -> Result<W, IoError> {
+    var src = r
+    var dst = w
+    while true {
+        let chunk = src.read_str(CHUNK)?
+        if chunk.len() == 0 { break }
+        dst.write_str(chunk)?
+    }
+    dst.flush()?
+    return Ok(dst)
+}
+
+// --- Tests of the generic code (D162) ------------------------------------------
+
+fun holds(ok: bool, what: str) {
+    if !ok {
+        panic(what)
+    }
+}
+
+// The bytes as text, to compare them.
+fun shown(r: Result<[uint8], IoError>) -> str {
+    return match r {
+        Ok(b) => text_of(b, 0, b.len())
+        Err(_) => "<error>"
+    }
+}
+
+// A result as text: its value, or the error's name.
+fun said<T: Format>(r: Result<T, IoError>) -> str {
+    return match r {
+        Ok(v) => f"{v}"
+        Err(IoError.InvalidInput) => "InvalidInput"
+        Err(IoError.Other(code)) => f"Other({code})"
+        Err(_) => "<error>"
+    }
+}
+
+fun ok(r: Result<(), IoError>) -> bool {
+    return match r {
+        Ok(()) => true
+        Err(_) => false
+    }
+}
+
+fun shown_line(r: Result<Option<str>, IoError>) -> str {
+    return match r {
+        Ok(Some(s)) => s
+        Ok(None) => "<end>"
+        Err(_) => "<error>"
+    }
+}
+
+// What a memory stream holds, written, sought and read back.
+#test
+fun memory_round_trip() {
+    var m = memory_stream()
+    holds(said(m.write(bytes_of("hello, "))) == "7", "write gives its length")
+    holds(said(m.write(bytes_of("world"))) == "5", "a second write")
+    holds(m.text() == "hello, world", "the bytes written")
+    holds(shown(m.read(4)) == "", "the cursor is at the end")
+    holds(said(m.seek(SeekFrom.Start(0))) == "0", "seek to the start")
+    holds(shown(m.read(5)) == "hello", "read from the start")
+    holds(m.position() == 5i64, "the cursor moved")
+    holds(shown(m.read(100)) == ", world", "a read past the end gives the rest")
+    holds(shown(m.read(1)) == "", "then nothing")
+    let b = from_str("bytes").bytes()
+    holds(b.len() == 5 && b[0] == 98u8, "bytes()")
+    var e = from_bytes(b)
+    holds(shown(e.read(0)) == "", "a read of 0")
+    holds(shown(e.read(-3)) == "", "a read of fewer than 0")
+}
+
+// Seeks from each place, and writes over and past the end.
+#test
+fun memory_seeks() {
+    var m = from_str("0123456789")
+    holds(said(m.seek(SeekFrom.End(-3))) == "7", "from the end")
+    holds(shown(m.read(10)) == "789", "the last three")
+    holds(said(m.seek(SeekFrom.Current(-5))) == "5", "back from the cursor")
+    holds(said(m.seek(SeekFrom.Current(2))) == "7", "on from the cursor")
+    holds(said(m.seek(SeekFrom.Start(-1))) == "InvalidInput", "before the start")
+    holds(m.position() == 7i64, "a failed seek leaves the cursor")
+    holds(said(m.seek(SeekFrom.Start(2))) == "2", "to 2")
+    holds(said(m.write(bytes_of("ab"))) == "2", "write over")
+    holds(m.text() == "01ab456789", "written over in place")
+    holds(said(m.seek(SeekFrom.End(0))) == "10", "to the end")
+    holds(said(m.write(bytes_of("XYZ"))) == "3", "append")
+    holds(m.text() == "01ab456789XYZ", "appended")
+    holds(said(m.seek(SeekFrom.End(2))) == "15", "past the end")
+    holds(shown(m.read(4)) == "", "nothing to read past the end")
+    holds(said(m.write(bytes_of("!"))) == "1", "write past the end")
+    let b = m.bytes()
+    holds(b.len() == 16 && b[13] == 0u8 && b[14] == 0u8 && b[15] == '!', "the gap is zeros")
+    holds(ok(m.flush()), "flush")
+}
+
+// A `Buffered` over a memory stream reads lines, exact counts and the rest.
+#test
+fun buffered_lines() {
+    var r = buffered(from_str("one\r\ntwo\n\nthree"))
+    holds(shown_line(r.read_line()) == "one\r", "the \\r stays")
+    holds(shown_line(r.read_line()) == "two", "a plain line")
+    holds(shown_line(r.read_line()) == "", "an empty line")
+    holds(shown_line(r.read_line()) == "three", "a last line without \\n")
+    holds(shown_line(r.read_line()) == "<end>", "then the end")
+    holds(shown_line(r.read_line()) == "<end>", "and again")
+    var e = buffered(memory_stream())
+    holds(shown_line(e.read_line()) == "<end>", "nothing at all")
+    var n = buffered(from_str("\n"))
+    holds(shown_line(n.read_line()) == "", "one empty line")
+    holds(shown_line(n.read_line()) == "<end>", "and no more")
+}
+
+// Lines longer than a read, so a line is put together over several.
+#test
+fun buffered_long_lines() {
+    var sb = StringBuilder()
+    var i = 0
+    while i < 3 {
+        var k = 0
+        while k < 5000 + i {
+            sb.append_byte(97u8 + (i as uint8))
+            k += 1
+        }
+        sb.append("\r\n")
+        i += 1
+    }
+    var r = buffered(from_str(sb.build()))
+    i = 0
+    while i < 3 {
+        match r.read_line() {
+            Ok(Some(l)) => {
+                holds(l.len() == 5000 + i + 1, f"line {i}'s length")
+                holds(l[0] == 97u8 + (i as uint8) && l[^1] == 13u8, f"line {i}'s bytes")
+            }
+            _ => panic(f"line {i}")
+        }
+        i += 1
+    }
+    holds(shown_line(r.read_line()) == "<end>", "the end")
+}
+
+// After a line: exact counts, a plain read and the rest; too few bytes
+// for an exact count leave them unread.
+#test
+fun buffered_exact_and_rest() {
+    var r = buffered(from_str("header\nbody bytes and the rest"))
+    holds(shown_line(r.read_line()) == "header", "a line")
+    holds(shown_line(r.read_exact(4)) == "body", "four bytes")
+    holds(shown_line(r.read_exact(0)) == "", "none")
+    holds(shown(r.read(6)) == " bytes", "a read through it")
+    match r.read_to_end() {
+        Ok(s) => holds(s == " and the rest", "the rest")
+        Err(_) => panic("read_to_end")
+    }
+    holds(said(r.read_to_end()) == "", "nothing after the end")
+    var s = buffered(from_str("abc"))
+    holds(shown_line(s.read_exact(4)) == "<end>", "too few bytes")
+    holds(shown_line(s.read_exact(3)) == "abc", "which stay unread")
+}
+
+// A `Buffered` is a `Read` itself, so adapters stack, and a big read goes
+// past its buffer.
+#test
+fun buffered_stacks() {
+    var sb = StringBuilder()
+    var i = 0
+    while i < 10000 {
+        sb.append_byte(48u8 + ((i % 10) as uint8))
+        i += 1
+    }
+    let text = sb.build()
+    var r = buffered(buffered(from_str(text)))
+    holds(shown(r.read(3)) == "012", "a small read")
+    match r.read(9000) {
+        Ok(b) => holds(b.len() > 0 && b[0] == '3', "a big read goes on where the small one stopped")
+        Err(_) => panic("read")
+    }
+    let all = read_all(buffered(buffered(from_str(text))))
+    holds(shown(all) == text, "read_all through two")
+    let inner = buffered(from_str("xyz")).into_inner()
+    holds(inner.text() == "xyz", "into_inner")
+}
+
+// `copy` and `read_all` over any `Read`, `copy` to any `Write`.
+#test
+fun copy_and_read_all() {
+    let w = copy(from_str("copied"), memory_stream())
+    match w {
+        Ok(m) => holds(m.text() == "copied", "into a memory stream")
+        Err(_) => panic("copy")
+    }
+    var src = from_str("abc")
+    holds(shown(read_all(src)) == "abc", "read_all")
+    holds(src.position() == 0i64, "the caller's stream doesn't move")
+    holds(shown(read_all(memory_stream())) == "", "read_all of nothing")
+    match copy(from_str("through a writer"), buffered_writer_with(memory_stream(), 4)) {
+        Ok(bw) => {
+            match bw.into_inner() {
+                Ok(m) => holds(m.text() == "through a writer", "copy into a BufferedWriter")
+                Err(_) => panic("into_inner")
+            }
+        }
+        Err(_) => panic("copy")
+    }
+}
+
+// A `BufferedWriter` passes its bytes on when its buffer fills, on `flush`,
+// and on `into_inner`.
+#test
+fun buffered_writer_flushes() {
+    var w = buffered_writer_with(memory_stream(), 8)
+    holds(said(w.write_str("abc")) == "3", "a small write")
+    holds(w.sink[0].text() == "", "kept in the buffer")
+    holds(said(w.write_str("defgh")) == "5", "fills the buffer")
+    holds(w.sink[0].text() == "", "still kept: exactly full")
+    holds(said(w.write(bytes_of("i"))) == "1", "one more")
+    holds(w.sink[0].text() == "abcdefgh", "the full buffer went on")
+    holds(said(w.write(bytes_of("a write longer than the buffer"))) == "30", "a long write")
+    holds(w.sink[0].text() == "abcdefghia write longer than the buffer", "goes straight on")
+    holds(said(w.write_str("tail")) == "4", "a tail")
+    holds(ok(w.flush()), "flush")
+    holds(w.sink[0].text() == "abcdefghia write longer than the buffertail", "flushed")
+    var big = buffered_writer(memory_stream())
+    var i = 0
+    while i < 3000 {
+        holds(said(big.write_str("line\n")) == "5", "write_str")
+        i += 1
+    }
+    match big.into_inner() {
+        Ok(m) => holds(m.bytes().len() == 15000, "every byte, in order")
+        Err(_) => panic("into_inner")
+    }
+}
+
+// A seek through a `Buffered` drops what it buffered, and one through a
+// `BufferedWriter` passes its buffer on first.
+#test
+fun buffered_seeks() {
+    var r = buffered(from_str("first\nsecond\nthird\n"))
+    holds(shown_line(r.read_line()) == "first", "a line, and the rest buffered")
+    holds(said(r.seek(SeekFrom.Current(0))) == "6", "the cursor is after the line, not after the buffer")
+    holds(shown_line(r.read_line()) == "second", "the next line")
+    holds(said(r.seek(SeekFrom.Start(0))) == "0", "back to the start")
+    holds(shown_line(r.read_line()) == "first", "the first line again")
+    holds(said(r.seek(SeekFrom.End(-6))) == "13", "near the end")
+    holds(shown_line(r.read_line()) == "third", "the last line")
+    holds(shown_line(r.read_line()) == "<end>", "the end")
+    holds(said(r.seek(SeekFrom.Start(13))) == "13", "a seek after the end of the input")
+    holds(shown_line(r.read_line()) == "third", "reads again")
+    var w = buffered_writer(from_str("0123456789"))
+    holds(said(w.write_str("ab")) == "2", "buffered")
+    holds(said(w.seek(SeekFrom.Start(5))) == "5", "a seek")
+    holds(said(w.write_str("XY")) == "2", "written after the seek")
+    match w.into_inner() {
+        Ok(m) => holds(m.text() == "ab234XY789", "each write where the cursor was")
+        Err(_) => panic("into_inner")
+    }
+}
+
+// Bytes that aren't text go through every path unchanged.
+#test
+fun any_bytes() {
+    var b: [uint8] = []
+    var i = 0
+    while i < 256 {
+        b.push(i as uint8)
+        i += 1
+    }
+    let all = read_all(buffered(from_bytes(b)))
+    holds(said_bytes(all) == "256 0 255", "read_all")
+    match copy(buffered(from_bytes(b)), buffered_writer_with(memory_stream(), 7)) {
+        Ok(w) => {
+            match w.into_inner() {
+                Ok(m) => holds(said_bytes(Ok(m.bytes())) == "256 0 255", "copy")
+                Err(_) => panic("into_inner")
+            }
+        }
+        Err(_) => panic("copy")
+    }
+    var m = from_bytes(b)
+    match m.read_str(300) {
+        Ok(s) => holds(s.len() == 256 && s[0] == 0u8 && s[255] == 255u8, "read_str")
+        Err(_) => panic("read_str")
+    }
+}
+
+// The length, first and last byte of a result's bytes.
+fun said_bytes(r: Result<[uint8], IoError>) -> str {
+    return match r {
+        Ok(b) => {
+            if b.len() == 0 { "0" } else { f"{b.len()} {b[0]} {b[^1]}" }
+        }
+        Err(_) => "<error>"
+    }
+}
+
+// A stream on a descriptor is `Pollable`, a `Buffered` over one too; a bad
+// descriptor fails each operation.
+#test
+fun descriptors() {
+    holds(fd_stream(0).descriptor() == 0, "a descriptor stream's descriptor")
+    holds(stdin().descriptor() == 0, "stdin's descriptor")
+    holds(reader(5).descriptor() == 5, "a reader's descriptor")
+    var bad = fd_stream(-1)
+    holds(shown(bad.read(4)) == "<error>", "a read of a bad descriptor fails")
+    holds(said(bad.write(bytes_of("x"))) == "Other(9)", "and a write")
+    holds(said(bad.seek(SeekFrom.Start(0))) == "Other(9)", "and a seek")
 }

@@ -26,16 +26,18 @@ The low-level primitives `__write`, `__read`, `__poll`, `__exit`, `__args`, `__r
 
 One page per module (D164). A new module adds its row here.
 
-The conventions (D164): operations on built-in types are methods (`s.split(",")`, `xs.sorted()`), and `std.str`, `std.char`, `std.int`, `std.list`, `std.option` and `std.map` are seen by every program without an import ([[MYLA-320]], [[Language/Modules#implicit-imports]]: their methods, not their functions, which need an import; not in the modules of `std`, which import what they use); everything else is a function of its module (`path.join(a, b)`). Strings are bytes and character classes ASCII. A function that can fail returns a `Result` with its module's error enum.
+The conventions (D164): operations on built-in types are methods (`s.split(",")`, `xs.sorted()`), and `std.str`, `std.char`, `std.int`, `std.list`, `std.option` and `std.map` are seen by every program without an import, and `std.hash`, whose methods and impls the `Hash` trait builds on (D163, D166, [[MYLA-313]]) ([[MYLA-320]], [[Language/Modules#implicit-imports]]: their methods, not their functions, which need an import; not in the modules of `std`, which import what they use); everything else is a function of its module (`path.join(a, b)`). Strings are bytes and character classes ASCII. A function that can fail returns a `Result` with its module's error: a bare enum when the variants carry different data, a struct with a `kind` enum when every error has the same position (D168). A map keyed by a type parameter writes `T: Eq + Hash` (D167).
 
 | Module | Page | Holds |
 | --- | --- | --- |
-| `std.io` | [[Language/Standard-library/Io]] | Writing to a descriptor, the buffered `Reader`, async reads |
+| `std.io` | [[Language/Standard-library/Io]] | Writing to a descriptor, the buffered `Reader`, async reads; the stream traits `Read`, `Write`, `Seek`, memory streams, `Buffered`, `BufferedWriter`, `copy` |
 | `std.fs` | [[Language/Standard-library/Fs]] | Whole-file reads and writes, directories, `IoError` |
+| `std.path` | [[Language/Standard-library/Path]] | Paths as strings: `join`, `parent`, `file_name`, extensions, `normalize`, `relative` |
+| `std.glob` | [[Language/Standard-library/Glob]] | Glob patterns (`*`, `?`, `**`, sets), directory walks, `glob` |
 | `std.process` | [[Language/Standard-library/Process]] | Arguments, the environment, exit, running programs (`run`, `command`) |
 | `std.char` | [[Language/Standard-library/Char]] | Character classes, case and digits, as methods on `char` (ASCII) |
 | `std.int` | [[Language/Standard-library/Int]] | Methods on every integer type: `gcd`, `pow`, Euclidean division, checked, wrapping, saturating and overflowing arithmetic, `mulmod`, `powmod`, `modinv` |
-| `std.num` | [[Language/Standard-library/Num]] | Exact parsing and printing of integers and floats |
+| `std.num` | [[Language/Standard-library/Num]] | Exact parsing and printing of integers and floats; integers in any radix and width, with `ParseIntError` |
 | `std.str` | [[Language/Standard-library/Str]] | Methods on `str`: search, split, trim, case, padding, replace |
 | `std.fmt` | [[Language/Standard-library/Fmt]] | Format specs and the helpers of `Format` impls |
 | `std.math` | [[Language/Standard-library/Math]] | Floating-point functions after fdlibm |
@@ -44,8 +46,21 @@ The conventions (D164): operations on built-in types are methods (`s.split(",")`
 | `std.option` | [[Language/Standard-library/Option]] | Methods on `Option` and `Result`: `map`, `and_then`, `unwrap_or`, `ok_or`, `map_err`, `expect`, … |
 | `std.map` | [[Language/Standard-library/Map]] | Methods on maps (`get_or`, `update`, `values`, `items`, `merge`) and `counts` |
 | `std.task` | [[Language/Standard-library/Task]] | Child tasks in numbers known at run time, cancellation |
-| `std.time` | [[Language/Standard-library/Time]] | The monotonic clock |
+| `std.time` | [[Language/Standard-library/Time]] | The monotonic and wall clocks, `Duration`, `Instant`, `DateTime` in UTC, RFC 3339 and ISO 8601 |
+| `std.log` | [[Language/Standard-library/Log]] | `error`, `warn`, `info`, `debug` to the standard error with a time, the level from `MYLA_LOG` |
 | `std.test` | [[Language/Standard-library/Test]] | Expectations, temporary directories and the program under test, for test functions |
-| `std.json` | [[Language/Standard-library/Json]] | JSON values, parsing and writing |
+| `std.json` | [[Language/Standard-library/Json]] | JSON values, parsing, compact and indented writing, paths, typed getters |
 | `std.toml` | [[Language/Standard-library/Toml]] | The TOML subset of manifests and lock files |
+| `std.csv` | [[Language/Standard-library/Csv]] | RFC 4180 CSV: records, a header row mapped to names, writing |
+| `std.ini` | [[Language/Standard-library/Ini]] | INI files: sections, keys, comments, read and written in order |
+| `std.bytes` | [[Language/Standard-library/Bytes]] | Strings as `[uint8]` and back, checking and building UTF-8 |
+| `std.encoding` | [[Language/Standard-library/Encoding]] | Hex and Base64 (standard and URL-safe), strict decoding |
+| `std.url` | [[Language/Standard-library/Url]] | Percent-encoding, query strings, parsing and building URLs |
+| `std.hash` | [[Language/Standard-library/Hash]] | The `Hasher` that `Hash` builds on (wyhash), FNV-1a, CRC-32 and Adler-32 |
+| `std.regex` | [[Language/Standard-library/Regex]] | Regular expressions in linear time: RE2's syntax on bytes, `find`, `captures`, `replace`, `split` |
+| `std.set` | [[Language/Standard-library/Set]] | `Set<T>` in insertion order: insert, remove, union, intersection, difference |
+| `std.deque` | [[Language/Standard-library/Deque]] | `Deque<T>`, the double-ended queue and the queue: a ring buffer, indexable |
+| `std.heap` | [[Language/Standard-library/Heap]] | Binary heaps: `Heap<T: Ord>`, least or greatest first, and `KeyedHeap<T>` by an `int64` priority |
+| `std.digest` | [[Language/Standard-library/Digest]] | MD5, SHA-1, SHA-2 and HMAC, one-shot and incremental, as bytes and as hex |
+| `std.args` | [[Language/Standard-library/Args]] | Command-line arguments: a declarative spec of flags, options, positionals and subcommands, parsing, the generated help |
 | `std.rt` | [[Language/Standard-library/Rt]] | The runtime in Myla; not for programs |

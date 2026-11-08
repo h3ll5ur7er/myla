@@ -1,0 +1,5 @@
+module error: 'args.parse' is a function of module 'std.args', not a type
+  --> examples/errors/module_type_names_a_function.my:6:12
+  |
+6 | fun run(p: args.parse) -> int {
+  |            ^^^^^^^^^^

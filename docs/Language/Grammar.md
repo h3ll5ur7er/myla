@@ -93,7 +93,7 @@ import_item  = IDENT ( "as" IDENT )? ;
 ```ebnf
 type          = prim_type | named_type | "[" type "]" | "[" type ":" type "]"
               | "(" ")" | tuple_type | function_type ;   (* "()": the unit type, D138 *)
-named_type    = IDENT type_args? ;
+named_type    = IDENT ( "." IDENT )* type_args? ;   (* m.T: a module's type, D170 *)
 type_args     = "<" type ( "," type )* ","? ">" ;
 prim_type     = "bool" | "str" | "int8" | "int16" | "int32" | "int64"
               | "uint8" | "uint16" | "uint32" | "uint64" ;
@@ -150,15 +150,20 @@ unary       = ( "-" | "!" | "~" ) unary | "await" unary
               (* the parser also lets a suffix follow a lambda whose body
                  can't take it, as in (x) => x as T [0]; write ((x) => …)[0] *)
 postfix     = primary ( "(" call_args? ")" | "[" NL* index_part NL* "]"
-                      | "." ( IDENT | TUPLE_INDEX ) | "?" )* ;
+                      | "." member | "?" )* ;
+member      = IDENT | TUPLE_INDEX | generic_call ;
 call_args   = NL+ | NL* call_arg NL* ( "," NL* call_arg NL* )* ( "," NL* )? ;
 call_arg    = "_" | expression ;            (* "_" alone: a partial-application hole *)
 index_part  = bound | bound? ":" bound? ( ":" expression? )? ;   (* D142 *)
 bound       = "^" expression | expression ;   (* "^n": the n-th from the end *)
 
 primary     = INT | FLOAT | CHAR | STRING | fstring | "true" | "false"
-            | "self" | IDENT | struct_literal | "(" NL* expression NL* ")"
+            | "self" | IDENT | generic_call | struct_literal | "(" NL* expression NL* ")"
             | "(" NL* ")" | tuple | list | map | match_expr | if_expr ;   (* "()": the unit value, D138 *)
+generic_call = IDENT type_args "(" call_args? ")" ;
+              (* f<T>(…), m.f<T>(…), x.method<T>(…) (D169): after a name, the
+                 parser tries "<" as type arguments, kept when they close and
+                 "(" follows, else "<" compares *)
 fstring     = 'f"' ( FSTRING_TEXT | "{{" | "}}"
                    | "{" expression FORMAT_SPEC? "}" )* '"' ;
               (* lowered by the lexer to: format(STRING, expression, …) *)
@@ -198,9 +203,9 @@ field_pattern = IDENT ( ":" pattern )? ;
 
 - **Struct literal or block.** In `if`, `while`, `for` and `match` heads and in match guards struct literals are off, so `{` starts the body. Parentheses turn them back on, and so does a lambda's body. The tree-sitter grammar keeps both readings until one fails (a declared conflict).
 - **Parenthesis.** `( … ) =>` is a lambda (decided by scanning to the matching `)`), `(e)` is grouping, `(e,)` and `(a, b)` are tuples. In types, `(…) -> R` is a function type and `(T,)` a tuple.
-- **`<`.** In types it opens type arguments; in expressions it is a comparison. Generic arguments never appear in expressions (D34), but after a cast's type a `<` opens type arguments: `a as T < b` is a parse error.
+- **`<`.** In types it opens type arguments; in expressions it is a comparison, except after a name, a module's member or a method's name, where the parser tries it as a call's type arguments (D169, C#'s and Swift's rule): it keeps them when they parse as types, close with `>` and a `(` follows right away, and otherwise goes back and reads a comparison, keeping no error from the attempt. So `mk<int>()`, `m.f<A, B>(x)` and `xs.mapped<str>(f)` are calls, while `a < b`, `a < b > c` and `f(a < b, c > d)` are comparisons. Two cases read differently from before: `a < b > (c)` is a call of `a` (as a comparison it was never well typed, since a `bool` isn't ordered), and so is `f(a < b, c > (d))`, one argument: write `f(a < b, c > d)` or `f((a < b), c > (d))` for two comparisons. The tree-sitter grammar keeps both readings until one fails (a declared conflict). After a cast's type a `<` opens type arguments: `a as T < b` is a parse error.
 - **`>>`.** Two touching `>` are a shift in expressions and two closers in types.
 - **Nesting.** Expressions, types, blocks and patterns nest at most 256 levels deep (`MAX_NESTING` in the parser): deeper is a parse error, `expression nested too deeply` (or `type`, `block`, `pattern`), at the token where it goes past, not a crash of the parser or the language server ([[MYLA-182]]).
 - **`|`.** Bitwise or in expressions, alternative in patterns.
-- **`.`.** `t.0` is a tuple index (a `.` followed by an integer token), `x.f` a field, `E.V` a variant, `m.f` a module member (resolved by the loader).
+- **`.`.** `t.0` is a tuple index (a `.` followed by an integer token), `x.f` a field, `E.V` a variant, `m.f` a module member (resolved by the loader); in a type, `m.T` is a module's type (D170, resolved by the loader too).
 - **Greedy bodies.** A lambda's expression body, like every operand, extends as far as it can: `(x) => x + 1 |> f` is a lambda whose body is `x + 1 |> f`.

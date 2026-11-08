@@ -34,6 +34,7 @@ fun main() {
 | `xs[i] = v` | Needs a `var` place |
 | `xs.push(v)`, `xs.pop()` | Need a `var` place; `pop` returns the last element, and popping an empty list is a runtime error |
 | `for x in xs` | Visits a snapshot of the elements |
+| `xs == ys`, `xs != ys` | The same length and equal elements in turn, each compared as `==` compares it; for lists whose elements are `Eq` (D163). Tuples compare the same way |
 
 ## Slices and indexes from the end
 
@@ -89,12 +90,43 @@ fun main() {
 
 | Operation | Notes |
 | --- | --- |
-| `[k: v, …]`, `[:]` | Keys must be an integer type, `char`, `bool` or `str`; `[:]` needs an expected type. A key given twice keeps its first place and takes the last value, as `m[k] = v` would |
+| `[k: v, …]`, `[:]` | A key is of any type that is `Eq` and `Hash` (below); `[:]` needs an expected type. A key given twice keeps its first place and takes the last value, as `m[k] = v` would |
 | `m[k]` | A missing key is a runtime error; use `get(m, k) -> Option<V>` (a prelude function) to ask safely |
 | `m[k] = v` | Inserts or replaces; needs a `var` place |
 | `m.contains(k)`, `m.keys() -> [K]`, `m.len()` | `keys` gives the keys in the order `for` visits them |
 | `m.remove(k)` | Needs a `var` place; removing a missing key does nothing. Like `m[k]`, `m[k] = v` and `contains`, it takes constant time on average ([[MYLA-310]]) |
 | `for k in m` | Visits the keys in the order they were first inserted: replacing a value keeps its key's place, removing a key and inserting it again moves it to the end (D105, [[MYLA-179]]) |
+
+### Keys
+
+A map's key type is any type that is `Eq` and `Hash` (D163, [[MYLA-313]]): the integers, `char`, `bool` and `str`; a tuple or a list whose elements are; a struct or enum with `#derive(Eq, Hash)` or with impls written for it ([[Language/Methods-and-traits]]). Floats aren't `Hash`, so neither is anything holding one. A key is a value, so a key in a map never changes.
+
+```myla
+#derive(Eq, Hash)
+struct Pos {
+    x: int,
+    y: int,
+}
+
+fun main() {
+    var dist: [(int, int): int] = [:]
+    dist[(0, 0)] = 0
+    dist[(0, 1)] = 1
+    print(dist[(0, 1)])
+    var walls: [Pos: bool] = [Pos { x: 2, y: 3 }: true]
+    print(walls.contains(Pos { x: 2, y: 3 }))
+    let paths: [[str]: int] = [["a", "b"]: 2]
+    print(paths[["a", "b"]])
+}
+// output:
+// 1
+// true
+// 2
+```
+
+- A generic `[K: V]` needs `K: Eq + Hash`, written where the type parameter is declared (D167): `fun counts<K: Eq + Hash>(xs: [K]) -> [K: int]`, `impl<K: Eq + Hash, V> [K: V]`, `fun distinct<T: Eq + Hash>(xs: [T]) -> int`. Without it, a map keyed by the type parameter, in the signature or the body, is the error `map key type must be Eq and Hash, found 'K': it needs the bound 'K: Eq + Hash'`; with it, a caller must give such a type (`type 'P' does not satisfy the bound 'K: Eq' required by 'counts'`).
+- A map finds a key among those of the same hash and compares them with `==`, so a type's own `Eq` decides which keys are the same; its `Hash` must give equal keys equal hashes.
+- The integers', `char`'s, `bool`'s and `str`'s maps keep their hash; any other key is hashed by its parts natively (a type's written `hash` called), and by its parts or that `hash` in the interpreter. Neither is the value `hash` gives, which a map doesn't show: the order is the order of insertion.
 
 ## Methods of the builtin types
 
@@ -123,8 +155,10 @@ Lists, maps and builders behave like every other value: `let b = a` makes an ind
 | `s.len()` | Number of **bytes** |
 | `s[i]` | The byte at `i`, as a `uint8`; out of bounds is a runtime error; strings can't be assigned into |
 | `a + b` | A new string |
-| `a == b`, `a != b` | Byte-wise equality; there is no `<` on strings |
+| `a == b`, `a != b` | Byte-wise equality |
+| `a < b`, `<=`, `>`, `>=` | Byte-wise order: the first byte that differs decides, unsigned, and a string that begins another comes first (`"ab" < "abc"`, `"Z" < "a"`, `"z" < "é"`), the order `list_dir` sorts in; `str` is `Ord`, so `xs.sort()` and a `Heap<str>` work ([[MYLA-318]]) |
 | `s.chars()` | `[char]`, one element per Unicode scalar; each byte that isn't part of a well-formed UTF-8 sequence (a stray or truncated byte, an overlong form, an encoded surrogate) gives U+FFFD |
+| `for c in s` | Visits the characters, each a `char`, as `s.chars()` gives them, without making the list ([[MYLA-318]]); the bytes are `s[i]` for `i` in `0..s.len()`, or the list `bytes.from_str(s)` ([[Language/Standard-library/Bytes]]) |
 | `format("{} of {}", a, b)` | See below |
 
 Byte comparisons with ASCII char literals type-check directly: `if s[i] == ' ' { … }`.

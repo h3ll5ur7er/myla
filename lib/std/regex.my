@@ -1,0 +1,4290 @@
+// std.regex: regular expressions in linear time (MYLA-335, D164).
+//
+// RE2's model: a pattern is parsed to a tree, compiled to a Thompson NFA
+// (a program of byte tests, splits and saves) and run by a Pike VM, which
+// walks the text once and keeps at most one thread per instruction, so a
+// search takes time proportional to the text times the program, whatever
+// the pattern. There are no backreferences and no lookaround, which no
+// linear-time matcher can have. On a longer text a lazily built DFA finds
+// where a match ends, a DFA of the reversed pattern where it starts, and
+// the Pike VM runs only over the match, for its groups.
+//
+// The syntax is RE2's (and Go's `regexp`'s), the matches are its
+// leftmost-first ones, and the tests compare them with RE2's own search
+// tests. Strings are bytes (D164): a class matches one byte, `.` matches one
+// byte, case folding is ASCII, and positions are byte offsets.
+
+// --- Errors -------------------------------------------------------------------
+
+// What is wrong with a pattern.
+#derive(Eq)
+pub enum ErrorKind {
+    // A `(` without its `)`.
+    MissingParen,
+    // A `)` without its `(`.
+    UnexpectedParen,
+    // A `[` without its `]`.
+    MissingBracket,
+    // A `\` before a character that isn't an escape, or one at the end.
+    InvalidEscape,
+    // A class range whose end comes before its start, `[z-a]`.
+    InvalidClassRange,
+    // A `[:name:]` that isn't one of the POSIX classes.
+    InvalidPosixClass,
+    // A non-ASCII character in a class: classes match bytes.
+    NonAsciiInClass,
+    // `*`, `+`, `?` or `{n}` with nothing before it to repeat.
+    MissingRepeatArgument,
+    // A repetition of a repetition, `a**`.
+    InvalidNestedRepeat,
+    // A count above 1000, or `{n,m}` with `m` below `n`.
+    InvalidRepeatCount,
+    // A group syntax this module doesn't have, such as lookaround `(?=`.
+    InvalidGroup,
+    // A group name that is empty or not letters, digits and `_`.
+    InvalidGroupName,
+    // Two groups with one name.
+    DuplicateGroupName,
+    // A flag other than `i`, `m`, `s` and `U`, or a `-` without one.
+    InvalidFlags,
+    // Groups nested more than 100 deep.
+    NestingTooDeep,
+    // A program of more than 100,000 instructions.
+    TooLarge,
+}
+
+// Why a pattern doesn't compile, and where: `pos` is the byte offset in the
+// pattern of the construct at fault.
+#derive(Eq)
+pub struct RegexError {
+    kind: ErrorKind,
+    pos: int,
+}
+
+impl RegexError {
+    // The reason in words, mostly as Go's `regexp` words it.
+    fun message(self) -> str {
+        return match self.kind {
+            MissingParen => "missing closing )"
+            UnexpectedParen => "unexpected )"
+            MissingBracket => "missing closing ]"
+            InvalidEscape => "invalid escape sequence"
+            InvalidClassRange => "invalid character class range"
+            InvalidPosixClass => "invalid POSIX character class"
+            NonAsciiInClass => "non-ASCII character in a class"
+            MissingRepeatArgument => "missing argument to repetition operator"
+            InvalidNestedRepeat => "invalid nested repetition operator"
+            InvalidRepeatCount => "invalid repeat count"
+            InvalidGroup => "invalid or unsupported group syntax"
+            InvalidGroupName => "invalid group name"
+            DuplicateGroupName => "duplicate group name"
+            InvalidFlags => "invalid flags"
+            NestingTooDeep => "groups nested too deeply"
+            TooLarge => "expression too large"
+        }
+    }
+}
+
+impl Format for RegexError {
+    fun format(self, spec: str) -> str {
+        return f"{self.message()} at {self.pos}"
+    }
+}
+
+// --- The tree -----------------------------------------------------------------
+
+// The kinds of empty-width assertion.
+const BEGIN_TEXT: int = 1
+const END_TEXT: int = 2
+const BEGIN_LINE: int = 3
+const END_LINE: int = 4
+const WORD_BOUNDARY: int = 5
+const NOT_WORD_BOUNDARY: int = 6
+
+// A parsed pattern. `Set` holds 256 flags, one per byte; `Rep` a minimum, a
+// maximum (-1: none) and whether it is greedy; `Group` a capture's index.
+enum Node {
+    Empty,
+    Byte(int),
+    Set([bool]),
+    Cat([Node]),
+    Alt([Node]),
+    Rep(Node, int, int, bool),
+    Group(Node, int),
+    Look(int),
+}
+
+// Whether `n` can match the empty string.
+fun nullable(n: Node) -> bool {
+    return match n {
+        Empty => true
+        Byte(_) => false
+        Set(_) => false
+        Look(_) => true
+        Group(sub, _) => nullable(sub)
+        Rep(sub, min, _, _) => min == 0 || nullable(sub)
+        Cat(xs) => {
+            var all = true
+            for x in xs {
+                if !nullable(x) { all = false }
+            }
+            all
+        }
+        Alt(xs) => {
+            var any = false
+            for x in xs {
+                if nullable(x) { any = true }
+            }
+            any
+        }
+    }
+}
+
+// --- Byte sets ----------------------------------------------------------------
+
+fun no_bytes() -> [bool] {
+    var s: [bool] = []
+    var b = 0
+    while b < 256 {
+        s.push(false)
+        b += 1
+    }
+    return s
+}
+
+fun byte_range(lo: int, hi: int) -> [bool] {
+    return with_range(no_bytes(), lo, hi)
+}
+
+// `set` with the bytes `lo` to `hi` added.
+fun with_range(set: [bool], lo: int, hi: int) -> [bool] {
+    var s = set
+    var b = lo
+    while b <= hi {
+        s[b] = true
+        b += 1
+    }
+    return s
+}
+
+fun negated(set: [bool]) -> [bool] {
+    var s = no_bytes()
+    var b = 0
+    while b < 256 {
+        s[b] = !set[b]
+        b += 1
+    }
+    return s
+}
+
+fun united(a: [bool], b: [bool]) -> [bool] {
+    var s = no_bytes()
+    var k = 0
+    while k < 256 {
+        s[k] = a[k] || b[k]
+        k += 1
+    }
+    return s
+}
+
+// `set` with each ASCII letter's other case added.
+fun folded(set: [bool]) -> [bool] {
+    var s = set
+    var b = 65
+    while b <= 90 {
+        if set[b] || set[b + 32] {
+            s[b] = true
+            s[b + 32] = true
+        }
+        b += 1
+    }
+    return s
+}
+
+// The class of a Perl escape letter (`d`, `w`, `s` and their capitals).
+fun perl_class(c: uint8) -> [bool] {
+    var s = no_bytes()
+    if c == 'd' || c == 'D' {
+        s = with_range(s, 48, 57)
+    } else if c == 'w' || c == 'W' {
+        s = with_range(s, 48, 57)
+        s = with_range(s, 65, 90)
+        s = with_range(s, 97, 122)
+        s[95] = true
+    } else {
+        // RE2's \s: tab, newline, form feed, carriage return and space
+        s[9] = true
+        s[10] = true
+        s[12] = true
+        s[13] = true
+        s[32] = true
+    }
+    if c == 'D' || c == 'W' || c == 'S' {
+        return negated(s)
+    }
+    return s
+}
+
+// The POSIX class `name` (`alpha`, `digit`, …), or None.
+#test("digit")[Some(byte_range(48, 57))]
+#test("word")[None]
+fun posix_class(name: str) -> Option<[bool]> {
+    var s = no_bytes()
+    if name == "alnum" {
+        s = with_range(s, 48, 57)
+        s = with_range(s, 65, 90)
+        s = with_range(s, 97, 122)
+    } else if name == "alpha" {
+        s = with_range(s, 65, 90)
+        s = with_range(s, 97, 122)
+    } else if name == "ascii" {
+        s = with_range(s, 0, 127)
+    } else if name == "blank" {
+        s[9] = true
+        s[32] = true
+    } else if name == "cntrl" {
+        s = with_range(s, 0, 31)
+        s[127] = true
+    } else if name == "digit" {
+        s = with_range(s, 48, 57)
+    } else if name == "graph" {
+        s = with_range(s, 33, 126)
+    } else if name == "lower" {
+        s = with_range(s, 97, 122)
+    } else if name == "print" {
+        s = with_range(s, 32, 126)
+    } else if name == "punct" {
+        s = with_range(s, 33, 47)
+        s = with_range(s, 58, 64)
+        s = with_range(s, 91, 96)
+        s = with_range(s, 123, 126)
+    } else if name == "space" {
+        s = with_range(s, 9, 13)
+        s[32] = true
+    } else if name == "upper" {
+        s = with_range(s, 65, 90)
+    } else if name == "word" {
+        return None
+    } else if name == "xdigit" {
+        s = with_range(s, 48, 57)
+        s = with_range(s, 65, 70)
+        s = with_range(s, 97, 102)
+    } else {
+        return None
+    }
+    return Some(s)
+}
+
+// --- Parsing ------------------------------------------------------------------
+
+const MAX_REPEAT: int = 1000
+const MAX_DEPTH: int = 100
+
+fun is_digit(c: uint8) -> bool {
+    return c >= '0' && c <= '9'
+}
+
+fun is_word_byte(c: uint8) -> bool {
+    return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_'
+}
+
+fun hex_value(c: uint8) -> int {
+    if c >= '0' && c <= '9' { return (c as int) - 48 }
+    if c >= 'a' && c <= 'f' { return (c as int) - 87 }
+    if c >= 'A' && c <= 'F' { return (c as int) - 55 }
+    return -1
+}
+
+struct Parser {
+    p: str,
+    i: int,
+    fold: bool,
+    multi: bool,
+    dotall: bool,
+    ungreedy: bool,
+    // the name of each group, "" for an unnamed one; [0] is the whole match
+    names: [str],
+}
+
+impl Parser {
+    fun err(self, kind: ErrorKind, at: int) -> RegexError {
+        return RegexError { kind: kind, pos: at }
+    }
+
+    fun at_end(self) -> bool {
+        return self.i >= self.p.len()
+    }
+
+    fun peek(self, k: int) -> int {
+        let j = self.i + k
+        return if j < self.p.len() { self.p[j] as int } else { -1 }
+    }
+
+    // Alternatives up to a `)` or the end, which it doesn't take.
+    fun alternation(var self, depth: int) -> Result<Node, RegexError> {
+        var alts: [Node] = []
+        alts.push(self.concatenation(depth)?)
+        while !self.at_end() && self.p[self.i] == '|' {
+            self.i += 1
+            alts.push(self.concatenation(depth)?)
+        }
+        if alts.len() == 1 {
+            return Ok(alts[0])
+        }
+        return Ok(Node.Alt(alts))
+    }
+
+    fun concatenation(var self, depth: int) -> Result<Node, RegexError> {
+        var items: [Node] = []
+        // what the last item is: 0 nothing to repeat, 1 an atom, 2 a repetition
+        var last = 0
+        while !self.at_end() {
+            let c = self.p[self.i]
+            if c == '|' || c == ')' {
+                break
+            }
+            let start = self.i
+            var min = -1
+            var max = -1
+            if c == '*' {
+                min = 0
+                self.i += 1
+            } else if c == '+' {
+                min = 1
+                self.i += 1
+            } else if c == '?' {
+                min = 0
+                max = 1
+                self.i += 1
+            } else if c == '{' {
+                match self.counts()? {
+                    Some(mm) => {
+                        min = mm.0
+                        max = mm.1
+                    }
+                    None => {}
+                }
+            }
+            if min >= 0 {
+                if last == 0 {
+                    return Err(self.err(ErrorKind.MissingRepeatArgument, start))
+                }
+                if last == 2 {
+                    return Err(self.err(ErrorKind.InvalidNestedRepeat, start))
+                }
+                var greedy = true
+                if !self.at_end() && self.p[self.i] == '?' {
+                    greedy = false
+                    self.i += 1
+                }
+                if self.ungreedy {
+                    greedy = !greedy
+                }
+                let atom = items.pop()
+                items.push(Node.Rep(atom, min, max, greedy))
+                last = 2
+                continue
+            }
+            match self.atom(depth)? {
+                Some(n) => {
+                    items.push(n)
+                    last = 1
+                }
+                None => {
+                    last = 0
+                }
+            }
+        }
+        if items.len() == 0 {
+            return Ok(Node.Empty)
+        }
+        if items.len() == 1 {
+            return Ok(items[0])
+        }
+        return Ok(Node.Cat(items))
+    }
+
+    // At a `{`: the counts of `{n}`, `{n,}` or `{n,m}` (-1 for no maximum),
+    // taken; None, and nothing taken, if it isn't one, which makes the `{`
+    // a literal.
+    fun counts(var self) -> Result<Option<(int, int)>, RegexError> {
+        let start = self.i
+        var j = self.i + 1
+        let n = self.p.len()
+        var min = 0
+        var digits = 0
+        while j < n && is_digit(self.p[j]) {
+            if min <= MAX_REPEAT { min = min * 10 + (self.p[j] as int) - 48 }
+            digits += 1
+            j += 1
+        }
+        if digits == 0 || j >= n {
+            return Ok(None)
+        }
+        var max = min
+        if self.p[j] == ',' {
+            j += 1
+            max = -1
+            var mdigits = 0
+            var m = 0
+            while j < n && is_digit(self.p[j]) {
+                if m <= MAX_REPEAT { m = m * 10 + (self.p[j] as int) - 48 }
+                mdigits += 1
+                j += 1
+            }
+            if mdigits > 0 { max = m }
+        }
+        if j >= n || self.p[j] != '}' {
+            return Ok(None)
+        }
+        self.i = j + 1
+        if min > MAX_REPEAT || max > MAX_REPEAT || (max >= 0 && max < min) {
+            return Err(self.err(ErrorKind.InvalidRepeatCount, start))
+        }
+        return Ok(Some((min, max)))
+    }
+
+    // A literal byte, folded when `(?i)` is on.
+    fun literal(self, b: int) -> Node {
+        if self.fold && ((b >= 65 && b <= 90) || (b >= 97 && b <= 122)) {
+            var s = no_bytes()
+            s[b] = true
+            return Node.Set(folded(s))
+        }
+        return Node.Byte(b)
+    }
+
+    // One atom; None for a group of flags only, `(?i)`, which leaves
+    // nothing to repeat.
+    fun atom(var self, depth: int) -> Result<Option<Node>, RegexError> {
+        let c = self.p[self.i]
+        if c == '(' {
+            return self.group(depth)
+        }
+        if c == '[' {
+            return Ok(Some(self.class()?))
+        }
+        if c == '\\' {
+            return Ok(Some(self.escape()?))
+        }
+        self.i += 1
+        if c == '.' {
+            if self.dotall {
+                return Ok(Some(Node.Set(byte_range(0, 255))))
+            }
+            return Ok(Some(Node.Set(negated(byte_range(10, 10)))))
+        }
+        if c == '^' {
+            return Ok(Some(Node.Look(if self.multi { BEGIN_LINE } else { BEGIN_TEXT })))
+        }
+        if c == '$' {
+            return Ok(Some(Node.Look(if self.multi { END_LINE } else { END_TEXT })))
+        }
+        if c >= 0xC0u8 {
+            // a UTF-8 character is one atom, so `é*` repeats all of it
+            var bytes: [Node] = [Node.Byte(c as int)]
+            while !self.at_end() && self.p[self.i] >= 0x80u8 && self.p[self.i] < 0xC0u8 {
+                bytes.push(Node.Byte(self.p[self.i] as int))
+                self.i += 1
+            }
+            if bytes.len() == 1 {
+                return Ok(Some(bytes[0]))
+            }
+            return Ok(Some(Node.Cat(bytes)))
+        }
+        return Ok(Some(self.literal(c as int)))
+    }
+
+    fun group(var self, depth: int) -> Result<Option<Node>, RegexError> {
+        let open = self.i
+        if depth >= MAX_DEPTH {
+            return Err(self.err(ErrorKind.NestingTooDeep, open))
+        }
+        let saved = (self.fold, self.multi, self.dotall, self.ungreedy)
+        self.i += 1
+        var index = -1
+        if self.peek(0) == '?' {
+            let named = (self.peek(1) == 'P' && self.peek(2) == '<') ||
+                (self.peek(1) == '<' && self.peek(2) != '=' && self.peek(2) != '!')
+            if named {
+                self.i += if self.peek(1) == 'P' { 3 } else { 2 }
+                let name_at = self.i
+                while !self.at_end() && is_word_byte(self.p[self.i]) {
+                    self.i += 1
+                }
+                if self.at_end() || self.p[self.i] != '>' || self.i == name_at {
+                    return Err(self.err(ErrorKind.InvalidGroupName, name_at))
+                }
+                var sb = StringBuilder()
+                sb.append(self.p, name_at, self.i)
+                let name = sb.build()
+                for other in self.names {
+                    if other == name {
+                        return Err(self.err(ErrorKind.DuplicateGroupName, name_at))
+                    }
+                }
+                self.i += 1
+                index = self.names.len()
+                self.names.push(name)
+            } else {
+                // flags: (?imsU-imsU) for the rest of the group, or (?flags:re)
+                self.i += 1
+                var on = true
+                var seen_minus = false
+                var any = false
+                var any_after_minus = false
+                while true {
+                    if self.at_end() {
+                        return Err(self.err(ErrorKind.MissingParen, open))
+                    }
+                    let f = self.p[self.i]
+                    if f == 'i' {
+                        self.fold = on
+                    } else if f == 'm' {
+                        self.multi = on
+                    } else if f == 's' {
+                        self.dotall = on
+                    } else if f == 'U' {
+                        self.ungreedy = on
+                    } else if f == '-' && !seen_minus {
+                        seen_minus = true
+                        on = false
+                        self.i += 1
+                        continue
+                    } else if f == ')' || f == ':' {
+                        if (!any && f == ')') || (seen_minus && !any_after_minus) {
+                            return Err(self.err(ErrorKind.InvalidFlags, open))
+                        }
+                        self.i += 1
+                        if f == ')' {
+                            // the flags hold until the enclosing group ends
+                            return Ok(None)
+                        }
+                        break
+                    } else if any || seen_minus || (f != 'P' && ((f >= 'a' && f <= 'z') || (f >= 'A' && f <= 'Z'))) {
+                        return Err(self.err(ErrorKind.InvalidFlags, open))
+                    } else {
+                        return Err(self.err(ErrorKind.InvalidGroup, open))
+                    }
+                    any = true
+                    if seen_minus { any_after_minus = true }
+                    self.i += 1
+                }
+            }
+        } else {
+            index = self.names.len()
+            self.names.push("")
+        }
+        let sub = self.alternation(depth + 1)?
+        if self.at_end() {
+            return Err(self.err(ErrorKind.MissingParen, open))
+        }
+        self.i += 1
+        self.fold = saved.0
+        self.multi = saved.1
+        self.dotall = saved.2
+        self.ungreedy = saved.3
+        if index < 0 {
+            return Ok(Some(sub))
+        }
+        return Ok(Some(Node.Group(sub, index)))
+    }
+
+    // At a `\` outside a class.
+    fun escape(var self) -> Result<Node, RegexError> {
+        let at = self.i
+        if self.i + 1 >= self.p.len() {
+            return Err(self.err(ErrorKind.InvalidEscape, at))
+        }
+        let c = self.p[self.i + 1]
+        if c == 'd' || c == 'D' || c == 'w' || c == 'W' || c == 's' || c == 'S' {
+            self.i += 2
+            return Ok(Node.Set(perl_class(c)))
+        }
+        if c == 'b' || c == 'B' || c == 'A' || c == 'z' || c == 'C' {
+            self.i += 2
+            if c == 'b' { return Ok(Node.Look(WORD_BOUNDARY)) }
+            if c == 'B' { return Ok(Node.Look(NOT_WORD_BOUNDARY)) }
+            if c == 'A' { return Ok(Node.Look(BEGIN_TEXT)) }
+            if c == 'z' { return Ok(Node.Look(END_TEXT)) }
+            return Ok(Node.Set(byte_range(0, 255)))
+        }
+        let b = self.escaped_byte()?
+        return Ok(self.literal(b))
+    }
+
+    // At a `\` that stands for one byte: `\n`, `\x41`, `\101`, `\.`, ….
+    fun escaped_byte(var self) -> Result<int, RegexError> {
+        let at = self.i
+        let n = self.p.len()
+        if self.i + 1 >= n {
+            return Err(self.err(ErrorKind.InvalidEscape, at))
+        }
+        let c = self.p[self.i + 1]
+        self.i += 2
+        if c >= '1' && c <= '7' && !(self.i < n && self.p[self.i] >= '0' && self.p[self.i] <= '7') {
+            // \1 alone would be a backreference
+            return Err(self.err(ErrorKind.InvalidEscape, at))
+        }
+        if c >= '0' && c <= '7' {
+            var v = (c as int) - 48
+            var k = 1
+            while k < 3 && self.i < n && self.p[self.i] >= '0' && self.p[self.i] <= '7' {
+                v = v * 8 + (self.p[self.i] as int) - 48
+                self.i += 1
+                k += 1
+            }
+            if v > 255 {
+                return Err(self.err(ErrorKind.InvalidEscape, at))
+            }
+            return Ok(v)
+        }
+        if c == 'x' {
+            if self.i < n && self.p[self.i] == '{' {
+                self.i += 1
+                var v = 0
+                var digits = 0
+                while self.i < n && hex_value(self.p[self.i]) >= 0 {
+                    if v <= 255 { v = v * 16 + hex_value(self.p[self.i]) }
+                    digits += 1
+                    self.i += 1
+                }
+                if digits == 0 || self.i >= n || self.p[self.i] != '}' || v > 255 {
+                    return Err(self.err(ErrorKind.InvalidEscape, at))
+                }
+                self.i += 1
+                return Ok(v)
+            }
+            if self.i + 1 < n && hex_value(self.p[self.i]) >= 0 && hex_value(self.p[self.i + 1]) >= 0 {
+                let v = hex_value(self.p[self.i]) * 16 + hex_value(self.p[self.i + 1])
+                self.i += 2
+                return Ok(v)
+            }
+            return Err(self.err(ErrorKind.InvalidEscape, at))
+        }
+        if c == 'a' { return Ok(7) }
+        if c == 'f' { return Ok(12) }
+        if c == 't' { return Ok(9) }
+        if c == 'n' { return Ok(10) }
+        if c == 'r' { return Ok(13) }
+        if c == 'v' { return Ok(11) }
+        if c < 128u8 && !is_word_byte(c) || c == '_' {
+            return Ok(c as int)
+        }
+        return Err(self.err(ErrorKind.InvalidEscape, at))
+    }
+
+    // At a `[`.
+    fun class(var self) -> Result<Node, RegexError> {
+        let open = self.i
+        let n = self.p.len()
+        self.i += 1
+        var negate = false
+        if self.i < n && self.p[self.i] == '^' {
+            negate = true
+            self.i += 1
+        }
+        var set = no_bytes()
+        var first = true
+        while true {
+            if self.i >= n {
+                return Err(self.err(ErrorKind.MissingBracket, open))
+            }
+            let c = self.p[self.i]
+            if c == ']' && !first {
+                self.i += 1
+                break
+            }
+            first = false
+            if c == '[' && self.peek(1) == ':' {
+                match self.posix()? {
+                    Some(s) => {
+                        set = united(set, s)
+                        continue
+                    }
+                    None => {}
+                }
+            }
+            if c == '\\' && self.i + 1 < n {
+                let e = self.p[self.i + 1]
+                if e == 'd' || e == 'D' || e == 'w' || e == 'W' || e == 's' || e == 'S' {
+                    set = united(set, perl_class(e))
+                    self.i += 2
+                    continue
+                }
+            }
+            let range_at = self.i
+            let lo = self.class_byte()?
+            var hi = lo
+            if self.i + 1 < n && self.p[self.i] == '-' && self.p[self.i + 1] != ']' {
+                self.i += 1
+                hi = self.class_byte()?
+                if hi < lo {
+                    return Err(self.err(ErrorKind.InvalidClassRange, range_at))
+                }
+            }
+            set = with_range(set, lo, hi)
+        }
+        if self.fold {
+            set = folded(set)
+        }
+        if negate {
+            set = negated(set)
+        }
+        return Ok(Node.Set(set))
+    }
+
+    // At `[:` in a class: the POSIX class `[:name:]` or `[:^name:]`, taken;
+    // None, and nothing taken, without a `:]` (then `[` is a literal).
+    fun posix(var self) -> Result<Option<[bool]>, RegexError> {
+        let start = self.i
+        let n = self.p.len()
+        var j = self.i + 2
+        while j + 1 < n && !(self.p[j] == ':' && self.p[j + 1] == ']') {
+            j += 1
+        }
+        if j + 1 >= n {
+            return Ok(None)
+        }
+        var k = self.i + 2
+        let negate = k < j && self.p[k] == '^'
+        if negate {
+            k += 1
+        }
+        var sb = StringBuilder()
+        sb.append(self.p, k, j)
+        return match posix_class(sb.build()) {
+            Some(s) => {
+                self.i = j + 2
+                Ok(Some(if negate { negated(s) } else { s }))
+            }
+            None => Err(self.err(ErrorKind.InvalidPosixClass, start))
+        }
+    }
+
+    // One byte of a class: a literal or an escape.
+    fun class_byte(var self) -> Result<int, RegexError> {
+        let c = self.p[self.i]
+        if c == '\\' {
+            return self.escaped_byte()
+        }
+        if c >= 0x80u8 {
+            return Err(self.err(ErrorKind.NonAsciiInClass, self.i))
+        }
+        self.i += 1
+        return Ok(c as int)
+    }
+}
+
+// The tree of `pattern` and its groups' names.
+fun parse(pattern: str) -> Result<(Node, [str]), RegexError> {
+    var p = Parser { p: pattern, i: 0, fold: false, multi: false, dotall: false, ungreedy: false, names: [""] }
+    let tree = p.alternation(0)?
+    if !p.at_end() {
+        return Err(p.err(ErrorKind.UnexpectedParen, p.i))
+    }
+    return Ok((tree, p.names))
+}
+
+// --- The program --------------------------------------------------------------
+
+// The instructions. Each continues at the next one unless it says otherwise.
+const OP_BYTE: int = 0      // the byte `arg`
+const OP_SET: int = 1       // a byte of set `arg`
+const OP_ANY: int = 2       // any byte
+const OP_NOT_NL: int = 3    // any byte but `\n`
+const OP_SPLIT: int = 4     // go on at `arg` and, with less priority, at `arg2`
+const OP_JMP: int = 5       // go on at `arg`
+const OP_SAVE: int = 6      // record the position in slot `arg`
+const OP_LOOK: int = 7      // the assertion `arg`
+const OP_MATCH: int = 8
+
+const MAX_PROGRAM: int = 100000
+
+struct Compiler {
+    op: [int],
+    arg: [int],
+    arg2: [int],
+    // 256 flags per set
+    sets: [bool],
+    nsets: int,
+}
+
+impl Compiler {
+    fun emit(var self, op: int, a: int, b: int) -> Result<int, RegexError> {
+        let pc = self.op.len()
+        if pc >= MAX_PROGRAM {
+            return Err(RegexError { kind: ErrorKind.TooLarge, pos: 0 })
+        }
+        self.op.push(op)
+        self.arg.push(a)
+        self.arg2.push(b)
+        return Ok(pc)
+    }
+
+    fun pc(self) -> int {
+        return self.op.len()
+    }
+
+    fun patch(var self, at: int, a: int, b: int) {
+        self.arg[at] = a
+        self.arg2[at] = b
+    }
+
+    // A split at `at` between `body` and `skip`, preferring `body` if greedy.
+    fun patch_split(var self, at: int, body: int, skip: int, greedy: bool) {
+        if greedy {
+            self.patch(at, body, skip)
+        } else {
+            self.patch(at, skip, body)
+        }
+    }
+
+    fun set(var self, s: [bool]) -> Result<(), RegexError> {
+        var count = 0
+        var one = 0
+        var b = 0
+        while b < 256 {
+            if s[b] {
+                count += 1
+                one = b
+            }
+            b += 1
+        }
+        if count == 1 {
+            self.emit(OP_BYTE, one, 0)?
+            return Ok(())
+        }
+        if count == 256 {
+            self.emit(OP_ANY, 0, 0)?
+            return Ok(())
+        }
+        if count == 255 && !s[10] {
+            self.emit(OP_NOT_NL, 0, 0)?
+            return Ok(())
+        }
+        // an empty set (`[^\x00-\xff]`) is a set that never matches
+        self.emit(OP_SET, self.nsets, 0)?
+        self.nsets += 1
+        for x in s {
+            self.sets.push(x)
+        }
+        return Ok(())
+    }
+
+    fun node(var self, n: Node) -> Result<(), RegexError> {
+        match n {
+            Empty => {}
+            Byte(b) => {
+                self.emit(OP_BYTE, b, 0)?
+            }
+            Set(s) => {
+                self.set(s)?
+            }
+            Look(k) => {
+                self.emit(OP_LOOK, k, 0)?
+            }
+            Group(sub, index) => {
+                self.emit(OP_SAVE, 2 * index, 0)?
+                self.node(sub)?
+                self.emit(OP_SAVE, 2 * index + 1, 0)?
+            }
+            Cat(xs) => {
+                for x in xs {
+                    self.node(x)?
+                }
+            }
+            Alt(xs) => {
+                var jumps: [int] = []
+                var k = 0
+                while k < xs.len() {
+                    if k < xs.len() - 1 {
+                        let split = self.emit(OP_SPLIT, 0, 0)?
+                        self.node(xs[k])?
+                        jumps.push(self.emit(OP_JMP, 0, 0)?)
+                        self.patch(split, split + 1, self.pc())
+                    } else {
+                        self.node(xs[k])?
+                    }
+                    k += 1
+                }
+                let end = self.pc()
+                for j in jumps {
+                    self.patch(j, end, 0)
+                }
+            }
+            Rep(sub, min, max, greedy) => {
+                self.repeat(sub, min, max, greedy)?
+            }
+        }
+        return Ok(())
+    }
+
+    // `sub{min,max}`, expanded as Go's `regexp/syntax` simplifies it:
+    // `x{2,5}` is `xx(x(x(x)?)?)?` and `x{3,}` is `xxx+`.
+    fun repeat(var self, sub: Node, min: int, max: int, greedy: bool) -> Result<(), RegexError> {
+        if max == -1 {
+            if min == 0 {
+                return self.star(sub, greedy)
+            }
+            var k = 0
+            while k < min - 1 {
+                self.node(sub)?
+                k += 1
+            }
+            return self.plus(sub, greedy)
+        }
+        var k = 0
+        while k < min {
+            self.node(sub)?
+            k += 1
+        }
+        var splits: [int] = []
+        while k < max {
+            splits.push(self.emit(OP_SPLIT, 0, 0)?)
+            self.node(sub)?
+            k += 1
+        }
+        let end = self.pc()
+        for s in splits {
+            self.patch_split(s, s + 1, end, greedy)
+        }
+        return Ok(())
+    }
+
+    // `sub*`. One that can match the empty string is `(sub+)?`, so that
+    // an empty iteration has the priority it has in RE2 and Go.
+    fun star(var self, sub: Node, greedy: bool) -> Result<(), RegexError> {
+        let split = self.emit(OP_SPLIT, 0, 0)?
+        if nullable(sub) {
+            self.plus(sub, greedy)?
+        } else {
+            self.node(sub)?
+            self.emit(OP_JMP, split, 0)?
+        }
+        self.patch_split(split, split + 1, self.pc(), greedy)
+        return Ok(())
+    }
+
+    fun plus(var self, sub: Node, greedy: bool) -> Result<(), RegexError> {
+        let body = self.pc()
+        self.node(sub)?
+        let split = self.emit(OP_SPLIT, 0, 0)?
+        self.patch_split(split, body, split + 1, greedy)
+        return Ok(())
+    }
+}
+
+// The literal bytes every match starts with, and whether `n` is all of
+// them (false when something follows that isn't a literal).
+fun literal_prefix(n: Node) -> (str, bool) {
+    return match n {
+        Byte(b) => {
+            var sb = StringBuilder()
+            sb.append_byte(b as uint8)
+            (sb.build(), true)
+        }
+        Group(sub, _) => literal_prefix(sub)
+        Cat(xs) => {
+            var sb = StringBuilder()
+            var whole = true
+            for x in xs {
+                if whole {
+                    let part = literal_prefix(x)
+                    sb.append(part.0)
+                    whole = part.1
+                }
+            }
+            (sb.build(), whole)
+        }
+        Empty => ("", true)
+        _ => ("", false)
+    }
+}
+
+// `n` backwards, without its groups: it matches the reversed texts.
+fun reversed(n: Node) -> Node {
+    return match n {
+        Cat(xs) => {
+            var ys: [Node] = []
+            var i = xs.len() - 1
+            while i >= 0 {
+                ys.push(reversed(xs[i]))
+                i -= 1
+            }
+            Node.Cat(ys)
+        }
+        Alt(xs) => {
+            var ys: [Node] = []
+            for x in xs {
+                ys.push(reversed(x))
+            }
+            Node.Alt(ys)
+        }
+        Rep(sub, min, max, greedy) => Node.Rep(reversed(sub), min, max, greedy)
+        Group(sub, _) => reversed(sub)
+        _ => n
+    }
+}
+
+// Whether every match of `n` starts at the beginning of the text.
+fun anchored_start(n: Node) -> bool {
+    return match n {
+        Look(k) => k == BEGIN_TEXT
+        Group(sub, _) => anchored_start(sub)
+        Cat(xs) => xs.len() > 0 && anchored_start(xs[0])
+        _ => false
+    }
+}
+
+// --- The regular expression ---------------------------------------------------
+
+// A compiled pattern.
+pub struct Regex {
+    pattern: str,
+    op: [int],
+    arg: [int],
+    arg2: [int],
+    sets: [bool],
+    // the name of each group ("" for an unnamed one); [0] is the whole match
+    names: [str],
+    // every match starts at 0
+    anchored: bool,
+    // the bytes every match starts with
+    prefix: str,
+    // where the program has a `.*?` in front, for an unanchored DFA
+    loop_pc: int,
+    // the program of the reversed pattern, without groups
+    rop: [int],
+    rarg: [int],
+    rarg2: [int],
+    rsets: [bool],
+}
+
+// One match: its byte offsets in the text and its text.
+#derive(Eq)
+pub struct Match {
+    start: int,
+    end: int,
+    text: str,
+}
+
+// The groups of one match: `get(0)` is the whole match.
+pub struct Captures {
+    haystack: str,
+    // a start and an end per group, -1 for a group that didn't take part
+    slots: [int],
+    names: [str],
+}
+
+// `pattern` compiled, or why it doesn't compile.
+pub fun compile(pattern: str) -> Result<Regex, RegexError> {
+    let parsed = parse(pattern)?
+    let tree = parsed.0
+    var c = Compiler { op: [], arg: [], arg2: [], sets: [], nsets: 0 }
+    c.emit(OP_SAVE, 0, 0)?
+    c.node(tree)?
+    c.emit(OP_SAVE, 1, 0)?
+    c.emit(OP_MATCH, 0, 0)?
+    // `.*?` and then the program, as the start of the forward DFA
+    let loop_pc = c.pc()
+    c.emit(OP_SPLIT, 0, loop_pc + 1)?
+    c.emit(OP_ANY, 0, 0)?
+    c.emit(OP_JMP, loop_pc, 0)?
+    var r = Compiler { op: [], arg: [], arg2: [], sets: [], nsets: 0 }
+    r.node(reversed(tree))?
+    r.emit(OP_MATCH, 0, 0)?
+    return Ok(Regex {
+        pattern: pattern,
+        op: c.op,
+        arg: c.arg,
+        arg2: c.arg2,
+        sets: c.sets,
+        names: parsed.1,
+        anchored: anchored_start(tree),
+        prefix: literal_prefix(tree).0,
+        loop_pc: loop_pc,
+        rop: r.op,
+        rarg: r.arg,
+        rarg2: r.arg2,
+        rsets: r.sets,
+    })
+}
+
+// `s` with every byte that has a meaning in a pattern escaped: a pattern
+// that matches `s` itself.
+#test("a.b*c")["a\\.b\\*c"]
+#test("[x](y){z}")["\\[x\\]\\(y\\)\\{z\\}"]
+#test("1+1=2?")["1\\+1=2\\?"]
+#test("^$|\\")["\\^\\$\\|\\\\"]
+#test("plain")["plain"]
+pub fun escape(s: str) -> str {
+    var sb = StringBuilder()
+    var i = 0
+    while i < s.len() {
+        let c = s[i]
+        if c == '\\' || c == '.' || c == '+' || c == '*' || c == '?' || c == '(' || c == ')' || c == '|' ||
+            c == '[' || c == ']' || c == '{' || c == '}' || c == '^' || c == '$' {
+            sb.append_byte('\\')
+        }
+        sb.append_byte(c)
+        i += 1
+    }
+    return sb.build()
+}
+
+fun substring(s: str, start: int, end: int) -> str {
+    var sb = StringBuilder()
+    sb.append(s, start, end)
+    return sb.build()
+}
+
+fun zeros(n: int) -> [int] {
+    var xs: [int] = []
+    var k = 0
+    while k < n {
+        xs.push(0)
+        k += 1
+    }
+    return xs
+}
+
+// Where the next search starts after the empty match at `pos`: past the
+// character there (a whole UTF-8 sequence), as in Go.
+fun next_after_empty(s: str, pos: int) -> int {
+    var j = pos + 1
+    if pos < s.len() && s[pos] >= 0xC0u8 {
+        while j < s.len() && j < pos + 4 && s[j] >= 0x80u8 && s[j] < 0xC0u8 {
+            j += 1
+        }
+    }
+    return j
+}
+
+impl Regex {
+    // The pattern the regex was compiled from.
+    fun as_str(self) -> str {
+        return self.pattern
+    }
+
+    // The number of groups, the whole match not counted.
+    fun group_count(self) -> int {
+        return self.names.len() - 1
+    }
+
+    // A search of `s` that wants `nslots` slots: the DFAs for a text of
+    // `DFA_MIN_TEXT` bytes or more (`engine` 0), or always (1), or never
+    // (-1: the Pike VM alone).
+    fun searcher(self, s: str, nslots: int, engine: int) -> Searcher {
+        let use_dfa = engine > 0 || (engine == 0 && s.len() >= DFA_MIN_TEXT)
+        let start = if self.anchored { 0 } else { self.loop_pc }
+        return Searcher {
+            s: s,
+            fwd: new_dfa(self.op, self.arg, self.arg2, self.sets, start, false, s, use_dfa),
+            rev: new_dfa(self.rop, self.rarg, self.rarg2, self.rsets, 0, true, s, use_dfa),
+            vm: new_vm(self, s, nslots),
+            use_dfa: use_dfa,
+            anchored: self.anchored,
+            prefix: self.prefix,
+            nslots: nslots,
+            slots: [],
+        }
+    }
+
+    // Whether `s` has a match.
+    fun is_match(self, s: str) -> bool {
+        var sr = self.searcher(s, 0, 0)
+        return sr.is_match()
+    }
+
+    // The leftmost-first match in `s`.
+    fun find(self, s: str) -> Option<Match> {
+        return self.find_at(s, 0)
+    }
+
+    // The leftmost-first match in `s` that starts at `start` or later. The
+    // text before `start` still counts for `^` and `\b`.
+    fun find_at(self, s: str, start: int) -> Option<Match> {
+        if start < 0 || start > s.len() {
+            return None
+        }
+        var sr = self.searcher(s, 2, 0)
+        if !sr.search(start) {
+            return None
+        }
+        let a = sr.slots[0]
+        let b = sr.slots[1]
+        return Some(Match { start: a, end: b, text: substring(s, a, b) })
+    }
+
+    // The slots of the successive matches (at most `limit` of them, all for
+    // -1) that don't overlap the one before, as Go finds them: an empty
+    // match right after a match doesn't count.
+    fun all_slots(self, s: str, nslots: int, limit: int, engine: int) -> [[int]] {
+        var found: [[int]] = []
+        var sr = self.searcher(s, nslots, engine)
+        var pos = 0
+        var prev_end = -1
+        while pos <= s.len() && (limit < 0 || found.len() < limit) {
+            if !sr.search(pos) {
+                break
+            }
+            let a = sr.slots[0]
+            let b = sr.slots[1]
+            var accept = true
+            if b == a {
+                if a == prev_end {
+                    accept = false
+                }
+                pos = next_after_empty(s, a)
+            } else {
+                pos = b
+            }
+            prev_end = b
+            if accept {
+                found.push(sr.slots)
+            }
+        }
+        return found
+    }
+
+    // Every match in `s`, left to right, none overlapping another.
+    fun find_all(self, s: str) -> [Match] {
+        var out: [Match] = []
+        for m in self.all_slots(s, 2, -1, 0) {
+            out.push(Match { start: m[0], end: m[1], text: substring(s, m[0], m[1]) })
+        }
+        return out
+    }
+
+    // The groups of the leftmost-first match in `s`.
+    fun captures(self, s: str) -> Option<Captures> {
+        var sr = self.searcher(s, 2 * self.names.len(), 0)
+        if !sr.search(0) {
+            return None
+        }
+        return Some(Captures { haystack: s, slots: sr.slots, names: self.names })
+    }
+
+    // The groups of every match in `s`, as `find_all` finds them.
+    fun captures_all(self, s: str) -> [Captures] {
+        var out: [Captures] = []
+        for slots in self.all_slots(s, 2 * self.names.len(), -1, 0) {
+            out.push(Captures { haystack: s, slots: slots, names: self.names })
+        }
+        return out
+    }
+
+    // `s` with its first match replaced by `with`, in which `$1` or `${1}`
+    // stands for a group's text, `$name` or `${name}` for a named one's and
+    // `$$` for a `$`.
+    fun replace(self, s: str, with: str) -> str {
+        return self.replacen(s, with, 1)
+    }
+
+    // `s` with every match replaced by `with`, expanded as `replace` does.
+    fun replace_all(self, s: str, with: str) -> str {
+        return self.replacen(s, with, -1)
+    }
+
+    fun replacen(self, s: str, with: str, limit: int) -> str {
+        let plain = !has_dollar(with)
+        let nslots = if plain { 2 } else { 2 * self.names.len() }
+        var sb = StringBuilder()
+        var last = 0
+        for slots in self.all_slots(s, nslots, limit, 0) {
+            sb.append(s, last, slots[0])
+            if plain {
+                sb.append(with)
+            } else {
+                sb.append(expanded(with, s, slots, self.names))
+            }
+            last = slots[1]
+        }
+        sb.append(s, last, s.len())
+        return sb.build()
+    }
+
+    // The pieces of `s` between the matches: `n` matches give `n + 1`
+    // pieces, empty ones included, as Rust's `Regex::split` gives them.
+    fun split(self, s: str) -> [str] {
+        var pieces: [str] = []
+        var last = 0
+        for m in self.all_slots(s, 2, -1, 0) {
+            pieces.push(substring(s, last, m[0]))
+            last = m[1]
+        }
+        pieces.push(substring(s, last, s.len()))
+        return pieces
+    }
+}
+
+// --- Searching ----------------------------------------------------------------
+
+// Texts shorter than this are searched by the Pike VM alone: building DFA
+// states costs more than it saves on them (a search costs both about 5 µs
+// at 72 bytes, natively).
+const DFA_MIN_TEXT: int = 96
+
+// One search of a text: the DFAs find where a match ends (forwards) and
+// where it starts (backwards from there), and the Pike VM finds the groups
+// of that match, or does it all when the DFAs give up.
+struct Searcher {
+    s: str,
+    fwd: Dfa,
+    rev: Dfa,
+    vm: Vm,
+    use_dfa: bool,
+    anchored: bool,
+    prefix: str,
+    nslots: int,
+    // the slots of the match found
+    slots: [int],
+}
+
+impl Searcher {
+    fun is_match(var self) -> bool {
+        if self.use_dfa {
+            var lo = 0
+            if self.prefix.len() > 0 && !self.anchored {
+                lo = find_bytes(self.s, self.prefix, 0)
+                if lo < 0 {
+                    return false
+                }
+            }
+            let end = self.fwd.forward(lo, true)
+            if end >= -1 {
+                return end >= 0
+            }
+            self.use_dfa = false
+        }
+        return self.vm.run(0, false)
+    }
+
+    // Searches from `start` for the leftmost-first match; true if there is
+    // one, with its slots in `slots`.
+    fun search(var self, start: int) -> bool {
+        if self.use_dfa {
+            let found = self.dfa_search(start)
+            if found >= 0 {
+                return found == 1
+            }
+            self.use_dfa = false
+        }
+        if !self.vm.run(start, false) {
+            return false
+        }
+        self.slots = self.vm.best
+        return true
+    }
+
+    // 1 if the DFAs find a match, 0 if there is none, -1 if they give up.
+    fun dfa_search(var self, start: int) -> int {
+        if self.anchored && start > 0 {
+            return 0
+        }
+        var lo = start
+        if self.prefix.len() > 0 && !self.anchored {
+            lo = find_bytes(self.s, self.prefix, start)
+            if lo < 0 {
+                return 0
+            }
+        }
+        let end = self.fwd.forward(lo, false)
+        if end == -1 {
+            return 0
+        }
+        if end < 0 {
+            return -1
+        }
+        let begin = self.rev.backward(end, lo)
+        if begin < 0 {
+            return -1
+        }
+        if self.nslots <= 2 {
+            self.slots = [begin, end]
+            return 1
+        }
+        // the groups: the Pike VM, from the start alone
+        if !self.vm.run(begin, true) {
+            return -1
+        }
+        self.slots = self.vm.best
+        return 1
+    }
+}
+
+// The first position at or after `lo` where `needle` (not empty) is in
+// `s`, or -1.
+#test("abcabc", "ca", 0)[2]
+#test("abcabc", "bc", 2)[4]
+#test("abcabc", "cb", 0)[-1]
+#test("ab", "abc", 0)[-1]
+fun find_bytes(s: str, needle: str, lo: int) -> int {
+    let first = needle[0]
+    let m = needle.len()
+    let last = s.len() - m
+    var i = lo
+    while i <= last {
+        if s[i] == first {
+            var k = 1
+            while k < m && s[i + k] == needle[k] {
+                k += 1
+            }
+            if k == m {
+                return i
+            }
+        }
+        i += 1
+    }
+    return -1
+}
+
+// --- The lazy DFA -------------------------------------------------------------
+//
+// A state is the ordered list of the threads of a Pike VM (the instructions
+// that wait for a byte, the match, and assertions not yet decided) and the
+// class of the byte read last. Its transitions are made when first needed:
+// on byte `c`, the assertions are decided, now that the bytes on both sides
+// are known; a match among the threads means a match ends here; and the
+// threads that take `c` give the next state. Forwards, a match drops the
+// threads after it, which have less priority, as the Pike VM does
+// (leftmost-first); backwards, every thread goes on, and the last match
+// seen is the longest.
+
+// The classes of the byte on one side of a position, which is all the
+// assertions ask: none (an end of the text), a newline, a word byte, another.
+const EDGE: int = 0
+const NEWLINE: int = 1
+const WORD: int = 2
+const OTHER: int = 3
+
+// The end of the text, as a transition's byte.
+const END: int = 256
+const STRIDE: int = 257
+
+// More states than this, and the DFA gives up for the Pike VM.
+const MAX_STATES: int = 2000
+
+#test(END)[EDGE]
+#test(10)[NEWLINE]
+#test(95)[WORD]
+#test(32)[OTHER]
+fun class_of(c: int) -> int {
+    if c == END { return EDGE }
+    if c == 10 { return NEWLINE }
+    if c < 128 && is_word_byte(c as uint8) { return WORD }
+    return OTHER
+}
+
+// Whether the assertion `k` holds between bytes of the classes `before`
+// and `after`.
+#test(WORD_BOUNDARY, EDGE, WORD)[true]
+#test(WORD_BOUNDARY, WORD, WORD)[false]
+#test(NOT_WORD_BOUNDARY, OTHER, NEWLINE)[true]
+#test(BEGIN_LINE, NEWLINE, WORD)[true]
+#test(END_LINE, WORD, OTHER)[false]
+#test(END_TEXT, WORD, EDGE)[true]
+fun look_holds(k: int, before: int, after: int) -> bool {
+    if k == BEGIN_TEXT { return before == EDGE }
+    if k == END_TEXT { return after == EDGE }
+    if k == BEGIN_LINE { return before == EDGE || before == NEWLINE }
+    if k == END_LINE { return after == EDGE || after == NEWLINE }
+    if k == WORD_BOUNDARY { return (before == WORD) != (after == WORD) }
+    return (before == WORD) == (after == WORD)
+}
+
+struct Dfa {
+    op: [int],
+    arg: [int],
+    arg2: [int],
+    sets: [bool],
+    start: int,
+    reverse: bool,
+    s: str,
+    // the states: 0 is the dead one
+    keys: [str: int],
+    lists: [[int]],
+    context: [int],
+    // per state and byte (and END): the next state * 2 + 1 if a match ends
+    // before the byte, -1 if not made yet
+    trans: [int],
+    // the start state for each class of the byte before it, -1 if not made
+    starts: [int],
+    // a mark per instruction: the closure that visited it last
+    seen: [int],
+    mark: int,
+    stack: [int],
+    out: [int],
+}
+
+fun new_dfa(op: [int], arg: [int], arg2: [int], sets: [bool], start: int, reverse: bool, s: str, used: bool) -> Dfa {
+    var trans: [int] = []
+    var seen: [int] = []
+    if used {
+        var k = 0
+        while k < STRIDE {
+            trans.push(0)
+            k += 1
+        }
+        seen = zeros(op.len())
+    }
+    let none: [int] = []
+    let dead: [str: int] = ["": 0]
+    return Dfa {
+        op: op,
+        arg: arg,
+        arg2: arg2,
+        sets: sets,
+        start: start,
+        reverse: reverse,
+        s: s,
+        keys: dead,
+        lists: [none],
+        context: [EDGE],
+        trans: trans,
+        starts: [-1, -1, -1, -1],
+        seen: seen,
+        mark: 0,
+        stack: [],
+        out: [],
+    }
+}
+
+impl Dfa {
+    // Appends to `out` the threads from `pc0`, in priority order, each once
+    // per mark. With `decide`, assertions are decided by the classes
+    // `before` and `after`; without, they are threads themselves.
+    fun closure(var self, pc0: int, decide: bool, before: int, after: int) {
+        self.stack.push(pc0)
+        while self.stack.len() > 0 {
+            var pc = self.stack.pop()
+            while true {
+                if self.seen[pc] == self.mark {
+                    break
+                }
+                self.seen[pc] = self.mark
+                let o = self.op[pc]
+                if o == OP_SPLIT {
+                    self.stack.push(self.arg2[pc])
+                    pc = self.arg[pc]
+                } else if o == OP_JMP {
+                    pc = self.arg[pc]
+                } else if o == OP_SAVE {
+                    pc += 1
+                } else if o == OP_LOOK && decide {
+                    if !look_holds(self.arg[pc], before, after) {
+                        break
+                    }
+                    pc += 1
+                } else {
+                    self.out.push(pc)
+                    break
+                }
+            }
+        }
+    }
+
+    // The state of the threads `list` after a byte of class `context`; -1
+    // if there would be too many states.
+    fun state(var self, list: [int], context: int) -> int {
+        if list.len() == 0 {
+            return 0
+        }
+        var sb = StringBuilder()
+        sb.append_byte(context as uint8)
+        for pc in list {
+            sb.append_byte((pc & 255) as uint8)
+            sb.append_byte(((pc >> 8) & 255) as uint8)
+            sb.append_byte(((pc >> 16) & 255) as uint8)
+        }
+        let key = sb.build()
+        match get(self.keys, key) {
+            Some(i) => {
+                return i
+            }
+            None => {}
+        }
+        let i = self.lists.len()
+        if i >= MAX_STATES {
+            return -1
+        }
+        self.keys[key] = i
+        self.lists.push(list)
+        self.context.push(context)
+        var k = 0
+        while k < STRIDE {
+            self.trans.push(-1)
+            k += 1
+        }
+        return i
+    }
+
+    // The start state after a byte of class `context`, or -1.
+    fun start_state(var self, context: int) -> int {
+        let known = self.starts[context]
+        if known >= 0 {
+            return known
+        }
+        self.mark += 1
+        self.out = []
+        self.closure(self.start, false, 0, 0)
+        let i = self.state(self.out, context)
+        if i >= 0 {
+            self.starts[context] = i
+        }
+        return i
+    }
+
+    // Makes the transition of state `si` on `c` (a byte or END); -1 if
+    // there would be too many states.
+    fun transition(var self, si: int, c: int) -> int {
+        let list = self.lists[si]
+        let ctx = self.context[si]
+        let cc = class_of(c)
+        let before = if self.reverse { cc } else { ctx }
+        let after = if self.reverse { ctx } else { cc }
+        // decide the assertions: the threads that wait for a byte, in order
+        self.mark += 1
+        self.out = []
+        for pc in list {
+            self.closure(pc, true, before, after)
+        }
+        let threads = self.out
+        // follow the threads that take `c`
+        self.mark += 1
+        self.out = []
+        var matched = false
+        for pc in threads {
+            let o = self.op[pc]
+            if o == OP_MATCH {
+                matched = true
+                if !self.reverse {
+                    break
+                }
+            } else if c < END {
+                var ok = false
+                if o == OP_BYTE {
+                    ok = c == self.arg[pc]
+                } else if o == OP_SET {
+                    ok = self.sets[self.arg[pc] * 256 + c]
+                } else if o == OP_ANY {
+                    ok = true
+                } else if o == OP_NOT_NL {
+                    ok = c != 10
+                }
+                if ok {
+                    self.closure(pc + 1, false, 0, 0)
+                }
+            }
+        }
+        var next = 0
+        if c < END {
+            next = self.state(self.out, cc)
+            if next < 0 {
+                return -1
+            }
+        }
+        let t = next * 2 + (if matched { 1 } else { 0 })
+        self.trans[si * STRIDE + c] = t
+        return t
+    }
+
+    // Scans forwards from `lo`: the end of the leftmost-first match (the
+    // first end found, with `earliest`), -1 if there is none, -2 if the DFA
+    // gave up.
+    fun forward(var self, lo: int, earliest: bool) -> int {
+        let s = self.s
+        let len = s.len()
+        var si = self.start_state(if lo > 0 { class_of(s[lo - 1] as int) } else { EDGE })
+        if si < 0 {
+            return -2
+        }
+        var last = -1
+        var p = lo
+        while true {
+            let c = if p < len { s[p] as int } else { END }
+            var t = self.trans[si * STRIDE + c]
+            if t < 0 {
+                t = self.transition(si, c)
+                if t < 0 {
+                    return -2
+                }
+            }
+            if (t & 1) == 1 {
+                last = p
+                if earliest {
+                    return p
+                }
+            }
+            si = t >> 1
+            if si == 0 || c == END {
+                return last
+            }
+            p += 1
+        }
+        unreachable()
+    }
+
+    // Scans backwards from `end`, no further than `low`: the first position
+    // from which the text up to `end` matches, -1 if there is none, -2 if
+    // the DFA gave up.
+    fun backward(var self, end: int, low: int) -> int {
+        let s = self.s
+        var si = self.start_state(if end < s.len() { class_of(s[end] as int) } else { EDGE })
+        if si < 0 {
+            return -2
+        }
+        var first = -1
+        var p = end
+        while true {
+            let c = if p > 0 { s[p - 1] as int } else { END }
+            var t = self.trans[si * STRIDE + c]
+            if t < 0 {
+                t = self.transition(si, c)
+                if t < 0 {
+                    return -2
+                }
+            }
+            if (t & 1) == 1 {
+                first = p
+            }
+            si = t >> 1
+            if si == 0 || p == low {
+                return first
+            }
+            p -= 1
+        }
+        unreachable()
+    }
+}
+
+impl Captures {
+    // The number of groups, the whole match included.
+    fun len(self) -> int {
+        return self.names.len()
+    }
+
+    // Group `i`'s match; None if it didn't take part (or there is no such
+    // group). Group 0 is the whole match.
+    fun get(self, i: int) -> Option<Match> {
+        if i < 0 || 2 * i + 1 >= self.slots.len() {
+            return None
+        }
+        let a = self.slots[2 * i]
+        let b = self.slots[2 * i + 1]
+        if a < 0 || b < 0 {
+            return None
+        }
+        return Some(Match { start: a, end: b, text: substring(self.haystack, a, b) })
+    }
+
+    // The group named `n`'s match.
+    fun name(self, n: str) -> Option<Match> {
+        var i = 1
+        while i < self.names.len() {
+            if self.names[i] == n {
+                return self.get(i)
+            }
+            i += 1
+        }
+        return None
+    }
+
+    // Group `i`'s text, "" if it didn't take part.
+    fun text(self, i: int) -> str {
+        return match self.get(i) {
+            Some(m) => m.text
+            None => ""
+        }
+    }
+}
+
+fun has_dollar(s: str) -> bool {
+    var i = 0
+    while i < s.len() {
+        if s[i] == '$' {
+            return true
+        }
+        i += 1
+    }
+    return false
+}
+
+// The replacement `with` expanded for the match of `slots` in `s`.
+#test("<$1>", "ab", [0, 2, 1, 2], ["", ""])["<b>"]
+#test("${x}-$$-$x", "ab", [0, 2, 0, 1], ["", "x"])["a-$-a"]
+#test("$2$", "ab", [0, 2, 0, 1], ["", ""])["$"] // no group 2; a $ at the end
+#test("$1x", "ab", [0, 2, 0, 1], ["", ""])[""] // the name is 1x
+#test("${1}x", "ab", [0, 2, 0, 1], ["", ""])["ax"]
+#test("${", "ab", [0, 2], [""])["${"]
+#test("$-", "ab", [0, 2], [""])["$-"]
+fun expanded(with: str, s: str, slots: [int], names: [str]) -> str {
+    var sb = StringBuilder()
+    let n = with.len()
+    var i = 0
+    while i < n {
+        let c = with[i]
+        if c != '$' || i + 1 >= n {
+            sb.append_byte(c)
+            i += 1
+            continue
+        }
+        if with[i + 1] == '$' {
+            sb.append_byte('$')
+            i += 2
+            continue
+        }
+        var start = i + 1
+        var end = start
+        var after = start
+        if with[i + 1] == '{' {
+            start = i + 2
+            end = start
+            while end < n && is_word_byte(with[end]) {
+                end += 1
+            }
+            if end >= n || with[end] != '}' || end == start {
+                sb.append_byte('$')
+                i += 1
+                continue
+            }
+            after = end + 1
+        } else {
+            while end < n && is_word_byte(with[end]) {
+                end += 1
+            }
+            if end == start {
+                sb.append_byte('$')
+                i += 1
+                continue
+            }
+            after = end
+        }
+        let group = group_index(substring(with, start, end), names)
+        if group >= 0 && 2 * group + 1 < slots.len() && slots[2 * group] >= 0 {
+            sb.append(s, slots[2 * group], slots[2 * group + 1])
+        }
+        i = after
+    }
+    return sb.build()
+}
+
+// The group a replacement names: a number, or a group's name; -1 if none.
+#test("2", [""])[2]
+#test("07", [""])[7]
+#test("x", ["", "x"])[1]
+#test("y", ["", "x"])[-1]
+fun group_index(name: str, names: [str]) -> int {
+    var v = 0
+    var k = 0
+    while k < name.len() && is_digit(name[k]) {
+        if v < 100000 { v = v * 10 + (name[k] as int) - 48 }
+        k += 1
+    }
+    if k == name.len() {
+        return v
+    }
+    var i = 1
+    while i < names.len() {
+        if names[i] == name {
+            return i
+        }
+        i += 1
+    }
+    return -1
+}
+
+// --- The Pike VM --------------------------------------------------------------
+
+// The state of a search: two queues of threads, the one at the current
+// position and the one at the next, each a sparse set of instructions
+// (`dense`, `sparse`, in priority order) with `nslots` slots per thread.
+struct Vm {
+    op: [int],
+    arg: [int],
+    arg2: [int],
+    sets: [bool],
+    n: int,
+    nslots: int,
+    dense: [int],
+    sparse: [int],
+    counts: [int],
+    slots: [int],
+    // the slots of the thread being followed
+    cur: [int],
+    // the slots of the match found
+    best: [int],
+    // frames: an instruction to explore (>= 0), or a slot to restore
+    // (-slot - 1, above its old value)
+    stack: [int],
+    s: str,
+    anchored: bool,
+    prefix: str,
+}
+
+fun new_vm(re: Regex, s: str, nslots: int) -> Vm {
+    let n = re.op.len()
+    var cur: [int] = []
+    var k = 0
+    while k < nslots {
+        cur.push(-1)
+        k += 1
+    }
+    return Vm {
+        op: re.op,
+        arg: re.arg,
+        arg2: re.arg2,
+        sets: re.sets,
+        n: n,
+        nslots: nslots,
+        dense: zeros(2 * n),
+        sparse: zeros(2 * n),
+        counts: [0, 0],
+        slots: zeros(2 * n * nslots),
+        cur: cur,
+        best: cur,
+        stack: [],
+        s: s,
+        anchored: re.anchored,
+        prefix: re.prefix,
+    }
+}
+
+impl Vm {
+    // Whether the assertion `k` holds at `pos`.
+    fun look(self, k: int, pos: int) -> bool {
+        let n = self.s.len()
+        if k == BEGIN_TEXT { return pos == 0 }
+        if k == END_TEXT { return pos == n }
+        if k == BEGIN_LINE { return pos == 0 || self.s[pos - 1] == '\n' }
+        if k == END_LINE { return pos == n || self.s[pos] == '\n' }
+        let before = pos > 0 && is_word_byte(self.s[pos - 1])
+        let after = pos < n && is_word_byte(self.s[pos])
+        if k == WORD_BOUNDARY { return before != after }
+        return before == after
+    }
+
+    // Adds the thread at `pc0`, with the slots `cur`, to queue `q` at
+    // `pos`, following splits, jumps, saves and assertions, each
+    // instruction once per position.
+    fun add(var self, q: int, pc0: int, pos: int) {
+        let base = q * self.n
+        let nslots = self.nslots
+        self.stack.push(pc0)
+        while self.stack.len() > 0 {
+            let top = self.stack.pop()
+            if top < 0 {
+                let old = self.stack.pop()
+                self.cur[-top - 1] = old
+                continue
+            }
+            var pc = top
+            while true {
+                let count = self.counts[q]
+                let at = self.sparse[base + pc]
+                if at < count && self.dense[base + at] == pc {
+                    break
+                }
+                self.sparse[base + pc] = count
+                self.dense[base + count] = pc
+                self.counts[q] = count + 1
+                let o = self.op[pc]
+                if o == OP_SPLIT {
+                    self.stack.push(self.arg2[pc])
+                    pc = self.arg[pc]
+                } else if o == OP_JMP {
+                    pc = self.arg[pc]
+                } else if o == OP_SAVE {
+                    let k = self.arg[pc]
+                    if k < nslots {
+                        self.stack.push(self.cur[k])
+                        self.stack.push(-k - 1)
+                        self.cur[k] = pos
+                    }
+                    pc += 1
+                } else if o == OP_LOOK {
+                    if !self.look(self.arg[pc], pos) {
+                        break
+                    }
+                    pc += 1
+                } else {
+                    // a byte test or the match: the thread waits here
+                    let sb = (base + pc) * nslots
+                    var k = 0
+                    while k < nslots {
+                        self.slots[sb + k] = self.cur[k]
+                        k += 1
+                    }
+                    break
+                }
+            }
+        }
+    }
+
+    // Searches from `start` for the leftmost-first match; true if there is
+    // one, with its slots in `best`. With `here`, only a match that starts
+    // at `start`.
+    fun run(var self, start: int, here: bool) -> bool {
+        let s = self.s
+        let len = s.len()
+        let n = self.n
+        let nslots = self.nslots
+        let use_prefix = self.prefix.len() > 0 && !self.anchored && !here
+        var matched = false
+        var q = 0
+        self.counts[0] = 0
+        self.counts[1] = 0
+        var pos = start
+        while true {
+            if self.counts[q] == 0 {
+                if matched || ((self.anchored || here) && pos > start) {
+                    break
+                }
+                if use_prefix {
+                    let at = find_bytes(s, self.prefix, pos)
+                    if at < 0 {
+                        break
+                    }
+                    pos = at
+                }
+            }
+            if !matched && (!self.anchored || pos == 0) && (!here || pos == start) {
+                var k = 0
+                while k < nslots {
+                    self.cur[k] = -1
+                    k += 1
+                }
+                self.add(q, 0, pos)
+            }
+            let nq = 1 - q
+            self.counts[nq] = 0
+            let base = q * n
+            let byte = if pos < len { s[pos] as int } else { -1 }
+            var i = 0
+            while i < self.counts[q] {
+                let pc = self.dense[base + i]
+                let o = self.op[pc]
+                var ok = false
+                if o == OP_BYTE {
+                    ok = byte == self.arg[pc]
+                } else if o == OP_SET {
+                    ok = byte >= 0 && self.sets[self.arg[pc] * 256 + byte]
+                } else if o == OP_ANY {
+                    ok = byte >= 0
+                } else if o == OP_NOT_NL {
+                    ok = byte >= 0 && byte != 10
+                } else if o == OP_MATCH {
+                    if nslots == 0 {
+                        return true
+                    }
+                    let sb = (base + pc) * nslots
+                    var k = 0
+                    while k < nslots {
+                        self.best[k] = self.slots[sb + k]
+                        k += 1
+                    }
+                    matched = true
+                    // the threads after this one have less priority
+                    break
+                }
+                if ok {
+                    let sb = (base + pc) * nslots
+                    var k = 0
+                    while k < nslots {
+                        self.cur[k] = self.slots[sb + k]
+                        k += 1
+                    }
+                    self.add(nq, pc + 1, pos + 1)
+                }
+                i += 1
+            }
+            if pos >= len {
+                break
+            }
+            pos += 1
+            q = nq
+        }
+        return matched
+    }
+}
+
+// --- Tests --------------------------------------------------------------------
+
+// The spans of the leftmost-first match of `pattern` in `text` as RE2's
+// search tests write them: a start-end pair per group, `-` for a group that
+// didn't take part, and `-` alone for no match.
+//
+// The cases: RE2's `re2-search.txt` (from Go's `regexp/testdata`), the
+// leftmost-first column, for the patterns and texts in ASCII without `\p`;
+// then cases of the rest of the syntax, whose results Go's `regexp` gave;
+// then byte cases, which Go, matching characters, can't give.
+#test("a", "")["-"]
+#test("a", "a")["0-1"]
+#test("^(?:a)$", "")["-"]
+#test("^(?:a)$", "a")["0-1"]
+#test("^(?:a)", "")["-"]
+#test("^(?:a)", "a")["0-1"]
+#test("(?:a)$", "")["-"]
+#test("(?:a)$", "a")["0-1"]
+#test("a", "")["-"]
+#test("a", "zyzzyva")["6-7"]
+#test("^(?:a)$", "")["-"]
+#test("^(?:a)$", "zyzzyva")["-"]
+#test("^(?:a)", "")["-"]
+#test("^(?:a)", "zyzzyva")["-"]
+#test("(?:a)$", "")["-"]
+#test("(?:a)$", "zyzzyva")["6-7"]
+#test("a+", "")["-"]
+#test("a+", "aa")["0-2"]
+#test("^(?:a+)$", "")["-"]
+#test("^(?:a+)$", "aa")["0-2"]
+#test("^(?:a+)", "")["-"]
+#test("^(?:a+)", "aa")["0-2"]
+#test("(?:a+)$", "")["-"]
+#test("(?:a+)$", "aa")["0-2"]
+#test("(a+|b)+", "")["-"]
+#test("(a+|b)+", "ab")["0-2 1-2"]
+#test("^(?:(a+|b)+)$", "")["-"]
+#test("^(?:(a+|b)+)$", "ab")["0-2 1-2"]
+#test("^(?:(a+|b)+)", "")["-"]
+#test("^(?:(a+|b)+)", "ab")["0-2 1-2"]
+#test("(?:(a+|b)+)$", "")["-"]
+#test("(?:(a+|b)+)$", "ab")["0-2 1-2"]
+#test("ab|cd", "")["-"]
+#test("ab|cd", "xabcdx")["1-3"]
+#test("^(?:ab|cd)$", "")["-"]
+#test("^(?:ab|cd)$", "xabcdx")["-"]
+#test("^(?:ab|cd)", "")["-"]
+#test("^(?:ab|cd)", "xabcdx")["-"]
+#test("(?:ab|cd)$", "")["-"]
+#test("(?:ab|cd)$", "xabcdx")["-"]
+#test("h.*od?", "")["-"]
+#test("h.*od?", "hello\ngoodbye\n")["0-5"]
+#test("^(?:h.*od?)$", "")["-"]
+#test("^(?:h.*od?)$", "hello\ngoodbye\n")["-"]
+#test("^(?:h.*od?)", "")["-"]
+#test("^(?:h.*od?)", "hello\ngoodbye\n")["0-5"]
+#test("(?:h.*od?)$", "")["-"]
+#test("(?:h.*od?)$", "hello\ngoodbye\n")["-"]
+#test("h.*o", "")["-"]
+#test("h.*o", "hello\ngoodbye\n")["0-5"]
+#test("^(?:h.*o)$", "")["-"]
+#test("^(?:h.*o)$", "hello\ngoodbye\n")["-"]
+#test("^(?:h.*o)", "")["-"]
+#test("^(?:h.*o)", "hello\ngoodbye\n")["0-5"]
+#test("(?:h.*o)$", "")["-"]
+#test("(?:h.*o)$", "hello\ngoodbye\n")["-"]
+#test("h.*o", "")["-"]
+#test("h.*o", "goodbye\nhello\n")["8-13"]
+#test("^(?:h.*o)$", "")["-"]
+#test("^(?:h.*o)$", "goodbye\nhello\n")["-"]
+#test("^(?:h.*o)", "")["-"]
+#test("^(?:h.*o)", "goodbye\nhello\n")["-"]
+#test("(?:h.*o)$", "")["-"]
+#test("(?:h.*o)$", "goodbye\nhello\n")["-"]
+#test("h.*o", "")["-"]
+#test("h.*o", "hello world")["0-8"]
+#test("^(?:h.*o)$", "")["-"]
+#test("^(?:h.*o)$", "hello world")["-"]
+#test("^(?:h.*o)", "")["-"]
+#test("^(?:h.*o)", "hello world")["0-8"]
+#test("(?:h.*o)$", "")["-"]
+#test("(?:h.*o)$", "hello world")["-"]
+#test("h.*o", "")["-"]
+#test("h.*o", "othello, world")["2-11"]
+#test("^(?:h.*o)$", "")["-"]
+#test("^(?:h.*o)$", "othello, world")["-"]
+#test("^(?:h.*o)", "")["-"]
+#test("^(?:h.*o)", "othello, world")["-"]
+#test("(?:h.*o)$", "")["-"]
+#test("(?:h.*o)$", "othello, world")["-"]
+#test("[^\\s\\S]", "")["-"]
+#test("[^\\s\\S]", "aaaaaaa")["-"]
+#test("^(?:[^\\s\\S])$", "")["-"]
+#test("^(?:[^\\s\\S])$", "aaaaaaa")["-"]
+#test("^(?:[^\\s\\S])", "")["-"]
+#test("^(?:[^\\s\\S])", "aaaaaaa")["-"]
+#test("(?:[^\\s\\S])$", "")["-"]
+#test("(?:[^\\s\\S])$", "aaaaaaa")["-"]
+#test("a", "")["-"]
+#test("a", "aaaaaaa")["0-1"]
+#test("^(?:a)$", "")["-"]
+#test("^(?:a)$", "aaaaaaa")["-"]
+#test("^(?:a)", "")["-"]
+#test("^(?:a)", "aaaaaaa")["0-1"]
+#test("(?:a)$", "")["-"]
+#test("(?:a)$", "aaaaaaa")["6-7"]
+#test("a*", "")["0-0"]
+#test("a*", "aaaaaaa")["0-7"]
+#test("^(?:a*)$", "")["0-0"]
+#test("^(?:a*)$", "aaaaaaa")["0-7"]
+#test("^(?:a*)", "")["0-0"]
+#test("^(?:a*)", "aaaaaaa")["0-7"]
+#test("(?:a*)$", "")["0-0"]
+#test("(?:a*)$", "aaaaaaa")["0-7"]
+#test("a*", "")["0-0"]
+#test("a*", "")["0-0"]
+#test("^(?:a*)$", "")["0-0"]
+#test("^(?:a*)$", "")["0-0"]
+#test("^(?:a*)", "")["0-0"]
+#test("^(?:a*)", "")["0-0"]
+#test("(?:a*)$", "")["0-0"]
+#test("(?:a*)$", "")["0-0"]
+#test("ab|cd", "")["-"]
+#test("ab|cd", "xabcdx")["1-3"]
+#test("^(?:ab|cd)$", "")["-"]
+#test("^(?:ab|cd)$", "xabcdx")["-"]
+#test("^(?:ab|cd)", "")["-"]
+#test("^(?:ab|cd)", "xabcdx")["-"]
+#test("(?:ab|cd)$", "")["-"]
+#test("(?:ab|cd)$", "xabcdx")["-"]
+#test("a", "")["-"]
+#test("a", "cab")["1-2"]
+#test("^(?:a)$", "")["-"]
+#test("^(?:a)$", "cab")["-"]
+#test("^(?:a)", "")["-"]
+#test("^(?:a)", "cab")["-"]
+#test("(?:a)$", "")["-"]
+#test("(?:a)$", "cab")["-"]
+#test("a*b", "")["-"]
+#test("a*b", "cab")["1-3"]
+#test("^(?:a*b)$", "")["-"]
+#test("^(?:a*b)$", "cab")["-"]
+#test("^(?:a*b)", "")["-"]
+#test("^(?:a*b)", "cab")["-"]
+#test("(?:a*b)$", "")["-"]
+#test("(?:a*b)$", "cab")["1-3"]
+#test("((((((((((((((((((((x))))))))))))))))))))", "")["-"]
+#test("((((((((((((((((((((x))))))))))))))))))))", "x")["0-1 0-1 0-1 0-1 0-1 0-1 0-1 0-1 0-1 0-1 0-1 0-1 0-1 0-1 0-1 0-1 0-1 0-1 0-1 0-1 0-1"]
+#test("^(?:((((((((((((((((((((x)))))))))))))))))))))$", "")["-"]
+#test("^(?:((((((((((((((((((((x)))))))))))))))))))))$", "x")["0-1 0-1 0-1 0-1 0-1 0-1 0-1 0-1 0-1 0-1 0-1 0-1 0-1 0-1 0-1 0-1 0-1 0-1 0-1 0-1 0-1"]
+#test("^(?:((((((((((((((((((((x)))))))))))))))))))))", "")["-"]
+#test("^(?:((((((((((((((((((((x)))))))))))))))))))))", "x")["0-1 0-1 0-1 0-1 0-1 0-1 0-1 0-1 0-1 0-1 0-1 0-1 0-1 0-1 0-1 0-1 0-1 0-1 0-1 0-1 0-1"]
+#test("(?:((((((((((((((((((((x)))))))))))))))))))))$", "")["-"]
+#test("(?:((((((((((((((((((((x)))))))))))))))))))))$", "x")["0-1 0-1 0-1 0-1 0-1 0-1 0-1 0-1 0-1 0-1 0-1 0-1 0-1 0-1 0-1 0-1 0-1 0-1 0-1 0-1 0-1"]
+#test("[abcd]", "")["-"]
+#test("[abcd]", "xxxabcdxxx")["3-4"]
+#test("^(?:[abcd])$", "")["-"]
+#test("^(?:[abcd])$", "xxxabcdxxx")["-"]
+#test("^(?:[abcd])", "")["-"]
+#test("^(?:[abcd])", "xxxabcdxxx")["-"]
+#test("(?:[abcd])$", "")["-"]
+#test("(?:[abcd])$", "xxxabcdxxx")["-"]
+#test("[^x]", "")["-"]
+#test("[^x]", "xxxabcdxxx")["3-4"]
+#test("^(?:[^x])$", "")["-"]
+#test("^(?:[^x])$", "xxxabcdxxx")["-"]
+#test("^(?:[^x])", "")["-"]
+#test("^(?:[^x])", "xxxabcdxxx")["-"]
+#test("(?:[^x])$", "")["-"]
+#test("(?:[^x])$", "xxxabcdxxx")["-"]
+#test("[abcd]+", "")["-"]
+#test("[abcd]+", "xxxabcdxxx")["3-7"]
+#test("^(?:[abcd]+)$", "")["-"]
+#test("^(?:[abcd]+)$", "xxxabcdxxx")["-"]
+#test("^(?:[abcd]+)", "")["-"]
+#test("^(?:[abcd]+)", "xxxabcdxxx")["-"]
+#test("(?:[abcd]+)$", "")["-"]
+#test("(?:[abcd]+)$", "xxxabcdxxx")["-"]
+#test("[^x]+", "")["-"]
+#test("[^x]+", "xxxabcdxxx")["3-7"]
+#test("^(?:[^x]+)$", "")["-"]
+#test("^(?:[^x]+)$", "xxxabcdxxx")["-"]
+#test("^(?:[^x]+)", "")["-"]
+#test("^(?:[^x]+)", "xxxabcdxxx")["-"]
+#test("(?:[^x]+)$", "")["-"]
+#test("(?:[^x]+)$", "xxxabcdxxx")["-"]
+#test("(fo|foo)", "")["-"]
+#test("(fo|foo)", "fo")["0-2 0-2"]
+#test("^(?:(fo|foo))$", "")["-"]
+#test("^(?:(fo|foo))$", "fo")["0-2 0-2"]
+#test("^(?:(fo|foo))", "")["-"]
+#test("^(?:(fo|foo))", "fo")["0-2 0-2"]
+#test("(?:(fo|foo))$", "")["-"]
+#test("(?:(fo|foo))$", "fo")["0-2 0-2"]
+#test("(foo|fo)", "")["-"]
+#test("(foo|fo)", "foo")["0-3 0-3"]
+#test("^(?:(foo|fo))$", "")["-"]
+#test("^(?:(foo|fo))$", "foo")["0-3 0-3"]
+#test("^(?:(foo|fo))", "")["-"]
+#test("^(?:(foo|fo))", "foo")["0-3 0-3"]
+#test("(?:(foo|fo))$", "")["-"]
+#test("(?:(foo|fo))$", "foo")["0-3 0-3"]
+#test("aa", "")["-"]
+#test("aa", "aA")["-"]
+#test("^(?:aa)$", "")["-"]
+#test("^(?:aa)$", "aA")["-"]
+#test("^(?:aa)", "")["-"]
+#test("^(?:aa)", "aA")["-"]
+#test("(?:aa)$", "")["-"]
+#test("(?:aa)$", "aA")["-"]
+#test("a", "")["-"]
+#test("a", "Aa")["1-2"]
+#test("^(?:a)$", "")["-"]
+#test("^(?:a)$", "Aa")["-"]
+#test("^(?:a)", "")["-"]
+#test("^(?:a)", "Aa")["-"]
+#test("(?:a)$", "")["-"]
+#test("(?:a)$", "Aa")["1-2"]
+#test("a", "")["-"]
+#test("a", "A")["-"]
+#test("^(?:a)$", "")["-"]
+#test("^(?:a)$", "A")["-"]
+#test("^(?:a)", "")["-"]
+#test("^(?:a)", "A")["-"]
+#test("(?:a)$", "")["-"]
+#test("(?:a)$", "A")["-"]
+#test("ABC", "")["-"]
+#test("ABC", "abc")["-"]
+#test("^(?:ABC)$", "")["-"]
+#test("^(?:ABC)$", "abc")["-"]
+#test("^(?:ABC)", "")["-"]
+#test("^(?:ABC)", "abc")["-"]
+#test("(?:ABC)$", "")["-"]
+#test("(?:ABC)$", "abc")["-"]
+#test("abc", "")["-"]
+#test("abc", "XABCY")["-"]
+#test("^(?:abc)$", "")["-"]
+#test("^(?:abc)$", "XABCY")["-"]
+#test("^(?:abc)", "")["-"]
+#test("^(?:abc)", "XABCY")["-"]
+#test("(?:abc)$", "")["-"]
+#test("(?:abc)$", "XABCY")["-"]
+#test("ABC", "")["-"]
+#test("ABC", "xabcy")["-"]
+#test("^(?:ABC)$", "")["-"]
+#test("^(?:ABC)$", "xabcy")["-"]
+#test("^(?:ABC)", "")["-"]
+#test("^(?:ABC)", "xabcy")["-"]
+#test("(?:ABC)$", "")["-"]
+#test("(?:ABC)$", "xabcy")["-"]
+#test("foo|bar|[A-Z]", "")["-"]
+#test("foo|bar|[A-Z]", "foo")["0-3"]
+#test("^(?:foo|bar|[A-Z])$", "")["-"]
+#test("^(?:foo|bar|[A-Z])$", "foo")["0-3"]
+#test("^(?:foo|bar|[A-Z])", "")["-"]
+#test("^(?:foo|bar|[A-Z])", "foo")["0-3"]
+#test("(?:foo|bar|[A-Z])$", "")["-"]
+#test("(?:foo|bar|[A-Z])$", "foo")["0-3"]
+#test("^(foo|bar|[A-Z])", "")["-"]
+#test("^(foo|bar|[A-Z])", "foo")["0-3 0-3"]
+#test("^(?:^(foo|bar|[A-Z]))$", "")["-"]
+#test("^(?:^(foo|bar|[A-Z]))$", "foo")["0-3 0-3"]
+#test("^(?:^(foo|bar|[A-Z]))", "")["-"]
+#test("^(?:^(foo|bar|[A-Z]))", "foo")["0-3 0-3"]
+#test("(?:^(foo|bar|[A-Z]))$", "")["-"]
+#test("(?:^(foo|bar|[A-Z]))$", "foo")["0-3 0-3"]
+#test("(foo|bar|[A-Z])$", "")["-"]
+#test("(foo|bar|[A-Z])$", "foo\n")["-"]
+#test("^(?:(foo|bar|[A-Z])$)$", "")["-"]
+#test("^(?:(foo|bar|[A-Z])$)$", "foo\n")["-"]
+#test("^(?:(foo|bar|[A-Z])$)", "")["-"]
+#test("^(?:(foo|bar|[A-Z])$)", "foo\n")["-"]
+#test("(?:(foo|bar|[A-Z])$)$", "")["-"]
+#test("(?:(foo|bar|[A-Z])$)$", "foo\n")["-"]
+#test("(foo|bar|[A-Z])$", "")["-"]
+#test("(foo|bar|[A-Z])$", "foo")["0-3 0-3"]
+#test("^(?:(foo|bar|[A-Z])$)$", "")["-"]
+#test("^(?:(foo|bar|[A-Z])$)$", "foo")["0-3 0-3"]
+#test("^(?:(foo|bar|[A-Z])$)", "")["-"]
+#test("^(?:(foo|bar|[A-Z])$)", "foo")["0-3 0-3"]
+#test("(?:(foo|bar|[A-Z])$)$", "")["-"]
+#test("(?:(foo|bar|[A-Z])$)$", "foo")["0-3 0-3"]
+#test("^(foo|bar|[A-Z])$", "")["-"]
+#test("^(foo|bar|[A-Z])$", "foo\n")["-"]
+#test("^(?:^(foo|bar|[A-Z])$)$", "")["-"]
+#test("^(?:^(foo|bar|[A-Z])$)$", "foo\n")["-"]
+#test("^(?:^(foo|bar|[A-Z])$)", "")["-"]
+#test("^(?:^(foo|bar|[A-Z])$)", "foo\n")["-"]
+#test("(?:^(foo|bar|[A-Z])$)$", "")["-"]
+#test("(?:^(foo|bar|[A-Z])$)$", "foo\n")["-"]
+#test("^(foo|bar|[A-Z])$", "")["-"]
+#test("^(foo|bar|[A-Z])$", "foo")["0-3 0-3"]
+#test("^(?:^(foo|bar|[A-Z])$)$", "")["-"]
+#test("^(?:^(foo|bar|[A-Z])$)$", "foo")["0-3 0-3"]
+#test("^(?:^(foo|bar|[A-Z])$)", "")["-"]
+#test("^(?:^(foo|bar|[A-Z])$)", "foo")["0-3 0-3"]
+#test("(?:^(foo|bar|[A-Z])$)$", "")["-"]
+#test("(?:^(foo|bar|[A-Z])$)$", "foo")["0-3 0-3"]
+#test("^(foo|bar|[A-Z])$", "")["-"]
+#test("^(foo|bar|[A-Z])$", "bar")["0-3 0-3"]
+#test("^(?:^(foo|bar|[A-Z])$)$", "")["-"]
+#test("^(?:^(foo|bar|[A-Z])$)$", "bar")["0-3 0-3"]
+#test("^(?:^(foo|bar|[A-Z])$)", "")["-"]
+#test("^(?:^(foo|bar|[A-Z])$)", "bar")["0-3 0-3"]
+#test("(?:^(foo|bar|[A-Z])$)$", "")["-"]
+#test("(?:^(foo|bar|[A-Z])$)$", "bar")["0-3 0-3"]
+#test("^(foo|bar|[A-Z])$", "")["-"]
+#test("^(foo|bar|[A-Z])$", "X")["0-1 0-1"]
+#test("^(?:^(foo|bar|[A-Z])$)$", "")["-"]
+#test("^(?:^(foo|bar|[A-Z])$)$", "X")["0-1 0-1"]
+#test("^(?:^(foo|bar|[A-Z])$)", "")["-"]
+#test("^(?:^(foo|bar|[A-Z])$)", "X")["0-1 0-1"]
+#test("(?:^(foo|bar|[A-Z])$)$", "")["-"]
+#test("(?:^(foo|bar|[A-Z])$)$", "X")["0-1 0-1"]
+#test("^(foo|bar|[A-Z])$", "")["-"]
+#test("^(foo|bar|[A-Z])$", "XY")["-"]
+#test("^(?:^(foo|bar|[A-Z])$)$", "")["-"]
+#test("^(?:^(foo|bar|[A-Z])$)$", "XY")["-"]
+#test("^(?:^(foo|bar|[A-Z])$)", "")["-"]
+#test("^(?:^(foo|bar|[A-Z])$)", "XY")["-"]
+#test("(?:^(foo|bar|[A-Z])$)$", "")["-"]
+#test("(?:^(foo|bar|[A-Z])$)$", "XY")["-"]
+#test("^(fo|foo)$", "")["-"]
+#test("^(fo|foo)$", "fo")["0-2 0-2"]
+#test("^(?:^(fo|foo)$)$", "")["-"]
+#test("^(?:^(fo|foo)$)$", "fo")["0-2 0-2"]
+#test("^(?:^(fo|foo)$)", "")["-"]
+#test("^(?:^(fo|foo)$)", "fo")["0-2 0-2"]
+#test("(?:^(fo|foo)$)$", "")["-"]
+#test("(?:^(fo|foo)$)$", "fo")["0-2 0-2"]
+#test("^(fo|foo)$", "")["-"]
+#test("^(fo|foo)$", "foo")["0-3 0-3"]
+#test("^(?:^(fo|foo)$)$", "")["-"]
+#test("^(?:^(fo|foo)$)$", "foo")["0-3 0-3"]
+#test("^(?:^(fo|foo)$)", "")["-"]
+#test("^(?:^(fo|foo)$)", "foo")["0-3 0-3"]
+#test("(?:^(fo|foo)$)$", "")["-"]
+#test("(?:^(fo|foo)$)$", "foo")["0-3 0-3"]
+#test("^^(fo|foo)$", "")["-"]
+#test("^^(fo|foo)$", "fo")["0-2 0-2"]
+#test("^(?:^^(fo|foo)$)$", "")["-"]
+#test("^(?:^^(fo|foo)$)$", "fo")["0-2 0-2"]
+#test("^(?:^^(fo|foo)$)", "")["-"]
+#test("^(?:^^(fo|foo)$)", "fo")["0-2 0-2"]
+#test("(?:^^(fo|foo)$)$", "")["-"]
+#test("(?:^^(fo|foo)$)$", "fo")["0-2 0-2"]
+#test("^^(fo|foo)$", "")["-"]
+#test("^^(fo|foo)$", "foo")["0-3 0-3"]
+#test("^(?:^^(fo|foo)$)$", "")["-"]
+#test("^(?:^^(fo|foo)$)$", "foo")["0-3 0-3"]
+#test("^(?:^^(fo|foo)$)", "")["-"]
+#test("^(?:^^(fo|foo)$)", "foo")["0-3 0-3"]
+#test("(?:^^(fo|foo)$)$", "")["-"]
+#test("(?:^^(fo|foo)$)$", "foo")["0-3 0-3"]
+#test("^$", "")["0-0"]
+#test("^$", "")["0-0"]
+#test("^(?:^$)$", "")["0-0"]
+#test("^(?:^$)$", "")["0-0"]
+#test("^(?:^$)", "")["0-0"]
+#test("^(?:^$)", "")["0-0"]
+#test("(?:^$)$", "")["0-0"]
+#test("(?:^$)$", "")["0-0"]
+#test("^$", "")["0-0"]
+#test("^$", "x")["-"]
+#test("^(?:^$)$", "")["0-0"]
+#test("^(?:^$)$", "x")["-"]
+#test("^(?:^$)", "")["0-0"]
+#test("^(?:^$)", "x")["-"]
+#test("(?:^$)$", "")["0-0"]
+#test("(?:^$)$", "x")["-"]
+#test("^^$", "")["0-0"]
+#test("^^$", "")["0-0"]
+#test("^(?:^^$)$", "")["0-0"]
+#test("^(?:^^$)$", "")["0-0"]
+#test("^(?:^^$)", "")["0-0"]
+#test("^(?:^^$)", "")["0-0"]
+#test("(?:^^$)$", "")["0-0"]
+#test("(?:^^$)$", "")["0-0"]
+#test("^$$", "")["0-0"]
+#test("^$$", "")["0-0"]
+#test("^(?:^$$)$", "")["0-0"]
+#test("^(?:^$$)$", "")["0-0"]
+#test("^(?:^$$)", "")["0-0"]
+#test("^(?:^$$)", "")["0-0"]
+#test("(?:^$$)$", "")["0-0"]
+#test("(?:^$$)$", "")["0-0"]
+#test("^^$", "")["0-0"]
+#test("^^$", "x")["-"]
+#test("^(?:^^$)$", "")["0-0"]
+#test("^(?:^^$)$", "x")["-"]
+#test("^(?:^^$)", "")["0-0"]
+#test("^(?:^^$)", "x")["-"]
+#test("(?:^^$)$", "")["0-0"]
+#test("(?:^^$)$", "x")["-"]
+#test("^$$", "")["0-0"]
+#test("^$$", "x")["-"]
+#test("^(?:^$$)$", "")["0-0"]
+#test("^(?:^$$)$", "x")["-"]
+#test("^(?:^$$)", "")["0-0"]
+#test("^(?:^$$)", "x")["-"]
+#test("(?:^$$)$", "")["0-0"]
+#test("(?:^$$)$", "x")["-"]
+#test("^^$$", "")["0-0"]
+#test("^^$$", "")["0-0"]
+#test("^(?:^^$$)$", "")["0-0"]
+#test("^(?:^^$$)$", "")["0-0"]
+#test("^(?:^^$$)", "")["0-0"]
+#test("^(?:^^$$)", "")["0-0"]
+#test("(?:^^$$)$", "")["0-0"]
+#test("(?:^^$$)$", "")["0-0"]
+#test("^^$$", "")["0-0"]
+#test("^^$$", "x")["-"]
+#test("^(?:^^$$)$", "")["0-0"]
+#test("^(?:^^$$)$", "x")["-"]
+#test("^(?:^^$$)", "")["0-0"]
+#test("^(?:^^$$)", "x")["-"]
+#test("(?:^^$$)$", "")["0-0"]
+#test("(?:^^$$)$", "x")["-"]
+#test("^^^^^^^^$$$$$$$$", "")["0-0"]
+#test("^^^^^^^^$$$$$$$$", "")["0-0"]
+#test("^(?:^^^^^^^^$$$$$$$$)$", "")["0-0"]
+#test("^(?:^^^^^^^^$$$$$$$$)$", "")["0-0"]
+#test("^(?:^^^^^^^^$$$$$$$$)", "")["0-0"]
+#test("^(?:^^^^^^^^$$$$$$$$)", "")["0-0"]
+#test("(?:^^^^^^^^$$$$$$$$)$", "")["0-0"]
+#test("(?:^^^^^^^^$$$$$$$$)$", "")["0-0"]
+#test("^", "")["0-0"]
+#test("^", "x")["0-0"]
+#test("^(?:^)$", "")["0-0"]
+#test("^(?:^)$", "x")["-"]
+#test("^(?:^)", "")["0-0"]
+#test("^(?:^)", "x")["0-0"]
+#test("(?:^)$", "")["0-0"]
+#test("(?:^)$", "x")["-"]
+#test("$", "")["0-0"]
+#test("$", "x")["1-1"]
+#test("^(?:$)$", "")["0-0"]
+#test("^(?:$)$", "x")["-"]
+#test("^(?:$)", "")["0-0"]
+#test("^(?:$)", "x")["-"]
+#test("(?:$)$", "")["0-0"]
+#test("(?:$)$", "x")["1-1"]
+#test("\\bfoo\\b", "")["-"]
+#test("\\bfoo\\b", "nofoo foo that")["6-9"]
+#test("^(?:\\bfoo\\b)$", "")["-"]
+#test("^(?:\\bfoo\\b)$", "nofoo foo that")["-"]
+#test("^(?:\\bfoo\\b)", "")["-"]
+#test("^(?:\\bfoo\\b)", "nofoo foo that")["-"]
+#test("(?:\\bfoo\\b)$", "")["-"]
+#test("(?:\\bfoo\\b)$", "nofoo foo that")["-"]
+#test("a\\b", "")["-"]
+#test("a\\b", "faoa x")["3-4"]
+#test("^(?:a\\b)$", "")["-"]
+#test("^(?:a\\b)$", "faoa x")["-"]
+#test("^(?:a\\b)", "")["-"]
+#test("^(?:a\\b)", "faoa x")["-"]
+#test("(?:a\\b)$", "")["-"]
+#test("(?:a\\b)$", "faoa x")["-"]
+#test("\\bbar", "")["-"]
+#test("\\bbar", "bar x")["0-3"]
+#test("^(?:\\bbar)$", "")["-"]
+#test("^(?:\\bbar)$", "bar x")["-"]
+#test("^(?:\\bbar)", "")["-"]
+#test("^(?:\\bbar)", "bar x")["0-3"]
+#test("(?:\\bbar)$", "")["-"]
+#test("(?:\\bbar)$", "bar x")["-"]
+#test("\\bbar", "")["-"]
+#test("\\bbar", "foo\nbar x")["4-7"]
+#test("^(?:\\bbar)$", "")["-"]
+#test("^(?:\\bbar)$", "foo\nbar x")["-"]
+#test("^(?:\\bbar)", "")["-"]
+#test("^(?:\\bbar)", "foo\nbar x")["-"]
+#test("(?:\\bbar)$", "")["-"]
+#test("(?:\\bbar)$", "foo\nbar x")["-"]
+#test("bar\\b", "")["-"]
+#test("bar\\b", "foobar")["3-6"]
+#test("^(?:bar\\b)$", "")["-"]
+#test("^(?:bar\\b)$", "foobar")["-"]
+#test("^(?:bar\\b)", "")["-"]
+#test("^(?:bar\\b)", "foobar")["-"]
+#test("(?:bar\\b)$", "")["-"]
+#test("(?:bar\\b)$", "foobar")["3-6"]
+#test("bar\\b", "")["-"]
+#test("bar\\b", "foobar\nxxx")["3-6"]
+#test("^(?:bar\\b)$", "")["-"]
+#test("^(?:bar\\b)$", "foobar\nxxx")["-"]
+#test("^(?:bar\\b)", "")["-"]
+#test("^(?:bar\\b)", "foobar\nxxx")["-"]
+#test("(?:bar\\b)$", "")["-"]
+#test("(?:bar\\b)$", "foobar\nxxx")["-"]
+#test("(foo|bar|[A-Z])\\b", "")["-"]
+#test("(foo|bar|[A-Z])\\b", "foo")["0-3 0-3"]
+#test("^(?:(foo|bar|[A-Z])\\b)$", "")["-"]
+#test("^(?:(foo|bar|[A-Z])\\b)$", "foo")["0-3 0-3"]
+#test("^(?:(foo|bar|[A-Z])\\b)", "")["-"]
+#test("^(?:(foo|bar|[A-Z])\\b)", "foo")["0-3 0-3"]
+#test("(?:(foo|bar|[A-Z])\\b)$", "")["-"]
+#test("(?:(foo|bar|[A-Z])\\b)$", "foo")["0-3 0-3"]
+#test("(foo|bar|[A-Z])\\b", "")["-"]
+#test("(foo|bar|[A-Z])\\b", "foo\n")["0-3 0-3"]
+#test("^(?:(foo|bar|[A-Z])\\b)$", "")["-"]
+#test("^(?:(foo|bar|[A-Z])\\b)$", "foo\n")["-"]
+#test("^(?:(foo|bar|[A-Z])\\b)", "")["-"]
+#test("^(?:(foo|bar|[A-Z])\\b)", "foo\n")["0-3 0-3"]
+#test("(?:(foo|bar|[A-Z])\\b)$", "")["-"]
+#test("(?:(foo|bar|[A-Z])\\b)$", "foo\n")["-"]
+#test("\\b", "")["-"]
+#test("\\b", "")["-"]
+#test("^(?:\\b)$", "")["-"]
+#test("^(?:\\b)$", "")["-"]
+#test("^(?:\\b)", "")["-"]
+#test("^(?:\\b)", "")["-"]
+#test("(?:\\b)$", "")["-"]
+#test("(?:\\b)$", "")["-"]
+#test("\\b", "")["-"]
+#test("\\b", "x")["0-0"]
+#test("^(?:\\b)$", "")["-"]
+#test("^(?:\\b)$", "x")["-"]
+#test("^(?:\\b)", "")["-"]
+#test("^(?:\\b)", "x")["0-0"]
+#test("(?:\\b)$", "")["-"]
+#test("(?:\\b)$", "x")["1-1"]
+#test("\\b(foo|bar|[A-Z])", "")["-"]
+#test("\\b(foo|bar|[A-Z])", "foo")["0-3 0-3"]
+#test("^(?:\\b(foo|bar|[A-Z]))$", "")["-"]
+#test("^(?:\\b(foo|bar|[A-Z]))$", "foo")["0-3 0-3"]
+#test("^(?:\\b(foo|bar|[A-Z]))", "")["-"]
+#test("^(?:\\b(foo|bar|[A-Z]))", "foo")["0-3 0-3"]
+#test("(?:\\b(foo|bar|[A-Z]))$", "")["-"]
+#test("(?:\\b(foo|bar|[A-Z]))$", "foo")["0-3 0-3"]
+#test("\\b(foo|bar|[A-Z])\\b", "")["-"]
+#test("\\b(foo|bar|[A-Z])\\b", "X")["0-1 0-1"]
+#test("^(?:\\b(foo|bar|[A-Z])\\b)$", "")["-"]
+#test("^(?:\\b(foo|bar|[A-Z])\\b)$", "X")["0-1 0-1"]
+#test("^(?:\\b(foo|bar|[A-Z])\\b)", "")["-"]
+#test("^(?:\\b(foo|bar|[A-Z])\\b)", "X")["0-1 0-1"]
+#test("(?:\\b(foo|bar|[A-Z])\\b)$", "")["-"]
+#test("(?:\\b(foo|bar|[A-Z])\\b)$", "X")["0-1 0-1"]
+#test("\\b(foo|bar|[A-Z])\\b", "")["-"]
+#test("\\b(foo|bar|[A-Z])\\b", "XY")["-"]
+#test("^(?:\\b(foo|bar|[A-Z])\\b)$", "")["-"]
+#test("^(?:\\b(foo|bar|[A-Z])\\b)$", "XY")["-"]
+#test("^(?:\\b(foo|bar|[A-Z])\\b)", "")["-"]
+#test("^(?:\\b(foo|bar|[A-Z])\\b)", "XY")["-"]
+#test("(?:\\b(foo|bar|[A-Z])\\b)$", "")["-"]
+#test("(?:\\b(foo|bar|[A-Z])\\b)$", "XY")["-"]
+#test("\\b(foo|bar|[A-Z])\\b", "")["-"]
+#test("\\b(foo|bar|[A-Z])\\b", "bar")["0-3 0-3"]
+#test("^(?:\\b(foo|bar|[A-Z])\\b)$", "")["-"]
+#test("^(?:\\b(foo|bar|[A-Z])\\b)$", "bar")["0-3 0-3"]
+#test("^(?:\\b(foo|bar|[A-Z])\\b)", "")["-"]
+#test("^(?:\\b(foo|bar|[A-Z])\\b)", "bar")["0-3 0-3"]
+#test("(?:\\b(foo|bar|[A-Z])\\b)$", "")["-"]
+#test("(?:\\b(foo|bar|[A-Z])\\b)$", "bar")["0-3 0-3"]
+#test("\\b(foo|bar|[A-Z])\\b", "")["-"]
+#test("\\b(foo|bar|[A-Z])\\b", "foo")["0-3 0-3"]
+#test("^(?:\\b(foo|bar|[A-Z])\\b)$", "")["-"]
+#test("^(?:\\b(foo|bar|[A-Z])\\b)$", "foo")["0-3 0-3"]
+#test("^(?:\\b(foo|bar|[A-Z])\\b)", "")["-"]
+#test("^(?:\\b(foo|bar|[A-Z])\\b)", "foo")["0-3 0-3"]
+#test("(?:\\b(foo|bar|[A-Z])\\b)$", "")["-"]
+#test("(?:\\b(foo|bar|[A-Z])\\b)$", "foo")["0-3 0-3"]
+#test("\\b(foo|bar|[A-Z])\\b", "")["-"]
+#test("\\b(foo|bar|[A-Z])\\b", "foo\n")["0-3 0-3"]
+#test("^(?:\\b(foo|bar|[A-Z])\\b)$", "")["-"]
+#test("^(?:\\b(foo|bar|[A-Z])\\b)$", "foo\n")["-"]
+#test("^(?:\\b(foo|bar|[A-Z])\\b)", "")["-"]
+#test("^(?:\\b(foo|bar|[A-Z])\\b)", "foo\n")["0-3 0-3"]
+#test("(?:\\b(foo|bar|[A-Z])\\b)$", "")["-"]
+#test("(?:\\b(foo|bar|[A-Z])\\b)$", "foo\n")["-"]
+#test("\\b(foo|bar|[A-Z])\\b", "")["-"]
+#test("\\b(foo|bar|[A-Z])\\b", "ffoo bbar N x")["10-11 10-11"]
+#test("^(?:\\b(foo|bar|[A-Z])\\b)$", "")["-"]
+#test("^(?:\\b(foo|bar|[A-Z])\\b)$", "ffoo bbar N x")["-"]
+#test("^(?:\\b(foo|bar|[A-Z])\\b)", "")["-"]
+#test("^(?:\\b(foo|bar|[A-Z])\\b)", "ffoo bbar N x")["-"]
+#test("(?:\\b(foo|bar|[A-Z])\\b)$", "")["-"]
+#test("(?:\\b(foo|bar|[A-Z])\\b)$", "ffoo bbar N x")["-"]
+#test("\\b(fo|foo)\\b", "")["-"]
+#test("\\b(fo|foo)\\b", "fo")["0-2 0-2"]
+#test("^(?:\\b(fo|foo)\\b)$", "")["-"]
+#test("^(?:\\b(fo|foo)\\b)$", "fo")["0-2 0-2"]
+#test("^(?:\\b(fo|foo)\\b)", "")["-"]
+#test("^(?:\\b(fo|foo)\\b)", "fo")["0-2 0-2"]
+#test("(?:\\b(fo|foo)\\b)$", "")["-"]
+#test("(?:\\b(fo|foo)\\b)$", "fo")["0-2 0-2"]
+#test("\\b(fo|foo)\\b", "")["-"]
+#test("\\b(fo|foo)\\b", "foo")["0-3 0-3"]
+#test("^(?:\\b(fo|foo)\\b)$", "")["-"]
+#test("^(?:\\b(fo|foo)\\b)$", "foo")["0-3 0-3"]
+#test("^(?:\\b(fo|foo)\\b)", "")["-"]
+#test("^(?:\\b(fo|foo)\\b)", "foo")["0-3 0-3"]
+#test("(?:\\b(fo|foo)\\b)$", "")["-"]
+#test("(?:\\b(fo|foo)\\b)$", "foo")["0-3 0-3"]
+#test("\\b\\b", "")["-"]
+#test("\\b\\b", "")["-"]
+#test("^(?:\\b\\b)$", "")["-"]
+#test("^(?:\\b\\b)$", "")["-"]
+#test("^(?:\\b\\b)", "")["-"]
+#test("^(?:\\b\\b)", "")["-"]
+#test("(?:\\b\\b)$", "")["-"]
+#test("(?:\\b\\b)$", "")["-"]
+#test("\\b\\b", "")["-"]
+#test("\\b\\b", "x")["0-0"]
+#test("^(?:\\b\\b)$", "")["-"]
+#test("^(?:\\b\\b)$", "x")["-"]
+#test("^(?:\\b\\b)", "")["-"]
+#test("^(?:\\b\\b)", "x")["0-0"]
+#test("(?:\\b\\b)$", "")["-"]
+#test("(?:\\b\\b)$", "x")["1-1"]
+#test("\\b$", "")["-"]
+#test("\\b$", "")["-"]
+#test("^(?:\\b$)$", "")["-"]
+#test("^(?:\\b$)$", "")["-"]
+#test("^(?:\\b$)", "")["-"]
+#test("^(?:\\b$)", "")["-"]
+#test("(?:\\b$)$", "")["-"]
+#test("(?:\\b$)$", "")["-"]
+#test("\\b$", "")["-"]
+#test("\\b$", "x")["1-1"]
+#test("^(?:\\b$)$", "")["-"]
+#test("^(?:\\b$)$", "x")["-"]
+#test("^(?:\\b$)", "")["-"]
+#test("^(?:\\b$)", "x")["-"]
+#test("(?:\\b$)$", "")["-"]
+#test("(?:\\b$)$", "x")["1-1"]
+#test("\\b$", "")["-"]
+#test("\\b$", "y x")["3-3"]
+#test("^(?:\\b$)$", "")["-"]
+#test("^(?:\\b$)$", "y x")["-"]
+#test("^(?:\\b$)", "")["-"]
+#test("^(?:\\b$)", "y x")["-"]
+#test("(?:\\b$)$", "")["-"]
+#test("(?:\\b$)$", "y x")["3-3"]
+#test("\\b.$", "")["-"]
+#test("\\b.$", "x")["0-1"]
+#test("^(?:\\b.$)$", "")["-"]
+#test("^(?:\\b.$)$", "x")["0-1"]
+#test("^(?:\\b.$)", "")["-"]
+#test("^(?:\\b.$)", "x")["0-1"]
+#test("(?:\\b.$)$", "")["-"]
+#test("(?:\\b.$)$", "x")["0-1"]
+#test("^\\b(fo|foo)\\b", "")["-"]
+#test("^\\b(fo|foo)\\b", "fo")["0-2 0-2"]
+#test("^(?:^\\b(fo|foo)\\b)$", "")["-"]
+#test("^(?:^\\b(fo|foo)\\b)$", "fo")["0-2 0-2"]
+#test("^(?:^\\b(fo|foo)\\b)", "")["-"]
+#test("^(?:^\\b(fo|foo)\\b)", "fo")["0-2 0-2"]
+#test("(?:^\\b(fo|foo)\\b)$", "")["-"]
+#test("(?:^\\b(fo|foo)\\b)$", "fo")["0-2 0-2"]
+#test("^\\b(fo|foo)\\b", "")["-"]
+#test("^\\b(fo|foo)\\b", "foo")["0-3 0-3"]
+#test("^(?:^\\b(fo|foo)\\b)$", "")["-"]
+#test("^(?:^\\b(fo|foo)\\b)$", "foo")["0-3 0-3"]
+#test("^(?:^\\b(fo|foo)\\b)", "")["-"]
+#test("^(?:^\\b(fo|foo)\\b)", "foo")["0-3 0-3"]
+#test("(?:^\\b(fo|foo)\\b)$", "")["-"]
+#test("(?:^\\b(fo|foo)\\b)$", "foo")["0-3 0-3"]
+#test("^\\b", "")["-"]
+#test("^\\b", "")["-"]
+#test("^(?:^\\b)$", "")["-"]
+#test("^(?:^\\b)$", "")["-"]
+#test("^(?:^\\b)", "")["-"]
+#test("^(?:^\\b)", "")["-"]
+#test("(?:^\\b)$", "")["-"]
+#test("(?:^\\b)$", "")["-"]
+#test("^\\b", "")["-"]
+#test("^\\b", "x")["0-0"]
+#test("^(?:^\\b)$", "")["-"]
+#test("^(?:^\\b)$", "x")["-"]
+#test("^(?:^\\b)", "")["-"]
+#test("^(?:^\\b)", "x")["0-0"]
+#test("(?:^\\b)$", "")["-"]
+#test("(?:^\\b)$", "x")["-"]
+#test("^\\b\\b", "")["-"]
+#test("^\\b\\b", "")["-"]
+#test("^(?:^\\b\\b)$", "")["-"]
+#test("^(?:^\\b\\b)$", "")["-"]
+#test("^(?:^\\b\\b)", "")["-"]
+#test("^(?:^\\b\\b)", "")["-"]
+#test("(?:^\\b\\b)$", "")["-"]
+#test("(?:^\\b\\b)$", "")["-"]
+#test("^\\b\\b", "")["-"]
+#test("^\\b\\b", "x")["0-0"]
+#test("^(?:^\\b\\b)$", "")["-"]
+#test("^(?:^\\b\\b)$", "x")["-"]
+#test("^(?:^\\b\\b)", "")["-"]
+#test("^(?:^\\b\\b)", "x")["0-0"]
+#test("(?:^\\b\\b)$", "")["-"]
+#test("(?:^\\b\\b)$", "x")["-"]
+#test("^\\b$", "")["-"]
+#test("^\\b$", "")["-"]
+#test("^(?:^\\b$)$", "")["-"]
+#test("^(?:^\\b$)$", "")["-"]
+#test("^(?:^\\b$)", "")["-"]
+#test("^(?:^\\b$)", "")["-"]
+#test("(?:^\\b$)$", "")["-"]
+#test("(?:^\\b$)$", "")["-"]
+#test("^\\b$", "")["-"]
+#test("^\\b$", "x")["-"]
+#test("^(?:^\\b$)$", "")["-"]
+#test("^(?:^\\b$)$", "x")["-"]
+#test("^(?:^\\b$)", "")["-"]
+#test("^(?:^\\b$)", "x")["-"]
+#test("(?:^\\b$)$", "")["-"]
+#test("(?:^\\b$)$", "x")["-"]
+#test("^\\b.$", "")["-"]
+#test("^\\b.$", "x")["0-1"]
+#test("^(?:^\\b.$)$", "")["-"]
+#test("^(?:^\\b.$)$", "x")["0-1"]
+#test("^(?:^\\b.$)", "")["-"]
+#test("^(?:^\\b.$)", "x")["0-1"]
+#test("(?:^\\b.$)$", "")["-"]
+#test("(?:^\\b.$)$", "x")["0-1"]
+#test("^\\b.\\b$", "")["-"]
+#test("^\\b.\\b$", "x")["0-1"]
+#test("^(?:^\\b.\\b$)$", "")["-"]
+#test("^(?:^\\b.\\b$)$", "x")["0-1"]
+#test("^(?:^\\b.\\b$)", "")["-"]
+#test("^(?:^\\b.\\b$)", "x")["0-1"]
+#test("(?:^\\b.\\b$)$", "")["-"]
+#test("(?:^\\b.\\b$)$", "x")["0-1"]
+#test("^^^^^^^^\\b$$$$$$$", "")["-"]
+#test("^^^^^^^^\\b$$$$$$$", "")["-"]
+#test("^(?:^^^^^^^^\\b$$$$$$$)$", "")["-"]
+#test("^(?:^^^^^^^^\\b$$$$$$$)$", "")["-"]
+#test("^(?:^^^^^^^^\\b$$$$$$$)", "")["-"]
+#test("^(?:^^^^^^^^\\b$$$$$$$)", "")["-"]
+#test("(?:^^^^^^^^\\b$$$$$$$)$", "")["-"]
+#test("(?:^^^^^^^^\\b$$$$$$$)$", "")["-"]
+#test("^^^^^^^^\\b.$$$$$$", "")["-"]
+#test("^^^^^^^^\\b.$$$$$$", "x")["0-1"]
+#test("^(?:^^^^^^^^\\b.$$$$$$)$", "")["-"]
+#test("^(?:^^^^^^^^\\b.$$$$$$)$", "x")["0-1"]
+#test("^(?:^^^^^^^^\\b.$$$$$$)", "")["-"]
+#test("^(?:^^^^^^^^\\b.$$$$$$)", "x")["0-1"]
+#test("(?:^^^^^^^^\\b.$$$$$$)$", "")["-"]
+#test("(?:^^^^^^^^\\b.$$$$$$)$", "x")["0-1"]
+#test("^^^^^^^^\\b$$$$$$$", "")["-"]
+#test("^^^^^^^^\\b$$$$$$$", "x")["-"]
+#test("^(?:^^^^^^^^\\b$$$$$$$)$", "")["-"]
+#test("^(?:^^^^^^^^\\b$$$$$$$)$", "x")["-"]
+#test("^(?:^^^^^^^^\\b$$$$$$$)", "")["-"]
+#test("^(?:^^^^^^^^\\b$$$$$$$)", "x")["-"]
+#test("(?:^^^^^^^^\\b$$$$$$$)$", "")["-"]
+#test("(?:^^^^^^^^\\b$$$$$$$)$", "x")["-"]
+#test("\\Bfoo\\B", "")["-"]
+#test("\\Bfoo\\B", "n foo xfoox that")["7-10"]
+#test("^(?:\\Bfoo\\B)$", "")["-"]
+#test("^(?:\\Bfoo\\B)$", "n foo xfoox that")["-"]
+#test("^(?:\\Bfoo\\B)", "")["-"]
+#test("^(?:\\Bfoo\\B)", "n foo xfoox that")["-"]
+#test("(?:\\Bfoo\\B)$", "")["-"]
+#test("(?:\\Bfoo\\B)$", "n foo xfoox that")["-"]
+#test("a\\B", "")["-"]
+#test("a\\B", "faoa x")["1-2"]
+#test("^(?:a\\B)$", "")["-"]
+#test("^(?:a\\B)$", "faoa x")["-"]
+#test("^(?:a\\B)", "")["-"]
+#test("^(?:a\\B)", "faoa x")["-"]
+#test("(?:a\\B)$", "")["-"]
+#test("(?:a\\B)$", "faoa x")["-"]
+#test("\\Bbar", "")["-"]
+#test("\\Bbar", "bar x")["-"]
+#test("^(?:\\Bbar)$", "")["-"]
+#test("^(?:\\Bbar)$", "bar x")["-"]
+#test("^(?:\\Bbar)", "")["-"]
+#test("^(?:\\Bbar)", "bar x")["-"]
+#test("(?:\\Bbar)$", "")["-"]
+#test("(?:\\Bbar)$", "bar x")["-"]
+#test("\\Bbar", "")["-"]
+#test("\\Bbar", "foo\nbar x")["-"]
+#test("^(?:\\Bbar)$", "")["-"]
+#test("^(?:\\Bbar)$", "foo\nbar x")["-"]
+#test("^(?:\\Bbar)", "")["-"]
+#test("^(?:\\Bbar)", "foo\nbar x")["-"]
+#test("(?:\\Bbar)$", "")["-"]
+#test("(?:\\Bbar)$", "foo\nbar x")["-"]
+#test("bar\\B", "")["-"]
+#test("bar\\B", "foobar")["-"]
+#test("^(?:bar\\B)$", "")["-"]
+#test("^(?:bar\\B)$", "foobar")["-"]
+#test("^(?:bar\\B)", "")["-"]
+#test("^(?:bar\\B)", "foobar")["-"]
+#test("(?:bar\\B)$", "")["-"]
+#test("(?:bar\\B)$", "foobar")["-"]
+#test("bar\\B", "")["-"]
+#test("bar\\B", "foobar\nxxx")["-"]
+#test("^(?:bar\\B)$", "")["-"]
+#test("^(?:bar\\B)$", "foobar\nxxx")["-"]
+#test("^(?:bar\\B)", "")["-"]
+#test("^(?:bar\\B)", "foobar\nxxx")["-"]
+#test("(?:bar\\B)$", "")["-"]
+#test("(?:bar\\B)$", "foobar\nxxx")["-"]
+#test("(foo|bar|[A-Z])\\B", "")["-"]
+#test("(foo|bar|[A-Z])\\B", "foox")["0-3 0-3"]
+#test("^(?:(foo|bar|[A-Z])\\B)$", "")["-"]
+#test("^(?:(foo|bar|[A-Z])\\B)$", "foox")["-"]
+#test("^(?:(foo|bar|[A-Z])\\B)", "")["-"]
+#test("^(?:(foo|bar|[A-Z])\\B)", "foox")["0-3 0-3"]
+#test("(?:(foo|bar|[A-Z])\\B)$", "")["-"]
+#test("(?:(foo|bar|[A-Z])\\B)$", "foox")["-"]
+#test("(foo|bar|[A-Z])\\B", "")["-"]
+#test("(foo|bar|[A-Z])\\B", "foo\n")["-"]
+#test("^(?:(foo|bar|[A-Z])\\B)$", "")["-"]
+#test("^(?:(foo|bar|[A-Z])\\B)$", "foo\n")["-"]
+#test("^(?:(foo|bar|[A-Z])\\B)", "")["-"]
+#test("^(?:(foo|bar|[A-Z])\\B)", "foo\n")["-"]
+#test("(?:(foo|bar|[A-Z])\\B)$", "")["-"]
+#test("(?:(foo|bar|[A-Z])\\B)$", "foo\n")["-"]
+#test("\\B", "")["0-0"]
+#test("\\B", "")["0-0"]
+#test("^(?:\\B)$", "")["0-0"]
+#test("^(?:\\B)$", "")["0-0"]
+#test("^(?:\\B)", "")["0-0"]
+#test("^(?:\\B)", "")["0-0"]
+#test("(?:\\B)$", "")["0-0"]
+#test("(?:\\B)$", "")["0-0"]
+#test("\\B", "")["0-0"]
+#test("\\B", "x")["-"]
+#test("^(?:\\B)$", "")["0-0"]
+#test("^(?:\\B)$", "x")["-"]
+#test("^(?:\\B)", "")["0-0"]
+#test("^(?:\\B)", "x")["-"]
+#test("(?:\\B)$", "")["0-0"]
+#test("(?:\\B)$", "x")["-"]
+#test("\\B(foo|bar|[A-Z])", "")["-"]
+#test("\\B(foo|bar|[A-Z])", "foo")["-"]
+#test("^(?:\\B(foo|bar|[A-Z]))$", "")["-"]
+#test("^(?:\\B(foo|bar|[A-Z]))$", "foo")["-"]
+#test("^(?:\\B(foo|bar|[A-Z]))", "")["-"]
+#test("^(?:\\B(foo|bar|[A-Z]))", "foo")["-"]
+#test("(?:\\B(foo|bar|[A-Z]))$", "")["-"]
+#test("(?:\\B(foo|bar|[A-Z]))$", "foo")["-"]
+#test("\\B(foo|bar|[A-Z])\\B", "")["-"]
+#test("\\B(foo|bar|[A-Z])\\B", "xXy")["1-2 1-2"]
+#test("^(?:\\B(foo|bar|[A-Z])\\B)$", "")["-"]
+#test("^(?:\\B(foo|bar|[A-Z])\\B)$", "xXy")["-"]
+#test("^(?:\\B(foo|bar|[A-Z])\\B)", "")["-"]
+#test("^(?:\\B(foo|bar|[A-Z])\\B)", "xXy")["-"]
+#test("(?:\\B(foo|bar|[A-Z])\\B)$", "")["-"]
+#test("(?:\\B(foo|bar|[A-Z])\\B)$", "xXy")["-"]
+#test("\\B(foo|bar|[A-Z])\\B", "")["-"]
+#test("\\B(foo|bar|[A-Z])\\B", "XY")["-"]
+#test("^(?:\\B(foo|bar|[A-Z])\\B)$", "")["-"]
+#test("^(?:\\B(foo|bar|[A-Z])\\B)$", "XY")["-"]
+#test("^(?:\\B(foo|bar|[A-Z])\\B)", "")["-"]
+#test("^(?:\\B(foo|bar|[A-Z])\\B)", "XY")["-"]
+#test("(?:\\B(foo|bar|[A-Z])\\B)$", "")["-"]
+#test("(?:\\B(foo|bar|[A-Z])\\B)$", "XY")["-"]
+#test("\\B(foo|bar|[A-Z])\\B", "")["-"]
+#test("\\B(foo|bar|[A-Z])\\B", "XYZ")["1-2 1-2"]
+#test("^(?:\\B(foo|bar|[A-Z])\\B)$", "")["-"]
+#test("^(?:\\B(foo|bar|[A-Z])\\B)$", "XYZ")["-"]
+#test("^(?:\\B(foo|bar|[A-Z])\\B)", "")["-"]
+#test("^(?:\\B(foo|bar|[A-Z])\\B)", "XYZ")["-"]
+#test("(?:\\B(foo|bar|[A-Z])\\B)$", "")["-"]
+#test("(?:\\B(foo|bar|[A-Z])\\B)$", "XYZ")["-"]
+#test("\\B(foo|bar|[A-Z])\\B", "")["-"]
+#test("\\B(foo|bar|[A-Z])\\B", "abara")["1-4 1-4"]
+#test("^(?:\\B(foo|bar|[A-Z])\\B)$", "")["-"]
+#test("^(?:\\B(foo|bar|[A-Z])\\B)$", "abara")["-"]
+#test("^(?:\\B(foo|bar|[A-Z])\\B)", "")["-"]
+#test("^(?:\\B(foo|bar|[A-Z])\\B)", "abara")["-"]
+#test("(?:\\B(foo|bar|[A-Z])\\B)$", "")["-"]
+#test("(?:\\B(foo|bar|[A-Z])\\B)$", "abara")["-"]
+#test("\\B(foo|bar|[A-Z])\\B", "")["-"]
+#test("\\B(foo|bar|[A-Z])\\B", "xfoo_")["1-4 1-4"]
+#test("^(?:\\B(foo|bar|[A-Z])\\B)$", "")["-"]
+#test("^(?:\\B(foo|bar|[A-Z])\\B)$", "xfoo_")["-"]
+#test("^(?:\\B(foo|bar|[A-Z])\\B)", "")["-"]
+#test("^(?:\\B(foo|bar|[A-Z])\\B)", "xfoo_")["-"]
+#test("(?:\\B(foo|bar|[A-Z])\\B)$", "")["-"]
+#test("(?:\\B(foo|bar|[A-Z])\\B)$", "xfoo_")["-"]
+#test("\\B(foo|bar|[A-Z])\\B", "")["-"]
+#test("\\B(foo|bar|[A-Z])\\B", "xfoo\n")["-"]
+#test("^(?:\\B(foo|bar|[A-Z])\\B)$", "")["-"]
+#test("^(?:\\B(foo|bar|[A-Z])\\B)$", "xfoo\n")["-"]
+#test("^(?:\\B(foo|bar|[A-Z])\\B)", "")["-"]
+#test("^(?:\\B(foo|bar|[A-Z])\\B)", "xfoo\n")["-"]
+#test("(?:\\B(foo|bar|[A-Z])\\B)$", "")["-"]
+#test("(?:\\B(foo|bar|[A-Z])\\B)$", "xfoo\n")["-"]
+#test("\\B(foo|bar|[A-Z])\\B", "")["-"]
+#test("\\B(foo|bar|[A-Z])\\B", "foo bar vNx")["9-10 9-10"]
+#test("^(?:\\B(foo|bar|[A-Z])\\B)$", "")["-"]
+#test("^(?:\\B(foo|bar|[A-Z])\\B)$", "foo bar vNx")["-"]
+#test("^(?:\\B(foo|bar|[A-Z])\\B)", "")["-"]
+#test("^(?:\\B(foo|bar|[A-Z])\\B)", "foo bar vNx")["-"]
+#test("(?:\\B(foo|bar|[A-Z])\\B)$", "")["-"]
+#test("(?:\\B(foo|bar|[A-Z])\\B)$", "foo bar vNx")["-"]
+#test("\\B(fo|foo)\\B", "")["-"]
+#test("\\B(fo|foo)\\B", "xfoo")["1-3 1-3"]
+#test("^(?:\\B(fo|foo)\\B)$", "")["-"]
+#test("^(?:\\B(fo|foo)\\B)$", "xfoo")["-"]
+#test("^(?:\\B(fo|foo)\\B)", "")["-"]
+#test("^(?:\\B(fo|foo)\\B)", "xfoo")["-"]
+#test("(?:\\B(fo|foo)\\B)$", "")["-"]
+#test("(?:\\B(fo|foo)\\B)$", "xfoo")["-"]
+#test("\\B(foo|fo)\\B", "")["-"]
+#test("\\B(foo|fo)\\B", "xfooo")["1-4 1-4"]
+#test("^(?:\\B(foo|fo)\\B)$", "")["-"]
+#test("^(?:\\B(foo|fo)\\B)$", "xfooo")["-"]
+#test("^(?:\\B(foo|fo)\\B)", "")["-"]
+#test("^(?:\\B(foo|fo)\\B)", "xfooo")["-"]
+#test("(?:\\B(foo|fo)\\B)$", "")["-"]
+#test("(?:\\B(foo|fo)\\B)$", "xfooo")["-"]
+#test("\\B\\B", "")["0-0"]
+#test("\\B\\B", "")["0-0"]
+#test("^(?:\\B\\B)$", "")["0-0"]
+#test("^(?:\\B\\B)$", "")["0-0"]
+#test("^(?:\\B\\B)", "")["0-0"]
+#test("^(?:\\B\\B)", "")["0-0"]
+#test("(?:\\B\\B)$", "")["0-0"]
+#test("(?:\\B\\B)$", "")["0-0"]
+#test("\\B\\B", "")["0-0"]
+#test("\\B\\B", "x")["-"]
+#test("^(?:\\B\\B)$", "")["0-0"]
+#test("^(?:\\B\\B)$", "x")["-"]
+#test("^(?:\\B\\B)", "")["0-0"]
+#test("^(?:\\B\\B)", "x")["-"]
+#test("(?:\\B\\B)$", "")["0-0"]
+#test("(?:\\B\\B)$", "x")["-"]
+#test("\\B$", "")["0-0"]
+#test("\\B$", "")["0-0"]
+#test("^(?:\\B$)$", "")["0-0"]
+#test("^(?:\\B$)$", "")["0-0"]
+#test("^(?:\\B$)", "")["0-0"]
+#test("^(?:\\B$)", "")["0-0"]
+#test("(?:\\B$)$", "")["0-0"]
+#test("(?:\\B$)$", "")["0-0"]
+#test("\\B$", "")["0-0"]
+#test("\\B$", "x")["-"]
+#test("^(?:\\B$)$", "")["0-0"]
+#test("^(?:\\B$)$", "x")["-"]
+#test("^(?:\\B$)", "")["0-0"]
+#test("^(?:\\B$)", "x")["-"]
+#test("(?:\\B$)$", "")["0-0"]
+#test("(?:\\B$)$", "x")["-"]
+#test("\\B$", "")["0-0"]
+#test("\\B$", "y x")["-"]
+#test("^(?:\\B$)$", "")["0-0"]
+#test("^(?:\\B$)$", "y x")["-"]
+#test("^(?:\\B$)", "")["0-0"]
+#test("^(?:\\B$)", "y x")["-"]
+#test("(?:\\B$)$", "")["0-0"]
+#test("(?:\\B$)$", "y x")["-"]
+#test("\\B.$", "")["-"]
+#test("\\B.$", "x")["-"]
+#test("^(?:\\B.$)$", "")["-"]
+#test("^(?:\\B.$)$", "x")["-"]
+#test("^(?:\\B.$)", "")["-"]
+#test("^(?:\\B.$)", "x")["-"]
+#test("(?:\\B.$)$", "")["-"]
+#test("(?:\\B.$)$", "x")["-"]
+#test("^\\B(fo|foo)\\B", "")["-"]
+#test("^\\B(fo|foo)\\B", "fo")["-"]
+#test("^(?:^\\B(fo|foo)\\B)$", "")["-"]
+#test("^(?:^\\B(fo|foo)\\B)$", "fo")["-"]
+#test("^(?:^\\B(fo|foo)\\B)", "")["-"]
+#test("^(?:^\\B(fo|foo)\\B)", "fo")["-"]
+#test("(?:^\\B(fo|foo)\\B)$", "")["-"]
+#test("(?:^\\B(fo|foo)\\B)$", "fo")["-"]
+#test("^\\B(fo|foo)\\B", "")["-"]
+#test("^\\B(fo|foo)\\B", "foo")["-"]
+#test("^(?:^\\B(fo|foo)\\B)$", "")["-"]
+#test("^(?:^\\B(fo|foo)\\B)$", "foo")["-"]
+#test("^(?:^\\B(fo|foo)\\B)", "")["-"]
+#test("^(?:^\\B(fo|foo)\\B)", "foo")["-"]
+#test("(?:^\\B(fo|foo)\\B)$", "")["-"]
+#test("(?:^\\B(fo|foo)\\B)$", "foo")["-"]
+#test("^\\B", "")["0-0"]
+#test("^\\B", "")["0-0"]
+#test("^(?:^\\B)$", "")["0-0"]
+#test("^(?:^\\B)$", "")["0-0"]
+#test("^(?:^\\B)", "")["0-0"]
+#test("^(?:^\\B)", "")["0-0"]
+#test("(?:^\\B)$", "")["0-0"]
+#test("(?:^\\B)$", "")["0-0"]
+#test("^\\B", "")["0-0"]
+#test("^\\B", "x")["-"]
+#test("^(?:^\\B)$", "")["0-0"]
+#test("^(?:^\\B)$", "x")["-"]
+#test("^(?:^\\B)", "")["0-0"]
+#test("^(?:^\\B)", "x")["-"]
+#test("(?:^\\B)$", "")["0-0"]
+#test("(?:^\\B)$", "x")["-"]
+#test("^\\B\\B", "")["0-0"]
+#test("^\\B\\B", "")["0-0"]
+#test("^(?:^\\B\\B)$", "")["0-0"]
+#test("^(?:^\\B\\B)$", "")["0-0"]
+#test("^(?:^\\B\\B)", "")["0-0"]
+#test("^(?:^\\B\\B)", "")["0-0"]
+#test("(?:^\\B\\B)$", "")["0-0"]
+#test("(?:^\\B\\B)$", "")["0-0"]
+#test("^\\B\\B", "")["0-0"]
+#test("^\\B\\B", "x")["-"]
+#test("^(?:^\\B\\B)$", "")["0-0"]
+#test("^(?:^\\B\\B)$", "x")["-"]
+#test("^(?:^\\B\\B)", "")["0-0"]
+#test("^(?:^\\B\\B)", "x")["-"]
+#test("(?:^\\B\\B)$", "")["0-0"]
+#test("(?:^\\B\\B)$", "x")["-"]
+#test("^\\B$", "")["0-0"]
+#test("^\\B$", "")["0-0"]
+#test("^(?:^\\B$)$", "")["0-0"]
+#test("^(?:^\\B$)$", "")["0-0"]
+#test("^(?:^\\B$)", "")["0-0"]
+#test("^(?:^\\B$)", "")["0-0"]
+#test("(?:^\\B$)$", "")["0-0"]
+#test("(?:^\\B$)$", "")["0-0"]
+#test("^\\B$", "")["0-0"]
+#test("^\\B$", "x")["-"]
+#test("^(?:^\\B$)$", "")["0-0"]
+#test("^(?:^\\B$)$", "x")["-"]
+#test("^(?:^\\B$)", "")["0-0"]
+#test("^(?:^\\B$)", "x")["-"]
+#test("(?:^\\B$)$", "")["0-0"]
+#test("(?:^\\B$)$", "x")["-"]
+#test("^\\B.$", "")["-"]
+#test("^\\B.$", "x")["-"]
+#test("^(?:^\\B.$)$", "")["-"]
+#test("^(?:^\\B.$)$", "x")["-"]
+#test("^(?:^\\B.$)", "")["-"]
+#test("^(?:^\\B.$)", "x")["-"]
+#test("(?:^\\B.$)$", "")["-"]
+#test("(?:^\\B.$)$", "x")["-"]
+#test("^\\B.\\B$", "")["-"]
+#test("^\\B.\\B$", "x")["-"]
+#test("^(?:^\\B.\\B$)$", "")["-"]
+#test("^(?:^\\B.\\B$)$", "x")["-"]
+#test("^(?:^\\B.\\B$)", "")["-"]
+#test("^(?:^\\B.\\B$)", "x")["-"]
+#test("(?:^\\B.\\B$)$", "")["-"]
+#test("(?:^\\B.\\B$)$", "x")["-"]
+#test("^^^^^^^^\\B$$$$$$$", "")["0-0"]
+#test("^^^^^^^^\\B$$$$$$$", "")["0-0"]
+#test("^(?:^^^^^^^^\\B$$$$$$$)$", "")["0-0"]
+#test("^(?:^^^^^^^^\\B$$$$$$$)$", "")["0-0"]
+#test("^(?:^^^^^^^^\\B$$$$$$$)", "")["0-0"]
+#test("^(?:^^^^^^^^\\B$$$$$$$)", "")["0-0"]
+#test("(?:^^^^^^^^\\B$$$$$$$)$", "")["0-0"]
+#test("(?:^^^^^^^^\\B$$$$$$$)$", "")["0-0"]
+#test("^^^^^^^^\\B.$$$$$$", "")["-"]
+#test("^^^^^^^^\\B.$$$$$$", "x")["-"]
+#test("^(?:^^^^^^^^\\B.$$$$$$)$", "")["-"]
+#test("^(?:^^^^^^^^\\B.$$$$$$)$", "x")["-"]
+#test("^(?:^^^^^^^^\\B.$$$$$$)", "")["-"]
+#test("^(?:^^^^^^^^\\B.$$$$$$)", "x")["-"]
+#test("(?:^^^^^^^^\\B.$$$$$$)$", "")["-"]
+#test("(?:^^^^^^^^\\B.$$$$$$)$", "x")["-"]
+#test("^^^^^^^^\\B$$$$$$$", "")["0-0"]
+#test("^^^^^^^^\\B$$$$$$$", "x")["-"]
+#test("^(?:^^^^^^^^\\B$$$$$$$)$", "")["0-0"]
+#test("^(?:^^^^^^^^\\B$$$$$$$)$", "x")["-"]
+#test("^(?:^^^^^^^^\\B$$$$$$$)", "")["0-0"]
+#test("^(?:^^^^^^^^\\B$$$$$$$)", "x")["-"]
+#test("(?:^^^^^^^^\\B$$$$$$$)$", "")["0-0"]
+#test("(?:^^^^^^^^\\B$$$$$$$)$", "x")["-"]
+#test("\\bx\\b", "")["-"]
+#test("\\bx\\b", "x")["0-1"]
+#test("^(?:\\bx\\b)$", "")["-"]
+#test("^(?:\\bx\\b)$", "x")["0-1"]
+#test("^(?:\\bx\\b)", "")["-"]
+#test("^(?:\\bx\\b)", "x")["0-1"]
+#test("(?:\\bx\\b)$", "")["-"]
+#test("(?:\\bx\\b)$", "x")["0-1"]
+#test("\\bx\\b", "")["-"]
+#test("\\bx\\b", "x>")["0-1"]
+#test("^(?:\\bx\\b)$", "")["-"]
+#test("^(?:\\bx\\b)$", "x>")["-"]
+#test("^(?:\\bx\\b)", "")["-"]
+#test("^(?:\\bx\\b)", "x>")["0-1"]
+#test("(?:\\bx\\b)$", "")["-"]
+#test("(?:\\bx\\b)$", "x>")["-"]
+#test("\\bx\\b", "")["-"]
+#test("\\bx\\b", "<x")["1-2"]
+#test("^(?:\\bx\\b)$", "")["-"]
+#test("^(?:\\bx\\b)$", "<x")["-"]
+#test("^(?:\\bx\\b)", "")["-"]
+#test("^(?:\\bx\\b)", "<x")["-"]
+#test("(?:\\bx\\b)$", "")["-"]
+#test("(?:\\bx\\b)$", "<x")["1-2"]
+#test("\\bx\\b", "")["-"]
+#test("\\bx\\b", "<x>")["1-2"]
+#test("^(?:\\bx\\b)$", "")["-"]
+#test("^(?:\\bx\\b)$", "<x>")["-"]
+#test("^(?:\\bx\\b)", "")["-"]
+#test("^(?:\\bx\\b)", "<x>")["-"]
+#test("(?:\\bx\\b)$", "")["-"]
+#test("(?:\\bx\\b)$", "<x>")["-"]
+#test("\\bx\\b", "")["-"]
+#test("\\bx\\b", "ax")["-"]
+#test("^(?:\\bx\\b)$", "")["-"]
+#test("^(?:\\bx\\b)$", "ax")["-"]
+#test("^(?:\\bx\\b)", "")["-"]
+#test("^(?:\\bx\\b)", "ax")["-"]
+#test("(?:\\bx\\b)$", "")["-"]
+#test("(?:\\bx\\b)$", "ax")["-"]
+#test("\\bx\\b", "")["-"]
+#test("\\bx\\b", "xb")["-"]
+#test("^(?:\\bx\\b)$", "")["-"]
+#test("^(?:\\bx\\b)$", "xb")["-"]
+#test("^(?:\\bx\\b)", "")["-"]
+#test("^(?:\\bx\\b)", "xb")["-"]
+#test("(?:\\bx\\b)$", "")["-"]
+#test("(?:\\bx\\b)$", "xb")["-"]
+#test("\\bx\\b", "")["-"]
+#test("\\bx\\b", "axb")["-"]
+#test("^(?:\\bx\\b)$", "")["-"]
+#test("^(?:\\bx\\b)$", "axb")["-"]
+#test("^(?:\\bx\\b)", "")["-"]
+#test("^(?:\\bx\\b)", "axb")["-"]
+#test("(?:\\bx\\b)$", "")["-"]
+#test("(?:\\bx\\b)$", "axb")["-"]
+#test("\\bx\\b", "")["-"]
+#test("^(?:\\bx\\b)$", "")["-"]
+#test("^(?:\\bx\\b)", "")["-"]
+#test("(?:\\bx\\b)$", "")["-"]
+#test("\\bx\\b", "")["-"]
+#test("^(?:\\bx\\b)$", "")["-"]
+#test("^(?:\\bx\\b)", "")["-"]
+#test("(?:\\bx\\b)$", "")["-"]
+#test("\\bx\\b", "")["-"]
+#test("^(?:\\bx\\b)$", "")["-"]
+#test("^(?:\\bx\\b)", "")["-"]
+#test("(?:\\bx\\b)$", "")["-"]
+#test("\\bx\\b", "")["-"]
+#test("\\bx\\b", "axb")["-"]
+#test("^(?:\\bx\\b)$", "")["-"]
+#test("^(?:\\bx\\b)$", "axb")["-"]
+#test("^(?:\\bx\\b)", "")["-"]
+#test("^(?:\\bx\\b)", "axb")["-"]
+#test("(?:\\bx\\b)$", "")["-"]
+#test("(?:\\bx\\b)$", "axb")["-"]
+#test("\\bx\\b", "")["-"]
+#test("^(?:\\bx\\b)$", "")["-"]
+#test("^(?:\\bx\\b)", "")["-"]
+#test("(?:\\bx\\b)$", "")["-"]
+#test("\\Bx\\B", "")["-"]
+#test("\\Bx\\B", "axb")["1-2"]
+#test("^(?:\\Bx\\B)$", "")["-"]
+#test("^(?:\\Bx\\B)$", "axb")["-"]
+#test("^(?:\\Bx\\B)", "")["-"]
+#test("^(?:\\Bx\\B)", "axb")["-"]
+#test("(?:\\Bx\\B)$", "")["-"]
+#test("(?:\\Bx\\B)$", "axb")["-"]
+#test("\\Bx\\B", "")["-"]
+#test("^(?:\\Bx\\B)$", "")["-"]
+#test("^(?:\\Bx\\B)", "")["-"]
+#test("(?:\\Bx\\B)$", "")["-"]
+#test("^$^$", "")["0-0"]
+#test("^$^$", "")["0-0"]
+#test("^(?:^$^$)$", "")["0-0"]
+#test("^(?:^$^$)$", "")["0-0"]
+#test("^(?:^$^$)", "")["0-0"]
+#test("^(?:^$^$)", "")["0-0"]
+#test("(?:^$^$)$", "")["0-0"]
+#test("(?:^$^$)$", "")["0-0"]
+#test("^$^", "")["0-0"]
+#test("^$^", "")["0-0"]
+#test("^(?:^$^)$", "")["0-0"]
+#test("^(?:^$^)$", "")["0-0"]
+#test("^(?:^$^)", "")["0-0"]
+#test("^(?:^$^)", "")["0-0"]
+#test("(?:^$^)$", "")["0-0"]
+#test("(?:^$^)$", "")["0-0"]
+#test("$^$", "")["0-0"]
+#test("$^$", "")["0-0"]
+#test("^(?:$^$)$", "")["0-0"]
+#test("^(?:$^$)$", "")["0-0"]
+#test("^(?:$^$)", "")["0-0"]
+#test("^(?:$^$)", "")["0-0"]
+#test("(?:$^$)$", "")["0-0"]
+#test("(?:$^$)$", "")["0-0"]
+#test("^$^$", "")["0-0"]
+#test("^$^$", "x")["-"]
+#test("^(?:^$^$)$", "")["0-0"]
+#test("^(?:^$^$)$", "x")["-"]
+#test("^(?:^$^$)", "")["0-0"]
+#test("^(?:^$^$)", "x")["-"]
+#test("(?:^$^$)$", "")["0-0"]
+#test("(?:^$^$)$", "x")["-"]
+#test("^$^", "")["0-0"]
+#test("^$^", "x")["-"]
+#test("^(?:^$^)$", "")["0-0"]
+#test("^(?:^$^)$", "x")["-"]
+#test("^(?:^$^)", "")["0-0"]
+#test("^(?:^$^)", "x")["-"]
+#test("(?:^$^)$", "")["0-0"]
+#test("(?:^$^)$", "x")["-"]
+#test("$^$", "")["0-0"]
+#test("$^$", "x")["-"]
+#test("^(?:$^$)$", "")["0-0"]
+#test("^(?:$^$)$", "x")["-"]
+#test("^(?:$^$)", "")["0-0"]
+#test("^(?:$^$)", "x")["-"]
+#test("(?:$^$)$", "")["0-0"]
+#test("(?:$^$)$", "x")["-"]
+#test("^$^$", "")["0-0"]
+#test("^$^$", "x\ny")["-"]
+#test("^(?:^$^$)$", "")["0-0"]
+#test("^(?:^$^$)$", "x\ny")["-"]
+#test("^(?:^$^$)", "")["0-0"]
+#test("^(?:^$^$)", "x\ny")["-"]
+#test("(?:^$^$)$", "")["0-0"]
+#test("(?:^$^$)$", "x\ny")["-"]
+#test("^$^", "")["0-0"]
+#test("^$^", "x\ny")["-"]
+#test("^(?:^$^)$", "")["0-0"]
+#test("^(?:^$^)$", "x\ny")["-"]
+#test("^(?:^$^)", "")["0-0"]
+#test("^(?:^$^)", "x\ny")["-"]
+#test("(?:^$^)$", "")["0-0"]
+#test("(?:^$^)$", "x\ny")["-"]
+#test("$^$", "")["0-0"]
+#test("$^$", "x\ny")["-"]
+#test("^(?:$^$)$", "")["0-0"]
+#test("^(?:$^$)$", "x\ny")["-"]
+#test("^(?:$^$)", "")["0-0"]
+#test("^(?:$^$)", "x\ny")["-"]
+#test("(?:$^$)$", "")["0-0"]
+#test("(?:$^$)$", "x\ny")["-"]
+#test("^$^$", "")["0-0"]
+#test("^$^$", "x\n\ny")["-"]
+#test("^(?:^$^$)$", "")["0-0"]
+#test("^(?:^$^$)$", "x\n\ny")["-"]
+#test("^(?:^$^$)", "")["0-0"]
+#test("^(?:^$^$)", "x\n\ny")["-"]
+#test("(?:^$^$)$", "")["0-0"]
+#test("(?:^$^$)$", "x\n\ny")["-"]
+#test("^$^", "")["0-0"]
+#test("^$^", "x\n\ny")["-"]
+#test("^(?:^$^)$", "")["0-0"]
+#test("^(?:^$^)$", "x\n\ny")["-"]
+#test("^(?:^$^)", "")["0-0"]
+#test("^(?:^$^)", "x\n\ny")["-"]
+#test("(?:^$^)$", "")["0-0"]
+#test("(?:^$^)$", "x\n\ny")["-"]
+#test("$^$", "")["0-0"]
+#test("$^$", "x\n\ny")["-"]
+#test("^(?:$^$)$", "")["0-0"]
+#test("^(?:$^$)$", "x\n\ny")["-"]
+#test("^(?:$^$)", "")["0-0"]
+#test("^(?:$^$)", "x\n\ny")["-"]
+#test("(?:$^$)$", "")["0-0"]
+#test("(?:$^$)$", "x\n\ny")["-"]
+#test("^(foo\\$)$", "")["-"]
+#test("^(foo\\$)$", "foo$bar")["-"]
+#test("^(?:^(foo\\$)$)$", "")["-"]
+#test("^(?:^(foo\\$)$)$", "foo$bar")["-"]
+#test("^(?:^(foo\\$)$)", "")["-"]
+#test("^(?:^(foo\\$)$)", "foo$bar")["-"]
+#test("(?:^(foo\\$)$)$", "")["-"]
+#test("(?:^(foo\\$)$)$", "foo$bar")["-"]
+#test("(foo\\$)", "")["-"]
+#test("(foo\\$)", "foo$bar")["0-4 0-4"]
+#test("^(?:(foo\\$))$", "")["-"]
+#test("^(?:(foo\\$))$", "foo$bar")["-"]
+#test("^(?:(foo\\$))", "")["-"]
+#test("^(?:(foo\\$))", "foo$bar")["0-4 0-4"]
+#test("(?:(foo\\$))$", "")["-"]
+#test("(?:(foo\\$))$", "foo$bar")["-"]
+#test("^...$", "")["-"]
+#test("^...$", "abc")["0-3"]
+#test("^(?:^...$)$", "")["-"]
+#test("^(?:^...$)$", "abc")["0-3"]
+#test("^(?:^...$)", "")["-"]
+#test("^(?:^...$)", "abc")["0-3"]
+#test("(?:^...$)$", "")["-"]
+#test("(?:^...$)$", "abc")["0-3"]
+#test("^...$", "")["-"]
+#test("^(?:^...$)$", "")["-"]
+#test("^(?:^...$)", "")["-"]
+#test("(?:^...$)$", "")["-"]
+#test("^...$", "")["-"]
+#test("^(?:^...$)$", "")["-"]
+#test("^(?:^...$)", "")["-"]
+#test("(?:^...$)$", "")["-"]
+#test("^...$", "")["-"]
+#test("^(?:^...$)$", "")["-"]
+#test("^(?:^...$)", "")["-"]
+#test("(?:^...$)$", "")["-"]
+#test("^.........$", "")["-"]
+#test("^(?:^.........$)$", "")["-"]
+#test("^(?:^.........$)", "")["-"]
+#test("(?:^.........$)$", "")["-"]
+#test("^...$", "")["-"]
+#test("^(?:^...$)$", "")["-"]
+#test("^(?:^...$)", "")["-"]
+#test("(?:^...$)$", "")["-"]
+#test("^.....$", "")["-"]
+#test("^(?:^.....$)$", "")["-"]
+#test("^(?:^.....$)", "")["-"]
+#test("(?:^.....$)$", "")["-"]
+#test("\\B(fo|foo)\\B", "")["-"]
+#test("\\B(fo|foo)\\B", "xfooo")["1-3 1-3"]
+#test("^(?:\\B(fo|foo)\\B)$", "")["-"]
+#test("^(?:\\B(fo|foo)\\B)$", "xfooo")["-"]
+#test("^(?:\\B(fo|foo)\\B)", "")["-"]
+#test("^(?:\\B(fo|foo)\\B)", "xfooo")["-"]
+#test("(?:\\B(fo|foo)\\B)$", "")["-"]
+#test("(?:\\B(fo|foo)\\B)$", "xfooo")["-"]
+#test("(fo|foo)", "")["-"]
+#test("(fo|foo)", "foo")["0-2 0-2"]
+#test("^(?:(fo|foo))$", "")["-"]
+#test("^(?:(fo|foo))$", "foo")["0-3 0-3"]
+#test("^(?:(fo|foo))", "")["-"]
+#test("^(?:(fo|foo))", "foo")["0-2 0-2"]
+#test("(?:(fo|foo))$", "")["-"]
+#test("(?:(fo|foo))$", "foo")["0-3 0-3"]
+#test("\\141", "")["-"]
+#test("\\141", "a")["0-1"]
+#test("^(?:\\141)$", "")["-"]
+#test("^(?:\\141)$", "a")["0-1"]
+#test("^(?:\\141)", "")["-"]
+#test("^(?:\\141)", "a")["0-1"]
+#test("(?:\\141)$", "")["-"]
+#test("(?:\\141)$", "a")["0-1"]
+#test("\\060", "")["-"]
+#test("\\060", "0")["0-1"]
+#test("^(?:\\060)$", "")["-"]
+#test("^(?:\\060)$", "0")["0-1"]
+#test("^(?:\\060)", "")["-"]
+#test("^(?:\\060)", "0")["0-1"]
+#test("(?:\\060)$", "")["-"]
+#test("(?:\\060)$", "0")["0-1"]
+#test("\\0600", "")["-"]
+#test("\\0600", "00")["0-2"]
+#test("^(?:\\0600)$", "")["-"]
+#test("^(?:\\0600)$", "00")["0-2"]
+#test("^(?:\\0600)", "")["-"]
+#test("^(?:\\0600)", "00")["0-2"]
+#test("(?:\\0600)$", "")["-"]
+#test("(?:\\0600)$", "00")["0-2"]
+#test("\\608", "")["-"]
+#test("\\608", "08")["0-2"]
+#test("^(?:\\608)$", "")["-"]
+#test("^(?:\\608)$", "08")["0-2"]
+#test("^(?:\\608)", "")["-"]
+#test("^(?:\\608)", "08")["0-2"]
+#test("(?:\\608)$", "")["-"]
+#test("(?:\\608)$", "08")["0-2"]
+#test("\\01", "")["-"]
+#test("\\01", "\u{1}")["0-1"]
+#test("^(?:\\01)$", "")["-"]
+#test("^(?:\\01)$", "\u{1}")["0-1"]
+#test("^(?:\\01)", "")["-"]
+#test("^(?:\\01)", "\u{1}")["0-1"]
+#test("(?:\\01)$", "")["-"]
+#test("(?:\\01)$", "\u{1}")["0-1"]
+#test("\\018", "")["-"]
+#test("\\018", "\u{1}8")["0-2"]
+#test("^(?:\\018)$", "")["-"]
+#test("^(?:\\018)$", "\u{1}8")["0-2"]
+#test("^(?:\\018)", "")["-"]
+#test("^(?:\\018)", "\u{1}8")["0-2"]
+#test("(?:\\018)$", "")["-"]
+#test("(?:\\018)$", "\u{1}8")["0-2"]
+#test("\\x{61}", "")["-"]
+#test("\\x{61}", "a")["0-1"]
+#test("^(?:\\x{61})$", "")["-"]
+#test("^(?:\\x{61})$", "a")["0-1"]
+#test("^(?:\\x{61})", "")["-"]
+#test("^(?:\\x{61})", "a")["0-1"]
+#test("(?:\\x{61})$", "")["-"]
+#test("(?:\\x{61})$", "a")["0-1"]
+#test("\\x61", "")["-"]
+#test("\\x61", "a")["0-1"]
+#test("^(?:\\x61)$", "")["-"]
+#test("^(?:\\x61)$", "a")["0-1"]
+#test("^(?:\\x61)", "")["-"]
+#test("^(?:\\x61)", "a")["0-1"]
+#test("(?:\\x61)$", "")["-"]
+#test("(?:\\x61)$", "a")["0-1"]
+#test("\\x{00000061}", "")["-"]
+#test("\\x{00000061}", "a")["0-1"]
+#test("^(?:\\x{00000061})$", "")["-"]
+#test("^(?:\\x{00000061})$", "a")["0-1"]
+#test("^(?:\\x{00000061})", "")["-"]
+#test("^(?:\\x{00000061})", "a")["0-1"]
+#test("(?:\\x{00000061})$", "")["-"]
+#test("(?:\\x{00000061})$", "a")["0-1"]
+#test("[^0-9]+", "")["-"]
+#test("[^0-9]+", "abc123")["0-3"]
+#test("^(?:[^0-9]+)$", "")["-"]
+#test("^(?:[^0-9]+)$", "abc123")["-"]
+#test("^(?:[^0-9]+)", "")["-"]
+#test("^(?:[^0-9]+)", "abc123")["0-3"]
+#test("(?:[^0-9]+)$", "")["-"]
+#test("(?:[^0-9]+)$", "abc123")["-"]
+#test("(?i)[@-A]+", "")["-"]
+#test("(?i)[@-A]+", "@AaB")["0-3"]
+#test("^(?:(?i)[@-A]+)$", "")["-"]
+#test("^(?:(?i)[@-A]+)$", "@AaB")["-"]
+#test("^(?:(?i)[@-A]+)", "")["-"]
+#test("^(?:(?i)[@-A]+)", "@AaB")["0-3"]
+#test("(?:(?i)[@-A]+)$", "")["-"]
+#test("(?:(?i)[@-A]+)$", "@AaB")["-"]
+#test("(?i)[A-Z]+", "")["-"]
+#test("(?i)[A-Z]+", "aAzZ")["0-4"]
+#test("^(?:(?i)[A-Z]+)$", "")["-"]
+#test("^(?:(?i)[A-Z]+)$", "aAzZ")["0-4"]
+#test("^(?:(?i)[A-Z]+)", "")["-"]
+#test("^(?:(?i)[A-Z]+)", "aAzZ")["0-4"]
+#test("(?:(?i)[A-Z]+)$", "")["-"]
+#test("(?:(?i)[A-Z]+)$", "aAzZ")["0-4"]
+#test("(?i)[^\\\\]+", "")["-"]
+#test("(?i)[^\\\\]+", "Aa\\")["0-2"]
+#test("^(?:(?i)[^\\\\]+)$", "")["-"]
+#test("^(?:(?i)[^\\\\]+)$", "Aa\\")["-"]
+#test("^(?:(?i)[^\\\\]+)", "")["-"]
+#test("^(?:(?i)[^\\\\]+)", "Aa\\")["0-2"]
+#test("(?:(?i)[^\\\\]+)$", "")["-"]
+#test("(?:(?i)[^\\\\]+)$", "Aa\\")["-"]
+#test("(?i)[acegikmoqsuwy]+", "")["-"]
+#test("(?i)[acegikmoqsuwy]+", "acegikmoqsuwyACEGIKMOQSUWY")["0-26"]
+#test("^(?:(?i)[acegikmoqsuwy]+)$", "")["-"]
+#test("^(?:(?i)[acegikmoqsuwy]+)$", "acegikmoqsuwyACEGIKMOQSUWY")["0-26"]
+#test("^(?:(?i)[acegikmoqsuwy]+)", "")["-"]
+#test("^(?:(?i)[acegikmoqsuwy]+)", "acegikmoqsuwyACEGIKMOQSUWY")["0-26"]
+#test("(?:(?i)[acegikmoqsuwy]+)$", "")["-"]
+#test("(?:(?i)[acegikmoqsuwy]+)$", "acegikmoqsuwyACEGIKMOQSUWY")["0-26"]
+#test("[@-A]+", "")["-"]
+#test("[@-A]+", "@AaB")["0-2"]
+#test("^(?:[@-A]+)$", "")["-"]
+#test("^(?:[@-A]+)$", "@AaB")["-"]
+#test("^(?:[@-A]+)", "")["-"]
+#test("^(?:[@-A]+)", "@AaB")["0-2"]
+#test("(?:[@-A]+)$", "")["-"]
+#test("(?:[@-A]+)$", "@AaB")["-"]
+#test("[A-Z]+", "")["-"]
+#test("[A-Z]+", "aAzZ")["1-2"]
+#test("^(?:[A-Z]+)$", "")["-"]
+#test("^(?:[A-Z]+)$", "aAzZ")["-"]
+#test("^(?:[A-Z]+)", "")["-"]
+#test("^(?:[A-Z]+)", "aAzZ")["-"]
+#test("(?:[A-Z]+)$", "")["-"]
+#test("(?:[A-Z]+)$", "aAzZ")["3-4"]
+#test("[^\\\\]+", "")["-"]
+#test("[^\\\\]+", "Aa\\")["0-2"]
+#test("^(?:[^\\\\]+)$", "")["-"]
+#test("^(?:[^\\\\]+)$", "Aa\\")["-"]
+#test("^(?:[^\\\\]+)", "")["-"]
+#test("^(?:[^\\\\]+)", "Aa\\")["0-2"]
+#test("(?:[^\\\\]+)$", "")["-"]
+#test("(?:[^\\\\]+)$", "Aa\\")["-"]
+#test("[acegikmoqsuwy]+", "")["-"]
+#test("[acegikmoqsuwy]+", "acegikmoqsuwyACEGIKMOQSUWY")["0-13"]
+#test("^(?:[acegikmoqsuwy]+)$", "")["-"]
+#test("^(?:[acegikmoqsuwy]+)$", "acegikmoqsuwyACEGIKMOQSUWY")["-"]
+#test("^(?:[acegikmoqsuwy]+)", "")["-"]
+#test("^(?:[acegikmoqsuwy]+)", "acegikmoqsuwyACEGIKMOQSUWY")["0-13"]
+#test("(?:[acegikmoqsuwy]+)$", "")["-"]
+#test("(?:[acegikmoqsuwy]+)$", "acegikmoqsuwyACEGIKMOQSUWY")["-"]
+#test("^abc", "")["-"]
+#test("^abc", "abcdef")["0-3"]
+#test("^(?:^abc)$", "")["-"]
+#test("^(?:^abc)$", "abcdef")["-"]
+#test("^(?:^abc)", "")["-"]
+#test("^(?:^abc)", "abcdef")["0-3"]
+#test("(?:^abc)$", "")["-"]
+#test("(?:^abc)$", "abcdef")["-"]
+#test("^abc", "")["-"]
+#test("^abc", "aabcdef")["-"]
+#test("^(?:^abc)$", "")["-"]
+#test("^(?:^abc)$", "aabcdef")["-"]
+#test("^(?:^abc)", "")["-"]
+#test("^(?:^abc)", "aabcdef")["-"]
+#test("(?:^abc)$", "")["-"]
+#test("(?:^abc)$", "aabcdef")["-"]
+#test("^[ay]*[bx]+c", "")["-"]
+#test("^[ay]*[bx]+c", "abcdef")["0-3"]
+#test("^(?:^[ay]*[bx]+c)$", "")["-"]
+#test("^(?:^[ay]*[bx]+c)$", "abcdef")["-"]
+#test("^(?:^[ay]*[bx]+c)", "")["-"]
+#test("^(?:^[ay]*[bx]+c)", "abcdef")["0-3"]
+#test("(?:^[ay]*[bx]+c)$", "")["-"]
+#test("(?:^[ay]*[bx]+c)$", "abcdef")["-"]
+#test("^[ay]*[bx]+c", "")["-"]
+#test("^[ay]*[bx]+c", "aabcdef")["0-4"]
+#test("^(?:^[ay]*[bx]+c)$", "")["-"]
+#test("^(?:^[ay]*[bx]+c)$", "aabcdef")["-"]
+#test("^(?:^[ay]*[bx]+c)", "")["-"]
+#test("^(?:^[ay]*[bx]+c)", "aabcdef")["0-4"]
+#test("(?:^[ay]*[bx]+c)$", "")["-"]
+#test("(?:^[ay]*[bx]+c)$", "aabcdef")["-"]
+#test("def$", "")["-"]
+#test("def$", "abcdef")["3-6"]
+#test("^(?:def$)$", "")["-"]
+#test("^(?:def$)$", "abcdef")["-"]
+#test("^(?:def$)", "")["-"]
+#test("^(?:def$)", "abcdef")["-"]
+#test("(?:def$)$", "")["-"]
+#test("(?:def$)$", "abcdef")["3-6"]
+#test("def$", "")["-"]
+#test("def$", "abcdeff")["-"]
+#test("^(?:def$)$", "")["-"]
+#test("^(?:def$)$", "abcdeff")["-"]
+#test("^(?:def$)", "")["-"]
+#test("^(?:def$)", "abcdeff")["-"]
+#test("(?:def$)$", "")["-"]
+#test("(?:def$)$", "abcdeff")["-"]
+#test("d[ex][fy]$", "")["-"]
+#test("d[ex][fy]$", "abcdef")["3-6"]
+#test("^(?:d[ex][fy]$)$", "")["-"]
+#test("^(?:d[ex][fy]$)$", "abcdef")["-"]
+#test("^(?:d[ex][fy]$)", "")["-"]
+#test("^(?:d[ex][fy]$)", "abcdef")["-"]
+#test("(?:d[ex][fy]$)$", "")["-"]
+#test("(?:d[ex][fy]$)$", "abcdef")["3-6"]
+#test("d[ex][fy]$", "")["-"]
+#test("d[ex][fy]$", "abcdeff")["-"]
+#test("^(?:d[ex][fy]$)$", "")["-"]
+#test("^(?:d[ex][fy]$)$", "abcdeff")["-"]
+#test("^(?:d[ex][fy]$)", "")["-"]
+#test("^(?:d[ex][fy]$)", "abcdeff")["-"]
+#test("(?:d[ex][fy]$)$", "")["-"]
+#test("(?:d[ex][fy]$)$", "abcdeff")["-"]
+#test("[dz][ex][fy]$", "")["-"]
+#test("[dz][ex][fy]$", "abcdef")["3-6"]
+#test("^(?:[dz][ex][fy]$)$", "")["-"]
+#test("^(?:[dz][ex][fy]$)$", "abcdef")["-"]
+#test("^(?:[dz][ex][fy]$)", "")["-"]
+#test("^(?:[dz][ex][fy]$)", "abcdef")["-"]
+#test("(?:[dz][ex][fy]$)$", "")["-"]
+#test("(?:[dz][ex][fy]$)$", "abcdef")["3-6"]
+#test("[dz][ex][fy]$", "")["-"]
+#test("[dz][ex][fy]$", "abcdeff")["-"]
+#test("^(?:[dz][ex][fy]$)$", "")["-"]
+#test("^(?:[dz][ex][fy]$)$", "abcdeff")["-"]
+#test("^(?:[dz][ex][fy]$)", "")["-"]
+#test("^(?:[dz][ex][fy]$)", "abcdeff")["-"]
+#test("(?:[dz][ex][fy]$)$", "")["-"]
+#test("(?:[dz][ex][fy]$)$", "abcdeff")["-"]
+#test("(?m)^abc", "")["-"]
+#test("(?m)^abc", "abcdef")["0-3"]
+#test("^(?:(?m)^abc)$", "")["-"]
+#test("^(?:(?m)^abc)$", "abcdef")["-"]
+#test("^(?:(?m)^abc)", "")["-"]
+#test("^(?:(?m)^abc)", "abcdef")["0-3"]
+#test("(?:(?m)^abc)$", "")["-"]
+#test("(?:(?m)^abc)$", "abcdef")["-"]
+#test("(?m)^abc", "")["-"]
+#test("(?m)^abc", "aabcdef")["-"]
+#test("^(?:(?m)^abc)$", "")["-"]
+#test("^(?:(?m)^abc)$", "aabcdef")["-"]
+#test("^(?:(?m)^abc)", "")["-"]
+#test("^(?:(?m)^abc)", "aabcdef")["-"]
+#test("(?:(?m)^abc)$", "")["-"]
+#test("(?:(?m)^abc)$", "aabcdef")["-"]
+#test("(?m)^[ay]*[bx]+c", "")["-"]
+#test("(?m)^[ay]*[bx]+c", "abcdef")["0-3"]
+#test("^(?:(?m)^[ay]*[bx]+c)$", "")["-"]
+#test("^(?:(?m)^[ay]*[bx]+c)$", "abcdef")["-"]
+#test("^(?:(?m)^[ay]*[bx]+c)", "")["-"]
+#test("^(?:(?m)^[ay]*[bx]+c)", "abcdef")["0-3"]
+#test("(?:(?m)^[ay]*[bx]+c)$", "")["-"]
+#test("(?:(?m)^[ay]*[bx]+c)$", "abcdef")["-"]
+#test("(?m)^[ay]*[bx]+c", "")["-"]
+#test("(?m)^[ay]*[bx]+c", "aabcdef")["0-4"]
+#test("^(?:(?m)^[ay]*[bx]+c)$", "")["-"]
+#test("^(?:(?m)^[ay]*[bx]+c)$", "aabcdef")["-"]
+#test("^(?:(?m)^[ay]*[bx]+c)", "")["-"]
+#test("^(?:(?m)^[ay]*[bx]+c)", "aabcdef")["0-4"]
+#test("(?:(?m)^[ay]*[bx]+c)$", "")["-"]
+#test("(?:(?m)^[ay]*[bx]+c)$", "aabcdef")["-"]
+#test("(?m)def$", "")["-"]
+#test("(?m)def$", "abcdef")["3-6"]
+#test("^(?:(?m)def$)$", "")["-"]
+#test("^(?:(?m)def$)$", "abcdef")["-"]
+#test("^(?:(?m)def$)", "")["-"]
+#test("^(?:(?m)def$)", "abcdef")["-"]
+#test("(?:(?m)def$)$", "")["-"]
+#test("(?:(?m)def$)$", "abcdef")["3-6"]
+#test("(?m)def$", "")["-"]
+#test("(?m)def$", "abcdeff")["-"]
+#test("^(?:(?m)def$)$", "")["-"]
+#test("^(?:(?m)def$)$", "abcdeff")["-"]
+#test("^(?:(?m)def$)", "")["-"]
+#test("^(?:(?m)def$)", "abcdeff")["-"]
+#test("(?:(?m)def$)$", "")["-"]
+#test("(?:(?m)def$)$", "abcdeff")["-"]
+#test("(?m)d[ex][fy]$", "")["-"]
+#test("(?m)d[ex][fy]$", "abcdef")["3-6"]
+#test("^(?:(?m)d[ex][fy]$)$", "")["-"]
+#test("^(?:(?m)d[ex][fy]$)$", "abcdef")["-"]
+#test("^(?:(?m)d[ex][fy]$)", "")["-"]
+#test("^(?:(?m)d[ex][fy]$)", "abcdef")["-"]
+#test("(?:(?m)d[ex][fy]$)$", "")["-"]
+#test("(?:(?m)d[ex][fy]$)$", "abcdef")["3-6"]
+#test("(?m)d[ex][fy]$", "")["-"]
+#test("(?m)d[ex][fy]$", "abcdeff")["-"]
+#test("^(?:(?m)d[ex][fy]$)$", "")["-"]
+#test("^(?:(?m)d[ex][fy]$)$", "abcdeff")["-"]
+#test("^(?:(?m)d[ex][fy]$)", "")["-"]
+#test("^(?:(?m)d[ex][fy]$)", "abcdeff")["-"]
+#test("(?:(?m)d[ex][fy]$)$", "")["-"]
+#test("(?:(?m)d[ex][fy]$)$", "abcdeff")["-"]
+#test("(?m)[dz][ex][fy]$", "")["-"]
+#test("(?m)[dz][ex][fy]$", "abcdef")["3-6"]
+#test("^(?:(?m)[dz][ex][fy]$)$", "")["-"]
+#test("^(?:(?m)[dz][ex][fy]$)$", "abcdef")["-"]
+#test("^(?:(?m)[dz][ex][fy]$)", "")["-"]
+#test("^(?:(?m)[dz][ex][fy]$)", "abcdef")["-"]
+#test("(?:(?m)[dz][ex][fy]$)$", "")["-"]
+#test("(?:(?m)[dz][ex][fy]$)$", "abcdef")["3-6"]
+#test("(?m)[dz][ex][fy]$", "")["-"]
+#test("(?m)[dz][ex][fy]$", "abcdeff")["-"]
+#test("^(?:(?m)[dz][ex][fy]$)$", "")["-"]
+#test("^(?:(?m)[dz][ex][fy]$)$", "abcdeff")["-"]
+#test("^(?:(?m)[dz][ex][fy]$)", "")["-"]
+#test("^(?:(?m)[dz][ex][fy]$)", "abcdeff")["-"]
+#test("(?:(?m)[dz][ex][fy]$)$", "")["-"]
+#test("(?:(?m)[dz][ex][fy]$)$", "abcdeff")["-"]
+#test("^", "")["0-0"]
+#test("^", "a")["0-0"]
+#test("^(?:^)$", "")["0-0"]
+#test("^(?:^)$", "a")["-"]
+#test("^(?:^)", "")["0-0"]
+#test("^(?:^)", "a")["0-0"]
+#test("(?:^)$", "")["0-0"]
+#test("(?:^)$", "a")["-"]
+#test("^^", "")["0-0"]
+#test("^^", "a")["0-0"]
+#test("^(?:^^)$", "")["0-0"]
+#test("^(?:^^)$", "a")["-"]
+#test("^(?:^^)", "")["0-0"]
+#test("^(?:^^)", "a")["0-0"]
+#test("(?:^^)$", "")["0-0"]
+#test("(?:^^)$", "a")["-"]
+#test("a", "")["-"]
+#test("a", "a")["0-1"]
+#test("^(?:a)$", "")["-"]
+#test("^(?:a)$", "a")["0-1"]
+#test("^(?:a)", "")["-"]
+#test("^(?:a)", "a")["0-1"]
+#test("(?:a)$", "")["-"]
+#test("(?:a)$", "a")["0-1"]
+#test("ab*", "")["-"]
+#test("ab*", "a")["0-1"]
+#test("^(?:ab*)$", "")["-"]
+#test("^(?:ab*)$", "a")["0-1"]
+#test("^(?:ab*)", "")["-"]
+#test("^(?:ab*)", "a")["0-1"]
+#test("(?:ab*)$", "")["-"]
+#test("(?:ab*)$", "a")["0-1"]
+#test("\\w*I\\w*", "")["-"]
+#test("\\w*I\\w*", "Inc.")["0-3"]
+#test("^(?:\\w*I\\w*)$", "")["-"]
+#test("^(?:\\w*I\\w*)$", "Inc.")["-"]
+#test("^(?:\\w*I\\w*)", "")["-"]
+#test("^(?:\\w*I\\w*)", "Inc.")["0-3"]
+#test("(?:\\w*I\\w*)$", "")["-"]
+#test("(?:\\w*I\\w*)$", "Inc.")["-"]
+#test("(?:|a)*", "")["0-0"]
+#test("(?:|a)*", "aaa")["0-0"]
+#test("^(?:(?:|a)*)$", "")["0-0"]
+#test("^(?:(?:|a)*)$", "aaa")["0-3"]
+#test("^(?:(?:|a)*)", "")["0-0"]
+#test("^(?:(?:|a)*)", "aaa")["0-0"]
+#test("(?:(?:|a)*)$", "")["0-0"]
+#test("(?:(?:|a)*)$", "aaa")["0-3"]
+#test("(?:|a)+", "")["0-0"]
+#test("(?:|a)+", "aaa")["0-0"]
+#test("^(?:(?:|a)+)$", "")["0-0"]
+#test("^(?:(?:|a)+)$", "aaa")["0-3"]
+#test("^(?:(?:|a)+)", "")["0-0"]
+#test("^(?:(?:|a)+)", "aaa")["0-0"]
+#test("(?:(?:|a)+)$", "")["0-0"]
+#test("(?:(?:|a)+)$", "aaa")["0-3"]
+#test("abc", "xxabcxx")["2-5"]
+#test("a\\.c", "abc a.c")["4-7"]
+#test("\\x41\\x{42}", "zAB")["1-3"]
+#test("\\101", "A")["0-1"]
+#test("\\t\\n", "a\t\nb")["1-3"]
+#test("\\a\\f\\v\\r", "\u{7}\u{c}\u{b}\r")["0-4"]
+#test("\\*\\+\\?\\(\\)\\[\\]\\{\\}\\|\\^\\$\\\\", "*+?()[]{}|^$\\")["0-13"]
+#test("a{", "a{")["0-2"]
+#test("a{,3}", "a{,3}")["0-5"]
+#test("a{x}", "a{x}")["0-4"]
+#test("a.c", "abc")["0-3"]
+#test("a.c", "a\nc")["-"]
+#test("(?s)a.c", "a\nc")["0-3"]
+#test("(?s:.).", "\n\n")["-"]
+#test(".*", "ab\ncd")["0-2"]
+#test("(?s).*", "ab\ncd")["0-5"]
+#test("[abc]+", "xxcabz")["2-5"]
+#test("[a-c]+", "dcbad")["1-4"]
+#test("[^a-c]+", "abcxyzabc")["3-6"]
+#test("[a-]+", "x-a-b")["1-4"]
+#test("[-a]+", "x-a-b")["1-4"]
+#test("[]a]+", "x]a]")["1-4"]
+#test("[^]a]+", "]]xy]")["2-4"]
+#test("[a\\-z]+", "b-az")["1-4"]
+#test("[\\d.]+", "v1.25x")["1-5"]
+#test("[\\w-]+", "..foo-bar..")["2-9"]
+#test("[^\\s]+", "  ab  ")["2-4"]
+#test("[\\x41-\\x43]+", "ABCD")["0-3"]
+#test("[\\]]", "a]")["1-2"]
+#test("[\\\\]", "a\\")["1-2"]
+#test("[.]", "a.b")["1-2"]
+#test("[*+?]+", "a*+?b")["1-4"]
+#test("[\\^a]+", "^a^")["0-3"]
+#test("[a^]+", "^a^")["0-3"]
+#test("\\d+", "abc 123 def")["4-7"]
+#test("\\D+", "123abc456")["3-6"]
+#test("\\w+", "  foo_bar9 ")["2-10"]
+#test("\\W+", "ab, cd")["2-4"]
+#test("\\s+", "a \t\n\r\u{c}b")["1-6"]
+#test("\\S+", "  ab  ")["2-4"]
+#test("\\s", "\u{b}")["-"]
+#test("[[:alpha:]]+", "12abC34")["2-5"]
+#test("[[:digit:]]+", "ab123c")["2-5"]
+#test("[[:alnum:]]+", "--ab12--")["2-6"]
+#test("[[:space:]]+", "a \t\u{b}\u{c}b")["1-5"]
+#test("[[:upper:]]+", "abCDe")["2-4"]
+#test("[[:lower:]]+", "ABcdE")["2-4"]
+#test("[[:punct:]]+", "ab!?.,cd")["2-6"]
+#test("[[:xdigit:]]+", "xyz09afAFg")["3-9"]
+#test("[[:blank:]]+", "a \t b")["1-4"]
+#test("[[:cntrl:]]+", "a\u{1}\u{2}b")["1-3"]
+#test("[[:print:]]+", "\u{1}ab c\u{2}")["1-5"]
+#test("[[:graph:]]+", " ab c")["1-3"]
+#test("[[:ascii:]]+", "abc")["0-3"]
+#test("[[:^alpha:]]+", "ab12cd")["2-4"]
+#test("[^[:alpha:]]+", "ab12cd")["2-4"]
+#test("[[:alpha:][:digit:]]+", "--a1b2--")["2-6"]
+#test("[[:alpha:]_]+", "--a_b--")["2-5"]
+#test("[\\d\\s]+", "ab 1 2 cd")["2-7"]
+#test("(?i)abc", "xABCx")["1-4"]
+#test("(?i)[a-c]+", "xAbCx")["1-4"]
+#test("(?i)[^a-c]+", "AbCxyz")["3-6"]
+#test("(?i)k", "K")["0-1"]
+#test("a(?i)b", "aB")["0-2"]
+#test("a(?i)b", "AB")["-"]
+#test("a(?i:b)c", "aBc")["0-3"]
+#test("a(?i:b)c", "aBC")["-"]
+#test("(?i)a(?-i)b", "Ab")["0-2"]
+#test("(?i)a(?-i)b", "AB")["-"]
+#test("(?i)[[:upper:]]+", "abCD")["0-4"]
+#test("(?i)\\x41", "a")["0-1"]
+#test("(?i)[^k]", "K")["-"]
+#test("^abc", "abc")["0-3"]
+#test("^abc", "xabc")["-"]
+#test("abc$", "xabc")["1-4"]
+#test("abc$", "abc\n")["-"]
+#test("^$", "")["0-0"]
+#test("^$", "\n")["-"]
+#test("(?m)^b", "a\nb")["2-3"]
+#test("(?m)a$", "a\nb")["0-1"]
+#test("(?m)^$", "a\n\nb")["2-2"]
+#test("(?m)^", "\na")["0-0"]
+#test("(?m)$", "a\n")["1-1"]
+#test("^a$", "a\nb")["-"]
+#test("(?m)^a$", "b\na\nc")["2-3"]
+#test("\\bfoo\\b", "a foo b")["2-5"]
+#test("\\bfoo\\b", "afoob")["-"]
+#test("\\Boo\\B", "afoob")["2-4"]
+#test("\\b", "")["-"]
+#test("\\B", "")["0-0"]
+#test("\\b", "ab")["0-0"]
+#test("\\B", "ab")["1-1"]
+#test("\\Aab", "ab")["0-2"]
+#test("ab\\z", "ab")["0-2"]
+#test("(?m)\\Aab", "x\nab")["-"]
+#test("(?m)ab\\z", "ab\nx")["-"]
+#test("(a)(b)(c)", "abc")["0-3 0-1 1-2 2-3"]
+#test("(a(b(c)))", "abc")["0-3 0-3 1-3 2-3"]
+#test("(?:a)(b)", "ab")["0-2 1-2"]
+#test("(?P<first>a)(?P<second>b)", "ab")["0-2 0-1 1-2"]
+#test("(?P<x>a+)|(?P<y>b+)", "bbb")["0-3 - 0-3"]
+#test("a|b|c", "xcx")["1-2"]
+#test("ab|cd|ef", "xxefcd")["2-4"]
+#test("a|", "b")["0-0"]
+#test("|a", "a")["0-0"]
+#test("(|a)b", "ab")["0-2 0-1"]
+#test("(a|ab)(c|bcd)(d*)", "abcd")["0-4 0-1 1-4 4-4"]
+#test("(a|ab)(bcd|c)(d*)", "abcd")["0-4 0-1 1-4 4-4"]
+#test("()", "x")["0-0 0-0"]
+#test("(()|a)+", "aa")["0-0 0-0 0-0"]
+#test("(a*)*", "b")["0-0 0-0"]
+#test("(a*)+", "b")["0-0 0-0"]
+#test("(a*|b)*", "ab")["0-2 1-2"]
+#test("(a+|b+)*", "aabb")["0-4 2-4"]
+#test("(a|b)*c", "abbac")["0-5 3-4"]
+#test("(ab|a)(bc|c)", "abc")["0-3 0-2 2-3"]
+#test("((a)|b)+", "ab")["0-2 1-2 0-1"]
+#test("((a)|b)+", "ba")["0-2 1-2 1-2"]
+#test("a*", "baaa")["0-0"]
+#test("a+", "baaa")["1-4"]
+#test("a?", "baaa")["0-0"]
+#test("ba?", "baaa")["0-2"]
+#test("ba*", "baaa")["0-4"]
+#test("a{2}", "aaaa")["0-2"]
+#test("a{2,}", "aaaaa")["0-5"]
+#test("a{2,3}", "aaaaa")["0-3"]
+#test("a{0}", "aaa")["0-0"]
+#test("a{0,1}", "aaa")["0-1"]
+#test("(ab){2}", "abababab")["0-4 2-4"]
+#test("(ab){1,2}c", "abababc")["2-7 4-6"]
+#test("x(ab)?y", "xy xaby")["0-2 -"]
+#test("(a){0}b", "ab")["1-2 -"]
+#test("a{3,3}", "aa aaa")["3-6"]
+#test("a{1,1000}", "aaaa")["0-4"]
+#test("a*?", "aaa")["0-0"]
+#test("a+?", "aaa")["0-1"]
+#test("a??", "aaa")["0-0"]
+#test("a{2,}?", "aaaa")["0-2"]
+#test("a{2,4}?", "aaaa")["0-2"]
+#test("a{2}?", "aaaa")["0-2"]
+#test("<.+?>", "<a><b>")["0-3"]
+#test("<.+>", "<a><b>")["0-6"]
+#test("(a+?)(a*)", "aaa")["0-3 0-1 1-3"]
+#test("(a*?)b", "aaab")["0-4 0-3"]
+#test("(?U)a+", "aaa")["0-1"]
+#test("(?U)a+?", "aaa")["0-3"]
+#test("(.*?),(.*)", "a,b,c")["0-5 0-1 2-5"]
+#test("a(b|bc)", "abc")["0-2 1-2"]
+#test("a(bc|b)", "abc")["0-3 1-3"]
+#test("(a+)(a+)", "aaaa")["0-4 0-3 3-4"]
+#test("(a+?)(a+)", "aaaa")["0-4 0-1 1-4"]
+#test("(a*)(a*)", "aa")["0-2 0-2 2-2"]
+#test("(.*)c(.*)", "abcdcef")["0-7 0-4 5-7"]
+#test("x*", "\n\nx")["0-0"]
+#test("\\w+@\\w+\\.com", "mail bob@example.com now")["5-20"]
+#test("\\w+@\\w+\\.com", "bob@example.org")["-"]
+#test("\\xc3\\xa9", "café")["3-5"] // é is two bytes
+#test("[\\x80-\\xff]+", "abécd")["2-4"]
+#test("..", "é")["0-2"] // . is one byte
+#test("a.b", "aéb")["-"]
+#test("a..b", "aéb")["0-4"]
+#test("é+", "éé")["0-4"] // a character in a pattern is one atom
+#test("(?i)é", "É")["-"] // case folding is ASCII
+#test("\\C", "\n")["0-1"]
+#test("(?m)^\\w+$", "ab\ncd")["0-2"]
+#test("\\bcd\\b", "ab cd")["3-5"]
+fun spans(pattern: str, text: str) -> str {
+    let re = match compile(pattern) {
+        Ok(r) => r
+        Err(e) => {
+            return f"error: {e}"
+        }
+    }
+    // the Pike VM alone, and the DFAs with it, must agree
+    let n = 2 * re.names.len()
+    var pike = re.searcher(text, n, -1)
+    var dfa = re.searcher(text, n, 1)
+    let found = pike.search(0)
+    if dfa.search(0) != found || (found && shown_slots(dfa.slots) != shown_slots(pike.slots)) {
+        return "the engines disagree: " + shown_slots(dfa.slots)
+    }
+    var pike0 = re.searcher(text, 0, -1)
+    var dfa0 = re.searcher(text, 0, 1)
+    if pike0.is_match() != found || dfa0.is_match() != found {
+        return "is_match disagrees"
+    }
+    if !found {
+        return "-"
+    }
+    return shown_slots(pike.slots)
+}
+
+// Slots as start-end pairs, `-` for a group that didn't take part.
+#test([0, 2, -1, -1, 1, 2])["0-2 - 1-2"]
+fun shown_slots(slots: [int]) -> str {
+    var sb = StringBuilder()
+    var i = 0
+    while i + 1 < slots.len() {
+        if i > 0 {
+            sb.append(" ")
+        }
+        if slots[i] < 0 {
+            sb.append("-")
+        } else {
+            sb.append(f"{slots[i]}-{slots[i + 1]}")
+        }
+        i += 2
+    }
+    return sb.build()
+}
+
+// Why `pattern` doesn't compile, or "ok".
+#test("a(b")["missing closing ) at 1"]
+#test("a(b(c)")["missing closing ) at 1"]
+#test("a)")["unexpected ) at 1"]
+#test(")")["unexpected ) at 0"]
+#test("[a")["missing closing ] at 0"]
+#test("[]")["missing closing ] at 0"]
+#test("[^]")["missing closing ] at 0"]
+#test("x[a-")["missing closing ] at 1"]
+#test("a\\")["invalid escape sequence at 1"]
+#test("\\q")["invalid escape sequence at 0"]
+#test("\\1")["invalid escape sequence at 0"] // no backreferences
+#test("(a)\\1")["invalid escape sequence at 3"]
+#test("\\8")["invalid escape sequence at 0"]
+#test("\\x4")["invalid escape sequence at 0"]
+#test("\\x{100}")["invalid escape sequence at 0"] // above a byte
+#test("\\777")["invalid escape sequence at 0"]
+#test("\\pL")["invalid escape sequence at 0"] // no Unicode classes
+#test("[\\b]")["invalid escape sequence at 1"]
+#test("[z-a]")["invalid character class range at 1"]
+#test("[a-\\d]")["invalid escape sequence at 3"]
+#test("[[:foo:]]")["invalid POSIX character class at 1"]
+#test("[é]")["non-ASCII character in a class at 1"]
+#test("*")["missing argument to repetition operator at 0"]
+#test("a|*")["missing argument to repetition operator at 2"]
+#test("(*)")["missing argument to repetition operator at 1"]
+#test("(?i)*")["missing argument to repetition operator at 4"]
+#test("{2}")["missing argument to repetition operator at 0"]
+#test("a**")["invalid nested repetition operator at 2"]
+#test("a*+")["invalid nested repetition operator at 2"]
+#test("a*??")["invalid nested repetition operator at 3"]
+#test("x{2}{3}")["invalid nested repetition operator at 4"]
+#test("a{1001}")["invalid repeat count at 1"]
+#test("a{2,1}")["invalid repeat count at 1"]
+#test("a{0,1001}")["invalid repeat count at 1"]
+#test("(?=a)")["invalid or unsupported group syntax at 0"] // no lookaround
+#test("(?!a)")["invalid or unsupported group syntax at 0"]
+#test("(?<=a)")["invalid or unsupported group syntax at 0"]
+#test("(?P=n)")["invalid or unsupported group syntax at 0"]
+#test("(?P<>a)")["invalid group name at 4"]
+#test("(?P<a-b>a)")["invalid group name at 4"]
+#test("(?P<n>a)(?P<n>b)")["duplicate group name at 12"]
+#test("(?<n>a)(?<n>b)")["duplicate group name at 10"]
+#test("(?x)")["invalid flags at 0"]
+#test("(?i-)")["invalid flags at 0"]
+#test("(?)")["invalid flags at 0"]
+#test("(?--i)")["invalid flags at 0"]
+#test("(?i")["missing closing ) at 0"]
+#test(repeated("(", 101) + "a" + repeated(")", 101))["groups nested too deeply at 100"]
+#test(repeated("(", 100) + "a" + repeated(")", 100))["ok"]
+#test("((a{1000}){1000}){1000}")["expression too large at 0"]
+#test("(?i:a)(?im-s:b)(?U)c")["ok"]
+#test("a{,3}x{")["ok"] // a { that isn't a count is a literal
+fun error_of(pattern: str) -> str {
+    return match compile(pattern) {
+        Ok(_) => "ok"
+        Err(e) => f"{e}"
+    }
+}
+
+// The matches of `pattern` in `text`, each start-end.
+#test("a", "banana")["1-2 3-4 5-6"]
+#test("a*", "baaac")["0-0 1-4 5-5"] // no empty match right after a match
+#test("", "abc")["0-0 1-1 2-2 3-3"]
+#test("", "é")["0-0 2-2"] // an empty match moves on by a character
+#test("\\b", "ab cd")["0-0 2-2 3-3 5-5"]
+#test("(?m)^", "a\nb\n")["0-0 2-2 4-4"]
+#test("x*", "")["0-0"]
+#test("\\d+", "no digits")[""]
+#test("[[:alpha:]]+", "one, two, three")["0-3 5-8 10-15"]
+fun all_spans(pattern: str, text: str) -> str {
+    let re = match compile(pattern) {
+        Ok(r) => r
+        Err(e) => {
+            return f"error: {e}"
+        }
+    }
+    var parts: [str] = []
+    for m in re.find_all(text) {
+        parts.push(f"{m.start}-{m.end}")
+    }
+    var sb = StringBuilder()
+    var i = 0
+    while i < parts.len() {
+        if i > 0 {
+            sb.append(" ")
+        }
+        sb.append(parts[i])
+        i += 1
+    }
+    let pike = re.all_slots(text, 2, -1, -1)
+    let dfa = re.all_slots(text, 2, -1, 1)
+    if pike.len() != dfa.len() {
+        return "the engines disagree"
+    }
+    var k = 0
+    while k < pike.len() {
+        if shown_slots(pike[k]) != shown_slots(dfa[k]) {
+            return "the engines disagree"
+        }
+        k += 1
+    }
+    return sb.build()
+}
+
+// `pattern`'s every match in `text` replaced by `with`; the first only if
+// `all` is false.
+#test("a", "banana", "o", true)["bonono"]
+#test("a", "banana", "o", false)["bonana"]
+#test("(\\w+)@(\\w+)", "bob@example", "$2 at $1", true)["example at bob"]
+#test("(?P<y>\\d{4})-(?P<m>\\d\\d)", "2026-11", "${m}/${y}", true)["11/2026"]
+#test("x*", "abc", "-", true)["-a-b-c-"]
+#test("a|", "baaa", "-", true)["-b---"]
+#test("b", "abc", "$$1", true)["a$1c"]
+#test("(a)|b", "ab", "[$1]", true)["[a][]"] // a group that didn't take part is empty
+#test("q", "abc", "x", true)["abc"]
+fun replaced(pattern: str, text: str, with: str, all: bool) -> str {
+    return match compile(pattern) {
+        Ok(re) => if all { re.replace_all(text, with) } else { re.replace(text, with) }
+        Err(e) => f"error: {e}"
+    }
+}
+
+// The pieces of `text` between `pattern`'s matches, joined with `|`.
+#test(",", "a,b,,c")["a|b||c"]
+#test("\\s*,\\s*", "a , b,c")["a|b|c"]
+#test(",", ",a,")["|a|"]
+#test(",", "")[""]
+#test("x*", "abc")["|a|b|c|"]
+#test("\\d", "a1b2c3")["a|b|c|"]
+fun split_joined(pattern: str, text: str) -> str {
+    let re = match compile(pattern) {
+        Ok(r) => r
+        Err(e) => {
+            return f"error: {e}"
+        }
+    }
+    let pieces = re.split(text)
+    var sb = StringBuilder()
+    var i = 0
+    while i < pieces.len() {
+        if i > 0 {
+            sb.append("|")
+        }
+        sb.append(pieces[i])
+        i += 1
+    }
+    return sb.build()
+}
+
+// Whether `pattern` matches somewhere in `text`.
+#test("b+", "abbc")[true]
+#test("^b", "abbc")[false]
+#test("(a*)*b", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")[false]
+#test("", "")[true]
+fun matches(pattern: str, text: str) -> bool {
+    return match compile(pattern) {
+        Ok(re) => re.is_match(text)
+        Err(_) => false
+    }
+}
+
+// The test functions' assertion (an f-string in `assert` doesn't compile
+// natively yet).
+fun holds(ok: bool, what: str) {
+    if !ok {
+        panic(what)
+    }
+}
+
+fun compiled(pattern: str) -> Regex {
+    return match compile(pattern) {
+        Ok(re) => re
+        Err(e) => {
+            panic(f"{pattern}: {e}")
+        }
+    }
+}
+
+#test
+fun finds_and_captures() {
+    let re = compiled("(?P<user>[\\w.]+)@(?P<host>\\w+)\\.com")
+    holds(re.group_count() == 2, "two groups")
+    holds(re.as_str() == "(?P<user>[\\w.]+)@(?P<host>\\w+)\\.com", "as_str")
+    match re.find("write to ann.lee@example.com today") {
+        Some(m) => holds(m.start == 9 && m.end == 28 && m.text == "ann.lee@example.com", f"find: {m.start}-{m.end}")
+        None => panic("no match")
+    }
+    match re.captures("write to ann.lee@example.com today") {
+        Some(c) => {
+            holds(c.len() == 3, "three groups with the whole match")
+            holds(c.text(1) == "ann.lee" && c.text(2) == "example", "group texts")
+            match c.name("host") {
+                Some(m) => holds(m.start == 17 && m.end == 24 && m.text == "example", "host")
+                None => panic("no host")
+            }
+            match c.name("nobody") {
+                Some(_) => panic("a group that doesn't exist")
+                None => {}
+            }
+            match c.get(3) {
+                Some(_) => panic("group 3")
+                None => {}
+            }
+        }
+        None => panic("no captures")
+    }
+    match re.find("nothing here") {
+        Some(_) => panic("a match in nothing")
+        None => {}
+    }
+    match re.find_at("a@b.com c@d.com", 1) {
+        Some(m) => holds(m.start == 8 && m.text == "c@d.com", "find_at")
+        None => panic("find_at found nothing")
+    }
+    let all = re.captures_all("a@b.com, c@d.com")
+    holds(all.len() == 2 && all[1].text(1) == "c" && all[1].text(2) == "d", "captures_all")
+}
+
+#test
+fun finds_all_with_text() {
+    let ms = compiled("\\d+").find_all("1 22 333")
+    holds(ms.len() == 3, "three numbers")
+    holds(ms[2] == Match { start: 5, end: 8, text: "333" }, "the third")
+    // `.` matches a byte, so a match can end inside a character
+    let half = compiled("a.").find_all("aé")
+    holds(half.len() == 1 && half[0].end == 2 && half[0].text.len() == 2, "a match inside a character")
+}
+
+#test
+fun escapes_round_trip() {
+    let text = "1+1=2? (a|b) [x] {y} ^$ \\."
+    let re = compiled(escape(text))
+    match re.find("so " + text + " so") {
+        Some(m) => holds(m.start == 3 && m.text == text, "an escaped pattern matches its text")
+        None => panic("no match of the escaped text")
+    }
+}
+
+// A backtracking matcher takes exponential time on these; a Pike VM visits
+// each position once.
+#test
+fun pathological_patterns_are_linear() {
+    let aaa = repeated("a", 10000)
+    holds(!compiled("(a*)*b").is_match(aaa), "(a*)*b")
+    holds(!compiled("(a|a)*b").is_match(aaa), "(a|a)*b")
+    holds(!compiled("(a|aa)*b").is_match(aaa), "(a|aa)*b")
+    match compiled("(a*)*$").find(aaa) {
+        Some(m) => holds(m.end == 10000, "(a*)*$ matches it all")
+        None => panic("(a*)*$")
+    }
+    match compiled("(x+x+)+y").find(repeated("x", 5000)) {
+        Some(_) => panic("(x+x+)+y")
+        None => {}
+    }
+}
+
+fun repeated(s: str, n: int) -> str {
+    var sb = StringBuilder()
+    var k = 0
+    while k < n {
+        sb.append(s)
+        k += 1
+    }
+    return sb.build()
+}
+
+// Text of `n` bytes, `a` and `b` in a pseudo-random order.
+fun ab_text(n: int) -> str {
+    var sb = StringBuilder()
+    var seed: uint32 = 7
+    var k = 0
+    while k < n {
+        seed = seed * 1103515245u32 + 12345u32
+        sb.append_byte(if ((seed >> 16) & 1u32) == 1u32 { 'a' } else { 'b' })
+        k += 1
+    }
+    return sb.build()
+}
+
+// A pattern whose DFA has more states than the cache takes: the search
+// goes on in the Pike VM and finds what the Pike VM alone finds.
+#test
+fun dfa_gives_up_for_the_pike_vm() {
+    let text = ab_text(3000)
+    var sr = compiled("a[ab]{14}c").searcher(text, 0, 1)
+    holds(!sr.is_match(), "no c")
+    holds(!sr.use_dfa, "the DFA gave up")
+    let re = compiled("a[ab]{14}b")
+    let auto = re.all_slots(text, 2, -1, 1)
+    let pike = re.all_slots(text, 2, -1, -1)
+    holds(auto.len() == pike.len() && auto.len() > 100, f"{auto.len()} matches")
+    var k = 0
+    while k < pike.len() {
+        holds(shown_slots(auto[k]) == shown_slots(pike[k]), f"match {k}")
+        k += 1
+    }
+}

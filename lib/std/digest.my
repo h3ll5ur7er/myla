@@ -1,0 +1,2726 @@
+// std.digest — message digests: MD5, SHA-1, SHA-2 and HMAC (MYLA-328).
+//
+// Each digest is a type: `new_md5()` (`new_sha1()`, `new_sha256()`, …)
+// starts one, `update` and `update_str` add bytes, `finish` gives the digest
+// as bytes and `finish_hex` as lower-case hex. The one-shot functions hash a
+// list of bytes (`md5(data)`) or a string (`md5_hex(s)`, giving hex). `hmac`
+// keys any of them (RFC 2104); `hmac_sha256` and its siblings are it for one
+// digest each.
+//
+// MD5 and SHA-1 are broken as signatures: they remain for checksums, Git's
+// object ids and puzzles. Speed counts here (Advent of Code hashes millions
+// of short strings), so a hasher keeps a single block of 16 words, filled a
+// word at a time, and the compression functions are unrolled onto locals:
+// no allocation per block, no table lookups, no index arithmetic. The
+// unrolled rounds follow RFC 1321 and FIPS 180-4 step by step, the
+// variables' roles rotating instead of their values. They are written for
+// today's code generator: no operator has two compound operands
+// (`t = a >> 25u32; a = (a << 7u32) | t`, not `(a << 7u32) | (a >> 25u32)`),
+// since it keeps one of them on the stack, which costs up to a quarter of
+// the speed. SHA-512's rounds call small functions instead (the compiler
+// copies the smallest in): unrolled, they would more than double its source
+// for 10 to 20 % more speed.
+
+// What `hmac` needs of a digest: every digest type of this module has it.
+pub trait Digest {
+    fun update(var self, data: [uint8])
+    fun finish(self) -> [uint8]
+    fun block_size(self) -> int
+}
+
+// A block of 64 bytes as 16 words, as MD5, SHA-1 and SHA-256 compress it:
+// MD5's words are little-endian, the SHAs' big-endian. `used` counts the
+// bytes in it, `total` those of the whole message.
+struct Block32 {
+    w: [uint32],
+    used: int,
+    total: int64,
+    big: bool,
+}
+
+fun new_block32(big: bool) -> Block32 {
+    let w: [uint32] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    return Block32 { w: w, used: 0, total: 0, big: big }
+}
+
+impl Block32 {
+    // Takes bytes of `data` from index `start` until the block is full or
+    // `data` ends, and gives the index it stopped at.
+    fun fill(var self, data: [uint8], start: int) -> int {
+        let n = data.len()
+        var i = start
+        while i < n && (self.used & 3) != 0 {
+            self.put(data[i])
+            i += 1
+        }
+        // then whole words, as many as the block and the data have
+        var words = (n - i) >> 2
+        if words > ((64 - self.used) >> 2) {
+            words = (64 - self.used) >> 2
+        }
+        var j = self.used >> 2
+        let end = j + words
+        if self.big {
+            while j < end {
+                self.w[j] = ((data[i] as uint32) << 24u32) | ((data[i + 1] as uint32) << 16u32) | ((data[i + 2] as uint32) << 8u32) | (data[i + 3] as uint32)
+                i += 4
+                j += 1
+            }
+        } else {
+            while j < end {
+                self.w[j] = (data[i] as uint32) | ((data[i + 1] as uint32) << 8u32) | ((data[i + 2] as uint32) << 16u32) | ((data[i + 3] as uint32) << 24u32)
+                i += 4
+                j += 1
+            }
+        }
+        self.used += words << 2
+        while i < n && self.used < 64 {
+            self.put(data[i])
+            i += 1
+        }
+        self.total += (i - start) as int64
+        return i
+    }
+
+    // The same for a string's bytes.
+    fun fill_str(var self, data: str, start: int) -> int {
+        let n = data.len()
+        var i = start
+        while i < n && (self.used & 3) != 0 {
+            self.put(data[i])
+            i += 1
+        }
+        // then whole words, as many as the block and the data have
+        var words = (n - i) >> 2
+        if words > ((64 - self.used) >> 2) {
+            words = (64 - self.used) >> 2
+        }
+        var j = self.used >> 2
+        let end = j + words
+        if self.big {
+            while j < end {
+                self.w[j] = ((data[i] as uint32) << 24u32) | ((data[i + 1] as uint32) << 16u32) | ((data[i + 2] as uint32) << 8u32) | (data[i + 3] as uint32)
+                i += 4
+                j += 1
+            }
+        } else {
+            while j < end {
+                self.w[j] = (data[i] as uint32) | ((data[i + 1] as uint32) << 8u32) | ((data[i + 2] as uint32) << 16u32) | ((data[i + 3] as uint32) << 24u32)
+                i += 4
+                j += 1
+            }
+        }
+        self.used += words << 2
+        while i < n && self.used < 64 {
+            self.put(data[i])
+            i += 1
+        }
+        self.total += (i - start) as int64
+        return i
+    }
+
+    // Adds one byte.
+    fun put(var self, b: uint8) {
+        let k = self.used
+        let shift = if self.big { 24 - 8 * (k & 3) } else { 8 * (k & 3) }
+        let v = (b as uint32) << (shift as uint32)
+        if (k & 3) == 0 {
+            self.w[k >> 2] = v
+        } else {
+            self.w[k >> 2] = self.w[k >> 2] | v
+        }
+        self.used = k + 1
+    }
+
+    // Adds the 0x80 that ends every message and clears the words after it.
+    // True when the 8 bytes of the length no longer fit: the block is then
+    // compressed and cleared before `put_length`.
+    fun pad(var self) -> bool {
+        let k = self.used
+        self.put(0x80u8)
+        for j in (k >> 2) + 1..16 {
+            self.w[j] = 0u32
+        }
+        return k >= 56
+    }
+
+    fun clear(var self) {
+        for j in 0..16 {
+            self.w[j] = 0u32
+        }
+    }
+
+    // The message's length in bits, in the last two words.
+    fun put_length(var self) {
+        let bits = (self.total as uint64) << 3u64
+        let hi = (bits >> 32u64) as uint32
+        let lo = (bits & 0xffffffffu64) as uint32
+        if self.big {
+            self.w[14] = hi
+            self.w[15] = lo
+        } else {
+            self.w[14] = lo
+            self.w[15] = hi
+        }
+    }
+}
+
+// SHA-512's block: 128 bytes as 16 big-endian words of 64 bits, and a
+// 128-bit length.
+struct Block64 {
+    w: [uint64],
+    used: int,
+    total: int64,
+}
+
+fun new_block64() -> Block64 {
+    let w: [uint64] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    return Block64 { w: w, used: 0, total: 0 }
+}
+
+impl Block64 {
+    // Takes bytes of `data` from index `start` until the block is full or
+    // `data` ends, and gives the index it stopped at.
+    fun fill(var self, data: [uint8], start: int) -> int {
+        let n = data.len()
+        var i = start
+        while i < n && (self.used & 7) != 0 {
+            self.put(data[i])
+            i += 1
+        }
+        // then whole words, as many as the block and the data have
+        var words = (n - i) >> 3
+        if words > ((128 - self.used) >> 3) {
+            words = (128 - self.used) >> 3
+        }
+        var j = self.used >> 3
+        let end = j + words
+        while j < end {
+            self.w[j] = ((data[i] as uint64) << 56u64) | ((data[i + 1] as uint64) << 48u64) | ((data[i + 2] as uint64) << 40u64) | ((data[i + 3] as uint64) << 32u64) | ((data[i + 4] as uint64) << 24u64) | ((data[i + 5] as uint64) << 16u64) | ((data[i + 6] as uint64) << 8u64) | (data[i + 7] as uint64)
+            i += 8
+            j += 1
+        }
+        self.used += words << 3
+        while i < n && self.used < 128 {
+            self.put(data[i])
+            i += 1
+        }
+        self.total += (i - start) as int64
+        return i
+    }
+
+    // The same for a string's bytes.
+    fun fill_str(var self, data: str, start: int) -> int {
+        let n = data.len()
+        var i = start
+        while i < n && (self.used & 7) != 0 {
+            self.put(data[i])
+            i += 1
+        }
+        // then whole words, as many as the block and the data have
+        var words = (n - i) >> 3
+        if words > ((128 - self.used) >> 3) {
+            words = (128 - self.used) >> 3
+        }
+        var j = self.used >> 3
+        let end = j + words
+        while j < end {
+            self.w[j] = ((data[i] as uint64) << 56u64) | ((data[i + 1] as uint64) << 48u64) | ((data[i + 2] as uint64) << 40u64) | ((data[i + 3] as uint64) << 32u64) | ((data[i + 4] as uint64) << 24u64) | ((data[i + 5] as uint64) << 16u64) | ((data[i + 6] as uint64) << 8u64) | (data[i + 7] as uint64)
+            i += 8
+            j += 1
+        }
+        self.used += words << 3
+        while i < n && self.used < 128 {
+            self.put(data[i])
+            i += 1
+        }
+        self.total += (i - start) as int64
+        return i
+    }
+
+    fun put(var self, b: uint8) {
+        let k = self.used
+        let v = (b as uint64) << ((56 - 8 * (k & 7)) as uint64)
+        if (k & 7) == 0 {
+            self.w[k >> 3] = v
+        } else {
+            self.w[k >> 3] = self.w[k >> 3] | v
+        }
+        self.used = k + 1
+    }
+
+    fun pad(var self) -> bool {
+        let k = self.used
+        self.put(0x80u8)
+        for j in (k >> 3) + 1..16 {
+            self.w[j] = 0u64
+        }
+        return k >= 112
+    }
+
+    fun clear(var self) {
+        for j in 0..16 {
+            self.w[j] = 0u64
+        }
+    }
+
+    fun put_length(var self) {
+        self.w[14] = (self.total >> 61) as uint64
+        self.w[15] = (self.total as uint64) << 3u64
+    }
+}
+
+// The words' bytes, lowest first (MD5).
+fun le_bytes(ws: [uint32]) -> [uint8] {
+    var out: [uint8] = []
+    for v in ws {
+        out.push(v as uint8)
+        out.push((v >> 8u32) as uint8)
+        out.push((v >> 16u32) as uint8)
+        out.push((v >> 24u32) as uint8)
+    }
+    return out
+}
+
+// The first `n` words' bytes, highest first (SHA-1, SHA-224, SHA-256).
+fun be_bytes(ws: [uint32], n: int) -> [uint8] {
+    var out: [uint8] = []
+    for i in 0..n {
+        let v = ws[i]
+        out.push((v >> 24u32) as uint8)
+        out.push((v >> 16u32) as uint8)
+        out.push((v >> 8u32) as uint8)
+        out.push(v as uint8)
+    }
+    return out
+}
+
+// The same for 64-bit words (SHA-384, SHA-512).
+fun be_bytes64(ws: [uint64], n: int) -> [uint8] {
+    var out: [uint8] = []
+    for i in 0..n {
+        let v = ws[i]
+        var s = 56u64
+        while true {
+            out.push((v >> s) as uint8)
+            if s == 0u64 {
+                break
+            }
+            s -= 8u64
+        }
+    }
+    return out
+}
+
+// Lower-case hex. (A private copy: std.encoding, MYLA-329, owns hex.)
+#test([0x00u8, 0x9fu8, 0xa0u8, 0xffu8])["009fa0ff"]
+fun hex_of(bytes: [uint8]) -> str {
+    let digits = "0123456789abcdef"
+    var sb = StringBuilder()
+    for b in bytes {
+        sb.append_byte(digits[(b >> 4u8) as int])
+        sb.append_byte(digits[(b & 15u8) as int])
+    }
+    return sb.build()
+}
+
+#test("abc")[[97u8, 98u8, 99u8]]
+fun bytes_of(s: str) -> [uint8] {
+    var out: [uint8] = []
+    for i in 0..s.len() {
+        out.push(s[i])
+    }
+    return out
+}
+
+#test(0u32)[48u8]
+#test(9u32)[57u8]
+#test(10u32)[97u8]
+#test(15u32)[102u8]
+fun hex_digit(n: uint32) -> uint8 {
+    // '0' + n, and 39 more from 10 on, where 'a' follows; no branch
+    return (((n + 6u32) >> 4u32) * 39u32 + n + 48u32) as uint8
+}
+
+// Hex straight from the state words, without a list of bytes between.
+struct Hex {
+    sb: StringBuilder,
+}
+
+fun new_hex() -> Hex {
+    return Hex { sb: StringBuilder() }
+}
+
+impl Hex {
+    // A word's bytes, highest first (the SHAs' order).
+    fun be32(var self, v: uint32) {
+        self.sb.append_byte(hex_digit(v >> 28u32))
+        self.sb.append_byte(hex_digit((v >> 24u32) & 15u32))
+        self.sb.append_byte(hex_digit((v >> 20u32) & 15u32))
+        self.sb.append_byte(hex_digit((v >> 16u32) & 15u32))
+        self.sb.append_byte(hex_digit((v >> 12u32) & 15u32))
+        self.sb.append_byte(hex_digit((v >> 8u32) & 15u32))
+        self.sb.append_byte(hex_digit((v >> 4u32) & 15u32))
+        self.sb.append_byte(hex_digit(v & 15u32))
+    }
+
+    // Lowest first (MD5's).
+    fun le32(var self, v: uint32) {
+        self.be32((v >> 24u32) | ((v >> 8u32) & 0xff00u32) | ((v << 8u32) & 0xff0000u32) | (v << 24u32))
+    }
+
+    fun be64(var self, v: uint64) {
+        self.be32((v >> 32u64) as uint32)
+        self.be32(v as uint32)
+    }
+}
+
+// ---- MD5 (RFC 1321)
+
+pub struct Md5 {
+    blk: Block32,
+    a: uint32,
+    b: uint32,
+    c: uint32,
+    d: uint32,
+}
+
+pub fun new_md5() -> Md5 {
+    return Md5 { blk: new_block32(false), a: 0x67452301, b: 0xefcdab89, c: 0x98badcfe, d: 0x10325476 }
+}
+
+impl Md5 {
+    // Adds the bytes of `s`.
+    fun update_str(var self, s: str) {
+        var i = 0
+        while i < s.len() {
+            i = self.blk.fill_str(s, i)
+            if self.blk.used == 64 {
+                self.compress()
+                self.blk.used = 0
+            }
+        }
+    }
+
+    #test(new_md5())["d41d8cd98f00b204e9800998ecf8427e"]
+    fun finish_hex(self) -> str {
+        var h = self
+        h.close()
+        return h.hex()
+    }
+
+    fun compress(var self) {
+        let w = self.blk.w
+        let m0 = w[0]
+        let m1 = w[1]
+        let m2 = w[2]
+        let m3 = w[3]
+        let m4 = w[4]
+        let m5 = w[5]
+        let m6 = w[6]
+        let m7 = w[7]
+        let m8 = w[8]
+        let m9 = w[9]
+        let m10 = w[10]
+        let m11 = w[11]
+        let m12 = w[12]
+        let m13 = w[13]
+        let m14 = w[14]
+        let m15 = w[15]
+        var a = self.a
+        var b = self.b
+        var c = self.c
+        var d = self.d
+        var t = 0u32
+        // each step: a += F(b, c, d) + K[i] + M[g]; a = rotl(a, s) + b, the
+        // roles moving on by one
+        // round 1
+        a = a + (d ^ (b & (c ^ d))) + 0xd76aa478u32 + m0
+        t = a >> 25u32; a = ((a << 7u32) | t) + b
+        d = d + (c ^ (a & (b ^ c))) + 0xe8c7b756u32 + m1
+        t = d >> 20u32; d = ((d << 12u32) | t) + a
+        c = c + (b ^ (d & (a ^ b))) + 0x242070dbu32 + m2
+        t = c >> 15u32; c = ((c << 17u32) | t) + d
+        b = b + (a ^ (c & (d ^ a))) + 0xc1bdceeeu32 + m3
+        t = b >> 10u32; b = ((b << 22u32) | t) + c
+        a = a + (d ^ (b & (c ^ d))) + 0xf57c0fafu32 + m4
+        t = a >> 25u32; a = ((a << 7u32) | t) + b
+        d = d + (c ^ (a & (b ^ c))) + 0x4787c62au32 + m5
+        t = d >> 20u32; d = ((d << 12u32) | t) + a
+        c = c + (b ^ (d & (a ^ b))) + 0xa8304613u32 + m6
+        t = c >> 15u32; c = ((c << 17u32) | t) + d
+        b = b + (a ^ (c & (d ^ a))) + 0xfd469501u32 + m7
+        t = b >> 10u32; b = ((b << 22u32) | t) + c
+        a = a + (d ^ (b & (c ^ d))) + 0x698098d8u32 + m8
+        t = a >> 25u32; a = ((a << 7u32) | t) + b
+        d = d + (c ^ (a & (b ^ c))) + 0x8b44f7afu32 + m9
+        t = d >> 20u32; d = ((d << 12u32) | t) + a
+        c = c + (b ^ (d & (a ^ b))) + 0xffff5bb1u32 + m10
+        t = c >> 15u32; c = ((c << 17u32) | t) + d
+        b = b + (a ^ (c & (d ^ a))) + 0x895cd7beu32 + m11
+        t = b >> 10u32; b = ((b << 22u32) | t) + c
+        a = a + (d ^ (b & (c ^ d))) + 0x6b901122u32 + m12
+        t = a >> 25u32; a = ((a << 7u32) | t) + b
+        d = d + (c ^ (a & (b ^ c))) + 0xfd987193u32 + m13
+        t = d >> 20u32; d = ((d << 12u32) | t) + a
+        c = c + (b ^ (d & (a ^ b))) + 0xa679438eu32 + m14
+        t = c >> 15u32; c = ((c << 17u32) | t) + d
+        b = b + (a ^ (c & (d ^ a))) + 0x49b40821u32 + m15
+        t = b >> 10u32; b = ((b << 22u32) | t) + c
+        // round 2
+        a = a + (c ^ (d & (b ^ c))) + 0xf61e2562u32 + m1
+        t = a >> 27u32; a = ((a << 5u32) | t) + b
+        d = d + (b ^ (c & (a ^ b))) + 0xc040b340u32 + m6
+        t = d >> 23u32; d = ((d << 9u32) | t) + a
+        c = c + (a ^ (b & (d ^ a))) + 0x265e5a51u32 + m11
+        t = c >> 18u32; c = ((c << 14u32) | t) + d
+        b = b + (d ^ (a & (c ^ d))) + 0xe9b6c7aau32 + m0
+        t = b >> 12u32; b = ((b << 20u32) | t) + c
+        a = a + (c ^ (d & (b ^ c))) + 0xd62f105du32 + m5
+        t = a >> 27u32; a = ((a << 5u32) | t) + b
+        d = d + (b ^ (c & (a ^ b))) + 0x02441453u32 + m10
+        t = d >> 23u32; d = ((d << 9u32) | t) + a
+        c = c + (a ^ (b & (d ^ a))) + 0xd8a1e681u32 + m15
+        t = c >> 18u32; c = ((c << 14u32) | t) + d
+        b = b + (d ^ (a & (c ^ d))) + 0xe7d3fbc8u32 + m4
+        t = b >> 12u32; b = ((b << 20u32) | t) + c
+        a = a + (c ^ (d & (b ^ c))) + 0x21e1cde6u32 + m9
+        t = a >> 27u32; a = ((a << 5u32) | t) + b
+        d = d + (b ^ (c & (a ^ b))) + 0xc33707d6u32 + m14
+        t = d >> 23u32; d = ((d << 9u32) | t) + a
+        c = c + (a ^ (b & (d ^ a))) + 0xf4d50d87u32 + m3
+        t = c >> 18u32; c = ((c << 14u32) | t) + d
+        b = b + (d ^ (a & (c ^ d))) + 0x455a14edu32 + m8
+        t = b >> 12u32; b = ((b << 20u32) | t) + c
+        a = a + (c ^ (d & (b ^ c))) + 0xa9e3e905u32 + m13
+        t = a >> 27u32; a = ((a << 5u32) | t) + b
+        d = d + (b ^ (c & (a ^ b))) + 0xfcefa3f8u32 + m2
+        t = d >> 23u32; d = ((d << 9u32) | t) + a
+        c = c + (a ^ (b & (d ^ a))) + 0x676f02d9u32 + m7
+        t = c >> 18u32; c = ((c << 14u32) | t) + d
+        b = b + (d ^ (a & (c ^ d))) + 0x8d2a4c8au32 + m12
+        t = b >> 12u32; b = ((b << 20u32) | t) + c
+        // round 3
+        a = a + (b ^ c ^ d) + 0xfffa3942u32 + m5
+        t = a >> 28u32; a = ((a << 4u32) | t) + b
+        d = d + (a ^ b ^ c) + 0x8771f681u32 + m8
+        t = d >> 21u32; d = ((d << 11u32) | t) + a
+        c = c + (d ^ a ^ b) + 0x6d9d6122u32 + m11
+        t = c >> 16u32; c = ((c << 16u32) | t) + d
+        b = b + (c ^ d ^ a) + 0xfde5380cu32 + m14
+        t = b >> 9u32; b = ((b << 23u32) | t) + c
+        a = a + (b ^ c ^ d) + 0xa4beea44u32 + m1
+        t = a >> 28u32; a = ((a << 4u32) | t) + b
+        d = d + (a ^ b ^ c) + 0x4bdecfa9u32 + m4
+        t = d >> 21u32; d = ((d << 11u32) | t) + a
+        c = c + (d ^ a ^ b) + 0xf6bb4b60u32 + m7
+        t = c >> 16u32; c = ((c << 16u32) | t) + d
+        b = b + (c ^ d ^ a) + 0xbebfbc70u32 + m10
+        t = b >> 9u32; b = ((b << 23u32) | t) + c
+        a = a + (b ^ c ^ d) + 0x289b7ec6u32 + m13
+        t = a >> 28u32; a = ((a << 4u32) | t) + b
+        d = d + (a ^ b ^ c) + 0xeaa127fau32 + m0
+        t = d >> 21u32; d = ((d << 11u32) | t) + a
+        c = c + (d ^ a ^ b) + 0xd4ef3085u32 + m3
+        t = c >> 16u32; c = ((c << 16u32) | t) + d
+        b = b + (c ^ d ^ a) + 0x04881d05u32 + m6
+        t = b >> 9u32; b = ((b << 23u32) | t) + c
+        a = a + (b ^ c ^ d) + 0xd9d4d039u32 + m9
+        t = a >> 28u32; a = ((a << 4u32) | t) + b
+        d = d + (a ^ b ^ c) + 0xe6db99e5u32 + m12
+        t = d >> 21u32; d = ((d << 11u32) | t) + a
+        c = c + (d ^ a ^ b) + 0x1fa27cf8u32 + m15
+        t = c >> 16u32; c = ((c << 16u32) | t) + d
+        b = b + (c ^ d ^ a) + 0xc4ac5665u32 + m2
+        t = b >> 9u32; b = ((b << 23u32) | t) + c
+        // round 4
+        a = a + (c ^ (b | ~d)) + 0xf4292244u32 + m0
+        t = a >> 26u32; a = ((a << 6u32) | t) + b
+        d = d + (b ^ (a | ~c)) + 0x432aff97u32 + m7
+        t = d >> 22u32; d = ((d << 10u32) | t) + a
+        c = c + (a ^ (d | ~b)) + 0xab9423a7u32 + m14
+        t = c >> 17u32; c = ((c << 15u32) | t) + d
+        b = b + (d ^ (c | ~a)) + 0xfc93a039u32 + m5
+        t = b >> 11u32; b = ((b << 21u32) | t) + c
+        a = a + (c ^ (b | ~d)) + 0x655b59c3u32 + m12
+        t = a >> 26u32; a = ((a << 6u32) | t) + b
+        d = d + (b ^ (a | ~c)) + 0x8f0ccc92u32 + m3
+        t = d >> 22u32; d = ((d << 10u32) | t) + a
+        c = c + (a ^ (d | ~b)) + 0xffeff47du32 + m10
+        t = c >> 17u32; c = ((c << 15u32) | t) + d
+        b = b + (d ^ (c | ~a)) + 0x85845dd1u32 + m1
+        t = b >> 11u32; b = ((b << 21u32) | t) + c
+        a = a + (c ^ (b | ~d)) + 0x6fa87e4fu32 + m8
+        t = a >> 26u32; a = ((a << 6u32) | t) + b
+        d = d + (b ^ (a | ~c)) + 0xfe2ce6e0u32 + m15
+        t = d >> 22u32; d = ((d << 10u32) | t) + a
+        c = c + (a ^ (d | ~b)) + 0xa3014314u32 + m6
+        t = c >> 17u32; c = ((c << 15u32) | t) + d
+        b = b + (d ^ (c | ~a)) + 0x4e0811a1u32 + m13
+        t = b >> 11u32; b = ((b << 21u32) | t) + c
+        a = a + (c ^ (b | ~d)) + 0xf7537e82u32 + m4
+        t = a >> 26u32; a = ((a << 6u32) | t) + b
+        d = d + (b ^ (a | ~c)) + 0xbd3af235u32 + m11
+        t = d >> 22u32; d = ((d << 10u32) | t) + a
+        c = c + (a ^ (d | ~b)) + 0x2ad7d2bbu32 + m2
+        t = c >> 17u32; c = ((c << 15u32) | t) + d
+        b = b + (d ^ (c | ~a)) + 0xeb86d391u32 + m9
+        t = b >> 11u32; b = ((b << 21u32) | t) + c
+        self.a = self.a + a
+        self.b = self.b + b
+        self.c = self.c + c
+        self.d = self.d + d
+    }
+
+    fun close(var self) {
+        if self.blk.pad() {
+            self.compress()
+            self.blk.clear()
+        }
+        self.blk.put_length()
+        self.compress()
+    }
+
+    fun bytes(self) -> [uint8] {
+        return le_bytes([self.a, self.b, self.c, self.d])
+    }
+
+    fun hex(self) -> str {
+        var x = new_hex()
+        x.le32(self.a)
+        x.le32(self.b)
+        x.le32(self.c)
+        x.le32(self.d)
+        return x.sb.build()
+    }
+}
+
+impl Digest for Md5 {
+    // Adds `data`.
+    fun update(var self, data: [uint8]) {
+        var i = 0
+        while i < data.len() {
+            i = self.blk.fill(data, i)
+            if self.blk.used == 64 {
+                self.compress()
+                self.blk.used = 0
+            }
+        }
+    }
+
+    // The digest of what was added; the hasher itself doesn't change.
+    #test(new_md5())[[0xd4u8, 0x1du8, 0x8cu8, 0xd9u8, 0x8fu8, 0x00u8, 0xb2u8, 0x04u8, 0xe9u8, 0x80u8, 0x09u8, 0x98u8, 0xecu8, 0xf8u8, 0x42u8, 0x7eu8]]
+    fun finish(self) -> [uint8] {
+        var h = self
+        h.close()
+        return h.bytes()
+    }
+
+    #test(new_md5())[64]
+    fun block_size(self) -> int {
+        return 64
+    }
+}
+
+// The MD5 digest of `data`, 16 bytes.
+#test([97u8, 98u8, 99u8])[[0x90u8, 0x01u8, 0x50u8, 0x98u8, 0x3cu8, 0xd2u8, 0x4fu8, 0xb0u8, 0xd6u8, 0x96u8, 0x3fu8, 0x7du8, 0x28u8, 0xe1u8, 0x7fu8, 0x72u8]]
+pub fun md5(data: [uint8]) -> [uint8] {
+    var h = new_md5()
+    h.update(data)
+    h.close()
+    return h.bytes()
+}
+
+// The MD5 digest of the bytes of `s`, in hex.
+#test("")["d41d8cd98f00b204e9800998ecf8427e"]
+#test("a")["0cc175b9c0f1b6a831c399e269772661"]
+#test("abc")["900150983cd24fb0d6963f7d28e17f72"]
+#test("message digest")["f96b697d7cb7938d525a2f31aaf161d0"]
+#test("abcdefghijklmnopqrstuvwxyz")["c3fcd3d76192e4007dfb496cca67e13b"]
+#test("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789")["d174ab98d277d9f5a5611c2c9f419d9f"]
+#test("12345678901234567890123456789012345678901234567890123456789012345678901234567890")["57edf4a22be3c955ac49da2e2107b67a"]
+pub fun md5_hex(s: str) -> str {
+    var h = new_md5()
+    h.update_str(s)
+    h.close()
+    return h.hex()
+}
+
+// ---- SHA-1 (FIPS 180-4, 6.1)
+
+pub struct Sha1 {
+    blk: Block32,
+    a: uint32,
+    b: uint32,
+    c: uint32,
+    d: uint32,
+    e: uint32,
+}
+
+pub fun new_sha1() -> Sha1 {
+    return Sha1 { blk: new_block32(true), a: 0x67452301, b: 0xefcdab89, c: 0x98badcfe, d: 0x10325476, e: 0xc3d2e1f0 }
+}
+
+impl Sha1 {
+    fun update_str(var self, s: str) {
+        var i = 0
+        while i < s.len() {
+            i = self.blk.fill_str(s, i)
+            if self.blk.used == 64 {
+                self.compress()
+                self.blk.used = 0
+            }
+        }
+    }
+
+    #test(new_sha1())["da39a3ee5e6b4b0d3255bfef95601890afd80709"]
+    fun finish_hex(self) -> str {
+        var h = self
+        h.close()
+        return h.hex()
+    }
+
+    fun compress(var self) {
+        let w = self.blk.w
+        var w0 = w[0]
+        var w1 = w[1]
+        var w2 = w[2]
+        var w3 = w[3]
+        var w4 = w[4]
+        var w5 = w[5]
+        var w6 = w[6]
+        var w7 = w[7]
+        var w8 = w[8]
+        var w9 = w[9]
+        var w10 = w[10]
+        var w11 = w[11]
+        var w12 = w[12]
+        var w13 = w[13]
+        var w14 = w[14]
+        var w15 = w[15]
+        var a = self.a
+        var b = self.b
+        var c = self.c
+        var d = self.d
+        var e = self.e
+        var t = 0u32
+        // each step: e += f(b, c, d) + K + W[t] + rotl(a, 5); b = rotl(b, 30); from
+        // step 16 W[t] = rotl(W[t-3] ^ W[t-8] ^ W[t-14] ^ W[t-16], 1) first
+        // steps 0 to 19: Ch
+        e = e + (d ^ (b & (c ^ d))) + 0x5a827999u32 + w0
+        t = a >> 27u32; t = (a << 5u32) | t; e = e + t
+        t = b >> 2u32; b = (b << 30u32) | t
+        d = d + (c ^ (a & (b ^ c))) + 0x5a827999u32 + w1
+        t = e >> 27u32; t = (e << 5u32) | t; d = d + t
+        t = a >> 2u32; a = (a << 30u32) | t
+        c = c + (b ^ (e & (a ^ b))) + 0x5a827999u32 + w2
+        t = d >> 27u32; t = (d << 5u32) | t; c = c + t
+        t = e >> 2u32; e = (e << 30u32) | t
+        b = b + (a ^ (d & (e ^ a))) + 0x5a827999u32 + w3
+        t = c >> 27u32; t = (c << 5u32) | t; b = b + t
+        t = d >> 2u32; d = (d << 30u32) | t
+        a = a + (e ^ (c & (d ^ e))) + 0x5a827999u32 + w4
+        t = b >> 27u32; t = (b << 5u32) | t; a = a + t
+        t = c >> 2u32; c = (c << 30u32) | t
+        e = e + (d ^ (b & (c ^ d))) + 0x5a827999u32 + w5
+        t = a >> 27u32; t = (a << 5u32) | t; e = e + t
+        t = b >> 2u32; b = (b << 30u32) | t
+        d = d + (c ^ (a & (b ^ c))) + 0x5a827999u32 + w6
+        t = e >> 27u32; t = (e << 5u32) | t; d = d + t
+        t = a >> 2u32; a = (a << 30u32) | t
+        c = c + (b ^ (e & (a ^ b))) + 0x5a827999u32 + w7
+        t = d >> 27u32; t = (d << 5u32) | t; c = c + t
+        t = e >> 2u32; e = (e << 30u32) | t
+        b = b + (a ^ (d & (e ^ a))) + 0x5a827999u32 + w8
+        t = c >> 27u32; t = (c << 5u32) | t; b = b + t
+        t = d >> 2u32; d = (d << 30u32) | t
+        a = a + (e ^ (c & (d ^ e))) + 0x5a827999u32 + w9
+        t = b >> 27u32; t = (b << 5u32) | t; a = a + t
+        t = c >> 2u32; c = (c << 30u32) | t
+        e = e + (d ^ (b & (c ^ d))) + 0x5a827999u32 + w10
+        t = a >> 27u32; t = (a << 5u32) | t; e = e + t
+        t = b >> 2u32; b = (b << 30u32) | t
+        d = d + (c ^ (a & (b ^ c))) + 0x5a827999u32 + w11
+        t = e >> 27u32; t = (e << 5u32) | t; d = d + t
+        t = a >> 2u32; a = (a << 30u32) | t
+        c = c + (b ^ (e & (a ^ b))) + 0x5a827999u32 + w12
+        t = d >> 27u32; t = (d << 5u32) | t; c = c + t
+        t = e >> 2u32; e = (e << 30u32) | t
+        b = b + (a ^ (d & (e ^ a))) + 0x5a827999u32 + w13
+        t = c >> 27u32; t = (c << 5u32) | t; b = b + t
+        t = d >> 2u32; d = (d << 30u32) | t
+        a = a + (e ^ (c & (d ^ e))) + 0x5a827999u32 + w14
+        t = b >> 27u32; t = (b << 5u32) | t; a = a + t
+        t = c >> 2u32; c = (c << 30u32) | t
+        e = e + (d ^ (b & (c ^ d))) + 0x5a827999u32 + w15
+        t = a >> 27u32; t = (a << 5u32) | t; e = e + t
+        t = b >> 2u32; b = (b << 30u32) | t
+        w0 = w13 ^ w8 ^ w2 ^ w0; t = w0 >> 31u32; w0 = (w0 << 1u32) | t
+        d = d + (c ^ (a & (b ^ c))) + 0x5a827999u32 + w0
+        t = e >> 27u32; t = (e << 5u32) | t; d = d + t
+        t = a >> 2u32; a = (a << 30u32) | t
+        w1 = w14 ^ w9 ^ w3 ^ w1; t = w1 >> 31u32; w1 = (w1 << 1u32) | t
+        c = c + (b ^ (e & (a ^ b))) + 0x5a827999u32 + w1
+        t = d >> 27u32; t = (d << 5u32) | t; c = c + t
+        t = e >> 2u32; e = (e << 30u32) | t
+        w2 = w15 ^ w10 ^ w4 ^ w2; t = w2 >> 31u32; w2 = (w2 << 1u32) | t
+        b = b + (a ^ (d & (e ^ a))) + 0x5a827999u32 + w2
+        t = c >> 27u32; t = (c << 5u32) | t; b = b + t
+        t = d >> 2u32; d = (d << 30u32) | t
+        w3 = w0 ^ w11 ^ w5 ^ w3; t = w3 >> 31u32; w3 = (w3 << 1u32) | t
+        a = a + (e ^ (c & (d ^ e))) + 0x5a827999u32 + w3
+        t = b >> 27u32; t = (b << 5u32) | t; a = a + t
+        t = c >> 2u32; c = (c << 30u32) | t
+        // steps 20 to 39: Parity
+        w4 = w1 ^ w12 ^ w6 ^ w4; t = w4 >> 31u32; w4 = (w4 << 1u32) | t
+        e = e + (b ^ c ^ d) + 0x6ed9eba1u32 + w4
+        t = a >> 27u32; t = (a << 5u32) | t; e = e + t
+        t = b >> 2u32; b = (b << 30u32) | t
+        w5 = w2 ^ w13 ^ w7 ^ w5; t = w5 >> 31u32; w5 = (w5 << 1u32) | t
+        d = d + (a ^ b ^ c) + 0x6ed9eba1u32 + w5
+        t = e >> 27u32; t = (e << 5u32) | t; d = d + t
+        t = a >> 2u32; a = (a << 30u32) | t
+        w6 = w3 ^ w14 ^ w8 ^ w6; t = w6 >> 31u32; w6 = (w6 << 1u32) | t
+        c = c + (e ^ a ^ b) + 0x6ed9eba1u32 + w6
+        t = d >> 27u32; t = (d << 5u32) | t; c = c + t
+        t = e >> 2u32; e = (e << 30u32) | t
+        w7 = w4 ^ w15 ^ w9 ^ w7; t = w7 >> 31u32; w7 = (w7 << 1u32) | t
+        b = b + (d ^ e ^ a) + 0x6ed9eba1u32 + w7
+        t = c >> 27u32; t = (c << 5u32) | t; b = b + t
+        t = d >> 2u32; d = (d << 30u32) | t
+        w8 = w5 ^ w0 ^ w10 ^ w8; t = w8 >> 31u32; w8 = (w8 << 1u32) | t
+        a = a + (c ^ d ^ e) + 0x6ed9eba1u32 + w8
+        t = b >> 27u32; t = (b << 5u32) | t; a = a + t
+        t = c >> 2u32; c = (c << 30u32) | t
+        w9 = w6 ^ w1 ^ w11 ^ w9; t = w9 >> 31u32; w9 = (w9 << 1u32) | t
+        e = e + (b ^ c ^ d) + 0x6ed9eba1u32 + w9
+        t = a >> 27u32; t = (a << 5u32) | t; e = e + t
+        t = b >> 2u32; b = (b << 30u32) | t
+        w10 = w7 ^ w2 ^ w12 ^ w10; t = w10 >> 31u32; w10 = (w10 << 1u32) | t
+        d = d + (a ^ b ^ c) + 0x6ed9eba1u32 + w10
+        t = e >> 27u32; t = (e << 5u32) | t; d = d + t
+        t = a >> 2u32; a = (a << 30u32) | t
+        w11 = w8 ^ w3 ^ w13 ^ w11; t = w11 >> 31u32; w11 = (w11 << 1u32) | t
+        c = c + (e ^ a ^ b) + 0x6ed9eba1u32 + w11
+        t = d >> 27u32; t = (d << 5u32) | t; c = c + t
+        t = e >> 2u32; e = (e << 30u32) | t
+        w12 = w9 ^ w4 ^ w14 ^ w12; t = w12 >> 31u32; w12 = (w12 << 1u32) | t
+        b = b + (d ^ e ^ a) + 0x6ed9eba1u32 + w12
+        t = c >> 27u32; t = (c << 5u32) | t; b = b + t
+        t = d >> 2u32; d = (d << 30u32) | t
+        w13 = w10 ^ w5 ^ w15 ^ w13; t = w13 >> 31u32; w13 = (w13 << 1u32) | t
+        a = a + (c ^ d ^ e) + 0x6ed9eba1u32 + w13
+        t = b >> 27u32; t = (b << 5u32) | t; a = a + t
+        t = c >> 2u32; c = (c << 30u32) | t
+        w14 = w11 ^ w6 ^ w0 ^ w14; t = w14 >> 31u32; w14 = (w14 << 1u32) | t
+        e = e + (b ^ c ^ d) + 0x6ed9eba1u32 + w14
+        t = a >> 27u32; t = (a << 5u32) | t; e = e + t
+        t = b >> 2u32; b = (b << 30u32) | t
+        w15 = w12 ^ w7 ^ w1 ^ w15; t = w15 >> 31u32; w15 = (w15 << 1u32) | t
+        d = d + (a ^ b ^ c) + 0x6ed9eba1u32 + w15
+        t = e >> 27u32; t = (e << 5u32) | t; d = d + t
+        t = a >> 2u32; a = (a << 30u32) | t
+        w0 = w13 ^ w8 ^ w2 ^ w0; t = w0 >> 31u32; w0 = (w0 << 1u32) | t
+        c = c + (e ^ a ^ b) + 0x6ed9eba1u32 + w0
+        t = d >> 27u32; t = (d << 5u32) | t; c = c + t
+        t = e >> 2u32; e = (e << 30u32) | t
+        w1 = w14 ^ w9 ^ w3 ^ w1; t = w1 >> 31u32; w1 = (w1 << 1u32) | t
+        b = b + (d ^ e ^ a) + 0x6ed9eba1u32 + w1
+        t = c >> 27u32; t = (c << 5u32) | t; b = b + t
+        t = d >> 2u32; d = (d << 30u32) | t
+        w2 = w15 ^ w10 ^ w4 ^ w2; t = w2 >> 31u32; w2 = (w2 << 1u32) | t
+        a = a + (c ^ d ^ e) + 0x6ed9eba1u32 + w2
+        t = b >> 27u32; t = (b << 5u32) | t; a = a + t
+        t = c >> 2u32; c = (c << 30u32) | t
+        w3 = w0 ^ w11 ^ w5 ^ w3; t = w3 >> 31u32; w3 = (w3 << 1u32) | t
+        e = e + (b ^ c ^ d) + 0x6ed9eba1u32 + w3
+        t = a >> 27u32; t = (a << 5u32) | t; e = e + t
+        t = b >> 2u32; b = (b << 30u32) | t
+        w4 = w1 ^ w12 ^ w6 ^ w4; t = w4 >> 31u32; w4 = (w4 << 1u32) | t
+        d = d + (a ^ b ^ c) + 0x6ed9eba1u32 + w4
+        t = e >> 27u32; t = (e << 5u32) | t; d = d + t
+        t = a >> 2u32; a = (a << 30u32) | t
+        w5 = w2 ^ w13 ^ w7 ^ w5; t = w5 >> 31u32; w5 = (w5 << 1u32) | t
+        c = c + (e ^ a ^ b) + 0x6ed9eba1u32 + w5
+        t = d >> 27u32; t = (d << 5u32) | t; c = c + t
+        t = e >> 2u32; e = (e << 30u32) | t
+        w6 = w3 ^ w14 ^ w8 ^ w6; t = w6 >> 31u32; w6 = (w6 << 1u32) | t
+        b = b + (d ^ e ^ a) + 0x6ed9eba1u32 + w6
+        t = c >> 27u32; t = (c << 5u32) | t; b = b + t
+        t = d >> 2u32; d = (d << 30u32) | t
+        w7 = w4 ^ w15 ^ w9 ^ w7; t = w7 >> 31u32; w7 = (w7 << 1u32) | t
+        a = a + (c ^ d ^ e) + 0x6ed9eba1u32 + w7
+        t = b >> 27u32; t = (b << 5u32) | t; a = a + t
+        t = c >> 2u32; c = (c << 30u32) | t
+        // steps 40 to 59: Maj
+        w8 = w5 ^ w0 ^ w10 ^ w8; t = w8 >> 31u32; w8 = (w8 << 1u32) | t
+        t = b | c; t = (d & t) | (b & c); e = e + t + 0x8f1bbcdcu32 + w8
+        t = a >> 27u32; t = (a << 5u32) | t; e = e + t
+        t = b >> 2u32; b = (b << 30u32) | t
+        w9 = w6 ^ w1 ^ w11 ^ w9; t = w9 >> 31u32; w9 = (w9 << 1u32) | t
+        t = a | b; t = (c & t) | (a & b); d = d + t + 0x8f1bbcdcu32 + w9
+        t = e >> 27u32; t = (e << 5u32) | t; d = d + t
+        t = a >> 2u32; a = (a << 30u32) | t
+        w10 = w7 ^ w2 ^ w12 ^ w10; t = w10 >> 31u32; w10 = (w10 << 1u32) | t
+        t = e | a; t = (b & t) | (e & a); c = c + t + 0x8f1bbcdcu32 + w10
+        t = d >> 27u32; t = (d << 5u32) | t; c = c + t
+        t = e >> 2u32; e = (e << 30u32) | t
+        w11 = w8 ^ w3 ^ w13 ^ w11; t = w11 >> 31u32; w11 = (w11 << 1u32) | t
+        t = d | e; t = (a & t) | (d & e); b = b + t + 0x8f1bbcdcu32 + w11
+        t = c >> 27u32; t = (c << 5u32) | t; b = b + t
+        t = d >> 2u32; d = (d << 30u32) | t
+        w12 = w9 ^ w4 ^ w14 ^ w12; t = w12 >> 31u32; w12 = (w12 << 1u32) | t
+        t = c | d; t = (e & t) | (c & d); a = a + t + 0x8f1bbcdcu32 + w12
+        t = b >> 27u32; t = (b << 5u32) | t; a = a + t
+        t = c >> 2u32; c = (c << 30u32) | t
+        w13 = w10 ^ w5 ^ w15 ^ w13; t = w13 >> 31u32; w13 = (w13 << 1u32) | t
+        t = b | c; t = (d & t) | (b & c); e = e + t + 0x8f1bbcdcu32 + w13
+        t = a >> 27u32; t = (a << 5u32) | t; e = e + t
+        t = b >> 2u32; b = (b << 30u32) | t
+        w14 = w11 ^ w6 ^ w0 ^ w14; t = w14 >> 31u32; w14 = (w14 << 1u32) | t
+        t = a | b; t = (c & t) | (a & b); d = d + t + 0x8f1bbcdcu32 + w14
+        t = e >> 27u32; t = (e << 5u32) | t; d = d + t
+        t = a >> 2u32; a = (a << 30u32) | t
+        w15 = w12 ^ w7 ^ w1 ^ w15; t = w15 >> 31u32; w15 = (w15 << 1u32) | t
+        t = e | a; t = (b & t) | (e & a); c = c + t + 0x8f1bbcdcu32 + w15
+        t = d >> 27u32; t = (d << 5u32) | t; c = c + t
+        t = e >> 2u32; e = (e << 30u32) | t
+        w0 = w13 ^ w8 ^ w2 ^ w0; t = w0 >> 31u32; w0 = (w0 << 1u32) | t
+        t = d | e; t = (a & t) | (d & e); b = b + t + 0x8f1bbcdcu32 + w0
+        t = c >> 27u32; t = (c << 5u32) | t; b = b + t
+        t = d >> 2u32; d = (d << 30u32) | t
+        w1 = w14 ^ w9 ^ w3 ^ w1; t = w1 >> 31u32; w1 = (w1 << 1u32) | t
+        t = c | d; t = (e & t) | (c & d); a = a + t + 0x8f1bbcdcu32 + w1
+        t = b >> 27u32; t = (b << 5u32) | t; a = a + t
+        t = c >> 2u32; c = (c << 30u32) | t
+        w2 = w15 ^ w10 ^ w4 ^ w2; t = w2 >> 31u32; w2 = (w2 << 1u32) | t
+        t = b | c; t = (d & t) | (b & c); e = e + t + 0x8f1bbcdcu32 + w2
+        t = a >> 27u32; t = (a << 5u32) | t; e = e + t
+        t = b >> 2u32; b = (b << 30u32) | t
+        w3 = w0 ^ w11 ^ w5 ^ w3; t = w3 >> 31u32; w3 = (w3 << 1u32) | t
+        t = a | b; t = (c & t) | (a & b); d = d + t + 0x8f1bbcdcu32 + w3
+        t = e >> 27u32; t = (e << 5u32) | t; d = d + t
+        t = a >> 2u32; a = (a << 30u32) | t
+        w4 = w1 ^ w12 ^ w6 ^ w4; t = w4 >> 31u32; w4 = (w4 << 1u32) | t
+        t = e | a; t = (b & t) | (e & a); c = c + t + 0x8f1bbcdcu32 + w4
+        t = d >> 27u32; t = (d << 5u32) | t; c = c + t
+        t = e >> 2u32; e = (e << 30u32) | t
+        w5 = w2 ^ w13 ^ w7 ^ w5; t = w5 >> 31u32; w5 = (w5 << 1u32) | t
+        t = d | e; t = (a & t) | (d & e); b = b + t + 0x8f1bbcdcu32 + w5
+        t = c >> 27u32; t = (c << 5u32) | t; b = b + t
+        t = d >> 2u32; d = (d << 30u32) | t
+        w6 = w3 ^ w14 ^ w8 ^ w6; t = w6 >> 31u32; w6 = (w6 << 1u32) | t
+        t = c | d; t = (e & t) | (c & d); a = a + t + 0x8f1bbcdcu32 + w6
+        t = b >> 27u32; t = (b << 5u32) | t; a = a + t
+        t = c >> 2u32; c = (c << 30u32) | t
+        w7 = w4 ^ w15 ^ w9 ^ w7; t = w7 >> 31u32; w7 = (w7 << 1u32) | t
+        t = b | c; t = (d & t) | (b & c); e = e + t + 0x8f1bbcdcu32 + w7
+        t = a >> 27u32; t = (a << 5u32) | t; e = e + t
+        t = b >> 2u32; b = (b << 30u32) | t
+        w8 = w5 ^ w0 ^ w10 ^ w8; t = w8 >> 31u32; w8 = (w8 << 1u32) | t
+        t = a | b; t = (c & t) | (a & b); d = d + t + 0x8f1bbcdcu32 + w8
+        t = e >> 27u32; t = (e << 5u32) | t; d = d + t
+        t = a >> 2u32; a = (a << 30u32) | t
+        w9 = w6 ^ w1 ^ w11 ^ w9; t = w9 >> 31u32; w9 = (w9 << 1u32) | t
+        t = e | a; t = (b & t) | (e & a); c = c + t + 0x8f1bbcdcu32 + w9
+        t = d >> 27u32; t = (d << 5u32) | t; c = c + t
+        t = e >> 2u32; e = (e << 30u32) | t
+        w10 = w7 ^ w2 ^ w12 ^ w10; t = w10 >> 31u32; w10 = (w10 << 1u32) | t
+        t = d | e; t = (a & t) | (d & e); b = b + t + 0x8f1bbcdcu32 + w10
+        t = c >> 27u32; t = (c << 5u32) | t; b = b + t
+        t = d >> 2u32; d = (d << 30u32) | t
+        w11 = w8 ^ w3 ^ w13 ^ w11; t = w11 >> 31u32; w11 = (w11 << 1u32) | t
+        t = c | d; t = (e & t) | (c & d); a = a + t + 0x8f1bbcdcu32 + w11
+        t = b >> 27u32; t = (b << 5u32) | t; a = a + t
+        t = c >> 2u32; c = (c << 30u32) | t
+        // steps 60 to 79: Parity
+        w12 = w9 ^ w4 ^ w14 ^ w12; t = w12 >> 31u32; w12 = (w12 << 1u32) | t
+        e = e + (b ^ c ^ d) + 0xca62c1d6u32 + w12
+        t = a >> 27u32; t = (a << 5u32) | t; e = e + t
+        t = b >> 2u32; b = (b << 30u32) | t
+        w13 = w10 ^ w5 ^ w15 ^ w13; t = w13 >> 31u32; w13 = (w13 << 1u32) | t
+        d = d + (a ^ b ^ c) + 0xca62c1d6u32 + w13
+        t = e >> 27u32; t = (e << 5u32) | t; d = d + t
+        t = a >> 2u32; a = (a << 30u32) | t
+        w14 = w11 ^ w6 ^ w0 ^ w14; t = w14 >> 31u32; w14 = (w14 << 1u32) | t
+        c = c + (e ^ a ^ b) + 0xca62c1d6u32 + w14
+        t = d >> 27u32; t = (d << 5u32) | t; c = c + t
+        t = e >> 2u32; e = (e << 30u32) | t
+        w15 = w12 ^ w7 ^ w1 ^ w15; t = w15 >> 31u32; w15 = (w15 << 1u32) | t
+        b = b + (d ^ e ^ a) + 0xca62c1d6u32 + w15
+        t = c >> 27u32; t = (c << 5u32) | t; b = b + t
+        t = d >> 2u32; d = (d << 30u32) | t
+        w0 = w13 ^ w8 ^ w2 ^ w0; t = w0 >> 31u32; w0 = (w0 << 1u32) | t
+        a = a + (c ^ d ^ e) + 0xca62c1d6u32 + w0
+        t = b >> 27u32; t = (b << 5u32) | t; a = a + t
+        t = c >> 2u32; c = (c << 30u32) | t
+        w1 = w14 ^ w9 ^ w3 ^ w1; t = w1 >> 31u32; w1 = (w1 << 1u32) | t
+        e = e + (b ^ c ^ d) + 0xca62c1d6u32 + w1
+        t = a >> 27u32; t = (a << 5u32) | t; e = e + t
+        t = b >> 2u32; b = (b << 30u32) | t
+        w2 = w15 ^ w10 ^ w4 ^ w2; t = w2 >> 31u32; w2 = (w2 << 1u32) | t
+        d = d + (a ^ b ^ c) + 0xca62c1d6u32 + w2
+        t = e >> 27u32; t = (e << 5u32) | t; d = d + t
+        t = a >> 2u32; a = (a << 30u32) | t
+        w3 = w0 ^ w11 ^ w5 ^ w3; t = w3 >> 31u32; w3 = (w3 << 1u32) | t
+        c = c + (e ^ a ^ b) + 0xca62c1d6u32 + w3
+        t = d >> 27u32; t = (d << 5u32) | t; c = c + t
+        t = e >> 2u32; e = (e << 30u32) | t
+        w4 = w1 ^ w12 ^ w6 ^ w4; t = w4 >> 31u32; w4 = (w4 << 1u32) | t
+        b = b + (d ^ e ^ a) + 0xca62c1d6u32 + w4
+        t = c >> 27u32; t = (c << 5u32) | t; b = b + t
+        t = d >> 2u32; d = (d << 30u32) | t
+        w5 = w2 ^ w13 ^ w7 ^ w5; t = w5 >> 31u32; w5 = (w5 << 1u32) | t
+        a = a + (c ^ d ^ e) + 0xca62c1d6u32 + w5
+        t = b >> 27u32; t = (b << 5u32) | t; a = a + t
+        t = c >> 2u32; c = (c << 30u32) | t
+        w6 = w3 ^ w14 ^ w8 ^ w6; t = w6 >> 31u32; w6 = (w6 << 1u32) | t
+        e = e + (b ^ c ^ d) + 0xca62c1d6u32 + w6
+        t = a >> 27u32; t = (a << 5u32) | t; e = e + t
+        t = b >> 2u32; b = (b << 30u32) | t
+        w7 = w4 ^ w15 ^ w9 ^ w7; t = w7 >> 31u32; w7 = (w7 << 1u32) | t
+        d = d + (a ^ b ^ c) + 0xca62c1d6u32 + w7
+        t = e >> 27u32; t = (e << 5u32) | t; d = d + t
+        t = a >> 2u32; a = (a << 30u32) | t
+        w8 = w5 ^ w0 ^ w10 ^ w8; t = w8 >> 31u32; w8 = (w8 << 1u32) | t
+        c = c + (e ^ a ^ b) + 0xca62c1d6u32 + w8
+        t = d >> 27u32; t = (d << 5u32) | t; c = c + t
+        t = e >> 2u32; e = (e << 30u32) | t
+        w9 = w6 ^ w1 ^ w11 ^ w9; t = w9 >> 31u32; w9 = (w9 << 1u32) | t
+        b = b + (d ^ e ^ a) + 0xca62c1d6u32 + w9
+        t = c >> 27u32; t = (c << 5u32) | t; b = b + t
+        t = d >> 2u32; d = (d << 30u32) | t
+        w10 = w7 ^ w2 ^ w12 ^ w10; t = w10 >> 31u32; w10 = (w10 << 1u32) | t
+        a = a + (c ^ d ^ e) + 0xca62c1d6u32 + w10
+        t = b >> 27u32; t = (b << 5u32) | t; a = a + t
+        t = c >> 2u32; c = (c << 30u32) | t
+        w11 = w8 ^ w3 ^ w13 ^ w11; t = w11 >> 31u32; w11 = (w11 << 1u32) | t
+        e = e + (b ^ c ^ d) + 0xca62c1d6u32 + w11
+        t = a >> 27u32; t = (a << 5u32) | t; e = e + t
+        t = b >> 2u32; b = (b << 30u32) | t
+        w12 = w9 ^ w4 ^ w14 ^ w12; t = w12 >> 31u32; w12 = (w12 << 1u32) | t
+        d = d + (a ^ b ^ c) + 0xca62c1d6u32 + w12
+        t = e >> 27u32; t = (e << 5u32) | t; d = d + t
+        t = a >> 2u32; a = (a << 30u32) | t
+        w13 = w10 ^ w5 ^ w15 ^ w13; t = w13 >> 31u32; w13 = (w13 << 1u32) | t
+        c = c + (e ^ a ^ b) + 0xca62c1d6u32 + w13
+        t = d >> 27u32; t = (d << 5u32) | t; c = c + t
+        t = e >> 2u32; e = (e << 30u32) | t
+        w14 = w11 ^ w6 ^ w0 ^ w14; t = w14 >> 31u32; w14 = (w14 << 1u32) | t
+        b = b + (d ^ e ^ a) + 0xca62c1d6u32 + w14
+        t = c >> 27u32; t = (c << 5u32) | t; b = b + t
+        t = d >> 2u32; d = (d << 30u32) | t
+        w15 = w12 ^ w7 ^ w1 ^ w15; t = w15 >> 31u32; w15 = (w15 << 1u32) | t
+        a = a + (c ^ d ^ e) + 0xca62c1d6u32 + w15
+        t = b >> 27u32; t = (b << 5u32) | t; a = a + t
+        t = c >> 2u32; c = (c << 30u32) | t
+        self.a = self.a + a
+        self.b = self.b + b
+        self.c = self.c + c
+        self.d = self.d + d
+        self.e = self.e + e
+    }
+
+    fun close(var self) {
+        if self.blk.pad() {
+            self.compress()
+            self.blk.clear()
+        }
+        self.blk.put_length()
+        self.compress()
+    }
+
+    fun bytes(self) -> [uint8] {
+        return be_bytes([self.a, self.b, self.c, self.d, self.e], 5)
+    }
+
+    fun hex(self) -> str {
+        var x = new_hex()
+        x.be32(self.a)
+        x.be32(self.b)
+        x.be32(self.c)
+        x.be32(self.d)
+        x.be32(self.e)
+        return x.sb.build()
+    }
+}
+
+impl Digest for Sha1 {
+    fun update(var self, data: [uint8]) {
+        var i = 0
+        while i < data.len() {
+            i = self.blk.fill(data, i)
+            if self.blk.used == 64 {
+                self.compress()
+                self.blk.used = 0
+            }
+        }
+    }
+
+    #test(new_sha1())[[0xdau8, 0x39u8, 0xa3u8, 0xeeu8, 0x5eu8, 0x6bu8, 0x4bu8, 0x0du8, 0x32u8, 0x55u8, 0xbfu8, 0xefu8, 0x95u8, 0x60u8, 0x18u8, 0x90u8, 0xafu8, 0xd8u8, 0x07u8, 0x09u8]]
+    fun finish(self) -> [uint8] {
+        var h = self
+        h.close()
+        return h.bytes()
+    }
+
+    #test(new_sha1())[64]
+    fun block_size(self) -> int {
+        return 64
+    }
+}
+
+// The SHA-1 digest of `data`, 20 bytes.
+#test([97u8, 98u8, 99u8])[[0xa9u8, 0x99u8, 0x3eu8, 0x36u8, 0x47u8, 0x06u8, 0x81u8, 0x6au8, 0xbau8, 0x3eu8, 0x25u8, 0x71u8, 0x78u8, 0x50u8, 0xc2u8, 0x6cu8, 0x9cu8, 0xd0u8, 0xd8u8, 0x9du8]]
+pub fun sha1(data: [uint8]) -> [uint8] {
+    var h = new_sha1()
+    h.update(data)
+    h.close()
+    return h.bytes()
+}
+
+#test("")["da39a3ee5e6b4b0d3255bfef95601890afd80709"]
+#test("abc")["a9993e364706816aba3e25717850c26c9cd0d89d"]
+#test("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq")["84983e441c3bd26ebaae4aa1f95129e5e54670f1"] // 448 bits
+#test("abcdefghbcdefghicdefghijdefghijkefghijklfghijklmghijklmnhijklmnoijklmnopjklmnopqklmnopqrlmnopqrsmnopqrstnopqrstu")["a49b2446a02c645bf419f995b67091253a04a259"] // 896 bits
+pub fun sha1_hex(s: str) -> str {
+    var h = new_sha1()
+    h.update_str(s)
+    h.close()
+    return h.hex()
+}
+
+// ---- SHA-256 and SHA-224 (FIPS 180-4, 6.2 and 6.3)
+
+// SHA-256, or SHA-224 (other initial values, 7 words of output).
+pub struct Sha256 {
+    blk: Block32,
+    a: uint32,
+    b: uint32,
+    c: uint32,
+    d: uint32,
+    e: uint32,
+    f: uint32,
+    g: uint32,
+    h: uint32,
+    words: int,
+}
+
+pub fun new_sha256() -> Sha256 {
+    return Sha256 {
+        blk: new_block32(true),
+        a: 0x6a09e667, b: 0xbb67ae85, c: 0x3c6ef372, d: 0xa54ff53a,
+        e: 0x510e527f, f: 0x9b05688c, g: 0x1f83d9ab, h: 0x5be0cd19,
+        words: 8,
+    }
+}
+
+pub fun new_sha224() -> Sha256 {
+    return Sha256 {
+        blk: new_block32(true),
+        a: 0xc1059ed8, b: 0x367cd507, c: 0x3070dd17, d: 0xf70e5939,
+        e: 0xffc00b31, f: 0x68581511, g: 0x64f98fa7, h: 0xbefa4fa4,
+        words: 7,
+    }
+}
+
+impl Sha256 {
+    fun update_str(var self, s: str) {
+        var i = 0
+        while i < s.len() {
+            i = self.blk.fill_str(s, i)
+            if self.blk.used == 64 {
+                self.compress()
+                self.blk.used = 0
+            }
+        }
+    }
+
+    #test(new_sha256())["e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"]
+    #test(new_sha224())["d14a028c2a3a2bc9476102bb288234c415a2b01f828ea62ac5b3e42f"]
+    fun finish_hex(self) -> str {
+        var h = self
+        h.close()
+        return h.hex()
+    }
+
+    fun compress(var self) {
+        let w = self.blk.w
+        var w0 = w[0]
+        var w1 = w[1]
+        var w2 = w[2]
+        var w3 = w[3]
+        var w4 = w[4]
+        var w5 = w[5]
+        var w6 = w[6]
+        var w7 = w[7]
+        var w8 = w[8]
+        var w9 = w[9]
+        var w10 = w[10]
+        var w11 = w[11]
+        var w12 = w[12]
+        var w13 = w[13]
+        var w14 = w[14]
+        var w15 = w[15]
+        var a = self.a
+        var b = self.b
+        var c = self.c
+        var d = self.d
+        var e = self.e
+        var f = self.f
+        var g = self.g
+        var h = self.h
+        var t = 0u32
+        var u = 0u32
+        var x = 0u64
+        var y = 0u64
+        // each round: h += Σ1(e) + Ch(e, f, g) + K[t] + W[t]; d += h;
+        // h += Σ0(a) + Maj(a, b, c); from round 16 W[t] += σ1(W[t-2]) + W[t-7] +
+        // σ0(W[t-15]) first. A rotation of a 32-bit word is a shift of x, the
+        // word doubled to 64 bits.
+        x = e as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
+        h = h + t + (g ^ (e & (f ^ g))) + 0x428a2f98u32 + w0
+        d = d + h
+        x = a as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; h = h + t
+        t = a | b; t = (c & t) | (a & b); h = h + t
+        x = d as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
+        g = g + t + (f ^ (d & (e ^ f))) + 0x71374491u32 + w1
+        c = c + g
+        x = h as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; g = g + t
+        t = h | a; t = (b & t) | (h & a); g = g + t
+        x = c as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
+        f = f + t + (e ^ (c & (d ^ e))) + 0xb5c0fbcfu32 + w2
+        b = b + f
+        x = g as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; f = f + t
+        t = g | h; t = (a & t) | (g & h); f = f + t
+        x = b as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
+        e = e + t + (d ^ (b & (c ^ d))) + 0xe9b5dba5u32 + w3
+        a = a + e
+        x = f as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; e = e + t
+        t = f | g; t = (h & t) | (f & g); e = e + t
+        x = a as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
+        d = d + t + (c ^ (a & (b ^ c))) + 0x3956c25bu32 + w4
+        h = h + d
+        x = e as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; d = d + t
+        t = e | f; t = (g & t) | (e & f); d = d + t
+        x = h as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
+        c = c + t + (b ^ (h & (a ^ b))) + 0x59f111f1u32 + w5
+        g = g + c
+        x = d as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; c = c + t
+        t = d | e; t = (f & t) | (d & e); c = c + t
+        x = g as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
+        b = b + t + (a ^ (g & (h ^ a))) + 0x923f82a4u32 + w6
+        f = f + b
+        x = c as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; b = b + t
+        t = c | d; t = (e & t) | (c & d); b = b + t
+        x = f as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
+        a = a + t + (h ^ (f & (g ^ h))) + 0xab1c5ed5u32 + w7
+        e = e + a
+        x = b as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; a = a + t
+        t = b | c; t = (d & t) | (b & c); a = a + t
+        x = e as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
+        h = h + t + (g ^ (e & (f ^ g))) + 0xd807aa98u32 + w8
+        d = d + h
+        x = a as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; h = h + t
+        t = a | b; t = (c & t) | (a & b); h = h + t
+        x = d as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
+        g = g + t + (f ^ (d & (e ^ f))) + 0x12835b01u32 + w9
+        c = c + g
+        x = h as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; g = g + t
+        t = h | a; t = (b & t) | (h & a); g = g + t
+        x = c as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
+        f = f + t + (e ^ (c & (d ^ e))) + 0x243185beu32 + w10
+        b = b + f
+        x = g as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; f = f + t
+        t = g | h; t = (a & t) | (g & h); f = f + t
+        x = b as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
+        e = e + t + (d ^ (b & (c ^ d))) + 0x550c7dc3u32 + w11
+        a = a + e
+        x = f as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; e = e + t
+        t = f | g; t = (h & t) | (f & g); e = e + t
+        x = a as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
+        d = d + t + (c ^ (a & (b ^ c))) + 0x72be5d74u32 + w12
+        h = h + d
+        x = e as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; d = d + t
+        t = e | f; t = (g & t) | (e & f); d = d + t
+        x = h as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
+        c = c + t + (b ^ (h & (a ^ b))) + 0x80deb1feu32 + w13
+        g = g + c
+        x = d as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; c = c + t
+        t = d | e; t = (f & t) | (d & e); c = c + t
+        x = g as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
+        b = b + t + (a ^ (g & (h ^ a))) + 0x9bdc06a7u32 + w14
+        f = f + b
+        x = c as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; b = b + t
+        t = c | d; t = (e & t) | (c & d); b = b + t
+        x = f as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
+        a = a + t + (h ^ (f & (g ^ h))) + 0xc19bf174u32 + w15
+        e = e + a
+        x = b as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; a = a + t
+        t = b | c; t = (d & t) | (b & c); a = a + t
+        x = w14 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w14 >> 10u32) ^ (y as uint32); w0 = w0 + t + w9
+        x = w1 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w1 >> 3u32) ^ (y as uint32); w0 = w0 + t
+        x = e as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
+        h = h + t + (g ^ (e & (f ^ g))) + 0xe49b69c1u32 + w0
+        d = d + h
+        x = a as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; h = h + t
+        t = a | b; t = (c & t) | (a & b); h = h + t
+        x = w15 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w15 >> 10u32) ^ (y as uint32); w1 = w1 + t + w10
+        x = w2 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w2 >> 3u32) ^ (y as uint32); w1 = w1 + t
+        x = d as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
+        g = g + t + (f ^ (d & (e ^ f))) + 0xefbe4786u32 + w1
+        c = c + g
+        x = h as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; g = g + t
+        t = h | a; t = (b & t) | (h & a); g = g + t
+        x = w0 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w0 >> 10u32) ^ (y as uint32); w2 = w2 + t + w11
+        x = w3 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w3 >> 3u32) ^ (y as uint32); w2 = w2 + t
+        x = c as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
+        f = f + t + (e ^ (c & (d ^ e))) + 0x0fc19dc6u32 + w2
+        b = b + f
+        x = g as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; f = f + t
+        t = g | h; t = (a & t) | (g & h); f = f + t
+        x = w1 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w1 >> 10u32) ^ (y as uint32); w3 = w3 + t + w12
+        x = w4 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w4 >> 3u32) ^ (y as uint32); w3 = w3 + t
+        x = b as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
+        e = e + t + (d ^ (b & (c ^ d))) + 0x240ca1ccu32 + w3
+        a = a + e
+        x = f as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; e = e + t
+        t = f | g; t = (h & t) | (f & g); e = e + t
+        x = w2 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w2 >> 10u32) ^ (y as uint32); w4 = w4 + t + w13
+        x = w5 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w5 >> 3u32) ^ (y as uint32); w4 = w4 + t
+        x = a as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
+        d = d + t + (c ^ (a & (b ^ c))) + 0x2de92c6fu32 + w4
+        h = h + d
+        x = e as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; d = d + t
+        t = e | f; t = (g & t) | (e & f); d = d + t
+        x = w3 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w3 >> 10u32) ^ (y as uint32); w5 = w5 + t + w14
+        x = w6 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w6 >> 3u32) ^ (y as uint32); w5 = w5 + t
+        x = h as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
+        c = c + t + (b ^ (h & (a ^ b))) + 0x4a7484aau32 + w5
+        g = g + c
+        x = d as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; c = c + t
+        t = d | e; t = (f & t) | (d & e); c = c + t
+        x = w4 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w4 >> 10u32) ^ (y as uint32); w6 = w6 + t + w15
+        x = w7 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w7 >> 3u32) ^ (y as uint32); w6 = w6 + t
+        x = g as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
+        b = b + t + (a ^ (g & (h ^ a))) + 0x5cb0a9dcu32 + w6
+        f = f + b
+        x = c as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; b = b + t
+        t = c | d; t = (e & t) | (c & d); b = b + t
+        x = w5 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w5 >> 10u32) ^ (y as uint32); w7 = w7 + t + w0
+        x = w8 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w8 >> 3u32) ^ (y as uint32); w7 = w7 + t
+        x = f as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
+        a = a + t + (h ^ (f & (g ^ h))) + 0x76f988dau32 + w7
+        e = e + a
+        x = b as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; a = a + t
+        t = b | c; t = (d & t) | (b & c); a = a + t
+        x = w6 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w6 >> 10u32) ^ (y as uint32); w8 = w8 + t + w1
+        x = w9 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w9 >> 3u32) ^ (y as uint32); w8 = w8 + t
+        x = e as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
+        h = h + t + (g ^ (e & (f ^ g))) + 0x983e5152u32 + w8
+        d = d + h
+        x = a as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; h = h + t
+        t = a | b; t = (c & t) | (a & b); h = h + t
+        x = w7 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w7 >> 10u32) ^ (y as uint32); w9 = w9 + t + w2
+        x = w10 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w10 >> 3u32) ^ (y as uint32); w9 = w9 + t
+        x = d as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
+        g = g + t + (f ^ (d & (e ^ f))) + 0xa831c66du32 + w9
+        c = c + g
+        x = h as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; g = g + t
+        t = h | a; t = (b & t) | (h & a); g = g + t
+        x = w8 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w8 >> 10u32) ^ (y as uint32); w10 = w10 + t + w3
+        x = w11 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w11 >> 3u32) ^ (y as uint32); w10 = w10 + t
+        x = c as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
+        f = f + t + (e ^ (c & (d ^ e))) + 0xb00327c8u32 + w10
+        b = b + f
+        x = g as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; f = f + t
+        t = g | h; t = (a & t) | (g & h); f = f + t
+        x = w9 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w9 >> 10u32) ^ (y as uint32); w11 = w11 + t + w4
+        x = w12 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w12 >> 3u32) ^ (y as uint32); w11 = w11 + t
+        x = b as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
+        e = e + t + (d ^ (b & (c ^ d))) + 0xbf597fc7u32 + w11
+        a = a + e
+        x = f as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; e = e + t
+        t = f | g; t = (h & t) | (f & g); e = e + t
+        x = w10 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w10 >> 10u32) ^ (y as uint32); w12 = w12 + t + w5
+        x = w13 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w13 >> 3u32) ^ (y as uint32); w12 = w12 + t
+        x = a as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
+        d = d + t + (c ^ (a & (b ^ c))) + 0xc6e00bf3u32 + w12
+        h = h + d
+        x = e as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; d = d + t
+        t = e | f; t = (g & t) | (e & f); d = d + t
+        x = w11 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w11 >> 10u32) ^ (y as uint32); w13 = w13 + t + w6
+        x = w14 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w14 >> 3u32) ^ (y as uint32); w13 = w13 + t
+        x = h as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
+        c = c + t + (b ^ (h & (a ^ b))) + 0xd5a79147u32 + w13
+        g = g + c
+        x = d as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; c = c + t
+        t = d | e; t = (f & t) | (d & e); c = c + t
+        x = w12 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w12 >> 10u32) ^ (y as uint32); w14 = w14 + t + w7
+        x = w15 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w15 >> 3u32) ^ (y as uint32); w14 = w14 + t
+        x = g as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
+        b = b + t + (a ^ (g & (h ^ a))) + 0x06ca6351u32 + w14
+        f = f + b
+        x = c as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; b = b + t
+        t = c | d; t = (e & t) | (c & d); b = b + t
+        x = w13 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w13 >> 10u32) ^ (y as uint32); w15 = w15 + t + w8
+        x = w0 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w0 >> 3u32) ^ (y as uint32); w15 = w15 + t
+        x = f as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
+        a = a + t + (h ^ (f & (g ^ h))) + 0x14292967u32 + w15
+        e = e + a
+        x = b as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; a = a + t
+        t = b | c; t = (d & t) | (b & c); a = a + t
+        x = w14 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w14 >> 10u32) ^ (y as uint32); w0 = w0 + t + w9
+        x = w1 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w1 >> 3u32) ^ (y as uint32); w0 = w0 + t
+        x = e as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
+        h = h + t + (g ^ (e & (f ^ g))) + 0x27b70a85u32 + w0
+        d = d + h
+        x = a as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; h = h + t
+        t = a | b; t = (c & t) | (a & b); h = h + t
+        x = w15 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w15 >> 10u32) ^ (y as uint32); w1 = w1 + t + w10
+        x = w2 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w2 >> 3u32) ^ (y as uint32); w1 = w1 + t
+        x = d as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
+        g = g + t + (f ^ (d & (e ^ f))) + 0x2e1b2138u32 + w1
+        c = c + g
+        x = h as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; g = g + t
+        t = h | a; t = (b & t) | (h & a); g = g + t
+        x = w0 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w0 >> 10u32) ^ (y as uint32); w2 = w2 + t + w11
+        x = w3 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w3 >> 3u32) ^ (y as uint32); w2 = w2 + t
+        x = c as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
+        f = f + t + (e ^ (c & (d ^ e))) + 0x4d2c6dfcu32 + w2
+        b = b + f
+        x = g as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; f = f + t
+        t = g | h; t = (a & t) | (g & h); f = f + t
+        x = w1 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w1 >> 10u32) ^ (y as uint32); w3 = w3 + t + w12
+        x = w4 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w4 >> 3u32) ^ (y as uint32); w3 = w3 + t
+        x = b as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
+        e = e + t + (d ^ (b & (c ^ d))) + 0x53380d13u32 + w3
+        a = a + e
+        x = f as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; e = e + t
+        t = f | g; t = (h & t) | (f & g); e = e + t
+        x = w2 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w2 >> 10u32) ^ (y as uint32); w4 = w4 + t + w13
+        x = w5 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w5 >> 3u32) ^ (y as uint32); w4 = w4 + t
+        x = a as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
+        d = d + t + (c ^ (a & (b ^ c))) + 0x650a7354u32 + w4
+        h = h + d
+        x = e as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; d = d + t
+        t = e | f; t = (g & t) | (e & f); d = d + t
+        x = w3 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w3 >> 10u32) ^ (y as uint32); w5 = w5 + t + w14
+        x = w6 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w6 >> 3u32) ^ (y as uint32); w5 = w5 + t
+        x = h as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
+        c = c + t + (b ^ (h & (a ^ b))) + 0x766a0abbu32 + w5
+        g = g + c
+        x = d as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; c = c + t
+        t = d | e; t = (f & t) | (d & e); c = c + t
+        x = w4 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w4 >> 10u32) ^ (y as uint32); w6 = w6 + t + w15
+        x = w7 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w7 >> 3u32) ^ (y as uint32); w6 = w6 + t
+        x = g as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
+        b = b + t + (a ^ (g & (h ^ a))) + 0x81c2c92eu32 + w6
+        f = f + b
+        x = c as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; b = b + t
+        t = c | d; t = (e & t) | (c & d); b = b + t
+        x = w5 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w5 >> 10u32) ^ (y as uint32); w7 = w7 + t + w0
+        x = w8 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w8 >> 3u32) ^ (y as uint32); w7 = w7 + t
+        x = f as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
+        a = a + t + (h ^ (f & (g ^ h))) + 0x92722c85u32 + w7
+        e = e + a
+        x = b as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; a = a + t
+        t = b | c; t = (d & t) | (b & c); a = a + t
+        x = w6 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w6 >> 10u32) ^ (y as uint32); w8 = w8 + t + w1
+        x = w9 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w9 >> 3u32) ^ (y as uint32); w8 = w8 + t
+        x = e as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
+        h = h + t + (g ^ (e & (f ^ g))) + 0xa2bfe8a1u32 + w8
+        d = d + h
+        x = a as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; h = h + t
+        t = a | b; t = (c & t) | (a & b); h = h + t
+        x = w7 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w7 >> 10u32) ^ (y as uint32); w9 = w9 + t + w2
+        x = w10 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w10 >> 3u32) ^ (y as uint32); w9 = w9 + t
+        x = d as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
+        g = g + t + (f ^ (d & (e ^ f))) + 0xa81a664bu32 + w9
+        c = c + g
+        x = h as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; g = g + t
+        t = h | a; t = (b & t) | (h & a); g = g + t
+        x = w8 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w8 >> 10u32) ^ (y as uint32); w10 = w10 + t + w3
+        x = w11 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w11 >> 3u32) ^ (y as uint32); w10 = w10 + t
+        x = c as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
+        f = f + t + (e ^ (c & (d ^ e))) + 0xc24b8b70u32 + w10
+        b = b + f
+        x = g as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; f = f + t
+        t = g | h; t = (a & t) | (g & h); f = f + t
+        x = w9 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w9 >> 10u32) ^ (y as uint32); w11 = w11 + t + w4
+        x = w12 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w12 >> 3u32) ^ (y as uint32); w11 = w11 + t
+        x = b as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
+        e = e + t + (d ^ (b & (c ^ d))) + 0xc76c51a3u32 + w11
+        a = a + e
+        x = f as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; e = e + t
+        t = f | g; t = (h & t) | (f & g); e = e + t
+        x = w10 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w10 >> 10u32) ^ (y as uint32); w12 = w12 + t + w5
+        x = w13 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w13 >> 3u32) ^ (y as uint32); w12 = w12 + t
+        x = a as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
+        d = d + t + (c ^ (a & (b ^ c))) + 0xd192e819u32 + w12
+        h = h + d
+        x = e as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; d = d + t
+        t = e | f; t = (g & t) | (e & f); d = d + t
+        x = w11 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w11 >> 10u32) ^ (y as uint32); w13 = w13 + t + w6
+        x = w14 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w14 >> 3u32) ^ (y as uint32); w13 = w13 + t
+        x = h as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
+        c = c + t + (b ^ (h & (a ^ b))) + 0xd6990624u32 + w13
+        g = g + c
+        x = d as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; c = c + t
+        t = d | e; t = (f & t) | (d & e); c = c + t
+        x = w12 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w12 >> 10u32) ^ (y as uint32); w14 = w14 + t + w7
+        x = w15 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w15 >> 3u32) ^ (y as uint32); w14 = w14 + t
+        x = g as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
+        b = b + t + (a ^ (g & (h ^ a))) + 0xf40e3585u32 + w14
+        f = f + b
+        x = c as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; b = b + t
+        t = c | d; t = (e & t) | (c & d); b = b + t
+        x = w13 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w13 >> 10u32) ^ (y as uint32); w15 = w15 + t + w8
+        x = w0 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w0 >> 3u32) ^ (y as uint32); w15 = w15 + t
+        x = f as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
+        a = a + t + (h ^ (f & (g ^ h))) + 0x106aa070u32 + w15
+        e = e + a
+        x = b as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; a = a + t
+        t = b | c; t = (d & t) | (b & c); a = a + t
+        x = w14 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w14 >> 10u32) ^ (y as uint32); w0 = w0 + t + w9
+        x = w1 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w1 >> 3u32) ^ (y as uint32); w0 = w0 + t
+        x = e as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
+        h = h + t + (g ^ (e & (f ^ g))) + 0x19a4c116u32 + w0
+        d = d + h
+        x = a as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; h = h + t
+        t = a | b; t = (c & t) | (a & b); h = h + t
+        x = w15 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w15 >> 10u32) ^ (y as uint32); w1 = w1 + t + w10
+        x = w2 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w2 >> 3u32) ^ (y as uint32); w1 = w1 + t
+        x = d as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
+        g = g + t + (f ^ (d & (e ^ f))) + 0x1e376c08u32 + w1
+        c = c + g
+        x = h as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; g = g + t
+        t = h | a; t = (b & t) | (h & a); g = g + t
+        x = w0 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w0 >> 10u32) ^ (y as uint32); w2 = w2 + t + w11
+        x = w3 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w3 >> 3u32) ^ (y as uint32); w2 = w2 + t
+        x = c as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
+        f = f + t + (e ^ (c & (d ^ e))) + 0x2748774cu32 + w2
+        b = b + f
+        x = g as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; f = f + t
+        t = g | h; t = (a & t) | (g & h); f = f + t
+        x = w1 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w1 >> 10u32) ^ (y as uint32); w3 = w3 + t + w12
+        x = w4 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w4 >> 3u32) ^ (y as uint32); w3 = w3 + t
+        x = b as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
+        e = e + t + (d ^ (b & (c ^ d))) + 0x34b0bcb5u32 + w3
+        a = a + e
+        x = f as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; e = e + t
+        t = f | g; t = (h & t) | (f & g); e = e + t
+        x = w2 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w2 >> 10u32) ^ (y as uint32); w4 = w4 + t + w13
+        x = w5 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w5 >> 3u32) ^ (y as uint32); w4 = w4 + t
+        x = a as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
+        d = d + t + (c ^ (a & (b ^ c))) + 0x391c0cb3u32 + w4
+        h = h + d
+        x = e as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; d = d + t
+        t = e | f; t = (g & t) | (e & f); d = d + t
+        x = w3 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w3 >> 10u32) ^ (y as uint32); w5 = w5 + t + w14
+        x = w6 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w6 >> 3u32) ^ (y as uint32); w5 = w5 + t
+        x = h as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
+        c = c + t + (b ^ (h & (a ^ b))) + 0x4ed8aa4au32 + w5
+        g = g + c
+        x = d as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; c = c + t
+        t = d | e; t = (f & t) | (d & e); c = c + t
+        x = w4 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w4 >> 10u32) ^ (y as uint32); w6 = w6 + t + w15
+        x = w7 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w7 >> 3u32) ^ (y as uint32); w6 = w6 + t
+        x = g as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
+        b = b + t + (a ^ (g & (h ^ a))) + 0x5b9cca4fu32 + w6
+        f = f + b
+        x = c as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; b = b + t
+        t = c | d; t = (e & t) | (c & d); b = b + t
+        x = w5 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w5 >> 10u32) ^ (y as uint32); w7 = w7 + t + w0
+        x = w8 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w8 >> 3u32) ^ (y as uint32); w7 = w7 + t
+        x = f as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
+        a = a + t + (h ^ (f & (g ^ h))) + 0x682e6ff3u32 + w7
+        e = e + a
+        x = b as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; a = a + t
+        t = b | c; t = (d & t) | (b & c); a = a + t
+        x = w6 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w6 >> 10u32) ^ (y as uint32); w8 = w8 + t + w1
+        x = w9 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w9 >> 3u32) ^ (y as uint32); w8 = w8 + t
+        x = e as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
+        h = h + t + (g ^ (e & (f ^ g))) + 0x748f82eeu32 + w8
+        d = d + h
+        x = a as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; h = h + t
+        t = a | b; t = (c & t) | (a & b); h = h + t
+        x = w7 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w7 >> 10u32) ^ (y as uint32); w9 = w9 + t + w2
+        x = w10 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w10 >> 3u32) ^ (y as uint32); w9 = w9 + t
+        x = d as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
+        g = g + t + (f ^ (d & (e ^ f))) + 0x78a5636fu32 + w9
+        c = c + g
+        x = h as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; g = g + t
+        t = h | a; t = (b & t) | (h & a); g = g + t
+        x = w8 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w8 >> 10u32) ^ (y as uint32); w10 = w10 + t + w3
+        x = w11 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w11 >> 3u32) ^ (y as uint32); w10 = w10 + t
+        x = c as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
+        f = f + t + (e ^ (c & (d ^ e))) + 0x84c87814u32 + w10
+        b = b + f
+        x = g as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; f = f + t
+        t = g | h; t = (a & t) | (g & h); f = f + t
+        x = w9 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w9 >> 10u32) ^ (y as uint32); w11 = w11 + t + w4
+        x = w12 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w12 >> 3u32) ^ (y as uint32); w11 = w11 + t
+        x = b as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
+        e = e + t + (d ^ (b & (c ^ d))) + 0x8cc70208u32 + w11
+        a = a + e
+        x = f as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; e = e + t
+        t = f | g; t = (h & t) | (f & g); e = e + t
+        x = w10 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w10 >> 10u32) ^ (y as uint32); w12 = w12 + t + w5
+        x = w13 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w13 >> 3u32) ^ (y as uint32); w12 = w12 + t
+        x = a as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
+        d = d + t + (c ^ (a & (b ^ c))) + 0x90befffau32 + w12
+        h = h + d
+        x = e as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; d = d + t
+        t = e | f; t = (g & t) | (e & f); d = d + t
+        x = w11 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w11 >> 10u32) ^ (y as uint32); w13 = w13 + t + w6
+        x = w14 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w14 >> 3u32) ^ (y as uint32); w13 = w13 + t
+        x = h as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
+        c = c + t + (b ^ (h & (a ^ b))) + 0xa4506cebu32 + w13
+        g = g + c
+        x = d as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; c = c + t
+        t = d | e; t = (f & t) | (d & e); c = c + t
+        x = w12 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w12 >> 10u32) ^ (y as uint32); w14 = w14 + t + w7
+        x = w15 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w15 >> 3u32) ^ (y as uint32); w14 = w14 + t
+        x = g as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
+        b = b + t + (a ^ (g & (h ^ a))) + 0xbef9a3f7u32 + w14
+        f = f + b
+        x = c as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; b = b + t
+        t = c | d; t = (e & t) | (c & d); b = b + t
+        x = w13 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w13 >> 10u32) ^ (y as uint32); w15 = w15 + t + w8
+        x = w0 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w0 >> 3u32) ^ (y as uint32); w15 = w15 + t
+        x = f as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
+        a = a + t + (h ^ (f & (g ^ h))) + 0xc67178f2u32 + w15
+        e = e + a
+        x = b as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; a = a + t
+        t = b | c; t = (d & t) | (b & c); a = a + t
+        self.a = self.a + a
+        self.b = self.b + b
+        self.c = self.c + c
+        self.d = self.d + d
+        self.e = self.e + e
+        self.f = self.f + f
+        self.g = self.g + g
+        self.h = self.h + h
+    }
+
+    fun close(var self) {
+        if self.blk.pad() {
+            self.compress()
+            self.blk.clear()
+        }
+        self.blk.put_length()
+        self.compress()
+    }
+
+    fun bytes(self) -> [uint8] {
+        return be_bytes([self.a, self.b, self.c, self.d, self.e, self.f, self.g, self.h], self.words)
+    }
+
+    fun hex(self) -> str {
+        var x = new_hex()
+        x.be32(self.a)
+        x.be32(self.b)
+        x.be32(self.c)
+        x.be32(self.d)
+        x.be32(self.e)
+        x.be32(self.f)
+        x.be32(self.g)
+        if self.words == 8 {
+            x.be32(self.h)
+        }
+        return x.sb.build()
+    }
+}
+
+impl Digest for Sha256 {
+    fun update(var self, data: [uint8]) {
+        var i = 0
+        while i < data.len() {
+            i = self.blk.fill(data, i)
+            if self.blk.used == 64 {
+                self.compress()
+                self.blk.used = 0
+            }
+        }
+    }
+
+    #test(new_sha256())[[0xe3u8, 0xb0u8, 0xc4u8, 0x42u8, 0x98u8, 0xfcu8, 0x1cu8, 0x14u8, 0x9au8, 0xfbu8, 0xf4u8, 0xc8u8, 0x99u8, 0x6fu8, 0xb9u8, 0x24u8, 0x27u8, 0xaeu8, 0x41u8, 0xe4u8, 0x64u8, 0x9bu8, 0x93u8, 0x4cu8, 0xa4u8, 0x95u8, 0x99u8, 0x1bu8, 0x78u8, 0x52u8, 0xb8u8, 0x55u8]]
+    #test(new_sha224())[[0xd1u8, 0x4au8, 0x02u8, 0x8cu8, 0x2au8, 0x3au8, 0x2bu8, 0xc9u8, 0x47u8, 0x61u8, 0x02u8, 0xbbu8, 0x28u8, 0x82u8, 0x34u8, 0xc4u8, 0x15u8, 0xa2u8, 0xb0u8, 0x1fu8, 0x82u8, 0x8eu8, 0xa6u8, 0x2au8, 0xc5u8, 0xb3u8, 0xe4u8, 0x2fu8]]
+    fun finish(self) -> [uint8] {
+        var h = self
+        h.close()
+        return h.bytes()
+    }
+
+    #test(new_sha256())[64]
+    fun block_size(self) -> int {
+        return 64
+    }
+}
+
+// The SHA-256 digest of `data`, 32 bytes.
+#test([97u8, 98u8, 99u8])[[0xbau8, 0x78u8, 0x16u8, 0xbfu8, 0x8fu8, 0x01u8, 0xcfu8, 0xeau8, 0x41u8, 0x41u8, 0x40u8, 0xdeu8, 0x5du8, 0xaeu8, 0x22u8, 0x23u8, 0xb0u8, 0x03u8, 0x61u8, 0xa3u8, 0x96u8, 0x17u8, 0x7au8, 0x9cu8, 0xb4u8, 0x10u8, 0xffu8, 0x61u8, 0xf2u8, 0x00u8, 0x15u8, 0xadu8]]
+pub fun sha256(data: [uint8]) -> [uint8] {
+    var h = new_sha256()
+    h.update(data)
+    h.close()
+    return h.bytes()
+}
+
+#test("")["e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"]
+#test("abc")["ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"]
+#test("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq")["248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"] // 448 bits
+#test("abcdefghbcdefghicdefghijdefghijkefghijklfghijklmghijklmnhijklmnoijklmnopjklmnopqklmnopqrlmnopqrsmnopqrstnopqrstu")["cf5b16a778af8380036ce59e7b0492370b249b11e8f07a51afac45037afee9d1"] // 896 bits
+pub fun sha256_hex(s: str) -> str {
+    var h = new_sha256()
+    h.update_str(s)
+    h.close()
+    return h.hex()
+}
+
+// The SHA-224 digest of `data`, 28 bytes.
+#test([97u8, 98u8, 99u8])[[0x23u8, 0x09u8, 0x7du8, 0x22u8, 0x34u8, 0x05u8, 0xd8u8, 0x22u8, 0x86u8, 0x42u8, 0xa4u8, 0x77u8, 0xbdu8, 0xa2u8, 0x55u8, 0xb3u8, 0x2au8, 0xadu8, 0xbcu8, 0xe4u8, 0xbdu8, 0xa0u8, 0xb3u8, 0xf7u8, 0xe3u8, 0x6cu8, 0x9du8, 0xa7u8]]
+pub fun sha224(data: [uint8]) -> [uint8] {
+    var h = new_sha224()
+    h.update(data)
+    h.close()
+    return h.bytes()
+}
+
+#test("abc")["23097d223405d8228642a477bda255b32aadbce4bda0b3f7e36c9da7"]
+#test("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq")["75388b16512776cc5dba5da1fd890150b0c6455cb4f58b1952522525"] // 448 bits
+pub fun sha224_hex(s: str) -> str {
+    var h = new_sha224()
+    h.update_str(s)
+    h.close()
+    return h.hex()
+}
+
+// ---- SHA-512 and SHA-384 (FIPS 180-4, 6.4 and 6.5)
+
+// The functions of FIPS 180-4, 4.1.3, that SHA-512's rounds call: Σ0, Σ1,
+// σ0 (g0), σ1 (g1) and Maj, a rotation as two shifts.
+fun sha512_s0(a: uint64) -> uint64 {
+    var r = a << 36u64
+    r = (a >> 28u64) | r
+    var s = a << 30u64
+    s = (a >> 34u64) | s
+    r = r ^ s
+    s = a << 25u64
+    s = (a >> 39u64) | s
+    return r ^ s
+}
+
+fun sha512_s1(e: uint64) -> uint64 {
+    var r = e << 50u64
+    r = (e >> 14u64) | r
+    var s = e << 46u64
+    s = (e >> 18u64) | s
+    r = r ^ s
+    s = e << 23u64
+    s = (e >> 41u64) | s
+    return r ^ s
+}
+
+fun sha512_g0(w: uint64) -> uint64 {
+    var r = w << 63u64
+    r = (w >> 1u64) | r
+    var s = w << 56u64
+    s = (w >> 8u64) | s
+    r = r ^ s
+    return (w >> 7u64) ^ r
+}
+
+fun sha512_g1(w: uint64) -> uint64 {
+    var r = w << 45u64
+    r = (w >> 19u64) | r
+    var s = w << 3u64
+    s = (w >> 61u64) | s
+    r = r ^ s
+    return (w >> 6u64) ^ r
+}
+
+fun sha512_maj(a: uint64, b: uint64, c: uint64) -> uint64 {
+    var t = a | b
+    t = c & t
+    return (a & b) | t
+}
+
+// SHA-512, or SHA-384 (other initial values, 6 words of output).
+pub struct Sha512 {
+    blk: Block64,
+    a: uint64,
+    b: uint64,
+    c: uint64,
+    d: uint64,
+    e: uint64,
+    f: uint64,
+    g: uint64,
+    h: uint64,
+    words: int,
+}
+
+pub fun new_sha512() -> Sha512 {
+    return Sha512 {
+        blk: new_block64(),
+        a: 0x6a09e667f3bcc908, b: 0xbb67ae8584caa73b, c: 0x3c6ef372fe94f82b, d: 0xa54ff53a5f1d36f1,
+        e: 0x510e527fade682d1, f: 0x9b05688c2b3e6c1f, g: 0x1f83d9abfb41bd6b, h: 0x5be0cd19137e2179,
+        words: 8,
+    }
+}
+
+pub fun new_sha384() -> Sha512 {
+    return Sha512 {
+        blk: new_block64(),
+        a: 0xcbbb9d5dc1059ed8, b: 0x629a292a367cd507, c: 0x9159015a3070dd17, d: 0x152fecd8f70e5939,
+        e: 0x67332667ffc00b31, f: 0x8eb44a8768581511, g: 0xdb0c2e0d64f98fa7, h: 0x47b5481dbefa4fa4,
+        words: 6,
+    }
+}
+
+impl Sha512 {
+    fun update_str(var self, s: str) {
+        var i = 0
+        while i < s.len() {
+            i = self.blk.fill_str(s, i)
+            if self.blk.used == 128 {
+                self.compress()
+                self.blk.used = 0
+            }
+        }
+    }
+
+    #test(new_sha512())["cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e"]
+    #test(new_sha384())["38b060a751ac96384cd9327eb1b1e36a21fdb71114be07434c0cc7bf63f6e1da274edebfe76f65fbd51ad2f14898b95b"]
+    fun finish_hex(self) -> str {
+        var h = self
+        h.close()
+        return h.hex()
+    }
+
+    fun compress(var self) {
+        let w = self.blk.w
+        var w0 = w[0]
+        var w1 = w[1]
+        var w2 = w[2]
+        var w3 = w[3]
+        var w4 = w[4]
+        var w5 = w[5]
+        var w6 = w[6]
+        var w7 = w[7]
+        var w8 = w[8]
+        var w9 = w[9]
+        var w10 = w[10]
+        var w11 = w[11]
+        var w12 = w[12]
+        var w13 = w[13]
+        var w14 = w[14]
+        var w15 = w[15]
+        var a = self.a
+        var b = self.b
+        var c = self.c
+        var d = self.d
+        var e = self.e
+        var f = self.f
+        var g = self.g
+        var h = self.h
+        // SHA-256's rounds, with SHA-512's functions
+        h = h + sha512_s1(e)
+        h = h + (g ^ (e & (f ^ g))) + 0x428a2f98d728ae22u64 + w0
+        d = d + h
+        h = h + sha512_s0(a)
+        h = h + sha512_maj(a, b, c)
+        g = g + sha512_s1(d)
+        g = g + (f ^ (d & (e ^ f))) + 0x7137449123ef65cdu64 + w1
+        c = c + g
+        g = g + sha512_s0(h)
+        g = g + sha512_maj(h, a, b)
+        f = f + sha512_s1(c)
+        f = f + (e ^ (c & (d ^ e))) + 0xb5c0fbcfec4d3b2fu64 + w2
+        b = b + f
+        f = f + sha512_s0(g)
+        f = f + sha512_maj(g, h, a)
+        e = e + sha512_s1(b)
+        e = e + (d ^ (b & (c ^ d))) + 0xe9b5dba58189dbbcu64 + w3
+        a = a + e
+        e = e + sha512_s0(f)
+        e = e + sha512_maj(f, g, h)
+        d = d + sha512_s1(a)
+        d = d + (c ^ (a & (b ^ c))) + 0x3956c25bf348b538u64 + w4
+        h = h + d
+        d = d + sha512_s0(e)
+        d = d + sha512_maj(e, f, g)
+        c = c + sha512_s1(h)
+        c = c + (b ^ (h & (a ^ b))) + 0x59f111f1b605d019u64 + w5
+        g = g + c
+        c = c + sha512_s0(d)
+        c = c + sha512_maj(d, e, f)
+        b = b + sha512_s1(g)
+        b = b + (a ^ (g & (h ^ a))) + 0x923f82a4af194f9bu64 + w6
+        f = f + b
+        b = b + sha512_s0(c)
+        b = b + sha512_maj(c, d, e)
+        a = a + sha512_s1(f)
+        a = a + (h ^ (f & (g ^ h))) + 0xab1c5ed5da6d8118u64 + w7
+        e = e + a
+        a = a + sha512_s0(b)
+        a = a + sha512_maj(b, c, d)
+        h = h + sha512_s1(e)
+        h = h + (g ^ (e & (f ^ g))) + 0xd807aa98a3030242u64 + w8
+        d = d + h
+        h = h + sha512_s0(a)
+        h = h + sha512_maj(a, b, c)
+        g = g + sha512_s1(d)
+        g = g + (f ^ (d & (e ^ f))) + 0x12835b0145706fbeu64 + w9
+        c = c + g
+        g = g + sha512_s0(h)
+        g = g + sha512_maj(h, a, b)
+        f = f + sha512_s1(c)
+        f = f + (e ^ (c & (d ^ e))) + 0x243185be4ee4b28cu64 + w10
+        b = b + f
+        f = f + sha512_s0(g)
+        f = f + sha512_maj(g, h, a)
+        e = e + sha512_s1(b)
+        e = e + (d ^ (b & (c ^ d))) + 0x550c7dc3d5ffb4e2u64 + w11
+        a = a + e
+        e = e + sha512_s0(f)
+        e = e + sha512_maj(f, g, h)
+        d = d + sha512_s1(a)
+        d = d + (c ^ (a & (b ^ c))) + 0x72be5d74f27b896fu64 + w12
+        h = h + d
+        d = d + sha512_s0(e)
+        d = d + sha512_maj(e, f, g)
+        c = c + sha512_s1(h)
+        c = c + (b ^ (h & (a ^ b))) + 0x80deb1fe3b1696b1u64 + w13
+        g = g + c
+        c = c + sha512_s0(d)
+        c = c + sha512_maj(d, e, f)
+        b = b + sha512_s1(g)
+        b = b + (a ^ (g & (h ^ a))) + 0x9bdc06a725c71235u64 + w14
+        f = f + b
+        b = b + sha512_s0(c)
+        b = b + sha512_maj(c, d, e)
+        a = a + sha512_s1(f)
+        a = a + (h ^ (f & (g ^ h))) + 0xc19bf174cf692694u64 + w15
+        e = e + a
+        a = a + sha512_s0(b)
+        a = a + sha512_maj(b, c, d)
+        w0 = w0 + sha512_g1(w14)
+        w0 = w0 + w9
+        w0 = w0 + sha512_g0(w1)
+        h = h + sha512_s1(e)
+        h = h + (g ^ (e & (f ^ g))) + 0xe49b69c19ef14ad2u64 + w0
+        d = d + h
+        h = h + sha512_s0(a)
+        h = h + sha512_maj(a, b, c)
+        w1 = w1 + sha512_g1(w15)
+        w1 = w1 + w10
+        w1 = w1 + sha512_g0(w2)
+        g = g + sha512_s1(d)
+        g = g + (f ^ (d & (e ^ f))) + 0xefbe4786384f25e3u64 + w1
+        c = c + g
+        g = g + sha512_s0(h)
+        g = g + sha512_maj(h, a, b)
+        w2 = w2 + sha512_g1(w0)
+        w2 = w2 + w11
+        w2 = w2 + sha512_g0(w3)
+        f = f + sha512_s1(c)
+        f = f + (e ^ (c & (d ^ e))) + 0x0fc19dc68b8cd5b5u64 + w2
+        b = b + f
+        f = f + sha512_s0(g)
+        f = f + sha512_maj(g, h, a)
+        w3 = w3 + sha512_g1(w1)
+        w3 = w3 + w12
+        w3 = w3 + sha512_g0(w4)
+        e = e + sha512_s1(b)
+        e = e + (d ^ (b & (c ^ d))) + 0x240ca1cc77ac9c65u64 + w3
+        a = a + e
+        e = e + sha512_s0(f)
+        e = e + sha512_maj(f, g, h)
+        w4 = w4 + sha512_g1(w2)
+        w4 = w4 + w13
+        w4 = w4 + sha512_g0(w5)
+        d = d + sha512_s1(a)
+        d = d + (c ^ (a & (b ^ c))) + 0x2de92c6f592b0275u64 + w4
+        h = h + d
+        d = d + sha512_s0(e)
+        d = d + sha512_maj(e, f, g)
+        w5 = w5 + sha512_g1(w3)
+        w5 = w5 + w14
+        w5 = w5 + sha512_g0(w6)
+        c = c + sha512_s1(h)
+        c = c + (b ^ (h & (a ^ b))) + 0x4a7484aa6ea6e483u64 + w5
+        g = g + c
+        c = c + sha512_s0(d)
+        c = c + sha512_maj(d, e, f)
+        w6 = w6 + sha512_g1(w4)
+        w6 = w6 + w15
+        w6 = w6 + sha512_g0(w7)
+        b = b + sha512_s1(g)
+        b = b + (a ^ (g & (h ^ a))) + 0x5cb0a9dcbd41fbd4u64 + w6
+        f = f + b
+        b = b + sha512_s0(c)
+        b = b + sha512_maj(c, d, e)
+        w7 = w7 + sha512_g1(w5)
+        w7 = w7 + w0
+        w7 = w7 + sha512_g0(w8)
+        a = a + sha512_s1(f)
+        a = a + (h ^ (f & (g ^ h))) + 0x76f988da831153b5u64 + w7
+        e = e + a
+        a = a + sha512_s0(b)
+        a = a + sha512_maj(b, c, d)
+        w8 = w8 + sha512_g1(w6)
+        w8 = w8 + w1
+        w8 = w8 + sha512_g0(w9)
+        h = h + sha512_s1(e)
+        h = h + (g ^ (e & (f ^ g))) + 0x983e5152ee66dfabu64 + w8
+        d = d + h
+        h = h + sha512_s0(a)
+        h = h + sha512_maj(a, b, c)
+        w9 = w9 + sha512_g1(w7)
+        w9 = w9 + w2
+        w9 = w9 + sha512_g0(w10)
+        g = g + sha512_s1(d)
+        g = g + (f ^ (d & (e ^ f))) + 0xa831c66d2db43210u64 + w9
+        c = c + g
+        g = g + sha512_s0(h)
+        g = g + sha512_maj(h, a, b)
+        w10 = w10 + sha512_g1(w8)
+        w10 = w10 + w3
+        w10 = w10 + sha512_g0(w11)
+        f = f + sha512_s1(c)
+        f = f + (e ^ (c & (d ^ e))) + 0xb00327c898fb213fu64 + w10
+        b = b + f
+        f = f + sha512_s0(g)
+        f = f + sha512_maj(g, h, a)
+        w11 = w11 + sha512_g1(w9)
+        w11 = w11 + w4
+        w11 = w11 + sha512_g0(w12)
+        e = e + sha512_s1(b)
+        e = e + (d ^ (b & (c ^ d))) + 0xbf597fc7beef0ee4u64 + w11
+        a = a + e
+        e = e + sha512_s0(f)
+        e = e + sha512_maj(f, g, h)
+        w12 = w12 + sha512_g1(w10)
+        w12 = w12 + w5
+        w12 = w12 + sha512_g0(w13)
+        d = d + sha512_s1(a)
+        d = d + (c ^ (a & (b ^ c))) + 0xc6e00bf33da88fc2u64 + w12
+        h = h + d
+        d = d + sha512_s0(e)
+        d = d + sha512_maj(e, f, g)
+        w13 = w13 + sha512_g1(w11)
+        w13 = w13 + w6
+        w13 = w13 + sha512_g0(w14)
+        c = c + sha512_s1(h)
+        c = c + (b ^ (h & (a ^ b))) + 0xd5a79147930aa725u64 + w13
+        g = g + c
+        c = c + sha512_s0(d)
+        c = c + sha512_maj(d, e, f)
+        w14 = w14 + sha512_g1(w12)
+        w14 = w14 + w7
+        w14 = w14 + sha512_g0(w15)
+        b = b + sha512_s1(g)
+        b = b + (a ^ (g & (h ^ a))) + 0x06ca6351e003826fu64 + w14
+        f = f + b
+        b = b + sha512_s0(c)
+        b = b + sha512_maj(c, d, e)
+        w15 = w15 + sha512_g1(w13)
+        w15 = w15 + w8
+        w15 = w15 + sha512_g0(w0)
+        a = a + sha512_s1(f)
+        a = a + (h ^ (f & (g ^ h))) + 0x142929670a0e6e70u64 + w15
+        e = e + a
+        a = a + sha512_s0(b)
+        a = a + sha512_maj(b, c, d)
+        w0 = w0 + sha512_g1(w14)
+        w0 = w0 + w9
+        w0 = w0 + sha512_g0(w1)
+        h = h + sha512_s1(e)
+        h = h + (g ^ (e & (f ^ g))) + 0x27b70a8546d22ffcu64 + w0
+        d = d + h
+        h = h + sha512_s0(a)
+        h = h + sha512_maj(a, b, c)
+        w1 = w1 + sha512_g1(w15)
+        w1 = w1 + w10
+        w1 = w1 + sha512_g0(w2)
+        g = g + sha512_s1(d)
+        g = g + (f ^ (d & (e ^ f))) + 0x2e1b21385c26c926u64 + w1
+        c = c + g
+        g = g + sha512_s0(h)
+        g = g + sha512_maj(h, a, b)
+        w2 = w2 + sha512_g1(w0)
+        w2 = w2 + w11
+        w2 = w2 + sha512_g0(w3)
+        f = f + sha512_s1(c)
+        f = f + (e ^ (c & (d ^ e))) + 0x4d2c6dfc5ac42aedu64 + w2
+        b = b + f
+        f = f + sha512_s0(g)
+        f = f + sha512_maj(g, h, a)
+        w3 = w3 + sha512_g1(w1)
+        w3 = w3 + w12
+        w3 = w3 + sha512_g0(w4)
+        e = e + sha512_s1(b)
+        e = e + (d ^ (b & (c ^ d))) + 0x53380d139d95b3dfu64 + w3
+        a = a + e
+        e = e + sha512_s0(f)
+        e = e + sha512_maj(f, g, h)
+        w4 = w4 + sha512_g1(w2)
+        w4 = w4 + w13
+        w4 = w4 + sha512_g0(w5)
+        d = d + sha512_s1(a)
+        d = d + (c ^ (a & (b ^ c))) + 0x650a73548baf63deu64 + w4
+        h = h + d
+        d = d + sha512_s0(e)
+        d = d + sha512_maj(e, f, g)
+        w5 = w5 + sha512_g1(w3)
+        w5 = w5 + w14
+        w5 = w5 + sha512_g0(w6)
+        c = c + sha512_s1(h)
+        c = c + (b ^ (h & (a ^ b))) + 0x766a0abb3c77b2a8u64 + w5
+        g = g + c
+        c = c + sha512_s0(d)
+        c = c + sha512_maj(d, e, f)
+        w6 = w6 + sha512_g1(w4)
+        w6 = w6 + w15
+        w6 = w6 + sha512_g0(w7)
+        b = b + sha512_s1(g)
+        b = b + (a ^ (g & (h ^ a))) + 0x81c2c92e47edaee6u64 + w6
+        f = f + b
+        b = b + sha512_s0(c)
+        b = b + sha512_maj(c, d, e)
+        w7 = w7 + sha512_g1(w5)
+        w7 = w7 + w0
+        w7 = w7 + sha512_g0(w8)
+        a = a + sha512_s1(f)
+        a = a + (h ^ (f & (g ^ h))) + 0x92722c851482353bu64 + w7
+        e = e + a
+        a = a + sha512_s0(b)
+        a = a + sha512_maj(b, c, d)
+        w8 = w8 + sha512_g1(w6)
+        w8 = w8 + w1
+        w8 = w8 + sha512_g0(w9)
+        h = h + sha512_s1(e)
+        h = h + (g ^ (e & (f ^ g))) + 0xa2bfe8a14cf10364u64 + w8
+        d = d + h
+        h = h + sha512_s0(a)
+        h = h + sha512_maj(a, b, c)
+        w9 = w9 + sha512_g1(w7)
+        w9 = w9 + w2
+        w9 = w9 + sha512_g0(w10)
+        g = g + sha512_s1(d)
+        g = g + (f ^ (d & (e ^ f))) + 0xa81a664bbc423001u64 + w9
+        c = c + g
+        g = g + sha512_s0(h)
+        g = g + sha512_maj(h, a, b)
+        w10 = w10 + sha512_g1(w8)
+        w10 = w10 + w3
+        w10 = w10 + sha512_g0(w11)
+        f = f + sha512_s1(c)
+        f = f + (e ^ (c & (d ^ e))) + 0xc24b8b70d0f89791u64 + w10
+        b = b + f
+        f = f + sha512_s0(g)
+        f = f + sha512_maj(g, h, a)
+        w11 = w11 + sha512_g1(w9)
+        w11 = w11 + w4
+        w11 = w11 + sha512_g0(w12)
+        e = e + sha512_s1(b)
+        e = e + (d ^ (b & (c ^ d))) + 0xc76c51a30654be30u64 + w11
+        a = a + e
+        e = e + sha512_s0(f)
+        e = e + sha512_maj(f, g, h)
+        w12 = w12 + sha512_g1(w10)
+        w12 = w12 + w5
+        w12 = w12 + sha512_g0(w13)
+        d = d + sha512_s1(a)
+        d = d + (c ^ (a & (b ^ c))) + 0xd192e819d6ef5218u64 + w12
+        h = h + d
+        d = d + sha512_s0(e)
+        d = d + sha512_maj(e, f, g)
+        w13 = w13 + sha512_g1(w11)
+        w13 = w13 + w6
+        w13 = w13 + sha512_g0(w14)
+        c = c + sha512_s1(h)
+        c = c + (b ^ (h & (a ^ b))) + 0xd69906245565a910u64 + w13
+        g = g + c
+        c = c + sha512_s0(d)
+        c = c + sha512_maj(d, e, f)
+        w14 = w14 + sha512_g1(w12)
+        w14 = w14 + w7
+        w14 = w14 + sha512_g0(w15)
+        b = b + sha512_s1(g)
+        b = b + (a ^ (g & (h ^ a))) + 0xf40e35855771202au64 + w14
+        f = f + b
+        b = b + sha512_s0(c)
+        b = b + sha512_maj(c, d, e)
+        w15 = w15 + sha512_g1(w13)
+        w15 = w15 + w8
+        w15 = w15 + sha512_g0(w0)
+        a = a + sha512_s1(f)
+        a = a + (h ^ (f & (g ^ h))) + 0x106aa07032bbd1b8u64 + w15
+        e = e + a
+        a = a + sha512_s0(b)
+        a = a + sha512_maj(b, c, d)
+        w0 = w0 + sha512_g1(w14)
+        w0 = w0 + w9
+        w0 = w0 + sha512_g0(w1)
+        h = h + sha512_s1(e)
+        h = h + (g ^ (e & (f ^ g))) + 0x19a4c116b8d2d0c8u64 + w0
+        d = d + h
+        h = h + sha512_s0(a)
+        h = h + sha512_maj(a, b, c)
+        w1 = w1 + sha512_g1(w15)
+        w1 = w1 + w10
+        w1 = w1 + sha512_g0(w2)
+        g = g + sha512_s1(d)
+        g = g + (f ^ (d & (e ^ f))) + 0x1e376c085141ab53u64 + w1
+        c = c + g
+        g = g + sha512_s0(h)
+        g = g + sha512_maj(h, a, b)
+        w2 = w2 + sha512_g1(w0)
+        w2 = w2 + w11
+        w2 = w2 + sha512_g0(w3)
+        f = f + sha512_s1(c)
+        f = f + (e ^ (c & (d ^ e))) + 0x2748774cdf8eeb99u64 + w2
+        b = b + f
+        f = f + sha512_s0(g)
+        f = f + sha512_maj(g, h, a)
+        w3 = w3 + sha512_g1(w1)
+        w3 = w3 + w12
+        w3 = w3 + sha512_g0(w4)
+        e = e + sha512_s1(b)
+        e = e + (d ^ (b & (c ^ d))) + 0x34b0bcb5e19b48a8u64 + w3
+        a = a + e
+        e = e + sha512_s0(f)
+        e = e + sha512_maj(f, g, h)
+        w4 = w4 + sha512_g1(w2)
+        w4 = w4 + w13
+        w4 = w4 + sha512_g0(w5)
+        d = d + sha512_s1(a)
+        d = d + (c ^ (a & (b ^ c))) + 0x391c0cb3c5c95a63u64 + w4
+        h = h + d
+        d = d + sha512_s0(e)
+        d = d + sha512_maj(e, f, g)
+        w5 = w5 + sha512_g1(w3)
+        w5 = w5 + w14
+        w5 = w5 + sha512_g0(w6)
+        c = c + sha512_s1(h)
+        c = c + (b ^ (h & (a ^ b))) + 0x4ed8aa4ae3418acbu64 + w5
+        g = g + c
+        c = c + sha512_s0(d)
+        c = c + sha512_maj(d, e, f)
+        w6 = w6 + sha512_g1(w4)
+        w6 = w6 + w15
+        w6 = w6 + sha512_g0(w7)
+        b = b + sha512_s1(g)
+        b = b + (a ^ (g & (h ^ a))) + 0x5b9cca4f7763e373u64 + w6
+        f = f + b
+        b = b + sha512_s0(c)
+        b = b + sha512_maj(c, d, e)
+        w7 = w7 + sha512_g1(w5)
+        w7 = w7 + w0
+        w7 = w7 + sha512_g0(w8)
+        a = a + sha512_s1(f)
+        a = a + (h ^ (f & (g ^ h))) + 0x682e6ff3d6b2b8a3u64 + w7
+        e = e + a
+        a = a + sha512_s0(b)
+        a = a + sha512_maj(b, c, d)
+        w8 = w8 + sha512_g1(w6)
+        w8 = w8 + w1
+        w8 = w8 + sha512_g0(w9)
+        h = h + sha512_s1(e)
+        h = h + (g ^ (e & (f ^ g))) + 0x748f82ee5defb2fcu64 + w8
+        d = d + h
+        h = h + sha512_s0(a)
+        h = h + sha512_maj(a, b, c)
+        w9 = w9 + sha512_g1(w7)
+        w9 = w9 + w2
+        w9 = w9 + sha512_g0(w10)
+        g = g + sha512_s1(d)
+        g = g + (f ^ (d & (e ^ f))) + 0x78a5636f43172f60u64 + w9
+        c = c + g
+        g = g + sha512_s0(h)
+        g = g + sha512_maj(h, a, b)
+        w10 = w10 + sha512_g1(w8)
+        w10 = w10 + w3
+        w10 = w10 + sha512_g0(w11)
+        f = f + sha512_s1(c)
+        f = f + (e ^ (c & (d ^ e))) + 0x84c87814a1f0ab72u64 + w10
+        b = b + f
+        f = f + sha512_s0(g)
+        f = f + sha512_maj(g, h, a)
+        w11 = w11 + sha512_g1(w9)
+        w11 = w11 + w4
+        w11 = w11 + sha512_g0(w12)
+        e = e + sha512_s1(b)
+        e = e + (d ^ (b & (c ^ d))) + 0x8cc702081a6439ecu64 + w11
+        a = a + e
+        e = e + sha512_s0(f)
+        e = e + sha512_maj(f, g, h)
+        w12 = w12 + sha512_g1(w10)
+        w12 = w12 + w5
+        w12 = w12 + sha512_g0(w13)
+        d = d + sha512_s1(a)
+        d = d + (c ^ (a & (b ^ c))) + 0x90befffa23631e28u64 + w12
+        h = h + d
+        d = d + sha512_s0(e)
+        d = d + sha512_maj(e, f, g)
+        w13 = w13 + sha512_g1(w11)
+        w13 = w13 + w6
+        w13 = w13 + sha512_g0(w14)
+        c = c + sha512_s1(h)
+        c = c + (b ^ (h & (a ^ b))) + 0xa4506cebde82bde9u64 + w13
+        g = g + c
+        c = c + sha512_s0(d)
+        c = c + sha512_maj(d, e, f)
+        w14 = w14 + sha512_g1(w12)
+        w14 = w14 + w7
+        w14 = w14 + sha512_g0(w15)
+        b = b + sha512_s1(g)
+        b = b + (a ^ (g & (h ^ a))) + 0xbef9a3f7b2c67915u64 + w14
+        f = f + b
+        b = b + sha512_s0(c)
+        b = b + sha512_maj(c, d, e)
+        w15 = w15 + sha512_g1(w13)
+        w15 = w15 + w8
+        w15 = w15 + sha512_g0(w0)
+        a = a + sha512_s1(f)
+        a = a + (h ^ (f & (g ^ h))) + 0xc67178f2e372532bu64 + w15
+        e = e + a
+        a = a + sha512_s0(b)
+        a = a + sha512_maj(b, c, d)
+        w0 = w0 + sha512_g1(w14)
+        w0 = w0 + w9
+        w0 = w0 + sha512_g0(w1)
+        h = h + sha512_s1(e)
+        h = h + (g ^ (e & (f ^ g))) + 0xca273eceea26619cu64 + w0
+        d = d + h
+        h = h + sha512_s0(a)
+        h = h + sha512_maj(a, b, c)
+        w1 = w1 + sha512_g1(w15)
+        w1 = w1 + w10
+        w1 = w1 + sha512_g0(w2)
+        g = g + sha512_s1(d)
+        g = g + (f ^ (d & (e ^ f))) + 0xd186b8c721c0c207u64 + w1
+        c = c + g
+        g = g + sha512_s0(h)
+        g = g + sha512_maj(h, a, b)
+        w2 = w2 + sha512_g1(w0)
+        w2 = w2 + w11
+        w2 = w2 + sha512_g0(w3)
+        f = f + sha512_s1(c)
+        f = f + (e ^ (c & (d ^ e))) + 0xeada7dd6cde0eb1eu64 + w2
+        b = b + f
+        f = f + sha512_s0(g)
+        f = f + sha512_maj(g, h, a)
+        w3 = w3 + sha512_g1(w1)
+        w3 = w3 + w12
+        w3 = w3 + sha512_g0(w4)
+        e = e + sha512_s1(b)
+        e = e + (d ^ (b & (c ^ d))) + 0xf57d4f7fee6ed178u64 + w3
+        a = a + e
+        e = e + sha512_s0(f)
+        e = e + sha512_maj(f, g, h)
+        w4 = w4 + sha512_g1(w2)
+        w4 = w4 + w13
+        w4 = w4 + sha512_g0(w5)
+        d = d + sha512_s1(a)
+        d = d + (c ^ (a & (b ^ c))) + 0x06f067aa72176fbau64 + w4
+        h = h + d
+        d = d + sha512_s0(e)
+        d = d + sha512_maj(e, f, g)
+        w5 = w5 + sha512_g1(w3)
+        w5 = w5 + w14
+        w5 = w5 + sha512_g0(w6)
+        c = c + sha512_s1(h)
+        c = c + (b ^ (h & (a ^ b))) + 0x0a637dc5a2c898a6u64 + w5
+        g = g + c
+        c = c + sha512_s0(d)
+        c = c + sha512_maj(d, e, f)
+        w6 = w6 + sha512_g1(w4)
+        w6 = w6 + w15
+        w6 = w6 + sha512_g0(w7)
+        b = b + sha512_s1(g)
+        b = b + (a ^ (g & (h ^ a))) + 0x113f9804bef90daeu64 + w6
+        f = f + b
+        b = b + sha512_s0(c)
+        b = b + sha512_maj(c, d, e)
+        w7 = w7 + sha512_g1(w5)
+        w7 = w7 + w0
+        w7 = w7 + sha512_g0(w8)
+        a = a + sha512_s1(f)
+        a = a + (h ^ (f & (g ^ h))) + 0x1b710b35131c471bu64 + w7
+        e = e + a
+        a = a + sha512_s0(b)
+        a = a + sha512_maj(b, c, d)
+        w8 = w8 + sha512_g1(w6)
+        w8 = w8 + w1
+        w8 = w8 + sha512_g0(w9)
+        h = h + sha512_s1(e)
+        h = h + (g ^ (e & (f ^ g))) + 0x28db77f523047d84u64 + w8
+        d = d + h
+        h = h + sha512_s0(a)
+        h = h + sha512_maj(a, b, c)
+        w9 = w9 + sha512_g1(w7)
+        w9 = w9 + w2
+        w9 = w9 + sha512_g0(w10)
+        g = g + sha512_s1(d)
+        g = g + (f ^ (d & (e ^ f))) + 0x32caab7b40c72493u64 + w9
+        c = c + g
+        g = g + sha512_s0(h)
+        g = g + sha512_maj(h, a, b)
+        w10 = w10 + sha512_g1(w8)
+        w10 = w10 + w3
+        w10 = w10 + sha512_g0(w11)
+        f = f + sha512_s1(c)
+        f = f + (e ^ (c & (d ^ e))) + 0x3c9ebe0a15c9bebcu64 + w10
+        b = b + f
+        f = f + sha512_s0(g)
+        f = f + sha512_maj(g, h, a)
+        w11 = w11 + sha512_g1(w9)
+        w11 = w11 + w4
+        w11 = w11 + sha512_g0(w12)
+        e = e + sha512_s1(b)
+        e = e + (d ^ (b & (c ^ d))) + 0x431d67c49c100d4cu64 + w11
+        a = a + e
+        e = e + sha512_s0(f)
+        e = e + sha512_maj(f, g, h)
+        w12 = w12 + sha512_g1(w10)
+        w12 = w12 + w5
+        w12 = w12 + sha512_g0(w13)
+        d = d + sha512_s1(a)
+        d = d + (c ^ (a & (b ^ c))) + 0x4cc5d4becb3e42b6u64 + w12
+        h = h + d
+        d = d + sha512_s0(e)
+        d = d + sha512_maj(e, f, g)
+        w13 = w13 + sha512_g1(w11)
+        w13 = w13 + w6
+        w13 = w13 + sha512_g0(w14)
+        c = c + sha512_s1(h)
+        c = c + (b ^ (h & (a ^ b))) + 0x597f299cfc657e2au64 + w13
+        g = g + c
+        c = c + sha512_s0(d)
+        c = c + sha512_maj(d, e, f)
+        w14 = w14 + sha512_g1(w12)
+        w14 = w14 + w7
+        w14 = w14 + sha512_g0(w15)
+        b = b + sha512_s1(g)
+        b = b + (a ^ (g & (h ^ a))) + 0x5fcb6fab3ad6faecu64 + w14
+        f = f + b
+        b = b + sha512_s0(c)
+        b = b + sha512_maj(c, d, e)
+        w15 = w15 + sha512_g1(w13)
+        w15 = w15 + w8
+        w15 = w15 + sha512_g0(w0)
+        a = a + sha512_s1(f)
+        a = a + (h ^ (f & (g ^ h))) + 0x6c44198c4a475817u64 + w15
+        e = e + a
+        a = a + sha512_s0(b)
+        a = a + sha512_maj(b, c, d)
+        self.a = self.a + a
+        self.b = self.b + b
+        self.c = self.c + c
+        self.d = self.d + d
+        self.e = self.e + e
+        self.f = self.f + f
+        self.g = self.g + g
+        self.h = self.h + h
+    }
+
+    fun close(var self) {
+        if self.blk.pad() {
+            self.compress()
+            self.blk.clear()
+        }
+        self.blk.put_length()
+        self.compress()
+    }
+
+    fun bytes(self) -> [uint8] {
+        return be_bytes64([self.a, self.b, self.c, self.d, self.e, self.f, self.g, self.h], self.words)
+    }
+
+    fun hex(self) -> str {
+        var x = new_hex()
+        x.be64(self.a)
+        x.be64(self.b)
+        x.be64(self.c)
+        x.be64(self.d)
+        x.be64(self.e)
+        x.be64(self.f)
+        if self.words == 8 {
+            x.be64(self.g)
+            x.be64(self.h)
+        }
+        return x.sb.build()
+    }
+}
+
+impl Digest for Sha512 {
+    fun update(var self, data: [uint8]) {
+        var i = 0
+        while i < data.len() {
+            i = self.blk.fill(data, i)
+            if self.blk.used == 128 {
+                self.compress()
+                self.blk.used = 0
+            }
+        }
+    }
+
+    #test(new_sha512())[[0xcfu8, 0x83u8, 0xe1u8, 0x35u8, 0x7eu8, 0xefu8, 0xb8u8, 0xbdu8, 0xf1u8, 0x54u8, 0x28u8, 0x50u8, 0xd6u8, 0x6du8, 0x80u8, 0x07u8, 0xd6u8, 0x20u8, 0xe4u8, 0x05u8, 0x0bu8, 0x57u8, 0x15u8, 0xdcu8, 0x83u8, 0xf4u8, 0xa9u8, 0x21u8, 0xd3u8, 0x6cu8, 0xe9u8, 0xceu8, 0x47u8, 0xd0u8, 0xd1u8, 0x3cu8, 0x5du8, 0x85u8, 0xf2u8, 0xb0u8, 0xffu8, 0x83u8, 0x18u8, 0xd2u8, 0x87u8, 0x7eu8, 0xecu8, 0x2fu8, 0x63u8, 0xb9u8, 0x31u8, 0xbdu8, 0x47u8, 0x41u8, 0x7au8, 0x81u8, 0xa5u8, 0x38u8, 0x32u8, 0x7au8, 0xf9u8, 0x27u8, 0xdau8, 0x3eu8]]
+    #test(new_sha384())[[0x38u8, 0xb0u8, 0x60u8, 0xa7u8, 0x51u8, 0xacu8, 0x96u8, 0x38u8, 0x4cu8, 0xd9u8, 0x32u8, 0x7eu8, 0xb1u8, 0xb1u8, 0xe3u8, 0x6au8, 0x21u8, 0xfdu8, 0xb7u8, 0x11u8, 0x14u8, 0xbeu8, 0x07u8, 0x43u8, 0x4cu8, 0x0cu8, 0xc7u8, 0xbfu8, 0x63u8, 0xf6u8, 0xe1u8, 0xdau8, 0x27u8, 0x4eu8, 0xdeu8, 0xbfu8, 0xe7u8, 0x6fu8, 0x65u8, 0xfbu8, 0xd5u8, 0x1au8, 0xd2u8, 0xf1u8, 0x48u8, 0x98u8, 0xb9u8, 0x5bu8]]
+    fun finish(self) -> [uint8] {
+        var h = self
+        h.close()
+        return h.bytes()
+    }
+
+    #test(new_sha512())[128]
+    fun block_size(self) -> int {
+        return 128
+    }
+}
+
+// The SHA-512 digest of `data`, 64 bytes.
+#test([0x61u8, 0x62u8, 0x63u8])[[0xddu8, 0xafu8, 0x35u8, 0xa1u8, 0x93u8, 0x61u8, 0x7au8, 0xbau8, 0xccu8, 0x41u8, 0x73u8, 0x49u8, 0xaeu8, 0x20u8, 0x41u8, 0x31u8, 0x12u8, 0xe6u8, 0xfau8, 0x4eu8, 0x89u8, 0xa9u8, 0x7eu8, 0xa2u8, 0x0au8, 0x9eu8, 0xeeu8, 0xe6u8, 0x4bu8, 0x55u8, 0xd3u8, 0x9au8, 0x21u8, 0x92u8, 0x99u8, 0x2au8, 0x27u8, 0x4fu8, 0xc1u8, 0xa8u8, 0x36u8, 0xbau8, 0x3cu8, 0x23u8, 0xa3u8, 0xfeu8, 0xebu8, 0xbdu8, 0x45u8, 0x4du8, 0x44u8, 0x23u8, 0x64u8, 0x3cu8, 0xe8u8, 0x0eu8, 0x2au8, 0x9au8, 0xc9u8, 0x4fu8, 0xa5u8, 0x4cu8, 0xa4u8, 0x9fu8]]
+pub fun sha512(data: [uint8]) -> [uint8] {
+    var h = new_sha512()
+    h.update(data)
+    h.close()
+    return h.bytes()
+}
+
+#test("")["cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e"]
+#test("abc")["ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f"]
+#test("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq")["204a8fc6dda82f0a0ced7beb8e08a41657c16ef468b228a8279be331a703c33596fd15c13b1b07f9aa1d3bea57789ca031ad85c7a71dd70354ec631238ca3445"] // 448 bits
+#test("abcdefghbcdefghicdefghijdefghijkefghijklfghijklmghijklmnhijklmnoijklmnopjklmnopqklmnopqrlmnopqrsmnopqrstnopqrstu")["8e959b75dae313da8cf4f72814fc143f8f7779c6eb9f7fa17299aeadb6889018501d289e4900f7e4331b99dec4b5433ac7d329eeb6dd26545e96e55b874be909"] // 896 bits
+pub fun sha512_hex(s: str) -> str {
+    var h = new_sha512()
+    h.update_str(s)
+    h.close()
+    return h.hex()
+}
+
+// The SHA-384 digest of `data`, 48 bytes.
+#test([0x61u8, 0x62u8, 0x63u8])[[0xcbu8, 0x00u8, 0x75u8, 0x3fu8, 0x45u8, 0xa3u8, 0x5eu8, 0x8bu8, 0xb5u8, 0xa0u8, 0x3du8, 0x69u8, 0x9au8, 0xc6u8, 0x50u8, 0x07u8, 0x27u8, 0x2cu8, 0x32u8, 0xabu8, 0x0eu8, 0xdeu8, 0xd1u8, 0x63u8, 0x1au8, 0x8bu8, 0x60u8, 0x5au8, 0x43u8, 0xffu8, 0x5bu8, 0xedu8, 0x80u8, 0x86u8, 0x07u8, 0x2bu8, 0xa1u8, 0xe7u8, 0xccu8, 0x23u8, 0x58u8, 0xbau8, 0xecu8, 0xa1u8, 0x34u8, 0xc8u8, 0x25u8, 0xa7u8]]
+pub fun sha384(data: [uint8]) -> [uint8] {
+    var h = new_sha384()
+    h.update(data)
+    h.close()
+    return h.bytes()
+}
+
+#test("abc")["cb00753f45a35e8bb5a03d699ac65007272c32ab0eded1631a8b605a43ff5bed8086072ba1e7cc2358baeca134c825a7"]
+#test("abcdefghbcdefghicdefghijdefghijkefghijklfghijklmghijklmnhijklmnoijklmnopjklmnopqklmnopqrlmnopqrsmnopqrstnopqrstu")["09330c33f71147e83d192fc782cd1b4753111b173b3b05d22fa08086e3b0f712fcc7c71a557e2db966c3e9fa91746039"] // 896 bits
+pub fun sha384_hex(s: str) -> str {
+    var h = new_sha384()
+    h.update_str(s)
+    h.close()
+    return h.hex()
+}
+
+// ---- HMAC (RFC 2104)
+
+// The HMAC of `msg` under `key` with the digest of `d`, a new hasher:
+// `hmac(new_sha256(), key, msg)`. A key longer than the digest's block is
+// hashed first, as the RFC says.
+pub fun hmac<D: Digest>(d: D, key: [uint8], msg: [uint8]) -> [uint8] {
+    let size = d.block_size()
+    var k = key
+    if k.len() > size {
+        var kh = d
+        kh.update(key)
+        k = kh.finish()
+    }
+    var ipad: [uint8] = []
+    var opad: [uint8] = []
+    for i in 0..size {
+        let b = if i < k.len() { k[i] } else { 0u8 }
+        ipad.push(b ^ 0x36u8)
+        opad.push(b ^ 0x5cu8)
+    }
+    var inner = d
+    inner.update(ipad)
+    inner.update(msg)
+    var outer = d
+    outer.update(opad)
+    outer.update(inner.finish())
+    return outer.finish()
+}
+
+// HMAC-MD5 (RFC 2202) of `msg` under `key`, 16 bytes.
+#test([0x6bu8, 0x65u8, 0x79u8], [0x61u8, 0x62u8, 0x63u8])[[0xd2u8, 0xfeu8, 0x98u8, 0x06u8, 0x3fu8, 0x87u8, 0x6bu8, 0x03u8, 0x19u8, 0x3au8, 0xfbu8, 0x49u8, 0xb4u8, 0x97u8, 0x95u8, 0x91u8]]
+pub fun hmac_md5(key: [uint8], msg: [uint8]) -> [uint8] {
+    return hmac(new_md5(), key, msg)
+}
+
+// The same of two strings' bytes, in hex.
+#test("Jefe", "what do ya want for nothing?")["750c783e6ab0b503eaa86e310a5db738"]
+pub fun hmac_md5_hex(key: str, msg: str) -> str {
+    return hex_of(hmac(new_md5(), bytes_of(key), bytes_of(msg)))
+}
+
+// HMAC-SHA-1 (RFC 2202), 20 bytes.
+#test([0x6bu8, 0x65u8, 0x79u8], [0x61u8, 0x62u8, 0x63u8])[[0x4fu8, 0xd0u8, 0xb2u8, 0x15u8, 0x27u8, 0x6eu8, 0xf1u8, 0x2fu8, 0x2bu8, 0x3eu8, 0x4cu8, 0x8eu8, 0xcau8, 0xc2u8, 0x81u8, 0x14u8, 0x98u8, 0xb6u8, 0x56u8, 0xfcu8]]
+pub fun hmac_sha1(key: [uint8], msg: [uint8]) -> [uint8] {
+    return hmac(new_sha1(), key, msg)
+}
+
+#test("Jefe", "what do ya want for nothing?")["effcdf6ae5eb2fa2d27416d5f184df9c259a7c79"]
+pub fun hmac_sha1_hex(key: str, msg: str) -> str {
+    return hex_of(hmac(new_sha1(), bytes_of(key), bytes_of(msg)))
+}
+
+// HMAC-SHA-256 (RFC 4231), 32 bytes.
+#test([0x6bu8, 0x65u8, 0x79u8], [0x61u8, 0x62u8, 0x63u8])[[0x9cu8, 0x19u8, 0x6eu8, 0x32u8, 0xdcu8, 0x01u8, 0x75u8, 0xf8u8, 0x6fu8, 0x4bu8, 0x1cu8, 0xb8u8, 0x92u8, 0x89u8, 0xd6u8, 0x61u8, 0x9du8, 0xe6u8, 0xbeu8, 0xe6u8, 0x99u8, 0xe4u8, 0xc3u8, 0x78u8, 0xe6u8, 0x83u8, 0x09u8, 0xedu8, 0x97u8, 0xa1u8, 0xa6u8, 0xabu8]]
+pub fun hmac_sha256(key: [uint8], msg: [uint8]) -> [uint8] {
+    return hmac(new_sha256(), key, msg)
+}
+
+#test("Jefe", "what do ya want for nothing?")["5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"]
+pub fun hmac_sha256_hex(key: str, msg: str) -> str {
+    return hex_of(hmac(new_sha256(), bytes_of(key), bytes_of(msg)))
+}
+
+// HMAC-SHA-512 (RFC 4231), 64 bytes.
+#test([0x6bu8, 0x65u8, 0x79u8], [0x61u8, 0x62u8, 0x63u8])[[0x39u8, 0x26u8, 0xa2u8, 0x07u8, 0xc8u8, 0xc4u8, 0x2bu8, 0x0cu8, 0x41u8, 0x79u8, 0x2cu8, 0xbdu8, 0x3eu8, 0x1au8, 0x1au8, 0xaau8, 0xf5u8, 0xf7u8, 0xa2u8, 0x57u8, 0x04u8, 0xf6u8, 0x2du8, 0xfcu8, 0x93u8, 0x9cu8, 0x49u8, 0x87u8, 0xddu8, 0x7cu8, 0xe0u8, 0x60u8, 0x00u8, 0x9cu8, 0x5bu8, 0xb1u8, 0xc2u8, 0x44u8, 0x73u8, 0x55u8, 0xb3u8, 0x21u8, 0x6fu8, 0x10u8, 0xb5u8, 0x37u8, 0xe9u8, 0xafu8, 0xa7u8, 0xb6u8, 0x4au8, 0x4eu8, 0x53u8, 0x91u8, 0xb0u8, 0xd6u8, 0x31u8, 0x17u8, 0x2du8, 0x07u8, 0x93u8, 0x9eu8, 0x08u8, 0x7au8]]
+pub fun hmac_sha512(key: [uint8], msg: [uint8]) -> [uint8] {
+    return hmac(new_sha512(), key, msg)
+}
+
+#test("Jefe", "what do ya want for nothing?")["164b7a7bfcf819e2e395fbe73b56e0a387bd64222e831fd610270cd7ea2505549758bf75c05a994a6d034f65f8f0e6fdcaeab1a34d4a6b4b636e070a38bce737"]
+pub fun hmac_sha512_hex(key: str, msg: str) -> str {
+    return hex_of(hmac(new_sha512(), bytes_of(key), bytes_of(msg)))
+}
+
+// ---- Tests
+
+// `n` copies of the byte `b`.
+fun repeated(b: uint8, n: int) -> [uint8] {
+    var out: [uint8] = []
+    for i in 0..n {
+        out.push(b)
+    }
+    return out
+}
+
+fun check(got: [uint8], want: str, what: str) {
+    let hex = hex_of(got)
+    assert(hex == want, f"{what}: {hex}, expected {want}")
+}
+
+// RFC 2202's test cases 1 to 7.
+#test
+fun hmac_rfc2202() {
+    let k1 = repeated(0x0bu8, 16)
+    let hi = bytes_of("Hi There")
+    check(hmac_md5(k1, hi), "9294727a3638bb1c13f48ef8158bfc9d", "md5 1")
+    check(hmac_sha1(repeated(0x0bu8, 20), hi), "b617318655057264e28bc0b6fb378c8ef146be00", "sha1 1")
+    let k3 = repeated(0xaau8, 16)
+    let d3 = repeated(0xddu8, 50)
+    check(hmac_md5(k3, d3), "56be34521d144c88dbb8c733f0e8b3f6", "md5 3")
+    check(hmac_sha1(repeated(0xaau8, 20), d3), "125d7342b9ac11cd91a39af48aa17b4f63f175d3", "sha1 3")
+    var k4: [uint8] = []
+    for i in 1..26 {
+        k4.push(i as uint8)
+    }
+    let d4 = repeated(0xcdu8, 50)
+    check(hmac_md5(k4, d4), "697eaf0aca3a3aea3a75164746ffaa79", "md5 4")
+    check(hmac_sha1(k4, d4), "4c9007f4026250c6bc8414f9bf50c86c2d7235da", "sha1 4")
+    let big = repeated(0xaau8, 80)
+    let long_key = bytes_of("Test Using Larger Than Block-Size Key - Hash Key First")
+    check(hmac_md5(big, long_key), "6b1ab7fe4bd7bf8f0b62e6ce61b9d0cd", "md5 6")
+    check(hmac_sha1(big, long_key), "aa4ae5e15272d00e95705637ce8a3b55ed402112", "sha1 6")
+    let two = bytes_of("Test Using Larger Than Block-Size Key and Larger Than One Block-Size Data")
+    check(hmac_md5(big, two), "6f630fad67cda0ee1fb1f562db3aa53e", "md5 7")
+    check(hmac_sha1(big, two), "e8e99d0f45237d786d6bbaa7965c7808bbff1a91", "sha1 7")
+}
+
+// RFC 4231's test cases 1, 2, 3, 4, 6 and 7 (5 truncates).
+#test
+fun hmac_rfc4231() {
+    let hi = bytes_of("Hi There")
+    let k1 = repeated(0x0bu8, 20)
+    check(hmac_sha256(k1, hi), "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7", "256 1")
+    check(hmac_sha512(k1, hi), "87aa7cdea5ef619d4ff0b4241a1d6cb02379f4e2ce4ec2787ad0b30545e17cdedaa833b7d6b8a702038b274eaea3f4e4be9d914eeb61f1702e696c203a126854", "512 1")
+    check(hmac(new_sha224(), k1, hi), "896fb1128abbdf196832107cd49df33f47b4b1169912ba4f53684b22", "224 1")
+    check(hmac(new_sha384(), k1, hi), "afd03944d84895626b0825f4ab46907f15f9dadbe4101ec682aa034c7cebc59cfaea9ea9076ede7f4af152e8b2fa9cb6", "384 1")
+    let k3 = repeated(0xaau8, 20)
+    let d3 = repeated(0xddu8, 50)
+    check(hmac_sha256(k3, d3), "773ea91e36800e46854db8ebd09181a72959098b3ef8c122d9635514ced565fe", "256 3")
+    check(hmac_sha512(k3, d3), "fa73b0089d56a284efb0f0756c890be9b1b5dbdd8ee81a3655f83e33b2279d39bf3e848279a722c806b485a47e67c807b946a337bee8942674278859e13292fb", "512 3")
+    var k4: [uint8] = []
+    for i in 1..26 {
+        k4.push(i as uint8)
+    }
+    let d4 = repeated(0xcdu8, 50)
+    check(hmac_sha256(k4, d4), "82558a389a443c0ea4cc819899f2083a85f0faa3e578f8077a2e3ff46729665b", "256 4")
+    check(hmac_sha512(k4, d4), "b0ba465637458c6990e5a8c5f61d4af7e576d97ff94b872de76f8050361ee3dba91ca5c11aa25eb4d679275cc5788063a5f19741120c4f2de2adebeb10a298dd", "512 4")
+    let big = repeated(0xaau8, 131)
+    let long_key = bytes_of("Test Using Larger Than Block-Size Key - Hash Key First")
+    check(hmac_sha256(big, long_key), "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54", "256 6")
+    check(hmac_sha512(big, long_key), "80b24263c7c1a3ebb71493c1dd7be8b49b46d1f41b4aeec1121b013783f8f3526b56d037e05f2598bd0fd2215d6a1e5295e64f73f63f0aec8b915a985d786598", "512 6")
+    let d7 = bytes_of("This is a test using a larger than block-size key and a larger than block-size data. The key needs to be hashed before being used by the HMAC algorithm.")
+    check(hmac_sha256(big, d7), "9b09ffa71b942fcb27635fbcd5b0e944bfdc63644f0713938a7f51535c3a35e2", "256 7")
+    check(hmac_sha512(big, d7), "e37b6a775dc87dbaa4dfa9f96e5e3ffddebd71f8867289865df5a32d20cdc944b6022cac3c4982b10d5eeb55c3e4de15134676fb6de0446065c97440fa8c6a58", "512 7")
+}
+
+// Pieces of every size give the one-shot digest, through both `update`s.
+#test
+fun incremental() {
+    var data: [uint8] = []
+    var text = StringBuilder()
+    for i in 0..300 {
+        let b = (32 + (i * 7 + 3) % 95) as uint8
+        data.push(b)
+        text.append_byte(b)
+    }
+    let s = text.build()
+    let want5 = hex_of(md5(data))
+    let want1 = hex_of(sha1(data))
+    let want256 = hex_of(sha256(data))
+    let want512 = hex_of(sha512(data))
+    assert(md5_hex(s) == want5, "md5_hex")
+    assert(sha512_hex(s) == want512, "sha512_hex")
+    for step in [1, 3, 4, 63, 64, 65, 127, 129] {
+        var h5 = new_md5()
+        var h1 = new_sha1()
+        var h256 = new_sha256()
+        var h512 = new_sha512()
+        var i = 0
+        var odd = false
+        while i < data.len() {
+            let j = if i + step < data.len() { i + step } else { data.len() }
+            if odd {
+                h5.update_str(s[i:j])
+                h1.update_str(s[i:j])
+                h256.update_str(s[i:j])
+                h512.update_str(s[i:j])
+            } else {
+                h5.update(data[i:j])
+                h1.update(data[i:j])
+                h256.update(data[i:j])
+                h512.update(data[i:j])
+            }
+            odd = !odd
+            i = j
+        }
+        assert(h5.finish_hex() == want5, f"md5 by {step}")
+        assert(h1.finish_hex() == want1, f"sha1 by {step}")
+        assert(h256.finish_hex() == want256, f"sha256 by {step}")
+        assert(h512.finish_hex() == want512, f"sha512 by {step}")
+        // finish leaves the hasher as it was
+        h5.update(data)
+        assert(h5.finish_hex() == md5_hex(s + s), f"md5 after finish by {step}")
+    }
+    // a copy of a hasher goes on by itself
+    var p = new_sha256()
+    p.update_str("ab")
+    var q = p
+    p.update_str("c")
+    q.update_str("d")
+    assert(p.finish_hex() == sha256_hex("abc"), "copy: the original")
+    assert(q.finish_hex() == sha256_hex("abd"), "copy: the copy")
+}

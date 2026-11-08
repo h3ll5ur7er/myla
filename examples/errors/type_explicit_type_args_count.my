@@ -1,0 +1,14 @@
+//~ type error: function 'mk' expects 1 type argument(s), got 2
+//~ span: int, str
+// Explicit type arguments name every type parameter of the function, in
+// order (D169).
+struct B<T> {
+    items: [T],
+}
+fun mk<T>() -> B<T> {
+    return B { items: [] }
+}
+fun main() {
+    let b = mk<int, str>()
+    print(b.items.len())
+}

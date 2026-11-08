@@ -1,0 +1,14 @@
+//~ type error: cannot assign value of type 'B<str>' to binding of type 'B<int32>'
+//~ span: let b: B<int> = of(["x"])
+// What the arguments fix comes first and the expected type only fills what
+// they leave open (MYLA-315): `T` is `str` here, so the annotation is wrong.
+struct B<T> {
+    items: [T],
+}
+fun of<T>(xs: [T]) -> B<T> {
+    return B { items: xs }
+}
+fun main() {
+    let b: B<int> = of(["x"])
+    print(0)
+}

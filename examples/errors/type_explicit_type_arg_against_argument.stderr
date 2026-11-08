@@ -1,0 +1,5 @@
+type error: argument type mismatch in call to 'widen': expected 'str', found 'bool'
+  --> examples/errors/type_explicit_type_arg_against_argument.my:9:22
+  |
+9 |     print(widen<str>(true))
+  |                      ^^^^

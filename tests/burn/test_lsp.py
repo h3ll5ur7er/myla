@@ -355,6 +355,32 @@ class ScopeScenarios(LspRequestHelpers):
         self.assertEqual(self.defn(uri, 5, 10), {"uri": uri, "range": rng(1, 7, 8)})    # C
         self.assertEqual(self.defn(uri, 5, 14), {"uri": uri, "range": rng(2, 4, 5)})    # C's n
 
+    def test_explicit_type_arguments(self):
+        # a call's type arguments (D169, MYLA-373) resolve as a type's do
+        uri = self.open("struct P { x: int }\n"                       # 0
+                        "fun mk<T>() -> [T] {\n    return []\n}\n"    # 1
+                        "fun main() {\n"                              # 4
+                        "    let ps = mk<P>()\n"                      # 5
+                        "    print(ps.len())\n}\n")
+        self.assertEqual(self.defn(uri, 5, 16), {"uri": uri, "range": rng(0, 7, 8)})    # P
+        self.assertEqual(self.defn(uri, 5, 13), {"uri": uri, "range": rng(1, 4, 6)})    # mk
+
+    def test_a_module_s_type_by_the_module_s_name(self):
+        # `m.T` in a type (D170, MYLA-371): `T` is the module's declaration,
+        # `m` the module
+        geo = self.write("geo.my", "// geo\npub struct Point {\n    x: int,\n}\n"
+                                   "pub fun zero() -> Point {\n    return Point { x: 0 }\n}\n")
+        uri = self.open("import geo as g\n"                       # 0
+                        "fun origin() -> g.Point {\n"            # 1
+                        "    return g.zero()\n"                  # 2
+                        "}\n"
+                        "fun xs(ps: [g.Point]) -> int {\n"       # 4
+                        "    return ps.len()\n}\n")
+        self.assertEqual(self.defn(uri, 1, 18), {"uri": _uri(geo), "range": rng(1, 11, 16)})   # Point
+        self.assertEqual(self.defn(uri, 4, 14), {"uri": _uri(geo), "range": rng(1, 11, 16)})   # in a list type
+        self.assertEqual(self.defn(uri, 1, 16), {"uri": _uri(geo), "range": rng(0, 0, 0)})     # the module
+        self.assertEqual(self.hover(uri, 1, 18), "pub struct Point")
+
     def test_unicode_identifiers(self):
         # XID identifiers (MYLA-84); ranges in UTF-16 units, 😀 counting two
         uri = self.open('fun main() {\n    let größe = 1\n    let 日本 = größe\n    print(f"😀{日本}")\n}\n')

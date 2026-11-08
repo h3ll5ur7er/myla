@@ -1,0 +1,13 @@
+//~ module error: module 'std.args' does not export a type 'Option'
+//~ span: args.Option
+// `m.T` names a type the module exports with `pub` (D170); std.args has
+// none called `Option`.
+import std.args as args
+
+fun first(o: args.Option) -> int {
+    return 0
+}
+
+fun main() {
+    print(0)
+}

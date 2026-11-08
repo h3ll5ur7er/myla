@@ -398,6 +398,12 @@ impl Resolver {
         match self.lookup(name) {
             Some(d) => { self.use_at(line, col, name, d) },
             None => {
+                // the prelude's function, declared in no file: a global with
+                // its signature to show and nowhere to go (MYLA-372)
+                if name == "get" {
+                    self.use_at(line, col, name, Def { name: name, path: "<prelude>", range: Range { start: Pos { line: 0, character: 0 }, end: Pos { line: 0, character: 0 } }, kind: DefKind.Global(SymKind.Function), detail: "fun get<K: Eq + Hash, V>(m: [K: V], k: K) -> Option<V>", ty: "" })
+                    return
+                }
                 if self.modules.contains(name) {
                     let file = self.modules[name]
                     self.use_at(line, col, name, Def { name: name, path: file, range: Range { start: Pos { line: 0, character: 0 }, end: Pos { line: 0, character: 0 } }, kind: DefKind.Module, detail: "", ty: "" })
@@ -447,8 +453,25 @@ impl Resolver {
         }
     }
 
+    // The trait of an impl: the first of its name after the impl's start
+    // that no bound took, as a bound may name it too (`impl<R: Read> Read
+    // for …`, MYLA-338).
+    fun use_impl_trait(var self, line: int32, col: int32, name: str) {
+        var k = self.ident_after(line, col, name)
+        while k >= 0 && self.used.contains(k) {
+            k = self.ident_after(self.toks[k].line, self.toks[k].column + 1, name)
+        }
+        if k >= 0 { self.use_name(self.toks[k].line, self.toks[k].column, name) }
+    }
+
     fun type_params(var self, tps: [TypeParam]) {
         for tp in tps { self.declare(tp.line, tp.col, tp.name, DefKind.TypeParam, "") }
+        // a bound, `<R: Read>`, uses its trait (one of the program's; a
+        // built-in one has no declaration); the AST keeps no position of
+        // its own for it, so it is the first of its name after the parameter
+        for tp in tps {
+            for b in tp.bounds { self.use_name(tp.line, tp.col, b) }
+        }
     }
 
     fun decl(var self, d: Decl) {
@@ -480,7 +503,7 @@ impl Resolver {
                 self.type_params(tps)
                 self.type_expr(target)
                 match tr {
-                    Some(t) => { self.use_name(d.line, d.col, t) },
+                    Some(t) => { self.use_impl_trait(d.line, d.col, t) },
                     None => {},
                 }
                 for t in targs { self.type_expr(t) }
@@ -526,7 +549,8 @@ impl Resolver {
     fun type_expr(var self, t: TypeExpr) {
         match t.kind {
             TypeKind.TRef(name, args) => {
-                self.use_name(t.line, t.col, name)
+                let parts = name.split(".")
+                if parts.len() > 1 { self.module_type(t.line, t.col, parts) } else { self.use_name(t.line, t.col, name) }
                 for a in args { self.type_expr(a) }
             },
             TypeKind.TTuple(es) => { for e in es { self.type_expr(e) } },
@@ -539,6 +563,32 @@ impl Resolver {
                 for p in ps { self.type_expr(p) }
                 self.type_expr(r)
             },
+        }
+    }
+
+    // `m.T` in a type at (line, col) (D170): `m` is the module, `T` its
+    // declaration. The module is the segment before `T` as the file imports
+    // it (its alias, or its path's last segment).
+    fun module_type(var self, line: int32, col: int32, parts: [str]) {
+        self.use_name(line, col, parts[0])
+        let last = parts[parts.len() - 1]
+        match get(self.modules, parts[parts.len() - 2]) {
+            Some(file) => {
+                match self.module_member(file, last) {
+                    Some(d) => {
+                        // past the segments before it, so `set.set` finds the second
+                        var before = 0
+                        var i = 0
+                        while i < parts.len() - 1 {
+                            before += parts[i].len() + 1
+                            i += 1
+                        }
+                        self.use_at(line, col + before, last, d)
+                    },
+                    None => {},
+                }
+            },
+            None => {},
         }
     }
 
@@ -670,8 +720,9 @@ impl Resolver {
                 self.expr(l)
                 self.expr(r)
             },
-            ExprKind.Call(callee, args) => {
+            ExprKind.Call(callee, args, targs) => {
                 self.expr(callee)
+                for t in targs { self.type_expr(t) }      // `mk<Point>()` (D169)
                 for a in args { self.expr(a) }
             },
             ExprKind.GetField(recv, field) => {
@@ -997,7 +1048,7 @@ impl Resolver {
             },
             ExprKind.Try(x) => { return success_of(self.unalias(self.type_of(x))) },
             ExprKind.GetField(recv, f) => { return self.member_type(recv, f, false) },
-            ExprKind.Call(callee, args) => {
+            ExprKind.Call(callee, args, _) => {
                 match callee.kind {
                     ExprKind.Name(n) => {
                         match self.lookup(n) {

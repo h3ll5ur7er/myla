@@ -1,0 +1,5 @@
+type error: type '(int32, float64)' has no method 'hash': 'float64' isn't Hash (NaN is unequal to itself)
+  --> examples/errors/type_tuple_hash_float.my:8:17
+  |
+8 |     print(t.hash(hash.new()).finish())
+  |           ^^^^^^^^^^^^^^^^^^

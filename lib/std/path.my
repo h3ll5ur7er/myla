@@ -1,0 +1,370 @@
+// std.path: paths as strings (MYLA-326, D164).
+//
+// Every function works on the text of a path alone: none of them looks at
+// the file system. The separator is `/` on every target, and a run of
+// slashes counts as one. A path that starts with `/` is absolute; any run of
+// slashes at its start is the one root, as on Linux (Python's `posixpath`
+// keeps exactly two, `//a`, as they are).
+
+// Whether `p` starts at the root.
+#test("/a")[true]
+#test("//a")[true]
+#test("a/b")[false]
+#test("")[false]
+pub fun is_absolute(p: str) -> bool {
+    return p.len() > 0 && p[0] == '/'
+}
+
+// `b` after `a`, with one `/` between them. An absolute `b` replaces `a`, as
+// in Python and Rust; an empty `a` gives `b`, an empty `b` gives `a` with a
+// `/` at its end.
+#test("a", "b")["a/b"]
+#test("a/", "b")["a/b"]
+#test("a", "/b")["/b"] // an absolute path replaces
+#test("", "b")["b"]
+#test("a", "")["a/"]
+#test("/", "a")["/a"]
+#test("a//", "b")["a//b"] // nothing else changes
+#test("", "")[""]
+pub fun join(a: str, b: str) -> str {
+    if is_absolute(b) || a == "" {
+        return b
+    }
+    if a[a.len() - 1] == '/' {
+        return a + b
+    }
+    return a + "/" + b
+}
+
+// The parts joined one after another, as `join` joins two; none give `""`.
+#test(["a", "b", "c"])["a/b/c"]
+#test(["a", "/b", "c"])["/b/c"]
+#test(["/"])["/"]
+pub fun join_all(parts: [str]) -> str {
+    var out = ""
+    for p in parts {
+        out = join(out, p)
+    }
+    return out
+}
+
+// `p` without its trailing slashes and trailing `.` components, which name
+// the directory before them: `a/./` is `a`. The root stays `/`; `.` alone
+// becomes `""`.
+fun trimmed(p: str) -> str {
+    var end = p.len()
+    while true {
+        while end > 1 && p[end - 1] == '/' {
+            end -= 1
+        }
+        if end == 1 && p[0] == '.' {
+            return ""
+        }
+        if end >= 2 && p[end - 1] == '.' && p[end - 2] == '/' {
+            end -= 1
+        } else {
+            return p[:end]
+        }
+    }
+    unreachable()
+}
+
+// The position of the last `/` of `t`, or -1.
+fun last_slash(t: str) -> int {
+    var i = t.len() - 1
+    while i >= 0 && t[i] != '/' {
+        i -= 1
+    }
+    return i
+}
+
+// Whether `t` is nothing but slashes (and at least one).
+fun all_slashes(t: str) -> bool {
+    if t.len() == 0 {
+        return false
+    }
+    for i in 0..t.len() {
+        if t[i] != '/' {
+            return false
+        }
+    }
+    return true
+}
+
+// The directory that holds `p`: `p` without its last component and the
+// slashes before it. A relative path of one component gives `""`; the root,
+// `""` and `.` have none.
+#test("a/b")[Some("a")]
+#test("a/b/")[Some("a")] // trailing slashes don't count
+#test("a")[Some("")]
+#test("/a")[Some("/")]
+#test("//a")[Some("/")]
+#test("/a/b")[Some("/a")]
+#test("a//b")[Some("a")]
+#test("a/./b/../c")[Some("a/./b/..")] // lexical: nothing is resolved
+#test("a/.")[Some("")] // a trailing `.` names `a`
+#test("a/..")[Some("a")]
+#test("/")[None]
+#test("")[None]
+#test(".")[None]
+pub fun parent(p: str) -> Option<str> {
+    let t = trimmed(p)
+    if t == "" || all_slashes(t) {
+        return None
+    }
+    var i = last_slash(t)
+    if i < 0 {
+        return Some("")
+    }
+    while i > 0 && t[i - 1] == '/' {
+        i -= 1
+    }
+    if i == 0 {
+        return Some("/")
+    }
+    return Some(t[:i])
+}
+
+// The last component of `p`; none for the root, `""`, `.` and a path that
+// ends in `..`.
+#test("a/b")[Some("b")]
+#test("a/b/")[Some("b")]
+#test("a")[Some("a")]
+#test("//a")[Some("a")]
+#test("a/./b/../c")[Some("c")]
+#test("a/.")[Some("a")]
+#test(".bashrc")[Some(".bashrc")]
+#test("a/..")[None]
+#test("/")[None]
+#test("")[None]
+#test(".")[None]
+pub fun file_name(p: str) -> Option<str> {
+    let t = trimmed(p)
+    if t == "" || all_slashes(t) {
+        return None
+    }
+    let name = t[last_slash(t) + 1:]
+    if name == ".." {
+        return None
+    }
+    return Some(name)
+}
+
+// The position of the dot that starts the extension of the file name
+// `name`, or -1. Leading dots don't start one: `.bashrc` and `...` have none.
+fun ext_dot(name: str) -> int {
+    var lead = 0
+    while lead < name.len() && name[lead] == '.' {
+        lead += 1
+    }
+    var i = name.len() - 1
+    while i >= lead {
+        if name[i] == '.' {
+            return i
+        }
+        i -= 1
+    }
+    return -1
+}
+
+// The file name without its extension.
+#test("a/b.tar.gz")[Some("b.tar")]
+#test("b.txt")[Some("b")]
+#test(".bashrc")[Some(".bashrc")]
+#test(".b.c")[Some(".b")]
+#test("foo.")[Some("foo")]
+#test("a/")[Some("a")]
+#test("/")[None]
+pub fun stem(p: str) -> Option<str> {
+    let name = file_name(p)?
+    let k = ext_dot(name)
+    if k < 0 {
+        return Some(name)
+    }
+    return Some(name[:k])
+}
+
+// The extension of the file name, without the dot: what follows its last
+// `.`, unless that dot is one of the name's leading ones.
+#test("a/b.tar.gz")[Some("gz")]
+#test("b.txt")[Some("txt")]
+#test(".bashrc")[None] // a hidden file, not an extension
+#test(".b.c")[Some("c")]
+#test("...")[None]
+#test("foo.")[Some("")] // a dot with nothing after it
+#test("a.d/b")[None]
+#test("/")[None]
+pub fun extension(p: str) -> Option<str> {
+    let name = file_name(p)?
+    let k = ext_dot(name)
+    if k < 0 {
+        return None
+    }
+    return Some(name[k + 1:])
+}
+
+// `p` with the extension of its file name replaced by `ext` (without its
+// dot), or added; an empty `ext` removes it. A path without a file name
+// stays as it is; trailing slashes go.
+#test("a/b.txt", "md")["a/b.md"]
+#test("a/b", "md")["a/b.md"]
+#test("b.tar.gz", "")["b.tar"]
+#test(".bashrc", "bak")[".bashrc.bak"]
+#test("a/b/", "x")["a/b.x"]
+#test("/", "x")["/"]
+#test("", "x")[""]
+pub fun with_extension(p: str, ext: str) -> str {
+    let name = match file_name(p) {
+        Some(n) => n
+        None => { return p }
+    }
+    let t = trimmed(p)
+    let k = ext_dot(name)
+    let base = if k < 0 { name } else { name[:k] }
+    let dir = t[:t.len() - name.len()]
+    if ext == "" {
+        return dir + base
+    }
+    return dir + base + "." + ext
+}
+
+// The components of `p`: `/` first for an absolute path, then each name.
+// Empty components and `.` are left out, `..` is kept (nothing is resolved).
+#test("/a/b")[["/", "a", "b"]]
+#test("a/./b/../c")[["a", "b", "..", "c"]]
+#test("///a//b/")[["/", "a", "b"]]
+#test("./a")[["a"]]
+#test("/")[["/"]]
+pub fun components(p: str) -> [str] {
+    var out: [str] = []
+    if is_absolute(p) {
+        out.push("/")
+    }
+    var start = 0
+    for i in 0..p.len() + 1 {
+        if i == p.len() || p[i] == '/' {
+            if i > start {
+                let c = p[start:i]
+                if c != "." {
+                    out.push(c)
+                }
+            }
+            start = i + 1
+        }
+    }
+    return out
+}
+
+// The names with a `/` between each two. (Not `std.list`'s `join`: an
+// imported module's cases on a method of a built-in type count as the
+// importing file's, MYLA-360, and its native harness doesn't build.)
+fun joined(names: [str]) -> str {
+    var sb = StringBuilder()
+    for i in 0..names.len() {
+        if i > 0 {
+            sb.append("/")
+        }
+        sb.append(names[i])
+    }
+    return sb.build()
+}
+
+// The names of `p` with `.` and `..` resolved: a `..` takes away the name
+// before it, stays at the root, and starts a relative path that leaves its
+// first directory.
+fun resolved(p: str) -> [str] {
+    let abs = is_absolute(p)
+    var out: [str] = []
+    for c in components(p) {
+        if c == "/" {
+            continue
+        }
+        if c == ".." {
+            if out.len() > 0 && out[^1] != ".." {
+                out.pop()
+            } else if !abs {
+                out.push("..")
+            }
+        } else {
+            out.push(c)
+        }
+    }
+    return out
+}
+
+// `p` with `.` and `..` resolved lexically, without the file system: a `..`
+// takes away the name before it (so a link isn't followed back), stays at
+// the root, and a relative path keeps its leading ones. Runs of slashes
+// become one, a trailing one goes, and an empty result is `.`.
+#test("a/./b/../c")["a/c"]
+#test("")["."]
+#test("/")["/"]
+#test("a/")["a"]
+#test("//a")["/a"] // Python's normpath keeps `//a`
+#test("///a//b/")["/a/b"]
+#test("/..")["/"] // `..` at the root stays there
+#test("/a/../../b")["/b"]
+#test("../a")["../a"]
+#test("a/..")["."]
+#test("a/../..")[".."]
+#test("../../a/../b")["../../b"]
+#test("./a")["a"]
+pub fun normalize(p: str) -> str {
+    let names = resolved(p)
+    let body = joined(names)
+    if is_absolute(p) {
+        return "/" + body
+    }
+    if body == "" {
+        return "."
+    }
+    return body
+}
+
+// The path that leads from the directory `from_dir` to `to`, lexically:
+// both are normalized, and links aren't followed. `.` when they are the
+// same. An absolute `to` from a relative `from_dir` is `to` normalized. None
+// when only the file system could tell: a relative `to` from an absolute
+// `from_dir`, or a `from_dir` whose `..` climb above where `to` starts
+// (`relative("..", "a")` would need the name of the working directory).
+#test("a/b", "a/c/d")[Some("../c/d")]
+#test("a", "a")[Some(".")]
+#test("/x", "/x/y")[Some("y")]
+#test("/", "/a")[Some("a")]
+#test("a/b", "a")[Some("..")]
+#test("/a/b/c", "/a/d")[Some("../../d")]
+#test("../x", "../y")[Some("../y")]
+#test("a", "../b")[Some("../../b")]
+#test("", "a")[Some("a")]
+#test("a/./b/", "a/b/c/../d")[Some("d")]
+#test("a", "/b")[Some("/b")]
+#test("/a", "b")[None]
+#test("..", "a")[None]
+pub fun relative(from_dir: str, to: str) -> Option<str> {
+    if is_absolute(to) && !is_absolute(from_dir) {
+        return Some(normalize(to))
+    }
+    if is_absolute(from_dir) && !is_absolute(to) {
+        return None
+    }
+    let f = resolved(from_dir)
+    let t = resolved(to)
+    var k = 0
+    while k < f.len() && k < t.len() && f[k] == t[k] {
+        k += 1
+    }
+    var out: [str] = []
+    for i in k..f.len() {
+        if f[i] == ".." {
+            return None
+        }
+        out.push("..")
+    }
+    for i in k..t.len() {
+        out.push(t[i])
+    }
+    if out.len() == 0 {
+        return Some(".")
+    }
+    return Some(joined(out))
+}

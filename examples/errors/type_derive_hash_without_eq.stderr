@@ -1,0 +1,5 @@
+type error: cannot derive Hash for 'Pos': it isn't Eq; derive both, '#derive(Eq, Hash)', or write 'impl Eq for Pos'
+  --> examples/errors/type_derive_hash_without_eq.my:5:1
+  |
+5 | struct Pos {
+  | ^^^^^^^^^^^^

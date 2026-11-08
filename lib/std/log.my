@@ -1,0 +1,250 @@
+// std.log — messages to the standard error with a time and a level
+// (MYLA-334).
+//
+// `error`, `warn`, `info` and `debug` write one line each,
+// `2026-11-07T17:00:00.123Z INFO message`: the time in UTC with
+// milliseconds (`std.time.format_rfc3339_millis`), the level, the message.
+// The environment variable MYLA_LOG says which levels get through: `error`,
+// `warn` (the default, also for a value it doesn't know), `info`, `debug`
+// (everything) or `off` (nothing), in any case. Myla has no global variables
+// (D28), so each call reads it again: natively about 0.25 µs, a fifth of
+// what a written line costs, and all a dropped message costs. A `Logger`
+// reads it once and keeps what it read. A line is one write to the
+// descriptor, so lines of tasks running at once don't mix.
+
+import .time as time
+from .time import DateTime
+from .process import env
+from .io import eprint
+
+// How much a message matters, the most first.
+#derive(Eq)
+pub enum Level {
+    Error,
+    Warn,
+    Info,
+    Debug,
+}
+
+impl Level {
+    // Its name in a line, `ERROR`, `WARN`, `INFO`, `DEBUG`.
+    #test(Level.Error)["ERROR"]
+    #test(Level.Warn)["WARN"]
+    #test(Level.Info)["INFO"]
+    #test(Level.Debug)["DEBUG"]
+    fun name(self) -> str {
+        return match self {
+            Error => "ERROR"
+            Warn => "WARN"
+            Info => "INFO"
+            Debug => "DEBUG"
+        }
+    }
+
+    // 1 for `Error` to 4 for `Debug`: a message gets through when its rank is
+    // at most the threshold's.
+    #test(Level.Error)[1]
+    #test(Level.Debug)[4]
+    fun rank(self) -> int {
+        return match self {
+            Error => 1
+            Warn => 2
+            Info => 3
+            Debug => 4
+        }
+    }
+}
+
+impl Format for Level {
+    fun format(self, spec: str) -> str {
+        return self.name()
+    }
+}
+
+// The most verbose level a setting of MYLA_LOG lets through, `None` for
+// `off`. Unset, or a value it doesn't know, is `warn`; spaces around it and
+// the case don't matter.
+#test(None)[Some(Level.Warn)]
+#test(Some("off"))[None]
+#test(Some("error"))[Some(Level.Error)]
+#test(Some("warn"))[Some(Level.Warn)]
+#test(Some(" Info "))[Some(Level.Info)]
+#test(Some("DEBUG"))[Some(Level.Debug)]
+#test(Some("loud"))[Some(Level.Warn)]
+#test(Some(""))[Some(Level.Warn)]
+pub fun threshold(setting: Option<str>) -> Option<Level> {
+    let s = match setting {
+        Some(v) => normalized(v)
+        None => "warn"
+    }
+    if s == "off" {
+        return None
+    }
+    if s == "error" {
+        return Some(Level.Error)
+    }
+    if s == "info" {
+        return Some(Level.Info)
+    }
+    if s == "debug" {
+        return Some(Level.Debug)
+    }
+    return Some(Level.Warn)
+}
+
+// `s` without the spaces and tabs around it, in lower case (ASCII). Not
+// `std.str`'s `trim` and `to_lower`: a module of `std` that imports
+// `std.str` runs its cases as its own and doesn't build them natively
+// (MYLA-360).
+#test(" \tInFo ")["info"]
+#test("   ")[""]
+fun normalized(s: str) -> str {
+    var start = 0
+    var end = s.len()
+    while start < end && (s[start] == ' ' || s[start] == '\t') {
+        start += 1
+    }
+    while end > start && (s[end - 1] == ' ' || s[end - 1] == '\t') {
+        end -= 1
+    }
+    var sb = StringBuilder()
+    var i = start
+    while i < end {
+        let c = s[i]
+        if c >= 'A' && c <= 'Z' {
+            sb.append_byte(c + 32)
+        } else {
+            sb.append_byte(c)
+        }
+        i += 1
+    }
+    return sb.build()
+}
+
+// The threshold MYLA_LOG sets now.
+pub fun current() -> Option<Level> {
+    return threshold(env("MYLA_LOG"))
+}
+
+// Whether a message of `level` gets through `max`.
+#test(Level.Warn, Some(Level.Info))[true]
+#test(Level.Info, Some(Level.Info))[true]
+#test(Level.Debug, Some(Level.Info))[false]
+#test(Level.Error, None)[false]
+fun passes(level: Level, max: Option<Level>) -> bool {
+    return match max {
+        Some(m) => level.rank() <= m.rank()
+        None => false
+    }
+}
+
+// Whether MYLA_LOG lets messages of `level` through now: to skip building
+// one that would be dropped.
+pub fun enabled(level: Level) -> bool {
+    return passes(level, current())
+}
+
+// The line written for `message` of `level` at the time `at`, without the
+// newline.
+#test(DateTime { year: 2026, month: 11, day: 7, hour: 17, minute: 0, second: 0, nanosecond: 123456789 }, Level.Info, "message")["2026-11-07T17:00:00.123Z INFO message"]
+#test(DateTime { year: 1999, month: 12, day: 31, hour: 23, minute: 59, second: 59, nanosecond: 0 }, Level.Error, "")["1999-12-31T23:59:59.000Z ERROR "]
+pub fun line(at: DateTime, level: Level, message: str) -> str {
+    return f"{time.format_rfc3339_millis(at)} {level.name()} {message}"
+}
+
+// `message` of `level` to the standard error, now, if `max` lets it through.
+fun write_at(level: Level, max: Option<Level>, message: str) {
+    if passes(level, max) {
+        eprint(line(time.now_utc(), level, message) + "\n")
+    }
+}
+
+// `message` of `level` to the standard error, if MYLA_LOG lets it through.
+pub fun log(level: Level, message: str) {
+    write_at(level, current(), message)
+}
+
+// An error: something failed.
+pub fun error(message: str) {
+    write_at(Level.Error, current(), message)
+}
+
+// A warning: something may be wrong.
+pub fun warn(message: str) {
+    write_at(Level.Warn, current(), message)
+}
+
+// Information on what the program does.
+pub fun info(message: str) {
+    write_at(Level.Info, current(), message)
+}
+
+// Detail for finding a fault.
+pub fun debug(message: str) {
+    write_at(Level.Debug, current(), message)
+}
+
+// --- Logger ---------------------------------------------------------------------
+
+// The functions above with the threshold read once: for a loop that logs a
+// lot, or a threshold of the program's own choosing.
+pub struct Logger {
+    max: Option<Level>,
+}
+
+// A logger with MYLA_LOG's threshold as it is now.
+pub fun logger() -> Logger {
+    return Logger { max: current() }
+}
+
+// A logger with a threshold of its own, `None` for one that writes nothing.
+pub fun logger_at(max: Option<Level>) -> Logger {
+    return Logger { max: max }
+}
+
+impl Logger {
+    // Whether it lets messages of `level` through.
+    #test(logger_at(Some(Level.Info)), Level.Info)[true]
+    #test(logger_at(Some(Level.Info)), Level.Debug)[false]
+    #test(logger_at(None), Level.Error)[false]
+    fun enabled(self, level: Level) -> bool {
+        return passes(level, self.max)
+    }
+
+    fun log(self, level: Level, message: str) {
+        write_at(level, self.max, message)
+    }
+
+    fun error(self, message: str) {
+        write_at(Level.Error, self.max, message)
+    }
+
+    fun warn(self, message: str) {
+        write_at(Level.Warn, self.max, message)
+    }
+
+    fun info(self, message: str) {
+        write_at(Level.Info, self.max, message)
+    }
+
+    fun debug(self, message: str) {
+        write_at(Level.Debug, self.max, message)
+    }
+}
+
+// The functions run without failing. Quietly, unless MYLA_LOG asks for
+// `info` or `debug`: the interpreter shows a passing case's standard error.
+#test
+fun writes() {
+    info("std.log's own case: information")
+    debug("std.log's own case: detail")
+    log(Level.Debug, "std.log's own case")
+    let quiet = logger_at(None)
+    quiet.error("std.log's own case: an error")
+    quiet.warn("std.log's own case: a warning")
+    quiet.info("std.log's own case: information")
+    quiet.debug("std.log's own case: detail")
+    quiet.log(Level.Error, "std.log's own case")
+    assert(enabled(Level.Error) == passes(Level.Error, current()), "enabled")
+    assert(logger().enabled(Level.Warn) == enabled(Level.Warn), "logger")
+}

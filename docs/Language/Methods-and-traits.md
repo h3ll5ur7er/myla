@@ -106,7 +106,7 @@ A fixed set of built-in traits backs the operators on structs and enums (D52):
 
 `a + b` on a struct becomes `a.add(b)`; `a < b` becomes `a.cmp(b) < 0`. Both operands must have the same type. Primitive types keep their built-in operators (a user `impl Add for int32` doesn't change `+`), and the bitwise operators can't be overloaded.
 
-## #derive(Eq)
+## #derive(Eq) and #derive(Hash)
 
 ```myla
 #derive(Eq)
@@ -119,7 +119,57 @@ fun main() {
 // true
 ```
 
-`#derive(Eq)` on a non-generic struct or enum synthesises a structural `impl Eq`. Every field or payload must be an integer, `bool`, `str` or a named type that is `Eq` itself (`char` and float fields are rejected for now: [[MYLA-13]]). A type can't both derive `Eq` and implement it. `Eq` is the only derivable trait so far; `Ord` is the planned next one.
+`#derive(Eq)` on a non-generic struct or enum synthesises a structural `impl Eq`: the fields in turn, or the variant and then its payload. Every field or payload must be `Eq` itself: an integer, a float, `char`, `bool`, `str`, a tuple or list of `Eq` elements, or a named type that is `Eq`. A type can't both derive `Eq` and implement it.
+
+`#derive(Hash)` writes an `impl Hash` (D163, [[MYLA-313]]) that adds the fields in order, `h.add(self.x).add(self.y)`, and for an enum the variant's index (as a `uint64`) and then its payload. It needs an `Eq` of the type, derived (`#derive(Eq, Hash)`) or written, and refuses a field that isn't `Hash`, a float among them. A type can't both derive `Hash` and implement it. `Eq` and `Hash` are the derivable traits so far; `Ord` is the planned next one.
+
+## Hash
+
+```myla
+import std.hash as hash
+
+#derive(Eq, Hash)
+struct Pos {
+    x: int,
+    y: int,
+}
+
+// a name compared and hashed without regard to case
+struct Tag {
+    text: str,
+}
+
+impl Eq for Tag {
+    fun eq(self, other: Tag) -> bool {
+        return self.text.to_lower() == other.text.to_lower()
+    }
+}
+
+impl Hash for Tag {
+    fun hash(self, h: Hasher) -> Hasher {
+        return h.add(self.text.to_lower())
+    }
+}
+
+fun main() {
+    let p = Pos { x: 1, y: 2 }
+    print(p.hash(hash.new()) == hash.new().add(1).add(2))
+    var seen: [Tag: int] = [:]
+    seen[Tag { text: "Red" }] = 1
+    seen[Tag { text: "RED" }] = 2
+    print(seen.len())
+}
+// output:
+// true
+// 1
+```
+
+`trait Hash { fun hash(self, h: Hasher) -> Hasher }` is in the prelude with the `Hasher` it passes through, by value since Myla has no `var` parameters (D163). The hasher's methods and its algorithm are [[Language/Standard-library/Hash]]'s: `h.add(x)` adds any `Hash` value (it is `x.hash(h)`), `add_u64`, `add_str` and the others add one of a built-in type, `finish()` gives the hash. A map's key type is any type that is `Eq` and `Hash` ([[Language/Collections-and-strings]]).
+
+- The integers, `char`, `bool` and `str` are `Hash`, and a tuple and a list are when their elements are (a list adds its length, then its elements). Floats aren't: NaN is unequal to itself. A hand-written impl may add `math.to_bits(x)` of a float field, as long as its `Eq` agrees.
+- That `a == b` gives `a.hash(h) == b.hash(h)` is the promise of a written impl: a map finds a key only among those of the same hash. A derived `Hash` with a derived `Eq` keeps it.
+- A tuple's `hash` is the language's, as no impl can name a tuple of every length: `(1, "a").hash(h)` adds `1`, then `"a"`.
+- A generic function that hashes takes `T: Hash` (`h.add(x)` and `x.hash(h)` on a `T: Hash`), and one with a map keyed by a type parameter `K` needs `K: Eq + Hash` written (D167, [[Language/Collections-and-strings]]).
 
 ## Bounds
 
@@ -139,7 +189,7 @@ fun main() {
 // 6
 ```
 
-A type parameter may carry bounds `T: Add + Eq` (built-in or user traits, D53). The bound is checked where the function is called, against the concrete type (primitives count as implementing their built-in operator traits, and the printable ones `Format`, D162). Inside the body, a bound permits that trait's **operators** on `T` (`Add`, `Eq`, `Ord`, …: their methods are their operators) and the **methods** of a user trait or of `Format`, with `Self` the type parameter; a `T: Format` goes in a format hole as its type does ([[MYLA-291]]). The interpreter calls the method of the value's type, native code the method of the type the copy is made for ([[Architecture/Monomorphization]]).
+A type parameter may carry bounds `T: Add + Eq` (built-in or user traits, D53; `Hash` is the prelude's). The bound is checked where the function is called, against the concrete type (primitives count as implementing their built-in operator traits, and the printable ones `Format`, D162). Inside the body, a bound permits that trait's **operators** on `T` (`Add`, `Eq`, `Ord`, …: their methods are their operators) and the **methods** of a user trait or of `Format`, with `Self` the type parameter; a `T: Format` goes in a format hole as its type does ([[MYLA-291]]). The interpreter calls the method of the value's type, native code the method of the type the copy is made for ([[Architecture/Monomorphization]]).
 
 ```myla
 trait Shape {

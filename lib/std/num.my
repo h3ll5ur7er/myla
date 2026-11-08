@@ -774,3 +774,344 @@ pub fun format_float(x: float64) -> str {
     }
     return sb.build()
 }
+
+// --- Integers in any radix (MYLA-331) -------------------------------------------
+
+// Why a string isn't an integer: it has no digits, a byte that isn't a digit
+// of the radix (at this byte index), or a value out of the type's range.
+#derive(Eq)
+pub enum ParseIntError {
+    Empty,
+    InvalidDigit(int),
+    Overflow,
+}
+
+// The value of the digit `c` in a radix up to 36, letters in either case;
+// 36 for a byte that is no digit.
+#test('7')[7u64]
+#test('a')[10u64]
+#test('Z')[35u64]
+#test('_')[36u64]
+fun digit_value(c: uint8) -> uint64 {
+    if c >= '0' && c <= '9' { return (c - '0') as uint64 }
+    if c >= 'a' && c <= 'z' { return (c - 'a') as uint64 + 10 }
+    if c >= 'A' && c <= 'Z' { return (c - 'A') as uint64 + 10 }
+    return 36
+}
+
+// A radix outside 2 to 36 is a runtime error of the function `name`.
+fun check_radix(name: str, radix: int) {
+    if radix < 2 || radix > 36 {
+        panic(f"{name}: radix {radix} is not between 2 and 36")
+    }
+}
+
+// The magnitude of the integer in `s` (an optional sign, then digits of
+// `radix`), which may be at most `pos_limit`, or `neg_limit` after a "-".
+// A bad digit anywhere is reported before an overflow.
+#test("-5", 10, 4u64, 5u64)[Ok(5u64)]
+#test("+5", 10, 4u64, 5u64)[Err(ParseIntError.Overflow)]
+#test("-6", 10, 4u64, 5u64)[Err(ParseIntError.Overflow)]
+#test("-1", 10, 0u64, 0u64)[Err(ParseIntError.Overflow)]
+fun parse_magnitude(s: str, radix: int, pos_limit: uint64, neg_limit: uint64) -> Result<uint64, ParseIntError> {
+    var i = 0
+    var limit = pos_limit
+    if s.len() > 0 && (s[0] == '-' || s[0] == '+') {
+        if s[0] == '-' { limit = neg_limit }
+        i = 1
+    }
+    if i == s.len() { return Err(ParseIntError.Empty) }
+    let r = radix as uint64
+    let most = limit / r            // the largest n with n * r within the limit
+    var n: uint64 = 0
+    var over = false
+    while i < s.len() {
+        let d = digit_value(s[i])
+        if d >= r { return Err(ParseIntError.InvalidDigit(i)) }
+        if !over {
+            if n > most {
+                over = true
+            } else {
+                n = n * r
+                if d > limit - n { over = true } else { n = n + d }
+            }
+        }
+        i += 1
+    }
+    if over { return Err(ParseIntError.Overflow) }
+    return Ok(n)
+}
+
+// The digits of `n` in radix `r` (2 to 36, lower case), after a "-" when
+// `negative`, padded with "0"s to at least `width` digits.
+fun radix_digits(n: uint64, r: uint64, width: int, negative: bool) -> str {
+    var buf: [uint8] = []
+    var v = n
+    while true {
+        let d = (v % r) as uint8
+        if d < 10 { buf.push('0' + d) } else { buf.push('a' + (d - 10)) }
+        v = v / r
+        if v == 0 { break }
+    }
+    var sb = StringBuilder()
+    if negative { sb.append_byte('-') }
+    var pad = width - buf.len()
+    while pad > 0 {
+        sb.append_byte('0')
+        pad -= 1
+    }
+    var i = buf.len() - 1
+    while i >= 0 {
+        sb.append_byte(buf[i])
+        i -= 1
+    }
+    return sb.build()
+}
+
+// The int64 written in `s` in `radix` (2 to 36): an optional "+" or "-",
+// then digits, letters in either case for those past 9. No "0x" prefix and
+// no "_" separator; a radix outside 2 to 36 is a runtime error.
+#test("ff", 16)[Ok(255i64)]
+#test("FF", 16)[Ok(255i64)]
+#test("-ff", 16)[Ok(-255i64)]
+#test("+5", 10)[Ok(5i64)]
+#test("-0", 10)[Ok(0i64)]
+#test("007", 10)[Ok(7i64)]
+#test("0000000000000000000000000000042", 10)[Ok(42i64)]
+#test("9223372036854775807", 10)[Ok(9223372036854775807i64)]
+#test("-9223372036854775808", 10)[Ok(-9223372036854775807i64 - 1i64)]
+#test("9223372036854775808", 10)[Err(ParseIntError.Overflow)]
+#test("-9223372036854775809", 10)[Err(ParseIntError.Overflow)]
+#test("18446744073709551616", 10)[Err(ParseIntError.Overflow)]
+#test("99999999999999999999999999", 10)[Err(ParseIntError.Overflow)]
+#test("111111111111111111111111111111111111111111111111111111111111111", 2)[Ok(9223372036854775807i64)]
+#test("-1000000000000000000000000000000000000000000000000000000000000000", 2)[Ok(-9223372036854775807i64 - 1i64)]
+#test("1000000000000000000000000000000000000000000000000000000000000000", 2)[Err(ParseIntError.Overflow)]
+#test("7fffffffffffffff", 16)[Ok(9223372036854775807i64)]
+#test("-8000000000000000", 16)[Ok(-9223372036854775807i64 - 1i64)]
+#test("8000000000000000", 16)[Err(ParseIntError.Overflow)]
+#test("777777777777777777777", 8)[Ok(9223372036854775807i64)]
+#test("1y2p0ij32e8e7", 36)[Ok(9223372036854775807i64)]
+#test("-1Y2P0IJ32E8E8", 36)[Ok(-9223372036854775807i64 - 1i64)]
+#test("1y2p0ij32e8e8", 36)[Err(ParseIntError.Overflow)]
+#test("zz", 36)[Ok(1295i64)]
+#test("", 10)[Err(ParseIntError.Empty)]
+#test("-", 10)[Err(ParseIntError.Empty)]
+#test("+", 16)[Err(ParseIntError.Empty)]
+#test("12a", 10)[Err(ParseIntError.InvalidDigit(2))]
+#test("2", 2)[Err(ParseIntError.InvalidDigit(0))]
+#test("g", 16)[Err(ParseIntError.InvalidDigit(0))]
+#test("1_000", 10)[Err(ParseIntError.InvalidDigit(1))]
+#test(" 1", 10)[Err(ParseIntError.InvalidDigit(0))]
+#test("1 ", 10)[Err(ParseIntError.InvalidDigit(1))]
+#test("--1", 10)[Err(ParseIntError.InvalidDigit(1))]
+#test("+-1", 10)[Err(ParseIntError.InvalidDigit(1))]
+#test("0x1f", 16)[Err(ParseIntError.InvalidDigit(1))]
+#test("1.0", 10)[Err(ParseIntError.InvalidDigit(1))]
+#test("99999999999999999999x", 10)[Err(ParseIntError.InvalidDigit(20))] // a bad digit before an overflow
+#test("1", 1)[panic("parse_int_radix: radix 1 is not between 2 and 36")]
+#test("1", 37)[panic("parse_int_radix: radix 37 is not between 2 and 36")]
+pub fun parse_int_radix(s: str, radix: int) -> Result<int64, ParseIntError> {
+    check_radix("parse_int_radix", radix)
+    let mag = parse_magnitude(s, radix, 9223372036854775807u64, 9223372036854775808u64)?
+    if s[0] == '-' { return Ok(0i64 - mag as int64) }    // wraps right for the minimum
+    return Ok(mag as int64)
+}
+
+// The int32 written in decimal in `s`, as `parse_int_radix` reads it.
+#test("42")[Ok(42)]
+#test("2147483647")[Ok(2147483647)]
+#test("-2147483648")[Ok(-2147483647 - 1)]
+#test("2147483648")[Err(ParseIntError.Overflow)]
+#test("-2147483649")[Err(ParseIntError.Overflow)]
+#test("9223372036854775807")[Err(ParseIntError.Overflow)]
+#test("+0")[Ok(0)]
+#test("")[Err(ParseIntError.Empty)]
+#test("4x")[Err(ParseIntError.InvalidDigit(1))]
+#test("ff")[Err(ParseIntError.InvalidDigit(0))]
+pub fun parse_int32(s: str) -> Result<int32, ParseIntError> {
+    let mag = parse_magnitude(s, 10, 2147483647u64, 2147483648u64)?
+    if s[0] == '-' { return Ok((0i64 - mag as int64) as int32) }
+    return Ok(mag as int32)
+}
+
+// The uint64 written in decimal in `s`. A sign is allowed, so "-0" is 0
+// and "-1" is out of range.
+#test("18446744073709551615")[Ok(18446744073709551615u64)]
+#test("18446744073709551616")[Err(ParseIntError.Overflow)]
+#test("9223372036854775808")[Ok(9223372036854775808u64)]
+#test("+7")[Ok(7u64)]
+#test("-0")[Ok(0u64)]
+#test("-1")[Err(ParseIntError.Overflow)]
+#test("")[Err(ParseIntError.Empty)]
+#test("1e3")[Err(ParseIntError.InvalidDigit(1))]
+pub fun parse_uint64(s: str) -> Result<uint64, ParseIntError> {
+    return parse_magnitude(s, 10, 18446744073709551615u64, 0u64)
+}
+
+// The uint64 written in `s` in `radix`, as `parse_uint64` reads decimal.
+#test("ffffffffffffffff", 16)[Ok(18446744073709551615u64)]
+#test("FFFFFFFFFFFFFFFF", 16)[Ok(18446744073709551615u64)]
+#test("10000000000000000", 16)[Err(ParseIntError.Overflow)]
+#test("1111111111111111111111111111111111111111111111111111111111111111", 2)[Ok(18446744073709551615u64)]
+#test("11111111111111111111111111111111111111111111111111111111111111111", 2)[Err(ParseIntError.Overflow)]
+#test("1777777777777777777777", 8)[Ok(18446744073709551615u64)]
+#test("3w5e11264sgsf", 36)[Ok(18446744073709551615u64)]
+#test("3w5e11264sgsg", 36)[Err(ParseIntError.Overflow)]
+#test("-0", 2)[Ok(0u64)]
+#test("-1", 16)[Err(ParseIntError.Overflow)]
+#test("", 16)[Err(ParseIntError.Empty)]
+#test("0b1", 2)[Err(ParseIntError.InvalidDigit(1))]
+#test("1", 0)[panic("parse_uint64_radix: radix 0 is not between 2 and 36")]
+pub fun parse_uint64_radix(s: str, radix: int) -> Result<uint64, ParseIntError> {
+    check_radix("parse_uint64_radix", radix)
+    return parse_magnitude(s, radix, 18446744073709551615u64, 0u64)
+}
+
+// `n` in `radix` (2 to 36), lower case, with a "-" when it is negative.
+#test(255i64, 16)["ff"]
+#test(-255i64, 16)["-ff"]
+#test(0i64, 2)["0"]
+#test(0i64, 36)["0"]
+#test(5i64, 2)["101"]
+#test(1295i64, 36)["zz"]
+#test(9223372036854775807i64, 10)["9223372036854775807"]
+#test(-9223372036854775807i64 - 1i64, 10)["-9223372036854775808"]
+#test(9223372036854775807i64, 2)["111111111111111111111111111111111111111111111111111111111111111"]
+#test(-9223372036854775807i64 - 1i64, 2)["-1000000000000000000000000000000000000000000000000000000000000000"]
+#test(9223372036854775807i64, 16)["7fffffffffffffff"]
+#test(-9223372036854775807i64 - 1i64, 16)["-8000000000000000"]
+#test(9223372036854775807i64, 8)["777777777777777777777"]
+#test(-9223372036854775807i64 - 1i64, 8)["-1000000000000000000000"]
+#test(9223372036854775807i64, 36)["1y2p0ij32e8e7"]
+#test(-9223372036854775807i64 - 1i64, 36)["-1y2p0ij32e8e8"]
+#test(-1i64, 3)["-1"]
+#test(10i64, 37)[panic("to_radix: radix 37 is not between 2 and 36")]
+pub fun to_radix(n: int64, radix: int) -> str {
+    check_radix("to_radix", radix)
+    if n < 0 { return radix_digits(0u64 - n as uint64, radix as uint64, 0, true) }
+    return radix_digits(n as uint64, radix as uint64, 0, false)
+}
+
+// `n` in `radix` (2 to 36), lower case.
+#test(18446744073709551615u64, 10)["18446744073709551615"]
+#test(18446744073709551615u64, 16)["ffffffffffffffff"]
+#test(18446744073709551615u64, 2)["1111111111111111111111111111111111111111111111111111111111111111"]
+#test(18446744073709551615u64, 8)["1777777777777777777777"]
+#test(18446744073709551615u64, 36)["3w5e11264sgsf"]
+#test(9223372036854775808u64, 16)["8000000000000000"]
+#test(0u64, 7)["0"]
+#test(35u64, 36)["z"]
+#test(1u64, 1)[panic("to_radix_u64: radix 1 is not between 2 and 36")]
+pub fun to_radix_u64(n: uint64, radix: int) -> str {
+    check_radix("to_radix_u64", radix)
+    return radix_digits(n, radix as uint64, 0, false)
+}
+
+// `n` in lower-case hex, with leading zeros up to `width` digits.
+#test(255u64, 0)["ff"]
+#test(255u64, 4)["00ff"]
+#test(255u64, 2)["ff"]
+#test(255u64, 1)["ff"]
+#test(0u64, 0)["0"]
+#test(0u64, 8)["00000000"]
+#test(0u64, -3)["0"]
+#test(18446744073709551615u64, 0)["ffffffffffffffff"]
+#test(18446744073709551615u64, 20)["0000ffffffffffffffff"]
+#test(3735928559u64, 16)["00000000deadbeef"]
+pub fun to_hex(n: uint64, width: int = 0) -> str {
+    return radix_digits(n, 16, width, false)
+}
+
+// `n` in binary, with leading zeros up to `width` digits.
+#test(5u64, 0)["101"]
+#test(5u64, 8)["00000101"]
+#test(0u64, 0)["0"]
+#test(0u64, 4)["0000"]
+#test(255u64, 4)["11111111"]
+#test(18446744073709551615u64, 0)["1111111111111111111111111111111111111111111111111111111111111111"]
+#test(9223372036854775808u64, 64)["1000000000000000000000000000000000000000000000000000000000000000"]
+pub fun to_binary(n: uint64, width: int = 0) -> str {
+    return radix_digits(n, 2, width, false)
+}
+
+// Whether `r` is `Ok(v)`, and whether it is an `Err(ParseIntError.Overflow)`.
+fun gives_i64(r: Result<int64, ParseIntError>, v: int64) -> bool {
+    return match r {
+        Ok(x) => x == v
+        Err(_) => false
+    }
+}
+
+fun gives_u64(r: Result<uint64, ParseIntError>, v: uint64) -> bool {
+    return match r {
+        Ok(x) => x == v
+        Err(_) => false
+    }
+}
+
+fun overflows_i64(r: Result<int64, ParseIntError>) -> bool {
+    return match r {
+        Ok(_) => false
+        Err(e) => e == ParseIntError.Overflow
+    }
+}
+
+fun overflows_u64(r: Result<uint64, ParseIntError>) -> bool {
+    return match r {
+        Ok(_) => false
+        Err(e) => e == ParseIntError.Overflow
+    }
+}
+
+// The two strings just past `limit` in radix `r` that the parse must refuse:
+// one that passes it in the last multiply, and, when the last digit of
+// `limit` isn't the largest, one that passes it in the last add.
+fun just_past(limit: uint64, r: int) -> [str] {
+    let q = limit / r as uint64
+    let rem = limit % r as uint64
+    var out = [to_radix_u64(q + 1, r) + "0"]
+    if rem + 1 < r as uint64 {
+        out.push(to_radix_u64(q, r) + to_radix_u64(rem + 1, r))
+    }
+    return out
+}
+
+// In every radix, int64's and uint64's extremes print and read back, and
+// the values just past them overflow.
+#test
+fun radix_extremes() {
+    let max: int64 = 9223372036854775807
+    let min: int64 = -9223372036854775807i64 - 1i64
+    let umax: uint64 = 18446744073709551615u64
+    var r = 2
+    while r <= 36 {
+        assert(gives_i64(parse_int_radix(to_radix(max, r), r), max), f"int64 max, radix {r}")
+        assert(gives_i64(parse_int_radix(to_radix(min, r), r), min), f"int64 min, radix {r}")
+        assert(gives_i64(parse_int_radix("+" + to_radix(max, r), r), max), f"+max, radix {r}")
+        assert(gives_i64(parse_int_radix("-0", r), 0), f"-0, radix {r}")
+        assert(overflows_i64(parse_int_radix("000" + to_radix(min, r)[1:], r)), f"min without its sign, radix {r}")
+        assert(gives_u64(parse_uint64_radix(to_radix_u64(umax, r), r), umax), f"uint64 max, radix {r}")
+        assert(gives_u64(parse_uint64_radix("00" + to_radix_u64(umax, r), r), umax), f"leading zeros, radix {r}")
+        for s in just_past(max as uint64, r) {
+            assert(overflows_i64(parse_int_radix(s, r)), f"past int64 max: {s}, radix {r}")
+        }
+        for s in just_past(9223372036854775808u64, r) {
+            assert(overflows_i64(parse_int_radix("-" + s, r)), f"past int64 min: -{s}, radix {r}")
+        }
+        for s in just_past(umax, r) {
+            assert(overflows_u64(parse_uint64_radix(s, r)), f"past uint64 max: {s}, radix {r}")
+        }
+        r += 1
+    }
+}
+
+// The widths are optional, and a parse in radix 10 is the decimal one.
+#test
+fun defaults_and_decimal() {
+    assert(to_hex(48879) == "beef", "to_hex without a width")
+    assert(to_binary(6) == "110", "to_binary without a width")
+    assert(to_hex(48879, 6) == "00beef", "to_hex with a width")
+    assert(gives_i64(parse_int_radix("-123", 10), -123), "decimal")
+    assert(gives_u64(parse_uint64("0018446744073709551615"), 18446744073709551615u64), "uint64 with leading zeros")
+}

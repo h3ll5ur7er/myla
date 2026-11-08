@@ -400,9 +400,13 @@ async fun main() {
     print(await t)
     print(await big())
     print(await missing())
+    // the timeout ends the 5-second child: timed from the timeout itself, so
+    // the interpreter's speed on the 400 KB above doesn't count (its copy
+    // took most of 3 s interpreted on a loaded machine)
+    let before = time.now_ms()
     let r = await task.timeout(50, async () => await slow())
     print(match r { Some(v) => "finished", None => "timed out" })
-    print(time.now_ms() - start < 3000)
+    print(time.now_ms() - before < 3000)
     print(match process.run("/bin/sh", ["-c", "echo sync"]) { Ok(o) => text(o.stdout), Err(e) => -1 })
 }
 """

@@ -1,0 +1,17 @@
+//~ type error: map key type must be Eq and Hash, found 'T': it needs the bound 'T: Eq + Hash'
+// A map keyed by a type parameter needs the bound written, in a signature
+// as in a body (D163, D167): `fun one<T: Eq + Hash>` is the fix.
+struct P {
+    a: int,
+}
+
+fun one<T>(x: T) -> [T: int] {
+    var m: [T: int] = [:]
+    m[x] = 1
+    return m
+}
+
+#main
+fun main() {
+    print(one(P { a: 1 }).len())
+}

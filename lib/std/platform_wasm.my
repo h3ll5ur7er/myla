@@ -241,8 +241,15 @@ pub fun open_write(path: str) -> int64 {
     return open_with(path, 9)  // OFLAGS_CREAT | OFLAGS_TRUNC
 }
 
+// A directory opened to read it from its start: its descriptor's cookie
+// (`dir_read`) starts at 0, whatever an earlier descriptor of that number,
+// or one 64 apart, left there.
 pub fun open_dir(path: str) -> int64 {
-    return open_with(path, 2)  // OFLAGS_DIRECTORY
+    let fd = open_with(path, 2)  // OFLAGS_DIRECTORY
+    if fd >= 0 {
+        __store64(__rt_addr("__wasi_cookies") + 8 * (fd & 63), 0)
+    }
+    return fd
 }
 
 // One read or write of `n` bytes at `buf` (`op`: the import).
@@ -670,6 +677,15 @@ pub fun unmap_memory(p: int64, n: int64) {
 
 pub fun clock_ns() -> int64 {
     arg(0, 1)  // CLOCKID_MONOTONIC
+    arg(1, 1)
+    arg(2, scratch(6))
+    let r = call(W_CLOCK_TIME_GET)
+    return __load64(scratch(6))
+}
+
+// The wall clock, in nanoseconds since 1970-01-01T00:00:00Z.
+pub fun wall_ns() -> int64 {
+    arg(0, 0)  // CLOCKID_REALTIME
     arg(1, 1)
     arg(2, scratch(6))
     let r = call(W_CLOCK_TIME_GET)

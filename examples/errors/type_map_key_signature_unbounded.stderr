@@ -1,0 +1,5 @@
+type error: map key type must be Eq and Hash, found 'T': it needs the bound 'T: Eq + Hash'
+  --> examples/errors/type_map_key_signature_unbounded.my:8:1
+  |
+8 | fun one<T>(x: T) -> [T: int] {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

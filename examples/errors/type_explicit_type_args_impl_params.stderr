@@ -1,0 +1,5 @@
+type error: method 'size' takes no type arguments: it has no type parameters of its own, and its impl's come from the receiver
+  --> examples/errors/type_explicit_type_args_impl_params.my:15:18
+   |
+15 |     print(b.size<str>())
+   |                  ^^^

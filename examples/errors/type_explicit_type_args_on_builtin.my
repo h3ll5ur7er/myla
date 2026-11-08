@@ -1,0 +1,6 @@
+//~ type error: function 'print' is not generic (it takes no type arguments)
+//~ span: str
+// A builtin takes no explicit type arguments either (D169).
+fun main() {
+    print<str>("hi")
+}

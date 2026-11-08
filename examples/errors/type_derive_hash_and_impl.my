@@ -1,0 +1,18 @@
+//~ type error: type 'Pos' both derives Hash and has an explicit 'impl Hash for Pos'
+// A type has one `Hash`: derived, or written by hand (D163).
+#derive(Eq, Hash)
+struct Pos {
+    x: int,
+    y: int,
+}
+
+impl Hash for Pos {
+    fun hash(self, h: Hasher) -> Hasher {
+        return h.add(self.x)
+    }
+}
+
+#main
+fun main() {
+    print(Pos { x: 1, y: 2 } == Pos { x: 1, y: 2 })
+}

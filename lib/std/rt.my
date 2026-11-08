@@ -157,6 +157,44 @@ pub fun str_eq(a: str, b: str) -> bool {
     return __equal_bytes(pa + 8, pb + 8, n)
 }
 
+// `a < b` and the other orderings of strings (MYLA-318): -1, 0 or 1, as
+// `Ord`'s `cmp` gives them, by the first byte that differs (unsigned), or
+// the shorter first when one begins the other; the order `list_dir` sorts
+// in. Eight bytes at a time while they agree (its cases are the parity
+// programs' `string_ordering`).
+pub fun str_cmp(a: str, b: str) -> int64 {
+    let pa = __addr_of(a) + 8
+    let pb = __addr_of(b) + 8
+    let na = __load64(pa - 8)
+    let nb = __load64(pb - 8)
+    var n = na
+    if nb < n {
+        n = nb
+    }
+    var i: int64 = 0
+    while i + 8 <= n && __load64(pa + i) == __load64(pb + i) {
+        i += 8
+    }
+    while i < n {
+        let x = __load8(pa + i)
+        let y = __load8(pb + i)
+        if x != y {
+            if x < y {
+                return -1
+            }
+            return 1
+        }
+        i += 1
+    }
+    if na < nb {
+        return -1
+    }
+    if na > nb {
+        return 1
+    }
+    return 0
+}
+
 // --- files and directories (the platform's, `std.platform`) ----------------
 //
 // Each sets the errno `std.io` reports: 0, or the failed call's.
@@ -814,6 +852,14 @@ fun decode_at(p: int64, i: int64, n: int64) -> int64 {
     return cp | (need << 32)
 }
 
+// The character at byte `i` of `s` (`decode_at`, whose `cp | len << 32` it
+// gives): a `for c in s` loop's step at a byte that isn't ASCII (MYLA-318;
+// raw memory, so its cases are the parity programs' `for_over_a_string`).
+pub fun str_char_at(s: str, i: int64) -> int64 {
+    let p = __addr_of(s) + 8
+    return decode_at(p, i, __load64(p - 8))
+}
+
 // `__str_chars` (`s.chars()`): the code points of `s`, U+FFFD for each byte
 // that isn't part of a well-formed UTF-8 sequence.
 pub fun str_chars(s: str) -> [char] {
@@ -862,8 +908,9 @@ const PHI: int64 = -7046029254386353131  // 2^64 / the golden ratio
 // mixed in with a multiply by 2^64/phi and a rotation, the high half folded
 // into the low one, which picks the slot. A value's hash is the value
 // multiplied by 2^64/phi, folded the same way. The assembly's `__map_hash`
-// computes the same, which the other map routines still use.
-fun str_hash(key: int64) -> int64 {
+// computes the same, which the other map routines still use. A compound
+// key's hash routine (`__khash_<K>`, MYLA-313) mixes its strings in with it.
+pub fun str_hash(key: int64) -> int64 {
     var n = __load64(key)
     var p = key + 8
     var h = n * PHI
@@ -1160,6 +1207,163 @@ fun map_key_to(at: int64, slot: int64, stride: int64, is_str: int64) {
     } else {
         __store8(at, k as uint8)
     }
+}
+
+// --- maps with compound keys ---------------------------------------------------
+//
+// A key that isn't an integer, `char`, `bool` or `str` (a tuple, a struct,
+// an enum, a list: any `Eq + Hash` type, D163, MYLA-313) has a hash and an
+// equality routine of its own, which the code generator builds for its type
+// (`__khash_<K>`, `__keq_<K>`) with the routines that find and make its slot
+// (`__mfind_<K>`, `__mput_<K>`). Its slot is `[state:8][hash:8][key][value]
+// [rank:8]`: the key's words are in it as a value's are, and the hash beside
+// them, so the routines below probe, compact and list the keys without
+// calling a routine of the key's type. The integers', `char`'s, `bool`'s and
+// `str`'s maps keep the routines above.
+
+// The next full slot after `after` (0: from the start) on the probe of the
+// hash `h` in the map `cell` whose hash is `h`, or 0 where an empty slot
+// ends the probe: the candidates `__mfind_<K>` compares with its key.
+pub fun map_find_h(cell: int64, h: int64, slot_size: int64, after: int64) -> int64 {
+    let cap = __load64(cell + 8)
+    if cap == 0 {
+        return 0
+    }
+    let mask = cap - 1
+    let slots = cell + 16
+    var i = h & mask
+    if after != 0 {
+        i = ((after - slots) / slot_size + 1) & mask
+    }
+    while true {
+        let slot = slots + i * slot_size
+        let state = __load64(slot)
+        if state == 0 {
+            return 0
+        }
+        if state == 1 && __load64(slot + 8) == h {
+            return slot
+        }
+        i = (i + 1) & mask
+    }
+    return 0
+}
+
+// A new slot for a key with the hash `h` that the map at `holder` lacks:
+// room made as `map_put_slot` makes it (the new cell stored back), then the
+// first tombstone or empty slot on its probe, full, with its hash and the
+// next rank. The caller copies the key and the value in.
+pub fun map_slot_h(holder: int64, h: int64, slot_size: int64) -> int64 {
+    var cell = __load64(holder)
+    let cap = __load64(cell + 8)
+    if cap == 0 || (__load64(map_next_rank(cell, slot_size)) + 1) * 4 >= cap * 3 {
+        let count = __load64(cell)
+        var fit: int64 = 8
+        while (count + 1) * 2 > fit {
+            fit = fit * 2
+        }
+        cell = map_rehash_h(cell, slot_size, fit)
+        __store64(holder, cell)
+    }
+    return map_place_h(cell, h, slot_size)
+}
+
+// `map_slot_h`'s slot in the map `cell`, which has room.
+fun map_place_h(cell: int64, h: int64, slot_size: int64) -> int64 {
+    let mask = __load64(cell + 8) - 1
+    let slots = cell + 16
+    var i = h & mask
+    while true {
+        let slot = slots + i * slot_size
+        let state = __load64(slot)
+        if state != 1 {
+            let next = slots + (mask + 1) * slot_size
+            let rank = __load64(next)
+            __store64(slot, 1)
+            __store64(slot + 8, h)
+            __store64(slot + slot_size - 8, rank)
+            __store64(next, rank + 1)
+            __store64(cell, __load64(cell) + 1)
+            return slot
+        }
+        i = (i + 1) & mask
+    }
+    return 0
+}
+
+// `map_rehash` of a map with compound keys: each key and value moved by its
+// hash, the references with them.
+fun map_rehash_h(cell: int64, slot_size: int64, cap: int64) -> int64 {
+    let fresh = map_new(cap, slot_size)
+    let count = __load64(cell)
+    let next = __load64(map_next_rank(cell, slot_size))
+    if next == count {
+        var slot = cell + 16
+        let end = slot + __load64(cell + 8) * slot_size
+        while slot < end {
+            if __load64(slot) == 1 {
+                let at = map_moved_h(fresh, slot, slot_size)
+                __store64(at + slot_size - 8, __load64(slot + slot_size - 8))
+            }
+            slot += slot_size
+        }
+    } else {
+        let by_rank = map_by_rank(cell, slot_size, next)
+        var r: int64 = 0
+        while r < next {
+            let slot = __load64(by_rank + r * 8)
+            if slot != 0 {
+                map_moved_h(fresh, slot, slot_size)
+            }
+            r += 1
+        }
+        __free(by_rank)
+    }
+    __free(cell)
+    return fresh
+}
+
+// The key and value of the full `slot` moved into the map `fresh`, ranked
+// next there: its new slot.
+fun map_moved_h(fresh: int64, slot: int64, slot_size: int64) -> int64 {
+    let at = map_place_h(fresh, __load64(slot + 8), slot_size)
+    __copy_bytes(at + 16, slot + 16, slot_size - 24)
+    return at
+}
+
+// The keys of the map `cell` with compound keys, `key_size` bytes each, in a
+// new list in the order of insertion; no reference taken (`__mkeys_<K>`
+// takes them).
+pub fun map_keys_h(cell: int64, slot_size: int64, key_size: int64) -> int64 {
+    let count = __load64(cell)
+    let list = __alloc(count * key_size + 16)
+    __store64(list, count)
+    __store64(list + 8, count)
+    let next = __load64(map_next_rank(cell, slot_size))
+    if next == count {
+        var slot = cell + 16
+        let end = slot + __load64(cell + 8) * slot_size
+        while slot < end {
+            if __load64(slot) == 1 {
+                __copy_bytes(list + 16 + __load64(slot + slot_size - 8) * key_size, slot + 16, key_size)
+            }
+            slot += slot_size
+        }
+        return list
+    }
+    let by_rank = map_by_rank(cell, slot_size, next)
+    var at = list + 16
+    var r: int64 = 0
+    while r < next {
+        let slot = __load64(by_rank + r * 8)
+        if slot != 0 {
+            __copy_bytes(at, slot + 16, key_size)
+            at += key_size
+        }
+        r += 1
+    }
+    __free(by_rank)
+    return list
 }
 
 // --- string builders ---------------------------------------------------------
@@ -2187,6 +2391,12 @@ fun exec_all_waiting() -> bool {
 // `__clock_ns`: the monotonic clock in nanoseconds.
 pub fun clock_ns() -> int64 {
     return os.clock_ns()
+}
+
+// `__wall_ns`: the wall clock, nanoseconds since 1970-01-01T00:00:00Z
+// (MYLA-334, `std.time.now_utc`).
+pub fun wall_ns() -> int64 {
+    return os.wall_ns()
 }
 
 // `__sleep_ns`: the thread asleep for `n` nanoseconds (`await __sleep(ms)`

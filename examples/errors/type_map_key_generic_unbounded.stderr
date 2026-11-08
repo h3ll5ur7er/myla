@@ -1,0 +1,5 @@
+type error: map key type must be Eq and Hash, found 'T': it needs the bound 'T: Eq + Hash'
+  --> examples/errors/type_map_key_generic_unbounded.my:5:15
+  |
+5 |     var seen: [T: bool] = [:]
+  |               ^^^^^^^^^

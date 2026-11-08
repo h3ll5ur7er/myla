@@ -1,0 +1,11 @@
+//~ module error: unknown module 'geo' in the type 'geo.Point'
+//~ span: geo.Point
+// A dotted name in a type is a module's type: `geo` must be a module this
+// file binds with `import … as geo` (D170).
+fun origin() -> geo.Point {
+    return origin()
+}
+
+fun main() {
+    print(0)
+}

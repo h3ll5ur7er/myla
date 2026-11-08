@@ -1,0 +1,5 @@
+type error: cannot compare values of type '[[str: int32]]': '[str: int32]' isn't Eq
+  --> examples/errors/type_list_of_maps_not_eq.my:6:13
+  |
+6 |     print(a == a)
+  |           ^^^^^^

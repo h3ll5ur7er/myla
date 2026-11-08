@@ -1,0 +1,21 @@
+//~ type error: method 'mapped' expects 1 type argument(s), got 2
+//~ span: int, str
+// A method's explicit type arguments name its own type parameters, not its
+// impl's: the receiver gives `T`, so `mapped` takes one (D169).
+struct B<T> {
+    items: [T],
+}
+impl<T> B<T> {
+    fun mapped<U>(self, f: (T) -> U) -> B<U> {
+        var out: [U] = []
+        for x in self.items {
+            out.push(f(x))
+        }
+        return B { items: out }
+    }
+}
+fun main() {
+    let b = B { items: [1, 2] }
+    let c = b.mapped<int, str>((x) => f"{x}")
+    print(c.items.len())
+}

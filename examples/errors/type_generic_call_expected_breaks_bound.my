@@ -1,0 +1,17 @@
+//~ type error: type 'P' does not satisfy the bound 'T: Ord' required by 'new_heap'
+//~ span: new_heap()
+// A type parameter the expected type fixes (MYLA-315) is held to its bounds
+// like one the arguments fix: `P` has no `Ord`.
+struct Heap<T> {
+    items: [T],
+}
+struct P {
+    x: int,
+}
+fun new_heap<T: Ord>() -> Heap<T> {
+    return Heap { items: [] }
+}
+fun main() {
+    let h: Heap<P> = new_heap()
+    print(0)
+}

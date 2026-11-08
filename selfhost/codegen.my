@@ -22,7 +22,7 @@ from .inline import inlinable, inline_calls, same_module, may_inline, merge_bloc
 from .hoist import hoist_cows
 from .ranges import widen_counters
 from .anf import Norm, new_norm
-from .lower import async_fnval_ir, lower_function, lower_lambda, blocked_types, Lowered, myla_runtime_function, derived_eq_ir, walk_ir, drop_entry_ir, dropb_slow_ir, list_drop_slow_ir, map_drop_slow_ir, clone_ir, deep_walk_ir, deep_cell_ir, Routine, Want, env_drop_ir, env_deep_ir, partial_ir, frame_new_ir
+from .lower import async_fnval_ir, lower_function, lower_lambda, blocked_types, Lowered, myla_runtime_function, derived_eq_ir, compound_eq_ir, tuple_hash_ir, key_hash_ir, key_eq_ir, map_find_ir, map_put_ir, map_keys_ir, walk_ir, drop_entry_ir, dropb_slow_ir, list_drop_slow_ir, map_drop_slow_ir, clone_ir, deep_walk_ir, deep_cell_ir, Routine, Want, env_drop_ir, env_deep_ir, partial_ir, frame_new_ir
 import .ir_x86 as ir_x86
 import .ownership as ownership
 import .runtime_x86 as runtime_x86
@@ -101,6 +101,11 @@ pub struct CodeGen {
     // Reference-counting helper worklists: concrete owning types whose per-type
     // drop/clone routines must be emitted (deduped by mangled token).
     need_drop: [Type],
+    // the routines on values of a type that call functions (MYLA-313: the
+    // equality of a tuple or list, a map key's hash and equality), still to
+    // be emitted, and the names of those queued; drained with the functions
+    type_jobs: [Want],
+    type_jobs_seen: [str: bool],
     drop_emitted: [str],
     need_clone: [Type],
     clone_emitted: [str],
@@ -327,7 +332,7 @@ pub fun new_codegen(c: Checker) -> CodeGen {
         lam_jobs: [], lam_seen: [:], partial_jobs: [], fnval_set: [],
         uses_float: false,
         epilogue: "", ret_type: None,
-        need_drop: [], drop_emitted: [], need_clone: [], clone_emitted: [],
+        need_drop: [], type_jobs: [], type_jobs_seen: [:], drop_emitted: [], need_clone: [], clone_emitted: [],
         need_walk: [], need_deep: [], deep_inline: [], deep_clone: [], need_deepc: [], deepc_clone: [], walk_retain: [], walk_emitted: [], helper_seen: [:],
         need_sb: false,
         line_spans: [], prelude_id: 0,
@@ -779,6 +784,10 @@ impl CodeGen {
                 let state = self.dbg_base(Type.TInt(64, false), 8)
                 let key = self.dbg_element(k)
                 let value = self.dbg_element(v)
+                if self.map_hashed(t) {
+                    // a compound key's slot keeps its hash (MYLA-313)
+                    return self.dbg_struct_lines("slot", size, ["state", "hash", "key", "value", "order"], [state, state, key, value, state], [0, 8, 16, self.map_val_off(t), size - 8])
+                }
                 return self.dbg_struct_lines("slot", size, ["state", "key", "value", "order"], [state, key, value, state], [0, 8, 16, size - 8])
             },
             _ => {},
@@ -1190,7 +1199,7 @@ impl CodeGen {
     // returned, so a variable a call in it passes is its last use.
     fun scan_expr(var self, e: Expr, in_return: bool) {
         match e.kind {
-            ExprKind.Call(callee, args) => {
+            ExprKind.Call(callee, args, _) => {
                 // a constructor's payload, or the value `push` appends, is
                 // kept; the call's arguments are counted
                 var stores = false
@@ -1310,6 +1319,21 @@ impl CodeGen {
             match d.kind {
                 DeclKind.StructDecl(name, fields, attrs, tps, isp, act) => { if name == key { return tps.len() == 0 && attrs_have_derive_eq(attrs) } },
                 DeclKind.EnumDecl(name, variants, attrs, tps, isp) => { if name == key { return tps.len() == 0 && attrs_have_derive_eq(attrs) } },
+                _ => {},
+            }
+        }
+        return false
+    }
+
+    // Whether the struct or enum `key` derives `Hash` (D163): a map key of it
+    // is hashed by its members, not through its `hash` (MYLA-313).
+    #test(codegen_on("#derive(Eq, Hash)\nstruct P { x: int }"), "P")[true]
+    #test(codegen_on("struct P { x: int }"), "P")[false]
+    fun derives_hash(self, key: str) -> bool {
+        for d in self.decls {
+            match d.kind {
+                DeclKind.StructDecl(name, fields, attrs, tps, isp, act) => { if name == key { return attrs_derive(attrs, "Hash") } },
+                DeclKind.EnumDecl(name, variants, attrs, tps, isp) => { if name == key { return attrs_derive(attrs, "Hash") } },
                 _ => {},
             }
         }
@@ -1888,7 +1912,7 @@ impl CodeGen {
                     return CtorInfo { ok: true, enum_name: enm, variant: n, args: [] }
                 }
             },
-            ExprKind.Call(callee, args) => {
+            ExprKind.Call(callee, args, _) => {
                 let qn = expr_name(callee_target(callee))
                 let cfield = getfield_name(callee)
                 if cfield != "" && qn != "" && self.is_enum_name(qn) {
@@ -1943,12 +1967,16 @@ impl CodeGen {
         let ps = self.request_fn("std$rt$print_str", [])
         var draining = true
         while draining {
-            while self.fn_worklist.len() > 0 || self.lam_jobs.len() > 0 {
+            while self.fn_worklist.len() > 0 || self.lam_jobs.len() > 0 || self.type_jobs.len() > 0 {
                 if self.fn_worklist.len() > 0 {
                     let job = self.fn_worklist.pop()
                     self.subst = job.subst
                     self.gen_any_function(self.sig_of(job.orig).decl, job.mangled)
                     self.subst = []
+                } else if self.type_jobs.len() > 0 {
+                    // a routine that may call functions, which join the
+                    // worklist (MYLA-313)
+                    self.emit_type_job(self.type_jobs.pop())
                 } else {
                     let lj = self.lam_jobs.pop()
                     if self.lam_seen.contains(lj.lifted) { continue }
@@ -2006,13 +2034,27 @@ impl CodeGen {
     }
 
     // Solve a generic callee's type arguments (in declaration order) by unifying
-    // its declared parameter types against the concrete argument types.
-    fun solve_targs(self, sig: FuncSig, args: [Expr]) -> [Type] {
+    // its declared parameter types against the concrete argument types, then
+    // its result type against the type of the call `call_id`, which gives
+    // those the checker took from the call's expected type (MYLA-315).
+    fun solve_targs(self, sig: FuncSig, args: [Expr], call_id: int32, explicit: [TypeExpr]) -> [Type] {
         var sub: [Subst] = []
+        // the explicit type arguments name the last type parameters, a
+        // method's own (D169); the checker kept their types with their nodes
+        let base = sig.type_params.len() - explicit.len()
+        var k = 0
+        while k < explicit.len() && base >= 0 {
+            if self.has_type(explicit[k].id) { sub.push(Subst { name: sig.type_params[base + k], ty: self.type_of(explicit[k].id) }) }
+            k += 1
+        }
         var i = 0
         while i < sig.params.len() && i < args.len() {
             for b in unify_into(sig.params[i], self.type_of(args[i].id)) { sub.push(b) }
             i = i + 1
+        }
+        match sig.ret {
+            Some(rt) => { if self.has_type(call_id) { for b in unify_into(rt, self.type_of(call_id)) { sub.push(b) } } },
+            None => {},
         }
         var out: [Type] = []
         for tp in sig.type_params {
@@ -2413,6 +2455,10 @@ impl CodeGen {
                     _ => {},
                 }
             }
+        }
+        // the routines on its values it calls (MYLA-313)
+        for w in l.wants {
+            if w.kind >= 7 { self.request_wants([w]) }
         }
         for lj in l.lams { self.lam_jobs.push(lj) }
         for pj in l.partials {
@@ -2894,7 +2940,47 @@ impl CodeGen {
     #test(codegen_on("[int]"), Type.TMap(Type.TStr, Type.TInt(32, true)))[32]
     // `[state:8][key:8][value][rank:8]`: the rank is the key's place in the
     // order of insertion, 0 … count - 1 (D105, MYLA-179)
-    fun map_slot_size(self, mt: Type) -> int32 { return 24 + self.stored_size(map_val(mt)) }
+    fun map_slot_size(self, mt: Type) -> int32 {
+        if self.map_hashed(mt) { return 24 + self.map_key_size(mt) + self.stored_size(map_val(mt)) }
+        return 24 + self.stored_size(map_val(mt))
+    }
+
+    // Whether the keys of the map type `mt` have routines of their own (D163,
+    // MYLA-313): any key but an integer, `char`, `bool` or `str`, which keep
+    // std.rt's `map_lookup` and `map_put_slot`. Such a slot is
+    // `[state:8][hash:8][key][value][rank:8]`, its key's words in it as a
+    // value's are, its hash kept so that a compaction needs no routine.
+    #test(codegen_on("[int]"), Type.TMap(Type.TStr, Type.TInt(32, true)))[false]
+    #test(codegen_on("[int]"), Type.TMap(Type.TTuple([Type.TInt(32, true), Type.TInt(32, true)]), Type.TInt(32, true)))[true]
+    fun map_hashed(self, mt: Type) -> bool {
+        return match map_key(mt) {
+            Type.TInt(w, sg) => false,
+            Type.TChar => false,
+            Type.TBool => false,
+            Type.TStr => false,
+            _ => true,
+        }
+    }
+
+    // The bytes of a key of the map type `mt` in its slot.
+    #test(codegen_on("[int]"), Type.TMap(Type.TTuple([Type.TInt(32, true), Type.TStr]), Type.TBool))[16]
+    fun map_key_size(self, mt: Type) -> int32 {
+        if !self.map_hashed(mt) { return 8 }
+        return self.stored_size(map_key(mt))
+    }
+
+    // Where a slot of the map type `mt` holds its key and its value.
+    #test(codegen_on("[int]"), Type.TMap(Type.TStr, Type.TBool))[8]
+    fun map_key_off(self, mt: Type) -> int32 {
+        if self.map_hashed(mt) { return 16 }
+        return 8
+    }
+
+    #test(codegen_on("[int]"), Type.TMap(Type.TTuple([Type.TInt(32, true), Type.TStr]), Type.TBool))[32]
+    fun map_val_off(self, mt: Type) -> int32 {
+        if self.map_hashed(mt) { return 16 + self.map_key_size(mt) }
+        return 16
+    }
     #test(codegen_on("[int]"), Type.TMap(Type.TStr, Type.TInt(32, true)))[1]
     fun map_is_str(self, mt: Type) -> int32 {
         if is_str_t(map_key(mt)) { return 1 }
@@ -3125,7 +3211,7 @@ impl CodeGen {
                 for v in self.free_expr(l, bound) { out.push(v) }
                 for v in self.free_expr(r, bound) { out.push(v) }
             },
-            ExprKind.Call(c, args) => {
+            ExprKind.Call(c, args, _) => {
                 for v in self.free_expr(c, bound) { out.push(v) }
                 for a in args { for v in self.free_expr(a, bound) { out.push(v) } }
             },
@@ -3215,14 +3301,38 @@ impl CodeGen {
         for d in self.decls {
             match d.kind {
                 DeclKind.StructDecl(name, fields, attrs, tps, isp, act) => {
-                    if tps.len() == 0 && attrs_have_derive_eq(attrs) { self.emit_routine(derived_eq_ir(self, name, false), d.id, d.line, d.col) }
+                    if tps.len() == 0 && attrs_have_derive_eq(attrs) {
+                        let r = derived_eq_ir(self, name, false)
+                        self.emit_routine(r.f, d.id, d.line, d.col)
+                        self.request_wants(r.wants)
+                    }
                 },
                 DeclKind.EnumDecl(name, variants, attrs, tps, isp) => {
-                    if tps.len() == 0 && attrs_have_derive_eq(attrs) { self.emit_routine(derived_eq_ir(self, name, true), d.id, d.line, d.col) }
+                    if tps.len() == 0 && attrs_have_derive_eq(attrs) {
+                        let r = derived_eq_ir(self, name, true)
+                        self.emit_routine(r.f, d.id, d.line, d.col)
+                        self.request_wants(r.wants)
+                    }
                 },
                 _ => {},
             }
         }
+    }
+
+    // A routine `type_jobs` holds (see `type_job_name`), built as IR and
+    // emitted, what it calls requested (MYLA-313).
+    fun emit_type_job(var self, w: Want) {
+        let name = type_job_name(w)
+        var r = Routine { f: empty_ir(name), wants: [] }
+        if w.kind == 7 { r = compound_eq_ir(self, w.t, name) }
+        if w.kind == 8 { r = tuple_hash_ir(self, w.t, name) }
+        if w.kind == 9 { r = key_hash_ir(self, w.t, name) }
+        if w.kind == 10 { r = key_eq_ir(self, w.t, name) }
+        if w.kind == 11 { r = map_find_ir(self, w.t, name) }
+        if w.kind == 12 { r = map_put_ir(self, w.t, name) }
+        if w.kind == 13 { r = map_keys_ir(self, w.t, name) }
+        self.emit_routine(r.f, -1, 0, 0)
+        self.request_wants(r.wants)
     }
 
     // An environment's routine built as IR (`myla_<lifted>_env_…`, the label
@@ -3250,6 +3360,14 @@ impl CodeGen {
             if w.kind == 4 { let n4 = self.register_walk(w.t, false) }
             if w.kind == 5 { let n5 = self.register_walk(w.t, true) }
             if w.kind == 6 { self.register_drop(w.t) }
+            if w.kind >= 7 {
+                // drained with the functions, as it may call some
+                let n = type_job_name(w)
+                if !self.type_jobs_seen.contains(n) {
+                    self.type_jobs_seen[n] = true
+                    self.type_jobs.push(w)
+                }
+            }
         }
     }
 
@@ -3257,7 +3375,7 @@ impl CodeGen {
     // (`myla_<its name>`) where the type `decl_id` is declared: checked,
     // its small leaf callees inlined, the functions it calls requested.
     fun emit_routine(var self, f: IrFunc, decl_id: int32, line: int32, col: int32) {
-        let g = self.take_ir(Ok(Lowered { f: f, lams: [], partials: [], fnvals: [], refused: [] }), f.name)
+        let g = self.take_ir(Ok(Lowered { f: f, lams: [], partials: [], fnvals: [], refused: [], wants: [] }), f.name)
         self.emit_ir_at(g, decl_id, line, col, f.name)
     }
 
@@ -3578,7 +3696,7 @@ pub fun place_root(e: Expr) -> str {
 #test(expr_of("-n * 2"))[true]
 fun is_new_value(e: Expr) -> bool {
     return match e.kind {
-        ExprKind.Call(c, args) => true,
+        ExprKind.Call(c, args, _) => true,
         ExprKind.Binary(op, l, r) => true,
         ExprKind.ListLit(es) => true,
         ExprKind.MapLit(entries) => true,
@@ -3697,7 +3815,7 @@ pub fun may_write_expr(e: Expr, name: str) -> bool {
         ExprKind.Unary(op, x) => { return may_write_expr(x, name) },
         ExprKind.Await(x) => { return may_write_expr(x, name) },
         ExprKind.Binary(op, l, r) => { return may_write_expr(l, name) || may_write_expr(r, name) },
-        ExprKind.Call(c, args) => {
+        ExprKind.Call(c, args, _) => {
             let writes = match c.kind {
                 ExprKind.GetField(recv, m) => place_root(recv) == name,
                 ExprKind.Name(f) => is_mutating_builtin(f) && args.len() > 0 && place_root(args[0]) == name,
@@ -3914,10 +4032,15 @@ pub fun is_builtin_call_name(nm: str) -> bool {
 
 #test([])[false]
 fun attrs_have_derive_eq(attrs: [Attribute]) -> bool {
+    return attrs_derive(attrs, "Eq")
+}
+
+// Whether `attrs` derive the trait `trnm`.
+fun attrs_derive(attrs: [Attribute], trnm: str) -> bool {
     for a in attrs {
         if a.name == "derive" {
             for arg in a.args {
-                match arg.kind { ExprKind.Name(n) => { if n == "Eq" { return true } }, _ => {} }
+                match arg.kind { ExprKind.Name(n) => { if n == trnm { return true } }, _ => {} }
             }
         }
     }
@@ -4041,6 +4164,29 @@ fun join_tokens(xs: [Type]) -> str {
 #test(".F4.i32R4.i32")["13.F4.i32R4.i32"]
 fun lp(tok: str) -> str {
     return format("{}{}", tok.len(), tok)
+}
+
+// The name of the routine a `Want` of kind 7 or more asks for (MYLA-313):
+// 7 `__eq_<T>`, the equality of a tuple or list type; 8 `__thash_<T>`, a
+// tuple's `hash`; for a map key type `T` with routines of its own
+// (`map_hashed`), 9 `__khash_<T>` its hash, 10 `__keq_<T>` its equality,
+// 11 `__mfind_<T>` its slot, 12 `__mput_<T>` its slot made, 13 `__mkeys_<T>`
+// the keys of a map.
+#test(Want { kind: 7, t: Type.TTuple([Type.TInt(32, true), Type.TStr]), clone: false })["__eq_.T4.i324.str"]
+#test(Want { kind: 8, t: Type.TTuple([Type.TChar]), clone: false })["__thash_.T5.char"]
+pub fun type_job_name(w: Want) -> str {
+    if w.kind == 8 { return "__thash_" + mono_token(w.t) }
+    if w.kind == 9 { return "__khash_" + mono_token(w.t) }
+    if w.kind == 10 { return "__keq_" + mono_token(w.t) }
+    if w.kind == 11 { return "__mfind_" + mono_token(w.t) }
+    if w.kind == 12 { return "__mput_" + mono_token(w.t) }
+    if w.kind == 13 { return "__mkeys_" + mono_token(w.t) }
+    return "__eq_" + mono_token(w.t)
+}
+
+// An IR function `name` with nothing in it yet.
+fun empty_ir(name: str) -> IrFunc {
+    return IrFunc { name: name, ret: None, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false, scope_parent: [-1] }
 }
 
 // The suffix naming a map type's helpers.

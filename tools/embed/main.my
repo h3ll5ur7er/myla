@@ -7,11 +7,14 @@
 //                                          the directory gives
 //
 // scripts/bootstrap.sh runs it with stage 0 before compiling the compiler, so
-// every stage carries the same library.
+// every stage carries the same library (and std.args, which reads its
+// arguments, must compile with the seed). Any mistake in the arguments, and
+// --help, prints the usage line and exits with status 2.
 
 from std.fs import read_to_string, write_to_file, list_dir, is_dir
 from std.io import println, eprintln
 from std.process import args, exit
+import std.args as cli
 
 // The regular files under `root`/`rel`, as paths relative to `root`, sorted;
 // names starting with "." are left out.
@@ -129,19 +132,24 @@ fun module(root: str, paths: [str]) -> str {
 }
 
 fun main() {
-    let argv = args()
-    if argv.len() < 3 || argv.len() > 4 || (argv.len() == 4 && argv[3] != "--check") {
-        eprintln("usage: embed <lib dir> <module file> [--check]")
-        exit(2)
+    let spec = cli.spec("embed").positional("lib dir").positional("module file").flag("check")
+    let parsed = match cli.parse(spec, args()[1:]) {
+        Ok(a) => a,
+        Err(_) => {
+            // every mistake, and --help, gets the usage line
+            eprintln("usage: embed <lib dir> <module file> [--check]")
+            exit(2)
+            return
+        },
     }
-    let root = argv[1]
-    let out = argv[2]
+    let root = parsed.get_or("lib dir", "")
+    let out = parsed.get_or("module file", "")
     let text = module(root, files(root, ""))
     let current = match read_to_string(out) {
         Ok(t) => t,
         Err(e) => "",
     }
-    if argv.len() == 4 {
+    if parsed.flag("check") {
         if current != text {
             eprintln(f"embed: {out} isn't what {root} gives: run scripts/bootstrap.sh")
             exit(1)

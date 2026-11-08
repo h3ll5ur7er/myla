@@ -1,0 +1,12 @@
+//~ type error: cannot infer type parameter(s) T for 'count' from the arguments
+//~ span: count()
+// The expected type fixes only the type parameters the result names
+// (MYLA-315): `T` appears in neither `count`'s parameters nor its result, so
+// the annotation `int` can't say what it is.
+fun count<T>() -> int {
+    return 0
+}
+fun main() {
+    let n: int = count()
+    print(n)
+}

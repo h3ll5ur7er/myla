@@ -13,5 +13,6 @@ Options, cheapest first:
 1. A smaller `std.int`: the operations that are the same for every width written once over a bound, if the bounds can carry them, or the generator emitting less.
 2. Checking a method's body only when the program calls it, or caching the result for the embedded library, whose text is fixed per build.
 
-- [ ] A profile of hello-world's check with the six modules
+- [ ] std.hash's checksums (FNV-1a, CRC-32, Adler-32) moved to a module of their own, imported as any other (D166): std.hash keeps the `Hasher` and the `Hash` impls
+- [ ] A profile of hello-world's check with the seven modules
 - [ ] The cheapest fix that brings it under 5 ms, measured

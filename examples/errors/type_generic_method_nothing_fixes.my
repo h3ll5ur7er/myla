@@ -1,0 +1,17 @@
+//~ type error: cannot infer type parameter(s) U for method 'emptied'
+//~ span: b.emptied()
+// A generic method's own type parameter, like a function's, is fixed by its
+// arguments or the expected type (MYLA-315); a call statement has neither.
+struct B<T> {
+    items: [T],
+}
+impl<T> B<T> {
+    fun emptied<U>(self) -> B<U> {
+        return B { items: [] }
+    }
+}
+fun main() {
+    let b = B { items: [1] }
+    b.emptied()
+    print(0)
+}

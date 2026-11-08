@@ -1,0 +1,5 @@
+type error: type 'P' does not satisfy the bound 'T: Eq' required by 'one'
+  --> examples/errors/type_map_key_bound_unsatisfied.my:17:14
+   |
+17 |     print(one(P { a: 1 }).len())
+   |           ^^^^^^^^^^^^^^^

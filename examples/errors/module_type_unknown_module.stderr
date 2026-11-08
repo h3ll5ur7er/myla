@@ -1,0 +1,5 @@
+module error: unknown module 'geo' in the type 'geo.Point': a type of another module is named through its 'import … as geo'
+  --> examples/errors/module_type_unknown_module.my:5:17
+  |
+5 | fun origin() -> geo.Point {
+  |                 ^^^^^^^^^

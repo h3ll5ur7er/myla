@@ -1,0 +1,222 @@
+// std.ini: INI files, read and written (MYLA-332, D164).
+//
+// INI has no standard; this module reads the common dialect, close to
+// Python's `configparser` without its interpolation and continuation lines.
+// A line, trimmed of ASCII whitespace, is blank, a comment (it starts with `;`
+// or `#`), a section header `[name]`, or a key and its value split at the
+// first `=` or `:`, both trimmed. Keys before the first header belong to the
+// section "". Names are case-sensitive, values are taken as written (no
+// quotes removed, no escapes, no comment after a value), a section given
+// twice is one section, and a key given twice keeps its first place and its
+// last value. `write` keeps the order of sections and keys.
+
+// What is wrong with a line.
+#derive(Eq)
+pub enum IniErrorKind {
+    // A line that starts with `[` but doesn't end with `]`, or `[]`
+    BadSection,
+    // A line that is neither blank, a comment, a header nor a key and value
+    NoSeparator,
+    // A `=` or `:` with no key before it
+    EmptyKey,
+}
+
+// An error and its line, counted from 1.
+#derive(Eq)
+pub struct IniError {
+    kind: IniErrorKind,
+    line: int,
+}
+
+impl Format for IniError {
+    // `line: what`, e.g. `3: a line without '=' or ':'`.
+    #test(IniError { kind: IniErrorKind.NoSeparator, line: 3 }, "")["3: a line without '=' or ':'"]
+    fun format(self, spec: str) -> str {
+        let what = match self.kind {
+            BadSection => "a section header without its closing ']' or its name"
+            NoSeparator => "a line without '=' or ':'"
+            EmptyKey => "a value without a key"
+        }
+        return f"{self.line}: {what}"
+    }
+}
+
+// The sections of an INI file, each a map from its keys to their values, in
+// the order they came. The section "" holds the keys before the first header.
+pub struct Ini {
+    entries: [str: [str: str]],
+}
+
+// An INI document without sections or keys.
+#test[Ini { entries: ["": [:]] }]
+pub fun new() -> Ini {
+    return Ini { entries: ["": [:]] }
+}
+
+// The INI document that `text` holds.
+#test("a = 1\n[s]\nb: two words \n")[Ok(Ini { entries: ["": ["a": "1"], "s": ["b": "two words"]] })]
+#test("; comment\n# another\n\n  [ s ]  \r\nk=v\r\n")[Ok(Ini { entries: ["": [:], "s": ["k": "v"]] })]
+#test("[s]\nx = 1\n[t]\n[s]\nx = 2\ny = a=b\n")[Ok(Ini { entries: ["": [:], "s": ["x": "2", "y": "a=b"], "t": [:]] })] // merged, last value
+#test("url = http://h/#x ; y")[Ok(Ini { entries: ["": ["url": "http://h/#x ; y"]] })] // no comments after a value
+#test("k =")[Ok(Ini { entries: ["": ["k": ""]] })]
+#test("")[Ok(Ini { entries: ["": [:]] })]
+#test("[s]\nno separator")[Err(IniError { kind: IniErrorKind.NoSeparator, line: 2 })]
+#test("\n[s\n")[Err(IniError { kind: IniErrorKind.BadSection, line: 2 })]
+#test("[ ]")[Err(IniError { kind: IniErrorKind.BadSection, line: 1 })]
+#test("= 1")[Err(IniError { kind: IniErrorKind.EmptyKey, line: 1 })]
+pub fun parse(text: str) -> Result<Ini, IniError> {
+    var doc = new()
+    var section = ""
+    var n = 0
+    var start = 0
+    while start <= text.len() {
+        var end = start
+        while end < text.len() && text[end] != '\n' {
+            end += 1
+        }
+        let line = trimmed(text, start, end)
+        n += 1
+        start = end + 1
+        if line.len() == 0 || line[0] == ';' || line[0] == '#' {
+            continue
+        }
+        if line[0] == '[' {
+            let name = trimmed(line, 1, line.len() - 1)
+            if line[line.len() - 1] != ']' || line.len() < 2 || name.len() == 0 {
+                return Err(IniError { kind: IniErrorKind.BadSection, line: n })
+            }
+            section = name
+            if !doc.entries.contains(section) {
+                doc.entries[section] = [:]
+            }
+            continue
+        }
+        var sep = 0
+        while sep < line.len() && line[sep] != '=' && line[sep] != ':' {
+            sep += 1
+        }
+        if sep == line.len() {
+            return Err(IniError { kind: IniErrorKind.NoSeparator, line: n })
+        }
+        let key = trimmed(line, 0, sep)
+        if key.len() == 0 {
+            return Err(IniError { kind: IniErrorKind.EmptyKey, line: n })
+        }
+        doc.entries[section][key] = trimmed(line, sep + 1, line.len())
+    }
+    return Ok(doc)
+}
+
+// `s[start:end]` without ASCII whitespace at either end (std.str's `trim`,
+// which a module of std would load with its cases, MYLA-360).
+#test(" a b \r", 0, 6)["a b"]
+#test("[ x ]", 1, 4)["x"]
+#test("  ", 0, 2)[""]
+#test("x", 1, 0)[""] // an empty or reversed range
+fun trimmed(s: str, start: int, end: int) -> str {
+    var a = start
+    var b = end
+    while a < b && is_space(s[a]) {
+        a += 1
+    }
+    while b > a && is_space(s[b - 1]) {
+        b -= 1
+    }
+    if a >= b {
+        return ""
+    }
+    return s[a:b]
+}
+
+fun is_space(c: uint8) -> bool {
+    return c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == 11u8 || c == 12u8
+}
+
+impl Ini {
+    // The value of `key` in `section` ("" for the keys before the first
+    // header).
+    #test(Ini { entries: ["": ["a": "1"], "s": ["b": "2"]] }, "s", "b")[Some("2")]
+    #test(Ini { entries: ["": ["a": "1"], "s": ["b": "2"]] }, "", "a")[Some("1")]
+    #test(Ini { entries: ["": ["a": "1"], "s": ["b": "2"]] }, "s", "a")[None]
+    #test(Ini { entries: ["": ["a": "1"]] }, "t", "a")[None]
+    fun get(self, section: str, key: str) -> Option<str> {
+        if !self.entries.contains(section) || !self.entries[section].contains(key) {
+            return None
+        }
+        return Some(self.entries[section][key])
+    }
+
+    // The names of the sections, in order, without "".
+    #test(Ini { entries: ["": ["a": "1"], "s": [:], "t": ["b": "2"]] })[["s", "t"]]
+    #test(new())[[]]
+    fun sections(self) -> [str] {
+        var out: [str] = []
+        for name in self.entries.keys() {
+            if name.len() > 0 {
+                out.push(name)
+            }
+        }
+        return out
+    }
+
+    // The keys of `section`, in order; none if there is no such section.
+    #test(Ini { entries: ["": [:], "s": ["b": "2", "a": "1"]] }, "s")[["b", "a"]]
+    #test(new(), "s")[[]]
+    fun keys(self, section: str) -> [str] {
+        if !self.entries.contains(section) {
+            return []
+        }
+        return self.entries[section].keys()
+    }
+
+    // Sets `key` in `section` to `value`, adding the section and the key at
+    // the end if they are new.
+    fun set(var self, section: str, key: str, value: str) {
+        if !self.entries.contains(section) {
+            self.entries[section] = [:]
+        }
+        self.entries[section][key] = value
+    }
+}
+
+// `doc` as INI text: the keys of "" first, then each section after a blank
+// line, every key as `key = value`. `parse` reads it back as it was unless a
+// name or a value holds a line end, has spaces at an end, a key holds `=` or
+// `:` or starts with `[`, `;` or `#`, or a value starts a line that isn't a
+// key.
+#test(Ini { entries: ["": ["a": "1"], "s": ["b": "two words"], "t": [:]] })["a = 1\n\n[s]\nb = two words\n\n[t]\n"]
+#test(Ini { entries: ["": [:], "s": ["k": ""]] })["[s]\nk = \n"]
+#test(new())[""]
+pub fun write(doc: Ini) -> str {
+    var sb = StringBuilder()
+    for name in doc.entries.keys() {
+        if name.len() > 0 {
+            if sb.len() > 0 {
+                sb.append_byte('\n')
+            }
+            sb.append(f"[{name}]\n")
+        }
+        let keys = doc.entries[name]
+        for k in keys.keys() {
+            sb.append(f"{k} = {keys[k]}\n")
+        }
+    }
+    return sb.build()
+}
+
+// What `write` writes, `parse` reads back.
+#test
+fun round_trip() {
+    var doc = new()
+    doc.set("server", "host", "example.org")
+    doc.set("", "name", "demo")
+    doc.set("server", "port", "8080")
+    doc.set("paths", "home", "C:\\Users\\ada")
+    doc.set("server", "host", "example.com")
+    let text = write(doc)
+    assert(text == "name = demo\n\n[server]\nhost = example.com\nport = 8080\n\n[paths]\nhome = C:\\Users\\ada\n", text)
+    match parse(text) {
+        Ok(back) => assert(write(back) == text, "written again")
+        Err(e) => assert(false, f"{e}")
+    }
+}
