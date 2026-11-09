@@ -314,7 +314,10 @@ def _written_ok(text: str, written: str) -> bool:
     it back as the same value)."""
     if written.startswith("not read back"):
         return False
-    return _ordered(tomllib.loads(json.loads(written))) == _ordered(tomllib.loads(text))
+    try:
+        return _ordered(tomllib.loads(json.loads(written))) == _ordered(tomllib.loads(text))
+    except tomllib.TOMLDecodeError:
+        return False
 
 
 # Writes TOML for values beyond the subset (MYLA-402): reads length-framed
