@@ -8,6 +8,12 @@
 // Python, they accept and write `NaN`, `Infinity` and `-Infinity`. Unlike
 // Python, a `\u` escape of a lone surrogate is an error, since a Myla string
 // holds UTF-8.
+//
+// Typed values (D172, MYLA-385): `ToJson` and `FromJson`, their impls for
+// the built-in types, and `encode`/`decode<T>` over them; `#derive(Json)`
+// writes a struct's or an enum's impls, calling the helpers below
+// (`members`, `member`, `optional_member`, `variant_of`, `unit_variant`,
+// `payload`, `unknown_variant`) by name, so they keep their signatures.
 
 from .num import parse_int, parse_float, format_float
 
@@ -24,12 +30,56 @@ pub enum Json {
     Object([(str, Json)]),
 }
 
-// Why a text isn't JSON, and where: line and column count from 1, the column
-// in characters.
+// What is wrong: a text that isn't JSON (`parse`), or a value that doesn't
+// fit the type it is read into (`decode`, `FromJson`, D172).
+#derive(Eq)
+pub enum JsonErrorKind {
+    // The text isn't JSON: `msg` is Python's message, `line` and `col` where
+    Syntax,
+    // An object without a field its type needs (the path names the field)
+    MissingField,
+    // A value of another kind than its type takes: a string for a number, an
+    // array for a struct, a fraction for an integer, a variant with or
+    // without a payload it hasn't
+    WrongType,
+    // A number its type can't hold: an integer too large or too small for it
+    OutOfRange,
+    // A name that isn't one of the enum's variants
+    UnknownVariant,
+}
+
+// Why a text isn't JSON or a value doesn't fit its type, and where: for a
+// `Syntax` error the line and column in the text (counting from 1, the
+// column in characters); for the others the path of the value in the
+// document, `$.items[2].label` (`$` the whole of it), and a line and column
+// of 0.
+#derive(Eq)
 pub struct JsonError {
+    kind: JsonErrorKind,
     msg: str,
     line: int32,
     col: int32,
+    path: str,
+}
+
+impl JsonError {
+    // The reason in words, without the position.
+    #test(JsonError { kind: JsonErrorKind.MissingField, msg: "missing field", line: 0, col: 0, path: "$.a" })["missing field"]
+    fun message(self) -> str {
+        return self.msg
+    }
+}
+
+impl Format for JsonError {
+    // `line:col: why` for a syntax error, `path: why` for the others.
+    #test(JsonError { kind: JsonErrorKind.Syntax, msg: "Expecting value", line: 1, col: 5, path: "" }, "")["1:5: Expecting value"]
+    #test(JsonError { kind: JsonErrorKind.OutOfRange, msg: "300 is out of range for uint8", line: 0, col: 0, path: "$.items[2].n" }, "")["$.items[2].n: 300 is out of range for uint8"]
+    fun format(self, spec: str) -> str {
+        return match self.kind {
+            Syntax => f"{self.line}:{self.col}: {self.msg}"
+            _ => f"{self.path}: {self.msg}"
+        }
+    }
 }
 
 // The member `key` of an object (the last one with that key); None if `j`
@@ -85,7 +135,7 @@ impl Parser {
             }
             k = k + 1
         }
-        return JsonError { msg: msg, line: line, col: col }
+        return JsonError { kind: JsonErrorKind.Syntax, msg: msg, line: line, col: col, path: "" }
     }
 
     fun at_end(self) -> bool {
@@ -219,7 +269,7 @@ impl Parser {
                 let e = self.s[self.i + 1]
                 if e == 'u' {
                     let cp = self.unicode_escape()?
-                    sb.append(format("{}", cp as char))
+                    sb.append(f"{cp as char}")
                 } else {
                     if e == '"' { sb.append_byte('"') }
                     else if e == '\\' { sb.append_byte('\\') }
@@ -345,7 +395,7 @@ impl Writer {
             Json.Bool(b) => {
                 if b { self.sb.append("true") } else { self.sb.append("false") }
             },
-            Json.Int(n) => { self.sb.append(format("{}", n)) },
+            Json.Int(n) => { self.sb.append(f"{n}") },
             Json.Float(f) => { self.sb.append(float_text(f)) },
             Json.Str(s) => { self.string(s) },
             Json.Array(items) => {
@@ -431,7 +481,7 @@ fun float_text(f: float64) -> str {
 fun round_trip(text: str) -> str {
     return match parse(text) {
         Ok(v) => to_string(v),
-        Err(e) => format("{}:{}: {}", e.line, e.col, e.msg),
+        Err(e) => f"{e.line}:{e.col}: {e.msg}",
     }
 }
 
@@ -709,4 +759,557 @@ fun pretty_round_trip() {
         }
         Err(e) => assert(false, e.msg)
     }
+}
+
+// --- Typed values (D172, MYLA-385) ------------------------------------------------
+
+// A value with a JSON form. `#derive(Json)` writes the impl for a struct (an
+// object of its fields, named as written, an `Option` field left out when it
+// is `None`) and for an enum (`"Red"` for a variant without payload,
+// `{"Dot": x}` for one with one, `{"Line": [a, b]}` for one with more).
+// Writing never fails: a non-finite float is `null`, a `uint64` beyond
+// `int64` a float.
+pub trait ToJson {
+    fun to_json(self) -> Json
+}
+
+// A value read from its JSON form: `Point.from_json(j)`, `T.from_json(j)`
+// under a bound `T: FromJson`. An integer is checked for its type's range,
+// a struct ignores members it has no field for, and an error says where it
+// is (`$.items[2].label`).
+pub trait FromJson {
+    fun from_json(j: Json) -> Result<Self, JsonError>
+}
+
+// `v` as compact JSON text, as `to_string` writes `v.to_json()`.
+pub fun encode<T: ToJson>(v: T) -> str {
+    return to_string(v.to_json())
+}
+
+// The value of type `T` that `text` holds: `json.decode<Point>(text)`, or
+// with the type from where the result goes (`let p: Result<Point, JsonError>
+// = json.decode(text)`). A text that isn't JSON is a `Syntax` error, a value
+// that doesn't fit `T` an error with its path.
+pub fun decode<T: FromJson>(text: str) -> Result<T, JsonError> {
+    let j = parse(text)?
+    return T.from_json(j)
+}
+
+// The error for a value `found` where `expected` (in words: "an integer",
+// "a color") should be, at the value itself (`$`), for a `FromJson` impl
+// written by hand: `Err(json.wrong_type("a color", j))`.
+#test("a color", Json.Int(3i64))[JsonError { kind: JsonErrorKind.WrongType, msg: "expected a color, found the number 3", line: 0, col: 0, path: "$" }]
+pub fun wrong_type(expected: str, found: Json) -> JsonError {
+    return value_error(JsonErrorKind.WrongType, f"expected {expected}, found {described(found)}")
+}
+
+// The members of the object `j`, for a `FromJson` impl of the type `name`
+// (a derived one, or one written by hand); not an object is an error.
+#test(Json.Object([("a", Json.Null)]), "P")[Ok([("a", Json.Null)])]
+#test(Json.Array([]), "P")[Err(JsonError { kind: JsonErrorKind.WrongType, msg: "expected an object for 'P', found an empty array", line: 0, col: 0, path: "$" })]
+pub fun members(j: Json, name: str) -> Result<[(str, Json)], JsonError> {
+    return match j {
+        Json.Object(ms) => Ok(ms)
+        _ => Err(wrong_type(f"an object for '{name}'", j))
+    }
+}
+
+// The member `name` of an object's `fields` (the last one of that name, as
+// `field` finds it) as a `T`; an error if there is none, or with the
+// member's step added to its path.
+pub fun member<T: FromJson>(fields: [(str, Json)], name: str) -> Result<T, JsonError> {
+    return match last_member(fields, name) {
+        Some(v) => within(T.from_json(v), key_step(name))
+        None => Err(JsonError { kind: JsonErrorKind.MissingField, msg: "missing field", line: 0, col: 0, path: "$" + key_step(name) })
+    }
+}
+
+// The member `name` of `fields` as an optional `T`: `None` when it is absent
+// or `null`.
+pub fun optional_member<T: FromJson>(fields: [(str, Json)], name: str) -> Result<Option<T>, JsonError> {
+    return match last_member(fields, name) {
+        Some(Json.Null) => Ok(None)
+        Some(v) => Ok(Some(within(T.from_json(v), key_step(name))?))
+        None => Ok(None)
+    }
+}
+
+// The last member of `fields` named `name`.
+fun last_member(fields: [(str, Json)], name: str) -> Option<Json> {
+    var found: Option<Json> = None
+    for m in fields {
+        if m.0 == name { found = Some(m.1) }
+    }
+    return found
+}
+
+// `r`, its error one step further in: `step` (`.name`, `[2]`) after the `$`.
+fun within<T>(r: Result<T, JsonError>, step: str) -> Result<T, JsonError> {
+    return match r {
+        Ok(v) => Ok(v)
+        Err(e) => Err(JsonError { kind: e.kind, msg: e.msg, line: e.line, col: e.col, path: "$" + step + e.path[1:] })
+    }
+}
+
+// The step of a path into the member `key`: `.key` for a name, `["a b"]` for
+// another key.
+#test("label")[".label"]
+#test("_x9")["._x9"]
+#test("a b")["[\"a b\"]"]
+#test("")["[\"\"]"]
+#test("9")["[\"9\"]"]
+fun key_step(key: str) -> str {
+    var plain = key.len() > 0 && !(key[0] >= '0' && key[0] <= '9')
+    for c in key.chars() {
+        if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_') { plain = false }
+    }
+    if plain { return "." + key }
+    return "[" + to_string(Json.Str(key)) + "]"
+}
+
+// An error at the value itself (`$`).
+fun value_error(kind: JsonErrorKind, msg: str) -> JsonError {
+    return JsonError { kind: kind, msg: msg, line: 0, col: 0, path: "$" }
+}
+
+// What `j` is, for an error: "null", "a string", "the number 1.5", …
+#test(Json.Float(1.5))["the number 1.5"]
+#test(Json.Array([Json.Null]))["an array of 1 item"]
+#test(Json.Object([]))["an object"]
+fun described(j: Json) -> str {
+    return match j {
+        Json.Null => "null"
+        Json.Bool(b) => if b { "true" } else { "false" }
+        Json.Int(n) => f"the number {n}"
+        Json.Float(f) => "the number " + float_text(f)
+        Json.Str(s) => "a string"
+        Json.Array(items) => match items.len() {
+            0 => "an empty array"
+            1 => "an array of 1 item"
+            n => f"an array of {n} items"
+        }
+        Json.Object(ms) => "an object"
+    }
+}
+
+// --- What `#derive(Json)` calls for an enum -----------------------------------------
+
+// The variant's name and its payload, if any, of an enum value of type
+// `name`: a string is a variant without payload, an object of one member a
+// variant with one.
+#test(Json.Str("Red"), "Color")[Ok(("Red", None))]
+#test(Json.Object([("Dot", Json.Int(1i64))]), "Shape")[Ok(("Dot", Some(Json.Int(1i64))))]
+#test(Json.Object([]), "Shape")[Err(JsonError { kind: JsonErrorKind.WrongType, msg: "expected a variant of 'Shape' (a string, or an object of one member), found an object", line: 0, col: 0, path: "$" })]
+fun variant_of(j: Json, name: str) -> Result<(str, Option<Json>), JsonError> {
+    match j {
+        Json.Str(s) => { return Ok((s, None)) }
+        Json.Object(ms) => {
+            if ms.len() == 1 { return Ok((ms[0].0, Some(ms[0].1))) }
+        }
+        _ => {}
+    }
+    return Err(wrong_type(f"a variant of '{name}' (a string, or an object of one member)", j))
+}
+
+// `value`, the variant without payload `v` names, if `v` has none.
+fun unit_variant<T>(v: (str, Option<Json>), name: str, value: T) -> Result<T, JsonError> {
+    return match v.1 {
+        Some(p) => Err(value_error(JsonErrorKind.WrongType, f"variant '{v.0}' of '{name}' has no payload: write it as \"{v.0}\""))
+        None => Ok(value)
+    }
+}
+
+// Item `i` of the payload of `n` items of the variant `v` of enum `name`:
+// the payload itself for one item, else an array of `n`.
+fun payload<T: FromJson>(v: (str, Option<Json>), name: str, n: int32, i: int32) -> Result<T, JsonError> {
+    let step = key_step(v.0)
+    match v.1 {
+        Some(p) => {
+            if n == 1 { return within(T.from_json(p), step) }
+            match p {
+                Json.Array(items) => {
+                    if items.len() == n { return within(T.from_json(items[i]), f"{step}[{i}]") }
+                }
+                _ => {}
+            }
+            return within(Err(wrong_type(f"an array of {n} items", p)), step)
+        }
+        None => {
+            return Err(value_error(JsonErrorKind.WrongType, f"variant '{v.0}' of '{name}' has a payload: write it as " + "{" + f"\"{v.0}\": …" + "}"))
+        }
+    }
+}
+
+// The error for a variant `variant` that the enum `name` hasn't.
+#test("Blue", "Color", ["Red", "Green"])[JsonError { kind: JsonErrorKind.UnknownVariant, msg: "unknown variant 'Blue' of 'Color', expected one of 'Red', 'Green'", line: 0, col: 0, path: "$" }]
+fun unknown_variant(variant: str, name: str, variants: [str]) -> JsonError {
+    var sb = StringBuilder()
+    sb.append(f"unknown variant '{variant}' of '{name}', expected one of ")
+    var first = true
+    for v in variants {
+        if !first { sb.append(", ") }
+        sb.append(f"'{v}'")
+        first = false
+    }
+    return value_error(JsonErrorKind.UnknownVariant, sb.build())
+}
+
+// --- The built-in types ---------------------------------------------------------
+
+// The integer `j` holds, checked for the range `lo` to `hi` of the type
+// `name`: an `Int`, or a whole `Float` (`2.0`, `1e3`).
+#test(Json.Int(-128i64), -128i64, 127i64, "int8")[Ok(-128i64)]
+#test(Json.Float(1e3), 0i64, 65535i64, "uint16")[Ok(1000i64)]
+#test(Json.Int(256i64), 0i64, 255i64, "uint8")[Err(JsonError { kind: JsonErrorKind.OutOfRange, msg: "256 is out of range for uint8", line: 0, col: 0, path: "$" })]
+#test(Json.Float(1e300), -128i64, 127i64, "int8")[Err(JsonError { kind: JsonErrorKind.OutOfRange, msg: "1e+300 is out of range for int8", line: 0, col: 0, path: "$" })]
+#test(Json.Float(0.5), -128i64, 127i64, "int8")[Err(JsonError { kind: JsonErrorKind.WrongType, msg: "expected an integer, found the number 0.5", line: 0, col: 0, path: "$" })]
+fun int_in(j: Json, lo: int64, hi: int64, name: str) -> Result<int64, JsonError> {
+    var n: int64 = 0
+    match j {
+        Json.Int(v) => { n = v }
+        Json.Float(f) => {
+            if !is_whole(f) { return Err(wrong_type("an integer", j)) }
+            if f < -9223372036854775808.0 || f >= 9223372036854775808.0 {
+                return Err(value_error(JsonErrorKind.OutOfRange, f"{float_text(f)} is out of range for {name}"))
+            }
+            n = f as int64
+        }
+        _ => { return Err(wrong_type("an integer", j)) }
+    }
+    if n < lo || n > hi { return Err(value_error(JsonErrorKind.OutOfRange, f"{n} is out of range for {name}")) }
+    return Ok(n)
+}
+
+// Whether `f` is a whole number (not NaN or an infinity).
+fun is_whole(f: float64) -> bool {
+    if f != f || f - f != 0.0 { return false }
+    if f >= 9007199254740992.0 || f <= -9007199254740992.0 { return true }
+    return (f as int64) as float64 == f
+}
+
+impl ToJson for int8 {
+    fun to_json(self) -> Json { return Json.Int(self as int64) }
+}
+
+impl FromJson for int8 {
+    fun from_json(j: Json) -> Result<int8, JsonError> { return Ok(int_in(j, -128, 127, "int8")? as int8) }
+}
+
+impl ToJson for int16 {
+    fun to_json(self) -> Json { return Json.Int(self as int64) }
+}
+
+impl FromJson for int16 {
+    fun from_json(j: Json) -> Result<int16, JsonError> { return Ok(int_in(j, -32768, 32767, "int16")? as int16) }
+}
+
+impl ToJson for int32 {
+    fun to_json(self) -> Json { return Json.Int(self as int64) }
+}
+
+impl FromJson for int32 {
+    fun from_json(j: Json) -> Result<int32, JsonError> { return Ok(int_in(j, -2147483648, 2147483647, "int32")? as int32) }
+}
+
+impl ToJson for int64 {
+    fun to_json(self) -> Json { return Json.Int(self) }
+}
+
+impl FromJson for int64 {
+    fun from_json(j: Json) -> Result<int64, JsonError> { return int_in(j, -9223372036854775807 - 1, 9223372036854775807, "int64") }
+}
+
+impl ToJson for uint8 {
+    fun to_json(self) -> Json { return Json.Int(self as int64) }
+}
+
+impl FromJson for uint8 {
+    fun from_json(j: Json) -> Result<uint8, JsonError> { return Ok(int_in(j, 0, 255, "uint8")? as uint8) }
+}
+
+impl ToJson for uint16 {
+    fun to_json(self) -> Json { return Json.Int(self as int64) }
+}
+
+impl FromJson for uint16 {
+    fun from_json(j: Json) -> Result<uint16, JsonError> { return Ok(int_in(j, 0, 65535, "uint16")? as uint16) }
+}
+
+impl ToJson for uint32 {
+    fun to_json(self) -> Json { return Json.Int(self as int64) }
+}
+
+impl FromJson for uint32 {
+    fun from_json(j: Json) -> Result<uint32, JsonError> { return Ok(int_in(j, 0, 4294967295, "uint32")? as uint32) }
+}
+
+impl ToJson for uint64 {
+    // beyond int64, a float: the nearest float64, which reads back only if
+    // it is exact
+    #test(18446744073709551615u64)[Json.Float(18446744073709551616.0)]
+    fun to_json(self) -> Json {
+        if self > 9223372036854775807 { return Json.Float(self as float64) }
+        return Json.Int(self as int64)
+    }
+}
+
+impl FromJson for uint64 {
+    #test(Json.Float(9223372036854775808.0))[Ok(9223372036854775808u64)]
+    #test(Json.Float(18446744073709551616.0))[Err(JsonError { kind: JsonErrorKind.OutOfRange, msg: "1.8446744073709552e+19 is out of range for uint64", line: 0, col: 0, path: "$" })]
+    fun from_json(j: Json) -> Result<uint64, JsonError> {
+        match j {
+            Json.Float(f) => {
+                if is_whole(f) && f >= 9223372036854775808.0 && f < 18446744073709551616.0 { return Ok(f as uint64) }
+            }
+            _ => {}
+        }
+        return Ok(int_in(j, 0, 9223372036854775807, "uint64")? as uint64)
+    }
+}
+
+impl ToJson for float64 {
+    #test(1.0 / 0.0)[Json.Null]
+    fun to_json(self) -> Json {
+        if self != self || self - self != 0.0 { return Json.Null }
+        return Json.Float(self)
+    }
+}
+
+impl FromJson for float64 {
+    fun from_json(j: Json) -> Result<float64, JsonError> {
+        return match j {
+            Json.Float(f) => Ok(f)
+            Json.Int(n) => Ok(n as float64)
+            _ => Err(wrong_type("a number", j))
+        }
+    }
+}
+
+impl ToJson for float32 {
+    // the shortest decimal that reads back as the same float32: 0.1, not
+    // 0.10000000149011612
+    #test(0.1f32)[Json.Float(0.1)]
+    fun to_json(self) -> Json {
+        if self != self || self - self != 0.0f32 { return Json.Null }
+        return match parse_float(f"{self}") {
+            Some(f) => Json.Float(f)
+            None => Json.Float(self as float64)
+        }
+    }
+}
+
+impl FromJson for float32 {
+    #test(Json.Float(1e300))[Err(JsonError { kind: JsonErrorKind.OutOfRange, msg: "1e+300 is out of range for float32", line: 0, col: 0, path: "$" })]
+    fun from_json(j: Json) -> Result<float32, JsonError> {
+        let f = float64.from_json(j)?
+        let g = f as float32
+        if f - f == 0.0 && g - g != 0.0f32 { return Err(value_error(JsonErrorKind.OutOfRange, f"{float_text(f)} is out of range for float32")) }
+        return Ok(g)
+    }
+}
+
+impl ToJson for bool {
+    fun to_json(self) -> Json { return Json.Bool(self) }
+}
+
+impl FromJson for bool {
+    fun from_json(j: Json) -> Result<bool, JsonError> {
+        return match j {
+            Json.Bool(b) => Ok(b)
+            _ => Err(wrong_type("true or false", j))
+        }
+    }
+}
+
+impl ToJson for str {
+    fun to_json(self) -> Json { return Json.Str(self) }
+}
+
+impl FromJson for str {
+    fun from_json(j: Json) -> Result<str, JsonError> {
+        return match j {
+            Json.Str(s) => Ok(s)
+            _ => Err(wrong_type("a string", j))
+        }
+    }
+}
+
+impl ToJson for char {
+    // a string of the one character
+    fun to_json(self) -> Json { return Json.Str(f"{self}") }
+}
+
+impl FromJson for char {
+    #test(Json.Str("é"))[Ok('é')]
+    #test(Json.Str("ab"))[Err(JsonError { kind: JsonErrorKind.WrongType, msg: "expected a string of one character, found a string of 2", line: 0, col: 0, path: "$" })]
+    fun from_json(j: Json) -> Result<char, JsonError> {
+        match j {
+            Json.Str(s) => {
+                let cs = s.chars()
+                if cs.len() == 1 { return Ok(cs[0]) }
+                return Err(value_error(JsonErrorKind.WrongType, f"expected a string of one character, found a string of {cs.len()}"))
+            }
+            _ => { return Err(wrong_type("a string of one character", j)) }
+        }
+    }
+}
+
+impl ToJson for Json {
+    fun to_json(self) -> Json { return self }
+}
+
+impl FromJson for Json {
+    fun from_json(j: Json) -> Result<Json, JsonError> { return Ok(j) }
+}
+
+impl<T: ToJson> ToJson for [T] {
+    fun to_json(self) -> Json {
+        var items: [Json] = []
+        for x in self { items.push(x.to_json()) }
+        return Json.Array(items)
+    }
+}
+
+impl<T: FromJson> FromJson for [T] {
+    fun from_json(j: Json) -> Result<[T], JsonError> {
+        match j {
+            Json.Array(items) => {
+                var out: [T] = []
+                var i = 0
+                for item in items {
+                    out.push(within(T.from_json(item), f"[{i}]")?)
+                    i += 1
+                }
+                return Ok(out)
+            }
+            _ => { return Err(wrong_type("an array", j)) }
+        }
+    }
+}
+
+// A map with string keys is an object, its members in the map's order.
+impl<V: ToJson> ToJson for [str: V] {
+    fun to_json(self) -> Json {
+        var ms: [(str, Json)] = []
+        for k in self { ms.push((k, self[k].to_json())) }
+        return Json.Object(ms)
+    }
+}
+
+impl<V: FromJson> FromJson for [str: V] {
+    fun from_json(j: Json) -> Result<[str: V], JsonError> {
+        match j {
+            Json.Object(ms) => {
+                var out: [str: V] = [:]
+                for m in ms { out[m.0] = within(V.from_json(m.1), key_step(m.0))? }
+                return Ok(out)
+            }
+            _ => { return Err(wrong_type("an object", j)) }
+        }
+    }
+}
+
+// `None` is `null`; a field of a derived struct leaves it out instead.
+impl<T: ToJson> ToJson for Option<T> {
+    fun to_json(self) -> Json {
+        return match self {
+            Some(x) => x.to_json()
+            None => Json.Null
+        }
+    }
+}
+
+impl<T: FromJson> FromJson for Option<T> {
+    fun from_json(j: Json) -> Result<Option<T>, JsonError> {
+        return match j {
+            Json.Null => Ok(None)
+            _ => Ok(Some(T.from_json(j)?))
+        }
+    }
+}
+
+// Every built-in type's value goes to JSON and back.
+#test
+fun built_in_types_round_trip() {
+    let m: [str: Option<[int8]>] = ["a": Some([-128, 127]), "b": None, "c d": Some([])]
+    let text = encode(m)
+    assert(text == "{\"a\":[-128,127],\"b\":null,\"c d\":[]}", text)
+    match decode<[str: Option<[int8]>]>(text) {
+        Ok(back) => assert(encode(back) == text, encode(back))
+        Err(e) => assert(false, f"{e}")
+    }
+    assert(encode(['x', 'ü']) == "[\"x\",\"ü\"]", "chars")
+    assert(encode([0.5f32, 1e10f32]) == "[0.5,10000000000.0]", encode([0.5f32, 1e10f32]))
+    assert(encode([1.0 / 0.0, -0.0]) == "[null,-0.0]", "floats")
+    assert(encode([true, false]) == "[true,false]", "bools")
+    assert(encode(Json.Array([Json.Null])) == "[null]", "Json")
+    assert(encode([[3u64]]) == "[[3]]", "uint64")
+    let big: Result<[int16], JsonError> = decode("[1, 40000]")
+    match big {
+        Ok(v) => assert(false, "40000 is no int16")
+        Err(e) => assert(f"{e}" == "$[1]: 40000 is out of range for int16", f"{e}")
+    }
+}
+
+// An error's text, or "ok" (for the test functions).
+fun outcome<T>(r: Result<T, JsonError>) -> str {
+    return match r {
+        Ok(v) => "ok"
+        Err(e) => f"{e}"
+    }
+}
+
+// Whether `r` is `Ok(want)` (for the test functions).
+fun gives<T: Eq>(r: Result<T, JsonError>, want: T) -> bool {
+    return match r {
+        Ok(v) => v == want
+        Err(e) => false
+    }
+}
+
+// `encode`, `decode` and the helpers of a `FromJson` impl.
+#test
+fun encodes_and_decodes() {
+    assert(encode([1, 2]) == "[1,2]", "encode")
+    let xs: Result<[int], JsonError> = decode("[1, 2]")
+    assert(gives(xs, [1, 2]), "decode")
+    match decode<[int]>("[1, 2") {
+        Ok(v) => assert(false, "not JSON")
+        Err(e) => assert(e == JsonError { kind: JsonErrorKind.Syntax, msg: "Expecting ',' delimiter", line: 1, col: 6, path: "" }, f"{e}")
+    }
+    match decode<[int]>("[1, \"2\"]") {
+        Ok(v) => assert(false, "not an int")
+        Err(e) => assert(e == JsonError { kind: JsonErrorKind.WrongType, msg: "expected an integer, found a string", line: 0, col: 0, path: "$[1]" }, f"{e}")
+    }
+    let two = [("a", Json.Int(1)), ("a", Json.Int(2))]
+    assert(gives(member<int64>(two, "a"), 2i64), "the last member")
+    match member<int64>([("b", Json.Int(1))], "a") {
+        Ok(v) => assert(false, "no member a")
+        Err(e) => assert(e == JsonError { kind: JsonErrorKind.MissingField, msg: "missing field", line: 0, col: 0, path: "$.a" }, f"{e}")
+    }
+    assert(outcome(member<int64>([("a b", Json.Null)], "a b")) == "$[\"a b\"]: expected an integer, found null", "a quoted key")
+    let cases = [[("a", Json.Null)], [], [("a", Json.Int(4))]]
+    var seen: [str] = []
+    for fields in cases {
+        match optional_member<int64>(fields, "a") {
+            Ok(Some(n)) => seen.push(f"{n}")
+            Ok(None) => seen.push("none")
+            Err(e) => seen.push(f"{e}")
+        }
+    }
+    assert(seen == ["none", "none", "4"], "null, absent, present")
+    assert(outcome(optional_member<int8>([("a", Json.Int(400))], "a")) == "$.a: 400 is out of range for int8", "nested")
+}
+
+// What `#derive(Json)` calls for an enum's variants.
+#test
+fun reads_variants() {
+    assert(gives(unit_variant(("Red", None), "Color", 1), 1), "unit")
+    assert(outcome(unit_variant(("Red", Some(Json.Null)), "Color", 1)) == "$: variant 'Red' of 'Color' has no payload: write it as \"Red\"", "unit with payload")
+    let pair = ("P", Some(Json.Array([Json.Int(1), Json.Int(2)])))
+    assert(gives(payload<int64>(pair, "E", 2, 1), 2i64), "second item")
+    assert(gives(payload<int64>(("P", Some(Json.Int(5))), "E", 1, 0), 5i64), "one item")
+    assert(outcome(payload<int64>(("P", Some(Json.Array([Json.Int(1)]))), "E", 2, 0)) == "$.P: expected an array of 2 items, found an array of 1 item", "too few")
+    assert(outcome(payload<int64>(("P", None), "E", 1, 0)) == "$: variant 'P' of 'E' has a payload: write it as {\"P\": …}", "no payload")
+    assert(outcome(payload<bool>(pair, "E", 2, 0)) == "$.P[0]: expected true or false, found the number 1", "an item's path")
 }
