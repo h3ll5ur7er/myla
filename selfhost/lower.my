@@ -29,7 +29,7 @@
 
 from std.num import f64_literal_bits, f32_round_bits
 from .ast import Expr, ExprKind, Stmt, StmtKind, Block, FunData, ElseTail, ExprOrBlock, MatchArm, Pattern, PatternKind, FieldInit, MapEntry, BindElem, bind_elems, Param, call_targs
-from .checker import CheckErr, REG_ARG_WORDS, type_name, Type, is_unit, is_slice_expr, from_end_of, slice_parts, is_hole_part, is_raw_memory_primitive, is_platform_primitive, Subst, FuncSig, opt_subst_type, subst_type, builtin_method
+from .checker import CheckErr, REG_ARG_WORDS, type_name, Type, is_unit, is_slice_expr, from_end_of, slice_parts, is_hole_part, is_raw_memory_primitive, is_platform_primitive, Subst, FuncSig, opt_subst_type, subst_type, builtin_method, is_wrapping_method
 from .checker import is_notify_primitive
 from .codegen import codegen_on, type_job_name, recv_by_address, may_write_expr, is_mutating_builtin, list_has_str, contains_int, is_actor_t, is_sb_t, is_async_t, CodeGen, LamJob, PartialJob, Cap, DropEntry, tfunc_params, tfunc_ret, is_hole_expr, mangle_fn, is_builtin_call_name, is_aggregate, tuple_elems, is_struct_or_enum_t, is_tfunc, is_overloadable_op, arith_method_cg, enum_name_of, is_tstr, is_cmp, place_root, is_aggregate_opt, arms_may_write, is_cell_t, list_elem, is_list_t, is_map_t, is_str_t, map_key, map_val, format_segments, args_have_hole, success_variant, failure_variant
 from .util import format_specs
@@ -2853,6 +2853,27 @@ impl Lower {
         return d
     }
 
+    // `x.wrapping_add(y)`, `x.wrapping_sub(y)`, `x.wrapping_mul(y)`,
+    // `x.wrapping_neg()` (D175): the plain operation, which wraps, never
+    // checked for overflow; one instruction.
+    fun wrapping(var self, cg: CodeGen, e: Expr, nm: str, args: [Expr]) -> int32 {
+        let t = cg.type_of(e.id)
+        let a = self.expr(cg, args[0])
+        let d = self.temp(t)
+        if nm == "wrapping_neg" {
+            self.add(Inst.Un(d, "-", t, a))
+            return d
+        }
+        let b = self.expr(cg, args[1])
+        let op = if nm == "wrapping_add" { "+" } else if nm == "wrapping_sub" { "-" } else { "*" }
+        match self.folded(op, t, t, a, b) {
+            Some(v) => { return self.konst(t, v) },
+            None => {},
+        }
+        self.add(Inst.Bin(d, op, t, t, a, b, Pos { line: e.line, col: e.col }))
+        return d
+    }
+
     // The integer `a` (an `int32` or wider, sign-extended) a Unicode scalar
     // or a trap at `pos` (MYLA-177): at most 10FFFF, not a surrogate (D800
     // to DFFF).
@@ -3208,6 +3229,7 @@ impl Lower {
                     self.add(Inst.SbBuild(d, c))
                     return self.owned_value(cg, d, Type.TStr)
                 }
+                if is_wrapping_method(nm) { return self.wrapping(cg, e, nm, args) }
                 if is_builtin_call_name(nm) { return self.io_call(cg, e, nm, args) }
                 // `__cancel_after(a, ms)` (D124): the child's first frame on
                 // the timers as a deadline

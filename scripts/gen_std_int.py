@@ -487,14 +487,10 @@ def methods(w: Width) -> list[tuple[str, str, str]]:
                f"        if e > 0 {{\n            base = base.checked_mul(base)?\n        }}\n"
                f"    }}\n    return Some(acc)\n}}")
 
-    # wrapping
-    for op, sym in (("add", "+"), ("sub", "-"), ("mul", "*")):
-        add_method(f"wrapping_{op}", f"`self {sym} other` modulo 2^{w.bits}.",
-                   f"fun wrapping_{op}(self, other: {T}) -> {T} {{\n    return self {sym} other\n}}")
-    add_method("wrapping_neg", f"`-self` modulo 2^{w.bits}" + (": the minimum's is the minimum." if S else "."),
-               f"fun wrapping_neg(self) -> {T} {{\n    return {'-self' if S else '0 - self'}\n}}")
+    # wrapping: `wrapping_add`, `wrapping_sub`, `wrapping_mul` and `wrapping_neg`
+    # are the language's builtin methods (D175), one instruction natively
     add_method("wrapping_pow", f"The number to the power `exp`, modulo 2^{w.bits}.",
-               pow_code(T, "wrapping_pow", "acc.wrapping_mul(base)", "base.wrapping_mul(base)", T))
+               pow_code(T, "wrapping_pow", WRAP["mul"]("acc", "base"), WRAP["mul"]("base", "base"), T))
 
     # saturating
     if S:
@@ -518,10 +514,10 @@ def methods(w: Width) -> list[tuple[str, str, str]]:
     for op, sym in (("add", "+"), ("sub", "-"), ("mul", "*")):
         add_method(f"overflowing_{op}", f"`self {sym} other` modulo 2^{w.bits}, and whether it didn't fit.",
                    f"fun overflowing_{op}(self, other: {T}) -> ({T}, bool) {{\n"
-                   f"    return (self.wrapping_{op}(other), {op}_overflows_{w.suffix}(self, other))\n}}")
+                   f"    return ({WRAP[op]('self', 'other')}, {op}_overflows_{w.suffix}(self, other))\n}}")
     add_method("overflowing_neg", f"`-self` modulo 2^{w.bits}, and whether it didn't fit.",
                f"fun overflowing_neg(self) -> ({T}, bool) {{\n"
-               f"    return (self.wrapping_neg(), {'self == ' + MIN if S else 'self != 0'})\n}}")
+               f"    return ({WRAP['neg']('self', '')}, {'self == ' + MIN if S else 'self != 0'})\n}}")
     add_method("overflowing_pow", f"The number to the power `exp` modulo 2^{w.bits}, and whether it didn't fit.",
                f"fun overflowing_pow(self, exp: uint32) -> ({T}, bool) {{\n"
                f"    let over = match self.checked_pow(exp) {{\n"
@@ -575,6 +571,16 @@ def methods(w: Width) -> list[tuple[str, str, str]]:
                f"        t0 = t1\n        t1 = t2\n    }}\n"
                f"    return if r0 == 1 {{ Some(t0) }} else {{ None }}\n}}")
     return m
+
+
+# The wrapping operations as the generated code writes them: the builtin
+# methods (D175).
+WRAP = {
+    "add": lambda a, b: f"{a} + {b}",
+    "sub": lambda a, b: f"{a} - {b}",
+    "mul": lambda a, b: f"{a} * {b}",
+    "neg": lambda a, b: f"0 - {a}",
+}
 
 
 def pow_code(T: str, name: str, mul_acc: str, mul_base: str, ty: str) -> str:
@@ -711,13 +717,13 @@ fun kinds_agree() {
     for a in vs {
         for b in vs {
             let (s, over) = a.overflowing_add(b)
-            holds(s == a.wrapping_add(b), "overflowing_add's value")
+            holds(s == a + b, "overflowing_add's value")
             match a.checked_add(b) {
                 Some(v) => holds(!over && v == s && a.saturating_add(b) == s, "add fits")
                 None => holds(over && a.saturating_add(b) == (if b > 0 { MAX_I64 } else { MIN_I64 }), "add overflows")
             }
             let (p, mover) = a.overflowing_mul(b)
-            holds(p == a.wrapping_mul(b), "overflowing_mul's value")
+            holds(p == a * b, "overflowing_mul's value")
             match a.checked_mul(b) {
                 Some(v) => holds(!mover && v == p && a.saturating_mul(b) == p, "mul fits")
                 None => holds(mover && a.saturating_mul(b) == (if (a < 0) == (b < 0) { MAX_I64 } else { MIN_I64 }), "mul overflows")
@@ -725,7 +731,7 @@ fun kinds_agree() {
             if b != 0 {
                 let r = a.rem_euclid(b)
                 holds(r >= 0 && (r < b || r < -b || b == -9223372036854775807 - 1), "rem_euclid's range")
-                holds(a.div_euclid(b).wrapping_mul(b).wrapping_add(r) == a, "q * b + r")
+                holds(a.div_euclid(b) * b + r == a, "q * b + r")
             }
         }
     }

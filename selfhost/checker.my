@@ -816,7 +816,17 @@ fun is_builtin_op_trait(name: str) -> bool {
 #test("B")[false]
 #test("len")[true]
 fun is_builtin_func(name: str) -> bool {
-    return name == "print" || name == "assert" || name == "panic" || name == "unreachable" || name == "len" || name == "push" || name == "pop" || name == "contains" || name == "remove" || name == "keys" || name == "format" || name == "chars" || name == "StringBuilder" || name == "append" || name == "append_byte" || name == "append_char" || name == "build" || name == "__write" || name == "__exit" || name == "__args" || name == "__read_file" || name == "__io_errno" || name == "__run" || name == "__run_stderr" || name == "__run_exit_code" || name == "__run_signal" || name == "__run_errno" || name == "__write_file" || name == "__read" || name == "__poll" || name == "__list_dir" || name == "__mkdir" || name == "__stat" || name == "__getcwd" || name == "__getenv" || name == "__test_dir" || name == "__test_program" || name == "__sqrt" || name == "__f64_bits" || name == "__f64_from_bits" || name == "__unlink" || name == "__rmdir" || name == "__rename" || name == "__task_cancelled" || name == "__yield" || name == "__sleep" || name == "__clock_ns" || name == "__sleep_ns" || name == "__cancel_after" || name == "__disarm" || name == "__wait_readable" || name == "__wait_either" || name == "__wait_socket" || name == "__spawn" || name == "__run_with" || name == "__spawn_with" || name == "__reap" || name == "__kill" || name == "__close" || is_platform_primitive(name) || is_raw_memory_primitive(name) || is_notify_primitive(name)
+    return name == "print" || name == "assert" || name == "panic" || name == "unreachable" || name == "len" || name == "push" || name == "pop" || name == "contains" || name == "remove" || name == "keys" || name == "format" || name == "chars" || name == "StringBuilder" || name == "append" || name == "append_byte" || name == "append_char" || name == "build" || name == "__write" || name == "__exit" || name == "__args" || name == "__read_file" || name == "__io_errno" || name == "__run" || name == "__run_stderr" || name == "__run_exit_code" || name == "__run_signal" || name == "__run_errno" || name == "__write_file" || name == "__read" || name == "__poll" || name == "__list_dir" || name == "__mkdir" || name == "__stat" || name == "__getcwd" || name == "__getenv" || name == "__test_dir" || name == "__test_program" || name == "__sqrt" || name == "__f64_bits" || name == "__f64_from_bits" || name == "__unlink" || name == "__rmdir" || name == "__rename" || name == "__task_cancelled" || name == "__yield" || name == "__sleep" || name == "__clock_ns" || name == "__sleep_ns" || name == "__cancel_after" || name == "__disarm" || name == "__wait_readable" || name == "__wait_either" || name == "__wait_socket" || name == "__spawn" || name == "__run_with" || name == "__spawn_with" || name == "__reap" || name == "__kill" || name == "__close" || is_platform_primitive(name) || is_raw_memory_primitive(name) || is_notify_primitive(name) || is_wrapping_method(name)
+}
+
+// Whether `name` is one of the integers' builtin methods that wrap on purpose
+// (D175, MYLA-395): `wrapping_add`, `wrapping_sub`, `wrapping_mul` and
+// `wrapping_neg`, one instruction natively and never checked for overflow.
+#test("wrapping_add")[true]
+#test("wrapping_neg")[true]
+#test("wrapping_pow")[false]
+pub fun is_wrapping_method(name: str) -> bool {
+    return name == "wrapping_add" || name == "wrapping_sub" || name == "wrapping_mul" || name == "wrapping_neg"
 }
 
 // The primitives of std.task's notifiers (MYLA-387): a notifier, a wake of
@@ -8115,6 +8125,7 @@ impl Checker {
         if name == "contains" || name == "remove" || name == "keys" { return self.infer_map_builtin(e, name, args) }
         if name == "format" { return Ok(Some(self.infer_format(e, args)?)) }
         if name == "StringBuilder" || name == "append" || name == "append_byte" || name == "append_char" || name == "build" { return self.infer_string_builder(e, name, args) }
+        if is_wrapping_method(name) { return self.infer_wrapping(e, name, args) }
         if is_builtin_func(name) { return self.infer_intrinsic(e, name, args) }
 
         let fi = self.func_idx(name)
@@ -8232,6 +8243,20 @@ impl Checker {
             i = i + 1
         }
         return Ok(Type.TStr)
+    }
+
+    // `x.wrapping_add(y)`, `x.wrapping_sub(y)`, `x.wrapping_mul(y)` and
+    // `x.wrapping_neg()` on an integer `x` (D175): of `x`'s type, `y` too.
+    fun infer_wrapping(var self, e: Expr, name: str, args: [Expr]) -> Result<Option<Type>, CheckErr> {
+        let n = if name == "wrapping_neg" { 0 } else { 1 }
+        if args.len() != n + 1 { return Err(terr_at(e.line, e.col, e.sp, method_arity(name, n))) }
+        let at = self.expect_value(args[0], None)?
+        if !is_int(at) { return Err(terr_at(e.line, e.col, e.sp, format("{}() requires an integer, found '{}'", name, type_name(at)))) }
+        if n == 1 {
+            let bt = self.expect_value(args[1], Some(at))?
+            if !type_eq(bt, at) { return Err(terr_at(args[1].line, args[1].col, args[1].sp, format("{}() takes a '{}', found '{}'", name, type_name(at), type_name(bt)))) }
+        }
+        return Ok(Some(at))
     }
 
     #test(checker_on("[int]"), Expr { id: 1, line: 5, col: 27, sp: SrcSpan { sline: 5, scol: 14, eline: 5, ecol: 29 }, kind: ExprKind.Call(Expr { id: 0, line: 5, col: 14, sp: SrcSpan { sline: 5, scol: 14, eline: 5, ecol: 27 }, kind: ExprKind.Name("StringBuilder") }, [], []) }, "StringBuilder", [])[Ok(Some(Type.TSB))]
@@ -9567,7 +9592,7 @@ fun method_arity(name: str, n: int32) -> str {
 #test("len")[true]
 #test("push")[false]
 fun receiver_only(m: str) -> bool {
-    return m == "len" || m == "pop" || m == "keys" || m == "chars" || m == "build"
+    return m == "len" || m == "pop" || m == "keys" || m == "chars" || m == "build" || m == "wrapping_neg"
 }
 
 // Whether `m` names a builtin function that is also a method (D103,
@@ -9575,19 +9600,23 @@ fun receiver_only(m: str) -> bool {
 #test("push")[true]
 #test("print")[false]
 pub fun builtin_method_name(m: str) -> bool {
-    return m == "len" || m == "push" || m == "pop" || m == "contains" || m == "remove" || m == "keys" || m == "chars" || m == "append" || m == "append_byte" || m == "append_char" || m == "build"
+    return m == "len" || m == "push" || m == "pop" || m == "contains" || m == "remove" || m == "keys" || m == "chars" || m == "append" || m == "append_byte" || m == "append_char" || m == "build" || is_wrapping_method(m)
 }
 
 // Whether the builtin function `m` is a method of a receiver of type `t`:
 // `len` of lists, maps, strings and builders, `push` and `pop` of lists,
 // `contains`, `remove` and `keys` of maps, `chars` of strings, `append`,
 // `append_byte`, `append_char` and `build` of builders (D103, MYLA-221,
-// MYLA-390).
+// MYLA-390), `wrapping_add`, `wrapping_sub`, `wrapping_mul` and
+// `wrapping_neg` of integers (D175).
 #test(Type.TList(Type.TStr), "push")[true]
 #test(Type.TStr, "push")[false]
 #test(Type.TSB, "len")[true]
+#test(Type.TInt(8, false), "wrapping_mul")[true]
+#test(Type.TChar, "wrapping_add")[false]
 pub fun builtin_method(t: Type, m: str) -> bool {
     return match t {
+        Type.TInt(w, s) => is_wrapping_method(m),
         Type.TList(el) => m == "len" || m == "push" || m == "pop",
         Type.TMap(k, v) => m == "len" || m == "contains" || m == "remove" || m == "keys",
         Type.TStr => m == "len" || m == "chars",

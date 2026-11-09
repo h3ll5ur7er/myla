@@ -10,7 +10,7 @@
 from .ast import Expr, ExprKind, Stmt, StmtKind, Block, Decl, DeclKind, FunData, Param, MatchArm, Pattern, PatternKind, FieldPat, BindElem, ExprOrBlock, ElseTail, FieldInit, MapEntry, Attribute, TypeExpr, TypeKind, TypeParam, bind_elems, names_in_expr, names_in_block, Expected, expected_failure
 from .tokens import SrcSpan, no_span
 from .checker import is_notify_primitive
-from .checker import Checker, Type, Subst, subst_type, subst_get, unify_param, type_name, is_raw_memory_primitive, is_net_primitive, is_term_primitive, checker_on, builtin_method, builtin_method_name, is_slice_expr, from_end_of, slice_parts, is_hole_part
+from .checker import Checker, Type, Subst, subst_type, subst_get, unify_param, type_name, is_raw_memory_primitive, is_net_primitive, is_term_primitive, checker_on, builtin_method, builtin_method_name, is_wrapping_method, is_slice_expr, from_end_of, slice_parts, is_hole_part
 from .anf import Norm, new_norm, stmt_suspends, body_suspends
 from .util import cp_utf8, format_specs
 from std.fmt import fmt_int, fmt_float, fmt_text
@@ -2933,6 +2933,21 @@ impl Interp {
         return Value.VInt(wrap_opt(res, rt))
     }
 
+    // `x.wrapping_add(y)` and the other wrapping methods (D175): modulo
+    // 2^width, never an overflow.
+    fun eval_wrapping(var self, e: Expr, nm: str, args: [Expr]) -> Value {
+        let a = as_int(self.eval(args[0]))
+        var res: int64 = 0
+        if nm == "wrapping_neg" { res = 0 - a }
+        else {
+            let b = as_int(self.eval(args[1]))
+            if nm == "wrapping_add" { res = a + b }
+            else if nm == "wrapping_sub" { res = a - b }
+            else { res = a * b }
+        }
+        return Value.VInt(wrap_opt(res, self.resolved_of(e.id)))
+    }
+
     #test(interp_on("[int]"), "<", Value.VInt(0), Value.VInt(3))[true]
     fun compare(self, op: str, lv: Value, rv: Value) -> bool {
         match lv {
@@ -4292,6 +4307,7 @@ impl Interp {
             return Value.VUnit
         }
         if nm == "len" { return Value.VInt(value_len(self.eval(args[0]))) }
+        if is_wrapping_method(nm) { return self.eval_wrapping(e, nm, args) }
         if nm == "push" {
             // the list's place, then the value; the list is changed afterwards,
             // so `push(xs, pop(xs))` sees the pop
