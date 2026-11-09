@@ -1,6 +1,6 @@
 # std.hash
 
-The `Hasher`'s methods, fast hashes and checksums ([[MYLA-327]]). The `Hasher` is what the `Hash` trait passes through (D163, [[MYLA-313]]): the struct and the trait are the prelude's, so every module can name them, and this module, which every program outside `std` has without an import (as std.str is, D164), gives the hasher its methods and the built-in types their `Hash` impls. The module imports nothing.
+The `Hasher`'s methods and wyhash ([[MYLA-327]]); the checksums, FNV-1a, CRC-32 and Adler-32, are [[Language/Standard-library/Checksum]]'s since [[MYLA-359]] (D166), as every program checks this module. The `Hasher` is what the `Hash` trait passes through (D163, [[MYLA-313]]): the struct and the trait are the prelude's, so every module can name them, and this module, which every program outside `std` has without an import (as std.str is, D164), gives the hasher its methods and the built-in types their `Hash` impls. The module imports nothing.
 
 ```myla
 import std.hash as hash
@@ -21,31 +21,20 @@ fun main() {
     print(h == hash.new().add_str("apple").add_u8(3))
     print(point_hash(Point { x: 1, y: 2 }) == point_hash(Point { x: 2, y: 1 }))
     print(f"{hash.wyhash("abc", 2):#x}")
-    print(f"{hash.fnv1a64("foobar"):#x}")
-    let crc = hash.crc32_update(hash.crc32("1234"), "56789")
-    print(f"{crc:#x} {hash.adler32("Wikipedia"):#x}")
 }
 // output:
 // true
 // false
 // 0x32dd92e4b2915153
-// 0x85944171f73967e8
-// 0xcbf43926 0x11e60398
 ```
 
-Every function takes a `str`, and its `_bytes` form a `[uint8]`; the two give the same result for the same bytes.
+`wyhash` takes a `str`, and its `_bytes` form a `[uint8]`; the two give the same result for the same bytes.
 
 | Function | Result |
 | --- | --- |
 | `new() -> Hasher` | A hasher with the fixed seed, `with_seed(0)` |
 | `with_seed(seed: uint64) -> Hasher` | A hasher with its own seed |
 | `wyhash(s, seed: uint64) -> uint64`, `wyhash_bytes(b, seed)` | The Hasher's algorithm at once: `with_seed(seed).add_str(s).finish()` |
-| `fnv1a32(s) -> uint32`, `fnv1a32_bytes(b)` | FNV-1a, 32 bits |
-| `fnv1a64(s) -> uint64`, `fnv1a64_bytes(b)` | FNV-1a, 64 bits |
-| `crc32(s) -> uint32`, `crc32_bytes(b)` | CRC-32 as zlib, gzip, PNG and zip compute it |
-| `crc32_update(crc: uint32, s) -> uint32`, `crc32_update_bytes(crc, b)` | The CRC of more bytes: start from 0, and `crc32_update(crc32(a), b)` is `crc32(a + b)` |
-| `adler32(s) -> uint32`, `adler32_bytes(b)` | Adler-32 as zlib computes it (RFC 1950) |
-| `adler32_update(adler: uint32, s) -> uint32`, `adler32_update_bytes(adler, b)` | Start from 1, not 0; `adler32_update(adler32(a), b)` is `adler32(a + b)` |
 
 ## The Hash trait
 
@@ -126,26 +115,16 @@ Measured natively on x86-64, best of three runs, with both written the same way 
 
 wyhash is about twice as fast on the integer keys that a `Hash` impl adds most, and faster on strings and long input too, where reading the bytes one at a time costs both the same. Its state is one word, while SipHash keeps four, a partial word and a length: seven words to pass back from every `add`, and the measured SipHash hasher handled only whole words. SipHash's strength is resisting collisions made on purpose, but only with a secret random key; with the fixed seed it has none, so it buys nothing here. Both versions measured gave the values of a model in Python, whose wyhash passes Zig's test vectors and whose SipHash rounds pass the reference implementation's 64 vectors of SipHash-2-4.
 
-## The checksums
-
-CRC-32 is CRC-32/ISO-HDLC, the one of zlib, gzip, PNG, zip and Ethernet: the reflected polynomial `0xEDB88320`, the register started at and xored with `0xFFFFFFFF`, so `crc32("123456789")` is `0xCBF43926`. It's table-driven. From 2048 bytes on it reads eight bytes at a time ("slicing by 8"), with seven more tables derived from the first when the call starts; below that, one table, a byte at a time.
-
-Adler-32 is zlib's, so `adler32("Wikipedia")` is `0x11E60398`. It reduces its two sums modulo 65521 once every 5552 bytes, the most after which they still fit 32 bits. Note the different starting values of the incremental forms, as in zlib: 0 for `crc32_update`, 1 for `adler32_update`.
-
 ## Speed
 
 Natively on x86-64, the best of five runs over 100 MB (100,000,000 bytes), on a machine shared with other work:
 
 | Function | `str` | `[uint8]` |
 | --- | --- | --- |
-| `fnv1a32` | 953 MB/s | 952 MB/s |
-| `fnv1a64` | 933 MB/s | 948 MB/s |
 | The Hasher, `add_str` / `add_bytes` (wyhash) | 1496 MB/s | 1496 MB/s |
-| `crc32` | 1167 MB/s | 1084 MB/s |
-| `adler32` | 1329 MB/s | 1335 MB/s |
 
-A key of two `int32`s takes 8.7 ns from `new()` to `finish()`, a 13-byte string 16.1 ns. A CRC-32 of a short string takes about 60 ns, most of it building the table, which Myla can't keep in a constant. Every byte is read with a bounds check, which bounds all of these: FNV-1a's chain of multiplications is the slowest.
+A key of two `int32`s takes 8.7 ns from `new()` to `finish()`, a 13-byte string 16.1 ns. Every byte is read with a bounds check. std.checksum's FNV-1a, measured the same way, runs at about 950 MB/s.
 
 ## Tests
 
-The vectors are published ones: FNV's reference values, Zig's tests of wyhash, the CRC-32 check value and zlib's results. A model of wyhash and FNV-1a in Python, checked against those vectors, gives the rest: wyhash across its 16- and 48-byte boundaries, at every length up to 130, and over 10,000 bytes. Test functions check that the `str` and `[uint8]` forms agree, that an incremental checksum doesn't depend on how the input is split, and that the fast paths agree with the byte-at-a-time ones. All 82 cases pass interpreted, natively, on aarch64 under qemu and on wasm32 under Node.
+The vectors are published ones, Zig's tests of wyhash. A model of wyhash in Python, checked against those vectors, gives the rest: wyhash across its 16- and 48-byte boundaries, at every length up to 130, and over 10,000 bytes. Test functions check that the `str` and `[uint8]` forms agree and that the Hasher gives wyhash. The module's 65 cases (std.checksum has the checksums' 32) pass interpreted and natively.
