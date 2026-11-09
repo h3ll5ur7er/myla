@@ -24,3 +24,7 @@ Roadmap row #32 ([[Project/Standard-library-roadmap]]).
 - **Measured** natively on x86-64 with `std.bench` (median of 5, 1 million operations on random keys): `put` with 64k keys, capacity 64k: `[int: int]` 23.0 ms, `Lru` 45.2 ms; `put` with 128k keys into a capacity of 64k (evicting): 124 ms; half `get`, half `put`, each with another `get`, 128k keys: map 68.1 ms, `Lru` 92.4 ms (capacity 64k), 91.5 ms (256k, no eviction). So an `Lru` costs 1.4 to 2 times a map, and an eviction a map removal and insertion more.
 - **Docs:** the page with two doc blocks that run (interpreted and natively the same), the row on [[Language/Standard-library]], row #32 on the roadmap, the `myla` skill.
 - **Suites** (the branch with all three tasks of the lane): `scripts/bootstrap.sh` reaches the byte-identical fixpoint; `scripts/test.sh fast`: 763 tests, the one failure `test_embedded_std` (`selfhost/embedded_std.my` behind `lib/` until the seed commit); `python3 -m unittest tests.burn.test_std_modules tests.burn.test_doc_blocks tests.burn.test_lsp tests.burn.test_toml tests.burn.test_compiler_parity tests.burn.test_selfhost_cases tests.burn.test_error_corpus tests.burn.test_selfhost_checker tests.burn.test_project_commands`: `Ran 733 tests in 491.9s OK (skipped=1)`.
+
+## Comments
+
+- 2026-11-09: the owner accepted the proposals: `recursive(step)` for a recursion, `put` returns the evicted entry.

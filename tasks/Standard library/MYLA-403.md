@@ -28,3 +28,7 @@ Two choices the task leaves open:
 - **Measured** natively on x86-64 with `bench.run` (the page's table): `() => 0` 2.66 ns (524288 calls a run), `time.now_ns()` 146 ns, `fib(10)` 400 ns, `fib(20)` 50.8 µs, sorting 1000 `int`s 28.7 µs; interpreted, `fib(20)` 258 ms (5 runs) and an empty closure 12.7 µs, which is what the page tells: measure natively.
 - **Docs:** the page with a doc block that runs (interpreted and natively the same), its row on [[Language/Standard-library]], row #67 on the roadmap, the `myla` skill.
 - **Suites** (the branch with all three tasks of the lane): `scripts/bootstrap.sh` reaches the byte-identical fixpoint; `scripts/test.sh fast`: 763 tests, the one failure `test_embedded_std` (`selfhost/embedded_std.my` behind `lib/` until the seed commit); `python3 -m unittest tests.burn.test_std_modules tests.burn.test_doc_blocks tests.burn.test_lsp tests.burn.test_toml tests.burn.test_compiler_parity tests.burn.test_selfhost_cases tests.burn.test_error_corpus tests.burn.test_selfhost_checker tests.burn.test_project_commands`: `Ran 733 tests in 491.9s OK (skipped=1)`.
+
+## Comments
+
+- 2026-11-09: the owner accepted the proposals: a fixed batch of calls per timed run, the spread as the median absolute deviation.

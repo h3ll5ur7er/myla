@@ -27,3 +27,7 @@ What the first box asks for beyond the document type: `Toml` (D73's subset) has 
 - **toml-test** ([toml-lang/toml-test](https://github.com/toml-lang/toml-test), cloned 2026-11-09): `MYLA_TOML_TEST=<checkout> python3 -m unittest tests.burn.test_toml` runs its 208 valid TOML 1.0 files: 90 read as `tomllib` reads them and written back (`parse` and `tomllib` both read the written text as the same value), 118 refused as outside the subset, 0 wrong. The files aren't vendored, so the test is skipped without a checkout.
 - **Docs:** [[Language/Standard-library/Toml]] has a "Writing" section with a doc block that runs (interpreted and natively the same), its two rows in the table, the index row on [[Language/Standard-library]], and row #55 on the roadmap, and the `myla` skill.
 - **Suites** (the branch with all three tasks of the lane): `scripts/bootstrap.sh` reaches the byte-identical fixpoint; `scripts/test.sh fast`: 763 tests, the one failure `test_embedded_std` (`selfhost/embedded_std.my` behind `lib/` until the seed commit); `python3 -m unittest tests.burn.test_std_modules tests.burn.test_doc_blocks tests.burn.test_lsp tests.burn.test_toml tests.burn.test_compiler_parity tests.burn.test_selfhost_cases tests.burn.test_error_corpus tests.burn.test_selfhost_checker tests.burn.test_project_commands`: `Ran 733 tests in 491.9s OK (skipped=1)`.
+
+## Comments
+
+- 2026-11-09: the owner chose to extend std.toml to TOML 1.0 and add `#derive(Toml)`: [[MYLA-407]].

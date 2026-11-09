@@ -78,3 +78,4 @@ After the five, the hello world's 100.9 M instructions are lexing 42.0 M (42 %),
 ## Comments
 
 - 2026-11-09, [[MYLA-376]]: `std.int`'s new `count_ones`, `leading_zeros` and `trailing_zeros` on eight widths add 2–3 ms to every program's check (a hello world 43.8 → 48.3 ms); and a std module importing `std.int` explicitly parses its 2,042 cases ([[MYLA-396]]). `std.hash`'s CRC-32 and Adler-32 take a whole list and rebuild the CRC table on every call, so `std.compress` keeps its own: a version over a range of a list would let it use them (gunzip of 100 MB went 526 → 802 ms through a slice).
+- 2026-11-09: the owner accepted the proposals: an implicit module's bodies checked once called (an error in a body no program calls is reported by `myla test` of the module), and `std.checksum` with FNV-1a in it.
