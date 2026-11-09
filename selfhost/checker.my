@@ -816,7 +816,7 @@ fun is_builtin_op_trait(name: str) -> bool {
 #test("B")[false]
 #test("len")[true]
 fun is_builtin_func(name: str) -> bool {
-    return name == "print" || name == "assert" || name == "panic" || name == "unreachable" || name == "len" || name == "push" || name == "pop" || name == "contains" || name == "remove" || name == "keys" || name == "format" || name == "chars" || name == "StringBuilder" || name == "append" || name == "append_byte" || name == "append_char" || name == "build" || name == "__write" || name == "__exit" || name == "__args" || name == "__read_file" || name == "__io_errno" || name == "__run" || name == "__run_stderr" || name == "__run_exit_code" || name == "__run_signal" || name == "__run_errno" || name == "__write_file" || name == "__read" || name == "__poll" || name == "__list_dir" || name == "__mkdir" || name == "__stat" || name == "__getcwd" || name == "__getenv" || name == "__test_dir" || name == "__test_program" || name == "__sqrt" || name == "__f64_bits" || name == "__f64_from_bits" || name == "__unlink" || name == "__rmdir" || name == "__rename" || name == "__task_cancelled" || name == "__yield" || name == "__sleep" || name == "__clock_ns" || name == "__sleep_ns" || name == "__cancel_after" || name == "__disarm" || name == "__wait_readable" || name == "__wait_either" || name == "__wait_socket" || name == "__spawn" || name == "__run_with" || name == "__spawn_with" || name == "__reap" || name == "__kill" || name == "__close" || is_platform_primitive(name) || is_raw_memory_primitive(name) || is_notify_primitive(name) || is_wrapping_method(name)
+    return name == "print" || name == "assert" || name == "panic" || name == "unreachable" || name == "len" || name == "push" || name == "pop" || name == "contains" || name == "remove" || name == "keys" || name == "format" || name == "chars" || name == "StringBuilder" || name == "append" || name == "append_byte" || name == "append_char" || name == "build" || name == "__write" || name == "__exit" || name == "__args" || name == "__read_file" || name == "__io_errno" || name == "__run" || name == "__run_stderr" || name == "__run_exit_code" || name == "__run_signal" || name == "__run_errno" || name == "__write_file" || name == "__read" || name == "__poll" || name == "__list_dir" || name == "__mkdir" || name == "__stat" || name == "__getcwd" || name == "__getenv" || name == "__test_dir" || name == "__test_program" || name == "__sqrt" || name == "__f64_bits" || name == "__f64_from_bits" || name == "__unlink" || name == "__rmdir" || name == "__rename" || name == "__task_cancelled" || name == "__yield" || name == "__sleep" || name == "__clock_ns" || name == "__sleep_ns" || name == "__cancel_after" || name == "__disarm" || name == "__wait_readable" || name == "__wait_either" || name == "__wait_socket" || name == "__spawn" || name == "__run_with" || name == "__spawn_with" || name == "__reap" || name == "__kill" || name == "__close" || name == "__str_to_bytes" || name == "__bytes_to_str" || is_platform_primitive(name) || is_raw_memory_primitive(name) || is_notify_primitive(name) || is_wrapping_method(name)
 }
 
 // Whether `name` is one of the integers' builtin methods that wrap on purpose
@@ -841,14 +841,15 @@ pub fun is_notify_primitive(name: str) -> bool {
 }
 
 // The platform primitives of MYLA-336: entropy, file descriptors and
-// children with pipes, and MYLA-334's wall clock, each a function of std.rt
-// (`__open` is `std.rt.open`) over std.platform, and in the interpreter the
-// host's own.
+// children with pipes, MYLA-334's wall clock and MYLA-378's stat of a path,
+// each a function of std.rt (`__open` is `std.rt.open`) over std.platform,
+// and in the interpreter the host's own.
 #test("__open")[true]
 #test("__wall_ns")[true]
+#test("__path_stat")[true]
 #test("__read")[false]
 pub fun is_platform_primitive(name: str) -> bool {
-    return name == "__random_bytes" || name == "__open" || name == "__seek" || name == "__fstat" || name == "__spawn_piped" || name == "__try_reap" || name == "__wall_ns" || is_net_primitive(name) || is_term_primitive(name)
+    return name == "__random_bytes" || name == "__open" || name == "__seek" || name == "__fstat" || name == "__path_stat" || name == "__spawn_piped" || name == "__try_reap" || name == "__wall_ns" || is_net_primitive(name) || is_term_primitive(name)
 }
 
 // The terminal and signal primitives of MYLA-350 (std.term's and
@@ -8090,6 +8091,21 @@ impl Checker {
             if name == "__list_dir" { return Ok(Some(Type.TStr)) }
             return Ok(Some(t_int()))
         }
+        if name == "__str_to_bytes" || name == "__bytes_to_str" {
+            // a string's bytes as a list and back, in one copy (MYLA-369)
+            var want = Type.TStr
+            var result = Type.TList(t_byte())
+            var shape = "s: str"
+            if name == "__bytes_to_str" {
+                want = Type.TList(t_byte())
+                result = Type.TStr
+                shape = "b: [uint8]"
+            }
+            if args.len() != 1 { return Err(terr_at(e.line, e.col, e.sp, format("{}() takes ({})", name, shape))) }
+            let a_t = self.expect_value(args[0], Some(want))?
+            if !type_eq(a_t, want) { return Err(terr_at(args[0].line, args[0].col, args[0].sp, format("{}() takes ({}): found '{}'", name, shape, type_name(a_t)))) }
+            return Ok(Some(result))
+        }
         if name == "__mkdir" {
             if args.len() != 2 { return Err(terr(e.line, e.col, "__mkdir() takes (path: str, mode: int32)")) }
             let p_t = self.expect_value(args[0], Some(Type.TStr))?
@@ -8404,7 +8420,13 @@ impl Checker {
     #test(checker_on("[int]"), Expr { id: 1, line: 5, col: 27, sp: SrcSpan { sline: 5, scol: 14, eline: 5, ecol: 29 }, kind: ExprKind.Call(Expr { id: 0, line: 5, col: 14, sp: SrcSpan { sline: 5, scol: 14, eline: 5, ecol: 27 }, kind: ExprKind.Name("StringBuilder") }, [], []) }, "StringBuilder", [])[Ok(Some(Type.TSB))]
     fun infer_string_builder(var self, e: Expr, name: str, args: [Expr]) -> Result<Option<Type>, CheckErr> {
         if name == "StringBuilder" {
-            if args.len() > 0 { return Err(terr_at(e.line, e.col, e.sp, "StringBuilder() takes no arguments")) }
+            // `StringBuilder(n)`: room for `n` bytes before it grows (MYLA-369)
+            let shape = "StringBuilder() takes nothing or a capacity (capacity: int)"
+            if args.len() > 1 { return Err(terr_at(e.line, e.col, e.sp, shape)) }
+            if args.len() == 1 {
+                let n_t = self.expect_value(args[0], Some(t_int()))?
+                if !type_eq(n_t, t_int()) { return Err(terr_at(args[0].line, args[0].col, args[0].sp, format("{}: found '{}'", shape, type_name(n_t)))) }
+            }
             return Ok(Some(Type.TSB))
         }
         if name == "build" {
@@ -8437,7 +8459,7 @@ impl Checker {
     // MYLA-336's primitives (`is_platform_primitive`): `__random_bytes(n)`,
     // `__open(path, flags, mode)`, `__seek(fd, offset, whence)`,
     // `__fstat(fd)`, `__spawn_piped(program, argv, opts)`, `__try_reap(pid)`,
-    // and MYLA-334's `__wall_ns()`
+    // MYLA-334's `__wall_ns()` and MYLA-378's `__path_stat(path, follow)`
     fun infer_platform_primitive(var self, e: Expr, name: str, args: [Expr]) -> Result<Option<Type>, CheckErr> {
         let i64 = Type.TInt(64, true)
         let strs = Type.TList(Type.TStr)
@@ -8464,6 +8486,10 @@ impl Checker {
             result = i64
         } else if name == "__fstat" {
             shape = "fd: int"
+            result = Type.TList(i64)
+        } else if name == "__path_stat" {
+            want = [Type.TStr, Type.TBool]
+            shape = "path: str, follow: bool"
             result = Type.TList(i64)
         } else if name == "__spawn_piped" {
             want = [Type.TStr, strs, strs]
