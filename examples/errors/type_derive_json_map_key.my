@@ -1,0 +1,13 @@
+//~ type error: cannot derive Json for enum 'Index': payload #0 of variant 'ByLine' has type '[int32: str]', which isn't ToJson and FromJson (a map is an object only with 'str' keys)
+// A map is a JSON object, whose keys are strings (D172).
+import std.json as json
+
+#derive(Json)
+enum Index {
+    Empty,
+    ByLine([int: str]),
+}
+
+fun main() {
+    print(json.encode(Index.Empty))
+}

@@ -1,0 +1,14 @@
+//~ type error: cannot derive Json for struct 'Edge': field 'ends' has type '(int32, int32)', which isn't ToJson and FromJson (a tuple has no JSON form: make it a struct)
+// A derived `Json` needs every field to have a JSON form (D172); a tuple has
+// none.
+import std.json as json
+
+#derive(Json)
+struct Edge {
+    label: str,
+    ends: (int, int),
+}
+
+fun main() {
+    print(json.encode(Edge { label: "e", ends: (1, 2) }))
+}

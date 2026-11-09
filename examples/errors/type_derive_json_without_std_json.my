@@ -1,0 +1,11 @@
+//~ type error: cannot derive Json for 'Point': std.json isn't imported (write 'import std.json as json')
+// The derived impls are std.json's traits over its `Json` (D172).
+#derive(Json)
+struct Point {
+    x: int,
+    y: int,
+}
+
+fun main() {
+    print(Point { x: 1, y: 2 }.x)
+}

@@ -9,6 +9,364 @@ from tests.burn._native import (CAN_BUILD_NATIVE, SKIP_REASON, Program, build_an
                                 run_file_both_now, selfhost_run, write_program)
 
 PROGRAMS = {
+    # D172 (MYLA-385): `#derive(Json)`, nested structs, lists, maps, an `Option` field absent and present, every built-in type, round trips
+    "json_derive_structs": r"""// D172 (MYLA-385): `#derive(Json)` on structs: nested structs, lists, maps,
+// an `Option` field absent and present, the built-in types, round trips
+import std.json as json
+from std.json import Json, JsonError, ToJson
+
+#derive(Json)
+struct Point {
+    x: int,
+    y: int,
+}
+
+#derive(Json)
+struct Item {
+    name: str,
+    at: Point,
+    tags: [str],
+    label: Option<str>,
+    counts: [str: int64],
+}
+
+#derive(Json)
+struct Order {
+    id: uint32,
+    items: [Item],
+    note: Option<Point>,
+}
+
+#derive(Json)
+struct Scalars {
+    small: int8,
+    byte: uint8,
+    wide: int64,
+    huge: uint64,
+    ratio: float64,
+    single: float32,
+    flag: bool,
+    letter: char,
+    raw: Json,
+    maybe: Option<[int]>,
+}
+
+#derive(Json)
+struct Empty {}
+
+fun show<T: ToJson>(v: T) {
+    print(json.encode(v))
+}
+
+fun main() {
+    let p = Point { x: 1, y: -2 }
+    show(p)
+    let a = Item { name: "a", at: p, tags: ["t1", "t2"], label: None, counts: ["k": 3, "j": 4] }
+    let b = Item { name: "b\"q", at: Point { x: 0, y: 0 }, tags: [], label: Some("lbl"), counts: [:] }
+    let o = Order { id: 4000000000, items: [a, b], note: None }
+    let text = json.encode(o)
+    print(text)
+    // back again, and written the same
+    match json.decode<Order>(text) {
+        Ok(back) => {
+            print(json.encode(back) == text)
+            print(back.items[1].label.unwrap_or("none"))
+            print(back.items[0].label.is_none())
+            print(back.items[0].counts["j"])
+            print(back.id)
+        }
+        Err(e) => print(f"error {e}")
+    }
+    // the expected type gives the type, too
+    let q: Result<Point, JsonError> = json.decode("{\"y\": 5, \"x\": 4, \"z\": [true]}")
+    match q {
+        Ok(v) => print(f"{v.x} {v.y}")
+        Err(e) => print(f"error {e}")
+    }
+    // an Option field from null, and from absent
+    match json.decode<Order>("{\"id\": 1, \"items\": [], \"note\": null}") {
+        Ok(v) => print(v.note.is_none())
+        Err(e) => print(f"error {e}")
+    }
+    match json.decode<Order>("{\"id\": 2, \"items\": [], \"note\": {\"x\": 7, \"y\": 8}}") {
+        Ok(v) => print(v.note.map((n: Point) => n.x + n.y).unwrap_or(0))
+        Err(e) => print(f"error {e}")
+    }
+    let nan = 0.0 / 0.0
+    let s = Scalars { small: -128, byte: 255, wide: -9000000000, huge: 18446744073709551615, ratio: nan, single: 0.1, flag: true, letter: 'é', raw: Json.Array([Json.Null, Json.Int(1)]), maybe: Some([1, 2]) }
+    print(json.encode(s))
+    let s2 = Scalars { small: 127, byte: 0, wide: 9223372036854775807, huge: 9223372036854775808, ratio: 2.5, single: 1.5, flag: false, letter: 'x', raw: Json.Null, maybe: None }
+    let t2 = json.encode(s2)
+    print(t2)
+    match json.decode<Scalars>(t2) {
+        Ok(v) => {
+            print(json.encode(v) == t2)
+            print(v.huge)
+            print(v.single)
+            print(v.letter)
+        }
+        Err(e) => print(f"error {e}")
+    }
+    // an integer reads as a float
+    match json.decode<Scalars>("{\"small\":1,\"byte\":2,\"wide\":3,\"huge\":4,\"ratio\":5,\"single\":6,\"flag\":true,\"letter\":\"z\",\"raw\":{}}") {
+        Ok(v) => print(f"{v.ratio} {v.single} {v.huge}")
+        Err(e) => print(f"error {e}")
+    }
+    show(Empty {})
+    print(json.decode<Empty>("{\"anything\": 1}").is_ok())
+    // the built-in types alone
+    show([[1, 2], [3]])
+    show(["a": Some(1), "b": None])
+    show('c')
+    let none: Option<int> = None
+    show(none)
+    print(json.decode<[str: [bool]]>("{\"x\": [true, false], \"y\": []}").map((m: [str: [bool]]) => m["x"].len()).unwrap_or(-1))
+    print(int8.from_json(Json.Int(-5)).unwrap_or(0))
+    print(json.decode<Option<int>>("null").map((v: Option<int>) => v.is_none()).unwrap_or(false))
+}
+""",
+    # D172 (MYLA-385): `#derive(Json)`, enums externally tagged, every variant shape, inside structs and lists
+    "json_derive_enums": r"""// D172 (MYLA-385): `#derive(Json)` on enums, externally tagged: `"Red"`
+// for a variant without payload, `{"Dot": x}` for one, `{"Line": [a, b]}`
+// for several; inside structs and lists, and back
+import std.json as json
+from std.json import Json
+
+#derive(Json)
+struct Point {
+    x: int,
+    y: int,
+}
+
+#derive(Json)
+enum Shape {
+    Empty,
+    Dot(Point),
+    Circle(Point, float64),
+    Line(Point, Point, str),
+    Tagged(Option<str>),
+}
+
+#derive(Json)
+enum Color {
+    Red,
+    Green,
+    Blue,
+}
+
+#derive(Json)
+struct Layer {
+    color: Color,
+    shapes: [Shape],
+    hidden: Option<Color>,
+}
+
+fun main() {
+    let o = Point { x: 0, y: 0 }
+    let shapes = [Shape.Empty, Shape.Dot(Point { x: 1, y: 2 }), Shape.Circle(o, 1.5), Shape.Line(o, Point { x: 3, y: 4 }, "edge"), Shape.Tagged(None), Shape.Tagged(Some("t"))]
+    for s in shapes {
+        print(json.encode(s))
+    }
+    let layer = Layer { color: Color.Green, shapes: shapes, hidden: Some(Color.Blue) }
+    let text = json.encode(layer)
+    print(text)
+    match json.decode<Layer>(text) {
+        Ok(back) => {
+            print(json.encode(back) == text)
+            print(back.shapes.len())
+            match back.shapes[3] {
+                Line(a, b, label) => print(f"{b.x} {b.y} {label}")
+                _ => print("not a line")
+            }
+            match back.color {
+                Green => print("green")
+                _ => print("other")
+            }
+        }
+        Err(e) => print(f"error {e}")
+    }
+    // Option of an enum, and the `Some` payload of one
+    let c: Option<Color> = Some(Color.Red)
+    print(json.encode(c))
+    print(json.encode([Color.Red, Color.Blue]))
+    match json.decode<[Color]>("[\"Blue\", \"Red\", \"Green\"]") {
+        Ok(cs) => print(json.encode(cs))
+        Err(e) => print(f"error {e}")
+    }
+    match json.decode<Shape>("{\"Circle\": [{\"x\": 5, \"y\": 6}, 2]}") {
+        Ok(s) => print(json.encode(s))
+        Err(e) => print(f"error {e}")
+    }
+    print(json.pretty(Shape.Dot(o).to_json()))
+}
+""",
+    # D172 (MYLA-385): `#derive(Json)`, recursive types: a tree of structs, an enum through lists, mutual recursion
+    "json_derive_recursive": r"""// D172 (MYLA-385): `#derive(Json)` on recursive types: a tree of structs
+// through a list, an enum through a list and an Option, mutual recursion
+import std.json as json
+
+#derive(Json)
+struct Tree {
+    label: str,
+    kids: [Tree],
+}
+
+#derive(Json)
+enum Expr {
+    Num(int64),
+    Neg([Expr]),
+    Sum([Expr]),
+    Call(str, [Expr]),
+}
+
+#derive(Json)
+struct Dir {
+    name: str,
+    files: [File],
+    parent: Option<[Dir]>,
+}
+
+#derive(Json)
+struct File {
+    name: str,
+    owner: Option<[Dir]>,
+}
+
+fun size(t: Tree) -> int {
+    var n = 1
+    for k in t.kids { n += size(k) }
+    return n
+}
+
+fun eval(e: Expr) -> int64 {
+    return match e {
+        Num(n) => n
+        Neg(xs) => -eval(xs[0])
+        Sum(xs) => {
+            var s: int64 = 0
+            for x in xs { s += eval(x) }
+            s
+        }
+        Call(name, args) => args.len() as int64
+    }
+}
+
+fun main() {
+    let t = Tree { label: "root", kids: [Tree { label: "a", kids: [] }, Tree { label: "b", kids: [Tree { label: "c", kids: [] }] }] }
+    let text = json.encode(t)
+    print(text)
+    match json.decode<Tree>(text) {
+        Ok(back) => print(f"{size(back)} {json.encode(back) == text}")
+        Err(e) => print(f"error {e}")
+    }
+    let e = Expr.Sum([Expr.Num(1), Expr.Neg([Expr.Num(5)]), Expr.Call("f", [Expr.Num(2), Expr.Num(3)])])
+    let et = json.encode(e)
+    print(et)
+    match json.decode<Expr>(et) {
+        Ok(back) => print(eval(back))
+        Err(err) => print(f"error {err}")
+    }
+    let d = Dir { name: "src", files: [File { name: "a.my", owner: None }], parent: Some([Dir { name: "/", files: [], parent: None }]) }
+    let dt = json.encode(d)
+    print(dt)
+    match json.decode<Dir>(dt) {
+        Ok(back) => print(json.encode(back) == dt)
+        Err(err) => print(f"error {err}")
+    }
+}
+""",
+    # D172 (MYLA-385): `#derive(Json)`, decoding errors with their paths and kinds
+    "json_derive_errors": r"""// D172 (MYLA-385): decoding errors carry their path: a missing field, a
+// wrong type, an integer out of range, an unknown variant, a payload of the
+// wrong size, a syntax error, each with its kind
+import std.json as json
+from std.json import Json, JsonError, JsonErrorKind
+
+#derive(Json)
+struct Item {
+    label: str,
+    level: int8,
+}
+
+#derive(Json)
+enum Kind {
+    Plain,
+    Pair(int, int),
+    One(Item),
+}
+
+#derive(Json)
+struct Doc {
+    items: [Item],
+    kinds: [Kind],
+    extra: [str: uint8],
+    note: Option<Item>,
+}
+
+fun kind_name(k: JsonErrorKind) -> str {
+    return match k {
+        Syntax => "syntax"
+        MissingField => "missing field"
+        WrongType => "wrong type"
+        OutOfRange => "out of range"
+        UnknownVariant => "unknown variant"
+    }
+}
+
+fun try_doc(text: str) {
+    match json.decode<Doc>(text) {
+        Ok(d) => print(f"ok {d.items.len()}")
+        Err(e) => print(f"{kind_name(e.kind)} at {e.path}: {e.msg} | {e}")
+    }
+}
+
+fun main() {
+    let good = "{\"items\": [{\"label\": \"a\", \"level\": 1}], \"kinds\": [\"Plain\", {\"Pair\": [1, 2]}], \"extra\": {}}"
+    try_doc(good)
+    try_doc("{\"items\": [{\"label\": \"a\", \"level\": 1}, {\"label\": \"b\", \"level\": 2}, {\"level\": 3}], \"kinds\": [], \"extra\": {}}")
+    try_doc("{\"items\": [{\"label\": \"a\", \"level\": 1}, {\"label\": \"b\", \"level\": 2}, {\"label\": 5, \"level\": 3}], \"kinds\": [], \"extra\": {}}")
+    try_doc("{\"items\": [{\"label\": \"a\", \"level\": 128}], \"kinds\": [], \"extra\": {}}")
+    try_doc("{\"items\": [{\"label\": \"a\", \"level\": -129}], \"kinds\": [], \"extra\": {}}")
+    try_doc("{\"items\": [{\"label\": \"a\", \"level\": 1.5}], \"kinds\": [], \"extra\": {}}")
+    try_doc("{\"items\": [], \"kinds\": [\"Plain\", \"Square\"], \"extra\": {}}")
+    try_doc("{\"items\": [], \"kinds\": [{\"Pair\": [1]}], \"extra\": {}}")
+    try_doc("{\"items\": [], \"kinds\": [{\"Pair\": [1, true]}], \"extra\": {}}")
+    try_doc("{\"items\": [], \"kinds\": [\"Pair\"], \"extra\": {}}")
+    try_doc("{\"items\": [], \"kinds\": [{\"Plain\": 1}], \"extra\": {}}")
+    try_doc("{\"items\": [], \"kinds\": [{\"One\": {\"label\": \"x\"}}], \"extra\": {}}")
+    try_doc("{\"items\": [], \"kinds\": [{\"a\": 1, \"b\": 2}], \"extra\": {}}")
+    try_doc("{\"items\": [], \"kinds\": [], \"extra\": {\"ok\": 1, \"a b\": 300}}")
+    try_doc("{\"items\": [], \"kinds\": [], \"extra\": {}, \"note\": {\"label\": null, \"level\": 0}}")
+    try_doc("{\"items\": {}, \"kinds\": [], \"extra\": {}}")
+    try_doc("{\"kinds\": [], \"extra\": {}}")
+    try_doc("[]")
+    try_doc("{\"items\": [,]}")
+    let r: Result<char, JsonError> = json.decode("\"ab\"")
+    match r {
+        Ok(c) => print(c)
+        Err(e) => print(f"{e}")
+    }
+    match json.decode<uint64>("1e30") {
+        Ok(n) => print(n)
+        Err(e) => print(f"{e}")
+    }
+    match json.decode<uint64>("-1") {
+        Ok(n) => print(n)
+        Err(e) => print(f"{e}")
+    }
+    match json.decode<int>("2147483648") {
+        Ok(n) => print(n)
+        Err(e) => print(f"{e}")
+    }
+    match json.decode<uint64>("18446744073709549568.0") {
+        Ok(n) => print(n)
+        Err(e) => print(f"{e}")
+    }
+    // a hand-built error, as a FromJson impl written by hand makes one
+    let mine = json.wrong_type("a color", Json.Int(3))
+    print(f"{mine}")
+}
+""",
     # D172 (MYLA-384): the task's `Zero`: `int.zero()`, a type keyword's
     # `int64.zero()`, a struct's, and `T.zero()` under `T: Zero + Add`
     "trait_functions_zero": """// D172 (MYLA-384): a trait function without `self`, called on a type
@@ -6720,6 +7078,61 @@ fun main() {
 }
 """
 
+JSON_DERIVE_GEO = r"""// derived in a module of its own, whose names the loader qualifies
+import std.json as json
+
+#derive(Json)
+pub struct Point {
+    x: int,
+    y: int,
+}
+
+#derive(Json)
+pub enum Shape {
+    Dot(Point),
+    Segment(Point, Point),
+    Nothing,
+}
+
+pub fun origin_text() -> str {
+    return json.encode(Point { x: 0, y: 0 })
+}
+"""
+
+JSON_DERIVE_SCENE = r"""// D172 (MYLA-385): a derived type of another module in a derived struct,
+// read and written through the module's alias
+import std.json as json
+import .geo as geo
+from .geo import Point, Shape
+
+#derive(Json)
+struct Scene {
+    shapes: [geo.Shape],
+    focus: Option<Point>,
+}
+
+fun main() {
+    let s = Scene { shapes: [Shape.Dot(Point { x: 1, y: 2 }), Shape.Nothing, Shape.Segment(Point { x: 0, y: 0 }, Point { x: 3, y: 4 })], focus: Some(Point { x: 5, y: 6 }) }
+    let text = json.encode(s)
+    print(text)
+    match json.decode<Scene>(text) {
+        Ok(back) => print(json.encode(back) == text)
+        Err(e) => print(f"{e}")
+    }
+    print(geo.origin_text())
+    match json.decode<Scene>("{\"shapes\": [{\"Segment\": [{\"x\": 0, \"y\": 0}]}]}") {
+        Ok(back) => print("ok")
+        Err(e) => print(f"{e}")
+    }
+    let p: Result<geo.Point, json.JsonError> = json.decode("{\"x\": 9, \"y\": 8}")
+    match p {
+        Ok(v) => print(v.x * 10 + v.y)
+        Err(e) => print(f"{e}")
+    }
+}
+"""
+
+
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
 class TestCompilerParity(unittest.TestCase):
     def test_trait_functions_across_modules(self):
@@ -6732,6 +7145,15 @@ class TestCompilerParity(unittest.TestCase):
             write_program(tmp, TRAIT_FUNCTIONS_MONEY, "money.my")
             main = write_program(tmp, TRAIT_FUNCTIONS_MAIN)
             self.assertEqual(run_file_both_now(main), ('0\n0\nmoney\nint\n5000000007\n6\nwallet of wallet of money\n1\n0\n', "", 0))
+
+    def test_json_derive_across_modules(self):
+        # D172 (MYLA-385): `#derive(Json)` in a module whose names the loader
+        # qualifies (`geo$Point`), its types fields of a derived struct in
+        # another, decoded through a module's type (`geo.Point`)
+        with tempfile.TemporaryDirectory() as tmp:
+            write_program(tmp, JSON_DERIVE_GEO, "geo.my")
+            main = write_program(tmp, JSON_DERIVE_SCENE)
+            self.assertEqual(run_file_both_now(main), ('{"shapes":[{"Dot":{"x":1,"y":2}},"Nothing",{"Segment":[{"x":0,"y":0},{"x":3,"y":4}]}],"focus":{"x":5,"y":6}}\ntrue\n{"x":0,"y":0}\n$.shapes[0].Segment: expected an array of 2 items, found an array of 1 item\n98\n', "", 0))
 
     def test_generic_constructors_of_a_module(self):
         # MYLA-315: the shapes std.deque and std.set take (MYLA-330), a module's
@@ -7017,6 +7439,14 @@ class TestCompilerParity(unittest.TestCase):
 # longer holds (a later decision changed its meaning) or there is none (a
 # program added or changed since): its output, pinned here.
 PINNED = {
+    # MYLA-385: new; native code gives the same
+    "json_derive_structs": '{"x":1,"y":-2}\n{"id":4000000000,"items":[{"name":"a","at":{"x":1,"y":-2},"tags":["t1","t2"],"counts":{"k":3,"j":4}},{"name":"b\\"q","at":{"x":0,"y":0},"tags":[],"label":"lbl","counts":{}}]}\ntrue\nlbl\ntrue\n4\n4000000000\n4 5\ntrue\n15\n{"small":-128,"byte":255,"wide":-9000000000,"huge":1.8446744073709552e+19,"ratio":null,"single":0.1,"flag":true,"letter":"é","raw":[null,1],"maybe":[1,2]}\n{"small":127,"byte":0,"wide":9223372036854775807,"huge":9.223372036854776e+18,"ratio":2.5,"single":1.5,"flag":false,"letter":"x","raw":null}\ntrue\n9223372036854775808\n1.5\nx\n5 6 4\n{}\ntrue\n[[1,2],[3]]\n{"a":1,"b":null}\n"c"\nnull\n2\n-5\ntrue\n',
+    # MYLA-385: new; native code gives the same
+    "json_derive_enums": '"Empty"\n{"Dot":{"x":1,"y":2}}\n{"Circle":[{"x":0,"y":0},1.5]}\n{"Line":[{"x":0,"y":0},{"x":3,"y":4},"edge"]}\n{"Tagged":null}\n{"Tagged":"t"}\n{"color":"Green","shapes":["Empty",{"Dot":{"x":1,"y":2}},{"Circle":[{"x":0,"y":0},1.5]},{"Line":[{"x":0,"y":0},{"x":3,"y":4},"edge"]},{"Tagged":null},{"Tagged":"t"}],"hidden":"Blue"}\ntrue\n6\n3 4 edge\ngreen\n"Red"\n["Red","Blue"]\n["Blue","Red","Green"]\n{"Circle":[{"x":5,"y":6},2.0]}\n{\n  "Dot": {\n    "x": 0,\n    "y": 0\n  }\n}\n',
+    # MYLA-385: new; native code gives the same
+    "json_derive_recursive": '{"label":"root","kids":[{"label":"a","kids":[]},{"label":"b","kids":[{"label":"c","kids":[]}]}]}\n4 true\n{"Sum":[{"Num":1},{"Neg":[{"Num":5}]},{"Call":["f",[{"Num":2},{"Num":3}]]}]}\n-2\n{"name":"src","files":[{"name":"a.my"}],"parent":[{"name":"/","files":[]}]}\ntrue\n',
+    # MYLA-385: new; native code gives the same
+    "json_derive_errors": 'ok 1\nmissing field at $.items[2].label: missing field | $.items[2].label: missing field\nwrong type at $.items[2].label: expected a string, found the number 5 | $.items[2].label: expected a string, found the number 5\nout of range at $.items[0].level: 128 is out of range for int8 | $.items[0].level: 128 is out of range for int8\nout of range at $.items[0].level: -129 is out of range for int8 | $.items[0].level: -129 is out of range for int8\nwrong type at $.items[0].level: expected an integer, found the number 1.5 | $.items[0].level: expected an integer, found the number 1.5\nunknown variant at $.kinds[1]: unknown variant \'Square\' of \'Kind\', expected one of \'Plain\', \'Pair\', \'One\' | $.kinds[1]: unknown variant \'Square\' of \'Kind\', expected one of \'Plain\', \'Pair\', \'One\'\nwrong type at $.kinds[0].Pair: expected an array of 2 items, found an array of 1 item | $.kinds[0].Pair: expected an array of 2 items, found an array of 1 item\nwrong type at $.kinds[0].Pair[1]: expected an integer, found true | $.kinds[0].Pair[1]: expected an integer, found true\nwrong type at $.kinds[0]: variant \'Pair\' of \'Kind\' has a payload: write it as {"Pair": …} | $.kinds[0]: variant \'Pair\' of \'Kind\' has a payload: write it as {"Pair": …}\nwrong type at $.kinds[0]: variant \'Plain\' of \'Kind\' has no payload: write it as "Plain" | $.kinds[0]: variant \'Plain\' of \'Kind\' has no payload: write it as "Plain"\nmissing field at $.kinds[0].One.level: missing field | $.kinds[0].One.level: missing field\nwrong type at $.kinds[0]: expected a variant of \'Kind\' (a string, or an object of one member), found an object | $.kinds[0]: expected a variant of \'Kind\' (a string, or an object of one member), found an object\nout of range at $.extra["a b"]: 300 is out of range for uint8 | $.extra["a b"]: 300 is out of range for uint8\nwrong type at $.note.label: expected a string, found null | $.note.label: expected a string, found null\nwrong type at $.items: expected an array, found an object | $.items: expected an array, found an object\nmissing field at $.items: missing field | $.items: missing field\nwrong type at $: expected an object for \'Doc\', found an empty array | $: expected an object for \'Doc\', found an empty array\nsyntax at : Expecting value | 1:12: Expecting value\n$: expected a string of one character, found a string of 2\n$: 1e+30 is out of range for uint64\n$: -1 is out of range for uint64\n$: 2147483648 is out of range for int32\n18446744073709549568\n$: expected a color, found the number 3\n',
     # MYLA-384: new; native code gives the same
     "trait_functions_zero": '0\n5000000000\n6\n5000000001\n3.75\n3\n400\n0\n0\n0\n',
     # MYLA-384: new; native code gives the same
