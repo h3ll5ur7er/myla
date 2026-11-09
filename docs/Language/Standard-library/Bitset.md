@@ -1,6 +1,6 @@
 # std.bitset
 
-`BitSet`, a set of small non-negative integers that takes a bit for each ([[MYLA-342]]). The integer `i` is bit `i % 64` of the word `i / 64`, a `uint64`, so a set of the integers below n takes n / 8 bytes and the set operations work 64 integers at a time. A set is growable, making room for whatever is inserted, or fixed, holding 0 to n - 1. It counts a word's bits with std.int's `count_ones`, `leading_zeros` and `trailing_zeros` ([[MYLA-376]]).
+`BitSet`, a set of small non-negative integers that takes a bit for each ([[MYLA-342]]). The integer `i` is bit `i % 64` of the word `i / 64`, a `uint64`, so a set of the integers below n takes n / 8 bytes and the set operations work 64 integers at a time. A set is growable, making room for whatever is inserted, or fixed, holding 0 to n - 1. The module imports nothing.
 
 ```myla
 import std.bitset as bitset
@@ -117,4 +117,4 @@ Measured natively on x86-64, best of five runs:
 | The same with a `[bool]` | 81 ms |
 | `union`, `intersection` and their `popcount`s, of two sets of a million bits, 100 times | 11 ms |
 
-A `[bool]` is faster for one bit at a time, where each `BitSet` call checks its bounds; the bit set takes a bit per integer (1.25 MB for 10 million) and does the set operations a word at a time. The counting is std.int's `count_ones`, a SWAR popcount.
+A `[bool]` is faster for one bit at a time, where each `BitSet` call checks its bounds; the bit set takes a bit per integer (1.25 MB for 10 million) and does the set operations a word at a time. The counting is a SWAR popcount, the module's own: std.int's `count_ones` is the same, but importing std.int would make every program that imports this module parse std.int's cases, 12 ms more to check a hello world, and only the module's own functions are inlined ([[MYLA-376]]).

@@ -26,7 +26,6 @@
 
 import .fmt as fmt          // `parse_spec` and `spec_need` for `Format`
 import std.list as list_m   // `filled`, `extend`
-import std.int as int_m     // `leading_zeros`
 
 const B32: uint64 = 4294967296          // the limb's base, 2^32
 const MASK: uint64 = 4294967295         // 2^32 - 1
@@ -378,6 +377,21 @@ fun mag_mul(a: [uint32], b: [uint32]) -> [uint32] {
     return mag_norm(out)
 }
 
+// The number of high zero bits of the limb `x`, for x > 0. (std.int's
+// `leading_zeros` is the same, but importing std.int would make each program
+// importing this module parse its 2042 cases, MYLA-376.)
+#test(1u32)[31]
+#test(2147483648u32)[0]
+fun leading_zeros(x: uint32) -> int {
+    var n = 0
+    var v = x
+    while v < 2147483648 {
+        v = v << 1
+        n += 1
+    }
+    return n
+}
+
 // u / v and u % v by Knuth's algorithm D, for v.len() >= 2. The top limb of
 // v is shifted to have its high bit set; each quotient limb is estimated
 // from the top two limbs of the remainder and the top limb of v, corrected
@@ -387,7 +401,7 @@ fun mag_mul(a: [uint32], b: [uint32]) -> [uint32] {
 fun div_knuth(u: [uint32], v: [uint32]) -> ([uint32], [uint32]) {
     let n = v.len()
     let m = u.len() - n
-    let s = v[n - 1].leading_zeros()
+    let s = leading_zeros(v[n - 1])
     let vn = mag_shl(v, s)
     var un = mag_shl(u, s)
     while un.len() < u.len() + 1 {
