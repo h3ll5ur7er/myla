@@ -38,3 +38,7 @@ Built on 7b328dd.
 - **Measured** natively on a 50 MB file (359,208 records of nine fields, written by Python's `csv.writer` from random rows, about a quarter of the fields quoted), best of five: `csv.stream_reader(fs.open(path))` 0.536 s (93 MB/s), peak RSS 8.6 MB; `fs.read_to_string` and `csv.parse` 0.513 s (97 MB/s), 240 MB. The same 359,208 records and 3,232,872 fields from both; Python 3's `csv.reader` reads the file in 0.684 s.
 - **The page.** [[Language/Standard-library/Csv]] has a section "Reading a stream" with a doc block that runs, the functions and methods, the `Io` error kind and the measurement; the index row on [[Language/Standard-library]] names the stream reader.
 - **Not done, on purpose:** no stream form of `parse_records` (records mapped by the header): the header is the first record, and the page says so. It can follow if someone asks.
+
+## Comments
+
+- 2026-11-09: the owner confirmed a failed read as `CsvErrorKind.Io` with the cause in `io_error()`, over an error that wraps an `IoError`.
