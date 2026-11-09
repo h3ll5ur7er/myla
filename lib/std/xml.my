@@ -616,7 +616,7 @@ impl XmlReader {
         if i == ns {
             return Err(self.name_error(ns))
         }
-        let name = piece(s, ns, i)
+        let name = s[ns:i]
         var attrs: [(str, str)] = []
         var far: [int] = []     // the offsets of the names past the first MANY_ATTRS
         var empty = false
@@ -650,7 +650,7 @@ impl XmlReader {
             if i == an {
                 return Err(self.name_error(an))
             }
-            let aname = piece(s, an, i)
+            let aname = s[an:i]
             i = skip_space(s, i)
             if i >= n {
                 return Err(self.error(XmlErrorKind.UnexpectedEnd, i))
@@ -1083,7 +1083,7 @@ impl XmlReader {
         if i == ts {
             return Err(self.name_error(ts))
         }
-        let target = piece(s, ts, i)
+        let target = s[ts:i]
         if target.len() == 3 && target.to_lower() == "xml" {
             if self.state == START && target == "xml" {
                 return Ok(("", "", -i))
@@ -1136,7 +1136,7 @@ impl XmlReader {
             }
             let ns = i
             i = name_end(s, i)
-            let name = piece(s, ns, i)
+            let name = s[ns:i]
             i = skip_space(s, i)
             if i >= n {
                 return Err(self.error(XmlErrorKind.UnexpectedEnd, n))
@@ -1582,18 +1582,6 @@ fun is_cut(s: str, i: int, p: str) -> bool {
         k += 1
     }
     return true
-}
-
-// The bytes of `s` from `a` to `b`: a slice, but where `b` is inside bytes
-// that aren't UTF-8 (where a slice can't end).
-#test("ab", 0, 1)["a"]
-fun piece(s: str, a: int, b: int) -> str {
-    if b < s.len() && s[b] >= 0x80u8 && s[b] < 0xC0u8 {
-        var sb = StringBuilder()
-        sb.append(s, a, b)
-        return sb.build()
-    }
-    return s[a:b]
 }
 
 // Whether the bytes of `s` from `a` to `b` are `t`.
@@ -2212,7 +2200,8 @@ fun latin1() {
         Ok(_) => assert(false, "a byte that isn't UTF-8")
         Err(e) => assert(e.kind == XmlErrorKind.InvalidChar && e.col == 4, f"{e}")
     }
-    // a lone continuation byte right after a name, where a slice can't end
+    // a lone continuation byte right after a name, which a slice ends beside
+    // (D174; the module copied the name through a builder before)
     for head in ["<a", "<a b", "<?p", "<?xml version"] {
         var sb2 = StringBuilder()
         sb2.append(head)
