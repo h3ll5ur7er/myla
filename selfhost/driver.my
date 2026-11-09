@@ -19,7 +19,8 @@ from .checker import build_checker_std, Checker, CheckErr
 from .codegen import new_codegen
 from .dwarf import read_gdb_script
 from .interp import new_interp, RtError, TestRun, TestOptions, sched_from_env, time_from_env
-from .harness import harness_source, Harness
+from .harness import harness_source, Harness, runner_case
+from std.test import cut_run, case_outcome, case_lines
 from std.process import command, env
 from std.time import now_ns
 from std.fs import make_dir_all, remove_dir_all, exists, read_to_string
@@ -142,7 +143,8 @@ pub fun cmd_test_native(file: str, opts: LoadOptions, sel: TestOptions, target: 
 // MYLA_EMULATOR names, or qemu-aarch64, for another target), its report
 // read back. A harness that ends before its summary (no child processes
 // there: a failure ended the run) reports the case it stopped at with the
-// error, and the rest as not run.
+// error, and the rest as not run. On wasm32, where the harness can start
+// no process, the runs are this process's (`resumed_tests`, MYLA-370).
 pub fun native_tests(file: str, opts: LoadOptions, sel: TestOptions, target: str) -> Result<TestRun, str> {
     let ch = load_and_check(file, opts)?
     let text = match read_to_string(file) {
@@ -176,6 +178,11 @@ pub fun native_tests(file: str, opts: LoadOptions, sel: TestOptions, target: str
         rest.push(argv[i])
         i = i + 1
     }
+    if target == "wasm32-wasi" {
+        let r = resumed_tests(h, argv[0], rest, sel.program, dir)
+        let gone = remove_dir_all(dir)
+        return r
+    }
     var emu = ""
     if argv.len() > 1 { emu = join_words(emulator(target)) }
     let ran = command(argv[0]).args(rest).env("MYLA_TEST_PROGRAM", sel.program).env("MYLA_TEST_EMULATOR", emu).stdin("").output()
@@ -187,6 +194,54 @@ pub fun native_tests(file: str, opts: LoadOptions, sel: TestOptions, target: str
     let err = decode(o.stderr)
     let code = match o.status { ExitStatus.Exited(c) => c, ExitStatus.Signaled(s) => -s }
     return Ok(harness_report(h, decode(o.stdout), err, code))
+}
+
+// The cases of the harness `h` run by `exe` with the arguments `lead`
+// (the emulator's and the harness's path) where the harness can start no
+// process (wasm32, MYLA-370): a run `--from <k>` runs the cases from `k` on
+// in the harness, between markers, until one ends it (a runtime error, an
+// `exit`) or all have run; what each case printed and how it ended give its
+// report as a child's would (`std.test`'s `cut_run`), and the next run
+// starts after the case that ended the last. A run per case that ends it,
+// and one more: each run's cases share its scratch directory (MYLA_TEST_DIR,
+// under `dir`), removed when the run ends.
+fun resumed_tests(h: Harness, exe: str, lead: [str], program: str, dir: str) -> Result<TestRun, str> {
+    var lines: [str] = []
+    var passed = 0
+    var k = 0
+    while k < h.cases.len() {
+        var argv = lead
+        argv.push("--from")
+        argv.push(format("{}", k))
+        let root = format("{}/run{}", dir, k)
+        let ran = command(exe).args(argv).env("MYLA_TEST_PROGRAM", program).env("MYLA_TEST_DIR", root).stdin("").output()
+        if exists(root) { let gone = remove_dir_all(root) }
+        let o = match ran {
+            Ok(o) => o,
+            Err(e) => { return Err(format("myla: cannot run the test harness with '{}'", exe)) },
+        }
+        let code = match o.status { ExitStatus.Exited(c) => c, ExitStatus.Signaled(s) => -s }
+        let runs = cut_run(decode(o.stdout), decode(o.stderr), code)
+        if runs.len() == 0 {
+            // the harness ended before its first case: that case failed so
+            let (detail, shown, rest) = case_outcome(runner_case(h.cases[k]), "", decode(o.stderr), code)
+            let why = if detail == "" { format("the harness ended with status {} before the case", code) } else { detail }
+            for l in case_lines(runner_case(h.cases[k]), why, []) { lines.push(l) }
+            k = k + 1
+            continue
+        }
+        // the rest of a case's stderr goes, as a child's does natively (into
+        // the harness's stderr, which `native_tests` reads for a failure only)
+        for run in runs {
+            if k >= h.cases.len() { break }
+            let c = runner_case(h.cases[k])
+            let (detail, shown, rest) = case_outcome(c, run.0, run.1, run.2)
+            if detail == "" { passed = passed + 1 }
+            for l in case_lines(c, detail, shown) { lines.push(l) }
+            k = k + 1
+        }
+    }
+    return Ok(TestRun { report: lines, passed: passed, total: h.cases.len() })
 }
 
 // The command the harness runs under: none for this machine's target, else
