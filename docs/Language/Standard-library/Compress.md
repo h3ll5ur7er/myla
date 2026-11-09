@@ -202,7 +202,7 @@ The output is a list the decoder appends to. A back reference copies from it, by
 
 Huffman codes are decoded with a table indexed by the next 10 bits: an entry gives the symbol and its length. A longer code (up to 15 bits) is decoded bit by bit from the code's counts, as `puff` does. The table pays: natively, `gunzip` of the benchmark below takes 1157 ms with no table (every code bit by bit), and with a table of 8, 9, 10 or 11 bits 744, 757, 735 and 746 ms. The widths differ by less than the noise; 10 bits is the fastest, and leaves few codes to the slow path.
 
-CRC-32 and Adler-32 are std.hash's algorithms ([[Language/Standard-library/Hash#the-checksums]]), written here for now over a part of the output, with the CRC's tables kept in the decoder. A module of `std` that imports std.hash can't run its cases natively ([[MYLA-360]]), and the checksums move to a module of their own ([[MYLA-359]], D166), which this module will call.
+CRC-32 and Adler-32 are std.hash's algorithms ([[Language/Standard-library/Hash#the-checksums]]), written here over a part of the output, with the CRC's tables kept in the decoder. std.hash's functions take a whole list and make the tables at each call, while the decoder sums its output a part at a time: slicing each part out for them took `gunzip` of the benchmark from 526 to 802 ms, and `gzip_reader` read 16 KiB at a time from 663 to 868 ms ([[MYLA-376]]). A form over a part of a list in std.hash, or [[MYLA-359]]'s checksum module (D166), would let this module call it.
 
 ### The compressor
 

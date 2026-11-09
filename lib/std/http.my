@@ -29,7 +29,7 @@
 
 import std.net as net
 from std.net import TcpStream, TcpListener, SocketAddr, IpAddr
-from std.fs import IoError
+from std.fs import IoError, io_error_name
 from std.io import Read, Write
 import std.url as url_m
 import std.compress as compress
@@ -89,7 +89,7 @@ impl HttpError {
         return match self {
             InvalidUrl(u) => f"invalid URL: {u}"
             Unsupported(what) => f"unsupported: {what}"
-            Io(e) => f"connection failed: {io_name(e)}"
+            Io(e) => f"connection failed: {io_error_name(e)}"
             TimedOut => "timed out"
             Closed => "connection closed"
             Truncated => "connection closed inside a message"
@@ -117,36 +117,6 @@ impl Format for HttpError {
     #test(HttpError.BodyTooLarge, "")["body too large"]
     fun format(self, spec: str) -> str {
         return self.message()
-    }
-}
-
-// The name of an `IoError`'s cause.
-#test(IoError.Other(5))["Other(5)"]
-#test(IoError.TimedOut)["TimedOut"]
-fun io_name(e: IoError) -> str {
-    return match e {
-        NotFound => "NotFound"
-        PermissionDenied => "PermissionDenied"
-        AlreadyExists => "AlreadyExists"
-        NotADirectory => "NotADirectory"
-        IsADirectory => "IsADirectory"
-        NotEmpty => "NotEmpty"
-        Interrupted => "Interrupted"
-        Cancelled => "Cancelled"
-        Unsupported => "Unsupported"
-        BrokenPipe => "BrokenPipe"
-        InvalidInput => "InvalidInput"
-        ConnectionRefused => "ConnectionRefused"
-        ConnectionReset => "ConnectionReset"
-        ConnectionAborted => "ConnectionAborted"
-        NotConnected => "NotConnected"
-        AddrInUse => "AddrInUse"
-        AddrNotAvailable => "AddrNotAvailable"
-        TimedOut => "TimedOut"
-        HostUnreachable => "HostUnreachable"
-        NetworkUnreachable => "NetworkUnreachable"
-        InvalidData => "InvalidData"
-        Other(c) => f"Other({c})"
     }
 }
 

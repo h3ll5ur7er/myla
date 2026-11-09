@@ -20,7 +20,7 @@
 import std.compress as compress
 from std.compress import CompressError
 from std.io import Read, Write, from_bytes, memory_stream
-from std.fs import IoError
+from std.fs import IoError, io_error_name
 import std.path as path_m
 import std.time as time
 import std.hash as hash_m
@@ -79,7 +79,7 @@ impl ArchiveError {
             LengthMismatch => "length mismatch"
             Compress(e) => f"entry doesn't decompress: {e.message()}"
             UnsafeName => "entry name leaves the directory"
-            Io(e) => f"read failed: {io_name(e)}"
+            Io(e) => f"read failed: {io_error_name(e)}"
         }
     }
 }
@@ -97,35 +97,6 @@ impl Format for ArchiveError {
     #test(ArchiveError.Zip64, "")["ZIP64 archives are not supported"]
     fun format(self, spec: str) -> str {
         return self.message()
-    }
-}
-
-// The name of an `IoError`'s cause.
-#test(IoError.Other(5))["Other(5)"]
-fun io_name(e: IoError) -> str {
-    return match e {
-        NotFound => "NotFound"
-        PermissionDenied => "PermissionDenied"
-        AlreadyExists => "AlreadyExists"
-        NotADirectory => "NotADirectory"
-        IsADirectory => "IsADirectory"
-        NotEmpty => "NotEmpty"
-        Interrupted => "Interrupted"
-        Cancelled => "Cancelled"
-        Unsupported => "Unsupported"
-        BrokenPipe => "BrokenPipe"
-        InvalidInput => "InvalidInput"
-        ConnectionRefused => "ConnectionRefused"
-        ConnectionReset => "ConnectionReset"
-        ConnectionAborted => "ConnectionAborted"
-        NotConnected => "NotConnected"
-        AddrInUse => "AddrInUse"
-        AddrNotAvailable => "AddrNotAvailable"
-        TimedOut => "TimedOut"
-        HostUnreachable => "HostUnreachable"
-        NetworkUnreachable => "NetworkUnreachable"
-        InvalidData => "InvalidData"
-        Other(c) => f"Other({c})"
     }
 }
 
