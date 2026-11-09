@@ -1050,6 +1050,98 @@ fun map_kv_hint(expected: Option<Type>) -> Option<[Type]> {
     return None
 }
 
+// A list or map literal's element may leave type parameters open that a
+// later element fixes (MYLA-401): `[Either.Left(1), Either.Right("a")]`,
+// `[None, Some(2)]`, `[[], [1]]`. Until then such a parameter is a hole, a
+// type parameter no program can name.
+fun hole() -> Type { return Type.TParam("?") }
+
+#test(Type.TEnum("Either", [Type.TInt(32, true), Type.TParam("?")]))[true]
+#test(Type.TList(Type.TList(Type.TParam("?"))))[true]
+#test(Type.TList(Type.TParam("T")))[false]
+fun has_hole(t: Type) -> bool { return mentions_param(t, "?") }
+
+#test(2)[[Type.TParam("?"), Type.TParam("?")]]
+#test(0)[[]]
+fun holes(n: int32) -> [Type] {
+    var out: [Type] = []
+    for i in 0..n { out.push(hole()) }
+    return out
+}
+
+// The hint an element that can't take a partial type gets: none while the
+// hint has a hole.
+#test(Some(Type.TList(Type.TParam("?"))))[None]
+#test(Some(Type.TStr))[Some(Type.TStr)]
+#test(None)[None]
+fun whole_hint(t: Option<Type>) -> Option<Type> {
+    return match t {
+        Some(x) => if has_hole(x) { None } else { Some(x) },
+        None => None,
+    }
+}
+
+// A type for messages, its holes as `_`.
+#test(Type.TEnum("Either", [Type.TInt(32, true), Type.TParam("?")]))["Either<int32, _>"]
+fun open_type_name(t: Type) -> str { return type_name(subst_type(t, [Subst { name: "?", ty: Type.TParam("_") }])) }
+
+// Two elements' types as one: a hole in either takes the other's type
+// there; None where they differ otherwise.
+#test(Type.TEnum("Either", [Type.TInt(32, true), Type.TParam("?")]), Type.TEnum("Either", [Type.TParam("?"), Type.TStr]))[Some(Type.TEnum("Either", [Type.TInt(32, true), Type.TStr]))]
+#test(Type.TList(Type.TParam("?")), Type.TList(Type.TEnum("Option", [Type.TParam("?")])))[Some(Type.TList(Type.TEnum("Option", [Type.TParam("?")])))]
+#test(Type.TMap(Type.TStr, Type.TParam("?")), Type.TMap(Type.TStr, Type.TBool))[Some(Type.TMap(Type.TStr, Type.TBool))]
+#test(Type.TEnum("Option", [Type.TInt(32, true)]), Type.TEnum("Option", [Type.TInt(64, true)]))[None]
+#test(Type.TEnum("Option", [Type.TParam("?")]), Type.TStr)[None]
+fun join_open(a: Type, b: Type) -> Option<Type> {
+    if type_eq(a, b) { return Some(a) }
+    if type_eq(a, hole()) { return Some(b) }
+    if type_eq(b, hole()) { return Some(a) }
+    match a {
+        Type.TEnum(n1, a1) => { match b { Type.TEnum(n2, a2) => { if n1 == n2 { match join_open_list(a1, a2) { Some(js) => { return Some(Type.TEnum(n1, js)) }, None => {} } } }, _ => {} } },
+        Type.TStruct(n1, a1) => { match b { Type.TStruct(n2, a2) => { if n1 == n2 { match join_open_list(a1, a2) { Some(js) => { return Some(Type.TStruct(n1, js)) }, None => {} } } }, _ => {} } },
+        Type.TActor(n1, a1) => { match b { Type.TActor(n2, a2) => { if n1 == n2 { match join_open_list(a1, a2) { Some(js) => { return Some(Type.TActor(n1, js)) }, None => {} } } }, _ => {} } },
+        Type.TList(e1) => { match b { Type.TList(e2) => { match join_open(e1, e2) { Some(j) => { return Some(Type.TList(j)) }, None => {} } }, _ => {} } },
+        Type.TTuple(e1) => { match b { Type.TTuple(e2) => { match join_open_list(e1, e2) { Some(js) => { return Some(Type.TTuple(js)) }, None => {} } }, _ => {} } },
+        Type.TMap(k1, v1) => { match b { Type.TMap(k2, v2) => { match join_open_list([k1, v1], [k2, v2]) { Some(js) => { return Some(Type.TMap(js[0], js[1])) }, None => {} } }, _ => {} } },
+        _ => {},
+    }
+    return None
+}
+
+// One column of a list or map literal (its elements, a map's keys or its
+// values) as its elements are checked: the type they share so far (`have`
+// once one is), possibly with holes; the first element, which a later
+// literal's type is unified with; the elements whose own type had a hole.
+struct LitColumn { ty: Type, have: bool, first: Expr, open: [Expr] }
+
+fun new_column(first: Expr) -> LitColumn { return LitColumn { ty: hole(), have: false, first: first, open: [] } }
+
+// A hint that is a hole says nothing.
+#test(Some(Type.TParam("?")))[None]
+#test(Some(Type.TList(Type.TParam("?"))))[Some(Type.TList(Type.TParam("?")))]
+fun drop_hole(t: Option<Type>) -> Option<Type> {
+    return match t {
+        Some(x) => if type_eq(x, hole()) { None } else { Some(x) },
+        None => None,
+    }
+}
+
+#test([Type.TParam("?"), Type.TStr], [Type.TBool, Type.TParam("?")])[Some([Type.TBool, Type.TStr])]
+#test([Type.TStr], [Type.TBool])[None]
+fun join_open_list(xs: [Type], ys: [Type]) -> Option<[Type]> {
+    if xs.len() != ys.len() { return None }
+    var out: [Type] = []
+    var i = 0
+    while i < xs.len() {
+        match join_open(xs[i], ys[i]) {
+            Some(j) => out.push(j),
+            None => { return None },
+        }
+        i += 1
+    }
+    return Some(out)
+}
+
 #test(None, "Box")[None]
 #test(None, "Pair")[None]
 #test(Some(Type.TStruct("Box", [Type.TInt(32, true)])), "Box")[Some([Type.TInt(32, true)])]
@@ -1802,6 +1894,7 @@ pub struct Checker {
     call_kind: str,
     call_kind_id: int32,
     targs_taken: int32,             // the last call whose explicit type arguments a generic function or method took (D169)
+    open_at: int32,                 // the list or map literal's element that may leave type parameters open, as holes (MYLA-401)
     call_target: str,
     call_mutates: bool,
     fun_name: str,
@@ -1859,7 +1952,7 @@ fun new_checker(decls: [Decl]) -> Checker {
         resolved: [:], call_defaults: [:], errs: [], warnings: [], primitives: false, called: [:], std_impls: [:], allowed: [], impl_allows: [], method_decl_allows: [], mains: [],
         skipped_decls: [:], skipped_fns: [:], broken_impls: [:], redefined: [:],
         lost_methods: [:], lost_traits: [:], failed_consts: [:], bodies: false,
-        call_kind: "", call_kind_id: -1, targs_taken: -1, call_target: "", call_mutates: false, fun_name: "", handovers: [:], become_words: [], passed_on: [],
+        call_kind: "", call_kind_id: -1, targs_taken: -1, open_at: -1, call_target: "", call_mutates: false, fun_name: "", handovers: [:], become_words: [], passed_on: [],
         actors: [:], conc_line: 0, conc_col: 0, conc_sp: no_span(), conc_node: -1, in_async: false, self_assignable: false, actor_self: "", builtin_as_method: false, cur_key: "",
         lams: [], awaited: [:], call_key: "", call_async: false, suspended: -1, task_init: false, in_guard: false, neg_lit: -1,
         task_line: 0, task_col: 0, task_sp: no_span(), task_node: -1, fill_decls: [:], renames: [:], mutating_calls: [:],
@@ -3638,6 +3731,7 @@ impl Checker {
             Some(et) => { if enum_type_matches(et, enum_name, nparams) { return Ok(et) } },
             None => {},
         }
+        if self.open_at == e.id { return Ok(Type.TEnum(enum_name, holes(nparams))) }   // MYLA-401
         return Err(terr_at(e.line, e.col, e.sp, format("cannot infer type argument(s) for '{}'; annotate the binding (e.g. ': {}<...>')", variant, enum_name)))
     }
 
@@ -4156,12 +4250,23 @@ impl Checker {
             },
             None => {},
         }
+        // a list's element leaves its components open as the list does (MYLA-401)
+        let may_open = self.open_at == e.id
         var ts: [Type] = []
         var i = 0
         while i < elems.len() {
             var want: Option<Type> = None
             if have_exp { want = Some(exp_elems[i]) }
-            ts.push(self.expect_value(elems[i], want)?)
+            if may_open {
+                want = drop_hole(want)
+                if !self.takes_partial(elems[i]) { want = whole_hint(want) }
+                self.open_at = elems[i].id
+                let r = self.expect_value(elems[i], want)
+                self.open_at = e.id
+                ts.push(r?)
+            } else {
+                ts.push(self.expect_value(elems[i], want)?)
+            }
             i = i + 1
         }
         return Ok(Type.TTuple(ts))
@@ -4182,51 +4287,165 @@ impl Checker {
 
     #test(checker_on("[int]"), Expr { id: 40, line: 30, col: 20, sp: SrcSpan { sline: 30, scol: 20, eline: 30, ecol: 22 }, kind: ExprKind.ListLit([]) }, [], Some(Type.TList(Type.TParam("T"))))[Ok(Type.TList(Type.TParam("T")))]
     fun infer_list_lit(var self, e: Expr, elems: [Expr], expected: Option<Type>) -> Result<Type, CheckErr> {
-        var exp_elem: Option<Type> = list_elem_hint(expected)
+        // this list may be an element that leaves its type open (MYLA-401)
+        let may_open = self.open_at == e.id
+        var exp_elem: Option<Type> = drop_hole(list_elem_hint(expected))
         if elems.len() == 0 {
-            return match exp_elem { Some(el) => Ok(Type.TList(el)), None => Err(terr_at(e.line, e.col, e.sp, "cannot infer the element type of an empty list `[]`; annotate it (e.g. `: [int]`)")) }
+            match exp_elem { Some(el) => { return Ok(Type.TList(el)) }, None => {} }
+            if may_open { return Ok(Type.TList(hole())) }
+            return Err(terr_at(e.line, e.col, e.sp, "cannot infer the element type of an empty list `[]`; annotate it (e.g. `: [int]`)"))
         }
-        var elem_t = self.expect_value(elems[0], exp_elem)?
-        var i = 1
-        while i < elems.len() {
-            let et = self.expect_value(elems[i], Some(elem_t))?
-            elem_t = self.unify(elems[0], elem_t, elems[i], et)?
-            i = i + 1
+        var col = new_column(elems[0])
+        for x in elems { col = self.column_step(col, x, exp_elem)? }
+        return Ok(Type.TList(self.close_column(col, may_open)?))
+    }
+
+    // The column `col` with its next element `x` (MYLA-401). `x` is checked
+    // against the elements' type so far, and may leave type parameters open
+    // (`open_at`): a later element may fix them. A hint with a hole goes only
+    // to an element that can take it.
+    fun column_step(var self, col: LitColumn, x: Expr, exp: Option<Type>) -> Result<LitColumn, CheckErr> {
+        var hint = exp
+        if col.have { hint = Some(col.ty) }
+        if !self.takes_partial(x) { hint = whole_hint(hint) }
+        let saved = self.open_at
+        self.open_at = x.id
+        let r = self.expect_value(x, hint)
+        self.open_at = saved
+        let t = r?
+        var open = col.open
+        if has_hole(t) { open.push(x) }
+        if !col.have { return Ok(LitColumn { ty: t, have: true, first: x, open: open }) }
+        if !has_hole(t) && !has_hole(col.ty) { return Ok(LitColumn { ty: self.unify(col.first, col.ty, x, t)?, have: true, first: col.first, open: open }) }
+        return match join_open(col.ty, t) {
+            Some(j) => Ok(LitColumn { ty: j, have: true, first: col.first, open: open }),
+            None => Err(terr_at(x.line, x.col, x.sp, format("type mismatch: '{}' vs '{}'", open_type_name(col.ty), open_type_name(t)))),
         }
-        return Ok(Type.TList(elem_t))
+    }
+
+    // The column's type once every element is checked: the elements that
+    // left a parameter open take it. If none fixed it, the first of them says
+    // what it lacks as it would alone, unless the literal is itself an
+    // element that may stay open (`may_open`).
+    fun close_column(var self, col: LitColumn, may_open: bool) -> Result<Type, CheckErr> {
+        if has_hole(col.ty) {
+            if may_open { return Ok(col.ty) }
+            let x = col.open[0]
+            self.expect_value(x, None)?
+            return Err(terr_at(x.line, x.col, x.sp, format("cannot infer the type '{}' of this element; add a type annotation to guide inference", open_type_name(col.ty))))
+        }
+        for x in col.open { self.fill_open(x, col.ty)? }
+        return Ok(col.ty)
+    }
+
+    // An element that left type parameters open gets the type its list's
+    // elements share, and so do its own elements that left them open.
+    fun fill_open(var self, x: Expr, t: Type) -> Result<int32, CheckErr> {
+        self.resolved[x.id] = t
+        match x.kind {
+            ExprKind.ListLit(es) => {
+                match t {
+                    Type.TList(el) => { for y in es { if self.holed(y) { self.fill_open(y, el)? } } },
+                    _ => {},
+                }
+            },
+            ExprKind.TupleLit(es) => {
+                match t {
+                    Type.TTuple(ts) => {
+                        var i = 0
+                        while i < es.len() && i < ts.len() {
+                            if self.holed(es[i]) { self.fill_open(es[i], ts[i])? }
+                            i += 1
+                        }
+                    },
+                    _ => {},
+                }
+            },
+            ExprKind.MapLit(ents) => {
+                match t {
+                    Type.TMap(k, v) => {
+                        // a key type left open wasn't checked yet
+                        if ents.len() > 0 && self.holed(ents[0].key) { self.check_key(k, ents[0].key.line, ents[0].key.col, ents[0].key.sp)? }
+                        for en in ents {
+                            if self.holed(en.key) { self.fill_open(en.key, k)? }
+                            if self.holed(en.value) { self.fill_open(en.value, v)? }
+                        }
+                    },
+                    _ => {},
+                }
+            },
+            _ => {},
+        }
+        return Ok(0)
+    }
+
+    fun holed(self, x: Expr) -> bool {
+        return match self.resolved.get(x.id) { Some(t) => has_hole(t), None => false }
+    }
+
+    // Whether the element `x` can take a hint with a hole, its holes left
+    // open: a variant, a struct, tuple, list or map literal.
+    fun takes_partial(self, x: Expr) -> bool {
+        return match x.kind {
+            ExprKind.ListLit(es) => true,
+            ExprKind.MapLit(es) => true,
+            ExprKind.TupleLit(es) => true,
+            ExprKind.StructLit(n, fs) => true,
+            ExprKind.Name(n) => n == "None" && self.unshadowed(n),
+            ExprKind.GetField(target, field) => self.is_variant_ref(target, field),
+            ExprKind.Call(callee, args, targs) => targs.len() == 0 && (match callee.kind {
+                ExprKind.Name(n) => (n == "Some" || n == "Ok" || n == "Err") && self.unshadowed(n),
+                ExprKind.GetField(target, field) => self.is_variant_ref(target, field),
+                _ => false,
+            }),
+            _ => false,
+        }
+    }
+
+    fun unshadowed(self, n: str) -> bool { return match self.lookup(n) { Some(b) => false, None => true } }
+
+    fun is_variant_ref(self, target: Expr, field: str) -> bool {
+        return match self.enum_name_ref(target) {
+            Some(en) => self.enum_has_variant(en, field),
+            None => false,
+        }
     }
 
     #test(checker_on("[int]"), Expr { id: 101, line: 48, col: 29, sp: SrcSpan { sline: 48, scol: 29, eline: 48, ecol: 32 }, kind: ExprKind.MapLit([]) }, [], Some(Type.TMap(Type.TChar, Type.TInt(32, true))))[Ok(Type.TMap(Type.TChar, Type.TInt(32, true)))]
     fun infer_map_lit(var self, e: Expr, entries: [MapEntry], expected: Option<Type>) -> Result<Type, CheckErr> {
+        // this map may be an element that leaves its type open (MYLA-401)
+        let may_open = self.open_at == e.id
         var exp_k: Option<Type> = None
         var exp_v: Option<Type> = None
         var have_exp = false
         match map_kv_hint(expected) {
             Some(kv) => {
-                exp_k = Some(kv[0])
-                exp_v = Some(kv[1])
+                exp_k = drop_hole(Some(kv[0]))
+                exp_v = drop_hole(Some(kv[1]))
                 have_exp = true
             },
             None => {},
         }
         if entries.len() == 0 {
             if have_exp { return Ok(match expected { Some(et) => et, None => Type.TMap(Type.TStr, Type.TStr) }) }
+            if may_open { return Ok(Type.TMap(hole(), hole())) }
             return Err(terr_at(e.line, e.col, e.sp, "cannot infer the key/value types of an empty map `[:]`; annotate it (e.g. `: [str: int]`)"))
         }
         let k0 = entries[0].key
-        let v0 = entries[0].value
-        var key_t = self.expect_value(k0, exp_k)?
-        self.check_key(key_t, k0.line, k0.col, k0.sp)?
-        var val_t = self.expect_value(v0, exp_v)?
-        var i = 1
+        var keys = new_column(k0)
+        var vals = new_column(entries[0].value)
+        var i = 0
         while i < entries.len() {
-            let kt = self.expect_value(entries[i].key, Some(key_t))?
-            key_t = self.unify(k0, key_t, entries[i].key, kt)?
-            let vt = self.expect_value(entries[i].value, Some(val_t))?
-            val_t = self.unify(v0, val_t, entries[i].value, vt)?
+            keys = self.column_step(keys, entries[i].key, exp_k)?
+            if i == 0 && !has_hole(keys.ty) { self.check_key(keys.ty, k0.line, k0.col, k0.sp)? }
+            vals = self.column_step(vals, entries[i].value, exp_v)?
             i = i + 1
         }
-        return Ok(Type.TMap(key_t, val_t))
+        // a key type a later key fixed is checked once it is
+        let key_open = self.holed(k0)
+        let key_t = self.close_column(keys, may_open)?
+        if key_open && !has_hole(key_t) { self.check_key(key_t, k0.line, k0.col, k0.sp)? }
+        return Ok(Type.TMap(key_t, self.close_column(vals, may_open)?))
     }
 
     #test(checker_on("enum E { A, B(int) }"), expr_of("a.b[0]"), expr_of("a.b[0]"), expr_of("a.b[0]"))[Err(CheckErr { line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 2 }, msg: "unknown name 'a'", decl: -1, notes: [] })]
@@ -4295,6 +4514,7 @@ impl Checker {
                     Some(et) => { if enum_type_matches(et, enum_name, nparams) { return Ok(et) } },
                     None => {},
                 }
+                if self.open_at == e.id { return Ok(Type.TEnum(enum_name, holes(nparams))) }   // MYLA-401
                 return Err(terr_at(e.line, e.col, e.sp, format("cannot infer type argument(s) for '{}.{}'; annotate the binding (e.g. ': {}<...>')", enum_name, field, enum_name)))
             },
             None => {},
@@ -4419,7 +4639,7 @@ impl Checker {
         var subst: [Subst] = []
         match expected_args {
             Some(ea) => { if ea.len() == params.len() { var i = 0
-            while i < params.len() { subst.push(Subst { name: params[i], ty: ea[i] })
+            while i < params.len() { if !has_hole(ea[i]) { subst.push(Subst { name: params[i], ty: ea[i] }) }
             i = i + 1 } } },
             None => {},
         }
@@ -4435,7 +4655,11 @@ impl Checker {
         }
         var missing: [str] = []
         for p in params { if !subst_has(subst, p) { missing.push(p) } }
-        if missing.len() > 0 { return Err(terr_at(e.line, e.col, e.sp, format("cannot infer type parameter(s) {}; add a type annotation to guide inference", join_strs(missing, ", ")))) }
+        if missing.len() > 0 {
+            // a list's element leaves them to a later one (MYLA-401)
+            if self.open_at != e.id { return Err(terr_at(e.line, e.col, e.sp, format("cannot infer type parameter(s) {}; add a type annotation to guide inference", join_strs(missing, ", ")))) }
+            for p in missing { subst.push(Subst { name: p, ty: hole() }) }
+        }
         var j = 0
         while j < nodes.len() {
             let want = subst_type(template_types[j], subst)

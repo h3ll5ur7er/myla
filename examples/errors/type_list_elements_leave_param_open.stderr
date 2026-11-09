@@ -1,0 +1,5 @@
+type error: cannot infer type parameter(s) R; add a type annotation to guide inference
+  --> examples/errors/type_list_elements_leave_param_open.my:11:26
+   |
+11 |     let es = [Either.Left(1), Either.Left(2)]
+   |               ^^^^^^^^^^^^^^
