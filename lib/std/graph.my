@@ -23,6 +23,7 @@ import std.deque as deque
 from std.deque import Deque
 import std.heap as heap
 from std.heap import KeyedHeap
+import std.list as list_m // `filled`, `reversed`, `contains`
 
 // A path found by a search: its nodes from the start to the goal, both
 // included, and its cost, the sum of its edges' weights (the number of its
@@ -208,10 +209,7 @@ pub fun astar<T: Eq + Hash>(start: T, goal: (T) -> bool, next: (T) -> [(T, int64
 // `nodes` give the least order.
 pub fun topo_sort<T: Eq + Hash>(nodes: [T], next: (T) -> [T]) -> Result<[T], GraphError> {
     let g = numbered(nodes, next)
-    var indegree: [int] = []
-    for i in 0..g.nodes.len() {
-        indegree.push(0)
-    }
+    var indegree = list_m.filled(g.nodes.len(), 0)
     for out in g.edges {
         for v in out {
             indegree[v] += 1
@@ -248,20 +246,14 @@ pub fun topo_sort<T: Eq + Hash>(nodes: [T], next: (T) -> [T]) -> Result<[T], Gra
 pub fun components<T: Eq + Hash>(nodes: [T], next: (T) -> [T]) -> [[T]] {
     let g = numbered(nodes, next)
     // Each edge both ways
-    var both: [[int]] = []
-    for i in 0..g.nodes.len() {
-        both.push([])
-    }
+    var both: [[int]] = list_m.filled(g.nodes.len(), [])
     for u in 0..g.edges.len() {
         for v in g.edges[u] {
             both[u].push(v)
             both[v].push(u)
         }
     }
-    var seen: [bool] = []
-    for i in 0..g.nodes.len() {
-        seen.push(false)
-    }
+    var seen = list_m.filled(g.nodes.len(), false)
     var out: [[T]] = []
     var todo: Deque<int> = deque.new()
     for s in 0..g.nodes.len() {
@@ -288,10 +280,7 @@ pub fun components<T: Eq + Hash>(nodes: [T], next: (T) -> [T]) -> [[T]] {
 // `bfs` over the nodes 0 to `n` - 1: the number of edges of a shortest path
 // from `start` to each node, -1 for one it doesn't reach.
 pub fun bfs_dense(n: int, start: int, next: (int) -> [int]) -> [int] {
-    var dist: [int] = []
-    for i in 0..n {
-        dist.push(-1)
-    }
+    var dist = list_m.filled(n, -1)
     dist[start] = 0
     var todo: Deque<int> = deque.new()
     todo.push_back(start)
@@ -310,12 +299,8 @@ pub fun bfs_dense(n: int, start: int, next: (int) -> [int]) -> [int] {
 // `dijkstra` over the nodes 0 to `n` - 1: the cost of a cheapest path from
 // `start` to each node, -1 for one it doesn't reach.
 pub fun dijkstra_dense(n: int, start: int, next: (int) -> [(int, int64)]) -> [int64] {
-    var dist: [int64] = []
-    var best: [int64] = []
-    for i in 0..n {
-        dist.push(-1)
-        best.push(-1)
-    }
+    var dist: [int64] = list_m.filled(n, -1)
+    var best: [int64] = list_m.filled(n, -1)
     best[start] = 0
     var todo: KeyedHeap<int> = heap.keyed_new()
     todo.push(0, start)
@@ -346,13 +331,7 @@ fun walk_back<T: Eq + Hash>(prev: [T: T], start: T, end: T) -> [T] {
         at = prev[at]
         back.push(at)
     }
-    var nodes: [T] = []
-    var i = back.len() - 1
-    while i >= 0 {
-        nodes.push(back[i])
-        i -= 1
-    }
-    return nodes
+    return back.reversed()
 }
 
 // A graph of numbered nodes: the nodes, and the numbers of the nodes each
@@ -427,15 +406,6 @@ fun steps(p: (int, int)) -> [(int, int)] {
     return out
 }
 
-fun has<T: Eq>(xs: [T], v: T) -> bool {
-    for x in xs {
-        if x == v {
-            return true
-        }
-    }
-    return false
-}
-
 #test
 fun breadth_first() {
     let d = bfs("a", letters)
@@ -449,7 +419,7 @@ fun breadth_first() {
     }
     assert(p.cost == 15 && p.nodes.len() == 16 && p.nodes[0] == (0, 0) && p.nodes[15] == (7, 4), "the path")
     for i in 1..p.nodes.len() {
-        assert(has(steps(p.nodes[i - 1]), p.nodes[i]), "each step an edge")
+        assert(steps(p.nodes[i - 1]).contains(p.nodes[i]), "each step an edge")
     }
     match bfs_path("a", (u: str) => u == "g", letters) {
         Some(_) => assert(false, "g is not reachable from a")
