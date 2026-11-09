@@ -136,14 +136,18 @@ def selfhost_run(path: str, args=None, cwd: str | None = None) -> tuple[str, str
 
 # -- native builds -------------------------------------------------------------
 
-def native_build(program: Program, binary: str, entry_path: str | None = None, debug: bool = False) -> None:
+def native_build(program: Program, binary: str, entry_path: str | None = None, debug: bool = False,
+                 checked: bool = False) -> None:
     """Compile `program` to the native binary `binary` with the self-hosted CLI.
     `entry_path` names the entry file in runtime-error positions, as `myla
-    build <entry_path>` would."""
+    build <entry_path>` would; `checked`: integer overflow traps (`--checked`,
+    D175)."""
     cmd = [selfhost_tool("main"), "build", entry_path or program.entry_file, "-o", binary,
            "--stdlib", STDLIB_ROOT, *target_flags()]
     if debug:
         cmd.append("-g")
+    if checked:
+        cmd.append("--checked")
     proc = subprocess.run(cmd, capture_output=True, text=True)
     if proc.returncode != 0:
         raise RuntimeError(f"myla build {program.entry_file} failed:\n{proc.stderr}")
@@ -168,15 +172,16 @@ def build_and_run(source: str, timeout: float | None = None) -> tuple[str, int]:
 
 
 def build_and_run_full(program: Program, args=None, argv0="prog",
-                       entry_path=None) -> tuple[str, str, int]:
+                       entry_path=None, checked: bool = False) -> tuple[str, str, int]:
     """Compile `program` to a native binary and run it, returning
     (stdout, stderr, exit). `args` are extra program arguments; `argv0` is the
     program name the binary sees as `argv[0]` (so the native argv can be made to
     match the interpreter's for parity); `entry_path` names the entry file in
-    runtime-error positions, as `myla build <entry_path>` would."""
+    runtime-error positions, as `myla build <entry_path>` would; `checked`:
+    built with `--checked`."""
     with tempfile.TemporaryDirectory() as tmp:
         binary = os.path.join(tmp, "prog")
-        native_build(program, binary, entry_path=entry_path)
+        native_build(program, binary, entry_path=entry_path, checked=checked)
         program_argv, exe = run_argv(binary, argv0, args or [])
         proc = subprocess.run(program_argv, executable=exe,
                               capture_output=True, text=True)

@@ -157,6 +157,39 @@ pub fun str_eq(a: str, b: str) -> bool {
     return __equal_bytes(pa + 8, pb + 8, n)
 }
 
+// Whether `a * b` doesn't fit an `int64`: a checked build's `*` at 64 bits
+// (D175), where no wider type holds the product. By division (CERT INT32-C),
+// which can't overflow itself.
+#test(3037000499i64, 3037000499)[false]
+#test(3037000500i64, 3037000500)[true]
+#test(-1i64, -9223372036854775807 - 1)[true]
+#test(-9223372036854775807i64 - 1, 1)[false]
+#test(-3037000500i64, 3037000500)[true]
+#test(-4611686018427387904i64, 2)[false]
+#test(-4611686018427387904i64, -2)[true]
+#test(0i64, -9223372036854775807 - 1)[false]
+pub fun mul_overflows_i64(a: int64, b: int64) -> bool {
+    let max: int64 = 9223372036854775807
+    let min: int64 = -9223372036854775807 - 1
+    if a > 0 {
+        return if b > 0 { a > max / b } else { b < min / a }
+    }
+    if b > 0 {
+        return a < min / b
+    }
+    return a != 0 && b < max / a
+}
+
+// Whether `a * b` doesn't fit a `uint64` (D175, as `mul_overflows_i64`).
+#test(4294967296u64, 4294967295)[false]
+#test(4294967296u64, 4294967296)[true]
+#test(0u64, 18446744073709551615)[false]
+#test(18446744073709551615u64, 1)[false]
+#test(18446744073709551615u64, 2)[true]
+pub fun mul_overflows_u64(a: uint64, b: uint64) -> bool {
+    return b != 0 && a > 18446744073709551615 / b
+}
+
 // `a < b` and the other orderings of strings (MYLA-318): -1, 0 or 1, as
 // `Ord`'s `cmp` gives them, by the first byte that differs (unsigned), or
 // the shorter first when one begins the other; the order `list_dir` sorts
@@ -1055,7 +1088,7 @@ fun digit_count(u: uint64) -> int64 {
     var p: uint64 = 10
     while n < 20 && u >= p {
         n += 1
-        p *= 10
+        p = p.wrapping_mul(10)   // past 10^19 only as the loop ends
     }
     return n
 }
@@ -1127,7 +1160,7 @@ pub fun int_to_str(v: int64) -> str {
     if v >= 0 {
         return uint_to_str(v as uint64)
     }
-    let u = 0u64 - (v as uint64)
+    let u = (v as uint64).wrapping_neg()
     let n = digit_count(u)
     let p = __alloc(n + 9)
     __store64(p, n + 1)
@@ -1245,19 +1278,19 @@ const PHI: int64 = -7046029254386353131  // 2^64 / the golden ratio
 pub fun str_hash(key: int64) -> int64 {
     var n = __load64(key)
     var p = key + 8
-    var h = n * PHI
+    var h = n.wrapping_mul(PHI)
     while n >= 8 {
-        h = (h ^ __load64(p)) * PHI
+        h = (h ^ __load64(p)).wrapping_mul(PHI)
         h = __rotl(h, 29)
         p += 8
         n -= 8
     }
     while n > 0 {
-        h = (h ^ (__load8(p) as int64)) * PHI
+        h = (h ^ (__load8(p) as int64)).wrapping_mul(PHI)
         p += 1
         n -= 1
     }
-    h = h * PHI
+    h = h.wrapping_mul(PHI)
     return h ^ (((h as uint64) >> 32) as int64)
 }
 
@@ -1267,7 +1300,7 @@ pub fun map_lookup(cell: int64, key: int64, slot_size: int64, is_str: int64) -> 
     let mask = __load64(cell + 8) - 1
     let slots = cell + 16
     if is_str == 0 {
-        let h = key * PHI
+        let h = key.wrapping_mul(PHI)
         var i = (h ^ (((h as uint64) >> 32) as int64)) & mask
         while true {
             let slot = slots + i * slot_size
@@ -1342,7 +1375,7 @@ fun map_set_slot(cell: int64, key: int64, slot_size: int64, is_str: int64) -> in
     var i: int64 = 0
     var n: int64 = 0
     if is_str == 0 {
-        let h = key * PHI
+        let h = key.wrapping_mul(PHI)
         i = (h ^ (((h as uint64) >> 32) as int64)) & mask
     } else {
         i = str_hash(key) & mask
@@ -2249,7 +2282,7 @@ fun digits_at(p: int64, limit: int64) -> int64 {
         if d < 0 || d > 9 || n > limit {
             return n
         }
-        n = n * 10 + d
+        n = n.wrapping_mul(10).wrapping_add(d)
         q += 1
     }
     return n
@@ -2413,7 +2446,7 @@ pub fun exec_push(fr: int64) {
     let q = wq_of(w)
     take_lock(q)
     if __rt_get("__exec_sched") == 2 {
-        let x = __rt_get("__exec_rng") * SCHED_MUL + SCHED_ADD
+        let x = __rt_get("__exec_rng").wrapping_mul(SCHED_MUL).wrapping_add(SCHED_ADD)
         __store64(__rt_addr("__exec_rng"), x)
         if ((x >> 33) & 1) != 0 {
             push_oldest(q, w, fr)
@@ -3829,7 +3862,7 @@ pub fun fmod(xb: int64, yb: int64) -> int64 {
         uy = (uy & 0x000FFFFFFFFFFFFFu64) | 0x0010000000000000u64
     }
     while ex > ey {
-        let d = ux - uy
+        let d = ux.wrapping_sub(uy)   // its top bit: whether uy was larger
         if (d >> 63u64) == 0u64 {
             if d == 0u64 { return sx as int64 }
             ux = d
@@ -3837,7 +3870,7 @@ pub fun fmod(xb: int64, yb: int64) -> int64 {
         ux = ux << 1u64
         ex -= 1
     }
-    let d = ux - uy
+    let d = ux.wrapping_sub(uy)
     if (d >> 63u64) == 0u64 {
         if d == 0u64 { return sx as int64 }
         ux = d

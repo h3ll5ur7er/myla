@@ -39,7 +39,7 @@ import sys
 import tempfile
 import unittest
 
-from ._golden import NoGolden, golden, recorded_examples
+from ._golden import NoGolden, answered_or_recorded, golden, recorded_examples
 from ._native import CAN_BUILD_NATIVE, SKIP_REASON, TEST_TARGET, assemble, run_argv, target_flags
 from ._targets import program_excuse
 from ._tools import STDLIB_ROOT, selfhost_tool
@@ -746,7 +746,7 @@ class SelfHostedCodegenParity(unittest.TestCase):
             rel = os.path.relpath(path, _REPO)
             with self.subTest(file=rel):
                 got = self._build_and_run(self._emit_asm(path))
-                self.assertEqual(got, _oracle(path))
+                self.assertEqual(got, answered_or_recorded(path, _oracle)[0])
                 checked += 1
         # Guard against the corpus silently going empty.
         self.assertGreater(checked, 20)
@@ -761,7 +761,12 @@ class SelfHostedCodegenParity(unittest.TestCase):
         self.assertGreater(len(runtime), 8)
         for path in runtime:
             with self.subTest(file=os.path.basename(path)), tempfile.TemporaryDirectory() as tmp:
-                interp = _runtime_error_oracle(path)
+                try:
+                    interp = _runtime_error_oracle(path)
+                except NoGolden:
+                    # added since (D175's overflows): test_error_corpus holds
+                    # it to the self-hosted CLI, natively too
+                    continue
                 self.assertIsNotNone(interp, "the interpreter ran it without a runtime error")
                 want_out, line, column = interp
                 asm = os.path.join(tmp, "self.s")

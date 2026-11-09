@@ -163,7 +163,7 @@ impl CodeGen {
         // Runtime errors: `runtime error: <message>` on stderr, then exit(1)
         // (MYLA-17); the message is the interpreter's, without the values. The
         // caller passes the position record in %rsi; out of memory has none.
-        for label in trap_labels() {
+        for label in trap_labels(self.checked) {
             self.raw(format("{}:", label))
             if label == "__trap_oom" { self.raw("\txorl %esi, %esi") }
             self.raw(format("\tleaq .Lmsg{}(%rip), %rdi", label))

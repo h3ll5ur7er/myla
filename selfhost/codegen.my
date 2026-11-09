@@ -270,6 +270,10 @@ pub struct CodeGen {
     wasm_arity: [str: int32],
     wasm_calls: [str: int32],
     env_records: [str],             // MYLA-263: the environments whose routines records the data holds (`env_record_of`)
+    // D175: integer `+`, `-`, `*`, unary `-` and the signed minimum `/ -1`
+    // trap on overflow, a shift on a count past the width (`--checked`, and
+    // `myla test --native`'s harness); a plain build wraps, its code unchanged
+    checked: bool,
 }
 
 // A code generator for `src` (checked alone, `checker_on`), the receiver of
@@ -353,7 +357,7 @@ pub fun new_codegen(c: Checker) -> CodeGen {
         dbg_fn_end: "", dbg_mark: "", dbg_n: 0, dbg_script: "",
         keep_ir: false, wants_ftoa: false, inlining: true, inl_names: [], inl_bodies: [], inl_no: [:], ssa: false, ssa_stats: no_ssa_stats(), refused: [], ir_texts: [], ir_blocked: [], ir_ready: false,
         pend_store: "", pend_temp: -1, ext_at: -1, temp_uses: [], temp_remat: [], temp_fconst: [:], fconst_labels: [:], temp_src: [], temp_imm: [], temp_frame: [], temp_mem: [], temp_off: [],
-        temp_reg: [], slot_reg: [], saved_regs: [], in_frame: false, resume_blocks: [], frames: c.task_line > 0, norm: compiler_norm(), save_base: 0, arg_words: 0, frameless: false, kept_params: [:], keeping: [:], scan_kept: [], scan_args: [], owning: [:], no_owned: [], handed: handed, passed_on: passed_on, tag_enums: [:], a64: false, wasm: false, wasm_arity: [:], wasm_calls: [:], env_records: [],
+        temp_reg: [], slot_reg: [], saved_regs: [], in_frame: false, resume_blocks: [], frames: c.task_line > 0, norm: compiler_norm(), save_base: 0, arg_words: 0, frameless: false, kept_params: [:], keeping: [:], scan_kept: [], scan_args: [], owning: [:], no_owned: [], handed: handed, passed_on: passed_on, tag_enums: [:], a64: false, wasm: false, wasm_arity: [:], wasm_calls: [:], env_records: [], checked: false,
     }
 }
 
@@ -2141,9 +2145,9 @@ impl CodeGen {
         out.push("\t.section .rodata")
         out.push(".Lbool_true:\n\t.ascii \"true\"")
         out.push(".Lbool_false:\n\t.ascii \"false\"")
-        let messages = trap_messages()
+        let messages = trap_messages(self.checked)
         var ti = 0
-        for label in trap_labels() {
+        for label in trap_labels(self.checked) {
             let text = messages[ti]
             out.push(format(".Lmsg{}:\n\t.quad {}\n\t.ascii \"{}\"", label, text.len(), text))
             ti = ti + 1
@@ -4499,15 +4503,28 @@ pub fun is_tfloat32(t: Type) -> bool {
 }
 
 // The runtime-error entries and their messages (MYLA-17), as in the Python
-// backend (`_TRAPS`). `__panic` prints them after `runtime error: `.
-#test()[["__trap_index", "__trap_key", "__trap_pop", "__trap_div", "__trap_mod", "__trap_match", "__trap_oom", "__trap_char", "__trap_step", "__trap_boundary"]]
-pub fun trap_labels() -> [str] {
-    return ["__trap_index", "__trap_key", "__trap_pop", "__trap_div", "__trap_mod", "__trap_match", "__trap_oom", "__trap_char", "__trap_step", "__trap_boundary"]
+// backend (`_TRAPS`). `__panic` prints them after `runtime error: `. A
+// checked build's (D175) has the overflow's two as well; a plain build's has
+// none of their code.
+#test(false)[["__trap_index", "__trap_key", "__trap_pop", "__trap_div", "__trap_mod", "__trap_match", "__trap_oom", "__trap_char", "__trap_step", "__trap_boundary"]]
+#test(true)[["__trap_index", "__trap_key", "__trap_pop", "__trap_div", "__trap_mod", "__trap_match", "__trap_oom", "__trap_char", "__trap_step", "__trap_boundary", "__trap_overflow", "__trap_shift"]]
+pub fun trap_labels(checked: bool) -> [str] {
+    var out = ["__trap_index", "__trap_key", "__trap_pop", "__trap_div", "__trap_mod", "__trap_match", "__trap_oom", "__trap_char", "__trap_step", "__trap_boundary"]
+    if checked {
+        out.push("__trap_overflow")
+        out.push("__trap_shift")
+    }
+    return out
 }
 
-#test()[["index out of bounds", "map key not found", "pop from an empty list", "division by zero", "modulo by zero", "no match arm matched", "out of memory", "invalid char", "slice step is zero", "a slice bound inside a character"]]
-fun trap_messages() -> [str] {
-    return ["index out of bounds", "map key not found", "pop from an empty list", "division by zero", "modulo by zero", "no match arm matched", "out of memory", "invalid char", "slice step is zero", "a slice bound inside a character"]
+#test(false)[["index out of bounds", "map key not found", "pop from an empty list", "division by zero", "modulo by zero", "no match arm matched", "out of memory", "invalid char", "slice step is zero", "a slice bound inside a character"]]
+fun trap_messages(checked: bool) -> [str] {
+    var out = ["index out of bounds", "map key not found", "pop from an empty list", "division by zero", "modulo by zero", "no match arm matched", "out of memory", "invalid char", "slice step is zero", "a slice bound inside a character"]
+    if checked {
+        out.push("integer overflow")
+        out.push("shift amount out of range")
+    }
+    return out
 }
 
 // The DW_ATE encoding of a scalar type (MYLA-66).

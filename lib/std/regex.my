@@ -4265,7 +4265,7 @@ fun ab_text(n: int) -> str {
     var seed: uint32 = 7
     var k = 0
     while k < n {
-        seed = seed * 1103515245u32 + 12345u32
+        seed = seed.wrapping_mul(1103515245u32).wrapping_add(12345u32)
         sb.append_byte(if ((seed >> 16) & 1u32) == 1u32 { 'a' } else { 'b' })
         k += 1
     }

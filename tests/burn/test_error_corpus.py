@@ -24,7 +24,12 @@ has no values in it (MYLA-17, MYLA-58)::
 
 and is built with the self-hosted compiler, which must exit with status 1 and
 print exactly that line and the interpreter's position, `  --> <file>:<line>:<col>`
-(MYLA-65, MYLA-66), on stderr. Module errors are checked through the loader,
+(MYLA-65, MYLA-66), on stderr. An error only a checked build gives, an
+integer overflow (D175), also says::
+
+    //~ checked
+
+and its binary is built with `myla build --checked`. Module errors are checked through the loader,
 with the bundled standard library, as are the type errors of a file that
 imports.
 
@@ -71,6 +76,7 @@ _REPO = os.path.dirname(os.path.dirname(ERRORS_DIR))
 
 _DIRECTIVE = re.compile(r"//~\s*(lex|parse|module|type|runtime)\s+error:\s*(.*?)\s*$")
 _NATIVE = re.compile(r"//~\s*native:\s*(.*?)\s*$")
+_CHECKED = re.compile(r"//~\s*checked\s*$")
 _SPAN = re.compile(r"//~\s*span:\s?(.*?)$")
 _COUNT = re.compile(r"//~\s*errors:\s*(\d+)\s*$")
 _NEXT = re.compile(r"//~\s*next:\s*(.*?)\s*$")
@@ -396,7 +402,8 @@ def _make(name: str):
         if phase == "runtime":
             self.assertIsNotNone(native, f"{name}: a runtime error file needs a '//~ native:' line")
             if CAN_BUILD_NATIVE:
-                out, err, code = build_and_run_full(check_file(path), entry_path=path)
+                checked = any(_CHECKED.match(line.strip()) for line in source.splitlines())
+                out, err, code = build_and_run_full(check_file(path), entry_path=path, checked=checked)
                 self.assertEqual(code, 1, f"{name}: the native binary should exit 1")
                 where = f"  --> {path}:{diag['line']}:{diag['column']}"
                 self.assertEqual(err, f"{native}\n{where}\n", f"{name}: native stderr")

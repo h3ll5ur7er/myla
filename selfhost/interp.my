@@ -10,7 +10,7 @@
 from .ast import Expr, ExprKind, Stmt, StmtKind, Block, Decl, DeclKind, FunData, Param, MatchArm, Pattern, PatternKind, FieldPat, BindElem, ExprOrBlock, ElseTail, FieldInit, MapEntry, Attribute, TypeExpr, TypeKind, TypeParam, bind_elems, names_in_expr, names_in_block, Expected, expected_failure
 from .tokens import SrcSpan, no_span
 from .checker import is_notify_primitive
-from .checker import Checker, Type, Subst, subst_type, subst_get, unify_param, type_name, is_raw_memory_primitive, is_net_primitive, is_term_primitive, checker_on, builtin_method, builtin_method_name, is_wrapping_method, is_slice_expr, from_end_of, slice_parts, is_hole_part
+from .checker import Checker, Type, Subst, subst_type, subst_get, unify_param, type_name, is_raw_memory_primitive, is_net_primitive, is_term_primitive, checker_on, builtin_method, builtin_method_name, is_wrapping_method, add_overflows, sub_overflows, mul_overflows, int_min, int_neg_overflows, shift_out_of_range, is_slice_expr, from_end_of, slice_parts, is_hole_part
 from .anf import Norm, new_norm, stmt_suspends, body_suspends
 from .util import cp_utf8, format_specs
 from std.fmt import fmt_int, fmt_float, fmt_text
@@ -1628,7 +1628,7 @@ impl Interp {
     // next value picks, its bit 33, as `__exec_push`).
     fun ready(var self, t: int32) {
         if self.sched == SCHED_SEED {
-            self.rng = self.rng * SCHED_MUL + SCHED_ADD
+            self.rng = self.rng.wrapping_mul(SCHED_MUL).wrapping_add(SCHED_ADD)
             if (self.rng / 8589934592u64) % 2u64 == 1u64 {
                 self.q_front(t)
                 return
@@ -2847,7 +2847,20 @@ impl Interp {
         if op == "!" { return Value.VBool(!as_bool(v)) }
         if op == "-" {
             match v { Value.VFloat(f) => { return Value.VFloat(-f) }, _ => {} }
-            return Value.VInt(wrap_opt(-as_int(v), self.resolved_of(e.id)))
+            let rt = self.resolved_of(e.id)
+            let i = as_int(v)
+            // `-x` that doesn't fit traps (D175); a negative literal fits
+            let literal = match x.kind { ExprKind.IntLit(n, suf, isc, big) => true, _ => false }
+            match rt {
+                Some(Type.TInt(w, s)) => {
+                    if !literal && int_neg_overflows(i, w, s) {
+                        self.fail(e, "integer overflow")
+                        return Value.VUnit
+                    }
+                },
+                _ => {},
+            }
+            return Value.VInt(wrap_opt(i.wrapping_neg(), rt))
         }
         // "~"
         return Value.VInt(wrap_opt(~as_int(v), self.resolved_of(e.id)))
@@ -2898,12 +2911,28 @@ impl Interp {
         let a = as_int(lv)
         let b = as_int(rv)
         var res: int64 = 0
-        if op == "+" { res = a + b }
-        else if op == "-" { res = a - b }
-        else if op == "*" { res = a * b }
-        else if op == "/" {
+        // an operation whose result doesn't fit its integer type traps
+        // (D175): `+`, `-`, `*` and the signed minimum `/ -1`; a shift's
+        // count must be below the width (`w` is 0 for a char's `c + n`,
+        // checked as a char below)
+        let (w, sg) = match rt { Some(Type.TInt(n, s)) => (n, s), _ => (0, false) }
+        var over = false
+        if op == "+" {
+            res = a.wrapping_add(b)
+            over = w > 0 && add_overflows(a, b, res, w, sg)
+        } else if op == "-" {
+            res = a.wrapping_sub(b)
+            over = w > 0 && sub_overflows(a, b, res, w, sg)
+        } else if op == "*" {
+            res = a.wrapping_mul(b)
+            over = w > 0 && mul_overflows(a, b, res, w, sg)
+        } else if op == "/" {
             if b == 0 {
                 self.fail(e, "division by zero")
+                return Value.VUnit
+            }
+            if sg && b == -1 && a == int_min(w) {
+                self.fail(e, "integer overflow")
                 return Value.VUnit
             }
             if is_u64(rt) { res = ((a as uint64) / (b as uint64)) as int64 } else { res = idiv(a, b) }
@@ -2918,8 +2947,17 @@ impl Interp {
         else if op == "&" { res = a & b }
         else if op == "|" { res = a | b }
         else if op == "^" { res = a ^ b }
-        else if op == "<<" { res = a << shift_count(b, rt) }
-        else if op == ">>" { res = shr_typed(a, b, rt) }
+        else if op == "<<" || op == ">>" {
+            if w > 0 && shift_out_of_range(b, w) {
+                self.fail(e, "shift amount out of range")
+                return Value.VUnit
+            }
+            res = if op == "<<" { a << shift_count(b, rt) } else { shr_typed(a, b, rt) }
+        }
+        if over {
+            self.fail(e, "integer overflow")
+            return Value.VUnit
+        }
         // `c + n`, `c - n`: a char again, as a cast to char checks it
         // (MYLA-318; the sum wraps as an int32 does natively)
         if is_char_type(rt) {
@@ -2936,14 +2974,19 @@ impl Interp {
     // `x.wrapping_add(y)` and the other wrapping methods (D175): modulo
     // 2^width, never an overflow.
     fun eval_wrapping(var self, e: Expr, nm: str, args: [Expr]) -> Value {
-        let a = as_int(self.eval(args[0]))
+        return self.eval_wrapping_on(e, nm, args[0], args[1:])
+    }
+
+    // `recv.nm(rest)`, a wrapping method on the integer `recv`.
+    fun eval_wrapping_on(var self, e: Expr, nm: str, recv: Expr, rest: [Expr]) -> Value {
+        let a = as_int(self.eval(recv))
         var res: int64 = 0
-        if nm == "wrapping_neg" { res = 0 - a }
+        if rest.len() == 0 { res = a.wrapping_neg() }
         else {
-            let b = as_int(self.eval(args[1]))
-            if nm == "wrapping_add" { res = a + b }
-            else if nm == "wrapping_sub" { res = a - b }
-            else { res = a * b }
+            let b = as_int(self.eval(rest[0]))
+            if nm == "wrapping_add" { res = a.wrapping_add(b) }
+            else if nm == "wrapping_sub" { res = a.wrapping_sub(b) }
+            else { res = a.wrapping_mul(b) }
         }
         return Value.VInt(wrap_opt(res, self.resolved_of(e.id)))
     }
@@ -3155,6 +3198,9 @@ impl Interp {
                 return self.eval_name_call(e, nm, args)
             },
             ExprKind.GetField(tgt, field) => {
+                // `h.wrapping_mul(k)` (D175) first: hashes and digests make
+                // many, and no impl can define the name on an integer
+                if is_wrapping_method(field) && is_int_value_type(self.resolved_of(tgt.id)) { return self.eval_wrapping_on(e, field, tgt, args) }
                 // `T.zero()`, `int.zero()`: a function of the type (D172)
                 match self.static_calls.get(e.id) {
                     Some(st) => { return self.eval_static_call(e, st, field, args) },
@@ -4914,7 +4960,7 @@ fun scmp(a: str, b: str) -> int32 {
 #test(-9223372036854775807 - 1, -1)[-9223372036854775807 - 1]
 fun idiv(a: int64, b: int64) -> int64 {
     if b == 0 { return 0 }
-    if b == -1 { return -a }
+    if b == -1 { return a.wrapping_neg() }
     return a / b
 }
 
@@ -4923,7 +4969,7 @@ fun idiv(a: int64, b: int64) -> int64 {
 #test(17, 5)[2]
 fun imod(a: int64, b: int64) -> int64 {
     if b == 0 { return 0 }
-    return a - idiv(a, b) * b
+    return a.wrapping_sub(idiv(a, b).wrapping_mul(b))   // MIN % -1 is 0
 }
 
 #test(Some(Type.TInt(8, false)))[8]
@@ -4949,6 +4995,14 @@ fun shr_typed(a: int64, b: int64, rt: Option<Type>) -> int64 {
     let unsigned64 = match rt { Some(t) => match t { Type.TInt(w, sg) => w == 64 && !sg, _ => false }, None => false }
     if unsigned64 { return ((aw as uint64) >> (count as uint64)) as int64 }   // logical
     return wrap_opt(aw >> count, rt)
+}
+
+// Whether `t` is an integer type (a receiver of the wrapping methods).
+#test(Some(Type.TInt(8, false)))[true]
+#test(Some(Type.TChar))[false]
+#test(None)[false]
+fun is_int_value_type(t: Option<Type>) -> bool {
+    return match t { Some(Type.TInt(w, s)) => true, _ => false }
 }
 
 #test(1, Some(Type.TParam("T")))[1]
@@ -5437,7 +5491,7 @@ fun values_hash(h: int64, xs: [Value]) -> int64 {
 // folded down, as native code's `__khash_<K>` mixes a word).
 #test(0, 0)[0]
 fun mix_key(h: int64, w: int64) -> int64 {
-    let m = (h ^ w) * -7046029254386353131
+    let m = (h ^ w).wrapping_mul(-7046029254386353131)
     return m ^ (((m as uint64) >> 29) as int64)
 }
 

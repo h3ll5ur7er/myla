@@ -21,7 +21,7 @@ import sys
 import tempfile
 import unittest
 
-from ._golden import golden, recorded_examples
+from ._golden import answered_or_recorded, golden, recorded_examples
 from ._native import CAN_BUILD_NATIVE, SKIP_REASON
 
 _REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir))
@@ -756,7 +756,9 @@ class TestResolutionCorpus(unittest.TestCase):
                 uses[(current, int(l), int(rest.split("-")[0]))] = (parts[4], int(dl), int(dc))
         checked = resolved = 0
         for path in files:
-            for line, column, member, kind, decl_line, decl_column in _checked_members(path):
+            # an example D175 rewrote is asked about as recorded: its lines
+            # are where they were
+            for line, column, member, kind, decl_line, decl_column in answered_or_recorded(path, _checked_members)[0]:
                 checked += 1
                 found = uses.get((path, line - 1, column - 1))
                 if found is None:

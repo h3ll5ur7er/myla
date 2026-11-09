@@ -972,7 +972,7 @@ struct Lcg {
 impl Lcg {
     // The next number in 0..m.
     fun below(var self, m: int) -> int {
-        self.x = self.x * 1664525u32 + 1013904223u32
+        self.x = self.x.wrapping_mul(1664525u32).wrapping_add(1013904223u32)
         return ((self.x >> 8u32) % (m as uint32)) as int
     }
 }

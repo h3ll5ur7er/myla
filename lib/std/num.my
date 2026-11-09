@@ -914,7 +914,7 @@ fun radix_digits(n: uint64, r: uint64, width: int, negative: bool) -> str {
 pub fun parse_int_radix(s: str, radix: int) -> Result<int64, ParseIntError> {
     check_radix("parse_int_radix", radix)
     let mag = parse_magnitude(s, radix, 9223372036854775807u64, 9223372036854775808u64)?
-    if s[0] == '-' { return Ok(0i64 - mag as int64) }    // wraps right for the minimum
+    if s[0] == '-' { return Ok((mag as int64).wrapping_neg()) }    // wraps right for the minimum
     return Ok(mag as int64)
 }
 
@@ -989,7 +989,7 @@ pub fun parse_uint64_radix(s: str, radix: int) -> Result<uint64, ParseIntError> 
 #test(10i64, 37)[panic("to_radix: radix 37 is not between 2 and 36")]
 pub fun to_radix(n: int64, radix: int) -> str {
     check_radix("to_radix", radix)
-    if n < 0 { return radix_digits(0u64 - n as uint64, radix as uint64, 0, true) }
+    if n < 0 { return radix_digits((n as uint64).wrapping_neg(), radix as uint64, 0, true) }
     return radix_digits(n as uint64, radix as uint64, 0, false)
 }
 

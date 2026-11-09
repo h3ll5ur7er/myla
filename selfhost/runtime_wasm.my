@@ -93,7 +93,7 @@ impl CodeGen {
         }
         // the runtime errors (MYLA-17): the message, the position record the
         // caller passes
-        for label in trap_labels() {
+        for label in trap_labels(self.checked) {
             var pos = "local.get 0"
             if label == "__trap_oom" { pos = "i64.const 0" }
             self.wasm_fn(label, 1, [format("i32.const .Lmsg{}", label), "i64.extend_i32_u", pos, "call __panic", "drop", "unreachable"], true)

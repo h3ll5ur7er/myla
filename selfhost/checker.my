@@ -6890,7 +6890,12 @@ impl Checker {
                 if op == "!" { return Ok(CV.CVBool(!cv_bool(v))) }
                 if is_float(t) { return Ok(CV.CVFloat) }
                 return match v {
-                    CV.CVInt(i) => Ok(CV.CVInt(wrap_int(if_neg(op == "-", i), t))),
+                    CV.CVInt(i) => {
+                        // a negative literal is checked as a literal is
+                        let literal = match x.kind { ExprKind.IntLit(n, suf, isc, big) => true, _ => false }
+                        if op == "-" && !literal && is_int(t) && int_neg_overflows(i, int_width(t), is_signed_int(t)) { return Err(const_overflow(e)) }
+                        Ok(CV.CVInt(wrap_int(if_neg(op == "-", i), t)))
+                    },
                     _ => Ok(CV.CVUnknown),
                 }
             },
@@ -6946,9 +6951,12 @@ impl Checker {
         }
         let li = match lv { CV.CVInt(x) => x, _ => { return Ok(CV.CVUnknown) } }
         let ri = match rv { CV.CVInt(x) => x, _ => { return Ok(CV.CVUnknown) } }
-        if op == "+" { return Ok(CV.CVInt(wrap_int(li + ri, t))) }
-        if op == "-" { return Ok(CV.CVInt(wrap_int(li - ri, t))) }
-        if op == "*" { return Ok(CV.CVInt(wrap_int(li * ri, t))) }
+        // an overflow is an error, as a division by zero is (D175): a const
+        // has no run to trap in
+        if is_int(t) && int_op_overflows(op, li, ri, int_width(t), is_signed_int(t)) { return Err(const_overflow(e)) }
+        if op == "+" { return Ok(CV.CVInt(wrap_int(li.wrapping_add(ri), t))) }
+        if op == "-" { return Ok(CV.CVInt(wrap_int(li.wrapping_sub(ri), t))) }
+        if op == "*" { return Ok(CV.CVInt(wrap_int(li.wrapping_mul(ri), t))) }
         if op == "/" || op == "%" {
             if ri == 0 { return Err(terr_at(e.line, e.col, e.sp, "const division by zero")) }
             if is_u64(t) {
@@ -6956,7 +6964,10 @@ impl Checker {
                 if op == "/" { return Ok(CV.CVInt(q)) }
                 return Ok(CV.CVInt(li - q * ri))
             }
-            let q = li / ri                                  // truncates toward zero, like _const_idiv
+            // truncates toward zero, like _const_idiv; by -1 the negation
+            // (wrapping only for a `%` of the minimum, whose remainder is 0)
+            if ri == -1 { return Ok(CV.CVInt(if op == "/" { wrap_int(li.wrapping_neg(), t) } else { 0 })) }
+            let q = li / ri
             if op == "/" { return Ok(CV.CVInt(wrap_int(q, t))) }
             return Ok(CV.CVInt(wrap_int(li - q * ri, t)))
         }
@@ -6981,6 +6992,18 @@ impl Checker {
     }
 }
 
+// The error of a const whose value overflows its type (D175).
+fun const_overflow(e: Expr) -> CheckErr {
+    return terr_at(e.line, e.col, e.sp, "const integer overflow")
+}
+
+// Whether `t` is a signed integer type.
+#test(Type.TInt(8, true))[true]
+#test(Type.TInt(64, false))[false]
+fun is_signed_int(t: Type) -> bool {
+    return match t { Type.TInt(w, s) => s, _ => false }
+}
+
 // `v` wrapped into integer type `t` (two's complement); other types unchanged.
 #test(0, Type.TInt(32, true))[0]
 #test(10, Type.TInt(32, true))[10]
@@ -6995,6 +7018,125 @@ fun wrap_int(v: int64, t: Type) -> int64 {
         },
         _ => v,
     }
+}
+
+// --- integer overflow (D175, MYLA-395) ----------------------------------------
+
+// Whether `a op b` (`+`, `-`, `*` or `/`) on integers of width `w`, signed or
+// not, has no result of that width: the operands are in canonical form (their
+// `w`-bit values extended to 64 bits). A `/` overflows only as the minimum of
+// a signed type divided by -1 (a zero divisor is an error of its own); `%`
+// never does (`MIN % -1` is 0). Computed with the wrapping methods, so it
+// can't overflow itself where it runs checked (the compiler interpreted).
+#test("+", 2147483647, 1, 32, true)[true]
+#test("+", 2147483646, 1, 32, true)[false]
+#test("-", -2147483648, 1, 32, true)[true]
+#test("-", 3, 4, 8, false)[true]
+#test("-", 4, 4, 8, false)[false]
+#test("*", 65536, 65536, 32, true)[true]
+#test("*", 4294967295, 4294967295, 32, false)[true]
+#test("*", 65535, 65537, 32, false)[false]
+#test("+", 9223372036854775807, 1, 64, true)[true]
+#test("+", -9223372036854775807, -1, 64, true)[false]
+#test("-", 0, -9223372036854775807 - 1, 64, true)[true]
+#test("-", -1, -9223372036854775807 - 1, 64, true)[false]
+#test("*", -1, -9223372036854775807 - 1, 64, true)[true]
+#test("*", -9223372036854775807 - 1, -1, 64, true)[true]
+#test("*", -9223372036854775807 - 1, 1, 64, true)[false]
+#test("*", 3037000500, 3037000500, 64, true)[true]
+#test("*", 3037000499, 3037000499, 64, true)[false]
+#test("+", -1, 1, 64, false)[true]
+#test("-", 0, 1, 64, false)[true]
+#test("*", 4294967296, 4294967296, 64, false)[true]
+#test("*", 4294967296, 4294967295, 64, false)[false]
+#test("/", -128, -1, 8, true)[true]
+#test("/", -127, -1, 8, true)[false]
+#test("/", -9223372036854775807 - 1, -1, 64, true)[true]
+#test("/", -1, -1, 64, false)[false]
+#test("%", -128, -1, 8, true)[false]
+pub fun int_op_overflows(op: str, a: int64, b: int64, w: int32, signed: bool) -> bool {
+    if op == "/" { return signed && b == -1 && a == int_min(w) }
+    if op == "+" { return add_overflows(a, b, a.wrapping_add(b), w, signed) }
+    if op == "-" { return sub_overflows(a, b, a.wrapping_sub(b), w, signed) }
+    if op == "*" { return mul_overflows(a, b, a.wrapping_mul(b), w, signed) }
+    return false
+}
+
+// Whether `r`, `a + b` wrapped to 64 bits, overflows the width `w`. The
+// interpreter calls this and its two siblings with the result it computed,
+// for each operation, without `int_op_overflows`' dispatch on the operator.
+#test(2147483647, 1, 2147483648, 32, true)[true]
+#test(-1, 1, 0, 64, false)[true]
+pub fun add_overflows(a: int64, b: int64, r: int64, w: int32, signed: bool) -> bool {
+    if w < 64 { return !fits_width(r, w, signed) }
+    if signed { return ((a ^ r) & (b ^ r)) < 0 }
+    return (r as uint64) < (a as uint64)
+}
+
+// Whether `r`, `a - b` wrapped to 64 bits, overflows the width `w`.
+#test(0, 1, -1, 8, false)[true]
+#test(-1, -9223372036854775807 - 1, 9223372036854775807, 64, true)[false]
+pub fun sub_overflows(a: int64, b: int64, r: int64, w: int32, signed: bool) -> bool {
+    if w < 64 { return !fits_width(r, w, signed) }
+    if signed { return ((a ^ b) & (a ^ r)) < 0 }
+    return (a as uint64) < (b as uint64)
+}
+
+// Whether `r`, `a * b` wrapped to 64 bits, overflows the width `w`.
+#test(65536, 65536, 4294967296, 32, true)[true]
+#test(-1, -9223372036854775807 - 1, -9223372036854775807 - 1, 64, true)[true]
+pub fun mul_overflows(a: int64, b: int64, r: int64, w: int32, signed: bool) -> bool {
+    // narrower than 64 bits: the 64-bit result is exact (a `uint32` product
+    // as the unsigned word), and fits if it is its own canonical form
+    if w < 64 { return !fits_width(r, w, signed) }
+    if a == 0 || b == 0 { return false }
+    if signed {
+        if a == -1 { return b == int_min(64) }
+        return r / a != b
+    }
+    return (r as uint64) / (a as uint64) != (b as uint64)
+}
+
+// Whether the 64-bit `r` is a `w`-bit integer's canonical form (its value
+// sign- or zero-extended), for `w` below 64.
+#test(127, 8, true)[true]
+#test(128, 8, true)[false]
+#test(255, 8, false)[true]
+#test(-1, 8, false)[false]
+fun fits_width(r: int64, w: int32, signed: bool) -> bool {
+    let k = (64 - w) as int64
+    if signed { return (r << k) >> k == r }
+    return ((r as uint64) >> (w as uint64)) == 0
+}
+
+// Whether `-a` on an integer of width `w` has no result of that width: the
+// signed minimum, or any unsigned number but 0 (D175).
+#test(-128, 8, true)[true]
+#test(127, 8, true)[false]
+#test(0, 32, false)[false]
+#test(1, 32, false)[true]
+pub fun int_neg_overflows(a: int64, w: int32, signed: bool) -> bool {
+    if signed { return a == int_min(w) }
+    return a != 0
+}
+
+// Whether a shift's count `n` is outside 0 to `w - 1`, the width of the
+// shifted type (D175's proposal: `shift amount out of range` where overflow
+// traps; a constant count out of range is a compile-time error already).
+#test(31, 32)[false]
+#test(32, 32)[true]
+#test(-1, 8)[true]
+#test(0, 64)[false]
+pub fun shift_out_of_range(n: int64, w: int32) -> bool {
+    return n < 0 || n >= (w as int64)
+}
+
+// The minimum of the signed type of width `w`, sign-extended.
+#test(8)[-128]
+#test(64)[-9223372036854775807 - 1]
+pub fun int_min(w: int32) -> int64 {
+    let one: int64 = -1
+    return one << ((w - 1) as int64)
 }
 
 #test(Type.TInt(32, true))[false]
@@ -7013,7 +7155,7 @@ fun int_less(a: int64, b: int64, t: Type) -> bool {
 #test(false, 255)[-256]
 #test(true, 128512)[-128512]
 fun if_neg(neg: bool, v: int64) -> int64 {
-    if neg { return 0 - v }
+    if neg { return v.wrapping_neg() }
     return ~v
 }
 

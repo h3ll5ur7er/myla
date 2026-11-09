@@ -97,8 +97,8 @@ const NS_PER_S: int64 = 1000000000
 const NS_PER_MIN: int64 = 60000000000
 const NS_PER_H: int64 = 3600000000000
 
-// A span of time in nanoseconds, positive or negative. Arithmetic wraps as
-// `int64` does, past about 292 years.
+// A span of time in nanoseconds, positive or negative. Arithmetic overflows
+// as `int64` does, past about 292 years (D175).
 #derive(Eq)
 pub struct Duration {
     ns: int64,
@@ -246,7 +246,7 @@ fun duration_text(d: int64) -> str {
     }
     var u = d as uint64
     if d < 0 {
-        u = (0 - d) as uint64  // the most negative wraps to itself: 2^63
+        u = d.wrapping_neg() as uint64  // the most negative wraps to itself: 2^63
     }
     var out = ""
     if u < 1000 {
@@ -689,10 +689,10 @@ impl DateTime {
         // the ends, 1677-09-21T00:12:43.145224192Z and
         // 2262-04-11T23:47:16.854775807Z, are in seconds that only partly
         // fit; at the lower one `s * NS_PER_S` wraps, and adding the
-        // nanoseconds wraps it back (D4)
+        // nanoseconds wraps it back (on purpose, D175)
         if s < -9223372036 || s > 9223372035 {
             if s == 9223372036 && self.nanosecond <= 854775807 || s == -9223372037 && self.nanosecond >= 145224192 {
-                return Ok(s * NS_PER_S + self.nanosecond as int64)
+                return Ok(s.wrapping_mul(NS_PER_S).wrapping_add(self.nanosecond as int64))
             }
             return Err(TimeError.OutOfRange)
         }

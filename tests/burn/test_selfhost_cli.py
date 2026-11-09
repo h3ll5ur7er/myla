@@ -19,7 +19,7 @@ import sys
 import tempfile
 import unittest
 
-from ._golden import golden, recorded_examples
+from ._golden import answered_or_recorded, golden, recorded_examples
 from ._native import CAN_BUILD_NATIVE, SKIP_REASON
 from ._tools import STDLIB_ROOT, selfhost_tool
 
@@ -292,7 +292,9 @@ class TestCommandParity(_Layout):
         """(stdout, exit) of the Python CLI's (recorded) and the self-hosted
         CLI's `myla test path`; `files` are the work directory's files the
         Python CLI saw (`path` among them written `{work}/name`)."""
-        py_out, _, py_code = python_cli(["test", path], files or {}, self.work)
+        # an example D175 rewrote is asked about as recorded: its cases are
+        # the same, `wrapping_add` for a `+` that wrapped
+        py_out, _, py_code = answered_or_recorded(path, lambda p: python_cli(["test", p], files or {}, self.work))[0]
         # the Python CLI's stdlib root, not the layout's symlink to it: module
         # ids come from paths as written, and a stdlib module tested through
         # another root would be named as a project module

@@ -36,7 +36,7 @@ from .diag import render
 // target this compiler was built for, the machine's it runs on (MYLA-276).
 // `primitives`: the program may call the raw-memory primitives
 // (`--primitives`, for the tests of their code; an error otherwise).
-struct Mode { debug: bool, emit_ir: bool, frames: bool, ssa: bool, ssa_stats: bool, no_inline: bool, target: str, primitives: bool }
+struct Mode { debug: bool, emit_ir: bool, frames: bool, ssa: bool, ssa_stats: bool, no_inline: bool, target: str, primitives: bool, checked: bool }
 
 fun emit_asm(prog: Loaded, mode: Mode, stdlib_root: str) -> int32 {
     return match build_checker_std(prog.decls, prog.next_id, mode.primitives, prog.std_impls) {
@@ -50,6 +50,7 @@ fun emit_asm(prog: Loaded, mode: Mode, stdlib_root: str) -> int32 {
             if mode.emit_ir { g.keep_ir_text() }
             if mode.ssa { g.ssa = true }
             if mode.no_inline { g.inlining = false }
+            if mode.checked { g.checked = true }
             let asm = g.generate()
             if g.refused.len() > 0 {
                 eprintln(render(type_errors(prog, g.refused)))
@@ -73,12 +74,12 @@ fun emit_asm(prog: Loaded, mode: Mode, stdlib_root: str) -> int32 {
 fun main() {
     let argv = args()
     if argv.len() < 2 {
-        eprintln("usage: gen_main <file.my> [stdlib_root] [-g] [--emit-ir] [--no-inline] [--primitives] [--ssa | --ssa-stats] [--target x86_64-linux|aarch64-linux|wasm32-wasi] [--package name=dir]... [--root dir]")
+        eprintln("usage: gen_main <file.my> [stdlib_root] [-g] [--emit-ir] [--no-inline] [--checked] [--primitives] [--ssa | --ssa-stats] [--target x86_64-linux|aarch64-linux|wasm32-wasi] [--package name=dir]... [--root dir]")
         exit(2)
     }
     var opts = load_options(default_stdlib_root())
     opts.runtime = true
-    var mode = Mode { debug: false, emit_ir: false, frames: false, ssa: false, ssa_stats: false, no_inline: false, target: TARGET, primitives: false }
+    var mode = Mode { debug: false, emit_ir: false, frames: false, ssa: false, ssa_stats: false, no_inline: false, target: TARGET, primitives: false, checked: false }
     var j = 2
     while j < argv.len() {
         if argv[j] == "-g" {
@@ -87,6 +88,8 @@ fun main() {
             mode.emit_ir = true
         } else if argv[j] == "--async-frames" {
             mode.frames = true
+        } else if argv[j] == "--checked" {
+            mode.checked = true
         } else if argv[j] == "--no-inline" {
             mode.no_inline = true
         } else if argv[j] == "--primitives" {

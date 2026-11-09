@@ -41,8 +41,8 @@ const GOLDEN: uint64 = 0x9e3779b97f4a7c15
 #test(0x9e3779b97f4a7c15u64)[16294208416658607535u64]
 fun mix64(z: uint64) -> uint64 {
     var x = z
-    x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9
-    x = (x ^ (x >> 27)) * 0x94d049bb133111eb
+    x = (x ^ (x >> 30)).wrapping_mul(0xbf58476d1ce4e5b9)
+    x = (x ^ (x >> 27)).wrapping_mul(0x94d049bb133111eb)
     return x ^ (x >> 31)
 }
 
@@ -54,7 +54,7 @@ fun splitmix64_firsts(seed: uint64, n: int) -> [uint64] {
     var x = seed
     var out: [uint64] = []
     for i in 0..n {
-        x = x + GOLDEN
+        x = x.wrapping_add(GOLDEN)
         out.push(mix64(x))
     }
     return out
@@ -65,10 +65,10 @@ fun splitmix64_firsts(seed: uint64, n: int) -> [uint64] {
 #test(42u64)[Rng { s0: 13679457532755275413u64, s1: 2949826092126892291u64, s2: 5139283748462763858u64, s3: 6349198060258255764u64 }]
 #test(0u64)[Rng { s0: 16294208416658607535u64, s1: 7960286522194355700u64, s2: 487617019471545679u64, s3: 17909611376780542444u64 }]
 pub fun seeded(seed: uint64) -> Rng {
-    let a = seed + GOLDEN
-    let b = a + GOLDEN
-    let c = b + GOLDEN
-    let d = c + GOLDEN
+    let a = seed.wrapping_add(GOLDEN)
+    let b = a.wrapping_add(GOLDEN)
+    let c = b.wrapping_add(GOLDEN)
+    let d = c.wrapping_add(GOLDEN)
     return Rng { s0: mix64(a), s1: mix64(b), s2: mix64(c), s3: mix64(d) }
 }
 
@@ -114,8 +114,8 @@ impl Rng {
     #test(Rng { s0: 1u64, s1: 2u64, s2: 3u64, s3: 4u64 })[11520u64]
     #test(seeded(42))[1546998764402558742u64]
     fun next_u64(var self) -> uint64 {
-        let x = self.s1 * 5
-        let result = ((x << 7) | (x >> 57)) * 9
+        let x = self.s1.wrapping_mul(5)
+        let result = ((x << 7) | (x >> 57)).wrapping_mul(9)
         let t = self.s1 << 17
         self.s2 ^= self.s0
         self.s3 ^= self.s1
@@ -141,10 +141,11 @@ impl Rng {
             panic("below: the range 0..0 is empty")
         }
         var x = self.next_u64()
-        if x * n < n {
+        // Lemire's method: the low half of the product, which wraps
+        if x.wrapping_mul(n) < n {
             // the values of the low half that would favour some results
-            let t = (0u64 - n) % n
-            while x * n < t {
+            let t = n.wrapping_neg() % n
+            while x.wrapping_mul(n) < t {
                 x = self.next_u64()
             }
         }
@@ -163,16 +164,16 @@ impl Rng {
         }
         // the size of the range, which fits a uint32 even when the
         // difference overflows an int
-        let n = (hi - lo) as uint32
+        let n = hi.wrapping_sub(lo) as uint32
         var m = self.next_u32() as uint64 * n as uint64
         if (m as uint32) < n {
-            let t = (0u32 - n) % n
+            let t = n.wrapping_neg() % n
             while (m as uint32) < t {
                 m = self.next_u32() as uint64 * n as uint64
             }
         }
         // wraps back into the range when the offset is past the int's top
-        return lo + (m >> 32) as int
+        return lo.wrapping_add((m >> 32) as int)
     }
 
     // A number in lo..hi, each as likely, for `int64`s. An empty range,
@@ -184,7 +185,9 @@ impl Rng {
         if hi <= lo {
             panic(f"int64_in: the range {lo}..{hi} is empty")
         }
-        return lo + self.below((hi - lo) as uint64) as int64
+        // the size of the range as a uint64, and the offset back, wrapping
+        // as `int_in`'s do
+        return lo.wrapping_add(self.below(hi.wrapping_sub(lo) as uint64) as int64)
     }
 
     // A number in [0, 1): one of the 2^53 multiples of 2^-53 there, each as

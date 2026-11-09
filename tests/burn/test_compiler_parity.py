@@ -2530,14 +2530,16 @@ fun main() {
     "argument_values_before_later_writes": (
         "struct C {\n    n: int,\n}\nimpl C {\n    fun bump_get(var self) -> int {\n        self.n = self.n + 1\n        return self.n\n    }\n    fun plus(self, k: int) -> int {\n        return self.n * 100 + k\n    }\n    fun with(self, o: C, k: int) -> int {\n        return self.n * 10000 + o.n * 100 + k\n    }\n}\nfun outer(c: C, k: int) -> int {\n    return c.n * 100 + k\n}\n#main\nfun main() {\n    var c = C { n: 1 }\n    print(c.plus(c.bump_get()))\n    var d = C { n: 1 }\n    print(outer(d, d.bump_get()))\n    var xs = [C { n: 1 }]\n    print(xs[0].plus(xs[0].bump_get()))\n    var e = C { n: 1 }\n    var f = C { n: 5 }\n    print(e.with(f, f.bump_get()))\n    let g = (x: C, k: int) => x.n * 100 + k\n    var h = C { n: 1 }\n    print(g(h, h.bump_get()))\n    var p = C { n: 1 }\n    print(p.n * 100 + p.bump_get())\n}\n"
     ),
+    # wrapping on purpose, through the wrapping methods (D175: `+` past the
+    # maximum is an overflow where it is checked)
     "unsigned_wrap": (
         "#main\nfun main() {\n"
-        "    var b: uint8 = 255u8\n    b = b + 1u8\n    print(b)\n"
-        "    print(18446744073709551615u64 + 1u64)\n}\n"
+        "    var b: uint8 = 255u8\n    b = b.wrapping_add(1u8)\n    print(b)\n"
+        "    let m: uint64 = 18446744073709551615\n    print(m.wrapping_add(1u64))\n}\n"
     ),
     "signed_wrap_and_div": (
         "#main\nfun main() {\n"
-        "    var x: int8 = 127i8\n    x = x + 1i8\n    print(x)\n"
+        "    var x: int8 = 127i8\n    x = x.wrapping_add(1i8)\n    print(x)\n"
         "    print(-7 / 2)\n    print(-7 % 2)\n    print(7 / -2)\n}\n"
     ),
     "recursion": (
@@ -4956,7 +4958,7 @@ fun main() {
         'const E: bool = !(A > 3)\n'
         'const F: int = B - C\n'
         'const G: uint8 = 200\n'
-        'const H: uint8 = G + G\n'
+        'const H: uint8 = G - 100 + 50\n'
         '#main\n'
         'fun main() {\n'
         '    print(B)\n'
@@ -5366,9 +5368,11 @@ fun main() {
         "}\n"
     ),
     # the int64 minimum divided by -1 wraps instead of trapping (MYLA-5)
+    # D175: the quotient `MIN / -1` overflows where it is checked, so the
+    # interpreter's part is the remainders (0) and the quotients that fit;
+    # a plain build's `MIN / -1` (MYLA-5: no `idiv` fault) is test_ir_contract's
     "int64_min_divided_by_minus_one": (
         'const MIN: int64 = -9223372036854775807 - 1\n'
-        'const Q: int64 = MIN / -1\n'
         'const R: int64 = MIN % -1\n'
         'fun div(a: int64, b: int64) -> int64 {\n'
         '    return a / b\n'
@@ -5380,19 +5384,17 @@ fun main() {
         'fun main() {\n'
         '    let a: int64 = -9223372036854775807 - 1\n'
         '    var b: int64 = -1\n'
-        '    print(a / b)\n'
         '    print(a % b)\n'
-        '    print(div(a, -1))\n'
         '    print(rem(a, -1))\n'
+        '    print(div(a, 1))\n'
         '    print(div(-7, -1))\n'
         '    print(rem(-7, -1))\n'
         '    print(div(7, -2))\n'
         '    print(rem(7, -2))\n'
         '    let c: int32 = -2147483647 - 1\n'
         '    var d: int32 = -1\n'
-        '    print(c / d)\n'
         '    print(c % d)\n'
-        '    print(Q)\n'
+        '    print(c / 1)\n'
         '    print(R)\n'
         '}\n'
     ),
@@ -6293,6 +6295,75 @@ async fun main() {
 }
 """,
     # MYLA-390: `sb.append_char(c)` natively, as the interpreter does it
+    "wrapping_methods": """// D175 (MYLA-395): the builtin wrapping methods of every integer width, the
+// same interpreted, natively and checked, past both ends; a hash, a random
+// step and a checksum that wrap on purpose
+fun fnv1a(s: str) -> uint64 {
+    var h: uint64 = 0xcbf29ce484222325
+    for i in 0..s.len() {
+        h = (h ^ (s[i] as uint64)).wrapping_mul(0x100000001b3)
+    }
+    return h
+}
+
+fun lcg(x: uint32) -> uint32 {
+    return x.wrapping_mul(1664525).wrapping_add(1013904223)
+}
+
+fun adler(s: str) -> uint32 {
+    var a: uint16 = 1
+    var b: uint16 = 0
+    for i in 0..s.len() {
+        a = a.wrapping_add(s[i] as uint16)
+        b = b.wrapping_add(a)
+    }
+    return ((b as uint32) << 16) | (a as uint32)
+}
+
+fun main() {
+    let i8max: int8 = 127
+    let i8min: int8 = -128
+    print(i8max.wrapping_add(1))
+    print(i8min.wrapping_sub(1))
+    print(i8max.wrapping_mul(i8max))
+    print(i8min.wrapping_neg())
+    let u8max: uint8 = 255
+    let u8zero: uint8 = 0
+    print(u8max.wrapping_add(u8max))
+    print(u8zero.wrapping_sub(1))
+    print(u8max.wrapping_mul(u8max))
+    print(u8zero.wrapping_neg())
+    let one: uint8 = 1
+    print(one.wrapping_neg())
+    let i16: int16 = 32767
+    print(i16.wrapping_add(i16))
+    let u16: uint16 = 65535
+    print(u16.wrapping_mul(3))
+    let i32max: int32 = 2147483647
+    print(i32max.wrapping_add(1))
+    print(i32max.wrapping_mul(-2))
+    let u32max: uint32 = 4294967295
+    print(u32max.wrapping_mul(u32max))
+    print(u32max.wrapping_add(2))
+    let i64min: int64 = -9223372036854775807 - 1
+    print(i64min.wrapping_sub(1))
+    print(i64min.wrapping_neg())
+    print(i64min.wrapping_mul(-1))
+    let u64max: uint64 = 18446744073709551615
+    print(u64max.wrapping_add(1))
+    print(u64max.wrapping_mul(u64max))
+    var x: uint32 = 1
+    for k in 0..5 {
+        x = lcg(x)
+    }
+    print(x)
+    print(fnv1a("myla"))
+    print(adler(\"Wikipedia, the free encyclopedia, at some length\"))
+    var acc: int64 = 1
+    acc = acc.wrapping_mul(3).wrapping_add(4).wrapping_sub(10)
+    print(acc)
+}
+""",
     "append_char": """// MYLA-390: `sb.append_char(c)`, a character's UTF-8 bytes, of each length
 struct Doc {
     out: StringBuilder,
@@ -7621,6 +7692,15 @@ class TestCompilerParity(unittest.TestCase):
 # longer holds (a later decision changed its meaning) or there is none (a
 # program added or changed since): its output, pinned here.
 PINNED = {
+    # D175: a const that overflows is an error (`G + G` was 144), and the
+    # quotient `MIN / -1` overflows where it is checked; new outputs
+    "consts_fold_through_references": "25\n-4\n-5\nfalse\n29\n150\n",
+    "int64_min_divided_by_minus_one": "0\n0\n-9223372036854775808\n7\n0\n-3\n1\n0\n-2147483648\n0\n",
+    # D175: they wrap through the wrapping methods now; the recording's output
+    "unsigned_wrap": "0\n0\n",
+    "signed_wrap_and_div": "-128\n-3\n-1\n-3\n",
+    # D175 (MYLA-395): new; the output filled in below, checked against both
+    "wrapping_methods": '-128\n127\n1\n-128\n254\n255\n1\n0\n255\n-2\n65533\n-2147483648\n2\n1\n1\n9223372036854775807\n-9223372036854775808\n-9223372036854775808\n0\n1\n217083232\n5868319654627689028\n2896040334\n-3\n',
     # MYLA-385: new; native code gives the same
     "json_derive_structs": '{"x":1,"y":-2}\n{"id":4000000000,"items":[{"name":"a","at":{"x":1,"y":-2},"tags":["t1","t2"],"counts":{"k":3,"j":4}},{"name":"b\\"q","at":{"x":0,"y":0},"tags":[],"label":"lbl","counts":{}}]}\ntrue\nlbl\ntrue\n4\n4000000000\n4 5\ntrue\n15\n{"small":-128,"byte":255,"wide":-9000000000,"huge":1.8446744073709552e+19,"ratio":null,"single":0.1,"flag":true,"letter":"é","raw":[null,1],"maybe":[1,2]}\n{"small":127,"byte":0,"wide":9223372036854775807,"huge":9.223372036854776e+18,"ratio":2.5,"single":1.5,"flag":false,"letter":"x","raw":null}\ntrue\n9223372036854775808\n1.5\nx\n5 6 4\n{}\ntrue\n[[1,2],[3]]\n{"a":1,"b":null}\n"c"\nnull\n2\n-5\ntrue\n',
     # MYLA-385: new; native code gives the same

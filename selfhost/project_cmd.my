@@ -98,8 +98,8 @@ fun with_program() -> Option<Here> {
     return Some(h)
 }
 
-// `myla build [-g]`: `src/main.my` to `build/<name>`.
-pub fun project_build(base: LoadOptions, debug: bool, target: str) -> int32 {
+// `myla build [-g] [--checked]`: `src/main.my` to `build/<name>`.
+pub fun project_build(base: LoadOptions, debug: bool, checked: bool, target: str) -> int32 {
     let h = match with_program() {
         Some(h) => h
         None => { return 1 }
@@ -113,7 +113,7 @@ pub fun project_build(base: LoadOptions, debug: bool, target: str) -> int32 {
         },
     }
     let entry = shown(h, h.project.root.dir + "/src/main.my")
-    return cmd_build(entry, shown(h, out_dir + "/" + h.project.root.name), options(h, base), debug, target)
+    return cmd_build(entry, shown(h, out_dir + "/" + h.project.root.name), options(h, base), debug, checked, target)
 }
 
 // `myla run [args…]`: interpret `src/main.my` with the arguments.
@@ -144,7 +144,8 @@ pub fun project_test(base: LoadOptions, sel: TestOptions, native: bool, target: 
     let tests_dir = h.project.root.dir + "/tests"
     var options = sel
     if is_dir(tests_dir) && h.project.root.has_program && !sel.list {
-        let built = project_build(base, false, target)
+        // built checked, as everything `myla test` runs is (D175)
+        let built = project_build(base, false, true, target)
         if built != 0 { return built }
         options.program = h.project.root.dir + "/build/" + h.project.root.name
     }
@@ -238,7 +239,8 @@ fun run_test_program_natively(h: Here, path: str, opts: LoadOptions, target: str
         Err(e) => { return [format("FAIL  {}: cannot create {}\n", file, dir)] },
     }
     let out = dir + "/program"
-    if cmd_build(file, out, opts, false, target) != 0 {
+    // checked, as `myla test` runs everything (D175)
+    if cmd_build(file, out, opts, false, true, target) != 0 {
         let gone = remove_dir_all(dir)
         return [format("FAIL  {}: didn't build\n", file)]
     }

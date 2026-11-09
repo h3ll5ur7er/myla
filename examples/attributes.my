@@ -10,9 +10,9 @@ fun add(a: int, b: int) -> int {
 }
 
 // Literal type suffixes disambiguate sized integers without an annotation.
-#test(255u8)[0u8]      // 255 + 1 wraps to 0 in a uint8
+#test(255u8)[0u8]      // 255 + 1 wraps to 0 in a uint8 (a plain `+` overflows, D175)
 fun inc_byte(b: uint8) -> uint8 {
-    return b + 1u8
+    return b.wrapping_add(1u8)
 }
 
 // #main marks the entry point, so it need not be named `main`.

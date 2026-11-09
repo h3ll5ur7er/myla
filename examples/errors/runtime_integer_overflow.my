@@ -1,0 +1,17 @@
+//~ runtime error: integer overflow
+//~ native: runtime error: integer overflow
+//~ checked
+// An int32 sum past 2^31 - 1 is a runtime error where overflow is checked
+// (D175): the interpreter and `myla build --checked`; the position is the
+// operator. A plain build wraps.
+fun total(xs: [int]) -> int {
+    var sum = 0
+    for x in xs {
+        sum = sum + x
+    }
+    return sum
+}
+
+fun main() {
+    print(total([2000000000, 2000000000]))
+}

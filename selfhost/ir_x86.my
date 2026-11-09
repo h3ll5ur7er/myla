@@ -1250,28 +1250,7 @@ impl CodeGen {
                     },
                     _ => {},
                 }
-                // the first operand where it is when that is a register; the
-                // two swapped when the second is still in %rax
-                var cop = op
-                var left = self.reg_of(x)
-                if left == "" && self.swap_operands(op, x, y) {
-                    self.load_temp(y, "rax", temp_base)
-                    left = "%rax"
-                    cop = swapped_cmp(op)
-                    self.emit(format("cmpq {}, {}", self.second_operand(op, x, temp_base), left))
-                } else {
-                    // a value just loaded, compared with a constant or a
-                    // register: the memory itself
-                    if left == "" && (self.temp_imm[y] != "" || (self.temp_reg[y] != "" && self.temp_remat[y] == "" && !(self.pend_store != "" && self.pend_temp == y))) {
-                        left = self.take_load(x)
-                    }
-                    if left == "" {
-                        self.load_temp(x, "rax", temp_base)
-                        left = "%rax"
-                    }
-                    self.emit(format("cmpq {}, {}", self.second_operand(op, y, temp_base), left))
-                }
-                let cond = jump_cond(cop, int_signed(t))
+                let cond = self.emit_int_compare(op, t, x, y, temp_base)
                 match term {
                     Term.Br(c, yes, no) => {
                         if no == next { self.emit(format("j{} {}", cond, labels[yes])) }
@@ -1285,6 +1264,61 @@ impl CodeGen {
             },
             _ => {},
         }
+    }
+
+    // The `cmpq` of the integer comparison `x op t y`; the condition of the
+    // jump taken when it holds.
+    fun emit_int_compare(var self, op: str, t: Type, x: int32, y: int32, temp_base: int32) -> str {
+        // the first operand where it is when that is a register; the
+        // two swapped when the second is still in %rax
+        var cop = op
+        var left = self.reg_of(x)
+        if left == "" && self.swap_operands(op, x, y) {
+            self.load_temp(y, "rax", temp_base)
+            left = "%rax"
+            cop = swapped_cmp(op)
+            self.emit(format("cmpq {}, {}", self.second_operand(op, x, temp_base), left))
+        } else {
+            // a value just loaded, compared with a constant or a
+            // register: the memory itself
+            if left == "" && (self.temp_imm[y] != "" || (self.temp_reg[y] != "" && self.temp_remat[y] == "" && !(self.pend_store != "" && self.pend_temp == y))) {
+                left = self.take_load(x)
+            }
+            if left == "" {
+                self.load_temp(x, "rax", temp_base)
+                left = "%rax"
+            }
+            self.emit(format("cmpq {}, {}", self.second_operand(op, y, temp_base), left))
+        }
+        return jump_cond(cop, int_signed(t))
+    }
+
+    // An integer comparison that only the `check` after it reads, of an
+    // overflow or a shift's count (D175's checked build): the `cmpq` and a
+    // jump over the trap when it holds, as a bounds check is. False for any
+    // other pair; the other checks keep their code (a plain build's is
+    // unchanged).
+    fun emit_compare_check(var self, a: Inst, b: Inst, temp_base: int32) -> bool {
+        match a {
+            Inst.Cmp(d, op, t, x, y) => {
+                match t { Type.TFloat(w) => { return false }, _ => {} }
+                match b {
+                    Inst.Check(v, kind, p) => {
+                        if v != d || self.temp_uses[d] != 1 || (kind != "overflow" && kind != "shift") { return false }
+                        let cond = self.emit_int_compare(op, t, x, y, temp_base)
+                        let ok = self.label()
+                        self.emit(format("j{} {}", cond, ok))
+                        self.load_position(p.line, p.col, "rsi")
+                        self.emit(format("call __trap_{}", kind))
+                        self.emit(format("{}:", ok))
+                        return true
+                    },
+                    _ => {},
+                }
+            },
+            _ => {},
+        }
+        return false
     }
 
     // A block's terminator; `next` is the block emitted after it (-1: none),
@@ -1483,6 +1517,7 @@ impl CodeGen {
         return match a {
             Inst.Elem(e, c, i, stride, is_str, checked, p) => self.emit_elem_load(f, a, b, temp_base),
             Inst.Bin(d, op, lt, rt, x, y, pos) => self.emit_add_load(f, a, b, temp_base) || self.emit_in_place(a, b, temp_base),
+            Inst.Cmp(d, op, t, x, y) => self.emit_compare_check(a, b, temp_base),
             _ => false,
         }
     }

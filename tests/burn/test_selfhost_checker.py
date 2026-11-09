@@ -411,6 +411,8 @@ FIELD_MUTATOR_WARNINGS: dict[str, tuple[str, list[str]]] = {
 # Verdicts a later decision changed from the retired Python checker's
 # recording, pinned here.
 SUPERSEDED: dict[str, str] = {
+    # D175: a const that overflows is an error, before the division by the zero it wrapped to
+    "const_division_by_wrapped_zero": "err 2 20 2:18-2:23 type: const integer overflow",
     # D102: the unsuffixed 2.0 is a float64
     "unit_test_78": "err 3 8 3:8-3:9 type: type mismatch: 'int32' vs 'float64' (no implicit conversion between numeric types)",
     # D138: a #test case on a function without a result expects [()] (the review of 2026-11-06)

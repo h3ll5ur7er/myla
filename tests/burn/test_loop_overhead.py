@@ -138,14 +138,15 @@ class LoopOverhead(unittest.TestCase):
 
     def test_integer_operations_at_the_limits_print_the_same(self):
         # every operation whose result no longer re-extends, at its type's
-        # limits: natively as interpreted (the minimum divided by -1 wraps)
+        # limits: natively as interpreted, the wrapping ones through the
+        # wrapping methods (D175), which a plain build lowers as the operators
         path = os.path.join(self.tmp.name, "wide.my")
         with open(path, "w", encoding="utf-8") as fh:
             fh.write(_WIDE_LIMITS)
         myla = selfhost_tool("main")
         ran = subprocess.run([myla, "run", path], capture_output=True, text=True)
         self.assertEqual(ran.returncode, 0, ran.stderr)
-        self.assertEqual(len(ran.stdout.splitlines()), 239)
+        self.assertEqual(len(ran.stdout.splitlines()), 237)
         exe = os.path.join(self.tmp.name, "wide")
         built = subprocess.run([myla, "build", path, "-o", exe], capture_output=True, text=True)
         self.assertEqual(built.returncode, 0, built.stderr)
@@ -153,8 +154,8 @@ class LoopOverhead(unittest.TestCase):
 
     def test_counting_loops_at_the_limit_print_the_same(self):
         # at INT32_MAX: a `<` loop ends there; a `<=` loop's increment wraps,
-        # as it must, and a loop that changes its counter elsewhere too stays
-        # as it was
+        # as it must (written with `wrapping_add`, D175), and a loop that
+        # changes its counter elsewhere too stays as it was
         path = os.path.join(self.tmp.name, "limit.my")
         with open(path, "w", encoding="utf-8") as fh:
             fh.write(_LIMITS)
@@ -181,12 +182,14 @@ fun main() {
 """
 
 _WIDE_LIMITS = """// Integer operations at their types' limits (MYLA-251): the same natively
-// as interpreted, wrapping where the language wraps.
+// as interpreted, wrapping through the wrapping methods (D175), the plain
+// operators natively.
 fun signed32(xs: [int]) {
     for a in xs {
         for b in xs {
-            if b != 0 { print(f"{a / b} {a % b}") }
-            print(f"{a & b} {a | b} {a ^ b} {a >> 3} {a >> 31} {(a + b) - 1} {(a - b) * 3 + 1} {(a + b) % 7}")
+            // the minimum by -1 overflows where it is checked (D175)
+            if b != 0 && !(a == -2147483647 - 1 && b == -1) { print(f"{a / b} {a % b}") }
+            print(f"{a & b} {a | b} {a ^ b} {a >> 3} {a >> 31} {a.wrapping_add(b).wrapping_sub(1)} {a.wrapping_sub(b).wrapping_mul(3).wrapping_add(1)} {a.wrapping_add(b) % 7}")
         }
     }
 }
@@ -195,7 +198,7 @@ fun unsigned32(xs: [uint32]) {
     for a in xs {
         for b in xs {
             if b != 0u32 { print(f"{a / b} {a % b}") }
-            print(f"{a & b} {a | b} {a ^ b} {a >> 3u32} {(a + b) - 1u32} {a / 8u32} {a % 8u32}")
+            print(f"{a & b} {a | b} {a ^ b} {a >> 3u32} {a.wrapping_add(b).wrapping_sub(1u32)} {a / 8u32} {a % 8u32}")
         }
     }
 }
@@ -203,20 +206,20 @@ fun unsigned32(xs: [uint32]) {
 fun small(xs: [int8], ys: [uint8], zs: [int16]) {
     for a in xs {
         for b in xs {
-            if b != 0i8 { print(f"{a / b} {a % b}") }
-            print(f"{a & b} {a | b} {a ^ b} {a >> 2i8} {a + b}")
+            if b != 0i8 && !(a == -128i8 && b == -1i8) { print(f"{a / b} {a % b}") }
+            print(f"{a & b} {a | b} {a ^ b} {a >> 2i8} {a.wrapping_add(b)}")
         }
     }
     for a in ys {
         for b in ys {
             if b != 0u8 { print(f"{a / b} {a % b}") }
-            print(f"{a & b} {a | b} {a ^ b} {a >> 2u8} {a + b}")
+            print(f"{a & b} {a | b} {a ^ b} {a >> 2u8} {a.wrapping_add(b)}")
         }
     }
     for a in zs {
         for b in zs {
-            if b != 0i16 { print(f"{a / b} {a % b}") }
-            print(f"{a ^ b} {a >> 15i16} {a - b}")
+            if b != 0i16 && !(a == -32768i16 && b == -1i16) { print(f"{a / b} {a % b}") }
+            print(f"{a ^ b} {a >> 15i16} {a.wrapping_sub(b)}")
         }
     }
 }
@@ -241,7 +244,9 @@ fun main() {
     signed32([mn, -7, -1, 0, 1, 7, 2147483647])
     unsigned32([0u32, 1u32, 7u32, 2147483648u32, 4294967295u32])
     small([-128i8, -1i8, 3i8, 127i8], [0u8, 1u8, 200u8, 255u8], [-32768i16, -3i16, 5i16, 32767i16])
-    print(mn / -1)
+    // `mn / -1` overflows where it is checked (test_ir_contract has a plain
+    // build's); its remainder fits
+    print(mn.wrapping_neg())
     print(mn % -1)
     print(f(7u32, 7, 7u8, 1))
     print(f(4294967295u32, -2147483648, 255u8, 2))
@@ -271,7 +276,7 @@ _LIMITS = """fun main() {
     var j = 2147483646
     var turns = 0
     while j <= 2147483647 {
-        j += 1
+        j = j.wrapping_add(1)
         turns += 1
         if turns > 3 {
             break
@@ -282,7 +287,7 @@ _LIMITS = """fun main() {
     var kt = 0
     while k < 2147483647 {
         k += 1
-        k += 1
+        k = k.wrapping_add(1)
         kt += 1
         if kt > 1 {
             break

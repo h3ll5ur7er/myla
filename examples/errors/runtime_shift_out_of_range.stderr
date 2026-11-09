@@ -1,0 +1,5 @@
+runtime error: shift amount out of range
+  --> examples/errors/runtime_shift_out_of_range.my:7:14
+  |
+7 |     return 1 << n
+  |            ^^^^^^

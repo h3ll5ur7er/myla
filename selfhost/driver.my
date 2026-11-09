@@ -58,9 +58,9 @@ pub fun load_and_check(file: str, opts: LoadOptions) -> Result<Checked, str> {
 }
 
 // Type-check `file`, then generate its assembly for `target` (`debug`: with DWARF
-// debug information, MYLA-71, MYLA-66; `ir`: lowering functions to the IR
-// first, MYLA-103).
-fun compile_asm(file: str, opts: LoadOptions, debug: bool, target: str) -> Result<str, str> {
+// debug information, MYLA-71, MYLA-66; `checked`: integer overflow traps,
+// D175).
+fun compile_asm(file: str, opts: LoadOptions, debug: bool, checked: bool, target: str) -> Result<str, str> {
     var native = for_target(opts, target)
     native.runtime = true
     let ch = load_and_check(file, native)?
@@ -68,6 +68,7 @@ fun compile_asm(file: str, opts: LoadOptions, debug: bool, target: str) -> Resul
     if target != "x86_64-linux" && debug { return Err(format("myla: -g is not supported for {} yet", target)) }
     if target == "aarch64-linux" { g.a64 = true }
     if target == "wasm32-wasi" { g.wasm = true }
+    g.checked = checked
     g.set_sources(ch.prog.spans, ch.prog.next_id)
     if debug { g.enable_debug_info(read_gdb_script(opts.stdlib_root)) }
     let asm = g.generate()
@@ -165,7 +166,8 @@ pub fun native_tests(file: str, opts: LoadOptions, sel: TestOptions, target: str
     let out = dir + "/harness"
     var nopts = opts
     nopts.overrides[file] = h.source
-    if cmd_build(file, out, nopts, false, target) != 0 {
+    // built checked: overflow traps under `myla test`, natively too (D175)
+    if cmd_build(file, out, nopts, false, true, target) != 0 {
         // the harness kept, for a look at the code added to the file
         let kept = write_to_file(out + ".my", h.source)
         return Err(format("myla: the test harness of {} didn't build: its errors above are at positions past the file's end, in the code added to it (kept at {}.my)", file, out))
@@ -460,9 +462,9 @@ fun build_step(argv: [str], label: str, target: str) -> bool {
 }
 
 // `target`: x86_64-linux, aarch64-linux or wasm32-wasi; its tools are
-// `build_commands`'.
-pub fun cmd_build(file: str, output: str, opts: LoadOptions, debug: bool, target: str) -> int32 {
-    let asm = match compile_asm(file, opts, debug, target) {
+// `build_commands`'. `checked`: integer overflow traps (`--checked`, D175).
+pub fun cmd_build(file: str, output: str, opts: LoadOptions, debug: bool, checked: bool, target: str) -> int32 {
+    let asm = match compile_asm(file, opts, debug, checked, target) {
         Ok(a) => a,
         Err(e) => {
             eprintln(e)
