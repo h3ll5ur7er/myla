@@ -56,6 +56,21 @@ fun lexer_on(src: str) -> Lexer {
     return new_lexer(src)
 }
 
+// The text of the one-character operator `c` (`one_char_kind`'s): a
+// literal, where `cp_utf8` made a string for every bracket and comma
+// (MYLA-359).
+#test(40)["("]
+#test(59)[";"]
+#test(64)[""]
+fun one_char_text(c: int32) -> str {
+    return match c {
+        43 => "+", 45 => "-", 42 => "*", 47 => "/", 37 => "%", 38 => "&", 94 => "^", 126 => "~",
+        60 => "<", 62 => ">", 33 => "!", 61 => "=", 124 => "|", 40 => "(", 41 => ")", 123 => "{",
+        125 => "}", 91 => "[", 93 => "]", 44 => ",", 58 => ":", 46 => ".", 35 => "#", 63 => "?",
+        59 => ";", _ => "",
+    }
+}
+
 // One canonical token line (mirror of src/myla/canon.py:canonical_token).
 #test(Token { kind: TokenKind.IDENT, lexeme: "East", line: 64, column: 19, eline: 64, ecol: 23, ival: 0, suffix: "", big: "" })["IDENT 64 19 \"East\" end=64:23"]
 #test(Token { kind: TokenKind.IDENT, lexeme: "Direction", line: 62, column: 9, eline: 62, ecol: 18, ival: 0, suffix: "", big: "" })["IDENT 62 9 \"Direction\" end=62:18"]
@@ -576,7 +591,7 @@ impl Lexer {
                 return
             }
             self.advance()
-            self.emit0(k, cp_utf8(c), sl, sc)
+            self.emit0(k, one_char_text(c), sl, sc)
         }
     }
 

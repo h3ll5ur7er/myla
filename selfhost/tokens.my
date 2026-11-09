@@ -86,46 +86,74 @@ fun upper_ascii(s: str) -> str {
 #test("as")[TokenKind.AS]
 #test("actor")[TokenKind.ACTOR]
 #test("typealias")[TokenKind.TYPEALIAS]
+#test("uint64")[TokenKind.UINT64]
+#test("while")[TokenKind.WHILE]
+#test("x")[TokenKind.IDENT]
+#test("typealiases")[TokenKind.IDENT]
+#test("lets")[TokenKind.IDENT]
+#test("zip")[TokenKind.IDENT]
 pub fun keyword_kind(text: str) -> TokenKind {
-    if text == "let" { return TokenKind.LET }
-    if text == "var" { return TokenKind.VAR }
-    if text == "fun" { return TokenKind.FUN }
-    if text == "return" { return TokenKind.RETURN }
-    if text == "become" { return TokenKind.BECOME }
-    if text == "struct" { return TokenKind.STRUCT }
-    if text == "enum" { return TokenKind.ENUM }
-    if text == "impl" { return TokenKind.IMPL }
-    if text == "trait" { return TokenKind.TRAIT }
-    if text == "self" { return TokenKind.SELF }
-    if text == "match" { return TokenKind.MATCH }
-    if text == "typealias" { return TokenKind.TYPEALIAS }
-    if text == "as" { return TokenKind.AS }
-    if text == "pub" { return TokenKind.PUB }
-    if text == "import" { return TokenKind.IMPORT }
-    if text == "from" { return TokenKind.FROM }
-    if text == "const" { return TokenKind.CONST }
-    if text == "break" { return TokenKind.BREAK }
-    if text == "continue" { return TokenKind.CONTINUE }
-    if text == "if" { return TokenKind.IF }
-    if text == "else" { return TokenKind.ELSE }
-    if text == "while" { return TokenKind.WHILE }
-    if text == "for" { return TokenKind.FOR }
-    if text == "in" { return TokenKind.IN }
-    if text == "true" { return TokenKind.TRUE }
-    if text == "false" { return TokenKind.FALSE }
-    if text == "bool" { return TokenKind.BOOL }
-    if text == "str" { return TokenKind.STR }
-    if text == "int8" { return TokenKind.INT8 }
-    if text == "int16" { return TokenKind.INT16 }
-    if text == "int32" { return TokenKind.INT32 }
-    if text == "int64" { return TokenKind.INT64 }
-    if text == "uint8" { return TokenKind.UINT8 }
-    if text == "uint16" { return TokenKind.UINT16 }
-    if text == "uint32" { return TokenKind.UINT32 }
-    if text == "uint64" { return TokenKind.UINT64 }
-    if text == "actor" { return TokenKind.ACTOR }
-    if text == "async" { return TokenKind.ASYNC }
-    if text == "await" { return TokenKind.AWAIT }
+    // by the first byte, so that a name is compared with the keywords that
+    // start as it does, not all 39 (MYLA-359: every identifier of every
+    // module comes here)
+    let n = text.len()
+    if n < 2 || n > 9 { return TokenKind.IDENT }
+    let c = text[0]
+    if c == 'a' {
+        if text == "as" { return TokenKind.AS }
+        if text == "actor" { return TokenKind.ACTOR }
+        if text == "async" { return TokenKind.ASYNC }
+        if text == "await" { return TokenKind.AWAIT }
+    } else if c == 'b' {
+        if text == "become" { return TokenKind.BECOME }
+        if text == "break" { return TokenKind.BREAK }
+        if text == "bool" { return TokenKind.BOOL }
+    } else if c == 'c' {
+        if text == "const" { return TokenKind.CONST }
+        if text == "continue" { return TokenKind.CONTINUE }
+    } else if c == 'e' {
+        if text == "enum" { return TokenKind.ENUM }
+        if text == "else" { return TokenKind.ELSE }
+    } else if c == 'f' {
+        if text == "fun" { return TokenKind.FUN }
+        if text == "from" { return TokenKind.FROM }
+        if text == "for" { return TokenKind.FOR }
+        if text == "false" { return TokenKind.FALSE }
+    } else if c == 'i' {
+        if text == "impl" { return TokenKind.IMPL }
+        if text == "import" { return TokenKind.IMPORT }
+        if text == "if" { return TokenKind.IF }
+        if text == "in" { return TokenKind.IN }
+        if text == "int8" { return TokenKind.INT8 }
+        if text == "int16" { return TokenKind.INT16 }
+        if text == "int32" { return TokenKind.INT32 }
+        if text == "int64" { return TokenKind.INT64 }
+    } else if c == 'l' {
+        if text == "let" { return TokenKind.LET }
+    } else if c == 'm' {
+        if text == "match" { return TokenKind.MATCH }
+    } else if c == 'p' {
+        if text == "pub" { return TokenKind.PUB }
+    } else if c == 'r' {
+        if text == "return" { return TokenKind.RETURN }
+    } else if c == 's' {
+        if text == "struct" { return TokenKind.STRUCT }
+        if text == "self" { return TokenKind.SELF }
+        if text == "str" { return TokenKind.STR }
+    } else if c == 't' {
+        if text == "trait" { return TokenKind.TRAIT }
+        if text == "typealias" { return TokenKind.TYPEALIAS }
+        if text == "true" { return TokenKind.TRUE }
+    } else if c == 'u' {
+        if text == "uint8" { return TokenKind.UINT8 }
+        if text == "uint16" { return TokenKind.UINT16 }
+        if text == "uint32" { return TokenKind.UINT32 }
+        if text == "uint64" { return TokenKind.UINT64 }
+    } else if c == 'v' {
+        if text == "var" { return TokenKind.VAR }
+    } else if c == 'w' {
+        if text == "while" { return TokenKind.WHILE }
+    }
     return TokenKind.IDENT
 }
 
