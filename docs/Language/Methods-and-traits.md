@@ -216,7 +216,7 @@ A fixed set of built-in traits backs the operators on structs and enums (D52):
 
 `a + b` on a struct becomes `a.add(b)`; `a < b` becomes `a.cmp(b) < 0`. Both operands must have the same type. Primitive types keep their built-in operators (a user `impl Add for int32` doesn't change `+`), and the bitwise operators can't be overloaded.
 
-## #derive(Eq), #derive(Hash) and #derive(Json)
+## #derive(Eq), #derive(Hash), #derive(Json) and #derive(Toml)
 
 ```myla
 #derive(Eq)
@@ -290,7 +290,9 @@ fun main() {
 
 `#derive(Json)` writes an `impl ToJson` and an `impl FromJson` against `std.json` (D172, [[MYLA-385]]), which the program imports: a struct as an object of its fields (an `Option` field left out when `None`), an enum externally tagged (`"Red"`, `{"Dot": x}`, `{"Line": [a, b]}`), so that `json.encode(v)` and `json.decode<T>(text)` work on it; every field must have a JSON form itself, and recursive types work. The rules and the built-in types' forms are on [[Language/Standard-library/Json#typed-values]].
 
-The derives are generated as Myla source and checked with the program (`derived_hash_src`, `derived_json_struct_src`, `derived_json_enum_src` in [[selfhost/checker.my]], and a generic type's `derived_eq_src`; a concrete type's `Eq` is the runners' own structural comparison); `#derive(Json)`'s source names std.json's items by the loader's qualified names (`std$json$Json`), which only the checker's own parser accepts (`parse_qualified`). `Eq`, `Hash` and `Json` are the derivable traits so far; `Ord` is the planned next one.
+`#derive(Toml)` writes an `impl ToToml` and an `impl FromToml` against `std.toml` ([[MYLA-407]]) the same way: a struct as a table of its fields, an enum externally tagged (`"Red"`, `{ Dot = x }`, `{ Line = [a, b] }`), so that `toml.encode(v)` (a `Result`: a document must be a table) and `toml.decode<T>(text)` work on it. TOML has no null, so an `Option` may be a struct's field, left out when `None`, and nothing else (not in a list, a map or a payload). The rules are on [[Language/Standard-library/Toml#typed-values]]. A type may derive both, `#derive(Json, Toml)`.
+
+The derives are generated as Myla source and checked with the program (`derived_hash_src`, `derived_struct_src` and `derived_enum_src` for both formats, a `Serial` naming the format's items, in [[selfhost/checker.my]], and a generic type's `derived_eq_src`; a concrete type's `Eq` is the runners' own structural comparison); `#derive(Json)`'s and `#derive(Toml)`'s source names the module's items by the loader's qualified names (`std$json$Json`, `std$toml$Toml`), which only the checker's own parser accepts (`parse_qualified`). `Eq`, `Hash`, `Json` and `Toml` are the derivable traits so far; `Ord` is the planned next one.
 
 ## Hash
 

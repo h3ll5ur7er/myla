@@ -1,0 +1,23 @@
+//~ type error: type 'Point' both derives Toml and has an explicit 'impl FromToml for Point'
+// A type's TOML form is derived or written by hand, not both (MYLA-407).
+import std.toml as toml
+from std.toml import Toml, TomlError, FromToml
+
+#derive(Toml)
+struct Point {
+    x: int,
+    y: int,
+}
+
+impl FromToml for Point {
+    fun from_toml(t: Toml) -> Result<Point, TomlError> {
+        return Ok(Point { x: 0, y: 0 })
+    }
+}
+
+fun main() {
+    match toml.decode<Point>("x = 1\ny = 2") {
+        Ok(p) => print(p.x)
+        Err(e) => print(f"{e}")
+    }
+}

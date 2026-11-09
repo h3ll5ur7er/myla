@@ -100,14 +100,14 @@ Three questions for the owner are worth deciding before the first module is writ
 | 29 | Union-find | `std.unionfind` | disjoint sets with path compression and union by rank | 4 | 1 |  | 45 | [[MYLA-342]] |
 | 30 | Grid | `std.grid` | a 2D array with width and height: in-bounds checks, 4 and 8 neighbours, read from text, printed | 5 | 2 |  | 39 | [[MYLA-342]] |
 | 31 | Graph search | `std.graph` | BFS, DFS, Dijkstra, A*, topological sort, connected components, over a neighbour function | 5 | 3 | #25, #26 | 40 | [[MYLA-342]] |
-| 32 | Caches | `std.cache` | an LRU cache; a memoising wrapper around a map | 3 | 2 |  | 61 | – |
+| 32 | Caches | `std.cache` | an LRU cache; a memoising wrapper around a map: done, `Lru`, `Memo`, `recursive` | 3 | 2 |  | 61 | [[MYLA-404]] |
 
 ### Hashes, checksums, encodings, cryptography
 
 | # | Name | Where | What | Use | Size | Needs | Priority | Task |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | 33 | Fast hashes | `std.hash` | FNV-1a and a fast 64-bit hash (wyhash or xxHash64) of a `str` or bytes, hash combining: what a `Hash` trait ([[MYLA-313]]) would build on | 6 | 1 |  | 22 | [[MYLA-327]] |
-| 34 | Checksums | `std.hash` | CRC-32 and Adler-32 (gzip, zlib, PNG and zip need them) | 5 | 1 |  | 35 | [[MYLA-327]] |
+| 34 | Checksums | `std.hash`, `std.checksum` since [[MYLA-359]] | CRC-32 and Adler-32 (gzip, zlib, PNG and zip need them) | 5 | 1 |  | 35 | [[MYLA-327]] |
 | 35 | MD5 and SHA-1 | `std.digest` | one-shot and incremental, as bytes and as hex; legacy but everywhere (Git's object ids, ETags, AoC); tuned, since AoC's MD5 dominated its slowest days | 6 | 2 |  | 20 | [[MYLA-328]] |
 | 36 | SHA-2 and HMAC | `std.digest` | SHA-256, SHA-512, HMAC; one-shot and incremental | 6 | 2 |  | 21 | [[MYLA-328]] |
 | 37 | Hex and Base64 | `std.encoding` | encode and decode, Base64 in the standard and the URL-safe alphabet | 8 | 1 |  | 13 | [[MYLA-329]] |
@@ -138,10 +138,10 @@ Three questions for the owner are worth deciding before the first module is writ
 | 52 | CSV | `std.csv` | RFC 4180 read and write (quotes, escapes, CRLF), rows as `[str]` or mapped by the header, streaming over #41 | 6 | 2 |  | 29 | [[MYLA-332]] |
 | 53 | JSON, more | `std.json` | a pretty printer, typed getters (`as_int`, `as_str`) and path access, a builder; `std.json` already parses and prints | 7 | 2 |  | 24 | [[MYLA-332]] |
 | 54 | INI | `std.ini` | read and write: sections, keys, comments | 4 | 1 |  | 38 | [[MYLA-332]] |
-| 55 | TOML writer | `std.toml` | writing TOML (`std.toml` parses it), e.g. for the project tool's manifest edits | 3 | 2 |  | 59 | – |
+| 55 | TOML writer | `std.toml` | writing TOML (`std.toml` parses it), e.g. for the project tool's manifest edits: done, `to_string` round-trips what `parse` reads, all of TOML 1.0 since [[MYLA-407]] | 3 | 2 |  | 59 | [[MYLA-402]], [[MYLA-407]] |
 | 56 | XML | `std.xml` | a non-validating parser (elements, attributes, text, entities, CDATA, comments) to a tree and as a pull reader, a writer with escaping; no DTD and no namespaces at first | 5 | 4 |  | 49 | [[MYLA-348]] |
 | 57 | YAML | `std.yaml` | the safe subset: block and flow maps and lists, scalars, multi-line strings, comments; no anchors and no tags. The whole specification would be an 8 | 5 | 4 |  | 51 | [[MYLA-349]] |
-| 58 | Serialisation by derive | compiler, `std.json` | `#derive(Json)` (or a serialisation trait) between structs and JSON or TOML, generated as `#derive(Eq)` is | 7 | 6 | a language decision | 56 | [[MYLA-354]] |
+| 58 | Serialisation by derive | compiler, `std.json` | `#derive(Json)` (or a serialisation trait) between structs and JSON or TOML, generated as `#derive(Eq)` is: done, `#derive(Json)` and `#derive(Toml)` | 7 | 6 | a language decision | 56 | [[MYLA-354]], [[MYLA-385]], [[MYLA-407]] |
 | 59 | Regular expressions | `std.regex` | RE2-style, linear time, no backreferences: match, find, find all, captures, replace, split | 8 | 5 |  | 31 | [[MYLA-335]] |
 
 ### Programs
@@ -155,7 +155,7 @@ Three questions for the owner are worth deciding before the first module is writ
 | 64 | Signals | `std.signal` | SIGINT and SIGTERM handled, for a clean shutdown, as an async event | 3 | 3 | primitives per target | 64 | [[MYLA-350]] |
 | 65 | UUIDs | `std.uuid` | v4 (random) and v7 (ordered by time), parse and print | 3 | 1 | #15 | 60 | [[MYLA-337]] |
 | 66 | Concurrency utilities | `std.task` | channels between tasks, a worker pool, a timeout around an await, waiting for the first of several | 6 | 4 |  | 57 | [[MYLA-351]] |
-| 67 | Benchmarking | `std.bench` | time a closure over repeated runs; report the minimum and the median | 4 | 1 |  | 63 | – |
+| 67 | Benchmarking | `std.bench` | time a closure over repeated runs; report the minimum and the median: done, `run`, `run_n`, `run_for`, `black_box` | 4 | 1 |  | 63 | [[MYLA-403]] |
 | 68 | Test helpers | `std.test` | `expect`, `expect_eq`, `expect_ne`, `fail`, `temp_dir`, `program`: done (D162) | 9 | 2 |  | – | [[MYLA-304]] |
 
 ## The suggested order
@@ -180,7 +180,8 @@ Three questions for the owner are worth deciding before the first module is writ
 | 2 Collections, hashes and formats | [[MYLA-326]], [[MYLA-327]], [[MYLA-328]], [[MYLA-329]], [[MYLA-331]], [[MYLA-332]], [[MYLA-333]], [[MYLA-334]], [[MYLA-335]], [[MYLA-338]]; [[MYLA-330]] once MYLA-310 and MYLA-315 are in | [[MYLA-315]], then [[MYLA-313]] (after MYLA-327), then [[MYLA-318]] | |
 | 3 Streams and the middle tier | [[MYLA-337]], [[MYLA-339]] and [[MYLA-340]] (after MYLA-336 and MYLA-338), [[MYLA-341]], [[MYLA-342]] (after MYLA-330), [[MYLA-343]], [[MYLA-344]], [[MYLA-345]] | [[MYLA-353]] (a decision); the fixes the lanes needed, [[MYLA-360]], [[MYLA-367]], [[MYLA-374]], [[MYLA-375]] | [[MYLA-378]] (what the lanes found missing) |
 | 4 Networks and larger formats | [[MYLA-347]] (after MYLA-346), [[MYLA-348]], [[MYLA-349]], [[MYLA-351]], [[MYLA-352]], [[MYLA-354]] (a decision) | | [[MYLA-346]], then [[MYLA-350]] |
-| Later | No tasks yet: #10, #32, #39, #40, #55, #67 | | |
+| 5 Small modules (2026-11-09) | [[MYLA-402]] (#55), [[MYLA-403]] (#67), [[MYLA-404]] (#32) | [[MYLA-396]], [[MYLA-359]] (check time) | |
+| Later | No tasks yet: #10, #39, #40 | | |
 
 A wave's lanes start once the previous wave's pull request is merged. A lane whose task needs nothing may start earlier, while an agent is free: MYLA-327, MYLA-328, MYLA-329, MYLA-335 and MYLA-338 need nothing at all.
 

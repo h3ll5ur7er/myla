@@ -11,3 +11,15 @@ The open follow-ups the standard library waves left ([[Project/Standard-library-
 | 5 Language gaps | [[MYLA-379]] (`==` on `Option`/`Result`, `#derive` on generic types, D173's `IoError` text, `io.copy`'s buffer) | the checker's derive, after MYLA-385 | platform and gaps |
 
 Left for later: [[MYLA-317]] and [[MYLA-368]] (research on the interpreter's and x86-64's speed), [[MYLA-377]] (`std.num` on `std.bigint`: an import cycle and check time), [[MYLA-314]] (the roadmap's umbrella). [[MYLA-311]] is decided (D175: overflow traps where the program is checked, `int` stays `int32`); [[MYLA-395]] implements it in its own pull request after the toolchain fixes.
+
+## Round 3 (2026-11-09)
+
+After #53, #54 and #55, in one pull request with one seed:
+
+| Lane | Tasks |
+| --- | --- |
+| Small modules | [[MYLA-402]] (the TOML writer), [[MYLA-403]] (`std.bench`), [[MYLA-404]] (`std.cache`) |
+| Check time | [[MYLA-396]] (an imported module's `#test` cases unparsed), then [[MYLA-359]] (the implicit modules' check time) |
+| Small fixes | [[MYLA-400]] (the last Option helpers), [[MYLA-332]]'s streaming CSV, [[MYLA-321]]'s page, [[MYLA-362]]'s wasm32 burn test |
+
+Left for later: [[MYLA-397]], [[MYLA-398]], [[MYLA-401]] (language gaps), [[MYLA-399]] (the owner's decision), [[MYLA-377]], and roadmap rows #10, #39 and #40.

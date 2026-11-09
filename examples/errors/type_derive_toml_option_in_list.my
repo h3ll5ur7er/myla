@@ -1,0 +1,17 @@
+//~ type error: cannot derive Toml for struct 'Row': field 'cells' has type '[Option<int32>]', which isn't ToToml and FromToml (TOML has no null: an 'Option' can only be a struct's field, left out when 'None')
+// TOML has no null (MYLA-407): an `Option` field is left out when `None`,
+// but a list has no place for a missing element.
+import std.toml as toml
+
+#derive(Toml)
+struct Row {
+    note: Option<str>,
+    cells: [Option<int>],
+}
+
+fun main() {
+    match toml.decode<Row>("cells = [1]") {
+        Ok(r) => print(r.cells.len())
+        Err(e) => print(f"{e}")
+    }
+}

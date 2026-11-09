@@ -1,0 +1,12 @@
+//~ type error: cannot derive Toml for 'Point': std.toml isn't imported (write 'import std.toml as toml')
+// The derived impls name std.toml's `Toml`, `ToToml` and `FromToml`
+// (MYLA-407), so the program imports it.
+#derive(Toml)
+struct Point {
+    x: int,
+    y: int,
+}
+
+fun main() {
+    print(Point { x: 1, y: 2 }.x)
+}

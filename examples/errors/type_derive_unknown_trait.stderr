@@ -1,5 +1,5 @@
-type error: cannot derive 'Ord': only 'Eq', 'Hash' and 'Json' are derivable
-  --> examples/errors/type_derive_unknown_trait.my:3:9
+type error: cannot derive 'Ord': only 'Eq', 'Hash', 'Json' and 'Toml' are derivable
+  --> examples/errors/type_derive_unknown_trait.my:4:9
   |
-3 | #derive(Ord)
+4 | #derive(Ord)
   |         ^^^

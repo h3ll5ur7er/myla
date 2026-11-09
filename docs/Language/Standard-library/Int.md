@@ -70,7 +70,7 @@ A modulus must be positive: `mulmod`, `powmod` and `modinv` with `m <= 0` are a 
 
 An operator whose result doesn't fit its type is the runtime error `integer overflow` where overflow is checked (`myla run`, `myla test`, `myla build --checked`), and wraps in a plain build (D175, [[Language/Expressions-and-operators]]). `pow`, `abs`, `gcd`, `lcm` and `div_euclid`, which overflow as the operators do, are the same: `2.pow(31)` is an error where overflow traps, and -2147483648 in a plain build. The checked, saturating and overflowing ones decide overflow by comparisons that can't overflow, before they compute; the wrapping ones use the builtin `wrapping_*` methods, so none of them traps.
 
-The builtin `wrapping_add`, `wrapping_sub`, `wrapping_mul` and `wrapping_neg` are how code that means to wrap says so: hashes, random generators, checksums. They are the compiler's, not this module's, so that the standard library's own modules, which don't get the implicit ones, can use them without parsing this module's two thousand cases ([[MYLA-396]]), and so that natively each is the one instruction of the plain operator, inlined where it stands.
+The builtin `wrapping_add`, `wrapping_sub`, `wrapping_mul` and `wrapping_neg` are how code that means to wrap says so: hashes, random generators, checksums. They are the compiler's, not this module's, so that the standard library's own modules, which don't get the implicit ones, can use them without an import (an import costs little since [[MYLA-396]] left an imported module's cases unparsed), and so that natively each is the one instruction of the plain operator, inlined where it stands.
 
 ## How it's written
 

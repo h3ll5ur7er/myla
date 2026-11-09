@@ -582,13 +582,6 @@ fun err(s: Spec, argv: [str]) -> ArgsError {
     unreachable()
 }
 
-fun is(o: Option<str>, v: str) -> bool {
-    return match o {
-        Some(x) => x == v
-        None => false
-    }
-}
-
 fun same(xs: [str], ys: [str]) -> bool {
     if xs.len() != ys.len() {
         return false
@@ -606,10 +599,10 @@ fun same(xs: [str], ys: [str]) -> bool {
 #test
 fun positionals_and_defaults() {
     let a = ok(demo(), ["in.txt"])
-    assert(is(a.get("input"), "in.txt"), "the positional")
+    assert(a.get("input") == Some("in.txt"), "the positional")
     assert(a.get("mode").is_none(), "an optional positional not given")
     assert(a.get_or("mode", "fast") == "fast", "get_or")
-    assert(is(a.get("out"), "a.out"), "the default")
+    assert(a.get("out") == Some("a.out"), "the default")
     assert(same(a.all("out"), ["a.out"]), "all gives the default")
     assert(a.get("level").is_none(), "an option without a default")
     assert(same(a.all("level"), []), "all without a value")
@@ -622,15 +615,15 @@ fun positionals_and_defaults() {
 fun long_and_short_forms() {
     for argv in [["--out", "x", "i"], ["--out=x", "i"], ["-o", "x", "i"], ["-ox", "i"], ["i", "-o", "x"]] {
         let a = ok(demo(), argv)
-        assert(is(a.get("out"), "x"), "the value of out")
-        assert(is(a.get("input"), "i"), "the input")
+        assert(a.get("out") == Some("x"), "the value of out")
+        assert(a.get("input") == Some("i"), "the input")
     }
     let e = ok(demo(), ["--out=", "i"])
-    assert(is(e.get("out"), ""), "an empty value")
+    assert(e.get("out") == Some(""), "an empty value")
     let eq = ok(demo(), ["--out=a=b", "i"])
-    assert(is(eq.get("out"), "a=b"), "the value after the first =")
+    assert(eq.get("out") == Some("a=b"), "the value after the first =")
     let dash = ok(demo(), ["-o", "-v", "i"])
-    assert(is(dash.get("out"), "-v") && !dash.flag("verbose"), "a value is the next argument")
+    assert(dash.get("out") == Some("-v") && !dash.flag("verbose"), "a value is the next argument")
 }
 
 #test
@@ -638,7 +631,7 @@ fun grouped_flags() {
     let a = ok(demo(), ["-vq", "i"])
     assert(a.flag("verbose") && a.flag("quiet"), "-vq")
     let b = ok(demo(), ["-vol2", "i"])
-    assert(b.flag("verbose") && is(b.get("out"), "l2") && b.get("level").is_none(), "-vol2: o takes the rest")
+    assert(b.flag("verbose") && b.get("out") == Some("l2") && b.get("level").is_none(), "-vol2: o takes the rest")
     let c = ok(demo(), ["-vvv", "--verbose", "--dry-run", "i"])
     assert(c.count("verbose") == 4 && c.count("quiet") == 0 && c.flag("dry-run"), "counted flags")
 }
@@ -647,8 +640,8 @@ fun grouped_flags() {
 fun repeated_options_and_many() {
     let a = ok(demo(), ["-o", "1", "i", "--out", "2", "m", "r1", "-o3", "r2"])
     assert(same(a.all("out"), ["1", "2", "3"]), "every value, in order")
-    assert(is(a.get("out"), "3"), "the last one wins")
-    assert(is(a.get("mode"), "m"), "the second positional")
+    assert(a.get("out") == Some("3"), "the last one wins")
+    assert(a.get("mode") == Some("m"), "the second positional")
     assert(same(a.all("rest"), ["r1", "r2"]), "the rest")
     assert(same(a.all("input"), ["i"]), "all of a positional")
 }
@@ -657,12 +650,12 @@ fun repeated_options_and_many() {
 fun double_dash_ends_the_options() {
     let a = ok(demo(), ["-v", "--", "-q", "--out", "-"])
     assert(a.flag("verbose") && !a.flag("quiet"), "options before -- only")
-    assert(is(a.get("input"), "-q") && is(a.get("mode"), "--out"), "positionals after --")
+    assert(a.get("input") == Some("-q") && a.get("mode") == Some("--out"), "positionals after --")
     assert(same(a.all("rest"), ["-"]), "- alone")
     let b = ok(demo(), ["i", "--", "--"])
-    assert(is(b.get("mode"), "--"), "a second -- is a positional")
+    assert(b.get("mode") == Some("--"), "a second -- is a positional")
     let c = ok(demo(), ["-"])
-    assert(is(c.get("input"), "-"), "- is a positional")
+    assert(c.get("input") == Some("-"), "- is a positional")
 }
 
 #test
@@ -704,7 +697,7 @@ fun subcommands() {
     match a.command() {
         Some((name, sub)) => {
             assert(name == "build", "the command's name")
-            assert(sub.flag("release") && is(sub.get("file"), "x.my") && is(sub.get("out"), "x"), "its arguments")
+            assert(sub.flag("release") && sub.get("file") == Some("x.my") && sub.get("out") == Some("x"), "its arguments")
         }
         None => assert(false, "a command"),
     }
@@ -730,7 +723,7 @@ fun help_is_an_error_with_the_text() {
         _ => assert(false, "help"),
     }
     let after = ok(demo(), ["--", "--help"])
-    assert(is(after.get("input"), "--help"), "--help after -- is a positional")
+    assert(after.get("input") == Some("--help"), "--help after -- is a positional")
 }
 
 #test

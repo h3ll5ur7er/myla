@@ -100,39 +100,23 @@ fun shown(m: [str: int]) -> str {
     return sb.build()
 }
 
-// Whether `o` is `Some(v)`; `none` whether it is `None` (an `Option` has
-// no `==`).
-fun holds<T: Eq>(o: Option<T>, v: T) -> bool {
-    return match o {
-        Some(x) => x == v
-        None => false
-    }
-}
-
-fun none<T>(o: Option<T>) -> bool {
-    return match o {
-        Some(x) => false
-        None => true
-    }
-}
-
 #test
 fun map_get() {
     let m = ages()
-    assert(holds(m.get("ann"), 31), "a key it has")
-    assert(none(m.get("cy")), "a key it lacks")
+    assert(m.get("ann") == Some(31), "a key it has")
+    assert(m.get("cy") == None, "a key it lacks")
     var ints: [int: str] = [:]
     ints[7] = "seven"
-    assert(holds(ints.get(7), "seven") && none(ints.get(8)), "an int key")
+    assert(ints.get(7) == Some("seven") && ints.get(8) == None, "an int key")
     let pairs: [(int, str): bool] = [(1, "a"): true]
-    assert(holds(pairs.get((1, "a")), true) && none(pairs.get((1, "b"))), "a tuple key")
+    assert(pairs.get((1, "a")) == Some(true) && pairs.get((1, "b")) == None, "a tuple key")
     let lists: [[int]: int] = [[1, 2]: 3]
-    assert(holds(lists.get([1, 2]), 3) && none(lists.get([2, 1])), "a list key")
+    assert(lists.get([1, 2]) == Some(3) && lists.get([2, 1]) == None, "a list key")
     var gone = ages()
     gone.remove("bob")
-    assert(none(gone.get("bob")), "a removed key")
+    assert(gone.get("bob") == None, "a removed key")
     let empty: [str: int] = [:]
-    assert(none(empty.get("")), "an empty map")
+    assert(empty.get("") == None, "an empty map")
 }
 
 #test

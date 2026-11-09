@@ -1,0 +1,5 @@
+type error: cannot derive Toml for struct 'Edge': field 'ends' has type '(int32, int32)', which isn't ToToml and FromToml (a tuple has no TOML form: make it a struct)
+  --> examples/errors/type_derive_toml_field_not_toml.my:7:1
+  |
+7 | struct Edge {
+  | ^^^^^^^^^^^^^

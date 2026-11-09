@@ -182,6 +182,30 @@ Timed interleaved against the same sources built with the stack convention (7 ru
 - **After**, a removal leaves a tombstone and a gap in the ranks; `keys` and `for` skip the gaps, and an insert compacts the table when the slots used since the last compaction reach 3/4 of it. The program is 1,100× as fast, 2.2× C with Myla's semantics.
 - **Elsewhere:** word frequency, whose map only grows, runs in the same time natively (603 and 605 ms, the median of 9 interleaved runs; 0.6 % more instructions for the next-rank word) and 3× as fast interpreted (8.3 → 2.8 s at 100,000 words), whose map lookups were linear before.
 
+## Progress (2026-11-09)
+
+All thirteen programs after the standard library waves, D175 (#54) and batches 4 and 5 (#55), at d8a6e9a: `benchmarks/results/2026-11-09.json` holds the full results. This container is a 2.1 GHz Xeon where the baseline's was 2.3 GHz, and its C runs up to 3× slower on some programs (Ackermann's 54 → 160 ms), so the table compares each program's ratio to C measured on the same machine, and the instructions callgrind counts, which don't depend on it. Times are the median of 5 runs.
+
+| Benchmark | Baseline, × C with Myla's semantics | Now, × C with Myla's semantics | Now, × idiomatic C | Myla's instructions, baseline → now |
+|---|---:|---:|---:|---:|
+| string build | 1.55 | **0.71** | 1.18 | 1.19× fewer |
+| fannkuch | 1.44 | 1.15 | 1.48 | 1.43× fewer |
+| quicksort | 1.41 | 1.21 | 1.76 | 1.24× fewer |
+| mandelbrot | 4.02 | **1.24** | 1.32 | 2.92× fewer |
+| sieve | 4.93 | **1.35** | 1.55 | 1.73× fewer |
+| binary trees | 2.03 | 1.69 | 1.79 | the same |
+| word frequency | 2.97 | 1.78 | 4.32 | 1.05× fewer |
+| closures | 3.25 | 2.39 | 1.76 | 1.69× fewer |
+| map removal | (added since) | 2.33 | 2.87 | |
+| game of life | 2.90 | 2.98 | 3.63 | 1.18× fewer |
+| fib | 5.02 | 4.16 | 4.27 | 1.16× fewer |
+| n-body | 4.17 | 4.42 | 4.41 | 2.63× fewer |
+| Ackermann | 9.03 | 7.08 | 7.16 | 1.56× fewer |
+
+- **Overall:** against C with Myla's semantics at gcc `-O2`, **2.02×** on the geometric mean of the twelve shared programs (3.06× at the baseline), with 1.47× fewer instructions. Against idiomatic C, 2.46× over all thirteen; against gcc `-O0`, 0.74×: faster than an unoptimizing compiler.
+- **What closed the gap** was the work of 2026-11-03 to 07 more than anything since: floats in xmm registers and a square root ([[MYLA-248]], [[MYLA-249]]: mandelbrot, n-body), packed list elements ([[MYLA-247]]: the sieve's memory 817 → 80 MB), the loops' checks ([[MYLA-251]]) and the string routines ([[MYLA-252]]: building strings is now faster than the C with Myla's semantics). D175 left plain builds as they were (the same binaries' sizes, instructions within a dozen).
+- **Where the gap is:** calls and registers (fib and Ackermann at 4–7× the time, Ackermann at only 2.2× the instructions: the stores and reloads around each call), float code (n-body runs 5.9× gcc's instructions, 88 % of them in `advance`), a small per-cell function that isn't inlined (Game of Life), and memory (binary trees and quicksort at 2–3× C's peak). The owner put the first two aside for now (2026-11-09).
+
 ## How the first round went
 
 The first round (fib, the sieve, binary trees) checked the method and needed two additions to `run.py`: user and system time and page faults, and names for valgrind's addresses. Instruction counts alone hid both large gaps of the round: the sieve's page faults, and binary trees running C's instruction count in 5.7× C's time. The second turned out to be `rep movsq` copying the three-word `Tree` at every match: a microcoded instruction that starts slowly, and which callgrind counts as one. Copying up to 8 words with moves fixed it ([[MYLA-246]]).
