@@ -47,13 +47,16 @@ pub struct CsvError {
     col: int,
 }
 
-impl Format for CsvError {
-    // `line:col: what`, e.g. `2:5: '"' in an unquoted field`.
-    #test(CsvError { kind: CsvErrorKind.BareQuote, line: 2, col: 5 }, "")["2:5: '\"' in an unquoted field"]
-    #test(CsvError { kind: CsvErrorKind.FieldCount, line: 3, col: 1 }, "")["3:1: a record with another number of fields than the header"]
-    #test(CsvError { kind: CsvErrorKind.Io, line: 1, col: 4 }, "")["1:4: the stream failed"]
-    fun format(self, spec: str) -> str {
-        let what = match self.kind {
+impl CsvError {
+    // The reason in words, without the position (D168).
+    #test(CsvError { kind: CsvErrorKind.BareQuote, line: 2, col: 5 })["'\"' in an unquoted field"]
+    #test(CsvError { kind: CsvErrorKind.UnclosedQuote, line: 1, col: 1 })["a quoted field without its closing '\"'"]
+    #test(CsvError { kind: CsvErrorKind.AfterQuote, line: 1, col: 4 })["a delimiter or a line end expected after '\"'"]
+    #test(CsvError { kind: CsvErrorKind.FieldCount, line: 3, col: 1 })["a record with another number of fields than the header"]
+    #test(CsvError { kind: CsvErrorKind.DuplicateName, line: 1, col: 5 })["a name the header has twice"]
+    #test(CsvError { kind: CsvErrorKind.Io, line: 1, col: 4 })["the stream failed"]
+    fun message(self) -> str {
+        return match self.kind {
             BareQuote => "'\"' in an unquoted field"
             UnclosedQuote => "a quoted field without its closing '\"'"
             AfterQuote => "a delimiter or a line end expected after '\"'"
@@ -61,7 +64,17 @@ impl Format for CsvError {
             DuplicateName => "a name the header has twice"
             Io => "the stream failed"
         }
-        return f"{self.line}:{self.col}: {what}"
+    }
+}
+
+impl Format for CsvError {
+    // `line:col: what`, e.g. `2:5: '"' in an unquoted field`: the position,
+    // then `message()`.
+    #test(CsvError { kind: CsvErrorKind.BareQuote, line: 2, col: 5 }, "")["2:5: '\"' in an unquoted field"]
+    #test(CsvError { kind: CsvErrorKind.FieldCount, line: 3, col: 1 }, "")["3:1: a record with another number of fields than the header"]
+    #test(CsvError { kind: CsvErrorKind.Io, line: 1, col: 4 }, "")["1:4: the stream failed"]
+    fun format(self, spec: str) -> str {
+        return f"{self.line}:{self.col}: {self.message()}"
     }
 }
 

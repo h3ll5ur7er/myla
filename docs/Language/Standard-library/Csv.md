@@ -89,16 +89,16 @@ Natively it reads a 50 MB file (359,208 records of nine fields, random ones writ
 
 ## Errors
 
-`CsvError { kind: CsvErrorKind, line: int, col: int }` says what is wrong and where: line and column count from 1, the column in characters, as `std.json`'s errors do. Its `Format` impl writes `line:col: what`, as in the example.
+`CsvError { kind: CsvErrorKind, line: int, col: int }` says what is wrong and where (D168): line and column count from 1, the column in characters, as `std.json`'s errors do. `e.message()` says it in words ([[MYLA-405]]), and its `Format` impl writes `line:col: message`, as in the example.
 
-| `CsvErrorKind` | Meaning |
-| --- | --- |
-| `BareQuote` | A `"` inside a field that doesn't start with one |
-| `UnclosedQuote` | A quoted field still open at the end of the text; the position is its opening quote |
-| `AfterQuote` | Something other than a delimiter or a line end after a quoted field's closing `"` |
-| `FieldCount` | `parse_records`: a record with more fields than the header (at the first extra field) or fewer (at the end of the record) |
-| `DuplicateName` | `parse_records`: a name the header has twice (at the second) |
-| `Io` | A stream reader's stream failed (at the end of what it read); `io_error()` gives the cause |
+| `CsvErrorKind` | Meaning | `message()` |
+| --- | --- | --- |
+| `BareQuote` | A `"` inside a field that doesn't start with one | `'"' in an unquoted field` |
+| `UnclosedQuote` | A quoted field still open at the end of the text; the position is its opening quote | `a quoted field without its closing '"'` |
+| `AfterQuote` | Something other than a delimiter or a line end after a quoted field's closing `"` | `a delimiter or a line end expected after '"'` |
+| `FieldCount` | `parse_records`: a record with more fields than the header (at the first extra field) or fewer (at the end of the record) | `a record with another number of fields than the header` |
+| `DuplicateName` | `parse_records`: a name the header has twice (at the second) | `a name the header has twice` |
+| `Io` | A stream reader's stream failed (at the end of what it read); `io_error()` gives the cause | `the stream failed` |
 
 ## Writing
 
