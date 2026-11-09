@@ -131,7 +131,7 @@ Each of `Read` and `Write` has a method for `[uint8]` and one for `str`. Strings
 | Function | Result |
 | --- | --- |
 | `read_all<R: Read>(r: R) -> Result<[uint8], IoError>` | Everything `r` gives up to its end |
-| `copy<R: Read, W: Write>(r: R, w: W) -> Result<W, IoError>` | Everything `r` gives up to its end written to `w`, which is flushed and given back |
+| `copy<R: Read, W: Write>(r: R, w: W) -> Result<W, IoError>` | Everything `r` gives up to its end written to `w`, 64 KiB at a time, which is flushed and given back |
 
 They take the streams by value, so the caller's `var` doesn't move: a memory stream read by `read_all` is where it was. A descriptor's offset, which the platform keeps, does move. `copy` gives the writer back, which is the way to the bytes of a memory stream it wrote, or to a `BufferedWriter`'s stream.
 
@@ -195,3 +195,5 @@ Natively on x86-64, 50 MB of lines of up to 120 bytes, best of three ([[MYLA-338
 | 1 000 000 `write_str` of 48 bytes into a `BufferedWriter<MemoryStream>` | 143 ms |
 | `copy(fd_stream(0), fd_stream(1))`, to `/dev/null` | 13 ms |
 | `copy` from one memory stream to another | 256 ms |
+
+`copy` reads 64 KiB at a time ([[MYLA-379]]; it was 4 KiB): a 256 MiB file copied by `copy(fs.open(a)?, fs.create(b)?)` into a new file took 88 ms natively, 162 ms with 4 KiB, and 40 ms instead of 56 to `/dev/null` (best of seven; 128 KiB gave 85 and 39, 16 KiB 104 and 42). From one memory stream to another it stays as it was.
