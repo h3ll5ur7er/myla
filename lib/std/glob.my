@@ -21,6 +21,7 @@
 import std.fs as fs
 from std.fs import IoError
 import std.path as path
+import std.list as list_m // `sorted_by`, `dedup`, `join`
 import std.time as time  // for the tests' directory names
 
 // A piece of a pattern component.
@@ -176,7 +177,8 @@ fun is_star(t: Tok) -> bool {
     }
 }
 
-// The non-empty components of `p`, which the slashes separate.
+// The non-empty components of `p`, which the slashes separate: std.str's
+// `split` and a filter, in one pass (`matches` splits every path).
 fun split(p: str) -> [str] {
     var out: [str] = []
     var start = 0
@@ -450,7 +452,9 @@ pub fun glob_in(dir: str, pattern: str) -> Result<[str], IoError> {
     let pat = compile(pattern)
     var g = Globber { dir: dir, pat: pat, out: [] }
     g.expand(0, if pat.absolute { "/" } else { "" })?
-    return Ok(deduped(sorted_paths(g.out)))
+    var out = g.out.sorted_by(path_before)
+    out.dedup()
+    return Ok(out)
 }
 
 // The state of one `glob_in`.
@@ -553,58 +557,13 @@ fun path_before(a: str, b: str) -> bool {
     return a.len() < b.len()
 }
 
-// `ps` sorted by `path_before` (a merge sort).
-fun sorted_paths(ps: [str]) -> [str] {
-    if ps.len() <= 1 {
-        return ps
-    }
-    let h = ps.len() / 2
-    let l = sorted_paths(ps[:h])
-    let r = sorted_paths(ps[h:])
-    var out: [str] = []
-    var a = 0
-    var b = 0
-    while a < l.len() || b < r.len() {
-        if b >= r.len() || (a < l.len() && !path_before(r[b], l[a])) {
-            out.push(l[a])
-            a += 1
-        } else {
-            out.push(r[b])
-            b += 1
-        }
-    }
-    return out
-}
-
-// The sorted `ps` without repeats.
-fun deduped(ps: [str]) -> [str] {
-    var out: [str] = []
-    for p in ps {
-        if out.len() == 0 || out[^1] != p {
-            out.push(p)
-        }
-    }
-    return out
-}
-
 // ---------------------------------------------------------------------------
 // Tests of `walk` and `glob`, on a tree they make under /tmp and remove. The
 // module doesn't import std.test, which every program would import with it.
 
-// The paths, `a, b`, to compare.
-fun shown(ps: [str]) -> str {
-    var sb = StringBuilder()
-    for i in 0..ps.len() {
-        if i > 0 {
-            sb.append(", ")
-        }
-        sb.append(ps[i])
-    }
-    return sb.build()
-}
-
+// The paths `got`, `a, b`, are `want`.
 fun same(got: [str], want: str) {
-    assert(shown(got) == want, f"expected [{want}], got [{shown(got)}]")
+    assert(got.join(", ") == want, f"expected [{want}], got [{got.join(", ")}]")
 }
 
 // A pattern that would take exponential time with naive backtracking.
@@ -682,7 +641,7 @@ fun globs() -> Result<(), IoError> {
                 want.push(p)
             }
         }
-        same(glob_in(root, pat)?, shown(want))
+        same(glob_in(root, pat)?, want.join(", "))
     }
     return Ok(())
 }
