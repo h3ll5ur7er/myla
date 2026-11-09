@@ -16,3 +16,7 @@ The owner decides:
 
 - [ ] The decision, in [[Project/Decisions]]
 - [ ] If B or C: the traits, their implementations, the pages and the tests changed, measured again
+
+## Comments
+
+- 2026-11-09: the owner took the recommendation, B: D177.

@@ -23,3 +23,13 @@ After #53, #54 and #55, in one pull request with one seed:
 | Small fixes | [[MYLA-400]] (the last Option helpers), [[MYLA-332]]'s streaming CSV, [[MYLA-321]]'s page, [[MYLA-362]]'s wasm32 burn test |
 
 Left for later: [[MYLA-397]], [[MYLA-398]], [[MYLA-401]] (language gaps), [[MYLA-399]] (the owner's decision), [[MYLA-377]], and roadmap rows #10, #39 and #40.
+
+## Round 4 (2026-11-09)
+
+After #56, in one pull request with one seed:
+
+| Lane | Tasks |
+| --- | --- |
+| Loading | [[MYLA-359]]'s last box: an implicit module's function bodies parsed only once called, toward 5 ms for a hello world |
+| Streams | [[MYLA-399]] (D177: `Read` and `Write` in bytes only), [[MYLA-405]] (`CsvError.message()`), [[MYLA-397]] (a platform module tested on its own target) |
+| Language | [[MYLA-401]] (a list literal's element type from all its elements), [[MYLA-406]] (a field and a method of the same name), [[MYLA-398]] (a bound naming a module's trait) |
