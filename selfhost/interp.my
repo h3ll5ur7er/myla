@@ -4232,6 +4232,26 @@ impl Interp {
             for x in __fstat(as_int(self.eval(args[0])) as int32) { out.push(Value.VInt(x)) }
             return Value.VList(out)
         }
+        // a string's bytes as a list and back (MYLA-369)
+        if nm == "__str_to_bytes" { return bytes_to_value(__str_to_bytes(as_str(self.eval(args[0])))) }
+        if nm == "__bytes_to_str" {
+            match self.eval(args[0]) {
+                Value.VList(xs) => {
+                    var sb = StringBuilder(xs.len())
+                    for x in xs { sb.append_byte(as_int(x) as uint8) }
+                    return Value.VStr(sb.build())
+                }
+                _ => {}
+            }
+            return Value.VStr("")
+        }
+        if nm == "__path_stat" {
+            let path = as_str(self.eval(args[0]))
+            let follow = as_bool(self.eval(args[1]))
+            var out: [Value] = []
+            for x in __path_stat(path, follow) { out.push(Value.VInt(x)) }
+            return Value.VList(out)
+        }
         if nm == "__spawn_piped" {
             let prog = as_str(self.eval(args[0]))
             var argv: [str] = []
@@ -4327,7 +4347,12 @@ impl Interp {
         if nm == "keys" { return map_keys(self.eval(args[0])) }
         if nm == "chars" { return decode_chars(as_str(self.eval(args[0]))) }
         if nm == "format" { return self.eval_format(args) }
-        if nm == "StringBuilder" { return Value.VSB(empty_bytes()) }
+        if nm == "StringBuilder" {
+            // a capacity (MYLA-369) is evaluated; the interpreter's buffer
+            // grows as a list does
+            for a in args { self.eval(a) }
+            return Value.VSB(empty_bytes())
+        }
         if nm == "append" {
             let p = self.place_of(args[0])
             var piece = as_str(self.eval(args[1]))

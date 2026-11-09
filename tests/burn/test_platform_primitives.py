@@ -220,6 +220,105 @@ fun main() {
 }
 """
 
+# MYLA-378, MYLA-363: a path's stat without opening it, a link followed or
+# not; and `__close`'s errno. The test makes `link` (to f.txt), `dangling`
+# (to nothing) and `sub` (a directory) first.
+PATHS = HELPERS + """from std.process import args
+
+#allow(primitive)
+fun close(fd: int) -> int {
+    __close(fd)
+    return __io_errno()
+}
+
+#allow(primitive)
+fun main() {
+    let dir = args()[1]
+    let f = dir + "/f.txt"
+    let w = __open(f, 2 | 4 | 8, 420)
+    __write(w, "hello")
+    print(close(w))
+    print(close(w))
+    print(close(-1))
+    let st = __path_stat(f, true)
+    print(e(st.len()))
+    print(st[0])
+    print(st[1] & 61440)
+    print(st[2] > 1600000000000000000)
+    print(__fstat(__open(f, 1, 0))[2] == st[2])
+    let l = __path_stat(dir + "/link", false)
+    print(e(l.len()))
+    print(l[1] & 61440)
+    let lf = __path_stat(dir + "/link", true)
+    print(lf[1] & 61440)
+    print(lf[4] == st[4] && lf[3] == st[3])
+    let d = __path_stat(dir + "/sub", false)
+    print(d[1] & 61440)
+    print(d[4] != st[4])
+    print(e(__path_stat(dir + "/dangling", true).len()))
+    print(__path_stat(dir + "/dangling", false)[1] & 61440)
+    print(e(__path_stat(dir + "/missing", false).len()))
+    print(e(__path_stat(dir + "/a\\0b", true).len()))
+    print(e(__path_stat("", true).len()))
+}
+"""
+PATHS_OUT = """0
+9
+9
+5 0
+5
+32768
+true
+true
+5 0
+40960
+32768
+true
+16384
+true
+0 2
+40960
+0 2
+0 22
+0 2
+"""
+
+# MYLA-369: a string's bytes as a list and back in one copy, and a builder
+# with a capacity.
+BYTES = """#allow(primitive)
+fun main() {
+    let b = __str_to_bytes("h\\u{e9}llo")
+    print(b.len())
+    print(b[1])
+    print(__bytes_to_str(b))
+    var more = b
+    more.push(33u8)
+    print(__bytes_to_str(more))
+    print(b.len())
+    let none: [uint8] = []
+    print(__bytes_to_str(none).len())
+    print(__str_to_bytes("").len())
+    let odd: [uint8] = [255u8, 0u8, 97u8]
+    let s = __bytes_to_str(odd)
+    print(s.len())
+    print(s[0])
+    var sb = StringBuilder(100)
+    sb.append("abc")
+    sb.append_byte(100u8)
+    print(sb.build())
+    var grows = StringBuilder(-3)
+    for i in 0..1000 {
+        grows.append("xy")
+    }
+    print(grows.len())
+    var exact = StringBuilder(4)
+    exact.append("abcd")
+    exact.append("e")
+    print(exact.build())
+}
+"""
+BYTES_OUT = "6\n195\nhéllo\nhéllo!\n6\n0\n0\n3\n255\nabcd\n2000\nabcde\n"
+
 PIPES = HELPERS + """fun show(h: [int]) -> str {
     var sb = StringBuilder()
     for x in h {
@@ -407,6 +506,29 @@ class Descriptors(unittest.TestCase):
 
 
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
+class Paths(unittest.TestCase):
+    def test_path_stat_and_close(self):
+        # each run in a directory of its own, the interpreter's and the build's
+        with tempfile.TemporaryDirectory() as a, tempfile.TemporaryDirectory() as b:
+            for d in (a, b):
+                os.symlink("f.txt", os.path.join(d, "link"))
+                os.symlink("nothing", os.path.join(d, "dangling"))
+                os.mkdir(os.path.join(d, "sub"))
+            with tempfile.TemporaryDirectory() as tmp:
+                path = write_program(tmp, PATHS)
+                interp = selfhost_run(path, [a])
+                native = build_and_run_full(Program(path), args=[b], argv0=path)
+            self.assertEqual(interp, (PATHS_OUT, "", 0))
+            self.assertEqual(native, interp)
+
+
+@unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
+class Bytes(unittest.TestCase):
+    def test_str_to_bytes_and_back_and_capacity(self):
+        self.assertEqual(run_both(BYTES), (BYTES_OUT, "", 0))
+
+
+@unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
 class Pipes(unittest.TestCase):
     def test_spawn_piped_reap_try_reap_kill(self):
         self.assertEqual(run_both(PIPES), (PIPES_OUT, "", 0))
@@ -432,8 +554,11 @@ class Warnings(unittest.TestCase):
         "__open": "print(__open(\"/\", 1, 0))",
         "__seek": "print(__seek(0, 0, 1))",
         "__fstat": "print(__fstat(0).len())",
+        "__path_stat": "print(__path_stat(\"/\", true).len())",
         "__spawn_piped": "print(__spawn_piped(\"/bin/true\", [\"true\"], none).len())",
         "__try_reap": "print(__try_reap(1))",
+        "__str_to_bytes": "print(__str_to_bytes(\"ab\").len())",
+        "__bytes_to_str": "print(__bytes_to_str([97u8]))",
     }
 
     def check(self, source: str) -> tuple[str, int]:
@@ -459,6 +584,10 @@ class Warnings(unittest.TestCase):
             "fun main() {\n    print(__seek(0, 0))\n}\n": "__seek() takes",
             "fun main() {\n    print(__random_bytes(\"4\").len())\n}\n": "__random_bytes() takes",
             "fun main() {\n    print(__spawn_piped(\"x\", [\"x\"]).len())\n}\n": "__spawn_piped() takes",
+            "fun main() {\n    print(__path_stat(\"/\").len())\n}\n": "__path_stat() takes (path: str, follow: bool)",
+            "fun main() {\n    print(__path_stat(\"/\", 1).len())\n}\n": "__path_stat() takes",
+            "fun main() {\n    print(__str_to_bytes([1u8]).len())\n}\n": "__str_to_bytes() takes (s: str)",
+            "fun main() {\n    print(__bytes_to_str(\"x\"))\n}\n": "__bytes_to_str() takes (b: [uint8])",
         }
         for src, msg in cases.items():
             with self.subTest(msg):

@@ -474,6 +474,28 @@ pub fun fstat(fd: int) -> [int64] {
     return st
 }
 
+// `__path_stat(path, follow)` (MYLA-378, MYLA-363): `[size, mode, mtime,
+// dev, ino]` of what `path` names, without opening it: the size, mode and
+// time as `__fstat`'s, then the device and the file's number on it, which
+// together tell one file from another. A symbolic link is followed when
+// `follow`, else it is described itself (its mode's type bits 0o120000).
+// `[]` with the errno (ENOENT, a dangling link followed; EINVAL for a NUL
+// in the path).
+pub fun path_stat(path: str, follow: bool) -> [int64] {
+    var st: [int64] = []
+    if nul_in(path) {
+        return st
+    }
+    let out = __alloc(40)
+    let r = os.path_stat(path, follow, out)
+    record(r)
+    if r >= 0 {
+        st = [__load64(out), __load64(out + 8), __load64(out + 16), __load64(out + 24), __load64(out + 32)]
+    }
+    __free(out)
+    return st
+}
+
 // --- entropy (MYLA-336) --------------------------------------------------------
 
 // `__random_bytes(n)`: `n` bytes of the system's entropy (getrandom(2),
@@ -971,10 +993,20 @@ pub fun try_reap(pid: int) -> int {
     return code
 }
 
+// `__close(fd)`: the descriptor closed, its errno recorded (MYLA-378):
+// EBADF for one that isn't open (a negative one too), EIO when the data
+// written couldn't be kept. EINTR is no error: Linux has closed it then,
+// and closing it again could close another file's.
 pub fun close(fd: int) {
-    if fd >= 0 {
-        os.close(fd as int64)
+    if fd < 0 {
+        __set_io_errno(EBADF)
+        return
     }
+    var r = os.close(fd as int64)
+    if r == os.EINTR {
+        r = 0
+    }
+    record(r)
 }
 
 // --- standard input ----------------------------------------------------------
@@ -1702,6 +1734,43 @@ pub fun map_keys_h(cell: int64, slot_size: int64, key_size: int64) -> int64 {
 //
 // A builder's cell holds its length and its capacity in bytes, then its
 // bytes; a builder variable holds its cell, unique when appended to.
+
+// `StringBuilder(n)` (MYLA-369): an empty builder with room for `n` bytes
+// (none for a negative `n`), all the cell has: appends up to that many
+// copy nothing but their own bytes.
+pub fun sb_with_capacity(n: int) -> int64 {
+    var want = n as int64
+    if want < 0 {
+        want = 0
+    }
+    let cell = __alloc(want + 16)
+    __store64(cell, 0)
+    __store64(cell + 8, __load64(cell - 16) - 16)
+    return cell
+}
+
+// `__str_to_bytes(s)` (MYLA-369): the bytes of `s` as a list, in one
+// allocation and one copy.
+pub fun str_to_bytes(s: str) -> [uint8] {
+    let p = __addr_of(s)
+    let n = __load64(p)
+    let cell = __alloc(n + 16)
+    __store64(cell, n)
+    __store64(cell + 8, __load64(cell - 16) - 16)
+    __copy_bytes(cell + 16, p + 8, n)
+    return __list_of(cell)
+}
+
+// `__bytes_to_str(b)` (MYLA-369): the bytes `b` as a string, as they are
+// (they needn't be UTF-8, D164), in one allocation and one copy.
+pub fun bytes_to_str(b: [uint8]) -> str {
+    let p = __list_addr(b)
+    let n = __load64(p)
+    let cell = __alloc(n + 8)
+    __store64(cell, n)
+    __copy_bytes(cell + 8, p + 16, n)
+    return __str_of(cell)
+}
 
 // `append(sb, s)`: `s`'s bytes after the builder's (the builder at the
 // address `holder`). The fast paths call nothing, so their values stay in

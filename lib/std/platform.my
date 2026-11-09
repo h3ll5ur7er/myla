@@ -34,6 +34,7 @@ const SYS_OPEN: int64 = 2
 const SYS_CLOSE: int64 = 3
 const SYS_STAT: int64 = 4
 const SYS_FSTAT: int64 = 5
+const SYS_LSTAT: int64 = 6
 const SYS_POLL: int64 = 7
 const SYS_MMAP: int64 = 9
 const SYS_MUNMAP: int64 = 11
@@ -138,8 +139,9 @@ pub fun write(fd: int64, buf: int64, n: int64) -> int64 {
     return __syscall(SYS_WRITE, fd, buf, n)
 }
 
-pub fun close(fd: int64) {
-    __syscall(SYS_CLOSE, fd, 0, 0)
+// The descriptor `fd` closed: 0, or minus the errno (EBADF, EIO, EINTR).
+pub fun close(fd: int64) -> int64 {
+    return __syscall(SYS_CLOSE, fd, 0, 0)
 }
 
 // The size of the open file `fd`, 0 when it reports none (/proc, a pipe).
@@ -201,6 +203,30 @@ pub fun fd_stat(fd: int64, out: int64) -> int64 {
         __store64(out + 16, __load64(st + 88) * 1000000000 + __load64(st + 96))
     }
     __free(st)
+    return r
+}
+
+// The size, the mode, the modification time, the device and the file's
+// number on it of what `path` names, as five words at `out`, without
+// opening it (MYLA-378): a symbolic link followed when `follow` (stat(2)),
+// else described itself (lstat(2)). 0, or minus the errno.
+pub fun path_stat(path: str, follow: bool, out: int64) -> int64 {
+    let p = c_path(path)
+    let st = __alloc(144)
+    var nr = SYS_LSTAT
+    if follow {
+        nr = SYS_STAT
+    }
+    let r = __syscall(nr, p, st, 0)
+    if r >= 0 {
+        __store64(out, __load64(st + 48))
+        __store64(out + 8, __load64(st + 24) & LOW32)
+        __store64(out + 16, __load64(st + 88) * 1000000000 + __load64(st + 96))
+        __store64(out + 24, __load64(st))
+        __store64(out + 32, __load64(st + 8))
+    }
+    __free(st)
+    __free(p)
     return r
 }
 
