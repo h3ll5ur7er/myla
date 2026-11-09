@@ -187,22 +187,22 @@ fun sum32(xs: [int]) -> int64 {
 }
 
 fun main() {
-    // int8: sign extension, wrapping at the width
+    // int8: sign extension, wrapping at the width (on purpose, D175)
     var a: [int8] = [-128, -1, 0, 1, 127]
     a[1] = a[1] - 1
-    a[4] = a[4] + 1
+    a[4] = a[4].wrapping_add(1)
     a.push(-5)
     print(sum8(a))
     print(a[4])
     print(a.pop())
     // uint8 and uint16: zero extension
     var b: [uint8] = [255, 0, 128]
-    b[0] = b[0] + 1
+    b[0] = b[0].wrapping_add(1)
     b[2] += 1
     print(b[0])
     print(b[2])
     var c: [uint16] = [65535, 1, 2]
-    c[1] += 65535
+    c[1] = c[1].wrapping_add(65535)
     print(sum16(c))
     // int (int32), with compound assignment and growth
     var d: [int] = []

@@ -33,6 +33,8 @@ SUITES = [
     "tests.burn.test_default_params",
     "tests.burn.test_let_else",
     "tests.burn.test_ir_contract",
+    # integer overflow, checked and plain (D175)
+    "tests.burn.test_overflow",
     "tests.burn.test_map_remove",
     # every standard library module's cases through the harness (MYLA-370:
     # on wasm32 too, every case run)

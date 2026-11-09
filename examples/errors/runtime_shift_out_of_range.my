@@ -1,0 +1,12 @@
+//~ runtime error: shift amount out of range
+//~ native: runtime error: shift amount out of range
+//~ checked
+// A shift's count past the width is a runtime error where overflow is
+// checked (D175), as a constant one is a type error; a plain build masks it.
+fun bit(n: int) -> int {
+    return 1 << n
+}
+
+fun main() {
+    print(bit(32))
+}

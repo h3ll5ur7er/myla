@@ -232,7 +232,7 @@ impl CodeGen {
         ] { self.raw(line) }
         // Runtime errors (MYLA-17): the message in x0, the position record
         // the caller passes in x1 (out of memory has none)
-        for label in trap_labels() {
+        for label in trap_labels(self.checked) {
             self.raw(format("{}:", label))
             if label == "__trap_oom" { self.raw("\tmov x1, #0") }
             self.raw(format("\tadrp x0, .Lmsg{}", label))

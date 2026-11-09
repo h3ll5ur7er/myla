@@ -182,7 +182,7 @@ fun many_elements() {
     var x: int64 = 1
     for i in 0..3000 {
         s.insert(x % 1000)
-        x = x * 6364136223846793005 + 1442695040888963407
+        x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407)
         if x < 0 {
             x = -x
         }

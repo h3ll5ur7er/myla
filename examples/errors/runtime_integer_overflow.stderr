@@ -1,0 +1,5 @@
+runtime error: integer overflow
+  --> examples/errors/runtime_integer_overflow.my:10:19
+   |
+10 |         sum = sum + x
+   |               ^^^^^^^

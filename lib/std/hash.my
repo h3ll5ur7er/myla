@@ -421,7 +421,7 @@ pub fun fnv1a32(s: str) -> uint32 {
     let n = s.len()
     var i = 0
     while i < n {
-        h = (h ^ (s[i] as uint32)) * FNV32_PRIME
+        h = (h ^ (s[i] as uint32)).wrapping_mul(FNV32_PRIME)
         i += 1
     }
     return h
@@ -434,7 +434,7 @@ pub fun fnv1a32_bytes(b: [uint8]) -> uint32 {
     let n = b.len()
     var i = 0
     while i < n {
-        h = (h ^ (b[i] as uint32)) * FNV32_PRIME
+        h = (h ^ (b[i] as uint32)).wrapping_mul(FNV32_PRIME)
         i += 1
     }
     return h
@@ -449,7 +449,7 @@ pub fun fnv1a64(s: str) -> uint64 {
     let n = s.len()
     var i = 0
     while i < n {
-        h = (h ^ (s[i] as uint64)) * FNV64_PRIME
+        h = (h ^ (s[i] as uint64)).wrapping_mul(FNV64_PRIME)
         i += 1
     }
     return h
@@ -462,7 +462,7 @@ pub fun fnv1a64_bytes(b: [uint8]) -> uint64 {
     let n = b.len()
     var i = 0
     while i < n {
-        h = (h ^ (b[i] as uint64)) * FNV64_PRIME
+        h = (h ^ (b[i] as uint64)).wrapping_mul(FNV64_PRIME)
         i += 1
     }
     return h

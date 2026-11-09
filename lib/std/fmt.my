@@ -227,7 +227,7 @@ pub fun fmt_int(v: int64, bits: int32, signed: bool, spec: str) -> str {
     var mag = u
     if signed && v < 0 {
         sign = "-"
-        mag = 0u64 - (v as uint64)
+        mag = (v as uint64).wrapping_neg()
     } else if sp.plus {
         sign = "+"
     }

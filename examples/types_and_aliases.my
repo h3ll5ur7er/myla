@@ -3,11 +3,11 @@
 
 typealias Byte = uint8
 
-// uint8 arithmetic wraps modulo 2^8.
+// uint8 arithmetic wrapping modulo 2^8, on purpose (`+` would overflow, D175).
 #test(255u8)[0u8]
 #test(0u8)[1u8]
 fun inc(b: Byte) -> Byte {
-    return b + 1u8
+    return b.wrapping_add(1u8)
 }
 
 // `int` is a built-in alias for `int32`, so the two are interchangeable.

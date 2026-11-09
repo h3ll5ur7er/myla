@@ -1,0 +1,11 @@
+//~ type error: const integer overflow
+//~ span: MAX + 1
+// A const whose value doesn't fit its type is caught while folding, as a
+// division by zero is (D175): it has no run to trap in.
+const MAX: int32 = 2147483647
+const PAST: int32 = MAX + 1
+
+#main
+fun main() {
+    print(PAST)
+}

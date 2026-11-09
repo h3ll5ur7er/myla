@@ -105,7 +105,8 @@ pub fun parse_value(digits: str, base: int64) -> int64 {
     var v: int64 = 0
     for ch in digits.chars() {
         let dv = digit_value(ch as int32)
-        v = v * base + (dv as int64)
+        // wraps on purpose: a uint64 literal past the int64 maximum is its bits
+        v = v.wrapping_mul(base).wrapping_add(dv as int64)
     }
     return v
 }

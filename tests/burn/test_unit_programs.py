@@ -20,6 +20,12 @@ from tests.burn._tools import STDLIB_ROOT, selfhost_tool
 _REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 _DATA = os.path.join(_REPO, "tests", "burn", "data", "unit_programs.json")
 
+# The programs whose meaning a later decision changed: these wrap a sized
+# integer, as the Python interpreter did; where overflow is checked (D175) it
+# is the runtime error `integer overflow`, so interpreted they fail there,
+# and natively, built plain, they still print what was recorded.
+_OVERFLOWS = ["var b: int8 = 127i8\n    b = b + 1i8\n", "var b: uint8 = 255u8\n    b = b + 1u8\n"]
+
 
 def _programs() -> list[dict]:
     with open(_DATA, encoding="utf-8") as fh:
@@ -49,6 +55,10 @@ class TestUnitPrograms(unittest.TestCase):
                         self.assertEqual(built.returncode, 0, built.stderr)
                         proc = subprocess.run([binary, *args], capture_output=True, text=True, timeout=60,
                                               env={**os.environ, "MYLA_THREADS": "1"})
+                    if interpreted and any(o in prog["source"] for o in _OVERFLOWS):
+                        self.assertEqual((proc.stdout, proc.returncode), ("", 1))
+                        self.assertIn("runtime error: integer overflow", proc.stderr)
+                        continue
                     self.assertEqual(proc.stdout, prog["stdout"])
                     if "runtime_error" in prog:
                         self.assertNotEqual(proc.returncode, 0)

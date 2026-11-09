@@ -10,7 +10,7 @@ Until the Python toolchain was retired (D101, [[MYLA-219]]), the Python interpre
 
 | Myla | `Value` |
 | --- | --- |
-| integers | `VInt(int64)`, wrapped to the type's width after every operation |
+| integers | `VInt(int64)`, in the type's width after every operation: an operation whose result doesn't fit is the runtime error `integer overflow`, a shift's count past the width `shift amount out of range` (D175; `add_overflows`, `sub_overflows` and `mul_overflows` of [[selfhost/checker.my]], with the result already computed; the interpreter's own arithmetic through the wrapping methods, so it can't overflow where it runs interpreted itself); `wrapping_*` wraps |
 | `char` | `VChar(int64)`, the code point |
 | floats | `VFloat(float64)`; `float32` results are rounded to single precision |
 | `bool`, `str` | `VBool`, `VStr` (a host `str`: bytes) |

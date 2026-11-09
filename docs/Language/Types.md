@@ -8,8 +8,8 @@ Every expression has a type known before the program runs. Types are resolved by
 
 | Type | Values | Notes |
 | --- | --- | --- |
-| `int8` `int16` `int32` `int64` | two's-complement signed | Arithmetic wraps at the width |
-| `uint8` `uint16` `uint32` `uint64` | unsigned | Arithmetic wraps modulo 2^width; printed without sign |
+| `int8` `int16` `int32` `int64` | two's-complement signed | Overflow is an error where it is checked, else it wraps at the width (D175) |
+| `uint8` `uint16` `uint32` `uint64` | unsigned | Overflow is an error where it is checked, else it wraps modulo 2^width (D175); printed without sign |
 | `int` | alias of `int32` | The default for integer literals |
 | `float32` `float64` | IEEE-754 | `float` is an alias of `float64`, the default for float literals (D102) |
 | `char` | a Unicode scalar (0…0x10FFFF, no surrogates) | Compares with `<`; `c - d` is an `int32`, `c + n` and `c - n` with an `int32` are a `char` ([[Language/Expressions-and-operators#typing-rules]]) |

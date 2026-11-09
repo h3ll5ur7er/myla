@@ -160,7 +160,7 @@ fun round_trips() {
         assert(decodes_to(base64_url_decode(base64_url_encode(b, false)), b), f"base64url of {b.len()} bytes")
         let text = base64_url_encode(b, false)
         assert(text.len() == (b.len() * 4 + 2) / 3, f"unpadded length for {b.len()} bytes")
-        x = x * 1664525u32 + 1013904223u32
+        x = x.wrapping_mul(1664525u32).wrapping_add(1013904223u32)
         b.push((x >> 24u32) as uint8)
     }
 }

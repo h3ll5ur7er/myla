@@ -198,7 +198,8 @@ def saturate(w: Width, v: int) -> int:
 def cases_for(w: Width, method: str) -> list[str]:
     S = w.signed
     if method == "abs":
-        return [case(w, [v], lit(w, w.wrap(abs(v))), "MIN, which wraps" if v == w.min else "") for v in unary(w)]
+        return [case(w, [v], lit(w, abs(v)) if w.fits(abs(v)) else 'panic("integer overflow")', "MIN, which overflows" if v == w.min else "")
+                for v in unary(w)]
     if method == "signum":
         return [case(w, [v], lit(w, (v > 0) - (v < 0))) for v in unary(w)]
     if method in ("min", "max"):
@@ -217,7 +218,9 @@ def cases_for(w: Width, method: str) -> list[str]:
         out = []
         for base, e in pow_cases(w):
             exact = base ** e
-            if method in ("pow", "wrapping_pow"):
+            if method == "pow":
+                expected = lit(w, exact) if w.fits(exact) else 'panic("integer overflow")'
+            elif method == "wrapping_pow":
                 expected = lit(w, w.wrap(exact))
             elif method == "checked_pow":
                 expected = opt(w, exact if w.fits(exact) else None)
@@ -225,11 +228,11 @@ def cases_for(w: Width, method: str) -> list[str]:
                 expected = lit(w, saturate(w, exact))
             else:
                 expected = pair(w, w.wrap(exact), not w.fits(exact))
-            label = "wraps" if not w.fits(exact) and method in ("pow", "wrapping_pow") else ""
+            label = ("wraps" if method == "wrapping_pow" else "overflows" if method == "pow" else "") if not w.fits(exact) else ""
             out.append(f"    #test({lit(w, base, receiver=True)}, {e})[{expected}]" + (f" // {label}" if label else ""))
         return out
     if method == "gcd":
-        return [case(w, [a, b], lit(w, w.wrap(gcd(a, b))), "wraps" if not w.fits(gcd(a, b)) else "")
+        return [case(w, [a, b], lit(w, gcd(a, b)) if w.fits(gcd(a, b)) else 'panic("integer overflow")', "overflows" if not w.fits(gcd(a, b)) else "")
                 for a, b in pairs(w, GCD_SPEC)]
     if method == "lcm":
         out = []
@@ -244,9 +247,9 @@ def cases_for(w: Width, method: str) -> list[str]:
                 continue
             r = a % abs(b)
             q = (a - r) // b
-            v = w.wrap(q) if method == "div_euclid" else r
-            label = "wraps, as / does" if method == "div_euclid" and not w.fits(q) else ""
-            out.append(case(w, [a, b], lit(w, v), label))
+            over = method == "div_euclid" and not w.fits(q)
+            label = "overflows, as / does" if over else ""
+            out.append(case(w, [a, b], 'panic("integer overflow")' if over else lit(w, q if method == "div_euclid" else r), label))
         return out
     ops = {"add": (add, ADD_SPEC, "+"), "sub": (sub, SUB_SPEC, "-"), "mul": (mul, MUL_SPEC, "*")}
     for kind in ("checked", "wrapping", "saturating", "overflowing"):
@@ -368,8 +371,8 @@ def methods(w: Width) -> list[tuple[str, str, str]]:
         m.append((name, comment, code))
 
     if S:
-        add_method("abs", "The absolute value. The minimum has none that fits: its `abs` is the\n"
-                   "minimum again, as `-` wraps it (`checked_abs` says so).",
+        add_method("abs", "The absolute value. The minimum has none that fits: its `abs` overflows,\n"
+                   "as `-` does (`checked_abs` gives `None`).",
                    f"fun abs(self) -> {T} {{\n    return if self < 0 {{ -self }} else {{ self }}\n}}")
         add_method("signum", "-1, 0 or 1, the sign of the number.",
                    f"fun signum(self) -> {T} {{\n    return if self > 0 {{ 1 }} else if self < 0 {{ -1 }} else {{ 0 }}\n}}")
@@ -384,24 +387,24 @@ def methods(w: Width) -> list[tuple[str, str, str]]:
                f"    }}\n"
                f"    return if self < lo {{ lo }} else if self > hi {{ hi }} else {{ self }}\n}}")
     add_method("pow", "The number to the power `exp`, multiplied as `*` does: past the width\n"
-               "it wraps today (D4).",
+               "it overflows (D175).",
                pow_code(T, "pow", "acc * base", "base * base", f"{T}"))
     add_method("gcd", "The greatest common divisor, never negative but for a result of 2^(bits - 1),\n"
-               "which wraps to the minimum (`MIN.gcd(0)`); `0.gcd(0)` is 0." if S else
+               "which overflows (`MIN.gcd(0)`); `0.gcd(0)` is 0." if S else
                "The greatest common divisor; `0.gcd(0)` is 0.",
                f"fun gcd(self, other: {T}) -> {T} {{\n"
                f"    var a = self\n    var b = other\n"
                f"    while b != 0 {{\n        let r = a % b\n        a = b\n        b = r\n    }}\n"
                f"    return {'a.abs()' if S else 'a'}\n}}")
     add_method("lcm", "The least common multiple" + (", never negative" if S else "") +
-               "; 0 if either is 0. Past the width it wraps\nas `*` does.",
+               "; 0 if either is 0. Past the width it overflows\nas `*` does.",
                f"fun lcm(self, other: {T}) -> {T} {{\n"
                f"    if self == 0 || other == 0 {{\n        return 0\n    }}\n"
                f"    return {'(self / self.gcd(other) * other).abs()' if S else 'self / self.gcd(other) * other'}\n}}")
     if S:
         add_method("div_euclid", "The quotient of Euclidean division: the `q` with `self == q * other + r`\n"
                    "and `0 <= r < |other|`. Division by zero is a runtime error; `MIN.div_euclid(-1)`\n"
-                   "wraps to `MIN`, as `/` does.",
+                   "overflows, as `/` does.",
                    f"fun div_euclid(self, other: {T}) -> {T} {{\n"
                    f"    let q = self / other\n"
                    f"    if self % other < 0 {{\n"
@@ -434,7 +437,7 @@ def methods(w: Width) -> list[tuple[str, str, str]]:
             "    var x = v - ((v >> 1) & 0x5555555555555555)\n"
             "    x = (x & 0x3333333333333333) + ((x >> 2) & 0x3333333333333333)\n"
             "    x = (x + (x >> 4)) & 0x0F0F0F0F0F0F0F0F\n"
-            "    return ((x * 0x0101010101010101) >> 56) as int\n}")
+            "    return (x.wrapping_mul(0x0101010101010101) >> 56) as int\n}")
     add_method("count_ones", f"The number of bits set{neg_note}.",
                f"fun count_ones(self) -> int {{\n"
                f"    let v: uint64 = {bits64}\n" + swar)
@@ -454,7 +457,7 @@ def methods(w: Width) -> list[tuple[str, str, str]]:
                f"    let b: uint64 = {bits64}\n"
                f"    // the bits below the lowest one set (all of them for 0), counted as\n"
                f"    // `count_ones` counts them: written out, as a method isn't inlined\n"
-               f"    let v = ((b & (0 - b)) - 1){mask}\n" + swar)
+               f"    let v = (b & b.wrapping_neg()).wrapping_sub(1){mask}\n" + swar)
 
     # checked
     for op, sym in (("add", "+"), ("sub", "-"), ("mul", "*")):
@@ -487,14 +490,10 @@ def methods(w: Width) -> list[tuple[str, str, str]]:
                f"        if e > 0 {{\n            base = base.checked_mul(base)?\n        }}\n"
                f"    }}\n    return Some(acc)\n}}")
 
-    # wrapping
-    for op, sym in (("add", "+"), ("sub", "-"), ("mul", "*")):
-        add_method(f"wrapping_{op}", f"`self {sym} other` modulo 2^{w.bits}.",
-                   f"fun wrapping_{op}(self, other: {T}) -> {T} {{\n    return self {sym} other\n}}")
-    add_method("wrapping_neg", f"`-self` modulo 2^{w.bits}" + (": the minimum's is the minimum." if S else "."),
-               f"fun wrapping_neg(self) -> {T} {{\n    return {'-self' if S else '0 - self'}\n}}")
+    # wrapping: `wrapping_add`, `wrapping_sub`, `wrapping_mul` and `wrapping_neg`
+    # are the language's builtin methods (D175), one instruction natively
     add_method("wrapping_pow", f"The number to the power `exp`, modulo 2^{w.bits}.",
-               pow_code(T, "wrapping_pow", "acc.wrapping_mul(base)", "base.wrapping_mul(base)", T))
+               pow_code(T, "wrapping_pow", WRAP["mul"]("acc", "base"), WRAP["mul"]("base", "base"), T))
 
     # saturating
     if S:
@@ -518,10 +517,10 @@ def methods(w: Width) -> list[tuple[str, str, str]]:
     for op, sym in (("add", "+"), ("sub", "-"), ("mul", "*")):
         add_method(f"overflowing_{op}", f"`self {sym} other` modulo 2^{w.bits}, and whether it didn't fit.",
                    f"fun overflowing_{op}(self, other: {T}) -> ({T}, bool) {{\n"
-                   f"    return (self.wrapping_{op}(other), {op}_overflows_{w.suffix}(self, other))\n}}")
+                   f"    return ({WRAP[op]('self', 'other')}, {op}_overflows_{w.suffix}(self, other))\n}}")
     add_method("overflowing_neg", f"`-self` modulo 2^{w.bits}, and whether it didn't fit.",
                f"fun overflowing_neg(self) -> ({T}, bool) {{\n"
-               f"    return (self.wrapping_neg(), {'self == ' + MIN if S else 'self != 0'})\n}}")
+               f"    return ({WRAP['neg']('self', '')}, {'self == ' + MIN if S else 'self != 0'})\n}}")
     add_method("overflowing_pow", f"The number to the power `exp` modulo 2^{w.bits}, and whether it didn't fit.",
                f"fun overflowing_pow(self, exp: uint32) -> ({T}, bool) {{\n"
                f"    let over = match self.checked_pow(exp) {{\n"
@@ -575,6 +574,16 @@ def methods(w: Width) -> list[tuple[str, str, str]]:
                f"        t0 = t1\n        t1 = t2\n    }}\n"
                f"    return if r0 == 1 {{ Some(t0) }} else {{ None }}\n}}")
     return m
+
+
+# The wrapping operations as the generated code writes them: the builtin
+# methods (D175).
+WRAP = {
+    "add": lambda a, b: f"{a}.wrapping_add({b})",
+    "sub": lambda a, b: f"{a}.wrapping_sub({b})",
+    "mul": lambda a, b: f"{a}.wrapping_mul({b})",
+    "neg": lambda a, b: f"{a}.wrapping_neg()",
+}
 
 
 def pow_code(T: str, name: str, mul_acc: str, mul_base: str, ty: str) -> str:
@@ -633,17 +642,19 @@ HEADER = """\
 // - `abs` and `signum` (signed widths), `min`, `max`, `clamp`, `pow`, `gcd`,
 //   `lcm`, `div_euclid` and `rem_euclid` (never negative);
 // - `count_ones`, `leading_zeros` and `trailing_zeros`, of the bits;
-// - `checked_*` (an `Option`), `wrapping_*`, `saturating_*` and
-//   `overflowing_*` (the result and whether it overflowed) of add, sub, mul and
-//   pow, `checked_div`, `checked_rem`, `checked_neg`, `checked_abs`,
-//   `wrapping_neg` and `overflowing_neg`;
+// - `checked_*` (an `Option`), `saturating_*` and `overflowing_*` (the result
+//   and whether it overflowed) of add, sub, mul and pow, `wrapping_pow`,
+//   `checked_div`, `checked_rem`, `checked_neg`, `checked_abs` and
+//   `overflowing_neg`;
 // - `mulmod`, `powmod` and `modinv`, computed without overflow at every width.
 //
-// The plain methods (`pow`, `abs`, `lcm`) overflow as the operators do,
-// wrapping today (D4). The `wrapping_*` methods are the one place that relies on
-// the operators wrapping: if MYLA-311 makes them trap, those methods change and
-// the rest stays, since the checked, saturating and overflowing ones decide
-// overflow before they compute, by comparisons that can't overflow.
+// `wrapping_add`, `wrapping_sub`, `wrapping_mul` and `wrapping_neg` are the
+// language's builtin methods (D175), one instruction natively, so that any
+// module can wrap without importing this one. The plain methods (`pow`, `abs`,
+// `gcd`, `lcm`, `div_euclid`) overflow as the operators do: a runtime error
+// where overflow traps (`myla run`, `myla test`, `--checked`), wrapping in a
+// plain build. The checked, saturating and overflowing ones decide overflow
+// before they compute, by comparisons that can't overflow.
 //
 // Imported into every program by MYLA-320; until then, `import std.int`.
 // It imports nothing.
@@ -724,8 +735,10 @@ fun kinds_agree() {
             }
             if b != 0 {
                 let r = a.rem_euclid(b)
-                holds(r >= 0 && (r < b || r < -b || b == -9223372036854775807 - 1), "rem_euclid's range")
-                holds(a.div_euclid(b).wrapping_mul(b).wrapping_add(r) == a, "q * b + r")
+                holds(r >= 0 && (b == -9223372036854775807 - 1 || r < b || r < -b), "rem_euclid's range")
+                if !(a == MIN_I64 && b == -1) {
+                    holds(a.div_euclid(b).wrapping_mul(b).wrapping_add(r) == a, "q * b + r")
+                }
             }
         }
     }

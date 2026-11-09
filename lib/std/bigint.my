@@ -141,14 +141,14 @@ fun mag_sub(a: [uint32], b: [uint32]) -> [uint32] {
     for i in 0..nb {
         let x = a[i] as uint64
         let y = b[i] as uint64 + borrow
-        out.push((x - y) as uint32)
+        out.push(x.wrapping_sub(y) as uint32)
         borrow = if x < y { 1 } else { 0 }
     }
     var i = nb
     let na = a.len()
     while i < na {
         let x = a[i] as uint64
-        out.push((x - borrow) as uint32)
+        out.push(x.wrapping_sub(borrow) as uint32)
         borrow = if x < borrow { 1 } else { 0 }
         i += 1
     }
@@ -431,12 +431,12 @@ fun div_knuth(u: [uint32], v: [uint32]) -> ([uint32], [uint32]) {
             carry = p >> 32
             let x = un[i + j] as uint64
             let y = (p & MASK) + borrow
-            un[i + j] = (x - y) as uint32
+            un[i + j] = x.wrapping_sub(y) as uint32
             borrow = if x < y { 1 } else { 0 }
         }
         let x = un[j + n] as uint64
         let y = carry + borrow
-        un[j + n] = (x - y) as uint32
+        un[j + n] = x.wrapping_sub(y) as uint32
         if x < y {
             // qhat was one too large: add vn back
             qhat -= 1
@@ -951,7 +951,7 @@ pub fun zero() -> BigInt {
 #test(-9223372036854775807i64 - 1)[BigInt { negative: true, mag: [0u32, 2147483648u32] }]
 pub fun from_int(n: int64) -> BigInt {
     if n < 0 {
-        return make(true, mag_of((0 - n) as uint64))
+        return make(true, mag_of((n as uint64).wrapping_neg()))
     }
     return make(false, mag_of(n as uint64))
 }
@@ -1128,7 +1128,7 @@ impl BigInt {
             if u > 9223372036854775808 {
                 return None
             }
-            return Some((0 - u) as int64)
+            return Some(u.wrapping_neg() as int64)
         }
         if u > 9223372036854775807 {
             return None

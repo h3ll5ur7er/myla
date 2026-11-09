@@ -41,7 +41,7 @@ A run reports up to 20 errors: after a syntax error the parser goes on at the ne
 | --- | --- |
 | `myla run <file> [args…]` | Load modules, type-check, interpret |
 | `myla test <file>` | Run every `#test(args)[expected]` case; prints `PASS`/`FAIL` per case and exits 1 on a failure |
-| `myla build <file> [-o out] [-g] [--target t]` | Compile to a static ELF for this machine (`a.out` by default) through `as` and `ld`; `-g` adds DWARF debug information for gdb: line table, variables and types ([[Development/Debugging]], x86-64 only). `--target x86_64-linux` or `aarch64-linux` builds for the other machine (clang, `ld.lld`), `--target wasm32-wasi` a WebAssembly module (clang, `wasm-ld`), run with `node tools/wasm/run.mjs prog.wasm` ([[Architecture/Native-backend]]) |
+| `myla build <file> [-o out] [-g] [--checked] [--target t]` | Compile to a static ELF for this machine (`a.out` by default) through `as` and `ld`; `-g` adds DWARF debug information for gdb: line table, variables and types ([[Development/Debugging]], x86-64 only); `--checked` makes integer overflow the runtime error `integer overflow`, as `myla run` and `myla test` have it, where a plain build wraps (D175). `--target x86_64-linux` or `aarch64-linux` builds for the other machine (clang, `ld.lld`), `--target wasm32-wasi` a WebAssembly module (clang, `wasm-ld`), run with `node tools/wasm/run.mjs prog.wasm` ([[Architecture/Native-backend]]) |
 | `myla check <file>` | Type-check only, printing any warnings (D95), then `ok` |
 | `myla repl` | The interactive interpreter ([[MYLA-82]]); on a terminal its lines are edited, with a history ([[Language/Standard-library/Term#editing-a-line]]) |
 

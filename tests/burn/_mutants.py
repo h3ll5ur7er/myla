@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import os
 
-from tests.burn._golden import golden, recorded_examples
+from tests.burn._golden import answered_or_recorded, golden, recorded_examples
 
 _REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir))
 
@@ -99,8 +99,9 @@ def mutants() -> list[tuple[str, str, str]]:
     """(name, source, the first error's message) for every mutant."""
     out = []
     for path in recorded_examples():
-        with open(path, encoding="utf-8") as fh:
+        edits, source = answered_or_recorded(path, _example_edits)
+        with open(source, encoding="utf-8") as fh:
             src = fh.read()
-        for name, edit, where, first in _example_edits(path):
+        for name, edit, where, first in edits:
             out.append((name, _mutate(src, edit, where), first))
     return out

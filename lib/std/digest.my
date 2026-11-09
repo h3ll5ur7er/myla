@@ -435,141 +435,141 @@ impl Md5 {
         // each step: a += F(b, c, d) + K[i] + M[g]; a = rotl(a, s) + b, the
         // roles moving on by one
         // round 1
-        a = a + (d ^ (b & (c ^ d))) + 0xd76aa478u32 + m0
-        t = a >> 25u32; a = ((a << 7u32) | t) + b
-        d = d + (c ^ (a & (b ^ c))) + 0xe8c7b756u32 + m1
-        t = d >> 20u32; d = ((d << 12u32) | t) + a
-        c = c + (b ^ (d & (a ^ b))) + 0x242070dbu32 + m2
-        t = c >> 15u32; c = ((c << 17u32) | t) + d
-        b = b + (a ^ (c & (d ^ a))) + 0xc1bdceeeu32 + m3
-        t = b >> 10u32; b = ((b << 22u32) | t) + c
-        a = a + (d ^ (b & (c ^ d))) + 0xf57c0fafu32 + m4
-        t = a >> 25u32; a = ((a << 7u32) | t) + b
-        d = d + (c ^ (a & (b ^ c))) + 0x4787c62au32 + m5
-        t = d >> 20u32; d = ((d << 12u32) | t) + a
-        c = c + (b ^ (d & (a ^ b))) + 0xa8304613u32 + m6
-        t = c >> 15u32; c = ((c << 17u32) | t) + d
-        b = b + (a ^ (c & (d ^ a))) + 0xfd469501u32 + m7
-        t = b >> 10u32; b = ((b << 22u32) | t) + c
-        a = a + (d ^ (b & (c ^ d))) + 0x698098d8u32 + m8
-        t = a >> 25u32; a = ((a << 7u32) | t) + b
-        d = d + (c ^ (a & (b ^ c))) + 0x8b44f7afu32 + m9
-        t = d >> 20u32; d = ((d << 12u32) | t) + a
-        c = c + (b ^ (d & (a ^ b))) + 0xffff5bb1u32 + m10
-        t = c >> 15u32; c = ((c << 17u32) | t) + d
-        b = b + (a ^ (c & (d ^ a))) + 0x895cd7beu32 + m11
-        t = b >> 10u32; b = ((b << 22u32) | t) + c
-        a = a + (d ^ (b & (c ^ d))) + 0x6b901122u32 + m12
-        t = a >> 25u32; a = ((a << 7u32) | t) + b
-        d = d + (c ^ (a & (b ^ c))) + 0xfd987193u32 + m13
-        t = d >> 20u32; d = ((d << 12u32) | t) + a
-        c = c + (b ^ (d & (a ^ b))) + 0xa679438eu32 + m14
-        t = c >> 15u32; c = ((c << 17u32) | t) + d
-        b = b + (a ^ (c & (d ^ a))) + 0x49b40821u32 + m15
-        t = b >> 10u32; b = ((b << 22u32) | t) + c
+        a = a.wrapping_add(d ^ (b & (c ^ d))).wrapping_add(0xd76aa478u32).wrapping_add(m0)
+        t = a >> 25u32; a = ((a << 7u32) | t).wrapping_add(b)
+        d = d.wrapping_add(c ^ (a & (b ^ c))).wrapping_add(0xe8c7b756u32).wrapping_add(m1)
+        t = d >> 20u32; d = ((d << 12u32) | t).wrapping_add(a)
+        c = c.wrapping_add(b ^ (d & (a ^ b))).wrapping_add(0x242070dbu32).wrapping_add(m2)
+        t = c >> 15u32; c = ((c << 17u32) | t).wrapping_add(d)
+        b = b.wrapping_add(a ^ (c & (d ^ a))).wrapping_add(0xc1bdceeeu32).wrapping_add(m3)
+        t = b >> 10u32; b = ((b << 22u32) | t).wrapping_add(c)
+        a = a.wrapping_add(d ^ (b & (c ^ d))).wrapping_add(0xf57c0fafu32).wrapping_add(m4)
+        t = a >> 25u32; a = ((a << 7u32) | t).wrapping_add(b)
+        d = d.wrapping_add(c ^ (a & (b ^ c))).wrapping_add(0x4787c62au32).wrapping_add(m5)
+        t = d >> 20u32; d = ((d << 12u32) | t).wrapping_add(a)
+        c = c.wrapping_add(b ^ (d & (a ^ b))).wrapping_add(0xa8304613u32).wrapping_add(m6)
+        t = c >> 15u32; c = ((c << 17u32) | t).wrapping_add(d)
+        b = b.wrapping_add(a ^ (c & (d ^ a))).wrapping_add(0xfd469501u32).wrapping_add(m7)
+        t = b >> 10u32; b = ((b << 22u32) | t).wrapping_add(c)
+        a = a.wrapping_add(d ^ (b & (c ^ d))).wrapping_add(0x698098d8u32).wrapping_add(m8)
+        t = a >> 25u32; a = ((a << 7u32) | t).wrapping_add(b)
+        d = d.wrapping_add(c ^ (a & (b ^ c))).wrapping_add(0x8b44f7afu32).wrapping_add(m9)
+        t = d >> 20u32; d = ((d << 12u32) | t).wrapping_add(a)
+        c = c.wrapping_add(b ^ (d & (a ^ b))).wrapping_add(0xffff5bb1u32).wrapping_add(m10)
+        t = c >> 15u32; c = ((c << 17u32) | t).wrapping_add(d)
+        b = b.wrapping_add(a ^ (c & (d ^ a))).wrapping_add(0x895cd7beu32).wrapping_add(m11)
+        t = b >> 10u32; b = ((b << 22u32) | t).wrapping_add(c)
+        a = a.wrapping_add(d ^ (b & (c ^ d))).wrapping_add(0x6b901122u32).wrapping_add(m12)
+        t = a >> 25u32; a = ((a << 7u32) | t).wrapping_add(b)
+        d = d.wrapping_add(c ^ (a & (b ^ c))).wrapping_add(0xfd987193u32).wrapping_add(m13)
+        t = d >> 20u32; d = ((d << 12u32) | t).wrapping_add(a)
+        c = c.wrapping_add(b ^ (d & (a ^ b))).wrapping_add(0xa679438eu32).wrapping_add(m14)
+        t = c >> 15u32; c = ((c << 17u32) | t).wrapping_add(d)
+        b = b.wrapping_add(a ^ (c & (d ^ a))).wrapping_add(0x49b40821u32).wrapping_add(m15)
+        t = b >> 10u32; b = ((b << 22u32) | t).wrapping_add(c)
         // round 2
-        a = a + (c ^ (d & (b ^ c))) + 0xf61e2562u32 + m1
-        t = a >> 27u32; a = ((a << 5u32) | t) + b
-        d = d + (b ^ (c & (a ^ b))) + 0xc040b340u32 + m6
-        t = d >> 23u32; d = ((d << 9u32) | t) + a
-        c = c + (a ^ (b & (d ^ a))) + 0x265e5a51u32 + m11
-        t = c >> 18u32; c = ((c << 14u32) | t) + d
-        b = b + (d ^ (a & (c ^ d))) + 0xe9b6c7aau32 + m0
-        t = b >> 12u32; b = ((b << 20u32) | t) + c
-        a = a + (c ^ (d & (b ^ c))) + 0xd62f105du32 + m5
-        t = a >> 27u32; a = ((a << 5u32) | t) + b
-        d = d + (b ^ (c & (a ^ b))) + 0x02441453u32 + m10
-        t = d >> 23u32; d = ((d << 9u32) | t) + a
-        c = c + (a ^ (b & (d ^ a))) + 0xd8a1e681u32 + m15
-        t = c >> 18u32; c = ((c << 14u32) | t) + d
-        b = b + (d ^ (a & (c ^ d))) + 0xe7d3fbc8u32 + m4
-        t = b >> 12u32; b = ((b << 20u32) | t) + c
-        a = a + (c ^ (d & (b ^ c))) + 0x21e1cde6u32 + m9
-        t = a >> 27u32; a = ((a << 5u32) | t) + b
-        d = d + (b ^ (c & (a ^ b))) + 0xc33707d6u32 + m14
-        t = d >> 23u32; d = ((d << 9u32) | t) + a
-        c = c + (a ^ (b & (d ^ a))) + 0xf4d50d87u32 + m3
-        t = c >> 18u32; c = ((c << 14u32) | t) + d
-        b = b + (d ^ (a & (c ^ d))) + 0x455a14edu32 + m8
-        t = b >> 12u32; b = ((b << 20u32) | t) + c
-        a = a + (c ^ (d & (b ^ c))) + 0xa9e3e905u32 + m13
-        t = a >> 27u32; a = ((a << 5u32) | t) + b
-        d = d + (b ^ (c & (a ^ b))) + 0xfcefa3f8u32 + m2
-        t = d >> 23u32; d = ((d << 9u32) | t) + a
-        c = c + (a ^ (b & (d ^ a))) + 0x676f02d9u32 + m7
-        t = c >> 18u32; c = ((c << 14u32) | t) + d
-        b = b + (d ^ (a & (c ^ d))) + 0x8d2a4c8au32 + m12
-        t = b >> 12u32; b = ((b << 20u32) | t) + c
+        a = a.wrapping_add(c ^ (d & (b ^ c))).wrapping_add(0xf61e2562u32).wrapping_add(m1)
+        t = a >> 27u32; a = ((a << 5u32) | t).wrapping_add(b)
+        d = d.wrapping_add(b ^ (c & (a ^ b))).wrapping_add(0xc040b340u32).wrapping_add(m6)
+        t = d >> 23u32; d = ((d << 9u32) | t).wrapping_add(a)
+        c = c.wrapping_add(a ^ (b & (d ^ a))).wrapping_add(0x265e5a51u32).wrapping_add(m11)
+        t = c >> 18u32; c = ((c << 14u32) | t).wrapping_add(d)
+        b = b.wrapping_add(d ^ (a & (c ^ d))).wrapping_add(0xe9b6c7aau32).wrapping_add(m0)
+        t = b >> 12u32; b = ((b << 20u32) | t).wrapping_add(c)
+        a = a.wrapping_add(c ^ (d & (b ^ c))).wrapping_add(0xd62f105du32).wrapping_add(m5)
+        t = a >> 27u32; a = ((a << 5u32) | t).wrapping_add(b)
+        d = d.wrapping_add(b ^ (c & (a ^ b))).wrapping_add(0x02441453u32).wrapping_add(m10)
+        t = d >> 23u32; d = ((d << 9u32) | t).wrapping_add(a)
+        c = c.wrapping_add(a ^ (b & (d ^ a))).wrapping_add(0xd8a1e681u32).wrapping_add(m15)
+        t = c >> 18u32; c = ((c << 14u32) | t).wrapping_add(d)
+        b = b.wrapping_add(d ^ (a & (c ^ d))).wrapping_add(0xe7d3fbc8u32).wrapping_add(m4)
+        t = b >> 12u32; b = ((b << 20u32) | t).wrapping_add(c)
+        a = a.wrapping_add(c ^ (d & (b ^ c))).wrapping_add(0x21e1cde6u32).wrapping_add(m9)
+        t = a >> 27u32; a = ((a << 5u32) | t).wrapping_add(b)
+        d = d.wrapping_add(b ^ (c & (a ^ b))).wrapping_add(0xc33707d6u32).wrapping_add(m14)
+        t = d >> 23u32; d = ((d << 9u32) | t).wrapping_add(a)
+        c = c.wrapping_add(a ^ (b & (d ^ a))).wrapping_add(0xf4d50d87u32).wrapping_add(m3)
+        t = c >> 18u32; c = ((c << 14u32) | t).wrapping_add(d)
+        b = b.wrapping_add(d ^ (a & (c ^ d))).wrapping_add(0x455a14edu32).wrapping_add(m8)
+        t = b >> 12u32; b = ((b << 20u32) | t).wrapping_add(c)
+        a = a.wrapping_add(c ^ (d & (b ^ c))).wrapping_add(0xa9e3e905u32).wrapping_add(m13)
+        t = a >> 27u32; a = ((a << 5u32) | t).wrapping_add(b)
+        d = d.wrapping_add(b ^ (c & (a ^ b))).wrapping_add(0xfcefa3f8u32).wrapping_add(m2)
+        t = d >> 23u32; d = ((d << 9u32) | t).wrapping_add(a)
+        c = c.wrapping_add(a ^ (b & (d ^ a))).wrapping_add(0x676f02d9u32).wrapping_add(m7)
+        t = c >> 18u32; c = ((c << 14u32) | t).wrapping_add(d)
+        b = b.wrapping_add(d ^ (a & (c ^ d))).wrapping_add(0x8d2a4c8au32).wrapping_add(m12)
+        t = b >> 12u32; b = ((b << 20u32) | t).wrapping_add(c)
         // round 3
-        a = a + (b ^ c ^ d) + 0xfffa3942u32 + m5
-        t = a >> 28u32; a = ((a << 4u32) | t) + b
-        d = d + (a ^ b ^ c) + 0x8771f681u32 + m8
-        t = d >> 21u32; d = ((d << 11u32) | t) + a
-        c = c + (d ^ a ^ b) + 0x6d9d6122u32 + m11
-        t = c >> 16u32; c = ((c << 16u32) | t) + d
-        b = b + (c ^ d ^ a) + 0xfde5380cu32 + m14
-        t = b >> 9u32; b = ((b << 23u32) | t) + c
-        a = a + (b ^ c ^ d) + 0xa4beea44u32 + m1
-        t = a >> 28u32; a = ((a << 4u32) | t) + b
-        d = d + (a ^ b ^ c) + 0x4bdecfa9u32 + m4
-        t = d >> 21u32; d = ((d << 11u32) | t) + a
-        c = c + (d ^ a ^ b) + 0xf6bb4b60u32 + m7
-        t = c >> 16u32; c = ((c << 16u32) | t) + d
-        b = b + (c ^ d ^ a) + 0xbebfbc70u32 + m10
-        t = b >> 9u32; b = ((b << 23u32) | t) + c
-        a = a + (b ^ c ^ d) + 0x289b7ec6u32 + m13
-        t = a >> 28u32; a = ((a << 4u32) | t) + b
-        d = d + (a ^ b ^ c) + 0xeaa127fau32 + m0
-        t = d >> 21u32; d = ((d << 11u32) | t) + a
-        c = c + (d ^ a ^ b) + 0xd4ef3085u32 + m3
-        t = c >> 16u32; c = ((c << 16u32) | t) + d
-        b = b + (c ^ d ^ a) + 0x04881d05u32 + m6
-        t = b >> 9u32; b = ((b << 23u32) | t) + c
-        a = a + (b ^ c ^ d) + 0xd9d4d039u32 + m9
-        t = a >> 28u32; a = ((a << 4u32) | t) + b
-        d = d + (a ^ b ^ c) + 0xe6db99e5u32 + m12
-        t = d >> 21u32; d = ((d << 11u32) | t) + a
-        c = c + (d ^ a ^ b) + 0x1fa27cf8u32 + m15
-        t = c >> 16u32; c = ((c << 16u32) | t) + d
-        b = b + (c ^ d ^ a) + 0xc4ac5665u32 + m2
-        t = b >> 9u32; b = ((b << 23u32) | t) + c
+        a = a.wrapping_add(b ^ c ^ d).wrapping_add(0xfffa3942u32).wrapping_add(m5)
+        t = a >> 28u32; a = ((a << 4u32) | t).wrapping_add(b)
+        d = d.wrapping_add(a ^ b ^ c).wrapping_add(0x8771f681u32).wrapping_add(m8)
+        t = d >> 21u32; d = ((d << 11u32) | t).wrapping_add(a)
+        c = c.wrapping_add(d ^ a ^ b).wrapping_add(0x6d9d6122u32).wrapping_add(m11)
+        t = c >> 16u32; c = ((c << 16u32) | t).wrapping_add(d)
+        b = b.wrapping_add(c ^ d ^ a).wrapping_add(0xfde5380cu32).wrapping_add(m14)
+        t = b >> 9u32; b = ((b << 23u32) | t).wrapping_add(c)
+        a = a.wrapping_add(b ^ c ^ d).wrapping_add(0xa4beea44u32).wrapping_add(m1)
+        t = a >> 28u32; a = ((a << 4u32) | t).wrapping_add(b)
+        d = d.wrapping_add(a ^ b ^ c).wrapping_add(0x4bdecfa9u32).wrapping_add(m4)
+        t = d >> 21u32; d = ((d << 11u32) | t).wrapping_add(a)
+        c = c.wrapping_add(d ^ a ^ b).wrapping_add(0xf6bb4b60u32).wrapping_add(m7)
+        t = c >> 16u32; c = ((c << 16u32) | t).wrapping_add(d)
+        b = b.wrapping_add(c ^ d ^ a).wrapping_add(0xbebfbc70u32).wrapping_add(m10)
+        t = b >> 9u32; b = ((b << 23u32) | t).wrapping_add(c)
+        a = a.wrapping_add(b ^ c ^ d).wrapping_add(0x289b7ec6u32).wrapping_add(m13)
+        t = a >> 28u32; a = ((a << 4u32) | t).wrapping_add(b)
+        d = d.wrapping_add(a ^ b ^ c).wrapping_add(0xeaa127fau32).wrapping_add(m0)
+        t = d >> 21u32; d = ((d << 11u32) | t).wrapping_add(a)
+        c = c.wrapping_add(d ^ a ^ b).wrapping_add(0xd4ef3085u32).wrapping_add(m3)
+        t = c >> 16u32; c = ((c << 16u32) | t).wrapping_add(d)
+        b = b.wrapping_add(c ^ d ^ a).wrapping_add(0x04881d05u32).wrapping_add(m6)
+        t = b >> 9u32; b = ((b << 23u32) | t).wrapping_add(c)
+        a = a.wrapping_add(b ^ c ^ d).wrapping_add(0xd9d4d039u32).wrapping_add(m9)
+        t = a >> 28u32; a = ((a << 4u32) | t).wrapping_add(b)
+        d = d.wrapping_add(a ^ b ^ c).wrapping_add(0xe6db99e5u32).wrapping_add(m12)
+        t = d >> 21u32; d = ((d << 11u32) | t).wrapping_add(a)
+        c = c.wrapping_add(d ^ a ^ b).wrapping_add(0x1fa27cf8u32).wrapping_add(m15)
+        t = c >> 16u32; c = ((c << 16u32) | t).wrapping_add(d)
+        b = b.wrapping_add(c ^ d ^ a).wrapping_add(0xc4ac5665u32).wrapping_add(m2)
+        t = b >> 9u32; b = ((b << 23u32) | t).wrapping_add(c)
         // round 4
-        a = a + (c ^ (b | ~d)) + 0xf4292244u32 + m0
-        t = a >> 26u32; a = ((a << 6u32) | t) + b
-        d = d + (b ^ (a | ~c)) + 0x432aff97u32 + m7
-        t = d >> 22u32; d = ((d << 10u32) | t) + a
-        c = c + (a ^ (d | ~b)) + 0xab9423a7u32 + m14
-        t = c >> 17u32; c = ((c << 15u32) | t) + d
-        b = b + (d ^ (c | ~a)) + 0xfc93a039u32 + m5
-        t = b >> 11u32; b = ((b << 21u32) | t) + c
-        a = a + (c ^ (b | ~d)) + 0x655b59c3u32 + m12
-        t = a >> 26u32; a = ((a << 6u32) | t) + b
-        d = d + (b ^ (a | ~c)) + 0x8f0ccc92u32 + m3
-        t = d >> 22u32; d = ((d << 10u32) | t) + a
-        c = c + (a ^ (d | ~b)) + 0xffeff47du32 + m10
-        t = c >> 17u32; c = ((c << 15u32) | t) + d
-        b = b + (d ^ (c | ~a)) + 0x85845dd1u32 + m1
-        t = b >> 11u32; b = ((b << 21u32) | t) + c
-        a = a + (c ^ (b | ~d)) + 0x6fa87e4fu32 + m8
-        t = a >> 26u32; a = ((a << 6u32) | t) + b
-        d = d + (b ^ (a | ~c)) + 0xfe2ce6e0u32 + m15
-        t = d >> 22u32; d = ((d << 10u32) | t) + a
-        c = c + (a ^ (d | ~b)) + 0xa3014314u32 + m6
-        t = c >> 17u32; c = ((c << 15u32) | t) + d
-        b = b + (d ^ (c | ~a)) + 0x4e0811a1u32 + m13
-        t = b >> 11u32; b = ((b << 21u32) | t) + c
-        a = a + (c ^ (b | ~d)) + 0xf7537e82u32 + m4
-        t = a >> 26u32; a = ((a << 6u32) | t) + b
-        d = d + (b ^ (a | ~c)) + 0xbd3af235u32 + m11
-        t = d >> 22u32; d = ((d << 10u32) | t) + a
-        c = c + (a ^ (d | ~b)) + 0x2ad7d2bbu32 + m2
-        t = c >> 17u32; c = ((c << 15u32) | t) + d
-        b = b + (d ^ (c | ~a)) + 0xeb86d391u32 + m9
-        t = b >> 11u32; b = ((b << 21u32) | t) + c
-        self.a = self.a + a
-        self.b = self.b + b
-        self.c = self.c + c
-        self.d = self.d + d
+        a = a.wrapping_add(c ^ (b | ~d)).wrapping_add(0xf4292244u32).wrapping_add(m0)
+        t = a >> 26u32; a = ((a << 6u32) | t).wrapping_add(b)
+        d = d.wrapping_add(b ^ (a | ~c)).wrapping_add(0x432aff97u32).wrapping_add(m7)
+        t = d >> 22u32; d = ((d << 10u32) | t).wrapping_add(a)
+        c = c.wrapping_add(a ^ (d | ~b)).wrapping_add(0xab9423a7u32).wrapping_add(m14)
+        t = c >> 17u32; c = ((c << 15u32) | t).wrapping_add(d)
+        b = b.wrapping_add(d ^ (c | ~a)).wrapping_add(0xfc93a039u32).wrapping_add(m5)
+        t = b >> 11u32; b = ((b << 21u32) | t).wrapping_add(c)
+        a = a.wrapping_add(c ^ (b | ~d)).wrapping_add(0x655b59c3u32).wrapping_add(m12)
+        t = a >> 26u32; a = ((a << 6u32) | t).wrapping_add(b)
+        d = d.wrapping_add(b ^ (a | ~c)).wrapping_add(0x8f0ccc92u32).wrapping_add(m3)
+        t = d >> 22u32; d = ((d << 10u32) | t).wrapping_add(a)
+        c = c.wrapping_add(a ^ (d | ~b)).wrapping_add(0xffeff47du32).wrapping_add(m10)
+        t = c >> 17u32; c = ((c << 15u32) | t).wrapping_add(d)
+        b = b.wrapping_add(d ^ (c | ~a)).wrapping_add(0x85845dd1u32).wrapping_add(m1)
+        t = b >> 11u32; b = ((b << 21u32) | t).wrapping_add(c)
+        a = a.wrapping_add(c ^ (b | ~d)).wrapping_add(0x6fa87e4fu32).wrapping_add(m8)
+        t = a >> 26u32; a = ((a << 6u32) | t).wrapping_add(b)
+        d = d.wrapping_add(b ^ (a | ~c)).wrapping_add(0xfe2ce6e0u32).wrapping_add(m15)
+        t = d >> 22u32; d = ((d << 10u32) | t).wrapping_add(a)
+        c = c.wrapping_add(a ^ (d | ~b)).wrapping_add(0xa3014314u32).wrapping_add(m6)
+        t = c >> 17u32; c = ((c << 15u32) | t).wrapping_add(d)
+        b = b.wrapping_add(d ^ (c | ~a)).wrapping_add(0x4e0811a1u32).wrapping_add(m13)
+        t = b >> 11u32; b = ((b << 21u32) | t).wrapping_add(c)
+        a = a.wrapping_add(c ^ (b | ~d)).wrapping_add(0xf7537e82u32).wrapping_add(m4)
+        t = a >> 26u32; a = ((a << 6u32) | t).wrapping_add(b)
+        d = d.wrapping_add(b ^ (a | ~c)).wrapping_add(0xbd3af235u32).wrapping_add(m11)
+        t = d >> 22u32; d = ((d << 10u32) | t).wrapping_add(a)
+        c = c.wrapping_add(a ^ (d | ~b)).wrapping_add(0x2ad7d2bbu32).wrapping_add(m2)
+        t = c >> 17u32; c = ((c << 15u32) | t).wrapping_add(d)
+        b = b.wrapping_add(d ^ (c | ~a)).wrapping_add(0xeb86d391u32).wrapping_add(m9)
+        t = b >> 11u32; b = ((b << 21u32) | t).wrapping_add(c)
+        self.a = self.a.wrapping_add(a)
+        self.b = self.b.wrapping_add(b)
+        self.c = self.c.wrapping_add(c)
+        self.d = self.d.wrapping_add(d)
     }
 
     fun close(var self) {
@@ -707,318 +707,318 @@ impl Sha1 {
         // each step: e += f(b, c, d) + K + W[t] + rotl(a, 5); b = rotl(b, 30); from
         // step 16 W[t] = rotl(W[t-3] ^ W[t-8] ^ W[t-14] ^ W[t-16], 1) first
         // steps 0 to 19: Ch
-        e = e + (d ^ (b & (c ^ d))) + 0x5a827999u32 + w0
-        t = a >> 27u32; t = (a << 5u32) | t; e = e + t
+        e = e.wrapping_add(d ^ (b & (c ^ d))).wrapping_add(0x5a827999u32).wrapping_add(w0)
+        t = a >> 27u32; t = (a << 5u32) | t; e = e.wrapping_add(t)
         t = b >> 2u32; b = (b << 30u32) | t
-        d = d + (c ^ (a & (b ^ c))) + 0x5a827999u32 + w1
-        t = e >> 27u32; t = (e << 5u32) | t; d = d + t
+        d = d.wrapping_add(c ^ (a & (b ^ c))).wrapping_add(0x5a827999u32).wrapping_add(w1)
+        t = e >> 27u32; t = (e << 5u32) | t; d = d.wrapping_add(t)
         t = a >> 2u32; a = (a << 30u32) | t
-        c = c + (b ^ (e & (a ^ b))) + 0x5a827999u32 + w2
-        t = d >> 27u32; t = (d << 5u32) | t; c = c + t
+        c = c.wrapping_add(b ^ (e & (a ^ b))).wrapping_add(0x5a827999u32).wrapping_add(w2)
+        t = d >> 27u32; t = (d << 5u32) | t; c = c.wrapping_add(t)
         t = e >> 2u32; e = (e << 30u32) | t
-        b = b + (a ^ (d & (e ^ a))) + 0x5a827999u32 + w3
-        t = c >> 27u32; t = (c << 5u32) | t; b = b + t
+        b = b.wrapping_add(a ^ (d & (e ^ a))).wrapping_add(0x5a827999u32).wrapping_add(w3)
+        t = c >> 27u32; t = (c << 5u32) | t; b = b.wrapping_add(t)
         t = d >> 2u32; d = (d << 30u32) | t
-        a = a + (e ^ (c & (d ^ e))) + 0x5a827999u32 + w4
-        t = b >> 27u32; t = (b << 5u32) | t; a = a + t
+        a = a.wrapping_add(e ^ (c & (d ^ e))).wrapping_add(0x5a827999u32).wrapping_add(w4)
+        t = b >> 27u32; t = (b << 5u32) | t; a = a.wrapping_add(t)
         t = c >> 2u32; c = (c << 30u32) | t
-        e = e + (d ^ (b & (c ^ d))) + 0x5a827999u32 + w5
-        t = a >> 27u32; t = (a << 5u32) | t; e = e + t
+        e = e.wrapping_add(d ^ (b & (c ^ d))).wrapping_add(0x5a827999u32).wrapping_add(w5)
+        t = a >> 27u32; t = (a << 5u32) | t; e = e.wrapping_add(t)
         t = b >> 2u32; b = (b << 30u32) | t
-        d = d + (c ^ (a & (b ^ c))) + 0x5a827999u32 + w6
-        t = e >> 27u32; t = (e << 5u32) | t; d = d + t
+        d = d.wrapping_add(c ^ (a & (b ^ c))).wrapping_add(0x5a827999u32).wrapping_add(w6)
+        t = e >> 27u32; t = (e << 5u32) | t; d = d.wrapping_add(t)
         t = a >> 2u32; a = (a << 30u32) | t
-        c = c + (b ^ (e & (a ^ b))) + 0x5a827999u32 + w7
-        t = d >> 27u32; t = (d << 5u32) | t; c = c + t
+        c = c.wrapping_add(b ^ (e & (a ^ b))).wrapping_add(0x5a827999u32).wrapping_add(w7)
+        t = d >> 27u32; t = (d << 5u32) | t; c = c.wrapping_add(t)
         t = e >> 2u32; e = (e << 30u32) | t
-        b = b + (a ^ (d & (e ^ a))) + 0x5a827999u32 + w8
-        t = c >> 27u32; t = (c << 5u32) | t; b = b + t
+        b = b.wrapping_add(a ^ (d & (e ^ a))).wrapping_add(0x5a827999u32).wrapping_add(w8)
+        t = c >> 27u32; t = (c << 5u32) | t; b = b.wrapping_add(t)
         t = d >> 2u32; d = (d << 30u32) | t
-        a = a + (e ^ (c & (d ^ e))) + 0x5a827999u32 + w9
-        t = b >> 27u32; t = (b << 5u32) | t; a = a + t
+        a = a.wrapping_add(e ^ (c & (d ^ e))).wrapping_add(0x5a827999u32).wrapping_add(w9)
+        t = b >> 27u32; t = (b << 5u32) | t; a = a.wrapping_add(t)
         t = c >> 2u32; c = (c << 30u32) | t
-        e = e + (d ^ (b & (c ^ d))) + 0x5a827999u32 + w10
-        t = a >> 27u32; t = (a << 5u32) | t; e = e + t
+        e = e.wrapping_add(d ^ (b & (c ^ d))).wrapping_add(0x5a827999u32).wrapping_add(w10)
+        t = a >> 27u32; t = (a << 5u32) | t; e = e.wrapping_add(t)
         t = b >> 2u32; b = (b << 30u32) | t
-        d = d + (c ^ (a & (b ^ c))) + 0x5a827999u32 + w11
-        t = e >> 27u32; t = (e << 5u32) | t; d = d + t
+        d = d.wrapping_add(c ^ (a & (b ^ c))).wrapping_add(0x5a827999u32).wrapping_add(w11)
+        t = e >> 27u32; t = (e << 5u32) | t; d = d.wrapping_add(t)
         t = a >> 2u32; a = (a << 30u32) | t
-        c = c + (b ^ (e & (a ^ b))) + 0x5a827999u32 + w12
-        t = d >> 27u32; t = (d << 5u32) | t; c = c + t
+        c = c.wrapping_add(b ^ (e & (a ^ b))).wrapping_add(0x5a827999u32).wrapping_add(w12)
+        t = d >> 27u32; t = (d << 5u32) | t; c = c.wrapping_add(t)
         t = e >> 2u32; e = (e << 30u32) | t
-        b = b + (a ^ (d & (e ^ a))) + 0x5a827999u32 + w13
-        t = c >> 27u32; t = (c << 5u32) | t; b = b + t
+        b = b.wrapping_add(a ^ (d & (e ^ a))).wrapping_add(0x5a827999u32).wrapping_add(w13)
+        t = c >> 27u32; t = (c << 5u32) | t; b = b.wrapping_add(t)
         t = d >> 2u32; d = (d << 30u32) | t
-        a = a + (e ^ (c & (d ^ e))) + 0x5a827999u32 + w14
-        t = b >> 27u32; t = (b << 5u32) | t; a = a + t
+        a = a.wrapping_add(e ^ (c & (d ^ e))).wrapping_add(0x5a827999u32).wrapping_add(w14)
+        t = b >> 27u32; t = (b << 5u32) | t; a = a.wrapping_add(t)
         t = c >> 2u32; c = (c << 30u32) | t
-        e = e + (d ^ (b & (c ^ d))) + 0x5a827999u32 + w15
-        t = a >> 27u32; t = (a << 5u32) | t; e = e + t
+        e = e.wrapping_add(d ^ (b & (c ^ d))).wrapping_add(0x5a827999u32).wrapping_add(w15)
+        t = a >> 27u32; t = (a << 5u32) | t; e = e.wrapping_add(t)
         t = b >> 2u32; b = (b << 30u32) | t
         w0 = w13 ^ w8 ^ w2 ^ w0; t = w0 >> 31u32; w0 = (w0 << 1u32) | t
-        d = d + (c ^ (a & (b ^ c))) + 0x5a827999u32 + w0
-        t = e >> 27u32; t = (e << 5u32) | t; d = d + t
+        d = d.wrapping_add(c ^ (a & (b ^ c))).wrapping_add(0x5a827999u32).wrapping_add(w0)
+        t = e >> 27u32; t = (e << 5u32) | t; d = d.wrapping_add(t)
         t = a >> 2u32; a = (a << 30u32) | t
         w1 = w14 ^ w9 ^ w3 ^ w1; t = w1 >> 31u32; w1 = (w1 << 1u32) | t
-        c = c + (b ^ (e & (a ^ b))) + 0x5a827999u32 + w1
-        t = d >> 27u32; t = (d << 5u32) | t; c = c + t
+        c = c.wrapping_add(b ^ (e & (a ^ b))).wrapping_add(0x5a827999u32).wrapping_add(w1)
+        t = d >> 27u32; t = (d << 5u32) | t; c = c.wrapping_add(t)
         t = e >> 2u32; e = (e << 30u32) | t
         w2 = w15 ^ w10 ^ w4 ^ w2; t = w2 >> 31u32; w2 = (w2 << 1u32) | t
-        b = b + (a ^ (d & (e ^ a))) + 0x5a827999u32 + w2
-        t = c >> 27u32; t = (c << 5u32) | t; b = b + t
+        b = b.wrapping_add(a ^ (d & (e ^ a))).wrapping_add(0x5a827999u32).wrapping_add(w2)
+        t = c >> 27u32; t = (c << 5u32) | t; b = b.wrapping_add(t)
         t = d >> 2u32; d = (d << 30u32) | t
         w3 = w0 ^ w11 ^ w5 ^ w3; t = w3 >> 31u32; w3 = (w3 << 1u32) | t
-        a = a + (e ^ (c & (d ^ e))) + 0x5a827999u32 + w3
-        t = b >> 27u32; t = (b << 5u32) | t; a = a + t
+        a = a.wrapping_add(e ^ (c & (d ^ e))).wrapping_add(0x5a827999u32).wrapping_add(w3)
+        t = b >> 27u32; t = (b << 5u32) | t; a = a.wrapping_add(t)
         t = c >> 2u32; c = (c << 30u32) | t
         // steps 20 to 39: Parity
         w4 = w1 ^ w12 ^ w6 ^ w4; t = w4 >> 31u32; w4 = (w4 << 1u32) | t
-        e = e + (b ^ c ^ d) + 0x6ed9eba1u32 + w4
-        t = a >> 27u32; t = (a << 5u32) | t; e = e + t
+        e = e.wrapping_add(b ^ c ^ d).wrapping_add(0x6ed9eba1u32).wrapping_add(w4)
+        t = a >> 27u32; t = (a << 5u32) | t; e = e.wrapping_add(t)
         t = b >> 2u32; b = (b << 30u32) | t
         w5 = w2 ^ w13 ^ w7 ^ w5; t = w5 >> 31u32; w5 = (w5 << 1u32) | t
-        d = d + (a ^ b ^ c) + 0x6ed9eba1u32 + w5
-        t = e >> 27u32; t = (e << 5u32) | t; d = d + t
+        d = d.wrapping_add(a ^ b ^ c).wrapping_add(0x6ed9eba1u32).wrapping_add(w5)
+        t = e >> 27u32; t = (e << 5u32) | t; d = d.wrapping_add(t)
         t = a >> 2u32; a = (a << 30u32) | t
         w6 = w3 ^ w14 ^ w8 ^ w6; t = w6 >> 31u32; w6 = (w6 << 1u32) | t
-        c = c + (e ^ a ^ b) + 0x6ed9eba1u32 + w6
-        t = d >> 27u32; t = (d << 5u32) | t; c = c + t
+        c = c.wrapping_add(e ^ a ^ b).wrapping_add(0x6ed9eba1u32).wrapping_add(w6)
+        t = d >> 27u32; t = (d << 5u32) | t; c = c.wrapping_add(t)
         t = e >> 2u32; e = (e << 30u32) | t
         w7 = w4 ^ w15 ^ w9 ^ w7; t = w7 >> 31u32; w7 = (w7 << 1u32) | t
-        b = b + (d ^ e ^ a) + 0x6ed9eba1u32 + w7
-        t = c >> 27u32; t = (c << 5u32) | t; b = b + t
+        b = b.wrapping_add(d ^ e ^ a).wrapping_add(0x6ed9eba1u32).wrapping_add(w7)
+        t = c >> 27u32; t = (c << 5u32) | t; b = b.wrapping_add(t)
         t = d >> 2u32; d = (d << 30u32) | t
         w8 = w5 ^ w0 ^ w10 ^ w8; t = w8 >> 31u32; w8 = (w8 << 1u32) | t
-        a = a + (c ^ d ^ e) + 0x6ed9eba1u32 + w8
-        t = b >> 27u32; t = (b << 5u32) | t; a = a + t
+        a = a.wrapping_add(c ^ d ^ e).wrapping_add(0x6ed9eba1u32).wrapping_add(w8)
+        t = b >> 27u32; t = (b << 5u32) | t; a = a.wrapping_add(t)
         t = c >> 2u32; c = (c << 30u32) | t
         w9 = w6 ^ w1 ^ w11 ^ w9; t = w9 >> 31u32; w9 = (w9 << 1u32) | t
-        e = e + (b ^ c ^ d) + 0x6ed9eba1u32 + w9
-        t = a >> 27u32; t = (a << 5u32) | t; e = e + t
+        e = e.wrapping_add(b ^ c ^ d).wrapping_add(0x6ed9eba1u32).wrapping_add(w9)
+        t = a >> 27u32; t = (a << 5u32) | t; e = e.wrapping_add(t)
         t = b >> 2u32; b = (b << 30u32) | t
         w10 = w7 ^ w2 ^ w12 ^ w10; t = w10 >> 31u32; w10 = (w10 << 1u32) | t
-        d = d + (a ^ b ^ c) + 0x6ed9eba1u32 + w10
-        t = e >> 27u32; t = (e << 5u32) | t; d = d + t
+        d = d.wrapping_add(a ^ b ^ c).wrapping_add(0x6ed9eba1u32).wrapping_add(w10)
+        t = e >> 27u32; t = (e << 5u32) | t; d = d.wrapping_add(t)
         t = a >> 2u32; a = (a << 30u32) | t
         w11 = w8 ^ w3 ^ w13 ^ w11; t = w11 >> 31u32; w11 = (w11 << 1u32) | t
-        c = c + (e ^ a ^ b) + 0x6ed9eba1u32 + w11
-        t = d >> 27u32; t = (d << 5u32) | t; c = c + t
+        c = c.wrapping_add(e ^ a ^ b).wrapping_add(0x6ed9eba1u32).wrapping_add(w11)
+        t = d >> 27u32; t = (d << 5u32) | t; c = c.wrapping_add(t)
         t = e >> 2u32; e = (e << 30u32) | t
         w12 = w9 ^ w4 ^ w14 ^ w12; t = w12 >> 31u32; w12 = (w12 << 1u32) | t
-        b = b + (d ^ e ^ a) + 0x6ed9eba1u32 + w12
-        t = c >> 27u32; t = (c << 5u32) | t; b = b + t
+        b = b.wrapping_add(d ^ e ^ a).wrapping_add(0x6ed9eba1u32).wrapping_add(w12)
+        t = c >> 27u32; t = (c << 5u32) | t; b = b.wrapping_add(t)
         t = d >> 2u32; d = (d << 30u32) | t
         w13 = w10 ^ w5 ^ w15 ^ w13; t = w13 >> 31u32; w13 = (w13 << 1u32) | t
-        a = a + (c ^ d ^ e) + 0x6ed9eba1u32 + w13
-        t = b >> 27u32; t = (b << 5u32) | t; a = a + t
+        a = a.wrapping_add(c ^ d ^ e).wrapping_add(0x6ed9eba1u32).wrapping_add(w13)
+        t = b >> 27u32; t = (b << 5u32) | t; a = a.wrapping_add(t)
         t = c >> 2u32; c = (c << 30u32) | t
         w14 = w11 ^ w6 ^ w0 ^ w14; t = w14 >> 31u32; w14 = (w14 << 1u32) | t
-        e = e + (b ^ c ^ d) + 0x6ed9eba1u32 + w14
-        t = a >> 27u32; t = (a << 5u32) | t; e = e + t
+        e = e.wrapping_add(b ^ c ^ d).wrapping_add(0x6ed9eba1u32).wrapping_add(w14)
+        t = a >> 27u32; t = (a << 5u32) | t; e = e.wrapping_add(t)
         t = b >> 2u32; b = (b << 30u32) | t
         w15 = w12 ^ w7 ^ w1 ^ w15; t = w15 >> 31u32; w15 = (w15 << 1u32) | t
-        d = d + (a ^ b ^ c) + 0x6ed9eba1u32 + w15
-        t = e >> 27u32; t = (e << 5u32) | t; d = d + t
+        d = d.wrapping_add(a ^ b ^ c).wrapping_add(0x6ed9eba1u32).wrapping_add(w15)
+        t = e >> 27u32; t = (e << 5u32) | t; d = d.wrapping_add(t)
         t = a >> 2u32; a = (a << 30u32) | t
         w0 = w13 ^ w8 ^ w2 ^ w0; t = w0 >> 31u32; w0 = (w0 << 1u32) | t
-        c = c + (e ^ a ^ b) + 0x6ed9eba1u32 + w0
-        t = d >> 27u32; t = (d << 5u32) | t; c = c + t
+        c = c.wrapping_add(e ^ a ^ b).wrapping_add(0x6ed9eba1u32).wrapping_add(w0)
+        t = d >> 27u32; t = (d << 5u32) | t; c = c.wrapping_add(t)
         t = e >> 2u32; e = (e << 30u32) | t
         w1 = w14 ^ w9 ^ w3 ^ w1; t = w1 >> 31u32; w1 = (w1 << 1u32) | t
-        b = b + (d ^ e ^ a) + 0x6ed9eba1u32 + w1
-        t = c >> 27u32; t = (c << 5u32) | t; b = b + t
+        b = b.wrapping_add(d ^ e ^ a).wrapping_add(0x6ed9eba1u32).wrapping_add(w1)
+        t = c >> 27u32; t = (c << 5u32) | t; b = b.wrapping_add(t)
         t = d >> 2u32; d = (d << 30u32) | t
         w2 = w15 ^ w10 ^ w4 ^ w2; t = w2 >> 31u32; w2 = (w2 << 1u32) | t
-        a = a + (c ^ d ^ e) + 0x6ed9eba1u32 + w2
-        t = b >> 27u32; t = (b << 5u32) | t; a = a + t
+        a = a.wrapping_add(c ^ d ^ e).wrapping_add(0x6ed9eba1u32).wrapping_add(w2)
+        t = b >> 27u32; t = (b << 5u32) | t; a = a.wrapping_add(t)
         t = c >> 2u32; c = (c << 30u32) | t
         w3 = w0 ^ w11 ^ w5 ^ w3; t = w3 >> 31u32; w3 = (w3 << 1u32) | t
-        e = e + (b ^ c ^ d) + 0x6ed9eba1u32 + w3
-        t = a >> 27u32; t = (a << 5u32) | t; e = e + t
+        e = e.wrapping_add(b ^ c ^ d).wrapping_add(0x6ed9eba1u32).wrapping_add(w3)
+        t = a >> 27u32; t = (a << 5u32) | t; e = e.wrapping_add(t)
         t = b >> 2u32; b = (b << 30u32) | t
         w4 = w1 ^ w12 ^ w6 ^ w4; t = w4 >> 31u32; w4 = (w4 << 1u32) | t
-        d = d + (a ^ b ^ c) + 0x6ed9eba1u32 + w4
-        t = e >> 27u32; t = (e << 5u32) | t; d = d + t
+        d = d.wrapping_add(a ^ b ^ c).wrapping_add(0x6ed9eba1u32).wrapping_add(w4)
+        t = e >> 27u32; t = (e << 5u32) | t; d = d.wrapping_add(t)
         t = a >> 2u32; a = (a << 30u32) | t
         w5 = w2 ^ w13 ^ w7 ^ w5; t = w5 >> 31u32; w5 = (w5 << 1u32) | t
-        c = c + (e ^ a ^ b) + 0x6ed9eba1u32 + w5
-        t = d >> 27u32; t = (d << 5u32) | t; c = c + t
+        c = c.wrapping_add(e ^ a ^ b).wrapping_add(0x6ed9eba1u32).wrapping_add(w5)
+        t = d >> 27u32; t = (d << 5u32) | t; c = c.wrapping_add(t)
         t = e >> 2u32; e = (e << 30u32) | t
         w6 = w3 ^ w14 ^ w8 ^ w6; t = w6 >> 31u32; w6 = (w6 << 1u32) | t
-        b = b + (d ^ e ^ a) + 0x6ed9eba1u32 + w6
-        t = c >> 27u32; t = (c << 5u32) | t; b = b + t
+        b = b.wrapping_add(d ^ e ^ a).wrapping_add(0x6ed9eba1u32).wrapping_add(w6)
+        t = c >> 27u32; t = (c << 5u32) | t; b = b.wrapping_add(t)
         t = d >> 2u32; d = (d << 30u32) | t
         w7 = w4 ^ w15 ^ w9 ^ w7; t = w7 >> 31u32; w7 = (w7 << 1u32) | t
-        a = a + (c ^ d ^ e) + 0x6ed9eba1u32 + w7
-        t = b >> 27u32; t = (b << 5u32) | t; a = a + t
+        a = a.wrapping_add(c ^ d ^ e).wrapping_add(0x6ed9eba1u32).wrapping_add(w7)
+        t = b >> 27u32; t = (b << 5u32) | t; a = a.wrapping_add(t)
         t = c >> 2u32; c = (c << 30u32) | t
         // steps 40 to 59: Maj
         w8 = w5 ^ w0 ^ w10 ^ w8; t = w8 >> 31u32; w8 = (w8 << 1u32) | t
-        t = b | c; t = (d & t) | (b & c); e = e + t + 0x8f1bbcdcu32 + w8
-        t = a >> 27u32; t = (a << 5u32) | t; e = e + t
+        t = b | c; t = (d & t) | (b & c); e = e.wrapping_add(t).wrapping_add(0x8f1bbcdcu32).wrapping_add(w8)
+        t = a >> 27u32; t = (a << 5u32) | t; e = e.wrapping_add(t)
         t = b >> 2u32; b = (b << 30u32) | t
         w9 = w6 ^ w1 ^ w11 ^ w9; t = w9 >> 31u32; w9 = (w9 << 1u32) | t
-        t = a | b; t = (c & t) | (a & b); d = d + t + 0x8f1bbcdcu32 + w9
-        t = e >> 27u32; t = (e << 5u32) | t; d = d + t
+        t = a | b; t = (c & t) | (a & b); d = d.wrapping_add(t).wrapping_add(0x8f1bbcdcu32).wrapping_add(w9)
+        t = e >> 27u32; t = (e << 5u32) | t; d = d.wrapping_add(t)
         t = a >> 2u32; a = (a << 30u32) | t
         w10 = w7 ^ w2 ^ w12 ^ w10; t = w10 >> 31u32; w10 = (w10 << 1u32) | t
-        t = e | a; t = (b & t) | (e & a); c = c + t + 0x8f1bbcdcu32 + w10
-        t = d >> 27u32; t = (d << 5u32) | t; c = c + t
+        t = e | a; t = (b & t) | (e & a); c = c.wrapping_add(t).wrapping_add(0x8f1bbcdcu32).wrapping_add(w10)
+        t = d >> 27u32; t = (d << 5u32) | t; c = c.wrapping_add(t)
         t = e >> 2u32; e = (e << 30u32) | t
         w11 = w8 ^ w3 ^ w13 ^ w11; t = w11 >> 31u32; w11 = (w11 << 1u32) | t
-        t = d | e; t = (a & t) | (d & e); b = b + t + 0x8f1bbcdcu32 + w11
-        t = c >> 27u32; t = (c << 5u32) | t; b = b + t
+        t = d | e; t = (a & t) | (d & e); b = b.wrapping_add(t).wrapping_add(0x8f1bbcdcu32).wrapping_add(w11)
+        t = c >> 27u32; t = (c << 5u32) | t; b = b.wrapping_add(t)
         t = d >> 2u32; d = (d << 30u32) | t
         w12 = w9 ^ w4 ^ w14 ^ w12; t = w12 >> 31u32; w12 = (w12 << 1u32) | t
-        t = c | d; t = (e & t) | (c & d); a = a + t + 0x8f1bbcdcu32 + w12
-        t = b >> 27u32; t = (b << 5u32) | t; a = a + t
+        t = c | d; t = (e & t) | (c & d); a = a.wrapping_add(t).wrapping_add(0x8f1bbcdcu32).wrapping_add(w12)
+        t = b >> 27u32; t = (b << 5u32) | t; a = a.wrapping_add(t)
         t = c >> 2u32; c = (c << 30u32) | t
         w13 = w10 ^ w5 ^ w15 ^ w13; t = w13 >> 31u32; w13 = (w13 << 1u32) | t
-        t = b | c; t = (d & t) | (b & c); e = e + t + 0x8f1bbcdcu32 + w13
-        t = a >> 27u32; t = (a << 5u32) | t; e = e + t
+        t = b | c; t = (d & t) | (b & c); e = e.wrapping_add(t).wrapping_add(0x8f1bbcdcu32).wrapping_add(w13)
+        t = a >> 27u32; t = (a << 5u32) | t; e = e.wrapping_add(t)
         t = b >> 2u32; b = (b << 30u32) | t
         w14 = w11 ^ w6 ^ w0 ^ w14; t = w14 >> 31u32; w14 = (w14 << 1u32) | t
-        t = a | b; t = (c & t) | (a & b); d = d + t + 0x8f1bbcdcu32 + w14
-        t = e >> 27u32; t = (e << 5u32) | t; d = d + t
+        t = a | b; t = (c & t) | (a & b); d = d.wrapping_add(t).wrapping_add(0x8f1bbcdcu32).wrapping_add(w14)
+        t = e >> 27u32; t = (e << 5u32) | t; d = d.wrapping_add(t)
         t = a >> 2u32; a = (a << 30u32) | t
         w15 = w12 ^ w7 ^ w1 ^ w15; t = w15 >> 31u32; w15 = (w15 << 1u32) | t
-        t = e | a; t = (b & t) | (e & a); c = c + t + 0x8f1bbcdcu32 + w15
-        t = d >> 27u32; t = (d << 5u32) | t; c = c + t
+        t = e | a; t = (b & t) | (e & a); c = c.wrapping_add(t).wrapping_add(0x8f1bbcdcu32).wrapping_add(w15)
+        t = d >> 27u32; t = (d << 5u32) | t; c = c.wrapping_add(t)
         t = e >> 2u32; e = (e << 30u32) | t
         w0 = w13 ^ w8 ^ w2 ^ w0; t = w0 >> 31u32; w0 = (w0 << 1u32) | t
-        t = d | e; t = (a & t) | (d & e); b = b + t + 0x8f1bbcdcu32 + w0
-        t = c >> 27u32; t = (c << 5u32) | t; b = b + t
+        t = d | e; t = (a & t) | (d & e); b = b.wrapping_add(t).wrapping_add(0x8f1bbcdcu32).wrapping_add(w0)
+        t = c >> 27u32; t = (c << 5u32) | t; b = b.wrapping_add(t)
         t = d >> 2u32; d = (d << 30u32) | t
         w1 = w14 ^ w9 ^ w3 ^ w1; t = w1 >> 31u32; w1 = (w1 << 1u32) | t
-        t = c | d; t = (e & t) | (c & d); a = a + t + 0x8f1bbcdcu32 + w1
-        t = b >> 27u32; t = (b << 5u32) | t; a = a + t
+        t = c | d; t = (e & t) | (c & d); a = a.wrapping_add(t).wrapping_add(0x8f1bbcdcu32).wrapping_add(w1)
+        t = b >> 27u32; t = (b << 5u32) | t; a = a.wrapping_add(t)
         t = c >> 2u32; c = (c << 30u32) | t
         w2 = w15 ^ w10 ^ w4 ^ w2; t = w2 >> 31u32; w2 = (w2 << 1u32) | t
-        t = b | c; t = (d & t) | (b & c); e = e + t + 0x8f1bbcdcu32 + w2
-        t = a >> 27u32; t = (a << 5u32) | t; e = e + t
+        t = b | c; t = (d & t) | (b & c); e = e.wrapping_add(t).wrapping_add(0x8f1bbcdcu32).wrapping_add(w2)
+        t = a >> 27u32; t = (a << 5u32) | t; e = e.wrapping_add(t)
         t = b >> 2u32; b = (b << 30u32) | t
         w3 = w0 ^ w11 ^ w5 ^ w3; t = w3 >> 31u32; w3 = (w3 << 1u32) | t
-        t = a | b; t = (c & t) | (a & b); d = d + t + 0x8f1bbcdcu32 + w3
-        t = e >> 27u32; t = (e << 5u32) | t; d = d + t
+        t = a | b; t = (c & t) | (a & b); d = d.wrapping_add(t).wrapping_add(0x8f1bbcdcu32).wrapping_add(w3)
+        t = e >> 27u32; t = (e << 5u32) | t; d = d.wrapping_add(t)
         t = a >> 2u32; a = (a << 30u32) | t
         w4 = w1 ^ w12 ^ w6 ^ w4; t = w4 >> 31u32; w4 = (w4 << 1u32) | t
-        t = e | a; t = (b & t) | (e & a); c = c + t + 0x8f1bbcdcu32 + w4
-        t = d >> 27u32; t = (d << 5u32) | t; c = c + t
+        t = e | a; t = (b & t) | (e & a); c = c.wrapping_add(t).wrapping_add(0x8f1bbcdcu32).wrapping_add(w4)
+        t = d >> 27u32; t = (d << 5u32) | t; c = c.wrapping_add(t)
         t = e >> 2u32; e = (e << 30u32) | t
         w5 = w2 ^ w13 ^ w7 ^ w5; t = w5 >> 31u32; w5 = (w5 << 1u32) | t
-        t = d | e; t = (a & t) | (d & e); b = b + t + 0x8f1bbcdcu32 + w5
-        t = c >> 27u32; t = (c << 5u32) | t; b = b + t
+        t = d | e; t = (a & t) | (d & e); b = b.wrapping_add(t).wrapping_add(0x8f1bbcdcu32).wrapping_add(w5)
+        t = c >> 27u32; t = (c << 5u32) | t; b = b.wrapping_add(t)
         t = d >> 2u32; d = (d << 30u32) | t
         w6 = w3 ^ w14 ^ w8 ^ w6; t = w6 >> 31u32; w6 = (w6 << 1u32) | t
-        t = c | d; t = (e & t) | (c & d); a = a + t + 0x8f1bbcdcu32 + w6
-        t = b >> 27u32; t = (b << 5u32) | t; a = a + t
+        t = c | d; t = (e & t) | (c & d); a = a.wrapping_add(t).wrapping_add(0x8f1bbcdcu32).wrapping_add(w6)
+        t = b >> 27u32; t = (b << 5u32) | t; a = a.wrapping_add(t)
         t = c >> 2u32; c = (c << 30u32) | t
         w7 = w4 ^ w15 ^ w9 ^ w7; t = w7 >> 31u32; w7 = (w7 << 1u32) | t
-        t = b | c; t = (d & t) | (b & c); e = e + t + 0x8f1bbcdcu32 + w7
-        t = a >> 27u32; t = (a << 5u32) | t; e = e + t
+        t = b | c; t = (d & t) | (b & c); e = e.wrapping_add(t).wrapping_add(0x8f1bbcdcu32).wrapping_add(w7)
+        t = a >> 27u32; t = (a << 5u32) | t; e = e.wrapping_add(t)
         t = b >> 2u32; b = (b << 30u32) | t
         w8 = w5 ^ w0 ^ w10 ^ w8; t = w8 >> 31u32; w8 = (w8 << 1u32) | t
-        t = a | b; t = (c & t) | (a & b); d = d + t + 0x8f1bbcdcu32 + w8
-        t = e >> 27u32; t = (e << 5u32) | t; d = d + t
+        t = a | b; t = (c & t) | (a & b); d = d.wrapping_add(t).wrapping_add(0x8f1bbcdcu32).wrapping_add(w8)
+        t = e >> 27u32; t = (e << 5u32) | t; d = d.wrapping_add(t)
         t = a >> 2u32; a = (a << 30u32) | t
         w9 = w6 ^ w1 ^ w11 ^ w9; t = w9 >> 31u32; w9 = (w9 << 1u32) | t
-        t = e | a; t = (b & t) | (e & a); c = c + t + 0x8f1bbcdcu32 + w9
-        t = d >> 27u32; t = (d << 5u32) | t; c = c + t
+        t = e | a; t = (b & t) | (e & a); c = c.wrapping_add(t).wrapping_add(0x8f1bbcdcu32).wrapping_add(w9)
+        t = d >> 27u32; t = (d << 5u32) | t; c = c.wrapping_add(t)
         t = e >> 2u32; e = (e << 30u32) | t
         w10 = w7 ^ w2 ^ w12 ^ w10; t = w10 >> 31u32; w10 = (w10 << 1u32) | t
-        t = d | e; t = (a & t) | (d & e); b = b + t + 0x8f1bbcdcu32 + w10
-        t = c >> 27u32; t = (c << 5u32) | t; b = b + t
+        t = d | e; t = (a & t) | (d & e); b = b.wrapping_add(t).wrapping_add(0x8f1bbcdcu32).wrapping_add(w10)
+        t = c >> 27u32; t = (c << 5u32) | t; b = b.wrapping_add(t)
         t = d >> 2u32; d = (d << 30u32) | t
         w11 = w8 ^ w3 ^ w13 ^ w11; t = w11 >> 31u32; w11 = (w11 << 1u32) | t
-        t = c | d; t = (e & t) | (c & d); a = a + t + 0x8f1bbcdcu32 + w11
-        t = b >> 27u32; t = (b << 5u32) | t; a = a + t
+        t = c | d; t = (e & t) | (c & d); a = a.wrapping_add(t).wrapping_add(0x8f1bbcdcu32).wrapping_add(w11)
+        t = b >> 27u32; t = (b << 5u32) | t; a = a.wrapping_add(t)
         t = c >> 2u32; c = (c << 30u32) | t
         // steps 60 to 79: Parity
         w12 = w9 ^ w4 ^ w14 ^ w12; t = w12 >> 31u32; w12 = (w12 << 1u32) | t
-        e = e + (b ^ c ^ d) + 0xca62c1d6u32 + w12
-        t = a >> 27u32; t = (a << 5u32) | t; e = e + t
+        e = e.wrapping_add(b ^ c ^ d).wrapping_add(0xca62c1d6u32).wrapping_add(w12)
+        t = a >> 27u32; t = (a << 5u32) | t; e = e.wrapping_add(t)
         t = b >> 2u32; b = (b << 30u32) | t
         w13 = w10 ^ w5 ^ w15 ^ w13; t = w13 >> 31u32; w13 = (w13 << 1u32) | t
-        d = d + (a ^ b ^ c) + 0xca62c1d6u32 + w13
-        t = e >> 27u32; t = (e << 5u32) | t; d = d + t
+        d = d.wrapping_add(a ^ b ^ c).wrapping_add(0xca62c1d6u32).wrapping_add(w13)
+        t = e >> 27u32; t = (e << 5u32) | t; d = d.wrapping_add(t)
         t = a >> 2u32; a = (a << 30u32) | t
         w14 = w11 ^ w6 ^ w0 ^ w14; t = w14 >> 31u32; w14 = (w14 << 1u32) | t
-        c = c + (e ^ a ^ b) + 0xca62c1d6u32 + w14
-        t = d >> 27u32; t = (d << 5u32) | t; c = c + t
+        c = c.wrapping_add(e ^ a ^ b).wrapping_add(0xca62c1d6u32).wrapping_add(w14)
+        t = d >> 27u32; t = (d << 5u32) | t; c = c.wrapping_add(t)
         t = e >> 2u32; e = (e << 30u32) | t
         w15 = w12 ^ w7 ^ w1 ^ w15; t = w15 >> 31u32; w15 = (w15 << 1u32) | t
-        b = b + (d ^ e ^ a) + 0xca62c1d6u32 + w15
-        t = c >> 27u32; t = (c << 5u32) | t; b = b + t
+        b = b.wrapping_add(d ^ e ^ a).wrapping_add(0xca62c1d6u32).wrapping_add(w15)
+        t = c >> 27u32; t = (c << 5u32) | t; b = b.wrapping_add(t)
         t = d >> 2u32; d = (d << 30u32) | t
         w0 = w13 ^ w8 ^ w2 ^ w0; t = w0 >> 31u32; w0 = (w0 << 1u32) | t
-        a = a + (c ^ d ^ e) + 0xca62c1d6u32 + w0
-        t = b >> 27u32; t = (b << 5u32) | t; a = a + t
+        a = a.wrapping_add(c ^ d ^ e).wrapping_add(0xca62c1d6u32).wrapping_add(w0)
+        t = b >> 27u32; t = (b << 5u32) | t; a = a.wrapping_add(t)
         t = c >> 2u32; c = (c << 30u32) | t
         w1 = w14 ^ w9 ^ w3 ^ w1; t = w1 >> 31u32; w1 = (w1 << 1u32) | t
-        e = e + (b ^ c ^ d) + 0xca62c1d6u32 + w1
-        t = a >> 27u32; t = (a << 5u32) | t; e = e + t
+        e = e.wrapping_add(b ^ c ^ d).wrapping_add(0xca62c1d6u32).wrapping_add(w1)
+        t = a >> 27u32; t = (a << 5u32) | t; e = e.wrapping_add(t)
         t = b >> 2u32; b = (b << 30u32) | t
         w2 = w15 ^ w10 ^ w4 ^ w2; t = w2 >> 31u32; w2 = (w2 << 1u32) | t
-        d = d + (a ^ b ^ c) + 0xca62c1d6u32 + w2
-        t = e >> 27u32; t = (e << 5u32) | t; d = d + t
+        d = d.wrapping_add(a ^ b ^ c).wrapping_add(0xca62c1d6u32).wrapping_add(w2)
+        t = e >> 27u32; t = (e << 5u32) | t; d = d.wrapping_add(t)
         t = a >> 2u32; a = (a << 30u32) | t
         w3 = w0 ^ w11 ^ w5 ^ w3; t = w3 >> 31u32; w3 = (w3 << 1u32) | t
-        c = c + (e ^ a ^ b) + 0xca62c1d6u32 + w3
-        t = d >> 27u32; t = (d << 5u32) | t; c = c + t
+        c = c.wrapping_add(e ^ a ^ b).wrapping_add(0xca62c1d6u32).wrapping_add(w3)
+        t = d >> 27u32; t = (d << 5u32) | t; c = c.wrapping_add(t)
         t = e >> 2u32; e = (e << 30u32) | t
         w4 = w1 ^ w12 ^ w6 ^ w4; t = w4 >> 31u32; w4 = (w4 << 1u32) | t
-        b = b + (d ^ e ^ a) + 0xca62c1d6u32 + w4
-        t = c >> 27u32; t = (c << 5u32) | t; b = b + t
+        b = b.wrapping_add(d ^ e ^ a).wrapping_add(0xca62c1d6u32).wrapping_add(w4)
+        t = c >> 27u32; t = (c << 5u32) | t; b = b.wrapping_add(t)
         t = d >> 2u32; d = (d << 30u32) | t
         w5 = w2 ^ w13 ^ w7 ^ w5; t = w5 >> 31u32; w5 = (w5 << 1u32) | t
-        a = a + (c ^ d ^ e) + 0xca62c1d6u32 + w5
-        t = b >> 27u32; t = (b << 5u32) | t; a = a + t
+        a = a.wrapping_add(c ^ d ^ e).wrapping_add(0xca62c1d6u32).wrapping_add(w5)
+        t = b >> 27u32; t = (b << 5u32) | t; a = a.wrapping_add(t)
         t = c >> 2u32; c = (c << 30u32) | t
         w6 = w3 ^ w14 ^ w8 ^ w6; t = w6 >> 31u32; w6 = (w6 << 1u32) | t
-        e = e + (b ^ c ^ d) + 0xca62c1d6u32 + w6
-        t = a >> 27u32; t = (a << 5u32) | t; e = e + t
+        e = e.wrapping_add(b ^ c ^ d).wrapping_add(0xca62c1d6u32).wrapping_add(w6)
+        t = a >> 27u32; t = (a << 5u32) | t; e = e.wrapping_add(t)
         t = b >> 2u32; b = (b << 30u32) | t
         w7 = w4 ^ w15 ^ w9 ^ w7; t = w7 >> 31u32; w7 = (w7 << 1u32) | t
-        d = d + (a ^ b ^ c) + 0xca62c1d6u32 + w7
-        t = e >> 27u32; t = (e << 5u32) | t; d = d + t
+        d = d.wrapping_add(a ^ b ^ c).wrapping_add(0xca62c1d6u32).wrapping_add(w7)
+        t = e >> 27u32; t = (e << 5u32) | t; d = d.wrapping_add(t)
         t = a >> 2u32; a = (a << 30u32) | t
         w8 = w5 ^ w0 ^ w10 ^ w8; t = w8 >> 31u32; w8 = (w8 << 1u32) | t
-        c = c + (e ^ a ^ b) + 0xca62c1d6u32 + w8
-        t = d >> 27u32; t = (d << 5u32) | t; c = c + t
+        c = c.wrapping_add(e ^ a ^ b).wrapping_add(0xca62c1d6u32).wrapping_add(w8)
+        t = d >> 27u32; t = (d << 5u32) | t; c = c.wrapping_add(t)
         t = e >> 2u32; e = (e << 30u32) | t
         w9 = w6 ^ w1 ^ w11 ^ w9; t = w9 >> 31u32; w9 = (w9 << 1u32) | t
-        b = b + (d ^ e ^ a) + 0xca62c1d6u32 + w9
-        t = c >> 27u32; t = (c << 5u32) | t; b = b + t
+        b = b.wrapping_add(d ^ e ^ a).wrapping_add(0xca62c1d6u32).wrapping_add(w9)
+        t = c >> 27u32; t = (c << 5u32) | t; b = b.wrapping_add(t)
         t = d >> 2u32; d = (d << 30u32) | t
         w10 = w7 ^ w2 ^ w12 ^ w10; t = w10 >> 31u32; w10 = (w10 << 1u32) | t
-        a = a + (c ^ d ^ e) + 0xca62c1d6u32 + w10
-        t = b >> 27u32; t = (b << 5u32) | t; a = a + t
+        a = a.wrapping_add(c ^ d ^ e).wrapping_add(0xca62c1d6u32).wrapping_add(w10)
+        t = b >> 27u32; t = (b << 5u32) | t; a = a.wrapping_add(t)
         t = c >> 2u32; c = (c << 30u32) | t
         w11 = w8 ^ w3 ^ w13 ^ w11; t = w11 >> 31u32; w11 = (w11 << 1u32) | t
-        e = e + (b ^ c ^ d) + 0xca62c1d6u32 + w11
-        t = a >> 27u32; t = (a << 5u32) | t; e = e + t
+        e = e.wrapping_add(b ^ c ^ d).wrapping_add(0xca62c1d6u32).wrapping_add(w11)
+        t = a >> 27u32; t = (a << 5u32) | t; e = e.wrapping_add(t)
         t = b >> 2u32; b = (b << 30u32) | t
         w12 = w9 ^ w4 ^ w14 ^ w12; t = w12 >> 31u32; w12 = (w12 << 1u32) | t
-        d = d + (a ^ b ^ c) + 0xca62c1d6u32 + w12
-        t = e >> 27u32; t = (e << 5u32) | t; d = d + t
+        d = d.wrapping_add(a ^ b ^ c).wrapping_add(0xca62c1d6u32).wrapping_add(w12)
+        t = e >> 27u32; t = (e << 5u32) | t; d = d.wrapping_add(t)
         t = a >> 2u32; a = (a << 30u32) | t
         w13 = w10 ^ w5 ^ w15 ^ w13; t = w13 >> 31u32; w13 = (w13 << 1u32) | t
-        c = c + (e ^ a ^ b) + 0xca62c1d6u32 + w13
-        t = d >> 27u32; t = (d << 5u32) | t; c = c + t
+        c = c.wrapping_add(e ^ a ^ b).wrapping_add(0xca62c1d6u32).wrapping_add(w13)
+        t = d >> 27u32; t = (d << 5u32) | t; c = c.wrapping_add(t)
         t = e >> 2u32; e = (e << 30u32) | t
         w14 = w11 ^ w6 ^ w0 ^ w14; t = w14 >> 31u32; w14 = (w14 << 1u32) | t
-        b = b + (d ^ e ^ a) + 0xca62c1d6u32 + w14
-        t = c >> 27u32; t = (c << 5u32) | t; b = b + t
+        b = b.wrapping_add(d ^ e ^ a).wrapping_add(0xca62c1d6u32).wrapping_add(w14)
+        t = c >> 27u32; t = (c << 5u32) | t; b = b.wrapping_add(t)
         t = d >> 2u32; d = (d << 30u32) | t
         w15 = w12 ^ w7 ^ w1 ^ w15; t = w15 >> 31u32; w15 = (w15 << 1u32) | t
-        a = a + (c ^ d ^ e) + 0xca62c1d6u32 + w15
-        t = b >> 27u32; t = (b << 5u32) | t; a = a + t
+        a = a.wrapping_add(c ^ d ^ e).wrapping_add(0xca62c1d6u32).wrapping_add(w15)
+        t = b >> 27u32; t = (b << 5u32) | t; a = a.wrapping_add(t)
         t = c >> 2u32; c = (c << 30u32) | t
-        self.a = self.a + a
-        self.b = self.b + b
-        self.c = self.c + c
-        self.d = self.d + d
-        self.e = self.e + e
+        self.a = self.a.wrapping_add(a)
+        self.b = self.b.wrapping_add(b)
+        self.c = self.c.wrapping_add(c)
+        self.d = self.d.wrapping_add(d)
+        self.e = self.e.wrapping_add(e)
     }
 
     fun close(var self) {
@@ -1179,429 +1179,429 @@ impl Sha256 {
         // σ0(W[t-15]) first. A rotation of a 32-bit word is a shift of x, the
         // word doubled to 64 bits.
         x = e as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
-        h = h + t + (g ^ (e & (f ^ g))) + 0x428a2f98u32 + w0
-        d = d + h
-        x = a as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; h = h + t
-        t = a | b; t = (c & t) | (a & b); h = h + t
+        h = h.wrapping_add(t).wrapping_add(g ^ (e & (f ^ g))).wrapping_add(0x428a2f98u32).wrapping_add(w0)
+        d = d.wrapping_add(h)
+        x = a as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; h = h.wrapping_add(t)
+        t = a | b; t = (c & t) | (a & b); h = h.wrapping_add(t)
         x = d as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
-        g = g + t + (f ^ (d & (e ^ f))) + 0x71374491u32 + w1
-        c = c + g
-        x = h as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; g = g + t
-        t = h | a; t = (b & t) | (h & a); g = g + t
+        g = g.wrapping_add(t).wrapping_add(f ^ (d & (e ^ f))).wrapping_add(0x71374491u32).wrapping_add(w1)
+        c = c.wrapping_add(g)
+        x = h as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; g = g.wrapping_add(t)
+        t = h | a; t = (b & t) | (h & a); g = g.wrapping_add(t)
         x = c as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
-        f = f + t + (e ^ (c & (d ^ e))) + 0xb5c0fbcfu32 + w2
-        b = b + f
-        x = g as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; f = f + t
-        t = g | h; t = (a & t) | (g & h); f = f + t
+        f = f.wrapping_add(t).wrapping_add(e ^ (c & (d ^ e))).wrapping_add(0xb5c0fbcfu32).wrapping_add(w2)
+        b = b.wrapping_add(f)
+        x = g as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; f = f.wrapping_add(t)
+        t = g | h; t = (a & t) | (g & h); f = f.wrapping_add(t)
         x = b as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
-        e = e + t + (d ^ (b & (c ^ d))) + 0xe9b5dba5u32 + w3
-        a = a + e
-        x = f as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; e = e + t
-        t = f | g; t = (h & t) | (f & g); e = e + t
+        e = e.wrapping_add(t).wrapping_add(d ^ (b & (c ^ d))).wrapping_add(0xe9b5dba5u32).wrapping_add(w3)
+        a = a.wrapping_add(e)
+        x = f as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; e = e.wrapping_add(t)
+        t = f | g; t = (h & t) | (f & g); e = e.wrapping_add(t)
         x = a as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
-        d = d + t + (c ^ (a & (b ^ c))) + 0x3956c25bu32 + w4
-        h = h + d
-        x = e as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; d = d + t
-        t = e | f; t = (g & t) | (e & f); d = d + t
+        d = d.wrapping_add(t).wrapping_add(c ^ (a & (b ^ c))).wrapping_add(0x3956c25bu32).wrapping_add(w4)
+        h = h.wrapping_add(d)
+        x = e as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; d = d.wrapping_add(t)
+        t = e | f; t = (g & t) | (e & f); d = d.wrapping_add(t)
         x = h as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
-        c = c + t + (b ^ (h & (a ^ b))) + 0x59f111f1u32 + w5
-        g = g + c
-        x = d as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; c = c + t
-        t = d | e; t = (f & t) | (d & e); c = c + t
+        c = c.wrapping_add(t).wrapping_add(b ^ (h & (a ^ b))).wrapping_add(0x59f111f1u32).wrapping_add(w5)
+        g = g.wrapping_add(c)
+        x = d as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; c = c.wrapping_add(t)
+        t = d | e; t = (f & t) | (d & e); c = c.wrapping_add(t)
         x = g as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
-        b = b + t + (a ^ (g & (h ^ a))) + 0x923f82a4u32 + w6
-        f = f + b
-        x = c as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; b = b + t
-        t = c | d; t = (e & t) | (c & d); b = b + t
+        b = b.wrapping_add(t).wrapping_add(a ^ (g & (h ^ a))).wrapping_add(0x923f82a4u32).wrapping_add(w6)
+        f = f.wrapping_add(b)
+        x = c as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; b = b.wrapping_add(t)
+        t = c | d; t = (e & t) | (c & d); b = b.wrapping_add(t)
         x = f as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
-        a = a + t + (h ^ (f & (g ^ h))) + 0xab1c5ed5u32 + w7
-        e = e + a
-        x = b as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; a = a + t
-        t = b | c; t = (d & t) | (b & c); a = a + t
+        a = a.wrapping_add(t).wrapping_add(h ^ (f & (g ^ h))).wrapping_add(0xab1c5ed5u32).wrapping_add(w7)
+        e = e.wrapping_add(a)
+        x = b as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; a = a.wrapping_add(t)
+        t = b | c; t = (d & t) | (b & c); a = a.wrapping_add(t)
         x = e as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
-        h = h + t + (g ^ (e & (f ^ g))) + 0xd807aa98u32 + w8
-        d = d + h
-        x = a as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; h = h + t
-        t = a | b; t = (c & t) | (a & b); h = h + t
+        h = h.wrapping_add(t).wrapping_add(g ^ (e & (f ^ g))).wrapping_add(0xd807aa98u32).wrapping_add(w8)
+        d = d.wrapping_add(h)
+        x = a as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; h = h.wrapping_add(t)
+        t = a | b; t = (c & t) | (a & b); h = h.wrapping_add(t)
         x = d as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
-        g = g + t + (f ^ (d & (e ^ f))) + 0x12835b01u32 + w9
-        c = c + g
-        x = h as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; g = g + t
-        t = h | a; t = (b & t) | (h & a); g = g + t
+        g = g.wrapping_add(t).wrapping_add(f ^ (d & (e ^ f))).wrapping_add(0x12835b01u32).wrapping_add(w9)
+        c = c.wrapping_add(g)
+        x = h as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; g = g.wrapping_add(t)
+        t = h | a; t = (b & t) | (h & a); g = g.wrapping_add(t)
         x = c as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
-        f = f + t + (e ^ (c & (d ^ e))) + 0x243185beu32 + w10
-        b = b + f
-        x = g as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; f = f + t
-        t = g | h; t = (a & t) | (g & h); f = f + t
+        f = f.wrapping_add(t).wrapping_add(e ^ (c & (d ^ e))).wrapping_add(0x243185beu32).wrapping_add(w10)
+        b = b.wrapping_add(f)
+        x = g as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; f = f.wrapping_add(t)
+        t = g | h; t = (a & t) | (g & h); f = f.wrapping_add(t)
         x = b as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
-        e = e + t + (d ^ (b & (c ^ d))) + 0x550c7dc3u32 + w11
-        a = a + e
-        x = f as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; e = e + t
-        t = f | g; t = (h & t) | (f & g); e = e + t
+        e = e.wrapping_add(t).wrapping_add(d ^ (b & (c ^ d))).wrapping_add(0x550c7dc3u32).wrapping_add(w11)
+        a = a.wrapping_add(e)
+        x = f as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; e = e.wrapping_add(t)
+        t = f | g; t = (h & t) | (f & g); e = e.wrapping_add(t)
         x = a as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
-        d = d + t + (c ^ (a & (b ^ c))) + 0x72be5d74u32 + w12
-        h = h + d
-        x = e as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; d = d + t
-        t = e | f; t = (g & t) | (e & f); d = d + t
+        d = d.wrapping_add(t).wrapping_add(c ^ (a & (b ^ c))).wrapping_add(0x72be5d74u32).wrapping_add(w12)
+        h = h.wrapping_add(d)
+        x = e as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; d = d.wrapping_add(t)
+        t = e | f; t = (g & t) | (e & f); d = d.wrapping_add(t)
         x = h as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
-        c = c + t + (b ^ (h & (a ^ b))) + 0x80deb1feu32 + w13
-        g = g + c
-        x = d as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; c = c + t
-        t = d | e; t = (f & t) | (d & e); c = c + t
+        c = c.wrapping_add(t).wrapping_add(b ^ (h & (a ^ b))).wrapping_add(0x80deb1feu32).wrapping_add(w13)
+        g = g.wrapping_add(c)
+        x = d as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; c = c.wrapping_add(t)
+        t = d | e; t = (f & t) | (d & e); c = c.wrapping_add(t)
         x = g as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
-        b = b + t + (a ^ (g & (h ^ a))) + 0x9bdc06a7u32 + w14
-        f = f + b
-        x = c as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; b = b + t
-        t = c | d; t = (e & t) | (c & d); b = b + t
+        b = b.wrapping_add(t).wrapping_add(a ^ (g & (h ^ a))).wrapping_add(0x9bdc06a7u32).wrapping_add(w14)
+        f = f.wrapping_add(b)
+        x = c as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; b = b.wrapping_add(t)
+        t = c | d; t = (e & t) | (c & d); b = b.wrapping_add(t)
         x = f as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
-        a = a + t + (h ^ (f & (g ^ h))) + 0xc19bf174u32 + w15
-        e = e + a
-        x = b as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; a = a + t
-        t = b | c; t = (d & t) | (b & c); a = a + t
-        x = w14 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w14 >> 10u32) ^ (y as uint32); w0 = w0 + t + w9
-        x = w1 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w1 >> 3u32) ^ (y as uint32); w0 = w0 + t
+        a = a.wrapping_add(t).wrapping_add(h ^ (f & (g ^ h))).wrapping_add(0xc19bf174u32).wrapping_add(w15)
+        e = e.wrapping_add(a)
+        x = b as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; a = a.wrapping_add(t)
+        t = b | c; t = (d & t) | (b & c); a = a.wrapping_add(t)
+        x = w14 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w14 >> 10u32) ^ (y as uint32); w0 = w0.wrapping_add(t).wrapping_add(w9)
+        x = w1 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w1 >> 3u32) ^ (y as uint32); w0 = w0.wrapping_add(t)
         x = e as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
-        h = h + t + (g ^ (e & (f ^ g))) + 0xe49b69c1u32 + w0
-        d = d + h
-        x = a as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; h = h + t
-        t = a | b; t = (c & t) | (a & b); h = h + t
-        x = w15 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w15 >> 10u32) ^ (y as uint32); w1 = w1 + t + w10
-        x = w2 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w2 >> 3u32) ^ (y as uint32); w1 = w1 + t
+        h = h.wrapping_add(t).wrapping_add(g ^ (e & (f ^ g))).wrapping_add(0xe49b69c1u32).wrapping_add(w0)
+        d = d.wrapping_add(h)
+        x = a as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; h = h.wrapping_add(t)
+        t = a | b; t = (c & t) | (a & b); h = h.wrapping_add(t)
+        x = w15 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w15 >> 10u32) ^ (y as uint32); w1 = w1.wrapping_add(t).wrapping_add(w10)
+        x = w2 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w2 >> 3u32) ^ (y as uint32); w1 = w1.wrapping_add(t)
         x = d as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
-        g = g + t + (f ^ (d & (e ^ f))) + 0xefbe4786u32 + w1
-        c = c + g
-        x = h as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; g = g + t
-        t = h | a; t = (b & t) | (h & a); g = g + t
-        x = w0 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w0 >> 10u32) ^ (y as uint32); w2 = w2 + t + w11
-        x = w3 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w3 >> 3u32) ^ (y as uint32); w2 = w2 + t
+        g = g.wrapping_add(t).wrapping_add(f ^ (d & (e ^ f))).wrapping_add(0xefbe4786u32).wrapping_add(w1)
+        c = c.wrapping_add(g)
+        x = h as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; g = g.wrapping_add(t)
+        t = h | a; t = (b & t) | (h & a); g = g.wrapping_add(t)
+        x = w0 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w0 >> 10u32) ^ (y as uint32); w2 = w2.wrapping_add(t).wrapping_add(w11)
+        x = w3 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w3 >> 3u32) ^ (y as uint32); w2 = w2.wrapping_add(t)
         x = c as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
-        f = f + t + (e ^ (c & (d ^ e))) + 0x0fc19dc6u32 + w2
-        b = b + f
-        x = g as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; f = f + t
-        t = g | h; t = (a & t) | (g & h); f = f + t
-        x = w1 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w1 >> 10u32) ^ (y as uint32); w3 = w3 + t + w12
-        x = w4 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w4 >> 3u32) ^ (y as uint32); w3 = w3 + t
+        f = f.wrapping_add(t).wrapping_add(e ^ (c & (d ^ e))).wrapping_add(0x0fc19dc6u32).wrapping_add(w2)
+        b = b.wrapping_add(f)
+        x = g as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; f = f.wrapping_add(t)
+        t = g | h; t = (a & t) | (g & h); f = f.wrapping_add(t)
+        x = w1 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w1 >> 10u32) ^ (y as uint32); w3 = w3.wrapping_add(t).wrapping_add(w12)
+        x = w4 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w4 >> 3u32) ^ (y as uint32); w3 = w3.wrapping_add(t)
         x = b as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
-        e = e + t + (d ^ (b & (c ^ d))) + 0x240ca1ccu32 + w3
-        a = a + e
-        x = f as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; e = e + t
-        t = f | g; t = (h & t) | (f & g); e = e + t
-        x = w2 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w2 >> 10u32) ^ (y as uint32); w4 = w4 + t + w13
-        x = w5 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w5 >> 3u32) ^ (y as uint32); w4 = w4 + t
+        e = e.wrapping_add(t).wrapping_add(d ^ (b & (c ^ d))).wrapping_add(0x240ca1ccu32).wrapping_add(w3)
+        a = a.wrapping_add(e)
+        x = f as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; e = e.wrapping_add(t)
+        t = f | g; t = (h & t) | (f & g); e = e.wrapping_add(t)
+        x = w2 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w2 >> 10u32) ^ (y as uint32); w4 = w4.wrapping_add(t).wrapping_add(w13)
+        x = w5 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w5 >> 3u32) ^ (y as uint32); w4 = w4.wrapping_add(t)
         x = a as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
-        d = d + t + (c ^ (a & (b ^ c))) + 0x2de92c6fu32 + w4
-        h = h + d
-        x = e as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; d = d + t
-        t = e | f; t = (g & t) | (e & f); d = d + t
-        x = w3 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w3 >> 10u32) ^ (y as uint32); w5 = w5 + t + w14
-        x = w6 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w6 >> 3u32) ^ (y as uint32); w5 = w5 + t
+        d = d.wrapping_add(t).wrapping_add(c ^ (a & (b ^ c))).wrapping_add(0x2de92c6fu32).wrapping_add(w4)
+        h = h.wrapping_add(d)
+        x = e as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; d = d.wrapping_add(t)
+        t = e | f; t = (g & t) | (e & f); d = d.wrapping_add(t)
+        x = w3 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w3 >> 10u32) ^ (y as uint32); w5 = w5.wrapping_add(t).wrapping_add(w14)
+        x = w6 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w6 >> 3u32) ^ (y as uint32); w5 = w5.wrapping_add(t)
         x = h as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
-        c = c + t + (b ^ (h & (a ^ b))) + 0x4a7484aau32 + w5
-        g = g + c
-        x = d as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; c = c + t
-        t = d | e; t = (f & t) | (d & e); c = c + t
-        x = w4 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w4 >> 10u32) ^ (y as uint32); w6 = w6 + t + w15
-        x = w7 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w7 >> 3u32) ^ (y as uint32); w6 = w6 + t
+        c = c.wrapping_add(t).wrapping_add(b ^ (h & (a ^ b))).wrapping_add(0x4a7484aau32).wrapping_add(w5)
+        g = g.wrapping_add(c)
+        x = d as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; c = c.wrapping_add(t)
+        t = d | e; t = (f & t) | (d & e); c = c.wrapping_add(t)
+        x = w4 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w4 >> 10u32) ^ (y as uint32); w6 = w6.wrapping_add(t).wrapping_add(w15)
+        x = w7 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w7 >> 3u32) ^ (y as uint32); w6 = w6.wrapping_add(t)
         x = g as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
-        b = b + t + (a ^ (g & (h ^ a))) + 0x5cb0a9dcu32 + w6
-        f = f + b
-        x = c as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; b = b + t
-        t = c | d; t = (e & t) | (c & d); b = b + t
-        x = w5 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w5 >> 10u32) ^ (y as uint32); w7 = w7 + t + w0
-        x = w8 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w8 >> 3u32) ^ (y as uint32); w7 = w7 + t
+        b = b.wrapping_add(t).wrapping_add(a ^ (g & (h ^ a))).wrapping_add(0x5cb0a9dcu32).wrapping_add(w6)
+        f = f.wrapping_add(b)
+        x = c as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; b = b.wrapping_add(t)
+        t = c | d; t = (e & t) | (c & d); b = b.wrapping_add(t)
+        x = w5 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w5 >> 10u32) ^ (y as uint32); w7 = w7.wrapping_add(t).wrapping_add(w0)
+        x = w8 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w8 >> 3u32) ^ (y as uint32); w7 = w7.wrapping_add(t)
         x = f as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
-        a = a + t + (h ^ (f & (g ^ h))) + 0x76f988dau32 + w7
-        e = e + a
-        x = b as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; a = a + t
-        t = b | c; t = (d & t) | (b & c); a = a + t
-        x = w6 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w6 >> 10u32) ^ (y as uint32); w8 = w8 + t + w1
-        x = w9 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w9 >> 3u32) ^ (y as uint32); w8 = w8 + t
+        a = a.wrapping_add(t).wrapping_add(h ^ (f & (g ^ h))).wrapping_add(0x76f988dau32).wrapping_add(w7)
+        e = e.wrapping_add(a)
+        x = b as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; a = a.wrapping_add(t)
+        t = b | c; t = (d & t) | (b & c); a = a.wrapping_add(t)
+        x = w6 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w6 >> 10u32) ^ (y as uint32); w8 = w8.wrapping_add(t).wrapping_add(w1)
+        x = w9 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w9 >> 3u32) ^ (y as uint32); w8 = w8.wrapping_add(t)
         x = e as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
-        h = h + t + (g ^ (e & (f ^ g))) + 0x983e5152u32 + w8
-        d = d + h
-        x = a as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; h = h + t
-        t = a | b; t = (c & t) | (a & b); h = h + t
-        x = w7 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w7 >> 10u32) ^ (y as uint32); w9 = w9 + t + w2
-        x = w10 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w10 >> 3u32) ^ (y as uint32); w9 = w9 + t
+        h = h.wrapping_add(t).wrapping_add(g ^ (e & (f ^ g))).wrapping_add(0x983e5152u32).wrapping_add(w8)
+        d = d.wrapping_add(h)
+        x = a as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; h = h.wrapping_add(t)
+        t = a | b; t = (c & t) | (a & b); h = h.wrapping_add(t)
+        x = w7 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w7 >> 10u32) ^ (y as uint32); w9 = w9.wrapping_add(t).wrapping_add(w2)
+        x = w10 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w10 >> 3u32) ^ (y as uint32); w9 = w9.wrapping_add(t)
         x = d as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
-        g = g + t + (f ^ (d & (e ^ f))) + 0xa831c66du32 + w9
-        c = c + g
-        x = h as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; g = g + t
-        t = h | a; t = (b & t) | (h & a); g = g + t
-        x = w8 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w8 >> 10u32) ^ (y as uint32); w10 = w10 + t + w3
-        x = w11 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w11 >> 3u32) ^ (y as uint32); w10 = w10 + t
+        g = g.wrapping_add(t).wrapping_add(f ^ (d & (e ^ f))).wrapping_add(0xa831c66du32).wrapping_add(w9)
+        c = c.wrapping_add(g)
+        x = h as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; g = g.wrapping_add(t)
+        t = h | a; t = (b & t) | (h & a); g = g.wrapping_add(t)
+        x = w8 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w8 >> 10u32) ^ (y as uint32); w10 = w10.wrapping_add(t).wrapping_add(w3)
+        x = w11 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w11 >> 3u32) ^ (y as uint32); w10 = w10.wrapping_add(t)
         x = c as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
-        f = f + t + (e ^ (c & (d ^ e))) + 0xb00327c8u32 + w10
-        b = b + f
-        x = g as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; f = f + t
-        t = g | h; t = (a & t) | (g & h); f = f + t
-        x = w9 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w9 >> 10u32) ^ (y as uint32); w11 = w11 + t + w4
-        x = w12 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w12 >> 3u32) ^ (y as uint32); w11 = w11 + t
+        f = f.wrapping_add(t).wrapping_add(e ^ (c & (d ^ e))).wrapping_add(0xb00327c8u32).wrapping_add(w10)
+        b = b.wrapping_add(f)
+        x = g as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; f = f.wrapping_add(t)
+        t = g | h; t = (a & t) | (g & h); f = f.wrapping_add(t)
+        x = w9 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w9 >> 10u32) ^ (y as uint32); w11 = w11.wrapping_add(t).wrapping_add(w4)
+        x = w12 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w12 >> 3u32) ^ (y as uint32); w11 = w11.wrapping_add(t)
         x = b as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
-        e = e + t + (d ^ (b & (c ^ d))) + 0xbf597fc7u32 + w11
-        a = a + e
-        x = f as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; e = e + t
-        t = f | g; t = (h & t) | (f & g); e = e + t
-        x = w10 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w10 >> 10u32) ^ (y as uint32); w12 = w12 + t + w5
-        x = w13 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w13 >> 3u32) ^ (y as uint32); w12 = w12 + t
+        e = e.wrapping_add(t).wrapping_add(d ^ (b & (c ^ d))).wrapping_add(0xbf597fc7u32).wrapping_add(w11)
+        a = a.wrapping_add(e)
+        x = f as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; e = e.wrapping_add(t)
+        t = f | g; t = (h & t) | (f & g); e = e.wrapping_add(t)
+        x = w10 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w10 >> 10u32) ^ (y as uint32); w12 = w12.wrapping_add(t).wrapping_add(w5)
+        x = w13 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w13 >> 3u32) ^ (y as uint32); w12 = w12.wrapping_add(t)
         x = a as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
-        d = d + t + (c ^ (a & (b ^ c))) + 0xc6e00bf3u32 + w12
-        h = h + d
-        x = e as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; d = d + t
-        t = e | f; t = (g & t) | (e & f); d = d + t
-        x = w11 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w11 >> 10u32) ^ (y as uint32); w13 = w13 + t + w6
-        x = w14 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w14 >> 3u32) ^ (y as uint32); w13 = w13 + t
+        d = d.wrapping_add(t).wrapping_add(c ^ (a & (b ^ c))).wrapping_add(0xc6e00bf3u32).wrapping_add(w12)
+        h = h.wrapping_add(d)
+        x = e as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; d = d.wrapping_add(t)
+        t = e | f; t = (g & t) | (e & f); d = d.wrapping_add(t)
+        x = w11 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w11 >> 10u32) ^ (y as uint32); w13 = w13.wrapping_add(t).wrapping_add(w6)
+        x = w14 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w14 >> 3u32) ^ (y as uint32); w13 = w13.wrapping_add(t)
         x = h as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
-        c = c + t + (b ^ (h & (a ^ b))) + 0xd5a79147u32 + w13
-        g = g + c
-        x = d as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; c = c + t
-        t = d | e; t = (f & t) | (d & e); c = c + t
-        x = w12 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w12 >> 10u32) ^ (y as uint32); w14 = w14 + t + w7
-        x = w15 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w15 >> 3u32) ^ (y as uint32); w14 = w14 + t
+        c = c.wrapping_add(t).wrapping_add(b ^ (h & (a ^ b))).wrapping_add(0xd5a79147u32).wrapping_add(w13)
+        g = g.wrapping_add(c)
+        x = d as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; c = c.wrapping_add(t)
+        t = d | e; t = (f & t) | (d & e); c = c.wrapping_add(t)
+        x = w12 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w12 >> 10u32) ^ (y as uint32); w14 = w14.wrapping_add(t).wrapping_add(w7)
+        x = w15 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w15 >> 3u32) ^ (y as uint32); w14 = w14.wrapping_add(t)
         x = g as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
-        b = b + t + (a ^ (g & (h ^ a))) + 0x06ca6351u32 + w14
-        f = f + b
-        x = c as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; b = b + t
-        t = c | d; t = (e & t) | (c & d); b = b + t
-        x = w13 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w13 >> 10u32) ^ (y as uint32); w15 = w15 + t + w8
-        x = w0 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w0 >> 3u32) ^ (y as uint32); w15 = w15 + t
+        b = b.wrapping_add(t).wrapping_add(a ^ (g & (h ^ a))).wrapping_add(0x06ca6351u32).wrapping_add(w14)
+        f = f.wrapping_add(b)
+        x = c as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; b = b.wrapping_add(t)
+        t = c | d; t = (e & t) | (c & d); b = b.wrapping_add(t)
+        x = w13 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w13 >> 10u32) ^ (y as uint32); w15 = w15.wrapping_add(t).wrapping_add(w8)
+        x = w0 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w0 >> 3u32) ^ (y as uint32); w15 = w15.wrapping_add(t)
         x = f as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
-        a = a + t + (h ^ (f & (g ^ h))) + 0x14292967u32 + w15
-        e = e + a
-        x = b as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; a = a + t
-        t = b | c; t = (d & t) | (b & c); a = a + t
-        x = w14 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w14 >> 10u32) ^ (y as uint32); w0 = w0 + t + w9
-        x = w1 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w1 >> 3u32) ^ (y as uint32); w0 = w0 + t
+        a = a.wrapping_add(t).wrapping_add(h ^ (f & (g ^ h))).wrapping_add(0x14292967u32).wrapping_add(w15)
+        e = e.wrapping_add(a)
+        x = b as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; a = a.wrapping_add(t)
+        t = b | c; t = (d & t) | (b & c); a = a.wrapping_add(t)
+        x = w14 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w14 >> 10u32) ^ (y as uint32); w0 = w0.wrapping_add(t).wrapping_add(w9)
+        x = w1 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w1 >> 3u32) ^ (y as uint32); w0 = w0.wrapping_add(t)
         x = e as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
-        h = h + t + (g ^ (e & (f ^ g))) + 0x27b70a85u32 + w0
-        d = d + h
-        x = a as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; h = h + t
-        t = a | b; t = (c & t) | (a & b); h = h + t
-        x = w15 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w15 >> 10u32) ^ (y as uint32); w1 = w1 + t + w10
-        x = w2 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w2 >> 3u32) ^ (y as uint32); w1 = w1 + t
+        h = h.wrapping_add(t).wrapping_add(g ^ (e & (f ^ g))).wrapping_add(0x27b70a85u32).wrapping_add(w0)
+        d = d.wrapping_add(h)
+        x = a as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; h = h.wrapping_add(t)
+        t = a | b; t = (c & t) | (a & b); h = h.wrapping_add(t)
+        x = w15 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w15 >> 10u32) ^ (y as uint32); w1 = w1.wrapping_add(t).wrapping_add(w10)
+        x = w2 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w2 >> 3u32) ^ (y as uint32); w1 = w1.wrapping_add(t)
         x = d as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
-        g = g + t + (f ^ (d & (e ^ f))) + 0x2e1b2138u32 + w1
-        c = c + g
-        x = h as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; g = g + t
-        t = h | a; t = (b & t) | (h & a); g = g + t
-        x = w0 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w0 >> 10u32) ^ (y as uint32); w2 = w2 + t + w11
-        x = w3 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w3 >> 3u32) ^ (y as uint32); w2 = w2 + t
+        g = g.wrapping_add(t).wrapping_add(f ^ (d & (e ^ f))).wrapping_add(0x2e1b2138u32).wrapping_add(w1)
+        c = c.wrapping_add(g)
+        x = h as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; g = g.wrapping_add(t)
+        t = h | a; t = (b & t) | (h & a); g = g.wrapping_add(t)
+        x = w0 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w0 >> 10u32) ^ (y as uint32); w2 = w2.wrapping_add(t).wrapping_add(w11)
+        x = w3 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w3 >> 3u32) ^ (y as uint32); w2 = w2.wrapping_add(t)
         x = c as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
-        f = f + t + (e ^ (c & (d ^ e))) + 0x4d2c6dfcu32 + w2
-        b = b + f
-        x = g as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; f = f + t
-        t = g | h; t = (a & t) | (g & h); f = f + t
-        x = w1 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w1 >> 10u32) ^ (y as uint32); w3 = w3 + t + w12
-        x = w4 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w4 >> 3u32) ^ (y as uint32); w3 = w3 + t
+        f = f.wrapping_add(t).wrapping_add(e ^ (c & (d ^ e))).wrapping_add(0x4d2c6dfcu32).wrapping_add(w2)
+        b = b.wrapping_add(f)
+        x = g as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; f = f.wrapping_add(t)
+        t = g | h; t = (a & t) | (g & h); f = f.wrapping_add(t)
+        x = w1 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w1 >> 10u32) ^ (y as uint32); w3 = w3.wrapping_add(t).wrapping_add(w12)
+        x = w4 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w4 >> 3u32) ^ (y as uint32); w3 = w3.wrapping_add(t)
         x = b as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
-        e = e + t + (d ^ (b & (c ^ d))) + 0x53380d13u32 + w3
-        a = a + e
-        x = f as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; e = e + t
-        t = f | g; t = (h & t) | (f & g); e = e + t
-        x = w2 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w2 >> 10u32) ^ (y as uint32); w4 = w4 + t + w13
-        x = w5 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w5 >> 3u32) ^ (y as uint32); w4 = w4 + t
+        e = e.wrapping_add(t).wrapping_add(d ^ (b & (c ^ d))).wrapping_add(0x53380d13u32).wrapping_add(w3)
+        a = a.wrapping_add(e)
+        x = f as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; e = e.wrapping_add(t)
+        t = f | g; t = (h & t) | (f & g); e = e.wrapping_add(t)
+        x = w2 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w2 >> 10u32) ^ (y as uint32); w4 = w4.wrapping_add(t).wrapping_add(w13)
+        x = w5 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w5 >> 3u32) ^ (y as uint32); w4 = w4.wrapping_add(t)
         x = a as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
-        d = d + t + (c ^ (a & (b ^ c))) + 0x650a7354u32 + w4
-        h = h + d
-        x = e as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; d = d + t
-        t = e | f; t = (g & t) | (e & f); d = d + t
-        x = w3 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w3 >> 10u32) ^ (y as uint32); w5 = w5 + t + w14
-        x = w6 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w6 >> 3u32) ^ (y as uint32); w5 = w5 + t
+        d = d.wrapping_add(t).wrapping_add(c ^ (a & (b ^ c))).wrapping_add(0x650a7354u32).wrapping_add(w4)
+        h = h.wrapping_add(d)
+        x = e as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; d = d.wrapping_add(t)
+        t = e | f; t = (g & t) | (e & f); d = d.wrapping_add(t)
+        x = w3 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w3 >> 10u32) ^ (y as uint32); w5 = w5.wrapping_add(t).wrapping_add(w14)
+        x = w6 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w6 >> 3u32) ^ (y as uint32); w5 = w5.wrapping_add(t)
         x = h as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
-        c = c + t + (b ^ (h & (a ^ b))) + 0x766a0abbu32 + w5
-        g = g + c
-        x = d as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; c = c + t
-        t = d | e; t = (f & t) | (d & e); c = c + t
-        x = w4 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w4 >> 10u32) ^ (y as uint32); w6 = w6 + t + w15
-        x = w7 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w7 >> 3u32) ^ (y as uint32); w6 = w6 + t
+        c = c.wrapping_add(t).wrapping_add(b ^ (h & (a ^ b))).wrapping_add(0x766a0abbu32).wrapping_add(w5)
+        g = g.wrapping_add(c)
+        x = d as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; c = c.wrapping_add(t)
+        t = d | e; t = (f & t) | (d & e); c = c.wrapping_add(t)
+        x = w4 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w4 >> 10u32) ^ (y as uint32); w6 = w6.wrapping_add(t).wrapping_add(w15)
+        x = w7 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w7 >> 3u32) ^ (y as uint32); w6 = w6.wrapping_add(t)
         x = g as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
-        b = b + t + (a ^ (g & (h ^ a))) + 0x81c2c92eu32 + w6
-        f = f + b
-        x = c as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; b = b + t
-        t = c | d; t = (e & t) | (c & d); b = b + t
-        x = w5 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w5 >> 10u32) ^ (y as uint32); w7 = w7 + t + w0
-        x = w8 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w8 >> 3u32) ^ (y as uint32); w7 = w7 + t
+        b = b.wrapping_add(t).wrapping_add(a ^ (g & (h ^ a))).wrapping_add(0x81c2c92eu32).wrapping_add(w6)
+        f = f.wrapping_add(b)
+        x = c as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; b = b.wrapping_add(t)
+        t = c | d; t = (e & t) | (c & d); b = b.wrapping_add(t)
+        x = w5 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w5 >> 10u32) ^ (y as uint32); w7 = w7.wrapping_add(t).wrapping_add(w0)
+        x = w8 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w8 >> 3u32) ^ (y as uint32); w7 = w7.wrapping_add(t)
         x = f as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
-        a = a + t + (h ^ (f & (g ^ h))) + 0x92722c85u32 + w7
-        e = e + a
-        x = b as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; a = a + t
-        t = b | c; t = (d & t) | (b & c); a = a + t
-        x = w6 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w6 >> 10u32) ^ (y as uint32); w8 = w8 + t + w1
-        x = w9 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w9 >> 3u32) ^ (y as uint32); w8 = w8 + t
+        a = a.wrapping_add(t).wrapping_add(h ^ (f & (g ^ h))).wrapping_add(0x92722c85u32).wrapping_add(w7)
+        e = e.wrapping_add(a)
+        x = b as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; a = a.wrapping_add(t)
+        t = b | c; t = (d & t) | (b & c); a = a.wrapping_add(t)
+        x = w6 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w6 >> 10u32) ^ (y as uint32); w8 = w8.wrapping_add(t).wrapping_add(w1)
+        x = w9 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w9 >> 3u32) ^ (y as uint32); w8 = w8.wrapping_add(t)
         x = e as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
-        h = h + t + (g ^ (e & (f ^ g))) + 0xa2bfe8a1u32 + w8
-        d = d + h
-        x = a as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; h = h + t
-        t = a | b; t = (c & t) | (a & b); h = h + t
-        x = w7 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w7 >> 10u32) ^ (y as uint32); w9 = w9 + t + w2
-        x = w10 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w10 >> 3u32) ^ (y as uint32); w9 = w9 + t
+        h = h.wrapping_add(t).wrapping_add(g ^ (e & (f ^ g))).wrapping_add(0xa2bfe8a1u32).wrapping_add(w8)
+        d = d.wrapping_add(h)
+        x = a as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; h = h.wrapping_add(t)
+        t = a | b; t = (c & t) | (a & b); h = h.wrapping_add(t)
+        x = w7 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w7 >> 10u32) ^ (y as uint32); w9 = w9.wrapping_add(t).wrapping_add(w2)
+        x = w10 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w10 >> 3u32) ^ (y as uint32); w9 = w9.wrapping_add(t)
         x = d as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
-        g = g + t + (f ^ (d & (e ^ f))) + 0xa81a664bu32 + w9
-        c = c + g
-        x = h as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; g = g + t
-        t = h | a; t = (b & t) | (h & a); g = g + t
-        x = w8 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w8 >> 10u32) ^ (y as uint32); w10 = w10 + t + w3
-        x = w11 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w11 >> 3u32) ^ (y as uint32); w10 = w10 + t
+        g = g.wrapping_add(t).wrapping_add(f ^ (d & (e ^ f))).wrapping_add(0xa81a664bu32).wrapping_add(w9)
+        c = c.wrapping_add(g)
+        x = h as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; g = g.wrapping_add(t)
+        t = h | a; t = (b & t) | (h & a); g = g.wrapping_add(t)
+        x = w8 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w8 >> 10u32) ^ (y as uint32); w10 = w10.wrapping_add(t).wrapping_add(w3)
+        x = w11 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w11 >> 3u32) ^ (y as uint32); w10 = w10.wrapping_add(t)
         x = c as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
-        f = f + t + (e ^ (c & (d ^ e))) + 0xc24b8b70u32 + w10
-        b = b + f
-        x = g as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; f = f + t
-        t = g | h; t = (a & t) | (g & h); f = f + t
-        x = w9 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w9 >> 10u32) ^ (y as uint32); w11 = w11 + t + w4
-        x = w12 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w12 >> 3u32) ^ (y as uint32); w11 = w11 + t
+        f = f.wrapping_add(t).wrapping_add(e ^ (c & (d ^ e))).wrapping_add(0xc24b8b70u32).wrapping_add(w10)
+        b = b.wrapping_add(f)
+        x = g as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; f = f.wrapping_add(t)
+        t = g | h; t = (a & t) | (g & h); f = f.wrapping_add(t)
+        x = w9 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w9 >> 10u32) ^ (y as uint32); w11 = w11.wrapping_add(t).wrapping_add(w4)
+        x = w12 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w12 >> 3u32) ^ (y as uint32); w11 = w11.wrapping_add(t)
         x = b as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
-        e = e + t + (d ^ (b & (c ^ d))) + 0xc76c51a3u32 + w11
-        a = a + e
-        x = f as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; e = e + t
-        t = f | g; t = (h & t) | (f & g); e = e + t
-        x = w10 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w10 >> 10u32) ^ (y as uint32); w12 = w12 + t + w5
-        x = w13 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w13 >> 3u32) ^ (y as uint32); w12 = w12 + t
+        e = e.wrapping_add(t).wrapping_add(d ^ (b & (c ^ d))).wrapping_add(0xc76c51a3u32).wrapping_add(w11)
+        a = a.wrapping_add(e)
+        x = f as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; e = e.wrapping_add(t)
+        t = f | g; t = (h & t) | (f & g); e = e.wrapping_add(t)
+        x = w10 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w10 >> 10u32) ^ (y as uint32); w12 = w12.wrapping_add(t).wrapping_add(w5)
+        x = w13 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w13 >> 3u32) ^ (y as uint32); w12 = w12.wrapping_add(t)
         x = a as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
-        d = d + t + (c ^ (a & (b ^ c))) + 0xd192e819u32 + w12
-        h = h + d
-        x = e as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; d = d + t
-        t = e | f; t = (g & t) | (e & f); d = d + t
-        x = w11 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w11 >> 10u32) ^ (y as uint32); w13 = w13 + t + w6
-        x = w14 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w14 >> 3u32) ^ (y as uint32); w13 = w13 + t
+        d = d.wrapping_add(t).wrapping_add(c ^ (a & (b ^ c))).wrapping_add(0xd192e819u32).wrapping_add(w12)
+        h = h.wrapping_add(d)
+        x = e as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; d = d.wrapping_add(t)
+        t = e | f; t = (g & t) | (e & f); d = d.wrapping_add(t)
+        x = w11 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w11 >> 10u32) ^ (y as uint32); w13 = w13.wrapping_add(t).wrapping_add(w6)
+        x = w14 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w14 >> 3u32) ^ (y as uint32); w13 = w13.wrapping_add(t)
         x = h as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
-        c = c + t + (b ^ (h & (a ^ b))) + 0xd6990624u32 + w13
-        g = g + c
-        x = d as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; c = c + t
-        t = d | e; t = (f & t) | (d & e); c = c + t
-        x = w12 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w12 >> 10u32) ^ (y as uint32); w14 = w14 + t + w7
-        x = w15 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w15 >> 3u32) ^ (y as uint32); w14 = w14 + t
+        c = c.wrapping_add(t).wrapping_add(b ^ (h & (a ^ b))).wrapping_add(0xd6990624u32).wrapping_add(w13)
+        g = g.wrapping_add(c)
+        x = d as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; c = c.wrapping_add(t)
+        t = d | e; t = (f & t) | (d & e); c = c.wrapping_add(t)
+        x = w12 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w12 >> 10u32) ^ (y as uint32); w14 = w14.wrapping_add(t).wrapping_add(w7)
+        x = w15 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w15 >> 3u32) ^ (y as uint32); w14 = w14.wrapping_add(t)
         x = g as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
-        b = b + t + (a ^ (g & (h ^ a))) + 0xf40e3585u32 + w14
-        f = f + b
-        x = c as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; b = b + t
-        t = c | d; t = (e & t) | (c & d); b = b + t
-        x = w13 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w13 >> 10u32) ^ (y as uint32); w15 = w15 + t + w8
-        x = w0 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w0 >> 3u32) ^ (y as uint32); w15 = w15 + t
+        b = b.wrapping_add(t).wrapping_add(a ^ (g & (h ^ a))).wrapping_add(0xf40e3585u32).wrapping_add(w14)
+        f = f.wrapping_add(b)
+        x = c as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; b = b.wrapping_add(t)
+        t = c | d; t = (e & t) | (c & d); b = b.wrapping_add(t)
+        x = w13 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w13 >> 10u32) ^ (y as uint32); w15 = w15.wrapping_add(t).wrapping_add(w8)
+        x = w0 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w0 >> 3u32) ^ (y as uint32); w15 = w15.wrapping_add(t)
         x = f as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
-        a = a + t + (h ^ (f & (g ^ h))) + 0x106aa070u32 + w15
-        e = e + a
-        x = b as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; a = a + t
-        t = b | c; t = (d & t) | (b & c); a = a + t
-        x = w14 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w14 >> 10u32) ^ (y as uint32); w0 = w0 + t + w9
-        x = w1 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w1 >> 3u32) ^ (y as uint32); w0 = w0 + t
+        a = a.wrapping_add(t).wrapping_add(h ^ (f & (g ^ h))).wrapping_add(0x106aa070u32).wrapping_add(w15)
+        e = e.wrapping_add(a)
+        x = b as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; a = a.wrapping_add(t)
+        t = b | c; t = (d & t) | (b & c); a = a.wrapping_add(t)
+        x = w14 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w14 >> 10u32) ^ (y as uint32); w0 = w0.wrapping_add(t).wrapping_add(w9)
+        x = w1 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w1 >> 3u32) ^ (y as uint32); w0 = w0.wrapping_add(t)
         x = e as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
-        h = h + t + (g ^ (e & (f ^ g))) + 0x19a4c116u32 + w0
-        d = d + h
-        x = a as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; h = h + t
-        t = a | b; t = (c & t) | (a & b); h = h + t
-        x = w15 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w15 >> 10u32) ^ (y as uint32); w1 = w1 + t + w10
-        x = w2 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w2 >> 3u32) ^ (y as uint32); w1 = w1 + t
+        h = h.wrapping_add(t).wrapping_add(g ^ (e & (f ^ g))).wrapping_add(0x19a4c116u32).wrapping_add(w0)
+        d = d.wrapping_add(h)
+        x = a as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; h = h.wrapping_add(t)
+        t = a | b; t = (c & t) | (a & b); h = h.wrapping_add(t)
+        x = w15 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w15 >> 10u32) ^ (y as uint32); w1 = w1.wrapping_add(t).wrapping_add(w10)
+        x = w2 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w2 >> 3u32) ^ (y as uint32); w1 = w1.wrapping_add(t)
         x = d as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
-        g = g + t + (f ^ (d & (e ^ f))) + 0x1e376c08u32 + w1
-        c = c + g
-        x = h as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; g = g + t
-        t = h | a; t = (b & t) | (h & a); g = g + t
-        x = w0 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w0 >> 10u32) ^ (y as uint32); w2 = w2 + t + w11
-        x = w3 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w3 >> 3u32) ^ (y as uint32); w2 = w2 + t
+        g = g.wrapping_add(t).wrapping_add(f ^ (d & (e ^ f))).wrapping_add(0x1e376c08u32).wrapping_add(w1)
+        c = c.wrapping_add(g)
+        x = h as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; g = g.wrapping_add(t)
+        t = h | a; t = (b & t) | (h & a); g = g.wrapping_add(t)
+        x = w0 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w0 >> 10u32) ^ (y as uint32); w2 = w2.wrapping_add(t).wrapping_add(w11)
+        x = w3 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w3 >> 3u32) ^ (y as uint32); w2 = w2.wrapping_add(t)
         x = c as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
-        f = f + t + (e ^ (c & (d ^ e))) + 0x2748774cu32 + w2
-        b = b + f
-        x = g as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; f = f + t
-        t = g | h; t = (a & t) | (g & h); f = f + t
-        x = w1 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w1 >> 10u32) ^ (y as uint32); w3 = w3 + t + w12
-        x = w4 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w4 >> 3u32) ^ (y as uint32); w3 = w3 + t
+        f = f.wrapping_add(t).wrapping_add(e ^ (c & (d ^ e))).wrapping_add(0x2748774cu32).wrapping_add(w2)
+        b = b.wrapping_add(f)
+        x = g as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; f = f.wrapping_add(t)
+        t = g | h; t = (a & t) | (g & h); f = f.wrapping_add(t)
+        x = w1 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w1 >> 10u32) ^ (y as uint32); w3 = w3.wrapping_add(t).wrapping_add(w12)
+        x = w4 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w4 >> 3u32) ^ (y as uint32); w3 = w3.wrapping_add(t)
         x = b as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
-        e = e + t + (d ^ (b & (c ^ d))) + 0x34b0bcb5u32 + w3
-        a = a + e
-        x = f as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; e = e + t
-        t = f | g; t = (h & t) | (f & g); e = e + t
-        x = w2 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w2 >> 10u32) ^ (y as uint32); w4 = w4 + t + w13
-        x = w5 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w5 >> 3u32) ^ (y as uint32); w4 = w4 + t
+        e = e.wrapping_add(t).wrapping_add(d ^ (b & (c ^ d))).wrapping_add(0x34b0bcb5u32).wrapping_add(w3)
+        a = a.wrapping_add(e)
+        x = f as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; e = e.wrapping_add(t)
+        t = f | g; t = (h & t) | (f & g); e = e.wrapping_add(t)
+        x = w2 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w2 >> 10u32) ^ (y as uint32); w4 = w4.wrapping_add(t).wrapping_add(w13)
+        x = w5 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w5 >> 3u32) ^ (y as uint32); w4 = w4.wrapping_add(t)
         x = a as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
-        d = d + t + (c ^ (a & (b ^ c))) + 0x391c0cb3u32 + w4
-        h = h + d
-        x = e as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; d = d + t
-        t = e | f; t = (g & t) | (e & f); d = d + t
-        x = w3 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w3 >> 10u32) ^ (y as uint32); w5 = w5 + t + w14
-        x = w6 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w6 >> 3u32) ^ (y as uint32); w5 = w5 + t
+        d = d.wrapping_add(t).wrapping_add(c ^ (a & (b ^ c))).wrapping_add(0x391c0cb3u32).wrapping_add(w4)
+        h = h.wrapping_add(d)
+        x = e as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; d = d.wrapping_add(t)
+        t = e | f; t = (g & t) | (e & f); d = d.wrapping_add(t)
+        x = w3 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w3 >> 10u32) ^ (y as uint32); w5 = w5.wrapping_add(t).wrapping_add(w14)
+        x = w6 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w6 >> 3u32) ^ (y as uint32); w5 = w5.wrapping_add(t)
         x = h as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
-        c = c + t + (b ^ (h & (a ^ b))) + 0x4ed8aa4au32 + w5
-        g = g + c
-        x = d as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; c = c + t
-        t = d | e; t = (f & t) | (d & e); c = c + t
-        x = w4 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w4 >> 10u32) ^ (y as uint32); w6 = w6 + t + w15
-        x = w7 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w7 >> 3u32) ^ (y as uint32); w6 = w6 + t
+        c = c.wrapping_add(t).wrapping_add(b ^ (h & (a ^ b))).wrapping_add(0x4ed8aa4au32).wrapping_add(w5)
+        g = g.wrapping_add(c)
+        x = d as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; c = c.wrapping_add(t)
+        t = d | e; t = (f & t) | (d & e); c = c.wrapping_add(t)
+        x = w4 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w4 >> 10u32) ^ (y as uint32); w6 = w6.wrapping_add(t).wrapping_add(w15)
+        x = w7 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w7 >> 3u32) ^ (y as uint32); w6 = w6.wrapping_add(t)
         x = g as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
-        b = b + t + (a ^ (g & (h ^ a))) + 0x5b9cca4fu32 + w6
-        f = f + b
-        x = c as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; b = b + t
-        t = c | d; t = (e & t) | (c & d); b = b + t
-        x = w5 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w5 >> 10u32) ^ (y as uint32); w7 = w7 + t + w0
-        x = w8 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w8 >> 3u32) ^ (y as uint32); w7 = w7 + t
+        b = b.wrapping_add(t).wrapping_add(a ^ (g & (h ^ a))).wrapping_add(0x5b9cca4fu32).wrapping_add(w6)
+        f = f.wrapping_add(b)
+        x = c as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; b = b.wrapping_add(t)
+        t = c | d; t = (e & t) | (c & d); b = b.wrapping_add(t)
+        x = w5 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w5 >> 10u32) ^ (y as uint32); w7 = w7.wrapping_add(t).wrapping_add(w0)
+        x = w8 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w8 >> 3u32) ^ (y as uint32); w7 = w7.wrapping_add(t)
         x = f as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
-        a = a + t + (h ^ (f & (g ^ h))) + 0x682e6ff3u32 + w7
-        e = e + a
-        x = b as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; a = a + t
-        t = b | c; t = (d & t) | (b & c); a = a + t
-        x = w6 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w6 >> 10u32) ^ (y as uint32); w8 = w8 + t + w1
-        x = w9 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w9 >> 3u32) ^ (y as uint32); w8 = w8 + t
+        a = a.wrapping_add(t).wrapping_add(h ^ (f & (g ^ h))).wrapping_add(0x682e6ff3u32).wrapping_add(w7)
+        e = e.wrapping_add(a)
+        x = b as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; a = a.wrapping_add(t)
+        t = b | c; t = (d & t) | (b & c); a = a.wrapping_add(t)
+        x = w6 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w6 >> 10u32) ^ (y as uint32); w8 = w8.wrapping_add(t).wrapping_add(w1)
+        x = w9 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w9 >> 3u32) ^ (y as uint32); w8 = w8.wrapping_add(t)
         x = e as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
-        h = h + t + (g ^ (e & (f ^ g))) + 0x748f82eeu32 + w8
-        d = d + h
-        x = a as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; h = h + t
-        t = a | b; t = (c & t) | (a & b); h = h + t
-        x = w7 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w7 >> 10u32) ^ (y as uint32); w9 = w9 + t + w2
-        x = w10 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w10 >> 3u32) ^ (y as uint32); w9 = w9 + t
+        h = h.wrapping_add(t).wrapping_add(g ^ (e & (f ^ g))).wrapping_add(0x748f82eeu32).wrapping_add(w8)
+        d = d.wrapping_add(h)
+        x = a as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; h = h.wrapping_add(t)
+        t = a | b; t = (c & t) | (a & b); h = h.wrapping_add(t)
+        x = w7 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w7 >> 10u32) ^ (y as uint32); w9 = w9.wrapping_add(t).wrapping_add(w2)
+        x = w10 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w10 >> 3u32) ^ (y as uint32); w9 = w9.wrapping_add(t)
         x = d as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
-        g = g + t + (f ^ (d & (e ^ f))) + 0x78a5636fu32 + w9
-        c = c + g
-        x = h as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; g = g + t
-        t = h | a; t = (b & t) | (h & a); g = g + t
-        x = w8 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w8 >> 10u32) ^ (y as uint32); w10 = w10 + t + w3
-        x = w11 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w11 >> 3u32) ^ (y as uint32); w10 = w10 + t
+        g = g.wrapping_add(t).wrapping_add(f ^ (d & (e ^ f))).wrapping_add(0x78a5636fu32).wrapping_add(w9)
+        c = c.wrapping_add(g)
+        x = h as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; g = g.wrapping_add(t)
+        t = h | a; t = (b & t) | (h & a); g = g.wrapping_add(t)
+        x = w8 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w8 >> 10u32) ^ (y as uint32); w10 = w10.wrapping_add(t).wrapping_add(w3)
+        x = w11 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w11 >> 3u32) ^ (y as uint32); w10 = w10.wrapping_add(t)
         x = c as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
-        f = f + t + (e ^ (c & (d ^ e))) + 0x84c87814u32 + w10
-        b = b + f
-        x = g as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; f = f + t
-        t = g | h; t = (a & t) | (g & h); f = f + t
-        x = w9 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w9 >> 10u32) ^ (y as uint32); w11 = w11 + t + w4
-        x = w12 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w12 >> 3u32) ^ (y as uint32); w11 = w11 + t
+        f = f.wrapping_add(t).wrapping_add(e ^ (c & (d ^ e))).wrapping_add(0x84c87814u32).wrapping_add(w10)
+        b = b.wrapping_add(f)
+        x = g as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; f = f.wrapping_add(t)
+        t = g | h; t = (a & t) | (g & h); f = f.wrapping_add(t)
+        x = w9 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w9 >> 10u32) ^ (y as uint32); w11 = w11.wrapping_add(t).wrapping_add(w4)
+        x = w12 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w12 >> 3u32) ^ (y as uint32); w11 = w11.wrapping_add(t)
         x = b as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
-        e = e + t + (d ^ (b & (c ^ d))) + 0x8cc70208u32 + w11
-        a = a + e
-        x = f as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; e = e + t
-        t = f | g; t = (h & t) | (f & g); e = e + t
-        x = w10 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w10 >> 10u32) ^ (y as uint32); w12 = w12 + t + w5
-        x = w13 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w13 >> 3u32) ^ (y as uint32); w12 = w12 + t
+        e = e.wrapping_add(t).wrapping_add(d ^ (b & (c ^ d))).wrapping_add(0x8cc70208u32).wrapping_add(w11)
+        a = a.wrapping_add(e)
+        x = f as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; e = e.wrapping_add(t)
+        t = f | g; t = (h & t) | (f & g); e = e.wrapping_add(t)
+        x = w10 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w10 >> 10u32) ^ (y as uint32); w12 = w12.wrapping_add(t).wrapping_add(w5)
+        x = w13 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w13 >> 3u32) ^ (y as uint32); w12 = w12.wrapping_add(t)
         x = a as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
-        d = d + t + (c ^ (a & (b ^ c))) + 0x90befffau32 + w12
-        h = h + d
-        x = e as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; d = d + t
-        t = e | f; t = (g & t) | (e & f); d = d + t
-        x = w11 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w11 >> 10u32) ^ (y as uint32); w13 = w13 + t + w6
-        x = w14 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w14 >> 3u32) ^ (y as uint32); w13 = w13 + t
+        d = d.wrapping_add(t).wrapping_add(c ^ (a & (b ^ c))).wrapping_add(0x90befffau32).wrapping_add(w12)
+        h = h.wrapping_add(d)
+        x = e as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; d = d.wrapping_add(t)
+        t = e | f; t = (g & t) | (e & f); d = d.wrapping_add(t)
+        x = w11 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w11 >> 10u32) ^ (y as uint32); w13 = w13.wrapping_add(t).wrapping_add(w6)
+        x = w14 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w14 >> 3u32) ^ (y as uint32); w13 = w13.wrapping_add(t)
         x = h as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
-        c = c + t + (b ^ (h & (a ^ b))) + 0xa4506cebu32 + w13
-        g = g + c
-        x = d as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; c = c + t
-        t = d | e; t = (f & t) | (d & e); c = c + t
-        x = w12 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w12 >> 10u32) ^ (y as uint32); w14 = w14 + t + w7
-        x = w15 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w15 >> 3u32) ^ (y as uint32); w14 = w14 + t
+        c = c.wrapping_add(t).wrapping_add(b ^ (h & (a ^ b))).wrapping_add(0xa4506cebu32).wrapping_add(w13)
+        g = g.wrapping_add(c)
+        x = d as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; c = c.wrapping_add(t)
+        t = d | e; t = (f & t) | (d & e); c = c.wrapping_add(t)
+        x = w12 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w12 >> 10u32) ^ (y as uint32); w14 = w14.wrapping_add(t).wrapping_add(w7)
+        x = w15 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w15 >> 3u32) ^ (y as uint32); w14 = w14.wrapping_add(t)
         x = g as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
-        b = b + t + (a ^ (g & (h ^ a))) + 0xbef9a3f7u32 + w14
-        f = f + b
-        x = c as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; b = b + t
-        t = c | d; t = (e & t) | (c & d); b = b + t
-        x = w13 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w13 >> 10u32) ^ (y as uint32); w15 = w15 + t + w8
-        x = w0 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w0 >> 3u32) ^ (y as uint32); w15 = w15 + t
+        b = b.wrapping_add(t).wrapping_add(a ^ (g & (h ^ a))).wrapping_add(0xbef9a3f7u32).wrapping_add(w14)
+        f = f.wrapping_add(b)
+        x = c as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; b = b.wrapping_add(t)
+        t = c | d; t = (e & t) | (c & d); b = b.wrapping_add(t)
+        x = w13 as uint64; x = (x << 32u64) | x; y = x >> 17u64; y = (x >> 19u64) ^ y; t = (w13 >> 10u32) ^ (y as uint32); w15 = w15.wrapping_add(t).wrapping_add(w8)
+        x = w0 as uint64; x = (x << 32u64) | x; y = x >> 7u64; y = (x >> 18u64) ^ y; t = (w0 >> 3u32) ^ (y as uint32); w15 = w15.wrapping_add(t)
         x = f as uint64; x = (x << 32u64) | x; y = x >> 6u64; y = (x >> 11u64) ^ y; y = (x >> 25u64) ^ y; t = y as uint32
-        a = a + t + (h ^ (f & (g ^ h))) + 0xc67178f2u32 + w15
-        e = e + a
-        x = b as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; a = a + t
-        t = b | c; t = (d & t) | (b & c); a = a + t
-        self.a = self.a + a
-        self.b = self.b + b
-        self.c = self.c + c
-        self.d = self.d + d
-        self.e = self.e + e
-        self.f = self.f + f
-        self.g = self.g + g
-        self.h = self.h + h
+        a = a.wrapping_add(t).wrapping_add(h ^ (f & (g ^ h))).wrapping_add(0xc67178f2u32).wrapping_add(w15)
+        e = e.wrapping_add(a)
+        x = b as uint64; x = (x << 32u64) | x; y = x >> 2u64; y = (x >> 13u64) ^ y; y = (x >> 22u64) ^ y; t = y as uint32; a = a.wrapping_add(t)
+        t = b | c; t = (d & t) | (b & c); a = a.wrapping_add(t)
+        self.a = self.a.wrapping_add(a)
+        self.b = self.b.wrapping_add(b)
+        self.c = self.c.wrapping_add(c)
+        self.d = self.d.wrapping_add(d)
+        self.e = self.e.wrapping_add(e)
+        self.f = self.f.wrapping_add(f)
+        self.g = self.g.wrapping_add(g)
+        self.h = self.h.wrapping_add(h)
     }
 
     fun close(var self) {
@@ -1826,606 +1826,606 @@ impl Sha512 {
         var g = self.g
         var h = self.h
         // SHA-256's rounds, with SHA-512's functions
-        h = h + sha512_s1(e)
-        h = h + (g ^ (e & (f ^ g))) + 0x428a2f98d728ae22u64 + w0
-        d = d + h
-        h = h + sha512_s0(a)
-        h = h + sha512_maj(a, b, c)
-        g = g + sha512_s1(d)
-        g = g + (f ^ (d & (e ^ f))) + 0x7137449123ef65cdu64 + w1
-        c = c + g
-        g = g + sha512_s0(h)
-        g = g + sha512_maj(h, a, b)
-        f = f + sha512_s1(c)
-        f = f + (e ^ (c & (d ^ e))) + 0xb5c0fbcfec4d3b2fu64 + w2
-        b = b + f
-        f = f + sha512_s0(g)
-        f = f + sha512_maj(g, h, a)
-        e = e + sha512_s1(b)
-        e = e + (d ^ (b & (c ^ d))) + 0xe9b5dba58189dbbcu64 + w3
-        a = a + e
-        e = e + sha512_s0(f)
-        e = e + sha512_maj(f, g, h)
-        d = d + sha512_s1(a)
-        d = d + (c ^ (a & (b ^ c))) + 0x3956c25bf348b538u64 + w4
-        h = h + d
-        d = d + sha512_s0(e)
-        d = d + sha512_maj(e, f, g)
-        c = c + sha512_s1(h)
-        c = c + (b ^ (h & (a ^ b))) + 0x59f111f1b605d019u64 + w5
-        g = g + c
-        c = c + sha512_s0(d)
-        c = c + sha512_maj(d, e, f)
-        b = b + sha512_s1(g)
-        b = b + (a ^ (g & (h ^ a))) + 0x923f82a4af194f9bu64 + w6
-        f = f + b
-        b = b + sha512_s0(c)
-        b = b + sha512_maj(c, d, e)
-        a = a + sha512_s1(f)
-        a = a + (h ^ (f & (g ^ h))) + 0xab1c5ed5da6d8118u64 + w7
-        e = e + a
-        a = a + sha512_s0(b)
-        a = a + sha512_maj(b, c, d)
-        h = h + sha512_s1(e)
-        h = h + (g ^ (e & (f ^ g))) + 0xd807aa98a3030242u64 + w8
-        d = d + h
-        h = h + sha512_s0(a)
-        h = h + sha512_maj(a, b, c)
-        g = g + sha512_s1(d)
-        g = g + (f ^ (d & (e ^ f))) + 0x12835b0145706fbeu64 + w9
-        c = c + g
-        g = g + sha512_s0(h)
-        g = g + sha512_maj(h, a, b)
-        f = f + sha512_s1(c)
-        f = f + (e ^ (c & (d ^ e))) + 0x243185be4ee4b28cu64 + w10
-        b = b + f
-        f = f + sha512_s0(g)
-        f = f + sha512_maj(g, h, a)
-        e = e + sha512_s1(b)
-        e = e + (d ^ (b & (c ^ d))) + 0x550c7dc3d5ffb4e2u64 + w11
-        a = a + e
-        e = e + sha512_s0(f)
-        e = e + sha512_maj(f, g, h)
-        d = d + sha512_s1(a)
-        d = d + (c ^ (a & (b ^ c))) + 0x72be5d74f27b896fu64 + w12
-        h = h + d
-        d = d + sha512_s0(e)
-        d = d + sha512_maj(e, f, g)
-        c = c + sha512_s1(h)
-        c = c + (b ^ (h & (a ^ b))) + 0x80deb1fe3b1696b1u64 + w13
-        g = g + c
-        c = c + sha512_s0(d)
-        c = c + sha512_maj(d, e, f)
-        b = b + sha512_s1(g)
-        b = b + (a ^ (g & (h ^ a))) + 0x9bdc06a725c71235u64 + w14
-        f = f + b
-        b = b + sha512_s0(c)
-        b = b + sha512_maj(c, d, e)
-        a = a + sha512_s1(f)
-        a = a + (h ^ (f & (g ^ h))) + 0xc19bf174cf692694u64 + w15
-        e = e + a
-        a = a + sha512_s0(b)
-        a = a + sha512_maj(b, c, d)
-        w0 = w0 + sha512_g1(w14)
-        w0 = w0 + w9
-        w0 = w0 + sha512_g0(w1)
-        h = h + sha512_s1(e)
-        h = h + (g ^ (e & (f ^ g))) + 0xe49b69c19ef14ad2u64 + w0
-        d = d + h
-        h = h + sha512_s0(a)
-        h = h + sha512_maj(a, b, c)
-        w1 = w1 + sha512_g1(w15)
-        w1 = w1 + w10
-        w1 = w1 + sha512_g0(w2)
-        g = g + sha512_s1(d)
-        g = g + (f ^ (d & (e ^ f))) + 0xefbe4786384f25e3u64 + w1
-        c = c + g
-        g = g + sha512_s0(h)
-        g = g + sha512_maj(h, a, b)
-        w2 = w2 + sha512_g1(w0)
-        w2 = w2 + w11
-        w2 = w2 + sha512_g0(w3)
-        f = f + sha512_s1(c)
-        f = f + (e ^ (c & (d ^ e))) + 0x0fc19dc68b8cd5b5u64 + w2
-        b = b + f
-        f = f + sha512_s0(g)
-        f = f + sha512_maj(g, h, a)
-        w3 = w3 + sha512_g1(w1)
-        w3 = w3 + w12
-        w3 = w3 + sha512_g0(w4)
-        e = e + sha512_s1(b)
-        e = e + (d ^ (b & (c ^ d))) + 0x240ca1cc77ac9c65u64 + w3
-        a = a + e
-        e = e + sha512_s0(f)
-        e = e + sha512_maj(f, g, h)
-        w4 = w4 + sha512_g1(w2)
-        w4 = w4 + w13
-        w4 = w4 + sha512_g0(w5)
-        d = d + sha512_s1(a)
-        d = d + (c ^ (a & (b ^ c))) + 0x2de92c6f592b0275u64 + w4
-        h = h + d
-        d = d + sha512_s0(e)
-        d = d + sha512_maj(e, f, g)
-        w5 = w5 + sha512_g1(w3)
-        w5 = w5 + w14
-        w5 = w5 + sha512_g0(w6)
-        c = c + sha512_s1(h)
-        c = c + (b ^ (h & (a ^ b))) + 0x4a7484aa6ea6e483u64 + w5
-        g = g + c
-        c = c + sha512_s0(d)
-        c = c + sha512_maj(d, e, f)
-        w6 = w6 + sha512_g1(w4)
-        w6 = w6 + w15
-        w6 = w6 + sha512_g0(w7)
-        b = b + sha512_s1(g)
-        b = b + (a ^ (g & (h ^ a))) + 0x5cb0a9dcbd41fbd4u64 + w6
-        f = f + b
-        b = b + sha512_s0(c)
-        b = b + sha512_maj(c, d, e)
-        w7 = w7 + sha512_g1(w5)
-        w7 = w7 + w0
-        w7 = w7 + sha512_g0(w8)
-        a = a + sha512_s1(f)
-        a = a + (h ^ (f & (g ^ h))) + 0x76f988da831153b5u64 + w7
-        e = e + a
-        a = a + sha512_s0(b)
-        a = a + sha512_maj(b, c, d)
-        w8 = w8 + sha512_g1(w6)
-        w8 = w8 + w1
-        w8 = w8 + sha512_g0(w9)
-        h = h + sha512_s1(e)
-        h = h + (g ^ (e & (f ^ g))) + 0x983e5152ee66dfabu64 + w8
-        d = d + h
-        h = h + sha512_s0(a)
-        h = h + sha512_maj(a, b, c)
-        w9 = w9 + sha512_g1(w7)
-        w9 = w9 + w2
-        w9 = w9 + sha512_g0(w10)
-        g = g + sha512_s1(d)
-        g = g + (f ^ (d & (e ^ f))) + 0xa831c66d2db43210u64 + w9
-        c = c + g
-        g = g + sha512_s0(h)
-        g = g + sha512_maj(h, a, b)
-        w10 = w10 + sha512_g1(w8)
-        w10 = w10 + w3
-        w10 = w10 + sha512_g0(w11)
-        f = f + sha512_s1(c)
-        f = f + (e ^ (c & (d ^ e))) + 0xb00327c898fb213fu64 + w10
-        b = b + f
-        f = f + sha512_s0(g)
-        f = f + sha512_maj(g, h, a)
-        w11 = w11 + sha512_g1(w9)
-        w11 = w11 + w4
-        w11 = w11 + sha512_g0(w12)
-        e = e + sha512_s1(b)
-        e = e + (d ^ (b & (c ^ d))) + 0xbf597fc7beef0ee4u64 + w11
-        a = a + e
-        e = e + sha512_s0(f)
-        e = e + sha512_maj(f, g, h)
-        w12 = w12 + sha512_g1(w10)
-        w12 = w12 + w5
-        w12 = w12 + sha512_g0(w13)
-        d = d + sha512_s1(a)
-        d = d + (c ^ (a & (b ^ c))) + 0xc6e00bf33da88fc2u64 + w12
-        h = h + d
-        d = d + sha512_s0(e)
-        d = d + sha512_maj(e, f, g)
-        w13 = w13 + sha512_g1(w11)
-        w13 = w13 + w6
-        w13 = w13 + sha512_g0(w14)
-        c = c + sha512_s1(h)
-        c = c + (b ^ (h & (a ^ b))) + 0xd5a79147930aa725u64 + w13
-        g = g + c
-        c = c + sha512_s0(d)
-        c = c + sha512_maj(d, e, f)
-        w14 = w14 + sha512_g1(w12)
-        w14 = w14 + w7
-        w14 = w14 + sha512_g0(w15)
-        b = b + sha512_s1(g)
-        b = b + (a ^ (g & (h ^ a))) + 0x06ca6351e003826fu64 + w14
-        f = f + b
-        b = b + sha512_s0(c)
-        b = b + sha512_maj(c, d, e)
-        w15 = w15 + sha512_g1(w13)
-        w15 = w15 + w8
-        w15 = w15 + sha512_g0(w0)
-        a = a + sha512_s1(f)
-        a = a + (h ^ (f & (g ^ h))) + 0x142929670a0e6e70u64 + w15
-        e = e + a
-        a = a + sha512_s0(b)
-        a = a + sha512_maj(b, c, d)
-        w0 = w0 + sha512_g1(w14)
-        w0 = w0 + w9
-        w0 = w0 + sha512_g0(w1)
-        h = h + sha512_s1(e)
-        h = h + (g ^ (e & (f ^ g))) + 0x27b70a8546d22ffcu64 + w0
-        d = d + h
-        h = h + sha512_s0(a)
-        h = h + sha512_maj(a, b, c)
-        w1 = w1 + sha512_g1(w15)
-        w1 = w1 + w10
-        w1 = w1 + sha512_g0(w2)
-        g = g + sha512_s1(d)
-        g = g + (f ^ (d & (e ^ f))) + 0x2e1b21385c26c926u64 + w1
-        c = c + g
-        g = g + sha512_s0(h)
-        g = g + sha512_maj(h, a, b)
-        w2 = w2 + sha512_g1(w0)
-        w2 = w2 + w11
-        w2 = w2 + sha512_g0(w3)
-        f = f + sha512_s1(c)
-        f = f + (e ^ (c & (d ^ e))) + 0x4d2c6dfc5ac42aedu64 + w2
-        b = b + f
-        f = f + sha512_s0(g)
-        f = f + sha512_maj(g, h, a)
-        w3 = w3 + sha512_g1(w1)
-        w3 = w3 + w12
-        w3 = w3 + sha512_g0(w4)
-        e = e + sha512_s1(b)
-        e = e + (d ^ (b & (c ^ d))) + 0x53380d139d95b3dfu64 + w3
-        a = a + e
-        e = e + sha512_s0(f)
-        e = e + sha512_maj(f, g, h)
-        w4 = w4 + sha512_g1(w2)
-        w4 = w4 + w13
-        w4 = w4 + sha512_g0(w5)
-        d = d + sha512_s1(a)
-        d = d + (c ^ (a & (b ^ c))) + 0x650a73548baf63deu64 + w4
-        h = h + d
-        d = d + sha512_s0(e)
-        d = d + sha512_maj(e, f, g)
-        w5 = w5 + sha512_g1(w3)
-        w5 = w5 + w14
-        w5 = w5 + sha512_g0(w6)
-        c = c + sha512_s1(h)
-        c = c + (b ^ (h & (a ^ b))) + 0x766a0abb3c77b2a8u64 + w5
-        g = g + c
-        c = c + sha512_s0(d)
-        c = c + sha512_maj(d, e, f)
-        w6 = w6 + sha512_g1(w4)
-        w6 = w6 + w15
-        w6 = w6 + sha512_g0(w7)
-        b = b + sha512_s1(g)
-        b = b + (a ^ (g & (h ^ a))) + 0x81c2c92e47edaee6u64 + w6
-        f = f + b
-        b = b + sha512_s0(c)
-        b = b + sha512_maj(c, d, e)
-        w7 = w7 + sha512_g1(w5)
-        w7 = w7 + w0
-        w7 = w7 + sha512_g0(w8)
-        a = a + sha512_s1(f)
-        a = a + (h ^ (f & (g ^ h))) + 0x92722c851482353bu64 + w7
-        e = e + a
-        a = a + sha512_s0(b)
-        a = a + sha512_maj(b, c, d)
-        w8 = w8 + sha512_g1(w6)
-        w8 = w8 + w1
-        w8 = w8 + sha512_g0(w9)
-        h = h + sha512_s1(e)
-        h = h + (g ^ (e & (f ^ g))) + 0xa2bfe8a14cf10364u64 + w8
-        d = d + h
-        h = h + sha512_s0(a)
-        h = h + sha512_maj(a, b, c)
-        w9 = w9 + sha512_g1(w7)
-        w9 = w9 + w2
-        w9 = w9 + sha512_g0(w10)
-        g = g + sha512_s1(d)
-        g = g + (f ^ (d & (e ^ f))) + 0xa81a664bbc423001u64 + w9
-        c = c + g
-        g = g + sha512_s0(h)
-        g = g + sha512_maj(h, a, b)
-        w10 = w10 + sha512_g1(w8)
-        w10 = w10 + w3
-        w10 = w10 + sha512_g0(w11)
-        f = f + sha512_s1(c)
-        f = f + (e ^ (c & (d ^ e))) + 0xc24b8b70d0f89791u64 + w10
-        b = b + f
-        f = f + sha512_s0(g)
-        f = f + sha512_maj(g, h, a)
-        w11 = w11 + sha512_g1(w9)
-        w11 = w11 + w4
-        w11 = w11 + sha512_g0(w12)
-        e = e + sha512_s1(b)
-        e = e + (d ^ (b & (c ^ d))) + 0xc76c51a30654be30u64 + w11
-        a = a + e
-        e = e + sha512_s0(f)
-        e = e + sha512_maj(f, g, h)
-        w12 = w12 + sha512_g1(w10)
-        w12 = w12 + w5
-        w12 = w12 + sha512_g0(w13)
-        d = d + sha512_s1(a)
-        d = d + (c ^ (a & (b ^ c))) + 0xd192e819d6ef5218u64 + w12
-        h = h + d
-        d = d + sha512_s0(e)
-        d = d + sha512_maj(e, f, g)
-        w13 = w13 + sha512_g1(w11)
-        w13 = w13 + w6
-        w13 = w13 + sha512_g0(w14)
-        c = c + sha512_s1(h)
-        c = c + (b ^ (h & (a ^ b))) + 0xd69906245565a910u64 + w13
-        g = g + c
-        c = c + sha512_s0(d)
-        c = c + sha512_maj(d, e, f)
-        w14 = w14 + sha512_g1(w12)
-        w14 = w14 + w7
-        w14 = w14 + sha512_g0(w15)
-        b = b + sha512_s1(g)
-        b = b + (a ^ (g & (h ^ a))) + 0xf40e35855771202au64 + w14
-        f = f + b
-        b = b + sha512_s0(c)
-        b = b + sha512_maj(c, d, e)
-        w15 = w15 + sha512_g1(w13)
-        w15 = w15 + w8
-        w15 = w15 + sha512_g0(w0)
-        a = a + sha512_s1(f)
-        a = a + (h ^ (f & (g ^ h))) + 0x106aa07032bbd1b8u64 + w15
-        e = e + a
-        a = a + sha512_s0(b)
-        a = a + sha512_maj(b, c, d)
-        w0 = w0 + sha512_g1(w14)
-        w0 = w0 + w9
-        w0 = w0 + sha512_g0(w1)
-        h = h + sha512_s1(e)
-        h = h + (g ^ (e & (f ^ g))) + 0x19a4c116b8d2d0c8u64 + w0
-        d = d + h
-        h = h + sha512_s0(a)
-        h = h + sha512_maj(a, b, c)
-        w1 = w1 + sha512_g1(w15)
-        w1 = w1 + w10
-        w1 = w1 + sha512_g0(w2)
-        g = g + sha512_s1(d)
-        g = g + (f ^ (d & (e ^ f))) + 0x1e376c085141ab53u64 + w1
-        c = c + g
-        g = g + sha512_s0(h)
-        g = g + sha512_maj(h, a, b)
-        w2 = w2 + sha512_g1(w0)
-        w2 = w2 + w11
-        w2 = w2 + sha512_g0(w3)
-        f = f + sha512_s1(c)
-        f = f + (e ^ (c & (d ^ e))) + 0x2748774cdf8eeb99u64 + w2
-        b = b + f
-        f = f + sha512_s0(g)
-        f = f + sha512_maj(g, h, a)
-        w3 = w3 + sha512_g1(w1)
-        w3 = w3 + w12
-        w3 = w3 + sha512_g0(w4)
-        e = e + sha512_s1(b)
-        e = e + (d ^ (b & (c ^ d))) + 0x34b0bcb5e19b48a8u64 + w3
-        a = a + e
-        e = e + sha512_s0(f)
-        e = e + sha512_maj(f, g, h)
-        w4 = w4 + sha512_g1(w2)
-        w4 = w4 + w13
-        w4 = w4 + sha512_g0(w5)
-        d = d + sha512_s1(a)
-        d = d + (c ^ (a & (b ^ c))) + 0x391c0cb3c5c95a63u64 + w4
-        h = h + d
-        d = d + sha512_s0(e)
-        d = d + sha512_maj(e, f, g)
-        w5 = w5 + sha512_g1(w3)
-        w5 = w5 + w14
-        w5 = w5 + sha512_g0(w6)
-        c = c + sha512_s1(h)
-        c = c + (b ^ (h & (a ^ b))) + 0x4ed8aa4ae3418acbu64 + w5
-        g = g + c
-        c = c + sha512_s0(d)
-        c = c + sha512_maj(d, e, f)
-        w6 = w6 + sha512_g1(w4)
-        w6 = w6 + w15
-        w6 = w6 + sha512_g0(w7)
-        b = b + sha512_s1(g)
-        b = b + (a ^ (g & (h ^ a))) + 0x5b9cca4f7763e373u64 + w6
-        f = f + b
-        b = b + sha512_s0(c)
-        b = b + sha512_maj(c, d, e)
-        w7 = w7 + sha512_g1(w5)
-        w7 = w7 + w0
-        w7 = w7 + sha512_g0(w8)
-        a = a + sha512_s1(f)
-        a = a + (h ^ (f & (g ^ h))) + 0x682e6ff3d6b2b8a3u64 + w7
-        e = e + a
-        a = a + sha512_s0(b)
-        a = a + sha512_maj(b, c, d)
-        w8 = w8 + sha512_g1(w6)
-        w8 = w8 + w1
-        w8 = w8 + sha512_g0(w9)
-        h = h + sha512_s1(e)
-        h = h + (g ^ (e & (f ^ g))) + 0x748f82ee5defb2fcu64 + w8
-        d = d + h
-        h = h + sha512_s0(a)
-        h = h + sha512_maj(a, b, c)
-        w9 = w9 + sha512_g1(w7)
-        w9 = w9 + w2
-        w9 = w9 + sha512_g0(w10)
-        g = g + sha512_s1(d)
-        g = g + (f ^ (d & (e ^ f))) + 0x78a5636f43172f60u64 + w9
-        c = c + g
-        g = g + sha512_s0(h)
-        g = g + sha512_maj(h, a, b)
-        w10 = w10 + sha512_g1(w8)
-        w10 = w10 + w3
-        w10 = w10 + sha512_g0(w11)
-        f = f + sha512_s1(c)
-        f = f + (e ^ (c & (d ^ e))) + 0x84c87814a1f0ab72u64 + w10
-        b = b + f
-        f = f + sha512_s0(g)
-        f = f + sha512_maj(g, h, a)
-        w11 = w11 + sha512_g1(w9)
-        w11 = w11 + w4
-        w11 = w11 + sha512_g0(w12)
-        e = e + sha512_s1(b)
-        e = e + (d ^ (b & (c ^ d))) + 0x8cc702081a6439ecu64 + w11
-        a = a + e
-        e = e + sha512_s0(f)
-        e = e + sha512_maj(f, g, h)
-        w12 = w12 + sha512_g1(w10)
-        w12 = w12 + w5
-        w12 = w12 + sha512_g0(w13)
-        d = d + sha512_s1(a)
-        d = d + (c ^ (a & (b ^ c))) + 0x90befffa23631e28u64 + w12
-        h = h + d
-        d = d + sha512_s0(e)
-        d = d + sha512_maj(e, f, g)
-        w13 = w13 + sha512_g1(w11)
-        w13 = w13 + w6
-        w13 = w13 + sha512_g0(w14)
-        c = c + sha512_s1(h)
-        c = c + (b ^ (h & (a ^ b))) + 0xa4506cebde82bde9u64 + w13
-        g = g + c
-        c = c + sha512_s0(d)
-        c = c + sha512_maj(d, e, f)
-        w14 = w14 + sha512_g1(w12)
-        w14 = w14 + w7
-        w14 = w14 + sha512_g0(w15)
-        b = b + sha512_s1(g)
-        b = b + (a ^ (g & (h ^ a))) + 0xbef9a3f7b2c67915u64 + w14
-        f = f + b
-        b = b + sha512_s0(c)
-        b = b + sha512_maj(c, d, e)
-        w15 = w15 + sha512_g1(w13)
-        w15 = w15 + w8
-        w15 = w15 + sha512_g0(w0)
-        a = a + sha512_s1(f)
-        a = a + (h ^ (f & (g ^ h))) + 0xc67178f2e372532bu64 + w15
-        e = e + a
-        a = a + sha512_s0(b)
-        a = a + sha512_maj(b, c, d)
-        w0 = w0 + sha512_g1(w14)
-        w0 = w0 + w9
-        w0 = w0 + sha512_g0(w1)
-        h = h + sha512_s1(e)
-        h = h + (g ^ (e & (f ^ g))) + 0xca273eceea26619cu64 + w0
-        d = d + h
-        h = h + sha512_s0(a)
-        h = h + sha512_maj(a, b, c)
-        w1 = w1 + sha512_g1(w15)
-        w1 = w1 + w10
-        w1 = w1 + sha512_g0(w2)
-        g = g + sha512_s1(d)
-        g = g + (f ^ (d & (e ^ f))) + 0xd186b8c721c0c207u64 + w1
-        c = c + g
-        g = g + sha512_s0(h)
-        g = g + sha512_maj(h, a, b)
-        w2 = w2 + sha512_g1(w0)
-        w2 = w2 + w11
-        w2 = w2 + sha512_g0(w3)
-        f = f + sha512_s1(c)
-        f = f + (e ^ (c & (d ^ e))) + 0xeada7dd6cde0eb1eu64 + w2
-        b = b + f
-        f = f + sha512_s0(g)
-        f = f + sha512_maj(g, h, a)
-        w3 = w3 + sha512_g1(w1)
-        w3 = w3 + w12
-        w3 = w3 + sha512_g0(w4)
-        e = e + sha512_s1(b)
-        e = e + (d ^ (b & (c ^ d))) + 0xf57d4f7fee6ed178u64 + w3
-        a = a + e
-        e = e + sha512_s0(f)
-        e = e + sha512_maj(f, g, h)
-        w4 = w4 + sha512_g1(w2)
-        w4 = w4 + w13
-        w4 = w4 + sha512_g0(w5)
-        d = d + sha512_s1(a)
-        d = d + (c ^ (a & (b ^ c))) + 0x06f067aa72176fbau64 + w4
-        h = h + d
-        d = d + sha512_s0(e)
-        d = d + sha512_maj(e, f, g)
-        w5 = w5 + sha512_g1(w3)
-        w5 = w5 + w14
-        w5 = w5 + sha512_g0(w6)
-        c = c + sha512_s1(h)
-        c = c + (b ^ (h & (a ^ b))) + 0x0a637dc5a2c898a6u64 + w5
-        g = g + c
-        c = c + sha512_s0(d)
-        c = c + sha512_maj(d, e, f)
-        w6 = w6 + sha512_g1(w4)
-        w6 = w6 + w15
-        w6 = w6 + sha512_g0(w7)
-        b = b + sha512_s1(g)
-        b = b + (a ^ (g & (h ^ a))) + 0x113f9804bef90daeu64 + w6
-        f = f + b
-        b = b + sha512_s0(c)
-        b = b + sha512_maj(c, d, e)
-        w7 = w7 + sha512_g1(w5)
-        w7 = w7 + w0
-        w7 = w7 + sha512_g0(w8)
-        a = a + sha512_s1(f)
-        a = a + (h ^ (f & (g ^ h))) + 0x1b710b35131c471bu64 + w7
-        e = e + a
-        a = a + sha512_s0(b)
-        a = a + sha512_maj(b, c, d)
-        w8 = w8 + sha512_g1(w6)
-        w8 = w8 + w1
-        w8 = w8 + sha512_g0(w9)
-        h = h + sha512_s1(e)
-        h = h + (g ^ (e & (f ^ g))) + 0x28db77f523047d84u64 + w8
-        d = d + h
-        h = h + sha512_s0(a)
-        h = h + sha512_maj(a, b, c)
-        w9 = w9 + sha512_g1(w7)
-        w9 = w9 + w2
-        w9 = w9 + sha512_g0(w10)
-        g = g + sha512_s1(d)
-        g = g + (f ^ (d & (e ^ f))) + 0x32caab7b40c72493u64 + w9
-        c = c + g
-        g = g + sha512_s0(h)
-        g = g + sha512_maj(h, a, b)
-        w10 = w10 + sha512_g1(w8)
-        w10 = w10 + w3
-        w10 = w10 + sha512_g0(w11)
-        f = f + sha512_s1(c)
-        f = f + (e ^ (c & (d ^ e))) + 0x3c9ebe0a15c9bebcu64 + w10
-        b = b + f
-        f = f + sha512_s0(g)
-        f = f + sha512_maj(g, h, a)
-        w11 = w11 + sha512_g1(w9)
-        w11 = w11 + w4
-        w11 = w11 + sha512_g0(w12)
-        e = e + sha512_s1(b)
-        e = e + (d ^ (b & (c ^ d))) + 0x431d67c49c100d4cu64 + w11
-        a = a + e
-        e = e + sha512_s0(f)
-        e = e + sha512_maj(f, g, h)
-        w12 = w12 + sha512_g1(w10)
-        w12 = w12 + w5
-        w12 = w12 + sha512_g0(w13)
-        d = d + sha512_s1(a)
-        d = d + (c ^ (a & (b ^ c))) + 0x4cc5d4becb3e42b6u64 + w12
-        h = h + d
-        d = d + sha512_s0(e)
-        d = d + sha512_maj(e, f, g)
-        w13 = w13 + sha512_g1(w11)
-        w13 = w13 + w6
-        w13 = w13 + sha512_g0(w14)
-        c = c + sha512_s1(h)
-        c = c + (b ^ (h & (a ^ b))) + 0x597f299cfc657e2au64 + w13
-        g = g + c
-        c = c + sha512_s0(d)
-        c = c + sha512_maj(d, e, f)
-        w14 = w14 + sha512_g1(w12)
-        w14 = w14 + w7
-        w14 = w14 + sha512_g0(w15)
-        b = b + sha512_s1(g)
-        b = b + (a ^ (g & (h ^ a))) + 0x5fcb6fab3ad6faecu64 + w14
-        f = f + b
-        b = b + sha512_s0(c)
-        b = b + sha512_maj(c, d, e)
-        w15 = w15 + sha512_g1(w13)
-        w15 = w15 + w8
-        w15 = w15 + sha512_g0(w0)
-        a = a + sha512_s1(f)
-        a = a + (h ^ (f & (g ^ h))) + 0x6c44198c4a475817u64 + w15
-        e = e + a
-        a = a + sha512_s0(b)
-        a = a + sha512_maj(b, c, d)
-        self.a = self.a + a
-        self.b = self.b + b
-        self.c = self.c + c
-        self.d = self.d + d
-        self.e = self.e + e
-        self.f = self.f + f
-        self.g = self.g + g
-        self.h = self.h + h
+        h = h.wrapping_add(sha512_s1(e))
+        h = h.wrapping_add(g ^ (e & (f ^ g))).wrapping_add(0x428a2f98d728ae22u64).wrapping_add(w0)
+        d = d.wrapping_add(h)
+        h = h.wrapping_add(sha512_s0(a))
+        h = h.wrapping_add(sha512_maj(a, b, c))
+        g = g.wrapping_add(sha512_s1(d))
+        g = g.wrapping_add(f ^ (d & (e ^ f))).wrapping_add(0x7137449123ef65cdu64).wrapping_add(w1)
+        c = c.wrapping_add(g)
+        g = g.wrapping_add(sha512_s0(h))
+        g = g.wrapping_add(sha512_maj(h, a, b))
+        f = f.wrapping_add(sha512_s1(c))
+        f = f.wrapping_add(e ^ (c & (d ^ e))).wrapping_add(0xb5c0fbcfec4d3b2fu64).wrapping_add(w2)
+        b = b.wrapping_add(f)
+        f = f.wrapping_add(sha512_s0(g))
+        f = f.wrapping_add(sha512_maj(g, h, a))
+        e = e.wrapping_add(sha512_s1(b))
+        e = e.wrapping_add(d ^ (b & (c ^ d))).wrapping_add(0xe9b5dba58189dbbcu64).wrapping_add(w3)
+        a = a.wrapping_add(e)
+        e = e.wrapping_add(sha512_s0(f))
+        e = e.wrapping_add(sha512_maj(f, g, h))
+        d = d.wrapping_add(sha512_s1(a))
+        d = d.wrapping_add(c ^ (a & (b ^ c))).wrapping_add(0x3956c25bf348b538u64).wrapping_add(w4)
+        h = h.wrapping_add(d)
+        d = d.wrapping_add(sha512_s0(e))
+        d = d.wrapping_add(sha512_maj(e, f, g))
+        c = c.wrapping_add(sha512_s1(h))
+        c = c.wrapping_add(b ^ (h & (a ^ b))).wrapping_add(0x59f111f1b605d019u64).wrapping_add(w5)
+        g = g.wrapping_add(c)
+        c = c.wrapping_add(sha512_s0(d))
+        c = c.wrapping_add(sha512_maj(d, e, f))
+        b = b.wrapping_add(sha512_s1(g))
+        b = b.wrapping_add(a ^ (g & (h ^ a))).wrapping_add(0x923f82a4af194f9bu64).wrapping_add(w6)
+        f = f.wrapping_add(b)
+        b = b.wrapping_add(sha512_s0(c))
+        b = b.wrapping_add(sha512_maj(c, d, e))
+        a = a.wrapping_add(sha512_s1(f))
+        a = a.wrapping_add(h ^ (f & (g ^ h))).wrapping_add(0xab1c5ed5da6d8118u64).wrapping_add(w7)
+        e = e.wrapping_add(a)
+        a = a.wrapping_add(sha512_s0(b))
+        a = a.wrapping_add(sha512_maj(b, c, d))
+        h = h.wrapping_add(sha512_s1(e))
+        h = h.wrapping_add(g ^ (e & (f ^ g))).wrapping_add(0xd807aa98a3030242u64).wrapping_add(w8)
+        d = d.wrapping_add(h)
+        h = h.wrapping_add(sha512_s0(a))
+        h = h.wrapping_add(sha512_maj(a, b, c))
+        g = g.wrapping_add(sha512_s1(d))
+        g = g.wrapping_add(f ^ (d & (e ^ f))).wrapping_add(0x12835b0145706fbeu64).wrapping_add(w9)
+        c = c.wrapping_add(g)
+        g = g.wrapping_add(sha512_s0(h))
+        g = g.wrapping_add(sha512_maj(h, a, b))
+        f = f.wrapping_add(sha512_s1(c))
+        f = f.wrapping_add(e ^ (c & (d ^ e))).wrapping_add(0x243185be4ee4b28cu64).wrapping_add(w10)
+        b = b.wrapping_add(f)
+        f = f.wrapping_add(sha512_s0(g))
+        f = f.wrapping_add(sha512_maj(g, h, a))
+        e = e.wrapping_add(sha512_s1(b))
+        e = e.wrapping_add(d ^ (b & (c ^ d))).wrapping_add(0x550c7dc3d5ffb4e2u64).wrapping_add(w11)
+        a = a.wrapping_add(e)
+        e = e.wrapping_add(sha512_s0(f))
+        e = e.wrapping_add(sha512_maj(f, g, h))
+        d = d.wrapping_add(sha512_s1(a))
+        d = d.wrapping_add(c ^ (a & (b ^ c))).wrapping_add(0x72be5d74f27b896fu64).wrapping_add(w12)
+        h = h.wrapping_add(d)
+        d = d.wrapping_add(sha512_s0(e))
+        d = d.wrapping_add(sha512_maj(e, f, g))
+        c = c.wrapping_add(sha512_s1(h))
+        c = c.wrapping_add(b ^ (h & (a ^ b))).wrapping_add(0x80deb1fe3b1696b1u64).wrapping_add(w13)
+        g = g.wrapping_add(c)
+        c = c.wrapping_add(sha512_s0(d))
+        c = c.wrapping_add(sha512_maj(d, e, f))
+        b = b.wrapping_add(sha512_s1(g))
+        b = b.wrapping_add(a ^ (g & (h ^ a))).wrapping_add(0x9bdc06a725c71235u64).wrapping_add(w14)
+        f = f.wrapping_add(b)
+        b = b.wrapping_add(sha512_s0(c))
+        b = b.wrapping_add(sha512_maj(c, d, e))
+        a = a.wrapping_add(sha512_s1(f))
+        a = a.wrapping_add(h ^ (f & (g ^ h))).wrapping_add(0xc19bf174cf692694u64).wrapping_add(w15)
+        e = e.wrapping_add(a)
+        a = a.wrapping_add(sha512_s0(b))
+        a = a.wrapping_add(sha512_maj(b, c, d))
+        w0 = w0.wrapping_add(sha512_g1(w14))
+        w0 = w0.wrapping_add(w9)
+        w0 = w0.wrapping_add(sha512_g0(w1))
+        h = h.wrapping_add(sha512_s1(e))
+        h = h.wrapping_add(g ^ (e & (f ^ g))).wrapping_add(0xe49b69c19ef14ad2u64).wrapping_add(w0)
+        d = d.wrapping_add(h)
+        h = h.wrapping_add(sha512_s0(a))
+        h = h.wrapping_add(sha512_maj(a, b, c))
+        w1 = w1.wrapping_add(sha512_g1(w15))
+        w1 = w1.wrapping_add(w10)
+        w1 = w1.wrapping_add(sha512_g0(w2))
+        g = g.wrapping_add(sha512_s1(d))
+        g = g.wrapping_add(f ^ (d & (e ^ f))).wrapping_add(0xefbe4786384f25e3u64).wrapping_add(w1)
+        c = c.wrapping_add(g)
+        g = g.wrapping_add(sha512_s0(h))
+        g = g.wrapping_add(sha512_maj(h, a, b))
+        w2 = w2.wrapping_add(sha512_g1(w0))
+        w2 = w2.wrapping_add(w11)
+        w2 = w2.wrapping_add(sha512_g0(w3))
+        f = f.wrapping_add(sha512_s1(c))
+        f = f.wrapping_add(e ^ (c & (d ^ e))).wrapping_add(0x0fc19dc68b8cd5b5u64).wrapping_add(w2)
+        b = b.wrapping_add(f)
+        f = f.wrapping_add(sha512_s0(g))
+        f = f.wrapping_add(sha512_maj(g, h, a))
+        w3 = w3.wrapping_add(sha512_g1(w1))
+        w3 = w3.wrapping_add(w12)
+        w3 = w3.wrapping_add(sha512_g0(w4))
+        e = e.wrapping_add(sha512_s1(b))
+        e = e.wrapping_add(d ^ (b & (c ^ d))).wrapping_add(0x240ca1cc77ac9c65u64).wrapping_add(w3)
+        a = a.wrapping_add(e)
+        e = e.wrapping_add(sha512_s0(f))
+        e = e.wrapping_add(sha512_maj(f, g, h))
+        w4 = w4.wrapping_add(sha512_g1(w2))
+        w4 = w4.wrapping_add(w13)
+        w4 = w4.wrapping_add(sha512_g0(w5))
+        d = d.wrapping_add(sha512_s1(a))
+        d = d.wrapping_add(c ^ (a & (b ^ c))).wrapping_add(0x2de92c6f592b0275u64).wrapping_add(w4)
+        h = h.wrapping_add(d)
+        d = d.wrapping_add(sha512_s0(e))
+        d = d.wrapping_add(sha512_maj(e, f, g))
+        w5 = w5.wrapping_add(sha512_g1(w3))
+        w5 = w5.wrapping_add(w14)
+        w5 = w5.wrapping_add(sha512_g0(w6))
+        c = c.wrapping_add(sha512_s1(h))
+        c = c.wrapping_add(b ^ (h & (a ^ b))).wrapping_add(0x4a7484aa6ea6e483u64).wrapping_add(w5)
+        g = g.wrapping_add(c)
+        c = c.wrapping_add(sha512_s0(d))
+        c = c.wrapping_add(sha512_maj(d, e, f))
+        w6 = w6.wrapping_add(sha512_g1(w4))
+        w6 = w6.wrapping_add(w15)
+        w6 = w6.wrapping_add(sha512_g0(w7))
+        b = b.wrapping_add(sha512_s1(g))
+        b = b.wrapping_add(a ^ (g & (h ^ a))).wrapping_add(0x5cb0a9dcbd41fbd4u64).wrapping_add(w6)
+        f = f.wrapping_add(b)
+        b = b.wrapping_add(sha512_s0(c))
+        b = b.wrapping_add(sha512_maj(c, d, e))
+        w7 = w7.wrapping_add(sha512_g1(w5))
+        w7 = w7.wrapping_add(w0)
+        w7 = w7.wrapping_add(sha512_g0(w8))
+        a = a.wrapping_add(sha512_s1(f))
+        a = a.wrapping_add(h ^ (f & (g ^ h))).wrapping_add(0x76f988da831153b5u64).wrapping_add(w7)
+        e = e.wrapping_add(a)
+        a = a.wrapping_add(sha512_s0(b))
+        a = a.wrapping_add(sha512_maj(b, c, d))
+        w8 = w8.wrapping_add(sha512_g1(w6))
+        w8 = w8.wrapping_add(w1)
+        w8 = w8.wrapping_add(sha512_g0(w9))
+        h = h.wrapping_add(sha512_s1(e))
+        h = h.wrapping_add(g ^ (e & (f ^ g))).wrapping_add(0x983e5152ee66dfabu64).wrapping_add(w8)
+        d = d.wrapping_add(h)
+        h = h.wrapping_add(sha512_s0(a))
+        h = h.wrapping_add(sha512_maj(a, b, c))
+        w9 = w9.wrapping_add(sha512_g1(w7))
+        w9 = w9.wrapping_add(w2)
+        w9 = w9.wrapping_add(sha512_g0(w10))
+        g = g.wrapping_add(sha512_s1(d))
+        g = g.wrapping_add(f ^ (d & (e ^ f))).wrapping_add(0xa831c66d2db43210u64).wrapping_add(w9)
+        c = c.wrapping_add(g)
+        g = g.wrapping_add(sha512_s0(h))
+        g = g.wrapping_add(sha512_maj(h, a, b))
+        w10 = w10.wrapping_add(sha512_g1(w8))
+        w10 = w10.wrapping_add(w3)
+        w10 = w10.wrapping_add(sha512_g0(w11))
+        f = f.wrapping_add(sha512_s1(c))
+        f = f.wrapping_add(e ^ (c & (d ^ e))).wrapping_add(0xb00327c898fb213fu64).wrapping_add(w10)
+        b = b.wrapping_add(f)
+        f = f.wrapping_add(sha512_s0(g))
+        f = f.wrapping_add(sha512_maj(g, h, a))
+        w11 = w11.wrapping_add(sha512_g1(w9))
+        w11 = w11.wrapping_add(w4)
+        w11 = w11.wrapping_add(sha512_g0(w12))
+        e = e.wrapping_add(sha512_s1(b))
+        e = e.wrapping_add(d ^ (b & (c ^ d))).wrapping_add(0xbf597fc7beef0ee4u64).wrapping_add(w11)
+        a = a.wrapping_add(e)
+        e = e.wrapping_add(sha512_s0(f))
+        e = e.wrapping_add(sha512_maj(f, g, h))
+        w12 = w12.wrapping_add(sha512_g1(w10))
+        w12 = w12.wrapping_add(w5)
+        w12 = w12.wrapping_add(sha512_g0(w13))
+        d = d.wrapping_add(sha512_s1(a))
+        d = d.wrapping_add(c ^ (a & (b ^ c))).wrapping_add(0xc6e00bf33da88fc2u64).wrapping_add(w12)
+        h = h.wrapping_add(d)
+        d = d.wrapping_add(sha512_s0(e))
+        d = d.wrapping_add(sha512_maj(e, f, g))
+        w13 = w13.wrapping_add(sha512_g1(w11))
+        w13 = w13.wrapping_add(w6)
+        w13 = w13.wrapping_add(sha512_g0(w14))
+        c = c.wrapping_add(sha512_s1(h))
+        c = c.wrapping_add(b ^ (h & (a ^ b))).wrapping_add(0xd5a79147930aa725u64).wrapping_add(w13)
+        g = g.wrapping_add(c)
+        c = c.wrapping_add(sha512_s0(d))
+        c = c.wrapping_add(sha512_maj(d, e, f))
+        w14 = w14.wrapping_add(sha512_g1(w12))
+        w14 = w14.wrapping_add(w7)
+        w14 = w14.wrapping_add(sha512_g0(w15))
+        b = b.wrapping_add(sha512_s1(g))
+        b = b.wrapping_add(a ^ (g & (h ^ a))).wrapping_add(0x06ca6351e003826fu64).wrapping_add(w14)
+        f = f.wrapping_add(b)
+        b = b.wrapping_add(sha512_s0(c))
+        b = b.wrapping_add(sha512_maj(c, d, e))
+        w15 = w15.wrapping_add(sha512_g1(w13))
+        w15 = w15.wrapping_add(w8)
+        w15 = w15.wrapping_add(sha512_g0(w0))
+        a = a.wrapping_add(sha512_s1(f))
+        a = a.wrapping_add(h ^ (f & (g ^ h))).wrapping_add(0x142929670a0e6e70u64).wrapping_add(w15)
+        e = e.wrapping_add(a)
+        a = a.wrapping_add(sha512_s0(b))
+        a = a.wrapping_add(sha512_maj(b, c, d))
+        w0 = w0.wrapping_add(sha512_g1(w14))
+        w0 = w0.wrapping_add(w9)
+        w0 = w0.wrapping_add(sha512_g0(w1))
+        h = h.wrapping_add(sha512_s1(e))
+        h = h.wrapping_add(g ^ (e & (f ^ g))).wrapping_add(0x27b70a8546d22ffcu64).wrapping_add(w0)
+        d = d.wrapping_add(h)
+        h = h.wrapping_add(sha512_s0(a))
+        h = h.wrapping_add(sha512_maj(a, b, c))
+        w1 = w1.wrapping_add(sha512_g1(w15))
+        w1 = w1.wrapping_add(w10)
+        w1 = w1.wrapping_add(sha512_g0(w2))
+        g = g.wrapping_add(sha512_s1(d))
+        g = g.wrapping_add(f ^ (d & (e ^ f))).wrapping_add(0x2e1b21385c26c926u64).wrapping_add(w1)
+        c = c.wrapping_add(g)
+        g = g.wrapping_add(sha512_s0(h))
+        g = g.wrapping_add(sha512_maj(h, a, b))
+        w2 = w2.wrapping_add(sha512_g1(w0))
+        w2 = w2.wrapping_add(w11)
+        w2 = w2.wrapping_add(sha512_g0(w3))
+        f = f.wrapping_add(sha512_s1(c))
+        f = f.wrapping_add(e ^ (c & (d ^ e))).wrapping_add(0x4d2c6dfc5ac42aedu64).wrapping_add(w2)
+        b = b.wrapping_add(f)
+        f = f.wrapping_add(sha512_s0(g))
+        f = f.wrapping_add(sha512_maj(g, h, a))
+        w3 = w3.wrapping_add(sha512_g1(w1))
+        w3 = w3.wrapping_add(w12)
+        w3 = w3.wrapping_add(sha512_g0(w4))
+        e = e.wrapping_add(sha512_s1(b))
+        e = e.wrapping_add(d ^ (b & (c ^ d))).wrapping_add(0x53380d139d95b3dfu64).wrapping_add(w3)
+        a = a.wrapping_add(e)
+        e = e.wrapping_add(sha512_s0(f))
+        e = e.wrapping_add(sha512_maj(f, g, h))
+        w4 = w4.wrapping_add(sha512_g1(w2))
+        w4 = w4.wrapping_add(w13)
+        w4 = w4.wrapping_add(sha512_g0(w5))
+        d = d.wrapping_add(sha512_s1(a))
+        d = d.wrapping_add(c ^ (a & (b ^ c))).wrapping_add(0x650a73548baf63deu64).wrapping_add(w4)
+        h = h.wrapping_add(d)
+        d = d.wrapping_add(sha512_s0(e))
+        d = d.wrapping_add(sha512_maj(e, f, g))
+        w5 = w5.wrapping_add(sha512_g1(w3))
+        w5 = w5.wrapping_add(w14)
+        w5 = w5.wrapping_add(sha512_g0(w6))
+        c = c.wrapping_add(sha512_s1(h))
+        c = c.wrapping_add(b ^ (h & (a ^ b))).wrapping_add(0x766a0abb3c77b2a8u64).wrapping_add(w5)
+        g = g.wrapping_add(c)
+        c = c.wrapping_add(sha512_s0(d))
+        c = c.wrapping_add(sha512_maj(d, e, f))
+        w6 = w6.wrapping_add(sha512_g1(w4))
+        w6 = w6.wrapping_add(w15)
+        w6 = w6.wrapping_add(sha512_g0(w7))
+        b = b.wrapping_add(sha512_s1(g))
+        b = b.wrapping_add(a ^ (g & (h ^ a))).wrapping_add(0x81c2c92e47edaee6u64).wrapping_add(w6)
+        f = f.wrapping_add(b)
+        b = b.wrapping_add(sha512_s0(c))
+        b = b.wrapping_add(sha512_maj(c, d, e))
+        w7 = w7.wrapping_add(sha512_g1(w5))
+        w7 = w7.wrapping_add(w0)
+        w7 = w7.wrapping_add(sha512_g0(w8))
+        a = a.wrapping_add(sha512_s1(f))
+        a = a.wrapping_add(h ^ (f & (g ^ h))).wrapping_add(0x92722c851482353bu64).wrapping_add(w7)
+        e = e.wrapping_add(a)
+        a = a.wrapping_add(sha512_s0(b))
+        a = a.wrapping_add(sha512_maj(b, c, d))
+        w8 = w8.wrapping_add(sha512_g1(w6))
+        w8 = w8.wrapping_add(w1)
+        w8 = w8.wrapping_add(sha512_g0(w9))
+        h = h.wrapping_add(sha512_s1(e))
+        h = h.wrapping_add(g ^ (e & (f ^ g))).wrapping_add(0xa2bfe8a14cf10364u64).wrapping_add(w8)
+        d = d.wrapping_add(h)
+        h = h.wrapping_add(sha512_s0(a))
+        h = h.wrapping_add(sha512_maj(a, b, c))
+        w9 = w9.wrapping_add(sha512_g1(w7))
+        w9 = w9.wrapping_add(w2)
+        w9 = w9.wrapping_add(sha512_g0(w10))
+        g = g.wrapping_add(sha512_s1(d))
+        g = g.wrapping_add(f ^ (d & (e ^ f))).wrapping_add(0xa81a664bbc423001u64).wrapping_add(w9)
+        c = c.wrapping_add(g)
+        g = g.wrapping_add(sha512_s0(h))
+        g = g.wrapping_add(sha512_maj(h, a, b))
+        w10 = w10.wrapping_add(sha512_g1(w8))
+        w10 = w10.wrapping_add(w3)
+        w10 = w10.wrapping_add(sha512_g0(w11))
+        f = f.wrapping_add(sha512_s1(c))
+        f = f.wrapping_add(e ^ (c & (d ^ e))).wrapping_add(0xc24b8b70d0f89791u64).wrapping_add(w10)
+        b = b.wrapping_add(f)
+        f = f.wrapping_add(sha512_s0(g))
+        f = f.wrapping_add(sha512_maj(g, h, a))
+        w11 = w11.wrapping_add(sha512_g1(w9))
+        w11 = w11.wrapping_add(w4)
+        w11 = w11.wrapping_add(sha512_g0(w12))
+        e = e.wrapping_add(sha512_s1(b))
+        e = e.wrapping_add(d ^ (b & (c ^ d))).wrapping_add(0xc76c51a30654be30u64).wrapping_add(w11)
+        a = a.wrapping_add(e)
+        e = e.wrapping_add(sha512_s0(f))
+        e = e.wrapping_add(sha512_maj(f, g, h))
+        w12 = w12.wrapping_add(sha512_g1(w10))
+        w12 = w12.wrapping_add(w5)
+        w12 = w12.wrapping_add(sha512_g0(w13))
+        d = d.wrapping_add(sha512_s1(a))
+        d = d.wrapping_add(c ^ (a & (b ^ c))).wrapping_add(0xd192e819d6ef5218u64).wrapping_add(w12)
+        h = h.wrapping_add(d)
+        d = d.wrapping_add(sha512_s0(e))
+        d = d.wrapping_add(sha512_maj(e, f, g))
+        w13 = w13.wrapping_add(sha512_g1(w11))
+        w13 = w13.wrapping_add(w6)
+        w13 = w13.wrapping_add(sha512_g0(w14))
+        c = c.wrapping_add(sha512_s1(h))
+        c = c.wrapping_add(b ^ (h & (a ^ b))).wrapping_add(0xd69906245565a910u64).wrapping_add(w13)
+        g = g.wrapping_add(c)
+        c = c.wrapping_add(sha512_s0(d))
+        c = c.wrapping_add(sha512_maj(d, e, f))
+        w14 = w14.wrapping_add(sha512_g1(w12))
+        w14 = w14.wrapping_add(w7)
+        w14 = w14.wrapping_add(sha512_g0(w15))
+        b = b.wrapping_add(sha512_s1(g))
+        b = b.wrapping_add(a ^ (g & (h ^ a))).wrapping_add(0xf40e35855771202au64).wrapping_add(w14)
+        f = f.wrapping_add(b)
+        b = b.wrapping_add(sha512_s0(c))
+        b = b.wrapping_add(sha512_maj(c, d, e))
+        w15 = w15.wrapping_add(sha512_g1(w13))
+        w15 = w15.wrapping_add(w8)
+        w15 = w15.wrapping_add(sha512_g0(w0))
+        a = a.wrapping_add(sha512_s1(f))
+        a = a.wrapping_add(h ^ (f & (g ^ h))).wrapping_add(0x106aa07032bbd1b8u64).wrapping_add(w15)
+        e = e.wrapping_add(a)
+        a = a.wrapping_add(sha512_s0(b))
+        a = a.wrapping_add(sha512_maj(b, c, d))
+        w0 = w0.wrapping_add(sha512_g1(w14))
+        w0 = w0.wrapping_add(w9)
+        w0 = w0.wrapping_add(sha512_g0(w1))
+        h = h.wrapping_add(sha512_s1(e))
+        h = h.wrapping_add(g ^ (e & (f ^ g))).wrapping_add(0x19a4c116b8d2d0c8u64).wrapping_add(w0)
+        d = d.wrapping_add(h)
+        h = h.wrapping_add(sha512_s0(a))
+        h = h.wrapping_add(sha512_maj(a, b, c))
+        w1 = w1.wrapping_add(sha512_g1(w15))
+        w1 = w1.wrapping_add(w10)
+        w1 = w1.wrapping_add(sha512_g0(w2))
+        g = g.wrapping_add(sha512_s1(d))
+        g = g.wrapping_add(f ^ (d & (e ^ f))).wrapping_add(0x1e376c085141ab53u64).wrapping_add(w1)
+        c = c.wrapping_add(g)
+        g = g.wrapping_add(sha512_s0(h))
+        g = g.wrapping_add(sha512_maj(h, a, b))
+        w2 = w2.wrapping_add(sha512_g1(w0))
+        w2 = w2.wrapping_add(w11)
+        w2 = w2.wrapping_add(sha512_g0(w3))
+        f = f.wrapping_add(sha512_s1(c))
+        f = f.wrapping_add(e ^ (c & (d ^ e))).wrapping_add(0x2748774cdf8eeb99u64).wrapping_add(w2)
+        b = b.wrapping_add(f)
+        f = f.wrapping_add(sha512_s0(g))
+        f = f.wrapping_add(sha512_maj(g, h, a))
+        w3 = w3.wrapping_add(sha512_g1(w1))
+        w3 = w3.wrapping_add(w12)
+        w3 = w3.wrapping_add(sha512_g0(w4))
+        e = e.wrapping_add(sha512_s1(b))
+        e = e.wrapping_add(d ^ (b & (c ^ d))).wrapping_add(0x34b0bcb5e19b48a8u64).wrapping_add(w3)
+        a = a.wrapping_add(e)
+        e = e.wrapping_add(sha512_s0(f))
+        e = e.wrapping_add(sha512_maj(f, g, h))
+        w4 = w4.wrapping_add(sha512_g1(w2))
+        w4 = w4.wrapping_add(w13)
+        w4 = w4.wrapping_add(sha512_g0(w5))
+        d = d.wrapping_add(sha512_s1(a))
+        d = d.wrapping_add(c ^ (a & (b ^ c))).wrapping_add(0x391c0cb3c5c95a63u64).wrapping_add(w4)
+        h = h.wrapping_add(d)
+        d = d.wrapping_add(sha512_s0(e))
+        d = d.wrapping_add(sha512_maj(e, f, g))
+        w5 = w5.wrapping_add(sha512_g1(w3))
+        w5 = w5.wrapping_add(w14)
+        w5 = w5.wrapping_add(sha512_g0(w6))
+        c = c.wrapping_add(sha512_s1(h))
+        c = c.wrapping_add(b ^ (h & (a ^ b))).wrapping_add(0x4ed8aa4ae3418acbu64).wrapping_add(w5)
+        g = g.wrapping_add(c)
+        c = c.wrapping_add(sha512_s0(d))
+        c = c.wrapping_add(sha512_maj(d, e, f))
+        w6 = w6.wrapping_add(sha512_g1(w4))
+        w6 = w6.wrapping_add(w15)
+        w6 = w6.wrapping_add(sha512_g0(w7))
+        b = b.wrapping_add(sha512_s1(g))
+        b = b.wrapping_add(a ^ (g & (h ^ a))).wrapping_add(0x5b9cca4f7763e373u64).wrapping_add(w6)
+        f = f.wrapping_add(b)
+        b = b.wrapping_add(sha512_s0(c))
+        b = b.wrapping_add(sha512_maj(c, d, e))
+        w7 = w7.wrapping_add(sha512_g1(w5))
+        w7 = w7.wrapping_add(w0)
+        w7 = w7.wrapping_add(sha512_g0(w8))
+        a = a.wrapping_add(sha512_s1(f))
+        a = a.wrapping_add(h ^ (f & (g ^ h))).wrapping_add(0x682e6ff3d6b2b8a3u64).wrapping_add(w7)
+        e = e.wrapping_add(a)
+        a = a.wrapping_add(sha512_s0(b))
+        a = a.wrapping_add(sha512_maj(b, c, d))
+        w8 = w8.wrapping_add(sha512_g1(w6))
+        w8 = w8.wrapping_add(w1)
+        w8 = w8.wrapping_add(sha512_g0(w9))
+        h = h.wrapping_add(sha512_s1(e))
+        h = h.wrapping_add(g ^ (e & (f ^ g))).wrapping_add(0x748f82ee5defb2fcu64).wrapping_add(w8)
+        d = d.wrapping_add(h)
+        h = h.wrapping_add(sha512_s0(a))
+        h = h.wrapping_add(sha512_maj(a, b, c))
+        w9 = w9.wrapping_add(sha512_g1(w7))
+        w9 = w9.wrapping_add(w2)
+        w9 = w9.wrapping_add(sha512_g0(w10))
+        g = g.wrapping_add(sha512_s1(d))
+        g = g.wrapping_add(f ^ (d & (e ^ f))).wrapping_add(0x78a5636f43172f60u64).wrapping_add(w9)
+        c = c.wrapping_add(g)
+        g = g.wrapping_add(sha512_s0(h))
+        g = g.wrapping_add(sha512_maj(h, a, b))
+        w10 = w10.wrapping_add(sha512_g1(w8))
+        w10 = w10.wrapping_add(w3)
+        w10 = w10.wrapping_add(sha512_g0(w11))
+        f = f.wrapping_add(sha512_s1(c))
+        f = f.wrapping_add(e ^ (c & (d ^ e))).wrapping_add(0x84c87814a1f0ab72u64).wrapping_add(w10)
+        b = b.wrapping_add(f)
+        f = f.wrapping_add(sha512_s0(g))
+        f = f.wrapping_add(sha512_maj(g, h, a))
+        w11 = w11.wrapping_add(sha512_g1(w9))
+        w11 = w11.wrapping_add(w4)
+        w11 = w11.wrapping_add(sha512_g0(w12))
+        e = e.wrapping_add(sha512_s1(b))
+        e = e.wrapping_add(d ^ (b & (c ^ d))).wrapping_add(0x8cc702081a6439ecu64).wrapping_add(w11)
+        a = a.wrapping_add(e)
+        e = e.wrapping_add(sha512_s0(f))
+        e = e.wrapping_add(sha512_maj(f, g, h))
+        w12 = w12.wrapping_add(sha512_g1(w10))
+        w12 = w12.wrapping_add(w5)
+        w12 = w12.wrapping_add(sha512_g0(w13))
+        d = d.wrapping_add(sha512_s1(a))
+        d = d.wrapping_add(c ^ (a & (b ^ c))).wrapping_add(0x90befffa23631e28u64).wrapping_add(w12)
+        h = h.wrapping_add(d)
+        d = d.wrapping_add(sha512_s0(e))
+        d = d.wrapping_add(sha512_maj(e, f, g))
+        w13 = w13.wrapping_add(sha512_g1(w11))
+        w13 = w13.wrapping_add(w6)
+        w13 = w13.wrapping_add(sha512_g0(w14))
+        c = c.wrapping_add(sha512_s1(h))
+        c = c.wrapping_add(b ^ (h & (a ^ b))).wrapping_add(0xa4506cebde82bde9u64).wrapping_add(w13)
+        g = g.wrapping_add(c)
+        c = c.wrapping_add(sha512_s0(d))
+        c = c.wrapping_add(sha512_maj(d, e, f))
+        w14 = w14.wrapping_add(sha512_g1(w12))
+        w14 = w14.wrapping_add(w7)
+        w14 = w14.wrapping_add(sha512_g0(w15))
+        b = b.wrapping_add(sha512_s1(g))
+        b = b.wrapping_add(a ^ (g & (h ^ a))).wrapping_add(0xbef9a3f7b2c67915u64).wrapping_add(w14)
+        f = f.wrapping_add(b)
+        b = b.wrapping_add(sha512_s0(c))
+        b = b.wrapping_add(sha512_maj(c, d, e))
+        w15 = w15.wrapping_add(sha512_g1(w13))
+        w15 = w15.wrapping_add(w8)
+        w15 = w15.wrapping_add(sha512_g0(w0))
+        a = a.wrapping_add(sha512_s1(f))
+        a = a.wrapping_add(h ^ (f & (g ^ h))).wrapping_add(0xc67178f2e372532bu64).wrapping_add(w15)
+        e = e.wrapping_add(a)
+        a = a.wrapping_add(sha512_s0(b))
+        a = a.wrapping_add(sha512_maj(b, c, d))
+        w0 = w0.wrapping_add(sha512_g1(w14))
+        w0 = w0.wrapping_add(w9)
+        w0 = w0.wrapping_add(sha512_g0(w1))
+        h = h.wrapping_add(sha512_s1(e))
+        h = h.wrapping_add(g ^ (e & (f ^ g))).wrapping_add(0xca273eceea26619cu64).wrapping_add(w0)
+        d = d.wrapping_add(h)
+        h = h.wrapping_add(sha512_s0(a))
+        h = h.wrapping_add(sha512_maj(a, b, c))
+        w1 = w1.wrapping_add(sha512_g1(w15))
+        w1 = w1.wrapping_add(w10)
+        w1 = w1.wrapping_add(sha512_g0(w2))
+        g = g.wrapping_add(sha512_s1(d))
+        g = g.wrapping_add(f ^ (d & (e ^ f))).wrapping_add(0xd186b8c721c0c207u64).wrapping_add(w1)
+        c = c.wrapping_add(g)
+        g = g.wrapping_add(sha512_s0(h))
+        g = g.wrapping_add(sha512_maj(h, a, b))
+        w2 = w2.wrapping_add(sha512_g1(w0))
+        w2 = w2.wrapping_add(w11)
+        w2 = w2.wrapping_add(sha512_g0(w3))
+        f = f.wrapping_add(sha512_s1(c))
+        f = f.wrapping_add(e ^ (c & (d ^ e))).wrapping_add(0xeada7dd6cde0eb1eu64).wrapping_add(w2)
+        b = b.wrapping_add(f)
+        f = f.wrapping_add(sha512_s0(g))
+        f = f.wrapping_add(sha512_maj(g, h, a))
+        w3 = w3.wrapping_add(sha512_g1(w1))
+        w3 = w3.wrapping_add(w12)
+        w3 = w3.wrapping_add(sha512_g0(w4))
+        e = e.wrapping_add(sha512_s1(b))
+        e = e.wrapping_add(d ^ (b & (c ^ d))).wrapping_add(0xf57d4f7fee6ed178u64).wrapping_add(w3)
+        a = a.wrapping_add(e)
+        e = e.wrapping_add(sha512_s0(f))
+        e = e.wrapping_add(sha512_maj(f, g, h))
+        w4 = w4.wrapping_add(sha512_g1(w2))
+        w4 = w4.wrapping_add(w13)
+        w4 = w4.wrapping_add(sha512_g0(w5))
+        d = d.wrapping_add(sha512_s1(a))
+        d = d.wrapping_add(c ^ (a & (b ^ c))).wrapping_add(0x06f067aa72176fbau64).wrapping_add(w4)
+        h = h.wrapping_add(d)
+        d = d.wrapping_add(sha512_s0(e))
+        d = d.wrapping_add(sha512_maj(e, f, g))
+        w5 = w5.wrapping_add(sha512_g1(w3))
+        w5 = w5.wrapping_add(w14)
+        w5 = w5.wrapping_add(sha512_g0(w6))
+        c = c.wrapping_add(sha512_s1(h))
+        c = c.wrapping_add(b ^ (h & (a ^ b))).wrapping_add(0x0a637dc5a2c898a6u64).wrapping_add(w5)
+        g = g.wrapping_add(c)
+        c = c.wrapping_add(sha512_s0(d))
+        c = c.wrapping_add(sha512_maj(d, e, f))
+        w6 = w6.wrapping_add(sha512_g1(w4))
+        w6 = w6.wrapping_add(w15)
+        w6 = w6.wrapping_add(sha512_g0(w7))
+        b = b.wrapping_add(sha512_s1(g))
+        b = b.wrapping_add(a ^ (g & (h ^ a))).wrapping_add(0x113f9804bef90daeu64).wrapping_add(w6)
+        f = f.wrapping_add(b)
+        b = b.wrapping_add(sha512_s0(c))
+        b = b.wrapping_add(sha512_maj(c, d, e))
+        w7 = w7.wrapping_add(sha512_g1(w5))
+        w7 = w7.wrapping_add(w0)
+        w7 = w7.wrapping_add(sha512_g0(w8))
+        a = a.wrapping_add(sha512_s1(f))
+        a = a.wrapping_add(h ^ (f & (g ^ h))).wrapping_add(0x1b710b35131c471bu64).wrapping_add(w7)
+        e = e.wrapping_add(a)
+        a = a.wrapping_add(sha512_s0(b))
+        a = a.wrapping_add(sha512_maj(b, c, d))
+        w8 = w8.wrapping_add(sha512_g1(w6))
+        w8 = w8.wrapping_add(w1)
+        w8 = w8.wrapping_add(sha512_g0(w9))
+        h = h.wrapping_add(sha512_s1(e))
+        h = h.wrapping_add(g ^ (e & (f ^ g))).wrapping_add(0x28db77f523047d84u64).wrapping_add(w8)
+        d = d.wrapping_add(h)
+        h = h.wrapping_add(sha512_s0(a))
+        h = h.wrapping_add(sha512_maj(a, b, c))
+        w9 = w9.wrapping_add(sha512_g1(w7))
+        w9 = w9.wrapping_add(w2)
+        w9 = w9.wrapping_add(sha512_g0(w10))
+        g = g.wrapping_add(sha512_s1(d))
+        g = g.wrapping_add(f ^ (d & (e ^ f))).wrapping_add(0x32caab7b40c72493u64).wrapping_add(w9)
+        c = c.wrapping_add(g)
+        g = g.wrapping_add(sha512_s0(h))
+        g = g.wrapping_add(sha512_maj(h, a, b))
+        w10 = w10.wrapping_add(sha512_g1(w8))
+        w10 = w10.wrapping_add(w3)
+        w10 = w10.wrapping_add(sha512_g0(w11))
+        f = f.wrapping_add(sha512_s1(c))
+        f = f.wrapping_add(e ^ (c & (d ^ e))).wrapping_add(0x3c9ebe0a15c9bebcu64).wrapping_add(w10)
+        b = b.wrapping_add(f)
+        f = f.wrapping_add(sha512_s0(g))
+        f = f.wrapping_add(sha512_maj(g, h, a))
+        w11 = w11.wrapping_add(sha512_g1(w9))
+        w11 = w11.wrapping_add(w4)
+        w11 = w11.wrapping_add(sha512_g0(w12))
+        e = e.wrapping_add(sha512_s1(b))
+        e = e.wrapping_add(d ^ (b & (c ^ d))).wrapping_add(0x431d67c49c100d4cu64).wrapping_add(w11)
+        a = a.wrapping_add(e)
+        e = e.wrapping_add(sha512_s0(f))
+        e = e.wrapping_add(sha512_maj(f, g, h))
+        w12 = w12.wrapping_add(sha512_g1(w10))
+        w12 = w12.wrapping_add(w5)
+        w12 = w12.wrapping_add(sha512_g0(w13))
+        d = d.wrapping_add(sha512_s1(a))
+        d = d.wrapping_add(c ^ (a & (b ^ c))).wrapping_add(0x4cc5d4becb3e42b6u64).wrapping_add(w12)
+        h = h.wrapping_add(d)
+        d = d.wrapping_add(sha512_s0(e))
+        d = d.wrapping_add(sha512_maj(e, f, g))
+        w13 = w13.wrapping_add(sha512_g1(w11))
+        w13 = w13.wrapping_add(w6)
+        w13 = w13.wrapping_add(sha512_g0(w14))
+        c = c.wrapping_add(sha512_s1(h))
+        c = c.wrapping_add(b ^ (h & (a ^ b))).wrapping_add(0x597f299cfc657e2au64).wrapping_add(w13)
+        g = g.wrapping_add(c)
+        c = c.wrapping_add(sha512_s0(d))
+        c = c.wrapping_add(sha512_maj(d, e, f))
+        w14 = w14.wrapping_add(sha512_g1(w12))
+        w14 = w14.wrapping_add(w7)
+        w14 = w14.wrapping_add(sha512_g0(w15))
+        b = b.wrapping_add(sha512_s1(g))
+        b = b.wrapping_add(a ^ (g & (h ^ a))).wrapping_add(0x5fcb6fab3ad6faecu64).wrapping_add(w14)
+        f = f.wrapping_add(b)
+        b = b.wrapping_add(sha512_s0(c))
+        b = b.wrapping_add(sha512_maj(c, d, e))
+        w15 = w15.wrapping_add(sha512_g1(w13))
+        w15 = w15.wrapping_add(w8)
+        w15 = w15.wrapping_add(sha512_g0(w0))
+        a = a.wrapping_add(sha512_s1(f))
+        a = a.wrapping_add(h ^ (f & (g ^ h))).wrapping_add(0x6c44198c4a475817u64).wrapping_add(w15)
+        e = e.wrapping_add(a)
+        a = a.wrapping_add(sha512_s0(b))
+        a = a.wrapping_add(sha512_maj(b, c, d))
+        self.a = self.a.wrapping_add(a)
+        self.b = self.b.wrapping_add(b)
+        self.c = self.c.wrapping_add(c)
+        self.d = self.d.wrapping_add(d)
+        self.e = self.e.wrapping_add(e)
+        self.f = self.f.wrapping_add(f)
+        self.g = self.g.wrapping_add(g)
+        self.h = self.h.wrapping_add(h)
     }
 
     fun close(var self) {

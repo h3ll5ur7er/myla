@@ -6,7 +6,7 @@ The reference for Myla (version 1.0). These pages and the decisions on [[Project
 
 ## Design in brief
 
-- **Statically typed, explicitly sized.** Integers are `int8` … `int64` and `uint8` … `uint64`, with `int` an alias for `int32`. There is no implicit conversion between numeric types; arithmetic wraps at the type's width. Use `as` to convert.
+- **Statically typed, explicitly sized.** Integers are `int8` … `int64` and `uint8` … `uint64`, with `int` an alias for `int32`. There is no implicit conversion between numeric types; arithmetic that overflows the type's width is a runtime error where programs are run and tested, and wraps in a plain build (D175; `x.wrapping_add(y)` wraps everywhere). Use `as` to convert.
 - **Value semantics.** Assignment, arguments and returns copy values: structs, tuples, enums, lists, maps and builders alike. Lists, maps and builders are reference-counted and copy-on-write, so copies are cheap.
 - **Immutable by default.** `let` bindings can't be changed, and neither can anything inside them; `var` allows both.
 - **Mostly statements.** `if` and loops are statements; `match` is an expression, and so are lambdas.

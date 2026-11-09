@@ -29,7 +29,7 @@
 
 from std.num import f64_literal_bits, f32_round_bits
 from .ast import Expr, ExprKind, Stmt, StmtKind, Block, FunData, ElseTail, ExprOrBlock, MatchArm, Pattern, PatternKind, FieldInit, MapEntry, BindElem, bind_elems, Param, call_targs
-from .checker import CheckErr, REG_ARG_WORDS, type_name, Type, is_unit, is_slice_expr, from_end_of, slice_parts, is_hole_part, is_raw_memory_primitive, is_platform_primitive, Subst, FuncSig, opt_subst_type, subst_type, builtin_method
+from .checker import CheckErr, REG_ARG_WORDS, type_name, Type, is_unit, is_slice_expr, from_end_of, slice_parts, is_hole_part, is_raw_memory_primitive, is_platform_primitive, Subst, FuncSig, opt_subst_type, subst_type, builtin_method, is_wrapping_method, int_op_overflows, int_min
 from .checker import is_notify_primitive
 from .codegen import codegen_on, type_job_name, recv_by_address, may_write_expr, is_mutating_builtin, list_has_str, contains_int, is_actor_t, is_sb_t, is_async_t, CodeGen, LamJob, PartialJob, Cap, DropEntry, tfunc_params, tfunc_ret, is_hole_expr, mangle_fn, is_builtin_call_name, is_aggregate, tuple_elems, is_struct_or_enum_t, is_tfunc, is_overloadable_op, arith_method_cg, enum_name_of, is_tstr, is_cmp, place_root, is_aggregate_opt, arms_may_write, is_cell_t, list_elem, is_list_t, is_map_t, is_str_t, map_key, map_val, format_segments, args_have_hole, success_variant, failure_variant
 from .util import format_specs
@@ -76,7 +76,9 @@ struct LoopTarget { cont: int32, brk: int32, owners: int32, temps: int32 }
 // function holds between suspensions (D92), or -1; `deep_res`: an actor
 // method's result is copied deeply before it leaves the actor (D92).
 // `scope_ids`: the open scopes' indices in `f.scope_parent` (MYLA-183).
-struct Lower { f: IrFunc, cur: int32, scopes: [[Local]], scope_ids: [int32], owners: [[int32]], temps: [[int32]], loops: [LoopTarget], sret: int32, arm_binds: [Local], err: str, lams: [LamJob], partials: [PartialJob], fnvals: [str], holder: [int32], into: int32, placed: [bool], tail: bool, tailed: bool, frame_fn: bool, result: int32, tasks: [TaskSlot], actor_self: int32, actor_off: int32, deep_res: bool, narrow: [int32: int32], wants: [Want], defers: [LDefer], received: int32, refused: [CheckErr], fn_name: str, by_addr: int32, by_addr_t: Type, resized: [str], scanned: bool, below: [LenFact], len_lets: [LenFact], nonneg: [int32] }
+// `checked`: integer overflow traps here (D175's checked build, but not in
+// the runtime, `checked_code`).
+struct Lower { f: IrFunc, cur: int32, scopes: [[Local]], scope_ids: [int32], owners: [[int32]], temps: [[int32]], loops: [LoopTarget], sret: int32, arm_binds: [Local], err: str, lams: [LamJob], partials: [PartialJob], fnvals: [str], holder: [int32], into: int32, placed: [bool], tail: bool, tailed: bool, frame_fn: bool, result: int32, tasks: [TaskSlot], actor_self: int32, actor_off: int32, deep_res: bool, narrow: [int32: int32], wants: [Want], defers: [LDefer], received: int32, refused: [CheckErr], fn_name: str, by_addr: int32, by_addr_t: Type, resized: [str], scanned: bool, below: [LenFact], len_lets: [LenFact], nonneg: [int32], checked: bool }
 
 // A per-type routine a routine built as IR calls, for the code generator to
 // emit (MYLA-162): `kind` 0 a cell's deep copy, 1 an inline value's deep
@@ -111,7 +113,7 @@ struct LDefer { depth: int32, nscopes: int32, nnames: int32, body: Block, cg: Co
 // entry block, the receiver of `#test` cases of the lowering's methods
 // (MYLA-184), with a code generator from `codegen_on` as their `cg`.
 pub fun lower_on() -> Lower {
-    var lw = Lower { f: IrFunc { name: "test", ret: None, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false, scope_parent: [-1] }, cur: 0, scopes: [[]], scope_ids: [0], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [], actor_self: -1, actor_off: 0, deep_res: false, narrow: [:], wants: [], defers: [], received: -1, refused: [], fn_name: "", by_addr: -1, by_addr_t: Type.TBool, resized: [], scanned: false, below: [], len_lets: [], nonneg: [] }
+    var lw = Lower { f: IrFunc { name: "test", ret: None, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false, scope_parent: [-1] }, cur: 0, scopes: [[]], scope_ids: [0], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [], actor_self: -1, actor_off: 0, deep_res: false, narrow: [:], wants: [], defers: [], received: -1, refused: [], fn_name: "", by_addr: -1, by_addr_t: Type.TBool, resized: [], scanned: false, below: [], len_lets: [], nonneg: [], checked: false }
     lw.start(lw.new_block())
     return lw
 }
@@ -122,8 +124,9 @@ pub fun lower_on() -> Lower {
 pub fun lower_function(cg: CodeGen, fd: FunData, mangled: str) -> Result<Lowered, str> {
     let sig = cg.sig_of(fd.name)
     let ret = opt_subst_type(sig.ret, cg.subst)
-    var lw = Lower { f: IrFunc { name: mangled, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false, scope_parent: [-1] }, cur: 0, scopes: [[]], scope_ids: [0], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [], actor_self: -1, actor_off: 0, deep_res: false, narrow: [:], wants: [], defers: [], received: -1, refused: [], fn_name: "", by_addr: -1, by_addr_t: Type.TBool, resized: [], scanned: false, below: [], len_lets: [], nonneg: [] }
+    var lw = Lower { f: IrFunc { name: mangled, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false, scope_parent: [-1] }, cur: 0, scopes: [[]], scope_ids: [0], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [], actor_self: -1, actor_off: 0, deep_res: false, narrow: [:], wants: [], defers: [], received: -1, refused: [], fn_name: "", by_addr: -1, by_addr_t: Type.TBool, resized: [], scanned: false, below: [], len_lets: [], nonneg: [], checked: false }
     lw.fn_name = fd.name
+    lw.checked = cg.checked && checked_code(mangled)
     var first_word = 0
     // an async function, when tasks take turns: its frame function, its
     // slots in its heap frame, the result in the first (D90)
@@ -235,7 +238,8 @@ pub fun lower_function(cg: CodeGen, fd: FunData, mangled: str) -> Result<Lowered
 // own at entry, borrowed as a parameter is (captures are immutable, D48).
 pub fun lower_lambda(cg: CodeGen, job: LamJob) -> Result<Lowered, str> {
     let ret = opt_subst_type(tfunc_ret(job.ftype), cg.subst)
-    var lw = Lower { f: IrFunc { name: job.lifted, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false, scope_parent: [-1] }, cur: 0, scopes: [[]], scope_ids: [0], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [], actor_self: -1, actor_off: 0, deep_res: false, narrow: [:], wants: [], defers: [], received: -1, refused: [], fn_name: "", by_addr: -1, by_addr_t: Type.TBool, resized: [], scanned: false, below: [], len_lets: [], nonneg: [] }
+    var lw = Lower { f: IrFunc { name: job.lifted, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false, scope_parent: [-1] }, cur: 0, scopes: [[]], scope_ids: [0], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [], actor_self: -1, actor_off: 0, deep_res: false, narrow: [:], wants: [], defers: [], received: -1, refused: [], fn_name: "", by_addr: -1, by_addr_t: Type.TBool, resized: [], scanned: false, below: [], len_lets: [], nonneg: [], checked: false }
+    lw.checked = cg.checked && checked_code(job.lifted)
     // an async lambda, when tasks take turns: a frame function, as an async
     // function's (D90); its frame holds the environment and the arguments
     let frame = cg.frames && is_async_t(job.ftype)
@@ -875,7 +879,7 @@ impl Lower {
     // `a op b` of type `rt` when the block's last two instructions made `a`
     // and `b` integer constants (both taken back), wrapped as at run time;
     // division and shifts out of range are left to run time.
-    fun folded(var self, op: str, lt: Type, rt: Type, a: int32, b: int32) -> Option<int64> {
+    fun folded(var self, op: str, lt: Type, rt: Type, a: int32, b: int32, checked: bool) -> Option<int64> {
         let w = match lt { Type.TInt(n, sg) => n, _ => 0 }
         if w == 0 || !type_eq_ir(lt, rt) { return None }
         let signed = match lt { Type.TInt(n, sg) => sg, _ => false }
@@ -887,10 +891,12 @@ impl Lower {
         match self.f.blocks[self.cur].insts[n - 2] { Inst.Const(d, t, k) => { if d == a { u = k; both += 1 } }, _ => {} }
         match self.f.blocks[self.cur].insts[n - 1] { Inst.Const(d, t, k) => { if d == b { v = k; both += 1 } }, _ => {} }
         if both != 2 { return None }
+        // an overflow left to trap where it runs, in a checked build (D175)
+        if checked && int_op_overflows(op, u, v, w, signed) { return None }
         var r: int64 = 0
-        if op == "+" { r = u + v }
-        else if op == "-" { r = u - v }
-        else if op == "*" { r = u * v }
+        if op == "+" { r = u.wrapping_add(v) }
+        else if op == "-" { r = u.wrapping_sub(v) }
+        else if op == "*" { r = u.wrapping_mul(v) }
         else if op == "&" { r = u & v }
         else if op == "|" { r = u | v }
         else if op == "^" { r = u ^ v }
@@ -2680,6 +2686,7 @@ impl Lower {
                     _ => {},
                 }
                 let a = self.expr(cg, x)
+                if self.checked && op == "-" { self.check_neg(t, a, Pos { line: e.line, col: e.col }) }
                 let d = self.temp(t)
                 self.add(Inst.Un(d, op, t, a))
                 return d
@@ -2839,18 +2846,135 @@ impl Lower {
         if !is_scalar(lt) || !is_scalar(rt) { return self.unsupported("an operator on values that aren't scalars") }
         let a = self.expr(cg, l)
         let b = self.expr(cg, r)
-        // two constants (literals, `const`s): one, folded (MYLA-162)
-        match self.folded(op, lt, rt, a, b) {
+        // two constants (literals, `const`s): one, folded (MYLA-162); in a
+        // checked build not if it overflows, which traps where it runs
+        match self.folded(op, lt, rt, a, b, self.checked) {
             Some(v) => { return self.konst(rt, v) },
             None => {},
+        }
+        let pos = Pos { line: e.line, col: e.col }
+        if self.checked {
+            let c = self.checked_arith(op, lt, rt, a, b, pos)
+            if c >= 0 { return c }
         }
         let d = self.temp(rt)
         if op == "==" || op == "!=" || is_cmp(op) {
             self.add(Inst.Cmp(d, op, lt, a, b))
         } else {
-            self.add(Inst.Bin(d, op, lt, rt, a, b, Pos { line: e.line, col: e.col }))
+            self.add(Inst.Bin(d, op, lt, rt, a, b, pos))
         }
         return d
+    }
+
+    // `x.wrapping_add(y)`, `x.wrapping_sub(y)`, `x.wrapping_mul(y)`,
+    // `x.wrapping_neg()` (D175): the plain operation, which wraps, never
+    // checked for overflow; one instruction.
+    fun wrapping(var self, cg: CodeGen, e: Expr, nm: str, args: [Expr]) -> int32 {
+        let t = cg.type_of(e.id)
+        let a = self.expr(cg, args[0])
+        let d = self.temp(t)
+        if nm == "wrapping_neg" {
+            self.add(Inst.Un(d, "-", t, a))
+            return d
+        }
+        let b = self.expr(cg, args[1])
+        let op = if nm == "wrapping_add" { "+" } else if nm == "wrapping_sub" { "-" } else { "*" }
+        match self.folded(op, t, t, a, b, false) {
+            Some(v) => { return self.konst(t, v) },
+            None => {},
+        }
+        self.add(Inst.Bin(d, op, t, t, a, b, Pos { line: e.line, col: e.col }))
+        return d
+    }
+
+    // `a op b` on integers in a checked build (D175): `+`, `-` and `*` that
+    // don't fit their type, and the signed minimum divided by -1, trap with
+    // `integer overflow`; a shift whose count isn't below the width with
+    // `shift amount out of range`. The result, or -1 for an operation that
+    // checks nothing (built as in a plain build). Narrower than 64 bits, the
+    // operation in 64 bits is exact and must equal its own value wrapped to
+    // the type; at 64 bits the signs (`+`, `-`), an unsigned comparison or
+    // std.rt's `mul_overflows_*` tell.
+    fun checked_arith(var self, op: str, lt: Type, rt: Type, a: int32, b: int32, pos: Pos) -> int32 {
+        let w = match lt { Type.TInt(n, sg) => n, _ => 0 }
+        if w == 0 || !type_eq_ir(lt, rt) { return -1 }
+        let signed = match lt { Type.TInt(n, sg) => sg, _ => false }
+        let i64 = Type.TInt(64, true)
+        let u64 = Type.TInt(64, false)
+        if op == "<<" || op == ">>" {
+            // the count as unsigned: a negative one is as far out of range
+            let ok = self.temp(Type.TBool)
+            self.add(Inst.Cmp(ok, "<", u64, b, self.konst(u64, w as int64)))
+            self.add(Inst.Check(ok, "shift", pos))
+            return -1
+        }
+        if op == "/" {
+            if !signed { return -1 }
+            // not (a == MIN and b == -1): (a ^ MIN) | (b ^ -1) isn't 0
+            let x = self.temp(i64)
+            self.add(Inst.Bin(x, "^", i64, i64, a, self.konst(i64, int_min(w)), pos))
+            let y = self.temp(i64)
+            self.add(Inst.Bin(y, "^", i64, i64, b, self.konst(i64, -1), pos))
+            let z = self.temp(i64)
+            self.add(Inst.Bin(z, "|", i64, i64, x, y, pos))
+            let ok = self.temp(Type.TBool)
+            self.add(Inst.Cmp(ok, "!=", i64, z, self.konst(i64, 0)))
+            self.add(Inst.Check(ok, "overflow", pos))
+            return -1
+        }
+        if op != "+" && op != "-" && op != "*" { return -1 }
+        let ok = self.temp(Type.TBool)
+        if w < 64 {
+            let wide = self.temp(i64)
+            self.add(Inst.Bin(wide, op, i64, i64, a, b, pos))
+            let d = self.temp(rt)
+            self.add(Inst.Cast(d, i64, rt, wide))
+            self.add(Inst.Cmp(ok, "==", i64, d, wide))
+            self.add(Inst.Check(ok, "overflow", pos))
+            return d
+        }
+        let d = self.temp(rt)
+        self.add(Inst.Bin(d, op, lt, rt, a, b, pos))
+        if op == "*" {
+            let over = self.temp(Type.TBool)
+            self.add(Inst.Call(over, if signed { "std$rt$mul_overflows_i64" } else { "std$rt$mul_overflows_u64" }, [a, b]))
+            self.add(Inst.Un(ok, "!", Type.TBool, over))
+        } else if !signed {
+            // unsigned: a sum below an operand wrapped, as does a difference
+            // of a smaller minuend
+            if op == "+" { self.add(Inst.Cmp(ok, ">=", u64, d, a)) } else { self.add(Inst.Cmp(ok, ">=", u64, a, b)) }
+        } else {
+            // signed: the result's sign against the operands' (Hacker's
+            // Delight 2-13): `+` overflows when both differ from it, `-` when
+            // the operands differ and the result differs from `a`
+            let x = self.temp(i64)
+            let y = self.temp(i64)
+            if op == "+" {
+                self.add(Inst.Bin(x, "^", i64, i64, a, d, pos))
+                self.add(Inst.Bin(y, "^", i64, i64, b, d, pos))
+            } else {
+                self.add(Inst.Bin(x, "^", i64, i64, a, b, pos))
+                self.add(Inst.Bin(y, "^", i64, i64, a, d, pos))
+            }
+            let m = self.temp(i64)
+            self.add(Inst.Bin(m, "&", i64, i64, x, y, pos))
+            self.add(Inst.Cmp(ok, ">=", i64, m, self.konst(i64, 0)))
+        }
+        self.add(Inst.Check(ok, "overflow", pos))
+        return d
+    }
+
+    // `-a` in a checked build (D175): a trap for the signed minimum, and for
+    // any unsigned number but 0, whose negation doesn't fit.
+    fun check_neg(var self, t: Type, a: int32, pos: Pos) {
+        let w = match t { Type.TInt(n, sg) => n, _ => 0 }
+        if w == 0 { return }
+        let signed = match t { Type.TInt(n, sg) => sg, _ => false }
+        let i64 = Type.TInt(64, true)
+        let ok = self.temp(Type.TBool)
+        if signed { self.add(Inst.Cmp(ok, "!=", i64, a, self.konst(i64, int_min(w)))) }
+        else { self.add(Inst.Cmp(ok, "==", i64, a, self.konst(i64, 0))) }
+        self.add(Inst.Check(ok, "overflow", pos))
     }
 
     // The integer `a` (an `int32` or wider, sign-extended) a Unicode scalar
@@ -3208,6 +3332,7 @@ impl Lower {
                     self.add(Inst.SbBuild(d, c))
                     return self.owned_value(cg, d, Type.TStr)
                 }
+                if is_wrapping_method(nm) { return self.wrapping(cg, e, nm, args) }
                 if is_builtin_call_name(nm) { return self.io_call(cg, e, nm, args) }
                 // `__cancel_after(a, ms)` (D124): the child's first frame on
                 // the timers as a deadline
@@ -5012,6 +5137,22 @@ fun wrap_ir(v: int64, t: Type) -> int64 {
     }
 }
 
+// Whether the function named `mangled` gets a checked build's overflow
+// checks (D175): all but the runtime's, std.rt's and std.platform's, whose
+// arithmetic on addresses, sizes and hashes the interpreter does natively
+// too (its primitives are native code, built plain), as it would in a
+// library built for release.
+#test("main")[true]
+#test("std$list$sum")[true]
+#test("std$rt$map_lookup")[false]
+#test("std$platform_aarch64$write")[false]
+fun checked_code(mangled: str) -> bool {
+    for prefix in ["std$rt$", "std$platform$", "std$platform_aarch64$", "std$platform_wasm$"] {
+        if mangled.len() >= prefix.len() && mangled[:prefix.len()] == prefix { return false }
+    }
+    return true
+}
+
 // Whether evaluating `e` calls nothing and changes nothing (a literal, a
 // name, operators on such), so it may be evaluated before its neighbours.
 fun calls_nothing(e: Expr) -> bool {
@@ -5034,7 +5175,7 @@ fun calls_nothing(e: Expr) -> bool {
 // An empty lowering of the routine `name` with result type `ret`, its entry
 // block started.
 fun routine(name: str, ret: Option<Type>) -> Lower {
-    var lw = Lower { f: IrFunc { name: name, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false, scope_parent: [-1] }, cur: 0, scopes: [[]], scope_ids: [0], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [], actor_self: -1, actor_off: 0, deep_res: false, narrow: [:], wants: [], defers: [], received: -1, refused: [], fn_name: "", by_addr: -1, by_addr_t: Type.TBool, resized: [], scanned: false, below: [], len_lets: [], nonneg: [] }
+    var lw = Lower { f: IrFunc { name: name, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false, scope_parent: [-1] }, cur: 0, scopes: [[]], scope_ids: [0], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [], actor_self: -1, actor_off: 0, deep_res: false, narrow: [:], wants: [], defers: [], received: -1, refused: [], fn_name: "", by_addr: -1, by_addr_t: Type.TBool, resized: [], scanned: false, below: [], len_lets: [], nonneg: [], checked: false }
     let entry = lw.new_block()
     lw.start(entry)
     return lw

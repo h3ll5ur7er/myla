@@ -1,0 +1,5 @@
+type error: const integer overflow
+  --> examples/errors/type_const_overflow.my:6:25
+  |
+6 | const PAST: int32 = MAX + 1
+  |                     ^^^^^^^

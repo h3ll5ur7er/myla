@@ -1867,8 +1867,8 @@ impl Deflate {
             if look == 0 { break }
             var cand = -1
             if look >= MIN_MATCH {
-                let h = (((((buf[s] as int32) << 16) | ((buf[s + 1] as int32) << 8) | (buf[s + 2] as int32)) *
-                    HASH_MUL) >> 17) & HASH_MASK
+                let h = (((((buf[s] as int32) << 16) | ((buf[s + 1] as int32) << 8) | (buf[s + 2] as int32)).wrapping_mul(
+                    HASH_MUL)) >> 17) & HASH_MASK
                 cand = head[h]
                 prev[s & WINDOW_MASK] = cand
                 head[h] = s
@@ -1889,8 +1889,8 @@ impl Deflate {
                     var p = s + 1
                     let stop = s + mlen
                     while p < stop {
-                        let h = (((((buf[p] as int32) << 16) | ((buf[p + 1] as int32) << 8) | (buf[p + 2] as int32)) *
-                            HASH_MUL) >> 17) & HASH_MASK
+                        let h = (((((buf[p] as int32) << 16) | ((buf[p + 1] as int32) << 8) | (buf[p + 2] as int32)).wrapping_mul(
+                            HASH_MUL)) >> 17) & HASH_MASK
                         prev[p & WINDOW_MASK] = head[h]
                         head[h] = p
                         p += 1
@@ -1960,8 +1960,8 @@ impl Deflate {
             }
             var cand = -1
             if look >= MIN_MATCH {
-                let h = (((((buf[s] as int32) << 16) | ((buf[s + 1] as int32) << 8) | (buf[s + 2] as int32)) *
-                    HASH_MUL) >> 17) & HASH_MASK
+                let h = (((((buf[s] as int32) << 16) | ((buf[s + 1] as int32) << 8) | (buf[s + 2] as int32)).wrapping_mul(
+                    HASH_MUL)) >> 17) & HASH_MASK
                 cand = head[h]
                 prev[s & WINDOW_MASK] = cand
                 head[h] = s
@@ -1988,8 +1988,8 @@ impl Deflate {
                 var p = s + 1
                 while p < stop {
                     if p <= max_insert {
-                        let h = (((((buf[p] as int32) << 16) | ((buf[p + 1] as int32) << 8) | (buf[p + 2] as int32)) *
-                            HASH_MUL) >> 17) & HASH_MASK
+                        let h = (((((buf[p] as int32) << 16) | ((buf[p + 1] as int32) << 8) | (buf[p + 2] as int32)).wrapping_mul(
+                            HASH_MUL)) >> 17) & HASH_MASK
                         prev[p & WINDOW_MASK] = head[h]
                         head[h] = p
                     }
@@ -2702,7 +2702,7 @@ fun noise(n: int, seed: int) -> [uint8] {
     var out: [uint8] = []
     var x = seed as uint32
     for i in 0..n {
-        x = x * 1664525u32 + 1013904223u32
+        x = x.wrapping_mul(1664525u32).wrapping_add(1013904223u32)
         out.push((x >> 24u32) as uint8)
     }
     return out

@@ -71,6 +71,21 @@ def recorded_examples() -> list[str]:
     return [os.path.join(_REPO, "examples", n) for n in RECORDED_EXAMPLES]
 
 
+def answered_or_recorded(path: str, ask):
+    """`ask(path)`, or, when the recordings have no answer for the file as it
+    is now but keep a copy of it as they saw it (RECORDED_CORPUS: rewritten
+    since, with no aliases, as D175 rewrote the examples that wrapped on
+    purpose), `ask` of that copy, and the copy's path; the gates that only
+    read the program, not run it, ask about the recorded text."""
+    try:
+        return ask(path), path
+    except NoGolden:
+        copy = recorded(path)
+        if copy == path:
+            raise
+        return ask(copy), copy
+
+
 def recorded(path: str) -> str:
     """The file at `path` (under the repository) as the recordings saw it:
     its copy in RECORDED_CORPUS when it was rewritten since, else itself."""

@@ -36,7 +36,7 @@ import tempfile
 import time
 import unittest
 
-from ._golden import golden, recorded_examples
+from ._golden import NoGolden, answered_or_recorded, golden, recorded_examples
 from ._native import CAN_BUILD_NATIVE
 from ._tools import STDLIB_ROOT, selfhost_tool
 
@@ -152,6 +152,12 @@ INTERP_PROGRAMS = {
         "    let (n, s) = pair(ok)?\n"
         "    return Ok(n)\n"
         "}\n")),
+}
+
+# The programs above whose meaning D175 changed: the minimum divided by -1
+# wraps no more where overflow is checked; what they print before it.
+OVERFLOWS = {
+    "int64_min_divided": "-922337203685477580\n-8\n922337203685477580\n-1\n-3074457345618258602\n",
 }
 
 
@@ -304,7 +310,20 @@ class SelfHostedInterpParity(unittest.TestCase):
             for name, path in sorted(cases.items()):
                 with self.subTest(case=name):
                     modules = _modules(path) if name == "error_in_module" else []
-                    self.assertEqual(self._myla_run_full(path), _cli_oracle(path, modules))
+                    if name in OVERFLOWS:
+                        # D175: what the Python CLI printed before the
+                        # overflow, then the overflow at its operator
+                        out, err, code = self._myla_run_full(path)
+                        self.assertEqual((out, code), (OVERFLOWS[name], 1))
+                        self.assertTrue(err.startswith(f"runtime error: integer overflow\n  --> {path}:"), err)
+                        continue
+                    try:
+                        want = _cli_oracle(path, modules)
+                    except NoGolden:
+                        if name.startswith("runtime_"):
+                            continue    # added since (D175): test_error_corpus holds it
+                        raise
+                    self.assertEqual(self._myla_run_full(path), want)
 
     def test_concurrency_matches_the_python_cli(self) -> None:
         if self._binary is None:
@@ -331,7 +350,7 @@ class SelfHostedInterpParity(unittest.TestCase):
         for path in _corpus():
             rel = os.path.relpath(path, _REPO)
             with self.subTest(file=rel):
-                self.assertEqual(self._myla_run(path), _oracle(path))
+                self.assertEqual(self._myla_run(path), answered_or_recorded(path, _oracle)[0])
                 checked += 1
         # Guard against the corpus silently going empty.
         self.assertGreater(checked, 20)
