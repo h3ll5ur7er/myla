@@ -154,7 +154,6 @@ struct Loader {
     next_id: int32,
     spans: [Span],
     overrides: [str: str],     // path -> text used instead of the file (an editor's unsaved buffers)
-    skip_tests: bool,          // modules loaded now leave their `#test` cases out (the implicit ones', MYLA-320)
 }
 
 // The modules of the standard library every program sees without an import
@@ -529,33 +528,6 @@ fun std_module_name(path: str) -> str {
     return join(segs[last:], ".")
 }
 
-// `d` without its `#test` cases, a function's or its methods' (MYLA-320):
-// only `myla test` of its own file runs them.
-fun without_tests(d: Decl) -> Decl {
-    var out = d
-    match d.kind {
-        DeclKind.FunDecl(fd) => { out.kind = DeclKind.FunDecl(fun_without_tests(fd)) },
-        DeclKind.ImplDecl(t, ms, tps, tn, ta, attrs) => {
-            var kept: [FunData] = []
-            for m in ms { kept.push(fun_without_tests(m)) }
-            out.kind = DeclKind.ImplDecl(t, kept, tps, tn, ta, attrs)
-        },
-        _ => {},
-    }
-    return out
-}
-
-#test(fun_of("#test\nfun f() { print(1) }"))[fun_of("\nfun f() { print(1) }")]
-fun fun_without_tests(fd: FunData) -> FunData {
-    var out = fd
-    var attrs: [Attribute] = []
-    for a in fd.attributes {
-        if a.name != "test" { attrs.push(a) }
-    }
-    out.attributes = attrs
-    return out
-}
-
 // The dotted name of the module with id `id` (a standard library's: its
 // names have no `$` of their own).
 #test("std$str")["std.str"]
@@ -737,11 +709,6 @@ impl Loader {
     // or no library at all). No module binds a name of theirs.
     fun load_implicit(var self) -> Result<[int32], Report> {
         var out: [int32] = []
-        // nothing runs their cases, nor those of the modules they import
-        // first (only `myla test` of its own file does), and std.int has
-        // 1,826: they are skipped unparsed
-        self.skip_tests = true
-        defer { self.skip_tests = false }
         for name in implicit_modules() {
             let p = ImportPath { line: 0, col: 0, sp: no_span(), dots: 0, segments: ["std", name] }
             match self.descend(self.entry, p, self.stdlib_root, 0)? {
@@ -773,7 +740,10 @@ impl Loader {
             },
         }
         self.spans.push(Span { first_id: self.next_id, path: path })
-        var parsed = match parse_source_with(src, self.next_id, self.skip_tests) {
+        // only the entry's `#test` cases are the program's (MYLA-360): every
+        // other module's are skipped unparsed, so that importing std.int,
+        // with 2,042, costs nothing for them (MYLA-320, MYLA-396)
+        var parsed = match parse_source_with(src, self.next_id, path != self.entry) {
             Ok(x) => x,
             Err(ds) => { return Err(reports(ds, path)) },
         }
@@ -1692,7 +1662,7 @@ pub fun load_program_opts(entry: str, opts: LoadOptions) -> Result<Loaded, Repor
     let packages = check_packages(opts.packages)?
     var normalized: [str: str] = [:]
     for p in opts.overrides.keys() { normalized[normalize(p)] = opts.overrides[p] }
-    var ld = Loader { stdlib_root: stdlib, project_root: project_root, packages: packages, entry: e, modules: [], next_id: 0, spans: [], overrides: normalized, skip_tests: false }
+    var ld = Loader { stdlib_root: stdlib, project_root: project_root, packages: packages, entry: e, modules: [], next_id: 0, spans: [], overrides: normalized }
     ld.load(e)?
     // the standard library's method modules, for a program outside it
     // (D164, MYLA-320)
@@ -1734,14 +1704,12 @@ pub fun load_program_opts(entry: str, opts: LoadOptions) -> Result<Loaded, Repor
         var r = Renamer { env: decl_env(m.bindings), aliases: module_env(m.bindings), exports: exports, vals: [], tys: [], path: m.path, err: None, kinds: kinds }
         let in_std = starts_with_text(m.id, "std$")
         let is_implicit = has_index(implicit, k)
-        // only the entry's cases are the program's: an imported module's
-        // methods on a built-in type are named as the entry's own
-        // (`str.bang`), so its cases would run as the entry's, and an implicit
-        // module's (std.int's are 1,826) be checked for every program (MYLA-360)
+        // only the entry's cases are the program's, the others' were left
+        // unparsed (`load`): an imported module's methods on a built-in type
+        // are named as the entry's own (`str.bang`), so its cases would run
+        // as the entry's (MYLA-360)
         let tested = m.path == ld.entry
-        for d0 in m.decls {
-            var d = d0
-            if is_implicit || !tested { d = without_tests(d0) }
+        for d in m.decls {
             if in_std && is_impl(d) { std_impls[d.id] = DeclOrigin { module: dotted_id(m.id), path: m.path, implicit: is_implicit } }
             if entry_std != "" && tested && is_fun(d) { std_impls[d.id] = DeclOrigin { module: entry_std, path: m.path, implicit: false } }
             decls.push(r.decl(d, m.id))

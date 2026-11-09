@@ -90,6 +90,19 @@ class TestImportedCases(unittest.TestCase):
         proc = _test(os.path.join(self.tmp, "util.my"), STDLIB_ROOT)
         self.assertIn("3/3 passed.", proc.stdout, proc.stderr)
 
+    def test_an_imported_module_s_cases_are_not_parsed(self):
+        # only the entry's cases are parsed: an imported module's are
+        # skipped unparsed, so std.int's thousands cost an importer nothing
+        # and a broken case shows only when its own file is tested (MYLA-396)
+        self.write("broken.my", "#test(1 +)[2]\npub fun one() -> int {\n    return 1\n}\n")
+        main = self.write("main.my", "from .broken import one\n\n#test()[1]\nfun f() -> int {\n    return one()\n}\n")
+        proc = _test(main, STDLIB_ROOT)
+        self.assertEqual(proc.stdout, "PASS  f #1\n\n1/1 passed.\n", proc.stderr)
+        self.assertEqual(proc.returncode, 0)
+        proc = _test(os.path.join(self.tmp, "broken.my"), STDLIB_ROOT)
+        self.assertIn("parse error", proc.stdout + proc.stderr)
+        self.assertNotEqual(proc.returncode, 0)
+
     @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
     def test_a_user_module_brings_no_cases_natively(self):
         self.write("util.my", _UTIL)
