@@ -536,15 +536,15 @@ const PIPE_CHUNK: int32 = 65536
 // EBADF: what a stream that was closed gives.
 const CLOSED: int32 = 9
 
-// One read of up to `n` bytes of `fd` ("" at the end), or why not.
-fun read_fd(fd: int32, n: int32) -> Result<str, IoError> {
+// One read of up to `n` bytes of `fd` (`[]` at the end), or why not.
+fun read_fd(fd: int32, n: int32) -> Result<[uint8], IoError> {
     if fd < 0 {
         return Err(from_errno(CLOSED))
     }
     if n <= 0 {
-        return Ok("")
+        return Ok([])
     }
-    let chunk = __read(fd, n)
+    let chunk = __read_bytes(fd, n)
     let err = __io_errno()
     if err != 0 {
         return Err(from_errno(err))
@@ -552,17 +552,17 @@ fun read_fd(fd: int32, n: int32) -> Result<str, IoError> {
     return Ok(chunk)
 }
 
-// All of `s` written to `fd`: its length, or why not.
-fun write_fd(fd: int32, s: str) -> Result<int, IoError> {
+// All of `b` written to `fd`: its length, or why not.
+fun write_fd(fd: int32, b: [uint8]) -> Result<int, IoError> {
     if fd < 0 {
         return Err(from_errno(CLOSED))
     }
-    __write(fd, s)
+    __write_bytes(fd, b)
     let err = __io_errno()
     if err != 0 {
         return Err(from_errno(err))
     }
-    return Ok(s.len())
+    return Ok(b.len())
 }
 
 // `fd` closed, or why not (one closed already: EBADF).
@@ -598,7 +598,7 @@ pub struct ChildStdin {
 
 impl Write for ChildStdin {
     fun write(var self, b: [uint8]) -> Result<int, IoError> {
-        return write_fd(self.fd, bytes_m.to_str(b))
+        return write_fd(self.fd, b)
     }
 
     // Nothing to do: nothing is buffered.
@@ -630,8 +630,7 @@ pub struct ChildStdout {
 
 impl Read for ChildStdout {
     fun read(var self, n: int) -> Result<[uint8], IoError> {
-        let s = read_fd(self.fd, n)?
-        return Ok(bytes_m.from_str(s))
+        return read_fd(self.fd, n)
     }
 }
 
@@ -659,8 +658,7 @@ pub struct ChildStderr {
 
 impl Read for ChildStderr {
     fun read(var self, n: int) -> Result<[uint8], IoError> {
-        let s = read_fd(self.fd, n)?
-        return Ok(bytes_m.from_str(s))
+        return read_fd(self.fd, n)
     }
 }
 

@@ -104,7 +104,7 @@ The first child's output is the second's input straight (`stdin_from_stdout`, [[
 
 ## Speed
 
-Natively on x86-64, best of five ([[MYLA-340]]): reading `head -c 268435456 /dev/zero` through a `ChildStdout`, 64 KiB a `read_str`, takes 118 ms, 2,160 MB/s (a shell's `head | cat > /dev/null` 105 ms). `read`, which gives a `[uint8]`, converted each byte and read 469 MB/s; since the conversion is one copy ([[MYLA-369]]) it reads as fast as `read_str` (101 to 118 ms against 115 to 125 ms, where it took 488 to 706 ms before; 2026-11-09).
+Natively on x86-64, best of five ([[MYLA-340]]): reading `head -c 268435456 /dev/zero` through a `ChildStdout`, 64 KiB a `read_str`, takes 118 ms, 2,160 MB/s (a shell's `head | cat > /dev/null` 105 ms). `read`, which gives a `[uint8]`, converted each byte and read 469 MB/s; since the conversion is one copy ([[MYLA-369]]) it reads as fast as `read_str` (101 to 118 ms against 115 to 125 ms, where it took 488 to 706 ms before; 2026-11-09). Since D177 a `ChildStdout` reads into a `[uint8]` (`__read_bytes`), and `read_str` is gone: 124 to 137 ms, against 126 to 134 ms through `read_str` on the same machine ([[MYLA-399]]).
 
 ## Process primitives
 

@@ -114,7 +114,7 @@ fun main() {
 | `Seek` | `seek(var self, pos: SeekFrom) -> Result<int64, IoError>`: the cursor moved to `SeekFrom.Start(k)`, `Current(k)` or `End(k)`; the new offset from the start. Before the start is `InvalidInput`; past the end is allowed |
 | `Pollable` | `descriptor(self) -> int32`: the descriptor a task can wait for. A `Buffered` over a `Pollable` stream has `ready` and the async reads |
 
-`Read` and `Write` deal in bytes only (D177): a stream implements `read`, or `write` and `flush`, and nothing for text. Strings are bytes (D164), and since [[MYLA-369]] `std.bytes`'s `from_str` and `to_str` convert in one allocation and one copy (the primitives `__str_to_bytes` and `__bytes_to_str`), so a `[uint8]` costs about what a `str` does (the measurements below). Text goes through the adapters: a `Buffered` pulls bytes, keeps them as text and gives `read_line`, `read_exact` and `read_to_end`; a `BufferedWriter` takes text with `write_str`. To write a few bytes of text to an unbuffered stream, `w.write(bytes.from_str(s))` (`import std.bytes as bytes`). Until [[MYLA-399]] each trait had a `str` twin, `read_str` and `write_str`, from when the two kinds converted only byte by byte ([[MYLA-338]]).
+`Read` and `Write` deal in bytes only (D177): a stream implements `read`, or `write` and `flush`, and nothing for text. Strings are bytes (D164), and since [[MYLA-369]] `std.bytes`'s `from_str` and `to_str` convert in one allocation and one copy (the primitives `__str_to_bytes` and `__bytes_to_str`), so a `[uint8]` costs about what a `str` does (the measurements below); the streams of a descriptor (`FdStream`, `fs.File`, a child's pipes) read into a `[uint8]` and write from one themselves (the primitives `__read_bytes` and `__write_bytes`), so their bytes aren't converted at all. Text goes through the adapters: a `Buffered` pulls bytes, keeps them as text and gives `read_line`, `read_exact` and `read_to_end`; a `BufferedWriter` takes text with `write_str`. To write a few bytes of text to an unbuffered stream, `w.write(bytes.from_str(s))` (`import std.bytes as bytes`). Until [[MYLA-399]] each trait had a `str` twin, `read_str` and `write_str`, from when the two kinds converted only byte by byte ([[MYLA-338]]).
 
 ### Streams of this module
 
@@ -190,6 +190,18 @@ Natively on x86-64, 50 MB of lines of up to 120 bytes, best of three ([[MYLA-338
 | `copy(fd_stream(0), fd_stream(1))`, to `/dev/null` | 13 ms |
 | `copy` from one memory stream to another | 256 ms |
 
-With the conversions in one copy ([[MYLA-369]]; the same 50 MB, 2026-11-09, on a busier machine where `stdin().read_line()` took 129 to 153 ms, seven runs): `Buffered` reading through `read` (`[uint8]`) and `bytes.to_str` instead of `read_str` took 100 to 148 ms, median 106; with the conversions a byte at a time, as before, 289 to 487 ms, median 302 (MYLA-338's 331 ms). Interpreted, on 2 MB, 6.1 to 6.5 s through `read_str`, 6.6 s through `read`. So `read_str` and `write_str` no longer pay for themselves in speed: dropping them is the owner's decision ([[MYLA-399]]). In the same run, 1 000 000 `write`s of a 48-byte `[uint8]` into a `BufferedWriter` over a descriptor took 23 to 28 ms (110 to 118 ms before), and `read_all` gathers text and converts once.
+With the conversions in one copy ([[MYLA-369]]; the same 50 MB, 2026-11-09, on a busier machine where `stdin().read_line()` took 129 to 153 ms, seven runs): `Buffered` reading through `read` (`[uint8]`) and `bytes.to_str` instead of `read_str` took 100 to 148 ms, median 106; with the conversions a byte at a time, as before, 289 to 487 ms, median 302 (MYLA-338's 331 ms). Interpreted, on 2 MB, 6.1 to 6.5 s through `read_str`, 6.6 s through `read`. So `read_str` and `write_str` no longer paid for themselves in speed. In the same run, 1 000 000 `write`s of a 48-byte `[uint8]` into a `BufferedWriter` over a descriptor took 23 to 28 ms (110 to 118 ms before), and `read_all` gathers text and converts once.
+
+Without them (D177, [[MYLA-399]]; 2026-11-09, natively on x86-64, the medians of eleven runs interleaved; before: through `read_str` and `write_str`; then: the bytes converted from and to the descriptor's `str`; now: the descriptor read into and written from a `[uint8]` by `__read_bytes` and `__write_bytes`):
+
+| What | Before | Converted | Now |
+| --- | --- | --- | --- |
+| `stdin().read_line()` over the 50 MB | 130 to 139 ms | 119 to 121 ms | 131 to 133 ms |
+| 1 000 000 `write_str` of 48 bytes into a `BufferedWriter` over `fd_stream(1)`, to `/dev/null` | 14 ms | 15 ms | 14 ms |
+| `copy(fd_stream(0), fd_stream(1))` of the 50 MB, to `/dev/null` | 7 ms | 10 ms | 7 ms |
+| `read_line` through a `Buffered<MemoryStream>` of the 50 MB (the file read too) | 268 ms | 279 ms | 288 ms |
+| 4 GiB from `/dev/zero` to `/dev/null` through two `File`s, reads of 1 MiB | 109 ms (`read_str`, `write_str`); 471 ms (`read`, `write`) | 481 ms | 111 ms |
+
+Interpreted, on 2 MB: 6.80 to 6.93 s before, 6.76 to 6.98 s converted, 6.67 to 6.80 s now. Converting costs nothing for lines but two copies of every byte in a bulk copy, four times the time for the 4 GiB, which the primitives give back. Why the converted lines are faster than either, with two copies more, isn't known (MYLA-369 saw it too).
 
 `copy` reads 64 KiB at a time ([[MYLA-379]]; it was 4 KiB): a 256 MiB file copied by `copy(fs.open(a)?, fs.create(b)?)` into a new file took 88 ms natively, 162 ms with 4 KiB, and 40 ms instead of 56 to `/dev/null` (best of seven; 128 KiB gave 85 and 39, 16 KiB 104 and 42). From one memory stream to another it stays as it was.

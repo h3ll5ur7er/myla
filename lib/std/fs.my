@@ -604,12 +604,12 @@ impl Read for File {
         if n <= 0 {
             return Ok([])
         }
-        let chunk = __read(self.fd, n)
+        let chunk = __read_bytes(self.fd, n)
         let err = __io_errno()
         if err != 0 {
             return Err(from_errno(err))
         }
-        return Ok(bytes_m.from_str(chunk))
+        return Ok(chunk)
     }
 }
 
@@ -617,7 +617,7 @@ impl Write for File {
     // Every byte of `b` at the cursor (or at the end, for a file opened to
     // append).
     fun write(var self, b: [uint8]) -> Result<int, IoError> {
-        __write(self.fd, bytes_m.to_str(b))
+        __write_bytes(self.fd, b)
         let err = __io_errno()
         if err != 0 {
             return Err(from_errno(err))
