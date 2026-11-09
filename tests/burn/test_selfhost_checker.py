@@ -25,6 +25,7 @@ from __future__ import annotations
 import glob
 import json
 import os
+import re
 import subprocess
 import tempfile
 import unittest
@@ -346,6 +347,36 @@ SELF_METHOD_WARNINGS: dict[str, tuple[str, list[str]]] = {
         []),
 }
 
+# MYLA-386: the D95 walk in a generic actor's async methods, through its
+# generic synchronous methods: the same warnings as the same actor over
+# `int` (the test checks both), written here since the Python checker had no
+# generic actors. The warnings' first lines, then `ok`.
+_SHELF = ("actor Shelf<T> {\n    items: [T],\n    sold: int,\n}\nimpl<T> Shelf<T> {\n"
+          "    fun take(var self) -> T {\n        self.sold = self.sold + 1\n        return self.items.pop()\n    }\n"
+          "    fun has(self) -> bool {\n        return self.items.len() > 0\n    }\n")
+GENERIC_ACTOR_WARNINGS: dict[str, tuple[str, list[str]]] = {
+    # a check through a method, a change by `pop` after the `await`
+    "check_then_pop": (_PAY + _SHELF +
+        "    async fun sell(var self, p: Pay) -> int {\n        if !self.has() {\n            return 0\n        }\n"
+        "        let paid = await p.charge()\n        self.items.pop()\n        return 1\n    }\n}\n",
+        ["warn 27 23 27:9-27:25 warning: 'self.items' was checked before an 'await' and is changed after it: another call to this actor may have changed it meanwhile"]),
+    # a change through a method returning a `T`, inside an expression
+    "change_in_a_method": (_PAY + _SHELF +
+        "    async fun hand_over(var self, p: Pay) -> Option<T> {\n        if self.sold > 9 {\n            return None\n        }\n"
+        "        let paid = await p.charge()\n        return Some(self.take())\n    }\n}\n",
+        ["warn 27 30 27:21-27:32 warning: 'self.sold' was checked before an 'await' and is changed after it: another call to this actor may have changed it meanwhile"]),
+    # a list of `T`s set from what was read before the `await`
+    "stale_value": (_PAY + _SHELF +
+        "    async fun restock(var self, p: Pay, x: T) {\n        let kept = self.items\n"
+        "        let paid = await p.charge()\n        self.items = kept\n        self.items.push(x)\n    }\n}\n",
+        ["warn 25 13 25:9-25:19 warning: 'self.items' is set from a value read before an 'await': another call to this actor may have changed it meanwhile"]),
+    # checking again after the `await` is quiet
+    "quiet_check_again": (_PAY + _SHELF +
+        "    async fun sell(var self, p: Pay) -> Option<T> {\n        if !self.has() {\n            return None\n        }\n"
+        "        let paid = await p.charge()\n        if self.has() {\n            return Some(self.take())\n        }\n        return None\n    }\n}\n",
+        []),
+}
+
 # Verdicts a later decision changed from the retired Python checker's
 # recording, pinned here.
 SUPERSEDED: dict[str, str] = {
@@ -521,6 +552,23 @@ class SelfHostedCheckerParity(unittest.TestCase):
                     lines = self._myla_check(path).split("\n")
                     self.assertEqual([l for l in lines if l.startswith("warn ")], warns)
                     self.assertEqual(lines[-1], "ok")
+
+    def test_warnings_in_generic_actors(self) -> None:
+        # MYLA-386: D95 in a generic actor, as in the same actor over `int`
+        with tempfile.TemporaryDirectory() as tmp:
+            for name, (source, warns) in GENERIC_ACTOR_WARNINGS.items():
+                concrete = (source.replace("actor Shelf<T>", "actor Shelf").replace("impl<T> Shelf<T>", "impl Shelf")
+                            .replace("[T]", "[int]").replace("<T>", "<int>").replace("-> T ", "-> int ")
+                            .replace("x: T", "x: int"))
+                self.assertIsNone(re.search(r"\bT\b", concrete), concrete)
+                for kind, text in [("generic", source), ("concrete", concrete)]:
+                    with self.subTest(case=name, kind=kind):
+                        path = os.path.join(tmp, f"{name}_{kind}.my")
+                        with open(path, "w", encoding="utf-8") as fh:
+                            fh.write(text)
+                        lines = self._myla_check(path).split("\n")
+                        self.assertEqual([l for l in lines if l.startswith("warn ")], warns)
+                        self.assertEqual(lines[-1], "ok")
 
     def test_declaration_mutants_match_the_oracle(self) -> None:
         # every example with one declaration broken (MYLA-110): the same error,

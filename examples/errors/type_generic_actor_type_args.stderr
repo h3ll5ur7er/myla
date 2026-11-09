@@ -1,0 +1,5 @@
+type error: type 'Cell' expects 1 type argument(s), got 0
+  --> examples/errors/type_generic_actor_type_args.my:8:13
+  |
+8 | fun peek(c: Cell) {}
+  |             ^^^^

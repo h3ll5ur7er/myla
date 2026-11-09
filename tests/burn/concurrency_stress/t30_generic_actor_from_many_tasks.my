@@ -1,0 +1,78 @@
+// 28. A generic actor is an actor: each instance, one per type argument
+// natively, serves its callers one method at a time, from any number of
+// tasks, and what crosses into it is a copy (MYLA-386)
+import std.task as task
+
+actor Tally<T> {
+    items: [T],
+    count: int,
+}
+
+impl<T> Tally<T> {
+    fun add(var self, x: T) -> int {
+        self.items.push(x)
+        self.count += 1
+        return self.count
+    }
+
+    fun size(self) -> int {
+        return self.items.len()
+    }
+
+    fun counted(self) -> int {
+        return self.count
+    }
+
+    fun take_all(var self) -> [T] {
+        let xs = self.items
+        self.items = []
+        return xs
+    }
+}
+
+async fun ints(t: Tally<int>, k: int, n: int) -> int {
+    var last = 0
+    for i in 0..n {
+        last = await t.add(k * n + i)
+    }
+    return last
+}
+
+async fun words(t: Tally<[str]>, k: int, n: int) -> int {
+    var pair = [f"w{k}", ""]
+    for i in 0..n {
+        // the list goes in as a copy: changing it after the call changes
+        // nothing in the actor
+        pair[1] = f"{i}"
+        let c = await t.add(pair)
+        pair[1] = "changed"
+    }
+    return n
+}
+
+#main
+async fun main() {
+    let a: Tally<int> = Tally { items: [], count: 0 }
+    let b: Tally<[str]> = Tally { items: [], count: 0 }
+    var fs: [async () -> int] = []
+    for k in 0..16 {
+        fs.push(async () => await ints(a, k, 12500))
+        fs.push(async () => await words(b, k, 500))
+    }
+    let rs = await task.all(fs)
+    let xs = await a.take_all()
+    var sum: int64 = 0
+    for x in xs {
+        sum += x as int64
+    }
+    let ws = await b.take_all()
+    var chars = 0
+    for w in ws {
+        chars += w[0].len() + w[1].len()
+    }
+    let na = await a.counted()
+    let left = await a.size()
+    let nb = await b.counted()
+    print(f"{rs.len()} {na} {xs.len()} {sum} {left}")
+    print(f"{nb} {ws.len()} {chars}")
+}

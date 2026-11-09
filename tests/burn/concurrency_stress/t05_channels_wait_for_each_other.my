@@ -1,0 +1,50 @@
+// 5. Deadlock without shared memory (MYLA-351): with channels, two tasks can
+// wait for each other. Over two rendezvous channels both send first, so
+// each waits for a receiver the other only becomes after its send: Myla
+// doesn't prevent this cycle. A time limit on the waits is the program's
+// way out: both sends time out, and their values are taken back. In the
+// order that receives first, the same exchange goes through. (Without the
+// limits the program would end with "every task waits for another one",
+// as t34 shows.)
+import std.task as task
+from std.task import Channel
+
+async fun send_then_recv(out: Channel<str>, inn: Channel<str>, word: str, ms: int) -> str {
+    match await out.send_timeout(word, ms) {
+        Ok(()) => {},
+        Err(e) => { return f"send {e}" },
+    }
+    return match await inn.recv_timeout(ms) {
+        Ok(w) => f"got {w}"
+        Err(e) => f"recv {e}"
+    }
+}
+
+async fun recv_then_send(inn: Channel<str>, out: Channel<str>, word: str, ms: int) -> str {
+    var heard = ""
+    match await inn.recv_timeout(ms) {
+        Ok(w) => { heard = w },
+        Err(e) => { return f"recv {e}" },
+    }
+    return match await out.send_timeout(word, ms) {
+        Ok(()) => f"got {heard}"
+        Err(e) => f"send {e}"
+    }
+}
+
+#main
+async fun main() {
+    let a: Channel<str> = task.channel(0)
+    let b: Channel<str> = task.channel(0)
+    async let x = send_then_recv(a, b, "hello", 100)
+    async let y = send_then_recv(b, a, "world", 100)
+    let rx = await x
+    let ry = await y
+    // a value taken back can't be received
+    let left_a = match await a.try_recv() { Ok(w) => 1, Err(e) => 0 }
+    let left_b = match await b.try_recv() { Ok(w) => 1, Err(e) => 0 }
+    print(f"{rx}, {ry}, left {left_a} {left_b}")
+    async let u = send_then_recv(a, b, "hello", 10000)
+    async let v = recv_then_send(a, b, "world", 10000)
+    print(f"{await u}, {await v}")
+}

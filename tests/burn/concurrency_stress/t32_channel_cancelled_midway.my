@@ -1,0 +1,116 @@
+// 32. Cancellation in the middle of a channel's traffic (MYLA-351, D96): 4
+// producers and 4 consumers; once a quarter of the values went through, one
+// consumer and one producer are cancelled. The cancelled consumer stops
+// before its next value (a value handed to it while it waited is still
+// its), the cancelled producer's waiting `send` gives up with
+// `Err(Cancelled)`, its value not sent. What was sent was received exactly
+// once, by a consumer or by the parent draining what was left: nothing lost
+// where a task stopped waiting, nothing twice. A rendezvous takes back the
+// value of a sender cancelled while it waited for a receiver.
+import std.task as task
+from std.task import Channel
+
+// How many values the consumers took so far.
+actor Tally {
+    n: int,
+}
+
+impl Tally {
+    fun add(var self) {
+        self.n += 1
+    }
+    fun count(self) -> int {
+        return self.n
+    }
+}
+
+const EACH: int = 300
+
+// The values it sent: a producer sends its own in order, so its first k.
+async fun produce(ch: Channel<int>, p: int) -> int {
+    var sent = 0
+    for i in 0..EACH {
+        match await ch.send(p * EACH + i) {
+            Ok(()) => { sent += 1 },
+            Err(e) => { return sent },
+        }
+        if task.cancelled() {
+            return sent
+        }
+    }
+    return sent
+}
+
+async fun consume(ch: Channel<int>, tally: Tally) -> [int] {
+    var got: [int] = []
+    while !task.cancelled() {
+        match await ch.recv() {
+            Some(x) => {
+                got.push(x)
+                await tally.add()
+            },
+            None => { return got },
+        }
+    }
+    return got
+}
+
+fun ints(cap: int) -> Channel<int> {
+    if cap < 0 {
+        return task.unbounded()
+    }
+    return task.channel(cap)
+}
+
+async fun run(cap: int) -> str {
+    let ch = ints(cap)
+    let tally = Tally { n: 0 }
+    async let c0 = consume(ch, tally)
+    async let c1 = consume(ch, tally)
+    async let c2 = consume(ch, tally)
+    async let c3 = consume(ch, tally)
+    async let p0 = produce(ch, 0)
+    async let p1 = produce(ch, 1)
+    async let p2 = produce(ch, 2)
+    async let p3 = produce(ch, 3)
+    while (await tally.count()) < EACH {
+        await task.yield()
+    }
+    task.cancel(c1)
+    task.cancel(p2)
+    let sent = [await p0, await p1, await p2, await p3]
+    await ch.close()
+    var got: [[int]] = [await c0, await c1, await c2, await c3]
+    var left: [int] = []
+    while let Some(x) = await ch.recv() {
+        left.push(x)
+    }
+    got.push(left)
+    var seen: [int] = []
+    for i in 0..4 * EACH {
+        seen.push(0)
+    }
+    for xs in got {
+        for x in xs {
+            seen[x] += 1
+        }
+    }
+    var wrong = 0
+    for p in 0..4 {
+        for i in 0..EACH {
+            let want = if i < sent[p] { 1 } else { 0 }
+            if seen[p * EACH + i] != want {
+                wrong += 1
+            }
+        }
+    }
+    let whole = sent[0] == EACH && sent[1] == EACH && sent[3] == EACH
+    return f"capacity {cap}: the others sent all {whole}, received as sent {wrong == 0}"
+}
+
+#main
+async fun main() {
+    for cap in [2, 0, -1] {
+        print(await run(cap))
+    }
+}

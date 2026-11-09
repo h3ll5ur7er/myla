@@ -1,0 +1,215 @@
+// 33. Worker pools, time limits and the first of several (MYLA-351):
+// - `task.pool` gives every job's result once, in the order of the jobs,
+//   whichever worker took it and whenever it finished;
+// - `task.workers` cancelled in the middle stops taking jobs: every job was
+//   done once (its result in the results channel) or is still in the jobs
+//   channel, and the count it gives is the results it sent;
+// - consumers that wait with `recv_timeout`, timing out again and again
+//   while producers pause, still receive every value exactly once;
+// - producers that wait with `send_timeout` on a rendezvous and on a full
+//   channel, giving up again and again while consumers pause: a value whose
+//   send gave `Ok` is received exactly once, one whose send timed out never
+//   (the race between a wait's time limit and the wake that serves it);
+// - `task.first` gives the quickest function's result, and the others,
+//   asleep, are cancelled: they end at once instead of after 10 s.
+import std.task as task
+from std.task import Channel
+
+async fun slow_square(x: int) -> int {
+    for i in 0..x % 4 {
+        await task.yield()
+    }
+    return x * x
+}
+
+async fun drain(ch: Channel<int>) -> [int] {
+    var out: [int] = []
+    while let Some(x) = await ch.recv() {
+        out.push(x)
+    }
+    return out
+}
+
+async fun in_order() -> bool {
+    var xs: [int] = []
+    for i in 0..500 {
+        xs.push(i)
+    }
+    let rs = await task.pool(8, xs, async (x: int) => await slow_square(x))
+    var ok = rs.len() == 500
+    for i in 0..rs.len() {
+        if rs[i] != i * i { ok = false }
+    }
+    return ok
+}
+
+async fun cancelled_pool() -> bool {
+    let jobs: Channel<int> = task.unbounded()
+    let results: Channel<int> = task.unbounded()
+    for i in 0..400 {
+        let r = await jobs.send(i)
+    }
+    await jobs.close()
+    async let w = task.workers(4, jobs, results, async (x: int) => await slow_square(x))
+    while (await results.len()) < 100 {
+        await task.yield()
+    }
+    task.cancel(w)
+    let sent = await w
+    let done = await drain(results)
+    let left = await drain(jobs)
+    var seen: [int] = []
+    for i in 0..400 {
+        seen.push(0)
+    }
+    for r in done {
+        var x = 0
+        while x * x < r { x += 1 }
+        seen[x] += 1
+    }
+    for x in left {
+        seen[x] += 1
+    }
+    var ok = sent == done.len()
+    for n in seen {
+        if n != 1 { ok = false }
+    }
+    return ok
+}
+
+async fun produce_slowly(ch: Channel<int>, p: int) -> int {
+    for i in 0..100 {
+        let r = await ch.send(p * 100 + i)
+        if i % 25 == 0 {
+            await task.sleep(3)
+        }
+    }
+    return 0
+}
+
+async fun consume_impatiently(ch: Channel<int>) -> [int] {
+    var got: [int] = []
+    while true {
+        match await ch.recv_timeout(1) {
+            Ok(x) => { got.push(x) },
+            Err(e) => {
+                if e == task.ChannelError.Closed {
+                    return got
+                }
+            },
+        }
+    }
+    return got
+}
+
+async fun impatient_receivers() -> bool {
+    let ch: Channel<int> = task.channel(3)
+    var cs: [async () -> [int]] = []
+    for c in 0..4 {
+        cs.push(async () => await consume_impatiently(ch))
+    }
+    async let got = task.all(cs)
+    var ps: [async () -> int] = []
+    for p in 0..4 {
+        ps.push(async () => await produce_slowly(ch, p))
+    }
+    let done = await task.all(ps)
+    await ch.close()
+    var seen: [int] = []
+    for i in 0..400 {
+        seen.push(0)
+    }
+    for xs in await got {
+        for x in xs {
+            seen[x] += 1
+        }
+    }
+    var ok = true
+    for n in seen {
+        if n != 1 { ok = false }
+    }
+    return ok
+}
+
+// The values whose send went through.
+async fun send_impatiently(ch: Channel<int>, p: int) -> [int] {
+    var sent: [int] = []
+    for i in 0..100 {
+        let x = p * 100 + i
+        match await ch.send_timeout(x, 1) {
+            Ok(()) => { sent.push(x) },
+            Err(e) => {},
+        }
+    }
+    return sent
+}
+
+async fun consume_slowly(ch: Channel<int>) -> [int] {
+    var got: [int] = []
+    while let Some(x) = await ch.recv() {
+        got.push(x)
+        if got.len() % 8 == 0 {
+            await task.sleep(2)
+        }
+    }
+    return got
+}
+
+async fun impatient_senders(cap: int) -> bool {
+    let ch: Channel<int> = task.channel(cap)
+    var cs: [async () -> [int]] = []
+    for c in 0..2 {
+        cs.push(async () => await consume_slowly(ch))
+    }
+    async let got = task.all(cs)
+    var ps: [async () -> [int]] = []
+    for p in 0..4 {
+        ps.push(async () => await send_impatiently(ch, p))
+    }
+    var want: [int] = []
+    for i in 0..400 {
+        want.push(0)
+    }
+    for xs in await task.all(ps) {
+        for x in xs {
+            want[x] = 1
+        }
+    }
+    await ch.close()
+    var seen: [int] = []
+    for i in 0..400 {
+        seen.push(0)
+    }
+    for xs in await got {
+        for x in xs {
+            seen[x] += 1
+        }
+    }
+    return seen == want
+}
+
+async fun nap(ms: int, v: int) -> int {
+    await task.sleep(ms)
+    return v
+}
+
+async fun the_quickest() -> str {
+    var fs: [async () -> int] = []
+    for i in 0..16 {
+        let ms = if i == 11 { 1 } else { 10000 }
+        fs.push(async () => await nap(ms, i * 10))
+    }
+    return match await task.first(fs) {
+        Some(p) => f"function {p.0} gave {p.1}"
+        None => "none"
+    }
+}
+
+#main
+async fun main() {
+    print(f"pool in order {await in_order()}")
+    print(f"cancelled workers, every job once {await cancelled_pool()}")
+    print(f"timing out receivers, every value once {await impatient_receivers()}")
+    print(f"timing out senders, received as sent {await impatient_senders(0)} {await impatient_senders(2)}")
+    print(await the_quickest())
+}

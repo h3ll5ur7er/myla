@@ -1,0 +1,5 @@
+type error: type 'bool' does not satisfy the bound 'T: Add' required by 'Total.add'
+  --> examples/errors/type_generic_actor_unmet_bound.my:18:24
+   |
+18 |     let s = await t.add(false)
+   |                   ^^^^^^^^^^^^

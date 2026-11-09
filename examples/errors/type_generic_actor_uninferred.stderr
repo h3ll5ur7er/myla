@@ -1,0 +1,5 @@
+type error: cannot infer type parameter(s) T; add a type annotation to guide inference
+  --> examples/errors/type_generic_actor_uninferred.my:10:13
+   |
+10 |     let l = Log { count: 0 }
+   |             ^^^^^^^^^^^^^^^^

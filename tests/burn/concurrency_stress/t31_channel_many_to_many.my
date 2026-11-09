@@ -1,0 +1,133 @@
+// 31. A channel between many producers and many consumers (MYLA-351): 8
+// producers send 400 values each through a channel (of 4, a rendezvous, and
+// one without a bound), 8 consumers take them until it is closed and
+// drained. Every value is received exactly once: none lost while senders
+// wait for room (or for a receiver) and receivers for values, none twice.
+// The channel's queue is a generic actor (MYLA-386), so each look at it is
+// one step, and a task that waits parks on a notifier (MYLA-387) until the
+// other side's step wakes it. A channel of strings carries the same.
+import std.task as task
+from std.task import Channel
+
+const PRODUCERS: int = 8
+const EACH: int = 400
+
+async fun produce(ch: Channel<int>, p: int) -> int {
+    var sent = 0
+    for i in 0..EACH {
+        match await ch.send(p * EACH + i) {
+            Ok(()) => { sent += 1 },
+            Err(e) => {},
+        }
+    }
+    return sent
+}
+
+async fun consume(ch: Channel<int>) -> [int] {
+    var got: [int] = []
+    while let Some(x) = await ch.recv() {
+        got.push(x)
+    }
+    return got
+}
+
+async fun producers(ch: Channel<int>) -> int {
+    var fs: [async () -> int] = []
+    for p in 0..PRODUCERS {
+        fs.push(async () => await produce(ch, p))
+    }
+    var sent = 0
+    for n in await task.all(fs) {
+        sent += n
+    }
+    await ch.close()
+    return sent
+}
+
+fun ints(cap: int) -> Channel<int> {
+    if cap < 0 {
+        return task.unbounded()
+    }
+    return task.channel(cap)
+}
+
+async fun produce_strs(ch: Channel<str>, p: int) -> int {
+    for i in 0..EACH {
+        let r = await ch.send(f"{p * EACH + i}")
+    }
+    return EACH
+}
+
+async fun consume_strs(ch: Channel<str>) -> [str] {
+    var got: [str] = []
+    while let Some(x) = await ch.recv() {
+        got.push(x)
+    }
+    return got
+}
+
+fun counted(seen: [int], sent: int, received: int) -> str {
+    var twice = 0
+    var missing = 0
+    for n in seen {
+        if n > 1 { twice += 1 }
+        if n == 0 { missing += 1 }
+    }
+    return f"{sent} sent, {received} received, {twice} twice, {missing} missing"
+}
+
+#main
+async fun main() {
+    for cap in [4, 0, -1] {
+        let ch = ints(cap)
+        var cs: [async () -> [int]] = []
+        for c in 0..8 {
+            cs.push(async () => await consume(ch))
+        }
+        async let got = task.all(cs)
+        let sent = await producers(ch)
+        var seen: [int] = []
+        for i in 0..PRODUCERS * EACH {
+            seen.push(0)
+        }
+        var received = 0
+        for xs in await got {
+            for x in xs {
+                seen[x] += 1
+                received += 1
+            }
+        }
+        print(counted(seen, sent, received))
+    }
+    let strs: Channel<str> = task.channel(3)
+    var cs: [async () -> [str]] = []
+    for c in 0..8 {
+        cs.push(async () => await consume_strs(strs))
+    }
+    async let got = task.all(cs)
+    var ps: [async () -> int] = []
+    for p in 0..PRODUCERS {
+        ps.push(async () => await produce_strs(strs, p))
+    }
+    var sent = 0
+    for n in await task.all(ps) {
+        sent += n
+    }
+    await strs.close()
+    var seen: [int] = []
+    for i in 0..PRODUCERS * EACH {
+        seen.push(0)
+    }
+    var received = 0
+    for xs in await got {
+        for x in xs {
+            var v = 0
+            for c in x {
+                v = v * 10 + (c - '0')
+            }
+            seen[v] += 1
+            received += 1
+        }
+    }
+    print(counted(seen, sent, received))
+}

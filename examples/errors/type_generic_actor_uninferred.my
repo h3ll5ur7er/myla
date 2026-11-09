@@ -1,0 +1,11 @@
+//~ type error: cannot infer type parameter(s) T
+// A generic actor's type arguments are inferred from its fields, or from
+// the expected type, as a generic struct's are (MYLA-386)
+actor Log<T> {
+    count: int,
+}
+
+#main
+async fun main() {
+    let l = Log { count: 0 }
+}

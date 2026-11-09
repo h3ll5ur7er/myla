@@ -51,7 +51,7 @@ The conventions (D164): operations on built-in types are methods (`s.split(",")`
 | `std.slice` | [[Language/Standard-library/Slice]] | The index arithmetic of slices |
 | `std.option` | [[Language/Standard-library/Option]] | Methods on `Option` and `Result`: `map`, `and_then`, `unwrap_or`, `ok_or`, `map_err`, `expect`, … |
 | `std.map` | [[Language/Standard-library/Map]] | Methods on maps (`get`, `get_or`, `update`, `values`, `items`, `merge`) and `counts` |
-| `std.task` | [[Language/Standard-library/Task]] | Child tasks in numbers known at run time, cancellation |
+| `std.task` | [[Language/Standard-library/Task]] | Child tasks in numbers known at run time, cancellation, time limits, notifiers, channels, worker pools, the first of several |
 | `std.time` | [[Language/Standard-library/Time]] | The monotonic and wall clocks, `Duration`, `Instant`, `DateTime` in UTC, RFC 3339 and ISO 8601 |
 | `std.log` | [[Language/Standard-library/Log]] | `error`, `warn`, `info`, `debug` to the standard error with a time, the level from `MYLA_LOG` |
 | `std.test` | [[Language/Standard-library/Test]] | Expectations, temporary directories and the program under test, for test functions |
