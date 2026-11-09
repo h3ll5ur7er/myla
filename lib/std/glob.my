@@ -13,10 +13,14 @@
 // pointers, the last `*` taking one more character on a mismatch, and the
 // components with a table over (pattern component, path component).
 //
-// `walk` and `glob` read directories through `std.fs`, which has no way to
-// tell a symbolic link from what it names: a link to a directory counts as
-// a directory, so both go into it, and a link back to a directory above it
-// is gone round until the path holds 40 links (Linux's limit).
+// A symbolic link is a path like any other, but neither `walk` nor a `**`
+// goes into a link to a directory (MYLA-363), as bash's globstar doesn't: a
+// link back to a directory above it would be gone round until the path
+// held 40 links (Linux's limit), and two such links make about 2^40 paths.
+// `walk_with(dir, true)` follows links, but not into a directory it is
+// already in (one the device and file number of `__path_stat` name); a
+// component of a pattern that isn't `**` (`link/*`, `link/x`) follows a
+// link, as shells do.
 
 import std.fs as fs
 from std.fs import IoError
@@ -410,31 +414,79 @@ fun below(rel: str, name: str) -> str {
 // Every path below the directory `dir`, relative to it, in sorted order:
 // a directory comes before what it holds, and the names of a directory are
 // sorted by their bytes (as `fs.list_dir` sorts them). Hidden names are
-// there too. A directory that can't be read is an error; a symbolic link to
-// a directory counts as one (see the top of the module).
+// there too. A directory that can't be read is an error; a symbolic link is
+// listed, but not gone into (see the top of the module).
 pub fun walk(dir: str) -> Result<[str], IoError> {
+    return walk_with(dir, false)
+}
+
+// `walk`, going into symbolic links to directories when `follow_links`,
+// but not into a directory the walk is already in (a link to one above
+// it): such a link is listed, and what is below it isn't.
+pub fun walk_with(dir: str, follow_links: bool) -> Result<[str], IoError> {
     var out: [str] = []
-    var stack: [str] = []
+    // the paths to visit, each with its depth (1 for a name in `dir`)
+    var stack: [(str, int)] = []
+    // following links: the directories from `dir` down to the parent of
+    // what is visited, by their device and file number
+    var chain: [(int64, int64)] = []
+    if follow_links {
+        chain.push(dir_id(dir))
+    }
     let top = fs.list_dir(dir)?
     var k = top.len() - 1
     while k >= 0 {
-        stack.push(top[k])
+        stack.push((top[k], 1))
         k -= 1
     }
     while stack.len() > 0 {
-        let rel = stack.pop()
+        let (rel, depth) = stack.pop()
         out.push(rel)
         let full = path.join(dir, rel)
-        if fs.is_dir(full) {
+        var into = false
+        if follow_links {
+            while chain.len() > depth {
+                chain.pop()
+            }
+            let st = __path_stat(full, true)
+            if st.len() == 5 && ((st[1] as int32) & S_IFMT) == S_IFDIR && !chain.contains((st[3], st[4])) {
+                chain.push((st[3], st[4]))
+                into = true
+            }
+        } else {
+            into = dir_itself(full)
+        }
+        if into {
             let names = fs.list_dir(full)?
             var i = names.len() - 1
             while i >= 0 {
-                stack.push(rel + "/" + names[i])
+                stack.push((rel + "/" + names[i], depth + 1))
                 i -= 1
             }
         }
     }
     return Ok(out)
+}
+
+const S_IFMT: int32 = 0xF000
+const S_IFDIR: int32 = 0x4000
+
+// Whether `p` is a directory itself, not a symbolic link to one.
+fun dir_itself(p: str) -> bool {
+    return match fs.symlink_metadata(p) {
+        Ok(m) => m.is_dir()
+        Err(_) => false
+    }
+}
+
+// The device and file number of the directory `p` (links followed), or
+// `(-1, -1)` when it has none.
+fun dir_id(p: str) -> (int64, int64) {
+    let st = __path_stat(p, true)
+    if st.len() != 5 {
+        return (-1i64, -1i64)
+    }
+    return (st[3], st[4])
 }
 
 // The paths that match `pattern`, found below the working directory (or
@@ -505,7 +557,7 @@ impl Globber {
                     continue
                 }
                 let p = below(rel, name)
-                if fs.is_dir(self.full(p)) {
+                if dir_itself(self.full(p)) {
                     self.expand(i, p)?
                 } else if last {
                     self.out.push(p)
