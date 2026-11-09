@@ -45,7 +45,7 @@ _REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pa
 DRIVER = """import std.compress as compress
 import std.archive as archive
 import std.encoding as encoding
-import std.hash as hash
+import std.checksum as checksum
 import std.io as io
 import std.num as num
 import std.process as process
@@ -146,7 +146,7 @@ fun kind_of(k: EntryKind) -> str {
 
 fun show(e: Entry) {
     let h = encoding.hex_encode
-    let crc = hash.crc32_bytes(e.data)
+    let crc = checksum.crc32_bytes(e.data)
     put(f"{kind_of(e.kind)} {h(bytes_of(e.name))} {e.mode} {e.mtime} {e.uid} {e.gid} {h(bytes_of(e.uname))} {h(bytes_of(e.gname))} {h(bytes_of(e.link))} {e.data.len()} {crc}\\n")
 }
 

@@ -23,7 +23,7 @@ from std.io import Read, Write, from_bytes, memory_stream
 from std.fs import IoError, io_error_name
 import std.path as path_m
 import std.time as time
-import std.hash as hash_m
+import std.checksum as checksum_m
 import std.option as option_m
 import std.str as str_m
 import std.list as list_m // `filled`
@@ -924,7 +924,7 @@ pub fun zip_data(b: [uint8], f: ZipFile) -> Result<[uint8], ArchiveError> {
         return Err(ArchiveError.Unsupported(f.method))
     }
     if (data.len() as int64) != f.size { return Err(ArchiveError.LengthMismatch) }
-    if hash_m.crc32_bytes(data) != f.crc { return Err(ArchiveError.ChecksumMismatch) }
+    if checksum_m.crc32_bytes(data) != f.crc { return Err(ArchiveError.ChecksumMismatch) }
     return Ok(data)
 }
 

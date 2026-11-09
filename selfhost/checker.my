@@ -1768,6 +1768,9 @@ pub struct Checker {
     errs: [CheckErr],               // the errors of the functions checked so far (MYLA-65, D80)
     warnings: [CheckErr],           // D95: the warnings found, in the order found
     primitives: bool,               // a program may call the raw-memory primitives (`gen_main --primitives`, the toolchain's tests)
+    // the functions (`std$str$join`) and methods (`str.trim`) checked code
+    // calls or names: an implicit module's others aren't checked (MYLA-359)
+    called: [str: bool],
     std_impls: [int32: DeclOrigin], // the standard library's impls by node id (the loader's): their methods are its code (MYLA-320); and an entry std module's functions (MYLA-388)
     mutating_calls: [int32: bool],  // the calls of a `var self` method in an actor's methods, by node id: D95 counts one on a field of `self` as a change of it (MYLA-394)
     renames: [int32: str],          // a callee's node id -> the name it stands for, put in by `fill_in`: `cancel` inside std.task is `std$task$cancel` (MYLA-388)
@@ -1853,7 +1856,7 @@ fun new_checker(decls: [Decl]) -> Checker {
         allow_self: false, type_params: [], bounds_cur: [],
         cur_ret: None, has_cur_ret: false, ret_at: None, loop_depth: 0, defer_at: -1,
         frames: [], lambda_infer_active: false, lambda_depth: 0, cur_decl: -1, lambda_infer: [], stmt_match: false,
-        resolved: [:], call_defaults: [:], errs: [], warnings: [], primitives: false, std_impls: [:], allowed: [], impl_allows: [], method_decl_allows: [], mains: [],
+        resolved: [:], call_defaults: [:], errs: [], warnings: [], primitives: false, called: [:], std_impls: [:], allowed: [], impl_allows: [], method_decl_allows: [], mains: [],
         skipped_decls: [:], skipped_fns: [:], broken_impls: [:], redefined: [:],
         lost_methods: [:], lost_traits: [:], failed_consts: [:], bodies: false,
         call_kind: "", call_kind_id: -1, targs_taken: -1, call_target: "", call_mutates: false, fun_name: "", handovers: [:], become_words: [], passed_on: [],
@@ -3610,6 +3613,7 @@ impl Checker {
         if self.is_task_cancel(ident) { return Err(terr_at(e.line, e.col, e.sp, "task.cancel can only be called, with the name of an 'async let'")) }
         if self.func_idx(ident) >= 0 {
             // a non-method top-level function referenced as a value
+            self.called[ident] = true
             return self.infer_fun_value(e, ident)
         }
         if self.redefined.contains(ident) { return Err(poisoned()) }
@@ -7645,26 +7649,102 @@ impl Checker {
         }
         self.bodies = true
         self.check_attributes_and_entry()
+        // a function or method of an implicit module (D164) that no code
+        // checked calls or names is never called: its body is checked once
+        // one does (MYLA-359), as its module's own `myla test` checks them
+        // all. Trait impls' are checked, as an operator, a bound or a derive
+        // calls them unnamed.
+        let lazy = self.lazy_decls()
+        var waiting_fns: [int32] = []
         var pos = -1
         for decl in self.decls {
             pos = pos + 1
             if self.skipped_decls.contains(pos) { continue }
-            match decl.kind { DeclKind.FunDecl(fd) => { if !self.skipped_fns.contains(fd.name) { self.check_body(decl.id, fd, "") } }, _ => {} }
+            match decl.kind {
+                DeclKind.FunDecl(fd) => {
+                    if lazy.contains(decl.id) { waiting_fns.push(pos) } else { self.check_fun_body(pos) }
+                },
+                _ => {},
+            }
         }
+        var waiting: [int32] = []
         var i = 0
         while i < self.method_decls.len() {
-            if !self.skipped_fns.contains(self.method_decls[i].name) {
-                self.impl_allows = self.method_decl_allows[i]
-                self.check_body(self.method_decl_ids[i], self.method_decls[i], self.method_decl_keys[i])
-                self.impl_allows = []
+            if lazy.contains(self.method_decl_ids[i]) {
+                waiting.push(i)
+            } else {
+                self.check_method_body(i)
             }
             i = i + 1
+        }
+        var more = true
+        while more {
+            more = false
+            var fns: [int32] = []
+            for k in waiting_fns {
+                let fname = match self.decls[k].kind { DeclKind.FunDecl(fd) => fd.name, _ => "" }
+                if self.called.contains(fname) {
+                    self.check_fun_body(k)
+                    more = true
+                } else {
+                    fns.push(k)
+                }
+            }
+            waiting_fns = fns
+            var rest: [int32] = []
+            for k in waiting {
+                if self.called.contains(self.method_decls[k].name) {
+                    self.check_method_body(k)
+                    more = true
+                } else {
+                    rest.push(k)
+                }
+            }
+            waiting = rest
         }
         self.check_passed_on()
         self.check_become_words()
         if self.errs.len() > 0 { return Err(unmangled_all(self.errs)) }
         self.warnings = unmangled_all(sort_by_place(self.warnings))
         return Ok(0)
+    }
+
+    // The body of the function `decls[pos]`, unless it was left out.
+    fun check_fun_body(var self, pos: int32) {
+        let decl = self.decls[pos]
+        match decl.kind {
+            DeclKind.FunDecl(fd) => { if !self.skipped_fns.contains(fd.name) { self.check_body(decl.id, fd, "") } },
+            _ => {},
+        }
+    }
+
+    // The body of the method `i` of `method_decls`, unless it was left out.
+    fun check_method_body(var self, i: int32) {
+        if self.skipped_fns.contains(self.method_decls[i].name) { return }
+        self.impl_allows = self.method_decl_allows[i]
+        self.check_body(self.method_decl_ids[i], self.method_decls[i], self.method_decl_keys[i])
+        self.impl_allows = []
+    }
+
+    // The functions and impls (by node id) of the implicit modules whose
+    // bodies are checked only once called (MYLA-359): impls of no trait.
+    #test(checker_on("[int]"))[[:]]
+    fun lazy_decls(self) -> [int32: bool] {
+        var out: [int32: bool] = [:]
+        for d in self.decls {
+            let lazy = match d.kind {
+                DeclKind.ImplDecl(t, ms, tps, None, targs, attrs) => true,
+                DeclKind.FunDecl(fd) => true,
+                _ => false,
+            }
+            if lazy {
+                match self.std_impls.get(d.id) {
+                    Some(o) => { if o.implicit { out[d.id] = true } },
+                    None => {},
+                }
+            }
+        }
+        return out
     }
 
     // Whether the function being checked is the standard library's.
@@ -8538,6 +8618,7 @@ impl Checker {
         if is_builtin_func(name) { return self.infer_intrinsic(e, name, args) }
 
         let fi = self.func_idx(name)
+        self.called[name] = true
         if fi < 0 {
             match prelude_variant_enum(name) {
                 Some(en) => {
@@ -9059,6 +9140,7 @@ impl Checker {
                 return Err(with_notes(terr_at(e.line, e.col, e.sp, format("type '{}' has no method '{}'", type_name(recv_type), field)), did_you_mean(field, self.method_names(key_opt))))
             },
             Some(sig) => {
+                self.called[sig.name] = true
                 let recv = match sig.decl.receiver { Some(r) => r, None => "" }
                 let mkey = match key_opt { Some(k) => k, None => "" }
                 if recv == "" { return Err(terr_at(e.line, e.col, e.sp, format("'{}' is a function of '{}' without 'self': call it on the type, '{}.{}(…)', not on a value", field, type_name(recv_type), type_name(recv_type), field))) }
@@ -9189,6 +9271,7 @@ impl Checker {
                 return Err(with_notes(terr_at(e.line, e.col, e.sp, format("type '{}' has no function '{}'", tn, field)), self.static_hint(field, tn)))
             },
         }
+        self.called[sig.name] = true
         match sig.decl.receiver {
             Some(r) => { return Err(terr_at(e.line, e.col, e.sp, format("'{}' is a method of '{}' (it takes '{}'): call it on a value, 'x.{}(…)'", field, tn, r, field))) },
             None => {},
@@ -9500,6 +9583,7 @@ impl Checker {
         }
         let fi = self.func_idx(nm)
         if fi < 0 { return Err(terr_at(e.line, e.col, e.sp, format("cannot partially apply '{}' with '_' (only functions, methods, and function values are supported)", nm))) }
+        self.called[nm] = true
         let sig = self.functions[fi]
         if sig.type_params.len() > 0 { return Err(terr_at(e.line, e.col, e.sp, format("cannot partially apply the generic function '{}'", nm))) }
         if sig.decl.is_async { return Err(terr_at(e.line, e.col, e.sp, "an async function can't be partially applied")) }
@@ -9510,7 +9594,10 @@ impl Checker {
     fun partial_field(var self, e: Expr, callee: Expr, target: Expr, field: str) -> Result<PartialTgt, CheckErr> {
         let recv = self.expect_value(target, None)?
         match self.method_partial(recv, field, e)? {
-            Some(pt) => { return Ok(pt) },
+            Some(pt) => {
+                match self.type_key(recv) { Some(k) => { self.called[format("{}.{}", k, field)] = true }, None => {} }
+                return Ok(pt)
+            },
             None => {},
         }
         match struct_view(recv) {
