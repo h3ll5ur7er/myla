@@ -15,7 +15,7 @@
 // `<`/`>` -> shift Binary, char literal -> IntLit(is_char=true).
 
 from .tokens import Token, TokenKind, Diag, SrcSpan, MAX_ERRORS, no_span
-from .lexer import lex
+from .lexer import lex, lex_qualified
 from .ast import TypeExpr, TypeKind, Expr, ExprKind, Stmt, StmtKind
 from .ast import Pattern, PatternKind, Decl, DeclKind, Block, ExprOrBlock, ElseTail
 from .ast import BindElem, FieldInit, MapEntry, MatchArm, FieldPat, Param
@@ -2612,6 +2612,28 @@ pub fun parse_source(src: str, first_id: int32) -> Result<Parsed, Diag> {
     return match parse_source_all(src, first_id) {
         Ok(p) => Ok(p),
         Err(ds) => Err(ds[0]),
+    }
+}
+
+// `parse_source` for source the checker writes against the linked program,
+// whose names may be the loader's qualified ones (`std$json$Json`,
+// `lex_qualified`; a derive's impl, MYLA-385).
+#test("fun f() -> m$T { return m$T.A }", 0)[true]
+#test("fun f( {", 0)[false]
+pub fun parses_qualified(src: str, first_id: int32) -> bool {
+    return match parse_qualified(src, first_id) {
+        Ok(p) => true,
+        Err(d) => false,
+    }
+}
+
+pub fun parse_qualified(src: str, first_id: int32) -> Result<Parsed, Diag> {
+    return match lex_qualified(src) {
+        Ok(toks) => match parse_ids_with(toks, first_id, true) {
+            Ok(p) => Ok(p),
+            Err(ds) => Err(ds[0]),
+        },
+        Err(d) => Err(d),
     }
 }
 

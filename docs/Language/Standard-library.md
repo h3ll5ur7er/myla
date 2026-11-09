@@ -55,7 +55,7 @@ The conventions (D164): operations on built-in types are methods (`s.split(",")`
 | `std.time` | [[Language/Standard-library/Time]] | The monotonic and wall clocks, `Duration`, `Instant`, `DateTime` in UTC, RFC 3339 and ISO 8601 |
 | `std.log` | [[Language/Standard-library/Log]] | `error`, `warn`, `info`, `debug` to the standard error with a time, the level from `MYLA_LOG` |
 | `std.test` | [[Language/Standard-library/Test]] | Expectations, temporary directories and the program under test, for test functions |
-| `std.json` | [[Language/Standard-library/Json]] | JSON values, parsing, compact and indented writing, paths, typed getters |
+| `std.json` | [[Language/Standard-library/Json]] | JSON values, parsing, compact and indented writing, paths, typed getters; typed values by `#derive(Json)`, `encode` and `decode<T>` |
 | `std.toml` | [[Language/Standard-library/Toml]] | The TOML subset of manifests and lock files |
 | `std.csv` | [[Language/Standard-library/Csv]] | RFC 4180 CSV: records, a header row mapped to names, writing |
 | `std.ini` | [[Language/Standard-library/Ini]] | INI files: sections, keys, comments, read and written in order |

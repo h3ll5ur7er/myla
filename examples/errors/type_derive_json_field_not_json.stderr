@@ -1,0 +1,5 @@
+type error: cannot derive Json for struct 'Edge': field 'ends' has type '(int32, int32)', which isn't ToJson and FromJson (a tuple has no JSON form: make it a struct)
+  --> examples/errors/type_derive_json_field_not_json.my:7:1
+  |
+7 | struct Edge {
+  | ^^^^^^^^^^^^^

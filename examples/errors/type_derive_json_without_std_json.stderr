@@ -1,0 +1,5 @@
+type error: cannot derive Json for 'Point': std.json isn't imported (write 'import std.json as json')
+  --> examples/errors/type_derive_json_without_std_json.my:4:1
+  |
+4 | struct Point {
+  | ^^^^^^^^^^^^^^

@@ -1,0 +1,16 @@
+//~ type error: type 'Point' does not satisfy the bound 'T: FromJson' required by 'decode'
+//~ help: '#derive(Json)' on 'Point' gives it 'ToJson' and 'FromJson' (D172)
+// `json.decode<T>` needs `T: FromJson`; the help names the derive (D172).
+import std.json as json
+
+struct Point {
+    x: int,
+    y: int,
+}
+
+fun main() {
+    match json.decode<Point>("{\"x\": 1, \"y\": 2}") {
+        Ok(p) => print(p.x)
+        Err(e) => print(f"{e}")
+    }
+}

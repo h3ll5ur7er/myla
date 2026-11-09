@@ -1,0 +1,20 @@
+//~ type error: type 'Point' both derives Json and has an explicit 'impl ToJson for Point'
+// A type's JSON form is derived or written by hand, not both (D172).
+import std.json as json
+from std.json import Json, ToJson
+
+#derive(Json)
+struct Point {
+    x: int,
+    y: int,
+}
+
+impl ToJson for Point {
+    fun to_json(self) -> Json {
+        return Json.Array([self.x.to_json(), self.y.to_json()])
+    }
+}
+
+fun main() {
+    print(json.encode(Point { x: 1, y: 2 }))
+}
