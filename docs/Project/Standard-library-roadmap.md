@@ -100,7 +100,7 @@ Three questions for the owner are worth deciding before the first module is writ
 | 29 | Union-find | `std.unionfind` | disjoint sets with path compression and union by rank | 4 | 1 |  | 45 | [[MYLA-342]] |
 | 30 | Grid | `std.grid` | a 2D array with width and height: in-bounds checks, 4 and 8 neighbours, read from text, printed | 5 | 2 |  | 39 | [[MYLA-342]] |
 | 31 | Graph search | `std.graph` | BFS, DFS, Dijkstra, A*, topological sort, connected components, over a neighbour function | 5 | 3 | #25, #26 | 40 | [[MYLA-342]] |
-| 32 | Caches | `std.cache` | an LRU cache; a memoising wrapper around a map | 3 | 2 |  | 61 | – |
+| 32 | Caches | `std.cache` | an LRU cache; a memoising wrapper around a map | 3 | 2 |  | 61 | [[MYLA-404]] |
 
 ### Hashes, checksums, encodings, cryptography
 
@@ -138,7 +138,7 @@ Three questions for the owner are worth deciding before the first module is writ
 | 52 | CSV | `std.csv` | RFC 4180 read and write (quotes, escapes, CRLF), rows as `[str]` or mapped by the header, streaming over #41 | 6 | 2 |  | 29 | [[MYLA-332]] |
 | 53 | JSON, more | `std.json` | a pretty printer, typed getters (`as_int`, `as_str`) and path access, a builder; `std.json` already parses and prints | 7 | 2 |  | 24 | [[MYLA-332]] |
 | 54 | INI | `std.ini` | read and write: sections, keys, comments | 4 | 1 |  | 38 | [[MYLA-332]] |
-| 55 | TOML writer | `std.toml` | writing TOML (`std.toml` parses it), e.g. for the project tool's manifest edits | 3 | 2 |  | 59 | – |
+| 55 | TOML writer | `std.toml` | writing TOML (`std.toml` parses it), e.g. for the project tool's manifest edits | 3 | 2 |  | 59 | [[MYLA-402]] |
 | 56 | XML | `std.xml` | a non-validating parser (elements, attributes, text, entities, CDATA, comments) to a tree and as a pull reader, a writer with escaping; no DTD and no namespaces at first | 5 | 4 |  | 49 | [[MYLA-348]] |
 | 57 | YAML | `std.yaml` | the safe subset: block and flow maps and lists, scalars, multi-line strings, comments; no anchors and no tags. The whole specification would be an 8 | 5 | 4 |  | 51 | [[MYLA-349]] |
 | 58 | Serialisation by derive | compiler, `std.json` | `#derive(Json)` (or a serialisation trait) between structs and JSON or TOML, generated as `#derive(Eq)` is | 7 | 6 | a language decision | 56 | [[MYLA-354]] |
@@ -155,7 +155,7 @@ Three questions for the owner are worth deciding before the first module is writ
 | 64 | Signals | `std.signal` | SIGINT and SIGTERM handled, for a clean shutdown, as an async event | 3 | 3 | primitives per target | 64 | [[MYLA-350]] |
 | 65 | UUIDs | `std.uuid` | v4 (random) and v7 (ordered by time), parse and print | 3 | 1 | #15 | 60 | [[MYLA-337]] |
 | 66 | Concurrency utilities | `std.task` | channels between tasks, a worker pool, a timeout around an await, waiting for the first of several | 6 | 4 |  | 57 | [[MYLA-351]] |
-| 67 | Benchmarking | `std.bench` | time a closure over repeated runs; report the minimum and the median | 4 | 1 |  | 63 | – |
+| 67 | Benchmarking | `std.bench` | time a closure over repeated runs; report the minimum and the median | 4 | 1 |  | 63 | [[MYLA-403]] |
 | 68 | Test helpers | `std.test` | `expect`, `expect_eq`, `expect_ne`, `fail`, `temp_dir`, `program`: done (D162) | 9 | 2 |  | – | [[MYLA-304]] |
 
 ## The suggested order
@@ -180,7 +180,8 @@ Three questions for the owner are worth deciding before the first module is writ
 | 2 Collections, hashes and formats | [[MYLA-326]], [[MYLA-327]], [[MYLA-328]], [[MYLA-329]], [[MYLA-331]], [[MYLA-332]], [[MYLA-333]], [[MYLA-334]], [[MYLA-335]], [[MYLA-338]]; [[MYLA-330]] once MYLA-310 and MYLA-315 are in | [[MYLA-315]], then [[MYLA-313]] (after MYLA-327), then [[MYLA-318]] | |
 | 3 Streams and the middle tier | [[MYLA-337]], [[MYLA-339]] and [[MYLA-340]] (after MYLA-336 and MYLA-338), [[MYLA-341]], [[MYLA-342]] (after MYLA-330), [[MYLA-343]], [[MYLA-344]], [[MYLA-345]] | [[MYLA-353]] (a decision); the fixes the lanes needed, [[MYLA-360]], [[MYLA-367]], [[MYLA-374]], [[MYLA-375]] | [[MYLA-378]] (what the lanes found missing) |
 | 4 Networks and larger formats | [[MYLA-347]] (after MYLA-346), [[MYLA-348]], [[MYLA-349]], [[MYLA-351]], [[MYLA-352]], [[MYLA-354]] (a decision) | | [[MYLA-346]], then [[MYLA-350]] |
-| Later | No tasks yet: #10, #32, #39, #40, #55, #67 | | |
+| 5 Small modules (2026-11-09) | [[MYLA-402]] (#55), [[MYLA-403]] (#67), [[MYLA-404]] (#32) | [[MYLA-396]], [[MYLA-359]] (check time) | |
+| Later | No tasks yet: #10, #39, #40 | | |
 
 A wave's lanes start once the previous wave's pull request is merged. A lane whose task needs nothing may start earlier, while an agent is free: MYLA-327, MYLA-328, MYLA-329, MYLA-335 and MYLA-338 need nothing at all.
 
