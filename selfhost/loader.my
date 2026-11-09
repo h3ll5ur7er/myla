@@ -120,6 +120,17 @@ pub fun load_options(stdlib_root: str) -> LoadOptions {
     return LoadOptions { stdlib_root: stdlib_root, packages: [], root: "", overrides: [:], runtime: false }
 }
 
+// The file of `std/` that is `std/platform.my` for the target `target`, ""
+// for the host's own (x86-64), as `for_target` takes it.
+#test("aarch64-linux")["platform_aarch64.my"]
+#test("wasm32-wasi")["platform_wasm.my"]
+#test("x86_64-linux")[""]
+pub fun target_platform_file(target: str) -> str {
+    if target == "aarch64-linux" { return "platform_aarch64.my" }
+    if target == "wasm32-wasi" { return "platform_wasm.my" }
+    return ""
+}
+
 // `opts` for the target `target`: aarch64 Linux takes the standard
 // library's `std/platform_aarch64.my` for its `std/platform.my` (MYLA-163),
 // wasm32 on WASI `std/platform_wasm.my` (MYLA-158), the smallest form of
@@ -127,9 +138,7 @@ pub fun load_options(stdlib_root: str) -> LoadOptions {
 // too, for the runtime a library without its own takes from them (MYLA-268),
 // and a library without the target's file takes theirs.
 pub fun for_target(opts: LoadOptions, target: str) -> LoadOptions {
-    var file = ""
-    if target == "aarch64-linux" { file = "platform_aarch64.my" }
-    if target == "wasm32-wasi" { file = "platform_wasm.my" }
+    let file = target_platform_file(target)
     if file == "" { return opts }
     var o = opts
     var carried = ""

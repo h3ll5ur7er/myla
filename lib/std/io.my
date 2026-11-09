@@ -175,10 +175,10 @@ impl Read for FdStream {
     // input ends.
     fun read(var self, n: int) -> Result<[uint8], IoError> {
         if n <= 0 { return Ok([]) }
-        let chunk = __read(self.fd, n)
+        let chunk = __read_bytes(self.fd, n)
         let err = __io_errno()
         if err != 0 { return Err(from_errno(err)) }
-        return Ok(bytes_of(chunk))
+        return Ok(chunk)
     }
 }
 
@@ -186,7 +186,7 @@ impl Write for FdStream {
     // A closed pipe is `BrokenPipe`, but on the standard output or error,
     // where it ends the program quietly, as `write` does (D146).
     fun write(var self, b: [uint8]) -> Result<int, IoError> {
-        __write(self.fd, text_of(b, 0, b.len()))
+        __write_bytes(self.fd, b)
         let err = __io_errno()
         if err != 0 { return Err(from_errno(err)) }
         return Ok(b.len())
