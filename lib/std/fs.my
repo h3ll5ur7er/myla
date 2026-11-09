@@ -99,8 +99,8 @@ fun net_error(code: int32) -> IoError {
 }
 
 // The name of `e`'s cause, its variant's: `NotFound`, `Other(9)` with the
-// platform's code. A module's error message names an `IoError` by it
-// (`IoError` has no `Format`, MYLA-379).
+// platform's code, as `e.message()` ends (D173). A module's error message
+// may name an `IoError` by it (MYLA-376).
 #test(IoError.NotFound)["NotFound"]
 #test(IoError.ConnectionReset)["ConnectionReset"]
 #test(IoError.Other(9))["Other(9)"]
@@ -128,6 +128,51 @@ pub fun io_error_name(e: IoError) -> str {
         NetworkUnreachable => "NetworkUnreachable"
         InvalidData => "InvalidData"
         Other(code) => f"Other({code})"
+    }
+}
+
+impl IoError {
+    // The cause in words, its name after it (D173, MYLA-379): `not found
+    // (NotFound)`, `error 5 (Other(5))` with the platform's code.
+    #test(IoError.NotFound)["not found (NotFound)"]
+    #test(IoError.PermissionDenied)["permission denied (PermissionDenied)"]
+    #test(IoError.ConnectionRefused)["connection refused (ConnectionRefused)"]
+    #test(IoError.AddrInUse)["address in use (AddrInUse)"]
+    #test(IoError.Other(5))["error 5 (Other(5))"]
+    fun message(self) -> str {
+        let what = match self {
+            NotFound => "not found"
+            PermissionDenied => "permission denied"
+            AlreadyExists => "already exists"
+            NotADirectory => "not a directory"
+            IsADirectory => "is a directory"
+            NotEmpty => "directory not empty"
+            Interrupted => "interrupted"
+            Cancelled => "cancelled"
+            Unsupported => "unsupported"
+            BrokenPipe => "broken pipe"
+            InvalidInput => "invalid input"
+            ConnectionRefused => "connection refused"
+            ConnectionReset => "connection reset"
+            ConnectionAborted => "connection aborted"
+            NotConnected => "not connected"
+            AddrInUse => "address in use"
+            AddrNotAvailable => "address not available"
+            TimedOut => "timed out"
+            HostUnreachable => "host unreachable"
+            NetworkUnreachable => "network unreachable"
+            InvalidData => "invalid data"
+            Other(code) => f"error {code}"
+        }
+        return f"{what} ({io_error_name(self)})"
+    }
+}
+
+// `f"{e}"`, `print(e)` and a test's report show the message (D168, D173).
+impl Format for IoError {
+    #test(IoError.IsADirectory, "")["is a directory (IsADirectory)"]
+    fun format(self, spec: str) -> str {
+        return self.message()
     }
 }
 

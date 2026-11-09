@@ -575,6 +575,7 @@ impl Interp {
 
     fun collect(var self) {
         var derived: [str: bool] = [:]
+        var derived_eq: [str: bool] = [:]
         for d in self.decls {
             match d.kind {
                 DeclKind.FunDecl(fd) => {
@@ -584,9 +585,11 @@ impl Interp {
                 DeclKind.EnumDecl(n, variants, attrs, tps, isp) => {
                     self.enum_names.push(n)
                     if derives_trait(attrs, "Hash") { derived[n] = true }
+                    if derives_trait(attrs, "Eq") { derived_eq[n] = true }
                 },
                 DeclKind.StructDecl(n, fields, attrs, tps, isp, act) => {
                     if derives_trait(attrs, "Hash") { derived[n] = true }
+                    if derives_trait(attrs, "Eq") { derived_eq[n] = true }
                 },
                 DeclKind.ImplDecl(target, methods, tps, trnm, targs, dattrs) => {
                     let key = canon_type_name(self.type_name_of(target))
@@ -609,6 +612,9 @@ impl Interp {
         // a derived `hash` is written as source, but hashing by the members
         // gives the same equal hashes
         for n in derived.keys() { self.own_hash.remove(n) }
+        // and so is a generic type's derived `eq` (MYLA-379), which compares
+        // as the members do
+        for n in derived_eq.keys() { self.own_eq.remove(n) }
     }
 
     fun add_func(var self, name: str, fd: FunData) {

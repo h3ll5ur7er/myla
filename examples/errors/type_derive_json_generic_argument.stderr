@@ -1,0 +1,6 @@
+type error: type 'Page<Pos>' does not satisfy the bound 'T: ToJson' required by 'encode': 'Pos' isn't ToJson
+  --> examples/errors/type_derive_json_generic_argument.my:18:22
+   |
+18 |     print(json.encode(Page { items: [Pos { x: 1 }], next: None }))
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+help: '#derive(Json)' on 'Pos' gives it 'ToJson' and 'FromJson' (D172)

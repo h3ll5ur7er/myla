@@ -1,5 +1,0 @@
-type error: deriving on generic types is not supported yet (Eq, Hash and Json are derived for concrete structs and enums)
-  --> examples/errors/type_derive_json_generic.my:5:1
-  |
-5 | #derive(Json)
-  | ^^^^^^^^^^^^^

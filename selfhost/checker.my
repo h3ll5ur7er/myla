@@ -1609,6 +1609,35 @@ pub struct Bound { tp: str, traits: [str], args: [[Type]] }
 // ListIter<T>` (D55, D171): its target and its arguments, both in its own type
 // parameters, which a type of the target's solves.
 pub struct ImplArgs { target: Type, args: [Type] }
+// Whether `e` is `None`, or a call of `Some`, `Ok` or `Err`: a value whose
+// type `==` takes from its other side (MYLA-379).
+#test(expr_of("None"))[true]
+#test(expr_of("Ok(1)"))[true]
+#test(expr_of("f(1)"))[false]
+fun needs_other_side(e: Expr) -> bool {
+    return match e.kind {
+        ExprKind.Name(n) => n == "None",
+        ExprKind.Call(c, args, targs) => match c.kind {
+            ExprKind.Name(n) => targs.len() == 0 && (n == "Some" || n == "Ok" || n == "Err"),
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+#test(None)[true]
+#test(Some((Type.TStr, "Eq")))[false]
+fun is_none_tt(x: Option<(Type, str)>) -> bool {
+    return match x {
+        Some(v) => false,
+        None => true,
+    }
+}
+
+// The bounds of a generic impl of a trait, `impl<T: Eq> Eq for Box<T>`
+// (MYLA-379): its target in its own type parameters, which a type of the
+// target's solves, and the bounds those must meet for the type to have it.
+pub struct ImplBounds { target: Type, bounds: [Bound] }
 // A map's key type met before every impl was known, checked once they are
 // (D163): where, and in which declaration.
 pub struct PendingKey { t: Type, line: int32, col: int32, sp: SrcSpan, decl: int32 }
@@ -1697,6 +1726,7 @@ pub struct Checker {
     trait_impls: [TraitImplPair],
     user_trait_impls: [TraitImplPair],
     impl_args: [str: ImplArgs],     // a generic trait's impls' arguments, by `trait\tkey` (D171)
+    impl_bounds: [str: ImplBounds], // a generic impl's bounds on its type parameters, by `trait\tkey` (MYLA-379)
     for_iters: [int32: Stmt],       // a `for` over an iterator, by its id: the loop it is (D171, `check_for_iterator`)
     // functions without `self` (D172): each one's impl target, by its name
     // (`Box.zero`: `Box<T>`), which solves the impl's type parameters; the
@@ -1817,7 +1847,7 @@ fun new_checker(decls: [Decl]) -> Checker {
         decls: decls,
         structs: [], enums: [], recursive_enums: [],
         functions: [], methods: [], method_decls: [], method_decl_keys: [], method_decl_ids: [],
-        impl_decls: [], next_id: 1000000000, pending_keys: [], keys_ready: false, key_ctx: false, traits: [], trait_decls: [], trait_impls: [], user_trait_impls: [], impl_args: [:], for_iters: [:],
+        impl_decls: [], next_id: 1000000000, pending_keys: [], keys_ready: false, key_ctx: false, traits: [], trait_decls: [], trait_impls: [], user_trait_impls: [], impl_args: [:], impl_bounds: [:], for_iters: [:],
         static_selfs: [:], static_calls: [:], on_type_params: false, call_types: [:],
         aliases: [], alias_cache: [], const_decls: [], consts: [], const_values: [:], const_done: [], const_folding: [],
         allow_self: false, type_params: [], bounds_cur: [],
@@ -2090,13 +2120,47 @@ impl Checker {
         match self.type_key(t) {
             Some(k) => {
                 if self.broken_impls.contains(trnm + "\t" + k) { return Err(poisoned()) }   // its impl or derive failed (MYLA-110)
-                if self.trait_implements_pair(k, trnm) { return Ok(true) }
+                if self.trait_implements_pair(k, trnm) { return Ok(is_none_tt(self.impl_bound_failing(k, trnm, t)?)) }
             },
             None => {},
         }
         if primitive_default_trait(t, trnm) { return Ok(true) }
         if self.lost_traits.contains(trnm) { return Err(poisoned()) }   // maybe the left-out impl (MYLA-110)
         return Ok(false)
+    }
+
+    // The first argument of `t` (a type with the key `k`) that doesn't meet
+    // a bound of its impl of `trnm`, and the bound's trait: `P` and `Eq` of
+    // `Option<P>` for `impl<T: Eq> Eq for Option<T>` (MYLA-379); None when
+    // they all do or the impl has none.
+    #test(checker_on("[int]"), "Vec2", "Eq", Type.TStruct("Vec2", []))[Ok(None)]
+    fun impl_bound_failing(self, k: str, trnm: str, t: Type) -> Result<Option<(Type, str)>, CheckErr> {
+        let ib = match self.impl_bounds.get(trnm + "\t" + k) {
+            Some(x) => x,
+            None => { return Ok(None) },
+        }
+        let u = unify_param(ib.target, t, [])
+        for b in ib.bounds {
+            // (a parameter the target doesn't hold has nothing to meet)
+            let c = match subst_get(u.subst, b.tp) {
+                Some(x) => x,
+                None => Type.TError,
+            }
+            if has_error(c) { continue }
+            var j = 0
+            while j < b.traits.len() {
+                // a generic trait's arguments are its impl's to solve (D171)
+                if b.args[j].len() == 0 {
+                    let ok = match c {
+                        Type.TParam(pn) => self.bound_has(pn, b.traits[j]),
+                        _ => self.type_implements(c, b.traits[j])?,
+                    }
+                    if !ok { return Ok(Some((c, b.traits[j]))) }
+                }
+                j += 1
+            }
+        }
+        return Ok(None)
     }
 
     // --- scope -----------------------------------------------------------
@@ -2897,6 +2961,12 @@ impl Checker {
         let target = self.resolve_part(target_te)?
         var trait_args: [Type] = []
         for a in trait_args_te { trait_args.push(self.resolve_part(a)?) }
+        // what a type of the target must meet to have the trait (MYLA-379);
+        // a bound that doesn't resolve has its error with the methods
+        let ibounds = match self.bounds_of(tps) {
+            Ok(bs) => bs,
+            Err(x) => [],
+        }
         self.type_params = []
         var key_opt: Option<str> = None
         var target_ok = !has_error(target)
@@ -3023,6 +3093,7 @@ impl Checker {
                 Some(tn) => {
                     if !conforms { self.broken_impls[tn + "\t" + key] = true }
                     self.trait_impls.push(TraitImplPair { trait_name: tn, key: key })
+                    if ibounds.len() > 0 { self.impl_bounds[tn + "\t" + key] = ImplBounds { target: target, bounds: ibounds } }
                 },
                 None => {},
             }
@@ -3662,6 +3733,15 @@ impl Checker {
             return Ok(Type.TBool)
         }
         if op == "==" || op == "!=" {
+            if needs_other_side(l) && !needs_other_side(r) {
+                // `None == opt`, `Ok(1) == res`: the left side typed by the
+                // right one (MYLA-379)
+                let rt0 = self.expect_value(r, None)?
+                let lt0 = self.expect_value(l, Some(rt0))?
+                if is_struct_or_enum(lt0) { return self.infer_overload_known(e, op, l, r, lt0, Some(rt0)) }
+                if !type_eq(lt0, rt0) { return Err(terr_at(e.line, e.col, e.sp, format("operator '{}' requires both operands to have the same type, found '{}' and '{}'", op, type_name(lt0), type_name(rt0)))) }
+                return Ok(Type.TBool)
+            }
             let lt = self.expect_value(l, None)?
             if is_struct_or_enum(lt) { return self.infer_operator_overload(e, op, l, r, lt) }
             if is_type_param(lt) { return self.infer_bounded_op(e, op, l, r, lt) }
@@ -3776,6 +3856,12 @@ impl Checker {
 
     #test(checker_on("enum E { A, B(int) }"), expr_of("a.b[0]"), "+", expr_of("a.b[0]"), expr_of("a.b[0]"), Type.TStruct("Vec2", []))[Err(CheckErr { line: 1, col: 4, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 7 }, msg: "operator '+' is not defined for 'Vec2': it needs 'impl Add for Vec2'", decl: -1, notes: [] })]
     fun infer_operator_overload(var self, e: Expr, op: str, l: Expr, r: Expr, lt: Type) -> Result<Type, CheckErr> {
+        return self.infer_overload_known(e, op, l, r, lt, None)
+    }
+
+    // `infer_operator_overload`, the right side's type `known_rt` when it
+    // was inferred first (`None == opt`).
+    fun infer_overload_known(var self, e: Expr, op: str, l: Expr, r: Expr, lt: Type, known_rt: Option<Type>) -> Result<Type, CheckErr> {
         var trnm = ""
         var kind = ""
         if op == "==" || op == "!=" { trnm = "Eq"
@@ -3785,9 +3871,18 @@ impl Checker {
         else { trnm = match arith_trait(op) { Some(t) => t, None => "" }
             kind = "arith" } }
         if !self.type_implements(lt, trnm)? {
+            // its generic impl's bound unmet: why its argument isn't (MYLA-379)
+            match self.failing_arg(lt, trnm) {
+                Some(ct) => { return Err(terr_at(e.line, e.col, e.sp, format("operator '{}' is not defined for '{}': {}", op, type_name(lt), self.not_trait_why(ct.0, ct.1)))) },
+                None => {},
+            }
             return Err(terr_at(e.line, e.col, e.sp, format("operator '{}' is not defined for '{}': it needs 'impl {} for {}'{}", op, type_name(lt), trnm, type_name(lt), if_str(trnm == "Eq", " (or '#derive(Eq)')", ""))))
         }
-        let rt = self.expect_value(r, None)?
+        // the left side's type for the right one's, `opt == None` (MYLA-379)
+        let rt = match known_rt {
+            Some(t) => t,
+            None => self.expect_value(r, Some(lt))?,
+        }
         if !type_eq(lt, rt) { return Err(terr_at(e.line, e.col, e.sp, format("operator '{}' requires both operands to have the same type, found '{}' and '{}'", op, type_name(lt), type_name(rt)))) }
         if kind == "arith" {
             // arith trait method returns Self == lt (enforced by conformance)
@@ -3936,6 +4031,10 @@ impl Checker {
             }
             if !ok {
                 if is_compound_eq(et) { return self.not_trait_why(et, trnm) }
+                match self.failing_arg(et, trnm) {
+                    Some(ct) => { return self.not_trait_why(ct.0, ct.1) },
+                    None => {},
+                }
                 if is_struct_or_enum(et) { return format("'{}' isn't {} (it needs 'impl {} for {}' or '#derive({})')", type_name(et), trnm, trnm, type_name(et), trnm) }
                 if is_type_param(et) { return format("'{}' isn't {} (it needs the bound '{}: {}')", type_name(et), trnm, type_name(et), trnm) }
                 if is_float(et) && trnm == "Hash" { return format("'{}' isn't Hash (NaN is unequal to itself)", type_name(et)) }
@@ -3943,6 +4042,22 @@ impl Checker {
             }
         }
         return format("its elements aren't {}", trnm)
+    }
+
+    // The argument of the struct or enum `t` that its generic impl of
+    // `trnm` has a bound it doesn't meet, and that bound's trait (MYLA-379);
+    // None for a type without that impl or whose arguments meet them.
+    #test(checker_on("[int]"), Type.TStruct("Vec2", []), "Eq")[None]
+    fun failing_arg(self, t: Type, trnm: str) -> Option<(Type, str)> {
+        let k = match self.type_key(t) {
+            Some(x) => x,
+            None => { return None },
+        }
+        if !is_struct_or_enum(t) || !self.trait_implements_pair(k, trnm) { return None }
+        return match self.impl_bound_failing(k, trnm, t) {
+            Ok(x) => x,
+            Err(x) => None,
+        }
     }
 
     #test(checker_on("[int]"), "T", "Eq")[false]
@@ -6015,8 +6130,11 @@ fun is_eq_type(t: Type, eq_names: [str]) -> bool {
         // the unit type (D138), and a tuple or list of `Eq` elements (D163)
         Type.TTuple(es) => all_eq_types(es, eq_names),
         Type.TList(e) => is_eq_type(e, eq_names),
-        Type.TStruct(n, a) => contains_str(eq_names, n),
-        Type.TEnum(n, a) => contains_str(eq_names, n),
+        // a generic type's arguments too; a type parameter of a generic
+        // type's derive gets the bound (MYLA-379)
+        Type.TStruct(n, a) => contains_str(eq_names, n) && all_eq_types(a, eq_names),
+        Type.TEnum(n, a) => contains_str(eq_names, n) && all_eq_types(a, eq_names),
+        Type.TParam(n) => true,
         _ => false,
     }
 }
@@ -6035,8 +6153,9 @@ fun is_hash_type(t: Type, hash_names: [str]) -> bool {
         Type.TError => true,          // has had its error (MYLA-110)
         Type.TTuple(es) => all_hash_types(es, hash_names),
         Type.TList(e) => is_hash_type(e, hash_names),
-        Type.TStruct(n, a) => contains_str(hash_names, n),
-        Type.TEnum(n, a) => contains_str(hash_names, n),
+        Type.TStruct(n, a) => contains_str(hash_names, n) && all_hash_types(a, hash_names),
+        Type.TEnum(n, a) => contains_str(hash_names, n) && all_hash_types(a, hash_names),
+        Type.TParam(n) => true,
         _ => false,
     }
 }
@@ -6102,13 +6221,16 @@ fun impl_of_type(d: Decl, name: str) -> bool {
 }
 
 // The source of a derived `impl Hash` (D163) for a type `parts` describes
-// (`derived_parts`), for a placeholder type `Derived` that `impl_for`
-// names: a struct's fields, or an enum's variant index and payload.
-#test([("x", -1), ("y", -1)])["impl Hash for Derived {\n    fun hash(self, hasher: Hasher) -> Hasher {\n        return hasher.add(self.x).add(self.y)\n    }\n}\n"]
-#test([("A", 0), ("B", 2)])["impl Hash for Derived {\n    fun hash(self, hasher: Hasher) -> Hasher {\n        return match self {\n            A => hasher.add_u64(0)\n            B(field0, field1) => hasher.add_u64(1).add(field0).add(field1)\n        }\n    }\n}\n"]
-fun derived_hash_src(parts: [(str, int32)]) -> str {
+// (`derived_parts`), its first line `head`: `impl Hash for Derived`, a
+// placeholder type that `impl_for` names, or a generic type's bounded impl
+// (MYLA-379); its body adds a struct's fields, or an enum's variant index
+// and payload.
+#test("impl Hash for Derived", [("x", -1), ("y", -1)])["impl Hash for Derived {\n    fun hash(self, hasher: Hasher) -> Hasher {\n        return hasher.add(self.x).add(self.y)\n    }\n}\n"]
+#test("impl<T: Hash> Hash for m$E<T>", [("A", 0), ("B", 2)])["impl<T: Hash> Hash for m$E<T> {\n    fun hash(self, hasher: Hasher) -> Hasher {\n        return match self {\n            A => hasher.add_u64(0)\n            B(field0, field1) => hasher.add_u64(1).add(field0).add(field1)\n        }\n    }\n}\n"]
+fun derived_hash_src(head: str, parts: [(str, int32)]) -> str {
     var sb = StringBuilder()
-    sb.append("impl Hash for Derived {\n    fun hash(self, hasher: Hasher) -> Hasher {\n")
+    sb.append(head)
+    sb.append(" {\n    fun hash(self, hasher: Hasher) -> Hasher {\n")
     let is_enum = parts.len() > 0 && parts[0].1 >= 0
     if !is_enum {
         sb.append("        return hasher")
@@ -6144,6 +6266,74 @@ fun derived_hash_src(parts: [(str, int32)]) -> str {
     return sb.build()
 }
 
+// The source of a derived `impl Eq` of the generic struct or enum `name`
+// with the type parameters `tps` (MYLA-379), each bounded by `Eq`, that
+// `parts` describes (`derived_parts`): a struct's fields compared in turn,
+// an enum's variants each against the same variant, its payloads in turn.
+#test("Pair", ["A", "B"], [("a", -1), ("b", -1)])["impl<A: Eq, B: Eq> Eq for Pair<A, B> {\n    fun eq(self, other: Pair<A, B>) -> bool {\n        return self.a == other.a && self.b == other.b\n    }\n}\n"]
+#test("m$Unit", ["T"], [])["impl<T: Eq> Eq for m$Unit<T> {\n    fun eq(self, other: m$Unit<T>) -> bool {\n        return true\n    }\n}\n"]
+#test("Tree", ["T"], [("Leaf", 0), ("Node", 2)])["impl<T: Eq> Eq for Tree<T> {\n    fun eq(self, other: Tree<T>) -> bool {\n        return match self {\n            Leaf => match other {\n                Leaf => true\n                _ => false\n            }\n            Node(field0, field1) => match other {\n                Node(other0, other1) => field0 == other0 && field1 == other1\n                _ => false\n            }\n        }\n    }\n}\n"]
+#test("One", ["T"], [("A", 1)])["impl<T: Eq> Eq for One<T> {\n    fun eq(self, other: One<T>) -> bool {\n        return match self {\n            A(field0) => match other {\n                A(other0) => field0 == other0\n            }\n        }\n    }\n}\n"]
+fun derived_eq_src(name: str, tps: [str], parts: [(str, int32)]) -> str {
+    let full = with_params(name, tps)
+    var sb = StringBuilder()
+    sb.append(f"impl{bounded_params(tps, "Eq")} Eq for {full} {{\n    fun eq(self, other: {full}) -> bool {{\n")
+    let is_enum = parts.len() > 0 && parts[0].1 >= 0
+    if !is_enum {
+        var cmps: [str] = []
+        for p in parts { cmps.push(f"self.{p.0} == other.{p.0}") }
+        if cmps.len() == 0 { cmps.push("true") }
+        sb.append(f"        return {cmps.join(" && ")}\n")
+    } else {
+        sb.append("        return match self {\n")
+        for p in parts {
+            var mine: [str] = []
+            var theirs: [str] = []
+            var cmps: [str] = []
+            var k = 0
+            while k < p.1 {
+                mine.push(f"field{k}")
+                theirs.push(f"other{k}")
+                cmps.push(f"field{k} == other{k}")
+                k += 1
+            }
+            if cmps.len() == 0 { cmps.push("true") }
+            var pat_a = p.0
+            var pat_b = p.0
+            if p.1 > 0 {
+                pat_a = f"{p.0}({mine.join(", ")})"
+                pat_b = f"{p.0}({theirs.join(", ")})"
+            }
+            sb.append(f"            {pat_a} => match other {{\n                {pat_b} => {cmps.join(" && ")}\n")
+            // another variant, unless there is none (an unreachable arm is an error)
+            if parts.len() > 1 { sb.append("                _ => false\n") }
+            sb.append("            }\n")
+        }
+        sb.append("        }\n")
+    }
+    sb.append("    }\n}\n")
+    return sb.build()
+}
+
+// `name` with its type parameters, as a type: `Pair<A, B>`, `P`.
+#test("Pair", ["A", "B"])["Pair<A, B>"]
+#test("P", [])["P"]
+fun with_params(name: str, tps: [str]) -> str {
+    if tps.len() == 0 { return name }
+    return f"{name}<{tps.join(", ")}>"
+}
+
+// The type parameters `tps` of an impl, each bounded by `trnm`: `<A: Eq, B:
+// Eq>`, "" for none.
+#test(["A", "B"], "Eq")["<A: Eq, B: Eq>"]
+#test([], "Eq")[""]
+fun bounded_params(tps: [str], trnm: str) -> str {
+    if tps.len() == 0 { return "" }
+    var out: [str] = []
+    for t in tps { out.push(f"{t}: {trnm}") }
+    return f"<{out.join(", ")}>"
+}
+
 // A type's name without its module, as a program writes it (`geo$Point` is
 // `Point`), for the messages of a derived impl.
 #test("geo$Point")["Point"]
@@ -6174,11 +6364,13 @@ fun option_of(t: Type) -> Option<Type> {
 // the fields named as written, an `Option` field left out when `None` and
 // read as `None` when absent or `null`; members it has no field for are
 // ignored. Parsed with `parse_qualified`, as the names are the loader's.
-#test("P", "std$json$", [("x", Type.TInt(32, true)), ("tag", Type.TEnum("Option", [Type.TStr]))])["impl std$json$ToJson for P {\n    fun to_json(self) -> std$json$Json {\n        var out: [(str, std$json$Json)] = []\n        out.push((\"x\", self.x.to_json()))\n        if let Some(v) = self.tag {\n            out.push((\"tag\", v.to_json()))\n        }\n        return std$json$Json.Object(out)\n    }\n}\n\nimpl std$json$FromJson for P {\n    fun from_json(j: std$json$Json) -> Result<P, std$json$JsonError> {\n        let fields = std$json$members(j, \"P\")?\n        return Ok(P {\n            x: std$json$member<int32>(fields, \"x\")?,\n            tag: std$json$optional_member<str>(fields, \"tag\")?,\n        })\n    }\n}\n"]
-#test("m$E", "", [])["impl ToJson for m$E {\n    fun to_json(self) -> Json {\n        var out: [(str, Json)] = []\n        return Json.Object(out)\n    }\n}\n\nimpl FromJson for m$E {\n    fun from_json(j: Json) -> Result<m$E, JsonError> {\n        let fields = members(j, \"E\")?\n        return Ok(m$E {\n        })\n    }\n}\n"]
-fun derived_json_struct_src(name: str, pre: str, fields: [(str, Type)]) -> str {
+#test("P", [], "std$json$", [("x", Type.TInt(32, true)), ("tag", Type.TEnum("Option", [Type.TStr]))])["impl std$json$ToJson for P {\n    fun to_json(self) -> std$json$Json {\n        var out: [(str, std$json$Json)] = []\n        out.push((\"x\", self.x.to_json()))\n        if let Some(v) = self.tag {\n            out.push((\"tag\", v.to_json()))\n        }\n        return std$json$Json.Object(out)\n    }\n}\n\nimpl std$json$FromJson for P {\n    fun from_json(j: std$json$Json) -> Result<P, std$json$JsonError> {\n        let fields = std$json$members(j, \"P\")?\n        return Ok(P {\n            x: std$json$member<int32>(fields, \"x\")?,\n            tag: std$json$optional_member<str>(fields, \"tag\")?,\n        })\n    }\n}\n"]
+#test("m$E", [], "", [])["impl ToJson for m$E {\n    fun to_json(self) -> Json {\n        var out: [(str, Json)] = []\n        return Json.Object(out)\n    }\n}\n\nimpl FromJson for m$E {\n    fun from_json(j: Json) -> Result<m$E, JsonError> {\n        let fields = members(j, \"E\")?\n        return Ok(m$E {\n        })\n    }\n}\n"]
+#test("Box", ["T"], "", [("v", Type.TParam("T"))])["impl<T: ToJson> ToJson for Box<T> {\n    fun to_json(self) -> Json {\n        var out: [(str, Json)] = []\n        out.push((\"v\", self.v.to_json()))\n        return Json.Object(out)\n    }\n}\n\nimpl<T: FromJson> FromJson for Box<T> {\n    fun from_json(j: Json) -> Result<Box<T>, JsonError> {\n        let fields = members(j, \"Box\")?\n        return Ok(Box {\n            v: member<T>(fields, \"v\")?,\n        })\n    }\n}\n"]
+fun derived_json_struct_src(name: str, tps: [str], pre: str, fields: [(str, Type)]) -> str {
+    let full = with_params(name, tps)
     var sb = StringBuilder()
-    sb.append(f"impl {pre}ToJson for {name} {{\n    fun to_json(self) -> {pre}Json {{\n")
+    sb.append(f"impl{bounded_params(tps, pre + "ToJson")} {pre}ToJson for {full} {{\n    fun to_json(self) -> {pre}Json {{\n")
     sb.append(f"        var out: [(str, {pre}Json)] = []\n")
     for f in fields {
         match option_of(f.1) {
@@ -6187,7 +6379,7 @@ fun derived_json_struct_src(name: str, pre: str, fields: [(str, Type)]) -> str {
         }
     }
     sb.append(f"        return {pre}Json.Object(out)\n    }}\n}}\n\n")
-    sb.append(f"impl {pre}FromJson for {name} {{\n    fun from_json(j: {pre}Json) -> Result<{name}, {pre}JsonError> {{\n")
+    sb.append(f"impl{bounded_params(tps, pre + "FromJson")} {pre}FromJson for {full} {{\n    fun from_json(j: {pre}Json) -> Result<{full}, {pre}JsonError> {{\n")
     sb.append(f"        let fields = {pre}members(j, \"{unqualified(name)}\")?\n        return Ok({name} {{\n")
     for f in fields {
         match option_of(f.1) {
@@ -6203,11 +6395,12 @@ fun derived_json_struct_src(name: str, pre: str, fields: [(str, Type)]) -> str {
 // (each its name and payload), externally tagged: `"Red"` for a variant
 // without payload, `{"Dot": x}` for one with one, `{"Line": [a, b]}` for
 // one with more.
-#test("E", "std$json$", [("A", []), ("B", [Type.TStr]), ("C", [Type.TInt(32, true), Type.TList(Type.TBool)])])["impl std$json$ToJson for E {\n    fun to_json(self) -> std$json$Json {\n        return match self {\n            A => std$json$Json.Str(\"A\")\n            B(field0) => std$json$Json.Object([(\"B\", field0.to_json())])\n            C(field0, field1) => std$json$Json.Object([(\"C\", std$json$Json.Array([field0.to_json(), field1.to_json()]))])\n        }\n    }\n}\n\nimpl std$json$FromJson for E {\n    fun from_json(j: std$json$Json) -> Result<E, std$json$JsonError> {\n        let v = std$json$variant_of(j, \"E\")?\n        return match v.0 {\n            \"A\" => std$json$unit_variant(v, \"E\", E.A)\n            \"B\" => Ok(E.B(std$json$payload<str>(v, \"E\", 1, 0)?))\n            \"C\" => Ok(E.C(std$json$payload<int32>(v, \"E\", 2, 0)?, std$json$payload<[bool]>(v, \"E\", 2, 1)?))\n            _ => Err(std$json$unknown_variant(v.0, \"E\", [\"A\", \"B\", \"C\"]))\n        }\n    }\n}\n"]
-fun derived_json_enum_src(name: str, pre: str, variants: [(str, [Type])]) -> str {
+#test("E", [], "std$json$", [("A", []), ("B", [Type.TStr]), ("C", [Type.TInt(32, true), Type.TList(Type.TBool)])])["impl std$json$ToJson for E {\n    fun to_json(self) -> std$json$Json {\n        return match self {\n            A => std$json$Json.Str(\"A\")\n            B(field0) => std$json$Json.Object([(\"B\", field0.to_json())])\n            C(field0, field1) => std$json$Json.Object([(\"C\", std$json$Json.Array([field0.to_json(), field1.to_json()]))])\n        }\n    }\n}\n\nimpl std$json$FromJson for E {\n    fun from_json(j: std$json$Json) -> Result<E, std$json$JsonError> {\n        let v = std$json$variant_of(j, \"E\")?\n        return match v.0 {\n            \"A\" => std$json$unit_variant(v, \"E\", E.A)\n            \"B\" => Ok(E.B(std$json$payload<str>(v, \"E\", 1, 0)?))\n            \"C\" => Ok(E.C(std$json$payload<int32>(v, \"E\", 2, 0)?, std$json$payload<[bool]>(v, \"E\", 2, 1)?))\n            _ => Err(std$json$unknown_variant(v.0, \"E\", [\"A\", \"B\", \"C\"]))\n        }\n    }\n}\n"]
+fun derived_json_enum_src(name: str, tps: [str], pre: str, variants: [(str, [Type])]) -> str {
     let shown = unqualified(name)
+    let full = with_params(name, tps)
     var sb = StringBuilder()
-    sb.append(f"impl {pre}ToJson for {name} {{\n    fun to_json(self) -> {pre}Json {{\n        return match self {{\n")
+    sb.append(f"impl{bounded_params(tps, pre + "ToJson")} {pre}ToJson for {full} {{\n    fun to_json(self) -> {pre}Json {{\n        return match self {{\n")
     for v in variants {
         let n = v.1.len()
         if n == 0 {
@@ -6227,7 +6420,7 @@ fun derived_json_enum_src(name: str, pre: str, variants: [(str, [Type])]) -> str
         sb.append(f"            {v.0}({binds.join(", ")}) => {pre}Json.Object([(\"{v.0}\", {payload})])\n")
     }
     sb.append("        }\n    }\n}\n\n")
-    sb.append(f"impl {pre}FromJson for {name} {{\n    fun from_json(j: {pre}Json) -> Result<{name}, {pre}JsonError> {{\n")
+    sb.append(f"impl{bounded_params(tps, pre + "FromJson")} {pre}FromJson for {full} {{\n    fun from_json(j: {pre}Json) -> Result<{full}, {pre}JsonError> {{\n")
     sb.append(f"        let v = {pre}variant_of(j, \"{shown}\")?\n        return match v.0 {{\n")
     var names: [str] = []
     for v in variants {
@@ -6271,6 +6464,7 @@ fun is_json_type(t: Type, json_names: [str]) -> bool {
         Type.TMap(k, v) => match k { Type.TStr => is_json_type(v, json_names), _ => false },
         Type.TStruct(n, a) => contains_str(json_names, n) && all_json_types(a, json_names),
         Type.TEnum(n, a) => (n == "Option" || contains_str(json_names, n)) && all_json_types(a, json_names),
+        Type.TParam(n) => true,
         _ => false,
     }
 }
@@ -6314,6 +6508,7 @@ impl Checker {
     #test(checker_on("[int]"))[Ok(0)]
     fun synthesize_derives(var self) -> Result<int32, CheckErr> {
         var targets: [Decl] = []
+        var target_pos: [int32] = []
         var pos = -1
         for decl in self.decls {
             pos = pos + 1
@@ -6325,9 +6520,13 @@ impl Checker {
                 if attr.name != "derive" { continue }
                 match self.check_derive_attr(decl, attr) {
                     Ok(x) => {
-                        var present = false
-                        for d in targets { if d.id == decl.id { present = true } }
-                        if !present { targets.push(decl) }
+                        // by its place: `check_program` numbers the prelude's
+                        // nodes from 0 as the program's, so their ids meet
+                        // (the prelude's `Option` derives, MYLA-379)
+                        if !target_pos.contains(pos) {
+                            targets.push(decl)
+                            target_pos.push(pos)
+                        }
                     },
                     Err(e) => {
                         self.record(e)?
@@ -6386,6 +6585,13 @@ impl Checker {
                     self.broken_impls["Eq\t" + name] = true
                     continue
                 },
+            }
+            let tps = self.type_params_of(name)
+            if tps.len() > 0 {
+                // a generic type's: an impl bounded by `T: Eq`, written as
+                // source and checked and run as any other (MYLA-379)
+                self.add_derived_impl(derived_eq_src(name, tps, self.derived_parts(name)), "Eq")
+                continue
             }
             // register the synthesized Eq impl: method `eq: (Self,Self)->bool`
             var self_t = Type.TEnum(name, [])
@@ -6460,9 +6666,28 @@ impl Checker {
                 // the runners hash a derived key by its members
                 self.trait_impls.push(TraitImplPair { trait_name: "Hash", key: name })
                 self.user_trait_impls.push(TraitImplPair { trait_name: "Hash", key: name })
+                let gtps = self.type_params_of(name)
+                if gtps.len() > 0 {
+                    // a generic type's arguments `Hash` too (MYLA-379)
+                    var params: [Type] = []
+                    var bounds: [Bound] = []
+                    for t in gtps {
+                        params.push(Type.TParam(t))
+                        bounds.push(Bound { tp: t, traits: ["Hash"], args: [[]] })
+                    }
+                    var target = Type.TEnum(name, params)
+                    if self.is_struct(name) { target = Type.TStruct(name, params) }
+                    self.impl_bounds["Hash\t" + name] = ImplBounds { target: target, bounds: bounds }
+                }
                 continue
             }
-            let src = derived_hash_src(self.derived_parts(name))
+            let tps = self.type_params_of(name)
+            if tps.len() > 0 {
+                // a generic type's, bounded, against the linked program's names (MYLA-379)
+                self.add_derived_impl(derived_hash_src(f"impl{bounded_params(tps, "Hash")} Hash for {with_params(name, tps)}", self.derived_parts(name)), "Hash")
+                continue
+            }
+            let src = derived_hash_src("impl Hash for Derived", self.derived_parts(name))
             match parse_source(src, self.next_id) {
                 Ok(p) => {
                     self.next_id = p.next_id
@@ -6476,6 +6701,33 @@ impl Checker {
             }
         }
         return Ok(0)
+    }
+
+    // The type parameters of the struct or enum `name`.
+    #test(checker_on("enum E<T> { A(T) }"), "E")[["T"]]
+    #test(checker_on("struct P { x: int }"), "P")[[]]
+    fun type_params_of(self, name: str) -> [str] {
+        let si = self.struct_idx(name)
+        if si >= 0 { return self.structs[si].type_params }
+        let ei = self.enum_idx(name)
+        if ei >= 0 { return self.enums[ei].type_params }
+        return []
+    }
+
+    // The impl `src` a derive of `trnm` wrote, against the linked program's
+    // names (`parse_qualified`), among the declarations: its impls are
+    // resolved after the derives (MYLA-379).
+    fun add_derived_impl(var self, src: str, trnm: str) {
+        match parse_qualified(src, self.next_id) {
+            Ok(p) => {
+                self.next_id = p.next_id
+                for d in p.program.decls {
+                    self.decls.push(d)
+                    self.impl_decls.push(d)
+                }
+            },
+            Err(d) => { panic(f"a derived {trnm} impl does not parse: {d.msg}\n{src}") },
+        }
     }
 
     // How std.json's names are qualified in the linked program: `std$json$`
@@ -6584,14 +6836,14 @@ impl Checker {
             if si >= 0 {
                 var fields: [(str, Type)] = []
                 for f in self.structs[si].fields { fields.push((f.name, f.ty)) }
-                src = derived_json_struct_src(name, pre, fields)
+                src = derived_json_struct_src(name, self.type_params_of(name), pre, fields)
             } else {
                 var variants: [(str, [Type])] = []
                 let ei = self.enum_idx(name)
                 if ei >= 0 {
                     for v in self.enums[ei].variants { variants.push((v.name, v.payload)) }
                 }
-                src = derived_json_enum_src(name, pre, variants)
+                src = derived_json_enum_src(name, self.type_params_of(name), pre, variants)
             }
             match parse_qualified(src, self.next_id) {
                 Ok(p) => {
@@ -6670,12 +6922,6 @@ impl Checker {
     fun check_derive_attr(self, decl: Decl, attr: Attribute) -> Result<int32, CheckErr> {
         let is_se = match decl.kind { DeclKind.StructDecl(n, f, a, t, p, act) => true, DeclKind.EnumDecl(n, v, a, t, p) => true, _ => false }
         if !is_se { return Err(terr_at(attr.line, attr.col, attr.sp, "'#derive' may only be applied to a struct or enum")) }
-        let has_tps = match decl.kind {
-            DeclKind.StructDecl(n, f, a, t, p, act) => t.len() > 0,
-            DeclKind.EnumDecl(n, v, a, t, p) => t.len() > 0,
-            _ => false,
-        }
-        if has_tps { return Err(terr_at(attr.line, attr.col, attr.sp, "deriving on generic types is not supported yet (Eq, Hash and Json are derived for concrete structs and enums)")) }
         return self.validate_derive_attr(attr)
     }
 
@@ -7625,16 +7871,18 @@ impl Checker {
     }
 }
 
-#test()["enum Option<T> { Some(T), None }\nenum Result<T, E> { Ok(T), Err(E) }\ntrait Format {\n    fun format(self, spec: str) -> str\n}\nstruct Hasher {\n    state: uint64,\n}\nimpl Eq for Hasher {\n    fun eq(self, other: Hasher) -> bool {\n        return self.state == other.state\n    }\n}\ntrait Hash {\n    fun hash(self, h: Hasher) -> Hasher\n}\ntrait Iterator<T> {\n    fun next(var self) -> Option<T>\n}\n"]
+#test()["#derive(Eq)\nenum Option<T> { Some(T), None }\n#derive(Eq)\nenum Result<T, E> { Ok(T), Err(E) }\ntrait Format {\n    fun format(self, spec: str) -> str\n}\nstruct Hasher {\n    state: uint64,\n}\nimpl Eq for Hasher {\n    fun eq(self, other: Hasher) -> bool {\n        return self.state == other.state\n    }\n}\ntrait Hash {\n    fun hash(self, h: Hasher) -> Hasher\n}\ntrait Iterator<T> {\n    fun next(var self) -> Option<T>\n}\n"]
 // The prelude: what every program has without an import. The `Hasher`'s
 // state and the `Hash` trait are here (D163, MYLA-313), so that every type
 // can be a map key's and every module can name them; the hasher's methods,
 // its algorithm, and the `Hash` impls of the built-in types are std.hash's,
-// an implicit module. `Iterator<T>` is here for `for` over one (D171). A
+// an implicit module. `Option` and `Result` derive `Eq`, so `opt == None`
+// works when the payload is `Eq` (MYLA-379). `Iterator<T>` is here for `for`
+// over one (D171). A
 // map's `get` is std.map's method `m.get(k)`: the free `get(m, k)` that was
 // here went, so a file may declare a `get` of its own (MYLA-393).
 fun prelude_src() -> str {
-    return "enum Option<T> { Some(T), None }\nenum Result<T, E> { Ok(T), Err(E) }\ntrait Format {\n    fun format(self, spec: str) -> str\n}\nstruct Hasher {\n    state: uint64,\n}\nimpl Eq for Hasher {\n    fun eq(self, other: Hasher) -> bool {\n        return self.state == other.state\n    }\n}\ntrait Hash {\n    fun hash(self, h: Hasher) -> Hasher\n}\ntrait Iterator<T> {\n    fun next(var self) -> Option<T>\n}\n"
+    return "#derive(Eq)\nenum Option<T> { Some(T), None }\n#derive(Eq)\nenum Result<T, E> { Ok(T), Err(E) }\ntrait Format {\n    fun format(self, spec: str) -> str\n}\nstruct Hasher {\n    state: uint64,\n}\nimpl Eq for Hasher {\n    fun eq(self, other: Hasher) -> bool {\n        return self.state == other.state\n    }\n}\ntrait Hash {\n    fun hash(self, h: Hasher) -> Hasher\n}\ntrait Iterator<T> {\n    fun next(var self) -> Option<T>\n}\n"
 }
 
 // The prelude's declarations, with node ids from `first_id`.
@@ -7748,10 +7996,13 @@ pub fun checker_on(src: str) -> Checker {
 #test("trait S { fun a(self) -> int }\nstruct Q { x: int }\nimpl S for Q { fun a() -> int { return 1 } }")[["'a' in impl of trait 'S' for 'Q' has no receiver but the trait declares 'self'"]]
 // `#derive(Json)` (D172, MYLA-385): without std.json; the field check
 // against std.json's names ("" here, as in std.json itself); generic types
+// too (MYLA-379), and a generic type's derived impl is bounded
 #test("#derive(Json)\nstruct P { x: int }")[["cannot derive Json for 'P': std.json isn't imported (write 'import std.json as json')"]]
 #test("enum Json { Null }\ntrait ToJson { fun to_json(self) -> Json }\ntrait FromJson { fun from_json(j: Json) -> Self }\nfun unknown_variant() {}\n#derive(Json)\nstruct P { x: (int, str) }")[["cannot derive Json for struct 'P': field 'x' has type '(int32, str)', which isn't ToJson and FromJson (a tuple has no JSON form: make it a struct)"]]
 #test("enum Json { Null }\ntrait ToJson { fun to_json(self) -> Json }\ntrait FromJson { fun from_json(j: Json) -> Self }\nfun unknown_variant() {}\nstruct Q { x: int }\n#derive(Json)\nenum E { A, B([str: Q]) }")[["cannot derive Json for enum 'E': payload #0 of variant 'B' has type '[str: Q]', which isn't ToJson and FromJson"]]
-#test("#derive(Json)\nstruct B<T> { v: T }")[["deriving on generic types is not supported yet (Eq, Hash and Json are derived for concrete structs and enums)"]]
+#test("#derive(Json)\nstruct B<T> { v: T }")[["cannot derive Json for 'B': std.json isn't imported (write 'import std.json as json')"]]
+#test("#derive(Eq)\nstruct B<T> { v: T }\nstruct N { x: int }\nfun f(b: B<N>) -> bool { return b == b }")[["operator '==' is not defined for 'B<N>': 'N' isn't Eq (it needs 'impl Eq for N' or '#derive(Eq)')"]]
+#test("#derive(Eq)\nenum Option<T> { Some(T), None }\nfun f(a: Option<[str: int]>) -> bool { return a == None }")[["operator '==' is not defined for 'Option<[str: int32]>': '[str: int32]' isn't Eq"]]
 fun errors_of(src: str) -> [str] {
     var out: [str] = []
     for e in checker_on(src).errs { out.push(e.msg) }
@@ -8739,8 +8990,19 @@ impl Checker {
                             // a module's trait and function as a program writes them (`FromJson`, not `std$json$FromJson`)
                             var msg = format("type '{}' does not satisfy the bound '{}: {}' required by '{}'", type_name(concrete), b.tp, generic_name(unqualified(tr), want), unqualified(sig.decl.name))
                             if ok { msg = format("{}: it implements '{}'", msg, generic_name(unqualified(tr), have)) }
+                            // its generic impl's bound unmet: the argument that isn't (MYLA-379)
+                            var lacking = concrete
+                            var lacks = tr
+                            match self.failing_arg(concrete, tr) {
+                                Some(ct) => {
+                                    lacking = ct.0
+                                    lacks = ct.1
+                                    msg = format("{}: '{}' isn't {}", msg, type_name(lacking), unqualified(lacks))
+                                },
+                                None => {},
+                            }
                             var err = terr_at(e.line, e.col, e.sp, msg)
-                            if !ok { err.notes = self.json_help(concrete, tr) }
+                            if !ok { err.notes = self.json_help(lacking, lacks) }
                             return Err(err)
                         }
                         j += 1

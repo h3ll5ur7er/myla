@@ -173,7 +173,7 @@ fun main() {
 ## Restrictions
 
 - Generic functions can't be used as values or partially applied.
-- `#main`, `#test` and `#derive` can't be applied to generic declarations.
+- `#main` and `#test` can't be applied to generic declarations. `#derive` can ([[MYLA-379]]): the impl it writes is bounded by the trait on every type parameter, `impl<T: Eq> Eq for Box<T>` ([[Language/Methods-and-traits]]).
 - An `impl` on a generic type (a struct, enum or actor) is either generic over all its parameters in order (`impl<T> Box<T>`) or not allowed (`impl Box<int>` is an error).
 - A struct's or actor's own type parameters take no bounds (`struct S<T: Add>` is a parse error): the impl that needs one says it, `impl<T: Add> S<T>`.
 - A generic `impl` on a built-in type is for lists and maps: `impl<T> [T] { fun second(self) -> T { … } }`, `impl<K: Eq + Hash, V> [K: V]` (a key needs its bound written, D167), their type parameters bound by the receiver's type ([[MYLA-221]]).

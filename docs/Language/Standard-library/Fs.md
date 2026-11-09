@@ -21,7 +21,7 @@ The file system: whole files, files read and written a piece at a time, metadata
 
 The file's bytes become the string unchanged, even when they aren't valid UTF-8: strings work on bytes, and `chars` gives U+FFFD for the invalid ones ([[Language/Collections-and-strings]], [[MYLA-12]]).
 
-`from_errno(code: int32) -> IoError` turns the platform layer's code (Linux's numbers on every target so far; wasm32's maps WASI's onto them) into its cause; `std.io` and `std.process` use it too. `io_error_name(e: IoError) -> str` is the cause's name, its variant's (`"NotFound"`, `"Other(9)"`): `IoError` has no `Format` ([[MYLA-379]]), and the error messages of std.compress, std.archive and std.http name an `IoError` by it ([[MYLA-376]]).
+`from_errno(code: int32) -> IoError` turns the platform layer's code (Linux's numbers on every target so far; wasm32's maps WASI's onto them) into its cause; `std.io` and `std.process` use it too. `e.message()` is the cause in words with its name after it (D173, [[MYLA-379]]): `not found (NotFound)`, `permission denied (PermissionDenied)`, `connection refused (ConnectionRefused)`, `error 5 (Other(5))` with the platform's code. `IoError` implements `Format` by it, so `f"{e}"`, `print(e)` and a test function's report (`FAIL  reads_the_config: not found (NotFound)`) show that text (D168). `io_error_name(e: IoError) -> str` is the cause's name alone, its variant's (`"NotFound"`, `"Other(9)"`), by which the error messages of std.compress, std.archive and std.http name an `IoError` ([[MYLA-376]]).
 
 ```myla
 from std.fs import list_dir, make_dir_all, is_dir, IoError
@@ -37,11 +37,11 @@ fun main() {
                 if is_dir("src/" + n) { print(n + "/") } else { print(n) }
             }
         },
-        Err(e) => { print("no src directory") },
+        Err(e) => { print(f"no src directory: {e}") },
     }
 }
 // output:
-// no src directory
+// no src directory: not found (NotFound)
 ```
 
 ## Files

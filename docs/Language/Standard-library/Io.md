@@ -131,7 +131,7 @@ Each of `Read` and `Write` has a method for `[uint8]` and one for `str`. Strings
 | Function | Result |
 | --- | --- |
 | `read_all<R: Read>(r: R) -> Result<[uint8], IoError>` | Everything `r` gives up to its end |
-| `copy<R: Read, W: Write>(r: R, w: W) -> Result<W, IoError>` | Everything `r` gives up to its end written to `w`, which is flushed and given back |
+| `copy<R: Read, W: Write>(r: R, w: W) -> Result<W, IoError>` | Everything `r` gives up to its end written to `w`, 64 KiB at a time, which is flushed and given back |
 
 They take the streams by value, so the caller's `var` doesn't move: a memory stream read by `read_all` is where it was. A descriptor's offset, which the platform keeps, does move. `copy` gives the writer back, which is the way to the bytes of a memory stream it wrote, or to a `BufferedWriter`'s stream.
 
@@ -197,3 +197,5 @@ Natively on x86-64, 50 MB of lines of up to 120 bytes, best of three ([[MYLA-338
 | `copy` from one memory stream to another | 256 ms |
 
 With the conversions in one copy ([[MYLA-369]]; the same 50 MB, 2026-11-09, on a busier machine where `stdin().read_line()` took 129 to 153 ms, seven runs): `Buffered` reading through `read` (`[uint8]`) and `bytes.to_str` instead of `read_str` took 100 to 148 ms, median 106; with the conversions a byte at a time, as before, 289 to 487 ms, median 302 (MYLA-338's 331 ms). Interpreted, on 2 MB, 6.1 to 6.5 s through `read_str`, 6.6 s through `read`. So `read_str` and `write_str` no longer pay for themselves in speed: dropping them is the owner's decision ([[MYLA-399]]). In the same run, 1 000 000 `write`s of a 48-byte `[uint8]` into a `BufferedWriter` over a descriptor took 23 to 28 ms (110 to 118 ms before), and `read_all` gathers text and converts once.
+
+`copy` reads 64 KiB at a time ([[MYLA-379]]; it was 4 KiB): a 256 MiB file copied by `copy(fs.open(a)?, fs.create(b)?)` into a new file took 88 ms natively, 162 ms with 4 KiB, and 40 ms instead of 56 to `/dev/null` (best of seven; 128 KiB gave 85 and 39, 16 KiB 104 and 42). From one memory stream to another it stays as it was.

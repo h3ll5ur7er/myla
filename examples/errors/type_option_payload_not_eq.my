@@ -1,0 +1,10 @@
+//~ type error: operator '==' is not defined for 'Option<Pos>': 'Pos' isn't Eq (it needs 'impl Eq for Pos' or '#derive(Eq)')
+// `==` on an `Option` needs its payload to be `Eq` (MYLA-379).
+struct Pos {
+    x: int,
+}
+
+fun main() {
+    let a = Some(Pos { x: 1 })
+    print(a == None)
+}

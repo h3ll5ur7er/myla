@@ -76,6 +76,8 @@ fun main() {
 
 `GridError` has `message()` and implements `Format`, so `print(e)` shows the message (D168).
 
+`Grid<T>` derives `Eq` and `Hash` ([[MYLA-379]]): `a == b` when the sizes and the cells are equal (`T: Eq`), and a grid of `Hash` cells is a map key, a search's state of a whole grid (`[Grid<char>: int]`).
+
 ## Positions
 
 A position is an `(int, int)` tuple `(x, y)`. `x` counts columns from the left, `y` rows from the top, so "up" is `y - 1`, as the text reads. A tuple is a map key and a `Set` element as it is (D163), it is written and taken apart without an import (`(x + 1, y)`, `let (x, y) = p`), and it is the node a search of `std.graph` over the grid wants.
@@ -91,5 +93,4 @@ A `#derive(Eq, Hash)` struct `Pos { x, y }` was the other choice. It gives names
 ## Limits
 
 - `print(g)` and `f"{g}"` aren't possible: a `Format` impl on the generic `Grid<T>` doesn't link natively ([[MYLA-367]]); write `print(g.text())`.
-- A `Grid<T>` has no `==` and isn't a map key: `#derive` doesn't take a generic type yet, and a written `impl<T: Eq> Eq for Grid<T>` would meet [[MYLA-367]] too. Compare `a.cells == b.cells` and the sizes, or key a map by `g.cells`.
 - `for p in g` isn't possible ([[MYLA-353]]): write `for p in g.positions()`, or loop over `y` and `x`.

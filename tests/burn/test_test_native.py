@@ -31,7 +31,7 @@ _UNWINDING_NATIVE_WANT = """FAIL  unwinds_nested_blocks: runtime error: boom
 FAIL  unwinds_on_exit: exited with status 2
 FAIL  reports_a_failing_defer: runtime error: boom
 PASS  passes_and_cleans
-FAIL  fails_with_an_io_error: IoError.NotFound
+FAIL  fails_with_an_io_error: not found (NotFound)
 FAIL  fails_and_cleans: runtime error: after writing
 FAIL  a_passing_defer_failure_fails: runtime error: late
 PASS  output_of_a_pass_is_hidden

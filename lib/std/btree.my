@@ -956,14 +956,6 @@ impl<T: Ord> SortedSet<T> {
 // The functions are generic, which a `#test` case can't take (D116), so the
 // tests are test functions (D162).
 
-// Whether `o` is `Some(v)` (an `Option` has no `==`).
-fun is_some_of<T: Eq>(o: Option<T>, v: T) -> bool {
-    return match o {
-        Some(x) => x == v
-        None => false
-    }
-}
-
 // A small linear congruential generator: the tests' randomness.
 struct Lcg {
     x: uint32,
@@ -1057,28 +1049,12 @@ impl Model {
     }
 }
 
-fun same_entry(a: Option<(int, int)>, b: Option<(int, int)>) -> bool {
-    return match (a, b) {
-        (Some(x), Some(y)) => x.0 == y.0 && x.1 == y.1
-        (None, None) => true
-        _ => false
-    }
-}
-
-fun same_value(a: Option<int>, b: Option<int>) -> bool {
-    return match (a, b) {
-        (Some(x), Some(y)) => x == y
-        (None, None) => true
-        _ => false
-    }
-}
-
 // Checks every query of `m` about `k` against the model.
 fun queries_agree(m: SortedMap<int, int>, model: Model, k: int) -> bool {
     let want = model.get(k)
-    return same_value(m.get(k), want) && m.contains(k) == !want.is_none() &&
-        same_entry(m.floor(k), model.floor(k)) &&
-        same_entry(m.ceiling(k), model.ceiling(k)) &&
+    return m.get(k) == want && m.contains(k) == !want.is_none() &&
+        m.floor(k) == model.floor(k) &&
+        m.ceiling(k) == model.ceiling(k) &&
         m.range(k, k + 20) == model.range(k, k + 20)
 }
 
@@ -1089,10 +1065,10 @@ fun map_basics() {
     assert(m.get("a").is_none() && !m.contains("a"), "nothing in it")
     assert(m.insert("pear", 1).is_none(), "a new key")
     assert(m.insert("fig", 2).is_none(), "another")
-    assert(is_some_of(m.insert("pear", 3), 1), "a key already there gives its old value")
+    assert(m.insert("pear", 3) == Some(1), "a key already there gives its old value")
     assert(m.len() == 2 && !m.is_empty(), "two keys")
-    assert(is_some_of(m.get("pear"), 3) && m.contains("fig") && !m.contains("lime"), "get, contains")
-    assert(is_some_of(m.remove("pear"), 3), "remove gives the value")
+    assert(m.get("pear") == Some(3) && m.contains("fig") && !m.contains("lime"), "get, contains")
+    assert(m.remove("pear") == Some(3), "remove gives the value")
     assert(m.remove("pear").is_none() && m.remove("lime").is_none(), "removing what isn't there")
     assert(m.len() == 1 && m.keys() == ["fig"], "one left")
     let o: SortedMap<str, int> = of([("b", 1), ("a", 2), ("b", 3)])
@@ -1160,9 +1136,9 @@ fun against_a_model() {
         let k = rng.below(600)
         let grow = if step < 2000 { 3 } else { 1 }
         if rng.below(4) < grow {
-            assert(same_value(m.insert(k, step), model.insert(k, step)), f"insert {k}")
+            assert(m.insert(k, step) == model.insert(k, step), f"insert {k}")
         } else {
-            assert(same_value(m.remove(k), model.remove(k)), f"remove {k}")
+            assert(m.remove(k) == model.remove(k), f"remove {k}")
         }
         assert(m.len() == model.count, f"len after step {step}")
         let fault = m.t.fault()
@@ -1182,7 +1158,7 @@ fun deep_tree() {
     var step = 0
     while m.len() < 8000 {
         let k = rng.below(40000)
-        assert(same_value(m.insert(k, step), model.insert(k, step)), "insert")
+        assert(m.insert(k, step) == model.insert(k, step), "insert")
         step += 1
         if step % 500 == 0 {
             let fault = m.t.fault()
@@ -1201,17 +1177,17 @@ fun deep_tree() {
         let which = rng.below(3)
         if which == 0 {
             let e = m.pop_first()
-            assert(same_entry(e, model.ceiling(lo)), "pop_first")
+            assert(e == model.ceiling(lo), "pop_first")
             lo = e.map((kv) => kv.0).unwrap_or(0)
             model.remove(lo)
         } else if which == 1 {
             let e = m.pop_last()
-            assert(same_entry(e, model.floor(hi - 1)), "pop_last")
+            assert(e == model.floor(hi - 1), "pop_last")
             hi = e.map((kv) => kv.0).unwrap_or(0)
             model.remove(hi)
         } else {
             let k = rng.below(40000)
-            assert(same_value(m.remove(k), model.remove(k)), "remove")
+            assert(m.remove(k) == model.remove(k), "remove")
         }
         step += 1
         if step % 500 == 0 {
@@ -1234,13 +1210,13 @@ fun set_basics() {
     assert(s.items() == ["fig"], "the one left")
     let c: SortedSet<char> = set_of("sorted".chars())
     assert(c.items() == ['d', 'e', 'o', 'r', 's', 't'], "in order, once each")
-    assert(is_some_of(c.first(), 'd') && is_some_of(c.last(), 't'), "first, last")
-    assert(is_some_of(c.floor('p'), 'o') && is_some_of(c.ceiling('p'), 'r'), "floor, ceiling")
+    assert(c.first() == Some('d') && c.last() == Some('t'), "first, last")
+    assert(c.floor('p') == Some('o') && c.ceiling('p') == Some('r'), "floor, ceiling")
     assert(c.floor('a').is_none() && c.ceiling('u').is_none(), "past the ends")
     assert(c.range('e', 's') == ['e', 'o', 'r'], "range")
     var p: SortedSet<int> = set_of([3, 1, 2])
-    assert(is_some_of(p.pop_first(), 1) && is_some_of(p.pop_last(), 3) && p.items() == [2], "pops")
-    assert(is_some_of(p.pop_last(), 2) && p.pop_last().is_none() && p.pop_first().is_none(), "popped empty")
+    assert(p.pop_first() == Some(1) && p.pop_last() == Some(3) && p.items() == [2], "pops")
+    assert(p.pop_last() == Some(2) && p.pop_last().is_none() && p.pop_first().is_none(), "popped empty")
 }
 
 #test
@@ -1305,7 +1281,7 @@ fun other_ordered_keys() {
     assert(names == ["a", "aa", "c"], "by the type's own cmp; an equal key is replaced")
     assert(jobs.values() == [4, 2, 1], "the later value")
     let big: SortedSet<int64> = set_of([5000000000, -5000000000, 0])
-    assert(is_some_of(big.first(), -5000000000) && is_some_of(big.floor(4999999999), 0), "int64")
+    assert(big.first() == Some(-5000000000) && big.floor(4999999999) == Some(0), "int64")
     let f: SortedMap<float, str> = of([(0.5, "half"), (-2.0, "minus two")])
     assert(f.first().map((kv) => kv.1).unwrap_or("") == "minus two", "floats")
 }
