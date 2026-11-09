@@ -6497,6 +6497,7 @@ impl Checker {
     #test(checker_on("[int]"))[Ok(0)]
     fun synthesize_derives(var self) -> Result<int32, CheckErr> {
         var targets: [Decl] = []
+        var target_pos: [int32] = []
         var pos = -1
         for decl in self.decls {
             pos = pos + 1
@@ -6508,9 +6509,13 @@ impl Checker {
                 if attr.name != "derive" { continue }
                 match self.check_derive_attr(decl, attr) {
                     Ok(x) => {
-                        var present = false
-                        for d in targets { if d.id == decl.id { present = true } }
-                        if !present { targets.push(decl) }
+                        // by its place: `check_program` numbers the prelude's
+                        // nodes from 0 as the program's, so their ids meet
+                        // (the prelude's `Option` derives, MYLA-379)
+                        if !target_pos.contains(pos) {
+                            targets.push(decl)
+                            target_pos.push(pos)
+                        }
                     },
                     Err(e) => {
                         self.record(e)?
