@@ -65,6 +65,34 @@ pub struct CheckErr { line: int32, col: int32, sp: SrcSpan, msg: str, decl: int3
 // one every program sees without an import (MYLA-320).
 pub struct DeclOrigin { module: str, path: str, implicit: bool }
 
+// The functions' bodies the loader left unparsed (MYLA-359): an implicit
+// module's, each an empty block until the checker first checks it. `ids`
+// are their declarations (an impl, for a method), `keys` the bodies
+// (`body_key`), and `parse` reads one, lexed, parsed and renamed as the
+// rest of its module was. Its errors are a lex, parse or module error's:
+// each message starts with its kind (`parse error: …`, `kind_of`).
+pub struct LazyBodies { ids: [int32: bool], keys: [int64: bool], parse: (int64) -> Result<Block, [CheckErr]> }
+
+// No body left unparsed: a program loaded whole.
+pub fun no_lazy_bodies() -> LazyBodies {
+    return LazyBodies { ids: [:], keys: [:], parse: no_body }
+}
+
+#test(7)[Err([CheckErr { line: 0, col: 0, sp: SrcSpan { sline: 0, scol: 0, eline: 0, ecol: 0 }, msg: "internal error: no body 7 to read", decl: -1, notes: [] }])]
+fun no_body(key: int64) -> Result<Block, [CheckErr]> {
+    return Err([terr(0, 0, f"internal error: no body {key} to read")])
+}
+
+// The key of the body of the function at `line`:`col` of the declaration
+// `id` (a method's: its impl's), in `LazyBodies.keys`: the three in one
+// number, a line below 2^20 and a column below 2^12 (the lexer leaves a
+// body past them unskipped).
+#test(7, 3, 5)[30064783365]
+#test(0, 1048575, 4095)[4294967295]
+pub fun body_key(id: int32, line: int32, col: int32) -> int64 {
+    return ((id as int64) << 32) | ((line as int64) << 12) | (col as int64)
+}
+
 // An error at a position without a range (one caret).
 #test(27, 27, "x")[CheckErr { line: 27, col: 27, sp: SrcSpan { sline: 0, scol: 0, eline: 0, ecol: 0 }, msg: "x", decl: -1, notes: [] }]
 #test(50, 50, "d2")[CheckErr { line: 50, col: 50, sp: SrcSpan { sline: 0, scol: 0, eline: 0, ecol: 0 }, msg: "d2", decl: -1, notes: [] }]
@@ -1771,6 +1799,9 @@ pub struct Checker {
     // the functions (`std$str$join`) and methods (`str.trim`) checked code
     // calls or names: an implicit module's others aren't checked (MYLA-359)
     called: [str: bool],
+    lazy_bodies: LazyBodies,        // the bodies the loader left unparsed (MYLA-359)
+    read_bodies: [int64: Block],    // those read so far, by `body_key`
+    read_ids: [int32: bool],        // and their declarations
     std_impls: [int32: DeclOrigin], // the standard library's impls by node id (the loader's): their methods are its code (MYLA-320); and an entry std module's functions (MYLA-388)
     mutating_calls: [int32: bool],  // the calls of a `var self` method in an actor's methods, by node id: D95 counts one on a field of `self` as a change of it (MYLA-394)
     renames: [int32: str],          // a callee's node id -> the name it stands for, put in by `fill_in`: `cancel` inside std.task is `std$task$cancel` (MYLA-388)
@@ -1856,7 +1887,7 @@ fun new_checker(decls: [Decl]) -> Checker {
         allow_self: false, type_params: [], bounds_cur: [],
         cur_ret: None, has_cur_ret: false, ret_at: None, loop_depth: 0, defer_at: -1,
         frames: [], lambda_infer_active: false, lambda_depth: 0, cur_decl: -1, lambda_infer: [], stmt_match: false,
-        resolved: [:], call_defaults: [:], errs: [], warnings: [], primitives: false, called: [:], std_impls: [:], allowed: [], impl_allows: [], method_decl_allows: [], mains: [],
+        resolved: [:], call_defaults: [:], errs: [], warnings: [], primitives: false, called: [:], lazy_bodies: no_lazy_bodies(), read_bodies: [:], read_ids: [:], std_impls: [:], allowed: [], impl_allows: [], method_decl_allows: [], mains: [],
         skipped_decls: [:], skipped_fns: [:], broken_impls: [:], redefined: [:],
         lost_methods: [:], lost_traits: [:], failed_consts: [:], bodies: false,
         call_kind: "", call_kind_id: -1, targs_taken: -1, call_target: "", call_mutates: false, fun_name: "", handovers: [:], become_words: [], passed_on: [],
@@ -7826,6 +7857,102 @@ impl Checker {
         self.impl_allows = []
     }
 
+    // `fd`, a function of the declaration `id` (a method's: its impl), with
+    // its body: one the loader left unparsed is read (`LazyBodies.parse`),
+    // once (MYLA-359). None when that fails: its errors are collected.
+    #test(checker_on("[int]"), 0, fun_of("fun f() { }"))[Some(FunData { line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 12 }, name: "f", params: [], ret_type: None, body: Some(Block { line: 1, col: 9, sp: SrcSpan { sline: 1, scol: 9, eline: 1, ecol: 12 }, stmts: [] }), attributes: [], type_params: [], receiver: None, is_pub: false, is_async: false })]
+    fun with_body(var self, id: int32, fd: FunData) -> Option<FunData> {
+        if !self.lazy_bodies.ids.contains(id) { return Some(fd) }
+        let key = body_key(id, fd.line, fd.col)
+        if !self.lazy_bodies.keys.contains(key) { return Some(fd) }
+        var g = fd
+        match self.read_bodies.get(key) {
+            Some(b) => {
+                g.body = Some(b)
+                return Some(g)
+            },
+            None => {},
+        }
+        let parse = self.lazy_bodies.parse
+        match parse(key) {
+            Ok(b) => {
+                self.read_bodies[key] = b
+                self.read_ids[id] = true
+                g.body = Some(b)
+                return Some(g)
+            },
+            Err(es) => {
+                for e in es { self.note(e) }
+                return None
+            },
+        }
+    }
+
+    // The bodies read (`with_body`) in place of their empty blocks, in the
+    // declarations and the tables of functions and methods, which the
+    // interpreter and the code generator read (MYLA-359).
+    #test(checker_on("[int]"))[()]
+    fun put_bodies(var self) {
+        if self.read_bodies.len() == 0 { return }
+        var i = 0
+        while i < self.decls.len() {
+            let d = self.decls[i]
+            if self.read_ids.contains(d.id) {
+                let k = match d.kind {
+                    DeclKind.FunDecl(fd) => DeclKind.FunDecl(self.read_into(d.id, fd)),
+                    DeclKind.ImplDecl(t, ms, tps, tr, targs, attrs) => {
+                        var out: [FunData] = []
+                        for m in ms { out.push(self.read_into(d.id, m)) }
+                        DeclKind.ImplDecl(t, out, tps, tr, targs, attrs)
+                    },
+                    _ => d.kind,
+                }
+                self.decls[i] = Decl { id: d.id, line: d.line, col: d.col, sp: d.sp, kind: k }
+            }
+            i += 1
+        }
+        i = 0
+        while i < self.functions.len() {
+            let sig = self.functions[i]
+            if sig.has_decl && self.read_ids.contains(sig.decl_id) {
+                var s = sig
+                s.decl = self.read_into(sig.decl_id, sig.decl)
+                self.functions[i] = s
+            }
+            i += 1
+        }
+        i = 0
+        while i < self.methods.len() {
+            let sig = self.methods[i].sig
+            if sig.has_decl && self.read_ids.contains(sig.decl_id) {
+                var s = sig
+                s.decl = self.read_into(sig.decl_id, sig.decl)
+                var m = self.methods[i]
+                m.sig = s
+                self.methods[i] = m
+            }
+            i += 1
+        }
+        i = 0
+        while i < self.method_decls.len() {
+            let id = self.method_decl_ids[i]
+            if self.read_ids.contains(id) { self.method_decls[i] = self.read_into(id, self.method_decls[i]) }
+            i += 1
+        }
+    }
+
+    // `fd` of the declaration `id` with its body if it was read.
+    fun read_into(self, id: int32, fd: FunData) -> FunData {
+        return match self.read_bodies.get(body_key(id, fd.line, fd.col)) {
+            Some(b) => {
+                var g = fd
+                g.body = Some(b)
+                g
+            },
+            None => fd,
+        }
+    }
+
     // The functions and impls (by node id) of the implicit modules whose
     // bodies are checked only once called (MYLA-359): impls of no trait.
     #test(checker_on("[int]"))[[:]]
@@ -7882,9 +8009,14 @@ impl Checker {
 
     // The body of `fd` (declaration `id`; a method of the type with key
     // `key`, else ""), on its own: its error is collected.
-    fun check_body(var self, id: int32, fd: FunData, key: str) {
+    fun check_body(var self, id: int32, unread: FunData, key: str) {
         if self.full() { return }
         self.reset_state(id)
+        // a body the loader left unparsed is read now (MYLA-359)
+        let fd = match self.with_body(id, unread) {
+            Some(f) => f,
+            None => { return },
+        }
         self.cur_key = key
         // its own `#allow`s and, for a method, its impl block's
         self.allowed = allowed_warnings(concat_attrs(fd.attributes, self.impl_allows))
@@ -8102,6 +8234,13 @@ pub fun build_checker_with(decls: [Decl], next_id: int32, primitives: bool) -> R
 // `build_checker_with` of a linked program whose standard library's impls,
 // by node id, are `std_impls` (`Loaded.std_impls`, MYLA-320).
 pub fun build_checker_std(decls: [Decl], next_id: int32, primitives: bool, std_impls: [int32: DeclOrigin]) -> Result<Checker, [CheckErr]> {
+    return build_checker_lazy(decls, next_id, primitives, std_impls, no_lazy_bodies())
+}
+
+// `build_checker_std` of a linked program whose implicit modules' bodies
+// the loader left unparsed (`Loaded.bodies`, MYLA-359): each is read once
+// checked, and in the returned checker's declarations.
+pub fun build_checker_lazy(decls: [Decl], next_id: int32, primitives: bool, std_impls: [int32: DeclOrigin], bodies: LazyBodies) -> Result<Checker, [CheckErr]> {
     let pre = prelude(next_id)
     var all: [Decl] = []
     for d in pre.program.decls { all.push(d) }
@@ -8109,9 +8248,11 @@ pub fun build_checker_std(decls: [Decl], next_id: int32, primitives: bool, std_i
     var c = new_checker(all)
     c.primitives = primitives
     c.std_impls = std_impls
+    c.lazy_bodies = bodies
     c.next_id = pre.next_id
     let r = c.run_all()
     match r { Ok(x) => {}, Err(e) => { return Err(e) } }
+    c.put_bodies()
     // every call with all its arguments, for whatever runs the program (D136)
     c.fill_in()
     return Ok(c)

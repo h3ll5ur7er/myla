@@ -8,14 +8,14 @@
 
 from std.process import args, exit
 from std.io import eprintln
-from .checker import build_checker_std
+from .checker import build_checker_lazy
 from .interp import new_interp, RtError, sched_from_env, time_from_env
 from .loader import load_program_opts, load_options, parse_package_flag, Loaded, file_of, type_errors
 from .stdroot import default_stdlib_root
 from .diag import render, Report
 
 fun run_program(prog: Loaded, file: str) -> int32 {
-    return match build_checker_std(prog.decls, prog.next_id, false, prog.std_impls) {
+    return match build_checker_lazy(prog.decls, prog.next_id, false, prog.std_impls, prog.bodies) {
         Ok(c) => {
             var it = new_interp(c, [file])
             // a task's failure reported when it happens (MYLA-170)

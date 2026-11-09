@@ -13,7 +13,7 @@
 from std.process import args, exit
 from std.io import write, eprintln
 from std.platform import TARGET
-from .checker import build_checker_std
+from .checker import build_checker_lazy
 from .codegen import new_codegen
 from .dwarf import read_gdb_script
 from .loader import load_program_opts, load_options, for_target, parse_package_flag, Loaded, type_errors
@@ -39,7 +39,7 @@ from .diag import render
 struct Mode { debug: bool, emit_ir: bool, frames: bool, ssa: bool, ssa_stats: bool, no_inline: bool, target: str, primitives: bool, checked: bool }
 
 fun emit_asm(prog: Loaded, mode: Mode, stdlib_root: str) -> int32 {
-    return match build_checker_std(prog.decls, prog.next_id, mode.primitives, prog.std_impls) {
+    return match build_checker_lazy(prog.decls, prog.next_id, mode.primitives, prog.std_impls, prog.bodies) {
         Ok(c) => {
             var g = new_codegen(c)
             if mode.frames { g.frames = true }

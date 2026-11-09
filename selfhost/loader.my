@@ -27,9 +27,9 @@
 
 from std.fs import read_to_string, exists, is_dir, current_dir
 from .stdroot import is_embedded, embedded_text, EMBEDDED_ROOT
-from .parser import parse_source_with, expr_of, stmt_of, type_expr_of, block_of, pattern_of, fun_of
+from .parser import parse_source_with, parse_source_lazy, parse_body, BodySite, LazyParsed, expr_of, stmt_of, type_expr_of, block_of, pattern_of, fun_of
 from .diag import Report, reports, type_report, chain
-from .checker import CheckErr, DeclOrigin
+from .checker import CheckErr, DeclOrigin, LazyBodies, body_key, no_lazy_bodies
 from .tokens import SrcSpan, no_span, keywords
 from .ast import Program, Decl, DeclKind, FunData, Param, TypeParam, Field, Variant
 from .ast import ImportPath, ImportItem, TypeExpr, TypeKind, Expr, ExprKind, FieldInit
@@ -48,6 +48,10 @@ struct Module {
     decls: [Decl],
     exports: [str: Binding],
     bindings: [str: Binding],
+    // an implicit module's functions' bodies left unparsed (MYLA-359):
+    // their sites, and the file's code points they are read from
+    sites: [BodySite],
+    cps: [char],
 }
 
 // The linked program: every module's declarations, the next free node id
@@ -57,7 +61,9 @@ struct Module {
 // `std_impls`: their methods are the standard library's code, MYLA-320),
 // and the functions of an entry file that is one of its modules, whose
 // names aren't qualified (MYLA-388: `cancel` in std.task is `task.cancel`).
-pub struct Loaded { decls: [Decl], next_id: int32, spans: [Span], std_impls: [int32: DeclOrigin] }
+// The implicit modules' functions' bodies are left unparsed until the
+// checker needs one (`bodies`, MYLA-359).
+pub struct Loaded { decls: [Decl], next_id: int32, spans: [Span], std_impls: [int32: DeclOrigin], bodies: LazyBodies }
 
 pub struct Span { first_id: int32, path: str }
 
@@ -76,7 +82,9 @@ pub fun file_of(prog: Loaded, id: int32) -> str {
 pub fun type_errors(prog: Loaded, errs: [CheckErr]) -> Report {
     var rs: [Report] = []
     for e in errs {
-        var r = type_report(e.line, e.col, e.sp, e.msg, file_of(prog, e.decl))
+        let (kind, msg) = kind_of(e.msg)
+        var r = type_report(e.line, e.col, e.sp, msg, file_of(prog, e.decl))
+        r.kind = kind
         r.notes = e.notes
         rs.push(r)
     }
@@ -154,6 +162,7 @@ struct Loader {
     next_id: int32,
     spans: [Span],
     overrides: [str: str],     // path -> text used instead of the file (an editor's unsaved buffers)
+    lazy: [str: bool],         // the files whose functions' bodies are left unparsed: the implicit modules' (MYLA-359)
 }
 
 // The modules of the standard library every program sees without an import
@@ -704,22 +713,50 @@ impl Loader {
     }
 
     // The implicit modules (`implicit_modules`) the standard library in use
-    // has, each loaded as an import of it would load it: the index of each
-    // module, none for a library without it (an older `--stdlib` directory,
-    // or no library at all). No module binds a name of theirs.
-    fun load_implicit(var self) -> Result<[int32], Report> {
+    // has, their `files` (`implicit_files`), each loaded as an import of it
+    // would load it: the index of each module, none for a library without
+    // it (an older `--stdlib` directory, or no library at all). No module
+    // binds a name of theirs.
+    fun load_implicit(var self, files: [str]) -> Result<[int32], Report> {
         var out: [int32] = []
+        for file in files {
+            let k = self.load(file)?
+            if !has_index(out, k) { out.push(k) }
+        }
+        return Ok(out)
+    }
+
+    // The files of the implicit modules the standard library in use has.
+    fun implicit_files(self) -> Result<[str], Report> {
+        var out: [str] = []
         for name in implicit_modules() {
             let p = ImportPath { line: 0, col: 0, sp: no_span(), dots: 0, segments: ["std", name] }
             match self.descend(self.entry, p, self.stdlib_root, 0)? {
-                Some(file) => {
-                    let k = self.load(file)?
-                    if !has_index(out, k) { out.push(k) }
-                },
+                Some(file) => { out.push(file) },
                 None => {},
             }
         }
         return Ok(out)
+    }
+
+    // The module `path` with text `src` parsed, its node ids from
+    // `next_id`. Only the entry's `#test` cases are the program's
+    // (MYLA-360): every other module's are skipped unparsed, so that
+    // importing std.int, with 2,042, costs nothing for them (MYLA-320,
+    // MYLA-396). An implicit module's functions' bodies are left for the
+    // checker to read once it needs one (MYLA-359): most of their text,
+    // which a program calls little of.
+    fun parse_module(self, path: str, src: str) -> Result<LazyParsed, Report> {
+        if self.lazy.contains(path) {
+            return match parse_source_lazy(src, self.next_id) {
+                Ok(lp) => Ok(lp),
+                Err(ds) => Err(reports(ds, path)),
+            }
+        }
+        return match parse_source_with(src, self.next_id, path != self.entry) {
+            Ok(x) => Ok(LazyParsed { parsed: x, cps: [], sites: [] }),
+            Err(ds) => Err(reports(ds, path)),
+        }
     }
 
     // Load `path` and its imports (depth first) once each; its module index.
@@ -740,13 +777,8 @@ impl Loader {
             },
         }
         self.spans.push(Span { first_id: self.next_id, path: path })
-        // only the entry's `#test` cases are the program's (MYLA-360): every
-        // other module's are skipped unparsed, so that importing std.int,
-        // with 2,042, costs nothing for them (MYLA-320, MYLA-396)
-        var parsed = match parse_source_with(src, self.next_id, path != self.entry) {
-            Ok(x) => x,
-            Err(ds) => { return Err(reports(ds, path)) },
-        }
+        let lp = self.parse_module(path, src)?
+        let parsed = lp.parsed
         self.next_id = parsed.next_id
         var imports: [Decl] = []
         var decls: [Decl] = []
@@ -757,7 +789,7 @@ impl Loader {
             }
         }
         let idx = self.modules.len() as int32
-        self.modules.push(Module { id: self.module_id(path), path: path, imports: imports, targets: [], decls: decls, exports: [:], bindings: [:] })
+        self.modules.push(Module { id: self.module_id(path), path: path, imports: imports, targets: [], decls: decls, exports: [:], bindings: [:], sites: lp.sites, cps: lp.cps })
         var targets: [int32] = []
         for imp in imports {
             match imp.kind {
@@ -1662,12 +1694,15 @@ pub fun load_program_opts(entry: str, opts: LoadOptions) -> Result<Loaded, Repor
     let packages = check_packages(opts.packages)?
     var normalized: [str: str] = [:]
     for p in opts.overrides.keys() { normalized[normalize(p)] = opts.overrides[p] }
-    var ld = Loader { stdlib_root: stdlib, project_root: project_root, packages: packages, entry: e, modules: [], next_id: 0, spans: [], overrides: normalized }
-    ld.load(e)?
+    var ld = Loader { stdlib_root: stdlib, project_root: project_root, packages: packages, entry: e, modules: [], next_id: 0, spans: [], overrides: normalized, lazy: [:] }
     // the standard library's method modules, for a program outside it
-    // (D164, MYLA-320)
-    var implicit: [int32] = []
-    if stdlib != "" && !is_std_module(e, stdlib) { implicit = ld.load_implicit()? }
+    // (D164, MYLA-320), their functions' bodies left unparsed, also where
+    // the program imports one (MYLA-359)
+    var files: [str] = []
+    if stdlib != "" && !is_std_module(e, stdlib) { files = ld.implicit_files()? }
+    for f in files { ld.lazy[f] = true }
+    ld.load(e)?
+    let implicit = ld.load_implicit(files)?
     // the runtime's functions in Myla (MYLA-162), compiled where a program
     // uses them: the standard library's, else the copy the tools carry
     if opts.runtime {
@@ -1699,9 +1734,17 @@ pub fun load_program_opts(entry: str, opts: LoadOptions) -> Result<Loaded, Repor
     // names aren't qualified, so its functions' origins tell (MYLA-388)
     var entry_std = ""
     if stdlib != "" && is_std_module(e, stdlib) { entry_std = std_module_name(e) }
+    var lazy = LazyTable { bodies: [:], keys: [:], renamers: [:], cps: [:] }
+    var lazy_ids: [int32: bool] = [:]
     for k in merge_order(ld.modules.len() as int32, implicit) {
         let m = ld.modules[k]
         var r = Renamer { env: decl_env(m.bindings), aliases: module_env(m.bindings), exports: exports, vals: [], tys: [], path: m.path, err: None, kinds: kinds }
+        if m.sites.len() > 0 {
+            // the bodies left unparsed, renamed in this scope once read
+            lazy.renamers[k] = r
+            lazy.cps[k] = m.cps
+            for id in lazy.add(k, m.sites, m.decls).keys() { lazy_ids[id] = true }
+        }
         let in_std = starts_with_text(m.id, "std$")
         let is_implicit = has_index(implicit, k)
         // only the entry's cases are the program's, the others' were left
@@ -1719,5 +1762,109 @@ pub fun load_program_opts(entry: str, opts: LoadOptions) -> Result<Loaded, Repor
         }
         match r.err { Some(e) => { return Err(e) }, None => {} }
     }
-    return Ok(Loaded { decls: decls, next_id: ld.next_id, spans: ld.spans, std_impls: std_impls })
+    var bodies = no_lazy_bodies()
+    if lazy.bodies.len() > 0 {
+        let table = lazy
+        bodies = LazyBodies { ids: lazy_ids, keys: lazy.keys, parse: (key: int64) => table.read(key) }
+    }
+    return Ok(Loaded { decls: decls, next_id: ld.next_id, spans: ld.spans, std_impls: std_impls, bodies: bodies })
+}
+
+// A function's body an implicit module's parse left for later
+// (`parse_source_lazy`, MYLA-359): its module (an index of `Loader.modules`),
+// its site, and its function, whose names are in scope there (in an
+// impl's method also `self` and the impl's type parameters).
+struct LazyBody { module: int32, site: BodySite, fd: FunData, receiver: bool, impl_params: [TypeParam] }
+
+// The bodies left for later, by `body_key` (`keys` too, for the checker),
+// with each module's renamer (its names, as it renamed the rest of the
+// module) and code points.
+struct LazyTable { bodies: [int64: LazyBody], keys: [int64: bool], renamers: [int32: Renamer], cps: [int32: [char]] }
+
+impl LazyTable {
+    // Record the bodies of the declarations `decls` of module `k` that the
+    // parse left at `sites`; the ids of the declarations that have one.
+    // The sites are in the order of the declarations, as the parse met
+    // them.
+    fun add(var self, k: int32, sites: [BodySite], decls: [Decl]) -> [int32: bool] {
+        var found: [int32: bool] = [:]
+        var next = 0
+        for d in decls {
+            if next >= sites.len() { break }
+            match d.kind {
+                DeclKind.FunDecl(fd) => {
+                    if self.add_fun(k, sites[next], d.id, fd, false, []) {
+                        found[d.id] = true
+                        next += 1
+                    }
+                },
+                DeclKind.ImplDecl(t, ms, tps, tr, targs, attrs) => {
+                    for m in ms {
+                        if next < sites.len() && self.add_fun(k, sites[next], d.id, m, true, tps) {
+                            found[d.id] = true
+                            next += 1
+                        }
+                    }
+                },
+                _ => {},
+            }
+        }
+        return found
+    }
+
+    // Record the body of `fd` if it is the one at `site`.
+    fun add_fun(var self, k: int32, site: BodySite, id: int32, fd: FunData, receiver: bool, impl_params: [TypeParam]) -> bool {
+        match fd.body {
+            Some(b) => { if b.line != site.line || b.col != site.col { return false } },
+            None => { return false },
+        }
+        let key = body_key(id, fd.line, fd.col)
+        self.bodies[key] = LazyBody { module: k, site: site, fd: fd, receiver: receiver, impl_params: impl_params }
+        self.keys[key] = true
+        return true
+    }
+
+    // The body `key`, lexed, parsed and renamed now (`LazyBodies.parse`);
+    // its errors each with its kind before its message (`kind_of`).
+    fun read(self, key: int64) -> Result<Block, [CheckErr]> {
+        let lb = match self.bodies.get(key) {
+            Some(x) => x,
+            None => { return Err([CheckErr { line: 0, col: 0, sp: no_span(), msg: f"internal error: no body {key} to read", decl: -1, notes: [] }]) },
+        }
+        let b = match parse_body(self.cps[lb.module], lb.site) {
+            Ok(x) => x,
+            Err(ds) => {
+                var out: [CheckErr] = []
+                for d in ds { out.push(CheckErr { line: d.line, col: d.col, sp: d.sp, msg: d.kind + ": " + d.msg, decl: -1, notes: [] }) }
+                return Err(out)
+            },
+        }
+        // the names in scope as `Renamer.function` has them: the
+        // parameters (and `self` in an impl), the type parameters (the
+        // impl's too) and `Self`
+        var r = self.renamers[lb.module]
+        r.vals = []
+        for p in lb.fd.params { r.vals.push(p.name) }
+        if lb.receiver { r.vals.push("self") }
+        r.tys = tp_names(lb.fd.type_params)
+        for t in lb.impl_params { r.tys.push(t.name) }
+        r.tys.push("Self")
+        let renamed = r.block(b)
+        return match r.err {
+            Some(e) => Err([CheckErr { line: e.line, col: e.col, sp: e.sp, msg: e.kind + ": " + e.msg, decl: -1, notes: e.notes }]),
+            None => Ok(renamed),
+        }
+    }
+}
+
+// The kind and the message of the error `msg` of the checker: a body read
+// late (MYLA-359) may have a lex, parse or module error, its kind before
+// its message.
+#test("parse error: expected ')'")[("parse error", "expected ')'")]
+#test("unknown name 'x'")[("type error", "unknown name 'x'")]
+fun kind_of(msg: str) -> (str, str) {
+    for kind in ["lex error", "parse error", "module error"] {
+        if starts_with_text(msg, kind + ": ") { return (kind, msg[kind.len() + 2:]) }
+    }
+    return ("type error", msg)
 }

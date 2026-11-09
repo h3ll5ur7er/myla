@@ -322,6 +322,25 @@ class SelfHostedParserParity(unittest.TestCase):
         self.assertGreater(checked, 25)
         self.assertGreater(errors, 15)
 
+    def test_bodies_read_later_are_the_same(self) -> None:
+        # MYLA-359: a file read as an implicit module is (each function's
+        # body skipped by the lexer, then lexed and parsed on its own) gives
+        # the tokens, with their places, and the tree of the file read
+        # whole; `parse_main --lazy` compares them. Every file of the
+        # corpus, the error corpus's lex errors included; only
+        # parse_several_errors reports its errors in another order (the
+        # signatures' first, then the bodies' as they are read).
+        bodies = 0
+        for path in sorted(set(_corpus()) | set(glob.glob(os.path.join(_REPO, "lib", "std", "**", "*.my"), recursive=True))):
+            if path.endswith("parse_several_errors.my"):
+                continue
+            with self.subTest(file=os.path.relpath(path, _REPO)):
+                proc = subprocess.run([self._binary, "--lazy", path], capture_output=True, text=True)
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                self.assertTrue(proc.stdout.startswith("same "), proc.stdout[:2000])
+                bodies += int(proc.stdout.split()[1])
+        self.assertGreater(bodies, 5000)
+
     def _continued(self, source: str) -> bool:
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "garbled.my")

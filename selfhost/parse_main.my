@@ -4,12 +4,20 @@
 // (src/myla/canon.py:canonical_ast), for byte-for-byte differential comparison
 // against `myla parse --canonical`; for lex or parse errors, an
 // `err <line> <col> <span> <kind>: <message>` line for each (MYLA-65, D80).
+//
+// `parse_main --lazy <file.my>` compares the file read as an implicit
+// module's is, its functions' bodies skipped and each read on its own
+// (`parse_source_lazy`, `parse_body`, MYLA-359), with the file read whole
+// (without its `#test` cases, as both are): the tokens with their places,
+// then the trees. It prints `same <bodies>`, or the first difference.
 
 from std.process import args, exit
 from std.fs import read_to_string
 from std.io import println, eprintln
-from .parser import parse_source_all
-from .ast import dump_program
+from .parser import parse_source_all, parse_source_with, parse_source_lazy, parse_body, BodySite
+from .lexer import lex_with, lex_lazy, lex_part, canonical_line
+from .tokens import Token
+from .ast import dump_program, Program, Decl, DeclKind, FunData, Block
 from .diag import canonical_err
 
 fun parse_and_dump(src: str) {
@@ -19,14 +27,161 @@ fun parse_and_dump(src: str) {
     }
 }
 
+// The canonical lines of `toks`.
+#test([])[[]]
+fun lines_of(toks: [Token]) -> [str] {
+    var out: [str] = []
+    for t in toks { out.push(canonical_line(t)) }
+    return out
+}
+
+// The tokens `lex_lazy` gives for `src` with each body it skipped lexed on
+// its own (`lex_part`) in its place, as text; "err …" for a lex error.
+#test("fun f() { 1 }")[["FUN 1 1 \"fun\" end=1:4", "IDENT 1 5 \"f\" end=1:6", "LPAREN 1 6 \"(\" end=1:7", "RPAREN 1 7 \")\" end=1:8", "LBRACE 1 9 \"{\" end=1:10", "INT 1 11 \"1\" int=1 end=1:12", "RBRACE 1 13 \"}\" end=1:14", "EOF 1 14 \"\" end=1:14"]]
+fun spliced_tokens(src: str) -> [str] {
+    let (toks, cps) = match lex_lazy(src) {
+        Ok(r) => r,
+        Err(d) => { return [canonical_err(d)] },
+    }
+    var out: [str] = []
+    var i = 0
+    while i < toks.len() {
+        let t = toks[i]
+        if t.suffix == "body" {
+            let end = toks[i + 1].ival as int32
+            match lex_part(cps, t.ival as int32, end, t.line, t.column) {
+                Ok(part) => {
+                    var k = 0
+                    while k < part.len() - 1 {
+                        out.push(canonical_line(part[k]))
+                        k += 1
+                    }
+                },
+                Err(d) => { return [canonical_err(d)] },
+            }
+            i += 2
+        } else {
+            out.push(canonical_line(t))
+            i += 1
+        }
+    }
+    return out
+}
+
+// The body of the site at `line`:`col` among `sites`, parsed.
+fun body_at(cps: [char], sites: [BodySite], b: Block) -> Result<Block, str> {
+    for s in sites {
+        if s.line == b.line && s.col == b.col {
+            return match parse_body(cps, s) {
+                Ok(x) => Ok(x),
+                Err(ds) => Err(canonical_err(ds[0])),
+            }
+        }
+    }
+    return Ok(b)
+}
+
+// `fd` with its body read, if the lexer skipped it.
+fun filled(cps: [char], sites: [BodySite], fd: FunData) -> Result<FunData, str> {
+    var g = fd
+    match fd.body {
+        Some(b) => { g.body = Some(body_at(cps, sites, b)?) },
+        None => {},
+    }
+    return Ok(g)
+}
+
+// The program `parse_source_lazy` gives for `src` with every body it left
+// read (`parse_body`), dumped; and how many bodies there were.
+fun spliced_program(src: str) -> Result<(str, int32), str> {
+    let lp = match parse_source_lazy(src, 0) {
+        Ok(x) => x,
+        Err(ds) => { return Err(canonical_err(ds[0])) },
+    }
+    var decls: [Decl] = []
+    for d in lp.parsed.program.decls {
+        let k = match d.kind {
+            DeclKind.FunDecl(fd) => DeclKind.FunDecl(filled(lp.cps, lp.sites, fd)?),
+            DeclKind.ImplDecl(t, ms, tps, tr, targs, attrs) => {
+                var out: [FunData] = []
+                for m in ms { out.push(filled(lp.cps, lp.sites, m)?) }
+                DeclKind.ImplDecl(t, out, tps, tr, targs, attrs)
+            },
+            _ => d.kind,
+        }
+        decls.push(Decl { id: d.id, line: d.line, col: d.col, sp: d.sp, kind: k })
+    }
+    return Ok((dump_program(Program { decls: decls }), lp.sites.len() as int32))
+}
+
+// `dump` without the numbers of the names the parser makes up from node
+// ids (`%index12`, `%for7`), which a body read on its own numbers apart.
+#test("(name \"%index247\") (name \"x1\")")["(name \"%index\") (name \"x1\")"]
+fun without_ids(dump: str) -> str {
+    var sb = StringBuilder()
+    var i = 0
+    var made_up = false
+    while i < dump.len() {
+        let c = dump[i]
+        if c == '%' { made_up = true }
+        else if c < '0' || c > '9' { if !(c >= 'a' && c <= 'z') { made_up = false } }
+        else if made_up {
+            i += 1
+            continue
+        }
+        sb.append_byte(c)
+        i += 1
+    }
+    return sb.build()
+}
+
+// The first line where `a` and `b` differ, as a report; "" if none.
+#test(["a", "b"], ["a", "c"])["line 2: b | c"]
+#test(["a"], ["a"])[""]
+fun first_difference(a: [str], b: [str]) -> str {
+    var i = 0
+    while i < a.len() || i < b.len() {
+        let x = if i < a.len() { a[i] } else { "<end>" }
+        let y = if i < b.len() { b[i] } else { "<end>" }
+        if x != y { return format("line {}: {} | {}", i + 1, x, y) }
+        i += 1
+    }
+    return ""
+}
+
+fun compare_lazy(src: str) {
+    let whole = match lex_with(src, true) {
+        Ok(toks) => lines_of(toks),
+        Err(d) => [canonical_err(d)],
+    }
+    let diff = first_difference(whole, spliced_tokens(src))
+    if diff != "" {
+        println("tokens differ, " + diff)
+        return
+    }
+    let eager = match parse_source_with(src, 0, true) {
+        Ok(p) => dump_program(p.program),
+        Err(ds) => canonical_err(ds[0]),
+    }
+    match spliced_program(src) {
+        Ok(r) => {
+            let (lazy, n) = r
+            let d = first_difference(without_ids(eager).split("\n"), without_ids(lazy).split("\n"))
+            if d != "" { println("trees differ, " + d) } else { println(format("same {}", n)) }
+        },
+        Err(e) => { if e == eager { println("same 0") } else { println("lazy fails: " + e) } },
+    }
+}
+
 fun main() {
     let argv = args()
-    if argv.len() < 2 {
-        eprintln("usage: parse_main <file.my>")
+    let lazy = argv.len() == 3 && argv[1] == "--lazy"
+    if argv.len() < 2 || (argv.len() > 2 && !lazy) {
+        eprintln("usage: parse_main [--lazy] <file.my>")
         exit(2)
     }
-    match read_to_string(argv[1]) {
-        Ok(src) => parse_and_dump(src),
+    match read_to_string(argv[argv.len() - 1]) {
+        Ok(src) => { if lazy { compare_lazy(src) } else { parse_and_dump(src) } },
         Err(e) => {
             eprintln("parse_main: cannot read input file")
             exit(1)
