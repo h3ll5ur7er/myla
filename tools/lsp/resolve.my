@@ -470,7 +470,11 @@ impl Resolver {
         // built-in one has no declaration); the AST keeps no position of
         // its own for it, so it is the first of its name after the parameter
         for tp in tps {
-            for b in tp.bounds { self.use_name(tp.line, tp.col, b) }
+            for b in tp.bounds {
+                // a module's trait, `T: json.ToJson` (MYLA-398)
+                let parts = b.split(".")
+                if parts.len() > 1 { self.module_type(tp.line, tp.col, parts) } else { self.use_name(tp.line, tp.col, b) }
+            }
             // a generic trait's arguments, `I: Iterator<T>` (D171)
             for args in tp.bound_args { for a in args { self.type_expr(a) } }
         }

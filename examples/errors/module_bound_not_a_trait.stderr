@@ -1,0 +1,5 @@
+module error: 'json.Json' is an enum of module 'std.json', not a trait
+  --> examples/errors/module_bound_not_a_trait.my:6:10
+  |
+6 | fun show<T: json.Json>(v: T) -> int {
+  |          ^^^^^^^^^^^^

@@ -68,7 +68,7 @@ fun_decl     = "async"? "fun" IDENT generics? "(" NL* ( param NL* ( "," NL* para
 param        = IDENT ":" type ( "=" expression )? ;   (* a default: D136 *)
 generics     = "<" generic ( "," generic )* ","? ">" ;
 generic      = IDENT ( ":" trait_bound ( "+" trait_bound )* )? ;
-trait_bound  = IDENT type_args? ;   (* a generic trait with its arguments, I: Iterator<T>: D171 *)
+trait_bound  = IDENT ( "." IDENT )* type_args? ;   (* I: Iterator<T>, a generic trait with its arguments: D171; m.Trait, a module's: MYLA-398 *)
 type_params  = "<" IDENT ( "," IDENT )* ","? ">" ;
 
 impl_decl    = "impl" generics? ( type | named_type "for" type ) "{" SEP* ( method SEP* )* "}" ;
@@ -211,5 +211,5 @@ field_pattern = IDENT ( ":" pattern )? ;
 - **`>>`.** Two touching `>` are a shift in expressions and two closers in types, as in a bound's type arguments at the end of a list of type parameters (`fun total<I: Iterator<int>>(it: I)`, D171).
 - **Nesting.** Expressions, types, blocks and patterns nest at most 256 levels deep (`MAX_NESTING` in the parser): deeper is a parse error, `expression nested too deeply` (or `type`, `block`, `pattern`), at the token where it goes past, not a crash of the parser or the language server ([[MYLA-182]]).
 - **`|`.** Bitwise or in expressions, alternative in patterns.
-- **`.`.** `t.0` is a tuple index (a `.` followed by an integer token), `x.f` a field, `E.V` a variant, `m.f` a module member (resolved by the loader); in a type, `m.T` is a module's type (D170, resolved by the loader too). `P.f(…)` on a type, `T.f(…)` on a type parameter, is a trait's function without `self` (D172, resolved by the checker: a local of the name is a value first); a type keyword before `.` is the type's name, so `int64.zero()` is one, though `int64` alone is no expression. A generic type's is called on its name alone: `Box<int>.zero()` reads as a comparison, and a `<` after a name whose type arguments close with `>` right before a `.` is a parse error saying so.
+- **`.`.** `t.0` is a tuple index (a `.` followed by an integer token), `x.f` a field, `E.V` a variant, `m.f` a module member (resolved by the loader); in a type, `m.T` is a module's type (D170, resolved by the loader too), and in a bound `m.Trait` a module's trait ([[MYLA-398]]). `P.f(…)` on a type, `T.f(…)` on a type parameter, is a trait's function without `self` (D172, resolved by the checker: a local of the name is a value first); a type keyword before `.` is the type's name, so `int64.zero()` is one, though `int64` alone is no expression. A generic type's is called on its name alone: `Box<int>.zero()` reads as a comparison, and a `<` after a name whose type arguments close with `>` right before a `.` is a parse error saying so.
 - **Greedy bodies.** A lambda's expression body, like every operand, extends as far as it can: `(x) => x + 1 |> f` is a lambda whose body is `x + 1 |> f`.

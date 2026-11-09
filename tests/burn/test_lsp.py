@@ -416,6 +416,18 @@ class ScopeScenarios(LspRequestHelpers):
         self.assertEqual(self.defn(uri, 1, 16), {"uri": _uri(geo), "range": rng(0, 0, 0)})     # the module
         self.assertEqual(self.hover(uri, 1, 18), "pub struct Point")
 
+    def test_a_module_s_trait_in_a_bound(self):
+        # `T: m.Trait` (MYLA-398): the trait is the module's declaration,
+        # `m` the module
+        geo = self.write("geo.my", "// geo\npub trait Area {\n    fun area(self) -> int\n}\n")
+        uri = self.open("import geo as g\n"                             # 0
+                        "fun total<T: g.Area>(x: T) -> int {\n"        # 1
+                        "    return x.area()\n"                        # 2
+                        "}\n")
+        self.assertEqual(self.defn(uri, 1, 16), {"uri": _uri(geo), "range": rng(1, 10, 14)})   # Area
+        self.assertEqual(self.defn(uri, 1, 13), {"uri": _uri(geo), "range": rng(0, 0, 0)})     # the module
+        self.assertEqual(self.hover(uri, 1, 10), "type parameter T: g.Area")
+
     def test_unicode_identifiers(self):
         # XID identifiers (MYLA-84); ranges in UTF-16 units, 😀 counting two
         uri = self.open('fun main() {\n    let größe = 1\n    let 日本 = größe\n    print(f"😀{日本}")\n}\n')
