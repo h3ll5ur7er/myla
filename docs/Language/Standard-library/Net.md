@@ -49,7 +49,7 @@ fun main() {
 | `connect(a)`, `connect_timeout(a, ms)`, `connect_async(a)` (async) | A connection: `ConnectionRefused`, `HostUnreachable`, `NetworkUnreachable`, `TimedOut` |
 | `connect_host(host: str, port: int)` | `lookup(host)`'s addresses tried in turn |
 | `TcpStream` | A `Read` and a `Write` of `std.io` ([[Language/Standard-library/Io#streams]]): `buffered(s)` reads its lines, `copy` and `read_all` take it. A read gives what one receive gives, `[]` at the end of the stream; a write sends every byte. A copy is the same connection |
-| `TcpStream`: `read_async(n)`, `read_str_async(n)`, `write_async(b)`, `write_str_async(s)` (async) | The reads and writes, the task waiting |
+| `TcpStream`: `read_async(n)`, `write_async(b)` (async) | The read and the write, the task waiting; bytes, as `Read` and `Write` deal in (D177) |
 | `TcpStream`: `peer_addr()`, `local_addr()`, `shutdown(how)`, `set_nodelay(on)`, `set_read_timeout(ms)`, `set_write_timeout(ms)`, `close()` | `how` is `Shutdown.Read`, `Write` or `Both`; after `Write` the peer reads the end. A timeout (negative: none, the default) makes a blocking wait `TimedOut` |
 | `udp_bind(a) -> Result<UdpSocket, IoError>` | A UDP socket bound to `a` |
 | `UdpSocket`: `send_to(b, to)`, `send_str_to(s, to)` | One datagram: its length |
@@ -61,6 +61,7 @@ An async form waits with the task suspended and the other tasks running, on the 
 ```myla
 import std.net as net
 from std.net import TcpListener
+import std.bytes as bytes
 
 async fun echo_once(l: TcpListener) -> int {
     var s = match await l.accept_async() {
@@ -69,7 +70,7 @@ async fun echo_once(l: TcpListener) -> int {
     }
     var n = 0
     while true {
-        let chunk = match await s.read_str_async(4096) {
+        let chunk = match await s.read_async(4096) {
             Ok(c) => c
             Err(e) => { return -1 }
         }
@@ -77,7 +78,7 @@ async fun echo_once(l: TcpListener) -> int {
             break
         }
         n += chunk.len()
-        let w = await s.write_str_async(chunk)
+        let w = await s.write_async(chunk)
     }
     let c = s.close()
     return n
@@ -98,9 +99,9 @@ async fun main() {
         Ok(s) => s
         Err(e) => { panic("can't connect") }
     }
-    let w = await s.write_str_async("ping")
-    match await s.read_str_async(10) {
-        Ok(back) => print(back)
+    let w = await s.write_async(bytes.from_str("ping"))
+    match await s.read_async(10) {
+        Ok(back) => print(bytes.to_str(back))
         Err(e) => print("no answer")
     }
     let sh = s.shutdown(net.Shutdown.Write)

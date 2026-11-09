@@ -88,8 +88,8 @@ fun format_of(name: str) -> int {
     return 0
 }
 
-// `data` written to `e` in pieces of 1 to 9973 bytes, as bytes and as text
-// by turns, flushed once in the middle if `flush`.
+// `data` written to `e` in pieces of 1 to 9973 bytes, flushed once in the
+// middle if `flush`.
 fun write_all<W: Write>(e: compress.Encoder<W>, data: [uint8], flush: bool) -> compress.Encoder<W> {
     var w = e
     var p = 0
@@ -99,11 +99,7 @@ fun write_all<W: Write>(e: compress.Encoder<W>, data: [uint8], flush: bool) -> c
         k = k * 7 % 9973 + 1
         var end = p + k
         if end > data.len() { end = data.len() }
-        if k % 2 == 0 {
-            if w.write(data[p:end]).is_err() { process.exit(3) }
-        } else {
-            if w.write_str(text(data[p:end])).is_err() { process.exit(3) }
-        }
+        if w.write(data[p:end]).is_err() { process.exit(3) }
         p = end
         if !flushed && p >= data.len() / 2 {
             if w.flush().is_err() { process.exit(3) }

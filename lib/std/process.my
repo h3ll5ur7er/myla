@@ -601,10 +601,6 @@ impl Write for ChildStdin {
         return write_fd(self.fd, bytes_m.to_str(b))
     }
 
-    fun write_str(var self, s: str) -> Result<int, IoError> {
-        return write_fd(self.fd, s)
-    }
-
     // Nothing to do: nothing is buffered.
     fun flush(var self) -> Result<(), IoError> {
         if self.fd < 0 {
@@ -625,7 +621,7 @@ impl ChildStdin {
 }
 
 // The read end of a child's standard output. `Read`: a read blocks until the
-// child wrote something or closed its output; `""` (`[]`) at the end.
+// child wrote something or closed its output; `[]` at the end.
 // `Pollable`, so a `Buffered` over it reads lines, and has the async reads
 // that wait with the task suspended (`std.io`).
 pub struct ChildStdout {
@@ -636,10 +632,6 @@ impl Read for ChildStdout {
     fun read(var self, n: int) -> Result<[uint8], IoError> {
         let s = read_fd(self.fd, n)?
         return Ok(bytes_m.from_str(s))
-    }
-
-    fun read_str(var self, n: int) -> Result<str, IoError> {
-        return read_fd(self.fd, n)
     }
 }
 
@@ -669,10 +661,6 @@ impl Read for ChildStderr {
     fun read(var self, n: int) -> Result<[uint8], IoError> {
         let s = read_fd(self.fd, n)?
         return Ok(bytes_m.from_str(s))
-    }
-
-    fun read_str(var self, n: int) -> Result<str, IoError> {
-        return read_fd(self.fd, n)
     }
 }
 
@@ -1248,12 +1236,12 @@ fun read_rest<R: Read>(r: R) -> str {
     var src = r
     var sb = StringBuilder()
     while true {
-        match src.read_str(4096) {
-            Ok(s) => {
-                if s.len() == 0 {
+        match src.read(4096) {
+            Ok(b) => {
+                if b.len() == 0 {
                     break
                 }
-                sb.append(s)
+                sb.append(bytes_m.to_str(b))
             }
             Err(_) => panic("a read failed")
         }
@@ -1331,8 +1319,8 @@ fun child_round_trip() {
     var w = input(child.take_stdin())
     var r = output_of(child.take_stdout())
     holds(none(child.take_stdin()), "the input is given out once")
-    holds(wrote(w.write_str("hello\n")) == 6, "write_str gives its length")
-    holds(wrote(w.write([98u8, 121u8, 116u8, 101u8, 115u8])) == 5, "write gives its length")
+    holds(wrote(w.write(bytes_m.from_str("hello\n"))) == 6, "write gives its length")
+    holds(wrote(w.write([98u8, 121u8, 116u8, 101u8, 115u8])) == 5, "and again")
     holds(ok(w.flush()), "flush")
     holds(ok(w.close()), "close the input")
     holds(read_rest(r) == "hello\nbytes", "what cat gave back")
@@ -1354,16 +1342,14 @@ fun closed_streams() {
     var e = error_of(child.take_stderr())
     holds(ok(w.close()), "close")
     holds(is_closed(w.close()), "a second close")
-    holds(is_closed(w.write_str("late")), "a write after close")
-    holds(is_closed(w.write([1u8])), "a byte write after close")
+    holds(is_closed(w.write([1u8])), "a write after close")
     holds(is_closed(w.flush()), "a flush after close")
     holds(read_rest(r) == "", "cat saw the end at once")
     holds(ok(r.close()), "close the output")
-    holds(is_closed(r.read_str(10)), "a read after close")
-    holds(is_closed(r.read(10)), "a byte read after close")
+    holds(is_closed(r.read(10)), "a read after close")
     holds(is_closed(r.close()), "a second close of the output")
     holds(ok(e.close()), "close the error")
-    holds(is_closed(e.read_str(1)), "a read of the error after close")
+    holds(is_closed(e.read(1)), "a read of the error after close")
     holds(waited(child.wait()) == ExitStatus.Exited(0), "cat ended well")
 }
 
@@ -1378,9 +1364,9 @@ fun child_line_by_line() {
     var child = running(started)
     var w = input(child.take_stdin())
     var lines = buffered(output_of(child.take_stdout()))
-    w.write_str("one\n")
+    w.write(bytes_m.from_str("one\n"))
     holds(line(lines.read_line()) == "one", "the first line back before the second went")
-    w.write_str("two\n")
+    w.write(bytes_m.from_str("two\n"))
     holds(line(lines.read_line()) == "two", "the second line")
     w.close()
     holds(line(lines.read_line()) == "<end>", "then the end")
@@ -1580,7 +1566,7 @@ fun input_from_a_child() {
         Err(e) => panic(f"tr: {e}")
     }
     var r = joined
-    holds(is_closed(r.read_str(1)), "the output was handed over")
+    holds(is_closed(r.read(1)), "the output was handed over")
     holds(match command("cat").stdin_from_stdout(joined).spawn() { Err(SpawnError.Other(9)) => true, _ => false }, "and can't be handed over again")
     holds(waited(first.wait()) == ExitStatus.Exited(0), "printf ended well")
 }
@@ -1619,7 +1605,7 @@ async fun child_waited_in_a_task() {
     }
     var other = running(command("cat").spawn())
     var w = input(other.take_stdin())
-    w.write_str("x")
+    w.write(bytes_m.from_str("x"))
     w.close()
     holds(read_rest(output_of(other.take_stdout())) == "x", "cat's output")
     let st = await other.wait_async()
