@@ -2384,9 +2384,9 @@ fun stream_failure() {
 }
 
 // Nesting has no limit: the reader, the tree builder and the writer loop
-// over stacks, not recursions (natively a million levels work). 1000 here:
-// on wasm32 the runtime releases a value nested 2000 deep by a recursion
-// that overflows its stack.
+// over stacks, not recursions (natively a million levels work, and the
+// release of such a tree runs in a bounded stack on every target since
+// MYLA-389). 1000 here: interpreted, 100,000 levels take a minute.
 #test
 fun deep() {
     let text = nested(1000)

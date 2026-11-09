@@ -5786,25 +5786,28 @@ pub fun drop_entry_ir(name: str, slow: str, atomic: bool) -> IrFunc {
 
 // A boxed enum's (`walk`: its release walk) or an actor's (`actor`, its
 // fields as a struct's) cell whose count reached 0: what it holds released,
-// then the cell freed (`free`: std.rt's, or "" for the runtime's `__free`).
-pub fun dropb_slow_ir(cg: CodeGen, t: Type, walk: str, name: str, free: str) -> IrFunc {
+// then the cell freed (`free`: std.rt's, or "" for the runtime's `__free`;
+// `kind`: `drop_guard`'s).
+pub fun dropb_slow_ir(cg: CodeGen, t: Type, walk: str, name: str, free: str, kind: int32) -> IrFunc {
     var lw = routine(name, None)
     let sp = lw.new_slot("cell", Type.TInt(64, true), 8, 0, false)
+    let guarded = lw.drop_guard(sp, kind)
     if walk != "" {
         // the enum's release walk in place, no call to it
         lw.walk_body(cg, sp, t, false)
     } else {
         lw.add(Inst.DropAt(t, lw.read_cell(sp)))
     }
-    lw.free_cell(sp, free)
+    lw.drop_guard_end(sp, free, guarded)
     return lw.f
 }
 
 // A list's cell (elements of type `et`) whose count reached 0: each element
-// released, then the cell freed.
-pub fun list_drop_slow_ir(cg: CodeGen, et: Type, name: str, free: str) -> IrFunc {
+// released, then the cell freed (`kind`: `drop_guard`'s).
+pub fun list_drop_slow_ir(cg: CodeGen, et: Type, name: str, free: str, kind: int32) -> IrFunc {
     var lw = routine(name, None)
     let sp = lw.new_slot("cell", Type.TInt(64, true), 8, 0, false)
+    let guarded = lw.drop_guard(sp, kind)
     if cg.owns_heap(et) || cg.is_boxed(et) {
         let stride = cg.stored_size(et)
         let i64 = Type.TInt(64, true)
@@ -5834,15 +5837,16 @@ pub fun list_drop_slow_ir(cg: CodeGen, et: Type, name: str, free: str) -> IrFunc
         lw.count_test(si, sn, body, done)
         lw.start(done)
     }
-    lw.free_cell(sp, free)
+    lw.drop_guard_end(sp, free, guarded)
     return lw.f
 }
 
 // A map's cell (`mt`) whose count reached 0: each occupied slot's key and
-// value released, then the cell freed.
-pub fun map_drop_slow_ir(cg: CodeGen, mt: Type, name: str, free: str) -> IrFunc {
+// value released, then the cell freed (`kind`: `drop_guard`'s).
+pub fun map_drop_slow_ir(cg: CodeGen, mt: Type, name: str, free: str, kind: int32) -> IrFunc {
     var lw = routine(name, None)
     let sp = lw.new_slot("cell", Type.TInt(64, true), 8, 0, false)
+    let guarded = lw.drop_guard(sp, kind)
     let kt = map_key(mt)
     let vt = map_val(mt)
     if cg.owns_heap(kt) || cg.owns_heap(vt) {
@@ -5893,7 +5897,63 @@ pub fun map_drop_slow_ir(cg: CodeGen, mt: Type, name: str, free: str) -> IrFunc 
         lw.count_test(si, sn, body, done)
         lw.start(done)
     }
-    lw.free_cell(sp, free)
+    lw.drop_guard_end(sp, free, guarded)
+    return lw.f
+}
+
+// How many guarded releases may run inside one another on a worker before
+// the next cell is deferred (MYLA-389): a few frames each, so a few hundred
+// frames at most, however deep the value.
+const DROP_DEPTH: int32 = 64
+
+// `__drop_drain` (MYLA-389): this worker's deferred cells released, the
+// last deferred first, each by its kind's release routine (the table
+// `__drop_routines` lists), with the depth 1, so a routine it calls defers
+// again past DROP_DEPTH but never drains itself; until none is left.
+pub fun drop_drain_ir() -> IrFunc {
+    var lw = routine("__drop_drain", None)
+    let i64 = Type.TInt(64, true)
+    let u64 = Type.TInt(64, false)
+    let sc = lw.new_slot("cell", i64, 8, -1, false)
+    let look = lw.new_block()
+    let one = lw.new_block()
+    let done = lw.new_block()
+    lw.finish(Term.Jmp(look))
+    lw.start(look)
+    let head = lw.temp(i64)
+    lw.add(Inst.Intr(head, Intrinsic.RtAddr("__drop_defer"), []))
+    let c = lw.temp(i64)
+    lw.add(Inst.LoadAt(c, head, 0, 8))
+    lw.add(Inst.Store(sc, c))
+    let empty = lw.temp(Type.TBool)
+    lw.add(Inst.Cmp(empty, "==", i64, c, lw.int_const(0)))
+    lw.finish(Term.Br(empty, done, one))
+    lw.start(one)
+    let word = lw.temp(i64)
+    lw.add(Inst.LoadAt(word, lw.read_cell(sc), -8, 8))
+    // (a logical shift: an address may use the word's top bit)
+    let next = lw.temp(i64)
+    lw.add(Inst.Bin(next, ">>", u64, u64, word, lw.int_const(16), Pos { line: 0, col: 0 }))
+    lw.store_rt_var("__drop_defer", next, 8)
+    let kind = lw.temp(i64)
+    lw.add(Inst.Bin(kind, "&", i64, i64, word, lw.int_const(65535), Pos { line: 0, col: 0 }))
+    // its count word as a dead cell's: 0
+    lw.add(Inst.StoreAt(lw.read_cell(sc), -8, lw.int_const(0), 8))
+    lw.store_rt_var("__drop_depth", lw.int_const(1), 8)
+    let table = lw.temp(i64)
+    lw.add(Inst.Intr(table, Intrinsic.RtAddr("__drop_routines"), []))
+    let off = lw.temp(i64)
+    lw.add(Inst.Bin(off, "<<", i64, i64, kind, lw.int_const(3), Pos { line: 0, col: 0 }))
+    let entry = lw.temp(i64)
+    lw.add(Inst.Bin(entry, "+", i64, i64, table, off, Pos { line: 0, col: 0 }))
+    let code = lw.temp(i64)
+    lw.add(Inst.LoadAt(code, entry, 0, 8))
+    let r = lw.temp(i64)
+    lw.add(Inst.Intr(r, Intrinsic.CallCode, [code, lw.read_cell(sc)]))
+    lw.store_rt_var("__drop_depth", lw.int_const(0), 8)
+    lw.finish(Term.Jmp(look))
+    lw.start(done)
+    lw.finish(Term.Ret(-1))
     return lw.f
 }
 
@@ -5929,6 +5989,91 @@ impl Lower {
             self.add(Inst.Bin(p, "+", Type.TInt(64, true), Type.TInt(64, true), at, self.int_const(off), Pos { line: 0, col: 0 }))
             self.add(Inst.DropAt(ft, p))
         }
+    }
+
+    // A release routine's guard (MYLA-389), for a cell whose type can hold
+    // cells of its own type without bound (`CodeGen.drop_reenters`; `kind`
+    // its place in `__drop_routines`, else -1 for no guard): past DROP_DEPTH
+    // releases inside one another on this worker, the cell goes on the
+    // worker's deferred cells (`__drop_defer`, linked through their count
+    // words, now unused, as `next << 16 | kind`) and the routine returns;
+    // else the depth (`__drop_depth`) is one more until `drop_guard_end`.
+    // So a value nested a million deep is released in a bounded stack, on
+    // every target. Whether it guards.
+    fun drop_guard(var self, sp: int32, kind: int32) -> bool {
+        if kind < 0 { return false }
+        let i64 = Type.TInt(64, true)
+        let at = self.temp(i64)
+        self.add(Inst.Intr(at, Intrinsic.RtAddr("__drop_depth"), []))
+        let d = self.temp(i64)
+        self.add(Inst.LoadAt(d, at, 0, 8))
+        let deep = self.temp(Type.TBool)
+        self.add(Inst.Cmp(deep, ">=", i64, d, self.int_const(DROP_DEPTH)))
+        let later = self.new_block()
+        let now = self.new_block()
+        self.finish(Term.Br(deep, later, now))
+        self.start(later)
+        let head = self.temp(i64)
+        self.add(Inst.Intr(head, Intrinsic.RtAddr("__drop_defer"), []))
+        let next = self.temp(i64)
+        self.add(Inst.LoadAt(next, head, 0, 8))
+        let up = self.temp(i64)
+        self.add(Inst.Bin(up, "<<", i64, i64, next, self.int_const(16), Pos { line: 0, col: 0 }))
+        let word = self.temp(i64)
+        self.add(Inst.Bin(word, "|", i64, i64, up, self.int_const(kind), Pos { line: 0, col: 0 }))
+        self.add(Inst.StoreAt(self.read_cell(sp), -8, word, 8))
+        self.add(Inst.StoreAt(head, 0, self.read_cell(sp), 8))
+        self.finish(Term.Ret(-1))
+        self.start(now)
+        self.depth_by(1)
+        return true
+    }
+
+    // `__drop_depth` plus `n`; the new depth.
+    fun depth_by(var self, n: int32) -> int32 {
+        let i64 = Type.TInt(64, true)
+        let at = self.temp(i64)
+        self.add(Inst.Intr(at, Intrinsic.RtAddr("__drop_depth"), []))
+        let d = self.temp(i64)
+        self.add(Inst.LoadAt(d, at, 0, 8))
+        let d1 = self.temp(i64)
+        self.add(Inst.Bin(d1, "+", i64, i64, d, self.int_const(n), Pos { line: 0, col: 0 }))
+        self.add(Inst.StoreAt(at, 0, d1, 8))
+        return d1
+    }
+
+    // A release routine's end, the cell freed (a tail call); with a guard
+    // (`guarded`), the depth one less first, and when cells were deferred
+    // and the depth is back at 0, they are released (`__drop_drain`). (The
+    // deferred cells are looked at first: there are rarely any.)
+    fun drop_guard_end(var self, sp: int32, free: str, guarded: bool) {
+        if guarded {
+            let i64 = Type.TInt(64, true)
+            let d0 = self.depth_by(-1)
+            let head = self.temp(i64)
+            self.add(Inst.Intr(head, Intrinsic.RtAddr("__drop_defer"), []))
+            let first = self.temp(i64)
+            self.add(Inst.LoadAt(first, head, 0, 8))
+            let some = self.temp(Type.TBool)
+            self.add(Inst.Cmp(some, "!=", i64, first, self.int_const(0)))
+            let look = self.new_block()
+            let drain = self.new_block()
+            let done = self.new_block()
+            self.finish(Term.Br(some, look, done))
+            self.start(look)
+            let at = self.temp(i64)
+            self.add(Inst.Intr(at, Intrinsic.RtAddr("__drop_depth"), []))
+            let d = self.temp(i64)
+            self.add(Inst.LoadAt(d, at, 0, 8))
+            let top = self.temp(Type.TBool)
+            self.add(Inst.Cmp(top, "==", i64, d, self.int_const(0)))
+            self.finish(Term.Br(top, drain, done))
+            self.start(drain)
+            self.add(Inst.Call(-1, "__drop_drain", []))
+            self.finish(Term.Jmp(done))
+            self.start(done)
+        }
+        self.free_cell(sp, free)
     }
 
     // The cell in the slot `sp` freed in place of the routine (std.rt's
