@@ -19,3 +19,5 @@ The lane's reproductions and generator are in its scratch folder; the first is 1
 ## Comments
 
 - 2026-11-08, wave 3 ([[MYLA-343]]): a signed division by the constant 2 is `cqto; idiv`, not a shift. `(lo + hi) / 2` in a binary search cost about a fifth of a B-tree lookup against `>> 1` (430 against 341 ms for 1M gets). Reproduction: `fun mid(a: int, b: int) -> int { return (a + b) / 2 }`, then `objdump -d`.
+
+- 2026-11-09, [[MYLA-376]]: the native backend inlines neither methods nor functions of another module, so a std method in a hot path costs a call where the lane's private helper was inlined (`std.bitset`'s `ones`, `std.btree`'s leaf shift: 1M inserts 320 → 360 ms with `std.list`'s `insert`).
