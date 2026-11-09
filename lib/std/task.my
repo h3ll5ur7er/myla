@@ -918,11 +918,8 @@ pub async fun first<T>(fs: [async () -> T]) -> Option<(int, T)> {
     // `None` only when this task was asked to stop: its children then were
     // too, and the first to finish is the first in the channel
     let w = await finished.recv()
-    // `cancel(rs)` as `timeout` cancels: a deadline that has passed (the
-    // checker takes `cancel` itself only from outside this module)
-    let t = __cancel_after(rs, 0)
+    cancel(rs)
     let results = await rs
-    let fired = __disarm(t)
     var winner = 0
     if let Some(i) = w {
         winner = i
@@ -1269,19 +1266,15 @@ async fun waits_to_send(ch: Channel<int>, x: int) -> str {
 #test
 async fun cancelled_waits() {
     let ch: Channel<int> = channel(0)
-    // `cancel(r)` as `first` cancels (`cancel` is the checker's only from
-    // outside this module)
     async let r = waits_to_recv(ch)
     await sleep(2)
-    let tr = __cancel_after(r, 0)
+    cancel(r)
     let stopped = await r
-    let fired_r = __disarm(tr)
     assert(stopped == (true, true), "a receiver asked to stop gets none")
     async let s = waits_to_send(ch, 5)
     await sleep(2)
-    let ts = __cancel_after(s, 0)
+    cancel(s)
     let said_s = await s
-    let fired_s = __disarm(ts)
     assert(said_s == "cancelled", "a sender asked to stop")
     assert(got_said(await ch.try_recv()) == "channel empty", "its value taken back")
     async let closing = waits_to_send(ch, 6)

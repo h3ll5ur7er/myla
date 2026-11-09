@@ -1,0 +1,19 @@
+type error: function 'iter.sum' expects 2 argument(s), got 1
+  --> examples/errors/type_module_function_name.my:12:22
+   |
+12 |     return xs.iter() |> iter.sum()
+   |            ^^^^^^^^^^^^^^^^^^^^^^^
+
+type error: function 'deque.of' expects 1 argument(s), got 2
+  --> examples/errors/type_module_function_name.my:16:21
+   |
+16 |     let d = deque.of([1], 2)
+   |             ^^^^^^^^^^^^^^^^
+
+type error: cannot assign value of type 'int32' to binding of type 'deque.Deque<int32>'
+  --> examples/errors/type_module_function_name.my:20:5
+   |
+20 |     let d: deque.Deque<int> = 1
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: aborting due to 3 previous errors

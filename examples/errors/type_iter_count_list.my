@@ -1,0 +1,11 @@
+//~ type error: type '[int32]' does not satisfy the bound 'I: Iterator<T>' required by 'iter.count'
+//~ span: xs
+//~ help: '[int32]' is not an Iterator: write 'xs.iter()'
+// The bound's failure, not "cannot infer type parameter(s) T": `T` comes
+// from the iterator's impl, which a list hasn't (MYLA-383).
+import std.iter as iter
+
+fun main() {
+    let xs = [1, 2, 3]
+    print(iter.count(xs))
+}

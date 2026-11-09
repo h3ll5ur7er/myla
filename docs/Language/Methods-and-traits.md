@@ -231,6 +231,29 @@ fun main() {
 
 `#derive(Eq)` on a non-generic struct or enum synthesises a structural `impl Eq`: the fields in turn, or the variant and then its payload. Every field or payload must be `Eq` itself: an integer, a float, `char`, `bool`, `str`, a tuple or list of `Eq` elements, or a named type that is `Eq`. A type can't both derive `Eq` and implement it.
 
+A float field compares with the floats' own `==`, in both runners: a value holding NaN is unequal to itself, and one holding `0.0` equals one holding `-0.0` ([[MYLA-316]]).
+
+```myla
+#derive(Eq)
+struct Reading {
+    unit: char,
+    value: float,
+}
+
+fun main() {
+    let a = Reading { unit: 'C', value: 0.0 }
+    print(a == Reading { unit: 'C', value: -0.0 })
+    print(a == Reading { unit: 'F', value: 0.0 })
+    let zero = 0.0
+    let b = Reading { unit: 'C', value: zero / zero }
+    print(b == b)
+}
+// output:
+// true
+// false
+// false
+```
+
 `#derive(Hash)` writes an `impl Hash` (D163, [[MYLA-313]]) that adds the fields in order, `h.add(self.x).add(self.y)`, and for an enum the variant's index (as a `uint64`) and then its payload. It needs an `Eq` of the type, derived (`#derive(Eq, Hash)`) or written, and refuses a field that isn't `Hash`, a float among them. A type can't both derive `Hash` and implement it. `Eq` and `Hash` are the derivable traits so far; `Ord` is the planned next one.
 
 ## Hash

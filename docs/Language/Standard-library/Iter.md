@@ -116,13 +116,13 @@ fun squares(xs: [int]) -> iter.Map<list.ListIter<int>, int, int> {
 }
 ```
 
-There are no trait objects, so a list can't hold iterators of different kinds. A list or a map isn't an iterator itself: `xs |> iter.map(f)` is an error (for now "cannot infer the type of lambda parameter 'x'"): write `xs.iter()`. `std.list`'s own methods stay eager (D171), and a thin wrapper type with methods (`iter.of(xs).map(f)`) can be added if someone asks for it.
+There are no trait objects, so a list can't hold iterators of different kinds. A list or a map isn't an iterator itself: `xs |> iter.map(f)` is an error, "type '[int32]' does not satisfy the bound 'I: Iterator<T>' required by 'iter.map'", with the help "'[int32]' is not an Iterator: write 'xs.iter()'" ([[MYLA-383]]). `std.list`'s own methods stay eager (D171), and a thin wrapper type with methods (`iter.of(xs).map(f)`) can be added if someone asks for it.
 
 ## How it works
 
 An adapter is a generic struct that holds the iterator it wraps and its closure, with a bounded impl, `impl<I: Iterator<T>, T, U> Iterator<U> for Map<I, T, U>`; its `next` calls the inner `next`. A closure can't keep state of its own, so what an adapter counts (`Take`'s `left`, `Enumerate`'s index, `FlatMap`'s current inner iterator) is a field of its struct. Natively each instance is compiled for its concrete types ([[Architecture/Monomorphization]]), so a pipeline is a nest of direct calls, one indirect call per closure per value.
 
-The module's loops are `while let Some(x) = c.next()`, not `for x in it`. One `for` over an iterator anywhere in a program has the checker rebuild every function's body once (`fill_in`, about 8 ms of a hello world's 47 ms check), which importing `std.iter` shouldn't cost a program without one. For the same reason the tests of `std.list` and `std.map`, which every program checks, loop with `while let`.
+An adapter's `next` loops with `while let Some(v) = self.inner.next()`, since a `for` would work on a copy of `self.inner` and leave it where it was. A `for` over an iterator costs only the function it is in: the checker rebuilds the bodies holding one, after the check, and leaves the rest as they are (`fill_in`, [[MYLA-382]]), so the tests of `std.list` and `std.map`, which every program checks, use `for`.
 
 ## Speed
 

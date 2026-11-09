@@ -1723,10 +1723,13 @@ pub struct Checker {
     stmt_match: bool,
     resolved: [int32: Type],        // expr node id -> resolved type (v0.8 interp side table)
     call_defaults: [int32: [Expr]], // call node id -> the defaults it leaves to its trailing parameters (D136)
+    fill_decls: [int32: bool],      // the declarations holding a recorded default, `for` over an iterator or rename: those `fill_in` rewrites (MYLA-382)
     errs: [CheckErr],               // the errors of the functions checked so far (MYLA-65, D80)
     warnings: [CheckErr],           // D95: the warnings found, in the order found
     primitives: bool,               // a program may call the raw-memory primitives (`gen_main --primitives`, the toolchain's tests)
-    std_impls: [int32: DeclOrigin], // the standard library's impls by node id (the loader's): their methods are its code (MYLA-320)
+    std_impls: [int32: DeclOrigin], // the standard library's impls by node id (the loader's): their methods are its code (MYLA-320); and an entry std module's functions (MYLA-388)
+    mutating_calls: [int32: bool],  // the calls of a `var self` method in an actor's methods, by node id: D95 counts one on a field of `self` as a change of it (MYLA-394)
+    renames: [int32: str],          // a callee's node id -> the name it stands for, put in by `fill_in`: `cancel` inside std.task is `std$task$cancel` (MYLA-388)
     // `#allow` (D161): the warnings the function being checked silences
     // (`primitive`, `primitive:__poll`, `reentrancy`), and the impl block's
     // `#allow`s while its methods are registered
@@ -1815,7 +1818,7 @@ fun new_checker(decls: [Decl]) -> Checker {
         call_kind: "", call_kind_id: -1, targs_taken: -1, call_target: "", call_mutates: false, fun_name: "", handovers: [:], become_words: [], passed_on: [],
         actors: [:], conc_line: 0, conc_col: 0, conc_sp: no_span(), conc_node: -1, in_async: false, self_assignable: false, actor_self: "", builtin_as_method: false, cur_key: "",
         lams: [], awaited: [:], call_key: "", call_async: false, suspended: -1, task_init: false, in_guard: false, neg_lit: -1,
-        task_line: 0, task_col: 0, task_sp: no_span(), task_node: -1,
+        task_line: 0, task_col: 0, task_sp: no_span(), task_node: -1, fill_decls: [:], renames: [:], mutating_calls: [:],
     }
 }
 
@@ -3522,7 +3525,7 @@ impl Checker {
             None => {},
         }
         // D96: the compiler takes its calls; as a value it would do nothing
-        if ident == "std$task$cancel" { return Err(terr_at(e.line, e.col, e.sp, "task.cancel can only be called, with the name of an 'async let'")) }
+        if self.is_task_cancel(ident) { return Err(terr_at(e.line, e.col, e.sp, "task.cancel can only be called, with the name of an 'async let'")) }
         if self.func_idx(ident) >= 0 {
             // a non-method top-level function referenced as a value
             return self.infer_fun_value(e, ident)
@@ -5306,6 +5309,7 @@ impl Checker {
         let loop = Stmt { id: self.fresh_id(), line: s.line, col: s.col, sp: s.sp, kind: StmtKind.WhileS(self.true_lit(s), Block { line: body.line, col: body.col, sp: body.sp, stmts: [step] }) }
         let own = Block { line: s.line, col: s.col, sp: s.sp, stmts: [decl, loop] }
         self.for_iters[s.id] = Stmt { id: self.fresh_id(), line: s.line, col: s.col, sp: s.sp, kind: StmtKind.IfS(self.true_lit(s), own, None) }
+        self.fill_decls[self.cur_decl] = true
         return Ok(0)
     }
 
@@ -5633,6 +5637,19 @@ impl Checker {
         return Err(terr_at(e.line, e.col, e.sp, format("'{}' belongs to the actor '{}': only its own methods reach it", field, type_name(Type.TStruct(sname, [])))))
     }
 
+    // Whether the function `name` names is std.task's `cancel` (D96), which
+    // the compiler takes itself: as other modules name it, or as std.task
+    // does, checked as the entry file (MYLA-388).
+    #test(checker_on("fun cancel(x: int) {}"), "cancel")[false]
+    #test(checker_on("[int]"), "std$task$cancel")[true]
+    fun is_task_cancel(self, name: str) -> bool {
+        if name == "std$task$cancel" { return true }
+        if name != "cancel" || self.std_impls.len() == 0 { return false }
+        let fi = self.func_idx(name)
+        if fi < 0 { return false }
+        return match self.std_impls.get(self.functions[fi].decl_id) { Some(o) => o.module == "std.task", None => false }
+    }
+
     // `task.cancel(a)` (D96): `a` names an `async let` in scope, as an `await`
     // of it would; the call has no result (types.py: _infer_task_cancel).
     #test(checker_on("enum E { A, B(int) }"), expr_of("a.b[0]"), [Expr { id: 5, line: 7, col: 17, sp: SrcSpan { sline: 7, scol: 17, eline: 7, ecol: 18 }, kind: ExprKind.Name("n") }])[Err(CheckErr { line: 7, col: 17, sp: SrcSpan { sline: 7, scol: 17, eline: 7, ecol: 18 }, msg: "task.cancel() takes the name of an 'async let'", decl: -1, notes: [] })]
@@ -5770,6 +5787,7 @@ impl Checker {
         self.call_mutates = mutates
         self.call_key = key
         self.call_async = asy
+        if mutates && self.actor_self != "" { self.mutating_calls[e.id] = true }
     }
 
     #test(checker_on("[int]"), BindElem.BWild, Type.TParam("T"), false)[Ok(0)]
@@ -5876,6 +5894,7 @@ impl Checker {
                 i += 1
             }
             self.call_defaults[e.id] = ds
+            self.fill_decls[self.cur_decl] = true
         }
         return Ok(true)
     }
@@ -6919,7 +6938,7 @@ impl Checker {
             Ok(x) => {},
             Err(e) => {
                 if !is_stopped(e) { self.note(e) }
-                return Err(self.errs)
+                return Err(unmangled_all(self.errs))
             },
         }
         self.bodies = true
@@ -6941,8 +6960,8 @@ impl Checker {
         }
         self.check_passed_on()
         self.check_become_words()
-        if self.errs.len() > 0 { return Err(self.errs) }
-        self.warnings = sort_by_place(self.warnings)
+        if self.errs.len() > 0 { return Err(unmangled_all(self.errs)) }
+        self.warnings = unmangled_all(sort_by_place(self.warnings))
         return Ok(0)
     }
 
@@ -6995,7 +7014,7 @@ impl Checker {
                     match fd.body {
                         Some(b) => {
                             let (changes, examines) = self.self_effects(self.actor_self)
-                            var r = Reentrancy { epoch: 0, checked: [:], locals: [:], awaits: [], out: [], changes: changes, examines: examines }
+                            var r = Reentrancy { epoch: 0, checked: [:], locals: [:], awaits: [], out: [], changes: changes, examines: examines, mutators: self.mutating_calls }
                             r.block(b)
                             if !contains_str(self.allowed, "reentrancy") {
                                 for w in r.out { self.warnings.push(CheckErr { line: w.line, col: w.col, sp: w.sp, msg: w.msg, decl: id, notes: w.notes }) }
@@ -7031,7 +7050,7 @@ impl Checker {
             if self.method_decl_keys[i] == key && !fd.is_async && !direct.contains(name) {
                 match fd.body {
                     Some(b) => {
-                        var e = Effects { changes: [], examines: [], calls: [] }
+                        var e = Effects { changes: [], examines: [], calls: [], mutators: self.mutating_calls }
                         e.block(b)
                         direct[name] = e
                         names.push(name)
@@ -7274,6 +7293,18 @@ pub fun checker_on(src: str) -> Checker {
 fun errors_of(src: str) -> [str] {
     var out: [str] = []
     for e in checker_on(src).errs { out.push(e.msg) }
+    return out
+}
+
+// D95's warnings of `src`: a mutator on a field of `self` changes it inside
+// an expression too (MYLA-394)
+#test("actor P { n: int }\nimpl P { fun charge(var self) -> bool { return true } }\nstruct C { n: int }\nimpl C { fun bump(var self) -> int { self.n += 1\nreturn self.n } }\nactor S { items: [int], c: C }\nimpl S { async fun sell(var self, p: P) -> int { if self.items.len() == 0 || self.c.n > 9 { return 0 }\nlet paid = await p.charge()\nlet x = self.items.pop()\nreturn x } }")[["'self.items' was checked before an 'await' and is changed after it: another call to this actor may have changed it meanwhile"]]
+#test("actor P { n: int }\nimpl P { fun charge(var self) -> bool { return true } }\nstruct C { n: int }\nimpl C { fun bump(var self) -> int { self.n += 1\nreturn self.n } }\nactor S { items: [int], c: C }\nimpl S { async fun sell(var self, p: P) -> int { if self.items.len() == 0 || self.c.n > 9 { return 0 }\nlet paid = await p.charge()\nreturn self.c.bump() + 1 } }")[["'self.c' was checked before an 'await' and is changed after it: another call to this actor may have changed it meanwhile"]]
+#test("actor P { n: int }\nimpl P { fun charge(var self) -> bool { return true } }\nstruct C { n: int }\nimpl C { fun bump(var self) -> int { self.n += 1\nreturn self.n } }\nactor S { items: [int], c: C }\nimpl S { async fun sell(var self, p: P) -> int { if self.items.len() == 0 || self.c.n > 9 { return 0 }\nlet x = self.items.pop() + self.c.bump()\nlet paid = await p.charge()\nreturn x } }")[[]]
+#test("actor P { n: int }\nimpl P { fun charge(var self) -> bool { return true } }\nstruct C { n: int }\nimpl C { fun bump(var self) -> int { self.n += 1\nreturn self.n } }\nactor S { items: [int], c: C }\nimpl S { async fun sell(var self, p: P) -> int { if self.items.len() == 0 || self.c.n > 9 { return 0 }\nlet paid = await p.charge()\nself.items.push(self.c.bump())\nreturn 1 } }")[["'self.items' was checked before an 'await' and is changed after it: another call to this actor may have changed it meanwhile", "'self.c' was checked before an 'await' and is changed after it: another call to this actor may have changed it meanwhile"]]
+fun warnings_of(src: str) -> [str] {
+    var out: [str] = []
+    for w in checker_on(src).warnings { out.push(w.msg) }
     return out
 }
 
@@ -7747,7 +7778,14 @@ impl Checker {
             if !is_str(at) { return Err(terr_at(e.line, e.col, e.sp, format("chars() requires a string, found '{}'", type_name(at)))) }
             return Ok(Some(Type.TList(Type.TChar)))
         }
-        if name == "std$task$cancel" { return self.infer_task_cancel(e, args) }
+        if self.is_task_cancel(name) {
+            // what the back ends know it by, inside std.task too (MYLA-388)
+            if name != "std$task$cancel" {
+                self.renames[callee.id] = "std$task$cancel"
+                self.fill_decls[self.cur_decl] = true
+            }
+            return self.infer_task_cancel(e, args)
+        }
         // `__cancel_after(a, ms)` (D124, `task.timeout`): the child of the
         // `async let` named `a` cancelled after `ms` milliseconds; the cell
         // `__disarm(cell)` reads (whether that hadn't happened yet)
@@ -8111,6 +8149,7 @@ impl Checker {
             let r = unify_param(sig.params[i], at, subst)
             // what a bound fixes is known for the next argument's hint (D171)
             subst = self.solve_bounds(sig.bounds, r.subst)
+            if sig.bounds.len() > 0 { self.check_generic_bounds(sig, subst, args[i])? }
             i = i + 1
         }
         subst = self.solve_bounds(sig.bounds, subst_then(subst, from_expected))
@@ -8130,6 +8169,50 @@ impl Checker {
         self.targs_taken = e.id
         self.call_types[e.id] = type_args_in(sig.type_params, subst)
         return Ok(opt_subst_type(sig.ret, subst))
+    }
+
+    // The bounds naming a generic trait with its arguments whose type
+    // parameter `subst` knows, held to the trait, after the argument `arg`:
+    // what such a bound solves the rest from, so its failure comes before
+    // the type parameters it leaves unsolved (MYLA-383). A list where an
+    // iterator is wanted gets a hint.
+    fun check_generic_bounds(self, sig: FuncSig, subst: [Subst], arg: Expr) -> Result<int32, CheckErr> {
+        for b in sig.bounds {
+            match subst_get(subst, b.tp) {
+                Some(concrete) => {
+                    var j = 0
+                    while j < b.traits.len() {
+                        let tr = b.traits[j]
+                        if b.args[j].len() > 0 {
+                            let ok = match concrete { Type.TParam(pn) => self.bound_has(pn, tr), _ => self.type_implements(concrete, tr)? }
+                            if !ok {
+                                let msg = format("type '{}' does not satisfy the bound '{}: {}' required by '{}'", type_name(concrete), b.tp, generic_name(tr, subst_type_list(b.args[j], subst)), sig.decl.name)
+                                return Err(CheckErr { line: arg.line, col: arg.col, sp: arg.sp, msg: msg, decl: -1, notes: self.iter_hint(concrete, tr, arg) })
+                            }
+                        }
+                        j += 1
+                    }
+                },
+                None => {},
+            }
+        }
+        return Ok(0)
+    }
+
+    // A `help` for a value of type `t` given where an `Iterator` is wanted,
+    // when `t` has an `iter()` method: a list's or a map's (MYLA-383).
+    fun iter_hint(self, t: Type, tr: str, arg: Expr) -> [Note] {
+        if tr != "Iterator" { return [] }
+        let has = match self.type_key(t) {
+            Some(k) => match self.method_sig(k, "iter") { Some(m) => true, None => false },
+            None => false,
+        }
+        if !has { return [] }
+        let how = match arg.kind {
+            ExprKind.Name(n) => format("write '{}.iter()'", n),
+            _ => "call its 'iter()'",
+        }
+        return [Note { label: "help", msg: format("'{}' is not an Iterator: {}", type_name(t), how), line: 0, col: 0, sp: no_span() }]
     }
 
     fun check_call_bounds(self, sig: FuncSig, subst: [Subst], e: Expr) -> Result<int32, CheckErr> {
@@ -8828,8 +8911,9 @@ fun self_method(c: Expr) -> str {
     return ""
 }
 
-// The calls of methods of `self` in `e`, innermost first, outside lambdas
-// and the block arms of a `match` (statements of their own, MYLA-171).
+// The calls of methods of `self` and of its fields (`self.items.pop()`,
+// MYLA-394) in `e`, innermost first, outside lambdas and the block arms of a
+// `match` (statements of their own, MYLA-171).
 #test(expr_of("f(1) + other.g(2)"))[[]]
 #test(expr_of("() => self.a()"))[[]]
 fun self_calls(e: Expr) -> [Expr] {
@@ -8875,7 +8959,10 @@ fun self_calls(e: Expr) -> [Expr] {
     }
     for x in subs { for c in self_calls(x) { out.push(c) } }
     match e.kind {
-        ExprKind.Call(c, args, _) => { if self_method(c) != "" { out.push(e) } },
+        ExprKind.Call(c, args, _) => {
+            let on_field = match c.kind { ExprKind.GetField(recv, m) => self_field(recv) != "", _ => false }
+            if self_method(c) != "" || on_field { out.push(e) }
+        },
         _ => {},
     }
     return out
@@ -8883,9 +8970,10 @@ fun self_calls(e: Expr) -> [Expr] {
 
 // What the body of a synchronous method of an actor does to the actor's
 // fields itself (MYLA-171): the fields it changes (assigned, or changed by
-// `push`, `pop`, `remove` or `append`), those it examines, and the methods
-// of `self` it calls, each in the order first met.
-struct Effects { changes: [str], examines: [str], calls: [str] }
+// `push`, `pop`, `remove` or `append` or a `var self` method, the calls of
+// one in `mutators`), those it examines, and the methods of `self` it calls,
+// each in the order first met.
+struct Effects { changes: [str], examines: [str], calls: [str], mutators: [int32: bool] }
 
 impl Effects {
     fun block(var self, b: Block) {
@@ -8953,7 +9041,7 @@ impl Effects {
                 match c.kind {
                     ExprKind.GetField(recv, bm) => {
                         let root = self_field(recv)
-                        if root != "" && mutating_builtin(bm) { self.changes = add_name(self.changes, root) }
+                        if root != "" && (mutating_builtin(bm) || self.mutators.contains(e.id)) { self.changes = add_name(self.changes, root) }
                     },
                     _ => {},
                 }
@@ -9247,11 +9335,12 @@ fun starts(s: str, prefix: str) -> bool {
 // field was last examined in by a condition, `locals` what each local was read
 // from, `awaits` the `await` that started each epoch after the first.
 // `changes` and `examines`: the fields each synchronous method of the actor
-// changes and examines, through the methods it calls (MYLA-171).
-struct Reentrancy { epoch: int32, checked: [str: int32], locals: [str: Taint], awaits: [Expr], out: [CheckErr], changes: [str: [str]], examines: [str: [str]] }
+// changes and examines, through the methods it calls (MYLA-171); `mutators`
+// the calls of `var self` methods, by node id (MYLA-394).
+struct Reentrancy { epoch: int32, checked: [str: int32], locals: [str: Taint], awaits: [Expr], out: [CheckErr], changes: [str: [str]], examines: [str: [str]], mutators: [int32: bool] }
 
 impl Reentrancy {
-    #test(Reentrancy { epoch: 0, checked: [:], locals: [:], awaits: [], out: [], changes: [:], examines: [:] }, expr_of("-n * 2"))[Reads { fields: [], names: [], awaits: [], examines: [:] }]
+    #test(Reentrancy { epoch: 0, checked: [:], locals: [:], awaits: [], out: [], changes: [:], examines: [:], mutators: [:] }, expr_of("-n * 2"))[Reads { fields: [], names: [], awaits: [], examines: [:] }]
     fun scan(self, e: Expr) -> Reads {
         var r = Reads { fields: [], names: [], awaits: [], examines: self.examines }
         r.expr(e, self.locals)
@@ -9270,7 +9359,7 @@ impl Reentrancy {
     }
 
     // `e` examined as a condition; its awaits.
-    #test(Reentrancy { epoch: 0, checked: [:], locals: [:], awaits: [], out: [], changes: [:], examines: [:] }, expr_of("-n * 2"))[[]]
+    #test(Reentrancy { epoch: 0, checked: [:], locals: [:], awaits: [], out: [], changes: [:], examines: [:], mutators: [:] }, expr_of("-n * 2"))[[]]
     fun check(var self, e: Expr) -> [Expr] {
         let r = self.scan(e)
         for n in r.names {
@@ -9302,7 +9391,7 @@ impl Reentrancy {
 
     // A statement's value: a `match`'s scrutinee and guards are conditions and
     // its block arms statements; its awaits.
-    #test(Reentrancy { epoch: 0, checked: ["balance": 0], locals: [:], awaits: [], out: [], changes: [:], examines: [:] }, Expr { id: 26, line: 22, col: 20, sp: SrcSpan { sline: 22, scol: 20, eline: 22, ecol: 25 }, kind: ExprKind.BoolLit(false) })[[]]
+    #test(Reentrancy { epoch: 0, checked: ["balance": 0], locals: [:], awaits: [], out: [], changes: [:], examines: [:], mutators: [:] }, Expr { id: 26, line: 22, col: 20, sp: SrcSpan { sline: 22, scol: 20, eline: 22, ecol: 25 }, kind: ExprKind.BoolLit(false) })[[]]
     fun value(var self, e: Expr) -> [Expr] {
         match e.kind {
             ExprKind.MatchE(sc, arms) => {
@@ -9394,7 +9483,7 @@ impl Reentrancy {
                         match c.kind {
                             ExprKind.GetField(recv, m) => {
                                 let root = self_field(recv)
-                                if root != "" && mutating_builtin(m) {
+                                if root != "" && (mutating_builtin(m) || self.mutators.contains(e.id)) {
                                     var names: [str] = []
                                     var awaits: [Expr] = []
                                     for a in args {
@@ -9403,6 +9492,8 @@ impl Reentrancy {
                                         for aw in r.awaits { awaits.push(aw) }
                                     }
                                     self.suspend(awaits)
+                                    // its arguments' own changes first (MYLA-394)
+                                    for a in args { self.call_changes(a) }
                                     self.write(root, names, e)
                                     return
                                 }
@@ -9449,18 +9540,29 @@ impl Reentrancy {
     }
 
     // The calls of methods of `self` in `e` change what those methods change
-    // (MYLA-171), each with the locals its arguments read.
+    // (MYLA-171), and a mutator on a field of `self` that field, wherever it
+    // stands (MYLA-394): each with the locals its arguments read.
     fun call_changes(var self, e: Expr) {
         for c in self_calls(e) {
             match c.kind {
                 ExprKind.Call(callee, args, _) => {
+                    var fs: [str] = []
                     match self.changes.get(self_method(callee)) {
-                        Some(fs) => {
-                            var names: [str] = []
-                            for a in args { for n in self.scan(a).names { names = add_name(names, n) } }
-                            for f in fs { self.write(f, names, c) }
+                        Some(x) => { fs = x },
+                        None => {
+                            match callee.kind {
+                                ExprKind.GetField(recv, m) => {
+                                    let root = self_field(recv)
+                                    if root != "" && (mutating_builtin(m) || self.mutators.contains(c.id)) { fs = [root] }
+                                },
+                                _ => {},
+                            }
                         },
-                        None => {},
+                    }
+                    if fs.len() > 0 {
+                        var names: [str] = []
+                        for a in args { for n in self.scan(a).names { names = add_name(names, n) } }
+                        for f in fs { self.write(f, names, c) }
                     }
                 },
                 _ => {},
@@ -9514,6 +9616,68 @@ fun starts_with_dunder(name: str) -> bool {
     return name.len() >= 2 && name[0] == '_' && name[1] == '_'
 }
 
+// `msg` with each name a module qualified (`std$iter$sum`, the loader's)
+// as a program writes it, by the module's last segment: `iter.sum`
+// (MYLA-383). No name of a program's own has a `$`.
+#test("function 'std$iter$sum' expects 2 argument(s), got 1")["function 'iter.sum' expects 2 argument(s), got 1"]
+#test("type 'std$deque$Deque<std$deque$Deque<int32>>' has no method 'pop'")["type 'deque.Deque<deque.Deque<int32>>' has no method 'pop'"]
+#test("'std$deque$Deque.push_back', 'geo$area'")["'deque.Deque.push_back', 'geo.area'"]
+#test("a 'b' of $5 and x$ and $y")["a 'b' of $5 and x$ and $y"]
+#test("größe$wert")["größe.wert"]
+fun unmangled(msg: str) -> str {
+    var has = false
+    for c in msg { if c == '$' { has = true } }
+    if !has { return msg }
+    var sb = StringBuilder()
+    let n = msg.len()
+    var i = 0
+    while i < n {
+        if !is_name_byte(msg[i]) {
+            sb.append_byte(msg[i])
+            i += 1
+            continue
+        }
+        // a run of name bytes and `$`: its last two segments, when every
+        // segment is a name
+        var j = i
+        while j < n && (is_name_byte(msg[j]) || msg[j] == '$') { j += 1 }
+        let run = msg[i:j]
+        let segs = run.split("$")
+        var ok = segs.len() >= 2
+        for g in segs { if g.len() == 0 || (g[0] >= '0' && g[0] <= '9') { ok = false } }
+        if ok { sb.append(segs[segs.len() - 2] + "." + segs[segs.len() - 1]) } else { sb.append(run) }
+        i = j
+    }
+    return sb.build()
+}
+
+// `es` with their messages and their notes' `unmangled`.
+fun unmangled_all(es: [CheckErr]) -> [CheckErr] {
+    var out: [CheckErr] = []
+    for e in es {
+        var f = e
+        f.msg = unmangled(e.msg)
+        var ns: [Note] = []
+        for n in e.notes {
+            var m = n
+            m.msg = unmangled(n.msg)
+            ns.push(m)
+        }
+        f.notes = ns
+        out.push(f)
+    }
+    return out
+}
+
+// Whether `b` is a byte of a name: an ASCII letter, digit or `_`, or a
+// byte of a character past ASCII (D72).
+#test(97u8)[true]
+#test(36u8)[false]
+#test(46u8)[false]
+fun is_name_byte(b: uint8) -> bool {
+    return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '_' || b >= 128
+}
+
 // =========================================================================
 // Default arguments (D136, MYLA-255) and loops over iterators (D171): filled
 // in once the program is checked
@@ -9522,39 +9686,71 @@ fun starts_with_dunder(name: str) -> bool {
 // The checker records, for each call that leaves trailing parameters out,
 // the defaults of those parameters (`call_defaults`, keyed by the call's node
 // id), and for each `for` over an iterator the loop it stands for
-// (`for_iters`, keyed by the `for`'s id). `fill_in` rewrites every function
-// and method body and every constant, so that call carries them as arguments
-// of its own and the `for` is that loop: the interpreter, the lowering and
-// everything after them see each call with all its arguments, and a loop
-// over an iterator as one written with `while`. The rebuilt nodes keep their
-// ids, so the side tables (types, the calls' targets) still apply; a
-// default's nodes are shared by the calls it fills, as they have one type.
+// (`for_iters`, keyed by the `for`'s id), each callee that stands for
+// another name (`renames`: std.task's `cancel` in its own module is
+// `std$task$cancel`, MYLA-388), and the declaration each was met in
+// (`fill_decls`: a function, a const, or the impl of a method). `fill_in`
+// rewrites the bodies of those declarations, so that call carries them as
+// arguments of its own and the `for` is that loop: the interpreter, the
+// lowering and everything after them see each call with all its arguments,
+// and a loop over an iterator as one written with `while`. The rest stay as
+// they are, the standard library's mostly (MYLA-382: rebuilding every body
+// cost a hello world 8 ms). The rebuilt nodes keep their ids, so the side
+// tables (types, the calls' targets) still apply; a default's nodes are
+// shared by the calls it fills, as they have one type.
 
-pub struct Fills { defaults: [int32: [Expr]], fors: [int32: Stmt] }
+pub struct Fills { defaults: [int32: [Expr]], fors: [int32: Stmt], renames: [int32: str] }
 
 impl Checker {
     // Every recorded call given its defaults and every loop over an iterator
     // made the loop it stands for, in the declarations, the functions' and
-    // methods' signatures and the method bodies the checker keeps apart.
+    // methods' signatures and the method bodies the checker keeps apart: in
+    // those of the declarations that hold one (`fill_decls`).
     fun fill_in(var self) {
-        if self.call_defaults.len() == 0 && self.for_iters.len() == 0 { return }
-        let t = Fills { defaults: self.call_defaults, fors: self.for_iters }
-        var ds: [Decl] = []
-        for d in self.decls { ds.push(fd_decl(d, t)) }
-        self.decls = ds
+        if self.fill_decls.len() == 0 { return }
+        let t = Fills { defaults: self.call_defaults, fors: self.for_iters, renames: self.renames }
+        let at = self.fill_decls
         var i = 0
+        while i < self.decls.len() {
+            if at.contains(self.decls[i].id) { self.decls[i] = fd_decl(self.decls[i], t) }
+            i += 1
+        }
+        i = 0
         while i < self.functions.len() {
-            var f = self.functions[i]
-            f.decl = fd_fun(f.decl, t)
-            self.functions[i] = f
+            if at.contains(self.functions[i].decl_id) {
+                var f = self.functions[i]
+                f.decl = fd_fun(f.decl, t)
+                self.functions[i] = f
+            }
             i += 1
         }
         i = 0
         while i < self.method_decls.len() {
-            self.method_decls[i] = fd_fun(self.method_decls[i], t)
+            if at.contains(self.method_decl_ids[i]) { self.method_decls[i] = fd_fun(self.method_decls[i], t) }
             i += 1
         }
     }
+}
+
+// The declarations of `src` whose bodies `fill_in` rewrites: a function's
+// or const's name, "impl" for an impl's methods (MYLA-382).
+#test("fun f(a: int, b: int = 1) -> int { return a + b }\nfun g() -> int { return f(1) }\nfun h() -> int { return f(1, 2) }")[["g"]]
+#test("enum Option<T> { Some(T), None }\ntrait Iterator<T> { fun next(var self) -> Option<T> }\nstruct U { i: int }\nimpl Iterator<int> for U { fun next(var self) -> Option<int> { return None } }\nfun f(a: int = 2) -> int { return a }\nconst K: int = 1\nimpl U { fun m(self) -> int { for x in self { return x }\nreturn 0 } }\nfun main() { for x in [1] { print(x) } }")[["impl"]]
+#test("fun main() { print(1) }")[[]]
+fun filled_in(src: str) -> [str] {
+    let c = checker_on(src)
+    var out: [str] = []
+    for d in c.decls {
+        if c.fill_decls.contains(d.id) {
+            match d.kind {
+                DeclKind.FunDecl(f) => { out.push(f.name) },
+                DeclKind.ConstDecl(n, te, e, attrs, p) => { out.push(n) },
+                DeclKind.ImplDecl(target, ms, tps, tr, targs, dattrs) => { out.push("impl") },
+                _ => { out.push("?") },
+            }
+        }
+    }
+    return out
 }
 
 fun fd_decl(d: Decl, t: Fills) -> Decl {
@@ -9666,6 +9862,7 @@ fun fd_expr(e: Expr, t: Fills) -> Expr {
         },
         ExprKind.Try(a) => ExprKind.Try(fd_expr(a, t)),
         ExprKind.Cast(a, te) => ExprKind.Cast(fd_expr(a, t), te),
+        ExprKind.Name(n) => if t.renames.contains(e.id) { ExprKind.Name(t.renames[e.id]) } else { e.kind },
         ExprKind.Lambda(ps, rt, body, asy) => ExprKind.Lambda(ps, rt, fd_body(body, t), asy),
         ExprKind.Await(a) => ExprKind.Await(fd_expr(a, t)),
         _ => e.kind,

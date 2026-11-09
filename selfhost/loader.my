@@ -54,7 +54,9 @@ struct Module {
 // (the checker parses the prelude from there), where each module's node ids
 // start, in increasing order (`file_of`), and the impls of the standard
 // library's modules by node id, with their module and file (the checker's
-// `std_impls`: their methods are the standard library's code, MYLA-320).
+// `std_impls`: their methods are the standard library's code, MYLA-320),
+// and the functions of an entry file that is one of its modules, whose
+// names aren't qualified (MYLA-388: `cancel` in std.task is `task.cancel`).
 pub struct Loaded { decls: [Decl], next_id: int32, spans: [Span], std_impls: [int32: DeclOrigin] }
 
 pub struct Span { first_id: int32, path: str }
@@ -502,6 +504,29 @@ fun is_impl(d: Decl) -> bool {
         DeclKind.ImplDecl(t, ms, tps, tn, ta, attrs) => true,
         _ => false,
     }
+}
+
+fun is_fun(d: Decl) -> bool {
+    return match d.kind {
+        DeclKind.FunDecl(fd) => true,
+        _ => false,
+    }
+}
+
+// The dotted name of the standard library's module at `path`, by the
+// segments after its last `std` directory (MYLA-388).
+#test("lib/std/task.my")["std.task"]
+#test("/a/std/lib/std/text/scan.my")["std.text.scan"]
+fun std_module_name(path: str) -> str {
+    let segs = segments(strip_ext(normalize(path)))
+    var last = -1
+    var i = 0
+    while i < segs.len() - 1 {
+        if segs[i] == "std" { last = i }
+        i += 1
+    }
+    if last < 0 { return "" }
+    return join(segs[last:], ".")
 }
 
 // `d` without its `#test` cases, a function's or its methods' (MYLA-320):
@@ -1700,6 +1725,10 @@ pub fun load_program_opts(entry: str, opts: LoadOptions) -> Result<Loaded, Repor
     }
     var decls: [Decl] = []
     var std_impls: [int32: DeclOrigin] = [:]
+    // an entry file that is a module of the standard library: its own
+    // names aren't qualified, so its functions' origins tell (MYLA-388)
+    var entry_std = ""
+    if stdlib != "" && is_std_module(e, stdlib) { entry_std = std_module_name(e) }
     for k in merge_order(ld.modules.len() as int32, implicit) {
         let m = ld.modules[k]
         var r = Renamer { env: decl_env(m.bindings), aliases: module_env(m.bindings), exports: exports, vals: [], tys: [], path: m.path, err: None, kinds: kinds }
@@ -1714,6 +1743,7 @@ pub fun load_program_opts(entry: str, opts: LoadOptions) -> Result<Loaded, Repor
             var d = d0
             if is_implicit || !tested { d = without_tests(d0) }
             if in_std && is_impl(d) { std_impls[d.id] = DeclOrigin { module: dotted_id(m.id), path: m.path, implicit: is_implicit } }
+            if entry_std != "" && tested && is_fun(d) { std_impls[d.id] = DeclOrigin { module: entry_std, path: m.path, implicit: false } }
             decls.push(r.decl(d, m.id))
         }
         match r.err { Some(e) => { return Err(e) }, None => {} }

@@ -377,6 +377,37 @@ GENERIC_ACTOR_WARNINGS: dict[str, tuple[str, list[str]]] = {
         []),
 }
 
+# MYLA-394: a builtin mutator (`push`, `pop`, `remove`, `append`) or a `var
+# self` method (std.list's `insert`, a struct's) on a field of `self` changes
+# that field wherever it stands in an expression, not only as a statement.
+# (This checker runs without the standard library, so the `var self` methods
+# here are a struct's.) The warnings' first lines, then `ok`.
+_COUNTER = ("struct Counter {\n    n: int,\n}\nimpl Counter {\n    fun bump(var self) -> int {\n        self.n += 1\n        return self.n\n    }\n"
+            "    fun reset(var self) {\n        self.n = 0\n    }\n}\n")
+_STALL = "actor Stall {\n    items: [int],\n    c: Counter,\n}\nimpl Stall {\n"
+_SELL = "    async fun sell(var self, p: Pay) -> {ret} {{\n        if self.items.len() == 0 {{\n            return {none}\n        }}\n        let paid = await p.charge()\n{body}    }}\n}}\n"
+FIELD_MUTATOR_WARNINGS: dict[str, tuple[str, list[str]]] = {
+    "pop_in_a_let": (_PAY + _COUNTER + _STALL + _SELL.format(ret="int", none="0", body="        let x = self.items.pop()\n        return x\n"),
+        ["warn 32 31 32:17-32:33 warning: 'self.items' was checked before an 'await' and is changed after it: another call to this actor may have changed it meanwhile"]),
+    "pop_in_a_return": (_PAY + _COUNTER + _STALL + _SELL.format(ret="Option<int>", none="None", body="        return Some(self.items.pop())\n"),
+        ["warn 32 35 32:21-32:37 warning: 'self.items' was checked before an 'await' and is changed after it: another call to this actor may have changed it meanwhile"]),
+    "var_self_method_as_a_statement": (_PAY + _COUNTER + _STALL +
+        "    async fun count(var self, p: Pay) -> int {\n        if self.c.n > 9 {\n            return 0\n        }\n"
+        "        let paid = await p.charge()\n        self.c.reset()\n        return 1\n    }\n}\n",
+        ["warn 32 21 32:9-32:23 warning: 'self.c' was checked before an 'await' and is changed after it: another call to this actor may have changed it meanwhile"]),
+    "var_self_method_in_an_expression": (_PAY + _COUNTER + _STALL +
+        "    async fun count(var self, p: Pay) -> int {\n        if self.c.n > 9 {\n            return 0\n        }\n"
+        "        let paid = await p.charge()\n        return self.c.bump() + 1\n    }\n}\n",
+        ["warn 32 27 32:16-32:29 warning: 'self.c' was checked before an 'await' and is changed after it: another call to this actor may have changed it meanwhile"]),
+    "quiet_check_again": (_PAY + _COUNTER + _STALL + _SELL.format(ret="int", none="0",
+        body="        if self.items.len() > 0 {\n            let x = self.items.pop()\n            return x\n        }\n        return 0\n"),
+        []),
+    "quiet_change_before": (_PAY + _COUNTER + _STALL +
+        "    async fun sell(var self, p: Pay) -> int {\n        if self.items.len() == 0 {\n            return 0\n        }\n"
+        "        let x = self.items.pop()\n        let paid = await p.charge()\n        return x\n    }\n}\n",
+        []),
+}
+
 # Verdicts a later decision changed from the retired Python checker's
 # recording, pinned here.
 SUPERSEDED: dict[str, str] = {
@@ -569,6 +600,18 @@ class SelfHostedCheckerParity(unittest.TestCase):
                         lines = self._myla_check(path).split("\n")
                         self.assertEqual([l for l in lines if l.startswith("warn ")], warns)
                         self.assertEqual(lines[-1], "ok")
+
+    def test_warnings_of_field_mutators(self) -> None:
+        # MYLA-394: a field's mutator inside an expression, as a statement's
+        with tempfile.TemporaryDirectory() as tmp:
+            for name, (source, warns) in FIELD_MUTATOR_WARNINGS.items():
+                with self.subTest(case=name):
+                    path = os.path.join(tmp, name + ".my")
+                    with open(path, "w", encoding="utf-8") as fh:
+                        fh.write(source)
+                    lines = self._myla_check(path).split("\n")
+                    self.assertEqual([l for l in lines if l.startswith("warn ")], warns)
+                    self.assertEqual(lines[-1], "ok")
 
     def test_declaration_mutants_match_the_oracle(self) -> None:
         # every example with one declaration broken (MYLA-110): the same error,
