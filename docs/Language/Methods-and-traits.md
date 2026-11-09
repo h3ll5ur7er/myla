@@ -229,7 +229,39 @@ fun main() {
 // true
 ```
 
-`#derive(Eq)` on a non-generic struct or enum synthesises a structural `impl Eq`: the fields in turn, or the variant and then its payload. Every field or payload must be `Eq` itself: an integer, a float, `char`, `bool`, `str`, a tuple or list of `Eq` elements, or a named type that is `Eq`. A type can't both derive `Eq` and implement it.
+`#derive(Eq)` on a struct or enum synthesises a structural `impl Eq`: the fields in turn, or the variant and then its payload. Every field or payload must be `Eq` itself: an integer, a float, `char`, `bool`, `str`, a tuple or list of `Eq` elements, an `Option` or `Result` of them, or a named type that is `Eq`. A type can't both derive `Eq` and implement it.
+
+On a generic type ([[MYLA-379]]) the impl is bounded by the trait on every type parameter, `impl<A: Eq, B: Eq> Eq for Pair<A, B>`, so `Pair<int, str>` has `==` and `Pair<int, Pos>` hasn't while `Pos` isn't `Eq` (`operator '==' is not defined for 'Pair<int32, Pos>': 'Pos' isn't Eq (…)`). A field of a type parameter is `Eq` by that bound; any other field is checked as a concrete type's is (`[str: T]` is a map, never `Eq`). `#derive(Hash)` bounds it by `T: Hash`, `#derive(Json)` by `T: ToJson` and `T: FromJson`. The prelude's `Option` and `Result` derive `Eq` this way.
+
+```myla
+#derive(Eq, Hash)
+struct Pair<A, B> {
+    a: A,
+    b: B,
+}
+
+#derive(Eq)
+enum Tree<T> {
+    Leaf,
+    Node(T, [Tree<T>]),
+}
+
+fun main() {
+    let p = Pair { a: 1, b: "x" }
+    print(p == Pair { a: 1, b: "x" })
+    var seen: [Pair<int, str>: bool] = [:]
+    seen[p] = true
+    print(seen.contains(Pair { a: 1, b: "y" }))
+    let t: Tree<int> = Tree.Node(1, [Tree.Leaf])
+    print(t != Tree.Node(1, []))
+    print(Some(p) == None)
+}
+// output:
+// true
+// false
+// true
+// false
+```
 
 A float field compares with the floats' own `==`, in both runners: a value holding NaN is unequal to itself, and one holding `0.0` equals one holding `-0.0` ([[MYLA-316]]).
 
@@ -258,7 +290,7 @@ fun main() {
 
 `#derive(Json)` writes an `impl ToJson` and an `impl FromJson` against `std.json` (D172, [[MYLA-385]]), which the program imports: a struct as an object of its fields (an `Option` field left out when `None`), an enum externally tagged (`"Red"`, `{"Dot": x}`, `{"Line": [a, b]}`), so that `json.encode(v)` and `json.decode<T>(text)` work on it; every field must have a JSON form itself, and recursive types work. The rules and the built-in types' forms are on [[Language/Standard-library/Json#typed-values]].
 
-The derives are generated as Myla source and checked with the program (`derived_hash_src`, `derived_json_struct_src`, `derived_json_enum_src` in [[selfhost/checker.my]]); `#derive(Json)`'s source names std.json's items by the loader's qualified names (`std$json$Json`), which only the checker's own parser accepts (`parse_qualified`). `Eq`, `Hash` and `Json` are the derivable traits so far; `Ord` is the planned next one.
+The derives are generated as Myla source and checked with the program (`derived_hash_src`, `derived_json_struct_src`, `derived_json_enum_src` in [[selfhost/checker.my]], and a generic type's `derived_eq_src`; a concrete type's `Eq` is the runners' own structural comparison); `#derive(Json)`'s source names std.json's items by the loader's qualified names (`std$json$Json`), which only the checker's own parser accepts (`parse_qualified`). `Eq`, `Hash` and `Json` are the derivable traits so far; `Ord` is the planned next one.
 
 ## Hash
 

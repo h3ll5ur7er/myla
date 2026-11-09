@@ -114,7 +114,7 @@ fun main() {
 | `Seek` | `seek(var self, pos: SeekFrom) -> Result<int64, IoError>`: the cursor moved to `SeekFrom.Start(k)`, `Current(k)` or `End(k)`; the new offset from the start. Before the start is `InvalidInput`; past the end is allowed |
 | `Pollable` | `descriptor(self) -> int32`: the descriptor a task can wait for. A `Buffered` over a `Pollable` stream has `ready` and the async reads |
 
-Each of `Read` and `Write` has a method for `[uint8]` and one for `str`. Strings are bytes (D164), and the two kinds hold the same bytes, but one becomes the other only byte by byte. A descriptor reads and writes a `str`, a memory stream holds a `[uint8]`, so each stream gives both the cheap way: a `Buffered` reads text with `read_str`, and text from a descriptor isn't converted at all. A stream that has only one kind gives the other by converting it (the example below).
+Each of `Read` and `Write` has a method for `[uint8]` and one for `str`. Strings are bytes (D164), and the two kinds hold the same bytes; when the traits were made one became the other only byte by byte, and `read_str` and `write_str` spared text that cost. Since [[MYLA-369]] `std.bytes`'s `from_str` and `to_str` convert in one allocation and one copy (the primitives `__str_to_bytes` and `__bytes_to_str`), and a `[uint8]` costs about what a `str` does (the measurements below). A descriptor reads and writes a `str`, a memory stream holds a `[uint8]`, so each stream gives both the cheap way: a `Buffered` reads text with `read_str`, and text from a descriptor isn't converted at all. A stream that has only one kind gives the other by converting it (the example below).
 
 ### Streams of this module
 
@@ -131,7 +131,7 @@ Each of `Read` and `Write` has a method for `[uint8]` and one for `str`. Strings
 | Function | Result |
 | --- | --- |
 | `read_all<R: Read>(r: R) -> Result<[uint8], IoError>` | Everything `r` gives up to its end |
-| `copy<R: Read, W: Write>(r: R, w: W) -> Result<W, IoError>` | Everything `r` gives up to its end written to `w`, which is flushed and given back |
+| `copy<R: Read, W: Write>(r: R, w: W) -> Result<W, IoError>` | Everything `r` gives up to its end written to `w`, 64 KiB at a time, which is flushed and given back |
 
 They take the streams by value, so the caller's `var` doesn't move: a memory stream read by `read_all` is where it was. A descriptor's offset, which the platform keeps, does move. `copy` gives the writer back, which is the way to the bytes of a memory stream it wrote, or to a `BufferedWriter`'s stream.
 
@@ -142,6 +142,7 @@ A type is a stream when it implements the traits. `Read` takes both methods; the
 ```myla
 from std.io import Read, buffered, read_all
 from std.fs import IoError
+import std.bytes as bytes
 
 // `left` more copies of one byte.
 struct Repeat {
@@ -160,9 +161,8 @@ impl Read for Repeat {
     }
 
     fun read_str(var self, n: int) -> Result<str, IoError> {
-        var sb = StringBuilder()
-        for b in self.read(n)? { sb.append_byte(b) }
-        return Ok(sb.build())
+        let b = self.read(n)?
+        return Ok(bytes.to_str(b))
     }
 }
 
@@ -195,3 +195,7 @@ Natively on x86-64, 50 MB of lines of up to 120 bytes, best of three ([[MYLA-338
 | 1 000 000 `write_str` of 48 bytes into a `BufferedWriter<MemoryStream>` | 143 ms |
 | `copy(fd_stream(0), fd_stream(1))`, to `/dev/null` | 13 ms |
 | `copy` from one memory stream to another | 256 ms |
+
+With the conversions in one copy ([[MYLA-369]]; the same 50 MB, 2026-11-09, on a busier machine where `stdin().read_line()` took 129 to 153 ms, seven runs): `Buffered` reading through `read` (`[uint8]`) and `bytes.to_str` instead of `read_str` took 100 to 148 ms, median 106; with the conversions a byte at a time, as before, 289 to 487 ms, median 302 (MYLA-338's 331 ms). Interpreted, on 2 MB, 6.1 to 6.5 s through `read_str`, 6.6 s through `read`. So `read_str` and `write_str` no longer pay for themselves in speed: dropping them is the owner's decision ([[MYLA-399]]). In the same run, 1 000 000 `write`s of a 48-byte `[uint8]` into a `BufferedWriter` over a descriptor took 23 to 28 ms (110 to 118 ms before), and `read_all` gathers text and converts once.
+
+`copy` reads 64 KiB at a time ([[MYLA-379]]; it was 4 KiB): a 256 MiB file copied by `copy(fs.open(a)?, fs.create(b)?)` into a new file took 88 ms natively, 162 ms with 4 KiB, and 40 ms instead of 56 to `/dev/null` (best of seven; 128 KiB gave 85 and 39, 16 KiB 104 and 42). From one memory stream to another it stays as it was.

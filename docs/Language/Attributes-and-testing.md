@@ -11,7 +11,7 @@ An attribute is written on the lines above a declaration: `#name`, optionally fo
 | `#main` | a non-generic function without parameters | The entry point, instead of the function named `main` |
 | `#test(args)[expected]` | a non-generic function or method | One test case; several may be stacked. On a method the receiver is the first argument (D116). The expected value may be `panic("message")` or `exit(n)`, the failure the call must end in (D162) |
 | `#test` | a non-generic function without parameters, with no result or a `Result<(), E>` | A test function (D162): it passes when it returns, fails on a runtime error, `exit` or `Err(e)` |
-| `#derive(Eq)`, `#derive(Hash)`, `#derive(Eq, Hash)`, `#derive(Json)` | a non-generic struct or enum | Structural equality and hashing ([[Language/Methods-and-traits]], D163), a JSON form (std.json's `ToJson` and `FromJson`, [[Language/Standard-library/Json]], D172); `Eq`, `Hash` and `Json` are the traits that can be derived (`cannot derive 'Ord': only 'Eq', 'Hash' and 'Json' are derivable`) |
+| `#derive(Eq)`, `#derive(Hash)`, `#derive(Eq, Hash)`, `#derive(Json)` | a struct or enum, generic too (its impl bounded by the trait, [[MYLA-379]]) | Structural equality and hashing ([[Language/Methods-and-traits]], D163), a JSON form (std.json's `ToJson` and `FromJson`, [[Language/Standard-library/Json]], D172); `Eq`, `Hash` and `Json` are the traits that can be derived (`cannot derive 'Ord': only 'Eq', 'Hash' and 'Json' are derivable`) |
 | `#allow(name, …)` | a function, a method or an `impl` block | Silences the warnings of that name inside it (D161, below) |
 
 ## Warnings and #allow
@@ -87,7 +87,7 @@ Every value-returning function in `examples/` carries tests, and the burn tests 
 
 ### Test functions
 
-A test that is a body rather than a line is a function without parameters under a bare `#test` (D162, [[MYLA-303]]): sugar for `#test()[()]`, named by the function's name, reported as `PASS  writes_and_reads`. It passes when it returns and fails on a runtime error (`assert`, `panic`, a failed expectation of `std.test`) or `exit`. Its result is none, or `Result<(), E>`: `Ok(())` passes, `Err(e)` fails the case with `e` shown as `{}` would show it (`FAIL  reads_the_config: IoError.NotFound`), so `?` is the way to say "and that must work". A test function is an ordinary function in every other way: it may be called, it takes `defer`, and `myla build` drops it with the cases.
+A test that is a body rather than a line is a function without parameters under a bare `#test` (D162, [[MYLA-303]]): sugar for `#test()[()]`, named by the function's name, reported as `PASS  writes_and_reads`. It passes when it returns and fails on a runtime error (`assert`, `panic`, a failed expectation of `std.test`) or `exit`. Its result is none, or `Result<(), E>`: `Ok(())` passes, `Err(e)` fails the case with `e` shown as `{}` would show it (`FAIL  reads_the_config: not found (NotFound)`, an `IoError`'s message, D173), so `?` is the way to say "and that must work". A test function is an ordinary function in every other way: it may be called, it takes `defer`, and `myla build` drops it with the cases.
 
 ```myla
 import std.test as test

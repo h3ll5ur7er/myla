@@ -9,14 +9,8 @@
 #test("é")[[195u8, 169u8]] // a character's two bytes
 #test("")[[]]
 pub fun from_str(s: str) -> [uint8] {
-    let n = s.len()
-    var out: [uint8] = []
-    var i = 0
-    while i < n {
-        out.push(s[i])
-        i += 1
-    }
-    return out
+    // one allocation and one copy (MYLA-369)
+    return __str_to_bytes(s)
 }
 
 // The bytes `b` as a string, as they are: they needn't be UTF-8.
@@ -24,13 +18,8 @@ pub fun from_str(s: str) -> [uint8] {
 #test([195u8, 169u8])["é"]
 #test([])[""]
 pub fun to_str(b: [uint8]) -> str {
-    // A builder grows by doubling, in place where it can, and `build` copies
-    // its bytes once: a few allocations for the whole list, not one a byte.
-    var sb = StringBuilder()
-    for x in b {
-        sb.append_byte(x)
-    }
-    return sb.build()
+    // one allocation and one copy (MYLA-369)
+    return __bytes_to_str(b)
 }
 
 // Whether `b` is UTF-8: shortest forms, no surrogates, nothing past U+10FFFF.
@@ -195,4 +184,21 @@ fun seq_len(b: [uint8], i: int) -> int {
         j += 1
     }
     return k
+}
+
+// Every byte value goes through `to_str` and back as it is, and a list
+// changed after it was made from a string leaves the string as it was.
+#test
+fun every_byte_round_trips() {
+    var all: [uint8] = []
+    for i in 0..256 {
+        all.push(i as uint8)
+    }
+    let s = to_str(all)
+    assert(s.len() == 256 && s[0] == 0u8 && s[255] == 255u8, "every byte in the string")
+    var back = from_str(s)
+    assert(back == all, "and back")
+    back[0] = 7u8
+    back.push(1u8)
+    assert(s[0] == 0u8 && s.len() == 256 && all[0] == 0u8, "copies, not shared")
 }

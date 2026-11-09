@@ -1,0 +1,13 @@
+//~ type error: map key type must be Eq and Hash, found 'Cell<float64>': 'float64' isn't Hash (NaN is unequal to itself)
+// A generic type's derived `Hash` is bounded by `T: Hash` (MYLA-379): a
+// `Cell<float>` is no map key.
+#derive(Eq, Hash)
+struct Cell<T> {
+    at: (int, int),
+    value: T,
+}
+
+fun main() {
+    var seen: [Cell<float>: bool] = [:]
+    print(seen.len())
+}

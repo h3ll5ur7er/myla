@@ -17,6 +17,9 @@
 import std.list as list_m // `filled`, `extend` and `map` of the cells
 import std.option as option_m // `is_none`, `err` in the test functions
 
+// Two grids are equal when their sizes and cells are (`T: Eq`); a grid of
+// `Hash` cells is a map key (MYLA-379).
+#derive(Eq, Hash)
 pub struct Grid<T> {
     width: int,
     height: int,
@@ -305,14 +308,6 @@ fun ok<T>(r: Result<Grid<T>, GridError>) -> Grid<T> {
     }
 }
 
-// Whether `o` is `Some(v)` (an `Option` has no `==`).
-fun is<T: Eq>(o: Option<T>, v: T) -> bool {
-    return match o {
-        Some(x) => x == v
-        None => false
-    }
-}
-
 
 const MAZE: str = "#####\n#S..#\n#.#E#\n#####\n"
 
@@ -320,11 +315,11 @@ const MAZE: str = "#####\n#S..#\n#.#E#\n#####\n"
 fun parse_and_print() {
     let g = ok(parse(MAZE))
     assert(g.width == 5 && g.height == 4, "the size")
-    assert(is(g.at((1, 1)), 'S') && is(g.at((3, 2)), 'E'), "at")
+    assert(g.at((1, 1)) == Some('S') && g.at((3, 2)) == Some('E'), "at")
     assert(g.at((5, 0)).is_none() && g.at((0, -1)).is_none(), "at out of bounds")
     assert(g.text() + "\n" == MAZE, "text gives the text back")
     let digits = ok(parse_with("123\n456", (c: char) => c - '0'))
-    assert(is(digits.at((2, 1)), 6) && digits.text() == "123\n456", "parse_with")
+    assert(digits.at((2, 1)) == Some(6) && digits.text() == "123\n456", "parse_with")
     match parse_with("12\n3", (c: char) => c) {
         Ok(_) => assert(false, "ragged")
         Err(e) => assert(e.message() == "row 2 has 1 cell, row 1 has 2", "the error")
@@ -347,10 +342,10 @@ fun parsing() {
     assert(u.width == 2 && u.cells == ['é', '·', '·', '·'], "a cell a character")
     let blank = ok(parse("\n"))
     assert(blank.width == 0 && blank.height == 1, "one empty line")
-    assert(is(parse("abc\nab\nabc").err(), GridError.Ragged(2, 2, 3)), "a short row")
-    assert(is(parse("ab\n\nab").err(), GridError.Ragged(2, 0, 2)), "an empty row")
-    assert(is(parse("a\nb\ncd\n").err(), GridError.Ragged(3, 2, 1)), "a long row")
-    assert(is(of([[1, 2], [3]]).err(), GridError.Ragged(2, 1, 2)), "of")
+    assert(parse("abc\nab\nabc").err() == Some(GridError.Ragged(2, 2, 3)), "a short row")
+    assert(parse("ab\n\nab").err() == Some(GridError.Ragged(2, 0, 2)), "an empty row")
+    assert(parse("a\nb\ncd\n").err() == Some(GridError.Ragged(3, 2, 1)), "a long row")
+    assert(of([[1, 2], [3]]).err() == Some(GridError.Ragged(2, 1, 2)), "of")
     let none_rows: Grid<int> = ok(of([]))
     assert(none_rows.width == 0 && none_rows.height == 0, "no rows")
 }
@@ -361,19 +356,26 @@ fun cells() {
     assert(g.cells == [0, 0, 0, 0, 0, 0], "filled")
     g.set((2, 1), 5)
     g.set((0, 1), 4)
-    assert(is(g.at((2, 1)), 5) && g.cells[g.index((2, 1))] == 5, "set and index")
+    assert(g.at((2, 1)) == Some(5) && g.cells[g.index((2, 1))] == 5, "set and index")
     assert(g.pos(5) == (2, 1) && g.index(g.pos(4)) == 4, "pos")
     assert(g.row(1) == [4, 0, 5] && g.column(2) == [0, 5], "row and column")
     assert(g.in_bounds((2, 1)) && !g.in_bounds((3, 1)) && !g.in_bounds((-1, 0)) && !g.in_bounds((0, 2)), "in_bounds")
     assert(g.positions() == [(0, 0), (1, 0), (2, 0), (0, 1), (1, 1), (2, 1)], "positions")
     let t = g.transposed()
-    assert(t.width == 2 && t.height == 3 && is(t.at((1, 2)), 5) && t.row(2) == [0, 5], "transposed")
+    assert(t.width == 2 && t.height == 3 && t.at((1, 2)) == Some(5) && t.row(2) == [0, 5], "transposed")
     let s = g.map((v: int) => if v > 0 { '#' } else { '.' })
     assert(s.text() == "...\n#.#", "map")
-    assert(is(s.find('#'), (0, 1)) && s.find('x').is_none(), "find")
+    assert(s.find('#') == Some((0, 1)) && s.find('x').is_none(), "find")
     assert(s.find_all('#') == [(0, 1), (2, 1)] && s.find_all('.').len() == 4, "find_all")
     let r = ok(of([[1, 2], [3, 4], [5, 6]]))
-    assert(r.width == 2 && r.height == 3 && is(r.at((1, 2)), 6), "of")
+    assert(r.width == 2 && r.height == 3 && r.at((1, 2)) == Some(6), "of")
+    // `==` and map keys (MYLA-379)
+    assert(r == ok(of([[1, 2], [3, 4], [5, 6]])) && r != ok(of([[1, 2, 3], [4, 5, 6]])) && t != r, "==")
+    var seen: [Grid<int>: int] = [:]
+    seen[r] = 1
+    seen[t] = 2
+    seen[ok(of([[1, 2], [3, 4], [5, 6]]))] = 3
+    assert(seen.len() == 2 && seen[r] == 3, "a map key")
 }
 
 #test

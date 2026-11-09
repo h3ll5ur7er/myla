@@ -200,6 +200,16 @@ fun wasi_path(path: str) -> str {
 // An empty path names nothing, as on Linux (ENOENT); WASI would take it for
 // the preopened directory itself (MYLA-281).
 fun on_path(n: int64, path: str, flags_first: bool, rest: [int64]) -> int64 {
+    var lookup: int64 = -1
+    if flags_first {
+        lookup = 1  // LOOKUPFLAGS_SYMLINK_FOLLOW
+    }
+    return on_path_lookup(n, path, lookup, rest)
+}
+
+// `on_path` with the lookup flags `lookup` second (-1: none), so a link
+// can be looked at itself (0, MYLA-363).
+fun on_path_lookup(n: int64, path: str, lookup: int64, rest: [int64]) -> int64 {
     if path.len() == 0 {
         return -2
     }
@@ -208,8 +218,8 @@ fun on_path(n: int64, path: str, flags_first: bool, rest: [int64]) -> int64 {
     var k: int64 = 0
     arg(k, PREOPEN)
     k += 1
-    if flags_first {
-        arg(k, 1)  // LOOKUPFLAGS_SYMLINK_FOLLOW
+    if lookup >= 0 {
+        arg(k, lookup)
         k += 1
     }
     arg(k, a + 8)
@@ -295,9 +305,10 @@ pub fun write(fd: int64, buf: int64, n: int64) -> int64 {
     return rw(W_FD_WRITE, fd, buf, n)
 }
 
-pub fun close(fd: int64) {
+// The descriptor `fd` closed (`fd_close`): 0, or minus the errno.
+pub fun close(fd: int64) -> int64 {
     arg(0, fd)
-    let r = call(W_FD_CLOSE)
+    return call(W_FD_CLOSE)
 }
 
 // The size of the open file `fd` (a filestat's size at 32).
@@ -322,9 +333,11 @@ pub fun mode_of(path: str) -> int64 {
 }
 
 // A mode for WASI's file type `t`, which has no permissions: a directory
-// 0o40755, a regular file 0o100644, anything else 0o644.
+// 0o40755, a regular file 0o100644, a symbolic link 0o120777, anything
+// else 0o644.
 #test(3)[16877]
 #test(4)[33188]
+#test(7)[41471]
 #test(2)[420]
 fun mode_of_type(t: int64) -> int64 {
     if t == 3 {
@@ -333,7 +346,32 @@ fun mode_of_type(t: int64) -> int64 {
     if t == 4 {
         return 33188
     }
+    if t == 7 {
+        return 41471
+    }
     return 420
+}
+
+// The size, the mode (`mode_of_type`), the modification time, the device
+// and the file's number on it of what `path` names, as five words at
+// `out` (`path_filestat_get`, a link followed when `follow`, MYLA-378): 0,
+// or minus the errno.
+pub fun path_stat(path: str, follow: bool, out: int64) -> int64 {
+    let st = __rt_addr("__wasi_stat")
+    var lookup: int64 = 0
+    if follow {
+        lookup = 1  // LOOKUPFLAGS_SYMLINK_FOLLOW
+    }
+    let r = on_path_lookup(W_PATH_FILESTAT_GET, path, lookup, [st])
+    if r < 0 {
+        return r
+    }
+    __store64(out, __load64(st + 32))
+    __store64(out + 8, mode_of_type(__load8(st + 16) as int64))
+    __store64(out + 16, __load64(st + 48))
+    __store64(out + 24, __load64(st))
+    __store64(out + 32, __load64(st + 8))
+    return 0
 }
 
 // The file at `path` opened with std.rt's portable `flags` (1 read, 2

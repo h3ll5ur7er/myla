@@ -38,4 +38,4 @@ fun main() {
 
 UTF-8 is what the Unicode Standard's table 3-7 calls well-formed: the shortest form of each character, no surrogates (U+D800 to U+DFFF), nothing past U+10FFFF. So `[192u8, 128u8]`, an overlong NUL, isn't UTF-8, and neither is `[237u8, 160u8, 128u8]`, the surrogate U+D800. A sequence cut short is wrong at its first byte: `utf8_error([104u8, 226u8, 130u8])` is `Some(1)`.
 
-`to_str` builds the string in a `StringBuilder`, which grows by doubling (in place where it can) and copies its bytes once at the end: a few allocations for the whole list, not one a byte. On x86-64 it converts about 340 MB a second, `from_str` about 470 MB.
+`from_str` and `to_str` are one allocation and one copy each, on every target and in the interpreter: the primitives `__str_to_bytes` and `__bytes_to_str` ([[MYLA-369]]), which a library module calls (a program's call is the primitive warning, D100). Natively on x86-64 each converts 50 MB in 25 to 26 ms, about 2 GB a second, where `to_str` through a `StringBuilder` a byte at a time took 180 to 209 ms and `from_str` a push a byte 123 to 156 ms; interpreted, 2 MB in 0.07 and 0.12 s, where they took 9.5 and 12 s (2026-11-09).

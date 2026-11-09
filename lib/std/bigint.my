@@ -1388,10 +1388,7 @@ fun big_quotient(base: int64, exp: uint32, add: int64, base2: int64, exp2: uint3
 // Whether `x` written in `radix` reads back as `x`.
 #test(BigInt { negative: true, mag: [0u32, 1u32] }, 36)[true]
 fun reads_back(x: BigInt, radix: int) -> bool {
-    return match parse_radix(x.to_str_radix(radix), radix) {
-        Ok(v) => v == x
-        Err(e) => false
-    }
+    return parse_radix(x.to_str_radix(radix), radix) == Ok(x)
 }
 
 // 3^4000 printed by divide and conquer and read back, in decimal, hex and

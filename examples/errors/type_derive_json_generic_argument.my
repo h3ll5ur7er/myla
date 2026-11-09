@@ -1,0 +1,19 @@
+//~ type error: type 'Page<Pos>' does not satisfy the bound 'T: ToJson' required by 'encode': 'Pos' isn't ToJson
+//~ help: '#derive(Json)' on 'Pos' gives it 'ToJson' and 'FromJson' (D172)
+// A generic type's derived `Json` is bounded by `T: ToJson` and `T:
+// FromJson` (MYLA-379): a `Page<Pos>` has no JSON form while `Pos` hasn't.
+import std.json as json
+
+#derive(Json)
+struct Page<T> {
+    items: [T],
+    next: Option<str>,
+}
+
+struct Pos {
+    x: int,
+}
+
+fun main() {
+    print(json.encode(Page { items: [Pos { x: 1 }], next: None }))
+}
