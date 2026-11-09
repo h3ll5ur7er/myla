@@ -138,10 +138,10 @@ Three questions for the owner are worth deciding before the first module is writ
 | 52 | CSV | `std.csv` | RFC 4180 read and write (quotes, escapes, CRLF), rows as `[str]` or mapped by the header, streaming over #41 | 6 | 2 |  | 29 | [[MYLA-332]] |
 | 53 | JSON, more | `std.json` | a pretty printer, typed getters (`as_int`, `as_str`) and path access, a builder; `std.json` already parses and prints | 7 | 2 |  | 24 | [[MYLA-332]] |
 | 54 | INI | `std.ini` | read and write: sections, keys, comments | 4 | 1 |  | 38 | [[MYLA-332]] |
-| 55 | TOML writer | `std.toml` | writing TOML (`std.toml` parses it), e.g. for the project tool's manifest edits: done, `to_string` round-trips what `parse` reads | 3 | 2 |  | 59 | [[MYLA-402]] |
+| 55 | TOML writer | `std.toml` | writing TOML (`std.toml` parses it), e.g. for the project tool's manifest edits: done, `to_string` round-trips what `parse` reads, all of TOML 1.0 since [[MYLA-407]] | 3 | 2 |  | 59 | [[MYLA-402]], [[MYLA-407]] |
 | 56 | XML | `std.xml` | a non-validating parser (elements, attributes, text, entities, CDATA, comments) to a tree and as a pull reader, a writer with escaping; no DTD and no namespaces at first | 5 | 4 |  | 49 | [[MYLA-348]] |
 | 57 | YAML | `std.yaml` | the safe subset: block and flow maps and lists, scalars, multi-line strings, comments; no anchors and no tags. The whole specification would be an 8 | 5 | 4 |  | 51 | [[MYLA-349]] |
-| 58 | Serialisation by derive | compiler, `std.json` | `#derive(Json)` (or a serialisation trait) between structs and JSON or TOML, generated as `#derive(Eq)` is | 7 | 6 | a language decision | 56 | [[MYLA-354]] |
+| 58 | Serialisation by derive | compiler, `std.json` | `#derive(Json)` (or a serialisation trait) between structs and JSON or TOML, generated as `#derive(Eq)` is: done, `#derive(Json)` and `#derive(Toml)` | 7 | 6 | a language decision | 56 | [[MYLA-354]], [[MYLA-385]], [[MYLA-407]] |
 | 59 | Regular expressions | `std.regex` | RE2-style, linear time, no backreferences: match, find, find all, captures, replace, split | 8 | 5 |  | 31 | [[MYLA-335]] |
 
 ### Programs
