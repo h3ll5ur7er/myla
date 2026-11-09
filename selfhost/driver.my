@@ -13,7 +13,7 @@ from std.process import run, Output, ExitStatus, SpawnError
 from std.io import write, eprintln
 from std.fs import write_to_file, remove_file
 from std.platform import TARGET
-from .loader import load_program_opts, LoadOptions, for_target, file_of, Loaded, type_errors, warning_reports, in_stdlib
+from .loader import load_program_opts, LoadOptions, for_target, file_of, Loaded, type_errors, warning_reports, in_stdlib, target_platform_file, normalize
 from .diag import render, Report
 from .checker import build_checker_std, Checker, CheckErr
 from .codegen import new_codegen
@@ -23,7 +23,7 @@ from .harness import harness_source, Harness, runner_case
 from std.test import cut_run, case_outcome, case_lines
 from std.process import command, env
 from std.time import now_ns
-from std.fs import make_dir_all, remove_dir_all, exists, read_to_string
+from std.fs import make_dir_all, remove_dir_all, exists, read_to_string, current_dir
 from .parser import expr_of, stmt_of, type_expr_of, block_of, pattern_of, fun_of  // AST values for #test cases (MYLA-184)
 
 // Decode a captured `[uint8]` buffer (e.g. a child's stderr) as UTF-8 text.
@@ -166,8 +166,12 @@ pub fun native_tests(file: str, opts: LoadOptions, sel: TestOptions, target: str
     let out = dir + "/harness"
     var nopts = opts
     nopts.overrides[file] = h.source
+    // the target's own platform module is its `std.platform`, which the
+    // harness imports too (through std.test): built as that module, with
+    // the harness in it, it is loaded once (MYLA-397)
+    let entry = harness_entry(file, opts.stdlib_root, target)
     // built checked: overflow traps under `myla test`, natively too (D175)
-    if cmd_build(file, out, nopts, false, true, target) != 0 {
+    if cmd_build(entry, out, nopts, false, true, target) != 0 {
         // the harness kept, for a look at the code added to the file
         let kept = write_to_file(out + ".my", h.source)
         return Err(format("myla: the test harness of {} didn't build: its errors above are at positions past the file's end, in the code added to it (kept at {}.my)", file, out))
@@ -196,6 +200,32 @@ pub fun native_tests(file: str, opts: LoadOptions, sel: TestOptions, target: str
     let err = decode(o.stderr)
     let code = match o.status { ExitStatus.Exited(c) => c, ExitStatus.Signaled(s) => -s }
     return Ok(harness_report(h, decode(o.stdout), err, code))
+}
+
+// The file a harness of `file`'s cases is built from for `target`: the
+// standard library's `std/platform.my` when `file` is the target's own
+// platform module (`for_target` gives that path `file`'s text, the harness
+// here), else `file` (MYLA-397).
+#test("lib/std/platform_wasm.my", "lib", "wasm32-wasi")["lib/std/platform.my"]
+#test("lib/./std/platform_aarch64.my", "lib", "aarch64-linux")["lib/std/platform.my"]
+#test("lib/std/platform_wasm.my", "lib", "aarch64-linux")["lib/std/platform_wasm.my"]
+#test("lib/std/platform.my", "lib", "x86_64-linux")["lib/std/platform.my"]
+#test("lib/std/platform_wasm.my", "", "wasm32-wasi")["lib/std/platform_wasm.my"]
+#test("tests/platform_wasm.my", "lib", "wasm32-wasi")["tests/platform_wasm.my"]
+fun harness_entry(file: str, stdlib_root: str, target: str) -> str {
+    let own = target_platform_file(target)
+    if own == "" || stdlib_root == "" { return file }
+    if absolute(file) != absolute(stdlib_root + "/std/" + own) { return file }
+    return stdlib_root + "/std/platform.my"
+}
+
+// `p` normalized, from the current directory if it is relative.
+fun absolute(p: str) -> str {
+    if p.len() > 0 && p[0] == '/' { return normalize(p) }
+    return match current_dir() {
+        Ok(d) => normalize(d + "/" + p),
+        Err(e) => normalize(p),
+    }
 }
 
 // The cases of the harness `h` run by `exe` with the arguments `lead`
