@@ -1,0 +1,13 @@
+//~ type error: type '[int32]' does not satisfy the bound 'I: Iterator<T>' required by 'iter.map'
+//~ span: xs
+//~ help: '[int32]' is not an Iterator: write 'xs.iter()'
+// A list isn't an iterator (D171): the bound `I: Iterator<T>` fails on the
+// argument, before the lambda's parameter, whose type `T` it would give
+// (MYLA-383).
+import std.iter as iter
+
+fun main() {
+    let xs = [1, 2, 3]
+    let total = xs |> iter.map((x) => x * 3) |> iter.sum(0)
+    print(total)
+}

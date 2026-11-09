@@ -1,0 +1,6 @@
+type error: type '[int32]' does not satisfy the bound 'I: Iterator<T>' required by 'iter.count'
+  --> examples/errors/type_iter_count_list.my:10:22
+   |
+10 |     print(iter.count(xs))
+   |                      ^^
+help: '[int32]' is not an Iterator: write 'xs.iter()'

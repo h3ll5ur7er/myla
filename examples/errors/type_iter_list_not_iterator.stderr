@@ -1,0 +1,6 @@
+type error: type '[int32]' does not satisfy the bound 'I: Iterator<T>' required by 'iter.map'
+  --> examples/errors/type_iter_list_not_iterator.my:11:17
+   |
+11 |     let total = xs |> iter.map((x) => x * 3) |> iter.sum(0)
+   |                 ^^
+help: '[int32]' is not an Iterator: write 'xs.iter()'

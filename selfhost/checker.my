@@ -6922,7 +6922,7 @@ impl Checker {
             Ok(x) => {},
             Err(e) => {
                 if !is_stopped(e) { self.note(e) }
-                return Err(self.errs)
+                return Err(unmangled_all(self.errs))
             },
         }
         self.bodies = true
@@ -6944,8 +6944,8 @@ impl Checker {
         }
         self.check_passed_on()
         self.check_become_words()
-        if self.errs.len() > 0 { return Err(self.errs) }
-        self.warnings = sort_by_place(self.warnings)
+        if self.errs.len() > 0 { return Err(unmangled_all(self.errs)) }
+        self.warnings = unmangled_all(sort_by_place(self.warnings))
         return Ok(0)
     }
 
@@ -8114,6 +8114,7 @@ impl Checker {
             let r = unify_param(sig.params[i], at, subst)
             // what a bound fixes is known for the next argument's hint (D171)
             subst = self.solve_bounds(sig.bounds, r.subst)
+            if sig.bounds.len() > 0 { self.check_generic_bounds(sig, subst, args[i])? }
             i = i + 1
         }
         subst = self.solve_bounds(sig.bounds, subst_then(subst, from_expected))
@@ -8133,6 +8134,50 @@ impl Checker {
         self.targs_taken = e.id
         self.call_types[e.id] = type_args_in(sig.type_params, subst)
         return Ok(opt_subst_type(sig.ret, subst))
+    }
+
+    // The bounds naming a generic trait with its arguments whose type
+    // parameter `subst` knows, held to the trait, after the argument `arg`:
+    // what such a bound solves the rest from, so its failure comes before
+    // the type parameters it leaves unsolved (MYLA-383). A list where an
+    // iterator is wanted gets a hint.
+    fun check_generic_bounds(self, sig: FuncSig, subst: [Subst], arg: Expr) -> Result<int32, CheckErr> {
+        for b in sig.bounds {
+            match subst_get(subst, b.tp) {
+                Some(concrete) => {
+                    var j = 0
+                    while j < b.traits.len() {
+                        let tr = b.traits[j]
+                        if b.args[j].len() > 0 {
+                            let ok = match concrete { Type.TParam(pn) => self.bound_has(pn, tr), _ => self.type_implements(concrete, tr)? }
+                            if !ok {
+                                let msg = format("type '{}' does not satisfy the bound '{}: {}' required by '{}'", type_name(concrete), b.tp, generic_name(tr, subst_type_list(b.args[j], subst)), sig.decl.name)
+                                return Err(CheckErr { line: arg.line, col: arg.col, sp: arg.sp, msg: msg, decl: -1, notes: self.iter_hint(concrete, tr, arg) })
+                            }
+                        }
+                        j += 1
+                    }
+                },
+                None => {},
+            }
+        }
+        return Ok(0)
+    }
+
+    // A `help` for a value of type `t` given where an `Iterator` is wanted,
+    // when `t` has an `iter()` method: a list's or a map's (MYLA-383).
+    fun iter_hint(self, t: Type, tr: str, arg: Expr) -> [Note] {
+        if tr != "Iterator" { return [] }
+        let has = match self.type_key(t) {
+            Some(k) => match self.method_sig(k, "iter") { Some(m) => true, None => false },
+            None => false,
+        }
+        if !has { return [] }
+        let how = match arg.kind {
+            ExprKind.Name(n) => format("write '{}.iter()'", n),
+            _ => "call its 'iter()'",
+        }
+        return [Note { label: "help", msg: format("'{}' is not an Iterator: {}", type_name(t), how), line: 0, col: 0, sp: no_span() }]
     }
 
     fun check_call_bounds(self, sig: FuncSig, subst: [Subst], e: Expr) -> Result<int32, CheckErr> {
@@ -9515,6 +9560,68 @@ fun child_reaches_self(e: Expr) -> CheckErr {
 #test("__task_cancelled")[true]
 fun starts_with_dunder(name: str) -> bool {
     return name.len() >= 2 && name[0] == '_' && name[1] == '_'
+}
+
+// `msg` with each name a module qualified (`std$iter$sum`, the loader's)
+// as a program writes it, by the module's last segment: `iter.sum`
+// (MYLA-383). No name of a program's own has a `$`.
+#test("function 'std$iter$sum' expects 2 argument(s), got 1")["function 'iter.sum' expects 2 argument(s), got 1"]
+#test("type 'std$deque$Deque<std$deque$Deque<int32>>' has no method 'pop'")["type 'deque.Deque<deque.Deque<int32>>' has no method 'pop'"]
+#test("'std$deque$Deque.push_back', 'geo$area'")["'deque.Deque.push_back', 'geo.area'"]
+#test("a 'b' of $5 and x$ and $y")["a 'b' of $5 and x$ and $y"]
+#test("größe$wert")["größe.wert"]
+fun unmangled(msg: str) -> str {
+    var has = false
+    for c in msg { if c == '$' { has = true } }
+    if !has { return msg }
+    var sb = StringBuilder()
+    let n = msg.len()
+    var i = 0
+    while i < n {
+        if !is_name_byte(msg[i]) {
+            sb.append_byte(msg[i])
+            i += 1
+            continue
+        }
+        // a run of name bytes and `$`: its last two segments, when every
+        // segment is a name
+        var j = i
+        while j < n && (is_name_byte(msg[j]) || msg[j] == '$') { j += 1 }
+        let run = msg[i:j]
+        let segs = run.split("$")
+        var ok = segs.len() >= 2
+        for g in segs { if g.len() == 0 || (g[0] >= '0' && g[0] <= '9') { ok = false } }
+        if ok { sb.append(segs[segs.len() - 2] + "." + segs[segs.len() - 1]) } else { sb.append(run) }
+        i = j
+    }
+    return sb.build()
+}
+
+// `es` with their messages and their notes' `unmangled`.
+fun unmangled_all(es: [CheckErr]) -> [CheckErr] {
+    var out: [CheckErr] = []
+    for e in es {
+        var f = e
+        f.msg = unmangled(e.msg)
+        var ns: [Note] = []
+        for n in e.notes {
+            var m = n
+            m.msg = unmangled(n.msg)
+            ns.push(m)
+        }
+        f.notes = ns
+        out.push(f)
+    }
+    return out
+}
+
+// Whether `b` is a byte of a name: an ASCII letter, digit or `_`, or a
+// byte of a character past ASCII (D72).
+#test(97u8)[true]
+#test(36u8)[false]
+#test(46u8)[false]
+fun is_name_byte(b: uint8) -> bool {
+    return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '_' || b >= 128
 }
 
 // =========================================================================

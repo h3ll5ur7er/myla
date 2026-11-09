@@ -116,7 +116,7 @@ fun squares(xs: [int]) -> iter.Map<list.ListIter<int>, int, int> {
 }
 ```
 
-There are no trait objects, so a list can't hold iterators of different kinds. A list or a map isn't an iterator itself: `xs |> iter.map(f)` is an error (for now "cannot infer the type of lambda parameter 'x'"): write `xs.iter()`. `std.list`'s own methods stay eager (D171), and a thin wrapper type with methods (`iter.of(xs).map(f)`) can be added if someone asks for it.
+There are no trait objects, so a list can't hold iterators of different kinds. A list or a map isn't an iterator itself: `xs |> iter.map(f)` is an error, "type '[int32]' does not satisfy the bound 'I: Iterator<T>' required by 'iter.map'", with the help "'[int32]' is not an Iterator: write 'xs.iter()'" ([[MYLA-383]]). `std.list`'s own methods stay eager (D171), and a thin wrapper type with methods (`iter.of(xs).map(f)`) can be added if someone asks for it.
 
 ## How it works
 
