@@ -9,6 +9,31 @@ from tests.burn._native import (CAN_BUILD_NATIVE, SKIP_REASON, Program, build_an
                                 run_file_both_now, selfhost_run, write_program)
 
 PROGRAMS = {
+    # D173 (MYLA-379): `IoError`'s `message()` and `Format`
+    "io_error_text": r"""// D173 (MYLA-379): an `IoError`'s `message()` and `Format`: the cause in
+// words, its name after it
+import std.fs as fs
+from std.fs import IoError, from_errno
+
+fun main() {
+    match fs.read_to_string("/no/such/dir/file.txt") {
+        Ok(s) => { print(s) },
+        Err(e) => {
+            print(f"cannot read: {e}")
+            print(e)
+            print(e.message() == f"{e}")
+        },
+    }
+    for code in [1, 2, 17, 20, 21, 39, 4, 125, 38, 32, 22, 111, 104, 103, 107, 98, 99, 110, 113, 101, 74, 5] {
+        print(from_errno(code))
+    }
+    let r: Result<str, IoError> = Err(IoError.Other(-3))
+    match r {
+        Ok(s) => { print(s) },
+        Err(e) => { print(f"<{e}>") },
+    }
+}
+""",
     # MYLA-379: `==` on `Option` and `Result` whose payloads are `Eq`
     "option_result_equality": r"""// MYLA-379: `==` and `!=` on `Option` and `Result` whose payloads are `Eq`:
 // literals on either side, nested, in tuples, lists, derived structs and
@@ -7892,6 +7917,8 @@ class TestCompilerParity(unittest.TestCase):
 # longer holds (a later decision changed its meaning) or there is none (a
 # program added or changed since): its output, pinned here.
 PINNED = {
+    # MYLA-379 (D173): new; native code gives the same
+    "io_error_text": 'cannot read: not found (NotFound)\nnot found (NotFound)\ntrue\npermission denied (PermissionDenied)\nnot found (NotFound)\nalready exists (AlreadyExists)\nnot a directory (NotADirectory)\nis a directory (IsADirectory)\ndirectory not empty (NotEmpty)\ninterrupted (Interrupted)\ncancelled (Cancelled)\nunsupported (Unsupported)\nbroken pipe (BrokenPipe)\ninvalid input (InvalidInput)\nconnection refused (ConnectionRefused)\nconnection reset (ConnectionReset)\nconnection aborted (ConnectionAborted)\nnot connected (NotConnected)\naddress in use (AddrInUse)\naddress not available (AddrNotAvailable)\ntimed out (TimedOut)\nhost unreachable (HostUnreachable)\nnetwork unreachable (NetworkUnreachable)\ninvalid data (InvalidData)\nerror 5 (Other(5))\n<error -3 (Other(-3))>\n',
     # MYLA-379: new; native code gives the same
     "option_result_equality": 'true\nfalse\nfalse\ntrue\nfalse\ntrue\ntrue\ntrue\nfalse\ntrue\ntrue\ntrue\ntrue\nfalse\nfalse\ntrue\nfalse\ntrue\nfalse\ntrue\nfalse\ntrue\nfalse\ntrue\ntrue\nfalse\ntrue\nfalse\ntrue\ntrue\nfalse\ntrue\ntrue\ntrue\ntrue\ntrue\nfalse\ntrue\n2\n',
     # MYLA-379: new; native code gives the same

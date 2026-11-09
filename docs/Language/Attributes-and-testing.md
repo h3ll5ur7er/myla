@@ -87,7 +87,7 @@ Every value-returning function in `examples/` carries tests, and the burn tests 
 
 ### Test functions
 
-A test that is a body rather than a line is a function without parameters under a bare `#test` (D162, [[MYLA-303]]): sugar for `#test()[()]`, named by the function's name, reported as `PASS  writes_and_reads`. It passes when it returns and fails on a runtime error (`assert`, `panic`, a failed expectation of `std.test`) or `exit`. Its result is none, or `Result<(), E>`: `Ok(())` passes, `Err(e)` fails the case with `e` shown as `{}` would show it (`FAIL  reads_the_config: IoError.NotFound`), so `?` is the way to say "and that must work". A test function is an ordinary function in every other way: it may be called, it takes `defer`, and `myla build` drops it with the cases.
+A test that is a body rather than a line is a function without parameters under a bare `#test` (D162, [[MYLA-303]]): sugar for `#test()[()]`, named by the function's name, reported as `PASS  writes_and_reads`. It passes when it returns and fails on a runtime error (`assert`, `panic`, a failed expectation of `std.test`) or `exit`. Its result is none, or `Result<(), E>`: `Ok(())` passes, `Err(e)` fails the case with `e` shown as `{}` would show it (`FAIL  reads_the_config: not found (NotFound)`, an `IoError`'s message, D173), so `?` is the way to say "and that must work". A test function is an ordinary function in every other way: it may be called, it takes `defer`, and `myla build` drops it with the cases.
 
 ```myla
 import std.test as test
