@@ -1,6 +1,6 @@
 # std.csv
 
-Comma-separated values, read and written after RFC 4180 ([[MYLA-332]]). The text is in memory; reading from a stream waits for `std.io`'s `Read` trait ([[MYLA-338]]). The module imports nothing.
+Comma-separated values, read and written after RFC 4180 ([[MYLA-332]]). `parse` and its kin read a text in memory, `stream_reader` the records of a stream one at a time ([[#Reading a stream]]). The module imports `std.io`'s `Read` and `std.fs`'s `IoError`.
 
 ```myla
 import std.csv as csv
@@ -50,6 +50,43 @@ The dialect is RFC 4180's, and where the RFC leaves a choice, Go's `encoding/csv
 
 The scratch comparison with Python's `csv` module (`strict=True`) on 23,000 random and written texts found the same records or an error for each, except the texts with a bare quote, which this module refuses.
 
+## Reading a stream
+
+`stream_reader(r)` reads the records of any stream `r: R` with `R: Read` (`std.io`, [[MYLA-338]]: a `File`, the standard input's `FdStream`, a `MemoryStream`, a decompressor), one at a time and without reading the stream whole: it holds the record it reads and a chunk of the stream (64 KiB at first, doubled while one record needs more). It is an `Iterator` of `Result<[str], CsvError>`.
+
+```myla
+import std.csv as csv
+import std.io as io
+
+fun main() {
+    let r = csv.stream_reader(io.from_str("id,label\r\n1,plain\r\n2,\"two\nlines\"\r\n3,\"bad\"x\r\n4,never\r\n"))
+    for row in r {
+        match row {
+            Ok(fields) => print(f"{fields.len()}: {fields[0]} [{fields[1]}]")
+            Err(e) => print(f"{e}")
+        }
+    }
+}
+// output:
+// 2: id [label]
+// 2: 1 [plain]
+// 2: 2 [two
+// lines]
+// 5:8: a delimiter or a line end expected after '"'
+```
+
+| Function or method | Result |
+| --- | --- |
+| `stream_reader<R: Read>(r: R) -> CsvStreamReader<R>` | A reader of the records of `r` |
+| `stream_reader_with<R: Read>(r: R, delim: char) -> CsvStreamReader<R>` | The same with another delimiter, as for `parse_with` |
+| `read_record(var self) -> Result<Option<[str]>, CsvError>` | The next record; `None` at the end of the stream |
+| `io_error(self) -> Option<IoError>` | Why the stream failed, after an `Io` error |
+| `next(var self) -> Option<Result<[str], CsvError>>` | The `Iterator`'s: `Some(Ok(record))` for each, `Some(Err(e))` once if the text is broken or the stream fails, then `None` |
+
+It gives what `parse_with` gives, the same records and the same error at the same line and column, wherever its reads end: a case reads 21 texts (every kind of quote, line end, blank line and error) with reads of every size from one byte to the whole text. After an error it gives nothing more. A header row is the first record; map the rest by it as `parse_records` does, if you want maps.
+
+Natively it reads a 50 MB file (359,208 records of nine fields, random ones written by Python's `csv.writer`, about a quarter of the fields quoted) at 93 MB/s in 8.6 MB of memory, where `fs.read_to_string` and `parse` take 97 MB/s and 240 MB (the best of five runs each; peak resident memory).
+
 ## Errors
 
 `CsvError { kind: CsvErrorKind, line: int, col: int }` says what is wrong and where: line and column count from 1, the column in characters, as `std.json`'s errors do. Its `Format` impl writes `line:col: what`, as in the example.
@@ -61,6 +98,7 @@ The scratch comparison with Python's `csv` module (`strict=True`) on 23,000 rand
 | `AfterQuote` | Something other than a delimiter or a line end after a quoted field's closing `"` |
 | `FieldCount` | `parse_records`: a record with more fields than the header (at the first extra field) or fewer (at the end of the record) |
 | `DuplicateName` | `parse_records`: a name the header has twice (at the second) |
+| `Io` | A stream reader's stream failed (at the end of what it read); `io_error()` gives the cause |
 
 ## Writing
 

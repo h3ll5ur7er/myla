@@ -57,7 +57,7 @@ The conventions (D164): operations on built-in types are methods (`s.split(",")`
 | `std.test` | [[Language/Standard-library/Test]] | Expectations, temporary directories and the program under test, for test functions |
 | `std.json` | [[Language/Standard-library/Json]] | JSON values, parsing, compact and indented writing, paths, typed getters; typed values by `#derive(Json)`, `encode` and `decode<T>` |
 | `std.toml` | [[Language/Standard-library/Toml]] | The TOML subset of manifests and lock files |
-| `std.csv` | [[Language/Standard-library/Csv]] | RFC 4180 CSV: records, a header row mapped to names, writing |
+| `std.csv` | [[Language/Standard-library/Csv]] | RFC 4180 CSV: records, a header row mapped to names, a stream read record by record, writing |
 | `std.ini` | [[Language/Standard-library/Ini]] | INI files: sections, keys, comments, read and written in order |
 | `std.yaml` | [[Language/Standard-library/Yaml]] | The safe subset of YAML 1.2: block and flow collections, quoted and block scalars, the core schema, writing; anchors, tags and second documents refused |
 | `std.xml` | [[Language/Standard-library/Xml]] | Well-formed XML 1.0 without a DTD: a tree, a pull reader over a text or a stream, writing with escaping and indentation |

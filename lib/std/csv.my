@@ -9,6 +9,11 @@
 // `csv` (with `strict=True`) decide it: records may have different numbers of
 // fields, spaces are part of a field, and a `"` inside a field that doesn't
 // start with one is an error. `write` quotes a field only when it must.
+// `stream_reader` reads the records of a stream (`std.io`'s `Read`) one at a
+// time, holding only the record it reads and a chunk of the stream.
+
+from std.io import Read, from_str
+from std.fs import IoError
 
 // What is wrong with a text.
 #derive(Eq)
@@ -27,6 +32,9 @@ pub enum CsvErrorKind {
     // `parse_records`: a name the header has twice (the position is the
     // second)
     DuplicateName,
+    // A stream reader's stream failed (the position is the end of what it
+    // read); `io_error()` gives the cause
+    Io,
 }
 
 // An error and where it is: line and column count from 1, the column in
@@ -42,6 +50,7 @@ impl Format for CsvError {
     // `line:col: what`, e.g. `2:5: '"' in an unquoted field`.
     #test(CsvError { kind: CsvErrorKind.BareQuote, line: 2, col: 5 }, "")["2:5: '\"' in an unquoted field"]
     #test(CsvError { kind: CsvErrorKind.FieldCount, line: 3, col: 1 }, "")["3:1: a record with another number of fields than the header"]
+    #test(CsvError { kind: CsvErrorKind.Io, line: 1, col: 4 }, "")["1:4: the stream failed"]
     fun format(self, spec: str) -> str {
         let what = match self.kind {
             BareQuote => "'\"' in an unquoted field"
@@ -49,6 +58,7 @@ impl Format for CsvError {
             AfterQuote => "a delimiter or a line end expected after '\"'"
             FieldCount => "a record with another number of fields than the header"
             DuplicateName => "a name the header has twice"
+            Io => "the stream failed"
         }
         return f"{self.line}:{self.col}: {what}"
     }
@@ -146,6 +156,11 @@ struct Reader {
     track: bool,
     starts: [int],
     end: int,
+    // the position of `s[0]`: its line and column, and whether the byte
+    // before it is a CR (a stream reader drops what it has read)
+    line0: int,
+    col0: int,
+    cr0: bool,
 }
 
 fun new_reader(text: str, delim: char, track: bool) -> Reader {
@@ -153,27 +168,62 @@ fun new_reader(text: str, delim: char, track: bool) -> Reader {
     if d >= 128 || delim == '"' || delim == '\n' || delim == '\r' {
         panic("std.csv: the delimiter must be ASCII and neither '\"' nor a line end")
     }
-    return Reader { s: text, d: d as uint8, i: 0, track: track, starts: [], end: 0 }
+    return Reader { s: text, d: d as uint8, i: 0, track: track, starts: [], end: 0, line0: 1, col0: 1, cr0: false }
 }
 
 impl Reader {
     // An error at byte offset `at`: its line and column counted from the
     // start, as an error is rare.
     fun error(self, kind: CsvErrorKind, at: int) -> CsvError {
-        var line = 1
-        var col = 1
+        let (line, col, _) = self.position(at)
+        return CsvError { kind: kind, line: line, col: col }
+    }
+
+    // The line and column of byte offset `at`, and whether the byte before
+    // it is a CR. A CR starts a line, and so does an LF but one right after
+    // a CR.
+    #test(new_reader("a\r\nb\rc\nd", ',', false), 8)[(4, 2, false)]
+    #test(new_reader("é\r", ',', false), 3)[(2, 1, true)]
+    fun position(self, at: int) -> (int, int, bool) {
+        var line = self.line0
+        var col = self.col0
+        var cr = self.cr0
         var k = 0
         while k < at {
             let c = self.s[k]
-            if c == '\n' || (c == '\r' && (k + 1 >= self.s.len() || self.s[k + 1] != '\n')) {
+            if c == '\r' {
                 line += 1
                 col = 1
-            } else if c < 128u8 || c >= 192u8 {
-                col += 1 // not a UTF-8 continuation byte
+                cr = true
+            } else if c == '\n' {
+                if !cr {
+                    line += 1
+                    col = 1
+                }
+                cr = false
+            } else {
+                if c < 128u8 || c >= 192u8 {
+                    col += 1 // not a UTF-8 continuation byte
+                }
+                cr = false
             }
             k += 1
         }
-        return CsvError { kind: kind, line: line, col: col }
+        return (line, col, cr)
+    }
+
+    // The bytes before the current position dropped, and `more` added after
+    // the rest.
+    fun refill(var self, more: str) {
+        let (line, col, cr) = self.position(self.i)
+        var sb = StringBuilder(self.s.len() - self.i + more.len())
+        sb.append(self.s, self.i, self.s.len())
+        sb.append(more)
+        self.s = sb.build()
+        self.i = 0
+        self.line0 = line
+        self.col0 = col
+        self.cr0 = cr
     }
 
     // Moves past blank lines; whether a record follows.
@@ -271,6 +321,119 @@ impl Reader {
     }
 }
 
+// --- Reading a stream ---------------------------------------------------------
+
+// How many bytes a stream reader asks its stream for at first: doubled while
+// a record needs more, back to this once it is read.
+const CHUNK: int = 65536
+
+// The records of a stream (`std.io`'s `Read`), read one at a time: what
+// `parse_with` gives, the same records and the same errors, without the text
+// in memory. It holds the record it reads and a chunk of the stream. An
+// `Iterator` of `Result<[str], CsvError>`: `Ok` for each record, one `Err`
+// if the text is broken or the stream fails, then nothing.
+pub struct CsvStreamReader<R> {
+    src: [R],            // the stream, as `std.io`'s `Buffered` keeps it
+    rd: Reader,          // the bytes read and not yet used, from rd.i on
+    eof: bool,           // the stream has ended
+    done: bool,          // the end, or an error, given
+    first: int,          // the first read's size
+    chunk: int,          // the next read's size
+    io: Option<IoError>,
+}
+
+// A reader of the records the stream `r` holds.
+pub fun stream_reader<R: Read>(r: R) -> CsvStreamReader<R> {
+    return stream_reader_sized(r, ',', CHUNK)
+}
+
+// `stream_reader` with another delimiter, as for `parse_with`.
+pub fun stream_reader_with<R: Read>(r: R, delim: char) -> CsvStreamReader<R> {
+    return stream_reader_sized(r, delim, CHUNK)
+}
+
+// A stream reader whose first read is of `chunk` bytes (the tests' small
+// ones put the ends of reads everywhere).
+fun stream_reader_sized<R: Read>(r: R, delim: char, chunk: int) -> CsvStreamReader<R> {
+    return CsvStreamReader { src: [r], rd: new_reader("", delim, false), eof: false, done: false,
+                             first: chunk, chunk: chunk, io: None }
+}
+
+impl<R: Read> CsvStreamReader<R> {
+    // The next record; None at the end of the stream. A record is read once
+    // its line end, or the end of the stream, is in: one that reaches the
+    // end of the bytes read so far is read again with more.
+    fun read_record(var self) -> Result<Option<[str]>, CsvError> {
+        while !self.done {
+            if self.rd.skip_blank() {
+                let start = self.rd.i
+                match self.rd.record() {
+                    Ok(fields) => {
+                        if self.eof || self.rd.i < self.rd.s.len() {
+                            self.chunk = self.first
+                            return Ok(Some(fields))
+                        }
+                        self.rd.i = start
+                    }
+                    Err(e) => {
+                        // only an open quote may close in what follows
+                        if self.eof || e.kind != CsvErrorKind.UnclosedQuote {
+                            self.done = true
+                            return Err(e)
+                        }
+                    }
+                }
+            } else if self.eof {
+                self.done = true
+                return Ok(None)
+            }
+            self.fill()?
+        }
+        return Ok(None)
+    }
+
+    // Why the stream failed, if it did.
+    fun io_error(self) -> Option<IoError> {
+        return self.io
+    }
+
+    // The next chunk of the stream after the bytes not yet used.
+    fun fill(var self) -> Result<(), CsvError> {
+        var r = self.src.pop()
+        let got = r.read_str(self.chunk)
+        self.src.push(r)
+        match got {
+            Ok(more) => {
+                if more.len() == 0 {
+                    self.eof = true
+                } else {
+                    self.rd.refill(more)
+                    if self.chunk < 0x1000000 {
+                        self.chunk *= 2
+                    }
+                }
+                return Ok(())
+            }
+            Err(e) => {
+                self.io = Some(e)
+                self.done = true
+                return Err(self.rd.error(CsvErrorKind.Io, self.rd.s.len()))
+            }
+        }
+    }
+}
+
+impl<R: Read> Iterator<Result<[str], CsvError>> for CsvStreamReader<R> {
+    // The next record; none after the last and after an error.
+    fun next(var self) -> Option<Result<[str], CsvError>> {
+        return match self.read_record() {
+            Ok(Some(fields)) => Some(Ok(fields))
+            Ok(None) => None
+            Err(e) => Some(Err(e))
+        }
+    }
+}
+
 // --- Writing ------------------------------------------------------------------
 
 // The records as CSV text, each ended by CRLF. A field is quoted only when it
@@ -353,5 +516,136 @@ fun round_trip() {
             }
         }
         Err(e) => assert(false, f"{e}")
+    }
+}
+
+// --- The stream reader's tests --------------------------------------------------
+
+// What a stream reader of `text` gives, its first read of `chunk` bytes: the
+// records, or the first error, as `parse_with` gives them.
+fun streamed(text: str, delim: char, chunk: int) -> Result<[[str]], CsvError> {
+    let r = stream_reader_sized(from_str(text), delim, chunk)
+    var rows: [[str]] = []
+    for row in r {
+        rows.push(row?)
+    }
+    return Ok(rows)
+}
+
+// A stream reader gives what `parse_with` gives, wherever its reads end: a
+// read of every size from one byte to the whole text.
+#test
+fun stream_as_parse() {
+    let texts = ["a,b\r\n1,2\r\n", "a,b\n1,2", "\"x, y\",\"say \"\"hi\"\"\"\n", "\"two\nlines\",z",
+                 "a,,\n,\n", "a\n\n\r\nb\n", "\"\"\n", "", "\r\n\r\n", "a\"b", "ok\n\"open", "\"a\"b",
+                 "\"é\nü\" x,\"y\"z", "x\r\r\ny\rz\r", "\"a\r\nb\"\r\n\"c\"\"\"\"d\"\r\n", "é,ü\r\n\"ß\"\r\n\r\nend",
+                 "1,2\r\n\r\nbad\"q", "a\r\n\r\n\r\"open", "\"\"\"\"", "\"x\"\r", "a,\"b\"\r\n\"\"\"c\",d\"e"]
+    for t in texts {
+        let want = parse(t)
+        var chunk = 1
+        while chunk <= t.len() + 1 {
+            let got = streamed(t, ',', chunk)
+            if got != want {
+                print(f"{t.len()} bytes, reads of {chunk}")
+            }
+            assert(got == want, "the records parse gives")
+            chunk += 1
+        }
+    }
+    let tabs = "a\tb\n\"1\t2\"\t3\r\n"
+    assert(streamed(tabs, '\t', 3) == parse_with(tabs, '\t'), "another delimiter")
+    let rows = [["plain", "with,comma", "with \"quote\""], [""], ["multi\r\nline", "", "é"], ["\"", ",", "\r"]]
+    assert(streamed(write(rows), ',', 5) == Ok(rows), "what write writes")
+}
+
+// A stream reader holds a record and a chunk, not the text; a long record
+// is read in reads that double, not again for each.
+#test
+fun stream_holds_a_chunk() {
+    var sb = StringBuilder()
+    var k = 0
+    while k < 5000 {
+        sb.append(f"{k},\"field, {k}\"\r\n")
+        k += 1
+    }
+    let text = sb.build()
+    var r = stream_reader_sized(from_str(text), ',', 256)
+    var n = 0
+    var most = 0
+    var going = true
+    while going {
+        match r.read_record() {
+            Ok(Some(fields)) => {
+                assert(fields == [f"{n}", f"field, {n}"], "the record")
+                n += 1
+                if r.rd.s.len() > most {
+                    most = r.rd.s.len()
+                }
+            }
+            Ok(None) => { going = false }
+            Err(e) => {
+                assert(false, "an error")
+                going = false
+            }
+        }
+    }
+    assert(n == 5000 && text.len() == 97780, "every record")
+    assert(most < 1024, "a chunk in memory")
+    var long = StringBuilder()
+    var field = StringBuilder()
+    long.append("\"")
+    k = 0
+    while k < 50000 {
+        long.append("ab\"\"c")
+        field.append("ab\"c")
+        k += 1
+    }
+    long.append("\",x\n")
+    let one = long.build()
+    var lr = stream_reader_sized(from_str(one), ',', 1)
+    assert(lr.read_record() == Ok(Some([field.build(), "x"])), "a record of 250,000 bytes")
+    assert(lr.chunk == 1, "the reads back to their first size")
+}
+
+// A stream that gives `text` and then fails.
+struct Failing {
+    text: str,
+    given: bool,
+}
+
+impl Read for Failing {
+    fun read(var self, n: int) -> Result<[uint8], IoError> {
+        let s = self.read_str(n)?
+        var b: [uint8] = []
+        for i in 0..s.len() {
+            b.push(s[i])
+        }
+        return Ok(b)
+    }
+
+    fun read_str(var self, n: int) -> Result<str, IoError> {
+        if self.given {
+            return Err(IoError.Other(5))
+        }
+        self.given = true
+        return Ok(self.text)
+    }
+}
+
+// A stream that fails is an `Io` error at the end of what was read, after
+// the records before it, and `io_error()` its cause.
+#test
+fun stream_failure() {
+    var r = stream_reader_sized(Failing { text: "a,b\r\né,", given: false }, ',', 16)
+    match r.io_error() {
+        Some(_) => assert(false, "no cause yet")
+        None => {}
+    }
+    assert(r.read_record() == Ok(Some(["a", "b"])), "the record before")
+    assert(r.read_record() == Err(CsvError { kind: CsvErrorKind.Io, line: 2, col: 3 }), "the failure")
+    assert(r.read_record() == Ok(None), "nothing after it")
+    match r.io_error() {
+        Some(Other(5)) => {}
+        _ => assert(false, "the cause")
     }
 }
