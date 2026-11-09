@@ -1,6 +1,7 @@
-//~ type error: StringBuilder() takes no arguments
-// A StringBuilder starts empty; append to it after construction.
+//~ type error: StringBuilder() takes nothing or a capacity (capacity: int): found 'str'
+// A StringBuilder starts empty, with room for as many bytes as a capacity
+// says (MYLA-369); append to it after construction.
 #main
 fun main() {
-    let sb = StringBuilder(1)
+    let sb = StringBuilder("text")
 }

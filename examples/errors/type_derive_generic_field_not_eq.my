@@ -1,0 +1,11 @@
+//~ type error: cannot derive Eq for struct 'Index': field 'by_name' has type '[str: T]', which is not Eq
+// A generic type's derive checks its fields as a concrete one's does
+// (MYLA-379): a map isn't `Eq`, whatever `T` is.
+#derive(Eq)
+struct Index<T> {
+    by_name: [str: T],
+}
+
+fun main() {
+    print(1)
+}

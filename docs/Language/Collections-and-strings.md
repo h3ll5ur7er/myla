@@ -256,7 +256,7 @@ fun main() {
 // a, b, c
 ```
 
-`StringBuilder()` creates an empty builder (it takes no arguments); `sb.append(s)`, `sb.append_byte(b: uint8)` and `sb.append_char(c: char)` (the character's UTF-8 bytes, [[MYLA-390]]) add to it (a `var` place is needed); `sb.len()` is its byte length; `sb.build()` returns a new `str`. Use it instead of `+` in loops, which copies the whole string each time.
+`StringBuilder()` creates an empty builder; `StringBuilder(n)` (an `int32`) one with room for `n` bytes, so appends up to that many copy only their own bytes, never what is there already ([[MYLA-369]]; a negative `n` is 0; 48 MB of 48-byte appends took 46 to 49 ms natively with the capacity given, 77 to 87 ms without); `sb.append(s)`, `sb.append_byte(b: uint8)` and `sb.append_char(c: char)` (the character's UTF-8 bytes, [[MYLA-390]]) add to it (a `var` place is needed); `sb.len()` is its byte length; `sb.build()` returns a new `str`. Use it instead of `+` in loops, which copies the whole string each time.
 
 `sb.append(s, start, end)` adds the bytes of `s` from `start` up to `end` (both `int32`), which is how to take part of a string ([[MYLA-85]]). The range must lie within `s` (`0 <= start <= end <= s.len()`), else it is a runtime error, like an index out of bounds. A range may split a multi-byte character; the bytes are kept, and joined again they make the same string.
 

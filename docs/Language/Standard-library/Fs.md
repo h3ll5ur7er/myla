@@ -11,6 +11,7 @@ The file system: whole files, files read and written a piece at a time, metadata
 | `make_dir_all(path: str) -> Result<(), IoError>` | Makes the directory and the parents it lacks, like `mkdir -p`; an existing directory is fine |
 | `exists(path: str) -> bool` | Whether the path names anything (symbolic links followed, so a dangling one doesn't count) |
 | `is_dir(path: str) -> bool`, `is_file(path: str) -> bool` | Whether it names a directory, a regular file (links followed) |
+| `is_symlink(path: str) -> bool` | Whether it names a symbolic link itself, a dangling one too ([[MYLA-363]]) |
 | `current_dir() -> Result<str, IoError>` | The working directory: an absolute path without symbolic links, as the kernel gives it; a directory that was removed is `NotFound` ([[MYLA-98]]) |
 | `remove_file(path: str) -> Result<(), IoError>` | Removes a file, or a symbolic link itself; a directory is `IsADirectory` ([[MYLA-96]]) |
 | `remove_dir(path: str) -> Result<(), IoError>` | Removes an empty directory; one that isn't is `NotEmpty` |
@@ -20,7 +21,7 @@ The file system: whole files, files read and written a piece at a time, metadata
 
 The file's bytes become the string unchanged, even when they aren't valid UTF-8: strings work on bytes, and `chars` gives U+FFFD for the invalid ones ([[Language/Collections-and-strings]], [[MYLA-12]]).
 
-`from_errno(code: int32) -> IoError` turns the platform layer's code (Linux's numbers on every target so far; wasm32's maps WASI's onto them) into its cause; `std.io` and `std.process` use it too. `io_error_name(e: IoError) -> str` is the cause's name, its variant's (`"NotFound"`, `"Other(9)"`): `IoError` has no `Format` ([[MYLA-379]]), and the error messages of std.compress, std.archive and std.http name an `IoError` by it ([[MYLA-376]]).
+`from_errno(code: int32) -> IoError` turns the platform layer's code (Linux's numbers on every target so far; wasm32's maps WASI's onto them) into its cause; `std.io` and `std.process` use it too. `e.message()` is the cause in words with its name after it (D173, [[MYLA-379]]): `not found (NotFound)`, `permission denied (PermissionDenied)`, `connection refused (ConnectionRefused)`, `error 5 (Other(5))` with the platform's code. `IoError` implements `Format` by it, so `f"{e}"`, `print(e)` and a test function's report (`FAIL  reads_the_config: not found (NotFound)`) show that text (D168). `io_error_name(e: IoError) -> str` is the cause's name alone, its variant's (`"NotFound"`, `"Other(9)"`), by which the error messages of std.compress, std.archive and std.http name an `IoError` ([[MYLA-376]]).
 
 ```myla
 from std.fs import list_dir, make_dir_all, is_dir, IoError
@@ -36,11 +37,11 @@ fun main() {
                 if is_dir("src/" + n) { print(n + "/") } else { print(n) }
             }
         },
-        Err(e) => { print("no src directory") },
+        Err(e) => { print(f"no src directory: {e}") },
     }
 }
 // output:
-// no src directory
+// no src directory: not found (NotFound)
 ```
 
 ## Files
@@ -62,7 +63,7 @@ A `File` is an open file, read and written at its cursor a piece at a time, so a
 | `f.seek(pos: SeekFrom) -> Result<int64, IoError>` | The cursor moved: `SeekFrom.Start(k)`, `Current(k)`, `End(k)`; the new offset. Before the start is `InvalidInput` (`Seek`) |
 | `f.len() -> Result<int64, IoError>` | The file's size in bytes now |
 | `f.metadata() -> Result<Metadata, IoError>` | Its size, kind, permissions and modification time now |
-| `f.close() -> Result<(), IoError>` | Closes it; every later operation on it, a second `close` too, is `Other(9)` (EBADF) |
+| `f.close() -> Result<(), IoError>` | Closes it; every later operation on it, a second `close` too, is `Other(9)` (EBADF). What the system couldn't keep of the data written is `Other(5)` (EIO), the descriptor closed all the same: `__close`'s errno ([[MYLA-378]]) |
 | `f.descriptor() -> int32` | The platform's descriptor (`Pollable`) |
 
 A file a function opens is closed by that function: Myla has no destructors, so nothing closes it when it goes out of scope, and an open file stays open until `close` or the end of the program. `defer` right after the open is the idiom:
@@ -123,12 +124,13 @@ Copying a stream of any size is a loop over a buffer: `copy` from `std.io` reads
 
 | Item | Result |
 | --- | --- |
-| `metadata(path: str) -> Result<Metadata, IoError>` | What the path names, symbolic links followed; a missing path is `NotFound` |
+| `metadata(path: str) -> Result<Metadata, IoError>` | What the path names, symbolic links followed; a missing path, or a dangling link, is `NotFound` |
+| `symlink_metadata(path: str) -> Result<Metadata, IoError>` | The path itself: a symbolic link isn't followed, its kind is `Symlink` and its size the length of the path it holds ([[MYLA-363]]) |
 | `struct Metadata { size: int64, kind: FileKind, permissions: int32, modified_ns: int64 }` | The size in bytes, the kind, the permission bits (`mode & 0o7777`), the last modification in nanoseconds since 1970 (`std.time.from_unix_ns(m.modified_ns)` is its `DateTime`) |
-| `m.is_file() -> bool`, `m.is_dir() -> bool` | Whether it is a regular file, a directory |
-| `enum FileKind { File, Dir, CharDevice, BlockDevice, Fifo, Socket, Other }` | The kind, from the mode's type bits |
+| `m.is_file() -> bool`, `m.is_dir() -> bool`, `m.is_symlink() -> bool` | Whether it is a regular file, a directory, a symbolic link |
+| `enum FileKind { File, Dir, CharDevice, BlockDevice, Fifo, Socket, Symlink, Other }` | The kind, from the mode's type bits; `Symlink` only from `symlink_metadata` |
 
-The platform layer gives the size and the time of an open descriptor only (`__fstat`), so `metadata(path)` opens a file or a directory to read it, and a file the program may not read is `PermissionDenied`. It doesn't open anything else, where opening could wait (a FIFO) or do something (a device): their size and time are 0, their kind and permissions are there. On wasm32 there are no permissions: the mode is made up from the kind (0o644 for a file, 0o755 for a directory, [[Language/Targets]]), and so a device's or a FIFO's kind is `Other`.
+Neither opens anything: they stat the path (`__path_stat`, [[MYLA-378]]), so a file the program may not read has its metadata too, and a device, a FIFO or a socket its own size and time (until November 2026 `metadata` opened files and directories to read them, and gave anything else size and time 0). On wasm32 there are no permissions: the mode is made up from the kind (0o644 for a file, 0o755 for a directory, 0o777 for a link, [[Language/Targets]]), and so a device's or a FIFO's kind is `Other`.
 
 ## Temporary files and directories
 
@@ -171,6 +173,7 @@ Files opened and read or written a piece at a time, at a cursor, and the system'
 | `__open(path: str, flags: int, mode: int) -> int` | open(2) with `O_CLOEXEC`; `flags` are Myla's own bits, the same on every target: 1 read, 2 write (both: read and write), 4 create, 8 truncate, 16 append (each write at the end, wherever the cursor is), 32 exclusive (with create: EEXIST when the file is there) | The descriptor, or -1. Without 1 or 2, with another bit, or a NUL in the path: EINVAL. `mode` is the permissions of a file it creates, less the umask |
 | `__seek(fd: int, offset: int64, whence: int) -> int64` | lseek(2): `offset` from the start (`whence` 0), the cursor (1) or the end (2) | The new offset from the start, or -1 (EINVAL for another whence or a place before the start, ESPIPE for a pipe) |
 | `__fstat(fd: int) -> [int64]` | fstat(2) | `[size, mode, mtime]`: the size in bytes, the mode as `__stat` gives it (type bits and permissions), the modification time in nanoseconds since 1970; `[]` on an error |
+| `__path_stat(path: str, follow: bool) -> [int64]` | stat(2) when `follow`, else lstat(2) ([[MYLA-378]], [[MYLA-363]]) | `[size, mode, mtime, dev, ino]`: `__fstat`'s three, then the device and the file's number on it (together they tell one file from another: `glob.walk_with` uses them to find a loop); a link itself has the type bits 0o120000. `[]` on an error (ENOENT for a dangling link followed, EINVAL for a NUL in the path) |
 | `__random_bytes(n: int) -> [uint8]` | getrandom(2) until `n` bytes are there (a call gives at most 32 MB, and a signal may cut one of 256 bytes or more short) | `n` bytes; `[]` on an error (EINVAL for a negative `n`) |
 
-aarch64 opens with `openat`; wasm32 uses `path_open` (the flags as its open flags, rights and `FDFLAGS_APPEND`), `fd_seek`, `fd_filestat_get` and `random_get`. WASI has no permissions: `mode` is not used there, and the mode `__fstat` gives is made up from the file's kind, as `__stat`'s is (0o100644 for a file, 0o40755 for a directory, 0o644 for anything else). Each sets `__io_errno()` as the directory primitives do; the interpreter calls the same primitives of its own.
+aarch64 opens with `openat` and stats with `newfstatat` (`AT_SYMLINK_NOFOLLOW` for a link itself); wasm32 uses `path_open` (the flags as its open flags, rights and `FDFLAGS_APPEND`), `fd_seek`, `fd_filestat_get`, `path_filestat_get` (with `LOOKUPFLAGS_SYMLINK_FOLLOW` or without), `fd_close` and `random_get`. WASI has no permissions: `mode` is not used there, and the mode `__fstat` and `__path_stat` give is made up from the file's kind, as `__stat`'s is (0o100644 for a file, 0o40755 for a directory, 0o120777 for a link, 0o644 for anything else). Each sets `__io_errno()` as the directory primitives do, `__close` too since [[MYLA-378]] (EBADF for a descriptor that isn't open, a negative one included; EIO; EINTR counts as closed, as Linux has closed it then); the interpreter calls the same primitives of its own.

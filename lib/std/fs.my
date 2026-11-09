@@ -99,8 +99,8 @@ fun net_error(code: int32) -> IoError {
 }
 
 // The name of `e`'s cause, its variant's: `NotFound`, `Other(9)` with the
-// platform's code. A module's error message names an `IoError` by it
-// (`IoError` has no `Format`, MYLA-379).
+// platform's code, as `e.message()` ends (D173). A module's error message
+// may name an `IoError` by it (MYLA-376).
 #test(IoError.NotFound)["NotFound"]
 #test(IoError.ConnectionReset)["ConnectionReset"]
 #test(IoError.Other(9))["Other(9)"]
@@ -128,6 +128,51 @@ pub fun io_error_name(e: IoError) -> str {
         NetworkUnreachable => "NetworkUnreachable"
         InvalidData => "InvalidData"
         Other(code) => f"Other({code})"
+    }
+}
+
+impl IoError {
+    // The cause in words, its name after it (D173, MYLA-379): `not found
+    // (NotFound)`, `error 5 (Other(5))` with the platform's code.
+    #test(IoError.NotFound)["not found (NotFound)"]
+    #test(IoError.PermissionDenied)["permission denied (PermissionDenied)"]
+    #test(IoError.ConnectionRefused)["connection refused (ConnectionRefused)"]
+    #test(IoError.AddrInUse)["address in use (AddrInUse)"]
+    #test(IoError.Other(5))["error 5 (Other(5))"]
+    fun message(self) -> str {
+        let what = match self {
+            NotFound => "not found"
+            PermissionDenied => "permission denied"
+            AlreadyExists => "already exists"
+            NotADirectory => "not a directory"
+            IsADirectory => "is a directory"
+            NotEmpty => "directory not empty"
+            Interrupted => "interrupted"
+            Cancelled => "cancelled"
+            Unsupported => "unsupported"
+            BrokenPipe => "broken pipe"
+            InvalidInput => "invalid input"
+            ConnectionRefused => "connection refused"
+            ConnectionReset => "connection reset"
+            ConnectionAborted => "connection aborted"
+            NotConnected => "not connected"
+            AddrInUse => "address in use"
+            AddrNotAvailable => "address not available"
+            TimedOut => "timed out"
+            HostUnreachable => "host unreachable"
+            NetworkUnreachable => "network unreachable"
+            InvalidData => "invalid data"
+            Other(code) => f"error {code}"
+        }
+        return f"{what} ({io_error_name(self)})"
+    }
+}
+
+// `f"{e}"`, `print(e)` and a test's report show the message (D168, D173).
+impl Format for IoError {
+    #test(IoError.IsADirectory, "")["is a directory (IsADirectory)"]
+    fun format(self, spec: str) -> str {
+        return self.message()
     }
 }
 
@@ -162,11 +207,13 @@ pub fun write_to_file(path: str, contents: str) -> Result<(), IoError> {
 // `__list_dir(path)` gives every name the directory lists, each followed by a
 // NUL byte, in the file system's order ("." and ".." may be among them);
 // `__mkdir(path, mode)` makes one directory; `__stat(path)` gives the
-// `st_mode` of what the path names (symbolic links followed), or -1;
-// `__getcwd()` gives the working directory, or "" (MYLA-98); `__unlink(path)`,
-// `__rmdir(path)` and `__rename(from, to)` remove a file (or a symbolic link
-// itself), remove an empty directory and rename (MYLA-96). Each sets the errno
-// that `__io_errno` reads.
+// `st_mode` of what the path names (symbolic links followed), or -1, and
+// `__path_stat(path, follow)` its size, mode, modification time, device and
+// number, of a symbolic link itself when not `follow`, without opening it
+// (MYLA-378, MYLA-363); `__getcwd()` gives the working directory, or ""
+// (MYLA-98); `__unlink(path)`, `__rmdir(path)` and `__rename(from, to)`
+// remove a file (or a symbolic link itself), remove an empty directory and
+// rename (MYLA-96). Each sets the errno that `__io_errno` reads.
 //
 // `tests/burn/test_fs.py` covers them on every target, and the test functions
 // at the end of this file use them (`myla test` runs only the cases of the
@@ -175,6 +222,7 @@ pub fun write_to_file(path: str, contents: str) -> Result<(), IoError> {
 const S_IFMT: int32 = 0xF000
 const S_IFDIR: int32 = 0x4000
 const S_IFREG: int32 = 0x8000
+const S_IFLNK: int32 = 0xA000
 
 // The working directory, as an absolute path without symbolic links (the
 // kernel's getcwd, through the primitive `__getcwd`, MYLA-98). A directory
@@ -299,6 +347,13 @@ pub fun is_file(path: str) -> bool {
     return mode >= 0 && (mode & S_IFMT) == S_IFREG
 }
 
+// Whether `path` names a symbolic link (itself, not what it names: a
+// dangling one too), MYLA-363.
+pub fun is_symlink(path: str) -> bool {
+    let st = __path_stat(path, false)
+    return st.len() == 5 && ((st[1] as int32) & S_IFMT) == S_IFLNK
+}
+
 // The names in `raw`, each followed by a NUL byte, without "." and "..".
 fun split_names(raw: str) -> [str] {
     var names: [str] = []
@@ -365,7 +420,7 @@ fun sorted_names(names: [str]) -> [str] {
 // `__open(path, flags, mode)` opens a descriptor with Myla's own flags, the
 // same on every target (the constants below); `__read`, `__write`,
 // `__seek`, `__fstat` and `__close` work on it (MYLA-336). Each sets the
-// errno `__io_errno` reads, but `__close`, which reports nothing.
+// errno `__io_errno` reads (`__close` since MYLA-378).
 
 const O_READ: int32 = 1
 const O_WRITE: int32 = 2
@@ -529,16 +584,16 @@ impl File {
     }
 
     // Close the file. Every later operation on it, and a second `close`,
-    // is `Other(9)` (EBADF).
+    // is `Other(9)` (EBADF); data the system couldn't keep is `Other(5)`
+    // (EIO). The descriptor is closed even then.
     fun close(var self) -> Result<(), IoError> {
-        // `__close` reports nothing, so `__fstat` tells a closed descriptor
-        let st = __fstat(self.fd)
         let fd = self.fd
         self.fd = -1
-        if st.len() != 3 {
-            return Err(from_errno(__io_errno()))
-        }
         __close(fd)
+        let err = __io_errno()
+        if err != 0 {
+            return Err(from_errno(err))
+        }
         return Ok(())
     }
 }
@@ -609,7 +664,8 @@ impl Pollable for File {
 
 // --- Metadata (MYLA-339) ------------------------------------------------------------
 
-// What a path names, symbolic links followed.
+// What a path names: `Symlink` only from `symlink_metadata`, which
+// doesn't follow a link (MYLA-363).
 #derive(Eq)
 pub enum FileKind {
     File,
@@ -618,6 +674,7 @@ pub enum FileKind {
     BlockDevice,
     Fifo,
     Socket,
+    Symlink,
     Other,
 }
 
@@ -646,27 +703,36 @@ impl Metadata {
     fun is_dir(self) -> bool {
         return self.kind == FileKind.Dir
     }
+
+    // Whether it is a symbolic link (only `symlink_metadata` gives one).
+    #test(metadata_of(4, 0o120777, 0))[true]
+    #test(metadata_of(3, 0o100644, 0))[false]
+    fun is_symlink(self) -> bool {
+        return self.kind == FileKind.Symlink
+    }
 }
 
-// The metadata of what `path` names (symbolic links followed). A missing
-// path is `NotFound`. The size and time come from opening it to read, as
-// the platform layer has no other way yet: a file the program may not read
-// is `PermissionDenied`. Only files and directories are opened; for
-// anything else (a device, a FIFO, a socket), where opening could wait or
-// do something, the size and the time are 0.
+// The metadata of what `path` names (symbolic links followed), without
+// opening it (MYLA-378): a file the program may not read has its metadata
+// too, and a device, a FIFO or a socket its own. A missing path, or a
+// dangling link, is `NotFound`.
 pub fun metadata(path: str) -> Result<Metadata, IoError> {
-    let mode = __stat(path)
-    if mode < 0 {
+    return stat_of(path, true)
+}
+
+// The metadata of `path` itself: a symbolic link isn't followed, its kind
+// is `Symlink` and its size the length of the path it holds (MYLA-363).
+pub fun symlink_metadata(path: str) -> Result<Metadata, IoError> {
+    return stat_of(path, false)
+}
+
+// `metadata` or `symlink_metadata`, from `__path_stat`.
+fun stat_of(path: str, follow: bool) -> Result<Metadata, IoError> {
+    let st = __path_stat(path, follow)
+    if st.len() != 5 {
         return Err(from_errno(__io_errno()))
     }
-    let kind = kind_of(mode)
-    if kind != FileKind.File && kind != FileKind.Dir {
-        return Ok(metadata_of(0, mode, 0))
-    }
-    var f = open(path)?
-    let m = f.metadata()
-    let closed = f.close()
-    return m
+    return Ok(metadata_of(st[0], st[1] as int32, st[2]))
 }
 
 // The metadata `__fstat`'s three values (`[size, mode, mtime]`) make.
@@ -684,12 +750,13 @@ fun metadata_of(size: int64, mode: int32, modified_ns: int64) -> Metadata {
 #test(0o60660)[FileKind.BlockDevice]
 #test(0o10644)[FileKind.Fifo]
 #test(0o140755)[FileKind.Socket]
-#test(0o120777)[FileKind.Other]
+#test(0o120777)[FileKind.Symlink]
 #test(0o644)[FileKind.Other]
 fun kind_of(mode: int32) -> FileKind {
     let t = mode & S_IFMT
     if t == S_IFREG { return FileKind.File }
     if t == S_IFDIR { return FileKind.Dir }
+    if t == S_IFLNK { return FileKind.Symlink }
     if t == 0x2000 { return FileKind.CharDevice }
     if t == 0x6000 { return FileKind.BlockDevice }
     if t == 0x1000 { return FileKind.Fifo }
@@ -970,6 +1037,9 @@ fun metadata_of_paths() -> Result<(), IoError> {
     let d = metadata(dir)?
     assert(d.kind == FileKind.Dir && d.is_dir(), "a directory")
     assert(error_of(metadata(dir + "/nothing")) == "NotFound", "a missing path")
+    assert(symlink_metadata(dir + "/f")? == f && symlink_metadata(dir)? == d, "no link: the same")
+    assert(error_of(symlink_metadata(dir + "/nothing")) == "NotFound", "a missing path itself")
+    assert(!is_symlink(dir + "/f") && !is_symlink(dir) && !is_symlink(dir + "/nothing"), "no links")
     var w = open_append(dir + "/f")?
     w.write_str("678")?
     assert(w.len()? == 8, "the length follows the writes")

@@ -347,6 +347,70 @@ fun main() {
 """
 
 
+# Symbolic links (MYLA-363) in the tree `test_symbolic_links` makes: `t/lf`
+# names `f.txt`, `t/la` the directory `a`, `t/a/up` its parent (a loop) and
+# `t/dangling` nothing; `t/secret` may not be read (mode 0). The metadata
+# comes without opening anything (MYLA-378).
+LINKS = """import std.fs as fs
+import std.glob as glob
+from std.fs import IoError
+
+fun paths(r: Result<[str], IoError>) -> str {
+    return match r {
+        Ok(ps) => ps.join(" ")
+        Err(e) => fs.io_error_name(e)
+    }
+}
+
+fun main() {
+    print(fs.is_symlink("t/lf"))
+    print(fs.is_symlink("t/dangling"))
+    print(fs.is_symlink("t/f.txt"))
+    print(fs.is_symlink("t/a") || fs.is_symlink("t/missing"))
+    print(fs.exists("t/dangling"))
+    match fs.symlink_metadata("t/lf") {
+        Ok(m) => print(m.is_symlink() && m.size == 5)
+        Err(e) => print(fs.io_error_name(e))
+    }
+    match fs.metadata("t/lf") {
+        Ok(m) => print(m.is_file() && m.size == 3 && m.modified_ns > 0)
+        Err(e) => print(fs.io_error_name(e))
+    }
+    match fs.metadata("t/la") {
+        Ok(m) => print(m.is_dir())
+        Err(e) => print(fs.io_error_name(e))
+    }
+    match fs.metadata("t/dangling") {
+        Ok(m) => print("there")
+        Err(e) => print(fs.io_error_name(e))
+    }
+    match fs.metadata("t/secret") {
+        // 0, or the 0o644 wasm32 makes up
+        Ok(m) => print(m.is_file() && (m.permissions == 0 || m.permissions == 0o644))
+        Err(e) => print(fs.io_error_name(e))
+    }
+    print(paths(glob.walk("t")))
+    print(paths(glob.walk_with("t", true)))
+    print(paths(glob.glob_in("t", "**")))
+    print(paths(glob.glob_in("t", "la/*")))
+}
+"""
+LINKS_OUTPUT = """true
+true
+false
+false
+false
+true
+true
+true
+NotFound
+true
+a a/up a/x.txt dangling f.txt la lf secret
+a a/up a/x.txt dangling f.txt la la/up la/x.txt lf secret
+a a/up a/x.txt dangling f.txt la lf secret
+la/up la/x.txt
+"""
+
 # Removing and renaming (MYLA-96): files, empty and full directories, a
 # tree holding a symbolic link to a directory outside it (removed, not
 # followed), and the errors.
@@ -575,6 +639,26 @@ class DirectoryParity(unittest.TestCase):
             with self.subTest(implementation=impl):
                 self.assertEqual(result, (NUL_PATHS_OUTPUT, "", 0))
                 self.assertEqual(sorted(os.listdir(self.work_dir("nul", impl))), ["q"])
+
+    def test_symbolic_links(self) -> None:
+        # MYLA-363: a link's own kind, and walks that don't follow links (or
+        # do, but not round a loop); MYLA-378: metadata without opening
+        def prepare(work: str) -> None:
+            t = os.path.join(work, "t")
+            os.makedirs(os.path.join(t, "a"))
+            with open(os.path.join(t, "f.txt"), "w") as fh:
+                fh.write("abc")
+            open(os.path.join(t, "a", "x.txt"), "w").close()
+            os.symlink("f.txt", os.path.join(t, "lf"))
+            os.symlink("a", os.path.join(t, "la"))
+            os.symlink("..", os.path.join(t, "a", "up"))
+            os.symlink("nothing", os.path.join(t, "dangling"))
+            open(os.path.join(t, "secret"), "w").close()
+            os.chmod(os.path.join(t, "secret"), 0)
+
+        for impl, result in self.run_all("links", LINKS, prepare).items():
+            with self.subTest(implementation=impl):
+                self.assertEqual(result, (LINKS_OUTPUT, "", 0))
 
     def test_many_long_names(self) -> None:
         names = [f"{i:03d}" + "x" * (i - 3) if i >= 3 else "n" * i for i in range(1, 256)]

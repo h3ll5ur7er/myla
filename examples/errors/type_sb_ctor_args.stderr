@@ -1,0 +1,5 @@
+type error: StringBuilder() takes nothing or a capacity (capacity: int): found 'str'
+  --> examples/errors/type_sb_ctor_args.my:6:28
+  |
+6 |     let sb = StringBuilder("text")
+  |                            ^^^^^^

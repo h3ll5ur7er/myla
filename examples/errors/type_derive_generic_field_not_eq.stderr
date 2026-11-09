@@ -1,0 +1,5 @@
+type error: cannot derive Eq for struct 'Index': field 'by_name' has type '[str: T]', which is not Eq
+  --> examples/errors/type_derive_generic_field_not_eq.my:5:1
+  |
+5 | struct Index<T> {
+  | ^^^^^^^^^^^^^^^^^

@@ -324,13 +324,10 @@ fun hex_of(bytes: [uint8]) -> str {
     return sb.build()
 }
 
+// The bytes of `s`, in one copy (MYLA-369).
 #test("abc")[[97u8, 98u8, 99u8]]
 fun bytes_of(s: str) -> [uint8] {
-    var out: [uint8] = []
-    for i in 0..s.len() {
-        out.push(s[i])
-    }
-    return out
+    return __str_to_bytes(s)
 }
 
 #test(0u32)[48u8]

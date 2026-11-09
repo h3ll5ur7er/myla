@@ -134,27 +134,25 @@ pub trait Pollable {
 // How many bytes one `read` asks for at least.
 const CHUNK: int32 = 4096
 
-// The bytes of `s`.
+// How many bytes `copy` reads at a time (MYLA-379): a 256 MiB file copied
+// into a new one natively took 164 ms with 4 KiB, 91 with 64 KiB and 85 with
+// 128 KiB; to `/dev/null`, 57, 40 and 39.
+const COPY_CHUNK: int32 = 65536
+
+// The bytes of `s`, in one copy (MYLA-369).
 fun bytes_of(s: str) -> [uint8] {
-    var out: [uint8] = []
-    let n = s.len()
-    var i = 0
-    while i < n {
-        out.push(s[i])
-        i += 1
-    }
-    return out
+    return __str_to_bytes(s)
 }
 
-// The bytes of `b` from `start` up to `end`, as text.
+// The bytes of `b` from `start` up to `end`, as text: one copy of them
+// all, two of a part.
+#test([97u8, 98u8, 99u8], 0, 3)["abc"]
+#test([97u8, 98u8, 99u8], 1, 2)["b"]
 fun text_of(b: [uint8], start: int32, end: int32) -> str {
-    var sb = StringBuilder()
-    var i = start
-    while i < end {
-        sb.append_byte(b[i])
-        i += 1
+    if start == 0 && end == b.len() {
+        return __bytes_to_str(b)
     }
-    return sb.build()
+    return __bytes_to_str(b[start:end])
 }
 
 // The bytes of `s` from `start` up to `end`.
@@ -662,7 +660,7 @@ pub fun buffered_writer<W: Write>(w: W) -> BufferedWriter<W> {
 pub fun buffered_writer_with<W: Write>(w: W, capacity: int32) -> BufferedWriter<W> {
     var cap = capacity
     if cap < 1 { cap = 1 }
-    return BufferedWriter { sink: [w], buf: StringBuilder(), cap: cap }
+    return BufferedWriter { sink: [w], buf: StringBuilder(cap), cap: cap }
 }
 
 impl<W: Write> BufferedWriter<W> {
@@ -678,7 +676,7 @@ impl<W: Write> BufferedWriter<W> {
     fun drain(var self) -> Result<(), IoError> {
         if self.buf.len() == 0 { return Ok(()) }
         self.push_out(self.buf.build())?
-        self.buf = StringBuilder()
+        self.buf = StringBuilder(self.cap)
         return Ok(())
     }
 
@@ -701,9 +699,10 @@ impl<W: Write> BufferedWriter<W> {
 
 impl<W: Write> Write for BufferedWriter<W> {
     fun write(var self, b: [uint8]) -> Result<int, IoError> {
-        if !self.make_room(b.len())? { return self.push_out(text_of(b, 0, b.len())) }
-        for x in b { self.buf.append_byte(x) }
-        return Ok(b.len())
+        let s = text_of(b, 0, b.len())
+        if !self.make_room(s.len())? { return self.push_out(s) }
+        self.buf.append(s)
+        return Ok(s.len())
     }
 
     fun write_str(var self, s: str) -> Result<int, IoError> {
@@ -740,23 +739,23 @@ impl<W: Write + Seek> Seek for BufferedWriter<W> {
 // keeps, does).
 pub fun read_all<R: Read>(r: R) -> Result<[uint8], IoError> {
     var src = r
-    var out: [uint8] = []
+    var out = StringBuilder()
     while true {
-        let chunk = src.read(CHUNK)?
+        let chunk = src.read_str(CHUNK)?
         if chunk.len() == 0 { break }
-        for b in chunk { out.push(b) }
+        out.append(chunk)
     }
-    return Ok(out)
+    return Ok(bytes_of(out.build()))
 }
 
-// Everything `r` gives up to its end written to `w`, which is flushed and
-// given back (the way to the bytes of a `MemoryStream` or a
+// Everything `r` gives up to its end written to `w`, 64 KiB at a time, which
+// is flushed and given back (the way to the bytes of a `MemoryStream` or a
 // `BufferedWriter`'s stream). Both are taken by value, as in `read_all`.
 pub fun copy<R: Read, W: Write>(r: R, w: W) -> Result<W, IoError> {
     var src = r
     var dst = w
     while true {
-        let chunk = src.read_str(CHUNK)?
+        let chunk = src.read_str(COPY_CHUNK)?
         if chunk.len() == 0 { break }
         dst.write_str(chunk)?
     }
@@ -956,6 +955,18 @@ fun copy_and_read_all() {
                 Err(_) => panic("into_inner")
             }
         }
+        Err(_) => panic("copy")
+    }
+    // more than one of its reads (MYLA-379)
+    var sb = StringBuilder()
+    var i = 0
+    while i < COPY_CHUNK + 7 {
+        sb.append_byte((i % 251) as uint8)
+        i += 1
+    }
+    let big = sb.build()
+    match copy(from_str(big), memory_stream()) {
+        Ok(m) => holds(m.text() == big, "a copy of more than 64 KiB")
         Err(_) => panic("copy")
     }
 }
