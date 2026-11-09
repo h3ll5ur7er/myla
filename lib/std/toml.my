@@ -9,11 +9,15 @@
 //
 // `parse_doc` also keeps where each key and its value are, so a program that
 // checks the document (the project tool, MYLA-93) can point at them.
+//
+// `to_string` writes a document back (MYLA-402), so that `parse` reads it as
+// the same value, keys in the same order (see "Writing" below).
 
 import std.map as map_m // `m.get(k)`
 
 // A TOML value. A table keeps its keys in the order they were defined (a
 // table that a header like `[a.b]` creates on the way counts from there).
+#derive(Eq)
 pub enum Toml {
     Str(str),
     Int(int64),
@@ -659,4 +663,305 @@ impl Parser {
         }
         return Ok(Toml.Table(members))
     }
+}
+
+// --- Writing ------------------------------------------------------------------
+//
+// A table's members are written in order: its key/value pairs under its
+// header, then its tables, each under a header of its own (`[a.b]`), and its
+// arrays of tables (`[[a.b]]`, one header an element). A header ends the
+// table above it, so a table that comes before a key/value pair of its table
+// is written inline (`point = { x = 1 }`), and the keys keep their order: a
+// document `parse` gives is read back as itself. A table that holds only
+// tables gets no header of its own (`[git.color]`, not `[git]` first).
+
+// The TOML text of the document `doc`, a table, one line a key/value pair
+// or a header, a blank line before each header. A value that isn't a table
+// is written as `inline_string` writes it.
+pub fun to_string(doc: Toml) -> str {
+    return match doc {
+        Toml.Table(members) => {
+            var w = Writer { sb: StringBuilder() }
+            w.body([], members)
+            w.sb.build()
+        }
+        _ => inline_string(doc)
+    }
+}
+
+// The TOML text of the value `v` on one line, as it stands on the right of
+// `=`: a string quoted (a literal string when that saves escaping a '"' or a
+// '\', else a basic string with escapes), an integer in decimal, an array
+// `[a, b]`, a table `{ k = v }`.
+pub fun inline_string(v: Toml) -> str {
+    return match v {
+        Toml.Str(s) => quote_string(s)
+        Toml.Int(n) => f"{n}"
+        Toml.Bool(b) => match b { true => "true", false => "false" }
+        Toml.Array(items) => {
+            var sb = StringBuilder()
+            sb.append_byte('[')
+            for x in items {
+                if sb.len() > 1 { sb.append(", ") }
+                sb.append(inline_string(x))
+            }
+            sb.append_byte(']')
+            sb.build()
+        }
+        Toml.Table(members) => {
+            if members.len() == 0 { return "{}" }
+            var sb = StringBuilder()
+            sb.append("{ ")
+            for m in members {
+                if sb.len() > 2 { sb.append(", ") }
+                sb.append(key_text(m.0))
+                sb.append(" = ")
+                sb.append(inline_string(m.1))
+            }
+            sb.append(" }")
+            sb.build()
+        }
+    }
+}
+
+// A key as TOML writes it: bare when it can be, else a basic string.
+#test("name")["name"]
+#test("a.b")["\"a.b\""]
+#test("")["\"\""]
+#test("é")["\"é\""]
+fun key_text(k: str) -> str {
+    if is_bare_key(k) { return k }
+    return basic_string_text(k)
+}
+
+// `s` as a literal string when it holds a '"' or a '\' and needs no other escape
+// (no "'" and no control character, tab included), else as a basic string.
+fun quote_string(s: str) -> str {
+    var special = false
+    var i = 0
+    while i < s.len() {
+        let c = s[i]
+        if c == '\'' || c == '\t' || is_control(c) { return basic_string_text(s) }
+        if c == '"' || c == '\\' { special = true }
+        i += 1
+    }
+    if !special { return basic_string_text(s) }
+    return "'" + s + "'"
+}
+
+// `s` as a basic string: '"', '\' and the control characters escaped,
+// `\b \t \n \f \r` by name, the others as `\u00XX`.
+#test("a\"b")["\"a\\\"b\""]
+#test("\u{1b}x")["\"\\u001Bx\""]
+fun basic_string_text(s: str) -> str {
+    var sb = StringBuilder(s.len() + 2)
+    sb.append_byte('"')
+    var run = 0                                  // start of bytes to copy as they are
+    var i = 0
+    while i < s.len() {
+        let c = s[i]
+        if c == '"' || c == '\\' || c < 32u8 || c == 127u8 {
+            sb.append(s, run, i)
+            if c == '"' { sb.append("\\\"") }
+            else if c == '\\' { sb.append("\\\\") }
+            else if c == 8u8 { sb.append("\\b") }
+            else if c == '\t' { sb.append("\\t") }
+            else if c == '\n' { sb.append("\\n") }
+            else if c == 12u8 { sb.append("\\f") }
+            else if c == 13u8 { sb.append("\\r") }
+            else { sb.append("\\u" + hex4(c as int32)) }
+            run = i + 1
+        }
+        i += 1
+    }
+    sb.append(s, run, s.len())
+    sb.append_byte('"')
+    return sb.build()
+}
+
+// Whether `v` is written under a header of its own when it can be: a table,
+// or an array of tables (not empty).
+#test(Toml.Table([]))[true]
+#test(Toml.Array([Toml.Table([]), Toml.Table([])]))[true]
+#test(Toml.Array([Toml.Table([]), Toml.Int(1)]))[false]
+#test(Toml.Array([]))[false]
+#test(Toml.Str("x"))[false]
+fun is_section(v: Toml) -> bool {
+    return match v {
+        Toml.Table(_) => true
+        Toml.Array(items) => {
+            if items.len() == 0 { return false }
+            for x in items {
+                match x {
+                    Toml.Table(_) => {},
+                    _ => { return false },
+                }
+            }
+            true
+        }
+        _ => false
+    }
+}
+
+// The index of the last member of a table that is written as a key/value
+// pair under the table's header, -1 if none is: every member up to it is
+// one, the rest are sections.
+fun last_pair(members: [(str, Toml)]) -> int32 {
+    var k = members.len() - 1
+    while k >= 0 && is_section(members[k].1) { k -= 1 }
+    return k
+}
+
+// A key path as a header writes it.
+#test(["dependencies", "a b"])["dependencies.\"a b\""]
+fun header_path(path: [str]) -> str {
+    var sb = StringBuilder()
+    for k in path {
+        if sb.len() > 0 { sb.append_byte('.') }
+        sb.append(key_text(k))
+    }
+    return sb.build()
+}
+
+struct Writer {
+    sb: StringBuilder,
+}
+
+impl Writer {
+    // The header `open path close`, after a blank line unless it starts the
+    // text.
+    fun header(var self, open: str, path: [str], close: str) {
+        if self.sb.len() > 0 { self.sb.append_byte('\n') }
+        self.sb.append(open)
+        self.sb.append(header_path(path))
+        self.sb.append(close)
+        self.sb.append_byte('\n')
+    }
+
+    // The members of the table at `path`, its header written already (or
+    // left out).
+    fun body(var self, path: [str], members: [(str, Toml)]) {
+        let last = last_pair(members)
+        var k = 0
+        while k <= last {
+            self.sb.append(key_text(members[k].0))
+            self.sb.append(" = ")
+            self.sb.append(inline_string(members[k].1))
+            self.sb.append_byte('\n')
+            k += 1
+        }
+        k = last + 1
+        while k < members.len() {
+            let sub = with_key(path, members[k].0)
+            match members[k].1 {
+                Toml.Table(ms) => {
+                    if ms.len() == 0 || last_pair(ms) >= 0 { self.header("[", sub, "]") }
+                    self.body(sub, ms)
+                },
+                Toml.Array(items) => {
+                    for x in items {
+                        self.header("[[", sub, "]]")
+                        match x {
+                            Toml.Table(ms) => { self.body(sub, ms) },
+                            _ => {},
+                        }
+                    }
+                },
+                _ => {},
+            }
+            k += 1
+        }
+    }
+}
+
+// --- Tests of the writer -------------------------------------------------------
+
+// "same" when the document `text` holds is written and read back as itself;
+// else what went wrong, with the text written.
+fun round_trip(text: str) -> str {
+    let doc = match parse(text) {
+        Ok(d) => d,
+        Err(e) => { return format("{}:{}: {} in the original", e.line, e.col, e.msg) },
+    }
+    let written = to_string(doc)
+    return match parse(written) {
+        Ok(back) => match back == doc { true => "same", false => "different:\n" + written }
+        Err(e) => format("{}:{}: {} in\n{}", e.line, e.col, e.msg, written)
+    }
+}
+
+#test
+fun writes_a_manifest() {
+    let doc = Toml.Table([
+        ("package", Toml.Table([
+            ("name", Toml.Str("shapes")),
+            ("version", Toml.Str("0.1.0")),
+            ("authors", Toml.Array([Toml.Str("Ada <ada@example.org>")])),
+        ])),
+        ("dependencies", Toml.Table([
+            ("geo", Toml.Table([("path", Toml.Str("../geo"))])),
+            ("big", Toml.Table([("path", Toml.Str("vendor/big")), ("optional", Toml.Bool(true))])),
+        ])),
+    ])
+    let want = "[package]\nname = \"shapes\"\nversion = \"0.1.0\"\nauthors = [\"Ada <ada@example.org>\"]\n\n[dependencies.geo]\npath = \"../geo\"\n\n[dependencies.big]\npath = \"vendor/big\"\noptional = true\n"
+    assert(to_string(doc) == want, to_string(doc))
+}
+
+#test
+fun writes_tables_inline_before_a_key() {
+    // a table before a key/value pair is written inline, so the keys keep
+    // their order
+    let doc = Toml.Table([
+        ("version", Toml.Int(1)),
+        ("point", Toml.Table([("x", Toml.Int(-3)), ("y", Toml.Int(9223372036854775807i64))])),
+        ("empty", Toml.Table([])),
+        ("last", Toml.Bool(false)),
+        ("tail", Toml.Table([])),
+    ])
+    let want = "version = 1\npoint = { x = -3, y = 9223372036854775807 }\nempty = {}\nlast = false\n\n[tail]\n"
+    assert(to_string(doc) == want, to_string(doc))
+}
+
+#test
+fun writes_arrays_of_tables() {
+    // TOML that the subset doesn't read back: an array of tables as `[[…]]`
+    // sections, an array of other values inline
+    let doc = Toml.Table([
+        ("mixed", Toml.Array([Toml.Int(1), Toml.Array([]), Toml.Table([("a", Toml.Str("b"))])])),
+        ("bin", Toml.Array([
+            Toml.Table([("name", Toml.Str("a")), ("opt", Toml.Table([("x", Toml.Int(1))]))]),
+            Toml.Table([]),
+        ])),
+    ])
+    let want = "mixed = [1, [], { a = \"b\" }]\n\n[[bin]]\nname = \"a\"\n\n[bin.opt]\nx = 1\n\n[[bin]]\n"
+    assert(to_string(doc) == want, to_string(doc))
+    // a value that isn't a table is written as `inline_string` writes it
+    assert(to_string(Toml.Int(7)) == "7", "a value")
+}
+
+#test(Toml.Str("plain"))["\"plain\""]
+#test(Toml.Str("tab\there \"q\" \\ \n\r\u{8}\u{c}\u{1}\u{7f}é"))["\"tab\\there \\\"q\\\" \\\\ \\n\\r\\b\\f\\u0001\\u007Fé\""]
+#test(Toml.Str("C:\\dir\\file"))["'C:\\dir\\file'"] // a literal string reads better
+#test(Toml.Str("say \"hi\""))["'say \"hi\"'"]
+#test(Toml.Str("it's \"x\""))["\"it's \\\"x\\\"\""]
+#test(Toml.Int(-9223372036854775807i64 - 1i64))["-9223372036854775808"]
+#test(Toml.Array([Toml.Str("a"), Toml.Bool(true)]))["[\"a\", true]"]
+#test(Toml.Table([("a b", Toml.Int(1)), ("", Toml.Int(2)), ("ok-1_x", Toml.Table([]))]))["{ \"a b\" = 1, \"\" = 2, ok-1_x = {} }"]
+fun inline_cases(v: Toml) -> str {
+    return inline_string(v)
+}
+
+#test("a = 1\n")["same"]
+#test("")["same"]
+#test("# only a comment\n")["same"]
+#test("[package]\nname = \"geo\"\nauthors = [\"Ada\", 'Bob']\n")["same"] // the page's
+#test("# myla.toml\n[package]\nname = \"shapes\"\nversion = \"0.1.0\"\ndescription = \"Shapes and their areas\"\nauthors = [\"Ada <ada@example.org>\"]\nlicense = \"MIT\"\n\n[dependencies]\ngeo = { path = \"../geo\" }\njson5 = { url = \"https://example.org/json5.git\", tag = \"v1.2.0\" }\n\n[dependencies.big]            # the same as big = { path = \"vendor/big\" }\npath = \"vendor/big\"\n")["same"] // a manifest
+#test("version = 1\n\n[pkgs.color]\nurl = \"https://example.org/color.git\"\nbranch = \"main\"\ncommit = \"0b1c2d3e\"\n\n[pkgs.json5]\nurl = \"x\"\ntag = \"v1.2.0\"\n")["same"] // a lock file
+#test("[a.b]\nx = 1\n[a]\ny = 2\n[a.c.d]\n[e]\n")["same"] // a table after its sub-table
+#test("\"a.b\" = 1\n'c\"d' = \"\\u00e9\\t\\\\\"\n[\"x y\".'z']\n\"\" = { \"\" = { q = [] } }\n")["same"] // quoted keys
+#test("n = -9223372036854775808\nm = +1_000\nt = true\nf = false\ns = 'lit\\eral'\n")["same"]
+#test("[a]\n[b]\n[a.x]\n")["same"] // a table extended after another
+#test("k = \"\\u0000\\u001f\\u007f\\b\\f\\r\\n\"\n")["same"] // control characters
+fun round_trip_cases(text: str) -> str {
+    return round_trip(text)
 }

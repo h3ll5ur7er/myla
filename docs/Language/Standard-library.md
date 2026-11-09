@@ -53,10 +53,11 @@ The conventions (D164): operations on built-in types are methods (`s.split(",")`
 | `std.map` | [[Language/Standard-library/Map]] | Methods on maps (`get`, `get_or`, `update`, `values`, `items`, `merge`) and `counts` |
 | `std.task` | [[Language/Standard-library/Task]] | Child tasks in numbers known at run time, cancellation, time limits, notifiers, channels, worker pools, the first of several |
 | `std.time` | [[Language/Standard-library/Time]] | The monotonic and wall clocks, `Duration`, `Instant`, `DateTime` in UTC, RFC 3339 and ISO 8601 |
+| `std.bench` | [[Language/Standard-library/Bench]] | Timing a closure over repeated runs: a warm-up that fixes the calls a run makes, `run`, `run_n`, `run_for`, the minimum, median and spread on one line, `black_box` |
 | `std.log` | [[Language/Standard-library/Log]] | `error`, `warn`, `info`, `debug` to the standard error with a time, the level from `MYLA_LOG` |
 | `std.test` | [[Language/Standard-library/Test]] | Expectations, temporary directories and the program under test, for test functions |
 | `std.json` | [[Language/Standard-library/Json]] | JSON values, parsing, compact and indented writing, paths, typed getters; typed values by `#derive(Json)`, `encode` and `decode<T>` |
-| `std.toml` | [[Language/Standard-library/Toml]] | The TOML subset of manifests and lock files |
+| `std.toml` | [[Language/Standard-library/Toml]] | The TOML subset of manifests and lock files, read and written back (`to_string`) |
 | `std.csv` | [[Language/Standard-library/Csv]] | RFC 4180 CSV: records, a header row mapped to names, a stream read record by record, writing |
 | `std.ini` | [[Language/Standard-library/Ini]] | INI files: sections, keys, comments, read and written in order |
 | `std.yaml` | [[Language/Standard-library/Yaml]] | The safe subset of YAML 1.2: block and flow collections, quoted and block scalars, the core schema, writing; anchors, tags and second documents refused |
@@ -69,6 +70,7 @@ The conventions (D164): operations on built-in types are methods (`s.split(",")`
 | `std.set` | [[Language/Standard-library/Set]] | `Set<T>` in insertion order: insert, remove, union, intersection, difference |
 | `std.deque` | [[Language/Standard-library/Deque]] | `Deque<T>`, the double-ended queue and the queue: a ring buffer, indexable |
 | `std.heap` | [[Language/Standard-library/Heap]] | Binary heaps: `Heap<T: Ord>`, least or greatest first, and `KeyedHeap<T>` by an `int64` priority |
+| `std.cache` | [[Language/Standard-library/Cache]] | `Lru<K, V>`, a least-recently-used cache in constant time over a map and an index-linked list; `Memo<K, V>`, memoising a function or a recursion given as a step |
 | `std.grid` | [[Language/Standard-library/Grid]] | `Grid<T>`, a 2D array of cells: read from text and printed, `at` and `set` with bounds, 4 and 8 neighbours, `(x, y)` positions |
 | `std.graph` | [[Language/Standard-library/Graph]] | Searches over a neighbour function: BFS, DFS, Dijkstra, A*, topological sort, connected components, and dense forms over numbered nodes |
 | `std.bitset` | [[Language/Standard-library/Bitset]] | `BitSet`, fixed or growable sets of small integers over `uint64` words: `popcount`, union, intersection, difference, complement |

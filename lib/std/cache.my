@@ -1,0 +1,439 @@
+// std.cache: an LRU cache and memoising (MYLA-404).
+//
+// `Lru<K, V>` keeps at most `capacity` entries and forgets the least
+// recently used one to make room. Myla has no references, so the recency
+// list is a doubly linked list of indices: an entry lives in a slot (its key,
+// its value, the slots before and after it in the list), a map takes a key to
+// its slot, and the list runs from `head` (the most recently used) to `tail`
+// (the least). `get`, `put`, `remove` and `contains` are a map operation and
+// a few index writes: constant time on average (MYLA-310). A removed entry's
+// slot goes to a free list for the next `put`, so the slots never outnumber
+// the capacity, and a slot keeps its old key and value until it is written
+// again (a generic `V` has nothing else to fill it with).
+//
+// `Memo<K, V>` computes a missing value with a closure and keeps it in a
+// map. A closure can't reach the memo it is in (a capture is a copy, and a
+// copy can't be changed), so a recursive function doesn't call the memo:
+// it is a step, `(k, known) => …`, that returns `Ok(v)` when the values it
+// needs are in `known` and `Err(j)`, the key it needs first, when one isn't.
+// `get` keeps the keys it is computing on a stack of its own, so a recursion
+// a million deep needs no call stack.
+//
+// A constructor needs an expected type, which fixes `K` and `V` (MYLA-315):
+// `var c: Lru<str, int> = cache.new(100)`, a field, a parameter or a return
+// type.
+
+import .map as map_m // `m.get(k)`
+
+pub struct Lru<K, V> {
+    cap: int,
+    // The slot of each key
+    index: [K: int],
+    // The slots: a key, its value, and the slots before (towards `head`) and
+    // after it in the recency list, -1 at the ends
+    slot_keys: [K],
+    slot_vals: [V],
+    prev: [int],
+    next: [int],
+    // The most and the least recently used slot, -1 when empty
+    head: int,
+    tail: int,
+    // Slots that `remove` emptied
+    free: [int],
+}
+
+// An empty cache that holds at most `capacity` entries (none for a
+// `capacity` below 1).
+pub fun new<K: Eq + Hash, V>(capacity: int) -> Lru<K, V> {
+    return Lru { cap: capacity, index: [:], slot_keys: [], slot_vals: [], prev: [], next: [], head: -1, tail: -1, free: [] }
+}
+
+impl<K: Eq + Hash, V> Lru<K, V> {
+    // The number of entries.
+    fun len(self) -> int {
+        return self.index.len()
+    }
+
+    fun is_empty(self) -> bool {
+        return self.index.len() == 0
+    }
+
+    // The most entries it holds.
+    fun capacity(self) -> int {
+        return self.cap
+    }
+
+    // Whether `k` has an entry; it doesn't count as a use.
+    fun contains(self, k: K) -> bool {
+        return self.index.contains(k)
+    }
+
+    // The value of `k`, if it has one, which makes it the most recently used.
+    fun get(var self, k: K) -> Option<V> {
+        let i = match self.index.get(k) {
+            Some(i) => i,
+            None => { return None },
+        }
+        if i != self.head {
+            self.unlink(i)
+            self.link_front(i)
+        }
+        return Some(self.slot_vals[i])
+    }
+
+    // The value of `k`, if it has one, without making it the most recently
+    // used.
+    fun peek(self, k: K) -> Option<V> {
+        return match self.index.get(k) {
+            Some(i) => Some(self.slot_vals[i])
+            None => None
+        }
+    }
+
+    // Sets the value of `k` to `v` and makes it the most recently used. When
+    // `k` is new and the cache full, the least recently used entry makes
+    // room: that entry, else None. A cache of no capacity keeps nothing and
+    // gives `(k, v)` back.
+    fun put(var self, k: K, v: V) -> Option<(K, V)> {
+        match self.index.get(k) {
+            Some(i) => {
+                self.slot_vals[i] = v
+                if i != self.head {
+                    self.unlink(i)
+                    self.link_front(i)
+                }
+                return None
+            },
+            None => {},
+        }
+        if self.cap < 1 {
+            return Some((k, v))
+        }
+        if self.index.len() >= self.cap {
+            let i = self.tail
+            let old = (self.slot_keys[i], self.slot_vals[i])
+            self.index.remove(old.0)
+            self.unlink(i)
+            self.slot_keys[i] = k
+            self.slot_vals[i] = v
+            self.index[k] = i
+            self.link_front(i)
+            return Some(old)
+        }
+        var i = -1
+        if self.free.len() > 0 {
+            i = self.free[^1]
+            self.free.pop()
+            self.slot_keys[i] = k
+            self.slot_vals[i] = v
+        } else {
+            i = self.slot_keys.len()
+            self.slot_keys.push(k)
+            self.slot_vals.push(v)
+            self.prev.push(-1)
+            self.next.push(-1)
+        }
+        self.index[k] = i
+        self.link_front(i)
+        return None
+    }
+
+    // Takes the entry of `k` out: its value, if it had one.
+    fun remove(var self, k: K) -> Option<V> {
+        let i = match self.index.get(k) {
+            Some(i) => i,
+            None => { return None },
+        }
+        self.index.remove(k)
+        self.unlink(i)
+        self.free.push(i)
+        return Some(self.slot_vals[i])
+    }
+
+    // Takes every entry out (the capacity stays).
+    fun clear(var self) {
+        self.index = [:]
+        self.slot_keys = []
+        self.slot_vals = []
+        self.prev = []
+        self.next = []
+        self.head = -1
+        self.tail = -1
+        self.free = []
+    }
+
+    // The keys, the most recently used first.
+    fun keys(self) -> [K] {
+        var out: [K] = []
+        var i = self.head
+        while i >= 0 {
+            out.push(self.slot_keys[i])
+            i = self.next[i]
+        }
+        return out
+    }
+
+    // The entries, the most recently used first.
+    fun items(self) -> [(K, V)] {
+        var out: [(K, V)] = []
+        var i = self.head
+        while i >= 0 {
+            out.push((self.slot_keys[i], self.slot_vals[i]))
+            i = self.next[i]
+        }
+        return out
+    }
+
+    // The cache's own step: takes the slot `i` out of the recency list.
+    fun unlink(var self, i: int) {
+        let p = self.prev[i]
+        let n = self.next[i]
+        if p >= 0 { self.next[p] = n } else { self.head = n }
+        if n >= 0 { self.prev[n] = p } else { self.tail = p }
+        self.prev[i] = -1
+        self.next[i] = -1
+    }
+
+    // The cache's own step: puts the slot `i` (not in the list) at its head.
+    fun link_front(var self, i: int) {
+        self.prev[i] = -1
+        self.next[i] = self.head
+        if self.head >= 0 { self.prev[self.head] = i } else { self.tail = i }
+        self.head = i
+    }
+}
+
+// --- Memo -------------------------------------------------------------------
+
+pub struct Memo<K, V> {
+    // The value of `k` given the values known so far: `Ok(v)`, or `Err(j)`,
+    // a key whose value it needs first
+    step: (K, [K: V]) -> Result<V, K>,
+    known: [K: V],
+}
+
+// A memo of `f`: `get(k)` is `f(k)`, computed once.
+pub fun new_memo<K: Eq + Hash, V>(f: (K) -> V) -> Memo<K, V> {
+    return Memo { step: (k: K, known: [K: V]) => Ok(f(k)), known: [:] }
+}
+
+// A memo of a recursive function, given as a step: `step(k, known)` is
+// `Ok(v)`, the value of `k`, when the values it needs are in `known`, else
+// `Err(j)`, a key whose value it needs first (which `get` computes, then
+// asks again).
+pub fun recursive<K: Eq + Hash, V>(step: (K, [K: V]) -> Result<V, K>) -> Memo<K, V> {
+    return Memo { step: step, known: [:] }
+}
+
+impl<K: Eq + Hash, V> Memo<K, V> {
+    // The value of `k`: the one kept, else computed and kept, with the
+    // values it needs. A step that needs a key it is computing (a cycle), or
+    // one that `known` holds, is a failure.
+    fun get(var self, k: K) -> V {
+        match self.known.get(k) {
+            Some(v) => { return v },
+            None => {},
+        }
+        var todo: [K] = [k]
+        var pending: [K: ()] = [:]
+        pending[k] = ()
+        while todo.len() > 0 {
+            let top = todo[^1]
+            let r = self.step(top, self.known)
+            match r {
+                Ok(v) => {
+                    self.known[top] = v
+                    pending.remove(top)
+                    todo.pop()
+                },
+                Err(j) => {
+                    if pending.contains(j) { panic("std.cache: a step needs a key that needs it (a cycle)") }
+                    if self.known.contains(j) { panic("std.cache: a step needs a key whose value it was given") }
+                    pending[j] = ()
+                    todo.push(j)
+                },
+            }
+        }
+        return self.known[k]
+    }
+
+    // The value kept for `k`, without computing it.
+    fun peek(self, k: K) -> Option<V> {
+        return self.known.get(k)
+    }
+
+    // Whether a value is kept for `k`.
+    fun contains(self, k: K) -> bool {
+        return self.known.contains(k)
+    }
+
+    // Keeps `v` as the value of `k`, computed or not.
+    fun set(var self, k: K, v: V) {
+        self.known[k] = v
+    }
+
+    // The number of values kept.
+    fun len(self) -> int {
+        return self.known.len()
+    }
+
+    // Forgets every value kept.
+    fun clear(var self) {
+        self.known = [:]
+    }
+}
+
+// --- tests -------------------------------------------------------------------
+// The types are generic, which a `#test` case can't take (D116), so the
+// tests are test functions (D162).
+
+#test
+fun evicts_the_least_recently_used() {
+    var c: Lru<str, int> = new(2)
+    assert(c.put("a", 1) == None && c.put("b", 2) == None, "room for two")
+    assert(c.get("a") == Some(1), "a is there, and now the most recent")
+    assert(c.put("c", 3) == Some(("b", 2)), "b makes room")
+    assert(c.keys() == ["c", "a"] && c.len() == 2, "most recent first")
+    assert(!c.contains("b") && c.get("b") == None, "b is gone")
+    assert(c.put("a", 10) == None, "an update evicts nothing")
+    assert(c.items() == [("a", 10), ("c", 3)], "and refreshes")
+    assert(c.peek("c") == Some(3) && c.keys() == ["a", "c"], "peek doesn't refresh")
+    assert(c.put("d", 4) == Some(("c", 3)), "c was the least recent")
+}
+
+#test
+fun removes_and_reuses_slots() {
+    var c: Lru<int, str> = new(3)
+    for k in 0..3 {
+        c.put(k, f"v{k}")
+    }
+    assert(c.remove(1) == Some("v1") && c.remove(1) == None, "removed once")
+    assert(c.keys() == [2, 0] && c.len() == 2, "the rest in order")
+    assert(c.put(7, "v7") == None, "room again")
+    assert(c.slot_keys.len() == 3, "the removed slot reused")
+    assert(c.remove(7) == Some("v7") && c.remove(0) == Some("v0") && c.remove(2) == Some("v2"), "the head, the tail, the last")
+    assert(c.is_empty() && c.keys() == [] && c.head == -1 && c.tail == -1, "empty")
+    c.put(5, "v5")
+    assert(c.items() == [(5, "v5")], "one again")
+    c.clear()
+    assert(c.is_empty() && c.capacity() == 3 && c.get(5) == None, "cleared")
+}
+
+#test
+fun small_capacities() {
+    var none: Lru<int, int> = new(0)
+    assert(none.put(1, 2) == Some((1, 2)) && none.len() == 0, "no capacity keeps nothing")
+    var one: Lru<int, int> = new(1)
+    assert(one.put(1, 1) == None && one.put(2, 2) == Some((1, 1)) && one.put(2, 3) == None, "one entry")
+    assert(one.get(2) == Some(3) && one.keys() == [2], "the last")
+}
+
+// The keys of a model of an LRU cache, a list of entries, the most recent
+// first, after `get` (`put` when `v >= 0`) of `k`.
+fun model_use(xs: [(int, int)], k: int, v: int, cap: int) -> [(int, int)] {
+    var out: [(int, int)] = []
+    var found = -1
+    for e in xs {
+        if e.0 == k { found = e.1 } else { out.push(e) }
+    }
+    if v < 0 && found < 0 { return xs }
+    var r: [(int, int)] = [(k, if v >= 0 { v } else { found })]
+    for e in out {
+        if r.len() < cap { r.push(e) }
+    }
+    return r
+}
+
+#test
+fun agrees_with_a_model() {
+    // 5000 random gets, puts and removes of keys 0 to 15, capacity 8
+    var c: Lru<int, int> = new(8)
+    var model: [(int, int)] = []
+    var x: uint64 = 12345
+    for step in 0..5000 {
+        x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407)
+        let k = ((x >> 33) % 16) as int
+        let op = ((x >> 40) % 3) as int
+        if op == 0 {
+            let want = model_use(model, k, -1, 8)
+            var expected: Option<int> = None
+            for e in model {
+                if e.0 == k { expected = Some(e.1) }
+            }
+            assert(c.get(k) == expected, f"get {k} at step {step}")
+            model = want
+        } else if op == 1 {
+            c.put(k, step)
+            model = model_use(model, k, step, 8)
+        } else {
+            var rest: [(int, int)] = []
+            for e in model {
+                if e.0 != k { rest.push(e) }
+            }
+            c.remove(k)
+            model = rest
+        }
+        assert(c.items() == model, f"the entries at step {step}")
+    }
+    assert(c.slot_keys.len() <= 8, "never more slots than the capacity")
+}
+
+#test
+fun compound_keys() {
+    var c: Lru<(int, str), [int]> = new(2)
+    c.put((1, "a"), [1])
+    c.put((2, "b"), [2, 2])
+    assert(c.get((1, "a")) == Some([1]), "a tuple key")
+    c.put((3, "c"), [])
+    assert(c.keys() == [(3, "c"), (1, "a")], "the tuple keys in order")
+}
+
+#test
+fun memoises_a_function() {
+    var m: Memo<str, int> = new_memo((s: str) => s.len() * 2)
+    assert(m.get("abc") == 6 && m.get("abc") == 6 && m.len() == 1, "computed once, kept")
+    assert(m.peek("x") == None && !m.contains("x"), "not computed by peek")
+    m.set("x", 99)
+    assert(m.get("x") == 99, "a value set")
+    m.clear()
+    assert(m.len() == 0 && m.get("x") == 2, "forgotten")
+}
+
+// Fibonacci numbers as a step: the two before `n` first.
+fun fib_step(n: int, known: [int: uint64]) -> Result<uint64, int> {
+    if n < 2 {
+        return Ok(n as uint64)
+    }
+    let a = match known.get(n - 1) {
+        Some(a) => a,
+        None => { return Err(n - 1) },
+    }
+    let b = match known.get(n - 2) {
+        Some(b) => b,
+        None => { return Err(n - 2) },
+    }
+    return Ok(a.wrapping_add(b))
+}
+
+#test
+fun memoises_a_recursion() {
+    var fib: Memo<int, uint64> = recursive(fib_step)
+    assert(fib.get(90) == 2880067194370816120u64, "fib 90")
+    assert(fib.len() == 91, "every value on the way kept")
+    // 10000 deep, on a stack of its own (wrapping: the values are big)
+    var a: uint64 = 0
+    var b: uint64 = 1
+    for i in 0..10000 {
+        let c = a.wrapping_add(b)
+        a = b
+        b = c
+    }
+    assert(fib.get(10000) == a, "fib 10000")
+}
+
+// A memo whose step for `n` needs `(n + 1) % 3`: a cycle.
+#test(0)[panic("std.cache: a step needs a key that needs it (a cycle)")]
+fun cyclic(n: int) -> int {
+    var m: Memo<int, int> = recursive((k: int, known: [int: int]) => Err((k + 1) % 3))
+    return m.get(n)
+}

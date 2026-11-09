@@ -100,7 +100,7 @@ Three questions for the owner are worth deciding before the first module is writ
 | 29 | Union-find | `std.unionfind` | disjoint sets with path compression and union by rank | 4 | 1 |  | 45 | [[MYLA-342]] |
 | 30 | Grid | `std.grid` | a 2D array with width and height: in-bounds checks, 4 and 8 neighbours, read from text, printed | 5 | 2 |  | 39 | [[MYLA-342]] |
 | 31 | Graph search | `std.graph` | BFS, DFS, Dijkstra, A*, topological sort, connected components, over a neighbour function | 5 | 3 | #25, #26 | 40 | [[MYLA-342]] |
-| 32 | Caches | `std.cache` | an LRU cache; a memoising wrapper around a map | 3 | 2 |  | 61 | [[MYLA-404]] |
+| 32 | Caches | `std.cache` | an LRU cache; a memoising wrapper around a map: done, `Lru`, `Memo`, `recursive` | 3 | 2 |  | 61 | [[MYLA-404]] |
 
 ### Hashes, checksums, encodings, cryptography
 
@@ -138,7 +138,7 @@ Three questions for the owner are worth deciding before the first module is writ
 | 52 | CSV | `std.csv` | RFC 4180 read and write (quotes, escapes, CRLF), rows as `[str]` or mapped by the header, streaming over #41 | 6 | 2 |  | 29 | [[MYLA-332]] |
 | 53 | JSON, more | `std.json` | a pretty printer, typed getters (`as_int`, `as_str`) and path access, a builder; `std.json` already parses and prints | 7 | 2 |  | 24 | [[MYLA-332]] |
 | 54 | INI | `std.ini` | read and write: sections, keys, comments | 4 | 1 |  | 38 | [[MYLA-332]] |
-| 55 | TOML writer | `std.toml` | writing TOML (`std.toml` parses it), e.g. for the project tool's manifest edits | 3 | 2 |  | 59 | [[MYLA-402]] |
+| 55 | TOML writer | `std.toml` | writing TOML (`std.toml` parses it), e.g. for the project tool's manifest edits: done, `to_string` round-trips what `parse` reads | 3 | 2 |  | 59 | [[MYLA-402]] |
 | 56 | XML | `std.xml` | a non-validating parser (elements, attributes, text, entities, CDATA, comments) to a tree and as a pull reader, a writer with escaping; no DTD and no namespaces at first | 5 | 4 |  | 49 | [[MYLA-348]] |
 | 57 | YAML | `std.yaml` | the safe subset: block and flow maps and lists, scalars, multi-line strings, comments; no anchors and no tags. The whole specification would be an 8 | 5 | 4 |  | 51 | [[MYLA-349]] |
 | 58 | Serialisation by derive | compiler, `std.json` | `#derive(Json)` (or a serialisation trait) between structs and JSON or TOML, generated as `#derive(Eq)` is | 7 | 6 | a language decision | 56 | [[MYLA-354]] |
@@ -155,7 +155,7 @@ Three questions for the owner are worth deciding before the first module is writ
 | 64 | Signals | `std.signal` | SIGINT and SIGTERM handled, for a clean shutdown, as an async event | 3 | 3 | primitives per target | 64 | [[MYLA-350]] |
 | 65 | UUIDs | `std.uuid` | v4 (random) and v7 (ordered by time), parse and print | 3 | 1 | #15 | 60 | [[MYLA-337]] |
 | 66 | Concurrency utilities | `std.task` | channels between tasks, a worker pool, a timeout around an await, waiting for the first of several | 6 | 4 |  | 57 | [[MYLA-351]] |
-| 67 | Benchmarking | `std.bench` | time a closure over repeated runs; report the minimum and the median | 4 | 1 |  | 63 | [[MYLA-403]] |
+| 67 | Benchmarking | `std.bench` | time a closure over repeated runs; report the minimum and the median: done, `run`, `run_n`, `run_for`, `black_box` | 4 | 1 |  | 63 | [[MYLA-403]] |
 | 68 | Test helpers | `std.test` | `expect`, `expect_eq`, `expect_ne`, `fail`, `temp_dir`, `program`: done (D162) | 9 | 2 |  | – | [[MYLA-304]] |
 
 ## The suggested order
