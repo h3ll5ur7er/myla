@@ -319,6 +319,45 @@ fun main() {
 """
 BYTES_OUT = "6\n195\nhéllo\nhéllo!\n6\n0\n0\n3\n255\nabcd\n2000\nabcde\n"
 
+# D177 (MYLA-399): a descriptor read into a list of bytes and written from
+# one, without a string between; every byte, and the errno as `__read`'s
+# and `__write`'s.
+BYTES_IO = HELPERS + """from std.process import args
+
+#allow(primitive)
+fun main() {
+    let path = args()[1] + "/b.bin"
+    let w = __open(path, 2 | 4 | 8, 420)
+    var all: [uint8] = []
+    for i in 0..256 {
+        all.push(i as uint8)
+    }
+    __write_bytes(w, all)
+    print(__io_errno())
+    let none: [uint8] = []
+    __write_bytes(w, none)
+    print(__io_errno())
+    __close(w)
+    let r = __open(path, 1, 0)
+    let first = __read_bytes(r, 3)
+    print(f"{first.len()} {first[0]} {first[2]} {__io_errno()}")
+    let rest = __read_bytes(r, 1000)
+    print(f"{rest.len()} {rest[0]} {rest[^1]}")
+    var grown = rest
+    grown.push(7u8)
+    print(f"{grown.len()} {rest.len()}")
+    print(e(__read_bytes(r, 10).len()))
+    print(e(__read_bytes(r, 0).len()))
+    print(e(__read_bytes(r, -4).len()))
+    __close(r)
+    print(e(__read_bytes(r, 4).len()))
+    __write_bytes(r, first)
+    print(__io_errno())
+    __write_bytes(1, [111u8, 107u8, 10u8])
+}
+"""
+BYTES_IO_OUT = "0\n0\n3 0 2 0\n253 3 255\n254 253\n0 0\n0 0\n0 0\n0 9\n9\nok\n"
+
 PIPES = HELPERS + """fun show(h: [int]) -> str {
     var sb = StringBuilder()
     for x in h {
@@ -526,6 +565,15 @@ class Paths(unittest.TestCase):
 class Bytes(unittest.TestCase):
     def test_str_to_bytes_and_back_and_capacity(self):
         self.assertEqual(run_both(BYTES), (BYTES_OUT, "", 0))
+
+    def test_read_bytes_and_write_bytes(self):
+        with tempfile.TemporaryDirectory() as a, tempfile.TemporaryDirectory() as b:
+            with tempfile.TemporaryDirectory() as tmp:
+                path = write_program(tmp, BYTES_IO)
+                interp = selfhost_run(path, [a])
+                native = build_and_run_full(Program(path), args=[b], argv0=path)
+            self.assertEqual(interp, (BYTES_IO_OUT, "", 0))
+            self.assertEqual(native, interp)
 
 
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)

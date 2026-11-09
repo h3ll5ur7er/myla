@@ -52,7 +52,7 @@ fun main() {
     var input = child.take_stdin().expect("a pipe")
     var lines = buffered(child.take_stdout().expect("a pipe"))
     for word in ["one", "two"] {
-        input.write_str(word + "\n")
+        input.write(bytes.from_str(word + "\n"))
         match lines.read_line() {
             Ok(Some(line)) => print(f"cat said {line}")
             _ => print("no line")
@@ -89,8 +89,8 @@ fun main() {
 | `child.kill() -> Result<(), IoError>` | SIGKILL; `wait` then gives `Signaled(9)`. A child reaped already isn't signalled (its ID may be another process's by now): `Ok` |
 | `child.id() -> int32` | Its process ID |
 | `await child.wait_async()`, `await child.wait_with_output_async()` | The waits in a task: the task suspended until the streams have bytes and the child ends (its pidfd), the other tasks running (D124); outside a task they block. A task asked to stop stops waiting, `Err(IoError.Cancelled)`, and leaves the child running |
-| `ChildStdin` | `Write` (`write`, `write_str`, `flush`), `close()`. A write blocks while the pipe is full; one to a child that closed its input is `BrokenPipe` |
-| `ChildStdout`, `ChildStderr` | `Read` (`read`, `read_str`; `""` at the end), `Pollable` (so a `Buffered` over one has the async reads), `close()` |
+| `ChildStdin` | `Write` (`write`, `flush`; text through `bytes.from_str` or a `buffered_writer`), `close()`. A write blocks while the pipe is full; one to a child that closed its input is `BrokenPipe` |
+| `ChildStdout`, `ChildStderr` | `Read` (`read`; `[]` at the end; text through `buffered`), `Pollable` (so a `Buffered` over one has the async reads), `close()` |
 
 A child and its pipes are values. The `Child` holds each stream until a `take_` method gives it out; from then on the caller holds it, closes it, and `wait` leaves it alone. That is why the streams come out by `take_` and aren't read from the fields: a copy taken from a field would be a second holder of the same descriptor, and `wait` couldn't know whether to close it. A stream used after `close`, or closed twice, gives `IoError.Other(9)` (EBADF), never a crash. A copy of a stream or of a `Child` names the same descriptor or process: closing or waiting through one doesn't tell the other (a second reap through a copy is `Other(10)`, ECHILD). A stream taken and dropped without `close` stays open until the program ends: a child reading an input nobody closes waits for it.
 

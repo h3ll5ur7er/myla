@@ -19,10 +19,10 @@ fun main() {
     // the same as a stream, read five bytes at a time
     var r = compress.gzip_reader(from_bytes(gz))
     while true {
-        match r.read_str(5) {
-            Ok(s) => {
-                if s.len() == 0 { break }
-                print(f"[{s}]")
+        match r.read(5) {
+            Ok(b) => {
+                if b.len() == 0 { break }
+                print(f"[{bytes.to_str(b)}]")
             }
             Err(_) => {
                 print(f"error: {r.error().unwrap_or(compress.CompressError.Truncated)}")
@@ -70,7 +70,7 @@ A `Decoder<R>` is a `Read` stream ([[Language/Standard-library/Io#streams]]) of 
 | `inflate_reader<R: Read>(r: R) -> Decoder<R>` | Raw DEFLATE; the stream ends where DEFLATE's ends, and the bytes after it are left unread (in the decoder's chunk) |
 | `gzip_reader<R: Read>(r: R) -> Decoder<R>` | gzip, member after member, to the end of `r`; anything there but another member or zero padding is `TrailingData` |
 | `zlib_reader<R: Read>(r: R) -> Decoder<R>` | zlib; the stream ends where zlib's ends |
-| `d.read(n)`, `d.read_str(n)` | `Read`: up to `n` bytes of the output, `[]` or `""` at its end |
+| `d.read(n)` | `Read`: up to `n` bytes of the output, `[]` at its end; `io.buffered(d)` reads it as text, by lines |
 | `d.read_to_end() -> Result<[uint8], CompressError>` | The rest of the output, or why it couldn't be had |
 | `d.error() -> Option<CompressError>` | Why a read failed |
 | `d.into_inner() -> R` | The inner stream |
@@ -91,7 +91,7 @@ fun main() {
 }
 ```
 
-`io.copy` takes the decoder by value, so the caller's `d` can't say why it failed; a loop over `d.read_str(n)` can.
+`io.copy` takes the decoder by value, so the caller's `d` can't say why it failed; a loop over `d.read(n)` can.
 
 ## Compressing
 
@@ -111,7 +111,7 @@ fun main() {
     // as a stream: what is written is compressed into the stream it owns
     var w = compress.zlib_writer(io.memory_stream(), 9)
     for i in 0..1000 {
-        match w.write_str(f"line {i}\n") {
+        match w.write(bytes.from_str(f"line {i}\n")) {
             Ok(_) => {}
             Err(e) => print("write failed")
         }
@@ -149,7 +149,7 @@ An `Encoder<W>` is a `Write` stream ([[Language/Standard-library/Io#streams]]) t
 | `deflate_writer<W: Write>(w: W, level: int = 6) -> Encoder<W>` | A writer of raw DEFLATE |
 | `gzip_writer<W: Write>(w: W, level: int = 6) -> Encoder<W>` | A writer of gzip data, one member |
 | `zlib_writer<W: Write>(w: W, level: int = 6) -> Encoder<W>` | A writer of a zlib stream |
-| `e.write(b)`, `e.write_str(s)` | `Write`: the bytes taken; an error is the inner stream's |
+| `e.write(b)` | `Write`: the bytes taken; an error is the inner stream's. Text through `io.buffered_writer(e)` and its `write_str`, or `bytes.from_str` |
 | `e.flush()` | `Write`: everything written so far compressed and written, ending with an empty stored block, as zlib's `Z_SYNC_FLUSH` does, so the output so far decodes to all of the input so far; then the inner stream flushed. Each flush costs a few bytes and the block it ends |
 | `e.finish() -> Result<W, IoError>` | The end of the stream (the last block, the trailer) written, and the inner stream, flushed. Nothing finishes an `Encoder` when the program ends: finish it |
 
@@ -223,7 +223,7 @@ Natively on x86-64, the best of five runs, decompressing 100 MB (100,000,000 byt
 | `inflate` (no checksum) | 623 ms | 160 MB/s |
 | `gzip_reader` over a memory stream, reads of 64 KiB | 859 ms | 116 MB/s |
 | `gzip_reader`, reads of 4 KiB | 987 ms | 101 MB/s |
-| `gzip_reader(fd_stream(0))`, each `read_str(65536)` written to the standard output, `< file.gz > /dev/null` (the whole program) | 1108 ms | 90 MB/s |
+| `gzip_reader(fd_stream(0))`, each `read_str(65536)` (since D177 `read`) written to the standard output, `< file.gz > /dev/null` (the whole program) | 1108 ms | 90 MB/s |
 | `gzip -dc < file.gz > /dev/null` (GNU gzip 1.12, the whole program) | 635 ms | 157 MB/s |
 | Python's `zlib.decompress(data, 31)` (the whole program, reading the file too) | 464 ms | 215 MB/s |
 

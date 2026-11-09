@@ -2,7 +2,7 @@
 
 - addresses: IPv4 and IPv6 parsed and printed (`::`, `[v6]:port`), as map keys;
 - TCP: an echo between tasks of one program on the reactor (`accept_async`,
-  `connect_async`, `read_str_async`, `write_str_async`), an accept that waits
+  `connect_async`, `read_async`, `write_async`), an accept that waits
   while another task runs, a listener in one program and a client in another
   (the blocking forms, through `std.io`'s `buffered`);
 - UDP: datagrams sent and received, cut to the size asked, a receive that
@@ -41,6 +41,7 @@ from ._native import (
 from ._tools import STDLIB_ROOT, selfhost_tool
 
 PRELUDE = """from std.fs import IoError
+import std.bytes as bytes
 import std.net as net
 from std.net import IpAddr, SocketAddr, TcpListener, TcpStream, UdpSocket
 
@@ -184,7 +185,7 @@ async fun serve(l: TcpListener, n: int) -> int {
             Err(e) => { return -1 }
         }
         while true {
-            let chunk = match await s.read_str_async(4096) {
+            let chunk = match await s.read_async(4096) {
                 Ok(c) => c
                 Err(e) => { return -2 }
             }
@@ -192,7 +193,7 @@ async fun serve(l: TcpListener, n: int) -> int {
                 break
             }
             total += chunk.len()
-            match await s.write_str_async(chunk) {
+            match await s.write_async(chunk) {
                 Ok(_) => {}
                 Err(e) => { return -3 }
             }
@@ -210,12 +211,12 @@ async fun client(port: int, words: [str]) -> str {
     }
     var got = ""
     for word in words {
-        let w = await s.write_str_async(word)
+        let w = await s.write_async(bytes.from_str(word))
         var want = word.len()
         while want > 0 {
-            match await s.read_str_async(100) {
+            match await s.read_async(100) {
                 Ok(t) => {
-                    got = got + t
+                    got = got + bytes.to_str(t)
                     want -= t.len()
                 }
                 Err(e) => { return f"read: {cause(e)}" }
@@ -223,7 +224,7 @@ async fun client(port: int, words: [str]) -> str {
         }
     }
     let sh = s.shutdown(net.Shutdown.Write)
-    let rest = await s.read_str_async(100)
+    let rest = await s.read_async(100)
     let c = s.close()
     return match rest {
         Ok(r) => f"{got} (then {r.len()} bytes)"
@@ -264,7 +265,7 @@ async fun silent_read(port: int) -> str {
         Ok(s) => s
         Err(e) => { return cause(e) }
     }
-    let r = await s.read_str_async(10)
+    let r = await s.read_async(10)
     let c = s.close()
     return match r {
         Ok(t) => f"read {t.len()} bytes"
@@ -310,6 +311,7 @@ timed out
 # wait blocks the thread in `__sock_poll` (the lowering of `__wait_socket`
 # without tasks, and the interpreter's outside any task).
 ONE_TASK = """import std.net as net
+import std.bytes as bytes
 
 #main
 async fun main() {
@@ -329,9 +331,9 @@ async fun main() {
         Ok(s) => s
         Err(e) => { panic("accept") }
     }
-    let w = await c.write_str_async("one task")
-    match await s.read_str_async(100) {
-        Ok(t) => print(t)
+    let w = await c.write_async(bytes.from_str("one task"))
+    match await s.read_async(100) {
+        Ok(t) => print(bytes.to_str(t))
         Err(e) => print("read failed")
     }
     let x = c.close()
@@ -373,7 +375,7 @@ fun main() {
                     break
                 }
                 n += 1
-                match out.write_str(upper(line) + "\\n") {
+                match out.write(bytes.from_str(upper(line) + "\\n")) {
                     Ok(_) => {}
                     Err(e) => panic(f"write: {cause(e)}")
                 }
@@ -404,14 +406,14 @@ fun main() {
     var out = s
     var lines = buffered(s)
     for line in ["abc", "Hello, World", "a longer line, with more in it"] {
-        let w = out.write_str(line + "\\n")
+        let w = out.write(bytes.from_str(line + "\\n"))
         match lines.read_line() {
             Ok(Some(back)) => print(back)
             Ok(None) => print("the end")
             Err(e) => print(cause(e))
         }
     }
-    let q = out.write_str("quit\\n")
+    let q = out.write(bytes.from_str("quit\\n"))
     // the server closes: the end of the stream
     match lines.read_line() {
         Ok(None) => print("the end")
@@ -615,7 +617,7 @@ ERRORS = PRELUDE + """fun main() {
         Err(e) => panic(cause(e))
     }
     s.set_read_timeout(30)
-    match s.read_str(10) {
+    match s.read(10) {
         Ok(t) => print(f"read {t.len()} bytes")
         Err(e) => print(cause(e))
     }
@@ -625,7 +627,7 @@ ERRORS = PRELUDE + """fun main() {
         Err(e) => panic(cause(e))
     }
     let pc = peer.close()
-    match s.read_str(10) {
+    match s.read(10) {
         Ok(t) => print(f"read {t.len()} bytes")
         Err(e) => print(cause(e))
     }
@@ -635,7 +637,7 @@ ERRORS = PRELUDE + """fun main() {
         Ok(()) => "closed twice"
         Err(e) => cause(e)
     })
-    match s.read_str(10) {
+    match s.read(10) {
         Ok(t) => print(f"read {t.len()} bytes")
         Err(e) => print(cause(e))
     }

@@ -844,7 +844,7 @@ fun is_builtin_op_trait(name: str) -> bool {
 #test("B")[false]
 #test("len")[true]
 fun is_builtin_func(name: str) -> bool {
-    return name == "print" || name == "assert" || name == "panic" || name == "unreachable" || name == "len" || name == "push" || name == "pop" || name == "contains" || name == "remove" || name == "keys" || name == "format" || name == "chars" || name == "StringBuilder" || name == "append" || name == "append_byte" || name == "append_char" || name == "build" || name == "__write" || name == "__exit" || name == "__args" || name == "__read_file" || name == "__io_errno" || name == "__run" || name == "__run_stderr" || name == "__run_exit_code" || name == "__run_signal" || name == "__run_errno" || name == "__write_file" || name == "__read" || name == "__poll" || name == "__list_dir" || name == "__mkdir" || name == "__stat" || name == "__getcwd" || name == "__getenv" || name == "__test_dir" || name == "__test_program" || name == "__sqrt" || name == "__f64_bits" || name == "__f64_from_bits" || name == "__unlink" || name == "__rmdir" || name == "__rename" || name == "__task_cancelled" || name == "__yield" || name == "__sleep" || name == "__clock_ns" || name == "__sleep_ns" || name == "__cancel_after" || name == "__disarm" || name == "__wait_readable" || name == "__wait_either" || name == "__wait_socket" || name == "__spawn" || name == "__run_with" || name == "__spawn_with" || name == "__reap" || name == "__kill" || name == "__close" || name == "__str_to_bytes" || name == "__bytes_to_str" || is_platform_primitive(name) || is_raw_memory_primitive(name) || is_notify_primitive(name) || is_wrapping_method(name)
+    return name == "print" || name == "assert" || name == "panic" || name == "unreachable" || name == "len" || name == "push" || name == "pop" || name == "contains" || name == "remove" || name == "keys" || name == "format" || name == "chars" || name == "StringBuilder" || name == "append" || name == "append_byte" || name == "append_char" || name == "build" || name == "__write" || name == "__exit" || name == "__args" || name == "__read_file" || name == "__io_errno" || name == "__run" || name == "__run_stderr" || name == "__run_exit_code" || name == "__run_signal" || name == "__run_errno" || name == "__write_file" || name == "__read" || name == "__poll" || name == "__list_dir" || name == "__mkdir" || name == "__stat" || name == "__getcwd" || name == "__getenv" || name == "__test_dir" || name == "__test_program" || name == "__sqrt" || name == "__f64_bits" || name == "__f64_from_bits" || name == "__unlink" || name == "__rmdir" || name == "__rename" || name == "__task_cancelled" || name == "__yield" || name == "__sleep" || name == "__clock_ns" || name == "__sleep_ns" || name == "__cancel_after" || name == "__disarm" || name == "__wait_readable" || name == "__wait_either" || name == "__wait_socket" || name == "__spawn" || name == "__run_with" || name == "__spawn_with" || name == "__reap" || name == "__kill" || name == "__close" || name == "__str_to_bytes" || name == "__bytes_to_str" || name == "__read_bytes" || name == "__write_bytes" || is_platform_primitive(name) || is_raw_memory_primitive(name) || is_notify_primitive(name) || is_wrapping_method(name)
 }
 
 // Whether `name` is one of the integers' builtin methods that wrap on purpose
@@ -8701,6 +8701,15 @@ impl Checker {
             if !is_str(s_t) { return Err(terr_at(e.line, e.col, e.sp, format("__write() expects a string, found '{}'", type_name(s_t)))) }
             return Ok(None)
         }
+        if name == "__write_bytes" {
+            // `__write` of a list of bytes, without a string between (D177)
+            if args.len() != 2 { return Err(terr_at(e.line, e.col, e.sp, "__write_bytes() takes (fd: int32, b: [uint8])")) }
+            let fd_t = self.expect_value(args[0], Some(t_int()))?
+            if !is_int(fd_t) { return Err(terr_at(e.line, e.col, e.sp, format("__write_bytes() fd must be an integer, found '{}'", type_name(fd_t)))) }
+            let b_t = self.expect_value(args[1], Some(Type.TList(t_byte())))?
+            if !type_eq(b_t, Type.TList(t_byte())) { return Err(terr_at(args[1].line, args[1].col, args[1].sp, format("__write_bytes() takes (fd: int32, b: [uint8]): found '{}'", type_name(b_t)))) }
+            return Ok(None)
+        }
         if name == "__exit" {
             if args.len() != 1 { return Err(terr_at(e.line, e.col, e.sp, "__exit() takes exactly one argument")) }
             let c_t = self.expect_value(args[0], Some(t_int()))?
@@ -8724,6 +8733,15 @@ impl Checker {
             let n_t = self.expect_value(args[1], Some(t_int()))?
             if !is_int(n_t) { return Err(terr_at(e.line, e.col, e.sp, format("__read() n must be an integer, found '{}'", type_name(n_t)))) }
             return Ok(Some(Type.TStr))
+        }
+        if name == "__read_bytes" {
+            // `__read`'s bytes as a list, without a string between (D177)
+            if args.len() != 2 { return Err(terr_at(e.line, e.col, e.sp, "__read_bytes() takes (fd: int32, n: int32)")) }
+            let fd_t = self.expect_value(args[0], Some(t_int()))?
+            if !is_int(fd_t) { return Err(terr_at(e.line, e.col, e.sp, format("__read_bytes() fd must be an integer, found '{}'", type_name(fd_t)))) }
+            let n_t = self.expect_value(args[1], Some(t_int()))?
+            if !is_int(n_t) { return Err(terr_at(e.line, e.col, e.sp, format("__read_bytes() n must be an integer, found '{}'", type_name(n_t)))) }
+            return Ok(Some(Type.TList(t_byte())))
         }
         if name == "__poll" {
             if args.len() != 2 { return Err(terr_at(e.line, e.col, e.sp, "__poll() takes (fd: int32, timeout_ms: int32)")) }

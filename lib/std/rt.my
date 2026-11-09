@@ -1073,6 +1073,30 @@ pub fun read(fd: int, n: int) -> str {
     return __str_of(cell)
 }
 
+// `__read_bytes` (D177): `__read`, the bytes read into a list.
+pub fun read_bytes(fd: int, n: int) -> [uint8] {
+    __set_io_errno(0)
+    var want = n as int64
+    if want < 0 {
+        want = 0
+    }
+    let cell = __alloc(want + 16)
+    var got: int64 = 0
+    if want > 0 {
+        got = os.read(fd as int64, cell + 16, want)
+        while got == os.EINTR {
+            got = os.read(fd as int64, cell + 16, want)
+        }
+        if got < 0 {
+            __set_io_errno(-got)
+            got = 0
+        }
+    }
+    __store64(cell, got)
+    __store64(cell + 8, __load64(cell - 16) - 16)
+    return __list_of(cell)
+}
+
 // `__poll`: 1 when a read of `fd` won't block (input, its end, or an error),
 // 0 when `timeout_ms` (negative: none) ran out, -1 with the errno when poll
 // failed; retried on EINTR.
@@ -1985,6 +2009,20 @@ pub fun print_char(c: char) {
 pub fun write(fd: int, s: str) {
     let c = __addr_of(s)
     let r = os.write_all(fd as int64, c + 8, __load64(c))
+    if r == os.EPIPE && (fd == 1 || fd == 2) {
+        os.broken_pipe()
+    }
+    if r < 0 {
+        __set_io_errno(-r)
+    } else {
+        __set_io_errno(0)
+    }
+}
+
+// `__write_bytes(fd, b)` (D177): `__write` of the bytes of a list.
+pub fun write_bytes(fd: int, b: [uint8]) {
+    let c = __list_addr(b)
+    let r = os.write_all(fd as int64, c + 16, __load64(c))
     if r == os.EPIPE && (fd == 1 || fd == 2) {
         os.broken_pipe()
     }

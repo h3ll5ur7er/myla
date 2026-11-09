@@ -4213,7 +4213,7 @@ pub fun is_builtin_call_name(nm: str) -> bool {
     if nm == "__task_cancelled" || nm == "__clock_ns" || nm == "__sleep_ns" || nm == "__disarm" { return true }
     if nm == "__spawn" || nm == "__reap" || nm == "__kill" || nm == "__close" { return true }
     if nm == "__run_with" || nm == "__spawn_with" { return true }
-    if nm == "__str_to_bytes" || nm == "__bytes_to_str" { return true }
+    if nm == "__str_to_bytes" || nm == "__bytes_to_str" || nm == "__read_bytes" || nm == "__write_bytes" { return true }
     if is_platform_primitive(nm) || is_raw_memory_primitive(nm) { return true }
     if is_notify_primitive(nm) { return true }
     return false

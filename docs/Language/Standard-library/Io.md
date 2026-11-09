@@ -109,12 +109,12 @@ fun main() {
 
 | Trait | Methods |
 | --- | --- |
-| `Read` | `read(var self, n: int) -> Result<[uint8], IoError>`: up to `n` bytes from the cursor on, `[]` at the end (and for `n <= 0`); fewer than `n` isn't the end. `read_str(var self, n: int) -> Result<str, IoError>`: the same as a `str`, `""` at the end |
-| `Write` | `write(var self, b: [uint8]) -> Result<int, IoError>`: all of `b`, or the error that stopped it; `b.len()`. `write_str(var self, s: str) -> Result<int, IoError>`: the bytes of `s`. `flush(var self) -> Result<(), IoError>`: whatever is buffered passed on |
+| `Read` | `read(var self, n: int) -> Result<[uint8], IoError>`: up to `n` bytes from the cursor on, `[]` at the end (and for `n <= 0`); fewer than `n` isn't the end |
+| `Write` | `write(var self, b: [uint8]) -> Result<int, IoError>`: all of `b`, or the error that stopped it; `b.len()`. `flush(var self) -> Result<(), IoError>`: whatever is buffered passed on |
 | `Seek` | `seek(var self, pos: SeekFrom) -> Result<int64, IoError>`: the cursor moved to `SeekFrom.Start(k)`, `Current(k)` or `End(k)`; the new offset from the start. Before the start is `InvalidInput`; past the end is allowed |
 | `Pollable` | `descriptor(self) -> int32`: the descriptor a task can wait for. A `Buffered` over a `Pollable` stream has `ready` and the async reads |
 
-Each of `Read` and `Write` has a method for `[uint8]` and one for `str`. Strings are bytes (D164), and the two kinds hold the same bytes; when the traits were made one became the other only byte by byte, and `read_str` and `write_str` spared text that cost. Since [[MYLA-369]] `std.bytes`'s `from_str` and `to_str` convert in one allocation and one copy (the primitives `__str_to_bytes` and `__bytes_to_str`), and a `[uint8]` costs about what a `str` does (the measurements below). A descriptor reads and writes a `str`, a memory stream holds a `[uint8]`, so each stream gives both the cheap way: a `Buffered` reads text with `read_str`, and text from a descriptor isn't converted at all. A stream that has only one kind gives the other by converting it (the example below).
+`Read` and `Write` deal in bytes only (D177): a stream implements `read`, or `write` and `flush`, and nothing for text. Strings are bytes (D164), and since [[MYLA-369]] `std.bytes`'s `from_str` and `to_str` convert in one allocation and one copy (the primitives `__str_to_bytes` and `__bytes_to_str`), so a `[uint8]` costs about what a `str` does (the measurements below). Text goes through the adapters: a `Buffered` pulls bytes, keeps them as text and gives `read_line`, `read_exact` and `read_to_end`; a `BufferedWriter` takes text with `write_str`. To write a few bytes of text to an unbuffered stream, `w.write(bytes.from_str(s))` (`import std.bytes as bytes`). Until [[MYLA-399]] each trait had a `str` twin, `read_str` and `write_str`, from when the two kinds converted only byte by byte ([[MYLA-338]]).
 
 ### Streams of this module
 
@@ -124,7 +124,7 @@ Each of `Read` and `Write` has a method for `[uint8]` and one for `str`. Strings
 | `memory_stream() -> MemoryStream`, `from_bytes(b: [uint8])`, `from_str(s: str)` | Bytes in memory and a cursor at the start. `Read`, `Write` (over the bytes at the cursor, and on past the end; a gap a seek past the end left is zeros), `Seek` |
 | `m.bytes() -> [uint8]`, `m.text() -> str`, `m.position() -> int64` | All its bytes, wherever the cursor is; as text; the cursor |
 | `buffered(r: R) -> Buffered<R>` | A buffer in front of `r`: `read_line`, `read_exact`, `read_to_end` and `fill` as `Reader` has them (`Reader` is `Buffered<FdStream>`), `into_inner()` (the stream, without the bytes still buffered). `Read`; `Seek` if `r` can (the buffer dropped; `Current` counts from the next byte a read gives); `Pollable`, `ready` and the async reads if `r` is `Pollable` |
-| `buffered_writer(w: W) -> BufferedWriter<W>`, `buffered_writer_with(w, capacity: int32)` | A buffer in front of `w`, 8 KiB or `capacity` bytes: writes are gathered and passed on when it is full, on `flush` and on `into_inner() -> Result<W, IoError>` (flushed). `Write`; `Seek` if `w` can (after the buffer is passed on). Nothing flushes it when the program ends |
+| `buffered_writer(w: W) -> BufferedWriter<W>`, `buffered_writer_with(w, capacity: int32)` | A buffer in front of `w`, 8 KiB or `capacity` bytes: writes are gathered and passed on when it is full, on `flush` and on `into_inner() -> Result<W, IoError>` (flushed). `Write`; `write_str(s: str) -> Result<int, IoError>`, the bytes of `s` (`s.len()`); `Seek` if `w` can (after the buffer is passed on). Nothing flushes it when the program ends |
 
 ### Any stream
 
@@ -137,12 +137,11 @@ They take the streams by value, so the caller's `var` doesn't move: a memory str
 
 ### A stream of your own
 
-A type is a stream when it implements the traits. `Read` takes both methods; the one it hasn't got natively converts the other:
+A type is a stream when it implements the traits: a `Read` has one method, `read`, and `buffered` gives it lines and text:
 
 ```myla
 from std.io import Read, buffered, read_all
 from std.fs import IoError
-import std.bytes as bytes
 
 // `left` more copies of one byte.
 struct Repeat {
@@ -158,11 +157,6 @@ impl Read for Repeat {
             self.left -= 1
         }
         return Ok(out)
-    }
-
-    fun read_str(var self, n: int) -> Result<str, IoError> {
-        let b = self.read(n)?
-        return Ok(bytes.to_str(b))
     }
 }
 

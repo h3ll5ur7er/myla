@@ -45,7 +45,7 @@ The Python interpreter ran each `async let` child on a Python thread and gave ea
 
 ## I/O primitives
 
-The interpreter is a native program, so the primitives of the standard library (`__write`, `__read`, `__poll`, `__read_file`, `__write_file`, `__list_dir`, `__mkdir`, `__stat`, `__unlink`, `__rmdir`, `__rename`, `__getcwd`, `__run` and the `__run_*` results) call the native runtime's own and behave as in a compiled program ([[Architecture/Native-backend]]). `__args` gives the file followed by the arguments after it on the command line, as `args()` does for a binary.
+The interpreter is a native program, so the primitives of the standard library (`__write`, `__read`, `__poll`, `__read_file`, `__write_file`, `__list_dir`, `__mkdir`, `__stat`, `__unlink`, `__rmdir`, `__rename`, `__getcwd`, `__run` and the `__run_*` results) call the native runtime's own and behave as in a compiled program ([[Architecture/Native-backend]]). `__args` gives the file followed by the arguments after it on the command line, as `args()` does for a binary. `__read_bytes` and `__write_bytes` (D177) go through `__read` and `__write` with a string between: the interpreter's values aren't the native lists.
 
 That runtime is the `std.rt` and `std.platform` the CLI was built with, at the last `scripts/bootstrap.sh`: `--stdlib lib` (or `MYLA_STDLIB`) changes the library the interpreted program is made of, not the primitives under it. So a change to `std.rt` or a platform module (what `__spawn_piped` does with its options, say, [[MYLA-378]]) shows in a native build at once and in the interpreter only after a bootstrap.
 

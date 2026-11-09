@@ -9,7 +9,7 @@
 //   sends and receives datagrams. A socket is an opaque handle inside them;
 //   nothing here is a file descriptor. Close a socket yourself (`close`).
 // - Every operation that waits has an async twin (`accept_async`,
-//   `connect_async`, `read_async`, `write_str_async`, `recv_from_async`, …)
+//   `connect_async`, `read_async`, `write_async`, `recv_from_async`, …)
 //   that waits with the task suspended, the other tasks running (D124);
 //   outside a task it blocks as its twin does. A task asked to stop stops
 //   waiting and gets `IoError.Cancelled`.
@@ -908,19 +908,14 @@ impl Read for TcpStream {
     // long as `set_read_timeout` allows); `[]` once the peer ended the
     // stream.
     fun read(var self, n: int) -> Result<[uint8], IoError> {
-        let s = self.read_str(n)?
-        return Ok(bytes_m.from_str(s))
-    }
-
-    fun read_str(var self, n: int) -> Result<str, IoError> {
         if n <= 0 {
-            return Ok("")
+            return Ok([])
         }
         while true {
             let s = __sock_recv(self.handle, n)
             let err = __io_errno()
             if err == 0 {
-                return Ok(s)
+                return Ok(bytes_m.from_str(s))
             }
             if err != EAGAIN {
                 return Err(from_errno(err))
@@ -932,14 +927,11 @@ impl Read for TcpStream {
 }
 
 impl Write for TcpStream {
-    fun write(var self, b: [uint8]) -> Result<int, IoError> {
-        return self.write_str(bytes_m.to_str(b))
-    }
-
-    // Every byte of `s` sent, waiting while the socket's buffer is full (as
+    // Every byte of `b` sent, waiting while the socket's buffer is full (as
     // long as `set_write_timeout` allows). A peer that went away is
     // `BrokenPipe` or `ConnectionReset`.
-    fun write_str(var self, s: str) -> Result<int, IoError> {
+    fun write(var self, b: [uint8]) -> Result<int, IoError> {
+        let s = bytes_m.to_str(b)
         var at = 0
         while at < s.len() {
             let r = __sock_send(self.handle, s, at)
@@ -965,20 +957,14 @@ impl Write for TcpStream {
 impl TcpStream {
     // `read`, the task waiting for the bytes.
     async fun read_async(var self, n: int) -> Result<[uint8], IoError> {
-        let s = await self.read_str_async(n)
-        return Ok(bytes_m.from_str(s?))
-    }
-
-    // `read_str`, the task waiting for the bytes.
-    async fun read_str_async(var self, n: int) -> Result<str, IoError> {
         if n <= 0 {
-            return Ok("")
+            return Ok([])
         }
         while true {
             let s = __sock_recv(self.handle, n)
             let err = __io_errno()
             if err == 0 {
-                return Ok(s)
+                return Ok(bytes_m.from_str(s))
             }
             if err != EAGAIN {
                 return Err(from_errno(err))
@@ -993,11 +979,7 @@ impl TcpStream {
 
     // `write`, the task waiting while the socket's buffer is full.
     async fun write_async(var self, b: [uint8]) -> Result<int, IoError> {
-        return await self.write_str_async(bytes_m.to_str(b))
-    }
-
-    // `write_str`, the task waiting while the socket's buffer is full.
-    async fun write_str_async(var self, s: str) -> Result<int, IoError> {
+        let s = bytes_m.to_str(b)
         var at = 0
         while at < s.len() {
             let r = __sock_send(self.handle, s, at)

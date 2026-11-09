@@ -56,10 +56,6 @@ impl Read for Trickle {
         self.pos = end
         return Ok(out)
     }
-
-    fun read_str(var self, n: int) -> Result<str, IoError> {
-        return Ok(text(self.read(n)?))
-    }
 }
 
 fun text(b: [uint8]) -> str {
@@ -97,11 +93,11 @@ fun drain<R: Read>(d: compress.Decoder<R>, pieces: bool) {
             k = k % 997 + 1
             n = k
         }
-        match r.read_str(n) {
-            Ok(s) => {
-                if s.len() == 0 { return }
-                if s.len() > n { process.exit(4) }
-                put(s)
+        match r.read(n) {
+            Ok(b) => {
+                if b.len() == 0 { return }
+                if b.len() > n { process.exit(4) }
+                put(text(b))
             }
             Err(_) => { fail(r.error().expect("a corrupt stream says why")) }
         }
