@@ -39,7 +39,7 @@ D84, [[MYLA-110]]. A part of a declaration that fails to check takes the **error
 | an alias | a bad target, a cycle | the error type for the alias and every alias that names it, one error |
 | a field, variant or method | a duplicate, a method colliding with a field | the first one |
 | type parameters, a recursive struct | shadowing, duplicates, infinite size | the declaration, as written |
-| a `#derive` | not derivable, generic, a bad attribute, an explicit impl too | no derived impl; Eq is broken for the type (`broken_impls`) unless an explicit impl stands |
+| a `#derive` | not derivable, a bad attribute, an explicit impl too | no derived impl; Eq is broken for the type (`broken_impls`) unless an explicit impl stands |
 | an impl | its target type failed or can't have methods; a duplicate impl | left out; its methods' and trait's names are lost (`lost_methods`, `lost_traits`) |
 | an impl | an unknown trait; the trait's arity; conformance | its methods stay; the (trait, type) pair is broken |
 | a bound | an unknown trait or type parameter | the bound is left out, and the function's body isn't checked |
@@ -91,11 +91,13 @@ The checker checks these forms and records what they mean (their types in `resol
 | `f >> g` (functions) | `(__x: A) => g(f(__x))` | `infer_compose` |
 | `f(a, _)` | `(__hole0: B) => f(a, __hole0)` | `infer_partial` |
 | `a + b` on a struct/enum | `a.add(b)`; `==` → `a.eq(b)`, `!=` → `!a.eq(b)`, `<` → `a.cmp(b) < 0` | `infer_operator_overload` |
-| `#derive(Eq)` | an `impl Eq` (field-wise `&&`, or a `match` on `(self, other)`), registered as a structural impl | `synthesize_derives` |
+| `#derive(Eq)` | an `impl Eq` (field-wise `&&`, or a `match` on `(self, other)`), registered as a structural impl; on a generic type, the source of `impl<T: Eq> Eq for Box<T>` (`derived_eq_src`, [[MYLA-379]]), resolved with the other impls | `synthesize_derives` |
 | `recv.m(x)` | a call of the method `Type.m` | `infer_method_call` |
 | `for x in e`, `e` an iterator (D171) | `if true { var %iter<id> = e; while true { match %iter<id>.next() { Some(x) => { body }, None => { break } } } }`, built with new node ids and checked in place of the `for`; unlike the forms above, `fill_in` puts it in the program where the `for` was, after the check, so the interpreter, the lowering and every backend run that loop. It rebuilds only the bodies of the declarations holding such a loop or a call given defaults (`fill_decls`, [[MYLA-382]]) | `check_for_iterator` |
 
 Operators on a bounded type parameter (`T: Add`) are resolved once `T` is concrete: by the interpreter at run time, by the code generator under its substitution ([[Architecture/Monomorphization]]).
+
+A generic impl of a trait keeps its bounds (`impl_bounds`, by `trait\tkey`, with its target in its own type parameters): a type has the trait when the pair is there and its arguments, solved against the target, meet them (`type_implements` through `impl_bound_failing`, [[MYLA-379]]), so `Option<Pos>` isn't `Eq` while `Pos` isn't; the operators', the map keys' and the bounds' messages name the argument that fails (`failing_arg`). The prelude's `Option` and `Result` are `#derive(Eq)`. `==` types its right side by its left one, and `None == opt` (a left side of `None`, `Some(…)`, `Ok(…)` or `Err(…)`) its left by its right (`needs_other_side`, `infer_overload_known`). Natively a routine on a generic type's values (a member's `eq` or `hash` in a tuple's, a list's or a key's routine) calls the instance of its impl's method for the type's arguments (`CodeGen.type_method`), and a derived `Hash`'s key walk substitutes them in the members' types.
 
 ## Methods and traits
 

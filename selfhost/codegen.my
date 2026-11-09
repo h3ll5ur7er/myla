@@ -1339,7 +1339,8 @@ impl CodeGen {
     }
 
     // Whether the struct or enum `key` derives `Hash` (D163): a map key of it
-    // is hashed by its members, not through its `hash` (MYLA-313).
+    // is hashed by its members, not through its `hash` (MYLA-313), a generic
+    // type's with its arguments substituted (MYLA-379).
     #test(codegen_on("#derive(Eq, Hash)\nstruct P { x: int }"), "P")[true]
     #test(codegen_on("struct P { x: int }"), "P")[false]
     fun derives_hash(self, key: str) -> bool {
@@ -1351,6 +1352,27 @@ impl CodeGen {
             }
         }
         return false
+    }
+
+    // The method `m` of the struct or enum `t` as a routine on `t`'s values
+    // calls it (`eq`, `hash`): its name, and for a generic impl's (`impl<T:
+    // Eq> Eq for Option<T>`, MYLA-379) the type arguments of its instance
+    // for `t`, which the caller queues and calls by `mangle_fn`'s name.
+    #test(codegen_on("[int]"), Type.TStruct("P", []), "eq")[("P.eq", [])]
+    fun type_method(self, t: Type, m: str) -> (str, [Type]) {
+        let name = self.type_key(t) + "." + m
+        if !self.has_func(name) { return (name, []) }
+        let sig = self.sig_of(name)
+        if sig.type_params.len() == 0 || sig.params.len() == 0 { return (name, []) }
+        let sub = unify_into(sig.params[0], t)
+        var targs: [Type] = []
+        for tp in sig.type_params {
+            match subst_get(sub, tp) {
+                Some(x) => { targs.push(x) },
+                None => { targs.push(Type.TTuple([])) },
+            }
+        }
+        return (name, targs)
     }
 
     // Whether `==` on `t` compares tags only: an enum without payloads whose

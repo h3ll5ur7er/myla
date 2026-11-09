@@ -5214,10 +5214,12 @@ impl Lower {
             recv = self.temp(ft)
             self.add(Inst.LoadAt(recv, p, off, 8))
         }
-        var name = cg.type_key(ft) + ".hash"
+        var name = ""
         if is_list_t(ft) {
             name = mangle_fn("__list.hash", [list_elem(ft)])
             self.f.instances.push(Instance { orig: "__list.hash", targs: [list_elem(ft)] })
+        } else {
+            name = self.type_method(cg, ft, "hash")
         }
         self.add(Inst.CallSret(name, self.slot_addr(rs), [recv, self.slot_addr(hs)]))
         let r = self.temp(u64)
@@ -5363,10 +5365,13 @@ impl Lower {
             Type.TStruct(n, a) => {
                 if cg.derives_hash(n) {
                     let info = cg.struct_info(n)
+                    // a generic type's fields of its arguments (MYLA-379)
+                    let sub = cg.type_subst(info.type_params, a)
                     var cur = off
                     for f in info.fields {
-                        self.hash_key_member(cg, p, cur, f.ty, sh, 8)
-                        cur = cur + cg.stored_size(f.ty)
+                        let fty = subst_type(f.ty, sub)
+                        self.hash_key_member(cg, p, cur, fty, sh, 8)
+                        cur = cur + cg.stored_size(fty)
                     }
                 } else {
                     self.hash_written(cg, p, off, ft, sh)
@@ -5378,7 +5383,7 @@ impl Lower {
                     let tag = self.temp(i64)
                     self.add(Inst.LoadAt(tag, p, off, 8))
                     self.mix_word(sh, tag)
-                    let et = Type.TEnum(n, [])
+                    let et = ft
                     let done = self.new_block()
                     var idx = 0
                     for v in cg.enum_info(n).variants {
@@ -5392,7 +5397,7 @@ impl Lower {
                             self.finish(Term.Br(is_v, this_v, next_v))
                             self.start(this_v)
                             var j = 0
-                            for pt in v.payload {
+                            for pt in cg.variant_payload(et, v.name) {
                                 self.hash_key_member(cg, p, off + cg.variant_field_offset(et, v.name, j), pt, sh, 8)
                                 j = j + 1
                             }
@@ -5440,7 +5445,7 @@ impl Lower {
             recv = self.temp(Type.TPtr)
             self.add(Inst.Mov(recv, at))
         }
-        self.add(Inst.CallSret(cg.type_key(ft) + ".hash", self.slot_addr(rs), [recv, self.slot_addr(hs)]))
+        self.add(Inst.CallSret(self.type_method(cg, ft, "hash"), self.slot_addr(rs), [recv, self.slot_addr(hs)]))
         let st = self.temp(i64)
         self.add(Inst.LoadAt(st, self.slot_addr(rs), 0, 8))
         self.mix_word(sh, st)
@@ -5627,7 +5632,7 @@ impl Lower {
                 pa = self.offset(a, off)
                 pb = self.offset(b, off)
             }
-            self.add(Inst.Call(eq, cg.type_key(ft) + ".eq", [pa, pb]))
+            self.add(Inst.Call(eq, self.type_method(cg, ft, "eq"), [pa, pb]))
         } else if is_tstr(ft) {
             let ka = self.temp(Type.TStr)
             self.add(Inst.LoadAt(ka, a, off, 8))
@@ -5656,6 +5661,16 @@ impl Lower {
 }
 
 impl Lower {
+    // The name a routine calls the struct or enum `t`'s method `m` by: a
+    // generic impl's instance for `t`'s arguments, queued (MYLA-379), or the
+    // method itself.
+    fun type_method(var self, cg: CodeGen, t: Type, m: str) -> str {
+        let (name, targs) = cg.type_method(t, m)
+        if targs.len() == 0 { return name }
+        self.f.instances.push(Instance { orig: name, targs: targs })
+        return mangle_fn(name, targs)
+    }
+
     // The name of `__eq_<T>`, `==` on the tuple or list type `t`, asked
     // for (MYLA-313).
     fun want_eq(var self, t: Type) -> str {

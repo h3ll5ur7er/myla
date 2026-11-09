@@ -1,0 +1,5 @@
+type error: operator '==' is not defined for 'Option<Pos>': 'Pos' isn't Eq (it needs 'impl Eq for Pos' or '#derive(Eq)')
+  --> examples/errors/type_option_payload_not_eq.my:9:13
+  |
+9 |     print(a == None)
+  |           ^^^^^^^^^

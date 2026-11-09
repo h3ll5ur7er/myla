@@ -11,7 +11,7 @@ An attribute is written on the lines above a declaration: `#name`, optionally fo
 | `#main` | a non-generic function without parameters | The entry point, instead of the function named `main` |
 | `#test(args)[expected]` | a non-generic function or method | One test case; several may be stacked. On a method the receiver is the first argument (D116). The expected value may be `panic("message")` or `exit(n)`, the failure the call must end in (D162) |
 | `#test` | a non-generic function without parameters, with no result or a `Result<(), E>` | A test function (D162): it passes when it returns, fails on a runtime error, `exit` or `Err(e)` |
-| `#derive(Eq)`, `#derive(Hash)`, `#derive(Eq, Hash)`, `#derive(Json)` | a non-generic struct or enum | Structural equality and hashing ([[Language/Methods-and-traits]], D163), a JSON form (std.json's `ToJson` and `FromJson`, [[Language/Standard-library/Json]], D172); `Eq`, `Hash` and `Json` are the traits that can be derived (`cannot derive 'Ord': only 'Eq', 'Hash' and 'Json' are derivable`) |
+| `#derive(Eq)`, `#derive(Hash)`, `#derive(Eq, Hash)`, `#derive(Json)` | a struct or enum, generic too (its impl bounded by the trait, [[MYLA-379]]) | Structural equality and hashing ([[Language/Methods-and-traits]], D163), a JSON form (std.json's `ToJson` and `FromJson`, [[Language/Standard-library/Json]], D172); `Eq`, `Hash` and `Json` are the traits that can be derived (`cannot derive 'Ord': only 'Eq', 'Hash' and 'Json' are derivable`) |
 | `#allow(name, …)` | a function, a method or an `impl` block | Silences the warnings of that name inside it (D161, below) |
 
 ## Warnings and #allow

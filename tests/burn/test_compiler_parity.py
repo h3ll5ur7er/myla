@@ -9,6 +9,277 @@ from tests.burn._native import (CAN_BUILD_NATIVE, SKIP_REASON, Program, build_an
                                 run_file_both_now, selfhost_run, write_program)
 
 PROGRAMS = {
+    # MYLA-379: `==` on `Option` and `Result` whose payloads are `Eq`
+    "option_result_equality": r"""// MYLA-379: `==` and `!=` on `Option` and `Result` whose payloads are `Eq`:
+// literals on either side, nested, in tuples, lists, derived structs and
+// generic code, a map's `get`, a float's NaN unequal to itself
+#derive(Eq)
+struct P {
+    x: int,
+    name: str,
+}
+
+#derive(Eq)
+struct Holder {
+    tag: Option<str>,
+    res: Result<int, str>,
+}
+
+#derive(Eq)
+enum Shape {
+    Dot,
+    Sized(Option<int>),
+}
+
+fun same<T: Eq>(a: Option<T>, b: Option<T>) -> bool {
+    return a == b
+}
+
+fun both<T: Eq, E: Eq>(a: Result<T, E>, b: Result<T, E>) -> bool {
+    return a == b && !(a != b)
+}
+
+fun first_even(xs: [int]) -> Option<int> {
+    for x in xs {
+        if x % 2 == 0 { return Some(x) }
+    }
+    return None
+}
+
+fun main() {
+    let a: Option<int> = Some(3)
+    print(a == Some(3))
+    print(a == Some(4))
+    print(a == None)
+    print(a != None)
+    print(None == a)
+    let n: Option<int> = None
+    print(n == None)
+    print(n != Some(0))
+    let r: Result<int, str> = Ok(1)
+    print(r == Ok(1))
+    print(r == Err("x"))
+    let e: Result<int, str> = Err("bad")
+    print(e == Err("bad"))
+    print(e != Err("worse"))
+    print(Ok(1) == r)
+    let nested: Option<Option<P>> = Some(Some(P { x: 1, name: "a" }))
+    print(nested == Some(Some(P { x: 1, name: "a" })))
+    print(nested == Some(Some(P { x: 1, name: "b" })))
+    print(nested == Some(None))
+    let rs: Result<Option<str>, int> = Ok(None)
+    print(rs == Ok(None))
+    print(rs == Ok(Some("")))
+    let xs: [Option<int>] = [Some(1), None]
+    print(xs == [Some(1), None])
+    print(xs == [None, Some(1)])
+    let t: (Option<str>, Result<int, str>) = (Some("a"), Ok(2))
+    print(t == (Some("a"), Ok(2)))
+    print(t == (Some("a"), Err("2")))
+    let h = Holder { tag: Some("t"), res: Ok(2) }
+    print(h == Holder { tag: Some("t"), res: Ok(2) })
+    print(h == Holder { tag: None, res: Ok(2) })
+    print(Shape.Sized(Some(2)) == Shape.Sized(Some(2)))
+    print(Shape.Sized(None) != Shape.Sized(Some(2)))
+    print(Shape.Dot == Shape.Sized(None))
+    print(same(Some("x"), Some("x")))
+    print(same<int>(None, Some(1)))
+    print(same(Some([1, 2]), Some([1, 2])))
+    let ok: Result<int, str> = Ok(5)
+    print(both(ok, Ok(5)))
+    print(both(ok, Err("5")))
+    print(first_even([1, 3, 4]) == Some(4))
+    print(first_even([1, 3]) == None)
+    let m = ["a": 1]
+    print(m.get("a") == Some(1))
+    print(m.get("b") == None)
+    print(xs.contains(None))
+    let zero = 0.0
+    let nan: Option<float> = Some(zero / zero)
+    print(nan == nan)
+    print(Some(0.0) == Some(-0.0))
+    var count = 0
+    for v in [Some(1), None, Some(1), Some(2)] {
+        if v == Some(1) { count += 1 }
+    }
+    print(count)
+}
+""",
+    # MYLA-379: `#derive(Eq, Hash)` on generic structs and enums, as `==` and map keys
+    "derive_on_generic_types": r"""// MYLA-379: `#derive(Eq, Hash)` on generic structs and enums, the impl
+// bounded by `T: Eq` / `T: Hash`: `==`, map keys, nesting, recursion,
+// generic code and a derived type holding a generic one
+#derive(Eq, Hash)
+struct Pair<A, B> {
+    a: A,
+    b: B,
+}
+
+#derive(Eq, Hash)
+enum Tree<T> {
+    Leaf,
+    Node(T, [Tree<T>]),
+}
+
+#derive(Eq)
+struct Grid<T> {
+    w: int,
+    cells: [T],
+}
+
+#derive(Eq, Hash)
+enum Either<L, R> {
+    Left(L),
+    Right(R),
+}
+
+#derive(Eq, Hash)
+struct Unit<T> {
+}
+
+#derive(Eq, Hash)
+struct Cell {
+    at: Pair<int, int>,
+    mark: Either<char, str>,
+}
+
+#derive(Eq)
+struct Measured<T> {
+    value: T,
+    weight: float,
+}
+
+fun count_distinct<K: Eq + Hash>(xs: [K]) -> int {
+    var seen: [K: bool] = [:]
+    for x in xs { seen[x] = true }
+    return seen.len()
+}
+
+fun eq_twice<T: Eq>(a: T, b: T) -> bool {
+    return a == b && !(a != b)
+}
+
+fun main() {
+    let p = Pair { a: 1, b: "x" }
+    print(p == Pair { a: 1, b: "x" })
+    print(p == Pair { a: 2, b: "x" })
+    print(p != Pair { a: 1, b: "y" })
+    let deep = Pair { a: Pair { a: 'c', b: [1, 2] }, b: Some(true) }
+    print(deep == Pair { a: Pair { a: 'c', b: [1, 2] }, b: Some(true) })
+    print(deep == Pair { a: Pair { a: 'c', b: [1] }, b: Some(true) })
+    let t1: Tree<int> = Tree.Node(1, [Tree.Leaf, Tree.Node(2, [])])
+    let t2: Tree<int> = Tree.Node(1, [Tree.Leaf, Tree.Node(2, [])])
+    let t3: Tree<int> = Tree.Node(1, [Tree.Leaf, Tree.Node(3, [])])
+    print(t1 == t2)
+    print(t1 == t3)
+    let leaf: Tree<int> = Tree.Leaf
+    print(leaf == Tree.Leaf)
+    let g = Grid { w: 2, cells: ["a", "b", "c", "d"] }
+    print(g == Grid { w: 2, cells: ["a", "b", "c", "d"] })
+    print(g == Grid { w: 4, cells: ["a", "b", "c", "d"] })
+    let l: Either<int, str> = Either.Left(1)
+    print(l == Either.Left(1))
+    print(l == Either.Right("1"))
+    let u1: Unit<str> = Unit {}
+    let u2: Unit<str> = Unit {}
+    print(u1 == u2)
+    let c = Cell { at: Pair { a: 0, b: 1 }, mark: Either.Left('#') }
+    print(c == Cell { at: Pair { a: 0, b: 1 }, mark: Either.Left('#') })
+    print(c == Cell { at: Pair { a: 0, b: 1 }, mark: Either.Right("#") })
+    let zero = 0.0
+    let m1 = Measured { value: "w", weight: zero / zero }
+    print(m1 == m1)
+    print(Measured { value: 1, weight: 0.5 } == Measured { value: 1, weight: 0.5 })
+    print(eq_twice(p, Pair { a: 1, b: "x" }))
+    print(eq_twice(t1, t3))
+    // map keys
+    var at: [Pair<int, int>: str] = [:]
+    at[Pair { a: 1, b: 2 }] = "one-two"
+    at[Pair { a: 2, b: 1 }] = "two-one"
+    at[Pair { a: 1, b: 2 }] = "again"
+    print(at.len())
+    print(at[Pair { a: 1, b: 2 }])
+    print(at.contains(Pair { a: 2, b: 1 }))
+    print(at.contains(Pair { a: 2, b: 2 }))
+    var trees: [Tree<str>: int] = [:]
+    trees[Tree.Node("r", [Tree.Leaf])] = 1
+    trees[Tree.Leaf] = 2
+    trees[Tree.Node("r", [Tree.Leaf])] = 3
+    print(trees.len())
+    print(trees.get_or(Tree.Node("r", [Tree.Leaf]), 0))
+    var cells: [Cell: int] = [:]
+    cells[c] = 7
+    print(cells.get_or(Cell { at: Pair { a: 0, b: 1 }, mark: Either.Left('#') }, 0))
+    print(cells.get_or(Cell { at: Pair { a: 0, b: 1 }, mark: Either.Right("#") }, 0))
+    let es: [Either<int, str>] = [Either.Left(1), Either.Right("a"), Either.Left(1), Either.Right("b")]
+    print(count_distinct(es))
+    print(count_distinct([(Pair { a: 1, b: 'a' }, 2), (Pair { a: 1, b: 'a' }, 2)]))
+    let h1 = Hasher { state: 0 }.add(Pair { a: 1, b: "x" }).finish()
+    let h2 = Hasher { state: 0 }.add(Pair { a: 1, b: "x" }).finish()
+    print(h1 == h2)
+}
+""",
+    # MYLA-379: `#derive(Json)` on generic structs and enums, round trips
+    "json_derive_generic": r"""// MYLA-379: `#derive(Json)` on generic structs and enums, bounded by
+// `T: ToJson` and `T: FromJson`
+import std.json as json
+from std.json import JsonError
+
+#derive(Json, Eq)
+struct Page<T> {
+    items: [T],
+    next: Option<str>,
+}
+
+#derive(Json, Eq)
+struct Point {
+    x: int,
+    y: int,
+}
+
+#derive(Json, Eq)
+enum Tagged<A, B> {
+    Nothing,
+    One(A),
+    Two(A, B),
+}
+
+fun main() {
+    let p = Page { items: [Point { x: 1, y: 2 }, Point { x: 3, y: 4 }], next: Some("p2") }
+    let text = json.encode(p)
+    print(text)
+    let back: Result<Page<Point>, JsonError> = json.decode<Page<Point>>(text)
+    match back {
+        Ok(q) => { print(q == p) },
+        Err(e) => { print(e.message()) },
+    }
+    let words = Page { items: ["a", "b"], next: None }
+    print(json.encode(words))
+    match json.decode<Page<str>>("{\"items\": [\"x\"]}") {
+        Ok(q) => { print(q.items[0]) },
+        Err(e) => { print(e.message()) },
+    }
+    match json.decode<Page<int>>("{\"items\": [\"x\"]}") {
+        Ok(q) => { print(q.items.len()) },
+        Err(e) => { print(e.message()) },
+    }
+    let ts: [Tagged<int, str>] = [Tagged.Nothing, Tagged.One(1), Tagged.Two(2, "b")]
+    let tt = json.encode(ts)
+    print(tt)
+    match json.decode<[Tagged<int, str>]>(tt) {
+        Ok(back2) => { print(back2 == ts) },
+        Err(e) => { print(e.message()) },
+    }
+    let nested: Page<Page<Tagged<Point, bool>>> = Page { items: [Page { items: [Tagged.One(Point { x: 0, y: 0 })], next: None }], next: None }
+    let nt = json.encode(nested)
+    print(nt)
+    let nb: Result<Page<Page<Tagged<Point, bool>>>, JsonError> = json.decode<Page<Page<Tagged<Point, bool>>>>(nt)
+    match nb {
+        Ok(v) => { print(v == nested) },
+        Err(e) => { print(e.message()) },
+    }
+}
+""",
     # D172 (MYLA-385): `#derive(Json)`, nested structs, lists, maps, an `Option` field absent and present, every built-in type, round trips
     "json_derive_structs": r"""// D172 (MYLA-385): `#derive(Json)` on structs: nested structs, lists, maps,
 // an `Option` field absent and present, the built-in types, round trips
@@ -7621,6 +7892,12 @@ class TestCompilerParity(unittest.TestCase):
 # longer holds (a later decision changed its meaning) or there is none (a
 # program added or changed since): its output, pinned here.
 PINNED = {
+    # MYLA-379: new; native code gives the same
+    "option_result_equality": 'true\nfalse\nfalse\ntrue\nfalse\ntrue\ntrue\ntrue\nfalse\ntrue\ntrue\ntrue\ntrue\nfalse\nfalse\ntrue\nfalse\ntrue\nfalse\ntrue\nfalse\ntrue\nfalse\ntrue\ntrue\nfalse\ntrue\nfalse\ntrue\ntrue\nfalse\ntrue\ntrue\ntrue\ntrue\ntrue\nfalse\ntrue\n2\n',
+    # MYLA-379: new; native code gives the same
+    "derive_on_generic_types": 'true\nfalse\ntrue\ntrue\nfalse\ntrue\nfalse\ntrue\ntrue\nfalse\ntrue\nfalse\ntrue\ntrue\nfalse\nfalse\ntrue\ntrue\nfalse\n2\nagain\ntrue\nfalse\n2\n3\n7\n0\n3\n1\ntrue\n',
+    # MYLA-379: new; native code gives the same
+    "json_derive_generic": '{"items":[{"x":1,"y":2},{"x":3,"y":4}],"next":"p2"}\ntrue\n{"items":["a","b"]}\nx\nexpected an integer, found a string\n["Nothing",{"One":1},{"Two":[2,"b"]}]\ntrue\n{"items":[{"items":[{"One":{"x":0,"y":0}}]}]}\ntrue\n',
     # MYLA-385: new; native code gives the same
     "json_derive_structs": '{"x":1,"y":-2}\n{"id":4000000000,"items":[{"name":"a","at":{"x":1,"y":-2},"tags":["t1","t2"],"counts":{"k":3,"j":4}},{"name":"b\\"q","at":{"x":0,"y":0},"tags":[],"label":"lbl","counts":{}}]}\ntrue\nlbl\ntrue\n4\n4000000000\n4 5\ntrue\n15\n{"small":-128,"byte":255,"wide":-9000000000,"huge":1.8446744073709552e+19,"ratio":null,"single":0.1,"flag":true,"letter":"é","raw":[null,1],"maybe":[1,2]}\n{"small":127,"byte":0,"wide":9223372036854775807,"huge":9.223372036854776e+18,"ratio":2.5,"single":1.5,"flag":false,"letter":"x","raw":null}\ntrue\n9223372036854775808\n1.5\nx\n5 6 4\n{}\ntrue\n[[1,2],[3]]\n{"a":1,"b":null}\n"c"\nnull\n2\n-5\ntrue\n',
     # MYLA-385: new; native code gives the same

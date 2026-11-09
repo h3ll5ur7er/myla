@@ -1,0 +1,5 @@
+type error: operator '==' is not defined for 'Pair<int32, Pos>': 'Pos' isn't Eq (it needs 'impl Eq for Pos' or '#derive(Eq)')
+  --> examples/errors/type_derive_generic_argument_not_eq.my:16:13
+   |
+16 |     print(p == p)
+   |           ^^^^^^
