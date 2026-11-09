@@ -2453,28 +2453,6 @@ fun agree(a: Result<[uint8], CompressError>, b: Option<[uint8]>) -> bool {
     }
 }
 
-// A result as text, to compare it (the modules of std have no `==` on
-// `Result` and `Option`).
-fun shown(r: Result<[uint8], CompressError>) -> str {
-    return match r {
-        Ok(b) => "ok " + shown_bytes(b)
-        Err(e) => "error " + e.message()
-    }
-}
-
-fun shown_some(r: Option<[uint8]>) -> str {
-    return match r {
-        Some(b) => "ok " + shown_bytes(b)
-        None => "none"
-    }
-}
-
-fun shown_bytes(b: [uint8]) -> str {
-    var sb = StringBuilder()
-    for x in b { sb.append(f"{x} ") }
-    return sb.build()
-}
-
 // Streams read in pieces, from an inner stream that gives pieces, give what
 // the functions give.
 #test
@@ -2490,8 +2468,8 @@ fun reads_in_pieces() {
         assert(agree(zlib_decompress(zl), read_pieces(zlib_reader(trickle(zl, most)), most)), f"zlib in pieces of {most}")
     }
     var d = gzip_reader(from_bytes(gz))
-    assert(shown(d.read_to_end()) == shown(Ok(bytes_m.from_str("one two"))), "read_to_end")
-    assert(shown(d.read_to_end()) == shown(Ok([])), "read_to_end at the end")
+    assert(d.read_to_end() == Ok(bytes_m.from_str("one two")), "read_to_end")
+    assert(d.read_to_end() == Ok([]), "read_to_end at the end")
     var s = zlib_reader(from_bytes(zl))
     let five = match s.read_str(5) {
         Ok(t) => t
@@ -2505,8 +2483,8 @@ fun reads_in_pieces() {
 fun raw_stream_ends() {
     var b = unhex("cb48cdc9c90700")
     for x in bytes_m.from_str(" and more") { b.push(x) }
-    assert(shown_some(read_pieces(inflate_reader(from_bytes(b)), 3)) == shown(Ok(bytes_m.from_str("hello"))), "inflate_reader")
-    assert(shown(inflate(b)) == shown(Err(CompressError.TrailingData)), "inflate")
+    assert(read_pieces(inflate_reader(from_bytes(b)), 3) == Some(bytes_m.from_str("hello")), "inflate_reader")
+    assert(inflate(b) == Err(CompressError.TrailingData), "inflate")
 }
 
 // A corrupt stream is `InvalidInput` (22), and `error()` says why; a
@@ -2538,7 +2516,7 @@ fun reader_errors() {
         _ => false
     }
     assert(stays, "the error stays")
-    assert(shown(r.read_to_end()) == shown(Err(CompressError.ChecksumMismatch)), "read_to_end gives it")
+    assert(r.read_to_end() == Err(CompressError.ChecksumMismatch), "read_to_end gives it")
 }
 
 // A DEFLATE stream written bit by bit, as RFC 1951 3.1.1 packs it.
@@ -2632,8 +2610,8 @@ fun window_across_reads() {
     for k in 0..300 * 258 { data.push(data[data.len() - 32768]) }
     for k in 0..4 { data.push(65) }
     let stream = w.done()
-    assert(agree(Ok(data), read_pieces(inflate_reader(from_bytes(stream)), 5000)), "reads of up to 5000 bytes")
-    assert(agree(Ok(data), read_pieces(inflate_reader(trickle(stream, 5000)), 70000)), "reads of up to 70000 bytes, from pieces of up to 5000")
+    assert(read_pieces(inflate_reader(from_bytes(stream)), 5000) == Some(data), "reads of up to 5000 bytes")
+    assert(read_pieces(inflate_reader(trickle(stream, 5000)), 70000) == Some(data), "reads of up to 70000 bytes, from pieces of up to 5000")
     // a distance one past the start of the output, and one that reaches it
     for d in [1001, 1000] {
         var far = bit_writer()
@@ -2645,11 +2623,11 @@ fun window_across_reads() {
         far.fixed(256)
         let got = inflate(far.done())
         if d > 1000 {
-            assert(shown(got) == shown(Err(CompressError.DistanceTooFar)), "too far")
+            assert(got == Err(CompressError.DistanceTooFar), "too far")
         } else {
             var want = more
             for k in 0..3 { want.push(more[k]) }
-            assert(agree(got, Some(want)), "as far as the start")
+            assert(got == Ok(want), "as far as the start")
         }
     }
 }
@@ -2687,11 +2665,11 @@ fun trailer_after_pieces() {
     let crc = crc32_part(crc_tables(), 0, data, 0, n)
     for sh in [0u32, 8u32, 16u32, 24u32] { g.push(((crc >> sh) & 255u32) as uint8) }
     for sh in [0u32, 8u32, 16u32, 24u32] { g.push((((n as uint32) >> sh) & 255u32) as uint8) }
-    assert(agree(zlib_decompress(z), Some(data)), "zlib_decompress")
-    assert(agree(gunzip(g), Some(data)), "gunzip")
+    assert(zlib_decompress(z) == Ok(data), "zlib_decompress")
+    assert(gunzip(g) == Ok(data), "gunzip")
     for most in [1, 5, 13] {
-        assert(agree(Ok(data), read_pieces(zlib_reader(trickle(z, most)), 4000)), f"zlib in pieces of {most}")
-        assert(agree(Ok(data), read_pieces(gzip_reader(trickle(g, most)), 4000)), f"gzip in pieces of {most}")
+        assert(read_pieces(zlib_reader(trickle(z, most)), 4000) == Some(data), f"zlib in pieces of {most}")
+        assert(read_pieces(gzip_reader(trickle(g, most)), 4000) == Some(data), f"gzip in pieces of {most}")
     }
 }
 
@@ -2745,11 +2723,11 @@ fun compresses_and_back() {
     for i in 0..inputs.len() {
         let b = inputs[i]
         for level in [0, 2, 4, 9] {
-            assert(agree(inflate(deflate(b, level)), Some(b)), f"deflate of input {i} at level {level}")
+            assert(inflate(deflate(b, level)) == Ok(b), f"deflate of input {i} at level {level}")
         }
         if b.len() < 10000 {
-            assert(agree(gunzip(gzip(b, 1)), Some(b)), f"gzip of input {i}")
-            assert(agree(zlib_decompress(zlib_compress(b, 6)), Some(b)), f"zlib of input {i}")
+            assert(gunzip(gzip(b, 1)) == Ok(b), f"gzip of input {i}")
+            assert(zlib_decompress(zlib_compress(b, 6)) == Ok(b), f"zlib of input {i}")
         }
     }
 }
@@ -2814,14 +2792,14 @@ fun writes_as_a_stream() {
     for level in [0, 1, 6] {
         for most in [1000, 70000] {
             let gz = stream_bytes(written(gzip_writer(memory_stream(), level), mixed, most))
-            assert(shown_some(gz) == shown(Ok(gzip(mixed, level))), f"gzip_writer at level {level}, pieces of {most}")
-            assert(agree(gunzip(gz.unwrap_or([])), Some(mixed)), f"gunzip at level {level}")
+            assert(gz == Some(gzip(mixed, level)), f"gzip_writer at level {level}, pieces of {most}")
+            assert(gunzip(gz.unwrap_or([])) == Ok(mixed), f"gunzip at level {level}")
         }
     }
     let zl = stream_bytes(written(zlib_writer(memory_stream(), 9), inputs[2], 100)).unwrap_or([])
-    assert(agree(zlib_decompress(zl), Some(inputs[2])), "zlib_writer")
+    assert(zlib_decompress(zl) == Ok(inputs[2]), "zlib_writer")
     let raw = stream_bytes(written(deflate_writer(memory_stream(), 4), inputs[4], 7)).unwrap_or([])
-    assert(agree(inflate(raw), Some(inputs[4])), "deflate_writer")
+    assert(inflate(raw) == Ok(inputs[4]), "deflate_writer")
     let none = stream_bytes(written(gzip_writer(memory_stream(), 6), [], 5)).unwrap_or([])
     assert(none == gzip([], 6), "nothing written")
 }
@@ -2841,11 +2819,11 @@ fun flushes() {
         assert(n1 > 4 && so_far[n1 - 4:] == [0u8, 0u8, 255u8, 255u8], "an empty stored block ends it")
         so_far.push(3)
         so_far.push(0)
-        assert(agree(inflate(so_far), Some(mixed[:30000])), f"the output at the flush, at level {level}")
+        assert(inflate(so_far) == Ok(mixed[:30000]), f"the output at the flush, at level {level}")
         let r2 = e.write(mixed[30000:])
         let f2 = e.flush()
         let f3 = e.flush()
         let all = stream_bytes(e.finish()).unwrap_or([])
-        assert(agree(inflate(all), Some(mixed)), f"the whole stream, at level {level}")
+        assert(inflate(all) == Ok(mixed), f"the whole stream, at level {level}")
     }
 }
