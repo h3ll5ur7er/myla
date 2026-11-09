@@ -53,6 +53,7 @@ The conventions (D164): operations on built-in types are methods (`s.split(",")`
 | `std.map` | [[Language/Standard-library/Map]] | Methods on maps (`get`, `get_or`, `update`, `values`, `items`, `merge`) and `counts` |
 | `std.task` | [[Language/Standard-library/Task]] | Child tasks in numbers known at run time, cancellation, time limits, notifiers, channels, worker pools, the first of several |
 | `std.time` | [[Language/Standard-library/Time]] | The monotonic and wall clocks, `Duration`, `Instant`, `DateTime` in UTC, RFC 3339 and ISO 8601 |
+| `std.bench` | [[Language/Standard-library/Bench]] | Timing a closure over repeated runs: a warm-up that fixes the calls a run makes, `run`, `run_n`, `run_for`, the minimum, median and spread on one line, `black_box` |
 | `std.log` | [[Language/Standard-library/Log]] | `error`, `warn`, `info`, `debug` to the standard error with a time, the level from `MYLA_LOG` |
 | `std.test` | [[Language/Standard-library/Test]] | Expectations, temporary directories and the program under test, for test functions |
 | `std.json` | [[Language/Standard-library/Json]] | JSON values, parsing, compact and indented writing, paths, typed getters; typed values by `#derive(Json)`, `encode` and `decode<T>` |

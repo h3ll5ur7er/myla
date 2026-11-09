@@ -155,7 +155,7 @@ Three questions for the owner are worth deciding before the first module is writ
 | 64 | Signals | `std.signal` | SIGINT and SIGTERM handled, for a clean shutdown, as an async event | 3 | 3 | primitives per target | 64 | [[MYLA-350]] |
 | 65 | UUIDs | `std.uuid` | v4 (random) and v7 (ordered by time), parse and print | 3 | 1 | #15 | 60 | [[MYLA-337]] |
 | 66 | Concurrency utilities | `std.task` | channels between tasks, a worker pool, a timeout around an await, waiting for the first of several | 6 | 4 |  | 57 | [[MYLA-351]] |
-| 67 | Benchmarking | `std.bench` | time a closure over repeated runs; report the minimum and the median | 4 | 1 |  | 63 | [[MYLA-403]] |
+| 67 | Benchmarking | `std.bench` | time a closure over repeated runs; report the minimum and the median: done, `run`, `run_n`, `run_for`, `black_box` | 4 | 1 |  | 63 | [[MYLA-403]] |
 | 68 | Test helpers | `std.test` | `expect`, `expect_eq`, `expect_ne`, `fail`, `temp_dir`, `program`: done (D162) | 9 | 2 |  | – | [[MYLA-304]] |
 
 ## The suggested order
