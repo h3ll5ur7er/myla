@@ -1,10 +1,15 @@
 """Every standard library module's own `#test` cases pass, interpreted and
-natively (MYLA-325, D164).
+natively (MYLA-325, D164), and on the target MYLA_TEST_TARGET names
+(`scripts/test-target.py`): on wasm32 under Node, where `myla test` runs the
+harness again after each case that ends a run (MYLA-370); under qemu-aarch64
+it is excused (`_targets.py`: a qemu process per case takes minutes).
 
 The modules are found, not listed, so a new module of `lib/std/` is covered by
 adding its cases. Left out: `std.rt`, the runtime itself, whose cases run in the
 interpreter only (natively it is the code the harness runs on), and the other
-targets' platform modules, which only their own targets can run.
+targets' platform modules, which only their own targets can run; on another
+target every platform module (the harness of `platform_wasm` doesn't build on
+wasm32: there it is `std.platform`, which the harness imports too).
 """
 from __future__ import annotations
 
@@ -13,19 +18,21 @@ import os
 import subprocess
 import unittest
 
-from ._native import CAN_BUILD_NATIVE, SKIP_REASON
+from ._native import CAN_BUILD_NATIVE, SKIP_REASON, TEST_TARGET, target_flags
 from ._tools import STDLIB_ROOT, selfhost_tool
 
 NOT_NATIVE = {"rt"}
-OTHER_TARGETS = {"platform_aarch64", "platform_wasm"}
+PLATFORMS = {"platform", "platform_aarch64", "platform_wasm"}   # `platform` is the host's (D161)
+_RUN_MJS = os.path.join(os.path.dirname(STDLIB_ROOT), "tools", "wasm", "run.mjs")
 
 
-def _modules() -> list[str]:
-    """The names of the modules of `lib/std/` that have `#test` cases."""
+def _modules(target: str = "") -> list[str]:
+    """The names of the modules of `lib/std/` that have `#test` cases, with
+    the host's platform module ("" `target`) or none."""
     found = []
     for path in sorted(glob.glob(os.path.join(STDLIB_ROOT, "std", "*.my"))):
         name = os.path.basename(path)[:-3]
-        if name in OTHER_TARGETS:
+        if name in PLATFORMS and (target != "" or name != "platform"):
             continue
         with open(path, encoding="utf-8") as fh:
             if any(line.lstrip().startswith("#test") for line in fh):
@@ -35,8 +42,11 @@ def _modules() -> list[str]:
 
 def _test(name: str, *flags: str) -> subprocess.CompletedProcess:
     path = os.path.join(STDLIB_ROOT, "std", name + ".my")
+    env = dict(os.environ)
+    if TEST_TARGET == "wasm32-wasi":
+        env["MYLA_EMULATOR"] = f"node {_RUN_MJS}"
     return subprocess.run([selfhost_tool("main"), "test", path, *flags, "--stdlib", STDLIB_ROOT],
-                          capture_output=True, text=True, timeout=600)
+                          capture_output=True, text=True, timeout=600, env=env)
 
 
 class StdModuleCases(unittest.TestCase):
@@ -53,12 +63,16 @@ class StdModuleCases(unittest.TestCase):
 
     @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
     def test_native(self) -> None:
-        for name in _modules():
+        # on the target MYLA_TEST_TARGET names, the native report is the
+        # host's, every case run (on wasm32 too, MYLA-370)
+        flags = target_flags() or ["--native"]
+        for name in _modules(TEST_TARGET):
             if name in NOT_NATIVE:
                 continue
             with self.subTest(module=name):
-                proc = _test(name, "--native")
+                proc = _test(name, *flags)
                 self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+                self.assertIn(" passed.", proc.stdout)
 
 
 if __name__ == "__main__":

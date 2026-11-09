@@ -8,8 +8,8 @@ design: a failed case runs no deferred block (its child process ends), a
 runtime error's message carries no values, so an expected `[panic]` is
 compared by prefix. For another target the harness runs under the emulator
 `--target` implies (qemu-aarch64) or MYLA_EMULATOR names (Node for wasm32,
-where no child process can start: the cases run in the harness itself and
-the first runtime error ends the run, which the report says)."""
+where the harness can start no child process: `myla test` runs it, and again
+after each case that ended a run, MYLA-370)."""
 import glob
 import os
 import shutil
@@ -41,28 +41,6 @@ PASS  output_of_a_pass_is_hidden
 
 # the async cases: the same but for the deferred blocks of the failed cases
 _ASYNC_NATIVE_WANT = _ASYNC_WANT.replace("      | case's defer\n", "").replace("      | async defer ran\n", "")
-
-# on wasm32 no child process can start: the cases run in the harness, and
-# the first runtime error ends the run
-_FUNCTIONS_INLINE_WANT = """PASS  passes
-PASS  passes_too (named)
-FAIL  fails_by_err: accepted 80
-FAIL  fails_by_expect: runtime error: expected 4, got 3
-FAIL  fails_by_ne: not run (an earlier failure ended the run)
-FAIL  fails_by_fail: not run (an earlier failure ended the run)
-FAIL  div #1: not run (an earlier failure ended the run)
-FAIL  div #2: not run (an earlier failure ended the run)
-FAIL  div #3: not run (an earlier failure ended the run)
-FAIL  div #4: not run (an earlier failure ended the run)
-FAIL  div #5: not run (an earlier failure ended the run)
-FAIL  leaves #1: not run (an earlier failure ended the run)
-FAIL  leaves #2: not run (an earlier failure ended the run)
-FAIL  leaves #3: not run (an earlier failure ended the run)
-FAIL  stays #1: not run (an earlier failure ended the run)
-
-2/15 passed.
-"""
-
 
 # MYLA-357: a receiver of every kind with an empty value, and a literal one
 # of another integer type, bound with the argument's type; a method on a
@@ -278,13 +256,74 @@ class TestAarch64(unittest.TestCase):
 @unittest.skipUnless(CAN_BUILD_NATIVE and shutil.which("node") and shutil.which("clang")
                      and shutil.which("wasm-ld"), "needs node, clang and wasm-ld")
 class TestWasm32(unittest.TestCase):
-    def test_the_cases_run_in_the_harness_itself(self):
+    """On wasm32 the harness can start no process: `myla test` runs it once
+    and again after each case that ended a run (MYLA-370), so the report is
+    the native one, every case run."""
+
+    def _run(self, tmp: str, path: str, *flags: str, env: dict | None = None) -> subprocess.CompletedProcess:
+        return _myla(["test", path, "--target", "wasm32-wasi", *flags], tmp,
+                     {"MYLA_EMULATOR": f"node {_RUN_MJS}", **(env or {})})
+
+    def test_every_case_runs_after_one_that_ends_the_run(self):
+        for program, want in ((_FUNCTIONS, _FUNCTIONS_WANT), (_ASYNC, _ASYNC_NATIVE_WANT),
+                              (_RECEIVERS, _RECEIVERS_WANT)):
+            with tempfile.TemporaryDirectory() as tmp:
+                path = _write(tmp, "t.my", program)
+                proc = self._run(tmp, path)
+                self.assertEqual(proc.returncode, 1, proc.stderr)
+                self.assertEqual(proc.stdout, want)
+                self.assertEqual(proc.stderr, "")
+
+    def test_a_panic_case_first_and_the_ordinary_ones_after_it(self):
+        source = """from std.process import exit
+
+#test(1)[panic("boom")]
+#test(2)[2]
+#test(3)[panic("boom")]
+#test(4)[5]
+fun f(x: int) -> int {
+    print(f"f {x}")
+    if x % 2 == 1 { panic("boom") }
+    return x
+}
+
+#test()[exit(3)]
+fun g() {
+    print("g")
+    exit(3)
+}
+
+#test
+fun last() {}
+"""
+        want = ("PASS  f #1\nPASS  f #2\nPASS  f #3\nFAIL  f #4: expected 5, got 4\n      | f 4\n"
+                "PASS  g #1\nPASS  last\n\n5/6 passed.\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = _write(tmp, "t.my", source)
+            interp = _myla(["test", path], tmp)
+            self.assertEqual(interp.stdout, want)
+            proc = self._run(tmp, path)
+            self.assertEqual((proc.stdout, proc.returncode, proc.stderr), (want, 1, ""))
+
+    def test_the_scratch_directories_go(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            scratch = os.path.join(tmp, "scratch")
+            os.mkdir(scratch)
+            path = _write(tmp, "unwind.my", _UNWINDING)
+            proc = self._run(tmp, path, env={"TMPDIR": scratch})
+            self.assertEqual(proc.returncode, 1, proc.stderr)
+            self.assertEqual(proc.stdout, _UNWINDING_NATIVE_WANT)
+            self.assertFalse(os.path.exists(os.path.join(tmp, "unwound.txt")))
+            self.assertEqual(os.listdir(scratch), [])
+
+    def test_only(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = _write(tmp, "funcs.my", _FUNCTIONS)
-            proc = _myla(["test", path, "--target", "wasm32-wasi"], tmp,
-                         {"MYLA_EMULATOR": f"node {_RUN_MJS}"})
+            proc = self._run(tmp, path, "--only", "leaves")
             self.assertEqual(proc.returncode, 1, proc.stderr)
-            self.assertEqual(proc.stdout, _FUNCTIONS_INLINE_WANT)
+            self.assertEqual(proc.stdout, "PASS  leaves #1\n"
+                                          "FAIL  leaves #2: expected exit status 4, exited with status 3\n"
+                                          "FAIL  leaves #3: exited with status 3\n\n1/3 passed.\n")
 
 
 if __name__ == "__main__":

@@ -34,6 +34,9 @@ SUITES = [
     "tests.burn.test_let_else",
     "tests.burn.test_ir_contract",
     "tests.burn.test_map_remove",
+    # every standard library module's cases through the harness (MYLA-370:
+    # on wasm32 too, every case run)
+    "tests.burn.test_std_modules",
 ]
 
 # A test that reads the x86-64 code ends there, skipped, on another target,
@@ -46,10 +49,15 @@ _X86_TESTS = [
 
 _BOTH = {
     **{t: _X86_CODE for t in _X86_TESTS},
+    "test_std_modules.StdModuleCases.test_interpreted": "the interpreter's runs are the host's",
 }
 
 SKIP: dict[str, dict[str, str]] = {
-    "aarch64-linux": _BOTH,
+    "aarch64-linux": {
+        **_BOTH,
+        # a qemu-aarch64 process per case: std.int's 1826 took 4.6 minutes
+        "test_std_modules.StdModuleCases.test_native": "a qemu process per case (std.int's 1826 cases: 4.6 minutes)",
+    },
     "wasm32-wasi": {
         **_BOTH,
         "test_selfhost_codegen.SelfHostedCodegenParity.test_children_run_in_parallel": "one worker (D125 (4))",
