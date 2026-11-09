@@ -449,7 +449,9 @@ pub fun walk_with(dir: str, follow_links: bool) -> Result<[str], IoError> {
                 chain.pop()
             }
             let st = __path_stat(full, true)
-            if st.len() == 5 && ((st[1] as int32) & S_IFMT) == S_IFDIR && !chain.contains((st[3], st[4])) {
+            // a file number 0 is none the host knows (a WASI host's memory
+            // file system): such a directory can't be told, so it is gone into
+            if st.len() == 5 && ((st[1] as int32) & S_IFMT) == S_IFDIR && (st[4] == 0 || !chain.contains((st[3], st[4]))) {
                 chain.push((st[3], st[4]))
                 into = true
             }

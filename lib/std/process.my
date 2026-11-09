@@ -1624,4 +1624,9 @@ async fun child_waited_in_a_task() {
     holds(read_rest(output_of(other.take_stdout())) == "x", "cat's output")
     let st = await other.wait_async()
     holds(waited(st) == ExitStatus.Exited(0), "cat's status")
+    // `output_async` with a stream that isn't a pipe (MYLA-378)
+    match await command("sh").args(["-c", "printf o; printf e >&2"]).stderr_from(Stdio.Null).output_async() {
+        Ok(out) => holds(bytes_m.to_str(out.stdout) == "o" && out.stderr.len() == 0, "output_async with a Null error")
+        Err(e) => panic(f"output_async: {e}")
+    }
 }
