@@ -971,8 +971,13 @@ pub fun kill(pid: int, sig: int) {
 // child's stdin a pipe too, `[errno, pid, in, out, err, exited]`: `in` the
 // write end of its stdin's pipe, `out` and `err` the read ends of its
 // stdout's and stderr's, `exited` its pidfd; `opts` as `run_with` takes
-// them, but for the input, which the pipe is instead. `[errno, 0, -1, -1,
-// -1, -1]` when it couldn't be started (ENOSYS on wasm32).
+// them, but for the input, which the pipe is instead. Or `opts[1]` says
+// what each stream is (MYLA-378), three letters for stdin, stdout and
+// stderr: `p` a pipe, `i` this process's, `n` nothing (/dev/null), and for
+// stdin `t` the text `opts[2]` or `d` the descriptor whose number `opts[2]`
+// is (handed over: closed here once the child has it); a stream that isn't
+// a pipe is -1 in the result. `[errno, 0, -1, -1, -1, -1]` when it
+// couldn't be started (ENOSYS on wasm32).
 pub fun spawn_piped(program: str, argv: [str], opts: [str]) -> [int] {
     return os.spawn_piped(program_paths(program), argv, opts)
 }
