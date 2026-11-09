@@ -1,0 +1,9 @@
+//~ type error: cannot destructure non-tuple value of type 'int32'
+// `for (a, b) in xs` destructures each element as `let (a, b) = x` does
+// (MYLA-390): the elements must be tuples of that many parts.
+#main
+fun main() {
+    for (i, j) in 0..3 {
+        print(i + j)
+    }
+}

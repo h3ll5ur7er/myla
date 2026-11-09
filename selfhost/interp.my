@@ -4348,6 +4348,18 @@ impl Interp {
             self.update_place(p, PlaceOp.OAppend(piece))
             return Value.VUnit
         }
+        if nm == "append_char" {
+            // the character's UTF-8 bytes (MYLA-390)
+            let p = self.place_of(args[0])
+            let c = self.eval(args[1])
+            self.read_place(p)
+            if self.stop() { return Value.VUnit }
+            match c {
+                Value.VChar(cp) => self.update_place(p, PlaceOp.OAppend(cp_utf8(cp as int32)))
+                _ => {}
+            }
+            return Value.VUnit
+        }
         if nm == "append_byte" {
             let p = self.place_of(args[0])
             let b = as_int(self.eval(args[1]))

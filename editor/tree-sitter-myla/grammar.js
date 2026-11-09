@@ -75,7 +75,7 @@ module.exports = grammar({
     if_stmt: $ => seq('if', choice($._cond, $.let_cond), $.block, optional(seq(optional($._nl_rep), 'else', choice($.if_stmt, $.block)))),
     let_cond: $ => seq('let', $._pattern, '=', $._cond),
     while_stmt: $ => seq('while', choice($._cond, $.let_cond), $.block),
-    for_stmt: $ => seq('for', $.identifier, 'in', $._cond, optional(seq('..', $._cond)), $.block),
+    for_stmt: $ => seq('for', choice($.identifier, $.bind_tuple), 'in', $._cond, optional(seq('..', $._cond)), $.block),
     _cond: $ => $._expression,
     return_stmt: $ => seq('return', optional(seq($._expression, repeat(seq(',', $._expression))))),
     become_stmt: $ => seq('become', $._expression),

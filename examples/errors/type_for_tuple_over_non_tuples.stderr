@@ -1,0 +1,5 @@
+type error: cannot destructure non-tuple value of type 'int32'
+  --> examples/errors/type_for_tuple_over_non_tuples.my:6:9
+  |
+6 |     for (i, j) in 0..3 {
+  |         ^^^^^^

@@ -1,0 +1,5 @@
+type error: append_char value must be 'char', found 'uint8'
+  --> examples/errors/type_append_char_of_a_byte.my:8:20
+  |
+8 |     sb.append_char(b)
+  |                    ^

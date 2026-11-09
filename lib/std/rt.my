@@ -1732,6 +1732,27 @@ pub fun sb_append_byte(holder: int64, b: uint8) {
     __store64(cell, len + 1)
 }
 
+// `sb.append_char(c)` (MYLA-390): the UTF-8 bytes of the character `c`
+// after the builder's.
+pub fun sb_append_char(holder: int64, c: char) {
+    let v = c as int64
+    if v < 0x80 {
+        sb_append_byte(holder, v as uint8)
+    } else if v < 0x800 {
+        sb_append_byte(holder, (0xC0 | (v >> 6)) as uint8)
+        sb_append_byte(holder, (0x80 | (v & 0x3F)) as uint8)
+    } else if v < 0x10000 {
+        sb_append_byte(holder, (0xE0 | (v >> 12)) as uint8)
+        sb_append_byte(holder, (0x80 | ((v >> 6) & 0x3F)) as uint8)
+        sb_append_byte(holder, (0x80 | (v & 0x3F)) as uint8)
+    } else {
+        sb_append_byte(holder, (0xF0 | (v >> 18)) as uint8)
+        sb_append_byte(holder, (0x80 | ((v >> 12) & 0x3F)) as uint8)
+        sb_append_byte(holder, (0x80 | ((v >> 6) & 0x3F)) as uint8)
+        sb_append_byte(holder, (0x80 | (v & 0x3F)) as uint8)
+    }
+}
+
 // `__sb_append_bytes`: the `count` bytes at `src` after the builder's (a
 // range of a string).
 pub fun sb_append_bytes(holder: int64, src: int64, count: int64) {

@@ -2550,8 +2550,17 @@
           "value": "for"
         },
         {
-          "type": "SYMBOL",
-          "name": "identifier"
+          "type": "CHOICE",
+          "members": [
+            {
+              "type": "SYMBOL",
+              "name": "identifier"
+            },
+            {
+              "type": "SYMBOL",
+              "name": "bind_tuple"
+            }
+          ]
         },
         {
           "type": "STRING",

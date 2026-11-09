@@ -6152,6 +6152,188 @@ async fun main() {
     print(vs[0] + vs[1] + vs[2])
 }
 """,
+    # MYLA-392: an `await` in a `match` that ends an arm of a `match`
+    # statement. The async split took the inner `match` for the arm's value
+    # and bound the void `await` to a temporary, which native code couldn't
+    # lower ("a function used as a value")
+    "await_in_a_nested_match": """import std.task as task
+
+enum Cause { Stop, Code(int) }
+
+async fun worker(r: Result<int, Cause>) -> int {
+    match r {
+        Ok(n) => { return n }
+        Err(e) => {
+            match e {
+                Stop => {}
+                Code(code) => {
+                    print(code)
+                    await task.sleep(1)
+                }
+            }
+        }
+    }
+    return 0
+}
+
+async fun twice(n: int) -> int {
+    await task.yield()
+    return 2 * n
+}
+
+// three deep, the innermost arm's value an awaited call, and a match as a
+// value whose arm ends in a nested match statement
+async fun deeper(r: Result<Option<int>, str>) -> int {
+    var got = 0
+    match r {
+        Ok(o) => match o {
+            Some(n) => {
+                match n > 10 {
+                    true => { got = await twice(n) }
+                    false => await task.sleep(0)
+                }
+            }
+            None => { got = -1 }
+        }
+        Err(s) => {
+            let k = match s.len() {
+                0 => 0
+                n => {
+                    match n {
+                        1 => await task.yield()
+                        _ => { print(s) }
+                    }
+                    await twice(n)
+                }
+            }
+            got = k
+        }
+    }
+    return got
+}
+
+#main
+async fun main() {
+    print(await worker(Err(Cause.Code(24))))
+    print(await worker(Err(Cause.Stop)))
+    print(await worker(Ok(7)))
+    print(await deeper(Ok(Some(21))))
+    print(await deeper(Ok(Some(3))))
+    print(await deeper(Ok(None)))
+    print(await deeper(Err("abc")))
+    print(await deeper(Err("z")))
+    print(await deeper(Err("")))
+}
+""",
+    # MYLA-390: a tuple of names in a `for` head, over a list, a map's items,
+    # an iterator, nested tuples, `_`, nested loops and an async loop
+    "for_tuple_patterns": """// MYLA-390: a tuple of names in a `for` head, over lists, maps' items,
+// iterators, nested tuples and `_`
+import std.task as task
+import std.iter as iter
+
+struct Pairs {
+    i: int,
+    n: int,
+}
+
+impl Iterator<(int, str)> for Pairs {
+    fun next(var self) -> Option<(int, str)> {
+        if self.i >= self.n { return None }
+        self.i += 1
+        return Some((self.i, "#".repeat(self.i)))
+    }
+}
+
+async fun total(ps: [(str, int)]) -> int {
+    var t = 0
+    for (name, n) in ps {
+        await task.yield()
+        t += n * name.len()
+    }
+    return t
+}
+
+#main
+async fun main() {
+    let pairs = [("a", 1), ("bb", 2), ("ccc", 3)]
+    for (k, v) in pairs {
+        print(f"{k}={v}")
+    }
+    var m: [str: int] = [:]
+    m["x"] = 10
+    m["y"] = 20
+    var sum = 0
+    for (k, v) in m.items() {
+        print(k)
+        sum += v
+    }
+    print(sum)
+    for (i, s) in (Pairs { i: 0, n: 3 }) {
+        print(f"{i}:{s}")
+    }
+    for ((a, b), c) in [((1, 2), 3), ((4, 5), 6)] {
+        print(a + b + c)
+    }
+    for (_, v) in pairs {
+        print(v)
+    }
+    for (i, x) in ["p", "q"].iter() |> iter.enumerate() {
+        print(f"{i} {x}")
+    }
+    // a nested loop's names, and break and continue
+    for (k, v) in pairs {
+        if v == 2 { continue }
+        for (k2, v2) in pairs {
+            if v2 > v { break }
+            print(k + k2)
+        }
+    }
+    print(await total(pairs))
+}
+""",
+    # MYLA-390: `sb.append_char(c)` natively, as the interpreter does it
+    "append_char": """// MYLA-390: `sb.append_char(c)`, a character's UTF-8 bytes, of each length
+struct Doc {
+    out: StringBuilder,
+}
+
+impl Doc {
+    fun put(var self, c: char) {
+        self.out.append_char(c)
+    }
+}
+
+fun main() {
+    var sb = StringBuilder()
+    for c in ['a', 'é', '€', '😀', '\\n', '\\u{10FFFF}', '\\0'] {
+        sb.append_char(c)
+    }
+    let s = sb.build()
+    print(s.len())
+    for c in s { print(c as int) }
+    // in a struct's field and a list's element
+    var d = Doc { out: StringBuilder() }
+    d.put('ö')
+    d.put('k')
+    print(d.out.build())
+    var bs = [StringBuilder(), StringBuilder()]
+    bs[1].append_char('ß')
+    bs[1].append_char('!')
+    print(bs[1].build())
+    print(bs[0].len())
+    // a copy keeps its own bytes
+    var a = StringBuilder()
+    a.append_char('x')
+    var b = a
+    b.append_char('y')
+    print(a.build())
+    print(b.build())
+    var many = StringBuilder()
+    for i in 0..1000 { many.append_char('λ') }
+    print(many.len())
+}
+""",
 }
 
 # A program that allocates far more recursive-enum cells (~12M) than the heap
@@ -7529,6 +7711,12 @@ PINNED = {
     "generic_actor_in_generic_code": "2\n1\nright left\n2\n32\nhello\n100\n2\n9\n1\n3\none\n5\n",
     "generic_actor_bounds_and_children": "10\n51\nxyy\n13\n<1>\n6\n102\n",
     "generic_actors_nested": "c\n2\n3\n6\n",
+    # MYLA-392: new; native code couldn't lower it ("a function used as a value")
+    "await_in_a_nested_match": "24\n0\n0\n7\n42\n0\n-1\nabc\n6\n2\n0\n",
+    # MYLA-390: new
+    "for_tuple_patterns": 'a=1\nbb=2\nccc=3\nx\ny\n30\n1:#\n2:##\n3:###\n6\n15\n1\n2\n3\n0 p\n1 q\naa\nccca\ncccbb\ncccccc\n14\n',
+    # MYLA-390: new
+    "append_char": '16\n97\n233\n8364\n128512\n10\n1114111\n0\nök\nß!\n0\nx\nxy\n2000\n',
 }
 
 
