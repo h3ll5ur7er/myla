@@ -15,6 +15,8 @@
 // sets are equal when they hold the same integers, two fixed ones when they
 // also have the same size; a fixed set never equals a growable one.
 
+import std.int as int_m     // `leading_zeros`, `trailing_zeros`
+
 #derive(Eq, Hash)
 pub struct BitSet {
     words: [uint64],
@@ -172,7 +174,7 @@ impl BitSet {
         for k in 0..self.words.len() {
             var w = self.words[k]
             while w != 0 {
-                out.push(k * 64 + lowest(w))
+                out.push(k * 64 + w.trailing_zeros())
                 w = w & (w - 1)
             }
         }
@@ -196,7 +198,7 @@ impl BitSet {
         var w = self.words[k] & (0xffffffffffffffffu64 << (start & 63))
         while true {
             if w != 0 {
-                return Some(k * 64 + lowest(w))
+                return Some(k * 64 + w.trailing_zeros())
             }
             k += 1
             if k >= self.words.len() {
@@ -219,7 +221,7 @@ impl BitSet {
         if n == 0 {
             return out
         }
-        let top = (n - 1) * 64 + highest(other.words[n - 1])
+        let top = (n - 1) * 64 + 63 - other.words[n - 1].leading_zeros()
         if top >= out.bits {
             out.reserve(top)
         }
@@ -359,14 +361,10 @@ impl BitSet {
     }
 }
 
-// The word's bit counts. std.int has them (`count_ones`, `leading_zeros`,
-// `trailing_zeros`), but these stay (MYLA-376): a module that imports
-// std.int makes each program importing it parse std.int's 2042 cases
-// (a hello world importing std.bitset checked in 58 ms instead of 46),
-// and only a function of the module itself is inlined, as `ones` is in
-// `popcount`.
-
-// The number of bits set in `w`.
+// The number of bits set in `w`: std.int's `count_ones`, which the native
+// backend doesn't inline from another module (MYLA-368), and this is
+// `popcount`'s whole loop: 2^26 words took 156 ms through a call to
+// `count_ones` and 125 ms with this inlined (MYLA-396).
 #test(0u64)[0]
 #test(0xffffffffffffffffu64)[64]
 #test(0x8000000000000001u64)[2]
@@ -376,47 +374,6 @@ fun ones(w: uint64) -> int {
     x = (x & 0x3333333333333333u64) + ((x >> 2) & 0x3333333333333333u64)
     x = (x + (x >> 4)) & 0x0f0f0f0f0f0f0f0fu64
     return (x.wrapping_mul(0x0101010101010101u64) >> 56) as int
-}
-
-// The index of the highest bit set in `w`, which isn't zero.
-#test(1u64)[0]
-#test(0x8000000000000000u64)[63]
-#test(0x50u64)[6]
-fun highest(w: uint64) -> int {
-    var n = 0
-    var x = w
-    if x >> 32 != 0 {
-        n += 32
-        x = x >> 32
-    }
-    if x >> 16 != 0 {
-        n += 16
-        x = x >> 16
-    }
-    if x >> 8 != 0 {
-        n += 8
-        x = x >> 8
-    }
-    if x >> 4 != 0 {
-        n += 4
-        x = x >> 4
-    }
-    if x >> 2 != 0 {
-        n += 2
-        x = x >> 2
-    }
-    if x >> 1 != 0 {
-        n += 1
-    }
-    return n
-}
-
-// The index of the lowest bit set in `w`, which isn't zero.
-#test(1u64)[0]
-#test(0x8000000000000000u64)[63]
-#test(0x50u64)[4]
-fun lowest(w: uint64) -> int {
-    return ones((w & w.wrapping_neg()) - 1)
 }
 
 // --- tests -------------------------------------------------------------------
