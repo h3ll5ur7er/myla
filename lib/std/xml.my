@@ -26,6 +26,7 @@ from std.fs import IoError
 import std.str as str_m
 import std.list as list_m
 import std.option as option_m
+import std.char as char_m // `to_digit`
 
 // --- Errors -------------------------------------------------------------------
 
@@ -897,7 +898,7 @@ impl XmlReader {
             let digits = i
             var v = 0
             while i < n {
-                let d = digit_value(s[i], hex)
+                let d = (s[i] as char).to_digit(if hex { 16 } else { 10 }).unwrap_or(-1)
                 if d < 0 {
                     break
                 }
@@ -912,7 +913,7 @@ impl XmlReader {
             if i == digits || s[i] != ';' || !is_xml_char(v) {
                 return Err(self.error(XmlErrorKind.InvalidReference, at))
             }
-            return Ok((encode(v), i + 1))
+            return Ok((format("{}", v as char), i + 1))
         }
         let end = name_end(s, i)
         if end >= n {
@@ -1636,24 +1637,6 @@ fun predefined(s: str, a: int, b: int) -> str {
     return ""
 }
 
-// The value of the digit `c` (hex if `hex`), or -1.
-#test('7', false)[7]
-#test('b', true)[11]
-#test('b', false)[-1]
-#test('G', true)[-1]
-fun digit_value(c: uint8, hex: bool) -> int {
-    if c >= '0' && c <= '9' {
-        return (c - '0') as int
-    }
-    if hex && c >= 'a' && c <= 'f' {
-        return (c - 'a') as int + 10
-    }
-    if hex && c >= 'A' && c <= 'F' {
-        return (c - 'A') as int + 10
-    }
-    return -1
-}
-
 // Whether `c` is a character XML 1.0 allows (2.2).
 #test(9)[true]
 #test(0)[false]
@@ -1726,31 +1709,6 @@ fun char_len(s: str, i: int) -> int {
         return 0
     }
     return utf8_len(s[i])
-}
-
-// The UTF-8 bytes of the scalar value `c`.
-#test(0x41)["A"]
-#test(0xE9)["é"]
-#test(0x20AC)["€"]
-#test(0x1F600)["😀"]
-fun encode(c: int) -> str {
-    var sb = StringBuilder()
-    if c < 0x80 {
-        sb.append_byte(c as uint8)
-    } else if c < 0x800 {
-        sb.append_byte((0xC0 | (c >> 6)) as uint8)
-        sb.append_byte((0x80 | (c & 0x3F)) as uint8)
-    } else if c < 0x10000 {
-        sb.append_byte((0xE0 | (c >> 12)) as uint8)
-        sb.append_byte((0x80 | ((c >> 6) & 0x3F)) as uint8)
-        sb.append_byte((0x80 | (c & 0x3F)) as uint8)
-    } else {
-        sb.append_byte((0xF0 | (c >> 18)) as uint8)
-        sb.append_byte((0x80 | ((c >> 12) & 0x3F)) as uint8)
-        sb.append_byte((0x80 | ((c >> 6) & 0x3F)) as uint8)
-        sb.append_byte((0x80 | (c & 0x3F)) as uint8)
-    }
-    return sb.build()
 }
 
 // ISO-8859-1 bytes as UTF-8.
