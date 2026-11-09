@@ -12,3 +12,7 @@ Found by several wave 3 lanes ([[Project/Standard-library-roadmap]]). Each cost 
 - [ ] `IoError` has no `message()` or `Format` (D168): adding them changes how `f"{e}"` and the test reports show one, so a decision on the text first
 - [ ] `#derive(Eq, Hash)` on a generic type is "not supported yet" ([[MYLA-342]]: `Grid<T>` has no `==`)
 - [ ] `std.io.copy` reads 4 KiB at a time; a large copy wants a bigger buffer or a size parameter ([[MYLA-339]])
+
+## Decided (D173, 2026-11-09)
+
+`IoError`'s text: `message()` and `Format` give a lowercase description with the cause after it, `not found (NotFound)`, `error 5 (Other(5))`. Built in batch 5, after [[MYLA-385]].
