@@ -347,6 +347,38 @@ fun main() {
 """
 
 
+# The same two directories listed 100 times each (MYLA-362): wasm32 kept a
+# directory descriptor's readdir cookie in a slot of 64 that opening didn't
+# reset, so under Node, which doesn't reuse descriptor numbers, the counts
+# went from `6 3` to `0 0` after 32 rounds.
+RELIST = """from std.fs import list_dir
+from std.io import println
+
+fun count(path: str) -> int {
+    return match list_dir(path) {
+        Ok(names) => names.len()
+        Err(e) => -1
+    }
+}
+
+fun main() {
+    let a = count("a")
+    let b = count("b")
+    println(f"{a} {b}")
+    var round = 1
+    while round < 100 {
+        let x = count("a")
+        let y = count("b")
+        if x != a || y != b {
+            println(f"round {round + 1}: {x} {y}")
+        }
+        round += 1
+    }
+    println("done")
+}
+"""
+
+
 # Symbolic links (MYLA-363) in the tree `test_symbolic_links` makes: `t/lf`
 # names `f.txt`, `t/la` the directory `a`, `t/a/up` its parent (a loop) and
 # `t/dangling` nothing; `t/secret` may not be read (mode 0). The metadata
@@ -676,6 +708,19 @@ class DirectoryParity(unittest.TestCase):
             with self.subTest(implementation=impl):
                 self.assertEqual(result, (expected, "", 0))
 
+
+    def test_the_same_directories_listed_again(self) -> None:
+        # MYLA-362: each of 100 listings of the same directories gives the
+        # same count (wasm32 gave short lists after 64 directory opens)
+        def prepare(work: str) -> None:
+            for d, n in (("a", 6), ("b", 3)):
+                os.makedirs(os.path.join(work, d))
+                for i in range(n):
+                    open(os.path.join(work, d, f"f{i}"), "w").close()
+
+        for impl, result in self.run_all("relist", RELIST, prepare).items():
+            with self.subTest(implementation=impl):
+                self.assertEqual(result, ("6 3\ndone\n", "", 0))
 
 if __name__ == "__main__":
     unittest.main()
