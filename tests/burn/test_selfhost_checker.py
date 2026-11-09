@@ -436,6 +436,11 @@ SUPERSEDED: dict[str, str] = {
     "map_literal_key": "ok",
     # D165: `'a' - 'b'` is an int32 and `c + n` a char, but two chars don't add
     "unit_test_3": "err 1 24 1:20-1:29 type: operator '+' can't add two chars: 'c - d' is their distance (an 'int32'), 'c + n' moves 'c' by the 'int32' 'n'",
+    # MYLA-406 (proposed D178): a method may share the name of a field that holds no function
+    "unit_test_13": "err 8 5 8:5-8:22 type: cannot assign value of type 'bool' to binding of type 'int32'\n"
+                    "err 4 9 4:9-4:20 type: return type mismatch: expected 'int32', found 'bool'\n"
+                    "note 3 20 3:20-3:23: the return type is declared here",
+    "unit_test_113": "ok",
 }
 
 def _corpus() -> list[str]:

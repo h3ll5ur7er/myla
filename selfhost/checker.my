@@ -3146,17 +3146,19 @@ impl Checker {
             },
             None => {},
         }
-        // field names for collision check
-        var field_names: [str] = []
+        // a method may share a field's name, `x.name` being the field and
+        // `x.name(…)` the method, unless the field holds a function, which
+        // `x.name(…)` calls (MYLA-406)
+        var fun_fields: [str] = []
         let si = self.struct_idx(key)
-        if si >= 0 { for f in self.structs[si].fields { field_names.push(f.name) } }
+        if si >= 0 { for f in self.structs[si].fields { if is_tfunc_type(f.ty) { fun_fields.push(f.name) } } }
         for m in methods {
             // a method that can't be added is left out, body and all
             var bad: Option<CheckErr> = None
             match self.method_sig(key, m.name) { Some(x) => { bad = Some(self.duplicate_method(m, key, x)) }, None => {} }
             match bad {
                 Some(x) => {},
-                None => { if contains_str(field_names, m.name) { bad = Some(terr_at(m.line, m.col, m.sp, format("method '{}' collides with a field of '{}'", m.name, key))) } },
+                None => { if contains_str(fun_fields, m.name) { bad = Some(with_notes(terr_at(m.line, m.col, m.sp, format("method '{}' has the name of a field of '{}' that holds a function: a call '.{}(…)' would mean either", m.name, key, m.name)), [Note { label: "help", msg: "rename the method or the field; a field that holds no function may share a method's name", line: 0, col: 0, sp: no_span() }])) } },
             }
             // a function without `self` (D172) is a trait's: called as
             // `P.f()`, which a variant's name would take
@@ -9462,7 +9464,16 @@ impl Checker {
                             None => false,
                         }
                         if is_func { return self.infer_indirect_call(e, callee, args) }
-                        if match fopt { Some(ft) => has_error(ft), None => false } { return Err(poisoned()) }   // the field's type failed (MYLA-110)
+                        match fopt {
+                            Some(ft) => {
+                                if has_error(ft) { return Err(poisoned()) }   // the field's type failed (MYLA-110)
+                                if !self.lost_methods.contains(field) {
+                                    // a field that holds no function (MYLA-406)
+                                    return Err(with_notes(terr_at(e.line, e.col, e.sp, format("type '{}' has no method '{}'", type_name(recv_type), field)), [Note { label: "help", msg: format("'{}' is a field of type '{}', not a function: read it without '()'", field, type_name(ft)), line: 0, col: 0, sp: no_span() }]))
+                                }
+                            },
+                            None => {},
+                        }
                     },
                     _ => {},
                 }

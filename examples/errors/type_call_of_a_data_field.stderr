@@ -1,0 +1,6 @@
+type error: type 'Lru' has no method 'keys'
+  --> examples/errors/type_call_of_a_data_field.my:11:17
+   |
+11 |     print(c.keys().len())
+   |           ^^^^^^^^
+help: 'keys' is a field of type '[int32]', not a function: read it without '()'

@@ -1,0 +1,12 @@
+//~ type error: type 'Lru' has no method 'keys'
+//~ help: 'keys' is a field of type '[int32]', not a function
+// A call of a field that holds no function says so (MYLA-406): a method may
+// share a field's name, but here there is none
+struct Lru {
+    keys: [int],
+}
+
+fun main() {
+    let c = Lru { keys: [1] }
+    print(c.keys().len())
+}

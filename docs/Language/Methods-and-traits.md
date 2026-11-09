@@ -62,7 +62,29 @@ fun main() {
 // 11
 ```
 - A generic type takes a generic impl that names every parameter in order: `impl<T> Box<T> { … }`. Methods may have their own type parameters.
-- A type may have several `impl` blocks; a method name must be unique per type and differ from every field name. There is no orphan rule (D45): any module may add methods to any type.
+- A type may have several `impl` blocks; a method name must be unique per type. There is no orphan rule (D45): any module may add methods to any type.
+- A method may share its name with a field ([[MYLA-406]], as in Rust): `c.keys` is the field and `c.keys()` the method, so a getter can be named like what it reads, as an actor's state is (`await counter.count()`). Not with a field that holds a function: `h.on(x)` calls such a field ([[Language/Functions-and-closures]]), so a method `on` beside it is an error at the method ("method 'on' has the name of a field of 'Handler' that holds a function"). Calling a field that holds no function, where no method has its name, says so: `type 'C' has no method 'keys'`, with the help `'keys' is a field of type '[int32]', not a function`.
+
+```myla
+struct Lru {
+    keys: [int],
+}
+
+impl Lru {
+    fun keys(self) -> [int] {
+        return self.keys[::-1]
+    }
+}
+
+fun main() {
+    let c = Lru { keys: [1, 2, 3] }
+    print(c.keys[0])
+    print(c.keys()[0])
+}
+// output:
+// 1
+// 3
+```
 - A method's call form is `receiver.method(args)` (D46). A type has no static methods of its own (every method in an `impl` of no trait takes `self`); a trait's functions without `self` are called on the type, `int.zero()` ([Functions without self](#functions-without-self), D172). `Type.method` isn't a value; wrap it in a lambda.
 
 ## Traits

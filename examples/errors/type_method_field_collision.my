@@ -1,7 +1,9 @@
-//~ type error: collides with a field
-// A method may not share a name with one of the type's fields.
-struct P { x: int }
+//~ type error: has the name of a field of 'P' that holds a function
+//~ help: rename the method or the field
+// A method may share a field's name (MYLA-406), unless the field holds a
+// function: `p.f(…)` calls such a field, so it would mean either.
+struct P { f: (int) -> int }
 
 impl P {
-    fun x(self) -> int { return self.x }
+    fun f(self, n: int) -> int { return n }
 }
