@@ -5867,6 +5867,73 @@ async fun main() {
     print(await deeper(Err("")))
 }
 """,
+    # MYLA-390: a tuple of names in a `for` head, over a list, a map's items,
+    # an iterator, nested tuples, `_`, nested loops and an async loop
+    "for_tuple_patterns": """// MYLA-390: a tuple of names in a `for` head, over lists, maps' items,
+// iterators, nested tuples and `_`
+import std.task as task
+import std.iter as iter
+
+struct Pairs {
+    i: int,
+    n: int,
+}
+
+impl Iterator<(int, str)> for Pairs {
+    fun next(var self) -> Option<(int, str)> {
+        if self.i >= self.n { return None }
+        self.i += 1
+        return Some((self.i, "#".repeat(self.i)))
+    }
+}
+
+async fun total(ps: [(str, int)]) -> int {
+    var t = 0
+    for (name, n) in ps {
+        await task.yield()
+        t += n * name.len()
+    }
+    return t
+}
+
+#main
+async fun main() {
+    let pairs = [("a", 1), ("bb", 2), ("ccc", 3)]
+    for (k, v) in pairs {
+        print(f"{k}={v}")
+    }
+    var m: [str: int] = [:]
+    m["x"] = 10
+    m["y"] = 20
+    var sum = 0
+    for (k, v) in m.items() {
+        print(k)
+        sum += v
+    }
+    print(sum)
+    for (i, s) in (Pairs { i: 0, n: 3 }) {
+        print(f"{i}:{s}")
+    }
+    for ((a, b), c) in [((1, 2), 3), ((4, 5), 6)] {
+        print(a + b + c)
+    }
+    for (_, v) in pairs {
+        print(v)
+    }
+    for (i, x) in ["p", "q"].iter() |> iter.enumerate() {
+        print(f"{i} {x}")
+    }
+    // a nested loop's names, and break and continue
+    for (k, v) in pairs {
+        if v == 2 { continue }
+        for (k2, v2) in pairs {
+            if v2 > v { break }
+            print(k + k2)
+        }
+    }
+    print(await total(pairs))
+}
+""",
 }
 
 # A program that allocates far more recursive-enum cells (~12M) than the heap
@@ -7174,6 +7241,8 @@ PINNED = {
     "generic_actors_nested": "c\n2\n3\n6\n",
     # MYLA-392: new; native code couldn't lower it ("a function used as a value")
     "await_in_a_nested_match": "24\n0\n0\n7\n42\n0\n-1\nabc\n6\n2\n0\n",
+    # MYLA-390: new
+    "for_tuple_patterns": 'a=1\nbb=2\nccc=3\nx\ny\n30\n1:#\n2:##\n3:###\n6\n15\n1\n2\n3\n0 p\n1 q\naa\nccca\ncccbb\ncccccc\n14\n',
 }
 
 

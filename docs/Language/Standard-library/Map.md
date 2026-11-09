@@ -22,8 +22,7 @@ fun main() {
     delivery["figs"] = 12
     delivery["limes"] = 3
     stock.merge(delivery)
-    for kv in stock.items() {
-        let (fruit, n) = kv
+    for (fruit, n) in stock.items() {
         print(f"{fruit}: {n}")
     }
     var total = 0
@@ -56,4 +55,4 @@ fun main() {
 | `m.merge(other: [K: V])` | Adds every entry of `other`, whose value wins for a key both have; `other`'s new keys go last, in its order; needs a `var` place |
 | `counts<T: Eq + Hash>(xs: [T]) -> [T: int]` | How often each element of `xs` occurs, the elements in the order they first occur |
 
-`m.get_or(k, 0)` reads what `match m.get(k) { Some(v) => v, None => 0 }` says, the most common use of `get` in the Advent of Code solutions (14 of 29, [[MYLA-318]]). `update`'s function takes its parameter's type from the map (`(n) => n + 1`), as the value type is known from the receiver. A `for` head takes no tuple pattern, so a loop over `items()` takes each pair apart with `let`.
+`m.get_or(k, 0)` reads what `match m.get(k) { Some(v) => v, None => 0 }` says, the most common use of `get` in the Advent of Code solutions (14 of 29, [[MYLA-318]]). `update`'s function takes its parameter's type from the map (`(n) => n + 1`), as the value type is known from the receiver. A loop over `items()` takes each pair apart in its head, `for (k, v) in m.items()` ([[MYLA-390]]).

@@ -120,7 +120,7 @@ bind_elem   = IDENT | "(" ")" | bind_tuple ;                  (* the name "_" di
 if_stmt     = "if" ( cond | let_cond ) block ( NL* "else" ( if_stmt | block ) )? ;
 let_cond    = "let" pattern "=" cond ;   (* if let, while let: D104 (5) *)
 while_stmt  = "while" ( cond | let_cond ) block ;
-for_stmt    = "for" IDENT "in" cond ( ".." cond )? block ;
+for_stmt    = "for" ( IDENT | bind_tuple ) "in" cond ( ".." cond )? block ;   (* a tuple binds its parts, MYLA-390 *)
 cond        = expression ;                          (* without struct literals *)
 return_stmt = "return" ( expression ( "," expression )* )? ;   (* a, b is a tuple *)
 become_stmt = "become" expression ;                (* a call, D87 *)

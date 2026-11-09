@@ -1478,16 +1478,47 @@ impl Parser {
     #test(parser_on("a.b[0]"))[Stmt { id: 1, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 7 }, kind: StmtKind.ForS(".", None, None, Block { line: 1, col: 7, sp: SrcSpan { sline: 1, scol: 7, eline: 1, ecol: 7 }, stmts: [] }, Some(Expr { id: 0, line: 1, col: 7, sp: SrcSpan { sline: 1, scol: 7, eline: 1, ecol: 7 }, kind: ExprKind.Hole })) }]
     fun for_stmt(var self) -> Stmt {
         let kw = self.advance()
-        let v = self.expect(TokenKind.IDENT, "loop variable name").lexeme
+        // `for (k, v) in e` (MYLA-390): the loop's variable a hidden name
+        // (`%for<id>`, which no source spells), destructured by a `let` that
+        // starts the body, as `let (k, v) = kv` would
+        var binding: Option<BindElem> = None
+        var v = ""
+        if self.check(TokenKind.LPAREN) {
+            let lp = self.peek()
+            let elems = self.tuple_binding()
+            binding = Some(BindElem.BTuple(elems, lp.line, lp.column, self.span_from(lp.line, lp.column)))
+            v = format("%for{}", self.fresh())
+        } else {
+            v = self.expect(TokenKind.IDENT, "loop variable name (or a tuple of names)").lexeme
+        }
         self.expect(TokenKind.IN, "'in'")
         let first = self.expression_ns()
         if self.match1(TokenKind.DOTDOT) {
             let end = self.expression_ns()
-            let body = self.block()
+            let body = self.destructured(self.block(), binding, v)
             return self.mk_stmt(kw.line, kw.column, StmtKind.ForS(v, Some(first), Some(end), body, None))
         }
-        let body = self.block()
+        let body = self.destructured(self.block(), binding, v)
         return self.mk_stmt(kw.line, kw.column, StmtKind.ForS(v, None, None, body, Some(first)))
+    }
+
+    // A `for` body with `let <binding> = <v>` first, for a loop over a
+    // tuple of names (MYLA-390); as it was for a loop variable.
+    fun destructured(var self, body: Block, binding: Option<BindElem>, v: str) -> Block {
+        return match binding {
+            Some(b) => {
+                let sp = match b {
+                    BTuple(es, l, c, s) => s
+                    _ => body.sp
+                }
+                let name = Expr { id: self.fresh(), line: sp.sline, col: sp.scol, sp: sp, kind: ExprKind.Name(v) }
+                let open = Stmt { id: self.fresh(), line: sp.sline, col: sp.scol, sp: sp, kind: StmtKind.DestructDecl("let", b, None, name) }
+                var stmts = [open]
+                for st in body.stmts { stmts.push(st) }
+                Block { line: body.line, col: body.col, sp: body.sp, stmts: stmts }
+            }
+            None => body,
+        }
     }
 
     #test(parser_on("a.b[0]"))[Stmt { id: 1, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 7 }, kind: StmtKind.ReturnS(Some(Expr { id: 0, line: 1, col: 2, sp: SrcSpan { sline: 1, scol: 2, eline: 1, ecol: 7 }, kind: ExprKind.Hole }), false) }]
