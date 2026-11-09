@@ -1,6 +1,6 @@
 # std.btree
 
-A sorted map and a sorted set ([[MYLA-343]]). `SortedMap<K, V>` keeps its keys in order, so it finds the greatest key below a value, the least above it, or every key in a range; `SortedSet<T>` is a sorted map to `()`. Both are B+ trees, and their keys are of any ordered type (`K: Ord`). The module imports nothing.
+A sorted map and a sorted set ([[MYLA-343]]). `SortedMap<K, V>` keeps its keys in order, so it finds the greatest key below a value, the least above it, or every key in a range; `SortedSet<T>` is a sorted map to `()`. Both are B+ trees, and their keys are of any ordered type (`K: Ord`). The module imports std.list and std.option.
 
 ```myla
 import std.btree as btree
