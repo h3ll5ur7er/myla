@@ -28,4 +28,4 @@ The checker records the declaration each default or `for` over an iterator was m
 
 The "after" includes `std.list`'s `iterates` and `std.map`'s `map_iter`, now looping with `for` (`std.map`'s with `for p in m.iter() { let (k, v) = p … }`, as `for (k, v) in` waits for [[MYLA-390]]), and `std.iter`'s `pipes`: they cost a hello world 0.09 M instructions (0.05 %), the rebuild of those two test functions. `std.iter`'s adapters keep `while let Some(v) = self.inner.next()`, since a `for` would loop over a copy of `self.inner`; the header comment and [[Language/Standard-library/Iter]] say so now.
 
-Suites: the bootstrap's fixed point; `scripts/test.sh fast` (711 tests, all pass but `test_embedded_std`, which wants the embedded library regenerated, left to the seed commit by the rules); the slow suites are in the batch's report.
+Suites at the batch's tip: the bootstrap's fixed point; `scripts/test.sh fast` 714 OK (with the embedded library regenerated); `tests.burn.test_compiler_parity`, `test_selfhost_cases`, `test_error_corpus`, `test_selfhost_checker`, `test_lsp`: 673 OK.
