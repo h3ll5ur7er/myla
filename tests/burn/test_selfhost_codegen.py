@@ -809,6 +809,9 @@ class SelfHostedCodegenParity(unittest.TestCase):
         else:
             expected = _diagnostic_oracle(entry, modules)
         self.assertIsNotNone(expected, "the Python toolchain accepted the program")
+        # MYLA-383: a module's names are written as the program writes them
+        # (`lib.P`), where the recordings show the loader's (`lib$P`)
+        expected = re.sub(r"\b([A-Za-z_][A-Za-z0-9_]*)\$(?=[A-Za-z_])", r"\1.", expected)
         proc = subprocess.run(
             [self._binary, entry, stdlib], capture_output=True, text=True
         )

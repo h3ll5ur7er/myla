@@ -1274,7 +1274,7 @@ fun chunked(body: str, trailers: Headers) -> str {
         if end > body.len() {
             end = body.len()
         }
-        sb.append(format("{:x}", end - at))
+        sb.append(f"{end - at:x}")
         sb.append("\r\n")
         sb.append(body, at, end)
         sb.append("\r\n")

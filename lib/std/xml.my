@@ -913,7 +913,7 @@ impl XmlReader {
             if i == digits || s[i] != ';' || !is_xml_char(v) {
                 return Err(self.error(XmlErrorKind.InvalidReference, at))
             }
-            return Ok((format("{}", v as char), i + 1))
+            return Ok((f"{v as char}", i + 1))
         }
         let end = name_end(s, i)
         if end >= n {

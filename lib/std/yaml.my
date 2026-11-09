@@ -758,7 +758,7 @@ impl Parser {
             if cp > 1114111i64 || (cp >= 55296i64 && cp < 57344i64) {
                 return Err(self.error(YamlErrorKind.InvalidEscape, at))
             }
-            return Ok(format("{}", (cp as int) as char))
+            return Ok(f"{(cp as int) as char}")
         }
         let t = match e {
             '0' => "\0"
@@ -1285,11 +1285,11 @@ impl Writer {
             else if c == '\t' { esc = "\\t" }
             else if c == '\r' { esc = "\\r" }
             else if c == 0u8 { esc = "\\0" }
-            else if c < 32u8 || c == 127u8 { esc = format("\\x{:02x}", c) }
+            else if c < 32u8 || c == 127u8 { esc = f"\\x{c:02x}" }
             else if c >= 0xC2u8 {
                 skip = special_len(s, i)
                 if skip == 2 {
-                    esc = format("\\x{:02x}", s[i + 1])  // a C1 control character
+                    esc = f"\\x{s[i + 1]:02x}"  // a C1 control character
                 } else if skip == 3 {
                     esc = if c == 0xEFu8 { "\\uFEFF" } else if s[i + 2] == 0xA8u8 { "\\L" } else { "\\P" }
                 }
