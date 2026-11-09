@@ -12,6 +12,7 @@
 // both modules' names where they were.
 
 from .io import Read, Write, Seek, SeekFrom, Pollable, buffered, buffered_writer, copy
+import .bytes as bytes_m // `from_str`, `to_str`: a `File`'s bytes
 
 // Why a filesystem or I/O operation failed: the causes a program handles on
 // every target (D129). `Unsupported`: the target can't do it at all (wasm32
@@ -95,6 +96,39 @@ fun net_error(code: int32) -> IoError {
     if code == 74 { return IoError.InvalidData }
     if code == 97 || code == 93 { return IoError.Unsupported }
     return IoError.Other(code)
+}
+
+// The name of `e`'s cause, its variant's: `NotFound`, `Other(9)` with the
+// platform's code. A module's error message names an `IoError` by it
+// (`IoError` has no `Format`, MYLA-379).
+#test(IoError.NotFound)["NotFound"]
+#test(IoError.ConnectionReset)["ConnectionReset"]
+#test(IoError.Other(9))["Other(9)"]
+pub fun io_error_name(e: IoError) -> str {
+    return match e {
+        NotFound => "NotFound"
+        PermissionDenied => "PermissionDenied"
+        AlreadyExists => "AlreadyExists"
+        NotADirectory => "NotADirectory"
+        IsADirectory => "IsADirectory"
+        NotEmpty => "NotEmpty"
+        Interrupted => "Interrupted"
+        Cancelled => "Cancelled"
+        Unsupported => "Unsupported"
+        BrokenPipe => "BrokenPipe"
+        InvalidInput => "InvalidInput"
+        ConnectionRefused => "ConnectionRefused"
+        ConnectionReset => "ConnectionReset"
+        ConnectionAborted => "ConnectionAborted"
+        NotConnected => "NotConnected"
+        AddrInUse => "AddrInUse"
+        AddrNotAvailable => "AddrNotAvailable"
+        TimedOut => "TimedOut"
+        HostUnreachable => "HostUnreachable"
+        NetworkUnreachable => "NetworkUnreachable"
+        InvalidData => "InvalidData"
+        Other(code) => f"Other({code})"
+    }
 }
 
 // Read the entire file at `path` into a string. On success the bytes are
@@ -512,7 +546,7 @@ impl File {
 impl Read for File {
     fun read(var self, n: int) -> Result<[uint8], IoError> {
         let s = self.read_str(n)?
-        return Ok(bytes_of(s))
+        return Ok(bytes_m.from_str(s))
     }
 
     // One read of at most `n` bytes at the cursor; "" at the end.
@@ -531,7 +565,7 @@ impl Read for File {
 
 impl Write for File {
     fun write(var self, b: [uint8]) -> Result<int, IoError> {
-        return self.write_str(text_of(b))
+        return self.write_str(bytes_m.to_str(b))
     }
 
     // Every byte of `s` at the cursor (or at the end, for a file opened to
@@ -571,24 +605,6 @@ impl Pollable for File {
     fun descriptor(self) -> int32 {
         return self.fd
     }
-}
-
-// The bytes of `s`.
-fun bytes_of(s: str) -> [uint8] {
-    var out: [uint8] = []
-    for i in 0..s.len() {
-        out.push(s[i])
-    }
-    return out
-}
-
-// The bytes `b` as text.
-fun text_of(b: [uint8]) -> str {
-    var sb = StringBuilder()
-    for x in b {
-        sb.append_byte(x)
-    }
-    return sb.build()
 }
 
 // --- Metadata (MYLA-339) ------------------------------------------------------------
@@ -824,7 +840,7 @@ fun joined(dir: str, name: str) -> str {
 fun error_of<T>(r: Result<T, IoError>) -> str {
     return match r {
         Ok(_) => "ok"
-        Err(e) => error_name(e)
+        Err(e) => io_error_name(e)
     }
 }
 
@@ -835,36 +851,6 @@ fun line(o: Option<str>) -> str {
     return match o {
         Some(s) => s
         None => "<none>"
-    }
-}
-
-// The name of `e`, `Other` with its code.
-#test(IoError.NotFound)["NotFound"]
-#test(IoError.Other(9))["Other(9)"]
-fun error_name(e: IoError) -> str {
-    return match e {
-        NotFound => "NotFound"
-        PermissionDenied => "PermissionDenied"
-        AlreadyExists => "AlreadyExists"
-        NotADirectory => "NotADirectory"
-        IsADirectory => "IsADirectory"
-        NotEmpty => "NotEmpty"
-        Interrupted => "Interrupted"
-        Cancelled => "Cancelled"
-        Unsupported => "Unsupported"
-        BrokenPipe => "BrokenPipe"
-        InvalidInput => "InvalidInput"
-        ConnectionRefused => "ConnectionRefused"
-        ConnectionReset => "ConnectionReset"
-        ConnectionAborted => "ConnectionAborted"
-        NotConnected => "NotConnected"
-        AddrInUse => "AddrInUse"
-        AddrNotAvailable => "AddrNotAvailable"
-        TimedOut => "TimedOut"
-        HostUnreachable => "HostUnreachable"
-        NetworkUnreachable => "NetworkUnreachable"
-        InvalidData => "InvalidData"
-        Other(code) => f"Other({code})"
     }
 }
 
@@ -884,7 +870,7 @@ fun file_round_trip() -> Result<(), IoError> {
     var r = open(path)?
     defer { let c = r.close() }
     assert(r.read_str(5)? == "hello", "a read at the start")
-    assert(text_of(r.read(2)?) == ", ", "a read as bytes")
+    assert(bytes_m.to_str(r.read(2)?) == ", ", "a read as bytes")
     assert(r.seek(SeekFrom.Current(-2))? == 5, "a seek back")
     assert(r.read_str(100)? == ", world", "a read past the end gives what's there")
     assert(r.read_str(100)? == "", "and then the end")

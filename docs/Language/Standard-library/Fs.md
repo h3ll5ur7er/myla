@@ -20,7 +20,7 @@ The file system: whole files, files read and written a piece at a time, metadata
 
 The file's bytes become the string unchanged, even when they aren't valid UTF-8: strings work on bytes, and `chars` gives U+FFFD for the invalid ones ([[Language/Collections-and-strings]], [[MYLA-12]]).
 
-`from_errno(code: int32) -> IoError` turns the platform layer's code (Linux's numbers on every target so far; wasm32's maps WASI's onto them) into its cause; `std.io` and `std.process` use it too.
+`from_errno(code: int32) -> IoError` turns the platform layer's code (Linux's numbers on every target so far; wasm32's maps WASI's onto them) into its cause; `std.io` and `std.process` use it too. `io_error_name(e: IoError) -> str` is the cause's name, its variant's (`"NotFound"`, `"Other(9)"`): `IoError` has no `Format` ([[MYLA-379]]), and the error messages of std.compress, std.archive and std.http name an `IoError` by it ([[MYLA-376]]).
 
 ```myla
 from std.fs import list_dir, make_dir_all, is_dir, IoError

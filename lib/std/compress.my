@@ -18,8 +18,9 @@
 // `deflate_writer`, `gzip_writer` and `zlib_writer` make.
 
 from std.io import Read, Write, from_bytes, memory_stream, MemoryStream
-from std.fs import IoError
-import std.list as list_m
+from std.fs import IoError, io_error_name
+import std.list as list_m // `filled`
+import std.bytes as bytes_m // `from_str` in the tests
 import std.option as option_m
 
 // Why compressed data couldn't be decompressed (D168: the variants carry no
@@ -76,7 +77,7 @@ impl CompressError {
             ChecksumMismatch => "checksum mismatch"
             LengthMismatch => "length mismatch"
             TrailingData => "data after the end of the stream"
-            Io(e) => f"read failed: {io_name(e)}"
+            Io(e) => f"read failed: {io_error_name(e)}"
         }
     }
 
@@ -112,35 +113,6 @@ impl Format for CompressError {
     #test(CompressError.BadCode, "")["invalid code"]
     fun format(self, spec: str) -> str {
         return self.message()
-    }
-}
-
-// The name of an `IoError`'s cause.
-#test(IoError.BrokenPipe)["BrokenPipe"]
-fun io_name(e: IoError) -> str {
-    return match e {
-        NotFound => "NotFound"
-        PermissionDenied => "PermissionDenied"
-        AlreadyExists => "AlreadyExists"
-        NotADirectory => "NotADirectory"
-        IsADirectory => "IsADirectory"
-        NotEmpty => "NotEmpty"
-        Interrupted => "Interrupted"
-        Cancelled => "Cancelled"
-        Unsupported => "Unsupported"
-        BrokenPipe => "BrokenPipe"
-        InvalidInput => "InvalidInput"
-        ConnectionRefused => "ConnectionRefused"
-        ConnectionReset => "ConnectionReset"
-        ConnectionAborted => "ConnectionAborted"
-        NotConnected => "NotConnected"
-        AddrInUse => "AddrInUse"
-        AddrNotAvailable => "AddrNotAvailable"
-        TimedOut => "TimedOut"
-        HostUnreachable => "HostUnreachable"
-        NetworkUnreachable => "NetworkUnreachable"
-        InvalidData => "InvalidData"
-        Other(c) => f"Other({c})"
     }
 }
 
@@ -993,10 +965,10 @@ fun zlib_header(b: [uint8], p: int32) -> Result<int32, CompressError> {
 // --- The checksums ------------------------------------------------------------------
 //
 // CRC-32 and Adler-32 as std.hash computes them (`crc32_update_bytes`,
-// `adler32_update_bytes`), here for now: a module of std that imports
-// std.hash can't run its cases natively (MYLA-360), and D166 moves them to a
-// module of their own (MYLA-359). These take a part of the bytes, and the
-// decoder keeps the CRC's tables.
+// `adler32_update_bytes`), over a part of the bytes, with the CRC's tables
+// kept in the decoder: std.hash's take a whole list and make the tables at
+// each call, and the decoder sums its output a part at a time. Slicing the
+// part out for them took `gunzip` of 100 MB from 526 to 802 ms (MYLA-376).
 
 // CRC-32's eight tables of slicing by 8: entry k * 256 + x is the register
 // after the byte x and k zero bytes (the first, k = 0, every CRC-32 has).
@@ -1020,11 +992,11 @@ fun crc_tables() -> [uint32] {
 
 // The CRC-32 (CRC-32/ISO-HDLC, as zlib, gzip and PNG compute it) of the
 // bytes behind `crc` followed by b[from:to]; `t`: `crc_tables()`.
-#test(crc_tables(), 0u32, text("123456789"), 0, 9)[0xCBF43926u32]
-#test(crc_tables(), 0u32, text("x123456789y"), 1, 10)[0xCBF43926u32]
-#test(crc_tables(), crc32_part(crc_tables(), 0u32, text("1234"), 0, 4), text("56789"), 0, 5)[0xCBF43926u32]
-#test(crc_tables(), 0u32, text("The quick brown fox jumps over the lazy dog"), 0, 43)[0x414FA339u32]
-#test(crc_tables(), 0u32, text(""), 0, 0)[0u32]
+#test(crc_tables(), 0u32, bytes_m.from_str("123456789"), 0, 9)[0xCBF43926u32]
+#test(crc_tables(), 0u32, bytes_m.from_str("x123456789y"), 1, 10)[0xCBF43926u32]
+#test(crc_tables(), crc32_part(crc_tables(), 0u32, bytes_m.from_str("1234"), 0, 4), bytes_m.from_str("56789"), 0, 5)[0xCBF43926u32]
+#test(crc_tables(), 0u32, bytes_m.from_str("The quick brown fox jumps over the lazy dog"), 0, 43)[0x414FA339u32]
+#test(crc_tables(), 0u32, bytes_m.from_str(""), 0, 0)[0u32]
 fun crc32_part(t: [uint32], crc: uint32, b: [uint8], from_i: int32, to: int32) -> uint32 {
     var c = crc ^ 0xFFFFFFFFu32
     var i = from_i
@@ -1046,10 +1018,10 @@ fun crc32_part(t: [uint32], crc: uint32, b: [uint8], from_i: int32, to: int32) -
 // The Adler-32 (RFC 1950) of the bytes behind `adler` followed by
 // b[from:to]: start from 1. The sums are reduced once every 5552 bytes, the
 // most after which they still fit 32 bits.
-#test(1u32, text("Wikipedia"), 0, 9)[0x11E60398u32]
-#test(adler32_part(1u32, text("Wiki"), 0, 4), text("Wikipedia"), 4, 9)[0x11E60398u32]
-#test(1u32, text("123456789"), 0, 9)[0x091E01DEu32]
-#test(1u32, text(""), 0, 0)[1u32]
+#test(1u32, bytes_m.from_str("Wikipedia"), 0, 9)[0x11E60398u32]
+#test(adler32_part(1u32, bytes_m.from_str("Wiki"), 0, 4), bytes_m.from_str("Wikipedia"), 4, 9)[0x11E60398u32]
+#test(1u32, bytes_m.from_str("123456789"), 0, 9)[0x091E01DEu32]
+#test(1u32, bytes_m.from_str(""), 0, 0)[1u32]
 fun adler32_part(adler: uint32, bytes: [uint8], from_i: int32, to: int32) -> uint32 {
     var a = adler & 0xFFFFu32
     var b = adler >> 16u32
@@ -1082,13 +1054,13 @@ fun decompress(b: [uint8], format: int32) -> Result<[uint8], CompressError> {
 
 // The bytes the raw DEFLATE stream `b` (RFC 1951, no header) stands for.
 // Bytes after its end are `TrailingData`.
-#test(unhex("0300"))[Ok(text(""))] // the empty stream: one fixed block
-#test(unhex("010500faff68656c6c6f"))[Ok(text("hello"))] // stored
-#test(unhex("cb48cdc9c90700"))[Ok(text("hello"))] // fixed codes
-#test(unhex("358ccb0d80300cc55679dc117b708701821a91a8a5416da0627b3e12371f6c4f4d734cdcc37f48ea9e18d5a9f4106b18d12c072e68428ecb0e50e10ef30e5aec64b8f0639414500da2abbc8fc82004a5ed49a1f9936abc861b"))[Ok(text("Twinkle, twinkle, little star, how I wonder what you are! Up above the world so high, like a diamond in the sky."))] // dynamic codes
-#test(unhex("4a4c02000000ffff4b4e0100"))[Ok(text("abcd"))] // a fixed block, an empty stored one, a fixed one
-#test(unhex("4b4c1c05c40200"))[Ok(run_of(97u8, 300))] // distance 1, length 258
-#test(unhex("4b040200"))[Ok(text("aaaa"))]
+#test(unhex("0300"))[Ok(bytes_m.from_str(""))] // the empty stream: one fixed block
+#test(unhex("010500faff68656c6c6f"))[Ok(bytes_m.from_str("hello"))] // stored
+#test(unhex("cb48cdc9c90700"))[Ok(bytes_m.from_str("hello"))] // fixed codes
+#test(unhex("358ccb0d80300cc55679dc117b708701821a91a8a5416da0627b3e12371f6c4f4d734cdcc37f48ea9e18d5a9f4106b18d12c072e68428ecb0e50e10ef30e5aec64b8f0639414500da2abbc8fc82004a5ed49a1f9936abc861b"))[Ok(bytes_m.from_str("Twinkle, twinkle, little star, how I wonder what you are! Up above the world so high, like a diamond in the sky."))] // dynamic codes
+#test(unhex("4a4c02000000ffff4b4e0100"))[Ok(bytes_m.from_str("abcd"))] // a fixed block, an empty stored one, a fixed one
+#test(unhex("4b4c1c05c40200"))[Ok(list_m.filled(300, 97u8))] // distance 1, length 258
+#test(unhex("4b040200"))[Ok(bytes_m.from_str("aaaa"))]
 #test(unhex(""))[Err(CompressError.Truncated)]
 #test(unhex("cb48cdc9c9"))[Err(CompressError.Truncated)] // no end of block
 #test(unhex("010500faff6865"))[Err(CompressError.Truncated)] // a stored block cut short
@@ -1101,9 +1073,9 @@ fun decompress(b: [uint8], format: int32) -> Result<[uint8], CompressError> {
 #test(unhex("05009204"))[Err(CompressError.BadCodeLengths)] // an over-subscribed code-length code
 #test(unhex("05000224"))[Err(CompressError.BadCodeLengths)] // a repeat with nothing before it
 #test(unhex("050080e47f1b"))[Err(CompressError.BadCodeLengths)] // no code for the end of the block
-#test(unhex("05c081080000000020d6fd258e"))[Ok(text("aa"))] // a dynamic block without distance codes
-#test(unhex("0dc0010900000080a0adfe3f515a"))[Ok(text("aaaa"))] // one distance code, of length 1
-#test(unhex("05c0010500000000a0ffaf03"))[Ok(text(""))] // one literal/length code, of length 1
+#test(unhex("05c081080000000020d6fd258e"))[Ok(bytes_m.from_str("aa"))] // a dynamic block without distance codes
+#test(unhex("0dc0010900000080a0adfe3f515a"))[Ok(bytes_m.from_str("aaaa"))] // one distance code, of length 1
+#test(unhex("05c0010500000000a0ffaf03"))[Ok(bytes_m.from_str(""))] // one literal/length code, of length 1
 #test(unhex("0580010500000080febf0e"))[Err(CompressError.BadCodeLengths)] // one code, of length 2
 #test(unhex("05c0010900000080a0adfe3f1102"))[Err(CompressError.BadCodeLengths)] // codes of lengths 1 and 2
 #test(unhex("0dc0010900000080a0adfe3f519900"))[Err(CompressError.BadCodeLengths)] // one distance code, of length 2
@@ -1116,10 +1088,10 @@ pub fun inflate(b: [uint8]) -> Result<[uint8], CompressError> {
 // after the other (zero bytes after one are padding, as for gzip). The
 // header's fields (name, comment, time, extra) are checked as far as they
 // have checks and skipped.
-#test(unhex("1f8b08000000000002ffcb48cdc9c9e7020020303a3606000000"))[Ok(text("hello\n"))]
-#test(unhex("1f8b08000000000002ff03000000000000000000"))[Ok(text(""))]
-#test(unhex("1f8b081e0000000000ff040061620100612e747874006e6f746500e1f9cb48cdc9c9e7020020303a3606000000"))[Ok(text("hello\n"))] // FEXTRA, FNAME, FCOMMENT, FHCRC
-#test(unhex("1f8b08000000000002ffcbcf4b5500004961ac23040000001f8b08000000000002ff2b29cf0700668aca1103000000"))[Ok(text("one two"))] // two members
+#test(unhex("1f8b08000000000002ffcb48cdc9c9e7020020303a3606000000"))[Ok(bytes_m.from_str("hello\n"))]
+#test(unhex("1f8b08000000000002ff03000000000000000000"))[Ok(bytes_m.from_str(""))]
+#test(unhex("1f8b081e0000000000ff040061620100612e747874006e6f746500e1f9cb48cdc9c9e7020020303a3606000000"))[Ok(bytes_m.from_str("hello\n"))] // FEXTRA, FNAME, FCOMMENT, FHCRC
+#test(unhex("1f8b08000000000002ffcbcf4b5500004961ac23040000001f8b08000000000002ff2b29cf0700668aca1103000000"))[Ok(bytes_m.from_str("one two"))] // two members
 #test(unhex("1f8b081e0000000000ff040061620100612e747874006e6f746500e1f8cb48cdc9c9e7020020303a3606000000"))[Err(CompressError.ChecksumMismatch)] // the header's CRC
 #test(unhex("1f8b08000000000002ffcb48cdc9c9e7020020303a3706000000"))[Err(CompressError.ChecksumMismatch)]
 #test(unhex("1f8b08000000000002ffcb48cdc9c9e7020020303a3607000000"))[Err(CompressError.LengthMismatch)]
@@ -1132,17 +1104,17 @@ pub fun inflate(b: [uint8]) -> Result<[uint8], CompressError> {
 #test(unhex("1f8b07000000000002ff03000000000000000000"))[Err(CompressError.BadHeader)] // not DEFLATE
 #test(unhex("1f8b08200000000002ff03000000000000000000"))[Err(CompressError.BadHeader)] // a reserved flag
 #test(unhex("78"))[Err(CompressError.BadHeader)]
-#test(unhex("1f8b08000000000002ff0300000000000000000000"))[Ok(text(""))] // zeros after a member: padding
+#test(unhex("1f8b08000000000002ff0300000000000000000000"))[Ok(bytes_m.from_str(""))] // zeros after a member: padding
 #test(unhex("1f8b08000000000002ff030000000000000000000000ab"))[Err(CompressError.TrailingData)]
 pub fun gunzip(b: [uint8]) -> Result<[uint8], CompressError> {
     return decompress(b, GZIP)
 }
 
 // The bytes the zlib stream `b` (RFC 1950) stands for.
-#test(unhex("7801010500faff68656c6c6f062c0215"))[Ok(text("hello"))]
-#test(unhex("7801cb48cdc9c9d751c840a200442806d5"))[Ok(text("hello, hello, hello"))]
-#test(unhex("78dacb48cdc9c9d751c840a200442806d5"))[Ok(text("hello, hello, hello"))]
-#test(unhex("789c030000000001"))[Ok(text(""))]
+#test(unhex("7801010500faff68656c6c6f062c0215"))[Ok(bytes_m.from_str("hello"))]
+#test(unhex("7801cb48cdc9c9d751c840a200442806d5"))[Ok(bytes_m.from_str("hello, hello, hello"))]
+#test(unhex("78dacb48cdc9c9d751c840a200442806d5"))[Ok(bytes_m.from_str("hello, hello, hello"))]
+#test(unhex("789c030000000001"))[Ok(bytes_m.from_str(""))]
 #test(unhex("789c030000000002"))[Err(CompressError.ChecksumMismatch)]
 #test(unhex("789c0300000000"))[Err(CompressError.Truncated)]
 #test(unhex("78"))[Err(CompressError.Truncated)]
@@ -1341,14 +1313,6 @@ fun level_config(level: int32) -> [int32] {
     return table[level]
 }
 
-// `n` zeros.
-#test(3)[[0, 0, 0]]
-fun zeros(n: int) -> [int32] {
-    var out: [int32] = []
-    for i in 0..n { out.push(0) }
-    return out
-}
-
 // The lengths of a Huffman code for symbols of the frequencies `freq` (0:
 // unused, no code), none longer than `limit` bits. The code is optimal
 // (two queues over the sorted frequencies) unless that makes a code
@@ -1363,7 +1327,7 @@ fun zeros(n: int) -> [int32] {
 #test([1, 1, 2, 3, 5, 8, 13, 21], 4)[[4, 4, 4, 4, 4, 4, 3, 1]]
 fun code_lengths(freq: [int32], limit: int32) -> [int32] {
     let n = freq.len()
-    var lens = zeros(n)
+    var lens = list_m.filled(n, 0)
     // frequency and symbol in one key, to sort them (a frequency is at most
     // a block's symbols, a symbol below 512)
     var keys: [int32] = []
@@ -1381,7 +1345,7 @@ fun code_lengths(freq: [int32], limit: int32) -> [int32] {
     // order they are made, which is by weight too
     var w: [int32] = []
     for k in keys { w.push(k >> 9) }
-    var parent = zeros(2 * m - 1)
+    var parent = list_m.filled(2 * m - 1, 0)
     var i = 0
     var j = m
     while w.len() < 2 * m - 1 {
@@ -1406,7 +1370,7 @@ fun code_lengths(freq: [int32], limit: int32) -> [int32] {
         parent[b] = next
         w.push(w[a] + w[b])
     }
-    var depth = zeros(2 * m - 1)
+    var depth = list_m.filled(2 * m - 1, 0)
     var k = 2 * m - 3
     while k >= 0 {
         depth[k] = depth[parent[k]] + 1
@@ -1418,7 +1382,7 @@ fun code_lengths(freq: [int32], limit: int32) -> [int32] {
     }
     var top = maxd
     if top < limit { top = limit }
-    var count = zeros(top + 1)
+    var count = list_m.filled(top + 1, 0)
     for x in 0..m { count[depth[x]] += 1 }
     // Two codes of the deepest length too long: one up in their parent's
     // place, the other below a shorter code, which becomes two
@@ -1477,16 +1441,16 @@ fun two_codes(lens: [int32]) -> [int32] {
 #test([2, 1, 3, 3])[[1, 0, 3, 7]]
 #test([0, 1, 0, 1])[[0, 0, 0, 1]]
 fun canonical_codes(lens: [int32]) -> [int32] {
-    var count = zeros(16)
+    var count = list_m.filled(16, 0)
     for l in lens { count[l] += 1 }
     count[0] = 0
-    var next = zeros(16)
+    var next = list_m.filled(16, 0)
     var code = 0
     for b in 1..16 {
         code = (code + count[b - 1]) << 1
         next[b] = code
     }
-    var codes = zeros(lens.len())
+    var codes = list_m.filled(lens.len(), 0)
     for s in 0..lens.len() {
         let l = lens[s]
         if l > 0 {
@@ -1503,9 +1467,9 @@ fun canonical_codes(lens: [int32]) -> [int32] {
 #test([8, 8, 8, 8, 8, 0, 0, 0])[[8, 16 | (1 << 5), 17]]
 #test([3, 3, 3])[[3, 3, 3]]
 #test([0, 0])[[0, 0]]
-#test(zeros(150))[[18 | (127 << 5), 18 | (1 << 5)]]
-#test(zeros(140))[[18 | (127 << 5), 0, 0]]
-#test(zeros(141))[[18 | (127 << 5), 17]]
+#test(list_m.filled(150, 0))[[18 | (127 << 5), 18 | (1 << 5)]]
+#test(list_m.filled(140, 0))[[18 | (127 << 5), 0, 0]]
+#test(list_m.filled(141, 0))[[18 | (127 << 5), 17]]
 fun rle_lengths(lens: [int32]) -> [int32] {
     var out: [int32] = []
     let n = lens.len()
@@ -1678,14 +1642,14 @@ fun new_deflate(format: int32, level: int) -> Deflate {
         dext.push(x)
         d += 1 << x
     }
-    var lcode_of = zeros(256)
+    var lcode_of = list_m.filled(256, 0)
     for c in 0..29 {
         for k in 0..(1 << lext[c]) {
             let i = lbase[c] - 3 + k
             if i < 256 { lcode_of[i] = c }
         }
     }
-    var dcode_of = zeros(512)
+    var dcode_of = list_m.filled(512, 0)
     for c in 0..30 {
         var x = dbase[c] - 1
         let hi = x + (1 << dext[c])
@@ -1724,7 +1688,7 @@ fun new_deflate(format: int32, level: int) -> Deflate {
         good: cfg[0], lazy: cfg[1], nice: cfg[2], chain: cfg[3], slow: cfg[4] == 1,
         buf: [], pos: 0, block_start: 0, head: head, prev: head,
         match_len: 2, match_dist: 0, pending: false,
-        syms: [], lfreq: zeros(286), dfreq: zeros(30),
+        syms: [], lfreq: list_m.filled(286, 0), dfreq: list_m.filled(30, 0),
         out: [], acc: 0, nacc: 0, started: false,
         lcode_of: lcode_of, dcode_of: dcode_of,
         lbase: lbase, lext: lext, dbase: dbase, dext: dext,
@@ -2106,7 +2070,7 @@ impl Deflate {
             var all_lens = llens[:hlit]
             for x in dlens[:hdist] { all_lens.push(x) }
             let rle = rle_lengths(all_lens)
-            var clfreq = zeros(19)
+            var clfreq = list_m.filled(19, 0)
             for e in rle { clfreq[e & 31] += 1 }
             let cllens = two_codes(code_lengths(clfreq, 7))
             let order = cl_order()
@@ -2283,29 +2247,29 @@ fun compress(b: [uint8], format: int32, level: int) -> [uint8] {
 
 // The raw DEFLATE stream (RFC 1951) of `b`, compressed at `level`: 0
 // stores, 1 is the fastest, 9 the smallest; below 0 is the default, 6.
-#test(text(""), 6)[unhex("0300")]
-#test(text(""), 0)[unhex("010000ffff")]
-#test(text("a"), 0)[unhex("010100feff61")]
-#test(text("hello"), 1)[unhex("cb48cdc9c90700")] // fixed codes
-#test(run_of(97u8, 300), 6)[unhex("4b1c05440300")] // zlib: 4b4c1c05c40200, its chains end before position 0
-#test(run_of(97u8, 300), 1)[unhex("4b1c0544870000")] // greedy: the second match from the first
+#test(bytes_m.from_str(""), 6)[unhex("0300")]
+#test(bytes_m.from_str(""), 0)[unhex("010000ffff")]
+#test(bytes_m.from_str("a"), 0)[unhex("010100feff61")]
+#test(bytes_m.from_str("hello"), 1)[unhex("cb48cdc9c90700")] // fixed codes
+#test(list_m.filled(300, 97u8), 6)[unhex("4b1c05440300")] // zlib: 4b4c1c05c40200, its chains end before position 0
+#test(list_m.filled(300, 97u8), 1)[unhex("4b1c0544870000")] // greedy: the second match from the first
 pub fun deflate(b: [uint8], level: int = 6) -> [uint8] {
     return compress(b, RAW, level)
 }
 
 // The gzip data (RFC 1952) of `b`: one member, compressed at `level`,
 // without a name or a time.
-#test(text(""), 6)[unhex("1f8b08000000000000ff03000000000000000000")]
-#test(text("hello\n"), 9)[unhex("1f8b08000000000002ffcb48cdc9c9e7020020303a3606000000")]
+#test(bytes_m.from_str(""), 6)[unhex("1f8b08000000000000ff03000000000000000000")]
+#test(bytes_m.from_str("hello\n"), 9)[unhex("1f8b08000000000002ffcb48cdc9c9e7020020303a3606000000")]
 pub fun gzip(b: [uint8], level: int = 6) -> [uint8] {
     return compress(b, GZIP, level)
 }
 
 // The zlib stream (RFC 1950) of `b`, compressed at `level`.
-#test(text(""), 6)[unhex("789c030000000001")]
-#test(text("hello"), 0)[unhex("7801010500faff68656c6c6f062c0215")]
-#test(text("hello"), 6)[unhex("789ccb48cdc9c90700062c0215")]
-#test(run_of(97u8, 300), -1)[unhex("789c4b1c05440300d8a871ad")]
+#test(bytes_m.from_str(""), 6)[unhex("789c030000000001")]
+#test(bytes_m.from_str("hello"), 0)[unhex("7801010500faff68656c6c6f062c0215")]
+#test(bytes_m.from_str("hello"), 6)[unhex("789ccb48cdc9c90700062c0215")]
+#test(list_m.filled(300, 97u8), -1)[unhex("789c4b1c05440300d8a871ad")]
 pub fun zlib_compress(b: [uint8], level: int = 6) -> [uint8] {
     return compress(b, ZLIB, level)
 }
@@ -2390,21 +2354,6 @@ impl<W: Write> Write for Encoder<W> {
 }
 
 // --- Test helpers ---------------------------------------------------------------
-
-// The bytes of `s`.
-fun text(s: str) -> [uint8] {
-    var out: [uint8] = []
-    for i in 0..s.len() { out.push(s[i]) }
-    return out
-}
-
-// `n` bytes `b`.
-#test(7u8, 2)[[7u8, 7u8]]
-fun run_of(b: uint8, n: int) -> [uint8] {
-    var out: [uint8] = []
-    for i in 0..n { out.push(b) }
-    return out
-}
 
 // The bytes the hex digits of `s` stand for (lower case, whole bytes).
 #test("00ff1a")[[0u8, 255u8, 26u8]]
@@ -2541,7 +2490,7 @@ fun reads_in_pieces() {
         assert(agree(zlib_decompress(zl), read_pieces(zlib_reader(trickle(zl, most)), most)), f"zlib in pieces of {most}")
     }
     var d = gzip_reader(from_bytes(gz))
-    assert(shown(d.read_to_end()) == shown(Ok(text("one two"))), "read_to_end")
+    assert(shown(d.read_to_end()) == shown(Ok(bytes_m.from_str("one two"))), "read_to_end")
     assert(shown(d.read_to_end()) == shown(Ok([])), "read_to_end at the end")
     var s = zlib_reader(from_bytes(zl))
     let five = match s.read_str(5) {
@@ -2555,8 +2504,8 @@ fun reads_in_pieces() {
 #test
 fun raw_stream_ends() {
     var b = unhex("cb48cdc9c90700")
-    for x in text(" and more") { b.push(x) }
-    assert(shown_some(read_pieces(inflate_reader(from_bytes(b)), 3)) == shown(Ok(text("hello"))), "inflate_reader")
+    for x in bytes_m.from_str(" and more") { b.push(x) }
+    assert(shown_some(read_pieces(inflate_reader(from_bytes(b)), 3)) == shown(Ok(bytes_m.from_str("hello"))), "inflate_reader")
     assert(shown(inflate(b)) == shown(Err(CompressError.TrailingData)), "inflate")
 }
 
@@ -2762,7 +2711,7 @@ fun noise(n: int, seed: int) -> [uint8] {
 // Inputs of each kind for the round trips: none, one byte, text, noise,
 // runs, and a mix of them longer than the window and than a block.
 fun samples() -> [[uint8]] {
-    let words = text("the quick brown fox jumps over the lazy dog; pack my box with five dozen liquor jugs. ")
+    let words = bytes_m.from_str("the quick brown fox jumps over the lazy dog; pack my box with five dozen liquor jugs. ")
     var prose: [uint8] = []
     var k = 0
     while prose.len() < 6000 {
@@ -2780,12 +2729,12 @@ fun samples() -> [[uint8]] {
         let part = match r % 3 {
             0 => prose[(r * 211) % 3000:(r * 211) % 3000 + 1500]
             1 => noise(300 + r % 200, r)
-            _ => run_of((r * 13) as uint8, 500)
+            _ => list_m.filled(500, (r * 13) as uint8)
         }
         for x in part { mixed.push(x) }
         r += 1
     }
-    return [text(""), text("x"), prose, noise(3000, 7), runs, mixed]
+    return [bytes_m.from_str(""), bytes_m.from_str("x"), prose, noise(3000, 7), runs, mixed]
 }
 
 // Every kind of input at levels of each kind comes back from the

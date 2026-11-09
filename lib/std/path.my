@@ -6,6 +6,8 @@
 // slashes at its start is the one root, as on Linux (Python's `posixpath`
 // keeps exactly two, `//a`, as they are).
 
+import std.list as list_m // `join`
+
 // Whether `p` starts at the root.
 #test("/a")[true]
 #test("//a")[true]
@@ -255,20 +257,6 @@ pub fun components(p: str) -> [str] {
     return out
 }
 
-// The names with a `/` between each two. (Not `std.list`'s `join`: an
-// imported module's cases on a method of a built-in type count as the
-// importing file's, MYLA-360, and its native harness doesn't build.)
-fun joined(names: [str]) -> str {
-    var sb = StringBuilder()
-    for i in 0..names.len() {
-        if i > 0 {
-            sb.append("/")
-        }
-        sb.append(names[i])
-    }
-    return sb.build()
-}
-
 // The names of `p` with `.` and `..` resolved: a `..` takes away the name
 // before it, stays at the root, and starts a relative path that leaves its
 // first directory.
@@ -311,7 +299,7 @@ fun resolved(p: str) -> [str] {
 #test("./a")["a"]
 pub fun normalize(p: str) -> str {
     let names = resolved(p)
-    let body = joined(names)
+    let body = names.join("/")
     if is_absolute(p) {
         return "/" + body
     }
@@ -366,5 +354,5 @@ pub fun relative(from_dir: str, to: str) -> Option<str> {
     if out.len() == 0 {
         return Some(".")
     }
-    return Some(joined(out))
+    return Some(out.join("/"))
 }

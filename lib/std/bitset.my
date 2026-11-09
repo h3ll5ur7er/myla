@@ -359,6 +359,13 @@ impl BitSet {
     }
 }
 
+// The word's bit counts. std.int has them (`count_ones`, `leading_zeros`,
+// `trailing_zeros`), but these stay (MYLA-376): a module that imports
+// std.int makes each program importing it parse std.int's 2042 cases
+// (a hello world importing std.bitset checked in 58 ms instead of 46),
+// and only a function of the module itself is inlined, as `ones` is in
+// `popcount`.
+
 // The number of bits set in `w`.
 #test(0u64)[0]
 #test(0xffffffffffffffffu64)[64]

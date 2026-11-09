@@ -14,6 +14,9 @@
 // `Grid<char>` of text and `parse_with` a grid of anything a character maps
 // to.
 
+import std.list as list_m // `filled`, `extend` and `map` of the cells
+import std.option as option_m // `is_none`, `err` in the test functions
+
 pub struct Grid<T> {
     width: int,
     height: int,
@@ -55,11 +58,7 @@ pub fun new<T>(width: int, height: int, fill: T) -> Grid<T> {
     if width < 0 || height < 0 {
         panic(f"grid size {width} by {height} is negative")
     }
-    var cells: [T] = []
-    for i in 0..width * height {
-        cells.push(fill)
-    }
-    return Grid { width: width, height: height, cells: cells }
+    return Grid { width: width, height: height, cells: list_m.filled(width * height, fill) }
 }
 
 // The grid of `rows`, `rows[y][x]` the cell at `(x, y)`; every row must
@@ -71,9 +70,7 @@ pub fun of<T>(rows: [[T]]) -> Result<Grid<T>, GridError> {
         if rows[y].len() != width {
             return Err(GridError.Ragged(y + 1, rows[y].len(), width))
         }
-        for v in rows[y] {
-            cells.push(v)
-        }
+        cells.extend(rows[y])
     }
     return Ok(Grid { width: width, height: rows.len(), cells: cells })
 }
@@ -238,11 +235,7 @@ impl<T> Grid<T> {
 
     // The grid of `f` of each cell.
     fun map<U>(self, f: (T) -> U) -> Grid<U> {
-        var cells: [U] = []
-        for v in self.cells {
-            cells.push(f(v))
-        }
-        return Grid { width: self.width, height: self.height, cells: cells }
+        return Grid { width: self.width, height: self.height, cells: self.cells.map(f) }
     }
 
     // The grid flipped about its diagonal: the cell at `(x, y)` goes to
@@ -303,7 +296,8 @@ impl<T: Format> Grid<T> {
 // The grid is generic, which a `#test` case can't take (D116), so most tests
 // are test functions (D162).
 
-// The grid of an `Ok`; a failure for an `Err`.
+// The grid of an `Ok`; a failure for an `Err`, with its message (std.option's
+// `expect` can't show it).
 fun ok<T>(r: Result<Grid<T>, GridError>) -> Grid<T> {
     return match r {
         Ok(g) => g
@@ -311,7 +305,7 @@ fun ok<T>(r: Result<Grid<T>, GridError>) -> Grid<T> {
     }
 }
 
-// Whether `o` is `Some(v)`.
+// Whether `o` is `Some(v)` (an `Option` has no `==`).
 fun is<T: Eq>(o: Option<T>, v: T) -> bool {
     return match o {
         Some(x) => x == v
@@ -319,21 +313,6 @@ fun is<T: Eq>(o: Option<T>, v: T) -> bool {
     }
 }
 
-// Whether `r` is `Err(e)`.
-fun is_err<T>(r: Result<Grid<T>, GridError>, e: GridError) -> bool {
-    return match r {
-        Ok(_) => false
-        Err(x) => x == e
-    }
-}
-
-// Whether `o` is `None`.
-fun none<T>(o: Option<T>) -> bool {
-    return match o {
-        Some(_) => false
-        None => true
-    }
-}
 
 const MAZE: str = "#####\n#S..#\n#.#E#\n#####\n"
 
@@ -342,7 +321,7 @@ fun parse_and_print() {
     let g = ok(parse(MAZE))
     assert(g.width == 5 && g.height == 4, "the size")
     assert(is(g.at((1, 1)), 'S') && is(g.at((3, 2)), 'E'), "at")
-    assert(none(g.at((5, 0))) && none(g.at((0, -1))), "at out of bounds")
+    assert(g.at((5, 0)).is_none() && g.at((0, -1)).is_none(), "at out of bounds")
     assert(g.text() + "\n" == MAZE, "text gives the text back")
     let digits = ok(parse_with("123\n456", (c: char) => c - '0'))
     assert(is(digits.at((2, 1)), 6) && digits.text() == "123\n456", "parse_with")
@@ -368,10 +347,10 @@ fun parsing() {
     assert(u.width == 2 && u.cells == ['é', '·', '·', '·'], "a cell a character")
     let blank = ok(parse("\n"))
     assert(blank.width == 0 && blank.height == 1, "one empty line")
-    assert(is_err(parse("abc\nab\nabc"), GridError.Ragged(2, 2, 3)), "a short row")
-    assert(is_err(parse("ab\n\nab"), GridError.Ragged(2, 0, 2)), "an empty row")
-    assert(is_err(parse("a\nb\ncd\n"), GridError.Ragged(3, 2, 1)), "a long row")
-    assert(is_err(of([[1, 2], [3]]), GridError.Ragged(2, 1, 2)), "of")
+    assert(is(parse("abc\nab\nabc").err(), GridError.Ragged(2, 2, 3)), "a short row")
+    assert(is(parse("ab\n\nab").err(), GridError.Ragged(2, 0, 2)), "an empty row")
+    assert(is(parse("a\nb\ncd\n").err(), GridError.Ragged(3, 2, 1)), "a long row")
+    assert(is(of([[1, 2], [3]]).err(), GridError.Ragged(2, 1, 2)), "of")
     let none_rows: Grid<int> = ok(of([]))
     assert(none_rows.width == 0 && none_rows.height == 0, "no rows")
 }
@@ -391,7 +370,7 @@ fun cells() {
     assert(t.width == 2 && t.height == 3 && is(t.at((1, 2)), 5) && t.row(2) == [0, 5], "transposed")
     let s = g.map((v: int) => if v > 0 { '#' } else { '.' })
     assert(s.text() == "...\n#.#", "map")
-    assert(is(s.find('#'), (0, 1)) && none(s.find('x')), "find")
+    assert(is(s.find('#'), (0, 1)) && s.find('x').is_none(), "find")
     assert(s.find_all('#') == [(0, 1), (2, 1)] && s.find_all('.').len() == 4, "find_all")
     let r = ok(of([[1, 2], [3, 4], [5, 6]]))
     assert(r.width == 2 && r.height == 3 && is(r.at((1, 2)), 6), "of")

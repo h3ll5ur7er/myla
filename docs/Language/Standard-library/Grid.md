@@ -1,6 +1,6 @@
 # std.grid
 
-`Grid<T>`, a two-dimensional array of cells with a width and a height ([[MYLA-342]]). It reads a grid from text and prints it back, reaches a cell by its position with a bounds check, and gives the 4 or 8 neighbours of a cell. The searches of [[Language/Standard-library/Graph]] take it as their graph. The module imports nothing.
+`Grid<T>`, a two-dimensional array of cells with a width and a height ([[MYLA-342]]). It reads a grid from text and prints it back, reaches a cell by its position with a bounds check, and gives the 4 or 8 neighbours of a cell. The searches of [[Language/Standard-library/Graph]] take it as their graph. The module imports std.list and std.option.
 
 ```myla
 import std.grid as grid

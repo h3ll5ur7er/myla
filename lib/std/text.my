@@ -2,12 +2,13 @@
 // text layout (MYLA-341, D164).
 
 import std.option as option_m // `ok`; `unwrap_or` and `is_none` in the test functions
+import std.str as str_m // `words`, `pad_start`, `pad_end`
+import std.list as list_m // `join`
 import std.num as num
 
-// Importing `std.str`, `std.char` or `std.list` here would bring their cases
-// along, and with `--native` the harness wouldn't build (MYLA-360): the few
-// helpers this module needs from them (`words`, `pad_start`, `pad_end`,
-// `join`) are written out privately until then.
+// The byte tests (`is_space_byte`, `is_digit_byte`, …) stay this module's:
+// `ints` and the scanner call them for every byte, and a function of the
+// module is inlined where std.char's methods, on a `char`, wouldn't be.
 
 // --- Errors -------------------------------------------------------------------
 
@@ -587,21 +588,8 @@ pub fun wrap(text: str, width: int) -> [str] {
     var out: [str] = []
     var sb = StringBuilder()
     var len = 0
-    let n = text.len()
-    var i = 0
-    while i < n {
-        // the next word, `text[start:i]` (`words`, written out: MYLA-360)
-        while i < n && is_space_byte(text[i]) {
-            i += 1
-        }
-        let start = i
-        while i < n && !is_space_byte(text[i]) {
-            i += 1
-        }
-        let w = i - start
-        if w == 0 {
-            break
-        }
+    for word in text.words() {
+        let w = word.len()
         if len > 0 && len + 1 + w > width {
             out.push(sb.build())
             sb = StringBuilder()
@@ -611,7 +599,7 @@ pub fun wrap(text: str, width: int) -> [str] {
             sb.append_byte(' ')
             len += 1
         }
-        sb.append(text, start, i)
+        sb.append(word)
         len += w
     }
     if len > 0 {
@@ -624,17 +612,7 @@ pub fun wrap(text: str, width: int) -> [str] {
 #test("a b c d", 3)["a b\nc d"]
 #test("", 3)[""]
 pub fun fill(text: str, width: int) -> str {
-    let lines = wrap(text, width)
-    var sb = StringBuilder()
-    var k = 0
-    while k < lines.len() {
-        if k > 0 {
-            sb.append_byte('\n')
-        }
-        sb.append(lines[k])
-        k += 1
-    }
-    return sb.build()
+    return wrap(text, width).join("\n")
 }
 
 // How `columns` lines up a column's cells.
@@ -664,7 +642,7 @@ pub fun columns(rows: [[str]], align: [Align], sep: str = "  ") -> str {
     for row in rows {
         var j = 0
         while j < row.len() {
-            let w = char_count(row[j])
+            let w = row[j].chars().len()
             if j == widths.len() {
                 widths.push(w)
             } else if w > widths[j] {
@@ -686,14 +664,12 @@ pub fun columns(rows: [[str]], align: [Align], sep: str = "  ") -> str {
                 sb.append(sep)
             }
             let cell = row[j]
-            let pad = widths[j] - char_count(cell)
-            let right = j < align.len() && align[j] == Align.Right
-            if right {
-                sb.append(spaces(pad))
-            }
-            sb.append(cell)
-            if !right && j < row.len() - 1 {
-                sb.append(spaces(pad))
+            if j < align.len() && align[j] == Align.Right {
+                sb.append(cell.pad_start(widths[j], ' '))
+            } else if j < row.len() - 1 {
+                sb.append(cell.pad_end(widths[j], ' '))
+            } else {
+                sb.append(cell)
             }
             j += 1
         }
@@ -707,37 +683,6 @@ pub fun columns(rows: [[str]], align: [Align], sep: str = "  ") -> str {
 #test
 fun columns_by_default() {
     assert(columns([["ab", "c"], ["d", "e"]], [Align.Right]) == "ab  c\n d  e", "two spaces")
-}
-
-// `n` spaces, none for `n <= 0`.
-#test(3)["   "]
-#test(-1)[""]
-fun spaces(n: int) -> str {
-    var sb = StringBuilder()
-    var k = 0
-    while k < n {
-        sb.append_byte(' ')
-        k += 1
-    }
-    return sb.build()
-}
-
-// The characters in `s`: its bytes but UTF-8 continuation bytes, as
-// `pad_start` counts them.
-#test("abc")[3]
-#test("größe")[5]
-#test("")[0]
-fun char_count(s: str) -> int {
-    var n = 0
-    var i = 0
-    while i < s.len() {
-        let b = s[i]
-        if b < 128u8 || b >= 192u8 {
-            n += 1
-        }
-        i += 1
-    }
-    return n
 }
 
 // `text` with `prefix` before every line that holds more than ASCII

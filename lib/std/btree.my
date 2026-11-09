@@ -24,6 +24,9 @@
 // `var m: SortedMap<str, int> = btree.new()`, a field, a parameter or a
 // return type.
 
+import std.list as list_m // `insert`, `remove_at`, `extend` of a node's lists
+import std.option as option_m // `is_none` and `map` in the tests
+
 // The most children an inner node has. It is even, so that a full node
 // splits into two halves that each have the minimum. Tuned by measurement:
 // see docs/Language/Standard-library/Btree.md.
@@ -360,7 +363,9 @@ impl<K: Ord, V> Tree<K, V> {
         }
         // The lists are taken out of the node, so that each is the only copy
         // of itself and the shift writes it in place, without a lookup of the
-        // node per write: a sixth faster.
+        // node per write: a sixth faster. The shift moves both in one loop:
+        // std.list's `insert`, once for each, made a million inserts 12 %
+        // slower (MYLA-376).
         var ks = self.nodes[n].keys
         var vs = self.nodes[n].vals
         self.nodes[n].keys = []
@@ -460,8 +465,8 @@ impl<K: Ord, V> Tree<K, V> {
             self.nodes[c].kids = self.nodes[c].kids[:m + 1]
             r = self.alloc(right)
         }
-        self.nodes[p].keys = inserted(self.nodes[p].keys, i, sep)
-        self.nodes[p].kids = inserted(self.nodes[p].kids, i + 1, r)
+        self.nodes[p].keys.insert(i, sep)
+        self.nodes[p].kids.insert(i + 1, r)
     }
 
     // Gives child `i` of node `p`, which has the fewest keys a node may
@@ -478,14 +483,14 @@ impl<K: Ord, V> Tree<K, V> {
                 if leaf {
                     let k = self.nodes[l].keys.pop()
                     let v = self.nodes[l].vals.pop()
-                    self.nodes[c].keys = inserted(self.nodes[c].keys, 0, k)
-                    self.nodes[c].vals = inserted(self.nodes[c].vals, 0, v)
+                    self.nodes[c].keys.insert(0, k)
+                    self.nodes[c].vals.insert(0, v)
                     self.nodes[p].keys[i - 1] = k
                 } else {
                     let k = self.nodes[l].keys.pop()
                     let kid = self.nodes[l].kids.pop()
-                    self.nodes[c].keys = inserted(self.nodes[c].keys, 0, self.nodes[p].keys[i - 1])
-                    self.nodes[c].kids = inserted(self.nodes[c].kids, 0, kid)
+                    self.nodes[c].keys.insert(0, self.nodes[p].keys[i - 1])
+                    self.nodes[c].kids.insert(0, kid)
                     self.nodes[p].keys[i - 1] = k
                 }
                 return i
@@ -525,24 +530,16 @@ impl<K: Ord, V> Tree<K, V> {
         let l = self.nodes[p].kids[i]
         let r = self.nodes[p].kids[i + 1]
         if self.nodes[l].kids.len() == 0 {
-            for k in self.nodes[r].keys {
-                self.nodes[l].keys.push(k)
-            }
-            for v in self.nodes[r].vals {
-                self.nodes[l].vals.push(v)
-            }
+            self.nodes[l].keys.extend(self.nodes[r].keys)
+            self.nodes[l].vals.extend(self.nodes[r].vals)
             self.nodes[l].next = self.nodes[r].next
         } else {
             self.nodes[l].keys.push(self.nodes[p].keys[i])
-            for k in self.nodes[r].keys {
-                self.nodes[l].keys.push(k)
-            }
-            for kid in self.nodes[r].kids {
-                self.nodes[l].kids.push(kid)
-            }
+            self.nodes[l].keys.extend(self.nodes[r].keys)
+            self.nodes[l].kids.extend(self.nodes[r].kids)
         }
-        self.nodes[p].keys = removed(self.nodes[p].keys, i)
-        self.nodes[p].kids = removed(self.nodes[p].kids, i + 1)
+        self.nodes[p].keys.remove_at(i)
+        self.nodes[p].kids.remove_at(i + 1)
         self.release(r)
     }
 
@@ -629,25 +626,6 @@ impl<K: Ord, V> Tree<K, V> {
         }
         return count
     }
-}
-
-// `xs` with `x` put in at `i`.
-fun inserted<T>(xs: [T], i: int, x: T) -> [T] {
-    var out: [T] = xs[:i]
-    out.push(x)
-    for j in i..xs.len() {
-        out.push(xs[j])
-    }
-    return out
-}
-
-// `xs` without its element at `i`.
-fun removed<T>(xs: [T], i: int) -> [T] {
-    var out: [T] = xs[:i]
-    for j in i + 1..xs.len() {
-        out.push(xs[j])
-    }
-    return out
 }
 
 // --- SortedMap -------------------------------------------------------------
@@ -978,46 +956,11 @@ impl<T: Ord> SortedSet<T> {
 // The functions are generic, which a `#test` case can't take (D116), so the
 // tests are test functions (D162).
 
-// Whether `xs` and `ys` hold the same elements in the same order.
-fun same<T: Eq>(xs: [T], ys: [T]) -> bool {
-    if xs.len() != ys.len() {
-        return false
-    }
-    for i in 0..xs.len() {
-        if xs[i] != ys[i] {
-            return false
-        }
-    }
-    return true
-}
-
+// Whether `o` is `Some(v)` (an `Option` has no `==`).
 fun is_some_of<T: Eq>(o: Option<T>, v: T) -> bool {
     return match o {
         Some(x) => x == v
         None => false
-    }
-}
-
-fun is_none<T>(o: Option<T>) -> bool {
-    return match o {
-        Some(_) => false
-        None => true
-    }
-}
-
-// The key of an entry, or `d`.
-fun key_or<K, V>(e: Option<(K, V)>, d: K) -> K {
-    return match e {
-        Some(kv) => kv.0
-        None => d
-    }
-}
-
-// The value of an entry, or `d`.
-fun value_or<K, V>(e: Option<(K, V)>, d: V) -> V {
-    return match e {
-        Some(kv) => kv.1
-        None => d
     }
 }
 
@@ -1130,73 +1073,61 @@ fun same_value(a: Option<int>, b: Option<int>) -> bool {
     }
 }
 
-fun same_items(xs: [(int, int)], ys: [(int, int)]) -> bool {
-    if xs.len() != ys.len() {
-        return false
-    }
-    for i in 0..xs.len() {
-        if xs[i].0 != ys[i].0 || xs[i].1 != ys[i].1 {
-            return false
-        }
-    }
-    return true
-}
-
 // Checks every query of `m` about `k` against the model.
 fun queries_agree(m: SortedMap<int, int>, model: Model, k: int) -> bool {
     let want = model.get(k)
-    return same_value(m.get(k), want) && m.contains(k) == !is_none(want) &&
+    return same_value(m.get(k), want) && m.contains(k) == !want.is_none() &&
         same_entry(m.floor(k), model.floor(k)) &&
         same_entry(m.ceiling(k), model.ceiling(k)) &&
-        same_items(m.range(k, k + 20), model.range(k, k + 20))
+        m.range(k, k + 20) == model.range(k, k + 20)
 }
 
 #test
 fun map_basics() {
     var m: SortedMap<str, int> = new()
     assert(m.is_empty() && m.len() == 0, "a new map is empty")
-    assert(is_none(m.get("a")) && !m.contains("a"), "nothing in it")
-    assert(is_none(m.insert("pear", 1)), "a new key")
-    assert(is_none(m.insert("fig", 2)), "another")
+    assert(m.get("a").is_none() && !m.contains("a"), "nothing in it")
+    assert(m.insert("pear", 1).is_none(), "a new key")
+    assert(m.insert("fig", 2).is_none(), "another")
     assert(is_some_of(m.insert("pear", 3), 1), "a key already there gives its old value")
     assert(m.len() == 2 && !m.is_empty(), "two keys")
     assert(is_some_of(m.get("pear"), 3) && m.contains("fig") && !m.contains("lime"), "get, contains")
     assert(is_some_of(m.remove("pear"), 3), "remove gives the value")
-    assert(is_none(m.remove("pear")) && is_none(m.remove("lime")), "removing what isn't there")
-    assert(m.len() == 1 && same(m.keys(), ["fig"]), "one left")
+    assert(m.remove("pear").is_none() && m.remove("lime").is_none(), "removing what isn't there")
+    assert(m.len() == 1 && m.keys() == ["fig"], "one left")
     let o: SortedMap<str, int> = of([("b", 1), ("a", 2), ("b", 3)])
-    assert(same(o.keys(), ["a", "b"]) && same(o.values(), [2, 3]), "of: the later value of a key")
+    assert(o.keys() == ["a", "b"] && o.values() == [2, 3], "of: the later value of a key")
     assert(m.t.fault() == "" && o.t.fault() == "", "the trees are sound")
 }
 
 #test
 fun map_order() {
     var m: SortedMap<int, str> = new()
-    assert(is_none(m.first()) && is_none(m.last()), "an empty map has no ends")
-    assert(is_none(m.floor(3)) && is_none(m.ceiling(3)), "nor neighbours")
-    assert(m.range(0, 10).len() == 0 && is_none(m.pop_first()) && is_none(m.pop_last()), "nor a range")
+    assert(m.first().is_none() && m.last().is_none(), "an empty map has no ends")
+    assert(m.floor(3).is_none() && m.ceiling(3).is_none(), "nor neighbours")
+    assert(m.range(0, 10).len() == 0 && m.pop_first().is_none() && m.pop_last().is_none(), "nor a range")
     for k in [50, 10, 40, 20, 30] {
         m.insert(k, f"v{k}")
     }
-    assert(same(m.keys(), [10, 20, 30, 40, 50]), "keys in order")
-    assert(same(m.values(), ["v10", "v20", "v30", "v40", "v50"]), "values in the keys' order")
+    assert(m.keys() == [10, 20, 30, 40, 50], "keys in order")
+    assert(m.values() == ["v10", "v20", "v30", "v40", "v50"], "values in the keys' order")
     let it = m.items()
     assert(it.len() == 5 && it[0].0 == 10 && it[4].1 == "v50", "items")
-    assert(key_or(m.first(), 0) == 10 && value_or(m.first(), "") == "v10", "first")
-    assert(key_or(m.last(), 0) == 50, "last")
-    assert(key_or(m.floor(30), 0) == 30, "floor of a key is the key")
-    assert(key_or(m.floor(35), 0) == 30, "floor between keys")
-    assert(key_or(m.floor(99), 0) == 50 && is_none(m.floor(9)), "floor past the ends")
-    assert(key_or(m.ceiling(30), 0) == 30, "ceiling of a key is the key")
-    assert(value_or(m.ceiling(31), "") == "v40", "ceiling between keys")
-    assert(key_or(m.ceiling(1), 0) == 10 && is_none(m.ceiling(51)), "ceiling past the ends")
+    assert(m.first().map((kv) => kv.0).unwrap_or(0) == 10 && m.first().map((kv) => kv.1).unwrap_or("") == "v10", "first")
+    assert(m.last().map((kv) => kv.0).unwrap_or(0) == 50, "last")
+    assert(m.floor(30).map((kv) => kv.0).unwrap_or(0) == 30, "floor of a key is the key")
+    assert(m.floor(35).map((kv) => kv.0).unwrap_or(0) == 30, "floor between keys")
+    assert(m.floor(99).map((kv) => kv.0).unwrap_or(0) == 50 && m.floor(9).is_none(), "floor past the ends")
+    assert(m.ceiling(30).map((kv) => kv.0).unwrap_or(0) == 30, "ceiling of a key is the key")
+    assert(m.ceiling(31).map((kv) => kv.1).unwrap_or("") == "v40", "ceiling between keys")
+    assert(m.ceiling(1).map((kv) => kv.0).unwrap_or(0) == 10 && m.ceiling(51).is_none(), "ceiling past the ends")
     let r = m.range(20, 50)
     assert(r.len() == 3 && r[0].0 == 20 && r[2].0 == 40, "a range is half-open")
     assert(m.range(21, 30).len() == 0 && m.range(30, 30).len() == 0 && m.range(40, 20).len() == 0, "empty ranges")
     assert(m.range(-100, 100).len() == 5, "a range past both ends")
-    assert(key_or(m.pop_first(), 0) == 10, "pop_first")
-    assert(value_or(m.pop_last(), "") == "v50", "pop_last")
-    assert(same(m.keys(), [20, 30, 40]) && m.len() == 3, "what is left")
+    assert(m.pop_first().map((kv) => kv.0).unwrap_or(0) == 10, "pop_first")
+    assert(m.pop_last().map((kv) => kv.1).unwrap_or("") == "v50", "pop_last")
+    assert(m.keys() == [20, 30, 40] && m.len() == 3, "what is left")
 }
 
 #test
@@ -1238,7 +1169,7 @@ fun against_a_model() {
         assert(fault == "", f"step {step}: {fault}")
         assert(queries_agree(m, model, rng.below(640) - 20), f"queries after step {step}")
     }
-    assert(same_items(m.items(), model.range(0, 600)), "the same entries at the end")
+    assert(m.items() == model.range(0, 600), "the same entries at the end")
 }
 
 // A tree of three levels, filled in random order and emptied again from
@@ -1259,7 +1190,7 @@ fun deep_tree() {
         }
     }
     assert(m.t.height == 2, "three levels")
-    assert(m.t.fault() == "" && same_items(m.items(), model.range(0, 40000)), "filled")
+    assert(m.t.fault() == "" && m.items() == model.range(0, 40000), "filled")
     for i in 0..200 {
         assert(queries_agree(m, model, rng.below(40000)), "queries")
     }
@@ -1271,12 +1202,12 @@ fun deep_tree() {
         if which == 0 {
             let e = m.pop_first()
             assert(same_entry(e, model.ceiling(lo)), "pop_first")
-            lo = key_or(e, 0)
+            lo = e.map((kv) => kv.0).unwrap_or(0)
             model.remove(lo)
         } else if which == 1 {
             let e = m.pop_last()
             assert(same_entry(e, model.floor(hi - 1)), "pop_last")
-            hi = key_or(e, 0)
+            hi = e.map((kv) => kv.0).unwrap_or(0)
             model.remove(hi)
         } else {
             let k = rng.below(40000)
@@ -1290,7 +1221,7 @@ fun deep_tree() {
     }
     assert(m.t.height == 0 && m.t.fault() == "" && model.count == 0, "empty again")
     m.insert(7, 7)
-    assert(m.t.nodes.len() < 400 && same(m.keys(), [7]), "the slots are reused")
+    assert(m.t.nodes.len() < 400 && m.keys() == [7], "the slots are reused")
 }
 
 #test
@@ -1300,25 +1231,25 @@ fun set_basics() {
     assert(s.insert("pear") && s.insert("fig") && !s.insert("pear"), "insert says whether it was new")
     assert(s.len() == 2 && s.contains("fig") && !s.contains("lime"), "contains")
     assert(s.remove("pear") && !s.remove("pear") && !s.remove("lime"), "remove says whether it was there")
-    assert(same(s.items(), ["fig"]), "the one left")
+    assert(s.items() == ["fig"], "the one left")
     let c: SortedSet<char> = set_of("sorted".chars())
-    assert(same(c.items(), ['d', 'e', 'o', 'r', 's', 't']), "in order, once each")
+    assert(c.items() == ['d', 'e', 'o', 'r', 's', 't'], "in order, once each")
     assert(is_some_of(c.first(), 'd') && is_some_of(c.last(), 't'), "first, last")
     assert(is_some_of(c.floor('p'), 'o') && is_some_of(c.ceiling('p'), 'r'), "floor, ceiling")
-    assert(is_none(c.floor('a')) && is_none(c.ceiling('u')), "past the ends")
-    assert(same(c.range('e', 's'), ['e', 'o', 'r']), "range")
+    assert(c.floor('a').is_none() && c.ceiling('u').is_none(), "past the ends")
+    assert(c.range('e', 's') == ['e', 'o', 'r'], "range")
     var p: SortedSet<int> = set_of([3, 1, 2])
-    assert(is_some_of(p.pop_first(), 1) && is_some_of(p.pop_last(), 3) && same(p.items(), [2]), "pops")
-    assert(is_some_of(p.pop_last(), 2) && is_none(p.pop_last()) && is_none(p.pop_first()), "popped empty")
+    assert(is_some_of(p.pop_first(), 1) && is_some_of(p.pop_last(), 3) && p.items() == [2], "pops")
+    assert(is_some_of(p.pop_last(), 2) && p.pop_last().is_none() && p.pop_first().is_none(), "popped empty")
 }
 
 #test
 fun set_algebra() {
     let a: SortedSet<int> = set_of([4, 1, 3, 2])
     let b: SortedSet<int> = set_of([6, 4, 2])
-    assert(same(a.union(b).items(), [1, 2, 3, 4, 6]), "union")
-    assert(same(a.intersection(b).items(), [2, 4]), "intersection")
-    assert(same(a.difference(b).items(), [1, 3]) && same(b.difference(a).items(), [6]), "difference")
+    assert(a.union(b).items() == [1, 2, 3, 4, 6], "union")
+    assert(a.intersection(b).items() == [2, 4], "intersection")
+    assert(a.difference(b).items() == [1, 3] && b.difference(a).items() == [6], "difference")
     let e: SortedSet<int> = set_new()
     assert(a.union(e).len() == 4 && a.intersection(e).is_empty() && e.difference(a).is_empty(), "with the empty set")
     assert(e.is_subset(a) && a.is_subset(a) && a.intersection(b).is_subset(b), "subsets")
@@ -1371,10 +1302,10 @@ fun other_ordered_keys() {
     for j in jobs.keys() {
         names.push(j.name)
     }
-    assert(same(names, ["a", "aa", "c"]), "by the type's own cmp; an equal key is replaced")
-    assert(same(jobs.values(), [4, 2, 1]), "the later value")
+    assert(names == ["a", "aa", "c"], "by the type's own cmp; an equal key is replaced")
+    assert(jobs.values() == [4, 2, 1], "the later value")
     let big: SortedSet<int64> = set_of([5000000000, -5000000000, 0])
     assert(is_some_of(big.first(), -5000000000) && is_some_of(big.floor(4999999999), 0), "int64")
     let f: SortedMap<float, str> = of([(0.5, "half"), (-2.0, "minus two")])
-    assert(value_or(f.first(), "") == "minus two", "floats")
+    assert(f.first().map((kv) => kv.1).unwrap_or("") == "minus two", "floats")
 }
