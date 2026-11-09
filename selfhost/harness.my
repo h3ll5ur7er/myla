@@ -21,11 +21,12 @@
 from .ast import Decl, DeclKind, FunData, Attribute, Expr, TypeExpr, TypeKind, Expected, expected_failure
 from .checker import Checker, Type, type_name, FuncSig
 from .tokens import SrcSpan
-from .interp import selected
+from .interp import selected, case_func_name
 from .parser import expr_of, type_expr_of, fun_of   // AST values for #test cases
 
 // A case the harness runs: its report name, what it expects, and the
-// function (its checked name, `T.m` for a method).
+// function (its checked name, `T.m` for a method, `__list.m` for one on a
+// list, which the report names `[str].m`).
 pub struct Case { name: str, kind: Expected, func: str }
 
 // The names of the cases `harness_source` would build, in order, for the
@@ -136,13 +137,14 @@ impl Gen {
         let fi = self.ch.func_idx(name)
         if fi < 0 { return n }
         let sig = self.ch.functions[fi]
+        let shown = case_func_name(self.ch, name)   // as the interpreter's report names it
         for attr in fd.attributes {
             if attr.name != "test" { continue }
             idx = idx + 1
-            if !selected(name, only) { continue }
+            if !selected(shown, only) { continue }
             let is_fn = match attr.outputs { Some(outs) => false, None => true }
-            var case_name = name
-            if !is_fn { case_name = format("{} #{}", name, idx) }
+            var case_name = shown
+            if !is_fn { case_name = format("{} #{}", shown, idx) }
             if attr.label != "" { case_name = format("{} ({})", case_name, attr.label) }
             var kind = Expected.Value
             var want = ""
@@ -177,7 +179,16 @@ impl Gen {
         var first = 0
         match fd.receiver {
             Some(r) => {
-                sb.append(format("    var __recv = {}\n", self.slice(attr.args[0].sp)))
+                // bound with the type the checker gave the case's argument
+                // (the receiver's), so that `[]`, `[:]` and an unsuffixed
+                // literal of another integer type build (MYLA-357)
+                var annot = ""
+                let arg = attr.args[0]
+                if self.ch.resolved.contains(arg.id) {
+                    let at = self.ch.resolved[arg.id]
+                    if nameable(at) { annot = ": " + self.type_text(at) }
+                }
+                sb.append(format("    var __recv{} = {}\n", annot, self.slice(arg.sp)))
                 call = format("__recv.{}(", fd.name)
                 first = 1
             },
@@ -364,8 +375,7 @@ impl Gen {
         match t {
             Type.TInt(w, s) => {
                 eq.append("    return a == b\n")
-                if w == 64 && !s { repr.append("    return format(\"{}\", v as int64)\n") }
-                else { repr.append("    return format(\"{}\", v)\n") }
+                repr.append("    return format(\"{}\", v)\n")   // a uint64 unsigned (MYLA-361)
             },
             Type.TFloat(w) => {
                 eq.append("    return a == b\n")
@@ -515,6 +525,35 @@ fun enum_pattern(path: str, vname: str, ps: [str]) -> str {
     if path != "" { head = path + "." + vname }
     if ps.len() == 0 { return head }
     return head + "(" + join(ps, ", ") + ")"
+}
+
+// Whether the harness can write `t` as a type: not a type parameter's, an
+// error's or an async function's.
+#test(Type.TList(Type.TStr))[true]
+#test(Type.TMap(Type.TStr, Type.TInt(8, true)))[true]
+#test(Type.TList(Type.TParam("T")))[false]
+#test(Type.TStruct("Box", [Type.TParam("T")]))[false]
+fun nameable(t: Type) -> bool {
+    return match t {
+        Type.TParam(n) => false,
+        Type.TSelf => false,
+        Type.TError => false,
+        Type.TPtr => false,
+        Type.TAsync(f) => false,
+        Type.TTuple(es) => all_nameable(es),
+        Type.TList(e) => nameable(e),
+        Type.TMap(k, v) => nameable(k) && nameable(v),
+        Type.TStruct(n, args) => all_nameable(args),
+        Type.TEnum(n, args) => all_nameable(args),
+        Type.TActor(n, args) => all_nameable(args),
+        Type.TFunc(ps, r) => all_nameable(ps) && (match r { Some(x) => nameable(x), None => true }),
+        _ => true,
+    }
+}
+
+fun all_nameable(ts: [Type]) -> bool {
+    for t in ts { if !nameable(t) { return false } }
+    return true
 }
 
 #test(Type.TSB)[true]

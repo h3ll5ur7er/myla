@@ -64,6 +64,95 @@ FAIL  stays #1: not run (an earlier failure ended the run)
 """
 
 
+# MYLA-357: a receiver of every kind with an empty value, and a literal one
+# of another integer type, bound with the argument's type; a method on a
+# built-in type named by its type. MYLA-361: a uint64 of 2^63 or more shown
+# unsigned, alone and inside a struct, a tuple, a list and an enum
+_RECEIVERS = """#derive(Eq)
+struct H { s: uint64 }
+
+impl [str] {
+    #test([], "-")[1]
+    #test(["a"], "-")[2]
+    fun width_with(self, sep: str) -> int {
+        return self.len() + sep.len()
+    }
+}
+
+impl [str: int] {
+    #test([:])[0]
+    #test(["a": 2])[2]
+    fun sum_values(self) -> int {
+        var t = 0
+        for k in self.keys() {
+            t += self[k]
+        }
+        return t
+    }
+}
+
+impl str {
+    #test("")[0]
+    fun byte_count(self) -> int {
+        return self.len()
+    }
+}
+
+impl int8 {
+    #test(5, 2)[7]
+    fun plus_i8(self, d: int8) -> int8 {
+        return self + d
+    }
+}
+
+#test()[1u64]
+fun big() -> uint64 {
+    return 0xFFFFFFFFFFFFFFFF
+}
+
+#test()[H { s: 1 }]
+fun big_h() -> H {
+    return H { s: 0xFFFFFFFFFFFFFFFF }
+}
+
+#test()[(1u64, 2)]
+fun big_pair() -> (uint64, int) {
+    return (0xFFFFFFFFFFFFFFFF, 2)
+}
+
+#test()[[1u64]]
+fun big_list() -> [uint64] {
+    return [0x8000000000000000]
+}
+
+#test()[Some(1u64)]
+fun big_some() -> Option<uint64> {
+    return Some(0x8000000000000000)
+}
+
+#test()[panic("no")]
+fun big_returns() -> uint64 {
+    return 0x8000000000000000
+}
+"""
+
+_RECEIVERS_WANT = """PASS  [str].width_with #1
+PASS  [str].width_with #2
+PASS  [str: int32].sum_values #1
+PASS  [str: int32].sum_values #2
+PASS  str.byte_count #1
+PASS  int8.plus_i8 #1
+FAIL  big #1: expected 1, got 18446744073709551615
+FAIL  big_h #1: expected H { s: 1 }, got H { s: 18446744073709551615 }
+FAIL  big_pair #1: expected (1, 2), got (18446744073709551615, 2)
+FAIL  big_list #1: expected [1], got [9223372036854775808]
+FAIL  big_some #1: expected Option.Some(1), got Option.Some(9223372036854775808)
+FAIL  big_returns #1: expected runtime error 'no', got 9223372036854775808
+
+6/12 passed.
+"""
+
+
 def _corpus() -> list[str]:
     """The files with cases whose native report must be the interpreter's."""
     files = sorted(glob.glob(os.path.join(_REPO, "examples", "*.my")))
@@ -135,6 +224,18 @@ class TestNative(unittest.TestCase):
             self.assertEqual(native.stderr, "")
             self.assertEqual((native.stdout, native.returncode), (interp.stdout, interp.returncode))
             self.assertIn("2/3 passed.", native.stdout)
+
+    def test_receivers_and_large_unsigned_values(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = _write(tmp, "recv.my", _RECEIVERS)
+            for flags in ([], ["--native"]):
+                with self.subTest(flags=flags):
+                    proc = _myla(["test", path, *flags], tmp)
+                    self.assertEqual(proc.stderr, "")
+                    self.assertEqual((proc.stdout, proc.returncode), (_RECEIVERS_WANT, 1))
+            proc = _myla(["test", path, "--only", "[str]."], tmp)
+            self.assertTrue(proc.stdout.startswith("PASS  [str].width_with #1\nPASS  [str].width_with #2\n\n2/2"),
+                            proc.stdout)
 
     def test_a_harness_that_does_not_build_is_kept(self):
         # a case calling `main`, which the harness blanks
