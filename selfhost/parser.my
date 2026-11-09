@@ -22,6 +22,9 @@ from .ast import BindElem, FieldInit, MapEntry, MatchArm, FieldPat, Param
 from .ast import TypeParam, Field, Variant, Attribute, ImportPath, ImportItem
 from .ast import FunData, Program
 
+// A token's start (`peek_pos`).
+struct TokPos { line: int32, column: int32 }
+
 pub struct Parser {
     toks: [Token],
     pos: int32,
@@ -255,6 +258,13 @@ impl Parser {
         return Expr { id: self.fresh(), line: line, col: col, sp: self.span_from(st.line, st.column), kind: k }
     }
 
+    // `mk_expr_from` with the start's position only: the expression levels
+    // take it before each operand, where a copy of the token cost a tenth of
+    // a check's parsing (MYLA-359).
+    fun mk_expr_at(var self, st: TokPos, line: int32, col: int32, k: ExprKind) -> Expr {
+        return Expr { id: self.fresh(), line: line, col: col, sp: self.span_from(st.line, st.column), kind: k }
+    }
+
     #test(parser_on("[int]"), 7, 5, StmtKind.ReturnS(Some(Expr { id: 22, line: 7, col: 12, sp: SrcSpan { sline: 7, scol: 12, eline: 7, ecol: 16 }, kind: ExprKind.Name("None") }), false))[Stmt { id: 0, line: 7, col: 5, sp: SrcSpan { sline: 7, scol: 5, eline: 1, ecol: 2 }, kind: StmtKind.ReturnS(Some(Expr { id: 22, line: 7, col: 12, sp: SrcSpan { sline: 7, scol: 12, eline: 7, ecol: 16 }, kind: ExprKind.Name("None") }), false) }]
     fun mk_stmt(var self, line: int32, col: int32, k: StmtKind) -> Stmt {
         return Stmt { id: self.fresh(), line: line, col: col, sp: self.span_from(line, col), kind: k }
@@ -300,6 +310,14 @@ impl Parser {
             return self.toks[self.toks.len() - 1]
         }
         return self.toks[idx]
+    }
+
+    // Where the current token starts, without a copy of it.
+    #test(parser_on("a.b[0]"))[TokPos { line: 1, column: 1 }]
+    fun peek_pos(self) -> TokPos {
+        var i = self.pos
+        if i >= self.toks.len() { i = self.toks.len() - 1 }
+        return TokPos { line: self.toks[i].line, column: self.toks[i].column }
     }
 
     // The kind of the current token, or of the one `offset` further, read in
@@ -1660,7 +1678,7 @@ impl Parser {
 
     #test(parser_on("let x = 1"))[Expr { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 10 }, kind: ExprKind.Hole }]
     fun pipe(var self) -> Expr {
-        let st = self.peek()
+        let st = self.peek_pos()
         var expr = self.logic_or()
         while self.check(TokenKind.PIPEGT) {
             let op = self.advance()
@@ -1669,91 +1687,91 @@ impl Parser {
                 ExprKind.Call(callee, args, targs) => ExprKind.Call(callee, cons_expr(expr, args), targs),
                 _ => ExprKind.Call(rhs, [expr], []),
             }
-            expr = self.mk_expr_from(st, op.line, op.column, spliced)
+            expr = self.mk_expr_at(st, op.line, op.column, spliced)
         }
         return expr
     }
 
     #test(parser_on("let x = 1"))[Expr { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 10 }, kind: ExprKind.Hole }]
     fun logic_or(var self) -> Expr {
-        let st = self.peek()
+        let st = self.peek_pos()
         var expr = self.logic_and()
         while self.check(TokenKind.OR) {
             let op = self.advance()
             let right = self.logic_and()
-            expr = self.mk_expr_from(st, op.line, op.column, ExprKind.Binary(op.lexeme, expr, right))
+            expr = self.mk_expr_at(st, op.line, op.column, ExprKind.Binary(op.lexeme, expr, right))
         }
         return expr
     }
 
     #test(parser_on("let x = 1"))[Expr { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 10 }, kind: ExprKind.Hole }]
     fun logic_and(var self) -> Expr {
-        let st = self.peek()
+        let st = self.peek_pos()
         var expr = self.equality()
         while self.check(TokenKind.AND) {
             let op = self.advance()
             let right = self.equality()
-            expr = self.mk_expr_from(st, op.line, op.column, ExprKind.Binary(op.lexeme, expr, right))
+            expr = self.mk_expr_at(st, op.line, op.column, ExprKind.Binary(op.lexeme, expr, right))
         }
         return expr
     }
 
     #test(parser_on("let x = 1"))[Expr { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 10 }, kind: ExprKind.Hole }]
     fun equality(var self) -> Expr {
-        let st = self.peek()
+        let st = self.peek_pos()
         var expr = self.comparison()
         while self.check(TokenKind.EQ) || self.check(TokenKind.NE) {
             let op = self.advance()
             let right = self.comparison()
-            expr = self.mk_expr_from(st, op.line, op.column, ExprKind.Binary(op.lexeme, expr, right))
+            expr = self.mk_expr_at(st, op.line, op.column, ExprKind.Binary(op.lexeme, expr, right))
         }
         return expr
     }
 
     #test(parser_on("let x = 1"))[Expr { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 10 }, kind: ExprKind.Hole }]
     fun comparison(var self) -> Expr {
-        let st = self.peek()
+        let st = self.peek_pos()
         var expr = self.bit_or()
         while (self.check(TokenKind.LT) || self.check(TokenKind.LE) || self.check(TokenKind.GT) || self.check(TokenKind.GE)) && self.compound_ahead() == "" {
             let op = self.advance()
             let right = self.bit_or()
-            expr = self.mk_expr_from(st, op.line, op.column, ExprKind.Binary(op.lexeme, expr, right))
+            expr = self.mk_expr_at(st, op.line, op.column, ExprKind.Binary(op.lexeme, expr, right))
         }
         return expr
     }
 
     #test(parser_on("let x = 1"))[Expr { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 10 }, kind: ExprKind.Hole }]
     fun bit_or(var self) -> Expr {
-        let st = self.peek()
+        let st = self.peek_pos()
         var expr = self.bit_xor()
         while self.check(TokenKind.PIPE) && self.compound_ahead() == "" {
             let op = self.advance()
             let right = self.bit_xor()
-            expr = self.mk_expr_from(st, op.line, op.column, ExprKind.Binary(op.lexeme, expr, right))
+            expr = self.mk_expr_at(st, op.line, op.column, ExprKind.Binary(op.lexeme, expr, right))
         }
         return expr
     }
 
     #test(parser_on("let x = 1"))[Expr { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 10 }, kind: ExprKind.Hole }]
     fun bit_xor(var self) -> Expr {
-        let st = self.peek()
+        let st = self.peek_pos()
         var expr = self.bit_and()
         while self.check(TokenKind.CARET) && self.compound_ahead() == "" {
             let op = self.advance()
             let right = self.bit_and()
-            expr = self.mk_expr_from(st, op.line, op.column, ExprKind.Binary(op.lexeme, expr, right))
+            expr = self.mk_expr_at(st, op.line, op.column, ExprKind.Binary(op.lexeme, expr, right))
         }
         return expr
     }
 
     #test(parser_on("let x = 1"))[Expr { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 10 }, kind: ExprKind.Hole }]
     fun bit_and(var self) -> Expr {
-        let st = self.peek()
+        let st = self.peek_pos()
         var expr = self.shift()
         while self.check(TokenKind.AMP) && self.compound_ahead() == "" {
             let op = self.advance()
             let right = self.shift()
-            expr = self.mk_expr_from(st, op.line, op.column, ExprKind.Binary(op.lexeme, expr, right))
+            expr = self.mk_expr_at(st, op.line, op.column, ExprKind.Binary(op.lexeme, expr, right))
         }
         return expr
     }
@@ -1776,7 +1794,7 @@ impl Parser {
 
     #test(parser_on("let x = 1"))[Expr { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 10 }, kind: ExprKind.Hole }]
     fun shift(var self) -> Expr {
-        let st = self.peek()
+        let st = self.peek_pos()
         var expr = self.term()
         while true {
             let op = self.adjacent_shift()
@@ -1787,43 +1805,43 @@ impl Parser {
             self.skip()
             self.skip()
             let right = self.term()
-            expr = self.mk_expr_from(st, a.line, a.column, ExprKind.Binary(op, expr, right))
+            expr = self.mk_expr_at(st, a.line, a.column, ExprKind.Binary(op, expr, right))
         }
         return expr
     }
 
     #test(parser_on("let x = 1"))[Expr { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 10 }, kind: ExprKind.Hole }]
     fun term(var self) -> Expr {
-        let st = self.peek()
+        let st = self.peek_pos()
         var expr = self.factor()
         while (self.check(TokenKind.PLUS) || self.check(TokenKind.MINUS)) && self.compound_ahead() == "" {
             let op = self.advance()
             let right = self.factor()
-            expr = self.mk_expr_from(st, op.line, op.column, ExprKind.Binary(op.lexeme, expr, right))
+            expr = self.mk_expr_at(st, op.line, op.column, ExprKind.Binary(op.lexeme, expr, right))
         }
         return expr
     }
 
     #test(parser_on("let x = 1"))[Expr { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 10 }, kind: ExprKind.Hole }]
     fun factor(var self) -> Expr {
-        let st = self.peek()
+        let st = self.peek_pos()
         var expr = self.cast()
         while (self.check(TokenKind.STAR) || self.check(TokenKind.SLASH) || self.check(TokenKind.PERCENT)) && self.compound_ahead() == "" {
             let op = self.advance()
             let right = self.cast()
-            expr = self.mk_expr_from(st, op.line, op.column, ExprKind.Binary(op.lexeme, expr, right))
+            expr = self.mk_expr_at(st, op.line, op.column, ExprKind.Binary(op.lexeme, expr, right))
         }
         return expr
     }
 
     #test(parser_on("let x = 1"))[Expr { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 10 }, kind: ExprKind.Hole }]
     fun cast(var self) -> Expr {
-        let st = self.peek()
+        let st = self.peek_pos()
         var expr = self.unary()
         while self.check(TokenKind.AS) {
             let kw = self.advance()
             let target = self.parse_type()
-            expr = self.mk_expr_from(st, kw.line, kw.column, ExprKind.Cast(expr, target))
+            expr = self.mk_expr_at(st, kw.line, kw.column, ExprKind.Cast(expr, target))
         }
         return expr
     }
@@ -1884,19 +1902,19 @@ impl Parser {
 
     #test(parser_on("let x = 1"))[Expr { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 10 }, kind: ExprKind.Hole }]
     fun postfix(var self) -> Expr {
-        let st = self.peek()
+        let st = self.peek_pos()
         var expr = self.primary()
         while true {
             if self.check(TokenKind.LPAREN) {
                 let lp = self.advance()
                 let args = self.call_args()
                 self.expect(TokenKind.RPAREN, "')'")
-                expr = self.mk_expr_from(st, lp.line, lp.column, ExprKind.Call(expr, args, []))
+                expr = self.mk_expr_at(st, lp.line, lp.column, ExprKind.Call(expr, args, []))
             } else if self.check(TokenKind.LBRACKET) {
                 let lb = self.advance()
                 let index = self.index_or_slice(lb)
                 self.expect(TokenKind.RBRACKET, "']' to close index")
-                expr = self.mk_expr_from(st, lb.line, lb.column, ExprKind.Index(expr, index))
+                expr = self.mk_expr_at(st, lb.line, lb.column, ExprKind.Index(expr, index))
             } else if self.check(TokenKind.DOT) {
                 let dot = self.advance()
                 if self.check(TokenKind.INT) {
@@ -1904,14 +1922,14 @@ impl Parser {
                     if idx_tok.suffix != "" {
                         self.fail_at(idx_tok, "tuple index may not have a type suffix")
                     }
-                    expr = self.mk_expr_from(st, dot.line, dot.column, ExprKind.TupleIndex(expr, idx_tok.ival))
+                    expr = self.mk_expr_at(st, dot.line, dot.column, ExprKind.TupleIndex(expr, idx_tok.ival))
                 } else {
                     let name = self.expect(TokenKind.IDENT, "field name or tuple index after '.'").lexeme
-                    expr = self.mk_expr_from(st, dot.line, dot.column, ExprKind.GetField(expr, name))
+                    expr = self.mk_expr_at(st, dot.line, dot.column, ExprKind.GetField(expr, name))
                 }
             } else if self.check(TokenKind.QUESTION) {
                 let q = self.advance()
-                expr = self.mk_expr_from(st, q.line, q.column, ExprKind.Try(expr))
+                expr = self.mk_expr_at(st, q.line, q.column, ExprKind.Try(expr))
             } else if self.check(TokenKind.LT) && names_a_callee(expr) && self.toks[self.pos - 1].kind == TokenKind.IDENT {
                 // `f<T>(…)`, `m.f<T>(…)`, `x.m<T>(…)` (D169): kept when the
                 // type arguments close and a `(` follows, else a comparison
@@ -1920,7 +1938,7 @@ impl Parser {
                         let lp = self.advance()
                         let args = self.call_args()
                         self.expect(TokenKind.RPAREN, "')'")
-                        expr = self.mk_expr_from(st, lp.line, lp.column, ExprKind.Call(expr, args, targs))
+                        expr = self.mk_expr_at(st, lp.line, lp.column, ExprKind.Call(expr, args, targs))
                     },
                     None => {
                         // `Box<int>.zero()`: a generic type's function is

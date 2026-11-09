@@ -257,9 +257,11 @@ impl Lexer {
 
     fun line_comment(var self) {
         let start = self.pos + 2
-        while !self.at_end() && self.peek() != 10 {
-            self.advance()
-        }
+        // to the line's end, which `advance` would count no line break in
+        var i = self.pos
+        while i < self.n && self.cps[i] != '\n' { i += 1 }
+        self.col = self.col + (i - self.pos)
+        self.pos = i
         // after code on its line: kept for the line's NEWLINE token
         if self.toks.len() > 0 && self.toks[self.toks.len() - 1].kind != TokenKind.NEWLINE && self.toks[self.toks.len() - 1].eline == self.line {
             self.comment = trim_spaces(self.slice_str(start, self.pos))
@@ -532,9 +534,11 @@ impl Lexer {
         let sl = self.line
         let sc = self.col
         let sp = self.pos
-        while !self.at_end() && (is_ident_continue(self.peek()) || (self.qualified && self.peek() == 36)) {
-            self.advance()
-        }
+        // no line break in a name: the column moves with the cursor
+        var i = self.pos
+        while i < self.n && (is_ident_continue(self.cps[i] as int32) || (self.qualified && self.cps[i] == '$')) { i += 1 }
+        self.col = self.col + (i - self.pos)
+        self.pos = i
         let text = self.slice_str(sp, self.pos)
         self.emit0(keyword_kind(text), text, sl, sc)
     }
@@ -912,7 +916,13 @@ impl Lexer {
                 self.advance()
                 self.emit_newline()
             } else if c == 32 || c == 9 || c == 13 {
-                self.advance()
+                // a run of blanks at once: no line break among them
+                // (MYLA-359: a method call a character was a tenth of a
+                // check's lexing)
+                var i = self.pos + 1
+                while i < self.n && (self.cps[i] == ' ' || self.cps[i] == '\t' || self.cps[i] == '\r') { i += 1 }
+                self.col = self.col + (i - self.pos)
+                self.pos = i
             } else if c == 47 && self.peek1() == 47 {
                 self.line_comment()
             } else if c == 47 && self.peek1() == 42 {
