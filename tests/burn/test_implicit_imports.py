@@ -231,6 +231,28 @@ class ImplicitModules(Fixture):
             self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
             self.assertIn("2/2 passed", proc.stdout)
 
+    def test_their_bodies_are_checked_once_called(self) -> None:
+        # MYLA-359: a method or function of an implicit module that no code
+        # checked calls isn't checked, one that is (even through another) is
+        lib = os.path.join(self.work, "lazy_lib")
+        if not os.path.exists(lib):
+            shutil.copytree(self.lib, lib)
+            with open(os.path.join(lib, "std", "int.my"), "a", encoding="utf-8") as fh:
+                fh.write("\nimpl int {\n    fun broken(self) -> int {\n        return \"no\"\n    }\n\n"
+                         "    fun calls_broken(self) -> int {\n        return self.broken()\n    }\n}\n\n"
+                         "pub fun broken_fn() -> int {\n    return \"no\"\n}\n")
+        path = self.write("lazy_ok.my", "fun main() {\n    print(21.doubled())\n}\n")
+        proc = self.myla_cmd("run", path, lib=lib)
+        self.assertEqual((proc.stdout, proc.stderr, proc.returncode), ("42\n", "", 0))
+        int_my = os.path.join(lib, "std", "int.my")
+        for n, body in enumerate(["print(1.broken())", "print(2.calls_broken())",
+                                  "print(i.broken_fn())", "let f = i.broken_fn\n    print(f())"]):
+            path = self.write(f"lazy_{n}.my", f"import std.int as i\n\nfun main() {{\n    {body}\n}}\n")
+            proc = self.myla_cmd("check", path, lib=lib)
+            self.assertEqual(proc.returncode, 1, body)
+            self.assertIn("type error: return type mismatch", proc.stderr, body)
+            self.assertIn("--> " + int_my + ":", proc.stderr, body)
+
     def test_the_repl(self) -> None:
         proc = self.myla_cmd("repl", stdin="\"ab\".shout()\n3.doubled()\n")
         self.assertEqual(proc.stdout, "\"ab!\"\n6\n", proc.stderr)

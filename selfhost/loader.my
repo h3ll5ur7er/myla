@@ -1711,6 +1711,9 @@ pub fun load_program_opts(entry: str, opts: LoadOptions) -> Result<Loaded, Repor
         let tested = m.path == ld.entry
         for d in m.decls {
             if in_std && is_impl(d) { std_impls[d.id] = DeclOrigin { module: dotted_id(m.id), path: m.path, implicit: is_implicit } }
+            // an implicit module's functions too: the checker checks their
+            // bodies only once called (MYLA-359)
+            if is_implicit && is_fun(d) { std_impls[d.id] = DeclOrigin { module: dotted_id(m.id), path: m.path, implicit: true } }
             if entry_std != "" && tested && is_fun(d) { std_impls[d.id] = DeclOrigin { module: entry_std, path: m.path, implicit: false } }
             decls.push(r.decl(d, m.id))
         }
