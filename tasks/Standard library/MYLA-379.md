@@ -54,6 +54,6 @@ Built on `eaa905d`; commits `d81384a`, `cdb47b1`, `491ed47`, `81fc9d0`, `d6ca91e
 
 ## Found on the way
 
-- [[MYLA-399]]: a list literal's element type isn't taken from its later elements (`[Either.Left(1), Either.Right("a")]`).
+- [[MYLA-401]]: a list literal's element type isn't taken from its later elements (`[Either.Left(1), Either.Right("a")]`).
 - [[MYLA-400]]: std.map's and std.args's Option helpers wait for the seed.
 - Fixed here: a written generic impl's bounds weren't checked at an operator (`Box<NoEq> == …` compiled), and a written generic `eq` inside a tuple, a list or a derived struct didn't link natively.

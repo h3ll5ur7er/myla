@@ -1,5 +1,5 @@
 ---
-id: MYLA-399
+id: MYLA-401
 title: "A list literal's element type isn't taken from its later elements"
 type: improvement
 status: backlog
