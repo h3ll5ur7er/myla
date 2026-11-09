@@ -55,3 +55,7 @@ Built on `3499093`.
 ## Found on the way
 
 - Nothing new to file.
+
+## Comments
+
+- 2026-11-09: the owner recorded the scope as D176 and kept the derive in std.toml (only programs that import it pay its check time); the proposals stand as built.
