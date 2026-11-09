@@ -29,6 +29,10 @@
 from .fs import IoError, from_errno, read_to_string
 from .io import Read, Write
 import .fmt as fmt
+import .bytes as bytes_m // `from_str`, `to_str`
+import .str as str_m // `find`, `find_from`, `contains`, `to_lower`
+import .list as list_m // `contains`
+import .option as option_m // `unwrap_or`, `is_some`
 
 // --- addresses ---------------------------------------------------------------------
 
@@ -300,7 +304,7 @@ pub fun parse_addr(s: str) -> Result<SocketAddr, AddrParseError> {
     var host = ""
     var port_text = ""
     if s[0] == '[' {
-        let close = find_byte(s, ']', 0)
+        let close = s.find("]").unwrap_or(-1)
         if close < 0 {
             return Err(AddrParseError.InvalidIp)
         }
@@ -318,14 +322,14 @@ pub fun parse_addr(s: str) -> Result<SocketAddr, AddrParseError> {
         }
         return Ok(SocketAddr { ip: ip, port: parse_port(port_text)? })
     }
-    let colon = find_byte(s, ':', 0)
+    let colon = s.find(":").unwrap_or(-1)
     if colon < 0 {
         return match parse_ip(s) {
             Ok(_) => Err(AddrParseError.MissingPort)
             Err(e) => Err(e)
         }
     }
-    if find_byte(s, ':', colon + 1) >= 0 {
+    if s.find_from(":", colon + 1).is_some() {
         // an IPv6 address without brackets: no port can be told apart
         return match parse_ip(s) {
             Ok(_) => Err(AddrParseError.MissingPort)
@@ -473,12 +477,12 @@ fun groups(s: str, last: bool) -> Option<[int]> {
     }
     var start = 0
     while true {
-        var end = find_byte(s, ':', start)
+        var end = s.find_from(":", start).unwrap_or(-1)
         if end < 0 {
             end = s.len()
         }
         let part = s[start:end]
-        if end == s.len() && last && find_byte(part, '.', 0) >= 0 {
+        if end == s.len() && last && part.contains(".") {
             let b = v4_bytes(part)?
             out.push((b[0] as int) * 256 + (b[1] as int))
             out.push((b[2] as int) * 256 + (b[3] as int))
@@ -546,18 +550,6 @@ fun parse_port(s: str) -> Result<int, AddrParseError> {
     return Ok(v)
 }
 
-// The first offset of the byte `c` in `s` from `start` on, or -1.
-fun find_byte(s: str, c: uint8, start: int) -> int {
-    var i = start
-    while i < s.len() {
-        if s[i] == c {
-            return i
-        }
-        i += 1
-    }
-    return -1
-}
-
 // The offset of the first `::` in `s`, or -1.
 #test("1::2")[1]
 #test("1:2")[-1]
@@ -591,7 +583,7 @@ fun record_bytes(a: SocketAddr) -> [uint8] {
 }
 
 fun record(a: SocketAddr) -> str {
-    return text_of(record_bytes(a))
+    return bytes_m.to_str(record_bytes(a))
 }
 
 // The address of the record at `at` in `r`, if there is one.
@@ -729,26 +721,6 @@ fun set_option(h: int, opt: int, on: bool) -> Result<(), IoError> {
         return Err(last_error())
     }
     return Ok(())
-}
-
-// The bytes of `s`.
-fun bytes_of(s: str) -> [uint8] {
-    var out: [uint8] = []
-    var i = 0
-    while i < s.len() {
-        out.push(s[i])
-        i += 1
-    }
-    return out
-}
-
-// The bytes `b` as a string.
-fun text_of(b: [uint8]) -> str {
-    var sb = StringBuilder()
-    for x in b {
-        sb.append_byte(x)
-    }
-    return sb.build()
 }
 
 // --- TCP -----------------------------------------------------------------------
@@ -937,7 +909,7 @@ impl Read for TcpStream {
     // stream.
     fun read(var self, n: int) -> Result<[uint8], IoError> {
         let s = self.read_str(n)?
-        return Ok(bytes_of(s))
+        return Ok(bytes_m.from_str(s))
     }
 
     fun read_str(var self, n: int) -> Result<str, IoError> {
@@ -961,7 +933,7 @@ impl Read for TcpStream {
 
 impl Write for TcpStream {
     fun write(var self, b: [uint8]) -> Result<int, IoError> {
-        return self.write_str(text_of(b))
+        return self.write_str(bytes_m.to_str(b))
     }
 
     // Every byte of `s` sent, waiting while the socket's buffer is full (as
@@ -994,7 +966,7 @@ impl TcpStream {
     // `read`, the task waiting for the bytes.
     async fun read_async(var self, n: int) -> Result<[uint8], IoError> {
         let s = await self.read_str_async(n)
-        return Ok(bytes_of(s?))
+        return Ok(bytes_m.from_str(s?))
     }
 
     // `read_str`, the task waiting for the bytes.
@@ -1021,7 +993,7 @@ impl TcpStream {
 
     // `write`, the task waiting while the socket's buffer is full.
     async fun write_async(var self, b: [uint8]) -> Result<int, IoError> {
-        return await self.write_str_async(text_of(b))
+        return await self.write_str_async(bytes_m.to_str(b))
     }
 
     // `write_str`, the task waiting while the socket's buffer is full.
@@ -1132,7 +1104,7 @@ fun tail_of(s: str, start: int) -> str {
 impl UdpSocket {
     // `b` sent to `to` as one datagram: its length.
     fun send_to(self, b: [uint8], to: SocketAddr) -> Result<int, IoError> {
-        return self.send_str_to(text_of(b), to)
+        return self.send_str_to(bytes_m.to_str(b), to)
     }
 
     fun send_str_to(self, s: str, to: SocketAddr) -> Result<int, IoError> {
@@ -1155,7 +1127,7 @@ impl UdpSocket {
     // sender; waiting as long as `set_read_timeout` allows.
     fun recv_from(self, n: int) -> Result<([uint8], SocketAddr), IoError> {
         let (s, a) = self.recv_str_from(n)?
-        return Ok((bytes_of(s), a))
+        return Ok((bytes_m.from_str(s), a))
     }
 
     fun recv_str_from(self, n: int) -> Result<(str, SocketAddr), IoError> {
@@ -1177,7 +1149,7 @@ impl UdpSocket {
     async fun recv_from_async(self, n: int) -> Result<([uint8], SocketAddr), IoError> {
         let got = await self.recv_str_from_async(n)
         let (s, a) = got?
-        return Ok((bytes_of(s), a))
+        return Ok((bytes_m.from_str(s), a))
     }
 
     async fun recv_str_from_async(self, n: int) -> Result<(str, SocketAddr), IoError> {
@@ -1361,7 +1333,7 @@ impl Resolver {
 #test("10.0.0.7 db\n", "web")[[]]
 pub fun hosts_lookup(text: str, name: str) -> [IpAddr] {
     var out: [IpAddr] = []
-    let want = lower(name)
+    let want = name.to_lower()
     for line in lines(text) {
         let f = fields(line)
         if f.len() < 2 {
@@ -1371,7 +1343,7 @@ pub fun hosts_lookup(text: str, name: str) -> [IpAddr] {
             Ok(ip) => {
                 var i = 1
                 while i < f.len() {
-                    if lower(f[i]) == want && !has_ip(out, ip) {
+                    if f[i].to_lower() == want && !out.contains(ip) {
                         out.push(ip)
                     }
                     i += 1
@@ -1401,15 +1373,6 @@ pub fun nameservers(text: str) -> [SocketAddr] {
     return out
 }
 
-fun has_ip(xs: [IpAddr], ip: IpAddr) -> bool {
-    for x in xs {
-        if x == ip {
-            return true
-        }
-    }
-    return false
-}
-
 // The lines of `text`, a comment (`#` on) and a `\r` taken off each.
 fun lines(text: str) -> [str] {
     var out: [str] = []
@@ -1418,7 +1381,7 @@ fun lines(text: str) -> [str] {
     while i <= text.len() {
         if i == text.len() || text[i] == '\n' {
             var end = i
-            let hash = find_byte(text[start:end], '#', 0)
+            let hash = text[start:end].find("#").unwrap_or(-1)
             if hash >= 0 {
                 end = start + hash
             }
@@ -1452,23 +1415,6 @@ fun fields(line: str) -> [str] {
     return out
 }
 
-// `s` with ASCII's capital letters made small.
-#test("Db.Example")["db.example"]
-fun lower(s: str) -> str {
-    var sb = StringBuilder()
-    var i = 0
-    while i < s.len() {
-        let c = s[i]
-        if c >= 'A' && c <= 'Z' {
-            sb.append_byte(c + 32)
-        } else {
-            sb.append_byte(c)
-        }
-        i += 1
-    }
-    return sb.build()
-}
-
 // --- DNS messages (RFC 1035) ---------------------------------------------------
 
 // `name` in DNS's wire form: each label (1 to 63 bytes) after its length,
@@ -1485,7 +1431,7 @@ fun dns_name(name: str) -> Result<str, IoError> {
     var sb = StringBuilder()
     var start = 0
     while start <= n.len() {
-        var end = find_byte(n, '.', start)
+        var end = n.find_from(".", start).unwrap_or(-1)
         if end < 0 {
             end = n.len()
         }
