@@ -5794,6 +5794,79 @@ async fun main() {
     print(vs[0] + vs[1] + vs[2])
 }
 """,
+    # MYLA-392: an `await` in a `match` that ends an arm of a `match`
+    # statement. The async split took the inner `match` for the arm's value
+    # and bound the void `await` to a temporary, which native code couldn't
+    # lower ("a function used as a value")
+    "await_in_a_nested_match": """import std.task as task
+
+enum Cause { Stop, Code(int) }
+
+async fun worker(r: Result<int, Cause>) -> int {
+    match r {
+        Ok(n) => { return n }
+        Err(e) => {
+            match e {
+                Stop => {}
+                Code(code) => {
+                    print(code)
+                    await task.sleep(1)
+                }
+            }
+        }
+    }
+    return 0
+}
+
+async fun twice(n: int) -> int {
+    await task.yield()
+    return 2 * n
+}
+
+// three deep, the innermost arm's value an awaited call, and a match as a
+// value whose arm ends in a nested match statement
+async fun deeper(r: Result<Option<int>, str>) -> int {
+    var got = 0
+    match r {
+        Ok(o) => match o {
+            Some(n) => {
+                match n > 10 {
+                    true => { got = await twice(n) }
+                    false => await task.sleep(0)
+                }
+            }
+            None => { got = -1 }
+        }
+        Err(s) => {
+            let k = match s.len() {
+                0 => 0
+                n => {
+                    match n {
+                        1 => await task.yield()
+                        _ => { print(s) }
+                    }
+                    await twice(n)
+                }
+            }
+            got = k
+        }
+    }
+    return got
+}
+
+#main
+async fun main() {
+    print(await worker(Err(Cause.Code(24))))
+    print(await worker(Err(Cause.Stop)))
+    print(await worker(Ok(7)))
+    print(await deeper(Ok(Some(21))))
+    print(await deeper(Ok(Some(3))))
+    print(await deeper(Ok(None)))
+    print(await deeper(Err("abc")))
+    print(await deeper(Err("z")))
+    print(await deeper(Err("")))
+}
+""",
 }
 
 # A program that allocates far more recursive-enum cells (~12M) than the heap
@@ -7099,6 +7172,8 @@ PINNED = {
     "generic_actor_in_generic_code": "2\n1\nright left\n2\n32\nhello\n100\n2\n9\n1\n3\none\n5\n",
     "generic_actor_bounds_and_children": "10\n51\nxyy\n13\n<1>\n6\n102\n",
     "generic_actors_nested": "c\n2\n3\n6\n",
+    # MYLA-392: new; native code couldn't lower it ("a function used as a value")
+    "await_in_a_nested_match": "24\n0\n0\n7\n42\n0\n-1\nabc\n6\n2\n0\n",
 }
 
 
