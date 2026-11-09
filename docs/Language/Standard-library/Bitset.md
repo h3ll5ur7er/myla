@@ -1,6 +1,6 @@
 # std.bitset
 
-`BitSet`, a set of small non-negative integers that takes a bit for each ([[MYLA-342]]). The integer `i` is bit `i % 64` of the word `i / 64`, a `uint64`, so a set of the integers below n takes n / 8 bytes and the set operations work 64 integers at a time. A set is growable, making room for whatever is inserted, or fixed, holding 0 to n - 1. The module imports nothing.
+`BitSet`, a set of small non-negative integers that takes a bit for each ([[MYLA-342]]). The integer `i` is bit `i % 64` of the word `i / 64`, a `uint64`, so a set of the integers below n takes n / 8 bytes and the set operations work 64 integers at a time. A set is growable, making room for whatever is inserted, or fixed, holding 0 to n - 1. It counts a word's bits with std.int's `count_ones`, `leading_zeros` and `trailing_zeros` ([[MYLA-376]]).
 
 ```myla
 import std.bitset as bitset
@@ -105,7 +105,7 @@ A `BitSet` has `#derive(Eq, Hash)`, so it is compared with `==`, is a map key an
 - two fixed sets are equal when they have the same size too;
 - a fixed set never equals a growable one: compare `items()` across kinds.
 
-A written `impl Hash` that skipped the zero words would have let any two sets of the same integers be equal, but it needs `std.hash`'s `Hasher` methods, and a `std` module that imports `std.hash` can't run its cases natively yet ([[MYLA-360]]).
+A written `impl Hash` that skipped the zero words would have let any two sets of the same integers be equal; the one form per set lets the derived `Eq` and `Hash` say the same without one.
 
 ## Speed
 
@@ -117,4 +117,4 @@ Measured natively on x86-64, best of five runs:
 | The same with a `[bool]` | 81 ms |
 | `union`, `intersection` and their `popcount`s, of two sets of a million bits, 100 times | 11 ms |
 
-A `[bool]` is faster for one bit at a time, where each `BitSet` call checks its bounds; the bit set takes a bit per integer (1.25 MB for 10 million) and does the set operations a word at a time. The counting is a SWAR popcount; Myla has no `count_ones` on integers yet.
+A `[bool]` is faster for one bit at a time, where each `BitSet` call checks its bounds; the bit set takes a bit per integer (1.25 MB for 10 million) and does the set operations a word at a time. The counting is std.int's `count_ones`, a SWAR popcount.

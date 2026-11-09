@@ -320,7 +320,28 @@ def cases_for(w: Width, method: str) -> list[str]:
                 expected = f"Some({pow(a % m, -1, m) if m > 1 else 0})"
             out.append(case(w, [a, m], expected, label2(w, a, "mod", m)))
         return out
+    if method in ("count_ones", "leading_zeros", "trailing_zeros"):
+        out = []
+        for v in bit_values(w):
+            u = v & ((1 << w.bits) - 1)
+            if method == "count_ones":
+                r = bin(u).count("1")
+            elif method == "leading_zeros":
+                r = w.bits - u.bit_length()
+            else:
+                r = w.bits if u == 0 else (u & -u).bit_length() - 1
+            out.append(case(w, [v], str(r), named(w, v)))
+        return out
     raise KeyError(method)
+
+
+def bit_values(w: Width) -> list[int]:
+    """The receivers of the bit methods' cases: the ends, single bits, a pattern."""
+    out = []
+    for v in [0, 1, 2, 0x50, 1 << (w.bits - 2), w.max, w.min, -1, w.max - 1, 0x5555 & w.max]:
+        if w.fits(v) and v not in out:
+            out.append(v)
+    return out
 
 
 def label3(w: Width, a: int, b: int, m: int) -> str:
@@ -398,6 +419,42 @@ def methods(w: Width) -> list[tuple[str, str, str]]:
                    f"fun div_euclid(self, other: {T}) -> {T} {{\n    return self / other\n}}")
         add_method("rem_euclid", "The remainder of Euclidean division; for an unsigned number `%`.",
                    f"fun rem_euclid(self, other: {T}) -> {T} {{\n    return self % other\n}}")
+
+    # bits: computed on the bits as a uint64, a negative number's two's
+    # complement cut to the width
+    if T == "uint64":
+        bits64 = "self"
+    elif S and narrow:
+        bits64 = f"(self as uint64) & 0x{(1 << w.bits) - 1:X}"
+    else:
+        bits64 = "self as uint64"
+    neg_note = " (a negative number's are its two's complement's)" if S else ""
+    swar = ("    // SWAR: the counts of each 2, 4 and 8 bits side by side, then the\n"
+            "    // bytes' added up by a multiplication into the top byte.\n"
+            "    var x = v - ((v >> 1) & 0x5555555555555555)\n"
+            "    x = (x & 0x3333333333333333) + ((x >> 2) & 0x3333333333333333)\n"
+            "    x = (x + (x >> 4)) & 0x0F0F0F0F0F0F0F0F\n"
+            "    return ((x * 0x0101010101010101) >> 56) as int\n}")
+    add_method("count_ones", f"The number of bits set{neg_note}.",
+               f"fun count_ones(self) -> int {{\n"
+               f"    let v: uint64 = {bits64}\n" + swar)
+    steps = "".join(f"    if x >> {s} != 0 {{\n        n -= {s}\n        x = x >> {s}\n    }}\n"
+                    for s in (32, 16, 8, 4, 2) if s < w.bits)
+    add_method("leading_zeros", f"The number of zero bits above the highest one set: {w.bits} for 0" +
+               (", 0 for a\nnegative number." if S else "."),
+               f"fun leading_zeros(self) -> int {{\n"
+               f"    var x: uint64 = {bits64}\n"
+               f"    if x == 0 {{\n        return {w.bits}\n    }}\n"
+               f"    var n = {w.bits - 1}\n" + steps +
+               f"    if x >> 1 != 0 {{\n        n -= 1\n    }}\n"
+               f"    return n\n}}")
+    mask = f" & 0x{(1 << w.bits) - 1:X}" if narrow else ""
+    add_method("trailing_zeros", f"The number of zero bits below the lowest one set: {w.bits} for 0.",
+               f"fun trailing_zeros(self) -> int {{\n"
+               f"    let b: uint64 = {bits64}\n"
+               f"    // the bits below the lowest one set (all of them for 0), counted as\n"
+               f"    // `count_ones` counts them: written out, as a method isn't inlined\n"
+               f"    let v = ((b & (0 - b)) - 1){mask}\n" + swar)
 
     # checked
     for op, sym in (("add", "+"), ("sub", "-"), ("mul", "*")):
@@ -575,6 +632,7 @@ HEADER = """\
 //
 // - `abs` and `signum` (signed widths), `min`, `max`, `clamp`, `pow`, `gcd`,
 //   `lcm`, `div_euclid` and `rem_euclid` (never negative);
+// - `count_ones`, `leading_zeros` and `trailing_zeros`, of the bits;
 // - `checked_*` (an `Option`), `wrapping_*`, `saturating_*` and
 //   `overflowing_*` (the result and whether it overflowed) of add, sub, mul and
 //   pow, `checked_div`, `checked_rem`, `checked_neg`, `checked_abs`,
