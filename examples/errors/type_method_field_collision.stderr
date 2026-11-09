@@ -1,0 +1,6 @@
+type error: method 'f' has the name of a field of 'P' that holds a function: a call '.f(…)' would mean either
+  --> examples/errors/type_method_field_collision.my:8:5
+  |
+8 |     fun f(self, n: int) -> int { return n }
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+help: rename the method or the field; a field that holds no function may share a method's name

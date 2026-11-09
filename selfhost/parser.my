@@ -736,11 +736,11 @@ impl Parser {
             var bounds: [str] = []
             var bound_args: [[TypeExpr]] = []
             if self.match1(TokenKind.COLON) {
-                bounds.push(self.expect(TokenKind.IDENT, "trait name in type-parameter bound").lexeme)
+                bounds.push(self.bound_name("trait name in type-parameter bound"))
                 // a generic trait's arguments, `I: Iterator<T>` (D171)
                 bound_args.push(self.type_args())
                 while self.match1(TokenKind.PLUS) {
-                    bounds.push(self.expect(TokenKind.IDENT, "trait name after '+'").lexeme)
+                    bounds.push(self.bound_name("trait name after '+'"))
                     bound_args.push(self.type_args())
                 }
             }
@@ -754,6 +754,21 @@ impl Parser {
             self.fail_at(self.peek(), "empty type-parameter list")    // unreachable: a name is expected first
         }
         return params
+    }
+
+    // A bound's trait: a name, or a module's trait by the module's name,
+    // `json.ToJson`, as a type names a module's type (MYLA-398, D170), which
+    // the loader resolves.
+    #test(parser_on("Show"), "trait name")["Show"]
+    #test(parser_on("json.ToJson<T>"), "trait name")["json.ToJson"]
+    #test(parser_on("a.b.Show + Eq"), "trait name")["a.b.Show"]
+    fun bound_name(var self, what: str) -> str {
+        var name = self.expect(TokenKind.IDENT, what).lexeme
+        while self.check(TokenKind.DOT) && self.peek_kind_at(1) == TokenKind.IDENT {
+            self.skip()
+            name = name + "." + self.advance().lexeme
+        }
+        return name
     }
 
     #test(parser_on("[int]"), "a trait")[[]]

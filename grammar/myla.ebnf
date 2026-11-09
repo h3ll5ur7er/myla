@@ -92,7 +92,7 @@ fun_decl     = "async"? "fun" IDENT generics? "(" NL* ( param NL* ( "," NL* para
 param        = IDENT ":" type ( "=" expression )? ;   (* a default: D136 *)
 generics     = "<" generic ( "," generic )* ","? ">" ;
 generic      = IDENT ( ":" trait_bound ( "+" trait_bound )* )? ;
-trait_bound  = IDENT type_args? ;   (* a generic trait with its arguments, I: Iterator<T>: D171 *)
+trait_bound  = IDENT ( "." IDENT )* type_args? ;   (* I: Iterator<T>, a generic trait with its arguments: D171; m.Trait, a module's: MYLA-398 *)
 type_params  = "<" IDENT ( "," IDENT )* ","? ">" ;
 
 impl_decl    = "impl" generics? ( type | named_type "for" type ) "{" SEP* ( method SEP* )* "}" ;

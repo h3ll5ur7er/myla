@@ -1,0 +1,5 @@
+module error: module 'std.json' does not export a trait 'ToText' (declarations are private unless marked 'pub')
+  --> examples/errors/module_bound_not_exported.my:6:10
+  |
+6 | fun show<T: Eq + json.ToText>(v: T) -> int {
+  |          ^^^^^^^^^^^^^^^^^^^

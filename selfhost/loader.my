@@ -507,6 +507,14 @@ fun is_type_kind(kind: str) -> bool {
     return kind == "struct" || kind == "actor" || kind == "enum" || kind == "type alias"
 }
 
+// A kind of declaration with its article, for messages: `an enum`.
+#test("enum")["an enum"]
+#test("function")["a function"]
+fun with_article(kind: str) -> str {
+    if kind.len() > 0 && (kind[0] == 'a' || kind[0] == 'e' || kind[0] == 'i' || kind[0] == 'o' || kind[0] == 'u') { return "an " + kind }
+    return "a " + kind
+}
+
 fun is_impl(d: Decl) -> bool {
     return match d.kind {
         DeclKind.ImplDecl(t, ms, tps, tn, ta, attrs) => true,
@@ -1099,7 +1107,11 @@ impl Renamer {
         var out: [TypeParam] = []
         for tp in tps {
             var bs: [str] = []
-            for b in tp.bounds { bs.push(self.type_name(b)) }
+            for b in tp.bounds {
+                // `T: json.ToJson`, a module's trait (MYLA-398), reported at
+                // its type parameter: a bound keeps no position of its own
+                if contains_byte(b, '.') { bs.push(self.module_type(b, TypeExpr { id: -1, line: tp.line, col: tp.col, sp: tp.sp, kind: TypeKind.TRef(b, []) }, false)) } else { bs.push(self.type_name(b)) }
+            }
             // a generic trait's arguments are types (D171)
             var bargs: [[TypeExpr]] = []
             for a in tp.bound_args { bargs.push(self.ty_list(a)) }
@@ -1228,7 +1240,8 @@ impl Renamer {
             }
         }
         if mid == "" {
-            self.fail(t.line, t.col, t.sp, format("unknown module '{}' in the type '{}': a type of another module is named through its 'import … as {}'", parts[0], n, parts[0]))
+            let kind = if want_type { "type" } else { "trait" }
+            self.fail(t.line, t.col, t.sp, format("unknown module '{}' in the {} '{}': a {} of another module is named through its 'import … as {}'", parts[0], kind, n, kind, parts[0]))
             return n
         }
         while k < parts.len() {
@@ -1249,7 +1262,7 @@ impl Renamer {
                         let fits = if want_type { is_type_kind(kind) } else { kind == "trait" }
                         if !last || !fits {
                             let what = if want_type { "a type" } else { "a trait" }
-                            self.fail(t.line, t.col, t.sp, format("'{}' is a {} of module '{}', not {}", join(parts[:k + 1], "."), kind, dotted_id(mid), what))
+                            self.fail(t.line, t.col, t.sp, format("'{}' is {} of module '{}', not {}", join(parts[:k + 1], "."), with_article(kind), dotted_id(mid), what))
                             return n
                         }
                         return b.value

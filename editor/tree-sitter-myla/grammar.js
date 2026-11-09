@@ -43,7 +43,7 @@ module.exports = grammar({
     param: $ => seq($.identifier, ':', $._type, optional(seq('=', $._expression))),
     generics: $ => seq('<', $.generic, repeat(seq(',', $.generic)), optional(','), '>'),
     generic: $ => seq($.identifier, optional(seq(':', $.trait_bound, repeat(seq('+', $.trait_bound))))),
-    trait_bound: $ => seq($.identifier, optional($.type_args)),
+    trait_bound: $ => seq($.identifier, repeat(seq('.', $.identifier)), optional($.type_args)),
     type_params: $ => seq('<', $.identifier, repeat(seq(',', $.identifier)), optional(','), '>'),
     impl_decl: $ => seq('impl', optional($.generics), choice($._type, seq($.named_type, 'for', $._type)), '{', optional($._sep_rep), repeat(seq($.method, optional($._sep_rep))), '}'),
     method: $ => seq(optional($._attribute_rep), $.method_head, $.block),

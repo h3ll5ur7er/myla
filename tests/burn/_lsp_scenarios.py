@@ -443,6 +443,15 @@ class LspRequestScenarios(LspRequestHelpers):
         self.assertEqual(hover(1, 12), "```myla\nB(int)\n```")
         self.assertIsNone(hover(4, 6))                     # `return`
 
+    def test_a_field_and_a_method_of_one_name(self):
+        # MYLA-406: `c.keys` is the field, `c.keys()` the method
+        uri = self.open("struct C { keys: [int] }\nimpl C {\n    fun keys(self) -> [int] {\n        return self.keys\n    }\n}\n"
+                        "fun main() {\n    let c = C { keys: [1] }\n    print(c.keys.len())\n    print(c.keys().len())\n}\n")
+        self.assertEqual(self.at("textDocument/definition", uri, 8, 13), {"uri": uri, "range": rng(0, 11, 15)})
+        self.assertEqual(self.at("textDocument/definition", uri, 9, 13), {"uri": uri, "range": rng(2, 8, 12)})
+        self.assertEqual(self.at("textDocument/hover", uri, 3, 22)["contents"]["value"], "```myla\nkeys: [int]\n```")
+        self.assertEqual(self.at("textDocument/hover", uri, 9, 13)["contents"]["value"], "```myla\nfun keys(self) -> [int]\n```")
+
     def test_a_bound_with_type_arguments_and_a_loop_over_an_iterator(self):
         # D171: a bound naming a generic trait with its arguments, and the
         # variable of a `for` over an iterator, typed by its `next`
