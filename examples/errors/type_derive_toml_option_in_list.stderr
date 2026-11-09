@@ -1,0 +1,5 @@
+type error: cannot derive Toml for struct 'Row': field 'cells' has type '[Option<int32>]', which isn't ToToml and FromToml (TOML has no null: an 'Option' can only be a struct's field, left out when 'None')
+  --> examples/errors/type_derive_toml_option_in_list.my:7:1
+  |
+7 | struct Row {
+  | ^^^^^^^^^^^^

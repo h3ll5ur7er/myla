@@ -1,0 +1,5 @@
+type error: type 'Point' both derives Toml and has an explicit 'impl FromToml for Point'
+  --> examples/errors/type_derive_toml_and_impl.my:7:1
+  |
+7 | struct Point {
+  | ^^^^^^^^^^^^^^

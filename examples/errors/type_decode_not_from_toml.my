@@ -1,0 +1,16 @@
+//~ type error: type 'Point' does not satisfy the bound 'T: FromToml' required by 'decode'
+//~ help: '#derive(Toml)' on 'Point' gives it 'ToToml' and 'FromToml' (D172)
+// `toml.decode<T>` needs `T: FromToml`; the help names the derive (MYLA-407).
+import std.toml as toml
+
+struct Point {
+    x: int,
+    y: int,
+}
+
+fun main() {
+    match toml.decode<Point>("x = 1\ny = 2") {
+        Ok(p) => print(p.x)
+        Err(e) => print(f"{e}")
+    }
+}

@@ -663,6 +663,426 @@ fun main() {
     print(f"{mine}")
 }
 """,
+    # MYLA-407: `#derive(Toml)` on structs: nested, lists, maps, arrays of tables, `Option` fields, dates, the built-in types, round trips
+    "toml_derive_structs": r"""// MYLA-407: `#derive(Toml)` on structs: nested structs, lists, maps, arrays
+// of tables, an `Option` field absent and present, dates and times, the
+// built-in types, round trips through the document's text
+import std.toml as toml
+from std.toml import Toml, TomlError, TomlDate, TomlDateTime, ToToml
+
+#derive(Toml, Eq)
+struct Point {
+    x: int,
+    y: int,
+}
+
+#derive(Toml)
+struct Server {
+    name: str,
+    at: Point,
+    ports: [uint16],
+    labels: [str: str],
+    backup: Option<str>,
+}
+
+#derive(Toml)
+struct Config {
+    title: str,
+    version: int64,
+    ratio: float64,
+    enabled: bool,
+    letter: char,
+    created: TomlDateTime,
+    day: TomlDate,
+    servers: [Server],
+    owner: Option<Point>,
+    tags: [str: [int8]],
+}
+
+#derive(Toml)
+struct Scalars {
+    small: int8,
+    byte: uint8,
+    wide: int64,
+    huge: uint64,
+    single: float32,
+    limit: float64,
+    raw: Toml,
+}
+
+#derive(Toml, Eq)
+struct Empty {}
+
+fun show(r: Result<str, TomlError>) {
+    match r {
+        Ok(t) => { print(t) },
+        Err(e) => { print(f"{e}") },
+    }
+}
+
+fun main() {
+    let text = "title = \"demo\"\nversion = 3\nratio = 0.5\nenabled = true\nletter = 'é'\ncreated = 1979-05-27T07:32:00-08:00\nday = 2024-02-29\nowner = { x = 1, y = 2 }\n\n[[servers]]\nname = \"alpha\"\nat = { x = 10, y = 20 }\nports = [80, 443]\nlabels = { env = \"prod\", \"a b\" = \"c\" }\n\n[[servers]]\nname = \"beta\"\nat.x = 0\nat.y = -1\nports = []\nlabels = {}\nbackup = \"alpha\"\nextra = [true]\n\n[tags]\na = [1, -2]\n"
+    match toml.decode<Config>(text) {
+        Ok(c) => {
+            print(f"{c.title} {c.version} {c.ratio} {c.enabled} {c.letter}")
+            print(c.created.offset == Some(-480))
+            print(c.day.year * 10000 + c.day.month * 100 + c.day.day)
+            print(c.servers.len())
+            print(c.servers[0].backup == None)
+            print(c.servers[1].backup == Some("alpha"))
+            print(c.servers[1].at == Point { x: 0, y: -1 })
+            print(c.servers[0].labels["a b"])
+            match c.owner {
+                Some(p) => { print(p.x + p.y) },
+                None => { print("no owner") },
+            }
+            let written = toml.encode(c)
+            show(written)
+            match written {
+                Ok(t) => {
+                    match toml.decode<Config>(t) {
+                        Ok(d) => { print(toml.encode(d) == written) },
+                        Err(e) => { print(f"{e}") },
+                    }
+                },
+                Err(e) => {},
+            }
+        },
+        Err(e) => { print(f"{e}") },
+    }
+    let s = Scalars { small: -128, byte: 255, wide: -9000000000, huge: 9223372036854775808u64, single: 0.1f32, limit: -1.0 / 0.0, raw: Toml.Array([Toml.Int(1), Toml.Str("x")]) }
+    let st = toml.encode(s)
+    show(st)
+    match st {
+        Ok(t) => {
+            match toml.decode<Scalars>(t) {
+                Ok(b) => { print(f"{b.small} {b.byte} {b.wide} {b.huge} {b.single} {b.limit} {toml.inline_string(b.raw)}") },
+                Err(e) => { print(f"{e}") },
+            }
+        },
+        Err(e) => {},
+    }
+    // beyond int64, a uint64 is the nearest float, read back only if exact
+    print(toml.inline_string(18446744073709551615u64.to_toml()))
+    show(toml.encode(Empty {}))
+    print(toml.decode<Empty>("") == Ok(Empty {}))
+    // keys the type hasn't are ignored
+    print(toml.decode<Point>("x = 1\ny = 2\nz = [true]") == Ok(Point { x: 1, y: 2 }))
+    // a map of derived values
+    let ps: [str: Point] = ["a": Point { x: 1, y: 2 }, "b c": Point { x: 3, y: 4 }]
+    show(toml.encode(ps))
+}
+""",
+    # MYLA-407: `#derive(Toml)` on enums, externally tagged; a variant with a payload is a document, one without isn't
+    "toml_derive_enums": r"""// MYLA-407: `#derive(Toml)` on enums, externally tagged as `#derive(Json)`
+// is: `"Red"` for a variant without payload, `{ Dot = x }` for one with
+// one, `{ Line = [a, b, c] }` for one with more; a variant with a payload is
+// a table, so a document of its own, one without isn't
+import std.toml as toml
+from std.toml import Toml, TomlError, ToToml
+
+#derive(Toml, Eq)
+enum Color {
+    Red,
+    Green,
+    Blue,
+}
+
+#derive(Toml, Eq)
+struct Point {
+    x: int,
+    y: int,
+}
+
+#derive(Toml, Eq)
+enum Shape {
+    Empty,
+    Dot(Point),
+    Circle(Point, float64),
+    Line(Point, Point, str),
+}
+
+#derive(Toml, Eq)
+struct Scene {
+    color: Color,
+    shapes: [Shape],
+    hidden: Option<Color>,
+}
+
+fun show(r: Result<str, TomlError>) {
+    match r {
+        Ok(t) => { print(t) },
+        Err(e) => { print(f"{e}") },
+    }
+}
+
+fun main() {
+    let shapes = [Shape.Empty, Shape.Dot(Point { x: 1, y: 2 }), Shape.Circle(Point { x: 0, y: 0 }, 1.5), Shape.Line(Point { x: 0, y: 0 }, Point { x: 3, y: 4 }, "edge")]
+    for s in shapes { print(toml.inline_string(s.to_toml())) }
+    let scene = Scene { color: Color.Green, shapes: shapes, hidden: Some(Color.Blue) }
+    let text = toml.encode(scene)
+    show(text)
+    match text {
+        Ok(t) => {
+            match toml.decode<Scene>(t) {
+                Ok(back) => { print(back == scene) },
+                Err(e) => { print(f"{e}") },
+            }
+        },
+        Err(e) => {},
+    }
+    show(toml.encode(Shape.Dot(Point { x: 5, y: 6 })))
+    show(toml.encode(Color.Red))
+    match toml.decode<Shape>("Line = [{ x = 1, y = 1 }, { x = 2, y = 2 }, \"d\"]") {
+        Ok(Shape.Line(a, b, label)) => { print(f"{b.x - a.x} {label}") },
+        Ok(other) => { print("another shape") },
+        Err(e) => { print(f"{e}") },
+    }
+    // written by hand: an integer where a float goes
+    match toml.decode<Scene>("color = \"Red\"\nshapes = [\"Empty\", { Circle = [{ x = 5, y = 6 }, 2] }]\n") {
+        Ok(s) => {
+            print(s.hidden == None)
+            print(toml.inline_string(s.shapes.to_toml()))
+        },
+        Err(e) => { print(f"{e}") },
+    }
+    print(toml.inline_string([Color.Blue, Color.Red].to_toml()))
+}
+""",
+    # MYLA-407: `#derive(Toml)` on generic types (bounded per parameter, MYLA-379) and recursive ones
+    "toml_derive_generic": r"""// MYLA-407: `#derive(Toml)` on generic structs and enums, bounded by
+// `T: ToToml` and `T: FromToml` (as MYLA-379 bounds Eq, Hash and Json), and
+// on recursive types
+import std.toml as toml
+from std.toml import Toml, TomlError, ToToml
+
+#derive(Toml, Eq)
+struct Page<T> {
+    items: [T],
+    next: Option<str>,
+}
+
+#derive(Toml, Eq)
+struct Point {
+    x: int,
+    y: int,
+}
+
+#derive(Toml, Eq)
+enum Tagged<A, B> {
+    Nothing,
+    One(A),
+    Two(A, B),
+}
+
+#derive(Toml, Eq)
+struct Tree {
+    label: str,
+    kids: [Tree],
+}
+
+#derive(Toml, Eq)
+enum Expr {
+    Num(int64),
+    Sum([Expr]),
+    Call(str, [Expr]),
+}
+
+fun eval(e: Expr) -> int64 {
+    return match e {
+        Num(n) => n
+        Sum(xs) => {
+            var t: int64 = 0
+            for x in xs { t += eval(x) }
+            t
+        }
+        Call(f, xs) => -eval(Expr.Sum(xs))
+    }
+}
+
+fun show(r: Result<str, TomlError>) {
+    match r {
+        Ok(t) => { print(t) },
+        Err(e) => { print(f"{e}") },
+    }
+}
+
+fun main() {
+    let p = Page { items: [Point { x: 1, y: 2 }, Point { x: 3, y: 4 }], next: Some("p2") }
+    let text = toml.encode(p)
+    show(text)
+    match text {
+        Ok(t) => {
+            let back: Result<Page<Point>, TomlError> = toml.decode<Page<Point>>(t)
+            match back {
+                Ok(q) => { print(q == p) },
+                Err(e) => { print(f"{e}") },
+            }
+        },
+        Err(e) => {},
+    }
+    show(toml.encode(Page { items: ["a", "b"], next: None }))
+    match toml.decode<Page<int>>("items = [\"x\"]") {
+        Ok(q) => { print(q.items.len()) },
+        Err(e) => { print(f"{e}") },
+    }
+    let ts: [Tagged<int, str>] = [Tagged.Nothing, Tagged.One(1), Tagged.Two(2, "b")]
+    print(toml.inline_string(ts.to_toml()))
+    let wrapped = Page { items: ts, next: None }
+    match toml.encode(wrapped) {
+        Ok(t) => {
+            match toml.decode<Page<Tagged<int, str>>>(t) {
+                Ok(b) => { print(b == wrapped) },
+                Err(e) => { print(f"{e}") },
+            }
+        },
+        Err(e) => { print(f"{e}") },
+    }
+    let tree = Tree { label: "root", kids: [Tree { label: "a", kids: [] }, Tree { label: "b", kids: [Tree { label: "c", kids: [] }] }] }
+    let tt = toml.encode(tree)
+    show(tt)
+    match tt {
+        Ok(t) => {
+            match toml.decode<Tree>(t) {
+                Ok(b) => { print(f"{b.kids[1].kids[0].label} {b == tree}") },
+                Err(e) => { print(f"{e}") },
+            }
+        },
+        Err(e) => {},
+    }
+    let e = Expr.Sum([Expr.Num(1), Expr.Call("neg", [Expr.Num(5)]), Expr.Num(2)])
+    print(toml.inline_string(e.to_toml()))
+    match toml.decode<Expr>(toml.to_string(e.to_toml())) {
+        Ok(b) => { print(f"{eval(b)} {b == e}") },
+        Err(err) => { print(f"{err}") },
+    }
+}
+""",
+    # MYLA-407: decoding errors with their paths, a syntax error's position, encoding a value that isn't a table, an impl by hand
+    "toml_derive_errors": r"""// MYLA-407: decoding errors carry their path, a syntax error its line and
+// column: a missing field, a wrong type, an integer out of range, a float
+// for an integer, an unknown variant, a payload of the wrong size, a variant
+// with or without the payload it hasn't, a quoted key, not a table; encoding
+// a value that isn't a table; an impl written by hand
+import std.toml as toml
+from std.toml import Toml, TomlError, TomlErrorKind, ToToml, FromToml
+
+#derive(Toml)
+enum Kind {
+    Plain,
+    Pair(int, int),
+    One(Item),
+}
+
+#derive(Toml)
+struct Item {
+    label: str,
+    level: int8,
+}
+
+#derive(Toml)
+struct Doc {
+    items: [Item],
+    kinds: [Kind],
+    extra: [str: uint8],
+    note: Option<Item>,
+}
+
+struct Celsius {
+    degrees: float64,
+}
+
+impl ToToml for Celsius {
+    fun to_toml(self) -> Toml {
+        return Toml.Str(f"{self.degrees}C")
+    }
+}
+
+impl FromToml for Celsius {
+    fun from_toml(t: Toml) -> Result<Celsius, TomlError> {
+        return match t {
+            Toml.Float(f) => Ok(Celsius { degrees: f })
+            _ => Err(toml.wrong_type("a temperature", t))
+        }
+    }
+}
+
+#derive(Toml)
+struct Weather {
+    at: Celsius,
+}
+
+fun kind_name(k: TomlErrorKind) -> str {
+    return match k {
+        Syntax => "syntax"
+        MissingField => "missing field"
+        WrongType => "wrong type"
+        OutOfRange => "out of range"
+        UnknownVariant => "unknown variant"
+    }
+}
+
+fun try(text: str) {
+    match toml.decode<Doc>(text) {
+        Ok(d) => { print(f"ok {d.items.len()}") },
+        Err(e) => { print(f"{kind_name(e.kind)} at {e.path}: {e.message()} | {e}") },
+    }
+}
+
+fun main() {
+    let base = "kinds = []\nextra = {}\n"
+    try(base + "items = [{ label = \"a\", level = 1 }]")
+    try(base + "items = [{ label = \"a\", level = 1 }, { label = \"b\", level = 2 }, { level = 3 }]")
+    try(base + "[[items]]\nlabel = \"a\"\nlevel = 1\n[[items]]\nlabel = \"b\"\nlevel = 2\n[[items]]\nlabel = 5\nlevel = 3\n")
+    try(base + "items = [{ label = \"a\", level = 128 }]")
+    try(base + "items = [{ label = \"a\", level = -129 }]")
+    try(base + "items = [{ label = \"a\", level = 1.0 }]")
+    try("items = []\nextra = {}\nkinds = [\"Plain\", \"Square\"]")
+    try("items = []\nextra = {}\nkinds = [{ Pair = [1] }]")
+    try("items = []\nextra = {}\nkinds = [{ Pair = [1, true] }]")
+    try("items = []\nextra = {}\nkinds = [\"Pair\"]")
+    try("items = []\nextra = {}\nkinds = [{ Plain = 1 }]")
+    try("items = []\nextra = {}\nkinds = [{ One = { label = \"x\" } }]")
+    try("items = []\nextra = {}\nkinds = [{ Plain = 1, Pair = 2 }]")
+    try("items = []\nkinds = []\nextra = { \"a b\" = 300 }")
+    try(base + "items = []\nnote = { label = 1979-05-27 }")
+    try(base + "items = { a = 1 }")
+    try(base)
+    try(base + "items = [\n  { label = \"a\", level = 1 },\n  { label = \"b\" level = 2 },\n]")
+    match toml.decode<[str: int32]>("n = 2147483648") {
+        Ok(m) => { print("fits") },
+        Err(e) => { print(f"{e}") },
+    }
+    match toml.decode<[str: uint64]>("n = -1") {
+        Ok(m) => { print("fits") },
+        Err(e) => { print(f"{e}") },
+    }
+    match toml.decode<[str: char]>("c = \"ab\"") {
+        Ok(m) => { print("one") },
+        Err(e) => { print(f"{e}") },
+    }
+    match toml.encode(Kind.Plain) {
+        Ok(t) => { print(t) },
+        Err(e) => { print(f"{kind_name(e.kind)}: {e}") },
+    }
+    match toml.encode([1, 2]) {
+        Ok(t) => { print(t) },
+        Err(e) => { print(f"{e}") },
+    }
+    match toml.encode(Weather { at: Celsius { degrees: 21.5 } }) {
+        Ok(t) => { print(t) },
+        Err(e) => { print(f"{e}") },
+    }
+    match toml.decode<Weather>("at = 21.5") {
+        Ok(w) => { print(w.at.degrees) },
+        Err(e) => { print(f"{e}") },
+    }
+    match toml.decode<Weather>("at = \"21.5C\"") {
+        Ok(w) => { print(w.at.degrees) },
+        Err(e) => { print(f"{e}") },
+    }
+}
+""",
     # D172 (MYLA-384): the task's `Zero`: `int.zero()`, a type keyword's
     # `int64.zero()`, a struct's, and `T.zero()` under `T: Zero + Add`
     "trait_functions_zero": """// D172 (MYLA-384): a trait function without `self`, called on a type
@@ -7682,6 +8102,67 @@ fun main() {
 """
 
 
+TOML_DERIVE_GEO = r"""// derived in a module of its own, whose names the loader qualifies, for
+// both formats at once
+import std.json as json
+import std.toml as toml
+
+#derive(Json, Toml)
+pub struct Point {
+    x: int,
+    y: int,
+}
+
+#derive(Json, Toml)
+pub enum Shape {
+    Dot(Point),
+    Segment(Point, Point),
+    Nothing,
+}
+
+pub fun origin_text() -> str {
+    return json.encode(Point { x: 0, y: 0 })
+}
+"""
+
+TOML_DERIVE_SCENE = r"""// MYLA-407: a derived type of another module in a derived struct, read and
+// written through the module's alias; the module derives Json and Toml both
+import std.toml as toml
+import .geo as geo
+from .geo import Point, Shape
+
+#derive(Toml)
+struct Scene {
+    shapes: [geo.Shape],
+    focus: Option<Point>,
+}
+
+fun main() {
+    let s = Scene { shapes: [Shape.Dot(Point { x: 1, y: 2 }), Shape.Nothing, Shape.Segment(Point { x: 0, y: 0 }, Point { x: 3, y: 4 })], focus: Some(Point { x: 5, y: 6 }) }
+    match toml.encode(s) {
+        Ok(text) => {
+            print(text)
+            match toml.decode<Scene>(text) {
+                Ok(back) => print(toml.encode(back) == Ok(text))
+                Err(e) => print(f"{e}")
+            }
+        }
+        Err(e) => print(f"{e}")
+    }
+    print(geo.origin_text())
+    match toml.decode<Scene>("shapes = [{ Segment = [{ x = 0, y = 0 }] }]") {
+        Ok(back) => print("ok")
+        Err(e) => print(f"{e}")
+    }
+    let p: Result<geo.Point, toml.TomlError> = toml.decode("x = 9\ny = 8")
+    match p {
+        Ok(v) => print(v.x * 10 + v.y)
+        Err(e) => print(f"{e}")
+    }
+}
+"""
+
+
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
 class TestCompilerParity(unittest.TestCase):
     def test_trait_functions_across_modules(self):
@@ -7703,6 +8184,15 @@ class TestCompilerParity(unittest.TestCase):
             write_program(tmp, JSON_DERIVE_GEO, "geo.my")
             main = write_program(tmp, JSON_DERIVE_SCENE)
             self.assertEqual(run_file_both_now(main), ('{"shapes":[{"Dot":{"x":1,"y":2}},"Nothing",{"Segment":[{"x":0,"y":0},{"x":3,"y":4}]}],"focus":{"x":5,"y":6}}\ntrue\n{"x":0,"y":0}\n$.shapes[0].Segment: expected an array of 2 items, found an array of 1 item\n98\n', "", 0))
+
+    def test_toml_derive_across_modules(self):
+        # MYLA-407: `#derive(Json, Toml)` in a module whose names the loader
+        # qualifies, its types fields of a derived struct in another, decoded
+        # through a module's type (`geo.Point`)
+        with tempfile.TemporaryDirectory() as tmp:
+            write_program(tmp, TOML_DERIVE_GEO, "geo.my")
+            main = write_program(tmp, TOML_DERIVE_SCENE)
+            self.assertEqual(run_file_both_now(main), ('shapes = [{ Dot = { x = 1, y = 2 } }, "Nothing", { Segment = [{ x = 0, y = 0 }, { x = 3, y = 4 }] }]\n\n[focus]\nx = 5\ny = 6\n\ntrue\n{"x":0,"y":0}\n$.shapes[0].Segment: expected an array of 2 items, found an array of 1 item\n98\n', "", 0))
 
     def test_generic_constructors_of_a_module(self):
         # MYLA-315: the shapes std.deque and std.set take (MYLA-330), a module's
@@ -8013,6 +8503,14 @@ PINNED = {
     "json_derive_recursive": '{"label":"root","kids":[{"label":"a","kids":[]},{"label":"b","kids":[{"label":"c","kids":[]}]}]}\n4 true\n{"Sum":[{"Num":1},{"Neg":[{"Num":5}]},{"Call":["f",[{"Num":2},{"Num":3}]]}]}\n-2\n{"name":"src","files":[{"name":"a.my"}],"parent":[{"name":"/","files":[]}]}\ntrue\n',
     # MYLA-385: new; native code gives the same
     "json_derive_errors": 'ok 1\nmissing field at $.items[2].label: missing field | $.items[2].label: missing field\nwrong type at $.items[2].label: expected a string, found the number 5 | $.items[2].label: expected a string, found the number 5\nout of range at $.items[0].level: 128 is out of range for int8 | $.items[0].level: 128 is out of range for int8\nout of range at $.items[0].level: -129 is out of range for int8 | $.items[0].level: -129 is out of range for int8\nwrong type at $.items[0].level: expected an integer, found the number 1.5 | $.items[0].level: expected an integer, found the number 1.5\nunknown variant at $.kinds[1]: unknown variant \'Square\' of \'Kind\', expected one of \'Plain\', \'Pair\', \'One\' | $.kinds[1]: unknown variant \'Square\' of \'Kind\', expected one of \'Plain\', \'Pair\', \'One\'\nwrong type at $.kinds[0].Pair: expected an array of 2 items, found an array of 1 item | $.kinds[0].Pair: expected an array of 2 items, found an array of 1 item\nwrong type at $.kinds[0].Pair[1]: expected an integer, found true | $.kinds[0].Pair[1]: expected an integer, found true\nwrong type at $.kinds[0]: variant \'Pair\' of \'Kind\' has a payload: write it as {"Pair": …} | $.kinds[0]: variant \'Pair\' of \'Kind\' has a payload: write it as {"Pair": …}\nwrong type at $.kinds[0]: variant \'Plain\' of \'Kind\' has no payload: write it as "Plain" | $.kinds[0]: variant \'Plain\' of \'Kind\' has no payload: write it as "Plain"\nmissing field at $.kinds[0].One.level: missing field | $.kinds[0].One.level: missing field\nwrong type at $.kinds[0]: expected a variant of \'Kind\' (a string, or an object of one member), found an object | $.kinds[0]: expected a variant of \'Kind\' (a string, or an object of one member), found an object\nout of range at $.extra["a b"]: 300 is out of range for uint8 | $.extra["a b"]: 300 is out of range for uint8\nwrong type at $.note.label: expected a string, found null | $.note.label: expected a string, found null\nwrong type at $.items: expected an array, found an object | $.items: expected an array, found an object\nmissing field at $.items: missing field | $.items: missing field\nwrong type at $: expected an object for \'Doc\', found an empty array | $: expected an object for \'Doc\', found an empty array\nsyntax at : Expecting value | 1:12: Expecting value\n$: expected a string of one character, found a string of 2\n$: 1e+30 is out of range for uint64\n$: -1 is out of range for uint64\n$: 2147483648 is out of range for int32\n18446744073709549568\n$: expected a color, found the number 3\n',
+    # MYLA-407: new; native code gives the same
+    "toml_derive_structs": 'demo 3 0.5 true é\ntrue\n20240229\n2\ntrue\ntrue\ntrue\nc\n3\ntitle = "demo"\nversion = 3\nratio = 0.5\nenabled = true\nletter = "é"\ncreated = 1979-05-27T07:32:00-08:00\nday = 2024-02-29\n\n[[servers]]\nname = "alpha"\nat = { x = 10, y = 20 }\nports = [80, 443]\n\n[servers.labels]\nenv = "prod"\n"a b" = "c"\n\n[[servers]]\nname = "beta"\nat = { x = 0, y = -1 }\nports = []\nlabels = {}\nbackup = "alpha"\n\n[owner]\nx = 1\ny = 2\n\n[tags]\na = [1, -2]\n\ntrue\nsmall = -128\nbyte = 255\nwide = -9000000000\nhuge = 9.223372036854776e+18\nsingle = 0.1\nlimit = -inf\nraw = [1, "x"]\n\n-128 255 -9000000000 9223372036854775808 0.1 -inf [1, "x"]\n1.8446744073709552e+19\n\ntrue\ntrue\n[a]\nx = 1\ny = 2\n\n["b c"]\nx = 3\ny = 4\n\n',
+    # MYLA-407: new; native code gives the same
+    "toml_derive_enums": '"Empty"\n{ Dot = { x = 1, y = 2 } }\n{ Circle = [{ x = 0, y = 0 }, 1.5] }\n{ Line = [{ x = 0, y = 0 }, { x = 3, y = 4 }, "edge"] }\ncolor = "Green"\nshapes = ["Empty", { Dot = { x = 1, y = 2 } }, { Circle = [{ x = 0, y = 0 }, 1.5] }, { Line = [{ x = 0, y = 0 }, { x = 3, y = 4 }, "edge"] }]\nhidden = "Blue"\n\ntrue\n[Dot]\nx = 5\ny = 6\n\n$: expected a table for a TOML document, found a string\n1 d\ntrue\n["Empty", { Circle = [{ x = 5, y = 6 }, 2.0] }]\n["Blue", "Red"]\n',
+    # MYLA-407: new; native code gives the same
+    "toml_derive_generic": 'items = [{ x = 1, y = 2 }, { x = 3, y = 4 }]\nnext = "p2"\n\ntrue\nitems = ["a", "b"]\n\n$.items[0]: expected an integer, found a string\n["Nothing", { One = 1 }, { Two = [2, "b"] }]\ntrue\nlabel = "root"\n\n[[kids]]\nlabel = "a"\nkids = []\n\n[[kids]]\nlabel = "b"\n\n[[kids.kids]]\nlabel = "c"\nkids = []\n\nc true\n{ Sum = [{ Num = 1 }, { Call = ["neg", [{ Num = 5 }]] }, { Num = 2 }] }\n-2 true\n',
+    # MYLA-407: new; native code gives the same
+    "toml_derive_errors": 'ok 1\nmissing field at $.items[2].label: missing field | $.items[2].label: missing field\nwrong type at $.items[2].label: expected a string, found the integer 5 | $.items[2].label: expected a string, found the integer 5\nout of range at $.items[0].level: 128 is out of range for int8 | $.items[0].level: 128 is out of range for int8\nout of range at $.items[0].level: -129 is out of range for int8 | $.items[0].level: -129 is out of range for int8\nwrong type at $.items[0].level: expected an integer, found the float 1.0 | $.items[0].level: expected an integer, found the float 1.0\nunknown variant at $.kinds[1]: unknown variant \'Square\' of \'Kind\', expected one of \'Plain\', \'Pair\', \'One\' | $.kinds[1]: unknown variant \'Square\' of \'Kind\', expected one of \'Plain\', \'Pair\', \'One\'\nwrong type at $.kinds[0].Pair: expected an array of 2 items, found an array of 1 item | $.kinds[0].Pair: expected an array of 2 items, found an array of 1 item\nwrong type at $.kinds[0].Pair[1]: expected an integer, found true | $.kinds[0].Pair[1]: expected an integer, found true\nwrong type at $.kinds[0]: variant \'Pair\' of \'Kind\' has a payload: write it as { Pair = … } | $.kinds[0]: variant \'Pair\' of \'Kind\' has a payload: write it as { Pair = … }\nwrong type at $.kinds[0]: variant \'Plain\' of \'Kind\' has no payload: write it as "Plain" | $.kinds[0]: variant \'Plain\' of \'Kind\' has no payload: write it as "Plain"\nmissing field at $.kinds[0].One.level: missing field | $.kinds[0].One.level: missing field\nwrong type at $.kinds[0]: expected a variant of \'Kind\' (a string, or a table of one key), found a table | $.kinds[0]: expected a variant of \'Kind\' (a string, or a table of one key), found a table\nout of range at $.extra["a b"]: 300 is out of range for uint8 | $.extra["a b"]: 300 is out of range for uint8\nwrong type at $.note.label: expected a string, found the date 1979-05-27 | $.note.label: expected a string, found the date 1979-05-27\nwrong type at $.items: expected an array, found a table | $.items: expected an array, found a table\nmissing field at $.items: missing field | $.items: missing field\nsyntax at : expected \',\' or \'}\' in an inline table | 5:17: expected \',\' or \'}\' in an inline table\n$.n: 2147483648 is out of range for int32\n$.n: -1 is out of range for uint64\n$.c: expected a string of one character, found a string of 2\nwrong type: $: expected a table for a TOML document, found a string\n$: expected a table for a TOML document, found an array of 2 items\nat = "21.5C"\n\n21.5\n$.at: expected a temperature, found a string\n',
     # MYLA-384: new; native code gives the same
     "trait_functions_zero": '0\n5000000000\n6\n5000000001\n3.75\n3\n400\n0\n0\n0\n',
     # MYLA-384: new; native code gives the same

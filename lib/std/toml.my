@@ -1682,3 +1682,560 @@ fun round_trip_cases(text: str) -> str {
     return round_trip(text)
 }
 
+// --- Typed values (MYLA-407, as std.json's D172) ----------------------------------
+
+// A value with a TOML form. `#derive(Toml)` writes the impl for a struct (a
+// table of its fields, named as written, an `Option` field left out when it
+// is `None`: TOML has no null) and for an enum (`"Red"` for a variant without
+// payload, `{ Dot = x }` for one with one, `{ Line = [a, b] }` for one with
+// more), as `#derive(Json)` does. Writing never fails: a `uint64` beyond
+// `int64` is a float.
+pub trait ToToml {
+    fun to_toml(self) -> Toml
+}
+
+// A value read from its TOML form: `Point.from_toml(t)`, `T.from_toml(t)`
+// under a bound `T: FromToml`. An integer is checked for its type's range,
+// a struct ignores keys it has no field for, and an error says where it is
+// (`$.servers[2].ip`).
+pub trait FromToml {
+    fun from_toml(t: Toml) -> Result<Self, TomlError>
+}
+
+// `v` as a TOML document, as `to_string` writes `v.to_toml()`; an error
+// (`WrongType`) when that isn't a table, as a document must be: a number, a
+// list, a variant without payload.
+pub fun encode<T: ToToml>(v: T) -> Result<str, TomlError> {
+    let t = v.to_toml()
+    return match t {
+        Toml.Table(ms) => Ok(to_string(t))
+        _ => Err(wrong_type("a table for a TOML document", t))
+    }
+}
+
+// The value of type `T` that the document `text` holds:
+// `toml.decode<Config>(text)`, or with the type from where the result goes.
+// A text that isn't TOML is a `Syntax` error, a value that doesn't fit `T`
+// an error with its path.
+pub fun decode<T: FromToml>(text: str) -> Result<T, TomlError> {
+    let t = parse(text)?
+    return T.from_toml(t)
+}
+
+// The error for a value `found` where `expected` (in words: "an integer",
+// "a color") should be, at the value itself (`$`), for a `FromToml` impl
+// written by hand: `Err(toml.wrong_type("a color", t))`.
+#test("a color", Toml.Int(3i64))[TomlError { kind: TomlErrorKind.WrongType, msg: "expected a color, found the integer 3", line: 0, col: 0, path: "$" }]
+pub fun wrong_type(expected: str, found: Toml) -> TomlError {
+    return value_error(TomlErrorKind.WrongType, f"expected {expected}, found {described(found)}")
+}
+
+// The members of the table `t`, for a `FromToml` impl of the type `name` (a
+// derived one, or one written by hand); not a table is an error.
+#test(Toml.Table([("a", Toml.Int(1i64))]), "P")[Ok([("a", Toml.Int(1i64))])]
+#test(Toml.Array([]), "P")[Err(TomlError { kind: TomlErrorKind.WrongType, msg: "expected a table for 'P', found an empty array", line: 0, col: 0, path: "$" })]
+pub fun members(t: Toml, name: str) -> Result<[(str, Toml)], TomlError> {
+    return match t {
+        Toml.Table(ms) => Ok(ms)
+        _ => Err(wrong_type(f"a table for '{name}'", t))
+    }
+}
+
+// The member `name` of a table's `fields` as a `T`; an error if there is
+// none, or with the member's step added to its path.
+pub fun member<T: FromToml>(fields: [(str, Toml)], name: str) -> Result<T, TomlError> {
+    return match field(Toml.Table(fields), name) {
+        Some(v) => within(T.from_toml(v), key_step(name))
+        None => Err(TomlError { kind: TomlErrorKind.MissingField, msg: "missing field", line: 0, col: 0, path: "$" + key_step(name) })
+    }
+}
+
+// The member `name` of `fields` as an optional `T`: `None` when it is absent
+// (TOML has no null).
+pub fun optional_member<T: FromToml>(fields: [(str, Toml)], name: str) -> Result<Option<T>, TomlError> {
+    return match field(Toml.Table(fields), name) {
+        Some(v) => Ok(Some(within(T.from_toml(v), key_step(name))?))
+        None => Ok(None)
+    }
+}
+
+// `r`, its error one step further in: `step` (`.name`, `[2]`) after the `$`.
+fun within<T>(r: Result<T, TomlError>, step: str) -> Result<T, TomlError> {
+    return match r {
+        Ok(v) => Ok(v)
+        Err(e) => Err(TomlError { kind: e.kind, msg: e.msg, line: e.line, col: e.col, path: "$" + step + e.path[1:] })
+    }
+}
+
+// The step of a path into the member `key`: `.key` for a name, `["a b"]` for
+// another key (as std.json writes it).
+#test("label")[".label"]
+#test("_x9")["._x9"]
+#test("a b")["[\"a b\"]"]
+#test("")["[\"\"]"]
+#test("9")["[\"9\"]"]
+fun key_step(key: str) -> str {
+    var plain = key.len() > 0 && !is_digit(key[0])
+    var i = 0
+    while i < key.len() {
+        let c = key[i]
+        if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || is_digit(c) || c == '_') { plain = false }
+        i += 1
+    }
+    if plain { return "." + key }
+    return "[" + basic_string_text(key) + "]"
+}
+
+// An error at the value itself (`$`).
+fun value_error(kind: TomlErrorKind, msg: str) -> TomlError {
+    return TomlError { kind: kind, msg: msg, line: 0, col: 0, path: "$" }
+}
+
+// What `t` is, for an error: "a string", "the integer 1", "the float 1.5", …
+#test(Toml.Float(1.5))["the float 1.5"]
+#test(Toml.Array([Toml.Bool(true)]))["an array of 1 item"]
+#test(Toml.Date(TomlDate { year: 2024, month: 1, day: 2 }))["the date 2024-01-02"]
+fun described(t: Toml) -> str {
+    return match t {
+        Toml.Str(s) => "a string"
+        Toml.Int(n) => f"the integer {n}"
+        Toml.Float(f) => "the float " + format_float(f)
+        Toml.Bool(b) => if b { "true" } else { "false" }
+        Toml.DateTime(d) => "the date-time " + datetime_text(d)
+        Toml.Date(d) => "the date " + date_text(d)
+        Toml.Time(x) => "the time " + time_text(x)
+        Toml.Array(items) => match items.len() {
+            0 => "an empty array"
+            1 => "an array of 1 item"
+            n => f"an array of {n} items"
+        }
+        Toml.Table(ms) => "a table"
+    }
+}
+
+// --- What `#derive(Toml)` calls for an enum -----------------------------------------
+
+// The variant's name and its payload, if any, of an enum value of type
+// `name`: a string is a variant without payload, a table of one key a
+// variant with one.
+#test(Toml.Str("Red"), "Color")[Ok(("Red", None))]
+#test(Toml.Table([("Dot", Toml.Int(1i64))]), "Shape")[Ok(("Dot", Some(Toml.Int(1i64))))]
+#test(Toml.Table([]), "Shape")[Err(TomlError { kind: TomlErrorKind.WrongType, msg: "expected a variant of 'Shape' (a string, or a table of one key), found a table", line: 0, col: 0, path: "$" })]
+fun variant_of(t: Toml, name: str) -> Result<(str, Option<Toml>), TomlError> {
+    match t {
+        Toml.Str(s) => { return Ok((s, None)) }
+        Toml.Table(ms) => {
+            if ms.len() == 1 { return Ok((ms[0].0, Some(ms[0].1))) }
+        }
+        _ => {}
+    }
+    return Err(wrong_type(f"a variant of '{name}' (a string, or a table of one key)", t))
+}
+
+// `value`, the variant without payload `v` names, if `v` has none.
+fun unit_variant<T>(v: (str, Option<Toml>), name: str, value: T) -> Result<T, TomlError> {
+    return match v.1 {
+        Some(p) => Err(value_error(TomlErrorKind.WrongType, f"variant '{v.0}' of '{name}' has no payload: write it as \"{v.0}\""))
+        None => Ok(value)
+    }
+}
+
+// Item `i` of the payload of `n` items of the variant `v` of enum `name`:
+// the payload itself for one item, else an array of `n`.
+fun payload<T: FromToml>(v: (str, Option<Toml>), name: str, n: int32, i: int32) -> Result<T, TomlError> {
+    let step = key_step(v.0)
+    match v.1 {
+        Some(p) => {
+            if n == 1 { return within(T.from_toml(p), step) }
+            match p {
+                Toml.Array(items) => {
+                    if items.len() == n { return within(T.from_toml(items[i]), f"{step}[{i}]") }
+                }
+                _ => {}
+            }
+            return within(Err(wrong_type(f"an array of {n} items", p)), step)
+        }
+        None => {
+            return Err(value_error(TomlErrorKind.WrongType, f"variant '{v.0}' of '{name}' has a payload: write it as " + "{ " + key_text(v.0) + " = … }"))
+        }
+    }
+}
+
+// The error for a variant `variant` that the enum `name` hasn't.
+#test("Blue", "Color", ["Red", "Green"])[TomlError { kind: TomlErrorKind.UnknownVariant, msg: "unknown variant 'Blue' of 'Color', expected one of 'Red', 'Green'", line: 0, col: 0, path: "$" }]
+fun unknown_variant(variant: str, name: str, variants: [str]) -> TomlError {
+    var sb = StringBuilder()
+    sb.append(f"unknown variant '{variant}' of '{name}', expected one of ")
+    var first = true
+    for v in variants {
+        if !first { sb.append(", ") }
+        sb.append(f"'{v}'")
+        first = false
+    }
+    return value_error(TomlErrorKind.UnknownVariant, sb.build())
+}
+
+// --- The built-in types ---------------------------------------------------------
+
+// The integer `t` holds, checked for the range `lo` to `hi` of the type
+// `name` (TOML's integers and floats are apart: a float isn't an integer).
+#test(Toml.Int(-128i64), -128i64, 127i64, "int8")[Ok(-128i64)]
+#test(Toml.Int(256i64), 0i64, 255i64, "uint8")[Err(TomlError { kind: TomlErrorKind.OutOfRange, msg: "256 is out of range for uint8", line: 0, col: 0, path: "$" })]
+#test(Toml.Float(2.0), -128i64, 127i64, "int8")[Err(TomlError { kind: TomlErrorKind.WrongType, msg: "expected an integer, found the float 2.0", line: 0, col: 0, path: "$" })]
+fun int_in(t: Toml, lo: int64, hi: int64, name: str) -> Result<int64, TomlError> {
+    let n = match t {
+        Toml.Int(v) => v
+        _ => { return Err(wrong_type("an integer", t)) }
+    }
+    if n < lo || n > hi { return Err(value_error(TomlErrorKind.OutOfRange, f"{n} is out of range for {name}")) }
+    return Ok(n)
+}
+
+impl ToToml for int8 {
+    fun to_toml(self) -> Toml { return Toml.Int(self as int64) }
+}
+
+impl FromToml for int8 {
+    fun from_toml(t: Toml) -> Result<int8, TomlError> { return Ok(int_in(t, -128, 127, "int8")? as int8) }
+}
+
+impl ToToml for int16 {
+    fun to_toml(self) -> Toml { return Toml.Int(self as int64) }
+}
+
+impl FromToml for int16 {
+    fun from_toml(t: Toml) -> Result<int16, TomlError> { return Ok(int_in(t, -32768, 32767, "int16")? as int16) }
+}
+
+impl ToToml for int32 {
+    fun to_toml(self) -> Toml { return Toml.Int(self as int64) }
+}
+
+impl FromToml for int32 {
+    fun from_toml(t: Toml) -> Result<int32, TomlError> { return Ok(int_in(t, -2147483648, 2147483647, "int32")? as int32) }
+}
+
+impl ToToml for int64 {
+    fun to_toml(self) -> Toml { return Toml.Int(self) }
+}
+
+impl FromToml for int64 {
+    fun from_toml(t: Toml) -> Result<int64, TomlError> { return int_in(t, -9223372036854775807 - 1, 9223372036854775807, "int64") }
+}
+
+impl ToToml for uint8 {
+    fun to_toml(self) -> Toml { return Toml.Int(self as int64) }
+}
+
+impl FromToml for uint8 {
+    fun from_toml(t: Toml) -> Result<uint8, TomlError> { return Ok(int_in(t, 0, 255, "uint8")? as uint8) }
+}
+
+impl ToToml for uint16 {
+    fun to_toml(self) -> Toml { return Toml.Int(self as int64) }
+}
+
+impl FromToml for uint16 {
+    fun from_toml(t: Toml) -> Result<uint16, TomlError> { return Ok(int_in(t, 0, 65535, "uint16")? as uint16) }
+}
+
+impl ToToml for uint32 {
+    fun to_toml(self) -> Toml { return Toml.Int(self as int64) }
+}
+
+impl FromToml for uint32 {
+    fun from_toml(t: Toml) -> Result<uint32, TomlError> { return Ok(int_in(t, 0, 4294967295, "uint32")? as uint32) }
+}
+
+impl ToToml for uint64 {
+    // beyond int64 (TOML's integers), a float: the nearest float64, which
+    // reads back only if it is exact
+    #test(18446744073709551615u64)[Toml.Float(18446744073709551616.0)]
+    fun to_toml(self) -> Toml {
+        if self > 9223372036854775807 { return Toml.Float(self as float64) }
+        return Toml.Int(self as int64)
+    }
+}
+
+impl FromToml for uint64 {
+    #test(Toml.Float(9223372036854775808.0))[Ok(9223372036854775808u64)]
+    #test(Toml.Float(18446744073709551616.0))[Err(TomlError { kind: TomlErrorKind.OutOfRange, msg: "1.8446744073709552e+19 is out of range for uint64", line: 0, col: 0, path: "$" })]
+    fun from_toml(t: Toml) -> Result<uint64, TomlError> {
+        match t {
+            Toml.Float(f) => {
+                if f >= 9223372036854775808.0 && f < 18446744073709551616.0 && f == (f as uint64) as float64 { return Ok(f as uint64) }
+                if f >= 9223372036854775808.0 { return Err(value_error(TomlErrorKind.OutOfRange, f"{format_float(f)} is out of range for uint64")) }
+            }
+            _ => {}
+        }
+        return Ok(int_in(t, 0, 9223372036854775807, "uint64")? as uint64)
+    }
+}
+
+impl ToToml for float64 {
+    // `inf` and `nan` are TOML floats too
+    #test(1.0 / 0.0)[Toml.Float(1.0 / 0.0)]
+    fun to_toml(self) -> Toml { return Toml.Float(self) }
+}
+
+impl FromToml for float64 {
+    // an integer is a float's value too
+    #test(Toml.Int(3i64))[Ok(3.0)]
+    fun from_toml(t: Toml) -> Result<float64, TomlError> {
+        return match t {
+            Toml.Float(f) => Ok(f)
+            Toml.Int(n) => Ok(n as float64)
+            _ => Err(wrong_type("a number", t))
+        }
+    }
+}
+
+impl ToToml for float32 {
+    // the shortest decimal that reads back as the same float32: 0.1, not
+    // 0.10000000149011612
+    #test(0.1f32)[Toml.Float(0.1)]
+    fun to_toml(self) -> Toml {
+        if self != self || self - self != 0.0f32 { return Toml.Float(self as float64) }
+        return match parse_float(f"{self}") {
+            Some(f) => Toml.Float(f)
+            None => Toml.Float(self as float64)
+        }
+    }
+}
+
+impl FromToml for float32 {
+    #test(Toml.Float(1e300))[Err(TomlError { kind: TomlErrorKind.OutOfRange, msg: "1e+300 is out of range for float32", line: 0, col: 0, path: "$" })]
+    fun from_toml(t: Toml) -> Result<float32, TomlError> {
+        let f = float64.from_toml(t)?
+        let g = f as float32
+        if f - f == 0.0 && g - g != 0.0f32 { return Err(value_error(TomlErrorKind.OutOfRange, f"{format_float(f)} is out of range for float32")) }
+        return Ok(g)
+    }
+}
+
+impl ToToml for bool {
+    fun to_toml(self) -> Toml { return Toml.Bool(self) }
+}
+
+impl FromToml for bool {
+    fun from_toml(t: Toml) -> Result<bool, TomlError> {
+        return match t {
+            Toml.Bool(b) => Ok(b)
+            _ => Err(wrong_type("true or false", t))
+        }
+    }
+}
+
+impl ToToml for str {
+    fun to_toml(self) -> Toml { return Toml.Str(self) }
+}
+
+impl FromToml for str {
+    fun from_toml(t: Toml) -> Result<str, TomlError> {
+        return match t {
+            Toml.Str(s) => Ok(s)
+            _ => Err(wrong_type("a string", t))
+        }
+    }
+}
+
+impl ToToml for char {
+    // a string of the one character
+    fun to_toml(self) -> Toml { return Toml.Str(f"{self}") }
+}
+
+impl FromToml for char {
+    #test(Toml.Str("é"))[Ok('é')]
+    #test(Toml.Str("ab"))[Err(TomlError { kind: TomlErrorKind.WrongType, msg: "expected a string of one character, found a string of 2", line: 0, col: 0, path: "$" })]
+    fun from_toml(t: Toml) -> Result<char, TomlError> {
+        match t {
+            Toml.Str(s) => {
+                let cs = s.chars()
+                if cs.len() == 1 { return Ok(cs[0]) }
+                return Err(value_error(TomlErrorKind.WrongType, f"expected a string of one character, found a string of {cs.len()}"))
+            }
+            _ => { return Err(wrong_type("a string of one character", t)) }
+        }
+    }
+}
+
+impl ToToml for TomlDateTime {
+    fun to_toml(self) -> Toml { return Toml.DateTime(self) }
+}
+
+impl FromToml for TomlDateTime {
+    fun from_toml(t: Toml) -> Result<TomlDateTime, TomlError> {
+        return match t {
+            Toml.DateTime(d) => Ok(d)
+            _ => Err(wrong_type("a date-time", t))
+        }
+    }
+}
+
+impl ToToml for TomlDate {
+    fun to_toml(self) -> Toml { return Toml.Date(self) }
+}
+
+impl FromToml for TomlDate {
+    fun from_toml(t: Toml) -> Result<TomlDate, TomlError> {
+        return match t {
+            Toml.Date(d) => Ok(d)
+            _ => Err(wrong_type("a date", t))
+        }
+    }
+}
+
+impl ToToml for TomlTime {
+    fun to_toml(self) -> Toml { return Toml.Time(self) }
+}
+
+impl FromToml for TomlTime {
+    fun from_toml(t: Toml) -> Result<TomlTime, TomlError> {
+        return match t {
+            Toml.Time(x) => Ok(x)
+            _ => Err(wrong_type("a time", t))
+        }
+    }
+}
+
+impl ToToml for Toml {
+    fun to_toml(self) -> Toml { return self }
+}
+
+impl FromToml for Toml {
+    fun from_toml(t: Toml) -> Result<Toml, TomlError> { return Ok(t) }
+}
+
+impl<T: ToToml> ToToml for [T] {
+    fun to_toml(self) -> Toml {
+        var items: [Toml] = []
+        for x in self { items.push(x.to_toml()) }
+        return Toml.Array(items)
+    }
+}
+
+impl<T: FromToml> FromToml for [T] {
+    fun from_toml(t: Toml) -> Result<[T], TomlError> {
+        match t {
+            Toml.Array(items) => {
+                var out: [T] = []
+                var i = 0
+                for item in items {
+                    out.push(within(T.from_toml(item), f"[{i}]")?)
+                    i += 1
+                }
+                return Ok(out)
+            }
+            _ => { return Err(wrong_type("an array", t)) }
+        }
+    }
+}
+
+// A map with string keys is a table, its keys in the map's order.
+impl<V: ToToml> ToToml for [str: V] {
+    fun to_toml(self) -> Toml {
+        var ms: [(str, Toml)] = []
+        for k in self { ms.push((k, self[k].to_toml())) }
+        return Toml.Table(ms)
+    }
+}
+
+impl<V: FromToml> FromToml for [str: V] {
+    fun from_toml(t: Toml) -> Result<[str: V], TomlError> {
+        match t {
+            Toml.Table(ms) => {
+                var out: [str: V] = [:]
+                for m in ms { out[m.0] = within(V.from_toml(m.1), key_step(m.0))? }
+                return Ok(out)
+            }
+            _ => { return Err(wrong_type("a table", t)) }
+        }
+    }
+}
+
+// An error's text, or "ok" (for the test functions).
+fun outcome<T>(r: Result<T, TomlError>) -> str {
+    return match r {
+        Ok(v) => "ok"
+        Err(e) => f"{e}"
+    }
+}
+
+// Whether `r` is `Ok(want)` (for the test functions).
+fun gives<T: Eq>(r: Result<T, TomlError>, want: T) -> bool {
+    return match r {
+        Ok(v) => v == want
+        Err(e) => false
+    }
+}
+
+// Every built-in type's value goes to TOML and back.
+#test
+fun built_in_types_round_trip() {
+    let m: [str: [int8]] = ["a": [-128, 127], "c d": []]
+    let text = match encode(m) {
+        Ok(t) => t
+        Err(e) => f"{e}"
+    }
+    assert(text == "a = [-128, 127]\n\"c d\" = []\n", text)
+    match decode<[str: [int8]]>(text) {
+        Ok(back) => assert(back.to_toml() == m.to_toml(), "read back")
+        Err(e) => assert(false, f"{e}")
+    }
+    assert(['x', 'ü'].to_toml() == Toml.Array([Toml.Str("x"), Toml.Str("ü")]), "chars")
+    assert(inline_string([0.5f32, 1e10f32].to_toml()) == "[0.5, 10000000000.0]", "float32")
+    assert(inline_string([1.0 / 0.0, -0.0].to_toml()) == "[inf, -0.0]", "floats")
+    assert(outcome(encode([1, 2])) == "$: expected a table for a TOML document, found an array of 2 items", "not a document")
+    let big: Result<[str: [int16]], TomlError> = decode("x = [1, 40000]")
+    assert(outcome(big) == "$.x[1]: 40000 is out of range for int16", outcome(big))
+    let day = TomlDate { year: 2024, month: 2, day: 29 }
+    assert(gives(TomlDate.from_toml(day.to_toml()), day), "a date")
+    assert(outcome(TomlTime.from_toml(day.to_toml())) == "$: expected a time, found the date 2024-02-29", "not a time")
+}
+
+// `encode`, `decode` and the helpers of a `FromToml` impl.
+#test
+fun encodes_and_decodes() {
+    let xs: Result<[str: [int]], TomlError> = decode("a = [1, 2]")
+    match xs {
+        Ok(m) => assert(m["a"] == [1, 2], "decode")
+        Err(e) => assert(false, f"{e}")
+    }
+    match decode<[str: int]>("a = [1, 2") {
+        Ok(v) => assert(false, "not TOML")
+        Err(e) => assert(e == TomlError { kind: TomlErrorKind.Syntax, msg: "expected ',' or ']' in an array", line: 1, col: 10, path: "" }, f"{e}")
+    }
+    match decode<[str: int]>("a = \"2\"") {
+        Ok(v) => assert(false, "not an int")
+        Err(e) => assert(e == TomlError { kind: TomlErrorKind.WrongType, msg: "expected an integer, found a string", line: 0, col: 0, path: "$.a" }, f"{e}")
+    }
+    match member<int64>([("b", Toml.Int(1))], "a") {
+        Ok(v) => assert(false, "no member a")
+        Err(e) => assert(e == TomlError { kind: TomlErrorKind.MissingField, msg: "missing field", line: 0, col: 0, path: "$.a" }, f"{e}")
+    }
+    assert(outcome(member<int64>([("a b", Toml.Bool(true))], "a b")) == "$[\"a b\"]: expected an integer, found true", "a quoted key")
+    var seen: [str] = []
+    let cases: [[(str, Toml)]] = [[], [("a", Toml.Int(4))]]
+    for fields in cases {
+        match optional_member<int64>(fields, "a") {
+            Ok(Some(n)) => seen.push(f"{n}")
+            Ok(None) => seen.push("none")
+            Err(e) => seen.push(f"{e}")
+        }
+    }
+    assert(seen == ["none", "4"], "absent, present")
+    assert(outcome(optional_member<int8>([("a", Toml.Int(400))], "a")) == "$.a: 400 is out of range for int8", "nested")
+}
+
+// What `#derive(Toml)` calls for an enum's variants.
+#test
+fun reads_variants() {
+    assert(gives(unit_variant(("Red", None), "Color", 1), 1), "unit")
+    assert(outcome(unit_variant(("Red", Some(Toml.Int(0))), "Color", 1)) == "$: variant 'Red' of 'Color' has no payload: write it as \"Red\"", "unit with payload")
+    let pair = ("P", Some(Toml.Array([Toml.Int(1), Toml.Int(2)])))
+    assert(gives(payload<int64>(pair, "E", 2, 1), 2i64), "second item")
+    assert(gives(payload<int64>(("P", Some(Toml.Int(5))), "E", 1, 0), 5i64), "one item")
+    assert(outcome(payload<int64>(("P", Some(Toml.Array([Toml.Int(1)]))), "E", 2, 0)) == "$.P: expected an array of 2 items, found an array of 1 item", "too few")
+    assert(outcome(payload<int64>(("P", None), "E", 1, 0)) == "$: variant 'P' of 'E' has a payload: write it as { P = … }", "no payload")
+    assert(outcome(payload<bool>(pair, "E", 2, 0)) == "$.P[0]: expected true or false, found the integer 1", "an item's path")
+}

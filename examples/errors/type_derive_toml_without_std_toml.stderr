@@ -1,0 +1,5 @@
+type error: cannot derive Toml for 'Point': std.toml isn't imported (write 'import std.toml as toml')
+  --> examples/errors/type_derive_toml_without_std_toml.my:5:1
+  |
+5 | struct Point {
+  | ^^^^^^^^^^^^^^

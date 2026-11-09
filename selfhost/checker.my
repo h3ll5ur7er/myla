@@ -6362,33 +6362,61 @@ fun option_of(t: Type) -> Option<Type> {
     }
 }
 
-// The source of the derived `impl ToJson` and `impl FromJson` (D172,
-// MYLA-385) of the struct `name` with these fields, against std.json's names
-// qualified by `pre` (`std$json$`, or "" in std.json itself): an object of
-// the fields named as written, an `Option` field left out when `None` and
-// read as `None` when absent or `null`; members it has no field for are
+// A format a derive writes impls for (D172): `Json` (std.json, MYLA-385) or
+// `Toml` (std.toml, MYLA-407). `name` is the derive's, the value enum's and
+// the traits' (`ToJson`, `FromJson`), `method` the functions' (`to_json`,
+// `from_json`), `table` the value's variant a struct is (`Object`, `Table`)
+// and `table_word` what it is in words; without `null` (TOML) an `Option`
+// is only a struct's field, left out when `None`.
+struct Serial {
+    name: str,
+    method: str,
+    title: str,
+    table: str,
+    table_word: str,
+    has_null: bool,
+}
+
+fun json_serial() -> Serial {
+    return Serial { name: "Json", method: "json", title: "JSON", table: "Object", table_word: "an object", has_null: true }
+}
+
+fun toml_serial() -> Serial {
+    return Serial { name: "Toml", method: "toml", title: "TOML", table: "Table", table_word: "a table", has_null: false }
+}
+
+// The source of the derived impls of `f` (`impl ToJson` and `impl
+// FromJson`, D172, MYLA-385; `ToToml` and `FromToml`, MYLA-407) of the
+// struct `name` with these fields, against the module's names qualified by
+// `pre` (`std$json$`, or "" in std.json itself): an object (a table) of the
+// fields named as written, an `Option` field left out when `None` and read
+// as `None` when absent (or `null`); members it has no field for are
 // ignored. Parsed with `parse_qualified`, as the names are the loader's.
-#test("P", [], "std$json$", [("x", Type.TInt(32, true)), ("tag", Type.TEnum("Option", [Type.TStr]))])["impl std$json$ToJson for P {\n    fun to_json(self) -> std$json$Json {\n        var out: [(str, std$json$Json)] = []\n        out.push((\"x\", self.x.to_json()))\n        if let Some(v) = self.tag {\n            out.push((\"tag\", v.to_json()))\n        }\n        return std$json$Json.Object(out)\n    }\n}\n\nimpl std$json$FromJson for P {\n    fun from_json(j: std$json$Json) -> Result<P, std$json$JsonError> {\n        let fields = std$json$members(j, \"P\")?\n        return Ok(P {\n            x: std$json$member<int32>(fields, \"x\")?,\n            tag: std$json$optional_member<str>(fields, \"tag\")?,\n        })\n    }\n}\n"]
-#test("m$E", [], "", [])["impl ToJson for m$E {\n    fun to_json(self) -> Json {\n        var out: [(str, Json)] = []\n        return Json.Object(out)\n    }\n}\n\nimpl FromJson for m$E {\n    fun from_json(j: Json) -> Result<m$E, JsonError> {\n        let fields = members(j, \"E\")?\n        return Ok(m$E {\n        })\n    }\n}\n"]
-#test("Box", ["T"], "", [("v", Type.TParam("T"))])["impl<T: ToJson> ToJson for Box<T> {\n    fun to_json(self) -> Json {\n        var out: [(str, Json)] = []\n        out.push((\"v\", self.v.to_json()))\n        return Json.Object(out)\n    }\n}\n\nimpl<T: FromJson> FromJson for Box<T> {\n    fun from_json(j: Json) -> Result<Box<T>, JsonError> {\n        let fields = members(j, \"Box\")?\n        return Ok(Box {\n            v: member<T>(fields, \"v\")?,\n        })\n    }\n}\n"]
-fun derived_json_struct_src(name: str, tps: [str], pre: str, fields: [(str, Type)]) -> str {
+#test(json_serial(), "P", [], "std$json$", [("x", Type.TInt(32, true)), ("tag", Type.TEnum("Option", [Type.TStr]))])["impl std$json$ToJson for P {\n    fun to_json(self) -> std$json$Json {\n        var out: [(str, std$json$Json)] = []\n        out.push((\"x\", self.x.to_json()))\n        if let Some(v) = self.tag {\n            out.push((\"tag\", v.to_json()))\n        }\n        return std$json$Json.Object(out)\n    }\n}\n\nimpl std$json$FromJson for P {\n    fun from_json(j: std$json$Json) -> Result<P, std$json$JsonError> {\n        let fields = std$json$members(j, \"P\")?\n        return Ok(P {\n            x: std$json$member<int32>(fields, \"x\")?,\n            tag: std$json$optional_member<str>(fields, \"tag\")?,\n        })\n    }\n}\n"]
+#test(json_serial(), "m$E", [], "", [])["impl ToJson for m$E {\n    fun to_json(self) -> Json {\n        var out: [(str, Json)] = []\n        return Json.Object(out)\n    }\n}\n\nimpl FromJson for m$E {\n    fun from_json(j: Json) -> Result<m$E, JsonError> {\n        let fields = members(j, \"E\")?\n        return Ok(m$E {\n        })\n    }\n}\n"]
+#test(json_serial(), "Box", ["T"], "", [("v", Type.TParam("T"))])["impl<T: ToJson> ToJson for Box<T> {\n    fun to_json(self) -> Json {\n        var out: [(str, Json)] = []\n        out.push((\"v\", self.v.to_json()))\n        return Json.Object(out)\n    }\n}\n\nimpl<T: FromJson> FromJson for Box<T> {\n    fun from_json(j: Json) -> Result<Box<T>, JsonError> {\n        let fields = members(j, \"Box\")?\n        return Ok(Box {\n            v: member<T>(fields, \"v\")?,\n        })\n    }\n}\n"]
+#test(toml_serial(), "P", [], "std$toml$", [("x", Type.TInt(32, true)), ("tag", Type.TEnum("Option", [Type.TStr]))])["impl std$toml$ToToml for P {\n    fun to_toml(self) -> std$toml$Toml {\n        var out: [(str, std$toml$Toml)] = []\n        out.push((\"x\", self.x.to_toml()))\n        if let Some(v) = self.tag {\n            out.push((\"tag\", v.to_toml()))\n        }\n        return std$toml$Toml.Table(out)\n    }\n}\n\nimpl std$toml$FromToml for P {\n    fun from_toml(j: std$toml$Toml) -> Result<P, std$toml$TomlError> {\n        let fields = std$toml$members(j, \"P\")?\n        return Ok(P {\n            x: std$toml$member<int32>(fields, \"x\")?,\n            tag: std$toml$optional_member<str>(fields, \"tag\")?,\n        })\n    }\n}\n"]
+fun derived_struct_src(f: Serial, name: str, tps: [str], pre: str, fields: [(str, Type)]) -> str {
     let full = with_params(name, tps)
+    let to_trait = f"{pre}To{f.name}"
+    let from_trait = f"{pre}From{f.name}"
+    let value = pre + f.name
     var sb = StringBuilder()
-    sb.append(f"impl{bounded_params(tps, pre + "ToJson")} {pre}ToJson for {full} {{\n    fun to_json(self) -> {pre}Json {{\n")
-    sb.append(f"        var out: [(str, {pre}Json)] = []\n")
-    for f in fields {
-        match option_of(f.1) {
-            Some(t) => { sb.append(f"        if let Some(v) = self.{f.0} {{\n            out.push((\"{f.0}\", v.to_json()))\n        }}\n") },
-            None => { sb.append(f"        out.push((\"{f.0}\", self.{f.0}.to_json()))\n") },
+    sb.append(f"impl{bounded_params(tps, to_trait)} {to_trait} for {full} {{\n    fun to_{f.method}(self) -> {value} {{\n")
+    sb.append(f"        var out: [(str, {value})] = []\n")
+    for fd in fields {
+        match option_of(fd.1) {
+            Some(t) => { sb.append(f"        if let Some(v) = self.{fd.0} {{\n            out.push((\"{fd.0}\", v.to_{f.method}()))\n        }}\n") },
+            None => { sb.append(f"        out.push((\"{fd.0}\", self.{fd.0}.to_{f.method}()))\n") },
         }
     }
-    sb.append(f"        return {pre}Json.Object(out)\n    }}\n}}\n\n")
-    sb.append(f"impl{bounded_params(tps, pre + "FromJson")} {pre}FromJson for {full} {{\n    fun from_json(j: {pre}Json) -> Result<{full}, {pre}JsonError> {{\n")
+    sb.append(f"        return {value}.{f.table}(out)\n    }}\n}}\n\n")
+    sb.append(f"impl{bounded_params(tps, from_trait)} {from_trait} for {full} {{\n    fun from_{f.method}(j: {value}) -> Result<{full}, {value}Error> {{\n")
     sb.append(f"        let fields = {pre}members(j, \"{unqualified(name)}\")?\n        return Ok({name} {{\n")
-    for f in fields {
-        match option_of(f.1) {
-            Some(t) => { sb.append(f"            {f.0}: {pre}optional_member<{type_name(t)}>(fields, \"{f.0}\")?,\n") },
-            None => { sb.append(f"            {f.0}: {pre}member<{type_name(f.1)}>(fields, \"{f.0}\")?,\n") },
+    for fd in fields {
+        match option_of(fd.1) {
+            Some(t) => { sb.append(f"            {fd.0}: {pre}optional_member<{type_name(t)}>(fields, \"{fd.0}\")?,\n") },
+            None => { sb.append(f"            {fd.0}: {pre}member<{type_name(fd.1)}>(fields, \"{fd.0}\")?,\n") },
         }
     }
     sb.append("        })\n    }\n}\n")
@@ -6398,17 +6426,21 @@ fun derived_json_struct_src(name: str, tps: [str], pre: str, fields: [(str, Type
 // The source of the derived impls of the enum `name` with these variants
 // (each its name and payload), externally tagged: `"Red"` for a variant
 // without payload, `{"Dot": x}` for one with one, `{"Line": [a, b]}` for
-// one with more.
-#test("E", [], "std$json$", [("A", []), ("B", [Type.TStr]), ("C", [Type.TInt(32, true), Type.TList(Type.TBool)])])["impl std$json$ToJson for E {\n    fun to_json(self) -> std$json$Json {\n        return match self {\n            A => std$json$Json.Str(\"A\")\n            B(field0) => std$json$Json.Object([(\"B\", field0.to_json())])\n            C(field0, field1) => std$json$Json.Object([(\"C\", std$json$Json.Array([field0.to_json(), field1.to_json()]))])\n        }\n    }\n}\n\nimpl std$json$FromJson for E {\n    fun from_json(j: std$json$Json) -> Result<E, std$json$JsonError> {\n        let v = std$json$variant_of(j, \"E\")?\n        return match v.0 {\n            \"A\" => std$json$unit_variant(v, \"E\", E.A)\n            \"B\" => Ok(E.B(std$json$payload<str>(v, \"E\", 1, 0)?))\n            \"C\" => Ok(E.C(std$json$payload<int32>(v, \"E\", 2, 0)?, std$json$payload<[bool]>(v, \"E\", 2, 1)?))\n            _ => Err(std$json$unknown_variant(v.0, \"E\", [\"A\", \"B\", \"C\"]))\n        }\n    }\n}\n"]
-fun derived_json_enum_src(name: str, tps: [str], pre: str, variants: [(str, [Type])]) -> str {
+// one with more (`{ Dot = x }`, `{ Line = [a, b] }` in TOML).
+#test(json_serial(), "E", [], "std$json$", [("A", []), ("B", [Type.TStr]), ("C", [Type.TInt(32, true), Type.TList(Type.TBool)])])["impl std$json$ToJson for E {\n    fun to_json(self) -> std$json$Json {\n        return match self {\n            A => std$json$Json.Str(\"A\")\n            B(field0) => std$json$Json.Object([(\"B\", field0.to_json())])\n            C(field0, field1) => std$json$Json.Object([(\"C\", std$json$Json.Array([field0.to_json(), field1.to_json()]))])\n        }\n    }\n}\n\nimpl std$json$FromJson for E {\n    fun from_json(j: std$json$Json) -> Result<E, std$json$JsonError> {\n        let v = std$json$variant_of(j, \"E\")?\n        return match v.0 {\n            \"A\" => std$json$unit_variant(v, \"E\", E.A)\n            \"B\" => Ok(E.B(std$json$payload<str>(v, \"E\", 1, 0)?))\n            \"C\" => Ok(E.C(std$json$payload<int32>(v, \"E\", 2, 0)?, std$json$payload<[bool]>(v, \"E\", 2, 1)?))\n            _ => Err(std$json$unknown_variant(v.0, \"E\", [\"A\", \"B\", \"C\"]))\n        }\n    }\n}\n"]
+#test(toml_serial(), "E", ["T"], "", [("A", []), ("B", [Type.TParam("T"), Type.TStr])])["impl<T: ToToml> ToToml for E<T> {\n    fun to_toml(self) -> Toml {\n        return match self {\n            A => Toml.Str(\"A\")\n            B(field0, field1) => Toml.Table([(\"B\", Toml.Array([field0.to_toml(), field1.to_toml()]))])\n        }\n    }\n}\n\nimpl<T: FromToml> FromToml for E<T> {\n    fun from_toml(j: Toml) -> Result<E<T>, TomlError> {\n        let v = variant_of(j, \"E\")?\n        return match v.0 {\n            \"A\" => unit_variant(v, \"E\", E.A)\n            \"B\" => Ok(E.B(payload<T>(v, \"E\", 2, 0)?, payload<str>(v, \"E\", 2, 1)?))\n            _ => Err(unknown_variant(v.0, \"E\", [\"A\", \"B\"]))\n        }\n    }\n}\n"]
+fun derived_enum_src(f: Serial, name: str, tps: [str], pre: str, variants: [(str, [Type])]) -> str {
     let shown = unqualified(name)
     let full = with_params(name, tps)
+    let to_trait = f"{pre}To{f.name}"
+    let from_trait = f"{pre}From{f.name}"
+    let value = pre + f.name
     var sb = StringBuilder()
-    sb.append(f"impl{bounded_params(tps, pre + "ToJson")} {pre}ToJson for {full} {{\n    fun to_json(self) -> {pre}Json {{\n        return match self {{\n")
+    sb.append(f"impl{bounded_params(tps, to_trait)} {to_trait} for {full} {{\n    fun to_{f.method}(self) -> {value} {{\n        return match self {{\n")
     for v in variants {
         let n = v.1.len()
         if n == 0 {
-            sb.append(f"            {v.0} => {pre}Json.Str(\"{v.0}\")\n")
+            sb.append(f"            {v.0} => {value}.Str(\"{v.0}\")\n")
             continue
         }
         var binds: [str] = []
@@ -6416,15 +6448,15 @@ fun derived_json_enum_src(name: str, tps: [str], pre: str, variants: [(str, [Typ
         var k = 0
         while k < n {
             binds.push(f"field{k}")
-            items.push(f"field{k}.to_json()")
+            items.push(f"field{k}.to_{f.method}()")
             k += 1
         }
         var payload = items[0]
-        if n > 1 { payload = f"{pre}Json.Array([{items.join(", ")}])" }
-        sb.append(f"            {v.0}({binds.join(", ")}) => {pre}Json.Object([(\"{v.0}\", {payload})])\n")
+        if n > 1 { payload = f"{value}.Array([{items.join(", ")}])" }
+        sb.append(f"            {v.0}({binds.join(", ")}) => {value}.{f.table}([(\"{v.0}\", {payload})])\n")
     }
     sb.append("        }\n    }\n}\n\n")
-    sb.append(f"impl{bounded_params(tps, pre + "FromJson")} {pre}FromJson for {full} {{\n    fun from_json(j: {pre}Json) -> Result<{full}, {pre}JsonError> {{\n")
+    sb.append(f"impl{bounded_params(tps, from_trait)} {from_trait} for {full} {{\n    fun from_{f.method}(j: {value}) -> Result<{full}, {value}Error> {{\n")
     sb.append(f"        let v = {pre}variant_of(j, \"{shown}\")?\n        return match v.0 {{\n")
     var names: [str] = []
     for v in variants {
@@ -6447,16 +6479,18 @@ fun derived_json_enum_src(name: str, tps: [str], pre: str, variants: [(str, [Typ
     return sb.build()
 }
 
-// Whether a field of type `t` can be in a derived `Json` impl: a scalar, a
-// string, std.json's `Json`, a list, a map with `str` keys, an `Option`, or
-// a type in `json_names` (derived or with both impls written) whose
-// arguments are.
-#test(Type.TMap(Type.TStr, Type.TList(Type.TFloat(32))), [])[true]
-#test(Type.TMap(Type.TInt(32, true), Type.TStr), [])[false]
-#test(Type.TTuple([Type.TStr]), [])[false]
-#test(Type.TEnum("Option", [Type.TStruct("P", [])]), ["P"])[true]
-#test(Type.TStruct("Q", []), ["P"])[false]
-fun is_json_type(t: Type, json_names: [str]) -> bool {
+// Whether a value of type `t` can be in a derived impl of `f`: a scalar, a
+// string, the format's value (`Json`, `Toml`), a list, a map with `str`
+// keys, an `Option` (JSON only: TOML has no null), or a type in `names`
+// (derived or with both impls written) whose arguments are.
+#test(json_serial(), Type.TMap(Type.TStr, Type.TList(Type.TFloat(32))), [])[true]
+#test(json_serial(), Type.TMap(Type.TInt(32, true), Type.TStr), [])[false]
+#test(json_serial(), Type.TTuple([Type.TStr]), [])[false]
+#test(json_serial(), Type.TEnum("Option", [Type.TStruct("P", [])]), ["P"])[true]
+#test(json_serial(), Type.TStruct("Q", []), ["P"])[false]
+#test(toml_serial(), Type.TEnum("Option", [Type.TStr]), [])[false]
+#test(toml_serial(), Type.TList(Type.TStruct("P", [])), ["P"])[true]
+fun is_serial_type(f: Serial, t: Type, names: [str]) -> bool {
     return match t {
         Type.TInt(w, s) => true,
         Type.TFloat(w) => true,
@@ -6464,31 +6498,69 @@ fun is_json_type(t: Type, json_names: [str]) -> bool {
         Type.TStr => true,
         Type.TChar => true,
         Type.TError => true,          // has had its error (MYLA-110)
-        Type.TList(e) => is_json_type(e, json_names),
-        Type.TMap(k, v) => match k { Type.TStr => is_json_type(v, json_names), _ => false },
-        Type.TStruct(n, a) => contains_str(json_names, n) && all_json_types(a, json_names),
-        Type.TEnum(n, a) => (n == "Option" || contains_str(json_names, n)) && all_json_types(a, json_names),
+        Type.TList(e) => is_serial_type(f, e, names),
+        Type.TMap(k, v) => match k { Type.TStr => is_serial_type(f, v, names), _ => false },
+        Type.TStruct(n, a) => contains_str(names, n) && all_serial_types(f, a, names),
+        Type.TEnum(n, a) => ((n == "Option" && f.has_null) || contains_str(names, n)) && all_serial_types(f, a, names),
         Type.TParam(n) => true,
         _ => false,
     }
 }
 
-fun all_json_types(ts: [Type], json_names: [str]) -> bool {
+fun all_serial_types(f: Serial, ts: [Type], names: [str]) -> bool {
     for t in ts {
-        if !is_json_type(t, json_names) { return false }
+        if !is_serial_type(f, t, names) { return false }
     }
     return true
 }
 
-// What a refusal of a field of type `t` adds: why a map or a tuple isn't.
-#test(Type.TMap(Type.TInt(32, true), Type.TStr))[" (a map is an object only with 'str' keys)"]
-#test(Type.TStr)[""]
-fun json_note(t: Type) -> str {
+// Whether a struct's field of type `t` can be in a derived impl of `f`: an
+// `Option` of such a type too, left out when `None`.
+#test(toml_serial(), Type.TEnum("Option", [Type.TStr]), [])[true]
+#test(toml_serial(), Type.TEnum("Option", [Type.TEnum("Option", [Type.TStr])]), [])[false]
+fun serial_field_ok(f: Serial, t: Type, names: [str]) -> bool {
+    if f.has_null { return is_serial_type(f, t, names) }
+    return match option_of(t) {
+        Some(inner) => is_serial_type(f, inner, names)
+        None => is_serial_type(f, t, names)
+    }
+}
+
+// What a refusal of a field of type `t` for `f` adds: why a map, a tuple or
+// (in TOML) an `Option` isn't.
+#test(json_serial(), Type.TMap(Type.TInt(32, true), Type.TStr))[" (a map is an object only with 'str' keys)"]
+#test(json_serial(), Type.TStr)[""]
+#test(toml_serial(), Type.TList(Type.TEnum("Option", [Type.TInt(32, true)])))[" (TOML has no null: an 'Option' can only be a struct's field, left out when 'None')"]
+#test(toml_serial(), Type.TTuple([Type.TStr]))[" (a tuple has no TOML form: make it a struct)"]
+#test(toml_serial(), Type.TMap(Type.TInt(32, true), Type.TStr))[" (a map is a table only with 'str' keys)"]
+fun serial_note(f: Serial, t: Type) -> str {
+    if !f.has_null && holds_option(t) { return f" ({f.title} has no null: an 'Option' can only be a struct's field, left out when 'None')" }
     return match t {
-        Type.TMap(k, v) => match k { Type.TStr => "", _ => " (a map is an object only with 'str' keys)" },
-        Type.TTuple(es) => " (a tuple has no JSON form: make it a struct)",
+        Type.TMap(k, v) => match k { Type.TStr => "", _ => f" (a map is {f.table_word} only with 'str' keys)" },
+        Type.TTuple(es) => f" (a tuple has no {f.title} form: make it a struct)",
         _ => "",
     }
+}
+
+// Whether `t` is or holds an `Option` (in a list, a map or a type's
+// arguments).
+#test(Type.TMap(Type.TStr, Type.TEnum("Option", [Type.TStr])))[true]
+#test(Type.TList(Type.TStr))[false]
+fun holds_option(t: Type) -> bool {
+    return match t {
+        Type.TEnum(n, a) => n == "Option" || any_holds_option(a),
+        Type.TStruct(n, a) => any_holds_option(a),
+        Type.TList(e) => holds_option(e),
+        Type.TMap(k, v) => holds_option(k) || holds_option(v),
+        _ => false,
+    }
+}
+
+fun any_holds_option(ts: [Type]) -> bool {
+    for t in ts {
+        if holds_option(t) { return true }
+    }
+    return false
 }
 
 // The impl `d` (`impl Hash for Derived`), for the type `name` instead.
@@ -6548,10 +6620,12 @@ impl Checker {
         var eq_targets: [Decl] = []
         var hash_targets: [Decl] = []
         var json_targets: [Decl] = []
+        var toml_targets: [Decl] = []
         for d in targets {
             if derives(decl_attrs(d), "Eq") { eq_targets.push(d) }
             if derives(decl_attrs(d), "Hash") { hash_targets.push(d) }
             if derives(decl_attrs(d), "Json") { json_targets.push(d) }
+            if derives(decl_attrs(d), "Toml") { toml_targets.push(d) }
         }
         var eq_names: [str] = []
         for d in eq_targets { eq_names.push(decl_kind_name(d)) }
@@ -6607,7 +6681,8 @@ impl Checker {
             self.user_trait_impls.push(TraitImplPair { trait_name: "Eq", key: name })
         }
         if hash_targets.len() > 0 { self.derive_hashes(hash_targets, eq_names)? }
-        if json_targets.len() > 0 { self.derive_json(json_targets)? }
+        if json_targets.len() > 0 { self.derive_serial(json_serial(), json_targets)? }
+        if toml_targets.len() > 0 { self.derive_serial(toml_serial(), toml_targets)? }
         return Ok(0)
     }
 
@@ -6739,16 +6814,23 @@ impl Checker {
     // without it.
     #test(checker_on("[int]"))[None]
     fun json_prefix(self) -> Option<str> {
-        for pre in ["std$json$", ""] {
-            if self.trait_idx(pre + "ToJson") >= 0 && self.trait_idx(pre + "FromJson") >= 0 && self.enum_idx(pre + "Json") >= 0 && self.func_idx(pre + "unknown_variant") >= 0 {
+        return self.serial_prefix(json_serial())
+    }
+
+    // How the names of `f`'s module (std.json, std.toml) are qualified (see
+    // `json_prefix`).
+    #test(checker_on("[int]"), toml_serial())[None]
+    fun serial_prefix(self, f: Serial) -> Option<str> {
+        for pre in [f"std${f.method}$", ""] {
+            if self.trait_idx(f"{pre}To{f.name}") >= 0 && self.trait_idx(f"{pre}From{f.name}") >= 0 && self.enum_idx(pre + f.name) >= 0 && self.func_idx(pre + "unknown_variant") >= 0 {
                 return Some(pre)
             }
         }
         return None
     }
 
-    // The help for a struct or enum `t` that isn't std.json's trait `trnm`:
-    // the derive that gives it one.
+    // The help for a struct or enum `t` that isn't std.json's or std.toml's
+    // trait `trnm`: the derive that gives it one.
     #test(checker_on("struct P { x: int }"), Type.TStruct("P", []), "ToJson")[[]]
     fun json_help(self, t: Type, trnm: str) -> [Note] {
         let name = match t {
@@ -6756,54 +6838,63 @@ impl Checker {
             Type.TEnum(n, a) => n,
             _ => "",
         }
-        match self.json_prefix() {
-            Some(pre) => {
-                if name != "" && (trnm == pre + "ToJson" || trnm == pre + "FromJson") {
-                    return [Note { label: "help", msg: f"'#derive(Json)' on '{name}' gives it 'ToJson' and 'FromJson' (D172)", line: 0, col: 0, sp: no_span() }]
-                }
-            },
-            None => {},
+        for f in [json_serial(), toml_serial()] {
+            match self.serial_prefix(f) {
+                Some(pre) => {
+                    if name != "" && (trnm == f"{pre}To{f.name}" || trnm == f"{pre}From{f.name}") {
+                        return [Note { label: "help", msg: f"'#derive({f.name})' on '{name}' gives it 'To{f.name}' and 'From{f.name}' (D172)", line: 0, col: 0, sp: no_span() }]
+                    }
+                },
+                None => {},
+            }
         }
         return []
     }
 
-    // `name`'s `ToJson` and `FromJson` are broken: their uses stop silently
-    // (MYLA-110).
+    // `name`'s `ToJson` and `FromJson` (and `ToToml` and `FromToml`) are
+    // broken: their uses stop silently (MYLA-110).
     fun mark_json_broken(var self, name: str) {
-        match self.json_prefix() {
+        for f in [json_serial(), toml_serial()] { self.mark_serial_broken(f, name) }
+    }
+
+    fun mark_serial_broken(var self, f: Serial, name: str) {
+        match self.serial_prefix(f) {
             Some(pre) => {
-                self.broken_impls[pre + "ToJson\t" + name] = true
-                self.broken_impls[pre + "FromJson\t" + name] = true
+                self.broken_impls[f"{pre}To{f.name}\t{name}"] = true
+                self.broken_impls[f"{pre}From{f.name}\t{name}"] = true
             },
             None => {},
         }
     }
 
-    // `#derive(Json)` (D172, MYLA-385) of each of `targets`: an `impl
-    // ToJson` and an `impl FromJson` written for it as source
-    // (`derived_json_struct_src`, `derived_json_enum_src`) against std.json,
-    // which the program must import, and checked and run as any other. Its
-    // fields' types must have both impls (built-in, derived or written).
-    fun derive_json(var self, targets: [Decl]) -> Result<int32, CheckErr> {
-        let pre = match self.json_prefix() {
+    // `#derive(Json)` (D172, MYLA-385) or `#derive(Toml)` (MYLA-407), `f`,
+    // of each of `targets`: an `impl ToJson` and an `impl FromJson` written
+    // for it as source (`derived_struct_src`, `derived_enum_src`) against
+    // std.json (std.toml), which the program must import, and checked and
+    // run as any other. Its fields' types must have both impls (built-in,
+    // derived or written).
+    fun derive_serial(var self, f: Serial, targets: [Decl]) -> Result<int32, CheckErr> {
+        let to_trait = f"To{f.name}"
+        let from_trait = f"From{f.name}"
+        let pre = match self.serial_prefix(f) {
             Some(p) => p,
             None => {
                 for decl in targets {
                     self.cur_decl = decl.id
-                    self.record(terr_at(decl.line, decl.col, decl.sp, format("cannot derive Json for '{}': std.json isn't imported (write 'import std.json as json')", decl_kind_name(decl))))?
+                    self.record(terr_at(decl.line, decl.col, decl.sp, f"cannot derive {f.name} for '{decl_kind_name(decl)}': std.{f.method} isn't imported (write 'import std.{f.method} as {f.method}')"))?
                 }
                 return Ok(0)
             },
         }
-        var json_names: [str] = [pre + "Json"]
-        for d in targets { json_names.push(decl_kind_name(d)) }
+        var names: [str] = [pre + f.name]
+        for d in targets { names.push(decl_kind_name(d)) }
         // a type with both impls written
         for d in self.impl_decls {
-            match impl_target_name(d, pre + "ToJson") {
+            match impl_target_name(d, pre + to_trait) {
                 Some(nm) => {
                     for e in self.impl_decls {
-                        match impl_target_name(e, pre + "FromJson") {
-                            Some(other) => { if other == nm && !contains_str(json_names, nm) { json_names.push(nm) } },
+                        match impl_target_name(e, pre + from_trait) {
+                            Some(other) => { if other == nm && !contains_str(names, nm) { names.push(nm) } },
                             None => {},
                         }
                     }
@@ -6816,7 +6907,7 @@ impl Checker {
             let name = decl_kind_name(decl)
             var explicit = ""
             for d in self.impl_decls {
-                for trnm in ["ToJson", "FromJson"] {
+                for trnm in [to_trait, from_trait] {
                     match impl_target_name(d, pre + trnm) {
                         Some(nm) => { if nm == name { explicit = trnm } },
                         None => {},
@@ -6824,14 +6915,14 @@ impl Checker {
                 }
             }
             if explicit != "" {
-                self.record(terr_at(decl.line, decl.col, decl.sp, format("type '{}' both derives Json and has an explicit 'impl {} for {}'", name, explicit, name)))?
+                self.record(terr_at(decl.line, decl.col, decl.sp, f"type '{name}' both derives {f.name} and has an explicit 'impl {explicit} for {name}'"))?
                 continue
             }
-            match self.check_derivable_json(decl, name, json_names) {
+            match self.check_derivable_serial(f, decl, name, names) {
                 Ok(x) => {},
                 Err(e) => {
                     self.record(e)?
-                    self.mark_json_broken(name)
+                    self.mark_serial_broken(f, name)
                     continue
                 },
             }
@@ -6839,15 +6930,15 @@ impl Checker {
             let si = self.struct_idx(name)
             if si >= 0 {
                 var fields: [(str, Type)] = []
-                for f in self.structs[si].fields { fields.push((f.name, f.ty)) }
-                src = derived_json_struct_src(name, self.type_params_of(name), pre, fields)
+                for fd in self.structs[si].fields { fields.push((fd.name, fd.ty)) }
+                src = derived_struct_src(f, name, self.type_params_of(name), pre, fields)
             } else {
                 var variants: [(str, [Type])] = []
                 let ei = self.enum_idx(name)
                 if ei >= 0 {
                     for v in self.enums[ei].variants { variants.push((v.name, v.payload)) }
                 }
-                src = derived_json_enum_src(name, self.type_params_of(name), pre, variants)
+                src = derived_enum_src(f, name, self.type_params_of(name), pre, variants)
             }
             match parse_qualified(src, self.next_id) {
                 Ok(p) => {
@@ -6857,17 +6948,26 @@ impl Checker {
                         self.impl_decls.push(d)
                     }
                 },
-                Err(d) => { panic(f"a derived Json impl does not parse: {d.msg}\n{src}") },
+                Err(d) => { panic(f"a derived {f.name} impl does not parse: {d.msg}\n{src}") },
             }
         }
         return Ok(0)
     }
 
-    fun check_derivable_json(self, decl: Decl, name: str, json_names: [str]) -> Result<int32, CheckErr> {
+    fun check_derivable_serial(self, f: Serial, decl: Decl, name: str, names: [str]) -> Result<int32, CheckErr> {
         let si = self.struct_idx(name)
         if si >= 0 {
-            for f in self.structs[si].fields {
-                if !is_json_type(f.ty, json_names) { return Err(terr_at(decl.line, decl.col, decl.sp, format("cannot derive Json for struct '{}': field '{}' has type '{}', which isn't ToJson and FromJson{}", name, f.name, type_name(f.ty), json_note(f.ty)))) }
+            for fd in self.structs[si].fields {
+                if serial_field_ok(f, fd.ty, names) { continue }
+                // what is wrong is inside a field's `Option`, which may be one
+                var inner = fd.ty
+                if !f.has_null {
+                    match option_of(fd.ty) {
+                        Some(t) => { inner = t },
+                        None => {},
+                    }
+                }
+                return Err(terr_at(decl.line, decl.col, decl.sp, f"cannot derive {f.name} for struct '{name}': field '{fd.name}' has type '{type_name(fd.ty)}', which isn't To{f.name} and From{f.name}{serial_note(f, inner)}"))
             }
             return Ok(0)
         }
@@ -6876,7 +6976,7 @@ impl Checker {
             for v in self.enums[ei].variants {
                 var i = 0
                 for pt in v.payload {
-                    if !is_json_type(pt, json_names) { return Err(terr_at(decl.line, decl.col, decl.sp, format("cannot derive Json for enum '{}': payload #{} of variant '{}' has type '{}', which isn't ToJson and FromJson{}", name, i, v.name, type_name(pt), json_note(pt)))) }
+                    if !is_serial_type(f, pt, names) { return Err(terr_at(decl.line, decl.col, decl.sp, f"cannot derive {f.name} for enum '{name}': payload #{i} of variant '{v.name}' has type '{type_name(pt)}', which isn't To{f.name} and From{f.name}{serial_note(f, pt)}")) }
                     i = i + 1
                 }
             }
@@ -6943,7 +7043,7 @@ impl Checker {
         if attr.args.len() == 0 { return Err(terr_at(attr.line, attr.col, attr.sp, "'#derive' needs at least one trait, e.g. #derive(Eq)")) }
         for a in attr.args {
             match a.kind {
-                ExprKind.Name(id) => { if id != "Eq" && id != "Hash" && id != "Json" { return Err(terr_at(a.line, a.col, a.sp, format("cannot derive '{}': only 'Eq', 'Hash' and 'Json' are derivable", id))) } },
+                ExprKind.Name(id) => { if id != "Eq" && id != "Hash" && id != "Json" && id != "Toml" { return Err(terr_at(a.line, a.col, a.sp, format("cannot derive '{}': only 'Eq', 'Hash', 'Json' and 'Toml' are derivable", id))) } },
                 _ => { return Err(terr_at(a.line, a.col, a.sp, "'#derive' arguments must be trait names")) },
             }
         }
@@ -8081,6 +8181,12 @@ pub fun checker_on(src: str) -> Checker {
 #test("enum Json { Null }\ntrait ToJson { fun to_json(self) -> Json }\ntrait FromJson { fun from_json(j: Json) -> Self }\nfun unknown_variant() {}\n#derive(Json)\nstruct P { x: (int, str) }")[["cannot derive Json for struct 'P': field 'x' has type '(int32, str)', which isn't ToJson and FromJson (a tuple has no JSON form: make it a struct)"]]
 #test("enum Json { Null }\ntrait ToJson { fun to_json(self) -> Json }\ntrait FromJson { fun from_json(j: Json) -> Self }\nfun unknown_variant() {}\nstruct Q { x: int }\n#derive(Json)\nenum E { A, B([str: Q]) }")[["cannot derive Json for enum 'E': payload #0 of variant 'B' has type '[str: Q]', which isn't ToJson and FromJson"]]
 #test("#derive(Json)\nstruct B<T> { v: T }")[["cannot derive Json for 'B': std.json isn't imported (write 'import std.json as json')"]]
+// `#derive(Toml)` (MYLA-407): without std.toml; an `Option` only as a
+// struct's field (TOML has no null)
+#test("#derive(Toml)\nstruct P { x: int }")[["cannot derive Toml for 'P': std.toml isn't imported (write 'import std.toml as toml')"]]
+#test("enum Toml { Str(str) }\ntrait ToToml { fun to_toml(self) -> Toml }\ntrait FromToml { fun from_toml(t: Toml) -> Self }\nfun unknown_variant() {}\nenum Option<T> { Some(T), None }\n#derive(Toml)\nstruct P { x: Option<int>, y: [Option<str>] }")[["cannot derive Toml for struct 'P': field 'y' has type '[Option<str>]', which isn't ToToml and FromToml (TOML has no null: an 'Option' can only be a struct's field, left out when 'None')"]]
+#test("enum Toml { Str(str) }\ntrait ToToml { fun to_toml(self) -> Toml }\ntrait FromToml { fun from_toml(t: Toml) -> Self }\nfun unknown_variant() {}\nenum Option<T> { Some(T), None }\n#derive(Toml)\nstruct P { x: Option<(int, int)> }")[["cannot derive Toml for struct 'P': field 'x' has type 'Option<(int32, int32)>', which isn't ToToml and FromToml (a tuple has no TOML form: make it a struct)"]]
+#test("enum Toml { Str(str) }\ntrait ToToml { fun to_toml(self) -> Toml }\ntrait FromToml { fun from_toml(t: Toml) -> Self }\nfun unknown_variant() {}\nenum Option<T> { Some(T), None }\n#derive(Toml)\nenum E { A, B(Option<int>) }")[["cannot derive Toml for enum 'E': payload #0 of variant 'B' has type 'Option<int32>', which isn't ToToml and FromToml (TOML has no null: an 'Option' can only be a struct's field, left out when 'None')"]]
 #test("#derive(Eq)\nstruct B<T> { v: T }\nstruct N { x: int }\nfun f(b: B<N>) -> bool { return b == b }")[["operator '==' is not defined for 'B<N>': 'N' isn't Eq (it needs 'impl Eq for N' or '#derive(Eq)')"]]
 #test("#derive(Eq)\nenum Option<T> { Some(T), None }\nfun f(a: Option<[str: int]>) -> bool { return a == None }")[["operator '==' is not defined for 'Option<[str: int32]>': '[str: int32]' isn't Eq"]]
 fun errors_of(src: str) -> [str] {

@@ -1,0 +1,17 @@
+//~ type error: cannot derive Toml for struct 'Edge': field 'ends' has type '(int32, int32)', which isn't ToToml and FromToml (a tuple has no TOML form: make it a struct)
+// A derived `Toml` needs every field to have a TOML form (MYLA-407); a tuple
+// has none.
+import std.toml as toml
+
+#derive(Toml)
+struct Edge {
+    label: str,
+    ends: (int, int),
+}
+
+fun main() {
+    match toml.encode(Edge { label: "e", ends: (1, 2) }) {
+        Ok(t) => print(t)
+        Err(e) => print(f"{e}")
+    }
+}

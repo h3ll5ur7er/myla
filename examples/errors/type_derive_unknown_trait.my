@@ -1,5 +1,6 @@
 //~ type error: cannot derive 'Ord'
-// Only `Eq`, `Hash` (D163) and `Json` (D172) are derivable; `Ord` is not yet.
+// Only `Eq`, `Hash` (D163), `Json` (D172) and `Toml` (MYLA-407) are
+// derivable; `Ord` is not yet.
 #derive(Ord)
 struct P { x: int }
 fun main() {}
