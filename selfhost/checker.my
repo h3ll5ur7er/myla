@@ -1728,6 +1728,7 @@ pub struct Checker {
     warnings: [CheckErr],           // D95: the warnings found, in the order found
     primitives: bool,               // a program may call the raw-memory primitives (`gen_main --primitives`, the toolchain's tests)
     std_impls: [int32: DeclOrigin], // the standard library's impls by node id (the loader's): their methods are its code (MYLA-320); and an entry std module's functions (MYLA-388)
+    mutating_calls: [int32: bool],  // the calls of a `var self` method in an actor's methods, by node id: D95 counts one on a field of `self` as a change of it (MYLA-394)
     renames: [int32: str],          // a callee's node id -> the name it stands for, put in by `fill_in`: `cancel` inside std.task is `std$task$cancel` (MYLA-388)
     // `#allow` (D161): the warnings the function being checked silences
     // (`primitive`, `primitive:__poll`, `reentrancy`), and the impl block's
@@ -1817,7 +1818,7 @@ fun new_checker(decls: [Decl]) -> Checker {
         call_kind: "", call_kind_id: -1, targs_taken: -1, call_target: "", call_mutates: false, fun_name: "", handovers: [:], become_words: [], passed_on: [],
         actors: [:], conc_line: 0, conc_col: 0, conc_sp: no_span(), conc_node: -1, in_async: false, self_assignable: false, actor_self: "", builtin_as_method: false, cur_key: "",
         lams: [], awaited: [:], call_key: "", call_async: false, suspended: -1, task_init: false, in_guard: false, neg_lit: -1,
-        task_line: 0, task_col: 0, task_sp: no_span(), task_node: -1, fill_decls: [:], renames: [:],
+        task_line: 0, task_col: 0, task_sp: no_span(), task_node: -1, fill_decls: [:], renames: [:], mutating_calls: [:],
     }
 }
 
@@ -5786,6 +5787,7 @@ impl Checker {
         self.call_mutates = mutates
         self.call_key = key
         self.call_async = asy
+        if mutates && self.actor_self != "" { self.mutating_calls[e.id] = true }
     }
 
     #test(checker_on("[int]"), BindElem.BWild, Type.TParam("T"), false)[Ok(0)]
@@ -7012,7 +7014,7 @@ impl Checker {
                     match fd.body {
                         Some(b) => {
                             let (changes, examines) = self.self_effects(self.actor_self)
-                            var r = Reentrancy { epoch: 0, checked: [:], locals: [:], awaits: [], out: [], changes: changes, examines: examines }
+                            var r = Reentrancy { epoch: 0, checked: [:], locals: [:], awaits: [], out: [], changes: changes, examines: examines, mutators: self.mutating_calls }
                             r.block(b)
                             if !contains_str(self.allowed, "reentrancy") {
                                 for w in r.out { self.warnings.push(CheckErr { line: w.line, col: w.col, sp: w.sp, msg: w.msg, decl: id, notes: w.notes }) }
@@ -7048,7 +7050,7 @@ impl Checker {
             if self.method_decl_keys[i] == key && !fd.is_async && !direct.contains(name) {
                 match fd.body {
                     Some(b) => {
-                        var e = Effects { changes: [], examines: [], calls: [] }
+                        var e = Effects { changes: [], examines: [], calls: [], mutators: self.mutating_calls }
                         e.block(b)
                         direct[name] = e
                         names.push(name)
@@ -7291,6 +7293,18 @@ pub fun checker_on(src: str) -> Checker {
 fun errors_of(src: str) -> [str] {
     var out: [str] = []
     for e in checker_on(src).errs { out.push(e.msg) }
+    return out
+}
+
+// D95's warnings of `src`: a mutator on a field of `self` changes it inside
+// an expression too (MYLA-394)
+#test("actor P { n: int }\nimpl P { fun charge(var self) -> bool { return true } }\nstruct C { n: int }\nimpl C { fun bump(var self) -> int { self.n += 1\nreturn self.n } }\nactor S { items: [int], c: C }\nimpl S { async fun sell(var self, p: P) -> int { if self.items.len() == 0 || self.c.n > 9 { return 0 }\nlet paid = await p.charge()\nlet x = self.items.pop()\nreturn x } }")[["'self.items' was checked before an 'await' and is changed after it: another call to this actor may have changed it meanwhile"]]
+#test("actor P { n: int }\nimpl P { fun charge(var self) -> bool { return true } }\nstruct C { n: int }\nimpl C { fun bump(var self) -> int { self.n += 1\nreturn self.n } }\nactor S { items: [int], c: C }\nimpl S { async fun sell(var self, p: P) -> int { if self.items.len() == 0 || self.c.n > 9 { return 0 }\nlet paid = await p.charge()\nreturn self.c.bump() + 1 } }")[["'self.c' was checked before an 'await' and is changed after it: another call to this actor may have changed it meanwhile"]]
+#test("actor P { n: int }\nimpl P { fun charge(var self) -> bool { return true } }\nstruct C { n: int }\nimpl C { fun bump(var self) -> int { self.n += 1\nreturn self.n } }\nactor S { items: [int], c: C }\nimpl S { async fun sell(var self, p: P) -> int { if self.items.len() == 0 || self.c.n > 9 { return 0 }\nlet x = self.items.pop() + self.c.bump()\nlet paid = await p.charge()\nreturn x } }")[[]]
+#test("actor P { n: int }\nimpl P { fun charge(var self) -> bool { return true } }\nstruct C { n: int }\nimpl C { fun bump(var self) -> int { self.n += 1\nreturn self.n } }\nactor S { items: [int], c: C }\nimpl S { async fun sell(var self, p: P) -> int { if self.items.len() == 0 || self.c.n > 9 { return 0 }\nlet paid = await p.charge()\nself.items.push(self.c.bump())\nreturn 1 } }")[["'self.items' was checked before an 'await' and is changed after it: another call to this actor may have changed it meanwhile", "'self.c' was checked before an 'await' and is changed after it: another call to this actor may have changed it meanwhile"]]
+fun warnings_of(src: str) -> [str] {
+    var out: [str] = []
+    for w in checker_on(src).warnings { out.push(w.msg) }
     return out
 }
 
@@ -8897,8 +8911,9 @@ fun self_method(c: Expr) -> str {
     return ""
 }
 
-// The calls of methods of `self` in `e`, innermost first, outside lambdas
-// and the block arms of a `match` (statements of their own, MYLA-171).
+// The calls of methods of `self` and of its fields (`self.items.pop()`,
+// MYLA-394) in `e`, innermost first, outside lambdas and the block arms of a
+// `match` (statements of their own, MYLA-171).
 #test(expr_of("f(1) + other.g(2)"))[[]]
 #test(expr_of("() => self.a()"))[[]]
 fun self_calls(e: Expr) -> [Expr] {
@@ -8944,7 +8959,10 @@ fun self_calls(e: Expr) -> [Expr] {
     }
     for x in subs { for c in self_calls(x) { out.push(c) } }
     match e.kind {
-        ExprKind.Call(c, args, _) => { if self_method(c) != "" { out.push(e) } },
+        ExprKind.Call(c, args, _) => {
+            let on_field = match c.kind { ExprKind.GetField(recv, m) => self_field(recv) != "", _ => false }
+            if self_method(c) != "" || on_field { out.push(e) }
+        },
         _ => {},
     }
     return out
@@ -8952,9 +8970,10 @@ fun self_calls(e: Expr) -> [Expr] {
 
 // What the body of a synchronous method of an actor does to the actor's
 // fields itself (MYLA-171): the fields it changes (assigned, or changed by
-// `push`, `pop`, `remove` or `append`), those it examines, and the methods
-// of `self` it calls, each in the order first met.
-struct Effects { changes: [str], examines: [str], calls: [str] }
+// `push`, `pop`, `remove` or `append` or a `var self` method, the calls of
+// one in `mutators`), those it examines, and the methods of `self` it calls,
+// each in the order first met.
+struct Effects { changes: [str], examines: [str], calls: [str], mutators: [int32: bool] }
 
 impl Effects {
     fun block(var self, b: Block) {
@@ -9022,7 +9041,7 @@ impl Effects {
                 match c.kind {
                     ExprKind.GetField(recv, bm) => {
                         let root = self_field(recv)
-                        if root != "" && mutating_builtin(bm) { self.changes = add_name(self.changes, root) }
+                        if root != "" && (mutating_builtin(bm) || self.mutators.contains(e.id)) { self.changes = add_name(self.changes, root) }
                     },
                     _ => {},
                 }
@@ -9316,11 +9335,12 @@ fun starts(s: str, prefix: str) -> bool {
 // field was last examined in by a condition, `locals` what each local was read
 // from, `awaits` the `await` that started each epoch after the first.
 // `changes` and `examines`: the fields each synchronous method of the actor
-// changes and examines, through the methods it calls (MYLA-171).
-struct Reentrancy { epoch: int32, checked: [str: int32], locals: [str: Taint], awaits: [Expr], out: [CheckErr], changes: [str: [str]], examines: [str: [str]] }
+// changes and examines, through the methods it calls (MYLA-171); `mutators`
+// the calls of `var self` methods, by node id (MYLA-394).
+struct Reentrancy { epoch: int32, checked: [str: int32], locals: [str: Taint], awaits: [Expr], out: [CheckErr], changes: [str: [str]], examines: [str: [str]], mutators: [int32: bool] }
 
 impl Reentrancy {
-    #test(Reentrancy { epoch: 0, checked: [:], locals: [:], awaits: [], out: [], changes: [:], examines: [:] }, expr_of("-n * 2"))[Reads { fields: [], names: [], awaits: [], examines: [:] }]
+    #test(Reentrancy { epoch: 0, checked: [:], locals: [:], awaits: [], out: [], changes: [:], examines: [:], mutators: [:] }, expr_of("-n * 2"))[Reads { fields: [], names: [], awaits: [], examines: [:] }]
     fun scan(self, e: Expr) -> Reads {
         var r = Reads { fields: [], names: [], awaits: [], examines: self.examines }
         r.expr(e, self.locals)
@@ -9339,7 +9359,7 @@ impl Reentrancy {
     }
 
     // `e` examined as a condition; its awaits.
-    #test(Reentrancy { epoch: 0, checked: [:], locals: [:], awaits: [], out: [], changes: [:], examines: [:] }, expr_of("-n * 2"))[[]]
+    #test(Reentrancy { epoch: 0, checked: [:], locals: [:], awaits: [], out: [], changes: [:], examines: [:], mutators: [:] }, expr_of("-n * 2"))[[]]
     fun check(var self, e: Expr) -> [Expr] {
         let r = self.scan(e)
         for n in r.names {
@@ -9371,7 +9391,7 @@ impl Reentrancy {
 
     // A statement's value: a `match`'s scrutinee and guards are conditions and
     // its block arms statements; its awaits.
-    #test(Reentrancy { epoch: 0, checked: ["balance": 0], locals: [:], awaits: [], out: [], changes: [:], examines: [:] }, Expr { id: 26, line: 22, col: 20, sp: SrcSpan { sline: 22, scol: 20, eline: 22, ecol: 25 }, kind: ExprKind.BoolLit(false) })[[]]
+    #test(Reentrancy { epoch: 0, checked: ["balance": 0], locals: [:], awaits: [], out: [], changes: [:], examines: [:], mutators: [:] }, Expr { id: 26, line: 22, col: 20, sp: SrcSpan { sline: 22, scol: 20, eline: 22, ecol: 25 }, kind: ExprKind.BoolLit(false) })[[]]
     fun value(var self, e: Expr) -> [Expr] {
         match e.kind {
             ExprKind.MatchE(sc, arms) => {
@@ -9463,7 +9483,7 @@ impl Reentrancy {
                         match c.kind {
                             ExprKind.GetField(recv, m) => {
                                 let root = self_field(recv)
-                                if root != "" && mutating_builtin(m) {
+                                if root != "" && (mutating_builtin(m) || self.mutators.contains(e.id)) {
                                     var names: [str] = []
                                     var awaits: [Expr] = []
                                     for a in args {
@@ -9472,6 +9492,8 @@ impl Reentrancy {
                                         for aw in r.awaits { awaits.push(aw) }
                                     }
                                     self.suspend(awaits)
+                                    // its arguments' own changes first (MYLA-394)
+                                    for a in args { self.call_changes(a) }
                                     self.write(root, names, e)
                                     return
                                 }
@@ -9518,18 +9540,29 @@ impl Reentrancy {
     }
 
     // The calls of methods of `self` in `e` change what those methods change
-    // (MYLA-171), each with the locals its arguments read.
+    // (MYLA-171), and a mutator on a field of `self` that field, wherever it
+    // stands (MYLA-394): each with the locals its arguments read.
     fun call_changes(var self, e: Expr) {
         for c in self_calls(e) {
             match c.kind {
                 ExprKind.Call(callee, args, _) => {
+                    var fs: [str] = []
                     match self.changes.get(self_method(callee)) {
-                        Some(fs) => {
-                            var names: [str] = []
-                            for a in args { for n in self.scan(a).names { names = add_name(names, n) } }
-                            for f in fs { self.write(f, names, c) }
+                        Some(x) => { fs = x },
+                        None => {
+                            match callee.kind {
+                                ExprKind.GetField(recv, m) => {
+                                    let root = self_field(recv)
+                                    if root != "" && (mutating_builtin(m) || self.mutators.contains(c.id)) { fs = [root] }
+                                },
+                                _ => {},
+                            }
                         },
-                        None => {},
+                    }
+                    if fs.len() > 0 {
+                        var names: [str] = []
+                        for a in args { for n in self.scan(a).names { names = add_name(names, n) } }
+                        for f in fs { self.write(f, names, c) }
                     }
                 },
                 _ => {},
