@@ -207,10 +207,9 @@ fun map_iter() {
     var m = ages()
     m["cy"] = 5
     m["bob"] = 28
-    // `while let`, not `for`: see `iterates` in std.list
     var sb = StringBuilder()
-    var it = m.iter()
-    while let Some((k, v)) = it.next() {
+    for p in m.iter() {
+        let (k, v) = p
         sb.append(f"{k}={v};")
     }
     assert(sb.build() == "bob=28;ann=31;cy=5;", "pairs in insertion order")

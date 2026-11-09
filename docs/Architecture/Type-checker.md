@@ -92,7 +92,7 @@ The checker checks these forms and records what they mean (their types in `resol
 | `a + b` on a struct/enum | `a.add(b)`; `==` → `a.eq(b)`, `!=` → `!a.eq(b)`, `<` → `a.cmp(b) < 0` | `infer_operator_overload` |
 | `#derive(Eq)` | an `impl Eq` (field-wise `&&`, or a `match` on `(self, other)`), registered as a structural impl | `synthesize_derives` |
 | `recv.m(x)` | a call of the method `Type.m` | `infer_method_call` |
-| `for x in e`, `e` an iterator (D171) | `if true { var %iter<id> = e; while true { match %iter<id>.next() { Some(x) => { body }, None => { break } } } }`, built with new node ids and checked in place of the `for`; unlike the forms above, `fill_in` puts it in the program where the `for` was, after the check, so the interpreter, the lowering and every backend run that loop | `check_for_iterator` |
+| `for x in e`, `e` an iterator (D171) | `if true { var %iter<id> = e; while true { match %iter<id>.next() { Some(x) => { body }, None => { break } } } }`, built with new node ids and checked in place of the `for`; unlike the forms above, `fill_in` puts it in the program where the `for` was, after the check, so the interpreter, the lowering and every backend run that loop. It rebuilds only the bodies of the declarations holding such a loop or a call given defaults (`fill_decls`, [[MYLA-382]]) | `check_for_iterator` |
 
 Operators on a bounded type parameter (`T: Add`) are resolved once `T` is concrete: by the interpreter at run time, by the code generator under its substitution ([[Architecture/Monomorphization]]).
 

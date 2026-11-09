@@ -1723,6 +1723,7 @@ pub struct Checker {
     stmt_match: bool,
     resolved: [int32: Type],        // expr node id -> resolved type (v0.8 interp side table)
     call_defaults: [int32: [Expr]], // call node id -> the defaults it leaves to its trailing parameters (D136)
+    fill_decls: [int32: bool],      // the declarations holding a recorded default or `for` over an iterator: those `fill_in` rewrites (MYLA-382)
     errs: [CheckErr],               // the errors of the functions checked so far (MYLA-65, D80)
     warnings: [CheckErr],           // D95: the warnings found, in the order found
     primitives: bool,               // a program may call the raw-memory primitives (`gen_main --primitives`, the toolchain's tests)
@@ -1815,7 +1816,7 @@ fun new_checker(decls: [Decl]) -> Checker {
         call_kind: "", call_kind_id: -1, targs_taken: -1, call_target: "", call_mutates: false, fun_name: "", handovers: [:], become_words: [], passed_on: [],
         actors: [:], conc_line: 0, conc_col: 0, conc_sp: no_span(), conc_node: -1, in_async: false, self_assignable: false, actor_self: "", builtin_as_method: false, cur_key: "",
         lams: [], awaited: [:], call_key: "", call_async: false, suspended: -1, task_init: false, in_guard: false, neg_lit: -1,
-        task_line: 0, task_col: 0, task_sp: no_span(), task_node: -1,
+        task_line: 0, task_col: 0, task_sp: no_span(), task_node: -1, fill_decls: [:],
     }
 }
 
@@ -5306,6 +5307,7 @@ impl Checker {
         let loop = Stmt { id: self.fresh_id(), line: s.line, col: s.col, sp: s.sp, kind: StmtKind.WhileS(self.true_lit(s), Block { line: body.line, col: body.col, sp: body.sp, stmts: [step] }) }
         let own = Block { line: s.line, col: s.col, sp: s.sp, stmts: [decl, loop] }
         self.for_iters[s.id] = Stmt { id: self.fresh_id(), line: s.line, col: s.col, sp: s.sp, kind: StmtKind.IfS(self.true_lit(s), own, None) }
+        self.fill_decls[self.cur_decl] = true
         return Ok(0)
     }
 
@@ -5876,6 +5878,7 @@ impl Checker {
                 i += 1
             }
             self.call_defaults[e.id] = ds
+            self.fill_decls[self.cur_decl] = true
         }
         return Ok(true)
     }
@@ -9522,39 +9525,69 @@ fun starts_with_dunder(name: str) -> bool {
 // The checker records, for each call that leaves trailing parameters out,
 // the defaults of those parameters (`call_defaults`, keyed by the call's node
 // id), and for each `for` over an iterator the loop it stands for
-// (`for_iters`, keyed by the `for`'s id). `fill_in` rewrites every function
-// and method body and every constant, so that call carries them as arguments
-// of its own and the `for` is that loop: the interpreter, the lowering and
-// everything after them see each call with all its arguments, and a loop
-// over an iterator as one written with `while`. The rebuilt nodes keep their
-// ids, so the side tables (types, the calls' targets) still apply; a
-// default's nodes are shared by the calls it fills, as they have one type.
+// (`for_iters`, keyed by the `for`'s id), and the declaration either was met
+// in (`fill_decls`: a function, a const, or the impl of a method). `fill_in`
+// rewrites the bodies of those declarations, so that call carries them as
+// arguments of its own and the `for` is that loop: the interpreter, the
+// lowering and everything after them see each call with all its arguments,
+// and a loop over an iterator as one written with `while`. The rest stay as
+// they are, the standard library's mostly (MYLA-382: rebuilding every body
+// cost a hello world 8 ms). The rebuilt nodes keep their ids, so the side
+// tables (types, the calls' targets) still apply; a default's nodes are
+// shared by the calls it fills, as they have one type.
 
 pub struct Fills { defaults: [int32: [Expr]], fors: [int32: Stmt] }
 
 impl Checker {
     // Every recorded call given its defaults and every loop over an iterator
     // made the loop it stands for, in the declarations, the functions' and
-    // methods' signatures and the method bodies the checker keeps apart.
+    // methods' signatures and the method bodies the checker keeps apart: in
+    // those of the declarations that hold one (`fill_decls`).
     fun fill_in(var self) {
-        if self.call_defaults.len() == 0 && self.for_iters.len() == 0 { return }
+        if self.fill_decls.len() == 0 { return }
         let t = Fills { defaults: self.call_defaults, fors: self.for_iters }
-        var ds: [Decl] = []
-        for d in self.decls { ds.push(fd_decl(d, t)) }
-        self.decls = ds
+        let at = self.fill_decls
         var i = 0
+        while i < self.decls.len() {
+            if at.contains(self.decls[i].id) { self.decls[i] = fd_decl(self.decls[i], t) }
+            i += 1
+        }
+        i = 0
         while i < self.functions.len() {
-            var f = self.functions[i]
-            f.decl = fd_fun(f.decl, t)
-            self.functions[i] = f
+            if at.contains(self.functions[i].decl_id) {
+                var f = self.functions[i]
+                f.decl = fd_fun(f.decl, t)
+                self.functions[i] = f
+            }
             i += 1
         }
         i = 0
         while i < self.method_decls.len() {
-            self.method_decls[i] = fd_fun(self.method_decls[i], t)
+            if at.contains(self.method_decl_ids[i]) { self.method_decls[i] = fd_fun(self.method_decls[i], t) }
             i += 1
         }
     }
+}
+
+// The declarations of `src` whose bodies `fill_in` rewrites: a function's
+// or const's name, "impl" for an impl's methods (MYLA-382).
+#test("fun f(a: int, b: int = 1) -> int { return a + b }\nfun g() -> int { return f(1) }\nfun h() -> int { return f(1, 2) }")[["g"]]
+#test("enum Option<T> { Some(T), None }\ntrait Iterator<T> { fun next(var self) -> Option<T> }\nstruct U { i: int }\nimpl Iterator<int> for U { fun next(var self) -> Option<int> { return None } }\nfun f(a: int = 2) -> int { return a }\nconst K: int = 1\nimpl U { fun m(self) -> int { for x in self { return x }\nreturn 0 } }\nfun main() { for x in [1] { print(x) } }")[["impl"]]
+#test("fun main() { print(1) }")[[]]
+fun filled_in(src: str) -> [str] {
+    let c = checker_on(src)
+    var out: [str] = []
+    for d in c.decls {
+        if c.fill_decls.contains(d.id) {
+            match d.kind {
+                DeclKind.FunDecl(f) => { out.push(f.name) },
+                DeclKind.ConstDecl(n, te, e, attrs, p) => { out.push(n) },
+                DeclKind.ImplDecl(target, ms, tps, tr, targs, dattrs) => { out.push("impl") },
+                _ => { out.push("?") },
+            }
+        }
+    }
+    return out
 }
 
 fun fd_decl(d: Decl, t: Fills) -> Decl {
