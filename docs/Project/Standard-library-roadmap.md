@@ -100,7 +100,7 @@ Three questions for the owner are worth deciding before the first module is writ
 | 29 | Union-find | `std.unionfind` | disjoint sets with path compression and union by rank | 4 | 1 |  | 45 | [[MYLA-342]] |
 | 30 | Grid | `std.grid` | a 2D array with width and height: in-bounds checks, 4 and 8 neighbours, read from text, printed | 5 | 2 |  | 39 | [[MYLA-342]] |
 | 31 | Graph search | `std.graph` | BFS, DFS, Dijkstra, A*, topological sort, connected components, over a neighbour function | 5 | 3 | #25, #26 | 40 | [[MYLA-342]] |
-| 32 | Caches | `std.cache` | an LRU cache; a memoising wrapper around a map | 3 | 2 |  | 61 | [[MYLA-404]] |
+| 32 | Caches | `std.cache` | an LRU cache; a memoising wrapper around a map: done, `Lru`, `Memo`, `recursive` | 3 | 2 |  | 61 | [[MYLA-404]] |
 
 ### Hashes, checksums, encodings, cryptography
 

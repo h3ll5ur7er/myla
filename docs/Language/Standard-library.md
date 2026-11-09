@@ -70,6 +70,7 @@ The conventions (D164): operations on built-in types are methods (`s.split(",")`
 | `std.set` | [[Language/Standard-library/Set]] | `Set<T>` in insertion order: insert, remove, union, intersection, difference |
 | `std.deque` | [[Language/Standard-library/Deque]] | `Deque<T>`, the double-ended queue and the queue: a ring buffer, indexable |
 | `std.heap` | [[Language/Standard-library/Heap]] | Binary heaps: `Heap<T: Ord>`, least or greatest first, and `KeyedHeap<T>` by an `int64` priority |
+| `std.cache` | [[Language/Standard-library/Cache]] | `Lru<K, V>`, a least-recently-used cache in constant time over a map and an index-linked list; `Memo<K, V>`, memoising a function or a recursion given as a step |
 | `std.grid` | [[Language/Standard-library/Grid]] | `Grid<T>`, a 2D array of cells: read from text and printed, `at` and `set` with bounds, 4 and 8 neighbours, `(x, y)` positions |
 | `std.graph` | [[Language/Standard-library/Graph]] | Searches over a neighbour function: BFS, DFS, Dijkstra, A*, topological sort, connected components, and dense forms over numbered nodes |
 | `std.bitset` | [[Language/Standard-library/Bitset]] | `BitSet`, fixed or growable sets of small integers over `uint64` words: `popcount`, union, intersection, difference, complement |
