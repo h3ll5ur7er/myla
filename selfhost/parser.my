@@ -15,7 +15,7 @@
 // `<`/`>` -> shift Binary, char literal -> IntLit(is_char=true).
 
 from .tokens import Token, TokenKind, Diag, SrcSpan, MAX_ERRORS, no_span
-from .lexer import lex, lex_qualified
+from .lexer import lex, lex_with, lex_qualified
 from .ast import TypeExpr, TypeKind, Expr, ExprKind, Stmt, StmtKind
 from .ast import Pattern, PatternKind, Decl, DeclKind, Block, ExprOrBlock, ElseTail
 from .ast import BindElem, FieldInit, MapEntry, MatchArm, FieldPat, Param
@@ -2629,7 +2629,7 @@ pub fun parse_source_all(src: str, first_id: int32) -> Result<Parsed, [Diag]> {
 // parse_source_all, skipping the `#test` cases when `skip_tests`.
 #test("#test(1)[2]\nfun f(x: int) -> int { return x }", 0, true)[Ok(Parsed { program: Program { decls: [Decl { id: 4, line: 2, col: 1, sp: SrcSpan { sline: 2, scol: 1, eline: 2, ecol: 34 }, kind: DeclKind.FunDecl(FunData { line: 2, col: 1, sp: SrcSpan { sline: 2, scol: 1, eline: 2, ecol: 34 }, name: "f", params: [Param { line: 2, col: 7, sp: SrcSpan { sline: 2, scol: 7, eline: 2, ecol: 13 }, name: "x", ty: Some(TypeExpr { id: 0, line: 2, col: 10, sp: SrcSpan { sline: 2, scol: 10, eline: 2, ecol: 13 }, kind: TypeKind.TRef("int", []) }), default: None }], ret_type: Some(TypeExpr { id: 1, line: 2, col: 18, sp: SrcSpan { sline: 2, scol: 18, eline: 2, ecol: 21 }, kind: TypeKind.TRef("int", []) }), body: Some(Block { line: 2, col: 22, sp: SrcSpan { sline: 2, scol: 22, eline: 2, ecol: 34 }, stmts: [Stmt { id: 3, line: 2, col: 24, sp: SrcSpan { sline: 2, scol: 24, eline: 2, ecol: 32 }, kind: StmtKind.ReturnS(Some(Expr { id: 2, line: 2, col: 31, sp: SrcSpan { sline: 2, scol: 31, eline: 2, ecol: 32 }, kind: ExprKind.Name("x") }), false) }] }), attributes: [], type_params: [], receiver: None, is_pub: false, is_async: false }) }] }, next_id: 5 })]
 pub fun parse_source_with(src: str, first_id: int32, skip_tests: bool) -> Result<Parsed, [Diag]> {
-    return match lex(src) {
+    return match lex_with(src, skip_tests) {
         Ok(toks) => parse_ids_with(toks, first_id, skip_tests),
         Err(d) => Err([d]),
     }
