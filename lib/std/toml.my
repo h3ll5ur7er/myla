@@ -1,42 +1,155 @@
-// std.toml — the TOML subset of `myla.toml` and `myla.lock` (MYLA-89, D73).
+// std.toml — TOML 1.0 documents, read and written (MYLA-89, MYLA-402,
+// MYLA-407).
 //
-// `parse` reads a document into a `Toml` table. The subset, specified on the
-// wiki page Architecture/Project-tool, is TOML 1.0 without floats, dates and
-// times, hexadecimal, octal and binary integers, multi-line strings, dotted
-// keys and arrays of tables; arrays hold strings only. Every document it
-// accepts means the same in TOML: the tests compare it with Python's
-// `tomllib`. A construct outside the subset is an error that names it.
+// `parse` reads a TOML 1.0 document into a `Toml` table: strings (basic,
+// literal and both multi-line kinds), integers (decimal, hexadecimal, octal
+// and binary, in int64), floats (`inf`, `nan`), booleans, offset and local
+// date-times, local dates and times, arrays of any values, inline tables,
+// dotted keys, tables and arrays of tables. The tests compare it with
+// Python's `tomllib` and with the toml-test suite. An error says what is
+// wrong and where (line and column).
 //
 // `parse_doc` also keeps where each key and its value are, so a program that
 // checks the document (the project tool, MYLA-93) can point at them.
 //
 // `to_string` writes a document back (MYLA-402), so that `parse` reads it as
 // the same value, keys in the same order (see "Writing" below).
+//
+// Typed values (MYLA-407, as std.json's D172): `ToToml` and `FromToml`,
+// their impls for the built-in types, and `encode`/`decode<T>` over them;
+// `#derive(Toml)` writes a struct's or an enum's impls, calling the helpers
+// below (`members`, `member`, `optional_member`, `variant_of`,
+// `unit_variant`, `payload`, `unknown_variant`) by name, so they keep their
+// signatures.
 
 import std.map as map_m // `m.get(k)`
+from .num import parse_float, format_float
 
 // A TOML value. A table keeps its keys in the order they were defined (a
-// table that a header like `[a.b]` creates on the way counts from there).
-#derive(Eq)
+// table that a header like `[a.b]` or a dotted key creates on the way counts
+// from there); an array of tables is an `Array` of `Table`s. Two values are
+// equal when they hold the same, a NaN equal to a NaN, so that a document
+// written and read back equals itself.
 pub enum Toml {
     Str(str),
     Int(int64),
+    Float(float64),
     Bool(bool),
+    // an offset date-time (`1979-05-27T07:32:00Z`, `…-07:00`) or a local
+    // one (`1979-05-27T07:32:00`)
+    DateTime(TomlDateTime),
+    // a local date, `1979-05-27`
+    Date(TomlDate),
+    // a local time, `07:32:00.5`
+    Time(TomlTime),
     Array([Toml]),
     Table([(str, Toml)]),
 }
 
-// Why a text isn't in the subset, and where: line and column count from 1,
-// the column in characters.
+// A date: `year` 1 to 9999, `month` 1 to 12, `day` 1 to the month's last.
+#derive(Eq)
+pub struct TomlDate {
+    year: int32,
+    month: int32,
+    day: int32,
+}
+
+// A time of day: `hour` 0 to 23, `minute` and `second` 0 to 59,
+// `nanosecond` 0 to 999999999 (digits past the ninth are cut off, as TOML
+// allows).
+#derive(Eq)
+pub struct TomlTime {
+    hour: int32,
+    minute: int32,
+    second: int32,
+    nanosecond: int32,
+}
+
+// A date and a time, with the offset from UTC in minutes (`Some(0)` for `Z`,
+// `Some(-420)` for `-07:00`), or `None` for a local date-time.
+#derive(Eq)
+pub struct TomlDateTime {
+    date: TomlDate,
+    time: TomlTime,
+    offset: Option<int32>,
+}
+
+impl Eq for Toml {
+    #test(Toml.Float(0.0 / 0.0), Toml.Float(0.0 / 0.0))[true]
+    #test(Toml.Array([Toml.Int(1)]), Toml.Array([Toml.Float(1.0)]))[false]
+    #test(Toml.Table([("a", Toml.Str("x"))]), Toml.Table([("a", Toml.Str("x"))]))[true]
+    fun eq(self, other: Toml) -> bool {
+        return match (self, other) {
+            (Toml.Str(a), Toml.Str(b)) => a == b
+            (Toml.Int(a), Toml.Int(b)) => a == b
+            (Toml.Float(a), Toml.Float(b)) => a == b || (a != a && b != b)
+            (Toml.Bool(a), Toml.Bool(b)) => a == b
+            (Toml.DateTime(a), Toml.DateTime(b)) => a == b
+            (Toml.Date(a), Toml.Date(b)) => a == b
+            (Toml.Time(a), Toml.Time(b)) => a == b
+            (Toml.Array(a), Toml.Array(b)) => a == b
+            (Toml.Table(a), Toml.Table(b)) => a == b
+            _ => false
+        }
+    }
+}
+
+// What is wrong: a text that isn't TOML (`parse`), or a value that doesn't
+// fit the type it is read into (`decode`, `FromToml`).
+#derive(Eq)
+pub enum TomlErrorKind {
+    // The text isn't TOML: `line` and `col` say where
+    Syntax,
+    // A table without a key its type needs (the path names the key)
+    MissingField,
+    // A value of another kind than its type takes: a string for a number, an
+    // array for a struct, a variant with or without a payload it hasn't;
+    // also a value `encode` can't make a document of (one that isn't a table)
+    WrongType,
+    // A number its type can't hold
+    OutOfRange,
+    // A name that isn't one of the enum's variants
+    UnknownVariant,
+}
+
+// Why a text isn't TOML or a value doesn't fit its type, and where: for a
+// `Syntax` error the line and column in the text (counting from 1, the
+// column in characters) and an empty path; for the others the path of the
+// value in the document, `$.servers[2].ip` (`$` the whole of it, as std.json
+// writes paths), and a line and column of 0.
+#derive(Eq)
 pub struct TomlError {
+    kind: TomlErrorKind,
     msg: str,
     line: int32,
     col: int32,
+    path: str,
+}
+
+impl TomlError {
+    // The reason in words, without the position.
+    #test(TomlError { kind: TomlErrorKind.Syntax, msg: "expected a value", line: 1, col: 5, path: "" })["expected a value"]
+    fun message(self) -> str {
+        return self.msg
+    }
+}
+
+impl Format for TomlError {
+    // `line:col: why` for a syntax error, `path: why` for the others.
+    #test(TomlError { kind: TomlErrorKind.Syntax, msg: "expected a value", line: 1, col: 5, path: "" }, "")["1:5: expected a value"]
+    #test(TomlError { kind: TomlErrorKind.MissingField, msg: "missing field", line: 0, col: 0, path: "$.a" }, "")["$.a: missing field"]
+    fun format(self, spec: str) -> str {
+        return match self.kind {
+            Syntax => f"{self.line}:{self.col}: {self.msg}"
+            _ => f"{self.path}: {self.msg}"
+        }
+    }
 }
 
 // Where something is in the text: from `line`:`col` to just before
 // `end_line`:`end_col` (lines and columns count from 1, columns in
 // characters).
+#derive(Eq)
 pub struct TomlPos {
     line: int32,
     col: int32,
@@ -75,14 +188,20 @@ pub fun parse(text: str) -> Result<Toml, TomlError> {
 
 // The table that `text` holds, with the positions of its keys and values.
 pub fun parse_doc(text: str) -> Result<TomlDoc, TomlError> {
-    var p = Parser { s: text, i: 0, root: Toml.Table([]), kinds: [:], table: [], spans: [:] }
+    var p = Parser { s: text, i: 0, keys: [], kinds: [], values: [], explicit: [], dotted: [], first: [], last: [], next: [], index: [:], pending: [], table: 0, path: [], spans: [:] }
+    let bad = utf8_error(text)
+    if bad >= 0 { return Err(p.error("invalid UTF-8", bad)) }
+    let root = p.node(-1, "", TABLE, Toml.Bool(false))
+    p.table = root
     p.document()?
-    return Ok(TomlDoc { root: p.root, text: text, spans: p.spans })
+    return Ok(TomlDoc { root: p.build(root), text: text, spans: p.spans })
 }
 
-// Where the key of the key path `path` is: the key of a key/value pair (also
-// inside an inline table), or the header that opened the table (the first
-// header on the way to it, if none opened it). None if nothing defined it.
+// Where the key of the key path `path` is: the key of a key/value pair (the
+// last part of a dotted key, also inside an inline table), or the header
+// that opened the table (the first header or dotted key on the way to it,
+// if none opened it). Inside an array of tables, its last element's. None
+// if nothing defined it.
 pub fun key_pos(d: TomlDoc, path: [str]) -> Option<TomlPos> {
     return match d.spans.get(path_key(path)) {
         Some(sp) => Some(pos_of(d.text, sp.0, sp.1))
@@ -126,23 +245,94 @@ fun line_col(s: str, at: int32) -> (int32, int32) {
     return (line, col)
 }
 
-// --- Parsing ------------------------------------------------------------------
+// The offset of the first byte of `s` that is no part of well-formed UTF-8
+// (as `s.chars()` decodes it: no overlong forms, surrogates or code points
+// past U+10FFFF), -1 if there is none.
+#test("aé€😀")[-1]
+#test("")[-1]
+fun utf8_error(s: str) -> int32 {
+    var i = 0
+    while i < s.len() {
+        let c = s[i]
+        if c < 128u8 {
+            i += 1
+            continue
+        }
+        var n = 0
+        var lo = 128u8
+        var hi = 191u8
+        if c >= 194u8 && c <= 223u8 {
+            n = 1
+        } else if c >= 224u8 && c <= 239u8 {
+            n = 2
+            if c == 224u8 { lo = 160u8 }
+            if c == 237u8 { hi = 159u8 }
+        } else if c >= 240u8 && c <= 244u8 {
+            n = 3
+            if c == 240u8 { lo = 144u8 }
+            if c == 244u8 { hi = 143u8 }
+        } else {
+            return i
+        }
+        if i + n >= s.len() { return i }
+        if s[i + 1] < lo || s[i + 1] > hi { return i }
+        var k = 2
+        while k <= n {
+            if s[i + k] < 128u8 || s[i + k] > 191u8 { return i }
+            k += 1
+        }
+        i += n + 1
+    }
+    return -1
+}
 
-// What a key path names, so far: a table a header opened, a table a header
-// created on the way to another, or something closed (a value or an inline
-// table, which nothing may add to).
-const OPENED: int32 = 1
-const IMPLIED: int32 = 2
-const CLOSED: int32 = 3
+#test
+fun finds_bad_utf8() {
+    for bytes in [[97u8, 255u8], [195u8], [237u8, 160u8, 128u8], [224u8, 128u8, 128u8], [244u8, 144u8, 128u8, 128u8], [97u8, 98u8, 128u8]] {
+        var sb = StringBuilder()
+        for b in bytes { sb.append_byte(b) }
+        let s = sb.build()
+        let at = utf8_error(s)
+        assert(at >= 0 && at < s.len(), f"case {bytes.len()}")
+    }
+}
+
+// --- Parsing ------------------------------------------------------------------
+//
+// The document is built as a tree of nodes, node 0 its table: a table, an
+// array of tables (its elements tables, the last one the one headers and
+// keys go to), or a value (anything else, an inline table and an array
+// included, which nothing may add to). The rules on what may be added where
+// are TOML's, as `tomllib` keeps them: a table a header defined, or that
+// dotted keys of an earlier section defined, is `explicit`, and neither a
+// header nor a dotted key may define it again.
+
+const TABLE: int32 = 1
+const TABLES: int32 = 2
+const VALUE: int32 = 3
 
 struct Parser {
     s: str,
     i: int32,
-    root: Toml,
-    // what each key path names (see `path_key`)
-    kinds: [str: int32],
-    // the path of the table that key/value lines go to
-    table: [str],
+    // the nodes: each one's key in its table, kind, value (a VALUE's), and
+    // its first child, last child and next sibling (-1 for none)
+    keys: [str],
+    kinds: [int32],
+    values: [Toml],
+    explicit: [bool],
+    // a table a dotted key defined (or went through), for the messages
+    dotted: [bool],
+    first: [int32],
+    last: [int32],
+    next: [int32],
+    // a table's child by "<table>:<key>"
+    index: [str: int32],
+    // the tables the current section's dotted keys defined or went through:
+    // explicit from the next header on
+    pending: [int32],
+    // the table key/value lines go to, and its key path
+    table: int32,
+    path: [str],
     // where each key path was defined: the byte offsets of the key's start
     // and end and of the value's (see `TomlDoc`)
     spans: [str: (int32, int32, int32, int32)],
@@ -154,7 +344,7 @@ struct Parser {
 fun path_key(path: [str]) -> str {
     var sb = StringBuilder()
     for k in path {
-        sb.append(format("{}:", k.len()))
+        sb.append(f"{k.len()}:")
         sb.append(k)
     }
     return sb.build()
@@ -187,7 +377,7 @@ fun dotted(path: [str]) -> str {
                     sb.append_byte('\\')
                     sb.append_byte(c)
                 } else if is_control(c) || c == '\t' {
-                    sb.append(format("\\u{}", hex4(c as int32)))
+                    sb.append("\\u" + hex4(c as int32))
                 } else {
                     sb.append_byte(c)
                 }
@@ -234,40 +424,44 @@ fun is_digit(c: uint8) -> bool {
     return c >= '0' && c <= '9'
 }
 
+// The value of the digit `c` in `base` (2, 8 or 16), -1 if it isn't one.
+#test('f', 16i64)[15i64]
+#test('8', 8i64)[-1i64]
+#test('_', 2i64)[-1i64]
+fun digit_value(c: uint8, base: int64) -> int64 {
+    var d: int64 = -1
+    if c >= '0' && c <= '9' { d = (c - '0') as int64 }
+    if c >= 'a' && c <= 'f' { d = (c - 'a') as int64 + 10 }
+    if c >= 'A' && c <= 'F' { d = (c - 'A') as int64 + 10 }
+    if d >= base { return -1 }
+    return d
+}
+
 // A control character TOML allows nowhere but in multi-line strings (tab is
 // allowed everywhere).
 fun is_control(c: uint8) -> bool {
     return (c < 32u8 && c != '\t') || c == 127u8
 }
 
-// `t` (a table) with `v` added as `key` to the table at `path[at..]` below it.
-fun insert(t: Toml, path: [str], at: int32, key: str, v: Toml) -> Toml {
-    match t {
-        Toml.Table(members) => {
-            var ms = members
-            if at == path.len() {
-                ms.push((key, v))
-                return Toml.Table(ms)
-            }
-            var k = 0
-            while k < ms.len() {
-                if ms[k].0 == path[at] {
-                    ms[k] = (path[at], insert(ms[k].1, path, at + 1, key, v))
-                    return Toml.Table(ms)
-                }
-                k = k + 1
-            }
-        },
-        _ => {},
+// The days of the month `month` of `year`.
+#test(2024, 2)[29]
+#test(1900, 2)[28]
+#test(2000, 2)[29]
+#test(2023, 4)[30]
+fun days_in(year: int32, month: int32) -> int32 {
+    if month == 2 {
+        if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) { return 29 }
+        return 28
     }
-    return t
+    if month == 4 || month == 6 || month == 9 || month == 11 { return 30 }
+    return 31
 }
 
 impl Parser {
     // An error at byte offset `at`.
     fun error(self, msg: str, at: int32) -> TomlError {
         let (line, col) = line_col(self.s, at)
-        return TomlError { msg: msg, line: line, col: col }
+        return TomlError { kind: TomlErrorKind.Syntax, msg: msg, line: line, col: col, path: "" }
     }
 
     fun at_end(self) -> bool {
@@ -284,6 +478,59 @@ impl Parser {
     fun ahead(self, k: int32) -> uint8 {
         if self.i + k >= self.s.len() { return 0u8 }
         return self.s[self.i + k]
+    }
+
+    // A new node in the table or array of tables `parent` (none: -1), last
+    // of its children.
+    fun node(var self, parent: int32, key: str, kind: int32, v: Toml) -> int32 {
+        let k = self.keys.len()
+        self.keys.push(key)
+        self.kinds.push(kind)
+        self.values.push(v)
+        self.explicit.push(false)
+        self.dotted.push(false)
+        self.first.push(-1)
+        self.last.push(-1)
+        self.next.push(-1)
+        if parent >= 0 {
+            if self.last[parent] < 0 {
+                self.first[parent] = k
+            } else {
+                self.next[self.last[parent]] = k
+            }
+            self.last[parent] = k
+            if self.kinds[parent] == TABLE { self.index[f"{parent}:{key}"] = k }
+        }
+        return k
+    }
+
+    // The child `key` of the table `parent`, -1 if it has none.
+    fun child(self, parent: int32, key: str) -> int32 {
+        return match self.index.get(f"{parent}:{key}") {
+            Some(k) => k
+            None => -1
+        }
+    }
+
+    // The value of the node `k`.
+    fun build(self, k: int32) -> Toml {
+        let kind = self.kinds[k]
+        if kind == VALUE { return self.values[k] }
+        var c = self.first[k]
+        if kind == TABLES {
+            var items: [Toml] = []
+            while c >= 0 {
+                items.push(self.build(c))
+                c = self.next[c]
+            }
+            return Toml.Array(items)
+        }
+        var members: [(str, Toml)] = []
+        while c >= 0 {
+            members.push((self.keys[c], self.build(c)))
+            c = self.next[c]
+        }
+        return Toml.Table(members)
     }
 
     fun skip_ws(var self) {
@@ -346,91 +593,127 @@ impl Parser {
                 self.header()?
                 self.end_of_line()?
             } else {
-                self.key_value()?
+                self.assign(self.table, self.path, true, true)?
                 self.end_of_line()?
             }
         }
         return Ok(0)
     }
 
-    // A table header, the current position at its "[".
+    // A key, dotted or not, and the white space after it: its parts, each
+    // with the offsets of its start and end.
+    fun dotted_key(var self) -> Result<[(str, int32, int32)], TomlError> {
+        var parts: [(str, int32, int32)] = []
+        while true {
+            let start = self.i
+            let k = self.key()?
+            parts.push((k, start, self.i))
+            self.skip_ws()
+            if self.peek() != '.' { return Ok(parts) }
+            self.i = self.i + 1
+            self.skip_ws()
+        }
+        return Ok(parts)
+    }
+
+    // A table header, `[a.b]`, or an array of tables' `[[a.b]]`, the current
+    // position at its "[": the table key/value lines go to from here.
     fun header(var self) -> Result<int32, TomlError> {
         let start = self.i
-        if self.ahead(1) == '[' { return Err(self.error("arrays of tables are not supported", start)) }
+        let tables = self.ahead(1) == '['
         self.i = self.i + 1
-        var path: [str] = []
-        while true {
-            self.skip_ws()
-            path.push(self.key()?)
-            self.skip_ws()
-            if self.peek() == ']' {
-                self.i = self.i + 1
-                return self.open_table(path, start, self.i)
-            }
-            if self.peek() != '.' { return Err(self.error("expected '.' or ']' in a table header", self.i)) }
+        if tables { self.i = self.i + 1 }
+        self.skip_ws()
+        let parts = self.dotted_key()?
+        if self.peek() != ']' { return Err(self.error("expected '.' or ']' in a table header", self.i)) }
+        self.i = self.i + 1
+        if tables {
+            if self.peek() != ']' { return Err(self.error("expected ']]' to end the header of an array of tables", self.i)) }
             self.i = self.i + 1
         }
-        return Ok(0)
-    }
-
-    // Open the table `path` for the key/value lines that follow, creating the
-    // tables on the way; the header is the text from `at` to `end`.
-    fun open_table(var self, path: [str], at: int32, end: int32) -> Result<int32, TomlError> {
-        var prefix: [str] = []
-        var k = 0
-        while k < path.len() {
-            let parent = prefix
-            prefix = with_key(prefix, path[k])
-            let last = k == path.len() - 1
-            let pk = path_key(prefix)
-            match self.kinds.get(pk) {
-                Some(kind) => {
-                    if kind == CLOSED { return Err(self.error(format("'{}' is not a table that can be extended", dotted(prefix)), at)) }
-                    if last {
-                        if kind == OPENED { return Err(self.error(format("table '{}' is defined twice", dotted(prefix)), at)) }
-                        self.kinds[pk] = OPENED
-                        self.spans[pk] = (at, end, at, end)
-                    }
-                },
-                None => {
-                    self.root = insert(self.root, parent, 0, path[k], Toml.Table([]))
-                    self.kinds[pk] = match last { true => OPENED, false => IMPLIED }
-                    self.spans[pk] = (at, end, at, end)
-                },
+        let end = self.i
+        for p in self.pending { self.explicit[p] = true }
+        self.pending = []
+        var node = 0
+        var path: [str] = []
+        var j = 0
+        while j < parts.len() {
+            let key = parts[j].0
+            path.push(key)
+            let pk = path_key(path)
+            let last = j == parts.len() - 1
+            var c = self.child(node, key)
+            if c < 0 {
+                var kind = TABLE
+                if last && tables { kind = TABLES }
+                c = self.node(node, key, kind, Toml.Bool(false))
+                self.spans[pk] = (start, end, start, end)
+            } else if self.kinds[c] == VALUE {
+                return Err(self.error(f"'{dotted(path)}' is not a table that can be extended", start))
+            } else if self.kinds[c] == TABLES {
+                if last && !tables { return Err(self.error(f"'{dotted(path)}' is an array of tables, not a table", start)) }
+                if !last { c = self.last[c] }
+            } else if last {
+                if tables { return Err(self.error(f"'{dotted(path)}' is a table, not an array of tables", start)) }
+                if self.explicit[c] {
+                    if self.dotted[c] { return Err(self.error(f"table '{dotted(path)}' is defined by dotted keys already", start)) }
+                    return Err(self.error(f"table '{dotted(path)}' is defined twice", start))
+                }
+                self.spans[pk] = (start, end, start, end)
             }
-            k = k + 1
+            if last {
+                if tables {
+                    self.spans[pk] = (start, end, start, end)
+                    c = self.node(c, "", TABLE, Toml.Bool(false))
+                }
+                self.explicit[c] = true
+            }
+            node = c
+            j = j + 1
         }
-        self.table = path
+        self.table = node
+        self.path = path
         return Ok(0)
     }
 
-    // A key/value line, the current position at the key.
-    fun key_value(var self) -> Result<int32, TomlError> {
+    // `key = value` in the table `node`, whose key path is `base`: a
+    // key/value line of a section (`section`: the tables its dotted keys
+    // define are explicit from the next header on) or a pair of an inline
+    // table; `record` keeps the spans (not inside an array).
+    fun assign(var self, node: int32, base: [str], section: bool, record: bool) -> Result<int32, TomlError> {
         let at = self.i
-        let (key, v) = self.pair(self.table)?
-        let path = with_key(self.table, key)
-        let pk = path_key(path)
-        if self.kinds.contains(pk) { return Err(self.error(format("'{}' is defined twice", dotted(path)), at)) }
-        self.kinds[pk] = CLOSED
-        self.root = insert(self.root, self.table, 0, key, v)
-        return Ok(0)
-    }
-
-    // `key = value`, in the table `base` (whose path the spans record).
-    fun pair(var self, base: [str]) -> Result<(str, Toml), TomlError> {
-        let key_start = self.i
-        let key = self.key()?
-        let key_end = self.i
-        self.skip_ws()
-        if self.peek() == '.' { return Err(self.error("dotted keys are not supported", self.i)) }
+        let parts = self.dotted_key()?
         if self.peek() != '=' { return Err(self.error("expected '=' after a key", self.i)) }
         self.i = self.i + 1
         self.skip_ws()
-        let path = with_key(base, key)
+        var table = node
+        var path = base
+        var j = 0
+        while j < parts.len() - 1 {
+            let key = parts[j].0
+            path.push(key)
+            var c = self.child(table, key)
+            if c < 0 {
+                c = self.node(table, key, TABLE, Toml.Bool(false))
+                if record { self.spans[path_key(path)] = (parts[0].1, parts[j].2, parts[0].1, parts[j].2) }
+            } else if self.kinds[c] != TABLE {
+                return Err(self.error(f"'{dotted(path)}' is not a table that can be extended", at))
+            } else if self.explicit[c] {
+                return Err(self.error(f"table '{dotted(path)}' is defined elsewhere and can't be extended with dotted keys", at))
+            }
+            self.dotted[c] = true
+            if section { self.pending.push(c) }
+            table = c
+            j = j + 1
+        }
+        let last = parts[parts.len() - 1]
+        path.push(last.0)
+        if self.child(table, last.0) >= 0 { return Err(self.error(f"'{dotted(path)}' is defined twice", at)) }
         let value_start = self.i
-        let v = self.value(path)?
-        self.spans[path_key(path)] = (key_start, key_end, value_start, self.i)
-        return Ok((key, v))
+        let v = self.value(path, record)?
+        let k = self.node(table, last.0, VALUE, v)
+        if record { self.spans[path_key(path)] = (last.1, last.2, value_start, self.i) }
+        return Ok(k)
     }
 
     fun key(var self) -> Result<str, TomlError> {
@@ -449,75 +732,123 @@ impl Parser {
     }
 
     // A value, of the key path `path` (for the spans of an inline table's
-    // keys).
-    fun value(var self, path: [str]) -> Result<Toml, TomlError> {
+    // keys, kept when `record`).
+    fun value(var self, path: [str], record: bool) -> Result<Toml, TomlError> {
         let c = self.peek()
-        if c == '"' || c == '\'' {
-            if self.ahead(1) == c && self.ahead(2) == c { return Err(self.error("multi-line strings are not supported", self.i)) }
-            if c == '"' { return Ok(Toml.Str(self.basic_string()?)) }
+        if c == '"' {
+            if self.ahead(1) == '"' && self.ahead(2) == '"' { return Ok(Toml.Str(self.multi_line_basic()?)) }
+            return Ok(Toml.Str(self.basic_string()?))
+        }
+        if c == '\'' {
+            if self.ahead(1) == '\'' && self.ahead(2) == '\'' { return Ok(Toml.Str(self.multi_line_literal()?)) }
             return Ok(Toml.Str(self.literal_string()?))
         }
-        if c == '[' { return self.array() }
-        if c == '{' { return self.inline_table(path) }
-        if self.word("true") { return Ok(Toml.Bool(true)) }
-        if self.word("false") { return Ok(Toml.Bool(false)) }
-        if self.word("inf") || self.word("nan") || self.word("+inf") || self.word("-inf") || self.word("+nan") || self.word("-nan") {
-            return Err(self.error("floats are not supported", self.i))
+        if c == '[' { return self.array(path) }
+        if c == '{' { return self.inline_table(path, record) }
+        if self.word("true") {
+            self.i = self.i + 4
+            return Ok(Toml.Bool(true))
+        }
+        if self.word("false") {
+            self.i = self.i + 5
+            return Ok(Toml.Bool(false))
+        }
+        for w in ["inf", "+inf", "-inf", "nan", "+nan", "-nan"] {
+            if self.word(w) {
+                self.i = self.i + w.len()
+                if w[w.len() - 1] == 'n' { return Ok(Toml.Float(0.0 / 0.0)) }
+                if w[0] == '-' { return Ok(Toml.Float(-1.0 / 0.0)) }
+                return Ok(Toml.Float(1.0 / 0.0))
+            }
+        }
+        if is_digit(c) && is_digit(self.ahead(1)) {
+            if is_digit(self.ahead(2)) && is_digit(self.ahead(3)) && self.ahead(4) == '-' { return self.date_time() }
+            if self.ahead(2) == ':' { return Ok(Toml.Time(self.time()?)) }
         }
         if c == '+' || c == '-' || is_digit(c) { return self.number() }
         return Err(self.error("expected a value", self.i))
     }
 
-    // Whether the text continues with `w`, not followed by a key character;
-    // moves past it if so (only for true and false).
-    fun word(var self, w: str) -> bool {
+    // Whether the text continues with `w`, not followed by a key character.
+    fun word(self, w: str) -> bool {
         if self.i + w.len() > self.s.len() { return false }
         var k = 0
         while k < w.len() {
             if self.s[self.i + k] != w[k] { return false }
             k = k + 1
         }
-        if is_bare_char(self.ahead(w.len())) { return false }
-        if w == "true" || w == "false" { self.i = self.i + w.len() }
-        return true
+        return !is_bare_char(self.ahead(w.len()))
     }
 
-    // A decimal integer; floats, dates and times, and other bases are named
-    // in the error.
-    fun number(var self) -> Result<Toml, TomlError> {
-        let start = self.i
-        var negative = false
-        if self.peek() == '+' || self.peek() == '-' {
-            negative = self.peek() == '-'
-            self.i = self.i + 1
-        }
-        let first = self.i
-        if self.peek() == '0' && (self.ahead(1) == 'x' || self.ahead(1) == 'o' || self.ahead(1) == 'b') {
-            return Err(self.error("hexadecimal, octal and binary integers are not supported", start))
-        }
-        var digits = StringBuilder()
-        var last_digit = false
+    // The digits at the current position, a '_' allowed between two of them,
+    // without the '_'s ("" if there is no digit).
+    fun digit_run(var self) -> Result<str, TomlError> {
+        var sb = StringBuilder()
         while is_digit(self.peek()) || self.peek() == '_' {
             if self.peek() == '_' {
-                if !last_digit || !is_digit(self.ahead(1)) { return Err(self.error("'_' must stand between digits", self.i)) }
-                last_digit = false
+                if sb.len() == 0 || !is_digit(self.s[self.i - 1]) || !is_digit(self.ahead(1)) { return Err(self.error("'_' must stand between digits", self.i)) }
             } else {
-                digits.append_byte(self.peek())
-                last_digit = true
+                sb.append_byte(self.peek())
             }
             self.i = self.i + 1
         }
-        let c = self.peek()
-        if c == '.' || c == 'e' || c == 'E' { return Err(self.error("floats are not supported", start)) }
-        if (c == '-' || c == ':') && self.i > first && start == first { return Err(self.error("dates and times are not supported", start)) }
-        let text = digits.build()
-        if text.len() == 0 { return Err(self.error("expected a value", start)) }
-        if text.len() > 1 && text[0] == '0' { return Err(self.error("leading zeros are not allowed", first)) }
+        return Ok(sb.build())
+    }
+
+    // A decimal integer or a float (not `inf` or `nan`), or an integer in
+    // hexadecimal, octal or binary.
+    fun number(var self) -> Result<Toml, TomlError> {
+        let start = self.i
+        var negative = false
+        var signed = false
+        if self.peek() == '+' || self.peek() == '-' {
+            negative = self.peek() == '-'
+            signed = true
+            self.i = self.i + 1
+        }
+        if self.peek() == '0' && (self.ahead(1) == 'x' || self.ahead(1) == 'o' || self.ahead(1) == 'b') {
+            if signed { return Err(self.error("a hexadecimal, octal or binary integer has no sign", start)) }
+            return self.based_integer()
+        }
+        let first = self.i
+        let int_part = self.digit_run()?
+        if int_part.len() == 0 { return Err(self.error("expected a value", start)) }
+        if int_part.len() > 1 && int_part[0] == '0' { return Err(self.error("leading zeros are not allowed", first)) }
+        var text = StringBuilder()
+        if negative { text.append_byte('-') }
+        text.append(int_part)
+        var is_float = false
+        if self.peek() == '.' {
+            self.i = self.i + 1
+            let frac = self.digit_run()?
+            if frac.len() == 0 { return Err(self.error("expected a digit after the '.' of a float", self.i)) }
+            text.append_byte('.')
+            text.append(frac)
+            is_float = true
+        }
+        if self.peek() == 'e' || self.peek() == 'E' {
+            self.i = self.i + 1
+            text.append_byte('e')
+            if self.peek() == '+' || self.peek() == '-' {
+                text.append_byte(self.peek())
+                self.i = self.i + 1
+            }
+            let exp = self.digit_run()?
+            if exp.len() == 0 { return Err(self.error("expected a digit in the exponent of a float", self.i)) }
+            text.append(exp)
+            is_float = true
+        }
+        if is_float {
+            return match parse_float(text.build()) {
+                Some(f) => Ok(Toml.Float(f))
+                None => Err(self.error("not a float", start))
+            }
+        }
         // accumulate negatively, so the int64 minimum fits
         var n: int64 = 0
         var k = 0
-        while k < text.len() {
-            let d = (text[k] - '0') as int64
+        while k < int_part.len() {
+            let d = (int_part[k] - '0') as int64
             if n < (-9223372036854775807i64 - 1i64 + d) / 10i64 { return Err(self.error("integer out of range", start)) }
             n = n * 10i64 - d
             k = k + 1
@@ -527,22 +858,170 @@ impl Parser {
         return Ok(Toml.Int(-n))
     }
 
+    // An integer in hexadecimal (`0x`), octal (`0o`) or binary (`0b`), the
+    // current position at its "0".
+    fun based_integer(var self) -> Result<Toml, TomlError> {
+        let start = self.i
+        let b = self.ahead(1)
+        var base: int64 = 2
+        var name = "a binary"
+        if b == 'x' {
+            base = 16
+            name = "a hexadecimal"
+        }
+        if b == 'o' {
+            base = 8
+            name = "an octal"
+        }
+        self.i = self.i + 2
+        var n: int64 = 0
+        var count = 0
+        while true {
+            let c = self.peek()
+            if c == '_' {
+                if count == 0 || digit_value(self.s[self.i - 1], base) < 0 || digit_value(self.ahead(1), base) < 0 { return Err(self.error("'_' must stand between digits", self.i)) }
+                self.i = self.i + 1
+                continue
+            }
+            let d = digit_value(c, base)
+            if d < 0 { break }
+            if n > (9223372036854775807i64 - d) / base { return Err(self.error("integer out of range", start)) }
+            n = n * base + d
+            count = count + 1
+            self.i = self.i + 1
+        }
+        if is_bare_char(self.peek()) { return Err(self.error(f"'{self.s[self.i:self.i + 1]}' is not a digit of {name} integer", self.i)) }
+        if count == 0 { return Err(self.error(f"expected a digit of {name} integer", self.i)) }
+        return Ok(Toml.Int(n))
+    }
+
+    // The number the `n` digits at the current position make, moving past
+    // them; -1 if they aren't `n` digits.
+    fun fixed(var self, n: int32) -> int32 {
+        var v = 0
+        var k = 0
+        while k < n {
+            let c = self.ahead(k)
+            if !is_digit(c) { return -1 }
+            v = v * 10 + (c - '0') as int32
+            k = k + 1
+        }
+        self.i = self.i + n
+        return v
+    }
+
+    // A date, `YYYY-MM-DD`.
+    fun date(var self) -> Result<TomlDate, TomlError> {
+        let at = self.i
+        let y = self.fixed(4)
+        if y < 0 || self.peek() != '-' { return Err(self.error("expected a date, YYYY-MM-DD", at)) }
+        self.i = self.i + 1
+        let m = self.fixed(2)
+        if m < 0 || self.peek() != '-' { return Err(self.error("expected a date, YYYY-MM-DD", at)) }
+        self.i = self.i + 1
+        let d = self.fixed(2)
+        if d < 0 || is_digit(self.peek()) { return Err(self.error("expected a date, YYYY-MM-DD", at)) }
+        if y < 1 { return Err(self.error("the year must be 0001 to 9999", at)) }
+        if m < 1 || m > 12 { return Err(self.error("the month must be 01 to 12", at + 5)) }
+        let most = days_in(y, m)
+        if d < 1 || d > most { return Err(self.error(f"the day must be 01 to {most} in {y:04}-{m:02}", at + 8)) }
+        return Ok(TomlDate { year: y, month: m, day: d })
+    }
+
+    // A time, `HH:MM:SS` with a fraction of a second or none.
+    fun time(var self) -> Result<TomlTime, TomlError> {
+        let at = self.i
+        let h = self.fixed(2)
+        if h < 0 || self.peek() != ':' { return Err(self.error("expected a time, HH:MM:SS", at)) }
+        self.i = self.i + 1
+        let mi = self.fixed(2)
+        if mi < 0 || self.peek() != ':' { return Err(self.error("expected a time with seconds, HH:MM:SS", at)) }
+        self.i = self.i + 1
+        let sec = self.fixed(2)
+        if sec < 0 || is_digit(self.peek()) { return Err(self.error("expected a time, HH:MM:SS", at)) }
+        var nano = 0
+        if self.peek() == '.' {
+            self.i = self.i + 1
+            if !is_digit(self.peek()) { return Err(self.error("expected a digit after the '.' of a time", self.i)) }
+            var scale = 100000000
+            while is_digit(self.peek()) {
+                nano = nano + (self.peek() - '0') as int32 * scale
+                scale = scale / 10
+                self.i = self.i + 1
+            }
+        }
+        if h > 23 { return Err(self.error("the hour must be 00 to 23", at)) }
+        if mi > 59 { return Err(self.error("the minute must be 00 to 59", at + 3)) }
+        if sec > 59 { return Err(self.error("the second must be 00 to 59", at + 6)) }
+        return Ok(TomlTime { hour: h, minute: mi, second: sec, nanosecond: nano })
+    }
+
+    // A date, or a date-time (local, or with its offset), the current
+    // position at the date.
+    fun date_time(var self) -> Result<Toml, TomlError> {
+        let d = self.date()?
+        let c = self.peek()
+        let spaced = c == ' ' && is_digit(self.ahead(1)) && is_digit(self.ahead(2)) && self.ahead(3) == ':'
+        if c != 'T' && c != 't' && !spaced { return Ok(Toml.Date(d)) }
+        self.i = self.i + 1
+        let t = self.time()?
+        let o = self.peek()
+        if o == 'Z' || o == 'z' {
+            self.i = self.i + 1
+            return Ok(Toml.DateTime(TomlDateTime { date: d, time: t, offset: Some(0) }))
+        }
+        if o != '+' && o != '-' { return Ok(Toml.DateTime(TomlDateTime { date: d, time: t, offset: None })) }
+        let at = self.i
+        self.i = self.i + 1
+        let oh = self.fixed(2)
+        if oh < 0 || self.peek() != ':' { return Err(self.error("expected an offset, +HH:MM or -HH:MM", at)) }
+        self.i = self.i + 1
+        let om = self.fixed(2)
+        if om < 0 || is_digit(self.peek()) { return Err(self.error("expected an offset, +HH:MM or -HH:MM", at)) }
+        if oh > 23 || om > 59 { return Err(self.error("the offset must be at most 23:59", at)) }
+        var off = oh * 60 + om
+        if o == '-' { off = -off }
+        return Ok(Toml.DateTime(TomlDateTime { date: d, time: t, offset: Some(off) }))
+    }
+
     // The value of the `count` hex digits at the current position, or -1.
     fun hex(self, count: int32) -> int64 {
         if self.i + count > self.s.len() { return -1i64 }
         var v: int64 = 0
         var k = 0
         while k < count {
-            let c = self.s[self.i + k]
-            var d: int64 = -1
-            if c >= '0' && c <= '9' { d = (c - '0') as int64 }
-            if c >= 'a' && c <= 'f' { d = (c - 'a') as int64 + 10i64 }
-            if c >= 'A' && c <= 'F' { d = (c - 'A') as int64 + 10i64 }
+            let d = digit_value(self.s[self.i + k], 16)
             if d < 0i64 { return -1i64 }
             v = v * 16i64 + d
             k = k + 1
         }
         return v
+    }
+
+    // The escape at the current position, a '\', moving past it: what it
+    // stands for.
+    fun escape(var self) -> Result<str, TomlError> {
+        let esc = self.i
+        let e = self.ahead(1)
+        self.i = self.i + 2
+        if e == 'u' || e == 'U' {
+            var count = 4
+            if e == 'U' { count = 8 }
+            let cp = self.hex(count)
+            if cp < 0i64 || (cp >= 55296i64 && cp < 57344i64) || cp > 1114111i64 {
+                return Err(self.error("invalid unicode escape", esc))
+            }
+            self.i = self.i + count
+            return Ok(f"{cp as uint32 as char}")
+        }
+        if e == '"' { return Ok("\"") }
+        if e == '\\' { return Ok("\\") }
+        if e == 'b' { return Ok("\u{8}") }
+        if e == 'f' { return Ok("\u{c}") }
+        if e == 'n' { return Ok("\n") }
+        if e == 'r' { return Ok("\r") }
+        if e == 't' { return Ok("\t") }
+        return Err(self.error("invalid escape in a string", esc))
     }
 
     // A basic string, the current position at its opening quote.
@@ -564,25 +1043,7 @@ impl Parser {
                 self.i = self.i + 1
             } else {
                 sb.append(self.s, run, self.i)
-                let esc = self.i
-                let e = self.ahead(1)
-                self.i = self.i + 2
-                if e == 'u' || e == 'U' {
-                    let count = match e == 'u' { true => 4, false => 8 }
-                    let cp = self.hex(count)
-                    if cp < 0i64 || (cp >= 55296i64 && cp < 57344i64) || cp > 1114111i64 {
-                        return Err(self.error("invalid unicode escape", esc))
-                    }
-                    sb.append(format("{}", cp as uint32 as char))
-                    self.i = self.i + count
-                } else if e == '"' { sb.append_byte('"') }
-                else if e == '\\' { sb.append_byte('\\') }
-                else if e == 'b' { sb.append_byte(8u8) }
-                else if e == 'f' { sb.append_byte(12u8) }
-                else if e == 'n' { sb.append_byte('\n') }
-                else if e == 'r' { sb.append_byte(13u8) }
-                else if e == 't' { sb.append_byte('\t') }
-                else { return Err(self.error("invalid escape in a string", esc)) }
+                sb.append(self.escape()?)
                 run = self.i
             }
         }
@@ -609,8 +1070,104 @@ impl Parser {
         return Ok("")
     }
 
-    // An array of strings, the current position at its "[".
-    fun array(var self) -> Result<Toml, TomlError> {
+    // The line break right after the opening quotes of a multi-line string,
+    // which isn't part of it.
+    fun skip_first_newline(var self) {
+        if self.peek() == '\n' {
+            self.i = self.i + 1
+        } else if self.peek() == 13u8 && self.ahead(1) == '\n' {
+            self.i = self.i + 2
+        }
+    }
+
+    // The number of `q`s from the current position on (at least 3, the
+    // closing ones) if they close a multi-line string, -1 if there are more
+    // than 5 (two may be part of the string).
+    fun closing(self, q: uint8) -> int32 {
+        var run = 3
+        while self.ahead(run) == q { run = run + 1 }
+        if run > 5 { return -1 }
+        return run
+    }
+
+    // A multi-line basic string, the current position at its opening
+    // quotes; a line break is "\n", and a '\' at the end of a line leaves out
+    // the white space and line breaks after it.
+    fun multi_line_basic(var self) -> Result<str, TomlError> {
+        let quote = self.i
+        self.i = self.i + 3
+        self.skip_first_newline()
+        var sb = StringBuilder()
+        var run = self.i                         // start of bytes to copy as they are
+        while true {
+            if self.at_end() { return Err(self.error("unterminated string", quote)) }
+            let c = self.peek()
+            if c == '"' && self.ahead(1) == '"' && self.ahead(2) == '"' {
+                let n = self.closing('"')
+                if n < 0 { return Err(self.error("too many quotes at the end of a string", self.i)) }
+                sb.append(self.s, run, self.i + n - 3)
+                self.i = self.i + n
+                return Ok(sb.build())
+            }
+            if c == '\\' {
+                sb.append(self.s, run, self.i)
+                var k = 1
+                while self.ahead(k) == ' ' || self.ahead(k) == '\t' { k = k + 1 }
+                if self.ahead(k) == '\n' || (self.ahead(k) == 13u8 && self.ahead(k + 1) == '\n') {
+                    self.i = self.i + k
+                    while self.peek() == ' ' || self.peek() == '\t' || self.peek() == '\n' || (self.peek() == 13u8 && self.ahead(1) == '\n') {
+                        self.i = self.i + 1
+                    }
+                } else {
+                    sb.append(self.escape()?)
+                }
+                run = self.i
+            } else if c == 13u8 && self.ahead(1) == '\n' {
+                sb.append(self.s, run, self.i)
+                self.i = self.i + 1
+                run = self.i
+            } else if c != '\n' && is_control(c) {
+                return Err(self.error("control character in a string", self.i))
+            } else {
+                self.i = self.i + 1
+            }
+        }
+        return Ok("")
+    }
+
+    // A multi-line literal string, the current position at its opening
+    // quotes.
+    fun multi_line_literal(var self) -> Result<str, TomlError> {
+        let quote = self.i
+        self.i = self.i + 3
+        self.skip_first_newline()
+        var sb = StringBuilder()
+        var run = self.i
+        while true {
+            if self.at_end() { return Err(self.error("unterminated string", quote)) }
+            let c = self.peek()
+            if c == '\'' && self.ahead(1) == '\'' && self.ahead(2) == '\'' {
+                let n = self.closing('\'')
+                if n < 0 { return Err(self.error("too many quotes at the end of a string", self.i)) }
+                sb.append(self.s, run, self.i + n - 3)
+                self.i = self.i + n
+                return Ok(sb.build())
+            }
+            if c == 13u8 && self.ahead(1) == '\n' {
+                sb.append(self.s, run, self.i)
+                self.i = self.i + 1
+                run = self.i
+            } else if c != '\n' && is_control(c) {
+                return Err(self.error("control character in a string", self.i))
+            } else {
+                self.i = self.i + 1
+            }
+        }
+        return Ok("")
+    }
+
+    // An array, of any values, the current position at its "[".
+    fun array(var self, path: [str]) -> Result<Toml, TomlError> {
         self.i = self.i + 1
         var items: [Toml] = []
         while true {
@@ -619,12 +1176,8 @@ impl Parser {
                 self.i = self.i + 1
                 return Ok(Toml.Array(items))
             }
-            let c = self.peek()
-            if c != '"' && c != '\'' {
-                if c == ',' || self.at_end() { return Err(self.error("expected a value", self.i)) }
-                return Err(self.error("arrays may only hold strings", self.i))
-            }
-            items.push(self.value([])?)
+            if self.peek() == ',' || self.at_end() { return Err(self.error("expected a value", self.i)) }
+            items.push(self.value(path, false)?)
             self.skip_blank()?
             if self.peek() == ',' {
                 self.i = self.i + 1
@@ -635,33 +1188,142 @@ impl Parser {
         return Ok(Toml.Array(items))
     }
 
-    // An inline table, the value of `path`, the current position at its "{".
-    fun inline_table(var self, path: [str]) -> Result<Toml, TomlError> {
+    // An inline table, the value of `path`, the current position at its "{";
+    // its keys' spans kept when `record`.
+    fun inline_table(var self, path: [str], record: bool) -> Result<Toml, TomlError> {
         self.i = self.i + 1
-        var members: [(str, Toml)] = []
+        let table = self.node(-1, "", TABLE, Toml.Bool(false))
         self.skip_ws()
         if self.peek() == '}' {
             self.i = self.i + 1
-            return Ok(Toml.Table(members))
+            return Ok(Toml.Table([]))
         }
         while true {
             self.skip_ws()
-            let at = self.i
-            if self.peek() == '}' { return Err(self.error("a trailing comma is not allowed in an inline table", at)) }
-            let (key, v) = self.pair(path)?
-            for m in members {
-                if m.0 == key { return Err(self.error(format("'{}' is defined twice", dotted([key])), at)) }
-            }
-            members.push((key, v))
+            if self.peek() == '}' { return Err(self.error("a trailing comma is not allowed in an inline table", self.i)) }
+            self.assign(table, path, false, record)?
             self.skip_ws()
             if self.peek() == '}' {
                 self.i = self.i + 1
-                return Ok(Toml.Table(members))
+                return Ok(self.build(table))
             }
             if self.peek() != ',' { return Err(self.error("expected ',' or '}' in an inline table", self.i)) }
             self.i = self.i + 1
         }
-        return Ok(Toml.Table(members))
+        return Ok(Toml.Table([]))
+    }
+}
+
+// --- Tests of the parser -------------------------------------------------------
+
+// The value `text` holds as `inline_string` writes it, or the error with
+// its position.
+fun read(text: str) -> str {
+    return match parse(text) {
+        Ok(v) => inline_string(v)
+        Err(e) => f"{e}"
+    }
+}
+
+#test("a = 1.5\nb = -2e3\nc = 1_000.0_1\nd = 6.626E-34\ne = +0.0\nf = -0.0\ng = 0e0")["{ a = 1.5, b = -2000.0, c = 1000.01, d = 6.626e-34, e = 0.0, f = -0.0, g = 0.0 }"] // floats
+#test("a = inf\nb = -inf\nc = +nan\nd = nan")["{ a = inf, b = -inf, c = nan, d = nan }"]
+#test("a = 0xDEAD_beef\nb = 0o755\nc = 0b1101\nd = 0x7FFFFFFFFFFFFFFF\ne = 0x0")["{ a = 3735928559, b = 493, c = 13, d = 9223372036854775807, e = 0 }"] // other bases
+#test("a = 0x8000000000000000")["1:5: integer out of range"]
+#test("a = 9223372036854775808")["1:5: integer out of range"]
+#test("a = -0x1")["1:5: a hexadecimal, octal or binary integer has no sign"]
+#test("a = 0o8")["1:7: '8' is not a digit of an octal integer"]
+#test("a = 0x")["1:7: expected a digit of a hexadecimal integer"]
+#test("a = 0x_1")["1:7: '_' must stand between digits"]
+#test("a = 01.5")["1:5: leading zeros are not allowed"]
+#test("a = 1.")["1:7: expected a digit after the '.' of a float"]
+#test("a = 1e")["1:7: expected a digit in the exponent of a float"]
+#test("a = 1_.5")["1:6: '_' must stand between digits"]
+#test("a = .5")["1:5: expected a value"]
+#test("a = infinity")["1:5: expected a value"]
+fun reads_numbers(text: str) -> str {
+    return read(text)
+}
+
+#test("a = 1979-05-27T07:32:00Z\nb = 1979-05-27 00:32:00.999999-07:00\nc = 1979-05-27t07:32:00\nd = 1979-05-27\ne = 07:32:00.5\nf = 00:00:00.1234567891")["{ a = 1979-05-27T07:32:00Z, b = 1979-05-27T00:32:00.999999-07:00, c = 1979-05-27T07:32:00, d = 1979-05-27, e = 07:32:00.5, f = 00:00:00.123456789 }"] // dates and times
+#test("a = 2024-02-29 # leap\nb = 1987-07-05 17:45:00+05:30")["{ a = 2024-02-29, b = 1987-07-05T17:45:00+05:30 }"]
+#test("a = 2023-02-29")["1:13: the day must be 01 to 28 in 2023-02"]
+#test("a = 2023-13-01")["1:10: the month must be 01 to 12"]
+#test("a = 0000-01-01")["1:5: the year must be 0001 to 9999"]
+#test("a = 1979-05-27T24:00:00")["1:16: the hour must be 00 to 23"]
+#test("a = 1979-05-27T07:60:00")["1:19: the minute must be 00 to 59"]
+#test("a = 07:32:60")["1:11: the second must be 00 to 59"]
+#test("a = 07:32")["1:5: expected a time with seconds, HH:MM:SS"]
+#test("a = 1979-05-27T07:32:00+24:00")["1:24: the offset must be at most 23:59"]
+#test("a = 1979-05-27T07:32:00+1:00")["1:24: expected an offset, +HH:MM or -HH:MM"]
+#test("a = 1979-5-27")["1:5: expected a date, YYYY-MM-DD"]
+#test("a = 1979-05-27T")["1:16: expected a time, HH:MM:SS"]
+#test("a = 1979-05-27 x")["1:16: expected the end of the line"]
+#test("a = 07:32:00.")["1:14: expected a digit after the '.' of a time"]
+fun reads_dates_and_times(text: str) -> str {
+    return read(text)
+}
+
+#test("a = \"\"\"\nline 1\n  line 2\\\n     joined \\\"\"\" \"\"\"\"")["{ a = \"line 1\\n  line 2joined \\\"\\\"\\\" \\\"\" }"] // multi-line basic
+#test("a = '''\r\nC:\\x\r\n''''\nb = '''''two'''''")["{ a = \"C:\\\\x\\n'\", b = \"''two''\" }"] // multi-line literal
+#test("a = \"\"\"a\\  \n\n  b\\tc\"\"\"")["{ a = \"ab\\tc\" }"]
+#test("a = \"\"\"x\"\"\"\"\"\"")["1:9: too many quotes at the end of a string"]
+#test("a = \"\"\"x\\ y\"\"\"")["1:9: invalid escape in a string"]
+#test("a = '''x\u{1}'''")["1:9: control character in a string"]
+#test("a = \"\"\"x")["1:5: unterminated string"]
+#test("a = \"\\e\"")["1:6: invalid escape in a string"]
+#test("a = \"\\uD800\"")["1:6: invalid unicode escape"]
+#test("\"\"\"k\"\"\" = 1")["1:1: a key can't be a multi-line string"]
+fun reads_strings(text: str) -> str {
+    return read(text)
+}
+
+#test("a.b.c = 1\na.b.d = 2\na . 'e' = 3\n")["{ a = { b = { c = 1, d = 2 }, e = 3 } }"] // dotted keys
+#test("[x]\ny.z = 1\n[x.y.w]\nv = 2\n")["{ x = { y = { z = 1, w = { v = 2 } } } }"] // a sub-table of a dotted one
+#test("a = { b.c = 1, b.d = [1, 'x', { e = 2 }] }")["{ a = { b = { c = 1, d = [1, \"x\", { e = 2 }] } } }"]
+#test("[[a]]\nx = 1\n[a.b]\ny = 2\n[[a]]\n[[a.c]]\nz = 3\n[[a.c]]\n")["{ a = [{ x = 1, b = { y = 2 } }, { c = [{ z = 3 }, {}] }] }"] // arrays of tables
+#test("a = [\n  1, # one\n  [2.5, \"s\"],\n  2024-01-01,\n]")["{ a = [1, [2.5, \"s\"], 2024-01-01] }"]
+#test("a.b = 1\n[a]\n")["2:1: table 'a' is defined by dotted keys already"]
+#test("[a.b.c]\n[a]\nb.c.d = 1\n")["3:1: table 'a.b.c' is defined elsewhere and can't be extended with dotted keys"]
+#test("[a]\nb = 1\n[a]\n")["3:1: table 'a' is defined twice"]
+#test("a = { b = 1 }\na.c = 2\n")["2:1: 'a' is not a table that can be extended"]
+#test("a = { b.c = 1, b = 2 }")["1:16: 'a.b' is defined twice"]
+#test("a = { b = {}, b.c = 2 }")["1:15: 'a.b' is not a table that can be extended"]
+#test("a = []\n[[a]]\n")["2:1: 'a' is not a table that can be extended"]
+#test("[a]\n[[a]]\n")["2:1: 'a' is a table, not an array of tables"]
+#test("[[a]]\n[a]\n")["2:1: 'a' is an array of tables, not a table"]
+#test("[[a]\n")["1:5: expected ']]' to end the header of an array of tables"]
+#test("a = { b = 1, }")["1:14: a trailing comma is not allowed in an inline table"]
+#test("a = { b = 1\n}")["1:12: expected ',' or '}' in an inline table"]
+#test("a = [1,,2]")["1:8: expected a value"]
+#test("a = 1\r")["1:6: a carriage return must be followed by a line feed"]
+fun reads_tables(text: str) -> str {
+    return read(text)
+}
+
+#test
+fun refuses_bad_utf8() {
+    var sb = StringBuilder()
+    sb.append("# ok\na = \"x")
+    sb.append_byte(192u8)
+    sb.append("\"\n")
+    match parse(sb.build()) {
+        Ok(v) => assert(false, "not UTF-8")
+        Err(e) => assert(f"{e}" == "2:7: invalid UTF-8", f"{e}")
+    }
+}
+
+#test
+fun keeps_positions() {
+    let text = "[dependencies]\ngeo.path = \"../geo\"\nbig = { path = \"vendor\" }\n[[bin]]\nname = \"a\"\n"
+    match parse_doc(text) {
+        Ok(d) => {
+            assert(key_pos(d, ["dependencies", "geo", "path"]) == Some(TomlPos { line: 2, col: 5, end_line: 2, end_col: 9 }), "a dotted key's last part")
+            assert(key_pos(d, ["dependencies", "geo"]) == Some(TomlPos { line: 2, col: 1, end_line: 2, end_col: 4 }), "its table")
+            assert(value_pos(d, ["dependencies", "big", "path"]) == Some(TomlPos { line: 3, col: 16, end_line: 3, end_col: 24 }), "in an inline table")
+            assert(key_pos(d, ["bin", "name"]) == Some(TomlPos { line: 5, col: 1, end_line: 5, end_col: 5 }), "in an array of tables")
+            assert(key_pos(d, ["bin"]) == Some(TomlPos { line: 4, col: 1, end_line: 4, end_col: 8 }), "an array of tables' header")
+        },
+        Err(e) => assert(false, f"{e}"),
     }
 }
 
@@ -691,13 +1353,19 @@ pub fun to_string(doc: Toml) -> str {
 
 // The TOML text of the value `v` on one line, as it stands on the right of
 // `=`: a string quoted (a literal string when that saves escaping a '"' or a
-// '\', else a basic string with escapes), an integer in decimal, an array
-// `[a, b]`, a table `{ k = v }`.
+// '\', else a basic string with escapes), an integer in decimal, a float in
+// its shortest form (`0.1`, `1e+16`, `inf`, `nan`), a date or time as RFC
+// 3339 writes it (`1979-05-27T07:32:00.5-07:00`, `Z` for a zero offset), an
+// array `[a, b]`, a table `{ k = v }`.
 pub fun inline_string(v: Toml) -> str {
     return match v {
         Toml.Str(s) => quote_string(s)
         Toml.Int(n) => f"{n}"
+        Toml.Float(f) => format_float(f)
         Toml.Bool(b) => match b { true => "true", false => "false" }
+        Toml.DateTime(dt) => datetime_text(dt)
+        Toml.Date(d) => date_text(d)
+        Toml.Time(t) => time_text(t)
         Toml.Array(items) => {
             var sb = StringBuilder()
             sb.append_byte('[')
@@ -720,6 +1388,47 @@ pub fun inline_string(v: Toml) -> str {
             }
             sb.append(" }")
             sb.build()
+        }
+    }
+}
+
+// A date as TOML writes it.
+#test(TomlDate { year: 1, month: 2, day: 3 })["0001-02-03"]
+fun date_text(d: TomlDate) -> str {
+    return f"{d.year:04}-{d.month:02}-{d.day:02}"
+}
+
+// A time as TOML writes it, with as many digits of the fraction as it needs.
+#test(TomlTime { hour: 7, minute: 5, second: 0, nanosecond: 0 })["07:05:00"]
+#test(TomlTime { hour: 23, minute: 59, second: 59, nanosecond: 120000000 })["23:59:59.12"]
+#test(TomlTime { hour: 0, minute: 0, second: 0, nanosecond: 1 })["00:00:00.000000001"]
+fun time_text(t: TomlTime) -> str {
+    let hms = f"{t.hour:02}:{t.minute:02}:{t.second:02}"
+    if t.nanosecond == 0 { return hms }
+    let digits = f"{t.nanosecond:09}"
+    var end = 9
+    while digits[end - 1] == '0' { end -= 1 }
+    return hms + "." + digits[:end]
+}
+
+// A date-time as TOML writes it: `T` between the date and the time, `Z` for
+// a zero offset.
+#test(TomlDateTime { date: TomlDate { year: 1979, month: 5, day: 27 }, time: TomlTime { hour: 0, minute: 32, second: 0, nanosecond: 0 }, offset: Some(-420) })["1979-05-27T00:32:00-07:00"]
+#test(TomlDateTime { date: TomlDate { year: 1979, month: 5, day: 27 }, time: TomlTime { hour: 0, minute: 32, second: 0, nanosecond: 0 }, offset: Some(330) })["1979-05-27T00:32:00+05:30"]
+#test(TomlDateTime { date: TomlDate { year: 1979, month: 5, day: 27 }, time: TomlTime { hour: 0, minute: 32, second: 0, nanosecond: 0 }, offset: None })["1979-05-27T00:32:00"]
+fun datetime_text(dt: TomlDateTime) -> str {
+    let text = date_text(dt.date) + "T" + time_text(dt.time)
+    return match dt.offset {
+        None => text
+        Some(0) => text + "Z"
+        Some(m) => {
+            var sign = "+"
+            var a = m
+            if m < 0 {
+                sign = "-"
+                a = -m
+            }
+            text + sign + f"{a / 60:02}:{a % 60:02}"
         }
     }
 }
@@ -881,12 +1590,12 @@ impl Writer {
 fun round_trip(text: str) -> str {
     let doc = match parse(text) {
         Ok(d) => d,
-        Err(e) => { return format("{}:{}: {} in the original", e.line, e.col, e.msg) },
+        Err(e) => { return f"{e} in the original" },
     }
     let written = to_string(doc)
     return match parse(written) {
         Ok(back) => match back == doc { true => "same", false => "different:\n" + written }
-        Err(e) => format("{}:{}: {} in\n{}", e.line, e.col, e.msg, written)
+        Err(e) => f"{e} in\n{written}"
     }
 }
 
@@ -924,8 +1633,8 @@ fun writes_tables_inline_before_a_key() {
 
 #test
 fun writes_arrays_of_tables() {
-    // TOML that the subset doesn't read back: an array of tables as `[[…]]`
-    // sections, an array of other values inline
+    // an array of tables as `[[…]]` sections, an array of other values
+    // inline
     let doc = Toml.Table([
         ("mixed", Toml.Array([Toml.Int(1), Toml.Array([]), Toml.Table([("a", Toml.Str("b"))])])),
         ("bin", Toml.Array([
@@ -935,6 +1644,7 @@ fun writes_arrays_of_tables() {
     ])
     let want = "mixed = [1, [], { a = \"b\" }]\n\n[[bin]]\nname = \"a\"\n\n[bin.opt]\nx = 1\n\n[[bin]]\n"
     assert(to_string(doc) == want, to_string(doc))
+    assert(parse(want) == Ok(doc), "read back")
     // a value that isn't a table is written as `inline_string` writes it
     assert(to_string(Toml.Int(7)) == "7", "a value")
 }
@@ -945,6 +1655,10 @@ fun writes_arrays_of_tables() {
 #test(Toml.Str("say \"hi\""))["'say \"hi\"'"]
 #test(Toml.Str("it's \"x\""))["\"it's \\\"x\\\"\""]
 #test(Toml.Int(-9223372036854775807i64 - 1i64))["-9223372036854775808"]
+#test(Toml.Float(0.1))["0.1"]
+#test(Toml.Float(-1e16))["-1e+16"]
+#test(Toml.Float(-1.0 / 0.0))["-inf"]
+#test(Toml.Float(3.0))["3.0"]
 #test(Toml.Array([Toml.Str("a"), Toml.Bool(true)]))["[\"a\", true]"]
 #test(Toml.Table([("a b", Toml.Int(1)), ("", Toml.Int(2)), ("ok-1_x", Toml.Table([]))]))["{ \"a b\" = 1, \"\" = 2, ok-1_x = {} }"]
 fun inline_cases(v: Toml) -> str {
@@ -962,6 +1676,9 @@ fun inline_cases(v: Toml) -> str {
 #test("n = -9223372036854775808\nm = +1_000\nt = true\nf = false\ns = 'lit\\eral'\n")["same"]
 #test("[a]\n[b]\n[a.x]\n")["same"] // a table extended after another
 #test("k = \"\\u0000\\u001f\\u007f\\b\\f\\r\\n\"\n")["same"] // control characters
+#test("f = [nan, -inf, 0.1, -0.0, 1e300, 5e-324]\nd = [1979-05-27T07:32:00.123456789+01:00, 1979-05-27T07:32:00, 2000-01-01, 23:59:59]\n")["same"] // floats, dates and times
+#test("s = \"\"\"\nmulti\nline\"\"\"\nx.y.z = 1\nx.w = { a.b = 2 }\n[[t]]\n[t.u]\n[[t.v]]\n[[t]]\nq = [[1], [{ r = 0x10 }]]\n")["same"] // the rest of TOML
 fun round_trip_cases(text: str) -> str {
     return round_trip(text)
 }
+

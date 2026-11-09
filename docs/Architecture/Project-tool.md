@@ -98,47 +98,13 @@ path = "vendor/big"
 
 A dependency has exactly one of `path` and `git`. Its name must equal the `package.name` in its own manifest, so a package is imported by one name everywhere. Unknown tables and keys are errors (a misspelt `[dependecies]` would otherwise be ignored); a later version may add tables, such as build configuration (D73 (1)).
 
-### The TOML subset
+### TOML
 
-A manifest is a TOML 1.0 document restricted to the constructs below. Every document the subset accepts means the same in TOML; constructs outside it are errors that name the construct ("floats are not supported", "arrays of tables are not supported").
-
-```ebnf
-document       = { line newline } line ;
-line           = ws [ ( table_header | key_value ) ws ] [ comment ] ;
-table_header   = "[" ws key { ws "." ws key } ws "]" ;
-key_value      = key ws "=" ws value ;
-key            = bare_key | basic_string | literal_string ;
-bare_key       = bare_char { bare_char } ;
-bare_char      = "A"…"Z" | "a"…"z" | "0"…"9" | "_" | "-" ;
-value          = basic_string | literal_string | integer | boolean | array | inline_table ;
-basic_string   = '"' { basic_char | escape } '"' ;
-basic_char     = any character but '"', "\" and control characters other than tab ;
-escape         = "\" ( "b" | "t" | "n" | "f" | "r" | '"' | "\"
-                     | "u" hex hex hex hex | "U" hex hex hex hex hex hex hex hex ) ;
-literal_string = "'" { any character but "'" and control characters other than tab } "'" ;
-integer        = [ "+" | "-" ] ( "0" | digit1_9 { [ "_" ] digit } ) ;
-boolean        = "true" | "false" ;
-array          = "[" { ws_comment_newline } [ string { ws_comment_newline } { "," { ws_comment_newline } string { ws_comment_newline } } [ "," { ws_comment_newline } ] ] "]" ;
-string         = basic_string | literal_string ;
-inline_table   = "{" ws [ key_value ws { "," ws key_value ws } ] "}" ;
-ws             = { " " | "\t" } ;
-ws_comment_newline = " " | "\t" | comment newline | newline ;
-comment        = "#" { any character but control characters other than tab } ;
-newline        = "\n" | "\r\n" ;
-```
-
-- **Strings** are UTF-8; a `\u`/`\U` escape must be a Unicode scalar value (not a surrogate, at most `10FFFF`). No multi-line strings (`"""`, `'''`).
-- **Integers** are decimal and fit in `int64`; no leading zeros, `_` only between digits. No hexadecimal, octal or binary integers, no floats, no `inf` or `nan`.
-- **Arrays** hold strings only (D73 (1)); they may span lines, with comments and a trailing comma.
-- **Inline tables** stay on one line, without a trailing comma, and are complete: no header or key adds to them later. Their values may be any value, inline tables included.
-- **Tables:** a key is defined once per table. `[a.b]` creates `a` if needed; a table is opened by a header at most once (`[a]` may still follow `[a.b]` once, as in TOML). A header can't name a key that holds a value or an inline table.
-- **Not supported:** dotted keys on the left of `=` (`a.b = 1`), arrays of tables (`[[x]]`), dates and times. A key/value pair or header must end its line (comments aside).
-
-`std.toml` parses this subset into a value ([[MYLA-89]]); errors carry a message, a line and a column (counting characters, from 1).
+A manifest is a TOML 1.0 document. D73 (1) named the subset it needs, tables, strings, integers, booleans, string arrays and inline tables, and `std.toml` read only that until [[MYLA-407]] (the owner's choice of 2026-11-09): now it reads all of TOML 1.0 ([[Language/Standard-library/Toml]]), and the manifest's own rules above refuse what it has no use for, at the value, as for any other wrong value: `version = 1.5` is `'package.version' must be a string`, `authors = ['a', 2]` `'package.authors' must be an array of strings`, `[[dependencies]]` `'dependencies' must be a table`. What TOML adds that a manifest can use is its spelling: dotted keys (`geo.path = "../geo"` under `[dependencies]`), multi-line and literal strings, and keys and values in any of TOML's forms. Errors carry a message, a line and a column (counting characters, from 1), and the positions of keys and values point at the part of a dotted key that names them.
 
 ## The lock file: `myla.lock`
 
-`myla fetch` writes `myla.lock` next to the manifest when the build has Git dependencies, its own or its dependencies'. It is TOML in the same subset, so `std.toml` reads it, and it is meant to be committed:
+`myla fetch` writes `myla.lock` next to the manifest when the build has Git dependencies, its own or its dependencies'. It is TOML, which `std.toml` reads and writes, and it is meant to be committed:
 
 ```toml
 # Written by `myla fetch`. Commit it; don't edit it.
@@ -302,7 +268,7 @@ The follow-up tasks in the epic `Project tool`:
 | Task | Step |
 | --- | --- |
 | [[MYLA-88]] | File-system functions: `list_dir`, `make_dir`, `make_dir_all`, `exists`, `is_dir`, `is_file` (done, in review) |
-| [[MYLA-89]] | `std.toml`: the subset above, tested against Python's `tomllib` (done, in review) |
+| [[MYLA-89]] | `std.toml`: D73's subset, tested against Python's `tomllib` (done, in review); all of TOML 1.0 since [[MYLA-407]] |
 | [[MYLA-92]] | Both loaders: `--package name=dir`, the resolution order, the shadowing error, package module ids, a project root parameter; parity tests between the toolchains (done, in review) |
 | [[MYLA-93]] | The project model in Myla: read and check `myla.toml` and `myla.lock`, resolve path dependencies transitively, the one-version rule, the `--package` list (done, in review: [the project model](#the-project-model)) |
 | [[MYLA-98]] | `std.fs.current_dir` and its primitive `__getcwd`, for finding the manifest and absolute paths (done, in review) |

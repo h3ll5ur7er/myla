@@ -541,7 +541,10 @@ fun parse_dependency(doc: TomlDoc, path: str, name: str, spec: Toml) -> Result<D
 #test("[package]\nname = \"geo\"\nversion = \"1\"\n[dependencies]\na = { path = \"../a\" }\nb = { git = \"u\", branch = \"x\" }\n")["ok geo 1 a=path ../a b=git u branch x"]
 #test("[package]\nname = \"geo\"\n")["1:1-1:10 missing 'version' in [package]"]
 #test("[package]\nname = \"if\"\nversion = \"1\"\n")["2:8-2:12 'if' is a keyword and can't be a package name"]
-#test("[package]\nname = \"geo\"\nversion = \"1\"\nauthors = [\n  'a', 2]\n")["5:8-0:0 arrays may only hold strings"]
+#test("[package]\nname = \"geo\"\nversion = \"1\"\nauthors = [\n  'a', 2]\n")["4:11-5:10 'package.authors' must be an array of strings"]
+#test("[package]\nname = \"geo\"\nversion = 1.5\n")["3:11-3:14 'package.version' must be a string"] // TOML 1.0's values are the manifest's errors (MYLA-407)
+#test("[package]\nname = \"geo\"\nversion = \"1\"\n[dependencies]\ngeo2.path = \"../geo2\"\n")["ok geo 1 geo2=path ../geo2"]
+#test("[package]\nname = \"geo\"\nversion = \"1\"\n[[dependencies]]\n")["4:1-4:17 'dependencies' must be a table"]
 #test("[package]\nname = \"geo\"\nversion = \"1\"\nauthors = [\n  'a']\n")["ok geo 1"]
 #test("[package]\nname = \"geo\"\nversion = \"1\"\nauthors = ['a', \"b\"]\nlicense = 1\n")["5:11-5:12 'package.license' must be a string"]
 #test("[package]\nname = \"geo\"\nversion = \"1\"\n[dependencies.a]\npath = \"x\"\nrev = \"0123456789012345678901234567890123456789\"\n")["6:1-6:4 'rev' of dependency 'a' needs 'git', not 'path'"]
