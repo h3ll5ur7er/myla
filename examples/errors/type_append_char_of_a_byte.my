@@ -1,0 +1,10 @@
+//~ type error: append_char value must be 'char', found 'uint8'
+// `sb.append_char(c)` takes a `char` and adds its UTF-8 bytes (MYLA-390);
+// a byte goes in with `append_byte`.
+#main
+fun main() {
+    var sb = StringBuilder()
+    let b: uint8 = 97
+    sb.append_char(b)
+    print(sb.build())
+}

@@ -826,22 +826,18 @@ fun pairs_and_pieces() {
     same(shown_all(empty.chunks(3)), "[]")
 }
 
-// `while let`, not `for x in xs.iter()`: one `for` over an iterator anywhere
-// in a program has the checker rebuild every function's body (`fill_in`),
-// which a module every program checks shouldn't cost it.
 #test
 fun iterates() {
     var seen: [str] = []
-    var words = ["a", "b", "c"].iter()
-    while let Some(s) = words.next() { seen.push(s) }
+    for s in ["a", "b", "c"].iter() { seen.push(s) }
     same(seen.join(""), "abc")
     var it = [1, 2].iter()
-    var copy = it
+    let copy = it
     same(shown_opt(it.next()), "Some(1)")
     same(shown_opt(it.next()), "Some(2)")
     same(shown_opt(it.next()), "None")
     var n = 0
-    while let Some(x) = copy.next() { n += x }
+    for x in copy { n += x }
     assert(n == 3, "a copy keeps its own position")
     let empty: [int] = []
     var e = empty.iter()

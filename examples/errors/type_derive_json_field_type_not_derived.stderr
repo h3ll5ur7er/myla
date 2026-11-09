@@ -1,0 +1,5 @@
+type error: cannot derive Json for struct 'Doc': field 'owner' has type 'Option<User>', which isn't ToJson and FromJson
+  --> examples/errors/type_derive_json_field_type_not_derived.my:10:1
+   |
+10 | struct Doc {
+   | ^^^^^^^^^^^^

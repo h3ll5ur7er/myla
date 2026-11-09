@@ -260,6 +260,9 @@ pub struct Interp {
     captured: [str],
     test_root: str,
     test_program: str,
+    // the checked program: the report's names of methods on built-in types
+    // and its values by their types (a uint64 unsigned, MYLA-357, MYLA-361)
+    checker: Checker,
     // functions without `self` (D172): their calls, by the call's id, with
     // the type each is called on (`T` of `T.zero()`); each function's impl
     // target by its name (and a generic impl's methods'), which solves the
@@ -319,6 +322,30 @@ pub fun selected(name: str, only: str) -> bool {
         i = i + 1
     }
     return false
+}
+
+// The name a case's report gives the function the checker names `name`:
+// a method on a list or a map by its receiver's type (`[str].width`, not
+// the checker's `__list.width`, MYLA-357), any other as it is (`P.plus`,
+// `int8.half`).
+#test(checker_on("impl [str] {\n    fun w(self) -> int { return 0 }\n}"), "__list.w")["[str].w"]
+#test(checker_on("impl [str: int] {\n    fun w(self) -> int { return 0 }\n}"), "__map.w")["[str: int32].w"]
+#test(checker_on("fun f() {}"), "f")["f"]
+pub fun case_func_name(ch: Checker, name: str) -> str {
+    var key = ""
+    if name.len() > 7 && name[0:7] == "__list." { key = "__list" }
+    if name.len() > 6 && name[0:6] == "__map." { key = "__map" }
+    if key == "" { return name }
+    let fi = ch.func_idx(name)
+    if fi < 0 || ch.functions[fi].params.len() == 0 { return name }
+    return type_name(ch.functions[fi].params[0]) + name[key.len():]
+}
+
+// The checked result type of the function `name`, None for none.
+fun case_ret(ch: Checker, name: str) -> Option<Type> {
+    let fi = ch.func_idx(name)
+    if fi < 0 { return None }
+    return ch.functions[fi].ret
 }
 
 // How a case's call ended: with a value, a runtime error, or `exit`.
@@ -515,7 +542,7 @@ pub fun new_interp(c: Checker, argv: [str]) -> Interp {
         on_failure: (r: RtError) => false, fail_reported: false,
         depth: 0,
         sleepers: [], deadlines: [], fired: [], fd_waits: [], notifs: [], pwaits: [], free_waits: [], parked_waits: [], sleep_seq: 0, virtual_time: false, vclock: 0,
-        testing: false, defer_errs: [], captured: [], test_root: "", test_program: "",
+        testing: false, defer_errs: [], captured: [], test_root: "", test_program: "", checker: c,
         static_calls: c.static_calls, impl_selfs: c.static_selfs, call_types: [:], type_env: c.on_type_params,
         tparams: [], types: [], type_ix: [:], env_next: None, env_fi: -1, env_tail: None, env_tail_fi: -1,
     }
@@ -756,10 +783,11 @@ impl Interp {
         var i = 0
         while i < self.func_decls.len() {
             let fd = self.func_decls[i]
-            let name = self.func_names[i]    // a method's is `T.m` (D116)
+            // a method's is `T.m` (D116), one on a list or map by its type
+            let name = case_func_name(self.checker, self.func_names[i])
             var idx = 0
             for attr in fd.attributes {
-                if attr.name == "test" && !is_qualified(name) && selected(name, sel.only) {
+                if attr.name == "test" && !is_qualified(self.func_names[i]) && selected(name, sel.only) {
                     idx = idx + 1
                     // a test function (a bare `#test`, D162) is named by its
                     // name, a case by its number, both by a comment after
@@ -856,7 +884,10 @@ impl Interp {
             self.test_root = ""
         }
         var parts: [str] = []
+        // the values shown by the function's checked result type (MYLA-361)
+        let rt = case_ret(self.checker, self.func_names[fi])
         let returns = match fd.ret_type { Some(t) => true, None => false }
+        let ch = self.checker
         match want {
             Expected.Value => {
                 match outcome {
@@ -864,10 +895,10 @@ impl Interp {
                         if is_fn {
                             // a test function's `Err(e)` fails it with `e` (D162)
                             match v {
-                                Value.VEnum(en, vr, pl) => { if vr == "Err" { parts.push(self.shown(pl[0])) } },
+                                Value.VEnum(en, vr, pl) => { if vr == "Err" { parts.push(self.shown(pl[0], err_type(rt))) } },
                                 _ => {},
                             }
-                        } else if !value_eq(v, expected) { parts.push("expected " + py_repr(expected) + ", got " + py_repr(v)) }
+                        } else if !value_eq(v, expected) { parts.push("expected " + typed_repr(ch, expected, rt) + ", got " + typed_repr(ch, v, rt)) }
                     },
                     Outcome.Failed(m) => { parts.push("runtime error: " + m) },
                     Outcome.Exited(c) => { parts.push(format("exited with status {}", c)) },
@@ -876,7 +907,7 @@ impl Interp {
             Expected.Panics(m) => {
                 let wanted = format("expected runtime error '{}'", m)
                 match outcome {
-                    Outcome.Returned(v) => { parts.push(wanted + ", " + returned_text(v, returns)) },
+                    Outcome.Returned(v) => { parts.push(wanted + ", " + returned_text(ch, v, returns, rt)) },
                     Outcome.Failed(got) => { if got != m { parts.push(format("{}, got runtime error '{}'", wanted, got)) } },
                     Outcome.Exited(c) => { parts.push(format("{}, exited with status {}", wanted, c)) },
                 }
@@ -884,7 +915,7 @@ impl Interp {
             Expected.Exits(n) => {
                 let wanted = format("expected exit status {}", n)
                 match outcome {
-                    Outcome.Returned(v) => { parts.push(wanted + ", " + returned_text(v, returns)) },
+                    Outcome.Returned(v) => { parts.push(wanted + ", " + returned_text(ch, v, returns, rt)) },
                     Outcome.Failed(got) => { parts.push(format("{}, got runtime error '{}'", wanted, got)) },
                     Outcome.Exited(c) => { if c as int64 != n { parts.push(format("{}, exited with status {}", wanted, c)) } },
                 }
@@ -3883,13 +3914,13 @@ impl Interp {
 
     // A value as `{}` shows it: through its `format` when its type has one,
     // else in its print form, a struct's or enum's as the report's (D162).
-    fun shown(var self, v: Value) -> str {
+    fun shown(var self, v: Value, t: Option<Type>) -> str {
         match v {
-            Value.VStruct(n, fns, fvs) => { if self.func_idx(format("{}.format", value_key(v))) < 0 { return without_module_ids(py_repr(v)) } },
-            Value.VEnum(en, vr, pl) => { if self.func_idx(format("{}.format", value_key(v))) < 0 { return without_module_ids(py_repr(v)) } },
+            Value.VStruct(n, fns, fvs) => { if self.func_idx(format("{}.format", value_key(v))) < 0 { return without_module_ids(typed_repr(self.checker, v, t)) } },
+            Value.VEnum(en, vr, pl) => { if self.func_idx(format("{}.format", value_key(v))) < 0 { return without_module_ids(typed_repr(self.checker, v, t)) } },
             _ => {},
         }
-        return self.format_spec_value(v, None, "")
+        return self.format_spec_value(v, t, "")
     }
 
     fun user_format(var self, v: Value, spec: str) -> str {
@@ -4315,6 +4346,18 @@ impl Interp {
             self.read_place(p)
             if self.stop() { return Value.VUnit }
             self.update_place(p, PlaceOp.OAppend(piece))
+            return Value.VUnit
+        }
+        if nm == "append_char" {
+            // the character's UTF-8 bytes (MYLA-390)
+            let p = self.place_of(args[0])
+            let c = self.eval(args[1])
+            self.read_place(p)
+            if self.stop() { return Value.VUnit }
+            match c {
+                Value.VChar(cp) => self.update_place(p, PlaceOp.OAppend(cp_utf8(cp as int32)))
+                _ => {}
+            }
             return Value.VUnit
         }
         if nm == "append_byte" {
@@ -5648,6 +5691,107 @@ pub fun py_repr(v: Value) -> str {
     }
 }
 
+// `py_repr` of `v` by its type `t` (None: unknown), as the report shows a
+// value: a uint64, which is stored as the int64 of its bits, unsigned, inside
+// a struct, tuple, list, map or enum too (MYLA-361).
+#test(checker_on("fun f() {}"), Value.VInt(-1), Some(Type.TInt(64, false)))["18446744073709551615"]
+#test(checker_on("fun f() {}"), Value.VInt(-1), Some(Type.TInt(64, true)))["-1"]
+#test(checker_on("fun f() {}"), Value.VTuple([Value.VInt(-1), Value.VInt(-1)]), Some(Type.TTuple([Type.TInt(64, false), Type.TInt(32, true)])))["(18446744073709551615, -1)"]
+#test(checker_on("struct H { s: uint64 }"), Value.VStruct("H", ["s"], [Value.VInt(-2)]), Some(Type.TStruct("H", [])))["H { s: 18446744073709551614 }"]
+#test(checker_on("fun f() {}"), Value.VEnum("Option", "Some", [Value.VList([Value.VInt(-1)])]), Some(Type.TEnum("Option", [Type.TList(Type.TInt(64, false))])))["Option.Some([18446744073709551615])"]
+#test(checker_on("fun f() {}"), Value.VInt(-1), None)["-1"]
+pub fun typed_repr(ch: Checker, v: Value, t: Option<Type>) -> str {
+    let ty = match t { Some(x) => x, None => { return py_repr(v) } }
+    match ty {
+        Type.TInt(w, sg) => { match v { Value.VInt(i) => { if w == 64 && !sg { return format("{}", i as uint64) } }, _ => {} } },
+        Type.TTuple(ts) => {
+            match v { Value.VTuple(es) => { if es.len() == ts.len() { return "(" + typed_reprs(ch, es, ts) + ")" } }, _ => {} }
+        },
+        Type.TList(e) => {
+            match v {
+                Value.VList(xs) => {
+                    var ts: [Type] = []
+                    for x in xs { ts.push(e) }
+                    return "[" + typed_reprs(ch, xs, ts) + "]"
+                },
+                _ => {},
+            }
+        },
+        Type.TMap(kt, vt) => {
+            match v {
+                Value.VMap(m) => {
+                    let ks = map_keys_of(m)
+                    let vs = map_vals_of(m)
+                    var sb = StringBuilder()
+                    sb.append("[")
+                    var i = 0
+                    while i < ks.len() {
+                        if i > 0 { sb.append(", ") }
+                        sb.append(typed_repr(ch, ks[i], Some(kt)) + ": " + typed_repr(ch, vs[i], Some(vt)))
+                        i = i + 1
+                    }
+                    sb.append("]")
+                    return sb.build()
+                },
+                _ => {},
+            }
+        },
+        Type.TStruct(sn, args) => {
+            match v {
+                Value.VStruct(n, names, vals) => {
+                    let fields = ch.struct_field_types(sn, args)
+                    var sb = StringBuilder()
+                    sb.append(n + " { ")
+                    var i = 0
+                    while i < names.len() {
+                        if i > 0 { sb.append(", ") }
+                        var ft: Option<Type> = None
+                        for f in fields { if f.name == names[i] { ft = Some(f.ty) } }
+                        sb.append(names[i] + ": " + typed_repr(ch, vals[i], ft))
+                        i = i + 1
+                    }
+                    sb.append(" }")
+                    return sb.build()
+                },
+                _ => {},
+            }
+        },
+        Type.TEnum(en, args) => {
+            match v {
+                Value.VEnum(n, vr, pl) => {
+                    if pl.len() == 0 { return n + "." + vr }
+                    var ts: [Type] = []
+                    if en == "Option" && args.len() == 1 { ts = [args[0]] }
+                    else if en == "Result" && args.len() == 2 { ts = if vr == "Ok" { [args[0]] } else { [args[1]] } }
+                    else { ts = match ch.enum_variant_payload(en, args, vr) { Some(p) => p, None => [] } }
+                    if ts.len() == pl.len() { return n + "." + vr + "(" + typed_reprs(ch, pl, ts) + ")" }
+                },
+                _ => {},
+            }
+        },
+        _ => {},
+    }
+    return py_repr(v)
+}
+
+fun typed_reprs(ch: Checker, vs: [Value], ts: [Type]) -> str {
+    var sb = StringBuilder()
+    var i = 0
+    while i < vs.len() {
+        if i > 0 { sb.append(", ") }
+        sb.append(typed_repr(ch, vs[i], Some(ts[i])))
+        i = i + 1
+    }
+    return sb.build()
+}
+
+// The error type of a test function's `Result<(), E>`, None for another.
+#test(Some(Type.TEnum("Result", [Type.TTuple([]), Type.TStr])))[Some(Type.TStr)]
+#test(None)[None]
+fun err_type(rt: Option<Type>) -> Option<Type> {
+    return match rt { Some(Type.TEnum(en, args)) => if en == "Result" && args.len() == 2 { Some(args[1]) } else { None }, _ => None }
+}
+
 #test(true)["True"]
 #test(false)["False"]
 fun bool_repr(b: bool) -> str {
@@ -5909,11 +6053,12 @@ fun output_lines(pieces: [str]) -> [str] {
 
 // How a call that was expected to fail ended instead: with its value, or,
 // for a function without a result, by returning.
-#test(Value.VInt(2), true)["got 2"]
-#test(Value.VUnit, false)["the call returned"]
-fun returned_text(v: Value, returns: bool) -> str {
+#test(checker_on("fun f() {}"), Value.VInt(2), true, None)["got 2"]
+#test(checker_on("fun f() {}"), Value.VInt(-1), true, Some(Type.TInt(64, false)))["got 18446744073709551615"]
+#test(checker_on("fun f() {}"), Value.VUnit, false, None)["the call returned"]
+fun returned_text(ch: Checker, v: Value, returns: bool, t: Option<Type>) -> str {
     if !returns { return "the call returned" }
-    return "got " + py_repr(v)
+    return "got " + typed_repr(ch, v, t)
 }
 
 #test(["a", "b"])["a; b"]

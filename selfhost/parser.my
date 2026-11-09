@@ -15,7 +15,7 @@
 // `<`/`>` -> shift Binary, char literal -> IntLit(is_char=true).
 
 from .tokens import Token, TokenKind, Diag, SrcSpan, MAX_ERRORS, no_span
-from .lexer import lex
+from .lexer import lex, lex_qualified
 from .ast import TypeExpr, TypeKind, Expr, ExprKind, Stmt, StmtKind
 from .ast import Pattern, PatternKind, Decl, DeclKind, Block, ExprOrBlock, ElseTail
 from .ast import BindElem, FieldInit, MapEntry, MatchArm, FieldPat, Param
@@ -1478,16 +1478,47 @@ impl Parser {
     #test(parser_on("a.b[0]"))[Stmt { id: 1, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 7 }, kind: StmtKind.ForS(".", None, None, Block { line: 1, col: 7, sp: SrcSpan { sline: 1, scol: 7, eline: 1, ecol: 7 }, stmts: [] }, Some(Expr { id: 0, line: 1, col: 7, sp: SrcSpan { sline: 1, scol: 7, eline: 1, ecol: 7 }, kind: ExprKind.Hole })) }]
     fun for_stmt(var self) -> Stmt {
         let kw = self.advance()
-        let v = self.expect(TokenKind.IDENT, "loop variable name").lexeme
+        // `for (k, v) in e` (MYLA-390): the loop's variable a hidden name
+        // (`%for<id>`, which no source spells), destructured by a `let` that
+        // starts the body, as `let (k, v) = kv` would
+        var binding: Option<BindElem> = None
+        var v = ""
+        if self.check(TokenKind.LPAREN) {
+            let lp = self.peek()
+            let elems = self.tuple_binding()
+            binding = Some(BindElem.BTuple(elems, lp.line, lp.column, self.span_from(lp.line, lp.column)))
+            v = format("%for{}", self.fresh())
+        } else {
+            v = self.expect(TokenKind.IDENT, "loop variable name (or a tuple of names)").lexeme
+        }
         self.expect(TokenKind.IN, "'in'")
         let first = self.expression_ns()
         if self.match1(TokenKind.DOTDOT) {
             let end = self.expression_ns()
-            let body = self.block()
+            let body = self.destructured(self.block(), binding, v)
             return self.mk_stmt(kw.line, kw.column, StmtKind.ForS(v, Some(first), Some(end), body, None))
         }
-        let body = self.block()
+        let body = self.destructured(self.block(), binding, v)
         return self.mk_stmt(kw.line, kw.column, StmtKind.ForS(v, None, None, body, Some(first)))
+    }
+
+    // A `for` body with `let <binding> = <v>` first, for a loop over a
+    // tuple of names (MYLA-390); as it was for a loop variable.
+    fun destructured(var self, body: Block, binding: Option<BindElem>, v: str) -> Block {
+        return match binding {
+            Some(b) => {
+                let sp = match b {
+                    BTuple(es, l, c, s) => s
+                    _ => body.sp
+                }
+                let name = Expr { id: self.fresh(), line: sp.sline, col: sp.scol, sp: sp, kind: ExprKind.Name(v) }
+                let open = Stmt { id: self.fresh(), line: sp.sline, col: sp.scol, sp: sp, kind: StmtKind.DestructDecl("let", b, None, name) }
+                var stmts = [open]
+                for st in body.stmts { stmts.push(st) }
+                Block { line: body.line, col: body.col, sp: body.sp, stmts: stmts }
+            }
+            None => body,
+        }
     }
 
     #test(parser_on("a.b[0]"))[Stmt { id: 1, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 7 }, kind: StmtKind.ReturnS(Some(Expr { id: 0, line: 1, col: 2, sp: SrcSpan { sline: 1, scol: 2, eline: 1, ecol: 7 }, kind: ExprKind.Hole }), false) }]
@@ -2612,6 +2643,28 @@ pub fun parse_source(src: str, first_id: int32) -> Result<Parsed, Diag> {
     return match parse_source_all(src, first_id) {
         Ok(p) => Ok(p),
         Err(ds) => Err(ds[0]),
+    }
+}
+
+// `parse_source` for source the checker writes against the linked program,
+// whose names may be the loader's qualified ones (`std$json$Json`,
+// `lex_qualified`; a derive's impl, MYLA-385).
+#test("fun f() -> m$T { return m$T.A }", 0)[true]
+#test("fun f( {", 0)[false]
+pub fun parses_qualified(src: str, first_id: int32) -> bool {
+    return match parse_qualified(src, first_id) {
+        Ok(p) => true,
+        Err(d) => false,
+    }
+}
+
+pub fun parse_qualified(src: str, first_id: int32) -> Result<Parsed, Diag> {
+    return match lex_qualified(src) {
+        Ok(toks) => match parse_ids_with(toks, first_id, true) {
+            Ok(p) => Ok(p),
+            Err(ds) => Err(ds[0]),
+        },
+        Err(d) => Err(d),
     }
 }
 

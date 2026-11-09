@@ -809,6 +809,9 @@ class SelfHostedCodegenParity(unittest.TestCase):
         else:
             expected = _diagnostic_oracle(entry, modules)
         self.assertIsNotNone(expected, "the Python toolchain accepted the program")
+        # MYLA-383: a module's names are written as the program writes them
+        # (`lib.P`), where the recordings show the loader's (`lib$P`)
+        expected = re.sub(r"\b([A-Za-z_][A-Za-z0-9_]*)\$(?=[A-Za-z_])", r"\1.", expected)
         proc = subprocess.run(
             [self._binary, entry, stdlib], capture_output=True, text=True
         )
@@ -1926,6 +1929,24 @@ class SelfHostedCodegenParity(unittest.TestCase):
             self.assertEqual((out, code), ("8997000\n3000\n100000\n", 0))
             self.assertLess(peak, 64, f"peak {peak:.1f} MB")
 
+    def test_deep_values_are_released_in_a_bounded_stack(self) -> None:
+        """MYLA-389: a value nested 100,000 deep through an enum held in a
+        list, a struct's list, recursive enums and a map is released without
+        running out of stack, and its cells are reused (ten rounds in the
+        memory of one); in tasks too, on several workers."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "deep.my")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(DEEP_RELEASE)
+            out, code, peak = self._build_and_measure(self._emit_asm(path))
+            self.assertEqual((out, code), ("2000040\n", 0))
+            self.assertLess(peak, 64, f"peak {peak:.1f} MB")
+            path = os.path.join(tmp, "tasks.my")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(DEEP_RELEASE_TASKS)
+            out, code = self._build_and_run(self._emit_asm(path, STDLIB_ROOT))
+            self.assertEqual((out, code), ("800044\n", 0))
+
     def test_child_failures_end_the_program_at_once(self) -> None:
         """A panic or `exit` in a child task ends the program at once: every
         other task stops at its next suspension point, then the failure is
@@ -2253,6 +2274,106 @@ async fun main() {
     print(sum)
     print(await c.get())
     print(await down(100000))
+}
+"""
+
+
+# MYLA-389: values nested 100,000 deep, released ten times over; the
+# release of a type that can nest itself defers past a depth, so the stack
+# stays bounded on every target (wasm32's engine stack ran out at 1,840
+# levels of the `Node` path, 3,911 of `Box`'s), and the cells are reused
+DEEP_RELEASE = """\
+// MYLA-389: values nested 100,000 deep released in a bounded stack, many
+// times over, their memory reused: through an enum held inline in a list,
+// a struct's list, recursive enums and a map
+enum Node { Elem(El), Text(str) }
+struct El { name: str, kids: [Node] }
+struct Box { kids: [Box] }
+enum Chain { Link(int, Chain), End }
+enum Tree { Leaf, Fork(Pair) }
+struct Pair { v: int, l: Tree, r: Tree }
+struct Dir { files: [str: Dir] }
+
+fun nest(n: int) -> El {
+    var b = El { name: "a", kids: [Node.Text("x")] }
+    for k in 0..n { b = El { name: "a", kids: [Node.Text("t"), Node.Elem(b)] } }
+    return b
+}
+
+fun boxes(n: int) -> Box {
+    var b = Box { kids: [] }
+    for k in 0..n { b = Box { kids: [b, Box { kids: [] }] } }
+    return b
+}
+
+fun chain(n: int) -> Chain {
+    var c = Chain.End
+    for k in 0..n { c = Chain.Link(k, c) }
+    return c
+}
+
+fun lefts(n: int) -> Tree {
+    var t = Tree.Leaf
+    for k in 0..n { t = Tree.Fork(Pair { v: k, l: t, r: Tree.Leaf }) }
+    return t
+}
+
+fun dirs(n: int) -> Dir {
+    var d = Dir { files: [:] }
+    for k in 0..n { d = Dir { files: ["sub": d, "leaf": Dir { files: [:] }] } }
+    return d
+}
+
+fun main() {
+    var total = 0
+    for round in 0..10 {
+        let e = nest(100000)
+        total += e.kids.len()
+        let b = boxes(100000)
+        total += b.kids.len()
+        match chain(100000) {
+            Link(v, rest) => { total += v }
+            End => {}
+        }
+        match lefts(100000) {
+            Fork(p) => { total += p.v }
+            Leaf => {}
+        }
+        total += dirs(20000).files.len()
+    }
+    print(total)
+}
+"""
+
+# MYLA-389: the same released on the workers' 8 MiB stacks, each worker
+# deferring on its own (`__drop_depth`, `__drop_defer` in its block)
+DEEP_RELEASE_TASKS = """\
+import std.task as task
+
+enum Node { Elem(El), Text(str) }
+struct El { name: str, kids: [Node] }
+
+fun nest(n: int) -> El {
+    var b = El { name: "a", kids: [Node.Text("x")] }
+    for k in 0..n { b = El { name: "a", kids: [Node.Text("t"), Node.Elem(b)] } }
+    return b
+}
+
+async fun grow(n: int) -> int {
+    await task.yield()
+    let e = nest(n)
+    await task.yield()
+    return e.kids.len() + n
+}
+
+#main
+async fun main() {
+    var fs: [async () -> int] = []
+    for i in 0..8 { fs.push(async () => await grow(100000 + i)) }
+    let rs = await task.all(fs)
+    var t = 0
+    for r in rs { t += r }
+    print(t)
 }
 """
 

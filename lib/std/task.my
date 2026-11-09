@@ -11,6 +11,9 @@
 // its half: a child's captures are copied (D89), so passing the whole list
 // down would copy it at every level.
 
+import std.list as list_m // `extend`; `map` and `join` in the tests
+import std.option as option_m // `is_none` in the tests
+
 // The results of `fs`, run as child tasks at once, in the order of `fs`.
 pub async fun all<T>(fs: [async () -> T]) -> [T] {
     if fs.len() == 0 {
@@ -38,9 +41,7 @@ async fun run_halves<T>(fs: [async () -> T]) -> [T] {
     async let left = run_halves(low)
     async let right = run_halves(high)
     var out = await left
-    for x in await right {
-        out.push(x)
-    }
+    out.extend(await right)
     return out
 }
 
@@ -918,11 +919,8 @@ pub async fun first<T>(fs: [async () -> T]) -> Option<(int, T)> {
     // `None` only when this task was asked to stop: its children then were
     // too, and the first to finish is the first in the channel
     let w = await finished.recv()
-    // `cancel(rs)` as `timeout` cancels: a deadline that has passed (the
-    // checker takes `cancel` itself only from outside this module)
-    let t = __cancel_after(rs, 0)
+    cancel(rs)
     let results = await rs
-    let fired = __disarm(t)
     var winner = 0
     if let Some(i) = w {
         winner = i
@@ -1084,24 +1082,6 @@ fun got_said(r: Result<int, ChannelError>) -> str {
     }
 }
 
-fun ints_said(xs: [int]) -> str {
-    var sb = StringBuilder()
-    for i in 0..xs.len() {
-        if i > 0 {
-            sb.append(" ")
-        }
-        sb.append(f"{xs[i]}")
-    }
-    return sb.build()
-}
-
-fun is_none<T>(o: Option<T>) -> bool {
-    return match o {
-        Some(x) => false
-        None => true
-    }
-}
-
 // A channel of `cap` (-1: unbounded).
 fun ints_of(cap: int) -> Channel<int> {
     if cap < 0 {
@@ -1141,7 +1121,7 @@ async fun channel_in_order() {
         await ch.close()
         assert(sent == 60, f"capacity {cap}: every value sent")
         assert(await got == xs, f"capacity {cap}: received in order")
-        assert(is_none(await ch.recv()), f"capacity {cap}: none after close")
+        assert((await ch.recv()).is_none(), f"capacity {cap}: none after close")
         assert(sent_said(await ch.send(1)) == "channel closed", f"capacity {cap}: send after close")
     }
 }
@@ -1189,7 +1169,7 @@ async fun close_drains() {
     await ch.close()
     await ch.close()
     assert(sent == 3 && (await ch.len()) == 3, "three held")
-    assert(ints_said(await recv_all(ch)) == "1 2 3", "what was left, then the end")
+    assert((await recv_all(ch)).map((x) => f"{x}").join(" ") == "1 2 3", "what was left, then the end")
     assert(got_said(await ch.try_recv()) == "channel closed", "drained")
 }
 
@@ -1258,7 +1238,7 @@ async fun woken_in_time() {
 
 async fun waits_to_recv(ch: Channel<int>) -> (bool, bool) {
     let got = await ch.recv()
-    return (is_none(got), cancelled())
+    return (got.is_none(), cancelled())
 }
 
 async fun waits_to_send(ch: Channel<int>, x: int) -> str {
@@ -1269,19 +1249,15 @@ async fun waits_to_send(ch: Channel<int>, x: int) -> str {
 #test
 async fun cancelled_waits() {
     let ch: Channel<int> = channel(0)
-    // `cancel(r)` as `first` cancels (`cancel` is the checker's only from
-    // outside this module)
     async let r = waits_to_recv(ch)
     await sleep(2)
-    let tr = __cancel_after(r, 0)
+    cancel(r)
     let stopped = await r
-    let fired_r = __disarm(tr)
     assert(stopped == (true, true), "a receiver asked to stop gets none")
     async let s = waits_to_send(ch, 5)
     await sleep(2)
-    let ts = __cancel_after(s, 0)
+    cancel(s)
     let said_s = await s
-    let fired_s = __disarm(ts)
     assert(said_s == "cancelled", "a sender asked to stop")
     assert(got_said(await ch.try_recv()) == "channel empty", "its value taken back")
     async let closing = waits_to_send(ch, 6)
@@ -1371,7 +1347,7 @@ async fun the_first() {
     }
     assert(__clock_ns() - t0 < 5000000000i64, "the others cancelled")
     let none: [async () -> int] = []
-    assert(is_none(await first(none)), "no functions")
+    assert((await first(none)).is_none(), "no functions")
 }
 
 #test
@@ -1380,7 +1356,7 @@ async fun all_and_timeout() {
     for i in 0..9 {
         fs.push(async () => await sleep_then(9 - i, i))
     }
-    assert(ints_said(await all(fs)) == "0 1 2 3 4 5 6 7 8", "in the order of the functions")
+    assert((await all(fs)).map((x) => f"{x}").join(" ") == "0 1 2 3 4 5 6 7 8", "in the order of the functions")
     match await timeout(5000, async () => await sleep_then(1, 4)) {
         Some(v) => assert(v == 4, "its result")
         None => assert(false, "in time")

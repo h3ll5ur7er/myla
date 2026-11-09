@@ -8,8 +8,8 @@ design: a failed case runs no deferred block (its child process ends), a
 runtime error's message carries no values, so an expected `[panic]` is
 compared by prefix. For another target the harness runs under the emulator
 `--target` implies (qemu-aarch64) or MYLA_EMULATOR names (Node for wasm32,
-where no child process can start: the cases run in the harness itself and
-the first runtime error ends the run, which the report says)."""
+where the harness can start no child process: `myla test` runs it, and again
+after each case that ended a run, MYLA-370)."""
 import glob
 import os
 import shutil
@@ -42,25 +42,92 @@ PASS  output_of_a_pass_is_hidden
 # the async cases: the same but for the deferred blocks of the failed cases
 _ASYNC_NATIVE_WANT = _ASYNC_WANT.replace("      | case's defer\n", "").replace("      | async defer ran\n", "")
 
-# on wasm32 no child process can start: the cases run in the harness, and
-# the first runtime error ends the run
-_FUNCTIONS_INLINE_WANT = """PASS  passes
-PASS  passes_too (named)
-FAIL  fails_by_err: accepted 80
-FAIL  fails_by_expect: runtime error: expected 4, got 3
-FAIL  fails_by_ne: not run (an earlier failure ended the run)
-FAIL  fails_by_fail: not run (an earlier failure ended the run)
-FAIL  div #1: not run (an earlier failure ended the run)
-FAIL  div #2: not run (an earlier failure ended the run)
-FAIL  div #3: not run (an earlier failure ended the run)
-FAIL  div #4: not run (an earlier failure ended the run)
-FAIL  div #5: not run (an earlier failure ended the run)
-FAIL  leaves #1: not run (an earlier failure ended the run)
-FAIL  leaves #2: not run (an earlier failure ended the run)
-FAIL  leaves #3: not run (an earlier failure ended the run)
-FAIL  stays #1: not run (an earlier failure ended the run)
+# MYLA-357: a receiver of every kind with an empty value, and a literal one
+# of another integer type, bound with the argument's type; a method on a
+# built-in type named by its type. MYLA-361: a uint64 of 2^63 or more shown
+# unsigned, alone and inside a struct, a tuple, a list and an enum
+_RECEIVERS = """#derive(Eq)
+struct H { s: uint64 }
 
-2/15 passed.
+impl [str] {
+    #test([], "-")[1]
+    #test(["a"], "-")[2]
+    fun width_with(self, sep: str) -> int {
+        return self.len() + sep.len()
+    }
+}
+
+impl [str: int] {
+    #test([:])[0]
+    #test(["a": 2])[2]
+    fun sum_values(self) -> int {
+        var t = 0
+        for k in self.keys() {
+            t += self[k]
+        }
+        return t
+    }
+}
+
+impl str {
+    #test("")[0]
+    fun byte_count(self) -> int {
+        return self.len()
+    }
+}
+
+impl int8 {
+    #test(5, 2)[7]
+    fun plus_i8(self, d: int8) -> int8 {
+        return self + d
+    }
+}
+
+#test()[1u64]
+fun big() -> uint64 {
+    return 0xFFFFFFFFFFFFFFFF
+}
+
+#test()[H { s: 1 }]
+fun big_h() -> H {
+    return H { s: 0xFFFFFFFFFFFFFFFF }
+}
+
+#test()[(1u64, 2)]
+fun big_pair() -> (uint64, int) {
+    return (0xFFFFFFFFFFFFFFFF, 2)
+}
+
+#test()[[1u64]]
+fun big_list() -> [uint64] {
+    return [0x8000000000000000]
+}
+
+#test()[Some(1u64)]
+fun big_some() -> Option<uint64> {
+    return Some(0x8000000000000000)
+}
+
+#test()[panic("no")]
+fun big_returns() -> uint64 {
+    return 0x8000000000000000
+}
+"""
+
+_RECEIVERS_WANT = """PASS  [str].width_with #1
+PASS  [str].width_with #2
+PASS  [str: int32].sum_values #1
+PASS  [str: int32].sum_values #2
+PASS  str.byte_count #1
+PASS  int8.plus_i8 #1
+FAIL  big #1: expected 1, got 18446744073709551615
+FAIL  big_h #1: expected H { s: 1 }, got H { s: 18446744073709551615 }
+FAIL  big_pair #1: expected (1, 2), got (18446744073709551615, 2)
+FAIL  big_list #1: expected [1], got [9223372036854775808]
+FAIL  big_some #1: expected Option.Some(1), got Option.Some(9223372036854775808)
+FAIL  big_returns #1: expected runtime error 'no', got 9223372036854775808
+
+6/12 passed.
 """
 
 
@@ -136,6 +203,18 @@ class TestNative(unittest.TestCase):
             self.assertEqual((native.stdout, native.returncode), (interp.stdout, interp.returncode))
             self.assertIn("2/3 passed.", native.stdout)
 
+    def test_receivers_and_large_unsigned_values(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = _write(tmp, "recv.my", _RECEIVERS)
+            for flags in ([], ["--native"]):
+                with self.subTest(flags=flags):
+                    proc = _myla(["test", path, *flags], tmp)
+                    self.assertEqual(proc.stderr, "")
+                    self.assertEqual((proc.stdout, proc.returncode), (_RECEIVERS_WANT, 1))
+            proc = _myla(["test", path, "--only", "[str]."], tmp)
+            self.assertTrue(proc.stdout.startswith("PASS  [str].width_with #1\nPASS  [str].width_with #2\n\n2/2"),
+                            proc.stdout)
+
     def test_a_harness_that_does_not_build_is_kept(self):
         # a case calling `main`, which the harness blanks
         source = "#test()[1]\nfun one() -> int { main()\n    return 1 }\nfun main() {}\n"
@@ -177,13 +256,74 @@ class TestAarch64(unittest.TestCase):
 @unittest.skipUnless(CAN_BUILD_NATIVE and shutil.which("node") and shutil.which("clang")
                      and shutil.which("wasm-ld"), "needs node, clang and wasm-ld")
 class TestWasm32(unittest.TestCase):
-    def test_the_cases_run_in_the_harness_itself(self):
+    """On wasm32 the harness can start no process: `myla test` runs it once
+    and again after each case that ended a run (MYLA-370), so the report is
+    the native one, every case run."""
+
+    def _run(self, tmp: str, path: str, *flags: str, env: dict | None = None) -> subprocess.CompletedProcess:
+        return _myla(["test", path, "--target", "wasm32-wasi", *flags], tmp,
+                     {"MYLA_EMULATOR": f"node {_RUN_MJS}", **(env or {})})
+
+    def test_every_case_runs_after_one_that_ends_the_run(self):
+        for program, want in ((_FUNCTIONS, _FUNCTIONS_WANT), (_ASYNC, _ASYNC_NATIVE_WANT),
+                              (_RECEIVERS, _RECEIVERS_WANT)):
+            with tempfile.TemporaryDirectory() as tmp:
+                path = _write(tmp, "t.my", program)
+                proc = self._run(tmp, path)
+                self.assertEqual(proc.returncode, 1, proc.stderr)
+                self.assertEqual(proc.stdout, want)
+                self.assertEqual(proc.stderr, "")
+
+    def test_a_panic_case_first_and_the_ordinary_ones_after_it(self):
+        source = """from std.process import exit
+
+#test(1)[panic("boom")]
+#test(2)[2]
+#test(3)[panic("boom")]
+#test(4)[5]
+fun f(x: int) -> int {
+    print(f"f {x}")
+    if x % 2 == 1 { panic("boom") }
+    return x
+}
+
+#test()[exit(3)]
+fun g() {
+    print("g")
+    exit(3)
+}
+
+#test
+fun last() {}
+"""
+        want = ("PASS  f #1\nPASS  f #2\nPASS  f #3\nFAIL  f #4: expected 5, got 4\n      | f 4\n"
+                "PASS  g #1\nPASS  last\n\n5/6 passed.\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = _write(tmp, "t.my", source)
+            interp = _myla(["test", path], tmp)
+            self.assertEqual(interp.stdout, want)
+            proc = self._run(tmp, path)
+            self.assertEqual((proc.stdout, proc.returncode, proc.stderr), (want, 1, ""))
+
+    def test_the_scratch_directories_go(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            scratch = os.path.join(tmp, "scratch")
+            os.mkdir(scratch)
+            path = _write(tmp, "unwind.my", _UNWINDING)
+            proc = self._run(tmp, path, env={"TMPDIR": scratch})
+            self.assertEqual(proc.returncode, 1, proc.stderr)
+            self.assertEqual(proc.stdout, _UNWINDING_NATIVE_WANT)
+            self.assertFalse(os.path.exists(os.path.join(tmp, "unwound.txt")))
+            self.assertEqual(os.listdir(scratch), [])
+
+    def test_only(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = _write(tmp, "funcs.my", _FUNCTIONS)
-            proc = _myla(["test", path, "--target", "wasm32-wasi"], tmp,
-                         {"MYLA_EMULATOR": f"node {_RUN_MJS}"})
+            proc = self._run(tmp, path, "--only", "leaves")
             self.assertEqual(proc.returncode, 1, proc.stderr)
-            self.assertEqual(proc.stdout, _FUNCTIONS_INLINE_WANT)
+            self.assertEqual(proc.stdout, "PASS  leaves #1\n"
+                                          "FAIL  leaves #2: expected exit status 4, exited with status 3\n"
+                                          "FAIL  leaves #3: exited with status 3\n\n1/3 passed.\n")
 
 
 if __name__ == "__main__":

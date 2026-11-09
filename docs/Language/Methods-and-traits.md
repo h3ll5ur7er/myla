@@ -216,7 +216,7 @@ A fixed set of built-in traits backs the operators on structs and enums (D52):
 
 `a + b` on a struct becomes `a.add(b)`; `a < b` becomes `a.cmp(b) < 0`. Both operands must have the same type. Primitive types keep their built-in operators (a user `impl Add for int32` doesn't change `+`), and the bitwise operators can't be overloaded.
 
-## #derive(Eq) and #derive(Hash)
+## #derive(Eq), #derive(Hash) and #derive(Json)
 
 ```myla
 #derive(Eq)
@@ -231,7 +231,34 @@ fun main() {
 
 `#derive(Eq)` on a non-generic struct or enum synthesises a structural `impl Eq`: the fields in turn, or the variant and then its payload. Every field or payload must be `Eq` itself: an integer, a float, `char`, `bool`, `str`, a tuple or list of `Eq` elements, or a named type that is `Eq`. A type can't both derive `Eq` and implement it.
 
-`#derive(Hash)` writes an `impl Hash` (D163, [[MYLA-313]]) that adds the fields in order, `h.add(self.x).add(self.y)`, and for an enum the variant's index (as a `uint64`) and then its payload. It needs an `Eq` of the type, derived (`#derive(Eq, Hash)`) or written, and refuses a field that isn't `Hash`, a float among them. A type can't both derive `Hash` and implement it. `Eq` and `Hash` are the derivable traits so far; `Ord` is the planned next one.
+A float field compares with the floats' own `==`, in both runners: a value holding NaN is unequal to itself, and one holding `0.0` equals one holding `-0.0` ([[MYLA-316]]).
+
+```myla
+#derive(Eq)
+struct Reading {
+    unit: char,
+    value: float,
+}
+
+fun main() {
+    let a = Reading { unit: 'C', value: 0.0 }
+    print(a == Reading { unit: 'C', value: -0.0 })
+    print(a == Reading { unit: 'F', value: 0.0 })
+    let zero = 0.0
+    let b = Reading { unit: 'C', value: zero / zero }
+    print(b == b)
+}
+// output:
+// true
+// false
+// false
+```
+
+`#derive(Hash)` writes an `impl Hash` (D163, [[MYLA-313]]) that adds the fields in order, `h.add(self.x).add(self.y)`, and for an enum the variant's index (as a `uint64`) and then its payload. It needs an `Eq` of the type, derived (`#derive(Eq, Hash)`) or written, and refuses a field that isn't `Hash`, a float among them. A type can't both derive `Hash` and implement it.
+
+`#derive(Json)` writes an `impl ToJson` and an `impl FromJson` against `std.json` (D172, [[MYLA-385]]), which the program imports: a struct as an object of its fields (an `Option` field left out when `None`), an enum externally tagged (`"Red"`, `{"Dot": x}`, `{"Line": [a, b]}`), so that `json.encode(v)` and `json.decode<T>(text)` work on it; every field must have a JSON form itself, and recursive types work. The rules and the built-in types' forms are on [[Language/Standard-library/Json#typed-values]].
+
+The derives are generated as Myla source and checked with the program (`derived_hash_src`, `derived_json_struct_src`, `derived_json_enum_src` in [[selfhost/checker.my]]); `#derive(Json)`'s source names std.json's items by the loader's qualified names (`std$json$Json`), which only the checker's own parser accepts (`parse_qualified`). `Eq`, `Hash` and `Json` are the derivable traits so far; `Ord` is the planned next one.
 
 ## Hash
 

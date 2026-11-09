@@ -26,6 +26,7 @@ from std.fs import IoError
 import std.str as str_m
 import std.list as list_m
 import std.option as option_m
+import std.char as char_m // `to_digit`
 
 // --- Errors -------------------------------------------------------------------
 
@@ -616,7 +617,7 @@ impl XmlReader {
         if i == ns {
             return Err(self.name_error(ns))
         }
-        let name = piece(s, ns, i)
+        let name = s[ns:i]
         var attrs: [(str, str)] = []
         var far: [int] = []     // the offsets of the names past the first MANY_ATTRS
         var empty = false
@@ -650,7 +651,7 @@ impl XmlReader {
             if i == an {
                 return Err(self.name_error(an))
             }
-            let aname = piece(s, an, i)
+            let aname = s[an:i]
             i = skip_space(s, i)
             if i >= n {
                 return Err(self.error(XmlErrorKind.UnexpectedEnd, i))
@@ -897,7 +898,7 @@ impl XmlReader {
             let digits = i
             var v = 0
             while i < n {
-                let d = digit_value(s[i], hex)
+                let d = (s[i] as char).to_digit(if hex { 16 } else { 10 }).unwrap_or(-1)
                 if d < 0 {
                     break
                 }
@@ -912,7 +913,7 @@ impl XmlReader {
             if i == digits || s[i] != ';' || !is_xml_char(v) {
                 return Err(self.error(XmlErrorKind.InvalidReference, at))
             }
-            return Ok((encode(v), i + 1))
+            return Ok((f"{v as char}", i + 1))
         }
         let end = name_end(s, i)
         if end >= n {
@@ -1083,7 +1084,7 @@ impl XmlReader {
         if i == ts {
             return Err(self.name_error(ts))
         }
-        let target = piece(s, ts, i)
+        let target = s[ts:i]
         if target.len() == 3 && target.to_lower() == "xml" {
             if self.state == START && target == "xml" {
                 return Ok(("", "", -i))
@@ -1136,7 +1137,7 @@ impl XmlReader {
             }
             let ns = i
             i = name_end(s, i)
-            let name = piece(s, ns, i)
+            let name = s[ns:i]
             i = skip_space(s, i)
             if i >= n {
                 return Err(self.error(XmlErrorKind.UnexpectedEnd, n))
@@ -1584,18 +1585,6 @@ fun is_cut(s: str, i: int, p: str) -> bool {
     return true
 }
 
-// The bytes of `s` from `a` to `b`: a slice, but where `b` is inside bytes
-// that aren't UTF-8 (where a slice can't end).
-#test("ab", 0, 1)["a"]
-fun piece(s: str, a: int, b: int) -> str {
-    if b < s.len() && s[b] >= 0x80u8 && s[b] < 0xC0u8 {
-        var sb = StringBuilder()
-        sb.append(s, a, b)
-        return sb.build()
-    }
-    return s[a:b]
-}
-
 // Whether the bytes of `s` from `a` to `b` are `t`.
 fun same_bytes(s: str, a: int, b: int, t: str) -> bool {
     if b - a != t.len() {
@@ -1634,24 +1623,6 @@ fun predefined(s: str, a: int, b: int) -> str {
         }
     }
     return ""
-}
-
-// The value of the digit `c` (hex if `hex`), or -1.
-#test('7', false)[7]
-#test('b', true)[11]
-#test('b', false)[-1]
-#test('G', true)[-1]
-fun digit_value(c: uint8, hex: bool) -> int {
-    if c >= '0' && c <= '9' {
-        return (c - '0') as int
-    }
-    if hex && c >= 'a' && c <= 'f' {
-        return (c - 'a') as int + 10
-    }
-    if hex && c >= 'A' && c <= 'F' {
-        return (c - 'A') as int + 10
-    }
-    return -1
 }
 
 // Whether `c` is a character XML 1.0 allows (2.2).
@@ -1726,31 +1697,6 @@ fun char_len(s: str, i: int) -> int {
         return 0
     }
     return utf8_len(s[i])
-}
-
-// The UTF-8 bytes of the scalar value `c`.
-#test(0x41)["A"]
-#test(0xE9)["é"]
-#test(0x20AC)["€"]
-#test(0x1F600)["😀"]
-fun encode(c: int) -> str {
-    var sb = StringBuilder()
-    if c < 0x80 {
-        sb.append_byte(c as uint8)
-    } else if c < 0x800 {
-        sb.append_byte((0xC0 | (c >> 6)) as uint8)
-        sb.append_byte((0x80 | (c & 0x3F)) as uint8)
-    } else if c < 0x10000 {
-        sb.append_byte((0xE0 | (c >> 12)) as uint8)
-        sb.append_byte((0x80 | ((c >> 6) & 0x3F)) as uint8)
-        sb.append_byte((0x80 | (c & 0x3F)) as uint8)
-    } else {
-        sb.append_byte((0xF0 | (c >> 18)) as uint8)
-        sb.append_byte((0x80 | ((c >> 12) & 0x3F)) as uint8)
-        sb.append_byte((0x80 | ((c >> 6) & 0x3F)) as uint8)
-        sb.append_byte((0x80 | (c & 0x3F)) as uint8)
-    }
-    return sb.build()
 }
 
 // ISO-8859-1 bytes as UTF-8.
@@ -2212,7 +2158,8 @@ fun latin1() {
         Ok(_) => assert(false, "a byte that isn't UTF-8")
         Err(e) => assert(e.kind == XmlErrorKind.InvalidChar && e.col == 4, f"{e}")
     }
-    // a lone continuation byte right after a name, where a slice can't end
+    // a lone continuation byte right after a name, which a slice ends beside
+    // (D174; the module copied the name through a builder before)
     for head in ["<a", "<a b", "<?p", "<?xml version"] {
         var sb2 = StringBuilder()
         sb2.append(head)
@@ -2384,9 +2331,9 @@ fun stream_failure() {
 }
 
 // Nesting has no limit: the reader, the tree builder and the writer loop
-// over stacks, not recursions (natively a million levels work). 1000 here:
-// on wasm32 the runtime releases a value nested 2000 deep by a recursion
-// that overflows its stack.
+// over stacks, not recursions (natively a million levels work, and the
+// release of such a tree runs in a bounded stack on every target since
+// MYLA-389). 1000 here: interpreted, 100,000 levels take a minute.
 #test
 fun deep() {
     let text = nested(1000)

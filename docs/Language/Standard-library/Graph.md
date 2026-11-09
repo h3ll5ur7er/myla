@@ -1,6 +1,6 @@
 # std.graph
 
-Searches of a graph given by its neighbour function ([[MYLA-342]]): breadth-first and depth-first search, Dijkstra's algorithm, A*, topological sort and connected components. No graph is stored. A search asks `next(u)` for the nodes the edges from `u` lead to, when it reaches `u`, so the graph can be a grid, a puzzle's states or a list of edges, and only the part a search reaches is made. The module imports `std.deque` and `std.heap`.
+Searches of a graph given by its neighbour function ([[MYLA-342]]): breadth-first and depth-first search, Dijkstra's algorithm, A*, topological sort and connected components. No graph is stored. A search asks `next(u)` for the nodes the edges from `u` lead to, when it reaches `u`, so the graph can be a grid, a puzzle's states or a list of edges, and only the part a search reaches is made. The module imports `std.deque`, `std.heap` and `std.list`.
 
 ```myla
 import std.graph as graph

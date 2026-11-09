@@ -25,6 +25,7 @@
 
 import .fmt as fmt
 from .io import write
+import .list as list_m // `concat`, `remove_at` of a line's characters
 
 const ESC: str = "\u{1b}"
 const EINTR: int = 4
@@ -903,7 +904,7 @@ impl LineEdit {
         }
         if c == 'w' {
             let begin = word_start(self.chars, self.cursor)
-            self.chars = spliced(self.chars, begin, self.cursor, [])
+            self.chars = self.chars[:begin].concat(self.chars[self.cursor:])
             self.cursor = begin
         }
         if c == 'p' { self.go_history(self.hist - 1, history) }
@@ -912,20 +913,20 @@ impl LineEdit {
     }
 
     fun insert(var self, cs: [char]) {
-        self.chars = spliced(self.chars, self.cursor, self.cursor, cs)
+        self.chars = self.chars[:self.cursor].concat(cs).concat(self.chars[self.cursor:])
         self.cursor += cs.len()
     }
 
     fun delete_back(var self) {
         if self.cursor > 0 {
-            self.chars = spliced(self.chars, self.cursor - 1, self.cursor, [])
+            self.chars.remove_at(self.cursor - 1)
             self.cursor -= 1
         }
     }
 
     fun delete_here(var self) {
         if self.cursor < self.chars.len() {
-            self.chars = spliced(self.chars, self.cursor, self.cursor + 1, [])
+            self.chars.remove_at(self.cursor)
         }
     }
 
@@ -989,27 +990,6 @@ fun text_of(cs: [char]) -> str {
         sb.append(f"{c}")
     }
     return sb.build()
-}
-
-// `cs` with `cs[a:b]` replaced by `ins`.
-#test(['a', 'b', 'c'], 1, 2, ['x', 'y'])[['a', 'x', 'y', 'c']]
-#test(['a', 'b'], 0, 2, ['z'])[['z']]
-fun spliced(cs: [char], a: int, b: int, ins: [char]) -> [char] {
-    var out: [char] = []
-    var i = 0
-    while i < a {
-        out.push(cs[i])
-        i += 1
-    }
-    for c in ins {
-        out.push(c)
-    }
-    i = b
-    while i < cs.len() {
-        out.push(cs[i])
-        i += 1
-    }
-    return out
 }
 
 // The columns of `cs[a:b]`.

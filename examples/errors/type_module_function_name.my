@@ -1,0 +1,21 @@
+//~ type error: function 'iter.sum' expects 2 argument(s), got 1
+//~ errors: 3
+//~ next: function 'deque.of' expects 1 argument(s), got 2
+//~ next: cannot assign value of type 'int32' to binding of type 'deque.Deque<int32>'
+// A module's functions and types are named in messages as a program writes
+// them, `iter.sum` and `deque.Deque`, not as the loader qualifies them
+// (`std$iter$sum`, MYLA-383).
+import std.deque as deque
+import std.iter as iter
+
+fun total(xs: [int]) -> int {
+    return xs.iter() |> iter.sum()
+}
+
+fun two() {
+    let d = deque.of([1], 2)
+}
+
+fun main() {
+    let d: deque.Deque<int> = 1
+}

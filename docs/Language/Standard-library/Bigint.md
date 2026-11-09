@@ -1,6 +1,6 @@
 # std.bigint
 
-Integers of any size ([[MYLA-345]]). A `BigInt` is a sign and a magnitude of 32-bit limbs. It has the operators `+ - * / %` and `< <= > >=`, `==`, a hash, so it can be a map key, and `Format`. It is read and written in any radix from 2 to 36, and big numbers are multiplied, divided, read and written faster than in quadratic time. The module imports only [[Language/Standard-library/Fmt]].
+Integers of any size ([[MYLA-345]]). A `BigInt` is a sign and a magnitude of 32-bit limbs. It has the operators `+ - * / %` and `< <= > >=`, `==`, a hash, so it can be a map key, and `Format`. It is read and written in any radix from 2 to 36, and big numbers are multiplied, divided, read and written faster than in quadratic time. The module imports [[Language/Standard-library/Fmt]], and std.list (`filled`, `extend`).
 
 ```myla
 import std.bigint as bigint

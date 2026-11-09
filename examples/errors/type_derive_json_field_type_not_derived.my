@@ -1,0 +1,17 @@
+//~ type error: cannot derive Json for struct 'Doc': field 'owner' has type 'Option<User>', which isn't ToJson and FromJson
+// A field's own type must derive `Json` too, or write both impls (D172).
+import std.json as json
+
+struct User {
+    name: str,
+}
+
+#derive(Json)
+struct Doc {
+    title: str,
+    owner: Option<User>,
+}
+
+fun main() {
+    print(json.encode(Doc { title: "t", owner: None }))
+}

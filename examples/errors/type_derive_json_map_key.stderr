@@ -1,0 +1,5 @@
+type error: cannot derive Json for enum 'Index': payload #0 of variant 'ByLine' has type '[int32: str]', which isn't ToJson and FromJson (a map is an object only with 'str' keys)
+  --> examples/errors/type_derive_json_map_key.my:6:1
+  |
+6 | enum Index {
+  | ^^^^^^^^^^^^

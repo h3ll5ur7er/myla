@@ -23,7 +23,7 @@ from .inline import inlinable, inline_calls, same_module, may_inline, merge_bloc
 from .hoist import hoist_cows
 from .ranges import widen_counters
 from .anf import Norm, new_norm
-from .lower import async_fnval_ir, lower_function, lower_lambda, blocked_types, Lowered, myla_runtime_function, derived_eq_ir, compound_eq_ir, tuple_hash_ir, key_hash_ir, key_eq_ir, map_find_ir, map_put_ir, map_keys_ir, walk_ir, drop_entry_ir, dropb_slow_ir, list_drop_slow_ir, map_drop_slow_ir, clone_ir, deep_walk_ir, deep_cell_ir, Routine, Want, env_drop_ir, env_deep_ir, partial_ir, frame_new_ir
+from .lower import async_fnval_ir, lower_function, lower_lambda, blocked_types, Lowered, myla_runtime_function, derived_eq_ir, compound_eq_ir, tuple_hash_ir, key_hash_ir, key_eq_ir, map_find_ir, map_put_ir, map_keys_ir, walk_ir, drop_entry_ir, dropb_slow_ir, list_drop_slow_ir, map_drop_slow_ir, drop_drain_ir, clone_ir, deep_walk_ir, deep_cell_ir, Routine, Want, env_drop_ir, env_deep_ir, partial_ir, frame_new_ir
 import .ir_x86 as ir_x86
 import .ownership as ownership
 import .runtime_x86 as runtime_x86
@@ -113,6 +113,9 @@ pub struct CodeGen {
     type_jobs: [Want],
     type_jobs_seen: [str: bool],
     drop_emitted: [str],
+    // the release routines that defer past a depth (MYLA-389), by kind:
+    // `__drop_routines`, which `__drop_drain` calls through
+    drop_kinds: [str],
     need_clone: [Type],
     clone_emitted: [str],
     // aggregates whose retain or release walk is a helper of its own
@@ -340,7 +343,7 @@ pub fun new_codegen(c: Checker) -> CodeGen {
         lam_jobs: [], lam_seen: [:], partial_jobs: [], fnval_set: [],
         uses_float: false,
         epilogue: "", ret_type: None,
-        need_drop: [], type_jobs: [], type_jobs_seen: [:], drop_emitted: [], need_clone: [], clone_emitted: [],
+        need_drop: [], type_jobs: [], type_jobs_seen: [:], drop_emitted: [], drop_kinds: [], need_clone: [], clone_emitted: [],
         need_walk: [], need_deep: [], deep_inline: [], deep_clone: [], need_deepc: [], deepc_clone: [], walk_retain: [], walk_emitted: [], helper_seen: [:],
         need_sb: false,
         line_spans: [], prelude_id: 0,
@@ -2179,6 +2182,11 @@ impl CodeGen {
             out.push("\t.quad 0")
             out.push("\t.quad 0")
         }
+        // the release routines `__drop_drain` calls, by kind (MYLA-389)
+        if self.drop_kinds.len() > 0 {
+            out.push("__drop_routines:")
+            for k in self.drop_kinds { out.push(format("\t.quad myla_{}", k)) }
+        }
         for l in self.env_records {
             out.push(format("myla_{}_env_routines:", l))
             out.push(format("\t.quad myla_{}_env_drop", l))
@@ -2214,6 +2222,12 @@ impl CodeGen {
         out.push("__run_signal_val:")
         out.push("\t.skip 8")
         out.push("__run_errno_val:")
+        out.push("\t.skip 8")
+        // how many guarded releases run inside one another, and the cells
+        // deferred past DROP_DEPTH (MYLA-389, `drop_guard`)
+        out.push("__drop_depth:")
+        out.push("\t.skip 8")
+        out.push("__drop_defer:")
         out.push("\t.skip 8")
         // 1 once a stack overflow is being reported (`__on_segv`)
         out.push("__segv_once:")
@@ -3487,16 +3501,23 @@ impl CodeGen {
                 }
                 let slow = name + "_slow"
                 var atomic = false
+                // a type that can nest itself without bound: its release
+                // defers past a depth, a kind of `__drop_drain`'s (MYLA-389)
+                var kind = -1
+                if self.drop_reenters(t) {
+                    kind = self.drop_kinds.len() as int32
+                    self.drop_kinds.push(slow)
+                }
                 match t {
-                    Type.TList(e) => { self.emit_routine(list_drop_slow_ir(self, e, slow, free), -1, 0, 0) },
-                    Type.TMap(k2, v) => { self.emit_routine(map_drop_slow_ir(self, t, slow, free), -1, 0, 0) },
+                    Type.TList(e) => { self.emit_routine(list_drop_slow_ir(self, e, slow, free, kind), -1, 0, 0) },
+                    Type.TMap(k2, v) => { self.emit_routine(map_drop_slow_ir(self, t, slow, free, kind), -1, 0, 0) },
                     Type.TEnum(n, a) => {
-                        self.emit_routine(dropb_slow_ir(self, t, "inline", slow, free), -1, 0, 0)
+                        self.emit_routine(dropb_slow_ir(self, t, "inline", slow, free, kind), -1, 0, 0)
                     },
                     // an actor's cell: its fields, as a struct's (same token)
                     Type.TActor(n, a) => {
                         atomic = self.frames
-                        self.emit_routine(dropb_slow_ir(self, Type.TStruct(n, a), "", slow, free), -1, 0, 0)
+                        self.emit_routine(dropb_slow_ir(self, Type.TStruct(n, a), "", slow, free, kind), -1, 0, 0)
                     },
                     _ => {},
                 }
@@ -3548,6 +3569,85 @@ impl CodeGen {
             }
         }
         if self.need_sb { self.emit_sb_rc_helpers() }
+        if self.drop_kinds.len() > 0 { self.emit_routine(drop_drain_ir(), -1, 0, 0) }
+    }
+
+    // Whether releasing a cell of `t` (a list, map, boxed enum or actor) can
+    // release another cell of `t` inside it (MYLA-389): `t` reaches itself
+    // through what it owns, so a value can nest it as deep as it likes.
+    #test(codegen_on("[int]"), Type.TList(Type.TInt(32, true)))[false]
+    #test(codegen_on("struct B { kids: [B] }"), Type.TList(Type.TStruct("B", [])))[true]
+    fun drop_reenters(self, t: Type) -> bool {
+        let tok = mono_token(t)
+        for m in self.cell_members(t) {
+            if self.reaches_cell(m, tok, []) { return true }
+        }
+        return false
+    }
+
+    // What a cell of `t` holds: a list's element, a map's key and value, a
+    // boxed enum's payloads, an actor's fields.
+    #test(codegen_on("[int]"), Type.TMap(Type.TStr, Type.TBool))[[Type.TStr, Type.TBool]]
+    #test(codegen_on("[int]"), Type.TStr)[[]]
+    fun cell_members(self, t: Type) -> [Type] {
+        var out: [Type] = []
+        match t {
+            Type.TList(e) => { out.push(e) },
+            Type.TMap(k, v) => {
+                out.push(k)
+                out.push(v)
+            },
+            Type.TEnum(n, a) => {
+                let info = self.enum_info(n)
+                let sub = self.type_subst(info.type_params, a)
+                for v in info.variants { for ft in v.payload { out.push(subst_type(ft, sub)) } }
+            },
+            Type.TActor(n, a) => {
+                let info = self.struct_info(n)
+                let sub = self.type_subst(info.type_params, a)
+                for f in info.fields { out.push(subst_type(f.ty, sub)) }
+            },
+            _ => {},
+        }
+        return out
+    }
+
+    // Whether a value of `t` holds, inline or through cells, a cell whose
+    // type's token is `tok` (`seen`: the cells' tokens already looked into).
+    #test(codegen_on("[int]"), Type.TTuple([Type.TStr, Type.TList(Type.TBool)]), ".L5.bool", [])[true]
+    #test(codegen_on("[int]"), Type.TList(Type.TStr), ".L5.bool", [])[false]
+    fun reaches_cell(self, t: Type, tok: str, seen: [str]) -> bool {
+        let cell = self.is_boxed(t) || match t { Type.TList(e) => true, Type.TMap(k, v) => true, Type.TActor(n, a) => true, _ => false }
+        if cell {
+            let mine = mono_token(t)
+            if mine == tok { return true }
+            if list_has_str(seen, mine) { return false }
+            for m in self.cell_members(t) {
+                if self.reaches_cell(m, tok, push_str_copy(seen, mine)) { return true }
+            }
+            return false
+        }
+        match t {
+            Type.TStruct(n, a) => {
+                let info = self.struct_info(n)
+                let sub = self.type_subst(info.type_params, a)
+                for f in info.fields {
+                    if self.reaches_cell(subst_type(f.ty, sub), tok, seen) { return true }
+                }
+            },
+            Type.TEnum(n, a) => {
+                for m in self.cell_members(t) {
+                    if self.reaches_cell(m, tok, seen) { return true }
+                }
+            },
+            Type.TTuple(es) => {
+                for e in es {
+                    if self.reaches_cell(e, tok, seen) { return true }
+                }
+            },
+            _ => {},
+        }
+        return false
     }
 
 
@@ -3796,7 +3896,7 @@ fun method_part(name: str) -> str {
 #test("total")[false]
 #test("length")[false]
 pub fun is_mutating_builtin(n: str) -> bool {
-    return n == "push" || n == "pop" || n == "remove" || n == "append" || n == "append_byte"
+    return n == "push" || n == "pop" || n == "remove" || n == "append" || n == "append_byte" || n == "append_char"
 }
 
 // Whether running an arm (guard and body) may write to variable `name`,
@@ -3963,9 +4063,11 @@ pub fun tls_offset(sym: str) -> int32 {
     if sym == "__run_exit_val" { return 56 }
     if sym == "__run_signal_val" { return 64 }
     if sym == "__run_errno_val" { return 72 }
+    if sym == "__drop_depth" { return 80 }
     if sym == "__worker_id" { return 88 }
     if sym == "__remote_free" { return 96 }
     if sym == "__exec_task" { return 104 }
+    if sym == "__drop_defer" { return 112 }
     if sym == "__free_buckets" { return 128 }
     return 0
 }
@@ -4073,7 +4175,7 @@ pub fun tfunc_ret(t: Type) -> Option<Type> {
 pub fun is_builtin_call_name(nm: str) -> bool {
     if nm == "print" || nm == "assert" || nm == "panic" || nm == "unreachable" { return true }
     if nm == "len" || nm == "push" || nm == "pop" || nm == "chars" || nm == "format" { return true }
-    if nm == "StringBuilder" || nm == "append" || nm == "append_byte" || nm == "build" { return true }
+    if nm == "StringBuilder" || nm == "append" || nm == "append_byte" || nm == "append_char" || nm == "build" { return true }
     if nm == "contains" || nm == "remove" || nm == "keys" { return true }
     if nm == "__write" || nm == "__exit" || nm == "__args" || nm == "__read_file" || nm == "__io_errno" { return true }
     if nm == "__write_file" || nm == "__run" || nm == "__run_stderr" || nm == "__run_exit_code" || nm == "__read" || nm == "__poll" { return true }

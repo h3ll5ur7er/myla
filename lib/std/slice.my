@@ -7,8 +7,8 @@
 // caller reports as it does a negative index (D154). A negative step goes
 // backwards, as in Python. The interpreter and the code generator both take
 // their indices from `range_of`, so every runner takes the same elements; a
-// step of 0 and a `str` bound inside a character are checked by the caller,
-// which reports them where the slice stands.
+// step of 0 and a `str` bound inside a well-formed character (D174) are
+// checked by the caller, which reports them where the slice stands.
 
 // The indices a slice takes: `count` of them, from `first`, `step` apart.
 pub struct Range { first: int64, step: int64, count: int64 }
@@ -68,15 +68,62 @@ pub fun take<T>(xs: [T], start: int64, has_start: bool, start_end: bool, stop: i
     return out
 }
 
-// Whether the byte at `i` of `s` starts a character (or is its end).
-fun starts_char(s: str, i: int64) -> bool {
-    if i < 0 || i >= s.len() as int64 { return true }
-    return (s[i] & 0xC0) != 0x80
+// How many bytes the well-formed UTF-8 sequence the byte at `j` of `s` leads
+// has, as `s.chars()` decodes it (no overlong form, no surrogate, nothing
+// past U+10FFFF, not cut short), or 1 for a byte that leads none.
+#test("aé", 1)[2]
+#test("aé", 0)[1]
+#test("€", 0)[3]
+#test("😀", 0)[4]
+fun seq_len(s: str, j: int64) -> int64 {
+    let n = s.len() as int64
+    let b = s[j] as int64
+    var need: int64 = 0
+    // the second byte's range: narrower after E0, ED, F0 and F4
+    var lo: int64 = 0x80
+    var hi: int64 = 0xBF
+    if b >= 0xC2 && b < 0xE0 {
+        need = 2
+    } else if b >= 0xE0 && b < 0xF0 {
+        need = 3
+        if b == 0xE0 { lo = 0xA0 }
+        if b == 0xED { hi = 0x9F }
+    } else if b >= 0xF0 && b < 0xF5 {
+        need = 4
+        if b == 0xF0 { lo = 0x90 }
+        if b == 0xF4 { hi = 0x8F }
+    }
+    if need == 0 || j + need > n { return 1 }
+    let c = s[j + 1] as int64
+    if c < lo || c > hi { return 1 }
+    var k: int64 = 2
+    while k < need {
+        if (s[j + k] & 0xC0) != 0x80 { return 1 }
+        k += 1
+    }
+    return need
 }
 
-// Whether a slice of `s` takes whole characters (D143): with a step of 1 its
-// two ends lie between characters; with any other it takes single bytes,
-// which must each be a character (ASCII).
+// Whether a slice of `s` may start or end at byte `i` (D174): unless `i`
+// falls strictly inside a well-formed UTF-8 sequence; beside a byte that
+// belongs to none (binary data, broken text) it may.
+#test("größe", 3)[false]
+#test("größe", 4)[true]
+fun at_boundary(s: str, i: int64) -> bool {
+    if i <= 0 || i >= s.len() as int64 { return true }
+    if (s[i] & 0xC0) != 0x80 { return true }
+    // the sequence's lead, at most three bytes back, if any
+    var j = i - 1
+    while j >= 0 && j >= i - 3 {
+        if (s[j] & 0xC0) != 0x80 { return j + seq_len(s, j) <= i }
+        j -= 1
+    }
+    return true
+}
+
+// Whether a slice of `s` takes whole characters (D143, D174): with a step
+// of 1 neither end lies strictly inside a well-formed character; with any
+// other it takes single bytes, which must each be a character (ASCII).
 #test("größe", 0, true, false, 2, true, false, 1)[true]
 #test("größe", 0, true, false, 3, true, false, 1)[false]
 #test("aö", 0, false, false, 0, false, false, -1)[false]
@@ -84,7 +131,7 @@ fun starts_char(s: str, i: int64) -> bool {
 pub fun str_whole(s: str, start: int64, has_start: bool, start_end: bool, stop: int64, has_stop: bool, stop_end: bool, step: int64) -> bool {
     let r = range_of(s.len() as int64, start, has_start, start_end, stop, has_stop, stop_end, step)
     if r.count == 0 { return true }
-    if r.step == 1 { return starts_char(s, r.first) && starts_char(s, r.first + r.count) }
+    if r.step == 1 { return at_boundary(s, r.first) && at_boundary(s, r.first + r.count) }
     var i = r.first
     var k: int64 = 0
     while k < r.count {

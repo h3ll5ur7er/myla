@@ -1807,6 +1807,10 @@
           "named": true
         },
         {
+          "type": "bind_tuple",
+          "named": true
+        },
+        {
           "type": "block",
           "named": true
         },

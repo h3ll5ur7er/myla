@@ -562,14 +562,19 @@ impl Norm {
         return Block { line: line, col: col, sp: sp, stmts: stmts }
     }
 
+    // An arm's trailing expression. Unless the match's value is wanted it is
+    // a statement (MYLA-392): a `match` there is a statement too, not a value
+    // whose void arms would bind an `await` with no result to a temporary.
     fun arm_value(var self, x: Expr, result: Expr, value: bool) {
+        if !value {
+            self.stmt(Stmt { id: self.id(), line: x.line, col: x.col, sp: x.sp, kind: StmtKind.ExprStmt(x) })
+            return
+        }
         let x2 = self.expr(x)
-        if value && self.value_matches {
+        if self.value_matches {
             self.out.push(Stmt { id: self.id(), line: x.line, col: x.col, sp: x.sp, kind: StmtKind.ExprStmt(x2) })
-        } else if value {
+        } else {
             self.out.push(Stmt { id: self.id(), line: x.line, col: x.col, sp: x.sp, kind: StmtKind.Assign(result, x2) })
-        } else if !is_simple(x2) {
-            self.out.push(Stmt { id: self.id(), line: x.line, col: x.col, sp: x.sp, kind: StmtKind.ExprStmt(x2) })
         }
     }
 

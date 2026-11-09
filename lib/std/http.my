@@ -29,7 +29,7 @@
 
 import std.net as net
 from std.net import TcpStream, TcpListener, SocketAddr, IpAddr
-from std.fs import IoError
+from std.fs import IoError, io_error_name
 from std.io import Read, Write
 import std.url as url_m
 import std.compress as compress
@@ -89,7 +89,7 @@ impl HttpError {
         return match self {
             InvalidUrl(u) => f"invalid URL: {u}"
             Unsupported(what) => f"unsupported: {what}"
-            Io(e) => f"connection failed: {io_name(e)}"
+            Io(e) => f"connection failed: {io_error_name(e)}"
             TimedOut => "timed out"
             Closed => "connection closed"
             Truncated => "connection closed inside a message"
@@ -117,36 +117,6 @@ impl Format for HttpError {
     #test(HttpError.BodyTooLarge, "")["body too large"]
     fun format(self, spec: str) -> str {
         return self.message()
-    }
-}
-
-// The name of an `IoError`'s cause.
-#test(IoError.Other(5))["Other(5)"]
-#test(IoError.TimedOut)["TimedOut"]
-fun io_name(e: IoError) -> str {
-    return match e {
-        NotFound => "NotFound"
-        PermissionDenied => "PermissionDenied"
-        AlreadyExists => "AlreadyExists"
-        NotADirectory => "NotADirectory"
-        IsADirectory => "IsADirectory"
-        NotEmpty => "NotEmpty"
-        Interrupted => "Interrupted"
-        Cancelled => "Cancelled"
-        Unsupported => "Unsupported"
-        BrokenPipe => "BrokenPipe"
-        InvalidInput => "InvalidInput"
-        ConnectionRefused => "ConnectionRefused"
-        ConnectionReset => "ConnectionReset"
-        ConnectionAborted => "ConnectionAborted"
-        NotConnected => "NotConnected"
-        AddrInUse => "AddrInUse"
-        AddrNotAvailable => "AddrNotAvailable"
-        TimedOut => "TimedOut"
-        HostUnreachable => "HostUnreachable"
-        NetworkUnreachable => "NetworkUnreachable"
-        InvalidData => "InvalidData"
-        Other(c) => f"Other({c})"
     }
 }
 
@@ -344,30 +314,6 @@ fun parse_hex(s: str) -> int {
         i += 1
     }
     return v as int
-}
-
-// `n` in lower-case hex.
-#test(255)["ff"]
-#test(0)["0"]
-#test(65536)["10000"]
-fun hex(n: int) -> str {
-    if n == 0 {
-        return "0"
-    }
-    let digits = "0123456789abcdef"
-    var out: [uint8] = []
-    var v = n
-    while v > 0 {
-        out.push(digits[v % 16])
-        v = v / 16
-    }
-    var sb = StringBuilder()
-    var i = out.len() - 1
-    while i >= 0 {
-        sb.append_byte(out[i])
-        i -= 1
-    }
-    return sb.build()
 }
 
 // The pieces of a comma-separated header value (or of several), trimmed
@@ -1328,7 +1274,7 @@ fun chunked(body: str, trailers: Headers) -> str {
         if end > body.len() {
             end = body.len()
         }
-        sb.append(hex(end - at))
+        sb.append(f"{end - at:x}")
         sb.append("\r\n")
         sb.append(body, at, end)
         sb.append("\r\n")
@@ -2865,25 +2811,16 @@ fun builders() {
     }
 }
 
-// The bytes `b` as a string.
-fun of_bytes(b: [uint8]) -> str {
-    var sb = StringBuilder()
-    for x in b {
-        sb.append_byte(x)
-    }
-    return sb.build()
-}
-
 // Bytes that aren't UTF-8 become U+FFFD, one each; valid ones stay.
 #test
 fun lossy_text() {
-    assert(lossy_utf8(of_bytes([97u8, 255u8, 98u8])) == "a\u{FFFD}b", "0xFF")
-    assert(lossy_utf8(of_bytes([195u8])) == "\u{FFFD}", "cut short")
-    assert(lossy_utf8(of_bytes([192u8, 128u8])) == "\u{FFFD}\u{FFFD}", "an overlong NUL")
-    assert(lossy_utf8(of_bytes([237u8, 160u8, 128u8, 104u8])) == "\u{FFFD}\u{FFFD}\u{FFFD}h", "a surrogate")
-    assert(lossy_utf8(of_bytes([240u8, 159u8, 152u8, 128u8])) == "\u{1F600}", "four bytes")
-    assert(lossy_utf8(of_bytes([244u8, 144u8, 128u8, 128u8])) == "\u{FFFD}\u{FFFD}\u{FFFD}\u{FFFD}", "past U+10FFFF")
-    let r = response(200, of_bytes([104u8, 105u8, 255u8]))
+    assert(lossy_utf8(bytes_m.to_str([97u8, 255u8, 98u8])) == "a\u{FFFD}b", "0xFF")
+    assert(lossy_utf8(bytes_m.to_str([195u8])) == "\u{FFFD}", "cut short")
+    assert(lossy_utf8(bytes_m.to_str([192u8, 128u8])) == "\u{FFFD}\u{FFFD}", "an overlong NUL")
+    assert(lossy_utf8(bytes_m.to_str([237u8, 160u8, 128u8, 104u8])) == "\u{FFFD}\u{FFFD}\u{FFFD}h", "a surrogate")
+    assert(lossy_utf8(bytes_m.to_str([240u8, 159u8, 152u8, 128u8])) == "\u{1F600}", "four bytes")
+    assert(lossy_utf8(bytes_m.to_str([244u8, 144u8, 128u8, 128u8])) == "\u{FFFD}\u{FFFD}\u{FFFD}\u{FFFD}", "past U+10FFFF")
+    let r = response(200, bytes_m.to_str([104u8, 105u8, 255u8]))
     assert(r.text() == "hi\u{FFFD}" && r.bytes() == [104u8, 105u8, 255u8], "a response's text and bytes")
 }
 

@@ -17,10 +17,8 @@
 // adapter that gives back the inner iterator's own values names their type
 // too (`Take<I, T>`), though only its `inner: I` holds them.
 //
-// The loops here are `while let Some(x) = c.next()`, not `for x in it`: one
-// `for` over an iterator anywhere in a program has the checker rebuild every
-// function's body once (`fill_in`, about 8 ms for a hello world), which
-// importing this module shouldn't cost a program that has none.
+// An adapter's `next` loops with `while let Some(v) = self.inner.next()`:
+// a `for` would work on a copy of `self.inner` and leave it where it was.
 
 import std.list as list_m     // `xs.iter()` in the tests
 import std.map as map_m       // `m.iter()` in the tests
@@ -631,10 +629,9 @@ fun pipes() {
     same(shown(words), "[1bb, 3dd]")
     let firsts = range(1, 100) |> map((n) => n * n) |> skip_while((n) => n < 10) |> take(3) |> to_list()
     same(shown(firsts), "[16, 25, 36]")
-    // a loop over a pipeline (`while let`: see the header)
+    // a loop over a pipeline
     var sb = StringBuilder()
-    var labels = zip(range(0, 3), ["x", "y", "z"].iter()) |> map((p) => f"{p.1}{p.0}")
-    while let Some(s) = labels.next() {
+    for s in zip(range(0, 3), ["x", "y", "z"].iter()) |> map((p) => f"{p.1}{p.0}") {
         sb.append(s)
     }
     same(sb.build(), "x0y1z2")

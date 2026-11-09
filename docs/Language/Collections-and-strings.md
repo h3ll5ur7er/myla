@@ -62,7 +62,7 @@ fun main() {
 
 - A slice's bounds are clamped to the list: `xs[2:99]` is the rest, `xs[5:2]` is empty. A plain negative bound is the runtime error `index out of bounds`, as a negative index is (`xs[1:-1]`: write `xs[1:^1]`, D154); only `^` counts from the end. A single index out of range is still an error, `xs[^0]` and `xs[^6]` of five elements too (D143).
 - The step is a signed integer, not 0 (`slice step is zero` when the program runs). With a negative step the bounds left out are the end and the start, as in Python: `xs[^1:0:-2]` is `[50, 30]`.
-- A `str` is sliced by bytes, as `s[i]` and `s.len()` count them: a slice whose bound falls inside a character is a runtime error (`a slice bound inside a character`), and with a step other than 1 every byte taken must be a whole character (ASCII).
+- A `str` is sliced by bytes, as `s[i]` and `s.len()` count them: a slice whose bound falls strictly inside a well-formed character (a lead byte with its continuation bytes, as `s.chars()` decodes it) is a runtime error (`a slice bound inside a character`); a bound beside a byte that belongs to no well-formed sequence is allowed, so a `str` holding binary data or broken text can be sliced anywhere such bytes are (D174, [[MYLA-390]]). With a step other than 1 every byte taken must be a whole character (ASCII).
 - `xs[^1] = v` assigns as any index does; a slice is a value to read: assigning to one (`xs[1:3] = ys`) isn't part of the language yet. Maps have no slices.
 
 ## Maps
@@ -138,7 +138,7 @@ The builtin collection and string operations are methods (D103, [[MYLA-221]]).
 | `push(v)`, `pop()` | lists (a `var` place) |
 | `contains(k)`, `keys()`, `remove(k)` | maps (`remove`: a `var` place) |
 | `chars()` | strings |
-| `append(s)`, `append(s, start, end)`, `append_byte(b)`, `build()` | `StringBuilder` (`append`, `append_byte`: a `var` place) |
+| `append(s)`, `append(s, start, end)`, `append_byte(b)`, `append_char(c)`, `build()` | `StringBuilder` (`append`, `append_byte`, `append_char`: a `var` place) |
 
 These names are the builtins' on their kinds of value: an `impl` can't define one there (`impl str { fun len(self) … }` is the error "'len' is a builtin method of 'str': an impl can't define it", D151), while a struct's own `len` is its own; and a local named `chars` doesn't hide `s.chars()`. They have no function form: `push(xs, v)` is the error "'push' is a method: call it as 'x.push(…)'" (the function forms went once the repository had moved, D103; `scripts/to_methods.py` rewrites a file). The names stay reserved, so a program can't declare a function `push` of its own, but a local closure of that name is called as one.
 
@@ -256,7 +256,7 @@ fun main() {
 // a, b, c
 ```
 
-`StringBuilder()` creates an empty builder (it takes no arguments); `sb.append(s)` and `sb.append_byte(b: uint8)` add to it (a `var` place is needed); `sb.len()` is its byte length; `sb.build()` returns a new `str`. Use it instead of `+` in loops, which copies the whole string each time.
+`StringBuilder()` creates an empty builder (it takes no arguments); `sb.append(s)`, `sb.append_byte(b: uint8)` and `sb.append_char(c: char)` (the character's UTF-8 bytes, [[MYLA-390]]) add to it (a `var` place is needed); `sb.len()` is its byte length; `sb.build()` returns a new `str`. Use it instead of `+` in loops, which copies the whole string each time.
 
 `sb.append(s, start, end)` adds the bytes of `s` from `start` up to `end` (both `int32`), which is how to take part of a string ([[MYLA-85]]). The range must lie within `s` (`0 <= start <= end <= s.len()`), else it is a runtime error, like an index out of bounds. A range may split a multi-byte character; the bytes are kept, and joined again they make the same string.
 

@@ -47,4 +47,3 @@ The targets are x86-64 and aarch64 Linux and wasm32 on WASI; macOS and Windows a
 - The recorded Python answers cover only the examples and the error corpus now; 20 new corpus files are held to the CLI's own output ([[MYLA-288]]).
 - 153 seed versions in six days: 110 of the 117 MB pack ([[MYLA-289]]).
 - No example or doc block uses the November features ([[MYLA-299]]).
-- [[Language/Methods-and-traits]] says `#derive(Eq)` rejects `char` and float fields; it accepts them ([[MYLA-316]]).

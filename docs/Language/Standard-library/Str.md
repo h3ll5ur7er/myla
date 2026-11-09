@@ -25,7 +25,7 @@ fun main() {
 // 1.2
 ```
 
-Strings are bytes (D164). A position or a length counts bytes, as `s[i]` and `s.len()` do. Whitespace is ASCII: space, `\t`, `\n`, `\v`, `\f` and `\r`. Case is ASCII too: `to_upper` changes only `a` to `z`, and every other byte stays as it is. The methods take any bytes, not only UTF-8: a piece may start or end inside a character, where a slice `s[a:b]` stops with an error.
+Strings are bytes (D164). A position or a length counts bytes, as `s[i]` and `s.len()` do. Whitespace is ASCII: space, `\t`, `\n`, `\v`, `\f` and `\r`. Case is ASCII too: `to_upper` changes only `a` to `z`, and every other byte stays as it is. The methods take any bytes, not only UTF-8: a piece may start or end inside a character, where a slice `s[a:b]` stops with an error if the character is well-formed (D174).
 
 ## Search
 

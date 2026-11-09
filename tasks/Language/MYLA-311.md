@@ -2,7 +2,7 @@
 id: MYLA-311
 title: "Decision: integer overflow and the width of int"
 type: chore
-status: todo
+status: done
 priority: medium
 labels: [decision, integers, overflow]
 ---
@@ -17,5 +17,9 @@ Found by Advent of Code ([[Project/AoC-2015-2021]], F2). `2147483647 + 1` prints
 
 B or C combines with D, and A is part of every option but D alone.
 
-- [ ] The owner's decision, recorded as a D number
-- [ ] Its implementation tasks
+- [x] The owner's decision, recorded as a D number: D175 (B, `int` stays `int32`)
+- [x] Its implementation tasks: [[MYLA-395]]
+
+## Decided (D175, 2026-11-09)
+
+The owner chose B and kept `int` as `int32`: overflow traps in the interpreter, under `myla test` and in `myla build --checked`; a plain build wraps. Code that wraps on purpose uses `std.int`'s `wrapping_*`. Built as [[MYLA-395]].

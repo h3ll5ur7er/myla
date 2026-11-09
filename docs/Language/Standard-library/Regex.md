@@ -114,7 +114,7 @@ Strings are bytes (D164), and so are patterns:
 
 - A class and `.` match one byte. `.` on `é`, two bytes in UTF-8, matches half of it: `a.b` doesn't match `aéb`, `a..b` does. A class can't hold a non-ASCII character (`[é]` is the error `NonAsciiInClass`), but bytes: `[\x80-\xff]+` matches runs of non-ASCII characters.
 - A non-ASCII character in a pattern outside a class is the sequence of its bytes, repeated as one: `é+` matches `éé`.
-- Positions are byte offsets, and a match may start or end inside a character. Its `text` keeps the bytes, as `StringBuilder.append(s, start, end)` does, where a slice `s[a:b]` would stop with an error.
+- Positions are byte offsets, and a match may start or end inside a character. Its `text` keeps the bytes, as `StringBuilder.append(s, start, end)` does, where a slice `s[a:b]` would stop with an error inside a well-formed character (D174).
 - Case folding, `\w`, `\b` and the POSIX classes are ASCII.
 
 ## How it matches
