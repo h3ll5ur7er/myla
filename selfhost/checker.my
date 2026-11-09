@@ -199,9 +199,9 @@ fun primitive_type_names() -> [str] {
 
 // The names of the built-in functions (types.py: _BUILTIN_FUNCS, without the
 // `__` primitives, which are never suggested).
-#test()[["print", "assert", "panic", "unreachable", "len", "push", "pop", "contains", "remove", "keys", "format", "chars", "StringBuilder", "append", "append_byte", "build"]]
+#test()[["print", "assert", "panic", "unreachable", "len", "push", "pop", "contains", "remove", "keys", "format", "chars", "StringBuilder", "append", "append_byte", "append_char", "build"]]
 fun builtin_func_names() -> [str] {
-    return ["print", "assert", "panic", "unreachable", "len", "push", "pop", "contains", "remove", "keys", "format", "chars", "StringBuilder", "append", "append_byte", "build"]
+    return ["print", "assert", "panic", "unreachable", "len", "push", "pop", "contains", "remove", "keys", "format", "chars", "StringBuilder", "append", "append_byte", "append_char", "build"]
 }
 
 #test([FieldT { name: "x", ty: Type.TInt(32, true) }, FieldT { name: "y", ty: Type.TInt(32, true) }])[["x", "y"]]
@@ -816,7 +816,7 @@ fun is_builtin_op_trait(name: str) -> bool {
 #test("B")[false]
 #test("len")[true]
 fun is_builtin_func(name: str) -> bool {
-    return name == "print" || name == "assert" || name == "panic" || name == "unreachable" || name == "len" || name == "push" || name == "pop" || name == "contains" || name == "remove" || name == "keys" || name == "format" || name == "chars" || name == "StringBuilder" || name == "append" || name == "append_byte" || name == "build" || name == "__write" || name == "__exit" || name == "__args" || name == "__read_file" || name == "__io_errno" || name == "__run" || name == "__run_stderr" || name == "__run_exit_code" || name == "__run_signal" || name == "__run_errno" || name == "__write_file" || name == "__read" || name == "__poll" || name == "__list_dir" || name == "__mkdir" || name == "__stat" || name == "__getcwd" || name == "__getenv" || name == "__test_dir" || name == "__test_program" || name == "__sqrt" || name == "__f64_bits" || name == "__f64_from_bits" || name == "__unlink" || name == "__rmdir" || name == "__rename" || name == "__task_cancelled" || name == "__yield" || name == "__sleep" || name == "__clock_ns" || name == "__sleep_ns" || name == "__cancel_after" || name == "__disarm" || name == "__wait_readable" || name == "__wait_either" || name == "__wait_socket" || name == "__spawn" || name == "__run_with" || name == "__spawn_with" || name == "__reap" || name == "__kill" || name == "__close" || is_platform_primitive(name) || is_raw_memory_primitive(name) || is_notify_primitive(name)
+    return name == "print" || name == "assert" || name == "panic" || name == "unreachable" || name == "len" || name == "push" || name == "pop" || name == "contains" || name == "remove" || name == "keys" || name == "format" || name == "chars" || name == "StringBuilder" || name == "append" || name == "append_byte" || name == "append_char" || name == "build" || name == "__write" || name == "__exit" || name == "__args" || name == "__read_file" || name == "__io_errno" || name == "__run" || name == "__run_stderr" || name == "__run_exit_code" || name == "__run_signal" || name == "__run_errno" || name == "__write_file" || name == "__read" || name == "__poll" || name == "__list_dir" || name == "__mkdir" || name == "__stat" || name == "__getcwd" || name == "__getenv" || name == "__test_dir" || name == "__test_program" || name == "__sqrt" || name == "__f64_bits" || name == "__f64_from_bits" || name == "__unlink" || name == "__rmdir" || name == "__rename" || name == "__task_cancelled" || name == "__yield" || name == "__sleep" || name == "__clock_ns" || name == "__sleep_ns" || name == "__cancel_after" || name == "__disarm" || name == "__wait_readable" || name == "__wait_either" || name == "__wait_socket" || name == "__spawn" || name == "__run_with" || name == "__spawn_with" || name == "__reap" || name == "__kill" || name == "__close" || is_platform_primitive(name) || is_raw_memory_primitive(name) || is_notify_primitive(name)
 }
 
 // The primitives of std.task's notifiers (MYLA-387): a notifier, a wake of
@@ -7767,7 +7767,7 @@ impl Checker {
         if name == "push" || name == "pop" { return self.infer_list_mutation(e, name, args) }
         if name == "contains" || name == "remove" || name == "keys" { return self.infer_map_builtin(e, name, args) }
         if name == "format" { return Ok(Some(self.infer_format(e, args)?)) }
-        if name == "StringBuilder" || name == "append" || name == "append_byte" || name == "build" { return self.infer_string_builder(e, name, args) }
+        if name == "StringBuilder" || name == "append" || name == "append_byte" || name == "append_char" || name == "build" { return self.infer_string_builder(e, name, args) }
         if is_builtin_func(name) { return self.infer_intrinsic(e, name, args) }
 
         let fi = self.func_idx(name)
@@ -7901,7 +7901,7 @@ impl Checker {
         }
         // sb.append(s, start, end) appends the bytes s[start..end] (MYLA-85)
         if name == "append" && args.len() != 2 && args.len() != 4 { return Err(terr_at(e.line, e.col, e.sp, "append() takes 1 or 3 arguments (a string, or a string and the bytes from, to)")) }
-        if name == "append_byte" && args.len() != 2 { return Err(terr_at(e.line, e.col, e.sp, method_arity(name, 1))) }
+        if (name == "append_byte" || name == "append_char") && args.len() != 2 { return Err(terr_at(e.line, e.col, e.sp, method_arity(name, 1))) }
         let lv = self.check_lvalue(args[0])?
         if !is_sb(lv.ty) { return Err(terr_at(args[0].line, args[0].col, args[0].sp, format("{}() requires a StringBuilder, found '{}'", name, type_name(lv.ty)))) }
         if !lv.mutable { return Err(terr_at(args[0].line, args[0].col, args[0].sp, format("{}() needs a mutable StringBuilder (declare it with 'var')", name))) }
@@ -7911,6 +7911,9 @@ impl Checker {
                 self.expect_type(args[2], t_int(), "append start")?
                 self.expect_type(args[3], t_int(), "append end")?
             }
+        } else if name == "append_char" {
+            // a character's UTF-8 bytes (MYLA-390)
+            self.expect_type(args[1], Type.TChar, "append_char value")?
         } else {
             self.expect_type(args[1], t_byte(), "append_byte value")?
         }
@@ -9134,11 +9137,12 @@ impl Reads {
 }
 
 // Whether the builtin method `m` changes its receiver (`push`, `pop`,
-// `remove`, `append`, `append_byte`).
+// `remove`, `append`, `append_byte`, `append_char`).
 #test("push")[true]
 #test("len")[false]
+#test("append_char")[true]
 pub fun mutating_builtin(m: str) -> bool {
-    return m == "push" || m == "pop" || m == "remove" || m == "append" || m == "append_byte"
+    return m == "push" || m == "pop" || m == "remove" || m == "append" || m == "append_byte" || m == "append_char"
 }
 
 // A builtin that is a method called as a function (`push(xs, v)`): its
@@ -9171,13 +9175,14 @@ fun receiver_only(m: str) -> bool {
 #test("push")[true]
 #test("print")[false]
 pub fun builtin_method_name(m: str) -> bool {
-    return m == "len" || m == "push" || m == "pop" || m == "contains" || m == "remove" || m == "keys" || m == "chars" || m == "append" || m == "append_byte" || m == "build"
+    return m == "len" || m == "push" || m == "pop" || m == "contains" || m == "remove" || m == "keys" || m == "chars" || m == "append" || m == "append_byte" || m == "append_char" || m == "build"
 }
 
 // Whether the builtin function `m` is a method of a receiver of type `t`:
 // `len` of lists, maps, strings and builders, `push` and `pop` of lists,
 // `contains`, `remove` and `keys` of maps, `chars` of strings, `append`,
-// `append_byte` and `build` of builders (D103, MYLA-221).
+// `append_byte`, `append_char` and `build` of builders (D103, MYLA-221,
+// MYLA-390).
 #test(Type.TList(Type.TStr), "push")[true]
 #test(Type.TStr, "push")[false]
 #test(Type.TSB, "len")[true]
@@ -9186,7 +9191,7 @@ pub fun builtin_method(t: Type, m: str) -> bool {
         Type.TList(el) => m == "len" || m == "push" || m == "pop",
         Type.TMap(k, v) => m == "len" || m == "contains" || m == "remove" || m == "keys",
         Type.TStr => m == "len" || m == "chars",
-        Type.TSB => m == "len" || m == "append" || m == "append_byte" || m == "build",
+        Type.TSB => m == "len" || m == "append" || m == "append_byte" || m == "append_char" || m == "build",
         _ => false,
     }
 }

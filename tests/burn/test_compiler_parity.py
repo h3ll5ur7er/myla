@@ -5934,6 +5934,48 @@ async fun main() {
     print(await total(pairs))
 }
 """,
+    # MYLA-390: `sb.append_char(c)` natively, as the interpreter does it
+    "append_char": """// MYLA-390: `sb.append_char(c)`, a character's UTF-8 bytes, of each length
+struct Doc {
+    out: StringBuilder,
+}
+
+impl Doc {
+    fun put(var self, c: char) {
+        self.out.append_char(c)
+    }
+}
+
+fun main() {
+    var sb = StringBuilder()
+    for c in ['a', 'é', '€', '😀', '\\n', '\\u{10FFFF}', '\\0'] {
+        sb.append_char(c)
+    }
+    let s = sb.build()
+    print(s.len())
+    for c in s { print(c as int) }
+    // in a struct's field and a list's element
+    var d = Doc { out: StringBuilder() }
+    d.put('ö')
+    d.put('k')
+    print(d.out.build())
+    var bs = [StringBuilder(), StringBuilder()]
+    bs[1].append_char('ß')
+    bs[1].append_char('!')
+    print(bs[1].build())
+    print(bs[0].len())
+    // a copy keeps its own bytes
+    var a = StringBuilder()
+    a.append_char('x')
+    var b = a
+    b.append_char('y')
+    print(a.build())
+    print(b.build())
+    var many = StringBuilder()
+    for i in 0..1000 { many.append_char('λ') }
+    print(many.len())
+}
+""",
 }
 
 # A program that allocates far more recursive-enum cells (~12M) than the heap
@@ -7243,6 +7285,8 @@ PINNED = {
     "await_in_a_nested_match": "24\n0\n0\n7\n42\n0\n-1\nabc\n6\n2\n0\n",
     # MYLA-390: new
     "for_tuple_patterns": 'a=1\nbb=2\nccc=3\nx\ny\n30\n1:#\n2:##\n3:###\n6\n15\n1\n2\n3\n0 p\n1 q\naa\nccca\ncccbb\ncccccc\n14\n',
+    # MYLA-390: new
+    "append_char": '16\n97\n233\n8364\n128512\n10\n1114111\n0\nök\nß!\n0\nx\nxy\n2000\n',
 }
 
 

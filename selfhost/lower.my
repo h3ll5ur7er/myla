@@ -3200,7 +3200,7 @@ impl Lower {
                 }
                 if nm == "format" && args.len() >= 1 { return self.format_call(cg, args) }
                 if nm == "StringBuilder" && args.len() == 0 { return self.sb_new(cg) }
-                if (nm == "append" && (args.len() == 2 || args.len() == 4)) || (nm == "append_byte" && args.len() == 2) { return self.sb_append(cg, e, nm, args) }
+                if (nm == "append" && (args.len() == 2 || args.len() == 4)) || ((nm == "append_byte" || nm == "append_char") && args.len() == 2) { return self.sb_append(cg, e, nm, args) }
                 if nm == "assert" || nm == "panic" || nm == "unreachable" { return self.intrinsic(cg, e, nm, args) }
                 if nm == "build" && args.len() == 1 {
                     let c = self.expr(cg, args[0])
@@ -4183,14 +4183,18 @@ impl Lower {
         return self.owned_value(cg, cell, Type.TSB)
     }
 
-    // `append(sb, s)`, `append(sb, s, start, end)` (the range checked) and
-    // `append_byte(sb, b)`: the builder made unique first, then the arguments.
+    // `append(sb, s)`, `append(sb, s, start, end)` (the range checked),
+    // `append_byte(sb, b)` and `append_char(sb, c)` (std.rt's, MYLA-390): the
+    // builder made unique first, then the arguments.
     fun sb_append(var self, cg: CodeGen, e: Expr, nm: str, args: [Expr]) -> int32 {
         let h = self.place(cg, args[0])
         let cell = self.temp(Type.TSB)
         self.add(Inst.Cow(cell, Type.TSB, h))
         let v = self.expr(cg, args[1])
-        if nm == "append_byte" {
+        if nm == "append_char" {
+            if !cg.has_func("std$rt$sb_append_char") { return self.unsupported("append_char without std.rt") }
+            self.add(Inst.Call(-1, "std$rt$sb_append_char", [h, v]))
+        } else if nm == "append_byte" {
             // std.rt's where the program has it (MYLA-162)
             if cg.has_func("std$rt$sb_append_byte") && !cg.owning.contains("std$rt$sb_append_byte") { self.add(Inst.Call(-1, "std$rt$sb_append_byte", [h, v])) }
             else { self.add(Inst.SbAppendByte(h, v)) }

@@ -138,7 +138,7 @@ The builtin collection and string operations are methods (D103, [[MYLA-221]]).
 | `push(v)`, `pop()` | lists (a `var` place) |
 | `contains(k)`, `keys()`, `remove(k)` | maps (`remove`: a `var` place) |
 | `chars()` | strings |
-| `append(s)`, `append(s, start, end)`, `append_byte(b)`, `build()` | `StringBuilder` (`append`, `append_byte`: a `var` place) |
+| `append(s)`, `append(s, start, end)`, `append_byte(b)`, `append_char(c)`, `build()` | `StringBuilder` (`append`, `append_byte`, `append_char`: a `var` place) |
 
 These names are the builtins' on their kinds of value: an `impl` can't define one there (`impl str { fun len(self) … }` is the error "'len' is a builtin method of 'str': an impl can't define it", D151), while a struct's own `len` is its own; and a local named `chars` doesn't hide `s.chars()`. They have no function form: `push(xs, v)` is the error "'push' is a method: call it as 'x.push(…)'" (the function forms went once the repository had moved, D103; `scripts/to_methods.py` rewrites a file). The names stay reserved, so a program can't declare a function `push` of its own, but a local closure of that name is called as one.
 
@@ -256,7 +256,7 @@ fun main() {
 // a, b, c
 ```
 
-`StringBuilder()` creates an empty builder (it takes no arguments); `sb.append(s)` and `sb.append_byte(b: uint8)` add to it (a `var` place is needed); `sb.len()` is its byte length; `sb.build()` returns a new `str`. Use it instead of `+` in loops, which copies the whole string each time.
+`StringBuilder()` creates an empty builder (it takes no arguments); `sb.append(s)`, `sb.append_byte(b: uint8)` and `sb.append_char(c: char)` (the character's UTF-8 bytes, [[MYLA-390]]) add to it (a `var` place is needed); `sb.len()` is its byte length; `sb.build()` returns a new `str`. Use it instead of `+` in loops, which copies the whole string each time.
 
 `sb.append(s, start, end)` adds the bytes of `s` from `start` up to `end` (both `int32`), which is how to take part of a string ([[MYLA-85]]). The range must lie within `s` (`0 <= start <= end <= s.len()`), else it is a runtime error, like an index out of bounds. A range may split a multi-byte character; the bytes are kept, and joined again they make the same string.
 

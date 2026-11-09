@@ -3896,7 +3896,7 @@ fun method_part(name: str) -> str {
 #test("total")[false]
 #test("length")[false]
 pub fun is_mutating_builtin(n: str) -> bool {
-    return n == "push" || n == "pop" || n == "remove" || n == "append" || n == "append_byte"
+    return n == "push" || n == "pop" || n == "remove" || n == "append" || n == "append_byte" || n == "append_char"
 }
 
 // Whether running an arm (guard and body) may write to variable `name`,
@@ -4175,7 +4175,7 @@ pub fun tfunc_ret(t: Type) -> Option<Type> {
 pub fun is_builtin_call_name(nm: str) -> bool {
     if nm == "print" || nm == "assert" || nm == "panic" || nm == "unreachable" { return true }
     if nm == "len" || nm == "push" || nm == "pop" || nm == "chars" || nm == "format" { return true }
-    if nm == "StringBuilder" || nm == "append" || nm == "append_byte" || nm == "build" { return true }
+    if nm == "StringBuilder" || nm == "append" || nm == "append_byte" || nm == "append_char" || nm == "build" { return true }
     if nm == "contains" || nm == "remove" || nm == "keys" { return true }
     if nm == "__write" || nm == "__exit" || nm == "__args" || nm == "__read_file" || nm == "__io_errno" { return true }
     if nm == "__write_file" || nm == "__run" || nm == "__run_stderr" || nm == "__run_exit_code" || nm == "__read" || nm == "__poll" { return true }
