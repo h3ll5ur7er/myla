@@ -607,9 +607,16 @@ const PIPE_BUF: int32 = 4096
 // EBADF: what a stream that was closed gives.
 const CLOSED: int32 = 9
 
-// One read of up to `n` bytes of `fd` (`[]` at the end), or why not.
+// The least handle std.rt gives (D181): a child's streams and its pidfd are
+// handles, a smaller number a descriptor's own, which only a value built
+// by hand holds here.
+const HANDLE_MIN: int32 = 8388608
+
+// One read of up to `n` bytes of `fd` (`[]` at the end), or why not: a
+// stream closed (`fd` -1, or its handle closed through a copy) or built by
+// hand is `Other(9)` (EBADF).
 fun read_fd(fd: int32, n: int32) -> Result<[uint8], IoError> {
-    if fd < 0 {
+    if fd < HANDLE_MIN {
         return Err(from_errno(CLOSED))
     }
     if n <= 0 {
@@ -625,7 +632,7 @@ fun read_fd(fd: int32, n: int32) -> Result<[uint8], IoError> {
 
 // All of `b` written to `fd`: its length, or why not.
 fun write_fd(fd: int32, b: [uint8]) -> Result<int, IoError> {
-    if fd < 0 {
+    if fd < HANDLE_MIN {
         return Err(from_errno(CLOSED))
     }
     __write_bytes(fd, b)
@@ -638,7 +645,7 @@ fun write_fd(fd: int32, b: [uint8]) -> Result<int, IoError> {
 
 // `fd` closed, or why not (one closed already: EBADF).
 fun close_fd(fd: int32) -> Result<(), IoError> {
-    if fd < 0 {
+    if fd < HANDLE_MIN {
         return Err(from_errno(CLOSED))
     }
     __close(fd)
@@ -647,6 +654,18 @@ fun close_fd(fd: int32) -> Result<(), IoError> {
         return Err(from_errno(err))
     }
     return Ok(())
+}
+
+// The handle `fd` of a stream, or -1 for a closed one or a number that is
+// no handle.
+#test(3)[-1]
+#test(-1)[-1]
+#test(8388609)[8388609]
+fun held(fd: int32) -> int32 {
+    if fd < HANDLE_MIN {
+        return -1
+    }
+    return fd
 }
 
 // The status of a child that ended, from what `__reap` gives.
@@ -687,7 +706,7 @@ impl Write for ChildStdin {
 
 impl Pollable for ChildStdin {
     fun descriptor(self) -> int32 {
-        return self.fd
+        return held(self.fd)
     }
 }
 
@@ -745,7 +764,7 @@ impl Read for ChildStdout {
 
 impl Pollable for ChildStdout {
     fun descriptor(self) -> int32 {
-        return self.fd
+        return held(self.fd)
     }
 }
 
@@ -773,7 +792,7 @@ impl Read for ChildStderr {
 
 impl Pollable for ChildStderr {
     fun descriptor(self) -> int32 {
-        return self.fd
+        return held(self.fd)
     }
 }
 
@@ -901,6 +920,11 @@ impl Child {
     // (its ID may be another process's by now): `Ok`.
     fun kill(var self) -> Result<(), IoError> {
         if let Some(st) = self.status {
+            return Ok(())
+        }
+        // reaped through a copy of this `Child`, which closed its pidfd's
+        // handle (D181): its ID may be another process's by now
+        if self.exited >= 0 && __poll(self.exited, 0) < 0 {
             return Ok(())
         }
         if self.pid <= 0 {
@@ -1462,6 +1486,37 @@ fun closed_streams() {
     holds(ok(e.close()), "close the error")
     holds(is_closed(e.read(1)), "a read of the error after close")
     holds(waited(child.wait()) == ExitStatus.Exited(0), "cat ended well")
+}
+
+// A copy of a closed stream reaches nothing, not the pipe that got its
+// descriptor next; a copy of a child another copy reaped signals nothing;
+// a stream built by hand holds no handle (D181).
+#test
+fun stale_copies() {
+    let started = command("cat").spawn()
+    if no_processes(started, "cat") {
+        return
+    }
+    var child = running(started)
+    var w = input(child.take_stdin())
+    let stale = w
+    holds(ok(w.close()), "close the input")
+    var other = running(command("cat").spawn())
+    var w2 = input(other.take_stdin())
+    var r2 = output_of(other.take_stdout())
+    var s = stale
+    holds(is_closed(s.write(bytes_m.from_str("INJECTED"))), "the stale copy's write")
+    holds(is_closed(s.close()), "the stale copy's close")
+    holds(wrote(w2.write(bytes_m.from_str("mine"))) == 4, "the other child's input")
+    holds(ok(w2.close()), "closed")
+    holds(read_rest(r2) == "mine", "the other child got its own bytes only")
+    let copy = child
+    holds(waited(child.wait()) == ExitStatus.Exited(0), "cat ended well")
+    var c2 = copy
+    holds(ok(c2.kill()), "a kill through a copy of a reaped child does nothing")
+    holds(waited(other.wait()) == ExitStatus.Exited(0), "the other ended well")
+    var forged = ChildStdin { fd: 1 }
+    holds(is_closed(forged.write(bytes_m.from_str("x"))), "a stream built by hand")
 }
 
 // Lines in and out one at a time: the child's output is a stream, not a

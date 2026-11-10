@@ -187,7 +187,7 @@ Without libc there is no getaddrinfo: `lookup` reads the hosts file, then asks t
 
 ## Primitives
 
-The module rests on these ([[MYLA-346]]), each a function of `std.rt` over `std.platform`'s socket functions, and in the interpreter the host's own. A handle is an `int`, an index into `std.rt`'s table of handles and the generation of its entry (D181), at least 2^20; the entry holds the platform's socket. An address crosses as a portable record, a string of 7 or 19 bytes: the family (4 or 6), the port (big-endian), the address's bytes. Each sets `__io_errno()` (0 on success), a Linux errno number on every target; a handle that isn't open (closed, a copy of a closed one, made up) is EBADF (9).
+The module rests on these ([[MYLA-346]]), each a function of `std.rt` over `std.platform`'s socket functions, and in the interpreter the host's own. A handle is an `int`, an index into `std.rt`'s table of handles and the generation of its entry (D181), at least 2^23; the entry holds the platform's socket. An address crosses as a portable record, a string of 7 or 19 bytes: the family (4 or 6), the port (big-endian), the address's bytes. Each sets `__io_errno()` (0 on success), a Linux errno number on every target; a handle that isn't open (closed, a copy of a closed one, made up) is EBADF (9).
 
 | Primitive | x86-64 and aarch64 Linux | Result |
 | --- | --- | --- |

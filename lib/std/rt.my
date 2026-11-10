@@ -450,11 +450,36 @@ pub fun list_dir(path: str) -> str {
 // --- file descriptors (MYLA-336) ---------------------------------------------
 //
 // A descriptor is read with `__read` and written with `__write` (below), at
-// its cursor, and closed with `__close`.
+// its cursor, and closed with `__close`. What these primitives take as `fd`
+// is a descriptor's number, or a handle (D181) for one: `__open` and
+// `__spawn_piped` give handles (a `File`'s, a child's streams'), which hold
+// the descriptor, so that a copy of a closed `File` reaches nothing and not
+// the file that got its descriptor next. A number below HANDLE_MIN (2^23,
+// past any descriptor's or process ID's) is a descriptor itself: the
+// standard streams', `io.fd_stream`'s.
 
-// `__open(path, flags, mode)`: the file at `path` opened, its descriptor
-// (closed on exec), or -1 with the errno. `flags`: 1 read, 2 write (both:
-// read and write), 4 create, 8 truncate, 16 append, 32 exclusive (with
+const H_FD: int64 = 3
+
+// The descriptor `fd` stands for: itself below HANDLE_MIN, else the one the
+// open handle `fd` holds, or -1 (EBADF's) when it isn't open.
+fun fd_of(fd: int64) -> int64 {
+    if fd < HANDLE_MIN {
+        return fd
+    }
+    return handle_get(fd, H_FD)
+}
+
+// A handle for the new descriptor `fd` (a negative one, an error, as it is).
+fun fd_handle(fd: int64) -> int64 {
+    if fd < 0 {
+        return fd
+    }
+    return handle_new(H_FD, fd)
+}
+
+// `__open(path, flags, mode)`: the file at `path` opened, a handle for its
+// descriptor (closed on exec), or -1 with the errno. `flags`: 1 read, 2
+// write (both: read and write), 4 create, 8 truncate, 16 append, 32 exclusive (with
 // create: EEXIST when the file is there); without 1 or 2, or with another
 // bit, EINVAL. `mode`: the permissions of a file it creates, less the umask
 // (none on wasm32).
@@ -472,7 +497,7 @@ pub fun open(path: str, flags: int, mode: int) -> int {
     if r < 0 {
         return -1
     }
-    return r as int
+    return fd_handle(r) as int
 }
 
 // `__seek(fd, offset, whence)`: the cursor of `fd` moved to `offset` bytes
@@ -484,7 +509,7 @@ pub fun seek(fd: int, offset: int64, whence: int) -> int64 {
         __set_io_errno(EINVAL)
         return -1
     }
-    let r = os.seek(fd as int64, offset, whence as int64)
+    let r = os.seek(fd_of(fd as int64), offset, whence as int64)
     record(r)
     if r < 0 {
         return -1
@@ -497,7 +522,7 @@ pub fun seek(fd: int, offset: int64, whence: int) -> int64 {
 // nanoseconds since 1970), or `[]` with the errno.
 pub fun fstat(fd: int) -> [int64] {
     let out = __alloc(24)
-    let r = os.fd_stat(fd as int64, out)
+    let r = os.fd_stat(fd_of(fd as int64), out)
     record(r)
     var st: [int64] = []
     if r >= 0 {
@@ -562,10 +587,11 @@ pub fun random_bytes(n: int) -> [uint8] {
 // then `cap` entries `[handle][kind][value]`, `cap` a power of two; the
 // handle `h` is in the entry `h & (cap - 1)`, which holds `h` while it is
 // open and 0 once it is free. Handles are given in increasing order from
-// 2^20, each the first number after the last one given whose entry is free,
-// so a handle closed is never given again (until the count passes 2^31 - 1
-// and starts again at 2^20, after some two billion), and no small number (a
-// descriptor's, say) is ever one: an operation through a copy made before a
+// 2^23 (HANDLE_MIN), each the first number after the last one given whose
+// entry is free, so a handle closed is never given again (until the count
+// passes 2^31 - 1 and starts again at 2^23, after some two billion), and no
+// descriptor's number or process ID (Linux's are below 2^20 and 2^22) is
+// ever one: an operation through a copy made before a
 // close, or through a number made up (one that isn't an open handle's),
 // finds its entry holding another handle or none, and fails, and never
 // reaches the descriptor or the record the entry may hold by then. The
@@ -580,7 +606,7 @@ pub fun random_bytes(n: int) -> [uint8] {
 const HANDLE: int64 = 24
 const H_SOCKET: int64 = 1
 const H_NOTIFIER: int64 = 2
-const HANDLE_MIN: int64 = 1048576
+const HANDLE_MIN: int64 = 8388608
 const HANDLE_MAX: int64 = 2147483647
 
 // A new handle of the kind `kind` for `value` (at least 0).
@@ -1160,7 +1186,47 @@ pub fun kill(pid: int, sig: int) {
 // a pipe is -1 in the result. `[errno, 0, -1, -1, -1, -1]` when it
 // couldn't be started (ENOSYS on wasm32).
 pub fun spawn_piped(program: str, argv: [str], opts: [str]) -> [int] {
-    return os.spawn_piped(program_paths(program), argv, opts)
+    var given: int64 = -1
+    var o = opts
+    if o.len() > 2 && o[1].len() > 0 && o[1][0] == 100u8 {     // 'd'
+        given = digits_of(o[2])
+        if given >= HANDLE_MIN {
+            o[2] = int_to_str(fd_of(given))
+        }
+    }
+    var h = os.spawn_piped(program_paths(program), argv, o)
+    // the descriptor handed over is closed now (once the child has it, or
+    // with the error): its handle with it
+    if given >= HANDLE_MIN {
+        let gone = handle_free(given, H_FD)
+    }
+    var k = 2
+    while k < 6 && k < h.len() {
+        h[k] = fd_handle(h[k] as int64) as int
+        k += 1
+    }
+    return h
+}
+
+// The number the decimal digits `s` make (-1: none, or not only digits).
+#test("42")[42]
+#test("")[-1]
+#test("4x")[-1]
+fun digits_of(s: str) -> int64 {
+    if s.len() == 0 || s.len() > 18 {
+        return -1
+    }
+    var n: int64 = 0
+    var i = 0
+    while i < s.len() {
+        let b = s[i]
+        if b < 48u8 || b > 57u8 {   // '0', '9'
+            return -1
+        }
+        n = n * 10 + (b - 48u8) as int64
+        i += 1
+    }
+    return n
 }
 
 // `__try_reap(pid)` (MYLA-336): the child `pid` reaped if it has ended, as
@@ -1179,16 +1245,21 @@ pub fun try_reap(pid: int) -> int {
     return code
 }
 
-// `__close(fd)`: the descriptor closed, its errno recorded (MYLA-378):
-// EBADF for one that isn't open (a negative one too), EIO when the data
-// written couldn't be kept. EINTR is no error: Linux has closed it then,
-// and closing it again could close another file's.
+// `__close(fd)`: the descriptor closed, a handle's with the handle (every
+// copy of it fails from then on), its errno recorded (MYLA-378): EBADF for
+// one that isn't open (a negative one too), EIO when the data written
+// couldn't be kept. EINTR is no error: Linux has closed it then, and
+// closing it again could close another file's.
 pub fun close(fd: int) {
-    if fd < 0 {
+    var d = fd as int64
+    if d >= HANDLE_MIN {
+        d = handle_free(d, H_FD)
+    }
+    if d < 0 {
         __set_io_errno(EBADF)
         return
     }
-    var r = os.close(fd as int64)
+    var r = os.close(d)
     if r == os.EINTR {
         r = 0
     }
@@ -1200,6 +1271,7 @@ pub fun close(fd: int) {
 // `__read`: what one read of at most `n` bytes of `fd` gives (retried on
 // EINTR): empty at the end of the input, for `n <= 0`, or with the errno.
 pub fun read(fd: int, n: int) -> str {
+    let d = fd_of(fd as int64)
     __set_io_errno(0)
     var want = n as int64
     if want < 0 {
@@ -1208,9 +1280,9 @@ pub fun read(fd: int, n: int) -> str {
     let cell = __alloc(want + 8)
     var got: int64 = 0
     if want > 0 {
-        got = os.read(fd as int64, cell + 8, want)
+        got = os.read(d, cell + 8, want)
         while got == os.EINTR {
-            got = os.read(fd as int64, cell + 8, want)
+            got = os.read(d, cell + 8, want)
         }
         if got < 0 {
             __set_io_errno(-got)
@@ -1223,6 +1295,7 @@ pub fun read(fd: int, n: int) -> str {
 
 // `__read_bytes` (D177): `__read`, the bytes read into a list.
 pub fun read_bytes(fd: int, n: int) -> [uint8] {
+    let d = fd_of(fd as int64)
     __set_io_errno(0)
     var want = n as int64
     if want < 0 {
@@ -1231,9 +1304,9 @@ pub fun read_bytes(fd: int, n: int) -> [uint8] {
     let cell = __alloc(want + 16)
     var got: int64 = 0
     if want > 0 {
-        got = os.read(fd as int64, cell + 16, want)
+        got = os.read(d, cell + 16, want)
         while got == os.EINTR {
-            got = os.read(fd as int64, cell + 16, want)
+            got = os.read(d, cell + 16, want)
         }
         if got < 0 {
             __set_io_errno(-got)
@@ -1249,10 +1322,15 @@ pub fun read_bytes(fd: int, n: int) -> [uint8] {
 // 0 when `timeout_ms` (negative: none) ran out, -1 with the errno when poll
 // failed; retried on EINTR.
 pub fun poll(fd: int, timeout_ms: int) -> int {
+    let d = fd_of(fd as int64)
     __set_io_errno(0)
-    var r = os.poll_read(fd as int64, timeout_ms as int64)
+    if d < 0 {
+        __set_io_errno(EBADF)
+        return -1
+    }
+    var r = os.poll_read(d, timeout_ms as int64)
     while r == os.EINTR {
-        r = os.poll_read(fd as int64, timeout_ms as int64)
+        r = os.poll_read(d, timeout_ms as int64)
     }
     if r < 0 {
         __set_io_errno(-r)
@@ -1266,10 +1344,15 @@ pub fun poll(fd: int, timeout_ms: int) -> int {
 // gone), 0 when `timeout_ms` (negative: none) ran out, -1 with the errno
 // when poll failed; retried on EINTR.
 pub fun poll_write(fd: int, timeout_ms: int) -> int {
+    let d = fd_of(fd as int64)
     __set_io_errno(0)
-    var r = os.poll_write(fd as int64, timeout_ms as int64)
+    if d < 0 {
+        __set_io_errno(EBADF)
+        return -1
+    }
+    var r = os.poll_write(d, timeout_ms as int64)
     while r == os.EINTR {
-        r = os.poll_write(fd as int64, timeout_ms as int64)
+        r = os.poll_write(d, timeout_ms as int64)
     }
     if r < 0 {
         __set_io_errno(-r)
@@ -1283,20 +1366,21 @@ pub fun poll_write(fd: int, timeout_ms: int) -> int {
 // the 2026-11-10 review's S4: a non-blocking input read at once gave
 // EAGAIN), at once for a negative descriptor, as with tasks.
 pub fun wait_alone(fd: int, events: int) {
-    if fd < 0 {
+    let d = fd_of(fd as int64)
+    if d < 0 {
         return
     }
     var r: int64 = 0
     if events == 2 {
-        r = os.poll_write(fd as int64, -1)
+        r = os.poll_write(d, -1)
     } else {
-        r = os.poll_read(fd as int64, -1)
+        r = os.poll_read(d, -1)
     }
     while r == os.EINTR {
         if events == 2 {
-            r = os.poll_write(fd as int64, -1)
+            r = os.poll_write(d, -1)
         } else {
-            r = os.poll_read(fd as int64, -1)
+            r = os.poll_read(d, -1)
         }
     }
 }
@@ -2195,8 +2279,9 @@ pub fun print_char(c: char) {
 // `__io_errno`, 0 when there was none. A closed pipe on the standard output
 // or error ends the program quietly (D146).
 pub fun write(fd: int, s: str) {
+    let d = fd_of(fd as int64)
     let c = __addr_of(s)
-    let r = os.write_all(fd as int64, c + 8, __load64(c))
+    let r = os.write_all(d, c + 8, __load64(c))
     if r == os.EPIPE && (fd == 1 || fd == 2) {
         os.broken_pipe()
     }
@@ -2209,8 +2294,9 @@ pub fun write(fd: int, s: str) {
 
 // `__write_bytes(fd, b)` (D177): `__write` of the bytes of a list.
 pub fun write_bytes(fd: int, b: [uint8]) {
+    let d = fd_of(fd as int64)
     let c = __list_addr(b)
-    let r = os.write_all(fd as int64, c + 16, __load64(c))
+    let r = os.write_all(d, c + 16, __load64(c))
     if r == os.EPIPE && (fd == 1 || fd == 2) {
         os.broken_pipe()
     }
@@ -3669,13 +3755,17 @@ const WATCH: int64 = 24
 // frame function suspends after this call). A task asked to stop waits no
 // time, nor for what the poller can't watch (a regular file: always ready).
 pub fun wait_fd(fr: int64, fd: int64) {
-    wait_fds(fr, fd, -1, 0)
+    wait_fds(fr, fd_of(fd), -1, 0)
 }
 
 // `myla___wait_fd2(frame, a, b)`: the frame waiting until `a` or `b` is
 // readable (a child's stdout and stderr, `std.process.run_async`).
 pub fun wait_fd2(fr: int64, a: int64, b: int64) {
-    wait_fds(fr, a, b, 0)
+    var bd: int64 = -1
+    if b >= 0 {
+        bd = fd_of(b)
+    }
+    wait_fds(fr, fd_of(a), bd, 0)
 }
 
 // `__wait_writable_frame(frame, fd)` (`__wait_writable`, MYLA-419): the
@@ -3683,7 +3773,7 @@ pub fun wait_fd2(fr: int64, a: int64, b: int64) {
 // as a socket waiting to send is: the platform's poller takes any
 // descriptor that way on Linux.
 pub fun wait_writable_frame(fr: int64, fd: int64) {
-    wait_fds(fr, fd, -1, 2)
+    wait_fds(fr, fd_of(fd), -1, 2)
 }
 
 // `myla___wait_sock(frame, h, events)` (`__wait_socket`, MYLA-346): the
