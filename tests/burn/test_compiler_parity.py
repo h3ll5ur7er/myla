@@ -7295,6 +7295,115 @@ async fun main() {
     print((h.on)(3))
 }
 """,
+    "values_nested_through_closures": r"""// M15 (MYLA-415): values nested through closures, as deep as they like, are
+// released in a bounded stack on every target (wasm32 overflowed at about
+// 3,000 levels, aarch64 under qemu at 30,000), and copied to a child task
+// without recursion
+import std.process as process
+import std.num as num
+
+struct Holder { f: () -> int, rest: [Holder] }
+struct Box { kids: [Box], tag: str }
+enum Chain { End, Step((int) -> int, Chain) }
+
+fun closures(n: int) -> int {
+    var f = () => 0
+    for i in 0..n {
+        let g = f
+        f = () => g() + 1
+    }
+    return 7
+}
+
+fun lists_of_closures(n: int) -> int {
+    var fs: [() -> int] = []
+    for i in 0..n {
+        let prev = fs
+        fs = [() => prev.len()]
+    }
+    return fs[0]()
+}
+
+fun holders(n: int) -> int {
+    var h = Holder { f: () => 0, rest: [] }
+    for i in 0..n {
+        let prev = h
+        h = Holder { f: () => prev.rest.len() + 1, rest: [] }
+    }
+    return h.f()
+}
+
+fun chains(n: int) -> int {
+    var c = Chain.End
+    for i in 0..n {
+        let prev = c
+        c = Chain.Step((x: int) => match prev { End => x, Step(g, _) => x + 1 }, Chain.End)
+    }
+    return match c { End => 0, Step(g, _) => g(1) }
+}
+
+fun partials(n: int) -> int {
+    var f = (x: int, k: () -> int) => x
+    var k = () => 0
+    for i in 0..n {
+        let kk = k
+        k = () => kk() + 0
+    }
+    let p = f(_, k)
+    return p(5)
+}
+
+fun nest(n: int) -> Box {
+    var b = Box { kids: [], tag: "leaf" }
+    for k in 0..n { b = Box { kids: [b], tag: f"t{k % 7}" } }
+    return b
+}
+
+// the depth of a nested box and the length of its tags, by a loop
+fun depth(b0: Box) -> (int, int) {
+    var b = b0
+    var d = 0
+    var sum = 0
+    while b.kids.len() > 0 {
+        sum += b.tag.len()
+        b = b.kids[0]
+        d += 1
+    }
+    return (d, sum)
+}
+
+async fun crossing(f: () -> int, fs: [() -> int], b: Box) -> (int, int) {
+    let (d, s) = depth(b)
+    return (fs.len() + d, s)
+}
+
+#main
+async fun main() {
+    let a = process.args()
+    var n = 50000
+    if a.len() > 1 { n = num.parse_int(a[1]).unwrap_or(50000) as int }
+    print(closures(n))
+    print(lists_of_closures(n))
+    print(holders(n))
+    print(chains(n))
+    print(partials(n))
+    // to a child task and back, deeply copied
+    var f = () => 0
+    var fs: [() -> int] = []
+    for i in 0..n {
+        let g = f
+        f = () => g() + 1
+        let prev = fs
+        fs = [() => prev.len()]
+    }
+    let b = nest(n)
+    async let c = crossing(f, fs, b)
+    let (k, t) = await c
+    let (d, u) = depth(b)
+    print(f"{k} {t} {d} {u}")
+    print("released")
+}
+""",
     "arithmetic_operators_of_generic_impls": r"""// M2 (MYLA-415, MYLA-367): the arithmetic operators of a generic impl call
 // its instance for the operands' type arguments (natively they didn't link)
 struct Box<T> { v: T }
@@ -9259,6 +9368,8 @@ PINNED = {
     "list_equal_to_itself": 'false false true false\nfalse true\nfalse\nfalse true\neq called\neq called\ntrue\nfalse\nfalse\ntrue true true true true\ntrue false\n',
     # MYLA-415 (M2, MYLA-367): native code didn't link ('undefined reference to myla_Box.add')
     "arithmetic_operators_of_generic_impls": '3\n5\n42\n4\n1\n3.75\nabcd\nababab\n15000000000\n3\n3 xy\nlinked\n',
+    # MYLA-415 (M15): stack overflow on aarch64 and wasm32 (release and deep copy recursed)
+    "values_nested_through_closures": '7\n1\n1\n2\n5\n50001 100000 50000 100000\nreleased\n',
 }
 
 

@@ -23,7 +23,7 @@ from .inline import inlinable, inline_calls, same_module, may_inline, merge_bloc
 from .hoist import hoist_cows
 from .ranges import widen_counters
 from .anf import Norm, new_norm
-from .lower import async_fnval_ir, lower_function, lower_lambda, blocked_types, Lowered, myla_runtime_function, derived_eq_ir, compound_eq_ir, tuple_hash_ir, key_hash_ir, key_eq_ir, map_find_ir, map_put_ir, map_keys_ir, walk_ir, drop_entry_ir, dropb_slow_ir, list_drop_slow_ir, map_drop_slow_ir, drop_drain_ir, clone_ir, deep_walk_ir, deep_cell_ir, Routine, Want, env_drop_ir, env_deep_ir, partial_ir, frame_new_ir
+from .lower import async_fnval_ir, lower_function, lower_lambda, blocked_types, Lowered, myla_runtime_function, derived_eq_ir, compound_eq_ir, tuple_hash_ir, key_hash_ir, key_eq_ir, map_find_ir, map_put_ir, map_keys_ir, walk_ir, drop_entry_ir, dropb_slow_ir, list_drop_slow_ir, map_drop_slow_ir, drop_drain_ir, clone_ir, deep_walk_ir, deep_cell_ir, deep_members_ir, deep_cell_has_members, env_deep_members_ir, Routine, Want, env_drop_ir, env_deep_ir, partial_ir, frame_new_ir
 import .ir_x86 as ir_x86
 import .ownership as ownership
 import .runtime_x86 as runtime_x86
@@ -3215,9 +3215,71 @@ impl CodeGen {
         if self.frames {
             self.emit_env_routine(env_deep_ir(self, lifted, owned, false))
             self.emit_env_routine(env_deep_ir(self, lifted, owned, true))
+            // their captures' routines, kinds of `__drop_drain`'s (M15)
+            for cl in [false, true] {
+                var suffix = "_env_deep_m"
+                if cl { suffix = "_env_clone_m" }
+                let kind = self.drop_kinds.len() as int32
+                self.drop_kinds.push(lifted + suffix)
+                self.emit_env_routine(env_deep_members_ir(self, lifted, owned, cl, kind))
+            }
         }
         self.env_records.push(lifted)
-        self.emit_env_routine(env_drop_ir(self, lifted, owned, self.rt_alloc_names().1))
+        // an environment holding a function value, which may hold another
+        // environment, without bound: its release defers past a depth, as
+        // a cell's that nests itself does (MYLA-389, M15)
+        var kind = -1
+        var chains = false
+        for d in owned { if self.reaches_func(d.ty, []) { chains = true } }
+        if chains {
+            kind = self.drop_kinds.len() as int32
+            self.drop_kinds.push(lifted + "_env_drop")
+        }
+        self.emit_env_routine(env_drop_ir(self, lifted, owned, self.rt_alloc_names().1, kind))
+    }
+
+    // Whether a value of `t` holds, inline or through cells, a function value
+    // (whose environment may hold anything; `seen`: the named types already
+    // looked into).
+    #test(codegen_on("[int]"), Type.TList(Type.TTuple([Type.TStr, Type.TFunc([], None)])), [])[true]
+    #test(codegen_on("[int]"), Type.TMap(Type.TStr, Type.TList(Type.TInt(32, true))), [])[false]
+    fun reaches_func(self, t: Type, seen: [str]) -> bool {
+        var parts: [Type] = []
+        match t {
+            Type.TFunc(ps, r) => { return true },
+            Type.TAsync(f) => { return true },
+            Type.TList(e) => { parts = [e] },
+            Type.TMap(k, v) => { parts = [k, v] },
+            Type.TTuple(es) => { parts = es },
+            Type.TStruct(n, a) => {
+                let tok = mono_token(t)
+                if list_has_str(seen, tok) { return false }
+                let info = self.struct_info(n)
+                let sub = self.type_subst(info.type_params, a)
+                for f in info.fields {
+                    if self.reaches_func(subst_type(f.ty, sub), push_str_copy(seen, tok)) { return true }
+                }
+            },
+            Type.TActor(n, a) => {
+                let tok = mono_token(t)
+                if list_has_str(seen, tok) { return false }
+                for m in self.cell_members(t) {
+                    if self.reaches_func(m, push_str_copy(seen, tok)) { return true }
+                }
+            },
+            Type.TEnum(n, a) => {
+                let tok = mono_token(t)
+                if list_has_str(seen, tok) { return false }
+                for m in self.cell_members(t) {
+                    if self.reaches_func(m, push_str_copy(seen, tok)) { return true }
+                }
+            },
+            _ => {},
+        }
+        for x in parts {
+            if self.reaches_func(x, seen) { return true }
+        }
+        return false
     }
 
     // `myla_<fn>__fnval`: the adapter that lets a plain `fun` be called as a
@@ -3588,7 +3650,15 @@ impl CodeGen {
                 let t = self.need_deepc[dc]
                 let cl = self.deepc_clone[dc]
                 dc = dc + 1
-                self.emit_wanting(deep_cell_ir(self, t, cl, self.deep_cell_label(t, cl)))
+                let label = self.deep_cell_label(t, cl)
+                self.emit_wanting(deep_cell_ir(self, t, cl, label))
+                // its members' routine, a kind of `__drop_drain`'s: a deep
+                // copy defers past a depth as a release does (M15)
+                if deep_cell_has_members(self, t) {
+                    let kind = self.drop_kinds.len() as int32
+                    self.drop_kinds.push(label + "_m")
+                    self.emit_env_routine(deep_members_ir(self, t, cl, label + "_m", kind))
+                }
             }
             while k < self.need_walk.len() {
                 let t = self.need_walk[k]

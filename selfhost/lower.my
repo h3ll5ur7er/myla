@@ -6402,7 +6402,9 @@ const DROP_DEPTH: int32 = 64
 // `__drop_drain` (MYLA-389): this worker's deferred cells released, the
 // last deferred first, each by its kind's release routine (the table
 // `__drop_routines` lists), with the depth 1, so a routine it calls defers
-// again past DROP_DEPTH but never drains itself; until none is left.
+// again past DROP_DEPTH but never drains itself; until none is left. A
+// deep copy's deferred cells (M15) are kinds too, their routines making
+// the members deep.
 pub fun drop_drain_ir() -> IrFunc {
     var lw = routine("__drop_drain", None)
     let i64 = Type.TInt(64, true)
@@ -6540,33 +6542,36 @@ impl Lower {
     // and the depth is back at 0, they are released (`__drop_drain`). (The
     // deferred cells are looked at first: there are rarely any.)
     fun drop_guard_end(var self, sp: int32, free: str, guarded: bool) {
-        if guarded {
-            let i64 = Type.TInt(64, true)
-            let d0 = self.depth_by(-1)
-            let head = self.temp(i64)
-            self.add(Inst.Intr(head, Intrinsic.RtAddr("__drop_defer"), []))
-            let first = self.temp(i64)
-            self.add(Inst.LoadAt(first, head, 0, 8))
-            let some = self.temp(Type.TBool)
-            self.add(Inst.Cmp(some, "!=", i64, first, self.int_const(0)))
-            let look = self.new_block()
-            let drain = self.new_block()
-            let done = self.new_block()
-            self.finish(Term.Br(some, look, done))
-            self.start(look)
-            let at = self.temp(i64)
-            self.add(Inst.Intr(at, Intrinsic.RtAddr("__drop_depth"), []))
-            let d = self.temp(i64)
-            self.add(Inst.LoadAt(d, at, 0, 8))
-            let top = self.temp(Type.TBool)
-            self.add(Inst.Cmp(top, "==", i64, d, self.int_const(0)))
-            self.finish(Term.Br(top, drain, done))
-            self.start(drain)
-            self.add(Inst.Call(-1, "__drop_drain", []))
-            self.finish(Term.Jmp(done))
-            self.start(done)
-        }
+        if guarded { self.guard_end() }
         self.free_cell(sp, free)
+    }
+
+    // A guarded routine's end (`drop_guard_end`), before what it then does.
+    fun guard_end(var self) {
+        let i64 = Type.TInt(64, true)
+        let d0 = self.depth_by(-1)
+        let head = self.temp(i64)
+        self.add(Inst.Intr(head, Intrinsic.RtAddr("__drop_defer"), []))
+        let first = self.temp(i64)
+        self.add(Inst.LoadAt(first, head, 0, 8))
+        let some = self.temp(Type.TBool)
+        self.add(Inst.Cmp(some, "!=", i64, first, self.int_const(0)))
+        let look = self.new_block()
+        let drain = self.new_block()
+        let done = self.new_block()
+        self.finish(Term.Br(some, look, done))
+        self.start(look)
+        let at = self.temp(i64)
+        self.add(Inst.Intr(at, Intrinsic.RtAddr("__drop_depth"), []))
+        let d = self.temp(i64)
+        self.add(Inst.LoadAt(d, at, 0, 8))
+        let top = self.temp(Type.TBool)
+        self.add(Inst.Cmp(top, "==", i64, d, self.int_const(0)))
+        self.finish(Term.Br(top, drain, done))
+        self.start(drain)
+        self.add(Inst.Call(-1, "__drop_drain", []))
+        self.finish(Term.Jmp(done))
+        self.start(done)
     }
 
     // The cell in the slot `sp` freed in place of the routine (std.rt's
@@ -6761,6 +6766,15 @@ pub fun deep_walk_ir(cg: CodeGen, t: Type, clone: bool, inline: bool, name: str)
 // retained, the original's count down); then each member a deep copy of its
 // own. `clone`: a copy word for word, then each member cloned; the cell
 // given only read.
+// The members of a cell of `t` (`deep_members_ir`), when there are any.
+pub fun deep_cell_has_members(cg: CodeGen, t: Type) -> bool {
+    return match t {
+        Type.TList(e) => cg.owns_heap(e) || cg.is_boxed(e),
+        Type.TMap(k, v) => cg.owns_heap(k) || cg.owns_heap(v),
+        _ => !is_sb_t(t),
+    }
+}
+
 pub fun deep_cell_ir(cg: CodeGen, t: Type, clone: bool, name: str) -> Routine {
     let i64 = Type.TInt(64, true)
     var lw = routine(name, Some(i64))
@@ -6796,21 +6810,35 @@ pub fun deep_cell_ir(cg: CodeGen, t: Type, clone: bool, name: str) -> Routine {
         lw.finish(Term.Jmp(deepen))
     }
     lw.start(deepen)
+    // its members made deep by a routine of their own (`deep_members_ir`),
+    // which may put the cell off till the outermost copy's end (M15)
+    if deep_cell_has_members(cg, t) { lw.add(Inst.Call(-1, name + "_m", [lw.read_cell(sc)])) }
+    lw.finish(Term.Ret(lw.read_cell(sc)))
+    return Routine { f: lw.f, wants: lw.wants }
+}
+
+// `<deep cell routine>_m(cell)` (M15): the members of the unshared cell of
+// type `t` made deep copies of their own (`clone`: clones). Guarded as a
+// release routine is (`drop_guard`, its place `kind` in `__drop_routines`):
+// past DROP_DEPTH copies inside one another the cell waits on the worker's
+// deferred cells, its count word holding the link, and the outermost copy
+// finishes it (`__drop_drain`), so a value nested a million deep crosses to
+// another task in a bounded stack. Its count is 1 again before its members.
+pub fun deep_members_ir(cg: CodeGen, t: Type, clone: bool, name: str, kind: int32) -> Routine {
+    var lw = routine(name, None)
+    let sc = lw.new_slot("cell", Type.TInt(64, true), 8, 0, false)
+    let guarded = lw.drop_guard(sc, kind)
+    lw.add(Inst.StoreAt(lw.read_cell(sc), -8, lw.int_const(1), 8))
     match t {
-        Type.TList(e) => {
-            if cg.owns_heap(e) || cg.is_boxed(e) { lw.deep_entries(cg, sc, 0, cg.stored_size(e), false, e, Type.TBool, clone) }
-        },
-        Type.TMap(k, v) => {
-            if cg.owns_heap(k) || cg.owns_heap(v) { lw.deep_entries(cg, sc, 8, cg.map_slot_size(t), true, k, v, clone) }
-        },
+        Type.TList(e) => { lw.deep_entries(cg, sc, 0, cg.stored_size(e), false, e, Type.TBool, clone) },
+        Type.TMap(k, v) => { lw.deep_entries(cg, sc, 8, cg.map_slot_size(t), true, k, v, clone) },
         _ => {
-            if !is_sb_t(t) {
-                lw.wants.push(Want { kind: 2, t: t, clone: clone })
-                lw.add(Inst.Rt(-1, cg.deep_walk_label(t, clone, true), [lw.read_cell(sc)]))
-            }
+            lw.wants.push(Want { kind: 2, t: t, clone: clone })
+            lw.add(Inst.Rt(-1, cg.deep_walk_label(t, clone, true), [lw.read_cell(sc)]))
         },
     }
-    lw.finish(Term.Ret(lw.read_cell(sc)))
+    if guarded { lw.guard_end() }
+    lw.finish(Term.Ret(-1))
     return Routine { f: lw.f, wants: lw.wants }
 }
 
@@ -6917,10 +6945,13 @@ impl Lower {
 // `myla_<lifted>_env_drop`: a lambda's or partial application's environment
 // released at its count's end (`__func_drop`): each capture it owns (`owned`,
 // held inline: a boxed enum as its value) released, then the cell freed.
-pub fun env_drop_ir(cg: CodeGen, lifted: str, owned: [DropEntry], free: str) -> Routine {
+pub fun env_drop_ir(cg: CodeGen, lifted: str, owned: [DropEntry], free: str, kind: int32) -> Routine {
     let i64 = Type.TInt(64, true)
     var lw = routine(lifted + "_env_drop", None)
     let sp = lw.new_slot("env", i64, 8, 0, false)
+    // (an environment that may reach another through a function value it
+    // holds: guarded, its place `kind` in `__drop_routines`; M15)
+    let guarded = lw.drop_guard(sp, kind)
     for d in owned {
         if is_cell_t(d.ty) {
             let v = lw.temp(d.ty)
@@ -6941,7 +6972,7 @@ pub fun env_drop_ir(cg: CodeGen, lifted: str, owned: [DropEntry], free: str) -> 
             }
         }
     }
-    lw.free_cell(sp, free)
+    lw.drop_guard_end(sp, free, guarded)
     return Routine { f: lw.f, wants: lw.wants }
 }
 
@@ -7255,8 +7286,26 @@ pub fun env_deep_ir(cg: CodeGen, lifted: str, owned: [DropEntry], clone: bool) -
         lw.finish(Term.Jmp(deepen))
     }
     lw.start(deepen)
-    for d in owned { lw.deep_member(cg, sc, d.off, d.ty, clone) }
+    // the captures made deep by a routine of their own, guarded (M15)
+    lw.add(Inst.Call(-1, lifted + suffix + "_m", [lw.read_cell(sc)]))
     lw.finish(Term.Ret(lw.read_cell(sc)))
+    return Routine { f: lw.f, wants: lw.wants }
+}
+
+// `myla_<lifted>_env_deep_m(env)` (`_env_clone_m`): the captures of the
+// unshared environment made deep copies (clones) of their own, guarded as
+// `deep_members_ir` is (`kind`), so a chain of closures crosses to another
+// task in a bounded stack (M15).
+pub fun env_deep_members_ir(cg: CodeGen, lifted: str, owned: [DropEntry], clone: bool, kind: int32) -> Routine {
+    var suffix = "_env_deep_m"
+    if clone { suffix = "_env_clone_m" }
+    var lw = routine(lifted + suffix, None)
+    let sc = lw.new_slot("env", Type.TInt(64, true), 8, 0, false)
+    let guarded = lw.drop_guard(sc, kind)
+    lw.add(Inst.StoreAt(lw.read_cell(sc), -8, lw.int_const(1), 8))
+    for d in owned { lw.deep_member(cg, sc, d.off, d.ty, clone) }
+    if guarded { lw.guard_end() }
+    lw.finish(Term.Ret(-1))
     return Routine { f: lw.f, wants: lw.wants }
 }
 
