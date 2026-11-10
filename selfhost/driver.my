@@ -13,7 +13,8 @@ from std.process import run, Output, ExitStatus, SpawnError
 from std.io import write, eprintln
 from std.fs import write_to_file, remove_file
 from std.platform import TARGET
-from .loader import load_program_opts, LoadOptions, for_target, file_of, Loaded, type_errors, warning_reports, in_stdlib, target_platform_file, normalize
+from .loader import load_program_opts, LoadOptions, for_target, file_of, Loaded, type_errors, warning_reports, in_stdlib, target_platform_file, normalize, is_std_module, std_tree_root
+from .stdroot import EMBEDDED_ROOT
 from .diag import render, Report
 from .checker import build_checker_lazy, Checker, CheckErr
 from .codegen import new_codegen
@@ -41,7 +42,8 @@ pub struct Checked { checker: Checker, prog: Loaded }
 // Load, link and type-check the program rooted at `file`, as `opts` says.
 // Errors are carried as the diagnostic text to print: every error, then a
 // summary line when there are several (MYLA-65, D80).
-pub fun load_and_check(file: str, opts: LoadOptions) -> Result<Checked, str> {
+pub fun load_and_check(entry: str, given: LoadOptions) -> Result<Checked, str> {
+    let (file, opts) = own_library(entry, given)
     let prog = match load_program_opts(file, opts) {
         Ok(p) => p,
         Err(r) => { return Err(render(r)) },
@@ -60,7 +62,8 @@ pub fun load_and_check(file: str, opts: LoadOptions) -> Result<Checked, str> {
 // Type-check `file`, then generate its assembly for `target` (`debug`: with DWARF
 // debug information, MYLA-71, MYLA-66; `checked`: integer overflow traps,
 // D175).
-fun compile_asm(file: str, opts: LoadOptions, debug: bool, checked: bool, target: str) -> Result<str, str> {
+fun compile_asm(entry: str, given: LoadOptions, debug: bool, checked: bool, target: str) -> Result<str, str> {
+    let (file, opts) = own_library(entry, given)
     var native = for_target(opts, target)
     native.runtime = true
     let ch = load_and_check(file, native)?
@@ -74,6 +77,47 @@ fun compile_asm(file: str, opts: LoadOptions, debug: bool, checked: bool, target
     let asm = g.generate()
     if g.refused.len() > 0 { return Err(render(type_errors(ch.prog, g.refused))) }
     return Ok(asm)
+}
+
+// The entry file and `opts` it is loaded with: with the library the tools
+// carry, a module of a copy of the standard library on disk (the
+// repository's `lib/std/x.my`) is loaded with that copy, as `--stdlib`
+// would name it, so that it and what it imports are one copy each (a
+// relative `.json` and an imported module's `std.json` were two); written
+// absolute where the root can't be written as the file is (`yaml.my` in
+// `lib/std`).
+fun own_library(file: str, opts: LoadOptions) -> (str, LoadOptions) {
+    var o = opts
+    if opts.stdlib_root != EMBEDDED_ROOT {
+        // a module of the root named, written another way (`lib/std/x.my`
+        // with `--stdlib $PWD/lib`): both absolute, for the same reason
+        if opts.stdlib_root == "" || !is_std_module(file, opts.stdlib_root) { return (file, opts) }
+        if written_under(file, opts.stdlib_root) { return (file, opts) }
+        o.stdlib_root = absolute(opts.stdlib_root)
+        return (absolute(file), o)
+    }
+    if !is_std_module(file, EMBEDDED_ROOT) { return (file, opts) }
+    o.stdlib_root = std_tree_root(file)
+    if o.stdlib_root != "" { return (file, o) }
+    let whole = absolute(file)
+    o.stdlib_root = std_tree_root(whole)
+    if o.stdlib_root == "" { return (file, opts) }
+    return (whole, o)
+}
+
+// Whether `file` is written as a path under `root`, both relative or both
+// absolute, as the loader's paths of the root's modules are.
+#test("lib/std/x.my", "lib")[true]
+#test("./lib/std/x.my", "lib/")[true]
+#test("std/x.my", ".")[true]
+#test("lib/std/x.my", "/w/lib")[false]
+#test("/w/lib/std/x.my", "lib")[false]
+#test("lib2/std/x.my", "lib")[false]
+fun written_under(file: str, root: str) -> bool {
+    let f = normalize(file)
+    let r = normalize(root)
+    if r == "." { return f[0] != '/' }
+    return f.len() > r.len() && f[0:r.len() + 1] == r + "/"
 }
 
 // Inspect a finished child's status; return true on failure (nonzero exit or a
@@ -146,7 +190,11 @@ pub fun cmd_test_native(file: str, opts: LoadOptions, sel: TestOptions, target: 
 // there: a failure ended the run) reports the case it stopped at with the
 // error, and the rest as not run. On wasm32, where the harness can start
 // no process, the runs are this process's (`resumed_tests`, MYLA-370).
-pub fun native_tests(file: str, opts: LoadOptions, sel: TestOptions, target: str) -> Result<TestRun, str> {
+pub fun native_tests(given_file: str, given: LoadOptions, sel: TestOptions, target: str) -> Result<TestRun, str> {
+    let (file, opts) = own_library(given_file, given)
+    if hosts_platform(file, opts.stdlib_root, target) {
+        return Err(format("myla: {} is std.platform for {}; for {} it is {}/std/{}, whose cases run there", file, TARGET, target, opts.stdlib_root, target_platform_file(target)))
+    }
     let ch = load_and_check(file, opts)?
     let text = match read_to_string(file) {
         Ok(t) => t,
@@ -165,11 +213,14 @@ pub fun native_tests(file: str, opts: LoadOptions, sel: TestOptions, target: str
     }
     let out = dir + "/harness"
     var nopts = opts
-    nopts.overrides[file] = h.source
     // the target's own platform module is its `std.platform`, which the
     // harness imports too (through std.test): built as that module, with
-    // the harness in it, it is loaded once (MYLA-397)
+    // the harness in it, it is loaded once (MYLA-397), the harness keyed
+    // where `for_target` reads the module, however the file and the root
+    // are written (S3)
     let entry = harness_entry(file, opts.stdlib_root, target)
+    if entry != file { nopts.overrides[opts.stdlib_root + "/std/" + target_platform_file(target)] = h.source }
+    else { nopts.overrides[file] = h.source }
     // built checked: overflow traps under `myla test`, natively too (D175)
     if cmd_build(entry, out, nopts, false, true, target) != 0 {
         // the harness kept, for a look at the code added to the file
@@ -220,6 +271,18 @@ fun harness_entry(file: str, stdlib_root: str, target: str) -> str {
     if own == "" || stdlib_root == "" { return file }
     if absolute(file) != absolute(stdlib_root + "/std/" + own) { return file }
     return stdlib_root + "/std/platform.my"
+}
+
+// Whether `file` is the host's own platform module, `std/platform.my`,
+// tested for a target with one of its own, which takes that module's place
+// there (`for_target`).
+#test("lib/std/platform.my", "lib", "wasm32-wasi")[true]
+#test("lib/./std/platform.my", "lib/", "aarch64-linux")[true]
+#test("lib/std/platform.my", "lib", "x86_64-linux")[false]
+#test("lib/std/platform_wasm.my", "lib", "wasm32-wasi")[false]
+fun hosts_platform(file: str, stdlib_root: str, target: str) -> bool {
+    if target_platform_file(target) == "" || stdlib_root == "" { return false }
+    return absolute(file) == absolute(stdlib_root + "/std/platform.my")
 }
 
 // `p` normalized, from the current directory if it is relative.

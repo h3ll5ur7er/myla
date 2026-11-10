@@ -149,7 +149,7 @@ pub fun for_target(opts: LoadOptions, target: str) -> LoadOptions {
     o.overrides[EMBEDDED_ROOT + "/std/platform.my"] = carried
     let path = opts.stdlib_root + "/std/" + file
     var text = carried
-    match source_text(path, opts.overrides) {
+    match override_text(path, opts.overrides) {
         Some(t) => { text = t },
         None => {
             match read_to_string(path) {
@@ -160,6 +160,54 @@ pub fun for_target(opts: LoadOptions, target: str) -> LoadOptions {
     }
     o.overrides[opts.stdlib_root + "/std/platform.my"] = text
     return o
+}
+
+// The text `overrides` (or the embedded library) gives `path`, under a key
+// spelled as `path` is or another spelling of it (`./lib/std/x.my`,
+// `lib//std/x.my`), as the loader reads the keys normalized (MYLA-397, S3).
+#test("lib//std/a.my", ["./lib/std/a.my": "x"])[Some("x")]
+#test("lib/std/a.my", ["lib/std/a.my": "y"])[Some("y")]
+#test("lib/std/b.my", ["lib/std/a.my": "y"])[None]
+fun override_text(path: str, overrides: [str: str]) -> Option<str> {
+    match source_text(path, overrides) {
+        Some(t) => { return Some(t) },
+        None => {},
+    }
+    let want = normalize(path)
+    for k in overrides.keys() {
+        if normalize(k) == want { return overrides.get(k) }
+    }
+    return None
+}
+
+// With the library the tools carry, the root of the copy of the standard
+// library on disk that `path` is a module of (`in_std_tree`: under a
+// directory `std` that holds `rt.my`), written as `path` is, relative or
+// absolute; "" for none, or for a root not written in `path` (`yaml.my` in
+// `lib/std`). `myla test lib/std/yaml.my` loads the library from `lib`, as
+// `--stdlib lib` would: one copy of each module, where the file's `.json`
+// and the `std.json` of a module it imports were two.
+#test("/nowhere/std/x.my")[""]
+#test("x.my")[""]
+pub fun std_tree_root(path: str) -> str {
+    let p = normalize(path)
+    let segs = segments(p)
+    var i = segs.len() - 2
+    while i >= 0 {
+        if segs[i] == "std" {
+            var parts: [str] = []
+            var k = 0
+            while k < i {
+                parts.push(segs[k])
+                k += 1
+            }
+            var root = join(parts, "/")
+            if p[0] == '/' { root = "/" + root } else if root == "" { root = "." }
+            if exists(join_path(root, "std/rt.my")) { return root }
+        }
+        i -= 1
+    }
+    return ""
 }
 
 struct Loader {
