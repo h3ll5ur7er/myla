@@ -79,3 +79,37 @@ run_tool() {  # <binary> [args...]
         "$@"
     fi
 }
+
+# The compiler as its seed carries it (MYLA-431): selfhost/gen_main.my
+# compiled by <compiler> for <target> with an empty embedded standard library
+# in place of selfhost/embedded_std.my. The bootstrap gives every stage `lib`,
+# so stage 0 never reads the library it embeds, which was over half of each
+# seed; the stages it builds embed the whole library again.
+seed_compile() {  # <compiler> <target> <out.s>
+    local compiler="$1" target="$2" out="$3" keep rc=0
+    keep="$(mktemp)"
+    cp selfhost/embedded_std.my "$keep"
+    trap 'cp "'"$keep"'" selfhost/embedded_std.my; rm -f "'"$keep"'"' EXIT INT TERM
+    cat > selfhost/embedded_std.my <<'STUB'
+// embedded_std.my as the seeds carry it (MYLA-431): no files. Written and
+// removed again by scripts/host.sh's seed_compile; the bootstrap gives stage 0
+// the library under lib/.
+
+pub fun embedded_paths() -> [str] {
+    return []
+}
+
+pub fun embedded_file(path: str) -> str {
+    return ""
+}
+STUB
+    if [ "$target" = "$HOST_TARGET" ]; then
+        run_tool "$compiler" selfhost/gen_main.my lib > "$out" || rc=$?
+    else
+        run_tool "$compiler" selfhost/gen_main.my lib --target "$target" > "$out" || rc=$?
+    fi
+    cp "$keep" selfhost/embedded_std.my
+    rm -f "$keep"
+    trap - EXIT INT TERM
+    return $rc
+}
