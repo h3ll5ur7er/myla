@@ -5925,6 +5925,13 @@ impl Checker {
                     Type.TList(el) => el,
                     Type.TMap(k, v) => {
                         self.key_ok(k, it_expr.line, it_expr.col, it_expr.sp)?
+                        // `for (k, v) in m`: a map's loop visits its keys
+                        // (MYLA-390's follow-up)
+                        let destructs = var_name.len() > 4 && var_name[:4] == "%for"
+                        let key_tuple = match k { Type.TTuple(ks) => true, _ => false }
+                        if destructs && !key_tuple {
+                            return Err(with_notes(terr_at(it_expr.line, it_expr.col, it_expr.sp, format("a loop over the map '{}' visits its keys, of type '{}', not its entries", type_name(it), type_name(k))), [Note { label: "help", msg: "write 'for (k, v) in m.items()' for the keys and values", line: 0, col: 0, sp: no_span() }]))
+                        }
                         k
                     },
                     // a string's characters, as `s.chars()` gives them (MYLA-318)
@@ -8305,7 +8312,7 @@ impl Checker {
             Ok(x) => {},
             Err(e) => {
                 if !is_stopped(e) { self.note(e) }
-                return Err(unmangled_all(self.errs))
+                return Err(unmangled_all(self.errs, self.known_names()))
             },
         }
         self.bodies = true
@@ -8366,9 +8373,33 @@ impl Checker {
         }
         self.check_passed_on()
         self.check_become_words()
-        if self.errs.len() > 0 { return Err(unmangled_all(self.errs)) }
-        self.warnings = unmangled_all(sort_by_place(self.warnings))
+        if self.errs.len() > 0 { return Err(unmangled_all(self.errs, self.known_names())) }
+        if self.warnings.len() > 0 { self.warnings = unmangled_all(sort_by_place(self.warnings), self.known_names()) }
         return Ok(0)
+    }
+
+    // The qualified names the loader made that a message may hold (a
+    // function, type, trait, alias or const, and each module path before
+    // one), which `unmangled_in` writes as a program does; only when there
+    // is a message.
+    fun known_names(self) -> [str: bool] {
+        var out: [str: bool] = [:]
+        var names: [str] = []
+        for k in self.func_map.keys() { names.push(k) }
+        for k in self.struct_map.keys() { names.push(k) }
+        for k in self.enum_map.keys() { names.push(k) }
+        for t in self.traits { names.push(t.name) }
+        for a in self.aliases { names.push(a.name) }
+        for c in self.const_decls { names.push(c.name) }
+        for n in names {
+            var i = 0
+            while i < n.len() {
+                if n[i] == '$' { out[n[:i]] = true }
+                i += 1
+            }
+            out[n] = true
+        }
+        return out
     }
 
     // The body of the function `decls[pos]`, unless it was left out.
@@ -10186,7 +10217,7 @@ impl Checker {
             Some(x) => x,
             None => {
                 if self.lost_methods.contains(field) { return Err(poisoned()) }   // maybe a left-out impl's (MYLA-110)
-                return Err(with_notes(terr_at(e.line, e.col, e.sp, format("type '{}' has no function '{}'", tn, field)), self.static_hint(field, tn)))
+                return Err(with_notes(terr_at(e.line, e.col, e.sp, format("type '{}' has no function '{}'", tn, field)), self.static_hint(field, tn, self.impl_head(st, tn))))
             },
         }
         self.called[sig.name] = true
@@ -10257,16 +10288,36 @@ impl Checker {
 
     // Notes naming the traits that declare a function `field` without
     // `self`, for a type `tn` that has none (D172).
-    #test(checker_on("trait Z { fun zero() -> Self }"), "zero", "str")[[Note { label: "help", msg: "trait 'Z' declares it: 'impl Z for str' would give 'str' one", line: 0, col: 0, sp: SrcSpan { sline: 0, scol: 0, eline: 0, ecol: 0 } }]]
-    #test(checker_on("trait Z { fun zero(self) -> Self }"), "zero", "str")[[]]
-    fun static_hint(self, field: str, tn: str) -> [Note] {
+    #test(checker_on("trait Z { fun zero() -> Self }"), "zero", "str", ("", "str"))[[Note { label: "help", msg: "trait 'Z' declares it: 'impl Z for str' would give 'str' one", line: 0, col: 0, sp: SrcSpan { sline: 0, scol: 0, eline: 0, ecol: 0 } }]]
+    #test(checker_on("trait Z { fun zero(self) -> Self }"), "zero", "str", ("", "str"))[[]]
+    #test(checker_on("trait Z { fun zero() -> Self }"), "zero", "Box", ("<T>", "Box<T>"))[[Note { label: "help", msg: "trait 'Z' declares it: 'impl<T> Z for Box<T>' would give 'Box' one", line: 0, col: 0, sp: SrcSpan { sline: 0, scol: 0, eline: 0, ecol: 0 } }]]
+    fun static_hint(self, field: str, tn: str, head: (str, str)) -> [Note] {
         var out: [Note] = []
         for t in self.traits {
             for m in t.methods {
-                if m.name == field && m.receiver == "" { out.push(Note { label: "help", msg: format("trait '{}' declares it: 'impl {} for {}' would give '{}' one", t.name, t.name, tn, tn), line: 0, col: 0, sp: no_span() }) }
+                // `head`: the impl's type parameters and target
+                if m.name == field && m.receiver == "" { out.push(Note { label: "help", msg: format("trait '{}' declares it: 'impl{} {} for {}' would give '{}' one", t.name, head.0, t.name, head.1, tn), line: 0, col: 0, sp: no_span() }) }
             }
         }
         return out
+    }
+
+    // The type parameters and the target of an impl for the type `st`
+    // written `tn`: a generic type's with its parameters, `<T>` and
+    // `Box<T>`, as `impl Z for Box` can't be written (MYLA-384's follow-up).
+    #test(checker_on("struct Box<T> { v: T }"), Type.TStruct("Box", []), "Box")[("<T>", "Box<T>")]
+    #test(checker_on("[int]"), Type.TStr, "str")[("", "str")]
+    fun impl_head(self, st: Type, tn: str) -> (str, str) {
+        let name = match st {
+            Type.TStruct(n, a) => n,
+            Type.TActor(n, a) => n,
+            Type.TEnum(n, a) => n,
+            _ => "",
+        }
+        let tps = if name == "" { [] } else { self.type_params_of(name) }
+        if tps.len() == 0 { return ("", tn) }
+        let ps = join_strs(tps, ", ")
+        return (f"<{ps}>", f"{tn}<{ps}>")
     }
 
     // `infer_generic_call` for a method: its explicit type arguments give
@@ -11469,8 +11520,24 @@ fun starts_with_dunder(name: str) -> bool {
 #test("a 'b' of $5 and x$ and $y")["a 'b' of $5 and x$ and $y"]
 #test("größe$wert")["größe.wert"]
 fun unmangled(msg: str) -> str {
+    return unmangled_in(msg, [:], true)
+}
+
+// `unmangled`, a run rewritten only when `all` or `known` has it: the
+// program's own text in a message (a format spec, a string) keeps its `$`
+// (MYLA-383). A list's and a map's method key, `__list` and `__map`, is
+// the type a program writes, `[T]` and `[K: V]` (MYLA-320).
+#test("invalid format spec 'std$iter$sum'", [:], false)["invalid format spec 'std$iter$sum'"]
+#test("function 'std$iter$sum' and 'a$b'", ["std$iter$sum": true], false)["function 'iter.sum' and 'a$b'"]
+#test("duplicate method 'map' for type '__list', not '__map' or '__lists'", [:], false)["duplicate method 'map' for type '[T]', not '[K: V]' or '__lists'"]
+#test("method '__list.sorted'", [:], false)["method '[T].sorted'"]
+fun unmangled_in(msg: str, known: [str: bool], all: bool) -> str {
     var has = false
-    for c in msg { if c == '$' { has = true } }
+    var i0 = 0
+    while i0 < msg.len() {
+        if msg[i0] == '$' || (msg[i0] == '_' && i0 + 1 < msg.len() && msg[i0 + 1] == '_') { has = true }
+        i0 += 1
+    }
     if !has { return msg }
     var sb = StringBuilder()
     let n = msg.len()
@@ -11486,8 +11553,13 @@ fun unmangled(msg: str) -> str {
         var j = i
         while j < n && (is_name_byte(msg[j]) || msg[j] == '$') { j += 1 }
         let run = msg[i:j]
+        if run == "__list" || run == "__map" {
+            sb.append(if run == "__list" { "[T]" } else { "[K: V]" })
+            i = j
+            continue
+        }
         let segs = run.split("$")
-        var ok = segs.len() >= 2
+        var ok = segs.len() >= 2 && (all || known.contains(run))
         for g in segs { if g.len() == 0 || (g[0] >= '0' && g[0] <= '9') { ok = false } }
         if ok { sb.append(segs[segs.len() - 2] + "." + segs[segs.len() - 1]) } else { sb.append(run) }
         i = j
@@ -11495,16 +11567,17 @@ fun unmangled(msg: str) -> str {
     return sb.build()
 }
 
-// `es` with their messages and their notes' `unmangled`.
-fun unmangled_all(es: [CheckErr]) -> [CheckErr] {
+// `es` with their messages and their notes' `unmangled_in` the names
+// `known`.
+fun unmangled_all(es: [CheckErr], known: [str: bool]) -> [CheckErr] {
     var out: [CheckErr] = []
     for e in es {
         var f = e
-        f.msg = unmangled(e.msg)
+        f.msg = unmangled_in(e.msg, known, false)
         var ns: [Note] = []
         for n in e.notes {
             var m = n
-            m.msg = unmangled(n.msg)
+            m.msg = unmangled_in(n.msg, known, false)
             ns.push(m)
         }
         f.notes = ns

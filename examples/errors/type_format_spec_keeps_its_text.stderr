@@ -1,0 +1,5 @@
+type error: invalid format spec 'std$iter$sum'
+  --> examples/errors/type_format_spec_keeps_its_text.my:7:14
+  |
+7 |     print(f"{x:std$iter$sum}")
+  |              ^

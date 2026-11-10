@@ -1,0 +1,7 @@
+//~ module error: module 'std.deque' does not export 'Nope'
+// The message names the module (MYLA-371's follow-up, MYLA-417).
+import std.deque as deque
+
+fun main() {
+    let d = deque.Nope()
+}

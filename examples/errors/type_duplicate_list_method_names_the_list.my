@@ -1,0 +1,12 @@
+//~ type error: duplicate method 'map' for type '[T]'
+//~ span: fun map(self, f: (T) -> T) -> [T] { return self }
+//~ note: 'map' for '[T]' is first defined in std.list
+// std.list, which every program sees, has a `map`: the message names the
+// list as a program writes it, not by its key `__list` (MYLA-320, MYLA-417).
+impl<T> [T] {
+    fun map(self, f: (T) -> T) -> [T] { return self }
+}
+
+fun main() {
+    print([1].map((x) => x + 1).len())
+}
