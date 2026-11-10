@@ -2,7 +2,7 @@
 id: MYLA-340
 title: Streaming processes
 type: feature
-status: review
+status: done
 priority: medium
 labels: [stdlib, process, streams, wave-3]
 ---
@@ -35,3 +35,7 @@ Wave 3 of [[Project/Standard-library-roadmap]], roadmap #46. Today `run` and `Co
 - `build/myla test lib/std/process.my --stdlib lib`: 24/24 interpreted, `--native` 24/24, `--target aarch64-linux` (qemu) 24/24, `--target wasm32-wasi` (Node) 24/24, where each test function sees `Unsupported` at its first spawn and stops (a wasm32 program built from `spawn`, `stdin_from(Null)` and a pipeline prints `no processes on this target` for each). 11 test functions: a round trip through `cat`, closed streams, lines in and out one at a time through a `Buffered`, `try_wait`/`kill`/`Signaled(9)`, `wait` draining 300 KB of output and of error nobody took, `wait_with_output` with a text input, the three input modes in `spawn` and `output`, the spawn errors, a pipeline of 16 MiB (`head | wc -c`) and of 512 KiB collected out of the second (`head | tr`), one cut short (`head -c 50000000 | head -c 5`: `Signaled(13)`), and the async waits.
 - `python3 -m unittest tests.burn.test_process tests.burn.test_time tests.burn.test_std_modules tests.burn.test_doc_blocks`: 28 tests, OK. `scripts/bootstrap.sh`: byte-identical fixed point (13,970,803 bytes).
 - Natively, best of five: 256 MiB from `head -c 268435456 /dev/zero` through a `ChildStdout`, 64 KiB a `read_str`: 118 ms, 2,160 MB/s (a shell's `head | cat > /dev/null`: 105 ms); `read` (`[uint8]`): 469 MB/s. 256 MiB through `head | wc -c` as a pipeline: 250 ms (1 GB/s; 380 ms on a busier run).
+
+## Review 2026-11-09
+
+Signed off in [[Project/Review-2026-11-09]], with a follow-up in [[MYLA-419]]: writing a child's stdin while reading its stdout deadlocks on one worker and interpreted.

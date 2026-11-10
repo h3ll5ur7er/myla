@@ -2,7 +2,7 @@
 id: MYLA-327
 title: "std.hash: the Hasher, fast hashes and checksums"
 type: feature
-status: review
+status: done
 priority: medium
 labels: [stdlib, hashing, wave-2]
 ---
@@ -26,3 +26,7 @@ Wave 2 of [[Project/Standard-library-roadmap]], roadmap #33, #34. The hashing th
 - **Vectors:** CRC-32 `"123456789"` → `0xCBF43926`, Adler-32 `"Wikipedia"` → `0x11E60398`, FNV's reference values, the seven wyhash vectors of Zig's tests; the rest from a model in Python checked against those and against the reference SipHash's 64 vectors, and from Python's `zlib`.
 - **The choice, by measurement** (natively, best of three; both written alike in Myla): one `uint64` key 6.1 ns with wyhash against 14.0 ns with SipHash-1-3, two 9.2 against 18.2 ns, a 13-byte string 16.4 against 20.5 ns, 100 MB 1533 against 1275 MB/s. wyhash it is; the page gives the reasoning.
 - **Throughput on 100 MB**, natively, best of five (`str` / `[uint8]`): FNV-1a 32 953 / 952 MB/s, FNV-1a 64 933 / 948 MB/s, the Hasher (wyhash) 1496 / 1496 MB/s, CRC-32 (slicing by 8) 1167 / 1084 MB/s, Adler-32 1329 / 1335 MB/s. A key of two `int32`s 8.7 ns from `new()` to `finish()`, a 13-byte string 16.1 ns. CRC-32 a byte at a time was 415 MB/s.
+
+## Review 2026-11-09
+
+Signed off in [[Project/Review-2026-11-09]].

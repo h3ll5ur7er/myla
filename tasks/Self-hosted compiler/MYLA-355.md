@@ -2,7 +2,7 @@
 id: MYLA-355
 title: "Native: assert with a computed message fails the IR verifier"
 type: bug
-status: review
+status: done
 priority: high
 labels: [codegen, lowering, ownership]
 ---
@@ -27,3 +27,7 @@ fun main() {
 - `intrinsic` opens a temporary scope for the message in the failing branch and closes it without drops before the `Panic` terminator. The interpreter needed nothing.
 - Test first: `test_assert_with_a_computed_message` (an f-string and a concatenation, each once passing and once failing) failed to build before (the verifier's error) and passes after. The other `assert` tests still pass.
 - `scripts/bootstrap.sh`: byte-identical fixed point (9,859,129 bytes).
+
+## Review 2026-11-09
+
+Signed off in [[Project/Review-2026-11-09]].

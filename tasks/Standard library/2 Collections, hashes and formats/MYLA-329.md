@@ -2,7 +2,7 @@
 id: MYLA-329
 title: "std.encoding and std.bytes: hex, Base64, URLs, bytes and strings"
 type: feature
-status: review
+status: done
 priority: medium
 labels: [stdlib, encoding, wave-2]
 ---
@@ -25,3 +25,7 @@ Wave 2 of [[Project/Standard-library-roadmap]], roadmap #7, #37, #38. Conversion
 - `build/myla test lib/std/<m>.my --stdlib lib`, interpreted, `--native`, `--target aarch64-linux` (qemu) and `--target wasm32-wasi` (node): `bytes.my` 47/47, `encoding.my` 93/93, `url.my` 139/139 on each. The cases hold RFC 4648's test vectors (base 16 and Base64) and RFC 3986's examples (sections 1.1.2, 3 and 5.4, an IPv6 and an IPvFuture host among them); test functions check round trips of every encoding for 0 to 300 random bytes and of 18 URLs through `parse` and `to_str`.
 - After `scripts/bootstrap.sh`: `python3 -m unittest tests.burn.test_std_modules tests.burn.test_doc_blocks` OK (6 tests).
 - Speed, x86-64, best of three on 100 MB of random bytes: `base64_encode` 0.55 s, `base64_decode` 0.45 s, `hex_encode` 0.61 s, `hex_decode` 0.73 s, `bytes.to_str` 0.30 s, `bytes.from_str` 0.21 s. A table lookup for the digits instead of range comparisons took `base64_decode` from 1.24 s to 0.45 s and `hex_decode` from 1.30 s to 0.73 s.
+
+## Review 2026-11-09
+
+Signed off in [[Project/Review-2026-11-09]], with a follow-up in [[MYLA-425]]: `EncodingError` and `UrlError` have no `Format`; `to_str` and reference resolution are [[MYLA-422]]'s.

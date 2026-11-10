@@ -39,7 +39,7 @@ D84, [[MYLA-110]]. A part of a declaration that fails to check takes the **error
 | a declaration | an import checked alone, a redefined builtin, a duplicate name or trait | the first one; the duplicate is left out, its body not checked (`skipped_decls`) |
 | a type in a signature, field, payload, trait method, impl target, const | unknown, wrong arguments, `Self` outside a trait, … | the error type for that part |
 | an alias | a bad target, a cycle | the error type for the alias and every alias that names it, one error |
-| a field, variant or method | a duplicate, a method colliding with a field | the first one |
+| a field, variant or method | a duplicate, a method named like a field that holds a function (D178) | the first one |
 | type parameters, a recursive struct | shadowing, duplicates, infinite size | the declaration, as written |
 | a `#derive` | not derivable, a bad attribute, an explicit impl too | no derived impl; Eq is broken for the type (`broken_impls`) unless an explicit impl stands |
 | an impl | its target type failed or can't have methods; a duplicate impl | left out; its methods' and trait's names are lost (`lost_methods`, `lost_traits`) |

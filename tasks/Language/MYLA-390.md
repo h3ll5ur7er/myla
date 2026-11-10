@@ -2,7 +2,7 @@
 id: MYLA-390
 title: "Small gaps from wave 4: for (k, v) in pairs, slicing bytes that aren't UTF-8"
 type: improvement
-status: review
+status: done
 priority: low
 labels: [language, strings]
 ---
@@ -29,3 +29,7 @@ The owner accepted the recommendation: `s[a:b]` stays by bytes (D143), and a bou
 - After, each on x86-64, aarch64 (`MYLA_TEST_TARGET=aarch64-linux`) and wasm32 (`MYLA_TEST_TARGET=wasm32-wasi`): the parity programs `for_tuple_patterns` (lists, `m.items()`, a user iterator, `iter.enumerate()`, nested tuples, `_`, nested loops with `break`/`continue`, an async loop with an `await`) and `append_char` (one to four bytes, a struct's field, a list's element, a copy, 1,000 appends); `test_bytes_that_are_no_character` and the runtime-error case `inside_a_character_among_bytes` in [[tests/burn/test_slices.py]]; `std.xml`'s 97 cases interpreted, `--native` and `--target aarch64-linux`. The error corpus: `type_for_tuple_over_non_tuples`, `type_append_char_of_a_byte`. std.slice's new `#test` cases (`seq_len`, `at_boundary`).
 - The bootstrap reaches its fixed point.
 - The suites, at the batch's last commit: `scripts/test.sh fast` 714 tests, all pass but `test_embedded_std` (the embedded library isn't committed, by the batch's rules: the seed commit regenerates it) and once `test_time`'s `test_an_async_read_lets_the_other_tasks_run` under the load of the run (it passes alone, three times out of three); `test_compiler_parity`, `test_selfhost_cases`, `test_error_corpus`, `test_selfhost_checker`, `test_lsp`, `test_grammar` (with the tree-sitter CLI), `test_selfhost_codegen`, `test_selfhost_interp`, `test_xml`, `test_http`, `test_aarch64`, `test_wasm`, `test_native_runtime`: 808 tests OK; `scripts/test-target.py aarch64-linux` and `wasm32-wasi`: 21 of 21 suites each.
+
+## Review 2026-11-09
+
+Signed off in [[Project/Review-2026-11-09]], with a follow-up in [[MYLA-417]]: no hint towards `m.items()` for `for (k, v) in m`.

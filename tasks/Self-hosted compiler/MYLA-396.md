@@ -2,7 +2,7 @@
 id: MYLA-396
 title: "Don't parse an imported module's #test cases"
 type: improvement
-status: review
+status: done
 priority: medium
 labels: [loader, performance, check-time]
 ---
@@ -26,3 +26,7 @@ Found by [[MYLA-376]]. Since [[MYLA-360]] only the tested file's cases are the p
 - `python3 -m unittest tests.burn.test_compiler_parity tests.burn.test_selfhost_cases tests.burn.test_error_corpus tests.burn.test_selfhost_checker tests.burn.test_lsp tests.burn.test_std_modules tests.burn.test_imported_cases tests.burn.test_implicit_imports tests.burn.test_project_commands tests.burn.test_doc_blocks`: 749 tests, OK.
 - `scripts/bootstrap.sh`: byte-identical fixed point (18,846,936 bytes).
 - `scripts/test.sh fast`: 764 tests, failures `test_embedded_std` (expected: `selfhost/embedded_std.my` is behind `lib/` until the seed commit) and `test_time.test_an_async_read_lets_the_other_tasks_run`, a timing test that failed under the load of a parallel callgrind run and passes alone (12/12).
+
+## Review 2026-11-09
+
+Signed off in [[Project/Review-2026-11-09]], with a follow-up in [[MYLA-416]]: an imported module's case with unbalanced brackets gives the importer a wrong error at end of file.

@@ -2,7 +2,7 @@
 id: MYLA-350
 title: std.term and std.signal
 type: feature
-status: review
+status: done
 priority: low
 labels: [stdlib, terminal, primitives, wave-4]
 ---
@@ -31,3 +31,7 @@ The REPL: `myla repl` had no line editing; on a terminal (stdin and stderr) it n
 - `scripts/test.sh fast`: 703 tests, OK. `scripts/test-target.py aarch64-linux test_term test_platform_primitives test_stdio` and the same for `wasm32-wasi`: all pass (test_term: 13 run on aarch64; 5 on wasm32, 9 excused).
 - `scripts/bootstrap.sh`: byte-identical fixed point (17,370,796 bytes) from the unchanged seed.
 - Measured natively, three runs of 200 SIGINTs to a built program awaiting `next()` while a task ticks every 5 ms: from `kill` to its line on the pipe, 15 to 34 µs at best, a median of 85 to 89 µs, p95 171 to 196 µs (4-core machine shared with other lanes).
+
+## Review 2026-11-09
+
+Signed off in [[Project/Review-2026-11-09]], with a follow-up in [[MYLA-426]]: the line editor's drawing is cubic; a panic in raw mode leaves the terminal raw (D187).

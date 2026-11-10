@@ -2,7 +2,7 @@
 id: MYLA-332
 title: "Small formats: CSV, INI, more JSON"
 type: feature
-status: review
+status: todo
 priority: medium
 labels: [stdlib, formats, wave-2]
 ---
@@ -42,3 +42,9 @@ Built on 7b328dd.
 ## Comments
 
 - 2026-11-09: the owner confirmed a failed read as `CsvErrorKind.Io` with the cause in `io_error()`, over an error that wraps an `IoError`.
+
+## Review 2026-11-09
+
+Not ready ([[Project/Review-2026-11-09]]): `ini.parse("[é")` ends the program (H9); the CSV stream reader is quadratic on short reads (M17). The fix is in [[MYLA-420]].
+
+- [ ] The review's blocker, fixed with [[MYLA-420]]

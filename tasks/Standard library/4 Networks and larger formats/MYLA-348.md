@@ -2,7 +2,7 @@
 id: MYLA-348
 title: "std.xml: a non-validating parser and writer"
 type: feature
-status: review
+status: done
 priority: low
 labels: [stdlib, formats, wave-4]
 ---
@@ -27,3 +27,7 @@ Wave 4 of [[Project/Standard-library-roadmap]], roadmap #56. Elements, attribute
 - **Burn test** `tests/burn/test_xml.py` (new), every document read by the pull reader, the tree and the stream reader in pieces of 1 to 7 bytes, compared as canonical XML: the W3C xmltest cases, not-wf/sa 88/88 refused without a DOCTYPE (45/98 with one; the other 53 have their error in the DTD), valid/sa 53/53 canonical inside the subset (35/67 outside it); 2000 generated documents as expat reads them; 4000 broken ones refused (3057) or read (943) as expat does, but for 26 with a version expat doesn't check (`11.0`). 8 to 14 s. The suite is read from `build/xmlts/` or `MYLA_XMLTS`, skipped without it.
 - `python3 -m unittest tests.burn.test_std_modules tests.burn.test_doc_blocks` after a bootstrap (fixed point reached): OK.
 - **Speed**, natively, best of five, 10 MB of records: `parse` 66 MB/s, `reader` 77 MB/s, `stream_reader` over a `File` 55 MB/s; Python 3.13's `ElementTree.fromstring` 37 MB/s, `XMLPullParser` 25 MB/s.
+
+## Review 2026-11-09
+
+Signed off in [[Project/Review-2026-11-09]], with a follow-up in [[MYLA-424]]: the W3C suite isn't in the checkout; one stale sentence.

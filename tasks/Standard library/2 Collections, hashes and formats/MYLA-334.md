@@ -2,7 +2,7 @@
 id: MYLA-334
 title: "std.time and std.log: civil time, durations, logging"
 type: feature
-status: review
+status: done
 priority: medium
 labels: [stdlib, time, wave-2]
 ---
@@ -27,3 +27,7 @@ Wave 2 of [[Project/Standard-library-roadmap]], roadmap #61, #62. UTC only: time
 - **Cross-checks:** a test function round-trips every day from 1970 to 2100 through `from_unix` and `to_unix` (and checks each day follows the one before, the weekday and the day of the year; every 7th day through RFC 3339's text too), another every 97th day of the years 1 to 9999 through both of Hinnant's functions. A scratch script compared 5007 instants from year 1 to 9999 with Python's `datetime` (RFC 3339 text, ISO weekday, day of the year, Unix seconds, and the same instant written with an offset parsed back): the same output interpreted, natively, under qemu-aarch64 and on wasm32 under Node. 2014 durations print exactly as Go's `time.Duration.String`, the most negative one included.
 - **Measurements** (natively on x86-64, best of three): `log.debug(m)` dropped 0.23 µs (reading `MYLA_LOG`, 168 variables in the environment), through a `Logger` 6 ns; `log.warn(m)` written to `/dev/null` 1.45 µs, through a `Logger` 1.22 µs; `now_utc()` 0.18 µs. Per call is fine; the `Logger` is there for loops. Checking a program that imports `std.test` (which imports `std.time`): 38 ms before, 45 ms after; with `std.fmt`'s `pad` imported it was 64 ms, so std.time has a small `pad` of its own.
 - **Found:** MYLA-360 holds for `std.str` too: a module of `lib/std` that imports `.str` runs std.str's 106 method cases as its own, and its `--native` harness doesn't parse. `std.log` has its own `normalized` instead of `trim` and `to_lower`.
+
+## Review 2026-11-09
+
+Signed off in [[Project/Review-2026-11-09]], with a follow-up in [[MYLA-425]]: `Duration.abs()` of the minimum and "arithmetic wraps" are runtime errors wherever overflow is checked.

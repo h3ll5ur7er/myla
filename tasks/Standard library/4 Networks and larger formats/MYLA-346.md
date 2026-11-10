@@ -2,7 +2,7 @@
 id: MYLA-346
 title: "Sockets: primitives and std.net"
 type: feature
-status: review
+status: done
 priority: low
 labels: [stdlib, net, primitives, wave-4]
 ---
@@ -31,3 +31,7 @@ No seed staging: the compiler imports `std.fs`, `std.io` and `std.process`, none
 - `scripts/test.sh fast`: 678 tests, OK. `test_platform_primitives`, `test_fs`, `test_process`, `test_stdio`, `test_time`, `test_selfhost_cases`, `test_compiler_parity`, `test_std_modules`, `test_doc_blocks`, `test_net`: 270 tests, OK.
 - `scripts/bootstrap.sh`: byte-identical fixed point (15,951,868 bytes) from the unchanged seed.
 - Measured natively, best of three (4-core machine shared with other lanes): 1 GiB through loopback TCP in 64 KiB writes and reads, one program, two tasks on the reactor: 437 ms, 2.45 GB/s (4 workers), 401 ms, 2.68 GB/s with `MYLA_THREADS=1`. 10,000 short connections (connect, accept, close both): 944 ms, 10,600 a second on 4 workers (the runs ranged from 3,400 to 10,600 under the machine's load), 901 ms, 11,100 a second on one worker.
+
+## Review 2026-11-09
+
+Signed off in [[Project/Review-2026-11-09]], with a follow-up in [[MYLA-419]]: a copy of a closed stream reaches the next socket with its descriptor (D181).

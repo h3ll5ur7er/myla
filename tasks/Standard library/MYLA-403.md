@@ -2,7 +2,7 @@
 id: MYLA-403
 title: "std.bench: time a closure over repeated runs"
 type: feature
-status: review
+status: done
 priority: low
 labels: [stdlib, benchmarking]
 ---
@@ -32,3 +32,7 @@ Two choices the task leaves open:
 ## Comments
 
 - 2026-11-09: the owner accepted the proposals: a fixed batch of calls per timed run, the spread as the median absolute deviation.
+
+## Review 2026-11-09
+
+Signed off in [[Project/Review-2026-11-09]], with a follow-up in [[MYLA-426]]: a closure that returns nothing can't be timed (after [[MYLA-417]]'s M24).

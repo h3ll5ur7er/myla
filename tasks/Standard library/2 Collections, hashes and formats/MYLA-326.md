@@ -2,7 +2,7 @@
 id: MYLA-326
 title: "std.path and std.glob: paths, directory walks, glob patterns"
 type: feature
-status: review
+status: done
 priority: medium
 labels: [stdlib, fs, wave-2]
 ---
@@ -28,3 +28,7 @@ Built from master after wave 1 (087e4fe).
 - **Tests**: `myla test lib/std/path.my --stdlib lib` 92/92, `lib/std/glob.my` 51/51; the same with `--native`, `--target aarch64-linux` (qemu) and `--target wasm32-wasi` (Node). The walk and glob test functions make a tree under `/tmp` with `std.fs` and remove it in a `defer` (a `lib/std` module can't import `std.test`, so not `test.temp_dir()`). `python3 -m unittest tests.burn.test_std_modules tests.burn.test_doc_blocks`: 6 tests OK after a bootstrap.
 - **wasm32 bug found and fixed** ([[lib/std/platform_wasm.my]], a commit of its own): `dir_read` keeps each directory descriptor's readdir cookie in slot `fd & 63` and never reset it when a directory was opened, so after 64 descriptors (Node's shim never reuses a number) `fs.list_dir` started at a stale cookie and gave a short or empty list. The glob test failed on wasm32 (49/50) before the fix, passes after it; `test-target.py wasm32-wasi test_fs` passes with it.
 - **Measured** natively, best of 5: `matches("a*a*a*a*a*b", 10,000 a's)` 36 µs; `walk` over 100 directories of 100 files (10,100 paths) 7 ms; `glob_in(dir, "**/*7.txt")` over it (1,000 matches) 11 ms.
+
+## Review 2026-11-09
+
+Signed off in [[Project/Review-2026-11-09]], with a follow-up in [[MYLA-426]]: `glob_in` differs from `walk` + `matches` for a dangling link named literally and for a file before `/**`.

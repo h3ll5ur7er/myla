@@ -2,7 +2,7 @@
 id: MYLA-374
 title: "The native test harness and an enum of one variant"
 type: bug
-status: review
+status: done
 priority: medium
 labels: [testing, native, harness]
 ---
@@ -27,3 +27,7 @@ It passed interpreted. Natively: "unreachable match arm (a previous arm already 
 - `python3 -m unittest tests.burn.test_test_native tests.burn.test_test_functions`: 14 tests OK, before the two harness-case tests were added; both of those pass too.
 - `scripts/bootstrap.sh`: byte-identical fixed point (14,322,660 bytes).
 - `tests/burn/test_selfhost_cases.py` (new): every file of `selfhost/` and `tools/` with `#test` cases passes them, four files at a time, in 30 s. Nothing ran them before: `test_selfhost_cli`'s corpus skips every toolchain file, since each one has changed since the Python recordings. The first full run found one more stale case, `lower.my`'s `map_lookup` (it counts temporaries, and MYLA-313 added one), which is fixed. All 34 `selfhost/` files and the tools' files pass (checker 633, interp 371, codegen 342, …).
+
+## Review 2026-11-09
+
+Signed off in [[Project/Review-2026-11-09]].

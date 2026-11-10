@@ -2,7 +2,7 @@
 id: MYLA-318
 title: "Small language gaps from Advent of Code"
 type: improvement
-status: review
+status: done
 priority: low
 labels: [language, stdlib]
 ---
@@ -66,3 +66,7 @@ Measured natively (x86-64, best of five, a shared machine), the sum of the code 
 | mixed (`größe λ π 😀 naïve café, …`) | 15 ms | 38 ms |
 
 `chars()` also makes a 40 MB list first; the loop makes none. Interpreted (one round, ASCII): 10.9 s against 11.5 s, the evaluation of the body dominating either way.
+
+## Review 2026-11-09
+
+Signed off in [[Project/Review-2026-11-09]].

@@ -2,7 +2,7 @@
 id: MYLA-331
 title: "std.num: integers in any radix and width, parse errors"
 type: feature
-status: review
+status: done
 priority: medium
 labels: [stdlib, numbers, wave-2]
 ---
@@ -26,3 +26,7 @@ Wave 2 of [[Project/Standard-library-roadmap]], roadmap #6. `std.num` is used by
 - **Bootstrap:** `scripts/bootstrap.sh` reaches its byte-identical fixed point (11,045,117 bytes; 10,982,434 before, the growth being the embedded library).
 - **Speed:** 10 million decimal strings (1000 distinct ones of 1 to 19 digits, half negative), native, best of 7: `parse_int_radix(s, 10)` 314 ms, `parse_int` 509 ms.
 - **Compiler bug found:** `Checker.synthesize_derives` (`selfhost/checker.my`) skips a `#derive` type whose declaration has the same line and column as one already collected, in another module. So a program loses `Eq` on its own derived type when a module it loads has a derived type at the same position. `myla test lib/std/num.my --native` without `--stdlib` hits it, as the harness holds a copy of `std.num` and loads the embedded one too. Comparing `d.id == decl.id` instead fixes it, with the fixed point still reached. Not fixed here (`selfhost/` isn't this lane's).
+
+## Review 2026-11-09
+
+Signed off in [[Project/Review-2026-11-09]], with a follow-up in [[MYLA-425]]: `to_hex`/`to_binary` with a width near `int`'s minimum.

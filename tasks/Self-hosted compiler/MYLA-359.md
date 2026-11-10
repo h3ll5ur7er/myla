@@ -2,7 +2,7 @@
 id: MYLA-359
 title: "Check time of the implicit std modules: about 26 ms for every program"
 type: improvement
-status: review
+status: todo
 priority: medium
 labels: [checker, performance, stdlib]
 ---
@@ -126,3 +126,9 @@ The hello world's 39.4 M instructions (1.8 M and 1.2 ms without the implicit mod
 
 - 2026-11-09, [[MYLA-376]]: `std.int`'s new `count_ones`, `leading_zeros` and `trailing_zeros` on eight widths add 2–3 ms to every program's check (a hello world 43.8 → 48.3 ms); and a std module importing `std.int` explicitly parses its 2,042 cases ([[MYLA-396]]). `std.hash`'s CRC-32 and Adler-32 take a whole list and rebuild the CRC table on every call, so `std.compress` keeps its own: a version over a range of a list would let it use them (gunzip of 100 MB went 526 → 802 ms through a slice).
 - 2026-11-09: the owner accepted the proposals: an implicit module's bodies checked once called (an error in a body no program calls is reported by `myla test` of the module), and `std.checksum` with FNV-1a in it.
+
+## Review 2026-11-10
+
+Not ready ([[Project/Review-2026-11-10]]): lazy parsing can load a different program without an error: a missing `}` swallows the methods after it (Z1), `body_key` collides (Z2), and `myla build` of a file without `main` builds a program that does nothing (Z3, [[MYLA-415]]). "Under 5 ms" moves to [[MYLA-412]]. The fix is in [[MYLA-416]].
+
+- [ ] The review's blocker, fixed with [[MYLA-416]]

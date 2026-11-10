@@ -2,7 +2,7 @@
 id: MYLA-379
 title: "Small gaps wave 3 met: == on Option and Result, IoError's Format, #derive on generic types"
 type: improvement
-status: review
+status: done
 priority: low
 labels: [language, stdlib]
 ---
@@ -57,3 +57,7 @@ Built on `eaa905d`; commits `d81384a`, `cdb47b1`, `491ed47`, `81fc9d0`, `d6ca91e
 - [[MYLA-401]]: a list literal's element type isn't taken from its later elements (`[Either.Left(1), Either.Right("a")]`).
 - [[MYLA-400]]: std.map's and std.args's Option helpers wait for the seed.
 - Fixed here: a written generic impl's bounds weren't checked at an operator (`Box<NoEq> == …` compiled), and a written generic `eq` inside a tuple, a list or a derived struct didn't link natively.
+
+## Review 2026-11-09
+
+Signed off in [[Project/Review-2026-11-09]], with a follow-up in [[MYLA-417]]: `Option`/`Result` aren't `Hash` (D182); `Tree.Leaf == t` fails where `t == Tree.Leaf` works.

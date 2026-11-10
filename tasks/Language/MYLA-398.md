@@ -2,7 +2,7 @@
 id: MYLA-398
 title: "A bound can't name a module's trait: T: json.ToJson"
 type: improvement
-status: review
+status: done
 priority: low
 labels: [language, parser, modules]
 ---
@@ -21,3 +21,7 @@ Found by the `#derive(Json)` lane ([[MYLA-385]]). With `import std.json as json`
 - **Docs:** [[Language/Methods-and-traits#bounds]] (the rule, the errors, a tested example), [[Language/Modules]], [[Language/Grammar]], [[Architecture/Module-loader]], D170's row in [[Project/Decisions]] extended as this task asks; the `myla` skill's "`T: json.ToJson` is a parse error" went (both copies).
 - **Not done:** a bound's failure at a call names the trait bare, `type 'Q' does not satisfy the bound 'T: ToJson' required by 'show'`, as it did for `from std.json import ToJson` (the checker's `unqualified`, kept as it was); the language server's completion after `T.` doesn't list a module trait's functions (`split_bounds` looks up the bound by its plain name).
 - **Suites:** `tests.burn.test_error_corpus`, `test_grammar` (with `TREE_SITTER`: tree-sitter parses every source file and 2000 samples, `src` current), `test_modules`, `test_selfhost_parser`, `test_doc_blocks`, `test_lsp`; the bootstrap's byte-identical fixed point.
+
+## Review 2026-11-10
+
+Signed off in [[Project/Review-2026-11-10]], with a follow-up in [[MYLA-417]]: two diagnostics and language-server gaps.

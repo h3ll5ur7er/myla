@@ -2,7 +2,7 @@
 id: MYLA-341
 title: "std.text: a scanner and text layout"
 type: feature
-status: review
+status: done
 priority: medium
 labels: [stdlib, strings, parsing, wave-3]
 ---
@@ -36,3 +36,7 @@ Decisions, on the page:
 - `wrap` counts bytes and never breaks a word: a longer one stands alone. `columns` counts characters, as `pad_start` does.
 
 For the integrator: the module doesn't import `std.str`, `std.char` or `std.list`, because with any of them `--native` can't build the harness (MYLA-360). It writes out the bits of `words`, `pad_start`, `pad_end` and `join` it needs; swap them back once MYLA-360 is fixed.
+
+## Review 2026-11-09
+
+Signed off in [[Project/Review-2026-11-09]], with a follow-up in [[MYLA-426]]: `wrap` counts bytes, `columns` characters; `ints` panics on a number out of range.

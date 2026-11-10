@@ -2,7 +2,7 @@
 id: MYLA-401
 title: "A list literal's element type isn't taken from its later elements"
 type: improvement
-status: review
+status: done
 priority: low
 labels: [language, types, checker]
 ---
@@ -34,3 +34,7 @@ fun main() {
 - **Errors kept:** `[Either.Left(1), Either.Left(2)]` still says `cannot infer type parameter(s) R` at the first element (`examples/errors/type_list_elements_leave_param_open.my`, pinned); `[None: 1]`, `[[], []]`, `[Tagged.Nothing, Tagged.One(1)]` give their old messages; `[Key.Any: 1, Key.One(1.5): 2]` is `map key type must be Eq and Hash, found 'Key<float64>'`. An open element of another type is `type mismatch: 'Option<_>' vs 'int32'`, the open parameter as `_` (`examples/errors/type_list_open_element_mismatch.my`, pinned).
 - **Not covered:** a hole inside a variant's payload (`[Some(None), Some(Some(1))]`) or a call's argument still needs the hint from where it stands, as before; `[Either.Left(1), Either.Left(2i64), Either.Right("a")]` is a mismatch (`int32` against `int64`), as `[Some(1), Some(2i64)]` was: only a literal standing alone as the first element adopts a later one's type.
 - **Suites:** `tests.burn.test_error_corpus`, `test_selfhost_checker`, `test_compiler_parity`, `test_doc_blocks`: 557 tests OK; the bootstrap reaches its byte-identical fixed point.
+
+## Review 2026-11-10
+
+Signed off in [[Project/Review-2026-11-10]], with a follow-up in [[MYLA-417]]: check time is quadratic in open elements; the older literal-width bug L2.

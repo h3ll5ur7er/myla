@@ -2,7 +2,7 @@
 id: MYLA-337
 title: std.random and std.uuid
 type: feature
-status: review
+status: done
 priority: medium
 labels: [stdlib, random, wave-3]
 ---
@@ -35,3 +35,7 @@ Built from master after wave 2 (1dd86a6).
 ## Decided (2026-11-08)
 
 The owner kept the panics: `random.from_os()`, `uuid.v4()` and `uuid.v7()` fail when the system gives no entropy (or v7's clock is before 1970) instead of returning a `Result`, an exception to D164 (3). [[Language/Standard-library/Random]] and [[Language/Standard-library/Uuid]] say so.
+
+## Review 2026-11-09
+
+Signed off in [[Project/Review-2026-11-09]].

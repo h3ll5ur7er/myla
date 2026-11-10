@@ -2,7 +2,7 @@
 id: MYLA-321
 title: "std.str: search, split, join, trim, case, replace"
 type: feature
-status: review
+status: todo
 priority: high
 labels: [stdlib, strings, wave-1]
 ---
@@ -33,3 +33,9 @@ Wave 1 of [[Project/Standard-library-roadmap]], roadmap #1, #2, #3, #4. Methods 
 ## Evidence
 
 The last box was done already: [[Language/Standard-library/Str]] exists, and commit `7c5a90e` (2026-11-07, once [[MYLA-320]] made std.str implicit) turned its block from a `myla fragment` into a plain `myla` block, with no import, that `tests.burn.test_doc_blocks` runs. Checked on 7b328dd (round 3): the block, run on its own, prints its `// output:` (`NAME.. 1: Ada`, `LANGS. 2: myla`, `a++b`, `1.2`) with `build/myla run` and as a native build; `python3 -m unittest tests.burn.test_doc_blocks` passes. The note above on the fragment and `import std.str` is history: an import path takes `str` as a segment since MYLA-320.
+
+## Review 2026-11-09
+
+Not ready ([[Project/Review-2026-11-09]]): `trim_end()` returns a whitespace-only string unchanged (M16). The fix is in [[MYLA-420]].
+
+- [ ] The review's blocker, fixed with [[MYLA-420]]

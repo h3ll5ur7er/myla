@@ -2,7 +2,7 @@
 id: MYLA-387
 title: "A runtime primitive to park a task until it is woken"
 type: feature
-status: review
+status: done
 priority: medium
 labels: [runtime, concurrency, primitives]
 ---
@@ -51,3 +51,7 @@ A **notifier** (`std.task.notifier()`, [[Language/Concurrency#Waiting until woke
 ## Fixed at the integration (wave 4, part 3)
 
 Found by [[MYLA-351]]: on several workers, more than one idle worker could see every task waiting, and each `exec_stuck` wrote `every task waits for another one`, so stderr held the line two or three times (t29: 5 of 80 runs on 4 and 16 workers; t34: 19 of 80). `exec_stuck` in [[lib/std/rt.my]] now claims the report with an exchange on `__parked`'s second word (the code generator gives `__parked` 16 bytes); the first worker writes it and ends the program, the others wait for that. The minimal case (64 tasks that yield, then wait on one notifier, under `task.all`, 16 workers) gave exactly one line in 100 of 100 runs; `test_what_they_report` now checks t29 and t34 on 1, 4 and 16 workers.
+
+## Review 2026-11-09
+
+Signed off in [[Project/Review-2026-11-09]], with a follow-up in [[MYLA-419]]: a forged `Notifier { id }` is a wild pointer (D181); notifiers are never freed; waking a timed wait is O(timers).

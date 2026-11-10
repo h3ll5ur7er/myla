@@ -2,7 +2,7 @@
 id: MYLA-322
 title: "std.char and std.int: character classes, integer helpers, checked arithmetic"
 type: feature
-status: review
+status: done
 priority: high
 labels: [stdlib, integers, wave-1]
 ---
@@ -31,3 +31,7 @@ Built on branch `stdlib/MYLA-322` from the wave's branch (5fa7d95).
 - **Differential check** (scratch, not committed): every pair of `int8` and `uint8` operands, and boundary and 1500 random pairs of `int16`, `uint32`, `int64` and `uint64`, through all two-operand methods, `mulmod`, `powmod`, `modinv` and the four `pow` kinds for exponents 0 to 69, against a Python model: 3,318,624 results, 0 differ, interpreted and native.
 - **Check time** of a hello-world (median of 15, `myla check`): no import 0.4 ms, `import std.char` 1.8 ms, `import std.int` 26.7 ms (`std.json` 7.1 ms for comparison). Without its 1826 `#test` lines `std.int` costs 12.8 ms: the cases are more than half, and a checker that skipped `#test` attributes outside `myla test` would halve the cost of every module MYLA-320 makes implicit. A native hello-world stays 18176 bytes with either import (unused methods are dropped).
 - **Compiler bugs found**, worked around here, suggested as tasks of their own: natively `assert(cond, f"…")` fails the IR verifier (the test functions use a private `holds` helper); the native test harness types an unsuffixed literal receiver as `int32` (the cases suffix every receiver, `5i8`); natively a literal on the left of `/` or `%` with a `uint64` at or above 2^63 on the right divides signed (`10 / m` gave `18446744073709551606`), which `2u64.modinv(MAX)` caught (the generated code never puts a literal there).
+
+## Review 2026-11-09
+
+Signed off in [[Project/Review-2026-11-09]].

@@ -2,7 +2,7 @@
 id: MYLA-369
 title: "A primitive for str ↔ [uint8] in one copy, and StringBuilder capacity"
 type: improvement
-status: review
+status: done
 priority: medium
 labels: [stdlib, primitives, performance]
 ---
@@ -36,3 +36,7 @@ Found by three wave 2 lanes. `std.bytes.to_str` ([[MYLA-329]]) appends a byte at
   Interpreted, 2 MB: `from_str` 11.6 to 12.1 s → 0.12 s, `to_str` 9.3 to 9.7 s → 0.07 s, 20 000 `BufferedWriter.write` 5.4 to 5.5 s → 1.1 to 1.2 s.
 - `read_str` measured as the task asks: `stdin().read_line()` over the 50 MB through `read_str` (as built) 129 to 153 ms (median 132, seven runs interleaved); a variant whose `Buffered` pulls through `read` and `bytes.to_str` 100 to 148 ms (median 106); that variant with the conversions a byte at a time, as before, 289 to 487 ms (median 302, MYLA-338's 331 ms). Interpreted, 2 MB: 6.1 to 6.5 s through `read_str`, 6.6 s through `read`. So the `[uint8]` path costs nothing natively now, and about 5 % interpreted ([[MYLA-399]]).
 - The suites, for the three tasks ([[MYLA-378]], [[MYLA-363]] and this one) at the branch's tip: `scripts/bootstrap.sh` byte-identical fixpoint (18633029 bytes); `scripts/test.sh fast` 730 tests OK (3 skipped); `python3 -m unittest tests.burn.test_compiler_parity tests.burn.test_selfhost_cases tests.burn.test_error_corpus tests.burn.test_selfhost_checker tests.burn.test_lsp tests.burn.test_std_modules tests.burn.test_fs tests.burn.test_process tests.burn.test_platform_primitives tests.burn.test_stdio tests.burn.test_doc_blocks tests.burn.test_embedded_std` 751 tests OK (1 skipped; `test_embedded_std` passes with the bootstrap's `selfhost/embedded_std.my`, which isn't committed, as the rules say). `scripts/test-target.py aarch64-linux` and `wasm32-wasi` over `test_fs`, `test_process`, `test_platform_primitives` and `test_stdio` (and `test_std_modules` on wasm32): all OK (aarch64 4 of 4 suites, wasm32 5 of 5; the skips are `_targets.py`'s).
+
+## Review 2026-11-09
+
+Signed off in [[Project/Review-2026-11-09]].

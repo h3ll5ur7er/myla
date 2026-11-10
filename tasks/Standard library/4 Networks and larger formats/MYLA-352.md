@@ -2,7 +2,7 @@
 id: MYLA-352
 title: DEFLATE compression and archives
 type: feature
-status: review
+status: todo
 priority: low
 labels: [stdlib, compression, wave-4]
 ---
@@ -29,3 +29,9 @@ Wave 4 of [[Project/Standard-library-roadmap]], roadmap #50, #51. The compressor
 - `python3 -m unittest tests.burn.test_std_modules tests.burn.test_doc_blocks` after a bootstrap: OK (and `tests.burn.test_compress`, `tests.burn.test_embedded_std`).
 - **Speed and ratio**, natively, best of five, 100 MB of mixed text (the repository's sources and pages repeated), in memory against the whole `gzip -N -c` program: level 1 1507 ms (66 MB/s, 31.07 %) against `gzip -1` 1400 ms (31.22 %); level 6 5068 ms (20 MB/s, 25.30 %) against 3962 ms (25.32 %); level 9 12919 ms (7.7 MB/s, 25.11 %) against 10127 ms (25.12 %). `gzip_writer` in writes of 64 KiB: 2146, 5639 and 13513 ms, the same bytes.
 
+
+## Review 2026-11-09
+
+Not ready ([[Project/Review-2026-11-09]]): `tar_read` overflows on a pax number of 20 digits; uid/gid of 2^31 or more read negative. The fix is in [[MYLA-423]].
+
+- [ ] The review's blocker, fixed with [[MYLA-423]]

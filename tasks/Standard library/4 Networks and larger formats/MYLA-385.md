@@ -2,7 +2,7 @@
 id: MYLA-385
 title: "#derive(Json), json.encode and json.decode<T>"
 type: feature
-status: review
+status: done
 priority: medium
 labels: [stdlib, json, derive]
 ---
@@ -72,3 +72,7 @@ Built on `81fe44e`. Tests first: the four parity programs failed before the chan
 
 - **A bound can't name a module's trait**: `fun show<T: json.ToJson>(v: T)` is `parse error: expected '>' to close type parameters, found '.'`; D170 covers types (`json.JsonError`), not bounds. Workaround: `from std.json import ToJson`, then `T: ToJson`.
 - The LSP's resolution corpus test takes every identifier named like a declaration to be resolved, so a file that declares a method `format` (an `impl Format`) can't call the builtin `format(…)`: std.json now writes f-strings there.
+
+## Review 2026-11-09
+
+Signed off in [[Project/Review-2026-11-09]], with a follow-up in [[MYLA-424]]: a `uint64` above 2^63 silently loses its low bits; -2^63-1 reads as `int64`'s minimum.

@@ -2,7 +2,7 @@
 id: MYLA-333
 title: "std.args: command-line arguments"
 type: feature
-status: review
+status: done
 priority: medium
 labels: [stdlib, cli, wave-2]
 ---
@@ -25,3 +25,7 @@ Wave 2 of [[Project/Standard-library-roadmap]], roadmap #60. A declarative parse
 - The proof: `tools/embed/main.my` (`embed <lib dir> <module file> [--check]`, the smallest tool, run by `scripts/bootstrap.sh` with stage 0) reads its arguments with `std.args`. Twelve invocations (none, one, two and three arguments, `--check`, an extra positional, `-x`, `--help`, `-h`, `--check=1`, a module that isn't there) give the same stdout, stderr and exit status with the old and the new binary. Only the order is freer: `embed --check lib m` and `embed lib -- m` are accepted now. The seed compiles it, and `scripts/bootstrap.sh` reaches its fixed point. `python3 -m unittest tests.burn.test_embedded_std` OK.
 - After `scripts/bootstrap.sh`: `python3 -m unittest tests.burn.test_std_modules tests.burn.test_doc_blocks` OK.
 - Speed, x86-64 natively, best of five: `parse` of 110,002 arguments (a flag, a positional, 100,000 for `many`, 10,000 `-ox`) takes 2.4 ms. Values are kept as one list of (name, value) pairs, so parsing is linear.
+
+## Review 2026-11-09
+
+Signed off in [[Project/Review-2026-11-09]], with a follow-up in [[MYLA-426]]: after `--` a command is still a command; a subcommand's error prints the parent's usage; a spec isn't validated.

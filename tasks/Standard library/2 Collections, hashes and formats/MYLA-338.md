@@ -2,7 +2,7 @@
 id: MYLA-338
 title: Stream traits, memory streams and buffering
 type: feature
-status: review
+status: done
 priority: medium
 labels: [stdlib, io, streams, wave-2]
 ---
@@ -77,3 +77,7 @@ The language server didn't resolve a trait named in a bound (`<R: Read>`: the AS
   | `copy` from a memory stream to another | 256 ms |
 
   Interpreted, 2 MB of the same, two runs each: 3.3 and 3.4 s with the old `Reader`, 3.6 and 3.2 s with the new.
+
+## Review 2026-11-09
+
+Signed off in [[Project/Review-2026-11-09]], with a follow-up in [[MYLA-420]]: `Buffered.read_line` and `read_exact` are quadratic in the line's length.

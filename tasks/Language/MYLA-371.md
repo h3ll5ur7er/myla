@@ -2,7 +2,7 @@
 id: MYLA-371
 title: "Dotted type names in type positions (m.Point)"
 type: improvement
-status: review
+status: done
 priority: low
 labels: [language, modules, decision]
 ---
@@ -24,3 +24,7 @@ labels: [language, modules, decision]
 
 - Runs at this commit (both tasks): `scripts/bootstrap.sh` byte-identical fixed point (13,789,685 bytes); `test_compiler_parity` 182 tests OK; `scripts/test-target.py aarch64-linux test_compiler_parity` and `wasm32-wasi`: OK; `test_selfhost_parser`, `test_selfhost_checker`, `test_error_corpus` (273), `test_grammar` (10, with tree-sitter), `test_lsp` (154), `test_std_modules`, `test_doc_blocks`: OK; own cases `selfhost/checker.my` 633/633, `parser.my` 168/168, `ast.my` 56/56, `loader.my` 121/121.
 - `scripts/test.sh fast`: 653 tests, 55 failures, every one from the stale `selfhost/embedded_std.my` the base 114a968 already has (its D167 change to `lib/std/map.my` isn't in the embedded copy: `map key type must be Eq and Hash, found 'K'` at `<myla>/std/map.my`), in `test_embedded_std`, `test_installed` and the suites that run the CLI's embedded library (benchmarks, project commands, packages, …). With the embedded library regenerated (`build/embed lib selfhost/embedded_std.my`, not committed) those twelve suites pass: 68 tests, OK. No seed and no embedded library here: the integrator's last commit runs `scripts/update-seed.sh` (D156).
+
+## Review 2026-11-09
+
+Signed off in [[Project/Review-2026-11-09]], with a follow-up in [[MYLA-417]]: three misleading diagnostics.

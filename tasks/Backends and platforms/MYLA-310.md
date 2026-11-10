@@ -2,7 +2,7 @@
 id: MYLA-310
 title: "Maps: remove in constant time, natively and in the interpreter"
 type: bug
-status: review
+status: done
 priority: high
 labels: [maps, performance, runtime, interpreter]
 ---
@@ -53,3 +53,7 @@ Removing every key of an `[int64: int]`, inserted 0 to n-1 (the best of two nati
 - [[MYLA-271]] (backlog) asked for the same native fix and is done by this one.
 
 - Follow-up in the pull request (2026-11-07): CI on aarch64 timed out `test_allocation_does_not_scan_unusable_free_cells` (5 s under qemu). The program calls `keys()` 8,000 times on a growing map, and `map_keys`' common path now called `map_key_to` for every key: 188 ms against master's 165 ms natively, 2.6 s against 2.1 s under qemu. That path stores the key inline again: 171 ms natively, 2.1 s under qemu. `std.rt`'s no-op `map_rebuild` is deleted, as the committed seed no longer calls it.
+
+## Review 2026-11-09
+
+Signed off in [[Project/Review-2026-11-09]], with a follow-up in [[MYLA-415]]: [[MYLA-429]]: iteration over a map emptied by removes costs its old capacity; maps never shrink. The four copy-on-write bugs in the same lowering are [[MYLA-415]]'s.

@@ -2,7 +2,7 @@
 id: MYLA-404
 title: "std.cache: an LRU cache and memoising"
 type: feature
-status: review
+status: done
 priority: low
 labels: [stdlib, collections, cache]
 ---
@@ -28,3 +28,7 @@ Roadmap row #32 ([[Project/Standard-library-roadmap]]).
 ## Comments
 
 - 2026-11-09: the owner accepted the proposals: `recursive(step)` for a recursion, `put` returns the evicted entry.
+
+## Review 2026-11-09
+
+Signed off in [[Project/Review-2026-11-09]].

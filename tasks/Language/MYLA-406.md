@@ -2,7 +2,7 @@
 id: MYLA-406
 title: "A struct field and a method of the same name: the field wins silently"
 type: bug
-status: review
+status: done
 priority: low
 labels: [language, checker, diagnostics]
 ---
@@ -35,3 +35,7 @@ A field of a type parameter (`struct Cell<T> { get: T }` with `fun get(self)`) i
 - **Error corpus**: `examples/errors/type_method_field_collision.my` (now the function field's case, `//~ help:`) and `examples/errors/type_call_of_a_data_field.my`, both pinned (`.stderr`). The checker gate's recorded snippets `unit_test_13` and `unit_test_113` expected the old collision error: `SUPERSEDED` in `tests/burn/test_selfhost_checker.py`, with their new verdicts (the other errors of `unit_test_13`; `ok`).
 - **Docs:** [[Language/Methods-and-traits#methods]] (the rule and a tested example), [[Language/Functions-and-closures]], the `myla` skill (both copies). D178's row is for the owner to add if they take the proposal.
 - **Suites:** `tests.burn.test_error_corpus`, `test_selfhost_checker`, `test_compiler_parity`, `test_doc_blocks`, `test_lsp`; the bootstrap's byte-identical fixed point.
+
+## Review 2026-11-10
+
+Signed off in [[Project/Review-2026-11-10]], with a follow-up in [[MYLA-417]]: the call-site error of D178 (L1); the docs are [[MYLA-427]]'s.

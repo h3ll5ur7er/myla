@@ -2,7 +2,7 @@
 id: MYLA-316
 title: "Docs: #derive(Eq) accepts char and float fields"
 type: chore
-status: review
+status: done
 priority: low
 labels: [docs]
 ---
@@ -17,3 +17,7 @@ A float field compares with the floats' `==`, in both runners: a struct holding 
 - On master `0eeea06` the rejecting sentence was already gone from [[Language/Methods-and-traits]] (its `#derive(Eq)` paragraph lists a float and `char` among the `Eq` field types); the float rule was missing. Added: a float field compares with the floats' `==` in both runners (NaN unequal to itself, `0.0` equal to `-0.0`), and a doc block with a `char` and a `float` field printing `true`, `false`, `false`.
 - The block's program, interpreted, natively on x86-64 and on aarch64 (qemu): `true`, `false`, `false` in each. `tests.burn.test_doc_blocks` passes (3 tests).
 - The entry in [[Project/Known-issues]] went.
+
+## Review 2026-11-09
+
+Signed off in [[Project/Review-2026-11-09]].

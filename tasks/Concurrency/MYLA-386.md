@@ -2,7 +2,7 @@
 id: MYLA-386
 title: "Generic actors: actor Channel<T>"
 type: feature
-status: review
+status: done
 priority: medium
 labels: [language, concurrency, actors, generics]
 ---
@@ -46,3 +46,7 @@ Found by the channels lane ([[MYLA-351]]): `actor Box<T>` is refused ("an actor 
 
   The bootstrap reaches its byte-identical fixed point (17,092,271 bytes). The seed is left for the integrator (D156).
 - **Found on the way.** This is not about generics. D95 doesn't count a `pop` inside an expression as a change: `let x = self.items.pop()` or `return Some(self.items.pop())` after an `await`, with `self.items` checked before it, gets no warning. A `self.items.pop()` statement does get one.
+
+## Review 2026-11-09
+
+Signed off in [[Project/Review-2026-11-09]], with a follow-up in [[MYLA-415]]: its probes found the actor segfault (H2).

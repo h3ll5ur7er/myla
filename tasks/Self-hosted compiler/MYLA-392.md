@@ -2,7 +2,7 @@
 id: MYLA-392
 title: "Native: an await in a match nested in a match arm can't be lowered"
 type: bug
-status: review
+status: done
 priority: medium
 labels: [lowering, async, native]
 ---
@@ -48,3 +48,7 @@ The async split ([[selfhost/anf.my]]) rewrote a `match` statement with an `await
 - `await_in_a_nested_match` in [[tests/burn/test_compiler_parity.py]] (the task's program, a three-deep match whose innermost arm awaits, and a value match whose arm holds a nested match statement): before, `myla build` stopped with `internal error: deeper can't be lowered to the IR: a function used as a value` (and `worker` for the task's program); after, native code prints what the interpreter prints, `24 0 0 7 42 0 -1 abc 6 2 0`, on x86-64, aarch64 (`MYLA_TEST_TARGET=aarch64-linux`, qemu) and wasm32 (`MYLA_TEST_TARGET=wasm32-wasi`, Node).
 - The bootstrap reaches its fixed point.
 - The suites, at the batch's last commit: `scripts/test.sh fast` 714 tests, all pass but `test_embedded_std` (the embedded library isn't committed, by the batch's rules: the seed commit regenerates it) and once `test_time`'s `test_an_async_read_lets_the_other_tasks_run` under the load of the run (it passes alone, three times out of three); `test_compiler_parity`, `test_selfhost_cases`, `test_error_corpus`, `test_selfhost_checker`, `test_lsp`, `test_grammar` (with the tree-sitter CLI), `test_selfhost_codegen`, `test_selfhost_interp`, `test_xml`, `test_http`, `test_aarch64`, `test_wasm`, `test_native_runtime`: 808 tests OK; `scripts/test-target.py aarch64-linux` and `wasm32-wasi`: 21 of 21 suites each.
+
+## Review 2026-11-09
+
+Signed off in [[Project/Review-2026-11-09]].

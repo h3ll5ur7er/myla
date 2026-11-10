@@ -2,7 +2,7 @@
 id: MYLA-380
 title: "Iterators in the language: the Iterator trait, generic-trait bounds, for over an iterator"
 type: feature
-status: review
+status: done
 priority: medium
 labels: [language, checker, generics, traits, iterators]
 ---
@@ -67,3 +67,7 @@ Measured (best of five, a machine shared with other agents): the sum of `3x` ove
 
 Natively the lazy pipeline is 2.2 times the hand-written loop and 4.3 times faster than the eager methods, in constant memory; the `for` costs nothing over `while let`. Interpreted it is 19 times the loop and 4 times the eager methods (MYLA-353 measured 12.8 s, best of three, under another load): each `next` is a method call with its `var self` copied back, once per adapter.
 
+
+## Review 2026-11-09
+
+Signed off in [[Project/Review-2026-11-09]], with a follow-up in [[MYLA-417]]: an enum can't be a stateful iterator; interpreted `next` is [[MYLA-414]]'s.

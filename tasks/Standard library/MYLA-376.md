@@ -2,7 +2,7 @@
 id: MYLA-376
 title: "Swap wave 3's private helpers for the standard library's own"
 type: chore
-status: review
+status: done
 priority: low
 labels: [stdlib, cleanup]
 ---
@@ -52,3 +52,7 @@ The rule: a private helper went where the library has the same thing, it behaves
 - `python3 scripts/gen_std_int.py --check`: current.
 
 Follow-up: the loader could load every module but the entry without its cases (`skip_tests` for all of them, not only the implicit ones); then std.bitset and std.bigint could import std.int at no cost.
+
+## Review 2026-11-09
+
+Signed off in [[Project/Review-2026-11-09]], with a follow-up in [[MYLA-428]]: duplicates remain in modules it didn't name.

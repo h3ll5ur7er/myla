@@ -2,7 +2,7 @@
 id: MYLA-312
 title: "#test cases run natively (the evidence for MYLA-303's step 4)"
 type: improvement
-status: review
+status: done
 priority: medium
 labels: [testing, native]
 ---
@@ -19,3 +19,7 @@ Found by Advent of Code ([[Project/AoC-2015-2021]], F3). `myla test` runs the ca
 ## Done (2026-11-07)
 
 - [[MYLA-307]] is done on master `11aeef7`: `myla test --native file.my` builds the cases into a harness and runs it natively (checked on a `fib` case: `1/1 passed`). The examples of 2020 Day 17 aren't in this repository, so their 7.1 s isn't measured again here.
+
+## Review 2026-11-09
+
+Signed off in [[Project/Review-2026-11-09]], with a follow-up in [[MYLA-418]]: failing reports differ between runners.

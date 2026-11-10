@@ -2,7 +2,7 @@
 id: MYLA-397
 title: "A target's own platform module can't be tested on that target"
 type: bug
-status: review
+status: todo
 priority: low
 labels: [testing, harness, platforms]
 ---
@@ -28,3 +28,9 @@ Built on `9681bb3` (after [[MYLA-399]] and [[MYLA-405]] in the streams lane).
 - **After:** wasm32 (Node) `13/13 passed.`; aarch64 (qemu) `23/23 passed.`; with an absolute path to the file too. `harness_entry`'s six cases and `target_platform_file`'s three.
 - **Bootstrap:** byte-identical fixed point, 19,371,251 bytes.
 - **Suites:** `scripts/test-target.py wasm32-wasi test_std_modules` (now with `platform_wasm`): OK (49 s); the host's slow suites with `test_std_modules`, `test_selfhost_cases`, `test_compiler_parity`: 799 tests OK; on aarch64 `test_std_modules` stays excused (`_targets.py`: a qemu process per case takes minutes), so the run above is the evidence there.
+
+## Review 2026-11-10
+
+Not ready ([[Project/Review-2026-11-10]]): works only when the file and the library root are spelled the same way: `./lib/std/platform_aarch64.my`, `--stdlib lib/` and `MYLA_STDLIB=$PWD/lib` give 0/23 or an internal error (S3). The fix is in [[MYLA-418]].
+
+- [ ] The review's blocker, fixed with [[MYLA-418]]

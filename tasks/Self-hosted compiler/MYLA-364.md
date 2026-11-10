@@ -2,7 +2,7 @@
 id: MYLA-364
 title: "A derived Eq is lost when two derived types of different modules share a line and column"
 type: bug
-status: review
+status: done
 priority: high
 labels: [checker, derive, modules]
 ---
@@ -19,3 +19,7 @@ Fixed in [[MYLA-313]]'s branch, where `synthesize_derives` gains `#derive(Hash)`
 
 - Before: the reproduction (`dup.my` and `main.my`, each `#derive(Eq) pub enum E` at line 2) fails with `type error: operator '==' is not defined for 'dup$E'` under the base commit's `build/myla run`.
 - After: `tests/burn/test_modules.py` `TestDerivesAtTheSamePlace` prints `false`, `true` interpreted and natively; the bootstrap keeps its byte-identical fixed point.
+
+## Review 2026-11-09
+
+Signed off in [[Project/Review-2026-11-09]].

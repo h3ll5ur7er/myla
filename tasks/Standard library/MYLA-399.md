@@ -2,7 +2,7 @@
 id: MYLA-399
 title: "Drop Read.read_str and Write.write_str now that str and [uint8] convert in one copy?"
 type: improvement
-status: review
+status: done
 priority: low
 labels: [stdlib, io, decision]
 ---
@@ -53,3 +53,7 @@ Built on `9681bb3`.
 ## Comments
 
 - 2026-11-09: the owner took the recommendation, B: D177.
+
+## Review 2026-11-10
+
+Signed off in [[Project/Review-2026-11-10]], with a follow-up in [[MYLA-420]]: a short read keeps a cell as large as the request (S1); interpreted bulk I/O is [[MYLA-414]]'s (S2); the socket line reader is [[MYLA-419]]'s (D180).

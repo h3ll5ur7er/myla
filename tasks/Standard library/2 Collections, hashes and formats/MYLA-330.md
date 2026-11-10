@@ -2,7 +2,7 @@
 id: MYLA-330
 title: "std.set, std.deque, std.heap: the first collections"
 type: feature
-status: review
+status: done
 priority: medium
 labels: [stdlib, collections, wave-2]
 ---
@@ -52,3 +52,7 @@ Wave 2 of [[Project/Standard-library-roadmap]], roadmap #24, #25, #26. Generic c
      ```
   2. A map type `[T: V]` with `T` a type parameter isn't checked where `T` is fixed: `one(P { a: 1 })` with `fun one<T>(x: T) -> [T: int]` and a struct `P` type-checks and runs in the interpreter (prints 1), and native code stops with "internal error: one__1P can't be lowered to the IR: an aggregate used as a scalar". So `Set<P>` of a struct passes the checker today. [[MYLA-313]] makes such keys real; until then the checker should reject the instance.
 - **Diagnostics:** a module's mangled names show in messages: "cannot infer type parameter(s) T for 'std$set$new'", "`for ... in` requires a list or map, found 'std$set$Set<int32>'".
+
+## Review 2026-11-09
+
+Signed off in [[Project/Review-2026-11-09]], with a follow-up in [[MYLA-425]]: no `iter()`; `with_capacity(2^30 + 1)` hangs natively; the pages are [[MYLA-427]]'s.

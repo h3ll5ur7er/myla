@@ -2,7 +2,7 @@
 id: MYLA-383
 title: "Diagnostics: a list where an iterator is expected, and module functions' mangled names"
 type: improvement
-status: review
+status: done
 priority: low
 labels: [checker, diagnostics]
 ---
@@ -23,3 +23,7 @@ Found by the `std.iter` lane ([[MYLA-381]]).
 - In the error corpus, pinned: `type_iter_list_not_iterator`, `type_iter_count_list`, `type_module_function_name`. `tests.burn.test_error_corpus` (296) and `tests.burn.test_selfhost_checker` (6) pass; no oracle line changed.
 
 Suites at the batch's tip: the bootstrap's fixed point; `scripts/test.sh fast` 714 OK (with the embedded library regenerated); `tests.burn.test_compiler_parity`, `test_selfhost_cases`, `test_error_corpus`, `test_selfhost_checker`, `test_lsp`: 673 OK.
+
+## Review 2026-11-09
+
+Signed off in [[Project/Review-2026-11-09]], with a follow-up in [[MYLA-417]]: `unmangled` rewrites any `a$b` in a message; `__list.sorted`, `__map` still leak.
