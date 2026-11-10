@@ -2,7 +2,7 @@
 id: MYLA-400
 title: "The Option helpers of std.map's and std.args's tests go once the seed knows == on Option"
 type: chore
-status: review
+status: done
 priority: low
 labels: [stdlib, cleanup]
 ---
@@ -20,3 +20,7 @@ Built on 7b328dd (master after #55, whose seed has MYLA-379's `==` on `Option`).
 - `build/myla test lib/std/map.my --stdlib lib`: 11/11, and 11/11 with `--native`; `lib/std/args.my`: 26/26 and 26/26.
 - `scripts/bootstrap.sh`: the byte-identical fixed point (18,857,370 bytes) with the changed std.map and std.args compiled by the seed and embedded, where the seed before #55 stopped with `operator '==' is not defined for 'Option<int32>'`.
 - `python3 -m unittest tests.burn.test_std_modules`: OK (3 min 30 s).
+
+## Review 2026-11-09
+
+Signed off in [[Project/Review-2026-11-09]].

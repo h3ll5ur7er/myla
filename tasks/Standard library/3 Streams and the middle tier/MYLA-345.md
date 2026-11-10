@@ -2,7 +2,7 @@
 id: MYLA-345
 title: "std.bigint: arbitrary-precision integers"
 type: feature
-status: review
+status: done
 priority: low
 labels: [stdlib, numbers, wave-3]
 ---
@@ -25,3 +25,7 @@ Wave 3 of [[Project/Standard-library-roadmap]], roadmap #14. `std.num` has big-i
 - Against Python 3.13: a generator (random operands of 1 to 6,000 digits, both signs, zero, limbs of 0, 1, 2^31 and 2^32 - 1, divisors next to the dividend or near its root, quotients and divisors of limbs all ones, divisors and quotients past the recursive division's size) wrote 9,600 cases of `+ - *`, the three divisions, `pow`, `cmp`, radix conversion both ways and shifts; a Myla program ran them and its output matched Python's line for line: all 9,600 natively, 600 interpreted, 3,300 on wasm32, and all 9,600 natively again with the thresholds set to 4 limbs and 10 digits (which found a carry past the end in Karatsuba's join, fixed and pinned). Instrumented, the runs reach every correction branch: algorithm D's q̂ fix and add-back, Burnikel–Ziegler's all-ones estimate and its fix-up loop. The pinned cases are Python's values (`calc` exactly; `big_product`, `big_square`, `big_quotient`, `big_text` by digit count and the first and last 15 digits).
 - Speed natively, best of 5 (machine shared, ±15 %): 10,000 × 10,000 digits 0.81 ms (pure schoolbook 1.65 ms; Python 0.34 ms); `pow(3, 100000)` 3.4 ms (Python 1.2 ms); 20,000 / 10,000 digits 2.1 ms (algorithm D only: 9.1 ms; Python 0.69 ms); reading 100,000 digits 36 ms (quadratic: 123 ms; Python 12 ms); writing 100,000 digits 85 ms (quadratic: 700 ms; with algorithm D in the divide and conquer: 355 ms; Python 25 ms).
 
+
+## Review 2026-11-09
+
+Signed off in [[Project/Review-2026-11-09]].

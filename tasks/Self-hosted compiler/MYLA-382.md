@@ -2,7 +2,7 @@
 id: MYLA-382
 title: "The checker's fill_in rebuilds every function body for one for-over-an-iterator or default"
 type: improvement
-status: review
+status: done
 priority: medium
 labels: [checker, performance]
 ---
@@ -29,3 +29,7 @@ The checker records the declaration each default or `for` over an iterator was m
 The "after" includes `std.list`'s `iterates` and `std.map`'s `map_iter`, now looping with `for` (`std.map`'s with `for p in m.iter() { let (k, v) = p … }`, as `for (k, v) in` waits for [[MYLA-390]]), and `std.iter`'s `pipes`: they cost a hello world 0.09 M instructions (0.05 %), the rebuild of those two test functions. `std.iter`'s adapters keep `while let Some(v) = self.inner.next()`, since a `for` would loop over a copy of `self.inner`; the header comment and [[Language/Standard-library/Iter]] say so now.
 
 Suites at the batch's tip: the bootstrap's fixed point; `scripts/test.sh fast` 714 OK (with the embedded library regenerated); `tests.burn.test_compiler_parity`, `test_selfhost_cases`, `test_error_corpus`, `test_selfhost_checker`, `test_lsp`: 673 OK.
+
+## Review 2026-11-09
+
+Signed off in [[Project/Review-2026-11-09]].

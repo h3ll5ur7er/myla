@@ -2,7 +2,7 @@
 id: MYLA-363
 title: "std.fs can't tell a symbolic link from what it points to"
 type: improvement
-status: review
+status: done
 priority: low
 labels: [fs, platforms, primitives]
 ---
@@ -28,3 +28,7 @@ Found by the `std.glob` lane ([[MYLA-326]]). `std.fs` has no `lstat`, and `__lis
 - `kind_of(0o120777)` is `Symlink` now (its `#test`), `Metadata.is_symlink`'s cases; `fs.my`'s `metadata_of_paths` checks `symlink_metadata` of a file and a directory is their `metadata`, and `is_symlink` of none. `build/myla test lib/std/fs.my --stdlib lib` 67/67 interpreted and `--native`; `lib/std/glob.my` 51/51.
 - The walk over 100 directories of 100 files (10,100 paths) took 10 to 13 ms natively before and after, `glob_in(**/*7.txt)` 14 to 16 ms (one stat per path both times).
 - The suites: see [[MYLA-369]]'s evidence.
+
+## Review 2026-11-09
+
+Signed off in [[Project/Review-2026-11-09]].

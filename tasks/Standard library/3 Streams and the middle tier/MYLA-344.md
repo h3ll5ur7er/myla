@@ -2,7 +2,7 @@
 id: MYLA-344
 title: "std.compress: DEFLATE decompression, gzip and zlib"
 type: feature
-status: review
+status: done
 priority: low
 labels: [stdlib, compression, streams, wave-3]
 ---
@@ -28,3 +28,7 @@ Wave 3 of [[Project/Standard-library-roadmap]], roadmap #49. Decompression first
 - `python3 -m unittest tests.burn.test_std_modules tests.burn.test_doc_blocks` after a bootstrap: OK.
 - **Speed**, natively, best of five, 100 MB of mixed text at level 6: `gunzip` 131 MB/s, `zlib_decompress` 142 MB/s, `inflate` 160 MB/s, `gzip_reader` over a memory stream 116 MB/s; `gzip -dc` 157 MB/s on the same machine. A first table of 10 bits against none: 735 against 1157 ms.
 
+
+## Review 2026-11-09
+
+Signed off in [[Project/Review-2026-11-09]].

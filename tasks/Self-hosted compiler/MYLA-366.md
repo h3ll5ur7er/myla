@@ -2,7 +2,7 @@
 id: MYLA-366
 title: "Interpreter: a ? in a call's argument called the function with the arguments it had"
 type: bug
-status: review
+status: done
 priority: high
 labels: [interpreter, parity]
 ---
@@ -10,3 +10,7 @@ Found by the stream lane ([[MYLA-338]]). `return Ok(twice(inner()?))` with `inne
 
 - [x] `call_func`, `call_value` and `call_with_receiver` make no call when the evaluation has stopped (a deferred block clears the stop first, so unwinding is unchanged)
 - [x] `test_compiler_parity`'s `try_in_a_call_argument`, interpreted and native; `test_selfhost_interp`, `test_test_functions`, `test_defer`, `test_concurrency_stress` and the interpreter's own cases (358) pass
+
+## Review 2026-11-09
+
+Signed off in [[Project/Review-2026-11-09]].

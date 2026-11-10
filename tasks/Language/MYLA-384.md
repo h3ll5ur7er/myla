@@ -2,7 +2,7 @@
 id: MYLA-384
 title: "Trait functions without self: T.f(x) on a type or a type parameter"
 type: feature
-status: review
+status: done
 priority: medium
 labels: [language, traits, generics, checker]
 ---
@@ -71,3 +71,7 @@ Tests:
 - `scripts/test.sh fast`: 676 tests, OK (1 skipped). `python3 -m unittest tests.burn.test_compiler_parity tests.burn.test_grammar tests.burn.test_lsp tests.burn.test_selfhost_cases tests.burn.test_error_corpus tests.burn.test_selfhost_checker` (with the tree-sitter CLI): 656 tests, OK; the error corpus alone 286. `test_examples_run`, `test_examples_compile`, `test_doc_blocks`: 79 tests, OK. `myla test`: `selfhost/checker.my` 672/672, `selfhost/parser.my` 170/170, `selfhost/interp.my` 375/375, `tools/lsp/resolve.my` 4/4.
 - The bootstrap reaches its byte-identical fixed point (15,591,451 bytes). The compiler's own sources and the standard library use none of the new syntax, so the current seed builds them; `selfhost/embedded_std.my` is unchanged. No new seed here (D156: the pull request's last commit runs `scripts/update-seed.sh`).
 - Found on the way, not fixed here (a task suggested): interpreted, a method call on a temporary whose type is a type parameter, `x.scaled(2).area()` with `x: T`, prints `ERR: VUnit` (native code is right) when the program calls no trait function on a type parameter; with one, the frame's binding covers it.
+
+## Review 2026-11-09
+
+Signed off in [[Project/Review-2026-11-09]], with a follow-up in [[MYLA-417]]: an impossible hint for `Box.tag()`; the build hang is [[MYLA-415]]'s.

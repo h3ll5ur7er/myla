@@ -2,7 +2,7 @@
 id: MYLA-402
 title: "std.toml writes TOML"
 type: feature
-status: review
+status: done
 priority: low
 labels: [stdlib, formats, toml]
 ---
@@ -31,3 +31,7 @@ What the first box asks for beyond the document type: `Toml` (D73's subset) has 
 ## Comments
 
 - 2026-11-09: the owner chose to extend std.toml to TOML 1.0 and add `#derive(Toml)`: [[MYLA-407]].
+
+## Review 2026-11-09
+
+Signed off in [[Project/Review-2026-11-09]].

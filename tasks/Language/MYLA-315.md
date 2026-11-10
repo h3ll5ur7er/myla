@@ -2,7 +2,7 @@
 id: MYLA-315
 title: "Generic constructors: an empty generic value, and a call's expected type in inference"
 type: bug
-status: review
+status: done
 priority: medium
 labels: [checker, generics, inference]
 ---
@@ -60,3 +60,7 @@ Not added: D34 decided that type arguments are written only in type positions, t
 - What stays an error, in `examples/errors/` with pinned diagnostics: `type_generic_call_nothing_fixes` (`let b = mk()`), `type_generic_call_param_not_in_result` (`fun count<T>() -> int` under `let n: int = count()`), `type_generic_method_nothing_fixes` (a call statement `b.emptied()`), and `type_generic_call_arguments_before_expected` (`let b: B<int> = of(["x"])`: the argument fixes `T = str` first, so the annotation is wrong, "cannot assign value of type 'B<str>' to binding of type 'B<int32>'"), and `type_generic_call_expected_breaks_bound` (a type parameter the expected type fixes is held to its bounds: `let h: Heap<P> = new_heap()` with `new_heap<T: Ord>`). `test_error_corpus`: 252 tests, OK.
 - `test_selfhost_checker`, `test_std_modules`, `test_implicit_imports`: OK. `scripts/test.sh fast`: 630 tests, OK (1 skipped).
 - `scripts/bootstrap.sh`: byte-identical fixed point (10,993,448 bytes). No new seed here: the pull request's last commit runs `scripts/update-seed.sh` (D156).
+
+## Review 2026-11-09
+
+Signed off in [[Project/Review-2026-11-09]], with a follow-up in [[MYLA-417]]: the expected type stops at `?`; "add a type annotation" where the annotation is the problem.

@@ -2,7 +2,7 @@
 id: MYLA-360
 title: "myla test: an imported module's cases on built-in-type methods count as the entry's"
 type: bug
-status: review
+status: done
 priority: medium
 labels: [testing, modules]
 ---
@@ -28,3 +28,7 @@ The loader ([[selfhost/loader.my]], `load_program_opts`) keeps the `#test` attri
 - `scripts/bootstrap.sh`: byte-identical fixed point.
 
 Follow-up for the integrator: the lanes' private helpers can be swapped for the std methods now (`std.text`, `std.grid`, `std.bitset`, `std.compress`'s checksums, `std.bigint`'s `filled`, `std.fs`'s helpers, `std.path`, `std.glob`).
+
+## Review 2026-11-09
+
+Signed off in [[Project/Review-2026-11-09]].

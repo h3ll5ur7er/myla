@@ -2,7 +2,7 @@
 id: MYLA-349
 title: "std.yaml: the safe subset"
 type: feature
-status: review
+status: done
 priority: low
 labels: [stdlib, formats, wave-4]
 ---
@@ -34,3 +34,7 @@ Wave 4 of [[Project/Standard-library-roadmap]], roadmap #57. Block and flow maps
 - `python3 -m unittest tests.burn.test_yaml` against the yaml-test-suite data release `data-2022-01-17` (402 cases): 198 in the subset give the value of their events with the core schema and read back the same after `to_string`; 98 with a left-out feature are refused naming one of their features; 11 with explicit keys refused with `ExplicitKey`; 1 with a repeated key refused with `DuplicateKey`; 94 of 94 invalid texts refused; 0 wrong. 4,000 mutated suite texts: no crash, 1,697 read, every one read back the same after writing. 25 cases agree between the interpreter and native code.
 - `python3 -m unittest tests.burn.test_std_modules tests.burn.test_doc_blocks` after `scripts/bootstrap.sh`: OK.
 - Natively, best of five, a 10 MB document of 18,217 records: `parse` 23 MB/s (414 to 451 ms over runs); `std.json` parses the same values as JSON at 30 MB/s; PyYAML's pure-Python `SafeLoader` 0.4 MB/s. `to_string` 11 MB/s, two thirds of it in `std.num.format_float` (callgrind: about 0.5 M instructions per float).
+
+## Review 2026-11-09
+
+Signed off in [[Project/Review-2026-11-09]], with a follow-up in [[MYLA-424]]: a whitespace-only block scalar line; raw control characters; the writer's YAML 1.1 protection covers booleans only.

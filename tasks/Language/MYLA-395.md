@@ -2,7 +2,7 @@
 id: MYLA-395
 title: "Integer overflow traps in the interpreter, under myla test and in --checked builds (D175)"
 type: feature
-status: review
+status: todo
 priority: medium
 labels: [language, integers, overflow, interpreter, codegen]
 ---
@@ -42,3 +42,9 @@ The implementation of D175 ([[MYLA-311]]). After the toolchain-fixes batches ([[
 - **The interpreter's cost** (callgrind): a loop of 1.4 million integer operations, 4,419.6 M instructions at the base, 4,503.3 M now (+1.9%; +11% before the checks lost their string comparisons and the `Type` they built); `fib(18)` 985.9 M → 976.2 M (−1.0%); MD5 and SHA-256 of 4 KB, whose rounds are all `wrapping_add` now, 1,209.0 M → 1,292.3 M (+6.9%; +102% before the interpreter took the wrapping methods first, ahead of the general method dispatch); a program's start (loading and checking the implicit modules) 362.9 M → 358.4 M (−1.2%: std.int has 216 cases fewer). The checker: `myla check examples/maps.my` 215.0 M → 210.3 M (−2.2%, the smaller std.int); its only new work is per constant.
 - **Suites**: `scripts/test.sh fast`: 757 tests OK (3 skipped); the slow suites that cover it pass: `test_compiler_parity` (218), `test_selfhost_cases`, `test_selfhost_checker`, `test_lsp` (160), `test_std_modules`, `test_error_corpus` (308), `test_overflow` (25), `test_selfhost_codegen`, `test_selfhost_interp`, `test_selfhost_cli`, `test_native_runtime`, `test_examples_run`, `test_examples_compile`, `test_examples_tests`; on aarch64-linux (qemu) and wasm32-wasi (Node), `scripts/test-target.py` with `test_overflow`, `test_ir_contract` and `test_error_corpus`. `test_embedded_std` passes here with the regenerated `selfhost/embedded_std.my`, which isn't committed (the integrator's seed commit).
 - **The tests D175 changed**: the programs that compared native code with the interpreter on deliberate wraps say `wrapping_*` now (`test_loop_overhead`, `test_packed_lists`, the parity programs `unsigned_wrap`, `signed_wrap_and_div`), which a plain build lowers to the same instructions; `test_ir_contract` runs its wrapping operations natively only, built plain (the interpreter's part is what fits); the parity programs `consts_fold_through_references` and `int64_min_divided_by_minus_one` and the interpreter's `int64_min_divided` no longer wrap a const or `MIN / -1` (pinned); the checker's `const_division_by_wrapped_zero` is now `const integer overflow` (`SUPERSEDED`); the Python toolchain's unit programs 49 and 50, which wrapped an `int8` and a `uint8`, overflow interpreted. The two examples D175 rewrote (`attributes.my`, `types_and_aliases.my`, same lines) are asked about as recorded (`tests/burn/data/recorded_corpus/examples/`, `_golden.answered_or_recorded`), and the corpus's new runtime errors are held by `test_error_corpus` alone, as its type errors added since are.
+
+## Review 2026-11-09
+
+Not ready ([[Project/Review-2026-11-09]]): the interpreter neither traps nor wraps arithmetic typed by a type parameter: `[2000000000, 2000000000].sum(0)` is 4000000000 under `myla run`, and `myla test` and `myla test --native` disagree (H1). The fix is in [[MYLA-414]].
+
+- [ ] The review's blocker, fixed with [[MYLA-414]]

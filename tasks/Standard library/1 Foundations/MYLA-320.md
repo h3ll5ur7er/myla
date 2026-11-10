@@ -2,7 +2,7 @@
 id: MYLA-320
 title: Std methods on built-in types in every program (the implicit imports)
 type: feature
-status: review
+status: done
 priority: high
 labels: [stdlib, compiler, checker, wave-1]
 ---
@@ -44,3 +44,7 @@ Wave 1 of [[Project/Standard-library-roadmap]]. Make the method modules of [[MYL
 **`myla test` of a file ran the implicit modules' cases** (the integrator's full suite at 7c5a90e: `myla test examples/constants.my` ran 2,012 cases, about 60 tests failed). The interpreter and the native harness take a case as the file's own when its function's name has no module id, and a method on a built-in type is `str.trim` in every module. Leaving the implicit modules' cases out fixes it: `myla test examples/constants.my` runs its 12 cases, interpreted and `--native`, and `myla test lib/std/int.my --stdlib lib` still runs std.int's 1,826, interpreted and `--native` (that file is the entry and a module of `std`, so it gets no implicit modules). `test_implicit_imports.test_test_cases` pins the count. A user module's `impl` on a built-in type with `#test` cases, imported by the file tested, has the same problem and still has it: the runners should decide by the declaration's file.
 
 **Suites** (rebased onto 7c5a90e). `scripts/bootstrap.sh` reaches its fixed point; `test_implicit_imports`, `test_std_modules`, `test_doc_blocks`, `test_grammar` (with the tree-sitter CLI), `test_lsp`, `test_selfhost_parser`, `test_modules`, `test_packages`, `test_builtin_impls`, `test_selfhost_cli`, `test_test_functions`, `test_project_commands`, `test_test_native`, `test_unit_type` and `test_test_names` pass. `scripts/test.sh fast`: 619 tests, all passing but the two diagnostics std's new methods changed (`test_builtin_methods`' `contains_on_a_list`, std.list's `contains`; `examples/errors/type_pop_non_list.my`, now with `help: did you mean 'pow'?`), which the integrator takes, and `test_test_native`'s report under load (a child's output racing; it passes alone).
+
+## Review 2026-11-09
+
+Signed off in [[Project/Review-2026-11-09]], with a follow-up in [[MYLA-417]]: a diagnostic names a list `'__list'`; the floor of every `check` is [[MYLA-432]]'s.

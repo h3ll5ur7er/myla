@@ -2,7 +2,7 @@
 id: MYLA-388
 title: "Inside std.task, a bare cancel(a) isn't task.cancel"
 type: bug
-status: review
+status: done
 priority: low
 labels: [checker, concurrency]
 ---
@@ -18,3 +18,7 @@ Found by the channels lane ([[MYLA-351]]). The checker recognises `task.cancel` 
 - Cases: `Checker.is_task_cancel` (a program's own `cancel` isn't, `std$task$cancel` is), `std_module_name` in the loader.
 
 Suites at the batch's tip: the bootstrap's fixed point; `scripts/test.sh fast` 714 OK (with the embedded library regenerated); `tests.burn.test_compiler_parity`, `test_selfhost_cases`, `test_error_corpus`, `test_selfhost_checker`, `test_lsp`: 673 OK.
+
+## Review 2026-11-09
+
+Signed off in [[Project/Review-2026-11-09]].

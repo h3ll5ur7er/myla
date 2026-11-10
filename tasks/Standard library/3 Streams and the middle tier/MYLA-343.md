@@ -2,7 +2,7 @@
 id: MYLA-343
 title: "std.btree: a sorted map and set"
 type: feature
-status: review
+status: done
 priority: low
 labels: [stdlib, collections, wave-3]
 ---
@@ -24,3 +24,7 @@ Wave 3 of [[Project/Standard-library-roadmap]], roadmap #27. A B-tree keyed by `
 - **Speed**, natively, best of five, 1 million random `int` keys: `SortedMap<int, int>` insert 369 ms, get 253 ms, remove 502 ms, 1 million `range` of about 10 keys 421 ms; `[int: int]` 148, 34 and 32 ms. `SortedSet<int>` insert 345 ms, contains 243 ms; std.set's `Set<int>` 132 and 26 ms.
 - **Layouts measured** (1 million inserts and gets of `int`): this arena 335 and 246 ms; a nested recursive enum copying its path 1636 and 283 ms; a flat arena with every node's keys in one list 284 and 193 ms (left out: its free slots would keep copies of removed keys and values alive). `ORDER` 32 to 128 measured, 64 chosen.
 - **Found:** a division by the constant 2 compiles to `idiv` natively: `(lo + hi) / 2` in the search cost a fifth of a lookup against `>> 1`.
+
+## Review 2026-11-09
+
+Signed off in [[Project/Review-2026-11-09]].

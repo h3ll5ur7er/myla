@@ -2,7 +2,7 @@
 id: MYLA-328
 title: "std.digest: MD5, SHA-1, SHA-2 and HMAC"
 type: feature
-status: review
+status: done
 priority: medium
 labels: [stdlib, hashing, wave-2]
 ---
@@ -37,3 +37,7 @@ Wave 2 of [[Project/Standard-library-roadmap]], roadmap #35, #36. Message digest
 
   Python's `hashlib` takes 1100 ms for the 2 million; the f-strings alone 50 ms. What the tuning was worth (callgrind instructions and timings): rotations written so no operator has two compound operands, MD5 +5 to 10 %, SHA-1 +10 %, SHA-256 +25 % (with the rotations as shifts of the word doubled to 64 bits), SHA-512 +10 to 20 %; hex from the state words instead of a list of bytes, −10 % of the instructions of a short hash. SHA-512's rounds call small functions instead of being unrolled, which keeps the module at 2700 lines (121 KB) instead of 6700 (183 KB).
 - **Found:** under register pressure the x86-64 allocator keeps the left operand of `(x << 7u32) | (x >> 25u32)` in a stack cell while it computes the right one, rather than spilling a long-lived local; small functions the compiler inlines keep their parameters in stack slots (SHA-256's `compress` had a 5.7 KB frame that way). Both cost speed only.
+
+## Review 2026-11-09
+
+Signed off in [[Project/Review-2026-11-09]].

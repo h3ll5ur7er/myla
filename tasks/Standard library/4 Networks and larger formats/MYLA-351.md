@@ -2,7 +2,7 @@
 id: MYLA-351
 title: "std.task: channels, pools and timeouts"
 type: feature
-status: review
+status: done
 priority: low
 labels: [stdlib, concurrency, wave-4]
 ---
@@ -67,3 +67,7 @@ Redone on `3f1487e` (master after wave 4 part 1, with [[MYLA-386]]'s generic act
 - *Runtime, MYLA-387:* when every task waits, more than one idle worker can report it. `exec_idle` calls `exec_stuck` in each worker that sees `exec_all_waiting()`, and `exec_stuck` writes the message and exits without claiming the report first, so stderr holds the line twice (once three times). It shows on t29 (5 of 80 runs on 4 and 16 workers) and t34 (19 of 80). A minimal program: 64 tasks that `await task.yield()` and then `await n.wait()` on one notifier, under `task.all`, on 16 workers: the line twice in 2 of 60 runs. `test_what_they_report` checks t29's stderr on 4 workers, so it can fail by chance; t34 is left out of `EXPECTED_STDERR` for this reason (its stdout and status are checked on every run). A fix: claim the report with an exchange on a flag before writing, and let the others park.
 - Inside `lib/std/task.my`, `cancel(a)` still isn't taken as `task.cancel` (`'a' is the result of a child task`), as the first attempt found; `first` and the tests use `__cancel_after(a, 0)` and `__disarm`, as `timeout` does.
 - `#test` functions of a `lib/std` module cost every program that imports it check time (about 6 ms here, from 18 test functions).
+
+## Review 2026-11-09
+
+Signed off in [[Project/Review-2026-11-09]], with a follow-up in [[MYLA-419]]: the notifier leak and the timed-wait cost.

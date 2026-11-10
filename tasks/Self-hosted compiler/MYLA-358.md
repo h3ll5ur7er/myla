@@ -2,7 +2,7 @@
 id: MYLA-358
 title: "Native: a literal left of an unsigned operator was lowered with the literal's first type"
 type: bug
-status: review
+status: done
 priority: high
 labels: [checker, codegen, integers, miscompile]
 ---
@@ -22,3 +22,7 @@ A related limit is left as it is: a literal on the left that doesn't fit `int32`
 - `infer_int_lit` and `infer_float_lit` record the type they give, so the last typing of a literal is the one the lowering reads.
 - Test first: `literal_left_of_unsigned_division` printed `18446744073709551606` and `0` natively for `10 / m` and `10 % m`. Now it gives the interpreter's `0 10 0 100 0 4000000005 1 true`.
 - `scripts/bootstrap.sh`: byte-identical fixed point. The checker's own cases (556/556), `test_selfhost_checker`, `test_error_corpus` and `test_std_modules` pass.
+
+## Review 2026-11-09
+
+Signed off in [[Project/Review-2026-11-09]].

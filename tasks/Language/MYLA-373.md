@@ -2,7 +2,7 @@
 id: MYLA-373
 title: "Explicit type arguments on a call, parsed speculatively (D169)"
 type: feature
-status: review
+status: todo
 priority: medium
 labels: [language, parser, checker, generics]
 ---
@@ -25,3 +25,9 @@ The owner's choice for [[MYLA-315]]'s open box, recorded as D169: `mk<int>()`, `
 - Own cases: `build/myla test selfhost/parser.my` 165/165 (new: `explicit_type_args`, `type_args_ahead`, `names_a_callee`), `selfhost/checker.my` 633/633 (new: three `infer_call` cases, `callee_words`), `selfhost/ast.my` 56/56 (`call_targs`, seven `dump_expr` cases).
 - `test_grammar` (with tree-sitter): 10 tests, OK; the grammar has `generic_call` in `primary` and in the new `member` rule, with two declared conflicts so tree-sitter keeps both readings. `test_selfhost_parser`, `test_selfhost_checker`, `test_std_modules`, `test_doc_blocks`, `test_lsp` (`test_explicit_type_arguments`: definition on `P` in `mk<P>()`): OK.
 - `scripts/bootstrap.sh`: byte-identical fixed point (13,760,424 bytes). No seed: the integrator's last commit runs `scripts/update-seed.sh` (D156).
+
+## Review 2026-11-09
+
+Not ready ([[Project/Review-2026-11-09]]): `f"{a < b} {c > (a)}"`, `[a < b, c > (d)]` and tuples are parsed as one generic call, and the look-ahead is quadratic (M1; D186). The fix is in [[MYLA-416]].
+
+- [ ] The review's blocker, fixed with [[MYLA-416]]

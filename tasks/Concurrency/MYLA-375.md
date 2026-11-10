@@ -2,7 +2,7 @@
 id: MYLA-375
 title: "Interpreter: awaiting input on no descriptor waits forever"
 type: bug
-status: review
+status: done
 priority: medium
 labels: [interpreter, concurrency, parity]
 ---
@@ -20,3 +20,7 @@ Natively, `wait_fds` ([[lib/std/rt.my]]) counts a descriptor the poller can't wa
 - `test_compiler_parity`, `test_process`, `test_stdio`, `test_time`, `test_task_yield`, `test_selfhost_interp`: OK.
 - `scripts/bootstrap.sh`: byte-identical fixed point.
 - The wasm32 burn suite of PR #47 hung on `wait_with_no_descriptor` (cancelled after 30 min). Reproduced: the program built for wasm32 printed `before` and hung under Node. After `wait_fds`' check, it prints `before after 2` on x86-64, aarch64 (qemu) and wasm32 (Node). `scripts/test-target.py wasm32-wasi` and `aarch64-linux`: 18 of 18 suites each. `test_compiler_parity`, `test_process`, `test_stdio`, `test_time`, `test_task_yield`, `test_native_runtime`, `test_std_modules`: 237 tests, OK.
+
+## Review 2026-11-09
+
+Signed off in [[Project/Review-2026-11-09]].

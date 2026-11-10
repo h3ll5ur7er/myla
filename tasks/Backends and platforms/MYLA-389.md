@@ -2,7 +2,7 @@
 id: MYLA-389
 title: "wasm32: releasing a deeply nested value overflows the stack"
 type: bug
-status: review
+status: done
 priority: medium
 labels: [wasm32, runtime, memory]
 ---
@@ -46,3 +46,7 @@ Cost: on `benchmarks/binary_trees` (a recursive enum released millions of times)
 - The bootstrap reaches its fixed point.
 - `std.xml`'s `deep` test keeps 1,000 levels (interpreted, 100,000 take a minute); its comment no longer blames the release.
 - The suites, at the batch's last commit: `scripts/test.sh fast` 714 tests, all pass but `test_embedded_std` (the embedded library isn't committed, by the batch's rules: the seed commit regenerates it) and once `test_time`'s `test_an_async_read_lets_the_other_tasks_run` under the load of the run (it passes alone, three times out of three); `test_compiler_parity`, `test_selfhost_cases`, `test_error_corpus`, `test_selfhost_checker`, `test_lsp`, `test_grammar` (with the tree-sitter CLI), `test_selfhost_codegen`, `test_selfhost_interp`, `test_xml`, `test_http`, `test_aarch64`, `test_wasm`, `test_native_runtime`: 808 tests OK; `scripts/test-target.py aarch64-linux` and `wasm32-wasi`: 21 of 21 suites each.
+
+## Review 2026-11-09
+
+Signed off in [[Project/Review-2026-11-09]], with a follow-up in [[MYLA-415]]: values nested through closures still overflow on wasm32 at 3,000 levels; the deep copy between tasks recurses.

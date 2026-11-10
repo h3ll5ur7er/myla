@@ -2,7 +2,7 @@
 id: MYLA-381
 title: "std.iter: adapters and consumers over Iterator"
 type: feature
-status: review
+status: done
 priority: medium
 labels: [stdlib, iterators]
 ---
@@ -54,3 +54,7 @@ Measured, best of five, MYLA-353's pipeline (`0..n` → `map(x * 3)` → `filter
 | Interpreted, n = 300 k | 1.09 s | 21.3 s | 23.6 s | 4.99 s | 1.94 s |
 
 Natively the library's pipeline is 2.4 times the loop, as MYLA-380's hand-written one was; over a list it takes 97 ms beyond building it against the eager methods' 228 ms. Interpreted it is 20 times the loop and 4.3 times the eager methods.
+
+## Review 2026-11-09
+
+Signed off in [[Project/Review-2026-11-09]].

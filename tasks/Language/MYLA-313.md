@@ -2,7 +2,7 @@
 id: MYLA-313
 title: "The Hash trait: every Eq + Hash type is a map key (D163)"
 type: feature
-status: review
+status: todo
 priority: medium
 labels: [maps, tuples, traits, derive]
 ---
@@ -71,3 +71,9 @@ The integer and string maps' code is unchanged. A tuple key costs 1.4 times the 
 ## Follow-up (D167, 2026-11-07)
 
 The owner chose written bounds once the wave 2 seed knew `Hash`: the implied bound of a map key in a signature is gone, and `std.map`'s `impl<K: Eq + Hash, V> [K: V]` and `counts<T: Eq + Hash>`, and the prelude's `get<K: Eq + Hash, V>`, write it. A missing bound is `map key type must be Eq and Hash, found 'T': it needs the bound 'T: Eq + Hash'` in a signature as in a body ([[examples/errors/type_map_key_signature_unbounded.my]]); a caller's type that isn't `Eq + Hash` is [[examples/errors/type_map_key_bound_unsatisfied.my]].
+
+## Review 2026-11-09
+
+Not ready ([[Project/Review-2026-11-09]]): native `==` on a list answers "equal" for the same cell without comparing: wrong for NaN and any non-reflexive `eq` (M3). The fix is in [[MYLA-415]].
+
+- [ ] The review's blocker, fixed with [[MYLA-415]]

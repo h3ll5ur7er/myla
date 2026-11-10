@@ -2,7 +2,7 @@
 id: MYLA-357
 title: "myla test --native: a case whose receiver is an empty list doesn't build"
 type: bug
-status: review
+status: done
 priority: medium
 labels: [testing, native, harness]
 ---
@@ -29,3 +29,7 @@ A smaller thing seen in the same place: a case on a method of `impl [str]` is re
 - Before: `tests.burn.test_test_native.TestNative.test_receivers_and_large_unsigned_values` failed: the interpreter named the cases `__list.width_with #1` and `__map.sum_values #1`, and `--native` stopped with "cannot infer the element type of an empty list `[]`", "cannot infer the key/value types of an empty map `[:]`" and "type 'int32' has no method 'plus_i8'".
 - After: it passes, interpreted and natively (and on wasm32, `TestWasm32.test_every_case_runs_after_one_that_ends_the_run`); `build/myla test selfhost/harness.my` 33/33 (`nameable`, `runner_case`), `selfhost/interp.my --only case_func_name` 3/3.
 - Suites: see [[MYLA-370]]'s evidence (the three tasks were tested together).
+
+## Review 2026-11-09
+
+Signed off in [[Project/Review-2026-11-09]].

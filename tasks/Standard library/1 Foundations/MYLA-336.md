@@ -2,7 +2,7 @@
 id: MYLA-336
 title: "New platform primitives: entropy, file descriptors, pipes"
 type: feature
-status: review
+status: done
 priority: medium
 labels: [platforms, primitives, stdlib, wave-1]
 ---
@@ -40,3 +40,7 @@ No seed staging: the seed compiles only the compiler, whose `std.rt` and `std.pl
 - `test_fs`, `test_stdio`, `test_process`: pass natively and on both targets. `test_wasm` (35 tests, 8 skipped as before) and `test_aarch64` (20, 1 skipped) pass. `scripts/test.sh fast`: 607 tests, OK.
 - `myla test` on `lib/std/platform.my`, `platform_aarch64.my`, `platform_wasm.my`, `rt.my` and `selfhost/runtime_wasm.my` passes (the new `linux_open_flags`, `exit_of`, `mode_of_type`, `open_rights` and `is_platform_primitive` cases among them).
 - `scripts/bootstrap.sh`: byte-identical fixed point (9,963,251 bytes), from the unchanged seed.
+
+## Review 2026-11-09
+
+Signed off in [[Project/Review-2026-11-09]], with a follow-up in [[MYLA-426]]: wasm32 maps unknown errnos to EIO.

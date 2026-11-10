@@ -2,7 +2,7 @@
 id: MYLA-362
 title: "wasm32: list_dir returned short lists after 64 directory opens"
 type: bug
-status: review
+status: done
 priority: medium
 labels: [wasm, fs]
 ---
@@ -16,3 +16,7 @@ Found by the `std.glob` lane ([[MYLA-326]]). `platform_wasm.dir_read` keeps each
 - `tests/burn/test_fs.py`'s `DirectoryParity.test_the_same_directories_listed_again` (program `RELIST`): in a fresh working directory with `a` (6 files) and `b` (3 files), it lists both 100 times each and prints a round whose counts differ from the first; it expects `6 3` and `done` alone, from the self-hosted interpreter and natively. `test_fs` is in `tests/burn/_targets.py`'s `SUITES`, so `scripts/test-target.py wasm32-wasi` runs it under Node.
 - Before: with `open_dir`'s reset of the cookie taken out of `lib/std/platform_wasm.my` (scratch, not committed), `python3 scripts/test-target.py wasm32-wasi tests.burn.test_fs.DirectoryParity.test_the_same_directories_listed_again` fails natively with `6 3\nround 33: 0 0\nround 34: 0 0\n…`.
 - After (the code as it is): that test passes on wasm32; the whole `test_fs` passes on x86-64 (19 tests), on wasm32 (`scripts/test-target.py wasm32-wasi tests.burn.test_fs`, 20 s) and on aarch64 (`scripts/test-target.py aarch64-linux tests.burn.test_fs`, 8 s).
+
+## Review 2026-11-09
+
+Signed off in [[Project/Review-2026-11-09]].

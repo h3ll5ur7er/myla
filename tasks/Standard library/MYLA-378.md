@@ -2,7 +2,7 @@
 id: MYLA-378
 title: "Platform primitives for wave 3's gaps: a path's stat, a child's stdout and stderr, a descriptor as stdin"
 type: feature
-status: review
+status: done
 priority: low
 labels: [platforms, primitives, stdlib]
 ---
@@ -33,3 +33,7 @@ Found by the file and process lanes ([[MYLA-339]], [[MYLA-340]]). Each is a prim
 - Measured natively (2026-11-09, a machine other lanes were using): 256 MiB of `head -c` through `pipe(command("wc").arg("-c"))` took 918 to 2,187 ms with the copy, 109 to 127 ms joined (a shell's own pipe 117 to 148 ms).
 - [[MYLA-397]] (a platform module can't be tested on its own target): each platform module's own cases (`stdio_mode`, `descriptor_of`, `mode_of_type`) ran interpreted and `--native` on x86-64 (`platform.my` 23/23, `platform_aarch64.my` 23/23, `platform_wasm.my` 13/13); their primitives ran on their own targets through the burn programs above and `std.process`'s and `std.fs`'s cases.
 - The suites: see [[MYLA-369]]'s evidence, run once for the three tasks.
+
+## Review 2026-11-09
+
+Signed off in [[Project/Review-2026-11-09]], with a follow-up in [[MYLA-419]]: a bad `cwd` reports "program not found"; its API proposal is D185.

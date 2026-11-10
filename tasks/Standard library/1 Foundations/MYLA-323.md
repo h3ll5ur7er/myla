@@ -2,7 +2,7 @@
 id: MYLA-323
 title: "std.list: building, higher-order operations, sorting, searching"
 type: feature
-status: review
+status: done
 priority: high
 labels: [stdlib, lists, functional, wave-1]
 ---
@@ -32,3 +32,7 @@ Wave 1 of [[Project/Standard-library-roadmap]], roadmap #16, #17, #18, #19, #22.
   - `myla test --native` can't build a `#test` case (still so on `e5195e6`) whose receiver is an empty list: `impl [str] { #test([], "-")[0] fun width(self, sep: str) -> int { … } }` gives a harness with `var __recv = []`, "cannot infer the element type of an empty list". `join`'s empty case is in a test function instead.
   - A lambda's parameter types weren't inferred where the method's function type has a type parameter of its own (`xs.map((x) => x * 2)`: "cannot infer the type of lambda parameter 'x'"); fixed by [[MYLA-356]], so neither the tests nor the page annotate them.
   - Lists have no `==` (`cannot compare values of type '[int32]'`), so the tests compare the lists' text.
+
+## Review 2026-11-09
+
+Signed off in [[Project/Review-2026-11-09]], with a follow-up in [[MYLA-425]]: the heapsort fallback of `sort_unstable` has no test.

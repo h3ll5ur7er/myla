@@ -2,7 +2,7 @@
 id: MYLA-394
 title: "D95's reentrancy warning misses a builtin mutator inside an expression"
 type: bug
-status: review
+status: todo
 priority: low
 labels: [checker, concurrency, warnings]
 ---
@@ -29,3 +29,9 @@ async fun sell(var self, p: Pay) -> int {
 - [[Language/Concurrency]] says what changes a field.
 
 Suites at the batch's tip: the bootstrap's fixed point; `scripts/test.sh fast` 714 OK (with the embedded library regenerated); `tests.burn.test_compiler_parity`, `test_selfhost_cases`, `test_error_corpus`, `test_selfhost_checker`, `test_lsp`: 673 OK.
+
+## Review 2026-11-09
+
+Not ready ([[Project/Review-2026-11-09]]): D95 misses a mutator in the head of `if`, `while` and `match`. The fix is in [[MYLA-417]].
+
+- [ ] The review's blocker, fixed with [[MYLA-417]]

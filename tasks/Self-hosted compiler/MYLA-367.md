@@ -2,7 +2,7 @@
 id: MYLA-367
 title: "Native: an operator or a format hole on a generic struct with a generic trait impl doesn't link"
 type: bug
-status: review
+status: todo
 priority: medium
 labels: [codegen, generics, traits, monomorphization]
 ---
@@ -25,3 +25,9 @@ The Format form, found by wave 3's MYLA-342 lane: `impl<T: Format> Format for Bo
 - `build/myla test selfhost/lower.my`: 113/114, the one failure (`Lower.map_lookup #1: expected 2, got 1`) the same on the unchanged source.
 
 Follow-up: `std.heap` could now offer a `Reverse<T>` wrapper instead of its max flag ([[MYLA-330]]), and `std.grid`'s `Grid` its `Format` ([[MYLA-342]]).
+
+## Review 2026-11-09
+
+Not ready ([[Project/Review-2026-11-09]]): `+ - * / %` on `impl<T: Add> Add for Box<T>` don't link natively ([[MYLA-415]]) and the checker types the result `Box<T>` (M2). The fix is in [[MYLA-417]].
+
+- [ ] The review's blocker, fixed with [[MYLA-417]]

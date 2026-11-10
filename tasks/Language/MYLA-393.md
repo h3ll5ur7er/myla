@@ -2,7 +2,7 @@
 id: MYLA-393
 title: "Retire the prelude's free get(m, k) for a map method m.get(k)"
 type: improvement
-status: review
+status: done
 priority: low
 labels: [language, stdlib, prelude]
 ---
@@ -33,3 +33,7 @@ The owner chose the method: `m.get(k)` in `std.map`, and the prelude's free `get
 - `scripts/bootstrap.sh` from the committed seed: byte-identical fixed point (17,091,882 bytes).
 - `scripts/test.sh` (all): 1263 tests, OK (skipped=314). The first full run, before the aliases and `check_main`'s `get`, had 12 failures: the gates over the recorded answers of maps.my and the two parity programs, and the doc block's output.
 - Not run: the seed. `scripts/update-seed.sh` and `selfhost/embedded_std.my` are the integrator's (D156); the commits between this task's first and last weren't bootstrapped one by one.
+
+## Review 2026-11-09
+
+Signed off in [[Project/Review-2026-11-09]].

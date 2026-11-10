@@ -2,7 +2,7 @@
 id: MYLA-347
 title: "std.http: an HTTP/1.1 client and server"
 type: feature
-status: review
+status: todo
 priority: low
 labels: [stdlib, net, wave-4]
 ---
@@ -71,3 +71,9 @@ Worked around in `worker` and `serve_requests` by deciding outside the inner mat
 - `tests/burn/test_http.py` (5 tests, each Myla program interpreted and built): `MylaClient` against Python's `http.server` (37 checks: plain, chunked with a trailer, close-delimited, gzip, gzip without `Accept-Encoding`, gzip chunked, deflate, redirects followed, left alone and looping, 303 after POST, echoes of POST and PUT with repeated headers, HEAD, repeated `Set-Cookie`, 404, 300 KB, keep-alive on one connection, a server `Connection: close`, a dropped kept connection retried, the async forms, a malformed status line, a body cut short, a bad chunk, a head past 64 KiB, a body past its limit, timeouts sync and async and against a listener that never answers, a refused connection sync and async, `https`, two bad URLs); `MylaServer` against Python's `http.client` (six requests on one socket: GET, POST with a query and headers, trailers, HEAD, a chunked PUT, 200 KB), `urllib` (200 and 404), and raw sockets (100-continue, pipelining, bare LF, HTTP/1.0 closed and kept, `Connection: close`, a bad handler header → 500, a chunked upload with a trailer, no Host → 400; 400, 431, 413, 501, 505 and a bad length refused), 19 counted requests then `served 19`; `KeepAlive` (an idle connection closed by the guard, a busy one told `Connection: close`); `OneProgram` (three async clients and `serve_n` in one program, then a server stopped by `task.timeout`); `HttpOnWasm`. Natively: 4 pass, `HttpOnWasm` skipped; `MYLA_TEST_TARGET=aarch64-linux`: 4 pass; `MYLA_TEST_TARGET=wasm32-wasi`: `HttpOnWasm` passes, the four socket tests skipped (in the file: `_targets.py` isn't this task's).
 - After `scripts/bootstrap.sh`: `python3 -m unittest tests.burn.test_std_modules tests.burn.test_doc_blocks`: 6 tests OK (the page's block runs interpreted and natively).
 - Measured natively (two programs on loopback, server with 4 workers, 4-core machine shared with other lanes, best of six runs; runs ranged down to about 60 % of these): one keep-alive `Client`, 20,000 GETs of 13 bytes: 23,600 a second (25,500 without the keep-alive guard); four async clients in one program: 23,300 a second; a connection each (`fetch`): 11,800 a second; 100 MB down: 196 ms, 510 MB/s; 121 MB up: 248 ms, 490 MB/s (raw loopback through std.net: 2.45 GB/s).
+
+## Review 2026-11-09
+
+Not ready ([[Project/Review-2026-11-09]]): a chunk size that overflows `body_len + size` kills a checked or interpreted server and passes the body limit of a plain build (H7). The fix is in [[MYLA-422]].
+
+- [ ] The review's blocker, fixed with [[MYLA-422]]

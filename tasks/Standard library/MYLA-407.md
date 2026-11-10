@@ -2,7 +2,7 @@
 id: MYLA-407
 title: "std.toml reads and writes TOML 1.0; #derive(Toml)"
 type: feature
-status: review
+status: done
 priority: medium
 labels: [stdlib, formats, toml, derive]
 ---
@@ -59,3 +59,7 @@ Built on `3499093`.
 ## Comments
 
 - 2026-11-09: the owner recorded the scope as D176 and kept the derive in std.toml (only programs that import it pay its check time); the proposals stand as built.
+
+## Review 2026-11-09
+
+Signed off in [[Project/Review-2026-11-09]], with a follow-up in [[MYLA-424]]: no nesting limit.

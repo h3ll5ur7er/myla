@@ -2,7 +2,7 @@
 id: MYLA-324
 title: "std.option and std.map: combinators and map helpers"
 type: feature
-status: review
+status: done
 priority: high
 labels: [stdlib, functional, maps, wave-1]
 ---
@@ -42,3 +42,7 @@ Found on the way:
 - **Native `assert` with a computed message** (also found by the `std.str` lane): `fun main() { assert(true, name()) }` with `name()` returning `"x" + "y"`, or `assert(n == 3, f"n={n}")`, fails natively with `internal error: main: IR verifier: L2: drop of $0 (__temp), which holds no value`; the interpreter is fine. `Lower.intrinsic` in [[selfhost/lower.my]] lowers the message inside the failing branch, and the temporary's drop lands where it holds no value. The tests use literal messages.
 - **Lambda parameters aren't inferred through an open type parameter**: `o.map((x) => x * 2)` and `apply(3, (x) => x + 1)` with `apply<T, U>(x: T, f: (T) -> U)` are `cannot infer the type of lambda parameter 'x'`, though `T` is known; `same<T>(x: T, f: (T) -> T)` infers. `infer_generic_call` and `infer_generic_method` in [[selfhost/checker.my]] drop the whole hint when the parameter type still holds a type parameter (`if contains_type_param(want) { hint = None }`). So `map`, `and_then` and `map_err` need `(x: int) => …`; `update`'s lambda infers, its `V` being the receiver's. A lambda of the wrong parameter type there reads `cannot infer type parameter(s) U for method 'map'` instead of a mismatch.
 - `counts<T>` has no bound on `T`; once D163 needs `K: Eq + Hash` for a generic `[K: V]` ([[MYLA-313]]), it becomes `counts<T: Eq + Hash>`.
+
+## Review 2026-11-09
+
+Signed off in [[Project/Review-2026-11-09]], with a follow-up in [[MYLA-435]]: `expect`'s error points into the library; the stale lambda note is [[MYLA-427]]'s.

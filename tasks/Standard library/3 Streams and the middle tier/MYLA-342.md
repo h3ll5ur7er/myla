@@ -2,7 +2,7 @@
 id: MYLA-342
 title: "Algorithms: grid, graph search, bit set, union-find"
 type: feature
-status: review
+status: done
 priority: medium
 labels: [stdlib, algorithms, wave-3]
 ---
@@ -38,3 +38,7 @@ Wave 3 of [[Project/Standard-library-roadmap]], roadmap #28, #29, #30, #31. AoC'
   1. The native test harness can't compare an enum of one variant: `__myla_eq_*` always adds `_ => { return false }`, which is an unreachable arm when the enum has one variant ([[selfhost/harness.my]], the line that appends the variant's arm). A `#test(1)[E.Only(1)]` on `fun f(x: int) -> E` with `enum E { Only(int) }` passes interpreted; `--native` fails with "unreachable match arm (a previous arm already matches everything)". `GridError` has one variant, so `parse`'s cases are a test function.
   2. A generic `impl<T: Format> Format for Box<T>` doesn't link natively when used by `print(b)` or `f"{b}"` ("undefined reference to `myla_Box.format`"); the interpreter prints it. Calling `b.format("")` links. The `Format` case of [[MYLA-367]]. So `Grid` has `text()`, not `Format`.
   3. [[MYLA-360]] also holds for `std.hash`: a `lib/std` module importing it runs `std.hash`'s cases as its own, and its native harness doesn't build ("unexpected character '`'"). The `Hasher` methods aren't reachable from a `std` module without that import.
+
+## Review 2026-11-09
+
+Signed off in [[Project/Review-2026-11-09]], with a follow-up in [[MYLA-425]]: `row`/`column` out of range behave differently; negative weights unchecked.
