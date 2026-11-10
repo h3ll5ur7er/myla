@@ -1846,6 +1846,24 @@ impl Wire {
         unreachable()
     }
 
+    // Whether a kept connection can't be used: the server closed it, or sent
+    // bytes nobody asked for, while it waited. Looked at without waiting.
+    fun stale(var self) -> bool {
+        if self.buffered() {
+            return true
+        }
+        self.stream.set_read_timeout(0)
+        return match self.stream.read(1) {
+            Ok(_) => true
+            Err(e) => {
+                match e {
+                    TimedOut => false
+                    _ => true
+                }
+            }
+        }
+    }
+
     // The connection closed.
     fun close(var self) {
         let c = self.stream.close()
@@ -2115,6 +2133,24 @@ impl Client {
         self.conn = None
     }
 
+    // The kept connection for a request to `t` that may (`again`) or may
+    // not be sent twice: for one that may not, a connection the server
+    // closed meanwhile is seen before the request goes, and closed.
+    fun reusable(var self, t: Target, again: bool) -> Option<Wire> {
+        return match self.kept(t) {
+            Some(c) => {
+                var w = c
+                if !again && w.stale() {
+                    w.close()
+                    None
+                } else {
+                    Some(w)
+                }
+            }
+            None => None
+        }
+    }
+
     // The kept connection if it goes to `t` (closed if it goes elsewhere),
     // and whether there was one.
     fun kept(var self, t: Target) -> Option<Wire> {
@@ -2156,11 +2192,15 @@ impl Client {
     }
 
     // One request and its response (the 1xx responses before it skipped),
-    // over the kept connection or a new one.
+    // over the kept connection or a new one. A kept connection that the
+    // server closed under the request is tried again on a new one only for
+    // an idempotent method (RFC 9112, section 9.3.1): the server may have
+    // acted on the request before it closed.
     fun exchange(var self, r: Request, t: Target, deadline: int64) -> Result<Response, HttpError> {
         let text = request_text(r, t, self.keep_alive)?
+        let again = idempotent(r.method)
         var reused = false
-        var w = match self.kept(t) {
+        var w = match self.reusable(t, again) {
             Some(c) => {
                 reused = true
                 c
@@ -2172,7 +2212,7 @@ impl Client {
                 Ok(p) => { return self.finish(w, p, r, t) }
                 Err(e) => {
                     w.close()
-                    if !reused || !retryable(e) {
+                    if !reused || !again || !retryable(e) {
                         return Err(e)
                     }
                     reused = false
@@ -2186,8 +2226,9 @@ impl Client {
     // `exchange`, the task waiting.
     async fun exchange_async(var self, r: Request, t: Target) -> Result<Response, HttpError> {
         let text = request_text(r, t, self.keep_alive)?
+        let again = idempotent(r.method)
         var reused = false
-        var w = match self.kept(t) {
+        var w = match self.reusable(t, again) {
             Some(c) => {
                 reused = true
                 c
@@ -2202,7 +2243,7 @@ impl Client {
                 Ok(p) => { return self.finish(w, p, r, t) }
                 Err(e) => {
                     w.close()
-                    if !reused || !retryable(e) {
+                    if !reused || !again || !retryable(e) {
                         return Err(e)
                     }
                     reused = false
@@ -2213,6 +2254,18 @@ impl Client {
         }
         unreachable()
     }
+}
+
+// Whether a request with the method `method` may be sent twice (RFC 9110,
+// section 9.2.2: the idempotent methods, as written there).
+#test("GET")[true]
+#test("PUT")[true]
+#test("DELETE")[true]
+#test("POST")[false]
+#test("PATCH")[false]
+#test("get")[false]
+fun idempotent(method: str) -> bool {
+    return method == "GET" || method == "HEAD" || method == "OPTIONS" || method == "TRACE" || method == "PUT" || method == "DELETE"
 }
 
 // Whether a request over a kept connection that failed so is sent again on

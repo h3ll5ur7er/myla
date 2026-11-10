@@ -715,6 +715,136 @@ class KeepAlive(unittest.TestCase):
                     self.assertEqual((rest, err, proc.returncode), ("stopped\n", "", 0))
 
 
+# --- what a client sends again on a new connection (MYLA-422) ---------------------
+
+REPLAY_CLIENT = PRELUDE + r"""import std.task as task
+
+#main
+async fun main() {
+    let base = f"http://127.0.0.1:{int_of(args()[1])}"
+    var c = http.client()
+    print(show(c.get(base + "/a")))
+    // the server reads this POST and drops the kept connection without an
+    // answer: it may have acted on it, so it isn't sent again
+    print(show(c.post(base + "/swallow", "once")))
+    print(show(c.get(base + "/a")))
+    // a GET dropped so is sent again, once, on a new connection
+    print(show(c.get(base + "/swallow-get")))
+    // a kept connection the server closed before the POST: seen, and the
+    // POST goes on a new one
+    print(show(c.get(base + "/close-after")))
+    await task.sleep(200)
+    print(show(c.post(base + "/echo", "fresh")))
+    c.close()
+    var a = http.client()
+    print(show(await a.get_async(base + "/a")))
+    print(show(await a.post_async(base + "/swallow-async", "once")))
+    print(show(await a.get_async(base + "/close-after")))
+    await task.sleep(200)
+    print(show(await a.post_async(base + "/echo", "fresh async")))
+    a.close()
+}
+"""
+
+REPLAY_OUT = """200 OK [a] Content-Length=1
+error: connection closed
+200 OK [a] Content-Length=1
+200 OK [answered the second time] Content-Length=24
+200 OK [closing] Content-Length=7
+200 OK [POST fresh] Content-Length=10
+200 OK [a] Content-Length=1
+error: connection closed
+200 OK [closing] Content-Length=7
+200 OK [POST fresh async] Content-Length=16
+"""
+
+
+class ReplayServer:
+    """A raw HTTP/1.1 server on 127.0.0.1 whose connections are kept, logging
+    each request it reads: `/swallow…` paths are read and their connection
+    closed without an answer (`/swallow-get` only the first time),
+    `/close-after` is answered and its connection closed."""
+
+    def __init__(self):
+        self.log = []
+        self.lock = threading.Lock()
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.sock.bind(("127.0.0.1", 0))
+        self.sock.listen(16)
+        self.port = self.sock.getsockname()[1]
+        threading.Thread(target=self.accept, daemon=True).start()
+
+    def accept(self):
+        while True:
+            try:
+                s, _ = self.sock.accept()
+            except OSError:
+                return
+            threading.Thread(target=self.serve, args=(s,), daemon=True).start()
+
+    def serve(self, s: socket.socket):
+        data = b""
+        with s:
+            while True:
+                while b"\r\n\r\n" not in data:
+                    b = s.recv(65536)
+                    if not b:
+                        return
+                    data += b
+                head, _, data = data.partition(b"\r\n\r\n")
+                lines = head.decode().split("\r\n")
+                method, path, _ = lines[0].split(" ")
+                n = 0
+                for line in lines[1:]:
+                    name, _, value = line.partition(":")
+                    if name.strip().lower() == "content-length":
+                        n = int(value)
+                while len(data) < n:
+                    data += s.recv(65536)
+                body, data = data[:n], data[n:]
+                with self.lock:
+                    self.log.append(f"{method} {path}")
+                    seen = self.log.count(f"{method} {path}")
+                if path.startswith("/swallow") and not (path == "/swallow-get" and seen > 1):
+                    return
+                text = {"/a": b"a", "/swallow-get": b"answered the second time", "/close-after": b"closing"}.get(
+                    path, method.encode() + b" " + body)
+                s.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: %d\r\n\r\n%s" % (len(text), text))
+                if path == "/close-after":
+                    return
+
+    def close(self):
+        self.sock.close()
+
+
+@unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
+@unittest.skipIf(NO_SOCKETS, NO_SOCKETS_WHY)
+class NoReplay(unittest.TestCase):
+    def test_only_idempotent_requests_are_sent_again(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = write_program(tmp, REPLAY_CLIENT, "replay.my")
+            binary = os.path.join(tmp, "replay")
+            native_build(Program(path), binary)
+            for name in ["interpreted", "built"]:
+                with self.subTest(client=name):
+                    server = ReplayServer()
+                    try:
+                        if name == "interpreted":
+                            out = selfhost_run(path, [str(server.port)])
+                        else:
+                            argv, exe = run_argv(binary, binary, [str(server.port)])
+                            proc = subprocess.run(argv, executable=exe, capture_output=True, text=True, timeout=60)
+                            out = (proc.stdout, proc.stderr, proc.returncode)
+                    finally:
+                        server.close()
+                    self.assertEqual(out, (REPLAY_OUT, "", 0))
+                    # each POST reached the server once; the dropped GET twice
+                    self.assertEqual(server.log, [
+                        "GET /a", "POST /swallow", "GET /a", "GET /swallow-get", "GET /swallow-get",
+                        "GET /close-after", "POST /echo",
+                        "GET /a", "POST /swallow-async", "GET /close-after", "POST /echo"])
+
+
 # --- a Myla client and server in one program ---------------------------------------
 
 ONE_PROGRAM = PRELUDE + r"""import std.task as task
