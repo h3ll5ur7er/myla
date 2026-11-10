@@ -330,6 +330,19 @@ pub fun poll_read(fd: int64, timeout_ms: int64) -> int64 {
     return r
 }
 
+// 1 when `fd` has room for a write (or a write fails at once), 0 when
+// `timeout_ms` (negative: none) ran out (MYLA-419).
+pub fun poll_write(fd: int64, timeout_ms: int64) -> int64 {
+    let pfd = __alloc(8)
+    __store64(pfd, (fd & LOW32) | (4i64 << 32))  // POLLOUT
+    var r = ppoll(pfd, 1, timeout_ms)
+    __free(pfd)
+    if r > 0 {
+        r = 1
+    }
+    return r
+}
+
 // The `n` bytes at `p` written to `fd`, a write at a time, again after an
 // interruption (EINTR, EAGAIN); 0, or the first error (minus its errno).
 pub fun write_all(fd: int64, p: int64, n: int64) -> int64 {
