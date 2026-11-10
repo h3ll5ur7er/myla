@@ -1,5 +1,5 @@
 //~ runtime error: map key 2 not found
-//~ native: runtime error: map key not found
+//~ native: runtime error: map key 2 not found
 // Reading an absent key traps (D40); use `get` or `contains` to probe safely.
 #main
 fun main() {

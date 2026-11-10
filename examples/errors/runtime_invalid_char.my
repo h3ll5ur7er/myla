@@ -1,5 +1,5 @@
 //~ runtime error: invalid char: 55296 is not a Unicode scalar value
-//~ native: runtime error: invalid char
+//~ native: runtime error: invalid char: 55296 is not a Unicode scalar value
 //~ span: n as char
 // A char is a Unicode scalar value: a surrogate (D800 to DFFF) or anything
 // above 10FFFF traps at the cast (MYLA-177).

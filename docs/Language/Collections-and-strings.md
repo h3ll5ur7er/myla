@@ -34,7 +34,7 @@ fun main() {
 | `xs[i] = v` | Needs a `var` place |
 | `xs.push(v)`, `xs.pop()` | Need a `var` place; `pop` returns the last element, and popping an empty list is a runtime error |
 | `for x in xs` | Visits a snapshot of the elements |
-| `xs == ys`, `xs != ys` | The same length and equal elements in turn, each compared as `==` compares it; for lists whose elements are `Eq` (D163). Tuples compare the same way |
+| `xs == ys`, `xs != ys` | The same length and equal elements in turn, each compared as `==` compares it; for lists whose elements are `Eq` (D163). Tuples compare the same way. A list is compared element by element even with itself, or with a copy that shares its storage: `[nan] == [nan]` and `xs == xs` with a NaN in it are `false`, and a type's own `eq` runs ([[MYLA-415]]) |
 
 ## Slices and indexes from the end
 

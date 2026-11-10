@@ -2,10 +2,12 @@
 the native binary's output matches the interpreter (and exit codes for traps)."""
 import os
 import re
+import subprocess
 import tempfile
 import unittest
 
 from tests.burn._targets import program_excuse
+from tests.burn._tools import selfhost_tool
 from tests.burn._native import (CAN_BUILD_NATIVE, SKIP_REASON, Program, build_and_run, build_and_run_full, interpret,
                                 run_file_both_now, selfhost_run, write_program)
 
@@ -7796,6 +7798,544 @@ fun main() {
     print(total)
 }
 """,
+    "values_nested_through_closures": r"""// M15 (MYLA-415): values nested through closures, as deep as they like, are
+// released in a bounded stack on every target (wasm32 overflowed at about
+// 3,000 levels, aarch64 under qemu at 30,000), and copied to a child task
+// without recursion
+import std.process as process
+import std.num as num
+
+struct Holder { f: () -> int, rest: [Holder] }
+struct Box { kids: [Box], tag: str }
+enum Chain { End, Step((int) -> int, Chain) }
+
+fun closures(n: int) -> int {
+    var f = () => 0
+    for i in 0..n {
+        let g = f
+        f = () => g() + 1
+    }
+    return 7
+}
+
+fun lists_of_closures(n: int) -> int {
+    var fs: [() -> int] = []
+    for i in 0..n {
+        let prev = fs
+        fs = [() => prev.len()]
+    }
+    return fs[0]()
+}
+
+fun holders(n: int) -> int {
+    var h = Holder { f: () => 0, rest: [] }
+    for i in 0..n {
+        let prev = h
+        h = Holder { f: () => prev.rest.len() + 1, rest: [] }
+    }
+    return h.f()
+}
+
+fun chains(n: int) -> int {
+    var c = Chain.End
+    for i in 0..n {
+        let prev = c
+        c = Chain.Step((x: int) => match prev { End => x, Step(g, _) => x + 1 }, Chain.End)
+    }
+    return match c { End => 0, Step(g, _) => g(1) }
+}
+
+fun partials(n: int) -> int {
+    var f = (x: int, k: () -> int) => x
+    var k = () => 0
+    for i in 0..n {
+        let kk = k
+        k = () => kk() + 0
+    }
+    let p = f(_, k)
+    return p(5)
+}
+
+fun nest(n: int) -> Box {
+    var b = Box { kids: [], tag: "leaf" }
+    for k in 0..n { b = Box { kids: [b], tag: f"t{k % 7}" } }
+    return b
+}
+
+// the depth of a nested box and the length of its tags, by a loop
+fun depth(b0: Box) -> (int, int) {
+    var b = b0
+    var d = 0
+    var sum = 0
+    while b.kids.len() > 0 {
+        sum += b.tag.len()
+        b = b.kids[0]
+        d += 1
+    }
+    return (d, sum)
+}
+
+async fun crossing(f: () -> int, fs: [() -> int], b: Box) -> (int, int) {
+    let (d, s) = depth(b)
+    return (fs.len() + d, s)
+}
+
+#main
+async fun main() {
+    let a = process.args()
+    var n = 50000
+    if a.len() > 1 { n = num.parse_int(a[1]).unwrap_or(50000) as int }
+    print(closures(n))
+    print(lists_of_closures(n))
+    print(holders(n))
+    print(chains(n))
+    print(partials(n))
+    // to a child task and back, deeply copied
+    var f = () => 0
+    var fs: [() -> int] = []
+    for i in 0..n {
+        let g = f
+        f = () => g() + 1
+        let prev = fs
+        fs = [() => prev.len()]
+    }
+    let b = nest(n)
+    async let c = crossing(f, fs, b)
+    let (k, t) = await c
+    let (d, u) = depth(b)
+    print(f"{k} {t} {d} {u}")
+    print("released")
+}
+""",
+    "arithmetic_operators_of_generic_impls": r"""// M2 (MYLA-415, MYLA-367): the arithmetic operators of a generic impl call
+// its instance for the operands' type arguments (natively they didn't link)
+struct Box<T> { v: T }
+impl<T: Add> Add for Box<T> {
+    fun add(self, other: Box<T>) -> Box<T> { return Box { v: self.v + other.v } }
+}
+impl<T: Sub> Sub for Box<T> {
+    fun sub(self, other: Box<T>) -> Box<T> { return Box { v: self.v - other.v } }
+}
+impl<T: Mul> Mul for Box<T> {
+    fun mul(self, other: Box<T>) -> Box<T> { return Box { v: self.v * other.v } }
+}
+impl<T: Div> Div for Box<T> {
+    fun div(self, other: Box<T>) -> Box<T> { return Box { v: self.v / other.v } }
+}
+impl<T: Rem> Rem for Box<T> {
+    fun rem(self, other: Box<T>) -> Box<T> { return Box { v: self.v % other.v } }
+}
+
+struct Pair<A, B> { a: A, b: B }
+impl<A: Add, B: Add> Add for Pair<A, B> {
+    fun add(self, other: Pair<A, B>) -> Pair<A, B> { return Pair { a: self.a + other.a, b: self.b + other.b } }
+}
+
+// in generic code, where the checker types the result (its half of M2 is
+// MYLA-417's), each operator through a function of its own
+fun plus<T: Add>(a: Box<T>, b: Box<T>) -> Box<T> { return a + b }
+fun minus<T: Sub>(a: Box<T>, b: Box<T>) -> Box<T> { return a - b }
+fun times<T: Mul>(a: Box<T>, b: Box<T>) -> Box<T> { return a * b }
+fun over<T: Div>(a: Box<T>, b: Box<T>) -> Box<T> { return a / b }
+fun modulo<T: Rem>(a: Box<T>, b: Box<T>) -> Box<T> { return a % b }
+fun chain<T: Add>(a: Box<T>) -> Box<T> { return a + a + a }
+fun pair_sum<A: Add, B: Add>(x: Pair<A, B>, y: Pair<A, B>) -> Pair<A, B> { return x + y }
+
+fun int_of(b: Box<int>) -> int { return b.v }
+fun float_of(b: Box<float>) -> float { return b.v }
+fun str_of(b: Box<str>) -> str { return b.v }
+
+fun main() {
+    print(int_of(plus(Box { v: 1 }, Box { v: 2 })))
+    print(int_of(minus(Box { v: 7 }, Box { v: 2 })))
+    print(int_of(times(Box { v: 6 }, Box { v: 7 })))
+    print(int_of(over(Box { v: 9 }, Box { v: 2 })))
+    print(int_of(modulo(Box { v: 9 }, Box { v: 4 })))
+    print(float_of(plus(Box { v: 1.5 }, Box { v: 2.25 })))
+    print(str_of(plus(Box { v: "ab" }, Box { v: "cd" })))
+    print(str_of(chain(Box { v: "ab" })))
+    let big: Box<int64> = Box { v: 5000000000 }
+    print(chain(big).v)
+    print(int_of(Box { v: 1 }.add(Box { v: 2 })))
+    let p = pair_sum(Pair { a: 1, b: "x" }, Pair { a: 2, b: "y" })
+    print(f"{p.a} {p.b}")
+    // the operator outside generic code links too
+    let unused = Box { v: 1 } + Box { v: 2 }
+    print("linked")
+}
+""",
+    "list_equal_to_itself": r"""// M3 (MYLA-415, MYLA-313): a list compared with itself, or with a copy that
+// shares its cell, is equal without a look at its elements only where the
+// elements' `==` is built in and reflexive: a NaN isn't equal to itself, and
+// a struct's `eq` runs (and may say no)
+from std.io import println
+
+struct Never { v: int }
+impl Eq for Never { fun eq(self, other: Never) -> bool { return false } }
+
+struct Loud { v: int }
+impl Eq for Loud {
+    fun eq(self, other: Loud) -> bool {
+        println("eq called")
+        return self.v == other.v
+    }
+}
+
+#derive(Eq)
+struct Holder { items: [float] }
+
+#derive(Eq)
+struct Point { x: int, y: int }
+
+fun main() {
+    let nan = 0.0 / 0.0
+    let xs = [nan]
+    let ys = xs
+    println(f"{xs == xs} {xs == ys} {xs != ys} {xs == [nan]}")
+    let nested = [[1.0, nan]]
+    let n2 = nested
+    println(f"{nested == n2} {nested != n2}")
+    let pairs = [(1, nan)]
+    println(f"{pairs == pairs}")
+    let a = [Never { v: 1 }]
+    let b = a
+    println(f"{a == b} {a != b}")
+    let l = [Loud { v: 1 }, Loud { v: 2 }]
+    let l2 = l
+    println(f"{l == l2}")
+    let h = Holder { items: [nan] }
+    println(f"{h == h}")
+    let hs = [h]
+    println(f"{hs == hs}")
+    // reflexive elements: equal, as before
+    let ints = [1, 2, 3]
+    let strs = ["a", "b"]
+    let deep = [[1, 2], [3]]
+    let tups = [(1, "x", 'c', true)]
+    let pts = [Point { x: 1, y: 2 }]
+    let pts2 = pts
+    println(f"{ints == ints} {strs == strs} {deep == deep} {tups == tups} {pts == pts2}")
+    let f2 = [1.5, 2.5]
+    println(f"{f2 == f2} {f2 != f2}")
+}
+""",
+    "keys_that_change_their_container": r"""// H4 (MYLA-415): a key, index or argument whose computation copies or grows
+// the container it is used on: computed before the container is made
+// unique, as the interpreter does, so a copy keeps the old contents and a
+// write never lands in a cell the growth freed
+struct Counter { n: int }
+impl Counter {
+    fun inc(var self, k: int) { self.n += k }
+}
+
+struct H {
+    m: [int: int],
+    saved: [int: int],
+    xs: [int],
+    xs_saved: [int],
+    grid: [[int]],
+    i: int,
+    sb: StringBuilder,
+    sb_saved: StringBuilder,
+    cs: [Counter],
+
+    names: [str: str],
+}
+
+impl H {
+    fun snap(var self, k: int) -> int {
+        self.saved = self.m
+        self.xs_saved = self.xs
+        return k
+    }
+    fun grow(var self, k: int) -> int {
+        var i = 100
+        while i < 400 {
+            self.m[i] = i
+            self.xs.push(i)
+            self.cs.push(Counter { n: i })
+            i += 1
+        }
+        return k
+    }
+    fun bump(var self) -> int {
+        self.i += 1
+        return self.i
+    }
+    fun snap_sb(var self, s: str) -> str {
+        self.sb_saved = self.sb
+        return s
+    }
+    fun key(var self, k: str) -> str {
+        self.names[k + "!"] = "added"
+        return k
+    }
+}
+
+impl [int] {
+    fun put_at(var self, i: int, v: int) { self[i] = v }
+}
+
+fun fresh() -> H {
+    return H { m: [1: 10, 2: 20, 3: 30], saved: [:], xs: [1, 2, 3], xs_saved: [], grid: [[0, 0, 0], [0, 0, 0], [0, 0, 0]], i: 0, sb: StringBuilder(), sb_saved: StringBuilder(), cs: [Counter { n: 0 }], names: ["a": "x"] }
+}
+
+fun main() {
+    // map remove, set and read-modify-write with a key that copies or grows
+    var h = fresh()
+    h.m.remove(h.snap(2))
+    print(f"{h.m.len()} {h.saved.len()} {h.saved.contains(2)}")
+    h = fresh()
+    h.m.remove(h.grow(2))
+    print(f"{h.m.len()} {h.m.contains(2)} {h.m[399]}")
+    h = fresh()
+    h.m[h.snap(7)] = 70
+    print(f"{h.m.len()} {h.saved.len()} {h.saved.contains(7)}")
+    h = fresh()
+    h.m[h.grow(2)] = 99
+    print(f"{h.m.len()} {h.m[2]} {h.m[150]}")
+    h = fresh()
+    h.names[h.key("b")] = "y"
+    print(f"{h.names.len()} {h.names["b"]} {h.names["b!"]}")
+    // list elements
+    h = fresh()
+    h.xs[h.snap(1)] = 99
+    print(f"{h.xs[1]} {h.xs_saved[1]}")
+    h = fresh()
+    h.xs[h.grow(1)] = 77
+    print(f"{h.xs[1]} {h.xs.len()}")
+    h = fresh()
+    h.grid[h.bump()][h.bump()] = 5
+    print(f"{h.grid[1][2]} {h.grid[2][1]} {h.i}")
+    h = fresh()
+    h.xs[h.xs.len() - 1] = 9
+    print(h.xs[2])
+    // pushes
+    h = fresh()
+    h.xs.push(h.snap(4))
+    print(f"{h.xs.len()} {h.xs_saved.len()}")
+    h = fresh()
+    h.xs.push(h.grow(5))
+    print(f"{h.xs[^1]} {h.xs.len()}")
+    // a builder
+    h = fresh()
+    h.sb.append("a")
+    h.sb.append(h.snap_sb("b"))
+    print(f"{h.sb.build()} {h.sb_saved.build()}")
+    h = fresh()
+    h.sb.append("abcdef", h.bump(), h.bump() + 2)
+    print(h.sb.build())
+    // methods writing their receiver, with an argument that grows it
+    h = fresh()
+    h.xs.put_at(h.grow(1), 55)
+    print(f"{h.xs[1]} {h.xs.len()}")
+    h = fresh()
+    h.cs[0].inc(h.grow(3))
+    print(f"{h.cs[0].n} {h.cs.len()}")
+    // locals, with an `if` that copies
+    var ys = [1, 2, 3]
+    var zs: [int] = []
+    ys[if true { zs = ys; 0 } else { 1 }] = 50
+    print(f"{ys[0]} {zs[0]}")
+    ys.push(if true { zs = ys; 0 } else { 1 })
+    print(f"{ys.len()} {zs.len()}")
+    var m2 = [1: 10, 2: 20, 3: 30]
+    m2.remove(if m2.len() > 0 { var i = 100; while i < 300 { m2[i] = i; i += 1 }; 2 } else { 0 })
+    print(f"{m2.len()} {m2.contains(2)}")
+    // in a match arm's expression, which is no scope of its own
+    for k in 0..3 {
+        h = fresh()
+        match k {
+            0 => h.sb.append(if k == 0 { "zero" } else { "other" }),
+            1 => h.xs.put_at(h.snap(1), 5),
+            _ => h.m.remove(if k > 1 { h.grow(2) } else { 3 }),
+        }
+        print(f"{k}: {h.sb.build()} {h.xs[1]} {h.xs_saved.len()} {h.m.len()}")
+    }
+    var saved2: [int: int] = [:]
+    m2[if true { saved2 = m2; 5 } else { 6 }] = 1
+    print(f"{m2.len()} {saved2.len()}")
+}
+""",
+    "recursive_enums_across_tasks": r"""// H3 (MYLA-415): recursive enums crossing between tasks and actors: handed
+// to a child while the parent keeps them, returned by a child, awaited by
+// a sibling, kept by an actor, inside structs, lists and options
+import std.task as task
+
+enum L { Nil, Cons(int, L) }
+enum T { Leaf, Bin(T, int, T) }
+
+struct Held { name: str, tree: T, lists: [L] }
+
+fun head(l: L) -> int { return match l { Cons(k, _) => k, Nil => -1 } }
+fun count(l: L) -> int { return match l { Cons(_, r) => 1 + count(r), Nil => 0 } }
+fun size(t: T) -> int { return match t { Leaf => 0, Bin(l, _, r) => size(l) + 1 + size(r) } }
+fun sum(t: T) -> int { return match t { Leaf => 0, Bin(l, v, r) => sum(l) + v + sum(r) } }
+
+fun tree(n: int) -> T {
+    var t = T.Leaf
+    for i in 0..n { t = T.Bin(t, i, T.Bin(T.Leaf, i * 10, T.Leaf)) }
+    return t
+}
+
+fun upto(n: int) -> L {
+    var l = L.Nil
+    for i in 0..n { l = L.Cons(i, l) }
+    return l
+}
+
+async fun crossing(l: L) -> int { return head(l) + count(l) }
+async fun make(n: int) -> T { return tree(n) }
+async fun make_list(n: int) -> L { return upto(n) }
+async fun keep(h: Held) -> Held {
+    var out = h
+    out.lists.push(L.Cons(99, h.lists[0]))
+    return out
+}
+async fun maybe(n: int) -> Option<T> {
+    if n == 0 { return None }
+    return Some(tree(n))
+}
+
+actor Shelf { trees: [T], last: L }
+impl Shelf {
+    fun put(var self, t: T) -> int {
+        self.trees.push(t)
+        return self.trees.len()
+    }
+    fun set_last(var self, l: L) { self.last = l }
+    fun total(self) -> int {
+        var s = 0
+        for t in self.trees { s += sum(t) }
+        return s + count(self.last)
+    }
+    fun first(self) -> T { return self.trees[0] }
+}
+
+#main
+async fun main() {
+    // shared with the parent, which reads it again afterwards
+    let l = L.Cons(1, L.Cons(2, L.Nil))
+    async let c = crossing(l)
+    print(await c)
+    print(count(l))
+    // a child's result
+    async let a = make(4)
+    let t = await a
+    print(size(t))
+    print(sum(t))
+    async let b = make_list(5)
+    print(count(await b))
+    // a struct holding them, both ways
+    let h = Held { name: "h", tree: t, lists: [l, upto(3)] }
+    async let k = keep(h)
+    let h2 = await k
+    print(f"{h2.name} {size(h2.tree)} {h2.lists.len()} {head(h2.lists[2])} {count(h2.lists[2])} {h.lists.len()}")
+    async let m = maybe(3)
+    match await m {
+        Some(x) => print(size(x)),
+        None => print("none"),
+    }
+    // a list of them through task.all
+    let jobs: [async () -> T] = [async () => tree(1), async () => tree(2), async () => tree(3)]
+    let ts = await task.all(jobs)
+    var s = 0
+    for x in ts { s += size(x) }
+    print(s)
+    // an actor keeps them
+    let shelf = Shelf { trees: [], last: L.Nil }
+    print(await shelf.put(t))
+    print(await shelf.put(tree(2)))
+    await shelf.set_last(l)
+    print(await shelf.total())
+    let f = await shelf.first()
+    print(size(f) == size(t))
+    // the parent's copies are still whole
+    print(sum(t))
+    print(count(l))
+}
+""",
+    "actors_store_every_heap_type": r"""// H2 (MYLA-415): an actor's method keeps an argument of every heap type in
+// its state, in a program with tasks, the arguments temporaries or the
+// caller's own values, which the caller then changes
+enum Shape { Dot, Line(int, int) }
+enum L { Nil, Cons(int, L) }
+struct Rec { name: str, tags: [str] }
+
+actor Store {
+    s: str,
+    xs: [int],
+    m: [str: int],
+    sb: StringBuilder,
+    r: Rec,
+    t: (str, [int]),
+    o: Option<str>,
+    e: Shape,
+    l: L,
+    f: (int) -> int,
+    nested: [[str]],
+}
+
+impl Store {
+    fun put_s(var self, v: str) -> int { self.s = v; return self.s.len() }
+    fun put_xs(var self, v: [int]) -> int { self.xs = v; return self.xs.len() }
+    fun put_m(var self, v: [str: int]) -> int { self.m = v; return self.m.len() }
+    fun put_sb(var self, v: StringBuilder) { self.sb = v }
+    fun put_r(var self, v: Rec) -> int { self.r = v; return self.r.tags.len() }
+    fun put_t(var self, v: (str, [int])) { self.t = v }
+    fun put_o(var self, v: Option<str>) { self.o = v }
+    fun put_e(var self, v: Shape) { self.e = v }
+    fun put_l(var self, v: L) { self.l = v }
+    fun put_f(var self, v: (int) -> int) { self.f = v }
+    fun put_nested(var self, v: [[str]]) { self.nested = v }
+    fun put_two(var self, a: str, b: [int]) -> int {
+        self.s = a + self.s
+        self.xs = b
+        return self.s.len() + self.xs.len()
+    }
+    fun report(var self) -> str {
+        let lsum = match self.l { Cons(k, _) => k, Nil => -1 }
+        let e = match self.e { Dot => 0, Line(a, b) => a + b }
+        let g = self.f
+        var sb = self.sb
+        sb.append("!")
+        return f"{self.s} {self.xs.len()} {self.m.get_or("a", 0)} {sb.build()} {self.r.name}/{self.r.tags.len()} {self.t.0}{self.t.1.len()} {self.o.unwrap_or("-")} {e} {lsum} {g(1)} {self.nested.len()}"
+    }
+}
+
+async fun helper() -> int { return 1 }
+
+#main
+async fun main() {
+    async let h = helper()
+    print(await h)
+    let st = Store { s: "", xs: [], m: [:], sb: StringBuilder(), r: Rec { name: "", tags: [] }, t: ("", []), o: None, e: Shape.Dot, l: L.Nil, f: (x: int) => x, nested: [] }
+    print(await st.put_s(f"value {7}"))
+    print(await st.put_xs([1, 2, 3]))
+    var mine = [10, 20]
+    print(await st.put_xs(mine))
+    mine.push(30)
+    print(await st.put_m(["a": 1, "b": 2]))
+    var sb = StringBuilder()
+    sb.append("built")
+    await st.put_sb(sb)
+    sb.append(" more")
+    var tags = ["x", "y"]
+    print(await st.put_r(Rec { name: "rec", tags: tags }))
+    tags.push("z")
+    await st.put_t(("t", [1, 2, 3, 4]))
+    await st.put_o(Some("some"))
+    await st.put_e(Shape.Line(3, 4))
+    await st.put_l(L.Cons(5, L.Cons(6, L.Nil)))
+    let k = 41
+    await st.put_f((x: int) => x + k)
+    await st.put_nested([["a"], ["b", "c"]])
+    print(await st.report())
+    print(await st.put_two("pre-", mine))
+    print(await st.report())
+    print(f"{mine.len()} {tags.len()} {sb.build()}")
+}
+""",
 }
 
 # A program that allocates far more recursive-enum cells (~12M) than the heap
@@ -8904,7 +9444,7 @@ class TestCompilerParity(unittest.TestCase):
     def test_a_char_moved_past_the_scalars_is_a_runtime_error(self):
         # MYLA-318: `c + n` and `c - n` are checked as `n as char` is, past
         # U+10FFFF, into the surrogates, below 0 (the sum wraps as an int32),
-        # at the operator; the native message has no values (MYLA-17)
+        # at the operator; the native message has the value too (D183)
         cases = (("'\\u{10FFFF}', 1", "1114112"), ("'\\u{D7FF}', 1", "55296"), ("'a', -98", "-1"),
                  ("'a', 2147483647", "-2147483552"))
         for args, value in cases:
@@ -8916,7 +9456,99 @@ class TestCompilerParity(unittest.TestCase):
                 self.assertEqual(err.splitlines()[:2], [f"runtime error: invalid char: {value} is not a Unicode scalar value",
                                                         f"  --> {path}:2:14"])
                 self.assertEqual(build_and_run_full(Program(path), entry_path=path),
-                                 ("b\n", f"runtime error: invalid char\n  --> {path}:2:14\n", 1))
+                                 ("b\n", f"runtime error: invalid char: {value} is not a Unicode scalar value\n"
+                                          f"  --> {path}:2:14\n", 1))
+
+    def test_polymorphic_recursion_is_refused_where_it_is_built(self):
+        # MYLA-415 (H5): a generic function calling itself with a larger type
+        # asks for instances without end, and `myla build` never ended; it is
+        # a type error at the call now, on every target, when the type
+        # arguments grow too deep or (a pair of pairs of ...) too large; the
+        # interpreter runs it
+        myla = selfhost_tool("main")
+        cases = (
+            ("grow", "fun grow<T>(n: int, x: T) -> int {\n    if n == 0 { return 0 }\n"
+                     "    return 1 + grow<[T]>(n - 1, [x])\n}\nfun main() { print(grow(3, 1)) }\n",
+             "3:25", "65 types deep (the limit is 64)", "3\n"),
+            ("g", "fun f<T>(n: int, x: T) -> int {\n    if n == 0 { return 0 }\n    return g(n - 1, (x, x))\n}\n"
+                  "fun g<T>(n: int, x: T) -> int {\n    return f(n, x)\n}\nfun main() { print(f(3, 1)) }\n",
+             "3:13", "more than 4096 types in all", "0\n"),
+            ("h", "fun h<T>(n: int, x: T) -> int {\n"
+                  "    let k = (m: int) => if m == 0 { 0 } else { h(m - 1, Some(x)) }\n    return k(n)\n}\n"
+                  "fun main() { print(h(3, 1)) }\n",
+             "2:49", "65 types deep (the limit is 64)", "0\n"),
+        )
+        for callee, src, at, why, out in cases:
+            with self.subTest(callee=callee), tempfile.TemporaryDirectory() as tmp:
+                path = write_program(tmp, src)
+                ran = subprocess.run([myla, "run", path], capture_output=True, text=True, timeout=60)
+                self.assertEqual((ran.stdout, ran.returncode), (out, 0), ran.stderr)
+                for target in ("x86_64-linux", "aarch64-linux", "wasm32-wasi"):
+                    built = subprocess.run([myla, "build", path, "-o", os.path.join(tmp, "out"), "--target", target],
+                                           capture_output=True, text=True, timeout=60)
+                    self.assertEqual(built.returncode, 1, built.stderr)
+                    self.assertIn(f"type error: the instances of '{callee}' nest without end: this call asks for one "
+                                  f"whose type arguments are {why}\n  --> {path}:{at}\n", built.stderr)
+                    self.assertIn("(polymorphic recursion)", built.stderr)
+
+    def test_a_file_without_main_is_a_clean_error_for_build(self):
+        # MYLA-415 (Z3): `CodeGen.sig_of` fell back on the first function, so
+        # `myla build` of a library built that function as the entry point,
+        # since D179 an unread empty body: a program doing nothing, exit 0
+        # (wasm32: an internal error); now the interpreter's message, exit 1
+        myla = selfhost_tool("main")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = write_program(tmp, "fun f() -> int {\n    return 1\n}\n")
+            ran = subprocess.run([myla, "run", path], capture_output=True, text=True, timeout=60)
+            self.assertEqual((ran.returncode, ran.stderr),
+                             (1, "runtime error: no entry point: define '#main' or a function named 'main'\n"))
+            for flags in (["--target", "x86_64-linux"], ["-g"], ["--checked"], ["--target", "aarch64-linux"],
+                          ["--target", "wasm32-wasi"]):
+                with self.subTest(flags=flags):
+                    out = os.path.join(tmp, "out")
+                    built = subprocess.run([myla, "build", path, "-o", out] + flags, capture_output=True, text=True,
+                                           timeout=60)
+                    self.assertEqual((built.returncode, built.stderr),
+                                     (1, "type error: no entry point: define '#main' or a function named 'main'\n"))
+                    self.assertFalse(os.path.exists(out))
+
+    def test_runtime_errors_carry_the_interpreters_values(self):
+        # D183 (MYLA-415): a native runtime error is the interpreter's text,
+        # its values included; natively an index error said
+        # `index out of bounds`, a missing key `map key not found`, a bad
+        # char `invalid char`. The first two lines of the interpreter's
+        # report, the message and the position, are the binary's stderr
+        cases = {
+            "list_read": "let xs = [1, 2, 3]\n    let i = 7\n    print(xs[i])",
+            "list_negative": "let xs = [1, 2, 3]\n    let i = -1\n    print(xs[i])",
+            "list_write": "var xs = [1, 2, 3]\n    let i = 5\n    xs[i] = 1\n    print(xs[0])",
+            "from_the_end": "let xs = [1, 2, 3]\n    let i = 5\n    print(xs[^i])",
+            "byte_list": "let xs: [uint8] = [1, 2, 3]\n    let i: uint8 = 3\n    print(xs[i])",
+            "int64_index": "let xs = [1, 2, 3]\n    let i: int64 = 5000000000\n    print(xs[i])",
+            "inner_list": "var xs = [[1], [2]]\n    let i = 1\n    let j = 4\n    xs[i][j] = 1\n    print(xs[0][0])",
+            "string_read": "let s = \"abc\"\n    let i = 9\n    print(s[i])",
+            "int_key": "let m = [1: 2]\n    let k = 5\n    print(m[k])",
+            "str_key": "let m = [\"a\": 2]\n    let k = \"it's\"\n    print(m[k])",
+            "escaped_key": "let m = [\"a\": 2]\n    let k = \"tab\\there\"\n    print(m[k])",
+            "char_key": "let m = ['a': 2]\n    let k = 'z'\n    print(m[k])",
+            "bool_key": "let m = [true: 2]\n    let k = false\n    print(m[k])",
+            "tuple_key": "let m = [(1, \"a\"): 2]\n    let k = (3, \"b\")\n    print(m[k])",
+            "int8_key": "let m: [int8: int] = [1: 2]\n    let k: int8 = -5\n    print(m[k])",
+            "key_of_a_place": "var m = [1: [2]]\n    let k = 5\n    m[k][0] = 3\n    print(m[1][0])",
+            "surrogate": "let n = 55296\n    print(n as char)",
+            "char_plus": "let c = 'a'\n    print(c + 1114111)",
+            "append_range": "var sb = StringBuilder()\n    let a = 2\n    sb.append(\"abc\", a, 9)\n    print(sb.build())",
+        }
+        for name, body in cases.items():
+            with self.subTest(case=name), tempfile.TemporaryDirectory() as tmp:
+                path = write_program(tmp, "fun main() {\n    " + body + "\n}\n")
+                out, err, code = selfhost_run(path)
+                self.assertEqual(code, 1, err)
+                lines = err.splitlines()
+                self.assertTrue(lines[0].startswith("runtime error: ") and lines[1].startswith("  --> "), err)
+                self.assertNotIn(lines[0], ("runtime error: index out of bounds", "runtime error: map key not found",
+                                            "runtime error: invalid char"))
+                self.assertEqual(build_and_run_full(Program(path), entry_path=path), (out, "\n".join(lines[:2]) + "\n", 1))
 
     def test_become_runs_a_million_deep(self):
         # MYLA-128, MYLA-131: every `become` of the parity programs jumps, so
@@ -9312,6 +9944,18 @@ PINNED = {
     "inference_through_lambdas_try_and_variants": 'true\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\nfalse\ntrue\ntrue\n',
     # MYLA-417: new ("cannot reassign 'self'" before); native, aarch64 and wasm32 give the same
     "enum_var_self_assigns_self": '3\n2\n1\n0\nabbccc|\namber\namber green\n10\n',
+    # MYLA-415 (H2): native code segfaulted (a string, list or map argument kept)
+    "actors_store_every_heap_type": '1\n7\n3\n2\n2\n2\nvalue 7 2 1 built! rec/2 t4 some 7 5 42 2\n14\npre-value 7 3 1 built! rec/2 t4 some 7 5 42 2\n3 3 built more\n',
+    # MYLA-415 (H3): native code segfaulted in __deepb_ and on a child's result
+    "recursive_enums_across_tasks": '3\n2\n8\n66\n5\nh 8 3 99 3 2\n6\n12\n1\n2\n79\ntrue\n66\n2\n',
+    # MYLA-415 (H4): native code wrote into the copy, or into the freed cell
+    "keys_that_change_their_container": '2 3 true\n302 false 399\n4 3 false\n303 99 150\n3 y added\n99 2\n77 303\n5 0 2\n9\n4 3\n5 304\nab a\nbcd\n55 303\n3 301\n50 1\n4 3\n202 false\n0: zero 2 0 3\n1:  5 3 3\n2:  2 0 302\n203 202\n',
+    # MYLA-415 (M3): native code answered equal for one cell without comparing
+    "list_equal_to_itself": 'false false true false\nfalse true\nfalse\nfalse true\neq called\neq called\ntrue\nfalse\nfalse\ntrue true true true true\ntrue false\n',
+    # MYLA-415 (M2, MYLA-367): native code didn't link ('undefined reference to myla_Box.add')
+    "arithmetic_operators_of_generic_impls": '3\n5\n42\n4\n1\n3.75\nabcd\nababab\n15000000000\n3\n3 xy\nlinked\n',
+    # MYLA-415 (M15): stack overflow on aarch64 and wasm32 (release and deep copy recursed)
+    "values_nested_through_closures": '7\n1\n1\n2\n5\n50001 100000 50000 100000\nreleased\n',
 }
 
 

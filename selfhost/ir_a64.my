@@ -326,6 +326,13 @@ impl CodeGen {
 
     // A jump to the runtime error `trap` reporting `line:col` (x1 the
     // position record, as `__panic` takes it).
+    // A call of `__trap_<kind>(pos, …)` (D183), its values in x1 and on.
+    fun a64_value_trap(var self, trap: str, line: int32, col: int32) {
+        if line <= 0 { self.emit("mov x0, #0") }
+        else { self.a64_adr("x0", self.position_label(line, col)) }
+        self.emit(format("bl {}", trap))
+    }
+
     fun a64_trap(var self, trap: str, line: int32, col: int32) {
         if line <= 0 { self.emit("mov x1, #0") }
         else { self.a64_adr("x1", self.position_label(line, col)) }
@@ -516,7 +523,15 @@ impl CodeGen {
                 self.emit("cmp x13, x14")
                 self.emit(format("b.le {}", good))
                 self.emit(format("{}:", bad))
-                self.a64_trap("__trap_index", p.line, p.col)
+                // the range and the string's length reported (D183)
+                let tr = self.want_trap("range")
+                if tr == "" { self.a64_trap("__trap_index", p.line, p.col) }
+                else {
+                    self.emit("mov x1, x12")
+                    self.emit("mov x2, x13")
+                    self.emit("ldr x3, [x11]")
+                    self.a64_value_trap(tr, p.line, p.col)
+                }
                 self.emit(format("{}:", good))
                 self.emit("add x1, x11, #8")
                 self.emit("add x1, x1, x12")
@@ -572,7 +587,14 @@ impl CodeGen {
                     let ok = self.label()
                     self.emit("cmp x11, x12")
                     self.emit(format("b.lo {}", ok))
-                    self.a64_trap("__trap_index", p.line, p.col)
+                    // the index and the length reported (D183)
+                    let tr = self.want_trap(if is_str { "sindex" } else { "lindex" })
+                    if tr == "" { self.a64_trap("__trap_index", p.line, p.col) }
+                    else {
+                        self.emit(x11_widened(f.temps[i], "1"))
+                        self.emit("mov x2, x12")
+                        self.a64_value_trap(tr, p.line, p.col)
+                    }
                     self.emit(format("{}:", ok))
                 }
                 if is_str { self.emit("add x10, x10, #8") } else { self.emit("add x10, x10, #16") }
@@ -1169,4 +1191,20 @@ fun a64_fcond(op: str) -> str {
     if op == "<=" { return "ls" }
     if op == ">" { return "gt" }
     return "ge"
+}
+
+// The move of the index in x11, of type `t`, into the register x`dst` as
+// its value: sign- or zero-extended from its width (D183).
+#test(Type.TInt(32, true), "1")["sxtw x1, w11"]
+#test(Type.TInt(16, false), "1")["uxth w1, w11"]
+fun x11_widened(t: Type, dst: str) -> str {
+    return match t {
+        Type.TInt(w, signed) => {
+            if w == 32 { if signed { format("sxtw x{}, w11", dst) } else { format("mov w{}, w11", dst) } }
+            else if w == 16 { if signed { format("sxth x{}, w11", dst) } else { format("uxth w{}, w11", dst) } }
+            else if w == 8 { if signed { format("sxtb x{}, w11", dst) } else { format("uxtb w{}, w11", dst) } }
+            else { format("mov x{}, x11", dst) }
+        },
+        _ => format("mov x{}, x11", dst),
+    }
 }

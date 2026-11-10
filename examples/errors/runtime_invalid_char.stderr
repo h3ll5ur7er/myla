@@ -1,0 +1,5 @@
+runtime error: invalid char: 55296 is not a Unicode scalar value
+  --> examples/errors/runtime_invalid_char.my:7:14
+  |
+7 |     return n as char
+  |            ^^^^^^^^^

@@ -17,10 +17,11 @@ catches two kinds of regression at once: a feature that silently *stops*
 rejecting bad input, and one that starts rejecting it for the *wrong* reason or
 in the wrong stage.
 
-A runtime error file also names what the native binary prints, whose message
-has no values in it (MYLA-17, MYLA-58)::
+A runtime error file also names what the native binary prints, the
+interpreter's message with its values (D183, MYLA-415; before, it had none,
+MYLA-17, MYLA-58)::
 
-    //~ native: runtime error: index out of bounds
+    //~ native: runtime error: list index 3 out of bounds (len 3)
 
 and is built with the self-hosted compiler, which must exit with status 1 and
 print exactly that line and the interpreter's position, `  --> <file>:<line>:<col>`

@@ -980,7 +980,7 @@ impl CodeGen {
             Inst.Elem(d, c, i, stride, is_str, checked, p) => {
                 self.load_temp(c, "rax", temp_base)
                 self.load_temp(i, "rcx", temp_base)
-                if checked { self.emit_elem_check(p.line, p.col) }
+                if checked { self.emit_elem_check(p.line, p.col, is_str, f.temps[i]) }
                 self.emit(format("leaq {}, %rax", self.elem_operand(is_str, stride)))
                 self.store_temp(d, temp_base)
             },
@@ -1686,7 +1686,7 @@ impl CodeGen {
                 if !ok { return false }
                 self.load_temp(c, "rax", temp_base)
                 self.load_temp(i, "rcx", temp_base)
-                if checked { self.emit_elem_check(p.line, p.col) }
+                if checked { self.emit_elem_check(p.line, p.col, is_str, f.temps[i]) }
                 let at = self.elem_operand(is_str, stride)
                 match b {
                     Inst.LoadAt(d, q, off, width) => {

@@ -2153,13 +2153,13 @@ CHILD_FAILURES = {
         "fun pick(xs: [int], i: int) -> int {\n    return xs[i]\n}\n"
         "#main\nasync fun main() {\n    async let a = noisy(1)\n    print(\"parent\")\n    print(await a)\n"
         "    async let b = pick([1, 2], 5)\n    print(\"between\")\n    print(await b)\n}\n",
-        "parent\nnoisy 1\n2\nbetween\n", 1, "runtime error: index out of bounds\n"),
+        "parent\nnoisy 1\n2\nbetween\n", 1, "runtime error: list index 5 out of bounds (len 2)\n"),
     # an out-of-bounds index in a child that is never awaited: its scope's end
     "held_trap": (
         "async fun pick(xs: [int], i: int) -> int {\n    return xs[i]\n}\n"
         "#main\nasync fun main() {\n    if true {\n        async let a = pick([1, 2], 5)\n"
         "        print(\"in scope\")\n    }\n    print(\"never\")\n}\n",
-        "in scope\n", 1, "runtime error: index out of bounds\n"),
+        "in scope\n", 1, "runtime error: list index 5 out of bounds (len 2)\n"),
 }
 
 

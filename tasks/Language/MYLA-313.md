@@ -2,7 +2,7 @@
 id: MYLA-313
 title: "The Hash trait: every Eq + Hash type is a map key (D163)"
 type: feature
-status: todo
+status: review
 priority: medium
 labels: [maps, tuples, traits, derive]
 ---
@@ -76,4 +76,4 @@ The owner chose written bounds once the wave 2 seed knew `Hash`: the implied bou
 
 Not ready ([[Project/Review-2026-11-09]]): native `==` on a list answers "equal" for the same cell without comparing: wrong for NaN and any non-reflexive `eq` (M3). The fix is in [[MYLA-415]].
 
-- [ ] The review's blocker, fixed with [[MYLA-415]]
+- [x] The review's blocker, fixed with [[MYLA-415]]: `__eq_list_<E>` keeps its same-cell shortcut only where the elements' `==` is built in and reflexive (integers, `char`, `bool`, strings, lists and tuples of such); the parity program `list_equal_to_itself` (NaN, a `Never` and a noisy `eq`, a derived struct over floats) agrees with the interpreter on three targets
