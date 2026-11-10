@@ -112,5 +112,26 @@ class TestBoundsNameAModulesTrait(unittest.TestCase):
             self.assertEqual(run_file_both_now(path), ('13\nx\n0\n{"x":4}\n', "", 0))
 
 
+class TestModuleIdCollision(unittest.TestCase):
+    def test_it_is_reported_at_the_import(self):
+        # `proj/up/a.my` and `a.my` above the project root are both `up$a`:
+        # the error is at the import that loads the second (MYLA-418; it
+        # had no position)
+        import subprocess
+        from ._tools import STDLIB_ROOT, selfhost_tool
+        with tempfile.TemporaryDirectory() as tmp:
+            os.makedirs(os.path.join(tmp, "proj", "up"))
+            write_program(tmp, "pub fun g() -> int {\n    return 1\n}\n", "a.my")
+            write_program(os.path.join(tmp, "proj", "up"), "pub fun f() -> int {\n    return 2\n}\n", "a.my")
+            write_program(os.path.join(tmp, "proj"),
+                          "from .up.a import f\nfrom ..a import g\n\nfun main() {\n    print(f() + g())\n}\n")
+            proc = subprocess.run([selfhost_tool("main"), "check", os.path.join("proj", "main.my"),
+                                   "--stdlib", STDLIB_ROOT], capture_output=True, text=True, cwd=tmp)
+            self.assertEqual(proc.returncode, 1)
+            self.assertTrue(proc.stderr.startswith(
+                "module error: module id collision 'up$a' between proj/up/a.my and a.my\n"
+                "  --> proj/main.my:2:6\n"), proc.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

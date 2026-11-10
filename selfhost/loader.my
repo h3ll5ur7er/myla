@@ -871,17 +871,43 @@ impl Loader {
         return Ok(idx)
     }
 
+    // Two modules with one id is an error at the import that loaded the
+    // second (the review of 2026-11-09: it had no position).
     fun check_ids(self) -> Result<int32, Report> {
         var seen: [str: str] = [:]
-        for m in self.modules {
+        var k = 0
+        while k < self.modules.len() {
+            let m = self.modules[k]
+            k += 1
             if m.id == "" { continue }
             match seen.get(m.id) {
-                Some(other) => { return Err(at(m.path, 0, 0, no_span(), format("module id collision '{}' between {} and {}", m.id, other, m.path))) },
+                Some(other) => {
+                    let msg = format("module id collision '{}' between {} and {}", m.id, other, m.path)
+                    return Err(self.import_of(k - 1, msg))
+                },
                 None => {},
             }
             seen[m.id] = m.path
         }
         return Ok(0)
+    }
+
+    // `msg` at the first import that loads the module `k`; at the module's
+    // file when none does (an implicit module, the runtime).
+    fun import_of(self, k: int32, msg: str) -> Report {
+        for m in self.modules {
+            var t = 0
+            while t < m.targets.len() && t < m.imports.len() {
+                if m.targets[t] == k {
+                    match m.imports[t].kind {
+                        DeclKind.ImportDecl(p, items, alias, isp) => { return at(m.path, p.line, p.col, p.sp, msg) },
+                        _ => {},
+                    }
+                }
+                t += 1
+            }
+        }
+        return at(self.modules[k].path, 0, 0, no_span(), msg)
     }
 
     fun build_exports(var self) {
