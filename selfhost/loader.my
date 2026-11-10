@@ -1551,7 +1551,7 @@ impl Renamer {
                     if b.is_module { mid = b.value } else { qualified = b.value }
                 },
                 None => {
-                    self.fail(cur.line, cur.col, cur.sp, format("module '{}' does not export '{}' (declarations are private unless marked 'pub')", dotted_id(mid), name))
+                    self.fail(cur.line, cur.col, cur.sp, format("module does not export '{}' (declarations are private unless marked 'pub')", name))
                     return Some(e)
                 },
             }

@@ -1,5 +1,0 @@
-module error: module 'std.deque' does not export 'Nope' (declarations are private unless marked 'pub')
-  --> examples/errors/module_call_not_exported_names_the_module.my:6:13
-  |
-6 |     let d = deque.Nope()
-  |             ^^^^^

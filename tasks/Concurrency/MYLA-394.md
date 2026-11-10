@@ -2,7 +2,7 @@
 id: MYLA-394
 title: "D95's reentrancy warning misses a builtin mutator inside an expression"
 type: bug
-status: todo
+status: review
 priority: low
 labels: [checker, concurrency, warnings]
 ---
@@ -34,4 +34,4 @@ Suites at the batch's tip: the bootstrap's fixed point; `scripts/test.sh fast` 7
 
 Not ready ([[Project/Review-2026-11-09]]): D95 misses a mutator in the head of `if`, `while` and `match`. The fix is in [[MYLA-417]].
 
-- [ ] The review's blocker, fixed with [[MYLA-417]]
+- [x] The review's blocker, fixed with [[MYLA-417]]: a mutator in the head of an `if` or a `while`, a match's scrutinee or a guard changes its field before the head is examined (`Reentrancy.head`, `value_changes`); six new `warnings_of` cases

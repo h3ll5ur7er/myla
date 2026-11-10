@@ -1182,7 +1182,7 @@ fun join_open(a: Type, b: Type) -> Option<Type> {
 // that isn't such a literal does.
 struct LitColumn { ty: Type, have: bool, first: Expr, slot: int32, fixed: bool }
 
-// Whether `t` holds an `Option` or a `Result` (D182, `hash_need`).
+// Whether `t` holds an `Option` or a `Result` (D182, `prelude_need`).
 #test(Type.TTuple([Type.TStr, Type.TEnum("Option", [Type.TStr])]))[true]
 #test(Type.TMap(Type.TStruct("Box", [Type.TEnum("Result", [Type.TStr, Type.TBool])]), Type.TStr))[true]
 #test(Type.TList(Type.TEnum("Shape", [])))[false]
@@ -4272,7 +4272,7 @@ impl Checker {
         if ei >= 0 { for v in self.enums[ei].variants { for pt in v.payload { self.prelude_need(pt) } } }
     }
 
-    // `hash_need` of the types a generic call's substitution gives.
+    // `prelude_need` of the types a generic call's substitution gives.
     fun prelude_need_all(var self, subst: [Subst]) {
         if !self.prelude_needed { for sb in subst { self.prelude_need(sb.ty) } }
     }
