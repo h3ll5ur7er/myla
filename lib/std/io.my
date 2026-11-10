@@ -292,10 +292,13 @@ impl Read for MemoryStream {
 impl Write for MemoryStream {
     // Over the bytes at the cursor, and on past the end; a gap left by a
     // seek past the end is filled with zeros.
+    // Past 2,147,483,647 bytes is `Other(27)` (EFBIG), as for a file too
+    // large.
     #test(from_str("abc"), [120u8])[Ok(1)]
     fun write(var self, b: [uint8]) -> Result<int, IoError> {
-        self.fill_gap()
         let n = b.len()
+        if self.pos > 2147483647 - n { return Err(IoError.Other(27)) }
+        self.fill_gap()
         var i = 0
         let over = self.data.len() - self.pos
         while i < n && i < over {
@@ -316,14 +319,22 @@ impl Write for MemoryStream {
 }
 
 impl Seek for MemoryStream {
+    // Before the start or past 2,147,483,647 is `InvalidInput`, an offset
+    // of any size too (D184).
     #test(from_str("abc"), SeekFrom.End(-1))[Ok(2i64)]
     #test(from_str("abc"), SeekFrom.Current(-1))[Err(IoError.InvalidInput)]
+    #test(from_str("abc"), SeekFrom.Current(9223372036854775807))[Err(IoError.InvalidInput)]
+    #test(from_str("abc"), SeekFrom.End(-9223372036854775807 - 1))[Err(IoError.InvalidInput)]
+    #test(from_str("abc"), SeekFrom.Start(2147483647))[Ok(2147483647i64)]
     fun seek(var self, pos: SeekFrom) -> Result<int64, IoError> {
-        let to = match pos {
-            Start(k) => k
-            Current(k) => (self.pos as int64) + k
-            End(k) => (self.data.len() as int64) + k
+        let (base, k) = match pos {
+            Start(k) => (0i64, k)
+            Current(k) => (self.pos as int64, k)
+            End(k) => (self.data.len() as int64, k)
         }
+        // the base is in 0..2^31, so only an offset that far out overflows
+        if k < -4294967296 || k > 4294967296 { return Err(IoError.InvalidInput) }
+        let to = base + k
         if to < 0 || to > 2147483647 { return Err(IoError.InvalidInput) }
         self.pos = to as int32
         return Ok(to)
@@ -384,9 +395,12 @@ impl<R: Read> Buffered<R> {
         return Ok(text_of(b, 0, b.len()))
     }
 
-    // Read at least `want` more bytes if the input has them (one `read` of at
-    // least CHUNK bytes, which may give fewer); false at the end of the
-    // input. The bytes already returned are dropped from the buffer.
+    // The next bytes of the input in the buffer, which is used up: one
+    // `read` of `want` bytes, at least CHUNK, which may give fewer; false at
+    // the end of the input. A caller that needs more than a read gives
+    // gathers the reads in a builder of its own (`read_line`, `read_exact`),
+    // so a byte is copied once, and not again with the buffer's tail on
+    // each read (M17).
     fun fill(var self, want: int32) -> Result<bool, IoError> {
         if self.eof { return Ok(false) }
         var n = CHUNK
@@ -396,14 +410,7 @@ impl<R: Read> Buffered<R> {
             self.eof = true
             return Ok(false)
         }
-        if self.pos >= self.buf.len() {
-            self.buf = chunk
-        } else {
-            var sb = StringBuilder()
-            sb.append(self.buf, self.pos, self.buf.len())
-            sb.append(chunk)
-            self.buf = sb.build()
-        }
+        self.buf = chunk
         self.pos = 0
         return Ok(true)
     }
@@ -428,33 +435,72 @@ impl<R: Read> Buffered<R> {
     }
 
     // The next line, without its "\n" (a "\r" before it is kept); a last line
-    // without "\n" counts too. None at the end of the input.
+    // without "\n" counts too. None at the end of the input. A line longer
+    // than what is buffered is gathered in a builder: linear in its length
+    // however short the reads (M17). A failed read leaves what was read of
+    // the line unread.
     fun read_line(var self) -> Result<Option<str>, IoError> {
-        var scanned = 0                    // bytes after pos known not to be "\n"
-        var found = -1
-        while found < 0 {
-            found = self.newline_from(self.pos + scanned)
-            if found < 0 {
-                scanned = self.buf.len() - self.pos
-                if !self.fill(1)? {
-                    if scanned == 0 { return Ok(None) }
-                    found = self.buf.len()
+        let found = self.newline_from(self.pos)
+        if found >= 0 {
+            return Ok(Some(self.take_line(found)))
+        }
+        var line = StringBuilder()
+        while true {
+            line.append(self.buf, self.pos, self.buf.len())
+            self.buf = ""
+            self.pos = 0
+            let more = self.fill(1)
+            match more {
+                Ok(true) => {}
+                Ok(false) => {
+                    if line.len() == 0 { return Ok(None) }
+                    return Ok(Some(line.build()))
+                }
+                Err(e) => {
+                    self.buf = line.build()
+                    return Err(e)
                 }
             }
+            let end = self.newline_from(0)
+            if end >= 0 {
+                line.append(self.buf, 0, end)
+                self.pos = end + 1
+                return Ok(Some(line.build()))
+            }
         }
-        return Ok(Some(self.take_line(found)))
+        unreachable()
     }
 
     // Exactly the next `n` bytes ("" for n <= 0); None if the input ends
-    // first (the bytes that were there stay unread).
+    // first, and then the bytes that were there stay unread, as after a
+    // failed read. Linear in `n` however short the reads (M17).
     fun read_exact(var self, n: int32) -> Result<Option<str>, IoError> {
         if n <= 0 { return Ok(Some("")) }
-        while self.buf.len() - self.pos < n {
-            if !self.fill(n - (self.buf.len() - self.pos))? { return Ok(None) }
+        var out = StringBuilder()
+        while true {
+            let need = n - out.len()
+            if self.buf.len() - self.pos >= need {
+                out.append(self.buf, self.pos, self.pos + need)
+                self.pos = self.pos + need
+                return Ok(Some(out.build()))
+            }
+            out.append(self.buf, self.pos, self.buf.len())
+            self.buf = ""
+            self.pos = 0
+            let more = self.fill(n - out.len())
+            match more {
+                Ok(true) => {}
+                Ok(false) => {
+                    self.buf = out.build()
+                    return Ok(None)
+                }
+                Err(e) => {
+                    self.buf = out.build()
+                    return Err(e)
+                }
+            }
         }
-        let out = slice(self.buf, self.pos, self.pos + n)
-        self.pos = self.pos + n
-        return Ok(Some(out))
+        unreachable()
     }
 
     // Everything up to the end of the input ("" if it has ended).
@@ -551,32 +597,65 @@ impl<R: Read + Pollable> Buffered<R> {
 
     // `read_line`, the task waiting for the input.
     async fun read_line_async(var self) -> Result<Option<str>, IoError> {
-        var scanned = 0
-        var found = -1
-        while found < 0 {
-            found = self.newline_from(self.pos + scanned)
-            if found < 0 {
-                scanned = self.buf.len() - self.pos
-                let more = await self.fill_async(1)
-                if !more? {
-                    if scanned == 0 { return Ok(None) }
-                    found = self.buf.len()
+        let found = self.newline_from(self.pos)
+        if found >= 0 {
+            return Ok(Some(self.take_line(found)))
+        }
+        var line = StringBuilder()
+        while true {
+            line.append(self.buf, self.pos, self.buf.len())
+            self.buf = ""
+            self.pos = 0
+            let more = await self.fill_async(1)
+            match more {
+                Ok(true) => {}
+                Ok(false) => {
+                    if line.len() == 0 { return Ok(None) }
+                    return Ok(Some(line.build()))
+                }
+                Err(e) => {
+                    self.buf = line.build()
+                    return Err(e)
                 }
             }
+            let end = self.newline_from(0)
+            if end >= 0 {
+                line.append(self.buf, 0, end)
+                self.pos = end + 1
+                return Ok(Some(line.build()))
+            }
         }
-        return Ok(Some(self.take_line(found)))
+        unreachable()
     }
 
     // `read_exact`, the task waiting for the input.
     async fun read_exact_async(var self, n: int32) -> Result<Option<str>, IoError> {
         if n <= 0 { return Ok(Some("")) }
-        while self.buf.len() - self.pos < n {
-            let more = await self.fill_async(n - (self.buf.len() - self.pos))
-            if !more? { return Ok(None) }
+        var out = StringBuilder()
+        while true {
+            let need = n - out.len()
+            if self.buf.len() - self.pos >= need {
+                out.append(self.buf, self.pos, self.pos + need)
+                self.pos = self.pos + need
+                return Ok(Some(out.build()))
+            }
+            out.append(self.buf, self.pos, self.buf.len())
+            self.buf = ""
+            self.pos = 0
+            let more = await self.fill_async(n - out.len())
+            match more {
+                Ok(true) => {}
+                Ok(false) => {
+                    self.buf = out.build()
+                    return Ok(None)
+                }
+                Err(e) => {
+                    self.buf = out.build()
+                    return Err(e)
+                }
+            }
         }
-        let out = slice(self.buf, self.pos, self.pos + n)
-        self.pos = self.pos + n
-        return Ok(Some(out))
+        unreachable()
     }
 
     // `read_to_end`, the task waiting for the input.
@@ -593,6 +672,41 @@ impl<R: Read + Pollable> Buffered<R> {
         self.buf = ""
         self.pos = 0
         return Ok(sb.build())
+    }
+}
+
+// --- Short reads ------------------------------------------------------------------
+
+// A stream that gives at most `most` bytes a read of the stream it owns, as
+// a pipe, a socket or a decompressor may: for the tests of code that reads
+// streams, which must not count on a read giving all it asked for.
+pub struct ShortReads<R> {
+    src: [R],
+    most: int32,
+}
+
+// The stream `r` read at most `most` bytes at a time (at least 1).
+pub fun short_reads<R: Read>(r: R, most: int32) -> ShortReads<R> {
+    var k = most
+    if k < 1 { k = 1 }
+    return ShortReads { src: [r], most: k }
+}
+
+impl<R: Read> ShortReads<R> {
+    // The stream it reads.
+    fun into_inner(self) -> R {
+        return self.src[0]
+    }
+}
+
+impl<R: Read> Read for ShortReads<R> {
+    fun read(var self, n: int) -> Result<[uint8], IoError> {
+        var k = n
+        if k > self.most { k = self.most }
+        var r = self.src.pop()
+        let got = r.read(k)
+        self.src.push(r)
+        return got
     }
 }
 
@@ -1089,4 +1203,77 @@ fun bytes_only_streams() {
         Ok(t) => holds(t.seen == 7, "copy")
         Err(_) => panic("copy")
     }
+}
+
+// The lines and exact counts of a text read 1, 2, 3, 7, 64 bytes at a
+// time and all at once are the same (M17's reads, which give little).
+#test
+fun buffered_over_short_reads() {
+    var long = StringBuilder()
+    var i = 0
+    while i < 300 {
+        long.append_byte('x')
+        i += 1
+    }
+    let text = "one\r\n\ntwo words\n" + long.build() + "\nlast"
+    let want = ["one\r", "", "two words", long.build(), "last", "<end>"]
+    for k in [1, 2, 3, 7, 64, 100000] {
+        var r = buffered(short_reads(from_str(text), k))
+        for w in want {
+            holds(shown_line(r.read_line()) == w, f"a line, {k} bytes a read")
+        }
+        var e = buffered(short_reads(from_str("abcdefghij"), k))
+        holds(shown_line(e.read_exact(3)) == "abc", "three bytes")
+        holds(shown_line(e.read_exact(4)) == "defg", "four more")
+        holds(shown_line(e.read_exact(5)) == "<end>", "too few left")
+        holds(shown_line(e.read_exact(3)) == "hij", "which stay unread")
+        holds(shown_line(e.read_exact(1)) == "<end>", "the end")
+    }
+    var s = short_reads(from_str("abcdef"), 4)
+    holds(shown(s.read(10)) == "abcd", "at most four bytes a read")
+    holds(shown(s.read(1)) == "e", "fewer if asked")
+    holds(s.into_inner().position() == 5i64, "into_inner")
+    var one = short_reads(from_str("ab"), 0)
+    holds(shown(one.read(5)) == "a", "at least one byte a read")
+}
+
+// A stream that gives one of `parts` a read, and fails for a part "!".
+struct Hiccup {
+    parts: [str],
+    at: int,
+}
+
+impl Read for Hiccup {
+    fun read(var self, n: int) -> Result<[uint8], IoError> {
+        if self.at >= self.parts.len() { return Ok([]) }
+        let p = self.parts[self.at]
+        self.at += 1
+        if p == "!" { return Err(IoError.Interrupted) }
+        return Ok(bytes_of(p))
+    }
+}
+
+// A read that fails in the middle of a line or an exact count leaves the
+// bytes read so far unread.
+#test
+fun buffered_failed_read_keeps_bytes() {
+    var r = buffered(Hiccup { parts: ["ab", "cd", "!", "ef\ngh", "!", "ij"], at: 0 })
+    holds(shown_line(r.read_line()) == "<error>", "the read fails")
+    holds(shown_line(r.read_line()) == "abcdef", "the line read before it is kept")
+    holds(shown_line(r.read_exact(3)) == "<error>", "a read fails again")
+    holds(shown_line(r.read_exact(3)) == "ghi", "the bytes before it are kept")
+    holds(shown_line(r.read_line()) == "j", "the rest")
+    holds(shown_line(r.read_line()) == "<end>", "the end")
+}
+
+// Offsets and lengths a memory stream can't hold are errors, not overflow
+// (D184).
+#test
+fun memory_limits() {
+    var m = from_str("abc")
+    holds(said(m.seek(SeekFrom.Current(9223372036854775807))) == "InvalidInput", "far past the end")
+    holds(said(m.seek(SeekFrom.Start(-9223372036854775807 - 1))) == "InvalidInput", "far before the start")
+    holds(said(m.seek(SeekFrom.Start(2147483647))) == "2147483647", "the last offset")
+    holds(said(m.write(bytes_of("x"))) == "Other(27)", "a write past it")
+    holds(m.bytes().len() == 3, "which changes nothing")
 }
