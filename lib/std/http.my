@@ -316,6 +316,116 @@ fun parse_hex(s: str) -> int {
     return v as int
 }
 
+// Whether what follows a chunk's size in `line`, from `at`, is a list of
+// chunk extensions (RFC 9112, section 7.1.1): each a `;` and a token,
+// perhaps `=` and a token or a quoted string, spaces and tabs between.
+#test("5", 1)[true]
+#test("5 ; a ;b=c; d = \"x\\\"y\"", 1)[true]
+#test("5 junk", 1)[false]
+#test("5;", 1)[false]
+#test("5;a=", 1)[false]
+#test("5;a=\"b", 1)[false]
+#test("5;a\rb", 1)[false]
+fun chunk_extensions(line: str, at: int) -> bool {
+    let n = line.len()
+    var i = at
+    while true {
+        i = skip_ows(line, i)
+        if i == n {
+            return true
+        }
+        if line[i] != 59 {
+            return false
+        }
+        i = skip_ows(line, i + 1)
+        let name = i
+        while i < n && token_byte(line[i]) {
+            i += 1
+        }
+        if i == name {
+            return false
+        }
+        let after = skip_ows(line, i)
+        if after < n && line[after] == 61 {
+            i = skip_ows(line, after + 1)
+            if i < n && line[i] == 34 {
+                i = quoted_end(line, i)
+                if i < 0 {
+                    return false
+                }
+            } else {
+                let v = i
+                while i < n && token_byte(line[i]) {
+                    i += 1
+                }
+                if i == v {
+                    return false
+                }
+            }
+        }
+    }
+    unreachable()
+}
+
+// The position after the spaces and tabs of `s` from `i`.
+#test(" \tx", 0)[2]
+#test("x", 1)[1]
+fun skip_ows(s: str, i: int) -> int {
+    var j = i
+    while j < s.len() && (s[j] == SP || s[j] == HT) {
+        j += 1
+    }
+    return j
+}
+
+// The position after the quoted string that begins at `i` in `s` (RFC
+// 9110, section 5.6.4), or -1 if it doesn't end or holds a control byte.
+#test("\"ab\"c", 0)[4]
+#test("\"a\\\"b\"", 0)[6]
+#test("\"ab", 0)[-1]
+#test("\"a\0\"", 0)[-1]
+fun quoted_end(s: str, i: int) -> int {
+    var j = i + 1
+    while j < s.len() {
+        let b = s[j]
+        if b == 34 {
+            return j + 1
+        }
+        if b == 92 {
+            j += 1
+            if j == s.len() {
+                return -1
+            }
+        }
+        let c = s[j]
+        if (c < 32 && c != HT) || c == 127 {
+            return -1
+        }
+        j += 1
+    }
+    return -1
+}
+
+// Whether `v`, a `Host` field's value, is a host and perhaps a port (RFC
+// 9110, section 7.2), or empty.
+#test("example.com")[true]
+#test("example.com:8080")[true]
+#test("[::1]:80")[true]
+#test("")[true]
+#test("a b")[false]
+#test("a/b")[false]
+#test("u@h")[false]
+#test("h:x")[false]
+fun is_host(v: str) -> bool {
+    if v.len() == 0 {
+        return true
+    }
+    return match url_m.parse("//" + v) {
+        Ok(u) => u.path == "" && u.user_info == None && u.query == None && u.fragment == None
+        Err(_) => false
+    }
+}
+
 // The pieces of a comma-separated header value (or of several), trimmed
 // and in lower case, the empty ones left out: `Connection`'s,
 // `Transfer-Encoding`'s, `Content-Encoding`'s.
@@ -932,7 +1042,7 @@ impl Parser {
                 if k == 0 {
                     return at
                 }
-                if self.body_len + k > self.max_body {
+                if k > self.max_body - self.body_len {
                     self.fail(HttpError.BodyTooLarge)
                     return at
                 }
@@ -950,7 +1060,7 @@ impl Parser {
                         if partial > MAX_CHUNK_LINE {
                             self.fail(HttpError.BadChunk)
                         }
-                    } else if self.seen + partial > self.max_head {
+                    } else if partial > self.max_head - self.seen {
                         self.fail(HttpError.HeadersTooLarge)
                     }
                     return at
@@ -973,11 +1083,11 @@ impl Parser {
     fun line(var self, line: str, used: int) {
         let s = self.state
         if s == S_START || s == S_HEAD || s == S_TRAILER {
-            self.seen += used
-            if self.seen > self.max_head {
+            if used > self.max_head - self.seen {
                 self.fail(HttpError.HeadersTooLarge)
                 return
             }
+            self.seen += used
         }
         if s == S_START {
             // empty lines before a message are skipped (RFC 9112, 2.2)
@@ -997,9 +1107,11 @@ impl Parser {
                 end += 1
             }
             let size = parse_hex(part(line, 0, end))
-            if size == -1 {
+            // the body so far is within the limit, so the room left is
+            // `max_body - body_len`: a sum could pass the largest `int` (H7)
+            if size == -1 || line.len() > MAX_CHUNK_LINE || !chunk_extensions(line, end) {
                 self.fail(HttpError.BadChunk)
-            } else if size == -2 || self.body_len + size > self.max_body {
+            } else if size == -2 || size > self.max_body - self.body_len {
                 self.fail(HttpError.BodyTooLarge)
             } else if size == 0 {
                 self.seen = 0
@@ -1063,6 +1175,9 @@ impl Parser {
             self.second = code
             self.status = status
             self.third = if a + 5 <= line.len() { part(line, a + 5, line.len()) } else { "" }
+            if !is_value(self.third) {
+                self.fail(HttpError.BadStartLine)
+            }
         }
     }
 
@@ -1091,6 +1206,10 @@ impl Parser {
             }
             let last = h.items[^1]
             let more = trim_ows(line)
+            if !is_value(more) {
+                self.fail(HttpError.BadHeader)
+                return
+            }
             h.items[h.items.len() - 1] = (last.0, if last.1.len() == 0 { more } else { last.1 + " " + more })
             if trailer {
                 self.trailers = h
@@ -1110,6 +1229,12 @@ impl Parser {
             return
         }
         let value = trim_ows(part(line, colon + 1, line.len()))
+        // a NUL, or a CR that doesn't end the line, is refused (RFC 9110,
+        // section 5.5): another parser could read it as a line's end
+        if !is_value(value) {
+            self.fail(HttpError.BadHeader)
+            return
+        }
         if trailer {
             self.trailers.items.push((name, value))
         } else {
@@ -1118,7 +1243,16 @@ impl Parser {
     }
 
     // The end of the head: how the body is framed (RFC 9112, section 6.3).
+    // A request with two `Host` fields, or one that isn't a host and port,
+    // is refused first (RFC 9112, section 3.2).
     fun framing(var self) {
+        if self.request {
+            let hosts = self.headers.get_all("Host")
+            if hosts.len() > 1 || (hosts.len() == 1 && !is_host(hosts[0])) {
+                self.fail(HttpError.BadHeader)
+                return
+            }
+        }
         if !self.request {
             let st = self.status
             if same_name(self.method, "HEAD") || (st >= 100 && st < 200) || st == 204 || st == 304 {
@@ -1270,10 +1404,7 @@ fun chunked(body: str, trailers: Headers) -> str {
     var sb = StringBuilder()
     var at = 0
     while at < body.len() {
-        var end = at + 65536
-        if end > body.len() {
-            end = body.len()
-        }
+        let end = if body.len() - at > 65536 { at + 65536 } else { body.len() }
         sb.append(f"{end - at:x}")
         sb.append("\r\n")
         sb.append(body, at, end)
@@ -2623,6 +2754,19 @@ fun shown_response(text: str, method: str) -> str {
 #test("POST / HTTP/1.1\r\nContent-Length: 10\r\n\r\nshort")["error: connection closed inside a message"]
 #test("GET / HTTP/1.1\r\nHost: a\r\n")["error: connection closed inside a message"]
 #test("")["error: connection closed"]
+#test("POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n1\r\nx\r\n7fffffff\r\nyyyy")["error: body too large"] // H7: body_len + size past int32
+#test("POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n5 ; a=b ;c=\"q\\\"d\"\r\nhello\r\n0\r\n\r\n")["POST / HTTP/1.1 [Transfer-Encoding=chunked] body=hello"] // extensions, spaces before them
+#test("POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n5 junk\r\nhello\r\n0\r\n\r\n")["error: malformed chunked body"] // no `;` before an extension
+#test("POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n5;a\0b\r\nhello\r\n0\r\n\r\n")["error: malformed chunked body"] // a NUL in an extension
+#test("POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n5;a=\"b\r\nhello\r\n0\r\n\r\n")["error: malformed chunked body"] // a quoted value without its end
+#test("GET / HTTP/1.1\r\nHost: a\r\nhost: b\r\n\r\n")["error: malformed header"] // two Host fields
+#test("GET / HTTP/1.1\r\nHost: a b\r\n\r\n")["error: malformed header"] // a Host that isn't one
+#test("GET / HTTP/1.1\r\nHost: [::1]:8080\r\n\r\n")["GET / HTTP/1.1 [Host=[::1]:8080] body="]
+#test("GET / HTTP/1.1\r\nHost:\r\n\r\n")["GET / HTTP/1.1 [Host=] body="] // an empty one is allowed
+#test("GET / HTTP/1.1\r\nX: a\0b\r\n\r\n")["error: malformed header"] // a NUL in a value
+#test("GET / HTTP/1.1\r\nX: a\rb\r\n\r\n")["error: malformed header"] // a bare CR in a value
+#test("GET / HTTP/1.1\r\nX: a\r\n \rb\r\n\r\n")["error: malformed header"] // a bare CR in a folded line
+#test("POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n0\r\nT: \0\r\n\r\n")["error: malformed header"] // a NUL in a trailer
 fun request_cases(text: str) -> str {
     return shown_request(text)
 }
@@ -2644,6 +2788,9 @@ fun request_cases(text: str) -> str {
 #test("SSH-2.0-OpenSSH\r\n", "GET")["error: malformed request or status line"]
 #test("HTTP/3.0 200 OK\r\n\r\n", "GET")["error: unsupported: HTTP/3.0"]
 #test("garbage", "GET")["error: connection closed inside a message"]
+#test("HTTP/1.1 200 O\0K\r\n\r\n", "GET")["error: malformed request or status line"] // a NUL in the reason
+#test("HTTP/1.1 200 O\rK\r\n\r\n", "GET")["error: malformed request or status line"] // a bare CR in the reason
+#test("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n7ffffff0\r\n", "GET")["error: body too large"]
 fun response_cases(text: str, method: str) -> str {
     return shown_response(text, method)
 }
@@ -2846,6 +2993,17 @@ fun limits() {
     var u = parser(true, "", 1000, 4)
     let at6 = u.advance("POST / HTTP/1.1\r\nContent-Length: 4\r\n\r\nabcd", 0)
     assert(u.done() && !u.failed, "at the limit")
+    // H7 (D184): sizes near the largest `int` are refused, never summed
+    // past it, with any limit
+    var v = parser(true, "", 1000, 2147483647)
+    let at7 = v.advance("POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n1\r\nx\r\n7fffffff\r\n", 0)
+    assert(v.failed && v.err == HttpError.BodyTooLarge, "a chunk past the largest int")
+    var w = parser(true, "", 1000, 2147483647)
+    let at8 = w.advance("POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n1\r\nx\r\n7ffffffe\r\n", 0)
+    assert(!w.failed && w.left == 2147483646, "a chunk up to the largest int")
+    var x = parser(true, "", 1000, 100)
+    let at9 = x.advance("POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n1;" + "a".repeat(5000) + "\r\n", 0)
+    assert(x.failed && x.err == HttpError.BadChunk, "a chunk line past its limit")
 }
 
 // The framing's corner cases: pipelined requests, a length beside

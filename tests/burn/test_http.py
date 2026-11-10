@@ -518,6 +518,15 @@ def python_clients(test: unittest.TestCase, port: int) -> None:
         (b"POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: gzip\r\n\r\n", b"501 Not Implemented"),
         (b"GET / HTTP/2.0\r\n\r\n", b"505 HTTP Version Not Supported"),
         (b"POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 1x\r\n\r\n", b"400 Bad Request"),
+        # H7 (MYLA-422): a chunk size that would take body_len + size past
+        # int32 is 413, on every runner (it killed a checked server, and a
+        # plain one waited for 2 GiB past its limit)
+        (b"POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n1\r\nx\r\n7fffffff\r\n", b"413 Content Too Large"),
+        (b"POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n1 junk\r\nx\r\n0\r\n\r\n", b"400 Bad Request"),
+        # two Host fields, a NUL and a bare CR in a value
+        (b"GET / HTTP/1.1\r\nHost: x\r\nHost: y\r\n\r\n", b"400 Bad Request"),
+        (b"GET / HTTP/1.1\r\nHost: x\r\nX-A: a\x00b\r\n\r\n", b"400 Bad Request"),
+        (b"GET / HTTP/1.1\r\nHost: x\r\nX-A: a\rX-B: b\r\n\r\n", b"400 Bad Request"),
     ]:
         out = raw(request)
         test.assertTrue(out.startswith(b"HTTP/1.1 " + status + b"\r\n"), (request[:40], out))
@@ -604,10 +613,13 @@ class MylaServer(unittest.TestCase):
             path = write_program(tmp, SERVER, "server.my")
             binary = os.path.join(tmp, "server")
             native_build(Program(path), binary)
+            checked = os.path.join(tmp, "server-checked")
+            native_build(Program(path), checked, checked=True)
             forms = {
                 "interpreted": ([selfhost_tool("main"), "run", path, str(SERVER_REQUESTS), "--stdlib", STDLIB_ROOT],
                                 None),
                 "built": run_argv(binary, binary, [str(SERVER_REQUESTS)]),
+                "built --checked": run_argv(checked, checked, [str(SERVER_REQUESTS)]),
             }
             for name, (argv, exe) in forms.items():
                 with self.subTest(server=name):
