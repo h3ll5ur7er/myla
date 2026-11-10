@@ -2108,7 +2108,7 @@ pub struct Checker {
     conc_sp: SrcSpan,
     conc_node: int32,
     in_async: bool,
-    self_assignable: bool,          // D144: in a `var self` method of a built-in type, `self = v` writes the receiver
+    self_assignable: bool,          // D144: in a `var self` method of a built-in type or an enum, `self = v` writes the receiver
     actor_self: str,
     // the call being checked is a builtin function called as a method
     // (`xs.push(v)`, D103, MYLA-221): a local of the same name doesn't shadow it
@@ -6645,9 +6645,10 @@ impl Checker {
         if self.is_actor(self.cur_key) { self.actor_self = self.cur_key } else { self.actor_self = "" }
         let recv = match fd.receiver { Some(r) => r, None => "" }
         // a built-in value's `var self` method changes it by assigning it,
-        // which reaches the caller's place (D144); a struct's changes its
-        // fields
-        self.self_assignable = recv == "var self" && sig.params.len() > 0 && is_builtin_value(sig.params[0])
+        // which reaches the caller's place (D144), and so does an enum's,
+        // which has no fields to change (an enum as a stateful iterator,
+        // MYLA-380's follow-up); a struct's changes its fields
+        self.self_assignable = recv == "var self" && sig.params.len() > 0 && (is_builtin_value(sig.params[0]) || (!fd.is_async && match sig.params[0] { Type.TEnum(en, ea) => true, _ => false }))
         // an async one would need its receiver back from its frame, as a
         // struct's gets it (D99)
         if self.self_assignable && fd.is_async { return Err(terr_at(fd.line, fd.col, fd.sp, "async 'var self' methods on built-in types are not supported yet")) }
@@ -8891,6 +8892,11 @@ pub fun checker_on(src: str) -> Checker {
 #test("#derive(Eq)\nenum Tree<T> { Leaf, Node(T) }\nfun f(t: Tree<int>) -> bool { return Tree.Node(\"a\") == t }")[["variant 'Tree.Node': expected 'int32', found 'str'"]]
 // a hole no element filled is reported where it is (L6)
 #test("enum Option<T> { Some(T), None }\nfun main() { let a = [(None, None), (Some(1), None)] }")[["cannot infer type argument(s) for 'None'; annotate the binding (e.g. ': Option<...>')"]]
+// an enum's `var self` method assigns `self` (MYLA-380's follow-up); a
+// struct's and a read-only one's can't
+#test("enum L { A, B }\nimpl L { fun step(var self) { self = L.B } }")[[]]
+#test("enum L { A, B }\nimpl L { fun step(self) { self = L.B } }")[["cannot reassign 'self'; mutate its fields or elements instead"]]
+#test("struct P { x: int }\nimpl P { fun reset(var self) { self = P { x: 0 } } }")[["cannot reassign 'self'; mutate its fields or elements instead"]]
 // a negative literal is no unsigned integer (L5)
 #test("fun main() { let w: uint8 = -1 }")[["integer literal -1 does not fit in 'uint8'"]]
 #test("fun main() { let w = -5u64 }")[["integer literal -5 does not fit in 'uint64'"]]

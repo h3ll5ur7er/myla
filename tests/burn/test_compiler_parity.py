@@ -7443,6 +7443,90 @@ fun main() {
     print(Tree.Node(4) != t)
 }
 """,
+    # MYLA-380 follow-up (MYLA-417): an enum as a stateful iterator
+    "enum_var_self_assigns_self": r"""// MYLA-380's follow-up (MYLA-417): an enum's `var self` method assigns
+// `self`, which writes the caller's place, so an enum can be a stateful
+// iterator; payloads that own memory, a place in a struct and in a list
+enum Count {
+    Left(int),
+    Done,
+}
+
+impl Iterator<int> for Count {
+    fun next(var self) -> Option<int> {
+        match self {
+            Left(n) => {
+                if n == 0 { self = Count.Done } else { self = Count.Left(n - 1) }
+                return Some(n)
+            }
+            Done => { return None }
+        }
+    }
+}
+
+enum Words {
+    Rest([str]),
+    Empty,
+}
+
+impl Words {
+    fun take(var self) -> str {
+        return match self {
+            Rest(ws) => {
+                if ws.len() <= 1 { self = Words.Empty } else { self = Words.Rest(ws[1:]) }
+                ws[0]
+            }
+            Empty => "",
+        }
+    }
+}
+
+enum Light {
+    Red,
+    Green,
+    Amber,
+}
+
+impl Light {
+    fun step(var self) {
+        self = match self {
+            Red => Light.Green,
+            Green => Light.Amber,
+            Amber => Light.Red,
+        }
+    }
+
+    fun name(self) -> str {
+        return match self {
+            Red => "red",
+            Green => "green",
+            Amber => "amber",
+        }
+    }
+}
+
+struct Crossing {
+    light: Light,
+}
+
+fun main() {
+    for x in Count.Left(3) { print(x) }
+    var w = Words.Rest(["a", "bb", "ccc"])
+    let first = w.take()
+    print(first + w.take() + w.take() + w.take() + "|")
+    var c = Crossing { light: Light.Red }
+    c.light.step()
+    c.light.step()
+    print(c.light.name())
+    var ls = [Light.Amber, Light.Red]
+    ls[1].step()
+    print(ls[0].name() + " " + ls[1].name())
+    var total = 0
+    var it = Count.Left(4)
+    while let Some(n) = it.next() { total += n }
+    print(total)
+}
+""",
 }
 
 # A program that allocates far more recursive-enum cells (~12M) than the heap
@@ -8933,6 +9017,8 @@ PINNED = {
     "option_and_result_as_map_keys": '3\nuno\nnone\nfalse\n13\n2\n3\ntrue\nfalse\n5\n',
     # MYLA-417: new ("cannot infer type parameter(s) E", "T for 'try_mk'" before); native code gives the same
     "inference_through_lambdas_try_and_variants": 'true\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\nfalse\ntrue\ntrue\n',
+    # MYLA-417: new ("cannot reassign 'self'" before); native, aarch64 and wasm32 give the same
+    "enum_var_self_assigns_self": '3\n2\n1\n0\nabbccc|\namber\namber green\n10\n',
 }
 
 
