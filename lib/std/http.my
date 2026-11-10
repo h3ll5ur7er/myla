@@ -1815,8 +1815,8 @@ impl Wire {
         unreachable()
     }
 
-    // `read_message`, the task waiting. A request that asked for it gets
-    // `100 Continue` before its body is read.
+    // `read_message`, the task waiting (the server reads its requests with
+    // `Link.read_request`).
     async fun read_message_async(var self, p: Parser) -> Result<Parser, HttpError> {
         var q = p
         while true {
@@ -1826,13 +1826,6 @@ impl Wire {
             }
             if q.done() {
                 return Ok(q)
-            }
-            if q.expect_continue {
-                q.expect_continue = false
-                if q.body_len == 0 {
-                    let sent = await self.send_async("HTTP/1.1 100 Continue\r\n\r\n")
-                    sent?
-                }
             }
             let more = await self.fill_async()
             if !more? {
@@ -2373,22 +2366,36 @@ pub async fun post_async(url: str, body: str) -> Result<Response, HttpError> {
 
 // How a server serves: how many connections at once (`workers`, each a
 // task), how many requests before it stops (negative: no limit), the
-// limits of a request's head and body, and how long a connection takes
-// requests (milliseconds after it was accepted; negative: as long as the
-// client keeps it). Past `keep_alive_ms` a connection waiting for its next
-// request is closed, and one still busy is closed after its response
-// (which says `Connection: close` from a second before the time), so idle
-// clients can't hold every worker for long.
+// limits of a request's head and body, and its time limits, in
+// milliseconds, each negative for none (MYLA-422):
+// - `keep_alive_ms`: how long after it was accepted a connection takes
+//   new requests. Past it a wait for the next request ends and a response
+//   says `Connection: close`; a request being read and a response being
+//   written go on.
+// - `idle_ms`: how long a connection waits for a request to begin, its
+//   first and each next one; then it is closed without an answer.
+// - `read_ms`: how long the head of a request may take from its first
+//   byte, and its body from the head's end, with that time again after
+//   each 16 KiB of it; then it is answered 408 and closed.
+// - `write_ms`: how long a response may take to send each 64 KiB of it;
+//   then the connection is closed (a client that doesn't read can't hold
+//   a worker).
+// A guard task beside each connection keeps the time: the handler's own
+// time isn't limited.
 pub struct ServerOptions {
     workers: int,
     max_requests: int,
     max_header_bytes: int,
     max_body_bytes: int,
     keep_alive_ms: int,
+    idle_ms: int,
+    read_ms: int,
+    write_ms: int,
 }
 
 // The defaults: 64 workers, no request limit, a head of 64 KiB, a body of
-// 16 MiB, connections kept for 60 s.
+// 16 MiB, new requests for 60 s, 5 s to begin one, 20 s to read one (a
+// body at 800 bytes a second at least), 30 s to send each 64 KiB.
 pub fun server_options() -> ServerOptions {
     return ServerOptions {
         workers: 64,
@@ -2396,6 +2403,9 @@ pub fun server_options() -> ServerOptions {
         max_header_bytes: MAX_HEAD,
         max_body_bytes: SERVER_MAX_BODY,
         keep_alive_ms: 60000,
+        idle_ms: 5000,
+        read_ms: 20000,
+        write_ms: 30000,
     }
 }
 
@@ -2445,8 +2455,10 @@ impl Tally {
 #test(HttpError.Unsupported("transfer coding gzip"))[501]
 #test(HttpError.Unsupported("HTTP/2.0"))[505]
 #test(HttpError.BadHeader)[400]
+#test(HttpError.TimedOut)[408]
 fun error_status(e: HttpError) -> int {
     return match e {
+        TimedOut => 408
         HeadersTooLarge => 431
         BodyTooLarge => 413
         Unsupported(what) => if what.starts_with("HTTP/") { 505 } else { 501 }
@@ -2455,15 +2467,16 @@ fun error_status(e: HttpError) -> int {
 }
 
 // Whether a request that couldn't be read so gets an answer: not when the
-// connection closed or failed.
+// connection closed or failed (a request that began and didn't come in
+// time is answered 408).
 #test(HttpError.Closed)[false]
 #test(HttpError.Io(IoError.ConnectionReset))[false]
 #test(HttpError.BadHeader)[true]
+#test(HttpError.TimedOut)[true]
 fun answerable(e: HttpError) -> bool {
     return match e {
         Closed => false
         Io(_) => false
-        TimedOut => false
         _ => true
     }
 }
@@ -2476,60 +2489,288 @@ fun error_response(e: HttpError) -> str {
     return f"HTTP/1.1 {status} {reason(status)}\r\nContent-Type: text/plain\r\nContent-Length: {body.len()}\r\nConnection: close\r\n\r\n{body}"
 }
 
-// A connection's guard: after `ms` milliseconds its reading is shut, so a
-// wait for its next request ends (as at the end of the stream); its
-// writing goes on. Nothing when cancelled first (the connection ended).
-async fun guard(s: TcpStream, ms: int) -> bool {
-    await task.sleep(ms)
-    if task.cancelled() {
-        return false
-    }
-    let shut = s.shutdown(net.Shutdown.Read)
-    return true
+// What a connection is doing, as its guard sees it: waiting for a request
+// to begin (`idle_ms`, and `keep_alive_ms`), reading one (`read_ms`),
+// waiting for the handler (no limit), sending a response (`write_ms`).
+const AT_IDLE: int = 0
+const AT_READ: int = 1
+const AT_HANDLER: int = 2
+const AT_WRITE: int = 3
+
+// The bytes of a body read, and of a response sent, after which the time
+// limit starts again.
+const READ_STEP: int = 16384
+const WRITE_STEP: int = 65536
+
+// The time `ms` milliseconds after `t` (negative: none, -1).
+#test(100i64, 5)[105]
+#test(100i64, -1)[-1]
+fun after(t: int64, ms: int) -> int64 {
+    return if ms < 0 { -1 } else { t + ms as int64 }
 }
 
-// The connection `s` served (`serve_requests`), under a guard when
-// `o.keep_alive_ms` limits it: one child task a connection, where a
-// `task.timeout` around each wait for a request would cost one a request
-// (half the requests a second of a keep-alive client).
-async fun serve_connection(s: TcpStream, o: ServerOptions, handler: async (Request) -> Response, tally: Tally) -> (bool, int) {
-    if o.keep_alive_ms < 0 {
-        return await serve_requests(s, o, handler, tally, -1)
+// The earlier of two times, either negative for none.
+#test(5i64, -1i64)[5]
+#test(-1i64, 7i64)[7]
+#test(9i64, 4i64)[4]
+#test(-1i64, -1i64)[-1]
+fun earliest(a: int64, b: int64) -> int64 {
+    if a < 0 {
+        return b
     }
-    async let g = guard(s, o.keep_alive_ms)
-    // a busy connection is told to close a little before the guard shuts it
-    var margin = o.keep_alive_ms / 10
-    if margin > 1000 {
-        margin = 1000
+    if b < 0 || a < b {
+        return a
     }
-    let done = await serve_requests(s, o, handler, tally, time.now_ms() + (o.keep_alive_ms - margin) as int64)
+    return b
+}
+
+// How often a guard looks at its connection: a quarter of the shortest
+// time limit, from 10 ms to a second (negative: no guard).
+#test(ServerOptions { workers: 1, max_requests: -1, max_header_bytes: 1, max_body_bytes: 1, keep_alive_ms: 60000, idle_ms: 5000, read_ms: 20000, write_ms: 30000 })[1000]
+#test(ServerOptions { workers: 1, max_requests: -1, max_header_bytes: 1, max_body_bytes: 1, keep_alive_ms: -1, idle_ms: 300, read_ms: -1, write_ms: 1000 })[75]
+#test(ServerOptions { workers: 1, max_requests: -1, max_header_bytes: 1, max_body_bytes: 1, keep_alive_ms: -1, idle_ms: 0, read_ms: -1, write_ms: -1 })[10]
+#test(ServerOptions { workers: 1, max_requests: -1, max_header_bytes: 1, max_body_bytes: 1, keep_alive_ms: -1, idle_ms: -1, read_ms: -1, write_ms: -1 })[-1]
+fun poll_ms(o: ServerOptions) -> int {
+    var shortest = -1
+    for ms in [o.keep_alive_ms, o.idle_ms, o.read_ms, o.write_ms] {
+        if ms >= 0 && (shortest < 0 || ms < shortest) {
+            shortest = ms
+        }
+    }
+    if shortest < 0 {
+        return -1
+    }
+    let q = shortest / 4
+    return if q < 10 { 10 } else if q > 1000 { 1000 } else { q }
+}
+
+// The time limit of what a connection does (`AT_IDLE`, …) from `since`,
+// as `o` gives it (negative: none); `life_end` bounds the wait for a request.
+fun deadline(o: ServerOptions, at: int, since: int64, life_end: int64) -> int64 {
+    if at == AT_IDLE {
+        return earliest(after(since, o.idle_ms), life_end)
+    }
+    if at == AT_READ {
+        return after(since, o.read_ms)
+    }
+    if at == AT_WRITE {
+        return after(since, o.write_ms)
+    }
+    return -1
+}
+
+// A connection's guard: every `poll` milliseconds it looks at what the
+// connection does, which the serving task counts on `marks` (a notifier no
+// task waits on: each `notify_all` counts its generation, `AT_IDLE` to
+// `AT_WRITE` the count's remainder by 4, a step of 4 progress). When the
+// connection has done the same past its time limit, it is shut: its
+// reading (a wait for a request ends as at the end of the stream; a
+// response can still be written), or both ways while it sends (a write
+// waiting for room fails), which ends the guard. A time limit is kept to
+// within `poll`. No actor call and no wake a request: an actor holding the
+// time, set three times a request, halved the requests a second natively
+// (MYLA-422). Whether it shut both ways; nothing once cancelled (the
+// connection ended).
+async fun guard(s: TcpStream, o: ServerOptions, marks: task.Notifier, life_end: int64, poll: int) -> bool {
+    var seen = marks.listen().gen
+    var since = time.now_ms()
+    var shut_read = false
+    while true {
+        await task.sleep(poll)
+        if task.cancelled() {
+            return false
+        }
+        let g = marks.listen().gen
+        let now = time.now_ms()
+        if g != seen {
+            seen = g
+            since = now
+        } else {
+            let at = (g % 4i64) as int
+            let end = deadline(o, at, since, life_end)
+            if end >= 0 && now >= end {
+                if at == AT_WRITE {
+                    let shut = s.shutdown(net.Shutdown.Both)
+                    return true
+                }
+                if !shut_read {
+                    let shut = s.shutdown(net.Shutdown.Read)
+                    shut_read = true
+                }
+            }
+        }
+    }
+    unreachable()
+}
+
+// A connection as the server serves it: its wire, the marks its guard
+// reads (`guarded`: there is a guard), what it does and since when.
+struct Link {
+    w: Wire,
+    marks: task.Notifier,
+    guarded: bool,
+    at: int,
+    since: int64,
+}
+
+impl Link {
+    // The connection doing `at` from now on, or, when it does already,
+    // getting on with it (its time limit starts again): at most four
+    // `notify_all`s, each a lock and a count.
+    fun mark(var self, at: int) {
+        self.since = time.now_ms()
+        if !self.guarded {
+            return
+        }
+        var k = (at - self.at + 4) % 4
+        if k == 0 {
+            k = 4
+        }
+        for i in 0..k {
+            self.marks.notify_all()
+        }
+        self.at = at
+    }
+
+    // Whether what the connection does is past its time limit: the guard
+    // may have shut it.
+    fun late(self, o: ServerOptions, life_end: int64) -> bool {
+        let end = deadline(o, self.at, self.since, life_end)
+        return end >= 0 && time.now_ms() >= end
+    }
+
+    // A request read with `p`, in time: its head within `o.read_ms` of
+    // its first byte, its body within `read_ms` of the head's end and of
+    // each 16 KiB of it (the wait for its first byte is the caller's to
+    // mark). A request that asked for it gets `100 Continue` before its
+    // body is read. A wait the guard ended is `TimedOut`, or `Closed` when
+    // nothing of a request had come.
+    async fun read_request(var self, p: Parser, o: ServerOptions, life_end: int64) -> Result<Parser, HttpError> {
+        var q = p
+        // 0: before the request, 1: its head, 2: its body
+        var part_of = 0
+        var stepped = 0
+        while true {
+            self.w.pos = q.advance(self.w.buf, self.w.pos)
+            if q.failed {
+                return Err(q.err)
+            }
+            if q.done() {
+                return Ok(q)
+            }
+            if q.expect_continue {
+                q.expect_continue = false
+                if q.body_len == 0 {
+                    let sent = await self.w.send_async("HTTP/1.1 100 Continue\r\n\r\n")
+                    sent?
+                }
+            }
+            let now_part = if !q.started { 0 } else if q.state >= S_LENGTH { 2 } else { 1 }
+            if now_part != part_of || (part_of == 2 && q.body_len - stepped >= READ_STEP) {
+                part_of = now_part
+                stepped = q.body_len
+                self.mark(AT_READ)
+            }
+            let more = await self.w.fill_async()
+            if !more? {
+                if self.late(o, life_end) {
+                    return Err(if q.started { HttpError.TimedOut } else { HttpError.Closed })
+                }
+                q.at_end()
+                if q.failed {
+                    return Err(q.err)
+                }
+                return Ok(q)
+            }
+        }
+        unreachable()
+    }
+
+    // A head and a body sent, in time: the guard shuts the connection when
+    // the client takes more than `write_ms` to take the first 64 KiB, or
+    // the next.
+    async fun send_parts(var self, parts: (str, str), write_ms: int) -> Result<(), HttpError> {
+        self.mark(AT_WRITE)
+        let body = parts.1
+        if body.len() <= ONE_WRITE {
+            return await self.w.send_async(parts.0 + body)
+        }
+        let head = await self.w.send_async(parts.0)
+        head?
+        if write_ms < 0 || !self.guarded {
+            return await self.w.send_async(body)
+        }
+        var at = 0
+        while at < body.len() {
+            let end = if body.len() - at > WRITE_STEP { at + WRITE_STEP } else { body.len() }
+            let sent = await self.w.send_async(part(body, at, end))
+            sent?
+            at = end
+            if at < body.len() {
+                self.mark(AT_WRITE)
+            }
+        }
+        return Ok(())
+    }
+}
+
+// The connection `s` served (`serve_requests`), under a guard when one of
+// `o`'s times limits it: one child task a connection, where a
+// `task.timeout` around each wait would cost a task each (half the
+// requests a second of a keep-alive client). `marks` is the worker's,
+// which its connections' guards read in turn.
+async fun serve_connection(s: TcpStream, o: ServerOptions, handler: async (Request) -> Response, tally: Tally, marks: task.Notifier) -> (bool, int) {
+    let life_end = after(time.now_ms(), o.keep_alive_ms)
+    let poll = poll_ms(o)
+    let at = (marks.listen().gen % 4i64) as int
+    let link = Link { w: wire(s), marks: marks, guarded: poll >= 0, at: at, since: time.now_ms() }
+    if poll < 0 {
+        return await serve_requests(link, o, handler, tally, life_end)
+    }
+    async let g = guard(s, o, marks, life_end, poll)
+    let done = await serve_requests(link, o, handler, tally, life_end)
     task.cancel(g)
     let fired = await g
     return done
 }
 
-// The connection `s` served, request after request, until it ends: a
-// client that closes it, a request that can't be read (answered with its
-// status), one that asks to close, a response after `close_at` (from
-// `time.now_ms`; negative: never), the server's limit reached. Whether the
-// worker goes on, and the requests answered. Only a server with a limit
-// counts its requests in `tally` as they come: two actor calls a request.
-async fun serve_requests(s: TcpStream, o: ServerOptions, handler: async (Request) -> Response, tally: Tally, close_at: int64) -> (bool, int) {
+// The connection of `link` served, request after request, until it ends:
+// a client that closes it, a request that can't be read (answered with
+// its status) or doesn't begin in time, one that asks to close, the
+// connection's time up at `life_end` (from `time.now_ms`; negative:
+// never), the server's limit reached. A response from a little before
+// `life_end` says `Connection: close`, so that a keep-alive client doesn't
+// send a request the server won't read. Whether the worker goes on, and
+// the requests answered. Only a server with a limit counts its requests
+// in `tally` as they come: two actor calls a request.
+async fun serve_requests(link_in: Link, o: ServerOptions, handler: async (Request) -> Response, tally: Tally, life_end: int64) -> (bool, int) {
     let counted = o.max_requests >= 0
     var answered = 0
-    var w = wire(s)
+    var link = link_in
+    let s = link.w.stream
     let nd = s.set_nodelay(true)
     let peer = match s.peer_addr() {
         Ok(a) => Some(a)
         Err(_) => None
     }
+    var close_at = life_end
+    if life_end >= 0 {
+        let margin = if o.keep_alive_ms / 10 > 1000 { 1000 } else { o.keep_alive_ms / 10 }
+        close_at = life_end - margin as int64
+    }
     while true {
-        let got = await w.read_message_async(parser(true, "", o.max_header_bytes, o.max_body_bytes))
+        // a request may begin until the connection's time is up, within
+        // `idle_ms`
+        if life_end >= 0 && time.now_ms() >= life_end {
+            return (true, answered)
+        }
+        link.mark(AT_IDLE)
+        let got = await link.read_request(parser(true, "", o.max_header_bytes, o.max_body_bytes), o, life_end)
         let p = match got {
             Ok(p) => p
             Err(e) => {
                 if answerable(e) {
-                    let sent = await w.send_async(error_response(e))
+                    let sent = await link.send_parts((error_response(e), ""), o.write_ms)
                 }
                 return (true, answered)
             }
@@ -2545,6 +2786,8 @@ async fun serve_requests(s: TcpStream, o: ServerOptions, handler: async (Request
             close = true
             parts = response_parts(response(400, "a request without Host\n"), false, true, false, false)
         } else {
+            // the handler's time isn't limited
+            link.mark(AT_HANDLER)
             let resp = await handler(req)
             close = close || resp.headers.has_token("Connection", "close") || (close_at >= 0 && time.now_ms() >= close_at)
             let keep_10 = !close && req.version == "HTTP/1.0"
@@ -2553,14 +2796,14 @@ async fun serve_requests(s: TcpStream, o: ServerOptions, handler: async (Request
         var sent: Result<(), HttpError> = Ok(())
         match parts {
             Ok(two) => {
-                sent = await w.send_parts_async(two)
+                sent = await link.send_parts(two, o.write_ms)
             }
             Err(e) => {
                 // the handler's response can't be sent (a header with CR
                 // or LF): a 500 instead
                 close = true
                 let body = f"invalid response: {e.message()}\n"
-                sent = await w.send_async(f"HTTP/1.1 500 Internal Server Error\r\nContent-Length: {body.len()}\r\nConnection: close\r\n\r\n{body}")
+                sent = await link.send_parts((f"HTTP/1.1 500 Internal Server Error\r\nContent-Length: {body.len()}\r\nConnection: close\r\n\r\n{body}", ""), o.write_ms)
             }
         }
         answered += 1
@@ -2585,6 +2828,9 @@ fun sent_ok(r: Result<(), HttpError>) -> bool {
 // until the server's limit or a cancellation; the requests it answered.
 async fun worker(l: TcpListener, o: ServerOptions, handler: async (Request) -> Response, tally: Tally) -> Result<int, HttpError> {
     var answered = 0
+    // the marks its connections' guards read, made once: a notifier is
+    // never freed
+    let marks = task.notifier()
     while true {
         if task.cancelled() {
             break
@@ -2592,8 +2838,8 @@ async fun worker(l: TcpListener, o: ServerOptions, handler: async (Request) -> R
         let got = await l.accept_async()
         match got {
             Ok(s) => {
-                let done = await serve_connection(s, o, handler, tally)
-                answered += done.1
+                let done = await serve_connection(s, o, handler, tally, marks)
+                answered = plus(answered, done.1)
                 var c = s
                 let gone = c.close()
                 if !done.0 {
@@ -2656,16 +2902,24 @@ async fun run_workers(l: TcpListener, o: ServerOptions, handler: async (Request)
     var total = 0
     for r in await task.all(fs) {
         match r {
-            Ok(k) => { total += k }
+            Ok(k) => { total = plus(total, k) }
             Err(e) => { return Err(e) }
         }
     }
     return Ok(total)
 }
 
+// `a + b`, two counts of requests, or the largest `int` past it (a server
+// may answer more in its life).
+#test(2, 3)[5]
+#test(2147483640, 100)[2147483647]
+fun plus(a: int, b: int) -> int {
+    return if b > 2147483647 - a { 2147483647 } else { a + b }
+}
+
 // The workers `o` asks for, at least one.
-#test(ServerOptions { workers: 0, max_requests: -1, max_header_bytes: 1, max_body_bytes: 1, keep_alive_ms: 1 })[1]
-#test(ServerOptions { workers: 8, max_requests: -1, max_header_bytes: 1, max_body_bytes: 1, keep_alive_ms: 1 })[8]
+#test(ServerOptions { workers: 0, max_requests: -1, max_header_bytes: 1, max_body_bytes: 1, keep_alive_ms: 1, idle_ms: 1, read_ms: 1, write_ms: 1 })[1]
+#test(ServerOptions { workers: 8, max_requests: -1, max_header_bytes: 1, max_body_bytes: 1, keep_alive_ms: 1, idle_ms: 1, read_ms: 1, write_ms: 1 })[8]
 fun worker_count(o: ServerOptions) -> int {
     return if o.workers < 1 { 1 } else { o.workers }
 }
@@ -2986,6 +3240,7 @@ fun builders() {
     assert(r.body == "" && r.headers.len() == 0, "the original unchanged")
     let o = server_options()
     assert(o.workers == 64 && o.max_requests == -1 && o.keep_alive_ms == 60000, "the server's defaults")
+    assert(o.idle_ms == 5000 && o.read_ms == 20000 && o.write_ms == 30000, "the server's times")
     assert(o.max_header_bytes == 65536 && o.max_body_bytes == 16777216, "the server's limits")
     let resp = response(201, "made").with_header("Location", "/x").with_trailer("T", "1")
     assert(resp.header("location").unwrap_or("") == "/x" && resp.trailers.len() == 1 && resp.reason == "Created", "a response built")
