@@ -7293,6 +7293,63 @@ async fun main() {
     print((h.on)(3))
 }
 """,
+    "arithmetic_operators_of_generic_impls": r"""// M2 (MYLA-415, MYLA-367): the arithmetic operators of a generic impl call
+// its instance for the operands' type arguments (natively they didn't link)
+struct Box<T> { v: T }
+impl<T: Add> Add for Box<T> {
+    fun add(self, other: Box<T>) -> Box<T> { return Box { v: self.v + other.v } }
+}
+impl<T: Sub> Sub for Box<T> {
+    fun sub(self, other: Box<T>) -> Box<T> { return Box { v: self.v - other.v } }
+}
+impl<T: Mul> Mul for Box<T> {
+    fun mul(self, other: Box<T>) -> Box<T> { return Box { v: self.v * other.v } }
+}
+impl<T: Div> Div for Box<T> {
+    fun div(self, other: Box<T>) -> Box<T> { return Box { v: self.v / other.v } }
+}
+impl<T: Rem> Rem for Box<T> {
+    fun rem(self, other: Box<T>) -> Box<T> { return Box { v: self.v % other.v } }
+}
+
+struct Pair<A, B> { a: A, b: B }
+impl<A: Add, B: Add> Add for Pair<A, B> {
+    fun add(self, other: Pair<A, B>) -> Pair<A, B> { return Pair { a: self.a + other.a, b: self.b + other.b } }
+}
+
+// in generic code, where the checker types the result (its half of M2 is
+// MYLA-417's), each operator through a function of its own
+fun plus<T: Add>(a: Box<T>, b: Box<T>) -> Box<T> { return a + b }
+fun minus<T: Sub>(a: Box<T>, b: Box<T>) -> Box<T> { return a - b }
+fun times<T: Mul>(a: Box<T>, b: Box<T>) -> Box<T> { return a * b }
+fun over<T: Div>(a: Box<T>, b: Box<T>) -> Box<T> { return a / b }
+fun modulo<T: Rem>(a: Box<T>, b: Box<T>) -> Box<T> { return a % b }
+fun chain<T: Add>(a: Box<T>) -> Box<T> { return a + a + a }
+fun pair_sum<A: Add, B: Add>(x: Pair<A, B>, y: Pair<A, B>) -> Pair<A, B> { return x + y }
+
+fun int_of(b: Box<int>) -> int { return b.v }
+fun float_of(b: Box<float>) -> float { return b.v }
+fun str_of(b: Box<str>) -> str { return b.v }
+
+fun main() {
+    print(int_of(plus(Box { v: 1 }, Box { v: 2 })))
+    print(int_of(minus(Box { v: 7 }, Box { v: 2 })))
+    print(int_of(times(Box { v: 6 }, Box { v: 7 })))
+    print(int_of(over(Box { v: 9 }, Box { v: 2 })))
+    print(int_of(modulo(Box { v: 9 }, Box { v: 4 })))
+    print(float_of(plus(Box { v: 1.5 }, Box { v: 2.25 })))
+    print(str_of(plus(Box { v: "ab" }, Box { v: "cd" })))
+    print(str_of(chain(Box { v: "ab" })))
+    let big: Box<int64> = Box { v: 5000000000 }
+    print(chain(big).v)
+    print(int_of(Box { v: 1 }.add(Box { v: 2 })))
+    let p = pair_sum(Pair { a: 1, b: "x" }, Pair { a: 2, b: "y" })
+    print(f"{p.a} {p.b}")
+    // the operator outside generic code links too
+    let unused = Box { v: 1 } + Box { v: 2 }
+    print("linked")
+}
+""",
     "list_equal_to_itself": r"""// M3 (MYLA-415, MYLA-313): a list compared with itself, or with a copy that
 // shares its cell, is equal without a look at its elements only where the
 // elements' `==` is built in and reflexive: a NaN isn't equal to itself, and
@@ -9145,6 +9202,8 @@ PINNED = {
     "keys_that_change_their_container": '2 3 true\n302 false 399\n4 3 false\n303 99 150\n3 y added\n99 2\n77 303\n5 0 2\n9\n4 3\n5 304\nab a\nbcd\n55 303\n3 301\n50 1\n4 3\n202 false\n203 202\n',
     # MYLA-415 (M3): native code answered equal for one cell without comparing
     "list_equal_to_itself": 'false false true false\nfalse true\nfalse\nfalse true\neq called\neq called\ntrue\nfalse\nfalse\ntrue true true true true\ntrue false\n',
+    # MYLA-415 (M2, MYLA-367): native code didn't link ('undefined reference to myla_Box.add')
+    "arithmetic_operators_of_generic_impls": '3\n5\n42\n4\n1\n3.75\nabcd\nababab\n15000000000\n3\n3 xy\nlinked\n',
 }
 
 

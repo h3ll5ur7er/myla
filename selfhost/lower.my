@@ -3322,7 +3322,10 @@ impl Lower {
                 let pb = self.addr(cg, r)
                 let slot = self.value_slot(cg, "__result", t, true)
                 let res = self.slot_addr(slot)
-                self.add(Inst.CallSret(format("{}.{}", cg.type_key(lt), arith_method_cg(op)), res, [pa, pb]))
+                // a generic impl's operator: its instance for the operands'
+                // type arguments (MYLA-367, M2)
+                let callee = self.method_instance(cg, format("{}.{}", cg.type_key(lt), arith_method_cg(op)), [l, r])
+                self.add(Inst.CallSret(callee, res, [pa, pb]))
                 self.own_temp(slot)
                 return res
             },
