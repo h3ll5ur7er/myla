@@ -43,6 +43,11 @@ pub enum Value {
     VPartial(Value, [Value], [bool]),      // base callable, arg slots, which slots are holes
     VActor(int32),                         // an actor's handle: its state in Interp.actors (D89)
     VTask(int32),                          // an `async let`'s child: Interp.tasks
+    // a `[uint8]` as the bytes of a host string, without a value per byte:
+    // what reading bytes and `__str_to_bytes` give, written, measured,
+    // indexed, sliced and compared as it is; any other use takes it apart
+    // into a `VList` (`list_values`; the 2026-11-10 review's S2)
+    VBytes(str),
 }
 impl Value {
     #test(Value.VInt(0))["VInt(0)"]
@@ -67,6 +72,7 @@ impl Value {
             VPartial(func, slots, holes) => f"VPartial()"
             VActor(i) => f"VActor({i})"
             VTask(i) => f"VTask({i})"
+            VBytes(b) => f"VBytes()"
         }
     }
 }
@@ -175,7 +181,12 @@ pub struct MatchRes { ok: bool, names: [str], vals: [Value] }
 pub struct Interp {
     decls: [Decl],
     resolved: [int32: Type],
+    // the functions (a method as `Type.name`), `func_ix` the first of each
+    // name; the constants (`const_ix`); the enums, and the enum of each
+    // variant name (`variant_ix`, `nullary_ix` of each without a payload),
+    // the first declared: each found without a scan (MYLA-380's follow-up)
     func_names: [str],
+    func_ix: [str: int32],
     func_decls: [FunData],
     // the structs and enums with an `eq` written for them, and those with a
     // `hash` written for them (not derived), by name (D163, MYLA-313)
@@ -183,7 +194,11 @@ pub struct Interp {
     own_hash: [str: bool],
     const_names: [str],
     const_vals: [Value],
+    const_ix: [str: int32],
     enum_names: [str],
+    enum_ix: [str: bool],
+    variant_ix: [str: str],
+    nullary_ix: [str: str],
     scopes: [RtFrame],
     ctrl: Ctrl,
     ctrl_val: Value,
@@ -532,9 +547,9 @@ pub fun new_interp(c: Checker, argv: [str]) -> Interp {
     var it = Interp {
         decls: c.decls,
         resolved: c.resolved,
-        func_names: [], func_decls: [], own_eq: [:], own_hash: [:],
-        const_names: [], const_vals: [],
-        enum_names: [],
+        func_names: [], func_ix: [:], func_decls: [], own_eq: [:], own_hash: [:],
+        const_names: [], const_vals: [], const_ix: [:],
+        enum_names: [], enum_ix: [:], variant_ix: [:], nullary_ix: [:],
         scopes: [],
         ctrl: Ctrl.CNone,
         ctrl_val: Value.VUnit,
@@ -564,6 +579,19 @@ pub fun new_interp(c: Checker, argv: [str]) -> Interp {
     // type parameters when the call has none recorded (a bound's)
     for f in c.functions {
         if f.params.len() > 0 && f.type_params.len() > f.own_type_params && match f.decl.receiver { Some(r) => true, None => false } { it.impl_selfs[f.name] = f.params[0] }
+    }
+    // the enums and their variants by name, the first declared
+    for d in c.decls {
+        match d.kind {
+            DeclKind.EnumDecl(en, variants, attrs, tps, isp) => {
+                it.enum_ix[en] = true
+                for v in variants {
+                    if !it.variant_ix.contains(v.name) { it.variant_ix[v.name] = en }
+                    if v.payload.len() == 0 && !it.nullary_ix.contains(v.name) { it.nullary_ix[v.name] = en }
+                }
+            },
+            _ => {},
+        }
     }
     return it
 }
@@ -643,18 +671,15 @@ impl Interp {
     }
 
     fun add_func(var self, name: str, fd: FunData) {
+        if !self.func_ix.contains(name) { self.func_ix[name] = self.func_names.len() }
         self.func_names.push(name)
         self.func_decls.push(fd)
     }
 
     #test(interp_on("[int]"), "inc")[-1]
+    #test(interp_on("fun inc(x: int) -> int { return x + 1 }"), "inc")[0]
     fun func_idx(self, name: str) -> int32 {
-        var i = 0
-        while i < self.func_names.len() {
-            if self.func_names[i] == name { return i }
-            i = i + 1
-        }
-        return -1
+        return self.func_ix.get_or(name, -1)
     }
 
     #test(interp_on("[int]"), TypeExpr { id: 87, line: 46, col: 6, sp: SrcSpan { sline: 46, scol: 6, eline: 46, ecol: 9 }, kind: TypeKind.TRef("int", []) })["int"]
@@ -670,18 +695,13 @@ impl Interp {
 
     #test(interp_on("[int]"), "a")[false]
     fun is_enum_name(self, n: str) -> bool {
-        for e in self.enum_names { if e == n { return true } }
-        return false
+        return self.enum_ix.contains(n)
     }
 
     #test(interp_on("[int]"), "KIB")[-1]
+    #test(interp_on("const KIB: int = 1024"), "KIB")[0]
     fun const_idx(self, name: str) -> int32 {
-        var i = 0
-        while i < self.const_names.len() {
-            if self.const_names[i] == name { return i }
-            i = i + 1
-        }
-        return -1
+        return self.const_ix.get_or(name, -1)
     }
 
     // -- scopes -----------------------------------------------------------
@@ -964,6 +984,7 @@ impl Interp {
                     self.push_scope()
                     let v = self.eval(value)
                     self.pop_scope()
+                    if !self.const_ix.contains(n) { self.const_ix[n] = self.const_names.len() }
                     self.const_names.push(n)
                     self.const_vals.push(v)
                 },
@@ -2612,6 +2633,7 @@ impl Interp {
     fun iter_items(self, v: Value) -> [Value] {
         return match v {
             Value.VList(xs) => xs,
+            Value.VBytes(b) => byte_values(b),
             Value.VMap(m) => map_keys_of(m),
             // (an async function's loop holds its items: a string's
             // characters, MYLA-318)
@@ -2863,15 +2885,7 @@ impl Interp {
 
     #test(interp_on("[int]"), "h")[None]
     fun nullary_variant_enum(self, name: str) -> Option<str> {
-        for d in self.decls {
-            match d.kind {
-                DeclKind.EnumDecl(en, variants, attrs, tps, isp) => {
-                    for v in variants { if v.name == name && v.payload.len() == 0 { return Some(en) } }
-                },
-                _ => {},
-            }
-        }
-        return None
+        return self.nullary_ix.get(name)
     }
 
     #test(interp_on("enum E { A, B(int) }"), expr_of("a.b[0]"), "-", expr_of("a.b[0]"))[Value.VInt(0)]
@@ -2911,7 +2925,6 @@ impl Interp {
         }
         let lv = self.eval(l)
         let rv = self.eval(r)
-        let rt = self.typed_of(e.id)
         // function composition: `f >> g` when the left operand is callable
         if op == ">>" && is_callable(lv) { return compose_values(lv, rv) }
         // operator overloading: dispatch to a trait method for user types
@@ -2926,6 +2939,8 @@ impl Interp {
             if is_u64(self.typed_of(l.id)) { return Value.VBool(ucompare(op, as_int(lv), as_int(rv))) }
             return Value.VBool(self.compare(op, lv, rv))
         }
+        // the operation's type, a type parameter's its frame's (H1)
+        let rt = self.typed_of(e.id)
         // float arithmetic
         var is_float_op = false
         match lv { Value.VFloat(f) => { is_float_op = true }, _ => {} }
@@ -3179,6 +3194,8 @@ impl Interp {
                 }
                 return Value.VStr(take_str(s, a.0, a.1, a.2, b.0, b.1, b.2, step))
             },
+            // bytes, so no bound is inside a character
+            Value.VBytes(s) => { return Value.VBytes(take_str(s, a.0, a.1, a.2, b.0, b.1, b.2, step)) },
             Value.VList(xs) => {
                 let r = range_of(xs.len() as int64, a.0, a.1, a.2, b.0, b.1, b.2, step)
                 var out: [Value] = []
@@ -3489,6 +3506,7 @@ impl Interp {
     #test(interp_on("[int]"), -1)[None]
     fun typed_of(self, id: int32) -> Option<Type> {
         var r = self.resolved.get(id)
+        // (a function's test: a match here retains the type and drops it)
         if is_param_opt(r) { r = Some(self.env_type(opt_type(r))) }
         return r
     }
@@ -3920,6 +3938,7 @@ impl Interp {
             },
             Value.VList(xs) => match b {
                 Value.VList(ys) => self.all_equal(xs, ys),
+                Value.VBytes(t) => self.all_equal(xs, byte_values(t)),
                 _ => false,
             },
             _ => value_eq(a, b),
@@ -3946,6 +3965,7 @@ impl Interp {
         return match v {
             Value.VTuple(es) => self.keys_hash(3, es),
             Value.VList(xs) => self.keys_hash(mix_key(4, xs.len() as int64), xs),
+            Value.VBytes(s) => self.keys_hash(mix_key(4, s.len() as int64), byte_values(s)),
             Value.VStruct(n, fns, fvs) => {
                 if self.own_hash.contains(n) { return self.written_hash(n, v) }
                 self.keys_hash(mix_key(5, str_key_hash(n)), fvs)
@@ -4150,6 +4170,9 @@ impl Interp {
         // a captured write leaves no errno of its own: `__io_errno` right
         // after it reads 0, not what an earlier primitive left (M5)
         if self.captured_io && nm != "__io_errno" { self.captured_io = false }
+        // a program's or the library's own function, or a variant, without
+        // testing every builtin's name first (MYLA-380's follow-up)
+        if !names_a_builtin(nm) { return self.call_named(e, nm, args) }
         if nm == "std$task$cancel" {
             match self.eval(args[0]) {
                 Value.VTask(id) => { self.request_cancel(id) },
@@ -4283,20 +4306,24 @@ impl Interp {
             let fd = as_int(self.eval(args[0])) as int32
             return Value.VStr(__read(fd, as_int(self.eval(args[1])) as int32))
         }
-        // `__read` and `__write` of bytes (D177): here through a string
+        // `__read` and `__write` of bytes (D177): here through a string,
+        // which the bytes stay (`VBytes`, S2)
         if nm == "__read_bytes" {
             let fd = as_int(self.eval(args[0])) as int32
-            return bytes_to_value(__str_to_bytes(__read(fd, as_int(self.eval(args[1])) as int32)))
+            return Value.VBytes(__read(fd, as_int(self.eval(args[1])) as int32))
         }
         if nm == "__write_bytes" {
             let fd = as_int(self.eval(args[0])) as int32
-            var sb = StringBuilder()
-            match self.eval(args[1]) {
-                Value.VList(xs) => { for x in xs { sb.append_byte(as_int(x) as uint8) } },
-                _ => {},
+            let s = match self.eval(args[1]) {
+                Value.VBytes(b) => b,
+                Value.VList(xs) => {
+                    var sb = StringBuilder(xs.len())
+                    for x in xs { sb.append_byte(as_int(x) as uint8) }
+                    sb.build()
+                },
+                _ => "",
             }
             if self.stop() { return Value.VUnit }
-            let s = sb.build()
             if fd == 1 && self.testing {
                 self.captured.push(s)
                 self.captured_io = true
@@ -4416,9 +4443,10 @@ impl Interp {
             return Value.VList(out)
         }
         // a string's bytes as a list and back (MYLA-369)
-        if nm == "__str_to_bytes" { return bytes_to_value(__str_to_bytes(as_str(self.eval(args[0])))) }
+        if nm == "__str_to_bytes" { return Value.VBytes(as_str(self.eval(args[0]))) }
         if nm == "__bytes_to_str" {
             match self.eval(args[0]) {
+                Value.VBytes(s) => { return Value.VStr(s) },
                 Value.VList(xs) => {
                     var sb = StringBuilder(xs.len())
                     for x in xs { sb.append_byte(as_int(x) as uint8) }
@@ -4578,6 +4606,12 @@ impl Interp {
             return Value.VUnit
         }
         if nm == "build" { return Value.VStr(sb_build(self.eval(args[0]))) }
+        return self.call_named(e, nm, args)
+    }
+
+    // `nm(args)` where `nm` names no builtin (`names_a_builtin`): a
+    // variant, a function value in scope or a function.
+    fun call_named(var self, e: Expr, nm: str, args: [Expr]) -> Value {
         // a bare enum constructor with payload, e.g. `Some(x)`, `Ok(x)`
         match self.variant_enum(nm) {
             Some(en) => { return Value.VEnum(en, nm, self.eval_args(args)) },
@@ -4595,20 +4629,15 @@ impl Interp {
             self.bind_next(fi, e.id, None)
             return self.call_func(fi, argv)
         }
+        // what the checker accepted, the interpreter couldn't find: an
+        // error at the call, never a value (MYLA-414)
+        self.fail(e, format("internal error: no function '{}' found", nm))
         return Value.VUnit
     }
 
     #test(interp_on("[int]"), "length")[None]
     fun variant_enum(self, name: str) -> Option<str> {
-        for d in self.decls {
-            match d.kind {
-                DeclKind.EnumDecl(en, variants, attrs, tps, isp) => {
-                    for v in variants { if v.name == name { return Some(en) } }
-                },
-                _ => {},
-            }
-        }
-        return None
+        return self.variant_ix.get(name)
     }
 
     #test(interp_on("[int]"), Value.VClosure([], ExprOrBlock.EB_Block(Block { line: 0, col: 0, sp: SrcSpan { sline: 0, scol: 0, eline: 0, ecol: 0 }, stmts: [] }), [], [], "inc", true), [Value.VInt(3)])[Value.VUnit]
@@ -4800,6 +4829,20 @@ fun format_typed(v: Value, t: Option<Type>) -> str {
     return format_value(v)
 }
 
+// Whether `Interp.eval_name_call` takes the call of `nm` itself: a
+// primitive (`__…`), `task.cancel`, or a builtin function or method.
+#test("__write")[true]
+#test("push")[true]
+#test("wrapping_add")[true]
+#test("std$task$cancel")[true]
+#test("fib")[false]
+#test("Some")[false]
+#test("_")[false]
+fun names_a_builtin(nm: str) -> bool {
+    if nm.len() >= 2 && nm[0] == '_' && nm[1] == '_' { return true }
+    return nm == "print" || nm == "assert" || nm == "panic" || nm == "unreachable" || nm == "len" || nm == "push" || nm == "pop" || nm == "contains" || nm == "remove" || nm == "keys" || nm == "chars" || nm == "format" || nm == "StringBuilder" || nm == "append" || nm == "append_char" || nm == "append_byte" || nm == "build" || nm == "std$task$cancel" || is_wrapping_method(nm)
+}
+
 // Whether `t` names a type parameter, which a generic function's frame
 // binds (`Interp.env_type`).
 #test(Type.TParam("T"))[true]
@@ -4932,15 +4975,28 @@ fun as_str(v: Value) -> str {
     return match v { Value.VStr(s) => s, _ => "" }
 }
 
-// Wrap a raw `[uint8]` buffer (e.g. captured subprocess output) as a `VList`
-// of `VInt` byte values, matching the `[uint8]` type the `__run_*` primitives
-// report to the checker.
-#test([])[Value.VList([])]
-#test([0, 1])[Value.VList([Value.VInt(0), Value.VInt(1)])]
+// A raw `[uint8]` buffer (e.g. captured subprocess output) as the value of
+// the `[uint8]` type the `__run_*` primitives report to the checker: its
+// bytes, held packed (`VBytes`).
+#test([])[Value.VBytes("")]
+#test([104, 105])[Value.VBytes("hi")]
+#allow(primitive)
 fun bytes_to_value(bytes: [uint8]) -> Value {
-    var items: [Value] = []
-    for b in bytes { items.push(Value.VInt(b as int64)) }
-    return Value.VList(items)
+    return Value.VBytes(__bytes_to_str(bytes))
+}
+
+// The bytes of `s` as a list's elements, one `VInt` each: a `VBytes` taken
+// apart.
+#test("")[[]]
+#test("h\0")[[Value.VInt(104), Value.VInt(0)]]
+pub fun byte_values(s: str) -> [Value] {
+    var out: [Value] = []
+    var i = 0
+    while i < s.len() {
+        out.push(Value.VInt(s[i] as int64))
+        i += 1
+    }
+    return out
 }
 
 #test(Value.VInt(0))[false]
@@ -5008,6 +5064,7 @@ fun value_key(v: Value) -> str {
         Value.VInt(i) => "int32",
         Value.VFloat(f) => "float64",
         Value.VList(xs) => "__list",
+        Value.VBytes(s) => "__list",
         Value.VMap(m) => "__map",
         _ => "",
     }
@@ -5298,6 +5355,7 @@ fun value_len(v: Value) -> int64 {
         Value.VList(xs) => xs.len() as int64,
         Value.VMap(m) => m.count as int64,
         Value.VStr(s) => s.len() as int64,
+        Value.VBytes(s) => s.len() as int64,
         Value.VSB(b) => b.len() as int64,
         _ => 0,
     }
@@ -5316,6 +5374,12 @@ fun index_error(c: Value, k: Value, assigning: bool, place: int32) -> str {
             let i = as_int(k)
             if i < 0 || i >= (xs.len() as int64) {
                 return format("list index {} out of bounds (len {})", i, xs.len())
+            }
+        },
+        Value.VBytes(s) => {
+            let i = as_int(k)
+            if i < 0 || i >= (s.len() as int64) {
+                return format("list index {} out of bounds (len {})", i, s.len())
             }
         },
         Value.VStr(str_) => {
@@ -5342,7 +5406,17 @@ fun index_error(c: Value, k: Value, assigning: bool, place: int32) -> str {
 fun list_values(v: Value) -> [Value] {
     return match v {
         Value.VList(xs) => xs,
+        Value.VBytes(s) => byte_values(s),
         _ => empty_values(),
+    }
+}
+
+#test(Value.VBytes("a"))[true]
+#test(Value.VList([]))[false]
+fun is_vbytes(v: Value) -> bool {
+    return match v {
+        Value.VBytes(s) => true,
+        _ => false,
     }
 }
 
@@ -5362,6 +5436,7 @@ fun is_vmap(v: Value) -> bool {
 fun is_vlist(v: Value) -> bool {
     return match v {
         Value.VList(xs) => true,
+        Value.VBytes(s) => true,
         _ => false,
     }
 }
@@ -5667,6 +5742,7 @@ fun value_hash(v: Value) -> int64 {
         Value.VUnit => 7,
         Value.VTuple(es) => values_hash(3, es),
         Value.VList(xs) => values_hash(mix_key(4, xs.len() as int64), xs),
+        Value.VBytes(s) => values_hash(mix_key(4, s.len() as int64), byte_values(s)),
         Value.VStruct(n, fns, fvs) => values_hash(mix_key(5, str_key_hash(n)), fvs),
         Value.VEnum(en, vr, pl) => values_hash(mix_key(6, str_key_hash(vr)), pl),
         Value.VFloat(f) => mix_key(8, f as int64),
@@ -5910,7 +5986,9 @@ fun i_tuple_elems(v: Value) -> [Value] {
 #test(Value.VInt(1), Value.VInt(1))[true]
 #test(Value.VInt(0), Value.VInt(1))[false]
 fun value_eq(a: Value, b: Value) -> bool {
+    match b { Value.VBytes(t) => { if !is_vbytes(a) { return value_eq(a, Value.VList(byte_values(t))) } }, _ => {} }
     return match a {
+        Value.VBytes(s) => match b { Value.VBytes(t) => s == t, _ => value_eq(Value.VList(byte_values(s)), b) },
         Value.VInt(x) => icmp(x, as_int(b)) == 0,
         Value.VChar(x) => match b { Value.VChar(y) => x == y, Value.VInt(y) => x == y, _ => false },
         Value.VBool(x) => match b { Value.VBool(y) => x == y, _ => false },
@@ -5948,6 +6026,7 @@ pub fun py_repr(v: Value) -> str {
         Value.VTuple(es) => "(" + reprs(es) + ")",
         Value.VEnum(en, vr, pl) => enum_repr(en, vr, pl),
         Value.VList(xs) => "[" + reprs(xs) + "]",
+        Value.VBytes(s) => "[" + reprs(byte_values(s)) + "]",
         Value.VMap(m) => map_repr(map_keys_of(m), map_vals_of(m)),
         Value.VSB(bs) => "StringBuilder(" + bytes_repr(bs) + ")",
         Value.VClosure(ps, body, cn, cv, fname, is_func) => format("<closure {} param(s), {} capture(s)>", ps.len(), cn.len()),
@@ -6218,6 +6297,7 @@ fun index_get(c: Value, k: Value, place: int32) -> Value {
     return match c {
         Value.VList(xs) => xs[as_int(k) as int32],
         Value.VStr(s) => Value.VInt(s[as_int(k) as int32] as int64),
+        Value.VBytes(s) => Value.VInt(s[as_int(k) as int32] as int64),
         Value.VMap(m) => {
             if place < 0 { return Value.VUnit }
             m.vs[place]

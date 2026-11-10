@@ -1877,6 +1877,57 @@ fun main() {
     print(c)
 }
 """,
+    "packed_byte_lists": """// a `[uint8]` from `bytes.from_str` and from a stream: the interpreter
+// holds it packed (MYLA-414, the 2026-11-10 review's S2), and every use
+// of a list works on it as on any other
+import std.bytes as bytes
+import std.io as io
+from std.io import Read
+
+fun main() {
+    var b = bytes.from_str("hello")
+    print(b.len())
+    print(b[1])
+    print(b[^1])
+    print(bytes.to_str(b[1:3]))
+    print(bytes.to_str(b[::-1]))
+    print(b == [104u8, 101, 108, 108, 111])
+    print([104u8, 101, 108, 108, 111] == b)
+    print(b == bytes.from_str("hello"))
+    print(b != bytes.from_str("help"))
+    var total = 0
+    for x in b { total += x as int }
+    print(total)
+    print(b.contains(108))
+    print(b.index_of(111) == Some(4))
+    var m: [[uint8]: int] = [:]
+    m[b] = 1
+    m[[104u8, 105]] = 2
+    print(m.get(bytes.from_str("hello")) == Some(1))
+    print(m.get(bytes.from_str("hi")) == Some(2))
+    b.push(33)
+    print(bytes.to_str(b))
+    b[0] = 72
+    print(bytes.to_str(b))
+    print(b.pop())
+    print(b.len())
+    let s = b.sorted()
+    print(s[0])
+    var src = io.from_str("abcdef")
+    match src.read(4) {
+        Ok(c) => {
+            print(c.len())
+            print(c[3])
+            print(bytes.to_str(c))
+            print(c == [97u8, 98, 99, 100])
+        }
+        Err(e) => print("error")
+    }
+    let e = bytes.from_str("")
+    print(e.len())
+    print(e == [])
+}
+""",
     "operators_of_generic_impls": """// `==`, `!=`, `<` and the others, and a format hole, on a generic struct
 // whose `Eq`, `Ord` and `Format` impls are generic: the operator calls the
 // method's instance for the struct's type arguments (MYLA-367)
@@ -8882,6 +8933,8 @@ PINNED = {
     "actor_function_field": '1205\n',
     # MYLA-414 (L4): new; the interpreter printed 'a' for the numbers
     "char_literal_typed_uint8": '97\n97\n97\n98\n97 98\ntrue\n2\na\n',
+    # MYLA-414 (S2): new; the interpreter holds these bytes packed
+    "packed_byte_lists": '5\n101\n111\nel\nolleh\ntrue\ntrue\ntrue\ntrue\n532\ntrue\ntrue\ntrue\ntrue\nhello!\nHello!\n33\n5\n72\n4\n100\nabcd\ntrue\n0\ntrue\n',
     # MYLA-367: new; native code gave "undefined reference to 'myla_Box.eq'"
     "operators_of_generic_impls": 'true\ntrue\nfalse\ntrue\nfalse\ntrue\ntrue\n<a> <42> <s>\n<a>\n',
     "string_ordering": 'true true false false\ntrue true false false\nfalse false true true\ntrue true false false\nfalse true false true\nfalse true false true\ntrue true false false\nfalse false true true\nfalse false true true\ntrue true false false\ntrue true false false\ntrue true false false\n,Apple,apple,apples,banana,fig,pear,z,é\n,Apple,apple,apples,banana,fig,pear,z,é\ntrue\na,b,b,c,d\n5\nlime\na,c,m,x\ntrue\na,b\n',
