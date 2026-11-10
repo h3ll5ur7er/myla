@@ -200,7 +200,7 @@ pub fun lower_on() -> Lower {
 
 // The IR of the function `fd`, generated as `mangled`; Err: why it can't be
 // lowered yet.
-#test(codegen_on("struct P { x: int }; fun get(p: P) -> int { return p.x }"), fun_of("fun h(xs: [int]) -> int { return len(xs) }"), "add")[Err("the builtin len")]
+#test(codegen_on("struct P { x: int }; fun h(xs: [int]) -> int { return 0 }"), fun_of("fun h(xs: [int]) -> int { return len(xs) }"), "add")[Err("the builtin len")]
 pub fun lower_function(cg: CodeGen, fd: FunData, mangled: str) -> Result<Lowered, str> {
     let sig = cg.sig_of(fd.name)
     let ret = opt_subst_type(sig.ret, cg.subst)
@@ -3768,7 +3768,7 @@ impl Lower {
 
     // A top-level function `n` as a value: its thunk (taking an environment
     // word it ignores) and a null environment.
-    #test(lower_on(), codegen_on("fun main() { print(1 + 2) }"), expr_of("Some(n)"), "inc")[0]
+    #test(lower_on(), codegen_on("fun inc(n: int) -> int { return n + 1 }"), expr_of("Some(n)"), "inc")[0]
     fun fn_value(var self, cg: CodeGen, e: Expr, n: str) -> int32 {
         if cg.sig_of(n).type_params.len() > 0 { return self.unsupported("a generic function as a value") }
         if !has_name(self.fnvals, n) { self.fnvals.push(n) }
@@ -3970,7 +3970,7 @@ impl Lower {
         return CallTarget { name: mangle_fn(sig.name, targs), params: cp, ret: opt_subst_type(sig.ret, sub) }
     }
 
-    #test(lower_on(), codegen_on("fun main() { print(1 + 2) }"), expr_of("Some(n)"), "list_sum", [], -1, false)[-1]
+    #test(lower_on(), codegen_on("fun list_sum() { print(1 + 2) }"), expr_of("Some(n)"), "list_sum", [], -1, false)[-1]
     fun direct_call(var self, cg: CodeGen, e: Expr, name: str, argv0: [Expr], into: int32, tail: bool) -> int32 {
         let sig = cg.sig_of(name)
         let ct = self.call_target(cg, sig, argv0, e)

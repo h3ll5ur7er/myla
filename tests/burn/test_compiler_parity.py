@@ -8868,6 +8868,27 @@ class TestCompilerParity(unittest.TestCase):
                                   f"whose type arguments are {why}\n  --> {path}:{at}\n", built.stderr)
                     self.assertIn("(polymorphic recursion)", built.stderr)
 
+    def test_a_file_without_main_is_a_clean_error_for_build(self):
+        # MYLA-415 (Z3): `CodeGen.sig_of` fell back on the first function, so
+        # `myla build` of a library built that function as the entry point,
+        # since D179 an unread empty body: a program doing nothing, exit 0
+        # (wasm32: an internal error); now the interpreter's message, exit 1
+        myla = selfhost_tool("main")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = write_program(tmp, "fun f() -> int {\n    return 1\n}\n")
+            ran = subprocess.run([myla, "run", path], capture_output=True, text=True, timeout=60)
+            self.assertEqual((ran.returncode, ran.stderr),
+                             (1, "runtime error: no entry point: define '#main' or a function named 'main'\n"))
+            for flags in (["--target", "x86_64-linux"], ["-g"], ["--checked"], ["--target", "aarch64-linux"],
+                          ["--target", "wasm32-wasi"]):
+                with self.subTest(flags=flags):
+                    out = os.path.join(tmp, "out")
+                    built = subprocess.run([myla, "build", path, "-o", out] + flags, capture_output=True, text=True,
+                                           timeout=60)
+                    self.assertEqual((built.returncode, built.stderr),
+                                     (1, "type error: no entry point: define '#main' or a function named 'main'\n"))
+                    self.assertFalse(os.path.exists(out))
+
     def test_become_runs_a_million_deep(self):
         # MYLA-128, MYLA-131: every `become` of the parity programs jumps, so
         # they run a million calls deep in the default stack

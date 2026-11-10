@@ -1053,10 +1053,13 @@ impl CodeGen {
 
     // -- lookups ----------------------------------------------------------
 
+    // (a name no function has is a compiler bug: it fell back on the first
+    // function once, which compiled a file without `main` as that function,
+    // an unread body since D179; Z3)
     fun sig_of(self, name: str) -> FuncSig {
         return match self.func_ix.get(name) {
             Some(i) => self.funcs[i]
-            None => self.funcs[0]
+            None => panic(format("internal error: no function '{}' to compile", name))
         }
     }
 
@@ -1990,6 +1993,12 @@ impl CodeGen {
 
     fun generate(var self) -> str {
         let en = self.entry_name()
+        // a file without an entry point is a library: nothing to build (Z3),
+        // as the interpreter says
+        if !self.has_func(en) {
+            self.refused.push(CheckErr { line: 0, col: 0, sp: no_span(), msg: "no entry point: define '#main' or a function named 'main'", decl: -1, notes: [] })
+            return ""
+        }
         if self.wasm { self.emit_runtime_prelude_wasm(en) } else if self.a64 { self.emit_runtime_prelude_a64(en) } else { self.emit_runtime_prelude(en) }
         // Start from the entry point: every function is emitted once a function
         // emitted calls it, makes it a value or applies it partially (MYLA-108;
@@ -2049,7 +2058,7 @@ impl CodeGen {
 
     // Register an instantiation (or non-generic function) and return its emitted
     // (mangled) name, enqueueing it for stamping the first time it is seen.
-    #test(codegen_on("fun main() { print(1 + 2) }"), "add", [])["add"]
+    #test(codegen_on("fun main() { print(1 + 2) }"), "main", [])["main"]
     fun request_fn(var self, orig: str, targs: [Type]) -> str {
         let sig = self.sig_of(orig)
         if sig.type_params.len() == 0 {
