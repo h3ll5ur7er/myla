@@ -21,3 +21,7 @@ fun main() {
 
 - [ ] The hoisted key takes the map's key type (the checker could check `%index` lets against the place they index, or the parser could hoist only what can't be typed alone)
 - [ ] A parity program with both lines, interpreted and natively
+
+## Found again in integration (2026-11-10)
+
+The same hidden temporary blocks a compound assignment to a field whose value is a generic call: `acc.items += lst()` (with `fun lst<T>() -> [T]`) still says `cannot infer type parameter(s) T for 'lst'`, while `acc.items = lst()` now checks ([[Project/Review-2026-11-09]]'s `gap_expected_through_try.my`, line 54).
