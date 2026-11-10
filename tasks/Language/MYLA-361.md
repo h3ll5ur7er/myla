@@ -2,7 +2,7 @@
 id: MYLA-361
 title: "myla test: a uint64 of 2^63 or more prints as negative in a failure's report"
 type: bug
-status: todo
+status: review
 priority: low
 labels: [testing, printing, integers]
 ---
@@ -31,4 +31,6 @@ The native harness's `__myla_repr` for a `uint64` does `format("{}", v as int64)
 
 Not ready ([[Project/Review-2026-11-09]]): natively a test function returning `Result<(), uint64>` (any scalar) doesn't build its harness (M8). The fix is in [[MYLA-418]].
 
-- [ ] The review's blocker, fixed with [[MYLA-418]]
+- [x] The review's blocker, fixed with [[MYLA-418]]
+
+  Natively `Result<(), uint64>` gave `type 'uint64' has no method 'format'` in the harness; now `FAIL  big: 18446744073709551615` as interpreted, and a float, `char` or `bool` `Err` as `f"{e}"` writes it (`test_test_native.TestNative.test_failing_reports_agree`, also under qemu-aarch64 and on wasm32).
