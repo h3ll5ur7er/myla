@@ -70,7 +70,7 @@ Lines end at LF or CRLF. Keys before the first header belong to the section "". 
 | `doc.keys(section: str) -> [str]` | The keys of a section in order; none if there is no such section |
 | `doc.set(section: str, key: str, value: str)` | A `var self` method: sets the value, adding the section and the key at the end if they are new |
 
-`IniError { kind: IniErrorKind, line: int }` names what is wrong and the line, counted from 1. Its `Format` impl writes `line: what`.
+`IniError { kind: IniErrorKind, line: int }` names what is wrong and the line, counted from 1 (D168). `e.message()` is what is wrong, `a line without '=' or ':'`, and its `Format` impl writes the line before it, `3: a line without '=' or ':'`. Any text gives a document or an error: a header of any bytes, `[é` too, is `BadSection`, not a runtime error ([[MYLA-420]], the review's H9).
 
 | `IniErrorKind` | Meaning |
 | --- | --- |
