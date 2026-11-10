@@ -403,6 +403,28 @@ class SelfHostedInterpParity(unittest.TestCase):
             small, large = times[UPDATE_N], times[4 * UPDATE_N]
             self.assertLess(large, 8 * small + 0.5, f"{UPDATE_N}: {small:.2f} s, {4 * UPDATE_N}: {large:.2f} s")
 
+    def test_byte_streams_hold_no_value_per_byte(self) -> None:
+        """`io.copy` of 32 MB from a file to a file, in chunks of `[uint8]`,
+        costs about what reading the file in one primitive does: the bytes
+        stay a host string (MYLA-414, the 2026-11-10 review's S2: 2,096 ms,
+        a value per byte, against 27 ms before D177)."""
+        if self._binary is None:
+            self.skipTest("timing needs the natively built interpreter")
+        with tempfile.TemporaryDirectory() as tmp:
+            src, dst = os.path.join(tmp, "src.bin"), os.path.join(tmp, "dst.bin")
+            with open(src, "wb") as fh:
+                fh.write(os.urandom(1 << 20) * 32)
+            path = os.path.join(tmp, "copy.my")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(BYTE_COPY)
+            proc = subprocess.run([selfhost_tool("main"), "run", "--stdlib", STDLIB_ROOT, path, src, dst],
+                                  capture_output=True, text=True, timeout=120)
+            self.assertEqual((proc.stderr, proc.returncode), ("", 0))
+            read_ms, copy_ms = (int(x) for x in proc.stdout.split())
+            with open(src, "rb") as a, open(dst, "rb") as b:
+                self.assertTrue(a.read() == b.read())
+            self.assertLess(copy_ms, 10 * read_ms + 500, f"read {read_ms} ms, copy {copy_ms} ms")
+
 
 # A loop of in-place updates (test_updates_are_amortised_constant).
 UPDATE_N = 20000
@@ -433,6 +455,30 @@ fun main() {
     }
     print(xs.len() + bag.items.len() + grid[0].len() + xs.len())
     print(total)
+}
+"""
+
+# A file read whole, then copied in chunks (test_byte_streams_hold_no_value_per_byte):
+# the milliseconds each took.
+BYTE_COPY = """\
+import std.fs as fs
+import std.io as io
+import std.time as time
+from std.process import args
+
+fun main() {
+    let a = args()
+    var t = time.now_ms()
+    let whole = match fs.read_to_string(a[1]) { Ok(s) => s, Err(e) => { panic("read") } }
+    let read_ms = time.now_ms() - t
+    let src = match fs.open(a[1]) { Ok(f) => f, Err(e) => { panic("open") } }
+    let dst = match fs.create(a[2]) { Ok(f) => f, Err(e) => { panic("create") } }
+    t = time.now_ms()
+    match io.copy(src, dst) {
+        Ok(d) => print(f"{read_ms} {time.now_ms() - t}")
+        Err(e) => panic("copy")
+    }
+    if whole.len() == 0 { panic("empty") }
 }
 """
 

@@ -25,7 +25,7 @@ from .loader import load_program_opts, load_options, file_of, normalize, Loaded,
 from .checker import build_checker_lazy, Checker
 from .diag import render_one, Report, carets
 from .tokens import SrcSpan
-from .interp import new_interp, Value, SessionStep, new_mapv, map_keys_of, map_vals_of
+from .interp import new_interp, Value, SessionStep, new_mapv, map_keys_of, map_vals_of, byte_values
 from .util import cp_utf8
 from .parser import expr_of, stmt_of, type_expr_of, block_of, pattern_of, fun_of  // AST values for #test cases (MYLA-184)
 
@@ -336,6 +336,7 @@ pub fun show(v: Value) -> str {
         Value.VTuple(es) => "(" + shows(es) + ")",
         Value.VEnum(en, vr, pl) => show_enum(en, vr, pl),
         Value.VList(xs) => "[" + shows(xs) + "]",
+        Value.VBytes(s) => "[" + shows(byte_values(s)) + "]",
         Value.VMap(m) => show_map(map_keys_of(m), map_vals_of(m)),
         Value.VSB(bs) => "StringBuilder",
         _ => "<function>",
