@@ -338,7 +338,12 @@ class SelfHostedParserParity(unittest.TestCase):
                 proc = subprocess.run([self._binary, "--lazy", path], capture_output=True, text=True)
                 self.assertEqual(proc.returncode, 0, proc.stderr)
                 self.assertTrue(proc.stdout.startswith("same "), proc.stdout[:2000])
-                bodies += int(proc.stdout.split()[1])
+                n = int(proc.stdout.split()[1])
+                # `same 0` is two parses failing alike: a file of the library
+                # or the compiler parses and has bodies (MYLA-418)
+                if os.path.relpath(path, _REPO).startswith(("lib" + os.sep, "selfhost" + os.sep)):
+                    self.assertGreater(n, 0, proc.stdout[:2000])
+                bodies += n
         self.assertGreater(bodies, 5000)
 
     def _continued(self, source: str) -> bool:
