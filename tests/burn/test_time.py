@@ -494,7 +494,7 @@ class Time(unittest.TestCase):
         exe = self.native("fails", FAILS)
         out, err, code, took = self.run_timed([exe], MYLA_THREADS="4")
         self.assertEqual((out, code), ("", 1))
-        self.assertIn("runtime error: index out of bounds", err)
+        self.assertIn("runtime error: list index 3 out of bounds (len 1)", err)
         self.assertLess(took, 5.0)
         out, err, code, took = self.interpreted("fails", FAILS)
         self.assertEqual((out, code), ("", 1))

@@ -8931,7 +8931,7 @@ class TestCompilerParity(unittest.TestCase):
     def test_a_char_moved_past_the_scalars_is_a_runtime_error(self):
         # MYLA-318: `c + n` and `c - n` are checked as `n as char` is, past
         # U+10FFFF, into the surrogates, below 0 (the sum wraps as an int32),
-        # at the operator; the native message has no values (MYLA-17)
+        # at the operator; the native message has the value too (D183)
         cases = (("'\\u{10FFFF}', 1", "1114112"), ("'\\u{D7FF}', 1", "55296"), ("'a', -98", "-1"),
                  ("'a', 2147483647", "-2147483552"))
         for args, value in cases:
@@ -8943,7 +8943,8 @@ class TestCompilerParity(unittest.TestCase):
                 self.assertEqual(err.splitlines()[:2], [f"runtime error: invalid char: {value} is not a Unicode scalar value",
                                                         f"  --> {path}:2:14"])
                 self.assertEqual(build_and_run_full(Program(path), entry_path=path),
-                                 ("b\n", f"runtime error: invalid char\n  --> {path}:2:14\n", 1))
+                                 ("b\n", f"runtime error: invalid char: {value} is not a Unicode scalar value\n"
+                                          f"  --> {path}:2:14\n", 1))
 
     def test_polymorphic_recursion_is_refused_where_it_is_built(self):
         # MYLA-415 (H5): a generic function calling itself with a larger type
@@ -8997,6 +8998,44 @@ class TestCompilerParity(unittest.TestCase):
                     self.assertEqual((built.returncode, built.stderr),
                                      (1, "type error: no entry point: define '#main' or a function named 'main'\n"))
                     self.assertFalse(os.path.exists(out))
+
+    def test_runtime_errors_carry_the_interpreters_values(self):
+        # D183 (MYLA-415): a native runtime error is the interpreter's text,
+        # its values included; natively an index error said
+        # `index out of bounds`, a missing key `map key not found`, a bad
+        # char `invalid char`. The first two lines of the interpreter's
+        # report, the message and the position, are the binary's stderr
+        cases = {
+            "list_read": "let xs = [1, 2, 3]\n    let i = 7\n    print(xs[i])",
+            "list_negative": "let xs = [1, 2, 3]\n    let i = -1\n    print(xs[i])",
+            "list_write": "var xs = [1, 2, 3]\n    let i = 5\n    xs[i] = 1\n    print(xs[0])",
+            "from_the_end": "let xs = [1, 2, 3]\n    let i = 5\n    print(xs[^i])",
+            "byte_list": "let xs: [uint8] = [1, 2, 3]\n    let i: uint8 = 3\n    print(xs[i])",
+            "int64_index": "let xs = [1, 2, 3]\n    let i: int64 = 5000000000\n    print(xs[i])",
+            "inner_list": "var xs = [[1], [2]]\n    let i = 1\n    let j = 4\n    xs[i][j] = 1\n    print(xs[0][0])",
+            "string_read": "let s = \"abc\"\n    let i = 9\n    print(s[i])",
+            "int_key": "let m = [1: 2]\n    let k = 5\n    print(m[k])",
+            "str_key": "let m = [\"a\": 2]\n    let k = \"it's\"\n    print(m[k])",
+            "escaped_key": "let m = [\"a\": 2]\n    let k = \"tab\\there\"\n    print(m[k])",
+            "char_key": "let m = ['a': 2]\n    let k = 'z'\n    print(m[k])",
+            "bool_key": "let m = [true: 2]\n    let k = false\n    print(m[k])",
+            "tuple_key": "let m = [(1, \"a\"): 2]\n    let k = (3, \"b\")\n    print(m[k])",
+            "int8_key": "let m: [int8: int] = [1: 2]\n    let k: int8 = -5\n    print(m[k])",
+            "key_of_a_place": "var m = [1: [2]]\n    let k = 5\n    m[k][0] = 3\n    print(m[1][0])",
+            "surrogate": "let n = 55296\n    print(n as char)",
+            "char_plus": "let c = 'a'\n    print(c + 1114111)",
+            "append_range": "var sb = StringBuilder()\n    let a = 2\n    sb.append(\"abc\", a, 9)\n    print(sb.build())",
+        }
+        for name, body in cases.items():
+            with self.subTest(case=name), tempfile.TemporaryDirectory() as tmp:
+                path = write_program(tmp, "fun main() {\n    " + body + "\n}\n")
+                out, err, code = selfhost_run(path)
+                self.assertEqual(code, 1, err)
+                lines = err.splitlines()
+                self.assertTrue(lines[0].startswith("runtime error: ") and lines[1].startswith("  --> "), err)
+                self.assertNotIn(lines[0], ("runtime error: index out of bounds", "runtime error: map key not found",
+                                            "runtime error: invalid char"))
+                self.assertEqual(build_and_run_full(Program(path), entry_path=path), (out, "\n".join(lines[:2]) + "\n", 1))
 
     def test_become_runs_a_million_deep(self):
         # MYLA-128, MYLA-131: every `become` of the parity programs jumps, so

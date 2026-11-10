@@ -2940,7 +2940,7 @@ impl Lower {
                 let src = cg.type_of(x.id)
                 if !is_scalar(src) || !is_scalar(t) { return self.unsupported("a cast of a value that isn't a scalar") }
                 let a = self.expr(cg, x)
-                if char_cast_checked(src, t) { self.check_scalar(a, Pos { line: e.line, col: e.col }) }
+                if char_cast_checked(src, t) { self.check_scalar(cg, a, Pos { line: e.line, col: e.col }) }
                 let d = self.temp(t)
                 self.add(Inst.Cast(d, src, t, a))
                 return d
@@ -3224,16 +3224,33 @@ impl Lower {
     // The integer `a` (an `int32` or wider, sign-extended) a Unicode scalar
     // or a trap at `pos` (MYLA-177): at most 10FFFF, not a surrogate (D800
     // to DFFF).
-    fun check_scalar(var self, a: int32, pos: Pos) {
+    fun check_scalar(var self, cg: CodeGen, a: int32, pos: Pos) {
         let u = Type.TInt(64, false)
         let in_range = self.temp(Type.TBool)
         self.add(Inst.Cmp(in_range, "<=", u, a, self.konst(u, 1114111)))
-        self.add(Inst.Check(in_range, "char", pos))
         let off = self.temp(u)
         self.add(Inst.Bin(off, "-", u, u, a, self.konst(u, 55296), pos))
         let not_surrogate = self.temp(Type.TBool)
         self.add(Inst.Cmp(not_surrogate, ">=", u, off, self.konst(u, 2048)))
-        self.add(Inst.Check(not_surrogate, "char", pos))
+        if !cg.has_func("std$rt$char_text") {
+            self.add(Inst.Check(in_range, "char", pos))
+            self.add(Inst.Check(not_surrogate, "char", pos))
+            return
+        }
+        // the interpreter's text, with the code point (D183), out of the way
+        let bad = self.new_block()
+        let next = self.new_block()
+        let ok = self.new_block()
+        self.finish(Term.Br(in_range, next, bad))
+        self.start(next)
+        self.finish(Term.Br(not_surrogate, ok, bad))
+        self.start(bad)
+        let cp = self.temp(Type.TInt(64, true))
+        self.add(Inst.Cast(cp, self.f.temps[a], Type.TInt(64, true), a))
+        let text = self.temp(Type.TStr)
+        self.add(Inst.Call(text, "std$rt$char_text", [cp]))
+        self.finish(Term.Panic(text, pos))
+        self.start(ok)
     }
 
     // `c - d` on two chars, the `int32` between their code points; `c + n`
@@ -3256,7 +3273,7 @@ impl Lower {
         let v = self.temp(i32)
         self.add(Inst.Bin(v, op, i32, i32, ai, bi, pos))
         if is_char_type(rt) { return v }
-        self.check_scalar(v, pos)
+        self.check_scalar(cg, v, pos)
         let d = self.temp(Type.TChar)
         self.add(Inst.Cast(d, i32, Type.TChar, v))
         return d
@@ -4353,8 +4370,88 @@ impl Lower {
     #test(lower_on(), codegen_on("enum E { A, B(int) }"), expr_of("a.b[0]"), Type.TMap(Type.TStr, Type.TInt(32, true)), 9, 10)[3]
     fun map_value(var self, cg: CodeGen, e: Expr, mt: Type, cell: int32, key: int32) -> int32 {
         let slot = self.map_lookup(cg, mt, cell, key)
-        self.add(Inst.Check(slot, "key", Pos { line: e.line, col: e.col }))
+        let pos = Pos { line: e.line, col: e.col }
+        if cg.has_func("std$rt$key_text") {
+            // the interpreter's text, with the key (D183), out of the way
+            let found = self.temp(Type.TBool)
+            self.add(Inst.Cmp(found, "!=", Type.TPtr, slot, self.konst(Type.TPtr, 0)))
+            let bad = self.new_block()
+            let ok = self.new_block()
+            self.finish(Term.Br(found, ok, bad))
+            self.start(bad)
+            let k = self.key_text_of(cg, map_key(mt), key, cg.map_hashed(mt), 0)
+            if k >= 0 {
+                let text = self.temp(Type.TStr)
+                self.add(Inst.Call(text, "std$rt$key_text", [k]))
+                self.finish(Term.Panic(text, pos))
+            } else { self.finish(Term.Trap("key", pos)) }
+            self.start(ok)
+        } else { self.add(Inst.Check(slot, "key", pos)) }
         return self.offset(slot, cg.map_val_off(mt))
+    }
+
+    // The map key `key` of type `kt` (at the address `key + off` when `at`)
+    // as the interpreter writes it in `map key … not found` (its
+    // `py_repr`, D183): a new string, for a key of a scalar or a string type
+    // or a tuple of such; -1 for another (a struct's, an enum's, a list's:
+    // the error then says `map key not found`).
+    fun key_text_of(var self, cg: CodeGen, kt: Type, key: int32, at: bool, off: int32) -> int32 {
+        let i64 = Type.TInt(64, true)
+        let u64 = Type.TInt(64, false)
+        var v = key
+        if at && !is_aggregate(kt) {
+            v = self.temp(kt)
+            self.add(Inst.LoadAt(v, key, off, 8))
+        }
+        let d = self.temp(Type.TStr)
+        match kt {
+            Type.TInt(w, signed) => {
+                if signed {
+                    let x = self.temp(i64)
+                    self.add(Inst.Cast(x, kt, i64, v))
+                    self.rt_call(cg, d, "__int_to_str", [x])
+                } else {
+                    let x = self.temp(u64)
+                    self.add(Inst.Cast(x, kt, u64, v))
+                    self.rt_call(cg, d, "__uint_to_str", [x])
+                }
+            },
+            // (the interpreter's text of a char key is its code point)
+            Type.TChar => {
+                let x = self.temp(i64)
+                self.add(Inst.Cast(x, kt, i64, v))
+                self.rt_call(cg, d, "__int_to_str", [x])
+            },
+            Type.TBool => { self.add(Inst.Call(d, "std$rt$key_bool_text", [v])) },
+            Type.TStr => { self.add(Inst.Call(d, "std$rt$key_str_text", [v])) },
+            Type.TTuple(es) => {
+                var acc = self.temp(Type.TStr)
+                self.add(Inst.Str(acc, "("))
+                var i = 0
+                while i < es.len() {
+                    let part = self.key_text_of(cg, es[i], key, true, off + cg.elem_offset(kt, i))
+                    if part < 0 { return -1 }
+                    if i > 0 { acc = self.concat_now(cg, acc, ", ") }
+                    let joined = self.temp(Type.TStr)
+                    self.rt_call(cg, joined, "__str_concat", [acc, part])
+                    acc = joined
+                    i = i + 1
+                }
+                // a one-element tuple as the interpreter writes it
+                return self.concat_now(cg, acc, ")")
+            },
+            _ => { return -1 },
+        }
+        return d
+    }
+
+    // The string `a` with the literal `lit` after it, a new string.
+    fun concat_now(var self, cg: CodeGen, a: int32, lit: str) -> int32 {
+        let b = self.temp(Type.TStr)
+        self.add(Inst.Str(b, lit))
+        let d = self.temp(Type.TStr)
+        self.rt_call(cg, d, "__str_concat", [a, b])
+        return d
     }
 
     // A new list of the keys of the map `cell`, each with its reference; the
@@ -6392,6 +6489,39 @@ pub fun map_drop_slow_ir(cg: CodeGen, mt: Type, name: str, free: str, kind: int3
     }
     lw.drop_guard_end(sp, free, guarded)
     return lw.f
+}
+
+// The std.rt function that words the runtime error `__trap_<kind>` (D183).
+#test("lindex")["std$rt$list_index_text"]
+pub fun trap_text_fn(kind: str) -> str {
+    if kind == "lindex" { return "std$rt$list_index_text" }
+    if kind == "sindex" { return "std$rt$str_index_text" }
+    return "std$rt$range_text"
+}
+
+// `__trap_<kind>(pos, a, b)` (`range`: `a, b, n`; D183): the runtime error
+// with its values, worded by std.rt's `text`, reported as `__panic` reports
+// a trap, at the position record `pos`; it doesn't return. A backend calls
+// it from its bounds check, with the values it compared.
+pub fun trap_value_ir(kind: str, text: str) -> Routine {
+    let i64 = Type.TInt(64, true)
+    var lw = routine("__trap_" + kind, None)
+    let sp = lw.new_slot("pos", i64, 8, 0, false)
+    var n = 2
+    if kind == "range" { n = 3 }
+    var slots: [int32] = []
+    var k = 0
+    while k < n {
+        slots.push(lw.new_slot(format("v{}", k), i64, 8, k + 1, false))
+        k += 1
+    }
+    var vals: [int32] = []
+    for sl in slots { vals.push(lw.read_cell(sl)) }
+    let m = lw.temp(Type.TStr)
+    lw.add(Inst.Call(m, text, vals))
+    lw.add(Inst.Rt(-1, "__panic", [m, lw.read_cell(sp)]))
+    lw.finish(Term.Ret(-1))
+    return Routine { f: lw.f, wants: [] }
 }
 
 // How many guarded releases may run inside one another on a worker before

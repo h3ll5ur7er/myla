@@ -38,20 +38,21 @@ def _interpreter_run(path: str) -> tuple[int, str]:
 
 # (name, statements in main from line 4 on, the message, the position). The
 # position is the interpreter's (checked against it below): the node that
-# raises the error, an index's `[`, a call's `(`, a binary operator.
+# raises the error, an index's `[`, a call's `(`, a binary operator. The
+# message is the interpreter's too, values included (D183, MYLA-415).
 TRAPS = [
-    ("list_index", "let xs = [1, 2]\n    print(xs[n + 3])", "index out of bounds", "5:13"),
-    ("string_index", 'let s = "ab"\n    print(s[n + 1])', "index out of bounds", "5:12"),
-    ("map_key", 'let m = ["a": 1]\n    print(m["b"])', "map key not found", "5:12"),
-    ("assign_list_index", "var xs = [1, 2]\n    xs[n + 5] = 3", "index out of bounds", "5:7"),
-    ("assign_inner_index", "var g = [[1]]\n    g[n][0] = 3", "index out of bounds", "5:6"),
-    ("assign_outer_index", "var g = [[1]]\n    g[0][n] = 3", "index out of bounds", "5:9"),
+    ("list_index", "let xs = [1, 2]\n    print(xs[n + 3])", "list index 4 out of bounds (len 2)", "5:13"),
+    ("string_index", 'let s = "ab"\n    print(s[n + 1])', "string index 2 out of bounds (len 2)", "5:12"),
+    ("map_key", 'let m = ["a": 1]\n    print(m["b"])', "map key 'b' not found", "5:12"),
+    ("assign_list_index", "var xs = [1, 2]\n    xs[n + 5] = 3", "list index 6 out of bounds (len 2)", "5:7"),
+    ("assign_inner_index", "var g = [[1]]\n    g[n][0] = 3", "list index 1 out of bounds (len 1)", "5:6"),
+    ("assign_outer_index", "var g = [[1]]\n    g[0][n] = 3", "list index 1 out of bounds (len 1)", "5:9"),
     ("pop_empty", "var xs: [int] = []\n    print(xs.pop() + n)", "pop from an empty list", "5:17"),
     ("division", "print(7 / (n - 1))", "division by zero", "4:13"),
     ("modulo", "print(7 % (n - 1))", "modulo by zero", "4:13"),
-    ("char_surrogate", "print((n + 55295) as char)", "invalid char", "4:23"),
-    ("char_above_max", "print((n + 1114111) as char)", "invalid char", "4:25"),
-    ("string_range", 'var sb = StringBuilder()\n    sb.append("abc", n, 9)', "index out of bounds", "5:14"),
+    ("char_surrogate", "print((n + 55295) as char)", "invalid char: 55296 is not a Unicode scalar value", "4:23"),
+    ("char_above_max", "print((n + 1114111) as char)", "invalid char: 1114112 is not a Unicode scalar value", "4:25"),
+    ("string_range", 'var sb = StringBuilder()\n    sb.append("abc", n, 9)', "string range 1..9 out of bounds (len 3)", "5:14"),
     ("panic", 'panic(f"boom {n}")', "boom 1", "4:10"),
     ("assert", "assert(n == 2)", "assertion failed", "4:11"),
     ("assert_message", 'assert(n == 2, "n is not 2")', "n is not 2", "4:11"),
@@ -59,17 +60,18 @@ TRAPS = [
 ]
 
 # A counting loop below a length whose list might change keeps its bounds
-# checks (MYLA-251): (name, main's body, its output, the trap's position).
+# checks (MYLA-251): (name, main's body, its output, the trap's position and
+# message, D183).
 KEPT_CHECKS = [
-    ("assigned", "var xs = [1, 2, 3]\n    let n = xs.len()\n    xs = [1]\n    for i in 0..n { print(xs[i]) }", "1\n", "6:29"),
-    ("shadowed", "let xs = [1, 2, 3]\n    for i in 0..xs.len() {\n        let xs = [7]\n        print(xs[i])\n    }", "7\n", "6:17"),
-    ("popped", "var xs = [1, 2, 3]\n    for i in 0..xs.len() {\n        let v = xs.pop()\n        print(xs[i])\n    }", "1\n", "6:17"),
-    ("another_list", "let xs = [1, 2, 3]\n    let ys = [1]\n    for i in 0..xs.len() { print(ys[i]) }", "1\n", "5:36"),
-    ("negative_start", "let xs = [1, 2, 3]\n    for i in -1..xs.len() { print(xs[i]) }", "", "4:37"),
-    ("popped_later", "var xs = [1, 2]\n    let n = xs.len()\n    for k in 0..2 {\n        for i in 0..n { print(xs[i]) }\n        let v = xs.pop()\n    }", "1\n2\n1\n", "6:33"),
-    ("a_field", "var s = S { items: [1, 2, 3] }\n    let n = s.items.len()\n    s.items = [1]\n    for i in 0..n { print(s.items[i]) }", "1\n", "6:34"),
-    ("past_the_end", "let xs = [1, 2, 3]\n    for i in 0..xs.len() {\n        for j in i + 2..xs.len() + 2 { print(xs[j]) }\n    }", "3\n", "5:48"),
-    ("a_string", 'var s = "abc"\n    let n = s.len()\n    s = "a"\n    for i in 0..n { print(s[i]) }', "97\n", "6:28"),
+    ("assigned", "var xs = [1, 2, 3]\n    let n = xs.len()\n    xs = [1]\n    for i in 0..n { print(xs[i]) }", "1\n", "6:29", "list index 1 out of bounds (len 1)"),
+    ("shadowed", "let xs = [1, 2, 3]\n    for i in 0..xs.len() {\n        let xs = [7]\n        print(xs[i])\n    }", "7\n", "6:17", "list index 1 out of bounds (len 1)"),
+    ("popped", "var xs = [1, 2, 3]\n    for i in 0..xs.len() {\n        let v = xs.pop()\n        print(xs[i])\n    }", "1\n", "6:17", "list index 1 out of bounds (len 1)"),
+    ("another_list", "let xs = [1, 2, 3]\n    let ys = [1]\n    for i in 0..xs.len() { print(ys[i]) }", "1\n", "5:36", "list index 1 out of bounds (len 1)"),
+    ("negative_start", "let xs = [1, 2, 3]\n    for i in -1..xs.len() { print(xs[i]) }", "", "4:37", "list index -1 out of bounds (len 3)"),
+    ("popped_later", "var xs = [1, 2]\n    let n = xs.len()\n    for k in 0..2 {\n        for i in 0..n { print(xs[i]) }\n        let v = xs.pop()\n    }", "1\n2\n1\n", "6:33", "list index 1 out of bounds (len 1)"),
+    ("a_field", "var s = S { items: [1, 2, 3] }\n    let n = s.items.len()\n    s.items = [1]\n    for i in 0..n { print(s.items[i]) }", "1\n", "6:34", "list index 1 out of bounds (len 1)"),
+    ("past_the_end", "let xs = [1, 2, 3]\n    for i in 0..xs.len() {\n        for j in i + 2..xs.len() + 2 { print(xs[j]) }\n    }", "3\n", "5:48", "list index 3 out of bounds (len 3)"),
+    ("a_string", 'var s = "abc"\n    let n = s.len()\n    s = "a"\n    for i in 0..n { print(s[i]) }', "97\n", "6:28", "string index 1 out of bounds (len 1)"),
 ]
 
 # A list too big for a chunk of the arena has a mapping of its own, given
@@ -236,8 +238,8 @@ pub fun apply(k: int) -> int {
 }
 """
 MODULE_TRAPS = [   # (line of main.my to keep, message, position)
-    (6, "index out of bounds", "lib.my:8:14"),
-    (7, "index out of bounds", "lib.my:4:23"),
+    (6, "list index 7 out of bounds (len 2)", "lib.my:8:14"),
+    (7, "list index 9 out of bounds (len 2)", "lib.my:4:23"),
     (8, "division by zero", "lib.my:11:28"),
 ]
 
@@ -312,13 +314,13 @@ class NativeRuntime(unittest.TestCase):
                     self.assertEqual((proc.stdout, proc.returncode), ("40000000\ntrue\n", 0), proc.stderr)
 
     def test_a_counting_loop_keeps_the_checks_it_needs(self):
-        for name, body, out, position in KEPT_CHECKS:
+        for name, body, out, position, message in KEPT_CHECKS:
             source = f"struct S {{ items: [int] }}\nfun main() {{\n    {body}\n}}\n"
             for backend, binary in self.binaries(name, source):
                 with self.subTest(case=name, backend=backend):
                     proc = subprocess.run([binary], capture_output=True, text=True)
                     self.assertEqual((proc.stdout, proc.stderr, proc.returncode),
-                                     (out, f"runtime error: index out of bounds\n  --> {name}.my:{position}\n", 1))
+                                     (out, f"runtime error: {message}\n  --> {name}.my:{position}\n", 1))
 
     def test_a_counting_loop_below_a_length_indexes_unchecked(self):
         path = self.write("unchecked.my", UNCHECKED)
