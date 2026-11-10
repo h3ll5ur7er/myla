@@ -96,7 +96,16 @@ pub struct Routine { f: IrFunc, wants: [Want] }
 // the scope that joins it.
 // `foreign`: a sibling's, which a child awaits (MYLA-148): never joined here
 // (depth -1), its result read as a deep clone, the parent reading it too.
-struct TaskSlot { slot: int32, ty: Type, void: bool, owns: bool, depth: int32, foreign: bool }
+// `walk`: the release walk of a recursive enum result, held inline in the
+// frame, "" for any other type (H3).
+struct TaskSlot { slot: int32, ty: Type, void: bool, owns: bool, depth: int32, foreign: bool, walk: str }
+
+// The release walk of a recursive enum `t` held inline (as a frame holds a
+// child's result), "" for any other type.
+fun boxed_drop_walk(cg: CodeGen, t: Type) -> str {
+    if cg.is_boxed(t) { return cg.walk_label(t, false) }
+    return ""
+}
 
 // `refused`: what the function can't be built for, at its place (an
 // instance's `become` passing more stack words than it received, MYLA-272).
@@ -308,7 +317,7 @@ pub fun lower_lambda(cg: CodeGen, job: LamJob) -> Result<Lowered, str> {
         if frame { lw.own(s) }
         lw.add(Inst.Bind(c.name, s))
         // a sibling's task: awaited here, joined by the parent (MYLA-148)
-        if c.task { lw.tasks.push(TaskSlot { slot: s, ty: c.task_ty, void: c.task_void, owns: cg.owns_heap(c.task_ty), depth: -1, foreign: true }) }
+        if c.task { lw.tasks.push(TaskSlot { slot: s, ty: c.task_ty, void: c.task_void, owns: cg.owns_heap(c.task_ty), depth: -1, foreign: true, walk: boxed_drop_walk(cg, c.task_ty) }) }
     }
     if frame {
         let e = lw.temp(Type.TPtr)
@@ -486,6 +495,124 @@ const FRAME_PARENT: int32 = 56
 // An actor's executor (D92), after its fields: `[lock][running][first
 // frame waiting][last]`.
 const ACTOR_RECORD: int32 = 32
+
+// Whether computing `e` leaves the variable `root` as it was and keeps no
+// reference to it (H4): no method call on it or given it (but the reading
+// builtins), no block (an `if` or `match` may assign), no lambda, no
+// `await`. Such a key, index or argument may be computed after a place of
+// `root` was made unique; any other is computed before it, as the
+// interpreter does, so that a copy it takes doesn't see the write and a
+// growth it makes doesn't leave the write in a freed cell.
+#test(expr_of("xs[i + 1] * 2"), "xs")[true]
+#test(expr_of("xs.len() - 1"), "xs")[true]
+#test(expr_of("f(xs, g(1))"), "xs")[true]
+#test(expr_of("h.snap(1)"), "h")[false]
+#test(expr_of("o.keep(h.m)"), "h")[false]
+#test(expr_of("o.next()"), "h")[true]
+#test(expr_of("if c { 1 } else { 2 }"), "h")[false]
+fun settled_operand(e: Expr, root: str) -> bool {
+    return match e.kind {
+        ExprKind.Unary(op, x) => settled_operand(x, root),
+        ExprKind.Binary(op, l, r) => settled_operand(l, root) && settled_operand(r, root),
+        ExprKind.Cast(x, t) => settled_operand(x, root),
+        ExprKind.Try(x) => settled_operand(x, root),
+        ExprKind.GetField(x, f) => settled_operand(x, root),
+        ExprKind.TupleIndex(x, i) => settled_operand(x, root),
+        ExprKind.Index(x, i) => settled_operand(x, root) && settled_operand(i, root),
+        ExprKind.TupleLit(es) => settled_operands(es, root),
+        ExprKind.ListLit(es) => settled_operands(es, root),
+        ExprKind.StructLit(n, fields) => {
+            var ok = true
+            for fi in fields { ok = ok && settled_operand(fi.value, root) }
+            ok
+        },
+        ExprKind.MapLit(entries) => {
+            var ok = true
+            for en in entries { ok = ok && settled_operand(en.key, root) && settled_operand(en.value, root) }
+            ok
+        },
+        // a function or a closure can't reach the caller's variables
+        // (closures capture by value): only what it is given, for the call
+        ExprKind.Call(c, args, targs) => match c.kind {
+            ExprKind.GetField(recv, m) => {
+                if m == "len" || m == "contains" || m == "get" || m == "get_or" || m == "is_empty" { settled_operand(recv, root) && settled_operands(args, root) }
+                else { place_root(recv) != root && settled_operand(recv, root) && settled_operands(args, root) && !mentions_any(args, root) }
+            },
+            _ => settled_operand(c, root) && settled_operands(args, root),
+        },
+        ExprKind.MatchE(s, arms) => false,
+        ExprKind.Lambda(ps, rt, body, asy) => false,
+        ExprKind.Await(x) => false,
+        _ => true,
+    }
+}
+
+fun settled_operands(es: [Expr], root: str) -> bool {
+    for x in es { if !settled_operand(x, root) { return false } }
+    return true
+}
+
+// Whether one of `es` names the variable `root` (anything holding a block
+// counts as naming it).
+#test([expr_of("f(a.b, 1)")], "a")[true]
+#test([expr_of("f(b, 1)")], "a")[false]
+fun mentions_any(es: [Expr], root: str) -> bool {
+    for e in es {
+        let named = match e.kind {
+            ExprKind.Name(n) => n == root,
+            ExprKind.Unary(op, x) => mentions_any([x], root),
+            ExprKind.Binary(op, l, r) => mentions_any([l, r], root),
+            ExprKind.Cast(x, t) => mentions_any([x], root),
+            ExprKind.Try(x) => mentions_any([x], root),
+            ExprKind.Await(x) => mentions_any([x], root),
+            ExprKind.GetField(x, f) => mentions_any([x], root),
+            ExprKind.TupleIndex(x, i) => mentions_any([x], root),
+            ExprKind.Index(x, i) => mentions_any([x, i], root),
+            ExprKind.TupleLit(xs) => mentions_any(xs, root),
+            ExprKind.ListLit(xs) => mentions_any(xs, root),
+            ExprKind.StructLit(n, fields) => {
+                var vs: [Expr] = []
+                for fi in fields { vs.push(fi.value) }
+                mentions_any(vs, root)
+            },
+            ExprKind.MapLit(entries) => {
+                var vs: [Expr] = []
+                for en in entries {
+                    vs.push(en.key)
+                    vs.push(en.value)
+                }
+                mentions_any(vs, root)
+            },
+            ExprKind.Call(c, args, targs) => mentions_any([c], root) || mentions_any(args, root),
+            ExprKind.MatchE(s, arms) => true,
+            ExprKind.Lambda(ps, rt, body, asy) => true,
+            _ => false,
+        }
+        if named { return true }
+    }
+    return false
+}
+
+// Whether every index on the path of the place `e` is settled
+// (`settled_operand`) against the variable the place starts at.
+#test(expr_of("a.b[i][j + 1].c"))[true]
+#test(expr_of("a.b[a.f()]"))[false]
+fun settled_path(e: Expr) -> bool {
+    let root = place_root(e)
+    var cur = e
+    while true {
+        match cur.kind {
+            ExprKind.GetField(x, f) => { cur = x },
+            ExprKind.TupleIndex(x, i) => { cur = x },
+            ExprKind.Index(x, i) => {
+                if !settled_operand(i, root) { return false }
+                cur = x
+            },
+            _ => { return true },
+        }
+    }
+    return true
+}
 
 // Whether an argument after `argv[i]` may write the variable `argv[i]` is
 // read from (through a method that may take `var self`, or a mutating
@@ -1614,6 +1741,7 @@ impl Lower {
     fun fixed_receiver(var self, cg: CodeGen, e: Expr, call: int32) -> Expr {
         return match e.kind {
             ExprKind.GetField(recv, f) => Expr { id: e.id, line: e.line, col: e.col, sp: e.sp, kind: ExprKind.GetField(self.fixed_receiver(cg, recv, call), f) },
+            ExprKind.TupleIndex(recv, k) => Expr { id: e.id, line: e.line, col: e.col, sp: e.sp, kind: ExprKind.TupleIndex(self.fixed_receiver(cg, recv, call), k) },
             ExprKind.Index(base, idx) => {
                 let b2 = self.fixed_receiver(cg, base, call)
                 let nm = format("%index{}_{}", call, idx.id)
@@ -1631,7 +1759,15 @@ impl Lower {
     fun deep_param(var self, cg: CodeGen, name: str, t: Type) {
         let s = self.lookup(name)
         if self.f.slots[s].owns {
-            self.add(Inst.Deep(t, self.slot_addr(s)))
+            // an owned argument that isn't held inline (a string, list or
+            // map passed owned, MYLA-127) is the cell itself in its slot, not
+            // an address to read through: the slot's own address (H2)
+            if self.f.slots[s].inline { self.add(Inst.Deep(t, self.slot_addr(s))) }
+            else {
+                let a = self.temp(Type.TPtr)
+                self.add(Inst.Addr(a, s))
+                self.add(Inst.Deep(t, a))
+            }
             return
         }
         let c = self.value_slot(cg, name, t, true)
@@ -1722,6 +1858,21 @@ impl Lower {
         self.declare_as(nm, slot, false)
         self.own(slot)
         return slot
+    }
+
+    // `e` computed now into a local of its own named `nm` (`held_value`), as
+    // the name of that local, of `e`'s type; a literal as it is.
+    fun held_operand(var self, cg: CodeGen, e: Expr, nm: str) -> Expr {
+        let lit = match e.kind {
+            ExprKind.IntLit(v, sfx, ch, big) => true,
+            ExprKind.FloatLit(x, sfx) => true,
+            ExprKind.StrLit(x) => true,
+            ExprKind.BoolLit(b) => true,
+            _ => false,
+        }
+        if lit { return e }
+        let held = self.held_value(cg, e, nm)
+        return Expr { id: e.id, line: e.line, col: e.col, sp: e.sp, kind: ExprKind.Name(nm) }
     }
 
     // A turn for the other tasks: this frame queued again (D90).
@@ -1894,7 +2045,7 @@ impl Lower {
         let ts = self.new_slot("__task_" + name, Type.TPtr, 8, -1, false)
         self.add(Inst.Store(ts, fr2))
         self.declare_as(name, ts, true)
-        self.tasks.push(TaskSlot { slot: ts, ty: rt, void: !has, owns: has && cg.owns_heap(rt), depth: self.owners.len() - 1, foreign: false })
+        self.tasks.push(TaskSlot { slot: ts, ty: rt, void: !has, owns: has && cg.owns_heap(rt), depth: self.owners.len() - 1, foreign: false, walk: boxed_drop_walk(cg, rt) })
     }
 
     // The child task whose frame is in the slot `ts`: its index in `tasks`,
@@ -1997,7 +2148,15 @@ impl Lower {
         self.finish(Term.Br(gone, end, live))
         self.start(live)
         let fr = self.wait_task(ts)
-        if t.owns { self.add(Inst.DropAt(t.ty, self.offset(fr, FRAME_RESULT))) }
+        if t.owns {
+            let at = self.offset(fr, FRAME_RESULT)
+            if t.walk != "" {
+                // a recursive enum in the frame is its cell's contents, not
+                // a box (`drop T [p]` releases a member, H3)
+                self.wants.push(Want { kind: 4, t: t.ty, clone: false })
+                self.add(Inst.Rt(-1, t.walk, [at]))
+            } else { self.add(Inst.DropAt(t.ty, at)) }
+        }
         self.add(Inst.Rt(-1, "__free", [fr]))
         self.add(Inst.Store(ts, self.int_const(0)))
         self.finish(Term.Jmp(end))
@@ -2206,6 +2365,10 @@ impl Lower {
     // element or map value of one at any depth, made unique on the way.
     #test(lower_on(), codegen_on("enum E { A, B(int) }"), expr_of("(a, 'c')"))[0]
     fun place(var self, cg: CodeGen, e: Expr) -> int32 {
+        // an index that may change or copy the place's variable: every
+        // index on the path computed first, in order, then the path made
+        // unique (H4)
+        if !settled_path(e) { return self.place(cg, self.fixed_receiver(cg, e, e.id)) }
         match e.kind {
             ExprKind.Name(n) => {
                 let slot = self.lookup(n)
@@ -3713,9 +3876,9 @@ impl Lower {
     }
 
     #test(lower_on(), codegen_on("fun main() { print(1 + 2) }"), expr_of("Some(n)"), "list_sum", [], -1, false)[-1]
-    fun direct_call(var self, cg: CodeGen, e: Expr, name: str, argv: [Expr], into: int32, tail: bool) -> int32 {
+    fun direct_call(var self, cg: CodeGen, e: Expr, name: str, argv0: [Expr], into: int32, tail: bool) -> int32 {
         let sig = cg.sig_of(name)
-        let ct = self.call_target(cg, sig, argv, e)
+        let ct = self.call_target(cg, sig, argv0, e)
         let target = ct.name
         let params = ct.params
         let ret = ct.ret
@@ -3737,7 +3900,19 @@ impl Lower {
         // before the call (MYLA-123, MYLA-129): its writes would change or
         // release the argument's place otherwise
         var root = ""
-        if sig.has_decl && match sig.decl.receiver { Some(r) => r == "var self", None => false } { root = place_root(argv[0]) }
+        if sig.has_decl && match sig.decl.receiver { Some(r) => r == "var self", None => false } { root = place_root(argv0[0]) }
+        // an argument that may change or copy the receiver's variable: the
+        // indices of the receiver's place and every argument computed first,
+        // in order, so that the place is reached after them (H4)
+        var argv = argv0
+        if root != "" && !tail && argv0.len() > 1 && !settled_operands(argv0[1:], root) {
+            argv = [self.fixed_receiver(cg, argv0[0], e.id)]
+            var j = 1
+            while j < argv0.len() {
+                argv.push(self.held_operand(cg, argv0[j], format("%arg{}_{}", e.id, j)))
+                j = j + 1
+            }
+        }
         var vals: [int32] = []
         let owns = cg.owned_params(sig, params)
         let any_byval = cg.has_byval(sig)
@@ -4231,14 +4406,21 @@ impl Lower {
     }
 
     // `m[k] = value`: the value taken first, then the map made unique, then
-    // the key.
+    // the key; a key that may change or copy the map computed before the
+    // map is made unique, with the indices of its place (H4).
     fun map_set(var self, cg: CodeGen, base: Expr, idx: Expr, value: Expr) {
         let mt = self.place_type(cg, base)
         let staged = self.stage(cg, map_val(mt), value)
-        let h = self.place(cg, base)
+        var place = base
+        var key = idx
+        if !settled_operand(idx, place_root(base)) {
+            place = self.fixed_receiver(cg, base, idx.id)
+            key = self.held_operand(cg, idx, format("%key{}", idx.id))
+        }
+        let h = self.place(cg, place)
         let cell = self.temp(mt)
         self.add(Inst.Cow(cell, mt, h))
-        let k = self.key_operand(cg, mt, idx)
+        let k = self.key_operand(cg, mt, key)
         self.map_put(cg, mt, h, k, staged)
     }
 
@@ -4263,10 +4445,17 @@ impl Lower {
     fun map_remove(var self, cg: CodeGen, m: Expr, k: Expr) -> int32 {
         let mt = self.place_type(cg, m)
         if !is_map_t(mt) { return self.unsupported("remove on that type") }
-        let h = self.place(cg, m)
+        // a key that may change or copy the map: computed first (H4)
+        var place = m
+        var kx = k
+        if !settled_operand(k, place_root(m)) {
+            place = self.fixed_receiver(cg, m, k.id)
+            kx = self.held_operand(cg, k, format("%key{}", k.id))
+        }
+        let h = self.place(cg, place)
         let cell = self.temp(mt)
         self.add(Inst.Cow(cell, mt, h))
-        let key = self.key_operand(cg, mt, k)
+        let key = self.key_operand(cg, mt, kx)
         let slot = self.map_lookup(cg, mt, cell, key)
         let i64 = Type.TInt(64, true)
         let found = self.temp(Type.TBool)
@@ -4322,8 +4511,18 @@ impl Lower {
 
     // `append(sb, s)`, `append(sb, s, start, end)` (the range checked),
     // `append_byte(sb, b)` and `append_char(sb, c)` (std.rt's, MYLA-390): the
-    // builder made unique first, then the arguments.
-    fun sb_append(var self, cg: CodeGen, e: Expr, nm: str, args: [Expr]) -> int32 {
+    // builder made unique first, then the arguments; arguments that may
+    // change or copy the builder computed before it, in order (H4).
+    fun sb_append(var self, cg: CodeGen, e: Expr, nm: str, args0: [Expr]) -> int32 {
+        var args = args0
+        if !settled_operands(args0[1:], place_root(args0[0])) {
+            args = [self.fixed_receiver(cg, args0[0], e.id)]
+            var i = 1
+            while i < args0.len() {
+                args.push(self.held_operand(cg, args0[i], format("%arg{}_{}", e.id, i)))
+                i = i + 1
+            }
+        }
         let h = self.place(cg, args[0])
         let cell = self.temp(Type.TSB)
         self.add(Inst.Cow(cell, Type.TSB, h))
@@ -6370,7 +6569,8 @@ impl Lower {
 }
 
 // The deep walk (`__deepw_<T>`, or `inline`: `__deepi_<E>`, a boxed enum's
-// cell contents) of the value at the address given: each member made a deep
+// cell contents; a boxed enum's value is those contents either way) of the
+// value at the address given: each member made a deep
 // copy of its own (`clone`: a clone of it; D92). An actor handle stays
 // shared, a clone taking a reference of its own.
 pub fun deep_walk_ir(cg: CodeGen, t: Type, clone: bool, inline: bool, name: str) -> Routine {
@@ -6395,38 +6595,37 @@ pub fun deep_walk_ir(cg: CodeGen, t: Type, clone: bool, inline: bool, name: str)
             }
         },
         Type.TEnum(n, a) => {
-            if cg.is_boxed(t) && !inline {
-                lw.deep_member(cg, sp, 0, t, clone)
-            } else {
-                let info = cg.enum_info(n)
-                let sub = cg.type_subst(info.type_params, a)
-                let i64 = Type.TInt(64, true)
-                let tag = lw.temp(i64)
-                lw.add(Inst.LoadAt(tag, lw.read_cell(sp), 0, 8))
-                let done = lw.new_block()
-                var idx = 0
-                for v in info.variants {
-                    if cg.variant_owns(v, sub) {
-                        let is_v = lw.temp(Type.TBool)
-                        lw.add(Inst.Cmp(is_v, "==", i64, tag, lw.konst(i64, idx as int64)))
-                        let this_v = lw.new_block()
-                        let next_v = lw.new_block()
-                        lw.finish(Term.Br(is_v, this_v, next_v))
-                        lw.start(this_v)
-                        var cur = 8
-                        for ft0 in v.payload {
-                            let ft = subst_type(ft0, sub)
-                            lw.deep_member(cg, sp, cur, ft, clone)
-                            cur = cur + cg.stored_size(ft)
-                        }
-                        lw.finish(Term.Jmp(done))
-                        lw.start(next_v)
+            // a boxed enum held in a slot, a frame or an environment is its
+            // cell's contents, inline, as `__walkr_` reads it: the same walk
+            // as a cell's (H3); only a member of one is the box's address
+            let info = cg.enum_info(n)
+            let sub = cg.type_subst(info.type_params, a)
+            let i64 = Type.TInt(64, true)
+            let tag = lw.temp(i64)
+            lw.add(Inst.LoadAt(tag, lw.read_cell(sp), 0, 8))
+            let done = lw.new_block()
+            var idx = 0
+            for v in info.variants {
+                if cg.variant_owns(v, sub) {
+                    let is_v = lw.temp(Type.TBool)
+                    lw.add(Inst.Cmp(is_v, "==", i64, tag, lw.konst(i64, idx as int64)))
+                    let this_v = lw.new_block()
+                    let next_v = lw.new_block()
+                    lw.finish(Term.Br(is_v, this_v, next_v))
+                    lw.start(this_v)
+                    var cur = 8
+                    for ft0 in v.payload {
+                        let ft = subst_type(ft0, sub)
+                        lw.deep_member(cg, sp, cur, ft, clone)
+                        cur = cur + cg.stored_size(ft)
                     }
-                    idx = idx + 1
+                    lw.finish(Term.Jmp(done))
+                    lw.start(next_v)
                 }
-                lw.finish(Term.Jmp(done))
-                lw.start(done)
+                idx = idx + 1
             }
+            lw.finish(Term.Jmp(done))
+            lw.start(done)
         },
         _ => { lw.deep_member(cg, sp, 0, t, clone) },
     }

@@ -2,7 +2,7 @@
 id: MYLA-415
 title: "P2 Lowering and native runtime copies"
 type: bug
-status: todo
+status: in-progress
 priority: high
 labels: [lowering, runtime, memory-safety, round-5]
 ---

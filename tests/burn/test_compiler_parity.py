@@ -7293,6 +7293,313 @@ async fun main() {
     print((h.on)(3))
 }
 """,
+    "keys_that_change_their_container": r"""// H4 (MYLA-415): a key, index or argument whose computation copies or grows
+// the container it is used on: computed before the container is made
+// unique, as the interpreter does, so a copy keeps the old contents and a
+// write never lands in a cell the growth freed
+struct Counter { n: int }
+impl Counter {
+    fun inc(var self, k: int) { self.n += k }
+}
+
+struct H {
+    m: [int: int],
+    saved: [int: int],
+    xs: [int],
+    xs_saved: [int],
+    grid: [[int]],
+    i: int,
+    sb: StringBuilder,
+    sb_saved: StringBuilder,
+    cs: [Counter],
+
+    names: [str: str],
+}
+
+impl H {
+    fun snap(var self, k: int) -> int {
+        self.saved = self.m
+        self.xs_saved = self.xs
+        return k
+    }
+    fun grow(var self, k: int) -> int {
+        var i = 100
+        while i < 400 {
+            self.m[i] = i
+            self.xs.push(i)
+            self.cs.push(Counter { n: i })
+            i += 1
+        }
+        return k
+    }
+    fun bump(var self) -> int {
+        self.i += 1
+        return self.i
+    }
+    fun snap_sb(var self, s: str) -> str {
+        self.sb_saved = self.sb
+        return s
+    }
+    fun key(var self, k: str) -> str {
+        self.names[k + "!"] = "added"
+        return k
+    }
+}
+
+impl [int] {
+    fun put_at(var self, i: int, v: int) { self[i] = v }
+}
+
+fun fresh() -> H {
+    return H { m: [1: 10, 2: 20, 3: 30], saved: [:], xs: [1, 2, 3], xs_saved: [], grid: [[0, 0, 0], [0, 0, 0], [0, 0, 0]], i: 0, sb: StringBuilder(), sb_saved: StringBuilder(), cs: [Counter { n: 0 }], names: ["a": "x"] }
+}
+
+fun main() {
+    // map remove, set and read-modify-write with a key that copies or grows
+    var h = fresh()
+    h.m.remove(h.snap(2))
+    print(f"{h.m.len()} {h.saved.len()} {h.saved.contains(2)}")
+    h = fresh()
+    h.m.remove(h.grow(2))
+    print(f"{h.m.len()} {h.m.contains(2)} {h.m[399]}")
+    h = fresh()
+    h.m[h.snap(7)] = 70
+    print(f"{h.m.len()} {h.saved.len()} {h.saved.contains(7)}")
+    h = fresh()
+    h.m[h.grow(2)] = 99
+    print(f"{h.m.len()} {h.m[2]} {h.m[150]}")
+    h = fresh()
+    h.names[h.key("b")] = "y"
+    print(f"{h.names.len()} {h.names["b"]} {h.names["b!"]}")
+    // list elements
+    h = fresh()
+    h.xs[h.snap(1)] = 99
+    print(f"{h.xs[1]} {h.xs_saved[1]}")
+    h = fresh()
+    h.xs[h.grow(1)] = 77
+    print(f"{h.xs[1]} {h.xs.len()}")
+    h = fresh()
+    h.grid[h.bump()][h.bump()] = 5
+    print(f"{h.grid[1][2]} {h.grid[2][1]} {h.i}")
+    h = fresh()
+    h.xs[h.xs.len() - 1] = 9
+    print(h.xs[2])
+    // pushes
+    h = fresh()
+    h.xs.push(h.snap(4))
+    print(f"{h.xs.len()} {h.xs_saved.len()}")
+    h = fresh()
+    h.xs.push(h.grow(5))
+    print(f"{h.xs[^1]} {h.xs.len()}")
+    // a builder
+    h = fresh()
+    h.sb.append("a")
+    h.sb.append(h.snap_sb("b"))
+    print(f"{h.sb.build()} {h.sb_saved.build()}")
+    h = fresh()
+    h.sb.append("abcdef", h.bump(), h.bump() + 2)
+    print(h.sb.build())
+    // methods writing their receiver, with an argument that grows it
+    h = fresh()
+    h.xs.put_at(h.grow(1), 55)
+    print(f"{h.xs[1]} {h.xs.len()}")
+    h = fresh()
+    h.cs[0].inc(h.grow(3))
+    print(f"{h.cs[0].n} {h.cs.len()}")
+    // locals, with an `if` that copies
+    var ys = [1, 2, 3]
+    var zs: [int] = []
+    ys[if true { zs = ys; 0 } else { 1 }] = 50
+    print(f"{ys[0]} {zs[0]}")
+    ys.push(if true { zs = ys; 0 } else { 1 })
+    print(f"{ys.len()} {zs.len()}")
+    var m2 = [1: 10, 2: 20, 3: 30]
+    m2.remove(if m2.len() > 0 { var i = 100; while i < 300 { m2[i] = i; i += 1 }; 2 } else { 0 })
+    print(f"{m2.len()} {m2.contains(2)}")
+    var saved2: [int: int] = [:]
+    m2[if true { saved2 = m2; 5 } else { 6 }] = 1
+    print(f"{m2.len()} {saved2.len()}")
+}
+""",
+    "recursive_enums_across_tasks": r"""// H3 (MYLA-415): recursive enums crossing between tasks and actors: handed
+// to a child while the parent keeps them, returned by a child, awaited by
+// a sibling, kept by an actor, inside structs, lists and options
+import std.task as task
+
+enum L { Nil, Cons(int, L) }
+enum T { Leaf, Bin(T, int, T) }
+
+struct Held { name: str, tree: T, lists: [L] }
+
+fun head(l: L) -> int { return match l { Cons(k, _) => k, Nil => -1 } }
+fun count(l: L) -> int { return match l { Cons(_, r) => 1 + count(r), Nil => 0 } }
+fun size(t: T) -> int { return match t { Leaf => 0, Bin(l, _, r) => size(l) + 1 + size(r) } }
+fun sum(t: T) -> int { return match t { Leaf => 0, Bin(l, v, r) => sum(l) + v + sum(r) } }
+
+fun tree(n: int) -> T {
+    var t = T.Leaf
+    for i in 0..n { t = T.Bin(t, i, T.Bin(T.Leaf, i * 10, T.Leaf)) }
+    return t
+}
+
+fun upto(n: int) -> L {
+    var l = L.Nil
+    for i in 0..n { l = L.Cons(i, l) }
+    return l
+}
+
+async fun crossing(l: L) -> int { return head(l) + count(l) }
+async fun make(n: int) -> T { return tree(n) }
+async fun make_list(n: int) -> L { return upto(n) }
+async fun keep(h: Held) -> Held {
+    var out = h
+    out.lists.push(L.Cons(99, h.lists[0]))
+    return out
+}
+async fun maybe(n: int) -> Option<T> {
+    if n == 0 { return None }
+    return Some(tree(n))
+}
+
+actor Shelf { trees: [T], last: L }
+impl Shelf {
+    fun put(var self, t: T) -> int {
+        self.trees.push(t)
+        return self.trees.len()
+    }
+    fun set_last(var self, l: L) { self.last = l }
+    fun total(self) -> int {
+        var s = 0
+        for t in self.trees { s += sum(t) }
+        return s + count(self.last)
+    }
+    fun first(self) -> T { return self.trees[0] }
+}
+
+#main
+async fun main() {
+    // shared with the parent, which reads it again afterwards
+    let l = L.Cons(1, L.Cons(2, L.Nil))
+    async let c = crossing(l)
+    print(await c)
+    print(count(l))
+    // a child's result
+    async let a = make(4)
+    let t = await a
+    print(size(t))
+    print(sum(t))
+    async let b = make_list(5)
+    print(count(await b))
+    // a struct holding them, both ways
+    let h = Held { name: "h", tree: t, lists: [l, upto(3)] }
+    async let k = keep(h)
+    let h2 = await k
+    print(f"{h2.name} {size(h2.tree)} {h2.lists.len()} {head(h2.lists[2])} {count(h2.lists[2])} {h.lists.len()}")
+    async let m = maybe(3)
+    match await m {
+        Some(x) => print(size(x)),
+        None => print("none"),
+    }
+    // a list of them through task.all
+    let jobs: [async () -> T] = [async () => tree(1), async () => tree(2), async () => tree(3)]
+    let ts = await task.all(jobs)
+    var s = 0
+    for x in ts { s += size(x) }
+    print(s)
+    // an actor keeps them
+    let shelf = Shelf { trees: [], last: L.Nil }
+    print(await shelf.put(t))
+    print(await shelf.put(tree(2)))
+    await shelf.set_last(l)
+    print(await shelf.total())
+    let f = await shelf.first()
+    print(size(f) == size(t))
+    // the parent's copies are still whole
+    print(sum(t))
+    print(count(l))
+}
+""",
+    "actors_store_every_heap_type": r"""// H2 (MYLA-415): an actor's method keeps an argument of every heap type in
+// its state, in a program with tasks, the arguments temporaries or the
+// caller's own values, which the caller then changes
+enum Shape { Dot, Line(int, int) }
+enum L { Nil, Cons(int, L) }
+struct Rec { name: str, tags: [str] }
+
+actor Store {
+    s: str,
+    xs: [int],
+    m: [str: int],
+    sb: StringBuilder,
+    r: Rec,
+    t: (str, [int]),
+    o: Option<str>,
+    e: Shape,
+    l: L,
+    f: (int) -> int,
+    nested: [[str]],
+}
+
+impl Store {
+    fun put_s(var self, v: str) -> int { self.s = v; return self.s.len() }
+    fun put_xs(var self, v: [int]) -> int { self.xs = v; return self.xs.len() }
+    fun put_m(var self, v: [str: int]) -> int { self.m = v; return self.m.len() }
+    fun put_sb(var self, v: StringBuilder) { self.sb = v }
+    fun put_r(var self, v: Rec) -> int { self.r = v; return self.r.tags.len() }
+    fun put_t(var self, v: (str, [int])) { self.t = v }
+    fun put_o(var self, v: Option<str>) { self.o = v }
+    fun put_e(var self, v: Shape) { self.e = v }
+    fun put_l(var self, v: L) { self.l = v }
+    fun put_f(var self, v: (int) -> int) { self.f = v }
+    fun put_nested(var self, v: [[str]]) { self.nested = v }
+    fun put_two(var self, a: str, b: [int]) -> int {
+        self.s = a + self.s
+        self.xs = b
+        return self.s.len() + self.xs.len()
+    }
+    fun report(var self) -> str {
+        let lsum = match self.l { Cons(k, _) => k, Nil => -1 }
+        let e = match self.e { Dot => 0, Line(a, b) => a + b }
+        let g = self.f
+        var sb = self.sb
+        sb.append("!")
+        return f"{self.s} {self.xs.len()} {self.m.get_or("a", 0)} {sb.build()} {self.r.name}/{self.r.tags.len()} {self.t.0}{self.t.1.len()} {self.o.unwrap_or("-")} {e} {lsum} {g(1)} {self.nested.len()}"
+    }
+}
+
+async fun helper() -> int { return 1 }
+
+#main
+async fun main() {
+    async let h = helper()
+    print(await h)
+    let st = Store { s: "", xs: [], m: [:], sb: StringBuilder(), r: Rec { name: "", tags: [] }, t: ("", []), o: None, e: Shape.Dot, l: L.Nil, f: (x: int) => x, nested: [] }
+    print(await st.put_s(f"value {7}"))
+    print(await st.put_xs([1, 2, 3]))
+    var mine = [10, 20]
+    print(await st.put_xs(mine))
+    mine.push(30)
+    print(await st.put_m(["a": 1, "b": 2]))
+    var sb = StringBuilder()
+    sb.append("built")
+    await st.put_sb(sb)
+    sb.append(" more")
+    var tags = ["x", "y"]
+    print(await st.put_r(Rec { name: "rec", tags: tags }))
+    tags.push("z")
+    await st.put_t(("t", [1, 2, 3, 4]))
+    await st.put_o(Some("some"))
+    await st.put_e(Shape.Line(3, 4))
+    await st.put_l(L.Cons(5, L.Cons(6, L.Nil)))
+    let k = 41
+    await st.put_f((x: int) => x + k)
+    await st.put_nested([["a"], ["b", "c"]])
+    print(await st.report())
+    print(await st.put_two("pre-", mine))
+    print(await st.report())
+    print(f"{mine.len()} {tags.len()} {sb.build()}")
+}
+""",
 }
 
 # A program that allocates far more recursive-enum cells (~12M) than the heap
@@ -8775,6 +9082,12 @@ PINNED = {
     "literal_element_types_from_later_elements": 'L1RaL3\n3\n252\n1\nbad\n2\n3\nx\n2\n5000000007\n42\n2\nb\n2\n3\n252\n',
     # MYLA-406: new ("method 'keys' collides with a field of 'Lru'" before); native code gives the same
     "a_field_and_a_method_of_one_name": '3\n3\n1\n10\n3\nq\n2\n5\nrex\npet rex\npet rex\n3\n4\n',
+    # MYLA-415 (H2): native code segfaulted (a string, list or map argument kept)
+    "actors_store_every_heap_type": '1\n7\n3\n2\n2\n2\nvalue 7 2 1 built! rec/2 t4 some 7 5 42 2\n14\npre-value 7 3 1 built! rec/2 t4 some 7 5 42 2\n3 3 built more\n',
+    # MYLA-415 (H3): native code segfaulted in __deepb_ and on a child's result
+    "recursive_enums_across_tasks": '3\n2\n8\n66\n5\nh 8 3 99 3 2\n6\n12\n1\n2\n79\ntrue\n66\n2\n',
+    # MYLA-415 (H4): native code wrote into the copy, or into the freed cell
+    "keys_that_change_their_container": '2 3 true\n302 false 399\n4 3 false\n303 99 150\n3 y added\n99 2\n77 303\n5 0 2\n9\n4 3\n5 304\nab a\nbcd\n55 303\n3 301\n50 1\n4 3\n202 false\n203 202\n',
 }
 
 
