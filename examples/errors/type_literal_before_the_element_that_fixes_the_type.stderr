@@ -1,0 +1,5 @@
+type error: integer literal 300 does not fit in 'uint8'
+  --> examples/errors/type_literal_before_the_element_that_fixes_the_type.my:6:17
+  |
+6 |     let a = [1, 300, 3u8]
+  |                 ^^^

@@ -1,0 +1,5 @@
+type error: integer literal 300 does not fit in 'uint8'
+  --> examples/errors/type_map_key_before_the_key_that_fixes_the_type.my:6:22
+  |
+6 |     let m = [1: "a", 300: "b", 3u8: "c"]
+  |                      ^^^

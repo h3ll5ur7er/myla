@@ -7319,6 +7319,28 @@ fun main() {
     print(twice(() => 7)[1])
 }
 """,
+    # L2 (MYLA-417): earlier literals take the type a later element fixes
+    "literals_take_the_type_a_later_element_fixes": r"""// L2 (MYLA-417): the literals before the element that fixes a literal's
+// type take that type, each checked again against it, in lists, map keys
+// and map values
+fun main() {
+    let big: int64 = 5000000000
+    let a = [1, -2, 3, big]
+    print(a[1] * big)
+    let b = [200, 100, 255u8]
+    print(b[2] - b[0] + b[1])
+    let f = [1.5, -2.25, 0.5f32]
+    print(f[1])
+    let m = [1: 40000, 2: 7, 3: big]
+    print(m[1] * big)
+    let k = [7: "a", 300: "b", 3u16: "c"]
+    for x in k.keys().sorted() { print(x * 200) }
+    let c = ['a', 'b', 99u8]
+    print(c[1] + c[2])
+    let n = [-1, -128, 5i8]
+    print(n[1])
+}
+""",
 }
 
 # A program that allocates far more recursive-enum cells (~12M) than the heap
@@ -8803,6 +8825,8 @@ PINNED = {
     "a_field_and_a_method_of_one_name": '3\n3\n1\n10\n3\nq\n2\n5\nrex\npet rex\npet rex\n3\n4\n',
     # M24 (MYLA-417): new ("expected '() -> ()', found '() -> ()'" before); native code gives the same
     "unit_as_a_type_argument": '3\n2\n2\n2\n2\n7\n',
+    # L2 (MYLA-417): new ("[-1, -128, 5i8]" was a type error, "[1, 2, x]" left 2 an int32); native code gives the same
+    "literals_take_the_type_a_later_element_fixes": '-10000000000\n155\n-2.25\n200000000000000\n600\n1400\n60000\n197\n-128\n',
 }
 
 

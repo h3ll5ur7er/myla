@@ -1138,11 +1138,30 @@ fun join_open(a: Type, b: Type) -> Option<Type> {
 
 // One column of a list or map literal (its elements, a map's keys or its
 // values) as its elements are checked: the type they share so far (`have`
-// once one is), possibly with holes; the first element, which a later
-// literal's type is unified with; the elements whose own type had a hole.
-struct LitColumn { ty: Type, have: bool, first: Expr, open: [Expr] }
+// once one is), possibly with holes; the first element, where a mismatch is
+// reported; `slot`, the column's lists in the checker's `col_open` (the
+// elements whose own type had a hole, MYLA-401) and `col_lits` (its
+// literals while nothing else fixes its type, L2); `fixed` once an element
+// that isn't such a literal does.
+struct LitColumn { ty: Type, have: bool, first: Expr, slot: int32, fixed: bool }
 
-fun new_column(first: Expr) -> LitColumn { return LitColumn { ty: hole(), have: false, first: first, open: [] } }
+// Whether the element `e` is a literal that takes the type its column gets
+// later (L2): an integer, float or char literal without a suffix, or one of
+// the first two negated.
+#test(expr_of("300"))[true]
+#test(expr_of("-1"))[true]
+#test(expr_of("'a'"))[true]
+#test(expr_of("3u8"))[false]
+#test(expr_of("x"))[false]
+#test(expr_of("-x"))[false]
+fun adapts(e: Expr) -> bool {
+    return match e.kind {
+        ExprKind.IntLit(v, suf, isc, big) => match suf { Some(x) => false, None => true },
+        ExprKind.FloatLit(lex, suf) => is_flexible_float_lit(e),
+        ExprKind.Unary(op, x) => op == "-" && (is_flexible_float_lit(x) || match x.kind { ExprKind.IntLit(v, suf, isc, big) => !isc && is_flexible_int_lit(x), _ => false }),
+        _ => false,
+    }
+}
 
 // A hint that is a hole says nothing.
 #test(Some(Type.TParam("?")))[None]
@@ -1933,6 +1952,8 @@ pub struct Checker {
     call_kind_id: int32,
     targs_taken: int32,             // the last call whose explicit type arguments a generic function or method took (D169)
     open_at: int32,                 // the list or map literal's element that may leave type parameters open, as holes (MYLA-401)
+    col_open: [[Expr]],             // each open literal column's elements with a hole (`LitColumn.slot`)
+    col_lits: [[Expr]],             // each open literal column's literals while only literals fix its type (L2)
     call_target: str,
     call_mutates: bool,
     fun_name: str,
@@ -1990,7 +2011,7 @@ fun new_checker(decls: [Decl]) -> Checker {
         resolved: [:], call_defaults: [:], errs: [], warnings: [], primitives: false, called: [:], lazy_bodies: no_lazy_bodies(), read_bodies: [:], read_ids: [:], std_impls: [:], allowed: [], impl_allows: [], method_decl_allows: [], mains: [],
         skipped_decls: [:], skipped_fns: [:], broken_impls: [:], redefined: [:],
         lost_methods: [:], lost_traits: [:], failed_consts: [:], bodies: false,
-        call_kind: "", call_kind_id: -1, targs_taken: -1, open_at: -1, call_target: "", call_mutates: false, fun_name: "", handovers: [:], become_words: [], passed_on: [],
+        call_kind: "", call_kind_id: -1, targs_taken: -1, open_at: -1, col_open: [], col_lits: [], call_target: "", call_mutates: false, fun_name: "", handovers: [:], become_words: [], passed_on: [],
         actors: [:], conc_line: 0, conc_col: 0, conc_sp: no_span(), conc_node: -1, in_async: false, self_assignable: false, actor_self: "", builtin_as_method: false, cur_key: "",
         lams: [], awaited: [:], call_key: "", call_async: false, suspended: -1, task_init: false, in_guard: false, neg_lit: -1,
         task_line: 0, task_col: 0, task_sp: no_span(), task_node: -1, fill_decls: [:], renames: [:], mutating_calls: [:],
@@ -4337,15 +4358,40 @@ impl Checker {
             if may_open { return Ok(Type.TList(hole())) }
             return Err(terr_at(e.line, e.col, e.sp, "cannot infer the element type of an empty list `[]`; annotate it (e.g. `: [int]`)"))
         }
-        var col = new_column(elems[0])
+        var col = self.open_column(elems[0])
         for x in elems { col = self.column_step(col, x, exp_elem)? }
-        return Ok(Type.TList(self.close_column(col, may_open)?))
+        let t = self.close_column(col, may_open)?
+        self.drop_columns(col.slot)
+        return Ok(Type.TList(t))
+    }
+
+    // A new column of a literal, its first element `first`; its lists live
+    // in the checker, so that a step adds to them in place (MYLA-401's
+    // quadratic join).
+    fun open_column(var self, first: Expr) -> LitColumn {
+        let slot = self.col_open.len()
+        self.col_open.push([])
+        self.col_lits.push([])
+        return LitColumn { ty: hole(), have: false, first: first, slot: slot, fixed: false }
+    }
+
+    // The columns from `slot` on, once their literal is checked.
+    fun drop_columns(var self, slot: int32) {
+        while self.col_open.len() > slot {
+            self.col_open.pop()
+            self.col_lits.pop()
+        }
     }
 
     // The column `col` with its next element `x` (MYLA-401). `x` is checked
     // against the elements' type so far, and may leave type parameters open
     // (`open_at`): a later element may fix them. A hint with a hole goes only
     // to an element that can take it.
+    //
+    // A literal (`adapts`) takes the column's type as its hint; while only
+    // such literals are in the column, an element of another type gives it
+    // to all of them, each checked again against it (L2): `[1, 300, 3u8]`
+    // is an error at `300`, `[1, 2, x]` with `x: int64` an `[int64]`.
     fun column_step(var self, col: LitColumn, x: Expr, exp: Option<Type>) -> Result<LitColumn, CheckErr> {
         var hint = exp
         if col.have { hint = Some(col.ty) }
@@ -4355,12 +4401,25 @@ impl Checker {
         let r = self.expect_value(x, hint)
         self.open_at = saved
         let t = r?
-        var open = col.open
-        if has_hole(t) { open.push(x) }
-        if !col.have { return Ok(LitColumn { ty: t, have: true, first: x, open: open }) }
-        if !has_hole(t) && !has_hole(col.ty) { return Ok(LitColumn { ty: self.unify(col.first, col.ty, x, t)?, have: true, first: col.first, open: open }) }
+        if has_hole(t) { self.col_open[col.slot].push(x) }
+        let lit = adapts(x)
+        let fixed = col.fixed || !lit
+        if lit && !col.fixed { self.col_lits[col.slot].push(x) }
+        if !col.have { return Ok(LitColumn { ty: t, have: true, first: x, slot: col.slot, fixed: fixed }) }
+        if !has_hole(t) && !has_hole(col.ty) {
+            if type_eq(col.ty, t) { return Ok(LitColumn { ty: t, have: true, first: col.first, slot: col.slot, fixed: fixed }) }
+            if !col.fixed {
+                // the literals so far take the type `x` gives
+                var all = true
+                for y in self.col_lits[col.slot] {
+                    if y.id != x.id && !type_eq(self.expect_value(y, Some(t))?, t) { all = false }
+                }
+                if all { return Ok(LitColumn { ty: t, have: true, first: col.first, slot: col.slot, fixed: fixed }) }
+            }
+            return Err(terr_at(col.first.line, col.first.col, col.first.sp, format("type mismatch: '{}' vs '{}' (no implicit conversion between numeric types)", type_name(col.ty), type_name(t))))
+        }
         return match join_open(col.ty, t) {
-            Some(j) => Ok(LitColumn { ty: j, have: true, first: col.first, open: open }),
+            Some(j) => Ok(LitColumn { ty: j, have: true, first: col.first, slot: col.slot, fixed: fixed }),
             None => Err(terr_at(x.line, x.col, x.sp, format("type mismatch: '{}' vs '{}'", open_type_name(col.ty), open_type_name(t)))),
         }
     }
@@ -4372,11 +4431,11 @@ impl Checker {
     fun close_column(var self, col: LitColumn, may_open: bool) -> Result<Type, CheckErr> {
         if has_hole(col.ty) {
             if may_open { return Ok(col.ty) }
-            let x = col.open[0]
+            let x = self.col_open[col.slot][0]
             self.expect_value(x, None)?
             return Err(terr_at(x.line, x.col, x.sp, format("cannot infer the type '{}' of this element; add a type annotation to guide inference", open_type_name(col.ty))))
         }
-        for x in col.open { self.fill_open(x, col.ty)? }
+        for x in self.col_open[col.slot] { self.fill_open(x, col.ty)? }
         return Ok(col.ty)
     }
 
@@ -4474,8 +4533,8 @@ impl Checker {
             return Err(terr_at(e.line, e.col, e.sp, "cannot infer the key/value types of an empty map `[:]`; annotate it (e.g. `: [str: int]`)"))
         }
         let k0 = entries[0].key
-        var keys = new_column(k0)
-        var vals = new_column(entries[0].value)
+        var keys = self.open_column(k0)
+        var vals = self.open_column(entries[0].value)
         var i = 0
         while i < entries.len() {
             keys = self.column_step(keys, entries[i].key, exp_k)?
@@ -4487,7 +4546,9 @@ impl Checker {
         let key_open = self.holed(k0)
         let key_t = self.close_column(keys, may_open)?
         if key_open && !has_hole(key_t) { self.check_key(key_t, k0.line, k0.col, k0.sp)? }
-        return Ok(Type.TMap(key_t, self.close_column(vals, may_open)?))
+        let val_t = self.close_column(vals, may_open)?
+        self.drop_columns(keys.slot)
+        return Ok(Type.TMap(key_t, val_t))
     }
 
     #test(checker_on("enum E { A, B(int) }"), expr_of("a.b[0]"), expr_of("a.b[0]"), expr_of("a.b[0]"))[Err(CheckErr { line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 2 }, msg: "unknown name 'a'", decl: -1, notes: [] })]
@@ -8338,6 +8399,11 @@ impl Checker {
     // failed may have left behind (types.py: _on_its_own).
     fun reset_state(var self, id: int32) {
         self.cur_decl = id
+        // a literal's columns an error left open
+        if self.col_open.len() > 0 {
+            self.col_open = []
+            self.col_lits = []
+        }
         self.frames = []
         self.loop_depth = 0
         self.defer_at = -1
@@ -8565,6 +8631,17 @@ pub fun checker_on(src: str) -> Checker {
 #test("enum Toml { Str(str) }\ntrait ToToml { fun to_toml(self) -> Toml }\ntrait FromToml { fun from_toml(t: Toml) -> Self }\nfun unknown_variant() {}\nenum Option<T> { Some(T), None }\n#derive(Toml)\nenum E { A, B(Option<int>) }")[["cannot derive Toml for enum 'E': payload #0 of variant 'B' has type 'Option<int32>', which isn't ToToml and FromToml (TOML has no null: an 'Option' can only be a struct's field, left out when 'None')"]]
 #test("#derive(Eq)\nstruct B<T> { v: T }\nstruct N { x: int }\nfun f(b: B<N>) -> bool { return b == b }")[["operator '==' is not defined for 'B<N>': 'N' isn't Eq (it needs 'impl Eq for N' or '#derive(Eq)')"]]
 #test("#derive(Eq)\nenum Option<T> { Some(T), None }\nfun f(a: Option<[str: int]>) -> bool { return a == None }")[["operator '==' is not defined for 'Option<[str: int32]>': '[str: int32]' isn't Eq"]]
+// a literal before the element that fixes its column's type is checked
+// again against it (L2), map keys and values too; a column another element
+// fixed doesn't adopt a later one's type
+#test("fun main() { let a = [1, 300, 3u8] }")[["integer literal 300 does not fit in 'uint8'"]]
+#test("fun main() { let m = [1: 0, 300: 1, 3u8: 2] }")[["integer literal 300 does not fit in 'uint8'"]]
+#test("fun main() { let m = [0: 1, 1: 300, 2: 3u8] }")[["integer literal 300 does not fit in 'uint8'"]]
+#test("fun main() { let a = [1, -129, 3i8] }")[["integer literal 129 does not fit in 'int8'"]]
+#test("fun main() { let x = 5\nlet a = [1, x, 3u8] }")[["type mismatch: 'int32' vs 'uint8' (no implicit conversion between numeric types)"]]
+#test("fun main() { let a = ['a', 300, 3u8] }")[["integer literal 300 does not fit in 'uint8'"]]
+#test("fun main() { let a = [1, 2.5] }")[["type mismatch: 'int32' vs 'float64' (no implicit conversion between numeric types)"]]
+#test("fun main() { let x: int64 = 5\nlet a = [1, -2, 3, x]\nlet b: [int64] = a\nlet c = [1.5, -2.5, 3.5f32]\nlet d: [float32] = c\nlet e = ['a', 98u8]\nlet f: [uint8] = e\nlet g = [-1, 3i8]\nlet h: [int8] = g }")[[]]
 // a generic impl's operator gives the receiver's instance (M2, MYLA-367)
 #test("struct Box<T> { v: T }\nimpl<T: Add> Add for Box<T> { fun add(self, other: Box<T>) -> Box<T> { return Box { v: self.v + other.v } } }\nfun main() { let c: Box<int> = Box { v: 1 } + Box { v: 2 }\nlet d = c + c + c\nlet e: int = d.v }")[[]]
 #test("struct Box<T> { v: T }\nimpl<T: Add> Add for Box<T> { fun add(self, other: Box<T>) -> Box<T> { return Box { v: self.v + other.v } } }\nfun main() { let c: Box<int> = Box { v: 1 } + Box { v: 2 }\nlet e: str = (c + c).v }")[["cannot assign value of type 'int32' to binding of type 'str'"]]
