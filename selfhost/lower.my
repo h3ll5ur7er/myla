@@ -5466,12 +5466,16 @@ pub fun compound_eq_ir(cg: CodeGen, t: Type, name: str) -> Routine {
         let et = list_elem(t)
         let i64 = Type.TInt(64, true)
         let pos = Pos { line: 0, col: 0 }
-        let same = lw.temp(Type.TBool)
-        lw.add(Inst.Cmp(same, "==", i64, lw.read_cell(sa), lw.read_cell(sb)))
         let equal = lw.new_block()
-        let differ = lw.new_block()
-        lw.finish(Term.Br(same, equal, differ))
-        lw.start(differ)
+        // one cell is equal to itself only where the elements' `==` is
+        // built in and reflexive (M3): a NaN isn't, nor need a struct's `eq`
+        if reflexive_eq(et) {
+            let same = lw.temp(Type.TBool)
+            lw.add(Inst.Cmp(same, "==", i64, lw.read_cell(sa), lw.read_cell(sb)))
+            let differ = lw.new_block()
+            lw.finish(Term.Br(same, equal, differ))
+            lw.start(differ)
+        }
         let na = lw.temp(i64)
         lw.add(Inst.LoadAt(na, lw.read_cell(sa), 0, 8))
         let nb = lw.temp(i64)
@@ -5517,6 +5521,29 @@ pub fun compound_eq_ir(cg: CodeGen, t: Type, name: str) -> Routine {
     lw.start(unequal)
     lw.finish(Term.Ret(lw.konst(Type.TBool, 0)))
     return Routine { f: lw.f, wants: lw.wants }
+}
+
+// Whether `t`'s `==` is built in and reflexive, every value equal to itself:
+// integers, `char`, `bool`, strings, the unit, and lists and tuples of such;
+// not a float (NaN), nor a struct or enum, whose `eq` is a method a program
+// may write (or derive over floats).
+#test(Type.TList(Type.TTuple([Type.TStr, Type.TInt(8, false)])))[true]
+#test(Type.TList(Type.TFloat(64)))[false]
+#test(Type.TStruct("P", []))[false]
+fun reflexive_eq(t: Type) -> bool {
+    return match t {
+        Type.TInt(w, sg) => true,
+        Type.TChar => true,
+        Type.TBool => true,
+        Type.TStr => true,
+        Type.TList(e) => reflexive_eq(e),
+        Type.TTuple(es) => {
+            var ok = true
+            for e in es { ok = ok && reflexive_eq(e) }
+            ok
+        },
+        _ => false,
+    }
 }
 
 // `__thash_<T>(t, state) -> uint64`, a tuple's `hash` (D163, MYLA-313): the

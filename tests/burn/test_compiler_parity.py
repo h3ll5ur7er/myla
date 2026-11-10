@@ -7293,6 +7293,61 @@ async fun main() {
     print((h.on)(3))
 }
 """,
+    "list_equal_to_itself": r"""// M3 (MYLA-415, MYLA-313): a list compared with itself, or with a copy that
+// shares its cell, is equal without a look at its elements only where the
+// elements' `==` is built in and reflexive: a NaN isn't equal to itself, and
+// a struct's `eq` runs (and may say no)
+from std.io import println
+
+struct Never { v: int }
+impl Eq for Never { fun eq(self, other: Never) -> bool { return false } }
+
+struct Loud { v: int }
+impl Eq for Loud {
+    fun eq(self, other: Loud) -> bool {
+        println("eq called")
+        return self.v == other.v
+    }
+}
+
+#derive(Eq)
+struct Holder { items: [float] }
+
+#derive(Eq)
+struct Point { x: int, y: int }
+
+fun main() {
+    let nan = 0.0 / 0.0
+    let xs = [nan]
+    let ys = xs
+    println(f"{xs == xs} {xs == ys} {xs != ys} {xs == [nan]}")
+    let nested = [[1.0, nan]]
+    let n2 = nested
+    println(f"{nested == n2} {nested != n2}")
+    let pairs = [(1, nan)]
+    println(f"{pairs == pairs}")
+    let a = [Never { v: 1 }]
+    let b = a
+    println(f"{a == b} {a != b}")
+    let l = [Loud { v: 1 }, Loud { v: 2 }]
+    let l2 = l
+    println(f"{l == l2}")
+    let h = Holder { items: [nan] }
+    println(f"{h == h}")
+    let hs = [h]
+    println(f"{hs == hs}")
+    // reflexive elements: equal, as before
+    let ints = [1, 2, 3]
+    let strs = ["a", "b"]
+    let deep = [[1, 2], [3]]
+    let tups = [(1, "x", 'c', true)]
+    let pts = [Point { x: 1, y: 2 }]
+    let pts2 = pts
+    println(f"{ints == ints} {strs == strs} {deep == deep} {tups == tups} {pts == pts2}")
+    let f2 = [1.5, 2.5]
+    println(f"{f2 == f2} {f2 != f2}")
+}
+""",
     "keys_that_change_their_container": r"""// H4 (MYLA-415): a key, index or argument whose computation copies or grows
 // the container it is used on: computed before the container is made
 // unique, as the interpreter does, so a copy keeps the old contents and a
@@ -9088,6 +9143,8 @@ PINNED = {
     "recursive_enums_across_tasks": '3\n2\n8\n66\n5\nh 8 3 99 3 2\n6\n12\n1\n2\n79\ntrue\n66\n2\n',
     # MYLA-415 (H4): native code wrote into the copy, or into the freed cell
     "keys_that_change_their_container": '2 3 true\n302 false 399\n4 3 false\n303 99 150\n3 y added\n99 2\n77 303\n5 0 2\n9\n4 3\n5 304\nab a\nbcd\n55 303\n3 301\n50 1\n4 3\n202 false\n203 202\n',
+    # MYLA-415 (M3): native code answered equal for one cell without comparing
+    "list_equal_to_itself": 'false false true false\nfalse true\nfalse\nfalse true\neq called\neq called\ntrue\nfalse\nfalse\ntrue true true true true\ntrue false\n',
 }
 
 
