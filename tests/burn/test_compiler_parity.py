@@ -9698,8 +9698,7 @@ class TestCompilerParity(unittest.TestCase):
                 interp, native = _both(src)
                 self.assertEqual(interp[2], 1, interp[1])
                 self.assertEqual((native[0], native[2]), (interp[0], interp[2]))
-                if name not in AWAITING_MYLA_415:
-                    self.assertEqual(native[1], _without_snippets(interp[1]))
+                self.assertEqual(native[1], _without_snippets(interp[1]))
 
     def test_divide_by_zero_traps_nonzero(self):
         src = "#main\nfun main() {\n    var z = 0\n    print(1 / z)\n}\n"
@@ -9999,10 +9998,6 @@ RUNTIME_ERRORS = {
     "error_after_stderr": 'from std.io import eprint\n\nfun main() {\n    eprint("before\\n")\n    panic("then")\n}\n',
 }
 
-# Those whose native report differs from the interpreter's today only in the
-# runtime error's text, which native code is to carry (MYLA-415, D183): their
-# stderr is compared once it does; their output and status are now.
-AWAITING_MYLA_415 = {"list_index", "negative_list_index", "missing_map_key", "string_index"}
 
 
 def _make(name: str, src: str):
