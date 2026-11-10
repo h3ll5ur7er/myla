@@ -199,6 +199,9 @@ pub fun native_tests(file: str, opts: LoadOptions, sel: TestOptions, target: str
     }
     let err = decode(o.stderr)
     let code = match o.status { ExitStatus.Exited(c) => c, ExitStatus.Signaled(s) => -s }
+    // what the cases wrote on stderr, which the harness passed on, as the
+    // interpreter's `myla test` lets it through
+    write(2, err)
     return Ok(harness_report(h, decode(o.stdout), err, code))
 }
 
@@ -257,17 +260,18 @@ fun resumed_tests(h: Harness, exe: str, lead: [str], program: str, dir: str) -> 
         if runs.len() == 0 {
             // the harness ended before its first case: that case failed so
             let (detail, shown, rest) = case_outcome(runner_case(h.cases[k]), "", decode(o.stderr), code)
+            write(2, rest)
             let why = if detail == "" { format("the harness ended with status {} before the case", code) } else { detail }
             for l in case_lines(runner_case(h.cases[k]), why, []) { lines.push(l) }
             k = k + 1
             continue
         }
-        // the rest of a case's stderr goes, as a child's does natively (into
-        // the harness's stderr, which `native_tests` reads for a failure only)
+        // what a case wrote on stderr itself is passed on, as a child's is
         for run in runs {
             if k >= h.cases.len() { break }
             let c = runner_case(h.cases[k])
             let (detail, shown, rest) = case_outcome(c, run.0, run.1, run.2)
+            write(2, rest)
             if detail == "" { passed = passed + 1 }
             for l in case_lines(c, detail, shown) { lines.push(l) }
             k = k + 1
