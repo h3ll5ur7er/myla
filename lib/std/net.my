@@ -78,9 +78,23 @@ impl Format for AddrParseError {
     }
 }
 
-// `ip` and `port` as a socket address.
+// `ip` and `port` as a socket address; a port outside 0 to 65535 is a
+// runtime error (D184).
 pub fun addr(ip: IpAddr, port: int) -> SocketAddr {
-    return SocketAddr { ip: ip, port: port }
+    return SocketAddr { ip: ip, port: checked_port(port) }
+}
+
+// `port`, which must be one (0 to 65535): else the runtime error naming it
+// (D184), where the record took its low 16 bits and bound or connected to
+// another port.
+#test(80)[80]
+#test(65536)[panic("port 65536 out of range (0 to 65535)")]
+#test(-1)[panic("port -1 out of range (0 to 65535)")]
+fun checked_port(port: int) -> int {
+    if port < 0 || port > 65535 {
+        panic(f"port {port} out of range (0 to 65535)")
+    }
+    return port
 }
 
 // 127.0.0.1, this machine over IPv4.
@@ -574,8 +588,10 @@ fun record_bytes(a: SocketAddr) -> [uint8] {
     if a.ip.is_ipv6() {
         out = [6]
     }
-    out.push(((a.port >> 8) & 255) as uint8)
-    out.push((a.port & 255) as uint8)
+    // a `SocketAddr` built by hand too
+    let port = checked_port(a.port)
+    out.push(((port >> 8) & 255) as uint8)
+    out.push((port & 255) as uint8)
     for b in a.ip.octets() {
         out.push(b)
     }
