@@ -7639,6 +7639,16 @@ fun main() {
     var m2 = [1: 10, 2: 20, 3: 30]
     m2.remove(if m2.len() > 0 { var i = 100; while i < 300 { m2[i] = i; i += 1 }; 2 } else { 0 })
     print(f"{m2.len()} {m2.contains(2)}")
+    // in a match arm's expression, which is no scope of its own
+    for k in 0..3 {
+        h = fresh()
+        match k {
+            0 => h.sb.append(if k == 0 { "zero" } else { "other" }),
+            1 => h.xs.put_at(h.snap(1), 5),
+            _ => h.m.remove(if k > 1 { h.grow(2) } else { 3 }),
+        }
+        print(f"{k}: {h.sb.build()} {h.xs[1]} {h.xs_saved.len()} {h.m.len()}")
+    }
     var saved2: [int: int] = [:]
     m2[if true { saved2 = m2; 5 } else { 6 }] = 1
     print(f"{m2.len()} {saved2.len()}")
@@ -9402,7 +9412,7 @@ PINNED = {
     # MYLA-415 (H3): native code segfaulted in __deepb_ and on a child's result
     "recursive_enums_across_tasks": '3\n2\n8\n66\n5\nh 8 3 99 3 2\n6\n12\n1\n2\n79\ntrue\n66\n2\n',
     # MYLA-415 (H4): native code wrote into the copy, or into the freed cell
-    "keys_that_change_their_container": '2 3 true\n302 false 399\n4 3 false\n303 99 150\n3 y added\n99 2\n77 303\n5 0 2\n9\n4 3\n5 304\nab a\nbcd\n55 303\n3 301\n50 1\n4 3\n202 false\n203 202\n',
+    "keys_that_change_their_container": '2 3 true\n302 false 399\n4 3 false\n303 99 150\n3 y added\n99 2\n77 303\n5 0 2\n9\n4 3\n5 304\nab a\nbcd\n55 303\n3 301\n50 1\n4 3\n202 false\n0: zero 2 0 3\n1:  5 3 3\n2:  2 0 302\n203 202\n',
     # MYLA-415 (M3): native code answered equal for one cell without comparing
     "list_equal_to_itself": 'false false true false\nfalse true\nfalse\nfalse true\neq called\neq called\ntrue\nfalse\nfalse\ntrue true true true true\ntrue false\n',
     # MYLA-415 (M2, MYLA-367): native code didn't link ('undefined reference to myla_Box.add')

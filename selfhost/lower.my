@@ -1813,12 +1813,27 @@ impl Lower {
     fun fixed_receiver(var self, cg: CodeGen, e: Expr, call: int32) -> Expr {
         return match e.kind {
             ExprKind.GetField(recv, f) => Expr { id: e.id, line: e.line, col: e.col, sp: e.sp, kind: ExprKind.GetField(self.fixed_receiver(cg, recv, call), f) },
-            ExprKind.TupleIndex(recv, k) => Expr { id: e.id, line: e.line, col: e.col, sp: e.sp, kind: ExprKind.TupleIndex(self.fixed_receiver(cg, recv, call), k) },
             ExprKind.Index(base, idx) => {
                 let b2 = self.fixed_receiver(cg, base, call)
                 let nm = format("%index{}_{}", call, idx.id)
                 let held = self.held_value(cg, idx, nm)
                 let i2 = Expr { id: idx.id, line: idx.line, col: idx.col, sp: idx.sp, kind: ExprKind.Name(nm) }
+                Expr { id: e.id, line: e.line, col: e.col, sp: e.sp, kind: ExprKind.Index(b2, i2) }
+            },
+            _ => e,
+        }
+    }
+
+    // The place `e` with each index on its path computed now, in order,
+    // into a local the statement owns (`held_operand`), so that what the
+    // indices do is done before the path is made unique (H4).
+    fun held_place(var self, cg: CodeGen, e: Expr, call: int32) -> Expr {
+        return match e.kind {
+            ExprKind.GetField(recv, f) => Expr { id: e.id, line: e.line, col: e.col, sp: e.sp, kind: ExprKind.GetField(self.held_place(cg, recv, call), f) },
+            ExprKind.TupleIndex(recv, k) => Expr { id: e.id, line: e.line, col: e.col, sp: e.sp, kind: ExprKind.TupleIndex(self.held_place(cg, recv, call), k) },
+            ExprKind.Index(base, idx) => {
+                let b2 = self.held_place(cg, base, call)
+                let i2 = self.held_operand(cg, idx, format("%index{}_{}", call, idx.id))
                 Expr { id: e.id, line: e.line, col: e.col, sp: e.sp, kind: ExprKind.Index(b2, i2) }
             },
             _ => e,
@@ -1932,7 +1947,8 @@ impl Lower {
         return slot
     }
 
-    // `e` computed now into a local of its own named `nm` (`held_value`), as
+    // `e` computed now into a local of its own named `nm`, which the
+    // statement owns (a match arm's expression has no scope of its own), as
     // the name of that local, of `e`'s type; a literal as it is.
     fun held_operand(var self, cg: CodeGen, e: Expr, nm: str) -> Expr {
         let lit = match e.kind {
@@ -1943,7 +1959,20 @@ impl Lower {
             _ => false,
         }
         if lit { return e }
-        let held = self.held_value(cg, e, nm)
+        let t = cg.type_of(e.id)
+        let slot = self.value_slot(cg, nm, t, true)
+        if is_aggregate(t) {
+            let src = self.addr(cg, e)
+            let dst = self.slot_addr(slot)
+            self.add(Inst.Copy(dst, src, cg.size(t)))
+            self.retain(cg, t, dst)
+        } else {
+            let v = self.expr(cg, e)
+            self.add(Inst.Store(slot, v))
+            self.retain(cg, t, v)
+        }
+        self.declare_as(nm, slot, false)
+        self.own_temp(slot)
         return Expr { id: e.id, line: e.line, col: e.col, sp: e.sp, kind: ExprKind.Name(nm) }
     }
 
@@ -2449,7 +2478,7 @@ impl Lower {
         // an index that may change or copy the place's variable: every
         // index on the path computed first, in order, then the path made
         // unique (H4)
-        if !settled_path(e) { return self.place(cg, self.fixed_receiver(cg, e, e.id)) }
+        if !settled_path(e) { return self.place(cg, self.held_place(cg, e, e.id)) }
         match e.kind {
             ExprKind.Name(n) => {
                 let slot = self.lookup(n)
@@ -4018,7 +4047,7 @@ impl Lower {
         // in order, so that the place is reached after them (H4)
         var argv = argv0
         if root != "" && !tail && argv0.len() > 1 && !settled_operands(argv0[1:], root) {
-            argv = [self.fixed_receiver(cg, argv0[0], e.id)]
+            argv = [self.held_place(cg, argv0[0], e.id)]
             var j = 1
             while j < argv0.len() {
                 argv.push(self.held_operand(cg, argv0[j], format("%arg{}_{}", e.id, j)))
@@ -4606,7 +4635,7 @@ impl Lower {
         var place = base
         var key = idx
         if !settled_operand(idx, place_root(base)) {
-            place = self.fixed_receiver(cg, base, idx.id)
+            place = self.held_place(cg, base, idx.id)
             key = self.held_operand(cg, idx, format("%key{}", idx.id))
         }
         let h = self.place(cg, place)
@@ -4641,7 +4670,7 @@ impl Lower {
         var place = m
         var kx = k
         if !settled_operand(k, place_root(m)) {
-            place = self.fixed_receiver(cg, m, k.id)
+            place = self.held_place(cg, m, k.id)
             kx = self.held_operand(cg, k, format("%key{}", k.id))
         }
         let h = self.place(cg, place)
@@ -4708,7 +4737,7 @@ impl Lower {
     fun sb_append(var self, cg: CodeGen, e: Expr, nm: str, args0: [Expr]) -> int32 {
         var args = args0
         if !settled_operands(args0[1:], place_root(args0[0])) {
-            args = [self.fixed_receiver(cg, args0[0], e.id)]
+            args = [self.held_place(cg, args0[0], e.id)]
             var i = 1
             while i < args0.len() {
                 args.push(self.held_operand(cg, args0[i], format("%arg{}_{}", e.id, i)))
