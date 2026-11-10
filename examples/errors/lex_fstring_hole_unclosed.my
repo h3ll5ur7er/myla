@@ -1,0 +1,11 @@
+//~ lex error: unclosed '(' in f-string hole
+// Each hole of an f-string is an expression of its own (D186, MYLA-416): a
+// bracket opened in one closes in it, so the parse of a hole can't run on
+// into the next one. Here `(` of the first hole closes in the second.
+fun g(a: int, b: int) -> int {
+    return a + b
+}
+
+fun main() {
+    print(f"{g(1} {2)}")
+}

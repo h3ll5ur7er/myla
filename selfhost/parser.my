@@ -39,6 +39,7 @@ pub struct Parser {
     stmt_match: bool,           // the next `match` starts a statement: its arms give no value (MYLA-222)
     skip_tests: bool,           // `#test` cases are skipped, not parsed (an implicit module's, MYLA-320)
     sites: [BodySite],          // the functions' bodies the lexer skipped, kept for later (MYLA-359)
+    elems: bool,                // an element of a list, map or tuple literal is parsed: a comma ends it (D186)
 }
 
 // A function's body the lexer skipped (`lex_lazy`, an implicit module's,
@@ -51,16 +52,22 @@ pub struct BodySite { line: int32, col: int32, start: int32, end: int32, first_i
 // Python parser's MAX_NESTING): past it, a parse error, not a stack overflow.
 const MAX_NESTING: int32 = 256
 
-#test([])[Parser { toks: [], pos: 0, allow_struct_lit: true, next_id: 0, errs: [], pending: None, resume: 0, unwinding: false, stopped: false, depth: 0, stmt_match: false, skip_tests: false, sites: [] }]
+// How many tokens the scan for explicit type arguments looks at (D186): a
+// type-argument list is shorter, and a run of comparisons, `f(x < y, x < y,
+// …)`, which the scan would otherwise follow to its end from every `<`,
+// is parsed in linear time.
+const TYPE_ARGS_BUDGET: int32 = 128
+
+#test([])[Parser { toks: [], pos: 0, allow_struct_lit: true, next_id: 0, errs: [], pending: None, resume: 0, unwinding: false, stopped: false, depth: 0, stmt_match: false, skip_tests: false, sites: [], elems: false }]
 pub fun new_parser(toks: [Token]) -> Parser {
-    return Parser { toks: toks, pos: 0, allow_struct_lit: true, next_id: 0, errs: [], pending: None, resume: 0, unwinding: false, stopped: false, depth: 0, stmt_match: false, skip_tests: false, sites: [] }
+    return Parser { toks: toks, pos: 0, allow_struct_lit: true, next_id: 0, errs: [], pending: None, resume: 0, unwinding: false, stopped: false, depth: 0, stmt_match: false, skip_tests: false, sites: [], elems: false }
 }
 
 // A parser at the first token of `src`, the receiver of `#test` cases of the
 // parser's methods (MYLA-184): one without tokens when `src` doesn't lex.
-#test("a")[Parser { toks: [Token { kind: TokenKind.IDENT, lexeme: "a", line: 1, column: 1, eline: 1, ecol: 2, ival: 0, suffix: "", big: "" }, Token { kind: TokenKind.EOF, lexeme: "", line: 1, column: 2, eline: 1, ecol: 2, ival: 0, suffix: "", big: "" }], pos: 0, allow_struct_lit: true, next_id: 0, errs: [], pending: None, resume: 0, unwinding: false, stopped: false, depth: 0, stmt_match: false, skip_tests: false, sites: [] }]
-#test("d2")[Parser { toks: [Token { kind: TokenKind.IDENT, lexeme: "d2", line: 1, column: 1, eline: 1, ecol: 3, ival: 0, suffix: "", big: "" }, Token { kind: TokenKind.EOF, lexeme: "", line: 1, column: 3, eline: 1, ecol: 3, ival: 0, suffix: "", big: "" }], pos: 0, allow_struct_lit: true, next_id: 0, errs: [], pending: None, resume: 0, unwinding: false, stopped: false, depth: 0, stmt_match: false, skip_tests: false, sites: [] }]
-#test("right")[Parser { toks: [Token { kind: TokenKind.IDENT, lexeme: "right", line: 1, column: 1, eline: 1, ecol: 6, ival: 0, suffix: "", big: "" }, Token { kind: TokenKind.EOF, lexeme: "", line: 1, column: 6, eline: 1, ecol: 6, ival: 0, suffix: "", big: "" }], pos: 0, allow_struct_lit: true, next_id: 0, errs: [], pending: None, resume: 0, unwinding: false, stopped: false, depth: 0, stmt_match: false, skip_tests: false, sites: [] }]
+#test("a")[Parser { toks: [Token { kind: TokenKind.IDENT, lexeme: "a", line: 1, column: 1, eline: 1, ecol: 2, ival: 0, suffix: "", big: "" }, Token { kind: TokenKind.EOF, lexeme: "", line: 1, column: 2, eline: 1, ecol: 2, ival: 0, suffix: "", big: "" }], pos: 0, allow_struct_lit: true, next_id: 0, errs: [], pending: None, resume: 0, unwinding: false, stopped: false, depth: 0, stmt_match: false, skip_tests: false, sites: [], elems: false }]
+#test("d2")[Parser { toks: [Token { kind: TokenKind.IDENT, lexeme: "d2", line: 1, column: 1, eline: 1, ecol: 3, ival: 0, suffix: "", big: "" }, Token { kind: TokenKind.EOF, lexeme: "", line: 1, column: 3, eline: 1, ecol: 3, ival: 0, suffix: "", big: "" }], pos: 0, allow_struct_lit: true, next_id: 0, errs: [], pending: None, resume: 0, unwinding: false, stopped: false, depth: 0, stmt_match: false, skip_tests: false, sites: [], elems: false }]
+#test("right")[Parser { toks: [Token { kind: TokenKind.IDENT, lexeme: "right", line: 1, column: 1, eline: 1, ecol: 6, ival: 0, suffix: "", big: "" }, Token { kind: TokenKind.EOF, lexeme: "", line: 1, column: 6, eline: 1, ecol: 6, ival: 0, suffix: "", big: "" }], pos: 0, allow_struct_lit: true, next_id: 0, errs: [], pending: None, resume: 0, unwinding: false, stopped: false, depth: 0, stmt_match: false, skip_tests: false, sites: [], elems: false }]
 pub fun parser_on(src: str) -> Parser {
     return match lex(src) {
         Ok(toks) => new_parser(toks),
@@ -68,9 +75,17 @@ pub fun parser_on(src: str) -> Parser {
     }
 }
 
+// A parser at the start of `src` that parses an element of a literal
+// (`Parser.elems`, D186), for the cases of `type_args_then`.
+fun elems_parser_on(src: str) -> Parser {
+    var p = parser_on(src)
+    p.elems = true
+    return p
+}
+
 // A parser at token `k` of `src` lexed as an implicit module's text is
 // (`lex_lazy`, MYLA-359), for the cases of `fun_body`.
-#test("", 0)[Parser { toks: [Token { kind: TokenKind.EOF, lexeme: "", line: 1, column: 1, eline: 1, ecol: 1, ival: 0, suffix: "", big: "" }], pos: 0, allow_struct_lit: true, next_id: 0, errs: [], pending: None, resume: 0, unwinding: false, stopped: false, depth: 0, stmt_match: false, skip_tests: false, sites: [] }]
+#test("", 0)[Parser { toks: [Token { kind: TokenKind.EOF, lexeme: "", line: 1, column: 1, eline: 1, ecol: 1, ival: 0, suffix: "", big: "" }], pos: 0, allow_struct_lit: true, next_id: 0, errs: [], pending: None, resume: 0, unwinding: false, stopped: false, depth: 0, stmt_match: false, skip_tests: false, sites: [], elems: false }]
 fun lazy_parser_on(src: str, k: int32) -> Parser {
     var p = match lex_lazy(src) {
         Ok(r) => new_parser(r.0),
@@ -684,8 +699,10 @@ impl Parser {
         while self.check(TokenKind.HASH) {
             let hash_tok = self.advance()
             let name = self.expect(TokenKind.IDENT, "attribute name after '#'").lexeme
-            if self.skip_tests && name == "test" {
-                // its tokens skipped, the case left out
+            if self.skip_tests && name == "test" && self.case_closes() {
+                // its tokens skipped, the case left out; one whose brackets
+                // don't close is parsed, its error the entry's (M14 of
+                // MYLA-416)
                 if self.match1(TokenKind.LPAREN) { self.skip_group() }
                 if self.match1(TokenKind.LBRACKET) { self.skip_group() }
                 self.skip_newlines()
@@ -709,6 +726,37 @@ impl Parser {
             self.skip_newlines()
         }
         return attrs
+    }
+
+    // At a `#test` case's arguments: whether its `( … )` and `[ … ]`, those
+    // it has, close, each bracket with its own kind.
+    #test(parser_on("(1, [2])[3]\nfun"))[true]
+    #test(parser_on("\nfun"))[true]
+    #test(parser_on("(1, [2, 3)[4]\npub fun f() { }"))[false]
+    #test(parser_on("(1"))[false]
+    fun case_closes(self) -> bool {
+        var k = self.pos
+        for open in [TokenKind.LPAREN, TokenKind.LBRACKET] {
+            if k < self.toks.len() && self.toks[k].kind == open {
+                var closers: [TokenKind] = []
+                while true {
+                    if k >= self.toks.len() { return false }
+                    let kind = self.toks[k].kind
+                    if kind == TokenKind.LPAREN { closers.push(TokenKind.RPAREN) }
+                    else if kind == TokenKind.LBRACKET { closers.push(TokenKind.RBRACKET) }
+                    else if kind == TokenKind.LBRACE { closers.push(TokenKind.RBRACE) }
+                    else if kind == TokenKind.RPAREN || kind == TokenKind.RBRACKET || kind == TokenKind.RBRACE {
+                        if closers.len() == 0 || closers[closers.len() - 1] != kind { return false }
+                        let c = closers.pop()
+                    } else if kind == TokenKind.EOF {
+                        return false
+                    }
+                    k += 1
+                    if closers.len() == 0 { break }
+                }
+            }
+        }
+        return true
     }
 
     // Skip to the bracket that closes the one just consumed, past it
@@ -1207,7 +1255,11 @@ impl Parser {
     #test(parser_on("[int]"))[Block { line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 6 }, stmts: [] }]
     fun block(var self) -> Block {
         self.enter("block")
+        // a block's statements in a literal's element are no elements (D186)
+        let elems = self.elems
+        self.elems = false
         let b = self.block_inner()
+        self.elems = elems
         self.depth = self.depth - 1
         return b
     }
@@ -1927,6 +1979,14 @@ impl Parser {
     // (`Binary(":", a, b)`, the step as `Binary(":", that, step)`), a bound
     // left out a `Hole`.
     fun index_or_slice(var self, lb: Token) -> Expr {
+        let elems = self.elems
+        self.elems = false
+        let ix = self.index_or_slice_in(lb)
+        self.elems = elems
+        return ix
+    }
+
+    fun index_or_slice_in(var self, lb: Token) -> Expr {
         var first = self.mk_expr(lb.line, lb.column, ExprKind.Hole)
         if !self.check(TokenKind.COLON) { first = self.bound() }
         if !self.check(TokenKind.COLON) { return first }
@@ -2040,7 +2100,11 @@ impl Parser {
 
     // Whether the tokens from the `<` here can be a type-argument list that
     // closes with a `>` right before a `(`: only tokens that a type has, the
-    // `<` and `>` balanced, no bracket closed that it didn't open.
+    // `<` and `>` balanced, no bracket closed that it didn't open, within
+    // `TYPE_ARGS_BUDGET` tokens. A comma between two holes of an f-string
+    // ends it, and one outside brackets in an element of a list, map or
+    // tuple literal: `[a < b, c > (d)]` is two comparisons, as in a call's
+    // argument list `f(a < b, c > (d))` is one generic call (D186).
     #test(parser_on("<int>(x)"))[true]
     #test(parser_on("<Box<[int]>>()"))[true]
     #test(parser_on("<(int) -> str, m.T>(f)"))[true]
@@ -2048,6 +2112,9 @@ impl Parser {
     #test(parser_on("< b\n> (c)"))[false]
     #test(parser_on("< b) > (c)"))[false]
     #test(parser_on("< 1 > (c)"))[false]
+    #test(elems_parser_on("<(int) -> str, m.T>(f)"))[false]
+    #test(elems_parser_on("<(int, str), [int: str]>(f)"))[false]
+    #test(elems_parser_on("<(int, str)>(f)"))[true]
     fun type_args_ahead(self) -> bool {
         return self.type_args_then(TokenKind.LPAREN)
     }
@@ -2059,7 +2126,8 @@ impl Parser {
         var angles = 0
         var brackets = 0
         var k = self.pos
-        while k < self.toks.len() {
+        let end = if self.toks.len() - k > TYPE_ARGS_BUDGET { k + TYPE_ARGS_BUDGET } else { self.toks.len() }
+        while k < end {
             let kind = self.toks[k].kind
             if kind == TokenKind.LT {
                 angles += 1
@@ -2071,6 +2139,8 @@ impl Parser {
             } else if kind == TokenKind.RPAREN || kind == TokenKind.RBRACKET {
                 brackets -= 1
                 if brackets < 0 { return false }
+            } else if kind == TokenKind.COMMA && (self.toks[k].suffix == "hole" || (brackets == 0 && self.elems)) {
+                return false
             } else if !(kind == TokenKind.IDENT || kind == TokenKind.COMMA || kind == TokenKind.DOT || kind == TokenKind.COLON || kind == TokenKind.ARROW || kind == TokenKind.ASYNC || self.is_prim_type(kind)) {
                 return false
             }
@@ -2271,11 +2341,18 @@ impl Parser {
             self.skip()
             return self.mk_expr(lb.line, lb.column, ExprKind.ListLit([]))
         }
+        // its elements, keys and values end at a comma (D186)
+        let elems = self.elems
+        self.elems = true
         let first = self.expression()
+        var lit = first
         if self.match1(TokenKind.COLON) {
-            return self.map_lit_tail(lb, first)
+            lit = self.map_lit_tail(lb, first)
+        } else {
+            lit = self.list_lit_tail(lb, first)
         }
-        return self.list_lit_tail(lb, first)
+        self.elems = elems
+        return lit
     }
 
     fun list_lit_tail(var self, lb: Token, first: Expr) -> Expr {
@@ -2320,6 +2397,9 @@ impl Parser {
         let scrutinee = self.expression_ns()
         self.expect(TokenKind.LBRACE, "'{' to begin match arms")
         self.skip_newlines()
+        // its arms in a literal's element are no elements (D186)
+        let elems = self.elems
+        self.elems = false
         var arms: [MatchArm] = []
         while !self.check(TokenKind.RBRACE) && !self.at_end() {
             let arm = self.match_arm(!as_stmt)
@@ -2338,6 +2418,7 @@ impl Parser {
                 }
             }
         }
+        self.elems = elems
         self.expect(TokenKind.RBRACE, "'}' to end match")
         if arms.len() == 0 {
             self.fail_at(kw, "match expression needs at least one arm")
@@ -2565,8 +2646,12 @@ impl Parser {
             // the unit value (D138)
             return self.mk_expr(lp.line, lp.column, ExprKind.TupleLit([]))
         }
+        // a tuple's elements end at a comma (D186), and the first may be one
+        let in_elems = self.elems
+        self.elems = true
         let first = self.expression()
         if !self.check(TokenKind.COMMA) {
+            self.elems = in_elems
             self.expect(TokenKind.RPAREN, "')'")
             return first
         }
@@ -2578,6 +2663,7 @@ impl Parser {
                 break
             }
         }
+        self.elems = in_elems
         self.expect(TokenKind.RPAREN, "')'")
         return self.mk_expr(lp.line, lp.column, ExprKind.TupleLit(elems))
     }
@@ -2586,6 +2672,9 @@ impl Parser {
     fun struct_lit(var self, name_tok: Token) -> Expr {
         self.expect(TokenKind.LBRACE, "'{'")
         self.skip_newlines()
+        // its fields in a literal's element are no elements (D186)
+        let elems = self.elems
+        self.elems = false
         var fields: [FieldInit] = []
         while !self.check(TokenKind.RBRACE) && !self.at_end() {
             let fname = self.expect(TokenKind.IDENT, "field name")
@@ -2598,6 +2687,7 @@ impl Parser {
             }
             self.skip_newlines()
         }
+        self.elems = elems
         self.expect(TokenKind.RBRACE, "'}'")
         return self.mk_expr(name_tok.line, name_tok.column, ExprKind.StructLit(name_tok.lexeme, fields))
     }
@@ -2629,6 +2719,9 @@ impl Parser {
         if self.check(TokenKind.RPAREN) {
             return args
         }
+        // a call's arguments in a literal's element are no elements (D186)
+        let elems = self.elems
+        self.elems = false
         while true {
             if self.hole_ahead() {
                 let tok = self.advance()
@@ -2644,6 +2737,7 @@ impl Parser {
                 break
             }
         }
+        self.elems = elems
         return args
     }
 
@@ -2695,6 +2789,20 @@ pub fun parse_ids_with(toks: [Token], first_id: int32, skip_tests: bool) -> Resu
 #test("right", 24)[Err([Diag { kind: "parse error", line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 6 }, msg: "expected a declaration (struct/actor/fun/enum/typealias/const/trait/impl/import), found 'right'" }])]
 pub fun parse_source_all(src: str, first_id: int32) -> Result<Parsed, [Diag]> {
     return parse_source_with(src, first_id, false)
+}
+
+// The first error of `src` parsed as `parse_source_with` does, "" for
+// none: a module's `#test` case whose brackets don't close is reported at
+// the case, as where the module is the entry (M14 of MYLA-416), not where
+// the skip of its tokens ran out.
+#test("pub fun ok() -> int { return 1 }\n\n#test(1, [2, 3)[4]\npub fun f() -> int { return 4 }\n", true)["3:15 expected ']' to close list literal, found ')'"]
+#test("pub fun ok() -> int { return 1 }\n\n#test(1, [2, 3)[4]\npub fun f() -> int { return 4 }\n", false)["3:15 expected ']' to close list literal, found ')'"]
+#test("#test(1, [2, 3])[4]\npub fun f() -> int { return 4 }\n", true)[""]
+fun first_error_with(src: str, skip_tests: bool) -> str {
+    return match parse_source_with(src, 0, skip_tests) {
+        Ok(p) => "",
+        Err(ds) => f"{ds[0].line}:{ds[0].col} {ds[0].msg}",
+    }
 }
 
 // parse_source_all, skipping the `#test` cases when `skip_tests`.

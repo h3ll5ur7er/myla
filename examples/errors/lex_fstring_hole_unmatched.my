@@ -1,0 +1,7 @@
+//~ lex error: unmatched ')' in f-string hole
+// Each hole of an f-string is an expression of its own (D186, MYLA-416): its
+// brackets close in it, each with its own kind.
+fun main() {
+    let xs = [1, 2]
+    print(f"{xs[0)]}")
+}

@@ -60,6 +60,16 @@ fun lexer_on(src: str) -> Lexer {
     return new_lexer(src)
 }
 
+// The kind of the bracket that closes one of kind `k`.
+#test(TokenKind.LPAREN)[TokenKind.RPAREN]
+#test(TokenKind.LBRACE)[TokenKind.RBRACE]
+#test(TokenKind.LBRACKET)[TokenKind.RBRACKET]
+fun closer_of(k: TokenKind) -> TokenKind {
+    if k == TokenKind.LPAREN { return TokenKind.RPAREN }
+    if k == TokenKind.LBRACE { return TokenKind.RBRACE }
+    return TokenKind.RBRACKET
+}
+
 // The text of the one-character operator `c` (`one_char_kind`'s): a
 // literal, where `cp_utf8` made a string for every bracket and comma
 // (MYLA-359).
@@ -721,12 +731,30 @@ impl Lexer {
             None => {},
         }
         var out: [Token] = []
+        // each hole is an expression of its own (D186): its brackets close
+        // in it, so that the parse of one can't run on into the next
+        var opens: [Token] = []
         for t in sub_toks {
             if t.kind != TokenKind.EOF && t.kind != TokenKind.NEWLINE {
                 let col = slice_col + (t.column - 1)
                 let ecol = slice_col + (t.ecol - 1)
-                out.push(Token { kind: t.kind, lexeme: t.lexeme, line: slice_line, column: col, eline: slice_line, ecol: ecol, ival: t.ival, suffix: t.suffix, big: t.big })
+                let tok = Token { kind: t.kind, lexeme: t.lexeme, line: slice_line, column: col, eline: slice_line, ecol: ecol, ival: t.ival, suffix: t.suffix, big: t.big }
+                if t.kind == TokenKind.LPAREN || t.kind == TokenKind.LBRACKET || t.kind == TokenKind.LBRACE {
+                    opens.push(tok)
+                } else if t.kind == TokenKind.RPAREN || t.kind == TokenKind.RBRACKET || t.kind == TokenKind.RBRACE {
+                    if opens.len() == 0 || closer_of(opens[opens.len() - 1].kind) != t.kind {
+                        self.fail_span(slice_line, col, SrcSpan { sline: slice_line, scol: col, eline: slice_line, ecol: ecol }, f"unmatched '{t.lexeme}' in f-string hole (a hole is one expression)")
+                        return ([], "")
+                    }
+                    let o = opens.pop()
+                }
+                out.push(tok)
             }
+        }
+        if opens.len() > 0 {
+            let o = opens[opens.len() - 1]
+            self.fail_span(o.line, o.column, SrcSpan { sline: o.line, scol: o.column, eline: o.eline, ecol: o.ecol }, f"unclosed '{o.lexeme}' in f-string hole (a hole is one expression)")
+            return ([], "")
         }
         return (out, spec)
     }
@@ -790,7 +818,8 @@ impl Lexer {
         self.emit0(TokenKind.LPAREN, "(", sl, sc)
         self.emit(TokenKind.STRING, fmt_str, sl, sc, 0, "")
         for toks in args {
-            self.emit0(TokenKind.COMMA, ",", sl, sc)
+            // a hole's comma: no type-argument list reaches past it (D186)
+            self.emit(TokenKind.COMMA, ",", sl, sc, 0, "hole")
             for t in toks {
                 self.toks.push(t)
             }
@@ -1154,6 +1183,9 @@ fun word_at(cps: [char], i: int32, n: int32, w: str) -> bool {
 #test("a")[Ok([Token { kind: TokenKind.IDENT, lexeme: "a", line: 1, column: 1, eline: 1, ecol: 2, ival: 0, suffix: "", big: "" }, Token { kind: TokenKind.EOF, lexeme: "", line: 1, column: 2, eline: 1, ecol: 2, ival: 0, suffix: "", big: "" }])]
 #test("d2")[Ok([Token { kind: TokenKind.IDENT, lexeme: "d2", line: 1, column: 1, eline: 1, ecol: 3, ival: 0, suffix: "", big: "" }, Token { kind: TokenKind.EOF, lexeme: "", line: 1, column: 3, eline: 1, ecol: 3, ival: 0, suffix: "", big: "" }])]
 #test("right")[Ok([Token { kind: TokenKind.IDENT, lexeme: "right", line: 1, column: 1, eline: 1, ecol: 6, ival: 0, suffix: "", big: "" }, Token { kind: TokenKind.EOF, lexeme: "", line: 1, column: 6, eline: 1, ecol: 6, ival: 0, suffix: "", big: "" }])]
+// each f-string hole is one expression, its brackets closed in it (D186)
+#test("f\"{g(1} {2)}\"")[Err(Diag { kind: "lex error", line: 1, col: 5, sp: SrcSpan { sline: 1, scol: 5, eline: 1, ecol: 6 }, msg: "unclosed '(' in f-string hole (a hole is one expression)" })]
+#test("f\"{x[0)]}\"")[Err(Diag { kind: "lex error", line: 1, col: 7, sp: SrcSpan { sline: 1, scol: 7, eline: 1, ecol: 8 }, msg: "unmatched ')' in f-string hole (a hole is one expression)" })]
 pub fun lex(src: str) -> Result<[Token], Diag> {
     return lex_with(src, false)
 }
