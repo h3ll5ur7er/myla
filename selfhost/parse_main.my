@@ -9,7 +9,8 @@
 // module's is, its functions' bodies skipped and each read on its own
 // (`parse_source_lazy`, `parse_body`, MYLA-359), with the file read whole
 // (without its `#test` cases, as both are): the tokens with their places,
-// then the trees. It prints `same <bodies>`, or the first difference.
+// then the trees. It prints `same <bodies>`, `same error` where both read
+// it with the same first error, or the first difference.
 
 from std.process import args, exit
 from std.fs import read_to_string
@@ -169,7 +170,7 @@ fun compare_lazy(src: str) {
             let d = first_difference(without_ids(eager).split("\n"), without_ids(lazy).split("\n"))
             if d != "" { println("trees differ, " + d) } else { println(format("same {}", n)) }
         },
-        Err(e) => { if e == eager { println("same 0") } else { println("lazy fails: " + e) } },
+        Err(e) => { if e == eager { println("same error") } else { println("lazy fails: " + e) } },
     }
 }
 

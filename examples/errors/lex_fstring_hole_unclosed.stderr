@@ -1,0 +1,5 @@
+lex error: unclosed '(' in f-string hole (a hole is one expression)
+  --> examples/errors/lex_fstring_hole_unclosed.my:10:15
+   |
+10 |     print(f"{g(1} {2)}")
+   |               ^

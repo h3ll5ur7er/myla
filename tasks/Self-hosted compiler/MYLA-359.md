@@ -2,7 +2,7 @@
 id: MYLA-359
 title: "Check time of the implicit std modules: about 26 ms for every program"
 type: improvement
-status: todo
+status: review
 priority: medium
 labels: [checker, performance, stdlib]
 ---
@@ -131,4 +131,4 @@ The hello world's 39.4 M instructions (1.8 M and 1.2 ms without the implicit mod
 
 Not ready ([[Project/Review-2026-11-10]]): lazy parsing can load a different program without an error: a missing `}` swallows the methods after it (Z1), `body_key` collides (Z2), and `myla build` of a file without `main` builds a program that does nothing (Z3, [[MYLA-415]]). "Under 5 ms" moves to [[MYLA-412]]. The fix is in [[MYLA-416]].
 
-- [ ] The review's blocker, fixed with [[MYLA-416]]
+- [x] The review's blocker, fixed with [[MYLA-416]]: Z1 (a skipped body stops at a line that starts with a declaration's keyword), Z2 (a body keyed by its `{`), Z4, the marker of an unread body with compiling one an internal error, the skipper's mutants and `scripts/update-seed.sh` checking the implicit modules whole. Z3's other half (`sig_of`'s fallback, a file without `main`) is [[MYLA-415]]'s. Evidence in [[MYLA-416]].
