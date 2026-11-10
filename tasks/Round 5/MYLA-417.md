@@ -2,7 +2,7 @@
 id: MYLA-417
 title: "P3b The checker: generic operators, literals, D178's call error, diagnostics"
 type: bug
-status: todo
+status: in-progress
 priority: high
 labels: [checker, diagnostics, round-5]
 ---

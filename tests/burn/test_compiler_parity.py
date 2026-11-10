@@ -7293,6 +7293,32 @@ async fun main() {
     print((h.on)(3))
 }
 """,
+    # M24 (MYLA-417): `()` as a type argument
+    "unit_as_a_type_argument": r"""// M24 (MYLA-417): `()` as a type argument, written or inferred from a
+// function without a result: `() -> T` with `T` the unit type is `() -> ()`
+import std.bench as bench
+
+fun work() {
+}
+
+fun twice<T>(f: () -> T) -> [T] {
+    return [f(), f()]
+}
+
+fun main() {
+    let r = bench.run_n<()>("u", 3, () => work())
+    print(r.runs)
+    let r2 = bench.run_n("v", 2, () => work())
+    print(r2.runs)
+    let xs = twice(() => work())
+    print(xs.len())
+    let ys: [()] = twice(work)
+    print(ys.len())
+    let g: () -> () = () => work()
+    print(twice(g).len())
+    print(twice(() => 7)[1])
+}
+""",
 }
 
 # A program that allocates far more recursive-enum cells (~12M) than the heap
@@ -8775,6 +8801,8 @@ PINNED = {
     "literal_element_types_from_later_elements": 'L1RaL3\n3\n252\n1\nbad\n2\n3\nx\n2\n5000000007\n42\n2\nb\n2\n3\n252\n',
     # MYLA-406: new ("method 'keys' collides with a field of 'Lru'" before); native code gives the same
     "a_field_and_a_method_of_one_name": '3\n3\n1\n10\n3\nq\n2\n5\nrex\npet rex\npet rex\n3\n4\n',
+    # M24 (MYLA-417): new ("expected '() -> ()', found '() -> ()'" before); native code gives the same
+    "unit_as_a_type_argument": '3\n2\n2\n2\n2\n7\n',
 }
 
 
