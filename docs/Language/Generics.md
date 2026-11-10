@@ -183,7 +183,7 @@ fun main() {
 
 | Backend | Strategy |
 | --- | --- |
-| Interpreter | Erasure: one body serves every instantiation; operators on erased values dispatch on the runtime value. A program that calls a trait's function on a type parameter (`T.zero()`, D172), which has no value to dispatch on, has its generic functions' frames bind their type parameters to the types the checker solved at each call |
+| Interpreter | Erasure: one body serves every instantiation. Each generic call binds the callee's type parameters to the types the checker solved there (D172, [[MYLA-414]]), so arithmetic, comparisons and formatting typed by a type parameter behave as for the concrete type: an `int8` sum overflows (D175), a `uint64` compares and prints unsigned, a `float32` rounds; a trait's function on a type parameter (`T.zero()`) and a method on a value of type-parameter type find their type there |
 | Native backend | Monomorphizes during code generation with a substitution map (the retired Python backend stamped out copies in a separate pass and checked the concrete program again) |
 
 Each instantiation gets its own name, whatever the type arguments are called ([[MYLA-9]], [[Architecture/Monomorphization]]).

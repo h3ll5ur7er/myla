@@ -3331,8 +3331,9 @@ impl Interp {
     fun eval_method_call(var self, e: Expr, recv: Expr, method: str, args: [Expr]) -> Value {
         // The method is the one of the receiver's checked type, a type
         // parameter's the type the running function's frame binds (H1). A
-        // type parameter no frame binds (a generic function's `#test`
-        // case) gives no type to key by: the receiver is evaluated once
+        // type parameter no frame binds (in a written `eq` or `hash` the
+        // interpreter calls itself, for a list's `==` or a map's key) gives
+        // no type to key by: the receiver is evaluated once
         // here, as a place when it is one (`self.items[i]`, `m[k]`, a field
         // of a call's result), and the method keyed by its value; the
         // receiver's value is then the one `self` starts from, and a `var
