@@ -395,12 +395,14 @@ impl<R: Read> Buffered<R> {
         return Ok(text_of(b, 0, b.len()))
     }
 
-    // The next bytes of the input in the buffer, which is used up: one
-    // `read` of `want` bytes, at least CHUNK, which may give fewer; false at
-    // the end of the input. A caller that needs more than a read gives
-    // gathers the reads in a builder of its own (`read_line`, `read_exact`),
-    // so a byte is copied once, and not again with the buffer's tail on
-    // each read (M17).
+    // Read at least `want` more bytes if the input has them (one `read` of at
+    // least CHUNK bytes, which may give fewer); false at the end of the
+    // input. The bytes already returned are dropped from the buffer, and
+    // those not yet returned are copied before the new ones. `read_line` and
+    // `read_exact` use the buffer up before they fill it, so they copy
+    // nothing here: they gather what they need in a builder of their own,
+    // where a byte is copied once, not again with the tail on each read
+    // (M17).
     fun fill(var self, want: int32) -> Result<bool, IoError> {
         if self.eof { return Ok(false) }
         var n = CHUNK
@@ -410,7 +412,14 @@ impl<R: Read> Buffered<R> {
             self.eof = true
             return Ok(false)
         }
-        self.buf = chunk
+        if self.pos >= self.buf.len() {
+            self.buf = chunk
+        } else {
+            var sb = StringBuilder()
+            sb.append(self.buf, self.pos, self.buf.len())
+            sb.append(chunk)
+            self.buf = sb.build()
+        }
         self.pos = 0
         return Ok(true)
     }
