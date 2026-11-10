@@ -7341,6 +7341,50 @@ fun main() {
     print(n[1])
 }
 """,
+    # D182 (MYLA-417): `Option` and `Result` are `Hash`
+    "option_and_result_as_map_keys": r"""// D182 (MYLA-417): `Option` and `Result` derive `Hash` in the prelude, so
+// an `Option` or `Result` of hashable types is a map key, and a derived key
+// struct may have such a field
+#derive(Eq, Hash)
+struct Key {
+    name: str,
+    port: Option<int>,
+}
+
+fun count_distinct<K: Eq + Hash>(xs: [K]) -> int {
+    var seen: [K: bool] = [:]
+    for x in xs { seen[x] = true }
+    return seen.len()
+}
+
+fun main() {
+    var m: [Option<int>: str] = [:]
+    m[Some(1)] = "one"
+    m[None] = "none"
+    m[Some(2)] = "two"
+    m[Some(1)] = "uno"
+    print(m.len())
+    print(m[Some(1)])
+    print(m.get(None).unwrap_or("?"))
+    print(m.contains(Some(3)))
+    var r: [Result<str, int>: int] = [:]
+    r[Ok("a")] = 1
+    r[Err(1)] = 2
+    r[Ok("a")] = r[Ok("a")] + 10
+    print(r[Ok("a")] + r[Err(1)])
+    let keys = [Key { name: "a", port: None }, Key { name: "a", port: Some(80) }, Key { name: "a", port: None }]
+    print(count_distinct(keys))
+    print(count_distinct([Some(Some(1)), Some(None), None, Some(Some(1))]))
+    let h1 = Hasher { state: 7 }.add(Some("x")).finish()
+    let h2 = Hasher { state: 7 }.add(Some("x")).finish()
+    let h3 = Hasher { state: 7 }.add(Some("y")).finish()
+    print(h1 == h2)
+    print(h1 == h3)
+    var t: [(Option<str>, int): int] = [:]
+    t[(None, 1)] = 5
+    print(t[(None, 1)])
+}
+""",
 }
 
 # A program that allocates far more recursive-enum cells (~12M) than the heap
@@ -8827,6 +8871,8 @@ PINNED = {
     "unit_as_a_type_argument": '3\n2\n2\n2\n2\n7\n',
     # L2 (MYLA-417): new ("[-1, -128, 5i8]" was a type error, "[1, 2, x]" left 2 an int32); native code gives the same
     "literals_take_the_type_a_later_element_fixes": '-10000000000\n155\n-2.25\n200000000000000\n600\n1400\n60000\n197\n-128\n',
+    # D182 (MYLA-417): new ("'Option<int32>' isn't Hash" before); native code gives the same
+    "option_and_result_as_map_keys": '3\nuno\nnone\nfalse\n13\n2\n3\ntrue\nfalse\n5\n',
 }
 
 

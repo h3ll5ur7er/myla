@@ -1145,6 +1145,27 @@ fun join_open(a: Type, b: Type) -> Option<Type> {
 // that isn't such a literal does.
 struct LitColumn { ty: Type, have: bool, first: Expr, slot: int32, fixed: bool }
 
+// Whether `t` holds an `Option` or a `Result` (D182, `hash_need`).
+#test(Type.TTuple([Type.TStr, Type.TEnum("Option", [Type.TStr])]))[true]
+#test(Type.TMap(Type.TStruct("Box", [Type.TEnum("Result", [Type.TStr, Type.TBool])]), Type.TStr))[true]
+#test(Type.TList(Type.TEnum("Shape", [])))[false]
+fun holds_prelude_enum(t: Type) -> bool {
+    return match t {
+        Type.TEnum(n, args) => n == "Option" || n == "Result" || holds_prelude_enum_in(args),
+        Type.TStruct(n, args) => holds_prelude_enum_in(args),
+        Type.TActor(n, args) => holds_prelude_enum_in(args),
+        Type.TTuple(es) => holds_prelude_enum_in(es),
+        Type.TList(e) => holds_prelude_enum(e),
+        Type.TMap(k, v) => holds_prelude_enum(k) || holds_prelude_enum(v),
+        _ => false,
+    }
+}
+
+fun holds_prelude_enum_in(ts: [Type]) -> bool {
+    for t in ts { if holds_prelude_enum(t) { return true } }
+    return false
+}
+
 // Whether the element `e` is a literal that takes the type its column gets
 // later (L2): an integer, float or char literal without a suffix, or one of
 // the first two negated.
@@ -1954,6 +1975,8 @@ pub struct Checker {
     open_at: int32,                 // the list or map literal's element that may leave type parameters open, as holes (MYLA-401)
     col_open: [[Expr]],             // each open literal column's elements with a hole (`LitColumn.slot`)
     col_lits: [[Expr]],             // each open literal column's literals while only literals fix its type (L2)
+    prelude_needed: bool,           // whether a type holding an `Option` or a `Result` was compared or hashed
+    lazy_prelude: [int32: bool],    // the prelude's derived `Eq` and `Hash` impls of `Option` and `Result`, until a type that holds one is compared or hashed (D182)
     call_target: str,
     call_mutates: bool,
     fun_name: str,
@@ -2011,7 +2034,7 @@ fun new_checker(decls: [Decl]) -> Checker {
         resolved: [:], call_defaults: [:], errs: [], warnings: [], primitives: false, called: [:], lazy_bodies: no_lazy_bodies(), read_bodies: [:], read_ids: [:], std_impls: [:], allowed: [], impl_allows: [], method_decl_allows: [], mains: [],
         skipped_decls: [:], skipped_fns: [:], broken_impls: [:], redefined: [:],
         lost_methods: [:], lost_traits: [:], failed_consts: [:], bodies: false,
-        call_kind: "", call_kind_id: -1, targs_taken: -1, open_at: -1, col_open: [], col_lits: [], call_target: "", call_mutates: false, fun_name: "", handovers: [:], become_words: [], passed_on: [],
+        call_kind: "", call_kind_id: -1, targs_taken: -1, open_at: -1, col_open: [], col_lits: [], prelude_needed: false, lazy_prelude: [:], call_target: "", call_mutates: false, fun_name: "", handovers: [:], become_words: [], passed_on: [],
         actors: [:], conc_line: 0, conc_col: 0, conc_sp: no_span(), conc_node: -1, in_async: false, self_assignable: false, actor_self: "", builtin_as_method: false, cur_key: "",
         lams: [], awaited: [:], call_key: "", call_async: false, suspended: -1, task_init: false, in_guard: false, neg_lit: -1,
         task_line: 0, task_col: 0, task_sp: no_span(), task_node: -1, fill_decls: [:], renames: [:], mutating_calls: [:],
@@ -3807,6 +3830,13 @@ impl Checker {
             self.neg_lit = saved_neg
             let t = tr?
             if !(is_int(t) || is_float(t)) { return Err(terr_at(e.line, e.col, e.sp, "unary '-' requires a numeric operand")) }
+            // a negative literal fits no unsigned type (L5)
+            match x.kind {
+                ExprKind.IntLit(v, suf, isc, big) => {
+                    if !isc && (v != 0 || big != "") && !is_signed_int(t) { return Err(terr_at(e.line, e.col, e.sp, format("integer literal -{} does not fit in '{}'", int_text(v, big), type_name(t)))) }
+                },
+                _ => {},
+            }
             return Ok(t)
         }
         if op == "!" {
@@ -3912,6 +3942,7 @@ impl Checker {
             let common = self.unify(l, lt, r, rt)?
             if is_compound_eq(common) {
                 // a tuple or list of `Eq` elements (D163, MYLA-313)
+                self.prelude_need(common)
                 if self.type_implements(common, "Eq")? { return Ok(Type.TBool) }
                 return Err(terr_at(e.line, e.col, e.sp, format("cannot compare values of type '{}': {}", type_name(common), self.not_eq_why(common))))
             }
@@ -4024,7 +4055,8 @@ impl Checker {
         var trnm = ""
         var kind = ""
         if op == "==" || op == "!=" { trnm = "Eq"
-            kind = "eq" }
+            kind = "eq"
+            self.prelude_need(lt) }
         else { if op == "<" || op == "<=" || op == ">" || op == ">=" { trnm = "Ord"
             kind = "ord" }
         else { trnm = match arith_trait(op) { Some(t) => t, None => "" }
@@ -4092,11 +4124,44 @@ impl Checker {
     // struct's field's isn't checked until a function uses it). Met before
     // the impls are known, it waits for `check_pending_keys`.
     fun check_key(var self, kt: Type, ln: int32, cl: int32, sp: SrcSpan) -> Result<int32, CheckErr> {
+        self.prelude_need(kt)
         if !self.keys_ready && !is_map_key(kt) && !contains_type_param(kt) && !has_error(kt) {
             self.pending_keys.push(PendingKey { t: kt, line: ln, col: cl, sp: sp, decl: self.cur_decl })
             return Ok(0)
         }
         return self.key_ok(kt, ln, cl, sp)
+    }
+
+    // The prelude's derived `Eq` and `Hash` of `Option` and `Result` (D182)
+    // are called once a type `t` that holds one is compared or hashed: by
+    // `==`, as a map's key, a bound's argument, a member of a derived `Eq`,
+    // a tuple's `hash`. Their bodies wait until then (`lazy_prelude`), as
+    // they and std.hash's methods they call would cost a hello world's check
+    // 1.4 %; the runners call them only there.
+    fun prelude_need(var self, t: Type) {
+        if !self.prelude_needed && holds_prelude_enum(t) {
+            for m in ["Option.eq", "Result.eq", "Option.hash", "Result.hash"] { self.called[m] = true }
+            self.prelude_needed = true
+        }
+    }
+
+    // The derived impl added last waits (`prelude_need`) if it is the
+    // prelude's `Option`'s or `Result`'s.
+    fun prelude_waits(var self, name: str) {
+        if (name == "Option" || name == "Result") && !self.prelude_needed { self.lazy_prelude[self.decls[self.decls.len() - 1].id] = true }
+    }
+
+    // `prelude_need` of the members of the struct or enum `name`.
+    fun members_need(var self, name: str) {
+        let si = self.struct_idx(name)
+        if si >= 0 { for f in self.structs[si].fields { self.prelude_need(f.ty) } }
+        let ei = self.enum_idx(name)
+        if ei >= 0 { for v in self.enums[ei].variants { for pt in v.payload { self.prelude_need(pt) } } }
+    }
+
+    // `hash_need` of the types a generic call's substitution gives.
+    fun prelude_need_all(var self, subst: [Subst]) {
+        if !self.prelude_needed { for sb in subst { self.prelude_need(sb.ty) } }
     }
 
     // `check_key` once the impls are known.
@@ -4586,6 +4651,7 @@ impl Checker {
         }
         match base {
             Type.TMap(k, v) => { self.key_ok(k, e.line, e.col, e.sp)?
+                self.prelude_need(k)
                 self.expect_type(ix, k, "map key")?
             return Ok(v) },
             Type.TStr => {
@@ -6959,11 +7025,14 @@ impl Checker {
         // an `impl Eq` for a type that doesn't exist may have been meant for
         // any of them: a type that isn't Eq is then no news (MYLA-110)
         var lost_eq = false
+        // the targets of the explicit impls, found once, not once a target
+        var explicit_eq: [str: bool] = [:]
         for d in self.impl_decls {
             match impl_eq_target_name(d) {
                 Some(nm) => {
                     if !contains_str(eq_names, nm) { eq_names.push(nm) }
                     if !self.names_a_type(nm) { lost_eq = true }
+                    explicit_eq[nm] = true
                 },
                 None => {},
             }
@@ -6972,14 +7041,7 @@ impl Checker {
             self.cur_decl = decl.id
             let name = decl_kind_name(decl)
             // explicit `impl Eq for name`? (it stands)
-            var explicit = false
-            for d in self.impl_decls {
-                match impl_eq_target_name(d) {
-                    Some(nm) => { if nm == name { explicit = true } },
-                    None => {},
-                }
-            }
-            if explicit {
+            if explicit_eq.contains(name) {
                 self.record(terr_at(decl.line, decl.col, decl.sp, format("type '{}' both derives Eq and has an explicit 'impl Eq for {}'", name, name)))?
                 continue
             }
@@ -6996,8 +7058,12 @@ impl Checker {
                 // a generic type's: an impl bounded by `T: Eq`, written as
                 // source and checked and run as any other (MYLA-379)
                 self.add_derived_impl(derived_eq_src(name, tps, self.derived_parts(name)), "Eq")
+                self.prelude_waits(name)
                 continue
             }
+            // compared member by member: a member's `Option` or `Result`
+            // by its `eq` (D182)
+            self.members_need(name)
             // register the synthesized Eq impl: method `eq: (Self,Self)->bool`
             var self_t = Type.TEnum(name, [])
             if self.is_struct(name) { self_t = Type.TStruct(name, []) }
@@ -7023,11 +7089,13 @@ impl Checker {
         for d in targets { hash_names.push(decl_kind_name(d)) }
         var lost = false
         var has_hasher = false
+        var explicit_hash: [str: bool] = [:]
         for d in self.impl_decls {
             match impl_target_name(d, "Hash") {
                 Some(nm) => {
                     if !contains_str(hash_names, nm) { hash_names.push(nm) }
                     if !self.names_a_type(nm) { lost = true }
+                    explicit_hash[nm] = true
                 },
                 None => {},
             }
@@ -7036,14 +7104,7 @@ impl Checker {
         for decl in targets {
             self.cur_decl = decl.id
             let name = decl_kind_name(decl)
-            var explicit = false
-            for d in self.impl_decls {
-                match impl_target_name(d, "Hash") {
-                    Some(nm) => { if nm == name { explicit = true } },
-                    None => {},
-                }
-            }
-            if explicit {
+            if explicit_hash.contains(name) {
                 self.record(terr_at(decl.line, decl.col, decl.sp, format("type '{}' both derives Hash and has an explicit 'impl Hash for {}'", name, name)))?
                 continue
             }
@@ -7091,6 +7152,9 @@ impl Checker {
             if tps.len() > 0 {
                 // a generic type's, bounded, against the linked program's names (MYLA-379)
                 self.add_derived_impl(derived_hash_src(f"impl{bounded_params(tps, "Hash")} Hash for {with_params(name, tps)}", self.derived_parts(name)), "Hash")
+                // the prelude's (D182): its body, and std.hash's methods it
+                // calls, checked once a type that holds one is hashed
+                self.prelude_waits(name)
                 continue
             }
             let src = derived_hash_src("impl Hash for Derived", self.derived_parts(name))
@@ -8081,7 +8145,8 @@ impl Checker {
         // one does (MYLA-359), as its module's own `myla test` checks them
         // all. Trait impls' are checked, as an operator, a bound or a derive
         // calls them unnamed.
-        let lazy = self.lazy_decls()
+        var lazy = self.lazy_decls()
+        for id in self.lazy_prelude.keys() { lazy[id] = true }
         var waiting_fns: [int32] = []
         var pos = -1
         for decl in self.decls {
@@ -8484,18 +8549,20 @@ impl Checker {
     }
 }
 
-#test()["#derive(Eq)\nenum Option<T> { Some(T), None }\n#derive(Eq)\nenum Result<T, E> { Ok(T), Err(E) }\ntrait Format {\n    fun format(self, spec: str) -> str\n}\nstruct Hasher {\n    state: uint64,\n}\nimpl Eq for Hasher {\n    fun eq(self, other: Hasher) -> bool {\n        return self.state == other.state\n    }\n}\ntrait Hash {\n    fun hash(self, h: Hasher) -> Hasher\n}\ntrait Iterator<T> {\n    fun next(var self) -> Option<T>\n}\n"]
+#test()["#derive(Eq, Hash)\nenum Option<T> { Some(T), None }\n#derive(Eq, Hash)\nenum Result<T, E> { Ok(T), Err(E) }\ntrait Format {\n    fun format(self, spec: str) -> str\n}\nstruct Hasher {\n    state: uint64,\n}\nimpl Eq for Hasher {\n    fun eq(self, other: Hasher) -> bool {\n        return self.state == other.state\n    }\n}\ntrait Hash {\n    fun hash(self, h: Hasher) -> Hasher\n}\ntrait Iterator<T> {\n    fun next(var self) -> Option<T>\n}\n"]
 // The prelude: what every program has without an import. The `Hasher`'s
 // state and the `Hash` trait are here (D163, MYLA-313), so that every type
 // can be a map key's and every module can name them; the hasher's methods,
 // its algorithm, and the `Hash` impls of the built-in types are std.hash's,
 // an implicit module. `Option` and `Result` derive `Eq`, so `opt == None`
-// works when the payload is `Eq` (MYLA-379). `Iterator<T>` is here for `for`
+// works when the payload is `Eq` (MYLA-379), and `Hash`, so they are map keys
+// when the payload is `Hash` (D182); those impls' bodies are checked once a
+// program compares or hashes one (`prelude_need`). `Iterator<T>` is here for `for`
 // over one (D171). A
 // map's `get` is std.map's method `m.get(k)`: the free `get(m, k)` that was
 // here went, so a file may declare a `get` of its own (MYLA-393).
 fun prelude_src() -> str {
-    return "#derive(Eq)\nenum Option<T> { Some(T), None }\n#derive(Eq)\nenum Result<T, E> { Ok(T), Err(E) }\ntrait Format {\n    fun format(self, spec: str) -> str\n}\nstruct Hasher {\n    state: uint64,\n}\nimpl Eq for Hasher {\n    fun eq(self, other: Hasher) -> bool {\n        return self.state == other.state\n    }\n}\ntrait Hash {\n    fun hash(self, h: Hasher) -> Hasher\n}\ntrait Iterator<T> {\n    fun next(var self) -> Option<T>\n}\n"
+    return "#derive(Eq, Hash)\nenum Option<T> { Some(T), None }\n#derive(Eq, Hash)\nenum Result<T, E> { Ok(T), Err(E) }\ntrait Format {\n    fun format(self, spec: str) -> str\n}\nstruct Hasher {\n    state: uint64,\n}\nimpl Eq for Hasher {\n    fun eq(self, other: Hasher) -> bool {\n        return self.state == other.state\n    }\n}\ntrait Hash {\n    fun hash(self, h: Hasher) -> Hasher\n}\ntrait Iterator<T> {\n    fun next(var self) -> Option<T>\n}\n"
 }
 
 // The prelude's declarations, with node ids from `first_id`.
@@ -8642,6 +8709,11 @@ pub fun checker_on(src: str) -> Checker {
 #test("fun main() { let a = ['a', 300, 3u8] }")[["integer literal 300 does not fit in 'uint8'"]]
 #test("fun main() { let a = [1, 2.5] }")[["type mismatch: 'int32' vs 'float64' (no implicit conversion between numeric types)"]]
 #test("fun main() { let x: int64 = 5\nlet a = [1, -2, 3, x]\nlet b: [int64] = a\nlet c = [1.5, -2.5, 3.5f32]\nlet d: [float32] = c\nlet e = ['a', 98u8]\nlet f: [uint8] = e\nlet g = [-1, 3i8]\nlet h: [int8] = g }")[[]]
+// a negative literal is no unsigned integer (L5)
+#test("fun main() { let w: uint8 = -1 }")[["integer literal -1 does not fit in 'uint8'"]]
+#test("fun main() { let w = -5u64 }")[["integer literal -5 does not fit in 'uint64'"]]
+#test("fun f(x: uint32) -> uint32 { return x + -2 }")[["integer literal -2 does not fit in 'uint32'"]]
+#test("fun main() { let w: uint8 = -0\nlet v: int8 = -128 }")[[]]
 // a generic impl's operator gives the receiver's instance (M2, MYLA-367)
 #test("struct Box<T> { v: T }\nimpl<T: Add> Add for Box<T> { fun add(self, other: Box<T>) -> Box<T> { return Box { v: self.v + other.v } } }\nfun main() { let c: Box<int> = Box { v: 1 } + Box { v: 2 }\nlet d = c + c + c\nlet e: int = d.v }")[[]]
 #test("struct Box<T> { v: T }\nimpl<T: Add> Add for Box<T> { fun add(self, other: Box<T>) -> Box<T> { return Box { v: self.v + other.v } } }\nfun main() { let c: Box<int> = Box { v: 1 } + Box { v: 2 }\nlet e: str = (c + c).v }")[["cannot assign value of type 'int32' to binding of type 'str'"]]
@@ -9590,6 +9662,7 @@ impl Checker {
             j = j + 1
         }
         self.check_call_bounds(sig, subst, e)?
+        self.prelude_need_all(subst)
         self.targs_taken = e.id
         self.call_types[e.id] = type_args_in(sig.type_params, subst)
         return Ok(opt_subst_type(sig.ret, subst))
@@ -9694,6 +9767,7 @@ impl Checker {
             // name a tuple, so its `hash` is the language's
             Type.TTuple(es) => {
                 if field == "hash" {
+                    self.prelude_need(recv_type)
                     if !self.type_implements(recv_type, "Hash")? { return Err(terr_at(e.line, e.col, e.sp, format("type '{}' has no method 'hash': {}", type_name(recv_type), self.not_hash_why(recv_type)))) }
                     if args.len() != 1 { return Err(terr_at(e.line, e.col, e.sp, format("method 'hash' expects 1 argument(s), got {}", args.len()))) }
                     let hasher = Type.TStruct("Hasher", [])
@@ -9980,6 +10054,7 @@ impl Checker {
             j = j + 1
         }
         self.check_call_bounds(sig, subst, e)?
+        self.prelude_need_all(subst)
         self.targs_taken = e.id
         self.call_types[e.id] = type_args_in(sig.type_params, subst)
         return Ok(opt_subst_type(sig.ret, subst))

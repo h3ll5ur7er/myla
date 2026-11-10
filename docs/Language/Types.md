@@ -90,7 +90,9 @@ Both are reference-counted, copy-on-write values: a copy is cheap, and writing t
 Every program has this prelude (`prelude_src` in [[selfhost/checker.my]]):
 
 ```
+#derive(Eq, Hash)
 enum Option<T> { Some(T), None }
+#derive(Eq, Hash)
 enum Result<T, E> { Ok(T), Err(E) }
 trait Format { fun format(self, spec: str) -> str }
 struct Hasher { state: uint64 }
@@ -102,7 +104,7 @@ trait Iterator<T> { fun next(var self) -> Option<T> }
 
 `Some`, `None`, `Ok` and `Err` may be used without the enum name. A bare `None` (or `Ok`/`Err`/`Some` whose type arguments can't be inferred) needs the expected type from an annotation, parameter or return type, or the other side of `==` (`opt == None`, `None == opt`). The `?` operator propagates `None`/`Err` ([[Language/Expressions-and-operators]]).
 
-Both derive `Eq` ([[MYLA-379]]): `==` and `!=` compare an `Option<T>` when `T` is `Eq`, a `Result<T, E>` when `T` and `E` are, the variant and then its payload, so `m.get(k) == Some(3)`, `r == Err(ParseIntError.Empty)` and a struct with an `Option` field that derives `Eq` work. An `Option` of a map, or of a struct without `Eq`, has none: `operator '==' is not defined for 'Option<Pos>': 'Pos' isn't Eq (it needs 'impl Eq for Pos' or '#derive(Eq)')`. They aren't `Hash`, so not map keys.
+Both derive `Eq` ([[MYLA-379]]): `==` and `!=` compare an `Option<T>` when `T` is `Eq`, a `Result<T, E>` when `T` and `E` are, the variant and then its payload, so `m.get(k) == Some(3)`, `r == Err(ParseIntError.Empty)` and a struct with an `Option` field that derives `Eq` work. An `Option` of a map, or of a struct without `Eq`, has none: `operator '==' is not defined for 'Option<Pos>': 'Pos' isn't Eq (it needs 'impl Eq for Pos' or '#derive(Eq)')`. Both derive `Hash` too (D182): an `Option<T>` is a map key when `T` is `Eq` and `Hash`, a `Result<T, E>` when `T` and `E` are, so `[Option<int>: str]`, a key `(str, Option<int>)` and a struct with an `Option` field that derives `Eq` and `Hash` work; `Option<float64>` isn't one.
 
 ## Type parameters and Self
 
@@ -117,7 +119,7 @@ Inside a generic declaration, a type parameter `T` stands for any type; only ope
 | `bool` | yes | no | `true`/`false` | yes |
 | `str` | yes (bytes) | yes (bytes, MYLA-318) | yes | yes |
 | struct, enum | with `Eq` (`impl Eq` or `#derive(Eq)`; a generic one's when its arguments meet the impl's bounds, MYLA-379) | with `Ord` | no | with `Eq` and `Hash` (D163) |
-| `Option`, `Result` | when the payloads are `Eq` (MYLA-379) | no | no | no |
+| `Option`, `Result` | when the payloads are `Eq` (MYLA-379) | no | no | when the payloads are `Eq` and `Hash` (D182) |
 | `()` | yes (always equal) | no | no | yes |
 | tuple, list | when the elements are `Eq` (D163) | no | no | when the elements are `Eq` and `Hash` |
 | map, function, `StringBuilder` | no | no | no | no |

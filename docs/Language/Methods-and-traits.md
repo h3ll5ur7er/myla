@@ -253,7 +253,7 @@ fun main() {
 
 `#derive(Eq)` on a struct or enum synthesises a structural `impl Eq`: the fields in turn, or the variant and then its payload. Every field or payload must be `Eq` itself: an integer, a float, `char`, `bool`, `str`, a tuple or list of `Eq` elements, an `Option` or `Result` of them, or a named type that is `Eq`. A type can't both derive `Eq` and implement it.
 
-On a generic type ([[MYLA-379]]) the impl is bounded by the trait on every type parameter, `impl<A: Eq, B: Eq> Eq for Pair<A, B>`, so `Pair<int, str>` has `==` and `Pair<int, Pos>` hasn't while `Pos` isn't `Eq` (`operator '==' is not defined for 'Pair<int32, Pos>': 'Pos' isn't Eq (…)`). A field of a type parameter is `Eq` by that bound; any other field is checked as a concrete type's is (`[str: T]` is a map, never `Eq`). `#derive(Hash)` bounds it by `T: Hash`, `#derive(Json)` by `T: ToJson` and `T: FromJson`. The prelude's `Option` and `Result` derive `Eq` this way.
+On a generic type ([[MYLA-379]]) the impl is bounded by the trait on every type parameter, `impl<A: Eq, B: Eq> Eq for Pair<A, B>`, so `Pair<int, str>` has `==` and `Pair<int, Pos>` hasn't while `Pos` isn't `Eq` (`operator '==' is not defined for 'Pair<int32, Pos>': 'Pos' isn't Eq (…)`). A field of a type parameter is `Eq` by that bound; any other field is checked as a concrete type's is (`[str: T]` is a map, never `Eq`). `#derive(Hash)` bounds it by `T: Hash`, `#derive(Json)` by `T: ToJson` and `T: FromJson`. The prelude's `Option` and `Result` derive `Eq` and `Hash` this way (D182).
 
 ```myla
 #derive(Eq, Hash)
