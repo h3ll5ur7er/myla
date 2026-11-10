@@ -28,3 +28,15 @@ So `Pair<A_B, C>` is `Pair__3A_B1C`, `Pair<A, B_C>` is `Pair__1A3B_C`, and `firs
 ## Cost
 
 Only functions reachable from the entry point are emitted, each instantiation once. (The Python backend emitted every non-generic function, called or not.)
+
+## Polymorphic recursion
+
+A generic function that calls itself with a larger type, `grow<T>` calling `grow<[T]>`, asks for a new instance at each step, so the worklist never empties: `myla build` ran until it ran out of memory, where `myla check` says `ok` and the interpreter, which erases types, runs it ([[MYLA-415]], H5). The lowering refuses such a call where it is made (`call_target`): when an instance's type arguments are more than 64 types deep (`MAX_INSTANCE_DEPTH`, `type_depth`), or have more than 4,096 parts in all (`MAX_INSTANCE_SIZE`, `type_size`: a pair of pairs of … doubles at each step and is too large long before it is too deep), the call is a type error, as a refused `become` is ([[MYLA-272]]):
+
+```
+type error: the instances of 'grow' nest without end: this call asks for one whose type arguments are 65 types deep (the limit is 64)
+  --> grow.my:3:16
+note: 'grow' is called with a larger type at each step (polymorphic recursion), which native code can't be built for; the interpreter runs it
+```
+
+The program is refused once its first function asks for such an instance, after 64 instances at most; no program that terminates needs one, as the instantiations don't depend on the values. Through a lambda or a method the same holds; a recursion through a generic type alone (`enum Nest<T> { Leaf(T), Node(Nest<[T]>) }`, with a function walking it) is refused at the function's call.

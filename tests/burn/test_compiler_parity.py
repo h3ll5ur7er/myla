@@ -1,10 +1,12 @@
 """Burn tests: hand-written programs exercising codegen corners, each asserting
 the native binary's output matches the interpreter (and exit codes for traps)."""
 import os
+import subprocess
 import tempfile
 import unittest
 
 from tests.burn._targets import program_excuse
+from tests.burn._tools import selfhost_tool
 from tests.burn._native import (CAN_BUILD_NATIVE, SKIP_REASON, Program, build_and_run, build_and_run_full, interpret,
                                 run_file_both_now, selfhost_run, write_program)
 
@@ -8833,6 +8835,38 @@ class TestCompilerParity(unittest.TestCase):
                                                         f"  --> {path}:2:14"])
                 self.assertEqual(build_and_run_full(Program(path), entry_path=path),
                                  ("b\n", f"runtime error: invalid char\n  --> {path}:2:14\n", 1))
+
+    def test_polymorphic_recursion_is_refused_where_it_is_built(self):
+        # MYLA-415 (H5): a generic function calling itself with a larger type
+        # asks for instances without end, and `myla build` never ended; it is
+        # a type error at the call now, on every target, when the type
+        # arguments grow too deep or (a pair of pairs of ...) too large; the
+        # interpreter runs it
+        myla = selfhost_tool("main")
+        cases = (
+            ("grow", "fun grow<T>(n: int, x: T) -> int {\n    if n == 0 { return 0 }\n"
+                     "    return 1 + grow<[T]>(n - 1, [x])\n}\nfun main() { print(grow(3, 1)) }\n",
+             "3:25", "65 types deep (the limit is 64)", "3\n"),
+            ("g", "fun f<T>(n: int, x: T) -> int {\n    if n == 0 { return 0 }\n    return g(n - 1, (x, x))\n}\n"
+                  "fun g<T>(n: int, x: T) -> int {\n    return f(n, x)\n}\nfun main() { print(f(3, 1)) }\n",
+             "3:13", "more than 4096 types in all", "0\n"),
+            ("h", "fun h<T>(n: int, x: T) -> int {\n"
+                  "    let k = (m: int) => if m == 0 { 0 } else { h(m - 1, Some(x)) }\n    return k(n)\n}\n"
+                  "fun main() { print(h(3, 1)) }\n",
+             "2:49", "65 types deep (the limit is 64)", "0\n"),
+        )
+        for callee, src, at, why, out in cases:
+            with self.subTest(callee=callee), tempfile.TemporaryDirectory() as tmp:
+                path = write_program(tmp, src)
+                ran = subprocess.run([myla, "run", path], capture_output=True, text=True, timeout=60)
+                self.assertEqual((ran.stdout, ran.returncode), (out, 0), ran.stderr)
+                for target in ("x86_64-linux", "aarch64-linux", "wasm32-wasi"):
+                    built = subprocess.run([myla, "build", path, "-o", os.path.join(tmp, "out"), "--target", target],
+                                           capture_output=True, text=True, timeout=60)
+                    self.assertEqual(built.returncode, 1, built.stderr)
+                    self.assertIn(f"type error: the instances of '{callee}' nest without end: this call asks for one "
+                                  f"whose type arguments are {why}\n  --> {path}:{at}\n", built.stderr)
+                    self.assertIn("(polymorphic recursion)", built.stderr)
 
     def test_become_runs_a_million_deep(self):
         # MYLA-128, MYLA-131: every `become` of the parity programs jumps, so

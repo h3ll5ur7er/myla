@@ -100,6 +100,77 @@ pub struct Routine { f: IrFunc, wants: [Want] }
 // frame, "" for any other type (H3).
 struct TaskSlot { slot: int32, ty: Type, void: bool, owns: bool, depth: int32, foreign: bool, walk: str }
 
+// How deep generic instances' type arguments may nest (H5): a polymorphic
+// recursion reaches it in as many instances, no other program comes near.
+const MAX_INSTANCE_DEPTH: int32 = 64
+// and how many parts they may have (a pair of pairs of … doubles)
+const MAX_INSTANCE_SIZE: int32 = 4096
+
+// How many parts the type `t` has (itself included), counted up to just past
+// `limit`.
+#test(Type.TTuple([Type.TStr, Type.TList(Type.TInt(8, true))]), 100)[4]
+#test(Type.TTuple([Type.TStr, Type.TStr, Type.TStr]), 2)[4]
+fun type_size(t: Type, limit: int32) -> int32 {
+    var n = 1
+    var stack = [t]
+    while stack.len() > 0 && n <= limit {
+        let x = stack.pop()
+        var parts: [Type] = []
+        match x {
+            Type.TList(e) => { parts = [e] },
+            Type.TMap(k, v) => { parts = [k, v] },
+            Type.TTuple(es) => { parts = es },
+            Type.TStruct(nm, a) => { parts = a },
+            Type.TEnum(nm, a) => { parts = a },
+            Type.TActor(nm, a) => { parts = a },
+            Type.TAsync(f) => { parts = [f] },
+            Type.TFunc(ps, r) => {
+                parts = ps
+                match r {
+                    Some(rt) => { parts.push(rt) },
+                    None => {},
+                }
+            },
+            _ => {},
+        }
+        for p in parts { stack.push(p) }
+        n += parts.len()
+    }
+    return n
+}
+
+// How deeply the type `t` nests: 0 for a scalar, one more than its deepest
+// part for a list, map, tuple, function or generic type.
+#test(Type.TInt(32, true))[0]
+#test(Type.TList(Type.TList(Type.TStr)))[2]
+#test(Type.TStruct("Box", [Type.TTuple([Type.TBool, Type.TList(Type.TChar)])]))[3]
+fun type_depth(t: Type) -> int32 {
+    var parts: [Type] = []
+    match t {
+        Type.TList(e) => { parts = [e] },
+        Type.TMap(k, v) => { parts = [k, v] },
+        Type.TTuple(es) => { parts = es },
+        Type.TStruct(n, a) => { parts = a },
+        Type.TEnum(n, a) => { parts = a },
+        Type.TActor(n, a) => { parts = a },
+        Type.TAsync(f) => { parts = [f] },
+        Type.TFunc(ps, r) => {
+            parts = ps
+            match r {
+                Some(rt) => { parts.push(rt) },
+                None => {},
+            }
+        },
+        _ => { return 0 },
+    }
+    var d = 0
+    for p in parts {
+        let pd = type_depth(p)
+        if pd > d { d = pd }
+    }
+    return d + 1
+}
+
 // The release walk of a recursive enum `t` held inline (as a frame holds a
 // child's result), "" for any other type.
 fun boxed_drop_walk(cg: CodeGen, t: Type) -> str {
@@ -340,6 +411,7 @@ pub fun lower_lambda(cg: CodeGen, job: LamJob) -> Result<Lowered, str> {
             lw.end_temps()
         },
     }
+    if lw.refused.len() > 0 { return Ok(Lowered { f: lw.f, lams: [], partials: [], fnvals: [], refused: lw.refused, wants: [] }) }
     if lw.err != "" { return Err(lw.err) }
     if frame {
         lw.drop_owners(0)
@@ -2243,6 +2315,15 @@ impl Lower {
         let d = self.unsupported("a refused 'become'")
     }
 
+    // The instance of `callee` that the call `e` asks for, `too` large,
+    // refused (H5): its function asks for a larger one in turn, without end.
+    fun refuse_instance(var self, cg: CodeGen, e: Expr, callee: str, too: str) {
+        let msg = format("the instances of '{}' nest without end: this call asks for one whose type arguments are {}", callee, too)
+        let note = format("'{}' is called with a larger type at each step (polymorphic recursion), which native code can't be built for; the interpreter runs it", callee)
+        self.refused.push(CheckErr { line: e.line, col: e.col, sp: e.sp, msg: msg, decl: e.id, notes: [Note { label: "note", msg: note, line: 0, col: 0, sp: no_span() }] })
+        let d = self.unsupported("a refused instance")
+    }
+
     // The call `c` ending the function by `become`: the owners dropped first,
     // since what the arguments need is theirs (owned, or kept by the caller's
     // caller: the checker sees to it), and the call jumped to.
@@ -3866,7 +3947,18 @@ impl Lower {
     fun call_target(var self, cg: CodeGen, sig: FuncSig, argv: [Expr], call: Expr) -> CallTarget {
         if sig.type_params.len() == 0 { return CallTarget { name: sig.name, params: sig.params, ret: sig.ret } }
         let targs = cg.solve_targs(sig, argv, call.id, call_targs(call))
-        self.f.instances.push(Instance { orig: sig.name, targs: targs })
+        // a generic function calling itself with a larger type (polymorphic
+        // recursion) asks for instances without end: refused where it is
+        // built, past a nesting no program needs (H5)
+        var too = ""
+        for ta in targs {
+            // (a type that doubles at each step grows too large long before
+            // it is too deep)
+            if too == "" && type_size(ta, MAX_INSTANCE_SIZE) > MAX_INSTANCE_SIZE { too = format("more than {} types in all", MAX_INSTANCE_SIZE) }
+            else if too == "" && type_depth(ta) > MAX_INSTANCE_DEPTH { too = format("{} types deep (the limit is {})", type_depth(ta), MAX_INSTANCE_DEPTH) }
+        }
+        if too != "" { self.refuse_instance(cg, call, if sig.has_decl { sig.decl.name } else { sig.name }, too) }
+        else { self.f.instances.push(Instance { orig: sig.name, targs: targs }) }
         var sub: [Subst] = []
         var k = 0
         while k < sig.type_params.len() {
