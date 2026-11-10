@@ -1,0 +1,8 @@
+//~ type error: integer literal -1 does not fit in 'uint8'
+//~ span: -1
+// A negative literal is no unsigned integer: it isn't the value that wraps to
+// 255 (L5, MYLA-417).
+fun main() {
+    let w: uint8 = -1
+    print(w)
+}

@@ -1,0 +1,5 @@
+module error: 'deque.Deque.Item' is not a type: 'deque.Deque' is a struct of module 'std.deque', and only a module has members
+  --> examples/errors/module_type_member_of_a_type.my:7:12
+  |
+7 |     let x: deque.Deque.Item = 1
+  |            ^^^^^^^^^^^^^^^^

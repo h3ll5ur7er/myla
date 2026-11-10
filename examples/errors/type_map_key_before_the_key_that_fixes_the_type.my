@@ -1,0 +1,8 @@
+//~ type error: integer literal 300 does not fit in 'uint8'
+//~ span: 300
+// A later key makes the keys uint8: the keys before it are checked again
+// against it (L2, MYLA-417).
+fun main() {
+    let m = [1: "a", 300: "b", 3u8: "c"]
+    print(m.len())
+}

@@ -1,0 +1,11 @@
+//~ type error: a loop over the map '[str: int32]' visits its keys, of type 'str', not its entries
+//~ span: m
+//~ help: write 'for (k, v) in m.items()'
+// A map's loop visits its keys; its keys and values are `m.items()`
+// (MYLA-390's follow-up, MYLA-417).
+fun main() {
+    let m = ["a": 1]
+    for (k, v) in m {
+        print(v)
+    }
+}

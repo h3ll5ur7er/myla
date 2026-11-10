@@ -1,0 +1,8 @@
+//~ type error: cannot infer type argument(s) for 'None'
+//~ span: None
+// The second places of the tuples are never filled: the error is at the
+// first of them, not at the `None` that `Some(1)` filled (L6, MYLA-417).
+fun main() {
+    let a = [(None, None), (Some(1), None)]
+    print(a.len())
+}

@@ -1,0 +1,5 @@
+type error: integer literal -1 does not fit in 'uint8'
+  --> examples/errors/type_negative_literal_unsigned.my:6:20
+  |
+6 |     let w: uint8 = -1
+  |                    ^^

@@ -1,0 +1,6 @@
+type error: duplicate method 'map' for type '[T]'
+  --> examples/errors/type_duplicate_list_method_names_the_list.my:7:5
+  |
+7 |     fun map(self, f: (T) -> T) -> [T] { return self }
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+note: 'map' for '[T]' is first defined in std.list, which every program sees, at lib/std/list.my:76:5
