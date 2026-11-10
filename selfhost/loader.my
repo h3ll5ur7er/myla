@@ -1271,6 +1271,11 @@ impl Renamer {
                         let fits = if want_type { is_type_kind(kind) } else { kind == "trait" }
                         if !last || !fits {
                             let what = if want_type { "a type" } else { "a trait" }
+                            // a name after it: only a module has members (L6)
+                            if !last {
+                                self.fail(t.line, t.col, t.sp, format("'{}' is not {}: '{}' is {} of module '{}', and only a module has members", n, what, join(parts[:k + 1], "."), with_article(kind), dotted_id(mid)))
+                                return n
+                            }
                             self.fail(t.line, t.col, t.sp, format("'{}' is {} of module '{}', not {}", join(parts[:k + 1], "."), with_article(kind), dotted_id(mid), what))
                             return n
                         }

@@ -7385,6 +7385,64 @@ fun main() {
     print(t[(None, 1)])
 }
 """,
+    # MYLA-417: a lambda result, `?` and a variant on the left of `==` take the types the call knows
+    "inference_through_lambdas_try_and_variants": r"""// MYLA-417: inference follow-ups. A lambda's result takes what the call
+// knows of it (`and_then`'s `E` from the receiver, MYLA-356); the type
+// expected of `e?` is expected of `e`, with the function's error type
+// (MYLA-315); `Tree.Leaf == t` types the variant by `t` (MYLA-379)
+struct B<T> {
+    items: [T],
+}
+
+#derive(Eq)
+enum Tree<T> {
+    Leaf,
+    Node(T),
+}
+
+fun mk<T>() -> B<T> {
+    return B { items: [] }
+}
+
+fun try_mk<T>(ok: bool) -> Result<B<T>, str> {
+    if ok { return Ok(mk()) }
+    return Err("no")
+}
+
+fun opt_mk<T>(ok: bool) -> Option<B<T>> {
+    if ok { return Some(mk()) }
+    return None
+}
+
+fun use_q(ok: bool) -> Result<int, str> {
+    let a: B<int> = try_mk(ok)?
+    var b: B<str> = try_mk(ok)?
+    b.items.push("x")
+    return Ok(a.items.len() + b.items.len())
+}
+
+fun use_o(ok: bool) -> Option<int> {
+    let a: B<int64> = opt_mk(ok)?
+    return Some(a.items.len())
+}
+
+fun main() {
+    let r: Result<int, str> = Ok(2)
+    print(r.and_then((x) => Ok(x + 1)) == Ok(3))
+    let bad: Result<int, str> = Err("e")
+    print(bad.and_then((x) => Ok(x * 2)) == Err("e"))
+    let o: Option<int> = Some(4)
+    print(o.and_then((x) => Some(x + 1)) == Some(5))
+    print(use_q(true) == Ok(1))
+    print(use_q(false) == Err("no"))
+    print(use_o(true) == Some(0))
+    print(use_o(false) == None)
+    let t: Tree<int> = Tree.Node(3)
+    print(Tree.Leaf == t)
+    print(Tree.Node(3) == t)
+    print(Tree.Node(4) != t)
+}
+""",
 }
 
 # A program that allocates far more recursive-enum cells (~12M) than the heap
@@ -8873,6 +8931,8 @@ PINNED = {
     "literals_take_the_type_a_later_element_fixes": '-10000000000\n155\n-2.25\n200000000000000\n600\n1400\n60000\n197\n-128\n',
     # D182 (MYLA-417): new ("'Option<int32>' isn't Hash" before); native code gives the same
     "option_and_result_as_map_keys": '3\nuno\nnone\nfalse\n13\n2\n3\ntrue\nfalse\n5\n',
+    # MYLA-417: new ("cannot infer type parameter(s) E", "T for 'try_mk'" before); native code gives the same
+    "inference_through_lambdas_try_and_variants": 'true\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\nfalse\ntrue\ntrue\n',
 }
 
 

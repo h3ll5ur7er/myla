@@ -1,0 +1,5 @@
+type error: 'get' is a method of 'Cell<(int32) -> int32>' and its field 'get' holds a function here: bind the field first: let g = c.get
+  --> examples/errors/type_method_beside_a_function_field.my:18:16
+   |
+18 |     print(c.get(5))
+   |           ^^^^^^^^
