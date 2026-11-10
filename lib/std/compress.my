@@ -54,6 +54,8 @@ pub enum CompressError {
     LengthMismatch,
     // Bytes after the end of the stream
     TrailingData,
+    // More output than the caller's `max_output`
+    TooLarge,
     // The stream it reads from failed
     Io(IoError),
 }
@@ -62,6 +64,7 @@ impl CompressError {
     // The reason in words.
     #test(CompressError.Truncated)["compressed data ends too early"]
     #test(CompressError.DistanceTooFar)["distance too far back"]
+    #test(CompressError.TooLarge)["output longer than max_output"]
     #test(CompressError.Io(IoError.NotFound))["read failed: NotFound"]
     #test(CompressError.Io(IoError.Other(5)))["read failed: Other(5)"]
     fun message(self) -> str {
@@ -77,6 +80,7 @@ impl CompressError {
             ChecksumMismatch => "checksum mismatch"
             LengthMismatch => "length mismatch"
             TrailingData => "data after the end of the stream"
+            TooLarge => "output longer than max_output"
             Io(e) => f"read failed: {io_error_name(e)}"
         }
     }
@@ -95,6 +99,7 @@ impl CompressError {
             ChecksumMismatch => -9
             LengthMismatch => -10
             TrailingData => -11
+            TooLarge => -12
             Io(e) => io_code(e)
         }
     }
@@ -553,7 +558,7 @@ impl Inflate {
         } else {
             self.ck = adler32_part(self.ck, self.out, self.ck_from, n)
         }
-        self.size = self.size + ((n - self.ck_from) as uint32)
+        self.size = self.size.wrapping_add((n - self.ck_from) as uint32)
         self.ck_from = n
     }
 
@@ -917,8 +922,9 @@ fun gzip_header(t: [uint32], b: [uint8], p: int32) -> Result<int32, CompressErro
     var q = p + 10
     if (flags & 4u8) != 0u8 {
         if n - q < 2 { return Ok(-1) }
-        q += 2 + ((b[q] as int32) | ((b[q + 1] as int32) << 8))
-        if q > n { return Ok(-1) }
+        let xlen = (b[q] as int32) | ((b[q + 1] as int32) << 8)
+        if xlen > n - q - 2 { return Ok(-1) }
+        q += 2 + xlen
     }
     if (flags & 8u8) != 0u8 {
         q = past_zero(b, q)
@@ -1042,89 +1048,138 @@ fun adler32_part(adler: uint32, bytes: [uint8], from_i: int32, to: int32) -> uin
 
 // --- All at once --------------------------------------------------------------------
 
-// The output of `b` as one stream of the container `format`, every byte of it.
-fun decompress(b: [uint8], format: int32) -> Result<[uint8], CompressError> {
+// The output of `b` as one stream of the container `format`, every byte of
+// it, or `TooLarge` past `max_output` bytes: decoding stops a byte past the
+// limit (a match past it at most 257 bytes further), so a small input that
+// stands for a lot of output (a "decompression bomb") is stopped there.
+fun decompress(b: [uint8], format: int32, max_output: int) -> Result<[uint8], CompressError> {
     var d = new_inflate(format)
     d.feed(b, true)
-    let status = d.run(0x7FFFFFFF)?
+    var target = max_output
+    if target < ALL { target += 1 }
+    let status = d.run(target)?
+    if d.out.len() > max_output { return Err(CompressError.TooLarge) }
     if status != FINISHED { return Err(CompressError.Truncated) }
     if d.avail() > 0 { return Err(CompressError.TrailingData) }
     return Ok(d.out)
 }
 
+// The most output a list holds, `max_output`'s default.
+const ALL: int = 0x7FFFFFFF
+
+// `max_output`, checked: below 0 it is a runtime error (D184).
+fun limit(name: str, max_output: int) -> int {
+    if max_output < 0 { panic(f"compress.{name}: max_output {max_output} is below 0") }
+    return max_output
+}
+
 // The bytes the raw DEFLATE stream `b` (RFC 1951, no header) stands for.
-// Bytes after its end are `TrailingData`.
-#test(unhex("0300"))[Ok(bytes_m.from_str(""))] // the empty stream: one fixed block
-#test(unhex("010500faff68656c6c6f"))[Ok(bytes_m.from_str("hello"))] // stored
-#test(unhex("cb48cdc9c90700"))[Ok(bytes_m.from_str("hello"))] // fixed codes
-#test(unhex("358ccb0d80300cc55679dc117b708701821a91a8a5416da0627b3e12371f6c4f4d734cdcc37f48ea9e18d5a9f4106b18d12c072e68428ecb0e50e10ef30e5aec64b8f0639414500da2abbc8fc82004a5ed49a1f9936abc861b"))[Ok(bytes_m.from_str("Twinkle, twinkle, little star, how I wonder what you are! Up above the world so high, like a diamond in the sky."))] // dynamic codes
-#test(unhex("4a4c02000000ffff4b4e0100"))[Ok(bytes_m.from_str("abcd"))] // a fixed block, an empty stored one, a fixed one
-#test(unhex("4b4c1c05c40200"))[Ok(list_m.filled(300, 97u8))] // distance 1, length 258
-#test(unhex("4b040200"))[Ok(bytes_m.from_str("aaaa"))]
-#test(unhex(""))[Err(CompressError.Truncated)]
-#test(unhex("cb48cdc9c9"))[Err(CompressError.Truncated)] // no end of block
-#test(unhex("010500faff6865"))[Err(CompressError.Truncated)] // a stored block cut short
-#test(unhex("07"))[Err(CompressError.BadBlockType)]
-#test(unhex("010500feff68656c6c6f"))[Err(CompressError.BadStoredLength)]
-#test(unhex("030200"))[Err(CompressError.DistanceTooFar)] // a match before any output
-#test(unhex("4b044200"))[Err(CompressError.DistanceTooFar)] // distance 2 after one byte
-#test(unhex("1b0300"))[Err(CompressError.BadCode)] // literal/length symbol 286
-#test(unhex("4b043e00"))[Err(CompressError.BadCode)] // distance symbol 30
-#test(unhex("05009204"))[Err(CompressError.BadCodeLengths)] // an over-subscribed code-length code
-#test(unhex("05000224"))[Err(CompressError.BadCodeLengths)] // a repeat with nothing before it
-#test(unhex("050080e47f1b"))[Err(CompressError.BadCodeLengths)] // no code for the end of the block
-#test(unhex("05c081080000000020d6fd258e"))[Ok(bytes_m.from_str("aa"))] // a dynamic block without distance codes
-#test(unhex("0dc0010900000080a0adfe3f515a"))[Ok(bytes_m.from_str("aaaa"))] // one distance code, of length 1
-#test(unhex("05c0010500000000a0ffaf03"))[Ok(bytes_m.from_str(""))] // one literal/length code, of length 1
-#test(unhex("0580010500000080febf0e"))[Err(CompressError.BadCodeLengths)] // one code, of length 2
-#test(unhex("05c0010900000080a0adfe3f1102"))[Err(CompressError.BadCodeLengths)] // codes of lengths 1 and 2
-#test(unhex("0dc0010900000080a0adfe3f519900"))[Err(CompressError.BadCodeLengths)] // one distance code, of length 2
-#test(unhex("030000"))[Err(CompressError.TrailingData)]
-pub fun inflate(b: [uint8]) -> Result<[uint8], CompressError> {
-    return decompress(b, RAW)
+// Bytes after its end are `TrailingData`; more than `max_output` bytes of
+// output are `TooLarge`.
+#test(unhex("0300"), ALL)[Ok(bytes_m.from_str(""))] // the empty stream: one fixed block
+#test(unhex("010500faff68656c6c6f"), ALL)[Ok(bytes_m.from_str("hello"))] // stored
+#test(unhex("cb48cdc9c90700"), ALL)[Ok(bytes_m.from_str("hello"))] // fixed codes
+#test(unhex("358ccb0d80300cc55679dc117b708701821a91a8a5416da0627b3e12371f6c4f4d734cdcc37f48ea9e18d5a9f4106b18d12c072e68428ecb0e50e10ef30e5aec64b8f0639414500da2abbc8fc82004a5ed49a1f9936abc861b"), ALL)[Ok(bytes_m.from_str("Twinkle, twinkle, little star, how I wonder what you are! Up above the world so high, like a diamond in the sky."))] // dynamic codes
+#test(unhex("4a4c02000000ffff4b4e0100"), ALL)[Ok(bytes_m.from_str("abcd"))] // a fixed block, an empty stored one, a fixed one
+#test(unhex("4b4c1c05c40200"), ALL)[Ok(list_m.filled(300, 97u8))] // distance 1, length 258
+#test(unhex("4b040200"), ALL)[Ok(bytes_m.from_str("aaaa"))]
+#test(unhex(""), ALL)[Err(CompressError.Truncated)]
+#test(unhex("cb48cdc9c9"), ALL)[Err(CompressError.Truncated)] // no end of block
+#test(unhex("010500faff6865"), ALL)[Err(CompressError.Truncated)] // a stored block cut short
+#test(unhex("07"), ALL)[Err(CompressError.BadBlockType)]
+#test(unhex("010500feff68656c6c6f"), ALL)[Err(CompressError.BadStoredLength)]
+#test(unhex("030200"), ALL)[Err(CompressError.DistanceTooFar)] // a match before any output
+#test(unhex("4b044200"), ALL)[Err(CompressError.DistanceTooFar)] // distance 2 after one byte
+#test(unhex("1b0300"), ALL)[Err(CompressError.BadCode)] // literal/length symbol 286
+#test(unhex("4b043e00"), ALL)[Err(CompressError.BadCode)] // distance symbol 30
+#test(unhex("05009204"), ALL)[Err(CompressError.BadCodeLengths)] // an over-subscribed code-length code
+#test(unhex("05000224"), ALL)[Err(CompressError.BadCodeLengths)] // a repeat with nothing before it
+#test(unhex("050080e47f1b"), ALL)[Err(CompressError.BadCodeLengths)] // no code for the end of the block
+#test(unhex("05c081080000000020d6fd258e"), ALL)[Ok(bytes_m.from_str("aa"))] // a dynamic block without distance codes
+#test(unhex("0dc0010900000080a0adfe3f515a"), ALL)[Ok(bytes_m.from_str("aaaa"))] // one distance code, of length 1
+#test(unhex("05c0010500000000a0ffaf03"), ALL)[Ok(bytes_m.from_str(""))] // one literal/length code, of length 1
+#test(unhex("0580010500000080febf0e"), ALL)[Err(CompressError.BadCodeLengths)] // one code, of length 2
+#test(unhex("05c0010900000080a0adfe3f1102"), ALL)[Err(CompressError.BadCodeLengths)] // codes of lengths 1 and 2
+#test(unhex("0dc0010900000080a0adfe3f519900"), ALL)[Err(CompressError.BadCodeLengths)] // one distance code, of length 2
+#test(unhex("030000"), ALL)[Err(CompressError.TrailingData)]
+#test(unhex("4b4c1c05c40200"), 300)[Ok(list_m.filled(300, 97u8))] // max_output: as long as the output
+#test(unhex("4b4c1c05c40200"), 299)[Err(CompressError.TooLarge)]
+#test(unhex("4b4c1c05c40200"), 0)[Err(CompressError.TooLarge)]
+#test(unhex("0300"), 0)[Ok(bytes_m.from_str(""))]
+#test(unhex("010500faff68656c6c6f"), 4)[Err(CompressError.TooLarge)] // stored
+#test(unhex("010500faff68656c6c6f"), 5)[Ok(bytes_m.from_str("hello"))]
+#test(unhex("cb48cdc9c9"), 3)[Err(CompressError.TooLarge)] // the limit before the end
+#test(unhex("cb48cdc9c9"), 5)[Err(CompressError.Truncated)]
+#test(unhex("edc13101000000c2a0f54f6d0d0fa0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000805703"), 1000)[Err(CompressError.TooLarge)] // 100 KB of zeros
+#test(unhex("0300"), -1)[panic("compress.inflate: max_output -1 is below 0")]
+pub fun inflate(b: [uint8], max_output: int = 0x7FFFFFFF) -> Result<[uint8], CompressError> {
+    return decompress(b, RAW, limit("inflate", max_output))
 }
 
 // The bytes the gzip data `b` (RFC 1952) stands for: every member's, one
-// after the other (zero bytes after one are padding, as for gzip). The
-// header's fields (name, comment, time, extra) are checked as far as they
-// have checks and skipped.
-#test(unhex("1f8b08000000000002ffcb48cdc9c9e7020020303a3606000000"))[Ok(bytes_m.from_str("hello\n"))]
-#test(unhex("1f8b08000000000002ff03000000000000000000"))[Ok(bytes_m.from_str(""))]
-#test(unhex("1f8b081e0000000000ff040061620100612e747874006e6f746500e1f9cb48cdc9c9e7020020303a3606000000"))[Ok(bytes_m.from_str("hello\n"))] // FEXTRA, FNAME, FCOMMENT, FHCRC
-#test(unhex("1f8b08000000000002ffcbcf4b5500004961ac23040000001f8b08000000000002ff2b29cf0700668aca1103000000"))[Ok(bytes_m.from_str("one two"))] // two members
-#test(unhex("1f8b081e0000000000ff040061620100612e747874006e6f746500e1f8cb48cdc9c9e7020020303a3606000000"))[Err(CompressError.ChecksumMismatch)] // the header's CRC
-#test(unhex("1f8b08000000000002ffcb48cdc9c9e7020020303a3706000000"))[Err(CompressError.ChecksumMismatch)]
-#test(unhex("1f8b08000000000002ffcb48cdc9c9e7020020303a3607000000"))[Err(CompressError.LengthMismatch)]
-#test(unhex(""))[Err(CompressError.Truncated)]
-#test(unhex("1f8b0800000000"))[Err(CompressError.Truncated)] // in the header
-#test(unhex("1f8b08080000000002ff612e74"))[Err(CompressError.Truncated)] // in the name
-#test(unhex("1f8b08000000000002ffcb48cdc9c9e7020020303a36060000"))[Err(CompressError.Truncated)] // in the trailer
-#test(unhex("1f8b08000000000002ffcb48cdc9c9e7020020303a36060000001f8b"))[Err(CompressError.Truncated)] // a second member cut short
-#test(unhex("1f8c08000000000002ff03000000000000000000"))[Err(CompressError.BadHeader)]
-#test(unhex("1f8b07000000000002ff03000000000000000000"))[Err(CompressError.BadHeader)] // not DEFLATE
-#test(unhex("1f8b08200000000002ff03000000000000000000"))[Err(CompressError.BadHeader)] // a reserved flag
-#test(unhex("78"))[Err(CompressError.BadHeader)]
-#test(unhex("1f8b08000000000002ff0300000000000000000000"))[Ok(bytes_m.from_str(""))] // zeros after a member: padding
-#test(unhex("1f8b08000000000002ff030000000000000000000000ab"))[Err(CompressError.TrailingData)]
-pub fun gunzip(b: [uint8]) -> Result<[uint8], CompressError> {
-    return decompress(b, GZIP)
+// after the other (zero bytes after one are padding, as for gzip), at most
+// `max_output` of them in all (else `TooLarge`). The header's fields (name,
+// comment, time, extra) are checked as far as they have checks and skipped.
+#test(unhex("1f8b08000000000002ffcb48cdc9c9e7020020303a3606000000"), ALL)[Ok(bytes_m.from_str("hello\n"))]
+#test(unhex("1f8b08000000000002ff03000000000000000000"), ALL)[Ok(bytes_m.from_str(""))]
+#test(unhex("1f8b081e0000000000ff040061620100612e747874006e6f746500e1f9cb48cdc9c9e7020020303a3606000000"), ALL)[Ok(bytes_m.from_str("hello\n"))] // FEXTRA, FNAME, FCOMMENT, FHCRC
+#test(unhex("1f8b08000000000002ffcbcf4b5500004961ac23040000001f8b08000000000002ff2b29cf0700668aca1103000000"), ALL)[Ok(bytes_m.from_str("one two"))] // two members
+#test(unhex("1f8b081e0000000000ff040061620100612e747874006e6f746500e1f8cb48cdc9c9e7020020303a3606000000"), ALL)[Err(CompressError.ChecksumMismatch)] // the header's CRC
+#test(unhex("1f8b08000000000002ffcb48cdc9c9e7020020303a3706000000"), ALL)[Err(CompressError.ChecksumMismatch)]
+#test(unhex("1f8b08000000000002ffcb48cdc9c9e7020020303a3607000000"), ALL)[Err(CompressError.LengthMismatch)]
+#test(unhex(""), ALL)[Err(CompressError.Truncated)]
+#test(unhex("1f8b0800000000"), ALL)[Err(CompressError.Truncated)] // in the header
+#test(unhex("1f8b08080000000002ff612e74"), ALL)[Err(CompressError.Truncated)] // in the name
+#test(unhex("1f8b08000000000002ffcb48cdc9c9e7020020303a36060000"), ALL)[Err(CompressError.Truncated)] // in the trailer
+#test(unhex("1f8b08000000000002ffcb48cdc9c9e7020020303a36060000001f8b"), ALL)[Err(CompressError.Truncated)] // a second member cut short
+#test(unhex("1f8c08000000000002ff03000000000000000000"), ALL)[Err(CompressError.BadHeader)]
+#test(unhex("1f8b07000000000002ff03000000000000000000"), ALL)[Err(CompressError.BadHeader)] // not DEFLATE
+#test(unhex("1f8b08200000000002ff03000000000000000000"), ALL)[Err(CompressError.BadHeader)] // a reserved flag
+#test(unhex("78"), ALL)[Err(CompressError.BadHeader)]
+#test(unhex("1f8b08000000000002ff0300000000000000000000"), ALL)[Ok(bytes_m.from_str(""))] // zeros after a member: padding
+#test(unhex("1f8b08000000000002ff030000000000000000000000ab"), ALL)[Err(CompressError.TrailingData)]
+#test(unhex("1f8b08000000000002ffcbcf4b5500004961ac23040000001f8b08000000000002ff2b29cf0700668aca1103000000"), 7)[Ok(bytes_m.from_str("one two"))] // max_output: both members
+#test(unhex("1f8b08000000000002ffcbcf4b5500004961ac23040000001f8b08000000000002ff2b29cf0700668aca1103000000"), 6)[Err(CompressError.TooLarge)]
+#test(unhex("1f8b08000000000002ffcb48cdc9c9e7020020303a3606000000"), 5)[Err(CompressError.TooLarge)]
+#test(unhex(""), -5)[panic("compress.gunzip: max_output -5 is below 0")]
+pub fun gunzip(b: [uint8], max_output: int = 0x7FFFFFFF) -> Result<[uint8], CompressError> {
+    return decompress(b, GZIP, limit("gunzip", max_output))
 }
 
-// The bytes the zlib stream `b` (RFC 1950) stands for.
-#test(unhex("7801010500faff68656c6c6f062c0215"))[Ok(bytes_m.from_str("hello"))]
-#test(unhex("7801cb48cdc9c9d751c840a200442806d5"))[Ok(bytes_m.from_str("hello, hello, hello"))]
-#test(unhex("78dacb48cdc9c9d751c840a200442806d5"))[Ok(bytes_m.from_str("hello, hello, hello"))]
-#test(unhex("789c030000000001"))[Ok(bytes_m.from_str(""))]
-#test(unhex("789c030000000002"))[Err(CompressError.ChecksumMismatch)]
-#test(unhex("789c0300000000"))[Err(CompressError.Truncated)]
-#test(unhex("78"))[Err(CompressError.Truncated)]
-#test(unhex("789d030000000001"))[Err(CompressError.BadHeader)] // the header check
-#test(unhex("7709030000000001"))[Err(CompressError.BadHeader)] // a method that isn't DEFLATE
-#test(unhex("881c030000000001"))[Err(CompressError.BadHeader)] // a window of 64 KiB
-#test(unhex("78bb0000000103000000000001"))[Err(CompressError.PresetDictionary)]
-#test(unhex("789c03000000000100"))[Err(CompressError.TrailingData)]
-pub fun zlib_decompress(b: [uint8]) -> Result<[uint8], CompressError> {
-    return decompress(b, ZLIB)
+// The bytes the zlib stream `b` (RFC 1950) stands for, at most
+// `max_output` of them (else `TooLarge`).
+#test(unhex("7801010500faff68656c6c6f062c0215"), ALL)[Ok(bytes_m.from_str("hello"))]
+#test(unhex("7801cb48cdc9c9d751c840a200442806d5"), ALL)[Ok(bytes_m.from_str("hello, hello, hello"))]
+#test(unhex("78dacb48cdc9c9d751c840a200442806d5"), ALL)[Ok(bytes_m.from_str("hello, hello, hello"))]
+#test(unhex("789c030000000001"), ALL)[Ok(bytes_m.from_str(""))]
+#test(unhex("789c030000000002"), ALL)[Err(CompressError.ChecksumMismatch)]
+#test(unhex("789c0300000000"), ALL)[Err(CompressError.Truncated)]
+#test(unhex("78"), ALL)[Err(CompressError.Truncated)]
+#test(unhex("789d030000000001"), ALL)[Err(CompressError.BadHeader)] // the header check
+#test(unhex("7709030000000001"), ALL)[Err(CompressError.BadHeader)] // a method that isn't DEFLATE
+#test(unhex("881c030000000001"), ALL)[Err(CompressError.BadHeader)] // a window of 64 KiB
+#test(unhex("78bb0000000103000000000001"), ALL)[Err(CompressError.PresetDictionary)]
+#test(unhex("789c03000000000100"), ALL)[Err(CompressError.TrailingData)]
+#test(unhex("7801cb48cdc9c9d751c840a200442806d5"), 19)[Ok(bytes_m.from_str("hello, hello, hello"))] // max_output
+#test(unhex("7801cb48cdc9c9d751c840a200442806d5"), 18)[Err(CompressError.TooLarge)]
+#test(unhex(""), -1)[panic("compress.zlib_decompress: max_output -1 is below 0")]
+pub fun zlib_decompress(b: [uint8], max_output: int = 0x7FFFFFFF) -> Result<[uint8], CompressError> {
+    return decompress(b, ZLIB, limit("zlib_decompress", max_output))
+}
+
+// gzip's length is the output's modulo 2^32 (RFC 1952): a member of 4 GiB
+// and more, read through `gzip_reader`, takes the sum past uint32, and it
+// wraps (D184).
+#test
+fun gzip_length_wraps() -> Result<(), CompressError> {
+    var d = new_inflate(GZIP)
+    d.size = 0xFFFFFFFEu32
+    // "hello\n", its trailer's length 6 - 2
+    d.feed(unhex("1f8b08000000000002ffcb48cdc9c9e7020020303a3604000000"), true)
+    let status = d.run(ALL)?
+    assert(status == FINISHED && d.out == bytes_m.from_str("hello\n"), "the stream")
+    assert(d.size == 4u32, f"the length {d.size}")
+    return Ok(())
 }
 
 // --- As a stream --------------------------------------------------------------------
