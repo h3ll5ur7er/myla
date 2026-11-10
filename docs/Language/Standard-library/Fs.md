@@ -6,6 +6,7 @@ The file system: whole files, files read and written a piece at a time, metadata
 | --- | --- |
 | `read_to_string(path: str) -> Result<str, IoError>` | The whole file |
 | `write_to_file(path: str, contents: str) -> Result<(), IoError>` | Creates or truncates (mode 0644); `Ok(())` once every byte is written (D138) |
+| `read_bytes(path: str) -> Result<[uint8], IoError>`, `write_bytes(path: str, b: [uint8]) -> Result<(), IoError>` | The same in bytes ([[MYLA-420]], [[MYLA-339]]'s follow-up) |
 | `list_dir(path: str) -> Result<[str], IoError>` | The names of the directory's entries, without `.` and `..`, sorted by their bytes |
 | `make_dir(path: str) -> Result<(), IoError>` | Makes one directory (mode 0755 less the umask); its parent must exist |
 | `make_dir_all(path: str) -> Result<(), IoError>` | Makes the directory and the parents it lacks, like `mkdir -p`; an existing directory is fine |
