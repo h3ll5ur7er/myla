@@ -106,7 +106,12 @@ pub async fun timeout<T>(ms: int, f: async () -> T) -> Option<T> {
 // actor's method can keep the notifiers of the tasks waiting for it in its
 // fields and wake them (the channel's way: the receiver that finds it empty
 // leaves its notifier with the actor in the same call, and the sender's call
-// wakes it). Natively a notifier lives as long as the program.
+// wakes it). A notifier is a handle into the runtime's table (D181): it
+// lives until `close`, which wakes the tasks waiting on it (their waits
+// give `false`) and frees it; from then on a wake, a wait or a `listen`
+// through any copy of it, as through a `Notifier` value built by hand, is
+// the runtime error "use of a closed notifier". A channel closes the
+// notifiers it made itself, so it holds none while no task waits on it.
 //
 // `notify_one` wakes the task that has waited longest, or, when none waits,
 // leaves a permit, which the next wait takes and ends at once; permits add
@@ -145,12 +150,25 @@ impl Notifier {
     // Wakes the task that has waited longest on this notifier, or leaves a
     // permit for the next wait when none waits.
     fun notify_one(self) {
-        __notify(self.id, false)
+        if !__notify(self.id, false) {
+            closed_notifier()
+        }
     }
 
     // Wakes every task waiting on this notifier now (no permit is left).
     fun notify_all(self) {
-        __notify(self.id, true)
+        if !__notify(self.id, true) {
+            closed_notifier()
+        }
+    }
+
+    // Closes the notifier: the tasks waiting on it are woken, their waits
+    // giving `false`, and it is freed (D181). Every later use of it, through
+    // any copy, is a runtime error, and so is a second close.
+    fun close(self) {
+        if !__notifier_close(self.id) {
+            closed_notifier()
+        }
     }
 
     // `await n.wait()`: the running task parked until another wakes it, the
@@ -170,7 +188,11 @@ impl Notifier {
     // The notifier from now on: a wait on the listener also ends at once
     // when a `notify_all` came after this.
     fun listen(self) -> Listener {
-        return Listener { id: self.id, gen: __notify_gen(self.id) }
+        let gen = __notify_gen(self.id)
+        if gen < 0i64 {
+            closed_notifier()
+        }
+        return Listener { id: self.id, gen: gen }
     }
 }
 
@@ -204,7 +226,16 @@ fun limit(ms: int) -> int {
 async fun wait_on(n: int64, since: int64, ms: int) -> bool {
     let w = __waiter(n, since, ms)
     await __park(w)
-    return __woken(w) == 1
+    let how = __woken(w)
+    if how == 3 {
+        closed_notifier()
+    }
+    return how == 1
+}
+
+// A notifier used after its `close`, or one that was never made (D181).
+fun closed_notifier() {
+    panic("use of a closed notifier")
 }
 
 // A waiter that sees whether it was woken, and whether it was asked to stop.
@@ -230,6 +261,56 @@ async fun permits_add_up() {
     assert(await n.wait())
     assert(await n.wait_timeout(0))
     assert(!(await n.wait_timeout(0)))
+}
+
+// A notifier built by hand names none (D181, the 2026-11-09 review's H8:
+// natively a wild pointer), nor does one closed, through any copy.
+#test()[panic("use of a closed notifier")]
+fun forged_notifier() {
+    let n = Notifier { id: 4096i64 }
+    n.notify_one()
+}
+
+#test()[panic("use of a closed notifier")]
+async fun wait_after_close() {
+    let n = notifier()
+    let copy = n
+    n.close()
+    let woken = await copy.wait_timeout(1)
+}
+
+#test()[panic("use of a closed notifier")]
+fun listen_after_close() {
+    let n = notifier()
+    n.close()
+    let l = n.listen()
+}
+
+#test()[panic("use of a closed notifier")]
+fun closed_twice() {
+    let n = notifier()
+    n.close()
+    n.close()
+}
+
+// Closing a notifier ends the waits on it, not woken; a new one made after
+// it is another (its handle isn't the closed one's).
+#test
+async fun close_ends_the_waits() {
+    let n = notifier()
+    async let a = waits_on(n)
+    async let b = waits_on(n)
+    // (time for both to park: a wait begun after the close would be the
+    // runtime error)
+    await sleep(50)
+    n.close()
+    assert(await a == (false, false), "the first waiter")
+    assert(await b == (false, false), "the second")
+    let m = notifier()
+    assert(m != n, "a new handle")
+    m.notify_one()
+    assert(await m.wait_timeout(0), "the new one works")
+    m.close()
 }
 
 // Each `notify_one` wakes one waiter, and leaves no permit behind.
@@ -360,9 +441,9 @@ const GOT: int = 3
 const DELIVERED: int = 4
 const SHUT: int = 5
 
-// A waiter's place in a channel's queue: the notifier it waits on (the
-// slot's, kept for its later waiters), its state, and the value it sends or
-// was handed. `seq` counts the waiters the slot had: an entry of the
+// A waiter's place in a channel's queue: the notifier it waits on (its
+// own, closed when it leaves the slot), its state, and the value it sends
+// or was handed. `seq` counts the waiters the slot had: an entry of the
 // queues of waiters with an older count is that of a waiter that gave up.
 struct Slot<T> {
     n: Notifier,
@@ -576,13 +657,17 @@ impl<T> Queue<T> {
     }
 
     // The running task registered as a waiter in `state` (with the value it
-    // sends): a free slot, or a new one with a notifier of its own.
+    // sends): a free slot, or a new one, with a new notifier, which
+    // `release` closes (a channel nobody waits on holds no notifier: one
+    // made per request leaked them, the 2026-11-09 review's M10).
     fun enlist(var self, state: int, v: Option<T>) -> Step<T> {
         var s = self.slots.len()
+        let n = notifier()
         if self.free.len() > 0 {
             s = self.free.pop()
+            self.slots[s].n = n
         } else {
-            self.slots.push(Slot { n: notifier(), seq: 0, state: FREE, value: None })
+            self.slots.push(Slot { n: n, seq: 0, state: FREE, value: None })
         }
         self.slots[s].state = state
         self.slots[s].value = v
@@ -624,8 +709,10 @@ impl<T> Queue<T> {
         self.slots[s].n.notify_one()
     }
 
-    // Slot `s` without its waiter, for the next one.
+    // Slot `s` without its waiter, for the next one: its notifier closed
+    // (the waiter's wait is over).
     fun release(var self, s: int) {
+        self.slots[s].n.close()
         self.slots[s].state = FREE
         self.slots[s].value = None
         self.slots[s].seq += 1
@@ -998,11 +1085,13 @@ async fun the_steps() {
     let late = await q.recv(true)
     assert(said(await q.send(6, true)) == "sent", "to a receiver about to give up")
     assert(said(await settle_after(q, late, false)) == "got 6", "the value of a receiver that gave up once served")
-    // the slot again: the wake left behind ends a wait at once, and settling
-    // says the receiver wasn't served yet
+    // the slot again, with a notifier of its own: the wake left behind went
+    // with the old one (M10), and a wake that wasn't a serve leaves the
+    // receiver waiting
     let again = await q.recv(true)
     assert(slot_of(again) == slot_of(late), "a slot reused")
-    assert(await notifier_of(again).wait_timeout(0), "the wake left behind")
+    assert(notifier_of(again) != notifier_of(late), "a new notifier")
+    assert(!(await notifier_of(again).wait_timeout(0)), "no wake left behind")
     assert(said(await settle_after(q, again, true)) == "pending", "not served: wait again")
     assert(said(await settle_after(q, again, false)) == "gone", "gave up")
     // a receiver that gave up is passed over

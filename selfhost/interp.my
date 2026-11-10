@@ -148,17 +148,26 @@ struct Sleeper { at: int64, seq: int64, task: int32, wait: int32 }
 // A notifier (`std.task.notifier`, MYLA-387): its permits (each a
 // `notify_one` nobody waited for, which the next wait takes), how many
 // `notify_all`s it had, the waits parked on it (`Interp.pwaits`), oldest
-// first.
-struct Notif { permits: int64, gen: int64, waits: [int32] }
+// first; `id` its handle, 0 once it is closed and its slot free (D181:
+// `Interp.notif_slot`).
+struct Notif { permits: int64, gen: int64, waits: [int32], id: int64 }
 
-// A wait on the notifier `n` (`__waiter`): its task once it parks, the
-// generation it waits from (-1: any), its time limit in milliseconds (-1:
-// none), its state: 0 made, 1 parked, 2 notified, 3 timed out, 4 cancelled.
-struct PWait { task: int32, n: int32, since: int64, ms: int64, state: int32 }
+// A wait on the notifier `nid` (`__waiter`): its task once it parks, its
+// notifier's slot then (`n`), the generation it waits from (-1: any), its
+// time limit in milliseconds (-1: none), its state: 0 made, 1 parked, 2
+// notified, 3 timed out, 4 cancelled, 5 the notifier closed while it
+// waited, 6 closed before (as native code's, std.rt's `waiter`).
+struct PWait { task: int32, n: int32, nid: int64, since: int64, ms: int64, state: int32 }
+
+// A notifier's handle is its slot in the low NOTIF_BITS bits and, above
+// them, the count of notifiers made when it was, so a handle closed is
+// never given again (D181).
+const NOTIF_BITS: int64 = 20
 
 // A task waiting for input on `fd` (D124, `std.io`'s async reads).
 // `events` 0: until `fd` (or `fd2`) is readable; else until the socket `fd`
-// is ready for them (`__wait_socket`, MYLA-346)
+// is ready for them (`__wait_socket`, MYLA-346); -1: until `fd` has room
+// for a write (`__wait_writable`, MYLA-419)
 struct FdWait { fd: int32, fd2: int32, task: int32, events: int32 }
 
 // A task's deadline (`std.task.timeout`, D124): at `at` the task `task` is
@@ -259,6 +268,8 @@ pub struct Interp {
     // `__woken` gave back) and those parked now (as native code's
     // `__parked`)
     notifs: [Notif],
+    free_notifs: [int32],
+    notif_seq: int64,
     pwaits: [PWait],
     free_waits: [int32],
     parked_waits: [int32],
@@ -570,7 +581,7 @@ pub fun new_interp(c: Checker, argv: [str]) -> Interp {
         failing: false, fail_err: None, fail_code: 0,
         on_failure: (r: RtError) => false, fail_reported: false,
         depth: 0,
-        sleepers: [], deadlines: [], fired: [], fd_waits: [], notifs: [], pwaits: [], free_waits: [], parked_waits: [], sleep_seq: 0, virtual_time: false, vclock: 0,
+        sleepers: [], deadlines: [], fired: [], fd_waits: [], notifs: [], free_notifs: [], notif_seq: 0, pwaits: [], free_waits: [], parked_waits: [], sleep_seq: 0, virtual_time: false, vclock: 0,
         testing: false, defer_errs: [], captured: [], captured_io: false, test_root: "", test_program: "", checker: c,
         static_calls: c.static_calls, impl_selfs: c.static_selfs, call_types: c.call_types,
         tparams: [], envs: [], env_memo: [:], env_next: -1, env_fi: -1, env_tail: -1, env_tail_fi: -1,
@@ -1423,6 +1434,7 @@ impl Interp {
         self.fired = []
         self.fd_waits = []
         self.notifs = []
+        self.free_notifs = []
         self.pwaits = []
         self.free_waits = []
         self.parked_waits = []
@@ -1983,17 +1995,21 @@ impl Interp {
             }
         }
         if self.stop() { return Value.VUnit }
-        if nm == "__notifier" {
-            self.notifs.push(Notif { permits: 0, gen: 0, waits: [] })
-            return Value.VInt((self.notifs.len() - 1) as int64)
+        if nm == "__notifier" { return Value.VInt(self.new_notifier()) }
+        if nm == "__notify_gen" {
+            let ni = self.notif_slot(ints[0])
+            if ni < 0 { return Value.VInt(-1) }
+            return Value.VInt(self.notifs[ni].gen)
         }
-        if nm == "__notify_gen" { return Value.VInt(self.notifs[ints[0] as int32].gen) }
         if nm == "__notify" {
-            self.notify(ints[0] as int32, all)
-            return Value.VUnit
+            let ni = self.notif_slot(ints[0])
+            if ni < 0 { return Value.VBool(false) }
+            self.notify(ni, all)
+            return Value.VBool(true)
         }
+        if nm == "__notifier_close" { return Value.VBool(self.close_notifier(ints[0])) }
         if nm == "__waiter" {
-            let w = PWait { task: -1, n: ints[0] as int32, since: ints[1], ms: ints[2], state: 0 }
+            let w = PWait { task: -1, n: -1, nid: ints[0], since: ints[1], ms: ints[2], state: 0 }
             if self.free_waits.len() > 0 {
                 let wi = self.free_waits.pop()
                 self.pwaits[wi] = w
@@ -2007,10 +2023,59 @@ impl Interp {
             self.free_waits.push(ints[0] as int32)
             if st == 2 { return Value.VInt(1) }
             if st == 4 { return Value.VInt(2) }
+            if st == 6 { return Value.VInt(3) }
             return Value.VInt(0)
         }
         self.park(ints[0] as int32)
         return Value.VUnit
+    }
+
+    // `__notifier()`: a new notifier, in a free slot if there is one: its
+    // handle (D181).
+    fun new_notifier(var self) -> int64 {
+        self.notif_seq = self.notif_seq + 1
+        var ni = self.notifs.len()
+        if self.free_notifs.len() > 0 {
+            ni = self.free_notifs.pop()
+        } else {
+            if (ni as int64) >= (1i64 << NOTIF_BITS) {
+                // a million notifiers open at once: the slot wouldn't fit
+                // the handle
+                self.rt_err = Some(RtError { msg: "too many notifiers open", line: 0, col: 0, sp: no_span(), node: -1 })
+                self.ctrl = Ctrl.CExit
+                self.exit_code = 1
+                return 0
+            }
+            self.notifs.push(Notif { permits: 0, gen: 0, waits: [], id: 0 })
+        }
+        let id = (self.notif_seq << NOTIF_BITS) | (ni as int64)
+        self.notifs[ni] = Notif { permits: 0, gen: 0, waits: [], id: id }
+        return id
+    }
+
+    // The slot of the notifier whose handle is `id`, or -1 when it is closed
+    // or was never made (D181).
+    #test(interp_on("[int]"), 5i64)[-1]
+    fun notif_slot(self, id: int64) -> int32 {
+        if id <= 0 { return -1 }
+        let ni = id & ((1i64 << NOTIF_BITS) - 1)
+        if ni >= (self.notifs.len() as int64) || self.notifs[ni as int32].id != id { return -1 }
+        return ni as int32
+    }
+
+    // `__notifier_close(n)`: every wait parked on it ended (not notified,
+    // its task ready) and its slot freed; false when it was closed already.
+    fun close_notifier(var self, id: int64) -> bool {
+        let ni = self.notif_slot(id)
+        if ni < 0 { return false }
+        let ws = self.notifs[ni].waits
+        for wi in ws {
+            self.unpark(wi, 5, true)
+            self.ready(self.pwaits[wi].task)
+        }
+        self.notifs[ni] = Notif { permits: 0, gen: 0, waits: [], id: 0 }
+        self.free_notifs.push(ni)
+        return true
     }
 
     // `__park(w)`: the running task parked on the wait `w`,
@@ -2018,11 +2083,14 @@ impl Interp {
     // it; outside any task nobody can wake it, so it ends at once, after
     // its time, or never (every task waits).
     fun park(var self, wi: int32) {
-        let ni = self.pwaits[wi].n
+        let ni = self.notif_slot(self.pwaits[wi].nid)
+        self.pwaits[wi].n = ni
         let outside = self.cur < 0 || self.cur >= self.tasks.len()
         var st = 1
         if !outside && (self.tasks[self.cur].requested || self.tasks[self.cur].cancelled) {
             st = 4
+        } else if ni < 0 {
+            st = 6
         } else if self.notifs[ni].permits > 0 {
             self.notifs[ni].permits = self.notifs[ni].permits - 1
             st = 2
@@ -4242,6 +4310,27 @@ impl Interp {
             self.parked = true
             return Value.VUnit
         }
+        // waiting for room to write to `fd` (a child's input, MYLA-419), as
+        // for input; outside any task the thread waits in the host's
+        // `__poll_write`, as natively (std.rt's `wait_alone`)
+        if nm == "__wait_writable" {
+            let fd = as_int(self.eval(args[0])) as int32
+            if self.stop() { return Value.VUnit }
+            if fd < 0 { return Value.VUnit }
+            if self.cur < 0 || self.cur >= self.tasks.len() {
+                let r = __poll_write(fd, -1)
+                return Value.VUnit
+            }
+            if self.tasks[self.cur].requested || __poll_write(fd, 0) != 0 { return Value.VUnit }
+            self.fd_waits.push(FdWait { fd: fd, fd2: -1, task: self.cur, events: -1 })
+            self.tasks[self.cur].state = 1
+            self.parked = true
+            return Value.VUnit
+        }
+        if nm == "__poll_write" {
+            let fd = as_int(self.eval(args[0])) as int32
+            return Value.VInt(__poll_write(fd, as_int(self.eval(args[1])) as int32) as int64)
+        }
         // waiting for a socket (MYLA-346): as for input, through the host's
         // `__sock_poll`; outside any task the thread waits in it
         if nm == "__wait_socket" {
@@ -4936,6 +5025,7 @@ fun format_value(v: Value) -> str {
 // ready for what it waits for (the host's `__poll`, `__sock_poll`).
 #allow(primitive)
 fun fd_wait_over(w: FdWait) -> bool {
+    if w.events < 0 { return __poll_write(w.fd, 0) != 0 }
     if w.events != 0 { return __sock_poll(w.fd, w.events, 0) != 0 }
     return __poll(w.fd, 0) != 0 || (w.fd2 >= 0 && __poll(w.fd2, 0) != 0)
 }

@@ -657,6 +657,96 @@ closed twice
 Other(9)
 """
 
+# D181 (the 2026-11-09 review's M13): a copy of a closed stream, listener or
+# UDP socket, and one built by hand, reach nothing; before, the copy wrote
+# into and closed whichever socket got the descriptor next
+STALE = PRELUDE + """fun said(r: Result<int, IoError>) -> str {
+    return match r {
+        Ok(n) => f"Ok({n})"
+        Err(e) => cause(e)
+    }
+}
+
+fun closed(r: Result<(), IoError>) -> str {
+    return match r {
+        Ok(()) => "Ok"
+        Err(e) => cause(e)
+    }
+}
+
+fun accept_one(l: TcpListener) -> TcpStream {
+    return match l.accept() {
+        Ok(s) => s
+        Err(e) => panic(f"accept: {cause(e)}")
+    }
+}
+
+fun main() {
+    var l = listen_any()
+    let at = net.addr(net.loopback(), port_of(l))
+    var a = match net.connect(at) {
+        Ok(s) => s
+        Err(e) => panic(cause(e))
+    }
+    var a_srv = accept_one(l)
+    var stale = a
+    let c = a.close()
+    // a second connection, which may get the closed one's descriptor
+    var b = match net.connect(at) {
+        Ok(s) => s
+        Err(e) => panic(cause(e))
+    }
+    var b_srv = accept_one(l)
+    print(f"stale write: {said(stale.write(bytes.from_str("INJECTED")))}")
+    b_srv.set_read_timeout(100)
+    match b_srv.read(100) {
+        Ok(t) => print(f"b's server end read '{bytes.to_str(t)}'")
+        Err(e) => print(f"b's server end read: {cause(e)}")
+    }
+    print(f"stale close: {closed(stale.close())}")
+    print(f"b write: {said(b.write(bytes.from_str("hello")))}")
+    match b_srv.read(100) {
+        Ok(t) => print(f"b's server end read '{bytes.to_str(t)}'")
+        Err(e) => print(f"b's server end read: {cause(e)}")
+    }
+    // a stream, a listener and a UDP socket built by hand
+    var forged = TcpStream { handle: 4, read_ms: -1, write_ms: -1 }
+    print(f"forged write: {said(forged.write(bytes.from_str("x")))}")
+    var forged_l = TcpListener { handle: 3, timeout_ms: 10 }
+    match forged_l.accept() {
+        Ok(s) => print("accepted")
+        Err(e) => print(f"forged accept: {cause(e)}")
+    }
+    var u = match net.udp_bind(net.addr(net.loopback(), 0)) {
+        Ok(u) => u
+        Err(e) => panic(cause(e))
+    }
+    var u_copy = u
+    let uc = u.close()
+    print(f"stale send: {said(u_copy.send_to(bytes.from_str("x"), at))}")
+    // a stale listener: it accepts nothing more
+    var l_copy = l
+    let lc = l.close()
+    match l_copy.accept() {
+        Ok(s) => print("accepted")
+        Err(e) => print(f"stale accept: {cause(e)}")
+    }
+    let x = a_srv.close()
+    let y = b.close()
+    let z = b_srv.close()
+}
+"""
+STALE_OUT = """stale write: Other(9)
+b's server end read: TimedOut
+stale close: Other(9)
+b write: Ok(5)
+b's server end read 'hello'
+forged write: Other(9)
+forged accept: Other(9)
+stale send: Other(9)
+stale accept: Other(9)
+"""
+
 NET_WASM = PRELUDE + """fun main() {
     match net.listen(net.addr(net.loopback(), 0)) {
         Ok(l) => print("listening")
@@ -711,6 +801,9 @@ class Tcp(unittest.TestCase):
 
     def test_the_async_forms_in_a_program_of_one_task(self):
         self.assertEqual(run_both(ONE_TASK), ("one task\n", "", 0))
+
+    def test_a_closed_or_made_up_handle_reaches_nothing(self):
+        self.assertEqual(run_both(STALE), (STALE_OUT, "", 0))
 
     def test_a_listener_and_a_client_in_two_programs(self):
         # each side interpreted and built, against the other's two forms
