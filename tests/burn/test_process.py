@@ -156,7 +156,8 @@ class TestSubprocessParity(unittest.TestCase):
     def test_a_child_s_path_directory_environment_and_input(self):
         # D147: a name without a `/` found on PATH, the directory, the
         # environment changed, cleared or kept, stdin given; a Command is a
-        # value its builder methods don't change
+        # value its builder methods don't change; a directory that isn't
+        # there is its own error (MYLA-419), not the program's "not found"
         out, err, code = run_source_both_now(
             "from std.process import run, command, Output, SpawnError\n\n"
             "fun text(r: Result<Output, SpawnError>) -> str {\n"
@@ -167,6 +168,7 @@ class TestSubprocessParity(unittest.TestCase):
             "            sb.build()\n"
             "        }\n"
             "        Err(SpawnError.NotFound) => \"not found\\n\"\n"
+            "        Err(SpawnError.WorkingDir(c)) => f\"working directory {c}\\n\"\n"
             "        Err(e) => \"another error\\n\"\n"
             "    }\n"
             "}\n\n"
@@ -184,7 +186,7 @@ class TestSubprocessParity(unittest.TestCase):
             "}\n"
         )
         self.assertEqual((out, err, code), (
-            "found on PATH\n\n/\n\nnot found\n\nset home\n\nno home\n\nONLY=this\n\n"
+            "found on PATH\n\n/\n\nworking directory 2\n\nset home\n\nno home\n\nONLY=this\n\n"
             "fed to its stdin\n\nnot found\n\nthe base is unchanged\n\n", "", 0))
 
     def test_an_environment_name_no_variable_can_have(self):

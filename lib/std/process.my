@@ -57,8 +57,10 @@ pub struct Output {
 // not be run, or the target has no processes at all (`Unsupported`, wasm32);
 // `Cancelled`: the task waiting for it was asked to stop (D96);
 // `InvalidInput`: what no process can take, such as an environment variable
-// name with `=` in it (D160); `Other` holds the platform's own code for
-// anything else.
+// name with `=` in it (D160) or a NUL byte in the program's name, an
+// argument or the directory; `WorkingDir`: the directory `cwd` gave can't
+// be entered, its errno (2 not there, 20 not a directory, 13 denied); `Other`
+// holds the platform's own code for anything else.
 #derive(Eq)
 pub enum SpawnError {
     NotFound,
@@ -66,6 +68,7 @@ pub enum SpawnError {
     Unsupported,
     Cancelled,
     InvalidInput,
+    WorkingDir(int32),
     Other(int32),
 }
 
@@ -73,6 +76,8 @@ impl SpawnError {
     // The reason in words.
     #test(SpawnError.NotFound)["program not found"]
     #test(SpawnError.Other(12))["could not start the program: errno 12"]
+    #test(SpawnError.WorkingDir(2))["working directory not found"]
+    #test(SpawnError.WorkingDir(5))["could not enter the working directory: errno 5"]
     fun message(self) -> str {
         return match self {
             NotFound => "program not found"
@@ -80,6 +85,7 @@ impl SpawnError {
             Unsupported => "no processes on this target"
             Cancelled => "cancelled"
             InvalidInput => "invalid input"
+            WorkingDir(code) => dir_message(code)
             Other(code) => f"could not start the program: errno {code}"
         }
     }
@@ -91,13 +97,37 @@ impl Format for SpawnError {
     }
 }
 
+// What a `WorkingDir` says, by its errno.
+#test(20)["working directory is not a directory"]
+#test(13)["working directory: permission denied"]
+fun dir_message(code: int32) -> str {
+    if code == 2 {
+        return "working directory not found"
+    }
+    if code == 20 {
+        return "working directory is not a directory"
+    }
+    if code == 13 {
+        return "working directory: permission denied"
+    }
+    return f"could not enter the working directory: errno {code}"
+}
+
+// What std.platform adds to the errno of a directory the child couldn't
+// enter, to tell it from the program's.
+const DIR_FAILED: int32 = 4096
+
 // The cause of a (nonzero) spawn error code (Linux's numbers, as from
 // `std.platform`).
 #test(2)[SpawnError.NotFound]
 #test(38)[SpawnError.Unsupported]
 #test(12)[SpawnError.Other(12)]
 #test(22)[SpawnError.InvalidInput]
+#test(4098)[SpawnError.WorkingDir(2)]
 fun spawn_error_from_errno(code: int32) -> SpawnError {
+    if code >= DIR_FAILED {
+        return SpawnError.WorkingDir(code - DIR_FAILED)
+    }
     if code == 2 { return SpawnError.NotFound }
     if code == 13 || code == 1 { return SpawnError.PermissionDenied }
     if code == 38 { return SpawnError.Unsupported }
@@ -109,6 +139,9 @@ fun spawn_error_from_errno(code: int32) -> SpawnError {
 // Spawn `program` with the complete argument vector `argv` (argv[0] included),
 // wait for it, and collect its output. Shared by `run` and `Command.output`.
 fun collect(program: str, argv: [str], opts: [str]) -> Result<Output, SpawnError> {
+    if unfit(program, argv, opts) {
+        return Err(SpawnError.InvalidInput)
+    }
     let out = __run_with(program, argv, opts)
     let err = __run_errno()
     if err != 0 {
@@ -121,6 +154,37 @@ fun collect(program: str, argv: [str], opts: [str]) -> Result<Output, SpawnError
         status = ExitStatus.Signaled(sig)
     }
     return Ok(Output { stdout: out, stderr: errbuf, status: status })
+}
+
+// Whether a NUL byte is in the program's name, an argument or the directory
+// (`opts[0]`, as `run_with` and `__spawn_piped` take it), where no process
+// can take one: the name was cut at it, so `command("a\0b")` was "program
+// not found" (MYLA-419).
+#test("ls", ["ls", "-l"], ["/tmp"])[false]
+#test("a\0b", ["a\0b"], [])[true]
+#test("ls", ["ls", "x\0"], [])[true]
+#test("ls", ["ls"], ["/t\0mp"])[true]
+fun unfit(program: str, argv: [str], opts: [str]) -> bool {
+    if has_nul(program) {
+        return true
+    }
+    for a in argv {
+        if has_nul(a) {
+            return true
+        }
+    }
+    return opts.len() > 0 && has_nul(opts[0])
+}
+
+fun has_nul(s: str) -> bool {
+    var i = 0
+    while i < s.len() {
+        if s[i] == 0 {
+            return true
+        }
+        i += 1
+    }
+    return false
 }
 
 // Run `program` with `args` (excluding argv[0], which is set to `program`),
@@ -154,6 +218,9 @@ pub async fun run_async(program: str, args: [str]) -> Result<Output, SpawnError>
 // `collect`, waiting as `run_async` does: the child started, its two pipes
 // read as either has bytes, then its end awaited (its pidfd) and reaped.
 async fun collect_async(program: str, argv: [str], opts: [str]) -> Result<Output, SpawnError> {
+    if unfit(program, argv, opts) {
+        return Err(SpawnError.InvalidInput)
+    }
     let h = __spawn_with(program, argv, opts)
     if h[0] != 0 {
         return Err(spawn_error_from_errno(h[0]))
@@ -282,8 +349,8 @@ impl Command {
         return c
     }
 
-    // The command run in the directory `dir` (one that isn't there is
-    // `NotFound`).
+    // The command run in the directory `dir` (one that isn't there, or
+    // can't be entered, is `WorkingDir` with its errno).
     fun cwd(self, dir: str) -> Command {
         var c = self
         c.dir = dir
@@ -533,6 +600,10 @@ fun stdio_letter(how: Stdio) -> str {
 // How many bytes one read of a child's pipe asks for.
 const PIPE_CHUNK: int32 = 65536
 
+// How many bytes a pipe with room takes in one write (POSIX's PIPE_BUF,
+// Linux's 4096), which `ChildStdin.write_async` writes at a time.
+const PIPE_BUF: int32 = 4096
+
 // EBADF: what a stream that was closed gives.
 const CLOSED: int32 = 9
 
@@ -591,7 +662,11 @@ fun status_of(code: int) -> ExitStatus {
 
 // The write end of a child's standard input. `Write`: a write blocks until
 // the child has taken what doesn't fit in the pipe; one to a child that
-// closed its input or ended is `BrokenPipe`. `close` ends the child's input.
+// closed its input or ended is `BrokenPipe`. In a task, `write_async` waits
+// for room with the task suspended instead, so another task can read the
+// child's output meanwhile (on one worker a blocked write never let it,
+// MYLA-340's deadlock). `Pollable`, for a wait of one's own. `close` ends
+// the child's input.
 pub struct ChildStdin {
     fd: int32,           // -1 once closed
 }
@@ -610,7 +685,41 @@ impl Write for ChildStdin {
     }
 }
 
+impl Pollable for ChildStdin {
+    fun descriptor(self) -> int32 {
+        return self.fd
+    }
+}
+
 impl ChildStdin {
+    // `write`, the task waiting while the pipe is full, the other tasks
+    // running: the bytes go a piece the pipe has room for at a time (POSIX
+    // lets PIPE_BUF bytes in at once when the pipe has room), each after a
+    // wait for that room if there is none now. Outside a task it waits as
+    // `write` does. A task asked to stop stops waiting: `Cancelled`, the
+    // bytes before the piece it waited for written.
+    async fun write_async(var self, b: [uint8]) -> Result<int, IoError> {
+        if self.fd < 0 {
+            return Err(from_errno(CLOSED))
+        }
+        var at = 0
+        while at < b.len() {
+            if __poll_write(self.fd, 0) == 0 {
+                await __wait_writable(self.fd)
+                if __task_cancelled() {
+                    return Err(IoError.Cancelled)
+                }
+            }
+            var end = at + PIPE_BUF
+            if end > b.len() {
+                end = b.len()
+            }
+            let w = write_fd(self.fd, b[at:end])?
+            at = end
+        }
+        return Ok(b.len())
+    }
+
     // The pipe closed: the child reads the end of its input. A second close
     // is `Other(9)`.
     fun close(var self) -> Result<(), IoError> {
@@ -989,7 +1098,11 @@ impl Command {
         if self.bad_name {
             return Err(SpawnError.InvalidInput)
         }
-        let h = __spawn_piped(self.program, self.argv, self.spawn_opts())
+        let opts = self.spawn_opts()
+        if unfit(self.program, self.argv, opts) {
+            return Err(SpawnError.InvalidInput)
+        }
+        let h = __spawn_piped(self.program, self.argv, opts)
         if h[0] != 0 {
             return Err(spawn_error_from_errno(h[0]))
         }
@@ -1371,6 +1484,53 @@ fun child_line_by_line() {
     holds(waited(child.wait()) == ExitStatus.Exited(0), "cat ended well")
 }
 
+// A child's input written by one task while another reads its output: more
+// than the pipes hold, so each waits for the other, which on one worker
+// (and interpreted) only `write_async` lets run (MYLA-340, the 2026-11-09
+// review's M12).
+#test
+async fun input_written_while_output_read() {
+    let started = command("cat").spawn()
+    if no_processes(started, "cat") {
+        return
+    }
+    var child = running(started)
+    let w = input(child.take_stdin())
+    let r = output_of(child.take_stdout())
+    async let wrote = feed(w, 10, 60000)
+    async let got = drink(r)
+    holds(await wrote == 600000, "every byte written")
+    holds(await got == 600000, "and read back")
+    holds(waited(child.wait()) == ExitStatus.Exited(0), "cat ended well")
+}
+
+// `rounds` writes of `n` bytes each to `w`, then its close: how many went.
+async fun feed(w: ChildStdin, rounds: int, n: int) -> int {
+    var inp = w
+    var piece: [uint8] = []
+    for i in 0..n {
+        piece.push(97u8 + (i % 26) as uint8)
+    }
+    var total = 0
+    for k in 0..rounds {
+        match await inp.write_async(piece) {
+            Ok(m) => { total += m }
+            Err(e) => { return -1 }
+        }
+    }
+    holds(ok(inp.close()), "the input closed")
+    return total
+}
+
+// What `r` gives up to its end: how many bytes.
+async fun drink(r: ChildStdout) -> int {
+    var out = buffered(r)
+    return match await out.read_to_end_async() {
+        Ok(s) => s.len()
+        Err(e) => -1
+    }
+}
+
 // `try_wait` while it runs and after, `kill`, and the status a kill gives.
 #test
 fun child_killed() {
@@ -1460,6 +1620,22 @@ fun spawn_errors() {
     holds(match missing { Err(SpawnError.NotFound) => true, _ => false }, "not there")
     holds(match command("cat").env("A=B", "x").spawn() { Err(SpawnError.InvalidInput) => true, _ => false }, "a bad name runs nothing")
     holds(match command("cat").pipe(command("/no/such/program")).output() { Err(SpawnError.NotFound) => true, _ => false }, "a pipeline's second not there")
+    // a directory that can't be entered, and a NUL byte no process can
+    // take, aren't "program not found" (MYLA-419)
+    holds(failed_with(command("true").cwd("/no/such/dir").output()) == Some(SpawnError.WorkingDir(2)), "a directory not there")
+    holds(failed_with(command("true").cwd("/dev/null").spawn()) == Some(SpawnError.WorkingDir(20)), "not a directory")
+    holds(failed_with(run("a\0b", [])) == Some(SpawnError.InvalidInput), "a NUL in the name")
+    holds(failed_with(command("echo").arg("a\0b").output()) == Some(SpawnError.InvalidInput), "a NUL in an argument")
+    holds(failed_with(command("true").cwd("/t\0mp").output()) == Some(SpawnError.InvalidInput), "a NUL in the directory")
+    holds(failed_with(command("a\0b").spawn()) == Some(SpawnError.InvalidInput), "spawned")
+}
+
+// Why `r` failed, if it did.
+fun failed_with<T>(r: Result<T, SpawnError>) -> Option<SpawnError> {
+    return match r {
+        Ok(_) => None
+        Err(e) => Some(e)
+    }
 }
 
 // `head | wc -c`: 16 MiB through this process. `head | tr`: 512 KiB (8
