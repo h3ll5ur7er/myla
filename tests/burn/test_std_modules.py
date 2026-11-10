@@ -5,11 +5,14 @@ harness again after each case that ends a run (MYLA-370); under qemu-aarch64
 it is excused (`_targets.py`: a qemu process per case takes minutes).
 
 The modules are found, not listed, so a new module of `lib/std/` is covered by
-adding its cases. Left out: `std.rt`, the runtime itself, whose cases run in the
-interpreter only (natively it is the code the harness runs on), and the other
-targets' platform modules, which only their own targets can run: on a target,
-its own platform module runs (`platform_wasm` on wasm32, `platform_aarch64` on
-aarch64), which is its `std.platform`, built as that module (MYLA-397).
+adding its cases, and each run must report every case of the file (one per
+`#test` line), all passed. Left out natively: `std.rt`, the runtime itself,
+whose cases run in the interpreter only (natively it is the code the harness
+runs on), and the other targets' platform modules, which only their own
+targets can run: on a target, its own platform module runs (`platform_wasm`
+on wasm32, `platform_aarch64` on aarch64), which is its `std.platform`, built
+as that module (MYLA-397). Interpreted, all three platform modules run
+(MYLA-418: the 36 cases of the foreign two ran nowhere, MYLA-325).
 """
 from __future__ import annotations
 
@@ -27,18 +30,27 @@ OWN_PLATFORM = {"": "platform", "aarch64-linux": "platform_aarch64", "wasm32-was
 _RUN_MJS = os.path.join(os.path.dirname(STDLIB_ROOT), "tools", "wasm", "run.mjs")
 
 
-def _modules(target: str = "") -> list[str]:
+def _modules(target: str | None = "") -> list[str]:
     """The names of the modules of `lib/std/` that have `#test` cases, with
-    the platform module of `target` ("" the host's) and no other."""
-    found = []
+    the platform module of `target` ("" the host's) and no other; with
+    `target` None, every platform module."""
+    return [name for name in sorted(_COUNTS)
+            if target is None or name not in PLATFORMS or name == OWN_PLATFORM.get(target)]
+
+
+def _case_counts() -> dict[str, int]:
+    """Each module of `lib/std/` with cases, and how many: one per `#test`
+    attribute, each on a line of its own."""
+    counts = {}
     for path in sorted(glob.glob(os.path.join(STDLIB_ROOT, "std", "*.my"))):
-        name = os.path.basename(path)[:-3]
-        if name in PLATFORMS and name != OWN_PLATFORM.get(target):
-            continue
         with open(path, encoding="utf-8") as fh:
-            if any(line.lstrip().startswith("#test") for line in fh):
-                found.append(name)
-    return found
+            n = sum(1 for line in fh if line.lstrip().startswith("#test"))
+        if n > 0:
+            counts[os.path.basename(path)[:-3]] = n
+    return counts
+
+
+_COUNTS = _case_counts()
 
 
 def _test(name: str, *flags: str) -> subprocess.CompletedProcess:
@@ -61,11 +73,19 @@ class StdModuleCases(unittest.TestCase):
         self.assertIn("platform_aarch64", _modules("aarch64-linux"))
         self.assertNotIn("platform_wasm", _modules("aarch64-linux"))
 
+        self.assertEqual(len(_modules(None)), len(_modules()) + 2)
+
+    def _passes_all(self, proc: subprocess.CompletedProcess, name: str) -> None:
+        n = _COUNTS[name]
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertTrue(proc.stdout.endswith(f"\n{n}/{n} passed.\n"), proc.stdout[-2000:])
+
     def test_interpreted(self) -> None:
-        for name in _modules():
+        # the platform modules of the other targets too: the interpreter
+        # runs their cases on this machine (MYLA-325)
+        for name in _modules(None):
             with self.subTest(module=name):
-                proc = _test(name)
-                self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+                self._passes_all(_test(name), name)
 
     @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
     def test_native(self) -> None:
@@ -76,9 +96,7 @@ class StdModuleCases(unittest.TestCase):
             if name in NOT_NATIVE:
                 continue
             with self.subTest(module=name):
-                proc = _test(name, *flags)
-                self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-                self.assertIn(" passed.", proc.stdout)
+                self._passes_all(_test(name, *flags), name)
 
 
 if __name__ == "__main__":
