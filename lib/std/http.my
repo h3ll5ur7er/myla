@@ -791,7 +791,16 @@ impl Request {
 
     // The request accepting a response head of at most `header_bytes` bytes
     // and a body of at most `body_bytes` (as received, before decoding).
+    // A negative limit is a runtime error (D184).
+    #test(request("GET", "/"), -1, 5)[panic("with_limits: header_bytes -1 is negative")]
+    #test(request("GET", "/"), 5, -2)[panic("with_limits: body_bytes -2 is negative")]
     fun with_limits(self, header_bytes: int, body_bytes: int) -> Request {
+        if header_bytes < 0 {
+            panic(f"with_limits: header_bytes {header_bytes} is negative")
+        }
+        if body_bytes < 0 {
+            panic(f"with_limits: body_bytes {body_bytes} is negative")
+        }
         var r = self
         r.max_header_bytes = header_bytes
         r.max_body_bytes = body_bytes
