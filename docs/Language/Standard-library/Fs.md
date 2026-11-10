@@ -57,8 +57,8 @@ A `File` is an open file, read and written at its cursor a piece at a time, so a
 | `o.read(on)`, `o.write(on)`, `o.append(on)`, `o.truncate(on)`, `o.create(on)`, `o.create_new(on)` | The options with one choice changed: to read; to write at the cursor; to write at the end (it writes, too); to empty the file; to create it when it isn't there; to create it and fail with `AlreadyExists` when it is (one step, so no other program comes in between) |
 | `o.mode(perms: int32) -> OpenOptions` | The permissions of a file it creates (0644 unless chosen; less the umask) |
 | `o.open(path: str) -> Result<File, IoError>` | The file, opened as chosen; neither reading nor writing is `InvalidInput` |
-| `f.read(n)`, `f.read_str(n)` | One read of up to `n` bytes at the cursor, as `[uint8]` or `str`; `[]` or `""` at the end (`Read`) |
-| `f.write(b)`, `f.write_str(s)` | All the bytes at the cursor, their count (`Write`) |
+| `f.read(n: int) -> Result<[uint8], IoError>` | One read of up to `n` bytes at the cursor; `[]` at the end (`Read`) |
+| `f.write(b: [uint8]) -> Result<int, IoError>` | All the bytes at the cursor, their count (`Write`) |
 | `f.flush() -> Result<(), IoError>` | Nothing to do, as nothing is buffered: `Ok(())` (`Write`) |
 | `f.seek(pos: SeekFrom) -> Result<int64, IoError>` | The cursor moved: `SeekFrom.Start(k)`, `Current(k)`, `End(k)`; the new offset. Before the start is `InvalidInput` (`Seek`) |
 | `f.len() -> Result<int64, IoError>` | The file's size in bytes now |
@@ -73,12 +73,15 @@ var f = fs.open(path)?
 defer { let closed = f.close() }
 ```
 
+`Read` and `Write` deal in bytes (D177): text goes through `std.io`'s adapters, `buffered(f)` for lines and `buffered_writer(f)` with its `write_str`, or `std.bytes`'s `from_str` and `to_str` for a few bytes.
+
 A `File` is a value, and a copy of it holds the same descriptor, with the same cursor, as the platform keeps it. So a reader can take a copy while the function keeps the file to close: `var r = buffered(f)` reads through `f`'s descriptor. `close` closes the descriptor for every copy. The file closed fails each later operation with `Other(9)` (EBADF), and so does a copy of it, until a file opened later gets the descriptor's number from the platform: don't use a copy after `close`. A failure is always an `IoError`, never a crash. A write to a file opened only to read is `Other(9)` too.
 
 ```myla
 import std.fs as fs
 from std.fs import IoError
 from std.io import SeekFrom, buffered
+import std.bytes as bytes
 
 // A file written, appended to, read back by lines, and its size.
 fun notes() -> Result<(), IoError> {
@@ -86,10 +89,10 @@ fun notes() -> Result<(), IoError> {
     defer { let gone = fs.remove_dir_all(dir) }
     let path = dir + "/notes.txt"
     var f = fs.create(path)?
-    f.write_str("one\ntwo\n")?
+    f.write(bytes.from_str("one\ntwo\n"))?
     f.close()?
     var log = fs.open_append(path)?
-    log.write_str("three\n")?
+    log.write(bytes.from_str("three\n"))?
     log.close()?
     var file = fs.open(path)?
     defer { let closed = file.close() }
@@ -98,7 +101,7 @@ fun notes() -> Result<(), IoError> {
         print(line)
     }
     file.seek(SeekFrom.Start(4))?
-    print(file.read_str(3)?)
+    print(bytes.to_str(file.read(3)?))
     let m = fs.metadata(path)?
     print(f"{m.size} bytes, a file: {m.is_file()}")
     return Ok(())
@@ -118,7 +121,7 @@ fun main() {
 // 14 bytes, a file: true
 ```
 
-Copying a stream of any size is a loop over a buffer: `copy` from `std.io` reads 4 KiB at a time, and a loop of `read_str(1 << 20)` and `write_str` with 1 MiB copies 4 GB from `/dev/zero` to `/dev/null` in the memory of a program that copies 1 MiB (below).
+Copying a stream of any size is a loop over a buffer: `copy` from `std.io` reads 64 KiB at a time, and a loop of `read(1 << 20)` and `write` with 1 MiB copies 4 GB from `/dev/zero` to `/dev/null` in the memory of a program that copies 1 MiB (below).
 
 ## Metadata
 
@@ -146,7 +149,7 @@ The digits come from the system's entropy (`__random_bytes`), and the name is ma
 
 ## Measurements
 
-On x86-64 natively, with a loop of `read_str(1 << 20)` and `write_str` through two `File`s, best of three (2026-11-08): 4 GiB (4,096 reads of 1 MiB) from `/dev/zero` to `/dev/null` in 96 ms, at a maximum resident set of 8.6 MB, where 1 MiB takes 8.5 MB and 1 GiB 8.5 MB: the memory doesn't grow with the size. A 256 MiB file of random bytes to a new file (in the page cache) in 139 ms, 1.9 GB/s.
+On x86-64 natively, with a loop of `read_str(1 << 20)` and `write_str` through two `File`s, best of three (2026-11-08): 4 GiB (4,096 reads of 1 MiB) from `/dev/zero` to `/dev/null` in 96 ms, at a maximum resident set of 8.6 MB, where 1 MiB takes 8.5 MB and 1 GiB 8.5 MB: the memory doesn't grow with the size. A 256 MiB file of random bytes to a new file (in the page cache) in 139 ms, 1.9 GB/s. Since D177 the loop is `read(1 << 20)` and `write`, a `File` reading into and writing from a `[uint8]` (`__read_bytes`, `__write_bytes`): the 4 GiB in 106 to 111 ms, as through `read_str` and `write_str` (108 to 112 ms) on the same machine (2026-11-09), where converting the bytes from and to a `str` took 467 to 510 ms ([[MYLA-399]]).
 
 ## Directory primitives
 

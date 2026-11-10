@@ -599,17 +599,12 @@ impl File {
 }
 
 impl Read for File {
+    // One read of at most `n` bytes at the cursor; `[]` at the end.
     fun read(var self, n: int) -> Result<[uint8], IoError> {
-        let s = self.read_str(n)?
-        return Ok(bytes_m.from_str(s))
-    }
-
-    // One read of at most `n` bytes at the cursor; "" at the end.
-    fun read_str(var self, n: int) -> Result<str, IoError> {
         if n <= 0 {
-            return Ok("")
+            return Ok([])
         }
-        let chunk = __read(self.fd, n)
+        let chunk = __read_bytes(self.fd, n)
         let err = __io_errno()
         if err != 0 {
             return Err(from_errno(err))
@@ -619,19 +614,15 @@ impl Read for File {
 }
 
 impl Write for File {
-    fun write(var self, b: [uint8]) -> Result<int, IoError> {
-        return self.write_str(bytes_m.to_str(b))
-    }
-
-    // Every byte of `s` at the cursor (or at the end, for a file opened to
+    // Every byte of `b` at the cursor (or at the end, for a file opened to
     // append).
-    fun write_str(var self, s: str) -> Result<int, IoError> {
-        __write(self.fd, s)
+    fun write(var self, b: [uint8]) -> Result<int, IoError> {
+        __write_bytes(self.fd, b)
         let err = __io_errno()
         if err != 0 {
             return Err(from_errno(err))
         }
-        return Ok(s.len())
+        return Ok(b.len())
     }
 
     // Nothing to do: a `File` buffers nothing, and what it wrote is the
@@ -928,7 +919,7 @@ fun file_round_trip() -> Result<(), IoError> {
     defer { let gone = remove_dir_all(dir) }
     let path = dir + "/a.txt"
     var w = create(path)?
-    assert(w.write_str("hello, ")? == 7, "write_str gives the count")
+    assert(w.write(bytes_m.from_str("hello, "))? == 7, "write gives the count")
     assert(w.write([119u8, 111u8, 114u8, 108u8, 100u8])? == 5, "write gives the count")
     w.flush()?
     assert(w.len()? == 12, "the length after two writes")
@@ -936,17 +927,17 @@ fun file_round_trip() -> Result<(), IoError> {
     assert(read_to_string(path)? == "hello, world", "what create and write made")
     var r = open(path)?
     defer { let c = r.close() }
-    assert(r.read_str(5)? == "hello", "a read at the start")
+    assert(bytes_m.to_str(r.read(5)?) == "hello", "a read at the start")
     assert(bytes_m.to_str(r.read(2)?) == ", ", "a read as bytes")
     assert(r.seek(SeekFrom.Current(-2))? == 5, "a seek back")
-    assert(r.read_str(100)? == ", world", "a read past the end gives what's there")
-    assert(r.read_str(100)? == "", "and then the end")
+    assert(bytes_m.to_str(r.read(100)?) == ", world", "a read past the end gives what's there")
+    assert(bytes_m.to_str(r.read(100)?) == "", "and then the end")
     assert(r.seek(SeekFrom.End(-5))? == 7, "a seek from the end")
-    assert(r.read_str(5)? == "world", "the last five")
+    assert(bytes_m.to_str(r.read(5)?) == "world", "the last five")
     assert(r.seek(SeekFrom.Start(0))? == 0, "a seek to the start")
-    assert(r.read_str(0)? == "", "a read of none")
+    assert(bytes_m.to_str(r.read(0)?) == "", "a read of none")
     assert(error_of(r.seek(SeekFrom.Current(-1))) == "InvalidInput", "before the start")
-    assert(error_of(r.write_str("x")) == "Other(9)", "a file open to read can't be written")
+    assert(error_of(r.write(bytes_m.from_str("x"))) == "Other(9)", "a file open to read can't be written")
     let m = r.metadata()?
     assert(m.size == 12 && m.is_file() && !m.is_dir(), "its metadata")
     assert(m.modified_ns > 0, "a modification time")
@@ -961,16 +952,16 @@ fun create_and_append() -> Result<(), IoError> {
     let path = dir + "/log"
     write_to_file(path, "old contents")?
     var c = create(path)?
-    c.write_str("one\n")?
+    c.write(bytes_m.from_str("one\n"))?
     c.close()?
     var a = open_append(path)?
-    a.write_str("two\n")?
+    a.write(bytes_m.from_str("two\n"))?
     a.seek(SeekFrom.Start(0))?
-    a.write_str("three\n")?
+    a.write(bytes_m.from_str("three\n"))?
     a.close()?
     assert(read_to_string(path)? == "one\ntwo\nthree\n", "appended at the end")
     var fresh = open_append(dir + "/new")?
-    fresh.write_str("x")?
+    fresh.write(bytes_m.from_str("x"))?
     fresh.close()?
     assert(read_to_string(dir + "/new")? == "x", "open_append creates")
     assert(error_of(open(dir + "/missing")) == "NotFound", "open of a missing file")
@@ -988,10 +979,10 @@ fun open_options() -> Result<(), IoError> {
     assert(error_of(options().read(true).open(path)) == "NotFound", "no create: not there")
     assert(error_of(options().create(true).open(path)) == "InvalidInput", "neither read nor write")
     var rw = options().read(true).write(true).create(true).mode(0o600).open(path)?
-    rw.write_str("abcdef")?
+    rw.write(bytes_m.from_str("abcdef"))?
     rw.seek(SeekFrom.Start(2))?
-    assert(rw.read_str(2)? == "cd", "read where it wrote")
-    rw.write_str("XY")?
+    assert(bytes_m.to_str(rw.read(2)?) == "cd", "read where it wrote")
+    rw.write(bytes_m.from_str("XY"))?
     rw.close()?
     assert(read_to_string(path)? == "abcdXY", "written at the cursor")
     let m = metadata(path)?
@@ -1016,12 +1007,12 @@ fun closing() -> Result<(), IoError> {
     let copy = f
     f.close()?
     assert(error_of(f.close()) == "Other(9)", "a second close")
-    assert(error_of(f.write_str("x")) == "Other(9)", "a write after close")
-    assert(error_of(f.read_str(1)) == "Other(9)", "a read after close")
+    assert(error_of(f.write(bytes_m.from_str("x"))) == "Other(9)", "a write after close")
+    assert(error_of(f.read(1)) == "Other(9)", "a read after close")
     assert(error_of(f.seek(SeekFrom.Start(0))) == "Other(9)", "a seek after close")
     assert(error_of(f.len()) == "Other(9)", "the length after close")
     var c = copy
-    assert(error_of(c.write_str("x")) == "Other(9)", "a copy's write after close")
+    assert(error_of(c.write(bytes_m.from_str("x"))) == "Other(9)", "a copy's write after close")
     assert(error_of(c.close()) == "Other(9)", "a copy's close")
     return Ok(())
 }
@@ -1041,7 +1032,7 @@ fun metadata_of_paths() -> Result<(), IoError> {
     assert(error_of(symlink_metadata(dir + "/nothing")) == "NotFound", "a missing path itself")
     assert(!is_symlink(dir + "/f") && !is_symlink(dir) && !is_symlink(dir + "/nothing"), "no links")
     var w = open_append(dir + "/f")?
-    w.write_str("678")?
+    w.write(bytes_m.from_str("678"))?
     assert(w.len()? == 8, "the length follows the writes")
     w.close()?
     assert(metadata(dir + "/f")?.size == 8, "and the path's metadata")
@@ -1061,9 +1052,9 @@ fun temporary_names() -> Result<(), IoError> {
     assert(a.len() == temp_root().len() + 1 + 5 + 16, "the root, myla- and 16 digits")
     let (p, f0) = make_temp_file_in(a, "t-")?
     var f = f0
-    f.write_str("data")?
+    f.write(bytes_m.from_str("data"))?
     f.seek(SeekFrom.Start(0))?
-    assert(f.read_str(10)? == "data", "a temporary file reads and writes")
+    assert(bytes_m.to_str(f.read(10)?) == "data", "a temporary file reads and writes")
     f.close()?
     assert(p.len() == a.len() + 1 + 2 + 16, "in the directory, with its prefix")
     let (q, g) = make_temp_file()?

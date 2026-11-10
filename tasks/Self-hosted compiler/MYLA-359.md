@@ -15,7 +15,7 @@ Options, cheapest first:
 
 - [x] std.hash's checksums (FNV-1a, CRC-32, Adler-32) moved to a module of their own, imported as any other (D166): std.hash keeps the `Hasher` and the `Hash` impls
 - [x] A profile of hello-world's check with the seven modules
-- [ ] The cheapest fix that brings it under 5 ms, measured (halved, 44.4 → 21.6 ms; not under 5 ms: see "What is left")
+- [ ] The cheapest fix that brings it under 5 ms, measured (halved, 44.4 → 21.6 ms in round 3; in round 4 the bodies read only once called, 100.7 → 39.4 M instructions, 26.1 → 10.0 ms on the busier container: not under 5 ms, see "Round 4: what is left", [[MYLA-412]])
 
 ## The profile
 
@@ -74,6 +74,53 @@ After the five, the hello world's 100.9 M instructions are lexing 42.0 M (42 %),
 
 - `scripts/bootstrap.sh` after each: byte-identical fixed point (18,892,652 bytes at the end).
 - Suites (after items 1 and 2): `scripts/test.sh fast` 765 tests, only `test_embedded_std` failing (expected until the seed commit); `python3 -m unittest tests.burn.test_compiler_parity tests.burn.test_selfhost_cases tests.burn.test_error_corpus tests.burn.test_selfhost_checker tests.burn.test_lsp tests.burn.test_std_modules tests.burn.test_implicit_imports tests.burn.test_imported_cases tests.burn.test_doc_blocks tests.burn.test_examples_run` 769 tests OK. After item 4: `test_doc_blocks`, `test_archive`, `test_compress`, `test_std_modules`, `test_implicit_imports`, `test_lsp` 194 tests OK. At the end (all five): `scripts/test.sh fast` 765 tests, only `test_embedded_std` failing; the slow suites above with `test_archive`, `test_compress`, `test_selfhost_lexer` and `test_selfhost_parser`, 790 tests OK (202 skipped).
+
+## Round 4: the bodies read once called
+
+The first proposal of "What is left", built:
+
+- **The lexer skips a body** ([[selfhost/lexer.my]] `lex_lazy`, `body_ahead`, `skip_body`): in an implicit module, at a `{` whose tokens back to a `fun` are its signature, the body is consumed to its `}` unlexed and only the two braces are emitted (the `{` with its code point offset and the suffix `body`, the `}` with the offset past it). The skip (`skip_group`, which `#test` attributes use too) is now one loop over the code points with locals, matching each bracket with its own closer over strings, chars, f-strings with their holes and comments; where a bracket doesn't close or closes another, or a string doesn't end, the lexer goes back and lexes the text as before.
+- **The parser keeps it** ([[selfhost/parser.my]] `fun_body`, `BodySite`, `parse_source_lazy`, `parse_body`, `body_ids`): an empty block of its place, and a site with node ids kept for it (twice its code points and 8: every body of the corpus needs well under half that, and `parse_body` refuses with an internal error past them), so its nodes are in its module's range of ids and `file_of`, the debugger's line tables and the error reports find its file. `lex_part` lexes the body later from its place in the file's code points, `parse_body` parses it with the kept ids.
+- **The loader** ([[selfhost/loader.my]] `implicit_files`, `Loader.lazy`, `parse_module`, `LazyTable`, `kind_of`) knows the implicit modules' files before it loads the entry, so a module imported explicitly too is read lazily, keeps each module's renamer and code points, and hands the checker `Loaded.bodies` (`LazyBodies`), whose `parse` reads a body and renames it with the names in scope there. Its lex, parse or module error is reported with its kind (`kind_of` in `type_errors`) at its place.
+- **The checker** ([[selfhost/checker.my]] `with_body`, `put_bodies`, `build_checker_lazy`) reads a body the first time `check_body` checks it (a trait impl's at once, as before, a lazily checked one once `called` names it), and puts every body read into `decls`, `functions`, `methods` and `method_decls` before `fill_in`, so the interpreter, the native lowering and the REPL see it. Every tool that loads a program (driver, `gen_main`, `interp_main`, `play_main`, the REPL, the language server) calls `build_checker_lazy`.
+- The language server's go-to-definition and outline parse a file on their own, whole (`tools/lsp/resolve.my`, `symbols.my`), so a definition in an implicit module's body is found as before; its diagnostics go through the loader and report a late body's error with its kind. `myla test lib/std/int.my` (an entry of `std`, no implicit modules) parses everything.
+- Then the keys: `body_key` is one `int64` (the declaration's id, the line below 2^20, the column below 2^12; the lexer leaves a body past them unskipped) instead of a formatted string, and the loader matches the sites with the functions in order instead of through a map of places.
+
+### Decisions (proposals)
+
+- **Lazy parsing with any library**, the embedded one and `--stdlib`/`MYLA_STDLIB` alike, as the lazy checking the owner accepted: a lex or parse error in an implicit module's body that the program doesn't call is no longer the program's error; `myla test` of the module, which parses the whole file, reports it. Alternatives: parse lazily only with the embedded library (fixed per build, known to parse) and the whole text with a library being edited; parse every body as before. I recommend as built: the same rule as the checking, and the module's own tests read everything.
+- **Node ids kept at parse time** rather than fresh ids at check time: no new span entries, the reports, `file_of` and the debug line tables are unchanged; the cost is gaps in the id numbers (an `int32`; the seven modules keep a few hundred thousand). Alternative: fresh ids past the prelude's, with spans the checker adds and every consumer of `Loaded.spans` reads.
+- The errors of a late body are carried as checker errors whose message starts with their kind (`parse error: …`), rather than a new field of `CheckErr`, which is built in hundreds of places.
+
+### Round 4: what is left
+
+The hello world's 39.4 M instructions (1.8 M and 1.2 ms without the implicit modules): lexing the seven modules 16.8 M (decoding their 300 KB to code points 2.5 M, the skipped bodies and cases 4 M, the signatures, comments and other declarations the rest), parsing the signatures 3.7 M, renaming 1.9 M, recording the bodies left 1.4 M, checking 14.1 M (registering the 1,100 methods' signatures, `resolve_impls`, 4.9 M; the 205 bodies a hello world checks 4.8 M, 2.7 M of it reading them). Reading the signatures is now most of it, so lazy bodies are not enough for 5 ms: the build-time cache of the embedded library, the second proposal, is worth a task ([[MYLA-412]]); it would take out lexing, parsing and renaming, an estimated 39 → 20 M with the reading of the cache. A program importing std.io pays 100.0 M, 60 M of it std.io and its imports parsed and checked whole: [[MYLA-413]] proposes their bodies read and checked once called too.
+
+### Round 4: evidence
+
+- **Tests first**: `tests/burn/test_implicit_imports.py`'s new `test_their_bodies_are_parsed_once_called` (a fixture std.int with a parse error, a lex error and a type error each in a method's body and a parse error in a function's): a program calling none runs and checks, one calling each reports that error, with its kind, at its exact `file:line:col`, and the module's own `myla test` reports the first error of the file. Before (the round-3 compiler) a program not calling them failed at once: `parse error: expected variable name, found '='` at `int.my:4644:13`; after it prints `42`, and calling it gives the same error at the same place. `tests/burn/test_selfhost_parser.py`'s new `test_bodies_read_later_are_the_same` runs `parse_main --lazy` on every file of the parser corpus and of `lib/std/**`: the tokens of each body lexed on its own (`lex_part`) are the file's, with their places, and the tree with the bodies parsed later is the whole file's (the names made up from node ids aside), for more than 5,000 bodies; of the error corpus only `parse_several_errors.my` is left out (the signatures' errors come before the bodies'). New cases (lexer 86/86, parser 183/183 in all): lexer (`body_ahead` ×4, `skip_body` ×2, `skip_group` ×6, `lex_lazy` ×4, `lex_part` ×2, `lexed`), parser (`fun_body` ×2, `parse_source_lazy` ×2, `parse_body` ×3, `body_ids` ×2, `lazy_parser_on`), checker `with_body`, `put_bodies`, `body_key` ×2, `no_body`, loader `kind_of` ×2, `parse_main` 4.
+- **Instructions** (callgrind, `build/myla check`, embedded library; round 3's end, then the lazy bodies, the one-loop skip, the integer keys):
+
+| Program | round 3 | lazy bodies | one-loop skip | integer keys |
+| --- | --- | --- | --- | --- |
+| hello world, no import | 100.7 M | 45.7 M | 41.3 M | **39.4 M** |
+| hello world with std.io | 161.1 M | 106.5 M | 101.9 M | **100.0 M** |
+| `examples/maps.my` | 105.0 M | 50.1 M | 45.7 M | **43.8 M** |
+| `examples/strings.my` | 104.8 M | 49.8 M | 45.4 M | **43.5 M** |
+| `check selfhost/main.my` | 3,038.6 M | | | **2,972.4 M** |
+
+- **Time** (CPU time of `build/myla check`, min of 21 runs, the four compilers alternating; the container was busier than in round 3, load average 3, so round 3's end measures 26.1 ms here where it measured 21.6):
+
+| Program | round 3 | lazy bodies | one-loop skip | integer keys |
+| --- | --- | --- | --- | --- |
+| hello world, no import | 26.1 ms | 10.7 | 10.2 | **10.0** |
+| hello world with std.io | 40.8 ms | 25.5 | 24.5 | **24.5** |
+| `examples/maps.my` | 27.6 ms | 11.9 | 11.2 | **11.0** |
+| `examples/strings.my` | 27.7 ms | 11.8 | 11.2 | **11.0** |
+
+`check selfhost/main.my`, min of 5: 684.7 → 687.1 ms (no change measurable; 2 % fewer instructions).
+- `scripts/bootstrap.sh`: byte-identical fixed point (19,462,378 bytes).
+- Suites: `scripts/test.sh fast` 771 tests OK (3 skipped; `test_embedded_std` passes, as `lib/` is unchanged); `python3 -m unittest tests.burn.test_compiler_parity tests.burn.test_selfhost_cases tests.burn.test_error_corpus tests.burn.test_selfhost_checker tests.burn.test_lsp tests.burn.test_std_modules tests.burn.test_implicit_imports tests.burn.test_imported_cases tests.burn.test_doc_blocks tests.burn.test_examples_run tests.burn.test_selfhost_lexer tests.burn.test_selfhost_parser` 791 tests OK (206 skipped).
 
 ## Comments
 

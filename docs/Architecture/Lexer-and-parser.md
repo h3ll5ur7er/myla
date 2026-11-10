@@ -14,6 +14,7 @@ The lexer is a hand-written single pass over the source, decoded to code points,
 - Character literals produce a `CHAR` token whose value is the code point, which the parser turns into a char literal.
 - **f-strings are lowered in the lexer** (`scan_fstring`): the literal parts become one format string, each `{…}` hole is cut out by a brace-counting scan that skips nested string and char literals (`scan_fstring_hole`), lexed again with a fresh lexer, and its tokens' columns are shifted back to their place in the source. The output is the token sequence of `format("…", hole, …)`; the tokens that aren't from a hole all start at the `f` and end after the closing quote.
 - `<<` and `>>` are never produced; `|>`, `=>`, `->`, `..` and the two-character comparisons are.
+- **Skipping unlexed** ([[MYLA-359]]). In a module whose cases nothing runs (`skip_tests`, every module but the entry) a `#test` attribute and its `(…)` and `[…]` are consumed unlexed (`skip_test_attr`). In an implicit module of the standard library (`lex_lazy`, `lazy`) a function's or method's body is too: at a `{` whose tokens back to a `fun` are its signature (`body_ahead`: no line break, `;` or brace outside its brackets), `skip_body` consumes it to its `}` and emits the two braces only, the `{` with its code point offset as `ival` and the suffix `body`, the `}` with the offset past it. Both skip with `skip_group`: one loop over the code points, which matches each bracket with its closer over strings, chars, f-strings with their holes, and comments, and fails where a bracket doesn't close or closes another, or a string doesn't end; the lexer then goes back and lexes the text as before, so the error is the same. `lex_part(cps, start, end, line, col)` lexes such a body later, from its place: the same tokens as lexing the file whole would give (`parse_main --lazy` compares them for every file of the corpus).
 
 ## AST
 
@@ -42,6 +43,7 @@ Details worth knowing:
 - **Desugaring here**: `x |> f(a)` becomes the call `f(x, a)`; `return a, b` returns a tuple literal.
 - **Assignment targets** are validated syntactically (`is_lvalue`: a name, or field/index chains on one).
 - **Patterns** are parsed separately (`pattern`): a lone identifier becomes a binding; the checker decides later whether it is a payload-less variant.
+- **Bodies left for later** ([[MYLA-359]]): a function's body the lexer skipped (`fun_body`, at a `{` with the suffix `body`) becomes an empty block of its place, and a `BodySite` (the `{`'s place, its code points, and node ids kept for it: `body_ids`, twice its code points and 8, which the nodes of every body of the corpus stay well under) in `Parser.sites`. `parse_source_lazy` gives them with the module's code points (`LazyParsed`); `parse_body(cps, site)` lexes and parses one later with `lex_part` and the kept ids, its errors where they are in the file. The names the parser makes up from node ids (`%index12`) differ from the file read whole, its nodes and places don't.
 
 ## Canonical dumps
 

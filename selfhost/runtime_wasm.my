@@ -31,19 +31,29 @@ fun wasi_calls() -> [(str, str, bool)] {
 const W_MEMORY_GROW: int32 = 21
 
 impl CodeGen {
+    // std.platform's function `name`, as the program names it: unqualified
+    // when std.platform is the entry, as in a test harness of the target's
+    // own platform module (MYLA-397).
+    fun platform_fn(self, name: str) -> str {
+        let q = "std$platform$" + name
+        if !self.has_func(q) && self.has_func(name) { return name }
+        return q
+    }
+
     fun emit_runtime_prelude_wasm(var self, entry_name: str) {
-        let ws = self.request_fn("std$platform$wasm_start", [])
-        var start = ["call myla_std$platform$wasm_start", "drop"]
-        self.wasm_calls["myla_std$platform$wasm_start"] = 0
+        let ws = self.request_fn(self.platform_fn("wasm_start"), [])
+        let map_memory = "myla_" + self.platform_fn("map_memory")
+        var start = [f"call myla_{ws}", "drop"]
+        self.wasm_calls[f"myla_{ws}"] = 0
         if self.frames {
             // one worker (D125): its state block, worker 0's, its first word
             // its own address; its ring of ready frames
             for l in ["i32.const __tls_blocks", "i32.const __tls_blocks", "i64.extend_i32_u", "i64.store 0",
                 "call __sched_init", "drop", "call __workers_count", "drop", "i32.const __exec_workers", "i64.const 1", "i64.store 0",
-                "i32.const __wq_rings", format("i64.const {}", 8 * EXEC_CAP), "call myla_std$platform$map_memory", "i64.store 0"] { start.push(l) }
+                "i32.const __wq_rings", format("i64.const {}", 8 * EXEC_CAP), "call " + map_memory, "i64.store 0"] { start.push(l) }
             self.wasm_calls["__sched_init"] = 0
             self.wasm_calls["__workers_count"] = 0
-            self.wasm_calls["myla_std$platform$map_memory"] = 1
+            self.wasm_calls[map_memory] = 1
         }
         if self.frames && self.sig_of(entry_name).decl.is_async {
             // the entry's task: its frame queued, the executor run (D90)

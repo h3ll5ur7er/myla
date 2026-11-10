@@ -15,7 +15,7 @@
 // `<`/`>` -> shift Binary, char literal -> IntLit(is_char=true).
 
 from .tokens import Token, TokenKind, Diag, SrcSpan, MAX_ERRORS, no_span
-from .lexer import lex, lex_with, lex_qualified
+from .lexer import lex, lex_with, lex_qualified, lex_lazy, lex_part
 from .ast import TypeExpr, TypeKind, Expr, ExprKind, Stmt, StmtKind
 from .ast import Pattern, PatternKind, Decl, DeclKind, Block, ExprOrBlock, ElseTail
 from .ast import BindElem, FieldInit, MapEntry, MatchArm, FieldPat, Param
@@ -38,27 +38,46 @@ pub struct Parser {
     depth: int32,               // nesting, up to MAX_NESTING (MYLA-182)
     stmt_match: bool,           // the next `match` starts a statement: its arms give no value (MYLA-222)
     skip_tests: bool,           // `#test` cases are skipped, not parsed (an implicit module's, MYLA-320)
+    sites: [BodySite],          // the functions' bodies the lexer skipped, kept for later (MYLA-359)
 }
+
+// A function's body the lexer skipped (`lex_lazy`, an implicit module's,
+// MYLA-359): the place of its `{`, its code points in the file's from
+// `start` to `end` (past the `}`), and the node ids kept for it, `ids`
+// from `first_id`, which `parse_body` numbers its nodes with.
+pub struct BodySite { line: int32, col: int32, start: int32, end: int32, first_id: int32, ids: int32 }
 
 // How deep expressions, types, blocks and patterns may nest (MYLA-182; the
 // Python parser's MAX_NESTING): past it, a parse error, not a stack overflow.
 const MAX_NESTING: int32 = 256
 
-#test([])[Parser { toks: [], pos: 0, allow_struct_lit: true, next_id: 0, errs: [], pending: None, resume: 0, unwinding: false, stopped: false, depth: 0, stmt_match: false, skip_tests: false }]
+#test([])[Parser { toks: [], pos: 0, allow_struct_lit: true, next_id: 0, errs: [], pending: None, resume: 0, unwinding: false, stopped: false, depth: 0, stmt_match: false, skip_tests: false, sites: [] }]
 pub fun new_parser(toks: [Token]) -> Parser {
-    return Parser { toks: toks, pos: 0, allow_struct_lit: true, next_id: 0, errs: [], pending: None, resume: 0, unwinding: false, stopped: false, depth: 0, stmt_match: false, skip_tests: false }
+    return Parser { toks: toks, pos: 0, allow_struct_lit: true, next_id: 0, errs: [], pending: None, resume: 0, unwinding: false, stopped: false, depth: 0, stmt_match: false, skip_tests: false, sites: [] }
 }
 
 // A parser at the first token of `src`, the receiver of `#test` cases of the
 // parser's methods (MYLA-184): one without tokens when `src` doesn't lex.
-#test("a")[Parser { toks: [Token { kind: TokenKind.IDENT, lexeme: "a", line: 1, column: 1, eline: 1, ecol: 2, ival: 0, suffix: "", big: "" }, Token { kind: TokenKind.EOF, lexeme: "", line: 1, column: 2, eline: 1, ecol: 2, ival: 0, suffix: "", big: "" }], pos: 0, allow_struct_lit: true, next_id: 0, errs: [], pending: None, resume: 0, unwinding: false, stopped: false, depth: 0, stmt_match: false, skip_tests: false }]
-#test("d2")[Parser { toks: [Token { kind: TokenKind.IDENT, lexeme: "d2", line: 1, column: 1, eline: 1, ecol: 3, ival: 0, suffix: "", big: "" }, Token { kind: TokenKind.EOF, lexeme: "", line: 1, column: 3, eline: 1, ecol: 3, ival: 0, suffix: "", big: "" }], pos: 0, allow_struct_lit: true, next_id: 0, errs: [], pending: None, resume: 0, unwinding: false, stopped: false, depth: 0, stmt_match: false, skip_tests: false }]
-#test("right")[Parser { toks: [Token { kind: TokenKind.IDENT, lexeme: "right", line: 1, column: 1, eline: 1, ecol: 6, ival: 0, suffix: "", big: "" }, Token { kind: TokenKind.EOF, lexeme: "", line: 1, column: 6, eline: 1, ecol: 6, ival: 0, suffix: "", big: "" }], pos: 0, allow_struct_lit: true, next_id: 0, errs: [], pending: None, resume: 0, unwinding: false, stopped: false, depth: 0, stmt_match: false, skip_tests: false }]
+#test("a")[Parser { toks: [Token { kind: TokenKind.IDENT, lexeme: "a", line: 1, column: 1, eline: 1, ecol: 2, ival: 0, suffix: "", big: "" }, Token { kind: TokenKind.EOF, lexeme: "", line: 1, column: 2, eline: 1, ecol: 2, ival: 0, suffix: "", big: "" }], pos: 0, allow_struct_lit: true, next_id: 0, errs: [], pending: None, resume: 0, unwinding: false, stopped: false, depth: 0, stmt_match: false, skip_tests: false, sites: [] }]
+#test("d2")[Parser { toks: [Token { kind: TokenKind.IDENT, lexeme: "d2", line: 1, column: 1, eline: 1, ecol: 3, ival: 0, suffix: "", big: "" }, Token { kind: TokenKind.EOF, lexeme: "", line: 1, column: 3, eline: 1, ecol: 3, ival: 0, suffix: "", big: "" }], pos: 0, allow_struct_lit: true, next_id: 0, errs: [], pending: None, resume: 0, unwinding: false, stopped: false, depth: 0, stmt_match: false, skip_tests: false, sites: [] }]
+#test("right")[Parser { toks: [Token { kind: TokenKind.IDENT, lexeme: "right", line: 1, column: 1, eline: 1, ecol: 6, ival: 0, suffix: "", big: "" }, Token { kind: TokenKind.EOF, lexeme: "", line: 1, column: 6, eline: 1, ecol: 6, ival: 0, suffix: "", big: "" }], pos: 0, allow_struct_lit: true, next_id: 0, errs: [], pending: None, resume: 0, unwinding: false, stopped: false, depth: 0, stmt_match: false, skip_tests: false, sites: [] }]
 pub fun parser_on(src: str) -> Parser {
     return match lex(src) {
         Ok(toks) => new_parser(toks),
         Err(d) => new_parser([]),
     }
+}
+
+// A parser at token `k` of `src` lexed as an implicit module's text is
+// (`lex_lazy`, MYLA-359), for the cases of `fun_body`.
+#test("", 0)[Parser { toks: [Token { kind: TokenKind.EOF, lexeme: "", line: 1, column: 1, eline: 1, ecol: 1, ival: 0, suffix: "", big: "" }], pos: 0, allow_struct_lit: true, next_id: 0, errs: [], pending: None, resume: 0, unwinding: false, stopped: false, depth: 0, stmt_match: false, skip_tests: false, sites: [] }]
+fun lazy_parser_on(src: str, k: int32) -> Parser {
+    var p = match lex_lazy(src) {
+        Ok(r) => new_parser(r.0),
+        Err(d) => new_parser([]),
+    }
+    p.pos = k
+    return p
 }
 
 // AST values parsed from `src` alone, the arguments of `#test` cases of
@@ -717,11 +736,11 @@ impl Parser {
             var bounds: [str] = []
             var bound_args: [[TypeExpr]] = []
             if self.match1(TokenKind.COLON) {
-                bounds.push(self.expect(TokenKind.IDENT, "trait name in type-parameter bound").lexeme)
+                bounds.push(self.bound_name("trait name in type-parameter bound"))
                 // a generic trait's arguments, `I: Iterator<T>` (D171)
                 bound_args.push(self.type_args())
                 while self.match1(TokenKind.PLUS) {
-                    bounds.push(self.expect(TokenKind.IDENT, "trait name after '+'").lexeme)
+                    bounds.push(self.bound_name("trait name after '+'"))
                     bound_args.push(self.type_args())
                 }
             }
@@ -735,6 +754,21 @@ impl Parser {
             self.fail_at(self.peek(), "empty type-parameter list")    // unreachable: a name is expected first
         }
         return params
+    }
+
+    // A bound's trait: a name, or a module's trait by the module's name,
+    // `json.ToJson`, as a type names a module's type (MYLA-398, D170), which
+    // the loader resolves.
+    #test(parser_on("Show"), "trait name")["Show"]
+    #test(parser_on("json.ToJson<T>"), "trait name")["json.ToJson"]
+    #test(parser_on("a.b.Show + Eq"), "trait name")["a.b.Show"]
+    fun bound_name(var self, what: str) -> str {
+        var name = self.expect(TokenKind.IDENT, what).lexeme
+        while self.check(TokenKind.DOT) && self.peek_kind_at(1) == TokenKind.IDENT {
+            self.skip()
+            name = name + "." + self.advance().lexeme
+        }
+        return name
     }
 
     #test(parser_on("[int]"), "a trait")[[]]
@@ -833,7 +867,7 @@ impl Parser {
         if self.match1(TokenKind.ARROW) {
             ret = Some(self.parse_type())
         }
-        let body = self.block()
+        let body = self.fun_body()
         let fd = FunData {
             line: kw.line, col: kw.column, sp: self.span_from(kw.line, kw.column), name: name, params: params,
             ret_type: ret, body: Some(body), attributes: attrs,
@@ -989,7 +1023,7 @@ impl Parser {
     #test(parser_on("a.b[0]"), [])[FunData { line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 7 }, name: ".", params: [], ret_type: None, body: Some(Block { line: 1, col: 7, sp: SrcSpan { sline: 1, scol: 7, eline: 1, ecol: 7 }, stmts: [] }), attributes: [], type_params: [], receiver: None, is_pub: false, is_async: false }]
     fun method_decl(var self, attrs: [Attribute]) -> FunData {
         let h = self.method_header()
-        let body = self.block()
+        let body = self.fun_body()
         // Rebuild rather than mutate `h.body`: the native backend does not yet
         // support assigning a ref-counted aggregate into a struct field.
         return FunData {
@@ -1002,6 +1036,25 @@ impl Parser {
     #test(parser_on("a.b[0]"))[FunData { line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 7 }, name: ".", params: [], ret_type: None, body: None, attributes: [], type_params: [], receiver: None, is_pub: false, is_async: false }]
     fun method_sig(var self) -> FunData {
         return self.method_header()
+    }
+
+    // A function's or method's body. One the lexer skipped (its `{` has the
+    // suffix "body", its `}` follows) is kept as a site, with node ids for
+    // it, and stands as an empty block of its place until `parse_body`
+    // reads it (MYLA-359).
+    #test(parser_on("{ x }"))[Block { line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 6 }, stmts: [Stmt { id: 1, line: 1, col: 3, sp: SrcSpan { sline: 1, scol: 3, eline: 1, ecol: 4 }, kind: StmtKind.ExprStmt(Expr { id: 0, line: 1, col: 3, sp: SrcSpan { sline: 1, scol: 3, eline: 1, ecol: 4 }, kind: ExprKind.Name("x") }) }] }]
+    #test(lazy_parser_on("fun f() { x }", 4))[Block { line: 1, col: 9, sp: SrcSpan { sline: 1, scol: 9, eline: 1, ecol: 14 }, stmts: [] }]
+    fun fun_body(var self) -> Block {
+        let open = self.peek()
+        if open.kind != TokenKind.LBRACE || open.suffix != "body" { return self.block() }
+        self.skip()
+        let close = self.advance()
+        let start = open.ival as int32
+        let end = close.ival as int32
+        let ids = body_ids(end - start)
+        self.sites.push(BodySite { line: open.line, col: open.column, start: start, end: end, first_id: self.next_id, ids: ids })
+        self.next_id += ids
+        return Block { line: open.line, col: open.column, sp: self.span_from(open.line, open.column), stmts: [] }
     }
 
     #test(parser_on("a.b[0]"), [], false)[Decl { id: 1, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 7 }, kind: DeclKind.TypeAliasDecl(".", TypeExpr { id: 0, line: 1, col: 7, sp: SrcSpan { sline: 1, scol: 7, eline: 1, ecol: 7 }, kind: TypeKind.TRef("", []) }, [], false) }]
@@ -2651,6 +2704,76 @@ pub fun parse_source_with(src: str, first_id: int32, skip_tests: bool) -> Result
         Ok(toks) => parse_ids_with(toks, first_id, skip_tests),
         Err(d) => Err([d]),
     }
+}
+
+// An implicit module's `src` parsed, node ids from `first_id` (MYLA-359):
+// without its `#test` cases, and its functions' bodies left for later,
+// each an empty block with the site `parse_body` reads it from; with the
+// file's code points. Err: its lex error, or its parse errors.
+#test("fun f(x: int) -> int { return x }", 0)[[BodySite { line: 1, col: 22, start: 21, end: 33, first_id: 2, ids: 32 }]]
+#test("trait T {\n    fun m(self)\n}", 0)[[]]
+fun lazy_sites(src: str, first_id: int32) -> [BodySite] {
+    return match parse_source_lazy(src, first_id) {
+        Ok(lp) => lp.sites,
+        Err(ds) => [],
+    }
+}
+
+pub fun parse_source_lazy(src: str, first_id: int32) -> Result<LazyParsed, [Diag]> {
+    let (toks, cps) = match lex_lazy(src) {
+        Ok(r) => r,
+        Err(d) => { return Err([d]) },
+    }
+    var p = new_parser(toks)
+    p.next_id = first_id
+    p.skip_tests = true
+    let prog = p.parse_program()
+    if p.errs.len() > 0 { return Err(p.errs) }
+    return Ok(LazyParsed { parsed: Parsed { program: prog, next_id: p.next_id }, cps: cps, sites: p.sites })
+}
+
+// A module parsed with its functions' bodies left for later
+// (`parse_source_lazy`): its code points, which `parse_body` reads a body
+// from, and the bodies' sites.
+pub struct LazyParsed { parsed: Parsed, cps: [char], sites: [BodySite] }
+
+// The body at `site` of the module whose code points are `cps`, lexed and
+// parsed now as it would have been with the module (MYLA-359): the same
+// tokens, nodes and places, its node ids the site's. Err: its lex error,
+// or its parse errors, where they are in the file.
+#test("fun f(x: int) -> int {\n    return x\n}", 0)[Ok(Block { line: 1, col: 22, sp: SrcSpan { sline: 1, scol: 22, eline: 3, ecol: 2 }, stmts: [Stmt { id: 3, line: 2, col: 5, sp: SrcSpan { sline: 2, scol: 5, eline: 2, ecol: 13 }, kind: StmtKind.ReturnS(Some(Expr { id: 2, line: 2, col: 12, sp: SrcSpan { sline: 2, scol: 12, eline: 2, ecol: 13 }, kind: ExprKind.Name("x") }), false) }] })]
+#test("fun f() {\n    let = 1\n}", 0)[Err([Diag { kind: "parse error", line: 2, col: 9, sp: SrcSpan { sline: 2, scol: 9, eline: 2, ecol: 10 }, msg: "expected variable name, found '='" }])]
+#test("fun f() {\n    1 @ 2\n}", 0)[Err([Diag { kind: "lex error", line: 2, col: 7, sp: SrcSpan { sline: 2, scol: 7, eline: 2, ecol: 7 }, msg: "unexpected character '@'" }])]
+fun first_body(src: str, first_id: int32) -> Result<Block, [Diag]> {
+    let lp = parse_source_lazy(src, first_id)?
+    return parse_body(lp.cps, lp.sites[0])
+}
+
+pub fun parse_body(cps: [char], site: BodySite) -> Result<Block, [Diag]> {
+    let toks = match lex_part(cps, site.start, site.end, site.line, site.col) {
+        Ok(t) => t,
+        Err(d) => { return Err([d]) },
+    }
+    var p = new_parser(toks)
+    p.next_id = site.first_id
+    let b = p.block()
+    let r = p.recovered(0, SYNC_DECL)
+    if p.errs.len() > 0 { return Err(p.errs) }
+    // no more nodes than the ids kept for it, which the next nodes' follow
+    if p.next_id > site.first_id + site.ids {
+        return Err([Diag { kind: "parse error", line: site.line, col: site.col, sp: no_span(), msg: format("internal error: the function body here needs {} node ids, {} were kept", p.next_id - site.first_id, site.ids) }])
+    }
+    return Ok(b)
+}
+
+// The node ids kept for a function's body of `n` code points that the
+// lexer skipped (MYLA-359): more than its nodes can number (a node takes a
+// token, two at most share one, and a token a code point; the desugared
+// forms take a few more).
+#test(0)[8]
+#test(12)[32]
+fun body_ids(n: int32) -> int32 {
+    return 2 * n + 8
 }
 
 // Lex and parse `src` (node ids from `first_id`): its first lex or parse error.

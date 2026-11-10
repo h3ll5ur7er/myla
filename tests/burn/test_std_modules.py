@@ -7,9 +7,9 @@ it is excused (`_targets.py`: a qemu process per case takes minutes).
 The modules are found, not listed, so a new module of `lib/std/` is covered by
 adding its cases. Left out: `std.rt`, the runtime itself, whose cases run in the
 interpreter only (natively it is the code the harness runs on), and the other
-targets' platform modules, which only their own targets can run; on another
-target every platform module (the harness of `platform_wasm` doesn't build on
-wasm32: there it is `std.platform`, which the harness imports too).
+targets' platform modules, which only their own targets can run: on a target,
+its own platform module runs (`platform_wasm` on wasm32, `platform_aarch64` on
+aarch64), which is its `std.platform`, built as that module (MYLA-397).
 """
 from __future__ import annotations
 
@@ -23,16 +23,17 @@ from ._tools import STDLIB_ROOT, selfhost_tool
 
 NOT_NATIVE = {"rt"}
 PLATFORMS = {"platform", "platform_aarch64", "platform_wasm"}   # `platform` is the host's (D161)
+OWN_PLATFORM = {"": "platform", "aarch64-linux": "platform_aarch64", "wasm32-wasi": "platform_wasm"}
 _RUN_MJS = os.path.join(os.path.dirname(STDLIB_ROOT), "tools", "wasm", "run.mjs")
 
 
 def _modules(target: str = "") -> list[str]:
     """The names of the modules of `lib/std/` that have `#test` cases, with
-    the host's platform module ("" `target`) or none."""
+    the platform module of `target` ("" the host's) and no other."""
     found = []
     for path in sorted(glob.glob(os.path.join(STDLIB_ROOT, "std", "*.my"))):
         name = os.path.basename(path)[:-3]
-        if name in PLATFORMS and (target != "" or name != "platform"):
+        if name in PLATFORMS and name != OWN_PLATFORM.get(target):
             continue
         with open(path, encoding="utf-8") as fh:
             if any(line.lstrip().startswith("#test") for line in fh):
@@ -54,6 +55,11 @@ class StdModuleCases(unittest.TestCase):
         names = _modules()
         for expected in ("json", "num", "fmt", "test"):
             self.assertIn(expected, names)
+        # each target's own platform module, and only that one (MYLA-397)
+        self.assertIn("platform_wasm", _modules("wasm32-wasi"))
+        self.assertNotIn("platform", _modules("wasm32-wasi"))
+        self.assertIn("platform_aarch64", _modules("aarch64-linux"))
+        self.assertNotIn("platform_wasm", _modules("aarch64-linux"))
 
     def test_interpreted(self) -> None:
         for name in _modules():

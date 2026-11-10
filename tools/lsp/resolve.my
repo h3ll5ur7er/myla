@@ -470,7 +470,11 @@ impl Resolver {
         // built-in one has no declaration); the AST keeps no position of
         // its own for it, so it is the first of its name after the parameter
         for tp in tps {
-            for b in tp.bounds { self.use_name(tp.line, tp.col, b) }
+            for b in tp.bounds {
+                // a module's trait, `T: json.ToJson` (MYLA-398)
+                let parts = b.split(".")
+                if parts.len() > 1 { self.module_type(tp.line, tp.col, parts) } else { self.use_name(tp.line, tp.col, b) }
+            }
             // a generic trait's arguments, `I: Iterator<T>` (D171)
             for args in tp.bound_args { for a in args { self.type_expr(a) } }
         }
@@ -726,13 +730,20 @@ impl Resolver {
                 self.expr(r)
             },
             ExprKind.Call(callee, args, targs) => {
-                self.expr(callee)
+                match callee.kind {
+                    // a method of the field's name takes the call (MYLA-406)
+                    ExprKind.GetField(recv, field) => {
+                        self.expr(recv)
+                        self.field(callee, recv, field, true)
+                    },
+                    _ => { self.expr(callee) },
+                }
                 for t in targs { self.type_expr(t) }      // `mk<Point>()` (D169)
                 for a in args { self.expr(a) }
             },
             ExprKind.GetField(recv, field) => {
                 self.expr(recv)
-                self.field(e, recv, field)
+                self.field(e, recv, field, false)
             },
             ExprKind.StructLit(name, fields) => {
                 self.use_name(e.line, e.col, name)
@@ -795,8 +806,9 @@ impl Resolver {
 
     // `recv.field` (`e`, positioned at the dot): a variant or a static
     // method when `recv` names a type, a declaration when it names a module,
-    // else a field or method of the value's type.
-    fun field(var self, e: Expr, recv: Expr, field: str) {
+    // else a field or method of the value's type: a method when `called`, a
+    // field else, where both have the name (MYLA-406).
+    fun field(var self, e: Expr, recv: Expr, field: str, called: bool) {
         let k = self.ident_after(e.line, e.col, field)
         var named = false
         var members: [Def] = []
@@ -857,14 +869,21 @@ impl Resolver {
         if self.want.line >= 0 && self.at_want(k) {
             self.completion = Completion { found: true, member: true, known: known, items: members }
         }
-        for m in members {
-            if m.name == field {
-                if !self.used.contains(k) {
-                    self.used[k] = true
-                    self.uses.push(Use { range: self.range_of(k), def: m })
+        var pick = -1
+        var i = 0
+        while i < members.len() {
+            if members[i].name == field {
+                if pick < 0 { pick = i }
+                if is_method_def(members[i]) == called {
+                    pick = i
+                    break
                 }
-                return
             }
+            i += 1
+        }
+        if pick >= 0 && !self.used.contains(k) {
+            self.used[k] = true
+            self.uses.push(Use { range: self.range_of(k), def: members[pick] })
         }
     }
 
@@ -1153,21 +1172,24 @@ impl Resolver {
         let t = self.unalias(self.type_of(recv))
         match self.value_members(t) {
             Some(ms) => {
+                // a call takes a method of the field's name (MYLA-406), else
+                // the field's function
+                var through_field = ""
                 for m in ms {
                     if m.name == name {
                         match m.kind {
                             DefKind.Global(SymKind.Field) => {
-                                if called { return result_of(m.ty) }
-                                return m.ty
+                                if !called { return m.ty }
+                                through_field = result_of(m.ty)
                             },
                             DefKind.Global(SymKind.Method) => {
-                                if !called { return "" }
-                                return subst(result_of(m.detail), ["Self"], [t])
+                                if called { return subst(result_of(m.detail), ["Self"], [t]) }
                             },
                             _ => { return "" },
                         }
                     }
                 }
+                return through_field
             },
             None => {},
         }
@@ -1302,6 +1324,13 @@ impl Resolver {
 fun kind_is_impl(k: SymKind) -> bool {
     return match k {
         SymKind.Impl => true,
+        _ => false,
+    }
+}
+
+fun is_method_def(d: Def) -> bool {
+    return match d.kind {
+        DefKind.Global(SymKind.Method) => true,
         _ => false,
     }
 }

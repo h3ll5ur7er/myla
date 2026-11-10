@@ -7121,6 +7121,178 @@ fun main() {
     print(many.len())
 }
 """,
+    "literal_element_types_from_later_elements": """// MYLA-401: a list or map literal's element type from all its elements:
+// a variant's open type parameters come from a later element
+enum Either<L, R> {
+    Left(L),
+    Right(R),
+}
+
+enum Tagged<T, U> {
+    One(T),
+    Two(T, U),
+    Nothing,
+}
+
+#derive(Eq, Hash)
+enum Key<T> {
+    Any,
+    One(T),
+}
+
+struct Page<T> {
+    items: [T],
+    next: Option<int>,
+}
+
+fun show(e: Either<int, str>) -> str {
+    return match e {
+        Left(n) => f"L{n}"
+        Right(s) => f"R{s}"
+    }
+}
+
+fun main() {
+    let es = [Either.Left(1), Either.Right("a"), Either.Left(3)]
+    var line = ""
+    for e in es { line = line + show(e) }
+    print(line)
+    // None, Ok and Err take theirs from a later element
+    let os = [None, Some(2u8), None]
+    print(os.len())
+    match os[1] { Some(v) => print(v + 250), None => print(0) }
+    let rs = [Ok(1), Err("bad"), Ok(2)]
+    for r in rs {
+        match r {
+            Ok(n) => print(n)
+            Err(s) => print(s)
+        }
+    }
+    // a variant without payload, and nested lists
+    let ts = [Tagged.Nothing, Tagged.One(1.5), Tagged.Two(2.5, 'x')]
+    print(ts.len())
+    match ts[2] { Tagged.Two(a, b) => print(b), _ => print('-') }
+    let nested = [[], [Either.Left(4)], [Either.Right(true)]]
+    print(nested[1].len() + nested[2].len())
+    let empties = [[], [], [7i64]]
+    print(empties[2][0] + 5000000000)
+    // a map's keys and values
+    let m = ["a": None, "b": Some(2), "c": None]
+    print(m["b"].unwrap_or(0) + 40)
+    let k = [Key.Any: 1, Key.One('z'): 2]
+    print(k[Key.One('z')])
+    // in tuples
+    let ps = [(None, 'a'), (Some("b"), 'c')]
+    match ps[1] { (Some(s), c) => print(s), _ => print("-") }
+    // in a struct literal's field
+    let p = Page { items: [Tagged.One(1), Tagged.Two(1, false)], next: None }
+    print(p.items.len())
+    let q: Page<Tagged<int, bool>> = Page { items: [Tagged.One(1)], next: None }
+    print(q.items.len() + first_page().items.len())
+    // what an earlier element fixed guides a later one's literal
+    let ws = [Either.Left(1u8), Either.Left(2), Either.Right("x")]
+    match ws[1] { Left(n) => print(n + 250), Right(s) => print(s) }
+}
+
+fun first_page() -> Page<Tagged<str, bool>> {
+    return Page { items: [Tagged.One("p"), Tagged.Nothing], next: Some(2) }
+}
+""",
+    "a_field_and_a_method_of_one_name": """// MYLA-406: a field and a method of the same name: `x.name` is the field,
+// `x.name(…)` the method
+struct Lru<K> {
+    keys: [K],
+    len: int,
+}
+
+impl<K> Lru<K> {
+    fun keys(self) -> [K] {
+        return self.keys[::-1]
+    }
+
+    fun len(self) -> int {
+        return self.keys.len()
+    }
+
+    fun push(var self, k: K) {
+        self.keys.push(k)
+        self.len += 10
+    }
+}
+
+// a field of a type parameter is no function where the struct is declared
+struct Cell<T> {
+    get: T,
+}
+
+impl<T> Cell<T> {
+    fun get(self) -> [T] {
+        return [self.get, self.get]
+    }
+}
+
+// a getter named like the field, the way an actor's state is read
+actor Counter {
+    count: int,
+}
+
+impl Counter {
+    fun count(self) -> int {
+        return self.count
+    }
+
+    fun bump(var self) {
+        self.count += 1
+    }
+}
+
+trait Named {
+    fun name(self) -> str
+}
+
+struct Pet {
+    name: str,
+}
+
+impl Named for Pet {
+    fun name(self) -> str {
+        return "pet " + self.name
+    }
+}
+
+fun describe<T: Named>(x: T) -> str {
+    return x.name()
+}
+
+// a field that holds a function is still called as `h.on(…)`
+struct Handler {
+    on: (int) -> int,
+}
+
+#main
+async fun main() {
+    var c = Lru { keys: [1, 2], len: 0 }
+    c.push(3)
+    print(c.keys.len())
+    print(c.keys()[0])
+    print(c.keys[0])
+    print(c.len)
+    print(c.len())
+    let cell = Cell { get: 'q' }
+    print(cell.get)
+    print(cell.get().len())
+    let k = Counter { count: 4 }
+    await k.bump()
+    print(await k.count())
+    let p = Pet { name: "rex" }
+    print(p.name)
+    print(p.name())
+    print(describe(p))
+    let h = Handler { on: (n: int) => n + 1 }
+    print(h.on(2))
+    print((h.on)(3))
+}
+""",
 }
 
 # A program that allocates far more recursive-enum cells (~12M) than the heap
@@ -8599,6 +8771,10 @@ PINNED = {
     "for_tuple_patterns": 'a=1\nbb=2\nccc=3\nx\ny\n30\n1:#\n2:##\n3:###\n6\n15\n1\n2\n3\n0 p\n1 q\naa\nccca\ncccbb\ncccccc\n14\n',
     # MYLA-390: new
     "append_char": '16\n97\n233\n8364\n128512\n10\n1114111\n0\nök\nß!\n0\nx\nxy\n2000\n',
+    # MYLA-401: new ("cannot infer type parameter(s) R" before); native code gives the same
+    "literal_element_types_from_later_elements": 'L1RaL3\n3\n252\n1\nbad\n2\n3\nx\n2\n5000000007\n42\n2\nb\n2\n3\n252\n',
+    # MYLA-406: new ("method 'keys' collides with a field of 'Lru'" before); native code gives the same
+    "a_field_and_a_method_of_one_name": '3\n3\n1\n10\n3\nq\n2\n5\nrex\npet rex\npet rex\n3\n4\n',
 }
 
 

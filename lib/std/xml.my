@@ -23,6 +23,7 @@
 
 from std.io import Read
 from std.fs import IoError
+import std.bytes as bytes_m // `to_str`: a stream's bytes
 import std.str as str_m
 import std.list as list_m
 import std.option as option_m
@@ -1469,12 +1470,13 @@ impl<R: Read> XmlStreamReader<R> {
     // fails, and is read again once the next chunk is in.
     fun fill(var self) -> Result<(), XmlError> {
         var r = self.src.pop()
-        let got = r.read_str(self.chunk)
+        let got = r.read(self.chunk)
         self.src.push(r)
         let lex = self.lex
         let p = advance(lex.s, lex.i, Pos { line: lex.base_line, col: lex.base_col, cr: lex.base_cr })
         match got {
-            Ok(b) => {
+            Ok(bytes) => {
+                let b = bytes_m.to_str(bytes)
                 var sb = StringBuilder()
                 sb.append(lex.s, lex.i, lex.s.len())
                 if b.len() == 0 {
@@ -2203,17 +2205,6 @@ struct Trickle {
 
 impl Read for Trickle {
     fun read(var self, n: int) -> Result<[uint8], IoError> {
-        let s = self.read_str(n)?
-        var out: [uint8] = []
-        var k = 0
-        while k < s.len() {
-            out.push(s[k])
-            k += 1
-        }
-        return Ok(out)
-    }
-
-    fun read_str(var self, n: int) -> Result<str, IoError> {
         if self.fail_at >= 0 && self.pos >= self.fail_at {
             return Err(IoError.BrokenPipe)
         }
@@ -2228,7 +2219,7 @@ impl Read for Trickle {
         var out = StringBuilder()
         out.append(self.data, self.pos, end)
         self.pos = end
-        return Ok(out.build())
+        return Ok(bytes_m.from_str(out.build()))
     }
 }
 

@@ -62,7 +62,29 @@ fun main() {
 // 11
 ```
 - A generic type takes a generic impl that names every parameter in order: `impl<T> Box<T> { … }`. Methods may have their own type parameters.
-- A type may have several `impl` blocks; a method name must be unique per type and differ from every field name. There is no orphan rule (D45): any module may add methods to any type.
+- A type may have several `impl` blocks; a method name must be unique per type. There is no orphan rule (D45): any module may add methods to any type.
+- A method may share its name with a field ([[MYLA-406]], as in Rust): `c.keys` is the field and `c.keys()` the method, so a getter can be named like what it reads, as an actor's state is (`await counter.count()`). Not with a field that holds a function: `h.on(x)` calls such a field ([[Language/Functions-and-closures]]), so a method `on` beside it is an error at the method ("method 'on' has the name of a field of 'Handler' that holds a function"). Calling a field that holds no function, where no method has its name, says so: `type 'C' has no method 'keys'`, with the help `'keys' is a field of type '[int32]', not a function`.
+
+```myla
+struct Lru {
+    keys: [int],
+}
+
+impl Lru {
+    fun keys(self) -> [int] {
+        return self.keys[::-1]
+    }
+}
+
+fun main() {
+    let c = Lru { keys: [1, 2, 3] }
+    print(c.keys[0])
+    print(c.keys()[0])
+}
+// output:
+// 1
+// 3
+```
 - A method's call form is `receiver.method(args)` (D46). A type has no static methods of its own (every method in an `impl` of no trait takes `self`); a trait's functions without `self` are called on the type, `int.zero()` ([Functions without self](#functions-without-self), D172). `Type.method` isn't a value; wrap it in a lambda.
 
 ## Traits
@@ -397,6 +419,27 @@ fun main() {
 A method a bound doesn't give is an error at the call: `type parameter 'T' has no method 'area': it has no bounds`.
 
 A bound may name a **generic trait with its arguments**, `I: Iterator<T>` or `I: Iterator<int>`, in a function's, a method's and an impl's type parameters (D171). Inside the body the trait's methods take its arguments: `it.next()` on an `I: Iterator<T>` is an `Option<T>`. At the call the argument's type must implement the trait with those arguments: its one impl (D55) gives them, so a `Words` that is an `Iterator<str>` doesn't satisfy `I: Iterator<int>` (`type 'Words' does not satisfy the bound 'I: Iterator<int32>' required by 'total': it implements 'Iterator<str>'`). The same impl **fixes a type parameter only the bound names**: in `fun count<I: Iterator<T>, T>(it: I) -> int`, the argument's type gives `I`, and `I`'s impl of `Iterator` gives `T`, for the arguments after it too, so a lambda there takes `T` without an annotation ([[Language/Generics]]). A generic trait without its arguments is an error (`trait 'Iterator' expects 1 type argument(s) in the bound 'I: Iterator', got 0 (write 'I: Iterator<T>')`), as are arguments on a trait that has none.
+
+A bound names **a module's trait** by the module's name, as a type names its type ([[Language/Modules]], D170, [[MYLA-398]]): with `import std.json as json`, `fun show<T: json.ToJson>(v: T)`, and with a module `shapes` that exports `trait Pair<T>`, `P: shapes.Pair<T>`; `from std.json import ToJson` and `T: ToJson` still work. The name must be a trait the module exports: `'json.Json' is an enum of module 'std.json', not a trait`, `module 'std.json' does not export a trait 'ToText'`, `unknown module 'geo' in the trait 'geo.Show'`, each reported at the type parameter.
+
+```myla
+import std.json as json
+
+#derive(Json)
+struct Pt {
+    x: int,
+}
+
+fun show<T: json.ToJson>(v: T) -> str {
+    return json.encode(v)
+}
+
+fun main() {
+    print(show(Pt { x: 4 }))
+}
+// output:
+// {"x":4}
+```
 
 ## Iterators
 

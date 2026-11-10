@@ -253,6 +253,47 @@ class ImplicitModules(Fixture):
             self.assertIn("type error: return type mismatch", proc.stderr, body)
             self.assertIn("--> " + int_my + ":", proc.stderr, body)
 
+    def test_their_bodies_are_parsed_once_called(self) -> None:
+        # MYLA-359: an implicit module's function bodies are lexed and
+        # parsed once the checker needs one, a lex or parse error in one at
+        # its place in the module; a type error in one read late at its
+        # place too; the module's own `myla test` reads them all
+        lib = os.path.join(self.work, "unparsed_lib")
+        if not os.path.exists(lib):
+            shutil.copytree(self.lib, lib)
+            with open(os.path.join(lib, "std", "int.my"), "a", encoding="utf-8") as fh:
+                fh.write("\nimpl int {\n    fun garbled(self) -> int {\n        let = self\n        return 1\n    }\n\n"
+                         "    fun odd_char(self) -> int {\n        return self @ 2\n    }\n\n"
+                         "    fun mistyped(self) -> int {\n        let s = \"}\" // }\n        return s\n    }\n}\n\n"
+                         "pub fun garbled_fn() -> int {\n    return (1 +) * 2\n}\n")
+        int_my = os.path.join(lib, "std", "int.my")
+        with open(int_my, encoding="utf-8") as fh:
+            lines = fh.read().split("\n")
+
+        def at(line_text: str, text: str) -> str:
+            # the place of `text` on the last line holding `line_text`
+            n = max(i for i, line in enumerate(lines, 1) if line_text in line)
+            return f"{int_my}:{n}:{lines[n - 1].index(text) + 1}"
+
+        path = self.write("unparsed_ok.my", "fun main() {\n    print(21.doubled())\n}\n")
+        for cmd in ("run", "check"):
+            proc = self.myla_cmd(cmd, path, lib=lib)
+            self.assertEqual((proc.stderr, proc.returncode), ("", 0), cmd)
+        for body, error, where in [
+            ("print(1.garbled())", "parse error: expected variable name, found '='", at("let = self", "= self")),
+            ("print(1.odd_char())", "lex error: unexpected character '@'", at("self @ 2", "@ 2")),
+            ("print(i.garbled_fn())", "parse error: expected an expression, found ')'", at("(1 +) * 2", ") * 2")),
+            ("print(1.mistyped())", "type error: return type mismatch", at("return s", "return s")),
+        ]:
+            path = self.write("unparsed.my", f"import std.int as i\n\nfun main() {{\n    {body}\n}}\n")
+            proc = self.myla_cmd("check", path, lib=lib)
+            self.assertEqual(proc.returncode, 1, body)
+            self.assertIn(error, proc.stderr, body)
+            self.assertIn("--> " + where + "\n", proc.stderr, body)
+        proc = self.myla_cmd("test", int_my, lib=lib)
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("lex error: unexpected character '@'\n  --> " + at("self @ 2", "@ 2") + "\n", proc.stderr)
+
     def test_the_repl(self) -> None:
         proc = self.myla_cmd("repl", stdin="\"ab\".shout()\n3.doubled()\n")
         self.assertEqual(proc.stdout, "\"ab!\"\n6\n", proc.stderr)

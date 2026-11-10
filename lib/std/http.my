@@ -1609,8 +1609,8 @@ impl Wire {
     fun fill(var self, deadline: int64) -> Result<bool, HttpError> {
         let ms = left_until(deadline)?
         self.stream.set_read_timeout(ms)
-        let chunk = match self.stream.read_str(READ_SIZE) {
-            Ok(c) => c
+        let chunk = match self.stream.read(READ_SIZE) {
+            Ok(c) => bytes_m.to_str(c)
             Err(e) => { return Err(io_error(e)) }
         }
         if chunk.len() == 0 {
@@ -1622,8 +1622,8 @@ impl Wire {
 
     // `fill`, the task waiting.
     async fun fill_async(var self) -> Result<bool, HttpError> {
-        let chunk = match await self.stream.read_str_async(READ_SIZE) {
-            Ok(c) => c
+        let chunk = match await self.stream.read_async(READ_SIZE) {
+            Ok(c) => bytes_m.to_str(c)
             Err(e) => { return Err(io_error(e)) }
         }
         if chunk.len() == 0 {
@@ -1637,7 +1637,7 @@ impl Wire {
     fun send(var self, s: str, deadline: int64) -> Result<(), HttpError> {
         let ms = left_until(deadline)?
         self.stream.set_write_timeout(ms)
-        return match self.stream.write_str(s) {
+        return match self.stream.write(bytes_m.from_str(s)) {
             Ok(_) => Ok(())
             Err(e) => Err(io_error(e))
         }
@@ -1645,7 +1645,7 @@ impl Wire {
 
     // `send`, the task waiting.
     async fun send_async(var self, s: str) -> Result<(), HttpError> {
-        return match await self.stream.write_str_async(s) {
+        return match await self.stream.write_async(bytes_m.from_str(s)) {
             Ok(_) => Ok(())
             Err(e) => Err(io_error(e))
         }

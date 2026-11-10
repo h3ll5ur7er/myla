@@ -1,0 +1,12 @@
+//~ module error: 'json.Json' is an enum of module 'std.json', not a trait
+// A bound names a module's trait as a type names its type (MYLA-398):
+// `json.Json` is std.json's enum, so it can't bound `T`.
+import std.json as json
+
+fun show<T: json.Json>(v: T) -> int {
+    return 0
+}
+
+fun main() {
+    print(0)
+}

@@ -1,0 +1,10 @@
+//~ module error: unknown module 'geo' in the trait 'geo.Show'
+// A dotted name in a bound is a module's trait: `geo` must be a module this
+// file binds with `import … as geo` (MYLA-398).
+fun show<T: geo.Show>(v: T) -> int {
+    return 0
+}
+
+fun main() {
+    print(0)
+}

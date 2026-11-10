@@ -1,0 +1,12 @@
+//~ module error: module 'std.json' does not export a trait 'ToText'
+// `m.Trait` in a bound names a trait the module exports with `pub`
+// (MYLA-398); std.json has `ToJson`, not `ToText`.
+import std.json as json
+
+fun show<T: Eq + json.ToText>(v: T) -> int {
+    return 0
+}
+
+fun main() {
+    print(0)
+}

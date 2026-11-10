@@ -76,21 +76,14 @@ struct Pieces { data: str, pos: int, step: int }
 
 impl Read for Pieces {
     fun read(var self, n: int) -> Result<[uint8], IoError> {
-        let s = self.read_str(n)?
-        var out: [uint8] = []
-        for k in 0..s.len() { out.push(s[k]) }
-        return Ok(out)
-    }
-
-    fun read_str(var self, n: int) -> Result<str, IoError> {
         self.step = self.step % 7 + 1
         var end = self.pos + self.step
         if end > self.pos + n { end = self.pos + n }
         if end > self.data.len() { end = self.data.len() }
-        var sb = StringBuilder()
-        sb.append(self.data, self.pos, end)
+        var out: [uint8] = []
+        for k in self.pos..end { out.push(self.data[k]) }
         self.pos = end
-        return Ok(sb.build())
+        return Ok(out)
     }
 }
 

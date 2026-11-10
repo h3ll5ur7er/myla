@@ -4194,6 +4194,24 @@ impl Interp {
             let fd = as_int(self.eval(args[0])) as int32
             return Value.VStr(__read(fd, as_int(self.eval(args[1])) as int32))
         }
+        // `__read` and `__write` of bytes (D177): here through a string
+        if nm == "__read_bytes" {
+            let fd = as_int(self.eval(args[0])) as int32
+            return bytes_to_value(__str_to_bytes(__read(fd, as_int(self.eval(args[1])) as int32)))
+        }
+        if nm == "__write_bytes" {
+            let fd = as_int(self.eval(args[0])) as int32
+            var sb = StringBuilder()
+            match self.eval(args[1]) {
+                Value.VList(xs) => { for x in xs { sb.append_byte(as_int(x) as uint8) } },
+                _ => {},
+            }
+            if self.stop() { return Value.VUnit }
+            let s = sb.build()
+            if fd == 1 && self.testing { self.captured.push(s) }
+            else { write(fd, s) }
+            return Value.VUnit
+        }
         if nm == "__poll" {
             let fd = as_int(self.eval(args[0])) as int32
             return Value.VInt(__poll(fd, as_int(self.eval(args[1])) as int32) as int64)

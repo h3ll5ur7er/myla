@@ -1,0 +1,7 @@
+//~ type error: type mismatch: 'Option<_>' vs 'int32'
+// An element that leaves a type parameter open (MYLA-401) still has to be
+// of the other elements' type; the message shows the open one as `_`
+fun main() {
+    let xs = [None, 5, Some(1)]
+    print(xs.len())
+}

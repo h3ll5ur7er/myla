@@ -1,0 +1,5 @@
+module error: unknown module 'geo' in the trait 'geo.Show': a trait of another module is named through its 'import … as geo'
+  --> examples/errors/module_bound_unknown_module.my:4:10
+  |
+4 | fun show<T: geo.Show>(v: T) -> int {
+  |          ^^^^^^^^^^^

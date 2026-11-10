@@ -14,6 +14,7 @@
 
 from std.io import Read, from_str
 from std.fs import IoError
+import std.bytes as bytes_m // `to_str`: a stream's bytes
 
 // What is wrong with a text.
 #derive(Eq)
@@ -46,13 +47,16 @@ pub struct CsvError {
     col: int,
 }
 
-impl Format for CsvError {
-    // `line:col: what`, e.g. `2:5: '"' in an unquoted field`.
-    #test(CsvError { kind: CsvErrorKind.BareQuote, line: 2, col: 5 }, "")["2:5: '\"' in an unquoted field"]
-    #test(CsvError { kind: CsvErrorKind.FieldCount, line: 3, col: 1 }, "")["3:1: a record with another number of fields than the header"]
-    #test(CsvError { kind: CsvErrorKind.Io, line: 1, col: 4 }, "")["1:4: the stream failed"]
-    fun format(self, spec: str) -> str {
-        let what = match self.kind {
+impl CsvError {
+    // The reason in words, without the position (D168).
+    #test(CsvError { kind: CsvErrorKind.BareQuote, line: 2, col: 5 })["'\"' in an unquoted field"]
+    #test(CsvError { kind: CsvErrorKind.UnclosedQuote, line: 1, col: 1 })["a quoted field without its closing '\"'"]
+    #test(CsvError { kind: CsvErrorKind.AfterQuote, line: 1, col: 4 })["a delimiter or a line end expected after '\"'"]
+    #test(CsvError { kind: CsvErrorKind.FieldCount, line: 3, col: 1 })["a record with another number of fields than the header"]
+    #test(CsvError { kind: CsvErrorKind.DuplicateName, line: 1, col: 5 })["a name the header has twice"]
+    #test(CsvError { kind: CsvErrorKind.Io, line: 1, col: 4 })["the stream failed"]
+    fun message(self) -> str {
+        return match self.kind {
             BareQuote => "'\"' in an unquoted field"
             UnclosedQuote => "a quoted field without its closing '\"'"
             AfterQuote => "a delimiter or a line end expected after '\"'"
@@ -60,7 +64,17 @@ impl Format for CsvError {
             DuplicateName => "a name the header has twice"
             Io => "the stream failed"
         }
-        return f"{self.line}:{self.col}: {what}"
+    }
+}
+
+impl Format for CsvError {
+    // `line:col: what`, e.g. `2:5: '"' in an unquoted field`: the position,
+    // then `message()`.
+    #test(CsvError { kind: CsvErrorKind.BareQuote, line: 2, col: 5 }, "")["2:5: '\"' in an unquoted field"]
+    #test(CsvError { kind: CsvErrorKind.FieldCount, line: 3, col: 1 }, "")["3:1: a record with another number of fields than the header"]
+    #test(CsvError { kind: CsvErrorKind.Io, line: 1, col: 4 }, "")["1:4: the stream failed"]
+    fun format(self, spec: str) -> str {
+        return f"{self.line}:{self.col}: {self.message()}"
     }
 }
 
@@ -400,14 +414,14 @@ impl<R: Read> CsvStreamReader<R> {
     // The next chunk of the stream after the bytes not yet used.
     fun fill(var self) -> Result<(), CsvError> {
         var r = self.src.pop()
-        let got = r.read_str(self.chunk)
+        let got = r.read(self.chunk)
         self.src.push(r)
         match got {
             Ok(more) => {
                 if more.len() == 0 {
                     self.eof = true
                 } else {
-                    self.rd.refill(more)
+                    self.rd.refill(bytes_m.to_str(more))
                     if self.chunk < 0x1000000 {
                         self.chunk *= 2
                     }
@@ -615,20 +629,11 @@ struct Failing {
 
 impl Read for Failing {
     fun read(var self, n: int) -> Result<[uint8], IoError> {
-        let s = self.read_str(n)?
-        var b: [uint8] = []
-        for i in 0..s.len() {
-            b.push(s[i])
-        }
-        return Ok(b)
-    }
-
-    fun read_str(var self, n: int) -> Result<str, IoError> {
         if self.given {
             return Err(IoError.Other(5))
         }
         self.given = true
-        return Ok(self.text)
+        return Ok(bytes_m.from_str(self.text))
     }
 }
 

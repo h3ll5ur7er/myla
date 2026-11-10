@@ -1134,11 +1134,6 @@ impl Read for Pieces {
         self.pos = end
         return Ok(out)
     }
-
-    fun read_str(var self, n: int) -> Result<str, IoError> {
-        let b = self.read(n)?
-        return Ok(bytes_m.to_str(b))
-    }
 }
 
 // zip_list gives the directory without reading the data; zip_data reads

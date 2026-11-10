@@ -1,0 +1,13 @@
+//~ type error: cannot infer type parameter(s) R
+// A list's elements may fix a variant's type parameters together, a later
+// one what an earlier one left open (MYLA-401); when none fixes `R`, the
+// first element that left it open says so, as it would alone
+enum Either<L, R> {
+    Left(L),
+    Right(R),
+}
+
+fun main() {
+    let es = [Either.Left(1), Either.Left(2)]
+    print(es.len())
+}

@@ -20,7 +20,7 @@
 from std.io import Read, Write, from_bytes, memory_stream, MemoryStream
 from std.fs import IoError, io_error_name
 import std.list as list_m // `filled`
-import std.bytes as bytes_m // `from_str` in the tests
+import std.bytes as bytes_m // `from_str`, `to_str` in the tests
 import std.option as option_m
 
 // Why compressed data couldn't be decompressed (D168: the variants carry no
@@ -1226,13 +1226,6 @@ impl<R: Read> Read for Decoder<R> {
         if !self.fill()? { return Ok([]) }
         return Ok(self.core.take(n))
     }
-
-    fun read_str(var self, n: int) -> Result<str, IoError> {
-        let b = self.read(n)?
-        var sb = StringBuilder()
-        for x in b { sb.append_byte(x) }
-        return Ok(sb.build())
-    }
 }
 
 // --- Compression --------------------------------------------------------------------
@@ -2335,12 +2328,6 @@ impl<W: Write> Write for Encoder<W> {
         return Ok(b.len())
     }
 
-    fun write_str(var self, s: str) -> Result<int, IoError> {
-        var b: [uint8] = []
-        for i in 0..s.len() { b.push(s[i]) }
-        return self.write(b)
-    }
-
     // Everything written so far compressed and passed on, ending on a byte
     // (a sync flush), then the inner stream flushed.
     fun flush(var self) -> Result<(), IoError> {
@@ -2396,13 +2383,6 @@ impl Read for Trickle {
         let out = self.data[self.pos:end]
         self.pos = end
         return Ok(out)
-    }
-
-    fun read_str(var self, n: int) -> Result<str, IoError> {
-        let b = self.read(n)?
-        var sb = StringBuilder()
-        for x in b { sb.append_byte(x) }
-        return Ok(sb.build())
     }
 }
 
@@ -2471,11 +2451,11 @@ fun reads_in_pieces() {
     assert(d.read_to_end() == Ok(bytes_m.from_str("one two")), "read_to_end")
     assert(d.read_to_end() == Ok([]), "read_to_end at the end")
     var s = zlib_reader(from_bytes(zl))
-    let five = match s.read_str(5) {
-        Ok(t) => t
+    let five = match s.read(5) {
+        Ok(t) => bytes_m.to_str(t)
         Err(_) => "<error>"
     }
-    assert(five == "hello", "read_str")
+    assert(five == "hello", "a read of five")
 }
 
 // A raw stream ends where DEFLATE's stream ends, before what follows it.
@@ -2754,7 +2734,7 @@ fun sizes() {
 }
 
 // The bytes `data` written to an `Encoder` in pieces of 1 to `most` bytes,
-// as bytes and as text by turns, then finished: what the inner stream got.
+// then finished: what the inner stream got.
 fun written<W: Write>(e: Encoder<W>, data: [uint8], most: int) -> Result<W, IoError> {
     var w = e
     var p = 0
@@ -2763,13 +2743,7 @@ fun written<W: Write>(e: Encoder<W>, data: [uint8], most: int) -> Result<W, IoEr
         k = k % most + 1
         var end = p + k
         if end > data.len() { end = data.len() }
-        if k % 2 == 0 {
-            w.write(data[p:end])?
-        } else {
-            var sb = StringBuilder()
-            for x in data[p:end] { sb.append_byte(x) }
-            w.write_str(sb.build())?
-        }
+        w.write(data[p:end])?
         p = end
     }
     return w.finish()

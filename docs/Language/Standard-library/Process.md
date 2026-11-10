@@ -52,7 +52,7 @@ fun main() {
     var input = child.take_stdin().expect("a pipe")
     var lines = buffered(child.take_stdout().expect("a pipe"))
     for word in ["one", "two"] {
-        input.write_str(word + "\n")
+        input.write(bytes.from_str(word + "\n"))
         match lines.read_line() {
             Ok(Some(line)) => print(f"cat said {line}")
             _ => print("no line")
@@ -89,8 +89,8 @@ fun main() {
 | `child.kill() -> Result<(), IoError>` | SIGKILL; `wait` then gives `Signaled(9)`. A child reaped already isn't signalled (its ID may be another process's by now): `Ok` |
 | `child.id() -> int32` | Its process ID |
 | `await child.wait_async()`, `await child.wait_with_output_async()` | The waits in a task: the task suspended until the streams have bytes and the child ends (its pidfd), the other tasks running (D124); outside a task they block. A task asked to stop stops waiting, `Err(IoError.Cancelled)`, and leaves the child running |
-| `ChildStdin` | `Write` (`write`, `write_str`, `flush`), `close()`. A write blocks while the pipe is full; one to a child that closed its input is `BrokenPipe` |
-| `ChildStdout`, `ChildStderr` | `Read` (`read`, `read_str`; `""` at the end), `Pollable` (so a `Buffered` over one has the async reads), `close()` |
+| `ChildStdin` | `Write` (`write`, `flush`; text through `bytes.from_str` or a `buffered_writer`), `close()`. A write blocks while the pipe is full; one to a child that closed its input is `BrokenPipe` |
+| `ChildStdout`, `ChildStderr` | `Read` (`read`; `[]` at the end; text through `buffered`), `Pollable` (so a `Buffered` over one has the async reads), `close()` |
 
 A child and its pipes are values. The `Child` holds each stream until a `take_` method gives it out; from then on the caller holds it, closes it, and `wait` leaves it alone. That is why the streams come out by `take_` and aren't read from the fields: a copy taken from a field would be a second holder of the same descriptor, and `wait` couldn't know whether to close it. A stream used after `close`, or closed twice, gives `IoError.Other(9)` (EBADF), never a crash. A copy of a stream or of a `Child` names the same descriptor or process: closing or waiting through one doesn't tell the other (a second reap through a copy is `Other(10)`, ECHILD). A stream taken and dropped without `close` stays open until the program ends: a child reading an input nobody closes waits for it.
 
@@ -104,7 +104,7 @@ The first child's output is the second's input straight (`stdin_from_stdout`, [[
 
 ## Speed
 
-Natively on x86-64, best of five ([[MYLA-340]]): reading `head -c 268435456 /dev/zero` through a `ChildStdout`, 64 KiB a `read_str`, takes 118 ms, 2,160 MB/s (a shell's `head | cat > /dev/null` 105 ms). `read`, which gives a `[uint8]`, converted each byte and read 469 MB/s; since the conversion is one copy ([[MYLA-369]]) it reads as fast as `read_str` (101 to 118 ms against 115 to 125 ms, where it took 488 to 706 ms before; 2026-11-09).
+Natively on x86-64, best of five ([[MYLA-340]]): reading `head -c 268435456 /dev/zero` through a `ChildStdout`, 64 KiB a `read_str`, takes 118 ms, 2,160 MB/s (a shell's `head | cat > /dev/null` 105 ms). `read`, which gives a `[uint8]`, converted each byte and read 469 MB/s; since the conversion is one copy ([[MYLA-369]]) it reads as fast as `read_str` (101 to 118 ms against 115 to 125 ms, where it took 488 to 706 ms before; 2026-11-09). Since D177 a `ChildStdout` reads into a `[uint8]` (`__read_bytes`), and `read_str` is gone: 124 to 137 ms, against 126 to 134 ms through `read_str` on the same machine ([[MYLA-399]]).
 
 ## Process primitives
 

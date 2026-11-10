@@ -65,6 +65,34 @@ pub struct CheckErr { line: int32, col: int32, sp: SrcSpan, msg: str, decl: int3
 // one every program sees without an import (MYLA-320).
 pub struct DeclOrigin { module: str, path: str, implicit: bool }
 
+// The functions' bodies the loader left unparsed (MYLA-359): an implicit
+// module's, each an empty block until the checker first checks it. `ids`
+// are their declarations (an impl, for a method), `keys` the bodies
+// (`body_key`), and `parse` reads one, lexed, parsed and renamed as the
+// rest of its module was. Its errors are a lex, parse or module error's:
+// each message starts with its kind (`parse error: …`, `kind_of`).
+pub struct LazyBodies { ids: [int32: bool], keys: [int64: bool], parse: (int64) -> Result<Block, [CheckErr]> }
+
+// No body left unparsed: a program loaded whole.
+pub fun no_lazy_bodies() -> LazyBodies {
+    return LazyBodies { ids: [:], keys: [:], parse: no_body }
+}
+
+#test(7)[Err([CheckErr { line: 0, col: 0, sp: SrcSpan { sline: 0, scol: 0, eline: 0, ecol: 0 }, msg: "internal error: no body 7 to read", decl: -1, notes: [] }])]
+fun no_body(key: int64) -> Result<Block, [CheckErr]> {
+    return Err([terr(0, 0, f"internal error: no body {key} to read")])
+}
+
+// The key of the body of the function at `line`:`col` of the declaration
+// `id` (a method's: its impl's), in `LazyBodies.keys`: the three in one
+// number, a line below 2^20 and a column below 2^12 (the lexer leaves a
+// body past them unskipped).
+#test(7, 3, 5)[30064783365]
+#test(0, 1048575, 4095)[4294967295]
+pub fun body_key(id: int32, line: int32, col: int32) -> int64 {
+    return ((id as int64) << 32) | ((line as int64) << 12) | (col as int64)
+}
+
 // An error at a position without a range (one caret).
 #test(27, 27, "x")[CheckErr { line: 27, col: 27, sp: SrcSpan { sline: 0, scol: 0, eline: 0, ecol: 0 }, msg: "x", decl: -1, notes: [] }]
 #test(50, 50, "d2")[CheckErr { line: 50, col: 50, sp: SrcSpan { sline: 0, scol: 0, eline: 0, ecol: 0 }, msg: "d2", decl: -1, notes: [] }]
@@ -816,7 +844,7 @@ fun is_builtin_op_trait(name: str) -> bool {
 #test("B")[false]
 #test("len")[true]
 fun is_builtin_func(name: str) -> bool {
-    return name == "print" || name == "assert" || name == "panic" || name == "unreachable" || name == "len" || name == "push" || name == "pop" || name == "contains" || name == "remove" || name == "keys" || name == "format" || name == "chars" || name == "StringBuilder" || name == "append" || name == "append_byte" || name == "append_char" || name == "build" || name == "__write" || name == "__exit" || name == "__args" || name == "__read_file" || name == "__io_errno" || name == "__run" || name == "__run_stderr" || name == "__run_exit_code" || name == "__run_signal" || name == "__run_errno" || name == "__write_file" || name == "__read" || name == "__poll" || name == "__list_dir" || name == "__mkdir" || name == "__stat" || name == "__getcwd" || name == "__getenv" || name == "__test_dir" || name == "__test_program" || name == "__sqrt" || name == "__f64_bits" || name == "__f64_from_bits" || name == "__unlink" || name == "__rmdir" || name == "__rename" || name == "__task_cancelled" || name == "__yield" || name == "__sleep" || name == "__clock_ns" || name == "__sleep_ns" || name == "__cancel_after" || name == "__disarm" || name == "__wait_readable" || name == "__wait_either" || name == "__wait_socket" || name == "__spawn" || name == "__run_with" || name == "__spawn_with" || name == "__reap" || name == "__kill" || name == "__close" || name == "__str_to_bytes" || name == "__bytes_to_str" || is_platform_primitive(name) || is_raw_memory_primitive(name) || is_notify_primitive(name) || is_wrapping_method(name)
+    return name == "print" || name == "assert" || name == "panic" || name == "unreachable" || name == "len" || name == "push" || name == "pop" || name == "contains" || name == "remove" || name == "keys" || name == "format" || name == "chars" || name == "StringBuilder" || name == "append" || name == "append_byte" || name == "append_char" || name == "build" || name == "__write" || name == "__exit" || name == "__args" || name == "__read_file" || name == "__io_errno" || name == "__run" || name == "__run_stderr" || name == "__run_exit_code" || name == "__run_signal" || name == "__run_errno" || name == "__write_file" || name == "__read" || name == "__poll" || name == "__list_dir" || name == "__mkdir" || name == "__stat" || name == "__getcwd" || name == "__getenv" || name == "__test_dir" || name == "__test_program" || name == "__sqrt" || name == "__f64_bits" || name == "__f64_from_bits" || name == "__unlink" || name == "__rmdir" || name == "__rename" || name == "__task_cancelled" || name == "__yield" || name == "__sleep" || name == "__clock_ns" || name == "__sleep_ns" || name == "__cancel_after" || name == "__disarm" || name == "__wait_readable" || name == "__wait_either" || name == "__wait_socket" || name == "__spawn" || name == "__run_with" || name == "__spawn_with" || name == "__reap" || name == "__kill" || name == "__close" || name == "__str_to_bytes" || name == "__bytes_to_str" || name == "__read_bytes" || name == "__write_bytes" || is_platform_primitive(name) || is_raw_memory_primitive(name) || is_notify_primitive(name) || is_wrapping_method(name)
 }
 
 // Whether `name` is one of the integers' builtin methods that wrap on purpose
@@ -1048,6 +1076,98 @@ fun map_kv_hint(expected: Option<Type>) -> Option<[Type]> {
         None => {},
     }
     return None
+}
+
+// A list or map literal's element may leave type parameters open that a
+// later element fixes (MYLA-401): `[Either.Left(1), Either.Right("a")]`,
+// `[None, Some(2)]`, `[[], [1]]`. Until then such a parameter is a hole, a
+// type parameter no program can name.
+fun hole() -> Type { return Type.TParam("?") }
+
+#test(Type.TEnum("Either", [Type.TInt(32, true), Type.TParam("?")]))[true]
+#test(Type.TList(Type.TList(Type.TParam("?"))))[true]
+#test(Type.TList(Type.TParam("T")))[false]
+fun has_hole(t: Type) -> bool { return mentions_param(t, "?") }
+
+#test(2)[[Type.TParam("?"), Type.TParam("?")]]
+#test(0)[[]]
+fun holes(n: int32) -> [Type] {
+    var out: [Type] = []
+    for i in 0..n { out.push(hole()) }
+    return out
+}
+
+// The hint an element that can't take a partial type gets: none while the
+// hint has a hole.
+#test(Some(Type.TList(Type.TParam("?"))))[None]
+#test(Some(Type.TStr))[Some(Type.TStr)]
+#test(None)[None]
+fun whole_hint(t: Option<Type>) -> Option<Type> {
+    return match t {
+        Some(x) => if has_hole(x) { None } else { Some(x) },
+        None => None,
+    }
+}
+
+// A type for messages, its holes as `_`.
+#test(Type.TEnum("Either", [Type.TInt(32, true), Type.TParam("?")]))["Either<int32, _>"]
+fun open_type_name(t: Type) -> str { return type_name(subst_type(t, [Subst { name: "?", ty: Type.TParam("_") }])) }
+
+// Two elements' types as one: a hole in either takes the other's type
+// there; None where they differ otherwise.
+#test(Type.TEnum("Either", [Type.TInt(32, true), Type.TParam("?")]), Type.TEnum("Either", [Type.TParam("?"), Type.TStr]))[Some(Type.TEnum("Either", [Type.TInt(32, true), Type.TStr]))]
+#test(Type.TList(Type.TParam("?")), Type.TList(Type.TEnum("Option", [Type.TParam("?")])))[Some(Type.TList(Type.TEnum("Option", [Type.TParam("?")])))]
+#test(Type.TMap(Type.TStr, Type.TParam("?")), Type.TMap(Type.TStr, Type.TBool))[Some(Type.TMap(Type.TStr, Type.TBool))]
+#test(Type.TEnum("Option", [Type.TInt(32, true)]), Type.TEnum("Option", [Type.TInt(64, true)]))[None]
+#test(Type.TEnum("Option", [Type.TParam("?")]), Type.TStr)[None]
+fun join_open(a: Type, b: Type) -> Option<Type> {
+    if type_eq(a, b) { return Some(a) }
+    if type_eq(a, hole()) { return Some(b) }
+    if type_eq(b, hole()) { return Some(a) }
+    match a {
+        Type.TEnum(n1, a1) => { match b { Type.TEnum(n2, a2) => { if n1 == n2 { match join_open_list(a1, a2) { Some(js) => { return Some(Type.TEnum(n1, js)) }, None => {} } } }, _ => {} } },
+        Type.TStruct(n1, a1) => { match b { Type.TStruct(n2, a2) => { if n1 == n2 { match join_open_list(a1, a2) { Some(js) => { return Some(Type.TStruct(n1, js)) }, None => {} } } }, _ => {} } },
+        Type.TActor(n1, a1) => { match b { Type.TActor(n2, a2) => { if n1 == n2 { match join_open_list(a1, a2) { Some(js) => { return Some(Type.TActor(n1, js)) }, None => {} } } }, _ => {} } },
+        Type.TList(e1) => { match b { Type.TList(e2) => { match join_open(e1, e2) { Some(j) => { return Some(Type.TList(j)) }, None => {} } }, _ => {} } },
+        Type.TTuple(e1) => { match b { Type.TTuple(e2) => { match join_open_list(e1, e2) { Some(js) => { return Some(Type.TTuple(js)) }, None => {} } }, _ => {} } },
+        Type.TMap(k1, v1) => { match b { Type.TMap(k2, v2) => { match join_open_list([k1, v1], [k2, v2]) { Some(js) => { return Some(Type.TMap(js[0], js[1])) }, None => {} } }, _ => {} } },
+        _ => {},
+    }
+    return None
+}
+
+// One column of a list or map literal (its elements, a map's keys or its
+// values) as its elements are checked: the type they share so far (`have`
+// once one is), possibly with holes; the first element, which a later
+// literal's type is unified with; the elements whose own type had a hole.
+struct LitColumn { ty: Type, have: bool, first: Expr, open: [Expr] }
+
+fun new_column(first: Expr) -> LitColumn { return LitColumn { ty: hole(), have: false, first: first, open: [] } }
+
+// A hint that is a hole says nothing.
+#test(Some(Type.TParam("?")))[None]
+#test(Some(Type.TList(Type.TParam("?"))))[Some(Type.TList(Type.TParam("?")))]
+fun drop_hole(t: Option<Type>) -> Option<Type> {
+    return match t {
+        Some(x) => if type_eq(x, hole()) { None } else { Some(x) },
+        None => None,
+    }
+}
+
+#test([Type.TParam("?"), Type.TStr], [Type.TBool, Type.TParam("?")])[Some([Type.TBool, Type.TStr])]
+#test([Type.TStr], [Type.TBool])[None]
+fun join_open_list(xs: [Type], ys: [Type]) -> Option<[Type]> {
+    if xs.len() != ys.len() { return None }
+    var out: [Type] = []
+    var i = 0
+    while i < xs.len() {
+        match join_open(xs[i], ys[i]) {
+            Some(j) => out.push(j),
+            None => { return None },
+        }
+        i += 1
+    }
+    return Some(out)
 }
 
 #test(None, "Box")[None]
@@ -1771,6 +1891,9 @@ pub struct Checker {
     // the functions (`std$str$join`) and methods (`str.trim`) checked code
     // calls or names: an implicit module's others aren't checked (MYLA-359)
     called: [str: bool],
+    lazy_bodies: LazyBodies,        // the bodies the loader left unparsed (MYLA-359)
+    read_bodies: [int64: Block],    // those read so far, by `body_key`
+    read_ids: [int32: bool],        // and their declarations
     std_impls: [int32: DeclOrigin], // the standard library's impls by node id (the loader's): their methods are its code (MYLA-320); and an entry std module's functions (MYLA-388)
     mutating_calls: [int32: bool],  // the calls of a `var self` method in an actor's methods, by node id: D95 counts one on a field of `self` as a change of it (MYLA-394)
     renames: [int32: str],          // a callee's node id -> the name it stands for, put in by `fill_in`: `cancel` inside std.task is `std$task$cancel` (MYLA-388)
@@ -1802,6 +1925,7 @@ pub struct Checker {
     call_kind: str,
     call_kind_id: int32,
     targs_taken: int32,             // the last call whose explicit type arguments a generic function or method took (D169)
+    open_at: int32,                 // the list or map literal's element that may leave type parameters open, as holes (MYLA-401)
     call_target: str,
     call_mutates: bool,
     fun_name: str,
@@ -1856,10 +1980,10 @@ fun new_checker(decls: [Decl]) -> Checker {
         allow_self: false, type_params: [], bounds_cur: [],
         cur_ret: None, has_cur_ret: false, ret_at: None, loop_depth: 0, defer_at: -1,
         frames: [], lambda_infer_active: false, lambda_depth: 0, cur_decl: -1, lambda_infer: [], stmt_match: false,
-        resolved: [:], call_defaults: [:], errs: [], warnings: [], primitives: false, called: [:], std_impls: [:], allowed: [], impl_allows: [], method_decl_allows: [], mains: [],
+        resolved: [:], call_defaults: [:], errs: [], warnings: [], primitives: false, called: [:], lazy_bodies: no_lazy_bodies(), read_bodies: [:], read_ids: [:], std_impls: [:], allowed: [], impl_allows: [], method_decl_allows: [], mains: [],
         skipped_decls: [:], skipped_fns: [:], broken_impls: [:], redefined: [:],
         lost_methods: [:], lost_traits: [:], failed_consts: [:], bodies: false,
-        call_kind: "", call_kind_id: -1, targs_taken: -1, call_target: "", call_mutates: false, fun_name: "", handovers: [:], become_words: [], passed_on: [],
+        call_kind: "", call_kind_id: -1, targs_taken: -1, open_at: -1, call_target: "", call_mutates: false, fun_name: "", handovers: [:], become_words: [], passed_on: [],
         actors: [:], conc_line: 0, conc_col: 0, conc_sp: no_span(), conc_node: -1, in_async: false, self_assignable: false, actor_self: "", builtin_as_method: false, cur_key: "",
         lams: [], awaited: [:], call_key: "", call_async: false, suspended: -1, task_init: false, in_guard: false, neg_lit: -1,
         task_line: 0, task_col: 0, task_sp: no_span(), task_node: -1, fill_decls: [:], renames: [:], mutating_calls: [:],
@@ -3053,17 +3177,19 @@ impl Checker {
             },
             None => {},
         }
-        // field names for collision check
-        var field_names: [str] = []
+        // a method may share a field's name, `x.name` being the field and
+        // `x.name(…)` the method, unless the field holds a function, which
+        // `x.name(…)` calls (MYLA-406)
+        var fun_fields: [str] = []
         let si = self.struct_idx(key)
-        if si >= 0 { for f in self.structs[si].fields { field_names.push(f.name) } }
+        if si >= 0 { for f in self.structs[si].fields { if is_tfunc_type(f.ty) { fun_fields.push(f.name) } } }
         for m in methods {
             // a method that can't be added is left out, body and all
             var bad: Option<CheckErr> = None
             match self.method_sig(key, m.name) { Some(x) => { bad = Some(self.duplicate_method(m, key, x)) }, None => {} }
             match bad {
                 Some(x) => {},
-                None => { if contains_str(field_names, m.name) { bad = Some(terr_at(m.line, m.col, m.sp, format("method '{}' collides with a field of '{}'", m.name, key))) } },
+                None => { if contains_str(fun_fields, m.name) { bad = Some(with_notes(terr_at(m.line, m.col, m.sp, format("method '{}' has the name of a field of '{}' that holds a function: a call '.{}(…)' would mean either", m.name, key, m.name)), [Note { label: "help", msg: "rename the method or the field; a field that holds no function may share a method's name", line: 0, col: 0, sp: no_span() }])) } },
             }
             // a function without `self` (D172) is a trait's: called as
             // `P.f()`, which a variant's name would take
@@ -3638,6 +3764,7 @@ impl Checker {
             Some(et) => { if enum_type_matches(et, enum_name, nparams) { return Ok(et) } },
             None => {},
         }
+        if self.open_at == e.id { return Ok(Type.TEnum(enum_name, holes(nparams))) }   // MYLA-401
         return Err(terr_at(e.line, e.col, e.sp, format("cannot infer type argument(s) for '{}'; annotate the binding (e.g. ': {}<...>')", variant, enum_name)))
     }
 
@@ -4156,12 +4283,23 @@ impl Checker {
             },
             None => {},
         }
+        // a list's element leaves its components open as the list does (MYLA-401)
+        let may_open = self.open_at == e.id
         var ts: [Type] = []
         var i = 0
         while i < elems.len() {
             var want: Option<Type> = None
             if have_exp { want = Some(exp_elems[i]) }
-            ts.push(self.expect_value(elems[i], want)?)
+            if may_open {
+                want = drop_hole(want)
+                if !self.takes_partial(elems[i]) { want = whole_hint(want) }
+                self.open_at = elems[i].id
+                let r = self.expect_value(elems[i], want)
+                self.open_at = e.id
+                ts.push(r?)
+            } else {
+                ts.push(self.expect_value(elems[i], want)?)
+            }
             i = i + 1
         }
         return Ok(Type.TTuple(ts))
@@ -4182,51 +4320,165 @@ impl Checker {
 
     #test(checker_on("[int]"), Expr { id: 40, line: 30, col: 20, sp: SrcSpan { sline: 30, scol: 20, eline: 30, ecol: 22 }, kind: ExprKind.ListLit([]) }, [], Some(Type.TList(Type.TParam("T"))))[Ok(Type.TList(Type.TParam("T")))]
     fun infer_list_lit(var self, e: Expr, elems: [Expr], expected: Option<Type>) -> Result<Type, CheckErr> {
-        var exp_elem: Option<Type> = list_elem_hint(expected)
+        // this list may be an element that leaves its type open (MYLA-401)
+        let may_open = self.open_at == e.id
+        var exp_elem: Option<Type> = drop_hole(list_elem_hint(expected))
         if elems.len() == 0 {
-            return match exp_elem { Some(el) => Ok(Type.TList(el)), None => Err(terr_at(e.line, e.col, e.sp, "cannot infer the element type of an empty list `[]`; annotate it (e.g. `: [int]`)")) }
+            match exp_elem { Some(el) => { return Ok(Type.TList(el)) }, None => {} }
+            if may_open { return Ok(Type.TList(hole())) }
+            return Err(terr_at(e.line, e.col, e.sp, "cannot infer the element type of an empty list `[]`; annotate it (e.g. `: [int]`)"))
         }
-        var elem_t = self.expect_value(elems[0], exp_elem)?
-        var i = 1
-        while i < elems.len() {
-            let et = self.expect_value(elems[i], Some(elem_t))?
-            elem_t = self.unify(elems[0], elem_t, elems[i], et)?
-            i = i + 1
+        var col = new_column(elems[0])
+        for x in elems { col = self.column_step(col, x, exp_elem)? }
+        return Ok(Type.TList(self.close_column(col, may_open)?))
+    }
+
+    // The column `col` with its next element `x` (MYLA-401). `x` is checked
+    // against the elements' type so far, and may leave type parameters open
+    // (`open_at`): a later element may fix them. A hint with a hole goes only
+    // to an element that can take it.
+    fun column_step(var self, col: LitColumn, x: Expr, exp: Option<Type>) -> Result<LitColumn, CheckErr> {
+        var hint = exp
+        if col.have { hint = Some(col.ty) }
+        if !self.takes_partial(x) { hint = whole_hint(hint) }
+        let saved = self.open_at
+        self.open_at = x.id
+        let r = self.expect_value(x, hint)
+        self.open_at = saved
+        let t = r?
+        var open = col.open
+        if has_hole(t) { open.push(x) }
+        if !col.have { return Ok(LitColumn { ty: t, have: true, first: x, open: open }) }
+        if !has_hole(t) && !has_hole(col.ty) { return Ok(LitColumn { ty: self.unify(col.first, col.ty, x, t)?, have: true, first: col.first, open: open }) }
+        return match join_open(col.ty, t) {
+            Some(j) => Ok(LitColumn { ty: j, have: true, first: col.first, open: open }),
+            None => Err(terr_at(x.line, x.col, x.sp, format("type mismatch: '{}' vs '{}'", open_type_name(col.ty), open_type_name(t)))),
         }
-        return Ok(Type.TList(elem_t))
+    }
+
+    // The column's type once every element is checked: the elements that
+    // left a parameter open take it. If none fixed it, the first of them says
+    // what it lacks as it would alone, unless the literal is itself an
+    // element that may stay open (`may_open`).
+    fun close_column(var self, col: LitColumn, may_open: bool) -> Result<Type, CheckErr> {
+        if has_hole(col.ty) {
+            if may_open { return Ok(col.ty) }
+            let x = col.open[0]
+            self.expect_value(x, None)?
+            return Err(terr_at(x.line, x.col, x.sp, format("cannot infer the type '{}' of this element; add a type annotation to guide inference", open_type_name(col.ty))))
+        }
+        for x in col.open { self.fill_open(x, col.ty)? }
+        return Ok(col.ty)
+    }
+
+    // An element that left type parameters open gets the type its list's
+    // elements share, and so do its own elements that left them open.
+    fun fill_open(var self, x: Expr, t: Type) -> Result<int32, CheckErr> {
+        self.resolved[x.id] = t
+        match x.kind {
+            ExprKind.ListLit(es) => {
+                match t {
+                    Type.TList(el) => { for y in es { if self.holed(y) { self.fill_open(y, el)? } } },
+                    _ => {},
+                }
+            },
+            ExprKind.TupleLit(es) => {
+                match t {
+                    Type.TTuple(ts) => {
+                        var i = 0
+                        while i < es.len() && i < ts.len() {
+                            if self.holed(es[i]) { self.fill_open(es[i], ts[i])? }
+                            i += 1
+                        }
+                    },
+                    _ => {},
+                }
+            },
+            ExprKind.MapLit(ents) => {
+                match t {
+                    Type.TMap(k, v) => {
+                        // a key type left open wasn't checked yet
+                        if ents.len() > 0 && self.holed(ents[0].key) { self.check_key(k, ents[0].key.line, ents[0].key.col, ents[0].key.sp)? }
+                        for en in ents {
+                            if self.holed(en.key) { self.fill_open(en.key, k)? }
+                            if self.holed(en.value) { self.fill_open(en.value, v)? }
+                        }
+                    },
+                    _ => {},
+                }
+            },
+            _ => {},
+        }
+        return Ok(0)
+    }
+
+    fun holed(self, x: Expr) -> bool {
+        return match self.resolved.get(x.id) { Some(t) => has_hole(t), None => false }
+    }
+
+    // Whether the element `x` can take a hint with a hole, its holes left
+    // open: a variant, a struct, tuple, list or map literal.
+    fun takes_partial(self, x: Expr) -> bool {
+        return match x.kind {
+            ExprKind.ListLit(es) => true,
+            ExprKind.MapLit(es) => true,
+            ExprKind.TupleLit(es) => true,
+            ExprKind.StructLit(n, fs) => true,
+            ExprKind.Name(n) => n == "None" && self.unshadowed(n),
+            ExprKind.GetField(target, field) => self.is_variant_ref(target, field),
+            ExprKind.Call(callee, args, targs) => targs.len() == 0 && (match callee.kind {
+                ExprKind.Name(n) => (n == "Some" || n == "Ok" || n == "Err") && self.unshadowed(n),
+                ExprKind.GetField(target, field) => self.is_variant_ref(target, field),
+                _ => false,
+            }),
+            _ => false,
+        }
+    }
+
+    fun unshadowed(self, n: str) -> bool { return match self.lookup(n) { Some(b) => false, None => true } }
+
+    fun is_variant_ref(self, target: Expr, field: str) -> bool {
+        return match self.enum_name_ref(target) {
+            Some(en) => self.enum_has_variant(en, field),
+            None => false,
+        }
     }
 
     #test(checker_on("[int]"), Expr { id: 101, line: 48, col: 29, sp: SrcSpan { sline: 48, scol: 29, eline: 48, ecol: 32 }, kind: ExprKind.MapLit([]) }, [], Some(Type.TMap(Type.TChar, Type.TInt(32, true))))[Ok(Type.TMap(Type.TChar, Type.TInt(32, true)))]
     fun infer_map_lit(var self, e: Expr, entries: [MapEntry], expected: Option<Type>) -> Result<Type, CheckErr> {
+        // this map may be an element that leaves its type open (MYLA-401)
+        let may_open = self.open_at == e.id
         var exp_k: Option<Type> = None
         var exp_v: Option<Type> = None
         var have_exp = false
         match map_kv_hint(expected) {
             Some(kv) => {
-                exp_k = Some(kv[0])
-                exp_v = Some(kv[1])
+                exp_k = drop_hole(Some(kv[0]))
+                exp_v = drop_hole(Some(kv[1]))
                 have_exp = true
             },
             None => {},
         }
         if entries.len() == 0 {
             if have_exp { return Ok(match expected { Some(et) => et, None => Type.TMap(Type.TStr, Type.TStr) }) }
+            if may_open { return Ok(Type.TMap(hole(), hole())) }
             return Err(terr_at(e.line, e.col, e.sp, "cannot infer the key/value types of an empty map `[:]`; annotate it (e.g. `: [str: int]`)"))
         }
         let k0 = entries[0].key
-        let v0 = entries[0].value
-        var key_t = self.expect_value(k0, exp_k)?
-        self.check_key(key_t, k0.line, k0.col, k0.sp)?
-        var val_t = self.expect_value(v0, exp_v)?
-        var i = 1
+        var keys = new_column(k0)
+        var vals = new_column(entries[0].value)
+        var i = 0
         while i < entries.len() {
-            let kt = self.expect_value(entries[i].key, Some(key_t))?
-            key_t = self.unify(k0, key_t, entries[i].key, kt)?
-            let vt = self.expect_value(entries[i].value, Some(val_t))?
-            val_t = self.unify(v0, val_t, entries[i].value, vt)?
+            keys = self.column_step(keys, entries[i].key, exp_k)?
+            if i == 0 && !has_hole(keys.ty) { self.check_key(keys.ty, k0.line, k0.col, k0.sp)? }
+            vals = self.column_step(vals, entries[i].value, exp_v)?
             i = i + 1
         }
-        return Ok(Type.TMap(key_t, val_t))
+        // a key type a later key fixed is checked once it is
+        let key_open = self.holed(k0)
+        let key_t = self.close_column(keys, may_open)?
+        if key_open && !has_hole(key_t) { self.check_key(key_t, k0.line, k0.col, k0.sp)? }
+        return Ok(Type.TMap(key_t, self.close_column(vals, may_open)?))
     }
 
     #test(checker_on("enum E { A, B(int) }"), expr_of("a.b[0]"), expr_of("a.b[0]"), expr_of("a.b[0]"))[Err(CheckErr { line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 2 }, msg: "unknown name 'a'", decl: -1, notes: [] })]
@@ -4295,6 +4547,7 @@ impl Checker {
                     Some(et) => { if enum_type_matches(et, enum_name, nparams) { return Ok(et) } },
                     None => {},
                 }
+                if self.open_at == e.id { return Ok(Type.TEnum(enum_name, holes(nparams))) }   // MYLA-401
                 return Err(terr_at(e.line, e.col, e.sp, format("cannot infer type argument(s) for '{}.{}'; annotate the binding (e.g. ': {}<...>')", enum_name, field, enum_name)))
             },
             None => {},
@@ -4419,7 +4672,7 @@ impl Checker {
         var subst: [Subst] = []
         match expected_args {
             Some(ea) => { if ea.len() == params.len() { var i = 0
-            while i < params.len() { subst.push(Subst { name: params[i], ty: ea[i] })
+            while i < params.len() { if !has_hole(ea[i]) { subst.push(Subst { name: params[i], ty: ea[i] }) }
             i = i + 1 } } },
             None => {},
         }
@@ -4435,7 +4688,11 @@ impl Checker {
         }
         var missing: [str] = []
         for p in params { if !subst_has(subst, p) { missing.push(p) } }
-        if missing.len() > 0 { return Err(terr_at(e.line, e.col, e.sp, format("cannot infer type parameter(s) {}; add a type annotation to guide inference", join_strs(missing, ", ")))) }
+        if missing.len() > 0 {
+            // a list's element leaves them to a later one (MYLA-401)
+            if self.open_at != e.id { return Err(terr_at(e.line, e.col, e.sp, format("cannot infer type parameter(s) {}; add a type annotation to guide inference", join_strs(missing, ", ")))) }
+            for p in missing { subst.push(Subst { name: p, ty: hole() }) }
+        }
         var j = 0
         while j < nodes.len() {
             let want = subst_type(template_types[j], subst)
@@ -7826,6 +8083,102 @@ impl Checker {
         self.impl_allows = []
     }
 
+    // `fd`, a function of the declaration `id` (a method's: its impl), with
+    // its body: one the loader left unparsed is read (`LazyBodies.parse`),
+    // once (MYLA-359). None when that fails: its errors are collected.
+    #test(checker_on("[int]"), 0, fun_of("fun f() { }"))[Some(FunData { line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 12 }, name: "f", params: [], ret_type: None, body: Some(Block { line: 1, col: 9, sp: SrcSpan { sline: 1, scol: 9, eline: 1, ecol: 12 }, stmts: [] }), attributes: [], type_params: [], receiver: None, is_pub: false, is_async: false })]
+    fun with_body(var self, id: int32, fd: FunData) -> Option<FunData> {
+        if !self.lazy_bodies.ids.contains(id) { return Some(fd) }
+        let key = body_key(id, fd.line, fd.col)
+        if !self.lazy_bodies.keys.contains(key) { return Some(fd) }
+        var g = fd
+        match self.read_bodies.get(key) {
+            Some(b) => {
+                g.body = Some(b)
+                return Some(g)
+            },
+            None => {},
+        }
+        let parse = self.lazy_bodies.parse
+        match parse(key) {
+            Ok(b) => {
+                self.read_bodies[key] = b
+                self.read_ids[id] = true
+                g.body = Some(b)
+                return Some(g)
+            },
+            Err(es) => {
+                for e in es { self.note(e) }
+                return None
+            },
+        }
+    }
+
+    // The bodies read (`with_body`) in place of their empty blocks, in the
+    // declarations and the tables of functions and methods, which the
+    // interpreter and the code generator read (MYLA-359).
+    #test(checker_on("[int]"))[()]
+    fun put_bodies(var self) {
+        if self.read_bodies.len() == 0 { return }
+        var i = 0
+        while i < self.decls.len() {
+            let d = self.decls[i]
+            if self.read_ids.contains(d.id) {
+                let k = match d.kind {
+                    DeclKind.FunDecl(fd) => DeclKind.FunDecl(self.read_into(d.id, fd)),
+                    DeclKind.ImplDecl(t, ms, tps, tr, targs, attrs) => {
+                        var out: [FunData] = []
+                        for m in ms { out.push(self.read_into(d.id, m)) }
+                        DeclKind.ImplDecl(t, out, tps, tr, targs, attrs)
+                    },
+                    _ => d.kind,
+                }
+                self.decls[i] = Decl { id: d.id, line: d.line, col: d.col, sp: d.sp, kind: k }
+            }
+            i += 1
+        }
+        i = 0
+        while i < self.functions.len() {
+            let sig = self.functions[i]
+            if sig.has_decl && self.read_ids.contains(sig.decl_id) {
+                var s = sig
+                s.decl = self.read_into(sig.decl_id, sig.decl)
+                self.functions[i] = s
+            }
+            i += 1
+        }
+        i = 0
+        while i < self.methods.len() {
+            let sig = self.methods[i].sig
+            if sig.has_decl && self.read_ids.contains(sig.decl_id) {
+                var s = sig
+                s.decl = self.read_into(sig.decl_id, sig.decl)
+                var m = self.methods[i]
+                m.sig = s
+                self.methods[i] = m
+            }
+            i += 1
+        }
+        i = 0
+        while i < self.method_decls.len() {
+            let id = self.method_decl_ids[i]
+            if self.read_ids.contains(id) { self.method_decls[i] = self.read_into(id, self.method_decls[i]) }
+            i += 1
+        }
+    }
+
+    // `fd` of the declaration `id` with its body if it was read.
+    fun read_into(self, id: int32, fd: FunData) -> FunData {
+        return match self.read_bodies.get(body_key(id, fd.line, fd.col)) {
+            Some(b) => {
+                var g = fd
+                g.body = Some(b)
+                g
+            },
+            None => fd,
+        }
+    }
+
     // The functions and impls (by node id) of the implicit modules whose
     // bodies are checked only once called (MYLA-359): impls of no trait.
     #test(checker_on("[int]"))[[:]]
@@ -7882,9 +8235,14 @@ impl Checker {
 
     // The body of `fd` (declaration `id`; a method of the type with key
     // `key`, else ""), on its own: its error is collected.
-    fun check_body(var self, id: int32, fd: FunData, key: str) {
+    fun check_body(var self, id: int32, unread: FunData, key: str) {
         if self.full() { return }
         self.reset_state(id)
+        // a body the loader left unparsed is read now (MYLA-359)
+        let fd = match self.with_body(id, unread) {
+            Some(f) => f,
+            None => { return },
+        }
         self.cur_key = key
         // its own `#allow`s and, for a method, its impl block's
         self.allowed = allowed_warnings(concat_attrs(fd.attributes, self.impl_allows))
@@ -8102,6 +8460,13 @@ pub fun build_checker_with(decls: [Decl], next_id: int32, primitives: bool) -> R
 // `build_checker_with` of a linked program whose standard library's impls,
 // by node id, are `std_impls` (`Loaded.std_impls`, MYLA-320).
 pub fun build_checker_std(decls: [Decl], next_id: int32, primitives: bool, std_impls: [int32: DeclOrigin]) -> Result<Checker, [CheckErr]> {
+    return build_checker_lazy(decls, next_id, primitives, std_impls, no_lazy_bodies())
+}
+
+// `build_checker_std` of a linked program whose implicit modules' bodies
+// the loader left unparsed (`Loaded.bodies`, MYLA-359): each is read once
+// checked, and in the returned checker's declarations.
+pub fun build_checker_lazy(decls: [Decl], next_id: int32, primitives: bool, std_impls: [int32: DeclOrigin], bodies: LazyBodies) -> Result<Checker, [CheckErr]> {
     let pre = prelude(next_id)
     var all: [Decl] = []
     for d in pre.program.decls { all.push(d) }
@@ -8109,9 +8474,11 @@ pub fun build_checker_std(decls: [Decl], next_id: int32, primitives: bool, std_i
     var c = new_checker(all)
     c.primitives = primitives
     c.std_impls = std_impls
+    c.lazy_bodies = bodies
     c.next_id = pre.next_id
     let r = c.run_all()
     match r { Ok(x) => {}, Err(e) => { return Err(e) } }
+    c.put_bodies()
     // every call with all its arguments, for whatever runs the program (D136)
     c.fill_in()
     return Ok(c)
@@ -8334,6 +8701,15 @@ impl Checker {
             if !is_str(s_t) { return Err(terr_at(e.line, e.col, e.sp, format("__write() expects a string, found '{}'", type_name(s_t)))) }
             return Ok(None)
         }
+        if name == "__write_bytes" {
+            // `__write` of a list of bytes, without a string between (D177)
+            if args.len() != 2 { return Err(terr_at(e.line, e.col, e.sp, "__write_bytes() takes (fd: int32, b: [uint8])")) }
+            let fd_t = self.expect_value(args[0], Some(t_int()))?
+            if !is_int(fd_t) { return Err(terr_at(e.line, e.col, e.sp, format("__write_bytes() fd must be an integer, found '{}'", type_name(fd_t)))) }
+            let b_t = self.expect_value(args[1], Some(Type.TList(t_byte())))?
+            if !type_eq(b_t, Type.TList(t_byte())) { return Err(terr_at(args[1].line, args[1].col, args[1].sp, format("__write_bytes() takes (fd: int32, b: [uint8]): found '{}'", type_name(b_t)))) }
+            return Ok(None)
+        }
         if name == "__exit" {
             if args.len() != 1 { return Err(terr_at(e.line, e.col, e.sp, "__exit() takes exactly one argument")) }
             let c_t = self.expect_value(args[0], Some(t_int()))?
@@ -8357,6 +8733,15 @@ impl Checker {
             let n_t = self.expect_value(args[1], Some(t_int()))?
             if !is_int(n_t) { return Err(terr_at(e.line, e.col, e.sp, format("__read() n must be an integer, found '{}'", type_name(n_t)))) }
             return Ok(Some(Type.TStr))
+        }
+        if name == "__read_bytes" {
+            // `__read`'s bytes as a list, without a string between (D177)
+            if args.len() != 2 { return Err(terr_at(e.line, e.col, e.sp, "__read_bytes() takes (fd: int32, n: int32)")) }
+            let fd_t = self.expect_value(args[0], Some(t_int()))?
+            if !is_int(fd_t) { return Err(terr_at(e.line, e.col, e.sp, format("__read_bytes() fd must be an integer, found '{}'", type_name(fd_t)))) }
+            let n_t = self.expect_value(args[1], Some(t_int()))?
+            if !is_int(n_t) { return Err(terr_at(e.line, e.col, e.sp, format("__read_bytes() n must be an integer, found '{}'", type_name(n_t)))) }
+            return Ok(Some(Type.TList(t_byte())))
         }
         if name == "__poll" {
             if args.len() != 2 { return Err(terr_at(e.line, e.col, e.sp, "__poll() takes (fd: int32, timeout_ms: int32)")) }
@@ -9238,7 +9623,16 @@ impl Checker {
                             None => false,
                         }
                         if is_func { return self.infer_indirect_call(e, callee, args) }
-                        if match fopt { Some(ft) => has_error(ft), None => false } { return Err(poisoned()) }   // the field's type failed (MYLA-110)
+                        match fopt {
+                            Some(ft) => {
+                                if has_error(ft) { return Err(poisoned()) }   // the field's type failed (MYLA-110)
+                                if !self.lost_methods.contains(field) {
+                                    // a field that holds no function (MYLA-406)
+                                    return Err(with_notes(terr_at(e.line, e.col, e.sp, format("type '{}' has no method '{}'", type_name(recv_type), field)), [Note { label: "help", msg: format("'{}' is a field of type '{}', not a function: read it without '()'", field, type_name(ft)), line: 0, col: 0, sp: no_span() }]))
+                                }
+                            },
+                            None => {},
+                        }
                     },
                     _ => {},
                 }

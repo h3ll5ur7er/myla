@@ -83,11 +83,10 @@ pub fun errno_text(code: int32) -> str {
 // objects, so a function that takes "any stream" is generic, and takes the
 // stream by value (`read_all`, `copy`).
 //
-// `Read` and `Write` each have a method for bytes as `[uint8]` and one for
-// bytes as `str` (strings are bytes, D164): a descriptor reads and writes
-// `str`, a memory stream holds `[uint8]`, and turning one into the other
-// goes byte by byte. So a stream gives each its own way, and text through a
-// `Buffered` over a descriptor isn't converted at all.
+// `Read` and `Write` deal in bytes, `[uint8]`, only (D177): a `str` and a
+// `[uint8]` convert in one copy (MYLA-369), so text has no method of its own
+// on every stream. `Buffered` gives text (`read_line`, `read_exact`,
+// `read_to_end`) and `BufferedWriter` takes it (`write_str`).
 
 // A source of bytes.
 pub trait Read {
@@ -95,17 +94,12 @@ pub trait Read {
     // end of the input (and for `n <= 0`). Fewer than `n` doesn't mean the
     // end: only `[]` does.
     fun read(var self, n: int) -> Result<[uint8], IoError>
-    // `read`, the bytes as a `str` (any bytes; it may end inside a
-    // character); "" at the end.
-    fun read_str(var self, n: int) -> Result<str, IoError>
 }
 
 // A sink of bytes.
 pub trait Write {
     // All of `b`, or the error that stopped it; `b.len()`.
     fun write(var self, b: [uint8]) -> Result<int, IoError>
-    // `write` of the bytes of `s`; `s.len()`.
-    fun write_str(var self, s: str) -> Result<int, IoError>
     // Whatever is buffered passed on.
     fun flush(var self) -> Result<(), IoError>
 }
@@ -180,13 +174,8 @@ impl Read for FdStream {
     // One read of at most `n` bytes; it blocks until there are some or the
     // input ends.
     fun read(var self, n: int) -> Result<[uint8], IoError> {
-        let s = self.read_str(n)?          // not inside the call: MYLA-338's report
-        return Ok(bytes_of(s))
-    }
-
-    fun read_str(var self, n: int) -> Result<str, IoError> {
-        if n <= 0 { return Ok("") }
-        let chunk = __read(self.fd, n)
+        if n <= 0 { return Ok([]) }
+        let chunk = __read_bytes(self.fd, n)
         let err = __io_errno()
         if err != 0 { return Err(from_errno(err)) }
         return Ok(chunk)
@@ -194,17 +183,13 @@ impl Read for FdStream {
 }
 
 impl Write for FdStream {
-    fun write(var self, b: [uint8]) -> Result<int, IoError> {
-        return self.write_str(text_of(b, 0, b.len()))
-    }
-
     // A closed pipe is `BrokenPipe`, but on the standard output or error,
     // where it ends the program quietly, as `write` does (D146).
-    fun write_str(var self, s: str) -> Result<int, IoError> {
-        __write(self.fd, s)
+    fun write(var self, b: [uint8]) -> Result<int, IoError> {
+        __write_bytes(self.fd, b)
         let err = __io_errno()
         if err != 0 { return Err(from_errno(err)) }
-        return Ok(s.len())
+        return Ok(b.len())
     }
 
     // Nothing to do: nothing is buffered.
@@ -302,15 +287,6 @@ impl Read for MemoryStream {
         self.pos = end
         return Ok(out)
     }
-
-    #test(from_str("abc"), 2)[Ok("ab")]
-    #test(from_str("abc"), 0)[Ok("")]
-    fun read_str(var self, n: int) -> Result<str, IoError> {
-        let end = self.read_end(n)
-        let out = text_of(self.data, self.pos, end)
-        self.pos = end
-        return Ok(out)
-    }
 }
 
 impl Write for MemoryStream {
@@ -328,24 +304,6 @@ impl Write for MemoryStream {
         }
         while i < n {
             self.data.push(b[i])
-            i += 1
-        }
-        self.pos = self.pos + n
-        return Ok(n)
-    }
-
-    #test(memory_stream(), "xyz")[Ok(3)]
-    fun write_str(var self, s: str) -> Result<int, IoError> {
-        self.fill_gap()
-        let n = s.len()
-        var i = 0
-        let over = self.data.len() - self.pos
-        while i < n && i < over {
-            self.data[self.pos + i] = s[i]
-            i += 1
-        }
-        while i < n {
-            self.data.push(s[i])
             i += 1
         }
         self.pos = self.pos + n
@@ -376,7 +334,8 @@ impl Seek for MemoryStream {
 
 // A reader with a buffer in front of the stream `R` it owns: lines, exact
 // counts and the rest, as text (the bytes verbatim). Keep it in a `var` (or
-// a field of one) and read through its methods. It is a `Read` itself.
+// a field of one) and read through its methods. It is a `Read` itself. It
+// pulls bytes and keeps them as text, each read's converted once (D177).
 //
 // The stream is the one element of `src`, and `pull` takes it out for a
 // read and puts it back: a stream that is a plain field would be shared
@@ -412,11 +371,17 @@ pub fun reader(fd: int32) -> Reader {
 
 impl<R: Read> Buffered<R> {
     // One read of the stream, of up to `n` bytes.
-    fun pull(var self, n: int32) -> Result<str, IoError> {
+    fun pull_bytes(var self, n: int32) -> Result<[uint8], IoError> {
         var r = self.src.pop()
-        let got = r.read_str(n)
+        let got = r.read(n)
         self.src.push(r)
         return got
+    }
+
+    // `pull_bytes`, the bytes as text.
+    fun pull(var self, n: int32) -> Result<str, IoError> {
+        let b = self.pull_bytes(n)?        // not inside the call: MYLA-338's report
+        return Ok(text_of(b, 0, b.len()))
     }
 
     // Read at least `want` more bytes if the input has them (one `read` of at
@@ -512,29 +477,24 @@ impl<R: Read> Buffered<R> {
 }
 
 impl<R: Read> Read for Buffered<R> {
-    fun read(var self, n: int) -> Result<[uint8], IoError> {
-        let s = self.read_str(n)?          // not inside the call: MYLA-338's report
-        return Ok(bytes_of(s))
-    }
-
     // From the buffer; a read of at least CHUNK bytes with nothing buffered
     // goes straight to the stream.
-    fun read_str(var self, n: int) -> Result<str, IoError> {
-        if n <= 0 { return Ok("") }
+    fun read(var self, n: int) -> Result<[uint8], IoError> {
+        if n <= 0 { return Ok([]) }
         if self.pos >= self.buf.len() {
-            if self.eof { return Ok("") }
+            if self.eof { return Ok([]) }
             if n >= CHUNK {
-                let chunk = self.pull(n)?
+                let chunk = self.pull_bytes(n)?
                 if chunk.len() == 0 { self.eof = true }
                 return Ok(chunk)
             }
-            if !self.fill(n)? { return Ok("") }
+            if !self.fill(n)? { return Ok([]) }
         }
         var end = self.buf.len()
         if n < end - self.pos { end = self.pos + n }
         let out = slice(self.buf, self.pos, end)
         self.pos = end
-        return Ok(out)
+        return Ok(bytes_of(out))
     }
 }
 
@@ -664,18 +624,26 @@ pub fun buffered_writer_with<W: Write>(w: W, capacity: int32) -> BufferedWriter<
 }
 
 impl<W: Write> BufferedWriter<W> {
-    // One write of `s` to the stream.
-    fun push_out(var self, s: str) -> Result<int, IoError> {
+    // One write of `b` to the stream.
+    fun push_out(var self, b: [uint8]) -> Result<int, IoError> {
         var w = self.sink.pop()
-        let r = w.write_str(s)
+        let r = w.write(b)
         self.sink.push(w)
         return r
+    }
+
+    // The bytes of `s` written: gathered in the buffer, or straight on if
+    // they are as many as it holds, or more; `s.len()`.
+    fun write_str(var self, s: str) -> Result<int, IoError> {
+        if !self.make_room(s.len())? { return self.push_out(bytes_of(s)) }
+        self.buf.append(s)
+        return Ok(s.len())
     }
 
     // The buffer passed on, without flushing the stream.
     fun drain(var self) -> Result<(), IoError> {
         if self.buf.len() == 0 { return Ok(()) }
-        self.push_out(self.buf.build())?
+        self.push_out(bytes_of(self.buf.build()))?
         self.buf = StringBuilder(self.cap)
         return Ok(())
     }
@@ -699,16 +667,9 @@ impl<W: Write> BufferedWriter<W> {
 
 impl<W: Write> Write for BufferedWriter<W> {
     fun write(var self, b: [uint8]) -> Result<int, IoError> {
-        let s = text_of(b, 0, b.len())
-        if !self.make_room(s.len())? { return self.push_out(s) }
-        self.buf.append(s)
-        return Ok(s.len())
-    }
-
-    fun write_str(var self, s: str) -> Result<int, IoError> {
-        if !self.make_room(s.len())? { return self.push_out(s) }
-        self.buf.append(s)
-        return Ok(s.len())
+        if !self.make_room(b.len())? { return self.push_out(b) }
+        self.buf.append(text_of(b, 0, b.len()))
+        return Ok(b.len())
     }
 
     // The buffer passed on, then the stream flushed.
@@ -741,9 +702,9 @@ pub fun read_all<R: Read>(r: R) -> Result<[uint8], IoError> {
     var src = r
     var out = StringBuilder()
     while true {
-        let chunk = src.read_str(CHUNK)?
+        let chunk = src.read(CHUNK)?
         if chunk.len() == 0 { break }
-        out.append(chunk)
+        out.append(text_of(chunk, 0, chunk.len()))
     }
     return Ok(bytes_of(out.build()))
 }
@@ -755,9 +716,9 @@ pub fun copy<R: Read, W: Write>(r: R, w: W) -> Result<W, IoError> {
     var src = r
     var dst = w
     while true {
-        let chunk = src.read_str(COPY_CHUNK)?
+        let chunk = src.read(COPY_CHUNK)?
         if chunk.len() == 0 { break }
-        dst.write_str(chunk)?
+        dst.write(chunk)?
     }
     dst.flush()?
     return Ok(dst)
@@ -1045,9 +1006,11 @@ fun any_bytes() {
         Err(_) => panic("copy")
     }
     var m = from_bytes(b)
-    match m.read_str(300) {
-        Ok(s) => holds(s.len() == 256 && s[0] == 0u8 && s[255] == 255u8, "read_str")
-        Err(_) => panic("read_str")
+    holds(said_bytes(m.read(300)) == "256 0 255", "read")
+    var r = buffered(from_bytes(b))
+    match r.read_to_end() {
+        Ok(s) => holds(s.len() == 256 && s[0] == 0u8 && s[255] == 255u8, "read_to_end")
+        Err(_) => panic("read_to_end")
     }
 }
 
@@ -1072,4 +1035,58 @@ fun descriptors() {
     holds(shown(bad.read(4)) == "<error>", "a read of a bad descriptor fails")
     holds(said(bad.write(bytes_of("x"))) == "Other(9)", "and a write")
     holds(said(bad.seek(SeekFrom.Start(0))) == "Other(9)", "and a seek")
+}
+
+// A stream of its own implements `read` alone, or `write` and `flush` (D177),
+// and `Buffered`, `BufferedWriter`, `read_all` and `copy` work over it.
+struct Countdown {
+    left: int,
+}
+
+impl Read for Countdown {
+    // Up to `n` of the bytes "9", "8", … "0", at most three a read.
+    fun read(var self, n: int) -> Result<[uint8], IoError> {
+        var out: [uint8] = []
+        while out.len() < n && out.len() < 3 && self.left > 0 {
+            self.left -= 1
+            out.push(48u8 + (self.left as uint8))
+        }
+        return Ok(out)
+    }
+}
+
+struct Tally {
+    seen: int,
+    flushes: int,
+}
+
+impl Write for Tally {
+    fun write(var self, b: [uint8]) -> Result<int, IoError> {
+        self.seen += b.len()
+        return Ok(b.len())
+    }
+
+    fun flush(var self) -> Result<(), IoError> {
+        self.flushes += 1
+        return Ok(())
+    }
+}
+
+#test
+fun bytes_only_streams() {
+    var r = buffered(Countdown { left: 10 })
+    holds(shown_line(r.read_exact(4)) == "9876", "read_exact over short reads")
+    holds(said(r.read_to_end()) == "543210", "and the rest")
+    holds(shown(read_all(Countdown { left: 5 })) == "43210", "read_all")
+    var w = buffered_writer_with(Tally { seen: 0, flushes: 0 }, 4)
+    holds(said(w.write_str("ab")) == "2", "write_str into the buffer")
+    holds(said(w.write(bytes_of("cdefg"))) == "5", "write past it")
+    match w.into_inner() {
+        Ok(t) => holds(t.seen == 7 && t.flushes == 1, "every byte, flushed once")
+        Err(_) => panic("into_inner")
+    }
+    match copy(Countdown { left: 7 }, Tally { seen: 0, flushes: 0 }) {
+        Ok(t) => holds(t.seen == 7, "copy")
+        Err(_) => panic("copy")
+    }
 }
