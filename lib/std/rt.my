@@ -723,12 +723,13 @@ pub fun sock_recv_from(h: int, n: int) -> str {
         }
     }
     record(got)
-    if got < 0 {
-        __store64(cell, 0)
-    } else {
-        __store64(cell, 19 + got)
+    var len: int64 = 0
+    if got >= 0 {
+        len = 19 + got
     }
-    return __str_of(cell)
+    let fit = fitted(cell, 8, len)
+    __store64(fit, len)
+    return __str_of(fit)
 }
 
 // `__sock_addr(h, peer)`: the address record of the socket's own end
