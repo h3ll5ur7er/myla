@@ -118,6 +118,8 @@ fun main() {
 
 `Read` and `Write` deal in bytes only (D177): a stream implements `read`, or `write` and `flush`, and nothing for text. Strings are bytes (D164), and since [[MYLA-369]] `std.bytes`'s `from_str` and `to_str` convert in one allocation and one copy (the primitives `__str_to_bytes` and `__bytes_to_str`), so a `[uint8]` costs about what a `str` does (the measurements below); the streams of a descriptor (`FdStream`, `fs.File`, a child's pipes) read into a `[uint8]` and write from one themselves (the primitives `__read_bytes` and `__write_bytes`), so their bytes aren't converted at all. Text goes through the adapters: a `Buffered` pulls bytes, keeps them as text and gives `read_line`, `read_exact` and `read_to_end`; a `BufferedWriter` takes text with `write_str`. To write a few bytes of text to an unbuffered stream, `w.write(bytes.from_str(s))` (`import std.bytes as bytes`). Until [[MYLA-399]] each trait had a `str` twin, `read_str` and `write_str`, from when the two kinds converted only byte by byte ([[MYLA-338]]).
 
+A read that gives fewer bytes than it asks for gives a list, or a string, of their size: `__read_bytes`, `__read` and `__sock_recv` keep the cell they allocated for the request only when they filled at least half of it, else they copy what they got into a cell of its size ([[MYLA-420]], the 2026-11-10 review's S1). Before, 33 MB read from a pipe 64 KiB at a time with reads of 16 MiB kept 504 cells of 16 MiB and ran out of memory on wasm32; now it reads them in 105 MB there.
+
 ### Streams of this module
 
 | Item | What it is |

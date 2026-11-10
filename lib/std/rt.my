@@ -683,8 +683,9 @@ pub fun sock_recv(h: int, n: int) -> str {
             got = 0
         }
     }
-    __store64(cell, got)
-    return __str_of(cell)
+    let fit = fitted(cell, 8, got)
+    __store64(fit, got)
+    return __str_of(fit)
 }
 
 // `__sock_send_to(h, s, addr)`: `s` sent as one datagram to the address
@@ -1049,6 +1050,22 @@ pub fun close(fd: int) {
 
 // --- standard input ----------------------------------------------------------
 
+// The cell `cell` from `__alloc`, whose bytes from `head` on hold the `got`
+// that one read gave: itself if it is no more than twice their size, else a
+// cell of their size, with them copied, and `cell` freed. So a short read
+// keeps no more than it got, not the room its request asked for (S1: 33 MB
+// read from a pipe 64 KiB at a time by reads of 16 MB kept 513 cells of
+// 16 MB, and ran out of memory on wasm32).
+fun fitted(cell: int64, head: int64, got: int64) -> int64 {
+    if (got + head) * 2 >= __load64(cell - 16) {
+        return cell
+    }
+    let small = __alloc(got + head)
+    __copy_bytes(small + head, cell + head, got)
+    __free(cell)
+    return small
+}
+
 // `__read`: what one read of at most `n` bytes of `fd` gives (retried on
 // EINTR): empty at the end of the input, for `n <= 0`, or with the errno.
 pub fun read(fd: int, n: int) -> str {
@@ -1069,8 +1086,9 @@ pub fun read(fd: int, n: int) -> str {
             got = 0
         }
     }
-    __store64(cell, got)
-    return __str_of(cell)
+    let fit = fitted(cell, 8, got)
+    __store64(fit, got)
+    return __str_of(fit)
 }
 
 // `__read_bytes` (D177): `__read`, the bytes read into a list.
@@ -1092,9 +1110,10 @@ pub fun read_bytes(fd: int, n: int) -> [uint8] {
             got = 0
         }
     }
-    __store64(cell, got)
-    __store64(cell + 8, __load64(cell - 16) - 16)
-    return __list_of(cell)
+    let fit = fitted(cell, 16, got)
+    __store64(fit, got)
+    __store64(fit + 8, __load64(fit - 16) - 16)
+    return __list_of(fit)
 }
 
 // `__poll`: 1 when a read of `fd` won't block (input, its end, or an error),
