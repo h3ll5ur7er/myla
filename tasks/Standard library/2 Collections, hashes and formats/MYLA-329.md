@@ -29,3 +29,5 @@ Wave 2 of [[Project/Standard-library-roadmap]], roadmap #7, #37, #38. Conversion
 ## Review 2026-11-09
 
 Signed off in [[Project/Review-2026-11-09]], with a follow-up in [[MYLA-425]]: `EncodingError` and `UrlError` have no `Format`; `to_str` and reference resolution are [[MYLA-422]]'s.
+
+- `Url.to_str` and reference resolution: done in [[MYLA-422]] (a port with a leading zero is `BadPort`; `url.resolve`, RFC 3986 section 5.2, with dot segments).
