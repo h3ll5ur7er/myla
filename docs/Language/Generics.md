@@ -187,3 +187,5 @@ fun main() {
 | Native backend | Monomorphizes during code generation with a substitution map (the retired Python backend stamped out copies in a separate pass and checked the concrete program again) |
 
 Each instantiation gets its own name, whatever the type arguments are called ([[MYLA-9]], [[Architecture/Monomorphization]]).
+
+Polymorphic recursion, a generic function calling itself with a larger type (`grow<T>` calling `grow<[T]>`), runs in the interpreter, but native code would need an instance for every size: `myla build` refuses the call, `the instances of 'grow' nest without end: this call asks for one whose type arguments are 65 types deep (the limit is 64)`, as a type error ([[MYLA-415]]). The operators of a generic impl (`impl<T: Add> Add for Box<T>`) call its instance for the operands' types, as its methods do.
