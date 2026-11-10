@@ -60,7 +60,7 @@ An empty separator splits into characters, as `chars()` does, but as strings: `"
 | `strip_suffix(suffix: str) -> Option<str>` | The string before `suffix`, or `None` |
 | `to_upper() -> str`, `to_lower() -> str` | With the ASCII letters changed |
 | `repeat(n: int) -> str` | The string `n` times; `""` for `n <= 0`. The result's room is taken at once; more than a `str` holds (2,147,483,647 bytes) is a runtime error naming `n` (D184) |
-| `pad_start(width: int, fill: char) -> str`, `pad_end(width: int, fill: char) -> str` | At least `width` characters, with `fill` added in front or behind; a longer string is never cut. The width counts characters, as a format spec's does |
+| `pad_start(width: int, fill: char) -> str`, `pad_end(width: int, fill: char) -> str` | At least `width` characters, with `fill` added in front or behind; a longer string is never cut, and any width at most its length gives it back. The width counts characters, as a format spec's does; a result longer than a `str` holds is a runtime error naming `width` (D184) |
 
 ## Bytes
 

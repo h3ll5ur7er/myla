@@ -766,7 +766,7 @@ impl<W: Write> BufferedWriter<W> {
     // whether they go in it (false: they are as many as it holds, or more,
     // and go straight on).
     fun make_room(var self, n: int32) -> Result<bool, IoError> {
-        if self.buf.len() + n <= self.cap { return Ok(true) }
+        if n <= self.cap - self.buf.len() { return Ok(true) }
         self.drain()?
         return Ok(n < self.cap)
     }

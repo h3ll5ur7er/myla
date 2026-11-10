@@ -347,12 +347,10 @@ impl str {
     #test("42", 5, ' ')["   42"]
     #test("hello", 3, ' ')["hello"] // never cut
     #test("é", 3, '·')["··é"] // the width counts characters
+    #test("ab", -2147483648, ' ')["ab"] // any width (D184)
+    #test("ab", 2147483647, 'é')[panic("std.str.pad_start: width = 2147483647 makes more than a str holds")]
     fun pad_start(self, width: int, fill: char) -> str {
-        let k = width - char_count(self)
-        if k <= 0 {
-            return self
-        }
-        return format("{}", fill).repeat(k) + self
+        return padding(self, width, fill, "pad_start") + self
     }
 
     // At least `width` characters, with `fill` added behind.
@@ -360,12 +358,9 @@ impl str {
     #test("ab", 4, '.')["ab.."]
     #test("hello", 3, ' ')["hello"]
     #test("é", 2, '-')["é-"]
+    #test("ab", -2147483648, ' ')["ab"]
     fun pad_end(self, width: int, fill: char) -> str {
-        let k = width - char_count(self)
-        if k <= 0 {
-            return self
-        }
-        return self + format("{}", fill).repeat(k)
+        return self + padding(self, width, fill, "pad_end")
     }
 
     // Every match of `old` replaced by `new`. An empty `old` matches
@@ -426,6 +421,24 @@ impl str {
         sb.append(self, start, self.len())
         return sb.build()
     }
+}
+
+// The `fill`s that make `s` `width` characters long, none if it is as
+// long; more than a str holds is a runtime error naming `width` and the
+// method `name` (D184).
+#test("ab", 4, '.', "pad_end")[".."]
+#test("abc", 2, '.', "pad_end")[""]
+fun padding(s: str, width: int, fill: char, name: str) -> str {
+    let have = char_count(s)
+    if width <= have {
+        return ""
+    }
+    let one = f"{fill}"
+    let k = width - have
+    if (k as int64) * (one.len() as int64) + (s.len() as int64) > 2147483647 {
+        panic(f"std.str.{name}: width = {width} makes more than a str holds")
+    }
+    return one.repeat(k)
 }
 
 // Whether `needle` is in `s` at byte `i` (which must leave room for it).
