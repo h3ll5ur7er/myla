@@ -1720,6 +1720,163 @@ fun main() {
     print(twice(Sq { side: 1 }).scaled(5).area())
 }
 """,
+    "generic_code_per_width": """// generic code typed by a type parameter, per integer width and float
+// size: arithmetic, comparison, sorting and formatting use the concrete
+// type, as natively (MYLA-414, H1)
+import std.iter as iter
+
+fun add<T: Add>(a: T, b: T) -> T { return a + b }
+fun sub<T: Sub>(a: T, b: T) -> T { return a - b }
+fun mul<T: Mul>(a: T, b: T) -> T { return a * b }
+fun div<T: Div>(a: T, b: T) -> T { return a / b }
+fun rem<T: Rem>(a: T, b: T) -> T { return a % b }
+fun less<T: Ord>(a: T, b: T) -> bool { return a < b }
+fun show<T: Format>(v: T) -> str { return f"{v}" }
+fun shown<T: Format>(o: Option<T>) -> str {
+    return match o {
+        Some(v) => f"S{v}"
+        None => "N"
+    }
+}
+fun largest<T: Ord>(xs: [T]) -> T {
+    var m = xs[0]
+    for x in xs { if x > m { m = x } }
+    return m
+}
+
+// each operation on `hi`, the type's largest value, and `lo`, its
+// smallest, through the generic functions
+fun row<T: Add + Sub + Mul + Div + Rem + Ord + Format>(name: str, hi: T, lo: T, one: T, two: T) {
+    let s = [hi, lo, one].sorted()
+    let line = f"{name}: {show(sub(hi, one))} {show(add(lo, one))} {show(div(hi, two))} {show(rem(hi, two))} {show(mul(one, two))} {less(lo, hi)} {less(hi, lo)} {show(s[0])} {show(s[2])} {show(largest([one, hi, lo]))} {shown(Some(hi))} {[lo, hi].is_sorted()}"
+    print(line)
+}
+
+struct Cell<T> { v: T }
+
+impl<T: Add + Ord + Format> Cell<T> {
+    fun plus(self, w: T) -> Cell<T> { return Cell { v: self.v + w } }
+    fun below(self, w: T) -> bool { return self.v < w }
+    fun text(self) -> str { return f"<{self.v}>" }
+}
+
+fun main() {
+    row("int8", 127i8, -128i8, 1i8, 2i8)
+    row("int16", 32767i16, -32768i16, 1i16, 2i16)
+    row("int32", 2147483647, -2147483648, 1, 2)
+    row("int64", 9223372036854775807i64, -9223372036854775807i64 - 1, 1i64, 2i64)
+    row("uint8", 255u8, 0u8, 1u8, 2u8)
+    row("uint16", 65535u16, 0u16, 1u16, 2u16)
+    row("uint32", 4294967295u32, 0u32, 1u32, 2u32)
+    row("uint64", 18446744073709551615u64, 0u64, 1u64, 2u64)
+    // the sums of std.list and std.iter, which fit
+    let us: [uint64] = [9223372036854775808, 9223372036854775806]
+    print(us.sum(0))
+    print(us.iter() |> iter.sum(0u64))
+    let bs: [uint8] = [100, 155]
+    print(bs.sum(0u8))
+    print(us.max_by((a, b) => a < b) == Some(9223372036854775808u64))
+    // float32 in generic code: rounded to single precision at each step
+    let a: float32 = 16777216.0
+    print(add(a, 1.0f32) == a)
+    print(mul(0.1f32, 0.1f32) as float64)
+    let fs: [float32] = [0.1, 0.2, 0.3]
+    print(fs.sum(0.0f32) as float64)
+    print((fs.iter() |> iter.sum(0.0f32)) as float64)
+    print(show(div(1.0f32, 3.0f32)))
+    print(show(div(1.0, 3.0)))
+    // a generic struct's methods on a uint64 and an int8
+    let c = Cell { v: 18446744073709551614u64 }
+    print(c.plus(1).text())
+    print(c.below(18446744073709551615u64))
+    let d = Cell { v: -100i8 }
+    print(d.plus(-28).text())
+}
+""",
+    "receivers_of_type_parameter_type": """// receivers of type-parameter type (MYLA-414, H6 and M4): a `var self`
+// method on an element of a list or a map changes it there, and a field of
+// a call's result finds its method
+trait Bump {
+    fun bump(var self)
+    fun get(self) -> int
+}
+struct A {
+    n: int,
+}
+impl Bump for A {
+    fun bump(var self) { self.n += 1 }
+    fun get(self) -> int { return self.n }
+}
+struct Wrap<R> {
+    items: [R],
+    m: [int: R],
+    inner: R,
+}
+fun mk<R>(r: R) -> Wrap<R> {
+    return Wrap { items: [r], m: [:], inner: r }
+}
+impl<R: Bump> Wrap<R> {
+    fun bump_item(var self, i: int) { self.items[i].bump() }
+    fun bump_map(var self, k: int) { self.m[k].bump() }
+    fun bump_inner(var self) { self.inner.bump() }
+    fun copy(self) -> Wrap<R> { return self }
+    fun of_a_call(self) -> int { return mk(self.inner).inner.get() }
+    fun of_a_method(self) -> int { return self.copy().inner.get() }
+    fun of_an_element(self) -> int { return mk(self.items[0]).items[0].get() }
+}
+fun bump_first<T: Bump>(xs: [T]) -> int {
+    var ys = xs
+    ys[0].bump()
+    ys[^1].bump()
+    return ys[0].get()
+}
+fun main() {
+    var w = Wrap { items: [A { n: 3 }], m: [1: A { n: 10 }], inner: A { n: 30 } }
+    w.bump_item(0)
+    w.bump_map(1)
+    w.bump_inner()
+    print(f"{w.items[0].get()} {w.m[1].get()} {w.inner.get()}")
+    print(f"{bump_first([A { n: 20 }])} {w.of_a_call()} {w.of_a_method()} {w.of_an_element()}")
+}
+""",
+    "actor_function_field": """// an actor's field that holds a function, called from the actor's own
+// method (MYLA-414, the 2026-11-10 review's L3)
+actor A {
+    on: (int) -> int,
+    n: int,
+}
+
+impl A {
+    fun run(self, k: int) -> int {
+        return self.on(k) + self.n
+    }
+}
+
+#main
+async fun main() {
+    let a = A { on: (x: int) => x * 100, n: 5 }
+    print(await a.run(12))
+}
+""",
+    "char_literal_typed_uint8": """// a `char` literal where a `uint8` is expected is that number (MYLA-414,
+// the 2026-11-10 review's L4)
+fun main() {
+    let h = ['a', 98u8]
+    print(h[0])
+    let g = [98u8, 'a']
+    print(g[1])
+    let x: uint8 = 'a'
+    print(x)
+    let xs: [uint8] = ['a', 'b']
+    print(xs[1])
+    print(f"{x} {xs[0] + 1}")
+    let s = "abc"
+    print(s[0] == 'a')
+    print(s[2] - 'a')
+    let c = 'a'
+    print(c)
+}
+""",
     "operators_of_generic_impls": """// `==`, `!=`, `<` and the others, and a format hole, on a generic struct
 // whose `Eq`, `Ord` and `Format` impls are generic: the operator calls the
 // method's instance for the struct's type arguments (MYLA-367)
@@ -8717,6 +8874,14 @@ PINNED = {
     "std_iter_pipelines": '36\n45000000000\n5\n<1>\n<4>\n<9>\n4 6\n4321\nb2,a1,c3\nb,c,z\n0:one,1:two,2:three,3:four,4:five\nx3,x2,x1\n5,8,13,21,34\n9\n34\ntrue\nfalse\nfig\nplum\nnone\n3 9\n',
     # MYLA-391: the interpreter printed 'ERR: VUnit'
     "method_on_a_generic_temporary": '36\n100\n',
+    # MYLA-414 (H1): new; the interpreter lost the width, the sign and the float size
+    "generic_code_per_width": 'int8: 126 -127 63 1 2 true false -128 127 127 S127 true\nint16: 32766 -32767 16383 1 2 true false -32768 32767 32767 S32767 true\nint32: 2147483646 -2147483647 1073741823 1 2 true false -2147483648 2147483647 2147483647 S2147483647 true\nint64: 9223372036854775806 -9223372036854775807 4611686018427387903 1 2 true false -9223372036854775808 9223372036854775807 9223372036854775807 S9223372036854775807 true\nuint8: 254 1 127 1 2 true false 0 255 255 S255 true\nuint16: 65534 1 32767 1 2 true false 0 65535 65535 S65535 true\nuint32: 4294967294 1 2147483647 1 2 true false 0 4294967295 4294967295 S4294967295 true\nuint64: 18446744073709551614 1 9223372036854775807 1 2 true false 0 18446744073709551615 18446744073709551615 S18446744073709551615 true\n18446744073709551614\n18446744073709551614\n255\ntrue\ntrue\n0.010000000707805157\n0.6000000238418579\n0.6000000238418579\n0.33333334\n0.3333333333333333\n<18446744073709551615>\ntrue\n<-128>\n',
+    # MYLA-414 (H6, M4): new; the interpreter lost the mutations and printed 'ERR: VUnit'
+    "receivers_of_type_parameter_type": '4 11 31\n22 31 31 4\n',
+    # MYLA-414 (L3): new; the interpreter printed 'ERR: VUnit'
+    "actor_function_field": '1205\n',
+    # MYLA-414 (L4): new; the interpreter printed 'a' for the numbers
+    "char_literal_typed_uint8": '97\n97\n97\n98\n97 98\ntrue\n2\na\n',
     # MYLA-367: new; native code gave "undefined reference to 'myla_Box.eq'"
     "operators_of_generic_impls": 'true\ntrue\nfalse\ntrue\nfalse\ntrue\ntrue\n<a> <42> <s>\n<a>\n',
     "string_ordering": 'true true false false\ntrue true false false\nfalse false true true\ntrue true false false\nfalse true false true\nfalse true false true\ntrue true false false\nfalse false true true\nfalse false true true\ntrue true false false\ntrue true false false\ntrue true false false\n,Apple,apple,apples,banana,fig,pear,z,é\n,Apple,apple,apples,banana,fig,pear,z,é\ntrue\na,b,b,c,d\n5\nlime\na,c,m,x\ntrue\na,b\n',

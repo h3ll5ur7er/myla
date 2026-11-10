@@ -2,7 +2,7 @@
 id: MYLA-414
 title: "P1 The interpreter: generic code, receivers, errno"
 type: bug
-status: todo
+status: in-progress
 priority: high
 labels: [interpreter, generics, overflow, round-5]
 ---

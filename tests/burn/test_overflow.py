@@ -90,6 +90,36 @@ def program(ty: str, expr: str, args: str) -> str:
             f"}}\n")
 
 
+# The operator traits a generic function's bound names (MYLA-414, H1): the
+# cases of CASES whose operator one of them allows run through
+# `g<T: Trait>(a: T, b: T) -> T`, whose frame binds `T` to the type.
+TRAITS = {"+": "Add", "-": "Sub", "*": "Mul", "/": "Div"}
+
+
+def generic_program(ty: str, expr: str, args: str) -> str:
+    op = expr.split()[1]
+    return (f"fun g<T: {TRAITS[op]}>(a: T, b: T) -> T {{\n"
+            f"    return {expr}\n"
+            f"}}\n\n"
+            f"fun f(a: {ty}, b: {ty}) -> {ty} {{\n"
+            f"    return g(a, b)\n"
+            f"}}\n\n"
+            f"fun main() {{\n"
+            f"    print(f({args}))\n"
+            f"}}\n")
+
+
+# A sum of a list through `std.list`'s `sum` and `std.iter`'s, whose `+` is
+# typed by a type parameter (H1): an `int32` sum past the maximum.
+SUMS = {
+    "list_sum": "fun main() {\n    let xs = [2000000000, 2000000000]\n    print(xs.sum(0))\n}\n",
+    "iter_sum": ("import std.iter as iter\n\nfun main() {\n    let xs = [2000000000, 2000000000]\n"
+                 "    print(xs.iter() |> iter.sum(0))\n}\n"),
+    "fold": "fun main() {\n    let xs: [uint8] = [200, 100]\n    print(xs.fold(0u8, (a, b) => a + b))\n}\n",
+}
+SUMS_WRAPPED = {"list_sum": "-294967296", "iter_sum": "-294967296", "fold": "44"}
+
+
 def build_and_run(path: str, checked: bool) -> tuple[str, str, int]:
     with tempfile.TemporaryDirectory() as tmp:
         binary = os.path.join(tmp, "prog")
@@ -156,6 +186,58 @@ class TestOverflow(unittest.TestCase):
                 self.assertEqual(proc.returncode, 0, f"{flags}: {proc.stdout}{proc.stderr}")
                 self.assertIn("2 passed", proc.stdout, f"{flags}: {proc.stdout}")
 
+    def test_sums_in_generic_code_trap(self):
+        # MYLA-414 (H1): `xs.sum(0)` and `iter.sum` add in `std.list`'s and
+        # `std.iter`'s generic code, which printed 4000000000 interpreted
+        for name, src in SUMS.items():
+            with self.subTest(name), tempfile.TemporaryDirectory() as tmp:
+                path = write_program(tmp, src)
+                out, err, code = selfhost_run(path)
+                self.assertEqual((out, code), ("", 1), err)
+                self.assertTrue(err.startswith(f"runtime error: {OVER}\n  --> "), err)
+                if CAN_BUILD_NATIVE:
+                    self.assertEqual(build_and_run(path, False), (SUMS_WRAPPED[name] + "\n", "", 0))
+                    nout, nerr, ncode = build_and_run(path, True)
+                    self.assertEqual((nout, ncode), ("", 1))
+                    self.assertEqual(nerr.split("\n")[0], f"runtime error: {OVER}")
+
+    def test_myla_test_traps_in_generic_code(self):
+        # MYLA-414 (H1): `myla test` and `myla test --native` agree on a sum
+        # through `std.list`'s generic `sum`
+        src = ("#test([2000000000, 2000000000])[panic(\"integer overflow\")]\n"
+               "#test([2000000000, 147483647])[2147483647]\n"
+               "fun total(xs: [int]) -> int {\n    return xs.sum(0)\n}\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = write_program(tmp, src)
+            runs = [[]] + ([["--native", *target_flags()]] if CAN_BUILD_NATIVE else [])
+            env = dict(os.environ)
+            if TEST_TARGET == "wasm32-wasi":
+                env["MYLA_EMULATOR"] = f"node {_RUN_MJS}"
+            for flags in runs:
+                proc = subprocess.run([selfhost_tool("main"), "test", path, "--stdlib", STDLIB_ROOT, *flags],
+                                      capture_output=True, text=True, env=env)
+                self.assertEqual(proc.returncode, 0, f"{flags}: {proc.stdout}{proc.stderr}")
+                self.assertIn("2/2 passed", proc.stdout, f"{flags}: {proc.stdout}")
+
+
+def _make_generic(name: str, case):
+    # MYLA-414 (H1): the operation in a generic function, typed by its type
+    # parameter, traps (or wraps, plain) as in a function of the type
+    ty, expr, col, args, wrapped, msg = case
+
+    def test(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = write_program(tmp, generic_program(ty, expr, args))
+            where = f"  --> {path}:2:{12 + col}"
+            out, err, code = selfhost_run(path)
+            self.assertEqual((out, code), ("", 1), err)
+            self.assertTrue(err.startswith(f"runtime error: {msg}\n{where}\n"), err)
+            if not CAN_BUILD_NATIVE:
+                self.skipTest(SKIP_REASON)
+            self.assertEqual(build_and_run(path, False), (wrapped + "\n", "", 0))
+            self.assertEqual(build_and_run(path, True), ("", f"runtime error: {msg}\n{where}\n", 1))
+    return test
+
 
 def _make(name: str, case):
     ty, expr, col, args, wrapped, msg = case
@@ -176,6 +258,8 @@ def _make(name: str, case):
 
 for _name, _case in CASES.items():
     setattr(TestOverflow, f"test_{_name}", _make(_name, _case))
+    if _case[1].split()[1] in TRAITS and not _case[1].startswith("-"):
+        setattr(TestOverflow, f"test_generic_{_name}", _make_generic(_name, _case))
 
 
 if __name__ == "__main__":

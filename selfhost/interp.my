@@ -252,12 +252,15 @@ pub struct Interp {
     vclock: int64,
     // D162: a `#test` case is running (`myla test`): a failure unwinds its
     // deferred blocks, which record their own failures in `defer_errs`; its
-    // standard output is kept in `captured` for the report; its scratch
+    // standard output is kept in `captured` for the report (`captured_io`:
+    // the last primitive was such a write, so `__io_errno` reads 0, the
+    // 2026-11-09 review's M5); its scratch
     // root (`std.test.temp_dir`), made on the first call and removed when
     // the case ends; the project's program under test (`std.test.program`)
     testing: bool,
     defer_errs: [str],
     captured: [str],
+    captured_io: bool,
     test_root: str,
     test_program: str,
     // the checked program: the report's names of methods on built-in types
@@ -267,25 +270,36 @@ pub struct Interp {
     // the type each is called on (`T` of `T.zero()`); each function's impl
     // target by its name (and a generic impl's methods'), which solves the
     // impl's type parameters; the type arguments of the generic calls, by
-    // the call's id. When a program calls one on a type parameter
-    // (`type_env`), a generic function's frame binds its type parameters
-    // to their types, as `%:T` (an index into `types`, `type_ix` by name),
-    // and `tparams` holds each function's (its impl's first); `env_next`
-    // is what the next call entered binds when it enters function `env_fi`
+    // the call's id. A generic function's frame binds its type parameters
+    // to the types they stand for at its call (D172; the 2026-11-09
+    // review's H1), so arithmetic, comparisons and formatting typed by a
+    // type parameter use the concrete type: the frame's first variable,
+    // `%env`, is an index into `envs` (`env_memo`: the index a call gives,
+    // by the call's id and the caller's environment), and `tparams` holds
+    // each function's type parameters (its impl's first); `env_next` is
+    // what the next call entered binds when it enters function `env_fi`
     // (a call that doesn't happen, its arguments stopped, leaves nothing to
-    // a later one), `env_tail` and `env_tail_fi` a `become`'s
+    // a later one), `env_tail` and `env_tail_fi` a `become`'s; -1 binds
+    // nothing
     static_calls: [int32: Type],
     impl_selfs: [str: Type],
     call_types: [int32: [Type]],
-    type_env: bool,
     tparams: [[str]],
-    types: [Type],
-    type_ix: [str: int32],
-    env_next: Option<[Subst]>,
+    envs: [TEnv],
+    env_memo: [int64: EnvMemo],
+    env_next: int32,
     env_fi: int32,
-    env_tail: Option<[Subst]>,
+    env_tail: int32,
     env_tail_fi: int32,
 }
+
+// What a generic function's frame binds its type parameters to
+// (`Interp.envs`), made for a call of the function `fi`.
+struct TEnv { fi: int32, sub: [Subst] }
+
+// The environment a call gives the function `fi` (`Interp.env_memo`): an
+// index into `Interp.envs`, -1 for none.
+struct EnvMemo { fi: int32, env: int32 }
 
 // A runtime error, with the Python interpreter's message; `node` is the id of
 // the expression it happened at (its file: loader.file_of), `sp` its range,
@@ -542,17 +556,14 @@ pub fun new_interp(c: Checker, argv: [str]) -> Interp {
         on_failure: (r: RtError) => false, fail_reported: false,
         depth: 0,
         sleepers: [], deadlines: [], fired: [], fd_waits: [], notifs: [], pwaits: [], free_waits: [], parked_waits: [], sleep_seq: 0, virtual_time: false, vclock: 0,
-        testing: false, defer_errs: [], captured: [], test_root: "", test_program: "", checker: c,
-        static_calls: c.static_calls, impl_selfs: c.static_selfs, call_types: [:], type_env: c.on_type_params,
-        tparams: [], types: [], type_ix: [:], env_next: None, env_fi: -1, env_tail: None, env_tail_fi: -1,
+        testing: false, defer_errs: [], captured: [], captured_io: false, test_root: "", test_program: "", checker: c,
+        static_calls: c.static_calls, impl_selfs: c.static_selfs, call_types: c.call_types,
+        tparams: [], envs: [], env_memo: [:], env_next: -1, env_fi: -1, env_tail: -1, env_tail_fi: -1,
     }
-    if it.type_env {
-        it.call_types = c.call_types
-        // a generic impl's methods: their receiver's type solves the impl's
-        // type parameters when the call has none recorded (a bound's)
-        for f in c.functions {
-            if f.params.len() > 0 && f.type_params.len() > f.own_type_params && match f.decl.receiver { Some(r) => true, None => false } { it.impl_selfs[f.name] = f.params[0] }
-        }
+    // a generic impl's methods: their receiver's type solves the impl's
+    // type parameters when the call has none recorded (a bound's)
+    for f in c.functions {
+        if f.params.len() > 0 && f.type_params.len() > f.own_type_params && match f.decl.receiver { Some(r) => true, None => false } { it.impl_selfs[f.name] = f.params[0] }
     }
     return it
 }
@@ -565,6 +576,20 @@ pub fun interp_on(src: str) -> Interp {
     it.collect()
     it.eval_consts()
     return it
+}
+
+// The runtime error, and its position, that evaluating `call` gives in an
+// interpreter of `src`, "" for none: a method nothing defines is an error
+// at the call, never a value printed as `ERR: VUnit` (MYLA-414).
+#test("fun main() {}", "x.nothing()")["internal error: no method 'nothing' found for a value of type '' at 1:10"]
+#test("fun main() {}", "(1, 2).0")[""]
+pub fun call_error(src: str, call: str) -> str {
+    var it = interp_on(src)
+    it.eval(expr_of(call))
+    return match it.rt_err {
+        Some(r) => f"{r.msg} at {r.line}:{r.col}",
+        None => "",
+    }
 }
 
 // The interpreter runs a program's I/O itself, through the standard
@@ -2811,8 +2836,10 @@ impl Interp {
 
     #test(interp_on("[int]"), Expr { id: 0, line: 5, col: 7, sp: SrcSpan { sline: 5, scol: 7, eline: 5, ecol: 8 }, kind: ExprKind.IntLit(1, None, false, "") }, 1, false)[Value.VInt(1)]
     fun eval_int_lit(self, e: Expr, v: int64, isc: bool) -> Value {
-        if isc { return Value.VChar(v) }
-        return Value.VInt(wrap_opt(v, self.resolved_of(e.id)))
+        // a `char` literal where an integer is expected (`let b: uint8 =
+        // 'a'`) is that number (the 2026-11-10 review's L4)
+        if isc && !is_int_value_type(self.resolved_of(e.id)) { return Value.VChar(v) }
+        return Value.VInt(wrap_opt(v, self.typed_of(e.id)))
     }
 
     #test(interp_on("[int]"), Expr { id: 10, line: 8, col: 12, sp: SrcSpan { sline: 8, scol: 12, eline: 8, ecol: 13 }, kind: ExprKind.Name("c") }, "c")[Value.VUnit]
@@ -2853,7 +2880,7 @@ impl Interp {
         if op == "!" { return Value.VBool(!as_bool(v)) }
         if op == "-" {
             match v { Value.VFloat(f) => { return Value.VFloat(-f) }, _ => {} }
-            let rt = self.resolved_of(e.id)
+            let rt = self.typed_of(e.id)
             let i = as_int(v)
             // `-x` that doesn't fit traps (D175); a negative literal fits
             let literal = match x.kind { ExprKind.IntLit(n, suf, isc, big) => true, _ => false }
@@ -2869,7 +2896,7 @@ impl Interp {
             return Value.VInt(wrap_opt(i.wrapping_neg(), rt))
         }
         // "~"
-        return Value.VInt(wrap_opt(~as_int(v), self.resolved_of(e.id)))
+        return Value.VInt(wrap_opt(~as_int(v), self.typed_of(e.id)))
     }
 
     #test(interp_on("enum E { A, B(int) }"), expr_of("a.b[0]"), "*", expr_of("a.b[0]"), expr_of("a.b[0]"))[Value.VInt(0)]
@@ -2884,11 +2911,11 @@ impl Interp {
         }
         let lv = self.eval(l)
         let rv = self.eval(r)
-        let rt = self.resolved_of(e.id)
+        let rt = self.typed_of(e.id)
         // function composition: `f >> g` when the left operand is callable
         if op == ">>" && is_callable(lv) { return compose_values(lv, rv) }
         // operator overloading: dispatch to a trait method for user types
-        if i_is_struct_or_enum(lv) { return self.eval_op_overload(op, lv, rv) }
+        if i_is_struct_or_enum(lv) { return self.eval_op_overload(e, op, lv, rv, self.full_type_of(l.id)) }
         // string concatenation (`==`/`!=` on strings compare, below)
         if op == "+" && is_vstr(lv) { return Value.VStr(as_str(lv) + as_str(rv)) }
         // comparisons -> bool (a tuple's or list's elements each as `==`
@@ -2896,7 +2923,7 @@ impl Interp {
         if op == "==" { return Value.VBool(self.values_equal(lv, rv)) }
         if op == "!=" { return Value.VBool(!self.values_equal(lv, rv)) }
         if is_cmp_op(op) {
-            if is_u64(self.resolved_of(l.id)) { return Value.VBool(ucompare(op, as_int(lv), as_int(rv))) }
+            if is_u64(self.typed_of(l.id)) { return Value.VBool(ucompare(op, as_int(lv), as_int(rv))) }
             return Value.VBool(self.compare(op, lv, rv))
         }
         // float arithmetic
@@ -2994,7 +3021,7 @@ impl Interp {
             else if nm == "wrapping_sub" { res = a.wrapping_sub(b) }
             else { res = a.wrapping_mul(b) }
         }
-        return Value.VInt(wrap_opt(res, self.resolved_of(e.id)))
+        return Value.VInt(wrap_opt(res, self.typed_of(e.id)))
     }
 
     #test(interp_on("[int]"), "<", Value.VInt(0), Value.VInt(3))[true]
@@ -3020,15 +3047,15 @@ impl Interp {
     #test(interp_on("[int]"), Expr { id: 0, line: 3, col: 8, sp: SrcSpan { sline: 3, scol: 8, eline: 3, ecol: 14 }, kind: ExprKind.FloatLit("2.0f64", Some("f64")) }, "2.0f64")[Value.VFloat(2.0)]
     fun eval_float_lit(self, e: Expr, lex: str) -> Value {
         var bits = f64_literal_bits(lex)
-        if is_float32_type(self.resolved_of(e.id)) { bits = f32_round_bits(bits) }
+        if is_float32_type(self.typed_of(e.id)) { bits = f32_round_bits(bits) }
         return Value.VFloat(float_from_bits(bits))
     }
 
     #test(interp_on("enum E { A, B(int) }"), expr_of("a.b[0]"), expr_of("a.b[0]"))[Value.VUnit]
     fun eval_cast(var self, e: Expr, x: Expr) -> Value {
         let v = self.eval(x)
-        let src = self.resolved_of(x.id)
-        let tgt = self.resolved_of(e.id)
+        let src = self.typed_of(x.id)
+        let tgt = self.typed_of(e.id)
         let r = cast_value(v, src, tgt)
         // a char is a Unicode scalar: anything else traps (MYLA-177)
         let to_char = match tgt { Some(tt) => match tt { Type.TChar => true, _ => false }, None => false }
@@ -3285,30 +3312,42 @@ impl Interp {
 
     #test(interp_on("enum E { A, B(int) }"), expr_of("a.b[0]"), expr_of("a.b[0]"), "get", [])[Value.VUnit]
     fun eval_method_call(var self, e: Expr, recv: Expr, method: str, args: [Expr]) -> Value {
-        // a temporary whose type is a type parameter (`x.scaled(2).area()`
-        // with `x: T`) has no type to key by and no place to read again:
-        // evaluated once, keyed by its value (MYLA-391)
-        if !self.key_by_type(recv) {
-            let rv = self.eval(recv)
-            if self.stop() { return Value.VUnit }
-            let vfi = self.func_idx(format("{}.{}", value_key(rv), method))
-            if vfi >= 0 {
-                let argv = self.eval_args(args)
-                if self.stop() { return Value.VUnit }
-                return self.call_method(vfi, rv, argv).0
+        // The method is the one of the receiver's checked type, a type
+        // parameter's the type the running function's frame binds (H1). A
+        // type parameter no frame binds (a generic function's `#test`
+        // case) gives no type to key by: the receiver is evaluated once
+        // here, as a place when it is one (`self.items[i]`, `m[k]`, a field
+        // of a call's result), and the method keyed by its value; the
+        // receiver's value is then the one `self` starts from, and a `var
+        // self` method's final `self` goes back to that place (MYLA-391;
+        // H6, M4 of the 2026-11-09 review).
+        var key = self.type_key(recv)
+        var place = Place { root: "", steps: [] }
+        var rv = Value.VUnit
+        var evaluated = key == ""
+        if evaluated {
+            if self.place_rooted(recv) {
+                place = self.place_of(recv)
+                rv = self.read_place(place)
+            } else {
+                rv = self.eval(recv)
             }
+            if self.stop() { return Value.VUnit }
+            key = value_key(self.deref(rv))
         }
-        let key = self.recv_key(recv)
         // a derived `eq` has no body: structural equality, as `==` (MYLA-132)
         if self.derived_eq(key, method, args) {
-            let a = self.eval(recv)
+            let a = if evaluated { rv } else { self.eval(recv) }
             let b = self.eval(args[0])
             return Value.VBool(value_eq(a, b))
         }
         let fi = self.func_idx(format("{}.{}", key, method))
         if fi < 0 && method == "hash" && args.len() == 1 {
             // a tuple's `hash` is the language's (D163): its elements' in turn
-            let rv = self.eval(recv)
+            if !evaluated {
+                rv = self.eval(recv)
+                evaluated = true
+            }
             match rv {
                 Value.VTuple(es) => {
                     let h = self.eval(args[0])
@@ -3321,36 +3360,72 @@ impl Interp {
         }
         if fi >= 0 {
             // the receiver first (once), then the arguments, as in Python;
-            // an actor's handle is passed as it is: its methods change the actor
-            if self.method_is_var_self(fi) && !self.is_actor_type(key) {
-                // The receiver's value moves into the call, so the method can
-                // change it in place (MYLA-74): its place (indices once)
-                // first, then the arguments, then its value, which keeps what
-                // the arguments changed in it (`c.add(c.bump_get())`, as the
-                // Python interpreter and native code do); the final `self` is
-                // stored back after.
-                let p = self.place_of(recv)
-                let argv = self.eval_args(args)
-                if self.stop() { return Value.VUnit }
-                self.receivers.push(self.read_place(p))
-                if self.place_valid(p) { self.update_place(p, PlaceOp.OSet(Value.VUnit)) }
-                self.bind_next(fi, e.id, self.resolved_of(recv.id))
-                let (rv, final_self) = self.call_with_receiver(fi, argv)
-                self.write_place(p, final_self)
-                // an async body deferred: its `self` goes back here when it ends
-                match self.deferred { Some(d) => { self.deferred_place = Some(p) }, None => {} }
-                return rv
+            // an actor's handle is passed as it is: its methods change the
+            // actor. A `var self` receiver is a place (the checker allows no
+            // temporary): its value moves into the call, so the method can
+            // change it in place (MYLA-74): its place (indices once) first,
+            // then the arguments, then its value, which keeps what the
+            // arguments changed in it (`c.add(c.bump_get())`, as the Python
+            // interpreter and native code do); the final `self` is stored
+            // back after.
+            let var_self = self.method_is_var_self(fi) && !self.is_actor_type(key)
+            if !evaluated {
+                if var_self { place = self.place_of(recv) } else { rv = self.eval(recv) }
             }
-            let rv0 = self.eval(recv)
             let argv = self.eval_args(args)
             if self.stop() { return Value.VUnit }
             self.bind_next(fi, e.id, self.resolved_of(recv.id))
-            let (rv, fs) = self.call_method(fi, rv0, argv)
-            return rv
+            if var_self && place.root != "" {
+                self.receivers.push(self.read_place(place))
+                if self.place_valid(place) { self.update_place(place, PlaceOp.OSet(Value.VUnit)) }
+                let (r, final_self) = self.call_with_receiver(fi, argv)
+                self.write_place(place, final_self)
+                // an async body deferred: its `self` goes back here when it ends
+                match self.deferred { Some(d) => { self.deferred_place = Some(place) }, None => {} }
+                return r
+            }
+            let (r, fs) = self.call_method(fi, rv, argv)
+            return r
         }
-        // not a method: a struct field holding a closure, called indirectly
-        let fv = get_field(self.eval(recv), method)
+        // not a method: a field holding a function, called (an actor's
+        // through its handle, from its own method: the 2026-11-10 review's
+        // L3)
+        if !evaluated { rv = self.eval(recv) }
+        let fv = get_field(self.deref(rv), method)
+        if self.stop() { return Value.VUnit }
+        if !is_callable(fv) {
+            // what the checker accepted, the interpreter couldn't find: an
+            // error at the call, never a value printed as `ERR: VUnit`
+            self.fail(e, format("internal error: no method '{}' found for a value of type '{}'", method, key))
+            return Value.VUnit
+        }
         return self.call_value(fv, self.eval_args(args))
+    }
+
+    // The method key `recv`'s checked type gives (`type_key_of`), a type
+    // parameter's the type the running function's frame binds (D172, H1);
+    // "" for none.
+    #test(interp_on("[int]"), Expr { id: 116, line: 57, col: 5, sp: SrcSpan { sline: 57, scol: 5, eline: 57, ecol: 6 }, kind: ExprKind.Name("c") })[""]
+    fun type_key(self, recv: Expr) -> str {
+        return match self.resolved_of(recv.id) {
+            Some(t) => {
+                let k = type_key_of(t)
+                if k != "" { k } else { type_key_of(self.env_type(t)) }
+            },
+            None => "",
+        }
+    }
+
+    // Whether `e` names a place a variable in scope holds: the variable,
+    // or a field or an element of one (`place_of`).
+    #test(interp_on("[int]"), expr_of("a.b[0]"))[false]
+    fun place_rooted(self, e: Expr) -> bool {
+        return match e.kind {
+            ExprKind.Name(n) => self.has_local(n),
+            ExprKind.GetField(t, f) => self.place_rooted(t),
+            ExprKind.Index(t, i) => !is_slice_expr(i) && self.place_rooted(t),
+            _ => false,
+        }
     }
 
     // The hasher `h` given each of `xs` in turn, through its type's `hash`
@@ -3387,130 +3462,122 @@ impl Interp {
         return self.call_func(fi, argv)
     }
 
-    // `t` with the type parameters the frames in scope bind (D172).
+    // `t` with the type parameters the running function's frame binds
+    // (D172, H1).
     #test(interp_on("[int]"), Type.TParam("T"))[Type.TParam("T")]
     #test(interp_on("[int]"), Type.TStr)[Type.TStr]
     fun env_type(self, t: Type) -> Type {
-        if !self.type_env { return t }
-        var sub: [Subst] = []
-        var i = self.scopes.len() - 1
-        while i >= 0 {
-            var j = self.scopes[i].names.len() - 1
-            while j >= 0 {
-                let n = self.scopes[i].names[j]
-                if n.len() > 2 && n[0] == '%' && n[1] == ':' {
-                    match self.scopes[i].vals[j] {
-                        Value.VInt(k) => { sub.push(Subst { name: n[2:], ty: self.types[k as int32] }) },
-                        _ => {},
-                    }
-                }
-                j -= 1
-            }
-            i -= 1
+        if !is_open(t) { return t }
+        let k = self.frame_env()
+        if k < 0 { return t }
+        return subst_type(t, self.envs[k].sub)
+    }
+
+    // The environment the running function's frame binds (an index into
+    // `envs`), -1 for none: its first variable, `%env`.
+    #test(interp_on("[int]"))[-1]
+    fun frame_env(self) -> int32 {
+        if self.scopes.len() == 0 || self.scopes[0].names.len() == 0 || self.scopes[0].names[0] != "%env" { return -1 }
+        return as_int(self.scopes[0].vals[0]) as int32
+    }
+
+    // The checked type of node `id`, a type parameter's the type the
+    // running function's frame binds it to: what an operator's width and
+    // sign, a float's size and a cast read (H1). Those are never a type
+    // made of a type parameter, which only `full_type_of` substitutes, so
+    // the common case costs a tag's test.
+    #test(interp_on("[int]"), -1)[None]
+    fun typed_of(self, id: int32) -> Option<Type> {
+        var r = self.resolved.get(id)
+        if is_param_opt(r) { r = Some(self.env_type(opt_type(r))) }
+        return r
+    }
+
+    // The checked type of node `id` with the type parameters the running
+    // function's frame binds: what a format reads (`Option<T>`'s payload).
+    #test(interp_on("[int]"), -1)[None]
+    fun full_type_of(self, id: int32) -> Option<Type> {
+        let r = self.resolved.get(id)
+        match r {
+            Some(t) => { if is_open(t) { return Some(self.env_type(t)) } },
+            None => {},
         }
-        if sub.len() == 0 { return t }
-        return subst_type(t, sub)
+        return r
     }
 
     // What the frame of function `fi`, called by the call `id` (on a value
     // or a type of type `self_t`), binds its type parameters to: the
     // checker's type arguments of the call, else those the receiver's type
-    // gives its impl's (D172); in the caller's frame, before the call.
-    #test(interp_on("[int]"), -1, 0, None)[None]
-    fun env_of(self, fi: int32, id: int32, self_t: Option<Type>) -> Option<[Subst]> {
-        if !self.type_env || fi < 0 || self.tparams[fi].len() == 0 { return None }
+    // gives its impl's (D172), in the caller's frame, before the call; an
+    // index into `envs`, -1 for none. A call site (`id` >= 0) gives a
+    // function the same environment each time its caller's is the same, so
+    // each is made once (`env_memo`).
+    #test(interp_on("[int]"), -1, 0, None)[-1]
+    fun env_of(var self, fi: int32, id: int32, self_t: Option<Type>) -> int32 {
+        if fi < 0 || self.tparams[fi].len() == 0 { return -1 }
+        let ce = self.frame_env()
+        let key = (id as int64) * 4294967296 + (ce as int64)
+        if id >= 0 {
+            match self.env_memo.get(key) {
+                Some(m) => { if m.fi == fi { return m.env } },
+                None => {},
+            }
+        }
         let tps = self.tparams[fi]
         var sub: [Subst] = []
         match self.call_types.get(id) {
             Some(ts) => {
-                var i = 0
-                while i < tps.len() && i < ts.len() {
-                    sub.push(Subst { name: tps[i], ty: self.env_type(ts[i]) })
-                    i += 1
-                }
-            },
-            None => {
-                match self_t {
-                    Some(st) => {
-                        match self.impl_selfs.get(self.func_names[fi]) {
-                            Some(pat) => { sub = unify_param(pat, self.env_type(st), []).subst },
-                            None => {},
-                        }
-                    },
-                    None => {},
-                }
-            },
-        }
-        return Some(sub)
-    }
-
-    fun bind_next(var self, fi: int32, id: int32, self_t: Option<Type>) {
-        if self.type_env {
-            self.env_next = self.env_of(fi, id, self_t)
-            self.env_fi = fi
-        }
-    }
-
-    // Bind the type parameters `env_next` gives in the frame of function
-    // `fi` just made.
-    fun bind_types(var self, fi: int32) {
-        if !self.type_env { return }
-        let next = self.env_next
-        self.env_next = None
-        if self.env_fi != fi { return }
-        match next {
-            Some(sub) => {
-                for b in sub {
-                    let tn = type_name(b.ty)
-                    var k = -1
-                    match self.type_ix.get(tn) {
-                        Some(x) => { k = x },
-                        None => {
-                            k = self.types.len()
-                            self.types.push(b.ty)
-                            self.type_ix[tn] = k
-                        },
+                if ts.len() == tps.len() {
+                    var i = 0
+                    while i < tps.len() {
+                        sub.push(Subst { name: tps[i], ty: self.env_type(ts[i]) })
+                        i += 1
                     }
-                    self.define("%:" + b.name, Value.VInt(k as int64))
                 }
             },
             None => {},
         }
+        if sub.len() == 0 {
+            match self_t {
+                Some(st) => {
+                    match self.impl_selfs.get(self.func_names[fi]) {
+                        Some(pat) => { sub = unify_param(pat, self.env_type(st), []).subst },
+                        None => {},
+                    }
+                },
+                None => {},
+            }
+        }
+        var k = -1
+        if sub.len() > 0 {
+            k = self.envs.len()
+            self.envs.push(TEnv { fi: fi, sub: sub })
+        }
+        if id >= 0 { self.env_memo[key] = EnvMemo { fi: fi, env: k } }
+        return k
+    }
+
+    fun bind_next(var self, fi: int32, id: int32, self_t: Option<Type>) {
+        self.env_next = self.env_of(fi, id, self_t)
+        self.env_fi = fi
+    }
+
+    // Bind the type parameters `env_next` gives in the frame of function
+    // `fi` just made, as its first variable.
+    fun bind_types(var self, fi: int32) {
+        let k = self.env_next
+        self.env_next = -1
+        if k < 0 || self.env_fi != fi { return }
+        self.define("%env", Value.VInt(k as int64))
     }
 
     // The runtime method-dispatch key for a receiver: its checker-resolved type
     // key when known (needed for builtins like int), else the value's own tag.
     #test(interp_on("[int]"), Expr { id: 116, line: 57, col: 5, sp: SrcSpan { sline: 57, scol: 5, eline: 57, ecol: 6 }, kind: ExprKind.Name("c") })[""]
     fun recv_key(self, recv: Expr) -> str {
-        match self.resolved_of(recv.id) {
-            Some(t) => {
-                var k = type_key_of(t)
-                // a type parameter's, the type its frame binds (D172)
-                if k == "" && self.type_env { k = type_key_of(self.env_type(t)) }
-                if k != "" { return k }
-            },
-            None => {},
-        }
+        let k = self.type_key(recv)
+        if k != "" { return k }
         return value_key(self.eval_pure(recv))
-    }
-
-    // Whether `recv_key` finds `recv`'s key without evaluating a call: its
-    // type names one, its frame binds its type parameter, or it is a name or
-    // a field of one (`eval_pure`).
-    #test(interp_on("enum E { A, B(int) }"), expr_of("a.b"))[true]
-    fun key_by_type(self, recv: Expr) -> bool {
-        match self.resolved_of(recv.id) {
-            Some(t) => {
-                if type_key_of(t) != "" { return true }
-                if self.type_env && type_key_of(self.env_type(t)) != "" { return true }
-            },
-            None => {},
-        }
-        return match recv.kind {
-            ExprKind.Name(n) => true,
-            ExprKind.GetField(t, f) => self.key_by_type(t),
-            _ => false,
-        }
     }
 
     #test(interp_on("enum E { A, B(int) }"), expr_of("a.b[0]"))[Value.VUnit]
@@ -3545,8 +3612,10 @@ impl Interp {
     // Call method `fi` on the receiver on top of `self.receivers`, which
     // moves into the method's `self`; yields the result and the final `self`.
     fun call_with_receiver(var self, fi: int32, argv: [Value]) -> (Value, Value) {
-        if self.stop() { return Value.VUnit, self.receivers.pop() }   // as call_func (MYLA-366)
-        if !self.enter_call() { return Value.VUnit, self.receivers.pop() }
+        if self.stop() || !self.enter_call() {   // as call_func (MYLA-366)
+            self.env_next = -1
+            return Value.VUnit, self.receivers.pop()
+        }
         let saved = self.scopes
         self.enter_method(fi, argv)
         // `become self.m(…)` with a `var self` method goes on with this `self`
@@ -3558,7 +3627,7 @@ impl Interp {
             self.tail = TailCall.TNone
             self.env_next = self.env_tail
             self.env_fi = self.env_tail_fi
-            self.env_tail = None
+            self.env_tail = -1
             match t {
                 TailCall.TSelfMethod(next, args) => {
                     self.receivers.push(self.lookup_or_unit("self"))
@@ -3624,28 +3693,26 @@ impl Interp {
             ExprKind.Call(callee, args, _) => self.tail_call(callee, args),
             _ => TailCall.TNone,
         }
-        if self.type_env {
-            // the callee's type parameters, which its frame binds (D172)
-            let recv_t = match ex.kind {
-                ExprKind.Call(callee, args, _) => match callee.kind { ExprKind.GetField(tgt, f) => self.resolved_of(tgt.id), _ => None },
-                _ => None,
-            }
-            self.env_tail = None
-            match t {
-                TailCall.TFunc(fi, argv) => {
-                    self.env_tail = self.env_of(fi, ex.id, None)
-                    self.env_tail_fi = fi
-                },
-                TailCall.TMethod(fi, rv, argv) => {
-                    self.env_tail = self.env_of(fi, ex.id, recv_t)
-                    self.env_tail_fi = fi
-                },
-                TailCall.TSelfMethod(fi, argv) => {
-                    self.env_tail = self.env_of(fi, ex.id, recv_t)
-                    self.env_tail_fi = fi
-                },
-                _ => {},
-            }
+        // the callee's type parameters, which its frame binds (D172)
+        let recv_t = match ex.kind {
+            ExprKind.Call(callee, args, _) => match callee.kind { ExprKind.GetField(tgt, f) => self.resolved_of(tgt.id), _ => None },
+            _ => None,
+        }
+        self.env_tail = -1
+        match t {
+            TailCall.TFunc(fi, argv) => {
+                self.env_tail = self.env_of(fi, ex.id, None)
+                self.env_tail_fi = fi
+            },
+            TailCall.TMethod(fi, rv, argv) => {
+                self.env_tail = self.env_of(fi, ex.id, recv_t)
+                self.env_tail_fi = fi
+            },
+            TailCall.TSelfMethod(fi, argv) => {
+                self.env_tail = self.env_of(fi, ex.id, recv_t)
+                self.env_tail_fi = fi
+            },
+            _ => {},
         }
         if !self.stop() {
             self.ctrl = Ctrl.CBecome
@@ -3689,7 +3756,7 @@ impl Interp {
             self.tail = TailCall.TNone
             self.env_next = self.env_tail
             self.env_fi = self.env_tail_fi
-            self.env_tail = None
+            self.env_tail = -1
             match t {
                 TailCall.TFunc(fi, argv) => { self.enter_func(fi, argv) },
                 TailCall.TMethod(fi, recv, argv) => {
@@ -3928,21 +3995,29 @@ impl Interp {
         }
     }
 
-    // Dispatch a binary operator on a user-defined struct/enum to its trait
-    // method. `==`/`!=` compare as `values_equal` does.
-    #test(interp_on("[int]"), "==", Value.VEnum("Color", "Green", []), Value.VEnum("Color", "Blue", []))[Value.VBool(false)]
-    fun eval_op_overload(var self, op: str, lv: Value, rv: Value) -> Value {
+    // Dispatch a binary operator `e` on a user-defined struct/enum to its
+    // trait method, whose frame binds a generic impl's type parameters by
+    // the left operand's type `lt` (H1). `==`/`!=` compare as
+    // `values_equal` does.
+    #test(interp_on("[int]"), expr_of("a == b"), "==", Value.VEnum("Color", "Green", []), Value.VEnum("Color", "Blue", []), None)[Value.VBool(false)]
+    fun eval_op_overload(var self, e: Expr, op: str, lv: Value, rv: Value, lt: Option<Type>) -> Value {
         let key = value_key(lv)
         if op == "==" || op == "!=" {
+            // an `eq` written for the type is the method `values_equal` calls
+            if self.own_eq.contains(key) { self.bind_next(self.func_idx(key + ".eq"), e.id, lt) }
             let eq = self.values_equal(lv, rv)
             if op == "==" { return Value.VBool(eq) }
             return Value.VBool(!eq)
         }
         if is_cmp_op(op) {
-            let (rr, fs) = self.call_method(self.func_idx(format("{}.cmp", key)), lv, [rv])
+            let ci = self.func_idx(format("{}.cmp", key))
+            self.bind_next(ci, e.id, lt)
+            let (rr, fs) = self.call_method(ci, lv, [rv])
             return Value.VBool(cmp_to_bool(op, as_int(rr)))
         }
-        let (rr, fs) = self.call_method(self.func_idx(format("{}.{}", key, i_arith_method(op))), lv, [rv])
+        let fi = self.func_idx(format("{}.{}", key, i_arith_method(op)))
+        self.bind_next(fi, e.id, lt)
+        let (rr, fs) = self.call_method(fi, lv, [rv])
         return rr
     }
 
@@ -3954,7 +4029,7 @@ impl Interp {
         var i = 1
         while i < args.len() {
             let v = self.eval(args[i])
-            let t = self.resolved_of(args[i].id)
+            let t = self.full_type_of(args[i].id)
             parts.push(self.format_spec_value(v, t, specs[i - 1]))
             i = i + 1
         }
@@ -3966,8 +4041,8 @@ impl Interp {
     // the spec with std.fmt as native code does.
     fun format_spec_value(var self, v: Value, t: Option<Type>, spec: str) -> str {
         match v {
-            Value.VStruct(n, fns, fvs) => { return self.user_format(v, spec) },
-            Value.VEnum(en, vr, pl) => { return self.user_format(v, spec) },
+            Value.VStruct(n, fns, fvs) => { return self.user_format(v, spec, t) },
+            Value.VEnum(en, vr, pl) => { return self.user_format(v, spec, t) },
             _ => {},
         }
         let text = format_typed(v, t)
@@ -3980,18 +4055,26 @@ impl Interp {
     }
 
     // A value as `{}` shows it: through its `format` when its type has one,
-    // else in its print form, a struct's or enum's as the report's (D162).
+    // else in its print form, a struct's or enum's, a list's, a tuple's and
+    // a map's as the report's (D162; a test function's `Err` of a list
+    // printed `ERR: VList()`, the 2026-11-09 review's M8).
     fun shown(var self, v: Value, t: Option<Type>) -> str {
         match v {
             Value.VStruct(n, fns, fvs) => { if self.func_idx(format("{}.format", value_key(v))) < 0 { return without_module_ids(typed_repr(self.checker, v, t)) } },
             Value.VEnum(en, vr, pl) => { if self.func_idx(format("{}.format", value_key(v))) < 0 { return without_module_ids(typed_repr(self.checker, v, t)) } },
+            Value.VList(xs) => { return without_module_ids(typed_repr(self.checker, v, t)) },
+            Value.VTuple(es) => { return without_module_ids(typed_repr(self.checker, v, t)) },
+            Value.VMap(m) => { return without_module_ids(typed_repr(self.checker, v, t)) },
             _ => {},
         }
         return self.format_spec_value(v, t, "")
     }
 
-    fun user_format(var self, v: Value, spec: str) -> str {
+    // `v.format(spec)`, its frame binding a generic impl's type parameters
+    // by `v`'s type `t` (H1).
+    fun user_format(var self, v: Value, spec: str, t: Option<Type>) -> str {
         let fi = self.func_idx(format("{}.format", value_key(v)))
+        self.bind_next(fi, -1, t)
         let (rr, fs) = self.call_method(fi, v, [Value.VStr(spec)])
         return as_str(rr)
     }
@@ -4064,6 +4147,9 @@ impl Interp {
 
     #test(interp_on("[int]"), Expr { id: 133, line: 83, col: 20, sp: SrcSpan { sline: 83, scol: 11, eline: 83, ecol: 22 }, kind: ExprKind.Call(Expr { id: 132, line: 83, col: 11, sp: SrcSpan { sline: 83, scol: 11, eline: 83, ecol: 20 }, kind: ExprKind.Name("page_size") }, [], []) }, "page_size", [])[Value.VUnit]
     fun eval_name_call(var self, e: Expr, nm: str, args: [Expr]) -> Value {
+        // a captured write leaves no errno of its own: `__io_errno` right
+        // after it reads 0, not what an earlier primitive left (M5)
+        if self.captured_io && nm != "__io_errno" { self.captured_io = false }
         if nm == "std$task$cancel" {
             match self.eval(args[0]) {
                 Value.VTask(id) => { self.request_cancel(id) },
@@ -4169,7 +4255,7 @@ impl Interp {
             let v = self.eval(args[0])
             if self.stop() { return Value.VUnit }
             // a struct or enum through its `format` (D159), the rest as before
-            self.emit(self.format_spec_value(v, self.resolved_of(args[0].id), ""))
+            self.emit(self.format_spec_value(v, self.typed_of(args[0].id), ""))
             self.emit("\n")
             return Value.VUnit
         }
@@ -4177,7 +4263,10 @@ impl Interp {
             let fd = as_int(self.eval(args[0])) as int32
             let s = as_str(self.eval(args[1]))
             if self.stop() { return Value.VUnit }
-            if fd == 1 && self.testing { self.captured.push(s) }
+            if fd == 1 && self.testing {
+                self.captured.push(s)
+                self.captured_io = true
+            }
             else { write(fd, s) }
             return Value.VUnit
         }
@@ -4208,7 +4297,10 @@ impl Interp {
             }
             if self.stop() { return Value.VUnit }
             let s = sb.build()
-            if fd == 1 && self.testing { self.captured.push(s) }
+            if fd == 1 && self.testing {
+                self.captured.push(s)
+                self.captured_io = true
+            }
             else { write(fd, s) }
             return Value.VUnit
         }
@@ -4216,7 +4308,13 @@ impl Interp {
             let fd = as_int(self.eval(args[0])) as int32
             return Value.VInt(__poll(fd, as_int(self.eval(args[1])) as int32) as int64)
         }
-        if nm == "__io_errno" { return Value.VInt(__io_errno() as int64) }
+        if nm == "__io_errno" {
+            if self.captured_io {
+                self.captured_io = false
+                return Value.VInt(0)
+            }
+            return Value.VInt(__io_errno() as int64)
+        }
         if nm == "__getcwd" { return Value.VStr(__getcwd()) }
         if nm == "__test_dir" {
             // the case's scratch root, made on the first call (D162)
@@ -4559,8 +4657,9 @@ impl Interp {
             var j = 0
             while j < self.scopes[i].names.len() {
                 let n = self.scopes[i].names[j]
-                // and the type parameters bound in scope (D172)
-                if wanted.contains(n) || (self.type_env && n.len() > 2 && n[0] == '%' && n[1] == ':') {
+                // and the type parameters bound in scope (D172), first, as
+                // in a function's frame (`frame_env`)
+                if wanted.contains(n) || (i == 0 && j == 0 && n == "%env") {
                     cnames.push(self.scopes[i].names[j])
                     cvals.push(self.scopes[i].vals[j])
                 }
@@ -4628,9 +4727,12 @@ impl Interp {
     #test(interp_on("fun k(f: (int) -> int) -> int { return f(2) }; fun z() -> int { return k((x: int) => x + 1) }"), 1, [Value.VChar(53)])[Value.VInt(3)]
     fun call_func(var self, fi: int32, argv: [Value]) -> Value {
         // an argument that stopped (a `?`, a failure) leaves no call to make
-        // (MYLA-366): its arguments are short
-        if self.stop() { return Value.VUnit }
-        if !self.enter_call() { return Value.VUnit }
+        // (MYLA-366): its arguments are short, and no frame takes what
+        // `bind_next` made for it
+        if self.stop() || !self.enter_call() {
+            self.env_next = -1
+            return Value.VUnit
+        }
         let saved = self.scopes
         self.enter_func(fi, argv)
         let rv = self.run_tail()
@@ -4696,6 +4798,49 @@ fun format_typed(v: Value, t: Option<Type>) -> str {
         _ => {},
     }
     return format_value(v)
+}
+
+// Whether `t` names a type parameter, which a generic function's frame
+// binds (`Interp.env_type`).
+#test(Type.TParam("T"))[true]
+#test(Type.TList(Type.TInt(32, true)))[false]
+#test(Type.TEnum("Option", [Type.TParam("T")]))[true]
+#test(Type.TFunc([Type.TStr], Some(Type.TParam("U"))))[true]
+#test(Type.TMap(Type.TStr, Type.TList(Type.TParam("V"))))[true]
+fun is_open(t: Type) -> bool {
+    return match t {
+        Type.TParam(n) => true,
+        Type.TInt(w, s) => false,
+        Type.TList(e) => is_open(e),
+        Type.TMap(k, v) => is_open(k) || is_open(v),
+        Type.TTuple(es) => any_open(es),
+        Type.TStruct(n, args) => any_open(args),
+        Type.TEnum(n, args) => any_open(args),
+        Type.TActor(n, args) => any_open(args),
+        Type.TFunc(ps, r) => any_open(ps) || match r { Some(x) => is_open(x), None => false },
+        Type.TAsync(f) => is_open(f),
+        _ => false,
+    }
+}
+
+#test([Type.TStr, Type.TParam("T")])[true]
+#test([])[false]
+fun any_open(ts: [Type]) -> bool {
+    for t in ts { if is_open(t) { return true } }
+    return false
+}
+
+#test(Some(Type.TParam("T")))[true]
+#test(Some(Type.TList(Type.TParam("T"))))[false]
+#test(None)[false]
+fun is_param_opt(t: Option<Type>) -> bool {
+    return match t { Some(Type.TParam(_)) => true, _ => false }
+}
+
+#test(Some(Type.TStr))[Type.TStr]
+#test(None)[Type.TError]
+fun opt_type(t: Option<Type>) -> Type {
+    return match t { Some(x) => x, None => Type.TError }
 }
 
 // A uint64 value is stored as the int64 with the same bits; division,
