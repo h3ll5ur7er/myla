@@ -13,7 +13,7 @@
 // (MYLA-65, D80).
 
 from .parser import parse_source, parse_qualified, Parsed, expr_of, stmt_of, type_expr_of, block_of, pattern_of, fun_of, is_let_else_marker
-from .ast import int_text
+from .ast import int_text, is_unread_body
 from .util import format_specs
 from std.fmt import parse_spec, spec_need
 from .ast import Program, Decl, DeclKind, FunData, Param, TypeParam, Field, Variant
@@ -83,14 +83,26 @@ fun no_body(key: int64) -> Result<Block, [CheckErr]> {
     return Err([terr(0, 0, f"internal error: no body {key} to read")])
 }
 
-// The key of the body of the function at `line`:`col` of the declaration
-// `id` (a method's: its impl's), in `LazyBodies.keys`: the three in one
-// number, a line below 2^20 and a column below 2^12 (the lexer leaves a
-// body past them unskipped).
+// The key of the body whose `{` is at `line`:`col`, of a function of the
+// declaration `id` (a method's: its impl's), in `LazyBodies.keys`: the
+// three in one number, a line below 2^20 and a column below 2^12 (the
+// lexer leaves a body whose `{` is past them unskipped).
 #test(7, 3, 5)[30064783365]
 #test(0, 1048575, 4095)[4294967295]
 pub fun body_key(id: int32, line: int32, col: int32) -> int64 {
     return ((id as int64) << 32) | ((line as int64) << 12) | (col as int64)
+}
+
+// The key of `fd`'s body (`body_key`), a function of the declaration `id`,
+// if it is the marker of a body the loader left unread (`is_unread_body`):
+// by the place of its `{`, which the lexer tested against the limits, not
+// its `fun`'s, which may be past them on a line before (MYLA-416).
+#test(0, fun_of("fun f() { }"))[None]
+pub fun unread_key(id: int32, fd: FunData) -> Option<int64> {
+    return match fd.body {
+        Some(b) => if is_unread_body(b) { Some(body_key(id, b.line, b.col)) } else { None },
+        None => None,
+    }
 }
 
 // An error at a position without a range (one caret).
@@ -8089,7 +8101,10 @@ impl Checker {
     #test(checker_on("[int]"), 0, fun_of("fun f() { }"))[Some(FunData { line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 12 }, name: "f", params: [], ret_type: None, body: Some(Block { line: 1, col: 9, sp: SrcSpan { sline: 1, scol: 9, eline: 1, ecol: 12 }, stmts: [] }), attributes: [], type_params: [], receiver: None, is_pub: false, is_async: false })]
     fun with_body(var self, id: int32, fd: FunData) -> Option<FunData> {
         if !self.lazy_bodies.ids.contains(id) { return Some(fd) }
-        let key = body_key(id, fd.line, fd.col)
+        let key = match unread_key(id, fd) {
+            Some(k) => k,
+            None => { return Some(fd) },
+        }
         if !self.lazy_bodies.keys.contains(key) { return Some(fd) }
         var g = fd
         match self.read_bodies.get(key) {
@@ -8169,7 +8184,11 @@ impl Checker {
 
     // `fd` of the declaration `id` with its body if it was read.
     fun read_into(self, id: int32, fd: FunData) -> FunData {
-        return match self.read_bodies.get(body_key(id, fd.line, fd.col)) {
+        let key = match unread_key(id, fd) {
+            Some(k) => k,
+            None => { return fd },
+        }
+        return match self.read_bodies.get(key) {
             Some(b) => {
                 var g = fd
                 g.body = Some(b)

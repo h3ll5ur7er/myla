@@ -329,17 +329,33 @@ class SelfHostedParserParity(unittest.TestCase):
         # whole; `parse_main --lazy` compares them. Every file of the
         # corpus, the error corpus's lex errors included; only
         # parse_several_errors reports its errors in another order (the
-        # signatures' first, then the bodies' as they are read).
+        # signatures' first, then the bodies' as they are read). A file of
+        # the standard library reads without an error (MYLA-416: one that
+        # failed both ways passed as `same 0`).
         bodies = 0
-        for path in sorted(set(_corpus()) | set(glob.glob(os.path.join(_REPO, "lib", "std", "**", "*.my"), recursive=True))):
+        std = set(glob.glob(os.path.join(_REPO, "lib", "std", "**", "*.my"), recursive=True))
+        for path in sorted(set(_corpus()) | std):
             if path.endswith("parse_several_errors.my"):
                 continue
             with self.subTest(file=os.path.relpath(path, _REPO)):
                 proc = subprocess.run([self._binary, "--lazy", path], capture_output=True, text=True)
                 self.assertEqual(proc.returncode, 0, proc.stderr)
                 self.assertTrue(proc.stdout.startswith("same "), proc.stdout[:2000])
-                bodies += int(proc.stdout.split()[1])
+                if path in std:
+                    self.assertNotEqual(proc.stdout.strip(), "same error", path)
+                if proc.stdout.split()[1].isdigit():
+                    bodies += int(proc.stdout.split()[1])
         self.assertGreater(bodies, 5000)
+
+    def test_a_std_file_with_an_error_fails_the_comparison(self) -> None:
+        # MYLA-416: `parse_main --lazy` tells a file that fails both ways
+        # from one that reads, so that a broken library file isn't passed
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "broken.my")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write("pub fun f() -> int {\n    return (1 +) * 2\n}\n")
+            proc = subprocess.run([self._binary, "--lazy", path], capture_output=True, text=True)
+            self.assertEqual(proc.stdout.strip(), "same error")
 
     def _continued(self, source: str) -> bool:
         with tempfile.TemporaryDirectory() as tmp:

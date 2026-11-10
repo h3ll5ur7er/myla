@@ -20,7 +20,7 @@ from .ast import TypeExpr, TypeKind, Expr, ExprKind, Stmt, StmtKind
 from .ast import Pattern, PatternKind, Decl, DeclKind, Block, ExprOrBlock, ElseTail
 from .ast import BindElem, FieldInit, MapEntry, MatchArm, FieldPat, Param
 from .ast import TypeParam, Field, Variant, Attribute, ImportPath, ImportItem
-from .ast import FunData, Program
+from .ast import FunData, Program, unread_block
 
 // A token's start (`peek_pos`).
 struct TokPos { line: int32, column: int32 }
@@ -1040,10 +1040,10 @@ impl Parser {
 
     // A function's or method's body. One the lexer skipped (its `{` has the
     // suffix "body", its `}` follows) is kept as a site, with node ids for
-    // it, and stands as an empty block of its place until `parse_body`
-    // reads it (MYLA-359).
+    // it, and stands as the marker of an unread body at its place
+    // (`unread_block`) until `parse_body` reads it (MYLA-359, D179).
     #test(parser_on("{ x }"))[Block { line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 6 }, stmts: [Stmt { id: 1, line: 1, col: 3, sp: SrcSpan { sline: 1, scol: 3, eline: 1, ecol: 4 }, kind: StmtKind.ExprStmt(Expr { id: 0, line: 1, col: 3, sp: SrcSpan { sline: 1, scol: 3, eline: 1, ecol: 4 }, kind: ExprKind.Name("x") }) }] }]
-    #test(lazy_parser_on("fun f() { x }", 4))[Block { line: 1, col: 9, sp: SrcSpan { sline: 1, scol: 9, eline: 1, ecol: 14 }, stmts: [] }]
+    #test(lazy_parser_on("fun f() { x }", 4))[Block { line: 1, col: 9, sp: SrcSpan { sline: 1, scol: 9, eline: 1, ecol: 9 }, stmts: [] }]
     fun fun_body(var self) -> Block {
         let open = self.peek()
         if open.kind != TokenKind.LBRACE || open.suffix != "body" { return self.block() }
@@ -1054,7 +1054,7 @@ impl Parser {
         let ids = body_ids(end - start)
         self.sites.push(BodySite { line: open.line, col: open.column, start: start, end: end, first_id: self.next_id, ids: ids })
         self.next_id += ids
-        return Block { line: open.line, col: open.column, sp: self.span_from(open.line, open.column), stmts: [] }
+        return unread_block(open.line, open.column)
     }
 
     #test(parser_on("a.b[0]"), [], false)[Decl { id: 1, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 7 }, kind: DeclKind.TypeAliasDecl(".", TypeExpr { id: 0, line: 1, col: 7, sp: SrcSpan { sline: 1, scol: 7, eline: 1, ecol: 7 }, kind: TypeKind.TRef("", []) }, [], false) }]

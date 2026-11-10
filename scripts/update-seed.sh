@@ -33,6 +33,16 @@ OUT_DIR="build/seed-update"
 scripts/bootstrap.sh "$OUT_DIR"
 . scripts/host.sh
 
+# the seven implicit modules checked whole (D179, MYLA-416): a program reads
+# a body of theirs only once it calls it, and the compiler builds against a
+# library whose broken body nothing calls, so the seed would carry it
+for module in str char int list option map hash; do
+    if ! run_tool "$OUT_DIR/myla" check "lib/std/$module.my" --stdlib lib > /dev/null; then
+        echo "FAIL: lib/std/$module.my doesn't check as a whole (\`build/myla check lib/std/$module.my --stdlib lib\`)" >&2
+        exit 1
+    fi
+done
+
 # the compiler is committed with its seed: a seed made from uncommitted
 # sources names the commit it will sit on, not its own (which it can't know)
 commit="$(git rev-parse HEAD)"
