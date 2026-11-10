@@ -1980,41 +1980,25 @@ fun authority(u: str) -> str {
 }
 
 // The reference `loc` (a redirect's `Location`) resolved against the URL
-// `base` (RFC 3986, section 5.2, without dot segments): an absolute URL as
-// it is, `//host/p` with `base`'s scheme, `/p` on `base`'s authority, `p`
-// beside `base`'s last segment, `?q` on `base`'s path.
+// `base` by `url.resolve` (RFC 3986, section 5.2, dot segments removed): an
+// absolute URL, `//host/p` with `base`'s scheme, `/p` on `base`'s
+// authority, `p` beside `base`'s last segment, `?q` on `base`'s path. One
+// that doesn't parse is given back as it is (and isn't a URL to send to).
 #test("http://h/a/b?x", "http://o/z")["http://o/z"]
 #test("http://h:8/a/b?x", "/c")["http://h:8/c"]
 #test("http://h/a/b?x", "c")["http://h/a/c"]
 #test("http://h", "c")["http://h/c"]
 #test("http://h/a/b?x", "?y")["http://h/a/b?y"]
 #test("http://h/a", "//o/p")["http://o/p"]
+#test("http://h/a/b/c", "../d")["http://h/a/d"] // dot segments (MYLA-422)
+#test("http://h/a/b", "./x/../y")["http://h/a/y"]
+#test("http://h/a", "/../../etc/passwd")["http://h/etc/passwd"]
+#test("http://h/a", "a b")["a b"]
 fun resolve(base: str, loc: str) -> str {
-    let auth = authority(base)
-    if auth == "" || authority(loc) != "" {
-        return loc
+    return match url_m.resolve(base, loc) {
+        Ok(t) => t
+        Err(_) => loc
     }
-    if loc.starts_with("//") {
-        return part(auth, 0, find_byte(auth, 58, 0) + 1) + loc
-    }
-    var path = part(base, auth.len(), base.len())
-    var cut = 0
-    while cut < path.len() && path[cut] != 63 && path[cut] != 35 {
-        cut += 1
-    }
-    path = part(path, 0, cut)
-    if loc.starts_with("/") {
-        return auth + loc
-    }
-    if loc.starts_with("?") {
-        return auth + (if path == "" { "/" } else { path }) + loc
-    }
-    var slash = path.len() - 1
-    while slash >= 0 && path[slash] != 47 {
-        slash -= 1
-    }
-    let dir = if slash < 0 { "/" } else { part(path, 0, slash + 1) }
-    return auth + dir + loc
 }
 
 impl Client {
@@ -3090,5 +3074,9 @@ fun redirects() {
     match redirected(post, response(302, "")) {
         Some(_) => assert(false, "no Location")
         None => {}
+    }
+    match redirected(request("GET", "http://a/x/y/z"), response(302, "").with_header("Location", "../w/./v")) {
+        Some(next) => assert(next.url == "http://a/x/w/v", f"dot segments: {next.url}")
+        None => assert(false, "dot segments")
     }
 }
