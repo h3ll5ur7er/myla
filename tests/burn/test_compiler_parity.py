@@ -1977,6 +1977,109 @@ fun main() {
     print(f"{bump_first([A { n: 20 }])} {w.of_a_call()} {w.of_a_method()} {w.of_an_element()}")
 }
 """,
+    "generic_eq_and_hash_the_interpreter_calls": """// A written `eq` or `hash` of a generic impl, which the interpreter calls
+// itself (an element's `==`, a map's key), binds its type parameters
+// (MYLA-436): `<` on a uint64 compares unsigned, a uint64 formats unsigned
+struct W<T> {
+    v: T,
+}
+
+impl<T: Ord> Eq for W<T> {
+    fun eq(self, other: W<T>) -> bool {
+        return !(self.v < other.v)
+    }
+}
+
+impl<T: Ord + Format> Hash for W<T> {
+    fun hash(self, h: Hasher) -> Hasher {
+        print(f"hash {self.v}")
+        return h.add_str(f"{self.v}")
+    }
+}
+
+// equal when both are below their bound or both aren't: every key in one
+// bucket, so a lookup compares by `eq`
+struct K<T> {
+    v: T,
+    z: T,
+}
+
+impl<T: Ord> Eq for K<T> {
+    fun eq(self, other: K<T>) -> bool {
+        return (self.v < self.z) == (other.v < other.z)
+    }
+}
+
+impl<T> Hash for K<T> {
+    fun hash(self, h: Hasher) -> Hasher {
+        return h.add_i32(0)
+    }
+}
+
+#derive(Eq)
+struct P {
+    w: W<uint64>,
+}
+
+#derive(Eq)
+enum E {
+    A(W<uint64>),
+    B,
+}
+
+// an `eq` that finds any two equal
+struct A {
+    v: int,
+}
+
+impl Eq for A {
+    fun eq(self, other: A) -> bool {
+        return true
+    }
+}
+
+#derive(Eq)
+struct Q {
+    a: A,
+}
+
+fun main() {
+    let x = W { v: 0u64 }
+    let y = W { v: 18446744073709551615u64 }
+    print(x == y)
+    print([x] == [y])
+    print((x, 1) == (y, 1))
+    print(P { w: x } == P { w: y })
+    print([P { w: x }] == [P { w: y }])
+    print(P { w: x }.eq(P { w: y }))
+    print(E.A(x) == E.A(y))
+    print(Some(x) == Some(y))
+    print([Some(x)] == [Some(y)])
+    print([x].contains(y))
+    let m = [y: 1]
+    print(m.contains(y))
+    print((y, 3).hash(Hasher { state: 0 }).state == (y, 3).hash(Hasher { state: 0 }).state)
+
+    let lo = K { v: 0u64, z: 1u64 }
+    let hi = K { v: 18446744073709551615u64, z: 1u64 }
+    print(lo == hi)
+    print([lo] == [hi])
+    var n = [lo: 1]
+    print(n.contains(hi))
+    n[hi] = 2
+    print(n.len())
+    n[hi] += 3
+    print(n[hi])
+    print(n.get_or(lo, 0))
+    n.remove(hi)
+    print(n.len())
+    let t = [(lo, 1): "a"]
+    print(t.contains((hi, 1)))
+
+    print(Q { a: A { v: 1 } } == Q { a: A { v: 2 } })
+    print(Q { a: A { v: 1 } }.eq(Q { a: A { v: 2 } }))
+}
+""",
     "actor_function_field": """// an actor's field that holds a function, called from the actor's own
 // method (MYLA-414, the 2026-11-10 review's L3)
 actor A {
@@ -9670,6 +9773,16 @@ class TestCompilerParity(unittest.TestCase):
             "tuple_key": "let m = [(1, \"a\"): 2]\n    let k = (3, \"b\")\n    print(m[k])",
             "int8_key": "let m: [int8: int] = [1: 2]\n    let k: int8 = -5\n    print(m[k])",
             "key_of_a_place": "var m = [1: [2]]\n    let k = 5\n    m[k][0] = 3\n    print(m[1][0])",
+            # MYLA-440: a uint64 key unsigned, by the map's or the key's type
+            "uint64_key": "let m: [uint64: int] = [1: 2]\n    let k: uint64 = 18446744073709551615\n    print(m[k])",
+            "uint64_high_bit_key": "let m: [uint64: int] = [1: 2]\n    let k: uint64 = 9223372036854775808\n    print(m[k])",
+            "uint64_literal_key": "let m: [uint64: int] = [1: 2]\n    print(m[18446744073709551615])",
+            "uint64_tuple_key": ("let m: [(uint64, uint32): int] = [(1, 2): 2]\n"
+                                 "    let k: (uint64, uint32) = (18446744073709551615, 4294967295)\n    print(m[k])"),
+            "uint64_key_of_a_place": ("var m: [uint64: [int]] = [1: [2]]\n    let k: uint64 = 18446744073709551615\n"
+                                      "    m[k][0] = 3\n    print(m[1][0])"),
+            "uint32_key": "let m: [uint32: int] = [1: 2]\n    let k: uint32 = 4294967295\n    print(m[k])",
+            "int64_key": "let m: [int64: int] = [1: 2]\n    let k: int64 = -9223372036854775808\n    print(m[k])",
             "surrogate": "let n = 55296\n    print(n as char)",
             "char_plus": "let c = 'a'\n    print(c + 1114111)",
             "append_range": "var sb = StringBuilder()\n    let a = 2\n    sb.append(\"abc\", a, 9)\n    print(sb.build())",
@@ -10002,6 +10115,9 @@ PINNED = {
     "generic_code_per_width": 'int8: 126 -127 63 1 2 true false -128 127 127 S127 true\nint16: 32766 -32767 16383 1 2 true false -32768 32767 32767 S32767 true\nint32: 2147483646 -2147483647 1073741823 1 2 true false -2147483648 2147483647 2147483647 S2147483647 true\nint64: 9223372036854775806 -9223372036854775807 4611686018427387903 1 2 true false -9223372036854775808 9223372036854775807 9223372036854775807 S9223372036854775807 true\nuint8: 254 1 127 1 2 true false 0 255 255 S255 true\nuint16: 65534 1 32767 1 2 true false 0 65535 65535 S65535 true\nuint32: 4294967294 1 2147483647 1 2 true false 0 4294967295 4294967295 S4294967295 true\nuint64: 18446744073709551614 1 9223372036854775807 1 2 true false 0 18446744073709551615 18446744073709551615 S18446744073709551615 true\n18446744073709551614\n18446744073709551614\n255\ntrue\ntrue\n0.010000000707805157\n0.6000000238418579\n0.6000000238418579\n0.33333334\n0.3333333333333333\n<18446744073709551615>\ntrue\n<-128>\n',
     # MYLA-414 (H6, M4): new; the interpreter lost the mutations and printed 'ERR: VUnit'
     "receivers_of_type_parameter_type": '4 11 31\n22 31 31 4\n',
+    # MYLA-436: new; the interpreter called an element's or a key's written
+    # generic `eq` or `hash` without binding its type parameters
+    "generic_eq_and_hash_the_interpreter_calls": 'false\nfalse\nfalse\nfalse\nfalse\nfalse\nfalse\nfalse\nfalse\nfalse\nhash 18446744073709551615\nhash 18446744073709551615\ntrue\nhash 18446744073709551615\nhash 18446744073709551615\ntrue\nfalse\nfalse\nfalse\n2\n5\n1\n1\nfalse\ntrue\ntrue\n',
     # MYLA-414 (L3): new; the interpreter printed 'ERR: VUnit'
     "actor_function_field": '1205\n',
     # MYLA-414 (L4): new; the interpreter printed 'a' for the numbers
@@ -10131,6 +10247,11 @@ RUNTIME_ERRORS = {
     "list_index": "fun main() {\n    let xs = [1, 2]\n    var i = 5\n    print(xs[i])\n}\n",
     "negative_list_index": "fun main() {\n    let xs = [1, 2]\n    var i = -1\n    print(xs[i])\n}\n",
     "missing_map_key": 'fun main() {\n    let m = ["a": 1]\n    print(m["b"])\n}\n',
+    # MYLA-440: a uint64 key unsigned in generic code, by the type it binds
+    "missing_uint64_key_in_generic_code": ("struct Table {\n    m: [uint64: str],\n}\n\n"
+                                           "fun look<K: Eq + Hash, V>(m: [K: V], k: K) -> V {\n    return m[k]\n}\n\n"
+                                           "fun main() {\n    let t = Table { m: [1: \"a\"] }\n    print(look(t.m, 1))\n"
+                                           "    print(look(t.m, 18446744073709551615))\n}\n"),
     "string_index": 'fun main() {\n    let s = "ab"\n    var i = 9\n    print(s[i])\n}\n',
     "error_after_stderr": 'from std.io import eprint\n\nfun main() {\n    eprint("before\\n")\n    panic("then")\n}\n',
 }
