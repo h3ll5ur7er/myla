@@ -1,6 +1,6 @@
 # std.net
 
-TCP and UDP sockets, IP addresses and name lookup ([[MYLA-346]]). A socket is an opaque handle inside a `TcpListener`, `TcpStream` or `UdpSocket`; an address is a Myla value; a failure is an `IoError` with a portable cause. Nothing here is a file descriptor, so a port to another system (Windows next) changes the platform layer only ([[#porting-sockets-to-another-system]]). On wasm32 every operation is `Unsupported`: WASI preview 1 has no sockets. A lookup there finds an address itself and `localhost`, and nothing else (`NotFound`: no hosts file, no name server).
+TCP and UDP sockets, IP addresses and name lookup ([[MYLA-346]]). A socket is an opaque handle inside a `TcpListener`, `TcpStream` or `UdpSocket`, an index into the runtime's table of handles with a generation (D181): once a socket is closed, every copy of it fails with `Other(9)` (EBADF) and never reaches the socket that gets its descriptor next, nor does a handle built by hand; an address is a Myla value; a failure is an `IoError` with a portable cause. Nothing here is a file descriptor, so a port to another system (Windows next) changes the platform layer only ([[#porting-sockets-to-another-system]]). On wasm32 every operation is `Unsupported`: WASI preview 1 has no sockets. A lookup there finds an address itself and `localhost`, and nothing else (`NotFound`: no hosts file, no name server).
 
 [TOC]
 
@@ -48,9 +48,12 @@ fun main() {
 | `TcpListener`: `local_addr()`, `close()` | Its address; closed (a second close does nothing) |
 | `connect(a)`, `connect_timeout(a, ms)`, `connect_async(a)` (async) | A connection: `ConnectionRefused`, `HostUnreachable`, `NetworkUnreachable`, `TimedOut` |
 | `connect_host(host: str, port: int)` | `lookup(host)`'s addresses tried in turn |
-| `TcpStream` | A `Read` and a `Write` of `std.io` ([[Language/Standard-library/Io#streams]]): `buffered(s)` reads its lines, `copy` and `read_all` take it. A read gives what one receive gives, `[]` at the end of the stream; a write sends every byte. A copy is the same connection |
+| `TcpStream` | A `Read` and a `Write` of `std.io` ([[Language/Standard-library/Io#streams]]): `copy` and `read_all` take it, and `buffered(s)` reads its lines outside tasks (in a task it blocks its worker: use `line_reader`). A read gives what one receive gives, `[]` at the end of the stream; a write sends every byte. A copy is the same connection, and `close` closes it for every copy |
 | `TcpStream`: `read_async(n)`, `write_async(b)` (async) | The read and the write, the task waiting; bytes, as `Read` and `Write` deal in (D177) |
 | `TcpStream`: `peer_addr()`, `local_addr()`, `shutdown(how)`, `set_nodelay(on)`, `set_read_timeout(ms)`, `set_write_timeout(ms)`, `close()` | `how` is `Shutdown.Read`, `Write` or `Both`; after `Write` the peer reads the end. A timeout (negative: none, the default) makes a blocking wait `TimedOut` |
+| `line_reader(s: TcpStream) -> LineReader` | Lines of text from `s` (D180) |
+| `LineReader`: `read_line_async()` (async), `read_line()` | The next line without its `"\n"` (a `"\r"` before it kept, as `io.Buffered.read_line` keeps it), a last line without one too; `None` at the end of the stream. The async form waits with the task suspended, as `read_async` does; a cancelled task gets `Cancelled`, the bytes read so far kept. Each byte is copied a bounded number of times, however long its line |
+| `LineReader`: `rest()` | The bytes read past the last line given (a body after a protocol's header lines), taken out of the reader |
 | `udp_bind(a) -> Result<UdpSocket, IoError>` | A UDP socket bound to `a` |
 | `UdpSocket`: `send_to(b, to)`, `send_str_to(s, to)` | One datagram: its length |
 | `UdpSocket`: `recv_from(n)`, `recv_str_from(n)`, `recv_from_async(n)`, `recv_str_from_async(n)` (async) | The next datagram, at most `n` bytes of it (the rest dropped), and its sender |
@@ -114,6 +117,62 @@ async fun main() {
 // 4
 ```
 
+A line protocol in tasks reads through a `LineReader` and writes to the stream itself, a copy of which is the same connection. `io.buffered(s).read_line()` would block its worker until the line came, and with one worker (`MYLA_THREADS=1`, a machine of one CPU, the interpreter) the peer never ran:
+
+```myla
+import std.net as net
+from std.net import TcpListener, TcpStream
+import std.bytes as bytes
+
+async fun shout(l: TcpListener) -> int {
+    var s = match await l.accept_async() {
+        Ok(s) => s
+        Err(e) => { return -1 }
+    }
+    var lines = net.line_reader(s)
+    var n = 0
+    while let Ok(Some(line)) = await lines.read_line_async() {
+        let w = await s.write_async(bytes.from_str(line.to_upper() + "\n"))
+        n += 1
+    }
+    let c = s.close()
+    return n
+}
+
+#main
+async fun main() {
+    var l = match net.listen(net.addr(net.loopback(), 0)) {
+        Ok(l) => l
+        Err(e) => { panic("can't listen") }
+    }
+    let at = match l.local_addr() {
+        Ok(a) => a
+        Err(e) => { panic("no address") }
+    }
+    async let served = shout(l)
+    var s = match await net.connect_async(at) {
+        Ok(s) => s
+        Err(e) => { panic("can't connect") }
+    }
+    var back = net.line_reader(s)
+    for word in ["ping", "pong"] {
+        let w = await s.write_async(bytes.from_str(word + "\n"))
+        match await back.read_line_async() {
+            Ok(Some(line)) => print(line)
+            _ => print("no answer")
+        }
+    }
+    let sh = s.shutdown(net.Shutdown.Write)
+    print(await served)
+    let c = s.close()
+    let d = l.close()
+}
+// output:
+// PING
+// PONG
+// 2
+```
+
 ## Names
 
 Without libc there is no getaddrinfo: `lookup` reads the hosts file, then asks the name servers over UDP (RFC 1035), an A query and then an AAAA one.
@@ -128,7 +187,7 @@ Without libc there is no getaddrinfo: `lookup` reads the hosts file, then asks t
 
 ## Primitives
 
-The module rests on these ([[MYLA-346]]), each a function of `std.rt` over `std.platform`'s socket functions, and in the interpreter the host's own. A handle is an `int`; an address crosses as a portable record, a string of 7 or 19 bytes: the family (4 or 6), the port (big-endian), the address's bytes. Each sets `__io_errno()` (0 on success), a Linux errno number on every target; a negative handle is EBADF (9).
+The module rests on these ([[MYLA-346]]), each a function of `std.rt` over `std.platform`'s socket functions, and in the interpreter the host's own. A handle is an `int`, an index into `std.rt`'s table of handles and the generation of its entry (D181), at least 2^23; the entry holds the platform's socket. An address crosses as a portable record, a string of 7 or 19 bytes: the family (4 or 6), the port (big-endian), the address's bytes. Each sets `__io_errno()` (0 on success), a Linux errno number on every target; a handle that isn't open (closed, a copy of a closed one, made up) is EBADF (9).
 
 | Primitive | x86-64 and aarch64 Linux | Result |
 | --- | --- | --- |
@@ -151,7 +210,7 @@ On wasm32 each gives ENOSYS (38), `Unsupported`, and `__net_config` `""`.
 
 A port gives the socket functions of `std.platform` again (`sock_open`, `sock_nonblocking`, `sock_bind`, `sock_listen`, `sock_accept`, `sock_connect`, `sock_error`, `sock_send`, `sock_recv`, `sock_send_to`, `sock_recv_from`, `sock_addr`, `sock_shutdown`, `sock_option`, `sock_poll`, `sock_close`, `net_config`, and the poller's `poller_watch_socket` and `poller_forget_socket`) over its own interface; `std.rt` and `std.net` stay as they are. For Windows (`platform_windows.my`, over Winsock):
 
-- **Handles.** A `SOCKET` is the handle. Sockets aren't file descriptors there, which is why data goes through send and receive, never read and write, and `sock_close` is `closesocket`, apart from a file's close. Windows' handles keep to 32 bits, so an `int` holds one. `WSAStartup` happens once, before the first socket.
+- **Handles.** A `SOCKET` is what the handle's entry in `std.rt`'s table holds (D181), where Linux's holds the descriptor. Sockets aren't file descriptors there, which is why data goes through send and receive, never read and write, and `sock_close` is `closesocket`, apart from a file's close. The entry holds a 64-bit word, so a `SOCKET` fits whatever its width. `WSAStartup` happens once, before the first socket.
 - **Contract.** Each function gives 0 or more, or minus an errno, as on Linux: a socket starts blocking and `sock_nonblocking` is `ioctlsocket(FIONBIO)`; `sock_accept` gives a blocking socket (Winsock's inherits the listener's mode, so the port sets it back); `sock_send` doesn't raise a signal; `sock_recv_from` drops what a datagram has past `n` bytes (`WSAEMSGSIZE` is not an error); `sock_addr` and `sock_recv_from` write the portable record, never a `sockaddr`; option 3 (`SO_REUSEADDR`) does nothing, as Windows allows a lingering address anyway and its own `SO_REUSEADDR` would let another program take a port.
 - **Errors.** `WSAGetLastError()`'s codes map onto Linux's numbers, which `std.fs`'s `from_errno` knows: `WSAEWOULDBLOCK` is EAGAIN (11), and EINPROGRESS (115) for a connect; `WSAECONNREFUSED` 111, `WSAECONNRESET` 104, `WSAECONNABORTED` 103, `WSAENOTCONN` 107, `WSAEADDRINUSE` 98, `WSAEADDRNOTAVAIL` 99, `WSAETIMEDOUT` 110, `WSAEHOSTUNREACH` 113, `WSAENETUNREACH` 101, `WSAEAFNOSUPPORT` 97, `WSAEINVAL` 22, `WSAENOTSOCK` and an invalid handle 9, `WSAEINTR` 4.
 - **Readiness.** `sock_poll` is `WSAPoll` with the same meaning: 1 for `POLLRDNORM`, 2 for `POLLWRNORM`, and `POLLERR` or `POLLHUP` as both. The reactor's `poller_watch_socket(p, h, events, token)` arms a socket once for the union of what its waiters ask, and a later wait gives `token` when it is ready; `poller_forget_socket` disarms it. A wake-up may come early, as the caller retries on EAGAIN. On Windows the poller would watch sockets with `WSAPoll` beside its wake-up event, or through IOCP (`AFD_POLL`, as libuv and mio do).

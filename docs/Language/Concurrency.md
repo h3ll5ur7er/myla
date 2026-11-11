@@ -156,7 +156,7 @@ async fun main() {
 - `await n.wait()` gives `true` when the task was woken; `await n.wait_timeout(ms)` gives `false` when `ms` milliseconds passed first (and with `ms <= 0` doesn't wait: whether a permit was there). A wait may end while the condition is still false, another task having got there first: the waiter looks again, in a loop.
 - A task asked to stop (D96) stops waiting at once, its wait giving `false`, and a wait it starts later doesn't wait; `task.cancelled()` tells it why. A failure elsewhere (D97) ends the program, and the tasks parked in it with it.
 - A program whose every task waits, on notifiers or on each other, with no time limit, sleeper or input left to wake one, ends with the runtime error `every task waits for another one` (status 1), natively and in the interpreter. A cycle among some tasks while others go on isn't seen: it lasts as long as they do.
-- Natively a notifier lives as long as the program, and parking and waking take the lock the executor's timers use. On one worker native code wakes tasks in the interpreter's order, so a program prints the same in both in every `MYLA_SCHED` order.
+- A notifier lives until `n.close()`, which wakes its waiters (their waits give false); a use of it afterwards through any copy, or of a `Notifier` built by hand, is the runtime error `use of a closed notifier` (D181). Parking and waking take the lock the executor's timers use. On one worker native code wakes tasks in the interpreter's order, so a program prints the same in both in every `MYLA_SCHED` order.
 
 ## Actors
 

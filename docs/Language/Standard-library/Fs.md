@@ -64,7 +64,7 @@ A `File` is an open file, read and written at its cursor a piece at a time, so a
 | `f.len() -> Result<int64, IoError>` | The file's size in bytes now |
 | `f.metadata() -> Result<Metadata, IoError>` | Its size, kind, permissions and modification time now |
 | `f.close() -> Result<(), IoError>` | Closes it; every later operation on it, a second `close` too, is `Other(9)` (EBADF). What the system couldn't keep of the data written is `Other(5)` (EIO), the descriptor closed all the same: `__close`'s errno ([[MYLA-378]]) |
-| `f.descriptor() -> int32` | The platform's descriptor (`Pollable`) |
+| `f.descriptor() -> int32` | Its handle, which the descriptor primitives take for the descriptor it holds (`Pollable`; -1 for a `File` built by hand) |
 
 A file a function opens is closed by that function: Myla has no destructors, so nothing closes it when it goes out of scope, and an open file stays open until `close` or the end of the program. `defer` right after the open is the idiom:
 
@@ -75,7 +75,7 @@ defer { let closed = f.close() }
 
 `Read` and `Write` deal in bytes (D177): text goes through `std.io`'s adapters, `buffered(f)` for lines and `buffered_writer(f)` with its `write_str`, or `std.bytes`'s `from_str` and `to_str` for a few bytes.
 
-A `File` is a value, and a copy of it holds the same descriptor, with the same cursor, as the platform keeps it. So a reader can take a copy while the function keeps the file to close: `var r = buffered(f)` reads through `f`'s descriptor. `close` closes the descriptor for every copy. The file closed fails each later operation with `Other(9)` (EBADF), and so does a copy of it, until a file opened later gets the descriptor's number from the platform: don't use a copy after `close`. A failure is always an `IoError`, never a crash. A write to a file opened only to read is `Other(9)` too.
+A `File` is a value holding a handle into the runtime's table (D181), and a copy of it holds the same handle: the same descriptor, with the same cursor, as the platform keeps it. So a reader can take a copy while the function keeps the file to close: `var r = buffered(f)` reads through `f`'s descriptor. `close` closes the descriptor and the handle for every copy: each later operation through any of them is `Other(9)` (EBADF), also after a file opened later got the descriptor's number from the platform (before D181 the copy then read and wrote that file), and so is one through a `File` built by hand. A failure is always an `IoError`, never a crash. A write to a file opened only to read is `Other(9)` too.
 
 ```myla
 import std.fs as fs
@@ -169,11 +169,11 @@ The system calls named are x86-64 Linux's; aarch64 uses the generic `*at` forms 
 
 ## Descriptor and entropy primitives
 
-Files opened and read or written a piece at a time, at a cursor, and the system's entropy rest on these ([[MYLA-336]], D64's pattern again; the API over them is [[MYLA-339]]'s `File` and [[MYLA-337]]'s `std.random`). A descriptor is an `int`; `__read(fd, n)` (one read of up to `n` bytes at the cursor, `""` at the end), `__write(fd, s)` (every byte of `s` at the cursor, again after a short write) and `__close(fd)` are the ones `std.io` and `std.process` already use.
+Files opened and read or written a piece at a time, at a cursor, and the system's entropy rest on these ([[MYLA-336]], D64's pattern again; the API over them is [[MYLA-339]]'s `File` and [[MYLA-337]]'s `std.random`). A descriptor is an `int`: a descriptor's own number below 2^23 (the standard streams', `io.fd_stream`'s), or a handle that holds one (D181: what `__open` and `__spawn_piped` give, a table index with a generation, which fails with EBADF once closed, through every copy); `__read(fd, n)` (one read of up to `n` bytes at the cursor, `""` at the end), `__write(fd, s)` (every byte of `s` at the cursor, again after a short write) and `__close(fd)` are the ones `std.io` and `std.process` already use.
 
 | Primitive | Does | Result |
 | --- | --- | --- |
-| `__open(path: str, flags: int, mode: int) -> int` | open(2) with `O_CLOEXEC`; `flags` are Myla's own bits, the same on every target: 1 read, 2 write (both: read and write), 4 create, 8 truncate, 16 append (each write at the end, wherever the cursor is), 32 exclusive (with create: EEXIST when the file is there) | The descriptor, or -1. Without 1 or 2, with another bit, or a NUL in the path: EINVAL. `mode` is the permissions of a file it creates, less the umask |
+| `__open(path: str, flags: int, mode: int) -> int` | open(2) with `O_CLOEXEC`; `flags` are Myla's own bits, the same on every target: 1 read, 2 write (both: read and write), 4 create, 8 truncate, 16 append (each write at the end, wherever the cursor is), 32 exclusive (with create: EEXIST when the file is there) | A handle for the descriptor, or -1. Without 1 or 2, with another bit, or a NUL in the path: EINVAL. `mode` is the permissions of a file it creates, less the umask |
 | `__seek(fd: int, offset: int64, whence: int) -> int64` | lseek(2): `offset` from the start (`whence` 0), the cursor (1) or the end (2) | The new offset from the start, or -1 (EINVAL for another whence, a place before the start or one past the largest the file system allows, an `int64` overflowed included; ESPIPE for a pipe) |
 | `__fstat(fd: int) -> [int64]` | fstat(2) | `[size, mode, mtime]`: the size in bytes, the mode as `__stat` gives it (type bits and permissions), the modification time in nanoseconds since 1970; `[]` on an error |
 | `__path_stat(path: str, follow: bool) -> [int64]` | stat(2) when `follow`, else lstat(2) ([[MYLA-378]], [[MYLA-363]]) | `[size, mode, mtime, dev, ino]`: `__fstat`'s three, then the device and the file's number on it (together they tell one file from another: `glob.walk_with` uses them to find a loop); a link itself has the type bits 0o120000. `[]` on an error (ENOENT for a dangling link followed, EINVAL for a NUL in the path) |

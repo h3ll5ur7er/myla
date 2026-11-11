@@ -29,6 +29,7 @@ fun describe_error(e: SpawnError) -> str {
         SpawnError.Unsupported => "no processes on this target",
         SpawnError.Cancelled => "cancelled",
         SpawnError.InvalidInput => "invalid input",
+        SpawnError.WorkingDir(code) => format("working directory errno {}", code),
         SpawnError.Other(code) => format("other errno {}", code),
     }
 }

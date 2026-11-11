@@ -270,6 +270,24 @@ async fun main() {
 }
 """
 
+# the only task reading lines of a non-blocking standard input (S4)
+NONBLOCKING = """import std.io as io
+
+#main
+async fun main() {
+    var r = io.stdin()
+    var k = 0
+    while k < 3 {
+        match await r.read_line_async() {
+            Ok(Some(l)) => print(f"line '{l}'")
+            Ok(None) => print("end")
+            Err(e) => print(f"Err({e})")
+        }
+        k += 1
+    }
+}
+"""
+
 # two tasks reading lines from standard input at once: both wait for the one
 # descriptor, and every line is read by one of them (the review of
 # 2026-11-06, R5: the second watch replaced the first, which waited for ever)
@@ -576,6 +594,32 @@ class Time(unittest.TestCase):
             with self.subTest(file=label), open(path, encoding="utf-8") as fh:
                 out = subprocess.run(cmd, stdin=fh, capture_output=True, text=True, timeout=60).stdout
                 self.assertEqual(out, "from file\ntrue\n")
+
+    def test_a_non_blocking_input_read_by_the_only_task(self):
+        # the 2026-11-10 review's S4: with no other task, `read_line_async` of
+        # a non-blocking stdin gave `Other(11)` (EAGAIN) natively, where the
+        # interpreter waited for the input; now the thread waits for it
+        # (std.rt's `wait_alone`) on both runners
+        exe = self.native("nonblocking", NONBLOCKING)
+        from ._tools import selfhost_tool
+        interp = [selfhost_tool("interp_main"), self.source("nonblocking", NONBLOCKING), STDLIB_ROOT]
+        for label, cmd in [("native", [exe]), ("interpreter", interp)]:
+            with self.subTest(runner=label):
+                r, w = os.pipe()
+                os.set_blocking(r, False)
+                proc = subprocess.Popen(cmd, stdin=r, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                os.close(r)
+                try:
+                    time.sleep(0.3)
+                    os.write(w, b"first line\nsec")
+                    time.sleep(0.3)
+                    os.write(w, b"ond line\n")
+                except BrokenPipeError:
+                    pass
+                os.close(w)
+                out, err = proc.communicate(timeout=60)
+                self.assertEqual((out, err, proc.returncode),
+                                 ("line 'first line'\nline 'second line'\nend\n", "", 0))
 
     def test_a_child_process_waited_for_without_blocking_the_worker(self):
         want = "t\nt\nt\nt\nt\n4 6 3\n5\n200000 200000\nnot found\ntimed out\ntrue\n5\n"

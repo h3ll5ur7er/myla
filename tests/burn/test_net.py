@@ -26,6 +26,7 @@ import subprocess
 import tempfile
 import threading
 import unittest
+from unittest import mock
 
 from ._native import (
     CAN_BUILD_NATIVE,
@@ -664,6 +665,186 @@ closed twice
 Other(9)
 """
 
+# D181 (the 2026-11-09 review's M13): a copy of a closed stream, listener or
+# UDP socket, and one built by hand, reach nothing; before, the copy wrote
+# into and closed whichever socket got the descriptor next
+STALE = PRELUDE + """fun said(r: Result<int, IoError>) -> str {
+    return match r {
+        Ok(n) => f"Ok({n})"
+        Err(e) => cause(e)
+    }
+}
+
+fun closed(r: Result<(), IoError>) -> str {
+    return match r {
+        Ok(()) => "Ok"
+        Err(e) => cause(e)
+    }
+}
+
+fun accept_one(l: TcpListener) -> TcpStream {
+    return match l.accept() {
+        Ok(s) => s
+        Err(e) => panic(f"accept: {cause(e)}")
+    }
+}
+
+fun main() {
+    var l = listen_any()
+    let at = net.addr(net.loopback(), port_of(l))
+    var a = match net.connect(at) {
+        Ok(s) => s
+        Err(e) => panic(cause(e))
+    }
+    var a_srv = accept_one(l)
+    var stale = a
+    let c = a.close()
+    // a second connection, which may get the closed one's descriptor
+    var b = match net.connect(at) {
+        Ok(s) => s
+        Err(e) => panic(cause(e))
+    }
+    var b_srv = accept_one(l)
+    print(f"stale write: {said(stale.write(bytes.from_str("INJECTED")))}")
+    b_srv.set_read_timeout(100)
+    match b_srv.read(100) {
+        Ok(t) => print(f"b's server end read '{bytes.to_str(t)}'")
+        Err(e) => print(f"b's server end read: {cause(e)}")
+    }
+    print(f"stale close: {closed(stale.close())}")
+    print(f"b write: {said(b.write(bytes.from_str("hello")))}")
+    match b_srv.read(100) {
+        Ok(t) => print(f"b's server end read '{bytes.to_str(t)}'")
+        Err(e) => print(f"b's server end read: {cause(e)}")
+    }
+    // a stream, a listener and a UDP socket built by hand
+    var forged = TcpStream { handle: 4, read_ms: -1, write_ms: -1 }
+    print(f"forged write: {said(forged.write(bytes.from_str("x")))}")
+    var forged_l = TcpListener { handle: 3, timeout_ms: 10 }
+    match forged_l.accept() {
+        Ok(s) => print("accepted")
+        Err(e) => print(f"forged accept: {cause(e)}")
+    }
+    var u = match net.udp_bind(net.addr(net.loopback(), 0)) {
+        Ok(u) => u
+        Err(e) => panic(cause(e))
+    }
+    var u_copy = u
+    let uc = u.close()
+    print(f"stale send: {said(u_copy.send_to(bytes.from_str("x"), at))}")
+    // a stale listener: it accepts nothing more
+    var l_copy = l
+    let lc = l.close()
+    match l_copy.accept() {
+        Ok(s) => print("accepted")
+        Err(e) => print(f"stale accept: {cause(e)}")
+    }
+    let x = a_srv.close()
+    let y = b.close()
+    let z = b_srv.close()
+}
+"""
+STALE_OUT = """stale write: Other(9)
+b's server end read: TimedOut
+stale close: Other(9)
+b write: Ok(5)
+b's server end read 'hello'
+forged write: Other(9)
+forged accept: Other(9)
+stale send: Other(9)
+stale accept: Other(9)
+"""
+
+# D180: lines of text over sockets in tasks, without blocking a worker
+# (`net.line_reader`): 20 connections echo lines given in pieces, with a
+# "\r" kept and a last line without "\n", also on one worker, where
+# `io.buffered(s).read_line()` hangs
+LINES = """import std.net as net
+import std.task as task
+import std.bytes as bytes
+from std.net import TcpStream, TcpListener, SocketAddr
+
+async fun serve_one(s: TcpStream) -> int {
+    var out = s
+    var r = net.line_reader(s)
+    var n = 0
+    while true {
+        match await r.read_line_async() {
+            Ok(Some(line)) => {
+                n += 1
+                let w = await out.write_async(bytes.from_str(line + "\\n"))
+            }
+            _ => { break }
+        }
+    }
+    let c = out.close()
+    return n
+}
+
+async fun serve(l: TcpListener, conns: int) -> int {
+    var jobs: [async () -> int] = []
+    for k in 0..conns {
+        match await l.accept_async() {
+            Ok(s) => { jobs.push(async () => await serve_one(s)) }
+            Err(e) => { return -1 }
+        }
+    }
+    var total = 0
+    for n in await task.all(jobs) { total += n }
+    return total
+}
+
+async fun client(at: SocketAddr, id: int, count: int) -> int {
+    var s = match await net.connect_async(at) {
+        Ok(s) => s
+        Err(e) => { return -1 }
+    }
+    var r = net.line_reader(s)
+    var ok = 0
+    for i in 0..count {
+        let msg = f"client {id} line {i} grüße €"
+        // a line in two pieces, the second with the next line's start
+        let w = await s.write_async(bytes.from_str(msg + "\\r"))
+        let w2 = await s.write_async(bytes.from_str("\\n"))
+        match await r.read_line_async() {
+            Ok(Some(back)) => { if back == msg + "\\r" { ok += 1 } }
+            _ => { break }
+        }
+    }
+    // a last line without "\\n", then the end
+    let w = await s.write_async(bytes.from_str("tail"))
+    let sh = s.shutdown(net.Shutdown.Write)
+    match await r.read_line_async() {
+        Ok(Some(back)) => { if back == "tail" { ok += 1 } }
+        _ => {}
+    }
+    match await r.read_line_async() {
+        Ok(None) => { ok += 1 }
+        _ => {}
+    }
+    let c = s.close()
+    return ok
+}
+
+#main
+async fun main() {
+    var l = match net.listen(net.addr(net.loopback(), 0)) { Ok(l) => l, Err(e) => { panic("listen") } }
+    let at = match l.local_addr() { Ok(a) => a, Err(e) => { panic("addr") } }
+    let conns = 20
+    async let served = serve(l, conns)
+    var cs: [async () -> int] = []
+    for id in 0..conns {
+        cs.push(async () => await client(at, id, 50))
+    }
+    var total = 0
+    for n in await task.all(cs) { total += n }
+    print(f"clients ok {total}")
+    print(f"server lines {await served}")
+    let d = l.close()
+}
+"""
+LINES_OUT = "clients ok 1040\nserver lines 1020\n"
+
 NET_WASM = PRELUDE + """fun main() {
     match net.listen(net.addr(net.loopback(), 0)) {
         Ok(l) => print("listening")
@@ -721,6 +902,14 @@ class Tcp(unittest.TestCase):
 
     def test_the_async_forms_in_a_program_of_one_task(self):
         self.assertEqual(run_both(ONE_TASK), ("one task\n", "", 0))
+
+    def test_lines_in_tasks_on_any_number_of_workers(self):
+        self.assertEqual(run_both(LINES), (LINES_OUT, "", 0))
+        with mock.patch.dict(os.environ, {"MYLA_THREADS": "1"}):
+            self.assertEqual(run_both(LINES), (LINES_OUT, "", 0))
+
+    def test_a_closed_or_made_up_handle_reaches_nothing(self):
+        self.assertEqual(run_both(STALE), (STALE_OUT, "", 0))
 
     def test_a_listener_and_a_client_in_two_programs(self):
         # each side interpreted and built, against the other's two forms

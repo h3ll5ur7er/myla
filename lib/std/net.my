@@ -31,7 +31,7 @@ from .io import Read, Write
 import .fmt as fmt
 import .bytes as bytes_m // `from_str`, `to_str`
 import .str as str_m // `find`, `find_from`, `contains`, `to_lower`
-import .list as list_m // `contains`
+import .list as list_m // `contains`, `extend`
 import .option as option_m // `unwrap_or`, `is_some`
 
 // --- addresses ---------------------------------------------------------------------
@@ -78,9 +78,23 @@ impl Format for AddrParseError {
     }
 }
 
-// `ip` and `port` as a socket address.
+// `ip` and `port` as a socket address; a port outside 0 to 65535 is a
+// runtime error (D184).
 pub fun addr(ip: IpAddr, port: int) -> SocketAddr {
-    return SocketAddr { ip: ip, port: port }
+    return SocketAddr { ip: ip, port: checked_port(port) }
+}
+
+// `port`, which must be one (0 to 65535): else the runtime error naming it
+// (D184), where the record took its low 16 bits and bound or connected to
+// another port.
+#test(80)[80]
+#test(65536)[panic("port 65536 out of range (0 to 65535)")]
+#test(-1)[panic("port -1 out of range (0 to 65535)")]
+fun checked_port(port: int) -> int {
+    if port < 0 || port > 65535 {
+        panic(f"port {port} out of range (0 to 65535)")
+    }
+    return port
 }
 
 // 127.0.0.1, this machine over IPv4.
@@ -574,8 +588,10 @@ fun record_bytes(a: SocketAddr) -> [uint8] {
     if a.ip.is_ipv6() {
         out = [6]
     }
-    out.push(((a.port >> 8) & 255) as uint8)
-    out.push((a.port & 255) as uint8)
+    // a `SocketAddr` built by hand too
+    let port = checked_port(a.port)
+    out.push(((port >> 8) & 255) as uint8)
+    out.push((port & 255) as uint8)
     for b in a.ip.octets() {
         out.push(b)
     }
@@ -1046,6 +1062,114 @@ impl TcpStream {
         let h = self.handle
         self.handle = -1
         return close_handle(h)
+    }
+}
+
+// --- lines of text (D180) --------------------------------------------------------
+
+// How many bytes a `LineReader` asks for at a time.
+const LINE_CHUNK: int = 4096
+
+// Lines of text from a TCP stream (D180): `net.line_reader(s)`, then
+// `await r.read_line_async()` in a task, which waits with the task
+// suspended, as `read_async` does, where `io.buffered(s).read_line()` blocks
+// its worker. Write to the stream itself (a copy of `s` is the same
+// connection): `w.write_async(bytes.from_str(line + "\n"))`. The reader
+// owns what it read past the last line it gave; `rest()` hands that over.
+pub struct LineReader {
+    s: TcpStream,
+    buf: [uint8],
+    // where the next line starts in `buf`, and how many bytes after it are
+    // known to hold no "\n"
+    pos: int,
+    scanned: int,
+    ended: bool,
+}
+
+// A line reader over the stream `s`.
+pub fun line_reader(s: TcpStream) -> LineReader {
+    return LineReader { s: s, buf: [], pos: 0, scanned: 0, ended: false }
+}
+
+impl LineReader {
+    // The next line, without its "\n" (a "\r" before it is kept, as
+    // `io.Buffered.read_line` keeps it); a last line without "\n" counts
+    // too. `None` once the peer ended the stream. The task waits for the
+    // bytes, the other tasks running; a task asked to stop gets
+    // `Cancelled`, the bytes read so far kept for the next call.
+    async fun read_line_async(var self) -> Result<Option<str>, IoError> {
+        while true {
+            if let Some(line) = self.line() {
+                return Ok(line)
+            }
+            let chunk = await self.s.read_async(LINE_CHUNK)
+            self.took(chunk?)
+        }
+        unreachable()
+    }
+
+    // `read_line_async` outside a task: the thread blocks for the bytes (as
+    // long as the stream's read timeout allows).
+    fun read_line(var self) -> Result<Option<str>, IoError> {
+        while true {
+            if let Some(line) = self.line() {
+                return Ok(line)
+            }
+            self.took(self.s.read(LINE_CHUNK)?)
+        }
+        unreachable()
+    }
+
+    // The bytes read and not yet given as a line (the start of a body after
+    // a protocol's header lines, say), taken out of the reader.
+    fun rest(var self) -> [uint8] {
+        let out = self.buf[self.pos:]
+        self.buf = []
+        self.pos = 0
+        self.scanned = 0
+        return out
+    }
+
+    // The next line if the buffer holds one (`Some(None)` at the end of the
+    // stream), else `None`: then more bytes are needed.
+    fun line(var self) -> Option<Option<str>> {
+        let n = self.buf.len()
+        var i = self.pos + self.scanned
+        while i < n {
+            if self.buf[i] == 10u8 {
+                let line = bytes_m.to_str(self.buf[self.pos:i])
+                self.pos = i + 1
+                self.scanned = 0
+                return Some(Some(line))
+            }
+            i += 1
+        }
+        self.scanned = n - self.pos
+        if !self.ended {
+            return None
+        }
+        if n == self.pos {
+            return Some(None)
+        }
+        let last = bytes_m.to_str(self.buf[self.pos:])
+        self.pos = n
+        self.scanned = 0
+        return Some(Some(last))
+    }
+
+    // The bytes of one read added (none: the end of the stream); the lines
+    // given before dropped once they are half the buffer, so each byte is
+    // copied a bounded number of times however long its line.
+    fun took(var self, chunk: [uint8]) {
+        if chunk.len() == 0 {
+            self.ended = true
+            return
+        }
+        if self.pos > 0 && self.pos * 2 >= self.buf.len() {
+            self.buf = self.buf[self.pos:]
+            self.pos = 0
+        }
+        self.buf.extend(chunk)
     }
 }
 
