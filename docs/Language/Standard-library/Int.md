@@ -1,10 +1,8 @@
 # std.int
 
-Methods on every integer type, `int8` to `int64` and `uint8` to `uint64` ([[MYLA-322]]): the arithmetic helpers, the bit counts ([[MYLA-376]]), the checked, saturating and overflowing forms of the operators, and modular arithmetic. The wrapping forms of `+`, `-`, `*` and unary `-` are the language's own methods (D175), in every module whether it imports this one or not. The names and meanings are Rust's (D164 (4)). [[MYLA-320]] will import the module into every program; until then a program writes `import std.int`. It imports nothing itself.
+Methods on every integer type, `int8` to `int64` and `uint8` to `uint64` ([[MYLA-322]]): the arithmetic helpers, the bit counts ([[MYLA-376]]), the checked, saturating and overflowing forms of the operators, and modular arithmetic. The wrapping forms of `+`, `-`, `*` and unary `-` are the language's own methods (D175), in every module whether it imports this one or not. The names and meanings are Rust's (D164 (4)). Every program sees them without an import ([[MYLA-320]]). It imports nothing itself.
 
 ```myla
-import std.int
-
 fun main() {
     let x: int8 = 120
     match x.checked_add(10) {

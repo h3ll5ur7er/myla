@@ -88,4 +88,4 @@ The tests check `parse` against the examples of RFC 3986 (sections 1.1.2, 3 and 
 | `BadHost(int)` | A host in brackets that has no `]`, isn't an IP literal, or is followed by something other than a port |
 | `BadPort(int)` | A port that isn't decimal digits, or is past 65535 |
 
-The position is a byte index in the text: `parse("http://exa mple.com/")` is `Err(UrlError.BadChar(10))`. `UrlError` derives `Eq`; `Url` doesn't, as `Option` isn't `Eq`.
+The position is a byte index in the text: `parse("http://exa mple.com/")` is `Err(UrlError.BadChar(10))`. `UrlError` derives `Eq`; `Url` doesn't yet, though its `Option` fields would allow it since [[MYLA-379]] ([[MYLA-488]]).

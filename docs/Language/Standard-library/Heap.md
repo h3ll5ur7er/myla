@@ -78,7 +78,7 @@ A heap's element type comes from where it goes ([[MYLA-315]]): an annotation (`v
 
 ## Elements
 
-A `Heap<T>` takes the integers, the floats, `char`, and any type that implements `Ord` (`fun cmp(self, other: Self) -> int`). A `str` has no order of its own yet, so it can't be a heap's element; a `KeyedHeap<str>` can hold strings by a priority.
+A `Heap<T>` takes the integers, the floats, `char`, `str` (byte-wise, [[MYLA-318]]) and any type that implements `Ord` (`fun cmp(self, other: Self) -> int`). A `KeyedHeap<T>` holds values of any type by a priority.
 
 ## A max-heap
 
@@ -86,7 +86,7 @@ A max-heap is a flag of the heap that `max_new` and `max_of` set, not a `Reverse
 
 - the values go in and come out as they are, with no wrapping and no `.0`;
 - every `T: Ord` works, the built-in ones too;
-- a generic `impl<T: Ord> Ord for Reverse<T>` doesn't link natively today when its operator is used (`a < b` on two `Reverse<int>`), which is all a heap does with it ([[MYLA-330]] has the reproduction).
+- a generic `impl<T: Ord> Ord for Reverse<T>` didn't link natively when the heap was built (an operator on a generic impl, fixed by [[MYLA-367]]); it works now, but the flag needs no wrapper type.
 
 The flag costs a test per comparison: a million pushes and pops of `int` take 183 ms, against 177 ms for the same heap with the max-heap's code taken out. The comparisons are written out in `push` and `sift_down`; a helper function for them cost 25 %, as the native backend doesn't inline it.
 
