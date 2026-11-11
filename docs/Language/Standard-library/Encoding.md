@@ -52,7 +52,7 @@ The error says what is wrong and where, as a byte position in the text.
 | `BadPadding(int)` | A padding that is missing (in `base64_decode`), short, superfluous or inside the text; the position is where it starts or should start |
 | `TrailingBits(int)` | The last character's unused bits aren't zero |
 
-`EncodingError` derives `Eq`. A bad byte is reported before a bad length: `hex_decode("6x6")` is `BadChar(1)`.
+`EncodingError` derives `Eq`. A bad byte is reported before a bad length: `hex_decode("6x6")` is `BadChar(1)`. `e.message()` says it in words with the position, `not a digit of the alphabet at byte 1`, and `f"{e}"` writes the same (D168, [[MYLA-425]]).
 
 ## Speed
 
