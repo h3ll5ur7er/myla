@@ -23,7 +23,7 @@ from .inline import inlinable, inline_calls, same_module, may_inline, merge_bloc
 from .hoist import hoist_cows
 from .ranges import widen_counters
 from .anf import Norm, new_norm
-from .lower import async_fnval_ir, lower_function, lower_lambda, blocked_types, Lowered, myla_runtime_function, derived_eq_ir, compound_eq_ir, tuple_hash_ir, key_hash_ir, key_eq_ir, map_find_ir, map_put_ir, map_keys_ir, walk_ir, drop_entry_ir, dropb_slow_ir, list_drop_slow_ir, map_drop_slow_ir, drop_drain_ir, clone_ir, deep_walk_ir, deep_cell_ir, Routine, Want, env_drop_ir, env_deep_ir, partial_ir, frame_new_ir
+from .lower import async_fnval_ir, lower_function, lower_lambda, blocked_types, Lowered, myla_runtime_function, derived_eq_ir, compound_eq_ir, tuple_hash_ir, key_hash_ir, key_eq_ir, map_find_ir, map_put_ir, map_keys_ir, walk_ir, drop_entry_ir, dropb_slow_ir, list_drop_slow_ir, map_drop_slow_ir, drop_drain_ir, trap_value_ir, trap_text_fn, clone_ir, deep_walk_ir, deep_cell_ir, deep_members_ir, deep_cell_has_members, env_deep_members_ir, Routine, Want, env_drop_ir, env_deep_ir, partial_ir, frame_new_ir
 import .ir_x86 as ir_x86
 import .ownership as ownership
 import .runtime_x86 as runtime_x86
@@ -199,6 +199,9 @@ pub struct CodeGen {
     // knew an instance's types (MYLA-272): reported as type errors, and
     // nothing more is emitted
     refused: [CheckErr],
+    // the runtime errors with values native code reports through a routine
+    // of their own (`want_trap`, D183): "lindex", "sindex", "range"
+    trap_vals: [str],
     ir_texts: [str],
     ir_blocked: [str],
     ir_ready: bool,
@@ -355,7 +358,7 @@ pub fun new_codegen(c: Checker) -> CodeGen {
         debug: false, line_files: [], cur_file: 0, last_loc: "",
         dbg_fn: false, dbg_lines: [], dbg_types: [:], dbg_pending: [], dbg_scopes: [],
         dbg_fn_end: "", dbg_mark: "", dbg_n: 0, dbg_script: "",
-        keep_ir: false, wants_ftoa: false, inlining: true, inl_names: [], inl_bodies: [], inl_no: [:], ssa: false, ssa_stats: no_ssa_stats(), refused: [], ir_texts: [], ir_blocked: [], ir_ready: false,
+        keep_ir: false, wants_ftoa: false, inlining: true, inl_names: [], inl_bodies: [], inl_no: [:], ssa: false, ssa_stats: no_ssa_stats(), refused: [], trap_vals: [], ir_texts: [], ir_blocked: [], ir_ready: false,
         pend_store: "", pend_temp: -1, ext_at: -1, temp_uses: [], temp_remat: [], temp_fconst: [:], fconst_labels: [:], temp_src: [], temp_imm: [], temp_frame: [], temp_mem: [], temp_off: [],
         temp_reg: [], slot_reg: [], saved_regs: [], in_frame: false, resume_blocks: [], frames: c.task_line > 0, norm: compiler_norm(), save_base: 0, arg_words: 0, frameless: false, kept_params: [:], keeping: [:], scan_kept: [], scan_args: [], owning: [:], no_owned: [], handed: handed, passed_on: passed_on, tag_enums: [:], a64: false, wasm: false, wasm_arity: [:], wasm_calls: [:], env_records: [], checked: false,
     }
@@ -1053,10 +1056,13 @@ impl CodeGen {
 
     // -- lookups ----------------------------------------------------------
 
+    // (a name no function has is a compiler bug: it fell back on the first
+    // function once, which compiled a file without `main` as that function,
+    // an unread body since D179; Z3)
     fun sig_of(self, name: str) -> FuncSig {
         return match self.func_ix.get(name) {
             Some(i) => self.funcs[i]
-            None => self.funcs[0]
+            None => panic(format("internal error: no function '{}' to compile", name))
         }
     }
 
@@ -1990,6 +1996,12 @@ impl CodeGen {
 
     fun generate(var self) -> str {
         let en = self.entry_name()
+        // a file without an entry point is a library: nothing to build (Z3),
+        // as the interpreter says
+        if !self.has_func(en) {
+            self.refused.push(CheckErr { line: 0, col: 0, sp: no_span(), msg: "no entry point: define '#main' or a function named 'main'", decl: -1, notes: [] })
+            return ""
+        }
         if self.wasm { self.emit_runtime_prelude_wasm(en) } else if self.a64 { self.emit_runtime_prelude_a64(en) } else { self.emit_runtime_prelude(en) }
         // Start from the entry point: every function is emitted once a function
         // emitted calls it, makes it a value or applies it partially (MYLA-108;
@@ -2031,6 +2043,14 @@ impl CodeGen {
                 let ff = self.request_fn("std$rt$float_to_str", [])
                 draining = true
             }
+            // the texts of the runtime errors with values (D183), likewise
+            for k in self.trap_vals {
+                let tf = trap_text_fn(k)
+                if !self.fn_seen.contains(tf) {
+                    let rf = self.request_fn(tf, [])
+                    draining = true
+                }
+            }
         }
         for pj in self.partial_jobs {
             self.emit_partial(pj)
@@ -2049,7 +2069,7 @@ impl CodeGen {
 
     // Register an instantiation (or non-generic function) and return its emitted
     // (mangled) name, enqueueing it for stamping the first time it is seen.
-    #test(codegen_on("fun main() { print(1 + 2) }"), "add", [])["add"]
+    #test(codegen_on("fun main() { print(1 + 2) }"), "main", [])["main"]
     fun request_fn(var self, orig: str, targs: [Type]) -> str {
         let sig = self.sig_of(orig)
         if sig.type_params.len() == 0 {
@@ -2977,7 +2997,7 @@ impl CodeGen {
     // %rax, trapping at line:col when it is out of bounds (shared with the IR
     // backend, MYLA-105).
     fun emit_elem_addr(var self, is_str: bool, stride: int32, line: int32, col: int32) {
-        self.emit_elem_check(line, col)
+        self.emit_elem_check(line, col, is_str, Type.TInt(64, true))
         self.emit(format("leaq {}, %rax", self.elem_operand(is_str, stride)))
     }
 
@@ -2992,11 +3012,32 @@ impl CodeGen {
         return "16(%rax,%rcx)"
     }
 
-    // The bounds check of element %rcx of the list or string %rax.
-    fun emit_elem_check(var self, line: int32, col: int32) {
+    // The bounds check of element %rcx of the list or string %rax (`is_str`),
+    // the index of type `it`: a failure reports the index and the length
+    // (D183), through `__trap_lindex(pos, i, n)` or `__trap_sindex`.
+    fun emit_elem_check(var self, line: int32, col: int32, is_str: bool, it: Type) {
         self.emit("movq (%rax), %rdx")
         self.emit("cmpq %rdx, %rcx")
-        self.trap("jae", "__trap_index", line, col)
+        let tr = self.want_trap(if is_str { "sindex" } else { "lindex" })
+        if tr == "" {
+            self.trap("jae", "__trap_index", line, col)
+            return
+        }
+        let skip = self.label()
+        self.emit(format("jb {}", skip))
+        for ins in rcx_widened(it, "rsi") { self.emit(ins) }
+        self.load_position(line, col, "rdi")
+        self.emit(format("call {}", tr))
+        self.emit(format("{}:", skip))
+    }
+
+    // `__trap_<kind>`, the routine reporting that runtime error with its
+    // values (D183), asked for; "" where std.rt has no text for it (a
+    // program built without it), the error then reported without them.
+    fun want_trap(var self, kind: str) -> str {
+        if !self.has_func(trap_text_fn(kind)) { return "" }
+        if !list_has_str(self.trap_vals, kind) { self.trap_vals.push(kind) }
+        return "__trap_" + kind
     }
 
     // -- copy-on-write mutation addressing --------------------------------
@@ -3109,7 +3150,17 @@ impl CodeGen {
         self.emit("cmpq (%rsi), %rcx")
         self.emit(format("jle {}", good))
         self.emit(format("{}:", bad))
-        self.trap("jmp", "__trap_index", line, col)
+        // the range and the string's length reported (D183)
+        let tr = self.want_trap("range")
+        if tr == "" { self.trap("jmp", "__trap_index", line, col) }
+        else {
+            self.emit("movq %rcx, %r8")
+            self.emit("movq (%rsi), %rcx")
+            self.emit("movq %rdx, %rsi")
+            self.emit("movq %r8, %rdx")
+            self.load_position(line, col, "rdi")
+            self.emit(format("call {}", tr))
+        }
         self.emit(format("{}:", good))
         self.emit("leaq 8(%rsi,%rdx), %rsi")   // &bytes[start]
         self.emit("subq %rdx, %rcx")
@@ -3206,9 +3257,71 @@ impl CodeGen {
         if self.frames {
             self.emit_env_routine(env_deep_ir(self, lifted, owned, false))
             self.emit_env_routine(env_deep_ir(self, lifted, owned, true))
+            // their captures' routines, kinds of `__drop_drain`'s (M15)
+            for cl in [false, true] {
+                var suffix = "_env_deep_m"
+                if cl { suffix = "_env_clone_m" }
+                let kind = self.drop_kinds.len() as int32
+                self.drop_kinds.push(lifted + suffix)
+                self.emit_env_routine(env_deep_members_ir(self, lifted, owned, cl, kind))
+            }
         }
         self.env_records.push(lifted)
-        self.emit_env_routine(env_drop_ir(self, lifted, owned, self.rt_alloc_names().1))
+        // an environment holding a function value, which may hold another
+        // environment, without bound: its release defers past a depth, as
+        // a cell's that nests itself does (MYLA-389, M15)
+        var kind = -1
+        var chains = false
+        for d in owned { if self.reaches_func(d.ty, []) { chains = true } }
+        if chains {
+            kind = self.drop_kinds.len() as int32
+            self.drop_kinds.push(lifted + "_env_drop")
+        }
+        self.emit_env_routine(env_drop_ir(self, lifted, owned, self.rt_alloc_names().1, kind))
+    }
+
+    // Whether a value of `t` holds, inline or through cells, a function value
+    // (whose environment may hold anything; `seen`: the named types already
+    // looked into).
+    #test(codegen_on("[int]"), Type.TList(Type.TTuple([Type.TStr, Type.TFunc([], None)])), [])[true]
+    #test(codegen_on("[int]"), Type.TMap(Type.TStr, Type.TList(Type.TInt(32, true))), [])[false]
+    fun reaches_func(self, t: Type, seen: [str]) -> bool {
+        var parts: [Type] = []
+        match t {
+            Type.TFunc(ps, r) => { return true },
+            Type.TAsync(f) => { return true },
+            Type.TList(e) => { parts = [e] },
+            Type.TMap(k, v) => { parts = [k, v] },
+            Type.TTuple(es) => { parts = es },
+            Type.TStruct(n, a) => {
+                let tok = mono_token(t)
+                if list_has_str(seen, tok) { return false }
+                let info = self.struct_info(n)
+                let sub = self.type_subst(info.type_params, a)
+                for f in info.fields {
+                    if self.reaches_func(subst_type(f.ty, sub), push_str_copy(seen, tok)) { return true }
+                }
+            },
+            Type.TActor(n, a) => {
+                let tok = mono_token(t)
+                if list_has_str(seen, tok) { return false }
+                for m in self.cell_members(t) {
+                    if self.reaches_func(m, push_str_copy(seen, tok)) { return true }
+                }
+            },
+            Type.TEnum(n, a) => {
+                let tok = mono_token(t)
+                if list_has_str(seen, tok) { return false }
+                for m in self.cell_members(t) {
+                    if self.reaches_func(m, push_str_copy(seen, tok)) { return true }
+                }
+            },
+            _ => {},
+        }
+        for x in parts {
+            if self.reaches_func(x, seen) { return true }
+        }
+        return false
     }
 
     // `myla_<fn>__fnval`: the adapter that lets a plain `fun` be called as a
@@ -3579,7 +3692,15 @@ impl CodeGen {
                 let t = self.need_deepc[dc]
                 let cl = self.deepc_clone[dc]
                 dc = dc + 1
-                self.emit_wanting(deep_cell_ir(self, t, cl, self.deep_cell_label(t, cl)))
+                let label = self.deep_cell_label(t, cl)
+                self.emit_wanting(deep_cell_ir(self, t, cl, label))
+                // its members' routine, a kind of `__drop_drain`'s: a deep
+                // copy defers past a depth as a release does (M15)
+                if deep_cell_has_members(self, t) {
+                    let kind = self.drop_kinds.len() as int32
+                    self.drop_kinds.push(label + "_m")
+                    self.emit_env_routine(deep_members_ir(self, t, cl, label + "_m", kind))
+                }
             }
             while k < self.need_walk.len() {
                 let t = self.need_walk[k]
@@ -3596,6 +3717,7 @@ impl CodeGen {
         }
         if self.need_sb { self.emit_sb_rc_helpers() }
         if self.drop_kinds.len() > 0 { self.emit_routine(drop_drain_ir(), -1, 0, 0) }
+        for k in self.trap_vals { self.emit_wanting(trap_value_ir(k, trap_text_fn(k))) }
     }
 
     // Whether releasing a cell of `t` (a list, map, boxed enum or actor) can
@@ -4548,6 +4670,23 @@ fun trap_messages(checked: bool) -> [str] {
         out.push("shift amount out of range")
     }
     return out
+}
+
+// The moves of the index in %rcx, of type `t`, into the 64-bit register
+// `dst` as its value: sign- or zero-extended from its width (D183).
+#test(Type.TInt(32, true), "rsi")[["movslq %ecx, %rsi"]]
+#test(Type.TInt(32, false), "rsi")[["movl %ecx, %ecx", "movq %rcx, %rsi"]]
+#test(Type.TInt(8, false), "rsi")[["movzbq %cl, %rsi"]]
+pub fun rcx_widened(t: Type, dst: str) -> [str] {
+    return match t {
+        Type.TInt(w, signed) => {
+            if w == 32 { if signed { [format("movslq %ecx, %{}", dst)] } else { ["movl %ecx, %ecx", format("movq %rcx, %{}", dst)] } }
+            else if w == 16 { if signed { [format("movswq %cx, %{}", dst)] } else { [format("movzwq %cx, %{}", dst)] } }
+            else if w == 8 { if signed { [format("movsbq %cl, %{}", dst)] } else { [format("movzbq %cl, %{}", dst)] } }
+            else { [format("movq %rcx, %{}", dst)] }
+        },
+        _ => [format("movq %rcx, %{}", dst)],
+    }
 }
 
 // The DW_ATE encoding of a scalar type (MYLA-66).

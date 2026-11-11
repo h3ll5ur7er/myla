@@ -1,0 +1,5 @@
+runtime error: string range 2..9 out of bounds (len 5)
+  --> examples/errors/runtime_str_range_oob.my:7:14
+  |
+7 |     sb.append("hello", 2, 9)
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^

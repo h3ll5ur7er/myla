@@ -1,5 +1,5 @@
 //~ runtime error: out of bounds
-//~ native: runtime error: index out of bounds
+//~ native: runtime error: list index 3 out of bounds (len 3)
 // Indexing past the end traps at runtime (D40); a safe accessor is left to the
 // stdlib (v0.5).
 #main

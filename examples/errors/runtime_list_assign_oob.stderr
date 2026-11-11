@@ -1,0 +1,5 @@
+runtime error: list index 5 out of bounds (len 2)
+  --> examples/errors/runtime_list_assign_oob.my:6:7
+  |
+6 |     xs[5] = 3
+  |     ^^^^^

@@ -315,4 +315,4 @@ Any expression can stand alone; usually it's a call. A `match` used as a stateme
 
 ## The entry point
 
-A runnable program has one entry function: the function marked `#main`, or else the one named `main`. Having both, or two `#main`s, is an error. The entry takes no parameters and returns nothing; read arguments with `std.process.args()` and set the exit status with `std.process.exit(code)` ([[Language/Standard-library]]). A program without an entry type-checks, but can't run.
+A runnable program has one entry function: the function marked `#main`, or else the one named `main`. Having both, or two `#main`s, is an error. The entry takes no parameters and returns nothing; read arguments with `std.process.args()` and set the exit status with `std.process.exit(code)` ([[Language/Standard-library]]). A program without an entry type-checks, but can't run: `myla run` says `runtime error: no entry point: define '#main' or a function named 'main'`, and `myla build` refuses it with the same message as a type error, on every target ([[MYLA-415]]).

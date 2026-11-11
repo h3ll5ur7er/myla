@@ -247,7 +247,7 @@ There are no global variables.
 
 ## Runtime errors
 
-Both report on stderr and exit 1. The interpreter gives the message with its values, the source position, the source line and a caret; a native binary prints the first two lines, `runtime error: <message>` without the values, then the same position ([[MYLA-17]], [[MYLA-65]]):
+Both report on stderr and exit 1, with the same message, values included (D183, [[MYLA-415]]). The interpreter gives the message, the source position, the source line and a caret; a native binary prints the first two lines, `runtime error: <message>`, then the same position ([[MYLA-17]], [[MYLA-65]]):
 
 ```
 $ myla run examples/errors/runtime_list_index_oob.my
@@ -258,7 +258,7 @@ runtime error: list index 3 out of bounds (len 3)
   |             ^
 $ myla build examples/errors/runtime_list_index_oob.my -o oob && ./oob
 wrote oob
-runtime error: index out of bounds
+runtime error: list index 3 out of bounds (len 3)
   --> examples/errors/runtime_list_index_oob.my:8:13
 ```
 
@@ -267,11 +267,13 @@ The position is that of the expression that fails: an index's `[`, a call's `(` 
 | Error | Interpreter | Native |
 | --- | --- | --- |
 | Division or remainder by zero | `division by zero` / `modulo by zero` | the same |
-| List or string index out of bounds | `list index 5 out of bounds (len 2)` | `index out of bounds` |
-| Missing map key (`m[k]`) | `map key 'b' not found` | `map key not found` |
+| List or string index out of bounds | `list index 5 out of bounds (len 2)`, `string index 9 out of bounds (len 3)` | the same |
+| Missing map key (`m[k]`) | `map key 'b' not found` (the key as Python's `repr` writes it: `'b'`, `"it's"`, `5`, `False`, `(3, 'b')`; a `char` key as its code point) | the same for a key of an integer, `char`, `bool` or `str` type or a tuple of such; `map key not found` for a struct, enum or list key |
 | `pop` on an empty list | `pop from an empty list` | the same |
 | `assert`, `panic`, `unreachable` | the message | the same |
-| An integer `as char` that isn't a Unicode scalar value (a surrogate, above U+10FFFF) | `invalid char: 55296 is not a Unicode scalar value` | `invalid char` |
+| An integer `as char` that isn't a Unicode scalar value (a surrogate, above U+10FFFF) | `invalid char: 55296 is not a Unicode scalar value` | the same |
+| `sb.append(s, start, end)` with a range outside `s` | `string range 2..9 out of bounds (len 5)` | the same |
+| A plain negative slice bound (D154) | `index out of bounds` | the same |
 | Running out of the stack | `stack overflow` (no position) | the same (no position; on every target, [[Language/Targets]], [[MYLA-261]]) |
 | A slice's step of 0 | `slice step is zero` | the same |
 | A `str` slice cutting a well-formed character (D174) | `a slice bound inside a character` | the same |

@@ -1,0 +1,5 @@
+runtime error: map key 'b' not found
+  --> examples/errors/runtime_map_field_absent.my:10:6
+   |
+10 |     m["b"].n = 1
+   |     ^^^^^^

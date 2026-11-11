@@ -2035,6 +2035,89 @@ pub fun write_bytes(fd: int, b: [uint8]) {
 
 // --- runtime errors ------------------------------------------------------------
 
+// The texts of the runtime errors that carry values, as the interpreter
+// words them (D183): the trap routines and the lowering's cold paths build
+// them, then report them as `__panic` does.
+
+// `list index 7 out of bounds (len 3)` (`__trap_lindex`).
+pub fun list_index_text(i: int64, n: int64) -> str {
+    return "list index " + int_to_str(i) + " out of bounds (len " + int_to_str(n) + ")"
+}
+
+// `string index 9 out of bounds (len 3)` (`__trap_sindex`).
+pub fun str_index_text(i: int64, n: int64) -> str {
+    return "string index " + int_to_str(i) + " out of bounds (len " + int_to_str(n) + ")"
+}
+
+// `string range 2..9 out of bounds (len 3)`: `sb.append(s, a, b)` with a
+// range that isn't within `s` (`__trap_range`).
+pub fun range_text(a: int64, b: int64, n: int64) -> str {
+    return "string range " + int_to_str(a) + ".." + int_to_str(b) + " out of bounds (len " + int_to_str(n) + ")"
+}
+
+// `invalid char: 55296 is not a Unicode scalar value`.
+pub fun char_text(cp: int64) -> str {
+    return "invalid char: " + int_to_str(cp) + " is not a Unicode scalar value"
+}
+
+// `map key 5 not found`, the key's text (`key_*_text`) given.
+pub fun key_text(k: str) -> str {
+    return "map key " + k + " not found"
+}
+
+// A key's text where the interpreter's differs from the value's print form:
+// a `bool` as `True` or `False`, a string quoted and escaped (Python's
+// `repr`, as the interpreter's `py_repr_str`).
+pub fun key_bool_text(b: bool) -> str {
+    if b {
+        return "True"
+    }
+    return "False"
+}
+
+pub fun key_str_text(s: str) -> str {
+    var has_single = false
+    var has_double = false
+    for c in s {
+        if c == '\'' {
+            has_single = true
+        }
+        if c == '"' {
+            has_double = true
+        }
+    }
+    var quote = '\''
+    if has_single && !has_double {
+        quote = '"'
+    }
+    var sb = StringBuilder()
+    sb.append_char(quote)
+    for c in s {
+        let cp = c as int32
+        if c == '\\' {
+            sb.append("\\\\")
+        } else if c == quote {
+            sb.append_char('\\')
+            sb.append_char(c)
+        } else if cp == 10 {
+            sb.append("\\n")
+        } else if cp == 9 {
+            sb.append("\\t")
+        } else if cp == 13 {
+            sb.append("\\r")
+        } else if cp < 32 || (cp >= 127 && cp <= 160) || cp == 173 {
+            let digits = "0123456789abcdef"
+            sb.append("\\x")
+            sb.append_byte(digits[(cp / 16) % 16])
+            sb.append_byte(digits[cp % 16])
+        } else {
+            sb.append_char(c)
+        }
+    }
+    sb.append_char(quote)
+    return sb.build()
+}
+
 // `__panic`'s report (a trap, `panic`, a failed `assert`; MYLA-17, MYLA-65):
 // `runtime error: <msg>` on stderr (`msg` a string's cell), with a position
 // record `pos` (a file name's cell, then the line and the column as 32-bit
