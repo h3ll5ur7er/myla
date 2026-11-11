@@ -47,8 +47,6 @@ fun main() {
 | `compile(pattern: str) -> Result<Regex, RegexError>` | The pattern compiled, or why it doesn't compile |
 | `escape(s: str) -> str` | `s` with every byte that means something in a pattern escaped: a pattern that matches `s` itself |
 | `struct Match { start: int, end: int, text: str }` | A match: its byte offsets in the text, and its text |
-| `struct RegexError { kind: ErrorKind, pos: int }` | The reason, and the byte offset in the pattern of the construct at fault. `e.message()` is the reason in words, and `f"{e}"` gives `missing closing ) at 1` |
-| `enum ErrorKind` | `MissingParen`, `UnexpectedParen`, `MissingBracket`, `InvalidEscape`, `InvalidClassRange`, `InvalidPosixClass`, `NonAsciiInClass`, `MissingRepeatArgument`, `InvalidNestedRepeat` (`a**`), `InvalidRepeatCount` (above 1000, or `{3,2}`), `InvalidGroup` (lookaround, `(?P=n)`), `InvalidGroupName`, `DuplicateGroupName`, `InvalidFlags`, `NestingTooDeep` (groups more than 100 deep), `TooLarge` (a program of more than 100,000 instructions, `((a{1000}){1000})`) |
 
 The methods of `Regex`:
 
@@ -119,6 +117,15 @@ Strings are bytes (D164), and so are patterns:
 - A non-ASCII character in a pattern outside a class is the sequence of its bytes, repeated as one: `é+` matches `éé`.
 - Positions are byte offsets, and a match may start or end inside a character. Its `text` keeps the bytes, as `StringBuilder.append(s, start, end)` does, where a slice `s[a:b]` would stop with an error inside a well-formed character (D174).
 - Case folding, `\w`, `\b` and the POSIX classes are ASCII.
+
+## Errors
+
+`compile` gives one of these for a pattern that doesn't compile.
+
+| Item | Meaning |
+| --- | --- |
+| `struct RegexError { kind: ErrorKind, pos: int }` | The reason, and the byte offset in the pattern of the construct at fault. `e.message()` is the reason in words, and `f"{e}"` gives `missing closing ) at 1` |
+| `enum ErrorKind` | `MissingParen`, `UnexpectedParen`, `MissingBracket`, `InvalidEscape`, `InvalidClassRange`, `InvalidPosixClass`, `NonAsciiInClass`, `MissingRepeatArgument`, `InvalidNestedRepeat` (`a**`), `InvalidRepeatCount` (above 1000, or `{3,2}`), `InvalidGroup` (lookaround, `(?P=n)`), `InvalidGroupName`, `DuplicateGroupName`, `InvalidFlags`, `NestingTooDeep` (groups more than 100 deep), `TooLarge` (a program of more than 100,000 instructions, `((a{1000}){1000})`) |
 
 ## How it matches
 
