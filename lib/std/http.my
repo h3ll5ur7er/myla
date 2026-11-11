@@ -2589,11 +2589,15 @@ fun deadline(o: ServerOptions, at: int, since: int64, life_end: int64) -> int64 
 // reading (a wait for a request ends as at the end of the stream; a
 // response can still be written), or both ways while it sends (a write
 // waiting for room fails), which ends the guard. A time limit is kept to
-// within `poll`. No actor call and no wake a request: an actor holding the
-// time, set three times a request, halved the requests a second natively
-// (MYLA-422). Whether it shut both ways; nothing once cancelled (the
-// connection ended).
-async fun guard(s: TcpStream, o: ServerOptions, marks: task.Notifier, life_end: int64, poll: int) -> bool {
+// within `poll`. A connection waiting for a request that has said nothing
+// since the last look is shut too, its worker given up, when a connection
+// waits to be accepted on the listener `l` (MYLA-468): a free worker would
+// have taken it at once, so every worker is busy, and silent connections
+// can't keep the others out. No actor call and no wake a request: an actor
+// holding the time, set three times a request, halved the requests a
+// second natively (MYLA-422). Whether it shut both ways; nothing once
+// cancelled (the connection ended).
+async fun guard(s: TcpStream, l: TcpListener, o: ServerOptions, marks: task.Notifier, life_end: int64, poll: int) -> bool {
     var seen = marks.listen().gen
     var since = time.now_ms()
     var shut_read = false
@@ -2619,10 +2623,19 @@ async fun guard(s: TcpStream, o: ServerOptions, marks: task.Notifier, life_end: 
                     let shut = s.shutdown(net.Shutdown.Read)
                     shut_read = true
                 }
+            } else if at == AT_IDLE && !shut_read && pending(l) {
+                let shut = s.shutdown(net.Shutdown.Read)
+                shut_read = true
             }
         }
     }
     unreachable()
+}
+
+// Whether a connection waits to be accepted on `l`: its socket readable
+// now (1, std.net's READABLE).
+fun pending(l: TcpListener) -> bool {
+    return __sock_poll(l.handle, 1, 0) > 0
 }
 
 // A connection as the server serves it: its wire, the marks its guard
@@ -2736,12 +2749,12 @@ impl Link {
     }
 }
 
-// The connection `s` served (`serve_requests`), under a guard when one of
-// `o`'s times limits it: one child task a connection, where a
-// `task.timeout` around each wait would cost a task each (half the
+// The connection `s`, accepted on `l`, served (`serve_requests`), under a
+// guard when one of `o`'s times limits it: one child task a connection,
+// where a `task.timeout` around each wait would cost a task each (half the
 // requests a second of a keep-alive client). `marks` is the worker's,
 // which its connections' guards read in turn.
-async fun serve_connection(s: TcpStream, o: ServerOptions, handler: async (Request) -> Response, tally: Tally, marks: task.Notifier) -> (bool, int) {
+async fun serve_connection(s: TcpStream, l: TcpListener, o: ServerOptions, handler: async (Request) -> Response, tally: Tally, marks: task.Notifier) -> (bool, int) {
     let life_end = after(time.now_ms(), o.keep_alive_ms)
     let poll = poll_ms(o)
     let at = (marks.listen().gen % 4i64) as int
@@ -2749,7 +2762,7 @@ async fun serve_connection(s: TcpStream, o: ServerOptions, handler: async (Reque
     if poll < 0 {
         return await serve_requests(link, o, handler, tally, life_end)
     }
-    async let g = guard(s, o, marks, life_end, poll)
+    async let g = guard(s, l, o, marks, life_end, poll)
     let done = await serve_requests(link, o, handler, tally, life_end)
     task.cancel(g)
     let fired = await g
@@ -2860,7 +2873,7 @@ async fun worker(l: TcpListener, o: ServerOptions, handler: async (Request) -> R
         let got = await l.accept_async()
         match got {
             Ok(s) => {
-                let done = await serve_connection(s, o, handler, tally, marks)
+                let done = await serve_connection(s, l, o, handler, tally, marks)
                 answered = plus(answered, done.1)
                 var c = s
                 let gone = c.close()
