@@ -152,10 +152,10 @@ impl CodeGen {
         } else {
             self.raw(format("\tcall myla_{}", entry_name))
         }
-        // exit_group: every thread ends (D89 (3))
-        self.raw("\tmovq $231, %rax")
-        self.raw("\txorq %rdi, %rdi")
-        self.raw("\tsyscall")
+        // the end: the exit hook, then exit_group, every thread ending
+        // (D89 (3), D187)
+        self.raw("\txorl %edi, %edi")
+        self.raw("\tcall __exit_program")
         self.raw("")
         if self.frames {
             self.emit_executor()
@@ -200,9 +200,8 @@ impl CodeGen {
         self.raw("	leaq .Lmsg_sov(%rip), %rsi")
         self.raw("	movl $30, %edx")
         self.raw("	syscall")
-        self.raw("	movq $231, %rax")
         self.raw("	movl $1, %edi")
-        self.raw("	syscall")
+        self.raw("	call __exit_program")
         self.raw(".Lsegv_other:")
         self.raw("	subq $32, %rsp")
         self.raw("	movq $0, (%rsp)")
@@ -378,9 +377,8 @@ impl CodeGen {
         self.raw("\tmovq %rax, %rdi")
         self.raw("\tjmp __task_end")
         self.raw(".Lfinish_program:")
-        self.raw("\tmovq $231, %rax")
-        self.raw("\txorq %rdi, %rdi")
-        self.raw("\tsyscall")
+        self.raw("\txorl %edi, %edi")
+        self.raw("\tcall __exit_program")
         self.raw("")
         // __task_fail: a panic (%rdi 2, %rsi the message, %rdx the position)
         // or an `exit` (%rdi 3, %rsi the code) in a task ends the program
@@ -516,8 +514,7 @@ impl CodeGen {
         self.raw("\tcall __task_fail")
         self.raw("\tcall __failed_wait")
         self.raw("\tpopq %rdi")
-        self.raw("\tmovq $231, %rax")
-        self.raw("\tsyscall")
+        self.raw("\tcall __exit_program")
         self.raw("")
     }
 
