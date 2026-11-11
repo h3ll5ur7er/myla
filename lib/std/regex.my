@@ -4272,14 +4272,6 @@ fun matches(pattern: str, text: str) -> bool {
     }
 }
 
-// The test functions' assertion (an f-string in `assert` doesn't compile
-// natively yet).
-fun holds(ok: bool, what: str) {
-    if !ok {
-        panic(what)
-    }
-}
-
 fun compiled(pattern: str) -> Regex {
     return match compile(pattern) {
         Ok(re) => re
@@ -4292,18 +4284,18 @@ fun compiled(pattern: str) -> Regex {
 #test
 fun finds_and_captures() {
     let re = compiled("(?P<user>[\\w.]+)@(?P<host>\\w+)\\.com")
-    holds(re.group_count() == 2, "two groups")
-    holds(re.as_str() == "(?P<user>[\\w.]+)@(?P<host>\\w+)\\.com", "as_str")
+    assert(re.group_count() == 2, "two groups")
+    assert(re.as_str() == "(?P<user>[\\w.]+)@(?P<host>\\w+)\\.com", "as_str")
     match re.find("write to ann.lee@example.com today") {
-        Some(m) => holds(m.start == 9 && m.end == 28 && m.text == "ann.lee@example.com", f"find: {m.start}-{m.end}")
+        Some(m) => assert(m.start == 9 && m.end == 28 && m.text == "ann.lee@example.com", f"find: {m.start}-{m.end}")
         None => panic("no match")
     }
     match re.captures("write to ann.lee@example.com today") {
         Some(c) => {
-            holds(c.len() == 3, "three groups with the whole match")
-            holds(c.text(1) == "ann.lee" && c.text(2) == "example", "group texts")
+            assert(c.len() == 3, "three groups with the whole match")
+            assert(c.text(1) == "ann.lee" && c.text(2) == "example", "group texts")
             match c.name("host") {
-                Some(m) => holds(m.start == 17 && m.end == 24 && m.text == "example", "host")
+                Some(m) => assert(m.start == 17 && m.end == 24 && m.text == "example", "host")
                 None => panic("no host")
             }
             match c.name("nobody") {
@@ -4322,21 +4314,21 @@ fun finds_and_captures() {
         None => {}
     }
     match re.find_at("a@b.com c@d.com", 1) {
-        Some(m) => holds(m.start == 8 && m.text == "c@d.com", "find_at")
+        Some(m) => assert(m.start == 8 && m.text == "c@d.com", "find_at")
         None => panic("find_at found nothing")
     }
     let all = re.captures_all("a@b.com, c@d.com")
-    holds(all.len() == 2 && all[1].text(1) == "c" && all[1].text(2) == "d", "captures_all")
+    assert(all.len() == 2 && all[1].text(1) == "c" && all[1].text(2) == "d", "captures_all")
 }
 
 #test
 fun finds_all_with_text() {
     let ms = compiled("\\d+").find_all("1 22 333")
-    holds(ms.len() == 3, "three numbers")
-    holds(ms[2] == Match { start: 5, end: 8, text: "333" }, "the third")
+    assert(ms.len() == 3, "three numbers")
+    assert(ms[2] == Match { start: 5, end: 8, text: "333" }, "the third")
     // `.` matches a byte, so a match can end inside a character
     let half = compiled("a.").find_all("aé")
-    holds(half.len() == 1 && half[0].end == 2 && half[0].text.len() == 2, "a match inside a character")
+    assert(half.len() == 1 && half[0].end == 2 && half[0].text.len() == 2, "a match inside a character")
 }
 
 #test
@@ -4344,7 +4336,7 @@ fun escapes_round_trip() {
     let text = "1+1=2? (a|b) [x] {y} ^$ \\."
     let re = compiled(escape(text))
     match re.find("so " + text + " so") {
-        Some(m) => holds(m.start == 3 && m.text == text, "an escaped pattern matches its text")
+        Some(m) => assert(m.start == 3 && m.text == text, "an escaped pattern matches its text")
         None => panic("no match of the escaped text")
     }
 }
@@ -4354,11 +4346,11 @@ fun escapes_round_trip() {
 #test
 fun pathological_patterns_are_linear() {
     let aaa = repeated("a", 10000)
-    holds(!compiled("(a*)*b").is_match(aaa), "(a*)*b")
-    holds(!compiled("(a|a)*b").is_match(aaa), "(a|a)*b")
-    holds(!compiled("(a|aa)*b").is_match(aaa), "(a|aa)*b")
+    assert(!compiled("(a*)*b").is_match(aaa), "(a*)*b")
+    assert(!compiled("(a|a)*b").is_match(aaa), "(a|a)*b")
+    assert(!compiled("(a|aa)*b").is_match(aaa), "(a|aa)*b")
     match compiled("(a*)*$").find(aaa) {
-        Some(m) => holds(m.end == 10000, "(a*)*$ matches it all")
+        Some(m) => assert(m.end == 10000, "(a*)*$ matches it all")
         None => panic("(a*)*$")
     }
     match compiled("(x+x+)+y").find(repeated("x", 5000)) {
@@ -4396,15 +4388,15 @@ fun ab_text(n: int) -> str {
 fun dfa_gives_up_for_the_pike_vm() {
     let text = ab_text(3000)
     var sr = compiled("a[ab]{14}c").searcher(text, 0, 1)
-    holds(!sr.is_match(), "no c")
-    holds(!sr.use_dfa, "the DFA gave up")
+    assert(!sr.is_match(), "no c")
+    assert(!sr.use_dfa, "the DFA gave up")
     let re = compiled("a[ab]{14}b")
     let auto = re.all_slots(text, 2, -1, 1)
     let pike = re.all_slots(text, 2, -1, -1)
-    holds(auto.len() == pike.len() && auto.len() > 100, f"{auto.len()} matches")
+    assert(auto.len() == pike.len() && auto.len() > 100, f"{auto.len()} matches")
     var k = 0
     while k < pike.len() {
-        holds(shown_slots(auto[k]) == shown_slots(pike[k]), f"match {k}")
+        assert(shown_slots(auto[k]) == shown_slots(pike[k]), f"match {k}")
         k += 1
     }
 }
