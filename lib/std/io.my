@@ -198,6 +198,38 @@ impl Write for FdStream {
     }
 }
 
+// How many bytes a pipe with room takes in one write (POSIX's PIPE_BUF,
+// Linux's 4096), which `FdStream.write_async` writes at a time.
+const PIPE_BUF: int32 = 4096
+
+impl FdStream {
+    // `write`, the task waiting while the descriptor is full, the other
+    // tasks running (MYLA-457): the bytes go a piece a pipe with room takes
+    // at once (PIPE_BUF bytes), each after a wait for that room if there is
+    // none now. `write` waits too, but with its thread blocked, as a blocking
+    // descriptor's write does (a non-blocking one's tried again at once
+    // before, spinning). A task asked to stop stops waiting: `Cancelled`, the
+    // bytes before the piece it waited for written.
+    async fun write_async(var self, b: [uint8]) -> Result<int, IoError> {
+        var at = 0
+        while at < b.len() {
+            if __poll_write(self.fd, 0) == 0 {
+                await __wait_writable(self.fd)
+                if __task_cancelled() {
+                    return Err(IoError.Cancelled)
+                }
+            }
+            var end = at + PIPE_BUF
+            if end > b.len() {
+                end = b.len()
+            }
+            let w = self.write(b[at:end])?
+            at = end
+        }
+        return Ok(b.len())
+    }
+}
+
 impl Seek for FdStream {
     // A pipe or a terminal can't seek: `Other(29)` (ESPIPE).
     fun seek(var self, pos: SeekFrom) -> Result<int64, IoError> {

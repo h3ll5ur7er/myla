@@ -8,6 +8,7 @@ import os
 import signal
 import subprocess
 import tempfile
+import time
 import unittest
 
 from ._native import (
@@ -267,6 +268,98 @@ class BrokenPipe(unittest.TestCase):
                         p = subprocess.run(argv, executable=exe, stdout=subprocess.PIPE, stderr=full, text=True, timeout=60)
                     # the message itself can't be written either: the status says it
                     self.assertEqual((p.stdout, p.returncode), ("one\ntwo\n", 1))
+
+
+# MYLA-457: a write to a full non-blocking output waits for room (a poll)
+# instead of trying again at once: 2 MiB through `print`, `println` and an
+# `FdStream`, and through `write_async` in a task, into a non-blocking pipe
+# read 64 KiB every 20 ms. The writer spun on EAGAIN: 0.29 s of CPU over
+# 0.34 s; a blocking pipe's writer takes about 0.01 s.
+SYNC_WRITER = """from std.io import println, fd_stream
+
+fun main() {
+    let line = "x".repeat(1023)
+    for i in 0..512 {
+        print(line)
+    }
+    for i in 0..512 {
+        println(line)
+    }
+    var out = fd_stream(1)
+    let b = (line + "\\n").bytes()
+    for i in 0..1024 {
+        match out.write(b) {
+            Ok(n) => {}
+            Err(e) => { panic(f"{e}") }
+        }
+    }
+}
+"""
+
+ASYNC_WRITER = """import std.io as io
+import std.task as task
+
+async fun ticks() -> int {
+    var n = 0
+    for i in 0..10 {
+        await task.sleep(20)
+        n += 1
+    }
+    return n
+}
+
+#main
+async fun main() {
+    let b = ("x".repeat(1023) + "\\n").bytes()
+    var out = io.fd_stream(1)
+    async let t = ticks()
+    for i in 0..2048 {
+        match await out.write_async(b) {
+            Ok(n) => {}
+            Err(e) => { panic(f"{e}") }
+        }
+    }
+    let n = await t
+}
+"""
+
+
+def _drained_slowly(argv: list[str], exe: str | None) -> tuple[int, bytes, int, float, float]:
+    """`argv` run with its standard output a non-blocking pipe read 64 KiB
+    every 20 ms: the bytes read, its stderr, its exit code, its CPU time and
+    the wall time, in seconds."""
+    r, w = os.pipe()
+    os.set_blocking(w, False)
+    t0 = time.monotonic()
+    p = subprocess.Popen(argv, executable=exe, stdout=w, stderr=subprocess.PIPE)
+    os.close(w)
+    got = 0
+    with os.fdopen(r, "rb", buffering=0) as reader:
+        while chunk := reader.read(65536):
+            got += len(chunk)
+            time.sleep(0.02)
+    err = p.stderr.read()
+    p.stderr.close()
+    _, status, usage = os.wait4(p.pid, 0)
+    wall = time.monotonic() - t0
+    p.returncode = os.waitstatus_to_exitcode(status)
+    return got, err, p.returncode, usage.ru_utime + usage.ru_stime, wall
+
+
+@unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
+class NonBlockingOutput(unittest.TestCase):
+    def test_a_full_output_is_waited_for_not_spun_on(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for kind, source in [("sync", SYNC_WRITER), ("async", ASYNC_WRITER)]:
+                os.makedirs(os.path.join(tmp, kind))
+                for name, argv, exe in _argvs(os.path.join(tmp, kind), source):
+                    with self.subTest(writes=kind, run=name):
+                        got, err, code, cpu, wall = _drained_slowly(argv, exe)
+                        self.assertEqual((got, err, code), (2048 * 1024, b"", 0))
+                        # the reader alone takes 0.64 s; the interpreter's
+                        # start (reading the library) is most of what is left
+                        self.assertGreater(wall, 0.6)
+                        self.assertLess(cpu, 0.4 * wall, f"{cpu:.2f} s of CPU in {wall:.2f} s")
 
 
 if __name__ == "__main__":
