@@ -233,6 +233,23 @@ fun runs_more_calls_for_less_work() {
     assert(small.median < big.median, f"medians {small.median} and {big.median}")
 }
 
+fun nothing() {
+}
+
+// A closure that returns nothing is timed as well: `T` is `()` (MYLA-403,
+// after MYLA-417 made `()` a type argument).
+#test
+fun times_a_closure_that_returns_nothing() {
+    let r = run_n("nothing", 3, () => nothing())
+    assert(r.runs == 3 && r.batch >= 1, "a call without a value")
+    let s = run_n("a block", 2, () => {
+        let ys = [3, 1, 2].sorted()
+    })
+    assert(s.runs == 2, "a block without a return")
+    assert(run_for("unit", time.millis(5), () => ()).runs >= 1, "the unit value")
+    assert(black_box(()) == (), "black_box of ()")
+}
+
 #test
 fun black_box_gives_its_value() {
     assert(black_box(42) == 42, "an int")
