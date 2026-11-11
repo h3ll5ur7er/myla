@@ -217,7 +217,10 @@ class ConcurrencyStress(unittest.TestCase):
             self.assertIn("stacks.txt", files)
             with open(os.path.join(kept, d, "stacks.txt"), encoding="utf-8") as fh:
                 stacks = fh.read()
-            if shutil.which("gdb"):
+            # gdb may not attach where ptrace is limited to a process's
+            # ancestors (Yama's ptrace_scope 1, as on GitHub's runners); it
+            # says so in the file, and the core below still holds the stacks
+            if shutil.which("gdb") and "Could not attach" not in stacks:
                 self.assertIn("myla_main", stacks)
             if resource.getrlimit(resource.RLIMIT_CORE)[1] != 0:
                 self.assertTrue(any("core" in f for f in files), files)
