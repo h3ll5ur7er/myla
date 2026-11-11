@@ -59,6 +59,7 @@ A lambda's parameter types can be left out: the iterator's element type gives th
 | --- | --- |
 | `xs.iter() -> ListIter<T>` | The elements of a list, first to last (`std.list`, implicit) |
 | `m.iter() -> ListIter<(K, V)>` | The entries of a map as `(key, value)` pairs, in insertion order (`std.map`, implicit) |
+| `s.iter()`, `d.iter()`, `h.iter()`, `m.iter()` of a `Set`, `Deque`, `Heap`, `SortedMap` or `SortedSet` | Their elements: a set's in insertion order, a deque's front to back, a heap's in `pop`'s order, a sorted map's or set's in key order ([[Language/Standard-library/Set]], [[Language/Standard-library/Deque]], [[Language/Standard-library/Heap]], [[Language/Standard-library/Btree]], [[MYLA-425]]) |
 | `range(start: int, end: int) -> Range` | `start`, `start + 1`, … up to but not including `end`; none when `end` isn't greater. `for i in a..b` is the loop; this is the iterator that starts a pipeline |
 | `repeat<T>(v: T) -> Repeat<T>` | `v` again and again, without end: follow it with `take`, a consumer that stops (`find`, `any`, `all`), or `zip` it with a finite iterator |
 | `from_fn<S, T>(state: S, step: (S) -> Option<(T, S)>) -> FromFn<S, T>` | The values `step` gives from a state: `step(s)` is `Some((value, next state))`, or `None` to end. A closure can't change what it captures (D48, D93), so the state goes in and comes back out: `iter.from_fn((0, 1), (s) => Some((s.0, (s.1, s.0 + s.1))))` are the Fibonacci numbers |
