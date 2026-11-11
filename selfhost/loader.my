@@ -1872,12 +1872,16 @@ pub fun load_program_opts(entry: str, opts: LoadOptions) -> Result<Loaded, Repor
         // are named as the entry's own (`str.bang`), so its cases would run
         // as the entry's (MYLA-360)
         let tested = m.path == ld.entry
+        // its functions' bodies may wait until called (D179): every module
+        // of `std` but the entry and std.rt, which the back ends call by
+        // the primitives it replaces (MYLA-432)
+        let may_wait = in_std && !tested && m.id != "std$rt"
         for d in m.decls {
-            if in_std && is_impl(d) { std_impls[d.id] = DeclOrigin { module: dotted_id(m.id), path: m.path, implicit: is_implicit } }
-            // an implicit module's functions too: the checker checks their
-            // bodies only once called (MYLA-359)
-            if is_implicit && is_fun(d) { std_impls[d.id] = DeclOrigin { module: dotted_id(m.id), path: m.path, implicit: true } }
-            if entry_std != "" && tested && is_fun(d) { std_impls[d.id] = DeclOrigin { module: entry_std, path: m.path, implicit: false } }
+            if in_std && is_impl(d) { std_impls[d.id] = DeclOrigin { module: dotted_id(m.id), path: m.path, implicit: is_implicit, lazy: may_wait } }
+            // a module's functions too: the checker checks an implicit
+            // module's bodies only once called (MYLA-359)
+            if may_wait && is_fun(d) { std_impls[d.id] = DeclOrigin { module: dotted_id(m.id), path: m.path, implicit: is_implicit, lazy: true } }
+            if entry_std != "" && tested && is_fun(d) { std_impls[d.id] = DeclOrigin { module: entry_std, path: m.path, implicit: false, lazy: false } }
             decls.push(r.decl(d, m.id))
         }
         match r.err { Some(e) => { return Err(e) }, None => {} }

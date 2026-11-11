@@ -61,9 +61,47 @@ pub enum Type {
 pub struct CheckErr { line: int32, col: int32, sp: SrcSpan, msg: str, decl: int32, notes: [Note] }
 
 // Where a declaration of the standard library comes from: its module
-// (`std.str`) and file, as the loader found them, and whether the module is
-// one every program sees without an import (MYLA-320).
-pub struct DeclOrigin { module: str, path: str, implicit: bool }
+// (`std.str`) and file, as the loader found them, whether the module is
+// one every program sees without an import (MYLA-320), and whether its
+// functions' bodies may wait until code calls them (D179): every module of
+// `std` but the entry and std.rt, whose functions the back ends name by
+// the primitives they stand for (MYLA-432).
+pub struct DeclOrigin { module: str, path: str, implicit: bool, lazy: bool }
+
+// The functions of the standard library that the lowering and the back
+// ends call by their mangled names, where no code the checker checks
+// calls them (MYLA-432): marked as called (`run_all`), so that a body left
+// for later is always read for them. A back end that names another one
+// is an internal error of the build (`Checker.unmarked_std`, `CodeGen.
+// request_fn`), and `tests/burn/test_lazy_std.py` fails on a name
+// in a back end's source that isn't here. std.rt's are listed too, though
+// its bodies are always read: the back ends also name them by the
+// primitives they replace (`myla_runtime_function`).
+pub fun backend_std_functions() -> [str] {
+    return [
+        // f-strings' holes and slices (`lower.my`), `task.cancel` (D96)
+        "std$fmt$fmt_text", "std$fmt$fmt_int", "std$fmt$fmt_float",
+        "std$slice$take", "std$slice$take_str", "std$slice$str_whole",
+        "std$task$cancel",
+        // the wasm32 start and its memory (`runtime_wasm.my`)
+        "std$platform$wasm_start", "std$platform$map_memory",
+        // the runtime's (`lower.my`, `codegen.my`, `ir_*.my`, `runtime_*.my`)
+        "std$rt$actor_enter", "std$rt$actor_leave", "std$rt$alloc", "std$rt$alloc_tasks", "std$rt$cancel_after",
+        "std$rt$char_text", "std$rt$dclone_cell", "std$rt$dclone_env", "std$rt$dclone_str", "std$rt$deep_env",
+        "std$rt$deep_str", "std$rt$equal_bytes", "std$rt$exec_find", "std$rt$exec_peek", "std$rt$exec_push",
+        "std$rt$exec_run", "std$rt$exec_yield_push", "std$rt$exit_program", "std$rt$failed_wait", "std$rt$float_to_str",
+        "std$rt$fmod", "std$rt$free", "std$rt$free_tasks", "std$rt$func_drop", "std$rt$func_retain",
+        "std$rt$key_bool_text", "std$rt$key_str_text", "std$rt$key_text", "std$rt$list_grow", "std$rt$list_index_text",
+        "std$rt$map_find_h", "std$rt$map_keys_h", "std$rt$map_lookup", "std$rt$map_new", "std$rt$map_put_slot",
+        "std$rt$map_slot_h", "std$rt$mul_overflows_i64", "std$rt$mul_overflows_u64", "std$rt$panic_report", "std$rt$panic_report_tasks",
+        "std$rt$print_bool", "std$rt$print_char", "std$rt$print_int", "std$rt$print_str", "std$rt$print_uint",
+        "std$rt$range_text", "std$rt$sb_append_byte", "std$rt$sb_append_bytes", "std$rt$sb_append_char", "std$rt$sched_init",
+        "std$rt$sleep_frame", "std$rt$str_char_at", "std$rt$str_cmp", "std$rt$str_concat", "std$rt$str_concat3",
+        "std$rt$str_concat4", "std$rt$str_eq", "std$rt$str_hash", "std$rt$str_index_text", "std$rt$task_cancel",
+        "std$rt$task_cancelled", "std$rt$task_end", "std$rt$task_wait", "std$rt$wait_fd", "std$rt$wait_fd2",
+        "std$rt$wait_sock", "std$rt$wait_stopped", "std$rt$wake_waiters", "std$rt$workers_count", "std$rt$zero_words",
+    ]
+}
 
 // The functions' bodies the loader left unparsed (MYLA-359): an implicit
 // module's, each an empty block until the checker first checks it. `ids`
@@ -8338,6 +8376,8 @@ impl Checker {
         // calls them unnamed.
         var lazy = self.lazy_decls()
         for id in self.lazy_prelude.keys() { lazy[id] = true }
+        // and those the back ends call by name (MYLA-432)
+        for n in backend_std_functions() { self.called[n] = true }
         var waiting_fns: [int32] = []
         var pos = -1
         for decl in self.decls {
@@ -8553,6 +8593,33 @@ impl Checker {
                     None => {},
                 }
             }
+        }
+        return out
+    }
+
+    // The functions and methods of the standard library whose bodies may
+    // wait until called (`DeclOrigin.lazy`, D179) that no code checked
+    // calls or names, nor `backend_std_functions`: what a back end must not
+    // ask for, as their bodies may never be read (MYLA-432).
+    #test(checker_on("[int]"))[[:]]
+    fun unmarked_std(self) -> [str: bool] {
+        var may_wait: [int32: bool] = [:]
+        for d in self.decls {
+            let lazy = match d.kind {
+                DeclKind.ImplDecl(t, ms, tps, None, targs, attrs) => true,
+                DeclKind.FunDecl(fd) => true,
+                _ => false,
+            }
+            if lazy {
+                match self.std_impls.get(d.id) {
+                    Some(o) => { if o.lazy { may_wait[d.id] = true } },
+                    None => {},
+                }
+            }
+        }
+        var out: [str: bool] = [:]
+        for sig in self.functions {
+            if sig.has_decl && may_wait.contains(sig.decl_id) && !self.called.contains(sig.name) { out[sig.name] = true }
         }
         return out
     }
