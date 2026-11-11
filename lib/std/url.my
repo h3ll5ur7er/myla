@@ -23,6 +23,32 @@ pub enum UrlError {
     BadPort(int),
 }
 
+impl UrlError {
+    // The reason in words, with its position (D168).
+    #test(UrlError.BadPercent(2))["'%' without two hex digits at byte 2"]
+    #test(UrlError.BadChar(10))["a byte not allowed there at byte 10"]
+    #test(UrlError.BadScheme(0))["a bad scheme at byte 0"]
+    #test(UrlError.BadHost(7))["a bad host at byte 7"]
+    #test(UrlError.BadPort(9))["a bad port at byte 9"]
+    fun message(self) -> str {
+        return match self {
+            BadPercent(i) => f"'%' without two hex digits at byte {i}"
+            BadChar(i) => f"a byte not allowed there at byte {i}"
+            BadScheme(i) => f"a bad scheme at byte {i}"
+            BadHost(i) => f"a bad host at byte {i}"
+            BadPort(i) => f"a bad port at byte {i}"
+        }
+    }
+}
+
+// `message()`; a spec is ignored.
+impl Format for UrlError {
+    #test(UrlError.BadPort(11), "")["a bad port at byte 11"]
+    fun format(self, spec: str) -> str {
+        return self.message()
+    }
+}
+
 // A URI reference's parts (RFC 3986, section 3), percent-encoded as written.
 // `host` is `None` without an authority (`mailto:a@b.c`) and `Some("")` for
 // an empty one (`file:///etc`); an IPv6 host is without its brackets.

@@ -6,7 +6,8 @@
 // or a list of edges alike, and only the part a search reaches is made. A
 // weighted edge is a `(node, weight)` pair, its weight an `int64` (a path's
 // cost is a sum, and `std.heap`'s priorities are `int64`s), and weights must
-// not be negative.
+// not be negative: a negative one is a failure, as is a path's cost past
+// `int64`'s range (D184).
 //
 // A node is any type a map key can be, `T: Eq + Hash` (D163, D167): an
 // integer, a string, a tuple such as a grid position `(x, y)`, or a struct
@@ -53,6 +54,22 @@ impl Format for GraphError {
     fun format(self, spec: str) -> str {
         return self.message()
     }
+}
+
+// The most a path may cost.
+const MOST: int64 = 9223372036854775807
+
+// The cost `d + w` of a path `d` and an edge `w` from the edges `next` of
+// the search `name` gave: a failure for a negative `w` or a sum past
+// `int64`'s range.
+fun step_cost(name: str, d: int64, w: int64) -> int64 {
+    if w < 0 {
+        panic(f"{name}: edge weight {w} is negative")
+    }
+    if w > MOST - d {
+        panic(f"{name}: a path's cost is past int64's range")
+    }
+    return d + w
 }
 
 // The number of edges of a shortest path from `start` to each node it
@@ -147,7 +164,7 @@ pub fun dijkstra<T: Eq + Hash>(start: T, next: (T) -> [(T, int64)]) -> [T: int64
         dist[u] = d
         for edge in next(u) {
             let (v, w) = edge
-            let c = d + w
+            let c = step_cost("dijkstra", d, w)
             if !best.contains(v) || c < best[v] {
                 best[v] = c
                 todo.push(c, v)
@@ -160,7 +177,7 @@ pub fun dijkstra<T: Eq + Hash>(start: T, next: (T) -> [(T, int64)]) -> [T: int64
 // A cheapest path from `start` to a node for which `goal` is true, if one
 // is reachable. Dijkstra's algorithm, stopping at the first goal it settles.
 pub fun dijkstra_path<T: Eq + Hash>(start: T, goal: (T) -> bool, next: (T) -> [(T, int64)]) -> Option<Path<T>> {
-    return astar(start, goal, next, (u: T) => 0i64)
+    return search("dijkstra_path", start, goal, next, (u: T) => 0i64)
 }
 
 // A cheapest path from `start` to a node for which `goal` is true, if one
@@ -169,6 +186,11 @@ pub fun dijkstra_path<T: Eq + Hash>(start: T, goal: (T) -> bool, next: (T) -> [(
 // cost (the Manhattan distance on a grid of steps that cost at least 1).
 // With `h` always 0 it is Dijkstra's algorithm.
 pub fun astar<T: Eq + Hash>(start: T, goal: (T) -> bool, next: (T) -> [(T, int64)], h: (T) -> int64) -> Option<Path<T>> {
+    return search("astar", start, goal, next, h)
+}
+
+// `astar`, its failures named `name`.
+fun search<T: Eq + Hash>(name: str, start: T, goal: (T) -> bool, next: (T) -> [(T, int64)], h: (T) -> int64) -> Option<Path<T>> {
     // The cheapest cost found so far of each node reached, and the node it
     // was reached from. A node goes on the heap with its cost then, so an
     // entry whose cost has since been beaten is skipped; a node may be
@@ -191,11 +213,15 @@ pub fun astar<T: Eq + Hash>(start: T, goal: (T) -> bool, next: (T) -> [(T, int64
         }
         for edge in next(u) {
             let (v, w) = edge
-            let c = g + w
+            let c = step_cost(name, g, w)
             if !cost.contains(v) || c < cost[v] {
                 cost[v] = c
                 prev[v] = u
-                todo.push(c + h(v), (v, c))
+                let e = h(v)
+                if e > 0 && c > MOST - e {
+                    panic(f"{name}: a path's cost and h is past int64's range")
+                }
+                todo.push(c + e, (v, c))
             }
         }
     }
@@ -312,7 +338,7 @@ pub fun dijkstra_dense(n: int, start: int, next: (int) -> [(int, int64)]) -> [in
         dist[u] = d
         for edge in next(u) {
             let (v, w) = edge
-            let c = d + w
+            let c = step_cost("dijkstra_dense", d, w)
             if best[v] < 0 || c < best[v] {
                 best[v] = c
                 todo.push(c, v)
@@ -559,6 +585,49 @@ fun astar_against_dijkstra() {
             }
         }
     }
+}
+
+// A negative weight is a failure in every weighted search: with a negative
+// cycle `dijkstra` and `astar` never returned (MYLA-342's follow-up), and
+// `dijkstra_dense` gave a cost that its -1 for "not reached" could be.
+#test(0)[panic("dijkstra: edge weight -3 is negative")]
+#test(1)[panic("dijkstra_path: edge weight -3 is negative")]
+#test(2)[panic("astar: edge weight -3 is negative")]
+#test(3)[panic("dijkstra_dense: edge weight -3 is negative")]
+#test(4)[0]
+fun negative_cycle(which: int) -> int {
+    // 0 -> 1 -> 0 costs 1 - 3 = -2 a round
+    let next = (u: int) => if u == 0 { [(1, 1i64)] } else { [(0, -3i64)] }
+    let goal = (u: int) => u == 2
+    if which == 0 {
+        return dijkstra(0, next).len()
+    } else if which == 1 {
+        return match dijkstra_path(0, goal, next) { Some(_) => 1, None => 0 }
+    } else if which == 2 {
+        return match astar(0, goal, next, (u: int) => 0i64) { Some(_) => 1, None => 0 }
+    } else if which == 3 {
+        return dijkstra_dense(2, 0, next).len()
+    }
+    return 0
+}
+
+// A path whose cost is past int64's range is a failure, not a wrapped cost.
+#test(0)[panic("dijkstra: a path's cost is past int64's range")]
+#test(1)[panic("astar: a path's cost is past int64's range")]
+#test(2)[panic("dijkstra_dense: a path's cost is past int64's range")]
+#test(3)[panic("astar: a path's cost and h is past int64's range")]
+fun cost_overflow(which: int) -> int {
+    let big = 9223372036854775807i64
+    let next = (u: int) => if u < 3 { [(u + 1, big / 2)] } else { [] }
+    let goal = (u: int) => u == 3
+    if which == 0 {
+        return dijkstra(0, next).len()
+    } else if which == 1 {
+        return match astar(0, goal, next, (u: int) => 0i64) { Some(_) => 1, None => 0 }
+    } else if which == 2 {
+        return dijkstra_dense(4, 0, next).len()
+    }
+    return match astar(0, goal, next, (u: int) => big) { Some(_) => 1, None => 0 }
 }
 
 #test

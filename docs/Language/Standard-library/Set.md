@@ -45,12 +45,13 @@ fun main() {
 | `s.contains(x: T) -> bool` | Whether `x` is in the set |
 | `s.len() -> int`, `s.is_empty() -> bool` | The number of elements; whether there are none |
 | `s.items() -> [T]` | The elements, in insertion order |
+| `s.iter() -> ListIter<T>` | An iterator over the elements, in insertion order (D171) |
 | `s.union(other) -> Set<T>` | The elements of either: `s`'s, then those of `other` that `s` hasn't, each in its set's order |
 | `s.intersection(other) -> Set<T>` | The elements of both, in `s`'s order |
 | `s.difference(other) -> Set<T>` | The elements of `s` that `other` hasn't, in `s`'s order |
 | `s.is_subset(other) -> bool` | Whether every element of `s` is in `other` |
 
-The order is the map's: an element inserted again keeps its place, one removed and inserted again goes last.
+The order is the map's: an element inserted again keeps its place, one removed and inserted again goes last. `==` and `!=` compare two sets by their elements, in any order: `set.of([1, 2]) == set.of([2, 1])` ([[MYLA-425]]). A `Set` isn't `Hash`, so it isn't a map key or an element of another set.
 
 ## Elements
 
@@ -62,7 +63,7 @@ A set's element type comes from where the set goes ([[MYLA-315]]): an annotation
 
 ## Visiting the elements
 
-`for x in s` isn't possible yet: a `for` loop takes a type of one's own once it implements the prelude's `Iterator<T>` (D171, [[MYLA-353]]), and `Set` doesn't yet. Write `for x in s.items()`, which visits a copy of the elements in insertion order.
+`for x in s.iter()` visits the elements in insertion order, and `s.iter()` starts a pipeline of [[Language/Standard-library/Iter]] (D171, [[MYLA-425]]): `s.iter() |> iter.filter((x) => x > 2) |> iter.count()`. The iterator holds the elements as `s.items()` gives them, as a map's `iter()` holds its pairs, so changing the set afterwards doesn't change what it visits; a copy of an iterator keeps its own position. `for x in s` without `iter()` isn't a loop over the set: a `Set` isn't an iterator itself.
 
 ## Speed
 

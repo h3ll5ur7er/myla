@@ -722,6 +722,13 @@ impl<K: Ord, V> SortedMap<K, V> {
         return self.t.items()
     }
 
+    // An iterator over the keys with their values, in order (D171): `for kv
+    // in m.iter()`, or a pipeline of `std.iter`. It walks the leaves as it
+    // goes and holds the map as it is now.
+    fun iter(self) -> SortedMapIter<K, V> {
+        return SortedMapIter { w: walk_of(self.t) }
+    }
+
     // Takes the least key and its value.
     fun pop_first(var self) -> Option<(K, V)> {
         let e = self.t.first()
@@ -738,6 +745,59 @@ impl<K: Ord, V> SortedMap<K, V> {
             self.t.remove(kv.0)
         }
         return e
+    }
+}
+
+// --- iterators -------------------------------------------------------------
+
+// A walk over a tree's leaves in key order: the tree, the leaf and the index
+// in it of the next key (`leaf` -1 at the end). A copy keeps its own place.
+struct Walk<K, V> {
+    t: Tree<K, V>,
+    leaf: int,
+    i: int,
+}
+
+fun walk_of<K: Ord, V>(t: Tree<K, V>) -> Walk<K, V> {
+    return Walk { t: t, leaf: t.first_leaf(), i: 0 }
+}
+
+impl<K: Ord, V> Walk<K, V> {
+    // The next key and its value, if there is one.
+    fun next_entry(var self) -> Option<(K, V)> {
+        while self.leaf >= 0 {
+            let n = self.leaf
+            if self.i < self.t.nodes[n].keys.len() {
+                let e = (self.t.nodes[n].keys[self.i], self.t.nodes[n].vals[self.i])
+                self.i += 1
+                return Some(e)
+            }
+            self.leaf = self.t.nodes[n].next
+            self.i = 0
+        }
+        return None
+    }
+}
+
+// A sorted map's entries one at a time, in key order.
+pub struct SortedMapIter<K, V> {
+    w: Walk<K, V>,
+}
+
+impl<K: Ord, V> Iterator<(K, V)> for SortedMapIter<K, V> {
+    fun next(var self) -> Option<(K, V)> {
+        return self.w.next_entry()
+    }
+}
+
+// A sorted set's elements one at a time, in order.
+pub struct SortedSetIter<T> {
+    w: Walk<T, ()>,
+}
+
+impl<T: Ord> Iterator<T> for SortedSetIter<T> {
+    fun next(var self) -> Option<T> {
+        return key_of(self.w.next_entry())
     }
 }
 
@@ -840,6 +900,12 @@ impl<T: Ord> SortedSet<T> {
     // The elements, in order.
     fun items(self) -> [T] {
         return self.t.keys()
+    }
+
+    // An iterator over the elements, in order (D171), as `SortedMap`'s
+    // `iter`.
+    fun iter(self) -> SortedSetIter<T> {
+        return SortedSetIter { w: walk_of(self.t) }
     }
 
     // Takes the least element.
@@ -1198,6 +1264,58 @@ fun deep_tree() {
     assert(m.t.height == 0 && m.t.fault() == "" && model.count == 0, "empty again")
     m.insert(7, 7)
     assert(m.t.nodes.len() < 400 && m.keys() == [7], "the slots are reused")
+}
+
+// `for` over a sorted map or set and `iter()`'s pipelines (D171): in key
+// order across many leaves, after inserts and removes; a copy of an
+// iterator keeps its own position, and an iterator holds the tree as it was.
+#test
+fun iterating() {
+    var m: SortedMap<int, int> = new()
+    var r = Lcg { x: 11u32 }
+    for i in 0..3000 {
+        let k = r.below(5000)
+        m.insert(k, i)
+        if i % 3 == 0 {
+            m.remove(r.below(5000))
+        }
+    }
+    var seen: [(int, int)] = []
+    for kv in m.iter() {
+        seen.push(kv)
+    }
+    assert(seen == m.items() && seen.len() > 1000, "every entry, in key order")
+    var it = m.iter()
+    let first = it.next()
+    assert(first == m.first(), "the first")
+    var copy = it
+    let second = it.next()
+    assert(second == copy.next() && second != first, "a copy keeps its own position")
+    m.insert(-1, 0)
+    var n = 0
+    for kv in it {
+        n += 1
+    }
+    assert(n == seen.len() - 2, "an iterator holds the map as it was")
+    let e: SortedMap<str, int> = new()
+    var none = e.iter()
+    assert(none.next().is_none(), "an empty map")
+    var s: SortedSet<int> = set_of([5, 3, 9, 1])
+    s.remove(3)
+    var xs: [int] = []
+    for x in s.iter() {
+        xs.push(x)
+    }
+    assert(xs == [1, 5, 9], "a set's elements, in order")
+    let big: SortedSet<int> = set_of(m.keys())
+    var count = 0
+    var last = -2
+    for x in big.iter() {
+        assert(x > last, "ascending")
+        last = x
+        count += 1
+    }
+    assert(count == big.len(), "every element of a set of many leaves")
 }
 
 #test

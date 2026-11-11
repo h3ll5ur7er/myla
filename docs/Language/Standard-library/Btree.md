@@ -56,6 +56,7 @@ fun main() {
 | `m.ceiling(k: K) -> Option<(K, V)>` | The least key not less than `k`, and its value |
 | `m.range(lo: K, hi: K) -> [(K, V)]` | The keys from `lo` up to but not including `hi`, with their values, in order; none when `hi` isn't greater than `lo`. O(log n) and then the keys found |
 | `m.keys() -> [K]`, `m.values() -> [V]`, `m.items() -> [(K, V)]` | The keys in order, the values in their keys' order, both together |
+| `m.iter() -> SortedMapIter<K, V>` | An iterator over the keys with their values, in order (D171) |
 | `m.pop_first() -> Option<(K, V)>`, `m.pop_last() -> Option<(K, V)>` | Takes the least key and its value; the greatest. Need a `var` place |
 
 | Method of `SortedSet<T>` | Result |
@@ -68,13 +69,14 @@ fun main() {
 | `s.floor(x: T) -> Option<T>`, `s.ceiling(x: T) -> Option<T>` | The greatest element not greater than `x`; the least not less than `x` |
 | `s.range(lo: T, hi: T) -> [T]` | The elements from `lo` up to but not including `hi`, in order |
 | `s.items() -> [T]` | The elements, in order |
+| `s.iter() -> SortedSetIter<T>` | An iterator over the elements, in order (D171) |
 | `s.pop_first() -> Option<T>`, `s.pop_last() -> Option<T>` | Takes the least element; the greatest. Need a `var` place |
 | `s.union(other) -> SortedSet<T>` | The elements of either, in O(n + m) |
 | `s.intersection(other) -> SortedSet<T>` | The elements of both, in O(n + m) |
 | `s.difference(other) -> SortedSet<T>` | The elements of `s` that `other` hasn't, in O(n + m) |
 | `s.is_subset(other) -> bool` | Whether every element of `s` is in `other` |
 
-A range is half-open, as Myla's ranges are: `m.range(10, 20)` holds 10 and not 20. `for x in s` isn't possible yet ([[MYLA-353]]): write `for x in s.items()`, or `for e in m.items()`.
+A range is half-open, as Myla's ranges are: `m.range(10, 20)` holds 10 and not 20. `for x in s.iter()` and `for (k, v) in m.iter()` visit the tree in order, a leaf at a time, without making a list ([[MYLA-425]]): over a million entries natively 7 to 9 ms against 12 to 16 ms for `items()`. `iter()` starts a pipeline of [[Language/Standard-library/Iter]] (D171); the iterator holds the tree as it was when `iter()` was called, and a copy of it keeps its own position.
 
 ## Keys
 

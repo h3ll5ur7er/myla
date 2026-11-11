@@ -960,6 +960,33 @@ fun sorts_many() {
     assert(sorted_from(flat, filled(2000, 3), 4), "sort_unstable of equal values")
 }
 
+// An input that drives `sort_unstable`'s quicksort to its depth limit, so
+// that the heapsort fallback sorts its last 72 elements, which no other case
+// reaches (MYLA-323's follow-up, MYLA-425): made by McIlroy's adversary ("A
+// killer adversary for quicksort", 1999) against this quicksort's pivots and
+// partition, stopped where the heapsort starts and the 72 elements it
+// hadn't compared then shuffled, so that the heapsort's range isn't already
+// a heap. A change to the pivots or the partition may need a new one.
+#test
+fun sort_unstable_falls_back_to_heapsort() {
+    let killer = [
+        0, 36, 2, 42, 4, 90, 6, 67, 8, 60, 10, 28, 12, 33, 14, 88, 16, 55, 18, 69, 20, 75, 22,
+        43, 24, 32, 26, 41, 44, 30, 95, 66, 50, 78, 93, 47, 80, 37, 89, 38, 29, 65, 64, 45, 97,
+        91, 96, 71, 79, 53, 1, 3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27, 84, 52, 98, 57,
+        48, 46, 86, 59, 54, 70, 73, 77, 68, 87, 83, 34, 58, 92, 76, 61, 51, 40, 85, 31, 63, 62,
+        82, 99, 74, 94, 56, 35, 72, 49, 39, 81,
+    ]
+    var up: [int] = []
+    for i in 0..100 { up.push(i) }
+    var a = killer
+    a.sort_unstable()
+    assert(a == up, "sort_unstable through the heapsort")
+    // The same order of other values takes the same way
+    var words = killer.map((v: int) => f"w{v:03}")
+    words.sort_unstable()
+    assert(words == up.map((v: int) => f"w{v:03}"), "strings through the heapsort")
+}
+
 #test
 fun searches_sorted() {
     let xs = [1, 3, 3, 3, 7, 9]

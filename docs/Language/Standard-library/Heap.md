@@ -64,6 +64,7 @@ fun main() {
 | `h.peek() -> Option<T>` | The element `pop` would take, left in place |
 | `h.len() -> int`, `h.is_empty() -> bool` | The number of elements; whether there are none |
 | `h.into_sorted() -> [T]` | The elements in the order `pop` gives them: ascending, or descending for a max-heap; a heapsort, in O(n log n) |
+| `h.iter() -> HeapIter<T>` | An iterator over the elements in the order `pop` gives them, lazily: each step pops a copy of the heap, in O(log n), and `h` stays as it is (D171) |
 
 | Method of `KeyedHeap<T>` | Result |
 | --- | --- |
@@ -72,7 +73,7 @@ fun main() {
 | `k.peek() -> Option<(int64, T)>` | The entry `pop` would take, left in place |
 | `k.len() -> int`, `k.is_empty() -> bool` | The number of entries; whether there are none |
 
-Values of equal priority, or equal values, come out in no set order. A keyed heap gives the least priority first; for the greatest, push `-priority`. `sift_down`, a method of `Heap`, is the heap's own step, which `pop` and `of` take; a program has no need of it.
+Values of equal priority, or equal values, come out in no set order. A keyed heap gives the least priority first; for the greatest, push `-priority`. `sift_down`, a method of `Heap`, is the heap's own step, which `pop` and `of` take; a program has no need of it. `for x in h.iter()` visits the elements least first (greatest first for a max-heap), and `h.iter() |> iter.take(k)` gives the `k` least in O(n + k log n) without sorting the rest ([[MYLA-425]]): the iterator pops its own copy of the heap, which the first step copies as the heap is shared until then.
 
 A heap's element type comes from where it goes ([[MYLA-315]]): an annotation (`var h: Heap<int> = heap.new()`), a field, a parameter or a return type. With nothing expected, `let h = heap.new()` is an error, "cannot infer type parameter(s) T": annotate the binding. Expecting a `Heap<P>` of a type `P` without `Ord` is an error too, as `T: Ord` is checked against what the expected type fixes. A struct can't carry a bound, so the bound is on the functions and on the methods' `impl`.
 

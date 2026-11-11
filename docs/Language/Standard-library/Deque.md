@@ -52,7 +52,7 @@ fun main() {
 | Function | Result |
 | --- | --- |
 | `new<T>() -> Deque<T>` | An empty deque |
-| `with_capacity<T>(n: int) -> Deque<T>` | An empty deque whose first push makes room for `n` elements, so that it doesn't grow again before it holds more |
+| `with_capacity<T>(n: int) -> Deque<T>` | An empty deque whose first push makes room for `n` elements, so that it doesn't grow again before it holds more. A negative `n` or one past 2^30 (1073741824, the most elements a deque holds) is a runtime error naming it (D184) |
 | `of<T>(xs: [T]) -> Deque<T>` | The elements of `xs`, `xs[0]` at the front |
 
 | Method | Result |
@@ -64,8 +64,9 @@ fun main() {
 | `d.set(i: int, v: T)` | Sets the element `i` places from the front to `v`. An `i` out of bounds is a failure, as it is for a list. Needs a `var` place |
 | `d.len() -> int`, `d.is_empty() -> bool` | The number of elements; whether there are none |
 | `d.items() -> [T]` | The elements, front to back |
+| `d.iter() -> DequeIter<T>` | An iterator over the elements, front to back (D171) |
 
-A deque's element type comes from where it goes ([[MYLA-315]]): an annotation (`var q: Deque<int> = deque.new()`), a field, a parameter or a return type. With nothing expected, `let d = deque.new()` is an error, "cannot infer type parameter(s) T": annotate the binding. `for x in d` isn't possible yet: `Deque` doesn't implement the prelude's `Iterator<T>` (D171, [[MYLA-353]]); write `for x in d.items()`. `grow`, a method of `Deque`, is the deque's own step, which a push takes when every slot is taken; a program has no need of it.
+A deque's element type comes from where it goes ([[MYLA-315]]): an annotation (`var q: Deque<int> = deque.new()`), a field, a parameter or a return type. With nothing expected, `let d = deque.new()` is an error, "cannot infer type parameter(s) T": annotate the binding. `for x in d.iter()` visits the elements front to back without making a list, and `d.iter()` starts a pipeline of [[Language/Standard-library/Iter]] (D171, [[MYLA-425]]); the iterator holds the deque as it was when `iter()` was called, and a copy of it keeps its own position. A deque holds at most 2^30 elements, the most slots a power of two in an `int` gives: a push past them is a runtime error. `grow`, a method of `Deque`, is the deque's own step, which a push takes when every slot is taken; a program has no need of it.
 
 ## How it works
 

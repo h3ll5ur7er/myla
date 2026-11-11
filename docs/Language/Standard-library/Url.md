@@ -121,4 +121,4 @@ The tests resolve every example of RFC 3986's section 5.4, normal and abnormal, 
 | `BadHost(int)` | A host in brackets that has no `]`, isn't an IP literal, or is followed by something other than a port |
 | `BadPort(int)` | A port that isn't decimal digits, or is past 65535 |
 
-The position is a byte index in the text: `parse("http://exa mple.com/")` is `Err(UrlError.BadChar(10))`. `UrlError` and `Url` derive `Eq`.
+The position is a byte index in the text: `parse("http://exa mple.com/")` is `Err(UrlError.BadChar(10))`. `e.message()` says it in words with the position, `a byte not allowed there at byte 10`, and `f"{e}"` writes the same (D168, [[MYLA-425]]). `UrlError` and `Url` derive `Eq`.

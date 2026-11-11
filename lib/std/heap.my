@@ -113,6 +113,14 @@ impl<T: Ord> Heap<T> {
         return Some(self.items[0])
     }
 
+    // An iterator over the elements in the order `pop` gives them (D171):
+    // `for x in h.iter()`, or a pipeline of `std.iter`. It pops a copy of
+    // the heap as it is now, O(log n) a step, so `h.iter() |> iter.take(k)`
+    // gives the `k` least without sorting the rest; `h` stays as it is.
+    fun iter(self) -> HeapIter<T> {
+        return HeapIter { h: self }
+    }
+
     // The elements in the order `pop` gives them: ascending, or descending
     // for a max-heap. Sorts in place, in O(n log n).
     fun into_sorted(self) -> [T] {
@@ -137,12 +145,15 @@ impl<T: Ord> Heap<T> {
     fun sift_down(var self, i: int, n: int) {
         let x = self.items[i]
         let max = self.max
+        // A hole from `half` on has no child: compared so, `2 * hole + 1`
+        // can't overflow in a heap of more than 2^30 elements.
+        let half = n / 2
         var hole = i
         while true {
-            var c = 2 * hole + 1
-            if c >= n {
+            if hole >= half {
                 break
             }
+            var c = 2 * hole + 1
             if c + 1 < n {
                 let l = self.items[c]
                 let r = self.items[c + 1]
@@ -158,6 +169,18 @@ impl<T: Ord> Heap<T> {
             hole = c
         }
         self.items[hole] = x
+    }
+}
+
+// A heap's elements one at a time, in `pop`'s order: a copy of the heap
+// that each step pops. A copy of the iterator keeps its own position.
+pub struct HeapIter<T> {
+    h: Heap<T>,
+}
+
+impl<T: Ord> Iterator<T> for HeapIter<T> {
+    fun next(var self) -> Option<T> {
+        return self.h.pop()
     }
 }
 
@@ -219,12 +242,13 @@ impl<T> KeyedHeap<T> {
         }
         // Sifts the last entry down from the root.
         let m = n - 1
+        let half = m / 2        // as in `Heap.sift_down`
         var hole = 0
         while true {
-            var c = 2 * hole + 1
-            if c >= m {
+            if hole >= half {
                 break
             }
+            var c = 2 * hole + 1
             if c + 1 < m && self.prio[c + 1] < self.prio[c] {
                 c += 1
             }
@@ -390,6 +414,40 @@ fun interleaved() {
         assert(h.len() == model.len(), "len")
     }
     assert(same(h.into_sorted(), model), "what is left")
+}
+
+// `for` over a heap and `iter()`'s pipelines (D171): the elements in the
+// order `pop` gives them, without changing the heap; a copy of an iterator
+// keeps its own position.
+#test
+fun iterating() {
+    var h: Heap<int> = of([5, 1, 4, 1, 3])
+    var seen: [int] = []
+    for x in h.iter() {
+        seen.push(x)
+    }
+    assert(same(seen, [1, 1, 3, 4, 5]), "least first")
+    assert(h.len() == 5 && is_some_of(h.peek(), 1), "the heap is unchanged")
+    var it = h.iter()
+    assert(is_some_of(it.next(), 1), "the first")
+    var copy = it
+    assert(is_some_of(it.next(), 1) && is_some_of(it.next(), 3), "the iterator moves on")
+    assert(is_some_of(copy.next(), 1), "a copy keeps its own position")
+    h.push(0)
+    var rest: [int] = []
+    for x in it {
+        rest.push(x)
+    }
+    assert(same(rest, [4, 5]), "an iterator holds the heap as it was")
+    let m: Heap<int> = max_of([2, 9, 7])
+    var down: [int] = []
+    for x in m.iter() {
+        down.push(x)
+    }
+    assert(same(down, [9, 7, 2]), "a max-heap: greatest first")
+    let e: Heap<str> = new()
+    var none = e.iter()
+    assert(is_none(none.next()), "an empty heap")
 }
 
 // A type with an `Ord` of its own: by `cost`, then by `name`'s length.

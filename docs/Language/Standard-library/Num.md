@@ -14,20 +14,12 @@ fun total(text: str) -> Result<int, ParseIntError> {
     return Ok(sum)
 }
 
-fun why(e: ParseIntError) -> str {
-    return match e {
-        Empty => "no digits"
-        InvalidDigit(i) => f"not a digit at byte {i}"
-        Overflow => "out of range"
-    }
-}
-
 fun main() {
     print(total("1,2,39").unwrap_or(-1))
     for text in ["1,2x", "1,,2", "1,3000000000", "1_000"] {
         match total(text) {
             Ok(n) => print(n)
-            Err(e) => print(why(e))
+            Err(e) => print(e.message())
         }
     }
     print(num.parse_int_radix("-FF", 16).unwrap_or(0))
@@ -76,6 +68,8 @@ pub enum ParseIntError {
 
 The first bad byte is the one reported, and a bad digit anywhere wins over an overflow: `"99999999999999999999x"` is an `InvalidDigit(20)`. A second sign is a bad digit: `"--1"` is an `InvalidDigit(1)`.
 
+`e.message()` says it in words: `no digits`, `not a digit at byte 1`, `out of range`; `f"{e}"` writes the same (D168, [[MYLA-425]]).
+
 ## Integers to text
 
 | Function | Result |
@@ -85,7 +79,7 @@ The first bad byte is the one reported, and a bad digit anywhere wins over an ov
 | `to_hex(n: uint64, width: int = 0) -> str` | `n` in hex, lower case, with leading zeros up to `width` digits: `to_hex(255, 4)` is `00ff` |
 | `to_binary(n: uint64, width: int = 0) -> str` | `n` in binary, with leading zeros up to `width` digits |
 
-A number with more digits than the width keeps them all. There is no prefix: write `"0x" + num.to_hex(n)`. Zero is `0`. A radix outside 2 to 36 is a runtime error. `format("{:x}", n)` and `format("{:08b}", n)` do the same for hex and binary ([[Language/Standard-library/Fmt]]), but write a negative number in two's complement (`ffffffffffffff01` for an `int64` -255), where `to_radix` writes `-ff`.
+A number with more digits than the width keeps them all; a negative width is a runtime error, `to_hex: width -3 is negative` (D184, [[MYLA-425]]). There is no prefix: write `"0x" + num.to_hex(n)`. Zero is `0`. A radix outside 2 to 36 is a runtime error. `format("{:x}", n)` and `format("{:08b}", n)` do the same for hex and binary ([[Language/Standard-library/Fmt]]), but write a negative number in two's complement (`ffffffffffffff01` for an `int64` -255), where `to_radix` writes `-ff`.
 
 ## Floats
 
@@ -93,9 +87,9 @@ A number with more digits than the width keeps them all. There is no prefix: wri
 | --- | --- |
 | `parse_float(s: str) -> Option<float64>` | The nearest double to `-? digits (. digits)? ([eE] [+-]? digits)?`; too large is infinite |
 | `format_float(x: float64) -> str` | The shortest decimal that reads back as `x`, as Python's `repr` writes it: `1.0`, `0.1`, `1e+16`, `1.5e-07`, `-0.0`, `nan`, `inf` |
-| `format_fixed(x: float64, prec: int32) -> str` | `x` with `prec` digits after the point, rounded on its exact binary value, ties to even: `2.67` for `(2.675, 2)` (D139) |
-| `pow2(k: int32) -> float64` | 2^k exactly, for -1022 <= k <= 1023 |
-| `f64_literal_bits(text) -> uint64`, `f32_round_bits(bits) -> uint64`, `float_from_bits(bits) -> float64` | The bit-level steps (for the compiler) |
+| `format_fixed(x: float64, prec: int32) -> str` | `x` with `prec` digits after the point, rounded on its exact binary value, ties to even: `2.67` for `(2.675, 2)` (D139). A negative `prec` is a runtime error |
+| `pow2(k: int32) -> float64` | 2^k, exactly for -1074 <= k <= 1023; 0 below, infinity above |
+| `f64_literal_bits(text) -> uint64`, `f32_round_bits(bits) -> uint64`, `float_from_bits(bits) -> float64` | The bit-level steps (for the compiler); a `text` that isn't a float literal's digits is a runtime error |
 
 `format("{}", x)` writes a float as `print` does, in its shortest round-trip form (`0.1`, `1e300`, D155); `format_float` is Python's `repr` of it (`1.0`, `1e+300`).
 

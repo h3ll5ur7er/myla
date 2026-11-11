@@ -31,10 +31,34 @@ pub fun new<T>() -> Deque<T> {
     return Deque { buf: [], head: 0, n: 0, want: 0 }
 }
 
+// The most slots a deque has, and so the most elements: the greatest power
+// of two an `int` holds.
+const MOST: int = 1073741824
+
 // An empty deque whose first push makes room for `n` elements, so that it
-// doesn't grow again before it holds more.
+// doesn't grow again before it holds more. A negative `n` or one past 2^30
+// is a runtime error (D184).
 pub fun with_capacity<T>(n: int) -> Deque<T> {
+    if n < 0 {
+        panic(f"deque.with_capacity: capacity {n} is negative")
+    }
+    if n > MOST {
+        panic(f"deque.with_capacity: capacity {n} is more than {MOST}")
+    }
     return Deque { buf: [], head: 0, n: 0, want: n }
+}
+
+// The slots for `n` elements: the least power of two, from 4, that holds
+// them; past 2^30 a runtime error.
+fun slots_for(n: int) -> int {
+    if n > MOST {
+        panic(f"deque: more than {MOST} elements")
+    }
+    var slots = 4
+    while slots < n {
+        slots *= 2
+    }
+    return slots
 }
 
 // A deque of the elements of `xs`, `xs[0]` at the front.
@@ -42,10 +66,7 @@ pub fun of<T>(xs: [T]) -> Deque<T> {
     if xs.len() == 0 {
         return new()
     }
-    var slots = 4
-    while slots < xs.len() {
-        slots *= 2
-    }
+    let slots = slots_for(xs.len())
     var buf = xs
     while buf.len() < slots {
         buf.push(xs[0])
@@ -136,6 +157,12 @@ impl<T> Deque<T> {
         self.buf[(self.head + i) & (self.buf.len() - 1)] = v
     }
 
+    // An iterator over the elements, front to back (D171): `for x in d.iter()`,
+    // or a pipeline of `std.iter`. It holds the deque as it is now.
+    fun iter(self) -> DequeIter<T> {
+        return DequeIter { d: self, at: 0 }
+    }
+
     // The elements, front to back.
     fun items(self) -> [T] {
         var out: [T] = []
@@ -153,18 +180,37 @@ impl<T> Deque<T> {
     fun grow(var self, v: T) {
         let cap = self.buf.len()
         if cap == 0 {
-            var slots = 4
-            while slots < self.want {
-                slots *= 2
-            }
+            let slots = slots_for(self.want)
             for i in 0..slots {
                 self.buf.push(v)
             }
             return
         }
+        if cap == MOST {
+            panic(f"deque: more than {MOST} elements")
+        }
         for i in 0..cap {
             self.buf.push(self.buf[i])
         }
+    }
+}
+
+// A deque's elements one at a time, front to back: the deque `iter()` was
+// called on and the index of the next element. A copy keeps its own
+// position.
+pub struct DequeIter<T> {
+    d: Deque<T>,
+    at: int,
+}
+
+impl<T> Iterator<T> for DequeIter<T> {
+    fun next(var self) -> Option<T> {
+        if self.at >= self.d.n {
+            return None
+        }
+        let v = self.d.buf[(self.d.head + self.at) & (self.d.buf.len() - 1)]
+        self.at += 1
+        return Some(v)
     }
 }
 
@@ -319,6 +365,29 @@ fun built_from_a_list() {
     assert(same(d.items(), [1, 2, 3, 4, 5]), "a copy is a value of its own")
 }
 
+// The slots of a deque made by `with_capacity(n)` after its first push.
+#test(0)[4]
+#test(5)[8]
+#test(100)[128]
+#test(1073741825)[panic("deque.with_capacity: capacity 1073741825 is more than 1073741824")] // M18: hung natively
+#test(-1)[panic("deque.with_capacity: capacity -1 is negative")]
+fun first_slots(n: int) -> int {
+    var d: Deque<int> = with_capacity(n)
+    d.push_back(1)
+    return d.buf.len()
+}
+
+// The slots for `n` elements.
+#test(0)[4]
+#test(4)[4]
+#test(5)[8]
+#test(1073741823)[1073741824]
+#test(1073741824)[1073741824]
+#test(1073741825)[panic("deque: more than 1073741824 elements")]
+fun slots_of(n: int) -> int {
+    return slots_for(n)
+}
+
 #test
 fun with_a_capacity() {
     var d: Deque<int> = with_capacity(100)
@@ -332,4 +401,38 @@ fun with_a_capacity() {
     var z: Deque<int> = with_capacity(0)
     z.push_back(1)
     assert(z.buf.len() == 4 && is_some_of(z.pop_back(), 1), "a capacity of 0")
+}
+
+// `for` over a deque, and `iter()`'s pipelines (D171): front to back, the
+// elements that wrap around the end too, and a copy keeps its own position.
+#test
+fun iterating() {
+    var d: Deque<int> = new()
+    for i in 0..6 {
+        d.push_back(i)
+    }
+    d.pop_front()
+    d.pop_front()
+    d.push_back(6)
+    d.push_back(7)
+    d.push_front(1)
+    var seen: [int] = []
+    for x in d.iter() {
+        seen.push(x)
+    }
+    assert(same(seen, [1, 2, 3, 4, 5, 6, 7]), "front to back, wrapped around")
+    var it = d.iter()
+    assert(is_some_of(it.next(), 1), "the first")
+    var copy = it
+    assert(is_some_of(it.next(), 2) && is_some_of(it.next(), 3), "the iterator moves on")
+    assert(is_some_of(copy.next(), 2), "a copy keeps its own position")
+    d.push_back(8)
+    var rest: [int] = []
+    for x in it {
+        rest.push(x)
+    }
+    assert(same(rest, [4, 5, 6, 7]), "an iterator holds the deque as it was")
+    let e: Deque<str> = new()
+    var none = e.iter()
+    assert(is_none(none.next()), "an empty deque")
 }

@@ -70,7 +70,7 @@ fun main() {
 | `b.contains(i: int) -> bool` | Whether `i` is in the set; false for any integer it can't hold |
 | `b.popcount() -> int` | The number of integers in the set |
 | `b.is_empty() -> bool` | Whether there are none |
-| `b.capacity() -> int` | What it holds without growing, 0 to `capacity() - 1`: a fixed set's size, or a multiple of 64 above a growable set's greatest integer |
+| `b.capacity() -> int` | What it holds without growing, 0 to `capacity() - 1`: a fixed set's size, or a multiple of 64 above a growable set's greatest integer, at most 2147483647 (a growable set that holds `int`'s maximum has that capacity) |
 | `b.items() -> [int]` | The integers, ascending |
 | `b.next_from(i: int) -> Option<int>` | The least integer of the set that is `i` or more |
 | `b.union(other) -> BitSet` | The integers of either set, in a set of `b`'s kind: a fixed `b` fails if it can't hold them, as `insert` does |

@@ -9,7 +9,10 @@
 //
 // A constructor needs an expected type, which fixes `T` (MYLA-315):
 // `var s: Set<str> = set.new()`, a field, a parameter or a return type.
-// `for x in s` isn't possible yet (MYLA-353): write `for x in s.items()`.
+// `for x in s.iter()` visits the elements (D171); `==` is the same elements
+// in any order.
+
+import std.list as list_m // `iter` of the elements, and its `ListIter`
 
 pub struct Set<T> {
     m: [T: ()],
@@ -63,6 +66,13 @@ impl<T: Eq + Hash> Set<T> {
         return self.m.keys()
     }
 
+    // An iterator over the elements, in insertion order (D171): `for x in
+    // s.iter()`, or a pipeline of `std.iter`. It holds the elements `items()`
+    // gives, as `std.map`'s `iter` holds its pairs.
+    fun iter(self) -> list_m.ListIter<T> {
+        return self.m.keys().iter()
+    }
+
     // The elements of either set: this one's, then `other`'s that this one
     // hasn't, each in its set's order.
     fun union(self, other: Set<T>) -> Set<T> {
@@ -98,6 +108,22 @@ impl<T: Eq + Hash> Set<T> {
     // Whether every element of this set is in `other`.
     fun is_subset(self, other: Set<T>) -> bool {
         if self.m.len() > other.m.len() {
+            return false
+        }
+        for x in self.m {
+            if !other.m.contains(x) {
+                return false
+            }
+        }
+        return true
+    }
+}
+
+// Two sets are equal when they have the same elements, in whatever order
+// they were inserted.
+impl<T: Eq + Hash> Eq for Set<T> {
+    fun eq(self, other: Set<T>) -> bool {
+        if self.m.len() != other.m.len() {
             return false
         }
         for x in self.m {
@@ -210,6 +236,48 @@ fun many_elements() {
 struct Spot {
     name: str,
     at: (int, int),
+}
+
+// `for` over a set and `iter()`'s pipelines (D171), in insertion order; a
+// copy of an iterator keeps its own position.
+#test
+fun iterating() {
+    var s: Set<str> = of(["pear", "fig", "lime"])
+    s.remove("fig")
+    s.insert("kiwi")
+    var seen: [str] = []
+    for x in s.iter() {
+        seen.push(x)
+    }
+    assert(same(seen, ["pear", "lime", "kiwi"]), "insertion order")
+    var it = s.iter()
+    assert(it.next() == Some("pear"), "the first")
+    var copy = it
+    assert(it.next() == Some("lime") && copy.next() == Some("lime"), "a copy keeps its own position")
+    s.insert("plum")
+    var rest: [str] = []
+    for x in it {
+        rest.push(x)
+    }
+    assert(same(rest, ["kiwi"]), "an iterator holds the set as it was")
+    let e: Set<int> = new()
+    var none = e.iter()
+    assert(none.next() == None, "an empty set")
+}
+
+// `==` is the same elements, in any order.
+#test
+fun equality() {
+    let a: Set<int> = of([1, 2, 3])
+    assert(a == of([3, 1, 2]), "the order doesn't count")
+    assert(a != of([1, 2]) && of([1, 2]) != a, "one element fewer")
+    assert(a != of([1, 2, 4]), "another element")
+    let e: Set<int> = new()
+    assert(e == of([]) && e != a, "the empty set")
+    var b = a
+    b.insert(4)
+    b.remove(4)
+    assert(a == b, "after an insert and a remove")
 }
 
 // Tuples and structs are elements as they are map keys (D163, MYLA-313).
