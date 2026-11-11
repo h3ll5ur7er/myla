@@ -979,6 +979,94 @@ impl CodeGen {
         self.emit("i64.select")
     }
 
+    // Whether the 64-bit `a op b` (`+`, `-` or `*`) fits, an i64 0 or 1 on
+    // the stack (MYLA-430). wasm has no flags: a signed sum is below `a`
+    // exactly when `b` is negative (a difference above it), unless it
+    // wrapped; an unsigned one wrapped when it is below `a` (a difference
+    // when `b` is above `a`). A product of operands in int32's range
+    // (unsigned: below 2^32) fits, the hot loop's usual case; any other
+    // fits when dividing it by `b` gives `a` back (0 and -1 as divisors
+    // apart: the minimum by -1 overflows, and would trap in `div_s`).
+    fun wasm_fits(var self, w: WFn, op: str, signed: bool, a: int32, b: int32) {
+        if op == "+" || op == "-" {
+            let wop = if op == "+" { "i64.add" } else { "i64.sub" }
+            if signed {
+                self.wasm_get(w, b)
+                self.emit("i64.const 0")
+                self.emit("i64.ge_s")
+                self.wasm_get(w, a)
+                self.wasm_get(w, b)
+                self.emit(wop)
+                self.wasm_get(w, a)
+                self.emit(if op == "+" { "i64.ge_s" } else { "i64.le_s" })
+                self.emit("i32.eq")
+            } else if op == "+" {
+                self.wasm_get(w, a)
+                self.wasm_get(w, b)
+                self.emit("i64.add")
+                self.wasm_get(w, a)
+                self.emit("i64.ge_u")
+            } else {
+                self.wasm_get(w, a)
+                self.wasm_get(w, b)
+                self.emit("i64.ge_u")
+            }
+            self.emit("i64.extend_i32_u")
+            return
+        }
+        // small operands: the high 32 bits of each (offset by 2^31 when
+        // signed) are 0
+        self.wasm_get(w, a)
+        if signed {
+            self.emit("i64.const 2147483648")
+            self.emit("i64.add")
+        }
+        self.wasm_get(w, b)
+        if signed {
+            self.emit("i64.const 2147483648")
+            self.emit("i64.add")
+        }
+        self.emit("i64.or")
+        self.emit("i64.const 32")
+        self.emit("i64.shr_u")
+        self.emit("i64.eqz")
+        self.emit("if")
+        self.emit("i64.const 1")
+        self.emit(format("local.set {}", w.la))
+        self.emit("else")
+        self.wasm_get(w, b)
+        self.emit("i64.eqz")
+        self.emit("if")
+        self.emit("i64.const 1")
+        self.emit(format("local.set {}", w.la))
+        self.emit("else")
+        if signed {
+            self.wasm_get(w, b)
+            self.emit("i64.const -1")
+            self.emit("i64.eq")
+            self.emit("if")
+            self.wasm_get(w, a)
+            self.emit("i64.const -9223372036854775808")
+            self.emit("i64.ne")
+            self.emit("i64.extend_i32_u")
+            self.emit(format("local.set {}", w.la))
+            self.emit("else")
+        }
+        self.wasm_get(w, a)
+        self.wasm_get(w, b)
+        self.emit("i64.mul")
+        self.wasm_get(w, b)
+        self.emit(if signed { "i64.div_s" } else { "i64.div_u" })
+        self.wasm_get(w, a)
+        self.emit("i64.eq")
+        self.emit("i64.extend_i32_u")
+        self.emit(format("local.set {}", w.la))
+        if signed { self.emit("end_if") }
+        self.emit("end_if")
+        self.emit("end_if")
+        self.emit(format("local.get {}", w.la))
+    }
+
     // An intrinsic, done in place (`Intrinsic` says what each means).
     fun wasm_intr(var self, f: IrFunc, w: WFn, d: int32, op: Intrinsic, args: [int32]) {
         match op {
@@ -1018,6 +1106,10 @@ impl CodeGen {
                 self.wasm_get(w, args[0])
                 self.wasm_get(w, args[1])
                 self.emit("i64.rotl")
+                self.wasm_set(w, d)
+            },
+            Intrinsic.Fits(o, signed) => {
+                self.wasm_fits(w, o, signed, args[0], args[1])
                 self.wasm_set(w, d)
             },
             Intrinsic.Bsr64 => {

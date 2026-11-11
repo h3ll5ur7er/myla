@@ -916,6 +916,30 @@ impl CodeGen {
                 self.emit("ror x10, x10, x11")
                 self.a64_st("x10", fr, d)
             },
+            // whether a 64-bit `+`, `-` or `*` fits (MYLA-430): the flags
+            // of `adds` or `subs` (V signed, C unsigned), or the high half
+            // of the product against the low one's sign (`smulh`, `umulh`)
+            Intrinsic.Fits(o, signed) => {
+                self.a64_ld("x10", fr, args[0])
+                self.a64_ld("x11", fr, args[1])
+                if o == "*" {
+                    self.emit("mul x12, x10, x11")
+                    if signed {
+                        self.emit("smulh x13, x10, x11")
+                        self.emit("cmp x13, x12, asr #63")
+                    } else {
+                        self.emit("umulh x13, x10, x11")
+                        self.emit("cmp x13, #0")
+                    }
+                    self.emit("cset x12, eq")
+                } else {
+                    if o == "+" { self.emit("adds x12, x10, x11") } else { self.emit("subs x12, x10, x11") }
+                    // a borrow clears C: an unsigned `-` fits while C is set
+                    let cond = if signed { "vc" } else if o == "+" { "cc" } else { "cs" }
+                    self.emit("cset x12, " + cond)
+                }
+                self.a64_st("x12", fr, d)
+            },
             Intrinsic.Bsr64 => {
                 self.a64_ld("x10", fr, args[0])
                 self.emit("clz x10, x10")

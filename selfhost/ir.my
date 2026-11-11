@@ -421,6 +421,12 @@ pub enum Intrinsic {
     // names) called with `arg` by the target's convention; its result
     // (MYLA-263)
     CallCode,
+    // fits op signed (a, b): whether `a op b` (op `+`, `-` or `*`) on the
+    // 64-bit integers a and b fits their type, int64 when signed, else uint64:
+    // a bool, 0 when it overflows (the wrapped result is the plain operation's,
+    // a `bin` after it). A checked build's 64-bit check (D175, MYLA-430):
+    // x86-64's and aarch64's overflow or carry flag, no division
+    Fits(str, bool),
 }
 
 // The intrinsic a primitive of the language's runtime code names (`__cas64`
@@ -448,6 +454,7 @@ pub fun primitive_intrinsic(name: str) -> Option<Intrinsic> {
 // The intrinsic's name in the text form.
 #test(Intrinsic.FetchAdd64)["fetch_add64"]
 #test(Intrinsic.Unique("__clone_list_.str"))["unique __clone_list_.str"]
+#test(Intrinsic.Fits("*", false))["fits * uint64"]
 pub fun intrinsic_name(op: Intrinsic) -> str {
     return match op {
         Intrinsic.Sqrt => "sqrt"
@@ -471,6 +478,7 @@ pub fun intrinsic_name(op: Intrinsic) -> str {
         Intrinsic.RtWaddr(sym) => "rt_waddr " + sym
         Intrinsic.RunFrame => "run_frame"
         Intrinsic.CallCode => "call_code"
+        Intrinsic.Fits(op, signed) => "fits " + op + (if signed { " int64" } else { " uint64" })
     }
 }
 
@@ -486,6 +494,7 @@ pub fun intrinsic_arity(op: Intrinsic) -> int32 {
         Intrinsic.FetchAdd64 => 2
         Intrinsic.StoreRel64 => 2
         Intrinsic.CallCode => 2
+        Intrinsic.Fits(op, signed) => 2
         Intrinsic.Cas64 => 3
         _ => 1
     }
@@ -519,6 +528,17 @@ fun is_word(t: Type) -> bool {
     }
 }
 
+// Whether `t` is the 64-bit integer type of the signedness.
+#test(Type.TInt(64, false), false)[true]
+#test(Type.TInt(64, true), false)[false]
+#test(Type.TInt(32, true), true)[false]
+fun is_int64_of(t: Type, signed: bool) -> bool {
+    return match t {
+        Type.TInt(w, s) => w == 64 && s == signed
+        _ => false
+    }
+}
+
 // Whether the intrinsic gives a value.
 #test(Intrinsic.RcDec)[true]
 #test(Intrinsic.RcInc)[false]
@@ -537,6 +557,16 @@ pub fun intrinsic_gives(op: Intrinsic) -> bool {
 pub fun is_xchg(op: Intrinsic) -> bool {
     return match op {
         Intrinsic.Xchg64 => true
+        _ => false
+    }
+}
+
+// Whether `op` is a `fits` (MYLA-430): it only computes, as a `bin` does.
+#test(Intrinsic.Fits("+", true))[true]
+#test(Intrinsic.Rotl)[false]
+pub fun is_fits(op: Intrinsic) -> bool {
+    return match op {
+        Intrinsic.Fits(o, signed) => true
         _ => false
     }
 }
@@ -675,6 +705,17 @@ pub fun verify(f: IrFunc) -> str {
                         for a in args {
                             if !is_word(f.temps[a]) { return format("L{}: intr {} takes 64-bit words, given %t{} ({})", bi, intrinsic_name(op), a, type_name(f.temps[a])) }
                         }
+                    }
+                    // and a `fits` of `+`, `-` or `*` 64-bit integers of its
+                    // signedness (MYLA-430)
+                    match op {
+                        Intrinsic.Fits(o, signed) => {
+                            if o != "+" && o != "-" && o != "*" { return format("L{}: intr fits of the operator {}", bi, o) }
+                            for a in args {
+                                if !is_int64_of(f.temps[a], signed) { return format("L{}: intr {} takes {}, given %t{} ({})", bi, intrinsic_name(op), type_name(Type.TInt(64, signed)), a, type_name(f.temps[a])) }
+                            }
+                        },
+                        _ => {},
                     }
                 },
                 _ => {},
@@ -1321,6 +1362,7 @@ fun only_reads(inst: Inst) -> bool {
         Inst.Un(d, op, t, a) => true
         Inst.Mov(d, a) => true
         Inst.Cast(d, from_t, to_t, a) => true
+        Inst.Intr(d, op, a) => is_fits(op)
         Inst.Loc(p) => true
         _ => false
     }
@@ -1436,6 +1478,8 @@ fun prepend(x: int32, xs: [int32]) -> [int32] {
 #test([Inst.Intr(1, Intrinsic.LoadAcq64, [0])])["L0: intr load_acq64 takes 64-bit words, given %t0 (str)"]
 #test([Inst.Intr(-1, Intrinsic.StoreRel64, [2, 2])])[""]
 #test([Inst.Intr(-1, Intrinsic.RcDec, [1])])[""]
+#test([Inst.Intr(1, Intrinsic.Fits("+", true), [2, 2])])["L0: intr fits + int64 takes int64, given %t2 (ptr)"]
+#test([Inst.Intr(1, Intrinsic.Fits("/", true), [2, 2])])["L0: intr fits of the operator /"]
 fun verify_block(insts: [Inst]) -> str {
     return verify(test_func([IrBlock { insts: insts, term: Term.Ret(-1) }]))
 }
