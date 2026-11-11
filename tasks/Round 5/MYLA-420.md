@@ -40,3 +40,7 @@ Built on 95785ab (wave A1 with its seed). The reproducers of both reviews were t
 ## Found on the way
 
 - [[MYLA-460]]: `std.xml`'s stream reader has M17's shape (an event read again after each read): a 100,000-byte attribute over 16-byte reads 555 ms, quadratic. `std.compress`'s decoders over 16-byte reads stay near linear.
+
+## The owner's decision (2026-11-11)
+
+The proposals stand as built (D189).

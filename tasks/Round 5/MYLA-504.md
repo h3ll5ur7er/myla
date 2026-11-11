@@ -1,8 +1,8 @@
 ---
 id: MYLA-504
 title: "A program importing std.process is built with the task runtime, for a test function of std.process"
-type: bug
-status: todo
+type: improvement
+status: backlog
 priority: low
 labels: [codegen, concurrency, check-time, round-5]
 ---
@@ -22,3 +22,7 @@ MYLA-432 kept the code byte-identical when the bodies became lazy: the loader st
 
 - [ ] Decide whether a library's unreached `async let` should make a program one with tasks (recommended: no)
 - [ ] If not, drop `LazyTable.task_line` and pin the four examples' binaries without the executor in a burn test
+
+## The owner's decision (2026-11-11)
+
+Kept as it is for now: a program that imports std.process (or std.task, std.http) is still built with the task runtime, so generated code doesn't change. Dropping it is a possible future optimisation (a minimal program importing std.process: 37,584 → 18,768 bytes), to be taken up with the other binary-size work.

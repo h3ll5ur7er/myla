@@ -58,3 +58,7 @@ All in [[selfhost/interp.my]] (and one line of [[selfhost/repl.my]], which shows
 - **The interpreter's own misses are runtime errors named `internal error: …`** (`no method 'm' found for a value of type 'T'`, `no function 'f' found`), at the call, exit 1. They mean the interpreter disagrees with the checker, never the program's fault, so the text says so. Alternatives: a panic of the toolchain with a stack (louder, but it loses the program's position), or the text of a user error (`no method …`), which would look like the program's.
 - **Type parameters are bound at every generic call, eagerly**, rather than only where an operation typed by a type parameter needs them (the review's suggestion, measured above). The lazy alternative (look the type up from the call's arguments when an operator needs it) would cost nothing in non-generic code but needs the caller's types at the operator, which erasure no longer has.
 - **`VBytes` stays a `[uint8]` only until a use that changes it**, which unpacks it into a `VList` for good (no repacking). Alternative: a packed list of every small integer type, which the interpreter's list operations would all have to know.
+
+## The owner's decision (2026-11-11)
+
+The proposals stand as built (D189).

@@ -71,3 +71,7 @@ What stays different by design or by limit: a failed case runs no deferred block
 1. **The child's report** — built: a mark and the verdict after it on stderr, a runtime error found as the last report on stderr. Alternatives: the verdict on a descriptor of its own (needs a `dup2` the platform modules don't have), or the runtime marking its own report when a case runs (a runtime variable in `std.rt`, P2's file, and a staged seed). The mark costs nothing and covers every case met; the one confusion left is above.
 2. **A library module run with the tools' library** — built: loaded with the copy of `std` it is in, as `--stdlib` would name it. Alternatives: resolve its relative imports into the embedded copy (then the file tested isn't the file on disk), or refuse without `--stdlib`. The comment of `in_std_tree` already said `myla check lib/std/fs.my` checks "as `--stdlib lib` would".
 3. **The host's platform module for another target** — built: an error naming the target's own. Alternative: build it as a module of its own name, which can't work, as its primitives are the host's.
+
+## The owner's decision (2026-11-11)
+
+The proposals stand as built (D189).

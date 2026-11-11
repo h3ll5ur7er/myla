@@ -53,3 +53,7 @@ Generated code:
 - `scripts/bootstrap.sh`: byte-identical fixed point after each item.
 
 Suites: `scripts/test.sh fast` (843 tests; the two failures are the embedded library's, `test_embedded_std` and `test_installed`, behind `lib/` until the seed commit), `test_std_modules`, `test_compiler_parity`, `test_lsp`, `test_fs`, `test_http`, `test_stdin` (459 tests, OK), and `scripts/test.sh` at the end: 1,511 tests, the same two failures of the embedded library and no other. `myla test` of std.ioerror, fs, io, net, process, csv, xml, compress, archive and http, interpreted and `--native` (all pass), and of std.ioerror, fs, io and process on aarch64 and wasm32. `myla test` has no `--checked` (only `build` has it); its cases run checked anyway. The selfhost cases of checker, loader, codegen and interp pass (921, 141, 356, 423).
+
+## The owner's decision (2026-11-11)
+
+The proposals stand as built (D189).

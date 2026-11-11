@@ -32,3 +32,7 @@ Work package P16 of [[Project/Review-2026-11-09]] (wave B, after [[MYLA-415]]). 
 - **A `--checked` compiler compiles itself** to the plain compiler's assembly byte for byte (gen_main, 3.4 s to build, 2.6 s to run); the bootstrap reaches its fixed point.
 - **The checked parity programs**: every program of `test_compiler_parity` (207) built `--checked` prints and exits as its plain build does, natively, on aarch64 (qemu) and on wasm32 (Node): 0 differ on each (none overflows, as the interpreter, which traps, agrees with the plain build).
 - **Suites**: `scripts/test.sh fast` 839 tests: failures `test_embedded_std` (expected until the seed commit) and `test_time.test_an_async_read_lets_the_other_tasks_run`, a timing test that fails alone too under the machine's load, at the base as now (filed as [[MYLA-500]]); `test_compiler_parity` and `test_selfhost_codegen` (294) pass but `test_children_run_in_parallel`, which needs idle cores (cpu 1.28 s against wall 1.35 s on a machine four lanes share) and passes alone at a lower load; on aarch64-linux and wasm32-wasi, `scripts/test-target.py` with `test_overflow`, `test_ir_contract` and `test_error_corpus` pass. The `#test` cases of `ir.my` (126), `ir_x86.my`, `ir_a64.my`, `ir_wasm.my`, `hoist.my`, `lower.my` and std.rt pass. The full `scripts/test.sh` (1,505 tests, 1,608 s): failures `test_embedded_std` (expected) and `test_children_run_in_parallel` (the load again; it passes alone afterwards).
+
+## The owner's decision (2026-11-11)
+
+The proposals stand as built (D189).

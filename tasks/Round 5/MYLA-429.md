@@ -38,3 +38,7 @@ When a removal shrinks a map, which no decision settles. Built: **a removal from
 - **Shrink when walked** (`keys` or `for` compacting a sparse map first): removals pay nothing, but a walk would have to change the map it reads, which a `for` retains and copy-on-write shares.
 
 Recommendation: the eighth, as built.
+
+## The owner's decision (2026-11-11)
+
+The proposals stand as built (D189).

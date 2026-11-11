@@ -70,3 +70,7 @@ Cost (best of n, on a machine shared with four other lanes):
 - Notifiers: 1,000,000 `notify_one` and `wait` on one task: 0.078 s before, 0.097 after on one worker (two look-ups a round); 200,000 rounds of a wait mode 0.063 and 0.066 s.
 
 Suites: `lib/std/task.my` 36/36, `net.my` 96/96, `process.my` 48/48, `fs.my` 73/73, `io.my` 24/24, interpreted, `--native`, `--target aarch64-linux` and `--target wasm32-wasi`; `scripts/test-target.py` aarch64-linux and wasm32-wasi for `test_net`, `test_process`, `test_time` (all pass); `tests.burn.test_net`, `test_process`, `test_time` natively; `scripts/test.sh fast`: 832 tests, the one failure `test_embedded_std` (expected until the seed commit); `scripts/test.sh` (full, with `test_std_modules`, `test_compiler_parity`, `test_lsp`, the concurrency stress tests): 1,483 tests, 336 skipped, the same one failure. The bootstrap reaches its fixed point after every commit.
+
+## The owner's decision (2026-11-11)
+
+The proposals stand as built (D189).
