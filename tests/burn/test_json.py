@@ -7,7 +7,8 @@ escapes, control characters and astral characters, int64 limits, random
 float bit patterns) in two spellings, compact UTF-8 and indented ASCII with
 `\\u` escapes; the driver's output must be exactly what Python makes of them:
 `json.dumps(json.loads(text), ensure_ascii=False, separators=(",", ":"))`,
-which also checks that floats are written as their shortest repr. Broken
+which also checks that floats are written as their shortest repr (but NaN and
+the infinities, which std.json writes as `null`). Broken
 texts (characters deleted, inserted or duplicated, or the text cut short)
 must fail where Python fails, with Python's message and position (3.13's
 wording; older Pythons only have to fail too).
@@ -112,6 +113,19 @@ def _canonical(value) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
+def _without_nan(value):
+    """`value` as std.json writes it: NaN and the infinities as null, as
+    JavaScript writes them (Python writes `NaN` and `Infinity`, which aren't
+    JSON; MYLA-424). `parse` reads them, as Python does."""
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    if isinstance(value, list):
+        return [_without_nan(v) for v in value]
+    if isinstance(value, dict):
+        return {k: _without_nan(v) for k, v in value.items()}
+    return value
+
+
 def _has_surrogate(value) -> bool:
     """Whether a parsed value holds a lone surrogate (which Myla rejects)."""
     if isinstance(value, str):
@@ -147,7 +161,7 @@ def _expected(text: str) -> str | None:
         return None
     if _has_surrogate(value) or _too_big(value):
         return None
-    return "ok " + _canonical(value)
+    return "ok " + _canonical(_without_nan(value))
 
 
 class _Duplicate(Exception):

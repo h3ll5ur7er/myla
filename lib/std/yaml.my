@@ -1539,7 +1539,7 @@ pub fun from_json(j: Json) -> Yaml {
 #test(": v\n")["{\"\":\"v\"}"] // an empty key
 #test("a:\n")["{\"a\":null}"]
 #test("--- 3\n...\n")["3"]
-#test("a: 0x10\nb: .nan\nc: -.INF\n")["{\"a\":16,\"b\":NaN,\"c\":-Infinity}"]
+#test("a: 0x10\nb: .nan\nc: -.INF\n")["{\"a\":16,\"b\":null,\"c\":null}"] // std.json writes NaN and the infinities as null
 #test("[a, b")["1:1: a flow collection without its closing bracket"]
 #test("[a b c, d e]")["[\"a b c\",\"d e\"]"]
 #test("{a: 1 b}")["{\"a\":\"1 b\"}"] // spaces inside a plain scalar

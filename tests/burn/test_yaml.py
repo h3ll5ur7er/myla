@@ -227,6 +227,8 @@ def _expected(events: list[str]) -> tuple[set[str], str]:
     def dump(node) -> str:
         if isinstance(node, _Scalar):
             v = _resolve(node.text) if node.style == ":" else node.text
+            if isinstance(v, float) and not math.isfinite(v):
+                return "null"                   # as std.json writes NaN and the infinities
             return json.dumps(v, ensure_ascii=False, separators=(",", ":"))
         kind, items = node
         if kind == "+SEQ":
