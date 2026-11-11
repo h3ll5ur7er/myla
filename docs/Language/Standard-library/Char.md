@@ -1,6 +1,6 @@
 # std.char
 
-Character classes, case and digits, as methods on `char` ([[MYLA-322]]). They are ASCII (D164 (2)): a character outside ASCII is in no class, and the case mappings leave it as it is. [[MYLA-320]] will import the module into every program; until then a program imports it (`import std.char`, or `from std.char import from_digit`, which brings the methods too). It imports nothing itself.
+Character classes, case and digits, as methods on `char` ([[MYLA-322]]). They are ASCII (D164 (2)): a character outside ASCII is in no class, and the case mappings leave it as it is. Every program sees the methods without an import ([[MYLA-320]]); the one free function, `from_digit`, needs one (`from std.char import from_digit`). It imports nothing itself.
 
 ```myla
 from std.char import from_digit

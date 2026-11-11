@@ -79,6 +79,8 @@ A `Decoder<R>` is a `Read` stream ([[Language/Standard-library/Io#streams]]) of 
 
 `Read` gives an `IoError`, so a read of corrupt data fails with `IoError.InvalidInput`, and `error()` says what was wrong; a failure of the inner stream is its own `IoError` (and `error()` is `Io` of it). A failure stays: every later read gives it again, and output decoded before it isn't given. `read_to_end` gives the `CompressError` itself.
 
+`Decoder`'s `ready` and `fill` (decoding until output waits) and `Encoder`'s `push_out` (what is compressed so far written to the inner stream) are the streams' own steps, public only because a method can't be private yet ([[MYLA-433]]); a program has no need of them.
+
 ```myla fragment
 import std.compress as compress
 import std.io as io

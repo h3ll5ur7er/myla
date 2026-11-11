@@ -65,7 +65,7 @@ fun main() {
 | `d.len() -> int`, `d.is_empty() -> bool` | The number of elements; whether there are none |
 | `d.items() -> [T]` | The elements, front to back |
 
-A deque's element type comes from where it goes ([[MYLA-315]]): an annotation (`var q: Deque<int> = deque.new()`), a field, a parameter or a return type. With nothing expected, `let d = deque.new()` is an error, "cannot infer type parameter(s) T": annotate the binding. `for x in d` isn't possible yet ([[MYLA-353]]); write `for x in d.items()`. `grow`, a method of `Deque`, is the deque's own step, which a push takes when every slot is taken; a program has no need of it.
+A deque's element type comes from where it goes ([[MYLA-315]]): an annotation (`var q: Deque<int> = deque.new()`), a field, a parameter or a return type. With nothing expected, `let d = deque.new()` is an error, "cannot infer type parameter(s) T": annotate the binding. `for x in d` isn't possible yet: `Deque` doesn't implement the prelude's `Iterator<T>` (D171, [[MYLA-353]]); write `for x in d.items()`. `grow`, a method of `Deque`, is the deque's own step, which a push takes when every slot is taken; a program has no need of it.
 
 ## How it works
 

@@ -96,6 +96,8 @@ It has `message()` (`"no digits"`, `"invalid digit at byte 2"`) and implements `
 
 The format spec is an integer's ([[Language/Standard-library/Fmt]]): fill, alignment (right by default) and width; `+` for the sign of a number that isn't negative; `0` for zeros after the sign; the kinds `x`, `X`, `b` and `o`, with `#` for the prefix `0x`, `0b` or `0o`. A negative number keeps its `-` in every radix (`-ff`), where `format("{:x}", n)` on an `int64` writes its two's complement. A precision is a runtime error.
 
+`a.mag_u64()`, the low 64 bits of the magnitude, is the step `to_uint64` and `hash` share, public only because a method can't be private yet ([[MYLA-433]]); a program has no need of it.
+
 ## How it works
 
 The magnitude is a `[uint32]`, least significant limb first, with no high zero limbs; a product of two limbs and a carry fits a `uint64`. Zero is the empty list and never negative, so every value has exactly one form.

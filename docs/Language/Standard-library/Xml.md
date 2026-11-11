@@ -113,6 +113,8 @@ Text holds the characters with the references replaced. A CDATA section is text:
 
 `stream_reader(r)` is an `XmlStreamReader<R>` over a stream `r` (`std.io`'s `Read`, such as a `File` or a decompressing `std.compress` reader), with the same `read_event` and the same iterator. It reads chunks of 64 KiB, and more while one event needs more. A text may come as several `Text` events, split where a chunk ended. An error is given once the stream has ended, at its place in the document (the rest of the stream is read first, as more bytes might have completed what stood at the end of a chunk). A failure of the stream itself is an error of kind `Io`, and `r.io_error() -> Option<IoError>` gives the cause.
 
+`XmlReader`'s `begin`, `start_tag`, `attr_value`, `end_tag`, `close`, `scan_comment`, `scan_pi`, `pi`, `scan_until`, `special_char` and `name_error`, and `XmlStreamReader`'s `fill`, are the readers' own steps, which `read_event` takes, public only because a method can't be private yet ([[MYLA-433]]); a program has no need of them.
+
 ## Writing
 
 | Function | Result |

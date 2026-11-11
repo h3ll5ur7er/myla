@@ -62,9 +62,12 @@ The methods of `Regex`:
 | `captures_all(s: str) -> [Captures]` | The groups of every match `find_all` finds |
 | `replace(s: str, with: str) -> str` | `s` with its first match replaced by `with`, expanded (below) |
 | `replace_all(s: str, with: str) -> str` | `s` with every match replaced |
+| `replacen(s: str, with: str, limit: int) -> str` | `s` with its first `limit` matches replaced, every one for -1: `replace` is `replacen(s, with, 1)`, `replace_all` is `replacen(s, with, -1)` |
 | `split(s: str) -> [str]` | The pieces between the matches: `n` matches give `n + 1` pieces, empty ones included, as `str.split` gives them |
 | `group_count() -> int` | The number of groups, the whole match not counted |
 | `as_str() -> str` | The pattern |
+
+`searcher` and `all_slots` are the matcher's own steps (a search over the DFAs or the Pike VM; the groups' offsets of successive matches), public only because a method can't be private yet ([[MYLA-433]]); a program has no need of them.
 
 The methods of `Captures`:
 

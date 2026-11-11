@@ -62,7 +62,7 @@ A set's element type comes from where the set goes ([[MYLA-315]]): an annotation
 
 ## Visiting the elements
 
-`for x in s` isn't possible yet: a `for` loop takes a list, a map or a range, and a type of one's own needs an iterator trait ([[MYLA-353]]). Write `for x in s.items()`, which visits a copy of the elements in insertion order.
+`for x in s` isn't possible yet: a `for` loop takes a type of one's own once it implements the prelude's `Iterator<T>` (D171, [[MYLA-353]]), and `Set` doesn't yet. Write `for x in s.items()`, which visits a copy of the elements in insertion order.
 
 ## Speed
 

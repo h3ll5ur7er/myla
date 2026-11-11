@@ -93,6 +93,8 @@ A `LineEdit` is a line being edited, a value with no input or output, so it is t
 | `editor(out: Stream) -> Editor` | An editor drawing on `out` |
 | `Editor`: `read_line(prompt) -> Result<Option<str>, TermError>`, `add_history(line)` | A line read in raw mode, restored before it returns: `None` at the input's end, `Interrupted` for Ctrl-C; a line added to the history (not a blank one, nor the last again) |
 
+`LineEdit`'s `insert`, `delete_back`, `delete_here` and `go_history` are the steps of `apply`, public only because a method can't be private yet ([[MYLA-433]]); a program has no need of them.
+
 ## Primitives
 
 The module rests on these ([[MYLA-350]]), each a function of `std.rt` over `std.platform`'s of the same name, and in the interpreter the host's own. Each sets `__io_errno()`, 0 on success: ENOTTY (25) for a descriptor that isn't a terminal, EBADF (9) for a negative one, ENOSYS (38) on wasm32.

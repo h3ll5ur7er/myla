@@ -20,6 +20,7 @@ fun main() {
 | `write(fd: int32, s: str) -> Result<(), IoError>` | Writes the bytes of `s` to file descriptor `fd`, all of them, or the error that stopped it (D146); a pipe nobody reads any more is `BrokenPipe` |
 | `println(s)` | `s` and a newline to stdout |
 | `eprint(s)`, `eprintln(s)` | To stderr, without / with a newline |
+| `errno_text(code: int32) -> str` | The `<cause>` of `write failed: <cause>` below, for the errno of a failed write: `errno_text(28)` is `"no space left on device"`, an errno it doesn't name `"errno 77"` |
 
 Output isn't buffered: what a program wrote is out before it waits for input.
 
@@ -130,6 +131,8 @@ A read that gives fewer bytes than it asks for gives a list, or a string, of the
 | `buffered(r: R) -> Buffered<R>` | A buffer in front of `r`: `read_line`, `read_exact`, `read_to_end` and `fill` as `Reader` has them (`Reader` is `Buffered<FdStream>`), `into_inner()` (the stream, without the bytes still buffered). `Read`; `Seek` if `r` can (the buffer dropped; `Current` counts from the next byte a read gives); `Pollable`, `ready` and the async reads if `r` is `Pollable` |
 | `short_reads(r: R, most: int32) -> ShortReads<R>` | `r` read at most `most` bytes at a time (at least 1), as a pipe, a socket or a decompressor may give them: for the tests of code that reads streams, which must not count on a read giving all it asked for. `Read`; `into_inner()` |
 | `buffered_writer(w: W) -> BufferedWriter<W>`, `buffered_writer_with(w, capacity: int32)` | A buffer in front of `w`, 8 KiB or `capacity` bytes: writes are gathered and passed on when it is full, on `flush` and on `into_inner() -> Result<W, IoError>` (flushed). `Write`; `write_str(s: str) -> Result<int, IoError>`, the bytes of `s` (`s.len()`); `Seek` if `w` can (after the buffer is passed on). Nothing flushes it when the program ends |
+
+`MemoryStream`'s `read_end` and `fill_gap`, `Buffered`'s `pull`, `pull_bytes`, `newline_from` and `take_line`, and `BufferedWriter`'s `push_out`, `drain` and `make_room` are the streams' own steps, public only because a method can't be private yet ([[MYLA-433]]); a program has no need of them.
 
 ### Any stream
 
