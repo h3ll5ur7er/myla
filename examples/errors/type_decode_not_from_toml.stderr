@@ -3,4 +3,4 @@ type error: type 'Point' does not satisfy the bound 'T: FromToml' required by 'd
    |
 12 |     match toml.decode<Point>("x = 1\ny = 2") {
    |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-help: '#derive(Toml)' on 'Point' gives it 'ToToml' and 'FromToml' (D172)
+help: '#derive(Toml)' on 'Point' gives it 'ToToml' and 'FromToml' (D176)

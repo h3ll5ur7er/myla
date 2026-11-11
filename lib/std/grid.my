@@ -55,11 +55,14 @@ impl Format for GridError {
     }
 }
 
-// A grid of `width` by `height` cells, each `fill`. A negative size is a
-// failure.
+// A grid of `width` by `height` cells, each `fill`. A negative size, or one
+// of more cells than an `int` counts, is a failure (D184).
 pub fun new<T>(width: int, height: int, fill: T) -> Grid<T> {
     if width < 0 || height < 0 {
         panic(f"grid size {width} by {height} is negative")
+    }
+    if width > 0 && height > 2147483647 / width {
+        panic(f"grid size {width} by {height} is more than 2147483647 cells")
     }
     return Grid { width: width, height: height, cells: list_m.filled(width * height, fill) }
 }
@@ -143,20 +146,27 @@ impl<T> Grid<T> {
     }
 
     // The positions next to `p` across an edge that are in bounds: up,
-    // right, down, left.
+    // right, down, left. A `p` out of bounds has those of its neighbours
+    // that are in bounds.
     fun neighbours4(self, p: (int, int)) -> [(int, int)] {
         let (x, y) = p
+        // Whether `x`, `x + 1` and `x - 1` are columns of the grid, and `y`,
+        // `y - 1` and `y + 1` rows, compared so that nothing overflows
+        let w = self.width
+        let h = self.height
+        let col = x >= 0 && x < w
+        let row = y >= 0 && y < h
         var out: [(int, int)] = []
-        if y > 0 {
+        if col && y > 0 && y <= h {
             out.push((x, y - 1))
         }
-        if x + 1 < self.width {
+        if row && x >= -1 && x < w - 1 {
             out.push((x + 1, y))
         }
-        if y + 1 < self.height {
+        if col && y >= -1 && y < h - 1 {
             out.push((x, y + 1))
         }
-        if x > 0 {
+        if row && x > 0 && x <= w {
             out.push((x - 1, y))
         }
         return out
@@ -167,33 +177,40 @@ impl<T> Grid<T> {
     // down-left, left, up-left.
     fun neighbours8(self, p: (int, int)) -> [(int, int)] {
         let (x, y) = p
-        let up = y > 0
-        let right = x + 1 < self.width
-        let down = y + 1 < self.height
-        let left = x > 0
+        // Whether the column `x`, the one right of it and the one left of
+        // it are the grid's, and the row `y`, the one up and the one down,
+        // compared as in `neighbours4`
+        let w = self.width
+        let h = self.height
+        let col = x >= 0 && x < w
+        let right = x >= -1 && x < w - 1
+        let left = x > 0 && x <= w
+        let row = y >= 0 && y < h
+        let up = y > 0 && y <= h
+        let down = y >= -1 && y < h - 1
         var out: [(int, int)] = []
-        if up {
+        if col && up {
             out.push((x, y - 1))
         }
-        if up && right {
+        if right && up {
             out.push((x + 1, y - 1))
         }
-        if right {
+        if right && row {
             out.push((x + 1, y))
         }
-        if down && right {
+        if right && down {
             out.push((x + 1, y + 1))
         }
-        if down {
+        if col && down {
             out.push((x, y + 1))
         }
-        if down && left {
+        if left && down {
             out.push((x - 1, y + 1))
         }
-        if left {
+        if left && row {
             out.push((x - 1, y))
         }
-        if up && left {
+        if left && up {
             out.push((x - 1, y - 1))
         }
         return out
@@ -201,13 +218,21 @@ impl<T> Grid<T> {
 
     // The index of `p` in `cells`, `y * width + x`: a node number for the
     // searches of `std.graph` over integers (`bfs_dense`, `dijkstra_dense`).
+    // A `p` out of bounds is a failure, as it is for `set`.
     fun index(self, p: (int, int)) -> int {
         let (x, y) = p
+        if x < 0 || x >= self.width || y < 0 || y >= self.height {
+            panic(f"grid position ({x}, {y}) out of bounds for {self.width} by {self.height}")
+        }
         return y * self.width + x
     }
 
-    // The position of the cell `cells[i]`.
+    // The position of the cell `cells[i]`; an `i` out of bounds is a
+    // failure.
     fun pos(self, i: int) -> (int, int) {
+        if i < 0 || i >= self.cells.len() {
+            panic(f"grid index {i} out of bounds for {self.cells.len()} cells")
+        }
         return (i % self.width, i / self.width)
     }
 
@@ -222,13 +247,21 @@ impl<T> Grid<T> {
         return out
     }
 
-    // The cells of row `y`, left to right.
+    // The cells of row `y`, left to right; a `y` out of bounds is a
+    // failure, as it is for `column`.
     fun row(self, y: int) -> [T] {
+        if y < 0 || y >= self.height {
+            panic(f"grid row {y} out of bounds for height {self.height}")
+        }
         return self.cells[y * self.width:(y + 1) * self.width]
     }
 
-    // The cells of column `x`, top to bottom.
+    // The cells of column `x`, top to bottom; an `x` out of bounds is a
+    // failure.
     fun column(self, x: int) -> [T] {
+        if x < 0 || x >= self.width {
+            panic(f"grid column {x} out of bounds for width {self.width}")
+        }
         var out: [T] = []
         for y in 0..self.height {
             out.push(self.cells[y * self.width + x])
@@ -393,8 +426,57 @@ fun neighbours() {
 #test(3, 4)[12]
 #test(0, 5)[0]
 #test(-1, 2)[panic("grid size -1 by 2 is negative")]
+#test(65536, 65536)[panic("grid size 65536 by 65536 is more than 2147483647 cells")] // M18: 0 cells natively
+#test(0, 2147483647)[0]
 fun new_cells(w: int, h: int) -> int {
     return new(w, h, 'x').cells.len()
+}
+
+// Row `y` and column `x` of a 3 by 2 grid of 0 to 5: out of bounds both are
+// a failure, as `set` is (MYLA-342's follow-up: a row out of bounds was
+// empty and a column wrapped into the next row).
+#test(1)[[3, 4, 5]]
+#test(2)[panic("grid row 2 out of bounds for height 2")]
+#test(-1)[panic("grid row -1 out of bounds for height 2")]
+fun row_of(y: int) -> [int] {
+    return ok(of([[0, 1, 2], [3, 4, 5]])).row(y)
+}
+
+#test(2)[[2, 5]]
+#test(3)[panic("grid column 3 out of bounds for width 3")]
+#test(-1)[panic("grid column -1 out of bounds for width 3")]
+fun column_of(x: int) -> [int] {
+    return ok(of([[0, 1, 2], [3, 4, 5]])).column(x)
+}
+
+// `index` and `pos` of a 3 by 2 grid, which are a failure out of bounds.
+#test(2, 1)[5]
+#test(3, 0)[panic("grid position (3, 0) out of bounds for 3 by 2")]
+#test(0, 2147483647)[panic("grid position (0, 2147483647) out of bounds for 3 by 2")] // overflowed
+fun index_of(x: int, y: int) -> int {
+    return new(3, 2, 0).index((x, y))
+}
+
+#test(5)[(2, 1)]
+#test(6)[panic("grid index 6 out of bounds for 6 cells")]
+#test(-1)[panic("grid index -1 out of bounds for 6 cells")]
+fun pos_of(i: int) -> (int, int) {
+    return new(3, 2, 0).pos(i)
+}
+
+// The neighbours of a position out of bounds are those in bounds, and no
+// coordinate overflows.
+#test
+fun neighbours_out_of_bounds() {
+    let g = new(3, 3, '.')
+    assert(g.neighbours4((-1, 1)) == [(0, 1)] && g.neighbours4((1, 3)) == [(1, 2)], "next to an edge")
+    assert(g.neighbours4((5, 0)) == [] && g.neighbours4((3, 3)) == [], "far or diagonal")
+    assert(g.neighbours8((3, 3)) == [(2, 2)] && g.neighbours8((-1, 1)) == [(0, 0), (0, 1), (0, 2)], "eight, from outside")
+    assert(g.neighbours8((1, -1)) == [(2, 0), (1, 0), (0, 0)], "eight, from above")
+    let big = 2147483647
+    assert(g.neighbours4((big, big)) == [] && g.neighbours8((big, 0)) == [], "at int's maximum")
+    let small = -2147483647 - 1
+    assert(g.neighbours4((small, small)) == [] && g.neighbours8((0, small)) == [], "at int's minimum")
 }
 
 // The cells of a 2 by 2 grid of zeros after a 1 is set at `(x, y)`.

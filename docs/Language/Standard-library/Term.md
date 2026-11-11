@@ -20,6 +20,8 @@ The terminal: whether a standard stream is one, its size, raw mode, styles and c
 
 `raw_mode()` puts the terminal on the standard input in raw mode: each key comes as it is typed, not echoed, Ctrl-C and Ctrl-Z as keys rather than signals, special keys as their escape sequences. Output is unchanged, so `"\n"` still starts a line. It gives a `RawMode` whose `restore()` puts the terminal back as it was; restore it with `defer`, so every way out does.
 
+The terminal is put back however the program ends, too (D187, [[MYLA-426]]): entering raw mode registers an exit hook with the runtime (`__term_raw` keeps the mode it found), which puts that mode back on every end of the program, a return from `main`, `exit`, a panic, any other runtime error, a stack overflow or a failed task, interpreted and natively, where a `defer` doesn't run (D135). `restore()` (any `__term_set` back to that mode) removes the hook. Raw mode entered again while it is on keeps the first mode, so a nested `raw_mode` and its `restore` leave the outer one's hook in place. A signal that kills the program (SIGTERM, SIGKILL) runs no hook: in raw mode Ctrl-C is a key, not SIGINT.
+
 | Item | Meaning |
 | --- | --- |
 | `raw_mode() -> Result<RawMode, TermError>` | Raw mode on the input: `NotATerminal` when it isn't one |
@@ -91,6 +93,8 @@ A `LineEdit` is a line being edited, a value with no input or output, so it is t
 | `editor(out: Stream) -> Editor` | An editor drawing on `out` |
 | `Editor`: `read_line(prompt) -> Result<Option<str>, TermError>`, `add_history(line)` | A line read in raw mode, restored before it returns: `None` at the input's end, `Interrupted` for Ctrl-C; a line added to the history (not a blank one, nor the last again) |
 
+`LineEdit`'s `insert`, `delete_back`, `delete_here` and `go_history` are the steps of `apply`, public only because a method can't be private yet ([[MYLA-433]]); a program has no need of them.
+
 ## Primitives
 
 The module rests on these ([[MYLA-350]]), each a function of `std.rt` over `std.platform`'s of the same name, and in the interpreter the host's own. Each sets `__io_errno()`, 0 on success: ENOTTY (25) for a descriptor that isn't a terminal, EBADF (9) for a negative one, ENOSYS (38) on wasm32.
@@ -100,8 +104,8 @@ The module rests on these ([[MYLA-350]]), each a function of `std.rt` over `std.
 | `__term_is_tty(fd) -> int` | 1 when `ioctl(TCGETS)` works, else 0 | 0 |
 | `__term_size(fd) -> int` | `ioctl(TIOCGWINSZ)`: the columns times 65536 plus the rows, or -1 | -1, ENOSYS |
 | `__term_get(fd) -> str` | `ioctl(TCGETS)`: the kernel's `struct termios`, 36 bytes, `""` on an error | `""`, ENOSYS |
-| `__term_set(fd, mode: str) -> int` | `ioctl(TCSETS)` with what `__term_get` gave; EINVAL for another size | -1, ENOSYS |
-| `__term_raw(fd) -> int` | The mode now without ECHO, ICANON, ISIG, IEXTEN, ICRNL, IXON, BRKINT, INPCK, ISTRIP, with CS8, VMIN 1 and VTIME 0; OPOST kept | -1, ENOSYS |
+| `__term_set(fd, mode: str) -> int` | `ioctl(TCSETS)` with what `__term_get` gave; EINVAL for another size. The mode the exit hook keeps for `fd` set again removes the hook | -1, ENOSYS |
+| `__term_raw(fd) -> int` | The mode now without ECHO, ICANON, ISIG, IEXTEN, ICRNL, IXON, BRKINT, INPCK, ISTRIP, with CS8, VMIN 1 and VTIME 0; OPOST kept. The mode before it is kept for the exit hook, unless the hook keeps one already (D187) | -1, ENOSYS |
 | `__term_vt(fd) -> int` | 0 for a terminal (Linux's always interprets escapes), else -1 | -1, ENOSYS |
 
 ## Porting to another system

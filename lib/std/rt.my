@@ -450,11 +450,36 @@ pub fun list_dir(path: str) -> str {
 // --- file descriptors (MYLA-336) ---------------------------------------------
 //
 // A descriptor is read with `__read` and written with `__write` (below), at
-// its cursor, and closed with `__close`.
+// its cursor, and closed with `__close`. What these primitives take as `fd`
+// is a descriptor's number, or a handle (D181) for one: `__open` and
+// `__spawn_piped` give handles (a `File`'s, a child's streams'), which hold
+// the descriptor, so that a copy of a closed `File` reaches nothing and not
+// the file that got its descriptor next. A number below HANDLE_MIN (2^23,
+// past any descriptor's or process ID's) is a descriptor itself: the
+// standard streams', `io.fd_stream`'s.
 
-// `__open(path, flags, mode)`: the file at `path` opened, its descriptor
-// (closed on exec), or -1 with the errno. `flags`: 1 read, 2 write (both:
-// read and write), 4 create, 8 truncate, 16 append, 32 exclusive (with
+const H_FD: int64 = 3
+
+// The descriptor `fd` stands for: itself below HANDLE_MIN, else the one the
+// open handle `fd` holds, or -1 (EBADF's) when it isn't open.
+fun fd_of(fd: int64) -> int64 {
+    if fd < HANDLE_MIN {
+        return fd
+    }
+    return handle_get(fd, H_FD)
+}
+
+// A handle for the new descriptor `fd` (a negative one, an error, as it is).
+fun fd_handle(fd: int64) -> int64 {
+    if fd < 0 {
+        return fd
+    }
+    return handle_new(H_FD, fd)
+}
+
+// `__open(path, flags, mode)`: the file at `path` opened, a handle for its
+// descriptor (closed on exec), or -1 with the errno. `flags`: 1 read, 2
+// write (both: read and write), 4 create, 8 truncate, 16 append, 32 exclusive (with
 // create: EEXIST when the file is there); without 1 or 2, or with another
 // bit, EINVAL. `mode`: the permissions of a file it creates, less the umask
 // (none on wasm32).
@@ -472,7 +497,7 @@ pub fun open(path: str, flags: int, mode: int) -> int {
     if r < 0 {
         return -1
     }
-    return r as int
+    return fd_handle(r) as int
 }
 
 // `__seek(fd, offset, whence)`: the cursor of `fd` moved to `offset` bytes
@@ -484,7 +509,7 @@ pub fun seek(fd: int, offset: int64, whence: int) -> int64 {
         __set_io_errno(EINVAL)
         return -1
     }
-    let r = os.seek(fd as int64, offset, whence as int64)
+    let r = os.seek(fd_of(fd as int64), offset, whence as int64)
     record(r)
     if r < 0 {
         return -1
@@ -497,7 +522,7 @@ pub fun seek(fd: int, offset: int64, whence: int) -> int64 {
 // nanoseconds since 1970), or `[]` with the errno.
 pub fun fstat(fd: int) -> [int64] {
     let out = __alloc(24)
-    let r = os.fd_stat(fd as int64, out)
+    let r = os.fd_stat(fd_of(fd as int64), out)
     record(r)
     var st: [int64] = []
     if r >= 0 {
@@ -553,15 +578,134 @@ pub fun random_bytes(n: int) -> [uint8] {
     return __list_of(cell)
 }
 
+// --- handles (D181) ----------------------------------------------------------------
+//
+// A handle (a socket's, a notifier's) is a number only the runtime turns
+// into what the platform uses (a descriptor, a Windows SOCKET, a record's
+// address): an index into the table `__handles` and the generation of its
+// entry, in one positive `int`. The table's cell is `[cap][open][last]` and
+// then `cap` entries `[handle][kind][value]`, `cap` a power of two; the
+// handle `h` is in the entry `h & (cap - 1)`, which holds `h` while it is
+// open and 0 once it is free. Handles are given in increasing order from
+// 2^23 (HANDLE_MIN), each the first number after the last one given whose
+// entry is free, so a handle closed is never given again (until the count
+// passes 2^31 - 1 and starts again at 2^23, after some two billion), and no
+// descriptor's number or process ID (Linux's are below 2^20 and 2^22) is
+// ever one: an operation through a copy made before a
+// close, or through a number made up (one that isn't an open handle's),
+// finds its entry holding another handle or none, and fails, and never
+// reaches the descriptor or the record the entry may hold by then. The
+// table doubles before it is half full, each entry moving to its handle's
+// place in the bigger one (two open handles differ modulo the old size, so
+// modulo the new one too). The lock is `__handles + 8`; the notifiers take
+// it inside the timers' lock. A close on one worker while another worker's
+// operation through a copy is between its look-up and its system call can
+// still reach the next socket with the descriptor: closing a stream another
+// task is using is a race of the program's.
+
+const HANDLE: int64 = 24
+const H_SOCKET: int64 = 1
+const H_NOTIFIER: int64 = 2
+const HANDLE_MIN: int64 = 8388608
+const HANDLE_MAX: int64 = 2147483647
+
+// A new handle of the kind `kind` for `value` (at least 0).
+fun handle_new(kind: int64, value: int64) -> int64 {
+    let lock = __rt_addr("__handles") + 8
+    take_lock(lock)
+    var t = __rt_get("__handles")
+    if t == 0 || 2 * (__load64(t + 8) + 1) > __load64(t) {
+        t = handles_grown(t)
+    }
+    let mask = __load64(t) - 1
+    var h = __load64(t + 16) + 1
+    if h < HANDLE_MIN || h > HANDLE_MAX - mask {
+        h = HANDLE_MIN
+    }
+    while __load64(t + 24 + (h & mask) * HANDLE) != 0 {
+        h += 1
+    }
+    let e = t + 24 + (h & mask) * HANDLE
+    __store64(e, h)
+    __store64(e + 8, kind)
+    __store64(e + 16, value)
+    __store64(t + 8, __load64(t + 8) + 1)
+    __store64(t + 16, h)
+    give_lock(lock)
+    return h
+}
+
+// What the open handle `h` of the kind `kind` holds, or -1 (closed, of
+// another kind, or never given); `free`: and the handle closed.
+fun handle_take(h: int64, kind: int64, free: bool) -> int64 {
+    if h <= 0 {
+        return -1
+    }
+    let lock = __rt_addr("__handles") + 8
+    take_lock(lock)
+    let t = __rt_get("__handles")
+    var v: int64 = -1
+    if t != 0 {
+        let e = t + 24 + (h & (__load64(t) - 1)) * HANDLE
+        if __load64(e) == h && __load64(e + 8) == kind {
+            v = __load64(e + 16)
+            if free {
+                __store64(e, 0)
+                __store64(t + 8, __load64(t + 8) - 1)
+            }
+        }
+    }
+    give_lock(lock)
+    return v
+}
+
+fun handle_get(h: int64, kind: int64) -> int64 {
+    return handle_take(h, kind, false)
+}
+
+fun handle_free(h: int64, kind: int64) -> int64 {
+    return handle_take(h, kind, true)
+}
+
+// The table `t` (0: none yet) moved into one twice as big (64 entries at
+// first); the lock held.
+fun handles_grown(t: int64) -> int64 {
+    var cap: int64 = 64
+    if t != 0 {
+        cap = __load64(t) * 2
+    }
+    let bigger = __alloc(24 + cap * HANDLE)
+    zero_words(bigger, 24 + cap * HANDLE)
+    __store64(bigger, cap)
+    if t != 0 {
+        __store64(bigger + 8, __load64(t + 8))
+        __store64(bigger + 16, __load64(t + 16))
+        var i: int64 = 0
+        while i < __load64(t) {
+            let e = t + 24 + i * HANDLE
+            let h = __load64(e)
+            if h != 0 {
+                __copy_bytes(bigger + 24 + (h & (cap - 1)) * HANDLE, e, HANDLE)
+            }
+            i += 1
+        }
+        __free(t)
+    }
+    __store64(__rt_addr("__handles"), bigger)
+    return bigger
+}
+
 // --- sockets (MYLA-346) ------------------------------------------------------------
 //
 // The primitives of std.net, each over the platform's socket functions
-// (`os.sock_*`). A socket is a handle (`int`) that only these take: data is
-// sent and received on it, and `__sock_close` closes it, as a port where
-// sockets aren't descriptors (Winsock) needs. An address is a portable
-// record, a string of 7 or 19 bytes: the family (4 or 6), the port (two
-// bytes, big-endian), the address's 4 or 16 bytes. Each sets the errno
-// `__io_errno` reads, 0 on success; a negative handle is EBADF.
+// (`os.sock_*`). A socket is a handle (`int`, D181) that only these take:
+// data is sent and received on it, and `__sock_close` closes it, as a port
+// where sockets aren't descriptors (Winsock) needs; the handle's entry holds
+// the platform's socket. An address is a portable record, a string of 7 or
+// 19 bytes: the family (4 or 6), the port (two bytes, big-endian), the
+// address's 4 or 16 bytes. Each sets the errno `__io_errno` reads, 0 on
+// success; a handle that isn't open (closed, through a copy too, or made
+// up) is EBADF.
 
 const EBADF: int64 = 9
 
@@ -574,69 +718,89 @@ fun sock_result(r: int64) -> int {
     return r as int
 }
 
+// The platform's socket of the handle `h`, or -1.
+fun sock_of(h: int) -> int64 {
+    return handle_get(h as int64, H_SOCKET)
+}
+
+// A new socket's handle for the platform's result `r` (a socket, or minus
+// the errno), as a primitive's result.
+fun sock_new(r: int64) -> int {
+    if r < 0 {
+        return sock_result(r)
+    }
+    return sock_result(handle_new(H_SOCKET, r))
+}
+
 // `__sock_open(family, kind)`: a new socket of the family `family` (4 or
 // 6) and the kind `kind` (1 stream, 2 datagrams), blocking: its handle, or
 // -1 (EAFNOSUPPORT for another family, EINVAL for another kind).
 pub fun sock_open(family: int, kind: int) -> int {
-    return sock_result(os.sock_open(family as int64, kind as int64))
+    return sock_new(os.sock_open(family as int64, kind as int64))
 }
 
 // `__sock_set_nonblocking(h, on)`: the socket `h` non-blocking (`on` 1) or
 // blocking (0): 0, or -1.
 pub fun sock_set_nonblocking(h: int, on: int) -> int {
-    if h < 0 {
+    let s = sock_of(h)
+    if s < 0 {
         return sock_result(-EBADF)
     }
-    return sock_result(os.sock_nonblocking(h as int64, on as int64))
+    return sock_result(os.sock_nonblocking(s, on as int64))
 }
 
 // `__sock_bind(h, addr)`: the socket bound to the address record `addr`.
 pub fun sock_bind(h: int, addr: str) -> int {
-    if h < 0 {
+    let s = sock_of(h)
+    if s < 0 {
         return sock_result(-EBADF)
     }
-    return sock_result(os.sock_bind(h as int64, addr))
+    return sock_result(os.sock_bind(s, addr))
 }
 
 // `__sock_listen(h, backlog)`: the stream socket listening.
 pub fun sock_listen(h: int, backlog: int) -> int {
-    if h < 0 {
+    let s = sock_of(h)
+    if s < 0 {
         return sock_result(-EBADF)
     }
-    return sock_result(os.sock_listen(h as int64, backlog as int64))
+    return sock_result(os.sock_listen(s, backlog as int64))
 }
 
 // `__sock_accept(h)`: the next connection of the listening socket `h`, a
 // new socket (blocking), or -1 (EAGAIN when `h` is non-blocking and none is
 // queued); retried on EINTR.
 pub fun sock_accept(h: int) -> int {
-    if h < 0 {
+    let s = sock_of(h)
+    if s < 0 {
         return sock_result(-EBADF)
     }
-    var r = os.sock_accept(h as int64)
+    var r = os.sock_accept(s)
     while r == os.EINTR {
-        r = os.sock_accept(h as int64)
+        r = os.sock_accept(s)
     }
-    return sock_result(r)
+    return sock_new(r)
 }
 
 // `__sock_connect(h, addr)`: the socket connected to the address record
 // `addr`: 0, or -1; EINPROGRESS (115) for a non-blocking socket, whose
 // connection goes on: once it is writable, `__sock_error` says how it went.
 pub fun sock_connect(h: int, addr: str) -> int {
-    if h < 0 {
+    let s = sock_of(h)
+    if s < 0 {
         return sock_result(-EBADF)
     }
-    return sock_result(os.sock_connect(h as int64, addr))
+    return sock_result(os.sock_connect(s, addr))
 }
 
 // `__sock_error(h)`: the error pending on the socket, taken (0 for none,
 // else its errno), or -1 when it can't be read.
 pub fun sock_error(h: int) -> int {
-    if h < 0 {
+    let s = sock_of(h)
+    if s < 0 {
         return sock_result(-EBADF)
     }
-    return sock_result(os.sock_error(h as int64))
+    return sock_result(os.sock_error(s))
 }
 
 // `__sock_send(h, s, start)`: the bytes of `s` from `start` on sent on the
@@ -644,7 +808,8 @@ pub fun sock_error(h: int) -> int {
 // socket's buffer filled), or -1 (EAGAIN: none fitted; EPIPE or ECONNRESET:
 // the peer went away; no signal). Retried on EINTR.
 pub fun sock_send(h: int, s: str, start: int) -> int {
-    if h < 0 {
+    let k = sock_of(h)
+    if k < 0 {
         return sock_result(-EBADF)
     }
     let c = __addr_of(s)
@@ -653,9 +818,9 @@ pub fun sock_send(h: int, s: str, start: int) -> int {
     if at < 0 || at > n {
         return sock_result(-EINVAL)
     }
-    var r = os.sock_send(h as int64, c + 8 + at, n - at)
+    var r = os.sock_send(k, c + 8 + at, n - at)
     while r == os.EINTR {
-        r = os.sock_send(h as int64, c + 8 + at, n - at)
+        r = os.sock_send(k, c + 8 + at, n - at)
     }
     return sock_result(r)
 }
@@ -671,32 +836,35 @@ pub fun sock_recv(h: int, n: int) -> str {
     let cell = __alloc(want + 8)
     var got: int64 = 0
     __set_io_errno(0)
-    if h < 0 {
+    let s = sock_of(h)
+    if s < 0 {
         __set_io_errno(EBADF)
     } else if want > 0 {
-        got = os.sock_recv(h as int64, cell + 8, want)
+        got = os.sock_recv(s, cell + 8, want)
         while got == os.EINTR {
-            got = os.sock_recv(h as int64, cell + 8, want)
+            got = os.sock_recv(s, cell + 8, want)
         }
         if got < 0 {
             __set_io_errno(-got)
             got = 0
         }
     }
-    __store64(cell, got)
-    return __str_of(cell)
+    let fit = fitted(cell, 8, got)
+    __store64(fit, got)
+    return __str_of(fit)
 }
 
 // `__sock_send_to(h, s, addr)`: `s` sent as one datagram to the address
 // record `addr`: how many bytes, or -1. Retried on EINTR.
 pub fun sock_send_to(h: int, s: str, addr: str) -> int {
-    if h < 0 {
+    let k = sock_of(h)
+    if k < 0 {
         return sock_result(-EBADF)
     }
     let c = __addr_of(s)
-    var r = os.sock_send_to(h as int64, c + 8, __load64(c), addr)
+    var r = os.sock_send_to(k, c + 8, __load64(c), addr)
     while r == os.EINTR {
-        r = os.sock_send_to(h as int64, c + 8, __load64(c), addr)
+        r = os.sock_send_to(k, c + 8, __load64(c), addr)
     }
     return sock_result(r)
 }
@@ -715,19 +883,21 @@ pub fun sock_recv_from(h: int, n: int) -> str {
     __store64(cell + 16, 0)
     __store64(cell + 24, 0)
     var got: int64 = -EBADF
-    if h >= 0 {
-        got = os.sock_recv_from(h as int64, cell + 27, want, cell + 8)
+    let s = sock_of(h)
+    if s >= 0 {
+        got = os.sock_recv_from(s, cell + 27, want, cell + 8)
         while got == os.EINTR {
-            got = os.sock_recv_from(h as int64, cell + 27, want, cell + 8)
+            got = os.sock_recv_from(s, cell + 27, want, cell + 8)
         }
     }
     record(got)
-    if got < 0 {
-        __store64(cell, 0)
-    } else {
-        __store64(cell, 19 + got)
+    var len: int64 = 0
+    if got >= 0 {
+        len = 19 + got
     }
-    return __str_of(cell)
+    let fit = fitted(cell, 8, len)
+    __store64(fit, len)
+    return __str_of(fit)
 }
 
 // `__sock_addr(h, peer)`: the address record of the socket's own end
@@ -735,8 +905,9 @@ pub fun sock_recv_from(h: int, n: int) -> str {
 pub fun sock_addr(h: int, peer: int) -> str {
     let cell = __alloc(8 + 19)
     var r: int64 = -EBADF
-    if h >= 0 {
-        r = os.sock_addr(h as int64, peer as int64, cell + 8)
+    let s = sock_of(h)
+    if s >= 0 {
+        r = os.sock_addr(s, peer as int64, cell + 8)
     }
     record(r)
     if r < 0 {
@@ -750,19 +921,21 @@ pub fun sock_addr(h: int, peer: int) -> str {
 // `__sock_shutdown(h, how)`: the socket's receiving (`how` 1), sending (2)
 // or both (3) ended: 0, or -1.
 pub fun sock_shutdown(h: int, how: int) -> int {
-    if h < 0 {
+    let s = sock_of(h)
+    if s < 0 {
         return sock_result(-EBADF)
     }
-    return sock_result(os.sock_shutdown(h as int64, how as int64))
+    return sock_result(os.sock_shutdown(s, how as int64))
 }
 
 // `__sock_option(h, opt, value)`: the option `opt` (1 no delay, 2
 // broadcast, 3 a listener's address reused) set to `value` (0 or 1).
 pub fun sock_option(h: int, opt: int, value: int) -> int {
-    if h < 0 {
+    let s = sock_of(h)
+    if s < 0 {
         return sock_result(-EBADF)
     }
-    return sock_result(os.sock_option(h as int64, opt as int64, value as int64))
+    return sock_result(os.sock_option(s, opt as int64, value as int64))
 }
 
 // `__sock_poll(h, events, timeout_ms)`: waiting, the thread blocked, at most
@@ -771,22 +944,25 @@ pub fun sock_option(h: int, opt: int, value: int) -> int {
 // events ready (an error or a hang-up counts as each), 0 when the time ran
 // out, or -1. Retried on EINTR.
 pub fun sock_poll(h: int, events: int, timeout_ms: int) -> int {
-    if h < 0 {
+    let s = sock_of(h)
+    if s < 0 {
         return sock_result(-EBADF)
     }
-    var r = os.sock_poll(h as int64, events as int64, timeout_ms as int64)
+    var r = os.sock_poll(s, events as int64, timeout_ms as int64)
     while r == os.EINTR {
-        r = os.sock_poll(h as int64, events as int64, timeout_ms as int64)
+        r = os.sock_poll(s, events as int64, timeout_ms as int64)
     }
     return sock_result(r)
 }
 
-// `__sock_close(h)`: the socket closed: 0, or -1.
+// `__sock_close(h)`: the socket closed, its handle with it (every copy of
+// it fails from then on with EBADF): 0, or -1.
 pub fun sock_close(h: int) -> int {
-    if h < 0 {
+    let s = handle_free(h as int64, H_SOCKET)
+    if s < 0 {
         return sock_result(-EBADF)
     }
-    return sock_result(os.sock_close(h as int64))
+    return sock_result(os.sock_close(s))
 }
 
 // `__net_config(which)`: the path of the hosts file (`which` 0), or the
@@ -842,21 +1018,47 @@ pub fun term_get(fd: int) -> str {
 }
 
 // `__term_set(fd, mode)`: the terminal back in the mode `__term_get` gave:
-// 0, or -1.
+// 0, or -1. The mode the exit hook keeps for `fd` set again is raw mode
+// left: the hook goes (D187).
 pub fun term_set(fd: int, mode: str) -> int {
     if fd < 0 {
         return sock_result(-EBADF)
     }
-    return sock_result(os.term_set_mode(fd as int64, mode))
+    let r = os.term_set_mode(fd as int64, mode)
+    let h = __rt_addr("__exit_hook")
+    let m = __addr_of(mode)
+    if r >= 0 && __load64(h) == (fd as int64) + 1 && __load64(m) == __load64(h + 24) && __equal_bytes(m + 8, h + 32, __load64(m)) {
+        __store64(h, 0)
+    }
+    return sock_result(r)
 }
 
 // `__term_raw(fd)`: the terminal in raw mode (no echo, a key at a time, no
-// signal keys): 0, or -1.
+// signal keys): 0, or -1. The mode before it is kept for the exit hook,
+// which puts it back however the program ends (D187); raw mode entered
+// again keeps the first one's.
 pub fun term_raw(fd: int) -> int {
     if fd < 0 {
         return sock_result(-EBADF)
     }
-    return sock_result(os.term_make_raw(fd as int64))
+    let h = __rt_addr("__exit_hook")
+    var kept = false
+    if __load64(h) == 0 {
+        let n = os.term_get_mode(fd as int64, h + 32)
+        if n >= 0 {
+            // a static string's cell: its size, a count that never reaches
+            // zero, its length
+            __store64(h + 8, 64)
+            __store64(h + 16, 2305843009213693952)
+            __store64(h + 24, n)
+            kept = true
+        }
+    }
+    let r = os.term_make_raw(fd as int64)
+    if kept && r >= 0 {
+        __store64(h, (fd as int64) + 1)
+    }
+    return sock_result(r)
 }
 
 // `__term_vt(fd)`: escape sequences written to the terminal interpreted
@@ -1012,7 +1214,47 @@ pub fun kill(pid: int, sig: int) {
 // a pipe is -1 in the result. `[errno, 0, -1, -1, -1, -1]` when it
 // couldn't be started (ENOSYS on wasm32).
 pub fun spawn_piped(program: str, argv: [str], opts: [str]) -> [int] {
-    return os.spawn_piped(program_paths(program), argv, opts)
+    var given: int64 = -1
+    var o = opts
+    if o.len() > 2 && o[1].len() > 0 && o[1][0] == 100u8 {     // 'd'
+        given = digits_of(o[2])
+        if given >= HANDLE_MIN {
+            o[2] = int_to_str(fd_of(given))
+        }
+    }
+    var h = os.spawn_piped(program_paths(program), argv, o)
+    // the descriptor handed over is closed now (once the child has it, or
+    // with the error): its handle with it
+    if given >= HANDLE_MIN {
+        let gone = handle_free(given, H_FD)
+    }
+    var k = 2
+    while k < 6 && k < h.len() {
+        h[k] = fd_handle(h[k] as int64) as int
+        k += 1
+    }
+    return h
+}
+
+// The number the decimal digits `s` make (-1: none, or not only digits).
+#test("42")[42]
+#test("")[-1]
+#test("4x")[-1]
+fun digits_of(s: str) -> int64 {
+    if s.len() == 0 || s.len() > 18 {
+        return -1
+    }
+    var n: int64 = 0
+    var i = 0
+    while i < s.len() {
+        let b = s[i]
+        if b < 48u8 || b > 57u8 {   // '0', '9'
+            return -1
+        }
+        n = n * 10 + (b - 48u8) as int64
+        i += 1
+    }
+    return n
 }
 
 // `__try_reap(pid)` (MYLA-336): the child `pid` reaped if it has ended, as
@@ -1031,16 +1273,21 @@ pub fun try_reap(pid: int) -> int {
     return code
 }
 
-// `__close(fd)`: the descriptor closed, its errno recorded (MYLA-378):
-// EBADF for one that isn't open (a negative one too), EIO when the data
-// written couldn't be kept. EINTR is no error: Linux has closed it then,
-// and closing it again could close another file's.
+// `__close(fd)`: the descriptor closed, a handle's with the handle (every
+// copy of it fails from then on), its errno recorded (MYLA-378): EBADF for
+// one that isn't open (a negative one too), EIO when the data written
+// couldn't be kept. EINTR is no error: Linux has closed it then, and
+// closing it again could close another file's.
 pub fun close(fd: int) {
-    if fd < 0 {
+    var d = fd as int64
+    if d >= HANDLE_MIN {
+        d = handle_free(d, H_FD)
+    }
+    if d < 0 {
         __set_io_errno(EBADF)
         return
     }
-    var r = os.close(fd as int64)
+    var r = os.close(d)
     if r == os.EINTR {
         r = 0
     }
@@ -1049,9 +1296,26 @@ pub fun close(fd: int) {
 
 // --- standard input ----------------------------------------------------------
 
+// The cell `cell` from `__alloc`, whose bytes from `head` on hold the `got`
+// that one read gave: itself if it is no more than twice their size, else a
+// cell of their size, with them copied, and `cell` freed. So a short read
+// keeps no more than it got, not the room its request asked for (S1: 33 MB
+// read from a pipe 64 KiB at a time by reads of 16 MB kept 513 cells of
+// 16 MB, and ran out of memory on wasm32).
+fun fitted(cell: int64, head: int64, got: int64) -> int64 {
+    if (got + head) * 2 >= __load64(cell - 16) {
+        return cell
+    }
+    let small = __alloc(got + head)
+    __copy_bytes(small + head, cell + head, got)
+    __free(cell)
+    return small
+}
+
 // `__read`: what one read of at most `n` bytes of `fd` gives (retried on
 // EINTR): empty at the end of the input, for `n <= 0`, or with the errno.
 pub fun read(fd: int, n: int) -> str {
+    let d = fd_of(fd as int64)
     __set_io_errno(0)
     var want = n as int64
     if want < 0 {
@@ -1060,21 +1324,23 @@ pub fun read(fd: int, n: int) -> str {
     let cell = __alloc(want + 8)
     var got: int64 = 0
     if want > 0 {
-        got = os.read(fd as int64, cell + 8, want)
+        got = os.read(d, cell + 8, want)
         while got == os.EINTR {
-            got = os.read(fd as int64, cell + 8, want)
+            got = os.read(d, cell + 8, want)
         }
         if got < 0 {
             __set_io_errno(-got)
             got = 0
         }
     }
-    __store64(cell, got)
-    return __str_of(cell)
+    let fit = fitted(cell, 8, got)
+    __store64(fit, got)
+    return __str_of(fit)
 }
 
 // `__read_bytes` (D177): `__read`, the bytes read into a list.
 pub fun read_bytes(fd: int, n: int) -> [uint8] {
+    let d = fd_of(fd as int64)
     __set_io_errno(0)
     var want = n as int64
     if want < 0 {
@@ -1083,34 +1349,86 @@ pub fun read_bytes(fd: int, n: int) -> [uint8] {
     let cell = __alloc(want + 16)
     var got: int64 = 0
     if want > 0 {
-        got = os.read(fd as int64, cell + 16, want)
+        got = os.read(d, cell + 16, want)
         while got == os.EINTR {
-            got = os.read(fd as int64, cell + 16, want)
+            got = os.read(d, cell + 16, want)
         }
         if got < 0 {
             __set_io_errno(-got)
             got = 0
         }
     }
-    __store64(cell, got)
-    __store64(cell + 8, __load64(cell - 16) - 16)
-    return __list_of(cell)
+    let fit = fitted(cell, 16, got)
+    __store64(fit, got)
+    __store64(fit + 8, __load64(fit - 16) - 16)
+    return __list_of(fit)
 }
 
 // `__poll`: 1 when a read of `fd` won't block (input, its end, or an error),
 // 0 when `timeout_ms` (negative: none) ran out, -1 with the errno when poll
 // failed; retried on EINTR.
 pub fun poll(fd: int, timeout_ms: int) -> int {
+    let d = fd_of(fd as int64)
     __set_io_errno(0)
-    var r = os.poll_read(fd as int64, timeout_ms as int64)
+    if d < 0 {
+        __set_io_errno(EBADF)
+        return -1
+    }
+    var r = os.poll_read(d, timeout_ms as int64)
     while r == os.EINTR {
-        r = os.poll_read(fd as int64, timeout_ms as int64)
+        r = os.poll_read(d, timeout_ms as int64)
     }
     if r < 0 {
         __set_io_errno(-r)
         return -1
     }
     return r as int
+}
+
+// `__poll_write` (MYLA-419): 1 when `fd` has room for a write (a pipe at
+// least PIPE_BUF bytes), or a write fails at once (an error, the reader
+// gone), 0 when `timeout_ms` (negative: none) ran out, -1 with the errno
+// when poll failed; retried on EINTR.
+pub fun poll_write(fd: int, timeout_ms: int) -> int {
+    let d = fd_of(fd as int64)
+    __set_io_errno(0)
+    if d < 0 {
+        __set_io_errno(EBADF)
+        return -1
+    }
+    var r = os.poll_write(d, timeout_ms as int64)
+    while r == os.EINTR {
+        r = os.poll_write(d, timeout_ms as int64)
+    }
+    if r < 0 {
+        __set_io_errno(-r)
+        return -1
+    }
+    return r as int
+}
+
+// `await __wait_readable(fd)` (`events` 1) or `__wait_writable(fd)` (2) in
+// a program without tasks: the thread blocked until `fd` is ready (D124;
+// the 2026-11-10 review's S4: a non-blocking input read at once gave
+// EAGAIN), at once for a negative descriptor, as with tasks.
+pub fun wait_alone(fd: int, events: int) {
+    let d = fd_of(fd as int64)
+    if d < 0 {
+        return
+    }
+    var r: int64 = 0
+    if events == 2 {
+        r = os.poll_write(d, -1)
+    } else {
+        r = os.poll_read(d, -1)
+    }
+    while r == os.EINTR {
+        if events == 2 {
+            r = os.poll_write(d, -1)
+        } else {
+            r = os.poll_read(d, -1)
+        }
+    }
 }
 
 // --- the program's arguments -------------------------------------------------
@@ -1945,7 +2263,7 @@ pub fun print_str(s: str) {
     let c = __addr_of(s)
     let r = os.write_line(c + 8, __load64(c))
     if r == os.EPIPE {
-        os.broken_pipe()
+        broken_pipe()
     }
     if r < 0 {
         write_failed(-r)
@@ -1958,7 +2276,14 @@ fun write_failed(code: int64) {
     write_err(__addr_of("runtime error: write failed: "))
     write_err(__addr_of(errno_text(code)))
     write_err(__addr_of("\n"))
-    os.exit(1)
+    exit_program(1)
+}
+
+// A write to a closed pipe: the program ends quietly, as by SIGPIPE (D146),
+// after the exit hook (D187).
+fun broken_pipe() {
+    exit_hook()
+    os.broken_pipe()
 }
 
 // What the errno `code` of a failed write means (as `strerror` says it).
@@ -2007,10 +2332,11 @@ pub fun print_char(c: char) {
 // `__io_errno`, 0 when there was none. A closed pipe on the standard output
 // or error ends the program quietly (D146).
 pub fun write(fd: int, s: str) {
+    let d = fd_of(fd as int64)
     let c = __addr_of(s)
-    let r = os.write_all(fd as int64, c + 8, __load64(c))
+    let r = os.write_all(d, c + 8, __load64(c))
     if r == os.EPIPE && (fd == 1 || fd == 2) {
-        os.broken_pipe()
+        broken_pipe()
     }
     if r < 0 {
         __set_io_errno(-r)
@@ -2021,10 +2347,11 @@ pub fun write(fd: int, s: str) {
 
 // `__write_bytes(fd, b)` (D177): `__write` of the bytes of a list.
 pub fun write_bytes(fd: int, b: [uint8]) {
+    let d = fd_of(fd as int64)
     let c = __list_addr(b)
-    let r = os.write_all(fd as int64, c + 16, __load64(c))
+    let r = os.write_all(d, c + 16, __load64(c))
     if r == os.EPIPE && (fd == 1 || fd == 2) {
-        os.broken_pipe()
+        broken_pipe()
     }
     if r < 0 {
         __set_io_errno(-r)
@@ -2118,6 +2445,31 @@ pub fun key_str_text(s: str) -> str {
     return sb.build()
 }
 
+// --- the end of the program (D187) ---------------------------------------------------
+
+// `__exit_program(code)`: the program ended with the status `code`, every
+// thread with it, after the exit hook: a return from the entry point, an
+// `exit`, a runtime error or a stack overflow ends here. It allocates
+// nothing.
+pub fun exit_program(code: int) {
+    exit_hook()
+    os.exit(code as int64)
+}
+
+// The exit hook: the terminal `__term_raw` made raw, if nothing put it back
+// since, back in the mode it had (`__exit_hook`: its descriptor plus one,
+// then that mode as a static string's cell). It runs once: taken off before
+// it runs, so a failure in it doesn't come back to it.
+pub fun exit_hook() {
+    let h = __rt_addr("__exit_hook")
+    let fd = __load64(h) - 1
+    if fd < 0 {
+        return
+    }
+    __store64(h, 0)
+    let r = os.term_set_mode(fd, __str_of(h + 24))
+}
+
 // `__panic`'s report (a trap, `panic`, a failed `assert`; MYLA-17, MYLA-65):
 // `runtime error: <msg>` on stderr (`msg` a string's cell), with a position
 // record `pos` (a file name's cell, then the line and the column as 32-bit
@@ -2125,14 +2477,14 @@ pub fun key_str_text(s: str) -> str {
 // It allocates nothing: a heap that ran out reports through it too.
 pub fun panic_report(msg: int64, pos: int64) {
     report_error(msg, pos)
-    os.exit(1)
+    exit_program(1)
 }
 
 // `panic_report` with tasks: the end waits for the other workers (D97).
 pub fun panic_report_tasks(msg: int64, pos: int64) {
     report_error(msg, pos)
     failed_wait()
-    os.exit(1)
+    exit_program(1)
 }
 
 fun report_error(msg: int64, pos: int64) {
@@ -3112,6 +3464,7 @@ fun timer_add_locked(at0: int64, fr: int64, cell: int64) -> int64 {
             break
         }
         __copy_bytes(c + 16 + i * TIMER, pe, TIMER)
+        timer_placed(c, i)
         i = parent
     }
     let e = c + 16 + i * TIMER
@@ -3119,9 +3472,21 @@ fun timer_add_locked(at0: int64, fr: int64, cell: int64) -> int64 {
     __store64(e + 8, seq)
     __store64(e + 16, fr)
     __store64(e + 24, cell)
+    timer_placed(c, i)
     __store64(c, __load64(c) + 1)
     __store64(__rt_addr("__timer_count"), __load64(c))
     return seq
+}
+
+// The entry at `i` of the timers' cell `cell` just put there: a wait's time
+// limit (its waiter tagged 2) keeps its place in its waiter, so that a wake
+// takes it off without looking through every timer (`timer_remove`, the
+// 2026-11-09 review's M11).
+fun timer_placed(cell: int64, i: int64) {
+    let fr = __load64(cell + 32 + i * TIMER)
+    if (fr & 2) != 0 {
+        __store64(fr - 2 + 80, i)
+    }
 }
 
 // Whether the timer `(a, sa)` is due before `(b, sb)`.
@@ -3280,6 +3645,7 @@ fun timers_forget(fr: int64) {
         if __load64(e + 16) == fr {
             n -= 1
             __copy_bytes(e, cell + 16 + n * TIMER, TIMER)
+            timer_placed(cell, i)
             gone = true
         } else {
             i += 1
@@ -3292,6 +3658,50 @@ fun timers_forget(fr: int64) {
     }
 }
 
+// The time limit of the parked waiter `w` taken off the timers, from the
+// place it keeps (`timer_placed`): the last timer moved into it and sifted
+// up or down, so a wake costs O(log timers), not a look at each (M11). The
+// lock held.
+fun timer_remove(w: int64) {
+    let cell = __rt_get("__timers")
+    let i = __load64(w + 80)
+    if cell == 0 || i < 0 || i >= __load64(cell) || __load64(cell + 32 + i * TIMER) != (w | 2) {
+        // (never: a waiter's place is kept wherever its timer moves)
+        timers_forget(w | 2)
+        return
+    }
+    let n = __load64(cell) - 1
+    __store64(cell, n)
+    __store64(__rt_addr("__timer_count"), n)
+    if i == n {
+        return
+    }
+    __copy_bytes(cell + 16 + i * TIMER, cell + 16 + n * TIMER, TIMER)
+    timer_placed(cell, i)
+    timer_sift(cell, timer_sift_up(cell, i), n)
+}
+
+// The timer at `i0` of the cell `cell` sifted up: where it ends.
+fun timer_sift_up(cell: int64, i0: int64) -> int64 {
+    let tmp = __rt_addr("__timer_tmp")
+    var i = i0
+    while i > 0 {
+        let parent = (i - 1) / 2
+        let e = cell + 16 + i * TIMER
+        let pe = cell + 16 + parent * TIMER
+        if !timer_before(__load64(e), __load64(e + 8), __load64(pe), __load64(pe + 8)) {
+            return i
+        }
+        __copy_bytes(tmp, e, TIMER)
+        __copy_bytes(e, pe, TIMER)
+        __copy_bytes(pe, tmp, TIMER)
+        timer_placed(cell, i)
+        timer_placed(cell, parent)
+        i = parent
+    }
+    return i
+}
+
 // The earliest timer of the cell `cell` (not empty) taken off: the last one
 // moved to the top and sifted down.
 fun timers_pop(cell: int64) {
@@ -3302,6 +3712,7 @@ fun timers_pop(cell: int64) {
         return
     }
     __copy_bytes(cell + 16, cell + 16 + n * TIMER, TIMER)
+    timer_placed(cell, 0)
     timer_sift(cell, 0, n)
 }
 
@@ -3340,6 +3751,8 @@ fun timer_sift(cell: int64, i0: int64, n: int64) {
         __copy_bytes(tmp, e, TIMER)
         __copy_bytes(e, c, TIMER)
         __copy_bytes(c, tmp, TIMER)
+        timer_placed(cell, i)
+        timer_placed(cell, child)
         i = child
     }
 }
@@ -3420,13 +3833,25 @@ const WATCH: int64 = 24
 // frame function suspends after this call). A task asked to stop waits no
 // time, nor for what the poller can't watch (a regular file: always ready).
 pub fun wait_fd(fr: int64, fd: int64) {
-    wait_fds(fr, fd, -1, 0)
+    wait_fds(fr, fd_of(fd), -1, 0)
 }
 
 // `myla___wait_fd2(frame, a, b)`: the frame waiting until `a` or `b` is
 // readable (a child's stdout and stderr, `std.process.run_async`).
 pub fun wait_fd2(fr: int64, a: int64, b: int64) {
-    wait_fds(fr, a, b, 0)
+    var bd: int64 = -1
+    if b >= 0 {
+        bd = fd_of(b)
+    }
+    wait_fds(fr, fd_of(a), bd, 0)
+}
+
+// `__wait_writable_frame(frame, fd)` (`__wait_writable`, MYLA-419): the
+// frame waiting until `fd` has room for a write (a child's input), watched
+// as a socket waiting to send is: the platform's poller takes any
+// descriptor that way on Linux.
+pub fun wait_writable_frame(fr: int64, fd: int64) {
+    wait_fds(fr, fd_of(fd), -1, 2)
 }
 
 // `myla___wait_sock(frame, h, events)` (`__wait_socket`, MYLA-346): the
@@ -3434,9 +3859,10 @@ pub fun wait_fd2(fr: int64, a: int64, b: int64) {
 // accept, 2 to send or a connect's end; an error or a hang-up counts as
 // either), watched by the poller through the platform's socket functions.
 // A wake-up may come early (another frame's event on the same socket): the
-// caller tries its operation again and waits again on EAGAIN.
+// caller tries its operation again and waits again on EAGAIN. A handle that
+// isn't open (D181) waits no time, and the operation then fails.
 pub fun wait_sock(fr: int64, h: int64, events: int64) {
-    wait_fds(fr, h, -1, events & 3)
+    wait_fds(fr, handle_get(h, H_SOCKET), -1, events & 3)
 }
 
 // The frame waiting for `a`, and `b` too unless it is negative: an entry
@@ -3634,39 +4060,55 @@ fun exec_stuck() {
     }
     let msg = __addr_of("runtime error: every task waits for another one\n")
     os.write_all(2, msg + 8, __load64(msg))
-    os.exit(1)
+    exit_program(1)
 }
 
 // --- notifiers: tasks parked until another wakes them (MYLA-387) -----------------
 // A notifier (`std.task.notifier`) is the record `[permits][generation][first
-// waiter][last]`, never freed: a handle is its address, so a copy reaches the
-// same one. A wait is a waiter, the cell `[frame][notifier][next][previous]
-// [next parked][previous parked][state][since][ms]` (WAITER bytes) that
-// `waiter` makes and `woken` frees: while it is parked it is on its
-// notifier's list, oldest first, and on `__parked`, every parked waiter's
-// list, which a cancel looks through. Its state: 0 made, 1 parked, then 2
-// notified, 3 timed out, 4 cancelled. `notify_one` wakes the oldest waiter,
+// waiter][last]`, which a handle names (`handle_new`, kind H_NOTIFIER, D181):
+// a copy of the handle reaches the same record, and one closed, or made up,
+// reaches none. A wait is a waiter, the cell `[frame][notifier][next]
+// [previous][next parked][previous parked][state][since][ms][record][timer]`
+// (WAITER bytes) that `waiter` makes and `woken` frees: while it is parked it
+// is on its notifier's list, oldest first, and on `__parked`, every parked
+// waiter's list, which a cancel looks through; `record` is its notifier's
+// record then, and `timer` the place of its time limit among the timers
+// (`timer_placed`). Its state: 0 made, 1 parked, then 2 notified, 3 timed
+// out, 4 cancelled, 5 its notifier closed while it waited, 6 its notifier
+// closed (or never made) before it. `notify_one` wakes the oldest waiter,
 // or with none adds a permit, which the next wait takes at once (none is
-// lost when the wake comes before the wait); `notify_all` wakes every waiter
-// and counts a generation, which a wait `since` an older one sees at once.
-// Everything here is under the timers' lock: a wait's time limit is a timer
-// (the waiter tagged 2) and a cancel ends a wait, both under it already.
+// lost when the wake comes before the wait); `notify_all` wakes every
+// waiter and counts a generation, which a wait `since` an older one sees at
+// once. Everything here is under the timers' lock: a wait's time limit is a
+// timer (the waiter tagged 2) and a cancel ends a wait, both under it
+// already; a close frees the record under it too, so a record found under
+// the lock stays until it is given back.
 
-const WAITER: int64 = 72
+const WAITER: int64 = 88
 
-// `__notifier()`: a new notifier, with no permit and no waiter.
+// `__notifier()`: a new notifier, with no permit and no waiter: its handle.
 pub fun notifier() -> int64 {
     let n = __alloc(32)
     zero_words(n, 32)
-    return n
+    return handle_new(H_NOTIFIER, n)
+}
+
+// The record of the notifier `n`, or -1 when it is closed or was never made
+// (the timers' lock held, if there are tasks).
+fun notifier_record(n: int64) -> int64 {
+    return handle_get(n, H_NOTIFIER)
 }
 
 // `__notify_gen(n)`: how many times `notify_all` woke the notifier `n`'s
-// waiters so far (`std.task`'s `listen`).
+// waiters so far (`std.task`'s `listen`); -1 when it is closed.
 pub fun notify_gen(n: int64) -> int64 {
     let lock = __rt_addr("__timer_lock")
     take_lock(lock)
-    let g = __load64(n + 8)
+    let rec = notifier_record(n)
+    var g: int64 = -1
+    if rec >= 0 {
+        g = __load64(rec + 8)
+    }
     give_lock(lock)
     return g
 }
@@ -3683,8 +4125,10 @@ pub fun waiter(n: int64, since: int64, ms: int) -> int64 {
     return w
 }
 
-// `__woken(w)`: how the wait `w` ended, 1 notified, 0 its time passed, 2 its
-// task was asked to stop (D96); the waiter freed.
+// `__woken(w)`: how the wait `w` ended, 1 notified, 0 its time passed (or
+// its notifier was closed while it waited), 2 its task was asked to stop
+// (D96), 3 its notifier was closed before (std.task's runtime error); the
+// waiter freed.
 pub fun woken(w: int64) -> int {
     let st = __load64(w + 48)
     __free(w)
@@ -3694,14 +4138,21 @@ pub fun woken(w: int64) -> int {
     if st == 4 {
         return 2
     }
+    if st == 6 {
+        return 3
+    }
     return 0
 }
 
 // The state the wait `w` ends with at once (the lock held, if there are
-// tasks), else 1 (it parks): a permit there (taken), a `notify_all` since
-// its generation, no time to wait.
+// tasks), else 1 (it parks): its notifier closed, a permit there (taken), a
+// `notify_all` since its generation, no time to wait. Its record noted.
 fun park_now(w: int64) -> int64 {
-    let n = __load64(w + 8)
+    let n = notifier_record(__load64(w + 8))
+    if n < 0 {
+        return 6
+    }
+    __store64(w + 72, n)
     let permits = __load64(n)
     if permits > 0 {
         __store64(n, permits - 1)
@@ -3718,8 +4169,9 @@ fun park_now(w: int64) -> int64 {
 }
 
 // `myla___park(frame, w)`: the frame parked on the wait `w`'s notifier until
-// it is woken, its time passes or its task is asked to stop (its frame
-// function suspends after this call); queued at once when it needn't wait.
+// it is woken, its time passes, its task is asked to stop or the notifier is
+// closed (its frame function suspends after this call); queued at once when
+// it needn't wait.
 pub fun park_frame(fr: int64, w: int64) {
     let lock = __rt_addr("__timer_lock")
     take_lock(lock)
@@ -3737,7 +4189,7 @@ pub fun park_frame(fr: int64, w: int64) {
     __store64(w, fr)
     __store64(w + 48, 1)
     // last on its notifier's list
-    let n = __load64(w + 8)
+    let n = __load64(w + 72)
     let last = __load64(n + 24)
     __store64(w + 24, last)
     if last != 0 {
@@ -3782,7 +4234,7 @@ pub fun park_alone(w: int64) {
 // time limit off the timers (`forget`: unless a timer fired it), its state
 // `st` (the lock held).
 fun unpark_locked(w: int64, st: int64, forget: bool) {
-    let n = __load64(w + 8)
+    let n = __load64(w + 72)
     let next = __load64(w + 16)
     let prev = __load64(w + 24)
     if prev != 0 {
@@ -3806,7 +4258,7 @@ fun unpark_locked(w: int64, st: int64, forget: bool) {
         __store64(gnext + 40, gprev)
     }
     if forget && __load64(w + 64) > 0 {
-        timers_forget(w | 2)
+        timer_remove(w)
     }
     __store64(w + 48, st)
 }
@@ -3814,33 +4266,47 @@ fun unpark_locked(w: int64, st: int64, forget: bool) {
 // `__notify(n, all)`: the oldest task waiting on the notifier `n` woken, or
 // a permit added when none waits; `all`: every task waiting woken and the
 // generation counted, no permit. The frames woken are queued so that the
-// one that waited longest runs first, as the timers queue sleepers.
-pub fun notify(n: int64, all: bool) {
+// one that waited longest runs first, as the timers queue sleepers. False
+// when `n` is closed (nothing done).
+pub fun notify(n: int64, all: bool) -> bool {
     let lock = __rt_addr("__timer_lock")
     take_lock(lock)
+    let rec = notifier_record(n)
+    if rec < 0 {
+        give_lock(lock)
+        return false
+    }
     if !all {
-        let w = __load64(n + 16)
+        let w = __load64(rec + 16)
         if w == 0 {
-            __store64(n, __load64(n) + 1)
+            __store64(rec, __load64(rec) + 1)
             give_lock(lock)
-            return
+            return true
         }
         let fr = __load64(w)
         unpark_locked(w, 2, true)
         give_lock(lock)
         exec_push(fr)
-        return
+        return true
     }
-    __store64(n + 8, __load64(n + 8) + 1)
-    if __load64(n + 16) == 0 {
+    __store64(rec + 8, __load64(rec + 8) + 1)
+    wake_all_locked(rec, 2, lock)
+    return true
+}
+
+// Every task waiting on the notifier record `rec` woken with the state `st`
+// and queued, the one that waited longest first; the lock `lock` given back
+// first.
+fun wake_all_locked(rec: int64, st: int64, lock: int64) {
+    if __load64(rec + 16) == 0 {
         give_lock(lock)
         return
     }
     var due: [int64] = []
-    while __load64(n + 16) != 0 {
-        let w = __load64(n + 16)
+    while __load64(rec + 16) != 0 {
+        let w = __load64(rec + 16)
         due.push(__load64(w))
-        unpark_locked(w, 2, true)
+        unpark_locked(w, st, true)
     }
     give_lock(lock)
     if __rt_get("__exec_sched") == 1 {
@@ -3857,13 +4323,45 @@ pub fun notify(n: int64, all: bool) {
 }
 
 // `__notify(n, all)` without tasks: no task waits (`park_alone` parks
-// none), so a permit added, or the generation counted.
-pub fun notify_alone(n: int64, all: bool) {
-    if all {
-        __store64(n + 8, __load64(n + 8) + 1)
-    } else {
-        __store64(n, __load64(n) + 1)
+// none), so a permit added, or the generation counted; false when `n` is
+// closed.
+pub fun notify_alone(n: int64, all: bool) -> bool {
+    let rec = notifier_record(n)
+    if rec < 0 {
+        return false
     }
+    if all {
+        __store64(rec + 8, __load64(rec + 8) + 1)
+    } else {
+        __store64(rec, __load64(rec) + 1)
+    }
+    return true
+}
+
+// `__notifier_close(n)` (D181): the notifier `n` closed, every task waiting
+// on it woken (its wait not notified) and its record freed, its handle
+// naming nothing from then on; false when it was closed already.
+pub fun notifier_close(n: int64) -> bool {
+    let lock = __rt_addr("__timer_lock")
+    take_lock(lock)
+    let rec = handle_free(n, H_NOTIFIER)
+    if rec < 0 {
+        give_lock(lock)
+        return false
+    }
+    // the waiters off it first: they are queued once the lock is given back
+    var due: [int64] = []
+    while __load64(rec + 16) != 0 {
+        let w = __load64(rec + 16)
+        due.push(__load64(w))
+        unpark_locked(w, 5, true)
+    }
+    __free(rec)
+    give_lock(lock)
+    for fr in due {
+        exec_push(fr)
+    }
+    return true
 }
 
 // --- lists -----------------------------------------------------------------------

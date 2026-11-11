@@ -2,18 +2,41 @@
 id: MYLA-420
 title: "P6 Text and streams"
 type: bug
-status: todo
+status: review
 priority: medium
 labels: [std, str, io, csv, ini, round-5]
 ---
 Work package P6 of [[Project/Review-2026-11-09]] (wave A2), with round 4's additions from [[Project/Review-2026-11-10]]. Files: `lib/std/str.my`, `lib/std/ini.my`, `lib/std/csv.my`, `lib/std/io.my`. Reopens [[MYLA-321]] and [[MYLA-332]].
 
-- [ ] M16: `trim_end()` of a whitespace-only string ([[MYLA-321]])
-- [ ] H9: `ini.parse("[é")` returns an error ([[MYLA-332]]); `IniError` gets `message()` (D168)
-- [ ] M17 and S5: `Buffered.read_line` and `read_exact` and `csv.stream_reader` linear in the line's length: a buffer that doesn't copy its tail per read; a shared test stream that gives short reads ([[MYLA-338]])
-- [ ] S1: a short `read` gives back a list of its own size, not the cell allocated for the request (wasm32 ran out of memory)
-- [ ] D180: `s.bytes()` on `str` in std.str
-- [ ] `MemoryStream.seek` overflow; `repeat` reserves its result
-- [ ] [[MYLA-339]]'s follow-up: `read_bytes` and `write_bytes` where they are missing
-- [ ] M25: two-way string search, so `find` isn't O(n·m) (80 KB haystack, 40 KB needle: 3.2 s)
-- [ ] D184 for the modules of this package
+- [x] M16: `trim_end()` of a whitespace-only string ([[MYLA-321]])
+- [x] H9: `ini.parse("[é")` returns an error ([[MYLA-332]]); `IniError` gets `message()` (D168)
+- [x] M17 and S5: `Buffered.read_line` and `read_exact` and `csv.stream_reader` linear in the line's length: a buffer that doesn't copy its tail per read; a shared test stream that gives short reads ([[MYLA-338]])
+- [x] S1: a short `read` gives back a list of its own size, not the cell allocated for the request (wasm32 ran out of memory)
+- [x] D180: `s.bytes()` on `str` in std.str
+- [x] `MemoryStream.seek` overflow; `repeat` reserves its result
+- [x] [[MYLA-339]]'s follow-up: `read_bytes` and `write_bytes` where they are missing
+- [x] M25: two-way string search, so `find` isn't O(n·m) (80 KB haystack, 40 KB needle: 3.2 s)
+- [x] D184 for the modules of this package
+
+## Evidence
+
+Built on 95785ab (wave A1 with its seed). The reproducers of both reviews were turned into cases first; the "before" numbers are the base's library (`git archive 95785ab lib`) with the same compiler, natively on x86-64 unless said, on a machine shared by five lanes (best of a few runs).
+
+- **M16** (`lib/std/str.my`): `trim_end` stopped at `space_end`, so `"   ".trim_end()` was `"   "`. Now it trims down to 0 (`space_before`). `bug_trim_end.my` printed `[   ]`, `[\r\n]`, `1`; now `[]`, `[]`, `0`. Cases `"   "`, `"\r\n"`, `""` and a test function over four whitespace-only strings for `trim`, `trim_start`, `trim_end`.
+- **H9** (`lib/std/ini.my`): the header's name was cut (`line[1:len-1]`) before the `]` was checked, inside `é`: `runtime error: a slice bound inside a character` at ini.my:128. The `]` is checked first. `bug_ini_panic.my` now prints `1: …`, `1: …`, `2: …` (BadSection). Four new cases (`[é`, `[xé\nk = v`, `[a]\n[ü`, and `[é]` that parses). `IniError.message()` (D168) with three cases; `Format` writes `line: message()`. The review's `d168.py` no longer lists `IniError`.
+- **M17/S5, `Buffered`** (`lib/std/io.my`): `read_line` and `read_exact` (and their async twins) use the buffer up and gather a line or a count longer than it in a `StringBuilder`, so a byte is copied once; `fill` still keeps unread bytes for its other callers (it is public). An 8 MiB line 1,291 → 31 ms; 16 MiB from a pipe 21,346 → 90 to 97 ms; `read_exact(16 MiB)` from a pipe 1,489 → 38 to 43 ms (from a file 32 → 36 ms). Interpreted: `read_exact(16 MiB)` from a pipe 34,179 → 350 ms; an 8 MiB line didn't end in 100 s before, 16.7 s now (the interpreter's time per byte looked at). 50 MB of short lines: 112 to 128 ms before and after. Async `read_line_async` over the 8 MiB line and the 50 MB in a task: 0.25 s.
+- **M17, `csv.stream_reader`** (`lib/std/csv.my`): a record that reaches the end of the bytes read waits; the reads after it are scanned once by a five-state machine (`scan_record`: field start, unquoted, quoted, quote, ended) and kept in a builder, and the record is read again once its end (or an error byte) is in. `csv_quadratic.my` (16-byte reads): 25,000 bytes 24 → 7 ms, 50,000 96 → 1, 100,000 434 → 1, 200,000 1,860 → 2 ms; interpreted 200,000 bytes 1,618 ms, linear. A record whose LF ends a read is now given without reading ahead (the old code read once more first: a stream of lines one at a time lagged by a record). A 50 MB file: 786 to 943 ms against 809 to 828 before (noise). Cases: `stream_as_parse` reads its 21 texts again over `io.short_reads` of every size; `stream_holds_a_chunk` reads the 250,000-byte record over 16-byte reads and checks it was read twice (`tries == 2`; the old way, once per read); `stream_gives_a_record_once_its_line_ends` checks how many reads each record took (fails with the old rule). A scratch comparison of 50,000 random texts (`a b , " CR LF é space`, up to 23 bytes) over reads of 1, 2, 3 and 5 bytes against `parse`: no difference.
+- **The shared test stream**: `io.short_reads(r, most)` (`ShortReads<R>`, `Read`, `into_inner`), on [[Language/Standard-library/Io]]; used by `std.io`'s `buffered_over_short_reads` and `std.csv`'s cases. `buffered_failed_read_keeps_bytes` checks that a failed read mid-line and mid-count leaves the bytes unread.
+- **S1** (`lib/std/rt.my`, `fitted`): `__read_bytes`, `__read`, `__sock_recv` and `__sock_recv_from` keep their cell only when the read filled at least half of it, else copy what they got into a cell of its size and free the big one. On wasm32, `keep.my` (33 MB from a pipe, reads of 16 MiB, 504 chunks kept) and `bign8.my` (8 reads of 1 GiB of a 3-byte file) were `runtime error: out of memory`; now `504 chunks kept, 33000000 bytes` (105 MB peak under Node) and `8 reads kept, 3 bytes each`. New burn case `test_platform_primitives.Bytes.test_short_reads_keep_their_size` (80 reads each of `__read_bytes` and `__read` asking 64 MiB, given 3 bytes, kept): out of memory on wasm32 with the base library, passes on x86-64, aarch64 and wasm32 now.
+- **D180**: `s.bytes()` in std.str (`__str_to_bytes`), two cases; `w.write(line.bytes())` works without an import, interpreted and native. The check of a program that loads std.str (`print(" hello ".trim())`): 8.4 ms CPU before and after, best of 30 (a bare hello world loads no method module: 8.1 ms either way). The skill's streams line names it.
+- **`MemoryStream`** (`lib/std/io.my`): `seek(Current(2^63 - 1))` was `integer overflow` at io.my:324 (`bug_seek_overflow.my`); now `InvalidInput` for an offset of any size, and a write past 2^31 - 1 bytes is `Other(27)` (EFBIG) instead of overflowing `pos + n`; three cases and `memory_limits`.
+- **`repeat`** reserves `n * len` bytes, and a result longer than a `str` holds is `std.str.repeat: n = … copies of … bytes are more than a str holds` (a case).
+- **`read_bytes`/`write_bytes`** (`lib/std/fs.my`): `fs.read_bytes(path)` and `fs.write_bytes(path, b)` beside `read_to_string` and `write_to_file`; the test function `whole_files_of_bytes` (600 bytes of every value, an empty file, a missing file and directory). On [[Language/Standard-library/Fs]].
+- **M25** (`lib/std/str.my`): `find_from` and `rfind` scan as before, but once partial matches have cost more than 256 + 4 comparisons per byte scanned they go on with the two-way search (Crochemore–Perrin, musl's `strstr` without its byte table; `rfind` over the text and needle reversed). `str_search_cliff.my` natively: n = 80,000 `find` 2,745 → 1 ms, `count`+`rfind` 5,579 → 1, `split`+`replace` 5,401 → 1; interpreted 918 ms (linear: 231, 458, 918 for 20, 40, 80 KB). Short needles in 10 MB (`findbench.my`: `find`, `count`, `split`, `rfind`, `replace` of words): 12 to 33 ms before, 9 to 30 after, three runs each. The test function `two_way_is_a_plain_search` compares `two_way` and `last_two_way` with a plain search on every text of up to 6 bytes over `ab` with every needle of up to 4, and 1,600 random texts from runs of `a`, `b`, `c`, from two starts and backwards (3 s interpreted); `max_suffix` and `two_way` have cases of their own.
+- **D184**: `pad_start`/`pad_end` with a width near `int`'s minimum overflowed (`width - count`); now any width at most the length gives the string back, and a result too long is a runtime error naming `width`. `BufferedWriter.make_room` no longer adds a write's length to the buffer's. The CSV line counter stays at 2,147,483,647 (a stream can have more lines). `find_from`'s budget is counted in `int64`. INI and the in-memory CSV count within a `str`, which can't overflow.
+- **Cases**: `build/myla test lib/std/<m>.my --stdlib lib`, interpreted, `--native`, `--target aarch64-linux` (qemu) and `--target wasm32-wasi` (Node), each the same: str 166/166 (134 before), ini 35/35 (28), csv 52/52 (44), io 30/30 (24), fs 74/74 (one test function new).
+- **Suites**: bootstrap fixed point 20,201,342 bytes (after the last `std.rt` change). `scripts/test.sh fast`: 830 tests, the two expected failures only (`test_embedded_std`, and `test_installed`'s language server, which carries the embedded copy: `selfhost/embedded_std.my` is behind `lib/` until the seed commit). `tests.burn.test_std_modules test_doc_blocks test_stdin test_stdio test_fs test_platform_primitives test_lsp`: 225 OK. `test_net`: OK. `scripts/test-target.py aarch64-linux` and `wasm32-wasi` with `test_platform_primitives test_stdin test_stdio test_fs`: all OK. The full `scripts/test.sh`: 1,479 tests, 336 skipped, 3 failures: the two expected ones above and `test_selfhost_codegen`'s `test_children_run_in_parallel` (cpu 1.16 s against wall 1.28 s under the five lanes' load), which passes alone.
+
+## Found on the way
+
+- [[MYLA-460]]: `std.xml`'s stream reader has M17's shape (an event read again after each read): a 100,000-byte attribute over 16-byte reads 555 ms, quadratic. `std.compress`'s decoders over 16-byte reads stay near linear.

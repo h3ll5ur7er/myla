@@ -246,6 +246,7 @@ fun f64_bits_exact(r: Rounded) -> uint64 {
 #test("0.1")[4591870180066957722u64]
 #test("2f32")[4611686018427387904u64]
 #test("1e400")[9218868437227405312u64]
+#test("1 ")[panic("f64_literal_bits: '1 ' is not a float literal")]
 pub fun f64_literal_bits(lexeme: str) -> uint64 {
     var n: [uint64] = []
     var digits = 0               // significant digits seen (for the zero test)
@@ -270,6 +271,8 @@ pub fun f64_literal_bits(lexeme: str) -> uint64 {
             exp_neg = true
         } else if c == '+' {
             exp_neg = false
+        } else if c < '0' || c > '9' {
+            panic(f"f64_literal_bits: '{lexeme}' is not a float literal")
         } else if in_exp {
             if exp < 100000 {
                 exp = exp * 10 + (c - '0') as int32
@@ -362,10 +365,17 @@ pub fun float_from_bits(bits: uint64) -> float64 {
     return x * pow2(e)
 }
 
-// 2^k exactly, for -1022 <= k <= 1023 (repeated squaring)
+// 2^k, exactly from -1074 to 1023 (repeated squaring): 0 below, infinity
+// above
 #test(10)[1024.0]
 #test(-2)[0.25]
+#test(-1074)[5e-324]
+#test(-1075)[0.0]
+#test(-2147483648)[0.0] // no overflow negating it
 pub fun pow2(k: int32) -> float64 {
+    if k < -1100 {
+        return 0.0f64       // as the squaring gives, without negating k
+    }
     var base = 2.0f64
     var n = k
     if n < 0 {
@@ -491,10 +501,10 @@ fun big_to_decimal(a: [uint64]) -> str {
     }
     var sb = StringBuilder()
     var i = chunks.len() - 1
-    sb.append(format("{}", chunks[i]))
+    sb.append(f"{chunks[i]}")
     i = i - 1
     while i >= 0 {
-        let part = format("{}", chunks[i])
+        let part = f"{chunks[i]}"
         var pad = 9 - part.len()
         while pad > 0 {
             sb.append_byte('0')
@@ -615,7 +625,7 @@ fun scientific(d: Decimal) -> str {
         sb.append_byte('.')
         sb.append(d.digits, 1, d.digits.len())
     }
-    sb.append(format("e{}", d.point - 1))
+    sb.append(f"e{d.point - 1}")
     return sb.build()
 }
 
@@ -649,7 +659,12 @@ fun exact_decimal(v: float64) -> Decimal {
 #test(-0.0001, 2)["-0.00"]
 #test(0.0, 3)["0.000"]
 #test(-1.5, 1)["-1.5"]
+#test(1.5, -1)[panic("format_fixed: prec -1 is negative")]
+#test(5e-324, -2147483648)[panic("format_fixed: prec -2147483648 is negative")]
 pub fun format_fixed(x: float64, prec: int32) -> str {
+    if prec < 0 {
+        panic(f"format_fixed: prec {prec} is negative")
+    }
     if x != x { return "nan" }
     var v = x
     var sign = ""
@@ -662,9 +677,12 @@ pub fun format_fixed(x: float64, prec: int32) -> str {
     var d = Decimal { digits: "0", point: 1 }
     if v != 0.0f64 {
         let exact = exact_decimal(v)
-        let keep = exact.point + prec
-        if keep >= 1 {
-            d = round_digits(exact, keep)
+        // in int64: `prec` may be near int32's maximum
+        let keep = exact.point as int64 + prec as int64
+        if keep > exact.digits.len() as int64 {
+            d = exact
+        } else if keep >= 1 {
+            d = round_digits(exact, keep as int32)
         } else if keep == 0 {
             // below the last place kept: up to one unit of it past a half
             // (a tie goes to the even 0)
@@ -691,11 +709,12 @@ pub fun format_fixed(x: float64, prec: int32) -> str {
     }
     if prec > 0 {
         sb.append_byte('.')
+        // the digit at place point + j of 0.digits, there for j from
+        // -point to `past`; compared so, point + j can't overflow
+        let past = d.digits.len() - d.point
         var j = 0
         while j < prec {
-            // the digit at place point + j of 0.digits
-            let at = d.point + j
-            if at >= 0 && at < d.digits.len() && !(d.digits == "0") { sb.append_byte(d.digits[at]) } else { sb.append_byte('0') }
+            if j >= -d.point && j < past && !(d.digits == "0") { sb.append_byte(d.digits[d.point + j]) } else { sb.append_byte('0') }
             j = j + 1
         }
     }
@@ -770,7 +789,7 @@ pub fun format_float(x: float64) -> str {
         var mag = e10
         if mag < 0 { mag = -mag }
         if mag < 10 { sb.append_byte('0') }
-        sb.append(format("{}", mag))
+        sb.append(f"{mag}")
     }
     return sb.build()
 }
@@ -784,6 +803,29 @@ pub enum ParseIntError {
     Empty,
     InvalidDigit(int),
     Overflow,
+}
+
+impl ParseIntError {
+    // The reason in words, with the byte of a bad digit (D168).
+    #test(ParseIntError.Empty)["no digits"]
+    #test(ParseIntError.InvalidDigit(3))["not a digit at byte 3"]
+    #test(ParseIntError.Overflow)["out of range"]
+    fun message(self) -> str {
+        return match self {
+            Empty => "no digits"
+            InvalidDigit(i) => f"not a digit at byte {i}"
+            Overflow => "out of range"
+        }
+    }
+}
+
+// `message()`; a spec is ignored.
+impl Format for ParseIntError {
+    #test(ParseIntError.InvalidDigit(0), "")["not a digit at byte 0"]
+    #test(ParseIntError.Overflow, ">20")["out of range"]
+    fun format(self, spec: str) -> str {
+        return self.message()
+    }
 }
 
 // The value of the digit `c` in a radix up to 36, letters in either case;
@@ -803,6 +845,13 @@ fun digit_value(c: uint8) -> uint64 {
 fun check_radix(name: str, radix: int) {
     if radix < 2 || radix > 36 {
         panic(f"{name}: radix {radix} is not between 2 and 36")
+    }
+}
+
+// A negative width is a runtime error of the function `name`.
+fun check_width(name: str, width: int) {
+    if width < 0 {
+        panic(f"{name}: width {width} is negative")
     }
 }
 
@@ -843,7 +892,7 @@ fun parse_magnitude(s: str, radix: int, pos_limit: uint64, neg_limit: uint64) ->
 }
 
 // The digits of `n` in radix `r` (2 to 36, lower case), after a "-" when
-// `negative`, padded with "0"s to at least `width` digits.
+// `negative`, padded with "0"s to at least `width` digits (not negative).
 fun radix_digits(n: uint64, r: uint64, width: int, negative: bool) -> str {
     var buf: [uint8] = []
     var v = n
@@ -1008,22 +1057,25 @@ pub fun to_radix_u64(n: uint64, radix: int) -> str {
     return radix_digits(n, radix as uint64, 0, false)
 }
 
-// `n` in lower-case hex, with leading zeros up to `width` digits.
+// `n` in lower-case hex, with leading zeros up to `width` digits; a
+// negative `width` is a runtime error (D184).
 #test(255u64, 0)["ff"]
 #test(255u64, 4)["00ff"]
 #test(255u64, 2)["ff"]
 #test(255u64, 1)["ff"]
 #test(0u64, 0)["0"]
 #test(0u64, 8)["00000000"]
-#test(0u64, -3)["0"]
+#test(255u64, -3)[panic("to_hex: width -3 is negative")]
+#test(255u64, -2147483648)[panic("to_hex: width -2147483648 is negative")] // M18: overflowed
 #test(18446744073709551615u64, 0)["ffffffffffffffff"]
 #test(18446744073709551615u64, 20)["0000ffffffffffffffff"]
 #test(3735928559u64, 16)["00000000deadbeef"]
 pub fun to_hex(n: uint64, width: int = 0) -> str {
+    check_width("to_hex", width)
     return radix_digits(n, 16, width, false)
 }
 
-// `n` in binary, with leading zeros up to `width` digits.
+// `n` in binary, with leading zeros up to `width` digits, as `to_hex`.
 #test(5u64, 0)["101"]
 #test(5u64, 8)["00000101"]
 #test(0u64, 0)["0"]
@@ -1031,7 +1083,9 @@ pub fun to_hex(n: uint64, width: int = 0) -> str {
 #test(255u64, 4)["11111111"]
 #test(18446744073709551615u64, 0)["1111111111111111111111111111111111111111111111111111111111111111"]
 #test(9223372036854775808u64, 64)["1000000000000000000000000000000000000000000000000000000000000000"]
+#test(5u64, -2147483647)[panic("to_binary: width -2147483647 is negative")] // M18: a 2 GB string natively
 pub fun to_binary(n: uint64, width: int = 0) -> str {
+    check_width("to_binary", width)
     return radix_digits(n, 2, width, false)
 }
 

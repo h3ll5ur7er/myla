@@ -23,7 +23,10 @@
 // positional. `--help`, and `-h` unless the spec gives `h` to an option of
 // its own, give `Err(ArgsError.Help(text))` with the generated help.
 //
-// Strings are bytes: a short name is one ASCII character.
+// Strings are bytes: a short name is one ASCII character. A spec that can't
+// be parsed (a name declared twice, an empty one, a required positional
+// after an optional one, `many` with commands) is a panic where it is built,
+// a mistake in the program as an undeclared name is.
 
 // std.str isn't imported: its cases would run as this module's (MYLA-360);
 // the one string helper needed is at the end.
@@ -48,6 +51,7 @@ pub enum ArgsError {
     // A required positional that wasn't given
     MissingPositional(str),
     // An argument past the positionals of a spec without `many` or commands
+    // (after `--`, a command's name too)
     UnexpectedPositional(str),
     // A command the spec doesn't declare
     UnknownCommand(str),
@@ -107,6 +111,7 @@ pub fun spec(name: str, about: str = "") -> Spec {
 impl Spec {
     // A flag, `--name`, and with a `short` other than '\0' `-short`.
     fun flag(self, name: str, short: char = '\0', help: str = "") -> Spec {
+        self.check_option(name, short)
         var s = self
         s.opts.push(OptSpec { name: name, short: short, value: "", help: help, default: None })
         return s
@@ -117,6 +122,7 @@ impl Spec {
     // names the value in the help ("" is "VALUE"). `default` is what `get`
     // gives when the option isn't given.
     fun option(self, name: str, short: char = '\0', value: str = "VALUE", help: str = "", default: Option<str> = None) -> Spec {
+        self.check_option(name, short)
         var s = self
         var v = value
         if v == "" {
@@ -128,6 +134,10 @@ impl Spec {
 
     // The next positional argument, in the order they are declared.
     fun positional(self, name: str, help: str = "", required: bool = true) -> Spec {
+        self.check_name(name)
+        if required && self.pos.len() > 0 && !self.pos[self.pos.len() - 1].required {
+            panic(f"args: the required positional '{name}' comes after the optional '{self.pos[self.pos.len() - 1].name}'")
+        }
         var s = self
         s.pos.push(PosSpec { name: name, help: help, required: required })
         return s
@@ -135,18 +145,69 @@ impl Spec {
 
     // The arguments past the positionals, none or many, for `all(name)`.
     fun many(self, name: str, help: str = "") -> Spec {
+        self.check_name(name)
+        if self.commands.len() > 0 {
+            panic(f"args: a spec has either 'many' or commands ('{name}' and '{self.commands[0].name}')")
+        }
         var s = self
         s.rest = [PosSpec { name: name, help: help, required: false }]
         return s
     }
 
     // A subcommand: the first argument past the positionals, if it is
-    // `name`, and the arguments after it are `sub`'s. The help lists it
+    // `name` and comes before `--`, and the arguments after it are `sub`'s. The help lists it
     // with `sub`'s `about`.
     fun command(self, name: str, sub: Spec) -> Spec {
+        if self.rest.len() > 0 {
+            panic(f"args: a spec has either 'many' or commands ('{self.rest[0].name}' and '{name}')")
+        }
+        for c in self.commands {
+            if c.name == name {
+                panic(f"args: the command '{name}' is declared twice")
+            }
+        }
         var s = self
         s.commands.push(CmdSpec { name: name, spec: sub })
         return s
+    }
+
+    // A panic unless `name` can name a new argument: not empty, not an
+    // option's spelling, not declared yet (options, positionals and `many`
+    // share the names `Args` is asked by).
+    fun check_name(self, name: str) {
+        if name == "" {
+            panic("args: an argument's name must not be empty")
+        }
+        if name[0] == '-' || find_byte(name, '=') >= 0 {
+            panic(f"args: the name '{name}' must not start with '-' or hold '='")
+        }
+        var taken = long_index(self, name) >= 0
+        for p in self.pos {
+            taken = taken || p.name == name
+        }
+        for p in self.rest {
+            taken = taken || p.name == name
+        }
+        if taken {
+            panic(f"args: '{name}' is declared twice")
+        }
+    }
+
+    // `check_name`, and a panic unless `short` is '\0' or a short name no
+    // other option has: one ASCII character that is printed, but not '-'.
+    fun check_option(self, name: str, short: char) {
+        self.check_name(name)
+        if short == '\0' {
+            return
+        }
+        let v = short as int32
+        if v <= 32 || v >= 127 || short == '-' {
+            panic(f"args: the short name of '--{name}' must be an ASCII letter, digit or sign other than '-', not '{short}'")
+        }
+        let k = short_index(self, short)
+        if k >= 0 {
+            panic(f"args: '-{short}' is declared twice (--{self.opts[k].name} and --{name})")
+        }
     }
 
     // The usage line, `usage: prog [options] <input> [<files>...]`.
@@ -328,11 +389,20 @@ impl Format for ArgsError {
 // The arguments `argv` (without the program's name: `process.args()[1:]`)
 // as `s` declares them.
 pub fun parse(s: Spec, argv: [str]) -> Result<Args, ArgsError> {
-    return parse_from(s, argv, 0)
+    return match parse_from(s, argv, 0) {
+        Ok(a) => Ok(a)
+        Err((e, _)) => Err(e)
+    }
 }
 
-// `argv[start:]` as `s` declares them.
-fun parse_from(s: Spec, argv: [str], start: int) -> Result<Args, ArgsError> {
+// The error `e` in the arguments of `s`.
+fun fail(s: Spec, e: ArgsError) -> Result<Args, (ArgsError, str)> {
+    return Err((e, s.usage()))
+}
+
+// `argv[start:]` as `s` declares them; an error with the usage line of
+// the spec whose arguments it is in (a command's own, MYLA-426).
+fun parse_from(s: Spec, argv: [str], start: int) -> Result<Args, (ArgsError, str)> {
     var a = empty_args(s)
     let n = argv.len()
     var i = start
@@ -355,14 +425,14 @@ fun parse_from(s: Spec, argv: [str], start: int) -> Result<Args, ArgsError> {
             let k = long_index(s, name)
             if k < 0 {
                 if name == "help" {
-                    return Err(ArgsError.Help(s.help()))
+                    return fail(s, ArgsError.Help(s.help()))
                 }
-                return Err(ArgsError.UnknownOption("--" + name))
+                return fail(s, ArgsError.UnknownOption("--" + name))
             }
             let o = s.opts[k]
             if o.value == "" {
                 if value.is_some() {
-                    return Err(ArgsError.UnexpectedValue("--" + name))
+                    return fail(s, ArgsError.UnexpectedValue("--" + name))
                 }
                 a.flags.push(o.name)
             } else if let Some(v) = value {
@@ -371,23 +441,23 @@ fun parse_from(s: Spec, argv: [str], start: int) -> Result<Args, ArgsError> {
                 a.values.push((o.name, argv[i]))
                 i += 1
             } else {
-                return Err(ArgsError.MissingValue("--" + name))
+                return fail(s, ArgsError.MissingValue("--" + name))
             }
         } else if options && arg.len() > 1 && arg[0] == '-' {
             // -v, -vq, -o value, -ovalue, -vo value
             var j = 1
             while j < arg.len() {
                 if arg[j] >= 0x80 {
-                    return Err(ArgsError.UnknownOption(arg))
+                    return fail(s, ArgsError.UnknownOption(arg))
                 }
                 let c = arg[j] as char
                 j += 1
                 let k = short_index(s, c)
                 if k < 0 {
                     if c == 'h' {
-                        return Err(ArgsError.Help(s.help()))
+                        return fail(s, ArgsError.Help(s.help()))
                     }
-                    return Err(ArgsError.UnknownOption(f"-{c}"))
+                    return fail(s, ArgsError.UnknownOption(f"-{c}"))
                 }
                 let o = s.opts[k]
                 if o.value == "" {
@@ -399,7 +469,7 @@ fun parse_from(s: Spec, argv: [str], start: int) -> Result<Args, ArgsError> {
                         a.values.push((o.name, argv[i]))
                         i += 1
                     } else {
-                        return Err(ArgsError.MissingValue(f"-{c}"))
+                        return fail(s, ArgsError.MissingValue(f"-{c}"))
                     }
                     j = arg.len()
                 }
@@ -409,25 +479,25 @@ fun parse_from(s: Spec, argv: [str], start: int) -> Result<Args, ArgsError> {
             next += 1
         } else if s.rest.len() > 0 {
             a.values.push((s.rest[0].name, arg))
-        } else if s.commands.len() > 0 {
+        } else if options && s.commands.len() > 0 {
             var k = 0
             while k < s.commands.len() && s.commands[k].name != arg {
                 k += 1
             }
             if k == s.commands.len() {
-                return Err(ArgsError.UnknownCommand(arg))
+                return fail(s, ArgsError.UnknownCommand(arg))
             }
             var sub = s.commands[k].spec
             sub.name = s.name + " " + arg
             a.sub = [(arg, parse_from(sub, argv, i)?)]
             i = n
         } else {
-            return Err(ArgsError.UnexpectedPositional(arg))
+            return fail(s, ArgsError.UnexpectedPositional(arg))
         }
     }
     while next < s.pos.len() {
         if s.pos[next].required {
-            return Err(ArgsError.MissingPositional(s.pos[next].name))
+            return fail(s, ArgsError.MissingPositional(s.pos[next].name))
         }
         next += 1
     }
@@ -518,17 +588,18 @@ fun section(title: str, rows: [(str, str)], width: int) -> str {
 
 // `parse(s, argv)`, or the end of the program: for `--help` the help on
 // stdout and exit status 0, for an error `prog: <message>` and the usage
-// line on stderr and exit status 2.
+// line on stderr (a command's own for an error in its arguments) and exit
+// status 2.
 pub fun parse_or_exit(s: Spec, argv: [str]) -> Args {
-    match parse(s, argv) {
+    match parse_from(s, argv, 0) {
         Ok(a) => { return a },
-        Err(ArgsError.Help(text)) => {
+        Err((ArgsError.Help(text), _)) => {
             println(text)
             exit(0)
         },
-        Err(e) => {
+        Err((e, usage)) => {
             eprintln(f"{s.name}: {e.message()}")
-            eprintln(s.usage())
+            eprintln(usage)
             exit(2)
         },
     }
@@ -708,6 +779,66 @@ fun subcommands() {
     assert(err(tool(), ["build"]) == ArgsError.MissingPositional("file"), "the command's positional")
     assert(err(tool(), ["build", "-v", "x"]) == ArgsError.UnknownOption("-v"), "the parent's flag after the command")
     assert(err(tool(), ["clean", "x"]) == ArgsError.UnexpectedPositional("x"), "the command's extra argument")
+    // after `--` a command's name is an argument like any other (MYLA-426)
+    assert(err(tool(), ["--", "build", "x.my"]) == ArgsError.UnexpectedPositional("build"), "a command after --")
+    let shell = spec("sh").positional("script", "", false).command("run", spec("run"))
+    let s = ok(shell, ["--", "run"])
+    assert(s.get("script") == Some("run") && s.command().is_none(), "after --, a positional named like a command")
+    let t = ok(shell, ["x", "run"])
+    assert(t.get("script") == Some("x") && t.command().is_some(), "the command before --")
+}
+
+// The usage line `parse_or_exit` prints for an error: the one of the spec
+// whose arguments were being read, a command's own (MYLA-426).
+#test(["build"])["usage: tool build [options] <file>"]
+#test(["build", "-v", "x"])["usage: tool build [options] <file>"]
+#test(["bild"])["usage: tool [options] [<command>]"]
+#test(["-x"])["usage: tool [options] [<command>]"]
+#test(["clean", "x"])["usage: tool clean [options]"]
+#test(["clean"])["parsed"]
+fun usage_of_error(argv: [str]) -> str {
+    return match parse_from(tool(), argv, 0) {
+        Ok(_) => "parsed"
+        Err((_, usage)) => usage
+    }
+}
+
+// A spec that can't be parsed is a mistake in the program: a panic where
+// it is built, naming the argument (MYLA-426). The cases of `bad_spec`.
+#test(0)[panic("args: 'out' is declared twice")]
+#test(1)[panic("args: 'input' is declared twice")]
+#test(2)[panic("args: '-v' is declared twice (--verbose and --very)")]
+#test(3)[panic("args: the short name of '--x' must be an ASCII letter, digit or sign other than '-', not 'é'")]
+#test(4)[panic("args: an argument's name must not be empty")]
+#test(5)[panic("args: the name '-o' must not start with '-' or hold '='")]
+#test(6)[panic("args: the name 'a=b' must not start with '-' or hold '='")]
+#test(7)[panic("args: the required positional 'b' comes after the optional 'a'")]
+#test(8)[panic("args: a spec has either 'many' or commands ('rest' and 'build')")]
+#test(9)[panic("args: a spec has either 'many' or commands ('rest' and 'build')")]
+#test(10)[panic("args: the command 'build' is declared twice")]
+#test(11)[panic("args: the short name of '--x' must be an ASCII letter, digit or sign other than '-', not '-'")]
+#test(12)[panic("args: 'rest' is declared twice")]
+#test(13)["3 2"]
+fun bad_spec(k: int) -> str {
+    let s = spec("p")
+    let b = spec("build")
+    let built = match k {
+        0 => s.option("out").flag("out")
+        1 => s.positional("input").option("input")
+        2 => s.flag("verbose", 'v').flag("very", 'v')
+        3 => s.flag("x", 'é')
+        4 => s.positional("")
+        5 => s.option("-o")
+        6 => s.flag("a=b")
+        7 => s.positional("a", "", false).positional("b")
+        8 => s.many("rest").command("build", b)
+        9 => s.command("build", b).many("rest")
+        10 => s.command("build", b).command("build", b)
+        11 => s.flag("x", '-')
+        12 => s.many("rest").positional("rest")
+        _ => s.flag("x", 'x').option("y", 'Y').positional("a").positional("b", "", false).many("c").flag("help", 'h')
+    }
+    return f"{built.opts.len()} {built.pos.len()}"
 }
 
 #test

@@ -39,7 +39,7 @@ An alias is another name for the same type, not a new type (D5). Aliases may be 
 
 ## Tuples
 
-`(int, str)` with literals `(1, "a")`. A 1-tuple is written `(int,)` / `(1,)` (D35). Elements are read with `t.0`, `t.1` (a constant index) or destructured with `let (a, b) = t`. Tuples can't be compared with `==`.
+`(int, str)` with literals `(1, "a")`. A 1-tuple is written `(int,)` / `(1,)` (D35). Elements are read with `t.0`, `t.1` (a constant index) or destructured with `let (a, b) = t`. Tuples of `Eq` elements compare with `==` and `!=`, element by element, and those of `Eq` and `Hash` elements are map keys (D163); they have no ordering (`<`).
 
 ## The unit type
 

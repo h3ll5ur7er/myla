@@ -70,6 +70,7 @@ What the parser holds a document to is TOML 1.0's grammar and its rules on table
 - **Floats** are the correctly rounded `float64` (`std.num.parse_float`): an integer part, then a fraction, an exponent or both (`1e06`, `6.626e-34`, `1_000.5`), or `inf` and `nan` with a sign or none. Too large a number is infinite, as `tomllib` reads it.
 - **Dates and times** are RFC 3339's with TOML's freedoms: `T`, `t` or a space between the date and the time, `Z` or `z`, seconds required (TOML 1.0), any number of digits in the fraction (nine kept). A date that isn't one is an error that says why: `the day must be 01 to 28 in 2023-02`, `the second must be 00 to 59` (no leap second, as `tomllib` and [[Language/Standard-library/Time]] have none), `the year must be 0001 to 9999`.
 - **Arrays** hold any values, of mixed types, over several lines with comments and a trailing comma.
+- **Nesting** is limited to 100 levels of tables and arrays, the document's own table not counted: each table a header or a dotted key goes through, an array of tables (its array and its element), each array and each inline table. A container past them is the syntax error `tables and arrays nested too deeply (more than 100 levels)` at that container, as std.json (200) and std.yaml (100) limit theirs: the parser recurses a level at a time, and the interpreters run it on their own stack. Without the limit 80 KB of nested inline tables took 28 s and 3 GB and 10^5 `[` overflowed the stack ([[MYLA-424]]); a document reads in time linear in its length.
 
 **Why dates and times are structs of their fields.** A program that reads a date wants its year, a time its hour; `==` should say that `1979-05-27 07:32:00Z` and `1979-05-27T07:32:00+00:00` are the same date-time, as TOML says; and the writer can always write a value from its fields, so `parse(to_string(doc)) == doc` holds without the original text. Three variants, not one with optional parts or four: a date-time always has a date and a time, and whether it is local is its `offset`; a lone date or time is its own struct. What the fields lose is the spelling: `.500` is written `.5`, `-00:00` and `+00:00` as `Z`, a space as `T`. The structs are std.toml's own rather than `std.time.DateTime`, which is UTC only and would make every program that imports std.toml (the compiler among them) import std.time.
 
@@ -130,7 +131,7 @@ fun main() {
 
 ## Typed values
 
-`#derive(Toml)` on a struct or an enum writes its `impl ToToml` and `impl FromToml` ([[MYLA-407]]), as `#derive(Json)` writes std.json's (D172, [[MYLA-385]]): source the checker writes and checks with the program. `toml.encode(v)` and `toml.decode<T>(text)` go through them.
+`#derive(Toml)` on a struct or an enum writes its `impl ToToml` and `impl FromToml` ([[MYLA-407]]), as `#derive(Json)` writes std.json's (D176, after D172 and [[MYLA-385]]): source the checker writes and checks with the program. `toml.encode(v)` and `toml.decode<T>(text)` go through them.
 
 ```myla
 import std.toml as toml
@@ -219,7 +220,7 @@ The built-in types:
 | Type | TOML | Read from |
 | --- | --- | --- |
 | `int8` … `int64`, `uint8` … `uint32` | an integer | an integer in the type's range (`128` for an `int8` is `OutOfRange`); a float is `WrongType`, as TOML keeps the two apart |
-| `uint64` | an integer; above `int64`'s range, which is TOML's, the nearest float | the same, or a whole float from 2^63 up to below 2^64 |
+| `uint64` | an integer; above `int64`'s range, which is TOML's, the nearest float: a value that isn't a float64 (not a multiple of 2048 there) comes back as that float's | the same, or a whole float from 2^63 up to below 2^64. An integer beyond `int64` in the text is `integer out of range` |
 | `float64`, `float32` | a float, `inf` and `nan` included; a `float32` in its shortest form, `0.1` | a float or an integer; a finite number beyond `float32`'s range is `OutOfRange` |
 | `bool`, `str` | `true`/`false`, a string | the same |
 | `char` | a string of the one character | a string of exactly one character |

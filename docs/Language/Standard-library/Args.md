@@ -68,11 +68,13 @@ fun main() {
 | `option(name: str, short: char = '\0', value: str = "VALUE", help: str = "", default: Option<str> = None)` | An option with a value: `--name v`, `--name=v`, `-c v`, `-cv`. `value` names the value in the help; `default` is what `get` gives when the option isn't given |
 | `positional(name: str, help: str = "", required: bool = true)` | The next positional argument, in the order they are declared |
 | `many(name: str, help: str = "")` | The arguments past the positionals, none or many |
-| `command(name: str, sub: Spec)` | A subcommand: the first argument past the positionals, if it is `name`; the arguments after it are `sub`'s, and the help lists it with `sub`'s `about` |
+| `command(name: str, sub: Spec)` | A subcommand: the first argument past the positionals, if it is `name` and comes before `--`; the arguments after it are `sub`'s, and the help lists it with `sub`'s `about` |
 | `usage() -> str` | The usage line, `usage: prog [options] <input> [<mode>] [<rest>...]` |
 | `help() -> str` | The help text: `about`, the usage line, then the arguments, the options and the commands, each with its help in one aligned column, without a newline at the end |
 
 A spec has either `many` or commands: with `many`, every argument past the positionals is one of its. A short name is one ASCII character.
+
+A spec that can't be parsed is a mistake in the program, so the method that would make it panics, naming the argument ([[MYLA-426]]): a name declared twice (options, positionals and `many` share the names `Args` is asked by: `args: 'out' is declared twice`), a short name given twice (`args: '-v' is declared twice (--verbose and --very)`), an empty name or one that starts with `-` or holds `=`, a short name that isn't a printed ASCII character or is `-`, a required positional after an optional one, `many` together with commands, and a command declared twice.
 
 ## Parsing
 
@@ -80,12 +82,12 @@ A spec has either `many` or commands: with `many`, every argument past the posit
 
 - `--out x`, `--out=x`, `-o x` and `-ox` give an option its value. The value is the next argument whatever it looks like, so `-o -v` gives `out` the value `-v`.
 - Short flags group: `-vq` is `-v -q`, and in `-vox` the `o` takes the rest, `x`.
-- Options may come anywhere among the positionals; `--` ends them, and every argument after it is a positional. `-` alone is a positional.
+- Options may come anywhere among the positionals; `--` ends them, and every argument after it is a positional, a command's name too. `-` alone is a positional.
 - An option given twice keeps both values. A flag may be given more than once.
 - Past a command's name, the arguments are the command's: `tool -v build -r` gives `-v` to `tool` and `-r` to `build`.
 - `--help`, and `-h` unless the spec gives `h` to one of its own, give `Err(ArgsError.Help(text))`, the help of the spec or of the command they were given to. The help lists them as `-h, --help`.
 
-`parse_or_exit(s: Spec, argv: [str]) -> Args` is `parse` for a program that has nothing better to do with an error: for `--help` it prints the help and exits with status 0; for an error it prints `prog: <message>` and the usage line on stderr and exits with status 2.
+`parse_or_exit(s: Spec, argv: [str]) -> Args` is `parse` for a program that has nothing better to do with an error: for `--help` it prints the help and exits with status 0; for an error it prints `prog: <message>` and the usage line on stderr and exits with status 2. The usage line is that of the spec whose arguments were wrong: `tool build` without its file prints `usage: tool build [options] <file>`.
 
 ## The arguments
 
@@ -111,7 +113,7 @@ Each error names the argument: an option as it was written (`--out` or `-o`), a 
 | `MissingValue(str)` | An option at the end, without its value | `option '-o' needs a value` |
 | `UnexpectedValue(str)` | A flag given a value, `--verbose=1` | `flag '--verbose' takes no value` |
 | `MissingPositional(str)` | A required positional not given | `missing argument <input>` |
-| `UnexpectedPositional(str)` | An argument past the positionals, without `many` or commands | `unexpected argument 'x.txt'` |
+| `UnexpectedPositional(str)` | An argument past the positionals, without `many` or commands (after `--`, a command's name too) | `unexpected argument 'x.txt'` |
 | `UnknownCommand(str)` | A command the spec doesn't declare | `unknown command 'bild'` |
 
 ## Used by

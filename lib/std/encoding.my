@@ -23,6 +23,30 @@ pub enum EncodingError {
     TrailingBits(int),
 }
 
+impl EncodingError {
+    // The reason in words, with its position (D168).
+    #test(EncodingError.BadLength(3))["a length of 3, which no encoding gives"]
+    #test(EncodingError.BadChar(1))["not a digit of the alphabet at byte 1"]
+    #test(EncodingError.BadPadding(2))["wrong padding at byte 2"]
+    #test(EncodingError.TrailingBits(5))["unused bits set in the last character, at byte 5"]
+    fun message(self) -> str {
+        return match self {
+            BadLength(n) => f"a length of {n}, which no encoding gives"
+            BadChar(i) => f"not a digit of the alphabet at byte {i}"
+            BadPadding(i) => f"wrong padding at byte {i}"
+            TrailingBits(i) => f"unused bits set in the last character, at byte {i}"
+        }
+    }
+}
+
+// `message()`; a spec is ignored.
+impl Format for EncodingError {
+    #test(EncodingError.BadChar(0), "")["not a digit of the alphabet at byte 0"]
+    fun format(self, spec: str) -> str {
+        return self.message()
+    }
+}
+
 const HEX: str = "0123456789abcdef"
 const STD: str = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
 const URL: str = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"

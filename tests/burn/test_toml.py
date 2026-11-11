@@ -34,7 +34,9 @@ every invalid one be refused. MYLA_TOML_TEST naming a checkout runs that one
 instead.
 
 The big corpus runs on the self-hosted native build, a small one in the
-self-hosted interpreter.
+self-hosted interpreter. With MYLA_TEST_TARGET set (`scripts/test-target.py`)
+the drivers are built for that target and run under qemu-aarch64 or Node,
+so the toml-test suite runs on every runner (MYLA-424).
 """
 from __future__ import annotations
 
@@ -50,7 +52,7 @@ import tempfile
 import tomllib
 import unittest
 
-from ._native import CAN_BUILD_NATIVE, SKIP_REASON
+from ._native import CAN_BUILD_NATIVE, SKIP_REASON, TEST_TARGET, check_file, native_build, run_argv
 from ._tools import STDLIB_ROOT, selfhost_tool
 
 VENDORED = os.path.join(os.path.dirname(__file__), "data", "toml_test_1.0.json")
@@ -609,12 +611,18 @@ def _suite() -> tuple[dict[str, tuple[bytes, object]], dict[str, bytes]]:
     return valid, invalid
 
 
-def _build(gen: str, source: str, out: str) -> None:
+def _build(gen: str, source: str, out: str) -> list[str]:
+    """`source` built for the machine, or for MYLA_TEST_TARGET by the CLI;
+    the command that runs it."""
+    if TEST_TARGET:
+        native_build(check_file(source), out)
+        return run_argv(out)[0]
     asm = subprocess.run([gen, source, STDLIB_ROOT], capture_output=True, text=True, check=True)
     with open(out + ".s", "w", encoding="utf-8") as fh:
         fh.write(asm.stdout)
     subprocess.run(["as", "--64", "-o", out + ".o", out + ".s"], check=True)
     subprocess.run(["ld", "-o", out, out + ".o"], check=True)
+    return [out]
 
 
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
@@ -627,13 +635,11 @@ class TomlAgainstPython(unittest.TestCase):
         with open(path, "w", encoding="utf-8") as fh:
             fh.write(DRIVER)
         sh_native = os.path.join(cls.tmp.name, "sh_native")
-        _build(gen, path, sh_native)
-        cls.native = {"self-hosted native": [sh_native]}
+        cls.native = {"self-hosted native": _build(gen, path, sh_native)}
         writer = os.path.join(cls.tmp.name, "writer.my")
         with open(writer, "w", encoding="utf-8") as fh:
             fh.write(WRITER_DRIVER)
-        cls.writer = os.path.join(cls.tmp.name, "writer")
-        _build(gen, writer, cls.writer)
+        cls.writer = _build(gen, writer, os.path.join(cls.tmp.name, "writer"))
         cls.interpreters = {
             "self-hosted interpreter": [selfhost_tool("interp_main"), path, STDLIB_ROOT],
         }
@@ -692,7 +698,7 @@ class TomlAgainstPython(unittest.TestCase):
         # as that value, keys in order
         rng = random.Random(5)
         values = [_any_table(rng, 0) for _ in range(2000)]
-        lines = self.run_driver([self.writer], [json.dumps(v[0], ensure_ascii=False) for v in values])
+        lines = self.run_driver(self.writer, [json.dumps(v[0], ensure_ascii=False) for v in values])
         wrong = []
         headers = 0
         for (_, value), line in zip(values, lines):

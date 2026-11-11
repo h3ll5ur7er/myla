@@ -2,7 +2,7 @@
 id: MYLA-335
 title: "std.regex: regular expressions in linear time"
 type: feature
-status: todo
+status: review
 priority: medium
 labels: [stdlib, strings, regex, wave-2]
 ---
@@ -45,4 +45,4 @@ Wave 2 of [[Project/Standard-library-roadmap]], roadmap #59. RE2's model: a patt
 
 Not ready ([[Project/Review-2026-11-09]]): the lazy DFA gives a wrong match on texts of 96 bytes or more when an assertion sits in a repetition (H10). The fix is in [[MYLA-421]].
 
-- [ ] The review's blocker, fixed with [[MYLA-421]]
+- [x] The review's blocker, fixed with [[MYLA-421]]: the DFA follows a state's threads in the Pike VM's order

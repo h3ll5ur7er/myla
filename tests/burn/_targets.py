@@ -39,6 +39,9 @@ SUITES = [
     # every standard library module's cases through the harness (MYLA-370:
     # on wasm32 too, every case run)
     "tests.burn.test_std_modules",
+    # std.toml against tomllib and the toml-test suite, its drivers built for
+    # the target (MYLA-424)
+    "tests.burn.test_toml",
 ]
 
 # A test that reads the x86-64 code ends there, skipped, on another target,
@@ -84,7 +87,7 @@ SKIP: dict[str, dict[str, str]] = {
         # MYLA-350: WASI preview 1 has no terminal modes and no signals, which
         # TermOnWasm checks are `Unsupported` (nothing a terminal, no size)
         **{f"test_term.{c}": "WASI has no terminals or signals (TermOnWasm checks they are Unsupported)"
-           for c in ["Terminal", "Signals", "Primitives"]},
+           for c in ["Terminal", "Signals", "Primitives", "RawModeEnds"]},
     },
 }
 

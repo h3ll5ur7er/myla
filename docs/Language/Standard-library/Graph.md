@@ -94,7 +94,7 @@ fun main() {
 
 ## Nodes and edges
 
-A node is any type a map key can be, `T: Eq + Hash` (D163, D167): an integer, a string, a tuple such as a grid position `(x, y)` or a state `((x, y), dir)`, or a struct that derives both. A weighted edge is a `(node, weight)` pair. A weight is an `int64`: a path's cost is a sum, which can pass the 2³¹ of an `int`, and [[Language/Standard-library/Heap]]'s `KeyedHeap` orders by `int64`. Weights must not be negative.
+A node is any type a map key can be, `T: Eq + Hash` (D163, D167): an integer, a string, a tuple such as a grid position `(x, y)` or a state `((x, y), dir)`, or a struct that derives both. A weighted edge is a `(node, weight)` pair. A weight is an `int64`: a path's cost is a sum, which can pass the 2³¹ of an `int`, and [[Language/Standard-library/Heap]]'s `KeyedHeap` orders by `int64`. Weights must not be negative: a negative one is a failure in `dijkstra`, `dijkstra_path`, `astar` and `dijkstra_dense` (`dijkstra: edge weight -3 is negative`), where a cycle of negative cost made the search go on for ever ([[MYLA-425]]). A path whose cost passes `int64`'s range is a failure too, and so is a cost plus `h` that does in `astar` (D184).
 
 A goal is a predicate, not a node, so a search can stop at any node that qualifies (`(s) => s.keys == all`), and `(p) => p == end` stops at one.
 

@@ -572,12 +572,9 @@ impl CodeGen {
                 self.a64_st("x10", fr, d)
             },
             Inst.Exit(v) => {
+                // the exit hook, then exit_group (D187)
                 self.a64_ld("x0", fr, v)
-                if self.frames { self.emit("bl __task_exit") }
-                else {
-                    self.emit("mov x8, #94")
-                    self.emit("svc #0")
-                }
+                if self.frames { self.emit("bl __task_exit") } else { self.emit("bl __exit_program") }
             },
             Inst.Elem(d, c, i, stride, is_str, checked, p) => {
                 self.a64_ld("x10", fr, c)

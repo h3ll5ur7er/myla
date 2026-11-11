@@ -188,7 +188,7 @@ pub fun parse(text: str) -> Result<Toml, TomlError> {
 
 // The table that `text` holds, with the positions of its keys and values.
 pub fun parse_doc(text: str) -> Result<TomlDoc, TomlError> {
-    var p = Parser { s: text, i: 0, keys: [], kinds: [], values: [], explicit: [], dotted: [], first: [], last: [], next: [], index: [:], pending: [], table: 0, path: [], spans: [:] }
+    var p = Parser { s: text, i: 0, keys: [], kinds: [], values: [], explicit: [], dotted: [], first: [], last: [], next: [], index: [:], pending: [], table: 0, path: [], depth: 0, spans: [:] }
     let bad = utf8_error(text)
     if bad >= 0 { return Err(p.error("invalid UTF-8", bad)) }
     let root = p.node(-1, "", TABLE, Toml.Bool(false))
@@ -311,6 +311,13 @@ const TABLE: int32 = 1
 const TABLES: int32 = 2
 const VALUE: int32 = 3
 
+// How deeply tables and arrays may nest, the document's own table not
+// counted: a header's or a dotted key's tables, an array of tables (its
+// array and its element), arrays and inline tables. The parser recurses a
+// few frames a level, and the interpreters run it on their own stack;
+// std.yaml allows 100 as well, std.json 200.
+const MAX_DEPTH: int32 = 100
+
 struct Parser {
     s: str,
     i: int32,
@@ -330,9 +337,11 @@ struct Parser {
     // the tables the current section's dotted keys defined or went through:
     // explicit from the next header on
     pending: [int32],
-    // the table key/value lines go to, and its key path
+    // the table key/value lines go to, its key path, and how many tables
+    // and arrays it is in (itself included)
     table: int32,
     path: [str],
+    depth: int32,
     // where each key path was defined: the byte offsets of the key's start
     // and end and of the value's (see `TomlDoc`)
     spans: [str: (int32, int32, int32, int32)],
@@ -464,6 +473,12 @@ impl Parser {
         return TomlError { kind: TomlErrorKind.Syntax, msg: msg, line: line, col: col, path: "" }
     }
 
+    // The error of a container `depth` deep at `at`, if that is too deep.
+    fun nesting(self, depth: int32, at: int32) -> Result<int32, TomlError> {
+        if depth > MAX_DEPTH { return Err(self.error(f"tables and arrays nested too deeply (more than {MAX_DEPTH} levels)", at)) }
+        return Ok(depth)
+    }
+
     fun at_end(self) -> bool {
         return self.i >= self.s.len()
     }
@@ -593,7 +608,7 @@ impl Parser {
                 self.header()?
                 self.end_of_line()?
             } else {
-                self.assign(self.table, self.path, true, true)?
+                self.assign(self.table, self.path, self.depth, true, true)?
                 self.end_of_line()?
             }
         }
@@ -636,6 +651,7 @@ impl Parser {
         self.pending = []
         var node = 0
         var path: [str] = []
+        var depth = 0
         var j = 0
         while j < parts.len() {
             let key = parts[j].0
@@ -643,6 +659,10 @@ impl Parser {
             let pk = path_key(path)
             let last = j == parts.len() - 1
             var c = self.child(node, key)
+            // a table, or an array of tables and its (last) element
+            depth = depth + 1
+            if (last && tables) || (c >= 0 && self.kinds[c] == TABLES) { depth = depth + 1 }
+            self.nesting(depth, start)?
             if c < 0 {
                 var kind = TABLE
                 if last && tables { kind = TABLES }
@@ -673,19 +693,21 @@ impl Parser {
         }
         self.table = node
         self.path = path
+        self.depth = depth
         return Ok(0)
     }
 
-    // `key = value` in the table `node`, whose key path is `base`: a
-    // key/value line of a section (`section`: the tables its dotted keys
-    // define are explicit from the next header on) or a pair of an inline
-    // table; `record` keeps the spans (not inside an array).
-    fun assign(var self, node: int32, base: [str], section: bool, record: bool) -> Result<int32, TomlError> {
+    // `key = value` in the table `node`, whose key path is `base` and which
+    // is `depth` deep: a key/value line of a section (`section`: the tables
+    // its dotted keys define are explicit from the next header on) or a pair
+    // of an inline table; `record` keeps the spans (not inside an array).
+    fun assign(var self, node: int32, base: [str], depth: int32, section: bool, record: bool) -> Result<int32, TomlError> {
         let at = self.i
         let parts = self.dotted_key()?
         if self.peek() != '=' { return Err(self.error("expected '=' after a key", self.i)) }
         self.i = self.i + 1
         self.skip_ws()
+        self.nesting(depth + parts.len() - 1, at)?
         var table = node
         var path = base
         var j = 0
@@ -710,7 +732,7 @@ impl Parser {
         path.push(last.0)
         if self.child(table, last.0) >= 0 { return Err(self.error(f"'{dotted(path)}' is defined twice", at)) }
         let value_start = self.i
-        let v = self.value(path, record)?
+        let v = self.value(path, depth + parts.len(), record)?
         let k = self.node(table, last.0, VALUE, v)
         if record { self.spans[path_key(path)] = (last.1, last.2, value_start, self.i) }
         return Ok(k)
@@ -732,8 +754,8 @@ impl Parser {
     }
 
     // A value, of the key path `path` (for the spans of an inline table's
-    // keys, kept when `record`).
-    fun value(var self, path: [str], record: bool) -> Result<Toml, TomlError> {
+    // keys, kept when `record`), `depth` deep if it is an array or a table.
+    fun value(var self, path: [str], depth: int32, record: bool) -> Result<Toml, TomlError> {
         let c = self.peek()
         if c == '"' {
             if self.ahead(1) == '"' && self.ahead(2) == '"' { return Ok(Toml.Str(self.multi_line_basic()?)) }
@@ -743,8 +765,9 @@ impl Parser {
             if self.ahead(1) == '\'' && self.ahead(2) == '\'' { return Ok(Toml.Str(self.multi_line_literal()?)) }
             return Ok(Toml.Str(self.literal_string()?))
         }
-        if c == '[' { return self.array(path) }
-        if c == '{' { return self.inline_table(path, record) }
+        if c == '[' || c == '{' { self.nesting(depth, self.i)? }
+        if c == '[' { return self.array(path, depth) }
+        if c == '{' { return self.inline_table(path, depth, record) }
         if self.word("true") {
             self.i = self.i + 4
             return Ok(Toml.Bool(true))
@@ -1166,8 +1189,8 @@ impl Parser {
         return Ok("")
     }
 
-    // An array, of any values, the current position at its "[".
-    fun array(var self, path: [str]) -> Result<Toml, TomlError> {
+    // An array, of any values, `depth` deep, the current position at its "[".
+    fun array(var self, path: [str], depth: int32) -> Result<Toml, TomlError> {
         self.i = self.i + 1
         var items: [Toml] = []
         while true {
@@ -1177,7 +1200,7 @@ impl Parser {
                 return Ok(Toml.Array(items))
             }
             if self.peek() == ',' || self.at_end() { return Err(self.error("expected a value", self.i)) }
-            items.push(self.value(path, false)?)
+            items.push(self.value(path, depth + 1, false)?)
             self.skip_blank()?
             if self.peek() == ',' {
                 self.i = self.i + 1
@@ -1188,9 +1211,9 @@ impl Parser {
         return Ok(Toml.Array(items))
     }
 
-    // An inline table, the value of `path`, the current position at its "{";
-    // its keys' spans kept when `record`.
-    fun inline_table(var self, path: [str], record: bool) -> Result<Toml, TomlError> {
+    // An inline table, the value of `path`, `depth` deep, the current
+    // position at its "{"; its keys' spans kept when `record`.
+    fun inline_table(var self, path: [str], depth: int32, record: bool) -> Result<Toml, TomlError> {
         self.i = self.i + 1
         let table = self.node(-1, "", TABLE, Toml.Bool(false))
         self.skip_ws()
@@ -1201,7 +1224,7 @@ impl Parser {
         while true {
             self.skip_ws()
             if self.peek() == '}' { return Err(self.error("a trailing comma is not allowed in an inline table", self.i)) }
-            self.assign(table, path, false, record)?
+            self.assign(table, path, depth, false, record)?
             self.skip_ws()
             if self.peek() == '}' {
                 self.i = self.i + 1
@@ -1298,6 +1321,48 @@ fun reads_strings(text: str) -> str {
 #test("a = 1\r")["1:6: a carriage return must be followed by a line feed"]
 fun reads_tables(text: str) -> str {
     return read(text)
+}
+
+// Tables and arrays nest at most MAX_DEPTH deep, however they are written:
+// deeper is an error at the container that goes past it, not a crash or
+// quadratic work (M20 of [[Project/Review-2026-11-09]]).
+// `s` `n` times (for the tests: the module doesn't import std.str).
+#test("ab", 3)["ababab"]
+fun rep(s: str, n: int32) -> str {
+    var sb = StringBuilder(s.len() * n)
+    var k = 0
+    while k < n {
+        sb.append(s)
+        k = k + 1
+    }
+    return sb.build()
+}
+
+#test
+fun nesting_limit() {
+    let cases = [
+        ("a = " + rep("[", 100) + rep("]", 100), ""),
+        ("a = " + rep("[", 101) + rep("]", 101), "1:105"),
+        ("a = " + rep("{a=", 100) + "1" + rep("}", 100), ""),
+        ("a = " + rep("{a=", 101) + "1" + rep("}", 101), "1:305"),
+        (rep("a.", 100) + "a = 1", ""),
+        (rep("a.", 101) + "a = 1", "1:1"),
+        ("[" + rep("a.", 99) + "a]\nx = 1", ""),
+        ("[" + rep("a.", 100) + "a]\nx = 1", "1:1"),
+        ("[[" + rep("a.", 98) + "a]]\nx = 1", ""),
+        ("[[" + rep("a.", 99) + "a]]\nx = 1", "1:1"),
+        ("[" + rep("a.", 49) + "a]\nb = " + rep("[{c = ", 25) + "1" + rep("}]", 25), ""),
+        ("[" + rep("a.", 49) + "a]\nb = " + rep("[{c = ", 25) + "[1]" + rep("}]", 25), "2:155"),
+        ("[" + rep("a.", 49) + "a]\nb." + rep("c.", 49) + "d = 1", ""),
+        ("[" + rep("a.", 49) + "a]\nb." + rep("c.", 50) + "d = 1", "2:1"),
+        ("a = " + rep("[", 100000), "1:105"),
+    ]
+    for (text, at) in cases {
+        match parse(text) {
+            Ok(_) => assert(at == "", f"{text.len()} bytes: read, expected an error at {at}")
+            Err(e) => assert(f"{e}" == f"{at}: tables and arrays nested too deeply (more than 100 levels)", f"{text.len()} bytes: {e}")
+        }
+    }
 }
 
 #test

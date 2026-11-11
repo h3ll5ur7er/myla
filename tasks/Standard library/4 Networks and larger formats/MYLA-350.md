@@ -35,3 +35,5 @@ The REPL: `myla repl` had no line editing; on a terminal (stdin and stderr) it n
 ## Review 2026-11-09
 
 Signed off in [[Project/Review-2026-11-09]], with a follow-up in [[MYLA-426]]: the line editor's drawing is cubic; a panic in raw mode leaves the terminal raw (D187).
+
+The follow-up is done in [[MYLA-426]] (in review, 2026-11-11): `LineEdit.render` walks back from the cursor once (2,000 characters typed: 17.5 s natively before, 9 ms after), and raw mode ends with the program through the runtime's exit hook (D187).

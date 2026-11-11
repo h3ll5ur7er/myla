@@ -61,7 +61,7 @@ An `Instant` is a reading. It has `==` and the comparisons.
 
 ## Duration
 
-A `Duration` is a span of time in nanoseconds, an `int64` in its field `ns`: about 292 years either way, positive or negative. Arithmetic wraps as `int64` does.
+A `Duration` is a span of time in nanoseconds, an `int64` in its field `ns`: about 292 years either way, positive or negative. A result past that range is a runtime error that names the operation, in every build (D184, [[MYLA-425]]): `time.hours(3000000)` stops with `time.hours: 3000000 is past a Duration's range (about 292 years)`, and so do `+`, `-`, `mul_int` and `div_int` past it, and `Instant`'s `add`, `since` and `elapsed`. The exception is `abs()` of the most negative duration, which gives the longest positive one, 1 ns shorter, as Go's `Duration.Abs` does.
 
 | Function | Result |
 | --- | --- |
@@ -73,14 +73,14 @@ A `Duration` is a span of time in nanoseconds, an `int64` in its field `ns`: abo
 | --- | --- |
 | `as_nanos()`, `as_micros()`, `as_millis()`, `as_secs() -> int64` | The whole units, rounded toward zero |
 | `as_secs_f64() -> float64` | The seconds as a float |
-| `abs() -> Duration` | Without the sign |
-| `mul_int(k: int64)`, `div_int(k: int64) -> Duration` | `k` times; divided by `k`, rounded toward zero |
+| `abs() -> Duration` | Without the sign; the most negative one gives the longest |
+| `mul_int(k: int64)`, `div_int(k: int64) -> Duration` | `k` times; divided by `k`, rounded toward zero. A `k` of 0 is a runtime error |
 
 A duration prints as Go prints one: `0s`; below a second one unit, `ns`, `µs` or `ms`, with a fraction (`1.1µs`, `250ms`); from a second on hours, minutes and seconds with the leading zero ones left out (`1.5s`, `1m0s`, `2h3m4s`). A fraction has no trailing zeros. A spec gives the text a width, `{d:>8}`. 2000 random durations and the edge cases print as Go's `time.Duration.String` prints them.
 
 ## DateTime
 
-A `DateTime` is a civil time in UTC, with the fields `year` (1 to 9999), `month` (1 to 12), `day`, `hour`, `minute`, `second` and `nanosecond`, all `int`. The calendar is the proleptic Gregorian one, so the years before 1582 follow today's rules too. A `DateTime` made by the functions below is always a valid one. It has `==` and the comparisons, and prints as `format_rfc3339` writes it.
+A `DateTime` is a civil time in UTC, with the fields `year` (1 to 9999), `month` (1 to 12), `day`, `hour`, `minute`, `second` and `nanosecond`, all `int`. The calendar is the proleptic Gregorian one, so the years before 1582 follow today's rules too. A `DateTime` made by the functions below is always a valid one; one built by hand with fields out of their ranges still gives a result without overflow (`to_unix_ns` `OutOfRange`, `diff` the longest `Duration`). It has `==` and the comparisons, and prints as `format_rfc3339` writes it.
 
 | Function | Result |
 | --- | --- |

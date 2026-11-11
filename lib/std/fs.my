@@ -201,6 +201,19 @@ pub fun write_to_file(path: str, contents: str) -> Result<(), IoError> {
     return Err(from_errno(err))
 }
 
+// The bytes of the file at `path`, all of them (MYLA-339's follow-up):
+// `read_to_string`'s, as a list.
+pub fun read_bytes(path: str) -> Result<[uint8], IoError> {
+    let text = read_to_string(path)?
+    return Ok(bytes_m.from_str(text))
+}
+
+// `b` written to `path`, creating or truncating the file (mode 0644), as
+// `write_to_file` writes a string.
+pub fun write_bytes(path: str, b: [uint8]) -> Result<(), IoError> {
+    return write_to_file(path, bytes_m.to_str(b))
+}
+
 // --- directories (MYLA-88) ---------------------------------------------------
 //
 // Four primitives make the system calls, the rest is Myla (D64):
@@ -435,13 +448,27 @@ const O_EXCLUSIVE: int32 = 32
 //
 // Myla has no destructors, so a file stays open until `close` or the end of
 // the program: `defer { let c = f.close() }` right after opening it. A `File`
-// is a value, and a copy holds the same descriptor, with the same cursor
-// (the platform keeps it). `close` closes it for every copy: the one closed
-// fails each later operation with `Other(9)` (EBADF), and so does a copy,
-// until a file opened later gets the descriptor's number. So don't use a
-// copy after `close`.
+// is a value holding a handle into the runtime's table (D181), and a copy
+// holds the same one, the same descriptor with the same cursor (the
+// platform keeps it). `close` closes it for every copy: each later
+// operation through any of them is `Other(9)` (EBADF), also once a file
+// opened later got the descriptor, and so is one through a `File` built by
+// hand.
 pub struct File {
     fd: int32,
+}
+
+// The least handle std.rt gives (D181): a smaller number is a descriptor
+// itself, which no `File` holds unless built by hand.
+const HANDLE_MIN: int32 = 8388608
+
+// The handle of `f`, or -1 (a closed one's, EBADF for each primitive) for a
+// number that is no handle.
+fun handle_of(f: File) -> int32 {
+    if f.fd < HANDLE_MIN {
+        return -1
+    }
+    return f.fd
 }
 
 // The file at `path`, open for reading.
@@ -576,7 +603,7 @@ impl File {
 
     // The file's size, kind, permissions and modification time now.
     fun metadata(self) -> Result<Metadata, IoError> {
-        let st = __fstat(self.fd)
+        let st = __fstat(handle_of(self))
         if st.len() != 3 {
             return Err(from_errno(__io_errno()))
         }
@@ -587,7 +614,7 @@ impl File {
     // is `Other(9)` (EBADF); data the system couldn't keep is `Other(5)`
     // (EIO). The descriptor is closed even then.
     fun close(var self) -> Result<(), IoError> {
-        let fd = self.fd
+        let fd = handle_of(self)
         self.fd = -1
         __close(fd)
         let err = __io_errno()
@@ -604,7 +631,7 @@ impl Read for File {
         if n <= 0 {
             return Ok([])
         }
-        let chunk = __read_bytes(self.fd, n)
+        let chunk = __read_bytes(handle_of(self), n)
         let err = __io_errno()
         if err != 0 {
             return Err(from_errno(err))
@@ -617,7 +644,7 @@ impl Write for File {
     // Every byte of `b` at the cursor (or at the end, for a file opened to
     // append).
     fun write(var self, b: [uint8]) -> Result<int, IoError> {
-        __write_bytes(self.fd, b)
+        __write_bytes(handle_of(self), b)
         let err = __io_errno()
         if err != 0 {
             return Err(from_errno(err))
@@ -639,7 +666,7 @@ impl Seek for File {
             Current(k) => (k, 1)
             End(k) => (k, 2)
         }
-        let r = __seek(self.fd, offset, whence)
+        let r = __seek(handle_of(self), offset, whence)
         if r < 0 {
             return Err(from_errno(__io_errno()))
         }
@@ -649,7 +676,7 @@ impl Seek for File {
 
 impl Pollable for File {
     fun descriptor(self) -> int32 {
-        return self.fd
+        return handle_of(self)
     }
 }
 
@@ -913,6 +940,29 @@ fun line(o: Option<str>) -> str {
 }
 
 // Written, closed, opened again, read, measured and sought.
+// Any bytes written by `write_bytes` read back by `read_bytes`; a missing
+// file is `NotFound`.
+#test
+fun whole_files_of_bytes() -> Result<(), IoError> {
+    let dir = make_temp_dir()?
+    defer { let gone = remove_dir_all(dir) }
+    var b: [uint8] = []
+    var i = 0
+    while i < 600 {
+        b.push((i % 256) as uint8)
+        i += 1
+    }
+    let path = joined(dir, "bytes")
+    write_bytes(path, b)?
+    assert(read_bytes(path)? == b, "the bytes read back")
+    assert(read_to_string(path)?.len() == 600, "as many as written")
+    write_bytes(path, [])?
+    assert(read_bytes(path)? == [], "an empty file")
+    assert(error_of(read_bytes(joined(dir, "missing"))) == "NotFound", "a missing file")
+    assert(error_of(write_bytes(joined(dir, "no/such"), b)) == "NotFound", "a missing directory")
+    return Ok(())
+}
+
 #test
 fun file_round_trip() -> Result<(), IoError> {
     let dir = make_temp_dir()?
@@ -1014,6 +1064,18 @@ fun closing() -> Result<(), IoError> {
     var c = copy
     assert(error_of(c.write(bytes_m.from_str("x"))) == "Other(9)", "a copy's write after close")
     assert(error_of(c.close()) == "Other(9)", "a copy's close")
+    // a file opened after the close gets its descriptor, not its handle
+    // (D181): the copy still reaches nothing, and the new file is whole
+    var next = create(dir + "/g")?
+    var stale = copy
+    assert(error_of(stale.write(bytes_m.from_str("INJECTED"))) == "Other(9)", "the stale copy's write")
+    assert(error_of(stale.close()) == "Other(9)", "the stale copy's close")
+    next.write(bytes_m.from_str("mine"))?
+    next.close()?
+    assert(read_to_string(dir + "/g")? == "mine", "the next file has its own bytes only")
+    // a `File` built by hand holds a descriptor's number, not a handle
+    var forged = File { fd: 1 }
+    assert(error_of(forged.write(bytes_m.from_str("x"))) == "Other(9)", "a file built by hand")
     return Ok(())
 }
 

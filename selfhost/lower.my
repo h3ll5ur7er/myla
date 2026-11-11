@@ -757,6 +757,24 @@ impl Lower {
         self.rt_call(cg, d, "__sock_poll", [h, ev, forever])
     }
 
+    // The awaited wait `n` (`waits_without_tasks`) of a program without
+    // tasks: the thread blocked until the descriptor is readable
+    // (`__wait_readable`) or writable (`__wait_writable`) in std.rt's
+    // `wait_alone`, as the interpreter waits, so that a read of a
+    // non-blocking input waits for it (the 2026-11-10 review's S4); for two
+    // descriptors (`__wait_either`) and a turn (`__yield`), nothing. The
+    // arguments are evaluated either way.
+    fun wait_alone(var self, cg: CodeGen, n: str, a: [Expr]) {
+        if n == "__wait_readable" || n == "__wait_writable" {
+            let fd = self.expr(cg, a[0])
+            var events = 1
+            if n == "__wait_writable" { events = 2 }
+            self.rt_call(cg, -1, "__wait_alone", [fd, self.int_const(events)])
+            return
+        }
+        for arg in a { self.discard(cg, arg) }
+    }
+
     // Whether `x`, awaited without tasks, is a socket's wait, which is then
     // lowered as `poll_socket`.
     fun socket_wait_without_tasks(var self, cg: CodeGen, x: Expr) -> bool {
@@ -1582,9 +1600,14 @@ impl Lower {
                             return
                         }
                         // `await __wait_readable(fd)`: waiting for input, the
-                        // others running (D124); with no tasks, nothing (the
-                        // read after it blocks)
-                        if n == "__wait_readable" || n == "__wait_either" {
+                        // others running (D124), or for room to write
+                        // (`__wait_writable`, MYLA-419); with no tasks, the
+                        // thread waits (`wait_alone`)
+                        if n == "__wait_readable" || n == "__wait_either" || n == "__wait_writable" {
+                            if !cg.frames {
+                                self.wait_alone(cg, n, a)
+                                return
+                            }
                             var fds: [int32] = []
                             for x in a {
                                 let fd = self.expr(cg, x)
@@ -1592,13 +1615,12 @@ impl Lower {
                                 self.add(Inst.Cast(f64, Type.TInt(32, true), Type.TInt(64, true), fd))
                                 fds.push(f64)
                             }
-                            if !cg.frames { return }
                             self.leave_self()
                             let me = self.temp(Type.TPtr)
                             self.add(Inst.Frame(me))
                             var cargs = [me]
                             for f in fds { cargs.push(f) }
-                            if n == "__wait_either" { self.add(Inst.Call(-1, "__wait_fd2", cargs)) } else { self.add(Inst.Call(-1, "__wait_fd", cargs)) }
+                            if n == "__wait_either" { self.add(Inst.Call(-1, "__wait_fd2", cargs)) } else if n == "__wait_writable" { self.rt_call(cg, -1, "__wait_writable_frame", cargs) } else { self.add(Inst.Call(-1, "__wait_fd", cargs)) }
                             let after = self.new_block()
                             self.finish(Term.Suspend(after))
                             self.start(after)
@@ -2374,13 +2396,19 @@ impl Lower {
                     let d = self.unsupported("an 'await' outside an async function's frame (in an async lambda)")
                     return
                 }
-                // without tasks, waiting for input or for a turn is nothing:
-                // the read after it blocks (D124, as `await_let` says); its
-                // arguments are evaluated. A socket's wait blocks in a poll
+                // without tasks, waiting for input blocks the thread
+                // (`wait_alone`) and a turn is nothing (D124, as `await_let`
+                // says); its arguments are evaluated. A socket's wait blocks
+                // in a poll
                 if self.socket_wait_without_tasks(cg, x) { return }
                 if waits_without_tasks(x) {
                     match x.kind {
-                        ExprKind.Call(c, a, _) => { for arg in a { self.discard(cg, arg) } },
+                        ExprKind.Call(c, a, _) => {
+                            match c.kind {
+                                ExprKind.Name(n) => { self.wait_alone(cg, n, a) },
+                                _ => {},
+                            }
+                        },
                         _ => {},
                     }
                     return
@@ -3016,7 +3044,12 @@ impl Lower {
                 if self.socket_wait_without_tasks(cg, x) { return -1 }
                 if waits_without_tasks(x) {
                     match x.kind {
-                        ExprKind.Call(c, a, _) => { for arg in a { self.discard(cg, arg) } },
+                        ExprKind.Call(c, a, _) => {
+                            match c.kind {
+                                ExprKind.Name(n) => { self.wait_alone(cg, n, a) },
+                                _ => {},
+                            }
+                        },
                         _ => {},
                     }
                     return -1
@@ -5172,9 +5205,14 @@ impl Lower {
         if is_notify_primitive(nm) && (nm != "__park" || !cg.frames) {
             var vs: [int32] = []
             for a in args { vs.push(self.expr(cg, a)) }
-            if nm == "__notify" || nm == "__park" {
-                if cg.frames { self.rt_call(cg, -1, nm, vs) } else { self.rt_call(cg, -1, nm + "_alone", vs) }
+            if nm == "__park" {
+                self.rt_call(cg, -1, "__park_alone", vs)
                 return -1
+            }
+            if nm == "__notify" {
+                let d = self.temp(t)
+                if cg.frames { self.rt_call(cg, d, nm, vs) } else { self.rt_call(cg, d, "__notify_alone", vs) }
+                return d
             }
             let d = self.temp(t)
             self.rt_call(cg, d, nm, vs)
@@ -5536,7 +5574,9 @@ pub fun myla_runtime_function(name: str) -> str {
         return "std$rt$" + sb.build()
     }
     // a notifier's (MYLA-387), a wait's park with or without tasks
-    if is_notify_primitive(name) || name == "__notify_alone" || name == "__park_frame" || name == "__park_alone" {
+    // and a descriptor's wait without tasks, or for room to write
+    // (MYLA-419)
+    if is_notify_primitive(name) || name == "__notify_alone" || name == "__park_frame" || name == "__park_alone" || name == "__wait_alone" || name == "__wait_writable_frame" {
         var sb = StringBuilder()
         sb.append(name, 2, name.len())
         return "std$rt$" + sb.build()
@@ -7175,12 +7215,13 @@ pub fun env_record_of(drop: str) -> str {
     return sb.build() + "_routines"
 }
 
-// Whether `x`, awaited, is a wait (`__wait_readable`, `__wait_either`) or a
-// turn for the others (`__yield`), which a program without tasks doesn't do.
+// Whether `x`, awaited, is a wait (`__wait_readable`, `__wait_writable`,
+// `__wait_either`) or a turn for the others (`__yield`), which a program
+// without tasks makes as `Lowerer.wait_alone` says.
 fun waits_without_tasks(x: Expr) -> bool {
     return match x.kind {
         ExprKind.Call(c, a, _) => match c.kind {
-            ExprKind.Name(n) => n == "__wait_readable" || n == "__wait_either" || n == "__yield"
+            ExprKind.Name(n) => n == "__wait_readable" || n == "__wait_writable" || n == "__wait_either" || n == "__yield"
             _ => false
         }
         _ => false

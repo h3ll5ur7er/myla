@@ -51,6 +51,6 @@ fun main() {
 
 ## Notes
 
-- **Lambdas:** a lambda passed to `map`, `and_then` or `map_err` needs its parameter's type written, `o.map((n: int64) => n * 2)`: while the method's own type parameter (`U`, `F`) is open, the checker infers no lambda parameter (`cannot infer the type of lambda parameter 'n'`). A named function needs nothing (`o.and_then(half)`), nor do the lambdas of `or_else` and `unwrap_or_else`, which have no parameter.
+- **Lambdas:** a lambda passed to `map`, `and_then` or `map_err` takes its parameter's type from the receiver, `o.map((n) => n * 2)`, though the method's own type parameter (`U`, `F`) is still open ([[MYLA-356]]); the result fixes it. Writing the type, `(n: int64) => n * 2`, works too.
 - **A bare `Ok(v)` or `Err(e)` as the receiver** needs its other type from an annotation (`let r: Result<int, str> = Ok(8)`), as it does anywhere else; a bare `Some(v)` doesn't.
 - `match`, `if let` and `?` stay the ways to take an `Option` or a `Result` apart where a value of each case is needed ([[Language/Types]]).

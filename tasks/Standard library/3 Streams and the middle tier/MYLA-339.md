@@ -38,3 +38,5 @@ Wave 3 of [[Project/Standard-library-roadmap]], roadmap #42, #45. Files bigger t
 ## Review 2026-11-09
 
 Signed off in [[Project/Review-2026-11-09]], with a follow-up in [[MYLA-426]]: wasm32 seek edge cases; `read_bytes`/`write_bytes` are [[MYLA-420]]'s.
+
+The follow-up is done in [[MYLA-426]] (in review, 2026-11-11): on wasm32 a seek past `int64`'s range, below 0 or past what Node's shim holds exactly is `InvalidInput` with the cursor unmoved, as natively.

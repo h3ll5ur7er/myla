@@ -51,7 +51,12 @@ fun main() {
             Err(e) => print(f"{e}")
         }
     }
-    print(text.ints("#1 @ 1,-3: 4x4 on 1518-11-01").map((n: int) => f"{n}").join(" "))
+    for line in ["#1 @ 1,-3: 4x4 on 1518-11-01", "x=1 y=99999999999"] {
+        match text.ints(line) {
+            Ok(ns) => print(ns.map((n: int) => f"{n}").join(" "))
+            Err(e) => print(f"{e}")
+        }
+    }
     for line in text.wrap("The quick brown fox jumps over the lazy dog", 16) {
         print(line)
     }
@@ -64,6 +69,7 @@ fun main() {
 // toggle
 // 1:6: no such action: up
 // 1 1 -3 4 4 1518 11 1
+// 1:7: integer out of range
 // The quick brown
 // fox jumps over
 // the lazy dog
@@ -118,8 +124,8 @@ A method that fails reads nothing: after an error, `pos` is where it was, so a p
 
 | Function | Result |
 | --- | --- |
-| `ints(line: str) -> [int]` | Every integer in `line`, in order |
-| `longs(line: str) -> [int64]` | The same as `int64`s |
+| `ints(line: str) -> Result<[int], ScanError>` | Every integer in `line`, in order |
+| `longs(line: str) -> Result<[int64], ScanError>` | The same as `int64`s |
 
 Everything that isn't a digit separates numbers, so `"#1 @ 1,-3: 4x4"` gives `[1, 1, -3, 4, 4]` and `"1.5"` gives `[1, 5]`. A `-` right before a digit is a sign, unless an ASCII letter or digit comes right before it. Then it joins words or numbers, as in a range, a date or a name:
 
@@ -135,19 +141,19 @@ Everything that isn't a digit separates numbers, so `"#1 @ 1,-3: 4x4"` gives `[1
 
 The rule reads Advent of Code's inputs right: coordinates and velocities keep their signs, and ranges, dates and room names don't make negative numbers. `+` is never part of a number, which changes nothing.
 
-A number out of the type's range is a runtime error that names it, as an index out of range is: `ints` is for text whose numbers fit, and `longs` reads up to `int64`'s. A text that may hold anything is read with a `Scanner`, whose `int` gives an `Overflow` error instead.
+A number out of the type's range is an `Overflow` error at the number's first byte, `1:7: integer out of range`, as the scanner's `int` gives (D184: a parser of outside input returns its error; until [[MYLA-426]] it was a runtime error). `longs` reads up to `int64`'s range. A program whose input is known to fit writes `text.ints(line)?` in a function that returns a `Result` with a `ScanError`, or `text.ints(line).expect("a line of numbers")`.
 
 ## Layout
 
 | Function | Result |
 | --- | --- |
-| `wrap(text: str, width: int) -> [str]` | The words of `text` in lines of at most `width` bytes |
+| `wrap(text: str, width: int) -> [str]` | The words of `text` in lines of at most `width` characters |
 | `fill(text: str, width: int) -> str` | `wrap`'s lines joined by `\n`, without one at the end |
 | `columns(rows: [[str]], align: [Align], sep: str = "  ") -> str` | The rows as lines of aligned columns, joined by `\n` without one at the end |
 | `indent(text: str, prefix: str) -> str` | `text` with `prefix` before every line that holds more than whitespace |
 | `dedent(text: str) -> str` | `text` without the leading whitespace its lines have in common |
 
-`wrap` fills each line greedily. Words are the runs between ASCII whitespace, line ends included, and one space joins them, so runs of spaces and blank lines become one space. The width counts bytes, as strings are bytes. A word longer than the width isn't broken: it stands on a line of its own, longer than the width. A width below 1 is a runtime error. Up to the joining spaces, this is Python's `textwrap.wrap` with `break_long_words=False` and `break_on_hyphens=False`, and the comparison found the same lines for 4,000 random texts and widths.
+`wrap` fills each line greedily. Words are the runs between ASCII whitespace, line ends included, and one space joins them, so runs of spaces and blank lines become one space. The width counts characters, as `columns`, `pad_start` and format specs do, so `"öö öö"` fits a width of 5 ([[MYLA-426]]; it counted bytes before). A word longer than the width isn't broken: it stands on a line of its own, longer than the width. A width below 1 is a runtime error. Up to the joining spaces, this is Python's `textwrap.wrap` with `break_long_words=False` and `break_on_hyphens=False`, and the comparison found the same lines for 4,000 random texts and widths.
 
 `columns` makes each column as wide as its widest cell, counted in characters, as `pad_start` and format specs count them, so a column with `é` lines up. `sep` goes between columns. `align` holds an `Align` for each column, `Align.Left` or `Align.Right`, and a column it leaves out is aligned left. A row may have fewer cells than others: its line ends after its last cell. The last cell of a line isn't padded when it is aligned left, so no line ends in spaces.
 

@@ -178,8 +178,8 @@ fun entry_of(line: str) -> Entry {
     }
     e.mode = number(f[2]) as int32
     e.mtime = number(f[3])
-    e.uid = number(f[4]) as int32
-    e.gid = number(f[5]) as int32
+    e.uid = number(f[4])
+    e.gid = number(f[5])
     e.uname = text(unh(f[6]))
     e.gname = text(unh(f[7]))
     e.link = text(unh(f[8]))
@@ -195,7 +195,7 @@ fun manifest() -> [Entry] {
 }
 
 // compress <fmt> <level> <whole|stream|flush>, inflate <fmt>, tar-list,
-// targz-list, zip-list, tar-write, targz-write <level>
+// targz-list, zip-list, tar-write, targz-write <level>, gunzip-limit <n>
 fun main() {
     let argv = process.args()
     let mode = argv[1]
@@ -214,6 +214,11 @@ fun main() {
         }
     } else if mode == "tar-list" {
         show_all(archive.tar_read(stdin_bytes()))
+    } else if mode == "gunzip-limit" {
+        match compress.gunzip(stdin_bytes(), num.parse_int(argv[2]).unwrap_or(0) as int) {
+            Ok(out) => put(f"{out.len()}\\n")
+            Err(e) => fail(e.message())
+        }
     } else if mode == "targz-list" {
         show_stream(archive.tar_reader(compress.gzip_reader(io.fd_stream(0))))
     } else if mode == "zip-list" {
@@ -360,7 +365,9 @@ def _tar_listing(data: bytes) -> list[str]:
     out = []
     with tarfile.open(fileobj=io.BytesIO(data), mode="r:*") as tf:
         for ti in tf:
-            body = tf.extractfile(ti).read() if ti.isreg() else b""
+            # a type tar doesn't know has data, as std.archive reads it
+            has_data = ti.isreg() or ti.type not in tarfile.SUPPORTED_TYPES
+            body = tf.extractfile(ti).read() if has_data else b""
             out.append(_line(_kind(ti), _enc(ti.name), ti.mode & 0o7777, int(ti.mtime), ti.uid, ti.gid,
                              _enc(ti.uname), _enc(ti.gname), _enc(ti.linkname), body))
     return out
@@ -417,6 +424,146 @@ def _zip_listing(data: bytes) -> list[str]:
     return out
 
 
+def _big_numbers_tar(fmt: int) -> bytes:
+    """A tar archive by Python's tarfile in the format `fmt` whose numbers
+    don't fit 32 bits, or ustar's octal fields: owners of 2^31 and more (in
+    base 256 for GNU, in pax records for PAX), times past 2^33 and before
+    1970."""
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w", format=fmt) as tf:
+        for i, (uid, gid, mtime) in enumerate(((4294967294, 3000000000, 0), (2**31, 2**31 - 1, 2**40),
+                                               (2**53, 1, -5), (0, 2**32 + 7, 1700000000))):
+            ti = tarfile.TarInfo(f"f{i}")
+            ti.uid, ti.gid, ti.mtime, ti.size = uid, gid, mtime, i
+            tf.addfile(ti, io.BytesIO(b"x" * i))
+    return buf.getvalue()
+
+
+# The fields of a tar header std.archive reads: (offset, width).
+_TEXT_FIELDS = ((0, 100), (157, 100), (265, 32), (297, 32))
+_NUMBER_FIELDS = ((100, 8), (108, 8), (116, 8), (124, 12), (136, 12), (148, 8))
+_POSIX_MAGIC = b"ustar\x0000"
+
+
+def _headers(data: bytes) -> list[int]:
+    """The offsets of the header blocks of the tar archive `data`, up to its
+    end."""
+    out, p = [], 0
+    while p + 512 <= len(data) and data[p:p + 512] != bytes(512):
+        out.append(p)
+        size = tarfile.nti(data[p + 124:p + 136])
+        p += 512 + (size + 511) // 512 * 512
+    return out
+
+
+def _with_checksum(b: bytearray, at: int) -> None:
+    """The checksum of the header at `b[at]` made again."""
+    b[at + 148:at + 156] = b" " * 8
+    b[at + 148:at + 155] = b"%06o\0" % sum(b[at:at + 512])
+
+
+def _mutated_tar(rng: random.Random, data: bytes) -> tuple[str, bytes]:
+    """(what changed, the archive) with a field of a header changed, its
+    checksum made again most of the time, or the archive cut short.
+
+    Python's tarfile joins a prefix field to the name whatever the header's
+    magic says, std.archive only in a POSIX header (as GNU tar does), so the
+    prefix changes only in such a header and the magic only in a header
+    without one. Python reads GNU's old sparse files (`S`) and Solaris's
+    extended headers (`X`), which std.archive takes for other types, and
+    gives an extended header's records to the entry after a long name or
+    another extended header that follows it (std.archive: the later one's),
+    so no type becomes one of those. And after an extended header, tarfile
+    takes a v7 file whose name ends in `/` for a file, not a directory, and
+    cuts the `/`s off a path of any type, so such a header keeps its type."""
+    b = bytearray(data)
+    heads = _headers(data)
+    at = rng.choice(heads)
+    kind = rng.randrange(10)
+    if kind == 0:
+        cut = rng.randrange(len(data))
+        return f"cut at {cut}", bytes(b[:cut])
+    if kind <= 3:
+        off, width = rng.choice(_NUMBER_FIELDS)
+        how = rng.randrange(3)
+        if how == 0:
+            b[at + off + rng.randrange(width)] = rng.choice(b"0123456789 \0x-+_\xff")
+        elif how == 1:
+            digits = rng.randrange(1, width + 1)
+            b[at + off:at + off + width] = (b"%0*o" % (digits, rng.randrange(8 ** digits))).ljust(width, b"\0")
+        else:
+            b[at + off] = rng.choice((0x80, 0xFF))
+            for i in range(1, width):
+                b[at + off + i] = rng.choice((0, 0xFF, rng.randrange(256)))
+        what = f"number at {off} of the header at {at}"
+    elif kind <= 6:
+        off, width = rng.choice(_TEXT_FIELDS)
+        b[at + off + rng.randrange(width)] = rng.choice(b"a/.\0\xff\x80 ")
+        what = f"text at {off} of the header at {at}"
+    elif kind == 7 and (at == 0 or data[heads[heads.index(at) - 1] + 156] not in b"xg"):
+        b[at + 156] = rng.choice(b"0125673\0AV")
+        what = f"type {chr(b[at + 156])!r} of the header at {at}"
+    elif kind == 8 and data[at + 257:at + 265] == _POSIX_MAGIC:
+        b[at + 345 + rng.randrange(155)] = rng.choice(b"p/.\0")
+        what = f"prefix of the header at {at}"
+    elif data[at + 345] == 0:
+        b[at + 257 + rng.randrange(8)] = rng.choice(b"ustar0 \0")
+        what = f"magic of the header at {at}"
+    else:
+        return "nothing", data
+    if rng.randrange(8) != 0:
+        _with_checksum(b, at)
+    else:
+        what += ", checksum left"
+    return what, bytes(b)
+
+
+def _pax_value(rng: random.Random, key: str) -> str:
+    if key in ("path", "linkpath", "uname", "gname", "comment"):
+        # Python's tarfile cuts the `/`s off the end of a path
+        return rng.choice(("x", "a/b/c", "é", "n" * 300, "", "a\0b", "../up", "s p"))
+    if key == "size":
+        return rng.choice(("0", "1", "3", "512", "513", "-1", "", "x", "9" * 20, str(2 ** 63), str(2 ** 31)))
+    return rng.choice(("0", "7", "-1", "4294967294", "3000000000", "2147483648", str(2 ** 53), str(2 ** 63 - 1),
+                       str(2 ** 63), str(-2 ** 63), str(-2 ** 63 - 1), "9" * 20, "9" * 26, "12.5", "-12.5",
+                       "1e5", "", "x", " 5", "+5", "0x10", "1_000", "٣", "7."))
+
+
+def _pax_tar(rng: random.Random) -> tuple[list[dict[str, str]], bytes]:
+    """(its records, a PAX archive) by Python's tarfile with pax records of
+    every kind and odd values."""
+    buf = io.BytesIO()
+    records = []
+    with tarfile.open(fileobj=buf, mode="w", format=tarfile.PAX_FORMAT) as tf:
+        for i in range(rng.randrange(1, 4)):
+            ti = tarfile.TarInfo(f"m{i}")
+            ti.type = rng.choice((tarfile.REGTYPE, tarfile.REGTYPE, tarfile.DIRTYPE, tarfile.SYMTYPE))
+            body = rng.randbytes(rng.randrange(0, 1200)) if ti.type == tarfile.REGTYPE else b""
+            ti.size = len(body)
+            ti.mtime = 1700000000
+            for _ in range(rng.randrange(1, 4)):
+                key = rng.choice(("mtime", "uid", "gid", "size", "path", "linkpath", "uname", "gname", "atime",
+                                  "comment"))
+                ti.pax_headers[key] = _pax_value(rng, key)
+            records.append(dict(ti.pax_headers))
+            tf.addfile(ti, io.BytesIO(body))
+    return records, buf.getvalue()
+
+
+def _float_exact(records: list[dict[str, str]]) -> bool:
+    """Whether every `mtime` among `records` reads in a float as its integer
+    part: Python's tarfile reads a time as a float, std.archive its integer
+    part exactly."""
+    for r in records:
+        v = r.get("mtime", "0")
+        try:
+            if int(float(v)) != int(v.split(".")[0]):
+                return False
+        except (ValueError, OverflowError):
+            pass
+    return True
+
+
 def _manifest(rng: random.Random) -> list[tuple]:
     """Entries for the driver to write: (kind, name, mode, mtime, uid, gid,
     uname, gname, link, data)."""
@@ -430,6 +577,7 @@ def _manifest(rng: random.Random) -> list[tuple]:
         ("l", "far link", 0o777, 9, 0, 0, "", "", "t/" * 70, b""),
         ("h", "hard", 0o644, 9, 0, 0, "", "", "a.txt", b""),
         ("f", "big ids", 0o644, 9, 3000000, 4000000, "u" * 40, "g" * 33, "", b"!"),
+        ("f", "huge ids", 0o644, 9, 4294967294, 3000000000, "", "", "", b"?"),
         ("f", "old", 0o644, -100, 0, 0, "", "", "", b""),
         ("f", "text.md", 0o644, 9, 0, 0, "", "", "", _repo_text(100_000)),
         ("f", "empty", 0o644, 9, 0, 0, "", "", "", b""),
@@ -470,6 +618,10 @@ class ArchiveTest(unittest.TestCase):
             subprocess.run(["as", "--64", "-o", exe + ".o", exe + ".s"], check=True)
             subprocess.run(["ld", "-o", exe, exe + ".o"], check=True)
             cls.native = exe
+            # the same driver built checked: an integer overflow is an error (D175)
+            cls.checked = os.path.join(cls.tmp, "driver-checked")
+            subprocess.run([selfhost_tool("main"), "build", path, "-o", cls.checked, "--stdlib", STDLIB_ROOT,
+                            "--checked"], capture_output=True, check=True)
 
     @classmethod
     def tearDownClass(cls) -> None:
@@ -542,6 +694,8 @@ class ArchiveTest(unittest.TestCase):
                 with tarfile.open(fileobj=buf, mode=f"w:{comp}", format=fmt) as tf:
                     tf.add(src, arcname="top")
                 cases.append((f"tarfile {fmt} {comp}", buf.getvalue()))
+        for fmt in (tarfile.GNU_FORMAT, tarfile.PAX_FORMAT):
+            cases.append((f"tarfile {fmt} big numbers", _big_numbers_tar(fmt)))
         return cases
 
     def zip_cases(self) -> list[tuple[str, bytes]]:
@@ -609,13 +763,121 @@ class ArchiveTest(unittest.TestCase):
             except (zipfile.BadZipFile, zlib.error, EOFError):
                 want = None
             with self.subTest(case=f"{name}, {zi.filename} broken"):
-                proc = subprocess.run([self.native, "zip-list"], input=bytes(b), capture_output=True, timeout=60)
+                code, stdout = self.run_both(["zip-list"], bytes(b))
                 if want is None:
-                    self.assertEqual(proc.returncode, 1, proc.stderr)
-                    self.assertTrue(proc.stderr.startswith(b"error: "), proc.stderr)
+                    self.assertEqual(code, 1)
                 else:
-                    self.assertEqual(proc.returncode, 0, proc.stderr)
-                    self.assertEqual(proc.stdout.decode().splitlines(), want)
+                    self.assertEqual(code, 0)
+                    self.assertEqual(stdout.decode().splitlines(), want)
+
+    def run_both(self, args: list[str], data: bytes) -> tuple[int, bytes]:
+        """(exit status, stdout) of the driver on `data`, built plain and
+        checked: the two must agree (no overflow trapped in one and wrapped in
+        the other, D184), and a failure must be the driver's own error, not a
+        runtime error."""
+        got = []
+        for exe in (self.native, self.checked):
+            proc = subprocess.run([exe, *args], input=data, capture_output=True, timeout=60)
+            got.append((proc.returncode, proc.stdout, proc.stderr))
+        self.assertEqual(got[0], got[1], "the plain and the checked build differ")
+        code, stdout, stderr = got[0]
+        if code != 0:
+            self.assertEqual(code, 1, stderr)
+            self.assertTrue(stderr.startswith(b"error: "), stderr)
+        return code, stdout
+
+    def tar_against_python(self, data: bytes, compare: bool = True) -> int:
+        """The driver's exit status on the tar archive `data`; where it reads
+        it, Python's tarfile must read it too, with the same listing (if
+        `compare`). std.archive may refuse what tarfile takes (a number that
+        doesn't fit an `int64`, a field that isn't a number in its strict
+        form, a header after the first one that tarfile takes for the end).
+        It takes the last data without its padding, which tarfile doesn't:
+        that it reads as tarfile reads the archive padded."""
+        want = None
+        for tail in (b"", bytes(-len(data) % 512)):
+            try:
+                want = _tar_listing(data + tail)
+                break
+            except (tarfile.TarError, EOFError, ValueError, OverflowError):
+                pass
+        code, stdout = self.run_both(["tar-list"], data)
+        if code == 0 and compare:
+            self.assertIsNotNone(want, "std.archive reads what tarfile refuses")
+            self.assertEqual(stdout.decode().splitlines(), want)
+        return code
+
+    @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
+    def test_tar_corrupted_natively(self) -> None:
+        rng = random.Random(2423)
+        cases = [(name, data) for name, data in self.tar_cases() if data[:2] != b"\x1f\x8b"]
+        read = 0
+        for i in range(400):
+            name, data = rng.choice(cases)
+            what, broken = _mutated_tar(rng, data)
+            with self.subTest(case=f"{name}: {what}"):
+                read += self.tar_against_python(broken) == 0
+        self.assertGreater(read, 100, "most changes leave an archive to read")
+
+    @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
+    def test_tar_pax_records_natively(self) -> None:
+        rng = random.Random(3423)
+        read = 0
+        for i in range(250):
+            records, data = _pax_tar(rng)
+            what = repr(records)
+            if i % 3 == 0:
+                # a byte of the first pax header's records changed
+                b = bytearray(data)
+                size = tarfile.nti(data[124:136])
+                at = 512 + rng.randrange(size)
+                b[at] = rng.choice(b"0123456789 =\n\0x")
+                data = bytes(b)
+                what += f", byte {at} changed"
+            with self.subTest(case=what):
+                read += self.tar_against_python(data, compare=_float_exact(records)) == 0
+        self.assertGreater(read, 50, "some records are read")
+
+    @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
+    def test_zip_directory_corrupted_natively(self) -> None:
+        # the central directory and its end changed: numbers out of range are
+        # errors, the same in a checked build (D184)
+        rng = random.Random(4423)
+        cases = self.zip_cases()
+        for i in range(150):
+            name, data = rng.choice(cases)
+            end = data.rindex(b"PK\x05\x06")
+            start = struct.unpack("<I", data[end + 16:end + 20])[0]
+            b = bytearray(data)
+            at = rng.randrange(start, len(data))
+            how = rng.randrange(3)
+            if how == 0:
+                b[at] ^= 1 << rng.randrange(8)
+            elif how == 1:
+                b[at] = rng.choice((0, 0xFF, 0x7F, 0x80))
+            else:
+                b[at:at + 4] = rng.choice((b"\xff\xff\xff\xff", b"\xff\xff\xff\x7f", b"\0\0\0\x80"))
+            with self.subTest(case=f"{name}, byte {at} of the directory"):
+                self.run_both(["zip-list"], bytes(b))
+
+    @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
+    def test_decompression_bomb_natively(self) -> None:
+        # 1 GiB of zeros in 1 MB of gzip: max_output stops it at 1 MiB, in a
+        # process that may not take 256 MiB
+        c = zlib.compressobj(9, zlib.DEFLATED, 31)
+        zeros = bytes(1 << 20)
+        bomb = b"".join(c.compress(zeros) for _ in range(1024)) + c.flush()
+        self.assertLess(len(bomb), 1_100_000)
+        def limited() -> None:
+            import resource
+            resource.setrlimit(resource.RLIMIT_AS, (256 << 20, 256 << 20))
+        for exe in (self.native, self.checked):
+            proc = subprocess.run([exe, "gunzip-limit", str(1 << 20)], input=bomb, capture_output=True, timeout=60,
+                                  preexec_fn=limited)
+            self.assertEqual((proc.returncode, proc.stderr), (1, b"error: output longer than max_output\n"))
+            small = gzip.compress(bytes(3 << 20))
+            proc = subprocess.run([exe, "gunzip-limit", str(3 << 20)], input=small, capture_output=True, timeout=60)
+            self.assertEqual((proc.returncode, proc.stdout), (0, b"3145728\n"), proc.stderr)
 
     @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
     def test_tar_write_natively(self) -> None:

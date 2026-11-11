@@ -12,7 +12,7 @@
 // `stream_reader` reads the records of a stream (`std.io`'s `Read`) one at a
 // time, holding only the record it reads and a chunk of the stream.
 
-from std.io import Read, from_str
+from std.io import Read, from_str, short_reads
 from std.fs import IoError
 import std.bytes as bytes_m // `to_str`: a stream's bytes
 
@@ -195,9 +195,11 @@ impl Reader {
 
     // The line and column of byte offset `at`, and whether the byte before
     // it is a CR. A CR starts a line, and so does an LF but one right after
-    // a CR.
+    // a CR. A stream may have more lines than an `int` counts: the line
+    // stays at the last one it counts, 2,147,483,647 (D184).
     #test(new_reader("a\r\nb\rc\nd", ',', false), 8)[(4, 2, false)]
     #test(new_reader("é\r", ',', false), 3)[(2, 1, true)]
+    #test(Reader { s: "a\nb", d: ',' as uint8, i: 0, track: false, starts: [], end: 0, line0: 2147483647, col0: 1, cr0: false }, 3)[(2147483647, 2, false)]
     fun position(self, at: int) -> (int, int, bool) {
         var line = self.line0
         var col = self.col0
@@ -206,12 +208,12 @@ impl Reader {
         while k < at {
             let c = self.s[k]
             if c == '\r' {
-                line += 1
+                if line < 2147483647 { line += 1 }
                 col = 1
                 cr = true
             } else if c == '\n' {
                 if !cr {
-                    line += 1
+                    if line < 2147483647 { line += 1 }
                     col = 1
                 }
                 cr = false
@@ -354,6 +356,13 @@ pub struct CsvStreamReader<R> {
     first: int,          // the first read's size
     chunk: int,          // the next read's size
     io: Option<IoError>,
+    // a record that reaches the end of rd's bytes waits for more: the bytes
+    // read since are gathered in `more`, and `scan` says, from them alone,
+    // whether the record has ended in them (M17)
+    waiting: bool,
+    more: StringBuilder,
+    scan: int,
+    tries: int64,        // how many times a record was read (for the tests)
 }
 
 // A reader of the records the stream `r` holds.
@@ -370,20 +379,76 @@ pub fun stream_reader_with<R: Read>(r: R, delim: char) -> CsvStreamReader<R> {
 // ones put the ends of reads everywhere).
 fun stream_reader_sized<R: Read>(r: R, delim: char, chunk: int) -> CsvStreamReader<R> {
     return CsvStreamReader { src: [r], rd: new_reader("", delim, false), eof: false, done: false,
-                             first: chunk, chunk: chunk, io: None }
+                             first: chunk, chunk: chunk, io: None, waiting: false, more: StringBuilder(),
+                             scan: AT_FIELD, tries: 0 }
+}
+
+// The states of the scan of a record that waits for more bytes: at the
+// start of a field, in a field without quotes, inside quotes, after a `"`
+// inside quotes (the closing one or the first of `""`), and ended: a line
+// end outside quotes, or a byte that is an error, after which `record`
+// decides.
+const AT_FIELD: int = 0
+const UNQUOTED: int = 1
+const QUOTED: int = 2
+const QUOTE: int = 3
+const ENDED: int = 4
+
+// The scan's state after the bytes of `s` from `a` up to `b`, from the
+// state `st`, with the delimiter `d`.
+#test(AT_FIELD, "ab,\"c", 0, 5, ',' as uint8)[QUOTED]
+#test(QUOTED, "x\"\"y\"", 0, 5, ',' as uint8)[QUOTE]
+#test(QUOTE, ",z\n", 0, 3, ',' as uint8)[ENDED] // closed, then a field and a line end
+#test(UNQUOTED, "a\"", 0, 2, ',' as uint8)[ENDED] // a bare quote: an error
+#test(QUOTED, "a\nb\r", 0, 4, ',' as uint8)[QUOTED] // line ends inside quotes
+#test(AT_FIELD, "x\ry", 0, 3, ',' as uint8)[ENDED]
+fun scan_record(st: int, s: str, a: int, b: int, d: uint8) -> int {
+    var state = st
+    var i = a
+    while i < b && state != ENDED {
+        let c = s[i]
+        if state == QUOTED {
+            if c == '"' {
+                state = QUOTE
+            }
+        } else if state == QUOTE {
+            state = if c == '"' { QUOTED } else if c == d { AT_FIELD } else { ENDED }
+        } else if c == d {
+            state = AT_FIELD
+        } else if c == '\n' || c == '\r' {
+            state = ENDED
+        } else if c == '"' {
+            state = if state == AT_FIELD { QUOTED } else { ENDED }
+        } else {
+            state = UNQUOTED
+        }
+        i += 1
+    }
+    return state
 }
 
 impl<R: Read> CsvStreamReader<R> {
     // The next record; None at the end of the stream. A record is read once
-    // its line end, or the end of the stream, is in: one that reaches the
-    // end of the bytes read so far is read again with more.
+    // its line end, or the end of the stream, is in. One that reaches the
+    // end of the bytes read so far waits: the reads after it are scanned,
+    // each byte once, and kept aside until the record ends in them, and then
+    // it is read again, once. So a record costs time linear in its length
+    // however few bytes each read gives (M17).
     fun read_record(var self) -> Result<Option<[str]>, CsvError> {
         while !self.done {
+            if self.waiting {
+                if !self.eof && self.scan != ENDED {
+                    self.fill()?
+                    continue
+                }
+                self.take_more()
+            }
             if self.rd.skip_blank() {
                 let start = self.rd.i
+                self.tries += 1
                 match self.rd.record() {
                     Ok(fields) => {
-                        if self.eof || self.rd.i < self.rd.s.len() {
+                        if self.eof || self.rd.i < self.rd.s.len() || self.rd.s[self.rd.i - 1] == '\n' {
                             self.chunk = self.first
                             return Ok(Some(fields))
                         }
@@ -397,6 +462,10 @@ impl<R: Read> CsvStreamReader<R> {
                         }
                     }
                 }
+                // the record reaches the end of the bytes (a CR at the end
+                // may be the first of CRLF): it waits for more
+                self.waiting = true
+                self.scan = scan_record(AT_FIELD, self.rd.s, start, self.rd.s.len(), self.rd.d)
             } else if self.eof {
                 self.done = true
                 return Ok(None)
@@ -404,6 +473,13 @@ impl<R: Read> CsvStreamReader<R> {
             self.fill()?
         }
         return Ok(None)
+    }
+
+    // The bytes a waiting record gathered, after the reader's.
+    fun take_more(var self) {
+        self.rd.refill(self.more.build())
+        self.more = StringBuilder()
+        self.waiting = false
     }
 
     // Why the stream failed, if it did.
@@ -421,7 +497,13 @@ impl<R: Read> CsvStreamReader<R> {
                 if more.len() == 0 {
                     self.eof = true
                 } else {
-                    self.rd.refill(bytes_m.to_str(more))
+                    let text = bytes_m.to_str(more)
+                    if self.waiting {
+                        self.scan = scan_record(self.scan, text, 0, text.len(), self.rd.d)
+                        self.more.append(text)
+                    } else {
+                        self.rd.refill(text)
+                    }
                     if self.chunk < 0x1000000 {
                         self.chunk *= 2
                     }
@@ -431,6 +513,9 @@ impl<R: Read> CsvStreamReader<R> {
             Err(e) => {
                 self.io = Some(e)
                 self.done = true
+                if self.waiting {
+                    self.take_more()
+                }
                 return Err(self.rd.error(CsvErrorKind.Io, self.rd.s.len()))
             }
         }
@@ -546,6 +631,17 @@ fun streamed(text: str, delim: char, chunk: int) -> Result<[[str]], CsvError> {
     return Ok(rows)
 }
 
+// The same over a stream that gives at most `most` bytes a read, whatever
+// the reader asks for.
+fun streamed_short(text: str, most: int) -> Result<[[str]], CsvError> {
+    let r = stream_reader(short_reads(from_str(text), most))
+    var rows: [[str]] = []
+    for row in r {
+        rows.push(row?)
+    }
+    return Ok(rows)
+}
+
 // A stream reader gives what `parse_with` gives, wherever its reads end: a
 // read of every size from one byte to the whole text.
 #test
@@ -563,6 +659,7 @@ fun stream_as_parse() {
                 print(f"{t.len()} bytes, reads of {chunk}")
             }
             assert(got == want, "the records parse gives")
+            assert(streamed_short(t, chunk) == want, "over short reads")
             chunk += 1
         }
     }
@@ -619,6 +716,41 @@ fun stream_holds_a_chunk() {
     var lr = stream_reader_sized(from_str(one), ',', 1)
     assert(lr.read_record() == Ok(Some([field.build(), "x"])), "a record of 250,000 bytes")
     assert(lr.chunk == 1, "the reads back to their first size")
+    // reads of 16 bytes, whatever the reader asks: the record waits, and
+    // is read once more when its line end is in (M17)
+    var sr = stream_reader(short_reads(from_str(one + "y\n"), 16))
+    assert(sr.read_record() == Ok(Some([field.build(), "x"])), "the record over short reads")
+    assert(sr.tries == 2, "read again once, not after each read")
+    assert(sr.read_record() == Ok(Some(["y"])), "the next one")
+    assert(sr.read_record() == Ok(None), "the end")
+}
+
+// A record whose line end comes with a read is given without waiting for
+// the next one, as an interactive stream needs.
+struct Lines {
+    lines: [str],
+    at: int,
+}
+
+impl Read for Lines {
+    fun read(var self, n: int) -> Result<[uint8], IoError> {
+        if self.at >= self.lines.len() {
+            panic("read past the line the test is at")
+        }
+        self.at += 1
+        return Ok(bytes_m.from_str(self.lines[self.at - 1]))
+    }
+}
+
+#test
+fun stream_gives_a_record_once_its_line_ends() {
+    var r = stream_reader(Lines { lines: ["a,b\n", "c,", "d\n", "\"e\n", "f\"\r\n"], at: 0 })
+    assert(r.read_record() == Ok(Some(["a", "b"])), "the first line")
+    assert(r.src[0].at == 1, "after one read")
+    assert(r.read_record() == Ok(Some(["c", "d"])), "a record over two reads")
+    assert(r.src[0].at == 3, "after two more")
+    assert(r.read_record() == Ok(Some(["e\nf"])), "a line end in quotes, then CRLF")
+    assert(r.src[0].at == 5, "after two more again")
 }
 
 // A stream that gives `text` and then fails.

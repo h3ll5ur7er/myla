@@ -70,32 +70,32 @@ fun call(n: int64) -> int64 {
     return -errno_linux(e)
 }
 
-// WASI's errno `e` as Linux's.
+// Linux's number of each of WASI preview 1's errnos, 0 (success) to 76
+// (ENOTCAPABLE, which Linux hasn't: EACCES), three digits each in WASI's
+// order: E2BIG 7, EACCES 13, EADDRINUSE 98, … ELOOP 40, … ENAMETOOLONG 36, …
+// EPERM 1, … EXDEV 18.
+const LINUX_ERRNOS: str = "000007013098099097011114009074016125010103111104035089033122017014027113043084115004022005106021040024031090072036100102101023105019002008037067012042092028038107020039131088095025006075130001032071093091034030029003116110026018013"
+
+// WASI's errno `e` as Linux's; one WASI doesn't define (a later host's)
+// 4096 plus it, past every Linux errno, so it stays `Other` and its own
+// rather than becoming another cause (MYLA-426: they were all EIO).
 #test(44)[2]
 #test(76)[13]
+#test(63)[1] // EPERM
 #test(6)[11]
 #test(51)[28]
 #test(70)[29]
+#test(32)[40] // ELOOP
+#test(37)[36] // ENAMETOOLONG
+#test(1)[7]
+#test(75)[18]
+#test(77)[4173]
 fun errno_linux(e: int64) -> int64 {
-    if e == 2 || e == 63 || e == 76 { return 13 }  // EACCES, EPERM, ENOTCAPABLE
-    if e == 6 { return 11 }    // EAGAIN
-    if e == 8 { return 9 }     // EBADF
-    if e == 19 { return 122 }  // EDQUOT
-    if e == 20 { return 17 }   // EEXIST
-    if e == 22 { return 27 }   // EFBIG
-    if e == 27 { return 4 }    // EINTR
-    if e == 28 { return 22 }   // EINVAL
-    if e == 29 { return 5 }    // EIO
-    if e == 31 { return 21 }   // EISDIR
-    if e == 44 { return 2 }    // ENOENT
-    if e == 51 { return 28 }   // ENOSPC
-    if e == 52 { return 38 }   // ENOSYS
-    if e == 54 { return 20 }   // ENOTDIR
-    if e == 55 { return 39 }   // ENOTEMPTY
-    if e == 58 { return 95 }   // ENOTSUP
-    if e == 64 { return 32 }   // EPIPE
-    if e == 70 { return 29 }   // ESPIPE
-    return 5
+    if e < 1 || e > 76 {
+        return 4096 + e
+    }
+    let k = (3 * e) as int
+    return ((LINUX_ERRNOS[k] - '0') as int64) * 100 + ((LINUX_ERRNOS[k + 1] - '0') as int64) * 10 + (LINUX_ERRNOS[k + 2] - '0') as int64
 }
 
 // A scratch word of the calls (`__wasi_buf`, 64 bytes).
@@ -414,7 +414,9 @@ fun open_rights(flags: int64) -> int64 {
 }
 
 // The cursor of `fd` moved to `offset` from the start (`whence` 0), the
-// cursor (1) or the end (2), WASI's whences too: the new offset.
+// cursor (1) or the end (2), WASI's whences too: the new offset. A host's
+// offset past `int64`'s range (WASI's is a `uint64`) is EINVAL, as Linux's
+// lseek gives for one past its largest (MYLA-426).
 pub fun seek(fd: int64, offset: int64, whence: int64) -> int64 {
     arg(0, fd)
     arg(1, offset)
@@ -424,7 +426,11 @@ pub fun seek(fd: int64, offset: int64, whence: int64) -> int64 {
     if r < 0 {
         return r
     }
-    return __load64(scratch(6))
+    let at = __load64(scratch(6))
+    if at < 0 {
+        return -22
+    }
+    return at
 }
 
 // The size, the mode (`mode_of_type`) and the modification time
@@ -560,10 +566,21 @@ pub fun dir_entry_size(rec: int64) -> int64 {
 // 1 when a read of `fd` won't block, 0 when `timeout_ms` (negative: none)
 // ran out: poll_oneoff on the descriptor and, with a limit, the clock.
 pub fun poll_read(fd: int64, timeout_ms: int64) -> int64 {
+    return poll_fd(fd, 1u8, timeout_ms)
+}
+
+// `poll_read` for room to write (MYLA-419).
+pub fun poll_write(fd: int64, timeout_ms: int64) -> int64 {
+    return poll_fd(fd, 2u8, timeout_ms)
+}
+
+// `poll_read` and `poll_write`: the subscription's tag `tag` (1 read, 2
+// write).
+fun poll_fd(fd: int64, tag: uint8, timeout_ms: int64) -> int64 {
     let subs = __rt_addr("__wasi_subs")
-    // a subscription: userdata 8, tag 1 (+8), then the fd (+16)
+    // a subscription: userdata 8, tag 1 or 2 (+8), then the fd (+16)
     __store64(subs, 1)
-    __store8(subs + 8, 1u8)
+    __store8(subs + 8, tag)
     __store32(subs + 16, fd as uint32)
     var n: int64 = 1
     if timeout_ms >= 0 {

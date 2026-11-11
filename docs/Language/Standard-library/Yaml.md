@@ -51,10 +51,10 @@ fun main() {
 - Block mappings (`key: value`) and sequences (`- item`), nested by indentation, a sequence also at its key's indentation, and compact forms (`- - a`, `- key: v`).
 - Flow sequences `[a, b]` and mappings `{a: 1, b}`, over several lines, with a trailing comma; `[k: v]` is a list holding a map of one entry.
 - Plain scalars over several lines, single-quoted (`''` is a quote) and double-quoted scalars with every escape of YAML 1.2 (`\n`, `\t`, `\xXX`, `\uXXXX`, `\UXXXXXXXX`, `\N`, `\_`, `\L`, `\P`, a `\` at a line's end, …). Lines fold as YAML folds them: a line break is a space, an empty line a line feed.
-- Literal `|` and folded `>` block scalars with an indentation digit and the chomping indicators `-` (strip) and `+` (keep).
-- Comments, a leading `---`, a trailing `...`, a byte order mark, an empty key (`: v`), and LF, CRLF or CR line ends.
+- Literal `|` and folded `>` block scalars with an indentation digit and the chomping indicators `-` (strip) and `+` (keep). Without a digit the first line with content sets the indentation; a scalar with no such line (`a: |`, then a line of spaces, then `b: 1`) takes the longest of its empty lines', so it is empty (`""`, or `"\n"` kept), as YAML 1.2 (8.1.1.1) and PyYAML read it.
+- Comments, a leading `---`, a trailing `...` (repeated or not), a byte order mark, an empty key (`: v`), and LF, CRLF or CR line ends.
 
-Left out, each an error of its own kind: anchors (`&a`), aliases (`*a`), tags (`!t`, `!!str`), directives (`%YAML`), explicit keys (`? k`), a collection as a key (`[a]: b`) and a second document. A mapping that repeats a key is refused too, as YAML 1.2 requires; `1: a` and `"1": b` count as the same key, since both keys are "1". The indentation rules are the specification's, so a flow collection's lines, its closing bracket included, are indented more than the block around it, and a tab never indents a block collection. Nesting is limited to 100 levels, as `std.json` limits its own.
+Left out, each an error of its own kind: anchors (`&a`), aliases (`*a`), tags (`!t`, `!!str`), directives (`%YAML`), explicit keys (`? k`), a collection as a key (`[a]: b`) and a second document. A mapping that repeats a key is refused too, as YAML 1.2 requires; `1: a` and `"1": b` count as the same key, since both keys are "1". The indentation rules are the specification's, so a flow collection's lines, its closing bracket included, are indented more than the block around it, and a tab never indents a block collection. Nesting is limited to 100 levels, as `std.json` and `std.toml` limit their own. A C0 control character other than a tab, a line feed and a carriage return is `Unexpected` wherever it stands, in a quoted scalar too, as YAML 1.2 has none in its character set; written as an escape in a double-quoted scalar (`"\x01"`) it is read. DEL and the C1 controls, which the specification allows in quoted scalars only, aren't looked for.
 
 ## The core schema
 
@@ -68,11 +68,11 @@ A plain scalar (unquoted, not a block scalar) is resolved by YAML 1.2's core sch
 | `[-+]?(\.[0-9]+\|[0-9]+(\.[0-9]*)?)([eE][-+]?[0-9]+)?`, `[-+]?.inf`, `.nan` (also `.Inf`, `.INF`, `.NaN`, `.NAN`) | `Float` |
 | anything else | `Str` |
 
-YAML 1.1, which many parsers still follow (PyYAML among them), reads some of these differently. Here `yes`, `no`, `on`, `off`, `y` and `n` are strings, not booleans; `012` is twelve, not octal ten (YAML 1.2 writes `0o12`); `0b101`, `1_000` and `1:20` (sexagesimal) are strings; `<<` is a plain key, not a merge. `to_string` quotes the strings 1.1 would take for booleans, so its text means the same to both.
+YAML 1.1, which many parsers still follow (PyYAML among them), reads some of these differently. Here `yes`, `no`, `on`, `off`, `y` and `n` are strings, not booleans; `012` is twelve, not octal ten (YAML 1.2 writes `0o12`); `0b101`, `1_000` and `1:20` (sexagesimal) are strings; `<<` is a plain key, not a merge. `to_string` quotes every string 1.1 would take for something else, so its text means the same to both ([[MYLA-424]]): its booleans (`y`, `yes`, `on`, `off`, in their cases), its integers in base 2 (`0b101`), base 8 (`017`), with `_` (`1_000`) and in base 60 (`1:30`), its floats with `_` or in base 60 (`1:30.5`), its timestamps (`2001-12-14`, `2001-12-14 21:59:43.10 -5`), and the merge and value keys `<<` and `=`. It errs towards quoting: a few strings 1.1 reads as strings too (`09`, an exponent without a sign) are quoted.
 
 ## Writing
 
-`to_string(v)` writes a map's entries as `key: value` lines and a list's items as `- item` lines, a nested collection on the lines below its key indented two more spaces, a map or list inside a list in the compact form (`- key: v`), and an empty map or list as `{}` or `[]`. A string is plain when it reads back as the same string: not empty, no leading or trailing space, no indicator first, no `: ` or ` #`, no control character, and not one that would resolve to another type (`"123"`, `"true"`, `"null"`) or that YAML 1.1 reads as a boolean (`"no"`). Any other string is double-quoted, with escapes for `"`, `\`, control characters, C1 controls, U+2028, U+2029 and U+FEFF. Floats are written in their shortest form, and as `.inf`, `-.inf` and `.nan`.
+`to_string(v)` writes a map's entries as `key: value` lines and a list's items as `- item` lines, a nested collection on the lines below its key indented two more spaces, a map or list inside a list in the compact form (`- key: v`), and an empty map or list as `{}` or `[]`. A string is plain when it reads back as the same string: not empty, no leading or trailing space, no indicator first, no `: ` or ` #`, no control character, and not one that would resolve to another type (`"123"`, `"true"`, `"null"`) or that YAML 1.1 reads as something else (`"no"`, `"1_000"`, `"2001-12-14"`). Any other string is double-quoted, with escapes for `"`, `\`, control characters, C1 controls, U+2028, U+2029 and U+FEFF. Floats are written in their shortest form, and as `.inf`, `-.inf` and `.nan`.
 
 `parse(to_string(v))` gives `v` back, but NaN, which isn't equal to itself, and a map with a repeated key (which only `from_json` can make), which `parse` refuses. A string must be UTF-8 for other parsers to read it.
 
@@ -107,6 +107,9 @@ The module's cases run interpreted, natively, on aarch64 and on wasm32. `tests/b
 - 98 cases that use a left-out feature are refused with the error that names one of their features, 11 with an explicit key (which the events don't show) with `ExplicitKey`, and 1 that repeats a key with `DuplicateKey`.
 - The 94 texts that aren't YAML are all refused.
 - 4,000 of the suite's texts with a character deleted, inserted or doubled, or cut short, are read or refused without a crash, and what is read is written back the same.
+- 6,000 strings made of the pieces of YAML 1.1's numbers, booleans, timestamps and keys are written by `to_string`, as an item and as a key, and PyYAML (a YAML 1.1 reader) reads every one back as the same string (skipped without PyYAML; 56 were misread when only the booleans were quoted).
+
+A float read is converted with `to_json` as any other, and `std.json` writes NaN and the infinities as `null`.
 
 ## Speed
 

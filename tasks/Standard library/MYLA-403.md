@@ -36,3 +36,5 @@ Two choices the task leaves open:
 ## Review 2026-11-09
 
 Signed off in [[Project/Review-2026-11-09]], with a follow-up in [[MYLA-426]]: a closure that returns nothing can't be timed (after [[MYLA-417]]'s M24).
+
+The follow-up is done in [[MYLA-426]] (in review, 2026-11-11): `run`, `run_n` and `run_for` time a closure that returns nothing (a test function and the page).

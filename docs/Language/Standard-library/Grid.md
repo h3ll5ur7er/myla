@@ -48,7 +48,7 @@ fun main() {
 
 | Function | Result |
 | --- | --- |
-| `new<T>(width: int, height: int, fill: T) -> Grid<T>` | A grid of `width` by `height` cells, each `fill` |
+| `new<T>(width: int, height: int, fill: T) -> Grid<T>` | A grid of `width` by `height` cells, each `fill`. A negative size, or more than 2147483647 cells, is a failure (D184) |
 | `of<T>(rows: [[T]]) -> Result<Grid<T>, GridError>` | The grid of `rows`, `rows[y][x]` the cell at `(x, y)`; `Ragged` if a row has another length than the first |
 | `parse(text: str) -> Result<Grid<char>, GridError>` | The grid of the characters of `text`, a line a row |
 | `parse_with<T>(text: str, f: (char) -> T) -> Result<Grid<T>, GridError>` | The same, each character mapped by `f` |
@@ -59,11 +59,11 @@ fun main() {
 | `g.in_bounds(p: (int, int)) -> bool` | Whether `p` is a position of the grid |
 | `g.at(p) -> Option<T>` | The cell at `p`; `None` out of bounds |
 | `g.set(p, v: T)` | Sets the cell at `p`. Out of bounds it is a failure, as for a list. Needs a `var` place |
-| `g.neighbours4(p) -> [(int, int)]` | The positions next to `p` across an edge, in bounds: up, right, down, left |
+| `g.neighbours4(p) -> [(int, int)]` | The positions next to `p` across an edge, in bounds: up, right, down, left. Of a `p` out of bounds, those of its neighbours that are in bounds |
 | `g.neighbours8(p) -> [(int, int)]` | Across an edge or a corner, clockwise from up: up, up-right, right, down-right, down, down-left, left, up-left |
-| `g.index(p) -> int`, `g.pos(i: int) -> (int, int)` | A position's index in `cells`, `y * width + x`, and back: node numbers for `bfs_dense` and `dijkstra_dense` |
+| `g.index(p) -> int`, `g.pos(i: int) -> (int, int)` | A position's index in `cells`, `y * width + x`, and back: node numbers for `bfs_dense` and `dijkstra_dense`. A `p` or an `i` out of bounds is a failure |
 | `g.positions() -> [(int, int)]` | Every position, row by row |
-| `g.row(y: int) -> [T]`, `g.column(x: int) -> [T]` | The cells of a row, left to right; of a column, top to bottom |
+| `g.row(y: int) -> [T]`, `g.column(x: int) -> [T]` | The cells of a row, left to right; of a column, top to bottom. A `y` or an `x` out of bounds is a failure, for both alike ([[MYLA-425]]) |
 | `g.map<U>(f: (T) -> U) -> Grid<U>` | The grid of `f` of each cell |
 | `g.transposed() -> Grid<T>` | The cell at `(x, y)` moved to `(y, x)`: rows become columns |
 | `g.find(v: T) -> Option<(int, int)>` | The first position, row by row, whose cell is `v`. `T: Eq` |

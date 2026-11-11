@@ -23,11 +23,38 @@ pub enum UrlError {
     BadPort(int),
 }
 
+impl UrlError {
+    // The reason in words, with its position (D168).
+    #test(UrlError.BadPercent(2))["'%' without two hex digits at byte 2"]
+    #test(UrlError.BadChar(10))["a byte not allowed there at byte 10"]
+    #test(UrlError.BadScheme(0))["a bad scheme at byte 0"]
+    #test(UrlError.BadHost(7))["a bad host at byte 7"]
+    #test(UrlError.BadPort(9))["a bad port at byte 9"]
+    fun message(self) -> str {
+        return match self {
+            BadPercent(i) => f"'%' without two hex digits at byte {i}"
+            BadChar(i) => f"a byte not allowed there at byte {i}"
+            BadScheme(i) => f"a bad scheme at byte {i}"
+            BadHost(i) => f"a bad host at byte {i}"
+            BadPort(i) => f"a bad port at byte {i}"
+        }
+    }
+}
+
+// `message()`; a spec is ignored.
+impl Format for UrlError {
+    #test(UrlError.BadPort(11), "")["a bad port at byte 11"]
+    fun format(self, spec: str) -> str {
+        return self.message()
+    }
+}
+
 // A URI reference's parts (RFC 3986, section 3), percent-encoded as written.
 // `host` is `None` without an authority (`mailto:a@b.c`) and `Some("")` for
 // an empty one (`file:///etc`); an IPv6 host is without its brackets.
 // `user_info`, `query` and `fragment` are `None` without their `@`, `?` or
 // `#`; `scheme` is "" for a relative reference.
+#derive(Eq, Hash)
 pub struct Url {
     scheme: str,
     user_info: Option<str>,
@@ -159,6 +186,8 @@ pub fun query_decode(s: str) -> Result<[(str, str)], UrlError> {
 #test("http://u@v@h/")[Err(UrlError.BadChar(8))]
 #test("http://h/a b")[Err(UrlError.BadChar(10))]
 #test("http://h:8:9/")[Err(UrlError.BadPort(10))]
+#test("http://h:080/")[Err(UrlError.BadPort(9))] // `to_str` couldn't give the zero back
+#test("http://h:0/")[Ok(Url { scheme: "http", user_info: None, host: Some("h"), port: Some(0), path: "/", query: None, fragment: None })]
 pub fun parse(s: str) -> Result<Url, UrlError> {
     let n = s.len()
     // a scheme ends at the first `:`, if no `/`, `?` or `#` comes before it
@@ -289,6 +318,169 @@ impl Url {
         }
         return sb.build()
     }
+}
+
+// --- reference resolution (RFC 3986, section 5.2) --------------------------------
+
+// The text of the URI reference `reference` resolved against the URL
+// `base` (RFC 3986, section 5.2, strict): what a link or a redirect's
+// `Location` in a document from `base` points to. The dot segments `.` and
+// `..` of the result's path are removed. An error is `parse`'s, of `base`
+// or of `reference` (its position in that text).
+#test("http://a/b/c/d;p?q", "g")[Ok("http://a/b/c/g")]
+#test("http://a/b/c/d;p?q", "../../g")[Ok("http://a/g")]
+#test("http://a/b/c/d;p?q", "//g")[Ok("http://g")]
+#test("http://a/b", "http://x/./y/../z")[Ok("http://x/z")] // an absolute reference loses its dot segments too
+#test("http://h", "c")[Ok("http://h/c")] // an empty path with an authority
+#test("http://h/a b", "c")[Err(UrlError.BadChar(10))]
+#test("http://h/", "%zz")[Err(UrlError.BadPercent(0))]
+pub fun resolve(base: str, reference: str) -> Result<str, UrlError> {
+    let b = parse(base)?
+    let r = parse(reference)?
+    return Ok(b.resolve(r).to_str())
+}
+
+impl Url {
+    // The reference `r` resolved against this URL as its base (RFC 3986,
+    // section 5.2.2, strict: a reference with a scheme is absolute even
+    // when the scheme is the base's).
+    #test(Url { scheme: "http", user_info: None, host: Some("a"), port: Some(8080), path: "/b/c", query: Some("q"), fragment: None }, Url { scheme: "", user_info: None, host: None, port: None, path: "", query: None, fragment: Some("f") })[Url { scheme: "http", user_info: None, host: Some("a"), port: Some(8080), path: "/b/c", query: Some("q"), fragment: Some("f") }]
+    fun resolve(self, r: Url) -> Url {
+        var t = r
+        if r.scheme.len() > 0 {
+            t.path = remove_dot_segments(r.path)
+            return t
+        }
+        if r.host != None {
+            t.path = remove_dot_segments(r.path)
+        } else {
+            if r.path.len() == 0 {
+                t.path = self.path
+                if r.query == None {
+                    t.query = self.query
+                }
+            } else if r.path[0] == '/' {
+                t.path = remove_dot_segments(r.path)
+            } else {
+                t.path = remove_dot_segments(merge(self, r.path))
+            }
+            t.user_info = self.user_info
+            t.host = self.host
+            t.port = self.port
+        }
+        t.scheme = self.scheme
+        return t
+    }
+}
+
+// The relative path `path` merged with the path of `base` (RFC 3986,
+// section 5.2.3): after the base's last `/`, or after `/` when the base
+// has an authority and an empty path.
+fun merge(base: Url, path: str) -> str {
+    if base.host != None && base.path.len() == 0 {
+        return "/" + path
+    }
+    var slash = base.path.len() - 1
+    while slash >= 0 && base.path[slash] != '/' {
+        slash -= 1
+    }
+    return base.path[:slash + 1] + path
+}
+
+// `path` without its dot segments (RFC 3986, section 5.2.4): each `.`
+// dropped, each `..` with the segment before it. Linear in the path's
+// length: the segments kept are a list, the input is read by position.
+#test("/a/b/c/./../../g")["/a/g"] // RFC 3986, 5.2.4
+#test("mid/content=5/../6")["mid/6"] // RFC 3986, 5.2.4
+#test("/../../x")["/x"]
+#test("/a/..")["/"]
+#test("/a/.")["/a/"]
+#test("../g")["g"]
+#test(".")[""]
+#test("a/./b/../../..")["/"]
+#test("/a//../b")["/a/b"]
+#test("")[""]
+fun remove_dot_segments(path: str) -> str {
+    let n = path.len()
+    var out: [str] = []
+    var i = 0
+    while i < n {
+        let rest = n - i
+        if path[i] == '.' && rest >= 3 && path[i + 1] == '.' && path[i + 2] == '/' {
+            i += 3 // A: "../"
+        } else if path[i] == '.' && rest >= 2 && path[i + 1] == '/' {
+            i += 2 // A: "./"
+        } else if path[i] == '/' && rest >= 3 && path[i + 1] == '.' && path[i + 2] == '/' {
+            i += 2 // B: "/./" becomes "/"
+        } else if path[i] == '/' && rest == 2 && path[i + 1] == '.' {
+            out.push("/") // B: a last "/."
+            i = n
+        } else if path[i] == '/' && rest >= 3 && path[i + 1] == '.' && path[i + 2] == '.' && (rest == 3 || path[i + 3] == '/') {
+            // C: "/../" becomes "/", a last "/.." too, and the segment
+            // before it goes
+            if out.len() > 0 {
+                let gone = out.pop()
+            }
+            if rest == 3 {
+                out.push("/")
+                i = n
+            } else {
+                i += 3
+            }
+        } else if path[i] == '.' && (rest == 1 || (rest == 2 && path[i + 1] == '.')) {
+            i = n // D: a last "." or ".."
+        } else {
+            // E: the first segment, with its "/", moved to the output
+            var j = if path[i] == '/' { i + 1 } else { i }
+            while j < n && path[j] != '/' {
+                j += 1
+            }
+            out.push(path[i:j])
+            i = j
+        }
+    }
+    var sb = StringBuilder()
+    for seg in out {
+        sb.append(seg)
+    }
+    return sb.build()
+}
+
+// RFC 3986's examples of resolution (section 5.4), normal and abnormal,
+// against its base.
+#test
+fun resolved() {
+    let base = "http://a/b/c/d;p?q"
+    let cases = [
+        ("g:h", "g:h"), ("g", "http://a/b/c/g"), ("./g", "http://a/b/c/g"), ("g/", "http://a/b/c/g/"),
+        ("/g", "http://a/g"), ("//g", "http://g"), ("?y", "http://a/b/c/d;p?y"), ("g?y", "http://a/b/c/g?y"),
+        ("#s", "http://a/b/c/d;p?q#s"), ("g#s", "http://a/b/c/g#s"), ("g?y#s", "http://a/b/c/g?y#s"),
+        (";x", "http://a/b/c/;x"), ("g;x", "http://a/b/c/g;x"), ("g;x?y#s", "http://a/b/c/g;x?y#s"),
+        ("", "http://a/b/c/d;p?q"), (".", "http://a/b/c/"), ("./", "http://a/b/c/"), ("..", "http://a/b/"),
+        ("../", "http://a/b/"), ("../g", "http://a/b/g"), ("../..", "http://a/"), ("../../", "http://a/"),
+        ("../../g", "http://a/g"),
+        ("../../../g", "http://a/g"), ("../../../../g", "http://a/g"), ("/./g", "http://a/g"),
+        ("/../g", "http://a/g"), ("g.", "http://a/b/c/g."), (".g", "http://a/b/c/.g"),
+        ("g..", "http://a/b/c/g.."), ("..g", "http://a/b/c/..g"), ("./../g", "http://a/b/g"),
+        ("./g/.", "http://a/b/c/g/"), ("g/./h", "http://a/b/c/g/h"), ("g/../h", "http://a/b/c/h"),
+        ("g;x=1/./y", "http://a/b/c/g;x=1/y"), ("g;x=1/../y", "http://a/b/c/y"),
+        ("g?y/./x", "http://a/b/c/g?y/./x"), ("g?y/../x", "http://a/b/c/g?y/../x"),
+        ("g#s/./x", "http://a/b/c/g#s/./x"), ("g#s/../x", "http://a/b/c/g#s/../x"), ("http:g", "http:g"),
+    ]
+    for c in cases {
+        match resolve(base, c.0) {
+            Ok(t) => assert(t == c.1, f"{c.0}: {t}, not {c.1}")
+            Err(e) => assert(false, f"{c.0} didn't resolve")
+        }
+    }
+    // a long path of `..` gives the root, in linear time
+    var sb = StringBuilder()
+    for i in 0..10000 {
+        sb.append("../")
+    }
+    sb.append("g")
+    let deep = sb.build()
+    assert(resolve(base, deep) == Ok("http://a/g"), "10,000 dot segments")
 }
 
 // Every URL of the table above, and a few more, read back as it was.
@@ -518,9 +710,16 @@ fun check(s: str, start: int, end: int, extra: str) -> Result<(), UrlError> {
 #test("h:65535", 2, 7)[Ok(Some(65535))]
 #test("h:99999999999", 2, 13)[Err(UrlError.BadPort(2))]
 #test("h:-1", 2, 4)[Err(UrlError.BadPort(2))]
+#test("h:08", 2, 4)[Err(UrlError.BadPort(2))] // a leading zero
+#test("h:0", 2, 3)[Ok(Some(0))]
 fun read_port(s: str, start: int, end: int) -> Result<Option<int>, UrlError> {
     if start == end {
         return Ok(None)
+    }
+    // RFC 3986 allows leading zeros, but a port is kept as a number, which
+    // `to_str` writes without them: refused, so that what parses reads back
+    if end - start > 1 && s[start] == '0' {
+        return Err(UrlError.BadPort(start))
     }
     var v = 0
     var i = start
@@ -650,4 +849,22 @@ fun hex_digit(c: uint8) -> int {
         return (c - 'A') as int + 10
     }
     return -1
+}
+
+// A `Url` compares field by field and is a map key (MYLA-488): parsing
+// lower-cases nothing, so `HTTP://a/` and `http://a/` differ.
+#test
+fun urls_compare_and_key_maps() {
+    match (parse("http://example.com/a?q=1"), parse("http://example.com/a?q=1"), parse("HTTP://example.com/a?q=1")) {
+        (Ok(a), Ok(b), Ok(c)) => {
+            assert(a == b, "the same text")
+            assert(a != c, "another scheme's case")
+            var seen: [Url: int] = [:]
+            seen[a] = 1
+            seen[c] = 2
+            assert(seen[b] == 1, "found by an equal URL")
+            assert(seen.len() == 2, "two keys")
+        }
+        _ => assert(false, "parse")
+    }
 }

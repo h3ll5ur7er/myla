@@ -20,6 +20,7 @@ fun main() {
 | `write(fd: int32, s: str) -> Result<(), IoError>` | Writes the bytes of `s` to file descriptor `fd`, all of them, or the error that stopped it (D146); a pipe nobody reads any more is `BrokenPipe` |
 | `println(s)` | `s` and a newline to stdout |
 | `eprint(s)`, `eprintln(s)` | To stderr, without / with a newline |
+| `errno_text(code: int32) -> str` | The `<cause>` of `write failed: <cause>` below, for the errno of a failed write: `errno_text(28)` is `"no space left on device"`, an errno it doesn't name `"errno 77"` |
 
 Output isn't buffered: what a program wrote is out before it waits for input.
 
@@ -34,7 +35,7 @@ Reading goes through a buffered `Reader` ([[MYLA-78]]), a `Buffered` over the de
 | `stdin() -> Reader` | A reader of the standard input |
 | `reader(fd: int32) -> Reader` | A reader of file descriptor `fd` |
 | `r.read_line() -> Result<Option<str>, IoError>` | The next line without its `"\n"` (a `"\r"` before it stays); a last line without `"\n"` counts; `None` at the end |
-| `r.read_exact(n: int32) -> Result<Option<str>, IoError>` | Exactly the next `n` bytes (`""` for `n <= 0`); `None` if the input ends first (those bytes stay unread) |
+| `r.read_exact(n: int32) -> Result<Option<str>, IoError>` | Exactly the next `n` bytes (`""` for `n <= 0`); `None` if the input ends first (those bytes stay unread, as after a failed read) |
 | `r.read_to_end() -> Result<str, IoError>` | The rest of the input (`""` once it has ended) |
 | `r.ready(timeout_ms: int32) -> bool` | Whether a read won't block: bytes are buffered, or within `timeout_ms` milliseconds input arrives, the input ends or reading fails (0: don't wait; negative: wait as long as it takes) |
 
@@ -58,6 +59,8 @@ fun main() {
 ```
 
 A protocol that frames messages with a `Content-Length` header reads the header lines with `read_line` and the body with `read_exact`; `tests/burn/test_stdin.py` has an example.
+
+A line or a count longer than what is buffered is gathered in a builder, read by read, so each byte is copied once: `read_line` and `read_exact` take time linear in the length, however few bytes a read gives ([[MYLA-420]], the review's M17 and S5). Before, each read copied the bytes gathered so far again. Natively on x86-64 (2026-11-10): an 8 MiB line 1,291 ms before, 31 ms now; a 16 MiB line from a pipe 21,346 ms, 97 ms; `read_exact(16 MiB)` from a pipe 1,489 ms, 43 ms (from a file 32 and 36 ms). Interpreted, `read_exact(16 MiB)` from a pipe 34,179 ms before, 350 ms now; an 8 MiB line didn't end in 100 s before and takes 16.7 s now, the interpreter's time to look at each byte for the `"\n"`. Lines of up to 120 bytes read as fast as before (50 MB in 112 to 128 ms either way). A failed read in the middle of a line or a count gives its error and leaves what was read of it unread.
 
 In a task, each read has an async version that waits for the input with the task suspended, so the other tasks run meanwhile (D124, [[MYLA-230]]): `await r.read_line_async()`, `await r.read_exact_async(n)`, `await r.read_to_end_async()`, `await r.fill_async(want)`. They give what the blocking reads give; outside a task they block as those do. A task asked to stop (`task.cancel`, a `task.timeout` that ran out) stops waiting at once and gets `Err(IoError.Cancelled)` (ECANCELED). Natively the executor's poller watches the descriptor (a regular file, which it can't watch, is always ready); the interpreter looks at the waiting tasks' descriptors before each turn.
 
@@ -116,15 +119,20 @@ fun main() {
 
 `Read` and `Write` deal in bytes only (D177): a stream implements `read`, or `write` and `flush`, and nothing for text. Strings are bytes (D164), and since [[MYLA-369]] `std.bytes`'s `from_str` and `to_str` convert in one allocation and one copy (the primitives `__str_to_bytes` and `__bytes_to_str`), so a `[uint8]` costs about what a `str` does (the measurements below); the streams of a descriptor (`FdStream`, `fs.File`, a child's pipes) read into a `[uint8]` and write from one themselves (the primitives `__read_bytes` and `__write_bytes`), so their bytes aren't converted at all. Text goes through the adapters: a `Buffered` pulls bytes, keeps them as text and gives `read_line`, `read_exact` and `read_to_end`; a `BufferedWriter` takes text with `write_str`. To write a few bytes of text to an unbuffered stream, `w.write(bytes.from_str(s))` (`import std.bytes as bytes`). Until [[MYLA-399]] each trait had a `str` twin, `read_str` and `write_str`, from when the two kinds converted only byte by byte ([[MYLA-338]]).
 
+A read that gives fewer bytes than it asks for gives a list, or a string, of their size: `__read_bytes`, `__read` and `__sock_recv` keep the cell they allocated for the request only when they filled at least half of it, else they copy what they got into a cell of its size ([[MYLA-420]], the 2026-11-10 review's S1). Before, 33 MB read from a pipe 64 KiB at a time with reads of 16 MiB kept 504 cells of 16 MiB and ran out of memory on wasm32; now it reads them in 105 MB there.
+
 ### Streams of this module
 
 | Item | What it is |
 | --- | --- |
 | `fd_stream(fd: int32) -> FdStream` | A descriptor, unbuffered: each read and write is a system call. `Read`, `Write`, `Seek` (a pipe can't: `Other(29)`, ESPIPE), `Pollable`. A write to a closed pipe is `BrokenPipe`, but on the standard output or error, where it ends the program quietly (D146) |
-| `memory_stream() -> MemoryStream`, `from_bytes(b: [uint8])`, `from_str(s: str)` | Bytes in memory and a cursor at the start. `Read`, `Write` (over the bytes at the cursor, and on past the end; a gap a seek past the end left is zeros), `Seek` |
+| `memory_stream() -> MemoryStream`, `from_bytes(b: [uint8])`, `from_str(s: str)` | Bytes in memory and a cursor at the start. `Read`, `Write` (over the bytes at the cursor, and on past the end; a gap a seek past the end left is zeros), `Seek`. It holds up to 2,147,483,647 bytes: a seek past that, by an offset of any size, is `InvalidInput`, and a write past it `Other(27)` (EFBIG), not an overflow (D184) |
 | `m.bytes() -> [uint8]`, `m.text() -> str`, `m.position() -> int64` | All its bytes, wherever the cursor is; as text; the cursor |
 | `buffered(r: R) -> Buffered<R>` | A buffer in front of `r`: `read_line`, `read_exact`, `read_to_end` and `fill` as `Reader` has them (`Reader` is `Buffered<FdStream>`), `into_inner()` (the stream, without the bytes still buffered). `Read`; `Seek` if `r` can (the buffer dropped; `Current` counts from the next byte a read gives); `Pollable`, `ready` and the async reads if `r` is `Pollable` |
+| `short_reads(r: R, most: int32) -> ShortReads<R>` | `r` read at most `most` bytes at a time (at least 1), as a pipe, a socket or a decompressor may give them: for the tests of code that reads streams, which must not count on a read giving all it asked for. `Read`; `into_inner()` |
 | `buffered_writer(w: W) -> BufferedWriter<W>`, `buffered_writer_with(w, capacity: int32)` | A buffer in front of `w`, 8 KiB or `capacity` bytes: writes are gathered and passed on when it is full, on `flush` and on `into_inner() -> Result<W, IoError>` (flushed). `Write`; `write_str(s: str) -> Result<int, IoError>`, the bytes of `s` (`s.len()`); `Seek` if `w` can (after the buffer is passed on). Nothing flushes it when the program ends |
+
+`MemoryStream`'s `read_end` and `fill_gap`, `Buffered`'s `pull`, `pull_bytes`, `newline_from` and `take_line`, and `BufferedWriter`'s `push_out`, `drain` and `make_room` are the streams' own steps, public only because a method can't be private yet ([[MYLA-433]]); a program has no need of them.
 
 ### Any stream
 

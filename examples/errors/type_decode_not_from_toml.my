@@ -1,5 +1,5 @@
 //~ type error: type 'Point' does not satisfy the bound 'T: FromToml' required by 'decode'
-//~ help: '#derive(Toml)' on 'Point' gives it 'ToToml' and 'FromToml' (D172)
+//~ help: '#derive(Toml)' on 'Point' gives it 'ToToml' and 'FromToml' (D176)
 // `toml.decode<T>` needs `T: FromToml`; the help names the derive (MYLA-407).
 import std.toml as toml
 

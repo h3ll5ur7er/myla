@@ -124,8 +124,9 @@ impl CodeGen {
         } else {
             self.emit(format("bl myla_{}", entry_name))
         }
-        // exit_group(0): every thread ends (D89 (3))
-        for line in ["\tmov x0, #0", "\tmov x8, #94", "\tsvc #0", ""] { self.raw(line) }
+        // the end: the exit hook, then exit_group(0), every thread ending
+        // (D89 (3), D187)
+        for line in ["\tmov x0, #0", "\tbl __exit_program", ""] { self.raw(line) }
         if self.frames {
             self.emit_executor_a64()
         }
@@ -196,8 +197,7 @@ impl CodeGen {
             "\tmov x8, #64",
             "\tsvc #0",
             "\tmov x0, #1",
-            "\tmov x8, #94",
-            "\tsvc #0",
+            "\tbl __exit_program",
             ".Lsegv_other:",
             "\tsub sp, sp, #32",
             "\tstp xzr, xzr, [sp]",
@@ -371,8 +371,7 @@ impl CodeGen {
             "\tb __task_end",
             ".Lfinish_program:",
             "\tmov x0, #0",
-            "\tmov x8, #94",
-            "\tsvc #0",
+            "\tbl __exit_program",
             "",
             // __task_fail(kind, …): the first failure claims the program
             // (x0 0 back), a later one goes back to the executor; with no
@@ -494,8 +493,7 @@ impl CodeGen {
             "\tbl __task_fail",
             "\tbl __failed_wait",
             "\tldp x0, x30, [sp], #16",
-            "\tmov x8, #94",
-            "\tsvc #0",
+            "\tbl __exit_program",
             "",
         ] { self.raw(line) }
     }

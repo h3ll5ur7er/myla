@@ -52,7 +52,9 @@ pub enum JsonErrorKind {
 // `Syntax` error the line and column in the text (counting from 1, the
 // column in characters); for the others the path of the value in the
 // document, `$.items[2].label` (`$` the whole of it), and a line and column
-// of 0.
+// of 0. The one error of another kind with a line and column is `decode`'s
+// `OutOfRange` for an integer beyond int64 that it can't read exactly,
+// found while the text is parsed, before any path is known.
 #derive(Eq)
 pub struct JsonError {
     kind: JsonErrorKind,
@@ -71,14 +73,13 @@ impl JsonError {
 }
 
 impl Format for JsonError {
-    // `line:col: why` for a syntax error, `path: why` for the others.
+    // `line:col: why` for an error in the text, `path: why` for the others.
     #test(JsonError { kind: JsonErrorKind.Syntax, msg: "Expecting value", line: 1, col: 5, path: "" }, "")["1:5: Expecting value"]
     #test(JsonError { kind: JsonErrorKind.OutOfRange, msg: "300 is out of range for uint8", line: 0, col: 0, path: "$.items[2].n" }, "")["$.items[2].n: 300 is out of range for uint8"]
+    #test(JsonError { kind: JsonErrorKind.OutOfRange, msg: "why", line: 2, col: 3, path: "" }, "")["2:3: why"]
     fun format(self, spec: str) -> str {
-        return match self.kind {
-            Syntax => f"{self.line}:{self.col}: {self.msg}"
-            _ => f"{self.path}: {self.msg}"
-        }
+        if self.kind == JsonErrorKind.Syntax || self.line > 0 { return f"{self.line}:{self.col}: {self.msg}" }
+        return f"{self.path}: {self.msg}"
     }
 }
 
@@ -108,11 +109,18 @@ const MAX_DEPTH: int32 = 200
 struct Parser {
     s: str,
     i: int32,
+    // `decode`'s: an integer beyond int64 that its float64 doesn't hold
+    // exactly is an error, not a float that has lost its low bits
+    exact: bool,
 }
 
 // The JSON value that `text` holds, with optional whitespace around it.
 pub fun parse(text: str) -> Result<Json, JsonError> {
-    var p = Parser { s: text, i: 0 }
+    return parse_with(text, false)
+}
+
+fun parse_with(text: str, exact: bool) -> Result<Json, JsonError> {
+    var p = Parser { s: text, i: 0, exact: exact }
     let v = p.value(0)?
     p.skip_ws()
     if p.i < text.len() { return Err(p.error("Extra data", p.i)) }
@@ -223,7 +231,14 @@ impl Parser {
             }
         }
         return match parse_float(text) {
-            Some(f) => Ok(Json.Float(f)),
+            Some(f) => {
+                if integral && self.exact && !holds_exactly(f, text) {
+                    var e = self.error(f"{text} can't be read exactly: beyond int64's range a number is a float64", start)
+                    e.kind = JsonErrorKind.OutOfRange
+                    return Err(e)
+                }
+                Ok(Json.Float(f))
+            },
             None => Err(self.error("Expecting value", start)),
         }
     }
@@ -378,6 +393,7 @@ impl Parser {
 // `j` as compact JSON text.
 #test(Json.Array([Json.Int(1), Json.Float(2.5), Json.Str("a\"b"), Json.Null]))["[1,2.5,\"a\\\"b\",null]"]
 #test(Json.Object([("k", Json.Bool(true)), ("e", Json.Object([]))]))["{\"k\":true,\"e\":{}}"]
+#test(Json.Array([Json.Float(1.0 / 0.0), Json.Float(-1.0 / 0.0), Json.Float(0.0 / 0.0)]))["[null,null,null]"] // JSON has no NaN or infinity
 pub fun to_string(j: Json) -> str {
     var w = Writer { sb: StringBuilder() }
     w.value(j)
@@ -396,7 +412,10 @@ impl Writer {
                 if b { self.sb.append("true") } else { self.sb.append("false") }
             },
             Json.Int(n) => { self.sb.append(f"{n}") },
-            Json.Float(f) => { self.sb.append(float_text(f)) },
+            Json.Float(f) => {
+                // JSON has no NaN or infinity: `null`, as JavaScript writes them
+                if f - f != 0.0 { self.sb.append("null") } else { self.sb.append(float_text(f)) }
+            },
             Json.Str(s) => { self.string(s) },
             Json.Array(items) => {
                 self.sb.append_byte('[')
@@ -457,7 +476,8 @@ impl Writer {
 const HEX: str = "0123456789abcdef"
 
 // A float as Python's json writes it: its shortest repr, with NaN and the
-// infinities spelled as JavaScript does.
+// infinities spelled as JavaScript does (for messages: `to_string` writes
+// them as `null`).
 #test(0.1)["0.1"]
 #test(1e16)["1e+16"]
 fun float_text(f: float64) -> str {
@@ -468,10 +488,28 @@ fun float_text(f: float64) -> str {
     return t
 }
 
+// Whether the float `f` read from the integer `text` (beyond int64) is that
+// integer. Below 2^64 in size it must be, as an integer type could take it;
+// from 2^64 on no integer type can, and a float type takes the nearest.
+#test(9223372036854775808.0, "9223372036854775808")[true]
+#test(9223372036854775808.0, "9223372036854775809")[false]
+#test(-9223372036854775808.0, "-9223372036854775809")[false]
+#test(18446744073709551616.0, "18446744073709551615")[true]
+fun holds_exactly(f: float64, text: str) -> bool {
+    var a = f
+    var digits = text
+    if f < 0.0 {
+        a = -f
+        digits = text[1:]
+    }
+    if a >= 18446744073709551616.0 { return true }
+    return f"{a as uint64}" == digits
+}
+
 // `text` parsed and written again, or the error (for the #test cases).
 #test(" [1, 2.5, \"x\", true, null, {\"a\": {}}] ")["[1,2.5,\"x\",true,null,{\"a\":{}}]"]
 #test("\"\\u00e9\\ud83d\\ude00\\n\"")["\"é😀\\n\""]
-#test("[-0, -0.0, 1E2, 1e400, NaN]")["[0,-0.0,100.0,Infinity,NaN]"]
+#test("[-0, -0.0, 1E2, 1e400, NaN]")["[0,-0.0,100.0,null,null]"] // read, but not written
 #test("[1,]")["1:3: Illegal trailing comma before end of array"]
 #test("{\"a\" 1}")["1:6: Expecting ':' delimiter"]
 #test("[\"abc")["1:2: Unterminated string starting at"]
@@ -677,6 +715,7 @@ fun path_doc() -> Json {
 #test(Json.Object([("a", Json.Object([("b", Json.Null)])), ("c", Json.Object([]))]), 4)["{\n    \"a\": {\n        \"b\": null\n    },\n    \"c\": {}\n}"]
 #test(Json.Array([Json.Str("x"), Json.Float(0.5)]), 0)["[\n\"x\",\n0.5\n]"]
 #test(Json.Str("a\nb"), 2)["\"a\\nb\""]
+#test(Json.Array([Json.Float(0.0 / 0.0)]), 2)["[\n  null\n]"]
 pub fun pretty(j: Json, indent: int = 2) -> str {
     var p = Pretty { w: Writer { sb: StringBuilder() }, indent: if indent > 0 { indent } else { 0 } }
     p.value(j, 0)
@@ -789,10 +828,30 @@ pub fun encode<T: ToJson>(v: T) -> str {
 // The value of type `T` that `text` holds: `json.decode<Point>(text)`, or
 // with the type from where the result goes (`let p: Result<Point, JsonError>
 // = json.decode(text)`). A text that isn't JSON is a `Syntax` error, a value
-// that doesn't fit `T` an error with its path.
+// that doesn't fit `T` an error with its path. Unlike `parse`, it refuses an
+// integer beyond int64, below 2^64 in size, that a float64 doesn't hold
+// exactly (`OutOfRange` at its line and column, D184), which an integer
+// type would read without its low bits.
 pub fun decode<T: FromJson>(text: str) -> Result<T, JsonError> {
-    let j = parse(text)?
+    let j = parse_with(text, true)?
     return T.from_json(j)
+}
+
+// `decode` of integers beyond int64 (MYLA-424).
+#test("9223372036854775808")[Ok(9223372036854775808u64)] // 2^63: a float64 holds it
+#test("9223372036854775809")[Err(JsonError { kind: JsonErrorKind.OutOfRange, msg: "9223372036854775809 can't be read exactly: beyond int64's range a number is a float64", line: 1, col: 1, path: "" })]
+#test(" 18446744073709549568")[Ok(18446744073709549568u64)] // the largest float64 below 2^64
+#test("18446744073709551615")[Err(JsonError { kind: JsonErrorKind.OutOfRange, msg: "1.8446744073709552e+19 is out of range for uint64", line: 0, col: 0, path: "$" })]
+fun decodes_uint64(text: str) -> Result<uint64, JsonError> {
+    return decode<uint64>(text)
+}
+
+#test("-9223372036854775808")[Ok([-9223372036854775807i64 - 1])]
+#test("[1, -9223372036854775809]")[Err(JsonError { kind: JsonErrorKind.OutOfRange, msg: "-9223372036854775809 can't be read exactly: beyond int64's range a number is a float64", line: 1, col: 5, path: "" })]
+#test("[-9223372036854775808]")[Ok([-9223372036854775807i64 - 1])]
+fun decodes_int64s(text: str) -> Result<[int64], JsonError> {
+    if text[0] == '[' { return decode<[int64]>(text) }
+    return Ok([decode<int64>(text)?])
 }
 
 // The error for a value `found` where `expected` (in words: "an integer",

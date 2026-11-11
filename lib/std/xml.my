@@ -1465,43 +1465,55 @@ impl<R: Read> XmlStreamReader<R> {
         return self.io
     }
 
-    // The bytes read so far but not used dropped, and the next chunk read
-    // after the rest. A chunk may end inside a character: the event there
-    // fails, and is read again once the next chunk is in.
+    // The bytes read so far but not used dropped, and more read after the
+    // rest: at least as many as the rest holds (or to the end), however few
+    // a read gives, gathered in one builder. A chunk may end inside an event
+    // or a character: the event there fails, and is read again once the
+    // bytes after it have doubled, so a long event is read a logarithmic
+    // number of times, not once a read (MYLA-460).
     fun fill(var self) -> Result<(), XmlError> {
-        var r = self.src.pop()
-        let got = r.read(self.chunk)
-        self.src.push(r)
         let lex = self.lex
         let p = advance(lex.s, lex.i, Pos { line: lex.base_line, col: lex.base_col, cr: lex.base_cr })
-        match got {
-            Ok(bytes) => {
-                let b = bytes_m.to_str(bytes)
-                var sb = StringBuilder()
-                sb.append(lex.s, lex.i, lex.s.len())
-                if b.len() == 0 {
-                    self.lex.whole = true
-                } else if lex.latin1 {
-                    sb.append(latin1_to_utf8(b))
-                } else {
-                    sb.append(b)
+        var sb = StringBuilder()
+        sb.append(lex.s, lex.i, lex.s.len())
+        let want = lex.s.len() - lex.i
+        var added = 0
+        while true {
+            var r = self.src.pop()
+            let got = r.read(self.chunk)
+            self.src.push(r)
+            match got {
+                Ok(bytes) => {
+                    let b = bytes_m.to_str(bytes)
+                    if b.len() == 0 {
+                        self.lex.whole = true
+                        break
+                    }
+                    if lex.latin1 {
+                        sb.append(latin1_to_utf8(b))
+                    } else {
+                        sb.append(b)
+                    }
+                    added += b.len()
+                    if added >= want {
+                        break
+                    }
                 }
-                self.lex.s = sb.build()
-                self.lex.i = 0
-                self.lex.base_line = p.line
-                self.lex.base_col = p.col
-                self.lex.base_cr = p.cr
-                if self.chunk < 0x1000000 {
-                    self.chunk *= 2
+                Err(e) => {
+                    self.io = Some(e)
+                    return Err(XmlError { kind: XmlErrorKind.Io, line: p.line, col: p.col })
                 }
-                return Ok(())
-            }
-            Err(e) => {
-                self.io = Some(e)
-                let q = advance(lex.s, lex.i, Pos { line: lex.base_line, col: lex.base_col, cr: lex.base_cr })
-                return Err(XmlError { kind: XmlErrorKind.Io, line: q.line, col: q.col })
             }
         }
+        self.lex.s = sb.build()
+        self.lex.i = 0
+        self.lex.base_line = p.line
+        self.lex.base_col = p.col
+        self.lex.base_cr = p.cr
+        if self.chunk < 0x1000000 {
+            self.chunk *= 2
+        }
+        return Ok(())
     }
 }
 
@@ -2300,6 +2312,39 @@ fun streams() {
     match parse_stream(Trickle { data: doc, pos: 0, step: 0, most: 3, fail_at: -1 }) {
         Ok(d) => assert(d.root.children == [Node.Text("a long text, & more of it"), Node.Element(element("b", [], []))], to_string(d.root))
         Err(e) => assert(false, f"{e}")
+    }
+}
+
+// A long event over short reads is read again a logarithmic number of
+// times, not once a read (MYLA-460): 250,000 bytes in reads of 1 to 16.
+#test
+fun stream_long_event() {
+    var sb = StringBuilder()
+    sb.append("<a v=\"")
+    var k = 0
+    while k < 250000 {
+        sb.append_byte('q')
+        k += 1
+    }
+    sb.append("\">")
+    sb.append("t".repeat(1000))
+    sb.append("</a>")
+    var r = stream_reader(Trickle { data: sb.build(), pos: 0, step: 0, most: 16, fail_at: -1 })
+    var texts = 0
+    while true {
+        match r.read_event() {
+            Ok(Start(name, attrs)) => assert(name == "a" && attrs.len() == 1 && attrs[0].1.len() == 250000, "the attribute")
+            Ok(Text(t)) => { texts += t.len() }
+            Ok(Eof) => {
+                assert(texts == 1000, f"{texts}")
+                return
+            }
+            Ok(_) => {}
+            Err(e) => {
+                assert(false, f"{e}")
+                return
+            }
+        }
     }
 }
 

@@ -330,6 +330,19 @@ pub fun poll_read(fd: int64, timeout_ms: int64) -> int64 {
     return r
 }
 
+// 1 when `fd` has room for a write (or a write fails at once), 0 when
+// `timeout_ms` (negative: none) ran out (MYLA-419).
+pub fun poll_write(fd: int64, timeout_ms: int64) -> int64 {
+    let pfd = __alloc(8)
+    __store64(pfd, (fd & LOW32) | (4i64 << 32))  // POLLOUT
+    var r = ppoll(pfd, 1, timeout_ms)
+    __free(pfd)
+    if r > 0 {
+        r = 1
+    }
+    return r
+}
+
 // The `n` bytes at `p` written to `fd`, a write at a time, again after an
 // interruption (EINTR, EAGAIN); 0, or the first error (minus its errno).
 pub fun write_all(fd: int64, p: int64, n: int64) -> int64 {
@@ -408,6 +421,10 @@ fun ppoll(fds: int64, n: int64, timeout_ms: int64) -> int64 {
 
 // --- processes ---------------------------------------------------------------
 
+// Added to the errno `exec_child` reports when the directory can't be
+// entered (std.process's `SpawnError.WorkingDir`).
+const DIR_FAILED: int64 = 4096
+
 // The child's side of `run`, between fork and exec: system calls on numbers
 // the parent prepared (`spec`, `child_spec`), nothing allocated or released.
 // Its stdin, stdout and stderr become the three descriptors at `fds` (-1:
@@ -415,7 +432,8 @@ fun ppoll(fds: int64, n: int64, timeout_ms: int64) -> int64 {
 // exec; its directory is the one given; each of the paths is tried in turn,
 // as `execvp` tries PATH's (one not there or not a directory: the next; one
 // that may not be run: remembered). When none could be run its errno goes
-// back through `report` (closed on exec) and the child ends with 127.
+// back through `report` (closed on exec) and the child ends with 127; one
+// the directory gave goes back as DIR_FAILED plus it.
 fun exec_child(fds: int64, report: int64, spec: int64, argv: int64, scratch: int64) {
     var k: int64 = 0
     while k < 3 {
@@ -438,6 +456,11 @@ fun exec_child(fds: int64, report: int64, spec: int64, argv: int64, scratch: int
     let dir = __load64(spec + 24)
     if dir != 0 {
         r = __syscall(SYS_CHDIR, dir, 0, 0)
+        if r < 0 {
+            // the directory's errno, told apart from the program's
+            // (MYLA-419: a bad `cwd` read as "program not found")
+            r = r - DIR_FAILED
+        }
     }
     if r == 0 {
         r = -2                         // ENOENT: no path to try
