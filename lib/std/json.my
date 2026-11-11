@@ -828,7 +828,16 @@ pub fun encode<T: ToJson>(v: T) -> str {
 // The value of type `T` that `text` holds: `json.decode<Point>(text)`, or
 // with the type from where the result goes (`let p: Result<Point, JsonError>
 // = json.decode(text)`). A text that isn't JSON is a `Syntax` error, a value
-// that doesn't fit `T` an error with its path.
+// that doesn't fit `T` an error with its path. Unlike `parse`, it refuses an
+// integer beyond int64, below 2^64 in size, that a float64 doesn't hold
+// exactly (`OutOfRange` at its line and column, D184), which an integer
+// type would read without its low bits.
+pub fun decode<T: FromJson>(text: str) -> Result<T, JsonError> {
+    let j = parse_with(text, true)?
+    return T.from_json(j)
+}
+
+// `decode` of integers beyond int64 (MYLA-424).
 #test("9223372036854775808")[Ok(9223372036854775808u64)] // 2^63: a float64 holds it
 #test("9223372036854775809")[Err(JsonError { kind: JsonErrorKind.OutOfRange, msg: "9223372036854775809 can't be read exactly: beyond int64's range a number is a float64", line: 1, col: 1, path: "" })]
 #test(" 18446744073709549568")[Ok(18446744073709549568u64)] // the largest float64 below 2^64
@@ -843,11 +852,6 @@ fun decodes_uint64(text: str) -> Result<uint64, JsonError> {
 fun decodes_int64s(text: str) -> Result<[int64], JsonError> {
     if text[0] == '[' { return decode<[int64]>(text) }
     return Ok([decode<int64>(text)?])
-}
-
-pub fun decode<T: FromJson>(text: str) -> Result<T, JsonError> {
-    let j = parse_with(text, true)?
-    return T.from_json(j)
 }
 
 // The error for a value `found` where `expected` (in words: "an integer",
