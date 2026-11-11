@@ -44,3 +44,5 @@ No seed staging: the seed compiles only the compiler, whose `std.rt` and `std.pl
 ## Review 2026-11-09
 
 Signed off in [[Project/Review-2026-11-09]], with a follow-up in [[MYLA-426]]: wasm32 maps unknown errnos to EIO.
+
+The follow-up is done in [[MYLA-426]] (in review, 2026-11-11): wasm32 maps all of WASI's errnos onto Linux's, and one WASI doesn't define stays `Other` and its own.

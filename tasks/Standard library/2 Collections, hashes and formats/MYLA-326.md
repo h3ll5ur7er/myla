@@ -32,3 +32,5 @@ Built from master after wave 1 (087e4fe).
 ## Review 2026-11-09
 
 Signed off in [[Project/Review-2026-11-09]], with a follow-up in [[MYLA-426]]: `glob_in` differs from `walk` + `matches` for a dangling link named literally and for a file before `/**`.
+
+The follow-up is done in [[MYLA-426]] (in review, 2026-11-11): a literal component is found as `walk` lists it (a dangling link too), and a file before `/**` matches, as `walk` and `matches` say.

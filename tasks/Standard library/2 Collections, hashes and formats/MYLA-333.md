@@ -29,3 +29,5 @@ Wave 2 of [[Project/Standard-library-roadmap]], roadmap #60. A declarative parse
 ## Review 2026-11-09
 
 Signed off in [[Project/Review-2026-11-09]], with a follow-up in [[MYLA-426]]: after `--` a command is still a command; a subcommand's error prints the parent's usage; a spec isn't validated.
+
+The follow-up is done in [[MYLA-426]] (in review, 2026-11-11): after `--` a command's name is an argument, `parse_or_exit` prints the usage of the spec whose arguments were wrong, and a spec that can't be parsed panics where it is built.
