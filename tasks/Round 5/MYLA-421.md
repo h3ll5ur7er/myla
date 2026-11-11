@@ -2,12 +2,23 @@
 id: MYLA-421
 title: "P7 Regex: the lazy DFA and a differential job"
 type: bug
-status: todo
+status: review
 priority: high
 labels: [std, regex, round-5]
 ---
 Work package P7 of [[Project/Review-2026-11-09]] (wave A2). Files: `lib/std/regex.my`, its corpus. Reopens [[MYLA-335]].
 
-- [ ] H10: fix the DFA, or send a pattern with an assertion inside a repetition to the Pike VM; `find` and `captures` of one call agree
-- [ ] Long-text cases (96 bytes and more) in the corpus
-- [ ] A differential job against Go's or Python's regex, from the review's oracle, as a burn test that runs when the oracle is installed
+- [x] H10: fix the DFA, or send a pattern with an assertion inside a repetition to the Pike VM; `find` and `captures` of one call agree
+- [x] Long-text cases (96 bytes and more) in the corpus
+- [x] A differential job against Go's or Python's regex, from the review's oracle, as a burn test that runs when the oracle is installed
+
+## Evidence
+
+- **The cause** (H10): the forward DFA followed a position's threads in two passes: the first stopped at an assertion not yet decided (the byte after the position isn't known yet), and the transition went on from it in a second pass with a fresh set of visited instructions. The Pike VM follows them in one pass and visits each instruction once per position. In `(^|a)+` at 0, the Pike VM reaches the loop's head again after `^` and stops there (already visited), so the loop's exit, an empty match, comes before `a`; the DFA's second pass went round once more and put `a` first: 0-1 against Go's 0-0. Only an assertion inside a repetition whose rest can be empty does this (a path from the assertion back to instructions visited before it); the reverse DFA isn't affected, as its order doesn't matter and both passes reach the same threads. `find` and `captures` disagreed because `captures` takes only the start from the DFAs and runs the Pike VM from there.
+- **Fixed in the DFA, not routed to the Pike VM**, because the fix is small and exact: a forward state whose threads hold an undecided assertion keeps the instructions they were followed from (its seeds), and its transition follows them again in one pass with the assertions decided, which is the Pike VM's closure at that position. States without an undecided assertion keep their threads, as before, so patterns without assertions (and the reverse DFA) build the same states. `lib/std/regex.my`, `Dfa.kept`, `start_state`, `transition`.
+- **The reproducer** `repro/std/bug_dfa.my`: before, on texts padded to 96 bytes, `(^|a)+` found 0-1 (captures 0-0), `(?:^|a)+` 0-1, `(b*?\B)*`'s third match 2-4, `a(?:a*?\B)+` 0-2, `(?:\b|b)+` 2-3; after, every line gives what the short text gives and Go gives.
+- **Tests, before and after** (`build/myla test lib/std/regex.my --stdlib lib --native`): ten corpus cases of assertions inside repetitions (in `spans`, which now also searches the whole match with the DFAs alone, as `find` does) and thirteen cases on texts of 96 bytes and more (`long_spans`: `find`, `captures`, `is_match`, `find_all` and the Pike VM alone must agree; results from Go 1.24.7). Before the fix 13 of them failed (1954/1967); after, 1967/1967 interpreted, `--native`, `--target aarch64-linux` under qemu (6 min) and `--target wasm32-wasi` under Node.
+- **The differential job** `tests/burn/test_regex.py`: the review's generator and Go oracle; 40,000 cases against Go natively (75 % on texts of 96 bytes and more), 10,000 against Python's `re` natively for the patterns where no repetition can match empty (a case `re` doesn't answer in 20 ms is left out), 100 and 60 interpreted. On the base `test_go_natively` fails, 62 of 40,000 cases disagree; after, all four pass (28 s). By hand, ten more corpora of 20,000 of the review's generator (seeds 2–11, long texts and mixed lengths): 248 disagreements with Go on the base, 0 after; one of 20,000 also with a driver built `--checked`: 0, no trap. The Python oracle agreed with Go on 19,769 of 19,769 cases of its subset.
+- **Go's own bug**, worked around in the job: go1.24.7's parser merges a case-sensitive literal `A` with a case-folded `a` that starts another alternative, `A|(?i:a)c` finds 2-3 in `acA` where Python and std.regex find 0-2. The Go corpus has no case-sensitive `A` in patterns (texts still have it); the Python corpus has.
+- **Measured** natively before and after (a scratch program, 10 MB of words and addresses, the median of five runs, twice each, on the shared container): literal `needle` 14.2/13.5 ms before, 14.5/14.8 ms after; `\w+@\w+\.com` `find_all` 43.4/43.5 and 42.9/43.7 ms; `\w+@\w+\.org` `is_match` 43.5/41.3 and 40.0/42.4 ms; 100 alternatives 40.5/45.4 and 43.5/42.5 ms; `\bthe\b` `find_all` 60.0/64.6 and 63.9/64.5 ms; `(?m)^\w+` 70.5/68.0 and 67.0/67.8 ms; `\b\w+\b` (2 million matches) 348/332 and 332/324 ms; `(?:\w+\b ?)+\n`, an assertion inside a repetition, 118/119 and 119/119 ms; `(a*)*b` on a million `a`s 4.00/3.99 and 4.23/4.05 ms. No change beyond the noise.
+- **Suites:** `scripts/bootstrap.sh` reaches the byte-identical fixed point (`selfhost/embedded_std.my` restored after it). `scripts/test.sh fast`: 829 tests, the one failure `test_embedded_std` (expected until the seed commit). `tests.burn.test_std_modules`, `test_doc_blocks`, `test_regex`, `test_lsp`: 176 tests OK. `scripts/test.sh`: 1,482 tests, 336 skipped, the one failure `test_embedded_std`. `test_regex` takes about 28 s, so it joins `test.sh fast`'s slow modules (`scripts/test.sh`).
