@@ -201,6 +201,19 @@ pub fun write_to_file(path: str, contents: str) -> Result<(), IoError> {
     return Err(from_errno(err))
 }
 
+// The bytes of the file at `path`, all of them (MYLA-339's follow-up):
+// `read_to_string`'s, as a list.
+pub fun read_bytes(path: str) -> Result<[uint8], IoError> {
+    let text = read_to_string(path)?
+    return Ok(bytes_m.from_str(text))
+}
+
+// `b` written to `path`, creating or truncating the file (mode 0644), as
+// `write_to_file` writes a string.
+pub fun write_bytes(path: str, b: [uint8]) -> Result<(), IoError> {
+    return write_to_file(path, bytes_m.to_str(b))
+}
+
 // --- directories (MYLA-88) ---------------------------------------------------
 //
 // Four primitives make the system calls, the rest is Myla (D64):
@@ -927,6 +940,29 @@ fun line(o: Option<str>) -> str {
 }
 
 // Written, closed, opened again, read, measured and sought.
+// Any bytes written by `write_bytes` read back by `read_bytes`; a missing
+// file is `NotFound`.
+#test
+fun whole_files_of_bytes() -> Result<(), IoError> {
+    let dir = make_temp_dir()?
+    defer { let gone = remove_dir_all(dir) }
+    var b: [uint8] = []
+    var i = 0
+    while i < 600 {
+        b.push((i % 256) as uint8)
+        i += 1
+    }
+    let path = joined(dir, "bytes")
+    write_bytes(path, b)?
+    assert(read_bytes(path)? == b, "the bytes read back")
+    assert(read_to_string(path)?.len() == 600, "as many as written")
+    write_bytes(path, [])?
+    assert(read_bytes(path)? == [], "an empty file")
+    assert(error_of(read_bytes(joined(dir, "missing"))) == "NotFound", "a missing file")
+    assert(error_of(write_bytes(joined(dir, "no/such"), b)) == "NotFound", "a missing directory")
+    return Ok(())
+}
+
 #test
 fun file_round_trip() -> Result<(), IoError> {
     let dir = make_temp_dir()?

@@ -358,6 +358,34 @@ fun main() {
 """
 BYTES_IO_OUT = "0\n0\n3 0 2 0\n253 3 255\n254 253\n0 0\n0 0\n0 0\n0 9\n9\nok\n"
 
+# S1 (MYLA-420): a short read gives a list, or a string, of its own size,
+# not the cell its request asked for: 80 reads each of `__read_bytes` and
+# `__read` asking for 64 MiB and given 3 bytes, all kept, asked for 10 GiB,
+# more than wasm32's memory holds (it ran out of memory there).
+KEPT = HELPERS + """from std.process import args
+
+#allow(primitive)
+fun main() {
+    let path = args()[1] + "/k.bin"
+    let w = __open(path, 2 | 4 | 8, 420)
+    __write_bytes(w, [1u8, 2u8, 3u8])
+    __close(w)
+    let r = __open(path, 1, 0)
+    var kept: [[uint8]] = []
+    var texts: [str] = []
+    var i = 0
+    while i < 80 {
+        let a = __seek(r, 0, 0)
+        kept.push(__read_bytes(r, 1 << 26))
+        let b = __seek(r, 0, 0)
+        texts.push(__read(r, 1 << 26))
+        i += 1
+    }
+    __close(r)
+    print(f"{kept.len()} {kept[79].len()} {kept[79][2]} {texts.len()} {texts[79].len()}")
+}
+"""
+
 PIPES = HELPERS + """fun show(h: [int]) -> str {
     var sb = StringBuilder()
     for x in h {
@@ -573,6 +601,15 @@ class Bytes(unittest.TestCase):
                 interp = selfhost_run(path, [a])
                 native = build_and_run_full(Program(path), args=[b], argv0=path)
             self.assertEqual(interp, (BYTES_IO_OUT, "", 0))
+            self.assertEqual(native, interp)
+
+    def test_short_reads_keep_their_size(self):
+        with tempfile.TemporaryDirectory() as a, tempfile.TemporaryDirectory() as b:
+            with tempfile.TemporaryDirectory() as tmp:
+                path = write_program(tmp, KEPT)
+                interp = selfhost_run(path, [a])
+                native = build_and_run_full(Program(path), args=[b], argv0=path)
+            self.assertEqual(interp, ("80 3 3 80 3\n", "", 0))
             self.assertEqual(native, interp)
 
 

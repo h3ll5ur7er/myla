@@ -28,16 +28,26 @@ pub struct IniError {
     line: int,
 }
 
-impl Format for IniError {
-    // `line: what`, e.g. `3: a line without '=' or ':'`.
-    #test(IniError { kind: IniErrorKind.NoSeparator, line: 3 }, "")["3: a line without '=' or ':'"]
-    fun format(self, spec: str) -> str {
-        let what = match self.kind {
+impl IniError {
+    // What is wrong, without the line (D168).
+    #test(IniError { kind: IniErrorKind.BadSection, line: 1 })["a section header without its closing ']' or its name"]
+    #test(IniError { kind: IniErrorKind.NoSeparator, line: 3 })["a line without '=' or ':'"]
+    #test(IniError { kind: IniErrorKind.EmptyKey, line: 2 })["a value without a key"]
+    fun message(self) -> str {
+        return match self.kind {
             BadSection => "a section header without its closing ']' or its name"
             NoSeparator => "a line without '=' or ':'"
             EmptyKey => "a value without a key"
         }
-        return f"{self.line}: {what}"
+    }
+}
+
+impl Format for IniError {
+    // `line: what`, e.g. `3: a line without '=' or ':'`: the line, then
+    // `message()`.
+    #test(IniError { kind: IniErrorKind.NoSeparator, line: 3 }, "")["3: a line without '=' or ':'"]
+    fun format(self, spec: str) -> str {
+        return f"{self.line}: {self.message()}"
     }
 }
 
@@ -64,6 +74,10 @@ pub fun new() -> Ini {
 #test("\n[s\n")[Err(IniError { kind: IniErrorKind.BadSection, line: 2 })]
 #test("[ ]")[Err(IniError { kind: IniErrorKind.BadSection, line: 1 })]
 #test("= 1")[Err(IniError { kind: IniErrorKind.EmptyKey, line: 1 })]
+#test("[é")[Err(IniError { kind: IniErrorKind.BadSection, line: 1 })] // H9: not cut inside the character
+#test("[xé\nk = v")[Err(IniError { kind: IniErrorKind.BadSection, line: 1 })]
+#test("[a]\n[ü")[Err(IniError { kind: IniErrorKind.BadSection, line: 2 })]
+#test("[é]\nk = ü")[Ok(Ini { entries: ["": [:], "é": ["k": "ü"]] })]
 pub fun parse(text: str) -> Result<Ini, IniError> {
     var doc = new()
     var section = ""
@@ -81,8 +95,12 @@ pub fun parse(text: str) -> Result<Ini, IniError> {
             continue
         }
         if line[0] == '[' {
+            // the `]` first: a byte before it is the end of a character
+            if line.len() < 2 || line[line.len() - 1] != ']' {
+                return Err(IniError { kind: IniErrorKind.BadSection, line: n })
+            }
             let name = trimmed(line, 1, line.len() - 1)
-            if line[line.len() - 1] != ']' || line.len() < 2 || name.len() == 0 {
+            if name.len() == 0 {
                 return Err(IniError { kind: IniErrorKind.BadSection, line: n })
             }
             section = name
