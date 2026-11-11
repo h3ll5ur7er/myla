@@ -93,7 +93,7 @@ pub fun backend_std_functions() -> [str] {
         "std$rt$fmod", "std$rt$free", "std$rt$free_tasks", "std$rt$func_drop", "std$rt$func_retain",
         "std$rt$key_bool_text", "std$rt$key_str_text", "std$rt$key_text", "std$rt$list_grow", "std$rt$list_index_text",
         "std$rt$map_find_h", "std$rt$map_keys_h", "std$rt$map_lookup", "std$rt$map_new", "std$rt$map_put_slot",
-        "std$rt$map_shrink", "std$rt$map_shrink_h", "std$rt$map_slot_h", "std$rt$panic_report", "std$rt$panic_report_tasks",
+        "std$rt$map_shrink", "std$rt$map_shrink_h", "std$rt$map_slot_h", "std$rt$map_walk", "std$rt$panic_report", "std$rt$panic_report_tasks",
         "std$rt$print_bool", "std$rt$print_char", "std$rt$print_int", "std$rt$print_str", "std$rt$print_uint",
         "std$rt$range_text", "std$rt$sb_append_byte", "std$rt$sb_append_bytes", "std$rt$sb_append_char", "std$rt$sched_init",
         "std$rt$sleep_frame", "std$rt$str_char_at", "std$rt$str_cmp", "std$rt$str_concat", "std$rt$str_concat3",

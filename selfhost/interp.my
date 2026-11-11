@@ -2657,6 +2657,20 @@ impl Interp {
                         }
                         return
                     },
+                    // a map's places from its first that may hold a key, the
+                    // holes skipped, without the list of its keys (MYLA-496):
+                    // `m` is the loop's own copy, so a change in the body
+                    // leaves the keys it walks
+                    Value.VMap(m) => {
+                        var i = m.lo
+                        while i < m.ks.len() {
+                            if m.here[i] {
+                                if !self.loop_iteration(var_name, m.ks[i], body) { return }
+                            }
+                            i = i + 1
+                        }
+                        return
+                    },
                     _ => {},
                 }
                 for item in self.iter_items(v) {
@@ -5609,7 +5623,10 @@ fun sb_bytes(v: Value) -> [int64] {
 // (`hashes`, as `Interp.key_hash` gives it): `heads` the first place of
 // each hash, `nexts` the next place of the same hash, -1 at the end. The
 // interpreter finds such a key among those of its hash with `==`
-// (`Interp.key_place`), which may call a type's own `eq`.
+// (`Interp.key_place`), which may call a type's own `eq`. Every place below
+// `lo` is a hole, so a `for` that leaves at its first key costs the holes a
+// removal of the oldest keys left since the last loop, not the map's size
+// (MYLA-496).
 pub struct MapV {
     ks: [Value],
     vs: [Value],
@@ -5620,18 +5637,19 @@ pub struct MapV {
     hashes: [int64],
     heads: [int64: int32],
     nexts: [int32],
+    lo: int32,
 }
 
-#test()[MapV { ks: [], vs: [], here: [], ints: [:], strs: [:], count: 0, hashes: [], heads: [:], nexts: [] }]
+#test()[MapV { ks: [], vs: [], here: [], ints: [:], strs: [:], count: 0, hashes: [], heads: [:], nexts: [], lo: 0 }]
 pub fun new_mapv() -> MapV {
-    return MapV { ks: [], vs: [], here: [], ints: [:], strs: [:], count: 0, hashes: [], heads: [:], nexts: [] }
+    return MapV { ks: [], vs: [], here: [], ints: [:], strs: [:], count: 0, hashes: [], heads: [:], nexts: [], lo: 0 }
 }
 
 // The map of `ks` and `vs`, inserted in that order (a key given again
 // replaces the value, keeping its first place); a compound key's hash its
 // structure's (`value_hash`).
-#test([Value.VInt(1)], [Value.VInt(2)])[MapV { ks: [Value.VInt(1)], vs: [Value.VInt(2)], here: [true], ints: [1: 0], strs: [:], count: 1, hashes: [0], heads: [:], nexts: [-1] }]
-#test([Value.VStr("a"), Value.VStr("a")], [Value.VInt(1), Value.VInt(2)])[MapV { ks: [Value.VStr("a")], vs: [Value.VInt(2)], here: [true], ints: [:], strs: ["a": 0], count: 1, hashes: [0], heads: [:], nexts: [-1] }]
+#test([Value.VInt(1)], [Value.VInt(2)])[MapV { ks: [Value.VInt(1)], vs: [Value.VInt(2)], here: [true], ints: [1: 0], strs: [:], count: 1, hashes: [0], heads: [:], nexts: [-1], lo: 0 }]
+#test([Value.VStr("a"), Value.VStr("a")], [Value.VInt(1), Value.VInt(2)])[MapV { ks: [Value.VStr("a")], vs: [Value.VInt(2)], here: [true], ints: [:], strs: ["a": 0], count: 1, hashes: [0], heads: [:], nexts: [-1], lo: 0 }]
 pub fun mapv_of(ks: [Value], vs: [Value]) -> MapV {
     var m = new_mapv()
     var i = 0
@@ -5790,6 +5808,9 @@ impl MapV {
         self.vs[j] = Value.VUnit
         self.here[j] = false
         self.count = self.count - 1
+        if j == self.lo {
+            while self.lo < self.ks.len() && !self.here[self.lo] { self.lo = self.lo + 1 }
+        }
         let holes = self.ks.len() - self.count
         if holes >= 16 && holes > self.count { self.compact() }
     }
@@ -5821,6 +5842,7 @@ impl MapV {
         self.vs = vs
         self.here = here
         self.hashes = hashes
+        self.lo = 0
     }
 }
 

@@ -268,7 +268,7 @@ The position is that of the expression that fails: an index's `[`, a call's `(` 
 | --- | --- | --- |
 | Division or remainder by zero | `division by zero` / `modulo by zero` | the same |
 | List or string index out of bounds | `list index 5 out of bounds (len 2)`, `string index 9 out of bounds (len 3)` | the same |
-| Missing map key (`m[k]`) | `map key 'b' not found` (the key as Python's `repr` writes it: `'b'`, `"it's"`, `5`, `False`, `(3, 'b')`; a `char` key as its code point) | the same for a key of an integer, `char`, `bool` or `str` type or a tuple of such; `map key not found` for a struct, enum or list key |
+| Missing map key (`m[k]`) | `map key 'b' not found` (the key as Python's `repr` writes it: `'b'`, `"it's"`, `5`, `False`, `(3, 'b')`; a `char` key as its code point) | the same, for a key of any type (a struct's `P { x: 1 }`, an enum's `Color.Red`, a list's `[1, 2]`, [[MYLA-441]]) |
 | `pop` on an empty list | `pop from an empty list` | the same |
 | `assert`, `panic`, `unreachable` | the message | the same |
 | An integer `as char` that isn't a Unicode scalar value (a surrogate, above U+10FFFF) | `invalid char: 55296 is not a Unicode scalar value` | the same |

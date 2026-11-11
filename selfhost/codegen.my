@@ -23,7 +23,7 @@ from .inline import inlinable, inline_calls, same_module, may_inline, merge_bloc
 from .hoist import hoist_cows
 from .ranges import widen_counters
 from .anf import Norm, new_norm
-from .lower import async_fnval_ir, lower_function, lower_lambda, blocked_types, Lowered, myla_runtime_function, derived_eq_ir, compound_eq_ir, tuple_hash_ir, key_hash_ir, key_eq_ir, map_find_ir, map_put_ir, map_keys_ir, walk_ir, drop_entry_ir, dropb_slow_ir, list_drop_slow_ir, map_drop_slow_ir, drop_drain_ir, trap_value_ir, trap_text_fn, clone_ir, deep_walk_ir, deep_cell_ir, deep_members_ir, deep_cell_has_members, env_deep_members_ir, Routine, Want, env_drop_ir, env_deep_ir, partial_ir, frame_new_ir
+from .lower import async_fnval_ir, lower_function, lower_lambda, blocked_types, Lowered, myla_runtime_function, derived_eq_ir, compound_eq_ir, tuple_hash_ir, key_hash_ir, key_eq_ir, map_find_ir, map_put_ir, map_keys_ir, key_repr_ir, walk_ir, drop_entry_ir, dropb_slow_ir, list_drop_slow_ir, map_drop_slow_ir, drop_drain_ir, trap_value_ir, trap_text_fn, clone_ir, deep_walk_ir, deep_cell_ir, deep_members_ir, deep_cell_has_members, env_deep_members_ir, Routine, Want, env_drop_ir, env_deep_ir, partial_ir, frame_new_ir
 import .ir_x86 as ir_x86
 import .ownership as ownership
 import .runtime_x86 as runtime_x86
@@ -3560,6 +3560,7 @@ impl CodeGen {
         if w.kind == 11 { r = map_find_ir(self, w.t, name) }
         if w.kind == 12 { r = map_put_ir(self, w.t, name) }
         if w.kind == 13 { r = map_keys_ir(self, w.t, name) }
+        if w.kind == 14 { r = key_repr_ir(self, w.t, name) }
         self.emit_routine(r.f, -1, 0, 0)
         self.request_wants(r.wants)
     }
@@ -4501,9 +4502,10 @@ fun lp(tok: str) -> str {
 // tuple's `hash`; for a map key type `T` with routines of its own
 // (`map_hashed`), 9 `__khash_<T>` its hash, 10 `__keq_<T>` its equality,
 // 11 `__mfind_<T>` its slot, 12 `__mput_<T>` its slot made, 13 `__mkeys_<T>`
-// the keys of a map.
+// the keys of a map; 14 `__krepr_<T>` a missing key's text (MYLA-441).
 #test(Want { kind: 7, t: Type.TTuple([Type.TInt(32, true), Type.TStr]), clone: false })["__eq_.T4.i324.str"]
 #test(Want { kind: 8, t: Type.TTuple([Type.TChar]), clone: false })["__thash_.T5.char"]
+#test(Want { kind: 14, t: Type.TList(Type.TStr), clone: false })["__krepr_.L4.str"]
 pub fun type_job_name(w: Want) -> str {
     if w.kind == 8 { return "__thash_" + mono_token(w.t) }
     if w.kind == 9 { return "__khash_" + mono_token(w.t) }
@@ -4511,6 +4513,7 @@ pub fun type_job_name(w: Want) -> str {
     if w.kind == 11 { return "__mfind_" + mono_token(w.t) }
     if w.kind == 12 { return "__mput_" + mono_token(w.t) }
     if w.kind == 13 { return "__mkeys_" + mono_token(w.t) }
+    if w.kind == 14 { return "__krepr_" + mono_token(w.t) }
     return "__eq_" + mono_token(w.t)
 }
 

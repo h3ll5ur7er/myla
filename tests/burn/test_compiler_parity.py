@@ -147,6 +147,165 @@ fun main() {
     print(f"{e.len()} {show(e)}")
 }
 """,
+    # MYLA-496: a `for` over a map walks its slots, without the list of keys
+    "for_over_a_map_walks_its_slots": r"""// MYLA-496: `for k in m` walks the map's slots in the order of insertion
+// without the list of its keys: the keys it started with whatever the body
+// does to the map, past the gaps of removed keys and taken tombstones, over
+// string, narrow and compound keys, a `let` map, a field and a list's map,
+// with `break`, `continue` and `return`, nested, and in an async function
+#derive(Eq, Hash)
+struct P {
+    x: int,
+    name: str,
+}
+
+struct Holder {
+    m: [str: int],
+}
+
+fun show(m: [int: int]) -> str {
+    var sb = StringBuilder()
+    for k in m {
+        sb.append(f"{k}={m[k]} ")
+    }
+    return sb.build()
+}
+
+fun ints(xs: [int]) -> str {
+    var sb = StringBuilder()
+    for x in xs { sb.append(f"{x},") }
+    return sb.build()
+}
+
+// the first key at or above `at`, by a loop that returns from inside
+fun first_from(m: [int: int], at: int) -> int {
+    for k in m {
+        if k >= at { return k }
+    }
+    return -1
+}
+
+async fun total(m: [str: int]) -> int {
+    var t = 0
+    for k in m {
+        t += m[k]
+    }
+    return t
+}
+
+#main
+async fun main() {
+    // a queue: the oldest key taken until none is left
+    var q: [int: int] = [:]
+    for i in 0..3000 { q[i] = i }
+    var taken = 0
+    var sum = 0
+    while q.len() > 0 {
+        var first = -1
+        for k in q {
+            first = k
+            break
+        }
+        sum += first
+        q.remove(first)
+        taken += 1
+        // now and then a key goes in again, at the end
+        if taken % 1000 == 0 { q[first] = first }
+    }
+    print(f"{taken} {sum}")
+
+    // the body changes the map: the loop walks the keys it began with
+    var m: [int: int] = [:]
+    for i in 0..10 { m[i] = i * i }
+    var seen: [int] = []
+    for k in m {
+        seen.push(k)
+        if k % 2 == 0 { m.remove(k + 1) }
+        m[100 + k] = k
+    }
+    print(f"{ints(seen)} {m.len()}")
+    print(show(m))
+    // tombstones taken by new keys: the order is still the insertion's
+    var t: [int: int] = [:]
+    for i in 0..8 { t[i] = i }
+    t.remove(2)
+    t.remove(5)
+    t[2] = 20
+    t[9] = 90
+    t.remove(0)
+    t[5] = 50
+    print(show(t))
+    print(f"{first_from(t, 4)} {first_from(t, 8)} {first_from(t, 100)}")
+    // continue, and a nested loop over the same map
+    var pairs = 0
+    for a in t {
+        if a % 2 == 1 { continue }
+        for b in t {
+            if b > a { pairs += 1 }
+        }
+    }
+    print(pairs)
+
+    // string keys, through removals and a compaction
+    var w: [str: int] = [:]
+    for i in 0..200 { w[f"k{i}"] = i }
+    for i in 0..200 {
+        if i % 40 != 3 { w.remove(f"k{i}") }
+    }
+    var sb = StringBuilder()
+    for k in w { sb.append(k + " ") }
+    print(sb.build())
+    // a `let` map, a field's and a list's
+    let fixed = w
+    var n = 0
+    for k in fixed { n += fixed[k] }
+    var h = Holder { m: w }
+    for k in h.m { h.m.remove(k) }
+    let ms = [w, h.m]
+    var lens: [int] = []
+    for mm in ms {
+        var c = 0
+        for k in mm { c += k.len() }
+        lens.push(c)
+    }
+    print(f"{n} {h.m.len()} {ints(lens)}")
+
+    // compound and narrow keys
+    var cm: [P: int] = [:]
+    for i in 0..6 { cm[P { x: i, name: f"p{i}" }] = i }
+    cm.remove(P { x: 0, name: "p0" })
+    cm.remove(P { x: 3, name: "p3" })
+    cm[P { x: 0, name: "p0" }] = 9
+    var cs = StringBuilder()
+    for k in cm { cs.append(f"{k.name}:{cm[k]} ") }
+    print(cs.build())
+    var lm: [[int]: str] = [[1]: "a", [2, 3]: "b", []: "c"]
+    lm.remove([1])
+    lm[[1]] = "d"
+    var ls = StringBuilder()
+    for k in lm { ls.append(f"{k.len()}{lm[k]} ") }
+    print(ls.build())
+    var bm: [uint8: bool] = [:]
+    for i in 0..5 { bm[(250 + i) as uint8] = i % 2 == 0 }
+    bm.remove(251)
+    var bs = StringBuilder()
+    for k in bm { bs.append(f"{k}={bm[k]} ") }
+    print(bs.build())
+    var tm: [(int, char): int] = [(1, 'a'): 1, (2, 'b'): 2]
+    for k in tm { tm[(k.0 + 10, k.1)] = k.0 }
+    var ts = StringBuilder()
+    for (a, c) in tm { ts.append(f"{a}{c} ") }
+    print(ts.build())
+
+    // empty maps, and one emptied
+    var e: [int: int] = [:]
+    for k in e { print(k) }
+    e[1] = 1
+    e.remove(1)
+    for k in e { print(k) }
+    print(f"{e.len()} {await total(fixed)}")
+}
+""",
     # D173 (MYLA-379): `IoError`'s `message()` and `Format`
     "io_error_text": r"""// D173 (MYLA-379): an `IoError`'s `message()` and `Format`: the cause in
 // words, its name after it
@@ -9746,14 +9905,57 @@ class TestCompilerParity(unittest.TestCase):
             "bool_key": "let m = [true: 2]\n    let k = false\n    print(m[k])",
             "tuple_key": "let m = [(1, \"a\"): 2]\n    let k = (3, \"b\")\n    print(m[k])",
             "int8_key": "let m: [int8: int] = [1: 2]\n    let k: int8 = -5\n    print(m[k])",
+            # MYLA-441: a struct's, an enum's and a list's key too, natively
+            # by a `__krepr_<T>` routine per type
+            "struct_key": "let m = [P { x: 0, ys: [], c: 'a', b: true }: 1]\n"
+                          "    let k = P { x: 1, ys: [7, 255], c: 'q', b: false }\n    print(m[k])",
+            "empty_struct_key": "var m: [Empty: int] = [:]\n    let k = Empty {}\n    print(m[k])",
+            "unit_variant_key": "let m = [Color.Red: 1]\n    let k = Color.Green\n    print(m[k])",
+            "variant_key": "let m = [Color.Red: 1]\n    let k = Color.Rgb(-1, 2, 3)\n    print(m[k])",
+            "named_variant_key": "let m = [Color.Red: 1]\n    let k = Color.Named(\"it's \\\"x\\\"\")\n    print(m[k])",
+            "tuple_of_struct_key": "let m = [(P { x: 0, ys: [], c: 'a', b: true }, 1): 1]\n"
+                                   "    let k = (P { x: 2, ys: [1], c: 'b', b: true }, 9)\n    print(m[k])",
+            "list_key": "let m = [[1, 2]: 1]\n    let k = [3, -4, 5]\n    print(m[k])",
+            "empty_list_key": "let m = [[1, 2]: 1]\n    let k: [int] = []\n    print(m[k])",
+            "nested_list_key": "let m = [[[\"a\"]]: 1]\n    let k = [[\"b\", \"c\"], [], [\"d\"]]\n    print(m[k])",
+            "list_of_bools_key": "let m = [[true]: 1]\n    let k = [false, true]\n    print(m[k])",
+            "list_of_chars_key": "let m = [['a']: 1]\n    let k = ['x', 'y']\n    print(m[k])",
+            "list_of_tuples_key": "let m = [[(1, 'a')]: 1]\n    let k = [(2, 'b'), (3, 'c')]\n    print(m[k])",
+            "option_key": "let m = [Some(1): 1]\n    let k: Option<int> = None\n    print(m[k])",
+            "option_payload_key": "let m = [Some(1): 1]\n    let k = Some(5)\n    print(m[k])",
+            "generic_struct_key": "let m = [Pair { a: 1, b: \"x\" }: 1]\n    let k = Pair { a: 2, b: \"y\" }\n    print(m[k])",
+            "enum_of_structs_key": "let m = [Shape.Dot: 1]\n"
+                                   "    let k = Shape.Line(P { x: 1, ys: [2], c: 'c', b: false }, [Color.Red, Color.Green])\n"
+                                   "    print(m[k])",
+            "recursive_enum_in_a_key": "let m = [Holder { t: Tree.Leaf }: 1]\n"
+                                       "    let k = Holder { t: Tree.Node(Tree.Leaf, 4, Tree.Node(Tree.Leaf, 5, Tree.Leaf)) }\n"
+                                       "    print(m[k])",
+            "unit_payload_key": "let m = [U.B: 1]\n    let k = U.A(())\n    print(m[k])",
+            "float_fields_key": "var m: [F: int] = [:]\n    m[F { x: 1.0, y: 2.0f32, r: Ok(1) }] = 1\n"
+                                "    print(m[F { x: 0.1, y: 0.1f32, r: Err(\"e\") }])",
+            "list_key_of_a_place":"var m = [[1]: [2]]\n    let k = [5, 6]\n    m[k][0] = 3\n    print(m[[1]][0])",
+            "uint64_key_in_a_struct":"let m = [W { v: 1 }: 1]\n    let k = W { v: 7 }\n    print(m[k])",
             "key_of_a_place": "var m = [1: [2]]\n    let k = 5\n    m[k][0] = 3\n    print(m[1][0])",
             "surrogate": "let n = 55296\n    print(n as char)",
             "char_plus": "let c = 'a'\n    print(c + 1114111)",
             "append_range": "var sb = StringBuilder()\n    let a = 2\n    sb.append(\"abc\", a, 9)\n    print(sb.build())",
         }
+        # the key types of the cases of a struct, enum or list key
+        decls = ("#derive(Eq, Hash)\nstruct P { x: int, ys: [uint8], c: char, b: bool }\n"
+                 "#derive(Eq, Hash)\nstruct Empty {}\n"
+                 "#derive(Eq, Hash)\nenum Color { Red, Green, Rgb(int, int, int), Named(str) }\n"
+                 "#derive(Eq, Hash)\nstruct Pair<A, B> { a: A, b: B }\n"
+                 "#derive(Eq, Hash)\nenum Shape { Dot, Line(P, [Color]) }\n"
+                 "#derive(Eq, Hash)\nenum Tree { Leaf, Node(Tree, int, Tree) }\n"
+                 "#derive(Eq, Hash)\nstruct Holder { t: Tree }\n"
+                 "#derive(Eq, Hash)\nstruct W { v: uint64 }\n"
+                 "#derive(Eq, Hash)\nenum U { A(()), B }\n"
+                 "struct F { x: float, y: float32, r: Result<int, str> }\n"
+                 "impl Eq for F {\n    fun eq(self, other: F) -> bool { return self.x == other.x }\n}\n"
+                 "impl Hash for F {\n    fun hash(self, h: Hasher) -> Hasher { return h.add(self.x as int64) }\n}\n")
         for name, body in cases.items():
             with self.subTest(case=name), tempfile.TemporaryDirectory() as tmp:
-                path = write_program(tmp, "fun main() {\n    " + body + "\n}\n")
+                path = write_program(tmp, decls + "fun main() {\n    " + body + "\n}\n")
                 out, err, code = selfhost_run(path)
                 self.assertEqual(code, 1, err)
                 lines = err.splitlines()
@@ -10006,6 +10208,8 @@ class TestCompilerParity(unittest.TestCase):
 # longer holds (a later decision changed its meaning) or there is none (a
 # program added or changed since): its output, pinned here.
 PINNED = {
+    # MYLA-496: new; native code gives the same, before the change and after
+    "for_over_a_map_walks_its_slots": '3003 4504497\n0,1,2,3,4,5,6,7,8,9, 15\n0=0 2=4 4=16 6=36 8=64 100=0 101=1 102=2 103=3 104=4 105=5 106=6 107=7 108=8 109=9 \n1=1 3=3 4=4 6=6 7=7 2=20 9=90 5=50 \n4 9 -1\n12\nk3 k43 k83 k123 k163 \n415 0 16,0,\np1:1 p2:2 p4:4 p5:5 p0:9 \n2b 0c 1d \n250=true 252=true 253=false 254=true \n1a 2b 11a 12b \n0 415\n',
     # MYLA-429: new; native code gives the same, before the change and after
     "map_shrinks_on_remove": "6 3=6 202=404 401=802 600=1200 799=1598 998=1996 \n1000 0 1998 500\n3=6 202=404 401=802 600=1200 799=1598 998=1996 5000=1 201=7 \n8 0 []\n1=1 \n6 k7:v7,w7 k57:v57,w57 k107:v107,w107 k157:v157,w157 k207:v207,w207 k257:v257,w257 \n3 false true\n1 z false\n2 98 99 1\n5 1,-1=p1 98,-98=p98 195,-195=p195 292,-292=p292 389,-389=p389 \n5 1/t1 98/t98 195/t195 292/t292 389/t389 98 false\n1 s199 200 1 s0\n10 0=0 3=1 6=2 9=3 2=4 5=5 8=6 1=7 4=8 7=9 \n",
     # D175: a const that overflows is an error (`G + G` was 144), and the
