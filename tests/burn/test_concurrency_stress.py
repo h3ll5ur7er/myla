@@ -11,10 +11,12 @@ reproducible. The examples Myla
 rejects at compile time are in the error corpus (examples/errors/), the
 documented limits on the Concurrency page."""
 import os
+import shutil
 import subprocess
 import tempfile
 import unittest
 
+from tests.burn._hang import run_watched
 from tests.burn._native import CAN_BUILD_NATIVE, SKIP_REASON
 from tests.burn._tools import STDLIB_ROOT
 _DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "concurrency_stress")
@@ -156,11 +158,12 @@ SCHEDULES = ["fifo", "seed:1", "seed:2", "seed:3"]
 
 
 def _run(cmd, env=None):
+    # a hang leaves its stacks and a core (`_hang`, MYLA-418)
     try:
-        p = subprocess.run(cmd, capture_output=True, text=True, timeout=_WATCHDOG, env=env)
+        p = run_watched(cmd, timeout=_WATCHDOG, env=env)
         return p.stdout, p.returncode
-    except subprocess.TimeoutExpired:
-        return "TIMEOUT", -1
+    except subprocess.TimeoutExpired as e:
+        return f"TIMEOUT: {e}", -1
 
 
 class ConcurrencyStress(unittest.TestCase):
@@ -187,6 +190,41 @@ class ConcurrencyStress(unittest.TestCase):
                     p = subprocess.run([exe], capture_output=True, text=True, timeout=_WATCHDOG,
                                        env=dict(os.environ, MYLA_THREADS=workers))
                     self.assertEqual(p.stderr, want, f"{workers} workers")
+
+    @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
+    def test_a_hang_leaves_its_stacks_and_a_core(self):
+        # MYLA-418: the watchdog's timeout keeps where the program was
+        from ._hang import Hung, cores_land_here
+        from ._tools import selfhost_tool
+        source = "fun main() {\n    var i = 0\n    while true {\n        i = (i + 1) % 7\n    }\n}\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "spin.my")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(source)
+            exe = os.path.join(tmp, "spin")
+            subprocess.run([selfhost_tool("main"), "build", path, "-o", exe, "--stdlib", STDLIB_ROOT], check=True)
+            kept = os.path.join(tmp, "hangs")
+            os.environ["MYLA_HANG_DIR"] = kept
+            try:
+                with self.assertRaises(Hung) as hung:
+                    run_watched([exe], timeout=1)
+            finally:
+                del os.environ["MYLA_HANG_DIR"]
+            self.assertIn("kept in " + kept, str(hung.exception))
+            [d] = os.listdir(kept)
+            files = os.listdir(os.path.join(kept, d))
+            self.assertIn("stacks.txt", files)
+            with open(os.path.join(kept, d, "stacks.txt"), encoding="utf-8") as fh:
+                stacks = fh.read()
+            # gdb may not attach where ptrace is limited to a process's
+            # ancestors (Yama's ptrace_scope 1, as on GitHub's runners); it
+            # says so in the file, and the core below still holds the stacks
+            if shutil.which("gdb") and "Could not attach" not in stacks:
+                self.assertIn("myla_main", stacks)
+            # a native core is a file only where the kernel writes one in the
+            # program's directory; elsewhere a handler takes it
+            if cores_land_here():
+                self.assertTrue(any("core" in f for f in files), files)
 
     @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
     def test_the_self_hosted_interpreter(self):

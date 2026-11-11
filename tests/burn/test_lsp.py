@@ -428,6 +428,22 @@ class ScopeScenarios(LspRequestHelpers):
         self.assertEqual(self.defn(uri, 1, 13), {"uri": _uri(geo), "range": rng(0, 0, 0)})     # the module
         self.assertEqual(self.hover(uri, 1, 10), "type parameter T: g.Area")
 
+    def test_a_module_trait_s_functions_on_a_type_parameter(self):
+        # `T.zero()` with `T: g.Zero` (MYLA-398's follow-up, MYLA-417): the
+        # module's trait's members, as a bound by the trait's plain name has
+        geo = self.write("geo.my", "// geo\npub trait Zero {\n    fun zero() -> Self\n    fun one() -> Self\n}\n")
+        text = ("import geo as g\n"                              # 0
+                "fun make<T: g.Zero>() -> T {\n"                 # 1
+                "    return T.zero()\n"                          # 2
+                "}\n")
+        uri = self.open(text)
+        self.assertEqual(self.defn(uri, 2, 13), {"uri": _uri(geo), "range": rng(2, 8, 12)})   # T.zero: the trait's
+        lines = text.splitlines()
+        self.client.send("textDocument/didChange", {"textDocument": {"uri": uri, "version": 2},
+                                                     "contentChanges": [{"text": "\n".join(lines[:2] + ["    return T."] + lines[3:]) + "\n"}]})
+        items = self.at("textDocument/completion", uri, 2, len("    return T."))["items"]
+        self.assertEqual(sorted(i["label"] for i in items), ["one", "zero"])
+
     def test_unicode_identifiers(self):
         # XID identifiers (MYLA-84); ranges in UTF-16 units, 😀 counting two
         uri = self.open('fun main() {\n    let größe = 1\n    let 日本 = größe\n    print(f"😀{日本}")\n}\n')

@@ -13,7 +13,7 @@
 // already pins positions), so the v0.6b AST-dump gate stays byte-identical.
 
 from .util import escape
-from .tokens import SrcSpan
+from .tokens import SrcSpan, no_span
 from .parser import expr_of, stmt_of, type_expr_of, block_of, pattern_of, fun_of  // AST values for #test cases (MYLA-184)
 
 // --- types ---------------------------------------------------------------
@@ -116,6 +116,39 @@ pub fun bind_elems(b: BindElem) -> [BindElem] {
 pub struct Stmt { id: int32, line: int32, col: int32, sp: SrcSpan, kind: StmtKind }
 
 pub struct Block { line: int32, col: int32, sp: SrcSpan, stmts: [Stmt] }
+
+// The marker of a function's body the lexer skipped (an implicit module's,
+// MYLA-359) until the checker reads it (D179): a block without statements
+// at the place of its `{`, whose range is empty there. A parsed block's
+// range covers its braces, and a block made up by a pass has no place, so
+// no other block is one (`is_unread_body`). It costs a program nothing
+// over an empty block: every pass walks it as one, and compiling one is an
+// internal error.
+#test(4, 9)[Block { line: 4, col: 9, sp: SrcSpan { sline: 4, scol: 9, eline: 4, ecol: 9 }, stmts: [] }]
+pub fun unread_block(line: int32, col: int32) -> Block {
+    return Block { line: line, col: col, sp: SrcSpan { sline: line, scol: col, eline: line, ecol: col }, stmts: [] }
+}
+
+// Whether `b` is the marker of a body never read (`unread_block`).
+#test(unread_block(1, 2))[true]
+#test(block_of("{ }"))[false]
+#test(block_of("{}"))[false]
+#test(Block { line: 0, col: 0, sp: no_span(), stmts: [] })[false]
+pub fun is_unread_body(b: Block) -> bool {
+    return b.stmts.len() == 0 && b.line > 0 && b.sp.sline == b.line && b.sp.scol == b.col && b.sp.eline == b.line && b.sp.ecol == b.col
+}
+
+// `fd` with the marker of an unread body in place of its body, at its
+// body's place: the argument of cases that compile one.
+#test(fun_of("fun f() { }"))[FunData { line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 12 }, name: "f", params: [], ret_type: None, body: Some(Block { line: 1, col: 9, sp: SrcSpan { sline: 1, scol: 9, eline: 1, ecol: 9 }, stmts: [] }), attributes: [], type_params: [], receiver: None, is_pub: false, is_async: false }]
+pub fun unread_fun(fd: FunData) -> FunData {
+    var g = fd
+    match fd.body {
+        Some(b) => { g.body = Some(unread_block(b.line, b.col)) },
+        None => {},
+    }
+    return g
+}
 
 pub enum ElseTail {
     ElseBlock(Block),

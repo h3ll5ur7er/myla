@@ -1,0 +1,16 @@
+//~ type error: cannot infer type parameter(s) T for 'mk': its result 'B<T>' can't be the 'int32' expected here
+//~ span: mk()
+// The annotation is what's wrong, not missing: no "add a type annotation"
+// (MYLA-315's follow-up, MYLA-417).
+struct B<T> {
+    items: [T],
+}
+
+fun mk<T>() -> B<T> {
+    return B { items: [] }
+}
+
+fun main() {
+    let a: int = mk()
+    print(a)
+}

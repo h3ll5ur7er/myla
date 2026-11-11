@@ -1,0 +1,5 @@
+runtime error: list index 3 out of bounds (len 3)
+  --> examples/errors/runtime_list_index_oob.my:8:13
+  |
+8 |     print(xs[3])
+  |           ^^^^^

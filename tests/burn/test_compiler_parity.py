@@ -1,10 +1,13 @@
 """Burn tests: hand-written programs exercising codegen corners, each asserting
 the native binary's output matches the interpreter (and exit codes for traps)."""
 import os
+import re
+import subprocess
 import tempfile
 import unittest
 
 from tests.burn._targets import program_excuse
+from tests.burn._tools import selfhost_tool
 from tests.burn._native import (CAN_BUILD_NATIVE, SKIP_REASON, Program, build_and_run, build_and_run_full, interpret,
                                 run_file_both_now, selfhost_run, write_program)
 
@@ -1718,6 +1721,214 @@ fun twice<T: Shape>(x: T) -> T {
 fun main() {
     print(bigger(Sq { side: 3 }))
     print(twice(Sq { side: 1 }).scaled(5).area())
+}
+""",
+    "generic_code_per_width": """// generic code typed by a type parameter, per integer width and float
+// size: arithmetic, comparison, sorting and formatting use the concrete
+// type, as natively (MYLA-414, H1)
+import std.iter as iter
+
+fun add<T: Add>(a: T, b: T) -> T { return a + b }
+fun sub<T: Sub>(a: T, b: T) -> T { return a - b }
+fun mul<T: Mul>(a: T, b: T) -> T { return a * b }
+fun div<T: Div>(a: T, b: T) -> T { return a / b }
+fun rem<T: Rem>(a: T, b: T) -> T { return a % b }
+fun less<T: Ord>(a: T, b: T) -> bool { return a < b }
+fun show<T: Format>(v: T) -> str { return f"{v}" }
+fun shown<T: Format>(o: Option<T>) -> str {
+    return match o {
+        Some(v) => f"S{v}"
+        None => "N"
+    }
+}
+fun largest<T: Ord>(xs: [T]) -> T {
+    var m = xs[0]
+    for x in xs { if x > m { m = x } }
+    return m
+}
+
+// each operation on `hi`, the type's largest value, and `lo`, its
+// smallest, through the generic functions
+fun row<T: Add + Sub + Mul + Div + Rem + Ord + Format>(name: str, hi: T, lo: T, one: T, two: T) {
+    let s = [hi, lo, one].sorted()
+    let line = f"{name}: {show(sub(hi, one))} {show(add(lo, one))} {show(div(hi, two))} {show(rem(hi, two))} {show(mul(one, two))} {less(lo, hi)} {less(hi, lo)} {show(s[0])} {show(s[2])} {show(largest([one, hi, lo]))} {shown(Some(hi))} {[lo, hi].is_sorted()}"
+    print(line)
+}
+
+struct Cell<T> { v: T }
+
+impl<T: Add + Ord + Format> Cell<T> {
+    fun plus(self, w: T) -> Cell<T> { return Cell { v: self.v + w } }
+    fun below(self, w: T) -> bool { return self.v < w }
+    fun text(self) -> str { return f"<{self.v}>" }
+}
+
+fun main() {
+    row("int8", 127i8, -128i8, 1i8, 2i8)
+    row("int16", 32767i16, -32768i16, 1i16, 2i16)
+    row("int32", 2147483647, -2147483648, 1, 2)
+    row("int64", 9223372036854775807i64, -9223372036854775807i64 - 1, 1i64, 2i64)
+    row("uint8", 255u8, 0u8, 1u8, 2u8)
+    row("uint16", 65535u16, 0u16, 1u16, 2u16)
+    row("uint32", 4294967295u32, 0u32, 1u32, 2u32)
+    row("uint64", 18446744073709551615u64, 0u64, 1u64, 2u64)
+    // the sums of std.list and std.iter, which fit
+    let us: [uint64] = [9223372036854775808, 9223372036854775806]
+    print(us.sum(0))
+    print(us.iter() |> iter.sum(0u64))
+    let bs: [uint8] = [100, 155]
+    print(bs.sum(0u8))
+    print(us.max_by((a, b) => a < b) == Some(9223372036854775808u64))
+    // float32 in generic code: rounded to single precision at each step
+    let a: float32 = 16777216.0
+    print(add(a, 1.0f32) == a)
+    print(mul(0.1f32, 0.1f32) as float64)
+    let fs: [float32] = [0.1, 0.2, 0.3]
+    print(fs.sum(0.0f32) as float64)
+    print((fs.iter() |> iter.sum(0.0f32)) as float64)
+    print(show(div(1.0f32, 3.0f32)))
+    print(show(div(1.0, 3.0)))
+    // a generic struct's methods on a uint64 and an int8
+    let c = Cell { v: 18446744073709551614u64 }
+    print(c.plus(1).text())
+    print(c.below(18446744073709551615u64))
+    let d = Cell { v: -100i8 }
+    print(d.plus(-28).text())
+}
+""",
+    "receivers_of_type_parameter_type": """// receivers of type-parameter type (MYLA-414, H6 and M4): a `var self`
+// method on an element of a list or a map changes it there, and a field of
+// a call's result finds its method
+trait Bump {
+    fun bump(var self)
+    fun get(self) -> int
+}
+struct A {
+    n: int,
+}
+impl Bump for A {
+    fun bump(var self) { self.n += 1 }
+    fun get(self) -> int { return self.n }
+}
+struct Wrap<R> {
+    items: [R],
+    m: [int: R],
+    inner: R,
+}
+fun mk<R>(r: R) -> Wrap<R> {
+    return Wrap { items: [r], m: [:], inner: r }
+}
+impl<R: Bump> Wrap<R> {
+    fun bump_item(var self, i: int) { self.items[i].bump() }
+    fun bump_map(var self, k: int) { self.m[k].bump() }
+    fun bump_inner(var self) { self.inner.bump() }
+    fun copy(self) -> Wrap<R> { return self }
+    fun of_a_call(self) -> int { return mk(self.inner).inner.get() }
+    fun of_a_method(self) -> int { return self.copy().inner.get() }
+    fun of_an_element(self) -> int { return mk(self.items[0]).items[0].get() }
+}
+fun bump_first<T: Bump>(xs: [T]) -> int {
+    var ys = xs
+    ys[0].bump()
+    ys[^1].bump()
+    return ys[0].get()
+}
+fun main() {
+    var w = Wrap { items: [A { n: 3 }], m: [1: A { n: 10 }], inner: A { n: 30 } }
+    w.bump_item(0)
+    w.bump_map(1)
+    w.bump_inner()
+    print(f"{w.items[0].get()} {w.m[1].get()} {w.inner.get()}")
+    print(f"{bump_first([A { n: 20 }])} {w.of_a_call()} {w.of_a_method()} {w.of_an_element()}")
+}
+""",
+    "actor_function_field": """// an actor's field that holds a function, called from the actor's own
+// method (MYLA-414, the 2026-11-10 review's L3)
+actor A {
+    on: (int) -> int,
+    n: int,
+}
+
+impl A {
+    fun run(self, k: int) -> int {
+        return self.on(k) + self.n
+    }
+}
+
+#main
+async fun main() {
+    let a = A { on: (x: int) => x * 100, n: 5 }
+    print(await a.run(12))
+}
+""",
+    "char_literal_typed_uint8": """// a `char` literal where a `uint8` is expected is that number (MYLA-414,
+// the 2026-11-10 review's L4)
+fun main() {
+    let h = ['a', 98u8]
+    print(h[0])
+    let g = [98u8, 'a']
+    print(g[1])
+    let x: uint8 = 'a'
+    print(x)
+    let xs: [uint8] = ['a', 'b']
+    print(xs[1])
+    print(f"{x} {xs[0] + 1}")
+    let s = "abc"
+    print(s[0] == 'a')
+    print(s[2] - 'a')
+    let c = 'a'
+    print(c)
+}
+""",
+    "packed_byte_lists": """// a `[uint8]` from `bytes.from_str` and from a stream: the interpreter
+// holds it packed (MYLA-414, the 2026-11-10 review's S2), and every use
+// of a list works on it as on any other
+import std.bytes as bytes
+import std.io as io
+from std.io import Read
+
+fun main() {
+    var b = bytes.from_str("hello")
+    print(b.len())
+    print(b[1])
+    print(b[^1])
+    print(bytes.to_str(b[1:3]))
+    print(bytes.to_str(b[::-1]))
+    print(b == [104u8, 101, 108, 108, 111])
+    print([104u8, 101, 108, 108, 111] == b)
+    print(b == bytes.from_str("hello"))
+    print(b != bytes.from_str("help"))
+    var total = 0
+    for x in b { total += x as int }
+    print(total)
+    print(b.contains(108))
+    print(b.index_of(111) == Some(4))
+    var m: [[uint8]: int] = [:]
+    m[b] = 1
+    m[[104u8, 105]] = 2
+    print(m.get(bytes.from_str("hello")) == Some(1))
+    print(m.get(bytes.from_str("hi")) == Some(2))
+    b.push(33)
+    print(bytes.to_str(b))
+    b[0] = 72
+    print(bytes.to_str(b))
+    print(b.pop())
+    print(b.len())
+    let s = b.sorted()
+    print(s[0])
+    var src = io.from_str("abcdef")
+    match src.read(4) {
+        Ok(c) => {
+            print(c.len())
+            print(c[3])
+            print(bytes.to_str(c))
+            print(c == [97u8, 98, 99, 100])
+        }
+        Err(e) => print("error")
+    }
+    let e = bytes.from_str("")
+    print(e.len())
+    print(e == [])
 }
 """,
     "operators_of_generic_impls": """// `==`, `!=`, `<` and the others, and a format hole, on a generic struct
@@ -7293,6 +7504,838 @@ async fun main() {
     print((h.on)(3))
 }
 """,
+    "comparisons_in_literals_and_holes": """// D186 (MYLA-416): `a < b, c > (d)` is one generic call only in a call's
+// argument list; in a list, map or tuple literal it is two comparisons, and
+// each f-string hole is parsed on its own. A literal's element keeps a
+// call's own arguments, a struct literal's fields and one type argument.
+struct Box<T> {
+    v: T,
+}
+
+fun pair<A, C>(a: A, c: C) -> (A, C) {
+    return (a, c)
+}
+
+fun mk<T>() -> [T] {
+    return []
+}
+
+fun count(p: (int64, str)) -> int {
+    return p.1.len()
+}
+
+fun both(p: bool, q: bool) -> int {
+    if p && q {
+        return 2
+    }
+    return 0
+}
+
+fun main() {
+    let a = 1
+    let b = 3
+    let c = 5
+    let d = 2
+    let t = [a < b, c > (d + 1), b < a, a > (c)]
+    print(t.len())
+    print(t[3])
+    let u = (a < b, c > (d))
+    print(u.1)
+    let w = (b < a, d > (a), c > (d))
+    print(w.2)
+    let m = [a < b: 1, c > (d): 2]
+    print(m.len())
+    print(m[true])
+    // f-string holes
+    print(f"{a < b} {c > (a)}")
+    let lo = 1
+    let hi = 9
+    let x = 5
+    print(f"below: {x < lo}, above: {x > (hi - 1)}")
+    print(f"{x < lo}{x} > ({hi})")
+    print(f"{x < lo:>6} and {hi > (x)}")
+    print(f"{[a < b, c > (d)].len()}")
+    // what stays a generic call inside an element
+    let n = [count(pair<int64, str>(1, "one")), count(pair<int64, str>(2, "three"))]
+    print(n[1])
+    let bx = [Box { v: pair<int, str>(7, "seven") }]
+    print(bx[0].v.1)
+    let one = [mk<int>().len(), mk<str>().len()]
+    print(one.len())
+}
+""",
+    # M24 (MYLA-417): `()` as a type argument
+    "unit_as_a_type_argument": r"""// M24 (MYLA-417): `()` as a type argument, written or inferred from a
+// function without a result: `() -> T` with `T` the unit type is `() -> ()`
+import std.bench as bench
+
+fun work() {
+}
+
+fun twice<T>(f: () -> T) -> [T] {
+    return [f(), f()]
+}
+
+fun main() {
+    let r = bench.run_n<()>("u", 3, () => work())
+    print(r.runs)
+    let r2 = bench.run_n("v", 2, () => work())
+    print(r2.runs)
+    let xs = twice(() => work())
+    print(xs.len())
+    let ys: [()] = twice(work)
+    print(ys.len())
+    let g: () -> () = () => work()
+    print(twice(g).len())
+    print(twice(() => 7)[1])
+}
+""",
+    # L2 (MYLA-417): earlier literals take the type a later element fixes
+    "literals_take_the_type_a_later_element_fixes": r"""// L2 (MYLA-417): the literals before the element that fixes a literal's
+// type take that type, each checked again against it, in lists, map keys
+// and map values
+fun main() {
+    let big: int64 = 5000000000
+    let a = [1, -2, 3, big]
+    print(a[1] * big)
+    let b = [200, 100, 255u8]
+    print(b[2] - b[0] + b[1])
+    let f = [1.5, -2.25, 0.5f32]
+    print(f[1])
+    let m = [1: 40000, 2: 7, 3: big]
+    print(m[1] * big)
+    let k = [7: "a", 300: "b", 3u16: "c"]
+    for x in k.keys().sorted() { print(x * 200) }
+    let c = ['a', 'b', 99u8]
+    print(c[1] + c[2])
+    let n = [-1, -128, 5i8]
+    print(n[1])
+}
+""",
+    # D182 (MYLA-417): `Option` and `Result` are `Hash`
+    "option_and_result_as_map_keys": r"""// D182 (MYLA-417): `Option` and `Result` derive `Hash` in the prelude, so
+// an `Option` or `Result` of hashable types is a map key, and a derived key
+// struct may have such a field
+#derive(Eq, Hash)
+struct Key {
+    name: str,
+    port: Option<int>,
+}
+
+fun count_distinct<K: Eq + Hash>(xs: [K]) -> int {
+    var seen: [K: bool] = [:]
+    for x in xs { seen[x] = true }
+    return seen.len()
+}
+
+fun main() {
+    var m: [Option<int>: str] = [:]
+    m[Some(1)] = "one"
+    m[None] = "none"
+    m[Some(2)] = "two"
+    m[Some(1)] = "uno"
+    print(m.len())
+    print(m[Some(1)])
+    print(m.get(None).unwrap_or("?"))
+    print(m.contains(Some(3)))
+    var r: [Result<str, int>: int] = [:]
+    r[Ok("a")] = 1
+    r[Err(1)] = 2
+    r[Ok("a")] = r[Ok("a")] + 10
+    print(r[Ok("a")] + r[Err(1)])
+    let keys = [Key { name: "a", port: None }, Key { name: "a", port: Some(80) }, Key { name: "a", port: None }]
+    print(count_distinct(keys))
+    print(count_distinct([Some(Some(1)), Some(None), None, Some(Some(1))]))
+    let h1 = Hasher { state: 7 }.add(Some("x")).finish()
+    let h2 = Hasher { state: 7 }.add(Some("x")).finish()
+    let h3 = Hasher { state: 7 }.add(Some("y")).finish()
+    print(h1 == h2)
+    print(h1 == h3)
+    var t: [(Option<str>, int): int] = [:]
+    t[(None, 1)] = 5
+    print(t[(None, 1)])
+}
+""",
+    # MYLA-417: a lambda result, `?` and a variant on the left of `==` take the types the call knows
+    "inference_through_lambdas_try_and_variants": r"""// MYLA-417: inference follow-ups. A lambda's result takes what the call
+// knows of it (`and_then`'s `E` from the receiver, MYLA-356); the type
+// expected of `e?` is expected of `e`, with the function's error type
+// (MYLA-315); `Tree.Leaf == t` types the variant by `t` (MYLA-379)
+struct B<T> {
+    items: [T],
+}
+
+#derive(Eq)
+enum Tree<T> {
+    Leaf,
+    Node(T),
+}
+
+fun mk<T>() -> B<T> {
+    return B { items: [] }
+}
+
+fun try_mk<T>(ok: bool) -> Result<B<T>, str> {
+    if ok { return Ok(mk()) }
+    return Err("no")
+}
+
+fun opt_mk<T>(ok: bool) -> Option<B<T>> {
+    if ok { return Some(mk()) }
+    return None
+}
+
+fun use_q(ok: bool) -> Result<int, str> {
+    let a: B<int> = try_mk(ok)?
+    var b: B<str> = try_mk(ok)?
+    b.items.push("x")
+    return Ok(a.items.len() + b.items.len())
+}
+
+fun use_o(ok: bool) -> Option<int> {
+    let a: B<int64> = opt_mk(ok)?
+    return Some(a.items.len())
+}
+
+fun main() {
+    let r: Result<int, str> = Ok(2)
+    print(r.and_then((x) => Ok(x + 1)) == Ok(3))
+    let bad: Result<int, str> = Err("e")
+    print(bad.and_then((x) => Ok(x * 2)) == Err("e"))
+    let o: Option<int> = Some(4)
+    print(o.and_then((x) => Some(x + 1)) == Some(5))
+    print(use_q(true) == Ok(1))
+    print(use_q(false) == Err("no"))
+    print(use_o(true) == Some(0))
+    print(use_o(false) == None)
+    let t: Tree<int> = Tree.Node(3)
+    print(Tree.Leaf == t)
+    print(Tree.Node(3) == t)
+    print(Tree.Node(4) != t)
+}
+""",
+    # MYLA-380 follow-up (MYLA-417): an enum as a stateful iterator
+    "enum_var_self_assigns_self": r"""// MYLA-380's follow-up (MYLA-417): an enum's `var self` method assigns
+// `self`, which writes the caller's place, so an enum can be a stateful
+// iterator; payloads that own memory, a place in a struct and in a list
+enum Count {
+    Left(int),
+    Done,
+}
+
+impl Iterator<int> for Count {
+    fun next(var self) -> Option<int> {
+        match self {
+            Left(n) => {
+                if n == 0 { self = Count.Done } else { self = Count.Left(n - 1) }
+                return Some(n)
+            }
+            Done => { return None }
+        }
+    }
+}
+
+enum Words {
+    Rest([str]),
+    Empty,
+}
+
+impl Words {
+    fun take(var self) -> str {
+        return match self {
+            Rest(ws) => {
+                if ws.len() <= 1 { self = Words.Empty } else { self = Words.Rest(ws[1:]) }
+                ws[0]
+            }
+            Empty => "",
+        }
+    }
+}
+
+enum Light {
+    Red,
+    Green,
+    Amber,
+}
+
+impl Light {
+    fun step(var self) {
+        self = match self {
+            Red => Light.Green,
+            Green => Light.Amber,
+            Amber => Light.Red,
+        }
+    }
+
+    fun name(self) -> str {
+        return match self {
+            Red => "red",
+            Green => "green",
+            Amber => "amber",
+        }
+    }
+}
+
+struct Crossing {
+    light: Light,
+}
+
+fun main() {
+    for x in Count.Left(3) { print(x) }
+    var w = Words.Rest(["a", "bb", "ccc"])
+    let first = w.take()
+    print(first + w.take() + w.take() + w.take() + "|")
+    var c = Crossing { light: Light.Red }
+    c.light.step()
+    c.light.step()
+    print(c.light.name())
+    var ls = [Light.Amber, Light.Red]
+    ls[1].step()
+    print(ls[0].name() + " " + ls[1].name())
+    var total = 0
+    var it = Count.Left(4)
+    while let Some(n) = it.next() { total += n }
+    print(total)
+}
+""",
+    "values_nested_through_closures": r"""// M15 (MYLA-415): values nested through closures, as deep as they like, are
+// released in a bounded stack on every target (wasm32 overflowed at about
+// 3,000 levels, aarch64 under qemu at 30,000), and copied to a child task
+// without recursion
+import std.process as process
+import std.num as num
+
+struct Holder { f: () -> int, rest: [Holder] }
+struct Box { kids: [Box], tag: str }
+enum Chain { End, Step((int) -> int, Chain) }
+
+fun closures(n: int) -> int {
+    var f = () => 0
+    for i in 0..n {
+        let g = f
+        f = () => g() + 1
+    }
+    return 7
+}
+
+fun lists_of_closures(n: int) -> int {
+    var fs: [() -> int] = []
+    for i in 0..n {
+        let prev = fs
+        fs = [() => prev.len()]
+    }
+    return fs[0]()
+}
+
+fun holders(n: int) -> int {
+    var h = Holder { f: () => 0, rest: [] }
+    for i in 0..n {
+        let prev = h
+        h = Holder { f: () => prev.rest.len() + 1, rest: [] }
+    }
+    return h.f()
+}
+
+fun chains(n: int) -> int {
+    var c = Chain.End
+    for i in 0..n {
+        let prev = c
+        c = Chain.Step((x: int) => match prev { End => x, Step(g, _) => x + 1 }, Chain.End)
+    }
+    return match c { End => 0, Step(g, _) => g(1) }
+}
+
+fun partials(n: int) -> int {
+    var f = (x: int, k: () -> int) => x
+    var k = () => 0
+    for i in 0..n {
+        let kk = k
+        k = () => kk() + 0
+    }
+    let p = f(_, k)
+    return p(5)
+}
+
+fun nest(n: int) -> Box {
+    var b = Box { kids: [], tag: "leaf" }
+    for k in 0..n { b = Box { kids: [b], tag: f"t{k % 7}" } }
+    return b
+}
+
+// the depth of a nested box and the length of its tags, by a loop
+fun depth(b0: Box) -> (int, int) {
+    var b = b0
+    var d = 0
+    var sum = 0
+    while b.kids.len() > 0 {
+        sum += b.tag.len()
+        b = b.kids[0]
+        d += 1
+    }
+    return (d, sum)
+}
+
+async fun crossing(f: () -> int, fs: [() -> int], b: Box) -> (int, int) {
+    let (d, s) = depth(b)
+    return (fs.len() + d, s)
+}
+
+#main
+async fun main() {
+    let a = process.args()
+    var n = 50000
+    if a.len() > 1 { n = num.parse_int(a[1]).unwrap_or(50000) as int }
+    print(closures(n))
+    print(lists_of_closures(n))
+    print(holders(n))
+    print(chains(n))
+    print(partials(n))
+    // to a child task and back, deeply copied
+    var f = () => 0
+    var fs: [() -> int] = []
+    for i in 0..n {
+        let g = f
+        f = () => g() + 1
+        let prev = fs
+        fs = [() => prev.len()]
+    }
+    let b = nest(n)
+    async let c = crossing(f, fs, b)
+    let (k, t) = await c
+    let (d, u) = depth(b)
+    print(f"{k} {t} {d} {u}")
+    print("released")
+}
+""",
+    "arithmetic_operators_of_generic_impls": r"""// M2 (MYLA-415, MYLA-367): the arithmetic operators of a generic impl call
+// its instance for the operands' type arguments (natively they didn't link)
+struct Box<T> { v: T }
+impl<T: Add> Add for Box<T> {
+    fun add(self, other: Box<T>) -> Box<T> { return Box { v: self.v + other.v } }
+}
+impl<T: Sub> Sub for Box<T> {
+    fun sub(self, other: Box<T>) -> Box<T> { return Box { v: self.v - other.v } }
+}
+impl<T: Mul> Mul for Box<T> {
+    fun mul(self, other: Box<T>) -> Box<T> { return Box { v: self.v * other.v } }
+}
+impl<T: Div> Div for Box<T> {
+    fun div(self, other: Box<T>) -> Box<T> { return Box { v: self.v / other.v } }
+}
+impl<T: Rem> Rem for Box<T> {
+    fun rem(self, other: Box<T>) -> Box<T> { return Box { v: self.v % other.v } }
+}
+
+struct Pair<A, B> { a: A, b: B }
+impl<A: Add, B: Add> Add for Pair<A, B> {
+    fun add(self, other: Pair<A, B>) -> Pair<A, B> { return Pair { a: self.a + other.a, b: self.b + other.b } }
+}
+
+// in generic code, where the checker types the result (its half of M2 is
+// MYLA-417's), each operator through a function of its own
+fun plus<T: Add>(a: Box<T>, b: Box<T>) -> Box<T> { return a + b }
+fun minus<T: Sub>(a: Box<T>, b: Box<T>) -> Box<T> { return a - b }
+fun times<T: Mul>(a: Box<T>, b: Box<T>) -> Box<T> { return a * b }
+fun over<T: Div>(a: Box<T>, b: Box<T>) -> Box<T> { return a / b }
+fun modulo<T: Rem>(a: Box<T>, b: Box<T>) -> Box<T> { return a % b }
+fun chain<T: Add>(a: Box<T>) -> Box<T> { return a + a + a }
+fun pair_sum<A: Add, B: Add>(x: Pair<A, B>, y: Pair<A, B>) -> Pair<A, B> { return x + y }
+
+fun int_of(b: Box<int>) -> int { return b.v }
+fun float_of(b: Box<float>) -> float { return b.v }
+fun str_of(b: Box<str>) -> str { return b.v }
+
+fun main() {
+    print(int_of(plus(Box { v: 1 }, Box { v: 2 })))
+    print(int_of(minus(Box { v: 7 }, Box { v: 2 })))
+    print(int_of(times(Box { v: 6 }, Box { v: 7 })))
+    print(int_of(over(Box { v: 9 }, Box { v: 2 })))
+    print(int_of(modulo(Box { v: 9 }, Box { v: 4 })))
+    print(float_of(plus(Box { v: 1.5 }, Box { v: 2.25 })))
+    print(str_of(plus(Box { v: "ab" }, Box { v: "cd" })))
+    print(str_of(chain(Box { v: "ab" })))
+    let big: Box<int64> = Box { v: 5000000000 }
+    print(chain(big).v)
+    print(int_of(Box { v: 1 }.add(Box { v: 2 })))
+    let p = pair_sum(Pair { a: 1, b: "x" }, Pair { a: 2, b: "y" })
+    print(f"{p.a} {p.b}")
+    // the operator outside generic code links too
+    let unused = Box { v: 1 } + Box { v: 2 }
+    print("linked")
+}
+""",
+    "list_equal_to_itself": r"""// M3 (MYLA-415, MYLA-313): a list compared with itself, or with a copy that
+// shares its cell, is equal without a look at its elements only where the
+// elements' `==` is built in and reflexive: a NaN isn't equal to itself, and
+// a struct's `eq` runs (and may say no)
+from std.io import println
+
+struct Never { v: int }
+impl Eq for Never { fun eq(self, other: Never) -> bool { return false } }
+
+struct Loud { v: int }
+impl Eq for Loud {
+    fun eq(self, other: Loud) -> bool {
+        println("eq called")
+        return self.v == other.v
+    }
+}
+
+#derive(Eq)
+struct Holder { items: [float] }
+
+#derive(Eq)
+struct Point { x: int, y: int }
+
+fun main() {
+    let nan = 0.0 / 0.0
+    let xs = [nan]
+    let ys = xs
+    println(f"{xs == xs} {xs == ys} {xs != ys} {xs == [nan]}")
+    let nested = [[1.0, nan]]
+    let n2 = nested
+    println(f"{nested == n2} {nested != n2}")
+    let pairs = [(1, nan)]
+    println(f"{pairs == pairs}")
+    let a = [Never { v: 1 }]
+    let b = a
+    println(f"{a == b} {a != b}")
+    let l = [Loud { v: 1 }, Loud { v: 2 }]
+    let l2 = l
+    println(f"{l == l2}")
+    let h = Holder { items: [nan] }
+    println(f"{h == h}")
+    let hs = [h]
+    println(f"{hs == hs}")
+    // reflexive elements: equal, as before
+    let ints = [1, 2, 3]
+    let strs = ["a", "b"]
+    let deep = [[1, 2], [3]]
+    let tups = [(1, "x", 'c', true)]
+    let pts = [Point { x: 1, y: 2 }]
+    let pts2 = pts
+    println(f"{ints == ints} {strs == strs} {deep == deep} {tups == tups} {pts == pts2}")
+    let f2 = [1.5, 2.5]
+    println(f"{f2 == f2} {f2 != f2}")
+}
+""",
+    "keys_that_change_their_container": r"""// H4 (MYLA-415): a key, index or argument whose computation copies or grows
+// the container it is used on: computed before the container is made
+// unique, as the interpreter does, so a copy keeps the old contents and a
+// write never lands in a cell the growth freed
+struct Counter { n: int }
+impl Counter {
+    fun inc(var self, k: int) { self.n += k }
+}
+
+struct H {
+    m: [int: int],
+    saved: [int: int],
+    xs: [int],
+    xs_saved: [int],
+    grid: [[int]],
+    i: int,
+    sb: StringBuilder,
+    sb_saved: StringBuilder,
+    cs: [Counter],
+
+    names: [str: str],
+}
+
+impl H {
+    fun snap(var self, k: int) -> int {
+        self.saved = self.m
+        self.xs_saved = self.xs
+        return k
+    }
+    fun grow(var self, k: int) -> int {
+        var i = 100
+        while i < 400 {
+            self.m[i] = i
+            self.xs.push(i)
+            self.cs.push(Counter { n: i })
+            i += 1
+        }
+        return k
+    }
+    fun bump(var self) -> int {
+        self.i += 1
+        return self.i
+    }
+    fun snap_sb(var self, s: str) -> str {
+        self.sb_saved = self.sb
+        return s
+    }
+    fun key(var self, k: str) -> str {
+        self.names[k + "!"] = "added"
+        return k
+    }
+}
+
+impl [int] {
+    fun put_at(var self, i: int, v: int) { self[i] = v }
+}
+
+fun fresh() -> H {
+    return H { m: [1: 10, 2: 20, 3: 30], saved: [:], xs: [1, 2, 3], xs_saved: [], grid: [[0, 0, 0], [0, 0, 0], [0, 0, 0]], i: 0, sb: StringBuilder(), sb_saved: StringBuilder(), cs: [Counter { n: 0 }], names: ["a": "x"] }
+}
+
+fun main() {
+    // map remove, set and read-modify-write with a key that copies or grows
+    var h = fresh()
+    h.m.remove(h.snap(2))
+    print(f"{h.m.len()} {h.saved.len()} {h.saved.contains(2)}")
+    h = fresh()
+    h.m.remove(h.grow(2))
+    print(f"{h.m.len()} {h.m.contains(2)} {h.m[399]}")
+    h = fresh()
+    h.m[h.snap(7)] = 70
+    print(f"{h.m.len()} {h.saved.len()} {h.saved.contains(7)}")
+    h = fresh()
+    h.m[h.grow(2)] = 99
+    print(f"{h.m.len()} {h.m[2]} {h.m[150]}")
+    h = fresh()
+    h.names[h.key("b")] = "y"
+    print(f"{h.names.len()} {h.names["b"]} {h.names["b!"]}")
+    // list elements
+    h = fresh()
+    h.xs[h.snap(1)] = 99
+    print(f"{h.xs[1]} {h.xs_saved[1]}")
+    h = fresh()
+    h.xs[h.grow(1)] = 77
+    print(f"{h.xs[1]} {h.xs.len()}")
+    h = fresh()
+    h.grid[h.bump()][h.bump()] = 5
+    print(f"{h.grid[1][2]} {h.grid[2][1]} {h.i}")
+    h = fresh()
+    h.xs[h.xs.len() - 1] = 9
+    print(h.xs[2])
+    // pushes
+    h = fresh()
+    h.xs.push(h.snap(4))
+    print(f"{h.xs.len()} {h.xs_saved.len()}")
+    h = fresh()
+    h.xs.push(h.grow(5))
+    print(f"{h.xs[^1]} {h.xs.len()}")
+    // a builder
+    h = fresh()
+    h.sb.append("a")
+    h.sb.append(h.snap_sb("b"))
+    print(f"{h.sb.build()} {h.sb_saved.build()}")
+    h = fresh()
+    h.sb.append("abcdef", h.bump(), h.bump() + 2)
+    print(h.sb.build())
+    // methods writing their receiver, with an argument that grows it
+    h = fresh()
+    h.xs.put_at(h.grow(1), 55)
+    print(f"{h.xs[1]} {h.xs.len()}")
+    h = fresh()
+    h.cs[0].inc(h.grow(3))
+    print(f"{h.cs[0].n} {h.cs.len()}")
+    // locals, with an `if` that copies
+    var ys = [1, 2, 3]
+    var zs: [int] = []
+    ys[if true { zs = ys; 0 } else { 1 }] = 50
+    print(f"{ys[0]} {zs[0]}")
+    ys.push(if true { zs = ys; 0 } else { 1 })
+    print(f"{ys.len()} {zs.len()}")
+    var m2 = [1: 10, 2: 20, 3: 30]
+    m2.remove(if m2.len() > 0 { var i = 100; while i < 300 { m2[i] = i; i += 1 }; 2 } else { 0 })
+    print(f"{m2.len()} {m2.contains(2)}")
+    // in a match arm's expression, which is no scope of its own
+    for k in 0..3 {
+        h = fresh()
+        match k {
+            0 => h.sb.append(if k == 0 { "zero" } else { "other" }),
+            1 => h.xs.put_at(h.snap(1), 5),
+            _ => h.m.remove(if k > 1 { h.grow(2) } else { 3 }),
+        }
+        print(f"{k}: {h.sb.build()} {h.xs[1]} {h.xs_saved.len()} {h.m.len()}")
+    }
+    var saved2: [int: int] = [:]
+    m2[if true { saved2 = m2; 5 } else { 6 }] = 1
+    print(f"{m2.len()} {saved2.len()}")
+}
+""",
+    "recursive_enums_across_tasks": r"""// H3 (MYLA-415): recursive enums crossing between tasks and actors: handed
+// to a child while the parent keeps them, returned by a child, awaited by
+// a sibling, kept by an actor, inside structs, lists and options
+import std.task as task
+
+enum L { Nil, Cons(int, L) }
+enum T { Leaf, Bin(T, int, T) }
+
+struct Held { name: str, tree: T, lists: [L] }
+
+fun head(l: L) -> int { return match l { Cons(k, _) => k, Nil => -1 } }
+fun count(l: L) -> int { return match l { Cons(_, r) => 1 + count(r), Nil => 0 } }
+fun size(t: T) -> int { return match t { Leaf => 0, Bin(l, _, r) => size(l) + 1 + size(r) } }
+fun sum(t: T) -> int { return match t { Leaf => 0, Bin(l, v, r) => sum(l) + v + sum(r) } }
+
+fun tree(n: int) -> T {
+    var t = T.Leaf
+    for i in 0..n { t = T.Bin(t, i, T.Bin(T.Leaf, i * 10, T.Leaf)) }
+    return t
+}
+
+fun upto(n: int) -> L {
+    var l = L.Nil
+    for i in 0..n { l = L.Cons(i, l) }
+    return l
+}
+
+async fun crossing(l: L) -> int { return head(l) + count(l) }
+async fun make(n: int) -> T { return tree(n) }
+async fun make_list(n: int) -> L { return upto(n) }
+async fun keep(h: Held) -> Held {
+    var out = h
+    out.lists.push(L.Cons(99, h.lists[0]))
+    return out
+}
+async fun maybe(n: int) -> Option<T> {
+    if n == 0 { return None }
+    return Some(tree(n))
+}
+
+actor Shelf { trees: [T], last: L }
+impl Shelf {
+    fun put(var self, t: T) -> int {
+        self.trees.push(t)
+        return self.trees.len()
+    }
+    fun set_last(var self, l: L) { self.last = l }
+    fun total(self) -> int {
+        var s = 0
+        for t in self.trees { s += sum(t) }
+        return s + count(self.last)
+    }
+    fun first(self) -> T { return self.trees[0] }
+}
+
+#main
+async fun main() {
+    // shared with the parent, which reads it again afterwards
+    let l = L.Cons(1, L.Cons(2, L.Nil))
+    async let c = crossing(l)
+    print(await c)
+    print(count(l))
+    // a child's result
+    async let a = make(4)
+    let t = await a
+    print(size(t))
+    print(sum(t))
+    async let b = make_list(5)
+    print(count(await b))
+    // a struct holding them, both ways
+    let h = Held { name: "h", tree: t, lists: [l, upto(3)] }
+    async let k = keep(h)
+    let h2 = await k
+    print(f"{h2.name} {size(h2.tree)} {h2.lists.len()} {head(h2.lists[2])} {count(h2.lists[2])} {h.lists.len()}")
+    async let m = maybe(3)
+    match await m {
+        Some(x) => print(size(x)),
+        None => print("none"),
+    }
+    // a list of them through task.all
+    let jobs: [async () -> T] = [async () => tree(1), async () => tree(2), async () => tree(3)]
+    let ts = await task.all(jobs)
+    var s = 0
+    for x in ts { s += size(x) }
+    print(s)
+    // an actor keeps them
+    let shelf = Shelf { trees: [], last: L.Nil }
+    print(await shelf.put(t))
+    print(await shelf.put(tree(2)))
+    await shelf.set_last(l)
+    print(await shelf.total())
+    let f = await shelf.first()
+    print(size(f) == size(t))
+    // the parent's copies are still whole
+    print(sum(t))
+    print(count(l))
+}
+""",
+    "actors_store_every_heap_type": r"""// H2 (MYLA-415): an actor's method keeps an argument of every heap type in
+// its state, in a program with tasks, the arguments temporaries or the
+// caller's own values, which the caller then changes
+enum Shape { Dot, Line(int, int) }
+enum L { Nil, Cons(int, L) }
+struct Rec { name: str, tags: [str] }
+
+actor Store {
+    s: str,
+    xs: [int],
+    m: [str: int],
+    sb: StringBuilder,
+    r: Rec,
+    t: (str, [int]),
+    o: Option<str>,
+    e: Shape,
+    l: L,
+    f: (int) -> int,
+    nested: [[str]],
+}
+
+impl Store {
+    fun put_s(var self, v: str) -> int { self.s = v; return self.s.len() }
+    fun put_xs(var self, v: [int]) -> int { self.xs = v; return self.xs.len() }
+    fun put_m(var self, v: [str: int]) -> int { self.m = v; return self.m.len() }
+    fun put_sb(var self, v: StringBuilder) { self.sb = v }
+    fun put_r(var self, v: Rec) -> int { self.r = v; return self.r.tags.len() }
+    fun put_t(var self, v: (str, [int])) { self.t = v }
+    fun put_o(var self, v: Option<str>) { self.o = v }
+    fun put_e(var self, v: Shape) { self.e = v }
+    fun put_l(var self, v: L) { self.l = v }
+    fun put_f(var self, v: (int) -> int) { self.f = v }
+    fun put_nested(var self, v: [[str]]) { self.nested = v }
+    fun put_two(var self, a: str, b: [int]) -> int {
+        self.s = a + self.s
+        self.xs = b
+        return self.s.len() + self.xs.len()
+    }
+    fun report(var self) -> str {
+        let lsum = match self.l { Cons(k, _) => k, Nil => -1 }
+        let e = match self.e { Dot => 0, Line(a, b) => a + b }
+        let g = self.f
+        var sb = self.sb
+        sb.append("!")
+        return f"{self.s} {self.xs.len()} {self.m.get_or("a", 0)} {sb.build()} {self.r.name}/{self.r.tags.len()} {self.t.0}{self.t.1.len()} {self.o.unwrap_or("-")} {e} {lsum} {g(1)} {self.nested.len()}"
+    }
+}
+
+async fun helper() -> int { return 1 }
+
+#main
+async fun main() {
+    async let h = helper()
+    print(await h)
+    let st = Store { s: "", xs: [], m: [:], sb: StringBuilder(), r: Rec { name: "", tags: [] }, t: ("", []), o: None, e: Shape.Dot, l: L.Nil, f: (x: int) => x, nested: [] }
+    print(await st.put_s(f"value {7}"))
+    print(await st.put_xs([1, 2, 3]))
+    var mine = [10, 20]
+    print(await st.put_xs(mine))
+    mine.push(30)
+    print(await st.put_m(["a": 1, "b": 2]))
+    var sb = StringBuilder()
+    sb.append("built")
+    await st.put_sb(sb)
+    sb.append(" more")
+    var tags = ["x", "y"]
+    print(await st.put_r(Rec { name: "rec", tags: tags }))
+    tags.push("z")
+    await st.put_t(("t", [1, 2, 3, 4]))
+    await st.put_o(Some("some"))
+    await st.put_e(Shape.Line(3, 4))
+    await st.put_l(L.Cons(5, L.Cons(6, L.Nil)))
+    let k = 41
+    await st.put_f((x: int) => x + k)
+    await st.put_nested([["a"], ["b", "c"]])
+    print(await st.report())
+    print(await st.put_two("pre-", mine))
+    print(await st.report())
+    print(f"{mine.len()} {tags.len()} {sb.build()}")
+}
+""",
 }
 
 # A program that allocates far more recursive-enum cells (~12M) than the heap
@@ -8401,7 +9444,7 @@ class TestCompilerParity(unittest.TestCase):
     def test_a_char_moved_past_the_scalars_is_a_runtime_error(self):
         # MYLA-318: `c + n` and `c - n` are checked as `n as char` is, past
         # U+10FFFF, into the surrogates, below 0 (the sum wraps as an int32),
-        # at the operator; the native message has no values (MYLA-17)
+        # at the operator; the native message has the value too (D183)
         cases = (("'\\u{10FFFF}', 1", "1114112"), ("'\\u{D7FF}', 1", "55296"), ("'a', -98", "-1"),
                  ("'a', 2147483647", "-2147483552"))
         for args, value in cases:
@@ -8413,7 +9456,99 @@ class TestCompilerParity(unittest.TestCase):
                 self.assertEqual(err.splitlines()[:2], [f"runtime error: invalid char: {value} is not a Unicode scalar value",
                                                         f"  --> {path}:2:14"])
                 self.assertEqual(build_and_run_full(Program(path), entry_path=path),
-                                 ("b\n", f"runtime error: invalid char\n  --> {path}:2:14\n", 1))
+                                 ("b\n", f"runtime error: invalid char: {value} is not a Unicode scalar value\n"
+                                          f"  --> {path}:2:14\n", 1))
+
+    def test_polymorphic_recursion_is_refused_where_it_is_built(self):
+        # MYLA-415 (H5): a generic function calling itself with a larger type
+        # asks for instances without end, and `myla build` never ended; it is
+        # a type error at the call now, on every target, when the type
+        # arguments grow too deep or (a pair of pairs of ...) too large; the
+        # interpreter runs it
+        myla = selfhost_tool("main")
+        cases = (
+            ("grow", "fun grow<T>(n: int, x: T) -> int {\n    if n == 0 { return 0 }\n"
+                     "    return 1 + grow<[T]>(n - 1, [x])\n}\nfun main() { print(grow(3, 1)) }\n",
+             "3:25", "65 types deep (the limit is 64)", "3\n"),
+            ("g", "fun f<T>(n: int, x: T) -> int {\n    if n == 0 { return 0 }\n    return g(n - 1, (x, x))\n}\n"
+                  "fun g<T>(n: int, x: T) -> int {\n    return f(n, x)\n}\nfun main() { print(f(3, 1)) }\n",
+             "3:13", "more than 4096 types in all", "0\n"),
+            ("h", "fun h<T>(n: int, x: T) -> int {\n"
+                  "    let k = (m: int) => if m == 0 { 0 } else { h(m - 1, Some(x)) }\n    return k(n)\n}\n"
+                  "fun main() { print(h(3, 1)) }\n",
+             "2:49", "65 types deep (the limit is 64)", "0\n"),
+        )
+        for callee, src, at, why, out in cases:
+            with self.subTest(callee=callee), tempfile.TemporaryDirectory() as tmp:
+                path = write_program(tmp, src)
+                ran = subprocess.run([myla, "run", path], capture_output=True, text=True, timeout=60)
+                self.assertEqual((ran.stdout, ran.returncode), (out, 0), ran.stderr)
+                for target in ("x86_64-linux", "aarch64-linux", "wasm32-wasi"):
+                    built = subprocess.run([myla, "build", path, "-o", os.path.join(tmp, "out"), "--target", target],
+                                           capture_output=True, text=True, timeout=60)
+                    self.assertEqual(built.returncode, 1, built.stderr)
+                    self.assertIn(f"type error: the instances of '{callee}' nest without end: this call asks for one "
+                                  f"whose type arguments are {why}\n  --> {path}:{at}\n", built.stderr)
+                    self.assertIn("(polymorphic recursion)", built.stderr)
+
+    def test_a_file_without_main_is_a_clean_error_for_build(self):
+        # MYLA-415 (Z3): `CodeGen.sig_of` fell back on the first function, so
+        # `myla build` of a library built that function as the entry point,
+        # since D179 an unread empty body: a program doing nothing, exit 0
+        # (wasm32: an internal error); now the interpreter's message, exit 1
+        myla = selfhost_tool("main")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = write_program(tmp, "fun f() -> int {\n    return 1\n}\n")
+            ran = subprocess.run([myla, "run", path], capture_output=True, text=True, timeout=60)
+            self.assertEqual((ran.returncode, ran.stderr),
+                             (1, "runtime error: no entry point: define '#main' or a function named 'main'\n"))
+            for flags in (["--target", "x86_64-linux"], ["-g"], ["--checked"], ["--target", "aarch64-linux"],
+                          ["--target", "wasm32-wasi"]):
+                with self.subTest(flags=flags):
+                    out = os.path.join(tmp, "out")
+                    built = subprocess.run([myla, "build", path, "-o", out] + flags, capture_output=True, text=True,
+                                           timeout=60)
+                    self.assertEqual((built.returncode, built.stderr),
+                                     (1, "type error: no entry point: define '#main' or a function named 'main'\n"))
+                    self.assertFalse(os.path.exists(out))
+
+    def test_runtime_errors_carry_the_interpreters_values(self):
+        # D183 (MYLA-415): a native runtime error is the interpreter's text,
+        # its values included; natively an index error said
+        # `index out of bounds`, a missing key `map key not found`, a bad
+        # char `invalid char`. The first two lines of the interpreter's
+        # report, the message and the position, are the binary's stderr
+        cases = {
+            "list_read": "let xs = [1, 2, 3]\n    let i = 7\n    print(xs[i])",
+            "list_negative": "let xs = [1, 2, 3]\n    let i = -1\n    print(xs[i])",
+            "list_write": "var xs = [1, 2, 3]\n    let i = 5\n    xs[i] = 1\n    print(xs[0])",
+            "from_the_end": "let xs = [1, 2, 3]\n    let i = 5\n    print(xs[^i])",
+            "byte_list": "let xs: [uint8] = [1, 2, 3]\n    let i: uint8 = 3\n    print(xs[i])",
+            "int64_index": "let xs = [1, 2, 3]\n    let i: int64 = 5000000000\n    print(xs[i])",
+            "inner_list": "var xs = [[1], [2]]\n    let i = 1\n    let j = 4\n    xs[i][j] = 1\n    print(xs[0][0])",
+            "string_read": "let s = \"abc\"\n    let i = 9\n    print(s[i])",
+            "int_key": "let m = [1: 2]\n    let k = 5\n    print(m[k])",
+            "str_key": "let m = [\"a\": 2]\n    let k = \"it's\"\n    print(m[k])",
+            "escaped_key": "let m = [\"a\": 2]\n    let k = \"tab\\there\"\n    print(m[k])",
+            "char_key": "let m = ['a': 2]\n    let k = 'z'\n    print(m[k])",
+            "bool_key": "let m = [true: 2]\n    let k = false\n    print(m[k])",
+            "tuple_key": "let m = [(1, \"a\"): 2]\n    let k = (3, \"b\")\n    print(m[k])",
+            "int8_key": "let m: [int8: int] = [1: 2]\n    let k: int8 = -5\n    print(m[k])",
+            "key_of_a_place": "var m = [1: [2]]\n    let k = 5\n    m[k][0] = 3\n    print(m[1][0])",
+            "surrogate": "let n = 55296\n    print(n as char)",
+            "char_plus": "let c = 'a'\n    print(c + 1114111)",
+            "append_range": "var sb = StringBuilder()\n    let a = 2\n    sb.append(\"abc\", a, 9)\n    print(sb.build())",
+        }
+        for name, body in cases.items():
+            with self.subTest(case=name), tempfile.TemporaryDirectory() as tmp:
+                path = write_program(tmp, "fun main() {\n    " + body + "\n}\n")
+                out, err, code = selfhost_run(path)
+                self.assertEqual(code, 1, err)
+                lines = err.splitlines()
+                self.assertTrue(lines[0].startswith("runtime error: ") and lines[1].startswith("  --> "), err)
+                self.assertNotIn(lines[0], ("runtime error: index out of bounds", "runtime error: map key not found",
+                                            "runtime error: invalid char"))
+                self.assertEqual(build_and_run_full(Program(path), entry_path=path), (out, "\n".join(lines[:2]) + "\n", 1))
 
     def test_become_runs_a_million_deep(self):
         # MYLA-128, MYLA-131: every `become` of the parity programs jumps, so
@@ -8555,6 +9690,15 @@ class TestCompilerParity(unittest.TestCase):
         out, code = build_and_run(STRESS_LIST_SRC)
         self.assertEqual(code, 0, "arena exhausted — list cells were not reclaimed")
         self.assertEqual(out.strip(), "0")
+
+    def test_runtime_errors_are_reported_alike(self):
+        # D183: the report on stderr, the output before it and the status
+        for name, src in RUNTIME_ERRORS.items():
+            with self.subTest(program=name):
+                interp, native = _both(src)
+                self.assertEqual(interp[2], 1, interp[1])
+                self.assertEqual((native[0], native[2]), (interp[0], interp[2]))
+                self.assertEqual(native[1], _without_snippets(interp[1]))
 
     def test_divide_by_zero_traps_nonzero(self):
         src = "#main\nfun main() {\n    var z = 0\n    print(1 / z)\n}\n"
@@ -8717,6 +9861,16 @@ PINNED = {
     "std_iter_pipelines": '36\n45000000000\n5\n<1>\n<4>\n<9>\n4 6\n4321\nb2,a1,c3\nb,c,z\n0:one,1:two,2:three,3:four,4:five\nx3,x2,x1\n5,8,13,21,34\n9\n34\ntrue\nfalse\nfig\nplum\nnone\n3 9\n',
     # MYLA-391: the interpreter printed 'ERR: VUnit'
     "method_on_a_generic_temporary": '36\n100\n',
+    # MYLA-414 (H1): new; the interpreter lost the width, the sign and the float size
+    "generic_code_per_width": 'int8: 126 -127 63 1 2 true false -128 127 127 S127 true\nint16: 32766 -32767 16383 1 2 true false -32768 32767 32767 S32767 true\nint32: 2147483646 -2147483647 1073741823 1 2 true false -2147483648 2147483647 2147483647 S2147483647 true\nint64: 9223372036854775806 -9223372036854775807 4611686018427387903 1 2 true false -9223372036854775808 9223372036854775807 9223372036854775807 S9223372036854775807 true\nuint8: 254 1 127 1 2 true false 0 255 255 S255 true\nuint16: 65534 1 32767 1 2 true false 0 65535 65535 S65535 true\nuint32: 4294967294 1 2147483647 1 2 true false 0 4294967295 4294967295 S4294967295 true\nuint64: 18446744073709551614 1 9223372036854775807 1 2 true false 0 18446744073709551615 18446744073709551615 S18446744073709551615 true\n18446744073709551614\n18446744073709551614\n255\ntrue\ntrue\n0.010000000707805157\n0.6000000238418579\n0.6000000238418579\n0.33333334\n0.3333333333333333\n<18446744073709551615>\ntrue\n<-128>\n',
+    # MYLA-414 (H6, M4): new; the interpreter lost the mutations and printed 'ERR: VUnit'
+    "receivers_of_type_parameter_type": '4 11 31\n22 31 31 4\n',
+    # MYLA-414 (L3): new; the interpreter printed 'ERR: VUnit'
+    "actor_function_field": '1205\n',
+    # MYLA-414 (L4): new; the interpreter printed 'a' for the numbers
+    "char_literal_typed_uint8": '97\n97\n97\n98\n97 98\ntrue\n2\na\n',
+    # MYLA-414 (S2): new; the interpreter holds these bytes packed
+    "packed_byte_lists": '5\n101\n111\nel\nolleh\ntrue\ntrue\ntrue\ntrue\n532\ntrue\ntrue\ntrue\ntrue\nhello!\nHello!\n33\n5\n72\n4\n100\nabcd\ntrue\n0\ntrue\n',
     # MYLA-367: new; native code gave "undefined reference to 'myla_Box.eq'"
     "operators_of_generic_impls": 'true\ntrue\nfalse\ntrue\nfalse\ntrue\ntrue\n<a> <42> <s>\n<a>\n',
     "string_ordering": 'true true false false\ntrue true false false\nfalse false true true\ntrue true false false\nfalse true false true\nfalse true false true\ntrue true false false\nfalse false true true\nfalse false true true\ntrue true false false\ntrue true false false\ntrue true false false\n,Apple,apple,apples,banana,fig,pear,z,é\n,Apple,apple,apples,banana,fig,pear,z,é\ntrue\na,b,b,c,d\n5\nlime\na,c,m,x\ntrue\na,b\n',
@@ -8775,6 +9929,32 @@ PINNED = {
     "literal_element_types_from_later_elements": 'L1RaL3\n3\n252\n1\nbad\n2\n3\nx\n2\n5000000007\n42\n2\nb\n2\n3\n252\n',
     # MYLA-406: new ("method 'keys' collides with a field of 'Lru'" before); native code gives the same
     "a_field_and_a_method_of_one_name": '3\n3\n1\n10\n3\nq\n2\n5\nrex\npet rex\npet rex\n3\n4\n',
+    # MYLA-416 (D186): new ("cannot call a value of type 'int32'" before, the
+    # literals and holes read as generic calls); native code gives the same
+    "comparisons_in_literals_and_holes": "4\nfalse\ntrue\ntrue\n1\n2\ntrue true\nbelow: false, above: false\n"
+                                         "false5 > (9)\n false and true\n2\n5\nseven\n2\n",
+    # M24 (MYLA-417): new ("expected '() -> ()', found '() -> ()'" before); native code gives the same
+    "unit_as_a_type_argument": '3\n2\n2\n2\n2\n7\n',
+    # L2 (MYLA-417): new ("[-1, -128, 5i8]" was a type error, "[1, 2, x]" left 2 an int32); native code gives the same
+    "literals_take_the_type_a_later_element_fixes": '-10000000000\n155\n-2.25\n200000000000000\n600\n1400\n60000\n197\n-128\n',
+    # D182 (MYLA-417): new ("'Option<int32>' isn't Hash" before); native code gives the same
+    "option_and_result_as_map_keys": '3\nuno\nnone\nfalse\n13\n2\n3\ntrue\nfalse\n5\n',
+    # MYLA-417: new ("cannot infer type parameter(s) E", "T for 'try_mk'" before); native code gives the same
+    "inference_through_lambdas_try_and_variants": 'true\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\nfalse\ntrue\ntrue\n',
+    # MYLA-417: new ("cannot reassign 'self'" before); native, aarch64 and wasm32 give the same
+    "enum_var_self_assigns_self": '3\n2\n1\n0\nabbccc|\namber\namber green\n10\n',
+    # MYLA-415 (H2): native code segfaulted (a string, list or map argument kept)
+    "actors_store_every_heap_type": '1\n7\n3\n2\n2\n2\nvalue 7 2 1 built! rec/2 t4 some 7 5 42 2\n14\npre-value 7 3 1 built! rec/2 t4 some 7 5 42 2\n3 3 built more\n',
+    # MYLA-415 (H3): native code segfaulted in __deepb_ and on a child's result
+    "recursive_enums_across_tasks": '3\n2\n8\n66\n5\nh 8 3 99 3 2\n6\n12\n1\n2\n79\ntrue\n66\n2\n',
+    # MYLA-415 (H4): native code wrote into the copy, or into the freed cell
+    "keys_that_change_their_container": '2 3 true\n302 false 399\n4 3 false\n303 99 150\n3 y added\n99 2\n77 303\n5 0 2\n9\n4 3\n5 304\nab a\nbcd\n55 303\n3 301\n50 1\n4 3\n202 false\n0: zero 2 0 3\n1:  5 3 3\n2:  2 0 302\n203 202\n',
+    # MYLA-415 (M3): native code answered equal for one cell without comparing
+    "list_equal_to_itself": 'false false true false\nfalse true\nfalse\nfalse true\neq called\neq called\ntrue\nfalse\nfalse\ntrue true true true true\ntrue false\n',
+    # MYLA-415 (M2, MYLA-367): native code didn't link ('undefined reference to myla_Box.add')
+    "arithmetic_operators_of_generic_impls": '3\n5\n42\n4\n1\n3.75\nabcd\nababab\n15000000000\n3\n3 xy\nlinked\n',
+    # MYLA-415 (M15): stack overflow on aarch64 and wasm32 (release and deep copy recursed)
+    "values_nested_through_closures": '7\n1\n1\n2\n5\n50001 100000 50000 100000\nreleased\n',
 }
 
 
@@ -8788,14 +9968,47 @@ def _self_hosted(src: str) -> str:
     return out
 
 
+def _both(src: str) -> tuple[tuple[str, str, int], tuple[str, str, int]]:
+    """(stdout, stderr, exit) of the self-hosted interpreter and of native
+    code for `src`, from one file, so that positions read alike."""
+    with tempfile.TemporaryDirectory() as tmp:
+        path = write_program(tmp, src)
+        return selfhost_run(path), build_and_run_full(Program(path))
+
+
+def _without_snippets(stderr: str) -> str:
+    """A runtime error's report without the source lines the interpreter
+    shows under its position (native code shows none)."""
+    return "".join(line for line in stderr.splitlines(True) if not re.match(r"\s*\d*\s*\|", line))
+
+
+# Programs that end with a runtime error: the report is the interpreter's on
+# stderr (D183), its source lines aside, with the same output and status.
+RUNTIME_ERRORS = {
+    "divide_by_zero": "#main\nfun main() {\n    var z = 0\n    print(1 / z)\n}\n",
+    "panic_after_output": '#main\nfun main() {\n    print(1)\n    panic("boom")\n    print(2)\n}\n',
+    "assert_with_a_message": '#main\nfun main() {\n    print(7)\n    assert(1 > 2, "nope")\n    print(8)\n}\n',
+    "assert_without_one": "#main\nfun main() {\n    assert(1 > 2)\n}\n",
+    "unreachable": ("enum E { A, B }\nfun g(e: E) -> int32 {\n    return match e {\n        E.A => 1,\n"
+                    "        E.B => unreachable(),\n    }\n}\n#main\nfun main() {\n    print(g(E.B))\n}\n"),
+    "list_index": "fun main() {\n    let xs = [1, 2]\n    var i = 5\n    print(xs[i])\n}\n",
+    "negative_list_index": "fun main() {\n    let xs = [1, 2]\n    var i = -1\n    print(xs[i])\n}\n",
+    "missing_map_key": 'fun main() {\n    let m = ["a": 1]\n    print(m["b"])\n}\n',
+    "string_index": 'fun main() {\n    let s = "ab"\n    var i = 9\n    print(s[i])\n}\n',
+    "error_after_stderr": 'from std.io import eprint\n\nfun main() {\n    eprint("before\\n")\n    panic("then")\n}\n',
+}
+
+
+
 def _make(name: str, src: str):
     def test(self):
         # native code against the self-hosted interpreter, the reference
-        # (D101), and against the recording or the pinned output
-        native_out, code = build_and_run(src)
-        self.assertEqual(code, 0)
-        self.assertEqual(native_out, _self_hosted(src))
-        self.assertEqual(native_out, PINNED[name] if name in PINNED else interpret(src))
+        # (D101), stderr too (D183), and against the recording or the
+        # pinned output
+        interp, native = _both(src)
+        self.assertEqual(native[2], 0)
+        self.assertEqual(native, interp)
+        self.assertEqual(native[0], PINNED[name] if name in PINNED else interpret(src))
     return test
 
 

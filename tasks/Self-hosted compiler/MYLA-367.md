@@ -2,7 +2,7 @@
 id: MYLA-367
 title: "Native: an operator or a format hole on a generic struct with a generic trait impl doesn't link"
 type: bug
-status: todo
+status: review
 priority: medium
 labels: [codegen, generics, traits, monomorphization]
 ---
@@ -30,4 +30,5 @@ Follow-up: `std.heap` could now offer a `Reverse<T>` wrapper instead of its max 
 
 Not ready ([[Project/Review-2026-11-09]]): `+ - * / %` on `impl<T: Add> Add for Box<T>` don't link natively ([[MYLA-415]]) and the checker types the result `Box<T>` (M2). The fix is in [[MYLA-417]].
 
-- [ ] The review's blocker, fixed with [[MYLA-417]]
+- [x] The review's blocker, fixed with [[MYLA-417]] and [[MYLA-415]]. The checker's half ([[MYLA-417]]): `Box<int> + Box<int>` is a `Box<int>`, `a + a + a` checks
+- [x] The native half, with [[MYLA-415]]: an arithmetic operator on a generic impl calls its instance (`method_instance`), so `impl<T: Add> Add for Box<T>` links; the parity program `arithmetic_operators_of_generic_impls` (`+ - * / %`, a chain, a two-parameter impl, in generic code and once outside it) runs on three targets

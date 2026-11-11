@@ -197,7 +197,7 @@ fun main() {
 
 `myla test file.my --native` runs the file's cases natively (D162, [[MYLA-307]]): the compiler builds a *harness* from the file and its cases ([[selfhost/harness.my]]), a program that calls each case's function with the case's arguments, compares the result with the expected value and prints the interpreter's report, line for line, so `myla test` and `myla test --native` can be held to each other; `myla test --target aarch64-linux` or `wasm32-wasi` builds the harness for that target and runs it under `qemu-aarch64`, or the command `MYLA_EMULATOR` names (`node tools/wasm/run.mjs` for wasm32). The harness runs every case in a child process of itself, so a runtime error or an `exit` ends that case only, and its output and scratch directory are handled as in the interpreter; `--only` and `--list` work the same. In a project, `--native` also builds and runs the test programs of `tests/`. Everything `myla test` builds is built checked (`myla build --checked`): an integer overflow fails the case natively as it does interpreted, `runtime error: integer overflow`, which `[panic("integer overflow")]` expects (D175).
 
-What differs natively, by design: a failed case runs no deferred block (its process ends, D97; a `temp_dir()` is still removed by the harness), a runtime error's message carries no values (an expected `[panic("…")]` passes when the native message and the expected one start the same way), and the cases of one run share a scratch directory on wasm32. A wasm32 module can start no process, so there `myla test` runs the harness itself, `<harness> --from <n>`: the harness runs the cases from `n` on in its own process, each between markers on stdout and stderr, and `myla test` cuts what it printed into the cases'; a case that ends the run (a runtime error, an `exit`, an expected `[panic(…)]` too) is reported as a child's would be, and the next run starts after it ([[MYLA-370]]). That is a run for each case that ends one, and one more; the report is the native one (every standard library module's agrees, 2026-11-09). A harness run by hand where no process can be started runs the cases in itself, in order, and the first runtime error ends that run. A harness that doesn't build (a case's function calling `main`, which the harness replaces) is kept in the scratch directory for a look. A target's own platform module, `lib/std/platform_wasm.my` under `--target wasm32-wasi --stdlib lib` or `platform_aarch64.my` on aarch64, is that target's `std.platform`, which the harness imports too (through `std.test`): its harness is built as `std/platform.my`, so the module is loaded once ([[MYLA-397]]).
+The report is the interpreter's for failing cases too ([[MYLA-418]]): a value in the interpreter's form (`2.0`, `1e+16`), a test function's `Err` as the interpreter shows it, an `exit(0)` in a case that fails it (`exited with status 0`) where `[exit(0)]` passes, and what a case writes on stderr passed on as the interpreter lets it through. A child tells the harness that its case returned, and what it gave, after a mark on stderr that a line of the case's own can't pass for; without the mark the case ended the process, by a runtime error (the runtime's report, last on stderr) or an `exit`. An expected `[panic("…")]` matches the message exactly, natively as interpreted (D183); until native runtime errors carry the interpreter's texts with their values ([[MYLA-415]]), an index error or a missing map key can be expected interpreted only. What differs natively, by design: a failed case runs no deferred block (its process ends, D97; a `temp_dir()` is still removed by the harness), and the cases of one run share a scratch directory on wasm32. A wasm32 module can start no process, so there `myla test` runs the harness itself, `<harness> --from <n>`: the harness runs the cases from `n` on in its own process, each between markers on stdout and stderr, and `myla test` cuts what it printed into the cases'; a case that ends the run (a runtime error, an `exit`, an expected `[panic(…)]` too) is reported as a child's would be, and the next run starts after it ([[MYLA-370]]). That is a run for each case that ends one, and one more; the report is the native one (every standard library module's agrees, 2026-11-09). A harness run by hand where no process can be started runs the cases in itself, in order, and the first runtime error ends that run. A harness that doesn't build (a case's function calling `main`, which the harness replaces) is kept in the scratch directory for a look. A target's own platform module, `lib/std/platform_wasm.my` under `--target wasm32-wasi --stdlib lib` or `platform_aarch64.my` on aarch64, is that target's `std.platform`, which the harness imports too (through `std.test`): its harness is built as `std/platform.my`, so the module is loaded once ([[MYLA-397]]), however the file and the root are written (`./lib/std/platform_aarch64.my`, `--stdlib lib/`, `MYLA_STDLIB=$PWD/lib`); the host's `lib/std/platform.my` for such a target is an error, as that target's `std.platform` is its own. With the library the tools carry, a module of a copy of the standard library on disk (`myla test lib/std/yaml.my`, `run`, `check`, `build` alike) is loaded with that copy, as `--stdlib lib` would load it, so that it and the modules it imports are one copy each ([[MYLA-418]]).
 
 ### Expected failures
 
@@ -247,7 +247,7 @@ There are no global variables.
 
 ## Runtime errors
 
-Both report on stderr and exit 1. The interpreter gives the message with its values, the source position, the source line and a caret; a native binary prints the first two lines, `runtime error: <message>` without the values, then the same position ([[MYLA-17]], [[MYLA-65]]):
+Both report on stderr and exit 1, with the same message, values included (D183, [[MYLA-415]]). The interpreter gives the message, the source position, the source line and a caret; a native binary prints the first two lines, `runtime error: <message>`, then the same position ([[MYLA-17]], [[MYLA-65]]):
 
 ```
 $ myla run examples/errors/runtime_list_index_oob.my
@@ -258,7 +258,7 @@ runtime error: list index 3 out of bounds (len 3)
   |             ^
 $ myla build examples/errors/runtime_list_index_oob.my -o oob && ./oob
 wrote oob
-runtime error: index out of bounds
+runtime error: list index 3 out of bounds (len 3)
   --> examples/errors/runtime_list_index_oob.my:8:13
 ```
 
@@ -267,11 +267,13 @@ The position is that of the expression that fails: an index's `[`, a call's `(` 
 | Error | Interpreter | Native |
 | --- | --- | --- |
 | Division or remainder by zero | `division by zero` / `modulo by zero` | the same |
-| List or string index out of bounds | `list index 5 out of bounds (len 2)` | `index out of bounds` |
-| Missing map key (`m[k]`) | `map key 'b' not found` | `map key not found` |
+| List or string index out of bounds | `list index 5 out of bounds (len 2)`, `string index 9 out of bounds (len 3)` | the same |
+| Missing map key (`m[k]`) | `map key 'b' not found` (the key as Python's `repr` writes it: `'b'`, `"it's"`, `5`, `False`, `(3, 'b')`; a `char` key as its code point) | the same for a key of an integer, `char`, `bool` or `str` type or a tuple of such; `map key not found` for a struct, enum or list key |
 | `pop` on an empty list | `pop from an empty list` | the same |
 | `assert`, `panic`, `unreachable` | the message | the same |
-| An integer `as char` that isn't a Unicode scalar value (a surrogate, above U+10FFFF) | `invalid char: 55296 is not a Unicode scalar value` | `invalid char` |
+| An integer `as char` that isn't a Unicode scalar value (a surrogate, above U+10FFFF) | `invalid char: 55296 is not a Unicode scalar value` | the same |
+| `sb.append(s, start, end)` with a range outside `s` | `string range 2..9 out of bounds (len 5)` | the same |
+| A plain negative slice bound (D154) | `index out of bounds` | the same |
 | Running out of the stack | `stack overflow` (no position) | the same (no position; on every target, [[Language/Targets]], [[MYLA-261]]) |
 | A slice's step of 0 | `slice step is zero` | the same |
 | A `str` slice cutting a well-formed character (D174) | `a slice bound inside a character` | the same |

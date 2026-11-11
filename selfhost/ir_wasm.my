@@ -325,14 +325,19 @@ impl CodeGen {
     // A runtime error `trap` reported at `line:col` (its position record as
     // the argument, as `__panic` takes it); nothing follows.
     fun wasm_trap(var self, trap: str, line: int32, col: int32) {
+        self.wasm_position(line, col)
+        self.wasm_call("call", trap, 1)
+        self.emit("drop")
+        self.emit("unreachable")
+    }
+
+    // The position record of `line:col` (0 for none) on the stack.
+    fun wasm_position(var self, line: int32, col: int32) {
         if line <= 0 { self.emit("i64.const 0") }
         else {
             self.emit(format("i32.const {}", self.position_label(line, col)))
             self.emit("i64.extend_i32_u")
         }
-        self.wasm_call("call", trap, 1)
-        self.emit("drop")
-        self.emit("unreachable")
     }
 
     // `suspend L`'s state, the one resuming at L, into the heap frame.
@@ -546,7 +551,19 @@ impl CodeGen {
                 self.emit("i64.gt_s")
                 self.emit("i32.or")
                 self.emit("if")
-                self.wasm_trap("__trap_index", p.line, p.col)
+                // the range and the string's length reported (D183)
+                let tr = self.want_trap("range")
+                if tr == "" { self.wasm_trap("__trap_index", p.line, p.col) }
+                else {
+                    self.wasm_position(p.line, p.col)
+                    self.emit(format("local.get {}", w.la))
+                    self.emit(format("local.get {}", w.lb))
+                    self.wasm_addr(w, v, 0)
+                    self.emit("i64.load 0")
+                    self.wasm_call("call", tr, 4)
+                    self.emit("drop")
+                    self.emit("unreachable")
+                }
                 self.emit("end_if")
                 self.wasm_get(w, h)
                 self.wasm_get(w, v)
@@ -611,7 +628,19 @@ impl CodeGen {
                     self.emit("i64.load 0")
                     self.emit("i64.ge_u")
                     self.emit("if")
-                    self.wasm_trap("__trap_index", p.line, p.col)
+                    // the index and the length reported (D183)
+                    let tr = self.want_trap(if is_str { "sindex" } else { "lindex" })
+                    if tr == "" { self.wasm_trap("__trap_index", p.line, p.col) }
+                    else {
+                        self.wasm_position(p.line, p.col)
+                        self.wasm_get(w, i)
+                        for ins in i64_widened(f.temps[i]) { self.emit(ins) }
+                        self.wasm_addr(w, c, 0)
+                        self.emit("i64.load 0")
+                        self.wasm_call("call", tr, 3)
+                        self.emit("drop")
+                        self.emit("unreachable")
+                    }
                     self.emit("end_if")
                 }
                 self.wasm_get(w, c)
@@ -1253,4 +1282,20 @@ impl CodeGen {
         if self.is_async_fn(n) { self.emit_async_fnval(n) } else { self.emit_fnval_adapter(n) }
     }
 
+}
+
+// The index on the stack, of type `t`, made its value as an i64: sign- or
+// zero-extended from its width (D183).
+#test(Type.TInt(32, true))[["i64.extend32_s"]]
+#test(Type.TInt(8, false))[["i64.const 255", "i64.and"]]
+fun i64_widened(t: Type) -> [str] {
+    return match t {
+        Type.TInt(w, signed) => {
+            if w == 32 { if signed { ["i64.extend32_s"] } else { ["i64.const 4294967295", "i64.and"] } }
+            else if w == 16 { if signed { ["i64.extend16_s"] } else { ["i64.const 65535", "i64.and"] } }
+            else if w == 8 { if signed { ["i64.extend8_s"] } else { ["i64.const 255", "i64.and"] } }
+            else { [] }
+        },
+        _ => [],
+    }
 }

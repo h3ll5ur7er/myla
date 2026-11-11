@@ -135,7 +135,7 @@ Where nothing fixes a type parameter, a call can name it: `mk<int>()`, `deque.ne
 - They come first: the arguments and the expected type are typed with them, so `widen<int64>(5000000000)` takes an `int64`, and an argument that doesn't fit is a mismatch (`widen<str>(true)`: expected 'str', found 'bool').
 - There is one for each type parameter, in the declaration's order; another count is an error naming both (`function 'mk' expects 1 type argument(s), got 2`).
 - A method's name its own type parameters, not its impl's, which its receiver gives: `b.mapped<str>(f)` on a `B<int>`. A method without type parameters of its own, a function that isn't generic, a builtin or a variant takes none (`function 'twice' is not generic (it takes no type arguments)`).
-- In the parser, a `<` after a name or a member is tried as type arguments and kept when they close with `>` and a `(` follows; otherwise it's a comparison, as before. So `a < b` and `f(a < b, c > d)` compare, but `f(a < b, c > (d))` is one call of `a` with the type arguments `b, c` ([[Language/Grammar#ambiguities-and-how-they-are-resolved]]).
+- In the parser, a `<` after a name or a member is tried as type arguments and kept when they close with `>` and a `(` follows; otherwise it's a comparison, as before. So `a < b` and `f(a < b, c > d)` compare, but `f(a < b, c > (d))` is one call of `a` with the type arguments `b, c` ([[Language/Grammar#ambiguities-and-how-they-are-resolved]]). Only in a call's argument list (D186): in a list, map or tuple literal `[a < b, c > (d)]` is two comparisons, and so is `f"{a < b} {c > (a)}"`, whose holes are parsed one by one; there a generic call with two or more type arguments needs a `let` of its own (`let p = pair<int, str>(1, "a")`), and one with a single type argument, `[mk<int>()]`, is read as before.
 
 ```myla
 struct B<T> {
@@ -183,7 +183,9 @@ fun main() {
 
 | Backend | Strategy |
 | --- | --- |
-| Interpreter | Erasure: one body serves every instantiation; operators on erased values dispatch on the runtime value. A program that calls a trait's function on a type parameter (`T.zero()`, D172), which has no value to dispatch on, has its generic functions' frames bind their type parameters to the types the checker solved at each call |
+| Interpreter | Erasure: one body serves every instantiation. Each generic call binds the callee's type parameters to the types the checker solved there (D172, [[MYLA-414]]), so arithmetic, comparisons and formatting typed by a type parameter behave as for the concrete type: an `int8` sum overflows (D175), a `uint64` compares and prints unsigned, a `float32` rounds; a trait's function on a type parameter (`T.zero()`) and a method on a value of type-parameter type find their type there |
 | Native backend | Monomorphizes during code generation with a substitution map (the retired Python backend stamped out copies in a separate pass and checked the concrete program again) |
 
 Each instantiation gets its own name, whatever the type arguments are called ([[MYLA-9]], [[Architecture/Monomorphization]]).
+
+Polymorphic recursion, a generic function calling itself with a larger type (`grow<T>` calling `grow<[T]>`), runs in the interpreter, but native code would need an instance for every size: `myla build` refuses the call, `the instances of 'grow' nest without end: this call asks for one whose type arguments are 65 types deep (the limit is 64)`, as a type error ([[MYLA-415]]). The operators of a generic impl (`impl<T: Add> Add for Box<T>`) call its instance for the operands' types, as its methods do.

@@ -13,7 +13,7 @@
 // (MYLA-65, D80).
 
 from .parser import parse_source, parse_qualified, Parsed, expr_of, stmt_of, type_expr_of, block_of, pattern_of, fun_of, is_let_else_marker
-from .ast import int_text
+from .ast import int_text, is_unread_body
 from .util import format_specs
 from std.fmt import parse_spec, spec_need
 from .ast import Program, Decl, DeclKind, FunData, Param, TypeParam, Field, Variant
@@ -83,14 +83,26 @@ fun no_body(key: int64) -> Result<Block, [CheckErr]> {
     return Err([terr(0, 0, f"internal error: no body {key} to read")])
 }
 
-// The key of the body of the function at `line`:`col` of the declaration
-// `id` (a method's: its impl's), in `LazyBodies.keys`: the three in one
-// number, a line below 2^20 and a column below 2^12 (the lexer leaves a
-// body past them unskipped).
+// The key of the body whose `{` is at `line`:`col`, of a function of the
+// declaration `id` (a method's: its impl's), in `LazyBodies.keys`: the
+// three in one number, a line below 2^20 and a column below 2^12 (the
+// lexer leaves a body whose `{` is past them unskipped).
 #test(7, 3, 5)[30064783365]
 #test(0, 1048575, 4095)[4294967295]
 pub fun body_key(id: int32, line: int32, col: int32) -> int64 {
     return ((id as int64) << 32) | ((line as int64) << 12) | (col as int64)
+}
+
+// The key of `fd`'s body (`body_key`), a function of the declaration `id`,
+// if it is the marker of a body the loader left unread (`is_unread_body`):
+// by the place of its `{`, which the lexer tested against the limits, not
+// its `fun`'s, which may be past them on a line before (MYLA-416).
+#test(0, fun_of("fun f() { }"))[None]
+pub fun unread_key(id: int32, fd: FunData) -> Option<int64> {
+    return match fd.body {
+        Some(b) => if is_unread_body(b) { Some(body_key(id, b.line, b.col)) } else { None },
+        None => None,
+    }
 }
 
 // An error at a position without a range (one caret).
@@ -530,6 +542,43 @@ fun is_frame_value(t: Type) -> bool {
         Type.TParam(n) => true,
         Type.TSelf => true,
         _ => false,
+    }
+}
+
+// The type `e?` expects of `e` when `expected` is expected of `e?` in a
+// function returning `ret` (MYLA-315's follow-up): `Result<X, E>` in one
+// returning `Result<_, E>`, `Option<X>` in one returning an `Option`, so
+// `let a: B<int> = try_mk(ok)?` solves `try_mk`'s `T`.
+#test(Some(Type.TStr), Some(Type.TEnum("Result", [Type.TBool, Type.TChar])))[Some(Type.TEnum("Result", [Type.TStr, Type.TChar]))]
+#test(Some(Type.TStr), Some(Type.TEnum("Option", [Type.TBool])))[Some(Type.TEnum("Option", [Type.TStr]))]
+#test(None, Some(Type.TEnum("Option", [Type.TBool])))[None]
+#test(Some(Type.TStr), Some(Type.TBool))[None]
+fun try_hint(expected: Option<Type>, ret: Option<Type>) -> Option<Type> {
+    let x = match expected {
+        Some(t) => t,
+        None => { return None },
+    }
+    return match ret {
+        Some(Type.TEnum(rn, rargs)) => {
+            if rn == "Result" && rargs.len() == 2 { Some(Type.TEnum("Result", [x, rargs[1]])) }
+            else if rn == "Option" && rargs.len() == 1 { Some(Type.TEnum("Option", [x])) }
+            else { None }
+        },
+        _ => None,
+    }
+}
+
+// A place as the program writes it (`c`, `a.b`, `p.0`), `x` for any other
+// expression.
+#test(expr_of("a.b.0"))["a.b.0"]
+#test(expr_of("f(x)"))["x"]
+#test(expr_of("self.c"))["self.c"]
+fun place_text(e: Expr) -> str {
+    return match e.kind {
+        ExprKind.Name(n) => n,
+        ExprKind.GetField(t, f) => place_text(t) + "." + f,
+        ExprKind.TupleIndex(t, i) => f"{place_text(t)}.{i}",
+        _ => "x",
     }
 }
 
@@ -1138,11 +1187,51 @@ fun join_open(a: Type, b: Type) -> Option<Type> {
 
 // One column of a list or map literal (its elements, a map's keys or its
 // values) as its elements are checked: the type they share so far (`have`
-// once one is), possibly with holes; the first element, which a later
-// literal's type is unified with; the elements whose own type had a hole.
-struct LitColumn { ty: Type, have: bool, first: Expr, open: [Expr] }
+// once one is), possibly with holes; the first element, where a mismatch is
+// reported; `slot`, the column's lists in the checker's `col_open` (the
+// elements whose own type had a hole, MYLA-401) and `col_lits` (its
+// literals while nothing else fixes its type, L2); `fixed` once an element
+// that isn't such a literal does.
+struct LitColumn { ty: Type, have: bool, first: Expr, slot: int32, fixed: bool }
 
-fun new_column(first: Expr) -> LitColumn { return LitColumn { ty: hole(), have: false, first: first, open: [] } }
+// Whether `t` holds an `Option` or a `Result` (D182, `prelude_need`).
+#test(Type.TTuple([Type.TStr, Type.TEnum("Option", [Type.TStr])]))[true]
+#test(Type.TMap(Type.TStruct("Box", [Type.TEnum("Result", [Type.TStr, Type.TBool])]), Type.TStr))[true]
+#test(Type.TList(Type.TEnum("Shape", [])))[false]
+fun holds_prelude_enum(t: Type) -> bool {
+    return match t {
+        Type.TEnum(n, args) => n == "Option" || n == "Result" || holds_prelude_enum_in(args),
+        Type.TStruct(n, args) => holds_prelude_enum_in(args),
+        Type.TActor(n, args) => holds_prelude_enum_in(args),
+        Type.TTuple(es) => holds_prelude_enum_in(es),
+        Type.TList(e) => holds_prelude_enum(e),
+        Type.TMap(k, v) => holds_prelude_enum(k) || holds_prelude_enum(v),
+        _ => false,
+    }
+}
+
+fun holds_prelude_enum_in(ts: [Type]) -> bool {
+    for t in ts { if holds_prelude_enum(t) { return true } }
+    return false
+}
+
+// Whether the element `e` is a literal that takes the type its column gets
+// later (L2): an integer, float or char literal without a suffix, or one of
+// the first two negated.
+#test(expr_of("300"))[true]
+#test(expr_of("-1"))[true]
+#test(expr_of("'a'"))[true]
+#test(expr_of("3u8"))[false]
+#test(expr_of("x"))[false]
+#test(expr_of("-x"))[false]
+fun adapts(e: Expr) -> bool {
+    return match e.kind {
+        ExprKind.IntLit(v, suf, isc, big) => match suf { Some(x) => false, None => true },
+        ExprKind.FloatLit(lex, suf) => is_flexible_float_lit(e),
+        ExprKind.Unary(op, x) => op == "-" && (is_flexible_float_lit(x) || match x.kind { ExprKind.IntLit(v, suf, isc, big) => !isc && is_flexible_int_lit(x), _ => false }),
+        _ => false,
+    }
+}
 
 // A hint that is a hole says nothing.
 #test(Some(Type.TParam("?")))[None]
@@ -1403,13 +1492,69 @@ fun arg_hint(pt: Type, subst: [Subst], lambda: bool) -> Option<Type> {
     if solved_in(pt, subst) { return Some(subst_type(pt, subst)) }
     if !lambda { return None }
     return match pt {
-        Type.TFunc(ps, r) => if all_solved_in(ps, subst) { Some(Type.TFunc(subst_type_list(ps, subst), None)) } else { None },
+        // the result's known part too, its open parameters holes: `(T) ->
+        // Result<U, E>` with `T` and `E` known types a lambda's `Ok(x + 1)`
+        // (MYLA-356's follow-up)
+        Type.TFunc(ps, r) => if all_solved_in(ps, subst) { Some(Type.TFunc(subst_type_list(ps, subst), partial_result(r, subst))) } else { None },
         Type.TAsync(f) => match arg_hint(f, subst, true) {
             Some(h) => Some(Type.TAsync(h)),
             None => None,
         },
         _ => None,
     }
+}
+
+// A lambda's result hint, `r` with the type parameters `subst` leaves open
+// as holes: only a generic struct or enum some of whose arguments it knows
+// (a lambda's expression body takes it, `infer_lambda`).
+#test(Some(Type.TEnum("Result", [Type.TParam("U"), Type.TParam("E")])), [Subst { name: "E", ty: Type.TStr }])[Some(Type.TEnum("Result", [Type.TParam("?"), Type.TStr]))]
+#test(Some(Type.TEnum("Option", [Type.TParam("U")])), [])[None]
+#test(Some(Type.TParam("U")), [])[None]
+fun partial_result(r: Option<Type>, subst: [Subst]) -> Option<Type> {
+    let rt = match r {
+        Some(t) => t,
+        None => { return None },
+    }
+    let args = match rt {
+        Type.TEnum(n, a) => a,
+        Type.TStruct(n, a) => a,
+        _ => { return None },
+    }
+    var known = false
+    for a in args { if solved_in(a, subst) { known = true } }
+    if !known { return None }
+    var open = subst
+    for n in type_params_named(rt) { if !subst_has(subst, n) { open.push(Subst { name: n, ty: hole() }) } }
+    return Some(subst_type(rt, open))
+}
+
+// The type parameters `t` names, each once.
+#test(Type.TMap(Type.TParam("K"), Type.TList(Type.TParam("K"))))[["K"]]
+fun type_params_named(t: Type) -> [str] {
+    var out: [str] = []
+    var todo = [t]
+    while todo.len() > 0 {
+        let x = todo.pop()
+        match x {
+            Type.TParam(n) => { if !contains_str(out, n) { out.push(n) } },
+            Type.TTuple(es) => { for y in es { todo.push(y) } },
+            Type.TList(e) => { todo.push(e) },
+            Type.TMap(k, v) => {
+                todo.push(k)
+                todo.push(v)
+            },
+            Type.TStruct(n, a) => { for y in a { todo.push(y) } },
+            Type.TActor(n, a) => { for y in a { todo.push(y) } },
+            Type.TEnum(n, a) => { for y in a { todo.push(y) } },
+            Type.TFunc(ps, r) => {
+                for y in ps { todo.push(y) }
+                match r { Some(y) => { todo.push(y) }, None => {} }
+            },
+            Type.TAsync(f) => { todo.push(f) },
+            _ => {},
+        }
+    }
+    return out
 }
 
 // The range of a call's explicit type arguments (not empty), which an error
@@ -1463,6 +1608,22 @@ fun expected_subst(ret: Option<Type>, expected: Option<Type>) -> [Subst] {
             None => [],
         },
         None => [],
+    }
+}
+
+// A generic call's declared result `ret` when the type `expected` of the
+// call can't be an instance of it (`B<T>` where an `int32` is expected).
+#test(Some(Type.TStruct("B", [Type.TParam("T")])), Some(Type.TInt(32, true)))[Some((Type.TStruct("B", [Type.TParam("T")]), Type.TInt(32, true)))]
+#test(Some(Type.TStruct("B", [Type.TParam("T")])), Some(Type.TStruct("B", [Type.TStr])))[None]
+#test(Some(Type.TParam("T")), Some(Type.TStr))[None]
+#test(Some(Type.TStr), None)[None]
+fun result_clash(ret: Option<Type>, expected: Option<Type>) -> Option<(Type, Type)> {
+    return match ret {
+        Some(rt) => match expected {
+            Some(et) => if unify_param(rt, et, []).ok || has_hole(et) { None } else { Some((rt, et)) },
+            None => None,
+        },
+        None => None,
     }
 }
 
@@ -1582,6 +1743,8 @@ fun list_any_tp(xs: [Type]) -> bool {
 #test(Type.TList(Type.TParam("T")), [])[Type.TList(Type.TParam("T"))]
 #test(Type.TTuple([Type.TTuple([Type.TInt(32, true), Type.TInt(32, true)]), Type.TInt(32, true)]), [])[Type.TTuple([Type.TTuple([Type.TInt(32, true), Type.TInt(32, true)]), Type.TInt(32, true)])]
 #test(Type.TActor("Cell", [Type.TParam("T")]), [Subst { name: "T", ty: Type.TStr }])[Type.TActor("Cell", [Type.TStr])]
+#test(Type.TFunc([], Some(Type.TParam("T"))), [Subst { name: "T", ty: Type.TTuple([]) }])[Type.TFunc([], None)]
+#test(Type.TFunc([], Some(Type.TParam("T"))), [Subst { name: "T", ty: Type.TBool }])[Type.TFunc([], Some(Type.TBool))]
 pub fun subst_type(t: Type, subst: [Subst]) -> Type {
     return match t {
         Type.TParam(n) => match subst_get(subst, n) { Some(x) => x, None => t },
@@ -1591,7 +1754,9 @@ pub fun subst_type(t: Type, subst: [Subst]) -> Type {
         Type.TStruct(n, args) => Type.TStruct(n, subst_type_list(args, subst)),
         Type.TActor(n, args) => Type.TActor(n, subst_type_list(args, subst)),
         Type.TEnum(n, args) => Type.TEnum(n, subst_type_list(args, subst)),
-        Type.TFunc(ps, r) => Type.TFunc(subst_type_list(ps, subst), match r { Some(rt) => Some(subst_type(rt, subst)), None => None }),
+        // a result that becomes `()` is none, as a function without one
+        // is written (D140): `() -> T` with `T` the unit type (M24)
+        Type.TFunc(ps, r) => Type.TFunc(subst_type_list(ps, subst), match r { Some(rt) => result_of(subst_type(rt, subst)), None => None }),
         Type.TAsync(f) => Type.TAsync(subst_type(f, subst)),
         _ => t,
     }
@@ -1629,6 +1794,8 @@ pub struct UniRes { ok: bool, subst: [Subst] }
 #test(Type.TParam("B"), Type.TInt(32, true), [Subst { name: "A", ty: Type.TInt(32, true) }])[UniRes { ok: true, subst: [Subst { name: "A", ty: Type.TInt(32, true) }, Subst { name: "B", ty: Type.TInt(32, true) }] }]
 #test(Type.TActor("Cell", [Type.TParam("T")]), Type.TActor("Cell", [Type.TStr]), [])[UniRes { ok: true, subst: [Subst { name: "T", ty: Type.TStr }] }]
 #test(Type.TActor("Cell", [Type.TParam("T")]), Type.TStruct("Cell", [Type.TStr]), [])[UniRes { ok: false, subst: [] }]
+#test(Type.TFunc([], Some(Type.TParam("T"))), Type.TFunc([], None), [])[UniRes { ok: true, subst: [Subst { name: "T", ty: Type.TTuple([]) }] }]
+#test(Type.TFunc([], Some(Type.TInt(32, true))), Type.TFunc([], None), [])[UniRes { ok: false, subst: [] }]
 pub fun unify_param(ptype: Type, at: Type, subst: [Subst]) -> UniRes {
     return match ptype {
         Type.TParam(n) => {
@@ -1687,7 +1854,8 @@ pub fun unify_param(ptype: Type, at: Type, subst: [Subst]) -> UniRes {
                 let r1 = unify_list(pp, ap, subst)
                 if !r1.ok { return UniRes { ok: false, subst: r1.subst } }
                 match pr {
-                    Some(prt) => match ar { Some(art) => unify_param(prt, art, r1.subst), None => UniRes { ok: false, subst: r1.subst } },
+                    // a function without a result gives `()` (D140, M24)
+                    Some(prt) => match ar { Some(art) => unify_param(prt, art, r1.subst), None => unify_param(prt, Type.TTuple([]), r1.subst) },
                     None => match ar { Some(art) => UniRes { ok: false, subst: r1.subst }, None => UniRes { ok: true, subst: r1.subst } },
                 }
             },
@@ -1926,6 +2094,12 @@ pub struct Checker {
     call_kind_id: int32,
     targs_taken: int32,             // the last call whose explicit type arguments a generic function or method took (D169)
     open_at: int32,                 // the list or map literal's element that may leave type parameters open, as holes (MYLA-401)
+    col_open: [[Expr]],             // each open literal column's elements with a hole (`LitColumn.slot`)
+    col_lits: [[Expr]],             // each open literal column's literals while only literals fix its type (L2)
+    tp_fields: [str: bool],         // the names of the fields of a type parameter's type, once `tp_fields_ready` (D178)
+    tp_fields_ready: bool,
+    prelude_needed: bool,           // whether a type holding an `Option` or a `Result` was compared or hashed
+    lazy_prelude: [int32: bool],    // the prelude's derived `Eq` and `Hash` impls of `Option` and `Result`, until a type that holds one is compared or hashed (D182)
     call_target: str,
     call_mutates: bool,
     fun_name: str,
@@ -1946,7 +2120,7 @@ pub struct Checker {
     conc_sp: SrcSpan,
     conc_node: int32,
     in_async: bool,
-    self_assignable: bool,          // D144: in a `var self` method of a built-in type, `self = v` writes the receiver
+    self_assignable: bool,          // D144: in a `var self` method of a built-in type or an enum, `self = v` writes the receiver
     actor_self: str,
     // the call being checked is a builtin function called as a method
     // (`xs.push(v)`, D103, MYLA-221): a local of the same name doesn't shadow it
@@ -1983,7 +2157,7 @@ fun new_checker(decls: [Decl]) -> Checker {
         resolved: [:], call_defaults: [:], errs: [], warnings: [], primitives: false, called: [:], lazy_bodies: no_lazy_bodies(), read_bodies: [:], read_ids: [:], std_impls: [:], allowed: [], impl_allows: [], method_decl_allows: [], mains: [],
         skipped_decls: [:], skipped_fns: [:], broken_impls: [:], redefined: [:],
         lost_methods: [:], lost_traits: [:], failed_consts: [:], bodies: false,
-        call_kind: "", call_kind_id: -1, targs_taken: -1, open_at: -1, call_target: "", call_mutates: false, fun_name: "", handovers: [:], become_words: [], passed_on: [],
+        call_kind: "", call_kind_id: -1, targs_taken: -1, open_at: -1, col_open: [], col_lits: [], tp_fields: [:], tp_fields_ready: false, prelude_needed: false, lazy_prelude: [:], call_target: "", call_mutates: false, fun_name: "", handovers: [:], become_words: [], passed_on: [],
         actors: [:], conc_line: 0, conc_col: 0, conc_sp: no_span(), conc_node: -1, in_async: false, self_assignable: false, actor_self: "", builtin_as_method: false, cur_key: "",
         lams: [], awaited: [:], call_key: "", call_async: false, suspended: -1, task_init: false, in_guard: false, neg_lit: -1,
         task_line: 0, task_col: 0, task_sp: no_span(), task_node: -1, fill_decls: [:], renames: [:], mutating_calls: [:],
@@ -3551,8 +3725,10 @@ impl Checker {
     fun enum_name_ref(self, e: Expr) -> Option<str> {
         match e.kind {
             ExprKind.Name(n) => {
+                // the table first: a scope's walk costs more
+                if !self.is_enum(n) { return None }
                 let shadowed = match self.lookup(n) { Some(x) => true, None => false }
-                if self.is_enum(n) && !shadowed { return Some(n) }
+                if !shadowed { return Some(n) }
             },
             _ => {},
         }
@@ -3628,7 +3804,7 @@ impl Checker {
             ExprKind.MatchE(s, arms) => self.infer_match(e, s, arms, expected, as_stmt),
             ExprKind.Try(x) => {
                 if self.defer_at >= 0 { return Err(terr_at(e.line, e.col, e.sp, "a deferred block can't use '?': it runs as its block ends")) }
-                Ok(Some(self.infer_try(e, x)?))
+                Ok(Some(self.infer_try(e, x, expected)?))
             },
             ExprKind.Cast(x, ty) => Ok(Some(self.infer_cast(e, x, ty)?)),
             ExprKind.Lambda(ps, ret, body, asy) => Ok(Some(self.infer_lambda(e, ps, ret, body, asy, expected)?)),
@@ -3779,6 +3955,13 @@ impl Checker {
             self.neg_lit = saved_neg
             let t = tr?
             if !(is_int(t) || is_float(t)) { return Err(terr_at(e.line, e.col, e.sp, "unary '-' requires a numeric operand")) }
+            // a negative literal fits no unsigned type (L5)
+            match x.kind {
+                ExprKind.IntLit(v, suf, isc, big) => {
+                    if !isc && (v != 0 || big != "") && !is_signed_int(t) { return Err(terr_at(e.line, e.col, e.sp, format("integer literal -{} does not fit in '{}'", int_text(v, big), type_name(t)))) }
+                },
+                _ => {},
+            }
             return Ok(t)
         }
         if op == "!" {
@@ -3864,7 +4047,7 @@ impl Checker {
             return Ok(Type.TBool)
         }
         if op == "==" || op == "!=" {
-            if needs_other_side(l) && !needs_other_side(r) {
+            if self.other_side_first(l) && !self.other_side_first(r) {
                 // `None == opt`, `Ok(1) == res`: the left side typed by the
                 // right one (MYLA-379)
                 let rt0 = self.expect_value(r, None)?
@@ -3884,6 +4067,7 @@ impl Checker {
             let common = self.unify(l, lt, r, rt)?
             if is_compound_eq(common) {
                 // a tuple or list of `Eq` elements (D163, MYLA-313)
+                self.prelude_need(common)
                 if self.type_implements(common, "Eq")? { return Ok(Type.TBool) }
                 return Err(terr_at(e.line, e.col, e.sp, format("cannot compare values of type '{}': {}", type_name(common), self.not_eq_why(common))))
             }
@@ -3996,7 +4180,8 @@ impl Checker {
         var trnm = ""
         var kind = ""
         if op == "==" || op == "!=" { trnm = "Eq"
-            kind = "eq" }
+            kind = "eq"
+            self.prelude_need(lt) }
         else { if op == "<" || op == "<=" || op == ">" || op == ">=" { trnm = "Ord"
             kind = "ord" }
         else { trnm = match arith_trait(op) { Some(t) => t, None => "" }
@@ -4020,8 +4205,10 @@ impl Checker {
             let k = match self.type_key(lt) { Some(x) => x, None => "" }
             match self.method_sig(k, arith_method(op)) {
                 Some(sig) => {
+                    // a generic impl's result in the receiver's arguments,
+                    // `Box<int> + Box<int>` a `Box<int>` (M2)
                     return match sig.ret {
-                        Some(rr) => Ok(rr),
+                        Some(rr) => Ok(subst_type(rr, unify_param(sig.params[0], lt, []).subst)),
                         None => Ok(lt),
                     }
                 },
@@ -4062,11 +4249,44 @@ impl Checker {
     // struct's field's isn't checked until a function uses it). Met before
     // the impls are known, it waits for `check_pending_keys`.
     fun check_key(var self, kt: Type, ln: int32, cl: int32, sp: SrcSpan) -> Result<int32, CheckErr> {
+        self.prelude_need(kt)
         if !self.keys_ready && !is_map_key(kt) && !contains_type_param(kt) && !has_error(kt) {
             self.pending_keys.push(PendingKey { t: kt, line: ln, col: cl, sp: sp, decl: self.cur_decl })
             return Ok(0)
         }
         return self.key_ok(kt, ln, cl, sp)
+    }
+
+    // The prelude's derived `Eq` and `Hash` of `Option` and `Result` (D182)
+    // are called once a type `t` that holds one is compared or hashed: by
+    // `==`, as a map's key, a bound's argument, a member of a derived `Eq`,
+    // a tuple's `hash`. Their bodies wait until then (`lazy_prelude`), as
+    // they and std.hash's methods they call would cost a hello world's check
+    // 1.4 %; the runners call them only there.
+    fun prelude_need(var self, t: Type) {
+        if !self.prelude_needed && holds_prelude_enum(t) {
+            for m in ["Option.eq", "Result.eq", "Option.hash", "Result.hash"] { self.called[m] = true }
+            self.prelude_needed = true
+        }
+    }
+
+    // The derived impl added last waits (`prelude_need`) if it is the
+    // prelude's `Option`'s or `Result`'s.
+    fun prelude_waits(var self, name: str) {
+        if (name == "Option" || name == "Result") && !self.prelude_needed { self.lazy_prelude[self.decls[self.decls.len() - 1].id] = true }
+    }
+
+    // `prelude_need` of the members of the struct or enum `name`.
+    fun members_need(var self, name: str) {
+        let si = self.struct_idx(name)
+        if si >= 0 { for f in self.structs[si].fields { self.prelude_need(f.ty) } }
+        let ei = self.enum_idx(name)
+        if ei >= 0 { for v in self.enums[ei].variants { for pt in v.payload { self.prelude_need(pt) } } }
+    }
+
+    // `prelude_need` of the types a generic call's substitution gives.
+    fun prelude_need_all(var self, subst: [Subst]) {
+        if !self.prelude_needed { for sb in subst { self.prelude_need(sb.ty) } }
     }
 
     // `check_key` once the impls are known.
@@ -4328,15 +4548,40 @@ impl Checker {
             if may_open { return Ok(Type.TList(hole())) }
             return Err(terr_at(e.line, e.col, e.sp, "cannot infer the element type of an empty list `[]`; annotate it (e.g. `: [int]`)"))
         }
-        var col = new_column(elems[0])
+        var col = self.open_column(elems[0])
         for x in elems { col = self.column_step(col, x, exp_elem)? }
-        return Ok(Type.TList(self.close_column(col, may_open)?))
+        let t = self.close_column(col, may_open)?
+        self.drop_columns(col.slot)
+        return Ok(Type.TList(t))
+    }
+
+    // A new column of a literal, its first element `first`; its lists live
+    // in the checker, so that a step adds to them in place (MYLA-401's
+    // quadratic join).
+    fun open_column(var self, first: Expr) -> LitColumn {
+        let slot = self.col_open.len()
+        self.col_open.push([])
+        self.col_lits.push([])
+        return LitColumn { ty: hole(), have: false, first: first, slot: slot, fixed: false }
+    }
+
+    // The columns from `slot` on, once their literal is checked.
+    fun drop_columns(var self, slot: int32) {
+        while self.col_open.len() > slot {
+            self.col_open.pop()
+            self.col_lits.pop()
+        }
     }
 
     // The column `col` with its next element `x` (MYLA-401). `x` is checked
     // against the elements' type so far, and may leave type parameters open
     // (`open_at`): a later element may fix them. A hint with a hole goes only
     // to an element that can take it.
+    //
+    // A literal (`adapts`) takes the column's type as its hint; while only
+    // such literals are in the column, an element of another type gives it
+    // to all of them, each checked again against it (L2): `[1, 300, 3u8]`
+    // is an error at `300`, `[1, 2, x]` with `x: int64` an `[int64]`.
     fun column_step(var self, col: LitColumn, x: Expr, exp: Option<Type>) -> Result<LitColumn, CheckErr> {
         var hint = exp
         if col.have { hint = Some(col.ty) }
@@ -4346,12 +4591,25 @@ impl Checker {
         let r = self.expect_value(x, hint)
         self.open_at = saved
         let t = r?
-        var open = col.open
-        if has_hole(t) { open.push(x) }
-        if !col.have { return Ok(LitColumn { ty: t, have: true, first: x, open: open }) }
-        if !has_hole(t) && !has_hole(col.ty) { return Ok(LitColumn { ty: self.unify(col.first, col.ty, x, t)?, have: true, first: col.first, open: open }) }
+        if has_hole(t) { self.col_open[col.slot].push(x) }
+        let lit = adapts(x)
+        let fixed = col.fixed || !lit
+        if lit && !col.fixed { self.col_lits[col.slot].push(x) }
+        if !col.have { return Ok(LitColumn { ty: t, have: true, first: x, slot: col.slot, fixed: fixed }) }
+        if !has_hole(t) && !has_hole(col.ty) {
+            if type_eq(col.ty, t) { return Ok(LitColumn { ty: t, have: true, first: col.first, slot: col.slot, fixed: fixed }) }
+            if !col.fixed {
+                // the literals so far take the type `x` gives
+                var all = true
+                for y in self.col_lits[col.slot] {
+                    if y.id != x.id && !type_eq(self.expect_value(y, Some(t))?, t) { all = false }
+                }
+                if all { return Ok(LitColumn { ty: t, have: true, first: col.first, slot: col.slot, fixed: fixed }) }
+            }
+            return Err(terr_at(col.first.line, col.first.col, col.first.sp, format("type mismatch: '{}' vs '{}' (no implicit conversion between numeric types)", type_name(col.ty), type_name(t))))
+        }
         return match join_open(col.ty, t) {
-            Some(j) => Ok(LitColumn { ty: j, have: true, first: col.first, open: open }),
+            Some(j) => Ok(LitColumn { ty: j, have: true, first: col.first, slot: col.slot, fixed: fixed }),
             None => Err(terr_at(x.line, x.col, x.sp, format("type mismatch: '{}' vs '{}'", open_type_name(col.ty), open_type_name(t)))),
         }
     }
@@ -4363,11 +4621,13 @@ impl Checker {
     fun close_column(var self, col: LitColumn, may_open: bool) -> Result<Type, CheckErr> {
         if has_hole(col.ty) {
             if may_open { return Ok(col.ty) }
-            let x = col.open[0]
+            // the element the hole is in, as deep as it goes: what the
+            // others filled there isn't the error (L6)
+            let x = self.hole_at(self.col_open[col.slot][0], col.ty)
             self.expect_value(x, None)?
             return Err(terr_at(x.line, x.col, x.sp, format("cannot infer the type '{}' of this element; add a type annotation to guide inference", open_type_name(col.ty))))
         }
-        for x in col.open { self.fill_open(x, col.ty)? }
+        for x in self.col_open[col.slot] { self.fill_open(x, col.ty)? }
         return Ok(col.ty)
     }
 
@@ -4412,6 +4672,45 @@ impl Checker {
         return Ok(0)
     }
 
+    // The innermost element of the open element `x` where the type `t` its
+    // column's elements share has a hole: `None` in the second place of
+    // `(None, None)` beside `(Some(1), None)`.
+    fun hole_at(self, x: Expr, t: Type) -> Expr {
+        match x.kind {
+            ExprKind.TupleLit(es) => {
+                match t {
+                    Type.TTuple(ts) => {
+                        var i = 0
+                        while i < es.len() && i < ts.len() {
+                            if has_hole(ts[i]) && self.holed(es[i]) { return self.hole_at(es[i], ts[i]) }
+                            i += 1
+                        }
+                    },
+                    _ => {},
+                }
+            },
+            ExprKind.ListLit(es) => {
+                match t {
+                    Type.TList(el) => { for y in es { if self.holed(y) { return self.hole_at(y, el) } } },
+                    _ => {},
+                }
+            },
+            ExprKind.MapLit(ents) => {
+                match t {
+                    Type.TMap(k, v) => {
+                        for en in ents {
+                            if has_hole(k) && self.holed(en.key) { return self.hole_at(en.key, k) }
+                            if has_hole(v) && self.holed(en.value) { return self.hole_at(en.value, v) }
+                        }
+                    },
+                    _ => {},
+                }
+            },
+            _ => {},
+        }
+        return x
+    }
+
     fun holed(self, x: Expr) -> bool {
         return match self.resolved.get(x.id) { Some(t) => has_hole(t), None => false }
     }
@@ -4431,6 +4730,21 @@ impl Checker {
                 ExprKind.GetField(target, field) => self.is_variant_ref(target, field),
                 _ => false,
             }),
+            _ => false,
+        }
+    }
+
+    // Whether `==` types the operand `e` by the other one (MYLA-379): `None`,
+    // `Some(…)`, `Ok(…)`, `Err(…)`, or a variant of a program's enum,
+    // `Tree.Leaf`, `Tree.Node(…)`, whose type arguments the other side has.
+    fun other_side_first(self, e: Expr) -> bool {
+        if needs_other_side(e) { return true }
+        return match e.kind {
+            ExprKind.GetField(target, field) => self.is_variant_ref(target, field),
+            ExprKind.Call(callee, args, targs) => targs.len() == 0 && match callee.kind {
+                ExprKind.GetField(target, field) => self.is_variant_ref(target, field),
+                _ => false,
+            },
             _ => false,
         }
     }
@@ -4465,8 +4779,8 @@ impl Checker {
             return Err(terr_at(e.line, e.col, e.sp, "cannot infer the key/value types of an empty map `[:]`; annotate it (e.g. `: [str: int]`)"))
         }
         let k0 = entries[0].key
-        var keys = new_column(k0)
-        var vals = new_column(entries[0].value)
+        var keys = self.open_column(k0)
+        var vals = self.open_column(entries[0].value)
         var i = 0
         while i < entries.len() {
             keys = self.column_step(keys, entries[i].key, exp_k)?
@@ -4478,7 +4792,9 @@ impl Checker {
         let key_open = self.holed(k0)
         let key_t = self.close_column(keys, may_open)?
         if key_open && !has_hole(key_t) { self.check_key(key_t, k0.line, k0.col, k0.sp)? }
-        return Ok(Type.TMap(key_t, self.close_column(vals, may_open)?))
+        let val_t = self.close_column(vals, may_open)?
+        self.drop_columns(keys.slot)
+        return Ok(Type.TMap(key_t, val_t))
     }
 
     #test(checker_on("enum E { A, B(int) }"), expr_of("a.b[0]"), expr_of("a.b[0]"), expr_of("a.b[0]"))[Err(CheckErr { line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 2 }, msg: "unknown name 'a'", decl: -1, notes: [] })]
@@ -4516,6 +4832,7 @@ impl Checker {
         }
         match base {
             Type.TMap(k, v) => { self.key_ok(k, e.line, e.col, e.sp)?
+                self.prelude_need(k)
                 self.expect_type(ix, k, "map key")?
             return Ok(v) },
             Type.TStr => {
@@ -5620,6 +5937,13 @@ impl Checker {
                     Type.TList(el) => el,
                     Type.TMap(k, v) => {
                         self.key_ok(k, it_expr.line, it_expr.col, it_expr.sp)?
+                        // `for (k, v) in m`: a map's loop visits its keys
+                        // (MYLA-390's follow-up)
+                        let destructs = var_name.len() > 4 && var_name[:4] == "%for"
+                        let key_tuple = match k { Type.TTuple(ks) => true, _ => false }
+                        if destructs && !key_tuple {
+                            return Err(with_notes(terr_at(it_expr.line, it_expr.col, it_expr.sp, format("a loop over the map '{}' visits its keys, of type '{}', not its entries", type_name(it), type_name(k))), [Note { label: "help", msg: "write 'for (k, v) in m.items()' for the keys and values", line: 0, col: 0, sp: no_span() }]))
+                        }
                         k
                     },
                     // a string's characters, as `s.chars()` gives them (MYLA-318)
@@ -6340,9 +6664,10 @@ impl Checker {
         if self.is_actor(self.cur_key) { self.actor_self = self.cur_key } else { self.actor_self = "" }
         let recv = match fd.receiver { Some(r) => r, None => "" }
         // a built-in value's `var self` method changes it by assigning it,
-        // which reaches the caller's place (D144); a struct's changes its
-        // fields
-        self.self_assignable = recv == "var self" && sig.params.len() > 0 && is_builtin_value(sig.params[0])
+        // which reaches the caller's place (D144), and so does an enum's,
+        // which has no fields to change (an enum as a stateful iterator,
+        // MYLA-380's follow-up); a struct's changes its fields
+        self.self_assignable = recv == "var self" && sig.params.len() > 0 && (is_builtin_value(sig.params[0]) || (!fd.is_async && match sig.params[0] { Type.TEnum(en, ea) => true, _ => false }))
         // an async one would need its receiver back from its frame, as a
         // struct's gets it (D99)
         if self.self_assignable && fd.is_async { return Err(terr_at(fd.line, fd.col, fd.sp, "async 'var self' methods on built-in types are not supported yet")) }
@@ -6889,11 +7214,14 @@ impl Checker {
         // an `impl Eq` for a type that doesn't exist may have been meant for
         // any of them: a type that isn't Eq is then no news (MYLA-110)
         var lost_eq = false
+        // the targets of the explicit impls, found once, not once a target
+        var explicit_eq: [str: bool] = [:]
         for d in self.impl_decls {
             match impl_eq_target_name(d) {
                 Some(nm) => {
                     if !contains_str(eq_names, nm) { eq_names.push(nm) }
                     if !self.names_a_type(nm) { lost_eq = true }
+                    explicit_eq[nm] = true
                 },
                 None => {},
             }
@@ -6902,14 +7230,7 @@ impl Checker {
             self.cur_decl = decl.id
             let name = decl_kind_name(decl)
             // explicit `impl Eq for name`? (it stands)
-            var explicit = false
-            for d in self.impl_decls {
-                match impl_eq_target_name(d) {
-                    Some(nm) => { if nm == name { explicit = true } },
-                    None => {},
-                }
-            }
-            if explicit {
+            if explicit_eq.contains(name) {
                 self.record(terr_at(decl.line, decl.col, decl.sp, format("type '{}' both derives Eq and has an explicit 'impl Eq for {}'", name, name)))?
                 continue
             }
@@ -6926,8 +7247,12 @@ impl Checker {
                 // a generic type's: an impl bounded by `T: Eq`, written as
                 // source and checked and run as any other (MYLA-379)
                 self.add_derived_impl(derived_eq_src(name, tps, self.derived_parts(name)), "Eq")
+                self.prelude_waits(name)
                 continue
             }
+            // compared member by member: a member's `Option` or `Result`
+            // by its `eq` (D182)
+            self.members_need(name)
             // register the synthesized Eq impl: method `eq: (Self,Self)->bool`
             var self_t = Type.TEnum(name, [])
             if self.is_struct(name) { self_t = Type.TStruct(name, []) }
@@ -6953,11 +7278,13 @@ impl Checker {
         for d in targets { hash_names.push(decl_kind_name(d)) }
         var lost = false
         var has_hasher = false
+        var explicit_hash: [str: bool] = [:]
         for d in self.impl_decls {
             match impl_target_name(d, "Hash") {
                 Some(nm) => {
                     if !contains_str(hash_names, nm) { hash_names.push(nm) }
                     if !self.names_a_type(nm) { lost = true }
+                    explicit_hash[nm] = true
                 },
                 None => {},
             }
@@ -6966,14 +7293,7 @@ impl Checker {
         for decl in targets {
             self.cur_decl = decl.id
             let name = decl_kind_name(decl)
-            var explicit = false
-            for d in self.impl_decls {
-                match impl_target_name(d, "Hash") {
-                    Some(nm) => { if nm == name { explicit = true } },
-                    None => {},
-                }
-            }
-            if explicit {
+            if explicit_hash.contains(name) {
                 self.record(terr_at(decl.line, decl.col, decl.sp, format("type '{}' both derives Hash and has an explicit 'impl Hash for {}'", name, name)))?
                 continue
             }
@@ -7021,6 +7341,9 @@ impl Checker {
             if tps.len() > 0 {
                 // a generic type's, bounded, against the linked program's names (MYLA-379)
                 self.add_derived_impl(derived_hash_src(f"impl{bounded_params(tps, "Hash")} Hash for {with_params(name, tps)}", self.derived_parts(name)), "Hash")
+                // the prelude's (D182): its body, and std.hash's methods it
+                // calls, checked once a type that holds one is hashed
+                self.prelude_waits(name)
                 continue
             }
             let src = derived_hash_src("impl Hash for Derived", self.derived_parts(name))
@@ -8001,7 +8324,7 @@ impl Checker {
             Ok(x) => {},
             Err(e) => {
                 if !is_stopped(e) { self.note(e) }
-                return Err(unmangled_all(self.errs))
+                return Err(unmangled_all(self.errs, self.known_names()))
             },
         }
         self.bodies = true
@@ -8011,7 +8334,8 @@ impl Checker {
         // one does (MYLA-359), as its module's own `myla test` checks them
         // all. Trait impls' are checked, as an operator, a bound or a derive
         // calls them unnamed.
-        let lazy = self.lazy_decls()
+        var lazy = self.lazy_decls()
+        for id in self.lazy_prelude.keys() { lazy[id] = true }
         var waiting_fns: [int32] = []
         var pos = -1
         for decl in self.decls {
@@ -8061,9 +8385,33 @@ impl Checker {
         }
         self.check_passed_on()
         self.check_become_words()
-        if self.errs.len() > 0 { return Err(unmangled_all(self.errs)) }
-        self.warnings = unmangled_all(sort_by_place(self.warnings))
+        if self.errs.len() > 0 { return Err(unmangled_all(self.errs, self.known_names())) }
+        if self.warnings.len() > 0 { self.warnings = unmangled_all(sort_by_place(self.warnings), self.known_names()) }
         return Ok(0)
+    }
+
+    // The qualified names the loader made that a message may hold (a
+    // function, type, trait, alias or const, and each module path before
+    // one), which `unmangled_in` writes as a program does; only when there
+    // is a message.
+    fun known_names(self) -> [str: bool] {
+        var out: [str: bool] = [:]
+        var names: [str] = []
+        for k in self.func_map.keys() { names.push(k) }
+        for k in self.struct_map.keys() { names.push(k) }
+        for k in self.enum_map.keys() { names.push(k) }
+        for t in self.traits { names.push(t.name) }
+        for a in self.aliases { names.push(a.name) }
+        for c in self.const_decls { names.push(c.name) }
+        for n in names {
+            var i = 0
+            while i < n.len() {
+                if n[i] == '$' { out[n[:i]] = true }
+                i += 1
+            }
+            out[n] = true
+        }
+        return out
     }
 
     // The body of the function `decls[pos]`, unless it was left out.
@@ -8089,7 +8437,10 @@ impl Checker {
     #test(checker_on("[int]"), 0, fun_of("fun f() { }"))[Some(FunData { line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 12 }, name: "f", params: [], ret_type: None, body: Some(Block { line: 1, col: 9, sp: SrcSpan { sline: 1, scol: 9, eline: 1, ecol: 12 }, stmts: [] }), attributes: [], type_params: [], receiver: None, is_pub: false, is_async: false })]
     fun with_body(var self, id: int32, fd: FunData) -> Option<FunData> {
         if !self.lazy_bodies.ids.contains(id) { return Some(fd) }
-        let key = body_key(id, fd.line, fd.col)
+        let key = match unread_key(id, fd) {
+            Some(k) => k,
+            None => { return Some(fd) },
+        }
         if !self.lazy_bodies.keys.contains(key) { return Some(fd) }
         var g = fd
         match self.read_bodies.get(key) {
@@ -8169,7 +8520,11 @@ impl Checker {
 
     // `fd` of the declaration `id` with its body if it was read.
     fun read_into(self, id: int32, fd: FunData) -> FunData {
-        return match self.read_bodies.get(body_key(id, fd.line, fd.col)) {
+        let key = match unread_key(id, fd) {
+            Some(k) => k,
+            None => { return fd },
+        }
+        return match self.read_bodies.get(key) {
             Some(b) => {
                 var g = fd
                 g.body = Some(b)
@@ -8329,6 +8684,11 @@ impl Checker {
     // failed may have left behind (types.py: _on_its_own).
     fun reset_state(var self, id: int32) {
         self.cur_decl = id
+        // a literal's columns an error left open
+        if self.col_open.len() > 0 {
+            self.col_open = []
+            self.col_lits = []
+        }
         self.frames = []
         self.loop_depth = 0
         self.defer_at = -1
@@ -8409,18 +8769,20 @@ impl Checker {
     }
 }
 
-#test()["#derive(Eq)\nenum Option<T> { Some(T), None }\n#derive(Eq)\nenum Result<T, E> { Ok(T), Err(E) }\ntrait Format {\n    fun format(self, spec: str) -> str\n}\nstruct Hasher {\n    state: uint64,\n}\nimpl Eq for Hasher {\n    fun eq(self, other: Hasher) -> bool {\n        return self.state == other.state\n    }\n}\ntrait Hash {\n    fun hash(self, h: Hasher) -> Hasher\n}\ntrait Iterator<T> {\n    fun next(var self) -> Option<T>\n}\n"]
+#test()["#derive(Eq, Hash)\nenum Option<T> { Some(T), None }\n#derive(Eq, Hash)\nenum Result<T, E> { Ok(T), Err(E) }\ntrait Format {\n    fun format(self, spec: str) -> str\n}\nstruct Hasher {\n    state: uint64,\n}\nimpl Eq for Hasher {\n    fun eq(self, other: Hasher) -> bool {\n        return self.state == other.state\n    }\n}\ntrait Hash {\n    fun hash(self, h: Hasher) -> Hasher\n}\ntrait Iterator<T> {\n    fun next(var self) -> Option<T>\n}\n"]
 // The prelude: what every program has without an import. The `Hasher`'s
 // state and the `Hash` trait are here (D163, MYLA-313), so that every type
 // can be a map key's and every module can name them; the hasher's methods,
 // its algorithm, and the `Hash` impls of the built-in types are std.hash's,
 // an implicit module. `Option` and `Result` derive `Eq`, so `opt == None`
-// works when the payload is `Eq` (MYLA-379). `Iterator<T>` is here for `for`
+// works when the payload is `Eq` (MYLA-379), and `Hash`, so they are map keys
+// when the payload is `Hash` (D182); those impls' bodies are checked once a
+// program compares or hashes one (`prelude_need`). `Iterator<T>` is here for `for`
 // over one (D171). A
 // map's `get` is std.map's method `m.get(k)`: the free `get(m, k)` that was
 // here went, so a file may declare a `get` of its own (MYLA-393).
 fun prelude_src() -> str {
-    return "#derive(Eq)\nenum Option<T> { Some(T), None }\n#derive(Eq)\nenum Result<T, E> { Ok(T), Err(E) }\ntrait Format {\n    fun format(self, spec: str) -> str\n}\nstruct Hasher {\n    state: uint64,\n}\nimpl Eq for Hasher {\n    fun eq(self, other: Hasher) -> bool {\n        return self.state == other.state\n    }\n}\ntrait Hash {\n    fun hash(self, h: Hasher) -> Hasher\n}\ntrait Iterator<T> {\n    fun next(var self) -> Option<T>\n}\n"
+    return "#derive(Eq, Hash)\nenum Option<T> { Some(T), None }\n#derive(Eq, Hash)\nenum Result<T, E> { Ok(T), Err(E) }\ntrait Format {\n    fun format(self, spec: str) -> str\n}\nstruct Hasher {\n    state: uint64,\n}\nimpl Eq for Hasher {\n    fun eq(self, other: Hasher) -> bool {\n        return self.state == other.state\n    }\n}\ntrait Hash {\n    fun hash(self, h: Hasher) -> Hasher\n}\ntrait Iterator<T> {\n    fun next(var self) -> Option<T>\n}\n"
 }
 
 // The prelude's declarations, with node ids from `first_id`.
@@ -8556,6 +8918,43 @@ pub fun checker_on(src: str) -> Checker {
 #test("enum Toml { Str(str) }\ntrait ToToml { fun to_toml(self) -> Toml }\ntrait FromToml { fun from_toml(t: Toml) -> Self }\nfun unknown_variant() {}\nenum Option<T> { Some(T), None }\n#derive(Toml)\nenum E { A, B(Option<int>) }")[["cannot derive Toml for enum 'E': payload #0 of variant 'B' has type 'Option<int32>', which isn't ToToml and FromToml (TOML has no null: an 'Option' can only be a struct's field, left out when 'None')"]]
 #test("#derive(Eq)\nstruct B<T> { v: T }\nstruct N { x: int }\nfun f(b: B<N>) -> bool { return b == b }")[["operator '==' is not defined for 'B<N>': 'N' isn't Eq (it needs 'impl Eq for N' or '#derive(Eq)')"]]
 #test("#derive(Eq)\nenum Option<T> { Some(T), None }\nfun f(a: Option<[str: int]>) -> bool { return a == None }")[["operator '==' is not defined for 'Option<[str: int32]>': '[str: int32]' isn't Eq"]]
+// a literal before the element that fixes its column's type is checked
+// again against it (L2), map keys and values too; a column another element
+// fixed doesn't adopt a later one's type
+#test("fun main() { let a = [1, 300, 3u8] }")[["integer literal 300 does not fit in 'uint8'"]]
+#test("fun main() { let m = [1: 0, 300: 1, 3u8: 2] }")[["integer literal 300 does not fit in 'uint8'"]]
+#test("fun main() { let m = [0: 1, 1: 300, 2: 3u8] }")[["integer literal 300 does not fit in 'uint8'"]]
+#test("fun main() { let a = [1, -129, 3i8] }")[["integer literal 129 does not fit in 'int8'"]]
+#test("fun main() { let x = 5\nlet a = [1, x, 3u8] }")[["type mismatch: 'int32' vs 'uint8' (no implicit conversion between numeric types)"]]
+#test("fun main() { let a = ['a', 300, 3u8] }")[["integer literal 300 does not fit in 'uint8'"]]
+#test("fun main() { let a = [1, 2.5] }")[["type mismatch: 'int32' vs 'float64' (no implicit conversion between numeric types)"]]
+#test("fun main() { let x: int64 = 5\nlet a = [1, -2, 3, x]\nlet b: [int64] = a\nlet c = [1.5, -2.5, 3.5f32]\nlet d: [float32] = c\nlet e = ['a', 98u8]\nlet f: [uint8] = e\nlet g = [-1, 3i8]\nlet h: [int8] = g }")[[]]
+// D178 (L1): a method found where the receiver's field of its name holds
+// a function at that instantiation; a field of another type, or a struct
+// without the method, is no error
+#test("struct Cell<T> { get: T }\nimpl<T> Cell<T> { fun get(self, n: int) -> int { return -n } }\nfun main() { let c = Cell { get: (x: int) => x + 1 }\nlet y = c.get(5) }")[["'get' is a method of 'Cell<(int32) -> int32>' and its field 'get' holds a function here: bind the field first: let g = c.get"]]
+#test("struct Cell<T> { get: T }\nimpl<T> Cell<T> { fun get(self, n: int) -> int { return -n } }\nfun main() { let c = Cell { get: 4 }\nlet y = c.get(5)\nlet z = c.get + 1 }")[[]]
+#test("struct Cell<T> { get: T }\nfun main() { let c = Cell { get: (x: int) => x + 1 }\nlet g = c.get\nlet y = c.get(5) + g(1) }")[[]]
+#test("struct Cell<T> { get: T }\nstruct W { c: Cell<(int) -> int> }\nimpl<T> Cell<T> { fun get(self, n: int) -> int { return -n } }\nfun f(w: W) -> int { return w.c.get(5) }")[["'get' is a method of 'Cell<(int32) -> int32>' and its field 'get' holds a function here: bind the field first: let g = w.c.get"]]
+// `Tree.Leaf == t` types the variant by `t`, as `t == Tree.Leaf` does
+// (MYLA-379's follow-up)
+#test("#derive(Eq)\nenum Tree<T> { Leaf, Node(T) }\nfun f(t: Tree<int>) -> bool { return Tree.Leaf == t || Tree.Node(2) != t || t == Tree.Leaf }")[[]]
+#test("#derive(Eq)\nenum Tree<T> { Leaf, Node(T) }\nfun f(t: Tree<int>) -> bool { return Tree.Node(\"a\") == t }")[["variant 'Tree.Node': expected 'int32', found 'str'"]]
+// a hole no element filled is reported where it is (L6)
+#test("enum Option<T> { Some(T), None }\nfun main() { let a = [(None, None), (Some(1), None)] }")[["cannot infer type argument(s) for 'None'; annotate the binding (e.g. ': Option<...>')"]]
+// an enum's `var self` method assigns `self` (MYLA-380's follow-up); a
+// struct's and a read-only one's can't
+#test("enum L { A, B }\nimpl L { fun step(var self) { self = L.B } }")[[]]
+#test("enum L { A, B }\nimpl L { fun step(self) { self = L.B } }")[["cannot reassign 'self'; mutate its fields or elements instead"]]
+#test("struct P { x: int }\nimpl P { fun reset(var self) { self = P { x: 0 } } }")[["cannot reassign 'self'; mutate its fields or elements instead"]]
+// a negative literal is no unsigned integer (L5)
+#test("fun main() { let w: uint8 = -1 }")[["integer literal -1 does not fit in 'uint8'"]]
+#test("fun main() { let w = -5u64 }")[["integer literal -5 does not fit in 'uint64'"]]
+#test("fun f(x: uint32) -> uint32 { return x + -2 }")[["integer literal -2 does not fit in 'uint32'"]]
+#test("fun main() { let w: uint8 = -0\nlet v: int8 = -128 }")[[]]
+// a generic impl's operator gives the receiver's instance (M2, MYLA-367)
+#test("struct Box<T> { v: T }\nimpl<T: Add> Add for Box<T> { fun add(self, other: Box<T>) -> Box<T> { return Box { v: self.v + other.v } } }\nfun main() { let c: Box<int> = Box { v: 1 } + Box { v: 2 }\nlet d = c + c + c\nlet e: int = d.v }")[[]]
+#test("struct Box<T> { v: T }\nimpl<T: Add> Add for Box<T> { fun add(self, other: Box<T>) -> Box<T> { return Box { v: self.v + other.v } } }\nfun main() { let c: Box<int> = Box { v: 1 } + Box { v: 2 }\nlet e: str = (c + c).v }")[["cannot assign value of type 'int32' to binding of type 'str'"]]
 fun errors_of(src: str) -> [str] {
     var out: [str] = []
     for e in checker_on(src).errs { out.push(e.msg) }
@@ -8568,6 +8967,13 @@ fun errors_of(src: str) -> [str] {
 #test("actor P { n: int }\nimpl P { fun charge(var self) -> bool { return true } }\nstruct C { n: int }\nimpl C { fun bump(var self) -> int { self.n += 1\nreturn self.n } }\nactor S { items: [int], c: C }\nimpl S { async fun sell(var self, p: P) -> int { if self.items.len() == 0 || self.c.n > 9 { return 0 }\nlet paid = await p.charge()\nreturn self.c.bump() + 1 } }")[["'self.c' was checked before an 'await' and is changed after it: another call to this actor may have changed it meanwhile"]]
 #test("actor P { n: int }\nimpl P { fun charge(var self) -> bool { return true } }\nstruct C { n: int }\nimpl C { fun bump(var self) -> int { self.n += 1\nreturn self.n } }\nactor S { items: [int], c: C }\nimpl S { async fun sell(var self, p: P) -> int { if self.items.len() == 0 || self.c.n > 9 { return 0 }\nlet x = self.items.pop() + self.c.bump()\nlet paid = await p.charge()\nreturn x } }")[[]]
 #test("actor P { n: int }\nimpl P { fun charge(var self) -> bool { return true } }\nstruct C { n: int }\nimpl C { fun bump(var self) -> int { self.n += 1\nreturn self.n } }\nactor S { items: [int], c: C }\nimpl S { async fun sell(var self, p: P) -> int { if self.items.len() == 0 || self.c.n > 9 { return 0 }\nlet paid = await p.charge()\nself.items.push(self.c.bump())\nreturn 1 } }")[["'self.items' was checked before an 'await' and is changed after it: another call to this actor may have changed it meanwhile", "'self.c' was checked before an 'await' and is changed after it: another call to this actor may have changed it meanwhile"]]
+// a mutator in the head of an `if`, a `while` or a `match` (MYLA-394)
+#test("actor P { n: int }\nimpl P { fun charge(var self) -> bool { return true } }\nactor S { items: [int] }\nimpl S { async fun sell(var self, p: P) -> int { if self.items.len() == 0 { return 0 }\nlet paid = await p.charge()\nif self.items.pop() > 0 { return 1 }\nreturn 0 } }")[["'self.items' was checked before an 'await' and is changed after it: another call to this actor may have changed it meanwhile"]]
+#test("actor P { n: int }\nimpl P { fun charge(var self) -> bool { return true } }\nactor S { items: [int] }\nimpl S { async fun sell(var self, p: P) -> int { if self.items.len() == 0 { return 0 }\nlet paid = await p.charge()\nvar n = 0\nwhile self.items.pop() > 0 { n += 1 }\nreturn n } }")[["'self.items' was checked before an 'await' and is changed after it: another call to this actor may have changed it meanwhile"]]
+#test("actor P { n: int }\nimpl P { fun charge(var self) -> bool { return true } }\nactor S { items: [int] }\nimpl S { async fun sell(var self, p: P) -> int { if self.items.len() == 0 { return 0 }\nlet paid = await p.charge()\nreturn match self.items.pop() { 0 => 0, _ => 1 } } }")[["'self.items' was checked before an 'await' and is changed after it: another call to this actor may have changed it meanwhile"]]
+#test("actor P { n: int }\nimpl P { fun charge(var self) -> bool { return true } }\nactor S { items: [int] }\nimpl S { async fun sell(var self, p: P) -> int { if self.items.len() == 0 { return 0 }\nlet paid = await p.charge()\nreturn match 1 { 0 => 0, _ if self.items.pop() > 0 => 1, _ => 2 } } }")[["'self.items' was checked before an 'await' and is changed after it: another call to this actor may have changed it meanwhile"]]
+#test("actor P { n: int }\nimpl P { fun charge(var self) -> bool { return true } }\nactor S { items: [int] }\nimpl S { async fun sell(var self, p: P) -> int { if self.items.len() == 0 { return 0 }\nlet paid = await p.charge()\nif self.items.pop() > 0 { let q = await p.charge()\nself.items.push(1) }\nreturn 0 } }")[["'self.items' was checked before an 'await' and is changed after it: another call to this actor may have changed it meanwhile", "'self.items' was checked before an 'await' and is changed after it: another call to this actor may have changed it meanwhile"]]
+#test("actor P { n: int }\nimpl P { fun charge(var self) -> bool { return true } }\nactor S { items: [int] }\nimpl S { async fun sell(var self, p: P) -> int { if self.items.len() == 0 { return 0 }\nlet paid = await p.charge()\nlet x = match self.items.pop() { 0 => 0, _ => 1 }\nreturn x } }")[["'self.items' was checked before an 'await' and is changed after it: another call to this actor may have changed it meanwhile"]]
 fun warnings_of(src: str) -> [str] {
     var out: [str] = []
     for w in checker_on(src).warnings { out.push(w.msg) }
@@ -9483,7 +9889,14 @@ impl Checker {
         subst = self.solve_bounds(sig.bounds, subst_then(subst, from_expected))
         var missing: [str] = []
         for tp in sig.type_params { if !subst_has(subst, tp) { missing.push(tp) } }
-        if missing.len() > 0 { return Err(terr_at(e.line, e.col, e.sp, format("cannot infer type parameter(s) {} for '{}' from the arguments; add a type annotation to guide inference", join_strs(missing, ", "), name))) }
+        if missing.len() > 0 {
+            // the annotation is what's wrong, not missing (MYLA-315's follow-up)
+            match result_clash(sig.ret, expected) {
+                Some(c) => { return Err(terr_at(e.line, e.col, e.sp, format("cannot infer type parameter(s) {} for '{}': its result '{}' can't be the '{}' expected here", join_strs(missing, ", "), name, type_name(c.0), type_name(c.1)))) },
+                None => {},
+            }
+            return Err(terr_at(e.line, e.col, e.sp, format("cannot infer type parameter(s) {} for '{}' from the arguments; add a type annotation to guide inference", join_strs(missing, ", "), name)))
+        }
         var j = 0
         while j < args.len() {
             let want = subst_type(sig.params[j], subst)
@@ -9494,6 +9907,7 @@ impl Checker {
             j = j + 1
         }
         self.check_call_bounds(sig, subst, e)?
+        self.prelude_need_all(subst)
         self.targs_taken = e.id
         self.call_types[e.id] = type_args_in(sig.type_params, subst)
         return Ok(opt_subst_type(sig.ret, subst))
@@ -9543,6 +9957,17 @@ impl Checker {
         return [Note { label: "help", msg: format("'{}' is not an Iterator: {}", type_name(t), how), line: 0, col: 0, sp: no_span() }]
     }
 
+    // The trait `tr` as a message names it: bare (`FromJson`, not
+    // `std$json$FromJson`), unless another trait has that name, when its
+    // module says which (`b.Show`, `unmangled` writes it; L6, MYLA-398).
+    fun trait_text(self, tr: str) -> str {
+        let bare = unqualified(tr)
+        var n = 0
+        for t in self.traits { if unqualified(t.name) == bare { n += 1 } }
+        if n > 1 { return tr }
+        return bare
+    }
+
     fun check_call_bounds(self, sig: FuncSig, subst: [Subst], e: Expr) -> Result<int32, CheckErr> {
         for b in sig.bounds {
             match subst_get(subst, b.tp) {
@@ -9560,8 +9985,8 @@ impl Checker {
                         }
                         if !ok || !type_list_eq(have, want) {
                             // a module's trait and function as a program writes them (`FromJson`, not `std$json$FromJson`)
-                            var msg = format("type '{}' does not satisfy the bound '{}: {}' required by '{}'", type_name(concrete), b.tp, generic_name(unqualified(tr), want), unqualified(sig.decl.name))
-                            if ok { msg = format("{}: it implements '{}'", msg, generic_name(unqualified(tr), have)) }
+                            var msg = format("type '{}' does not satisfy the bound '{}: {}' required by '{}'", type_name(concrete), b.tp, generic_name(self.trait_text(tr), want), unqualified(sig.decl.name))
+                            if ok { msg = format("{}: it implements '{}'", msg, generic_name(self.trait_text(tr), have)) }
                             // its generic impl's bound unmet: the argument that isn't (MYLA-379)
                             var lacking = concrete
                             var lacks = tr
@@ -9598,6 +10023,7 @@ impl Checker {
             // name a tuple, so its `hash` is the language's
             Type.TTuple(es) => {
                 if field == "hash" {
+                    self.prelude_need(recv_type)
                     if !self.type_implements(recv_type, "Hash")? { return Err(terr_at(e.line, e.col, e.sp, format("type '{}' has no method 'hash': {}", type_name(recv_type), self.not_hash_why(recv_type)))) }
                     if args.len() != 1 { return Err(terr_at(e.line, e.col, e.sp, format("method 'hash' expects 1 argument(s), got {}", args.len()))) }
                     let hasher = Type.TStruct("Hasher", [])
@@ -9640,6 +10066,7 @@ impl Checker {
                 return Err(with_notes(terr_at(e.line, e.col, e.sp, format("type '{}' has no method '{}'", type_name(recv_type), field)), did_you_mean(field, self.method_names(key_opt))))
             },
             Some(sig) => {
+                self.field_shadowed(e, target, recv_type, field)?
                 self.called[sig.name] = true
                 let recv = match sig.decl.receiver { Some(r) => r, None => "" }
                 let mkey = match key_opt { Some(k) => k, None => "" }
@@ -9676,6 +10103,47 @@ impl Checker {
             },
         }
         return Err(terr_at(e.line, e.col, e.sp, format("type '{}' has no method '{}'", type_name(recv_type), field)))
+    }
+
+    // D178: `x.f(…)` finds the method `f`, and the receiver's field `f`
+    // holds a function at this instantiation (`struct Cell<T> { get: T }`
+    // with `T` a function type; a field declared with a function type
+    // can't share a method's name): which one the call means is unclear, so
+    // it is an error, the field reached through a binding.
+    fun field_shadowed(var self, e: Expr, target: Expr, recv_type: Type, field: str) -> Result<int32, CheckErr> {
+        let nm = match recv_type {
+            Type.TStruct(n, a) => if a.len() > 0 { n } else { "" },
+            Type.TActor(n, a) => if a.len() > 0 { n } else { "" },
+            _ => "",
+        }
+        if nm == "" { return Ok(0) }
+        if !self.tp_fields_ready {
+            // the names of the fields whose types name a type parameter
+            for st in self.structs { for f in st.fields { if contains_type_param(f.ty) { self.tp_fields[f.name] = true } } }
+            self.tp_fields_ready = true
+        }
+        if !self.tp_fields.contains(field) { return Ok(0) }
+        let args = match recv_type {
+            Type.TStruct(n, a) => a,
+            Type.TActor(n, a) => a,
+            _ => [],
+        }
+        let si = self.struct_idx(nm)
+        if si < 0 { return Ok(0) }
+        for f in self.structs[si].fields {
+            if f.name == field && contains_type_param(f.ty) {
+                match field_type_get(self.struct_field_types(nm, args), field) {
+                    Some(ft) => {
+                        if is_tfunc_type(ft) {
+                            let place = place_text(target)
+                            return Err(terr_at(e.line, e.col, e.sp, format("'{}' is a method of '{}' and its field '{}' holds a function here: bind the field first: let g = {}.{}", field, type_name(recv_type), field, place, field)))
+                        }
+                    },
+                    None => {},
+                }
+            }
+        }
+        return Ok(0)
     }
 
     // `x.m(args)` on a value of the type parameter `pn`: the method `m` of a
@@ -9768,7 +10236,7 @@ impl Checker {
             Some(x) => x,
             None => {
                 if self.lost_methods.contains(field) { return Err(poisoned()) }   // maybe a left-out impl's (MYLA-110)
-                return Err(with_notes(terr_at(e.line, e.col, e.sp, format("type '{}' has no function '{}'", tn, field)), self.static_hint(field, tn)))
+                return Err(with_notes(terr_at(e.line, e.col, e.sp, format("type '{}' has no function '{}'", tn, field)), self.static_hint(field, tn, self.impl_head(st, tn))))
             },
         }
         self.called[sig.name] = true
@@ -9839,16 +10307,36 @@ impl Checker {
 
     // Notes naming the traits that declare a function `field` without
     // `self`, for a type `tn` that has none (D172).
-    #test(checker_on("trait Z { fun zero() -> Self }"), "zero", "str")[[Note { label: "help", msg: "trait 'Z' declares it: 'impl Z for str' would give 'str' one", line: 0, col: 0, sp: SrcSpan { sline: 0, scol: 0, eline: 0, ecol: 0 } }]]
-    #test(checker_on("trait Z { fun zero(self) -> Self }"), "zero", "str")[[]]
-    fun static_hint(self, field: str, tn: str) -> [Note] {
+    #test(checker_on("trait Z { fun zero() -> Self }"), "zero", "str", ("", "str"))[[Note { label: "help", msg: "trait 'Z' declares it: 'impl Z for str' would give 'str' one", line: 0, col: 0, sp: SrcSpan { sline: 0, scol: 0, eline: 0, ecol: 0 } }]]
+    #test(checker_on("trait Z { fun zero(self) -> Self }"), "zero", "str", ("", "str"))[[]]
+    #test(checker_on("trait Z { fun zero() -> Self }"), "zero", "Box", ("<T>", "Box<T>"))[[Note { label: "help", msg: "trait 'Z' declares it: 'impl<T> Z for Box<T>' would give 'Box' one", line: 0, col: 0, sp: SrcSpan { sline: 0, scol: 0, eline: 0, ecol: 0 } }]]
+    fun static_hint(self, field: str, tn: str, head: (str, str)) -> [Note] {
         var out: [Note] = []
         for t in self.traits {
             for m in t.methods {
-                if m.name == field && m.receiver == "" { out.push(Note { label: "help", msg: format("trait '{}' declares it: 'impl {} for {}' would give '{}' one", t.name, t.name, tn, tn), line: 0, col: 0, sp: no_span() }) }
+                // `head`: the impl's type parameters and target
+                if m.name == field && m.receiver == "" { out.push(Note { label: "help", msg: format("trait '{}' declares it: 'impl{} {} for {}' would give '{}' one", t.name, head.0, t.name, head.1, tn), line: 0, col: 0, sp: no_span() }) }
             }
         }
         return out
+    }
+
+    // The type parameters and the target of an impl for the type `st`
+    // written `tn`: a generic type's with its parameters, `<T>` and
+    // `Box<T>`, as `impl Z for Box` can't be written (MYLA-384's follow-up).
+    #test(checker_on("struct Box<T> { v: T }"), Type.TStruct("Box", []), "Box")[("<T>", "Box<T>")]
+    #test(checker_on("[int]"), Type.TStr, "str")[("", "str")]
+    fun impl_head(self, st: Type, tn: str) -> (str, str) {
+        let name = match st {
+            Type.TStruct(n, a) => n,
+            Type.TActor(n, a) => n,
+            Type.TEnum(n, a) => n,
+            _ => "",
+        }
+        let tps = if name == "" { [] } else { self.type_params_of(name) }
+        if tps.len() == 0 { return ("", tn) }
+        let ps = join_strs(tps, ", ")
+        return (f"<{ps}>", f"{tn}<{ps}>")
     }
 
     // `infer_generic_call` for a method: its explicit type arguments give
@@ -9872,7 +10360,13 @@ impl Checker {
         subst = self.solve_bounds(sig.bounds, subst_then(subst, from_expected))
         var missing: [str] = []
         for tp in sig.type_params { if !subst_has(subst, tp) { missing.push(tp) } }
-        if missing.len() > 0 { return Err(terr_at(e.line, e.col, e.sp, format("cannot infer type parameter(s) {} for method '{}'; add a type annotation to guide inference", join_strs(missing, ", "), method))) }
+        if missing.len() > 0 {
+            match result_clash(sig.ret, expected) {
+                Some(c) => { return Err(terr_at(e.line, e.col, e.sp, format("cannot infer type parameter(s) {} for method '{}': its result '{}' can't be the '{}' expected here", join_strs(missing, ", "), method, type_name(c.0), type_name(c.1)))) },
+                None => {},
+            }
+            return Err(terr_at(e.line, e.col, e.sp, format("cannot infer type parameter(s) {} for method '{}'; add a type annotation to guide inference", join_strs(missing, ", "), method)))
+        }
         var j = 0
         while j < args.len() {
             let pt = sig.params[j + 1]
@@ -9884,14 +10378,15 @@ impl Checker {
             j = j + 1
         }
         self.check_call_bounds(sig, subst, e)?
+        self.prelude_need_all(subst)
         self.targs_taken = e.id
         self.call_types[e.id] = type_args_in(sig.type_params, subst)
         return Ok(opt_subst_type(sig.ret, subst))
     }
 
-    #test(checker_on("enum E { A, B(int) }"), expr_of("a.b[0]"), expr_of("a.b[0]"))[Err(CheckErr { line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 2 }, msg: "unknown name 'a'", decl: -1, notes: [] })]
-    fun infer_try(var self, e: Expr, operand: Expr) -> Result<Type, CheckErr> {
-        let ot = self.expect_value(operand, None)?
+    #test(checker_on("enum E { A, B(int) }"), expr_of("a.b[0]"), expr_of("a.b[0]"), None)[Err(CheckErr { line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 2 }, msg: "unknown name 'a'", decl: -1, notes: [] })]
+    fun infer_try(var self, e: Expr, operand: Expr, expected: Option<Type>) -> Result<Type, CheckErr> {
+        let ot = self.expect_value(operand, try_hint(expected, self.cur_ret))?
         if self.task_init { return Err(terr_at(e.line, e.col, e.sp, "'?' can't stand in an 'async let': its child task has no function to return from")) }
         if opt_has_error(self.cur_ret) { return Err(poisoned()) }   // the return type failed (MYLA-110)
         // `?` returns from the innermost function or lambda (MYLA-72)
@@ -9957,6 +10452,18 @@ impl Checker {
         }
         var want_ret: Option<Type> = None
         if have_exp { want_ret = exp_ret }
+        // a result with holes (`partial_result`) is only a hint, for an
+        // expression body
+        var ret_hint: Option<Type> = None
+        match want_ret {
+            Some(w) => {
+                if has_hole(w) {
+                    want_ret = None
+                    match body { ExprOrBlock.EB_Expr(x) => { ret_hint = Some(w) }, _ => {} }
+                }
+            },
+            None => {},
+        }
         // save context
         let saved_ret = self.cur_ret
         let saved_has = self.has_cur_ret
@@ -10016,7 +10523,22 @@ impl Checker {
                 // a `?` in the body returns from the lambda (MYLA-72)
                 self.cur_ret = want_ret
                 self.has_cur_ret = match want_ret { Some(w) => true, None => false }
-                ret_t = self.infer(ex, want_ret)?
+                match ret_hint {
+                    Some(h) => {
+                        ret_t = self.infer(ex, Some(h))?
+                        match ret_t {
+                            Some(t) => {
+                                if has_hole(t) {
+                                    self.restore_lambda(saved_ret, saved_has, saved_active, saved_infer, saved_async, saved_task_init, saved_guard)
+                                    self.pop_scope()
+                                    return Err(terr_at(ex.line, ex.col, ex.sp, format("cannot infer the type '{}' of this lambda's result; add a type annotation to guide inference", open_type_name(t))))
+                                }
+                            },
+                            None => {},
+                        }
+                    },
+                    None => { ret_t = self.infer(ex, want_ret)? },
+                }
             },
         }
         self.restore_lambda(saved_ret, saved_has, saved_active, saved_infer, saved_async, saved_task_init, saved_guard)
@@ -10758,10 +11280,16 @@ impl Reentrancy {
     fun value(var self, e: Expr) -> [Expr] {
         match e.kind {
             ExprKind.MatchE(sc, arms) => {
+                // a mutator in the scrutinee or a guard changes its field
+                // before the match examines it (MYLA-394)
+                self.call_changes(sc)
                 var awaits = self.check(sc)
                 for arm in arms {
                     match arm.guard {
-                        Some(g) => { for a in self.check(g) { awaits.push(a) } },
+                        Some(g) => {
+                            self.call_changes(g)
+                            for a in self.check(g) { awaits.push(a) }
+                        },
                         None => {},
                     }
                     match arm.body {
@@ -10776,6 +11304,31 @@ impl Reentrancy {
         return self.scan(e).awaits
     }
 
+    // The head `c` of an `if` or a `while`: its calls' changes (a mutator's
+    // on a field of `self` a change of the field, MYLA-394) before it is
+    // examined, then its awaits.
+    fun head(var self, c: Expr) {
+        self.call_changes(c)
+        let aw = self.check(c)
+        self.suspend(aw)
+    }
+
+    // The changes of `e`'s calls that `value` hasn't made: all of them but
+    // a match's scrutinee's and guards'.
+    fun value_changes(var self, e: Expr) {
+        match e.kind {
+            ExprKind.MatchE(sc, arms) => {
+                for arm in arms {
+                    match arm.body {
+                        ExprOrBlock.EB_Expr(x) => { self.call_changes(x) },
+                        ExprOrBlock.EB_Block(b) => {},
+                    }
+                }
+            },
+            _ => { self.call_changes(e) },
+        }
+    }
+
     fun stmt(var self, s: Stmt) {
         match s.kind {
             StmtKind.VarDecl(k, name, ty, init) => {
@@ -10785,14 +11338,14 @@ impl Reentrancy {
                 let awaits = self.value(init)
                 self.locals[name] = Taint { fields: self.taint(r), epoch: before }
                 self.suspend(awaits)
-                self.call_changes(init)
+                self.value_changes(init)
             },
             StmtKind.Assign(target, v) => {
                 let r = self.scan(v)
                 let before = self.epoch
                 let awaits = self.value(v)
                 self.suspend(awaits)
-                self.call_changes(v)
+                self.value_changes(v)
                 let root = self_field(target)
                 if root != "" {
                     self.write(root, r.names, target)
@@ -10804,9 +11357,9 @@ impl Reentrancy {
                 }
             },
             StmtKind.IfS(c, th, el) => {
-                let aw = self.check(c)
-                self.suspend(aw)
-                self.call_changes(c)
+                // the head's mutators change their fields before it is
+                // examined (MYLA-394); its awaits come after
+                self.head(c)
                 self.block(th)
                 match el {
                     Some(ElseTail.ElseBlock(b)) => { self.block(b) },
@@ -10815,9 +11368,7 @@ impl Reentrancy {
                 }
             },
             StmtKind.WhileS(c, b) => {
-                let aw = self.check(c)
-                self.suspend(aw)
-                self.call_changes(c)
+                self.head(c)
                 self.block(b)
             },
             StmtKind.ForS(v, st, en, body, it) => {
@@ -10834,7 +11385,7 @@ impl Reentrancy {
                     Some(x) => {
                         let aw = self.value(x)
                         self.suspend(aw)
-                        self.call_changes(x)
+                        self.value_changes(x)
                     },
                     None => {},
                 }
@@ -10889,7 +11440,7 @@ impl Reentrancy {
                 }
                 let aw = self.value(e)
                 self.suspend(aw)
-                self.call_changes(e)
+                self.value_changes(e)
             },
             StmtKind.DestructDecl(k, b, ty, init) => {
                 let aw = self.scan(init).awaits
@@ -10988,8 +11539,24 @@ fun starts_with_dunder(name: str) -> bool {
 #test("a 'b' of $5 and x$ and $y")["a 'b' of $5 and x$ and $y"]
 #test("größe$wert")["größe.wert"]
 fun unmangled(msg: str) -> str {
+    return unmangled_in(msg, [:], true)
+}
+
+// `unmangled`, a run rewritten only when `all` or `known` has it: the
+// program's own text in a message (a format spec, a string) keeps its `$`
+// (MYLA-383). A list's and a map's method key, `__list` and `__map`, is
+// the type a program writes, `[T]` and `[K: V]` (MYLA-320).
+#test("invalid format spec 'std$iter$sum'", [:], false)["invalid format spec 'std$iter$sum'"]
+#test("function 'std$iter$sum' and 'a$b'", ["std$iter$sum": true], false)["function 'iter.sum' and 'a$b'"]
+#test("duplicate method 'map' for type '__list', not '__map' or '__lists'", [:], false)["duplicate method 'map' for type '[T]', not '[K: V]' or '__lists'"]
+#test("method '__list.sorted'", [:], false)["method '[T].sorted'"]
+fun unmangled_in(msg: str, known: [str: bool], all: bool) -> str {
     var has = false
-    for c in msg { if c == '$' { has = true } }
+    var i0 = 0
+    while i0 < msg.len() {
+        if msg[i0] == '$' || (msg[i0] == '_' && i0 + 1 < msg.len() && msg[i0 + 1] == '_') { has = true }
+        i0 += 1
+    }
     if !has { return msg }
     var sb = StringBuilder()
     let n = msg.len()
@@ -11005,8 +11572,13 @@ fun unmangled(msg: str) -> str {
         var j = i
         while j < n && (is_name_byte(msg[j]) || msg[j] == '$') { j += 1 }
         let run = msg[i:j]
+        if run == "__list" || run == "__map" {
+            sb.append(if run == "__list" { "[T]" } else { "[K: V]" })
+            i = j
+            continue
+        }
         let segs = run.split("$")
-        var ok = segs.len() >= 2
+        var ok = segs.len() >= 2 && (all || known.contains(run))
         for g in segs { if g.len() == 0 || (g[0] >= '0' && g[0] <= '9') { ok = false } }
         if ok { sb.append(segs[segs.len() - 2] + "." + segs[segs.len() - 1]) } else { sb.append(run) }
         i = j
@@ -11014,16 +11586,17 @@ fun unmangled(msg: str) -> str {
     return sb.build()
 }
 
-// `es` with their messages and their notes' `unmangled`.
-fun unmangled_all(es: [CheckErr]) -> [CheckErr] {
+// `es` with their messages and their notes' `unmangled_in` the names
+// `known`.
+fun unmangled_all(es: [CheckErr], known: [str: bool]) -> [CheckErr] {
     var out: [CheckErr] = []
     for e in es {
         var f = e
-        f.msg = unmangled(e.msg)
+        f.msg = unmangled_in(e.msg, known, false)
         var ns: [Note] = []
         for n in e.notes {
             var m = n
-            m.msg = unmangled(n.msg)
+            m.msg = unmangled_in(n.msg, known, false)
             ns.push(m)
         }
         f.notes = ns

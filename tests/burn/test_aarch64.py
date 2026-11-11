@@ -16,6 +16,7 @@ import subprocess
 import tempfile
 import unittest
 
+from ._hang import run_watched
 from ._native import CAN_BUILD_NATIVE, SKIP_REASON
 from ._tools import STDLIB_ROOT, native_compiler
 from . import test_builtin_impls, test_defer, test_format_specs, test_loop_overhead, test_register_args, test_slices, test_time, test_unit_type
@@ -463,8 +464,8 @@ class Aarch64Tasks(unittest.TestCase):
                 runs = [{"MYLA_THREADS": w} for w in ("1", "4", "16")]
                 runs += [{"MYLA_THREADS": "1", "MYLA_SCHED": sched} for sched in SCHEDULES]
                 for extra in runs:
-                    p = subprocess.run(["qemu-aarch64", exe], capture_output=True, text=True, timeout=120,
-                                       env=dict(os.environ, **extra))
+                    # a hang leaves the guest's core (`_hang`, MYLA-418)
+                    p = run_watched(["qemu-aarch64", exe], timeout=120, env=dict(os.environ, **extra))
                     self.assertEqual((p.stdout, p.returncode), want, extra)
 
 

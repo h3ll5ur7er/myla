@@ -126,7 +126,8 @@ class WasmParity(unittest.TestCase):
         bodies = re.findall(r"^(myla_(?:main|work|names)[A-Za-z0-9_]*):\n(.*?)\n\tend_function", asm, re.M | re.S)
         self.assertGreater(len(bodies), 3)
         for name, body in bodies:
-            if name.endswith(("_env_deep", "_env_clone", "_env_drop")):
+            # (an environment's record routines, and their members' halves, MYLA-415)
+            if name.endswith(("_env_deep", "_env_clone", "_env_drop", "_env_deep_m", "_env_clone_m")):
                 continue
             with self.subTest(function=name):
                 self.assertEqual(re.findall(r"call \S*(?:deep|dclone)\S*", body), [])

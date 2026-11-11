@@ -1,0 +1,5 @@
+module error: 'deque' is a module, not a type: name one of its types, 'deque.T'
+  --> examples/errors/module_module_as_a_type.my:7:12
+  |
+7 |     let x: deque = 1
+  |            ^^^^^

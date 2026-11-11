@@ -1,0 +1,5 @@
+type error: cannot infer type parameter(s) T for 'mk': its result 'B<T>' can't be the 'int32' expected here
+  --> examples/errors/type_generic_result_against_the_annotation.my:14:20
+   |
+14 |     let a: int = mk()
+   |                  ^^^^

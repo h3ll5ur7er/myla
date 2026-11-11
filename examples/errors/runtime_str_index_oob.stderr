@@ -1,0 +1,5 @@
+runtime error: string index 5 out of bounds (len 2)
+  --> examples/errors/runtime_str_index_oob.my:7:12
+  |
+7 |     print(s[5] as int)
+  |           ^^^^
