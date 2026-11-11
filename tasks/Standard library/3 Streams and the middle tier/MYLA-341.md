@@ -40,3 +40,5 @@ For the integrator: the module doesn't import `std.str`, `std.char` or `std.list
 ## Review 2026-11-09
 
 Signed off in [[Project/Review-2026-11-09]], with a follow-up in [[MYLA-426]]: `wrap` counts bytes, `columns` characters; `ints` panics on a number out of range.
+
+The follow-up is done in [[MYLA-426]] (in review, 2026-11-11): `wrap` counts characters as `columns` does, and `ints` and `longs` return a `Result` with an `Overflow` `ScanError` (D184).

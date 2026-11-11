@@ -1016,21 +1016,47 @@ pub fun term_get(fd: int) -> str {
 }
 
 // `__term_set(fd, mode)`: the terminal back in the mode `__term_get` gave:
-// 0, or -1.
+// 0, or -1. The mode the exit hook keeps for `fd` set again is raw mode
+// left: the hook goes (D187).
 pub fun term_set(fd: int, mode: str) -> int {
     if fd < 0 {
         return sock_result(-EBADF)
     }
-    return sock_result(os.term_set_mode(fd as int64, mode))
+    let r = os.term_set_mode(fd as int64, mode)
+    let h = __rt_addr("__exit_hook")
+    let m = __addr_of(mode)
+    if r >= 0 && __load64(h) == (fd as int64) + 1 && __load64(m) == __load64(h + 24) && __equal_bytes(m + 8, h + 32, __load64(m)) {
+        __store64(h, 0)
+    }
+    return sock_result(r)
 }
 
 // `__term_raw(fd)`: the terminal in raw mode (no echo, a key at a time, no
-// signal keys): 0, or -1.
+// signal keys): 0, or -1. The mode before it is kept for the exit hook,
+// which puts it back however the program ends (D187); raw mode entered
+// again keeps the first one's.
 pub fun term_raw(fd: int) -> int {
     if fd < 0 {
         return sock_result(-EBADF)
     }
-    return sock_result(os.term_make_raw(fd as int64))
+    let h = __rt_addr("__exit_hook")
+    var kept = false
+    if __load64(h) == 0 {
+        let n = os.term_get_mode(fd as int64, h + 32)
+        if n >= 0 {
+            // a static string's cell: its size, a count that never reaches
+            // zero, its length
+            __store64(h + 8, 64)
+            __store64(h + 16, 2305843009213693952)
+            __store64(h + 24, n)
+            kept = true
+        }
+    }
+    let r = os.term_make_raw(fd as int64)
+    if kept && r >= 0 {
+        __store64(h, (fd as int64) + 1)
+    }
+    return sock_result(r)
 }
 
 // `__term_vt(fd)`: escape sequences written to the terminal interpreted
@@ -2217,7 +2243,7 @@ pub fun print_str(s: str) {
     let c = __addr_of(s)
     let r = os.write_line(c + 8, __load64(c))
     if r == os.EPIPE {
-        os.broken_pipe()
+        broken_pipe()
     }
     if r < 0 {
         write_failed(-r)
@@ -2230,7 +2256,14 @@ fun write_failed(code: int64) {
     write_err(__addr_of("runtime error: write failed: "))
     write_err(__addr_of(errno_text(code)))
     write_err(__addr_of("\n"))
-    os.exit(1)
+    exit_program(1)
+}
+
+// A write to a closed pipe: the program ends quietly, as by SIGPIPE (D146),
+// after the exit hook (D187).
+fun broken_pipe() {
+    exit_hook()
+    os.broken_pipe()
 }
 
 // What the errno `code` of a failed write means (as `strerror` says it).
@@ -2283,7 +2316,7 @@ pub fun write(fd: int, s: str) {
     let c = __addr_of(s)
     let r = os.write_all(d, c + 8, __load64(c))
     if r == os.EPIPE && (fd == 1 || fd == 2) {
-        os.broken_pipe()
+        broken_pipe()
     }
     if r < 0 {
         __set_io_errno(-r)
@@ -2298,7 +2331,7 @@ pub fun write_bytes(fd: int, b: [uint8]) {
     let c = __list_addr(b)
     let r = os.write_all(d, c + 16, __load64(c))
     if r == os.EPIPE && (fd == 1 || fd == 2) {
-        os.broken_pipe()
+        broken_pipe()
     }
     if r < 0 {
         __set_io_errno(-r)
@@ -2424,14 +2457,14 @@ pub fun exit_hook() {
 // It allocates nothing: a heap that ran out reports through it too.
 pub fun panic_report(msg: int64, pos: int64) {
     report_error(msg, pos)
-    os.exit(1)
+    exit_program(1)
 }
 
 // `panic_report` with tasks: the end waits for the other workers (D97).
 pub fun panic_report_tasks(msg: int64, pos: int64) {
     report_error(msg, pos)
     failed_wait()
-    os.exit(1)
+    exit_program(1)
 }
 
 fun report_error(msg: int64, pos: int64) {
@@ -4007,7 +4040,7 @@ fun exec_stuck() {
     }
     let msg = __addr_of("runtime error: every task waits for another one\n")
     os.write_all(2, msg + 8, __load64(msg))
-    os.exit(1)
+    exit_program(1)
 }
 
 // --- notifiers: tasks parked until another wakes them (MYLA-387) -----------------

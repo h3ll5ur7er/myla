@@ -84,7 +84,7 @@ SKIP: dict[str, dict[str, str]] = {
         # MYLA-350: WASI preview 1 has no terminal modes and no signals, which
         # TermOnWasm checks are `Unsupported` (nothing a terminal, no size)
         **{f"test_term.{c}": "WASI has no terminals or signals (TermOnWasm checks they are Unsupported)"
-           for c in ["Terminal", "Signals", "Primitives"]},
+           for c in ["Terminal", "Signals", "Primitives", "RawModeEnds"]},
     },
 }
 
