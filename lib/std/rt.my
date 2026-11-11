@@ -1113,6 +1113,46 @@ pub fun poll(fd: int, timeout_ms: int) -> int {
     return r as int
 }
 
+// `__poll_write` (MYLA-419): 1 when `fd` has room for a write (a pipe at
+// least PIPE_BUF bytes), or a write fails at once (an error, the reader
+// gone), 0 when `timeout_ms` (negative: none) ran out, -1 with the errno
+// when poll failed; retried on EINTR.
+pub fun poll_write(fd: int, timeout_ms: int) -> int {
+    __set_io_errno(0)
+    var r = os.poll_write(fd as int64, timeout_ms as int64)
+    while r == os.EINTR {
+        r = os.poll_write(fd as int64, timeout_ms as int64)
+    }
+    if r < 0 {
+        __set_io_errno(-r)
+        return -1
+    }
+    return r as int
+}
+
+// `await __wait_readable(fd)` (`events` 1) or `__wait_writable(fd)` (2) in
+// a program without tasks: the thread blocked until `fd` is ready (D124;
+// the 2026-11-10 review's S4: a non-blocking input read at once gave
+// EAGAIN), at once for a negative descriptor, as with tasks.
+pub fun wait_alone(fd: int, events: int) {
+    if fd < 0 {
+        return
+    }
+    var r: int64 = 0
+    if events == 2 {
+        r = os.poll_write(fd as int64, -1)
+    } else {
+        r = os.poll_read(fd as int64, -1)
+    }
+    while r == os.EINTR {
+        if events == 2 {
+            r = os.poll_write(fd as int64, -1)
+        } else {
+            r = os.poll_read(fd as int64, -1)
+        }
+    }
+}
+
 // --- the program's arguments -------------------------------------------------
 
 // `__args`: the program's arguments, its own path first.
@@ -3429,6 +3469,14 @@ pub fun wait_fd2(fr: int64, a: int64, b: int64) {
     wait_fds(fr, a, b, 0)
 }
 
+// `__wait_writable_frame(frame, fd)` (`__wait_writable`, MYLA-419): the
+// frame waiting until `fd` has room for a write (a child's input), watched
+// as a socket waiting to send is: the platform's poller takes any
+// descriptor that way on Linux.
+pub fun wait_writable_frame(fr: int64, fd: int64) {
+    wait_fds(fr, fd, -1, 2)
+}
+
 // `myla___wait_sock(frame, h, events)` (`__wait_socket`, MYLA-346): the
 // frame waiting until the socket `h` is ready for `events` (1 to receive or
 // accept, 2 to send or a connect's end; an error or a hang-up counts as
@@ -3815,7 +3863,7 @@ fun unpark_locked(w: int64, st: int64, forget: bool) {
 // a permit added when none waits; `all`: every task waiting woken and the
 // generation counted, no permit. The frames woken are queued so that the
 // one that waited longest runs first, as the timers queue sleepers.
-pub fun notify(n: int64, all: bool) {
+pub fun notify(n: int64, all: bool) -> bool {
     let lock = __rt_addr("__timer_lock")
     take_lock(lock)
     if !all {
@@ -3823,18 +3871,18 @@ pub fun notify(n: int64, all: bool) {
         if w == 0 {
             __store64(n, __load64(n) + 1)
             give_lock(lock)
-            return
+            return true
         }
         let fr = __load64(w)
         unpark_locked(w, 2, true)
         give_lock(lock)
         exec_push(fr)
-        return
+        return true
     }
     __store64(n + 8, __load64(n + 8) + 1)
     if __load64(n + 16) == 0 {
         give_lock(lock)
-        return
+        return true
     }
     var due: [int64] = []
     while __load64(n + 16) != 0 {
@@ -3854,16 +3902,18 @@ pub fun notify(n: int64, all: bool) {
             exec_push(due[i])
         }
     }
+    return true
 }
 
 // `__notify(n, all)` without tasks: no task waits (`park_alone` parks
 // none), so a permit added, or the generation counted.
-pub fun notify_alone(n: int64, all: bool) {
+pub fun notify_alone(n: int64, all: bool) -> bool {
     if all {
         __store64(n + 8, __load64(n + 8) + 1)
     } else {
         __store64(n, __load64(n) + 1)
     }
+    return true
 }
 
 // --- lists -----------------------------------------------------------------------

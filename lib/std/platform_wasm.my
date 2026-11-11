@@ -560,10 +560,21 @@ pub fun dir_entry_size(rec: int64) -> int64 {
 // 1 when a read of `fd` won't block, 0 when `timeout_ms` (negative: none)
 // ran out: poll_oneoff on the descriptor and, with a limit, the clock.
 pub fun poll_read(fd: int64, timeout_ms: int64) -> int64 {
+    return poll_fd(fd, 1u8, timeout_ms)
+}
+
+// `poll_read` for room to write (MYLA-419).
+pub fun poll_write(fd: int64, timeout_ms: int64) -> int64 {
+    return poll_fd(fd, 2u8, timeout_ms)
+}
+
+// `poll_read` and `poll_write`: the subscription's tag `tag` (1 read, 2
+// write).
+fun poll_fd(fd: int64, tag: uint8, timeout_ms: int64) -> int64 {
     let subs = __rt_addr("__wasi_subs")
-    // a subscription: userdata 8, tag 1 (+8), then the fd (+16)
+    // a subscription: userdata 8, tag 1 or 2 (+8), then the fd (+16)
     __store64(subs, 1)
-    __store8(subs + 8, 1u8)
+    __store8(subs + 8, tag)
     __store32(subs + 16, fd as uint32)
     var n: int64 = 1
     if timeout_ms >= 0 {

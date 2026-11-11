@@ -893,7 +893,7 @@ fun is_builtin_op_trait(name: str) -> bool {
 #test("B")[false]
 #test("len")[true]
 fun is_builtin_func(name: str) -> bool {
-    return name == "print" || name == "assert" || name == "panic" || name == "unreachable" || name == "len" || name == "push" || name == "pop" || name == "contains" || name == "remove" || name == "keys" || name == "format" || name == "chars" || name == "StringBuilder" || name == "append" || name == "append_byte" || name == "append_char" || name == "build" || name == "__write" || name == "__exit" || name == "__args" || name == "__read_file" || name == "__io_errno" || name == "__run" || name == "__run_stderr" || name == "__run_exit_code" || name == "__run_signal" || name == "__run_errno" || name == "__write_file" || name == "__read" || name == "__poll" || name == "__list_dir" || name == "__mkdir" || name == "__stat" || name == "__getcwd" || name == "__getenv" || name == "__test_dir" || name == "__test_program" || name == "__sqrt" || name == "__f64_bits" || name == "__f64_from_bits" || name == "__unlink" || name == "__rmdir" || name == "__rename" || name == "__task_cancelled" || name == "__yield" || name == "__sleep" || name == "__clock_ns" || name == "__sleep_ns" || name == "__cancel_after" || name == "__disarm" || name == "__wait_readable" || name == "__wait_either" || name == "__wait_socket" || name == "__spawn" || name == "__run_with" || name == "__spawn_with" || name == "__reap" || name == "__kill" || name == "__close" || name == "__str_to_bytes" || name == "__bytes_to_str" || name == "__read_bytes" || name == "__write_bytes" || is_platform_primitive(name) || is_raw_memory_primitive(name) || is_notify_primitive(name) || is_wrapping_method(name)
+    return name == "print" || name == "assert" || name == "panic" || name == "unreachable" || name == "len" || name == "push" || name == "pop" || name == "contains" || name == "remove" || name == "keys" || name == "format" || name == "chars" || name == "StringBuilder" || name == "append" || name == "append_byte" || name == "append_char" || name == "build" || name == "__write" || name == "__exit" || name == "__args" || name == "__read_file" || name == "__io_errno" || name == "__run" || name == "__run_stderr" || name == "__run_exit_code" || name == "__run_signal" || name == "__run_errno" || name == "__write_file" || name == "__read" || name == "__poll" || name == "__list_dir" || name == "__mkdir" || name == "__stat" || name == "__getcwd" || name == "__getenv" || name == "__test_dir" || name == "__test_program" || name == "__sqrt" || name == "__f64_bits" || name == "__f64_from_bits" || name == "__unlink" || name == "__rmdir" || name == "__rename" || name == "__task_cancelled" || name == "__yield" || name == "__sleep" || name == "__clock_ns" || name == "__sleep_ns" || name == "__cancel_after" || name == "__disarm" || name == "__wait_readable" || name == "__wait_writable" || name == "__wait_either" || name == "__wait_socket" || name == "__spawn" || name == "__run_with" || name == "__spawn_with" || name == "__reap" || name == "__kill" || name == "__close" || name == "__str_to_bytes" || name == "__bytes_to_str" || name == "__read_bytes" || name == "__write_bytes" || is_platform_primitive(name) || is_raw_memory_primitive(name) || is_notify_primitive(name) || is_wrapping_method(name)
 }
 
 // Whether `name` is one of the integers' builtin methods that wrap on purpose
@@ -907,14 +907,14 @@ pub fun is_wrapping_method(name: str) -> bool {
 }
 
 // The primitives of std.task's notifiers (MYLA-387): a notifier, a wake of
-// one or all of its waiters, its generation, and a wait (`__waiter`, then
-// `__park`, awaited, then `__woken`), each a function of std.rt and in the
-// interpreter its scheduler's.
+// one or all of its waiters, its generation, a wait (`__waiter`, then
+// `__park`, awaited, then `__woken`) and its close (D181), each a function
+// of std.rt and in the interpreter its scheduler's.
 #test("__park")[true]
 #test("__notify")[true]
 #test("__sleep")[false]
 pub fun is_notify_primitive(name: str) -> bool {
-    return name == "__notifier" || name == "__notify" || name == "__notify_gen" || name == "__waiter" || name == "__park" || name == "__woken"
+    return name == "__notifier" || name == "__notify" || name == "__notify_gen" || name == "__waiter" || name == "__park" || name == "__woken" || name == "__notifier_close"
 }
 
 // The platform primitives of MYLA-336: entropy, file descriptors and
@@ -926,7 +926,7 @@ pub fun is_notify_primitive(name: str) -> bool {
 #test("__path_stat")[true]
 #test("__read")[false]
 pub fun is_platform_primitive(name: str) -> bool {
-    return name == "__random_bytes" || name == "__open" || name == "__seek" || name == "__fstat" || name == "__path_stat" || name == "__spawn_piped" || name == "__try_reap" || name == "__wall_ns" || is_net_primitive(name) || is_term_primitive(name)
+    return name == "__random_bytes" || name == "__open" || name == "__seek" || name == "__fstat" || name == "__path_stat" || name == "__spawn_piped" || name == "__try_reap" || name == "__wall_ns" || name == "__poll_write" || is_net_primitive(name) || is_term_primitive(name)
 }
 
 // The terminal and signal primitives of MYLA-350 (std.term's and
@@ -9448,13 +9448,13 @@ impl Checker {
             return Ok(None)
         }
         // the running task waiting until `fd` is readable (D124, `std.io`'s
-        // async reads)
-        if name == "__wait_readable" {
-            if args.len() != 1 { return Err(terr_at(e.line, e.col, e.sp, "__wait_readable() takes (fd: int)")) }
+        // async reads), or writable (a child's input, MYLA-419)
+        if name == "__wait_readable" || name == "__wait_writable" {
+            if args.len() != 1 { return Err(terr_at(e.line, e.col, e.sp, format("{}() takes (fd: int)", name))) }
             let f_t = self.expect_value(args[0], Some(t_int()))?
-            if !type_eq(f_t, t_int()) { return Err(terr_at(args[0].line, args[0].col, args[0].sp, format("__wait_readable() takes an 'int', found '{}'", type_name(f_t)))) }
+            if !type_eq(f_t, t_int()) { return Err(terr_at(args[0].line, args[0].col, args[0].sp, format("{}() takes an 'int', found '{}'", name, type_name(f_t)))) }
             self.suspended = e.id
-            if !self.awaited.contains(e.id) { return Err(terr_at(e.line, e.col, e.sp, "a call to '__wait_readable' needs 'await'")) }
+            if !self.awaited.contains(e.id) { return Err(terr_at(e.line, e.col, e.sp, format("a call to '{}' needs 'await'", name))) }
             return Ok(None)
         }
         // the running task asleep for `ms` milliseconds (D124, `std.task.sleep`)
@@ -9731,6 +9731,10 @@ impl Checker {
             want = []
             shape = ""
             result = i64
+        } else if name == "__poll_write" {
+            want = [t_int(), t_int()]
+            shape = "fd: int, timeout_ms: int"
+            result = t_int()
         }
         if args.len() != want.len() { return Err(terr_at(e.line, e.col, e.sp, format("{}() takes ({})", name, shape))) }
         var k = 0
@@ -9743,8 +9747,9 @@ impl Checker {
     }
 
     // MYLA-387's primitives (`is_notify_primitive`): `__notifier()`,
-    // `__notify(n, all)`, `__notify_gen(n)`, `__waiter(n, since, ms)`,
-    // `await __park(w)` (it suspends) and `__woken(w)`
+    // `__notify(n, all)` (whether `n` is open, D181), `__notify_gen(n)`,
+    // `__waiter(n, since, ms)`, `await __park(w)` (it suspends),
+    // `__woken(w)` and `__notifier_close(n)`
     fun infer_notify_primitive(var self, e: Expr, name: str, args: [Expr]) -> Result<Option<Type>, CheckErr> {
         let i64 = Type.TInt(64, true)
         var want: [Type] = [i64]
@@ -9756,7 +9761,9 @@ impl Checker {
         } else if name == "__notify" {
             want = [i64, Type.TBool]
             shape = "n: int64, all: bool"
-            result = None
+            result = Some(Type.TBool)
+        } else if name == "__notifier_close" {
+            result = Some(Type.TBool)
         } else if name == "__waiter" {
             want = [i64, i64, t_int()]
             shape = "n: int64, since: int64, ms: int"

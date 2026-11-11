@@ -2307,6 +2307,10 @@ impl CodeGen {
         // and the claim on the stuck report (`exec_stuck`)
         out.push("__parked:")
         out.push("\t.skip 16")
+        // the table of handles (std.rt's `handle_new`, D181): its cell and
+        // its lock
+        out.push("__handles:")
+        out.push("\t.skip 16")
         if self.frames {
             // each worker's queue: `[lock][head][tail]`, a cache line each
             out.push("\t.balign 64")
