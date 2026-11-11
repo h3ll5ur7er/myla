@@ -145,12 +145,15 @@ impl<T: Ord> Heap<T> {
     fun sift_down(var self, i: int, n: int) {
         let x = self.items[i]
         let max = self.max
+        // A hole from `half` on has no child: compared so, `2 * hole + 1`
+        // can't overflow in a heap of more than 2^30 elements.
+        let half = n / 2
         var hole = i
         while true {
-            var c = 2 * hole + 1
-            if c >= n {
+            if hole >= half {
                 break
             }
+            var c = 2 * hole + 1
             if c + 1 < n {
                 let l = self.items[c]
                 let r = self.items[c + 1]
@@ -239,12 +242,13 @@ impl<T> KeyedHeap<T> {
         }
         // Sifts the last entry down from the root.
         let m = n - 1
+        let half = m / 2        // as in `Heap.sift_down`
         var hole = 0
         while true {
-            var c = 2 * hole + 1
-            if c >= m {
+            if hole >= half {
                 break
             }
+            var c = 2 * hole + 1
             if c + 1 < m && self.prio[c + 1] < self.prio[c] {
                 c += 1
             }
