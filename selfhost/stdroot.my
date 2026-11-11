@@ -5,7 +5,7 @@
 
 from std.fs import read_to_string
 from std.process import env
-from .embedded_std import embedded_paths, embedded_file
+from .embedded_std import embedded_paths, embedded_file, embedded_cache
 
 // The root of the embedded standard library: the directory that would hold
 // `std/`, as a name no real path has. Its files (`<myla>/std/io.my`) are read
@@ -58,6 +58,31 @@ pub fun is_embedded(path: str) -> bool {
 pub fun embedded_text(path: str) -> Option<str> {
     if !is_embedded(path) { return None }
     return Some(embedded_file(embedded_rel(path)))
+}
+
+// The parse the toolchain carries of its module `rel` (`std/io.my`; its
+// form is selfhost/astcache.my's, MYLA-412) when `src` is the text it was
+// made of, "" when it carries none or the text is another: a library
+// being edited, or another one, is parsed.
+#test("std/nope.my", "")[""]
+#test("std/rt.my", "")[""]
+pub fun embedded_parse(rel: str, src: str) -> str {
+    let entry = embedded_cache(rel)
+    if entry == "" || embedded_file(rel) != src { return "" }
+    return entry
+}
+
+// The modules of `std` but std.rt that the toolchain carries without their
+// parse: none, unless one doesn't parse or its parse doesn't read back
+// (`astcache.cache_entry`), which would make every program that loads it
+// slower without a word.
+#test()[[]]
+fun carried_unparsed() -> [str] {
+    var out: [str] = []
+    for p in embedded_paths() {
+        if p.starts_with("std/") && p.ends_with(".my") && p != "std/rt.my" && embedded_parse(p, embedded_file(p)) == "" { out.push(p) }
+    }
+    return out
 }
 
 // The file `rel` (`debug/myla_gdb.py`) of the standard library root `root`:

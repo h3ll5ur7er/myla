@@ -109,11 +109,11 @@ pub fun backend_std_functions() -> [str] {
 // method), `keys` the bodies (`body_key`), and `parse` reads one, lexed,
 // parsed and renamed as the rest of its module was. Its errors are a lex,
 // parse or module error's: each message starts with its kind (`parse
-// error: …`, `kind_of`).
+// error: …`, `kind_of`). A key's value is the loader's (MYLA-412).
 // `task_line`: the line of an `async let` in one of them, 0 if none has one
 // or nobody asked: what makes a native build's program one with tasks
 // (`Checker.task_line`), as if every body was read (MYLA-413).
-pub struct LazyBodies { ids: [int32: bool], keys: [int64: bool], parse: (int64) -> Result<Block, [CheckErr]>, task_line: int32 }
+pub struct LazyBodies { ids: [int32: bool], keys: [int64: int32], parse: (int64) -> Result<Block, [CheckErr]>, task_line: int32 }
 
 // No body left unparsed: a program loaded whole.
 pub fun no_lazy_bodies() -> LazyBodies {

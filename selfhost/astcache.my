@@ -1,0 +1,1605 @@
+// astcache.my -- the parse of a library module, kept as text (MYLA-412).
+//
+// A module of the standard library is parsed with its functions' bodies
+// left for later (`parse_source_lazy`, MYLA-359): what is left, its
+// declarations' signatures, is still most of a hello world's check, and
+// the text of the library the toolchain carries is fixed per build. So
+// `tools/embed/main.my`, which `scripts/bootstrap.sh` runs to write
+// `selfhost/embedded_std.my`, also writes each module's parse there in
+// the form below (`cache_entry`), and the loader reads it (`decode`)
+// instead of lexing and parsing the file whenever the file's text is the
+// embedded one (wiki: Architecture/Module-loader).
+//
+// The form: "MC1" and the string table (a count, then each string as its
+// length in bytes and its bytes), then the module: its declarations; its
+// bodies' sites, each with where its text is in the file's bytes and
+// where its parse starts below, -1 for none; its next node id; and the
+// bodies parsed (an implicit module's, which every program reads some
+// of). Each value is a number: a string is twice its index in the table,
+// or one more than twice a prefix's index and an id for a name the parser
+// made of a node's id (`%for12`). A number is a run of digits, the high
+// ones first: a byte 0x20 + d for each digit d below 32 but the last, the
+// last 0x40 + d below 64; a signed number is zigzagged (n >= 0 is 2n,
+// n < 0 is -2n - 1). A node's id is the difference with the id written
+// before it, the first with the module's first id (a body's with its
+// site's), and its line the difference with the line written before it;
+// a range that starts at its node and ends on its line is one number. So
+// the ids are relative and most numbers are one byte. The parse at
+// another first id is the same with every id moved (`cache_entry` checks
+// it for each module).
+
+from .tokens import SrcSpan, no_span
+from .ast import TypeExpr, TypeKind, Expr, ExprKind, FieldInit, MapEntry, Param, ExprOrBlock
+from .ast import Pattern, PatternKind, FieldPat, MatchArm, BindElem, Stmt, StmtKind, Block, ElseTail
+from .ast import TypeParam, Field, Variant, ImportPath, ImportItem, Attribute, FunData, Decl, DeclKind, Program
+from .parser import parse_source_lazy, parse_body, LazyParsed, Parsed, BodySite
+
+// The tag that starts an entry: another form, or none, is not read.
+const TAG: str = "MC1"
+
+// The first id `cache_entry` parses a module at a second time: the cache
+// is used only where the parse at it is the parse at 0 moved.
+const PROBE_BASE: int32 = 1000003
+
+// --- writing ---------------------------------------------------------------
+
+struct Writer {
+    sb: StringBuilder,
+    strs: [str: int32],
+    table: [str],
+    base: int32,
+    last_id: int32,
+    last_line: int32,
+}
+
+fun new_writer(base: int32) -> Writer {
+    return Writer { sb: StringBuilder(), strs: [:], table: [], base: base, last_id: base, last_line: 0 }
+}
+
+// Where the digits of a name the parser made of a node's id start
+// (`%for12`, `%index7`: a `%`, letters, and the id without leading
+// zeros), its length when it is no such name.
+#test("%for12")[4]
+#test("%index7")[6]
+#test("%for")[4]
+#test("for12")[5]
+#test("%for012")[7]
+#test("%for0")[4]
+fun id_name_at(s: str) -> int32 {
+    if s.len() < 2 || s[0] != '%' { return s.len() }
+    var i = 1
+    while i < s.len() && s[i] >= 'a' && s[i] <= 'z' { i += 1 }
+    if i == s.len() { return i }
+    if s[i] == '0' && i + 1 < s.len() { return s.len() }
+    var j = i
+    while j < s.len() && s[j] >= '0' && s[j] <= '9' { j += 1 }
+    if j < s.len() || j - i > 9 { return s.len() }
+    return i
+}
+
+// The id in such a name and one, 0 when it is none.
+#test("%for12")[13]
+#test("%index0")[1]
+#test("x12")[0]
+fun id_suffix(s: str) -> int32 {
+    let at = id_name_at(s)
+    if at == s.len() { return 0 }
+    var n = 0
+    var i = at
+    while i < s.len() {
+        n = n * 10 + (s[i] - '0') as int32
+        i += 1
+    }
+    return n + 1
+}
+
+// The digits of `n` (>= 0), as the form writes them.
+#test(0)["@"]
+#test(63)["\u{7f}"]
+#test(64)["!@"]
+#test(2047)["?\u{7f}"]
+#test(2048)["! @"]
+fun digits(n: int64) -> str {
+    var sb = StringBuilder()
+    var w = Writer { sb: sb, strs: [:], table: [], base: 0, last_id: 0, last_line: 0 }
+    w.unsigned(n)
+    return w.sb.build()
+}
+
+impl Writer {
+    // What was written, after the tag and the string table.
+    fun finish(var self) -> str {
+        let module = self.sb.build()
+        var head = Writer { sb: StringBuilder(), strs: [:], table: [], base: 0, last_id: 0, last_line: 0 }
+        head.sb.append(TAG)
+        head.unsigned(self.table.len() as int64)
+        for s in self.table {
+            head.unsigned(s.len() as int64)
+            head.sb.append(s)
+        }
+        head.sb.append(module)
+        return head.sb.build()
+    }
+
+    fun unsigned(var self, n: int64) {
+        if n < 64 {
+            self.sb.append_byte((64 + n) as uint8)
+            return
+        }
+        var rest = n / 64
+        var high: [uint8] = []
+        while rest > 0 {
+            high.push((32 + rest % 32) as uint8)
+            rest = rest / 32
+        }
+        var i = high.len() - 1
+        while i >= 0 {
+            self.sb.append_byte(high[i])
+            i -= 1
+        }
+        self.sb.append_byte((64 + n % 64) as uint8)
+    }
+
+    fun signed(var self, n: int32) {
+        let v = n as int64
+        if v >= 0 { self.unsigned(2 * v) } else { self.unsigned(-2 * v - 1) }
+    }
+
+    // A 64-bit number: its sign, then what is left, so that nothing
+    // overflows.
+    fun wide(var self, v: int64) {
+        if v >= 0 {
+            self.unsigned(0)
+            self.unsigned(v)
+        } else {
+            self.unsigned(1)
+            self.unsigned(-(v + 1))
+        }
+    }
+
+    fun flag(var self, b: bool) {
+        if b { self.unsigned(1) } else { self.unsigned(0) }
+    }
+
+    // A string: twice its index in the table; a name the parser made of a
+    // node's id (`%for12`, `%index7`), so that it moves with the ids, one
+    // more than twice its prefix's index, and the id.
+    fun text(var self, s: str) {
+        let n = id_suffix(s)
+        if n > 0 {
+            let at = id_name_at(s)
+            self.unsigned(2 * self.index(s[:at]) + 1)
+            self.signed(n - 1 - self.base)
+            return
+        }
+        self.unsigned(2 * self.index(s))
+    }
+
+    fun index(var self, s: str) -> int64 {
+        match self.strs.get(s) {
+            Some(k) => { return k as int64 },
+            None => {
+                let k = self.table.len() as int32
+                self.strs[s] = k
+                self.table.push(s)
+                return k as int64
+            },
+        }
+    }
+
+    fun opt_text(var self, o: Option<str>) {
+        match o {
+            Some(s) => {
+                self.unsigned(1)
+                self.text(s)
+            },
+            None => { self.unsigned(0) },
+        }
+    }
+
+    fun texts(var self, xs: [str]) {
+        self.unsigned(xs.len() as int64)
+        for x in xs { self.text(x) }
+    }
+
+    fun id(var self, id: int32) {
+        self.signed(id - self.last_id)
+        self.last_id = id
+    }
+
+    // A position and a range: the line from the last one, the range from
+    // the position.
+    fun place(var self, line: int32, col: int32, sp: SrcSpan) {
+        self.signed(line - self.last_line)
+        self.last_line = line
+        self.signed(col)
+        self.span(line, col, sp)
+    }
+
+    // Most ranges start at their node's position and end on its line: one
+    // even number, twice their length; any other an odd one and its four
+    // ends.
+    fun span(var self, line: int32, col: int32, sp: SrcSpan) {
+        if sp.sline == line && sp.scol == col && sp.eline == line && sp.ecol >= col {
+            self.unsigned((2 * (sp.ecol - col)) as int64)
+            return
+        }
+        self.unsigned(1)
+        self.signed(sp.sline - line)
+        self.signed(sp.scol - col)
+        self.signed(sp.eline - sp.sline)
+        self.signed(sp.ecol - sp.scol)
+    }
+
+    fun ty(var self, t: TypeExpr) {
+        self.id(t.id)
+        self.place(t.line, t.col, t.sp)
+        match t.kind {
+            TypeKind.TRef(name, args) => {
+                self.unsigned(0)
+                self.text(name)
+                self.types(args)
+            },
+            TypeKind.TTuple(elems) => {
+                self.unsigned(1)
+                self.types(elems)
+            },
+            TypeKind.TList(elem) => {
+                self.unsigned(2)
+                self.ty(elem)
+            },
+            TypeKind.TMap(k, v) => {
+                self.unsigned(3)
+                self.ty(k)
+                self.ty(v)
+            },
+            TypeKind.TFn(params, ret, asy) => {
+                self.unsigned(4)
+                self.types(params)
+                self.ty(ret)
+                self.flag(asy)
+            },
+        }
+    }
+
+    fun types(var self, ts: [TypeExpr]) {
+        self.unsigned(ts.len() as int64)
+        for t in ts { self.ty(t) }
+    }
+
+    fun opt_ty(var self, o: Option<TypeExpr>) {
+        match o {
+            Some(t) => {
+                self.unsigned(1)
+                self.ty(t)
+            },
+            None => { self.unsigned(0) },
+        }
+    }
+
+    fun expr(var self, e: Expr) {
+        self.id(e.id)
+        self.place(e.line, e.col, e.sp)
+        match e.kind {
+            ExprKind.IntLit(v, suffix, is_char, big) => {
+                self.unsigned(0)
+                self.wide(v)
+                self.opt_text(suffix)
+                self.flag(is_char)
+                self.text(big)
+            },
+            ExprKind.FloatLit(lexeme, suffix) => {
+                self.unsigned(1)
+                self.text(lexeme)
+                self.opt_text(suffix)
+            },
+            ExprKind.StrLit(s) => {
+                self.unsigned(2)
+                self.text(s)
+            },
+            ExprKind.BoolLit(b) => {
+                self.unsigned(3)
+                self.flag(b)
+            },
+            ExprKind.Name(n) => {
+                self.unsigned(4)
+                self.text(n)
+            },
+            ExprKind.Unary(op, x) => {
+                self.unsigned(5)
+                self.text(op)
+                self.expr(x)
+            },
+            ExprKind.Binary(op, a, b) => {
+                self.unsigned(6)
+                self.text(op)
+                self.expr(a)
+                self.expr(b)
+            },
+            ExprKind.Call(callee, args, targs) => {
+                self.unsigned(7)
+                self.expr(callee)
+                self.exprs(args)
+                self.types(targs)
+            },
+            ExprKind.GetField(x, name) => {
+                self.unsigned(8)
+                self.expr(x)
+                self.text(name)
+            },
+            ExprKind.StructLit(name, fields) => {
+                self.unsigned(9)
+                self.text(name)
+                self.unsigned(fields.len() as int64)
+                for f in fields {
+                    self.place(f.line, f.col, f.sp)
+                    self.text(f.name)
+                    self.expr(f.value)
+                }
+            },
+            ExprKind.TupleLit(es) => {
+                self.unsigned(10)
+                self.exprs(es)
+            },
+            ExprKind.TupleIndex(x, k) => {
+                self.unsigned(11)
+                self.expr(x)
+                self.wide(k)
+            },
+            ExprKind.ListLit(es) => {
+                self.unsigned(12)
+                self.exprs(es)
+            },
+            ExprKind.MapLit(entries) => {
+                self.unsigned(13)
+                self.unsigned(entries.len() as int64)
+                for m in entries {
+                    self.expr(m.key)
+                    self.expr(m.value)
+                }
+            },
+            ExprKind.Index(x, k) => {
+                self.unsigned(14)
+                self.expr(x)
+                self.expr(k)
+            },
+            ExprKind.MatchE(x, arms) => {
+                self.unsigned(15)
+                self.expr(x)
+                self.unsigned(arms.len() as int64)
+                for a in arms { self.arm(a) }
+            },
+            ExprKind.Try(x) => {
+                self.unsigned(16)
+                self.expr(x)
+            },
+            ExprKind.Cast(x, t) => {
+                self.unsigned(17)
+                self.expr(x)
+                self.ty(t)
+            },
+            ExprKind.Lambda(params, ret, body, asy) => {
+                self.unsigned(18)
+                self.params(params)
+                self.opt_ty(ret)
+                self.body(body)
+                self.flag(asy)
+            },
+            ExprKind.Await(x) => {
+                self.unsigned(19)
+                self.expr(x)
+            },
+            ExprKind.Hole => { self.unsigned(20) },
+        }
+    }
+
+    fun exprs(var self, es: [Expr]) {
+        self.unsigned(es.len() as int64)
+        for e in es { self.expr(e) }
+    }
+
+    fun opt_expr(var self, o: Option<Expr>) {
+        match o {
+            Some(e) => {
+                self.unsigned(1)
+                self.expr(e)
+            },
+            None => { self.unsigned(0) },
+        }
+    }
+
+    fun params(var self, ps: [Param]) {
+        self.unsigned(ps.len() as int64)
+        for p in ps {
+            self.place(p.line, p.col, p.sp)
+            self.text(p.name)
+            self.opt_ty(p.ty)
+            self.opt_expr(p.default)
+        }
+    }
+
+    fun body(var self, b: ExprOrBlock) {
+        match b {
+            ExprOrBlock.EB_Expr(e) => {
+                self.unsigned(0)
+                self.expr(e)
+            },
+            ExprOrBlock.EB_Block(blk) => {
+                self.unsigned(1)
+                self.block(blk)
+            },
+        }
+    }
+
+    fun arm(var self, a: MatchArm) {
+        self.place(a.line, a.col, a.sp)
+        self.pattern(a.pattern)
+        self.opt_expr(a.guard)
+        self.body(a.body)
+    }
+
+    fun pattern(var self, p: Pattern) {
+        self.id(p.id)
+        self.place(p.line, p.col, p.sp)
+        match p.kind {
+            PatternKind.PWild => { self.unsigned(0) },
+            PatternKind.PBind(n) => {
+                self.unsigned(1)
+                self.text(n)
+            },
+            PatternKind.PLit(e) => {
+                self.unsigned(2)
+                self.expr(e)
+            },
+            PatternKind.PEnum(en, variant, elems, payload) => {
+                self.unsigned(3)
+                self.opt_text(en)
+                self.text(variant)
+                self.patterns(elems)
+                self.flag(payload)
+            },
+            PatternKind.PTuple(elems) => {
+                self.unsigned(4)
+                self.patterns(elems)
+            },
+            PatternKind.PStruct(name, fields) => {
+                self.unsigned(5)
+                self.text(name)
+                self.unsigned(fields.len() as int64)
+                for f in fields {
+                    self.place(f.line, f.col, f.sp)
+                    self.text(f.name)
+                    self.pattern(f.pattern)
+                }
+            },
+            PatternKind.POr(alts) => {
+                self.unsigned(6)
+                self.patterns(alts)
+            },
+        }
+    }
+
+    fun patterns(var self, ps: [Pattern]) {
+        self.unsigned(ps.len() as int64)
+        for p in ps { self.pattern(p) }
+    }
+
+    fun bind(var self, b: BindElem) {
+        match b {
+            BindElem.BName(n, line, col, sp) => {
+                self.unsigned(0)
+                self.text(n)
+                self.place(line, col, sp)
+            },
+            BindElem.BWild => { self.unsigned(1) },
+            BindElem.BTuple(es, line, col, sp) => {
+                self.unsigned(2)
+                self.unsigned(es.len() as int64)
+                for e in es { self.bind(e) }
+                self.place(line, col, sp)
+            },
+        }
+    }
+
+    fun block(var self, b: Block) {
+        self.place(b.line, b.col, b.sp)
+        self.unsigned(b.stmts.len() as int64)
+        for s in b.stmts { self.stmt(s) }
+    }
+
+    fun opt_block(var self, o: Option<Block>) {
+        match o {
+            Some(b) => {
+                self.unsigned(1)
+                self.block(b)
+            },
+            None => { self.unsigned(0) },
+        }
+    }
+
+    fun stmt(var self, s: Stmt) {
+        self.id(s.id)
+        self.place(s.line, s.col, s.sp)
+        match s.kind {
+            StmtKind.VarDecl(kind, name, t, init) => {
+                self.unsigned(0)
+                self.text(kind)
+                self.text(name)
+                self.opt_ty(t)
+                self.expr(init)
+            },
+            StmtKind.DestructDecl(kind, b, t, init) => {
+                self.unsigned(1)
+                self.text(kind)
+                self.bind(b)
+                self.opt_ty(t)
+                self.expr(init)
+            },
+            StmtKind.Assign(place, value) => {
+                self.unsigned(2)
+                self.expr(place)
+                self.expr(value)
+            },
+            StmtKind.IfS(cond, then, tail) => {
+                self.unsigned(3)
+                self.expr(cond)
+                self.block(then)
+                match tail {
+                    Some(ElseTail.ElseBlock(b)) => {
+                        self.unsigned(1)
+                        self.block(b)
+                    },
+                    Some(ElseTail.ElseIf(st)) => {
+                        self.unsigned(2)
+                        self.stmt(st)
+                    },
+                    None => { self.unsigned(0) },
+                }
+            },
+            StmtKind.WhileS(cond, b) => {
+                self.unsigned(4)
+                self.expr(cond)
+                self.block(b)
+            },
+            StmtKind.ForS(v, start, end, b, iter) => {
+                self.unsigned(5)
+                self.text(v)
+                self.opt_expr(start)
+                self.opt_expr(end)
+                self.block(b)
+                self.opt_expr(iter)
+            },
+            StmtKind.ReturnS(value, tail_call) => {
+                self.unsigned(6)
+                self.opt_expr(value)
+                self.flag(tail_call)
+            },
+            StmtKind.BreakS => { self.unsigned(7) },
+            StmtKind.ContinueS => { self.unsigned(8) },
+            StmtKind.ExprStmt(e) => {
+                self.unsigned(9)
+                self.expr(e)
+            },
+            StmtKind.DeferS(b) => {
+                self.unsigned(10)
+                self.block(b)
+            },
+        }
+    }
+
+    fun type_params(var self, tps: [TypeParam]) {
+        self.unsigned(tps.len() as int64)
+        for tp in tps {
+            self.place(tp.line, tp.col, tp.sp)
+            self.text(tp.name)
+            self.texts(tp.bounds)
+            self.unsigned(tp.bound_args.len() as int64)
+            for args in tp.bound_args { self.types(args) }
+        }
+    }
+
+    fun attributes(var self, attrs: [Attribute]) {
+        self.unsigned(attrs.len() as int64)
+        for a in attrs {
+            self.place(a.line, a.col, a.sp)
+            self.text(a.name)
+            self.exprs(a.args)
+            match a.outputs {
+                Some(es) => {
+                    self.unsigned(1)
+                    self.exprs(es)
+                },
+                None => { self.unsigned(0) },
+            }
+            self.text(a.label)
+        }
+    }
+
+    fun fun_data(var self, f: FunData) {
+        self.place(f.line, f.col, f.sp)
+        self.text(f.name)
+        self.params(f.params)
+        self.opt_ty(f.ret_type)
+        self.opt_block(f.body)
+        self.attributes(f.attributes)
+        self.type_params(f.type_params)
+        self.opt_text(f.receiver)
+        self.flag(f.is_pub)
+        self.flag(f.is_async)
+    }
+
+    fun funs(var self, fs: [FunData]) {
+        self.unsigned(fs.len() as int64)
+        for f in fs { self.fun_data(f) }
+    }
+
+    fun decl(var self, d: Decl) {
+        self.id(d.id)
+        self.place(d.line, d.col, d.sp)
+        match d.kind {
+            DeclKind.StructDecl(name, fields, attrs, tps, is_pub, is_actor) => {
+                self.unsigned(0)
+                self.text(name)
+                self.unsigned(fields.len() as int64)
+                for f in fields {
+                    self.place(f.line, f.col, f.sp)
+                    self.text(f.name)
+                    self.ty(f.ty)
+                }
+                self.attributes(attrs)
+                self.type_params(tps)
+                self.flag(is_pub)
+                self.flag(is_actor)
+            },
+            DeclKind.FunDecl(fd) => {
+                self.unsigned(1)
+                self.fun_data(fd)
+            },
+            DeclKind.EnumDecl(name, variants, attrs, tps, is_pub) => {
+                self.unsigned(2)
+                self.text(name)
+                self.unsigned(variants.len() as int64)
+                for v in variants {
+                    self.place(v.line, v.col, v.sp)
+                    self.text(v.name)
+                    self.types(v.payload)
+                }
+                self.attributes(attrs)
+                self.type_params(tps)
+                self.flag(is_pub)
+            },
+            DeclKind.TypeAliasDecl(name, t, attrs, is_pub) => {
+                self.unsigned(3)
+                self.text(name)
+                self.ty(t)
+                self.attributes(attrs)
+                self.flag(is_pub)
+            },
+            DeclKind.ImplDecl(target, methods, tps, tr, targs, attrs) => {
+                self.unsigned(4)
+                self.ty(target)
+                self.funs(methods)
+                self.type_params(tps)
+                self.opt_text(tr)
+                self.types(targs)
+                self.attributes(attrs)
+            },
+            DeclKind.TraitDecl(name, methods, tps, is_pub, attrs) => {
+                self.unsigned(5)
+                self.text(name)
+                self.funs(methods)
+                self.type_params(tps)
+                self.flag(is_pub)
+                self.attributes(attrs)
+            },
+            DeclKind.ConstDecl(name, t, value, attrs, is_pub) => {
+                self.unsigned(6)
+                self.text(name)
+                self.ty(t)
+                self.expr(value)
+                self.attributes(attrs)
+                self.flag(is_pub)
+            },
+            DeclKind.ImportDecl(p, items, alias, is_pub) => {
+                self.unsigned(7)
+                self.place(p.line, p.col, p.sp)
+                self.signed(p.dots)
+                self.texts(p.segments)
+                match items {
+                    Some(its) => {
+                        self.unsigned(1)
+                        self.unsigned(its.len() as int64)
+                        for it in its {
+                            self.place(it.line, it.col, it.sp)
+                            self.text(it.name)
+                            self.opt_text(it.alias)
+                        }
+                    },
+                    None => { self.unsigned(0) },
+                }
+                self.opt_text(alias)
+                self.flag(is_pub)
+            },
+        }
+    }
+}
+
+// The parse `lp` of a module whose node ids start at `base`, in the form
+// above, relative to `base`.
+// With each site, where its body's text starts and ends in the module's
+// bytes (`bytes`, two numbers a site), so that the loader decodes only the
+// bodies it reads, not the whole text, and the body parsed (`bodies`, one
+// a site, None for one whose text is read), its ids from the site's first
+// and its lines from 0, after the next node id: each site has where its
+// body starts there, -1 for none.
+pub fun encode(lp: LazyParsed, bytes: [int32], bodies: [Option<Block>], base: int32) -> str {
+    var w = new_writer(base)
+    var at: [int32] = []
+    var k = 0
+    for s in lp.sites {
+        match bodies[k] {
+            Some(b) => {
+                at.push(w.sb.len() as int32)
+                w.last_id = s.first_id
+                w.last_line = 0
+                w.block(b)
+            },
+            None => { at.push(-1) },
+        }
+        k += 1
+    }
+    let parsed_bodies = w.sb.build()
+    w.sb = StringBuilder()
+    w.last_id = base
+    w.last_line = 0
+    let decls = lp.parsed.program.decls
+    w.unsigned(decls.len() as int64)
+    for d in decls { w.decl(d) }
+    w.unsigned(lp.sites.len() as int64)
+    k = 0
+    for s in lp.sites {
+        w.signed(s.line)
+        w.signed(s.col)
+        w.signed(s.start)
+        w.signed(s.end)
+        w.signed(s.first_id - base)
+        w.signed(s.ids)
+        w.signed(bytes[2 * k])
+        w.signed(bytes[2 * k + 1])
+        w.signed(at[k])
+        k += 1
+    }
+    w.signed(lp.parsed.next_id - base)
+    w.sb.append(parsed_bodies)
+    return w.finish()
+}
+
+// The entry of the cache for a module whose text is `src`: its parse with
+// its functions' bodies left for later (`parse_source_lazy`), node ids
+// from 0, and with `with_bodies` the bodies parsed too, encoded; "" when it
+// doesn't parse, when the parse at another first id isn't the same moved
+// (a name made of an id the form didn't know would not be), when the
+// entry doesn't read back as the parse, or when a body read from its own
+// text (`body_part`) isn't the one read from the module's code points.
+#test("fun f(x: int) -> int { return x }")[true]
+#test("fun f(x: int) -> int { return x }\n\nfun g( {")[false]
+#test("// é\nfun f(s: str) -> str {\n    return \"ü\" + s\n}\n\nfun g() -> char { return 'λ' }\n")[true]
+#test("fun f(xs: [(int, int)]) -> int {\n    var n = 0\n    for (a, b) in xs { n += a * b }\n    var ys = [1]\n    ys[0] += n\n    return ys[0]\n}\n")[true]
+fun cacheable(src: str) -> bool {
+    return cache_entry(src, true) != ""
+}
+
+pub fun cache_entry(src: str, with_bodies: bool) -> str {
+    let at0 = match parse_source_lazy(src, 0) {
+        Ok(lp) => lp,
+        Err(ds) => { return "" },
+    }
+    let bytes = byte_places(at0.cps, at0.sites)
+    let entry = encode(at0, bytes, parsed_bodies(at0, with_bodies), 0)
+    let moved = match parse_source_lazy(src, PROBE_BASE) {
+        Ok(lp) => lp,
+        Err(ds) => { return "" },
+    }
+    let bodies = parsed_bodies(moved, with_bodies)
+    if encode(moved, bytes, bodies, PROBE_BASE) != entry { return "" }
+    let back = match decode(entry, PROBE_BASE) {
+        Some(c) => c,
+        None => { return "" },
+    }
+    if encode(back.parsed, back.bytes, cached_bodies(back), PROBE_BASE) != entry { return "" }
+    var k = 0
+    for site in moved.sites {
+        let (part, at) = body_part(src, bytes, k, site)
+        if read_body(part, at) != read_body(moved.cps, site) { return "" }
+        k += 1
+    }
+    return entry
+}
+
+// The bodies `c` holds parsed, one a site.
+fun cached_bodies(c: Cached) -> [Option<Block>] {
+    var out: [Option<Block>] = []
+    var k = 0
+    for site in c.parsed.sites {
+        out.push(cached_body(c.bodies, k, site))
+        k += 1
+    }
+    return out
+}
+
+// The bodies of the sites of `lp`, each parsed (`parse_body`) when
+// `with`, None for one with an error, whose text is read so that its
+// error is the same.
+fun parsed_bodies(lp: LazyParsed, with: bool) -> [Option<Block>] {
+    var out: [Option<Block>] = []
+    for site in lp.sites {
+        if !with {
+            out.push(None)
+            continue
+        }
+        match parse_body(lp.cps, site) {
+            Ok(b) => { out.push(Some(b)) },
+            Err(ds) => { out.push(None) },
+        }
+    }
+    return out
+}
+
+// Where each site's body starts and ends in the bytes of the text whose
+// code points are `cps`: two numbers a site.
+#test("é f() { x }".chars(), [BodySite { line: 1, col: 7, start: 6, end: 11, first_id: 0, ids: 0 }])[[7, 12]]
+#test("".chars(), [])[[]]
+fun byte_places(cps: [char], sites: [BodySite]) -> [int32] {
+    var at: [int32] = []
+    var b = 0
+    for c in cps {
+        at.push(b)
+        b += utf8_len(c)
+    }
+    at.push(b)
+    var out: [int32] = []
+    for s in sites {
+        out.push(at[s.start])
+        out.push(at[s.end])
+    }
+    return out
+}
+
+#test('a')[1]
+#test('é')[2]
+#test('€')[3]
+#test('😀')[4]
+fun utf8_len(c: char) -> int32 {
+    let v = c as int32
+    if v < 128 { return 1 }
+    if v < 2048 { return 2 }
+    if v < 65536 { return 3 }
+    return 4
+}
+
+// The code points of the body at `site`, the `k`th of a module whose text
+// is `src` and its bodies' places in its bytes `bytes` (`decode`), and its
+// site in them: what `parse_body` reads it from, without the module's
+// code points.
+#test("fun f() { é }", [8, 14], 0, BodySite { line: 1, col: 9, start: 8, end: 13, first_id: 4, ids: 18 })[(['{', ' ', 'é', ' ', '}'], BodySite { line: 1, col: 9, start: 0, end: 5, first_id: 4, ids: 18 })]
+pub fun body_part(src: str, bytes: [int32], k: int32, site: BodySite) -> ([char], BodySite) {
+    let cps = src[bytes[2 * k]:bytes[2 * k + 1]].chars()
+    return (cps, BodySite { line: site.line, col: site.col, start: 0, end: cps.len() as int32, first_id: site.first_id, ids: site.ids })
+}
+
+// The body at `site` of the code points `cps`, parsed (`parse_body`) and
+// encoded, or its errors: what `cache_entry` compares.
+#test("fun f() { x }".chars(), BodySite { line: 1, col: 9, start: 8, end: 13, first_id: 4, ids: 18 })["ok MC1AAxBRJAB@VBIA@VBD@"]
+#test("fun f() { let = 1 }".chars(), BodySite { line: 1, col: 9, start: 8, end: 19, first_id: 4, ids: 30 })["parse error 1:15 1:15-1:16 expected variable name, found '='\n"]
+fun read_body(cps: [char], site: BodySite) -> str {
+    return match parse_body(cps, site) {
+        Ok(b) => {
+            var w = new_writer(site.first_id)
+            w.block(b)
+            "ok " + w.finish()
+        },
+        Err(ds) => {
+            var sb = StringBuilder()
+            for d in ds { sb.append(f"{d.kind} {d.line}:{d.col} {d.sp.sline}:{d.sp.scol}-{d.sp.eline}:{d.sp.ecol} {d.msg}\n") }
+            sb.build()
+        },
+    }
+}
+
+// --- reading ---------------------------------------------------------------
+
+struct Reader {
+    data: str,
+    pos: int32,
+    strs: [str],
+    base: int32,
+    last_id: int32,
+    last_line: int32,
+}
+
+impl Reader {
+    fun unsigned(var self) -> int64 {
+        var v: int64 = 0
+        while true {
+            let c = self.data[self.pos] as int64
+            self.pos += 1
+            if c >= 64 { return v * 64 + (c - 64) }
+            v = v * 32 + (c - 32)
+        }
+        unreachable()
+    }
+
+    fun wide(var self) -> int64 {
+        let negative = self.unsigned() == 1
+        let m = self.unsigned()
+        if negative { return -m - 1 }
+        return m
+    }
+
+    // A number below 2^31; one of one or two digits, most of them, without
+    // a call.
+    fun count(var self) -> int32 {
+        let c = self.data[self.pos] as int32
+        if c >= 64 {
+            self.pos += 1
+            return c - 64
+        }
+        let d = self.data[self.pos + 1] as int32
+        if d >= 64 {
+            self.pos += 2
+            return (c - 32) * 64 + d - 64
+        }
+        return self.unsigned() as int32
+    }
+
+    fun signed(var self) -> int32 {
+        let v = self.count()
+        if v % 2 == 0 { return v / 2 }
+        return -(v / 2) - 1
+    }
+
+    fun flag(var self) -> bool {
+        return self.unsigned() == 1
+    }
+
+    fun text(var self) -> str {
+        let k = self.count()
+        if k % 2 == 0 { return self.strs[k / 2] }
+        let prefix = self.strs[k / 2]
+        return prefix + f"{self.base + self.signed()}"
+    }
+
+    fun opt_text(var self) -> Option<str> {
+        if self.unsigned() == 0 { return None }
+        return Some(self.text())
+    }
+
+    fun texts(var self) -> [str] {
+        let n = self.count()
+        var out: [str] = []
+        var i = 0
+        while i < n {
+            out.push(self.text())
+            i += 1
+        }
+        return out
+    }
+
+    fun id(var self) -> int32 {
+        let id = self.last_id + self.signed()
+        self.last_id = id
+        return id
+    }
+
+    fun line(var self) -> int32 {
+        let line = self.last_line + self.signed()
+        self.last_line = line
+        return line
+    }
+
+    fun span(var self, line: int32, col: int32) -> SrcSpan {
+        let v = self.count()
+        if v % 2 == 0 { return SrcSpan { sline: line, scol: col, eline: line, ecol: col + v / 2 } }
+        let sline = line + self.signed()
+        let scol = col + self.signed()
+        let eline = sline + self.signed()
+        let ecol = scol + self.signed()
+        return SrcSpan { sline: sline, scol: scol, eline: eline, ecol: ecol }
+    }
+
+    fun ty(var self) -> TypeExpr {
+        let id = self.id()
+        let line = self.line()
+        let col = self.signed()
+        let sp = self.span(line, col)
+        return TypeExpr { id: id, line: line, col: col, sp: sp, kind: self.type_kind() }
+    }
+
+    fun type_kind(var self) -> TypeKind {
+        let tag = self.count()
+        if tag == 0 {
+            let name = self.text()
+            return TypeKind.TRef(name, self.types())
+        }
+        if tag == 1 { return TypeKind.TTuple(self.types()) }
+        if tag == 2 { return TypeKind.TList(self.ty()) }
+        if tag == 3 {
+            let k = self.ty()
+            return TypeKind.TMap(k, self.ty())
+        }
+        let params = self.types()
+        let ret = self.ty()
+        return TypeKind.TFn(params, ret, self.flag())
+    }
+
+    fun types(var self) -> [TypeExpr] {
+        let n = self.count()
+        var out: [TypeExpr] = []
+        var i = 0
+        while i < n {
+            out.push(self.ty())
+            i += 1
+        }
+        return out
+    }
+
+    fun opt_ty(var self) -> Option<TypeExpr> {
+        if self.unsigned() == 0 { return None }
+        return Some(self.ty())
+    }
+
+    fun expr(var self) -> Expr {
+        let id = self.id()
+        let line = self.line()
+        let col = self.signed()
+        let sp = self.span(line, col)
+        return Expr { id: id, line: line, col: col, sp: sp, kind: self.expr_kind() }
+    }
+
+    fun expr_kind(var self) -> ExprKind {
+        let tag = self.count()
+        if tag == 0 {
+            let v = self.wide()
+            let suffix = self.opt_text()
+            let is_char = self.flag()
+            return ExprKind.IntLit(v, suffix, is_char, self.text())
+        }
+        if tag == 1 {
+            let lexeme = self.text()
+            return ExprKind.FloatLit(lexeme, self.opt_text())
+        }
+        if tag == 2 { return ExprKind.StrLit(self.text()) }
+        if tag == 3 { return ExprKind.BoolLit(self.flag()) }
+        if tag == 4 { return ExprKind.Name(self.text()) }
+        if tag == 5 {
+            let op = self.text()
+            return ExprKind.Unary(op, self.expr())
+        }
+        if tag == 6 {
+            let op = self.text()
+            let a = self.expr()
+            return ExprKind.Binary(op, a, self.expr())
+        }
+        if tag == 7 {
+            let callee = self.expr()
+            let args = self.exprs()
+            return ExprKind.Call(callee, args, self.types())
+        }
+        if tag == 8 {
+            let x = self.expr()
+            return ExprKind.GetField(x, self.text())
+        }
+        if tag == 9 {
+            let name = self.text()
+            let n = self.count()
+            var fields: [FieldInit] = []
+            var i = 0
+            while i < n {
+                let line = self.line()
+                let col = self.signed()
+                let sp = self.span(line, col)
+                let fname = self.text()
+                fields.push(FieldInit { line: line, col: col, sp: sp, name: fname, value: self.expr() })
+                i += 1
+            }
+            return ExprKind.StructLit(name, fields)
+        }
+        if tag == 10 { return ExprKind.TupleLit(self.exprs()) }
+        if tag == 11 {
+            let x = self.expr()
+            return ExprKind.TupleIndex(x, self.wide())
+        }
+        if tag == 12 { return ExprKind.ListLit(self.exprs()) }
+        if tag == 13 {
+            let n = self.count()
+            var entries: [MapEntry] = []
+            var i = 0
+            while i < n {
+                let k = self.expr()
+                entries.push(MapEntry { key: k, value: self.expr() })
+                i += 1
+            }
+            return ExprKind.MapLit(entries)
+        }
+        if tag == 14 {
+            let x = self.expr()
+            return ExprKind.Index(x, self.expr())
+        }
+        if tag == 15 {
+            let x = self.expr()
+            let n = self.count()
+            var arms: [MatchArm] = []
+            var i = 0
+            while i < n {
+                arms.push(self.arm())
+                i += 1
+            }
+            return ExprKind.MatchE(x, arms)
+        }
+        if tag == 16 { return ExprKind.Try(self.expr()) }
+        if tag == 17 {
+            let x = self.expr()
+            return ExprKind.Cast(x, self.ty())
+        }
+        if tag == 18 {
+            let params = self.params()
+            let ret = self.opt_ty()
+            let body = self.body()
+            return ExprKind.Lambda(params, ret, body, self.flag())
+        }
+        if tag == 19 { return ExprKind.Await(self.expr()) }
+        return ExprKind.Hole
+    }
+
+    fun exprs(var self) -> [Expr] {
+        let n = self.count()
+        var out: [Expr] = []
+        var i = 0
+        while i < n {
+            out.push(self.expr())
+            i += 1
+        }
+        return out
+    }
+
+    fun opt_expr(var self) -> Option<Expr> {
+        if self.unsigned() == 0 { return None }
+        return Some(self.expr())
+    }
+
+    fun params(var self) -> [Param] {
+        let n = self.count()
+        var out: [Param] = []
+        var i = 0
+        while i < n {
+            let line = self.line()
+            let col = self.signed()
+            let sp = self.span(line, col)
+            let name = self.text()
+            let t = self.opt_ty()
+            out.push(Param { line: line, col: col, sp: sp, name: name, ty: t, default: self.opt_expr() })
+            i += 1
+        }
+        return out
+    }
+
+    fun body(var self) -> ExprOrBlock {
+        if self.unsigned() == 0 { return ExprOrBlock.EB_Expr(self.expr()) }
+        return ExprOrBlock.EB_Block(self.block())
+    }
+
+    fun arm(var self) -> MatchArm {
+        let line = self.line()
+        let col = self.signed()
+        let sp = self.span(line, col)
+        let p = self.pattern()
+        let guard = self.opt_expr()
+        return MatchArm { line: line, col: col, sp: sp, pattern: p, guard: guard, body: self.body() }
+    }
+
+    fun pattern(var self) -> Pattern {
+        let id = self.id()
+        let line = self.line()
+        let col = self.signed()
+        let sp = self.span(line, col)
+        return Pattern { id: id, line: line, col: col, sp: sp, kind: self.pattern_kind() }
+    }
+
+    fun pattern_kind(var self) -> PatternKind {
+        let tag = self.count()
+        if tag == 0 { return PatternKind.PWild }
+        if tag == 1 { return PatternKind.PBind(self.text()) }
+        if tag == 2 { return PatternKind.PLit(self.expr()) }
+        if tag == 3 {
+            let en = self.opt_text()
+            let variant = self.text()
+            let elems = self.patterns()
+            return PatternKind.PEnum(en, variant, elems, self.flag())
+        }
+        if tag == 4 { return PatternKind.PTuple(self.patterns()) }
+        if tag == 5 {
+            let name = self.text()
+            let n = self.count()
+            var fields: [FieldPat] = []
+            var i = 0
+            while i < n {
+                let fline = self.line()
+                let fcol = self.signed()
+                let fsp = self.span(fline, fcol)
+                let fname = self.text()
+                fields.push(FieldPat { line: fline, col: fcol, sp: fsp, name: fname, pattern: self.pattern() })
+                i += 1
+            }
+            return PatternKind.PStruct(name, fields)
+        }
+        return PatternKind.POr(self.patterns())
+    }
+
+    fun patterns(var self) -> [Pattern] {
+        let n = self.count()
+        var out: [Pattern] = []
+        var i = 0
+        while i < n {
+            out.push(self.pattern())
+            i += 1
+        }
+        return out
+    }
+
+    fun bind(var self) -> BindElem {
+        let tag = self.count()
+        if tag == 0 {
+            let name = self.text()
+            let line = self.line()
+            let col = self.signed()
+            return BindElem.BName(name, line, col, self.span(line, col))
+        }
+        if tag == 1 { return BindElem.BWild }
+        let n = self.count()
+        var es: [BindElem] = []
+        var i = 0
+        while i < n {
+            es.push(self.bind())
+            i += 1
+        }
+        let line = self.line()
+        let col = self.signed()
+        return BindElem.BTuple(es, line, col, self.span(line, col))
+    }
+
+    fun block(var self) -> Block {
+        let line = self.line()
+        let col = self.signed()
+        let sp = self.span(line, col)
+        let n = self.count()
+        var stmts: [Stmt] = []
+        var i = 0
+        while i < n {
+            stmts.push(self.stmt())
+            i += 1
+        }
+        return Block { line: line, col: col, sp: sp, stmts: stmts }
+    }
+
+    fun opt_block(var self) -> Option<Block> {
+        if self.unsigned() == 0 { return None }
+        return Some(self.block())
+    }
+
+    fun stmt(var self) -> Stmt {
+        let id = self.id()
+        let line = self.line()
+        let col = self.signed()
+        let sp = self.span(line, col)
+        return Stmt { id: id, line: line, col: col, sp: sp, kind: self.stmt_kind() }
+    }
+
+    fun stmt_kind(var self) -> StmtKind {
+        let tag = self.count()
+        if tag == 0 {
+            let kind = self.text()
+            let name = self.text()
+            let t = self.opt_ty()
+            return StmtKind.VarDecl(kind, name, t, self.expr())
+        }
+        if tag == 1 {
+            let kind = self.text()
+            let b = self.bind()
+            let t = self.opt_ty()
+            return StmtKind.DestructDecl(kind, b, t, self.expr())
+        }
+        if tag == 2 {
+            let place = self.expr()
+            return StmtKind.Assign(place, self.expr())
+        }
+        if tag == 3 {
+            let cond = self.expr()
+            let then = self.block()
+            let which = self.count()
+            var tail: Option<ElseTail> = None
+            if which == 1 { tail = Some(ElseTail.ElseBlock(self.block())) }
+            if which == 2 { tail = Some(ElseTail.ElseIf(self.stmt())) }
+            return StmtKind.IfS(cond, then, tail)
+        }
+        if tag == 4 {
+            let cond = self.expr()
+            return StmtKind.WhileS(cond, self.block())
+        }
+        if tag == 5 {
+            let v = self.text()
+            let start = self.opt_expr()
+            let end = self.opt_expr()
+            let b = self.block()
+            return StmtKind.ForS(v, start, end, b, self.opt_expr())
+        }
+        if tag == 6 {
+            let value = self.opt_expr()
+            return StmtKind.ReturnS(value, self.flag())
+        }
+        if tag == 7 { return StmtKind.BreakS }
+        if tag == 8 { return StmtKind.ContinueS }
+        if tag == 9 { return StmtKind.ExprStmt(self.expr()) }
+        return StmtKind.DeferS(self.block())
+    }
+
+    fun type_params(var self) -> [TypeParam] {
+        let n = self.count()
+        var out: [TypeParam] = []
+        var i = 0
+        while i < n {
+            let line = self.line()
+            let col = self.signed()
+            let sp = self.span(line, col)
+            let name = self.text()
+            let bounds = self.texts()
+            let k = self.count()
+            var args: [[TypeExpr]] = []
+            var j = 0
+            while j < k {
+                args.push(self.types())
+                j += 1
+            }
+            out.push(TypeParam { line: line, col: col, sp: sp, name: name, bounds: bounds, bound_args: args })
+            i += 1
+        }
+        return out
+    }
+
+    fun attributes(var self) -> [Attribute] {
+        let n = self.count()
+        var out: [Attribute] = []
+        var i = 0
+        while i < n {
+            let line = self.line()
+            let col = self.signed()
+            let sp = self.span(line, col)
+            let name = self.text()
+            let args = self.exprs()
+            var outputs: Option<[Expr]> = None
+            if self.unsigned() == 1 { outputs = Some(self.exprs()) }
+            out.push(Attribute { line: line, col: col, sp: sp, name: name, args: args, outputs: outputs, label: self.text() })
+            i += 1
+        }
+        return out
+    }
+
+    fun fun_data(var self) -> FunData {
+        let line = self.line()
+        let col = self.signed()
+        let sp = self.span(line, col)
+        let name = self.text()
+        let params = self.params()
+        let ret = self.opt_ty()
+        let body = self.opt_block()
+        let attrs = self.attributes()
+        let tps = self.type_params()
+        let receiver = self.opt_text()
+        let is_pub = self.flag()
+        return FunData { line: line, col: col, sp: sp, name: name, params: params, ret_type: ret, body: body, attributes: attrs, type_params: tps, receiver: receiver, is_pub: is_pub, is_async: self.flag() }
+    }
+
+    fun funs(var self) -> [FunData] {
+        let n = self.count()
+        var out: [FunData] = []
+        var i = 0
+        while i < n {
+            out.push(self.fun_data())
+            i += 1
+        }
+        return out
+    }
+
+    fun decl(var self) -> Decl {
+        let id = self.id()
+        let line = self.line()
+        let col = self.signed()
+        let sp = self.span(line, col)
+        return Decl { id: id, line: line, col: col, sp: sp, kind: self.decl_kind() }
+    }
+
+    fun decl_kind(var self) -> DeclKind {
+        let tag = self.count()
+        if tag == 0 {
+            let name = self.text()
+            let n = self.count()
+            var fields: [Field] = []
+            var i = 0
+            while i < n {
+                let line = self.line()
+                let col = self.signed()
+                let sp = self.span(line, col)
+                let fname = self.text()
+                fields.push(Field { line: line, col: col, sp: sp, name: fname, ty: self.ty() })
+                i += 1
+            }
+            let attrs = self.attributes()
+            let tps = self.type_params()
+            let is_pub = self.flag()
+            return DeclKind.StructDecl(name, fields, attrs, tps, is_pub, self.flag())
+        }
+        if tag == 1 { return DeclKind.FunDecl(self.fun_data()) }
+        if tag == 2 {
+            let name = self.text()
+            let n = self.count()
+            var variants: [Variant] = []
+            var i = 0
+            while i < n {
+                let line = self.line()
+                let col = self.signed()
+                let sp = self.span(line, col)
+                let vname = self.text()
+                variants.push(Variant { line: line, col: col, sp: sp, name: vname, payload: self.types() })
+                i += 1
+            }
+            let attrs = self.attributes()
+            let tps = self.type_params()
+            return DeclKind.EnumDecl(name, variants, attrs, tps, self.flag())
+        }
+        if tag == 3 {
+            let name = self.text()
+            let t = self.ty()
+            let attrs = self.attributes()
+            return DeclKind.TypeAliasDecl(name, t, attrs, self.flag())
+        }
+        if tag == 4 {
+            let target = self.ty()
+            let methods = self.funs()
+            let tps = self.type_params()
+            let tr = self.opt_text()
+            let targs = self.types()
+            return DeclKind.ImplDecl(target, methods, tps, tr, targs, self.attributes())
+        }
+        if tag == 5 {
+            let name = self.text()
+            let methods = self.funs()
+            let tps = self.type_params()
+            let is_pub = self.flag()
+            return DeclKind.TraitDecl(name, methods, tps, is_pub, self.attributes())
+        }
+        if tag == 6 {
+            let name = self.text()
+            let t = self.ty()
+            let value = self.expr()
+            let attrs = self.attributes()
+            return DeclKind.ConstDecl(name, t, value, attrs, self.flag())
+        }
+        let line = self.line()
+        let col = self.signed()
+        let sp = self.span(line, col)
+        let dots = self.signed()
+        let segments = self.texts()
+        var items: Option<[ImportItem]> = None
+        if self.unsigned() == 1 {
+            let n = self.count()
+            var its: [ImportItem] = []
+            var i = 0
+            while i < n {
+                let iline = self.line()
+                let icol = self.signed()
+                let isp = self.span(iline, icol)
+                let iname = self.text()
+                its.push(ImportItem { line: iline, col: icol, sp: isp, name: iname, alias: self.opt_text() })
+                i += 1
+            }
+            items = Some(its)
+        }
+        let alias = self.opt_text()
+        let p = ImportPath { line: line, col: col, sp: sp, dots: dots, segments: segments }
+        return DeclKind.ImportDecl(p, items, alias, self.flag())
+    }
+}
+
+// A module's parse read from the cache, with where its bodies' texts are
+// in its bytes (`encode`) and its bodies parsed (`cached_body`): the
+// parse's code points are left empty, as the loader reads a body from the
+// cache or else from its own text (`body_part`).
+pub struct Cached { parsed: LazyParsed, bytes: [int32], bodies: Bodies }
+
+// The bodies an entry holds parsed: the entry, its strings, the module's
+// first id, and where each site's body starts in the entry, -1 for none.
+pub struct Bodies { entry: str, strs: [str], base: int32, at: [int32] }
+
+#test()[Bodies { entry: "", strs: [], base: 0, at: [] }]
+pub fun no_bodies() -> Bodies {
+    return Bodies { entry: "", strs: [], base: 0, at: [] }
+}
+
+// The body at `site`, the `k`th of its module, as parsed when the
+// toolchain was built (`parse_body`), its node ids the site's; None where
+// it is to be read from its text (one with an error, or a module whose
+// parse is not the toolchain's).
+#test(no_bodies(), 0, BodySite { line: 1, col: 1, start: 0, end: 2, first_id: 0, ids: 12 })[None]
+pub fun cached_body(b: Bodies, k: int32, site: BodySite) -> Option<Block> {
+    if k >= b.at.len() || b.at[k] < 0 { return None }
+    var r = Reader { data: b.entry, pos: b.at[k], strs: b.strs, base: b.base, last_id: site.first_id, last_line: 0 }
+    return Some(r.block())
+}
+
+// The parse that `entry` (`cache_entry`) holds, its node ids from
+// `first_id`; None for an entry of another form.
+#test("fun f(x: int) -> int { return x }", 7)[true]
+#test("pub struct P<T> { x: [T: (int, str)] }\n\nconst N: int64 = -9223372036854775807 - 1\nconst B: uint64 = 0xffff_ffff_ffff_ffff\nconst F: (float32, char) = (1.5f32, 'x')\n\n#derive(Eq)\nenum E { A(int), B }\n\nimpl<T> P<T> {\n    fun f(self, k: int = 3) -> int { return k }\n}\n", 100)[true]
+#test("import std.io as io\nfrom .x import a, b as c\npub trait T<U> {\n    fun m(var self, f: async (U) -> U) -> Option<U>\n}\n", 5)[true]
+fun reads_back(src: str, first_id: int32) -> bool {
+    let entry = cache_entry(src, true)
+    let c = match decode(entry, first_id) {
+        Some(x) => x,
+        None => { return false },
+    }
+    let parsed = match parse_source_lazy(src, first_id) {
+        Ok(x) => x,
+        Err(ds) => { return false },
+    }
+    return entry != "" && encode(c.parsed, c.bytes, cached_bodies(c), first_id) == encode(parsed, byte_places(parsed.cps, parsed.sites), parsed_bodies(parsed, true), first_id)
+}
+
+#test("", 0)[None]
+#test("MC2", 0)[None]
+pub fun decode(entry: str, first_id: int32) -> Option<Cached> {
+    if entry.len() < TAG.len() || entry[:TAG.len()] != TAG { return None }
+    var r = Reader { data: entry, pos: TAG.len(), strs: [], base: first_id, last_id: first_id, last_line: 0 }
+    let n = r.count()
+    var strs: [str] = []
+    var i = 0
+    while i < n {
+        let len = r.count()
+        var sb = StringBuilder()
+        sb.append(entry, r.pos, r.pos + len)
+        strs.push(sb.build())
+        r.pos += len
+        i += 1
+    }
+    r.strs = strs
+    let nd = r.count()
+    var decls: [Decl] = []
+    i = 0
+    while i < nd {
+        decls.push(r.decl())
+        i += 1
+    }
+    let ns = r.count()
+    var sites: [BodySite] = []
+    var bytes: [int32] = []
+    var at: [int32] = []
+    i = 0
+    while i < ns {
+        let line = r.signed()
+        let col = r.signed()
+        let start = r.signed()
+        let end = r.signed()
+        let first = first_id + r.signed()
+        sites.push(BodySite { line: line, col: col, start: start, end: end, first_id: first, ids: r.signed() })
+        bytes.push(r.signed())
+        bytes.push(r.signed())
+        at.push(r.signed())
+        i += 1
+    }
+    let next_id = first_id + r.signed()
+    i = 0
+    while i < ns {
+        if at[i] >= 0 { at[i] += r.pos }
+        i += 1
+    }
+    let bodies = Bodies { entry: entry, strs: r.strs, base: first_id, at: at }
+    return Some(Cached { parsed: LazyParsed { parsed: Parsed { program: Program { decls: decls }, next_id: next_id }, cps: [], sites: sites }, bytes: bytes, bodies: bodies })
+}
