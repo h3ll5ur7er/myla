@@ -9669,14 +9669,57 @@ class TestCompilerParity(unittest.TestCase):
             "bool_key": "let m = [true: 2]\n    let k = false\n    print(m[k])",
             "tuple_key": "let m = [(1, \"a\"): 2]\n    let k = (3, \"b\")\n    print(m[k])",
             "int8_key": "let m: [int8: int] = [1: 2]\n    let k: int8 = -5\n    print(m[k])",
+            # MYLA-441: a struct's, an enum's and a list's key too, natively
+            # by a `__krepr_<T>` routine per type
+            "struct_key": "let m = [P { x: 0, ys: [], c: 'a', b: true }: 1]\n"
+                          "    let k = P { x: 1, ys: [7, 255], c: 'q', b: false }\n    print(m[k])",
+            "empty_struct_key": "var m: [Empty: int] = [:]\n    let k = Empty {}\n    print(m[k])",
+            "unit_variant_key": "let m = [Color.Red: 1]\n    let k = Color.Green\n    print(m[k])",
+            "variant_key": "let m = [Color.Red: 1]\n    let k = Color.Rgb(-1, 2, 3)\n    print(m[k])",
+            "named_variant_key": "let m = [Color.Red: 1]\n    let k = Color.Named(\"it's \\\"x\\\"\")\n    print(m[k])",
+            "tuple_of_struct_key": "let m = [(P { x: 0, ys: [], c: 'a', b: true }, 1): 1]\n"
+                                   "    let k = (P { x: 2, ys: [1], c: 'b', b: true }, 9)\n    print(m[k])",
+            "list_key": "let m = [[1, 2]: 1]\n    let k = [3, -4, 5]\n    print(m[k])",
+            "empty_list_key": "let m = [[1, 2]: 1]\n    let k: [int] = []\n    print(m[k])",
+            "nested_list_key": "let m = [[[\"a\"]]: 1]\n    let k = [[\"b\", \"c\"], [], [\"d\"]]\n    print(m[k])",
+            "list_of_bools_key": "let m = [[true]: 1]\n    let k = [false, true]\n    print(m[k])",
+            "list_of_chars_key": "let m = [['a']: 1]\n    let k = ['x', 'y']\n    print(m[k])",
+            "list_of_tuples_key": "let m = [[(1, 'a')]: 1]\n    let k = [(2, 'b'), (3, 'c')]\n    print(m[k])",
+            "option_key": "let m = [Some(1): 1]\n    let k: Option<int> = None\n    print(m[k])",
+            "option_payload_key": "let m = [Some(1): 1]\n    let k = Some(5)\n    print(m[k])",
+            "generic_struct_key": "let m = [Pair { a: 1, b: \"x\" }: 1]\n    let k = Pair { a: 2, b: \"y\" }\n    print(m[k])",
+            "enum_of_structs_key": "let m = [Shape.Dot: 1]\n"
+                                   "    let k = Shape.Line(P { x: 1, ys: [2], c: 'c', b: false }, [Color.Red, Color.Green])\n"
+                                   "    print(m[k])",
+            "recursive_enum_in_a_key": "let m = [Holder { t: Tree.Leaf }: 1]\n"
+                                       "    let k = Holder { t: Tree.Node(Tree.Leaf, 4, Tree.Node(Tree.Leaf, 5, Tree.Leaf)) }\n"
+                                       "    print(m[k])",
+            "unit_payload_key": "let m = [U.B: 1]\n    let k = U.A(())\n    print(m[k])",
+            "float_fields_key": "var m: [F: int] = [:]\n    m[F { x: 1.0, y: 2.0f32, r: Ok(1) }] = 1\n"
+                                "    print(m[F { x: 0.1, y: 0.1f32, r: Err(\"e\") }])",
+            "list_key_of_a_place":"var m = [[1]: [2]]\n    let k = [5, 6]\n    m[k][0] = 3\n    print(m[[1]][0])",
+            "uint64_key_in_a_struct":"let m = [W { v: 1 }: 1]\n    let k = W { v: 7 }\n    print(m[k])",
             "key_of_a_place": "var m = [1: [2]]\n    let k = 5\n    m[k][0] = 3\n    print(m[1][0])",
             "surrogate": "let n = 55296\n    print(n as char)",
             "char_plus": "let c = 'a'\n    print(c + 1114111)",
             "append_range": "var sb = StringBuilder()\n    let a = 2\n    sb.append(\"abc\", a, 9)\n    print(sb.build())",
         }
+        # the key types of the cases of a struct, enum or list key
+        decls = ("#derive(Eq, Hash)\nstruct P { x: int, ys: [uint8], c: char, b: bool }\n"
+                 "#derive(Eq, Hash)\nstruct Empty {}\n"
+                 "#derive(Eq, Hash)\nenum Color { Red, Green, Rgb(int, int, int), Named(str) }\n"
+                 "#derive(Eq, Hash)\nstruct Pair<A, B> { a: A, b: B }\n"
+                 "#derive(Eq, Hash)\nenum Shape { Dot, Line(P, [Color]) }\n"
+                 "#derive(Eq, Hash)\nenum Tree { Leaf, Node(Tree, int, Tree) }\n"
+                 "#derive(Eq, Hash)\nstruct Holder { t: Tree }\n"
+                 "#derive(Eq, Hash)\nstruct W { v: uint64 }\n"
+                 "#derive(Eq, Hash)\nenum U { A(()), B }\n"
+                 "struct F { x: float, y: float32, r: Result<int, str> }\n"
+                 "impl Eq for F {\n    fun eq(self, other: F) -> bool { return self.x == other.x }\n}\n"
+                 "impl Hash for F {\n    fun hash(self, h: Hasher) -> Hasher { return h.add(self.x as int64) }\n}\n")
         for name, body in cases.items():
             with self.subTest(case=name), tempfile.TemporaryDirectory() as tmp:
-                path = write_program(tmp, "fun main() {\n    " + body + "\n}\n")
+                path = write_program(tmp, decls + "fun main() {\n    " + body + "\n}\n")
                 out, err, code = selfhost_run(path)
                 self.assertEqual(code, 1, err)
                 lines = err.splitlines()

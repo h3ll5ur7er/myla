@@ -9,7 +9,6 @@ Open bugs and gaps by component, each with a task that has its steps to reproduc
 - `#test` coverage of `selfhost/` is 67 percent (1,402 of 2,107 value-returning functions, `scripts/test_coverage.py`) against D109's 80, with no generator left ([[MYLA-184]]).
 - The interpreter is about 500 times slower than native code (`fib(30)`: 3.7 s against 7 ms on `d5d80bc`, [[MYLA-317]]).
 - **Interpreter:** a written `eq` or `hash` of a generic type, called for a list's `==` or a map key, binds no type parameter, so an operation typed by `T` falls back to erasure ([[MYLA-436]]); a `uint64` map key of 2^63 or more is written signed in `map key … not found` ([[MYLA-440]]).
-- **Native:** a missing map key of a struct, enum or list type is `map key not found` without the key the interpreter writes ([[MYLA-441]]).
 - Maps never shrink: iteration over an emptied map costs its old size, 82 s for 20,000 keys taken oldest-first from a once-10^6 map ([[MYLA-429]]).
 - `--checked` 64-bit arithmetic is three to five times slower in hot loops, as a checked `*` divides to detect overflow ([[MYLA-430]]).
 - An import of std.io checks `io`, `fs` and `bytes` whole, as they import each other: 61.8 M instructions of a hello world's 101 M, as [[Project/Review-2026-11-10]] measured ([[MYLA-432]]).
