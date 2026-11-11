@@ -601,6 +601,7 @@ class Time(unittest.TestCase):
             ended.append(True)
             ticked.set()
             feeder.join()
+            proc.stdout.close()
         return lines, fed == [True]
 
     def test_an_async_read_lets_the_other_tasks_run(self):

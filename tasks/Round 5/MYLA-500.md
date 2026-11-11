@@ -30,4 +30,4 @@ The test now feeds its program itself (`fed_after_a_tick` in [[tests/burn/test_t
   | 8 | 8.3 | 1 of 30 failed | 0 of 30 failed |
   | 12 | 16 to 18 | 2 of 30 failed | 0 of 30 failed |
 
-  Each failure was `AssertionError: 'line 0' != 't'`. Alone, at load 1, the test takes 1.0 s.
+  Each failure was `AssertionError: 'line 0' != 't'`. After the full suite showed a `ResourceWarning` for the program's unclosed stdout pipe, closed now, another 30 runs beside 8 busy loops (load 10): 0 failed. Alone, at load 1, the test takes 1.0 s.
