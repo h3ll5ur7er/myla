@@ -2318,8 +2318,9 @@ impl CodeGen {
         // a timer entry being swapped (std.rt's `timer_sift`, the lock held)
         out.push("__timer_tmp:")
         out.push("\t.skip 32")
-        // the waiters parked on notifiers (std.rt's `park_frame`, MYLA-387),
-        // and the claim on the stuck report (`exec_stuck`)
+        // the claim on the stuck report (`exec_stuck`) in its second word;
+        // the first, once the list of waiters parked on notifiers, is unused
+        // since a task's record holds what it waits on (MYLA-456)
         out.push("__parked:")
         out.push("\t.skip 16")
         // the table of handles (std.rt's `handle_new`, D181): its cell and

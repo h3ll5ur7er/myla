@@ -154,11 +154,11 @@ fun main() {
 }
 ```
 
-Stages are `lex`, `parse`, `module`, `type` and `runtime`. A `module` case goes through the loader with the bundled standard library. A `runtime` case is also built natively, by the self-hosted compiler; it needs a second directive with the first line the native binary prints on stderr (its messages have no values in them, [[MYLA-17]]). The binary must exit with status 1 and print exactly that line and then the interpreter's position, `  --> <file>:<line>:<col>` ([[MYLA-65]]):
+Stages are `lex`, `parse`, `module`, `type` and `runtime`. A `module` case goes through the loader with the bundled standard library. A `runtime` case is also built natively, by the self-hosted compiler; it needs a second directive with the first line the native binary prints on stderr, which since D183 is the interpreter's text with its values ([[MYLA-415]], [[MYLA-441]]). The binary must exit with status 1 and print exactly that line and then the interpreter's position, `  --> <file>:<line>:<col>` ([[MYLA-65]]):
 
 ```
 //~ runtime error: map key 2 not found
-//~ native: runtime error: map key not found
+//~ native: runtime error: map key 2 not found
 ```
 
 A file may also name the source text the diagnostic underlines, which pins the range an error reports ([[MYLA-65]]):
