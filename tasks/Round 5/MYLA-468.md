@@ -43,4 +43,4 @@ What remains with the built option: a client that sends a request's first bytes 
 - Before (the test against bccc624's `http.my`): `[4.30, 4.30, 4.30]` s, interpreted and built (answered only at the next renewal, when the old connections closed).
 - After: 0.79 to 0.81 s each.
 - `tests.burn.test_http`: 9 OK (one skipped: `HttpOnWasm`) natively; `TimeLimits` (3 tests) with `MYLA_TEST_TARGET=aarch64-linux`. `build/myla test lib/std/http.my`: 221/221 interpreted and `--native`.
-- Throughput (natively, interleaved with the base on a loaded machine, see MYLA-456's evidence for the numbers): one keep-alive client's 20,000 GETs and four async clients' within the noise; the guard's poll of the listener happens only at a look that finds its connection idle and quiet, never on a request's path.
+- Throughput (natively, interleaved with the base: [[MYLA-456]]'s evidence has the numbers): one keep-alive client's 20,000 GETs and four async clients' within the noise; the guard's poll of the listener happens only at a look that finds its connection idle and quiet, never on a request's path.
