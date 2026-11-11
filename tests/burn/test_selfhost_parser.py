@@ -344,8 +344,14 @@ class SelfHostedParserParity(unittest.TestCase):
                 self.assertTrue(proc.stdout.startswith("same "), proc.stdout[:2000])
                 if path in std:
                     self.assertNotEqual(proc.stdout.strip(), "same error", path)
-                if proc.stdout.split()[1].isdigit():
-                    bodies += int(proc.stdout.split()[1])
+                word = proc.stdout.split()[1]
+                n = int(word) if word.isdigit() else 0
+                # `same 0` is two parses failing alike (MYLA-418), as is
+                # `same error` (MYLA-416): a file of the library or the
+                # compiler parses and has bodies
+                if os.path.relpath(path, _REPO).startswith(("lib" + os.sep, "selfhost" + os.sep)):
+                    self.assertGreater(n, 0, proc.stdout[:2000])
+                bodies += n
         self.assertGreater(bodies, 5000)
 
     def test_a_long_run_of_comparisons_parses_in_linear_time(self) -> None:

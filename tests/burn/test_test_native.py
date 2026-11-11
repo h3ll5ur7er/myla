@@ -3,10 +3,12 @@
 `myla test --native` builds a harness program from a file and its cases
 (selfhost/harness.my) and runs it: the report is the interpreter's, line
 for line, on every example and standard library module with cases (but the
-runtime itself, which doesn't build as a program). What differs natively by
-design: a failed case runs no deferred block (its child process ends), a
-runtime error's message carries no values, so an expected `[panic]` is
-compared by prefix. For another target the harness runs under the emulator
+runtime itself, which doesn't build as a program), failing reports and what
+the cases write on stderr included (MYLA-418). What differs natively by
+design: a failed case runs no deferred block (its child process ends). An
+expected `[panic]` matches exactly on both (D183); until native runtime
+errors carry the interpreter's texts (MYLA-415), one such as an index error
+can't be expected on both. For another target the harness runs under the emulator
 `--target` implies (qemu-aarch64) or MYLA_EMULATOR names (Node for wasm32,
 where the harness can start no child process: `myla test` runs it, and again
 after each case that ended a run, MYLA-370)."""
@@ -23,6 +25,20 @@ from tests.burn.test_test_functions import _ASYNC, _ASYNC_WANT, _FUNCTIONS, _FUN
 
 _REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir))
 _RUN_MJS = os.path.join(_REPO, "tools", "wasm", "run.mjs")
+
+
+def _tool(args: list[str], cwd: str, env: dict | None = None) -> subprocess.CompletedProcess:
+    """`myla` as `_myla` runs it, but with the standard library root as
+    `env` (MYLA_STDLIB) gives it, else the one the tools carry."""
+    full = {k: v for k, v in os.environ.items() if k != "MYLA_STDLIB"}
+    full.update(env or {})
+    return subprocess.run([selfhost_tool("main"), *args], capture_output=True, text=True, cwd=cwd, env=full)
+
+
+def _case_count(path: str) -> int:
+    """The `#test` attributes of a file, one case each."""
+    with open(path, encoding="utf-8") as fh:
+        return sum(1 for line in fh if line.lstrip().startswith("#test"))
 
 # natively a failed case runs no deferred block, so nothing is printed by
 # them and a deferred block's own failure isn't seen; a deferred block that
@@ -130,6 +146,169 @@ FAIL  big_returns #1: expected runtime error 'no', got 9223372036854775808
 6/12 passed.
 """
 
+# MYLA-418: failing reports, held to both runners (the review of 2026-11-09,
+# M6 to M9): a float in the interpreter's form (`2.0`, `1e+16`), an `exit(0)`
+# in a case, which is no pass, and `[exit(0)]`, which is; a test function's
+# scalar `Err`; an expected panic matched exactly (D183); and what a case
+# writes on stderr, passed on and never taken for a verdict or a runtime
+# error, a partial line before a panic too
+_FAILING = """from std.io import eprint, write
+from std.process import exit
+
+#test()[7.25]
+fun two() -> float {
+    return 2.0
+}
+
+#test()[7.25]
+fun big() -> float {
+    return 1e16
+}
+
+#test()[1.5f32]
+fun tenth() -> float32 {
+    return 0.1f32
+}
+
+#test()[[1.0]]
+fun floats() -> [float] {
+    return [2.0, -0.0]
+}
+
+#test(0)[1]
+#test(0)[exit(0)]
+#test(3)[exit(0)]
+#test(4)[panic("boom")]
+fun leaves(n: int) -> int {
+    exit(n)
+    return 2
+}
+
+#test
+fun exits_early() {
+    exit(0)
+    assert(1 == 2, "not reached")
+}
+
+#test
+fun big_err() -> Result<(), uint64> {
+    return Err(0xFFFFFFFFFFFFFFFF)
+}
+
+#test
+fun float_err() -> Result<(), float> {
+    return Err(2.5)
+}
+
+#test
+fun char_err() -> Result<(), char> {
+    return Err('x')
+}
+
+#test
+fun bool_err() -> Result<(), bool> {
+    return Err(false)
+}
+
+#test("bo")[panic("boom")]
+#test("x")[panic("")]
+#test("boom")[panic("boom")]
+#test("boom")[panic("boomer")]
+#test("boom")[exit(1)]
+fun boom(m: str) -> int {
+    panic(m)
+}
+
+#test()[1]
+fun logs_a_verdict() -> int {
+    eprint("myla test: fake verdict\\n")
+    return 1
+}
+
+#test()[1]
+fun logs_an_error() -> int {
+    eprint("runtime error: fake\\n")
+    return 1
+}
+
+#test()[panic("boom")]
+fun partial_line_then_panic() -> int {
+    let e = write(2, "progress... ")
+    panic("boom")
+}
+
+#test()[2]
+fun logs_and_fails() -> int {
+    eprint("to stderr\\n")
+    print("to stdout")
+    return 1
+}
+"""
+
+_FAILING_WANT = """FAIL  two #1: expected 7.25, got 2.0
+FAIL  big #1: expected 7.25, got 1e+16
+FAIL  tenth #1: expected 1.5, got 0.10000000149011612
+FAIL  floats #1: expected [1.0], got [2.0, -0.0]
+FAIL  leaves #1: exited with status 0
+PASS  leaves #2
+FAIL  leaves #3: expected exit status 0, exited with status 3
+FAIL  leaves #4: expected runtime error 'boom', exited with status 4
+FAIL  exits_early: exited with status 0
+FAIL  big_err: 18446744073709551615
+FAIL  float_err: 2.5
+FAIL  char_err: x
+FAIL  bool_err: false
+FAIL  boom #1: expected runtime error 'boom', got runtime error 'bo'
+FAIL  boom #2: expected runtime error '', got runtime error 'x'
+PASS  boom #3
+FAIL  boom #4: expected runtime error 'boomer', got runtime error 'boom'
+FAIL  boom #5: expected exit status 1, got runtime error 'boom'
+PASS  logs_a_verdict #1
+PASS  logs_an_error #1
+PASS  partial_line_then_panic #1
+FAIL  logs_and_fails #1: expected 2, got 1
+      | to stdout
+
+5/22 passed.
+"""
+
+_FAILING_STDERR = "myla test: fake verdict\nruntime error: fake\nprogress... to stderr\n"
+
+# an expected runtime error of the runtime's own, matched exactly on both
+# runners (D183): needs native runtime errors with the interpreter's texts
+# (MYLA-415)
+_RUNTIME_TEXTS = """#test([1, 2], 5)[panic("list index 5 out of bounds (len 2)")]
+#test([1, 2], 1)[panic("list index 5 out of bounds (len 2)")]
+fun at(xs: [int], i: int) -> int {
+    return xs[i]
+}
+
+#test(["a": 1], "b")[panic("map key 'b' not found")]
+fun value(m: [str: int], k: str) -> int {
+    return m[k]
+}
+"""
+
+_RUNTIME_TEXTS_WANT = """PASS  at #1
+FAIL  at #2: expected runtime error 'list index 5 out of bounds (len 2)', got 2
+PASS  value #1
+
+2/3 passed.
+"""
+
+# a test function's `Err` of a list or tuple, shown alike (M8; the
+# interpreter's half is MYLA-414's)
+_COMPOUND_ERR = """#test
+fun list_err() -> Result<(), [int]> {
+    return Err([1])
+}
+
+#test
+fun pair_err() -> Result<(), (int, str)> {
+    return Err((1, "a"))
+}
+"""
+
 
 def _corpus() -> list[str]:
     """The files with cases whose native report must be the interpreter's."""
@@ -215,6 +394,63 @@ class TestNative(unittest.TestCase):
             self.assertTrue(proc.stdout.startswith("PASS  [str].width_with #1\nPASS  [str].width_with #2\n\n2/2"),
                             proc.stdout)
 
+    def test_failing_reports_agree(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = _write(tmp, "failing.my", _FAILING)
+            for flags in ([], ["--native"]):
+                with self.subTest(flags=flags):
+                    proc = _myla(["test", path, *flags], tmp)
+                    self.assertEqual((proc.stdout, proc.stderr, proc.returncode),
+                                     (_FAILING_WANT, _FAILING_STDERR, 1))
+
+    def test_runtime_errors_are_expected_alike(self):
+        # MYLA-415's texts: fails natively until they are in
+        with tempfile.TemporaryDirectory() as tmp:
+            path = _write(tmp, "texts.my", _RUNTIME_TEXTS)
+            for flags in ([], ["--native"]):
+                with self.subTest(flags=flags):
+                    proc = _myla(["test", path, *flags], tmp)
+                    self.assertEqual((proc.stdout, proc.stderr, proc.returncode), (_RUNTIME_TEXTS_WANT, "", 1))
+
+    def test_a_compound_err_is_shown_alike(self):
+        # MYLA-414's half: interpreted, a list's `Err` was `ERR: VList()`
+        with tempfile.TemporaryDirectory() as tmp:
+            path = _write(tmp, "errs.my", _COMPOUND_ERR)
+            interp = _myla(["test", path], tmp)
+            native = _myla(["test", path, "--native"], tmp)
+            self.assertEqual(native.stderr, "")
+            self.assertIn("FAIL  list_err: [1]\n", native.stdout)
+            self.assertEqual((native.stdout, native.returncode), (interp.stdout, interp.returncode))
+
+    def test_a_module_of_the_library_without_stdlib(self):
+        # `myla test lib/std/<m>.my` with the library the tools carry loads
+        # the file's own library, as `--stdlib lib` does: one copy of each
+        # module (std.yaml's `.json` and std.json were two, a type error)
+        for name in ("yaml", "option", "bench", "log", "net", "time"):
+            with self.subTest(module=name):
+                rel = os.path.join("lib", "std", name + ".my")
+                plain = _tool(["test", rel], _REPO)
+                given = _myla(["test", rel], _REPO)
+                self.assertEqual(plain.stderr, "")
+                self.assertEqual((plain.stdout, plain.returncode), (given.stdout, 0))
+        # a module only that library has resolves, and from inside std/
+        with tempfile.TemporaryDirectory() as tmp:
+            std = os.path.join(tmp, "lib", "std")
+            os.makedirs(std)
+            shutil.copy(os.path.join(_REPO, "lib", "std", "rt.my"), std)
+            _write(std, "helper.my", "pub fun three() -> int {\n    return 3\n}\n")
+            _write(std, "uses.my", "import std.helper as h\n\n#test()[3]\nfun f() -> int {\n    return h.three()\n}\n")
+            for rel, cwd in (("lib/std/uses.my", tmp), ("uses.my", std)):
+                with self.subTest(file=rel):
+                    proc = _tool(["test", rel], cwd)
+                    self.assertEqual((proc.stdout, proc.stderr, proc.returncode), ("PASS  f #1\n\n1/1 passed.\n", "", 0))
+
+    def test_the_hosts_platform_module_for_another_target(self):
+        # its place there is the target's own module's (S3's review)
+        proc = _myla(["test", os.path.join("lib", "std", "platform.my"), "--target", "wasm32-wasi"], _REPO)
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("is std.platform for x86_64-linux; for wasm32-wasi it is", proc.stderr)
+
     def test_a_harness_that_does_not_build_is_kept(self):
         # a case calling `main`, which the harness blanks
         source = "#test()[1]\nfun one() -> int { main()\n    return 1 }\nfun main() {}\n"
@@ -238,8 +474,8 @@ class TestNative(unittest.TestCase):
             with self.subTest(file=os.path.relpath(f, _REPO)):
                 interp = _myla(["test", f], _REPO)
                 native = _myla(["test", f, "--native"], _REPO)
-                self.assertEqual(native.stderr, "", native.stderr)
-                self.assertEqual((native.stdout, native.returncode), (interp.stdout, interp.returncode))
+                self.assertEqual((native.stdout, native.stderr, native.returncode),
+                                 (interp.stdout, interp.stderr, interp.returncode))
 
 
 @unittest.skipUnless(CAN_BUILD_NATIVE and shutil.which("qemu-aarch64") and shutil.which("clang")
@@ -251,6 +487,28 @@ class TestAarch64(unittest.TestCase):
             proc = _myla(["test", path, "--target", "aarch64-linux"], tmp)
             self.assertEqual(proc.returncode, 1, proc.stderr)
             self.assertEqual(proc.stdout, _FUNCTIONS_WANT)
+
+    def test_failing_reports_under_qemu(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = _write(tmp, "failing.my", _FAILING)
+            proc = _myla(["test", path, "--target", "aarch64-linux"], tmp)
+            self.assertEqual((proc.stdout, proc.stderr, proc.returncode), (_FAILING_WANT, _FAILING_STDERR, 1))
+
+    def test_its_platform_module_however_the_paths_are_written(self):
+        # S3 (MYLA-397): the harness is the target's std.platform under any
+        # spelling of the file and of the library's root
+        rel = os.path.join("lib", "std", "platform_aarch64.my")
+        n = _case_count(os.path.join(_REPO, rel))
+        lib = os.path.join(_REPO, "lib")
+        for argv, env in ((["./" + rel, "--stdlib", "lib"], None),
+                          ([rel, "--stdlib", "lib/"], None),
+                          ([rel], {"MYLA_STDLIB": lib}),
+                          ([os.path.join(_REPO, rel), "--stdlib", "lib"], None),
+                          ([rel], None)):
+            with self.subTest(argv=argv, env=env):
+                proc = _tool(["test", *argv, "--target", "aarch64-linux"], _REPO, env)
+                self.assertEqual(proc.stderr, "")
+                self.assertTrue(proc.stdout.endswith(f"\n{n}/{n} passed.\n"), proc.stdout)
 
 
 @unittest.skipUnless(CAN_BUILD_NATIVE and shutil.which("node") and shutil.which("clang")
@@ -304,6 +562,28 @@ fun last() {}
             self.assertEqual(interp.stdout, want)
             proc = self._run(tmp, path)
             self.assertEqual((proc.stdout, proc.returncode, proc.stderr), (want, 1, ""))
+
+    def test_failing_reports(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = _write(tmp, "failing.my", _FAILING)
+            proc = self._run(tmp, path)
+            self.assertEqual((proc.stdout, proc.stderr, proc.returncode), (_FAILING_WANT, _FAILING_STDERR, 1))
+
+    def test_its_platform_module_however_the_paths_are_written(self):
+        # S3 (MYLA-397): an internal compiler error under another spelling
+        rel = os.path.join("lib", "std", "platform_wasm.my")
+        n = _case_count(os.path.join(_REPO, rel))
+        lib = os.path.join(_REPO, "lib")
+        emu = {"MYLA_EMULATOR": f"node {_RUN_MJS}"}
+        for argv, env in ((["./" + rel, "--stdlib", "lib"], emu),
+                          ([rel, "--stdlib", "lib/"], emu),
+                          ([rel], {"MYLA_STDLIB": lib, **emu}),
+                          ([os.path.join(_REPO, rel), "--stdlib", "lib"], emu),
+                          ([rel], emu)):
+            with self.subTest(argv=argv, env=env):
+                proc = _tool(["test", *argv, "--target", "wasm32-wasi"], _REPO, env)
+                self.assertEqual(proc.stderr, "")
+                self.assertTrue(proc.stdout.endswith(f"\n{n}/{n} passed.\n"), proc.stdout)
 
     def test_the_scratch_directories_go(self):
         with tempfile.TemporaryDirectory() as tmp:

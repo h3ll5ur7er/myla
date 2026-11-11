@@ -1,6 +1,7 @@
 """Burn tests: hand-written programs exercising codegen corners, each asserting
 the native binary's output matches the interpreter (and exit codes for traps)."""
 import os
+import re
 import tempfile
 import unittest
 
@@ -8616,6 +8617,16 @@ class TestCompilerParity(unittest.TestCase):
         self.assertEqual(code, 0, "arena exhausted — list cells were not reclaimed")
         self.assertEqual(out.strip(), "0")
 
+    def test_runtime_errors_are_reported_alike(self):
+        # D183: the report on stderr, the output before it and the status
+        for name, src in RUNTIME_ERRORS.items():
+            with self.subTest(program=name):
+                interp, native = _both(src)
+                self.assertEqual(interp[2], 1, interp[1])
+                self.assertEqual((native[0], native[2]), (interp[0], interp[2]))
+                if name not in AWAITING_MYLA_415:
+                    self.assertEqual(native[1], _without_snippets(interp[1]))
+
     def test_divide_by_zero_traps_nonzero(self):
         src = "#main\nfun main() {\n    var z = 0\n    print(1 / z)\n}\n"
         out, code = build_and_run(src)
@@ -8852,14 +8863,51 @@ def _self_hosted(src: str) -> str:
     return out
 
 
+def _both(src: str) -> tuple[tuple[str, str, int], tuple[str, str, int]]:
+    """(stdout, stderr, exit) of the self-hosted interpreter and of native
+    code for `src`, from one file, so that positions read alike."""
+    with tempfile.TemporaryDirectory() as tmp:
+        path = write_program(tmp, src)
+        return selfhost_run(path), build_and_run_full(Program(path))
+
+
+def _without_snippets(stderr: str) -> str:
+    """A runtime error's report without the source lines the interpreter
+    shows under its position (native code shows none)."""
+    return "".join(line for line in stderr.splitlines(True) if not re.match(r"\s*\d*\s*\|", line))
+
+
+# Programs that end with a runtime error: the report is the interpreter's on
+# stderr (D183), its source lines aside, with the same output and status.
+RUNTIME_ERRORS = {
+    "divide_by_zero": "#main\nfun main() {\n    var z = 0\n    print(1 / z)\n}\n",
+    "panic_after_output": '#main\nfun main() {\n    print(1)\n    panic("boom")\n    print(2)\n}\n',
+    "assert_with_a_message": '#main\nfun main() {\n    print(7)\n    assert(1 > 2, "nope")\n    print(8)\n}\n',
+    "assert_without_one": "#main\nfun main() {\n    assert(1 > 2)\n}\n",
+    "unreachable": ("enum E { A, B }\nfun g(e: E) -> int32 {\n    return match e {\n        E.A => 1,\n"
+                    "        E.B => unreachable(),\n    }\n}\n#main\nfun main() {\n    print(g(E.B))\n}\n"),
+    "list_index": "fun main() {\n    let xs = [1, 2]\n    var i = 5\n    print(xs[i])\n}\n",
+    "negative_list_index": "fun main() {\n    let xs = [1, 2]\n    var i = -1\n    print(xs[i])\n}\n",
+    "missing_map_key": 'fun main() {\n    let m = ["a": 1]\n    print(m["b"])\n}\n',
+    "string_index": 'fun main() {\n    let s = "ab"\n    var i = 9\n    print(s[i])\n}\n',
+    "error_after_stderr": 'from std.io import eprint\n\nfun main() {\n    eprint("before\\n")\n    panic("then")\n}\n',
+}
+
+# Those whose native report differs from the interpreter's today only in the
+# runtime error's text, which native code is to carry (MYLA-415, D183): their
+# stderr is compared once it does; their output and status are now.
+AWAITING_MYLA_415 = {"list_index", "negative_list_index", "missing_map_key", "string_index"}
+
+
 def _make(name: str, src: str):
     def test(self):
         # native code against the self-hosted interpreter, the reference
-        # (D101), and against the recording or the pinned output
-        native_out, code = build_and_run(src)
-        self.assertEqual(code, 0)
-        self.assertEqual(native_out, _self_hosted(src))
-        self.assertEqual(native_out, PINNED[name] if name in PINNED else interpret(src))
+        # (D101), stderr too (D183), and against the recording or the
+        # pinned output
+        interp, native = _both(src)
+        self.assertEqual(native[2], 0)
+        self.assertEqual(native, interp)
+        self.assertEqual(native[0], PINNED[name] if name in PINNED else interpret(src))
     return test
 
 

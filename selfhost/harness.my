@@ -13,11 +13,14 @@
 // interpreter's, line for line, so `myla test` and `myla test --native`
 // can be held to each other.
 //
-// What differs natively, by design: a runtime error's message carries no
-// values (an expected `[panic("…")]` is compared by prefix), a failed
-// case runs no deferred block (the child process ends), and a value with
-// no form of its own (a function, a StringBuilder) shows as `<function>`
-// or `<StringBuilder>`.
+// A child tells how its case ended on stderr (`std.test`'s `case_end`):
+// a mark and the verdict after a case that returned; without the mark the
+// case ended the process, by a runtime error or an `exit`, `exit(0)` too.
+// An expected `[panic("…")]` matches the message exactly (D183).
+//
+// What differs natively, by design: a failed case runs no deferred block
+// (the child process ends), and a value with no form of its own (a
+// function, a StringBuilder) shows as `<function>` or `<StringBuilder>`.
 
 from .ast import Decl, DeclKind, FunData, Attribute, Expr, TypeExpr, TypeKind, Expected, expected_failure
 from .checker import Checker, Type, type_name, FuncSig
@@ -326,8 +329,9 @@ impl Gen {
     }
 
     // The function showing an `Err(e)` of a test function as the report
-    // does: a string as it is, a type with its own `format` through it,
-    // the rest in their print form without module ids.
+    // does: a string as it is, a number, `char` or `bool` as `f"{e}"`
+    // writes it (M8), a type with its own `format` through it, the rest in
+    // their print form without module ids.
     fun shown_fn(var self, t: Type) -> str {
         let n = self.type_index(t)
         let name = format("__myla_shown_{}", n)
@@ -337,6 +341,10 @@ impl Gen {
         var body = ""
         match t {
             Type.TStr => { body = "    return v\n" },
+            Type.TInt(w, s) => { body = "    return format(\"{}\", v)\n" },
+            Type.TFloat(w) => { body = "    return format(\"{}\", v)\n" },
+            Type.TChar => { body = "    return format(\"{}\", v)\n" },
+            Type.TBool => { body = "    return format(\"{}\", v)\n" },
             _ => {
                 let formats = match self.ch.type_implements(t, "Format") { Ok(b) => b, Err(e) => false }
                 if formats { body = "    return v.format(\"\")\n" }
@@ -415,8 +423,9 @@ impl Gen {
             },
             Type.TFloat(w) => {
                 eq.append("    return a == b\n")
-                if w == 32 { repr.append("    return format(\"{}\", v as float64)\n") }
-                else { repr.append("    return format(\"{}\", v)\n") }
+                // Python's repr, as the interpreter's report (M7)
+                if w == 32 { repr.append("    return __myla_t.repr_float(v as float64)\n") }
+                else { repr.append("    return __myla_t.repr_float(v)\n") }
             },
             Type.TChar => {
                 eq.append("    return a == b\n")
