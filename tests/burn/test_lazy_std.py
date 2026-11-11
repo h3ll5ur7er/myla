@@ -8,12 +8,21 @@ called, so that a body the loader left unread is always read for them, and a
 build that asks for another function of `std` nobody called is an internal
 error (`Checker.unmarked_std`). The list is checked here against the names
 the back ends' sources write.
+
+An imported module's bodies are read so (MYLA-413), a program's own modules
+whole; a body read late has the eager check's error at its place.
 """
 from __future__ import annotations
 
 import os
 import re
+import shutil
+import subprocess
+import tempfile
 import unittest
+
+from ._native import CAN_BUILD_NATIVE
+from ._tools import STDLIB_ROOT, selfhost_tool
 
 _REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir))
 _SELFHOST = os.path.join(_REPO, "selfhost")
@@ -75,6 +84,92 @@ class BackEndNames(unittest.TestCase):
         self.assertIn("std$fmt$fmt_int", names)
         self.assertIn("std$slice$take", names)
         self.assertNotIn("std$list$sum", names)  # only in a `#test` case of `checked_code`
+
+
+class ImportedStdBodies(unittest.TestCase):
+    """MYLA-413, D179 (2): an imported module of `std` has its functions'
+    bodies read once called, with the error of one read at the place and in
+    the words of the eager check (the module's own `myla check`); a
+    program's own modules are read whole (D179 (3))."""
+
+    # a type error, a function that calls it, and (in a library of its own,
+    # as a parse error stops the eager check of the module) a parse error
+    BROKEN = ("\npub fun broken_413() -> int {\n    return \"no\"\n}\n\n"
+              "pub fun calls_broken_413() -> int {\n    return broken_413()\n}\n")
+    GARBLED = "\npub fun garbled_413() -> int {\n    let = 1\n    return 2\n}\n"
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.myla = selfhost_tool("main")
+        cls._tmp = tempfile.TemporaryDirectory(prefix="myla_lazy_std_")
+        cls.work = cls._tmp.name
+        cls.lib = os.path.join(cls.work, "lib")
+        cls.plib = os.path.join(cls.work, "plib")
+        for lib, text in ((cls.lib, cls.BROKEN), (cls.plib, cls.GARBLED)):
+            shutil.copytree(STDLIB_ROOT, lib)
+            with open(os.path.join(lib, "std", "text.my"), "a", encoding="utf-8") as fh:
+                fh.write(text)
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls._tmp.cleanup()
+
+    def myla_cmd(self, *argv: str, lib: str = "") -> subprocess.CompletedProcess:
+        return subprocess.run([self.myla, *argv, "--stdlib", lib or self.lib], cwd=self.work,
+                              capture_output=True, text=True, timeout=600)
+
+    def write(self, name: str, text: str) -> str:
+        path = os.path.join(self.work, name)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        return path
+
+    def calling(self, call: str) -> str:
+        return self.write("calls.my", f"import std.text as text\n\nfun main() {{\n    print({call})\n}}\n")
+
+    def test_a_body_nobody_calls_is_not_read(self) -> None:
+        for lib in (self.lib, self.plib):
+            path = self.calling('text.fill("a b c", 3)')
+            for cmd in ("check", "run"):
+                proc = self.myla_cmd(cmd, path, lib=lib)
+                self.assertEqual((proc.stderr, proc.returncode), ("", 0), (cmd, lib))
+            if CAN_BUILD_NATIVE:
+                exe = os.path.join(self.work, "uncalled")
+                proc = self.myla_cmd("build", path, "-o", exe, lib=lib)
+                self.assertEqual((proc.stderr, proc.returncode), ("", 0))
+                self.assertEqual(subprocess.run([exe], capture_output=True, text=True).stdout, "a b\nc\n")
+
+    def test_a_called_body_has_the_eager_error(self) -> None:
+        # the module checked on its own reads every body; called, the body
+        # read late gives the same error, place and source line
+        eager = self.myla_cmd("check", os.path.join(self.lib, "std", "text.my"))
+        self.assertEqual(eager.returncode, 1)
+        first = eager.stderr.split("\n")[:5]
+        self.assertEqual(first[0], "type error: return type mismatch: expected 'int32', found 'str'", eager.stderr)
+        for call in ("text.broken_413()", "text.calls_broken_413()"):
+            proc = self.myla_cmd("check", self.calling(call))
+            self.assertEqual(proc.returncode, 1, call)
+            self.assertEqual(proc.stderr.split("\n")[:5], first, call)
+
+    def test_a_called_body_has_the_eager_parse_error(self) -> None:
+        eager = self.myla_cmd("check", os.path.join(self.plib, "std", "text.my"), lib=self.plib)
+        self.assertEqual(eager.returncode, 1)
+        first = eager.stderr.split("\n")[:5]
+        self.assertEqual(first[0], "parse error: expected variable name, found '='", eager.stderr)
+        proc = self.myla_cmd("check", self.calling("text.garbled_413()"), lib=self.plib)
+        self.assertEqual(proc.returncode, 1)
+        self.assertEqual(proc.stderr.split("\n")[:5], first)
+
+    def test_a_programs_own_module_is_read_whole(self) -> None:
+        # D179 (3): `myla check` means every function of the program's own
+        # modules checks, called or not
+        os.makedirs(os.path.join(self.work, "own"), exist_ok=True)
+        self.write("own/helper.my", "pub fun used() -> int {\n    return 1\n}\n\npub fun unused() -> int {\n    return \"no\"\n}\n")
+        path = self.write("own/main.my", "from .helper import used\n\nfun main() {\n    print(used())\n}\n")
+        proc = self.myla_cmd("check", path)
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("type error: return type mismatch", proc.stderr)
+        self.assertIn("helper.my:6:", proc.stderr)
 
 
 if __name__ == "__main__":

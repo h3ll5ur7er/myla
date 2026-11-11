@@ -103,17 +103,20 @@ pub fun backend_std_functions() -> [str] {
     ]
 }
 
-// The functions' bodies the loader left unparsed (MYLA-359): an implicit
-// module's, each an empty block until the checker first checks it. `ids`
-// are their declarations (an impl, for a method), `keys` the bodies
-// (`body_key`), and `parse` reads one, lexed, parsed and renamed as the
-// rest of its module was. Its errors are a lex, parse or module error's:
+// The functions' bodies the loader left unparsed (MYLA-359): a module's of
+// `std` (`DeclOrigin.lazy`), each the marker of an unread body until the
+// checker first checks it. `ids` are their declarations (an impl, for a
+// method), `keys` the bodies (`body_key`), and `parse` reads one, lexed,
+// parsed and renamed as the rest of its module was. Its errors are a lex, parse or module error's:
 // each message starts with its kind (`parse error: …`, `kind_of`).
-pub struct LazyBodies { ids: [int32: bool], keys: [int64: bool], parse: (int64) -> Result<Block, [CheckErr]> }
+// `task_line`: the line of an `async let` in one of them, 0 if none has one
+// or nobody asked: what makes a native build's program one with tasks
+// (`Checker.task_line`), as if every body was read (MYLA-413).
+pub struct LazyBodies { ids: [int32: bool], keys: [int64: bool], parse: (int64) -> Result<Block, [CheckErr]>, task_line: int32 }
 
 // No body left unparsed: a program loaded whole.
 pub fun no_lazy_bodies() -> LazyBodies {
-    return LazyBodies { ids: [:], keys: [:], parse: no_body }
+    return LazyBodies { ids: [:], keys: [:], parse: no_body, task_line: 0 }
 }
 
 #test(7)[Err([CheckErr { line: 0, col: 0, sp: SrcSpan { sline: 0, scol: 0, eline: 0, ecol: 0 }, msg: "internal error: no body 7 to read", decl: -1, notes: [] }])]
@@ -2095,7 +2098,7 @@ pub struct Checker {
     warnings: [CheckErr],           // D95: the warnings found, in the order found
     primitives: bool,               // a program may call the raw-memory primitives (`gen_main --primitives`, the toolchain's tests)
     // the functions (`std$str$join`) and methods (`str.trim`) checked code
-    // calls or names: an implicit module's others aren't checked (MYLA-359)
+    // calls or names: the other ones of `std` aren't checked (MYLA-359, MYLA-413)
     called: [str: bool],
     lazy_bodies: LazyBodies,        // the bodies the loader left unparsed (MYLA-359)
     read_bodies: [int64: Block],    // those read so far, by `body_key`
@@ -8369,9 +8372,10 @@ impl Checker {
         }
         self.bodies = true
         self.check_attributes_and_entry()
-        // a function or method of an implicit module (D164) that no code
-        // checked calls or names is never called: its body is checked once
-        // one does (MYLA-359), as its module's own `myla test` checks them
+        // a function or method of an implicit module (D164) or another
+        // module of `std` (MYLA-413) that no code checked calls or names is
+        // never called: its body is checked once one does (MYLA-359, D179),
+        // as its module's own `myla test` checks them
         // all. Trait impls' are checked, as an operator, a bound or a derive
         // calls them unnamed.
         var lazy = self.lazy_decls()
@@ -8576,8 +8580,10 @@ impl Checker {
         }
     }
 
-    // The functions and impls (by node id) of the implicit modules whose
-    // bodies are checked only once called (MYLA-359): impls of no trait.
+    // The functions and impls (by node id) of the modules of `std` whose
+    // bodies are checked only once called (`DeclOrigin.lazy`): the
+    // implicit modules' (MYLA-359) and those a program imports (MYLA-413);
+    // impls of no trait.
     #test(checker_on("[int]"))[[:]]
     fun lazy_decls(self) -> [int32: bool] {
         var out: [int32: bool] = [:]
@@ -8589,7 +8595,7 @@ impl Checker {
             }
             if lazy {
                 match self.std_impls.get(d.id) {
-                    Some(o) => { if o.implicit { out[d.id] = true } },
+                    Some(o) => { if o.lazy { out[d.id] = true } },
                     None => {},
                 }
             }
@@ -8909,6 +8915,7 @@ pub fun build_checker_lazy(decls: [Decl], next_id: int32, primitives: bool, std_
     c.next_id = pre.next_id
     let r = c.run_all()
     match r { Ok(x) => {}, Err(e) => { return Err(e) } }
+    if c.task_line == 0 { c.task_line = bodies.task_line }
     c.put_bodies()
     // every call with all its arguments, for whatever runs the program (D136)
     c.fill_in()
