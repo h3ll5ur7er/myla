@@ -7293,6 +7293,66 @@ async fun main() {
     print((h.on)(3))
 }
 """,
+    "comparisons_in_literals_and_holes": """// D186 (MYLA-416): `a < b, c > (d)` is one generic call only in a call's
+// argument list; in a list, map or tuple literal it is two comparisons, and
+// each f-string hole is parsed on its own. A literal's element keeps a
+// call's own arguments, a struct literal's fields and one type argument.
+struct Box<T> {
+    v: T,
+}
+
+fun pair<A, C>(a: A, c: C) -> (A, C) {
+    return (a, c)
+}
+
+fun mk<T>() -> [T] {
+    return []
+}
+
+fun count(p: (int64, str)) -> int {
+    return p.1.len()
+}
+
+fun both(p: bool, q: bool) -> int {
+    if p && q {
+        return 2
+    }
+    return 0
+}
+
+fun main() {
+    let a = 1
+    let b = 3
+    let c = 5
+    let d = 2
+    let t = [a < b, c > (d + 1), b < a, a > (c)]
+    print(t.len())
+    print(t[3])
+    let u = (a < b, c > (d))
+    print(u.1)
+    let w = (b < a, d > (a), c > (d))
+    print(w.2)
+    let m = [a < b: 1, c > (d): 2]
+    print(m.len())
+    print(m[true])
+    // f-string holes
+    print(f"{a < b} {c > (a)}")
+    let lo = 1
+    let hi = 9
+    let x = 5
+    print(f"below: {x < lo}, above: {x > (hi - 1)}")
+    print(f"{x < lo}{x} > ({hi})")
+    print(f"{x < lo:>6} and {hi > (x)}")
+    print(f"{[a < b, c > (d)].len()}")
+    // what stays a generic call inside an element
+    let n = [count(pair<int64, str>(1, "one")), count(pair<int64, str>(2, "three"))]
+    print(n[1])
+    let bx = [Box { v: pair<int, str>(7, "seven") }]
+    print(bx[0].v.1)
+    let one = [mk<int>().len(), mk<str>().len()]
+    print(one.len())
+}
+""",
 }
 
 # A program that allocates far more recursive-enum cells (~12M) than the heap
@@ -8775,6 +8835,10 @@ PINNED = {
     "literal_element_types_from_later_elements": 'L1RaL3\n3\n252\n1\nbad\n2\n3\nx\n2\n5000000007\n42\n2\nb\n2\n3\n252\n',
     # MYLA-406: new ("method 'keys' collides with a field of 'Lru'" before); native code gives the same
     "a_field_and_a_method_of_one_name": '3\n3\n1\n10\n3\nq\n2\n5\nrex\npet rex\npet rex\n3\n4\n',
+    # MYLA-416 (D186): new ("cannot call a value of type 'int32'" before, the
+    # literals and holes read as generic calls); native code gives the same
+    "comparisons_in_literals_and_holes": "4\nfalse\ntrue\ntrue\n1\n2\ntrue true\nbelow: false, above: false\n"
+                                         "false5 > (9)\n false and true\n2\n5\nseven\n2\n",
 }
 
 

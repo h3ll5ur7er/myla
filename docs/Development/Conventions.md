@@ -11,6 +11,7 @@ This repository uses [Genbeya](https://github.com/genbeya/genbeya): the board is
 - A finished task records what proves it under one heading, `## Evidence`.
 - One pull request per theme (an epic step or a review round), named after its tasks.
 - A pull request that changes the compiler's output (`selfhost/`, `lib/std/`) carries one new seed, in its last commit: `scripts/update-seed.sh`, then commit `bootstrap/seed.s`, `bootstrap/seed-aarch64.s` and `selfhost/embedded_std.my` (D156, [[Development/Bootstrap]]); the commits before it may leave them behind. CI checks the pull request's tip.
+- After changing a module of `lib/std/`, run `build/myla test lib/std/<module>.my --stdlib lib`: a program reads the bodies of the implicit modules (`std.str`, `std.char`, `std.int`, `std.list`, `std.option`, `std.map`, `std.hash`) only once it calls them (D179), so a broken body nothing calls passes every other run, the bootstrap included. `scripts/update-seed.sh` checks those seven whole and stops on one that doesn't ([[MYLA-416]]).
 - A new task takes the next free number across all epics. Abandoned tasks move to `done` with a note; tasks are never deleted.
 - Reference tasks, pages and files with `[[MYLA-12]]`, `[[Language/Types]]` and `[[selfhost/checker.my#L10-L20]]`; `![[file#L1-L9]]` on its own line embeds lines.
 - Name the task in commit messages and pull requests: `MYLA-12: Encode interpreter strings with surrogateescape`.

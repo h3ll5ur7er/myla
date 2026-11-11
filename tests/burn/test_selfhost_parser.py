@@ -20,6 +20,7 @@ import os
 import random
 import subprocess
 import tempfile
+import time
 import unittest
 
 from ._golden import NoGolden, answer_for_file, golden, recorded, recorded_examples
@@ -329,17 +330,52 @@ class SelfHostedParserParity(unittest.TestCase):
         # whole; `parse_main --lazy` compares them. Every file of the
         # corpus, the error corpus's lex errors included; only
         # parse_several_errors reports its errors in another order (the
-        # signatures' first, then the bodies' as they are read).
+        # signatures' first, then the bodies' as they are read). A file of
+        # the standard library reads without an error (MYLA-416: one that
+        # failed both ways passed as `same 0`).
         bodies = 0
-        for path in sorted(set(_corpus()) | set(glob.glob(os.path.join(_REPO, "lib", "std", "**", "*.my"), recursive=True))):
+        std = set(glob.glob(os.path.join(_REPO, "lib", "std", "**", "*.my"), recursive=True))
+        for path in sorted(set(_corpus()) | std):
             if path.endswith("parse_several_errors.my"):
                 continue
             with self.subTest(file=os.path.relpath(path, _REPO)):
                 proc = subprocess.run([self._binary, "--lazy", path], capture_output=True, text=True)
                 self.assertEqual(proc.returncode, 0, proc.stderr)
                 self.assertTrue(proc.stdout.startswith("same "), proc.stdout[:2000])
-                bodies += int(proc.stdout.split()[1])
+                if path in std:
+                    self.assertNotEqual(proc.stdout.strip(), "same error", path)
+                if proc.stdout.split()[1].isdigit():
+                    bodies += int(proc.stdout.split()[1])
         self.assertGreater(bodies, 5000)
+
+    def test_a_long_run_of_comparisons_parses_in_linear_time(self) -> None:
+        # MYLA-416 (D186): the scan for explicit type arguments followed
+        # `x < y, x < y, …` from every `<` to the end (32,000 in a list: 25 s
+        # in the review, 13 s here); a comma ends it in a literal's element,
+        # and a budget of tokens in a call's arguments
+        n = 32000
+        with tempfile.TemporaryDirectory() as tmp:
+            for name, line in [("list", "    let t = [" + ", ".join(["x < y"] * n) + "]\n"),
+                               ("call", "    let t = f(" + ", ".join(["x < y"] * n) + ")\n")]:
+                path = os.path.join(tmp, name + ".my")
+                with open(path, "w", encoding="utf-8") as fh:
+                    fh.write("fun main() {\n    let x = 1\n    let y = 2\n" + line + "}\n")
+                start = time.monotonic()
+                proc = subprocess.run([self._binary, path], capture_output=True, text=True)
+                took = time.monotonic() - start
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                self.assertEqual(proc.stdout.count('(binary "<" (name "x") (name "y"))'), n, name)
+                self.assertLess(took, 5.0, name)
+
+    def test_a_std_file_with_an_error_fails_the_comparison(self) -> None:
+        # MYLA-416: `parse_main --lazy` tells a file that fails both ways
+        # from one that reads, so that a broken library file isn't passed
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "broken.my")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write("pub fun f() -> int {\n    return (1 +) * 2\n}\n")
+            proc = subprocess.run([self._binary, "--lazy", path], capture_output=True, text=True)
+            self.assertEqual(proc.stdout.strip(), "same error")
 
     def _continued(self, source: str) -> bool:
         with tempfile.TemporaryDirectory() as tmp:

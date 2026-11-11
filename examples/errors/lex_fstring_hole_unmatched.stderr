@@ -1,0 +1,5 @@
+lex error: unmatched ')' in f-string hole (a hole is one expression)
+  --> examples/errors/lex_fstring_hole_unmatched.my:6:18
+  |
+6 |     print(f"{xs[0)]}")
+  |                  ^

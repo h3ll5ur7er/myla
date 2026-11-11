@@ -2,7 +2,7 @@
 id: MYLA-373
 title: "Explicit type arguments on a call, parsed speculatively (D169)"
 type: feature
-status: todo
+status: review
 priority: medium
 labels: [language, parser, checker, generics]
 ---
@@ -30,4 +30,4 @@ The owner's choice for [[MYLA-315]]'s open box, recorded as D169: `mk<int>()`, `
 
 Not ready ([[Project/Review-2026-11-09]]): `f"{a < b} {c > (a)}"`, `[a < b, c > (d)]` and tuples are parsed as one generic call, and the look-ahead is quadratic (M1; D186). The fix is in [[MYLA-416]].
 
-- [ ] The review's blocker, fixed with [[MYLA-416]]
+- [x] The review's blocker, fixed with [[MYLA-416]]: a comma ends the type-argument scan in a list, map or tuple literal's element and before each f-string hole (whose brackets close in it), and the scan has a budget of 128 tokens; `f"{a < b} {c > (a)}"` prints `true true`, 32,000 comparisons in a list parse in 0.14 s (13 s before). Evidence in [[MYLA-416]].

@@ -1840,7 +1840,8 @@ impl LazyTable {
             Some(b) => { if b.line != site.line || b.col != site.col { return false } },
             None => { return false },
         }
-        let key = body_key(id, fd.line, fd.col)
+        // by the place of its `{`, as the lexer tested it (MYLA-416)
+        let key = body_key(id, site.line, site.col)
         self.bodies[key] = LazyBody { module: k, site: site, fd: fd, receiver: receiver, impl_params: impl_params }
         self.keys[key] = true
         return true

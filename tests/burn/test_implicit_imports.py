@@ -294,6 +294,79 @@ class ImplicitModules(Fixture):
         self.assertEqual(proc.returncode, 1)
         self.assertIn("lex error: unexpected character '@'\n  --> " + at("self @ 2", "@ 2") + "\n", proc.stderr)
 
+    def lib_with(self, name: str, module: str, text: str) -> str:
+        """A copy of the fixture library, `text` appended to `std.<module>`."""
+        lib = os.path.join(self.work, name)
+        if not os.path.exists(lib):
+            shutil.copytree(self.lib, lib)
+            with open(os.path.join(lib, "std", module + ".my"), "a", encoding="utf-8") as fh:
+                fh.write("\n" + text)
+        return lib
+
+    def test_a_body_without_its_brace_keeps_the_methods_after_it(self) -> None:
+        # MYLA-416 (Z1): the skip of a body that misses a `}` would run to the
+        # impl's `}` and take the methods after it for body text; a line that
+        # starts with a declaration's keyword inside a skipped body sends it
+        # back to the lexer, so the error is the eager one, at the method
+        # after the broken one, also where one more `}` closes the impl
+        broken = ("impl int {\n    fun q4_ok(self) -> int { return self + 1 }\n\n"
+                  "    fun q4_missing(self) -> int {\n        if self > 0 { return 1\n        return 2\n    }\n\n"
+                  "    fun q4_after(self) -> int { return 3 }\n}\n")
+        error = "parse error: expected an expression, found 'fun'"
+        for name, text in [("brace_a", broken), ("brace_b", broken + "}\n")]:
+            lib = self.lib_with(name, "int", text)
+            int_my = os.path.join(lib, "std", "int.my")
+            with open(int_my, encoding="utf-8") as fh:
+                n = max(i for i, line in enumerate(fh.read().split("\n"), 1) if "fun q4_after" in line)
+            where = f"--> {int_my}:{n}:5\n"
+            eager = self.myla_cmd("check", int_my, lib=lib)
+            self.assertIn(error, eager.stderr, name)
+            self.assertIn(where, eager.stderr, name)
+            for call in ("q4_ok", "q4_after"):
+                path = self.write(f"{name}_{call}.my", f"fun main() {{\n    print(1.{call}())\n}}\n")
+                for cmd in ("check", "run"):
+                    proc = self.myla_cmd(cmd, path, lib=lib)
+                    self.assertEqual(proc.returncode, 1, (name, call, cmd, proc.stdout))
+                    self.assertIn(error + "\n  " + where, proc.stderr, (name, call, cmd))
+
+    def test_a_signature_over_two_lines_keeps_its_body(self) -> None:
+        # MYLA-416 (Z2): a body is keyed by the place of its `{`, which the
+        # lexer keeps below the limits of the key, not its `fun`'s, which may
+        # be past them on the line before: two methods' keys collided and
+        # both ran the second one's body
+        line1 = "impl int { " + " " * (5000 - 1 - len("impl int { ")) + "fun q_a(self,"
+        line2 = ") -> int { return 1 };"
+        line2 += " " * (904 - 1 - len(line2)) + "fun q_b(self) -> int { return 2 }"
+        self.assertEqual((line1.index("fun") + 1, line2.index("fun") + 1), (5000, 904))
+        lib = self.lib_with("key_lib", "int", line1 + "\n" + line2 + "\n}\n")
+        path = self.write("keys.my", "fun main() {\n    print(7.q_a())\n    print(7.q_b())\n}\n")
+        proc = self.myla_cmd("run", path, lib=lib)
+        self.assertEqual((proc.stdout, proc.stderr, proc.returncode), ("1\n2\n", "", 0))
+        if CAN_BUILD_NATIVE:
+            exe = os.path.join(self.work, "keys_bin")
+            built = self.myla_cmd("build", path, "-o", exe, lib=lib)
+            self.assertEqual(built.returncode, 0, built.stderr)
+            proc = subprocess.run([exe], capture_output=True, text=True, timeout=60)
+            self.assertEqual(proc.stdout, "1\n2\n")
+
+    def test_a_test_attribute_is_skipped_only_where_one_may_stand(self) -> None:
+        # MYLA-416 (Z4): a module's `#test` cases are skipped unlexed only
+        # where an attribute may stand, at the start of a line: one in the
+        # middle of a statement is lexed, its error the eager one, imported
+        # as when checked itself. A body read late is lexed as the module
+        # read whole, its cases at the start of a line left out as there
+        self.write("attr/m.my", "pub fun f() -> int {\n    let x = 1 #test(\"anything\", @ $)[1 2 3]\n    return x\n}\n")
+        main = self.write("attr/main.my", "from .m import f\n\nfun main() {\n    print(f())\n}\n")
+        m_my = os.path.join(self.work, "attr", "m.my")
+        for target in (main, m_my):
+            proc = self.myla_cmd("check", target)
+            self.assertEqual(proc.returncode, 1, target)
+            self.assertIn("lex error: unexpected character '@'\n  --> " + m_my + ":2:33\n", proc.stderr, target)
+        lib = self.lib_with("case_lib", "int", "impl int {\n    fun with_case(self) -> int {\n        #test(1)[2]\n        return 5\n    }\n}\n")
+        path = self.write("with_case.my", "fun main() {\n    print(1.with_case())\n}\n")
+        proc = self.myla_cmd("run", path, lib=lib)
+        self.assertEqual((proc.stdout, proc.stderr, proc.returncode), ("5\n", "", 0))
+
     def test_the_repl(self) -> None:
         proc = self.myla_cmd("repl", stdin="\"ab\".shout()\n3.doubled()\n")
         self.assertEqual(proc.stdout, "\"ab!\"\n6\n", proc.stderr)

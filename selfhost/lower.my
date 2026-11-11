@@ -28,7 +28,7 @@
 // copies, which the Python backend shares, so both backends behave alike.
 
 from std.num import f64_literal_bits, f32_round_bits
-from .ast import Expr, ExprKind, Stmt, StmtKind, Block, FunData, ElseTail, ExprOrBlock, MatchArm, Pattern, PatternKind, FieldInit, MapEntry, BindElem, bind_elems, Param, call_targs
+from .ast import Expr, ExprKind, Stmt, StmtKind, Block, FunData, ElseTail, ExprOrBlock, MatchArm, Pattern, PatternKind, FieldInit, MapEntry, BindElem, bind_elems, Param, call_targs, is_unread_body, unread_fun
 from .checker import CheckErr, REG_ARG_WORDS, type_name, Type, is_unit, is_slice_expr, from_end_of, slice_parts, is_hole_part, is_raw_memory_primitive, is_platform_primitive, Subst, FuncSig, opt_subst_type, subst_type, builtin_method, is_wrapping_method, int_op_overflows, int_min
 from .checker import is_notify_primitive
 from .codegen import codegen_on, type_job_name, recv_by_address, may_write_expr, is_mutating_builtin, list_has_str, contains_int, is_actor_t, is_sb_t, is_async_t, CodeGen, LamJob, PartialJob, Cap, DropEntry, tfunc_params, tfunc_ret, is_hole_expr, mangle_fn, is_builtin_call_name, is_aggregate, tuple_elems, is_struct_or_enum_t, is_tfunc, is_overloadable_op, arith_method_cg, enum_name_of, is_tstr, is_cmp, place_root, is_aggregate_opt, arms_may_write, is_cell_t, list_elem, is_list_t, is_map_t, is_str_t, map_key, map_val, format_segments, args_have_hole, success_variant, failure_variant
@@ -121,7 +121,10 @@ pub fun lower_on() -> Lower {
 // The IR of the function `fd`, generated as `mangled`; Err: why it can't be
 // lowered yet.
 #test(codegen_on("struct P { x: int }; fun get(p: P) -> int { return p.x }"), fun_of("fun h(xs: [int]) -> int { return len(xs) }"), "add")[Err("the builtin len")]
+#test(codegen_on("fun get() -> int { return 1 }"), unread_fun(fun_of("fun get() -> int { return 1 }")), "get")[Err("its body was never read")]
 pub fun lower_function(cg: CodeGen, fd: FunData, mangled: str) -> Result<Lowered, str> {
+    // a library's body the checker never read (D179): nothing to compile
+    match fd.body { Some(b) => { if is_unread_body(b) { return Err("its body was never read") } }, None => {} }
     let sig = cg.sig_of(fd.name)
     let ret = opt_subst_type(sig.ret, cg.subst)
     var lw = Lower { f: IrFunc { name: mangled, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false, scope_parent: [-1] }, cur: 0, scopes: [[]], scope_ids: [0], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [], actor_self: -1, actor_off: 0, deep_res: false, narrow: [:], wants: [], defers: [], received: -1, refused: [], fn_name: "", by_addr: -1, by_addr_t: Type.TBool, resized: [], scanned: false, below: [], len_lets: [], nonneg: [], checked: false }
