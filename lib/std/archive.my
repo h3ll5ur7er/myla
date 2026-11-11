@@ -56,6 +56,8 @@ pub enum ArchiveError {
     LengthMismatch,
     // A zip entry's deflate data that doesn't decompress
     Compress(CompressError),
+    // A zip entry longer than the caller's `max_output`
+    TooLarge,
     // `safe_path`: a name that would leave the directory
     UnsafeName,
     // The stream failed
@@ -80,6 +82,7 @@ impl ArchiveError {
             ChecksumMismatch => "checksum mismatch"
             LengthMismatch => "length mismatch"
             Compress(e) => f"entry doesn't decompress: {e.message()}"
+            TooLarge => "entry longer than max_output"
             UnsafeName => "entry name leaves the directory"
             Io(e) => f"read failed: {io_error_name(e)}"
         }
@@ -127,8 +130,8 @@ pub struct Entry {
     kind: EntryKind,
     mode: int32,
     mtime: int64,
-    uid: int32,
-    gid: int32,
+    uid: int64,
+    gid: int64,
     uname: str,
     gname: str,
     link: str,
@@ -359,8 +362,8 @@ fun header_block(e: Entry, prefix: str, name: str, flag: uint8, size: int64) -> 
     var h = Header { b: [] }
     h.text(name, 100)
     h.num((e.mode & 0o7777) as int64, 8)
-    h.num(if e.uid >= 0 && (e.uid as int64) <= OCTAL_7 { e.uid as int64 } else { 0 }, 8)
-    h.num(if e.gid >= 0 && (e.gid as int64) <= OCTAL_7 { e.gid as int64 } else { 0 }, 8)
+    h.num(if e.uid >= 0 && e.uid <= OCTAL_7 { e.uid } else { 0 }, 8)
+    h.num(if e.gid >= 0 && e.gid <= OCTAL_7 { e.gid } else { 0 }, 8)
     h.num(if size <= OCTAL_11 { size } else { 0 }, 12)
     h.num(if e.mtime >= 0 && e.mtime <= OCTAL_11 { e.mtime } else { 0 }, 12)
     h.text("        ", 8)           // the checksum, spaces while it is summed
@@ -374,13 +377,19 @@ fun header_block(e: Entry, prefix: str, name: str, flag: uint8, size: int64) -> 
     h.num(0, 8)
     h.text(prefix, 155)
     h.text("", 12)
+    return with_checksum(h.b)
+}
+
+// The header block `h` with its checksum made: six octal digits, a NUL, a
+// space.
+fun with_checksum(h: [uint8]) -> [uint8] {
+    var b = h
+    for i in 148..156 { b[i] = ' ' }
     var sum = 0
-    for x in h.b { sum += x as int }
-    var b = h.b
+    for x in b { sum += x as int }
     let ck = octal(sum as int64, 6)
     for i in 0..6 { b[148 + i] = ck[i] }
     b[154] = 0
-    b[155] = ' '
     return b
 }
 
@@ -415,8 +424,8 @@ fun entry_blocks(e: Entry) -> Result<[uint8], ArchiveError> {
     if e.link.len() > 100 { pax.append(pax_record("linkpath", e.link)) }
     if size > OCTAL_11 { pax.append(pax_record("size", f"{size}")) }
     if e.mtime < 0 || e.mtime > OCTAL_11 { pax.append(pax_record("mtime", f"{e.mtime}")) }
-    if e.uid < 0 || (e.uid as int64) > OCTAL_7 { pax.append(pax_record("uid", f"{e.uid}")) }
-    if e.gid < 0 || (e.gid as int64) > OCTAL_7 { pax.append(pax_record("gid", f"{e.gid}")) }
+    if e.uid < 0 || e.uid > OCTAL_7 { pax.append(pax_record("uid", f"{e.uid}")) }
+    if e.gid < 0 || e.gid > OCTAL_7 { pax.append(pax_record("gid", f"{e.gid}")) }
     if e.uname.len() > 32 { pax.append(pax_record("uname", e.uname)) }
     if e.gname.len() > 32 { pax.append(pax_record("gname", e.gname)) }
     var out: [uint8] = []
@@ -505,16 +514,26 @@ fun zero_blocks(n: int) -> [uint8] {
 #test([0xFFu8, 0xFFu8, 0xFFu8, 0xFEu8], 0, 4)[Some(-2i64)]
 #test(bytes_m.from_str("12 3\0"), 0, 5)[None]
 #test(bytes_m.from_str("0009\0"), 0, 5)[None]
+#test([0x80u8, 0u8, 0u8, 0u8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFEu8], 0, 8)[Some(4294967294i64)]
+#test([0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8], 0, 12)[Some(-1i64)]
+#test([0x80u8, 0u8, 0u8, 0u8, 0x7Fu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8], 0, 12)[Some(9223372036854775807i64)]
+#test([0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0x80u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8], 0, 12)[Some(-9223372036854775807i64 - 1i64)]
+#test([0x80u8, 0u8, 0u8, 0u8, 0x80u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8], 0, 12)[None] // 2^63: past int64 (D184)
+#test([0x80u8, 1u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8], 0, 12)[None]
+#test([0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0x7Fu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8], 0, 12)[None]
+#test([0xFFu8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8], 0, 12)[None]
 fun tar_number(b: [uint8], at: int, width: int) -> Option<int64> {
     let first = b[at]
     if first == 0x80u8 || first == 0xFFu8 {
+        // a negative number is the complement of its bytes, less one: both
+        // add up as numbers from 0 to int64's largest, or don't fit (D184)
+        let flip: uint8 = if first == 0xFFu8 { 0xFFu8 } else { 0u8 }
         var v: int64 = 0
-        for i in at + 1..at + width { v = (v << 8) | (b[i] as int64) }
-        if first == 0xFFu8 {
-            var top: int64 = 1
-            for i in 1..width { top = top << 8 }
-            v = v - top
+        for i in at + 1..at + width {
+            if v > 0x7FFFFFFFFFFFFF { return None }
+            v = (v << 8) | ((b[i] ^ flip) as int64)
         }
+        if first == 0xFFu8 { return Some(-v - 1) }
         return Some(v)
     }
     var end = at
@@ -567,7 +586,7 @@ fun pax_records(b: [uint8]) -> Result<[(str, str)], ArchiveError> {
             len = len * 10 + ((b[q] - '0') as int)
             q += 1
         }
-        if q == p || q >= n || b[q] != ' ' || len <= q - p + 1 || p + len > n || b[p + len - 1] != '\n' {
+        if q == p || q >= n || b[q] != ' ' || len <= q - p + 1 || len > n - p || b[p + len - 1] != '\n' {
             return Err(ArchiveError.BadHeader)
         }
         var eq = q + 1
@@ -579,13 +598,26 @@ fun pax_records(b: [uint8]) -> Result<[(str, str)], ArchiveError> {
     return Ok(out)
 }
 
-// The integer part of a pax number (`1700000000.25`, `-3`), or None.
-#test("1700000000.25")[Some(1700000000i64)]
-#test("-3")[Some(-3i64)]
-#test("12")[Some(12i64)]
-#test("")[None]
-#test("1x")[None]
-fun pax_int(s: str) -> Option<int64> {
+// The integer part of a pax number (`1700000000.25`, `-3`), or None if it
+// isn't one or doesn't fit an `int64` (D184). A fraction is allowed if
+// `fraction` (a time), else the number is an integer (a size, an id).
+#test("1700000000.25", true)[Some(1700000000i64)]
+#test("1700000000.25", false)[None]
+#test("-3", true)[Some(-3i64)]
+#test("12", false)[Some(12i64)]
+#test("12.", true)[Some(12i64)]
+#test("", true)[None]
+#test("1x", true)[None]
+#test("-", true)[None]
+#test(".5", true)[None]
+#test("12.5x", true)[None]
+#test("9223372036854775807", false)[Some(9223372036854775807i64)]
+#test("-9223372036854775808.5", true)[Some(-9223372036854775807i64 - 1i64)]
+#test("00000000000000000000000000042", false)[Some(42i64)]
+#test("9223372036854775808", false)[None] // past int64
+#test("-9223372036854775809", false)[None]
+#test("99999999999999999999999999", true)[None]
+fun pax_int(s: str, fraction: bool) -> Option<int64> {
     var i = 0
     var neg = false
     if s.len() > 0 && s[0] == '-' {
@@ -593,14 +625,51 @@ fun pax_int(s: str) -> Option<int64> {
         i = 1
     }
     let start = i
+    // summed below 0, where int64 reaches one further
+    let lowest: int64 = -9223372036854775807 - 1
     var v: int64 = 0
     while i < s.len() && s[i] >= '0' && s[i] <= '9' {
-        v = v * 10 + ((s[i] - '0') as int64)
+        let d = (s[i] - '0') as int64
+        if v < (lowest + d) / 10 { return None }
+        v = v * 10 - d
         i += 1
     }
-    if i == start || (i < s.len() && s[i] != '.') { return None }
-    if neg { return Some(-v) }
-    return Some(v)
+    if i == start { return None }
+    if i < s.len() {
+        if !fraction || s[i] != '.' { return None }
+        i += 1
+        while i < s.len() {
+            if s[i] < '0' || s[i] > '9' { return None }
+            i += 1
+        }
+    }
+    if neg { return Some(v) }
+    if v == lowest { return None }
+    return Some(-v)
+}
+
+// The number of the pax record `key` in `pax`, if there is one; `BadHeader`
+// if it isn't a number or doesn't fit an `int64`.
+#test(["size": "17"], "size")[Ok(Some(17i64))]
+#test(["mtime": "17.5"], "mtime")[Ok(Some(17i64))]
+#test(["uid": "17.5"], "uid")[Err(ArchiveError.BadHeader)]
+#test(["size": "99999999999999999999"], "size")[Err(ArchiveError.BadHeader)]
+#test(["path": "x"], "size")[Ok(None)]
+fun pax_number(pax: [str: str], key: str) -> Result<Option<int64>, ArchiveError> {
+    if !pax.contains(key) { return Ok(None) }
+    return match pax_int(pax[key], key == "mtime") {
+        Some(v) => Ok(Some(v))
+        None => Err(ArchiveError.BadHeader)
+    }
+}
+
+// The number in the header field `h[at:at + width]` (`tar_number`), or
+// `BadHeader` if it isn't one.
+fun header_number(h: [uint8], at: int, width: int) -> Result<int64, ArchiveError> {
+    return match tar_number(h, at, width) {
+        Some(v) => Ok(v)
+        None => Err(ArchiveError.BadHeader)
+    }
 }
 
 // A stream of the entries of the tar archive its inner stream reads, an
@@ -669,9 +738,11 @@ impl<R: Read> TarReader<R> {
         for k in self.global.keys() { pax[k] = self.global[k] }
         var long_name = ""
         var long_link = ""
+        // a pax header or a long name read, which an entry must follow
+        var pending = false
         while true {
             let h = self.take(BLOCK)?
-            if h.len() == 0 { return Ok(None) }
+            if h.len() == 0 && !pending { return Ok(None) }
             if h.len() < BLOCK { return Err(ArchiveError.Truncated) }
             var zero = true
             for x in h {
@@ -680,13 +751,18 @@ impl<R: Read> TarReader<R> {
                     break
                 }
             }
-            if zero { return Ok(None) }
+            if zero {
+                if pending { return Err(ArchiveError.Truncated) }
+                return Ok(None)
+            }
             if !checksum_ok(h) { return Err(ArchiveError.BadHeader) }
             let flag = h[156]
-            var size = match tar_number(h, 124, 12) {
-                Some(v) => v
-                None => { return Err(ArchiveError.BadHeader) }
-            }
+            // every header's numbers are numbers, as Python's tarfile has it
+            var size = header_number(h, 124, 12)?
+            let mode = header_number(h, 100, 8)?
+            let uid = header_number(h, 108, 8)?
+            let gid = header_number(h, 116, 8)?
+            let mtime = header_number(h, 136, 12)?
             if flag == 'x' || flag == 'g' {
                 let records = pax_records(self.data(size)?)?
                 for kv in records {
@@ -694,20 +770,17 @@ impl<R: Read> TarReader<R> {
                     pax[k] = v
                     if flag == 'g' { self.global[k] = v }
                 }
+                pending = true
                 continue
             }
             if flag == 'L' || flag == 'K' {
                 let d = self.data(size)?
                 let s = c_str(d, 0, d.len())
                 if flag == 'L' { long_name = s } else { long_link = s }
+                pending = true
                 continue
             }
-            if pax.contains("size") {
-                size = match pax_int(pax["size"]) {
-                    Some(v) => v
-                    None => { return Err(ArchiveError.BadHeader) }
-                }
-            }
+            size = pax_number(pax, "size")?.unwrap_or(size)
             var name = c_str(h, 0, 100)
             let posix = h[257] == 'u' && h[258] == 's' && h[259] == 't' && h[260] == 'a' && h[261] == 'r' &&
                 h[262] == 0u8
@@ -737,15 +810,12 @@ impl<R: Read> TarReader<R> {
             if kind == EntryKind.Dir { e.name = no_trailing_slash(name) }
             e.kind = kind
             e.link = link
-            e.mode = (tar_number(h, 100, 8).unwrap_or(0) & 0o7777) as int32
-            e.uid = tar_number(h, 108, 8).unwrap_or(0) as int32
-            e.gid = tar_number(h, 116, 8).unwrap_or(0) as int32
-            e.mtime = tar_number(h, 136, 12).unwrap_or(0)
+            e.mode = (mode & 0o7777) as int32
+            e.uid = pax_number(pax, "uid")?.unwrap_or(uid)
+            e.gid = pax_number(pax, "gid")?.unwrap_or(gid)
+            e.mtime = pax_number(pax, "mtime")?.unwrap_or(mtime)
             e.uname = c_str(h, 265, 32)
             e.gname = c_str(h, 297, 32)
-            if pax.contains("mtime") { e.mtime = pax_int(pax["mtime"]).unwrap_or(e.mtime) }
-            if pax.contains("uid") { e.uid = pax_int(pax["uid"]).unwrap_or(e.uid as int64) as int32 }
-            if pax.contains("gid") { e.gid = pax_int(pax["gid"]).unwrap_or(e.gid as int64) as int32 }
             if pax.contains("uname") { e.uname = pax["uname"] }
             if pax.contains("gname") { e.gname = pax["gname"] }
             return Ok(Some(e))
@@ -826,7 +896,7 @@ fun extra_mtime(b: [uint8], from_i: int, to: int) -> Option<int64> {
     while p + 4 <= to {
         let id = le16(b, p)
         let n = le16(b, p + 2)
-        if p + 4 + n > to { return None }
+        if n > to - p - 4 { return None }
         if id == 0x5455 && n >= 5 && (b[p + 4] & 1u8) != 0u8 {
             return Some(((le32(b, p + 5) as int32) as int64))
         }
@@ -868,8 +938,8 @@ pub fun zip_list(b: [uint8]) -> Result<[ZipFile], ArchiveError> {
         let attrs = le32(b, q + 38)
         let off = le32(b, q + 42)
         if csize == 0xFFFFFFFFu32 || size == 0xFFFFFFFFu32 || off == 0xFFFFFFFFu32 { return Err(ArchiveError.Zip64) }
+        if nlen + elen + clen > e - q - 46 { return Err(ArchiveError.BadHeader) }
         let next = q + 46 + nlen + elen + clen
-        if next > e { return Err(ArchiveError.BadHeader) }
         let raw_name = bytes_m.to_str(b[q + 46:q + 46 + nlen])
         var kind = EntryKind.File
         var mode: int32 = 0o644
@@ -901,23 +971,29 @@ pub fun zip_list(b: [uint8]) -> Result<[ZipFile], ArchiveError> {
 }
 
 // The data of the entry `f` of the zip archive `b`, decompressed, its
-// length and CRC-32 checked.
-pub fun zip_data(b: [uint8], f: ZipFile) -> Result<[uint8], ArchiveError> {
+// length and CRC-32 checked. An entry whose size is more than `max_output`
+// bytes is `TooLarge`, before its data is read; a deflate entry is
+// decompressed up to its size and no further, so its data can't take more
+// memory than its size says.
+pub fun zip_data(b: [uint8], f: ZipFile, max_output: int = 0x7FFFFFFF) -> Result<[uint8], ArchiveError> {
+    if max_output < 0 { panic(f"archive.zip_data: max_output {max_output} is below 0") }
     if (f.flags & 1) != 0 { return Err(ArchiveError.Encrypted) }
     let n = b.len() as int64
-    if f.offset < 0 || f.csize < 0 { return Err(ArchiveError.BadHeader) }
-    if f.offset + 30 > n { return Err(ArchiveError.Truncated) }
+    if f.offset < 0 || f.csize < 0 || f.size < 0 { return Err(ArchiveError.BadHeader) }
+    if f.size > (max_output as int64) { return Err(ArchiveError.TooLarge) }
+    if f.offset > n - 30 { return Err(ArchiveError.Truncated) }
     let p = f.offset as int
     if le32(b, p) != ZIP_LOCAL { return Err(ArchiveError.BadHeader) }
-    let start = (p + 30 + le16(b, p + 26) + le16(b, p + 28)) as int64
-    if start + f.csize > n { return Err(ArchiveError.Truncated) }
+    let start = (p as int64) + 30 + (le16(b, p + 26) as int64) + (le16(b, p + 28) as int64)
+    if start > n || f.csize > n - start { return Err(ArchiveError.Truncated) }
     let raw = b[start as int:(start + f.csize) as int]
     var data: [uint8] = []
     if f.method == 0 {
         data = raw
     } else if f.method == 8 {
-        data = match compress.inflate(raw) {
+        data = match compress.inflate(raw, f.size as int) {
             Ok(d) => d
+            Err(CompressError.TooLarge) => { return Err(ArchiveError.LengthMismatch) }
             Err(e) => { return Err(ArchiveError.Compress(e)) }
         }
     } else {
@@ -1117,6 +1193,100 @@ fun tar_gnu_and_global() -> Result<(), ArchiveError> {
     return Ok(())
 }
 
+// A pax header of `records`, then the file `f`'s blocks: GNU tar's and
+// Python's layout.
+fun with_pax(records: str, f: Entry) -> [uint8] {
+    let r = bytes_m.from_str(records)
+    let ph = file("././@PaxHeader", [])
+    var b = header_block(ph, "", ph.name, 'x', r.len() as int64)
+    for x in data_blocks(r) { b.push(x) }
+    for x in header_block(f, "", f.name, '0', f.data.len() as int64) { b.push(x) }
+    for x in data_blocks(f.data) { b.push(x) }
+    return b
+}
+
+// Owners of 2^31 and more (M19): in GNU's base-256 fields and in pax
+// records, as GNU tar and Python's tarfile write them, read as Python reads
+// them, and written back. A pax number past int64 is `BadHeader`, not a
+// trap or a wrapped number (D184).
+#test
+fun tar_big_numbers() -> Result<(), ArchiveError> {
+    let f = file("f", bytes_m.from_str("x"))
+    // GNU: the uid 4294967294 and the gid 3000000000 in base 256
+    var h = header_block(f, "", f.name, '0', 1)
+    let uid: [uint8] = [0x80u8, 0u8, 0u8, 0u8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFEu8]
+    let gid: [uint8] = [0x80u8, 0u8, 0u8, 0u8, 0xB2u8, 0xD0u8, 0x5Eu8, 0u8]
+    for i in 0..8 {
+        h[108 + i] = uid[i]
+        h[116 + i] = gid[i]
+    }
+    var gnu = with_checksum(h)
+    for x in data_blocks(f.data) { gnu.push(x) }
+    let a = tar_read(gnu)?
+    assert(a.len() == 1 && a[0].uid == 4294967294 && a[0].gid == 3000000000, f"GNU: {a[0].uid} {a[0].gid}")
+    // pax
+    let b = tar_read(with_pax(pax_record("uid", "4294967294") + pax_record("gid", "3000000000"), f))?
+    assert(b.len() == 1 && b[0].uid == 4294967294 && b[0].gid == 3000000000, f"pax: {b[0].uid} {b[0].gid}")
+    assert(b[0].data == f.data, "the data")
+    // written in pax records, and read back
+    var big = f
+    big.uid = 4294967294
+    big.gid = -3000000000
+    big.mtime = 9223372036854775807
+    let back = tar_read(tar_write([big])?)?
+    assert(back.len() == 1 && back[0] == big, "written and read back")
+    // numbers past int64: the review's archive, and each field
+    for key in ["mtime", "uid", "gid", "size"] {
+        for value in ["99999999999999999999999999", "9223372036854775808", "-9223372036854775809", "1x", ""] {
+            let got = tar_read(with_pax(pax_record(key, value), f))
+            assert(got == Err(ArchiveError.BadHeader), f"{key}={value}")
+        }
+    }
+    // a size field in base 256 past int64
+    var huge = header_block(f, "", f.name, '0', 1)
+    huge[124] = 0x80u8
+    huge[125] = 1u8
+    var t = with_checksum(huge)
+    for x in data_blocks(f.data) { t.push(x) }
+    assert(tar_read(t) == Err(ArchiveError.BadHeader), "a size of 2^80")
+    // a number field that isn't one, as Python's tarfile and GNU tar have it
+    for at in [100, 108, 116, 136] {
+        var bad = header_block(f, "", f.name, '0', 1)
+        bad[at + 2] = 'x'
+        var u = with_checksum(bad)
+        for x in data_blocks(f.data) { u.push(x) }
+        assert(tar_read(u) == Err(ArchiveError.BadHeader), f"the field at {at}")
+    }
+    return Ok(())
+}
+
+// Headers the fuzz test of tests/burn/test_archive.py found taken where
+// Python's tarfile refuses them: a pax header or a long name with no entry
+// after it, and a pax header whose own number fields aren't numbers.
+#test
+fun tar_broken_headers() -> Result<(), ArchiveError> {
+    let f = file("f", bytes_m.from_str("x"))
+    let whole = with_pax(pax_record("uid", "5"), f)
+    assert(tar_read(whole)?[0].uid == 5, "the pax record")
+    let pax_only = whole[:1024]
+    assert(tar_read(pax_only) == Err(ArchiveError.Truncated), "the end after a pax header")
+    var zeros = pax_only
+    for x in zero_blocks(2) { zeros.push(x) }
+    assert(tar_read(zeros) == Err(ArchiveError.Truncated), "zero blocks after a pax header")
+    var nm = bytes_m.from_str("long")
+    nm.push(0)
+    let ll = file("././@LongLink", [])
+    var long = header_block(ll, "", ll.name, 'L', nm.len() as int64)
+    for x in data_blocks(nm) { long.push(x) }
+    assert(tar_read(long) == Err(ArchiveError.Truncated), "the end after a long name")
+    var bad = whole[:512]
+    bad[110] = 'x'
+    bad = with_checksum(bad)
+    for x in whole[512:] { bad.push(x) }
+    assert(tar_read(bad) == Err(ArchiveError.BadHeader), "a pax header's uid")
+    return Ok(())
+}
+
 // The input in pieces of 1 to 700 bytes.
 struct Pieces {
     data: [uint8],
@@ -1163,5 +1333,35 @@ fun zip_directory() -> Result<(), ArchiveError> {
         Err(Encrypted) => true
         _ => false
     }, "encrypted")
+    // max_output: the entry's size is checked before its data is read
+    assert(zip_data(z, files[1], 23)? == data, "as long as the entry")
+    assert(zip_data(z, files[1], 22) == Err(ArchiveError.TooLarge), "longer than max_output")
+    assert(zip_data(z, files[0], 0)? == [], "an empty entry")
+    // inflating stops at the size the directory gives
+    var short = files[1]
+    short.size = 5
+    assert(zip_data(z, short) == Err(ArchiveError.LengthMismatch), "a size too small")
+    // numbers from the directory out of range: errors, not overflow (D184)
+    var far = files[1]
+    far.offset = 9223372036854775807
+    assert(zip_data(z, far) == Err(ArchiveError.Truncated), "an offset past the end")
+    var long = files[1]
+    long.csize = 9223372036854775807
+    assert(zip_data(z, long) == Err(ArchiveError.Truncated), "a compressed size past the end")
+    var huge = files[1]
+    huge.size = 9223372036854775807
+    assert(zip_data(z, huge) == Err(ArchiveError.TooLarge), "a size no list holds")
     return Ok(())
+}
+
+// zip_data of a stored "hello" with the limit `max_output`.
+#test(5)[Ok(bytes_m.from_str("hello"))]
+#test(4)[Err(ArchiveError.TooLarge)]
+#test(-1)[panic("archive.zip_data: max_output -1 is below 0")]
+fun stored_hello(max_output: int) -> Result<[uint8], ArchiveError> {
+    let z = unhex("504b03041400000000000000215286a61036050000000500000005000000612e74787468656c6c6f504b010214031400" +
+        "000000000000215286a610360500000005000000050000000000000000000000a48100000000612e747874504b050600" +
+        "0000000100010033000000280000000000")
+    let files = zip_list(z)?
+    return zip_data(z, files[0], max_output)
 }

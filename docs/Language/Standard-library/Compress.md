@@ -55,9 +55,11 @@ Each takes the whole compressed input and gives the whole output. The input must
 
 | Function | Result |
 | --- | --- |
-| `inflate(b: [uint8]) -> Result<[uint8], CompressError>` | The raw DEFLATE stream `b` (RFC 1951) decompressed |
-| `gunzip(b: [uint8]) -> Result<[uint8], CompressError>` | The gzip data `b` (RFC 1952) decompressed: every member, one after the other. Zero bytes after a member are padding, as for `gzip` |
-| `zlib_decompress(b: [uint8]) -> Result<[uint8], CompressError>` | The zlib stream `b` (RFC 1950) decompressed |
+| `inflate(b: [uint8], max_output: int = 0x7FFFFFFF) -> Result<[uint8], CompressError>` | The raw DEFLATE stream `b` (RFC 1951) decompressed |
+| `gunzip(b: [uint8], max_output: int = 0x7FFFFFFF) -> Result<[uint8], CompressError>` | The gzip data `b` (RFC 1952) decompressed: every member, one after the other. Zero bytes after a member are padding, as for `gzip` |
+| `zlib_decompress(b: [uint8], max_output: int = 0x7FFFFFFF) -> Result<[uint8], CompressError>` | The zlib stream `b` (RFC 1950) decompressed |
+
+`max_output` bounds the output: a stream that stands for more than `max_output` bytes is `TooLarge` ([[MYLA-423]]). Decoding stops a byte past the limit (a back reference past it copies at most 257 bytes more), so a few kilobytes of input that stand for gigabytes of output, a "decompression bomb", take no more memory than the limit: a caller that decompresses what it was sent passes the most it will take, `compress.gunzip(body, 1 << 20)`. The default is the longest list there is. A `max_output` below 0 is a runtime error, `compress.gunzip: max_output -1 is below 0` (D184). A stream's reader bounds itself: it reads as much as it wants.
 
 The names are the operations' usual ones; [compressing](#compressing) has the other direction. A `str` read from a file is turned into bytes with `bytes.from_str` ([[Language/Standard-library/Bytes]]).
 
@@ -188,8 +190,9 @@ fun main() {
 | `BadCode` | Bits that aren't a code of the block, or a symbol DEFLATE doesn't define (lengths 286 and 287, distances 30 and 31) |
 | `DistanceTooFar` | A distance back past the start of the output (of the member, for gzip) |
 | `ChecksumMismatch` | The CRC-32 (gzip) or Adler-32 (zlib) of the output, or gzip's header CRC, isn't the stream's |
-| `LengthMismatch` | The output's length isn't the one the gzip trailer gives (modulo 2^32) |
+| `LengthMismatch` | The output's length isn't the one the gzip trailer gives (modulo 2^32: the length a stream sums wraps, D184) |
 | `TrailingData` | Bytes after the end of the stream |
+| `TooLarge` | More output than the function's `max_output` |
 | `Io(IoError)` | The inner stream failed |
 
 The rules are zlib's, so `gzip`, Python's `zlib` and this module accept and reject the same streams: the burn test checks 400 corrupted ones, each read three ways. Python's `gzip` module alone is more lenient: it ignores the header's CRC and its reserved flags. A gzip header's fields (name, comment, time, extra field) are checked as far as they have checks and skipped.
@@ -241,10 +244,10 @@ So `gzip` is 1.1 times as slow as `gzip -1` and 1.3 times as slow as `gzip -6` a
 
 ## Tests
 
-The module's cases are vectors made by Python's `zlib` and `gzip` and by hand (the error cases and the edge cases of incomplete and empty codes, each checked to be one Python's `zlib` accepts or rejects alike, for the same reason), and test functions for the streams: read in pieces of 1 to 100 bytes from inner streams that give 1 to 100 bytes a read, back references of 32768 bytes across the window, the bit buffer given back at a trailer, and the errors. All 92 cases pass interpreted, natively, on aarch64 under qemu and on wasm32 under Node.
+The module's cases are vectors made by Python's `zlib` and `gzip` and by hand (the error cases and the edge cases of incomplete and empty codes, each checked to be one Python's `zlib` accepts or rejects alike, for the same reason), and test functions for the streams: read in pieces of 1 to 100 bytes from inner streams that give 1 to 100 bytes a read, back references of 32768 bytes across the window, the bit buffer given back at a trailer, and the errors. `max_output` has cases at and one byte below each output's length, in stored and Huffman blocks, across gzip members and on 100 KB of zeros, and one below 0; a test function sums a gzip length past 2^32 ([[MYLA-423]]). With the compressor's, all 155 cases pass interpreted, natively, on aarch64 under qemu and on wasm32 under Node.
 
 `tests/burn/test_compress.py` compresses text, random bytes, long runs and a mix of them with `gzip -1` to `-9`, `zlib.compress` at levels 0 to 9, raw DEFLATE at every level and with each strategy, smaller windows, a low memory level and several members, and decompresses each natively with the functions, as a stream, and as a stream over 1 to 13 bytes a read in reads of 1 to 997 bytes; a few interpreted. It corrupts 400 of them (a bit flipped, a byte changed or added, the data cut short) and checks that each fails where Python fails, with Python's output where it doesn't.
 
 The compressor's cases (MYLA-352) are outputs checked against Python's `zlib` (the same bytes as zlib's where zlib's chains reach, the empty stream, stored blocks, the headers of each container), the Huffman code's lengths with and without the limit, the run-length coding of a header and the cost of a stored block; and test functions: inputs of six kinds at levels of each kind through every container and back, the sizes of the levels and of stored blocks, a writer given its input in pieces of 1 to 70000 bytes making what the functions make, and flushes. All 139 cases pass interpreted, natively, on aarch64 under qemu and on wasm32 under Node.
 
-`tests/burn/test_archive.py` compresses text, random bytes, long runs, a mix of them and matches exactly 32768 bytes back (and one byte further) at every level, in each container, with the functions and with a writer given pieces of 1 to 9973 bytes, and 3 MB of text, and decompresses each with Python's `zlib`, `gzip -d` and this module; the output may be at most 2 % bigger than zlib's at the same level (it is smaller on text).
+`tests/burn/test_archive.py` compresses text, random bytes, long runs, a mix of them and matches exactly 32768 bytes back (and one byte further) at every level, in each container, with the functions and with a writer given pieces of 1 to 9973 bytes, and 3 MB of text, and decompresses each with Python's `zlib`, `gzip -d` and this module; the output may be at most 2 % bigger than zlib's at the same level (it is smaller on text). It gunzips 1 GiB of zeros in 1 MB with a `max_output` of 1 MiB, in a process limited to 256 MiB of address space, built plain and `--checked`: `TooLarge`.
