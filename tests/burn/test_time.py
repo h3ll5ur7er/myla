@@ -8,6 +8,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 
@@ -557,17 +558,63 @@ class Time(unittest.TestCase):
             feed.wait()
         return out
 
+    def fed_after_a_tick(self, cmd: list[str], **env: str) -> tuple[list[str], bool]:
+        # The program's output lines, and whether it ticked within 30 s
+        # while its reader waited. Its input is three lines 150 ms
+        # apart, the first written only once the program printed a tick:
+        # its reader, started before the ticker, is waiting by then, so the
+        # tick came while a read was pending. A first line written 150 ms
+        # after the start raced the program's own start under load
+        # (MYLA-500).
+        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                text=True, env={**os.environ, **env})
+        ticked = threading.Event()
+        ended: list[bool] = []
+        fed: list[bool] = []
+
+        def feed() -> None:
+            try:
+                if ticked.wait(30) and not ended:
+                    fed.append(True)
+                    for i in range(3):
+                        if i > 0:
+                            time.sleep(0.15)
+                        proc.stdin.write(f"{i}\n")
+                        proc.stdin.flush()
+                proc.stdin.close()
+            except BrokenPipeError:
+                pass
+
+        feeder = threading.Thread(target=feed)
+        feeder.start()
+        watchdog = threading.Timer(60, proc.kill)
+        watchdog.start()
+        lines: list[str] = []
+        try:
+            for line in proc.stdout:
+                lines.append(line.rstrip("\n"))
+                if line == "t\n":
+                    ticked.set()
+            proc.wait()
+        finally:
+            watchdog.cancel()
+            ended.append(True)
+            ticked.set()
+            feeder.join()
+        return lines, fed == [True]
+
     def test_an_async_read_lets_the_other_tasks_run(self):
         exe = self.native("read", READ)
         from ._tools import selfhost_tool
         for label, cmd, env in [("native", [exe], {"MYLA_THREADS": "1"}),
                                 ("interpreter", [selfhost_tool("interp_main"), self.source("read", READ), STDLIB_ROOT], {})]:
             with self.subTest(runner=label):
-                lines = self.fed(cmd, FEEDER, **env).splitlines()
-                self.assertEqual(lines[-1], "3 lines, 10 ticks")
+                lines, ticked = self.fed_after_a_tick(cmd, **env)
+                # a tick while the reader waited: the worker wasn't blocked
+                self.assertTrue(ticked, f"no tick while the read was pending: {lines}")
+                self.assertEqual(lines[:1], ["t"])
                 self.assertEqual([l for l in lines if l.startswith("line")], ["line 0", "line 1", "line 2"])
-                # ticks before the first line came: the worker wasn't blocked
-                self.assertEqual(lines[0], "t")
+                self.assertEqual(lines[-1], "3 lines, 10 ticks")
 
     def test_two_readers_of_one_descriptor(self):
         exe = self.native("two_readers", TWO_READERS)
