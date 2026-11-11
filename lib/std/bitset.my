@@ -11,7 +11,7 @@
 // Every set has one form, so `#derive(Eq, Hash)` is the set's equality and
 // a `BitSet` is a map key and a `Set` element (the state of a search over
 // subsets): a growable set has no zero word at its end, and a fixed set of
-// size n has (n + 63) / 64 words with the bits from n on clear. Two growable
+// size n has ceil(n / 64) words with the bits from n on clear. Two growable
 // sets are equal when they hold the same integers, two fixed ones when they
 // also have the same size; a fixed set never equals a growable one.
 
@@ -42,7 +42,7 @@ pub fun fixed(n: int) -> BitSet {
         panic(f"bit set size {n} is negative")
     }
     var words: [uint64] = []
-    for i in 0..(n + 63) / 64 {
+    for i in 0..words_for(n) {
         words.push(0)
     }
     return BitSet { words: words, bits: n, fixed: true }
@@ -83,7 +83,7 @@ impl BitSet {
     #test(of([5, 6]), 700)[false]
     #test(of([5, 6]), -1)[false]
     fun remove(var self, i: int) -> bool {
-        if i < 0 || i >= self.bits {
+        if i < 0 || i >= self.bits && self.past(i) {
             return false
         }
         let bit = 1u64 << (i & 63)
@@ -117,7 +117,7 @@ impl BitSet {
     #test(of([0, 63, 64, 200]), 9999)[false]
     #test(of([0, 63, 64, 200]), -1)[false]
     fun contains(self, i: int) -> bool {
-        if i < 0 || i >= self.bits {
+        if i < 0 || i >= self.bits && self.past(i) {
             return false
         }
         return self.words[i >> 6] & (1u64 << (i & 63)) != 0
@@ -148,7 +148,8 @@ impl BitSet {
 
     // The integers it holds without growing, 0 to `capacity()` - 1: the
     // size of a fixed set; for a growable one, a multiple of 64 above its
-    // greatest integer.
+    // greatest integer, but at most int's maximum (a set that holds
+    // 2147483647 holds it too).
     #test(fixed(10))[10]
     #test(of([10]))[64]
     #test(of([10, 64]))[128]
@@ -191,7 +192,7 @@ impl BitSet {
     #test(of([3, 64, 200]), -5)[Some(3)]
     fun next_from(self, i: int) -> Option<int> {
         let start = if i < 0 { 0 } else { i }
-        if start >= self.bits {
+        if start >= self.bits && self.past(start) {
             return None
         }
         var k = start >> 6
@@ -331,6 +332,14 @@ impl BitSet {
         return n
     }
 
+    // Whether the set can't hold `i`, which is `bits` or more: always for a
+    // fixed set; for a growable one, if `i`'s word is past its words (it
+    // isn't for 2147483647 in a set of the most words, whose `bits` is
+    // int's maximum, one short).
+    fun past(self, i: int) -> bool {
+        return self.fixed || i >> 6 >= self.words.len()
+    }
+
     // Drops the zero words at the end of a growable set, which keeps it in
     // its one form.
     fun trim(var self) {
@@ -340,7 +349,7 @@ impl BitSet {
         while self.words.len() > 0 && self.words[self.words.len() - 1] == 0 {
             self.words.pop()
         }
-        self.bits = self.words.len() * 64
+        self.bits = bits_of(self.words.len())
     }
 
     // Makes room for `i`, which a fixed set must already have.
@@ -357,8 +366,31 @@ impl BitSet {
         while self.words.len() <= i >> 6 {
             self.words.push(0)
         }
-        self.bits = self.words.len() * 64
+        self.bits = bits_of(self.words.len())
     }
+}
+
+// The words of a fixed set of size `n`, (n + 63) / 64.
+#test(0)[0]
+#test(1)[1]
+#test(64)[1]
+#test(65)[2]
+#test(2147483647)[33554432] // overflowed
+fun words_for(n: int) -> int {
+    return n / 64 + (if n & 63 == 0 { 0 } else { 1 })     // no n + 63: it may overflow
+}
+
+// The integers `words` words hold, 64 each, but at most int's maximum: the
+// last word of a set that holds 2147483647 has one bit past it.
+#test(0)[0]
+#test(2)[128]
+#test(33554431)[2147483584]
+#test(33554432)[2147483647] // overflowed
+fun bits_of(words: int) -> int {
+    if words >= 33554432 {
+        return 2147483647
+    }
+    return words * 64
 }
 
 // The number of bits set in `w`: std.int's `count_ones`, which the native
