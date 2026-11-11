@@ -38,3 +38,5 @@ Wave 4 of [[Project/Standard-library-roadmap]], roadmap #57. Block and flow maps
 ## Review 2026-11-09
 
 Signed off in [[Project/Review-2026-11-09]], with a follow-up in [[MYLA-424]]: a whitespace-only block scalar line; raw control characters; the writer's YAML 1.1 protection covers booleans only.
+
+The follow-up is built and in review in [[MYLA-424]] (2026-11-11).

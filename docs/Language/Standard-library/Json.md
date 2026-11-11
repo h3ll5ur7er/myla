@@ -26,15 +26,15 @@ fun main() {
 | --- | --- |
 | `enum Json { Null, Bool(bool), Int(int64), Float(float64), Str(str), Array([Json]), Object([(str, Json)]) }` | A number without fraction or exponent that fits in int64 is an `Int`, any other a `Float`; an object keeps its members in order, duplicates included |
 | `parse(text: str) -> Result<Json, JsonError>` | One value, with whitespace around it allowed |
-| `struct JsonError { kind: JsonErrorKind, msg: str, line: int32, col: int32, path: str }` | A `Syntax` error of `parse` has Python 3.13's message and position (the column counts characters) and an empty `path`; the others come from decoding ([below](#typed-values)). `e.message()` is `msg`; `{e}` writes `line:col: msg` or `path: msg` |
-| `to_string(j: Json) -> str` | Compact text, as `json.dumps(j, ensure_ascii=False, separators=(",", ":"))` writes it: floats in their shortest form, control characters escaped, other characters as they are |
+| `struct JsonError { kind: JsonErrorKind, msg: str, line: int32, col: int32, path: str }` | A `Syntax` error of `parse` has Python 3.13's message and position (the column counts characters) and an empty `path`; the others come from decoding ([below](#typed-values)). `e.message()` is `msg`; `{e}` writes `line:col: msg` for an error in the text, `path: msg` for the others |
+| `to_string(j: Json) -> str` | Compact text, as `json.dumps(j, ensure_ascii=False, separators=(",", ":"))` writes it: floats in their shortest form, control characters escaped, other characters as they are; but NaN and the infinities, which JSON has no form for, are `null` |
 | `field(j: Json, key: str) -> Option<Json>` | An object's member (the last one with that key, as Python keeps it) |
 | `at(j: Json, path: str) -> Option<Json>` | The value at a path, below |
 | `pretty(j: Json, indent: int = 2) -> str` | Text with one item or member on a line, below |
 | `obj(members: [(str, Json)])`, `arr(items: [Json])`, `num(x: float64)`, `text(s: str)` | Constructors, all `-> Json`, below |
 | `j.as_int()`, `j.as_float()`, `j.as_str()`, `j.as_bool()`, `j.as_list()`, `j.as_object()` | Typed getters, below |
 
-Like Python, `NaN`, `Infinity` and `-Infinity` are read and written. Unlike Python, a `\u` escape of a lone surrogate is an error, since a Myla string holds UTF-8, and nesting is limited to 200 levels (what every implementation's stack takes: the interpreters run the parser's recursion on their own).
+Like Python, `parse` reads `NaN`, `Infinity` and `-Infinity`; unlike Python, `to_string` and `pretty` write them as `null`, as JavaScript's `JSON.stringify` does, since a text with them isn't JSON and most readers refuse it (Python writes them, Go's `encoding/json` fails; [[MYLA-424]]). Unlike Python, a `\u` escape of a lone surrogate is an error, since a Myla string holds UTF-8, and nesting is limited to 200 levels (what every implementation's stack takes: the interpreters run the parser's recursion on their own).
 
 ## Building, reading and printing values
 
@@ -158,7 +158,7 @@ fun main() {
 | `trait ToJson { fun to_json(self) -> Json }` | A value's JSON form. Writing never fails |
 | `trait FromJson { fun from_json(j: Json) -> Result<Self, JsonError> }` | A value read from its JSON form, a function without `self` (D172): `Point.from_json(j)`, or `T.from_json(j)` under `T: FromJson` |
 | `encode<T: ToJson>(v: T) -> str` | `to_string(v.to_json())` |
-| `decode<T: FromJson>(text: str) -> Result<T, JsonError>` | `parse`, then `T.from_json`. The type comes from explicit type arguments, `json.decode<Point>(text)`, or from where the result goes (`let p: Result<Point, JsonError> = json.decode(text)`, D169) |
+| `decode<T: FromJson>(text: str) -> Result<T, JsonError>` | `parse`, then `T.from_json`. The type comes from explicit type arguments, `json.decode<Point>(text)`, or from where the result goes (`let p: Result<Point, JsonError> = json.decode(text)`, D169). Unlike `parse`, it refuses an integer beyond `int64`, below 2^64 in size, that a float64 doesn't hold exactly: `1:8: 9223372036854775809 can't be read exactly: beyond int64's range a number is a float64` (`OutOfRange`, at its line and column; D184) |
 | `enum JsonErrorKind { Syntax, MissingField, WrongType, OutOfRange, UnknownVariant }` | What is wrong: the text isn't JSON; an object lacks a field; a value of another kind than the type takes (a string for a number, a fraction for an integer, a variant with a payload it hasn't); an integer outside its type's range; a name that isn't one of the enum's variants |
 | `wrong_type(expected: str, found: Json) -> JsonError` | For an impl written by hand: `expected a version, found a string` at the value |
 | `members(j: Json, name: str) -> Result<[(str, Json)], JsonError>` | The members of an object; another value is an error naming the type `name` |
@@ -176,7 +176,7 @@ The built-in types:
 | Type | JSON | Read from |
 | --- | --- | --- |
 | `int8` … `int64`, `uint8` … `uint32` | a number | an `Int`, or a whole `Float` (`2.0`, `1e3`), in the type's range: `128` for an `int8` is `OutOfRange`, `1.5` `WrongType` |
-| `uint64` | a number; above `int64`'s range the nearest float, `1.8446744073709552e+19` | the same, or a whole `Float` below 2^64: the largest values don't come back, as their float is 2^64 |
+| `uint64` | a number; above `int64`'s range the nearest float, `1.8446744073709552e+19` | the same, or a whole `Float` below 2^64. Above 2^63 only a value a float64 holds (a multiple of 2048) comes back as itself: `decode` refuses an integer in the text that would lose its low bits, and the largest values, whose float is 2^64, are out of range; but `encode` of `9223372036854775809` writes the float `9.223372036854776e+18`, which reads back as `9223372036854775808` ([[MYLA-424]]) |
 | `float64`, `float32` | a number; NaN and the infinities `null` | a `Float` or an `Int`; `null` is `WrongType`, a finite number beyond `float32`'s range `OutOfRange`. A `float32` is written in its shortest form, `0.1` and not `0.10000000149011612` |
 | `bool`, `str` | `true`/`false`, a string | the same |
 | `char` | a string of the one character | a string of exactly one character |

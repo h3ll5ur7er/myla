@@ -24,6 +24,12 @@ and a few cases run on the self-hosted interpreter too.
 The suite is data, not code: the test only reads its files. It looks for the
 data release in `$MYLA_YAML_TEST_SUITE`, else clones its `data-2022-01-17`
 tag into `build/yaml-test-suite` once, and is skipped when neither works.
+
+The writer against a YAML 1.1 reader (MYLA-424): strings made of the pieces
+of YAML 1.1's numbers, booleans, timestamps and keys are written by
+`to_string`, as an item and as a key, and PyYAML (which reads YAML 1.1, as
+most readers in use do) must read them back as the same strings. Skipped
+without PyYAML.
 """
 from __future__ import annotations
 
@@ -227,6 +233,8 @@ def _expected(events: list[str]) -> tuple[set[str], str]:
     def dump(node) -> str:
         if isinstance(node, _Scalar):
             v = _resolve(node.text) if node.style == ":" else node.text
+            if isinstance(v, float) and not math.isfinite(v):
+                return "null"                   # as std.json writes NaN and the infinities
             return json.dumps(v, ensure_ascii=False, separators=(",", ":"))
         kind, items = node
         if kind == "+SEQ":
@@ -379,6 +387,100 @@ class YamlTestSuite(unittest.TestCase):
         sample = [c for c in self.cases if not c[2] and not c[3] and c[4] not in ("", "duplicate")][:25]
         texts = [c[1] for c in sample]
         self.assertEqual(self.run_driver(self.interpreter, texts), self.run_driver(self.native, texts))
+
+
+WRITER = """from std.io import stdin, println, Reader
+import std.yaml as yaml
+from std.yaml import Yaml
+from std.num import parse_int
+
+struct Input { r: Reader }
+
+impl Input {
+    fun next(var self) -> Option<str> {
+        let header = match self.r.read_line() {
+            Ok(Some(line)) => line,
+            _ => "",
+        }
+        let n = match parse_int(header) {
+            Some(v) => v as int32,
+            None => -1,
+        }
+        if n < 0 { return None }
+        return match self.r.read_exact(n) {
+            Ok(Some(t)) => Some(t),
+            _ => None,
+        }
+    }
+}
+
+fun main() {
+    var input = Input { r: stdin() }
+    while let Some(s) = input.next() {
+        let out = yaml.to_string(Yaml.Map([("item", Yaml.List([Yaml.Str(s)])), ("key", Yaml.Map([(s, Yaml.Null)]))]))
+        println(f"{out.len()}")
+        print(out)                              // and a line break
+    }
+}
+"""
+
+# the pieces of YAML 1.1's implicit types: a string of a few of them is often
+# one of its numbers, booleans or timestamps
+_PIECES = ["0", "1", "7", "9", "12", "60", "_", ":", ".", "-", "+", "e", "E", "x", "b", "o", "T", "t",
+           " ", "Z", "0b", "0x", "0o", "2001-12-14", "2001-1-4", "21:59:43", ".10", "-05:00", "y", "n",
+           "yes", "No", "on", "OFF", "true", "null", "~", "<<", "=", ".inf", ".NaN", "a", "1_000"]
+
+
+def _writer_strings(seed: int, count: int) -> list[str]:
+    rng = random.Random(seed)
+    seen, out = set(), []
+    while len(out) < count:
+        s = "".join(rng.choice(_PIECES) for _ in range(rng.randrange(1, 5)))
+        if s not in seen:
+            seen.add(s)
+            out.append(s)
+    return out
+
+
+@unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
+class YamlWriterForYaml11(unittest.TestCase):
+    def test_pyyaml_reads_strings(self) -> None:
+        try:
+            import yaml as pyyaml
+        except ImportError:
+            self.skipTest("PyYAML isn't installed")
+        strings = _writer_strings(7, 6000)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "main.my")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(WRITER)
+            asm = subprocess.run([selfhost_tool("gen_main"), path, STDLIB_ROOT], capture_output=True, text=True, check=True)
+            native = os.path.join(tmp, "native")
+            with open(native + ".s", "w", encoding="utf-8") as fh:
+                fh.write(asm.stdout)
+            subprocess.run(["as", "--64", "-o", native + ".o", native + ".s"], check=True)
+            subprocess.run(["ld", "-o", native, native + ".o"], check=True)
+            proc = subprocess.run([native], input=_framed([t.encode() for t in strings]), capture_output=True, timeout=600)
+        self.assertEqual(proc.returncode, 0, proc.stderr[-2000:])
+        out, docs = proc.stdout, []
+        while out:
+            head, _, out = out.partition(b"\n")
+            n = int(head)
+            docs.append(out[:n].decode("utf-8"))
+            out = out[n + 1:]
+        self.assertEqual(len(docs), len(strings))
+        wrong = []
+        for s, doc in zip(strings, docs):
+            try:
+                back = pyyaml.safe_load(doc)
+            except Exception as err:                # PyYAML fails on some: `0x_`
+                wrong.append(f"{s!r}: {doc!r} isn't read: {str(err)[:80]}")
+                continue
+            if back != {"item": [s], "key": {s: None}}:
+                wrong.append(f"{s!r}: {doc!r} reads as {back!r}")
+        quoted = sum(1 for doc in docs if doc.startswith('item:\n  - "'))
+        print(f"\nwriter against PyYAML: {len(strings)} strings, {quoted} quoted, {len(wrong)} wrong", file=sys.stderr)
+        self.assertEqual(wrong[:10], [], f"{len(wrong)} of {len(strings)}")
 
 
 if __name__ == "__main__":

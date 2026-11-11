@@ -76,3 +76,5 @@ Built on `81fe44e`. Tests first: the four parity programs failed before the chan
 ## Review 2026-11-09
 
 Signed off in [[Project/Review-2026-11-09]], with a follow-up in [[MYLA-424]]: a `uint64` above 2^63 silently loses its low bits; -2^63-1 reads as `int64`'s minimum.
+
+The follow-up is built and in review in [[MYLA-424]] (2026-11-11).

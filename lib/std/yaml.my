@@ -211,6 +211,8 @@ fun new_entries() -> Entries {
 #test("é: \"ü")[Err(YamlError { kind: YamlErrorKind.UnclosedQuote, line: 1, col: 4 })] // columns count characters
 pub fun parse(text: str) -> Result<Yaml, YamlError> {
     var p = Parser { s: text, i: 0, line_start: 0, depth: 0 }
+    let bad = control_at(text)
+    if bad >= 0 { return Err(p.error(YamlErrorKind.Unexpected, bad)) }
     if has_bom(text) {
         p.i = 3
         p.line_start = 3
@@ -227,15 +229,41 @@ pub fun parse(text: str) -> Result<Yaml, YamlError> {
         v = p.node(-1, p.line_start)?
     }
     p.skip_to_content()
-    if p.marker_at(p.i) && p.s[p.i] == '.' {
+    // `...` ends the document, and may be repeated (l-document-suffix+)
+    var ended = false
+    while p.marker_at(p.i) && p.s[p.i] == '.' {
         p.i += 3
         p.rest_of_line()?
         p.skip_to_content()
-        if !p.at_end() { return Err(p.error(YamlErrorKind.MultipleDocuments, p.i)) }
+        ended = true
     }
+    if ended && !p.at_end() { return Err(p.error(YamlErrorKind.MultipleDocuments, p.i)) }
     if p.marker_at(p.i) { return Err(p.error(YamlErrorKind.MultipleDocuments, p.i)) }
     if !p.at_end() { return Err(p.error(YamlErrorKind.Unexpected, p.i)) }
     return Ok(v)
+}
+
+// Where the first C0 control character other than a tab, a line feed and a
+// carriage return is, or -1: YAML has none of them anywhere, not even in a
+// quoted scalar (c-printable and nb-json leave them out); `"\x01"` writes
+// one. DEL and the C1 controls, which only a quoted scalar may hold, aren't
+// looked for.
+#test("a: b\tc\r\n")[-1]
+#test("a\u{1F}")[1]
+#test("\u{0}")[0]
+#test("é\u{7F}\u{85}")[-1]
+fun control_at(s: str) -> int {
+    var i = 0
+    while i < s.len() {
+        let c = s[i]
+        if c < 32u8 && c != 9u8 && c != 10u8 && c != 13u8 { return i }
+        i += 1
+    }
+    return -1
+}
+
+fun is_digit(c: uint8) -> bool {
+    return c >= '0' && c <= '9'
 }
 
 // Whether `s` starts with a byte order mark, U+FEFF.
@@ -818,23 +846,32 @@ impl Parser {
         var indent = base + explicit
         if explicit == 0 {
             // the first line with content sets it; no empty line before it
-            // may have more spaces
+            // may have more spaces. Without one (the text ends, or a line
+            // indented `n` or less ends the scalar first), the longest empty
+            // line does (YAML 1.2, 8.1.1.1)
             var j = self.i
             var most = 0
+            var most_at = 0                     // the end of that line's spaces
             while true {
                 let ls = j
                 while self.ch(j) == ' ' { j += 1 }
                 let sp = j - ls
                 if is_break(self.ch(j)) {
-                    if sp > most { most = sp }
+                    if sp > most {
+                        most = sp
+                        most_at = j
+                    }
                     j = self.after_break(j)
                 } else if j >= self.s.len() {
                     indent = if most > sp { most } else { sp }  // no content at all
                     break
+                } else if sp <= n {
+                    indent = most                           // the scalar ends here
+                    break
                 } else {
                     indent = sp
-                    if sp > n && most > sp {
-                        return Err(self.error(YamlErrorKind.Indentation, ls + most))
+                    if most > sp {
+                        return Err(self.error(YamlErrorKind.Indentation, most_at))
                     }
                     break
                 }
@@ -1356,6 +1393,32 @@ fun float_text(f: float64) -> str {
 #test("x\n")[false]
 #test("€ and —")[true]
 #test("a\u{2028}b")[false]
+#test("y")[false] // YAML 1.1 reads these as something else
+#test("Off")[false]
+#test("0b1010")[false]
+#test("-0b1")[false]
+#test("1_000")[false]
+#test("0x_1F")[false]
+#test("0_17")[false]
+#test("1:30")[false]
+#test("190:20:30")[false]
+#test("1_0.5")[false]
+#test("190:20:30.15")[false]
+#test("2001-12-14")[false]
+#test("2001-12-14t21:59:43.10-05:00")[false]
+#test("2001-12-14 21:59:43.10 -5")[false]
+#test("2001-1-4 1:59:43")[false]
+#test("<<")[false]
+#test("=")[false]
+#test("1:60")[true] // and these as strings
+#test("2001-12-1")[true]
+#test("2001-12-14x")[true]
+#test("1-2-3")[true]
+#test("0b12")[true]
+#test("1__")[false]
+#test("_1")[true]
+#test("yes sir")[true]
+#test("<<a")[true]
 fun plain_safe(s: str) -> bool {
     let n = s.len()
     if n == 0 { return false }
@@ -1381,13 +1444,158 @@ fun plain_safe(s: str) -> bool {
         Yaml.Str(_) => {}
         _ => { return false }
     }
-    if n > 3 { return true }
-    // YAML 1.1's booleans, which its readers would take for one
-    return match s {
-        "y" | "Y" | "yes" | "Yes" | "YES" | "n" | "N" | "no" | "No" | "NO" => false
-        "on" | "On" | "ON" | "off" | "Off" | "OFF" => false
-        _ => true
+    return !yaml11_other(s)
+}
+
+// Whether a YAML 1.1 reader (PyYAML, and most of the readers in use) takes
+// the plain scalar `s` for something other than a string, where the 1.2
+// core schema doesn't: its booleans `y`, `yes`, `on`, `off`, …; its
+// integers in base 2 (`0b101`), base 8 (`017`), with `_` (`1_000`) or in
+// base 60 (`1:30`); its floats with `_` or in base 60 (`1:30.5`); its
+// timestamps (`2001-12-14`, `2001-12-14 21:59:43.10 -5`); and the merge key
+// `<<` and the value key `=`. A little more than YAML 1.1 takes (`09`, an
+// exponent without a sign) is counted too, as quoting costs nothing.
+#test("Yes")[true]
+#test("0b1_0")[true]
+#test("0x_1F")[true]
+#test("1:30")[true]
+#test("1:30.5")[true]
+#test("2001-12-14")[true]
+#test("2001-12-14T21:59:43Z")[true]
+#test("1:60")[false]
+#test("2001-12-14T")[false]
+#test("v1.2")[false]
+fun yaml11_other(s: str) -> bool {
+    match s {
+        "y" | "Y" | "yes" | "Yes" | "YES" | "n" | "N" | "no" | "No" | "NO" => { return true }
+        "on" | "On" | "ON" | "off" | "Off" | "OFF" => { return true }
+        "<<" | "=" => { return true }
+        _ => {}
     }
+    return number11(s) || timestamp11(s)
+}
+
+// Whether `s` is a YAML 1.1 integer or float: [-+]? then `0b[01_]+`,
+// `0x[0-9a-fA-F_]+`, `[0-9][0-9_]*` (decimal and octal), a float
+// `[0-9][0-9_]*.[0-9_]*` or `.[0-9_]+` with an exponent, or base 60
+// `[0-9][0-9_]*(:[0-5]?[0-9])+` with an optional `.[0-9_]*`.
+#test("-0b1")[true]
+#test("0b12")[false]
+#test("1__")[true]
+#test("_1")[false]
+#test("1_0.5e+3")[true]
+#test("._5")[true]
+#test("190:20:30.15")[true]
+#test("1:2:")[false]
+#test("1.2.3")[false]
+fun number11(s: str) -> bool {
+    let n = s.len()
+    var i = 0
+    if i < n && (s[i] == '+' || s[i] == '-') { i += 1 }
+    if i >= n { return false }
+    if i + 2 < n && s[i] == '0' && (s[i + 1] == 'b' || s[i + 1] == 'x') {
+        let hex = s[i + 1] == 'x'
+        var j = i + 2
+        while j < n {
+            let c = s[j]
+            let ok = c == '0' || c == '1' || c == '_' || (hex && (is_digit(c) || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')))
+            if !ok { return false }
+            j += 1
+        }
+        return true
+    }
+    if s[i] == '.' { return fraction11(s, i + 1, true) }
+    if !is_digit(s[i]) { return false }
+    var j = i
+    while j < n && (is_digit(s[j]) || s[j] == '_') { j += 1 }
+    if j == n { return true }
+    if s[j] == '.' { return fraction11(s, j + 1, false) }
+    if s[j] != ':' { return false }
+    while j < n && s[j] == ':' {
+        j += 1
+        let start = j
+        while j < n && is_digit(s[j]) && j - start < 2 { j += 1 }
+        if j == start || (j - start == 2 && s[start] > '5') { return false }
+    }
+    if j == n { return true }
+    if s[j] != '.' { return false }
+    j += 1
+    while j < n && (is_digit(s[j]) || s[j] == '_') { j += 1 }
+    return j == n
+}
+
+// Whether `s` from `i` on is a float's `[0-9_]*` (`[0-9_]+` if `some`) and an
+// optional exponent, to its end.
+fun fraction11(s: str, i: int, some: bool) -> bool {
+    let n = s.len()
+    var j = i
+    while j < n && (is_digit(s[j]) || s[j] == '_') { j += 1 }
+    if some && j == i { return false }
+    if j == n { return true }
+    if s[j] != 'e' && s[j] != 'E' { return false }
+    j += 1
+    if j < n && (s[j] == '+' || s[j] == '-') { j += 1 }
+    let digits = j
+    while j < n && is_digit(s[j]) { j += 1 }
+    return j > digits && j == n
+}
+
+// Where the run of `lo` to `hi` digits at `i` in `s` ends, or -1.
+fun digits_to(s: str, i: int, lo: int, hi: int) -> int {
+    var j = i
+    while j < s.len() && is_digit(s[j]) && j - i < hi { j += 1 }
+    if j - i < lo { return -1 }
+    return j
+}
+
+// Whether `s` is a YAML 1.1 timestamp: `YYYY-MM-DD`, or
+// `YYYY-M-D` then `T`, `t` or blanks, `H:MM:SS`, an optional fraction and
+// an optional zone, `Z` or `±H[:MM]` after optional blanks.
+#test("2001-12-14")[true]
+#test("2001-1-4")[false]
+#test("2001-1-4 1:59:43")[true]
+#test("2001-12-14t21:59:43.10-05:00")[true]
+#test("2001-12-14 21:59:43.10 -5")[true]
+#test("2001-12-14 21:59:43 Z")[true]
+#test("2001-12-14 21:59")[false]
+#test("2001-12-14 21:59:43 +")[false]
+fun timestamp11(s: str) -> bool {
+    let n = s.len()
+    var j = digits_to(s, 0, 4, 4)
+    if j < 0 || j >= n || s[j] != '-' { return false }
+    let month = j + 1
+    j = digits_to(s, month, 1, 2)
+    if j < 0 || j >= n || s[j] != '-' { return false }
+    let short = j - month < 2
+    let day = j + 1
+    j = digits_to(s, day, 1, 2)
+    if j < 0 { return false }
+    if j == n { return !short && j - day == 2 }
+    if s[j] == 'T' || s[j] == 't' {
+        j += 1
+    } else {
+        let blanks = j
+        while j < n && (s[j] == ' ' || s[j] == '\t') { j += 1 }
+        if j == blanks { return false }
+    }
+    j = digits_to(s, j, 1, 2)
+    if j < 0 || j >= n || s[j] != ':' { return false }
+    j = digits_to(s, j + 1, 2, 2)
+    if j < 0 || j >= n || s[j] != ':' { return false }
+    j = digits_to(s, j + 1, 2, 2)
+    if j < 0 { return false }
+    if j < n && s[j] == '.' {
+        j += 1
+        while j < n && is_digit(s[j]) { j += 1 }
+    }
+    while j < n && (s[j] == ' ' || s[j] == '\t') { j += 1 }
+    if j == n { return true }
+    if s[j] == 'Z' { return j + 1 == n }
+    if s[j] != '+' && s[j] != '-' { return false }
+    j = digits_to(s, j + 1, 1, 2)
+    if j < 0 { return false }
+    if j < n && s[j] == ':' { j = digits_to(s, j + 1, 2, 2) }
+    return j == n
 }
 
 // What `to_string` writes, `parse` reads back as the same value.
@@ -1539,7 +1747,7 @@ pub fun from_json(j: Json) -> Yaml {
 #test(": v\n")["{\"\":\"v\"}"] // an empty key
 #test("a:\n")["{\"a\":null}"]
 #test("--- 3\n...\n")["3"]
-#test("a: 0x10\nb: .nan\nc: -.INF\n")["{\"a\":16,\"b\":NaN,\"c\":-Infinity}"]
+#test("a: 0x10\nb: .nan\nc: -.INF\n")["{\"a\":16,\"b\":null,\"c\":null}"] // std.json writes NaN and the infinities as null
 #test("[a, b")["1:1: a flow collection without its closing bracket"]
 #test("[a b c, d e]")["[\"a b c\",\"d e\"]"]
 #test("{a: 1 b}")["{\"a\":\"1 b\"}"] // spaces inside a plain scalar
@@ -1555,6 +1763,20 @@ pub fun from_json(j: Json) -> Yaml {
 #test("key\nother")["\"key other\""]
 #test("--- a\n--- b\n")["2:1: multiple documents are not supported"]
 #test("a: 1\nb\nc: 2\n")["2:1: a key without ':' in a block mapping"]
+#test("a: |\n  \nb: 1\n")["{\"a\":\"\",\"b\":1}"] // a block scalar of spaces only (M21)
+#test("a: >\n   \nb: 1\n")["{\"a\":\"\",\"b\":1}"]
+#test("a: |\n  \n")["{\"a\":\"\"}"]
+#test("a: |+\n  \nb: 1\n")["{\"a\":\"\\n\",\"b\":1}"]
+#test("- |\n  \n   \n- x\n")["[\"\",\"x\"]"]
+#test("a: |\n    \n  x\n")["2:5: bad indentation"] // a leading empty line longer than the first line
+#test("a\u{1}b: c\n")["1:2: an unexpected character"] // C0 controls aren't YAML characters
+#test("a: \"x\u{0}\"\n")["1:6: an unexpected character"]
+#test("# \u{1B}[0m\na: 1\n")["1:3: an unexpected character"]
+#test("a: \"\\x01\\t\"\n")["{\"a\":\"\\u0001\\t\"}"] // escaped, they are
+#test("a:\tb\r\n")["{\"a\":\"b\"}"]
+#test("a: 1\n...\n...\n")["{\"a\":1}"] // a second '...' starts no document
+#test("a: 1\n...\n# c\n...\n")["{\"a\":1}"]
+#test("a: 1\n...\nb\n")["3:1: multiple documents are not supported"]
 fun json_text(text: str) -> str {
     return match parse(text) {
         Ok(v) => json_m.to_string(to_json(v))

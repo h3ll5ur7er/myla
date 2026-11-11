@@ -63,3 +63,5 @@ Built on `3499093`.
 ## Review 2026-11-09
 
 Signed off in [[Project/Review-2026-11-09]], with a follow-up in [[MYLA-424]]: no nesting limit.
+
+The follow-up is built and in review in [[MYLA-424]] (2026-11-11).
