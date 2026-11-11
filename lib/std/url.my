@@ -54,7 +54,7 @@ impl Format for UrlError {
 // an empty one (`file:///etc`); an IPv6 host is without its brackets.
 // `user_info`, `query` and `fragment` are `None` without their `@`, `?` or
 // `#`; `scheme` is "" for a relative reference.
-#derive(Eq)
+#derive(Eq, Hash)
 pub struct Url {
     scheme: str,
     user_info: Option<str>,
@@ -849,4 +849,22 @@ fun hex_digit(c: uint8) -> int {
         return (c - 'A') as int + 10
     }
     return -1
+}
+
+// A `Url` compares field by field and is a map key (MYLA-488): parsing
+// lower-cases nothing, so `HTTP://a/` and `http://a/` differ.
+#test
+fun urls_compare_and_key_maps() {
+    match (parse("http://example.com/a?q=1"), parse("http://example.com/a?q=1"), parse("HTTP://example.com/a?q=1")) {
+        (Ok(a), Ok(b), Ok(c)) => {
+            assert(a == b, "the same text")
+            assert(a != c, "another scheme's case")
+            var seen: [Url: int] = [:]
+            seen[a] = 1
+            seen[c] = 2
+            assert(seen[b] == 1, "found by an equal URL")
+            assert(seen.len() == 2, "two keys")
+        }
+        _ => assert(false, "parse")
+    }
 }
