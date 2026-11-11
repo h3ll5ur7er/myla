@@ -15,7 +15,7 @@ Work package P13 of [[Project/Review-2026-11-09]] (wave A2), with round 4's addi
 - [x] Evidence counts in task files and pages that later refactors changed
 - [x] D178 in [[Language/Methods-and-traits]] with the call-site error once [[MYLA-417]] builds it
 - [x] D179 in [[Development/Conventions]]: library editors run `myla test` on the module they changed
-- [ ] D180: Net.md's line-protocol example and the warning that `buffered(s)` blocks its worker. Open here: it is P5's ([[MYLA-419]]), which builds the async line reader the example uses
+- [x] D180: Net.md's line-protocol example and the warning that `buffered(s)` blocks its worker: written by [[MYLA-419]] (P5), with the async line reader it uses (`net.line_reader`, a tested block in [[Language/Standard-library/Net]])
 - [ ] Io.md, Fs.md and Process.md: performance sections as current numbers, not histories of `read_str` measurements. Open: P6 and P5 are changing those pages and the code they measure, and the numbers need re-measuring through `read` on a quiet machine (this one ran five lanes, load 3 of 4 cores). It follows wave A2's merge
 
 ## Evidence
