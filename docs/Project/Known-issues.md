@@ -34,7 +34,6 @@ The targets are x86-64 and aarch64 Linux and wasm32 on WASI; macOS and Windows a
 
 ## Language
 
-- A compound assignment's hoisted index loses the place's type: `r[Ok("a")] += 10` and `acc.items += lst()` can't infer what `r[Ok("a")] = …` and `acc.items = lst()` do ([[MYLA-448]]); a literal before the element that fixes a wider type must fit `int32`: `[4000000000, big]` with `big: int64` fails ([[MYLA-449]]).
 - Every field and method of a `pub` type is public, so no library type can protect an invariant ([[MYLA-433]]).
 
 ## Standard library

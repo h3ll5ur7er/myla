@@ -31,7 +31,7 @@ fun main() {
 
 `target = value`, where the target is a variable, a field chain or an index chain rooted at a `var`: `p.x = 1`, `grid[i][j] = 0`, `m["k"] = v`, `self.items[0].name = n`. A tuple element (`t.0 = …`) can't be assigned. Assignment is a statement, so `a = b = c` doesn't parse. `self` itself can't be reassigned in a struct's method; in a `var self` method of a builtin type `self = v` writes the receiver (D144).
 
-Compound assignment (D104 (2), [[MYLA-223]]): `+=`, `-=`, `*=`, `/=`, `%=`, `&=`, `|=`, `^=`, `<<=` and `>>=` mean `place = place op value`. The place is a `var`, a field or an element of one, as for `=`, and it is evaluated once: in `xs[next()] += 1` `next()` runs once. The operator is the binary one, so a struct's `+=` uses its `Add` impl and `f >>= g` composes two functions.
+Compound assignment (D104 (2), [[MYLA-223]]): `+=`, `-=`, `*=`, `/=`, `%=`, `&=`, `|=`, `^=`, `<<=` and `>>=` mean `place = place op value`. The place is a `var`, a field or an element of one, as for `=`, and it is evaluated once: in `xs[next()] += 1` `next()` runs once. The operator is the binary one, so a struct's `+=` uses its `Add` impl and `f >>= g` composes two functions. It is checked as `place = place op value` is: an index computed once still expects the place's key type, so `r[Ok("a")] += 1` with `r: [Result<str, int>: int]` and `w[2 * n] += 1` with `w: [int64: int]` check ([[MYLA-448]]), and an operator the place's type lacks is the error (`xs += ys` on lists: `operator '+' requires numeric or string operands`).
 
 ```myla
 fun main() {

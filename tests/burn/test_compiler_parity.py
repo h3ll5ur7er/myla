@@ -7747,6 +7747,83 @@ fun main() {
     print(n[1])
 }
 """,
+    # MYLA-449: a literal too wide for int32 waits for the element that fixes a wider type
+    "literals_wait_for_the_element_that_fixes_a_wider_type": r"""// MYLA-449: a literal too wide for the type the literals before it have
+// waits for the element that fixes a wider one, in lists, map keys and map
+// values
+fun main() {
+    let big: int64 = 5000000000
+    let a = [4000000000, big]
+    print(a[0] + a[1])
+    let b = [1, -3000000000, 4000000000, big]
+    print(b[1] * 2)
+    let m = [1: 4000000000, 2: big]
+    print(m[1] - m[2])
+    let k = [4000000000: "a", big: "b", 7: "c"]
+    print(k[4000000000] + k[7])
+    let u: uint64 = 1
+    let c = [18000000000000000000, 2, u]
+    print(c[0] + c[1])
+    let n = [[4000000000, big], [1]]
+    print(n[1][0] + n[0][0])
+}
+""",
+    # MYLA-448: a compound assignment's hidden index and right side take the plain assignment's types
+    "compound_assignments_type_as_their_plain_form": r"""// MYLA-448: a compound assignment's hidden `let` of its index expects the
+// key type of the place it indexes, and its right side what the plain
+// `place = place op value` gives it
+trait Blank {
+    fun blank() -> Self
+}
+
+impl Blank for str {
+    fun blank() -> str { return "-" }
+}
+
+impl Blank for int {
+    fun blank() -> int { return 7 }
+}
+
+fun blank<T: Blank>() -> T { return T.blank() }
+
+struct Acc {
+    counts: [Option<int>: int],
+    grid: [[int64]],
+}
+
+fun main() {
+    var r: [Result<str, int>: int] = [:]
+    r[Ok("a")] = 1
+    r[Ok("a")] += 10
+    r[Err(2)] = 5
+    r[Err(2)] *= 3
+    print(r[Ok("a")] + r[Err(2)])
+    var m: [Option<int>: int] = [:]
+    m[None] = 1
+    m[None] += 1
+    m[Some(4)] = 2
+    m[Some(2 + 2)] <<= 3
+    print(m[None] + m[Some(4)])
+    var w: [int64: int] = [:]
+    w[5000000000] = 1
+    w[2500000000 * 2] += 41
+    print(w[5000000000])
+    var b: [uint8: str] = [:]
+    b[200] = "x"
+    b[100 + 100] += "y"
+    b[100 + 100] += blank()
+    print(b[200])
+    var acc = Acc { counts: [None: 1], grid: [[1, 2], [3]] }
+    acc.counts[None] -= 1
+    acc.counts[Some(1 + 1)] = 4
+    acc.counts[Some(1 + 1)] %= 3
+    var i = 0
+    acc.grid[i + 1][^(i + 1)] += 5000000000
+    var n = 1
+    n += blank()
+    print(f"{acc.counts[None]} {acc.counts[Some(2)]} {acc.grid[1][0]} {n}")
+}
+""",
     # D182 (MYLA-417): `Option` and `Result` are `Hash`
     "option_and_result_as_map_keys": r"""// D182 (MYLA-417): `Option` and `Result` derive `Hash` in the prelude, so
 // an `Option` or `Result` of hashable types is a map key, and a derived key
@@ -10074,6 +10151,10 @@ PINNED = {
     "unit_as_a_type_argument": '3\n2\n2\n2\n2\n7\n',
     # L2 (MYLA-417): new ("[-1, -128, 5i8]" was a type error, "[1, 2, x]" left 2 an int32); native code gives the same
     "literals_take_the_type_a_later_element_fixes": '-10000000000\n155\n-2.25\n200000000000000\n600\n1400\n60000\n197\n-128\n',
+    # MYLA-449: new ("integer literal 4000000000 does not fit in 'int32'" before); native code gives the same
+    "literals_wait_for_the_element_that_fixes_a_wider_type": '9000000000\n-6000000000\n-1000000000\nac\n18000000000000000002\n4000000001\n',
+    # MYLA-448: new ("cannot infer type parameter(s) E", "T for 'blank'" before); native code gives the same
+    "compound_assignments_type_as_their_plain_form": '26\n18\n42\nxy-\n0 1 5000000003 8\n',
     # D182 (MYLA-417): new ("'Option<int32>' isn't Hash" before); native code gives the same
     "option_and_result_as_map_keys": '3\nuno\nnone\nfalse\n13\n2\n3\ntrue\nfalse\n5\n',
     # MYLA-417: new ("cannot infer type parameter(s) E", "T for 'try_mk'" before); native code gives the same

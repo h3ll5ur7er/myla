@@ -1,0 +1,18 @@
+//~ type error: operator '+' requires numeric or string operands
+//~ span: acc.items += lst()
+// A list has no `+`: that is the error of `acc.items += lst()`, as of
+// `acc.items = acc.items + lst()`, not that `lst`'s `T` can't be inferred
+// (MYLA-448).
+struct Acc<T> {
+    items: [T],
+}
+
+fun lst<T>() -> [T] {
+    return []
+}
+
+fun main() {
+    var acc: Acc<int> = Acc { items: [1] }
+    acc.items += lst()
+    print(acc.items.len())
+}

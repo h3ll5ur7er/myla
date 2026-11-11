@@ -1,0 +1,5 @@
+type error: operator '+' requires numeric or string operands
+  --> examples/errors/type_compound_assign_without_the_operator.my:16:15
+   |
+16 |     acc.items += lst()
+   |     ^^^^^^^^^^^^^^^^^^

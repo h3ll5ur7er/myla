@@ -1,0 +1,5 @@
+type error: integer literal 4000000000 does not fit in 'uint8'
+  --> examples/errors/type_literal_wider_than_the_type_a_later_element_fixes.my:6:14
+  |
+6 |     let a = [4000000000, 3u8]
+  |              ^^^^^^^^^^
