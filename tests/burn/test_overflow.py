@@ -134,7 +134,199 @@ def build_and_run(path: str, checked: bool) -> tuple[str, str, int]:
         return ran.stdout, ran.stderr, ran.returncode
 
 
+# MYLA-430: a checked 64-bit `+`, `-` and `*` takes the overflow or carry flag
+# on x86-64 and aarch64 and a test without flags on wasm32, no division. Each
+# case is an operation on operands at the edges (the int32 range wasm32's `*`
+# takes a short cut in, the square root of 2^63, the extremes), as a function
+# of two operands (`f`), on a variable in place (`x op= b`) and with a
+# constant (`a op k`, an immediate on x86-64).
+EDGES = {
+    "int64": [0, 1, -1, 2, -2, 2147483647, -2147483648, 2147483648, 3037000499, 3037000500, -3037000500, 2 ** 62,
+              -2 ** 62, 2 ** 63 - 1, -2 ** 63],
+    "uint64": [0, 1, 2, 2 ** 32 - 1, 2 ** 32, 2 ** 63, 2 ** 64 - 1],
+}
+# fewer for the forms in place (each overflow is a run of its own)
+IN_PLACE_EDGES = {"int64": [0, -1, 2, 3037000500, -3037000500, 2 ** 63 - 1, -2 ** 63],
+                  "uint64": [0, 1, 2 ** 32, 2 ** 64 - 1]}
+EDGE_OPS = ["+", "-", "*", "+=", "-=", "*="]
+EDGE_CONSTS = {"int64": [("+", 1), ("-", 1), ("*", 3), ("*", -1), ("+", 2147483647), ("-", -2147483648)],
+               "uint64": [("+", 1), ("-", 1), ("*", 3)]}
+
+
+def _edge_cases() -> list[tuple[str, int, str, int, int]]:
+    """Each case: the type, the function's number in the program, the
+    operator, and the operands."""
+    cases = []
+    for ty, values in EDGES.items():
+        for k, op in enumerate(EDGE_OPS):
+            vs = IN_PLACE_EDGES[ty] if op.endswith("=") else values
+            cases += [(ty, k, op, a, b) for a in vs for b in vs]
+        for k, (op, c) in enumerate(EDGE_CONSTS[ty]):
+            cases += [(ty, len(EDGE_OPS) + k, op, a, c) for a in values]
+    return cases
+
+
+def _edge_literal(ty: str, v: int) -> str:
+    # the minimum has no literal: its negation doesn't fit
+    return "-9223372036854775807 - 1" if ty == "int64" and v == -2 ** 63 else str(v)
+
+
+def edge_program() -> str:
+    """A program that runs the cases from the one its argument names, printing
+    `k result` for each, until one traps."""
+    out = []
+    for ty in EDGES:
+        s = ty[0]
+        for k, op in enumerate(EDGE_OPS):
+            body = (f"    var x = a\n    x {op} b\n    return x\n" if op.endswith("=")
+                    else f"    return a {op} b\n")
+            out.append(f"fun {s}{k}(a: {ty}, b: {ty}) -> {ty} {{\n{body}}}\n")
+        for k, (op, c) in enumerate(EDGE_CONSTS[ty]):
+            literal = str(c) if c >= 0 else f"({c})"
+            out.append(f"fun {s}{len(EDGE_OPS) + k}(a: {ty}, b: {ty}) -> {ty} {{\n"
+                       f"    return a {op} {literal}\n}}\n")
+        n = len(EDGE_OPS) + len(EDGE_CONSTS[ty])
+        arms = "\n".join(f"        {k} => {s}{k}(a, b)," for k in range(n))
+        out.append(f"fun run_{s}(k: int, a: {ty}, b: {ty}) -> {ty} {{\n"
+                   f"    return match k {{\n{arms}\n        _ => a,\n    }}\n}}\n")
+    cases = _edge_cases()
+    lists = []
+    for name, pick in [("ty", lambda c: "0" if c[0] == "int64" else "1"), ("fs", lambda c: str(c[1]))]:
+        lists.append(f"    let {name}: [int] = [{', '.join(pick(c) for c in cases)}]")
+    for ty in EDGES:
+        for name, at in [("a", 3), ("b", 4)]:
+            vals = ", ".join(_edge_literal(ty, c[at]) if c[0] == ty else "0" for c in cases)
+            lists.append(f"    let {ty[0]}{name}: [{ty}] = [{vals}]")
+    out.append("fun main() {\n"
+               + "\n".join(lists) + "\n"
+               "    var k = num.parse_int(process.args()[1]).unwrap_or(0) as int\n"
+               "    while k < ty.len() {\n"
+               "        if ty[k] == 0 { print(f\"{k} {run_i(fs[k], ia[k], ib[k])}\") }\n"
+               "        else { print(f\"{k} {run_u(fs[k], ua[k], ub[k])}\") }\n"
+               "        k += 1\n"
+               "    }\n"
+               "}\n")
+    return "import std.num as num\nimport std.process as process\n\n" + "\n".join(out)
+
+
+def edge_result(ty: str, op: str, a: int, b: int, wrap: bool) -> int | None:
+    """The case's value; None where it overflows and `wrap` is off."""
+    r = {"+": a + b, "-": a - b, "*": a * b}[op[0]]
+    lo, hi = (-2 ** 63, 2 ** 63) if ty == "int64" else (0, 2 ** 64)
+    if lo <= r < hi:
+        return r
+    if not wrap:
+        return None
+    r %= 2 ** 64
+    return r - 2 ** 64 if ty == "int64" and r >= 2 ** 63 else r
+
+
+def build_binary(path: str, out: str, checked: bool) -> str:
+    binary = os.path.join(out, "prog-checked" if checked else "prog")
+    cmd = [selfhost_tool("main"), "build", path, "-o", binary, "--stdlib", STDLIB_ROOT, *target_flags()]
+    if checked:
+        cmd.append("--checked")
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise RuntimeError(f"myla build {path} failed:\n{proc.stderr}")
+    return binary
+
+
+def run_binary(binary: str, path: str, args: list[str]) -> tuple[str, str, int]:
+    argv, exe = run_argv(binary, path, args)
+    ran = subprocess.run(argv, executable=exe, capture_output=True, text=True)
+    return ran.stdout, ran.stderr, ran.returncode
+
+
+# Functions of each 64-bit operation, for their checked code (MYLA-430).
+SHAPES = """fun mul(a: int64, b: int64) -> int64 {
+    return a * b
+}
+
+fun mulu(a: uint64, b: uint64) -> uint64 {
+    return a * b
+}
+
+fun add(a: int64, b: int64) -> int64 {
+    return a + b
+}
+
+fun subu(a: uint64, b: uint64) -> uint64 {
+    return a - b
+}
+
+fun main() {
+    let xs: [int64] = [3, 4]
+    let us: [uint64] = [5, 2]
+    print(mul(xs[0], xs[1]) + add(xs[0], xs[1]))
+    print(mulu(us[0], us[1]) + subu(us[0], us[1]))
+}
+"""
+
+
+def function_body(asm: str, name: str) -> str:
+    """The lines of the function `myla_<name>` in a target's assembly."""
+    lines = asm.splitlines()
+    out = []
+    for line in lines[lines.index(f"myla_{name}:") + 1:]:
+        if line == "\tend_function" or (line.endswith(":") and not line.startswith(".L")):
+            break
+        out.append(line)
+    return "\n".join(out)
+
+
 class TestOverflow(unittest.TestCase):
+    def test_64_bit_edges_trap_where_they_overflow(self):
+        # MYLA-430: each case at the edges of int64 and uint64 traps exactly
+        # where its value doesn't fit, checked, and wraps in a plain build
+        if not CAN_BUILD_NATIVE:
+            self.skipTest(SKIP_REASON)
+        cases = _edge_cases()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = write_program(tmp, edge_program())
+            plain = build_binary(path, tmp, False)
+            want = "".join(f"{k} {edge_result(c[0], c[2], c[3], c[4], True)}\n" for k, c in enumerate(cases))
+            self.assertEqual(run_binary(plain, path, ["0"]), (want, "", 0))
+            checked = build_binary(path, tmp, True)
+            k = 0
+            while k <= len(cases):
+                out, err, code = run_binary(checked, path, [str(k)])
+                for line in out.splitlines():
+                    ty, _, op, a, b = cases[k]
+                    self.assertEqual(line, f"{k} {edge_result(ty, op, a, b, False)}", f"{ty} {a} {op} {b}")
+                    k += 1
+                if code == 0:
+                    self.assertEqual(k, len(cases), err)
+                    break
+                ty, _, op, a, b = cases[k]
+                self.assertIsNone(edge_result(ty, op, a, b, False), f"{ty} {a} {op} {b} trapped: {err}")
+                self.assertEqual((code, err.split("\n")[0]), (1, f"runtime error: {OVER}"))
+                k += 1
+
+    def test_64_bit_checks_take_the_flags(self):
+        # MYLA-430 (M27): a checked 64-bit `*` divided to find an overflow
+        # (std.rt's `mul_overflows_i64`); now the target's flags, or on
+        # wasm32 a short cut for operands in the int32 range
+        with tempfile.TemporaryDirectory() as tmp:
+            path = write_program(tmp, SHAPES)
+            proc = subprocess.run([selfhost_tool("gen_main"), path, STDLIB_ROOT, "--checked", "--no-inline",
+                                   *target_flags()], capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertFalse("mul_overflows" in proc.stdout, "std.rt's division by the operand is called")
+        body = {name: function_body(proc.stdout, name) for name in ["mul", "mulu", "add", "subu"]}
+        if TEST_TARGET == "aarch64-linux":
+            want = {"mul": ["smulh"], "mulu": ["umulh"], "add": ["adds", "cset x12, vc"], "subu": ["subs", "cset x12, cs"]}
+        elif TEST_TARGET == "wasm32-wasi":
+            want = {"mul": ["i64.shr_u", "i64.div_s"], "mulu": ["i64.shr_u", "i64.div_u"], "add": ["i64.ge_s"],
+                    "subu": ["i64.ge_u"]}
+        else:
+            want = {"mul": ["imulq", "jno"], "mulu": ["mulq", "jno"], "add": ["addq", "jno"], "subu": ["subq", "jnc"]}
+        for name, needles in want.items():
+            for needle in needles:
+                self.assertIn(needle, body[name], f"{name}:\n{body[name]}")
+            if TEST_TARGET != "wasm32-wasi":
+                self.assertNotIn("div", body[name], f"{name}:\n{body[name]}")
+
     def test_what_fits_is_the_same_everywhere(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = write_program(tmp, FITS)

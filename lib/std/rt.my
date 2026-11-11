@@ -157,39 +157,6 @@ pub fun str_eq(a: str, b: str) -> bool {
     return __equal_bytes(pa + 8, pb + 8, n)
 }
 
-// Whether `a * b` doesn't fit an `int64`: a checked build's `*` at 64 bits
-// (D175), where no wider type holds the product. By division (CERT INT32-C),
-// which can't overflow itself.
-#test(3037000499i64, 3037000499)[false]
-#test(3037000500i64, 3037000500)[true]
-#test(-1i64, -9223372036854775807 - 1)[true]
-#test(-9223372036854775807i64 - 1, 1)[false]
-#test(-3037000500i64, 3037000500)[true]
-#test(-4611686018427387904i64, 2)[false]
-#test(-4611686018427387904i64, -2)[true]
-#test(0i64, -9223372036854775807 - 1)[false]
-pub fun mul_overflows_i64(a: int64, b: int64) -> bool {
-    let max: int64 = 9223372036854775807
-    let min: int64 = -9223372036854775807 - 1
-    if a > 0 {
-        return if b > 0 { a > max / b } else { b < min / a }
-    }
-    if b > 0 {
-        return a < min / b
-    }
-    return a != 0 && b < max / a
-}
-
-// Whether `a * b` doesn't fit a `uint64` (D175, as `mul_overflows_i64`).
-#test(4294967296u64, 4294967295)[false]
-#test(4294967296u64, 4294967296)[true]
-#test(0u64, 18446744073709551615)[false]
-#test(18446744073709551615u64, 1)[false]
-#test(18446744073709551615u64, 2)[true]
-pub fun mul_overflows_u64(a: uint64, b: uint64) -> bool {
-    return b != 0 && a > 18446744073709551615 / b
-}
-
 // `a < b` and the other orderings of strings (MYLA-318): -1, 0 or 1, as
 // `Ord`'s `cmp` gives them, by the first byte that differs (unsigned), or
 // the shorter first when one begins the other; the order `list_dir` sorts
