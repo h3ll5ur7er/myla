@@ -107,8 +107,9 @@ pub fun backend_std_functions() -> [str] {
 // `std` (`DeclOrigin.lazy`), each the marker of an unread body until the
 // checker first checks it. `ids` are their declarations (an impl, for a
 // method), `keys` the bodies (`body_key`), and `parse` reads one, lexed,
-// parsed and renamed as the rest of its module was. Its errors are a lex, parse or module error's:
-// each message starts with its kind (`parse error: …`, `kind_of`).
+// parsed and renamed as the rest of its module was. Its errors are a lex,
+// parse or module error's: each message starts with its kind (`parse
+// error: …`, `kind_of`).
 // `task_line`: the line of an `async let` in one of them, 0 if none has one
 // or nobody asked: what makes a native build's program one with tasks
 // (`Checker.task_line`), as if every body was read (MYLA-413).
@@ -8609,20 +8610,7 @@ impl Checker {
     // ask for, as their bodies may never be read (MYLA-432).
     #test(checker_on("[int]"))[[:]]
     fun unmarked_std(self) -> [str: bool] {
-        var may_wait: [int32: bool] = [:]
-        for d in self.decls {
-            let lazy = match d.kind {
-                DeclKind.ImplDecl(t, ms, tps, None, targs, attrs) => true,
-                DeclKind.FunDecl(fd) => true,
-                _ => false,
-            }
-            if lazy {
-                match self.std_impls.get(d.id) {
-                    Some(o) => { if o.lazy { may_wait[d.id] = true } },
-                    None => {},
-                }
-            }
-        }
+        let may_wait = self.lazy_decls()
         var out: [str: bool] = [:]
         for sig in self.functions {
             if sig.has_decl && may_wait.contains(sig.decl_id) && !self.called.contains(sig.name) { out[sig.name] = true }
