@@ -14,6 +14,7 @@ Work package P8 of [[Project/Review-2026-11-09]] (wave A2). Files: `lib/std/http
 - [x] `url.resolve` with dot segments, used by the redirects ([[MYLA-329]])
 - [x] [[MYLA-329]]'s follow-up: `Url.to_str` keeps a port's leading zeros out (or refuses them)
 - [x] Two `Host` fields, a NUL and a bare CR in a header are refused
+- [x] [[MYLA-472]] (P9's finding, taken in at the integrator's request): a gzip or deflate body is decoded within the body limit, on P9's `max_output` (commit c3dc460 cherry-picked)
 
 ## What changed
 
@@ -31,7 +32,7 @@ Work package P8 of [[Project/Review-2026-11-09]] (wave A2). Files: `lib/std/http
 - **Replay, before:** `NoReplay` (a raw Python server that logs each request) logged `POST /swallow` and `POST /swallow-async` twice, interpreted and built. After: once each, the dropped GET twice, and a POST after a kept connection the server closed goes on a new connection once.
 - **Time limits, before** (the review's t_slow scenarios, `slow.py` in the lane's scratchpad, against the server built from the base): two clients that never read a 30 MB response held both workers (a request 3 s later timed out after 5 s); 64 silent connections against the default options: a request timed out after 8 s; a 3 s upload with `keep_alive_ms=1000`: `400 Bad Request`, "connection closed inside a message". **After:** the 64 silent connections: answered after 4.7 s; the upload: `200 OK` with its 30 bytes. `TimeLimits` (3 tests, interpreted and built): silent connections closed after `idle_ms` without an answer while a request is served; two non-reading clients of an 8 MiB response closed after `write_ms` and a request served; a 700 ms handler not cut by 300 ms limits, its connection kept; a 1.2 s upload past `keep_alive_ms` read whole and answered with `Connection: close`; a dribbled head answered 408 after `read_ms`; 64 silent connections hold a default server 3 to 9 s. Mutations: without the guard's shutdown of a sending connection, the first test hangs (2 errors); without the handler's mark, it fails (2 failures).
 - **Speed** (natively, 4 workers, the machine loaded by four other lanes, interleaved with the base): 60,000 keep-alive GETs took 47 to 48 µs of the server's CPU each against 53 to 57 µs before (16,400 to 18,700 a second against 12,800 to 17,400); 100 MB down 608 to 664 ms against 724 to 848 ms. A first version kept the time in an actor (three calls a request): 125 to 142 µs a request, 5,700 to 11,700 a second; without its notifies the same, without its actor calls 49 to 58 µs — so the guard reads a notifier's generation instead.
-- `build/myla test lib/std/http.my --stdlib lib`: 219/219 interpreted, `--native`, `--target aarch64-linux` (qemu) and `--target wasm32-wasi` (Node); `url.my`: 162/162 on each (`myla test` has no `--checked`: the interpreter traps on overflow).
+- `build/myla test lib/std/http.my --stdlib lib`: 221/221 (219 before MYLA-472) interpreted, `--native`, `--target aarch64-linux` (qemu) and `--target wasm32-wasi` (Node); `url.my`: 162/162 on each (`myla test` has no `--checked`: the interpreter traps on overflow).
 - `tests.burn.test_http`: 9 tests OK natively (one skipped: `HttpOnWasm`), with `MylaServer` also `--checked`.
 
 ## Proposals (open decisions)
