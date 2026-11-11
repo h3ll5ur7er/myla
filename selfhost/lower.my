@@ -2774,8 +2774,8 @@ impl Lower {
 
     // `for v in xs { body }`: the loop holds a reference to the list (dropped
     // when it ends, or by a `return` from the body), walks it by index, and
-    // `v` borrows each element in turn. Over a map, the list is a new one of
-    // its keys.
+    // `v` borrows each element in turn. Over a map, `for_map`, or with a
+    // std.rt without `map_walk` the list is a new one of its keys.
     fun for_list(var self, cg: CodeGen, vn: str, it: Expr, body: Block) {
         let it_t = cg.type_of(it.id)
         if is_tstr(it_t) {
@@ -2784,6 +2784,10 @@ impl Lower {
         }
         if (!is_list_t(it_t) && !is_map_t(it_t)) || !lowerable(cg, it_t) {
             let d = self.unsupported("a for loop over that type")
+            return
+        }
+        if is_map_t(it_t) && cg.has_func("std$rt$map_walk") {
+            self.for_map(cg, vn, it, body)
             return
         }
         var lt = it_t
@@ -2851,6 +2855,86 @@ impl Lower {
         self.start(done)
         self.drop_owners(self.owners.len() - 1)
         self.owners.pop()
+    }
+
+    // `for k in m { body }` over a map (MYLA-496): the loop holds the map, as
+    // `for_list` a list, so it walks the keys it started with (a change in
+    // the body copies the map first), and steps from slot to slot in the
+    // order of insertion (std.rt's `map_walk`), `k` borrowing each key from
+    // its slot, without the list of the keys (std.rt's `map_keys`): a loop
+    // that leaves early costs the keys it walked, not the map's size.
+    fun for_map(var self, cg: CodeGen, vn: str, it: Expr, body: Block) {
+        let mt = cg.type_of(it.id)
+        let kt = map_key(mt)
+        let i64 = Type.TInt(64, true)
+        let held = self.value_slot(cg, "__iterated", mt, true)
+        self.begin_temps()
+        let v = self.expr(cg, it)
+        self.add(Inst.Store(held, v))
+        // a fixed iterable needs no snapshot of its own (MYLA-122)
+        if self.fixed_place(it) { self.f.slots[held].owns = false } else { self.retain(cg, mt, v) }
+        self.end_temps()
+        var loop_owners: [int32] = []
+        self.owners.push(loop_owners)
+        self.own(held)
+        // the slot of the key the loop is at, 0 past the last
+        let at = self.new_slot("__entry", i64, 8, -1, false)
+        self.map_step(cg, mt, held, at, self.int_const(0))
+        let elem = self.value_slot(cg, vn, kt, false)
+        let body_b = self.new_block()
+        let cont = self.new_block()
+        let done = self.new_block()
+        self.entry_test(at, body_b, done)
+        self.start(body_b)
+        let p = self.temp(i64)
+        self.add(Inst.Load(p, at))
+        let off = cg.map_key_off(mt)
+        if is_aggregate(kt) {
+            self.add(Inst.Copy(self.slot_addr(elem), self.offset(p, off), cg.size(kt)))
+        } else {
+            let x = self.temp(kt)
+            self.add(Inst.LoadAt(x, p, off, 8))
+            self.add(Inst.Store(elem, x))
+        }
+        let depth = self.owners.len()
+        self.open_scope()
+        self.declare_as(vn, elem, true)
+        self.add(Inst.Bind(vn, elem))
+        self.loops.push(LoopTarget { cont: cont, brk: done, owners: depth, temps: self.temps.len() })
+        for st in body.stmts { self.stmt(cg, st) }
+        self.loops.pop()
+        self.close_scope()
+        self.finish(Term.Jmp(cont))
+        self.start(cont)
+        let p2 = self.temp(i64)
+        self.add(Inst.Load(p2, at))
+        self.map_step(cg, mt, held, at, p2)
+        self.entry_test(at, body_b, done)
+        self.start(done)
+        self.drop_owners(self.owners.len() - 1)
+        self.owners.pop()
+    }
+
+    // The slot of the map in `held` (of type `mt`) after the slot `after` in
+    // the order of insertion (0: its first) stored in `at`, 0 past its last.
+    fun map_step(var self, cg: CodeGen, mt: Type, held: int32, at: int32, after: int32) {
+        let i64 = Type.TInt(64, true)
+        let cell = self.temp(mt)
+        self.add(Inst.Load(cell, held))
+        let next = self.temp(i64)
+        self.add(Inst.Call(next, "std$rt$map_walk", [cell, self.int_const(cg.map_slot_size(mt)), after]))
+        self.add(Inst.Store(at, next))
+    }
+
+    // The block ended with `at`'s slot address tested: on to `yes` when it
+    // names a slot, else to `no`.
+    fun entry_test(var self, at: int32, yes: int32, no: int32) {
+        let i64 = Type.TInt(64, true)
+        let p = self.temp(i64)
+        self.add(Inst.Load(p, at))
+        let c = self.temp(Type.TBool)
+        self.add(Inst.Cmp(c, "!=", i64, p, self.int_const(0)))
+        self.finish(Term.Br(c, yes, no))
     }
 
     // `for c in s { body }` over a string's characters (MYLA-318): the loop
