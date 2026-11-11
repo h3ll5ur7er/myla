@@ -150,7 +150,16 @@ The digits come from the system's entropy (`__random_bytes`), and the name is ma
 
 ## Measurements
 
-On x86-64 natively, with a loop of `read_str(1 << 20)` and `write_str` through two `File`s, best of three (2026-11-08): 4 GiB (4,096 reads of 1 MiB) from `/dev/zero` to `/dev/null` in 96 ms, at a maximum resident set of 8.6 MB, where 1 MiB takes 8.5 MB and 1 GiB 8.5 MB: the memory doesn't grow with the size. A 256 MiB file of random bytes to a new file (in the page cache) in 139 ms, 1.9 GB/s. Since D177 the loop is `read(1 << 20)` and `write`, a `File` reading into and writing from a `[uint8]` (`__read_bytes`, `__write_bytes`): the 4 GiB in 106 to 111 ms, as through `read_str` and `write_str` (108 to 112 ms) on the same machine (2026-11-09), where converting the bytes from and to a `str` took 467 to 510 ms ([[MYLA-399]]).
+Natively on x86-64, measured on the development container (4 cores of a Xeon at 2.1 GHz, shared with other work: a load of 3.5 to 5), 2026-11-11, the best of 16 runs in two sets (of 14 for the 1 MiB, of 5 for the 1 GiB), with a loop of `read(1 << 20)` and `write` through two `File`s:
+
+| What | Time | Largest resident set |
+| --- | ---: | ---: |
+| 4 GiB (4,096 reads of 1 MiB) from `/dev/zero` to `/dev/null` | 82 ms | 11.4 MB |
+| 1 GiB from a pipe to `/dev/null` | 29 ms | 11.4 MB |
+| 1 MiB from a file to `/dev/null` | 2.4 ms | 11.4 MB |
+| A 256 MiB file of random bytes to a new file (in the page cache) | 191 ms, 1.4 GB/s | 11.4 MB |
+
+The memory doesn't grow with the size. A `File` reads into a `[uint8]` and writes from one itself (`__read_bytes`, `__write_bytes`, D177): converting the bytes from and to a `str` instead made the 4 GiB take 467 to 510 ms ([[MYLA-399]], 2026-11-09). `std.io`'s `copy` and the size of its pieces are measured on its page ([[Language/Standard-library/Io#speed]]).
 
 ## Directory primitives
 

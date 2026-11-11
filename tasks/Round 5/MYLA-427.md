@@ -11,12 +11,12 @@ Work package P13 of [[Project/Review-2026-11-09]] (wave A2), with round 4's addi
 - [x] The stale sentences of §3.3: `Types.md:42` (tuples can't be compared), `Heap.md:89`, `Option.md`'s lambda note ([[MYLA-324]]), `Int.md` and `Char.md` line 3, the Set, Deque and Heap pages on MYLA-353 and iterators ([[MYLA-330]]), `Url` and `Eq`
 - [x] [[Project/Known-issues]]: remove the 20 tasks that are done
 - [x] Undocumented `pub` items (`fmt.spec_need`, `io.errno_text`, methods on a dozen pages); runnable blocks for Fmt, Rt, Slice, Test and the four pages [[MYLA-325]] names
-- [ ] The Regex, Time and Io pages with the reference part first. Open: wave A2's P7 ([[MYLA-421]]), P11 ([[MYLA-425]]) and P6 ([[MYLA-420]]) are changing those pages; restructuring them now would turn every merge into a conflict. It follows wave A2's merge
+- [x] The Regex, Time and Io pages with the reference part first (after wave A2's merge, in round 5's follow-up)
 - [x] Evidence counts in task files and pages that later refactors changed
 - [x] D178 in [[Language/Methods-and-traits]] with the call-site error once [[MYLA-417]] builds it
 - [x] D179 in [[Development/Conventions]]: library editors run `myla test` on the module they changed
 - [x] D180: Net.md's line-protocol example and the warning that `buffered(s)` blocks its worker: written by [[MYLA-419]] (P5), with the async line reader it uses (`net.line_reader`, a tested block in [[Language/Standard-library/Net]])
-- [ ] Io.md, Fs.md and Process.md: performance sections as current numbers, not histories of `read_str` measurements. Open: P6 and P5 are changing those pages and the code they measure, and the numbers need re-measuring through `read` on a quiet machine (this one ran five lanes, load 3 of 4 cores). It follows wave A2's merge
+- [x] Io.md, Fs.md and Process.md: performance sections as current numbers, not histories of `read_str` measurements (after wave A2's merge, in round 5's follow-up)
 
 ## Evidence
 
@@ -46,3 +46,14 @@ Each claim was checked against the code on `95785ab` (wave A1 integrated) before
 - **D179.** [[Development/Conventions]] already has the rule (`build/myla test lib/std/<module>.my --stdlib lib` after changing a module), from MYLA-416.
 - All 42 wiki links added resolve to a page, a file or a task.
 - Suites: `scripts/test.sh fast` `Ran 829 tests … OK (skipped=3)`. The full `scripts/test.sh` wasn't run: the package changes no code, only `docs/` and `tasks/`, and the tests that read either are `test_doc_blocks`, `test_lsp` and the corpus tests of the fast suite.
+
+## Evidence of the follow-up (2026-11-11)
+
+The two items left open, on `bccc624` (round 5 with D188 and D189):
+
+- **Reference first.** Paragraphs moved, not rewritten, apart from a lead-in sentence for a new table and the numbers of the next item.
+  - [[Language/Standard-library/Io]]: the reference (writing, Reading with the async reads, Streams with the traits, this module's streams, any stream, a stream of your own) comes first, then a new "How it works" with the paragraphs on linear reads, short reads' cells, the descriptors' byte primitives and `copy`'s pieces, then "Speed". The sentence on a failed read in the middle of a line stayed in Reading, as reference.
+  - [[Language/Standard-library/Time]]: "How it works" (the day counting, the cases that check it and the wall clock primitive) moved from inside DateTime to the end, after Errors, with the sentence on the 2000 durations checked against Go.
+  - [[Language/Standard-library/Regex]] already had the reference first. `RegexError` and `ErrorKind` moved from the functions' table to an "Errors" section after "Bytes and UTF-8", before "How it matches", as the Http, Compress and Time pages have it.
+  - Anchors other pages link to (`Io#streams`, `Io#speed`, `Fs#descriptor-and-entropy-primitives`, `Process#children-as-streams`, `Process#process-primitives`) are unchanged. A scan of every `[[…]]` in the five pages and the task files that link to them finds a page, task, file or heading for each, and only the false hits `[[:alpha:]]` and `[[:^alpha:]]` inside Regex's code. `python3 -m unittest tests.burn.test_doc_blocks`: `Ran 3 tests … OK`.
+- **Current numbers.** Every case the three sections cite, re-measured natively on this container (4 cores of a Xeon at 2.1 GHz, shared with five other lanes: load 3.5 to 5), the best of 16 runs in two sets, by a program outside the suite (50 MB of random lines of up to 120 bytes, 819,831 lines; a 256 MiB file of random bytes; 8 and 16 MiB lines). The histories of `read_str` measurements are gone; what explains a design choice stays, dated: the quadratic reads before MYLA-420, the short reads' cells on wasm32, the conversion step D177 removed (481 ms against 111 ms for 4 GiB), the copying pipeline before MYLA-378 (918 to 2,187 ms). `copy`'s 64 KiB was measured again against 4, 16 and 128 KiB with copies of the library: 380, 239, 159 and 197 ms for the 256 MiB file to a new file, 51, 38, 34 and 35 ms to `/dev/null`. Selected numbers: `stdin().read_line()` over the 50 MB 78 ms (the page said 75 and 131 to 133), 4 GiB through two `File`s 82 ms at 11.4 MB resident, as for 1 MiB and 1 GiB, a `ChildStdout` of 256 MiB 107 ms (a shell's `head | cat` 68), the pipeline through `wc -c` 127 ms (a shell's 93), interpreted 2 MB of lines 4.4 s (the page said 6.67 to 6.80).
