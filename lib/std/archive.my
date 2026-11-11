@@ -20,7 +20,7 @@
 import std.compress as compress
 from std.compress import CompressError
 from std.io import Read, Write, from_bytes, memory_stream
-from std.fs import IoError, io_error_name
+from std.ioerror import IoError, io_error_name
 import std.path as path_m
 import std.time as time
 import std.checksum as checksum_m

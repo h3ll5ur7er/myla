@@ -18,7 +18,7 @@
 // `deflate_writer`, `gzip_writer` and `zlib_writer` make.
 
 from std.io import Read, Write, from_bytes, memory_stream, MemoryStream
-from std.fs import IoError, io_error_name
+from std.ioerror import IoError, io_error_name
 import std.list as list_m // `filled`
 import std.bytes as bytes_m // `from_str`, `to_str` in the tests
 import std.option as option_m
@@ -121,8 +121,8 @@ impl Format for CompressError {
     }
 }
 
-// The errno of an `IoError`, as std.fs's `from_errno` reads it (an `Other`
-// with a number it names stays apart: 1000 more).
+// The errno of an `IoError`, as std.ioerror's `from_errno` reads it (an
+// `Other` with a number it names stays apart: 1000 more).
 #test(IoError.NotFound)[2]
 #test(IoError.Other(2))[1002]
 fun io_code(e: IoError) -> int32 {

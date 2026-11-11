@@ -8,7 +8,7 @@
 // Output is not buffered, so whatever a program wrote is out before it waits
 // for input.
 
-from .fs import IoError, from_errno
+from .ioerror import IoError, from_errno
 
 // Write `s`'s bytes to file descriptor `fd` (1 = stdout, 2 = stderr), all of
 // them, or the error that stopped it (D146). A closed pipe on the standard

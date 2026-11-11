@@ -2,7 +2,7 @@
 id: MYLA-432
 title: "P18 Check time: IoError on its own, then lazy std modules"
 type: improvement
-status: todo
+status: in-progress
 priority: medium
 labels: [check-time, loader, round-5]
 ---

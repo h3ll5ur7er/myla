@@ -29,7 +29,7 @@
 
 import std.net as net
 from std.net import TcpStream, TcpListener, SocketAddr, IpAddr
-from std.fs import IoError, io_error_name
+from std.ioerror import IoError, io_error_name
 from std.io import Read, Write
 import std.url as url_m
 import std.compress as compress

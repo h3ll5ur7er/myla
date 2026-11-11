@@ -13,7 +13,7 @@
 // time, holding only the record it reads and a chunk of the stream.
 
 from std.io import Read, from_str, short_reads
-from std.fs import IoError
+from std.ioerror import IoError
 import std.bytes as bytes_m // `to_str`: a stream's bytes
 
 // What is wrong with a text.

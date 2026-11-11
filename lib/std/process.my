@@ -2,7 +2,7 @@
 // environment, termination, and child processes (D73, D129, D147).
 
 from .io import Read, Write, Pollable, buffered
-from .fs import IoError, from_errno
+from .ioerror import IoError, from_errno
 import .bytes as bytes_m
 
 // The process command-line arguments, captured at startup. `args()[0]` is the

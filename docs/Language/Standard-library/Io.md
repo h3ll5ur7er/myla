@@ -28,7 +28,7 @@ A write to the standard output or error whose pipe nobody reads any more (`myla 
 
 ## Reading
 
-Reading goes through a buffered `Reader` ([[MYLA-78]]), a `Buffered` over the descriptor (below). Keep it in a `var`, or in a field of a struct whose `var self` methods read from it (Myla has no references, so a function can't take a reader to read from). A read blocks until there is input or the input ends; the bytes come back verbatim, and an error is the errno as an `IoError` from `std.fs`.
+Reading goes through a buffered `Reader` ([[MYLA-78]]), a `Buffered` over the descriptor (below). Keep it in a `var`, or in a field of a struct whose `var self` methods read from it (Myla has no references, so a function can't take a reader to read from). A read blocks until there is input or the input ends; the bytes come back verbatim, and an error is the errno as an `IoError` from `std.ioerror`, which `std.fs` re-exports.
 
 | Item | Result |
 | --- | --- |
