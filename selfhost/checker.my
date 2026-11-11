@@ -6957,14 +6957,16 @@ struct Serial {
     table: str,
     table_word: str,
     has_null: bool,
+    // the decision that gave the format its derive
+    decision: str,
 }
 
 fun json_serial() -> Serial {
-    return Serial { name: "Json", method: "json", title: "JSON", table: "Object", table_word: "an object", has_null: true }
+    return Serial { name: "Json", method: "json", title: "JSON", table: "Object", table_word: "an object", has_null: true, decision: "D172" }
 }
 
 fun toml_serial() -> Serial {
-    return Serial { name: "Toml", method: "toml", title: "TOML", table: "Table", table_word: "a table", has_null: false }
+    return Serial { name: "Toml", method: "toml", title: "TOML", table: "Table", table_word: "a table", has_null: false, decision: "D176" }
 }
 
 // The source of the derived impls of `f` (`impl ToJson` and `impl
@@ -7422,7 +7424,7 @@ impl Checker {
             match self.serial_prefix(f) {
                 Some(pre) => {
                     if name != "" && (trnm == f"{pre}To{f.name}" || trnm == f"{pre}From{f.name}") {
-                        return [Note { label: "help", msg: f"'#derive({f.name})' on '{name}' gives it 'To{f.name}' and 'From{f.name}' (D172)", line: 0, col: 0, sp: no_span() }]
+                        return [Note { label: "help", msg: f"'#derive({f.name})' on '{name}' gives it 'To{f.name}' and 'From{f.name}' ({f.decision})", line: 0, col: 0, sp: no_span() }]
                     }
                 },
                 None => {},
