@@ -1,0 +1,8 @@
+//~ type error: invalid format spec 'std$iter$sum'
+//~ span: x
+// The spec is the program's own text: a `$` in it isn't a module's name to
+// rewrite (MYLA-383, MYLA-417).
+fun main() {
+    let x = 1
+    print(f"{x:std$iter$sum}")
+}

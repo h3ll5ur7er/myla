@@ -7562,6 +7562,240 @@ fun main() {
     print(one.len())
 }
 """,
+    # M24 (MYLA-417): `()` as a type argument
+    "unit_as_a_type_argument": r"""// M24 (MYLA-417): `()` as a type argument, written or inferred from a
+// function without a result: `() -> T` with `T` the unit type is `() -> ()`
+import std.bench as bench
+
+fun work() {
+}
+
+fun twice<T>(f: () -> T) -> [T] {
+    return [f(), f()]
+}
+
+fun main() {
+    let r = bench.run_n<()>("u", 3, () => work())
+    print(r.runs)
+    let r2 = bench.run_n("v", 2, () => work())
+    print(r2.runs)
+    let xs = twice(() => work())
+    print(xs.len())
+    let ys: [()] = twice(work)
+    print(ys.len())
+    let g: () -> () = () => work()
+    print(twice(g).len())
+    print(twice(() => 7)[1])
+}
+""",
+    # L2 (MYLA-417): earlier literals take the type a later element fixes
+    "literals_take_the_type_a_later_element_fixes": r"""// L2 (MYLA-417): the literals before the element that fixes a literal's
+// type take that type, each checked again against it, in lists, map keys
+// and map values
+fun main() {
+    let big: int64 = 5000000000
+    let a = [1, -2, 3, big]
+    print(a[1] * big)
+    let b = [200, 100, 255u8]
+    print(b[2] - b[0] + b[1])
+    let f = [1.5, -2.25, 0.5f32]
+    print(f[1])
+    let m = [1: 40000, 2: 7, 3: big]
+    print(m[1] * big)
+    let k = [7: "a", 300: "b", 3u16: "c"]
+    for x in k.keys().sorted() { print(x * 200) }
+    let c = ['a', 'b', 99u8]
+    print(c[1] + c[2])
+    let n = [-1, -128, 5i8]
+    print(n[1])
+}
+""",
+    # D182 (MYLA-417): `Option` and `Result` are `Hash`
+    "option_and_result_as_map_keys": r"""// D182 (MYLA-417): `Option` and `Result` derive `Hash` in the prelude, so
+// an `Option` or `Result` of hashable types is a map key, and a derived key
+// struct may have such a field
+#derive(Eq, Hash)
+struct Key {
+    name: str,
+    port: Option<int>,
+}
+
+fun count_distinct<K: Eq + Hash>(xs: [K]) -> int {
+    var seen: [K: bool] = [:]
+    for x in xs { seen[x] = true }
+    return seen.len()
+}
+
+fun main() {
+    var m: [Option<int>: str] = [:]
+    m[Some(1)] = "one"
+    m[None] = "none"
+    m[Some(2)] = "two"
+    m[Some(1)] = "uno"
+    print(m.len())
+    print(m[Some(1)])
+    print(m.get(None).unwrap_or("?"))
+    print(m.contains(Some(3)))
+    var r: [Result<str, int>: int] = [:]
+    r[Ok("a")] = 1
+    r[Err(1)] = 2
+    r[Ok("a")] = r[Ok("a")] + 10
+    print(r[Ok("a")] + r[Err(1)])
+    let keys = [Key { name: "a", port: None }, Key { name: "a", port: Some(80) }, Key { name: "a", port: None }]
+    print(count_distinct(keys))
+    print(count_distinct([Some(Some(1)), Some(None), None, Some(Some(1))]))
+    let h1 = Hasher { state: 7 }.add(Some("x")).finish()
+    let h2 = Hasher { state: 7 }.add(Some("x")).finish()
+    let h3 = Hasher { state: 7 }.add(Some("y")).finish()
+    print(h1 == h2)
+    print(h1 == h3)
+    var t: [(Option<str>, int): int] = [:]
+    t[(None, 1)] = 5
+    print(t[(None, 1)])
+}
+""",
+    # MYLA-417: a lambda result, `?` and a variant on the left of `==` take the types the call knows
+    "inference_through_lambdas_try_and_variants": r"""// MYLA-417: inference follow-ups. A lambda's result takes what the call
+// knows of it (`and_then`'s `E` from the receiver, MYLA-356); the type
+// expected of `e?` is expected of `e`, with the function's error type
+// (MYLA-315); `Tree.Leaf == t` types the variant by `t` (MYLA-379)
+struct B<T> {
+    items: [T],
+}
+
+#derive(Eq)
+enum Tree<T> {
+    Leaf,
+    Node(T),
+}
+
+fun mk<T>() -> B<T> {
+    return B { items: [] }
+}
+
+fun try_mk<T>(ok: bool) -> Result<B<T>, str> {
+    if ok { return Ok(mk()) }
+    return Err("no")
+}
+
+fun opt_mk<T>(ok: bool) -> Option<B<T>> {
+    if ok { return Some(mk()) }
+    return None
+}
+
+fun use_q(ok: bool) -> Result<int, str> {
+    let a: B<int> = try_mk(ok)?
+    var b: B<str> = try_mk(ok)?
+    b.items.push("x")
+    return Ok(a.items.len() + b.items.len())
+}
+
+fun use_o(ok: bool) -> Option<int> {
+    let a: B<int64> = opt_mk(ok)?
+    return Some(a.items.len())
+}
+
+fun main() {
+    let r: Result<int, str> = Ok(2)
+    print(r.and_then((x) => Ok(x + 1)) == Ok(3))
+    let bad: Result<int, str> = Err("e")
+    print(bad.and_then((x) => Ok(x * 2)) == Err("e"))
+    let o: Option<int> = Some(4)
+    print(o.and_then((x) => Some(x + 1)) == Some(5))
+    print(use_q(true) == Ok(1))
+    print(use_q(false) == Err("no"))
+    print(use_o(true) == Some(0))
+    print(use_o(false) == None)
+    let t: Tree<int> = Tree.Node(3)
+    print(Tree.Leaf == t)
+    print(Tree.Node(3) == t)
+    print(Tree.Node(4) != t)
+}
+""",
+    # MYLA-380 follow-up (MYLA-417): an enum as a stateful iterator
+    "enum_var_self_assigns_self": r"""// MYLA-380's follow-up (MYLA-417): an enum's `var self` method assigns
+// `self`, which writes the caller's place, so an enum can be a stateful
+// iterator; payloads that own memory, a place in a struct and in a list
+enum Count {
+    Left(int),
+    Done,
+}
+
+impl Iterator<int> for Count {
+    fun next(var self) -> Option<int> {
+        match self {
+            Left(n) => {
+                if n == 0 { self = Count.Done } else { self = Count.Left(n - 1) }
+                return Some(n)
+            }
+            Done => { return None }
+        }
+    }
+}
+
+enum Words {
+    Rest([str]),
+    Empty,
+}
+
+impl Words {
+    fun take(var self) -> str {
+        return match self {
+            Rest(ws) => {
+                if ws.len() <= 1 { self = Words.Empty } else { self = Words.Rest(ws[1:]) }
+                ws[0]
+            }
+            Empty => "",
+        }
+    }
+}
+
+enum Light {
+    Red,
+    Green,
+    Amber,
+}
+
+impl Light {
+    fun step(var self) {
+        self = match self {
+            Red => Light.Green,
+            Green => Light.Amber,
+            Amber => Light.Red,
+        }
+    }
+
+    fun name(self) -> str {
+        return match self {
+            Red => "red",
+            Green => "green",
+            Amber => "amber",
+        }
+    }
+}
+
+struct Crossing {
+    light: Light,
+}
+
+fun main() {
+    for x in Count.Left(3) { print(x) }
+    var w = Words.Rest(["a", "bb", "ccc"])
+    let first = w.take()
+    print(first + w.take() + w.take() + w.take() + "|")
+    var c = Crossing { light: Light.Red }
+    c.light.step()
+    c.light.step()
+    print(c.light.name())
+    var ls = [Light.Amber, Light.Red]
+    ls[1].step()
+    print(ls[0].name() + " " + ls[1].name())
+    var total = 0
+    var it = Count.Left(4)
+    while let Some(n) = it.next() { total += n }
+    print(total)
+}
+""",
 }
 
 # A program that allocates far more recursive-enum cells (~12M) than the heap
@@ -9068,6 +9302,16 @@ PINNED = {
     # literals and holes read as generic calls); native code gives the same
     "comparisons_in_literals_and_holes": "4\nfalse\ntrue\ntrue\n1\n2\ntrue true\nbelow: false, above: false\n"
                                          "false5 > (9)\n false and true\n2\n5\nseven\n2\n",
+    # M24 (MYLA-417): new ("expected '() -> ()', found '() -> ()'" before); native code gives the same
+    "unit_as_a_type_argument": '3\n2\n2\n2\n2\n7\n',
+    # L2 (MYLA-417): new ("[-1, -128, 5i8]" was a type error, "[1, 2, x]" left 2 an int32); native code gives the same
+    "literals_take_the_type_a_later_element_fixes": '-10000000000\n155\n-2.25\n200000000000000\n600\n1400\n60000\n197\n-128\n',
+    # D182 (MYLA-417): new ("'Option<int32>' isn't Hash" before); native code gives the same
+    "option_and_result_as_map_keys": '3\nuno\nnone\nfalse\n13\n2\n3\ntrue\nfalse\n5\n',
+    # MYLA-417: new ("cannot infer type parameter(s) E", "T for 'try_mk'" before); native code gives the same
+    "inference_through_lambdas_try_and_variants": 'true\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\nfalse\ntrue\ntrue\n',
+    # MYLA-417: new ("cannot reassign 'self'" before); native, aarch64 and wasm32 give the same
+    "enum_var_self_assigns_self": '3\n2\n1\n0\nabbccc|\namber\namber green\n10\n',
 }
 
 

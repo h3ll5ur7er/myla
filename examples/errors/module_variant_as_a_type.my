@@ -1,0 +1,11 @@
+//~ module error: 'Shape.Dot' is not a type: 'Shape' is an enum, and only a module has members
+//~ span: Shape.Dot
+// A variant isn't a type; `Shape` is (MYLA-371's follow-up, MYLA-417).
+enum Shape {
+    Dot,
+    Line,
+}
+
+fun main() {
+    let x: Shape.Dot = Shape.Dot
+}

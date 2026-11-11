@@ -831,7 +831,7 @@ impl Resolver {
                                 for b in split_bounds(od.detail) {
                                     match self.globals.get(b) {
                                         Some(g) => { for m in g.members { members.push(m) } },
-                                        None => {},
+                                        None => { for m in self.module_trait_members(b) { members.push(m) } },
                                     }
                                 }
                             },
@@ -967,6 +967,25 @@ impl Resolver {
 
     // The members reached through the type named `name` itself: an enum's
     // variants, and the methods of its impls (static ones among them).
+    // The members of the trait a bound names through a module, `json.ToJson`
+    // of `T: json.ToJson` (MYLA-398's follow-up): none for another name.
+    fun module_trait_members(var self, b: str) -> [Def] {
+        var dot = -1
+        var i = 0
+        while i < b.len() {
+            if b[i] == '.' { dot = i }
+            i += 1
+        }
+        if dot <= 0 { return [] }
+        let m = b[:dot]
+        if !self.modules.contains(m) { return [] }
+        let file = self.modules[m]
+        return match globals_of(file, self.module_symbols(file)).get(b[dot + 1:]) {
+            Some(g) => g.members,
+            None => [],
+        }
+    }
+
     fun members_named(self, name: str) -> [Def] {
         var out: [Def] = []
         match self.globals.get(name) {

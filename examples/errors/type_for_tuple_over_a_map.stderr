@@ -1,0 +1,6 @@
+type error: a loop over the map '[str: int32]' visits its keys, of type 'str', not its entries
+  --> examples/errors/type_for_tuple_over_a_map.my:8:19
+  |
+8 |     for (k, v) in m {
+  |                   ^
+help: write 'for (k, v) in m.items()' for the keys and values

@@ -1,0 +1,6 @@
+type error: type 'Box' has no function 'tag'
+  --> examples/errors/type_generic_static_call_hint.my:14:18
+   |
+14 |     print(Box.tag())
+   |           ^^^^^^^^^
+help: trait 'Tag' declares it: 'impl<T> Tag for Box<T>' would give 'Box' one

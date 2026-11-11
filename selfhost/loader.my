@@ -1280,6 +1280,10 @@ impl Renamer {
         let k = match t.kind {
             TypeKind.TRef(n, args) => {
                 let q = if contains_byte(n, '.') { self.module_type(n, t, true) } else { self.type_name(n) }
+                // a module's name alone (MYLA-371's follow-up)
+                if q == n && !contains_byte(n, '.') && !has(self.tys, n) && !self.env.contains(n) && self.aliases.contains(n) {
+                    self.fail(t.line, t.col, t.sp, format("'{}' is a module, not a type: name one of its types, '{}.T'", n, n))
+                }
                 TypeKind.TRef(q, self.ty_list(args))
             },
             TypeKind.TTuple(es) => TypeKind.TTuple(self.ty_list(es)),
@@ -1323,6 +1327,21 @@ impl Renamer {
             }
         }
         if mid == "" {
+            // a type of this module before the dot (`Shape.Dot`, a variant;
+            // MYLA-371's follow-up)
+            match self.env.get(parts[0]) {
+                Some(q) => {
+                    match self.kinds.get(q) {
+                        Some(kd) => {
+                            let what = if want_type { "a type" } else { "a trait" }
+                            self.fail(t.line, t.col, t.sp, format("'{}' is not {}: '{}' is {}, and only a module has members", n, what, parts[0], with_article(kd)))
+                            return n
+                        },
+                        None => {},
+                    }
+                },
+                None => {},
+            }
             let kind = if want_type { "type" } else { "trait" }
             self.fail(t.line, t.col, t.sp, format("unknown module '{}' in the {} '{}': a {} of another module is named through its 'import … as {}'", parts[0], kind, n, kind, parts[0]))
             return n
@@ -1345,6 +1364,11 @@ impl Renamer {
                         let fits = if want_type { is_type_kind(kind) } else { kind == "trait" }
                         if !last || !fits {
                             let what = if want_type { "a type" } else { "a trait" }
+                            // a name after it: only a module has members (L6)
+                            if !last {
+                                self.fail(t.line, t.col, t.sp, format("'{}' is not {}: '{}' is {} of module '{}', and only a module has members", n, what, join(parts[:k + 1], "."), with_article(kind), dotted_id(mid)))
+                                return n
+                            }
                             self.fail(t.line, t.col, t.sp, format("'{}' is {} of module '{}', not {}", join(parts[:k + 1], "."), with_article(kind), dotted_id(mid), what))
                             return n
                         }

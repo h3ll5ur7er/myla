@@ -1,0 +1,5 @@
+module error: 'Shape.Dot' is not a type: 'Shape' is an enum, and only a module has members
+  --> examples/errors/module_variant_as_a_type.my:10:12
+   |
+10 |     let x: Shape.Dot = Shape.Dot
+   |            ^^^^^^^^^

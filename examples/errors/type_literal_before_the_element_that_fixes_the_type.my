@@ -1,0 +1,8 @@
+//~ type error: integer literal 300 does not fit in 'uint8'
+//~ span: 300
+// A later element makes the list a [uint8]: the literals before it are checked
+// again against it, not only the first (L2, MYLA-417).
+fun main() {
+    let a = [1, 300, 3u8]
+    print(a[1])
+}

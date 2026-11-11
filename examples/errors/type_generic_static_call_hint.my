@@ -1,0 +1,15 @@
+//~ type error: type 'Box' has no function 'tag'
+//~ help: trait 'Tag' declares it: 'impl<T> Tag for Box<T>' would give 'Box' one
+// The hint for a generic type is an impl that can be written, with its type
+// parameters (MYLA-384's follow-up, MYLA-417).
+struct Box<T> {
+    v: T,
+}
+
+trait Tag {
+    fun tag() -> str
+}
+
+fun main() {
+    print(Box.tag())
+}

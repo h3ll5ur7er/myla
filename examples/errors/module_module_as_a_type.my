@@ -1,0 +1,8 @@
+//~ module error: 'deque' is a module, not a type: name one of its types, 'deque.T'
+//~ span: deque
+// A module's name alone isn't a type (MYLA-371's follow-up, MYLA-417).
+import std.deque as deque
+
+fun main() {
+    let x: deque = 1
+}

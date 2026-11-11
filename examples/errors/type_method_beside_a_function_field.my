@@ -1,0 +1,19 @@
+//~ type error: 'get' is a method of 'Cell<(int32) -> int32>' and its field 'get' holds a function here: bind the field first: let g = c.get
+//~ span: c.get(5)
+// `c.get(5)` finds the method `get`, while the field `get` holds a function
+// at this instantiation: which one is meant is unclear, so the call is an
+// error and the field is reached through a binding (D178, L1, MYLA-417).
+struct Cell<T> {
+    get: T,
+}
+
+impl<T> Cell<T> {
+    fun get(self, n: int) -> int {
+        return -n
+    }
+}
+
+fun main() {
+    let c = Cell { get: (x: int) => x + 1 }
+    print(c.get(5))
+}

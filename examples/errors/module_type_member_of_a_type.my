@@ -1,0 +1,9 @@
+//~ module error: 'deque.Deque.Item' is not a type: 'deque.Deque' is a struct of module 'std.deque', and only a module has members
+//~ span: deque.Deque.Item
+// A dotted type goes through modules: a type has no members (L6, MYLA-417).
+import std.deque as deque
+
+fun main() {
+    let x: deque.Deque.Item = 1
+    print(x)
+}

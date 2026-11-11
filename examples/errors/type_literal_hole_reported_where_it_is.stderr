@@ -1,0 +1,5 @@
+type error: cannot infer type argument(s) for 'None'; annotate the binding (e.g. ': Option<...>')
+  --> examples/errors/type_literal_hole_reported_where_it_is.my:6:21
+  |
+6 |     let a = [(None, None), (Some(1), None)]
+  |                     ^^^^
