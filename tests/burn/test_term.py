@@ -285,6 +285,150 @@ class Terminal(Case):
                 self.assertEqual((out, code), ("hello\nline hello\n", 0))
 
 
+# D187: a program that ends in raw mode, however it ends, leaves the terminal
+# as it found it; the argument says how it ends
+ENDS = """import std.term as term
+import std.process as process
+
+fun down(n: int) -> int {
+    return down(n + 1) + 1
+}
+
+#allow(primitive)
+fun main() {
+    let how = process.args()[1]
+    let raw = match term.raw_mode() {
+        Ok(r) => r
+        Err(e) => panic(f"raw_mode: {e}")
+    }
+    print("raw")
+    if how == "nested" {
+        // the inner one's restore puts back the outer's raw mode
+        let inner = match term.raw_mode() {
+            Ok(r) => r
+            Err(e) => panic(f"raw_mode: {e}")
+        }
+        let r = inner.restore()
+        panic("after the inner one")
+    }
+    if how == "left" {
+        // raw mode left: the hook goes, so raw again behind its back stays
+        let m = __term_get(0)
+        let r = raw.restore()
+        let s = __term_set(0, m)
+        return
+    }
+    if how == "exit" {
+        process.exit(3)
+    }
+    if how == "panic" {
+        panic("boom")
+    }
+    let n = process.args().len()
+    if how == "index" {
+        let xs = [1]
+        print(xs[n])
+    }
+    if how == "key" {
+        let m: [int: int] = [:]
+        print(m[n])
+    }
+    if how == "deep" {
+        print(down(n))
+    }
+}
+"""
+
+ENDS_ASYNC = """import std.term as term
+import std.task as task
+
+async fun fails() -> int {
+    await task.sleep(10)
+    panic("a task failed")
+}
+
+#main
+async fun main() {
+    let raw = match term.raw_mode() {
+        Ok(r) => r
+        Err(e) => panic(f"raw_mode: {e}")
+    }
+    print("raw")
+    async let a = fails()
+    print(await a)
+}
+"""
+
+
+@unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
+class RawModeEnds(Case):
+    """D187: raw mode ends with the program, through the runtime's exit hook:
+    a return from `main`, `exit`, a panic, a runtime error, a stack overflow,
+    a failed task; leaving raw mode removes the hook."""
+
+    COOKED = termios.ECHO | termios.ICANON | termios.ISIG
+
+    @classmethod
+    def setUpClass(cls):
+        cls.ends = Built(ENDS)
+        cls.ends_async = Built(ENDS_ASYNC)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.ends.close()
+        cls.ends_async.close()
+
+    def commands(self, built: Built, arg: str):
+        """("interpreted", argv, executable) and ("built", …), the program
+        given `arg`."""
+        argv, exe = run_argv(built.binary, built.path, [arg])
+        return [("interpreted", [selfhost_tool("main"), "run", built.path, arg, "--stdlib", STDLIB_ROOT], None),
+                ("built", argv, exe)]
+
+    def ended(self, argv, exe) -> tuple[str, int, int]:
+        """The output, the exit status and the terminal's local flags once
+        the program ended."""
+        t = Pty(argv, exe)
+        out, code = t.finish_keeping()
+        lflag = t.lflag()
+        t.close()
+        return out, code, lflag & self.COOKED
+
+    def test_every_end_restores_the_terminal(self):
+        cases = {
+            "return": (0, ""),
+            "exit": (3, ""),
+            "panic": (1, "runtime error: boom"),
+            "index": (1, "runtime error: list index 2 out of bounds (len 1)"),
+            "key": (1, "runtime error: map key 2 not found"),
+            "deep": (1, "stack overflow"),
+            "nested": (1, "runtime error: after the inner one"),
+        }
+        for end, (want_code, want_text) in cases.items():
+            for how, argv, exe in self.commands(self.ends, end):
+                with self.subTest(how, end=end):
+                    out, code, lflag = self.ended(argv, exe)
+                    self.assertEqual(code, want_code, out)
+                    self.assertTrue(out.startswith("raw\n"), out)
+                    self.assertIn(want_text, out)
+                    self.assertEqual(lflag, self.COOKED, f"left raw: {oct(lflag)}")
+
+    def test_leaving_raw_mode_removes_the_hook(self):
+        for how, argv, exe in self.commands(self.ends, "left"):
+            with self.subTest(how):
+                out, code, lflag = self.ended(argv, exe)
+                self.assertEqual((out, code), ("raw\n", 0))
+                self.assertEqual(lflag & (termios.ECHO | termios.ICANON), 0, oct(lflag))
+
+    def test_a_failed_task(self):
+        for how, argv, exe in self.ends_async.commands():
+            with self.subTest(how):
+                out, code, lflag = self.ended(argv, exe)
+                self.assertEqual(code, 1, out)
+                self.assertIn("runtime error: a task failed", out)
+                self.assertEqual(lflag, self.COOKED, f"left raw: {oct(lflag)}")
+
+
 SIGNALS = """import std.signal as signal
 import std.task as task
 from std.signal import Signal
