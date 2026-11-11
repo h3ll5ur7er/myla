@@ -74,7 +74,7 @@ build/myla run examples/args/main.my one two
 build/myla test examples/traits.my
 ```
 
-The tools carry the standard library ([[MYLA-243]]): before stage 1, stage 0 builds `tools/embed/main.my`, which writes `selfhost/embedded_std.my` from `lib/` (each file's text as a string literal) when it changed, so every stage carries the same library and `build/myla` is never older than `lib/` after a bootstrap. The module is committed, so editors see whole sources; `test_embedded_std.py` fails when it isn't what `lib/` gives. `--stdlib <dir>` or `MYLA_STDLIB` name a directory instead (the repository's `lib/` while changing std, without bootstrapping).
+The tools carry the standard library ([[MYLA-243]]): before stage 1, stage 0 builds `tools/embed/main.my`, which writes `selfhost/embedded_std.my` from `lib/` (each file's text as a string literal, and each module's parse, which the loader reads instead of parsing the file, [[MYLA-412]], [[Architecture/Module-loader]]) when it changed, so every stage carries the same library and `build/myla` is never older than `lib/` after a bootstrap. The module is committed, so editors see whole sources; `test_embedded_std.py` fails when it isn't what `lib/` gives. `--stdlib <dir>` or `MYLA_STDLIB` name a directory instead (the repository's `lib/` while changing std, without bootstrapping).
 
 ## Using the self-hosted compiler directly
 

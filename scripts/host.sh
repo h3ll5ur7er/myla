@@ -102,6 +102,10 @@ pub fun embedded_paths() -> [str] {
 pub fun embedded_file(path: str) -> str {
     return ""
 }
+
+pub fun embedded_cache(path: str) -> str {
+    return ""
+}
 STUB
     if [ "$target" = "$HOST_TARGET" ]; then
         run_tool "$compiler" selfhost/gen_main.my lib > "$out" || rc=$?
