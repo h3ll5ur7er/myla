@@ -3,9 +3,9 @@
 # check-seed.sh — are the seeds the current compiler? (MYLA-218, D127)
 #
 # Each seed must be the self-hosted compiler of the sources it is committed
-# with: this machine's (bootstrap/seed.s on x86-64, bootstrap/seed-aarch64.s
-# on aarch64) equal to the stage3.s of a bootstrap of those sources, the
-# other's to what that stage 3 compiler writes for its target (`--target`).
+# with: what the stage 3 compiler of a bootstrap of those sources writes for
+# each seed's target, without the embedded standard library (seed_compile in
+# scripts/host.sh, MYLA-431).
 # CI's bootstrap job runs this on every pull request; the optional pre-push
 # hook (.githooks/pre-push, scripts/install-hooks.sh) runs it before a push.
 #
@@ -69,13 +69,10 @@ stale=""
 for entry in $SEEDS; do
     target="${entry%%:*}"
     seed="${entry#*:}"
-    want="$stage3"
-    if [ "$target" != "$HOST_TARGET" ]; then
-        want="$(dirname "$stage3")/check-$target.s"
-        if ! run_tool "$compiler" "$ENTRY" "$STDLIB_ROOT" --target "$target" > "$want"; then
-            echo "check-seed: the compiler failed to build itself for $target" >&2
-            exit 2
-        fi
+    want="$(dirname "$stage3")/check-$target.s"
+    if ! seed_compile "$compiler" "$target" "$want"; then
+        echo "check-seed: the compiler failed to build itself for $target" >&2
+        exit 2
     fi
     if [ -f "$seed" ] && awk 'f || !/^#/ { f = 1; print }' "$seed" | cmp -s - "$want"; then
         echo "check-seed: $seed is the current compiler"
