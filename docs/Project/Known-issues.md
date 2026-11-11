@@ -1,37 +1,32 @@
 # Known issues
 
-Open bugs and gaps by component, each with a task that has its steps to reproduce; this page is the overview. A line goes when its task is `done`. The entries come from the reviews of 31 October ([[Project/Review-2026-10]]) and 6 November 2026 ([[Project/Review-2026-11]]).
+Open bugs and gaps by component, each with a task that has its steps to reproduce; this page is the overview. A line goes when its task is `done`. The entries come from the reviews of 31 October ([[Project/Review-2026-10]]), 6 November ([[Project/Review-2026-11]]) and 9 and 10 November 2026 ([[Project/Review-2026-11-09]], [[Project/Review-2026-11-10]]), and from round 5's lanes. The findings round 5's wave A2 fixes are in its packages ([[Project/Follow-up-plan]]), not here.
 
 [TOC]
 
 ## Self-hosted compiler
 
-- **x86-64 miscompile:** a function-value parameter in a function that also contains a tail call is read from `%rdi` after the call's argument loads overwrote it: the binary segfaults where aarch64 and the interpreter print the result ([[MYLA-250]]).
-- **Isolation:** a program's `impl [T] { fun len }` or `impl str { fun len }` is picked up by the standard library's own calls natively, not in the interpreter, so slices and format specs trap ([[MYLA-221]]).
-- **Safety:** the raw-memory primitives (`__load64`, `__store64`, `__free`, `__addr_of`, …) are callable from a program with a warning; natively a bare segfault ([[MYLA-285]]).
-- `#test` coverage of `selfhost/` is 70 percent against D109's 80, with no generator left ([[MYLA-184]]); `let`s in an `if`/`else` pair don't share frame cells ([[MYLA-183]]).
-- The optimisation passes have invariants nothing checks ([[MYLA-294]]); the interpreter keeps about 115 KB per sleeping task ([[MYLA-296]]).
-- The interpreter is about 500 times slower than native code (`fib(30)`: 3.7 s against 7 ms), and its maps are lists searched linearly ([[MYLA-317]], [[MYLA-310]]).
+- `#test` coverage of `selfhost/` is 67 percent (1,402 of 2,107 value-returning functions, `scripts/test_coverage.py`) against D109's 80, with no generator left ([[MYLA-184]]).
+- The interpreter is about 800 times slower than native code (`fib(30)`: 4.8 s against 6 ms on `95785ab`) ([[MYLA-317]]).
+- **Interpreter:** a written `eq` or `hash` of a generic type, called for a list's `==` or a map key, binds no type parameter, so an operation typed by `T` falls back to erasure ([[MYLA-436]]); a `uint64` map key of 2^63 or more is written signed in `map key … not found` ([[MYLA-440]]).
+- **Native:** a missing map key of a struct, enum or list type is `map key not found` without the key the interpreter writes ([[MYLA-441]]).
+- Maps never shrink: iteration over an emptied map costs its old size, 82 s for 20,000 keys taken oldest-first from a once-10^6 map ([[MYLA-429]]).
+- `--checked` 64-bit arithmetic is three to five times slower in hot loops, as a checked `*` divides to detect overflow ([[MYLA-430]]).
+- An import of std.io checks `io`, `fs` and `bytes` whole, as they import each other: 61.8 M instructions of a hello world's 101 M, as [[Project/Review-2026-11-10]] measured ([[MYLA-432]]).
 
 ## Backends and platforms
 
-The targets are x86-64 and aarch64 Linux and wasm32 on WASI; macOS and Windows are planned ([[MYLA-62]]). What the two new backends showed ([[Project/Reflection-2026-11]]):
-
-- wasm32: a list or string stops at 2^26 elements with `out of memory`, far below the 4 GiB the memory allows: big cells round to the next power of two and freed big cells aren't reused across classes ([[MYLA-284]]).
-- The reactor's protocols have run only under qemu, which can't reorder memory ([[MYLA-301]]); the burn suite can't run on aarch64 hardware, `wasmtime` and the browser page are tested nowhere in CI ([[MYLA-297]]).
-- The two backends repeat seven helpers and the WASI import numbering ([[MYLA-298]]).
+The targets are x86-64 and aarch64 Linux and wasm32 on WASI; macOS and Windows are planned ([[MYLA-62]]).
 
 ## Concurrency
 
-- **Use after free in `task.timeout`:** a child that finishes before its deadline is armed leaves a stale timer that later writes into freed memory: a spurious `None`, an unrelated task cancelled, a segfault on 2+ workers ([[MYLA-230]]).
-- Two tasks reading the same descriptor with `read_line_async` hang natively ([[MYLA-230]]).
 - A non-reentrant actor method kind is still open ([[MYLA-274]]).
+- Natively, on 16 workers, armed timers make every loop top take `__timer_lock`: CPU-bound tasks about 15 % slower ([[MYLA-296]]).
+- A trait method can't be async, so there is no async `Read` or `Write` ([[MYLA-434]]).
 
 ## Tooling in Myla
 
-- A NUL byte in a path is silently truncated ([[MYLA-286]]); a write error on stdout other than a broken pipe is invisible ([[MYLA-287]]).
 - The language server's bare completion dumps the workspace, and a long check blocks every request ([[MYLA-188]]).
-- `task.cancel`'s fake signature, `Command.env` without validation, modules without `#test` cases ([[MYLA-295]]).
 
 ## Editor tooling
 
@@ -39,11 +34,15 @@ The targets are x86-64 and aarch64 Linux and wasm32 on WASI; macOS and Windows a
 
 ## Language
 
-- `if c { Some(n) } else { None }` can't be typed: branches aren't typed against each other ([[MYLA-290]]); a bound `T: Format` can't be formatted ([[MYLA-291]]); a negative slice bound silently means "before the start" ([[MYLA-292]]); two messages don't name the defaults the caller filled in ([[MYLA-293]]); float printing is 17 digits ([[MYLA-300]]).
-- A generic function can't build an empty generic value (`B { items: [] }` as a `B<T>`), and a call's expected type takes no part in inference ([[MYLA-315]]); tuples have no `==` and neither tuples nor structs can be map keys ([[MYLA-313]]); `int` wraps silently at 32 bits ([[MYLA-311]]). From [[Project/AoC-2015-2021]].
+- A compound assignment's hoisted index loses the place's type: `r[Ok("a")] += 10` and `acc.items += lst()` can't infer what `r[Ok("a")] = …` and `acc.items = lst()` do ([[MYLA-448]]); a literal before the element that fixes a wider type must fit `int32`: `[4000000000, big]` with `big: int64` fails ([[MYLA-449]]).
+- Every field and method of a `pub` type is public, so no library type can protect an invariant ([[MYLA-433]]).
+
+## Standard library
+
+- A failing `opt.expect("…")` points into `lib/std/option.my`, not at its caller ([[MYLA-435]]).
+- `Url` isn't `Eq` or `Hash` ([[MYLA-488]]).
 
 ## Documentation and repository
 
 - The recorded Python answers cover only the examples and the error corpus now; 20 new corpus files are held to the CLI's own output ([[MYLA-288]]).
-- 153 seed versions in six days: 110 of the 117 MB pack ([[MYLA-289]]).
-- No example or doc block uses the November features ([[MYLA-299]]).
+- The tutorial and the "Why Myla" page aren't written yet (D114, [[MYLA-299]]).
