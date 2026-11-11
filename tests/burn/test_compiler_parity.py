@@ -12,6 +12,141 @@ from tests.burn._native import (CAN_BUILD_NATIVE, SKIP_REASON, Program, build_an
                                 run_file_both_now, selfhost_run, write_program)
 
 PROGRAMS = {
+    # MYLA-429: a map that removals leave with few keys shrinks
+    "map_shrinks_on_remove": r"""// MYLA-429: a map that removals leave with few keys shrinks: its order, its
+// copies, a walk that removes, string, narrow and compound keys, values that
+// own memory, and maps in fields and lists all go through the compaction
+#derive(Eq, Hash)
+struct P {
+    x: int,
+    y: int,
+}
+
+struct Holder {
+    m: [int: str],
+}
+
+fun show(m: [int: int]) -> str {
+    var sb = StringBuilder()
+    for k in m {
+        sb.append(f"{k}={m[k]} ")
+    }
+    return sb.build()
+}
+
+fun main() {
+    // grown to 1,000 keys, then all but six removed, in a scrambled order
+    var m: [int: int] = [:]
+    for i in 0..1000 {
+        m[i] = i * 2
+    }
+    let before = m
+    for i in 0..1000 {
+        let k = (i * 7) % 1000
+        if k % 199 != 3 { m.remove(k) }
+    }
+    print(f"{m.len()} {show(m)}")
+    // the copy taken before kept every key, in order
+    print(f"{before.len()} {before[0]} {before[999]} {before.keys()[500]}")
+    // the order after the compaction: new keys last, a removed one again last
+    m[5000] = 1
+    m.remove(201)
+    m[201] = 7
+    print(show(m))
+    // a walk that removes every key it visits: it walks the keys it began with
+    var seen = 0
+    for k in m {
+        m.remove(k)
+        seen += 1
+    }
+    print(f"{seen} {m.len()} [{show(m)}]")
+    m[1] = 1
+    print(show(m))
+
+    // string keys and values that own memory, through the compaction
+    var w: [str: [str]] = [:]
+    for i in 0..300 {
+        w[f"k{i}"] = [f"v{i}", f"w{i}"]
+    }
+    for i in 0..300 {
+        if i % 50 != 7 { w.remove(f"k{i}") }
+    }
+    var sb = StringBuilder()
+    for k in w {
+        sb.append(f"{k}:{w[k][0]},{w[k][1]} ")
+    }
+    print(f"{w.len()} {sb.build()}")
+    w["k7"].push("x")
+    print(f"{w["k7"].len()} {w.contains("k8")} {w.contains("k57")}")
+
+    // narrow keys
+    var c: [char: bool] = [:]
+    for ch in "abcdefghijklmnopqrstuvwxyz".chars() {
+        c[ch] = ch < 'n'
+    }
+    for ch in "abcdefghijklmnopqrstuvwxy".chars() {
+        c.remove(ch)
+    }
+    print(f"{c.len()} {c.keys()[0]} {c['z']}")
+    var b: [int8: int8] = [:]
+    for i in 0..100 {
+        b[i as int8] = (i % 7) as int8
+    }
+    for i in 0..98 {
+        b.remove(i as int8)
+    }
+    print(f"{b.len()} {b.keys()[0]} {b.keys()[1]} {b[99]}")
+
+    // compound keys
+    var pm: [P: str] = [:]
+    var tm: [(int, str): int] = [:]
+    for i in 0..400 {
+        pm[P { x: i, y: -i }] = f"p{i}"
+        tm[(i, f"t{i}")] = i
+    }
+    for i in 0..400 {
+        if i % 97 != 1 {
+            pm.remove(P { x: i, y: -i })
+            tm.remove((i, f"t{i}"))
+        }
+    }
+    var ps = StringBuilder()
+    for p in pm {
+        ps.append(f"{p.x},{p.y}={pm[p]} ")
+    }
+    print(f"{pm.len()} {ps.build()}")
+    var ts = StringBuilder()
+    for t in tm.keys() {
+        ts.append(f"{t.0}/{t.1} ")
+    }
+    print(f"{tm.len()} {ts.build()}{tm[(98, "t98")]} {tm.contains((99, "t99"))}")
+
+    // a map in a field and in a list
+    var h = Holder { m: [:] }
+    for i in 0..200 {
+        h.m[i] = f"s{i}"
+    }
+    var hs: [Holder] = [h, h]
+    for i in 0..199 {
+        h.m.remove(i)
+        hs[1].m.remove(199 - i)
+    }
+    print(f"{h.m.len()} {h.m[199]} {hs[0].m.len()} {hs[1].m.len()} {hs[1].m[0]}")
+
+    // emptied, then filled again
+    var e: [int: int] = [:]
+    for i in 0..5000 {
+        e[i] = i
+    }
+    for i in 0..5000 {
+        e.remove(4999 - i)
+    }
+    for i in 0..10 {
+        e[(i * 3) % 10] = i
+    }
+    print(f"{e.len()} {show(e)}")
+}
+""",
     # D173 (MYLA-379): `IoError`'s `message()` and `Format`
     "io_error_text": r"""// D173 (MYLA-379): an `IoError`'s `message()` and `Format`: the cause in
 // words, its name after it
@@ -9794,6 +9929,8 @@ class TestCompilerParity(unittest.TestCase):
 # longer holds (a later decision changed its meaning) or there is none (a
 # program added or changed since): its output, pinned here.
 PINNED = {
+    # MYLA-429: new; native code gives the same, before the change and after
+    "map_shrinks_on_remove": "6 3=6 202=404 401=802 600=1200 799=1598 998=1996 \n1000 0 1998 500\n3=6 202=404 401=802 600=1200 799=1598 998=1996 5000=1 201=7 \n8 0 []\n1=1 \n6 k7:v7,w7 k57:v57,w57 k107:v107,w107 k157:v157,w157 k207:v207,w207 k257:v257,w257 \n3 false true\n1 z false\n2 98 99 1\n5 1,-1=p1 98,-98=p98 195,-195=p195 292,-292=p292 389,-389=p389 \n5 1/t1 98/t98 195/t195 292/t292 389/t389 98 false\n1 s199 200 1 s0\n10 0=0 3=1 6=2 9=3 2=4 5=5 8=6 1=7 4=8 7=9 \n",
     # D175: a const that overflows is an error (`G + G` was 144), and the
     # quotient `MIN / -1` overflows where it is checked; new outputs
     "consts_fold_through_references": "25\n-4\n-5\nfalse\n29\n150\n",

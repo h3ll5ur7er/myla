@@ -4697,7 +4697,8 @@ impl Lower {
     // key's entry found; when there is one, it becomes a tombstone and its
     // key and value are released. Nothing else moves: its rank becomes a gap
     // in the order of insertion, which `__map_keys` skips, and the table is
-    // compacted as it fills (std.rt's maps, MYLA-310).
+    // compacted as it fills (std.rt's maps, MYLA-310), or by a removal from
+    // a map with fewer keys than an eighth of its capacity (MYLA-429).
     #test(lower_on(), codegen_on("enum E { A, B(int) }"), expr_of("(a, 'c')"), expr_of("(a, 'c')"))[0]
     fun map_remove(var self, cg: CodeGen, m: Expr, k: Expr) -> int32 {
         let mt = self.place_type(cg, m)
@@ -4736,6 +4737,23 @@ impl Lower {
             } else if is_tfunc(ft) || cg.owns_heap(ft) {
                 self.add(Inst.DropAt(ft, self.offset(slot, kv.0)))
             }
+        }
+        // the map had fewer keys than an eighth of its capacity: compacted
+        // into a table that fits them (std.rt's `map_shrink`, MYLA-429)
+        let shrink = if cg.map_hashed(mt) { "std$rt$map_shrink_h" } else { "std$rt$map_shrink" }
+        if cg.has_func(shrink) {
+            let cap = self.temp(i64)
+            self.add(Inst.LoadAt(cap, cell, 8, 8))
+            let n8 = self.temp(i64)
+            self.add(Inst.Bin(n8, "<<", i64, i64, n, self.konst(i64, 3), Pos { line: 0, col: 0 }))
+            let few = self.temp(Type.TBool)
+            self.add(Inst.Cmp(few, "<", i64, n8, cap))
+            let compact = self.new_block()
+            self.finish(Term.Br(few, compact, done))
+            self.start(compact)
+            var args = [h, self.int_const(cg.map_slot_size(mt))]
+            if !cg.map_hashed(mt) { args.push(self.int_const(cg.map_is_str(mt))) }
+            self.add(Inst.Call(-1, shrink, args))
         }
         self.finish(Term.Jmp(done))
         self.start(done)

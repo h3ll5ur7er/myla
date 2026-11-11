@@ -1,0 +1,144 @@
+{
+ "date": "2026-11-11",
+ "commit": "bb5380d",
+ "machine": {
+  "cpu": "Intel(R) Xeon(R) Processor @ 2.10GHz",
+  "cores": 4
+ },
+ "results": [
+  {
+   "name": "word_freq",
+   "measures": "building and scanning a string, maps with string keys",
+   "size": 5000000,
+   "profile_size": 100000,
+   "variants": {
+    "myla": {
+     "seconds": 0.841008350999914,
+     "user_seconds": 0.79957,
+     "system_seconds": 0.036101,
+     "page_faults": 16962,
+     "max_rss_kb": 51124,
+     "binary_bytes": 48392,
+     "instructions": 140467757,
+     "top_functions": [
+      [
+       14873940,
+       "myla_counts"
+      ]
+     ]
+    },
+    "c": {
+     "seconds": 0.19914391399993292,
+     "user_seconds": 0.191221,
+     "system_seconds": 0.0040219999999999995,
+     "page_faults": 4639,
+     "max_rss_kb": 19484,
+     "binary_bytes": 16328,
+     "instructions": 26990313
+    },
+    "c_myla_gcc": {
+     "seconds": 0.5104138579999926,
+     "user_seconds": 0.49516299999999996,
+     "system_seconds": 0.01605,
+     "page_faults": 8995,
+     "max_rss_kb": 36252,
+     "binary_bytes": 16696,
+     "instructions": 102711789
+    },
+    "c_myla_clang": {
+     "seconds": 0.41354539800011025,
+     "user_seconds": 0.389688,
+     "system_seconds": 0.022303999999999997,
+     "page_faults": 9005,
+     "max_rss_kb": 36624,
+     "binary_bytes": 16592,
+     "instructions": 78282248
+    },
+    "c_myla_O0": {
+     "seconds": 0.6403010160000804,
+     "user_seconds": 0.6120829999999999,
+     "system_seconds": 0.02344,
+     "page_faults": 8995,
+     "max_rss_kb": 36252,
+     "binary_bytes": 16992,
+     "instructions": 143283996
+    }
+   }
+  },
+  {
+   "name": "map_remove",
+   "measures": "removing keys from a map: emptying it, and a working set of 1,000 live keys",
+   "size": 32000,
+   "profile_size": 4000,
+   "variants": {
+    "myla": {
+     "seconds": 0.023483779999992294,
+     "user_seconds": 0.022899,
+     "system_seconds": 0.0,
+     "page_faults": 1107,
+     "max_rss_kb": 14680,
+     "binary_bytes": 47416,
+     "instructions": 15784285,
+     "top_functions": [
+      [
+       3135552,
+       "myla_std$rt$map_set_slot"
+      ],
+      [
+       2983068,
+       "myla_std$rt$map_put_slot"
+      ],
+      [
+       2107621,
+       "myla_std$rt$map_lookup"
+      ],
+      [
+       1864973,
+       "myla_std$rt$zero_bytes"
+      ],
+      [
+       1755957,
+       "myla_slide"
+      ]
+     ]
+    },
+    "c": {
+     "seconds": 0.007677392000005057,
+     "user_seconds": 0.003832,
+     "system_seconds": 0.0037329999999999998,
+     "page_faults": 711,
+     "max_rss_kb": 14680,
+     "binary_bytes": 16280,
+     "instructions": 5254470
+    },
+    "c_myla_gcc": {
+     "seconds": 0.010508870000080606,
+     "user_seconds": 0.0060739999999999995,
+     "system_seconds": 0.0033269999999999997,
+     "page_faults": 712,
+     "max_rss_kb": 14680,
+     "binary_bytes": 16648,
+     "instructions": 5774309
+    },
+    "c_myla_clang": {
+     "seconds": 0.007885817999977007,
+     "user_seconds": 0.007679999999999999,
+     "system_seconds": 0.0,
+     "page_faults": 721,
+     "max_rss_kb": 14680,
+     "binary_bytes": 16576,
+     "instructions": 5255504
+    },
+    "c_myla_O0": {
+     "seconds": 0.015202675999944404,
+     "user_seconds": 0.014667999999999999,
+     "system_seconds": 0.0,
+     "page_faults": 712,
+     "max_rss_kb": 14680,
+     "binary_bytes": 21200,
+     "instructions": 13488636
+    }
+   }
+  }
+ ]
+}

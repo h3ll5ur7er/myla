@@ -206,6 +206,20 @@ All thirteen programs after the standard library waves, D175 (#54) and batches 4
 - **What closed the gap** was the work of 2026-11-03 to 07 more than anything since: floats in xmm registers and a square root ([[MYLA-248]], [[MYLA-249]]: mandelbrot, n-body), packed list elements ([[MYLA-247]]: the sieve's memory 817 → 80 MB), the loops' checks ([[MYLA-251]]) and the string routines ([[MYLA-252]]: building strings is now faster than the C with Myla's semantics). D175 left plain builds as they were (the same binaries' sizes, instructions within a dozen).
 - **Where the gap is:** calls and registers (fib and Ackermann at 4–7× the time, Ackermann at only 2.2× the instructions: the stores and reloads around each call), float code (n-body runs 5.9× gcc's instructions, 88 % of them in `advance`), a small per-cell function that isn't inlined (Game of Life), and memory (binary trees and quicksort at 2–3× C's peak). The owner put the first two aside for now (2026-11-09).
 
+## Progress: maps shrink on remove (2026-11-11)
+
+[[MYLA-429]] makes a removal from a map with fewer keys than an eighth of its capacity compact it (std.rt's `map_shrink`): a map emptied by removals shrinks, and a walk over it costs the keys it has left. 20,000 keys taken oldest-first from a map that once held a million took 94 s and take 3.6 s, as from a map that never held more (2.8 s). The runs before and after are `benchmarks/results/2026-11-11-map-shrink-before.json` and `…-after.json`; instructions by callgrind, which a noisy machine doesn't change.
+
+| Myla's instructions | Before | After | Change |
+|---|---:|---:|---:|
+| `word_freq` (100,000), its map only grows | 140.64 M | 140.47 M | −0.1 % |
+| `map_remove` (4,000) | 15.12 M | 15.78 M | +4.4 % (three runs each: +3 %) |
+| the compiler compiling itself | 9,340.08 M | 9,340.37 M | +0.003 % |
+
+- A removal that doesn't shrink runs four instructions more (the capacity loaded, the count shifted, a compare and a branch): `map_remove`'s working set, which never shrinks, 1.68 → 1.76 M instructions in `slide`.
+- `map_remove`'s first part empties a map of 4,000 keys, which now compacts it five times on the way (to 2,048 slots, then 512, 128, 32 and 8): about 0.38 M instructions in `map_rehash`, `map_by_rank`, `map_set_slot` and `zero_bytes`, the price of the shrinking, amortised O(1) per removal. Some 0.2 M of the rest is the executor's idle loop, which varies by that much from run to run.
+- Times are the same within noise (`word_freq` 901 → 841 ms, `map_remove` 30 → 23 ms, the median of 5).
+
 ## How the first round went
 
 The first round (fib, the sieve, binary trees) checked the method and needed two additions to `run.py`: user and system time and page faults, and names for valgrind's addresses. Instruction counts alone hid both large gaps of the round: the sieve's page faults, and binary trees running C's instruction count in 5.7× C's time. The second turned out to be `rep movsq` copying the three-word `Tree` at every match: a microcoded instruction that starts slowly, and which callgrind counts as one. Copying up to 8 words with moves fixed it ([[MYLA-246]]).
