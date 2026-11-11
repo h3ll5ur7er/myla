@@ -1647,8 +1647,10 @@ pub fun format_response(r: Response) -> Result<str, HttpError> {
 // The body `body` decoded by the `Content-Encoding` of `h` (gzip, x-gzip,
 // deflate as zlib or raw, identity), the codings taken off in reverse;
 // with an unknown one it is left as it is. The headers lose
-// `Content-Encoding` and `Content-Length` once it is decoded.
-fun decode_body(h: Headers, body: str) -> Result<(Headers, str), HttpError> {
+// `Content-Encoding` and `Content-Length` once it is decoded. Each step
+// gives at most `max` bytes, the body's limit: past it, `BodyTooLarge` (a
+// few kilobytes may stand for gigabytes, MYLA-472).
+fun decode_body(h: Headers, body: str, max: int) -> Result<(Headers, str), HttpError> {
     let codings = tokens(h.get_all("Content-Encoding"))
     if codings.len() == 0 || body.len() == 0 {
         return Ok((h, body))
@@ -1663,18 +1665,21 @@ fun decode_body(h: Headers, body: str) -> Result<(Headers, str), HttpError> {
     while i >= 0 {
         let c = codings[i]
         if c == "gzip" || c == "x-gzip" {
-            b = match compress.gunzip(b) {
+            b = match compress.gunzip(b, max) {
                 Ok(out) => out
-                Err(e) => { return Err(HttpError.Decode(e)) }
+                Err(e) => { return Err(decode_error(e)) }
             }
         } else if c == "deflate" {
-            b = match compress.zlib_decompress(b) {
+            b = match compress.zlib_decompress(b, max) {
                 Ok(out) => out
                 Err(e) => {
+                    if e == CompressError.TooLarge {
+                        return Err(HttpError.BodyTooLarge)
+                    }
                     // some servers send raw DEFLATE
-                    match compress.inflate(b) {
+                    match compress.inflate(b, max) {
                         Ok(out) => out
-                        Err(_) => { return Err(HttpError.Decode(e)) }
+                        Err(raw) => { return Err(if raw == CompressError.TooLarge { HttpError.BodyTooLarge } else { HttpError.Decode(e) }) }
                     }
                 }
             }
@@ -1685,6 +1690,13 @@ fun decode_body(h: Headers, body: str) -> Result<(Headers, str), HttpError> {
     out.remove("Content-Encoding")
     out.remove("Content-Length")
     return Ok((out, bytes_m.to_str(b)))
+}
+
+// A decoder's error as the body's: past the limit, `BodyTooLarge`.
+#test(CompressError.TooLarge)[HttpError.BodyTooLarge]
+#test(CompressError.Truncated)[HttpError.Decode(CompressError.Truncated)]
+fun decode_error(e: CompressError) -> HttpError {
+    return if e == CompressError.TooLarge { HttpError.BodyTooLarge } else { HttpError.Decode(e) }
 }
 
 // --- connections ---------------------------------------------------------------------
@@ -2186,7 +2198,7 @@ impl Client {
         }
         resp.url = r.url
         if r.decompress {
-            let d = decode_body(resp.headers, resp.body)?
+            let d = decode_body(resp.headers, resp.body, r.max_body_bytes)?
             resp.headers = d.0
             resp.body = d.1
         }
@@ -3340,7 +3352,7 @@ fun content_codings() {
     let cases = [("gzip", gz), ("x-gzip", gz), ("deflate", zl), ("Deflate", raw)]
     for c in cases {
         let h = Headers { items: [("Content-Encoding", c.0), ("Content-Length", "1"), ("X", "y")] }
-        match decode_body(h, c.1) {
+        match decode_body(h, c.1, 1000) {
             Ok(d) => {
                 assert(d.1 == text, f"{c.0} decoded")
                 assert(d.0 == Headers { items: [("X", "y")] }, f"{c.0}: the coding's headers gone")
@@ -3349,17 +3361,37 @@ fun content_codings() {
         }
     }
     let twice = bytes_m.to_str(compress.gzip(bytes_m.from_str(zl)))
-    match decode_body(Headers { items: [("Content-Encoding", "deflate, gzip")] }, twice) {
+    match decode_body(Headers { items: [("Content-Encoding", "deflate, gzip")] }, twice, 1000) {
         Ok(d) => assert(d.1 == text, "two codings, in reverse")
         Err(e) => assert(false, f"two codings: {e}")
     }
-    match decode_body(Headers { items: [("Content-Encoding", "br")] }, "xyz") {
+    match decode_body(Headers { items: [("Content-Encoding", "br")] }, "xyz", 1000) {
         Ok(d) => assert(d.1 == "xyz" && d.0.has("Content-Encoding"), "an unknown coding: as it is")
         Err(e) => assert(false, "br")
     }
-    match decode_body(Headers { items: [("Content-Encoding", "gzip")] }, "not gzip") {
+    match decode_body(Headers { items: [("Content-Encoding", "gzip")] }, "not gzip", 1000) {
         Ok(d) => assert(false, "corrupt gzip")
         Err(e) => assert(e == HttpError.Decode(CompressError.BadHeader), f"corrupt gzip: {e}")
+    }
+    // a decompression bomb (MYLA-472): 64 KiB of zeros in a few hundred
+    // bytes, past a limit of 4 KiB, by each coding, and by the inner of two
+    var zeros: [uint8] = []
+    for i in 0..65536 {
+        zeros.push(0u8)
+    }
+    let gz_bomb = compress.gzip(zeros)
+    let bombs = [("gzip", gz_bomb), ("deflate", compress.zlib_compress(zeros)), ("deflate", compress.deflate(zeros)), ("gzip, gzip", compress.gzip(gz_bomb))]
+    for c in bombs {
+        let h = Headers { items: [("Content-Encoding", c.0)] }
+        assert(c.1.len() < 4096, f"{c.0}: a bomb")
+        match decode_body(h, bytes_m.to_str(c.1), 4096) {
+            Ok(d) => assert(false, f"{c.0}: {d.1.len()} bytes decoded past the limit")
+            Err(e) => assert(e == HttpError.BodyTooLarge, f"{c.0}: {e}")
+        }
+        match decode_body(h, bytes_m.to_str(c.1), 65536) {
+            Ok(d) => assert(d.1.len() == 65536, f"{c.0}: at the limit")
+            Err(e) => assert(false, f"{c.0} at the limit: {e}")
+        }
     }
 }
 

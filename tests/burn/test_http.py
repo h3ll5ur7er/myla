@@ -159,6 +159,9 @@ async fun main() {
     print(show(http.fetch(base + "/badchunk")))
     print(show(http.fetch(base + "/hugeheader")))
     print(show(http.send(http.request("GET", base + "/big?n=5000").with_limits(65536, 4096))))
+    // a gzip bomb: 64 MiB of zeros in 64 KiB, past a limit of 1 MiB once
+    // decoded (MYLA-472)
+    print(show(http.send(http.request("GET", base + "/bomb").with_limits(65536, 1048576))))
     print(show(http.send(http.request("GET", base + "/slow").with_timeout(300))))
     print(show(await http.send_async(http.request("GET", base + "/slow").with_timeout(300))))
     print(show(http.send(http.request("GET", f"http://127.0.0.1:{silent}/").with_timeout(200))))
@@ -198,6 +201,7 @@ error: malformed request or status line
 error: connection closed inside a message
 error: malformed chunked body
 error: headers too large
+error: body too large
 error: body too large
 error: timed out
 error: timed out
@@ -315,6 +319,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             # answered as if the connection stays, then closed
             self.answer(200, b"dropped after this")
             self.close_connection = True
+        elif path == "/bomb":
+            c = zlib.compressobj(9, zlib.DEFLATED, 31)
+            data = b"".join(c.compress(bytes(1 << 20)) for _ in range(64)) + c.flush()
+            self.answer(200, data, [("Content-Encoding", "gzip")])
         elif path == "/slow":
             time.sleep(1.0)
             self.answer(200, b"late")
