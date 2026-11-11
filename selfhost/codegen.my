@@ -277,6 +277,10 @@ pub struct CodeGen {
     // trap on overflow, a shift on a count past the width (`--checked`, and
     // `myla test --native`'s harness); a plain build wraps, its code unchanged
     checked: bool,
+    // MYLA-432: the standard library's functions whose bodies may wait until
+    // called that nothing called (`Checker.unmarked_std`): asking for one is
+    // an internal error, as its body may never have been read
+    unmarked: [str: bool],
 }
 
 // A code generator for `src` (checked alone, `checker_on`), the receiver of
@@ -360,7 +364,7 @@ pub fun new_codegen(c: Checker) -> CodeGen {
         dbg_fn_end: "", dbg_mark: "", dbg_n: 0, dbg_script: "",
         keep_ir: false, wants_ftoa: false, inlining: true, inl_names: [], inl_bodies: [], inl_no: [:], ssa: false, ssa_stats: no_ssa_stats(), refused: [], trap_vals: [], ir_texts: [], ir_blocked: [], ir_ready: false,
         pend_store: "", pend_temp: -1, ext_at: -1, temp_uses: [], temp_remat: [], temp_fconst: [:], fconst_labels: [:], temp_src: [], temp_imm: [], temp_frame: [], temp_mem: [], temp_off: [],
-        temp_reg: [], slot_reg: [], saved_regs: [], in_frame: false, resume_blocks: [], frames: c.task_line > 0, norm: compiler_norm(), save_base: 0, arg_words: 0, frameless: false, kept_params: [:], keeping: [:], scan_kept: [], scan_args: [], owning: [:], no_owned: [], handed: handed, passed_on: passed_on, tag_enums: [:], a64: false, wasm: false, wasm_arity: [:], wasm_calls: [:], env_records: [], checked: false,
+        temp_reg: [], slot_reg: [], saved_regs: [], in_frame: false, resume_blocks: [], frames: c.task_line > 0, norm: compiler_norm(), save_base: 0, arg_words: 0, frameless: false, kept_params: [:], keeping: [:], scan_kept: [], scan_args: [], owning: [:], no_owned: [], handed: handed, passed_on: passed_on, tag_enums: [:], a64: false, wasm: false, wasm_arity: [:], wasm_calls: [:], env_records: [], checked: false, unmarked: c.unmarked_std(),
     }
 }
 
@@ -2073,6 +2077,9 @@ impl CodeGen {
     // (mangled) name, enqueueing it for stamping the first time it is seen.
     #test(codegen_on("fun main() { print(1 + 2) }"), "main", [])["main"]
     fun request_fn(var self, orig: str, targs: [Type]) -> str {
+        // a function of `std` the back end names that the checker never
+        // marked: one missing from `backend_std_functions` (MYLA-432)
+        if self.unmarked.contains(orig) { panic(format("internal error: the back end calls '{}', which the checker never marked as called (add it to `backend_std_functions`)", orig)) }
         let sig = self.sig_of(orig)
         if sig.type_params.len() == 0 {
             if !self.fn_seen.contains(orig) {

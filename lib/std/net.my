@@ -16,9 +16,10 @@
 // - `lookup` finds a name's addresses without libc: the hosts file first,
 //   then a DNS query over UDP to the system's name servers; a `Resolver`
 //   says which file and which servers.
-// - A failure is an `IoError` of `std.fs`, its causes portable
-//   (`ConnectionRefused`, `AddrInUse`, `TimedOut`, …). On wasm32 (WASI
-//   preview 1 has no sockets) every operation is `Unsupported`.
+// - A failure is an `IoError` of `std.ioerror` (which `std.fs`
+//   re-exports), its causes portable (`ConnectionRefused`, `AddrInUse`,
+//   `TimedOut`, …). On wasm32 (WASI preview 1 has no sockets) every
+//   operation is `Unsupported`.
 //
 // Everything that depends on the system goes through the `__sock_*`
 // primitives (std.rt over std.platform's socket functions): a port to
@@ -26,7 +27,8 @@
 // stays as it is. [[Language/Standard-library/Net]] says what a port must
 // provide.
 
-from .fs import IoError, from_errno, read_to_string
+from .ioerror import IoError, from_errno
+from .fs import read_to_string
 from .io import Read, Write
 import .fmt as fmt
 import .bytes as bytes_m // `from_str`, `to_str`

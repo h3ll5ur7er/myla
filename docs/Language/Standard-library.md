@@ -31,6 +31,7 @@ The conventions (D164): operations on built-in types are methods (`s.split(",")`
 | --- | --- | --- |
 | `std.io` | [[Language/Standard-library/Io]] | Writing to a descriptor, the buffered `Reader`, async reads; the stream traits `Read`, `Write`, `Seek`, memory streams, `Buffered`, `BufferedWriter`, `copy` |
 | `std.fs` | [[Language/Standard-library/Fs]] | Whole-file reads and writes, `File` streams (`Read`, `Write`, `Seek`), metadata, directories, temporary files and directories, `IoError` |
+| `std.ioerror` | [[Language/Standard-library/Ioerror]] | `IoError`, `from_errno`, `io_error_name`, which `std.fs` re-exports |
 | `std.path` | [[Language/Standard-library/Path]] | Paths as strings: `join`, `parent`, `file_name`, extensions, `normalize`, `relative` |
 | `std.glob` | [[Language/Standard-library/Glob]] | Glob patterns (`*`, `?`, `**`, sets), directory walks, `glob` |
 | `std.process` | [[Language/Standard-library/Process]] | Arguments, the environment, exit, running programs (`run`, `command`), children streamed through pipes (`spawn`, `Child`, `pipe`) |
