@@ -278,33 +278,6 @@ impl<T> KeyedHeap<T> {
 // The functions are generic, which a `#test` case can't take (D116), so the
 // tests are test functions (D162).
 
-// Whether `xs` and `ys` hold the same elements in the same order.
-fun same<T: Eq>(xs: [T], ys: [T]) -> bool {
-    if xs.len() != ys.len() {
-        return false
-    }
-    for i in 0..xs.len() {
-        if xs[i] != ys[i] {
-            return false
-        }
-    }
-    return true
-}
-
-fun is_some_of<T: Eq>(o: Option<T>, v: T) -> bool {
-    return match o {
-        Some(x) => x == v
-        None => false
-    }
-}
-
-fun is_none<T>(o: Option<T>) -> bool {
-    return match o {
-        Some(_) => false
-        None => true
-    }
-}
-
 // Pseudo-random numbers in 0..m, from a linear congruential generator.
 fun randoms(n: int, m: int, seed: uint32) -> [int] {
     var out: [int] = []
@@ -351,16 +324,16 @@ fun ascending(xs: [int]) -> bool {
 fun min_first() {
     var h: Heap<int> = new()
     assert(h.is_empty() && h.len() == 0, "a new heap is empty")
-    assert(is_none(h.pop()) && is_none(h.peek()), "an empty heap")
+    assert(h.pop() == None && h.peek() == None, "an empty heap")
     for x in [5, 1, 4, 1, 3] {
         h.push(x)
     }
     assert(h.len() == 5 && !h.is_empty(), "five elements")
-    assert(is_some_of(h.peek(), 1), "peek")
+    assert(h.peek() == Some(1), "peek")
     assert(h.len() == 5, "peek takes nothing")
-    assert(same(drained(h), [1, 1, 3, 4, 5]), "least first")
+    assert(drained(h) == [1, 1, 3, 4, 5], "least first")
     assert(h.len() == 5, "a heap is a value")
-    assert(is_some_of(h.pop(), 1) && is_some_of(h.pop(), 1) && h.len() == 3, "pop")
+    assert(h.pop() == Some(1) && h.pop() == Some(1) && h.len() == 3, "pop")
 }
 
 #test
@@ -369,11 +342,11 @@ fun max_first() {
     for x in [5, 1, 4, 1, 3] {
         h.push(x)
     }
-    assert(is_some_of(h.peek(), 5), "peek of a max-heap")
-    assert(same(drained(h), [5, 4, 3, 1, 1]), "greatest first")
+    assert(h.peek() == Some(5), "peek of a max-heap")
+    assert(drained(h) == [5, 4, 3, 1, 1], "greatest first")
     let m: Heap<int> = max_of([2, 9, 7])
-    assert(same(drained(m), [9, 7, 2]), "max_of")
-    assert(same(m.into_sorted(), [9, 7, 2]), "into_sorted of a max-heap: descending")
+    assert(drained(m) == [9, 7, 2], "max_of")
+    assert(m.into_sorted() == [9, 7, 2], "into_sorted of a max-heap: descending")
 }
 
 #test
@@ -384,10 +357,10 @@ fun heapify() {
         assert(h.len() == n, "of keeps every element")
         let out = drained(h)
         assert(ascending(out), f"of then pop is ascending for {n}")
-        assert(same(tally(out, 50), tally(xs, 50)), f"the same elements for {n}")
-        assert(same(h.into_sorted(), out), f"into_sorted is pop's order for {n}")
+        assert(tally(out, 50) == tally(xs, 50), f"the same elements for {n}")
+        assert(h.into_sorted() == out, f"into_sorted is pop's order for {n}")
         let m: Heap<int> = max_of(xs)
-        assert(same(m.into_sorted(), out[::-1]), f"max_of for {n}")
+        assert(m.into_sorted() == out[::-1], f"max_of for {n}")
     }
 }
 
@@ -408,12 +381,12 @@ fun interleaved() {
             j -= 1
         }
         if i % 3 == 0 {
-            assert(is_some_of(h.pop(), model[0]), "the least comes out")
+            assert(h.pop() == Some(model[0]), "the least comes out")
             model = model[1:]
         }
         assert(h.len() == model.len(), "len")
     }
-    assert(same(h.into_sorted(), model), "what is left")
+    assert(h.into_sorted() == model, "what is left")
 }
 
 // `for` over a heap and `iter()`'s pipelines (D171): the elements in the
@@ -426,28 +399,28 @@ fun iterating() {
     for x in h.iter() {
         seen.push(x)
     }
-    assert(same(seen, [1, 1, 3, 4, 5]), "least first")
-    assert(h.len() == 5 && is_some_of(h.peek(), 1), "the heap is unchanged")
+    assert(seen == [1, 1, 3, 4, 5], "least first")
+    assert(h.len() == 5 && h.peek() == Some(1), "the heap is unchanged")
     var it = h.iter()
-    assert(is_some_of(it.next(), 1), "the first")
+    assert(it.next() == Some(1), "the first")
     var copy = it
-    assert(is_some_of(it.next(), 1) && is_some_of(it.next(), 3), "the iterator moves on")
-    assert(is_some_of(copy.next(), 1), "a copy keeps its own position")
+    assert(it.next() == Some(1) && it.next() == Some(3), "the iterator moves on")
+    assert(copy.next() == Some(1), "a copy keeps its own position")
     h.push(0)
     var rest: [int] = []
     for x in it {
         rest.push(x)
     }
-    assert(same(rest, [4, 5]), "an iterator holds the heap as it was")
+    assert(rest == [4, 5], "an iterator holds the heap as it was")
     let m: Heap<int> = max_of([2, 9, 7])
     var down: [int] = []
     for x in m.iter() {
         down.push(x)
     }
-    assert(same(down, [9, 7, 2]), "a max-heap: greatest first")
+    assert(down == [9, 7, 2], "a max-heap: greatest first")
     let e: Heap<str> = new()
     var none = e.iter()
-    assert(is_none(none.next()), "an empty heap")
+    assert(none.next() == None, "an empty heap")
 }
 
 // A type with an `Ord` of its own: by `cost`, then by `name`'s length.
@@ -475,26 +448,26 @@ fun own_order() {
     while let Some(j) = h.pop() {
         names.push(j.name)
     }
-    assert(same(names, ["a", "aa", "c"]), "by the type's own cmp")
+    assert(names == ["a", "aa", "c"], "by the type's own cmp")
 }
 
 #test
 fun other_ordered_types() {
     var f: Heap<float> = max_of([0.5, -2.0, 3.25])
     f.push(1.0)
-    assert(is_some_of(f.pop(), 3.25) && is_some_of(f.pop(), 1.0), "floats, greatest first")
+    assert(f.pop() == Some(3.25) && f.pop() == Some(1.0), "floats, greatest first")
     let c: Heap<char> = of("heap".chars())
-    assert(same(c.into_sorted(), ['a', 'e', 'h', 'p']), "chars")
+    assert(c.into_sorted() == ['a', 'e', 'h', 'p'], "chars")
     var b: Heap<int64> = new()
     b.push(5000000000)
     b.push(-5000000000)
-    assert(is_some_of(b.pop(), -5000000000), "int64")
+    assert(b.pop() == Some(-5000000000), "int64")
 }
 
 #test
 fun keyed() {
     var h: KeyedHeap<str> = keyed_new()
-    assert(h.is_empty() && is_none(h.pop()) && is_none(h.peek()), "an empty keyed heap")
+    assert(h.is_empty() && h.pop() == None && h.peek() == None, "an empty keyed heap")
     h.push(5, "five")
     h.push(5000000000, "big")
     h.push(-2, "minus two")
@@ -513,7 +486,7 @@ fun keyed() {
         last = p
         names.push(name)
     }
-    assert(same(names, ["minus two", "three", "five", "big"]), "the values follow their priorities")
+    assert(names == ["minus two", "three", "five", "big"], "the values follow their priorities")
     var k: KeyedHeap<int> = keyed_new()
     let ps = randoms(1000, 100, 3u32)
     for i in 0..ps.len() {
