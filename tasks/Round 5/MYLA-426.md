@@ -2,7 +2,7 @@
 id: MYLA-426
 title: "P12 Terminal, paths, arguments, platform corners, small modules"
 type: bug
-status: todo
+status: in-progress
 priority: medium
 labels: [std, term, glob, args, platform, round-5]
 ---

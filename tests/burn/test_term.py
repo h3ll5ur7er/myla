@@ -517,6 +517,43 @@ class Repl(Case):
         self.assertEqual(p.stderr, "myla> myla> \n")
 
 
+PASTE = """import std.term as term
+import std.time as time
+from std.term import Key
+
+// 2,000 characters typed (a paste), the line drawn after each as
+// `Editor.read_line` does
+fun main() {
+    var ed = term.line_edit(0)
+    let t0 = time.now_ms()
+    var drawn = 0
+    for i in 0..2000 {
+        let s = ed.apply(Key.Char('x'), [])
+        drawn += ed.render("> ", 80).len()
+    }
+    print(f"{drawn} {time.now_ms() - t0}")
+}
+"""
+
+
+@unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
+class LongLines(Case):
+    """M22: drawing a line costs what is drawn, not the line's length
+    squared: 2,000 characters typed one by one took 17 s natively."""
+
+    def test_a_paste_draws_in_linear_time(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = write_program(tmp, PASTE)
+            out, err, code = build_and_run_full(Program(path), argv0=path)
+        self.assertEqual((err, code), ("", 0))
+        drawn, ms = map(int, out.split())
+        # each draw: "\r> ", the last 77 characters at most, the clear, "\r",
+        # the move to the cursor after them
+        self.assertEqual(drawn, sum(len(f"\r> {'x' * min(n, 77)}\x1b[K\r\x1b[{2 + min(n, 77)}C")
+                                    for n in range(1, 2001)))
+        self.assertLess(ms, 2000, out)
+
+
 WASM = """import std.term as term
 from std.term import Stream
 import std.signal as signal
