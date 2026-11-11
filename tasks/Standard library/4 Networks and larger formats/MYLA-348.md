@@ -31,3 +31,5 @@ Wave 4 of [[Project/Standard-library-roadmap]], roadmap #56. Elements, attribute
 ## Review 2026-11-09
 
 Signed off in [[Project/Review-2026-11-09]], with a follow-up in [[MYLA-424]]: the W3C suite isn't in the checkout; one stale sentence.
+
+The follow-up is built and in review in [[MYLA-424]] (2026-11-11).
