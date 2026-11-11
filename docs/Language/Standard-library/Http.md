@@ -80,6 +80,8 @@ async fun main() {
 | `Client`: `send(r)`, `get(url)`, `post(url, body)`, and `send_async`, `get_async`, `post_async` (async) | A request over the connection kept from the last one, when it goes to the same host and port and the server allowed it, else over a new one |
 | `Client`: `close()` | The kept connection closed |
 
+`Client`'s `exchange_async` and `follow_async` are the steps of its `send_async` (one exchange; the redirects), public only because a method can't be private yet ([[MYLA-433]]); a program has no need of them.
+
 The one-shot GET is `get`, and `fetch` is the same: the module was first written while the prelude's free `get(m, k)` took the name in the file being tested; maps have `m.get(k)` since [[MYLA-393]].
 
 `request(method: str, url: str) -> Request` makes a request, which these methods change, each giving a new one:

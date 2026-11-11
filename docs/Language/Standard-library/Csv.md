@@ -83,6 +83,8 @@ fun main() {
 | `io_error(self) -> Option<IoError>` | Why the stream failed, after an `Io` error |
 | `next(var self) -> Option<Result<[str], CsvError>>` | The `Iterator`'s: `Some(Ok(record))` for each, `Some(Err(e))` once if the text is broken or the stream fails, then `None` |
 
+`fill`, a method of `CsvStreamReader`, is the reader's own step, which reads the next chunk, public only because a method can't be private yet ([[MYLA-433]]); a program has no need of it.
+
 It gives what `parse_with` gives, the same records and the same error at the same line and column, wherever its reads end: a case reads 21 texts (every kind of quote, line end, blank line and error) with reads of every size from one byte to the whole text. After an error it gives nothing more. A header row is the first record; map the rest by it as `parse_records` does, if you want maps.
 
 Natively it reads a 50 MB file (359,208 records of nine fields, random ones written by Python's `csv.writer`, about a quarter of the fields quoted) at 93 MB/s in 8.6 MB of memory, where `fs.read_to_string` and `parse` take 97 MB/s and 240 MB (the best of five runs each; peak resident memory).

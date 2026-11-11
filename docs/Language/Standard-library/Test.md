@@ -2,6 +2,44 @@
 
 What a test function needs beyond `#test` (D162, [[MYLA-304]], [[Language/Attributes-and-testing#test-functions]]). Every failure is a runtime error, as `assert`'s is: the case fails the way a program fails, and `myla test` is the one place that goes on after one.
 
+`myla test file.my` runs the test function below (`PASS  saves_one_word_a_line`), interpreted and with `--native`; `myla run` runs `main`, where an expectation that holds does nothing and one that fails ends the program.
+
+```myla
+import std.fs as fs
+import std.test as test
+from std.io import println
+
+// The words of `text`, one a line, written to `path`.
+fun save_words(path: str, text: str) -> Result<(), fs.IoError> {
+    var sb = StringBuilder()
+    for w in text.split(" ") {
+        if w != "" {
+            sb.append(w)
+            sb.append("\n")
+        }
+    }
+    return fs.write_to_file(path, sb.build())
+}
+
+#test
+fun saves_one_word_a_line() -> Result<(), fs.IoError> {
+    let path = test.temp_dir() + "/words.txt"
+    save_words(path, "to  be or")?
+    let back = fs.read_to_string(path)?
+    test.expect_eq(back, "to\nbe\nor\n")
+    test.expect_ne(back.len(), 0)
+    test.expect(fs.exists(path), "the file is there")
+    return Ok(())
+}
+
+fun main() {
+    test.expect_eq(2 + 2, 4)
+    println("outside a case an expectation that holds does nothing")
+}
+// output:
+// outside a case an expectation that holds does nothing
+```
+
 | Function | Meaning |
 | --- | --- |
 | `expect(cond: bool, msg: str = "expectation failed")` | Fails the case with `msg` unless `cond` holds |

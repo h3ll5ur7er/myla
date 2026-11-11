@@ -41,6 +41,8 @@ Each digest is a type, started by a function (Myla has no static methods): `new_
 
 The trait `Digest` has `update`, `finish` and `block_size`, and all four types implement it: a generic function over digests takes a `D: Digest`.
 
+`compress` and `close`, methods of each hasher, are its own steps (a block taken in; the padding `finish` gives a copy), public only because a method can't be private yet ([[MYLA-433]]); a program has no need of them.
+
 ## One-shot functions
 
 | Function | Result |
