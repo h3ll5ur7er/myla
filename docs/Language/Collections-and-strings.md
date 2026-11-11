@@ -94,7 +94,7 @@ fun main() {
 | `m[k]` | A missing key is a runtime error; use `m.get(k) -> Option<V>` ([[Language/Standard-library/Map]], [[MYLA-393]]) to ask safely |
 | `m[k] = v` | Inserts or replaces; needs a `var` place |
 | `m.contains(k)`, `m.keys() -> [K]`, `m.len()` | `keys` gives the keys in the order `for` visits them |
-| `m.remove(k)` | Needs a `var` place; removing a missing key does nothing. Like `m[k]`, `m[k] = v` and `contains`, it takes constant time on average ([[MYLA-310]]) |
+| `m.remove(k)` | Needs a `var` place; removing a missing key does nothing. Like `m[k]`, `m[k] = v` and `contains`, it takes constant time on average ([[MYLA-310]]), and a map emptied by removals shrinks, so walking it costs the keys it has left ([[MYLA-429]]) |
 | `for k in m` | Visits the keys in the order they were first inserted: replacing a value keeps its key's place, removing a key and inserting it again moves it to the end (D105, [[MYLA-179]]) |
 
 ### Keys

@@ -1645,6 +1645,10 @@ pub fun str_chars(s: str) -> [char] {
 // when it reaches 3/4 of the capacity, `map_put_slot` compacts the table:
 // tombstones dropped, ranks renumbered 0 … count - 1, the capacity the
 // smallest that leaves it at most half full (so it grows, stays or shrinks).
+// A removal from a map with fewer keys than an eighth of its capacity
+// compacts it the same way (`map_shrink`, MYLA-429), so a map emptied by
+// removals shrinks, and walking it costs its keys, not the capacity it once
+// had.
 
 const PHI: int64 = -7046029254386353131  // 2^64 / the golden ratio
 
@@ -1802,16 +1806,35 @@ pub fun map_put_slot(holder: int64, key: int64, slot_size: int64, is_str: int64)
     var cell = __load64(holder)
     let cap = __load64(cell + 8)
     if cap == 0 || (__load64(map_next_rank(cell, slot_size)) + 1) * 4 >= cap * 3 {
-        // at most half full once compacted, the key to come counted
-        let count = __load64(cell)
-        var fit: int64 = 8
-        while (count + 1) * 2 > fit {
-            fit = fit * 2
-        }
-        cell = map_rehash(cell, slot_size, is_str, fit)
+        cell = map_rehash(cell, slot_size, is_str, map_fit(__load64(cell)))
         __store64(holder, cell)
     }
     return map_set_slot(cell, key, slot_size, is_str)
+}
+
+// The capacity a map of `count` keys is compacted to: the smallest power of
+// two, at least 8, that leaves it at most half full with one key more.
+fun map_fit(count: int64) -> int64 {
+    var fit: int64 = 8
+    while (count + 1) * 2 > fit {
+        fit = fit * 2
+    }
+    return fit
+}
+
+// `remove`'s compaction (`__map_shrink`, MYLA-429): the map at `holder`,
+// which had fewer keys than an eighth of its capacity when a key was removed,
+// compacted into the capacity `map_fit` gives (the new cell stored back), so
+// a walk over it and the operations after cost its live keys, not the
+// capacity it once needed. Each compaction is paid for by the keys removed
+// since the last (about an eighth of the capacity at least), so a removal
+// stays amortised O(1).
+pub fun map_shrink(holder: int64, slot_size: int64, is_str: int64) {
+    let cell = __load64(holder)
+    let fit = map_fit(__load64(cell))
+    if fit < __load64(cell + 8) {
+        __store64(holder, map_rehash(cell, slot_size, is_str, fit))
+    }
 }
 
 // The keys and values of the map `cell` moved into a new one of `cap` slots,
@@ -2001,15 +2024,19 @@ pub fun map_slot_h(holder: int64, h: int64, slot_size: int64) -> int64 {
     var cell = __load64(holder)
     let cap = __load64(cell + 8)
     if cap == 0 || (__load64(map_next_rank(cell, slot_size)) + 1) * 4 >= cap * 3 {
-        let count = __load64(cell)
-        var fit: int64 = 8
-        while (count + 1) * 2 > fit {
-            fit = fit * 2
-        }
-        cell = map_rehash_h(cell, slot_size, fit)
+        cell = map_rehash_h(cell, slot_size, map_fit(__load64(cell)))
         __store64(holder, cell)
     }
     return map_place_h(cell, h, slot_size)
+}
+
+// `map_shrink` of a map with compound keys (`__map_shrink_h`).
+pub fun map_shrink_h(holder: int64, slot_size: int64) {
+    let cell = __load64(holder)
+    let fit = map_fit(__load64(cell))
+    if fit < __load64(cell + 8) {
+        __store64(holder, map_rehash_h(cell, slot_size, fit))
+    }
 }
 
 // `map_slot_h`'s slot in the map `cell`, which has room.

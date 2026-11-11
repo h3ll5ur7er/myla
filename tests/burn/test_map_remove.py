@@ -10,7 +10,9 @@ order as D105 does, through thousands of mixed inserts, replacements,
 removals and reinsertions (so through every compaction and growth), and time
 removal at two sizes: four times the keys must take about four times as long,
 not sixteen. (A literal that gives a key twice is in the order test too: the
-interpreter used to keep both.)"""
+interpreter used to keep both.) And a map emptied by removals shrinks
+(MYLA-429): walking and draining it costs the keys it has left, not the
+capacity it once needed."""
 import os
 import subprocess
 import tempfile
@@ -243,6 +245,76 @@ fun main() {
 """
 
 
+# A map that once held many keys, walked and drained oldest-first, timed
+# inside the program against one that never held more than it keeps
+# (MYLA-429, M26): it prints the microseconds of each. Removals never shrank a
+# native map, so walking one emptied by them cost the capacity it once
+# needed: 20,000 keys taken oldest-first from a map that had held a million
+# took 94 s, where a map of 20,000 takes 3 s.
+_SHRINK = """from std.process import args
+from std.num import parse_int
+from std.time import now_ns
+
+fun arg(i: int) -> int64 {
+    return match parse_int(args()[i]) {
+        Some(v) => v,
+        None => 0,
+    }
+}
+
+// A map grown to `size` keys and left with its newest `keep`: the
+// microseconds `rounds` walks over it take, then taking its keys
+// oldest-first until it is empty.
+fun walk_and_drain(size: int64, keep: int64, rounds: int64) -> int64 {
+    var m: [int64: int64] = [:]
+    var i: int64 = 0
+    while i < size {
+        m[i] = i
+        i += 1
+    }
+    i = 0
+    while i < size - keep {
+        m.remove(i)
+        i += 1
+    }
+    let start = now_ns()
+    var sum: int64 = 0
+    var r: int64 = 0
+    while r < rounds {
+        for k in m {
+            sum += k - (size - keep)
+        }
+        r += 1
+    }
+    var next = size - keep
+    while m.len() > 0 {
+        var first: int64 = -1
+        for k in m {
+            first = k
+            break
+        }
+        if first != next {
+            panic(f"took {first}, not {next}")
+        }
+        m.remove(first)
+        next += 1
+    }
+    let took = now_ns() - start
+    if sum != rounds * keep * (keep - 1) / 2 {
+        panic("the walks went wrong")
+    }
+    return took / 1000
+}
+
+fun main() {
+    let size = arg(1)
+    let keep = arg(2)
+    let rounds = arg(3)
+    print(f"{walk_and_drain(size, keep, rounds)} {walk_and_drain(keep, keep, rounds)}")
+}
+"""
+
+
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
 class MapRemove(unittest.TestCase):
     def test_order_after_removes_and_reinserts(self):
@@ -279,6 +351,43 @@ class MapRemove(unittest.TestCase):
                 return int(out)
 
             self._assert_linear(micros, 1999, "interpreted", 100_000)
+
+    def _assert_live_size(self, micros, size: int, keep: int, rounds: int, label: str, slack_us: int):
+        """The map that held `size` keys within three times the time of the
+        one that held `keep` (it was hundreds of times), plus `slack_us`;
+        the best of three."""
+        runs = [micros(size, keep, rounds) for _ in range(3)]
+        once_big = min(r[0] for r in runs)
+        always_small = min(r[1] for r in runs)
+        self.assertLess(once_big, 3 * always_small + slack_us,
+                        f"{label}: {keep} keys left of {size} took {once_big} us, {keep} keys of {keep} {always_small} us")
+
+    def test_a_map_emptied_by_removes_walks_in_its_live_size_natively(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = write_program(tmp, _SHRINK)
+            binary = os.path.join(tmp, "shrink")
+            native_build(Program(path), binary)
+
+            def micros(size: int, keep: int, rounds: int) -> tuple[int, int]:
+                argv, exe = run_argv(binary, "shrink", [str(size), str(keep), str(rounds)])
+                proc = subprocess.run(argv, executable=exe, capture_output=True, text=True, timeout=300)
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                a, b = proc.stdout.split()
+                return int(a), int(b)
+
+            self._assert_live_size(micros, 200_000, 1000, 100, "natively", 20_000)
+
+    def test_a_map_emptied_by_removes_walks_in_its_live_size_in_the_interpreter(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = write_program(tmp, _SHRINK)
+
+            def micros(size: int, keep: int, rounds: int) -> tuple[int, int]:
+                out, err, code = selfhost_run(path, [str(size), str(keep), str(rounds)])
+                self.assertEqual(code, 0, err)
+                a, b = out.split()
+                return int(a), int(b)
+
+            self._assert_live_size(micros, 20_000, 200, 20, "interpreted", 100_000)
 
 
 if __name__ == "__main__":
