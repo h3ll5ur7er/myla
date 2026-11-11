@@ -221,8 +221,17 @@ fun run_for_stops_at_its_budget() {
     assert(r.runs >= 1, "a run")
     // the warm-up takes a few milliseconds and the last run one more
     assert(took < 500000000, f"took {took} ns")
-    // a run is about a millisecond (the batch), so 30 ms make a few
-    assert(r.runs <= 60, f"{r.runs} runs")
+    // every run but the last began before the budget had passed, so their
+    // times add up to less than it; a count of runs would assume that a run
+    // stays as long as the warm-up's, which a JIT breaks (wasm32 under Node
+    // calibrates before V8 optimises `busy`, and a run then takes a quarter)
+    var before_last = 0.0
+    var i = 0
+    while i < r.runs - 1 {
+        before_last += r.times[i] * (r.batch as float64)
+        i += 1
+    }
+    assert(before_last < 30000000.0, f"{r.runs} runs, {before_last} ns before the last")
 }
 
 #test
