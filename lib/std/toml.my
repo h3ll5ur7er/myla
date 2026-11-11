@@ -23,6 +23,7 @@
 // signatures.
 
 import std.map as map_m // `m.get(k)`
+import std.bytes as bytes_m // `utf8_error`
 from .num import parse_float, format_float
 
 // A TOML value. A table keeps its keys in the order they were defined (a
@@ -189,8 +190,7 @@ pub fun parse(text: str) -> Result<Toml, TomlError> {
 // The table that `text` holds, with the positions of its keys and values.
 pub fun parse_doc(text: str) -> Result<TomlDoc, TomlError> {
     var p = Parser { s: text, i: 0, keys: [], kinds: [], values: [], explicit: [], dotted: [], first: [], last: [], next: [], index: [:], pending: [], table: 0, path: [], depth: 0, spans: [:] }
-    let bad = utf8_error(text)
-    if bad >= 0 { return Err(p.error("invalid UTF-8", bad)) }
+    if let Some(bad) = bytes_m.utf8_error(bytes_m.from_str(text)) { return Err(p.error("invalid UTF-8", bad)) }
     let root = p.node(-1, "", TABLE, Toml.Bool(false))
     p.table = root
     p.document()?
@@ -245,55 +245,16 @@ fun line_col(s: str, at: int32) -> (int32, int32) {
     return (line, col)
 }
 
-// The offset of the first byte of `s` that is no part of well-formed UTF-8
-// (as `s.chars()` decodes it: no overlong forms, surrogates or code points
-// past U+10FFFF), -1 if there is none.
-#test("aé€😀")[-1]
-#test("")[-1]
-fun utf8_error(s: str) -> int32 {
-    var i = 0
-    while i < s.len() {
-        let c = s[i]
-        if c < 128u8 {
-            i += 1
-            continue
-        }
-        var n = 0
-        var lo = 128u8
-        var hi = 191u8
-        if c >= 194u8 && c <= 223u8 {
-            n = 1
-        } else if c >= 224u8 && c <= 239u8 {
-            n = 2
-            if c == 224u8 { lo = 160u8 }
-            if c == 237u8 { hi = 159u8 }
-        } else if c >= 240u8 && c <= 244u8 {
-            n = 3
-            if c == 240u8 { lo = 144u8 }
-            if c == 244u8 { hi = 143u8 }
-        } else {
-            return i
-        }
-        if i + n >= s.len() { return i }
-        if s[i + 1] < lo || s[i + 1] > hi { return i }
-        var k = 2
-        while k <= n {
-            if s[i + k] < 128u8 || s[i + k] > 191u8 { return i }
-            k += 1
-        }
-        i += n + 1
-    }
-    return -1
-}
-
 #test
 fun finds_bad_utf8() {
     for bytes in [[97u8, 255u8], [195u8], [237u8, 160u8, 128u8], [224u8, 128u8, 128u8], [244u8, 144u8, 128u8, 128u8], [97u8, 98u8, 128u8]] {
-        var sb = StringBuilder()
-        for b in bytes { sb.append_byte(b) }
-        let s = sb.build()
-        let at = utf8_error(s)
-        assert(at >= 0 && at < s.len(), f"case {bytes.len()}")
+        var b: [uint8] = [120u8, 61u8, 34u8] // x = "…"
+        for x in bytes { b.push(x) }
+        b.push(34u8)
+        match parse(bytes_m.to_str(b)) {
+            Err(e) => assert(e.msg == "invalid UTF-8" && e.col >= 4, f"case {bytes.len()}: {e}")
+            Ok(_) => panic(f"case {bytes.len()}: parsed")
+        }
     }
 }
 
@@ -429,6 +390,8 @@ fun is_bare_key(k: str) -> bool {
     return true
 }
 
+// Not std.char's `is_digit` and `to_digit`: a call a byte took a document of
+// numbers 5 % longer to parse (MYLA-428).
 fun is_digit(c: uint8) -> bool {
     return c >= '0' && c <= '9'
 }

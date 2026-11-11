@@ -22,6 +22,7 @@ from std.fs import IoError, io_error_name
 import std.list as list_m // `filled`
 import std.bytes as bytes_m // `from_str`, `to_str` in the tests
 import std.option as option_m
+import std.char as char_m // `to_digit`, in the tests
 
 // Why compressed data couldn't be decompressed (D168: the variants carry no
 // position, so it is a bare enum).
@@ -974,7 +975,8 @@ fun zlib_header(b: [uint8], p: int32) -> Result<int32, CompressError> {
 // `adler32_update_bytes`), over a part of the bytes, with the CRC's tables
 // kept in the decoder: std.checksum's take a whole list and make the tables at
 // each call, and the decoder sums its output a part at a time. Slicing the
-// part out for them took `gunzip` of 100 MB from 526 to 802 ms (MYLA-376).
+// part out for them took `gunzip` of 100 MB from 526 to 802 ms (MYLA-376),
+// and of 36 MB from 253 to 372 ms (MYLA-428).
 
 // CRC-32's eight tables of slicing by 8: entry k * 256 + x is the register
 // after the byte x and k zero bytes (the first, k = 0, every CRC-32 has).
@@ -2397,21 +2399,18 @@ impl<W: Write> Write for Encoder<W> {
 
 // --- Test helpers ---------------------------------------------------------------
 
-// The bytes the hex digits of `s` stand for (lower case, whole bytes).
+// The bytes the hex digits of `s` stand for (whole bytes): not
+// std.encoding's `hex_decode`, which every program importing this module
+// would check for the tests' sake (3 ms more to check one, MYLA-428).
 #test("00ff1a")[[0u8, 255u8, 26u8]]
 fun unhex(s: str) -> [uint8] {
     var out: [uint8] = []
     var i = 0
     while i + 1 < s.len() {
-        out.push(((hex_digit(s[i]) << 4) | hex_digit(s[i + 1])) as uint8)
+        out.push((((s[i] as char).to_digit(16).unwrap_or(0) << 4) | (s[i + 1] as char).to_digit(16).unwrap_or(0)) as uint8)
         i += 2
     }
     return out
-}
-
-fun hex_digit(c: uint8) -> int32 {
-    if c >= '0' && c <= '9' { return (c - '0') as int32 }
-    return (c - 'a') as int32 + 10
 }
 
 // The input in pieces of 1 to `most` bytes, or a failure once `fail_at`

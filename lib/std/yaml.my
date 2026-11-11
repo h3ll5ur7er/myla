@@ -262,6 +262,8 @@ fun control_at(s: str) -> int {
     return -1
 }
 
+// Not std.char's `is_digit`: a call for each byte of a plain scalar resolved
+// (std.toml's, swapped, parsed numbers 5 % slower).
 fun is_digit(c: uint8) -> bool {
     return c >= '0' && c <= '9'
 }

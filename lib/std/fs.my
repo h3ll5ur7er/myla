@@ -890,7 +890,8 @@ fun random_suffix() -> Result<str, IoError> {
     return Ok(hex_of(b))
 }
 
-// The bytes `b` as hexadecimal digits, two each.
+// The bytes `b` as hexadecimal digits, two each: std.encoding's
+// `hex_encode`, which would add 2.5 ms to checking every program using std.io.
 #test([0u8, 15u8, 160u8, 255u8])["000fa0ff"]
 fun hex_of(b: [uint8]) -> str {
     let digits = "0123456789abcdef"

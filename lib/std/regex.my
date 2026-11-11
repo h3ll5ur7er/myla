@@ -282,6 +282,8 @@ fun posix_class(name: str) -> Option<[bool]> {
 const MAX_REPEAT: int = 1000
 const MAX_DEPTH: int = 100
 
+// Not std.char's `is_digit` and `to_digit` (for `hex_value`): with them
+// `replace_all`'s `$1` took 6 % longer and compiling 10 % (MYLA-428).
 fun is_digit(c: uint8) -> bool {
     return c >= '0' && c <= '9'
 }

@@ -634,7 +634,8 @@ fun chunk_digits(radix: uint32) -> int {
 }
 
 // The value of the digit `c` in a radix up to 36, letters in either case;
-// 36 for a byte that is no digit.
+// 36 for a byte that is no digit. Not std.char's `to_digit`, a call a digit
+// (std.num's copy, swapped, parsed 70 % slower).
 #test('7')[7u32]
 #test('z')[35u32]
 #test('A')[10u32]

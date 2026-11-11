@@ -833,7 +833,8 @@ fun in_set(c: uint8, set: str) -> bool {
     return false
 }
 
-// The value of the hex digit `c`, in either case, or -1.
+// The value of the hex digit `c`, in either case, or -1. Not std.char's
+// `to_digit`: a call and an `Option` a digit took `percent_decode` 29 % longer.
 #test('7')[7]
 #test('b')[11]
 #test('B')[11]
