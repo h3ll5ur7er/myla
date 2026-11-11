@@ -30,6 +30,8 @@ fun is_align(c: char) -> bool {
     return c == '<' || c == '>' || c == '^'
 }
 
+// Not std.char's `is_digit`: `parse_spec` runs at each formatted hole, and
+// a call a character took 300,000 formats 2 to 3 % longer (MYLA-428).
 fun is_digit(c: char) -> bool {
     return c >= '0' && c <= '9'
 }

@@ -660,7 +660,7 @@ fun ctrl_char(b: int) -> char {
 }
 
 // The length of a UTF-8 sequence that starts with `b`, 0 for a byte that
-// can't start one.
+// can't start one (nothing in std gives a length from the lead byte alone).
 #test(0xC3u8)[2]
 #test(0xF0u8)[4]
 #test(0x80u8)[0]

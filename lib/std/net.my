@@ -33,6 +33,7 @@ import .bytes as bytes_m // `from_str`, `to_str`
 import .str as str_m // `find`, `find_from`, `contains`, `to_lower`
 import .list as list_m // `contains`, `extend`
 import .option as option_m // `unwrap_or`, `is_some`
+import .char as char_m // `to_digit`
 
 // --- addresses ---------------------------------------------------------------------
 
@@ -508,7 +509,7 @@ fun groups(s: str, last: bool) -> Option<[int]> {
         var v = 0
         var i = 0
         while i < part.len() {
-            let d = hex_digit(part[i])
+            let d = (part[i] as char).to_digit(16).unwrap_or(-1)
             if d < 0 {
                 return None
             }
@@ -525,23 +526,6 @@ fun groups(s: str, last: bool) -> Option<[int]> {
         }
     }
     return None
-}
-
-// The value of the hex digit `c`, or -1.
-#test('7')[7]
-#test('B')[11]
-#test('g')[-1]
-fun hex_digit(c: uint8) -> int {
-    if c >= '0' && c <= '9' {
-        return (c - '0') as int
-    }
-    if c >= 'a' && c <= 'f' {
-        return (c - 'a') as int + 10
-    }
-    if c >= 'A' && c <= 'F' {
-        return (c - 'A') as int + 10
-    }
-    return -1
 }
 
 // A port: decimal digits, 0 to 65535.
@@ -1684,7 +1668,8 @@ fun skip_name(msg: str, at0: int) -> int {
 
 // --- the cases' helpers --------------------------------------------------------
 
-// The bytes of `s` in hex.
+// The bytes of `s` in hex: not std.encoding's `hex_encode`, which every
+// program importing this module would check for the tests' sake.
 fun hex_of(s: str) -> str {
     let digits = "0123456789abcdef"
     var sb = StringBuilder()
@@ -1720,12 +1705,13 @@ fun dns_query_hex(id: int, name: str, qtype: int) -> str {
     }
 }
 
-// The bytes of the hex text `h` as a string.
+// The bytes of the hex text `h` as a string (std.encoding's `hex_decode`
+// gives a list, and would be checked by this module's importers).
 fun unhex(h: str) -> str {
     var sb = StringBuilder()
     var i = 0
     while i + 1 < h.len() {
-        sb.append_byte((hex_digit(h[i]) * 16 + hex_digit(h[i + 1])) as uint8)
+        sb.append_byte(((h[i] as char).to_digit(16).unwrap_or(-1) * 16 + (h[i + 1] as char).to_digit(16).unwrap_or(-1)) as uint8)
         i += 2
     }
     return sb.build()

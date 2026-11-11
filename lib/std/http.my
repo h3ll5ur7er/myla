@@ -137,7 +137,8 @@ const LF: uint8 = 10
 const SP: uint8 = 32
 const HT: uint8 = 9
 
-// The first position of the byte `b` in `s` at or after `start`, or -1.
+// The first position of the byte `b` in `s` at or after `start`, or -1. Not
+// std.str's `find_from`: it took parsing a request 8 % more instructions.
 #test("ab\ncd\n", 10u8, 0)[2]
 #test("ab\ncd\n", 10u8, 3)[5]
 #test("abc", 10u8, 0)[-1]

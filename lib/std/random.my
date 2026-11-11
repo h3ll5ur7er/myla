@@ -283,32 +283,6 @@ fun booleans(r: Rng, n: int) -> [bool] {
     return out
 }
 
-fun same<T: Eq>(xs: [T], ys: [T]) -> bool {
-    if xs.len() != ys.len() {
-        return false
-    }
-    for i in 0..xs.len() {
-        if xs[i] != ys[i] {
-            return false
-        }
-    }
-    return true
-}
-
-fun is_some_of<T: Eq>(o: Option<T>, v: T) -> bool {
-    return match o {
-        Some(x) => x == v
-        None => false
-    }
-}
-
-fun is_none<T>(o: Option<T>) -> bool {
-    return match o {
-        Some(_) => false
-        None => true
-    }
-}
-
 // The numbers 0..n.
 fun upto(n: int) -> [int] {
     var out: [int] = []
@@ -380,10 +354,10 @@ fun from_os_differs() {
 fun shuffled_reference() {
     var r = seeded(42)
     let xs = r.shuffled(upto(10))
-    assert(same(xs, [9, 1, 4, 2, 8, 7, 6, 5, 3, 0]), "the reference port's shuffle of 0..10")
+    assert(xs == [9, 1, 4, 2, 8, 7, 6, 5, 3, 0], "the reference port's shuffle of 0..10")
     let e: [str] = []
     assert(r.shuffled(e).len() == 0, "nothing to shuffle")
-    assert(same(r.shuffled(["x"]), ["x"]), "one element")
+    assert(r.shuffled(["x"]) == ["x"], "one element")
     let words = r.shuffled(["a", "b", "c", "d"])
     assert(words.len() == 4, "strings")
 }
@@ -396,7 +370,7 @@ fun shuffled_is_a_permutation() {
         let ys = r.shuffled(xs)
         assert(is_permutation(ys), "each element once")
     }
-    assert(same(xs, upto(100)), "the list given isn't changed")
+    assert(xs == upto(100), "the list given isn't changed")
 }
 
 #test
@@ -427,8 +401,8 @@ fun shuffled_spreads_evenly() {
 fun choice_spreads_evenly() {
     var r = seeded(3)
     let none: [int] = []
-    assert(is_none(r.choice(none)), "an empty list has no element")
-    assert(is_some_of(r.choice(["only"]), "only"), "one element")
+    assert(r.choice(none) == None, "an empty list has no element")
+    assert(r.choice(["only"]) == Some("only"), "one element")
     let xs = [10, 11, 12, 13, 14]
     var counts = zeros(5)
     for k in 0..10000 {

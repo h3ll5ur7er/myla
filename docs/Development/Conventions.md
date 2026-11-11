@@ -63,4 +63,5 @@ Language and design decisions are numbered (D1 onwards) and recorded with date, 
 
 - Python (the tests and scripts): standard library only, type hints, docstrings that explain why.
 - Myla: `snake_case` values and functions, `PascalCase` types, four-space indentation, braces on the same line.
+- A module of `lib/std/` uses the library's function rather than a private copy of it ([[MYLA-376]], [[MYLA-428]]). A copy stays, with a comment saying why, where it behaves differently, where the import would cost every importer check time for little (std.encoding: 2.5 to 4 ms, for one helper), or where the library's version is slower on a hot path. Only a function of the caller's own module is inlined, so a per-byte test or digit from another module (std.char's `is_digit`, `to_digit`) is a call each: it made `parse_uint64` 70 % slower, `percent_decode` 29 % and the formatting of a spec 2 to 3 %. Measure before swapping one in a loop.
 - Commit and push work on a branch; keep generated files (`build/`, `.venv/`, `__pycache__`) out of version control.

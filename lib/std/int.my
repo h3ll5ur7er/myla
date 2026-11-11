@@ -4584,15 +4584,15 @@ fun modular_at_64_bits() {
     var b: uint64 = 2
     var i = 0
     while i < 20 {
-        holds(a.powmod(p - 1, p) == 1, "a^(p-1) mod p, int64")
-        holds(b.powmod(q - 1, q) == 1, "b^(q-1) mod q, uint64")
+        assert(a.powmod(p - 1, p) == 1, "a^(p-1) mod p, int64")
+        assert(b.powmod(q - 1, q) == 1, "b^(q-1) mod q, uint64")
         match a.modinv(p) {
-            Some(x) => holds(a.mulmod(x, p) == 1, "a * a^-1 mod p, int64")
-            None => holds(false, "no inverse modulo a prime, int64")
+            Some(x) => assert(a.mulmod(x, p) == 1, "a * a^-1 mod p, int64")
+            None => assert(false, "no inverse modulo a prime, int64")
         }
         match b.modinv(q) {
-            Some(x) => holds(b.mulmod(x, q) == 1, "b * b^-1 mod q, uint64")
-            None => holds(false, "no inverse modulo a prime, uint64")
+            Some(x) => assert(b.mulmod(x, q) == 1, "b * b^-1 mod q, uint64")
+            None => assert(false, "no inverse modulo a prime, uint64")
         }
         a = a.mulmod(a, p) + 1
         b = b.mulmod(b, q) + 1
@@ -4608,33 +4608,24 @@ fun kinds_agree() {
     for a in vs {
         for b in vs {
             let (s, over) = a.overflowing_add(b)
-            holds(s == a.wrapping_add(b), "overflowing_add's value")
+            assert(s == a.wrapping_add(b), "overflowing_add's value")
             match a.checked_add(b) {
-                Some(v) => holds(!over && v == s && a.saturating_add(b) == s, "add fits")
-                None => holds(over && a.saturating_add(b) == (if b > 0 { MAX_I64 } else { MIN_I64 }), "add overflows")
+                Some(v) => assert(!over && v == s && a.saturating_add(b) == s, "add fits")
+                None => assert(over && a.saturating_add(b) == (if b > 0 { MAX_I64 } else { MIN_I64 }), "add overflows")
             }
             let (p, mover) = a.overflowing_mul(b)
-            holds(p == a.wrapping_mul(b), "overflowing_mul's value")
+            assert(p == a.wrapping_mul(b), "overflowing_mul's value")
             match a.checked_mul(b) {
-                Some(v) => holds(!mover && v == p && a.saturating_mul(b) == p, "mul fits")
-                None => holds(mover && a.saturating_mul(b) == (if (a < 0) == (b < 0) { MAX_I64 } else { MIN_I64 }), "mul overflows")
+                Some(v) => assert(!mover && v == p && a.saturating_mul(b) == p, "mul fits")
+                None => assert(mover && a.saturating_mul(b) == (if (a < 0) == (b < 0) { MAX_I64 } else { MIN_I64 }), "mul overflows")
             }
             if b != 0 {
                 let r = a.rem_euclid(b)
-                holds(r >= 0 && (b == -9223372036854775807 - 1 || r < b || r < -b), "rem_euclid's range")
+                assert(r >= 0 && (b == -9223372036854775807 - 1 || r < b || r < -b), "rem_euclid's range")
                 if !(a == MIN_I64 && b == -1) {
-                    holds(a.div_euclid(b).wrapping_mul(b).wrapping_add(r) == a, "q * b + r")
+                    assert(a.div_euclid(b).wrapping_mul(b).wrapping_add(r) == a, "q * b + r")
                 }
             }
         }
-    }
-}
-
-// The test functions' assertion: `assert(ok, f"…")` doesn't compile
-// natively yet (an IR verifier error on the f-string message), a function
-// call with one does.
-fun holds(ok: bool, what: str) {
-    if !ok {
-        panic(what)
     }
 }
