@@ -9644,7 +9644,7 @@ class TestCompilerParity(unittest.TestCase):
                     built = subprocess.run([myla, "build", path, "-o", out] + flags, capture_output=True, text=True,
                                            timeout=60)
                     self.assertEqual((built.returncode, built.stderr),
-                                     (1, "type error: no entry point: define '#main' or a function named 'main'\n"))
+                                     (1, "error: no entry point: define '#main' or a function named 'main'\n"))
                     self.assertFalse(os.path.exists(out))
 
     def test_runtime_errors_carry_the_interpreters_values(self):

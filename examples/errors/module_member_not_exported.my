@@ -1,0 +1,9 @@
+//~ module error: module 'std.deque' does not export 'Nope'
+//~ span: deque
+// `m.f` names what the module exports with `pub`; the error names the
+// module, as the type and bound positions do (MYLA-417).
+import std.deque as deque
+
+fun main() {
+    let d = deque.Nope()
+}

@@ -1641,7 +1641,7 @@ impl Renamer {
                     if b.is_module { mid = b.value } else { qualified = b.value }
                 },
                 None => {
-                    self.fail(cur.line, cur.col, cur.sp, format("module does not export '{}' (declarations are private unless marked 'pub')", name))
+                    self.fail(cur.line, cur.col, cur.sp, format("module '{}' does not export '{}' (declarations are private unless marked 'pub')", dotted_id(mid), name))
                     return Some(e)
                 },
             }
@@ -2040,11 +2040,13 @@ fun async_let_in(cps: [char], site: BodySite) -> int32 {
 
 // The kind and the message of the error `msg` of the checker: a body read
 // late (MYLA-359) may have a lex, parse or module error, its kind before
-// its message.
+// its message; a build that can't be made at all (no entry point) is an
+// `error` (the owner's decision on MYLA-415, 2026-11-11).
 #test("parse error: expected ')'")[("parse error", "expected ')'")]
 #test("unknown name 'x'")[("type error", "unknown name 'x'")]
+#test("error: no entry point")[("error", "no entry point")]
 fun kind_of(msg: str) -> (str, str) {
-    for kind in ["lex error", "parse error", "module error"] {
+    for kind in ["lex error", "parse error", "module error", "error"] {
         if starts_with_text(msg, kind + ": ") { return (kind, msg[kind.len() + 2:]) }
     }
     return ("type error", msg)

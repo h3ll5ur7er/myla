@@ -63,3 +63,7 @@ Work package P3 of [[Project/Review-2026-11-09]], the checker half that [[Projec
 
 - [[MYLA-448]]: `m[Ok("a")] += 1` can't infer the key's type (the parser's hoisted `let %index`).
 - [[MYLA-449]]: a literal before the element that fixes a wider type must still fit `int32` (`[4000000000, big]`).
+
+## The owner's decision (2026-11-11)
+
+The proposals stand as built (D189). The message of a module's member it doesn't export now names the module, as the owner asked: `module 'std.deque' does not export 'Nope' (declarations are private unless marked 'pub')`, with `member_not_exported` re-pinned in `test_selfhost_codegen`'s `SUPERSEDED` and a new error-corpus file, `examples/errors/module_member_not_exported.my`. `deque.Deque { … }` stays a parse error (D170).

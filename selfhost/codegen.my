@@ -2002,10 +2002,11 @@ impl CodeGen {
 
     fun generate(var self) -> str {
         let en = self.entry_name()
-        // a file without an entry point is a library: nothing to build (Z3),
-        // as the interpreter says
+        // a file without an entry point is a library: nothing to build yet
+        // (Z3), an error of its own; with an FFI it builds a library
+        // (MYLA-505, the owner's decision on MYLA-415)
         if !self.has_func(en) {
-            self.refused.push(CheckErr { line: 0, col: 0, sp: no_span(), msg: "no entry point: define '#main' or a function named 'main'", decl: -1, notes: [] })
+            self.refused.push(CheckErr { line: 0, col: 0, sp: no_span(), msg: "error: no entry point: define '#main' or a function named 'main'", decl: -1, notes: [] })
             return ""
         }
         if self.wasm { self.emit_runtime_prelude_wasm(en) } else if self.a64 { self.emit_runtime_prelude_a64(en) } else { self.emit_runtime_prelude(en) }
