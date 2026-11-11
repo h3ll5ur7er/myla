@@ -43,6 +43,21 @@ def _allow_cores() -> None:
         pass
 
 
+def cores_land_here() -> bool:
+    """Whether a core the kernel writes is a file in the program's
+    directory: a hard limit above zero and a `core_pattern` that names a
+    file, not a handler (`|/usr/lib/systemd/systemd-coredump …`, as on
+    GitHub's runners, which keeps the core in the system's own store)."""
+    if resource.getrlimit(resource.RLIMIT_CORE)[1] == 0:
+        return False
+    try:
+        with open("/proc/sys/kernel/core_pattern", encoding="utf-8") as fh:
+            pattern = fh.read().strip()
+    except OSError:
+        return True
+    return not pattern.startswith("|") and "/" not in pattern
+
+
 def hang_dir() -> str:
     """Where the cores and stacks of programs that hung are kept."""
     d = os.environ.get("MYLA_HANG_DIR") or os.path.join(tempfile.gettempdir(), "myla-hangs")

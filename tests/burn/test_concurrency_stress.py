@@ -11,7 +11,6 @@ reproducible. The examples Myla
 rejects at compile time are in the error corpus (examples/errors/), the
 documented limits on the Concurrency page."""
 import os
-import resource
 import shutil
 import subprocess
 import tempfile
@@ -195,7 +194,7 @@ class ConcurrencyStress(unittest.TestCase):
     @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
     def test_a_hang_leaves_its_stacks_and_a_core(self):
         # MYLA-418: the watchdog's timeout keeps where the program was
-        from ._hang import Hung
+        from ._hang import Hung, cores_land_here
         from ._tools import selfhost_tool
         source = "fun main() {\n    var i = 0\n    while true {\n        i = (i + 1) % 7\n    }\n}\n"
         with tempfile.TemporaryDirectory() as tmp:
@@ -222,7 +221,9 @@ class ConcurrencyStress(unittest.TestCase):
             # says so in the file, and the core below still holds the stacks
             if shutil.which("gdb") and "Could not attach" not in stacks:
                 self.assertIn("myla_main", stacks)
-            if resource.getrlimit(resource.RLIMIT_CORE)[1] != 0:
+            # a native core is a file only where the kernel writes one in the
+            # program's directory; elsewhere a handler takes it
+            if cores_land_here():
                 self.assertTrue(any("core" in f for f in files), files)
 
     @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
