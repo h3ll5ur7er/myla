@@ -357,6 +357,31 @@ class TestTestFunctions(unittest.TestCase):
             self.assertEqual(proc.returncode, 1, proc.stderr)
             self.assertEqual(proc.stdout, "no #test cases match 'nothing_has_this'.\n")
 
+    def test_a_printing_case_of_a_file_named_by_its_absolute_path(self):
+        # MYLA-414 (M5): its captured write left the errno of an earlier
+        # primitive, so `println` failed with "write failed: errno 2"
+        src = 'from std.io import println\n\n#test()[2]\nfun says() -> int {\n    println("hello")\n    return 2\n}\n'
+        with tempfile.TemporaryDirectory() as tmp:
+            path = _write(tmp, "says.my", src)
+            proc = _myla(["test", os.path.abspath(path)], tmp)
+            self.assertEqual((proc.stdout, proc.stderr, proc.returncode), ("PASS  says #1\n\n1/1 passed.\n", "", 0))
+
+    def test_an_err_of_a_test_function_shows_its_value(self):
+        # MYLA-414 (M8, the interpreter's half): a list's or a tuple's `Err`
+        # printed `ERR: VList()`
+        src = ("#test\nfun big() -> Result<(), uint64> { return Err(0xFFFFFFFFFFFFFFFF) }\n\n"
+               "#test\nfun list() -> Result<(), [int]> { return Err([1, 2]) }\n\n"
+               "#test\nfun tuple() -> Result<(), (int, str)> { return Err((1, \"a\")) }\n\n"
+               "#test\nfun nested() -> Result<(), [(str, [uint64])]> { return Err([(\"k\", [18446744073709551615u64])]) }\n\n"
+               "#test\nfun table() -> Result<(), [str: int]> { return Err([\"x\": 1]) }\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = _write(tmp, "errs.my", src)
+            proc = _myla(["test", path], tmp)
+            self.assertEqual(proc.returncode, 1, proc.stderr)
+            self.assertEqual(proc.stdout, "FAIL  big: 18446744073709551615\nFAIL  list: [1, 2]\n"
+                                          "FAIL  tuple: (1, 'a')\nFAIL  nested: [('k', [18446744073709551615])]\n"
+                                          "FAIL  table: ['x': 1]\n\n0/5 passed.\n")
+
     def test_temp_dir_needs_a_running_case(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = _write(tmp, "outside.my", "import std.test as test\nfun main() { print(test.temp_dir()) }\n")

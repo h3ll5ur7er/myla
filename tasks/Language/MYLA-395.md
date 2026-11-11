@@ -2,7 +2,7 @@
 id: MYLA-395
 title: "Integer overflow traps in the interpreter, under myla test and in --checked builds (D175)"
 type: feature
-status: todo
+status: review
 priority: medium
 labels: [language, integers, overflow, interpreter, codegen]
 ---
@@ -47,4 +47,6 @@ The implementation of D175 ([[MYLA-311]]). After the toolchain-fixes batches ([[
 
 Not ready ([[Project/Review-2026-11-09]]): the interpreter neither traps nor wraps arithmetic typed by a type parameter: `[2000000000, 2000000000].sum(0)` is 4000000000 under `myla run`, and `myla test` and `myla test --native` disagree (H1). The fix is in [[MYLA-414]].
 
-- [ ] The review's blocker, fixed with [[MYLA-414]]
+- [x] The review's blocker, fixed with [[MYLA-414]]
+
+The interpreter binds every generic call's type parameters in its frame now, so `xs.sum(0)`, `iter.sum` and a `T: Add` function trap as a function of the concrete type does, interpreted and under `myla test` (`test_overflow`'s generic cases and sums, the parity program `generic_code_per_width`); evidence in [[MYLA-414]].
