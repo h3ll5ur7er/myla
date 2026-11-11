@@ -52,14 +52,14 @@ The unreserved bytes are RFC 3986's: the ASCII letters and digits, `-`, `.`, `_`
 
 ## URLs
 
-`parse(s: str) -> Result<Url, UrlError>` splits a URI reference (RFC 3986's `URI-reference`) into its parts and checks each against the RFC's grammar. It changes nothing: a part stays percent-encoded and in the case it was written in. A relative reference such as `../g?y` parses too, with the scheme "". `Url.to_str()` puts the parts back together; it gives back the text that was parsed, but for an empty port (`http://h:/`), which `parse` reads as none.
+`parse(s: str) -> Result<Url, UrlError>` splits a URI reference (RFC 3986's `URI-reference`) into its parts and checks each against the RFC's grammar. It changes nothing: a part stays percent-encoded and in the case it was written in. A relative reference such as `../g?y` parses too, with the scheme "". `Url.to_str()` puts the parts back together; it gives back the text that was parsed, but for an empty port (`http://h:/`), which `parse` reads as none. A port with a leading zero (`http://h:080/`) is `BadPort`: the RFC's grammar allows it, but the port is kept as a number, and `to_str` couldn't give the zero back ([[MYLA-422]]).
 
 | Field | Holds |
 | --- | --- |
 | `scheme: str` | `https`; "" for a relative reference |
 | `user_info: Option<str>` | What comes before `@` in the authority; `None` without an `@` |
 | `host: Option<str>` | The host, an IPv6 address without its brackets; `None` without an authority (`mailto:a@b.c`), `Some("")` for an empty one (`file:///etc/hosts`) |
-| `port: Option<int>` | The port, 0 to 65535; `None` without one |
+| `port: Option<int>` | The port, 0 to 65535, written without a leading zero; `None` without one |
 | `path: str` | The path, perhaps "" |
 | `query: Option<str>` | After `?`, up to `#`; `None` without a `?`. `query_decode` reads a form's pairs from it |
 | `fragment: Option<str>` | After `#`; `None` without one |
@@ -78,6 +78,39 @@ The tests check `parse` against the examples of RFC 3986 (sections 1.1.2, 3 and 
 | `foo://example.com:8042/over/there?name=ferret#nose` | `foo` | `example.com` | 8042 | `/over/there` | `name=ferret` | `nose` |
 | `g;x?y#s` | | | | `g;x` | `y` | `s` |
 
+## Resolving a reference
+
+| Function | Result |
+| --- | --- |
+| `resolve(base: str, reference: str) -> Result<str, UrlError>` | The reference resolved against the URL `base`: the URL a link (or a redirect's `Location`) in a document from `base` points to. The error is `parse`'s, of either text |
+| `Url.resolve(self, r: Url) -> Url` | The same on parsed URLs, `self` the base |
+
+It is RFC 3986's algorithm (section 5.2), strict: a reference with a scheme is absolute (`http:g` stays `http:g`); one with an authority takes only the base's scheme; an empty path keeps the base's path, and its query unless the reference has one; a path that starts with `/` replaces the base's, any other goes after the base's last `/`. The dot segments are then removed (section 5.2.4): each `.`, and each `..` with the segment before it, never above the root. The fragment is always the reference's. The time is linear in the length of the texts. [[Language/Standard-library/Http]]'s client resolves its redirects so.
+
+```myla
+import std.url as url
+
+fun main() {
+    let base = "http://a/b/c/d;p?q"
+    for r in ["g", "../g", "../../../g", "./g/.", "?y", "#s", "//h/x/../y"] {
+        match url.resolve(base, r) {
+            Ok(t) => print(t)
+            Err(_) => print("not a reference")
+        }
+    }
+}
+// output:
+// http://a/b/c/g
+// http://a/b/g
+// http://a/g
+// http://a/b/c/g/
+// http://a/b/c/d;p?y
+// http://a/b/c/d;p?q#s
+// http://h/y
+```
+
+The tests resolve every example of RFC 3986's section 5.4, normal and abnormal, against its base.
+
 ## Errors
 
 | Variant | Meaning |
@@ -88,4 +121,4 @@ The tests check `parse` against the examples of RFC 3986 (sections 1.1.2, 3 and 
 | `BadHost(int)` | A host in brackets that has no `]`, isn't an IP literal, or is followed by something other than a port |
 | `BadPort(int)` | A port that isn't decimal digits, or is past 65535 |
 
-The position is a byte index in the text: `parse("http://exa mple.com/")` is `Err(UrlError.BadChar(10))`. `UrlError` derives `Eq`; `Url` doesn't, as `Option` isn't `Eq`.
+The position is a byte index in the text: `parse("http://exa mple.com/")` is `Err(UrlError.BadChar(10))`. `UrlError` and `Url` derive `Eq`.

@@ -11,6 +11,11 @@
   the errors: a malformed status line, a body cut short, a bad chunk, a
   head past the limit, a body past it, a timeout, a refused connection,
   `https`, a URL that isn't one;
+- the server's time limits (idle, read, write, keep-alive) against silent,
+  dribbling, slow-uploading and non-reading clients and a slow handler,
+  and 64 silent connections against a default server (MYLA-422);
+- a client that sends a POST over a kept connection the server dropped
+  only once, a GET again (MYLA-422);
 - a Myla client and server in one program, three clients at once on the
   reactor.
 
@@ -154,6 +159,9 @@ async fun main() {
     print(show(http.fetch(base + "/badchunk")))
     print(show(http.fetch(base + "/hugeheader")))
     print(show(http.send(http.request("GET", base + "/big?n=5000").with_limits(65536, 4096))))
+    // a gzip bomb: 64 MiB of zeros in 64 KiB, past a limit of 1 MiB once
+    // decoded (MYLA-472)
+    print(show(http.send(http.request("GET", base + "/bomb").with_limits(65536, 1048576))))
     print(show(http.send(http.request("GET", base + "/slow").with_timeout(300))))
     print(show(await http.send_async(http.request("GET", base + "/slow").with_timeout(300))))
     print(show(http.send(http.request("GET", f"http://127.0.0.1:{silent}/").with_timeout(200))))
@@ -193,6 +201,7 @@ error: malformed request or status line
 error: connection closed inside a message
 error: malformed chunked body
 error: headers too large
+error: body too large
 error: body too large
 error: timed out
 error: timed out
@@ -310,6 +319,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             # answered as if the connection stays, then closed
             self.answer(200, b"dropped after this")
             self.close_connection = True
+        elif path == "/bomb":
+            c = zlib.compressobj(9, zlib.DEFLATED, 31)
+            data = b"".join(c.compress(bytes(1 << 20)) for _ in range(64)) + c.flush()
+            self.answer(200, data, [("Content-Encoding", "gzip")])
         elif path == "/slow":
             time.sleep(1.0)
             self.answer(200, b"late")
@@ -518,6 +531,15 @@ def python_clients(test: unittest.TestCase, port: int) -> None:
         (b"POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: gzip\r\n\r\n", b"501 Not Implemented"),
         (b"GET / HTTP/2.0\r\n\r\n", b"505 HTTP Version Not Supported"),
         (b"POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 1x\r\n\r\n", b"400 Bad Request"),
+        # H7 (MYLA-422): a chunk size that would take body_len + size past
+        # int32 is 413, on every runner (it killed a checked server, and a
+        # plain one waited for 2 GiB past its limit)
+        (b"POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n1\r\nx\r\n7fffffff\r\n", b"413 Content Too Large"),
+        (b"POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n1 junk\r\nx\r\n0\r\n\r\n", b"400 Bad Request"),
+        # two Host fields, a NUL and a bare CR in a value
+        (b"GET / HTTP/1.1\r\nHost: x\r\nHost: y\r\n\r\n", b"400 Bad Request"),
+        (b"GET / HTTP/1.1\r\nHost: x\r\nX-A: a\x00b\r\n\r\n", b"400 Bad Request"),
+        (b"GET / HTTP/1.1\r\nHost: x\r\nX-A: a\rX-B: b\r\n\r\n", b"400 Bad Request"),
     ]:
         out = raw(request)
         test.assertTrue(out.startswith(b"HTTP/1.1 " + status + b"\r\n"), (request[:40], out))
@@ -604,10 +626,13 @@ class MylaServer(unittest.TestCase):
             path = write_program(tmp, SERVER, "server.my")
             binary = os.path.join(tmp, "server")
             native_build(Program(path), binary)
+            checked = os.path.join(tmp, "server-checked")
+            native_build(Program(path), checked, checked=True)
             forms = {
                 "interpreted": ([selfhost_tool("main"), "run", path, str(SERVER_REQUESTS), "--stdlib", STDLIB_ROOT],
                                 None),
                 "built": run_argv(binary, binary, [str(SERVER_REQUESTS)]),
+                "built --checked": run_argv(checked, checked, [str(SERVER_REQUESTS)]),
             }
             for name, (argv, exe) in forms.items():
                 with self.subTest(server=name):
@@ -701,6 +726,347 @@ class KeepAlive(unittest.TestCase):
                     finally:
                         proc.kill()
                     self.assertEqual((rest, err, proc.returncode), ("stopped\n", "", 0))
+
+
+# --- the server's time limits (MYLA-422) -------------------------------------------
+
+TIME_SERVER = PRELUDE + r"""from std.io import println
+import std.task as task
+
+fun handle(r: Request) -> Response {
+    if r.path() == "/big" {
+        // 8 MiB, doubled up
+        var s = "x"
+        while s.len() < 8388608 {
+            s = s + s
+        }
+        return http.response(200, s)
+    }
+    if r.path() == "/echo" {
+        return http.response(200, r.body)
+    }
+    return http.response(200, "ok")
+}
+
+async fun answer(r: Request) -> Response {
+    if r.path() == "/sleep" {
+        await task.sleep(700)
+    }
+    return handle(r)
+}
+
+fun time_of(s: str) -> int {
+    return if s == "-" { -1 } else { int_of(s) }
+}
+
+// args: how long it runs, then `d` for the default options or the
+// workers, keep_alive_ms, idle_ms, read_ms and write_ms (`-`: none)
+#main
+async fun main() {
+    var l = match net.listen(net.addr(net.loopback(), 0)) {
+        Ok(l) => l
+        Err(e) => { panic("listen") }
+    }
+    match l.local_addr() {
+        Ok(a) => println(f"{a.port}")
+        Err(e) => panic("local_addr")
+    }
+    var o = http.server_options()
+    let a = args()
+    if a[2] != "d" {
+        o.workers = int_of(a[2])
+        o.keep_alive_ms = time_of(a[3])
+        o.idle_ms = time_of(a[4])
+        o.read_ms = time_of(a[5])
+        o.write_ms = time_of(a[6])
+    }
+    let f = async () => await http.serve_with(l, o, async (r: Request) => await answer(r))
+    match await task.timeout(int_of(a[1]), f) {
+        Some(_) => println("ended")
+        None => println("stopped")
+    }
+}
+"""
+
+
+def quick_get(port: int, timeout: float = 3) -> tuple[bytes, float]:
+    """A GET on a connection of its own, closed after: the response and how
+    long it took."""
+    t0 = time.monotonic()
+    with socket.create_connection(("127.0.0.1", port), timeout=timeout) as s:
+        s.sendall(b"GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+        return recv_all(s), time.monotonic() - t0
+
+
+def end_of(s: socket.socket, limit: float) -> tuple[bytes, float]:
+    """What `s` receives until it ends (the end of the stream or a reset),
+    and when, at most `limit` seconds from now."""
+    t0 = time.monotonic()
+    s.settimeout(limit)
+    out = b""
+    try:
+        while True:
+            b = s.recv(65536)
+            if not b:
+                break
+            out += b
+    except ConnectionResetError:
+        pass
+    return out, time.monotonic() - t0
+
+
+@unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
+@unittest.skipIf(NO_SOCKETS, NO_SOCKETS_WHY)
+class TimeLimits(unittest.TestCase):
+    """The server's `idle_ms`, `read_ms`, `write_ms` and `keep_alive_ms`
+    against Python's raw sockets: slow, silent and non-reading clients (the
+    review's t_slow.py, M23)."""
+
+    def forms(self, tmp: str, args: list[str]):
+        path = os.path.join(tmp, "times.my")
+        if not os.path.exists(path):
+            write_program(tmp, TIME_SERVER, "times.my")
+            native_build(Program(path), os.path.join(tmp, "times"))
+        binary = os.path.join(tmp, "times")
+        return {
+            "interpreted": ([selfhost_tool("main"), "run", path, *args, "--stdlib", STDLIB_ROOT], None),
+            "built": run_argv(binary, binary, args),
+        }
+
+    def serve(self, argv, exe, check):
+        proc = subprocess.Popen(argv, executable=exe, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            port = int(proc.stdout.readline())
+            check(port)
+            rest, err = proc.communicate(timeout=60)
+        finally:
+            proc.kill()
+        self.assertEqual((rest, err, proc.returncode), ("stopped\n", "", 0))
+
+    def test_idle_non_reading_and_slow_handled_connections(self):
+        def check(port):
+            # two silent connections hold both workers until idle_ms: then
+            # they are closed without an answer, and a request is served
+            idle = [socket.create_connection(("127.0.0.1", port), timeout=10) for _ in range(2)]
+            time.sleep(0.1)
+            out, took = quick_get(port, timeout=5)
+            self.assertTrue(out.startswith(b"HTTP/1.1 200 OK\r\n"), out)
+            self.assertLess(took, 2.5)
+            for s in idle:
+                self.assertEqual(end_of(s, 3)[0], b"")
+                s.close()
+            # two clients that never read an 8 MiB response hold both
+            # workers until write_ms passes without progress
+            hold = []
+            for _ in range(2):
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+                s.connect(("127.0.0.1", port))
+                s.sendall(b"GET /big HTTP/1.1\r\nHost: x\r\n\r\n")
+                hold.append(s)
+            time.sleep(0.2)
+            out, took = quick_get(port, timeout=8)
+            self.assertTrue(out.startswith(b"HTTP/1.1 200 OK\r\n"), out)
+            for s in hold:
+                got, _ = end_of(s, 5)
+                self.assertLess(len(got), 8 << 20, "closed before the whole response")
+                s.close()
+            # a handler slower than idle_ms and read_ms isn't cut, and its
+            # connection is kept
+            with socket.create_connection(("127.0.0.1", port), timeout=10) as s:
+                s.sendall(b"GET /sleep HTTP/1.1\r\nHost: x\r\n\r\n")
+                first = recv_response(s)
+                self.assertTrue(first.startswith(b"HTTP/1.1 200 OK\r\n") and first.endswith(b"\r\n\r\nok"), first)
+                self.assertNotIn(b"Connection: close", first)
+                s.sendall(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+                self.assertTrue(recv_response(s).endswith(b"\r\n\r\nok"))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            for name, (argv, exe) in self.forms(tmp, ["12000", "2", "-", "300", "300", "300"]).items():
+                with self.subTest(server=name):
+                    self.serve(argv, exe, check)
+
+    def test_slow_requests(self):
+        def check(port):
+            # an upload slower than keep_alive_ms, within read_ms: read
+            # whole, answered, then the connection closes
+            with socket.create_connection(("127.0.0.1", port), timeout=10) as s:
+                s.sendall(b"POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: 12\r\n\r\n")
+                for _ in range(12):
+                    s.sendall(b"z")
+                    time.sleep(0.1)
+                out, _ = end_of(s, 5)
+                self.assertTrue(out.startswith(b"HTTP/1.1 200 OK\r\n") and out.endswith(b"\r\n\r\n" + b"z" * 12), out)
+                self.assertIn(b"Connection: close\r\n", out)
+            # a head dribbled a byte at a time: 408 once read_ms passed
+            with socket.create_connection(("127.0.0.1", port), timeout=10) as s:
+                t0 = time.monotonic()
+                s.sendall(b"GET / HTTP/1.1\r\nHost: x\r\nX-Slow: ")
+                s.settimeout(0.1)
+                out = b""
+                while time.monotonic() - t0 < 6 and not out:
+                    try:
+                        s.sendall(b"a")
+                        out = s.recv(65536)
+                    except socket.timeout:
+                        pass
+                    except OSError:
+                        break
+                took = time.monotonic() - t0
+                self.assertTrue(out.startswith(b"HTTP/1.1 408 Request Timeout\r\n"), out)
+                self.assertTrue(1.0 < took < 4, took)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            for name, (argv, exe) in self.forms(tmp, ["8000", "2", "400", "300", "1500", "500"]).items():
+                with self.subTest(server=name):
+                    self.serve(argv, exe, check)
+
+    def test_idle_connections_hold_a_default_server_for_idle_ms(self):
+        # the review's case: 64 silent connections took every worker of a
+        # default server for keep_alive_ms (60 s); idle_ms (5 s) ends them
+        def check(port):
+            idle = [socket.create_connection(("127.0.0.1", port), timeout=10) for _ in range(64)]
+            time.sleep(0.2)
+            out, took = quick_get(port, timeout=15)
+            self.assertTrue(out.startswith(b"HTTP/1.1 200 OK\r\n"), out)
+            self.assertTrue(3 < took < 9, took)
+            for s in idle:
+                s.close()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            for name, (argv, exe) in self.forms(tmp, ["9000", "d"]).items():
+                with self.subTest(server=name):
+                    self.serve(argv, exe, check)
+
+
+# --- what a client sends again on a new connection (MYLA-422) ---------------------
+
+REPLAY_CLIENT = PRELUDE + r"""import std.task as task
+
+#main
+async fun main() {
+    let base = f"http://127.0.0.1:{int_of(args()[1])}"
+    var c = http.client()
+    print(show(c.get(base + "/a")))
+    // the server reads this POST and drops the kept connection without an
+    // answer: it may have acted on it, so it isn't sent again
+    print(show(c.post(base + "/swallow", "once")))
+    print(show(c.get(base + "/a")))
+    // a GET dropped so is sent again, once, on a new connection
+    print(show(c.get(base + "/swallow-get")))
+    // a kept connection the server closed before the POST: seen, and the
+    // POST goes on a new one
+    print(show(c.get(base + "/close-after")))
+    await task.sleep(200)
+    print(show(c.post(base + "/echo", "fresh")))
+    c.close()
+    var a = http.client()
+    print(show(await a.get_async(base + "/a")))
+    print(show(await a.post_async(base + "/swallow-async", "once")))
+    print(show(await a.get_async(base + "/close-after")))
+    await task.sleep(200)
+    print(show(await a.post_async(base + "/echo", "fresh async")))
+    a.close()
+}
+"""
+
+REPLAY_OUT = """200 OK [a] Content-Length=1
+error: connection closed
+200 OK [a] Content-Length=1
+200 OK [answered the second time] Content-Length=24
+200 OK [closing] Content-Length=7
+200 OK [POST fresh] Content-Length=10
+200 OK [a] Content-Length=1
+error: connection closed
+200 OK [closing] Content-Length=7
+200 OK [POST fresh async] Content-Length=16
+"""
+
+
+class ReplayServer:
+    """A raw HTTP/1.1 server on 127.0.0.1 whose connections are kept, logging
+    each request it reads: `/swallow…` paths are read and their connection
+    closed without an answer (`/swallow-get` only the first time),
+    `/close-after` is answered and its connection closed."""
+
+    def __init__(self):
+        self.log = []
+        self.lock = threading.Lock()
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.sock.bind(("127.0.0.1", 0))
+        self.sock.listen(16)
+        self.port = self.sock.getsockname()[1]
+        threading.Thread(target=self.accept, daemon=True).start()
+
+    def accept(self):
+        while True:
+            try:
+                s, _ = self.sock.accept()
+            except OSError:
+                return
+            threading.Thread(target=self.serve, args=(s,), daemon=True).start()
+
+    def serve(self, s: socket.socket):
+        data = b""
+        with s:
+            while True:
+                while b"\r\n\r\n" not in data:
+                    b = s.recv(65536)
+                    if not b:
+                        return
+                    data += b
+                head, _, data = data.partition(b"\r\n\r\n")
+                lines = head.decode().split("\r\n")
+                method, path, _ = lines[0].split(" ")
+                n = 0
+                for line in lines[1:]:
+                    name, _, value = line.partition(":")
+                    if name.strip().lower() == "content-length":
+                        n = int(value)
+                while len(data) < n:
+                    data += s.recv(65536)
+                body, data = data[:n], data[n:]
+                with self.lock:
+                    self.log.append(f"{method} {path}")
+                    seen = self.log.count(f"{method} {path}")
+                if path.startswith("/swallow") and not (path == "/swallow-get" and seen > 1):
+                    return
+                text = {"/a": b"a", "/swallow-get": b"answered the second time", "/close-after": b"closing"}.get(
+                    path, method.encode() + b" " + body)
+                s.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: %d\r\n\r\n%s" % (len(text), text))
+                if path == "/close-after":
+                    return
+
+    def close(self):
+        self.sock.close()
+
+
+@unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
+@unittest.skipIf(NO_SOCKETS, NO_SOCKETS_WHY)
+class NoReplay(unittest.TestCase):
+    def test_only_idempotent_requests_are_sent_again(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = write_program(tmp, REPLAY_CLIENT, "replay.my")
+            binary = os.path.join(tmp, "replay")
+            native_build(Program(path), binary)
+            for name in ["interpreted", "built"]:
+                with self.subTest(client=name):
+                    server = ReplayServer()
+                    try:
+                        if name == "interpreted":
+                            out = selfhost_run(path, [str(server.port)])
+                        else:
+                            argv, exe = run_argv(binary, binary, [str(server.port)])
+                            proc = subprocess.run(argv, executable=exe, capture_output=True, text=True, timeout=60)
+                            out = (proc.stdout, proc.stderr, proc.returncode)
+                    finally:
+                        server.close()
+                    self.assertEqual(out, (REPLAY_OUT, "", 0))
+                    # each POST reached the server once; the dropped GET twice
+                    self.assertEqual(server.log, [
+                        "GET /a", "POST /swallow", "GET /a", "GET /swallow-get", "GET /swallow-get",
+                        "GET /close-after", "POST /echo",
+                        "GET /a", "POST /swallow-async", "GET /close-after", "POST /echo"])
 
 
 # --- a Myla client and server in one program ---------------------------------------
