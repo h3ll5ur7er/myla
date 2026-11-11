@@ -25,6 +25,8 @@ SUITES = [
     "tests.burn.test_net",
     "tests.burn.test_term",
     "tests.burn.test_http",
+    # a deadline's end and a cancel beside many timers (MYLA-456)
+    "tests.burn.test_timer_scaling",
     "tests.burn.test_unit_type",
     "tests.burn.test_defer",
     "tests.burn.test_format_specs",

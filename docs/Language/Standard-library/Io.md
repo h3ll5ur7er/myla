@@ -24,7 +24,7 @@ fun main() {
 
 Output isn't buffered: what a program wrote is out before it waits for input.
 
-A write to the standard output or error whose pipe nobody reads any more (`myla run prog.my | head -1`) ends the program quietly, as Unix tools stop: natively by SIGPIPE, on wasm32 with the exit code 141 a shell shows for it (D146). Any other error of `print`, `println`, `eprint` and `eprintln`, which have no result (a full disk: `prog > /dev/full`), ends the program with `runtime error: write failed: <cause>` and status 1 (D153); `write` gives it to the program. A write to any other descriptor gives the error to the program instead: the runtime ignores SIGPIPE, and gives a child it starts the default back.
+A write to the standard output or error whose pipe nobody reads any more (`myla run prog.my | head -1`) ends the program quietly, as Unix tools stop: natively by SIGPIPE, on wasm32 with the exit code 141 a shell shows for it (D146). Any other error of `print`, `println`, `eprint` and `eprintln`, which have no result (a full disk: `prog > /dev/full`), ends the program with `runtime error: write failed: <cause>` and status 1 (D153); `write` gives it to the program. A write to any other descriptor gives the error to the program instead: the runtime ignores SIGPIPE, and gives a child it starts the default back. A write to a descriptor that is non-blocking and full (a pipe a parent such as Node hands over, its reader slow) waits for room as a blocking write would, the thread in a poll; it tried again at once and spun on the CPU before [[MYLA-457]]. In a task, `FdStream.write_async(b)` waits with the task suspended instead, so the other tasks run on its worker.
 
 ## Reading
 
@@ -123,7 +123,7 @@ fun main() {
 
 | Item | What it is |
 | --- | --- |
-| `fd_stream(fd: int32) -> FdStream` | A descriptor, unbuffered: each read and write is a system call. `Read`, `Write`, `Seek` (a pipe can't: `Other(29)`, ESPIPE), `Pollable`. A write to a closed pipe is `BrokenPipe`, but on the standard output or error, where it ends the program quietly (D146) |
+| `fd_stream(fd: int32) -> FdStream` | A descriptor, unbuffered: each read and write is a system call. `Read`, `Write`, `Seek` (a pipe can't: `Other(29)`, ESPIPE), `Pollable`. A write to a closed pipe is `BrokenPipe`, but on the standard output or error, where it ends the program quietly (D146). `write_async(b)` (async): `write`, the task waiting while the descriptor is full, a piece of 4,096 bytes (PIPE_BUF) at a time; `Cancelled` when its task is asked to stop ([[MYLA-457]]) |
 | `memory_stream() -> MemoryStream`, `from_bytes(b: [uint8])`, `from_str(s: str)` | Bytes in memory and a cursor at the start. `Read`, `Write` (over the bytes at the cursor, and on past the end; a gap a seek past the end left is zeros), `Seek`. It holds up to 2,147,483,647 bytes: a seek past that, by an offset of any size, is `InvalidInput`, and a write past it `Other(27)` (EFBIG), not an overflow (D184) |
 | `m.bytes() -> [uint8]`, `m.text() -> str`, `m.position() -> int64` | All its bytes, wherever the cursor is; as text; the cursor |
 | `buffered(r: R) -> Buffered<R>` | A buffer in front of `r`: `read_line`, `read_exact`, `read_to_end` and `fill` as `Reader` has them (`Reader` is `Buffered<FdStream>`), `into_inner()` (the stream, without the bytes still buffered). `Read`; `Seek` if `r` can (the buffer dropped; `Current` counts from the next byte a read gives); `Pollable`, `ready` and the async reads if `r` is `Pollable` |

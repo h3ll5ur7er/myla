@@ -344,7 +344,10 @@ pub fun poll_write(fd: int64, timeout_ms: int64) -> int64 {
 }
 
 // The `n` bytes at `p` written to `fd`, a write at a time, again after an
-// interruption (EINTR, EAGAIN); 0, or the first error (minus its errno).
+// interruption (EINTR) or, for a non-blocking descriptor that is full
+// (EAGAIN), once it has room: the thread waits in a poll as a blocking
+// write would, where it tried again at once and spun (MYLA-457); 0, or the
+// first error (minus its errno).
 pub fun write_all(fd: int64, p: int64, n: int64) -> int64 {
     var at = p
     var left = n
@@ -353,7 +356,9 @@ pub fun write_all(fd: int64, p: int64, n: int64) -> int64 {
         if r >= 0 {
             at += r
             left -= r
-        } else if r != EINTR && r != EAGAIN {
+        } else if r == EAGAIN {
+            let room = poll_write(fd, -1)
+        } else if r != EINTR {
             return r
         }
     }
@@ -372,6 +377,9 @@ pub fun write_line(p: int64, n: int64) -> int64 {
     __store64(iov + 24, 1)
     var r = __syscall(SYS_WRITEV, 1, iov, 2)
     while r == EINTR || r == EAGAIN {
+        if r == EAGAIN {
+            let room = poll_write(1, -1)
+        }
         r = __syscall(SYS_WRITEV, 1, iov, 2)
     }
     __free(iov)
