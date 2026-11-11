@@ -1,6 +1,6 @@
 # std.net
 
-TCP and UDP sockets, IP addresses and name lookup ([[MYLA-346]]). A socket is an opaque handle inside a `TcpListener`, `TcpStream` or `UdpSocket`; an address is a Myla value; a failure is an `IoError` with a portable cause. Nothing here is a file descriptor, so a port to another system (Windows next) changes the platform layer only ([[#porting-sockets-to-another-system]]). On wasm32 every operation is `Unsupported`: WASI preview 1 has no sockets.
+TCP and UDP sockets, IP addresses and name lookup ([[MYLA-346]]). A socket is an opaque handle inside a `TcpListener`, `TcpStream` or `UdpSocket`; an address is a Myla value; a failure is an `IoError` with a portable cause. Nothing here is a file descriptor, so a port to another system (Windows next) changes the platform layer only ([[#porting-sockets-to-another-system]]). On wasm32 every operation is `Unsupported`: WASI preview 1 has no sockets. A lookup there finds an address itself and `localhost`, and nothing else (`NotFound`: no hosts file, no name server).
 
 [TOC]
 
@@ -123,7 +123,7 @@ Without libc there is no getaddrinfo: `lookup` reads the hosts file, then asks t
 | `lookup(name: str) -> Result<[IpAddr], IoError>` | `system_resolver().lookup(name)` |
 | `struct Resolver { hosts_path: str, servers: [SocketAddr], timeout_ms: int, attempts: int }` | Where to look: the hosts file (`""`: none), then the name servers, each query waited for `timeout_ms` (2000) and tried `attempts` times (2) |
 | `system_resolver()`, `resolver(hosts_path, servers)` | The system's (its hosts file and the `nameserver` lines of its resolver's configuration, as the platform gives them: on Linux `/etc/hosts` and `/etc/resolv.conf`), or one of your own |
-| `Resolver`: `lookup(name)` | An address itself; else the hosts file's entries for the name (its case ignored, a trailing dot allowed, Windows' line ends too); else the first server's answer, IPv4's addresses first. `NotFound`: no such name, or no records, or no server to ask; `TimedOut`: no server answered; `InvalidData`: none gave a usable answer; `InvalidInput`: a name DNS can't carry (an empty label, one past 63 bytes, a name past 253). A reply from elsewhere or with another id is ignored |
+| `Resolver`: `lookup(name)` | An address itself; else the hosts file's entries for the name (its case ignored, a trailing dot allowed, Windows' line ends too); else, for `localhost` and the names below it (`db.localhost`), `127.0.0.1` and `::1`, as RFC 6761 has them, with no hosts file too ([[MYLA-426]]); else the first server's answer, IPv4's addresses first. `NotFound`: no such name, or no records, or no server to ask; `TimedOut`: no server answered; `InvalidData`: none gave a usable answer; `InvalidInput`: a name DNS can't carry (an empty label, one past 63 bytes, a name past 253). A reply from elsewhere or with another id is ignored |
 | `hosts_lookup(text, name) -> [IpAddr]`, `nameservers(text) -> [SocketAddr]` | The two parsers, for a hosts file's and a resolv.conf's text |
 
 ## Primitives

@@ -913,7 +913,14 @@ impl LineEdit {
     }
 
     fun insert(var self, cs: [char]) {
-        self.chars = self.chars[:self.cursor].concat(cs).concat(self.chars[self.cursor:])
+        if self.cursor == self.chars.len() {
+            // typed at the end, as a paste is: no copy of the line (M22)
+            for c in cs {
+                self.chars.push(c)
+            }
+        } else {
+            self.chars = self.chars[:self.cursor].concat(cs).concat(self.chars[self.cursor:])
+        }
         self.cursor += cs.len()
     }
 
@@ -962,15 +969,22 @@ impl LineEdit {
     #test(LineEdit { chars: [], cursor: 0, hist: 0, draft: [] }, "", 80)["\r\u{1b}[K\r"]
     #test(LineEdit { chars: ['a', 'b', 'c', 'd', 'e', 'f'], cursor: 6, hist: 0, draft: [] }, "> ", 6)["\r> def\u{1b}[K\r\u{1b}[5C"]
     #test(LineEdit { chars: ['a', 'b', 'c', 'd', 'e', 'f'], cursor: 0, hist: 0, draft: [] }, "> ", 6)["\r> abc\u{1b}[K\r\u{1b}[2C"]
+    #test(LineEdit { chars: ['a', '中', 'b'], cursor: 3, hist: 0, draft: [] }, "> ", 5)["\r> b\u{1b}[K\r\u{1b}[3C"] // a wide character scrolled out
+    #test(LineEdit { chars: ['a', '中', 'b', 'c'], cursor: 2, hist: 0, draft: [] }, "> ", 5)["\r> 中\u{1b}[K\r\u{1b}[4C"]
     fun render(self, prompt: str, cols: int) -> str {
         let pw = width(prompt)
         var room = cols - pw - 1
         if room < 1 {
             room = 1
         }
-        var start = 0
-        while start < self.cursor && span_width(self.chars, start, self.cursor) > room {
-            start += 1
+        // the first character shown: back from the cursor while the span
+        // to it fits (M22: one pass over what is drawn, not the whole line
+        // measured again for each start tried)
+        var start = self.cursor
+        var before = 0
+        while start > 0 && before + char_width(self.chars[start - 1]) <= room {
+            before += char_width(self.chars[start - 1])
+            start -= 1
         }
         var end = start
         var w = 0
@@ -978,7 +992,7 @@ impl LineEdit {
             w += char_width(self.chars[end])
             end += 1
         }
-        return "\r" + prompt + text_of(self.chars[start:end]) + clear_to_end() + "\r" + cursor_right(pw + span_width(self.chars, start, self.cursor))
+        return "\r" + prompt + text_of(self.chars[start:end]) + clear_to_end() + "\r" + cursor_right(pw + before)
     }
 }
 
@@ -990,17 +1004,6 @@ fun text_of(cs: [char]) -> str {
         sb.append(f"{c}")
     }
     return sb.build()
-}
-
-// The columns of `cs[a:b]`.
-fun span_width(cs: [char], a: int, b: int) -> int {
-    var w = 0
-    var i = a
-    while i < b {
-        w += char_width(cs[i])
-        i += 1
-    }
-    return w
 }
 
 // Where the word before `at` starts (spaces before it skipped).

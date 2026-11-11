@@ -42,6 +42,8 @@ fun main() {
 | `summary(name: str, batch: int, totals: [int64]) -> Report` | The report of runs of `batch` calls that took `totals` nanoseconds each, for times measured some other way |
 | `duration_text(ns: float64) -> str` | Nanoseconds with three significant digits and a unit: `12.3 ns`, `1.23 µs`, `123 ms`, `4.50 s` |
 
+A closure that returns nothing is timed too: `T` is then `()` ([[MYLA-426]]; `()` is a type argument since [[MYLA-417]]), so `bench.run("step", () => step())` for a `fun step()` and `bench.run_n("sort", 10, () => { let ys = xs.sorted() })` work as a closure with a value does.
+
 `struct Report { name: str, runs: int, batch: int, times: [float64], min: float64, median: float64, max: float64, spread: float64 }`: the times are nanoseconds a call of the closure, `times` each run's in the order of the runs (its time divided by the `batch` calls it made). `spread` is the median absolute deviation, the median of the runs' distances from the median: one slow run (a page fault, another process taking the CPU) moves neither it nor the median much, where it moves a mean and a standard deviation. `r.line()` is the report on one line, the spread as a percentage of the median, and `f"{r}"` the same (`Format`):
 
 ```text

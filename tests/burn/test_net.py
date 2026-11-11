@@ -528,6 +528,10 @@ fun main() {
     print(ips(r.lookup("::1")))
     print(ips(r.lookup("a..b")))
     print(ips(net.resolver(args()[1] + ".missing", []).lookup("db.test")))
+    // localhost: the hosts file's entries, else the loopback (MYLA-426)
+    print(ips(r.lookup("localhost")))
+    print(ips(net.resolver(args()[1] + ".missing", []).lookup("Localhost.")))
+    print(ips(net.resolver("", []).lookup("db.localhost")))
 }
 """
 HOSTS_FILE = ("# a test hosts file\r\n"
@@ -545,6 +549,9 @@ NotFound
 ::1
 InvalidInput
 NotFound
+127.0.0.1
+127.0.0.1 ::1
+127.0.0.1 ::1
 """
 
 DNS = PRELUDE + """from std.process import args
@@ -673,9 +680,12 @@ NET_WASM = PRELUDE + """fun main() {
     print(ips(net.resolver("", [net.addr(net.loopback(), 53)]).lookup("www.example.test")))
     print(ips(net.lookup("www.example.test")))
     print(ips(net.lookup("127.0.0.1")))
+    // no hosts file, but localhost is the loopback (RFC 6761, MYLA-426)
+    print(ips(net.lookup("localhost")))
+    print(ips(net.lookup("db.LOCALHOST.")))
 }
 """
-NET_WASM_OUT = "Unsupported\nUnsupported\nUnsupported\nUnsupported\nNotFound\n127.0.0.1\n"
+NET_WASM_OUT = "Unsupported\nUnsupported\nUnsupported\nUnsupported\nNotFound\n127.0.0.1\n127.0.0.1 ::1\n127.0.0.1 ::1\n"
 
 
 def run_both(source: str, args=()) -> tuple[str, str, int]:

@@ -2158,6 +2158,31 @@ pub fun key_str_text(s: str) -> str {
     return sb.build()
 }
 
+// --- the end of the program (D187) ---------------------------------------------------
+
+// `__exit_program(code)`: the program ended with the status `code`, every
+// thread with it, after the exit hook: a return from the entry point, an
+// `exit`, a runtime error or a stack overflow ends here. It allocates
+// nothing.
+pub fun exit_program(code: int) {
+    exit_hook()
+    os.exit(code as int64)
+}
+
+// The exit hook: the terminal `__term_raw` made raw, if nothing put it back
+// since, back in the mode it had (`__exit_hook`: its descriptor plus one,
+// then that mode as a static string's cell). It runs once: taken off before
+// it runs, so a failure in it doesn't come back to it.
+pub fun exit_hook() {
+    let h = __rt_addr("__exit_hook")
+    let fd = __load64(h) - 1
+    if fd < 0 {
+        return
+    }
+    __store64(h, 0)
+    let r = os.term_set_mode(fd, __str_of(h + 24))
+}
+
 // `__panic`'s report (a trap, `panic`, a failed `assert`; MYLA-17, MYLA-65):
 // `runtime error: <msg>` on stderr (`msg` a string's cell), with a position
 // record `pos` (a file name's cell, then the line and the column as 32-bit
