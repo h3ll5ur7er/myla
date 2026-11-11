@@ -1210,8 +1210,10 @@ pub fun lookup(name: str) -> Result<[IpAddr], IoError> {
 
 impl Resolver {
     // The addresses of `name`: an address itself; the hosts file's entries
-    // for it; else what the first name server that answers gives, IPv4's
-    // first. `NotFound` when there are none (or no name server to ask),
+    // for it; `localhost` (and a name below it) the loopback addresses when
+    // the hosts file has none for it, or there is none (wasm32; RFC 6761);
+    // else what the first name server that answers gives, IPv4's first.
+    // `NotFound` when there are none (or no name server to ask),
     // `TimedOut` when no server answered, `InvalidData` when none gave a
     // usable answer, `InvalidInput` for a name DNS can't carry.
     fun lookup(self, name: str) -> Result<[IpAddr], IoError> {
@@ -1220,13 +1222,13 @@ impl Resolver {
             Err(_) => {}
         }
         let q = dns_name(name)?
+        var bare = name
+        if bare[bare.len() - 1] == '.' {
+            bare = bare[:bare.len() - 1]
+        }
         if self.hosts_path != "" {
             match read_to_string(self.hosts_path) {
                 Ok(text) => {
-                    var bare = name
-                    if bare[bare.len() - 1] == '.' {
-                        bare = bare[:bare.len() - 1]
-                    }
                     let found = hosts_lookup(text, bare)
                     if found.len() > 0 {
                         return Ok(found)
@@ -1234,6 +1236,9 @@ impl Resolver {
                 }
                 Err(_) => {}
             }
+        }
+        if is_localhost(bare) {
+            return Ok([loopback(), loopback_v6()])
         }
         if self.servers.len() == 0 {
             return Err(IoError.NotFound)
@@ -1304,6 +1309,25 @@ impl Resolver {
         }
         unreachable()
     }
+}
+
+// Whether `name` (without its final dot) is `localhost` or a name below it,
+// in any case: the loopback's names (RFC 6761, 6.3; MYLA-426).
+#test("localhost")[true]
+#test("LocalHost")[true]
+#test("db.localhost")[true]
+#test("notlocalhost")[false]
+#test("localhost.example")[false]
+fun is_localhost(name: str) -> bool {
+    let n = name.len()
+    if n < 9 {
+        return false
+    }
+    let tail = name[n - 9:]
+    if tail.to_lower() != "localhost" {
+        return false
+    }
+    return n == 9 || name[n - 10] == '.'
 }
 
 // The addresses the hosts file `text` gives `name` (its case ignored), in

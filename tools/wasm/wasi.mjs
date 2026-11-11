@@ -19,7 +19,8 @@
 // when the program asked for every right, as its own reads and writes of
 // whole files do; MYLA-336), `read(handle, bytes)` and `write(handle,
 // bytes)` how many at the handle's cursor, `seek(handle, offset, whence)`
-// the new cursor (whence 0 the start, 1 the cursor, 2 the end), `close`,
+// the new cursor (whence 0 the start, 1 the cursor, 2 the end; `offset` a
+// BigInt, `seekTo` the bounds; the cursor unmoved on a failure), `close`,
 // `fstat(handle)` and `stat(path, follow)` `{type, size, ino, nlink,
 // mtimeNs}` (type 3 a directory, 4 a regular file, 7 a symbolic link),
 // `readdir(path)` `[{name, type}]`, `mkdir`, `rmdir`, `unlink`,
@@ -27,15 +28,36 @@
 // name (`ENOENT`, …). The streams: `stdin(bytes)` how many it read (0 at the
 // end), `stdout(bytes)`, `stderr(bytes)`.
 
+// WASI preview 1's errnos, every one (MYLA-426: ELOOP, ENAMETOOLONG and
+// the others were EIO before).
 export const ERRNO = {
-  E2BIG: 1, EACCES: 2, EAGAIN: 6, EBADF: 8, EDQUOT: 19, EEXIST: 20, EFBIG: 22, EINTR: 27, EINVAL: 28,
-  EIO: 29, EISDIR: 31, ENOENT: 44, ENOSPC: 51, ENOSYS: 52, ENOTDIR: 54, ENOTEMPTY: 55, ENOTSUP: 58, EPERM: 63, EPIPE: 64, ESPIPE: 70,
-  ENOTCAPABLE: 76,
+  E2BIG: 1, EACCES: 2, EADDRINUSE: 3, EADDRNOTAVAIL: 4, EAFNOSUPPORT: 5, EAGAIN: 6, EALREADY: 7, EBADF: 8, EBADMSG: 9,
+  EBUSY: 10, ECANCELED: 11, ECHILD: 12, ECONNABORTED: 13, ECONNREFUSED: 14, ECONNRESET: 15, EDEADLK: 16, EDESTADDRREQ: 17,
+  EDOM: 18, EDQUOT: 19, EEXIST: 20, EFAULT: 21, EFBIG: 22, EHOSTUNREACH: 23, EIDRM: 24, EILSEQ: 25, EINPROGRESS: 26,
+  EINTR: 27, EINVAL: 28, EIO: 29, EISCONN: 30, EISDIR: 31, ELOOP: 32, EMFILE: 33, EMLINK: 34, EMSGSIZE: 35, EMULTIHOP: 36,
+  ENAMETOOLONG: 37, ENETDOWN: 38, ENETRESET: 39, ENETUNREACH: 40, ENFILE: 41, ENOBUFS: 42, ENODEV: 43, ENOENT: 44,
+  ENOEXEC: 45, ENOLCK: 46, ENOLINK: 47, ENOMEM: 48, ENOMSG: 49, ENOPROTOOPT: 50, ENOSPC: 51, ENOSYS: 52, ENOTCONN: 53,
+  ENOTDIR: 54, ENOTEMPTY: 55, ENOTRECOVERABLE: 56, ENOTSOCK: 57, ENOTSUP: 58, ENOTTY: 59, ENXIO: 60, EOVERFLOW: 61,
+  EOWNERDEAD: 62, EPERM: 63, EPIPE: 64, EPROTO: 65, EPROTONOSUPPORT: 66, EPROTOTYPE: 67, ERANGE: 68, EROFS: 69,
+  ESPIPE: 70, ESRCH: 71, ESTALE: 72, ETIMEDOUT: 73, ETXTBSY: 74, EXDEV: 75, ENOTCAPABLE: 76,
 };
+// Node's names for two of them
+ERRNO.EWOULDBLOCK = ERRNO.EAGAIN;
+ERRNO.EOPNOTSUPP = ERRNO.ENOTSUP;
 
 // An error's code as WASI's errno.
 function errnoOf(e) {
   return ERRNO[e && e.code] ?? ERRNO.EIO;
+}
+
+// The cursor `offset` from `base` (both may be BigInts): a number from 0 to
+// 2^53 - 1, the largest offset a JavaScript number holds exactly, as a file
+// system with that largest file size gives (EINVAL past it, as Linux's
+// lseek does past its own; MYLA-426).
+export function seekTo(base, offset) {
+  const at = BigInt(base) + BigInt(offset);
+  if (at < 0n || at > BigInt(Number.MAX_SAFE_INTEGER)) throw fsError("EINVAL");
+  return Number(at);
 }
 
 // An error with the errno name `code` (what a file system throws).
@@ -212,7 +234,7 @@ export class Wasi {
           if (!d) return ERRNO.EBADF;
           if (d.handle === undefined) return d.dir ? ERRNO.EBADF : ERRNO.ESPIPE;
           if (whence > 2) return ERRNO.EINVAL;
-          this.view().setBigUint64(out, BigInt(this.fs.seek(d.handle, Number(offset), whence)), true);
+          this.view().setBigUint64(out, BigInt(this.fs.seek(d.handle, offset, whence)), true);
           return 0;
         }),
         random_get: g(function (buf, len) {

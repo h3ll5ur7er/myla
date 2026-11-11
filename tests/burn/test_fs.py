@@ -460,6 +460,91 @@ lf/**: lf true
 **/dangling/**: dangling true
 """
 
+# Seeks past the ends of an offset (MYLA-426): a sum past int64's range or
+# below 0 is EINVAL and leaves the cursor; past the end is allowed and a
+# write there leaves a hole. Node's WASI shim lost precision and moved the
+# cursor on a failure, and wasm32 read an offset past 2^63 as an errno.
+SEEK_EDGES = """import std.fs as fs
+from std.io import SeekFrom, Seek, Write, Read
+import std.bytes as bytes
+
+fun show(what: str, r: Result<int64, fs.IoError>) {
+    match r {
+        Ok(p) => print(f"{what}: {p}")
+        Err(e) => print(f"{what}: {fs.io_error_name(e)}")
+    }
+}
+
+fun main() {
+    let w = fs.write_to_file("f", "hello")
+    var f = match fs.options().read(true).write(true).open("f") {
+        Ok(f) => f
+        Err(e) => panic(f"{e}")
+    }
+    show("start 3", f.seek(SeekFrom.Start(3)))
+    show("current -10", f.seek(SeekFrom.Current(-10)))
+    show("end -6", f.seek(SeekFrom.End(-6)))
+    show("start -1", f.seek(SeekFrom.Start(-1)))
+    show("current max", f.seek(SeekFrom.Current(9223372036854775807)))
+    show("end max", f.seek(SeekFrom.End(9223372036854775807)))
+    show("start min", f.seek(SeekFrom.Start(-9223372036854775807 - 1)))
+    show("current min", f.seek(SeekFrom.Current(-9223372036854775807 - 1)))
+    show("still", f.seek(SeekFrom.Current(0)))
+    show("end -2", f.seek(SeekFrom.End(-2)))
+    show("end 10", f.seek(SeekFrom.End(10)))
+    match f.write(bytes.from_str("x")) {
+        Ok(n) => print(f"wrote {n}")
+        Err(e) => print(f"write: {e}")
+    }
+    show("length", f.seek(SeekFrom.End(0)))
+    show("start 0", f.seek(SeekFrom.Start(0)))
+    match f.read(100) {
+        Ok(b) => print(f"read {b.len()}, {b[5]} {b[14]} {b[15]}")
+        Err(e) => print(f"read: {e}")
+    }
+    let c = f.close()
+}
+"""
+SEEK_EDGES_OUTPUT = """start 3: 3
+current -10: InvalidInput
+end -6: InvalidInput
+start -1: InvalidInput
+current max: InvalidInput
+end max: InvalidInput
+start min: InvalidInput
+current min: InvalidInput
+still: 3
+end -2: 3
+end 10: 15
+wrote 1
+length: 16
+start 0: 0
+read 16, 0 0 120
+"""
+
+# Errors past the common causes keep their own numbers on every target
+# (MYLA-426): wasm32 gave EIO (Other(5)) for every errno its table didn't
+# know, and Node's shim did for every error it didn't name.
+ERRNOS = """import std.fs as fs
+
+fun name(r: Result<fs.Metadata, fs.IoError>) -> str {
+    return match r {
+        Ok(_) => "Ok"
+        Err(e) => fs.io_error_name(e)
+    }
+}
+
+fun main() {
+    print("a loop: " + name(fs.metadata("t/loop")))
+    print("a long name: " + name(fs.metadata("t/" + "n".repeat(300))))
+    print("not there: " + name(fs.metadata("t/nothing")))
+}
+"""
+ERRNOS_OUTPUT = """a loop: Other(40)
+a long name: Other(36)
+not there: NotFound
+"""
+
 # Removing and renaming (MYLA-96): files, empty and full directories, a
 # tree holding a symbolic link to a directory outside it (removed, not
 # followed), and the errors.
@@ -688,6 +773,20 @@ class DirectoryParity(unittest.TestCase):
             with self.subTest(implementation=impl):
                 self.assertEqual(result, (NUL_PATHS_OUTPUT, "", 0))
                 self.assertEqual(sorted(os.listdir(self.work_dir("nul", impl))), ["q"])
+
+    def test_seeks_past_the_ends(self) -> None:
+        for impl, result in self.run_all("seek_edges", SEEK_EDGES).items():
+            with self.subTest(implementation=impl):
+                self.assertEqual(result, (SEEK_EDGES_OUTPUT, "", 0))
+
+    def test_errors_keep_their_numbers(self) -> None:
+        def prepare(work: str) -> None:
+            os.makedirs(os.path.join(work, "t"))
+            os.symlink("loop", os.path.join(work, "t", "loop"))
+
+        for impl, result in self.run_all("errnos", ERRNOS, prepare).items():
+            with self.subTest(implementation=impl):
+                self.assertEqual(result, (ERRNOS_OUTPUT, "", 0))
 
     def test_symbolic_links(self) -> None:
         # MYLA-363: a link's own kind, and walks that don't follow links (or

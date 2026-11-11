@@ -2,7 +2,7 @@
 // Myla program built for wasm. Paths are absolute (`/main.my`); a
 // directory exists when it was made or a file lies under it.
 
-import { fsError, joinPath } from "./wasi.mjs";
+import { fsError, joinPath, seekTo } from "./wasi.mjs";
 
 export class MemFs {
   // `files`: path (relative to `/` or absolute) to text or bytes.
@@ -74,10 +74,8 @@ export class MemFs {
   }
 
   seek(h, offset, whence) {
-    const at = (whence === 0 ? 0 : whence === 1 ? h.pos : h.file.data.length) + offset;
-    if (at < 0) throw fsError("EINVAL");
-    h.pos = at;
-    return at;
+    h.pos = seekTo(whence === 0 ? 0 : whence === 1 ? h.pos : h.file.data.length, offset);
+    return h.pos;
   }
 
   close() {}

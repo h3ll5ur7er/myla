@@ -2,7 +2,7 @@
 // through Node's synchronous API (MYLA-158).
 
 import fs from "node:fs";
-import { fsError } from "./wasi.mjs";
+import { fsError, seekTo } from "./wasi.mjs";
 
 function typeOf(st) {
   if (st.isDirectory()) return 3;
@@ -46,10 +46,8 @@ export class NodeFs {
   }
   seek(h, offset, whence) {
     if (!h.seekable) throw fsError("ESPIPE");
-    const at = (whence === 0 ? 0 : whence === 1 ? h.pos : fs.fstatSync(h.fd).size) + offset;
-    if (at < 0) throw fsError("EINVAL");
-    h.pos = at;
-    return at;
+    h.pos = seekTo(whence === 0 ? 0 : whence === 1 ? h.pos : fs.fstatSync(h.fd).size, offset);
+    return h.pos;
   }
   close(h) { fs.closeSync(h.fd); }
   fstat(h) { return statOf(fs.fstatSync(h.fd)); }
