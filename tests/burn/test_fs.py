@@ -425,6 +425,17 @@ fun main() {
     print(paths(glob.walk_with("t", true)))
     print(paths(glob.glob_in("t", "**")))
     print(paths(glob.glob_in("t", "la/*")))
+    // a link that names nothing, named literally, and a file before `/**`:
+    // what `walk` and `matches` find (MYLA-426)
+    let all = match glob.walk("t") {
+        Ok(ps) => ps
+        Err(_) => []
+    }
+    for p in ["dangling", "dangling/**", "f.txt/**", "lf/**", "**/x.txt/**", "**/dangling/**"] {
+        let got = paths(glob.glob_in("t", p))
+        let want = all.filter((x) => glob.matches(p, x)).join(" ")
+        print(f"{p}: {got} {got == want}")
+    }
 }
 """
 LINKS_OUTPUT = """true
@@ -441,6 +452,12 @@ a a/up a/x.txt dangling f.txt la lf secret
 a a/up a/x.txt dangling f.txt la la/up la/x.txt lf secret
 a a/up a/x.txt dangling f.txt la lf secret
 la/up la/x.txt
+dangling: dangling true
+dangling/**: dangling true
+f.txt/**: f.txt true
+lf/**: lf true
+**/x.txt/**: a/x.txt true
+**/dangling/**: dangling true
 """
 
 # Removing and renaming (MYLA-96): files, empty and full directories, a

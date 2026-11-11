@@ -568,27 +568,48 @@ impl Globber {
             return Ok(())
         }
         if c.literal {
+            // there as `walk` lists it: a link that names nothing too
             let p = below(rel, c.text)
-            if last {
-                if fs.exists(self.full(p)) {
-                    self.out.push(p)
-                }
-            } else if fs.is_dir(self.full(p)) {
+            if !last && fs.is_dir(self.full(p)) {
                 self.expand(i + 1, p)?
+            } else if self.rest_globstars(i + 1) && there(self.full(p)) {
+                self.out.push(p)
             }
             return Ok(())
         }
         for name in self.names(rel)? {
             if comp_matches(c, name) {
                 let p = below(rel, name)
-                if last {
-                    self.out.push(p)
-                } else if fs.is_dir(self.full(p)) {
+                if !last && fs.is_dir(self.full(p)) {
                     self.expand(i + 1, p)?
+                } else if self.rest_globstars(i + 1) {
+                    self.out.push(p)
                 }
             }
         }
         return Ok(())
+    }
+
+    // Whether the components from `i` on are all `**` (none included), so
+    // a path matched up to `i` matches whole: a file before `/**` too.
+    fun rest_globstars(self, i: int) -> bool {
+        var k = i
+        while k < self.pat.comps.len() {
+            if !self.pat.comps[k].globstar {
+                return false
+            }
+            k += 1
+        }
+        return true
+    }
+}
+
+// Whether the path `p` is there, as `walk` lists it: a symbolic link that
+// names nothing too.
+fun there(p: str) -> bool {
+    return match fs.symlink_metadata(p) {
+        Ok(_) => true
+        Err(_) => false
     }
 }
 
@@ -681,6 +702,10 @@ fun globs() -> Result<(), IoError> {
     same(glob_in(root, "[ab]*")?, "a, a-c, a.txt, b.my")
     same(glob_in(root, "a/b")?, "a/b")
     same(glob_in(root, "a/../b.my")?, "a/../b.my")
+    // a file where a `**` that may match nothing follows (MYLA-426)
+    same(glob_in(root, "a.txt/**")?, "a.txt")
+    same(glob_in(root, "**/x.my/**")?, "src/lib/x.my")
+    same(glob_in(root, "src/*/**")?, "src/lib, src/lib/x.my, src/lib/y.txt, src/main.my")
     same(glob_in(root, "nope/*")?, "")
     same(glob_in(root, "a.txt/*")?, "")
     same(glob_in(root + "/nope", "*")?, "")
@@ -688,7 +713,7 @@ fun globs() -> Result<(), IoError> {
     same(glob(root + "/*.txt")?, root + "/a.txt")
     // what `glob_in` finds is what `walk` and `matches` find
     let all = walk(root)?
-    for pat in ["*", "**", "**/*.my", "src/*", "*/*", "**/lib/*", "?.*", "[!a]*"] {
+    for pat in ["*", "**", "**/*.my", "src/*", "*/*", "**/lib/*", "?.*", "[!a]*", "a.txt/**", "*/**", "**/x.my/**", "src/*/**", "**/b/**", "a/b/**"] {
         var want: [str] = []
         for p in all {
             if matches(pat, p) {
