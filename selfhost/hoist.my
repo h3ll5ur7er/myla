@@ -15,7 +15,7 @@
 // before a loop that runs no turn copies a shared list nobody writes, which
 // no program can see.
 
-from .ir import IrFunc, IrBlock, Inst, Term, successors, inst_uses, term_uses
+from .ir import IrFunc, IrBlock, Inst, Term, successors, inst_uses, term_uses, is_fits
 from .checker import Type
 from .ssa import rename_uses, rename_term
 
@@ -177,7 +177,7 @@ fun hoist_loop(f0: IrFunc, at: [int32], preds: [[int32]], slot_of: [int32], lo: 
                 Inst.CallInd(d, fv, args) => { return (f, []) },
                 Inst.CallIndSret(fv, r, args) => { return (f, []) },
                 Inst.Rt(d, name, args) => { return (f, []) },
-                Inst.Intr(d, op, args) => { return (f, []) },
+                Inst.Intr(d, op, args) => { if !is_fits(op) { return (f, []) } },
                 _ => {},
             }
         }
@@ -235,7 +235,7 @@ fun only_reads_and_cows(f: IrFunc, slot_of: [int32], lo: int32, hi: int32, s: in
                 Inst.CallInd(d, fv, args) => { return false },
                 Inst.CallIndSret(fv, r, args) => { return false },
                 Inst.Rt(d, name, args) => { return false },
-                Inst.Intr(d, op, args) => { return false },
+                Inst.Intr(d, op, args) => { if !is_fits(op) { return false } },
                 Inst.Store(sl, v) => { if sl == s || derived[v] { return false } },
                 Inst.DropSlot(t, sl) => { if sl == s { return false } },
                 Inst.Moved(sl) => { if sl == s { return false } },
@@ -373,7 +373,7 @@ fun touches(inst: Inst, s: int32) -> bool {
         Inst.CallInd(d, fv, args) => true
         Inst.CallIndSret(fv, r, args) => true
         Inst.Rt(d, name, args) => true
-        Inst.Intr(d, op, args) => true
+        Inst.Intr(d, op, args) => !is_fits(op)
         Inst.Cow(d, t, h) => true
         Inst.Append(d, h, c, stride) => true
         Inst.Pop(d, c, stride, pos) => true

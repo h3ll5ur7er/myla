@@ -20,11 +20,12 @@
 import std.compress as compress
 from std.compress import CompressError
 from std.io import Read, Write, from_bytes, memory_stream
-from std.fs import IoError, io_error_name
+from std.ioerror import IoError, io_error_name
 import std.path as path_m
 import std.time as time
 import std.checksum as checksum_m
 import std.option as option_m
+import std.char as char_m // `to_digit`, in the tests
 import std.str as str_m
 import std.list as list_m // `filled`
 import std.bytes as bytes_m // `from_str`, `to_str`
@@ -1044,7 +1045,7 @@ pub fun zip_read(b: [uint8]) -> Result<[Entry], ArchiveError> {
 
 // --- Test helpers -------------------------------------------------------------------
 
-// The bytes the hex digits of `s` stand for (lower case, whole bytes): not
+// The bytes the hex digits of `s` stand for (whole bytes): not
 // std.encoding's `hex_decode`, which every program importing this module
 // would check for the tests' sake.
 #test("00ff1a")[[0u8, 255u8, 26u8]]
@@ -1052,15 +1053,10 @@ fun unhex(s: str) -> [uint8] {
     var out: [uint8] = []
     var i = 0
     while i + 1 < s.len() {
-        out.push(((hex_digit(s[i]) << 4) | hex_digit(s[i + 1])) as uint8)
+        out.push((((s[i] as char).to_digit(16).unwrap_or(0) << 4) | (s[i + 1] as char).to_digit(16).unwrap_or(0)) as uint8)
         i += 2
     }
     return out
-}
-
-fun hex_digit(c: uint8) -> int32 {
-    if c >= '0' && c <= '9' { return (c - '0') as int32 }
-    return (c - 'a') as int32 + 10
 }
 
 // A directory entry as zip_read gives one: mode 0o755 and the time `mtime`.

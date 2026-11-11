@@ -14,6 +14,7 @@ self-hosted native backend, each in a fresh working directory; so is
 ran in the Python interpreter and the Python native backend too until those
 were retired, MYLA-219.)"""
 import os
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -687,6 +688,54 @@ class IoErrorCauses(unittest.TestCase):
             )
         self.assertEqual((out, err, code), ("ok\nalready exists\nis a directory\nok\nnot empty\nnot a directory\n"
                                             "not found\nok\nok\n", "", 0))
+
+
+@unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
+class IoErrorModule(unittest.TestCase):
+    """`IoError` is std.ioerror's (MYLA-432): std.io no longer imports std.fs
+    for it, and std.fs re-exports it with `from_errno` and `io_error_name`,
+    so the old names are the same type."""
+
+    def test_std_io_reads_no_fs(self):
+        # a library whose std.fs doesn't even parse: a program importing
+        # std.io alone (or std.process, std.csv) never reads it
+        myla = selfhost_tool("main")
+        with tempfile.TemporaryDirectory() as tmp:
+            lib = os.path.join(tmp, "lib")
+            shutil.copytree(STDLIB_ROOT, lib)
+            with open(os.path.join(lib, "std", "fs.my"), "w") as fh:
+                fh.write("pub fun broken( {\n")
+            for module, use in [("from std.io import println", 'println("hi")'),
+                                ("import std.process as process", "print(process.args().len() > 0)"),
+                                ("import std.csv as csv", "print(csv.parse(\"a\").is_ok())")]:
+                path = write_program(tmp, f"{module}\n\nfun main() {{\n    {use}\n}}\n")
+                proc = subprocess.run([myla, "check", path, "--stdlib", lib], capture_output=True, text=True)
+                self.assertEqual((proc.stderr, proc.returncode), ("", 0), module)
+            path = write_program(tmp, "import std.fs as fs\n\nfun main() {\n    print(fs.exists(\"/\"))\n}\n")
+            proc = subprocess.run([myla, "check", path, "--stdlib", lib], capture_output=True, text=True)
+            self.assertIn("parse error", proc.stderr)
+
+    def test_the_old_names_are_the_same_type(self):
+        out = run_source_both_now(
+            "import std.fs as fs\n"
+            "from std.fs import IoError, from_errno, io_error_name\n"
+            "import std.ioerror as ioerror\n"
+            "fun name(e: fs.IoError) -> str {\n"
+            "    return io_error_name(e)\n"
+            "}\n"
+            "fun main() {\n"
+            "    let e: ioerror.IoError = from_errno(2)\n"
+            "    let f: IoError = ioerror.from_errno(17)\n"
+            "    print(name(e) + \" \" + name(f) + \" \" + fs.io_error_name(fs.from_errno(5)))\n"
+            "    print(f\"{f}\")\n"
+            "    match fs.read_to_string(\"/no/such/file\") {\n"
+            "        Ok(s) => print(s),\n"
+            "        Err(IoError.NotFound) => print(\"missing\"),\n"
+            "        Err(x) => print(x.message()),\n"
+            "    }\n"
+            "}\n",
+        )
+        self.assertEqual(out, ("NotFound AlreadyExists Other(5)\nalready exists (AlreadyExists)\nmissing\n", "", 0))
 
 
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)

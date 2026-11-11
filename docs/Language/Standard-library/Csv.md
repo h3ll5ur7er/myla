@@ -1,6 +1,6 @@
 # std.csv
 
-Comma-separated values, read and written after RFC 4180 ([[MYLA-332]]). `parse` and its kin read a text in memory, `stream_reader` the records of a stream one at a time ([[#Reading a stream]]). The module imports `std.io`'s `Read` and `std.fs`'s `IoError`.
+Comma-separated values, read and written after RFC 4180 ([[MYLA-332]]). `parse` and its kin read a text in memory, `stream_reader` the records of a stream one at a time ([[#Reading a stream]]). The module imports `std.io`'s `Read` and `std.ioerror`'s `IoError` (which `std.fs` re-exports).
 
 ```myla
 import std.csv as csv

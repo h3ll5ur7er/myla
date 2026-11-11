@@ -2,7 +2,7 @@
 // environment, termination, and child processes (D73, D129, D147).
 
 from .io import Read, Write, Pollable, buffered
-from .fs import IoError, from_errno
+from .ioerror import IoError, from_errno
 import .bytes as bytes_m
 
 // The process command-line arguments, captured at startup. `args()[0]` is the
@@ -1329,12 +1329,6 @@ fun wait_status(r: Result<ExitStatus, IoError>) -> ExitStatus {
 // no processes (wasm32) the first spawn is `Unsupported`, which is what the
 // test checks there before it returns.
 
-fun holds(ok: bool, what: str) {
-    if !ok {
-        panic(what)
-    }
-}
-
 // Whether `r` failed only because the target has no processes; any other
 // failure ends the test.
 fun no_processes<T>(r: Result<T, SpawnError>, what: str) -> bool {
@@ -1453,15 +1447,15 @@ fun child_round_trip() {
     var child = running(started)
     var w = input(child.take_stdin())
     var r = output_of(child.take_stdout())
-    holds(none(child.take_stdin()), "the input is given out once")
-    holds(wrote(w.write(bytes_m.from_str("hello\n"))) == 6, "write gives its length")
-    holds(wrote(w.write([98u8, 121u8, 116u8, 101u8, 115u8])) == 5, "and again")
-    holds(ok(w.flush()), "flush")
-    holds(ok(w.close()), "close the input")
-    holds(read_rest(r) == "hello\nbytes", "what cat gave back")
-    holds(ok(r.close()), "close the output")
-    holds(waited(child.wait()) == ExitStatus.Exited(0), "cat ended well")
-    holds(waited(child.wait()) == ExitStatus.Exited(0), "a second wait gives it again")
+    assert(none(child.take_stdin()), "the input is given out once")
+    assert(wrote(w.write(bytes_m.from_str("hello\n"))) == 6, "write gives its length")
+    assert(wrote(w.write([98u8, 121u8, 116u8, 101u8, 115u8])) == 5, "and again")
+    assert(ok(w.flush()), "flush")
+    assert(ok(w.close()), "close the input")
+    assert(read_rest(r) == "hello\nbytes", "what cat gave back")
+    assert(ok(r.close()), "close the output")
+    assert(waited(child.wait()) == ExitStatus.Exited(0), "cat ended well")
+    assert(waited(child.wait()) == ExitStatus.Exited(0), "a second wait gives it again")
 }
 
 // A stream used after it was closed is an error, not a crash.
@@ -1475,17 +1469,17 @@ fun closed_streams() {
     var w = input(child.take_stdin())
     var r = output_of(child.take_stdout())
     var e = error_of(child.take_stderr())
-    holds(ok(w.close()), "close")
-    holds(is_closed(w.close()), "a second close")
-    holds(is_closed(w.write([1u8])), "a write after close")
-    holds(is_closed(w.flush()), "a flush after close")
-    holds(read_rest(r) == "", "cat saw the end at once")
-    holds(ok(r.close()), "close the output")
-    holds(is_closed(r.read(10)), "a read after close")
-    holds(is_closed(r.close()), "a second close of the output")
-    holds(ok(e.close()), "close the error")
-    holds(is_closed(e.read(1)), "a read of the error after close")
-    holds(waited(child.wait()) == ExitStatus.Exited(0), "cat ended well")
+    assert(ok(w.close()), "close")
+    assert(is_closed(w.close()), "a second close")
+    assert(is_closed(w.write([1u8])), "a write after close")
+    assert(is_closed(w.flush()), "a flush after close")
+    assert(read_rest(r) == "", "cat saw the end at once")
+    assert(ok(r.close()), "close the output")
+    assert(is_closed(r.read(10)), "a read after close")
+    assert(is_closed(r.close()), "a second close of the output")
+    assert(ok(e.close()), "close the error")
+    assert(is_closed(e.read(1)), "a read of the error after close")
+    assert(waited(child.wait()) == ExitStatus.Exited(0), "cat ended well")
 }
 
 // A copy of a closed stream reaches nothing, not the pipe that got its
@@ -1500,23 +1494,23 @@ fun stale_copies() {
     var child = running(started)
     var w = input(child.take_stdin())
     let stale = w
-    holds(ok(w.close()), "close the input")
+    assert(ok(w.close()), "close the input")
     var other = running(command("cat").spawn())
     var w2 = input(other.take_stdin())
     var r2 = output_of(other.take_stdout())
     var s = stale
-    holds(is_closed(s.write(bytes_m.from_str("INJECTED"))), "the stale copy's write")
-    holds(is_closed(s.close()), "the stale copy's close")
-    holds(wrote(w2.write(bytes_m.from_str("mine"))) == 4, "the other child's input")
-    holds(ok(w2.close()), "closed")
-    holds(read_rest(r2) == "mine", "the other child got its own bytes only")
+    assert(is_closed(s.write(bytes_m.from_str("INJECTED"))), "the stale copy's write")
+    assert(is_closed(s.close()), "the stale copy's close")
+    assert(wrote(w2.write(bytes_m.from_str("mine"))) == 4, "the other child's input")
+    assert(ok(w2.close()), "closed")
+    assert(read_rest(r2) == "mine", "the other child got its own bytes only")
     let copy = child
-    holds(waited(child.wait()) == ExitStatus.Exited(0), "cat ended well")
+    assert(waited(child.wait()) == ExitStatus.Exited(0), "cat ended well")
     var c2 = copy
-    holds(ok(c2.kill()), "a kill through a copy of a reaped child does nothing")
-    holds(waited(other.wait()) == ExitStatus.Exited(0), "the other ended well")
+    assert(ok(c2.kill()), "a kill through a copy of a reaped child does nothing")
+    assert(waited(other.wait()) == ExitStatus.Exited(0), "the other ended well")
     var forged = ChildStdin { fd: 1 }
-    holds(is_closed(forged.write(bytes_m.from_str("x"))), "a stream built by hand")
+    assert(is_closed(forged.write(bytes_m.from_str("x"))), "a stream built by hand")
 }
 
 // Lines in and out one at a time: the child's output is a stream, not a
@@ -1531,12 +1525,12 @@ fun child_line_by_line() {
     var w = input(child.take_stdin())
     var lines = buffered(output_of(child.take_stdout()))
     w.write(bytes_m.from_str("one\n"))
-    holds(line(lines.read_line()) == "one", "the first line back before the second went")
+    assert(line(lines.read_line()) == "one", "the first line back before the second went")
     w.write(bytes_m.from_str("two\n"))
-    holds(line(lines.read_line()) == "two", "the second line")
+    assert(line(lines.read_line()) == "two", "the second line")
     w.close()
-    holds(line(lines.read_line()) == "<end>", "then the end")
-    holds(waited(child.wait()) == ExitStatus.Exited(0), "cat ended well")
+    assert(line(lines.read_line()) == "<end>", "then the end")
+    assert(waited(child.wait()) == ExitStatus.Exited(0), "cat ended well")
 }
 
 // A child's input written by one task while another reads its output: more
@@ -1554,9 +1548,9 @@ async fun input_written_while_output_read() {
     let r = output_of(child.take_stdout())
     async let wrote = feed(w, 10, 60000)
     async let got = drink(r)
-    holds(await wrote == 600000, "every byte written")
-    holds(await got == 600000, "and read back")
-    holds(waited(child.wait()) == ExitStatus.Exited(0), "cat ended well")
+    assert(await wrote == 600000, "every byte written")
+    assert(await got == 600000, "and read back")
+    assert(waited(child.wait()) == ExitStatus.Exited(0), "cat ended well")
 }
 
 // `rounds` writes of `n` bytes each to `w`, then its close: how many went.
@@ -1573,7 +1567,7 @@ async fun feed(w: ChildStdin, rounds: int, n: int) -> int {
             Err(e) => { return -1 }
         }
     }
-    holds(ok(inp.close()), "the input closed")
+    assert(ok(inp.close()), "the input closed")
     return total
 }
 
@@ -1594,12 +1588,12 @@ fun child_killed() {
         return
     }
     var child = running(started)
-    holds(child.id() > 0, "a process ID")
-    holds(none(polled(child.try_wait())), "still running")
-    holds(ok(child.kill()), "kill")
-    holds(waited(child.wait()) == ExitStatus.Signaled(9), "ended by SIGKILL")
-    holds(match polled(child.try_wait()) { Some(st) => st == ExitStatus.Signaled(9), None => false }, "try_wait gives it then")
-    holds(ok(child.kill()), "a kill after the end does nothing")
+    assert(child.id() > 0, "a process ID")
+    assert(none(polled(child.try_wait())), "still running")
+    assert(ok(child.kill()), "kill")
+    assert(waited(child.wait()) == ExitStatus.Signaled(9), "ended by SIGKILL")
+    assert(match polled(child.try_wait()) { Some(st) => st == ExitStatus.Signaled(9), None => false }, "try_wait gives it then")
+    assert(ok(child.kill()), "a kill after the end does nothing")
 }
 
 // `wait` with the streams still held: the input closed (or cat would wait
@@ -1612,8 +1606,8 @@ fun wait_closes_what_it_holds() {
         return
     }
     var child = running(started)
-    holds(waited(child.wait()) == ExitStatus.Exited(3), "it ended with 3")
-    holds(none(child.take_stdout()) && none(child.take_stderr()), "nothing held after")
+    assert(waited(child.wait()) == ExitStatus.Exited(3), "it ended with 3")
+    assert(none(child.take_stdout()) && none(child.take_stderr()), "nothing held after")
 }
 
 // `wait_with_output` keeps what it reads; a text `stdin` is the input.
@@ -1624,12 +1618,12 @@ fun wait_with_output_and_text_input() {
         return
     }
     var child = running(started)
-    holds(none(child.take_stdin()), "a text input is no pipe")
+    assert(none(child.take_stdin()), "a text input is no pipe")
     match child.wait_with_output() {
         Ok(out) => {
-            holds(bytes_m.to_str(out.stdout) == "outgot", "the output")
-            holds(bytes_m.to_str(out.stderr) == "err", "the error")
-            holds(out.status == ExitStatus.Exited(0), "the status")
+            assert(bytes_m.to_str(out.stdout) == "outgot", "the output")
+            assert(bytes_m.to_str(out.stderr) == "err", "the error")
+            assert(out.status == ExitStatus.Exited(0), "the status")
         }
         Err(_) => panic("wait_with_output failed")
     }
@@ -1643,24 +1637,24 @@ fun input_modes() {
         return
     }
     var child = running(started)
-    holds(none(child.take_stdin()), "Null is no pipe")
+    assert(none(child.take_stdin()), "Null is no pipe")
     match child.wait_with_output() {
-        Ok(out) => holds(out.stdout.len() == 0 && out.status == ExitStatus.Exited(0), "cat read nothing")
+        Ok(out) => assert(out.stdout.len() == 0 && out.status == ExitStatus.Exited(0), "cat read nothing")
         Err(_) => panic("wait_with_output failed")
     }
     var quiet = running(command("sh").args(["-c", "exit 0"]).stdin_from(Stdio.Inherit).spawn())
-    holds(none(quiet.take_stdin()), "Inherit is no pipe")
-    holds(waited(quiet.wait()) == ExitStatus.Exited(0), "sh ended well")
+    assert(none(quiet.take_stdin()), "Inherit is no pipe")
+    assert(waited(quiet.wait()) == ExitStatus.Exited(0), "sh ended well")
     var piped = running(command("cat").stdin("text").stdin_from(Stdio.Piped).spawn())
     var w = input(piped.take_stdin())
-    holds(ok(w.close()), "Piped after a text is a pipe")
-    holds(waited(piped.wait()) == ExitStatus.Exited(0), "cat ended at the closed input")
+    assert(ok(w.close()), "Piped after a text is a pipe")
+    assert(waited(piped.wait()) == ExitStatus.Exited(0), "cat ended at the closed input")
     match command("cat").stdin_from(Stdio.Null).output() {
-        Ok(out) => holds(out.stdout.len() == 0, "output with Null reads nothing")
+        Ok(out) => assert(out.stdout.len() == 0, "output with Null reads nothing")
         Err(_) => panic("output failed")
     }
     match command("cat").stdin("x").stdin_from(Stdio.Piped).output() {
-        Ok(out) => holds(out.stdout.len() == 0, "output with Piped has nobody to write")
+        Ok(out) => assert(out.stdout.len() == 0, "output with Piped has nobody to write")
         Err(_) => panic("output failed")
     }
 }
@@ -1672,17 +1666,17 @@ fun spawn_errors() {
     if match missing { Err(SpawnError.Unsupported) => true, _ => false } {
         return
     }
-    holds(match missing { Err(SpawnError.NotFound) => true, _ => false }, "not there")
-    holds(match command("cat").env("A=B", "x").spawn() { Err(SpawnError.InvalidInput) => true, _ => false }, "a bad name runs nothing")
-    holds(match command("cat").pipe(command("/no/such/program")).output() { Err(SpawnError.NotFound) => true, _ => false }, "a pipeline's second not there")
+    assert(match missing { Err(SpawnError.NotFound) => true, _ => false }, "not there")
+    assert(match command("cat").env("A=B", "x").spawn() { Err(SpawnError.InvalidInput) => true, _ => false }, "a bad name runs nothing")
+    assert(match command("cat").pipe(command("/no/such/program")).output() { Err(SpawnError.NotFound) => true, _ => false }, "a pipeline's second not there")
     // a directory that can't be entered, and a NUL byte no process can
     // take, aren't "program not found" (MYLA-419)
-    holds(failed_with(command("true").cwd("/no/such/dir").output()) == Some(SpawnError.WorkingDir(2)), "a directory not there")
-    holds(failed_with(command("true").cwd("/dev/null").spawn()) == Some(SpawnError.WorkingDir(20)), "not a directory")
-    holds(failed_with(run("a\0b", [])) == Some(SpawnError.InvalidInput), "a NUL in the name")
-    holds(failed_with(command("echo").arg("a\0b").output()) == Some(SpawnError.InvalidInput), "a NUL in an argument")
-    holds(failed_with(command("true").cwd("/t\0mp").output()) == Some(SpawnError.InvalidInput), "a NUL in the directory")
-    holds(failed_with(command("a\0b").spawn()) == Some(SpawnError.InvalidInput), "spawned")
+    assert(failed_with(command("true").cwd("/no/such/dir").output()) == Some(SpawnError.WorkingDir(2)), "a directory not there")
+    assert(failed_with(command("true").cwd("/dev/null").spawn()) == Some(SpawnError.WorkingDir(20)), "not a directory")
+    assert(failed_with(run("a\0b", [])) == Some(SpawnError.InvalidInput), "a NUL in the name")
+    assert(failed_with(command("echo").arg("a\0b").output()) == Some(SpawnError.InvalidInput), "a NUL in an argument")
+    assert(failed_with(command("true").cwd("/t\0mp").output()) == Some(SpawnError.InvalidInput), "a NUL in the directory")
+    assert(failed_with(command("a\0b").spawn()) == Some(SpawnError.InvalidInput), "spawned")
 }
 
 // Why `r` failed, if it did.
@@ -1704,24 +1698,24 @@ fun pipeline_of_two() {
     }
     match counted {
         Ok(out) => {
-            holds(bytes_m.to_str(out.second.stdout) == "16777216\n", f"all of it: {bytes_m.to_str(out.second.stdout)}")
-            holds(out.first.stdout.len() == 0, "the first's output went to the second")
-            holds(out.first.status == ExitStatus.Exited(0) && out.second.status == ExitStatus.Exited(0), "both ended well")
+            assert(bytes_m.to_str(out.second.stdout) == "16777216\n", f"all of it: {bytes_m.to_str(out.second.stdout)}")
+            assert(out.first.stdout.len() == 0, "the first's output went to the second")
+            assert(out.first.status == ExitStatus.Exited(0) && out.second.status == ExitStatus.Exited(0), "both ended well")
         }
         Err(e) => panic(f"pipeline: {e}")
     }
     match command("head").args(["-c", "524288", "/dev/zero"]).pipe(command("tr").args(["\\0", "a"])).output() {
         Ok(out) => {
-            holds(out.second.stdout.len() == 524288, f"all of it: {out.second.stdout.len()}")
-            holds(out.second.stdout[0] == 'a' && out.second.stdout[524287] == 'a', "translated")
+            assert(out.second.stdout.len() == 524288, f"all of it: {out.second.stdout.len()}")
+            assert(out.second.stdout[0] == 'a' && out.second.stdout[524287] == 'a', "translated")
         }
         Err(e) => panic(f"pipeline: {e}")
     }
     match command("sh").args(["-c", "echo a >&2; echo data"]).pipe(command("sh").args(["-c", "cat; echo b >&2; exit 2"])).output() {
         Ok(out) => {
-            holds(bytes_m.to_str(out.second.stdout) == "data\n", "the data")
-            holds(bytes_m.to_str(out.first.stderr) == "a\n" && bytes_m.to_str(out.second.stderr) == "b\n", "both errors")
-            holds(out.second.status == ExitStatus.Exited(2), "the second's status")
+            assert(bytes_m.to_str(out.second.stdout) == "data\n", "the data")
+            assert(bytes_m.to_str(out.first.stderr) == "a\n" && bytes_m.to_str(out.second.stderr) == "b\n", "both errors")
+            assert(out.second.status == ExitStatus.Exited(2), "the second's status")
         }
         Err(e) => panic(f"pipeline: {e}")
     }
@@ -1738,8 +1732,8 @@ fun pipeline_second_writes_first() {
     }
     match r {
         Ok(out) => {
-            holds(out.second.stdout.len() == 1000007, f"all of it: {out.second.stdout.len()}")
-            holds(out.second.status == ExitStatus.Exited(0), "the second ended well")
+            assert(out.second.stdout.len() == 1000007, f"all of it: {out.second.stdout.len()}")
+            assert(out.second.status == ExitStatus.Exited(0), "the second ended well")
         }
         Err(e) => panic(f"pipeline: {e}")
     }
@@ -1754,7 +1748,7 @@ fun output_modes() {
         return
     }
     var child = running(started)
-    holds(none(child.take_stdout()), "Null is no pipe")
+    assert(none(child.take_stdout()), "Null is no pipe")
     var tries = 0
     var st = polled(child.try_wait())
     while none(st) && tries < 5000 {
@@ -1762,20 +1756,20 @@ fun output_modes() {
         st = polled(child.try_wait())
         tries += 1
     }
-    holds(match st { Some(s) => s == ExitStatus.Exited(0), None => false }, "it ended without anyone reading")
+    assert(match st { Some(s) => s == ExitStatus.Exited(0), None => false }, "it ended without anyone reading")
     var quiet = running(command("sh").args(["-c", "echo out; echo err >&2"]).stderr_from(Stdio.Null).spawn())
-    holds(none(quiet.take_stderr()), "a Null error is no pipe")
+    assert(none(quiet.take_stderr()), "a Null error is no pipe")
     match quiet.wait_with_output() {
-        Ok(out) => holds(bytes_m.to_str(out.stdout) == "out\n" && out.stderr.len() == 0, "the output, no error")
+        Ok(out) => assert(bytes_m.to_str(out.stdout) == "out\n" && out.stderr.len() == 0, "the output, no error")
         Err(_) => panic("wait_with_output failed")
     }
     var shown = running(command("true").stdout_from(Stdio.Inherit).stderr_from(Stdio.Inherit).spawn())
-    holds(none(shown.take_stdout()) && none(shown.take_stderr()), "Inherit is no pipe")
-    holds(waited(shown.wait()) == ExitStatus.Exited(0), "true ended well")
+    assert(none(shown.take_stdout()) && none(shown.take_stderr()), "Inherit is no pipe")
+    assert(waited(shown.wait()) == ExitStatus.Exited(0), "true ended well")
     match command("sh").args(["-c", "echo out; echo err >&2; exit 3"]).stdout_from(Stdio.Null).output() {
         Ok(out) => {
-            holds(out.stdout.len() == 0 && bytes_m.to_str(out.stderr) == "err\n", "output with a Null output")
-            holds(out.status == ExitStatus.Exited(3), "and its status")
+            assert(out.stdout.len() == 0 && bytes_m.to_str(out.stderr) == "err\n", "output with a Null output")
+            assert(out.status == ExitStatus.Exited(3), "and its status")
         }
         Err(_) => panic("output failed")
     }
@@ -1791,13 +1785,13 @@ fun input_from_a_child() {
     var first = running(started)
     let joined = output_of(first.take_stdout())
     match command("tr").args(["a-z", "A-Z"]).stdin_from_stdout(joined).output() {
-        Ok(out) => holds(bytes_m.to_str(out.stdout) == "ABC", f"translated: {bytes_m.to_str(out.stdout)}")
+        Ok(out) => assert(bytes_m.to_str(out.stdout) == "ABC", f"translated: {bytes_m.to_str(out.stdout)}")
         Err(e) => panic(f"tr: {e}")
     }
     var r = joined
-    holds(is_closed(r.read(1)), "the output was handed over")
-    holds(match command("cat").stdin_from_stdout(joined).spawn() { Err(SpawnError.Other(9)) => true, _ => false }, "and can't be handed over again")
-    holds(waited(first.wait()) == ExitStatus.Exited(0), "printf ended well")
+    assert(is_closed(r.read(1)), "the output was handed over")
+    assert(match command("cat").stdin_from_stdout(joined).spawn() { Err(SpawnError.Other(9)) => true, _ => false }, "and can't be handed over again")
+    assert(waited(first.wait()) == ExitStatus.Exited(0), "printf ended well")
 }
 
 // A second child that ends early: the first gets SIGPIPE, as in a shell.
@@ -1809,9 +1803,9 @@ fun pipeline_cut_short() {
     }
     match result {
         Ok(out) => {
-            holds(out.second.stdout.len() == 5, "five bytes")
-            holds(out.first.status == ExitStatus.Signaled(13), "the first stopped by SIGPIPE")
-            holds(out.second.status == ExitStatus.Exited(0), "the second ended well")
+            assert(out.second.stdout.len() == 5, "five bytes")
+            assert(out.first.status == ExitStatus.Signaled(13), "the first stopped by SIGPIPE")
+            assert(out.second.status == ExitStatus.Exited(0), "the second ended well")
         }
         Err(e) => panic(f"pipeline: {e}")
     }
@@ -1827,8 +1821,8 @@ async fun child_waited_in_a_task() {
     var child = running(started)
     match await child.wait_with_output_async() {
         Ok(out) => {
-            holds(bytes_m.to_str(out.stdout) == "done" && bytes_m.to_str(out.stderr) == "e", "what it wrote")
-            holds(out.status == ExitStatus.Exited(4), "its status")
+            assert(bytes_m.to_str(out.stdout) == "done" && bytes_m.to_str(out.stderr) == "e", "what it wrote")
+            assert(out.status == ExitStatus.Exited(4), "its status")
         }
         Err(_) => panic("wait_with_output_async failed")
     }
@@ -1836,12 +1830,12 @@ async fun child_waited_in_a_task() {
     var w = input(other.take_stdin())
     w.write(bytes_m.from_str("x"))
     w.close()
-    holds(read_rest(output_of(other.take_stdout())) == "x", "cat's output")
+    assert(read_rest(output_of(other.take_stdout())) == "x", "cat's output")
     let st = await other.wait_async()
-    holds(waited(st) == ExitStatus.Exited(0), "cat's status")
+    assert(waited(st) == ExitStatus.Exited(0), "cat's status")
     // `output_async` with a stream that isn't a pipe (MYLA-378)
     match await command("sh").args(["-c", "printf o; printf e >&2"]).stderr_from(Stdio.Null).output_async() {
-        Ok(out) => holds(bytes_m.to_str(out.stdout) == "o" && out.stderr.len() == 0, "output_async with a Null error")
+        Ok(out) => assert(bytes_m.to_str(out.stdout) == "o" && out.stderr.len() == 0, "output_async with a Null error")
         Err(e) => panic(f"output_async: {e}")
     }
 }

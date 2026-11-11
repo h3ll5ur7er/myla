@@ -8,7 +8,7 @@
 // Output is not buffered, so whatever a program wrote is out before it waits
 // for input.
 
-from .fs import IoError, from_errno
+from .ioerror import IoError, from_errno
 
 // Write `s`'s bytes to file descriptor `fd` (1 = stdout, 2 = stderr), all of
 // them, or the error that stopped it (D146). A closed pipe on the standard
@@ -849,12 +849,6 @@ pub fun copy<R: Read, W: Write>(r: R, w: W) -> Result<W, IoError> {
 
 // --- Tests of the generic code (D162) ------------------------------------------
 
-fun holds(ok: bool, what: str) {
-    if !ok {
-        panic(what)
-    }
-}
-
 // The bytes as text, to compare them.
 fun shown(r: Result<[uint8], IoError>) -> str {
     return match r {
@@ -892,61 +886,61 @@ fun shown_line(r: Result<Option<str>, IoError>) -> str {
 #test
 fun memory_round_trip() {
     var m = memory_stream()
-    holds(said(m.write(bytes_of("hello, "))) == "7", "write gives its length")
-    holds(said(m.write(bytes_of("world"))) == "5", "a second write")
-    holds(m.text() == "hello, world", "the bytes written")
-    holds(shown(m.read(4)) == "", "the cursor is at the end")
-    holds(said(m.seek(SeekFrom.Start(0))) == "0", "seek to the start")
-    holds(shown(m.read(5)) == "hello", "read from the start")
-    holds(m.position() == 5i64, "the cursor moved")
-    holds(shown(m.read(100)) == ", world", "a read past the end gives the rest")
-    holds(shown(m.read(1)) == "", "then nothing")
+    assert(said(m.write(bytes_of("hello, "))) == "7", "write gives its length")
+    assert(said(m.write(bytes_of("world"))) == "5", "a second write")
+    assert(m.text() == "hello, world", "the bytes written")
+    assert(shown(m.read(4)) == "", "the cursor is at the end")
+    assert(said(m.seek(SeekFrom.Start(0))) == "0", "seek to the start")
+    assert(shown(m.read(5)) == "hello", "read from the start")
+    assert(m.position() == 5i64, "the cursor moved")
+    assert(shown(m.read(100)) == ", world", "a read past the end gives the rest")
+    assert(shown(m.read(1)) == "", "then nothing")
     let b = from_str("bytes").bytes()
-    holds(b.len() == 5 && b[0] == 98u8, "bytes()")
+    assert(b.len() == 5 && b[0] == 98u8, "bytes()")
     var e = from_bytes(b)
-    holds(shown(e.read(0)) == "", "a read of 0")
-    holds(shown(e.read(-3)) == "", "a read of fewer than 0")
+    assert(shown(e.read(0)) == "", "a read of 0")
+    assert(shown(e.read(-3)) == "", "a read of fewer than 0")
 }
 
 // Seeks from each place, and writes over and past the end.
 #test
 fun memory_seeks() {
     var m = from_str("0123456789")
-    holds(said(m.seek(SeekFrom.End(-3))) == "7", "from the end")
-    holds(shown(m.read(10)) == "789", "the last three")
-    holds(said(m.seek(SeekFrom.Current(-5))) == "5", "back from the cursor")
-    holds(said(m.seek(SeekFrom.Current(2))) == "7", "on from the cursor")
-    holds(said(m.seek(SeekFrom.Start(-1))) == "InvalidInput", "before the start")
-    holds(m.position() == 7i64, "a failed seek leaves the cursor")
-    holds(said(m.seek(SeekFrom.Start(2))) == "2", "to 2")
-    holds(said(m.write(bytes_of("ab"))) == "2", "write over")
-    holds(m.text() == "01ab456789", "written over in place")
-    holds(said(m.seek(SeekFrom.End(0))) == "10", "to the end")
-    holds(said(m.write(bytes_of("XYZ"))) == "3", "append")
-    holds(m.text() == "01ab456789XYZ", "appended")
-    holds(said(m.seek(SeekFrom.End(2))) == "15", "past the end")
-    holds(shown(m.read(4)) == "", "nothing to read past the end")
-    holds(said(m.write(bytes_of("!"))) == "1", "write past the end")
+    assert(said(m.seek(SeekFrom.End(-3))) == "7", "from the end")
+    assert(shown(m.read(10)) == "789", "the last three")
+    assert(said(m.seek(SeekFrom.Current(-5))) == "5", "back from the cursor")
+    assert(said(m.seek(SeekFrom.Current(2))) == "7", "on from the cursor")
+    assert(said(m.seek(SeekFrom.Start(-1))) == "InvalidInput", "before the start")
+    assert(m.position() == 7i64, "a failed seek leaves the cursor")
+    assert(said(m.seek(SeekFrom.Start(2))) == "2", "to 2")
+    assert(said(m.write(bytes_of("ab"))) == "2", "write over")
+    assert(m.text() == "01ab456789", "written over in place")
+    assert(said(m.seek(SeekFrom.End(0))) == "10", "to the end")
+    assert(said(m.write(bytes_of("XYZ"))) == "3", "append")
+    assert(m.text() == "01ab456789XYZ", "appended")
+    assert(said(m.seek(SeekFrom.End(2))) == "15", "past the end")
+    assert(shown(m.read(4)) == "", "nothing to read past the end")
+    assert(said(m.write(bytes_of("!"))) == "1", "write past the end")
     let b = m.bytes()
-    holds(b.len() == 16 && b[13] == 0u8 && b[14] == 0u8 && b[15] == '!', "the gap is zeros")
-    holds(ok(m.flush()), "flush")
+    assert(b.len() == 16 && b[13] == 0u8 && b[14] == 0u8 && b[15] == '!', "the gap is zeros")
+    assert(ok(m.flush()), "flush")
 }
 
 // A `Buffered` over a memory stream reads lines, exact counts and the rest.
 #test
 fun buffered_lines() {
     var r = buffered(from_str("one\r\ntwo\n\nthree"))
-    holds(shown_line(r.read_line()) == "one\r", "the \\r stays")
-    holds(shown_line(r.read_line()) == "two", "a plain line")
-    holds(shown_line(r.read_line()) == "", "an empty line")
-    holds(shown_line(r.read_line()) == "three", "a last line without \\n")
-    holds(shown_line(r.read_line()) == "<end>", "then the end")
-    holds(shown_line(r.read_line()) == "<end>", "and again")
+    assert(shown_line(r.read_line()) == "one\r", "the \\r stays")
+    assert(shown_line(r.read_line()) == "two", "a plain line")
+    assert(shown_line(r.read_line()) == "", "an empty line")
+    assert(shown_line(r.read_line()) == "three", "a last line without \\n")
+    assert(shown_line(r.read_line()) == "<end>", "then the end")
+    assert(shown_line(r.read_line()) == "<end>", "and again")
     var e = buffered(memory_stream())
-    holds(shown_line(e.read_line()) == "<end>", "nothing at all")
+    assert(shown_line(e.read_line()) == "<end>", "nothing at all")
     var n = buffered(from_str("\n"))
-    holds(shown_line(n.read_line()) == "", "one empty line")
-    holds(shown_line(n.read_line()) == "<end>", "and no more")
+    assert(shown_line(n.read_line()) == "", "one empty line")
+    assert(shown_line(n.read_line()) == "<end>", "and no more")
 }
 
 // Lines longer than a read, so a line is put together over several.
@@ -968,14 +962,14 @@ fun buffered_long_lines() {
     while i < 3 {
         match r.read_line() {
             Ok(Some(l)) => {
-                holds(l.len() == 5000 + i + 1, f"line {i}'s length")
-                holds(l[0] == 97u8 + (i as uint8) && l[^1] == 13u8, f"line {i}'s bytes")
+                assert(l.len() == 5000 + i + 1, f"line {i}'s length")
+                assert(l[0] == 97u8 + (i as uint8) && l[^1] == 13u8, f"line {i}'s bytes")
             }
             _ => panic(f"line {i}")
         }
         i += 1
     }
-    holds(shown_line(r.read_line()) == "<end>", "the end")
+    assert(shown_line(r.read_line()) == "<end>", "the end")
 }
 
 // After a line: exact counts, a plain read and the rest; too few bytes
@@ -983,18 +977,18 @@ fun buffered_long_lines() {
 #test
 fun buffered_exact_and_rest() {
     var r = buffered(from_str("header\nbody bytes and the rest"))
-    holds(shown_line(r.read_line()) == "header", "a line")
-    holds(shown_line(r.read_exact(4)) == "body", "four bytes")
-    holds(shown_line(r.read_exact(0)) == "", "none")
-    holds(shown(r.read(6)) == " bytes", "a read through it")
+    assert(shown_line(r.read_line()) == "header", "a line")
+    assert(shown_line(r.read_exact(4)) == "body", "four bytes")
+    assert(shown_line(r.read_exact(0)) == "", "none")
+    assert(shown(r.read(6)) == " bytes", "a read through it")
     match r.read_to_end() {
-        Ok(s) => holds(s == " and the rest", "the rest")
+        Ok(s) => assert(s == " and the rest", "the rest")
         Err(_) => panic("read_to_end")
     }
-    holds(said(r.read_to_end()) == "", "nothing after the end")
+    assert(said(r.read_to_end()) == "", "nothing after the end")
     var s = buffered(from_str("abc"))
-    holds(shown_line(s.read_exact(4)) == "<end>", "too few bytes")
-    holds(shown_line(s.read_exact(3)) == "abc", "which stay unread")
+    assert(shown_line(s.read_exact(4)) == "<end>", "too few bytes")
+    assert(shown_line(s.read_exact(3)) == "abc", "which stay unread")
 }
 
 // A `Buffered` is a `Read` itself, so adapters stack, and a big read goes
@@ -1009,15 +1003,15 @@ fun buffered_stacks() {
     }
     let text = sb.build()
     var r = buffered(buffered(from_str(text)))
-    holds(shown(r.read(3)) == "012", "a small read")
+    assert(shown(r.read(3)) == "012", "a small read")
     match r.read(9000) {
-        Ok(b) => holds(b.len() > 0 && b[0] == '3', "a big read goes on where the small one stopped")
+        Ok(b) => assert(b.len() > 0 && b[0] == '3', "a big read goes on where the small one stopped")
         Err(_) => panic("read")
     }
     let all = read_all(buffered(buffered(from_str(text))))
-    holds(shown(all) == text, "read_all through two")
+    assert(shown(all) == text, "read_all through two")
     let inner = buffered(from_str("xyz")).into_inner()
-    holds(inner.text() == "xyz", "into_inner")
+    assert(inner.text() == "xyz", "into_inner")
 }
 
 // `copy` and `read_all` over any `Read`, `copy` to any `Write`.
@@ -1025,17 +1019,17 @@ fun buffered_stacks() {
 fun copy_and_read_all() {
     let w = copy(from_str("copied"), memory_stream())
     match w {
-        Ok(m) => holds(m.text() == "copied", "into a memory stream")
+        Ok(m) => assert(m.text() == "copied", "into a memory stream")
         Err(_) => panic("copy")
     }
     var src = from_str("abc")
-    holds(shown(read_all(src)) == "abc", "read_all")
-    holds(src.position() == 0i64, "the caller's stream doesn't move")
-    holds(shown(read_all(memory_stream())) == "", "read_all of nothing")
+    assert(shown(read_all(src)) == "abc", "read_all")
+    assert(src.position() == 0i64, "the caller's stream doesn't move")
+    assert(shown(read_all(memory_stream())) == "", "read_all of nothing")
     match copy(from_str("through a writer"), buffered_writer_with(memory_stream(), 4)) {
         Ok(bw) => {
             match bw.into_inner() {
-                Ok(m) => holds(m.text() == "through a writer", "copy into a BufferedWriter")
+                Ok(m) => assert(m.text() == "through a writer", "copy into a BufferedWriter")
                 Err(_) => panic("into_inner")
             }
         }
@@ -1050,7 +1044,7 @@ fun copy_and_read_all() {
     }
     let big = sb.build()
     match copy(from_str(big), memory_stream()) {
-        Ok(m) => holds(m.text() == big, "a copy of more than 64 KiB")
+        Ok(m) => assert(m.text() == big, "a copy of more than 64 KiB")
         Err(_) => panic("copy")
     }
 }
@@ -1060,25 +1054,25 @@ fun copy_and_read_all() {
 #test
 fun buffered_writer_flushes() {
     var w = buffered_writer_with(memory_stream(), 8)
-    holds(said(w.write_str("abc")) == "3", "a small write")
-    holds(w.sink[0].text() == "", "kept in the buffer")
-    holds(said(w.write_str("defgh")) == "5", "fills the buffer")
-    holds(w.sink[0].text() == "", "still kept: exactly full")
-    holds(said(w.write(bytes_of("i"))) == "1", "one more")
-    holds(w.sink[0].text() == "abcdefgh", "the full buffer went on")
-    holds(said(w.write(bytes_of("a write longer than the buffer"))) == "30", "a long write")
-    holds(w.sink[0].text() == "abcdefghia write longer than the buffer", "goes straight on")
-    holds(said(w.write_str("tail")) == "4", "a tail")
-    holds(ok(w.flush()), "flush")
-    holds(w.sink[0].text() == "abcdefghia write longer than the buffertail", "flushed")
+    assert(said(w.write_str("abc")) == "3", "a small write")
+    assert(w.sink[0].text() == "", "kept in the buffer")
+    assert(said(w.write_str("defgh")) == "5", "fills the buffer")
+    assert(w.sink[0].text() == "", "still kept: exactly full")
+    assert(said(w.write(bytes_of("i"))) == "1", "one more")
+    assert(w.sink[0].text() == "abcdefgh", "the full buffer went on")
+    assert(said(w.write(bytes_of("a write longer than the buffer"))) == "30", "a long write")
+    assert(w.sink[0].text() == "abcdefghia write longer than the buffer", "goes straight on")
+    assert(said(w.write_str("tail")) == "4", "a tail")
+    assert(ok(w.flush()), "flush")
+    assert(w.sink[0].text() == "abcdefghia write longer than the buffertail", "flushed")
     var big = buffered_writer(memory_stream())
     var i = 0
     while i < 3000 {
-        holds(said(big.write_str("line\n")) == "5", "write_str")
+        assert(said(big.write_str("line\n")) == "5", "write_str")
         i += 1
     }
     match big.into_inner() {
-        Ok(m) => holds(m.bytes().len() == 15000, "every byte, in order")
+        Ok(m) => assert(m.bytes().len() == 15000, "every byte, in order")
         Err(_) => panic("into_inner")
     }
 }
@@ -1088,22 +1082,22 @@ fun buffered_writer_flushes() {
 #test
 fun buffered_seeks() {
     var r = buffered(from_str("first\nsecond\nthird\n"))
-    holds(shown_line(r.read_line()) == "first", "a line, and the rest buffered")
-    holds(said(r.seek(SeekFrom.Current(0))) == "6", "the cursor is after the line, not after the buffer")
-    holds(shown_line(r.read_line()) == "second", "the next line")
-    holds(said(r.seek(SeekFrom.Start(0))) == "0", "back to the start")
-    holds(shown_line(r.read_line()) == "first", "the first line again")
-    holds(said(r.seek(SeekFrom.End(-6))) == "13", "near the end")
-    holds(shown_line(r.read_line()) == "third", "the last line")
-    holds(shown_line(r.read_line()) == "<end>", "the end")
-    holds(said(r.seek(SeekFrom.Start(13))) == "13", "a seek after the end of the input")
-    holds(shown_line(r.read_line()) == "third", "reads again")
+    assert(shown_line(r.read_line()) == "first", "a line, and the rest buffered")
+    assert(said(r.seek(SeekFrom.Current(0))) == "6", "the cursor is after the line, not after the buffer")
+    assert(shown_line(r.read_line()) == "second", "the next line")
+    assert(said(r.seek(SeekFrom.Start(0))) == "0", "back to the start")
+    assert(shown_line(r.read_line()) == "first", "the first line again")
+    assert(said(r.seek(SeekFrom.End(-6))) == "13", "near the end")
+    assert(shown_line(r.read_line()) == "third", "the last line")
+    assert(shown_line(r.read_line()) == "<end>", "the end")
+    assert(said(r.seek(SeekFrom.Start(13))) == "13", "a seek after the end of the input")
+    assert(shown_line(r.read_line()) == "third", "reads again")
     var w = buffered_writer(from_str("0123456789"))
-    holds(said(w.write_str("ab")) == "2", "buffered")
-    holds(said(w.seek(SeekFrom.Start(5))) == "5", "a seek")
-    holds(said(w.write_str("XY")) == "2", "written after the seek")
+    assert(said(w.write_str("ab")) == "2", "buffered")
+    assert(said(w.seek(SeekFrom.Start(5))) == "5", "a seek")
+    assert(said(w.write_str("XY")) == "2", "written after the seek")
     match w.into_inner() {
-        Ok(m) => holds(m.text() == "ab234XY789", "each write where the cursor was")
+        Ok(m) => assert(m.text() == "ab234XY789", "each write where the cursor was")
         Err(_) => panic("into_inner")
     }
 }
@@ -1118,21 +1112,21 @@ fun any_bytes() {
         i += 1
     }
     let all = read_all(buffered(from_bytes(b)))
-    holds(said_bytes(all) == "256 0 255", "read_all")
+    assert(said_bytes(all) == "256 0 255", "read_all")
     match copy(buffered(from_bytes(b)), buffered_writer_with(memory_stream(), 7)) {
         Ok(w) => {
             match w.into_inner() {
-                Ok(m) => holds(said_bytes(Ok(m.bytes())) == "256 0 255", "copy")
+                Ok(m) => assert(said_bytes(Ok(m.bytes())) == "256 0 255", "copy")
                 Err(_) => panic("into_inner")
             }
         }
         Err(_) => panic("copy")
     }
     var m = from_bytes(b)
-    holds(said_bytes(m.read(300)) == "256 0 255", "read")
+    assert(said_bytes(m.read(300)) == "256 0 255", "read")
     var r = buffered(from_bytes(b))
     match r.read_to_end() {
-        Ok(s) => holds(s.len() == 256 && s[0] == 0u8 && s[255] == 255u8, "read_to_end")
+        Ok(s) => assert(s.len() == 256 && s[0] == 0u8 && s[255] == 255u8, "read_to_end")
         Err(_) => panic("read_to_end")
     }
 }
@@ -1151,13 +1145,13 @@ fun said_bytes(r: Result<[uint8], IoError>) -> str {
 // descriptor fails each operation.
 #test
 fun descriptors() {
-    holds(fd_stream(0).descriptor() == 0, "a descriptor stream's descriptor")
-    holds(stdin().descriptor() == 0, "stdin's descriptor")
-    holds(reader(5).descriptor() == 5, "a reader's descriptor")
+    assert(fd_stream(0).descriptor() == 0, "a descriptor stream's descriptor")
+    assert(stdin().descriptor() == 0, "stdin's descriptor")
+    assert(reader(5).descriptor() == 5, "a reader's descriptor")
     var bad = fd_stream(-1)
-    holds(shown(bad.read(4)) == "<error>", "a read of a bad descriptor fails")
-    holds(said(bad.write(bytes_of("x"))) == "Other(9)", "and a write")
-    holds(said(bad.seek(SeekFrom.Start(0))) == "Other(9)", "and a seek")
+    assert(shown(bad.read(4)) == "<error>", "a read of a bad descriptor fails")
+    assert(said(bad.write(bytes_of("x"))) == "Other(9)", "and a write")
+    assert(said(bad.seek(SeekFrom.Start(0))) == "Other(9)", "and a seek")
 }
 
 // A stream of its own implements `read` alone, or `write` and `flush` (D177),
@@ -1198,18 +1192,18 @@ impl Write for Tally {
 #test
 fun bytes_only_streams() {
     var r = buffered(Countdown { left: 10 })
-    holds(shown_line(r.read_exact(4)) == "9876", "read_exact over short reads")
-    holds(said(r.read_to_end()) == "543210", "and the rest")
-    holds(shown(read_all(Countdown { left: 5 })) == "43210", "read_all")
+    assert(shown_line(r.read_exact(4)) == "9876", "read_exact over short reads")
+    assert(said(r.read_to_end()) == "543210", "and the rest")
+    assert(shown(read_all(Countdown { left: 5 })) == "43210", "read_all")
     var w = buffered_writer_with(Tally { seen: 0, flushes: 0 }, 4)
-    holds(said(w.write_str("ab")) == "2", "write_str into the buffer")
-    holds(said(w.write(bytes_of("cdefg"))) == "5", "write past it")
+    assert(said(w.write_str("ab")) == "2", "write_str into the buffer")
+    assert(said(w.write(bytes_of("cdefg"))) == "5", "write past it")
     match w.into_inner() {
-        Ok(t) => holds(t.seen == 7 && t.flushes == 1, "every byte, flushed once")
+        Ok(t) => assert(t.seen == 7 && t.flushes == 1, "every byte, flushed once")
         Err(_) => panic("into_inner")
     }
     match copy(Countdown { left: 7 }, Tally { seen: 0, flushes: 0 }) {
-        Ok(t) => holds(t.seen == 7, "copy")
+        Ok(t) => assert(t.seen == 7, "copy")
         Err(_) => panic("copy")
     }
 }
@@ -1229,21 +1223,21 @@ fun buffered_over_short_reads() {
     for k in [1, 2, 3, 7, 64, 100000] {
         var r = buffered(short_reads(from_str(text), k))
         for w in want {
-            holds(shown_line(r.read_line()) == w, f"a line, {k} bytes a read")
+            assert(shown_line(r.read_line()) == w, f"a line, {k} bytes a read")
         }
         var e = buffered(short_reads(from_str("abcdefghij"), k))
-        holds(shown_line(e.read_exact(3)) == "abc", "three bytes")
-        holds(shown_line(e.read_exact(4)) == "defg", "four more")
-        holds(shown_line(e.read_exact(5)) == "<end>", "too few left")
-        holds(shown_line(e.read_exact(3)) == "hij", "which stay unread")
-        holds(shown_line(e.read_exact(1)) == "<end>", "the end")
+        assert(shown_line(e.read_exact(3)) == "abc", "three bytes")
+        assert(shown_line(e.read_exact(4)) == "defg", "four more")
+        assert(shown_line(e.read_exact(5)) == "<end>", "too few left")
+        assert(shown_line(e.read_exact(3)) == "hij", "which stay unread")
+        assert(shown_line(e.read_exact(1)) == "<end>", "the end")
     }
     var s = short_reads(from_str("abcdef"), 4)
-    holds(shown(s.read(10)) == "abcd", "at most four bytes a read")
-    holds(shown(s.read(1)) == "e", "fewer if asked")
-    holds(s.into_inner().position() == 5i64, "into_inner")
+    assert(shown(s.read(10)) == "abcd", "at most four bytes a read")
+    assert(shown(s.read(1)) == "e", "fewer if asked")
+    assert(s.into_inner().position() == 5i64, "into_inner")
     var one = short_reads(from_str("ab"), 0)
-    holds(shown(one.read(5)) == "a", "at least one byte a read")
+    assert(shown(one.read(5)) == "a", "at least one byte a read")
 }
 
 // A stream that gives one of `parts` a read, and fails for a part "!".
@@ -1267,12 +1261,12 @@ impl Read for Hiccup {
 #test
 fun buffered_failed_read_keeps_bytes() {
     var r = buffered(Hiccup { parts: ["ab", "cd", "!", "ef\ngh", "!", "ij"], at: 0 })
-    holds(shown_line(r.read_line()) == "<error>", "the read fails")
-    holds(shown_line(r.read_line()) == "abcdef", "the line read before it is kept")
-    holds(shown_line(r.read_exact(3)) == "<error>", "a read fails again")
-    holds(shown_line(r.read_exact(3)) == "ghi", "the bytes before it are kept")
-    holds(shown_line(r.read_line()) == "j", "the rest")
-    holds(shown_line(r.read_line()) == "<end>", "the end")
+    assert(shown_line(r.read_line()) == "<error>", "the read fails")
+    assert(shown_line(r.read_line()) == "abcdef", "the line read before it is kept")
+    assert(shown_line(r.read_exact(3)) == "<error>", "a read fails again")
+    assert(shown_line(r.read_exact(3)) == "ghi", "the bytes before it are kept")
+    assert(shown_line(r.read_line()) == "j", "the rest")
+    assert(shown_line(r.read_line()) == "<end>", "the end")
 }
 
 // Offsets and lengths a memory stream can't hold are errors, not overflow
@@ -1280,9 +1274,9 @@ fun buffered_failed_read_keeps_bytes() {
 #test
 fun memory_limits() {
     var m = from_str("abc")
-    holds(said(m.seek(SeekFrom.Current(9223372036854775807))) == "InvalidInput", "far past the end")
-    holds(said(m.seek(SeekFrom.Start(-9223372036854775807 - 1))) == "InvalidInput", "far before the start")
-    holds(said(m.seek(SeekFrom.Start(2147483647))) == "2147483647", "the last offset")
-    holds(said(m.write(bytes_of("x"))) == "Other(27)", "a write past it")
-    holds(m.bytes().len() == 3, "which changes nothing")
+    assert(said(m.seek(SeekFrom.Current(9223372036854775807))) == "InvalidInput", "far past the end")
+    assert(said(m.seek(SeekFrom.Start(-9223372036854775807 - 1))) == "InvalidInput", "far before the start")
+    assert(said(m.seek(SeekFrom.Start(2147483647))) == "2147483647", "the last offset")
+    assert(said(m.write(bytes_of("x"))) == "Other(27)", "a write past it")
+    assert(m.bytes().len() == 3, "which changes nothing")
 }

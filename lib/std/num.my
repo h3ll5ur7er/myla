@@ -829,7 +829,8 @@ impl Format for ParseIntError {
 }
 
 // The value of the digit `c` in a radix up to 36, letters in either case;
-// 36 for a byte that is no digit.
+// 36 for a byte that is no digit. Not std.char's `to_digit`: a call and an
+// `Option` a digit took `parse_uint64` 70 % longer (MYLA-428).
 #test('7')[7u64]
 #test('a')[10u64]
 #test('Z')[35u64]

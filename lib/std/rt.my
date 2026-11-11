@@ -157,39 +157,6 @@ pub fun str_eq(a: str, b: str) -> bool {
     return __equal_bytes(pa + 8, pb + 8, n)
 }
 
-// Whether `a * b` doesn't fit an `int64`: a checked build's `*` at 64 bits
-// (D175), where no wider type holds the product. By division (CERT INT32-C),
-// which can't overflow itself.
-#test(3037000499i64, 3037000499)[false]
-#test(3037000500i64, 3037000500)[true]
-#test(-1i64, -9223372036854775807 - 1)[true]
-#test(-9223372036854775807i64 - 1, 1)[false]
-#test(-3037000500i64, 3037000500)[true]
-#test(-4611686018427387904i64, 2)[false]
-#test(-4611686018427387904i64, -2)[true]
-#test(0i64, -9223372036854775807 - 1)[false]
-pub fun mul_overflows_i64(a: int64, b: int64) -> bool {
-    let max: int64 = 9223372036854775807
-    let min: int64 = -9223372036854775807 - 1
-    if a > 0 {
-        return if b > 0 { a > max / b } else { b < min / a }
-    }
-    if b > 0 {
-        return a < min / b
-    }
-    return a != 0 && b < max / a
-}
-
-// Whether `a * b` doesn't fit a `uint64` (D175, as `mul_overflows_i64`).
-#test(4294967296u64, 4294967295)[false]
-#test(4294967296u64, 4294967296)[true]
-#test(0u64, 18446744073709551615)[false]
-#test(18446744073709551615u64, 1)[false]
-#test(18446744073709551615u64, 2)[true]
-pub fun mul_overflows_u64(a: uint64, b: uint64) -> bool {
-    return b != 0 && a > 18446744073709551615 / b
-}
-
 // `a < b` and the other orderings of strings (MYLA-318): -1, 0 or 1, as
 // `Ord`'s `cmp` gives them, by the first byte that differs (unsigned), or
 // the shorter first when one begins the other; the order `list_dir` sorts
@@ -1645,6 +1612,10 @@ pub fun str_chars(s: str) -> [char] {
 // when it reaches 3/4 of the capacity, `map_put_slot` compacts the table:
 // tombstones dropped, ranks renumbered 0 … count - 1, the capacity the
 // smallest that leaves it at most half full (so it grows, stays or shrinks).
+// A removal from a map with fewer keys than an eighth of its capacity
+// compacts it the same way (`map_shrink`, MYLA-429), so a map emptied by
+// removals shrinks, and walking it costs its keys, not the capacity it once
+// had.
 
 const PHI: int64 = -7046029254386353131  // 2^64 / the golden ratio
 
@@ -1802,16 +1773,35 @@ pub fun map_put_slot(holder: int64, key: int64, slot_size: int64, is_str: int64)
     var cell = __load64(holder)
     let cap = __load64(cell + 8)
     if cap == 0 || (__load64(map_next_rank(cell, slot_size)) + 1) * 4 >= cap * 3 {
-        // at most half full once compacted, the key to come counted
-        let count = __load64(cell)
-        var fit: int64 = 8
-        while (count + 1) * 2 > fit {
-            fit = fit * 2
-        }
-        cell = map_rehash(cell, slot_size, is_str, fit)
+        cell = map_rehash(cell, slot_size, is_str, map_fit(__load64(cell)))
         __store64(holder, cell)
     }
     return map_set_slot(cell, key, slot_size, is_str)
+}
+
+// The capacity a map of `count` keys is compacted to: the smallest power of
+// two, at least 8, that leaves it at most half full with one key more.
+fun map_fit(count: int64) -> int64 {
+    var fit: int64 = 8
+    while (count + 1) * 2 > fit {
+        fit = fit * 2
+    }
+    return fit
+}
+
+// `remove`'s compaction (`__map_shrink`, MYLA-429): the map at `holder`,
+// which had fewer keys than an eighth of its capacity when a key was removed,
+// compacted into the capacity `map_fit` gives (the new cell stored back), so
+// a walk over it and the operations after cost its live keys, not the
+// capacity it once needed. Each compaction is paid for by the keys removed
+// since the last (about an eighth of the capacity at least), so a removal
+// stays amortised O(1).
+pub fun map_shrink(holder: int64, slot_size: int64, is_str: int64) {
+    let cell = __load64(holder)
+    let fit = map_fit(__load64(cell))
+    if fit < __load64(cell + 8) {
+        __store64(holder, map_rehash(cell, slot_size, is_str, fit))
+    }
 }
 
 // The keys and values of the map `cell` moved into a new one of `cap` slots,
@@ -2001,15 +1991,19 @@ pub fun map_slot_h(holder: int64, h: int64, slot_size: int64) -> int64 {
     var cell = __load64(holder)
     let cap = __load64(cell + 8)
     if cap == 0 || (__load64(map_next_rank(cell, slot_size)) + 1) * 4 >= cap * 3 {
-        let count = __load64(cell)
-        var fit: int64 = 8
-        while (count + 1) * 2 > fit {
-            fit = fit * 2
-        }
-        cell = map_rehash_h(cell, slot_size, fit)
+        cell = map_rehash_h(cell, slot_size, map_fit(__load64(cell)))
         __store64(holder, cell)
     }
     return map_place_h(cell, h, slot_size)
+}
+
+// `map_shrink` of a map with compound keys (`__map_shrink_h`).
+pub fun map_shrink_h(holder: int64, slot_size: int64) {
+    let cell = __load64(holder)
+    let fit = map_fit(__load64(cell))
+    if fit < __load64(cell + 8) {
+        __store64(holder, map_rehash_h(cell, slot_size, fit))
+    }
 }
 
 // `map_slot_h`'s slot in the map `cell`, which has room.

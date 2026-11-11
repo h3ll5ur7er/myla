@@ -7,7 +7,7 @@
 // runtime needs (integer widths, print/format rendering, casts) comes from the
 // checker's `resolved` side table, keyed by AST node id.
 
-from .ast import Expr, ExprKind, Stmt, StmtKind, Block, Decl, DeclKind, FunData, Param, MatchArm, Pattern, PatternKind, FieldPat, BindElem, ExprOrBlock, ElseTail, FieldInit, MapEntry, Attribute, TypeExpr, TypeKind, TypeParam, bind_elems, names_in_expr, names_in_block, Expected, expected_failure
+from .ast import Expr, ExprKind, Stmt, StmtKind, Block, Decl, DeclKind, FunData, Param, MatchArm, Pattern, PatternKind, FieldPat, BindElem, ExprOrBlock, ElseTail, FieldInit, MapEntry, Attribute, TypeExpr, TypeKind, TypeParam, bind_elems, names_in_expr, names_in_block, Expected, expected_failure, is_unread_body
 from .tokens import SrcSpan, no_span
 from .checker import is_notify_primitive
 from .checker import Checker, Type, Subst, subst_type, subst_get, unify_param, type_name, is_raw_memory_primitive, is_net_primitive, is_term_primitive, checker_on, builtin_method, builtin_method_name, is_wrapping_method, add_overflows, sub_overflows, mul_overflows, int_min, int_neg_overflows, shift_out_of_range, is_slice_expr, from_end_of, slice_parts, is_hole_part
@@ -1301,7 +1301,11 @@ impl Interp {
 
     fun exec_block_body(var self, body: Option<Block>) {
         match body {
-            Some(b) => { self.exec_block(b) },
+            Some(b) => {
+                // a library's body the checker never read (D179, MYLA-432)
+                if is_unread_body(b) { panic(format("internal error: a function whose body was never read was called, at {}:{}", b.line, b.col)) }
+                self.exec_block(b)
+            },
             None => {},
         }
     }

@@ -28,9 +28,8 @@
 // after an optional one, `many` with commands) is a panic where it is built,
 // a mistake in the program as an undeclared name is.
 
-// std.str isn't imported: its cases would run as this module's (MYLA-360);
-// the one string helper needed is at the end.
 import std.map as map_m // `m.get(k)`
+import std.str as str_m // `find`, `contains`
 import std.option as option_m
 from std.io import println, eprintln
 from std.process import exit
@@ -178,7 +177,7 @@ impl Spec {
         if name == "" {
             panic("args: an argument's name must not be empty")
         }
-        if name[0] == '-' || find_byte(name, '=') >= 0 {
+        if name[0] == '-' || name.contains("=") {
             panic(f"args: the name '{name}' must not start with '-' or hold '='")
         }
         var taken = long_index(self, name) >= 0
@@ -417,8 +416,7 @@ fun parse_from(s: Spec, argv: [str], start: int) -> Result<Args, (ArgsError, str
             // --name, --name=value, --name value
             var name = arg[2:]
             var value: Option<str> = None
-            let eq = find_byte(name, '=')
-            if eq >= 0 {
+            if let Some(eq) = name.find("=") {
                 value = Some(name[eq + 1:])
                 name = name[:eq]
             }
@@ -604,21 +602,6 @@ pub fun parse_or_exit(s: Spec, argv: [str]) -> Args {
         },
     }
     unreachable()
-}
-
-// The index of the first byte `b` in `s`, or -1.
-#test("a=b", '=')[1]
-#test("ab", '=')[-1]
-#test("", '=')[-1]
-fun find_byte(s: str, b: char) -> int {
-    var i = 0
-    while i < s.len() {
-        if s[i] == (b as uint8) {
-            return i
-        }
-        i += 1
-    }
-    return -1
 }
 
 // --- tests -------------------------------------------------------------------

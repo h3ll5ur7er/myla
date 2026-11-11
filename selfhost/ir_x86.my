@@ -248,7 +248,10 @@ impl CodeGen {
             var i = 0
             while i < stop {
                 let shift = match insts[i] { Inst.Bin(d, op, lt, rt, x, y, pos) => op == "<<", _ => false }
-                if shift && i + 2 < stop && i + 2 != fused && self.emit_scaled(f, insts[i], insts[i + 1], insts[i + 2], temp_base) { i = i + 3 }
+                var checked = 0
+                if !shift && i + 2 < stop && i + 2 != fused { checked = self.emit_checked_op(insts, i, if i + 3 != fused { stop } else { i + 3 }, temp_base) }
+                if checked > 0 { i = i + checked }
+                else if shift && i + 2 < stop && i + 2 != fused && self.emit_scaled(f, insts[i], insts[i + 1], insts[i + 2], temp_base) { i = i + 3 }
                 else if i + 1 < stop && i + 1 != fused && self.emit_pair(f, insts[i], insts[i + 1], temp_base) { i = i + 2 }
                 else {
                     if i != fused { self.emit_inst(f, insts[i], slot_off, temp_base) }
@@ -496,7 +499,8 @@ impl CodeGen {
     // The registers each uses besides its operands' (MYLA-294): `sqrt`,
     // `f64_round` %rax and %xmm0; `f64_bits`, `f64_from_bits`, `rt_addr`,
     // the atomics but `cas64`, `rc_inc`, `rc_dec` and `bsr64` %rax; `cas64`
-    // %rax and %rdx; `rt_waddr` and `rotl` %rax and %rcx; `unique` %rcx and
+    // %rax and %rdx; `rt_waddr`, `rotl` and `fits` %rax and %rcx (and %rdx,
+    // `fits` of an unsigned `*`); `unique` %rcx and
     // its clone's call; `run_frame` %rax, %rdi and %r11 and the call;
     // `call_code` %rdi and %r11 and the call. None of %rax, %rcx, %rdx and
     // %xmm0 is one the allocator hands out (`alloc_regs`), and the three
@@ -629,6 +633,14 @@ impl CodeGen {
                 self.load_temp(args[0], "r11", temp_base)
                 self.load_temp(args[1], "rdi", temp_base)
                 self.emit("call *%r11")
+                self.store_temp(d, temp_base)
+            },
+            // whether a 64-bit `+`, `-` or `*` fits (MYLA-430): the
+            // operation again in %rax, and its overflow or carry flag
+            Intrinsic.Fits(o, signed) => {
+                let flag = self.emit_flagged_op(o, signed, args[0], args[1], temp_base)
+                self.emit(format("setn{} %al", flag))
+                self.emit("movzbl %al, %eax")
                 self.store_temp(d, temp_base)
             },
             Intrinsic.Bsr64 => {
@@ -1318,6 +1330,152 @@ impl CodeGen {
         return false
     }
 
+    // `ok = fits op (x, y)` that only the `check ok overflow` after it reads
+    // (D175's checked build, MYLA-430): the operation in %rax, its result
+    // unused, and a jump over the trap on its flag. False for any other pair.
+    fun emit_fits_check(var self, a: Inst, b: Inst, temp_base: int32) -> bool {
+        match a {
+            Inst.Intr(ok, op, args) => {
+                match op {
+                    Intrinsic.Fits(o, signed) => {
+                        if !self.only_check_reads(ok, b) { return false }
+                        let flag = self.emit_flagged_op(o, signed, args[0], args[1], temp_base)
+                        self.emit_trap_on_flag(flag, b)
+                        return true
+                    },
+                    _ => {},
+                }
+            },
+            _ => {},
+        }
+        return false
+    }
+
+    // `ok = fits op (x, y)`, the `check ok overflow` that alone reads it and
+    // `d = x op y` at `i` (the lowering's checked `+`, `-` and `*` on 64-bit
+    // integers, MYLA-430): the operation once and a jump over the trap on
+    // its overflow or carry flag. In place, as the plain operation is, where
+    // `d`'s register holds an operand already (`emit_bin_in_reg`), or where
+    // only a store into a variable living in the register of `x` (or, the
+    // order not mattering, of `y`) reads `d` (`emit_in_place`), the store
+    // included; else in %rax. How many instructions it took: 4, 3, or 0 for
+    // any other sequence (nothing emitted).
+    fun emit_checked_op(var self, insts: [Inst], i: int32, stop: int32, temp_base: int32) -> int32 {
+        var op = ""
+        var signed = false
+        var ok = -1
+        var args: [int32] = []
+        match insts[i] {
+            Inst.Intr(t, fop, xs) => {
+                match fop {
+                    Intrinsic.Fits(o, sg) => {
+                        op = o
+                        signed = sg
+                        ok = t
+                        args = xs
+                    },
+                    _ => { return 0 },
+                }
+            },
+            _ => { return 0 },
+        }
+        if !self.only_check_reads(ok, insts[i + 1]) { return 0 }
+        return match insts[i + 2] {
+            Inst.Bin(d, bop, lt, rt, x, y, pos) => {
+                if bop != op || x != args[0] || y != args[1] { return 0 }
+                // the operands read once here, not twice: one just computed
+                // in %rax needn't be stored
+                self.temp_uses[x] -= 1
+                self.temp_uses[y] -= 1
+                var n = 3
+                var reg = ""
+                if !(op == "*" && !signed) {
+                    if i + 3 < stop { reg = self.stored_in_reg(d, insts[i + 3]) }
+                    if reg != "" { n = 4 }
+                    else if self.temp_reg[d] != "" && self.temp_uses[d] > 0 && !text_has_xmm("%" + self.temp_reg[d]) { reg = "%" + self.temp_reg[d] }
+                }
+                var other = -1
+                if reg != "" && self.reg_of(x) == reg { other = y }
+                else if reg != "" && op != "-" && self.reg_of(y) == reg { other = x }
+                if other >= 0 {
+                    let src = self.second_operand(op, other, temp_base)
+                    if op == "+" { self.emit(format("addq {}, {}", src, reg)) }
+                    else if op == "-" { self.emit(format("subq {}, {}", src, reg)) }
+                    else if is_immediate(src) { self.emit(format("imulq {}, {}, {}", src, reg, reg)) }
+                    else { self.emit(format("imulq {}, {}", src, reg)) }
+                    self.emit_trap_on_flag(if signed || op == "*" { "o" } else { "c" }, insts[i + 1])
+                    return n
+                }
+                let flag = self.emit_flagged_op(op, signed, x, y, temp_base)
+                self.emit_trap_on_flag(flag, insts[i + 1])
+                self.store_temp(d, temp_base)
+                3
+            },
+            _ => 0,
+        }
+    }
+
+    // The register of the variable `s` when `st` is `store [$s], %d`, the
+    // only reader of `d`, and `s` lives in a general register; else "".
+    fun stored_in_reg(self, d: int32, st: Inst) -> str {
+        if self.temp_uses[d] != 1 { return "" }
+        return match st {
+            Inst.Store(s, v) => if v == d && self.slot_reg[s] != "" && !text_has_xmm("%" + self.slot_reg[s]) { "%" + self.slot_reg[s] } else { "" }
+            _ => ""
+        }
+    }
+
+    // Whether `c` is `check ok overflow` and the only reader of `ok`.
+    fun only_check_reads(self, ok: int32, c: Inst) -> bool {
+        return match c {
+            Inst.Check(v, kind, p) => v == ok && kind == "overflow" && self.temp_uses[ok] == 1
+            _ => false
+        }
+    }
+
+    // The 64-bit `x op y` (`+`, `-` or `*`) into %rax, setting the flag
+    // its overflow sets: `o` (signed; an unsigned `*`, `mulq`, whose high
+    // half in %rdx isn't 0) or `c` (an unsigned `+` or `-`) (MYLA-430). The
+    // operands as the plain operation takes them (`second_operand`).
+    fun emit_flagged_op(var self, op: str, signed: bool, x: int32, y: int32, temp_base: int32) -> str {
+        var src = ""
+        if self.swap_operands(op, x, y) {
+            self.load_temp(y, "rax", temp_base)
+            src = self.second_operand(op, x, temp_base)
+        } else {
+            self.load_temp(x, "rax", temp_base)
+            src = self.second_operand(op, y, temp_base)
+        }
+        if op == "*" && !signed {
+            if is_immediate(src) {
+                self.emit(format("movq {}, %rcx", src))
+                src = "%rcx"
+            }
+            self.emit("mulq " + src)
+            return "o"
+        }
+        if op == "+" { self.emit(format("addq {}, %rax", src)) }
+        else if op == "-" { self.emit(format("subq {}, %rax", src)) }
+        else if is_immediate(src) { self.emit(format("imulq {}, %rax, %rax", src)) }
+        else { self.emit(format("imulq {}, %rax", src)) }
+        return if signed { "o" } else { "c" }
+    }
+
+    // A jump over the trap of the `check` `c` when the flag (`o` or `c`)
+    // is clear: the trap call takes the position, %rax keeps the result.
+    fun emit_trap_on_flag(var self, flag: str, c: Inst) {
+        match c {
+            Inst.Check(v, kind, p) => {
+                let ok = self.label()
+                self.emit(format("jn{} {}", flag, ok))
+                self.load_position(p.line, p.col, "rsi")
+                self.emit(format("call __trap_{}", kind))
+                self.emit(format("{}:", ok))
+            },
+            _ => {},
+        }
+    }
+
     // A block's terminator; `next` is the block emitted after it (-1: none),
     // which a jump to it can fall through to.
     fun emit_term(var self, t: Term, labels: [str], next: int32, temp_base: int32) {
@@ -1515,6 +1673,7 @@ impl CodeGen {
             Inst.Elem(e, c, i, stride, is_str, checked, p) => self.emit_elem_load(f, a, b, temp_base),
             Inst.Bin(d, op, lt, rt, x, y, pos) => self.emit_add_load(f, a, b, temp_base) || self.emit_in_place(a, b, temp_base),
             Inst.Cmp(d, op, t, x, y) => self.emit_compare_check(a, b, temp_base),
+            Inst.Intr(d, op, args) => self.emit_fits_check(a, b, temp_base),
             _ => false,
         }
     }
@@ -3239,6 +3398,7 @@ fun writes_no_slot(inst: Inst) -> bool {
         Inst.Intr(d, op, args) => match op {
             Intrinsic.Rotl | Intrinsic.Bsr64 | Intrinsic.Sqrt | Intrinsic.F64Bits | Intrinsic.F64FromBits | Intrinsic.F64Round => true
             Intrinsic.RtAddr(sym) | Intrinsic.RtWaddr(sym) => true
+            Intrinsic.Fits(o, signed) => true
             _ => false
         }
         _ => false
@@ -3737,6 +3897,13 @@ fun ends_with_colon(s: str) -> bool {
 fun has_index(xs: [int32], x: int32) -> bool {
     for y in xs { if y == x { return true } }
     return false
+}
+
+// Whether the operand text is an immediate (`$5`).
+#test("$-3")[true]
+#test("%rcx")[false]
+fun is_immediate(src: str) -> bool {
+    return src.len() > 0 && src[0] == '$'
 }
 
 // Whether `t` is a 64-bit integer type.

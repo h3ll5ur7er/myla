@@ -178,11 +178,11 @@ fun digits_round_trip() {
             match from_digit(d, radix) {
                 Some(c) => {
                     match c.to_digit(radix) {
-                        Some(back) => holds(back == d, f"digit {d} of radix {radix} read back as {back}")
+                        Some(back) => assert(back == d, f"digit {d} of radix {radix} read back as {back}")
                         None => panic(f"digit {d} of radix {radix} didn't read back")
                     }
                     match c.to_upper().to_digit(radix) {
-                        Some(back) => holds(back == d, f"upper-case digit {d} of radix {radix} read back as {back}")
+                        Some(back) => assert(back == d, f"upper-case digit {d} of radix {radix} read back as {back}")
                         None => panic(f"upper-case digit {d} of radix {radix} didn't read back")
                     }
                 }
@@ -201,29 +201,20 @@ fun classes_agree() {
     var n = 0
     while n < 300 {
         let c = n as char
-        holds(c.is_alpha() == (c.is_upper() || c.is_lower()), f"is_alpha of {n}")
-        holds(c.is_alnum() == (c.is_alpha() || c.is_digit()), f"is_alnum of {n}")
-        holds(!(c.is_upper() && c.is_lower()), f"upper and lower at {n}")
-        holds(!(c.is_space() && c.is_alnum()), f"space and alnum at {n}")
+        assert(c.is_alpha() == (c.is_upper() || c.is_lower()), f"is_alpha of {n}")
+        assert(c.is_alnum() == (c.is_alpha() || c.is_digit()), f"is_alnum of {n}")
+        assert(!(c.is_upper() && c.is_lower()), f"upper and lower at {n}")
+        assert(!(c.is_space() && c.is_alnum()), f"space and alnum at {n}")
         if c.is_upper() {
-            holds(c.to_lower().is_lower() && c.to_lower().to_upper() == c, f"case of {n}")
+            assert(c.to_lower().is_lower() && c.to_lower().to_upper() == c, f"case of {n}")
         } else if c.is_lower() {
-            holds(c.to_upper().is_upper() && c.to_upper().to_lower() == c, f"case of {n}")
+            assert(c.to_upper().is_upper() && c.to_upper().to_lower() == c, f"case of {n}")
         } else {
-            holds(c.to_upper() == c && c.to_lower() == c, f"case of {n}")
+            assert(c.to_upper() == c && c.to_lower() == c, f"case of {n}")
         }
         if n > 127 {
-            holds(!c.is_alnum() && !c.is_space(), f"{n} is above ASCII")
+            assert(!c.is_alnum() && !c.is_space(), f"{n} is above ASCII")
         }
         n += 1
-    }
-}
-
-// The test functions' assertion: `assert(ok, f"…")` doesn't compile
-// natively yet (an IR verifier error on the f-string message), a function
-// call with one does.
-fun holds(ok: bool, what: str) {
-    if !ok {
-        panic(what)
     }
 }

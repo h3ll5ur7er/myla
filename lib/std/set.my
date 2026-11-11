@@ -139,19 +139,6 @@ impl<T: Eq + Hash> Eq for Set<T> {
 // The functions are generic, which a `#test` case can't take (D116), so the
 // tests are test functions (D162).
 
-// Whether `xs` and `ys` hold the same elements in the same order.
-fun same<T: Eq>(xs: [T], ys: [T]) -> bool {
-    if xs.len() != ys.len() {
-        return false
-    }
-    for i in 0..xs.len() {
-        if xs[i] != ys[i] {
-            return false
-        }
-    }
-    return true
-}
-
 #test
 fun insert_remove_contains() {
     var s: Set<str> = new()
@@ -165,7 +152,7 @@ fun insert_remove_contains() {
     assert(!s.remove("pear"), "removing it again")
     assert(!s.remove("lime"), "removing what was never there")
     assert(!s.contains("pear") && s.len() == 1, "after the removal")
-    assert(same(s.items(), ["fig"]), "the one left")
+    assert(s.items() == ["fig"], "the one left")
 }
 
 #test
@@ -174,11 +161,11 @@ fun insertion_order() {
     for x in [5, 3, 9, 3, 1, 5] {
         s.insert(x)
     }
-    assert(same(s.items(), [5, 3, 9, 1]), "first insertion decides")
+    assert(s.items() == [5, 3, 9, 1], "first insertion decides")
     s.remove(3)
     s.insert(3)
-    assert(same(s.items(), [5, 9, 1, 3]), "removed and inserted again goes last")
-    assert(same(of(['b', 'a', 'b', 'c']).items(), ['b', 'a', 'c']), "of keeps the first of each")
+    assert(s.items() == [5, 9, 1, 3], "removed and inserted again goes last")
+    assert(of(['b', 'a', 'b', 'c']).items() == ['b', 'a', 'c'], "of keeps the first of each")
     let e: Set<bool> = of([])
     assert(e.is_empty(), "of an empty list")
 }
@@ -187,13 +174,13 @@ fun insertion_order() {
 fun set_algebra() {
     let a: Set<int> = of([1, 2, 3, 4])
     let b: Set<int> = of([6, 4, 2])
-    assert(same(a.union(b).items(), [1, 2, 3, 4, 6]), "union")
-    assert(same(b.union(a).items(), [6, 4, 2, 1, 3]), "union from the other side")
-    assert(same(a.intersection(b).items(), [2, 4]), "intersection")
-    assert(same(b.intersection(a).items(), [4, 2]), "intersection in the receiver's order")
-    assert(same(a.difference(b).items(), [1, 3]), "difference")
-    assert(same(b.difference(a).items(), [6]), "difference the other way")
-    assert(same(a.items(), [1, 2, 3, 4]) && same(b.items(), [6, 4, 2]), "the operands are unchanged")
+    assert(a.union(b).items() == [1, 2, 3, 4, 6], "union")
+    assert(b.union(a).items() == [6, 4, 2, 1, 3], "union from the other side")
+    assert(a.intersection(b).items() == [2, 4], "intersection")
+    assert(b.intersection(a).items() == [4, 2], "intersection in the receiver's order")
+    assert(a.difference(b).items() == [1, 3], "difference")
+    assert(b.difference(a).items() == [6], "difference the other way")
+    assert(a.items() == [1, 2, 3, 4] && b.items() == [6, 4, 2], "the operands are unchanged")
     let e: Set<int> = new()
     assert(a.union(e).len() == 4 && a.intersection(e).is_empty(), "with the empty set")
     assert(e.is_subset(a) && e.is_subset(e), "the empty set is a subset of all")
@@ -249,7 +236,7 @@ fun iterating() {
     for x in s.iter() {
         seen.push(x)
     }
-    assert(same(seen, ["pear", "lime", "kiwi"]), "insertion order")
+    assert(seen == ["pear", "lime", "kiwi"], "insertion order")
     var it = s.iter()
     assert(it.next() == Some("pear"), "the first")
     var copy = it
@@ -259,7 +246,7 @@ fun iterating() {
     for x in it {
         rest.push(x)
     }
-    assert(same(rest, ["kiwi"]), "an iterator holds the set as it was")
+    assert(rest == ["kiwi"], "an iterator holds the set as it was")
     let e: Set<int> = new()
     var none = e.iter()
     assert(none.next() == None, "an empty set")

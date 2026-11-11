@@ -30,7 +30,8 @@ from .stdroot import is_embedded, embedded_text, EMBEDDED_ROOT
 from .parser import parse_source_with, parse_source_lazy, parse_body, BodySite, LazyParsed, expr_of, stmt_of, type_expr_of, block_of, pattern_of, fun_of
 from .diag import Report, reports, type_report, chain
 from .checker import CheckErr, DeclOrigin, LazyBodies, body_key, no_lazy_bodies
-from .tokens import SrcSpan, no_span, keywords
+from .tokens import SrcSpan, no_span, keywords, TokenKind
+from .lexer import lex_part
 from .ast import Program, Decl, DeclKind, FunData, Param, TypeParam, Field, Variant
 from .ast import ImportPath, ImportItem, TypeExpr, TypeKind, Expr, ExprKind, FieldInit
 from .ast import MapEntry, Stmt, StmtKind, Block, ElseTail, BindElem, ExprOrBlock, Attribute
@@ -219,7 +220,7 @@ struct Loader {
     next_id: int32,
     spans: [Span],
     overrides: [str: str],     // path -> text used instead of the file (an editor's unsaved buffers)
-    lazy: [str: bool],         // the files whose functions' bodies are left unparsed: the implicit modules' (MYLA-359)
+    lazy: [str: bool],         // the files whose functions' bodies are left unparsed: the implicit modules' (MYLA-359), besides `lazy_std`'s
 }
 
 // The modules of the standard library every program sees without an import
@@ -810,9 +811,10 @@ impl Loader {
     // importing std.int, with 2,042, costs nothing for them (MYLA-320,
     // MYLA-396). An implicit module's functions' bodies are left for the
     // checker to read once it needs one (MYLA-359): most of their text,
-    // which a program calls little of.
+    // which a program calls little of; so are those of every other module
+    // of the standard library it imports (`lazy_std`, MYLA-413).
     fun parse_module(self, path: str, src: str) -> Result<LazyParsed, Report> {
-        if self.lazy.contains(path) {
+        if self.lazy.contains(path) || self.lazy_std(path) {
             return match parse_source_lazy(src, self.next_id) {
                 Ok(lp) => Ok(lp),
                 Err(ds) => Err(reports(ds, path)),
@@ -822,6 +824,20 @@ impl Loader {
             Ok(x) => Ok(LazyParsed { parsed: x, cps: [], sites: [] }),
             Err(ds) => Err(reports(ds, path)),
         }
+    }
+
+    // Whether `path` is a module of the standard library whose functions'
+    // bodies are read once called (D179): every one but the entry and
+    // std.rt, whose functions the back ends call by the primitives they
+    // replace (MYLA-413). A program's own modules are read whole.
+    #test(Loader { stdlib_root: "/l", project_root: "/p", packages: [], entry: "/p/a.my", modules: [], next_id: 0, spans: [], overrides: [:], lazy: [:] }, "/l/std/fs.my")[true]
+    #test(Loader { stdlib_root: "/l", project_root: "/p", packages: [], entry: "/p/a.my", modules: [], next_id: 0, spans: [], overrides: [:], lazy: [:] }, "/l/std/rt.my")[false]
+    #test(Loader { stdlib_root: "/l", project_root: "/p", packages: [], entry: "/p/a.my", modules: [], next_id: 0, spans: [], overrides: [:], lazy: [:] }, "/p/b.my")[false]
+    #test(Loader { stdlib_root: "/l", project_root: "/l", packages: [], entry: "/l/std/fs.my", modules: [], next_id: 0, spans: [], overrides: [:], lazy: [:] }, "/l/std/fs.my")[false]
+    fun lazy_std(self, path: str) -> bool {
+        if path == self.entry { return false }
+        let id = self.module_id(path)
+        return starts_with_text(id, "std$") && id != "std$rt"
     }
 
     // Load `path` and its imports (depth first) once each; its module index.
@@ -1872,12 +1888,16 @@ pub fun load_program_opts(entry: str, opts: LoadOptions) -> Result<Loaded, Repor
         // are named as the entry's own (`str.bang`), so its cases would run
         // as the entry's (MYLA-360)
         let tested = m.path == ld.entry
+        // its functions' bodies may wait until called (D179): every module
+        // of `std` but the entry and std.rt, which the back ends call by
+        // the primitives it replaces (MYLA-432)
+        let may_wait = in_std && !tested && m.id != "std$rt"
         for d in m.decls {
-            if in_std && is_impl(d) { std_impls[d.id] = DeclOrigin { module: dotted_id(m.id), path: m.path, implicit: is_implicit } }
-            // an implicit module's functions too: the checker checks their
-            // bodies only once called (MYLA-359)
-            if is_implicit && is_fun(d) { std_impls[d.id] = DeclOrigin { module: dotted_id(m.id), path: m.path, implicit: true } }
-            if entry_std != "" && tested && is_fun(d) { std_impls[d.id] = DeclOrigin { module: entry_std, path: m.path, implicit: false } }
+            if in_std && is_impl(d) { std_impls[d.id] = DeclOrigin { module: dotted_id(m.id), path: m.path, implicit: is_implicit, lazy: may_wait } }
+            // a module's functions too: the checker checks an implicit
+            // module's bodies only once called (MYLA-359)
+            if may_wait && is_fun(d) { std_impls[d.id] = DeclOrigin { module: dotted_id(m.id), path: m.path, implicit: is_implicit, lazy: true } }
+            if entry_std != "" && tested && is_fun(d) { std_impls[d.id] = DeclOrigin { module: entry_std, path: m.path, implicit: false, lazy: false } }
             decls.push(r.decl(d, m.id))
         }
         match r.err { Some(e) => { return Err(e) }, None => {} }
@@ -1885,7 +1905,10 @@ pub fun load_program_opts(entry: str, opts: LoadOptions) -> Result<Loaded, Repor
     var bodies = no_lazy_bodies()
     if lazy.bodies.len() > 0 {
         let table = lazy
-        bodies = LazyBodies { ids: lazy_ids, keys: lazy.keys, parse: (key: int64) => table.read(key) }
+        // a native build has tasks where an `async let` is in any body
+        // loaded, read or not, as when every body was read (D90, MYLA-413)
+        let tasks = if opts.runtime { lazy.task_line() } else { 0 }
+        bodies = LazyBodies { ids: lazy_ids, keys: lazy.keys, parse: (key: int64) => table.read(key), task_line: tasks }
     }
     return Ok(Loaded { decls: decls, next_id: ld.next_id, spans: ld.spans, std_impls: std_impls, bodies: bodies })
 }
@@ -1932,6 +1955,16 @@ impl LazyTable {
         return found
     }
 
+    // The line of an `async let` in a body left unread, 0 if none has one.
+    fun task_line(self) -> int32 {
+        for key in self.bodies.keys() {
+            let lb = self.bodies[key]
+            let at = async_let_in(self.cps[lb.module], lb.site)
+            if at > 0 { return at }
+        }
+        return 0
+    }
+
     // Record the body of `fd` if it is the one at `site`.
     fun add_fun(var self, k: int32, site: BodySite, id: int32, fd: FunData, receiver: bool, impl_params: [TypeParam]) -> bool {
         match fd.body {
@@ -1976,6 +2009,33 @@ impl LazyTable {
             None => Ok(renamed),
         }
     }
+}
+
+// The line of the first `async let` in the body at `site` of the code
+// points `cps`, 0 if it has none: its text is looked through for `async`,
+// and lexed only if it holds one, so that one in a comment or a string
+// doesn't count.
+#test("fun f() {\n    let a = 1\n}".chars(), BodySite { line: 1, col: 9, start: 8, end: 25, first_id: 0, ids: 0 })[0]
+#test("fun f() {\n    // async let a\n    let s = \"async let\"\n}".chars(), BodySite { line: 1, col: 9, start: 8, end: 54, first_id: 0, ids: 0 })[0]
+#test("fun f() {\n    async let a = g()\n}".chars(), BodySite { line: 1, col: 9, start: 8, end: 33, first_id: 0, ids: 0 })[2]
+fun async_let_in(cps: [char], site: BodySite) -> int32 {
+    var i = site.start
+    var found = false
+    while i + 5 <= site.end && !found {
+        if cps[i] == 'a' && cps[i + 1] == 's' && cps[i + 2] == 'y' && cps[i + 3] == 'n' && cps[i + 4] == 'c' { found = true }
+        i += 1
+    }
+    if !found { return 0 }
+    let toks = match lex_part(cps, site.start, site.end, site.line, site.col) {
+        Ok(t) => t,
+        Err(d) => { return 0 },
+    }
+    var k = 0
+    while k + 1 < toks.len() {
+        if toks[k].kind == TokenKind.ASYNC && toks[k + 1].kind == TokenKind.LET { return toks[k].line }
+        k += 1
+    }
+    return 0
 }
 
 // The kind and the message of the error `msg` of the checker: a body read

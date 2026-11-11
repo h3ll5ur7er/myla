@@ -312,7 +312,8 @@ fun be_bytes64(ws: [uint64], n: int) -> [uint8] {
     return out
 }
 
-// Lower-case hex. (A private copy: std.encoding, MYLA-329, owns hex.)
+// Lower-case hex: std.encoding's `hex_encode`, but importing it took 4 ms
+// more to check a program importing this module (MYLA-428).
 #test([0x00u8, 0x9fu8, 0xa0u8, 0xffu8])["009fa0ff"]
 fun hex_of(bytes: [uint8]) -> str {
     let digits = "0123456789abcdef"
@@ -330,6 +331,8 @@ fun bytes_of(s: str) -> [uint8] {
     return __str_to_bytes(s)
 }
 
+// The lower-case digit of `n` (0 to 15): std.char's `from_digit` is a call
+// and an `Option` for each of `Hex`'s eight digits a word.
 #test(0u32)[48u8]
 #test(9u32)[57u8]
 #test(10u32)[97u8]
