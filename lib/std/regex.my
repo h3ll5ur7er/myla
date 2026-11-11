@@ -1453,6 +1453,15 @@ fun find_bytes(s: str, needle: str, lo: int) -> int {
 // threads after it, which have less priority, as the Pike VM does
 // (leftmost-first); backwards, every thread goes on, and the last match
 // seen is the longest.
+//
+// Forwards, a state whose threads hold an undecided assertion keeps instead
+// the instructions they were followed from (the seeds), and its transition
+// follows them again in one pass, the assertions decided. The Pike VM
+// visits each instruction once per position, in one pass: an assertion
+// inside a repetition, followed in a second pass, could go round the loop
+// again through instructions the first pass had visited, and give its
+// threads another order than the Pike VM's (MYLA-421). Backwards the order
+// doesn't matter, and both passes reach the same threads.
 
 // The classes of the byte on one side of a position, which is all the
 // assertions ask: none (an end of the text), a newline, a word byte, another.
@@ -1622,6 +1631,20 @@ impl Dfa {
         return i
     }
 
+    // What a state keeps of the threads in `out`, followed from `seeds`:
+    // the seeds if a forward DFA's threads hold an undecided assertion, the
+    // threads otherwise.
+    fun kept(self, seeds: [int]) -> [int] {
+        if !self.reverse {
+            for pc in self.out {
+                if self.op[pc] == OP_LOOK {
+                    return seeds
+                }
+            }
+        }
+        return self.out
+    }
+
     // The start state after a byte of class `context`, or -1.
     fun start_state(var self, context: int) -> int {
         let known = self.starts[context]
@@ -1631,7 +1654,7 @@ impl Dfa {
         self.mark += 1
         self.out = []
         self.closure(self.start, false, 0, 0)
-        let i = self.state(self.out, context)
+        let i = self.state(self.kept([self.start]), context)
         if i >= 0 {
             self.starts[context] = i
         }
@@ -1647,6 +1670,7 @@ impl Dfa {
         let before = if self.reverse { cc } else { ctx }
         let after = if self.reverse { ctx } else { cc }
         // decide the assertions: the threads that wait for a byte, in order
+        // (followed again from the state's seeds, if it kept them)
         self.mark += 1
         self.out = []
         for pc in list {
@@ -1656,6 +1680,7 @@ impl Dfa {
         // follow the threads that take `c`
         self.mark += 1
         self.out = []
+        var seeds: [int] = []
         var matched = false
         for pc in threads {
             let o = self.op[pc]
@@ -1676,13 +1701,14 @@ impl Dfa {
                     ok = c != 10
                 }
                 if ok {
+                    seeds.push(pc + 1)
                     self.closure(pc + 1, false, 0, 0)
                 }
             }
         }
         var next = 0
         if c < END {
-            next = self.state(self.out, cc)
+            next = self.state(self.kept(seeds), cc)
             if next < 0 {
                 return -1
             }
@@ -3947,6 +3973,18 @@ impl Vm {
 #test("\\C", "\n")["0-1"]
 #test("(?m)^\\w+$", "ab\ncd")["0-2"]
 #test("\\bcd\\b", "ab cd")["3-5"]
+// an assertion inside a repetition: the DFA's threads in the Pike VM's
+// order (MYLA-421)
+#test("(^|a)+", "a")["0-0 0-0"]
+#test("(?:^|a)+", "a")["0-0"]
+#test("(b*?\\B)*", "  bbb  ")["0-0 0-0"]
+#test("a(?:a*?\\B)+", "aaa ")["0-1"]
+#test("(?:\\b|b)+", "  b")["2-2"]
+#test("(\\b|.[ab]|\\zb)*(b*)+", "ab ab")["0-0 0-0 0-0"]
+#test("(\\b|a)*b", " ab")["1-3 1-2"]
+#test("(?m)(?:$|\\n)+", "a\n\nb")["1-1"]
+#test("(?:\\B|a)+?", "aa")["0-1"]
+#test("(?:(?m:^)|\\n)+", "\n\n")["0-0"]
 fun spans(pattern: str, text: str) -> str {
     let re = match compile(pattern) {
         Ok(r) => r
@@ -3961,6 +3999,11 @@ fun spans(pattern: str, text: str) -> str {
     let found = pike.search(0)
     if dfa.search(0) != found || (found && shown_slots(dfa.slots) != shown_slots(pike.slots)) {
         return "the engines disagree: " + shown_slots(dfa.slots)
+    }
+    // the whole match alone, as `find` searches: both ends from the DFAs
+    var dfa2 = re.searcher(text, 2, 1)
+    if dfa2.search(0) != found || (found && (dfa2.slots[0] != pike.slots[0] || dfa2.slots[1] != pike.slots[1])) {
+        return "the DFAs disagree: " + shown_slots(dfa2.slots)
     }
     var pike0 = re.searcher(text, 0, -1)
     var dfa0 = re.searcher(text, 0, 1)
@@ -4093,6 +4136,81 @@ fun all_spans(pattern: str, text: str) -> str {
             return "the engines disagree"
         }
         k += 1
+    }
+    return sb.build()
+}
+
+// Texts of `DFA_MIN_TEXT` bytes or more, searched as a caller searches
+// them (the DFAs first): the groups of the first match, then how many
+// matches `find_all` finds, the first three and the last. `find`,
+// `captures`, `is_match` and the Pike VM alone must agree. Go's `regexp`
+// gave the results (MYLA-421).
+#test("(^|a)+", "a" + repeated(" ", 95))["0-0 0-0 | 1: 0-0"]
+#test("(?:^|a)+", "a" + repeated(" ", 95))["0-0 | 1: 0-0"]
+#test("(b*?\\B)*", "  bbb" + repeated(" ", 91))["0-0 0-0 | 96: 0-0 1-1 2-3 … 96-96"]
+#test("a(?:a*?\\B)+", "aaa" + repeated(" ", 93))["0-1 | 2: 0-1 1-2"]
+#test("(?:\\b|b)+", "  b" + repeated(" ", 93))["2-2 | 2: 2-2 3-3"]
+#test("(\\b|a)*b", " ab" + repeated(" ", 117))["1-3 1-2 | 1: 1-3"]
+#test("(?m)(?:$|\\n)+", "a\n\nb" + repeated("c", 100))["1-1 | 3: 1-1 2-2 104-104"]
+#test("\\w+@\\w+\\.com", repeated("x", 90) + " mail bob@example.com now")["96-111 | 1: 96-111"]
+#test("\\bcd\\b", repeated("abcd ", 20) + "cd")["100-102 | 1: 100-102"]
+#test("(?m)^(\\w+)$", repeated("a b\n", 30) + "word\n")["120-124 120-124 | 1: 120-124"]
+#test("(a+)(b+)?", repeated("c", 100) + "aab")["100-103 100-102 102-103 | 1: 100-103"]
+#test("x*", repeated("y", 100))["0-0 | 101: 0-0 1-1 2-2 … 100-100"]
+#test("\\Bb+\\b", repeated("a b ", 30) + "abbb")["121-124 | 1: 121-124"]
+fun long_spans(pattern: str, text: str) -> str {
+    if text.len() < DFA_MIN_TEXT {
+        return "a short text"
+    }
+    let re = match compile(pattern) {
+        Ok(r) => r
+        Err(e) => {
+            return f"error: {e}"
+        }
+    }
+    let first = match re.captures(text) {
+        Some(c) => c.slots
+        None => []
+    }
+    let found = match re.find(text) {
+        Some(m) => [m.start, m.end]
+        None => []
+    }
+    if shown_slots(found) != shown_slots(first[:2]) {
+        return "find and captures disagree: " + shown_slots(found) + " and " + shown_slots(first)
+    }
+    if re.is_match(text) != (found.len() == 2) {
+        return "is_match disagrees"
+    }
+    var pike = re.searcher(text, first.len(), -1)
+    if pike.search(0) != (found.len() == 2) || (found.len() == 2 && shown_slots(pike.slots) != shown_slots(first)) {
+        return "the Pike VM disagrees: " + shown_slots(pike.slots)
+    }
+    let all = re.find_all(text)
+    let all_pike = re.all_slots(text, 2, -1, -1)
+    var parts: [str] = []
+    var k = 0
+    while k < all.len() {
+        if k >= all_pike.len() || all_pike[k][0] != all[k].start || all_pike[k][1] != all[k].end {
+            return f"find_all and the Pike VM disagree at match {k}"
+        }
+        if k < 3 || k == all.len() - 1 {
+            if k > 3 {
+                parts.push("…")
+            }
+            parts.push(f"{all[k].start}-{all[k].end}")
+        }
+        k += 1
+    }
+    if all_pike.len() != all.len() {
+        return "find_all and the Pike VM disagree on the count"
+    }
+    var sb = StringBuilder()
+    sb.append(if found.len() == 2 { shown_slots(first) } else { "-" })
+    sb.append(f" | {all.len()}:")
+    for p in parts {
+        sb.append(" ")
+        sb.append(p)
     }
     return sb.build()
 }
