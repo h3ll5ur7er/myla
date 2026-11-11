@@ -20,21 +20,26 @@ fed in pieces of 1 to 7 bytes, and answers `mismatch` when they disagree.
   canonical form in `valid/sa/out/`, for every case inside the module's
   subset: a not-wf case without a DOCTYPE, a valid case whose internal subset
   declares no entities and no attributes (the module skips a DTD). The cases
-  outside it are run and counted too. The suite isn't in the repository:
-  download https://www.w3.org/XML/Test/xmlts20130923.tar.gz and extract it
-  into `build/xmlts/` (or point `MYLA_XMLTS` at the folder holding
-  `xmlconf/`); without it the test is skipped.
+  outside it are run and counted too. The suite is fetched as the YAML
+  suite is, not vendored as toml-test is: James Clark's licence lets the
+  cases be passed on only as the unmodified archive (MYLA-424). The test
+  looks for it in `$MYLA_XMLTS` (the folder holding `xmlconf/`), else
+  downloads https://www.w3.org/XML/Test/xmlts20130923.tar.gz once, checks
+  its SHA-256 and extracts it into `build/xmlts/`; without either it is
+  skipped.
 
 The corpora run on the self-hosted native build, a small one on the
 self-hosted interpreter.
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import random
 import re
 import subprocess
 import sys
+import tarfile
 import tempfile
 import unittest
 import xml.parsers.expat
@@ -391,15 +396,48 @@ def _read(path: str) -> bytes:
         return fh.read()
 
 
-def _xmlts() -> str | None:
-    """The suite's `xmltest` folder, if it is there."""
-    for root in (os.environ.get("MYLA_XMLTS", ""), os.path.join(_REPO, "build", "xmlts")):
-        if not root:
-            continue
-        for cand in (os.path.join(root, "xmlconf", "xmltest"), os.path.join(root, "xmltest"), root):
-            if os.path.isdir(os.path.join(cand, "not-wf", "sa")):
-                return cand
+_XMLTS_URL = "https://www.w3.org/XML/Test/xmlts20130923.tar.gz"
+_XMLTS_SHA256 = "9b61db9f5dbffa545f4b8d78422167083a8568c59bd1129f94138f936cf6fc1f"
+
+
+def _xmltest_in(root: str) -> str | None:
+    for cand in (os.path.join(root, "xmlconf", "xmltest"), os.path.join(root, "xmltest"), root):
+        if os.path.isdir(os.path.join(cand, "not-wf", "sa")):
+            return cand
     return None
+
+
+def _fetch_xmlts(root: str) -> None:
+    """The suite's archive downloaded (by curl, which takes the proxy and
+    its certificates from the environment), checked and extracted into
+    `root`: the archive is data, its members only files and folders."""
+    os.makedirs(os.path.dirname(root), exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=os.path.dirname(root)) as tmp:
+        archive = os.path.join(tmp, "xmlts.tar.gz")
+        subprocess.run(["curl", "-sSfL", "--max-time", "300", "-o", archive, _XMLTS_URL],
+                       capture_output=True, timeout=330, check=True)
+        with open(archive, "rb") as fh:
+            if hashlib.sha256(fh.read()).hexdigest() != _XMLTS_SHA256:
+                return
+        out = os.path.join(tmp, "out")
+        with tarfile.open(archive) as tar:
+            tar.extractall(out, filter="data")
+        os.replace(out, root)
+
+
+def _xmlts() -> str | None:
+    """The suite's `xmltest` folder: `$MYLA_XMLTS`'s, else `build/xmlts/`'s,
+    downloaded once; None without one."""
+    given = os.environ.get("MYLA_XMLTS")
+    if given:
+        return _xmltest_in(given)
+    root = os.path.join(_REPO, "build", "xmlts")
+    if _xmltest_in(root) is None and not os.path.exists(root):
+        try:
+            _fetch_xmlts(root)
+        except (OSError, subprocess.SubprocessError, tarfile.TarError, TypeError):
+            return None
+    return _xmltest_in(root)
 
 
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
@@ -472,7 +510,7 @@ class XmlAgainstReferences(unittest.TestCase):
     def test_w3c_xmltest(self) -> None:
         root = _xmlts()
         if root is None:
-            self.skipTest("the W3C suite isn't in build/xmlts/ (see the module's docstring)")
+            self.skipTest("the W3C suite couldn't be fetched into build/xmlts/ (set MYLA_XMLTS)")
         # not well-formed: every case without a DOCTYPE must fail
         nwf = sorted(f for f in os.listdir(os.path.join(root, "not-wf", "sa")) if f.endswith(".xml"))
         docs = [_read(os.path.join(root, "not-wf", "sa", f)) for f in nwf]
