@@ -99,5 +99,33 @@ class StdModuleCases(unittest.TestCase):
                 self._passes_all(_test(name, *flags), name)
 
 
+class RootSpellings(unittest.TestCase):
+    """A module of `lib/std` tested or checked with its library's root, or
+    the file, written with a leading `..` (MYLA-545, MYLA-397): it is that
+    library's module, not the entry of a program with the library beside it
+    (`duplicate method 'map'`)."""
+
+    def _run(self, cwd: str, *argv: str) -> subprocess.CompletedProcess:
+        env = {k: v for k, v in os.environ.items() if k != "MYLA_STDLIB"}
+        return subprocess.run([selfhost_tool("main"), *argv], capture_output=True, text=True,
+                              timeout=600, cwd=cwd, env=env)
+
+    def test_a_root_or_a_file_written_with_dot_dot(self) -> None:
+        std = os.path.join(STDLIB_ROOT, "std")
+        repo = os.path.dirname(STDLIB_ROOT)
+        up = os.path.join(os.pardir, os.path.basename(repo), "lib", "std", "option.my")
+        lib_up = os.path.join(os.pardir, os.pardir, os.path.basename(STDLIB_ROOT))
+        for cwd, name, argv in ((std, "option", ["test", "option.my", "--stdlib", ".."]),
+                                (std, "yaml", ["test", "yaml.my", "--stdlib", lib_up]),
+                                (repo, "option", ["test", up, "--stdlib", "lib"])):
+            with self.subTest(argv=argv):
+                proc = self._run(cwd, *argv)
+                n = _COUNTS[name]
+                self.assertEqual(proc.stderr, "")
+                self.assertTrue(proc.stdout.endswith(f"\n{n}/{n} passed.\n"), proc.stdout[-2000:])
+        proc = self._run(std, "check", "fs.my", "--stdlib", "..")
+        self.assertEqual((proc.stdout, proc.stderr, proc.returncode), ("ok\n", "", 0))
+
+
 if __name__ == "__main__":
     unittest.main()

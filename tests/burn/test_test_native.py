@@ -653,6 +653,15 @@ class TestAarch64(unittest.TestCase):
                 proc = _tool(["test", *argv, "--target", "aarch64-linux"], _REPO, env)
                 self.assertEqual(proc.stderr, "")
                 self.assertTrue(proc.stdout.endswith(f"\n{n}/{n} passed.\n"), proc.stdout)
+        # MYLA-545: a root or a file written with a leading `..`
+        up = os.path.join(os.pardir, os.path.basename(_REPO), rel)
+        for argv, cwd in ((["platform_aarch64.my", "--stdlib", ".."], os.path.join(_REPO, "lib", "std")),
+                          ([os.path.join("std", "platform_aarch64.my"), "--stdlib", os.path.join(os.pardir, "lib")], lib),
+                          ([up, "--stdlib", "lib"], _REPO)):
+            with self.subTest(argv=argv, cwd=cwd):
+                proc = _tool(["test", *argv, "--target", "aarch64-linux"], cwd)
+                self.assertEqual(proc.stderr, "")
+                self.assertTrue(proc.stdout.endswith(f"\n{n}/{n} passed.\n"), proc.stdout)
 
 
 @unittest.skipUnless(CAN_BUILD_NATIVE and shutil.which("node") and shutil.which("clang")

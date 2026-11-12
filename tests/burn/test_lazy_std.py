@@ -171,6 +171,26 @@ class ImportedStdBodies(unittest.TestCase):
         self.assertIn("type error: return type mismatch", proc.stderr)
         self.assertIn("helper.my:6:", proc.stderr)
 
+    def test_a_programs_own_std_directory_is_read_whole(self) -> None:
+        # MYLA-413 (C4 of the review of 2026-11-12): laziness goes by the
+        # file's root, not by a module id that starts `std$`: a program's own
+        # `std/helper.my` is read whole, its type error and its parse error
+        # reported as those of `other/helper.my` are
+        bad_type = "pub fun ok() -> int {\n    return 1\n}\n\npub fun broken() -> int {\n    return \"no\"\n}\n"
+        bad_parse = "pub fun ok() -> int {\n    return 1\n}\n\npub fun garbled() -> int {\n    let = 1\n    return 2\n}\n"
+        for text, want in ((bad_type, "type error: return type mismatch"), (bad_parse, "parse error: expected variable name")):
+            for d in ("std", "other"):
+                with self.subTest(dir=d, want=want):
+                    root = os.path.join(self.work, "own_" + d)
+                    os.makedirs(os.path.join(root, d), exist_ok=True)
+                    self.write(f"own_{d}/{d}/helper.my", text)
+                    path = self.write(f"own_{d}/main.my", f"from .{d}.helper import ok\n\nfun main() {{\n    print(ok())\n}}\n")
+                    for cmd in ("check", "run"):
+                        proc = self.myla_cmd(cmd, path)
+                        self.assertEqual(proc.returncode, 1, (cmd, proc.stdout))
+                        self.assertTrue(proc.stderr.startswith(want), proc.stderr)
+                        self.assertIn(f"{d}/helper.my:", proc.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
