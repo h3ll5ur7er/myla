@@ -24,9 +24,11 @@
 // its own, give `Err(ArgsError.Help(text))` with the generated help.
 //
 // Strings are bytes: a short name is one ASCII character. A spec that can't
-// be parsed (a name declared twice, an empty one, a required positional
-// after an optional one, `many` with commands) is a panic where it is built,
-// a mistake in the program as an undeclared name is.
+// be parsed (a name declared twice, an empty one, an option with a space, a
+// required positional after an optional one, a positional after `many` or a
+// command, `many` twice or with commands, a command that can't be given)
+// is a panic where it is built, a mistake in the program as an undeclared
+// name is.
 
 import std.map as map_m // `m.get(k)`
 import std.str as str_m // `find`, `contains`
@@ -134,6 +136,14 @@ impl Spec {
     // The next positional argument, in the order they are declared.
     fun positional(self, name: str, help: str = "", required: bool = true) -> Spec {
         self.check_name(name)
+        // read before them whatever the order, so declared after them it
+        // would look like a last argument, `cp <from>... <to>` (MYLA-553)
+        if self.rest.len() > 0 {
+            panic(f"args: the positional '{name}' comes after 'many' ('{self.rest[0].name}'), which takes the rest")
+        }
+        if self.commands.len() > 0 {
+            panic(f"args: the positional '{name}' comes after the command '{self.commands[0].name}'")
+        }
         if required && self.pos.len() > 0 && !self.pos[self.pos.len() - 1].required {
             panic(f"args: the required positional '{name}' comes after the optional '{self.pos[self.pos.len() - 1].name}'")
         }
@@ -148,6 +158,9 @@ impl Spec {
         if self.commands.len() > 0 {
             panic(f"args: a spec has either 'many' or commands ('{name}' and '{self.commands[0].name}')")
         }
+        if self.rest.len() > 0 {
+            panic(f"args: a spec has one 'many' ('{self.rest[0].name}' and '{name}')")
+        }
         var s = self
         s.rest = [PosSpec { name: name, help: help, required: false }]
         return s
@@ -157,6 +170,10 @@ impl Spec {
     // `name` and comes before `--`, and the arguments after it are `sub`'s. The help lists it
     // with `sub`'s `about`.
     fun command(self, name: str, sub: Spec) -> Spec {
+        // an argument that is empty or starts with '-' is never a command's
+        if name == "" || name[0] == '-' || !printed(name) {
+            panic(f"args: the command '{name}' can't be given: its name is empty, starts with '-' or holds a space")
+        }
         if self.rest.len() > 0 {
             panic(f"args: a spec has either 'many' or commands ('{self.rest[0].name}' and '{name}')")
         }
@@ -192,16 +209,21 @@ impl Spec {
         }
     }
 
-    // `check_name`, and a panic unless `short` is '\0' or a short name no
-    // other option has: one ASCII character that is printed, but not '-'.
+    // `check_name`, a panic if `name` holds a space, and unless `short` is
+    // '\0' or a short name no other option has: one ASCII character that is
+    // printed, but not '-' or '=' (as a long name holds no '=').
     fun check_option(self, name: str, short: char) {
         self.check_name(name)
+        // typed as one argument (a positional's name is only shown)
+        if !printed(name) {
+            panic(f"args: the option '{name}' must not hold a space or a control character")
+        }
         if short == '\0' {
             return
         }
         let v = short as int32
-        if v <= 32 || v >= 127 || short == '-' {
-            panic(f"args: the short name of '--{name}' must be an ASCII letter, digit or sign other than '-', not '{short}'")
+        if v <= 32 || v >= 127 || short == '-' || short == '=' {
+            panic(f"args: the short name of '--{name}' must be an ASCII letter, digit or sign other than '-' and '=', not '{short}'")
         }
         let k = short_index(self, short)
         if k >= 0 {
@@ -514,6 +536,24 @@ fun long_index(s: Spec, name: str) -> int {
     return -1
 }
 
+// Whether `name` holds no space and no control character (UTF-8's other
+// bytes are letters and signs), so the help shows it as it is given.
+#test("dry-run")[true]
+#test("größe")[true]
+#test("a b")[false]
+#test("a\tb")[false]
+#test("a\u{7f}")[false]
+fun printed(name: str) -> bool {
+    var i = 0
+    while i < name.len() {
+        if name[i] <= 32 || name[i] == 127 {
+            return false
+        }
+        i += 1
+    }
+    return true
+}
+
 // The index in `opts` of the option `-c`, or -1.
 fun short_index(s: Spec, c: char) -> int {
     var i = 0
@@ -636,20 +676,6 @@ fun err(s: Spec, argv: [str]) -> ArgsError {
     unreachable()
 }
 
-fun same(xs: [str], ys: [str]) -> bool {
-    if xs.len() != ys.len() {
-        return false
-    }
-    var i = 0
-    while i < xs.len() {
-        if xs[i] != ys[i] {
-            return false
-        }
-        i += 1
-    }
-    return true
-}
-
 #test
 fun positionals_and_defaults() {
     let a = ok(demo(), ["in.txt"])
@@ -657,11 +683,11 @@ fun positionals_and_defaults() {
     assert(a.get("mode").is_none(), "an optional positional not given")
     assert(a.get_or("mode", "fast") == "fast", "get_or")
     assert(a.get("out") == Some("a.out"), "the default")
-    assert(same(a.all("out"), ["a.out"]), "all gives the default")
+    assert(a.all("out") == ["a.out"], "all gives the default")
     assert(a.get("level").is_none(), "an option without a default")
-    assert(same(a.all("level"), []), "all without a value")
+    assert(a.all("level") == [], "all without a value")
     assert(!a.flag("verbose") && !a.flag("dry-run"), "no flags")
-    assert(same(a.all("rest"), []), "no rest")
+    assert(a.all("rest") == [], "no rest")
     assert(a.command().is_none(), "no command")
 }
 
@@ -693,11 +719,11 @@ fun grouped_flags() {
 #test
 fun repeated_options_and_many() {
     let a = ok(demo(), ["-o", "1", "i", "--out", "2", "m", "r1", "-o3", "r2"])
-    assert(same(a.all("out"), ["1", "2", "3"]), "every value, in order")
+    assert(a.all("out") == ["1", "2", "3"], "every value, in order")
     assert(a.get("out") == Some("3"), "the last one wins")
     assert(a.get("mode") == Some("m"), "the second positional")
-    assert(same(a.all("rest"), ["r1", "r2"]), "the rest")
-    assert(same(a.all("input"), ["i"]), "all of a positional")
+    assert(a.all("rest") == ["r1", "r2"], "the rest")
+    assert(a.all("input") == ["i"], "all of a positional")
 }
 
 #test
@@ -705,7 +731,7 @@ fun double_dash_ends_the_options() {
     let a = ok(demo(), ["-v", "--", "-q", "--out", "-"])
     assert(a.flag("verbose") && !a.flag("quiet"), "options before -- only")
     assert(a.get("input") == Some("-q") && a.get("mode") == Some("--out"), "positionals after --")
-    assert(same(a.all("rest"), ["-"]), "- alone")
+    assert(a.all("rest") == ["-"], "- alone")
     let b = ok(demo(), ["i", "--", "--"])
     assert(b.get("mode") == Some("--"), "a second -- is a positional")
     let c = ok(demo(), ["-"])
@@ -791,7 +817,7 @@ fun usage_of_error(argv: [str]) -> str {
 #test(0)[panic("args: 'out' is declared twice")]
 #test(1)[panic("args: 'input' is declared twice")]
 #test(2)[panic("args: '-v' is declared twice (--verbose and --very)")]
-#test(3)[panic("args: the short name of '--x' must be an ASCII letter, digit or sign other than '-', not 'é'")]
+#test(3)[panic("args: the short name of '--x' must be an ASCII letter, digit or sign other than '-' and '=', not 'é'")]
 #test(4)[panic("args: an argument's name must not be empty")]
 #test(5)[panic("args: the name '-o' must not start with '-' or hold '='")]
 #test(6)[panic("args: the name 'a=b' must not start with '-' or hold '='")]
@@ -799,9 +825,19 @@ fun usage_of_error(argv: [str]) -> str {
 #test(8)[panic("args: a spec has either 'many' or commands ('rest' and 'build')")]
 #test(9)[panic("args: a spec has either 'many' or commands ('rest' and 'build')")]
 #test(10)[panic("args: the command 'build' is declared twice")]
-#test(11)[panic("args: the short name of '--x' must be an ASCII letter, digit or sign other than '-', not '-'")]
+#test(11)[panic("args: the short name of '--x' must be an ASCII letter, digit or sign other than '-' and '=', not '-'")]
 #test(12)[panic("args: 'rest' is declared twice")]
-#test(13)["3 2"]
+#test(13)[panic("args: the positional 'b' comes after 'many' ('rest'), which takes the rest")] // MYLA-553
+#test(14)[panic("args: the positional 'x' comes after the command 'build'")]
+#test(15)[panic("args: a spec has one 'many' ('rest' and 'more')")]
+#test(16)[panic("args: the command '' can't be given: its name is empty, starts with '-' or holds a space")]
+#test(17)[panic("args: the command '-c' can't be given: its name is empty, starts with '-' or holds a space")]
+#test(18)[panic("args: the command 'a b' can't be given: its name is empty, starts with '-' or holds a space")]
+#test(19)[panic("args: the option 'a b' must not hold a space or a control character")]
+#test(20)[panic("args: the option 'tab\there' must not hold a space or a control character")]
+#test(21)[panic("args: the short name of '--x' must be an ASCII letter, digit or sign other than '-' and '=', not '='")]
+#test(22)[panic("args: the short name of '--x' must be an ASCII letter, digit or sign other than '-' and '=', not ' '")]
+#test(23)["3 2"]
 fun bad_spec(k: int) -> str {
     let s = spec("p")
     let b = spec("build")
@@ -819,7 +855,17 @@ fun bad_spec(k: int) -> str {
         10 => s.command("build", b).command("build", b)
         11 => s.flag("x", '-')
         12 => s.many("rest").positional("rest")
-        _ => s.flag("x", 'x').option("y", 'Y').positional("a").positional("b", "", false).many("c").flag("help", 'h')
+        13 => s.many("rest").positional("b")
+        14 => s.command("build", b).positional("x", "", false)
+        15 => s.many("rest").many("more")
+        16 => s.command("", b)
+        17 => s.command("-c", b)
+        18 => s.command("a b", b)
+        19 => s.flag("a b")
+        20 => s.option("tab\there")
+        21 => s.flag("x", '=')
+        22 => s.flag("x", ' ')
+        _ => s.flag("x", 'x').option("y", 'Y').positional("a").positional("b c", "", false).many("c d").flag("help", 'h')
     }
     return f"{built.opts.len()} {built.pos.len()}"
 }

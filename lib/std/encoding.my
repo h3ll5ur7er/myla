@@ -192,26 +192,9 @@ fun round_trips() {
 // Whether `r` is `Ok(want)`.
 fun decodes_to(r: Result<[uint8], EncodingError>, want: [uint8]) -> bool {
     return match r {
-        Ok(got) => same_bytes(got, want)
+        Ok(got) => got == want
         Err(_) => false
     }
-}
-
-#test([1u8, 2u8], [1u8, 2u8])[true]
-#test([1u8, 2u8], [1u8])[false]
-#test([1u8, 2u8], [1u8, 3u8])[false]
-fun same_bytes(a: [uint8], b: [uint8]) -> bool {
-    if a.len() != b.len() {
-        return false
-    }
-    var i = 0
-    while i < a.len() {
-        if a[i] != b[i] {
-            return false
-        }
-        i += 1
-    }
-    return true
 }
 
 // `b` in Base64 with the alphabet `alpha`, padded if `pad`.
