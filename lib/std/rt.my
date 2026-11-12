@@ -2031,7 +2031,12 @@ pub fun map_shrink_h(holder: int64, slot_size: int64) {
     }
 }
 
-// `map_slot_h`'s slot in the map `cell`, which has room.
+// `map_slot_h`'s slot in the map `cell`, which has room: the first empty
+// one on the probe, past the tombstones, so the keys of one hash stay on it
+// in the order of insertion and are compared oldest first, as the
+// interpreter compares them (a key's written `eq` runs alike, MYLA-546).
+// A tombstone holds a rank until the next compaction, so the load bound
+// holds without reusing them.
 fun map_place_h(cell: int64, h: int64, slot_size: int64) -> int64 {
     let mask = __load64(cell + 8) - 1
     let slots = cell + 16
@@ -2039,7 +2044,7 @@ fun map_place_h(cell: int64, h: int64, slot_size: int64) -> int64 {
     while true {
         let slot = slots + i * slot_size
         let state = __load64(slot)
-        if state != 1 {
+        if state == 0 {
             let next = slots + (mask + 1) * slot_size
             let rank = __load64(next)
             __store64(slot, 1)
