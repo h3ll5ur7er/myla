@@ -379,12 +379,14 @@ impl Lexer {
         }
         let int_digits = self.scan_digits(10)
         var is_float = false
-        if self.peek() == 46 && is_digit(self.peek1()) {
+        // after a `.` a tuple's index, so `v.0.0` is two (MYLA-545)
+        let index = self.toks.len() > 0 && self.toks[self.toks.len() - 1].kind == TokenKind.DOT
+        if self.peek() == 46 && is_digit(self.peek1()) && !index {
             self.advance()
             self.scan_digits(10)
             is_float = true
         }
-        if self.peek() == 101 || self.peek() == 69 {
+        if (self.peek() == 101 || self.peek() == 69) && !index {
             let nx = self.peek1()
             if is_digit(nx) || ((nx == 43 || nx == 45) && is_digit(self.peek2())) {
                 self.advance()
@@ -882,12 +884,14 @@ impl Lexer {
     // Past the bracket at the cursor and the one that closes it, over
     // nested brackets, strings, chars, f-strings with their holes and
     // comments; false where a bracket doesn't close or closes another, a
-    // string doesn't end, or a line starts with a declaration's keyword,
-    // which no function's body has (`starts_decl`: the bracket of a body
-    // that misses its `}` would close past the functions after it, Z1 of
-    // MYLA-416). The cursor is then anywhere: the caller goes back. One
-    // loop over the code points, which the first test passes over most of
-    // (MYLA-359).
+    // string doesn't end, or a declaration's keyword stands outside a
+    // string or a comment, which no function's body or case has
+    // (`starts_decl`: the bracket of a body that misses its `}` would close
+    // past the functions after it, Z1 of MYLA-416), at a line's start or
+    // after anything else on it (`/* c */ fun`, `}; fun`, `#test(1)[3]
+    // fun`, MYLA-545). The cursor is then anywhere: the caller goes back.
+    // One loop over the code points, a word at a time, which the first
+    // tests pass over most of (MYLA-359).
     #test(lexer_on("(a, [\"]\", ']'], f\"{x[\")\"]}\") // )\n)x"))[true]
     #test(lexer_on("{ g(\"}\", '}', f\"{a[\"}\"]}\") // }\n  /* } */ [{}] }x"))[true]
     #test(lexer_on("(\"a)"))[false]
@@ -896,6 +900,12 @@ impl Lexer {
     #test(lexer_on("[ /* ]"))[false]
     #test(lexer_on("{\n    if x {\n    }\n\n    fun g() { }\n}"))[false]
     #test(lexer_on("{\n    funds()\n  /*\nfun */\n}"))[true]
+    #test(lexer_on("{\n    if x {\n    }\n    /* c */ fun g() { }\n}"))[false]
+    #test(lexer_on("{\n    if x {\n    }; fun g() { }\n}"))[false]
+    #test(lexer_on("{\n    if x {\n    }\n    #test(1)[3] fun g() { }\n}"))[false]
+    #test(lexer_on("{\n    if x {\n}\n#derive(Eq) pub struct Q { x: int }\n}"))[false]
+    #test(lexer_on("{ x.fund(\"fun\", 'f') + pubs_ * my_struct; xfun(funds) // fun\n}"))[true]
+    #test(lexer_on("{ \u{e4}fun + f\u{e4}fun }"))[true]
     fun skip_group(var self) -> bool {
         let cps = self.cps
         let n = self.n
@@ -907,14 +917,25 @@ impl Lexer {
         var start = self.pos - (self.col - 1)
         while i < n {
             let c = cps[i]
-            if (c >= 'a' && c <= 'z') || c == ' ' || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '.' || c == ',' {
+            if c == ' ' || c == '.' || c == ',' {
                 i += 1
+            } else if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' {
+                // a word, whole: a declaration's keyword only at its start,
+                // not after a letter of another script (`äfun`); written
+                // out, as most of a body's text is words (MYLA-359)
+                if c >= 'a' && c <= 't' && ((DECL_INITIALS >> (c - 'a')) & 1) != 0 && starts_decl(cps, i, n) && (i == 0 || !is_ident_continue(cps[i - 1] as int32)) { return false }
+                i += 1
+                while i < n {
+                    let d = cps[i]
+                    if !((d >= 'a' && d <= 'z') || (d >= 'A' && d <= 'Z') || (d >= '0' && d <= '9') || d == '_') { break }
+                    i += 1
+                }
             } else if c == '\n' {
                 i += 1
                 line += 1
                 start = i
+                // its indentation at once
                 while i < n && (cps[i] == ' ' || cps[i] == '\t') { i += 1 }
-                if i < n && decl_initial(cps[i]) && starts_decl(cps, i, n) { return false }
             } else if c == '{' || c == '(' || c == '[' {
                 closers.push(if c == '{' { '}' } else if c == '(' { ')' } else { ']' })
                 i += 1
@@ -1054,15 +1075,36 @@ impl Lexer {
 }
 
 // Whether the text at `i` of `cps` begins with a declaration's keyword,
-// which no function's body has at the start of a line (Myla has no nested
-// `fun`): `fun`, `pub`, `struct`, `enum`, `impl`, `trait`, `actor`,
+// which no function's body has (Myla has no nested `fun`, and the keywords
+// are reserved): `fun`, `pub`, `struct`, `enum`, `impl`, `trait`, `actor`,
 // `typealias`, `const`, `import`, `from` or `async fun` (MYLA-416).
+// Each keyword, and a longer name that starts as it does (its mutants,
+// MYLA-545).
 #test("fun f", 0)[true]
 #test("async  fun f", 0)[true]
 #test("async let", 0)[false]
+#test("asyncfun", 0)[false]
 #test("funds", 0)[false]
 #test("x impl", 2)[true]
+#test("impls", 0)[false]
 #test("trait", 0)[true]
+#test("traits", 0)[false]
+#test("from .a import b", 0)[true]
+#test("fromage", 0)[false]
+#test("import std.io", 0)[true]
+#test("imports", 0)[false]
+#test("pub fun", 0)[true]
+#test("pubs", 0)[false]
+#test("struct P", 0)[true]
+#test("structure", 0)[false]
+#test("enum E", 0)[true]
+#test("enumerate()", 0)[false]
+#test("typealias T = int", 0)[true]
+#test("types", 0)[false]
+#test("const N: int = 1", 0)[true]
+#test("constant", 0)[false]
+#test("actor A", 0)[true]
+#test("actors", 0)[false]
 #test("i", 0)[false]
 fun starts_decl_at(src: str, i: int32) -> bool {
     let cps = src.chars()
@@ -1150,7 +1192,8 @@ fun hole_end(cps: [char], i: int32, n: int32) -> int32 {
 }
 
 // Whether a declaration's keyword may start with `c` (`starts_decl`): one
-// of `a`, `c`, `e`, `f`, `i`, `p`, `s` and `t`, a bit each of `DECL_INITIALS`.
+// of `a`, `c`, `e`, `f`, `i`, `p`, `s` and `t`, a bit each of `DECL_INITIALS`
+// (which `skip_group` tests written out, and these cases hold).
 #test('f')[true]
 #test('t')[true]
 #test('a')[true]
@@ -1220,6 +1263,10 @@ pub fun lex_with(src: str, skip_tests: bool) -> Result<[Token], Diag> {
 #test("fun f() { xf\"{\" }")[Ok(["fun", "f", "(", ")", "{ 8 body", "} 17", ""])]
 #test("fun f() { a(f\"{g(\"}\")}\") }")[Ok(["fun", "f", "(", ")", "{ 8 body", "} 26", ""])]
 #test("fun f() { a(f\"{P { s: 1 }.s + \"{\"}\") }")[Ok(["fun", "f", "(", ")", "{ 8 body", "} 38", ""])]
+// after a `.` a number is a tuple's index, its own `.` the next index's
+// (MYLA-545), and a float elsewhere
+#test("v.0.0 + 1.5")[Ok(["v", ".", "0", ".", "0", "+", "1.5", ""])]
+#test("v.1e5")[Err(Diag { kind: "lex error", line: 1, col: 4, sp: SrcSpan { sline: 1, scol: 4, eline: 1, ecol: 4 }, msg: "invalid integer literal: unexpected 'e' after digits" })]
 fun lazy_shape(src: str) -> Result<[str], Diag> {
     let (toks, cps) = lex_lazy(src)?
     var out: [str] = []

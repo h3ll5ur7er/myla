@@ -329,6 +329,34 @@ class ImplicitModules(Fixture):
                     self.assertEqual(proc.returncode, 1, (name, call, cmd, proc.stdout))
                     self.assertIn(error + "\n  " + where, proc.stderr, (name, call, cmd))
 
+    def test_a_declaration_after_a_missing_brace_anywhere_on_its_line(self) -> None:
+        # MYLA-545 (Z1's residual): a declaration's keyword that doesn't start
+        # its line, after a comment, a `};`, a `#test` or another attribute,
+        # sends the skipped body back to the lexer too: the error is the eager
+        # one at load, not a method that is silently gone (on the eager one's
+        # line: the entry's own `#test` is parsed, an imported module's isn't)
+        head = ("impl int {\n    fun q5_ok(self) -> int { return self + 1 }\n\n"
+                "    fun q5_missing(self) -> int {\n        if self > 0 { return 1\n        return 2\n    }")
+        for name, text in [("swallow_comment", head + "\n\n    /* the next one */ fun q5_after(self) -> int { return 3 }\n}\n}\n"),
+                           ("swallow_semi", head + "; fun q5_after(self) -> int { return 3 }\n}\n}\n"),
+                           ("swallow_test", head + "\n\n    #test(1)[3] fun q5_after(self) -> int { return 3 }\n}\n}\n"),
+                           ("swallow_derive", "pub fun q5_a(x: int) -> int {\n    if x > 0 { return 1\n    return 2\n}\n"
+                                              "#derive(Eq) pub struct Q5 { x: int }\n}\n")]:
+            lib = self.lib_with(name, "int", text)
+            int_my = os.path.join(lib, "std", "int.my")
+            eager = self.myla_cmd("check", int_my, lib=lib)
+            self.assertEqual(eager.returncode, 1, name)
+            self.assertTrue(eager.stderr.startswith("parse error: "), (name, eager.stderr))
+            first = eager.stderr.split("\n")[:4]
+            path = self.write(f"{name}.my", "fun main() {\n    print(1.q5_ok())\n}\n")
+            for cmd in ("check", "run"):
+                proc = self.myla_cmd(cmd, path, lib=lib)
+                self.assertEqual(proc.returncode, 1, (name, cmd, proc.stdout))
+                lines = proc.stderr.split("\n")[:4]
+                self.assertTrue(lines[0].startswith("parse error: expected an expression, found "), (name, cmd, lines))
+                self.assertEqual(lines[1].rsplit(":", 1)[0], first[1].rsplit(":", 1)[0], (name, cmd))
+                self.assertEqual(lines[3], first[3], (name, cmd))
+
     def test_a_signature_over_two_lines_keeps_its_body(self) -> None:
         # MYLA-416 (Z2): a body is keyed by the place of its `{`, which the
         # lexer keeps below the limits of the key, not its `fun`'s, which may

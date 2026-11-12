@@ -12,6 +12,18 @@ from tests.burn._native import (CAN_BUILD_NATIVE, SKIP_REASON, Program, build_an
                                 native_build, run_argv, run_file_both_now, selfhost_run, write_program)
 
 PROGRAMS = {
+    # MYLA-545: `v.0.0` is two tuple indexes, not `v.` and the float `0.0`
+    "tuple_index_chain": r"""fun main() {
+    let v = ((1, 2), (3, (4, 5)))
+    print(v.0.0)
+    print(v.1.1.0 + v.0.1)
+    let w = [(7, (8, 9.5))]
+    print(w[0].1.1)
+    print(w[0].1.0 * 2)
+    let x = 0.5
+    print(x + 1.25e1)
+}
+""",
     # MYLA-429: a map that removals leave with few keys shrinks
     "map_shrinks_on_remove": r"""// MYLA-429: a map that removals leave with few keys shrinks: its order, its
 // copies, a walk that removes, string, narrow and compound keys, values that
@@ -11410,6 +11422,8 @@ class TestCompilerParity(unittest.TestCase):
 # longer holds (a later decision changed its meaning) or there is none (a
 # program added or changed since): its output, pinned here.
 PINNED = {
+    # MYLA-545: new; failed to parse before (`expected field name or tuple index after '.'`)
+    "tuple_index_chain": "1\n6\n9.5\n16\n13\n",
     # MYLA-496: new; native code gives the same, before the change and after
     "for_over_a_map_walks_its_slots": '3003 4504497\n0,1,2,3,4,5,6,7,8,9, 15\n0=0 2=4 4=16 6=36 8=64 100=0 101=1 102=2 103=3 104=4 105=5 106=6 107=7 108=8 109=9 \n1=1 3=3 4=4 6=6 7=7 2=20 9=90 5=50 \n4 9 -1\n12\nk3 k43 k83 k123 k163 \n415 0 16,0,\np1:1 p2:2 p4:4 p5:5 p0:9 \n2b 0c 1d \n250=true 252=true 253=false 254=true \n1a 2b 11a 12b \n0 415\n',
     # MYLA-429: new; native code gives the same, before the change and after
