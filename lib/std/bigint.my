@@ -45,6 +45,12 @@ const BURNIKEL: int = 80
 const TEXT_LIMBS: int = 40
 const TEXT_DIGITS: int = 360
 
+// A number holds at most this many limbs, 2^26 - 1 (256 MiB): its bits,
+// and the position of any of them, are then an `int` (MYLA-550). An
+// operation that would give a larger one is a runtime error.
+const MAX_LIMBS: int = 67108863
+const MAX_BITS: int = 2147483616     // MAX_LIMBS * 32
+
 // An integer of any size: its sign and its magnitude (see the top).
 #derive(Eq, Hash)
 pub struct BigInt {
@@ -922,7 +928,11 @@ fun mag_text(a: [uint32], radix: uint32, upper: bool) -> str {
 // --- BigInt ---------------------------------------------------------------------
 
 // The integer with sign `neg` and magnitude `mag`: zero is never negative.
+// One of more than MAX_LIMBS limbs is a runtime error.
 fun make(neg: bool, mag: [uint32]) -> BigInt {
+    if mag.len() > MAX_LIMBS {
+        panic(f"bigint: a number of more than {MAX_BITS} bits")
+    }
     return BigInt { negative: neg && mag.len() > 0, mag: mag }
 }
 
@@ -998,11 +1008,19 @@ impl BigInt {
     }
 
     // The integer to the power `exp`, by squaring from the exponent's top
-    // bit; 0^0 is 1.
+    // bit; 0^0 is 1. A power of more than MAX_BITS bits is a runtime error
+    // (D184).
+    #test(BigInt { negative: false, mag: [2u32] }, 4294967295u32)[panic("bigint.pow: an exponent of 4294967295 makes more than 2147483616 bits")]
+    #test(BigInt { negative: true, mag: [1u32] }, 4294967295u32)[BigInt { negative: true, mag: [1u32] }]
     #test(BigInt { negative: true, mag: [2u32] }, 33u32)[BigInt { negative: true, mag: [0u32, 2u32] }]
     #test(BigInt { negative: true, mag: [2u32] }, 2u32)[BigInt { negative: false, mag: [4u32] }]
     #test(BigInt { negative: false, mag: empty() }, 0u32)[BigInt { negative: false, mag: [1u32] }]
     fun pow(self, exp: uint32) -> BigInt {
+        // at least (bits - 1) * exp + 1 bits
+        let bits = mag_bitlen(self.mag)
+        if bits > 1 && ((bits - 1) as int64) * (exp as int64) >= MAX_BITS as int64 {
+            panic(f"bigint.pow: an exponent of {exp} makes more than {MAX_BITS} bits")
+        }
         var r: [uint32] = [1u32]
         var bit: uint32 = 2147483648
         while bit > 0 && (exp & bit) == 0 {
@@ -1071,11 +1089,17 @@ impl BigInt {
         return r
     }
 
-    // self * 2^n; a negative `n` is a runtime error.
+    // self * 2^n; a negative `n` is a runtime error, and so is one that
+    // makes more than MAX_BITS bits (D184).
     #test(BigInt { negative: true, mag: [3u32] }, 32)[BigInt { negative: true, mag: [0u32, 3u32] }]
+    #test(BigInt { negative: false, mag: [5u32] }, 2147483646)[panic("bigint.shl: a shift of 2147483646 makes more than 2147483616 bits")] // the review's C13
+    #test(BigInt { negative: false, mag: empty() }, 2147483647)[zero()]
     fun shl(self, n: int) -> BigInt {
         if n < 0 {
             panic(f"bigint.shl: a negative shift {n}")
+        }
+        if self.mag.len() > 0 && n > MAX_BITS - mag_bitlen(self.mag) {
+            panic(f"bigint.shl: a shift of {n} makes more than {MAX_BITS} bits")
         }
         return make(self.negative, mag_shl(self.mag, n))
     }
@@ -1178,6 +1202,10 @@ impl Mul for BigInt {
     #test(BigInt { negative: true, mag: [4294967295u32] }, BigInt { negative: false, mag: [4294967295u32] })[BigInt { negative: true, mag: [1u32, 4294967294u32] }]
     #test(BigInt { negative: true, mag: [7u32] }, BigInt { negative: false, mag: empty() })[zero()]
     fun mul(self, other: BigInt) -> BigInt {
+        // at least this many limbs, less one
+        if self.mag.len() + other.mag.len() > MAX_LIMBS + 1 {
+            panic(f"bigint: a product of more than {MAX_BITS} bits")
+        }
         return make(self.negative != other.negative, mag_mul(self.mag, other.mag))
     }
 }

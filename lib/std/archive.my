@@ -57,7 +57,9 @@ pub enum ArchiveError {
     LengthMismatch,
     // A zip entry's deflate data that doesn't decompress
     Compress(CompressError),
-    // A zip entry longer than the caller's `max_output`
+    // A zip entry, or `zip_read`'s entries together, longer than the
+    // caller's `max_output`; a tar entry of 2^31 bytes or more, which a list
+    // can't hold
     TooLarge,
     // `safe_path`: a name that would leave the directory
     UnsafeName,
@@ -83,7 +85,7 @@ impl ArchiveError {
             ChecksumMismatch => "checksum mismatch"
             LengthMismatch => "length mismatch"
             Compress(e) => f"entry doesn't decompress: {e.message()}"
-            TooLarge => "entry longer than max_output"
+            TooLarge => "data longer than max_output or than a list holds"
             UnsafeName => "entry name leaves the directory"
             Io(e) => f"read failed: {io_error_name(e)}"
         }
@@ -575,6 +577,8 @@ fun checksum_ok(h: [uint8]) -> bool {
 #test(bytes_m.from_str("12 path=abc"))[Err(ArchiveError.BadHeader)]
 #test(bytes_m.from_str("x path=abc\n"))[Err(ArchiveError.BadHeader)]
 #test(bytes_m.from_str("5 abc\n"))[Err(ArchiveError.BadHeader)]
+#test(bytes_m.from_str("7 =abc\n"))[Err(ArchiveError.BadHeader)] // an empty key (MYLA-550)
+#test(bytes_m.from_str("5 a=\n"))[Ok([("a", "")])] // an empty value
 fun pax_records(b: [uint8]) -> Result<[(str, str)], ArchiveError> {
     var out: [(str, str)] = []
     var p = 0
@@ -592,7 +596,7 @@ fun pax_records(b: [uint8]) -> Result<[(str, str)], ArchiveError> {
         }
         var eq = q + 1
         while eq < p + len - 1 && b[eq] != '=' { eq += 1 }
-        if eq >= p + len - 1 { return Err(ArchiveError.BadHeader) }
+        if eq >= p + len - 1 || eq == q + 1 { return Err(ArchiveError.BadHeader) }
         out.push((bytes_m.to_str(b[q + 1:eq]), bytes_m.to_str(b[eq + 1:p + len - 1])))
         p += len
     }
@@ -724,7 +728,9 @@ impl<R: Read> TarReader<R> {
     // The data of `size` bytes after a header, and the padding to its
     // block (which may be missing at the end of the stream).
     fun data(var self, size: int64) -> Result<[uint8], ArchiveError> {
-        if size < 0 || size > 0x7FFFFFFF { return Err(ArchiveError.BadHeader) }
+        if size < 0 { return Err(ArchiveError.BadHeader) }
+        // more than a list holds, ustar's largest (8 GiB - 1) among them
+        if size > 0x7FFFFFFF { return Err(ArchiveError.TooLarge) }
         let n = size as int
         let d = self.take(n)?
         if d.len() < n { return Err(ArchiveError.Truncated) }
@@ -1006,27 +1012,49 @@ pub fun zip_data(b: [uint8], f: ZipFile, max_output: int = 0x7FFFFFFF) -> Result
 }
 
 // Every entry of the zip archive `b` with its data, or the first error. A
-// symbolic link's target is its `link`.
+// symbolic link's target is its `link`. Entries whose sizes add up to more
+// than `max_output` bytes are `TooLarge`, before any data is read, and each
+// is decompressed up to its size and no further, so the entries take no
+// more memory than that (MYLA-550: a bomb was `out of memory`).
 // Python's zipfile: "a.txt" stored, then "d/" and "d/b.txt" deflated
 // (2021-01-01 00:00, mode 0o644; the directory 0o755)
 #test(unhex("504b03041400000000000000215286a61036050000000500000005000000612e74787468656c6c6f504b010214031400" +
     "000000000000215286a610360500000005000000050000000000000000000000a48100000000612e747874504b050600" +
-    "0000000100010033000000280000000000"))[Ok([zip_entry("a.txt", bytes_m.from_str("hello"), 1609459200)])]
+    "0000000100010033000000280000000000"), 2147483647)[Ok([zip_entry("a.txt", bytes_m.from_str("hello"), 1609459200)])]
 #test(unhex("504b03041400000008000000215200000000020000000000000002000000642f0300504b030414000000080000002152" +
     "e3513d8d0a0000001700000007000000642f622e747874cb48cdc9c957c8402701504b01021403140000000800000021" +
     "52000000000200000000000000020000000000000000001000ed4100000000642f504b01021403140000000800000021" +
     "52e3513d8d0a00000017000000070000000000000000000000a48122000000642f622e747874504b0506000000000200" +
-    "020065000000510000000000"))[Ok([zip_dir("d", 1609459200), zip_entry("d/b.txt", bytes_m.from_str("hello hello hello hello"), 1609459200)])]
+    "020065000000510000000000"), 2147483647)[Ok([zip_dir("d", 1609459200), zip_entry("d/b.txt", bytes_m.from_str("hello hello hello hello"), 1609459200)])]
 #test(unhex("504b03041400000000000000215286a61036050000000500000005000000612e74787468656c6c70504b010214031400" +
     "000000000000215286a610360500000005000000050000000000000000000000a48100000000612e747874504b050600" +
-    "0000000100010033000000280000000000"))[Err(ArchiveError.ChecksumMismatch)] // a byte of the data changed
+    "0000000100010033000000280000000000"), 2147483647)[Err(ArchiveError.ChecksumMismatch)] // a byte of the data changed
 #test(unhex("504b03041400000000000000215286a61036050000000500000005000000612e74787468656c6c6f504b010214031400" +
     "000000000000215286a610360500000005000000050000000000000000000000a48100000000612e747874504b050600" +
-    "00000001"))[Err(ArchiveError.NotZip)] // cut short
-#test(bytes_m.from_str("PK"))[Err(ArchiveError.NotZip)]
-pub fun zip_read(b: [uint8]) -> Result<[Entry], ArchiveError> {
+    "00000001"), 2147483647)[Err(ArchiveError.NotZip)] // cut short
+#test(bytes_m.from_str("PK"), 2147483647)[Err(ArchiveError.NotZip)]
+#test(unhex("504b03041400000008000000215200000000020000000000000002000000642f0300504b030414000000080000002152" +
+    "e3513d8d0a0000001700000007000000642f622e747874cb48cdc9c957c8402701504b01021403140000000800000021" +
+    "52000000000200000000000000020000000000000000001000ed4100000000642f504b01021403140000000800000021" +
+    "52e3513d8d0a00000017000000070000000000000000000000a48122000000642f622e747874504b0506000000000200" +
+    "020065000000510000000000"), 22)[Err(ArchiveError.TooLarge)] // the entries hold 23 bytes
+#test(unhex("504b03041400000008000000215200000000020000000000000002000000642f0300504b030414000000080000002152" +
+    "e3513d8d0a0000001700000007000000642f622e747874cb48cdc9c957c8402701504b01021403140000000800000021" +
+    "52000000000200000000000000020000000000000000001000ed4100000000642f504b01021403140000000800000021" +
+    "52e3513d8d0a00000017000000070000000000000000000000a48122000000642f622e747874504b0506000000000200" +
+    "020065000000510000000000"), 23)[Ok([zip_dir("d", 1609459200), zip_entry("d/b.txt", bytes_m.from_str("hello hello hello hello"), 1609459200)])]
+#test(bytes_m.from_str("PK"), -1)[panic("archive.zip_read: max_output -1 is below 0")]
+pub fun zip_read(b: [uint8], max_output: int = 0x7FFFFFFF) -> Result<[Entry], ArchiveError> {
+    if max_output < 0 { panic(f"archive.zip_read: max_output {max_output} is below 0") }
+    let files = zip_list(b)?
+    // at most 65535 sizes below 2^32 each: no overflow
+    var total: int64 = 0
+    for f in files {
+        if f.size > 0 { total += f.size }
+    }
+    if total > (max_output as int64) { return Err(ArchiveError.TooLarge) }
     var out: [Entry] = []
-    for f in zip_list(b)? {
+    for f in files {
         var data = zip_data(b, f)?
         var e = file(f.name, data)
         e.kind = f.kind
@@ -1199,6 +1227,21 @@ fun with_pax(records: str, f: Entry) -> [uint8] {
     for x in header_block(f, "", f.name, '0', f.data.len() as int64) { b.push(x) }
     for x in data_blocks(f.data) { b.push(x) }
     return b
+}
+
+// An entry of 2^31 bytes or more, up to ustar's largest, 8 GiB - 1, is
+// `TooLarge`, which a list can't hold (MYLA-550: it was `BadHeader`); the
+// same in a pax `size`.
+#test
+fun tar_entry_too_large() {
+    let f = file("f", bytes_m.from_str("x"))
+    for size in [2147483648i64, 8589934591i64] {
+        let t = with_checksum(header_block(f, "", f.name, '0', size))
+        assert(tar_read(t) == Err(ArchiveError.TooLarge), f"{size}")
+    }
+    assert(tar_read(with_pax(pax_record("size", "2147483648"), f)) == Err(ArchiveError.TooLarge), "pax")
+    let t = with_checksum(header_block(f, "", f.name, '0', 2147483647i64))
+    assert(tar_read(t) == Err(ArchiveError.Truncated), "the most a list holds, cut short")
 }
 
 // Owners of 2^31 and more (M19): in GNU's base-256 fields and in pax

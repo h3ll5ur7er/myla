@@ -337,6 +337,10 @@ class RegexDifferentialTest(unittest.TestCase):
             subprocess.run(["as", "--64", "-o", exe + ".o", exe + ".s"], check=True)
             subprocess.run(["ld", "-o", exe, exe + ".o"], check=True)
             cls.native = exe
+            # the same driver built checked, where an integer overflow is an error (D184, MYLA-550)
+            cls.checked = os.path.join(cls.tmp, "driver-checked")
+            subprocess.run([selfhost_tool("main"), "build", cls.path, "-o", cls.checked, "--stdlib", STDLIB_ROOT,
+                            "--checked"], capture_output=True, check=True)
 
     @classmethod
     def tearDownClass(cls) -> None:
@@ -404,6 +408,20 @@ class RegexDifferentialTest(unittest.TestCase):
     @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
     def test_python_natively(self) -> None:
         self.against_python(True, 4211, 10_000)
+
+    @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
+    def test_checked_natively(self) -> None:
+        # the plain and the checked build answer the same, counted
+        # repetitions such as `a{99999999999}` included
+        made = corpus(4214, 10_000, 0.75, python=True)
+        lines = [line(g, t) for g, _, t in made]
+        lines += [line(f"a{{{n}}}", b"aaa") for n in ("2147483647", "2147483648", "4294967296", "99999999999999999999")]
+        lines += [line(f"a{{1,{n}}}", b"aaa") for n in ("2147483647", "2147483648", "99999999999999999999")]
+        plain = self.myla(True, lines)
+        proc = subprocess.run([self.checked], input="\n".join(lines) + "\n", capture_output=True, text=True,
+                              timeout=900)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout.splitlines(), plain, "the plain and the checked build differ")
 
     @unittest.skipUnless(shutil.which("go"), "Go isn't installed")
     def test_go_interpreted(self) -> None:

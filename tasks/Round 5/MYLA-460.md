@@ -2,7 +2,7 @@
 id: MYLA-460
 title: "std.xml's stream reader is quadratic in an event's length over short reads"
 type: bug
-status: todo
+status: review
 priority: medium
 labels: [std, xml, streams, round-5]
 ---
@@ -70,5 +70,17 @@ Taken into [[MYLA-424]] (P10), whose file `lib/std/xml.my` is.
 
 Reopened ([[Project/Review-2026-11-12]]): the fix for the quadratic scan made the reader wait for bytes it doesn't need (new, high).
 
-- [ ] **The stream reader holds back a complete event until more bytes arrive.** `XmlStreamReader.fill` (`xml.my:1474`) reads until new bytes match the tail it held back, so an event that is whole in the buffer is given only after the next read: on a pipe an event complete at 1.0 s is delivered at 5.0 s, and a read that would block turns into `error 1:4: the stream failed` before `<m/>` is given (`repro-r5/std/bug_xml_stream_waits2.my`: pieces `<s><m v="0000000000` and `"/>`; before the fix the reader gave `start s`, `start m`, `end m`). Scan for the event's possible end, as `std.csv` does
-- [ ] A case that fails if the reader reads again once an event is whole
+- [x] **The stream reader holds back a complete event until more bytes arrive.** `XmlStreamReader.fill` (`xml.my:1474`) reads until new bytes match the tail it held back, so an event that is whole in the buffer is given only after the next read: on a pipe an event complete at 1.0 s is delivered at 5.0 s, and a read that would block turns into `error 1:4: the stream failed` before `<m/>` is given (`repro-r5/std/bug_xml_stream_waits2.my`: pieces `<s><m v="0000000000` and `"/>`; before the fix the reader gave `start s`, `start m`, `end m`). Scan for the event's possible end, as `std.csv` does
+- [x] A case that fails if the reader reads again once an event is whole
+
+### What changed (round 6)
+
+`fill` ([[lib/std/xml.my]]) now stops reading as soon as the bytes it read may end the event that failed, not only once they match the held-back tail. `scan_event`, a small state machine like `std.csv`'s `scan_record`, follows the event from its first byte: a tag's `>` outside quotes, a comment's `-->`, a CDATA section's `]]>`, a processing instruction's `?>` (the declaration's too), any `>` of a DOCTYPE, a reference's `;`, and any byte after a text cut in a character, a CR or a `]`. It finds a superset of the places a well-formed event can end (a malformed one waits for the end of the stream anyway), so the reader never waits for bytes an event doesn't need; an end inside the held-back tail is ignored, as it didn't end the event. Its state is kept between fills of one event, so each byte is scanned once. The doubling rule stays, so a long event is still lexed a logarithmic number of times. The reader also no longer waits for a fourth byte at the stream's start: only while the bytes may still be cut in a byte order mark or a UTF-16 mark (`mark_cut`), so `<s>` and then a blocking read gives `start s`.
+
+### Evidence (round 6)
+
+- The case first: `stream_gives_whole_events` reads 14 documents, each over a stream that fails right after its first part (`Trickle`'s `fail_at`, which now also caps a read at it), in pieces of 1, 2, 3, 7 and 64 bytes, and wants every event whole in that part before the `Io` error: a tag with quotes holding `>` and `'>`, an empty element, a comment with `->` and `- `, an empty comment, a PI with `>` and `??>`, a CDATA section ending in `]]]]>`, a DOCTYPE whose subset holds `'y>'` and `<!-- ]> -->`, references, CRLF, `é]` in text, a BOM, `<s>` alone, and a closed root. Before: `FAIL stream_gives_whole_events: <s><m v="0000000000"/> in pieces of 1: start s|error 1:4: the stream failed`; after, it passes, with `scan_event`'s 10 and `mark_cut`'s 5 cases.
+- The review's reproductions: `bug_xml_stream_waits2.my` gives `start s`, `start m`, `end m`, then the blocked read (before: `start s`, the blocked read, `error 1:4`). On a pipe (`bug_xml_stream_waits.my`, native): `<m/>` at 1003 ms, `</s>` at 6008 ms (before: all three at 6009 ms).
+- Still linear (the task's reproduction, native, x86-64, 16-byte reads): 25,000 bytes 1 ms, 100,000 2 ms, 250,000 6 ms, 1,000,000 21 ms (the round-5 reader: 1, 1, 4, 20 ms).
+- `build/myla test lib/std/xml.my --stdlib lib`: 106/106 interpreted (9 s, was 6 s: the scan is a loop over each byte read, which the interpreter runs at about 2 µs a byte), `--native` (checked), `--target aarch64-linux`, `--target wasm32-wasi`. `tests.burn.test_xml` OK.
+- `scripts/test.sh` once at the end of the lane (with [[MYLA-550]]): 1,549 tests; the three failures are the embedded library (behind `lib/` until the seed commit, twice) and `test_children_run_in_parallel`, which passes alone. Bootstrap fixed point byte-identical.
