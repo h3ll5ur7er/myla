@@ -3476,10 +3476,14 @@ impl Interp {
         var m = new_mapv()
         for en in entries {
             let k = self.eval(en.key)
+            // the key hashed and found after its value, as natively, and as
+            // a store into a container is (MYLA-4, MYLA-546)
+            let v = self.eval(en.value)
+            if self.stop() { return Value.VUnit }
             let (found, h) = self.key_place(m, k, kt)
             var j = found
             if j < 0 { j = m.add_key(k, h) }
-            m.vs[j] = self.eval(en.value)
+            m.vs[j] = v
         }
         return Value.VMap(m)
     }
@@ -6244,15 +6248,22 @@ impl MapV {
     }
 
     // `k` indexed at the place `j`: by its number or itself, else by its
-    // hash `h`, first among those of `h`.
+    // hash `h`, last among those of `h`, so a hash's keys are compared
+    // oldest first, as native code's probe meets them (MYLA-546).
     fun index(var self, k: Value, h: int64, j: int32) {
         if let Value.VStr(s) = k {
             self.strs[s] = j
         } else if is_int_key(k) {
             self.ints[as_int(k)] = j
         } else {
-            self.nexts[j] = self.first_of(h)
-            self.heads[h] = j
+            self.nexts[j] = -1
+            var at = self.first_of(h)
+            if at < 0 {
+                self.heads[h] = j
+            } else {
+                while self.nexts[at] >= 0 { at = self.nexts[at] }
+                self.nexts[at] = j
+            }
         }
     }
 
@@ -6338,13 +6349,22 @@ impl MapV {
         while i < self.ks.len() {
             if self.here[i] {
                 self.nexts.push(-1)
-                self.index(self.ks[i], old_hashes[i], ks.len())
+                if is_plain_key(self.ks[i]) { self.index(self.ks[i], old_hashes[i], ks.len()) }
                 ks.push(self.ks[i])
                 vs.push(self.vs[i])
                 here.push(true)
                 hashes.push(old_hashes[i])
             }
             i = i + 1
+        }
+        // each hash's chain, oldest first (`index`), linked from the newest
+        var j = ks.len() - 1
+        while j >= 0 {
+            if !is_plain_key(ks[j]) {
+                self.nexts[j] = self.first_of(hashes[j])
+                self.heads[hashes[j]] = j
+            }
+            j -= 1
         }
         self.ks = ks
         self.vs = vs

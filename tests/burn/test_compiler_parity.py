@@ -2407,6 +2407,77 @@ fun main() {
     print(m.contains(k))
 }
 """,
+    "written_hash_and_eq_run_alike": """// MYLA-546: a key's written `hash` and `eq` run in the same order and as
+// often on both runners: keys whose hashes collide are compared oldest
+// first, a key removed and another added leave that order, and a map
+// literal hashes each key after its value, in a nested literal too
+struct K {
+    v: int,
+}
+
+impl Eq for K {
+    fun eq(self, other: K) -> bool {
+        print(f"eq {self.v} {other.v}")
+        return self.v == other.v
+    }
+}
+
+impl Hash for K {
+    fun hash(self, h: Hasher) -> Hasher {
+        print(f"hash {self.v}")
+        return h.add(self.v % 3)
+    }
+}
+
+fun key(v: int) -> K {
+    print(f"key {v}")
+    return K { v: v }
+}
+
+fun val(v: int) -> int {
+    print(f"val {v}")
+    return v
+}
+
+fun show(m: [K: int]) {
+    var sb = StringBuilder()
+    for k in m { sb.append(f"{k.v} ") }
+    print(sb.build())
+}
+
+fun main() {
+    var m: [K: int] = [:]
+    for i in 0..7 {
+        m[K { v: i }] = i
+    }
+    show(m)
+    print("-- lookups")
+    print(m[K { v: 6 }])
+    print(m.contains(K { v: 9 }))
+    print("-- removed, then added")
+    m.remove(K { v: 3 })
+    m[K { v: 9 }] = 9
+    m[K { v: 12 }] = 12
+    show(m)
+    print(m[K { v: 12 }])
+    print(m.get_or(K { v: 15 }, -1))
+    print("-- many removed")
+    for i in 0..40 {
+        m[K { v: 100 + i }] = i
+    }
+    for i in 0..36 {
+        m.remove(K { v: 100 + i })
+    }
+    m[K { v: 30 }] = 30
+    show(m)
+    print(m[K { v: 30 }])
+    print("-- literals")
+    let n = [key(1): val(1), key(4): val(4), key(1): val(9)]
+    print(f"{n.len()} {n[K { v: 1 }]}")
+    let d = [key(2): [key(5): val(50), key(8): val(80)], key(11): [key(14): val(140)]]
+    print(d.len())
+}
+""",
     "actor_function_field": """// an actor's field that holds a function, called from the actor's own
 // method (MYLA-414, the 2026-11-10 review's L3)
 actor A {
@@ -10619,6 +10690,9 @@ PINNED = {
     # generic `eq` or `hash` without binding its type parameters
     "generic_eq_and_hash_the_interpreter_calls": 'false\nfalse\nfalse\nfalse\nfalse\nfalse\nfalse\nfalse\nfalse\nfalse\nhash 18446744073709551615\nhash 18446744073709551615\ntrue\nhash 18446744073709551615\nhash 18446744073709551615\ntrue\nfalse\nfalse\nfalse\n2\n5\n1\n1\nfalse\ntrue\ntrue\n',
     "map_keys_hashed_once": 'hash\n-- set\nhash\n-- get\nhash\neq\n2\n-- +=\nhash\neq\n-- += of a computed key\nhash\neq\n-- += of a call\nhash\neq\nhash\neq\n-- contains, get_or\nhash\neq\ntrue\nhash\neq\nhash\neq\n7\nhash\n-- += of a string\nhash\neq\nhash\neq\nab\nhash\n-- nested set\nhash\neq\n-- push\nhash\neq\n-- nested get\nhash\neq\n3\n-- nested +=\nhash\neq\n-- var self\nhash\neq\nhash\neq\n4\nhash\n-- field set\nhash\neq\n-- field +=\nhash\neq\nhash\neq\nhash\neq\n7\nhash\neq\ncd\nhash\nhash\n-- map in a map\nhash\neq\nhash\neq\nhash\neq\nhash\neq\nhash\neq\nhash\neq\n6\nhash\n-- tuple key\nhash\neq\nhash\neq\n5\nhash\nhash\nhash\nhash\nhash\nhash\nhash\nhash\nhash\nhash\nhash\nhash\nhash\nhash\nhash\nhash\nhash\nhash\nhash\nhash\n-- keys moved by the argument\nhash\neq\nhash\neq\nhash\neq\nhash\neq\nhash\neq\nhash\neq\nhash\neq\nhash\neq\nhash\neq\nhash\neq\nhash\neq\nhash\neq\nhash\neq\nhash\neq\nhash\neq\nhash\neq\nhash\neq\nhash\neq\nhash\neq\n17\n-- remove\nhash\neq\nhash\nfalse\n',
+    # MYLA-546: new; the runners compared colliding keys in other orders, and the
+    # interpreter hashed a literal's key before its value
+    "written_hash_and_eq_run_alike": 'hash 0\nhash 1\nhash 2\nhash 3\neq 0 3\nhash 4\neq 1 4\nhash 5\neq 2 5\nhash 6\neq 0 6\neq 3 6\n0 1 2 3 4 5 6 \n-- lookups\nhash 6\neq 0 6\neq 3 6\neq 6 6\n6\nhash 9\neq 0 9\neq 3 9\neq 6 9\nfalse\n-- removed, then added\nhash 3\neq 0 3\neq 3 3\nhash 9\neq 0 9\neq 6 9\nhash 12\neq 0 12\neq 6 12\neq 9 12\n0 1 2 4 5 6 9 12 \nhash 12\neq 0 12\neq 6 12\neq 9 12\neq 12 12\n12\nhash 15\neq 0 15\neq 6 15\neq 9 15\neq 12 15\n-1\n-- many removed\nhash 100\neq 1 100\neq 4 100\nhash 101\neq 2 101\neq 5 101\nhash 102\neq 0 102\neq 6 102\neq 9 102\neq 12 102\nhash 103\neq 1 103\neq 4 103\neq 100 103\nhash 104\neq 2 104\neq 5 104\neq 101 104\nhash 105\neq 0 105\neq 6 105\neq 9 105\neq 12 105\neq 102 105\nhash 106\neq 1 106\neq 4 106\neq 100 106\neq 103 106\nhash 107\neq 2 107\neq 5 107\neq 101 107\neq 104 107\nhash 108\neq 0 108\neq 6 108\neq 9 108\neq 12 108\neq 102 108\neq 105 108\nhash 109\neq 1 109\neq 4 109\neq 100 109\neq 103 109\neq 106 109\nhash 110\neq 2 110\neq 5 110\neq 101 110\neq 104 110\neq 107 110\nhash 111\neq 0 111\neq 6 111\neq 9 111\neq 12 111\neq 102 111\neq 105 111\neq 108 111\nhash 112\neq 1 112\neq 4 112\neq 100 112\neq 103 112\neq 106 112\neq 109 112\nhash 113\neq 2 113\neq 5 113\neq 101 113\neq 104 113\neq 107 113\neq 110 113\nhash 114\neq 0 114\neq 6 114\neq 9 114\neq 12 114\neq 102 114\neq 105 114\neq 108 114\neq 111 114\nhash 115\neq 1 115\neq 4 115\neq 100 115\neq 103 115\neq 106 115\neq 109 115\neq 112 115\nhash 116\neq 2 116\neq 5 116\neq 101 116\neq 104 116\neq 107 116\neq 110 116\neq 113 116\nhash 117\neq 0 117\neq 6 117\neq 9 117\neq 12 117\neq 102 117\neq 105 117\neq 108 117\neq 111 117\neq 114 117\nhash 118\neq 1 118\neq 4 118\neq 100 118\neq 103 118\neq 106 118\neq 109 118\neq 112 118\neq 115 118\nhash 119\neq 2 119\neq 5 119\neq 101 119\neq 104 119\neq 107 119\neq 110 119\neq 113 119\neq 116 119\nhash 120\neq 0 120\neq 6 120\neq 9 120\neq 12 120\neq 102 120\neq 105 120\neq 108 120\neq 111 120\neq 114 120\neq 117 120\nhash 121\neq 1 121\neq 4 121\neq 100 121\neq 103 121\neq 106 121\neq 109 121\neq 112 121\neq 115 121\neq 118 121\nhash 122\neq 2 122\neq 5 122\neq 101 122\neq 104 122\neq 107 122\neq 110 122\neq 113 122\neq 116 122\neq 119 122\nhash 123\neq 0 123\neq 6 123\neq 9 123\neq 12 123\neq 102 123\neq 105 123\neq 108 123\neq 111 123\neq 114 123\neq 117 123\neq 120 123\nhash 124\neq 1 124\neq 4 124\neq 100 124\neq 103 124\neq 106 124\neq 109 124\neq 112 124\neq 115 124\neq 118 124\neq 121 124\nhash 125\neq 2 125\neq 5 125\neq 101 125\neq 104 125\neq 107 125\neq 110 125\neq 113 125\neq 116 125\neq 119 125\neq 122 125\nhash 126\neq 0 126\neq 6 126\neq 9 126\neq 12 126\neq 102 126\neq 105 126\neq 108 126\neq 111 126\neq 114 126\neq 117 126\neq 120 126\neq 123 126\nhash 127\neq 1 127\neq 4 127\neq 100 127\neq 103 127\neq 106 127\neq 109 127\neq 112 127\neq 115 127\neq 118 127\neq 121 127\neq 124 127\nhash 128\neq 2 128\neq 5 128\neq 101 128\neq 104 128\neq 107 128\neq 110 128\neq 113 128\neq 116 128\neq 119 128\neq 122 128\neq 125 128\nhash 129\neq 0 129\neq 6 129\neq 9 129\neq 12 129\neq 102 129\neq 105 129\neq 108 129\neq 111 129\neq 114 129\neq 117 129\neq 120 129\neq 123 129\neq 126 129\nhash 130\neq 1 130\neq 4 130\neq 100 130\neq 103 130\neq 106 130\neq 109 130\neq 112 130\neq 115 130\neq 118 130\neq 121 130\neq 124 130\neq 127 130\nhash 131\neq 2 131\neq 5 131\neq 101 131\neq 104 131\neq 107 131\neq 110 131\neq 113 131\neq 116 131\neq 119 131\neq 122 131\neq 125 131\neq 128 131\nhash 132\neq 0 132\neq 6 132\neq 9 132\neq 12 132\neq 102 132\neq 105 132\neq 108 132\neq 111 132\neq 114 132\neq 117 132\neq 120 132\neq 123 132\neq 126 132\neq 129 132\nhash 133\neq 1 133\neq 4 133\neq 100 133\neq 103 133\neq 106 133\neq 109 133\neq 112 133\neq 115 133\neq 118 133\neq 121 133\neq 124 133\neq 127 133\neq 130 133\nhash 134\neq 2 134\neq 5 134\neq 101 134\neq 104 134\neq 107 134\neq 110 134\neq 113 134\neq 116 134\neq 119 134\neq 122 134\neq 125 134\neq 128 134\neq 131 134\nhash 135\neq 0 135\neq 6 135\neq 9 135\neq 12 135\neq 102 135\neq 105 135\neq 108 135\neq 111 135\neq 114 135\neq 117 135\neq 120 135\neq 123 135\neq 126 135\neq 129 135\neq 132 135\nhash 136\neq 1 136\neq 4 136\neq 100 136\neq 103 136\neq 106 136\neq 109 136\neq 112 136\neq 115 136\neq 118 136\neq 121 136\neq 124 136\neq 127 136\neq 130 136\neq 133 136\nhash 137\neq 2 137\neq 5 137\neq 101 137\neq 104 137\neq 107 137\neq 110 137\neq 113 137\neq 116 137\neq 119 137\neq 122 137\neq 125 137\neq 128 137\neq 131 137\neq 134 137\nhash 138\neq 0 138\neq 6 138\neq 9 138\neq 12 138\neq 102 138\neq 105 138\neq 108 138\neq 111 138\neq 114 138\neq 117 138\neq 120 138\neq 123 138\neq 126 138\neq 129 138\neq 132 138\neq 135 138\nhash 139\neq 1 139\neq 4 139\neq 100 139\neq 103 139\neq 106 139\neq 109 139\neq 112 139\neq 115 139\neq 118 139\neq 121 139\neq 124 139\neq 127 139\neq 130 139\neq 133 139\neq 136 139\nhash 100\neq 1 100\neq 4 100\neq 100 100\nhash 101\neq 2 101\neq 5 101\neq 101 101\nhash 102\neq 0 102\neq 6 102\neq 9 102\neq 12 102\neq 102 102\nhash 103\neq 1 103\neq 4 103\neq 103 103\nhash 104\neq 2 104\neq 5 104\neq 104 104\nhash 105\neq 0 105\neq 6 105\neq 9 105\neq 12 105\neq 105 105\nhash 106\neq 1 106\neq 4 106\neq 106 106\nhash 107\neq 2 107\neq 5 107\neq 107 107\nhash 108\neq 0 108\neq 6 108\neq 9 108\neq 12 108\neq 108 108\nhash 109\neq 1 109\neq 4 109\neq 109 109\nhash 110\neq 2 110\neq 5 110\neq 110 110\nhash 111\neq 0 111\neq 6 111\neq 9 111\neq 12 111\neq 111 111\nhash 112\neq 1 112\neq 4 112\neq 112 112\nhash 113\neq 2 113\neq 5 113\neq 113 113\nhash 114\neq 0 114\neq 6 114\neq 9 114\neq 12 114\neq 114 114\nhash 115\neq 1 115\neq 4 115\neq 115 115\nhash 116\neq 2 116\neq 5 116\neq 116 116\nhash 117\neq 0 117\neq 6 117\neq 9 117\neq 12 117\neq 117 117\nhash 118\neq 1 118\neq 4 118\neq 118 118\nhash 119\neq 2 119\neq 5 119\neq 119 119\nhash 120\neq 0 120\neq 6 120\neq 9 120\neq 12 120\neq 120 120\nhash 121\neq 1 121\neq 4 121\neq 121 121\nhash 122\neq 2 122\neq 5 122\neq 122 122\nhash 123\neq 0 123\neq 6 123\neq 9 123\neq 12 123\neq 123 123\nhash 124\neq 1 124\neq 4 124\neq 124 124\nhash 125\neq 2 125\neq 5 125\neq 125 125\nhash 126\neq 0 126\neq 6 126\neq 9 126\neq 12 126\neq 126 126\nhash 127\neq 1 127\neq 4 127\neq 127 127\nhash 128\neq 2 128\neq 5 128\neq 128 128\nhash 129\neq 0 129\neq 6 129\neq 9 129\neq 12 129\neq 129 129\nhash 130\neq 1 130\neq 4 130\neq 130 130\nhash 131\neq 2 131\neq 5 131\neq 131 131\nhash 132\neq 0 132\neq 6 132\neq 9 132\neq 12 132\neq 132 132\nhash 133\neq 1 133\neq 4 133\neq 133 133\nhash 134\neq 2 134\neq 5 134\neq 134 134\nhash 135\neq 0 135\neq 6 135\neq 9 135\neq 12 135\neq 135 135\nhash 30\neq 0 30\neq 6 30\neq 9 30\neq 12 30\neq 138 30\n0 1 2 4 5 6 9 12 136 137 138 139 30 \nhash 30\neq 0 30\neq 6 30\neq 9 30\neq 12 30\neq 138 30\neq 30 30\n30\n-- literals\nkey 1\nval 1\nhash 1\nkey 4\nval 4\nhash 4\neq 1 4\nkey 1\nval 9\nhash 1\neq 1 1\nhash 1\neq 1 1\n2 9\nkey 2\nkey 5\nval 50\nhash 5\nkey 8\nval 80\nhash 8\neq 5 8\nhash 2\nkey 11\nkey 14\nval 140\nhash 14\nhash 11\neq 2 11\n2\n',
     # MYLA-414 (L3): new; the interpreter printed 'ERR: VUnit'
     "actor_function_field": '1205\n',
     # MYLA-414 (L4): new; the interpreter printed 'a' for the numbers
