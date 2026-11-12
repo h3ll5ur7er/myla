@@ -1,0 +1,13 @@
+//~ type error: type 'Option' derives Eq in the prelude (D182): it can't have an explicit 'impl Eq for Option'
+// The prelude derives `Eq` and `Hash` for `Option` (D182): a program's
+// impl of either is the error, at the program's impl, not at a position of
+// the prelude read in another file (MYLA-507: `<myla>/std/hash.my:2:1`).
+impl<T: Eq> Eq for Option<T> {
+    fun eq(self, other: Option<T>) -> bool {
+        return true
+    }
+}
+
+fun main() {
+    print(Some(1) == None)
+}

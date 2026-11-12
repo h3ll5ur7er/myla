@@ -1,0 +1,5 @@
+type error: cannot derive Eq for struct 'Q': field 'w' has type 'W<S>', which isn't Eq: 'S' isn't Ord (it needs 'impl Ord for S')
+  --> examples/errors/type_derive_field_argument_not_ord.my:21:1
+   |
+21 | struct Q {
+   | ^^^^^^^^^^

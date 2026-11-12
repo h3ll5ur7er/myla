@@ -1,0 +1,27 @@
+//~ type error: cannot derive Eq for struct 'Q': field 'w' has type 'W<S>', which isn't Eq: 'S' isn't Ord (it needs 'impl Ord for S')
+// A field's generic type is `Eq` only where its impl's bounds are met:
+// `W<S>` needs `S: Ord`. The derive checked only that `W` and `S` are `Eq`,
+// and the interpreter failed inside itself comparing two `Q`s (MYLA-507).
+struct W<T> {
+    v: T,
+}
+
+impl<T: Ord> Eq for W<T> {
+    fun eq(self, other: W<T>) -> bool {
+        return !(self.v < other.v) && !(other.v < self.v)
+    }
+}
+
+#derive(Eq)
+struct S {
+    x: int,
+}
+
+#derive(Eq)
+struct Q {
+    w: W<S>,
+}
+
+fun main() {
+    print(Q { w: W { v: S { x: 1 } } } == Q { w: W { v: S { x: 2 } } })
+}

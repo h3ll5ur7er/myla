@@ -1,0 +1,5 @@
+type error: type 'json.JsonErrorKind' derives Eq in std.json: it can't have an explicit 'impl Eq for json.JsonErrorKind'
+  --> examples/errors/type_impl_beside_std_derive.my:7:1
+  |
+7 | impl Eq for json.JsonErrorKind {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

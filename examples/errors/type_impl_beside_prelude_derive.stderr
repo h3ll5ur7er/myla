@@ -1,0 +1,5 @@
+type error: type 'Option' derives Eq in the prelude (D182): it can't have an explicit 'impl Eq for Option'
+  --> examples/errors/type_impl_beside_prelude_derive.my:5:1
+  |
+5 | impl<T: Eq> Eq for Option<T> {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

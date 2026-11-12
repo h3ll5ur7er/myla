@@ -1,0 +1,24 @@
+//~ type error: cannot derive Eq for struct 'P': field 'w' has type 'W<T>', which is Eq only where 'T: Ord'
+//~ help: write the impl instead: 'impl<T: Eq + Ord> Eq for P<T>'
+// A generic type's derive bounds each type parameter by the trait alone
+// (MYLA-379): `W<T>` is `Eq` only where `T: Ord`, a bound the derive can't
+// add, so the derive is refused at the struct, not in the impl it writes
+// (MYLA-507: reported at a position of std/hash.my).
+struct W<T> {
+    v: T,
+}
+
+impl<T: Ord> Eq for W<T> {
+    fun eq(self, other: W<T>) -> bool {
+        return !(self.v < other.v) && !(other.v < self.v)
+    }
+}
+
+#derive(Eq)
+struct P<T> {
+    w: W<T>,
+}
+
+fun main() {
+    print(P { w: W { v: 1 } } == P { w: W { v: 2 } })
+}
