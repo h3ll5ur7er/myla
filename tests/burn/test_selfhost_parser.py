@@ -391,29 +391,44 @@ class SelfHostedParserParity(unittest.TestCase):
 
     def test_a_long_chain_of_operators_is_a_parse_error(self) -> None:
         # MYLA-545: `x < y && x < y && …` 16,000 long overflowed the
-        # checker's stack (its tree is as deep as the chain); 4,096 operators
-        # in a row are an expression, more a parse error at the one past
-        # (with `&&`, the `<` of the operand after the 4,096th)
+        # checker's stack (its tree is as deep as the chain); 8,192
+        # operators in an expression parse, one more is a parse error there
         myla = selfhost_tool("main")
         with tempfile.TemporaryDirectory() as tmp:
-            for n, op in ((4097, "&&"), (16000, "&&"), (4097, "+"), (16000, "+")):
-                operand = "x < y" if op == "&&" else "x"
-                path = os.path.join(tmp, f"chain_{n}.my")
+            for operands, op in ((4096, "&&"), (16000, "&&"), (8193, "+"), (16000, "+"), (8193, ".abs()")):
+                if op == "&&":
+                    text = " &&\n        ".join(["x < y"] * operands)    # two operators an operand
+                elif op == "+":
+                    text = " +\n        ".join(["x"] * operands)
+                else:
+                    text = "x" + ".abs()" * ((operands - 1) // 2)    # a field and a call each
+                path = os.path.join(tmp, f"chain_{operands}_{len(op)}.my")
                 with open(path, "w", encoding="utf-8") as fh:
-                    fh.write("fun main() {\n    let x = 1\n    let y = 2\n    let t = "
-                             + f" {op}\n        ".join([operand] * n) + "\n    print(t)\n}\n")
-                ok = n <= 4097
+                    fh.write("fun main() {\n    let x = 1\n    let y = 2\n    let t = " + text + "\n    print(t)\n}\n")
+                ok = operands <= 8193
                 for cmd in ("check", "run"):
-                    with self.subTest(n=n, op=op, cmd=cmd):
+                    with self.subTest(operands=operands, op=op, cmd=cmd):
                         proc = subprocess.run([myla, cmd, path], capture_output=True, text=True, timeout=300)
                         if ok:
-                            want = "ok\n" if cmd == "check" else ("true\n" if op == "&&" else f"{n}\n")
-                            self.assertEqual((proc.stdout, proc.stderr), (want, ""))
+                            want = {"&&": "true\n", "+": f"{operands}\n", ".abs()": "1\n"}[op]
+                            self.assertEqual((proc.stdout, proc.stderr), ("ok\n" if cmd == "check" else want, ""))
                         else:
+                            # the 8,193rd: with `&&`, the `&&` after the 4,096th
+                            # operand (its two operators counted), with `+` the
+                            # `+` after the 8,193rd
+                            line = 4099 if op == "&&" else 8196
                             self.assertEqual(proc.returncode, 1)
                             self.assertTrue(proc.stderr.startswith(
-                                "parse error: more than 4096 operators in a row: split the expression with a 'let'\n"
-                                f"  --> {path}:{4101 if op == '&&' else 4100}:"), proc.stderr[:300])
+                                "parse error: more than 8192 operators, calls and fields in one expression: split it with a 'let'\n"
+                                f"  --> {path}:{line}:"), proc.stderr[:300])
+        # one more of each is the error
+        with tempfile.TemporaryDirectory() as tmp:
+            for text in (" +\n        ".join(["x"] * 8194), "x" + ".abs()" * 4097):
+                path = os.path.join(tmp, "over.my")
+                with open(path, "w", encoding="utf-8") as fh:
+                    fh.write("fun main() {\n    let x = 1\n    print(" + text + ")\n}\n")
+                proc = subprocess.run([myla, "check", path], capture_output=True, text=True, timeout=300)
+                self.assertTrue(proc.stderr.startswith("parse error: more than 8192 operators"), proc.stderr[:300])
 
     def test_a_std_file_with_an_error_fails_the_comparison(self) -> None:
         # MYLA-416: `parse_main --lazy` tells a file that fails both ways
