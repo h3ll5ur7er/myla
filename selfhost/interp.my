@@ -157,13 +157,16 @@ struct Notif { permits: int64, gen: int64, waits: [int32], id: int64 }
 // notifier's slot then (`n`), the generation it waits from (-1: any), its
 // time limit in milliseconds (-1: none), its state: 0 made, 1 parked, 2
 // notified, 3 timed out, 4 cancelled, 5 the notifier closed while it
-// waited, 6 closed before (as native code's, std.rt's `waiter`).
+// waited, 6 closed before, 7 never made (as native code's, std.rt's
+// `waiter`; D195).
 struct PWait { task: int32, n: int32, nid: int64, since: int64, ms: int64, state: int32 }
 
 // A notifier's handle is its slot in the low NOTIF_BITS bits and, above
 // them, the count of notifiers made when it was, so a handle closed is
-// never given again (D181).
-const NOTIF_BITS: int64 = 20
+// never given again (D181), and one whose count is past the notifiers
+// made was never given (D195). 31 bits: as many open at once as memory
+// holds, as natively (MYLA-548: 2^20 were "too many notifiers open" here).
+const NOTIF_BITS: int64 = 31
 
 // A task waiting for input on `fd` (D124, `std.io`'s async reads).
 // `events` 0: until `fd` (or `fd2`) is readable; else until the socket `fd`
@@ -2239,7 +2242,7 @@ impl Interp {
         if nm == "__notifier" { return Value.VInt(self.new_notifier()) }
         if nm == "__notify_gen" {
             let ni = self.notif_slot(ints[0])
-            if ni < 0 { return Value.VInt(-1) }
+            if ni < 0 { return Value.VInt(if self.notif_given(ints[0]) { -1 } else { -2 }) }
             return Value.VInt(self.notifs[ni].gen)
         }
         if nm == "__notify" {
@@ -2264,7 +2267,7 @@ impl Interp {
             self.free_waits.push(ints[0] as int32)
             if st == 2 { return Value.VInt(1) }
             if st == 4 { return Value.VInt(2) }
-            if st == 6 { return Value.VInt(3) }
+            if st == 7 { return Value.VInt(3) }
             return Value.VInt(0)
         }
         self.park(ints[0] as int32)
@@ -2280,8 +2283,8 @@ impl Interp {
             ni = self.free_notifs.pop()
         } else {
             if (ni as int64) >= (1i64 << NOTIF_BITS) {
-                // a million notifiers open at once: the slot wouldn't fit
-                // the handle
+                // two billion notifiers open at once: the slot wouldn't
+                // fit the handle
                 self.rt_err = Some(RtError { msg: "too many notifiers open", line: 0, col: 0, sp: no_span(), node: -1 })
                 self.ctrl = Ctrl.CExit
                 self.exit_code = 1
@@ -2292,6 +2295,14 @@ impl Interp {
         let id = (self.notif_seq << NOTIF_BITS) | (ni as int64)
         self.notifs[ni] = Notif { permits: 0, gen: 0, waits: [], id: id }
         return id
+    }
+
+    // Whether `id` is a notifier's handle given at some time, open or closed
+    // since (D195): its count is one of the notifiers made.
+    #test(interp_on("[int]"), 4096i64)[false]
+    fun notif_given(self, id: int64) -> bool {
+        let seq = id >> NOTIF_BITS
+        return id > 0 && seq >= 1 && seq <= self.notif_seq
     }
 
     // The slot of the notifier whose handle is `id`, or -1 when it is closed
@@ -2331,7 +2342,7 @@ impl Interp {
         if !outside && (self.tasks[self.cur].requested || self.tasks[self.cur].cancelled) {
             st = 4
         } else if ni < 0 {
-            st = 6
+            st = if self.notif_given(self.pwaits[wi].nid) { 6 } else { 7 }
         } else if self.notifs[ni].permits > 0 {
             self.notifs[ni].permits = self.notifs[ni].permits - 1
             st = 2

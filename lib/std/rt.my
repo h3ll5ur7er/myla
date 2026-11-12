@@ -634,6 +634,20 @@ fun handle_free(h: int64, kind: int64) -> int64 {
     return handle_take(h, kind, true)
 }
 
+// Whether `h` is a handle this table gave at some time (open or closed
+// since): handles are given in increasing order from HANDLE_MIN and never
+// twice (until the count starts again after some two billion), so one that
+// is no more than the last given was given (D195: a wait on a closed
+// notifier ends at once, one on a made-up handle is the runtime error).
+fun handle_given(h: int64) -> bool {
+    let lock = __rt_addr("__handles") + 8
+    take_lock(lock)
+    let t = __rt_get("__handles")
+    let given = t != 0 && h >= HANDLE_MIN && h <= __load64(t + 16)
+    give_lock(lock)
+    return given
+}
+
 // The table `t` (0: none yet) moved into one twice as big (64 entries at
 // first); the lock held.
 fun handles_grown(t: int64) -> int64 {
@@ -4890,7 +4904,7 @@ fun exec_stuck() {
 // cancel walked); `record` is its notifier's record then, and `timer` the
 // place of its time limit among the timers (`timer_placed`). Its state: 0 made, 1 parked, then 2 notified, 3 timed
 // out, 4 cancelled, 5 its notifier closed while it waited, 6 its notifier
-// closed (or never made) before it. `notify_one` wakes the oldest waiter,
+// closed before it, 7 its notifier never made (a handle made up). `notify_one` wakes the oldest waiter,
 // or with none adds a permit, which the next wait takes at once (none is
 // lost when the wake comes before the wait); `notify_all` wakes every
 // waiter and counts a generation, which a wait `since` an older one sees at
@@ -4915,7 +4929,8 @@ fun notifier_record(n: int64) -> int64 {
 }
 
 // `__notify_gen(n)`: how many times `notify_all` woke the notifier `n`'s
-// waiters so far (`std.task`'s `listen`); -1 when it is closed.
+// waiters so far (`std.task`'s `listen`); -1 when it is closed, -2 when it
+// was never made (D195).
 pub fun notify_gen(n: int64) -> int64 {
     let lock = __rt_addr("__timer_lock")
     take_lock(lock)
@@ -4925,6 +4940,9 @@ pub fun notify_gen(n: int64) -> int64 {
         g = __load64(rec + 8)
     }
     give_lock(lock)
+    if rec < 0 && !handle_given(n) {
+        return -2
+    }
     return g
 }
 
@@ -4940,10 +4958,10 @@ pub fun waiter(n: int64, since: int64, ms: int) -> int64 {
     return w
 }
 
-// `__woken(w)`: how the wait `w` ended, 1 notified, 0 its time passed (or
-// its notifier was closed while it waited), 2 its task was asked to stop
-// (D96), 3 its notifier was closed before (std.task's runtime error); the
-// waiter freed.
+// `__woken(w)`: how the wait `w` ended, 1 notified, 0 its time passed or
+// its notifier was closed (while it waited, or before it: D195, MYLA-548),
+// 2 its task was asked to stop (D96), 3 its notifier was never made
+// (std.task's runtime error); the waiter freed.
 pub fun woken(w: int64) -> int {
     let st = __load64(w + 48)
     __free(w)
@@ -4953,7 +4971,7 @@ pub fun woken(w: int64) -> int {
     if st == 4 {
         return 2
     }
-    if st == 6 {
+    if st == 7 {
         return 3
     }
     return 0
@@ -4965,7 +4983,10 @@ pub fun woken(w: int64) -> int {
 fun park_now(w: int64) -> int64 {
     let n = notifier_record(__load64(w + 8))
     if n < 0 {
-        return 6
+        if handle_given(__load64(w + 8)) {
+            return 6
+        }
+        return 7
     }
     __store64(w + 72, n)
     let permits = __load64(n)
