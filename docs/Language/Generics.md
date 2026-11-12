@@ -1,6 +1,6 @@
 # Generics
 
-Functions, structs, enums, actors, impls and traits may take type parameters. Generic code is checked once against opaque type parameters, then run by erasure in the interpreter and **monomorphized** (one concrete copy per instantiation) for native code (D13, [[Architecture/Monomorphization]]).
+Functions, structs, enums, actors, impls and traits may take type parameters. Generic code is checked once against opaque type parameters, then run in the interpreter with each call's type parameters bound to the types they stand for ([[MYLA-414]], [[Architecture/Interpreter]]) and **monomorphized** (one concrete copy per instantiation) for native code (D13, [[Architecture/Monomorphization]]).
 
 [TOC]
 
