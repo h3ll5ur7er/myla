@@ -1650,12 +1650,17 @@ pub fun sleep_ns(n: int64) {
 // (`__poll_buf`); a wake-up only writes the constant 1 there.
 
 // A new poller with its wake-up descriptor watched: the poller's
-// descriptor in the low 32 bits, the wake-up one's in the high ones.
+// descriptor in the low 32 bits, the wake-up one's in the high ones; or
+// minus the errno (EMFILE: no descriptor left, MYLA-548), nothing kept.
 pub fun poller_new() -> int64 {
     let ep = __syscall(SYS_EPOLL_CREATE1, 524288, 0, 0)  // EPOLL_CLOEXEC
+    if ep < 0 {
+        return ep
+    }
     let ev = __syscall(SYS_EVENTFD2, 0, 526336, 0)  // EFD_CLOEXEC | EFD_NONBLOCK
-    if ep < 0 || ev < 0 {
-        return -1
+    if ev < 0 {
+        __syscall(SYS_CLOSE, ep, 0, 0)
+        return ev
     }
     let e = __rt_addr("__poll_buf") + 32
     __store32(e, 1u32)  // EPOLLIN

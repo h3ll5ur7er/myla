@@ -2921,6 +2921,10 @@ fun digits_at(p: int64, limit: int64) -> int64 {
 // (1), `seed:N` (2, the generator seeded with N); anything else keeps the
 // default, the newest first (0).
 pub fun sched_init() {
+    // the reactor's poller made now, while descriptors are free (MYLA-548:
+    // made at the first wait, it found none left in a program that had
+    // used them up, and that wait hung)
+    let p = poller()
     let v = env_after("MYLA_SCHED=")
     if v == 0 {
         return
@@ -3062,7 +3066,7 @@ fun exec_pushed() {
     if __rt_get("__exec_sleepers") != 0 {
         os.unpark_one(__rt_addr("__exec_seq"))
     }
-    if __rt_get("__exec_polling") != 0 {
+    if __rt_get("__exec_polling") != 0 && __rt_get("__exec_poller") > 0 {
         os.poller_wake(__rt_get("__exec_poller"))
     }
 }
@@ -3698,9 +3702,37 @@ fun timer_add(at0: int64, fr: int64, cell: int64) -> int64 {
     return seq
 }
 
+// The reactor's poller (D124), made at the start with tasks (`sched_init`)
+// or at the first need: its word, or minus the errno when the system gives
+// none (no descriptor left, MYLA-548). A failure isn't kept, so a later need
+// tries again; until then the timers are kept without it (`exec_poll`),
+// and a wait for a descriptor is a runtime error (`no_poller`). Taken
+// under the timers' lock, or before the workers start.
+fun poller() -> int64 {
+    var p = __rt_get("__exec_poller")
+    if p == 0 {
+        p = os.poller_new()
+        if p < 0 {
+            return p
+        }
+        __store64(__rt_addr("__exec_poller"), p)
+    }
+    return p
+}
+
+// A wait for a descriptor with no poller to wait in: the program ends with
+// the runtime error that says why (MYLA-548: the wait hung for good). The
+// cause can't reach the waiter as an `IoError`: its frame may go on on
+// another worker, whose errno is another.
+fun no_poller() {
+    let msg = __addr_of("runtime error: no descriptor left to wait for input or output on (too many open files)\n")
+    os.write_all(2, msg + 8, __load64(msg))
+    exit_program(1)
+}
+
 // A worker polling until a later time woken to wait for a new timer.
 fun timers_changed() {
-    if __rt_get("__exec_polling") != 0 {
+    if __rt_get("__exec_polling") != 0 && __rt_get("__exec_poller") > 0 {
         os.poller_wake(__rt_get("__exec_poller"))
     }
 }
@@ -3711,9 +3743,7 @@ fun timer_add_locked(at0: int64, fr: int64, cell: int64) -> int64 {
     if cell == 0 && task_cancelled() != 0 {
         at = 0
     }
-    if __rt_get("__exec_poller") == 0 {
-        __store64(__rt_addr("__exec_poller"), os.poller_new())
-    }
+    let p = poller()
     var c = __rt_get("__timers")
     if c == 0 || __load64(c) == __load64(c + 8) {
         c = timers_grown(c)
@@ -4044,6 +4074,17 @@ fun exec_poll() {
             }
         }
         give_lock(lock)
+        if timeout != 0 && __rt_get("__exec_poller") <= 0 {
+            // no poller (the system gave none): the timers kept by a nap
+            // of at most a millisecond at a time, a push seen after it
+            if timeout < 0 || timeout > 1 {
+                timeout = 1
+            }
+            os.sleep_ns(timeout * 1000000)
+            __store_rel64(__rt_addr("__exec_polling"), 0)
+            timers_fire()
+            return
+        }
         if timeout != 0 {
             let woken = poll_events(os.poller_wait(__rt_get("__exec_poller"), timeout))
             __store_rel64(__rt_addr("__exec_polling"), 0)
@@ -4059,7 +4100,7 @@ fun exec_poll() {
 // A busy worker's look at the poller, when no other worker polls: the
 // frames whose descriptors became readable queued.
 fun exec_glance() {
-    if __xchg64(__rt_addr("__exec_polling"), 1) == 0 {
+    if __rt_get("__exec_poller") > 0 && __xchg64(__rt_addr("__exec_polling"), 1) == 0 {
         let woken = poll_events(os.poller_wait(__rt_get("__exec_poller"), 0))
         __store_rel64(__rt_addr("__exec_polling"), 0)
         push_woken(woken)
@@ -4221,8 +4262,9 @@ fun wait_fds(fr: int64, a: int64, b: int64, events: int64) {
         exec_push(fr)
         return
     }
-    if __rt_get("__exec_poller") == 0 {
-        __store64(__rt_addr("__exec_poller"), os.poller_new())
+    if poller() < 0 {
+        give_lock(lock)
+        no_poller()
     }
     let first = watch_add(a, fr, events)
     var ready = first == 0
@@ -4542,8 +4584,10 @@ pub fun sock_park(lot: int, h: int, deadline: int64, tag: int64) -> int {
         return sock_result(-EBADF)
     }
     __set_io_errno(0)
-    if __rt_get("__exec_poller") == 0 {
-        __store64(__rt_addr("__exec_poller"), os.poller_new())
+    let made = poller()
+    if made < 0 {
+        give_lock(lock)
+        return sock_result(made)
     }
     let p = __alloc(PARKING)
     zero_words(p, PARKING)

@@ -8082,13 +8082,18 @@ impl Checker {
     }
 
     // The help for a struct or enum `t` that isn't std.json's or std.toml's
-    // trait `trnm`: the derive that gives it one.
+    // trait `trnm`: the derive that gives it one. A TCP stream isn't a
+    // descriptor `std.io` can wait for (`Pollable`): its lines in a task
+    // come from std.net's line reader (MYLA-548).
     #test(checker_on("struct P { x: int }"), Type.TStruct("P", []), "ToJson")[[]]
     fun json_help(self, t: Type, trnm: str) -> [Note] {
         let name = match t {
             Type.TStruct(n, a) => n,
             Type.TEnum(n, a) => n,
             _ => "",
+        }
+        if name == "std$net$TcpStream" && trnm == "std$io$Pollable" {
+            return [Note { label: "help", msg: "in a task, read a TCP stream's lines with 'net.line_reader(s)' and 'await r.read_line_async()' (D180)", line: 0, col: 0, sp: no_span() }]
         }
         for f in [json_serial(), toml_serial()] {
             match self.serial_prefix(f) {
