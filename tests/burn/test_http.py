@@ -1017,6 +1017,91 @@ class TimeLimits(unittest.TestCase):
                 with self.subTest(server=name):
                     self.serve(argv, exe, check)
 
+    def test_requests_begun_wait_parked_on_a_default_server(self):
+        # B7 of the review of 2026-11-12 (MYLA-549): 64 connections that
+        # each sent one byte held every worker of a default server for
+        # read_ms (20 s); renewed every 19 s they stopped it. A request
+        # begun waits for its next bytes parked, its parser kept, and holds
+        # no worker: 64 one-byte heads, 64 heads without their end and 64
+        # bodies cut short beside a default server, and a request on a
+        # connection of its own is answered at once; then each of them
+        # ends its request and is answered as if it had come whole.
+        def check(port):
+            def opened(first: bytes) -> list:
+                socks = [socket.create_connection(("127.0.0.1", port), timeout=10) for _ in range(64)]
+                for s in socks:
+                    s.sendall(first)
+                return socks
+            one = opened(b"G")
+            heads = opened(b"GET /x HTTP/1.1\r\nHost: x\r\nX-A: b")
+            bodies = opened(b"POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: 10\r\n\r\nabc")
+            time.sleep(0.3)
+            took = []
+            for _ in range(3):
+                out, t = quick_get(port, timeout=5)
+                self.assertTrue(out.startswith(b"HTTP/1.1 200 OK\r\n"), out)
+                took.append(t)
+            self.assertLess(max(took), 1.5, took)
+            # each request ended in two more pieces, a while apart
+            for s in one:
+                s.sendall(b"ET / HTTP/1.1\r\nHo")
+            for s in heads:
+                s.sendall(b"c\r\nConnection: cl")
+            for s in bodies:
+                s.sendall(b"defg")
+            time.sleep(0.2)
+            for s in one:
+                s.sendall(b"st: x\r\nConnection: close\r\n\r\n")
+            for s in heads:
+                s.sendall(b"ose\r\n\r\n")
+            for s in bodies:
+                s.sendall(b"hij")
+            for s in one + heads:
+                out, _ = end_of(s, 5)
+                self.assertTrue(out.startswith(b"HTTP/1.1 200 OK\r\n") and out.endswith(b"\r\n\r\nok"), out)
+                s.close()
+            for s in bodies:
+                r = recv_response(s)
+                self.assertTrue(r.startswith(b"HTTP/1.1 200 OK\r\n") and r.endswith(b"\r\n\r\nabcdefghij"), r)
+                s.close()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            for name, (argv, exe) in self.forms(tmp, ["20000", "d"]).items():
+                with self.subTest(server=name):
+                    self.serve(argv, exe, check)
+
+    def test_dribbled_heads_do_not_take_the_workers(self):
+        # the review's t_park2.py, case 3 (MYLA-549): 200 connections
+        # dribbling a head a byte a second against 2 workers; each freed
+        # worker took the next dribbler, even with read_ms 2,000. They wait
+        # parked: fresh requests are answered at once, and every dribbler
+        # is answered 408 once read_ms passed since its head began.
+        def check(port):
+            slow = [socket.create_connection(("127.0.0.1", port), timeout=10) for _ in range(200)]
+            t0 = time.monotonic()
+            for s in slow:
+                s.sendall(b"GET / HTTP/1.1\r\nHost: x\r\nX-Slow: ")
+            took = []
+            for _ in range(3):
+                time.sleep(0.3)
+                for s in slow:
+                    s.sendall(b"a")
+                out, t = quick_get(port, timeout=5)
+                self.assertTrue(out.startswith(b"HTTP/1.1 200 OK\r\n"), out)
+                took.append(t)
+            self.assertLess(max(took), 1.0, took)
+            for s in slow:
+                out, _ = end_of(s, 5)
+                self.assertTrue(out.startswith(b"HTTP/1.1 408 Request Timeout\r\n"), out)
+                s.close()
+            ended = time.monotonic() - t0
+            self.assertTrue(1.5 < ended < 4, ended)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            for name, (argv, exe) in self.forms(tmp, ["12000", "2", "-", "5000", "1500", "5000"]).items():
+                with self.subTest(server=name):
+                    self.serve(argv, exe, check)
+
 
 # --- what a client sends again on a new connection (MYLA-422) ---------------------
 

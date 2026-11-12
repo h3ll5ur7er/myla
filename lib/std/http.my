@@ -2434,10 +2434,11 @@ pub async fun post_async(url: str, body: str) -> Result<Response, HttpError> {
 //   then the connection is closed (a client that doesn't read can't hold
 //   a worker).
 // A connection waiting for its next request (its first too) is parked on
-// the reactor with no task and holds no worker (MYLA-468); a keeper task
-// closes those whose time runs out, and a wait while a request is read or
-// a response sent has its time limit. The handler's own time isn't
-// limited.
+// the reactor with no task and holds no worker (MYLA-468), and so is one
+// whose request has begun and waits for more of it, its parser kept
+// (MYLA-549); a keeper task closes those whose time runs out (a request
+// begun answered 408), and a wait while a response is sent has its time
+// limit. The handler's own time isn't limited.
 pub struct ServerOptions {
     workers: int,
     max_connections: int,
@@ -2580,15 +2581,17 @@ fun earliest(a: int64, b: int64) -> int64 {
 }
 
 // How often the keeper looks for connections whose time ran out: a quarter
-// of the shorter of `idle_ms` and `keep_alive_ms`, from 10 ms to a second
-// (negative: neither limits a connection, no keeper).
+// of the shortest of `idle_ms`, `keep_alive_ms` and `read_ms` (a request
+// begun waits parked too, MYLA-549), from 10 ms to a second (negative:
+// none limits a parked connection, no keeper).
 #test(ServerOptions { workers: 1, max_connections: 1, max_requests: -1, max_header_bytes: 1, max_body_bytes: 1, keep_alive_ms: 60000, idle_ms: 5000, read_ms: 20000, write_ms: 30000 })[1000]
 #test(ServerOptions { workers: 1, max_connections: 1, max_requests: -1, max_header_bytes: 1, max_body_bytes: 1, keep_alive_ms: -1, idle_ms: 300, read_ms: -1, write_ms: 1000 })[75]
 #test(ServerOptions { workers: 1, max_connections: 1, max_requests: -1, max_header_bytes: 1, max_body_bytes: 1, keep_alive_ms: -1, idle_ms: 0, read_ms: -1, write_ms: -1 })[10]
-#test(ServerOptions { workers: 1, max_connections: 1, max_requests: -1, max_header_bytes: 1, max_body_bytes: 1, keep_alive_ms: -1, idle_ms: -1, read_ms: 50, write_ms: 50 })[-1]
+#test(ServerOptions { workers: 1, max_connections: 1, max_requests: -1, max_header_bytes: 1, max_body_bytes: 1, keep_alive_ms: -1, idle_ms: -1, read_ms: 200, write_ms: 50 })[50]
+#test(ServerOptions { workers: 1, max_connections: 1, max_requests: -1, max_header_bytes: 1, max_body_bytes: 1, keep_alive_ms: -1, idle_ms: -1, read_ms: -1, write_ms: 50 })[-1]
 fun poll_ms(o: ServerOptions) -> int {
     var shortest = -1
-    for ms in [o.keep_alive_ms, o.idle_ms] {
+    for ms in [o.keep_alive_ms, o.idle_ms, o.read_ms] {
         if ms >= 0 && (shortest < 0 || ms < shortest) {
             shortest = ms
         }
@@ -2608,15 +2611,19 @@ fun poll_ms(o: ServerOptions) -> int {
 // is notified once and a worker takes it (`worker`). Each connection is
 // parked with its deadline (`idle_ms` from when it began to wait, and its
 // connection's time, `keep_alive_ms` from its accept) and its time's end as
-// its tag, which the worker that takes it up reads (`__sock_tag`).
+// its tag, which the worker that takes it up reads (`__sock_tag`). A
+// connection whose request has begun and waits for its next bytes is
+// parked too, with the request's time limit as its deadline, and what it
+// read in `pending` (MYLA-549).
 struct Lot {
     id: int,
     ready: task.Notifier,
+    pending: Pending,
 }
 
 fun lot_made() -> Lot {
     let n = task.notifier()
-    return Lot { id: __sock_lot(n.id), ready: n }
+    return Lot { id: __sock_lot(n.id), ready: n, pending: Pending { begun: [:] } }
 }
 
 impl Lot {
@@ -2662,26 +2669,56 @@ fun closed(h: int) {
 
 // The connection `h` parked until its next request begins: within
 // `idle_ms` from now and its time's end `life_end` (its tag); closed once
-// the lot is (a server that stopped). Past `max_connections` sockets
-// parked (the listener `l` among them when it is), the connection whose
-// time runs out first is closed (its client opens another when it has a
-// request: a quiet connection gives way to a new one).
-fun park_connection(lot: Lot, l: TcpListener, h: int, o: ServerOptions, life_end: int64) {
-    let deadline = earliest(after(time.now_ms(), o.idle_ms), life_end)
-    let count = lot.park(h, deadline, life_end)
+// the lot is (a server that stopped). Whether a parked connection must be
+// closed for it (`evict`): past `max_connections` sockets parked (the
+// listener among them when it is), the connection whose time runs out
+// first is (its client opens another when it has a request: a quiet
+// connection gives way to a new one).
+fun park_connection(lot: Lot, h: int, o: ServerOptions, life_end: int64) -> bool {
+    return parked(lot, h, earliest(after(time.now_ms(), o.idle_ms), life_end), life_end, o)
+}
+
+// The connection `h` parked with `deadline` and `tag` (`park_connection`).
+fun parked(lot: Lot, h: int, deadline: int64, tag: int64, o: ServerOptions) -> bool {
+    let count = lot.park(h, deadline, tag)
     if count < 0 {
         closed(h)
-        return
+        return false
     }
-    if o.max_connections >= 0 && count > o.max_connections {
-        evict(lot, l)
+    return o.max_connections >= 0 && count > o.max_connections
+}
+
+// The connection `h`, its request begun `b` not all there, parked until
+// more of it comes, within the request's time limit (MYLA-549); `b` kept
+// in the lot's `pending` first, so that the worker that takes it up finds
+// it. Whether a parked connection must be closed for it, as
+// `park_connection`.
+async fun park_begun(lot: Lot, h: int, b: Begun, o: ServerOptions) -> bool {
+    let deadline = b.r.deadline
+    await lot.pending.put(h, b)
+    return parked(lot, h, deadline, BEGUN, o)
+}
+
+// The parked connection `h`, taken off the lot, closed: its request begun,
+// if it has one, forgotten, and answered with `answer` first (`TimedOut`:
+// 408) as far as the socket takes it at once.
+async fun dropped(lot: Lot, h: int, answer: Option<HttpError>) {
+    if __sock_tag(h) == BEGUN {
+        let gone = await lot.pending.take(h)
+        match answer {
+            Some(e) => {
+                let sent = __sock_send(h, error_response(e), 0)
+            }
+            None => {}
+        }
     }
+    closed(h)
 }
 
 // The parked connection whose time runs out first closed (with no time
 // limit, the one parked first), not the listener `l`, which is parked
 // again when it came first.
-fun evict(lot: Lot, l: TcpListener) {
+async fun evict(lot: Lot, l: TcpListener) {
     var oldest = __sock_expired(lot.id, -1)
     if oldest == l.handle {
         let again = lot.park(l.handle, -1, -1)
@@ -2692,7 +2729,7 @@ fun evict(lot: Lot, l: TcpListener) {
         }
     }
     if oldest > 0 {
-        closed(oldest)
+        await dropped(lot, oldest, None)
     }
 }
 
@@ -2712,7 +2749,9 @@ async fun accept_waiting(l: TcpListener, o: ServerOptions, lot: Lot) -> Result<(
         match nl.accept() {
             Ok(s) => {
                 let nd = s.set_nodelay(true)
-                park_connection(lot, l, s.handle, o, after(time.now_ms(), o.keep_alive_ms))
+                if park_connection(lot, s.handle, o, after(time.now_ms(), o.keep_alive_ms)) {
+                    await evict(lot, l)
+                }
             }
             Err(e) => {
                 fate = accept_fate(e)
@@ -2722,7 +2761,7 @@ async fun accept_waiting(l: TcpListener, o: ServerOptions, lot: Lot) -> Result<(
         k += 1
     }
     if fate == LATER {
-        evict(lot, l)
+        await evict(lot, l)
         await task.sleep(10)
     }
     let parked = lot.park(l.handle, -1, -1)
@@ -2738,71 +2777,101 @@ struct Link {
     w: Wire,
 }
 
-impl Link {
-    // More bytes read, within `deadline` (negative: none): false at the end
-    // of the stream, `TimedOut` past the deadline. What the socket has is
-    // read at once; a wait for more is a task's with that time limit.
-    async fun fill_until(var self, deadline: int64) -> Result<bool, HttpError> {
-        let now = self.w.try_fill()?
-        if now != 0 {
-            return Ok(now > 0)
-        }
-        if deadline < 0 {
-            return await self.w.fill_async()
-        }
-        let left = deadline - time.now_ms()
-        if left <= 0 {
-            return Err(HttpError.TimedOut)
-        }
-        let st = self.w.stream
-        let got = await task.timeout(left as int, async () => {
-            var c = st
-            return await c.read_async(READ_SIZE)
-        })
-        return match got {
-            Some(Ok(b)) => self.w.took(b)
-            Some(Err(e)) => Err(io_error(e))
-            None => if task.cancelled() { Err(HttpError.Io(IoError.Cancelled)) } else { Err(HttpError.TimedOut) }
-        }
+// A request being read (`Link.read_request`): its parser, which part of it
+// is coming (0: none yet, 1: its head, 2: its body), the body's length when
+// its time limit last began again, and when it ends (negative: none).
+struct Reading {
+    p: Parser,
+    part_of: int,
+    stepped: int,
+    deadline: int64,
+}
+
+// A reading of a new request with the server's limits.
+fun reading(o: ServerOptions) -> Reading {
+    return Reading { p: parser(true, "", o.max_header_bytes, o.max_body_bytes), part_of: 0, stepped: 0, deadline: -1 }
+}
+
+// A request begun whose next bytes haven't come, kept while its connection
+// waits parked (MYLA-549): the reading, the bytes read and not taken yet,
+// and the connection's time's end.
+struct Begun {
+    r: Reading,
+    rest: str,
+    life_end: int64,
+}
+
+// The requests begun of a server's parked connections, by the connection's
+// handle, which its workers share. A connection parked so has the tag
+// BEGUN; only a request that comes in pieces costs the two calls.
+actor Pending {
+    begun: [int: Begun],
+}
+
+impl Pending {
+    fun put(var self, h: int, b: Begun) {
+        self.begun[h] = b
     }
 
-    // A request read with `p`, its first bytes there: its head within
-    // `o.read_ms` of them, its body within `read_ms` of the head's end and
-    // of each 16 KiB of it. A request that asked for it gets `100
-    // Continue` before its body is read. A request the client ended too
-    // soon is `Closed` (nothing of it came) or the parser's error.
-    async fun read_request(var self, p: Parser, o: ServerOptions) -> Result<Parser, HttpError> {
-        var q = p
-        // 0: before the request, 1: its head, 2: its body
-        var part_of = 0
-        var stepped = 0
-        var deadline: int64 = -1
+    // The request begun of `h`, no longer kept.
+    fun take(var self, h: int) -> Option<Begun> {
+        if !self.begun.contains(h) {
+            return None
+        }
+        let b = self.begun[h]
+        self.begun.remove(h)
+        return Some(b)
+    }
+}
+
+// The tag of a connection parked with a request begun (its time's end is
+// in its `Begun`; another tag is that end, or -1 for none).
+const BEGUN: int64 = -2
+
+impl Link {
+    // A request read on with `r` as far as its bytes have come (MYLA-549):
+    // its head within `o.read_ms` of its first byte, its body within
+    // `read_ms` of the head's end and of each 16 KiB of it. The reading
+    // given back is done (`r.p.done()`), or waits for bytes the socket
+    // doesn't have yet: its caller parks the connection with it, holding
+    // no worker. A request that asked for it gets `100 Continue` before
+    // its body is read. A request the client ended too soon is `Closed`
+    // (nothing of it came) or the parser's error; one whose time ran out
+    // `TimedOut`.
+    async fun read_request(var self, r: Reading, o: ServerOptions) -> Result<Reading, HttpError> {
+        var q = r
         while true {
-            self.w.pos = q.advance(self.w.buf, self.w.pos)
-            if q.failed {
-                return Err(q.err)
+            self.w.pos = q.p.advance(self.w.buf, self.w.pos)
+            if q.p.failed {
+                return Err(q.p.err)
             }
-            if q.done() {
+            if q.p.done() {
                 return Ok(q)
             }
-            if q.expect_continue {
-                q.expect_continue = false
-                if q.body_len == 0 {
+            if q.p.expect_continue {
+                q.p.expect_continue = false
+                if q.p.body_len == 0 {
                     let sent = await self.send("HTTP/1.1 100 Continue\r\n\r\n", o.write_ms)
                     sent?
                 }
             }
-            let now_part = if !q.started { 0 } else if q.state >= S_LENGTH { 2 } else { 1 }
-            if now_part != part_of || (part_of == 2 && q.body_len - stepped >= READ_STEP) {
-                part_of = now_part
-                stepped = q.body_len
-                deadline = after(time.now_ms(), o.read_ms)
+            let now_part = if !q.p.started { 0 } else if q.p.state >= S_LENGTH { 2 } else { 1 }
+            if now_part != q.part_of || (q.part_of == 2 && q.p.body_len - q.stepped >= READ_STEP) {
+                q.part_of = now_part
+                q.stepped = q.p.body_len
+                q.deadline = after(time.now_ms(), o.read_ms)
             }
-            let more = await self.fill_until(deadline)
-            if !more? {
-                q.at_end()
-                if q.failed {
-                    return Err(q.err)
+            let got = self.w.try_fill()?
+            if got < 0 {
+                q.p.at_end()
+                if q.p.failed {
+                    return Err(q.p.err)
+                }
+                return Ok(q)
+            }
+            if got == 0 {
+                if q.deadline >= 0 && time.now_ms() >= q.deadline {
+                    return Err(HttpError.TimedOut)
                 }
                 return Ok(q)
             }
@@ -2869,55 +2938,94 @@ impl Link {
 // The connection `h`, taken up ready (its next request has begun, or it
 // ended), served request after request while they come at once (a
 // pipelining client's), then parked again until the next begins, or
-// closed: a client that closes it, a request that can't be read (answered
-// with its status), one that asks to close, the connection's time up, the
-// server's limit reached. A response from a little before the time's end
-// says `Connection: close`, so that a keep-alive client doesn't send a
-// request the server won't read. Whether the worker goes on, and the
-// requests answered. Only a server with a limit counts its requests in
+// parked with a request begun until more of it comes (and taken up where
+// it stopped, MYLA-549), or closed: a client that closes it, a request
+// that can't be read (answered with its status), one that asks to close,
+// the connection's time up, the server's limit reached. A response from a
+// little before the time's end says `Connection: close`, so that a
+// keep-alive client doesn't send a request the server won't read. Whether
+// the worker goes on, and the requests answered. Only a server with a limit counts its requests in
 // `tally` as they come: two actor calls a request.
 async fun serve_ready(h: int, l: TcpListener, o: ServerOptions, handler: async (Request) -> Response, tally: Tally, lot: Lot) -> (bool, int) {
     let counted = o.max_requests >= 0
     var answered = 0
-    let life_end = __sock_tag(h)
+    var life_end = __sock_tag(h)
+    var link = Link { w: wire(stream_of(h)) }
+    // a request begun, taken up where it waited (MYLA-549)
+    var begun: Option<Reading> = None
+    if life_end == BEGUN {
+        match await lot.pending.take(h) {
+            Some(b) => {
+                life_end = b.life_end
+                link.w.buf = b.rest
+                begun = Some(b.r)
+            }
+            None => {
+                closed(h)
+                return (true, answered)
+            }
+        }
+    }
     var close_at = life_end
     if life_end >= 0 {
         let margin = if o.keep_alive_ms / 10 > 1000 { 1000 } else { o.keep_alive_ms / 10 }
         close_at = life_end - margin as int64
     }
-    var link = Link { w: wire(stream_of(h)) }
     let peer = match link.w.stream.peer_addr() {
         Ok(a) => Some(a)
         Err(_) => None
     }
     while true {
-        // a request may begin until the connection's time is up
-        if life_end >= 0 && time.now_ms() >= life_end {
-            closed(h)
-            return (true, answered)
+        var resumed = false
+        let r = match begun {
+            Some(b) => {
+                resumed = true
+                b
+            }
+            None => reading(o)
         }
-        if !link.w.buffered() {
-            match link.w.try_fill() {
-                Ok(got) => {
-                    if got == 0 {
-                        // nothing yet: parked until it comes
-                        park_connection(lot, l, h, o, life_end)
-                        return (true, answered)
+        if !resumed {
+            // a request may begin until the connection's time is up
+            if life_end >= 0 && time.now_ms() >= life_end {
+                closed(h)
+                return (true, answered)
+            }
+            if !link.w.buffered() {
+                match link.w.try_fill() {
+                    Ok(got) => {
+                        if got == 0 {
+                            // nothing yet: parked until it comes
+                            if park_connection(lot, h, o, life_end) {
+                                await evict(lot, l)
+                            }
+                            return (true, answered)
+                        }
+                        if got < 0 {
+                            closed(h)
+                            return (true, answered)
+                        }
                     }
-                    if got < 0 {
+                    Err(_) => {
                         closed(h)
                         return (true, answered)
                     }
                 }
-                Err(_) => {
-                    closed(h)
-                    return (true, answered)
-                }
             }
         }
-        let got = await link.read_request(parser(true, "", o.max_header_bytes, o.max_body_bytes), o)
+        begun = None
+        let got = await link.read_request(r, o)
         let p = match got {
-            Ok(p) => p
+            Ok(q) => {
+                if !q.p.done() {
+                    // the rest of it not there yet: parked with what came
+                    let rest = part(link.w.buf, link.w.pos, link.w.buf.len())
+                    if await park_begun(lot, h, Begun { r: q, rest: rest, life_end: life_end }, o) {
+                        await evict(lot, l)
+                    }
+                    return (true, answered)
+                }
+                q.p
+            }
             Err(e) => {
                 if answerable(e) {
                     let sent = await link.send_parts((error_response(e), ""), o.write_ms)
@@ -3020,9 +3128,10 @@ async fun worker(l: TcpListener, o: ServerOptions, handler: async (Request) -> R
 }
 
 // The lot's keeper: every `poll` milliseconds the connections whose time
-// ran out while they were parked (`idle_ms` without a request beginning,
-// or their time up) closed without an answer, until the task is cancelled
-// or every worker stopped.
+// ran out while they were parked closed: without an answer those waiting
+// for a request (`idle_ms` without one beginning, or their time up), with
+// 408 those whose request began and didn't come within `read_ms`
+// (MYLA-549); until the task is cancelled or every worker stopped.
 async fun keeper(lot: Lot, tally: Tally, poll: int) -> Result<int, HttpError> {
     while true {
         await task.sleep(poll)
@@ -3032,7 +3141,7 @@ async fun keeper(lot: Lot, tally: Tally, poll: int) -> Result<int, HttpError> {
         let now = time.now_ms()
         var h = __sock_expired(lot.id, now)
         while h > 0 {
-            closed(h)
+            await dropped(lot, h, Some(HttpError.TimedOut))
             h = __sock_expired(lot.id, now)
         }
     }

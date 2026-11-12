@@ -2,7 +2,7 @@
 id: MYLA-549
 title: "R7 std.http: a request that has begun holds a worker; the client's redirect and write checks"
 type: bug
-status: todo
+status: in-progress
 priority: high
 labels: [std, http, security, round-6]
 ---
