@@ -2,7 +2,7 @@
 id: MYLA-436
 title: "Interpreter: an `eq` or `hash` written for a generic type, called for a list's `==` or a map key, binds no type parameter"
 type: bug
-status: review
+status: done
 priority: low
 labels: [interpreter, generics, parity]
 ---
@@ -50,3 +50,7 @@ All in [[selfhost/interp.my]]; [[Architecture/Interpreter]] describes it.
 
 - [[MYLA-506]]: a compound key's written `hash` runs twice per `m[k]` and `m[k] = v` interpreted (four times for `+=`), once natively.
 - [[MYLA-507]]: a `#derive(Eq)` whose field's `==` needs another bound is reported at `<myla>/std/hash.my:3:23`.
+
+## Review 2026-11-12
+
+Signed off in [[Project/Review-2026-11-12]], with a follow-up in [[MYLA-414]]: the same loss of the binding one step further: a map key's written `eq` or `hash` that runs before a `var self` call (`m[k].sort()`).

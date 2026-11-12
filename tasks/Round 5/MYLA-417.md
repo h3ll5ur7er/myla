@@ -2,7 +2,7 @@
 id: MYLA-417
 title: "P3b The checker: generic operators, literals, D178's call error, diagnostics"
 type: bug
-status: review
+status: todo
 priority: high
 labels: [checker, diagnostics, round-5]
 ---
@@ -67,3 +67,23 @@ Work package P3 of [[Project/Review-2026-11-09]], the checker half that [[Projec
 ## The owner's decision (2026-11-11)
 
 The proposals stand as built (D189). The message of a module's member it doesn't export now names the module, as the owner asked: `module 'std.deque' does not export 'Nope' (declarations are private unless marked 'pub')`, with `member_not_exported` re-pinned in `test_selfhost_codegen`'s `SUPERSEDED` and a new error-corpus file, `examples/errors/module_member_not_exported.my`. `deque.Deque { … }` stays a parse error (D170).
+
+## Review 2026-11-12
+
+Reopened ([[Project/Review-2026-11-12]]): two regressions, both narrow. The rest holds: 4,708 generated literal programs with none wrong, 174 diagnostics without an internal name, and the package's tests catch mutations of its fixes.
+
+- [ ] **D178's call error fires on a generic actor's getter called from outside** (new). The field can't be meant there, as an actor's state is private, and the fix the message gives (`let g = c.value`) is itself an error; the compiler before round 5 prints 6. `field_shadowed` should skip an actor receiver that isn't `self`. Reproducer `repro-r5/checker/bug1_d178_actor_getter.my`:
+
+  ```myla
+  actor Cell<T> { value: T }
+  impl<T> Cell<T> {
+      fun value(self) -> T { return self.value }
+  }
+  #main
+  async fun main() {
+      let c = Cell { value: (x: int) => x + 1 }
+      let f = await c.value()
+      print(f(5))
+  }
+  ```
+- [ ] D95's head, which [[MYLA-394]] carries (the same function, `Reentrancy.head`)

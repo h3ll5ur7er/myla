@@ -13,6 +13,7 @@ Where Myla stands, where it is going, why it is the way it is, and what is known
 | [[Project/Review-2026-11]] | The second review, 6 November 2026: the November work and the 83 tasks that waited in review |
 | [[Project/Review-2026-11-09]] | The third review, part 1, 9 November 2026: the 85 tasks of the standard-library rounds, their bugs, and the work packages of round 5 |
 | [[Project/Review-2026-11-10]] | The review of round 4 (pull request #57) and the owner's five questions |
+| [[Project/Review-2026-11-12]] | The review of round 5 (pull requests #58 to #64): verdicts on its 52 tasks, the bugs, and the work packages of round 6 |
 | [[Project/AoC-2015-2021]] | What solving Advent of Code 2015 to 2021 in Myla showed: nine findings, now tasks, and the helpers the solutions needed |
 | [[Project/Standard-library-roadmap]] | Candidate standard library modules with their use, size and a suggested order, for the owner to review |
 | [[Project/Reflection-2026-11]] | What the aarch64 and wasm32 backends taught about the IR, the platform interface and the language, and what to do before the next target |

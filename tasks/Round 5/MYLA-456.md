@@ -2,7 +2,7 @@
 id: MYLA-456
 title: "A deadline's end and a cancel look through every timer"
 type: improvement
-status: backlog
+status: done
 priority: low
 labels: [runtime, concurrency, round-5]
 ---
@@ -58,3 +58,7 @@ async fun main() {
 - The task's own program (20,000 sleepers, then 2,000 rounds): `timeout 270 ms first 2770 ms` before, `timeout 14 ms first 52 ms` after.
 - Suites: `scripts/test.sh fast`: 850 tests, the failures `test_embedded_std` and `test_installed`'s language-server case (both the embedded library behind `lib/` until the seed commit). `scripts/test.sh`: 1,519 tests, 338 skipped, the same two and `test_children_run_in_parallel` (CPU against wall time under the machine's load; it passes alone). `lib/std/task.my` 36/36 natively, aarch64 and wasm32; `net.my` 98/98, `process.my` 48/48, `io.my` 30/30 natively; `tests.burn.test_time`, `test_concurrency_stress`, `test_scheduling`, `test_net`, `test_process`, `test_task_yield` (50 tests OK), `test_selfhost_codegen` and `test_http` (53 OK). The bootstrap reaches its fixed point.
 - Cost, sockets and HTTP (natively, interleaved with the base, best of 8 on a lighter machine, load 2 to 3.5 on 4 cores): 8 connections × 20,000 round trips of 16 bytes (`read_async` and `write_async` on each side) on 4 workers 6.25 to 7.03 s before, 6.37 to 7.19 s after; on one worker 6.08 to 6.60 s before, 5.98 to 6.46 s after. One keep-alive client's 20,000 GETs against a 4-worker server 17,400 to 18,100 a second before, 15,000 to 27,700 after; four async clients 22,000 to 24,000 before, 20,200 to 22,400 after. Under a load of 5 to 7 earlier the same runs scattered from 13,000 to 31,700 a second either way. Within noise: a wait adds a record look-up and a store, and a task that waited takes the timers' lock once more at its end.
+
+## Review 2026-11-12
+
+Built and merged (`e45b680b`) while still `backlog`. Measured in [[Project/Review-2026-11-12]]: 2,000 `task.first` beside 20,000 sleepers take 18 ms (3.8 s before). Signed off.

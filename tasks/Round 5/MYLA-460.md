@@ -2,7 +2,7 @@
 id: MYLA-460
 title: "std.xml's stream reader is quadratic in an event's length over short reads"
 type: bug
-status: review
+status: todo
 priority: medium
 labels: [std, xml, streams, round-5]
 ---
@@ -65,3 +65,10 @@ Taken into [[MYLA-424]] (P10), whose file `lib/std/xml.my` is.
 | 1,000,000 bytes | 49,276 ms | 10 ms |
 
 - `build/myla test lib/std/xml.my --stdlib lib`: 90/90 interpreted, `--native`, `--target aarch64-linux`, `--target wasm32-wasi` (the `streams` case still reads every document in pieces of 1, 2, 3, 7 and 64 bytes as the text reader does, ISO-8859-1 in pieces of 1 to 23). `test_xml` (expat and the W3C suite, the stream reader in pieces of 1 to 7 bytes for every document) OK.
+
+## Review 2026-11-12
+
+Reopened ([[Project/Review-2026-11-12]]): the fix for the quadratic scan made the reader wait for bytes it doesn't need (new, high).
+
+- [ ] **The stream reader holds back a complete event until more bytes arrive.** `XmlStreamReader.fill` (`xml.my:1474`) reads until new bytes match the tail it held back, so an event that is whole in the buffer is given only after the next read: on a pipe an event complete at 1.0 s is delivered at 5.0 s, and a read that would block turns into `error 1:4: the stream failed` before `<m/>` is given (`repro-r5/std/bug_xml_stream_waits2.my`: pieces `<s><m v="0000000000` and `"/>`; before the fix the reader gave `start s`, `start m`, `end m`). Scan for the event's possible end, as `std.csv` does
+- [ ] A case that fails if the reader reads again once an event is whole

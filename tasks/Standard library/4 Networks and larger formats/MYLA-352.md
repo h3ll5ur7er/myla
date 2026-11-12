@@ -2,7 +2,7 @@
 id: MYLA-352
 title: DEFLATE compression and archives
 type: feature
-status: review
+status: done
 priority: low
 labels: [stdlib, compression, wave-4]
 ---
@@ -35,3 +35,7 @@ Wave 4 of [[Project/Standard-library-roadmap]], roadmap #50, #51. The compressor
 Not ready ([[Project/Review-2026-11-09]]): `tar_read` overflows on a pax number of 20 digits; uid/gid of 2^31 or more read negative. The fix is in [[MYLA-423]].
 
 - [x] The review's blocker, fixed with [[MYLA-423]]
+
+## Review 2026-11-12
+
+Signed off in [[Project/Review-2026-11-12]].

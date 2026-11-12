@@ -2,7 +2,7 @@
 id: MYLA-468
 title: "std.http: a silent connection holds a worker for `idle_ms`"
 type: improvement
-status: review
+status: done
 priority: medium
 labels: [std, http, security, round-5]
 ---
@@ -89,3 +89,7 @@ What remains with the built option: a client that sends a request's first bytes 
 - After: 0.79 to 0.81 s each.
 - `tests.burn.test_http`: 9 OK (one skipped: `HttpOnWasm`) natively; `TimeLimits` (3 tests) with `MYLA_TEST_TARGET=aarch64-linux`. `build/myla test lib/std/http.my`: 221/221 interpreted and `--native`.
 - Throughput (natively, interleaved with the base: [[MYLA-456]]'s evidence has the numbers): one keep-alive client's 20,000 GETs and four async clients' within the noise; the guard's poll of the listener happens only at a look that finds its connection idle and quiet, never on a request's path.
+
+## Review 2026-11-12
+
+Signed off in [[Project/Review-2026-11-12]], with a follow-up in [[MYLA-549]]: the task's own attack with one byte sent: 64 connections that each send `G`, renewed every 19 s, left a normal request unanswered for 38 s (`repro-r5/http/t_onebyte.py`). The task declares it under "what remains"; it is `high` there.

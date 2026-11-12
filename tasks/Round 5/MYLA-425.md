@@ -2,7 +2,7 @@
 id: MYLA-425
 title: "P11 Numbers and containers: D184 sweep, iterators, error types"
 type: bug
-status: review
+status: done
 priority: medium
 labels: [std, collections, num, overflow, round-5]
 ---
@@ -68,3 +68,7 @@ Work package P11 of [[Project/Review-2026-11-09]] (wave A2), with round 4's addi
 ## The owner's decision (2026-11-11)
 
 The proposals stand as built (D189).
+
+## Review 2026-11-12
+
+Signed off in [[Project/Review-2026-11-12]], with a follow-up in [[MYLA-550]]: `bigint.from_int(5i64).shl(2147483646).bit_len()` overflows, and union-find and the dense graph forms give a raw index error for a bad argument (both outside this package's files).

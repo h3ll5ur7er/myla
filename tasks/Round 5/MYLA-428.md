@@ -2,7 +2,7 @@
 id: MYLA-428
 title: "P14 Standard library helpers, round two"
 type: improvement
-status: review
+status: done
 priority: low
 labels: [std, cleanup, round-5]
 ---
@@ -65,3 +65,7 @@ Only a function of the caller's module is inlined ([[Architecture/IR]]), so a pe
 ## The owner's decision (2026-11-11)
 
 The proposals stand as built (D189).
+
+## Review 2026-11-12
+
+Signed off in [[Project/Review-2026-11-12]], with a follow-up in [[MYLA-553]]: the comments that keep helpers private "for the import cost" (`fs.my`, `digest.my`, `net.my`, `archive.my`, `compress.my`) were measured before lazy modules: the cost is 1.7 percent now.

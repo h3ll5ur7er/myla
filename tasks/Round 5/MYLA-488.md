@@ -2,7 +2,7 @@
 id: MYLA-488
 title: "`Url` derives `Eq` and `Hash`"
 type: improvement
-status: review
+status: done
 priority: low
 labels: [std, url, round-5]
 ---
@@ -30,3 +30,7 @@ Done in round 5's wave A2 integration: [[MYLA-422]] (P8) had made `Url` derive `
 
 - Test first: the test function `urls_compare_and_key_maps` in [[lib/std/url.my]] (two equal parses, another scheme's case, a map keyed by `Url`). With `#derive(Eq)` alone: `type error: map key type must be Eq and Hash, found 'Url': 'Url' isn't Hash`. With `#derive(Eq, Hash)`: `build/myla test lib/std/url.my --stdlib lib` 169/169.
 - [[Language/Standard-library/Url]] says the equality is field by field and that parsing lower-cases nothing.
+
+## Review 2026-11-12
+
+Signed off in [[Project/Review-2026-11-12]].

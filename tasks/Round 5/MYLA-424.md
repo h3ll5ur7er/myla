@@ -2,7 +2,7 @@
 id: MYLA-424
 title: "P10 Structured formats: TOML depth, YAML, JSON ranges"
 type: bug
-status: review
+status: done
 priority: medium
 labels: [std, toml, yaml, json, round-5]
 ---
@@ -59,3 +59,7 @@ Suites (4 cores shared with the other lanes): the bootstrap reaches a byte-ident
 ## The owner's decision (2026-11-11)
 
 The proposals stand as built (D189). A `uint64` above 2^63 stays as `encode` writes it, documented; no `Json.UInt(uint64)` variant.
+
+## Review 2026-11-12
+
+Signed off in [[Project/Review-2026-11-12]], with a follow-up in [[MYLA-550]]: `yaml.parse("mask: 0xFFFFFFFFFFFFFFFF\n")` traps at `yaml.my:1139` where the program is checked (D184); its seventh box, the XML reader, is [[MYLA-460]], which is reopened.

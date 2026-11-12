@@ -2,7 +2,7 @@
 id: MYLA-394
 title: "D95's reentrancy warning misses a builtin mutator inside an expression"
 type: bug
-status: review
+status: todo
 priority: low
 labels: [checker, concurrency, warnings]
 ---
@@ -35,3 +35,10 @@ Suites at the batch's tip: the bootstrap's fixed point; `scripts/test.sh fast` 7
 Not ready ([[Project/Review-2026-11-09]]): D95 misses a mutator in the head of `if`, `while` and `match`. The fix is in [[MYLA-417]].
 
 - [x] The review's blocker, fixed with [[MYLA-417]]: a mutator in the head of an `if` or a `while`, a match's scrutinee or a guard changes its field before the head is examined (`Reentrancy.head`, `value_changes`); six new `warnings_of` cases
+
+## Review 2026-11-12
+
+Reopened ([[Project/Review-2026-11-12]]): the warning got weaker with [[MYLA-417]]'s rewrite of the head.
+
+- [ ] **An `await` and a mutator of the checked field in one `if` or `while` head are no longer reported**: `while await p.charge() > 0 && self.items.pop() > 0 { }` after `if self.items.len() == 0 { return 0 }` warned before round 5 and doesn't now (5 warnings then, 1 now, on `repro-r5/checker/bug2_d95_await_in_head.my`), because `Reentrancy.head` makes a head's changes before its awaits. Walk the head in evaluation order
+- [ ] The new false positive of `repro-r5/checker/h2.my`

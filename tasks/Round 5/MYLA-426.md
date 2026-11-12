@@ -2,7 +2,7 @@
 id: MYLA-426
 title: "P12 Terminal, paths, arguments, platform corners, small modules"
 type: bug
-status: review
+status: done
 priority: medium
 labels: [std, term, glob, args, platform, round-5]
 ---
@@ -61,3 +61,7 @@ Left as it is: on wasm32 a seek on a directory's descriptor is EBADF (WASI's rig
 ## The owner's decision (2026-11-11)
 
 The proposals stand as built (D189).
+
+## Review 2026-11-12
+
+Signed off in [[Project/Review-2026-11-12]], with a follow-up in [[MYLA-548]]: a failure doesn't end the program while a task blocks in a key read (the terminal stays raw), and signals leave it raw (the owner's decision 2); `std.args`' spec checks are in [[MYLA-553]]. The evidence's `args 46/46` is 43 cases today.

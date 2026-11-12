@@ -2,7 +2,7 @@
 id: MYLA-441
 title: "Native `map key … not found` for struct, enum and list keys"
 type: improvement
-status: review
+status: done
 priority: low
 labels: [lowering, runtime, round-5]
 ---
@@ -27,3 +27,7 @@ Built as IR (`selfhost/lower.my`): `key_text_of` writes a scalar or string key a
 - Test first: 21 new cases in `test_runtime_errors_carry_the_interpreters_values` (struct, empty struct, unit and payload variants, a quoted string payload, tuple of struct, list, empty list, nested lists, lists of bools/chars/tuples, `Option`, a generic struct, an enum of structs and lists, a recursive enum in a struct, a `uint64` field, a unit payload, float and float32 fields, a list key of a place). Before: 18 of the first 18 failed (`map key not found`); after: all pass on x86-64, aarch64 (`MYLA_TEST_TARGET=aarch64-linux`) and wasm32 (`MYLA_TEST_TARGET=wasm32-wasi`).
 - By hand, an imported type: `map key lib$Shape.Pair(lib$Q { a: 1, s: "it's" }, [1, 2]) not found` on both runners and all three targets: the interpreter's text, module ids included (see [[MYLA-514]]).
 - Bootstrap fixed point: byte-identical (21,127,093 bytes).
+
+## Review 2026-11-12
+
+Signed off in [[Project/Review-2026-11-12]], with a follow-up in [[MYLA-543]]: float fields of a key are written `3` natively and `3.0` interpreted (`1e300` and `1e+300`).

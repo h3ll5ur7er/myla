@@ -2,7 +2,7 @@
 id: MYLA-414
 title: "P1 The interpreter: generic code, receivers, errno"
 type: bug
-status: review
+status: todo
 priority: high
 labels: [interpreter, generics, overflow, round-5]
 ---
@@ -62,3 +62,23 @@ All in [[selfhost/interp.my]] (and one line of [[selfhost/repl.my]], which shows
 ## The owner's decision (2026-11-11)
 
 The proposals stand as built (D189).
+
+## Review 2026-11-12
+
+Reopened ([[Project/Review-2026-11-12]]): the interpreter loses the binding of type parameters in one more place, and two things are new with this package. The rest holds: 320 generated per-width programs agree with native code, trap positions included. A validated patch for the three is in the bundle (`repro-r5/interp/candidate-fixes.patch`, 38 lines).
+
+- [ ] **The binding is lost when a map key's written `eq` or `hash` runs before a `var self` call** (high, in H1's scope): `m[K { v: 1 }].sort()` on a `[uint64]` value sorts signed, and `repro-r5/interp/settle_env3.my` is an internal error (`no method 'twice'`). Settling the key consumes the pending environment; bind again after it. Reproducer `repro-r5/interp/settle_env2.my`:
+
+  ```myla
+  #derive(Hash)
+  struct K { v: int }
+  impl Eq for K { fun eq(self, other: K) -> bool { return self.v == other.v } }
+
+  fun main() {
+      var m = [K { v: 1 }: [5u64, 18446744073709551615u64, 1u64]]
+      m[K { v: 1 }].sort()
+      for x in m[K { v: 1 }] { print(x) }    // native: 1, 5, 18446744073709551615
+  }
+  ```
+- [ ] **`env_memo` grows per call path** (medium, new): a generic function with two recursive call sites, `fib<T: Add + Sub + Ord>(27, 1, 2)`, takes 163 MB against 13 MB for the same function on `int` (`repro-r5/interp/gfib.my`; `gfib31.my`: 1,067 MB). Intern the environments by content
+- [ ] **A test function's `Err` of packed bytes prints `ERR: VBytes()`** under `myla test` (new, with the packed `[uint8]`); natively `[97, 98]` (`repro-r5/interp/vbytes_t2.my`)

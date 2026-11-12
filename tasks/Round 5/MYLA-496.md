@@ -2,7 +2,7 @@
 id: MYLA-496
 title: "A `for` over a map lists all its keys first, so leaving the loop early still costs the map's size"
 type: improvement
-status: review
+status: done
 priority: low
 labels: [maps, performance, runtime, round-5]
 ---
@@ -58,3 +58,7 @@ Test first, before (round 5's compiler, `bccc624` plus MYLA-441) and after, x86-
 - A stress of 200,000 rounds of loops with `break`, `continue`, `return` and a body that changes the map, string keys and list values: the same output, 11,292 KB peak before and after (nothing leaks); also with `-g` and `--checked`.
 - Callgrind, Myla's instructions: `map_remove` (4,000) 15.78 → 15.90 M (+0.7 %: the order's store per insert, the compactions walking it instead of the slots; `map_by_rank` and its `zero_bytes` gone); `word_freq` (100,000) 140.47 → 140.58 M (+0.08 %); the compiler compiling itself 12,189.6 → 12,194.9 M (+0.04 %). The same outputs.
 - Bootstrap fixed point: byte-identical (21,145,493 bytes).
+
+## Review 2026-11-12
+
+Signed off in [[Project/Review-2026-11-12]], with a follow-up in [[MYLA-554]]: the docs don't say what a `for` over a list or map sees when its body changes it (the loop walks what it began with).

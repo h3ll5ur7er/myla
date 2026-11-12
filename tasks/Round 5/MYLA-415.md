@@ -2,7 +2,7 @@
 id: MYLA-415
 title: "P2 Lowering and native runtime copies"
 type: bug
-status: review
+status: todo
 priority: high
 labels: [lowering, runtime, memory-safety, round-5]
 ---
@@ -68,3 +68,31 @@ Each reproducer of `review1/repro/native/` became a test that failed before (the
 ## The owner's decision (2026-11-11)
 
 Proposals 1, 2 and 4 stand as built (D189). Proposal 3 is decided otherwise (D188): `myla build` of a file without an entry point is `error: no entry point …`, an error of its own kind, not a type error; once Myla has an FFI it builds a library ([[MYLA-505]]). Changed with the decision: `CodeGen.generate`'s message and `loader.kind_of`.
+
+## Review 2026-11-12
+
+Reopened ([[Project/Review-2026-11-12]]): H3 isn't closed for one shape, which the pre-round-5 compiler shares and the parity program `recursive_enums_across_tasks` never builds. Everything else holds on five runners: 35 value shapes through about 60 hand-overs each at up to 3,000 rounds and 8 threads, 10^6 levels of nesting, 5,400 generated write statements.
+
+- [ ] **A closure held in a variable that captures a recursive enum segfaults when it is copied to a child task, an actor or a channel** (exit 139 on x86-64, `--checked` and aarch64; the interpreter and wasm32 print 3). Also a partial `add(cap, _)`, a struct holding the closure, nested closures, `[f, f]` to `task.all`, `ch.send(f)`. A temporary closure works. Unverified: `Lower.deep_member` loads a boxed capture as a box, where an environment holds the enum's contents inline. Reproducer `repro-r5/native/segv_closure_captures_recursive_enum_to_task.my`:
+
+  ```myla
+  enum Lst { Nil, Cons(int, Lst) }
+
+  fun total(l: Lst) -> int {
+      return match l {
+          Cons(n, rest) => n + total(rest)
+          Nil => 0
+      }
+  }
+
+  async fun run(f: () -> int) -> int { return f() }
+
+  #main
+  async fun main() {
+      let cap = Lst.Cons(1, Lst.Cons(2, Lst.Nil))
+      let f = () => total(cap)
+      async let a = run(f)
+      print(await a)
+  }
+  ```
+- [ ] Closures, partials and structs holding a closure that capture a recursive enum, in the parity program

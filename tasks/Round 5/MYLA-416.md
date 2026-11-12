@@ -2,7 +2,7 @@
 id: MYLA-416
 title: "P3a Lexer and parser: lazy skipping, f-string holes, D186"
 type: bug
-status: review
+status: done
 priority: high
 labels: [lexer, parser, lazy-parsing, round-5]
 ---
@@ -46,3 +46,7 @@ Commits on `worktree-agent-ad519a00c8e57d5c2` (no staging commit, no seed): `MYL
 ## The owner's decision (2026-11-11)
 
 The proposals stand as built (D189).
+
+## Review 2026-11-12
+
+Signed off in [[Project/Review-2026-11-12]], with a follow-up in [[MYLA-545]]: a declaration swallowed after a missing `}` still loads silently when it doesn't start its line (`/* c */ fun`, `}; fun`, `#derive(Eq) pub struct`); 8 of the 12 declaration keywords of `starts_decl` are untested.

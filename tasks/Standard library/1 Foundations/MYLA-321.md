@@ -2,7 +2,7 @@
 id: MYLA-321
 title: "std.str: search, split, join, trim, case, replace"
 type: feature
-status: review
+status: done
 priority: high
 labels: [stdlib, strings, wave-1]
 ---
@@ -39,3 +39,7 @@ The last box was done already: [[Language/Standard-library/Str]] exists, and com
 Not ready ([[Project/Review-2026-11-09]]): `trim_end()` returns a whitespace-only string unchanged (M16). The fix is in [[MYLA-420]].
 
 - [x] The review's blocker, fixed with [[MYLA-420]]
+
+## Review 2026-11-12
+
+Signed off in [[Project/Review-2026-11-12]].
