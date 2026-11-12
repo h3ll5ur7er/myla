@@ -1,0 +1,5 @@
+type error: operator '==' is not defined for 'W<list.ListIter<int32>>': 'list.ListIter<int32>' isn't Iterator<str> (it implements 'Iterator<int32>')
+  --> examples/errors/type_impl_bound_generic_trait.my:20:39
+   |
+20 |     print(W { v: [123456789].iter() } == W { v: [2].iter() })
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

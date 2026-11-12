@@ -1,0 +1,9 @@
+//~ type error: integer literal -97 (the char literal negated) does not fit in 'uint8'
+//~ span: -'a'
+// A char literal fits a `uint8` where one is expected, as its code; negated,
+// it is a negative number, which fits no unsigned type (MYLA-544, as L5's
+// `-1`): it was taken and wrapped to 159.
+fun main() {
+    let v: uint8 = -'a'
+    print(v)
+}

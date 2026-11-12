@@ -1,0 +1,6 @@
+type error: cannot derive Eq for struct 'P': field 'w' has type 'W<I>', which is Eq only where 'I: Iterator<str>'
+  --> examples/errors/type_derive_field_generic_trait_bound.my:18:1
+   |
+18 | struct P<I> {
+   | ^^^^^^^^^^^^^
+help: write the impl instead: 'impl<I: Eq + Iterator<str>> Eq for P<I>'

@@ -13,7 +13,7 @@ from .checker import is_notify_primitive
 from .checker import Checker, Type, Subst, subst_type, subst_get, unify_param, type_name, is_raw_memory_primitive, is_net_primitive, is_lot_primitive, is_term_primitive, checker_on, builtin_method, builtin_method_name, is_wrapping_method, add_overflows, sub_overflows, mul_overflows, int_min, int_neg_overflows, shift_out_of_range, is_slice_expr, from_end_of, slice_parts, is_hole_part
 from .anf import Norm, new_norm, stmt_suspends, body_suspends
 from .util import cp_utf8, format_specs, written_type_name
-from std.fmt import fmt_int, fmt_float, fmt_text
+from std.fmt import fmt_int, fmt_float, fmt_text, parse_spec
 from std.slice import range_of, str_whole, take_str
 from std.num import f64_literal_bits, f32_round_bits, float_from_bits, pow2, format_float
 from std.io import write, eprint, errno_text
@@ -3758,6 +3758,41 @@ impl Interp {
             self.bind_next(fi, e.id, self.resolved_of(recv.id))
             let (r, fs) = self.call_method(fi, rv, argv)
             return r
+        }
+        // `x.format(spec)` of a printable builtin value, `x: T` with
+        // `T: Format` (MYLA-544): its print form by the spec, as a hole's
+        if method == "format" && args.len() == 1 && fi < 0 {
+            if !evaluated {
+                rv = self.eval(recv)
+                evaluated = true
+            }
+            let user = match self.deref(rv) {
+                Value.VStruct(n, fns, fvs) => true,
+                Value.VEnum(en, vr, pl) => true,
+                _ => false,
+            }
+            if !user {
+                let spec = as_str(self.eval(args[0]))
+                if self.stop() { return Value.VUnit }
+                let t = self.full_type_of(recv.id)
+                match parse_spec(spec) {
+                    Ok(sp) => { return Value.VStr(self.format_spec_value(rv, t, spec)) },
+                    Err(why) => {},
+                }
+                // a spec that isn't one: the program's std.fmt fails on it,
+                // as native code's does, not the interpreter's own copy
+                let (name, argv) = match t {
+                    Some(Type.TInt(w, sg)) => ("std$fmt$fmt_int", [Value.VInt(as_int(rv)), Value.VInt(w as int64), Value.VBool(sg), Value.VStr(spec)]),
+                    Some(Type.TFloat(w)) => ("std$fmt$fmt_float", [Value.VFloat(as_float(rv)), Value.VStr(format_typed(rv, t)), Value.VStr(spec)]),
+                    _ => ("std$fmt$fmt_text", [Value.VStr(format_typed(rv, t)), Value.VStr(spec)]),
+                }
+                let ffi = self.func_idx(name)
+                if ffi < 0 {
+                    self.fail(e, format("invalid format spec '{}'", spec))
+                    return Value.VUnit
+                }
+                return self.call_func(ffi, argv)
+            }
         }
         // not a method: a field holding a function, called (an actor's
         // through its handle, from its own method: the 2026-11-10 review's
