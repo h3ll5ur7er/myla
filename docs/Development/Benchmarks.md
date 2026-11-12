@@ -220,6 +220,18 @@ All thirteen programs after the standard library waves, D175 (#54) and batches 4
 - `map_remove`'s first part empties a map of 4,000 keys, which now compacts it five times on the way (to 2,048 slots, then 512, 128, 32 and 8): about 0.38 M instructions in `map_rehash`, `map_by_rank`, `map_set_slot` and `zero_bytes`, the price of the shrinking, amortised O(1) per removal. Some 0.2 M of the rest is the executor's idle loop, which varies by that much from run to run.
 - Times are the same within noise (`word_freq` 901 → 841 ms, `map_remove` 30 → 23 ms, the median of 5).
 
+## Progress: a `for` over a map walks its slots (2026-11-11)
+
+[[MYLA-496]] makes `for k in m` step through the map's slots in the order of insertion (std.rt's `map_walk`, through an order of the slots by rank kept in the cell) instead of making the list of its keys first, and start at the first rank that may still be a key's: a loop that leaves at its first key costs the gaps since the last one. 20,000 keys taken oldest-first by `for k in m { first = k; break }` took 2.6 s natively and 9.7 s interpreted, and take 3 ms and 0.19 s.
+
+| Myla's instructions | Before | After | Change |
+|---|---:|---:|---:|
+| `word_freq` (100,000) | 140.47 M | 140.58 M | +0.08 % |
+| `map_remove` (4,000) | 15.78 M | 15.90 M | +0.7 % |
+| the compiler compiling itself | 12,189.6 M | 12,194.9 M | +0.04 % |
+
+- An insert stores its slot's index in the order (4 bytes a slot more, 12.5 % of an `[int: int]` map's 32-byte slot), and a compaction walks the order: `map_remove`'s `map_by_rank` and the `zero_bytes` of its block are gone, `map_set_slot` and `map_rehash` run a little more.
+
 ## How the first round went
 
 The first round (fib, the sieve, binary trees) checked the method and needed two additions to `run.py`: user and system time and page faults, and names for valgrind's addresses. Instruction counts alone hid both large gaps of the round: the sieve's page faults, and binary trees running C's instruction count in 5.7× C's time. The second turned out to be `rep movsq` copying the three-word `Tree` at every match: a microcoded instruction that starts slowly, and which callgrind counts as one. Copying up to 8 words with moves fixed it ([[MYLA-246]]).

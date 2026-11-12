@@ -10,11 +10,18 @@
 // every stage carries the same library (and std.args, which reads its
 // arguments, must compile with the seed). Any mistake in the arguments, and
 // --help, prints the usage line and exits with status 2.
+//
+// With each module's text, the module carries its parse (MYLA-412): the
+// declarations with their functions' bodies left for later, as the loader
+// parses a module of `std` (`selfhost/astcache.my`), and reads instead of
+// the file whenever the file's text is the embedded one. std.rt, which the
+// loader parses whole, has none.
 
 from std.fs import read_to_string, write_to_file, list_dir, is_dir
 from std.io import println, eprintln
 from std.process import args, exit
 import std.args as cli
+from ...selfhost.astcache import cache_entry
 
 // The regular files under `root`/`rel`, as paths relative to `root`, sorted;
 // names starting with "." are left out.
@@ -101,8 +108,40 @@ fun fun_name(path: str) -> str {
     return sb.build()
 }
 
+// The function holding a module's parse: `cache_` and the path as in
+// `fun_name`.
+#test("std/io.my")["cache_std_io_my"]
+fun cache_name(path: str) -> str {
+    return "cache" + fun_name(path)[4:]
+}
+
+// Whether the loader reads the module `path` with its bodies left for
+// later, so that its parse is worth carrying: every module of `std` but
+// std.rt (`Loader.lazy_std`).
+#test("std/io.my")[true]
+#test("std/rt.my")[false]
+#test("debug/myla_gdb.py")[false]
+fun cached(path: str) -> bool {
+    return path.starts_with("std/") && path.ends_with(".my") && path != "std/rt.my"
+}
+
+// Whether the module `path`'s parse carries its functions' bodies parsed
+// too: the implicit modules' (`implicit_modules` in selfhost/loader.my,
+// D164), some of whose bodies every program reads. Another module's are
+// read from its text, which costs a program that calls them a little
+// more and the toolchain 2 MB less.
+#test("std/int.my")[true]
+#test("std/http.my")[false]
+fun with_bodies(path: str) -> bool {
+    for name in ["str", "char", "int", "list", "option", "map", "hash"] {
+        if path == f"std/{name}.my" { return true }
+    }
+    return false
+}
+
 // The module for the files `paths` of `root`: each file's text as one string
-// literal (a list of lines would cost several instructions per line).
+// literal (a list of lines would cost several instructions per line), and
+// each module's parse (`cache_entry`).
 fun module(root: str, paths: [str]) -> str {
     var sb = StringBuilder()
     sb.append("// embedded_std.my: the standard library and the gdb script, as the toolchain\n")
@@ -116,7 +155,15 @@ fun module(root: str, paths: [str]) -> str {
     sb.append("// doesn't list.\n")
     sb.append("pub fun embedded_file(path: str) -> str {\n")
     for p in paths { sb.append(f"    if path == \"{escaped(p)}\" {{ return {fun_name(p)}() }}\n") }
+    sb.append("    return \"\"\n}\n\n")
+    sb.append("// The parse of the embedded module `path` (selfhost/astcache.my, MYLA-412),\n")
+    sb.append("// or \"\" for none.\n")
+    sb.append("pub fun embedded_cache(path: str) -> str {\n")
+    for p in paths {
+        if cached(p) { sb.append(f"    if path == \"{escaped(p)}\" {{ return {cache_name(p)}() }}\n") }
+    }
     sb.append("    return \"\"\n}\n")
+    var parses: [str] = []
     for p in paths {
         let text = match read_to_string(root + "/" + p) {
             Ok(t) => t,
@@ -127,7 +174,15 @@ fun module(root: str, paths: [str]) -> str {
             },
         }
         sb.append(f"\nfun {fun_name(p)}() -> str {{\n    return \"{escaped(text)}\"\n}}\n")
+        if cached(p) {
+            let entry = cache_entry(text, with_bodies(p))
+            // a module the loader will parse on every use, which only a
+            // module that doesn't parse should be
+            if entry == "" { eprintln(f"embed: {p} is carried without its parse: it doesn't parse, or its parse doesn't read back") }
+            parses.push(f"\nfun {cache_name(p)}() -> str {{\n    return \"{escaped(entry)}\"\n}}\n")
+        }
     }
+    for c in parses { sb.append(c) }
     return sb.build()
 }
 

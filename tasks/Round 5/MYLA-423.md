@@ -42,3 +42,6 @@ Decisions the items left open, built as recommended; the owner decides.
 
 **Suites**: `scripts/test.sh fast`: 829 tests, one failure, `test_embedded_std` (expected until the integrator's seed commit). `tests.burn.test_std_modules`, `test_doc_blocks`, `test_lsp`, `test_compiler_parity` and `test_http` (std.http calls std.compress): 427 tests, OK. `scripts/test.sh` (full): 1482 tests in 21 min, the same one failure, 336 skipped. The bootstrap from the base seed is unchanged (no compiler change); `selfhost/embedded_std.my` restored, not committed.
 
+## The owner's decision (2026-11-11)
+
+The proposals stand as built (D189).

@@ -61,3 +61,7 @@ Only a function of the caller's module is inlined ([[Architecture/IR]]), so a pe
 - `python3 scripts/gen_std_int.py --check`: current (its template's `holds` went too).
 - `scripts/bootstrap.sh` (std.toml, std.fs, std.io, std.process and std.num are the compiler's): byte-identical fixed point, 21,013,000 bytes; `selfhost/embedded_std.my` restored after it.
 - `scripts/test.sh fast`: 837 tests, two failures, `test_embedded_std` and `test_installed`'s `test_the_language_server_knows_the_standard_library`, both because `selfhost/embedded_std.my` is behind `lib` until the pull request's seed commit (D156). `python3 -m unittest tests.burn.test_compiler_parity tests.burn.test_lsp tests.burn.test_toml tests.burn.test_compress tests.burn.test_archive tests.burn.test_http tests.burn.test_regex tests.burn.test_yaml tests.burn.test_xml tests.burn.test_fs`: 478 tests, OK. `scripts/test.sh`: 1503 tests, the same two failures, nothing else.
+
+## The owner's decision (2026-11-11)
+
+The proposals stand as built (D189).

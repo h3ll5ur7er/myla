@@ -57,3 +57,7 @@ Left as it is: on wasm32 a seek on a directory's descriptor is EBADF (WASI's rig
 - **Module cases**: `myla test lib/std/<m>.my --stdlib lib` for term 102, glob 51, args 46, bench 23, text 143: all pass interpreted, `--native`, `--target aarch64-linux` and `--target wasm32-wasi`; `platform_wasm` 19/19 interpreted and on wasm32; `net` 98/98 interpreted and native; `rt` 29/29.
 - **Bootstrap**: byte-identical fixed point after the compiler commit (20,129,051 bytes, from the old seed), and after the library's use on the staged seed (20,134,340 bytes).
 - **Suites**: `scripts/test.sh fast` 833 tests, 1 failure: `test_embedded_std`, expected until the integrator's seed. `scripts/test-target.py wasm32-wasi` test_net, test_fs, test_platform_primitives, test_term: pass; `aarch64-linux` test_fs, test_net, test_platform_primitives, test_term: pass. `tests.burn.test_wasm` OK, `test_doc_blocks` OK. The full `scripts/test.sh`: 1,484 tests, 336 skipped, 1 failure, the same `test_embedded_std` (`test_std_modules`, `test_compiler_parity`, `test_lsp`, `test_term`, `test_fs`, `test_net` among the passes).
+
+## The owner's decision (2026-11-11)
+
+The proposals stand as built (D189).

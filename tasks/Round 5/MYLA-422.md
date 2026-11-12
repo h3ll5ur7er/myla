@@ -44,3 +44,7 @@ Work package P8 of [[Project/Review-2026-11-09]] (wave A2). Files: `lib/std/http
 - **Which control bytes a value may hold**: NUL and a bare CR are refused (LF ends the line), the other C0 controls kept, as RFC 9110 allows. Alternative: refuse every control but HT, as Go's server does.
 - **The guard reads `std.task`'s `Listener.gen`** (a field of a `pub struct`) and relies on `notify_all` counting the generation with no waiter: lane P5 owns `task.my`. Alternative: a public counter in `std.task` (`Notifier.generation()`), which P5 or the integrator could add; the read would then go through it.
 - A request without `Host` is still refused only by the server (400), not by `parse_request`; [[MYLA-468]] is the worker-per-connection limit that remains.
+
+## The owner's decision (2026-11-11)
+
+The proposals stand as built (D189).

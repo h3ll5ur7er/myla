@@ -24,7 +24,7 @@ fun main() {
 
 Output isn't buffered: what a program wrote is out before it waits for input.
 
-A write to the standard output or error whose pipe nobody reads any more (`myla run prog.my | head -1`) ends the program quietly, as Unix tools stop: natively by SIGPIPE, on wasm32 with the exit code 141 a shell shows for it (D146). Any other error of `print`, `println`, `eprint` and `eprintln`, which have no result (a full disk: `prog > /dev/full`), ends the program with `runtime error: write failed: <cause>` and status 1 (D153); `write` gives it to the program. A write to any other descriptor gives the error to the program instead: the runtime ignores SIGPIPE, and gives a child it starts the default back.
+A write to the standard output or error whose pipe nobody reads any more (`myla run prog.my | head -1`) ends the program quietly, as Unix tools stop: natively by SIGPIPE, on wasm32 with the exit code 141 a shell shows for it (D146). Any other error of `print`, `println`, `eprint` and `eprintln`, which have no result (a full disk: `prog > /dev/full`), ends the program with `runtime error: write failed: <cause>` and status 1 (D153); `write` gives it to the program. A write to any other descriptor gives the error to the program instead: the runtime ignores SIGPIPE, and gives a child it starts the default back. A write to a descriptor that is non-blocking and full (a pipe a parent such as Node hands over, its reader slow) waits for room as a blocking write would, the thread in a poll; it tried again at once and spun on the CPU before [[MYLA-457]]. In a task, `FdStream.write_async(b)` waits with the task suspended instead, so the other tasks run on its worker.
 
 ## Reading
 
@@ -60,7 +60,7 @@ fun main() {
 
 A protocol that frames messages with a `Content-Length` header reads the header lines with `read_line` and the body with `read_exact`; `tests/burn/test_stdin.py` has an example.
 
-A line or a count longer than what is buffered is gathered in a builder, read by read, so each byte is copied once: `read_line` and `read_exact` take time linear in the length, however few bytes a read gives ([[MYLA-420]], the review's M17 and S5). Before, each read copied the bytes gathered so far again. Natively on x86-64 (2026-11-10): an 8 MiB line 1,291 ms before, 31 ms now; a 16 MiB line from a pipe 21,346 ms, 97 ms; `read_exact(16 MiB)` from a pipe 1,489 ms, 43 ms (from a file 32 and 36 ms). Interpreted, `read_exact(16 MiB)` from a pipe 34,179 ms before, 350 ms now; an 8 MiB line didn't end in 100 s before and takes 16.7 s now, the interpreter's time to look at each byte for the `"\n"`. Lines of up to 120 bytes read as fast as before (50 MB in 112 to 128 ms either way). A failed read in the middle of a line or a count gives its error and leaves what was read of it unread.
+A failed read in the middle of a line or a count gives its error and leaves what was read of it unread.
 
 In a task, each read has an async version that waits for the input with the task suspended, so the other tasks run meanwhile (D124, [[MYLA-230]]): `await r.read_line_async()`, `await r.read_exact_async(n)`, `await r.read_to_end_async()`, `await r.fill_async(want)`. They give what the blocking reads give; outside a task they block as those do. A task asked to stop (`task.cancel`, a `task.timeout` that ran out) stops waiting at once and gets `Err(IoError.Cancelled)` (ECANCELED). Natively the executor's poller watches the descriptor (a regular file, which it can't watch, is always ready); the interpreter looks at the waiting tasks' descriptors before each turn.
 
@@ -119,13 +119,11 @@ fun main() {
 
 `Read` and `Write` deal in bytes only (D177): a stream implements `read`, or `write` and `flush`, and nothing for text. Strings are bytes (D164), and since [[MYLA-369]] `std.bytes`'s `from_str` and `to_str` convert in one allocation and one copy (the primitives `__str_to_bytes` and `__bytes_to_str`), so a `[uint8]` costs about what a `str` does (the measurements below); the streams of a descriptor (`FdStream`, `fs.File`, a child's pipes) read into a `[uint8]` and write from one themselves (the primitives `__read_bytes` and `__write_bytes`), so their bytes aren't converted at all. Text goes through the adapters: a `Buffered` pulls bytes, keeps them as text and gives `read_line`, `read_exact` and `read_to_end`; a `BufferedWriter` takes text with `write_str`. To write a few bytes of text to an unbuffered stream, `w.write(bytes.from_str(s))` (`import std.bytes as bytes`). Until [[MYLA-399]] each trait had a `str` twin, `read_str` and `write_str`, from when the two kinds converted only byte by byte ([[MYLA-338]]).
 
-A read that gives fewer bytes than it asks for gives a list, or a string, of their size: `__read_bytes`, `__read` and `__sock_recv` keep the cell they allocated for the request only when they filled at least half of it, else they copy what they got into a cell of its size ([[MYLA-420]], the 2026-11-10 review's S1). Before, 33 MB read from a pipe 64 KiB at a time with reads of 16 MiB kept 504 cells of 16 MiB and ran out of memory on wasm32; now it reads them in 105 MB there.
-
 ### Streams of this module
 
 | Item | What it is |
 | --- | --- |
-| `fd_stream(fd: int32) -> FdStream` | A descriptor, unbuffered: each read and write is a system call. `Read`, `Write`, `Seek` (a pipe can't: `Other(29)`, ESPIPE), `Pollable`. A write to a closed pipe is `BrokenPipe`, but on the standard output or error, where it ends the program quietly (D146) |
+| `fd_stream(fd: int32) -> FdStream` | A descriptor, unbuffered: each read and write is a system call. `Read`, `Write`, `Seek` (a pipe can't: `Other(29)`, ESPIPE), `Pollable`. A write to a closed pipe is `BrokenPipe`, but on the standard output or error, where it ends the program quietly (D146). `write_async(b)` (async): `write`, the task waiting while the descriptor is full, a piece of 4,096 bytes (PIPE_BUF) at a time; `Cancelled` when its task is asked to stop ([[MYLA-457]]) |
 | `memory_stream() -> MemoryStream`, `from_bytes(b: [uint8])`, `from_str(s: str)` | Bytes in memory and a cursor at the start. `Read`, `Write` (over the bytes at the cursor, and on past the end; a gap a seek past the end left is zeros), `Seek`. It holds up to 2,147,483,647 bytes: a seek past that, by an offset of any size, is `InvalidInput`, and a write past it `Other(27)` (EFBIG), not an overflow (D184) |
 | `m.bytes() -> [uint8]`, `m.text() -> str`, `m.position() -> int64` | All its bytes, wherever the cursor is; as text; the cursor |
 | `buffered(r: R) -> Buffered<R>` | A buffer in front of `r`: `read_line`, `read_exact`, `read_to_end` and `fill` as `Reader` has them (`Reader` is `Buffered<FdStream>`), `into_inner()` (the stream, without the bytes still buffered). `Read`; `Seek` if `r` can (the buffer dropped; `Current` counts from the next byte a read gives); `Pollable`, `ready` and the async reads if `r` is `Pollable` |
@@ -186,30 +184,42 @@ fun main() {
 
 An adapter is a generic struct, `struct Buffered<R>` (a struct's parameters can't have bounds), with `impl<R: Read> Buffered<R>`, and `impl<R: Read> Read for Buffered<R>` so that adapters stack. Another impl block may ask for more, `impl<R: Read + Pollable> Buffered<R>`, and its methods are there only for such an `R`. `Buffered` keeps its stream as the one element of a list and takes it out for each read: a stream that is a plain field would share its bytes with the copy a read works on, and a read that changes them would copy them all each time.
 
-### Speed
+## How it works
 
-Natively on x86-64, 50 MB of lines of up to 120 bytes, best of three ([[MYLA-338]]):
+A line or a count longer than what is buffered is gathered in a builder, read by read, so each byte is copied once: `read_line` and `read_exact` take time linear in the length, however few bytes a read gives ([[MYLA-420]], the review's M17 and S5). Before, each read copied the bytes gathered so far again: natively an 8 MiB line took 1,291 ms, a 16 MiB line from a pipe 21,346 ms and `read_exact(16 MiB)` from a pipe 1,489 ms; interpreted, that `read_exact` took 34,179 ms and an 8 MiB line didn't end in 100 s (2026-11-10). Today's times are under [[#speed]].
+
+A read that gives fewer bytes than it asks for gives a list, or a string, of their size: `__read_bytes`, `__read` and `__sock_recv` keep the cell they allocated for the request only when they filled at least half of it, else they copy what they got into a cell of its size ([[MYLA-420]], the 2026-11-10 review's S1). Before, 33 MB read from a pipe 64 KiB at a time with reads of 16 MiB kept 504 cells of 16 MiB and ran out of memory on wasm32; now it reads them in 105 MB there.
+
+The streams of a descriptor read into a `[uint8]` and write from one themselves, through `__read_bytes` and `__write_bytes` (D177, [[MYLA-399]]). A step between, which converted the descriptor's `str` from and to a `[uint8]`, made the 4 GiB copy of the table below take 481 ms, four times the 111 ms of these primitives and the 109 ms of the old `read_str` and `write_str`, and cost nothing measurable for lines (2026-11-09).
+
+`copy` reads 64 KiB at a time ([[MYLA-379]]; it was 4 KiB). The 256 MiB file of the table, copied with other sizes (a copy of the library with `COPY_CHUNK` changed, the same runs):
+
+| Piece | To a new file | To `/dev/null` |
+| --- | ---: | ---: |
+| 4 KiB | 380 ms | 51 ms |
+| 16 KiB | 239 ms | 38 ms |
+| 64 KiB | 159 ms | 34 ms |
+| 128 KiB | 197 ms | 35 ms |
+
+The medians put 64 and 128 KiB together (215 to 231 ms and 213 to 224 ms to a new file, in the two sets), and 4 KiB at twice their time.
+
+## Speed
+
+Natively on x86-64, measured on the development container (4 cores of a Xeon at 2.1 GHz, shared with other work: a load of 3.5 to 5 while measuring), 2026-11-11, the best of 16 runs in two sets, by a program outside the suite. The medians were up to 30 % above the best, those of the pipes and of the files written up to 45 %. The lines are 50 MB of lines of up to 120 bytes (819,831 of them).
 
 | What | Time |
-| --- | --- |
-| `stdin().read_line()` over all of it | 75 ms (96 ms before streams) |
-| `read_line` through a `Buffered<MemoryStream>` | 128 ms |
-| 1 000 000 `write_str` of 48 bytes into a `BufferedWriter<MemoryStream>` | 143 ms |
-| `copy(fd_stream(0), fd_stream(1))`, to `/dev/null` | 13 ms |
-| `copy` from one memory stream to another | 256 ms |
+| --- | ---: |
+| `stdin().read_line()` over the 50 MB, from a file | 78 ms |
+| `read_line` through a `Buffered<MemoryStream>` over the 50 MB, `fs.read_bytes` of the file included | 177 ms |
+| 1,000,000 `write_str` of 48 bytes into a `BufferedWriter<MemoryStream>`, then `into_inner` | 178 ms |
+| 1,000,000 `write_str` of 48 bytes into a `BufferedWriter` over `fd_stream(1)`, to `/dev/null` | 16 ms |
+| 1,000,000 `write` of a 48-byte `[uint8]` into the same | 29 ms |
+| `copy(fd_stream(0), fd_stream(1))` of the 50 MB, to `/dev/null` | 9 ms |
+| `copy` of the 50 MB from one memory stream to another, the file read included | 233 ms |
+| 4 GiB from `/dev/zero` to `/dev/null` through two `File`s, reads of 1 MiB ([[Language/Standard-library/Fs#measurements]]) | 82 ms |
+| `copy(fs.open(a)?, fs.create(b)?)` of a 256 MiB file to a new file (in the page cache); to `/dev/null` | 159 ms; 34 ms |
+| An 8 MiB line, `read_line`, from a file | 25 ms |
+| A 16 MiB line, `read_line`, from a pipe | 46 ms |
+| `read_exact(16 MiB)` from a pipe; from a file | 41 ms; 38 ms |
 
-With the conversions in one copy ([[MYLA-369]]; the same 50 MB, 2026-11-09, on a busier machine where `stdin().read_line()` took 129 to 153 ms, seven runs): `Buffered` reading through `read` (`[uint8]`) and `bytes.to_str` instead of `read_str` took 100 to 148 ms, median 106; with the conversions a byte at a time, as before, 289 to 487 ms, median 302 (MYLA-338's 331 ms). Interpreted, on 2 MB, 6.1 to 6.5 s through `read_str`, 6.6 s through `read`. So `read_str` and `write_str` no longer paid for themselves in speed. In the same run, 1 000 000 `write`s of a 48-byte `[uint8]` into a `BufferedWriter` over a descriptor took 23 to 28 ms (110 to 118 ms before), and `read_all` gathers text and converts once.
-
-Without them (D177, [[MYLA-399]]; 2026-11-09, natively on x86-64, the medians of eleven runs interleaved; before: through `read_str` and `write_str`; then: the bytes converted from and to the descriptor's `str`; now: the descriptor read into and written from a `[uint8]` by `__read_bytes` and `__write_bytes`):
-
-| What | Before | Converted | Now |
-| --- | --- | --- | --- |
-| `stdin().read_line()` over the 50 MB | 130 to 139 ms | 119 to 121 ms | 131 to 133 ms |
-| 1 000 000 `write_str` of 48 bytes into a `BufferedWriter` over `fd_stream(1)`, to `/dev/null` | 14 ms | 15 ms | 14 ms |
-| `copy(fd_stream(0), fd_stream(1))` of the 50 MB, to `/dev/null` | 7 ms | 10 ms | 7 ms |
-| `read_line` through a `Buffered<MemoryStream>` of the 50 MB (the file read too) | 268 ms | 279 ms | 288 ms |
-| 4 GiB from `/dev/zero` to `/dev/null` through two `File`s, reads of 1 MiB | 109 ms (`read_str`, `write_str`); 471 ms (`read`, `write`) | 481 ms | 111 ms |
-
-Interpreted, on 2 MB: 6.80 to 6.93 s before, 6.76 to 6.98 s converted, 6.67 to 6.80 s now. Converting costs nothing for lines but two copies of every byte in a bulk copy, four times the time for the 4 GiB, which the primitives give back. Why the converted lines are faster than either, with two copies more, isn't known (MYLA-369 saw it too).
-
-`copy` reads 64 KiB at a time ([[MYLA-379]]; it was 4 KiB): a 256 MiB file copied by `copy(fs.open(a)?, fs.create(b)?)` into a new file took 88 ms natively, 162 ms with 4 KiB, and 40 ms instead of 56 to `/dev/null` (best of seven; 128 KiB gave 85 and 39, 16 KiB 104 and 42). From one memory stream to another it stays as it was.
+Interpreted (`myla run`, best of three; the interpreter starts in 21 ms): `stdin().read_line()` over 2 MB of such lines takes 4.4 s, `read_exact(16 MiB)` from a pipe 0.25 s, and an 8 MiB line 16.0 s, the interpreter's time to look at each byte for the `"\n"`.

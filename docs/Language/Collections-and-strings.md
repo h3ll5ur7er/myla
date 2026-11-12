@@ -27,7 +27,7 @@ fun main() {
 
 | Operation | Notes |
 | --- | --- |
-| `[a, b, c]` | Elements unify to one type; an expected element type flows into the literals (`let b: [uint8] = [1, 2]`) |
+| `[a, b, c]` | Elements unify to one type; an expected element type flows into the literals (`let b: [uint8] = [1, 2]`). Without one, unsuffixed literals take the type a later element fixes: `[1, 2, x]` with `x: int64` is an `[int64]`, and so is `[4000000000, x]`, whose first literal doesn't fit the `int32` a lone literal would be ([[MYLA-417]], [[MYLA-449]]); a map's keys and values alike |
 | `[]` | Needs an expected type |
 | `xs.len()` | `int` |
 | `xs[i]` | Any integer index; out of bounds is a runtime error |

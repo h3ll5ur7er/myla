@@ -64,3 +64,7 @@ Work package P11 of [[Project/Review-2026-11-09]] (wave A2), with round 4's addi
 ## Found on the way
 
 - [[MYLA-480]]: std.list's sorts overflow on a list of more than 2^30 elements (`mid + width` in the merge passes, `2 * r + 1` in `sort_unstable`'s heapsort); `list.my` isn't this package's beyond its test.
+
+## The owner's decision (2026-11-11)
+
+The proposals stand as built (D189).

@@ -26,11 +26,12 @@
 // the project root and then the stdlib root.
 
 from std.fs import read_to_string, exists, is_dir, current_dir
-from .stdroot import is_embedded, embedded_text, EMBEDDED_ROOT
+from .stdroot import is_embedded, embedded_text, embedded_parse, EMBEDDED_ROOT
+from .astcache import decode, body_part, cached_body, no_bodies, Cached, Bodies
 from .parser import parse_source_with, parse_source_lazy, parse_body, BodySite, LazyParsed, expr_of, stmt_of, type_expr_of, block_of, pattern_of, fun_of
 from .diag import Report, reports, type_report, chain
 from .checker import CheckErr, DeclOrigin, LazyBodies, body_key, no_lazy_bodies
-from .tokens import SrcSpan, no_span, keywords, TokenKind
+from .tokens import SrcSpan, no_span, keywords, TokenKind, Diag
 from .lexer import lex_part
 from .ast import Program, Decl, DeclKind, FunData, Param, TypeParam, Field, Variant
 from .ast import ImportPath, ImportItem, TypeExpr, TypeKind, Expr, ExprKind, FieldInit
@@ -50,9 +51,15 @@ struct Module {
     exports: [str: Binding],
     bindings: [str: Binding],
     // an implicit module's functions' bodies left unparsed (MYLA-359):
-    // their sites, and the file's code points they are read from
+    // their sites, and the file's code points they are read from; or,
+    // where its parse was the toolchain's (MYLA-412), the file's text,
+    // where each body is in its bytes, two numbers a site, and the bodies
+    // parsed then
     sites: [BodySite],
     cps: [char],
+    src: str,
+    bytes: [int32],
+    bodies: Bodies,
 }
 
 // The linked program: every module's declarations, the next free node id
@@ -812,17 +819,54 @@ impl Loader {
     // MYLA-396). An implicit module's functions' bodies are left for the
     // checker to read once it needs one (MYLA-359): most of their text,
     // which a program calls little of; so are those of every other module
-    // of the standard library it imports (`lazy_std`, MYLA-413).
-    fun parse_module(self, path: str, src: str) -> Result<LazyParsed, Report> {
+    // of the standard library it imports (`lazy_std`, MYLA-413); such a
+    // module's parse is the toolchain's where it carries one of its text
+    // (`cached`, MYLA-412).
+    fun parse_module(self, path: str, src: str) -> Result<Cached, Report> {
         if self.lazy.contains(path) || self.lazy_std(path) {
+            match self.cached(path, src) {
+                Some(c) => { return Ok(c) },
+                None => {},
+            }
             return match parse_source_lazy(src, self.next_id) {
-                Ok(lp) => Ok(lp),
+                Ok(lp) => Ok(Cached { parsed: lp, bytes: [], bodies: no_bodies() }),
                 Err(ds) => Err(reports(ds, path)),
             }
         }
         return match parse_source_with(src, self.next_id, path != self.entry) {
-            Ok(x) => Ok(LazyParsed { parsed: x, cps: [], sites: [] }),
+            Ok(x) => Ok(Cached { parsed: LazyParsed { parsed: x, cps: [], sites: [] }, bytes: [], bodies: no_bodies() }),
             Err(ds) => Err(reports(ds, path)),
+        }
+    }
+
+    // The parse of the module `path` of the standard library, with text
+    // `src`, that the toolchain carries (MYLA-412): `parse_source_lazy`'s,
+    // made when the toolchain was built (`astcache.cache_entry`), its node
+    // ids from `next_id`; None where the text isn't the one it was made of
+    // (a library being edited, or another), which is parsed.
+    #test(Loader { stdlib_root: "/l", project_root: "/p", packages: [], entry: "/p/a.my", modules: [], next_id: 0, spans: [], overrides: [:], lazy: [:] }, "/l/std/char.my", "")[None]
+    #test(Loader { stdlib_root: "/l", project_root: "/p", packages: [], entry: "/p/a.my", modules: [], next_id: 0, spans: [], overrides: [:], lazy: [:] }, "/p/char.my", "")[None]
+    fun cached(self, path: str, src: str) -> Option<Cached> {
+        if self.stdlib_root == "" { return None }
+        let rel = match rel_under(path, self.stdlib_root) {
+            Some(parts) => join(parts, "/"),
+            None => { return None },
+        }
+        return decode(embedded_parse(rel, src), self.next_id)
+    }
+
+    // Whether the embedded module `path` with `more` after its text is
+    // read from the parse the toolchain carries, as `cached` reads it.
+    #test(Loader { stdlib_root: EMBEDDED_ROOT, project_root: "/p", packages: [], entry: "/p/a.my", modules: [], next_id: 40, spans: [], overrides: [:], lazy: [:] }, "<myla>/std/char.my", "")[true]
+    #test(Loader { stdlib_root: EMBEDDED_ROOT, project_root: "/p", packages: [], entry: "/p/a.my", modules: [], next_id: 40, spans: [], overrides: [:], lazy: [:] }, "<myla>/std/char.my", "\n")[false]
+    fun reads_carried(self, path: str, more: str) -> bool {
+        let src = match embedded_text(path) {
+            Some(t) => t + more,
+            None => { return false },
+        }
+        return match self.cached(path, src) {
+            Some(c) => c.parsed.parsed.program.decls.len() > 0 && c.parsed.parsed.next_id > 40,
+            None => false,
         }
     }
 
@@ -858,7 +902,8 @@ impl Loader {
             },
         }
         self.spans.push(Span { first_id: self.next_id, path: path })
-        let lp = self.parse_module(path, src)?
+        let c = self.parse_module(path, src)?
+        let lp = c.parsed
         let parsed = lp.parsed
         self.next_id = parsed.next_id
         var imports: [Decl] = []
@@ -870,7 +915,7 @@ impl Loader {
             }
         }
         let idx = self.modules.len() as int32
-        self.modules.push(Module { id: self.module_id(path), path: path, imports: imports, targets: [], decls: decls, exports: [:], bindings: [:], sites: lp.sites, cps: lp.cps })
+        self.modules.push(Module { id: self.module_id(path), path: path, imports: imports, targets: [], decls: decls, exports: [:], bindings: [:], sites: lp.sites, cps: lp.cps, src: src, bytes: c.bytes, bodies: c.bodies })
         var targets: [int32] = []
         for imp in imports {
             match imp.kind {
@@ -1300,6 +1345,9 @@ impl Renamer {
                 if q == n && !contains_byte(n, '.') && !has(self.tys, n) && !self.env.contains(n) && self.aliases.contains(n) {
                     self.fail(t.line, t.col, t.sp, format("'{}' is a module, not a type: name one of its types, '{}.T'", n, n))
                 }
+                // a name that stays, without arguments (`int`, `T`): the
+                // same type, not a copy (MYLA-412: most of a library's)
+                if q == n && args.len() == 0 { return t }
                 TypeKind.TRef(q, self.ty_list(args))
             },
             TypeKind.TTuple(es) => TypeKind.TTuple(self.ty_list(es)),
@@ -1641,7 +1689,7 @@ impl Renamer {
                     if b.is_module { mid = b.value } else { qualified = b.value }
                 },
                 None => {
-                    self.fail(cur.line, cur.col, cur.sp, format("module does not export '{}' (declarations are private unless marked 'pub')", name))
+                    self.fail(cur.line, cur.col, cur.sp, format("module '{}' does not export '{}' (declarations are private unless marked 'pub')", dotted_id(mid), name))
                     return Some(e)
                 },
             }
@@ -1870,7 +1918,7 @@ pub fun load_program_opts(entry: str, opts: LoadOptions) -> Result<Loaded, Repor
     // names aren't qualified, so its functions' origins tell (MYLA-388)
     var entry_std = ""
     if stdlib != "" && is_std_module(e, stdlib) { entry_std = std_module_name(e) }
-    var lazy = LazyTable { bodies: [:], keys: [:], renamers: [:], cps: [:] }
+    var lazy = LazyTable { bodies: [], keys: [:], renamers: [:], cps: [:], texts: [:], bytes: [:], parsed: [:] }
     var lazy_ids: [int32: bool] = [:]
     for k in merge_order(ld.modules.len() as int32, implicit) {
         let m = ld.modules[k]
@@ -1879,6 +1927,11 @@ pub fun load_program_opts(entry: str, opts: LoadOptions) -> Result<Loaded, Repor
             // the bodies left unparsed, renamed in this scope once read
             lazy.renamers[k] = r
             lazy.cps[k] = m.cps
+            if m.bytes.len() > 0 {
+                lazy.texts[k] = m.src
+                lazy.bytes[k] = m.bytes
+                lazy.parsed[k] = m.bodies
+            }
             for id in lazy.add(k, m.sites, m.decls).keys() { lazy_ids[id] = true }
         }
         let in_std = starts_with_text(m.id, "std$")
@@ -1915,14 +1968,18 @@ pub fun load_program_opts(entry: str, opts: LoadOptions) -> Result<Loaded, Repor
 
 // A function's body an implicit module's parse left for later
 // (`parse_source_lazy`, MYLA-359): its module (an index of `Loader.modules`),
-// its site, and its function, whose names are in scope there (in an
-// impl's method also `self` and the impl's type parameters).
-struct LazyBody { module: int32, site: BodySite, fd: FunData, receiver: bool, impl_params: [TypeParam] }
+// its site (the `index`th of its module's), and its function, whose names
+// are in scope there (in an impl's method also `self` and the impl's type
+// parameters).
+struct LazyBody { module: int32, index: int32, site: BodySite, fd: FunData, receiver: bool, impl_params: [TypeParam] }
 
-// The bodies left for later, by `body_key` (`keys` too, for the checker),
-// with each module's renamer (its names, as it renamed the rest of the
-// module) and code points.
-struct LazyTable { bodies: [int64: LazyBody], keys: [int64: bool], renamers: [int32: Renamer], cps: [int32: [char]] }
+// The bodies left for later, in the order of their modules and sites, and
+// the index of each by its `body_key` (`keys`, which the checker is given:
+// one small map, not one of whole bodies, MYLA-412), with each module's
+// renamer (its names, as it renamed the rest of the module) and code
+// points; for a module whose parse was the toolchain's, its text, its
+// bodies' places in its bytes and its bodies parsed then instead.
+struct LazyTable { bodies: [LazyBody], keys: [int64: int32], renamers: [int32: Renamer], cps: [int32: [char]], texts: [int32: str], bytes: [int32: [int32]], parsed: [int32: Bodies] }
 
 impl LazyTable {
     // Record the bodies of the declarations `decls` of module `k` that the
@@ -1936,14 +1993,14 @@ impl LazyTable {
             if next >= sites.len() { break }
             match d.kind {
                 DeclKind.FunDecl(fd) => {
-                    if self.add_fun(k, sites[next], d.id, fd, false, []) {
+                    if self.add_fun(k, next, sites[next], d.id, fd, false, []) {
                         found[d.id] = true
                         next += 1
                     }
                 },
                 DeclKind.ImplDecl(t, ms, tps, tr, targs, attrs) => {
                     for m in ms {
-                        if next < sites.len() && self.add_fun(k, sites[next], d.id, m, true, tps) {
+                        if next < sites.len() && self.add_fun(k, next, sites[next], d.id, m, true, tps) {
                             found[d.id] = true
                             next += 1
                         }
@@ -1957,35 +2014,62 @@ impl LazyTable {
 
     // The line of an `async let` in a body left unread, 0 if none has one.
     fun task_line(self) -> int32 {
-        for key in self.bodies.keys() {
-            let lb = self.bodies[key]
-            let at = async_let_in(self.cps[lb.module], lb.site)
+        for lb in self.bodies {
+            let (cps, site) = self.body_text(lb)
+            let at = async_let_in(cps, site)
             if at > 0 { return at }
         }
         return 0
     }
 
+    // The code points the body `lb` is read from, and its site in them: its
+    // module's, or its own text's, cut out of the module's text where its
+    // parse was the toolchain's (`body_part`, MYLA-412), so that only the
+    // bodies read are decoded.
+    fun body_text(self, lb: LazyBody) -> ([char], BodySite) {
+        return match self.bytes.get(lb.module) {
+            Some(bytes) => body_part(self.texts[lb.module], bytes, lb.index, lb.site),
+            None => (self.cps[lb.module], lb.site),
+        }
+    }
+
+    // The body `lb` parsed: as the toolchain parsed it when it was built,
+    // where it did (MYLA-412), else now from its text (`parse_body`).
+    fun read_parsed(self, lb: LazyBody) -> Result<Block, [Diag]> {
+        match self.parsed.get(lb.module) {
+            Some(bodies) => {
+                match cached_body(bodies, lb.index, lb.site) {
+                    Some(b) => { return Ok(b) },
+                    None => {},
+                }
+            },
+            None => {},
+        }
+        let (cps, site) = self.body_text(lb)
+        return parse_body(cps, site)
+    }
+
     // Record the body of `fd` if it is the one at `site`.
-    fun add_fun(var self, k: int32, site: BodySite, id: int32, fd: FunData, receiver: bool, impl_params: [TypeParam]) -> bool {
+    fun add_fun(var self, k: int32, index: int32, site: BodySite, id: int32, fd: FunData, receiver: bool, impl_params: [TypeParam]) -> bool {
         match fd.body {
             Some(b) => { if b.line != site.line || b.col != site.col { return false } },
             None => { return false },
         }
         // by the place of its `{`, as the lexer tested it (MYLA-416)
         let key = body_key(id, site.line, site.col)
-        self.bodies[key] = LazyBody { module: k, site: site, fd: fd, receiver: receiver, impl_params: impl_params }
-        self.keys[key] = true
+        self.keys[key] = self.bodies.len() as int32
+        self.bodies.push(LazyBody { module: k, index: index, site: site, fd: fd, receiver: receiver, impl_params: impl_params })
         return true
     }
 
     // The body `key`, lexed, parsed and renamed now (`LazyBodies.parse`);
     // its errors each with its kind before its message (`kind_of`).
     fun read(self, key: int64) -> Result<Block, [CheckErr]> {
-        let lb = match self.bodies.get(key) {
-            Some(x) => x,
+        let lb = match self.keys.get(key) {
+            Some(i) => self.bodies[i],
             None => { return Err([CheckErr { line: 0, col: 0, sp: no_span(), msg: f"internal error: no body {key} to read", decl: -1, notes: [] }]) },
         }
-        let b = match parse_body(self.cps[lb.module], lb.site) {
+        let b = match self.read_parsed(lb) {
             Ok(x) => x,
             Err(ds) => {
                 var out: [CheckErr] = []
@@ -2040,11 +2124,13 @@ fun async_let_in(cps: [char], site: BodySite) -> int32 {
 
 // The kind and the message of the error `msg` of the checker: a body read
 // late (MYLA-359) may have a lex, parse or module error, its kind before
-// its message.
+// its message; a build that can't be made at all (no entry point) is an
+// `error` (the owner's decision on MYLA-415, 2026-11-11).
 #test("parse error: expected ')'")[("parse error", "expected ')'")]
 #test("unknown name 'x'")[("type error", "unknown name 'x'")]
+#test("error: no entry point")[("error", "no entry point")]
 fun kind_of(msg: str) -> (str, str) {
-    for kind in ["lex error", "parse error", "module error"] {
+    for kind in ["lex error", "parse error", "module error", "error"] {
         if starts_with_text(msg, kind + ": ") { return (kind, msg[kind.len() + 2:]) }
     }
     return ("type error", msg)

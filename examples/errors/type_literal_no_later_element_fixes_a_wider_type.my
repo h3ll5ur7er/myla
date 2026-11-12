@@ -1,0 +1,8 @@
+//~ type error: integer literal 4000000000 does not fit in 'int32'
+//~ span: 4000000000
+// A map value too wide for an int32 waits for one that fixes a wider type;
+// none does, so the values are int32s and it is the error (MYLA-449).
+fun main() {
+    let m = [1: 4000000000, 2: 7]
+    print(m[2])
+}

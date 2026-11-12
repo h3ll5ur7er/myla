@@ -42,3 +42,7 @@ Commits on `worktree-agent-ad519a00c8e57d5c2` (no staging commit, no seed): `MYL
 3. **An f-string hole's brackets close in it** (a new lex error). Alternative: only end the scan at the hole's comma, leaving `f"{g(1} {2)}"` to the checker's placeholder count. A hole with a comma of its own at the top, `f"{a, b}"`, is left to the checker's count as before.
 4. **Z4's place for an attribute is lexical**: the start of a line or after `;`, `{`, `}`. A `#test` at the start of a line inside a body is still skipped in an imported module (as in round 4) and now in a body read late too, while the entry rejects it. Alternative: track function bodies' braces in the lexer (a field more and `body_ahead` at every `{` of an eagerly lexed module).
 5. **An escape that ends a line inside a skipped string** sends the body back to eager lexing (its error at load) instead of deferring the identical error.
+
+## The owner's decision (2026-11-11)
+
+The proposals stand as built (D189).

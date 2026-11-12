@@ -76,7 +76,7 @@ A `Duration` is a span of time in nanoseconds, an `int64` in its field `ns`: abo
 | `abs() -> Duration` | Without the sign; the most negative one gives the longest |
 | `mul_int(k: int64)`, `div_int(k: int64) -> Duration` | `k` times; divided by `k`, rounded toward zero. A `k` of 0 is a runtime error |
 
-A duration prints as Go prints one: `0s`; below a second one unit, `ns`, `µs` or `ms`, with a fraction (`1.1µs`, `250ms`); from a second on hours, minutes and seconds with the leading zero ones left out (`1.5s`, `1m0s`, `2h3m4s`). A fraction has no trailing zeros. A spec gives the text a width, `{d:>8}`. 2000 random durations and the edge cases print as Go's `time.Duration.String` prints them.
+A duration prints as Go prints one: `0s`; below a second one unit, `ns`, `µs` or `ms`, with a fraction (`1.1µs`, `250ms`); from a second on hours, minutes and seconds with the leading zero ones left out (`1.5s`, `1m0s`, `2h3m4s`). A fraction has no trailing zeros. A spec gives the text a width, `{d:>8}`.
 
 ## DateTime
 
@@ -107,12 +107,6 @@ A `DateTime` is a civil time in UTC, with the fields `year` (1 to 9999), `month`
 
 **No time zones yet.** They need the tz database, and come later. An offset in a text (`+01:00`) is applied when it is read, and the result is in UTC; there is no way to write one.
 
-### How it works
-
-The days are counted with Howard Hinnant's [`days_from_civil` and `civil_from_days`](http://howardhinnant.github.io/date_algorithms.html). They shift the year to start on March 1st, so February's leap day is the last day of the year, and split time into eras of 400 years, 146097 days each. Within an era the year and the day of the year come out of integer divisions, without a loop and without tables. The cases check every day from 1970 to 2100 through `from_unix` and `to_unix`, every 97th day of the whole range both ways, and 5000 random instants from year 1 to 9999 agree with Python's `datetime`, in the interpreter, natively, on aarch64 and on wasm32.
-
-The wall clock is the primitive `__wall_ns`: `clock_gettime(CLOCK_REALTIME)` on Linux and WASI's `clock_time_get` with the realtime clock ([[Language/Targets]]). Natively a reading costs about 0.2 µs, as it is a system call.
-
 ## Text
 
 | Function | Result |
@@ -137,3 +131,9 @@ The wall clock is the primitive `__wall_ns`: `clock_gettime(CLOCK_REALTIME)` on 
 | `Syntax(at: int)` | The text doesn't have the form at this byte offset |
 | `Field(name: str)` | A field outside its range: `"year"`, `"month"`, `"day"`, `"hour"`, `"minute"`, `"second"`, `"nanosecond"` or `"offset"` |
 | `OutOfRange` | The time is outside the years 1 to 9999 (an offset can push a valid text out) |
+
+## How it works
+
+The days are counted with Howard Hinnant's [`days_from_civil` and `civil_from_days`](http://howardhinnant.github.io/date_algorithms.html). They shift the year to start on March 1st, so February's leap day is the last day of the year, and split time into eras of 400 years, 146097 days each. Within an era the year and the day of the year come out of integer divisions, without a loop and without tables. The cases check every day from 1970 to 2100 through `from_unix` and `to_unix`, every 97th day of the whole range both ways, and 5000 random instants from year 1 to 9999 agree with Python's `datetime`, in the interpreter, natively, on aarch64 and on wasm32. 2000 random durations and the edge cases print as Go's `time.Duration.String` prints them.
+
+The wall clock is the primitive `__wall_ns`: `clock_gettime(CLOCK_REALTIME)` on Linux and WASI's `clock_time_get` with the realtime clock ([[Language/Targets]]). Natively a reading costs about 0.2 µs, as it is a system call.

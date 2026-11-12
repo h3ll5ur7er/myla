@@ -314,6 +314,43 @@ fun main() {
 }
 """
 
+# A queue drained oldest-first by a `for` that leaves at its first key
+# (MYLA-496): it prints the microseconds. The loop made the list of all the
+# keys before its first step, so the drain was quadratic: 20,000 keys took
+# 2.6 s natively and 9.7 s interpreted.
+_QUEUE = """from std.process import args
+from std.num import parse_int
+from std.time import now_ns
+
+fun main() {
+    let n: int64 = match parse_int(args()[1]) {
+        Some(v) => v,
+        None => 0,
+    }
+    var m: [int64: str] = [:]
+    var i: int64 = 0
+    while i < n {
+        m[i] = f"v{i}"
+        i += 1
+    }
+    let start = now_ns()
+    var next: int64 = 0
+    while m.len() > 0 {
+        var first: int64 = -1
+        for k in m {
+            first = k
+            break
+        }
+        if first != next {
+            panic(f"took {first}, not {next}")
+        }
+        m.remove(first)
+        next += 1
+    }
+    print((now_ns() - start) / 1000)
+}
+"""
+
 
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
 class MapRemove(unittest.TestCase):
@@ -351,6 +388,32 @@ class MapRemove(unittest.TestCase):
                 return int(out)
 
             self._assert_linear(micros, 1999, "interpreted", 100_000)
+
+    def test_a_loop_that_leaves_at_the_first_key_costs_what_it_walked_natively(self):
+        # MYLA-496: 20,000 keys took 2.6 s, now milliseconds
+        with tempfile.TemporaryDirectory() as tmp:
+            path = write_program(tmp, _QUEUE)
+            binary = os.path.join(tmp, "queue")
+            native_build(Program(path), binary)
+
+            def micros(n: int) -> int:
+                argv, exe = run_argv(binary, "queue", [str(n)])
+                proc = subprocess.run(argv, executable=exe, capture_output=True, text=True, timeout=300)
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                return int(proc.stdout)
+
+            self._assert_linear(micros, 5000, "natively", 20_000)
+
+    def test_a_loop_that_leaves_at_the_first_key_costs_what_it_walked_in_the_interpreter(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = write_program(tmp, _QUEUE)
+
+            def micros(n: int) -> int:
+                out, err, code = selfhost_run(path, [str(n)])
+                self.assertEqual(code, 0, err)
+                return int(out)
+
+            self._assert_linear(micros, 2000, "interpreted", 100_000)
 
     def _assert_live_size(self, micros, size: int, keep: int, rounds: int, label: str, slack_us: int):
         """The map that held `size` keys within three times the time of the

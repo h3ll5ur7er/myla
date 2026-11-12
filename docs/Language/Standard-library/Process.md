@@ -102,11 +102,18 @@ A child that writes more than a pipe holds (64 KiB on Linux) to a stream nobody 
 
 `a.pipe(b)` is a shell's `a | b`: a `Pipeline`, and its `output()` runs both and gives a `PipelineOutput { first: Output, second: Output }`. The pipeline's output is `second.stdout`; `first.stdout` is empty, as it went to the second. The first takes its input as `output` does; the second's is the first's output. Either's `stderr_from`, and the second's `stdout_from`, are taken (a stream that isn't a pipe is empty here). When the second ends before its input does, the first gets SIGPIPE at its next write (`Signaled(13)`), as in a shell. A child that can't be started is its `SpawnError`, the other killed and reaped; a read that fails is `Other` of its errno.
 
-The first child's output is the second's input straight (`stdin_from_stdout`, [[MYLA-378]]): nothing goes through this process, which only reads what it collects (the second's output and both errors) as it comes. Until November 2026 the primitives couldn't give a child a descriptor as its input, and this process copied the first's output in pieces: a second child that wrote 1 MB before reading its input stalled the copy for good, which now runs through. Natively 256 MiB of `head -c` through `pipe(command("wc").arg("-c"))` takes 109 to 127 ms, as a shell's own pipe does (117 to 148 ms on the same machine; the copy took 918 to 2,187 ms there, 2026-11-09). There is no async form yet.
+The first child's output is the second's input straight (`stdin_from_stdout`, [[MYLA-378]]): nothing goes through this process, which only reads what it collects (the second's output and both errors) as it comes. Until November 2026 the primitives couldn't give a child a descriptor as its input, and this process copied the first's output in pieces: a second child that wrote 1 MB before reading its input stalled the copy for good, which now runs through. The copy made 256 MiB of `head -c` through `pipe(command("wc").arg("-c"))` take 918 to 2,187 ms, where a shell's own pipe took 117 to 148 ms on the same machine (2026-11-09); straight, it takes 127 ms against the shell's 93 ms ([[#speed]]). There is no async form yet.
 
 ## Speed
 
-Natively on x86-64, best of five ([[MYLA-340]]): reading `head -c 268435456 /dev/zero` through a `ChildStdout`, 64 KiB a `read_str`, takes 118 ms, 2,160 MB/s (a shell's `head | cat > /dev/null` 105 ms). `read`, which gives a `[uint8]`, converted each byte and read 469 MB/s; since the conversion is one copy ([[MYLA-369]]) it reads as fast as `read_str` (101 to 118 ms against 115 to 125 ms, where it took 488 to 706 ms before; 2026-11-09). Since D177 a `ChildStdout` reads into a `[uint8]` (`__read_bytes`), and `read_str` is gone: 124 to 137 ms, against 126 to 134 ms through `read_str` on the same machine ([[MYLA-399]]).
+Natively on x86-64, measured on the development container (4 cores of a Xeon at 2.1 GHz, shared with other work: a load of 3.5 to 5), 2026-11-11, the best of 16 runs in two sets; through pipes the times varied by up to half from run to run:
+
+| What | Time | A shell's |
+| --- | ---: | ---: |
+| `head -c 268435456 /dev/zero` read through a `ChildStdout`, 64 KiB a `read` ([[MYLA-340]]) | 107 ms, 2.5 GB/s | 68 ms, `head … \| cat > /dev/null` |
+| The same 256 MiB through `pipe(command("wc").arg("-c"))`, `output()` | 127 ms | 93 ms, `head … \| wc -c` |
+
+A `ChildStdout` reads into a `[uint8]` itself (`__read_bytes`, D177, [[MYLA-399]]), so its bytes aren't converted: converted a byte at a time, as at first, they came at 469 MB/s ([[MYLA-340]]), and [[MYLA-369]] made the conversion one copy before D177 removed it (2026-11-09).
 
 ## Process primitives
 

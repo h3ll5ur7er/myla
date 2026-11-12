@@ -1,0 +1,8 @@
+//~ type error: integer literal 4000000000 does not fit in 'uint8'
+//~ span: 4000000000
+// A literal too wide for an int32 waits for the element that fixes the
+// list's type, here a uint8, and is checked against it (MYLA-449).
+fun main() {
+    let a = [4000000000, 3u8]
+    print(a[1])
+}

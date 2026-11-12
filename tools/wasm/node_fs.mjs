@@ -62,7 +62,10 @@ export class NodeFs {
   rename(a, b) { fs.renameSync(a, b); }
 }
 
-// A write of all of `u8` to the descriptor `fd`, again after EAGAIN.
+// A write of all of `u8` to the descriptor `fd`, again after EAGAIN (a
+// non-blocking pipe that is full) a millisecond later: Node has no
+// synchronous poll, and trying again at once spun (MYLA-457: 0.68 s of CPU
+// over 0.72 s for 2 MiB to a slow reader).
 function writeAll(fd, u8) {
   let off = 0;
   while (off < u8.length) {
@@ -70,8 +73,14 @@ function writeAll(fd, u8) {
       off += fs.writeSync(fd, u8, off, u8.length - off);
     } catch (e) {
       if (e.code !== "EAGAIN") throw e;
+      pause(1);
     }
   }
+}
+
+// The thread asleep for `ms` milliseconds.
+function pause(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
 // The process's own standard streams.

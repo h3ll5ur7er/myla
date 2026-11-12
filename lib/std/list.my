@@ -223,8 +223,7 @@ impl<T> [T] {
         // Runs of RUN sorted by insertion, then merged in passes.
         var lo = 0
         while lo < n {
-            var hi = lo + RUN
-            if hi > n { hi = n }
+            let hi = run_end(lo, RUN, n)
             for i in lo + 1..hi {
                 let v = a[i]
                 var j = i
@@ -239,7 +238,7 @@ impl<T> [T] {
         var width = RUN
         while width < n {
             a = merged_by(a, width, less)
-            width *= 2
+            width = next_width(width, n)
         }
         self = a
     }
@@ -316,6 +315,32 @@ impl<T> [T] {
 // The length of the runs a merge sort starts with, sorted by insertion.
 const RUN: int = 16
 
+// The end of a run of `width` that starts at `lo`, or `n` where it would
+// pass the list's end.
+#test(0, 16, 100)[16]
+#test(96, 16, 100)[100]
+#test(1073741824, 1073741824, 2147483647)[2147483647]
+#test(1073741823, 1073741824, 2147483647)[2147483647]
+#test(1073741822, 1073741824, 2147483647)[2147483646]
+fun run_end(lo: int, width: int, n: int) -> int {
+    // Compared with what is left, not summed first: past 2^30 elements
+    // `lo + width` would overflow (MYLA-480, D184).
+    if width >= n - lo { return n }
+    return lo + width
+}
+
+// The width of the merge sort's next pass, twice `width`, or `n` where that
+// would pass the list's length: a run of `n` is the whole list.
+#test(16, 100)[32]
+#test(64, 100)[100]
+#test(50, 100)[100]
+#test(1073741823, 2147483647)[2147483646]
+#test(1073741824, 2147483647)[2147483647]
+fun next_width(width: int, n: int) -> int {
+    if width >= n - width { return n }
+    return width * 2
+}
+
 // `a`'s runs of `width`, each sorted, merged in pairs into runs of twice
 // that: one pass of the merge sort, taking the left run's element of equal
 // ones (stable).
@@ -324,10 +349,8 @@ fun merged_by<T>(a: [T], width: int, less: (T, T) -> bool) -> [T] {
     var out: [T] = []
     var lo = 0
     while lo < n {
-        var mid = lo + width
-        if mid > n { mid = n }
-        var hi = mid + width
-        if hi > n { hi = n }
+        let mid = run_end(lo, width, n)
+        let hi = run_end(mid, width, n)
         var i = lo
         var j = mid
         while i < mid && j < hi {
@@ -439,8 +462,7 @@ impl<T: Ord> [T] {
         let n = a.len()
         var lo = 0
         while lo < n {
-            var hi = lo + RUN
-            if hi > n { hi = n }
+            let hi = run_end(lo, RUN, n)
             for i in lo + 1..hi {
                 let v = a[i]
                 var j = i
@@ -455,7 +477,7 @@ impl<T: Ord> [T] {
         var width = RUN
         while width < n {
             a = merged(a, width)
-            width *= 2
+            width = next_width(width, n)
         }
         self = a
     }
@@ -504,9 +526,14 @@ impl<T: Ord> [T] {
                             if end <= 0 { break }
                             a.swap(lo, lo + end)
                         }
+                        // A node from `end / 2` on has no child: compared
+                        // so, `2 * r + 1` can't overflow past 2^30 elements
+                        // (MYLA-480, as in std.heap). Not a helper: a
+                        // method's instance doesn't inline one (MYLA-526).
+                        let half = end / 2
                         while true {
+                            if r >= half { break }
                             var child = 2 * r + 1
-                            if child >= end { break }
                             if child + 1 < end && a[lo + child] < a[lo + child + 1] { child += 1 }
                             if !(a[lo + r] < a[lo + child]) { break }
                             a.swap(lo + r, lo + child)
@@ -633,10 +660,8 @@ fun merged<T: Ord>(a: [T], width: int) -> [T] {
     var out: [T] = []
     var lo = 0
     while lo < n {
-        var mid = lo + width
-        if mid > n { mid = n }
-        var hi = mid + width
-        if hi > n { hi = n }
+        let mid = run_end(lo, width, n)
+        let hi = run_end(mid, width, n)
         var i = lo
         var j = mid
         while i < mid && j < hi {

@@ -1600,14 +1600,23 @@ pub fun str_chars(s: str) -> [char] {
 //
 // A map's cell holds its count and its capacity (a power of two), then the
 // slots `[state:8][key:8][value][rank:8]`, `slot_size` bytes each, then the
-// next rank (8 bytes): state 0 empty, 1 full, 2 a removed key's tombstone; a
-// key is a value, or a string's cell (`is_str` 1). The slot of a key is found
-// by its hash and linear probing, past tombstones.
+// next rank (8 bytes), the first rank that may be a key's (8 bytes: every
+// rank below it is a gap), and the order: at each rank below the next, the
+// index of the slot that took it (4 bytes, room for one per slot). State 0
+// is empty, 1 full, 2 a removed key's tombstone; a key is a value, or a
+// string's cell (`is_str` 1). The slot of a key is found by its hash and
+// linear probing, past tombstones.
 //
 // A key's rank is its place in the order of insertion (D105): a new key takes
-// the next rank. A removal leaves a tombstone and a gap in the ranks, without
-// touching the other slots, so it takes constant time (MYLA-310); `keys`
-// goes through the ranks in order and skips the gaps. The next rank counts
+// the next rank, and the order the slot's index there. A removal leaves a
+// tombstone and a gap in the ranks, without touching the other slots, so it
+// takes constant time (MYLA-310); a rank is a key's while the slot the order
+// names is full and has that rank (a tombstone's slot may be taken again,
+// with a rank of its own). `keys` and `for` go through the ranks in order
+// and skip the gaps; `for` from the first rank that may be a key's, which it
+// moves past the gaps it finds, so a loop that leaves at its first key costs
+// the gaps since the last loop, not the map's size (`map_walk`, MYLA-496).
+// The next rank counts
 // every slot a key has filled since the last compaction, tombstones too, so
 // when it reaches 3/4 of the capacity, `map_put_slot` compacts the table:
 // tombstones dropped, ranks renumbered 0 … count - 1, the capacity the
@@ -1700,25 +1709,67 @@ fun zero_bytes(p: int64, n: int64) {
 }
 
 // `__map_new`: an empty map of `cap` slots of `slot_size` bytes (the next
-// rank 0 after them).
+// rank and the first 0 after them, then room for the order).
 pub fun map_new(cap: int64, slot_size: int64) -> int64 {
-    let cell = __alloc(cap * slot_size + 24)
+    let cell = __alloc(cap * slot_size + 32 + cap * 4)
     __store64(cell, 0)
     __store64(cell + 8, cap)
-    zero_bytes(cell + 16, cap * slot_size + 8)
+    zero_bytes(cell + 16, cap * slot_size + 16)
     return cell
 }
 
-// The address of the map `cell`'s next rank, after its slots.
+// The address of the map `cell`'s next rank, after its slots; the first rank
+// that may be a key's is in the word after it, then the order.
 fun map_next_rank(cell: int64, slot_size: int64) -> int64 {
     return cell + 16 + __load64(cell + 8) * slot_size
+}
+
+// The full slot that has the rank `r` in the map whose slots start at `slots`
+// and whose order is at `order`, or 0 for a gap.
+fun map_at_rank(slots: int64, order: int64, slot_size: int64, r: int64) -> int64 {
+    let slot = slots + (__load32(order + r * 4) as int64) * slot_size
+    if __load64(slot) == 1 && __load64(slot + slot_size - 8) == r {
+        return slot
+    }
+    return 0
+}
+
+// `for k in m`'s step (MYLA-496): the full slot of the map `cell` with the
+// lowest rank above the slot `after`'s, or from the first rank that may be a
+// key's when `after` is 0 (then moved past the gaps found, as a removal only
+// makes gaps); 0 when there is none. The loop holds the map, so it doesn't
+// change under it.
+pub fun map_walk(cell: int64, slot_size: int64, after: int64) -> int64 {
+    let slots = cell + 16
+    let tail = slots + __load64(cell + 8) * slot_size
+    let next = __load64(tail)
+    var r: int64 = 0
+    if after == 0 {
+        r = __load64(tail + 8)
+    } else {
+        r = __load64(after + slot_size - 8) + 1
+    }
+    while r < next {
+        let slot = map_at_rank(slots, tail + 16, slot_size, r)
+        if slot != 0 {
+            if after == 0 {
+                __store64(tail + 8, r)
+            }
+            return slot
+        }
+        r += 1
+    }
+    if after == 0 {
+        __store64(tail + 8, r)
+    }
+    return 0
 }
 
 // The slot of `key` in the map `cell` (which has room), found or made: its
 // address, plus 1 when the key was there (its value is then replaced; slots
 // are 8-byte aligned). A new key takes the first tombstone on its way, else
-// the empty slot it ends at, and the next rank, with a reference to a string
-// key.
+// the empty slot it ends at, and the next rank (its index in the order there),
+// with a reference to a string key.
 fun map_set_slot(cell: int64, key: int64, slot_size: int64, is_str: int64) -> int64 {
     let mask = __load64(cell + 8) - 1
     let slots = cell + 16
@@ -1731,14 +1782,15 @@ fun map_set_slot(cell: int64, key: int64, slot_size: int64, is_str: int64) -> in
         i = str_hash(key) & mask
         n = __load64(key)
     }
-    var tomb: int64 = 0
+    var tomb: int64 = -1
     while true {
         let slot = slots + i * slot_size
         let state = __load64(slot)
         if state == 0 {
             var at = slot
-            if tomb != 0 {
-                at = tomb
+            if tomb >= 0 {
+                at = slots + tomb * slot_size
+                i = tomb
             }
             let next = slots + (mask + 1) * slot_size
             let rank = __load64(next)
@@ -1746,6 +1798,7 @@ fun map_set_slot(cell: int64, key: int64, slot_size: int64, is_str: int64) -> in
             __store64(at + 8, key)
             __store64(at + slot_size - 8, rank)
             __store64(next, rank + 1)
+            __store32(next + 16 + rank * 4, i as uint32)
             __store64(cell, __load64(cell) + 1)
             if is_str != 0 {
                 __store64(key - 8, __load64(key - 8) + 1)
@@ -1757,8 +1810,8 @@ fun map_set_slot(cell: int64, key: int64, slot_size: int64, is_str: int64) -> in
             if k == key || (is_str != 0 && __load64(k) == n && __equal_bytes(k + 8, key + 8, n)) {
                 return slot + 1
             }
-        } else if tomb == 0 {
-            tomb = slot
+        } else if tomb < 0 {
+            tomb = i
         }
         i = (i + 1) & mask
     }
@@ -1805,34 +1858,21 @@ pub fun map_shrink(holder: int64, slot_size: int64, is_str: int64) {
 }
 
 // The keys and values of the map `cell` moved into a new one of `cap` slots,
-// without tombstones and in their order, ranked 0 … count - 1; the old cell
-// freed. Without gaps in the ranks, each key keeps its rank; with them, the
-// keys go in by rank and take new ones.
+// without tombstones and in their order, ranked 0 … count - 1 (taken by
+// rank through the order, from the first that may be a key's); the old cell
+// freed.
 fun map_rehash(cell: int64, slot_size: int64, is_str: int64, cap: int64) -> int64 {
     let fresh = map_new(cap, slot_size)
-    let count = __load64(cell)
-    let next = __load64(map_next_rank(cell, slot_size))
-    if next == count {
-        var slot = cell + 16
-        let end = slot + __load64(cell + 8) * slot_size
-        while slot < end {
-            if __load64(slot) == 1 {
-                let at = map_moved(fresh, slot, slot_size, is_str)
-                __store64(at + slot_size - 8, __load64(slot + slot_size - 8))
-            }
-            slot += slot_size
+    let slots = cell + 16
+    let tail = map_next_rank(cell, slot_size)
+    let next = __load64(tail)
+    var r = __load64(tail + 8)
+    while r < next {
+        let slot = map_at_rank(slots, tail + 16, slot_size, r)
+        if slot != 0 {
+            map_moved(fresh, slot, slot_size, is_str)
         }
-    } else {
-        let by_rank = map_by_rank(cell, slot_size, next)
-        var r: int64 = 0
-        while r < next {
-            let slot = __load64(by_rank + r * 8)
-            if slot != 0 {
-                map_moved(fresh, slot, slot_size, is_str)
-            }
-            r += 1
-        }
-        __free(by_rank)
+        r += 1
     }
     __free(cell)
     return fresh
@@ -1851,23 +1891,6 @@ fun map_moved(fresh: int64, slot: int64, slot_size: int64, is_str: int64) -> int
         __copy_bytes(at + 16, slot + 16, slot_size - 24)
     }
     return at
-}
-
-// A new block of `next` words: at each rank below `next`, the address of the
-// full slot of the map `cell` that has it, or 0 for a gap. The caller frees
-// it.
-fun map_by_rank(cell: int64, slot_size: int64, next: int64) -> int64 {
-    let by_rank = __alloc(next * 8)
-    zero_bytes(by_rank, next * 8)
-    var slot = cell + 16
-    let end = slot + __load64(cell + 8) * slot_size
-    while slot < end {
-        if __load64(slot) == 1 {
-            __store64(by_rank + __load64(slot + slot_size - 8) * 8, slot)
-        }
-        slot += slot_size
-    }
-    return by_rank
 }
 
 // `keys(m)` (`__map_keys`): a new list of the keys of the map `cell` in the
@@ -1908,18 +1931,18 @@ pub fun map_keys(cell: int64, slot_size: int64, stride: int64, is_str: int64) ->
         }
         return list
     }
-    let by_rank = map_by_rank(cell, slot_size, next)
+    let slots = cell + 16
+    let tail = map_next_rank(cell, slot_size)
     var at = list + 16
-    var r: int64 = 0
+    var r = __load64(tail + 8)
     while r < next {
-        let slot = __load64(by_rank + r * 8)
+        let slot = map_at_rank(slots, tail + 16, slot_size, r)
         if slot != 0 {
             map_key_to(at, slot, stride, is_str)
             at += stride
         }
         r += 1
     }
-    __free(by_rank)
     return list
 }
 
@@ -2021,6 +2044,7 @@ fun map_place_h(cell: int64, h: int64, slot_size: int64) -> int64 {
             __store64(slot + 8, h)
             __store64(slot + slot_size - 8, rank)
             __store64(next, rank + 1)
+            __store32(next + 16 + rank * 4, i as uint32)
             __store64(cell, __load64(cell) + 1)
             return slot
         }
@@ -2033,29 +2057,16 @@ fun map_place_h(cell: int64, h: int64, slot_size: int64) -> int64 {
 // hash, the references with them.
 fun map_rehash_h(cell: int64, slot_size: int64, cap: int64) -> int64 {
     let fresh = map_new(cap, slot_size)
-    let count = __load64(cell)
-    let next = __load64(map_next_rank(cell, slot_size))
-    if next == count {
-        var slot = cell + 16
-        let end = slot + __load64(cell + 8) * slot_size
-        while slot < end {
-            if __load64(slot) == 1 {
-                let at = map_moved_h(fresh, slot, slot_size)
-                __store64(at + slot_size - 8, __load64(slot + slot_size - 8))
-            }
-            slot += slot_size
+    let slots = cell + 16
+    let tail = map_next_rank(cell, slot_size)
+    let next = __load64(tail)
+    var r = __load64(tail + 8)
+    while r < next {
+        let slot = map_at_rank(slots, tail + 16, slot_size, r)
+        if slot != 0 {
+            map_moved_h(fresh, slot, slot_size)
         }
-    } else {
-        let by_rank = map_by_rank(cell, slot_size, next)
-        var r: int64 = 0
-        while r < next {
-            let slot = __load64(by_rank + r * 8)
-            if slot != 0 {
-                map_moved_h(fresh, slot, slot_size)
-            }
-            r += 1
-        }
-        __free(by_rank)
+        r += 1
     }
     __free(cell)
     return fresh
@@ -2089,18 +2100,18 @@ pub fun map_keys_h(cell: int64, slot_size: int64, key_size: int64) -> int64 {
         }
         return list
     }
-    let by_rank = map_by_rank(cell, slot_size, next)
+    let slots = cell + 16
+    let tail = map_next_rank(cell, slot_size)
     var at = list + 16
-    var r: int64 = 0
+    var r = __load64(tail + 8)
     while r < next {
-        let slot = __load64(by_rank + r * 8)
+        let slot = map_at_rank(slots, tail + 16, slot_size, r)
         if slot != 0 {
             __copy_bytes(at, slot + 16, key_size)
             at += key_size
         }
         r += 1
     }
-    __free(by_rank)
     return list
 }
 
@@ -3341,9 +3352,13 @@ pub fun sleep_ns(n: int64) {
 // is its count, read without the lock to see whether there are any. A
 // sleeper's entry holds its frame and no cell; a deadline's holds the
 // child task's first frame with its low bit set and the cell its `timeout`
-// reads (1 once the deadline fired); a wait's time limit (MYLA-387) its
-// waiter (`waiter`) with the bit 2 set and no cell. A worker that finds no
-// frame while there are timers polls (`exec_poll`) instead of parking.
+// reads, `[fired][place]` (1 once the deadline fired; where its entry is);
+// a wait's time limit (MYLA-387) its waiter (`waiter`) with the bit 2 set
+// and no cell. Every entry keeps its place where its end looks for it
+// (`timer_placed`): a sleeper's in its task's record, a deadline's in its
+// cell, a time limit's in its waiter, so none is looked for among all of
+// them (MYLA-419's M11, MYLA-456). A worker that finds no frame while there
+// are timers polls (`exec_poll`) instead of parking.
 
 const TIMER: int64 = 32
 
@@ -3357,14 +3372,19 @@ pub fun sleep_frame(fr: int64, ms: int64) {
 // `__cancel_after(child, ms)`: the child task whose first frame is `fr`
 // cancelled once `ms` milliseconds passed (D124, `task.timeout`): its flags
 // get "has a deadline" (4), so its end takes the deadline off; the cell
-// `__disarm` reads, which says whether the deadline fired. The child may
-// have ended already (on another worker, before this ran): its flags say
-// so (8, `task_end`), and no deadline is set, so none can fire later into
-// a freed frame (the review of 2026-11-06, R1). The flag and the timer go
-// in under the timers' lock, so an end that sees the flag finds the timer.
+// `__disarm` reads, which says whether the deadline fired, and which keeps
+// the deadline's place among the timers; the task's record holds it, so
+// its end takes it off without a scan (MYLA-456; a second deadline of one
+// task, which std.task never sets, is looked for: the flag 1). The child
+// may have ended already (on another worker, before this ran): its flags
+// say so (8, `task_end`), and no deadline is set, so none can fire later
+// into a freed frame (the review of 2026-11-06, R1). The flag and the timer
+// go in under the timers' lock, so an end that sees the flag finds the
+// timer.
 pub fun cancel_after(fr: int64, ms: int64) -> int64 {
-    let cell = __alloc(8)
+    let cell = __alloc(16)
     __store64(cell, 0)
+    __store64(cell + 8, -1)
     let at = fr + 48
     let lock = __rt_addr("__timer_lock")
     take_lock(lock)
@@ -3377,6 +3397,12 @@ pub fun cancel_after(fr: int64, ms: int64) -> int64 {
         if __cas64(at, flags, flags | 4) {
             break
         }
+    }
+    let rec = task_rec(fr)
+    if __load64(rec + 32) == 0 {
+        __store64(rec + 32, cell)
+    } else {
+        flags_or(fr, 1)
     }
     let seq = timer_add_locked(os.clock_ns() + ms * 1000000, fr | 1, cell)
     give_lock(lock)
@@ -3395,16 +3421,18 @@ pub fun disarm(cell: int64) -> bool {
 // `__task_end(fr)`: the task whose first frame is `fr` ended (not the
 // entry's): its deadline, if it has one, taken off the timers (a deadline
 // that fired did all it does under their lock, so nothing touches the frame
-// after this), then the frames waiting for it go on, its word saying done.
+// after this) and its record freed, then the frames waiting for it go on,
+// its word saying done.
 pub fun task_end(fr: int64) {
-    // "ended" (8) unless a deadline was set (4) first: then it is taken off
+    // "ended" (8) unless a deadline was set (4) or it has a record: then
+    // under the lock, which whoever sets either holds
     let at = fr + 48
     while true {
         let flags = __load64(at)
-        if (flags & 4) != 0 {
+        if (flags & 4) != 0 || (flags >> 4) != 0 {
             let lock = __rt_addr("__timer_lock")
             take_lock(lock)
-            timers_forget(fr | 1)
+            task_done_locked(fr)
             give_lock(lock)
             break
         }
@@ -3413,6 +3441,145 @@ pub fun task_end(fr: int64) {
         }
     }
     wake_waiters(__xchg64(fr + 24, 1))
+}
+
+// --- the records of tasks (MYLA-456) ----------------------------------------------
+// A task that waits (asleep, parked on a notifier, watching a descriptor)
+// or has a deadline gets a record, which its first frame's flags word
+// holds above the flags (`rec << 4`), made when first needed (`task_rec`)
+// and freed with the task (`task_done_locked`): `[parent's record][first
+// child's][next sibling's][previous sibling's][deadline's cell][wait]
+// [sleeper's place]`. The records form the tree of the tasks below any
+// that has one (a task's record is made with its parent's), so a cancel
+// visits its task's and its descendants' records, not every timer, waiter
+// and watch. `wait` is what the task waits on now, tagged: its frame | 1
+// asleep (and its place among the timers, `timer_placed`), its waiter | 2
+// parked, its frame | 3 watching (a task runs one frame at a time, so it
+// waits on one thing). Everything here is under the timers' lock.
+
+const TASK_REC: int64 = 56
+
+// The record of the task whose first frame is `t`, made (with its
+// parent's) when it has none; the lock held.
+fun task_rec(t: int64) -> int64 {
+    let have = __load64(t + 48) >> 4
+    if have != 0 {
+        return have
+    }
+    let rec = __alloc(TASK_REC)
+    zero_words(rec, TASK_REC)
+    let parent = __load64(t + 56)
+    if parent != 0 {
+        let up = task_rec(parent)
+        __store64(rec, up)
+        let first = __load64(up + 8)
+        __store64(rec + 16, first)
+        if first != 0 {
+            __store64(first + 24, rec)
+        }
+        __store64(up + 8, rec)
+    }
+    flags_or(t, rec << 4)
+    return rec
+}
+
+// The flags of the task `t` with `bits` set.
+fun flags_or(t: int64, bits: int64) {
+    let at = t + 48
+    while true {
+        let flags = __load64(at)
+        if __cas64(at, flags, flags | bits) {
+            break
+        }
+    }
+}
+
+// The record of the task the frame `fr` runs in (0: none); the lock held.
+fun rec_of_frame(fr: int64) -> int64 {
+    return __load64(__load64(fr + 40) + 48) >> 4
+}
+
+// The task `fr` waiting on `w` (tagged), its record made if need be; the
+// lock held.
+fun waits_on(fr: int64, w: int64) {
+    __store64(task_rec(__load64(fr + 40)) + 40, w)
+}
+
+// The wait `w` (tagged) of the frame `fr`'s task over, if it is its wait;
+// the lock held.
+fun wait_over(fr: int64, w: int64) {
+    let rec = rec_of_frame(fr)
+    if rec != 0 && __load64(rec + 40) == w {
+        __store64(rec + 40, 0)
+    }
+}
+
+// The task whose first frame is `t` ended: its deadline off the timers
+// unless it fired, its record off its parent's and freed, its flags
+// "ended" (8) and without a record; the lock held.
+fun task_done_locked(t: int64) {
+    let at = t + 48
+    let flags = __load64(at)
+    let rec = flags >> 4
+    if rec != 0 {
+        let cell = __load64(rec + 32)
+        if cell != 0 && __load64(cell) == 0 {
+            deadline_remove(t, cell)
+        }
+        // (a child outliving its task, which structured concurrency rules
+        // out, would move up to the parent's record)
+        let up = __load64(rec)
+        var c = __load64(rec + 8)
+        while c != 0 {
+            let next = __load64(c + 16)
+            __store64(c, 0)
+            __store64(c + 16, 0)
+            __store64(c + 24, 0)
+            if up != 0 {
+                __store64(c, up)
+                let first = __load64(up + 8)
+                __store64(c + 16, first)
+                if first != 0 {
+                    __store64(first + 24, c)
+                }
+                __store64(up + 8, c)
+            }
+            c = next
+        }
+        let next = __load64(rec + 16)
+        let prev = __load64(rec + 24)
+        if prev != 0 {
+            __store64(prev + 16, next)
+        } else if up != 0 {
+            __store64(up + 8, next)
+        }
+        if next != 0 {
+            __store64(next + 24, prev)
+        }
+        __free(rec)
+    }
+    if (flags & 1) != 0 {
+        timers_forget(t | 1)
+    }
+    while true {
+        let f = __load64(at)
+        if __cas64(at, f, (f & 14) | 8) {
+            break
+        }
+    }
+}
+
+// The deadline of the task `t`, whose cell `cell` keeps its place, taken
+// off the timers; the lock held.
+fun deadline_remove(t: int64, cell: int64) {
+    let timers = __rt_get("__timers")
+    let i = __load64(cell + 8)
+    if timers == 0 || i < 0 || i >= __load64(timers) || __load64(timers + 32 + i * TIMER) != (t | 1) {
+        // (never: a deadline's place is kept wherever its timer moves)
+        timers_forget(t | 1)
+        return
+    }
+    timer_remove_at(timers, i)
 }
 
 // A timer at `at` for `fr` (and `cell`); its order among timers of one time.
@@ -3449,6 +3616,10 @@ fun timer_add_locked(at0: int64, fr: int64, cell: int64) -> int64 {
     }
     let seq = __rt_get("__timer_seq")
     __store64(__rt_addr("__timer_seq"), seq + 1)
+    if (fr & 3) == 0 {
+        // a sleeper: its task's record keeps its place
+        waits_on(fr, fr | 1)
+    }
     // sifted up from the end
     var i = __load64(c)
     while i > 0 {
@@ -3472,14 +3643,22 @@ fun timer_add_locked(at0: int64, fr: int64, cell: int64) -> int64 {
     return seq
 }
 
-// The entry at `i` of the timers' cell `cell` just put there: a wait's time
-// limit (its waiter tagged 2) keeps its place in its waiter, so that a wake
-// takes it off without looking through every timer (`timer_remove`, the
-// 2026-11-09 review's M11).
+// The entry at `i` of the timers' cell `cell` just put there, its place
+// kept where its end looks for it: a wait's time limit (its waiter tagged
+// 2) in its waiter, so that a wake takes it off without looking through
+// every timer (`timer_remove`, the 2026-11-09 review's M11); a deadline
+// (its task tagged 1) in its cell, for its task's end, and a sleeper in its
+// task's record, for a cancel (MYLA-456).
 fun timer_placed(cell: int64, i: int64) {
-    let fr = __load64(cell + 32 + i * TIMER)
-    if (fr & 2) != 0 {
+    let e = cell + 16 + i * TIMER
+    let fr = __load64(e + 16)
+    let tag = fr & 3
+    if tag == 2 {
         __store64(fr - 2 + 80, i)
+    } else if tag == 1 {
+        __store64(__load64(e + 24) + 8, i)
+    } else {
+        __store64(rec_of_frame(fr) + 48, i)
     }
 }
 
@@ -3534,6 +3713,7 @@ fun timers_fire() {
             unpark_locked(w, 3, false)
             due.push(__load64(w))
         } else {
+            wait_over(fr, fr | 1)
             due.push(fr)
         }
     }
@@ -3554,75 +3734,61 @@ fun timers_fire() {
 
 // The task whose first frame is `t` asked to stop (its flags' 2), and the
 // time of every sleeper of it or a task below it come (D124: a cancelled
-// task's sleep ends at once); the timers' lock held.
+// task's sleep ends at once), every wait of theirs on a notifier or a
+// descriptor ended; the timers' lock held. They are found through the
+// records of `t` and the tasks below it (MYLA-456), where every timer,
+// parked waiter and watch was looked at.
 fun cancel_locked(t: int64) {
-    let at = t + 48
-    while true {
-        let flags = __load64(at)
-        if __cas64(at, flags, flags | 2) {
-            break
-        }
-    }
-    // waiting for input: no longer watched, queued (its read sees the
-    // request)
-    let ws = __rt_get("__watches")
-    if ws != 0 {
-        var k: int64 = 0
-        while k < __load64(ws) {
-            let wf = __load64(ws + 24 + k * WATCH)
-            if task_below(__load64(wf + 40), t) {
-                // every entry of the frame taken (and unwatched), so it is
-                // queued once
-                let gone = watch_take(wf)
-                exec_push(wf)
-            } else {
-                k += 1
-            }
-        }
-    }
-    // waiting on a notifier (MYLA-387): taken off it (and its time limit
-    // off the timers), queued, its wait cancelled
-    var pw = __rt_get("__parked")
-    while pw != 0 {
-        let next = __load64(pw + 32)
-        let wf = __load64(pw)
-        if task_below(__load64(wf + 40), t) {
-            unpark_locked(pw, 4, true)
-            exec_push(wf)
-        }
-        pw = next
-    }
-    let cell = __rt_get("__timers")
-    if cell == 0 {
+    flags_or(t, 2)
+    let top = __load64(t + 48) >> 4
+    if top == 0 {
         return
     }
-    let n = __load64(cell)
-    var woke = false
-    var i: int64 = 0
-    while i < n {
-        let e = cell + 16 + i * TIMER
-        let fr = __load64(e + 16)
-        if (fr & 3) == 0 && task_below(__load64(fr + 40), t) {
-            __store64(e, 0)
-            woke = true
+    // the records of the tree below `top`, depth first
+    var r = top
+    while true {
+        cancel_wait(r)
+        let child = __load64(r + 8)
+        if child != 0 {
+            r = child
+        } else {
+            while r != top && __load64(r + 16) == 0 {
+                r = __load64(r)
+            }
+            if r == top {
+                return
+            }
+            r = __load64(r + 16)
         }
-        i += 1
-    }
-    if woke {
-        timers_heapify(cell)
     }
 }
 
-// Whether the task `t` (a first frame) is `top` or a task below it.
-fun task_below(t: int64, top: int64) -> bool {
-    var x = t
-    while x != 0 {
-        if x == top {
-            return true
+// The wait of the task whose record is `r` ended by a cancel: a sleeper's
+// time come (it fires with the next timers), a parked waiter taken off its
+// notifier (and its time limit off the timers) and queued, a frame waiting
+// for input no longer watched and queued (its read sees the request); the
+// lock held.
+fun cancel_wait(r: int64) {
+    let w = __load64(r + 40)
+    let kind = w & 3
+    let p = w - kind
+    if kind == 1 {
+        let cell = __rt_get("__timers")
+        let i = __load64(r + 48)
+        if cell != 0 && i >= 0 && i < __load64(cell) && __load64(cell + 32 + i * TIMER) == p {
+            __store64(cell + 16 + i * TIMER, 0)
+            let top = timer_sift_up(cell, i)
         }
-        x = __load64(x + 56)
+    } else if kind == 2 {
+        let wf = __load64(p)
+        unpark_locked(p, 4, true)
+        exec_push(wf)
+    } else if kind == 3 {
+        // every entry of the frame taken (and unwatched), so it is queued
+        // once
+        let gone = watch_take(p)
+        exec_push(p)
     }
-    return false
 }
 
 // Every timer for `fr` (a deadline's tagged frame) taken off; the lock held.
@@ -3664,6 +3830,12 @@ fun timer_remove(w: int64) {
         timers_forget(w | 2)
         return
     }
+    timer_remove_at(cell, i)
+}
+
+// The timer at `i` of the cell `cell` taken off: the last one moved into
+// its place and sifted up or down. The lock held.
+fun timer_remove_at(cell: int64, i: int64) {
     let n = __load64(cell) - 1
     __store64(cell, n)
     __store64(__rt_addr("__timer_count"), n)
@@ -3893,6 +4065,8 @@ fun wait_fds(fr: int64, a: int64, b: int64, events: int64) {
         exec_push(fr)
         return
     }
+    // its task's wait, which a cancel ends
+    waits_on(fr, fr | 3)
     give_lock(lock)
 }
 
@@ -3963,6 +4137,9 @@ fun watch_take(fr: int64) -> bool {
     }
     __store64(cell, n)
     __store64(__rt_addr("__watch_count"), n)
+    if found {
+        wait_over(fr, fr | 3)
+    }
     // a descriptor no other frame waits for no longer watched
     var k = 0
     while k < gone.len() {
@@ -4062,12 +4239,12 @@ fun exec_stuck() {
 // waiter][last]`, which a handle names (`handle_new`, kind H_NOTIFIER, D181):
 // a copy of the handle reaches the same record, and one closed, or made up,
 // reaches none. A wait is a waiter, the cell `[frame][notifier][next]
-// [previous][next parked][previous parked][state][since][ms][record][timer]`
-// (WAITER bytes) that `waiter` makes and `woken` frees: while it is parked it
-// is on its notifier's list, oldest first, and on `__parked`, every parked
-// waiter's list, which a cancel looks through; `record` is its notifier's
-// record then, and `timer` the place of its time limit among the timers
-// (`timer_placed`). Its state: 0 made, 1 parked, then 2 notified, 3 timed
+// [previous][two words unused][state][since][ms][record][timer]` (WAITER
+// bytes) that `waiter` makes and `woken` frees: while it is parked it is on
+// its notifier's list, oldest first, and its task's record holds it, for a
+// cancel (MYLA-456; every parked waiter was on a list, `__parked`, which a
+// cancel walked); `record` is its notifier's record then, and `timer` the
+// place of its time limit among the timers (`timer_placed`). Its state: 0 made, 1 parked, then 2 notified, 3 timed
 // out, 4 cancelled, 5 its notifier closed while it waited, 6 its notifier
 // closed (or never made) before it. `notify_one` wakes the oldest waiter,
 // or with none adds a permit, which the next wait takes at once (none is
@@ -4192,13 +4369,8 @@ pub fun park_frame(fr: int64, w: int64) {
         __store64(n + 16, w)
     }
     __store64(n + 24, w)
-    // first on every parked waiter's
-    let head = __rt_get("__parked")
-    __store64(w + 32, head)
-    if head != 0 {
-        __store64(head + 40, w)
-    }
-    __store64(__rt_addr("__parked"), w)
+    // its task's wait, which a cancel ends
+    waits_on(fr, w | 2)
     let ms = __load64(w + 64)
     if ms > 0 {
         let seq = timer_add_locked(os.clock_ns() + ms * 1000000, w | 2, 0)
@@ -4224,9 +4396,9 @@ pub fun park_alone(w: int64) {
     __store64(w + 48, st)
 }
 
-// The parked waiter `w` taken off its notifier's list and `__parked`, its
-// time limit off the timers (`forget`: unless a timer fired it), its state
-// `st` (the lock held).
+// The parked waiter `w` taken off its notifier's list and its task's
+// record, its time limit off the timers (`forget`: unless a timer fired
+// it), its state `st` (the lock held).
 fun unpark_locked(w: int64, st: int64, forget: bool) {
     let n = __load64(w + 72)
     let next = __load64(w + 16)
@@ -4241,16 +4413,7 @@ fun unpark_locked(w: int64, st: int64, forget: bool) {
     } else {
         __store64(n + 24, prev)
     }
-    let gnext = __load64(w + 32)
-    let gprev = __load64(w + 40)
-    if gprev != 0 {
-        __store64(gprev + 32, gnext)
-    } else {
-        __store64(__rt_addr("__parked"), gnext)
-    }
-    if gnext != 0 {
-        __store64(gnext + 40, gprev)
-    }
+    wait_over(__load64(w), w | 2)
     if forget && __load64(w + 64) > 0 {
         timer_remove(w)
     }

@@ -13,7 +13,8 @@
   `https`, a URL that isn't one;
 - the server's time limits (idle, read, write, keep-alive) against silent,
   dribbling, slow-uploading and non-reading clients and a slow handler,
-  and 64 silent connections against a default server (MYLA-422);
+  and 64 silent connections, renewed, against a default server (MYLA-422,
+  MYLA-468);
 - a client that sends a POST over a kept connection the server dropped
   only once, a GET again (MYLA-422);
 - a Myla client and server in one program, three clients at once on the
@@ -921,20 +922,50 @@ class TimeLimits(unittest.TestCase):
                 with self.subTest(server=name):
                     self.serve(argv, exe, check)
 
-    def test_idle_connections_hold_a_default_server_for_idle_ms(self):
-        # the review's case: 64 silent connections took every worker of a
-        # default server for keep_alive_ms (60 s); idle_ms (5 s) ends them
+    def test_silent_connections_renewed_do_not_stop_a_default_server(self):
+        # the review's case (MYLA-422): 64 silent connections took every
+        # worker of a default server for keep_alive_ms (60 s), then for
+        # idle_ms (5 s); renewed every 4.5 s, they stopped it for good
+        # (MYLA-468). A connection that has said nothing for a whole look of
+        # its guard gives its worker up once another waits to be accepted.
         def check(port):
-            idle = [socket.create_connection(("127.0.0.1", port), timeout=10) for _ in range(64)]
-            time.sleep(0.2)
-            out, took = quick_get(port, timeout=15)
-            self.assertTrue(out.startswith(b"HTTP/1.1 200 OK\r\n"), out)
-            self.assertTrue(3 < took < 9, took)
-            for s in idle:
-                s.close()
+            stop = threading.Event()
+            renewed = threading.Event()
+
+            def renew():
+                held = []
+                while not stop.is_set():
+                    fresh = [socket.create_connection(("127.0.0.1", port), timeout=10) for _ in range(64)]
+                    for s in held:
+                        s.close()
+                    held = fresh
+                    renewed.set()
+                    stop.wait(4.5)
+                for s in held:
+                    s.close()
+
+            attacker = threading.Thread(target=renew)
+            attacker.start()
+            try:
+                took = []
+                for _ in range(3):
+                    # just after a renewal: every worker holds a fresh
+                    # silent connection
+                    renewed.wait()
+                    renewed.clear()
+                    time.sleep(0.2)
+                    out, t = quick_get(port, timeout=15)
+                    self.assertTrue(out.startswith(b"HTTP/1.1 200 OK\r\n"), out)
+                    took.append(t)
+                # two looks of a guard (a second each) at most, not the
+                # 4.5 s until the next renewal
+                self.assertLess(max(took), 3.2, took)
+            finally:
+                stop.set()
+                attacker.join()
 
         with tempfile.TemporaryDirectory() as tmp:
-            for name, (argv, exe) in self.forms(tmp, ["9000", "d"]).items():
+            for name, (argv, exe) in self.forms(tmp, ["20000", "d"]).items():
                 with self.subTest(server=name):
                     self.serve(argv, exe, check)
 

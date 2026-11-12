@@ -93,7 +93,7 @@ pub fun backend_std_functions() -> [str] {
         "std$rt$fmod", "std$rt$free", "std$rt$free_tasks", "std$rt$func_drop", "std$rt$func_retain",
         "std$rt$key_bool_text", "std$rt$key_str_text", "std$rt$key_text", "std$rt$list_grow", "std$rt$list_index_text",
         "std$rt$map_find_h", "std$rt$map_keys_h", "std$rt$map_lookup", "std$rt$map_new", "std$rt$map_put_slot",
-        "std$rt$map_shrink", "std$rt$map_shrink_h", "std$rt$map_slot_h", "std$rt$panic_report", "std$rt$panic_report_tasks",
+        "std$rt$map_shrink", "std$rt$map_shrink_h", "std$rt$map_slot_h", "std$rt$map_walk", "std$rt$panic_report", "std$rt$panic_report_tasks",
         "std$rt$print_bool", "std$rt$print_char", "std$rt$print_int", "std$rt$print_str", "std$rt$print_uint",
         "std$rt$range_text", "std$rt$sb_append_byte", "std$rt$sb_append_bytes", "std$rt$sb_append_char", "std$rt$sched_init",
         "std$rt$sleep_frame", "std$rt$str_char_at", "std$rt$str_cmp", "std$rt$str_concat", "std$rt$str_concat3",
@@ -109,11 +109,11 @@ pub fun backend_std_functions() -> [str] {
 // method), `keys` the bodies (`body_key`), and `parse` reads one, lexed,
 // parsed and renamed as the rest of its module was. Its errors are a lex,
 // parse or module error's: each message starts with its kind (`parse
-// error: …`, `kind_of`).
+// error: …`, `kind_of`). A key's value is the loader's (MYLA-412).
 // `task_line`: the line of an `async let` in one of them, 0 if none has one
 // or nobody asked: what makes a native build's program one with tasks
 // (`Checker.task_line`), as if every body was read (MYLA-413).
-pub struct LazyBodies { ids: [int32: bool], keys: [int64: bool], parse: (int64) -> Result<Block, [CheckErr]>, task_line: int32 }
+pub struct LazyBodies { ids: [int32: bool], keys: [int64: int32], parse: (int64) -> Result<Block, [CheckErr]>, task_line: int32 }
 
 // No body left unparsed: a program loaded whole.
 pub fun no_lazy_bodies() -> LazyBodies {
@@ -1233,8 +1233,9 @@ fun join_open(a: Type, b: Type) -> Option<Type> {
 // reported; `slot`, the column's lists in the checker's `col_open` (the
 // elements whose own type had a hole, MYLA-401) and `col_lits` (its
 // literals while nothing else fixes its type, L2); `fixed` once an element
-// that isn't such a literal does.
-struct LitColumn { ty: Type, have: bool, first: Expr, slot: int32, fixed: bool }
+// that isn't such a literal does; `waiting` while a literal that didn't fit
+// the type the literals had waits for one that fixes a wider type (MYLA-449).
+struct LitColumn { ty: Type, have: bool, first: Expr, slot: int32, fixed: bool, waiting: bool }
 
 // Whether `t` holds an `Option` or a `Result` (D182, `prelude_need`).
 #test(Type.TTuple([Type.TStr, Type.TEnum("Option", [Type.TStr])]))[true]
@@ -4154,12 +4155,17 @@ impl Checker {
             if is_struct_or_enum(lt) { return self.infer_operator_overload(e, op, l, r, lt) }
             if is_type_param(lt) { return self.infer_bounded_op(e, op, l, r, lt) }
             if is_str(lt) {
-                let rt = self.expect_value(r, None)?
+                let rt = self.expect_value(r, Some(Type.TStr))?
                 if !is_str(rt) { return Err(terr_at(e.line, e.col, e.sp, format("cannot concatenate 'str' with '{}'", type_name(rt)))) }
                 return Ok(Type.TStr)
             }
             var hint2: Option<Type> = None
             if is_int(lt) || is_float(lt) { hint2 = Some(lt) }
+            else {
+                // a list has no `+`: that is the error, not what the right
+                // side lacks (`acc.items += lst()`, MYLA-448)
+                if !is_char(lt) { return Err(terr_at(e.line, e.col, e.sp, "operator '+' requires numeric or string operands")) }
+            }
             let rt = self.expect_value(r, hint2)?
             match self.char_arith(e, op, l, lt, rt)? { Some(t) => { return Ok(t) }, None => {} }
             let common = self.unify(l, lt, r, rt)?
@@ -4173,6 +4179,7 @@ impl Checker {
         if is_arith_op(op) && is_type_param(lt) { return self.infer_bounded_op(e, op, l, r, lt) }
         var hint2 = hint
         if is_int(lt) || is_float(lt) { hint2 = Some(lt) }
+        else { if !is_char(lt) { return Err(terr_at(e.line, e.col, e.sp, format("operator '{}' requires integer operands", op))) } }
         // what a char is moved by or measured from isn't the context's type
         if is_char(lt) { hint2 = None }
         let rt = self.expect_value(r, hint2)?
@@ -4604,7 +4611,7 @@ impl Checker {
         let slot = self.col_open.len()
         self.col_open.push([])
         self.col_lits.push([])
-        return LitColumn { ty: hole(), have: false, first: first, slot: slot, fixed: false }
+        return LitColumn { ty: hole(), have: false, first: first, slot: slot, fixed: false, waiting: false }
     }
 
     // The columns from `slot` on, once their literal is checked.
@@ -4624,6 +4631,11 @@ impl Checker {
     // such literals are in the column, an element of another type gives it
     // to all of them, each checked again against it (L2): `[1, 300, 3u8]`
     // is an error at `300`, `[1, 2, x]` with `x: int64` an `[int64]`.
+    //
+    // Without a type expected of the elements, a literal that doesn't fit
+    // the type the literals have so far waits for an element that fixes
+    // one (MYLA-449): `[4000000000, big]` with `big: int64` is an `[int64]`;
+    // `close_column` reports it if none does.
     fun column_step(var self, col: LitColumn, x: Expr, exp: Option<Type>) -> Result<LitColumn, CheckErr> {
         var hint = exp
         if col.have { hint = Some(col.ty) }
@@ -4632,26 +4644,39 @@ impl Checker {
         self.open_at = x.id
         let r = self.expect_value(x, hint)
         self.open_at = saved
+        let lit = adapts(x)
+        if !col.fixed && lit && r.is_err() && is_none_type(exp) {
+            self.col_lits[col.slot].push(x)
+            return Ok(LitColumn { ty: col.ty, have: col.have, first: col.first, slot: col.slot, fixed: false, waiting: true })
+        }
         let t = r?
         if has_hole(t) { self.col_open[col.slot].push(x) }
-        let lit = adapts(x)
         let fixed = col.fixed || !lit
         if lit && !col.fixed { self.col_lits[col.slot].push(x) }
-        if !col.have { return Ok(LitColumn { ty: t, have: true, first: x, slot: col.slot, fixed: fixed }) }
+        if col.waiting && !lit && !has_hole(t) {
+            // the literals so far take the type `x` fixes, the one that
+            // waited too, or it is their error
+            for y in self.col_lits[col.slot] {
+                let yt = self.expect_value(y, Some(t))?
+                if !type_eq(yt, t) { return Err(terr_at(y.line, y.col, y.sp, format("type mismatch: '{}' vs '{}' (no implicit conversion between numeric types)", type_name(yt), type_name(t)))) }
+            }
+            return Ok(LitColumn { ty: t, have: true, first: col.first, slot: col.slot, fixed: true, waiting: false })
+        }
+        if !col.have { return Ok(LitColumn { ty: t, have: true, first: if col.waiting { col.first } else { x }, slot: col.slot, fixed: fixed, waiting: col.waiting }) }
         if !has_hole(t) && !has_hole(col.ty) {
-            if type_eq(col.ty, t) { return Ok(LitColumn { ty: t, have: true, first: col.first, slot: col.slot, fixed: fixed }) }
+            if type_eq(col.ty, t) { return Ok(LitColumn { ty: t, have: true, first: col.first, slot: col.slot, fixed: fixed, waiting: col.waiting }) }
             if !col.fixed {
                 // the literals so far take the type `x` gives
                 var all = true
                 for y in self.col_lits[col.slot] {
                     if y.id != x.id && !type_eq(self.expect_value(y, Some(t))?, t) { all = false }
                 }
-                if all { return Ok(LitColumn { ty: t, have: true, first: col.first, slot: col.slot, fixed: fixed }) }
+                if all { return Ok(LitColumn { ty: t, have: true, first: col.first, slot: col.slot, fixed: fixed, waiting: false }) }
             }
             return Err(terr_at(col.first.line, col.first.col, col.first.sp, format("type mismatch: '{}' vs '{}' (no implicit conversion between numeric types)", type_name(col.ty), type_name(t))))
         }
         return match join_open(col.ty, t) {
-            Some(j) => Ok(LitColumn { ty: j, have: true, first: col.first, slot: col.slot, fixed: fixed }),
+            Some(j) => Ok(LitColumn { ty: j, have: true, first: col.first, slot: col.slot, fixed: fixed, waiting: col.waiting }),
             None => Err(terr_at(x.line, x.col, x.sp, format("type mismatch: '{}' vs '{}'", open_type_name(col.ty), open_type_name(t)))),
         }
     }
@@ -4661,6 +4686,19 @@ impl Checker {
     // what it lacks as it would alone, unless the literal is itself an
     // element that may stay open (`may_open`).
     fun close_column(var self, col: LitColumn, may_open: bool) -> Result<Type, CheckErr> {
+        if col.waiting {
+            // no element fixed a type the literal that waited fits: its
+            // error, against the type the others have (MYLA-449)
+            var hint: Option<Type> = None
+            if col.have && !has_hole(col.ty) { hint = Some(col.ty) }
+            for y in self.col_lits[col.slot] {
+                let yt = self.expect_value(y, hint)?
+                match hint {
+                    Some(h) => { if !type_eq(yt, h) { return Err(terr_at(y.line, y.col, y.sp, format("type mismatch: '{}' vs '{}' (no implicit conversion between numeric types)", type_name(yt), type_name(h)))) } },
+                    None => {},
+                }
+            }
+        }
         if has_hole(col.ty) {
             if may_open { return Ok(col.ty) }
             // the element the hole is in, as deep as it goes: what the
@@ -4991,6 +5029,31 @@ fun is_struct_or_enum(t: Type) -> bool {
 #test(Type.TBool)[false]
 #test(Type.TParam("T"))[true]
 fun is_type_param(t: Type) -> bool { return match t { Type.TParam(n) => true, _ => false } }
+
+// Whether `b` is the block of a compound assignment that computes an index
+// of its place first (the parser's `compound_assign`, MYLA-223): its hidden
+// `let`s, then the assignment.
+fun hoists_an_index(b: Block) -> bool {
+    if b.stmts.len() < 2 { return false }
+    return match b.stmts[0].kind { StmtKind.VarDecl(k, n, t, i) => is_hidden_index(n), _ => false }
+}
+
+#test("%index12")[true]
+#test("index")[false]
+fun is_hidden_index(n: str) -> bool { return n.len() > 6 && n[:6] == "%index" }
+
+// Whether the index `i` is the hidden name `name`, or `^name`.
+#test(Expr { id: 0, line: 1, col: 1, sp: no_span(), kind: ExprKind.Name("%index3") }, "%index3")[true]
+#test(Expr { id: 0, line: 1, col: 1, sp: no_span(), kind: ExprKind.Unary("^", Expr { id: 1, line: 1, col: 2, sp: no_span(), kind: ExprKind.Name("%index3") }) }, "%index3")[true]
+#test(Expr { id: 0, line: 1, col: 1, sp: no_span(), kind: ExprKind.Name("%index3") }, "%index4")[false]
+fun names_index(i: Expr, name: str) -> bool {
+    return match i.kind {
+        ExprKind.Name(n) => n == name,
+        ExprKind.Unary(op, x) => op == "^" && names_index(x, name),
+        _ => false,
+    }
+}
+
 
 // What a type `for` can't loop over lacks to be an iterator (D171).
 #test(Type.TInt(32, true))[""]
@@ -5918,6 +5981,7 @@ impl Checker {
             },
             StmtKind.IfS(cond, then, otherwise) => {
                 self.expect_type(cond, Type.TBool, "if condition")?
+                if hoists_an_index(then) { return self.check_compound(then) }
                 self.check_block(then)?
                 match otherwise {
                     Some(et) => match et {
@@ -5966,6 +6030,56 @@ impl Checker {
                 self.infer_node(ex, None)?
                 Ok(0)
             },
+        }
+    }
+
+    // The block of a compound assignment whose place has an index computed
+    // first (the parser's `compound_assign`): each hidden `let %index… = k`
+    // expects the key type of the place `k` indexes, as `m[k] = m[k] + v`
+    // gives `k` (MYLA-448): `r[Ok("a")] += 1` with `r: [Result<str, int>:
+    // int]`, `w[2 * n] += 1` with `w: [int64: int]`.
+    fun check_compound(var self, b: Block) -> Result<int32, CheckErr> {
+        match b.stmts[b.stmts.len() - 1].kind {
+            StmtKind.Assign(place, value) => {
+                self.push_scope()
+                for s in b.stmts {
+                    var hidden = false
+                    match s.kind {
+                        StmtKind.VarDecl(kind, name, ty, init) => {
+                            if is_hidden_index(name) {
+                                hidden = true
+                                let hint = self.index_key_hint(place, name)?
+                                let vt = self.expect_value(init, hint)?
+                                self.define_at(name, vt, false, s.line, s.col, s.sp)
+                            }
+                        },
+                        _ => {},
+                    }
+                    if !hidden { self.check_stmt(s)? }
+                }
+                self.pop_scope()
+                return Ok(0)
+            },
+            _ => {},
+        }
+        return self.check_block(b)
+    }
+
+    // The type of a key of the container that `place` indexes with the
+    // hidden name `name`: a map's key type, an `int32` for a list; None
+    // where it isn't either.
+    fun index_key_hint(var self, place: Expr, name: str) -> Result<Option<Type>, CheckErr> {
+        return match place.kind {
+            ExprKind.Index(t, i) => {
+                if !names_index(i, name) { return self.index_key_hint(t, name) }
+                return match self.check_lvalue(t)?.ty {
+                    Type.TMap(k, v) => Ok(Some(k)),
+                    Type.TList(el) => Ok(Some(t_int())),
+                    _ => Ok(None),
+                }
+            },
+            ExprKind.GetField(t, f) => self.index_key_hint(t, name),
+            _ => Ok(None),
         }
     }
 
@@ -9019,6 +9133,32 @@ pub fun checker_on(src: str) -> Checker {
 // a generic impl's operator gives the receiver's instance (M2, MYLA-367)
 #test("struct Box<T> { v: T }\nimpl<T: Add> Add for Box<T> { fun add(self, other: Box<T>) -> Box<T> { return Box { v: self.v + other.v } } }\nfun main() { let c: Box<int> = Box { v: 1 } + Box { v: 2 }\nlet d = c + c + c\nlet e: int = d.v }")[[]]
 #test("struct Box<T> { v: T }\nimpl<T: Add> Add for Box<T> { fun add(self, other: Box<T>) -> Box<T> { return Box { v: self.v + other.v } } }\nfun main() { let c: Box<int> = Box { v: 1 } + Box { v: 2 }\nlet e: str = (c + c).v }")[["cannot assign value of type 'int32' to binding of type 'str'"]]
+// a compound assignment's hidden index takes the key type of the place it
+// indexes, and its operator is the error where its left side has none (MYLA-448)
+#test("#derive(Eq, Hash)\nenum K<T> { A, B(T) }\nfun f() { var m: [K<int>: int] = [:]\nm[K.A] = 0\nm[K.A] += 1 }")[[]]
+#test("fun f() { var m: [[int]: int] = [:]\nm[[]] = 1\nm[[]] += 10 }")[[]]
+#test("fun f() { var w: [int64: int] = [:]\nw[2500000000 * 2] += 1 }")[[]]
+#test("fun f() { var w: [[uint8: int]] = [[:]]\nvar i = 0\nw[i + 0][100 + 100] -= 1 }")[[]]
+#test("fun f() { var m = [1: \"a\"]\nm[1 + 1] += 1 }")[["cannot concatenate 'str' with 'int32'"]]
+#test("fun f() { let m = [1: 2]\nm[1 + 1] += 1 }")[["cannot assign to an immutable binding (declare it with 'var')"]]
+#test("fun f() { var m: [int64: int] = [:]\nm[\"k\" + \"\"] += 1 }")[["map key must be 'int64', found 'str'"]]
+#test("struct B<T> { items: [T] }\nfun lst<T>() -> [T] { return [] }\nfun f() { var b: B<int> = B { items: [] }\nb.items += lst() }")[["operator '+' requires numeric or string operands"]]
+#test("struct B<T> { items: [T] }\nfun lst<T>() -> [T] { return [] }\nfun f() { var b: B<int> = B { items: [] }\nb.items = b.items + lst() }")[["operator '+' requires numeric or string operands"]]
+#test("fun f() { let t = [1] + 2 }")[["operator '+' requires numeric or string operands"]]
+#test("fun f() { var xs = [true]\nxs[0] -= 1 }")[["operator '-' requires integer operands"]]
+#test("trait Blank { fun blank() -> Self }\nimpl Blank for str { fun blank() -> str { return \"-\" } }\nfun blank<T: Blank>() -> T { return T.blank() }\nfun f() { var s = \"a\"\ns += blank() }")[[]]
+// a literal that doesn't fit the column's type while only literals are in
+// it waits for a later element's type (MYLA-449)
+#test("fun f() { let big: int64 = 5000000000\nlet a = [4000000000, big] }")[[]]
+#test("fun f() { let big: int64 = 5000000000\nlet a = [1, 4000000000, -3000000000, big] }")[[]]
+#test("fun f() { let big: int64 = 5000000000\nlet m = [1: 4000000000, 2: big]\nlet k = [4000000000: 1, big: 2] }")[[]]
+#test("fun f() { let u: uint64 = 1\nlet a = [18000000000000000000, 2, u] }")[[]]
+#test("fun f() { let a = [4000000000, 3u8] }")[["integer literal 4000000000 does not fit in 'uint8'"]]
+#test("fun f() { let a = [4000000000, 1] }")[["integer literal 4000000000 does not fit in 'int32'"]]
+#test("fun f() { let a = [4000000000] }")[["integer literal 4000000000 does not fit in 'int32'"]]
+#test("fun f() { let n = 1\nlet a = [4000000000, 1, n] }")[["integer literal 4000000000 does not fit in 'int32'"]]
+#test("fun f() { let big: int64 = 5000000000\nlet a: [int32] = [4000000000, big] }")[["integer literal 4000000000 does not fit in 'int32'"]]
+#test("fun f() { let a = [4000000000, 2.5] }")[["integer literal 4000000000 does not fit in 'int32'"]]
 fun errors_of(src: str) -> [str] {
     var out: [str] = []
     for e in checker_on(src).errs { out.push(e.msg) }

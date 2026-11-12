@@ -64,3 +64,7 @@ Each reproducer of `review1/repro/native/` became a test that failed before (the
 2. **The instantiation limits**, 64 types deep and 4,096 parts. Alternatives: Rust's recursion limit of 128 with a crate attribute to raise it; a flag. No program needs either; a flag can come with the first that does.
 3. **`myla build` of a library says `type error: no entry point …`**, the interpreter's message under the kind every refused build uses. Alternative: a kind of its own (`error:`), which the driver would print.
 4. **H4 computes only unsettled operands first.** The alternative, every key and index first into a local, is simpler to state but costs a store and a load (and a retain for a string key) on every write into a container.
+
+## The owner's decision (2026-11-11)
+
+Proposals 1, 2 and 4 stand as built (D189). Proposal 3 is decided otherwise (D188): `myla build` of a file without an entry point is `error: no entry point …`, an error of its own kind, not a type error; once Myla has an FFI it builds a library ([[MYLA-505]]). Changed with the decision: `CodeGen.generate`'s message and `loader.kind_of`.

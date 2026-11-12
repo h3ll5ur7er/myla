@@ -147,6 +147,165 @@ fun main() {
     print(f"{e.len()} {show(e)}")
 }
 """,
+    # MYLA-496: a `for` over a map walks its slots, without the list of keys
+    "for_over_a_map_walks_its_slots": r"""// MYLA-496: `for k in m` walks the map's slots in the order of insertion
+// without the list of its keys: the keys it started with whatever the body
+// does to the map, past the gaps of removed keys and taken tombstones, over
+// string, narrow and compound keys, a `let` map, a field and a list's map,
+// with `break`, `continue` and `return`, nested, and in an async function
+#derive(Eq, Hash)
+struct P {
+    x: int,
+    name: str,
+}
+
+struct Holder {
+    m: [str: int],
+}
+
+fun show(m: [int: int]) -> str {
+    var sb = StringBuilder()
+    for k in m {
+        sb.append(f"{k}={m[k]} ")
+    }
+    return sb.build()
+}
+
+fun ints(xs: [int]) -> str {
+    var sb = StringBuilder()
+    for x in xs { sb.append(f"{x},") }
+    return sb.build()
+}
+
+// the first key at or above `at`, by a loop that returns from inside
+fun first_from(m: [int: int], at: int) -> int {
+    for k in m {
+        if k >= at { return k }
+    }
+    return -1
+}
+
+async fun total(m: [str: int]) -> int {
+    var t = 0
+    for k in m {
+        t += m[k]
+    }
+    return t
+}
+
+#main
+async fun main() {
+    // a queue: the oldest key taken until none is left
+    var q: [int: int] = [:]
+    for i in 0..3000 { q[i] = i }
+    var taken = 0
+    var sum = 0
+    while q.len() > 0 {
+        var first = -1
+        for k in q {
+            first = k
+            break
+        }
+        sum += first
+        q.remove(first)
+        taken += 1
+        // now and then a key goes in again, at the end
+        if taken % 1000 == 0 { q[first] = first }
+    }
+    print(f"{taken} {sum}")
+
+    // the body changes the map: the loop walks the keys it began with
+    var m: [int: int] = [:]
+    for i in 0..10 { m[i] = i * i }
+    var seen: [int] = []
+    for k in m {
+        seen.push(k)
+        if k % 2 == 0 { m.remove(k + 1) }
+        m[100 + k] = k
+    }
+    print(f"{ints(seen)} {m.len()}")
+    print(show(m))
+    // tombstones taken by new keys: the order is still the insertion's
+    var t: [int: int] = [:]
+    for i in 0..8 { t[i] = i }
+    t.remove(2)
+    t.remove(5)
+    t[2] = 20
+    t[9] = 90
+    t.remove(0)
+    t[5] = 50
+    print(show(t))
+    print(f"{first_from(t, 4)} {first_from(t, 8)} {first_from(t, 100)}")
+    // continue, and a nested loop over the same map
+    var pairs = 0
+    for a in t {
+        if a % 2 == 1 { continue }
+        for b in t {
+            if b > a { pairs += 1 }
+        }
+    }
+    print(pairs)
+
+    // string keys, through removals and a compaction
+    var w: [str: int] = [:]
+    for i in 0..200 { w[f"k{i}"] = i }
+    for i in 0..200 {
+        if i % 40 != 3 { w.remove(f"k{i}") }
+    }
+    var sb = StringBuilder()
+    for k in w { sb.append(k + " ") }
+    print(sb.build())
+    // a `let` map, a field's and a list's
+    let fixed = w
+    var n = 0
+    for k in fixed { n += fixed[k] }
+    var h = Holder { m: w }
+    for k in h.m { h.m.remove(k) }
+    let ms = [w, h.m]
+    var lens: [int] = []
+    for mm in ms {
+        var c = 0
+        for k in mm { c += k.len() }
+        lens.push(c)
+    }
+    print(f"{n} {h.m.len()} {ints(lens)}")
+
+    // compound and narrow keys
+    var cm: [P: int] = [:]
+    for i in 0..6 { cm[P { x: i, name: f"p{i}" }] = i }
+    cm.remove(P { x: 0, name: "p0" })
+    cm.remove(P { x: 3, name: "p3" })
+    cm[P { x: 0, name: "p0" }] = 9
+    var cs = StringBuilder()
+    for k in cm { cs.append(f"{k.name}:{cm[k]} ") }
+    print(cs.build())
+    var lm: [[int]: str] = [[1]: "a", [2, 3]: "b", []: "c"]
+    lm.remove([1])
+    lm[[1]] = "d"
+    var ls = StringBuilder()
+    for k in lm { ls.append(f"{k.len()}{lm[k]} ") }
+    print(ls.build())
+    var bm: [uint8: bool] = [:]
+    for i in 0..5 { bm[(250 + i) as uint8] = i % 2 == 0 }
+    bm.remove(251)
+    var bs = StringBuilder()
+    for k in bm { bs.append(f"{k}={bm[k]} ") }
+    print(bs.build())
+    var tm: [(int, char): int] = [(1, 'a'): 1, (2, 'b'): 2]
+    for k in tm { tm[(k.0 + 10, k.1)] = k.0 }
+    var ts = StringBuilder()
+    for (a, c) in tm { ts.append(f"{a}{c} ") }
+    print(ts.build())
+
+    // empty maps, and one emptied
+    var e: [int: int] = [:]
+    for k in e { print(k) }
+    e[1] = 1
+    e.remove(1)
+    for k in e { print(k) }
+    print(f"{e.len()} {await total(fixed)}")
+}
+""",
     # D173 (MYLA-379): `IoError`'s `message()` and `Format`
     "io_error_text": r"""// D173 (MYLA-379): an `IoError`'s `message()` and `Format`: the cause in
 // words, its name after it
@@ -1975,6 +2134,109 @@ fun main() {
     w.bump_inner()
     print(f"{w.items[0].get()} {w.m[1].get()} {w.inner.get()}")
     print(f"{bump_first([A { n: 20 }])} {w.of_a_call()} {w.of_a_method()} {w.of_an_element()}")
+}
+""",
+    "generic_eq_and_hash_the_interpreter_calls": """// A written `eq` or `hash` of a generic impl, which the interpreter calls
+// itself (an element's `==`, a map's key), binds its type parameters
+// (MYLA-436): `<` on a uint64 compares unsigned, a uint64 formats unsigned
+struct W<T> {
+    v: T,
+}
+
+impl<T: Ord> Eq for W<T> {
+    fun eq(self, other: W<T>) -> bool {
+        return !(self.v < other.v)
+    }
+}
+
+impl<T: Ord + Format> Hash for W<T> {
+    fun hash(self, h: Hasher) -> Hasher {
+        print(f"hash {self.v}")
+        return h.add_str(f"{self.v}")
+    }
+}
+
+// equal when both are below their bound or both aren't: every key in one
+// bucket, so a lookup compares by `eq`
+struct K<T> {
+    v: T,
+    z: T,
+}
+
+impl<T: Ord> Eq for K<T> {
+    fun eq(self, other: K<T>) -> bool {
+        return (self.v < self.z) == (other.v < other.z)
+    }
+}
+
+impl<T> Hash for K<T> {
+    fun hash(self, h: Hasher) -> Hasher {
+        return h.add_i32(0)
+    }
+}
+
+#derive(Eq)
+struct P {
+    w: W<uint64>,
+}
+
+#derive(Eq)
+enum E {
+    A(W<uint64>),
+    B,
+}
+
+// an `eq` that finds any two equal
+struct A {
+    v: int,
+}
+
+impl Eq for A {
+    fun eq(self, other: A) -> bool {
+        return true
+    }
+}
+
+#derive(Eq)
+struct Q {
+    a: A,
+}
+
+fun main() {
+    let x = W { v: 0u64 }
+    let y = W { v: 18446744073709551615u64 }
+    print(x == y)
+    print([x] == [y])
+    print((x, 1) == (y, 1))
+    print(P { w: x } == P { w: y })
+    print([P { w: x }] == [P { w: y }])
+    print(P { w: x }.eq(P { w: y }))
+    print(E.A(x) == E.A(y))
+    print(Some(x) == Some(y))
+    print([Some(x)] == [Some(y)])
+    print([x].contains(y))
+    let m = [y: 1]
+    print(m.contains(y))
+    print((y, 3).hash(Hasher { state: 0 }).state == (y, 3).hash(Hasher { state: 0 }).state)
+
+    let lo = K { v: 0u64, z: 1u64 }
+    let hi = K { v: 18446744073709551615u64, z: 1u64 }
+    print(lo == hi)
+    print([lo] == [hi])
+    var n = [lo: 1]
+    print(n.contains(hi))
+    n[hi] = 2
+    print(n.len())
+    n[hi] += 3
+    print(n[hi])
+    print(n.get_or(lo, 0))
+    n.remove(hi)
+    print(n.len())
+    let t = [(lo, 1): "a"]
+    print(t.contains((hi, 1)))
+
+    print(Q { a: A { v: 1 } } == Q { a: A { v: 2 } })
+    print(Q { a: A { v: 1 } }.eq(Q { a: A { v: 2 } }))
 }
 """,
     "actor_function_field": """// an actor's field that holds a function, called from the actor's own
@@ -7747,6 +8009,83 @@ fun main() {
     print(n[1])
 }
 """,
+    # MYLA-449: a literal too wide for int32 waits for the element that fixes a wider type
+    "literals_wait_for_the_element_that_fixes_a_wider_type": r"""// MYLA-449: a literal too wide for the type the literals before it have
+// waits for the element that fixes a wider one, in lists, map keys and map
+// values
+fun main() {
+    let big: int64 = 5000000000
+    let a = [4000000000, big]
+    print(a[0] + a[1])
+    let b = [1, -3000000000, 4000000000, big]
+    print(b[1] * 2)
+    let m = [1: 4000000000, 2: big]
+    print(m[1] - m[2])
+    let k = [4000000000: "a", big: "b", 7: "c"]
+    print(k[4000000000] + k[7])
+    let u: uint64 = 1
+    let c = [18000000000000000000, 2, u]
+    print(c[0] + c[1])
+    let n = [[4000000000, big], [1]]
+    print(n[1][0] + n[0][0])
+}
+""",
+    # MYLA-448: a compound assignment's hidden index and right side take the plain assignment's types
+    "compound_assignments_type_as_their_plain_form": r"""// MYLA-448: a compound assignment's hidden `let` of its index expects the
+// key type of the place it indexes, and its right side what the plain
+// `place = place op value` gives it
+trait Blank {
+    fun blank() -> Self
+}
+
+impl Blank for str {
+    fun blank() -> str { return "-" }
+}
+
+impl Blank for int {
+    fun blank() -> int { return 7 }
+}
+
+fun blank<T: Blank>() -> T { return T.blank() }
+
+struct Acc {
+    counts: [Option<int>: int],
+    grid: [[int64]],
+}
+
+fun main() {
+    var r: [Result<str, int>: int] = [:]
+    r[Ok("a")] = 1
+    r[Ok("a")] += 10
+    r[Err(2)] = 5
+    r[Err(2)] *= 3
+    print(r[Ok("a")] + r[Err(2)])
+    var m: [Option<int>: int] = [:]
+    m[None] = 1
+    m[None] += 1
+    m[Some(4)] = 2
+    m[Some(2 + 2)] <<= 3
+    print(m[None] + m[Some(4)])
+    var w: [int64: int] = [:]
+    w[5000000000] = 1
+    w[2500000000 * 2] += 41
+    print(w[5000000000])
+    var b: [uint8: str] = [:]
+    b[200] = "x"
+    b[100 + 100] += "y"
+    b[100 + 100] += blank()
+    print(b[200])
+    var acc = Acc { counts: [None: 1], grid: [[1, 2], [3]] }
+    acc.counts[None] -= 1
+    acc.counts[Some(1 + 1)] = 4
+    acc.counts[Some(1 + 1)] %= 3
+    var i = 0
+    acc.grid[i + 1][^(i + 1)] += 5000000000
+    var n = 1
+    n += blank()
+    print(f"{acc.counts[None]} {acc.counts[Some(2)]} {acc.grid[1][0]} {n}")
+}
+""",
     # D182 (MYLA-417): `Option` and `Result` are `Hash`
     "option_and_result_as_map_keys": r"""// D182 (MYLA-417): `Option` and `Result` derive `Hash` in the prelude, so
 // an `Option` or `Result` of hashable types is a map key, and a derived key
@@ -9644,7 +9983,7 @@ class TestCompilerParity(unittest.TestCase):
                     built = subprocess.run([myla, "build", path, "-o", out] + flags, capture_output=True, text=True,
                                            timeout=60)
                     self.assertEqual((built.returncode, built.stderr),
-                                     (1, "type error: no entry point: define '#main' or a function named 'main'\n"))
+                                     (1, "error: no entry point: define '#main' or a function named 'main'\n"))
                     self.assertFalse(os.path.exists(out))
 
     def test_runtime_errors_carry_the_interpreters_values(self):
@@ -9669,14 +10008,67 @@ class TestCompilerParity(unittest.TestCase):
             "bool_key": "let m = [true: 2]\n    let k = false\n    print(m[k])",
             "tuple_key": "let m = [(1, \"a\"): 2]\n    let k = (3, \"b\")\n    print(m[k])",
             "int8_key": "let m: [int8: int] = [1: 2]\n    let k: int8 = -5\n    print(m[k])",
+            # MYLA-441: a struct's, an enum's and a list's key too, natively
+            # by a `__krepr_<T>` routine per type
+            "struct_key": "let m = [P { x: 0, ys: [], c: 'a', b: true }: 1]\n"
+                          "    let k = P { x: 1, ys: [7, 255], c: 'q', b: false }\n    print(m[k])",
+            "empty_struct_key": "var m: [Empty: int] = [:]\n    let k = Empty {}\n    print(m[k])",
+            "unit_variant_key": "let m = [Color.Red: 1]\n    let k = Color.Green\n    print(m[k])",
+            "variant_key": "let m = [Color.Red: 1]\n    let k = Color.Rgb(-1, 2, 3)\n    print(m[k])",
+            "named_variant_key": "let m = [Color.Red: 1]\n    let k = Color.Named(\"it's \\\"x\\\"\")\n    print(m[k])",
+            "tuple_of_struct_key": "let m = [(P { x: 0, ys: [], c: 'a', b: true }, 1): 1]\n"
+                                   "    let k = (P { x: 2, ys: [1], c: 'b', b: true }, 9)\n    print(m[k])",
+            "list_key": "let m = [[1, 2]: 1]\n    let k = [3, -4, 5]\n    print(m[k])",
+            "empty_list_key": "let m = [[1, 2]: 1]\n    let k: [int] = []\n    print(m[k])",
+            "nested_list_key": "let m = [[[\"a\"]]: 1]\n    let k = [[\"b\", \"c\"], [], [\"d\"]]\n    print(m[k])",
+            "list_of_bools_key": "let m = [[true]: 1]\n    let k = [false, true]\n    print(m[k])",
+            "list_of_chars_key": "let m = [['a']: 1]\n    let k = ['x', 'y']\n    print(m[k])",
+            "list_of_tuples_key": "let m = [[(1, 'a')]: 1]\n    let k = [(2, 'b'), (3, 'c')]\n    print(m[k])",
+            "option_key": "let m = [Some(1): 1]\n    let k: Option<int> = None\n    print(m[k])",
+            "option_payload_key": "let m = [Some(1): 1]\n    let k = Some(5)\n    print(m[k])",
+            "generic_struct_key": "let m = [Pair { a: 1, b: \"x\" }: 1]\n    let k = Pair { a: 2, b: \"y\" }\n    print(m[k])",
+            "enum_of_structs_key": "let m = [Shape.Dot: 1]\n"
+                                   "    let k = Shape.Line(P { x: 1, ys: [2], c: 'c', b: false }, [Color.Red, Color.Green])\n"
+                                   "    print(m[k])",
+            "recursive_enum_in_a_key": "let m = [Holder { t: Tree.Leaf }: 1]\n"
+                                       "    let k = Holder { t: Tree.Node(Tree.Leaf, 4, Tree.Node(Tree.Leaf, 5, Tree.Leaf)) }\n"
+                                       "    print(m[k])",
+            "unit_payload_key": "let m = [U.B: 1]\n    let k = U.A(())\n    print(m[k])",
+            "float_fields_key": "var m: [F: int] = [:]\n    m[F { x: 1.0, y: 2.0f32, r: Ok(1) }] = 1\n"
+                                "    print(m[F { x: 0.1, y: 0.1f32, r: Err(\"e\") }])",
+            "list_key_of_a_place":"var m = [[1]: [2]]\n    let k = [5, 6]\n    m[k][0] = 3\n    print(m[[1]][0])",
+            "uint64_key_in_a_struct":"let m = [W { v: 1 }: 1]\n    let k = W { v: 7 }\n    print(m[k])",
             "key_of_a_place": "var m = [1: [2]]\n    let k = 5\n    m[k][0] = 3\n    print(m[1][0])",
+            # MYLA-440: a uint64 key unsigned, by the map's or the key's type
+            "uint64_key": "let m: [uint64: int] = [1: 2]\n    let k: uint64 = 18446744073709551615\n    print(m[k])",
+            "uint64_high_bit_key": "let m: [uint64: int] = [1: 2]\n    let k: uint64 = 9223372036854775808\n    print(m[k])",
+            "uint64_literal_key": "let m: [uint64: int] = [1: 2]\n    print(m[18446744073709551615])",
+            "uint64_tuple_key": ("let m: [(uint64, uint32): int] = [(1, 2): 2]\n"
+                                 "    let k: (uint64, uint32) = (18446744073709551615, 4294967295)\n    print(m[k])"),
+            "uint64_key_of_a_place": ("var m: [uint64: [int]] = [1: [2]]\n    let k: uint64 = 18446744073709551615\n"
+                                      "    m[k][0] = 3\n    print(m[1][0])"),
+            "uint32_key": "let m: [uint32: int] = [1: 2]\n    let k: uint32 = 4294967295\n    print(m[k])",
+            "int64_key": "let m: [int64: int] = [1: 2]\n    let k: int64 = -9223372036854775808\n    print(m[k])",
             "surrogate": "let n = 55296\n    print(n as char)",
             "char_plus": "let c = 'a'\n    print(c + 1114111)",
             "append_range": "var sb = StringBuilder()\n    let a = 2\n    sb.append(\"abc\", a, 9)\n    print(sb.build())",
         }
+        # the key types of the cases of a struct, enum or list key
+        decls = ("#derive(Eq, Hash)\nstruct P { x: int, ys: [uint8], c: char, b: bool }\n"
+                 "#derive(Eq, Hash)\nstruct Empty {}\n"
+                 "#derive(Eq, Hash)\nenum Color { Red, Green, Rgb(int, int, int), Named(str) }\n"
+                 "#derive(Eq, Hash)\nstruct Pair<A, B> { a: A, b: B }\n"
+                 "#derive(Eq, Hash)\nenum Shape { Dot, Line(P, [Color]) }\n"
+                 "#derive(Eq, Hash)\nenum Tree { Leaf, Node(Tree, int, Tree) }\n"
+                 "#derive(Eq, Hash)\nstruct Holder { t: Tree }\n"
+                 "#derive(Eq, Hash)\nstruct W { v: uint64 }\n"
+                 "#derive(Eq, Hash)\nenum U { A(()), B }\n"
+                 "struct F { x: float, y: float32, r: Result<int, str> }\n"
+                 "impl Eq for F {\n    fun eq(self, other: F) -> bool { return self.x == other.x }\n}\n"
+                 "impl Hash for F {\n    fun hash(self, h: Hasher) -> Hasher { return h.add(self.x as int64) }\n}\n")
         for name, body in cases.items():
             with self.subTest(case=name), tempfile.TemporaryDirectory() as tmp:
-                path = write_program(tmp, "fun main() {\n    " + body + "\n}\n")
+                path = write_program(tmp, decls + "fun main() {\n    " + body + "\n}\n")
                 out, err, code = selfhost_run(path)
                 self.assertEqual(code, 1, err)
                 lines = err.splitlines()
@@ -9929,6 +10321,8 @@ class TestCompilerParity(unittest.TestCase):
 # longer holds (a later decision changed its meaning) or there is none (a
 # program added or changed since): its output, pinned here.
 PINNED = {
+    # MYLA-496: new; native code gives the same, before the change and after
+    "for_over_a_map_walks_its_slots": '3003 4504497\n0,1,2,3,4,5,6,7,8,9, 15\n0=0 2=4 4=16 6=36 8=64 100=0 101=1 102=2 103=3 104=4 105=5 106=6 107=7 108=8 109=9 \n1=1 3=3 4=4 6=6 7=7 2=20 9=90 5=50 \n4 9 -1\n12\nk3 k43 k83 k123 k163 \n415 0 16,0,\np1:1 p2:2 p4:4 p5:5 p0:9 \n2b 0c 1d \n250=true 252=true 253=false 254=true \n1a 2b 11a 12b \n0 415\n',
     # MYLA-429: new; native code gives the same, before the change and after
     "map_shrinks_on_remove": "6 3=6 202=404 401=802 600=1200 799=1598 998=1996 \n1000 0 1998 500\n3=6 202=404 401=802 600=1200 799=1598 998=1996 5000=1 201=7 \n8 0 []\n1=1 \n6 k7:v7,w7 k57:v57,w57 k107:v107,w107 k157:v157,w157 k207:v207,w207 k257:v257,w257 \n3 false true\n1 z false\n2 98 99 1\n5 1,-1=p1 98,-98=p98 195,-195=p195 292,-292=p292 389,-389=p389 \n5 1/t1 98/t98 195/t195 292/t292 389/t389 98 false\n1 s199 200 1 s0\n10 0=0 3=1 6=2 9=3 2=4 5=5 8=6 1=7 4=8 7=9 \n",
     # D175: a const that overflows is an error (`G + G` was 144), and the
@@ -10002,6 +10396,9 @@ PINNED = {
     "generic_code_per_width": 'int8: 126 -127 63 1 2 true false -128 127 127 S127 true\nint16: 32766 -32767 16383 1 2 true false -32768 32767 32767 S32767 true\nint32: 2147483646 -2147483647 1073741823 1 2 true false -2147483648 2147483647 2147483647 S2147483647 true\nint64: 9223372036854775806 -9223372036854775807 4611686018427387903 1 2 true false -9223372036854775808 9223372036854775807 9223372036854775807 S9223372036854775807 true\nuint8: 254 1 127 1 2 true false 0 255 255 S255 true\nuint16: 65534 1 32767 1 2 true false 0 65535 65535 S65535 true\nuint32: 4294967294 1 2147483647 1 2 true false 0 4294967295 4294967295 S4294967295 true\nuint64: 18446744073709551614 1 9223372036854775807 1 2 true false 0 18446744073709551615 18446744073709551615 S18446744073709551615 true\n18446744073709551614\n18446744073709551614\n255\ntrue\ntrue\n0.010000000707805157\n0.6000000238418579\n0.6000000238418579\n0.33333334\n0.3333333333333333\n<18446744073709551615>\ntrue\n<-128>\n',
     # MYLA-414 (H6, M4): new; the interpreter lost the mutations and printed 'ERR: VUnit'
     "receivers_of_type_parameter_type": '4 11 31\n22 31 31 4\n',
+    # MYLA-436: new; the interpreter called an element's or a key's written
+    # generic `eq` or `hash` without binding its type parameters
+    "generic_eq_and_hash_the_interpreter_calls": 'false\nfalse\nfalse\nfalse\nfalse\nfalse\nfalse\nfalse\nfalse\nfalse\nhash 18446744073709551615\nhash 18446744073709551615\ntrue\nhash 18446744073709551615\nhash 18446744073709551615\ntrue\nfalse\nfalse\nfalse\n2\n5\n1\n1\nfalse\ntrue\ntrue\n',
     # MYLA-414 (L3): new; the interpreter printed 'ERR: VUnit'
     "actor_function_field": '1205\n',
     # MYLA-414 (L4): new; the interpreter printed 'a' for the numbers
@@ -10074,6 +10471,10 @@ PINNED = {
     "unit_as_a_type_argument": '3\n2\n2\n2\n2\n7\n',
     # L2 (MYLA-417): new ("[-1, -128, 5i8]" was a type error, "[1, 2, x]" left 2 an int32); native code gives the same
     "literals_take_the_type_a_later_element_fixes": '-10000000000\n155\n-2.25\n200000000000000\n600\n1400\n60000\n197\n-128\n',
+    # MYLA-449: new ("integer literal 4000000000 does not fit in 'int32'" before); native code gives the same
+    "literals_wait_for_the_element_that_fixes_a_wider_type": '9000000000\n-6000000000\n-1000000000\nac\n18000000000000000002\n4000000001\n',
+    # MYLA-448: new ("cannot infer type parameter(s) E", "T for 'blank'" before); native code gives the same
+    "compound_assignments_type_as_their_plain_form": '26\n18\n42\nxy-\n0 1 5000000003 8\n',
     # D182 (MYLA-417): new ("'Option<int32>' isn't Hash" before); native code gives the same
     "option_and_result_as_map_keys": '3\nuno\nnone\nfalse\n13\n2\n3\ntrue\nfalse\n5\n',
     # MYLA-417: new ("cannot infer type parameter(s) E", "T for 'try_mk'" before); native code gives the same
@@ -10131,6 +10532,11 @@ RUNTIME_ERRORS = {
     "list_index": "fun main() {\n    let xs = [1, 2]\n    var i = 5\n    print(xs[i])\n}\n",
     "negative_list_index": "fun main() {\n    let xs = [1, 2]\n    var i = -1\n    print(xs[i])\n}\n",
     "missing_map_key": 'fun main() {\n    let m = ["a": 1]\n    print(m["b"])\n}\n',
+    # MYLA-440: a uint64 key unsigned in generic code, by the type it binds
+    "missing_uint64_key_in_generic_code": ("struct Table {\n    m: [uint64: str],\n}\n\n"
+                                           "fun look<K: Eq + Hash, V>(m: [K: V], k: K) -> V {\n    return m[k]\n}\n\n"
+                                           "fun main() {\n    let t = Table { m: [1: \"a\"] }\n    print(look(t.m, 1))\n"
+                                           "    print(look(t.m, 18446744073709551615))\n}\n"),
     "string_index": 'fun main() {\n    let s = "ab"\n    var i = 9\n    print(s[i])\n}\n',
     "error_after_stderr": 'from std.io import eprint\n\nfun main() {\n    eprint("before\\n")\n    panic("then")\n}\n',
 }

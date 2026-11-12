@@ -2,7 +2,7 @@
 id: MYLA-500
 title: "test_time's async-read test races its feeder under load"
 type: bug
-status: todo
+status: review
 priority: low
 labels: [tests, concurrency, round-5]
 ---
@@ -15,4 +15,20 @@ AssertionError: 'line 0' != 't'
 
 The program's own start (loading and checking its imports) can take longer than the feeder's first 0.15 s, and then a line is waiting before the first tick is due. The test should wait for the program to start (the feeder could wait for the first tick on the program's stdout before it writes), not assume 0.15 s is enough.
 
-- [ ] The feeder writes its first line only after the program's first tick (or the assertion allows a line before the first tick when the read was ready at once)
+- [x] The feeder writes its first line only after the program's first tick (or the assertion allows a line before the first tick when the read was ready at once)
+
+## Evidence
+
+The test now feeds its program itself (`fed_after_a_tick` in [[tests/burn/test_time.py]]): the program's stdin and stdout are pipes, a thread writes the three lines 150 ms apart, and the first one only once the program has printed a tick. The reader task starts before the ticker, so by the first tick its `read_line_async` is pending, and the tick shows that the worker went on while it waited. What the test checks is unchanged or stricter: a tick within 30 s while no input had come (else the feeder gives up, closes stdin and the test fails with `no tick while the read was pending: …`), the first output line a tick, the three lines in order, `3 lines, 10 ticks`. `FEEDER` stays for `test_two_readers_of_one_descriptor`.
+
+- **It still catches a blocked worker.** With the program's `await r.read_line_async()` replaced by the blocking `r.read_line()`, both runners fail: `AssertionError: False is not true : no tick while the read was pending: ['t', 't', …, '0 lines, 10 ticks']` (the ticks only came after the feeder gave up).
+- **30 runs under load, before and after.** `python3 -m unittest tests.burn.test_time.Time.test_an_async_read_lets_the_other_tasks_run`, 30 times in a row beside busy loops (the machine is shared with five other lanes):
+
+  | Busy loops | Load at the end | Before | After |
+  | --- | --- | --- | --- |
+  | 5 | 6.1 | 1 of 30 failed | |
+  | 8 | 8.3 | 1 of 30 failed | 0 of 30 failed |
+  | 12 | 16 to 18 | 2 of 30 failed | 0 of 30 failed |
+
+  Each failure was `AssertionError: 'line 0' != 't'`. After the full suite showed a `ResourceWarning` for the program's unclosed stdout pipe, closed now, another 30 runs beside 8 busy loops (load 10): 0 failed. Alone, at load 1, the test takes 1.0 s.
+- **Suites** (lane F of the follow-up, on `bccc624`): `scripts/test.sh fast` `Ran 848 tests … FAILED (failures=1, skipped=3)`, the failure `test_embedded_std` (expected until the seed commit); `tests.burn.test_time` `Ran 13 tests … OK`; the full `scripts/test.sh` `Ran 1517 tests … FAILED (failures=2, skipped=338)`: `test_embedded_std` again and `test_selfhost_codegen.test_children_run_in_parallel`, which asks four children for 1.5 times the wall time in CPU time and got 1.08 s of CPU in 1.36 s at a load of 6.7 on 4 cores; alone at that load it fails the same way, and nothing in this lane touches the runtime or code generation.

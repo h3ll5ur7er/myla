@@ -2774,8 +2774,8 @@ impl Lower {
 
     // `for v in xs { body }`: the loop holds a reference to the list (dropped
     // when it ends, or by a `return` from the body), walks it by index, and
-    // `v` borrows each element in turn. Over a map, the list is a new one of
-    // its keys.
+    // `v` borrows each element in turn. Over a map, `for_map`, or with a
+    // std.rt without `map_walk` the list is a new one of its keys.
     fun for_list(var self, cg: CodeGen, vn: str, it: Expr, body: Block) {
         let it_t = cg.type_of(it.id)
         if is_tstr(it_t) {
@@ -2784,6 +2784,10 @@ impl Lower {
         }
         if (!is_list_t(it_t) && !is_map_t(it_t)) || !lowerable(cg, it_t) {
             let d = self.unsupported("a for loop over that type")
+            return
+        }
+        if is_map_t(it_t) && cg.has_func("std$rt$map_walk") {
+            self.for_map(cg, vn, it, body)
             return
         }
         var lt = it_t
@@ -2851,6 +2855,86 @@ impl Lower {
         self.start(done)
         self.drop_owners(self.owners.len() - 1)
         self.owners.pop()
+    }
+
+    // `for k in m { body }` over a map (MYLA-496): the loop holds the map, as
+    // `for_list` a list, so it walks the keys it started with (a change in
+    // the body copies the map first), and steps from slot to slot in the
+    // order of insertion (std.rt's `map_walk`), `k` borrowing each key from
+    // its slot, without the list of the keys (std.rt's `map_keys`): a loop
+    // that leaves early costs the keys it walked, not the map's size.
+    fun for_map(var self, cg: CodeGen, vn: str, it: Expr, body: Block) {
+        let mt = cg.type_of(it.id)
+        let kt = map_key(mt)
+        let i64 = Type.TInt(64, true)
+        let held = self.value_slot(cg, "__iterated", mt, true)
+        self.begin_temps()
+        let v = self.expr(cg, it)
+        self.add(Inst.Store(held, v))
+        // a fixed iterable needs no snapshot of its own (MYLA-122)
+        if self.fixed_place(it) { self.f.slots[held].owns = false } else { self.retain(cg, mt, v) }
+        self.end_temps()
+        var loop_owners: [int32] = []
+        self.owners.push(loop_owners)
+        self.own(held)
+        // the slot of the key the loop is at, 0 past the last
+        let at = self.new_slot("__entry", i64, 8, -1, false)
+        self.map_step(cg, mt, held, at, self.int_const(0))
+        let elem = self.value_slot(cg, vn, kt, false)
+        let body_b = self.new_block()
+        let cont = self.new_block()
+        let done = self.new_block()
+        self.entry_test(at, body_b, done)
+        self.start(body_b)
+        let p = self.temp(i64)
+        self.add(Inst.Load(p, at))
+        let off = cg.map_key_off(mt)
+        if is_aggregate(kt) {
+            self.add(Inst.Copy(self.slot_addr(elem), self.offset(p, off), cg.size(kt)))
+        } else {
+            let x = self.temp(kt)
+            self.add(Inst.LoadAt(x, p, off, 8))
+            self.add(Inst.Store(elem, x))
+        }
+        let depth = self.owners.len()
+        self.open_scope()
+        self.declare_as(vn, elem, true)
+        self.add(Inst.Bind(vn, elem))
+        self.loops.push(LoopTarget { cont: cont, brk: done, owners: depth, temps: self.temps.len() })
+        for st in body.stmts { self.stmt(cg, st) }
+        self.loops.pop()
+        self.close_scope()
+        self.finish(Term.Jmp(cont))
+        self.start(cont)
+        let p2 = self.temp(i64)
+        self.add(Inst.Load(p2, at))
+        self.map_step(cg, mt, held, at, p2)
+        self.entry_test(at, body_b, done)
+        self.start(done)
+        self.drop_owners(self.owners.len() - 1)
+        self.owners.pop()
+    }
+
+    // The slot of the map in `held` (of type `mt`) after the slot `after` in
+    // the order of insertion (0: its first) stored in `at`, 0 past its last.
+    fun map_step(var self, cg: CodeGen, mt: Type, held: int32, at: int32, after: int32) {
+        let i64 = Type.TInt(64, true)
+        let cell = self.temp(mt)
+        self.add(Inst.Load(cell, held))
+        let next = self.temp(i64)
+        self.add(Inst.Call(next, "std$rt$map_walk", [cell, self.int_const(cg.map_slot_size(mt)), after]))
+        self.add(Inst.Store(at, next))
+    }
+
+    // The block ended with `at`'s slot address tested: on to `yes` when it
+    // names a slot, else to `no`.
+    fun entry_test(var self, at: int32, yes: int32, no: int32) {
+        let i64 = Type.TInt(64, true)
+        let p = self.temp(i64)
+        self.add(Inst.Load(p, at))
+        let c = self.temp(Type.TBool)
+        self.add(Inst.Cmp(c, "!=", i64, p, self.int_const(0)))
+        self.finish(Term.Br(c, yes, no))
     }
 
     // `for c in s { body }` over a string's characters (MYLA-318): the loop
@@ -4422,78 +4506,108 @@ impl Lower {
             let ok = self.new_block()
             self.finish(Term.Br(found, ok, bad))
             self.start(bad)
-            let k = self.key_text_of(cg, map_key(mt), key, cg.map_hashed(mt), 0)
-            if k >= 0 {
-                let text = self.temp(Type.TStr)
-                self.add(Inst.Call(text, "std$rt$key_text", [k]))
-                self.finish(Term.Panic(text, pos))
-            } else { self.finish(Term.Trap("key", pos)) }
+            let k = self.key_text_of(cg, map_key(mt), key, cg.map_hashed(mt))
+            let text = self.temp(Type.TStr)
+            self.add(Inst.Call(text, "std$rt$key_text", [k]))
+            self.finish(Term.Panic(text, pos))
             self.start(ok)
         } else { self.add(Inst.Check(slot, "key", pos)) }
         return self.offset(slot, cg.map_val_off(mt))
     }
 
-    // The map key `key` of type `kt` (at the address `key + off` when `at`)
-    // as the interpreter writes it in `map key … not found` (its
-    // `py_repr`, D183): a new string, for a key of a scalar or a string type
-    // or a tuple of such; -1 for another (a struct's, an enum's, a list's:
-    // the error then says `map key not found`).
-    fun key_text_of(var self, cg: CodeGen, kt: Type, key: int32, at: bool, off: int32) -> int32 {
+    // The map key `key` of type `kt` (at the address `key` when `at`, as a
+    // compound key is passed) as the interpreter writes it in `map key … not
+    // found` (its `py_repr`, D183): a new string, a scalar's or a string's
+    // made here, a compound key's by its `__krepr_<T>` (MYLA-441).
+    fun key_text_of(var self, cg: CodeGen, kt: Type, key: int32, at: bool) -> int32 {
+        if at { return self.repr_member(cg, key, 0, kt, 8) }
+        return self.repr_scalar(cg, kt, key)
+    }
+
+    // The member of type `ft` at `p + off` (`width` bytes wide when it is a
+    // scalar: a packed list's element is narrower, D120) as the interpreter's
+    // `py_repr` writes it: a new string. A struct's, an enum's, a tuple's or a
+    // list's by its `__krepr_<T>` (MYLA-441), given a list's cell, a
+    // recursive enum's box or another's address.
+    fun repr_member(var self, cg: CodeGen, p: int32, off: int32, ft: Type, width: int32) -> int32 {
+        let d = self.temp(Type.TStr)
+        if is_unit(ft) {
+            // (the interpreter's `()`, an empty tuple)
+            self.add(Inst.Str(d, "()"))
+            return d
+        }
+        if is_list_t(ft) || cg.is_boxed(ft) {
+            let q = self.temp(Type.TPtr)
+            self.add(Inst.LoadAt(q, p, off, 8))
+            self.add(Inst.Call(d, self.want_key(14, ft), [q]))
+            return d
+        }
+        if is_aggregate(ft) {
+            self.add(Inst.Call(d, self.want_key(14, ft), [self.offset(p, off)]))
+            return d
+        }
+        let v = self.temp(ft)
+        self.add(Inst.LoadAt(v, p, off, width))
+        return self.repr_scalar(cg, ft, v)
+    }
+
+    // The scalar or string `v` of type `t` as the interpreter's `py_repr`
+    // writes it: a new string; a `char` as its code point, a `bool` as `True`
+    // or `False`, a string quoted and escaped.
+    fun repr_scalar(var self, cg: CodeGen, t: Type, v: int32) -> int32 {
         let i64 = Type.TInt(64, true)
         let u64 = Type.TInt(64, false)
-        var v = key
-        if at && !is_aggregate(kt) {
-            v = self.temp(kt)
-            self.add(Inst.LoadAt(v, key, off, 8))
-        }
         let d = self.temp(Type.TStr)
-        match kt {
+        match t {
             Type.TInt(w, signed) => {
                 if signed {
                     let x = self.temp(i64)
-                    self.add(Inst.Cast(x, kt, i64, v))
+                    self.add(Inst.Cast(x, t, i64, v))
                     self.rt_call(cg, d, "__int_to_str", [x])
                 } else {
                     let x = self.temp(u64)
-                    self.add(Inst.Cast(x, kt, u64, v))
+                    self.add(Inst.Cast(x, t, u64, v))
                     self.rt_call(cg, d, "__uint_to_str", [x])
                 }
             },
-            // (the interpreter's text of a char key is its code point)
             Type.TChar => {
                 let x = self.temp(i64)
-                self.add(Inst.Cast(x, kt, i64, v))
+                self.add(Inst.Cast(x, t, i64, v))
                 self.rt_call(cg, d, "__int_to_str", [x])
             },
             Type.TBool => { self.add(Inst.Call(d, "std$rt$key_bool_text", [v])) },
             Type.TStr => { self.add(Inst.Call(d, "std$rt$key_str_text", [v])) },
-            Type.TTuple(es) => {
-                var acc = self.temp(Type.TStr)
-                self.add(Inst.Str(acc, "("))
-                var i = 0
-                while i < es.len() {
-                    let part = self.key_text_of(cg, es[i], key, true, off + cg.elem_offset(kt, i))
-                    if part < 0 { return -1 }
-                    if i > 0 { acc = self.concat_now(cg, acc, ", ") }
-                    let joined = self.temp(Type.TStr)
-                    self.rt_call(cg, joined, "__str_concat", [acc, part])
-                    acc = joined
-                    i = i + 1
+            // (a field of a key whose `hash` the program wrote; a float32 as
+            // the float64 it is in the interpreter)
+            Type.TFloat(w) => {
+                var x = v
+                if w == 32 {
+                    x = self.temp(Type.TFloat(64))
+                    self.add(Inst.Cast(x, t, Type.TFloat(64), v))
                 }
-                // a one-element tuple as the interpreter writes it
-                return self.concat_now(cg, acc, ")")
+                self.rt_call(cg, d, "__float_to_str", [x, self.int_const(17)])
             },
-            _ => { return -1 },
+            _ => { self.add(Inst.Str(d, "?")) },
         }
         return d
     }
 
     // The string `a` with the literal `lit` after it, a new string.
     fun concat_now(var self, cg: CodeGen, a: int32, lit: str) -> int32 {
-        let b = self.temp(Type.TStr)
-        self.add(Inst.Str(b, lit))
+        return self.concat_text(cg, a, self.text(lit))
+    }
+
+    // The strings `a` and `b` joined, a new string.
+    fun concat_text(var self, cg: CodeGen, a: int32, b: int32) -> int32 {
         let d = self.temp(Type.TStr)
         self.rt_call(cg, d, "__str_concat", [a, b])
+        return d
+    }
+
+    // The string literal `lit`.
+    fun text(var self, lit: str) -> int32 {
+        let d = self.temp(Type.TStr)
+        self.add(Inst.Str(d, lit))
         return d
     }
 
@@ -6209,6 +6323,124 @@ pub fun map_keys_ir(cg: CodeGen, kt: Type, name: str) -> Routine {
     lw.add(Inst.Store(sl, list))
     if cg.owns_heap(kt) { lw.each_entry(cg, sl, 0, ks, false, kt, Type.TBool, true) }
     lw.finish(Term.Ret(lw.read_cell(sl)))
+    return Routine { f: lw.f, wants: lw.wants }
+}
+
+// `__krepr_<T>(p) -> str`, a map key of the struct, enum, tuple or list type
+// `t` as the interpreter's `py_repr` writes it (D183, MYLA-441), for `map key
+// … not found`: the value at `p` (a list's cell), each member by its own text
+// (`repr_member`), so a member of a compound type by its own routine. Called
+// on the error's way only.
+pub fun key_repr_ir(cg: CodeGen, t: Type, name: str) -> Routine {
+    let i64 = Type.TInt(64, true)
+    var lw = routine(name, Some(Type.TStr))
+    // a list's cell is a number here, to step through
+    var pt = Type.TPtr
+    if is_list_t(t) { pt = i64 }
+    let sp = lw.new_slot("p", pt, 8, 0, false)
+    match t {
+        Type.TStruct(n, args) => {
+            let info = cg.struct_info(n)
+            let sub = cg.type_subst(info.type_params, args)
+            var acc = lw.text(n + " { ")
+            var off = 0
+            var i = 0
+            for fl in info.fields {
+                let ft = subst_type(fl.ty, sub)
+                var lead = fl.name + ": "
+                if i > 0 { lead = ", " + lead }
+                acc = lw.concat_now(cg, acc, lead)
+                acc = lw.concat_text(cg, acc, lw.repr_member(cg, lw.read_ptr(sp), off, ft, 8))
+                off = off + cg.stored_size(ft)
+                i = i + 1
+            }
+            lw.finish(Term.Ret(lw.concat_now(cg, acc, " }")))
+        },
+        Type.TEnum(n, args) => {
+            // the variant of the tag in turn
+            let tag = lw.temp(i64)
+            lw.add(Inst.LoadAt(tag, lw.read_ptr(sp), 0, 8))
+            var vi = 0
+            for v in cg.enum_info(n).variants {
+                let is = lw.temp(Type.TBool)
+                lw.add(Inst.Cmp(is, "==", i64, tag, lw.int_const(vi)))
+                let here = lw.new_block()
+                let next = lw.new_block()
+                lw.finish(Term.Br(is, here, next))
+                lw.start(here)
+                let payload = cg.variant_payload(t, v.name)
+                if payload.len() == 0 {
+                    lw.finish(Term.Ret(lw.text(n + "." + v.name)))
+                } else {
+                    var acc = lw.text(n + "." + v.name + "(")
+                    var i = 0
+                    while i < payload.len() {
+                        if i > 0 { acc = lw.concat_now(cg, acc, ", ") }
+                        let off = cg.variant_field_offset(t, v.name, i)
+                        acc = lw.concat_text(cg, acc, lw.repr_member(cg, lw.read_ptr(sp), off, payload[i], 8))
+                        i = i + 1
+                    }
+                    lw.finish(Term.Ret(lw.concat_now(cg, acc, ")")))
+                }
+                lw.start(next)
+                vi = vi + 1
+            }
+            lw.finish(Term.Ret(lw.text("?")))
+        },
+        Type.TList(et) => {
+            let pos = Pos { line: 0, col: 0 }
+            let stride = cg.elem_size(et)
+            let sacc = lw.new_slot("text", Type.TStr, 8, -1, false)
+            let ssep = lw.new_slot("sep", Type.TStr, 8, -1, false)
+            let si = lw.new_slot("i", i64, 8, -1, false)
+            let sn = lw.new_slot("n", i64, 8, -1, false)
+            lw.add(Inst.Store(sacc, lw.text("[")))
+            lw.add(Inst.Store(ssep, lw.text("")))
+            let n = lw.temp(i64)
+            lw.add(Inst.LoadAt(n, lw.read_cell(sp), 0, 8))
+            lw.add(Inst.Store(si, lw.int_const(0)))
+            lw.add(Inst.Store(sn, n))
+            let body = lw.new_block()
+            let done = lw.new_block()
+            lw.count_test(si, sn, body, done)
+            lw.start(body)
+            // the element's address: cell + 16 + i * stride
+            let i = lw.temp(i64)
+            lw.add(Inst.Load(i, si))
+            let scaled = lw.temp(i64)
+            lw.add(Inst.Bin(scaled, "*", i64, i64, i, lw.int_const(stride), pos))
+            let pe = lw.temp(i64)
+            lw.add(Inst.Bin(pe, "+", i64, i64, lw.read_cell(sp), scaled, pos))
+            let part = lw.repr_member(cg, pe, 16, et, stride)
+            let a = lw.temp(Type.TStr)
+            lw.add(Inst.Load(a, sacc))
+            let s = lw.temp(Type.TStr)
+            lw.add(Inst.Load(s, ssep))
+            lw.add(Inst.Store(sacc, lw.concat_text(cg, lw.concat_text(cg, a, s), part)))
+            lw.add(Inst.Store(ssep, lw.text(", ")))
+            let i2 = lw.temp(i64)
+            lw.add(Inst.Bin(i2, "+", i64, i64, i, lw.int_const(1), pos))
+            lw.add(Inst.Store(si, i2))
+            lw.count_test(si, sn, body, done)
+            lw.start(done)
+            let r = lw.temp(Type.TStr)
+            lw.add(Inst.Load(r, sacc))
+            lw.finish(Term.Ret(lw.concat_now(cg, r, "]")))
+        },
+        _ => {
+            // a tuple's elements, as the interpreter writes a one-element one
+            var acc = lw.text("(")
+            var off = 0
+            var i = 0
+            for et in tuple_elems(t) {
+                if i > 0 { acc = lw.concat_now(cg, acc, ", ") }
+                acc = lw.concat_text(cg, acc, lw.repr_member(cg, lw.read_ptr(sp), off, et, 8))
+                off = off + cg.stored_size(et)
+                i = i + 1
+            }
+            lw.finish(Term.Ret(lw.concat_now(cg, acc, ")")))
+        },
+    }
     return Routine { f: lw.f, wants: lw.wants }
 }
 

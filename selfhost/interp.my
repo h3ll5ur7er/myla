@@ -198,9 +198,12 @@ pub struct Interp {
     func_ix: [str: int32],
     func_decls: [FunData],
     // the structs and enums with an `eq` written for them, and those with a
-    // `hash` written for them (not derived), by name (D163, MYLA-313)
+    // `hash` written for them (not derived), by name (D163, MYLA-313);
+    // whether one of those is a generic impl's, whose frame the interpreter
+    // binds by the static type of what it compares or hashes (MYLA-436)
     own_eq: [str: bool],
     own_hash: [str: bool],
+    typed_keys: bool,
     const_names: [str],
     const_vals: [Value],
     const_ix: [str: int32],
@@ -313,6 +316,10 @@ pub struct Interp {
     tparams: [[str]],
     envs: [TEnv],
     env_memo: [int64: EnvMemo],
+    // (`type_env_memo`: the index a call by no call site gives, by the
+    // function and the closed type it binds by: a written `eq`, `hash` or
+    // `format` the interpreter calls itself, MYLA-436)
+    type_env_memo: [str: int32],
     env_next: int32,
     env_fi: int32,
     env_tail: int32,
@@ -444,7 +451,7 @@ enum PlaceOp {
     OSet(Value),
     OPush(Value),
     OPop,
-    ORemove(Value),
+    ORemove(Value, Option<Type>),   // (the key and its type: `key_place`)
     OAppend(str),
     OAppendByte(int64),
 }
@@ -558,7 +565,7 @@ pub fun new_interp(c: Checker, argv: [str]) -> Interp {
     var it = Interp {
         decls: c.decls,
         resolved: c.resolved,
-        func_names: [], func_ix: [:], func_decls: [], own_eq: [:], own_hash: [:],
+        func_names: [], func_ix: [:], func_decls: [], own_eq: [:], own_hash: [:], typed_keys: false,
         const_names: [], const_vals: [], const_ix: [:],
         enum_names: [], enum_ix: [:], variant_ix: [:], nullary_ix: [:],
         scopes: [],
@@ -584,7 +591,7 @@ pub fun new_interp(c: Checker, argv: [str]) -> Interp {
         sleepers: [], deadlines: [], fired: [], fd_waits: [], notifs: [], free_notifs: [], notif_seq: 0, pwaits: [], free_waits: [], parked_waits: [], sleep_seq: 0, virtual_time: false, vclock: 0,
         testing: false, defer_errs: [], captured: [], captured_io: false, test_root: "", test_program: "", checker: c,
         static_calls: c.static_calls, impl_selfs: c.static_selfs, call_types: c.call_types,
-        tparams: [], envs: [], env_memo: [:], env_next: -1, env_fi: -1, env_tail: -1, env_tail_fi: -1,
+        tparams: [], envs: [], env_memo: [:], type_env_memo: [:], env_next: -1, env_fi: -1, env_tail: -1, env_tail_fi: -1,
     }
     // a generic impl's methods: their receiver's type solves the impl's
     // type parameters when the call has none recorded (a bound's)
@@ -679,6 +686,17 @@ impl Interp {
         // and so is a generic type's derived `eq` (MYLA-379), which compares
         // as the members do
         for n in derived_eq.keys() { self.own_eq.remove(n) }
+        // (a struct's or an enum's: the others' are std.hash's, which a
+        // map's key or `==` doesn't call)
+        for n in self.own_eq.keys() { if self.generic_own(n, "eq") { self.typed_keys = true } }
+        for n in self.own_hash.keys() { if self.generic_own(n, "hash") { self.typed_keys = true } }
+    }
+
+    // Whether the method `m` written for the type `n` is a generic struct's
+    // or enum's.
+    fun generic_own(self, n: str, m: str) -> bool {
+        if !self.enum_ix.contains(n) && self.checker.struct_idx(n) < 0 { return false }
+        return self.tparams[self.func_idx(n + "." + m)].len() > 0
     }
 
     fun add_func(var self, name: str, fd: FunData) {
@@ -1042,12 +1060,23 @@ impl Interp {
     // is then an insert); fails with the Python interpreter's message if not.
     #test(interp_on("enum E { A, B(int) }"), Value.VList([Value.VInt(7)]), Value.VInt(0), expr_of("a.b[0]"), false)[true]
     fun check_index(var self, c: Value, k: Value, e: Expr, assigning: bool) -> bool {
-        let msg = index_error(c, k, assigning, self.place_in(c, k))
+        let kt = self.hashed_index_key(k, e)
+        let msg = index_error(c, k, assigning, self.place_in(c, k, kt))
         if msg.len() > 0 {
-            self.fail(e, msg)
+            // a missing key written by its type, a uint64's unsigned, as
+            // native code writes it (D183, MYLA-440)
+            if is_vmap(c) { self.fail(e, missing_key(typed_repr(self.checker, k, self.index_key_type(e)))) } else { self.fail(e, msg) }
             return false
         }
         return true
+    }
+
+    // The key type `key_place` reads the key `k` of the index `nd` by: a
+    // compound key's in a program with a generic `eq` or `hash` written
+    // (`typed_keys`), else None.
+    fun hashed_index_key(self, k: Value, nd: Expr) -> Option<Type> {
+        if !self.typed_keys || is_plain_key(k) { return None }
+        return self.index_key_type(nd)
     }
 
     // Whether every index on the path to `p` is still valid, without failing.
@@ -1061,8 +1090,9 @@ impl Interp {
                 Step.SField(f) => { v = get_field(v, f) },
                 Step.SIndex(k, nd) => {
                     let last = i == p.steps.len() - 1
-                    if index_error(v, k, last, self.place_in(v, k)).len() > 0 { return false }
-                    if !last { v = index_get(v, k, self.place_in(v, k)) }
+                    let kt = self.hashed_index_key(k, nd)
+                    if index_error(v, k, last, self.place_in(v, k, kt)).len() > 0 { return false }
+                    if !last { v = index_get(v, k, self.place_in(v, k, kt)) }
                 },
             }
             i = i + 1
@@ -1112,7 +1142,8 @@ impl Interp {
                 Step.SField(f) => { v = get_field(v, f) },
                 Step.SIndex(k, nd) => {
                     if !self.check_index(v, k, nd, false) { return Value.VUnit }
-                    v = index_get(v, k, self.place_in(v, k))
+                    let kt = self.hashed_index_key(k, nd)
+                    v = index_get(v, k, self.place_in(v, k, kt))
                 },
             }
         }
@@ -1221,9 +1252,10 @@ impl Interp {
             },
             Step.SIndex(k, nd) => {
                 if is_vmap(self.cell) {
+                    let kt = self.hashed_index_key(k, nd)
                     var m = map_parts(self.cell)
                     self.cell = Value.VUnit
-                    let (found, h) = self.key_place(m, k)
+                    let (found, h) = self.key_place(m, k, kt)
                     var j = found
                     if j < 0 { j = m.add_key(k, h) }
                     self.cell = m.vs[j]
@@ -1264,11 +1296,11 @@ impl Interp {
                 self.cell = Value.VList(xs)
                 return last
             },
-            PlaceOp.ORemove(k) => {
+            PlaceOp.ORemove(k, kt) => {
                 if is_vmap(self.cell) {
                     var m = map_parts(self.cell)
                     self.cell = Value.VUnit
-                    let (j, h) = self.key_place(m, k)
+                    let (j, h) = self.key_place(m, k, kt)
                     if j >= 0 { m.remove_at(j) }
                     self.cell = Value.VMap(m)
                 }
@@ -2657,6 +2689,20 @@ impl Interp {
                         }
                         return
                     },
+                    // a map's places from its first that may hold a key, the
+                    // holes skipped, without the list of its keys (MYLA-496):
+                    // `m` is the loop's own copy, so a change in the body
+                    // leaves the keys it walks
+                    Value.VMap(m) => {
+                        var i = m.lo
+                        while i < m.ks.len() {
+                            if m.here[i] {
+                                if !self.loop_iteration(var_name, m.ks[i], body) { return }
+                            }
+                            i = i + 1
+                        }
+                        return
+                    },
                     _ => {},
                 }
                 for item in self.iter_items(v) {
@@ -2759,7 +2805,7 @@ impl Interp {
             ExprKind.TupleLit(elems) => self.eval_tuple_lit(elems),
             ExprKind.TupleIndex(tgt, idx) => self.eval_tuple_index(tgt, idx),
             ExprKind.ListLit(elems) => self.eval_list_lit(elems),
-            ExprKind.MapLit(entries) => self.eval_map_lit(entries),
+            ExprKind.MapLit(entries) => self.eval_map_lit(entries, e),
             ExprKind.Index(tgt, idx) => self.eval_index(e, tgt, idx),
             ExprKind.StructLit(name, fields) => self.eval_struct_lit(name, fields),
             ExprKind.MatchE(scrut, arms) => self.eval_match(scrut, arms),
@@ -3005,8 +3051,13 @@ impl Interp {
         if op == "+" && is_vstr(lv) { return Value.VStr(as_str(lv) + as_str(rv)) }
         // comparisons -> bool (a tuple's or list's elements each as `==`
         // compares them, D163)
-        if op == "==" { return Value.VBool(self.values_equal(lv, rv)) }
-        if op == "!=" { return Value.VBool(!self.values_equal(lv, rv)) }
+        if op == "==" || op == "!=" {
+            // the operands' type, for a generic `eq` of their members (MYLA-436)
+            var lt: Option<Type> = None
+            if self.typed_keys { lt = self.full_type_of(l.id) }
+            let eq = self.values_equal(lv, rv, lt)
+            return Value.VBool(if op == "==" { eq } else { !eq })
+        }
         if is_cmp_op(op) {
             if is_u64(self.typed_of(l.id)) { return Value.VBool(ucompare(op, as_int(lv), as_int(rv))) }
             return Value.VBool(self.compare(op, lv, rv))
@@ -3209,12 +3260,13 @@ impl Interp {
 
     // `[k: v, …]`: a key given again replaces the value and keeps the
     // first one's place, as `m[k] = v` would.
-    #test(interp_on("[int]"), [])[Value.VMap(new_mapv())]
-    fun eval_map_lit(var self, entries: [MapEntry]) -> Value {
+    #test(interp_on("[int]"), [], expr_of("[:]"))[Value.VMap(new_mapv())]
+    fun eval_map_lit(var self, entries: [MapEntry], e: Expr) -> Value {
+        let kt = self.hashed_key_type(e)
         var m = new_mapv()
         for en in entries {
             let k = self.eval(en.key)
-            let (found, h) = self.key_place(m, k)
+            let (found, h) = self.key_place(m, k, kt)
             var j = found
             if j < 0 { j = m.add_key(k, h) }
             m.vs[j] = self.eval(en.value)
@@ -3228,7 +3280,8 @@ impl Interp {
         if is_slice_expr(idx) { return self.eval_slice(e, c, idx) }
         let k = self.index_value(c, idx)
         if self.stop() || !self.check_index(c, k, e, false) { return Value.VUnit }
-        return index_get(c, k, self.place_in(c, k))
+        let kt = self.hashed_index_key(k, e)
+        return index_get(c, k, self.place_in(c, k, kt))
     }
 
     // An index's value: `^n` counted from the end of `c` (D142).
@@ -3429,7 +3482,8 @@ impl Interp {
         if self.derived_eq(key, method, args) {
             let a = if evaluated { rv } else { self.eval(recv) }
             let b = self.eval(args[0])
-            return Value.VBool(value_eq(a, b))
+            // member by member, each through its own `eq` (MYLA-436)
+            return Value.VBool(self.values_equal(a, b, self.full_type_of(recv.id)))
         }
         let fi = self.func_idx(format("{}.{}", key, method))
         if fi < 0 && method == "hash" && args.len() == 1 {
@@ -3442,7 +3496,7 @@ impl Interp {
                 Value.VTuple(es) => {
                     let h = self.eval(args[0])
                     if self.stop() { return Value.VUnit }
-                    return self.hash_all(es, h)
+                    return self.hash_all(es, h, self.member_types(rv, self.full_type_of(recv.id)))
                 },
                 Value.VUnit => { return self.eval(args[0]) },
                 _ => {},
@@ -3518,20 +3572,27 @@ impl Interp {
         }
     }
 
-    // The hasher `h` given each of `xs` in turn, through its type's `hash`
-    // (a tuple's its elements', D163).
-    fun hash_all(var self, xs: [Value], h: Value) -> Value {
+    // The hasher `h` given each of `xs`, of the types `ts`
+    // (`member_type`), in turn, through its type's `hash` (a tuple's its
+    // elements', D163), a generic impl's bound by the type (MYLA-436).
+    fun hash_all(var self, xs: [Value], h: Value, ts: [Type]) -> Value {
         var g = h
-        for x in xs {
+        var i = 0
+        while i < xs.len() {
+            let x = xs[i]
+            let t = member_type(ts, i, xs.len())
             match x {
-                Value.VTuple(es) => { g = self.hash_all(es, g) },
+                Value.VTuple(es) => { g = self.hash_all(es, g, self.member_types(x, t)) },
                 Value.VUnit => {},
                 _ => {
-                    let (rv, fs) = self.call_method(self.func_idx(value_key(x) + ".hash"), x, [g])
+                    let fi = self.func_idx(value_key(x) + ".hash")
+                    self.bind_next(fi, -1, t)
+                    let (rv, fs) = self.call_method(fi, x, [g])
                     g = rv
                 },
             }
             if self.stop() { return Value.VUnit }
+            i += 1
         }
         return g
     }
@@ -3602,15 +3663,28 @@ impl Interp {
     // gives its impl's (D172), in the caller's frame, before the call; an
     // index into `envs`, -1 for none. A call site (`id` >= 0) gives a
     // function the same environment each time its caller's is the same, so
-    // each is made once (`env_memo`).
+    // each is made once (`env_memo`); so does a call by no call site on a
+    // closed type (`type_env_memo`).
     #test(interp_on("[int]"), -1, 0, None)[-1]
     fun env_of(var self, fi: int32, id: int32, self_t: Option<Type>) -> int32 {
         if fi < 0 || self.tparams[fi].len() == 0 { return -1 }
         let ce = self.frame_env()
         let key = (id as int64) * 4294967296 + (ce as int64)
+        var tkey = ""
         if id >= 0 {
             match self.env_memo.get(key) {
                 Some(m) => { if m.fi == fi { return m.env } },
+                None => {},
+            }
+        } else {
+            match self_t {
+                Some(st) => {
+                    let ct = self.env_type(st)
+                    if !is_open(ct) {
+                        tkey = f"{fi} {type_name(ct)}"
+                        match self.type_env_memo.get(tkey) { Some(k) => { return k }, None => {} }
+                    }
+                },
                 None => {},
             }
         }
@@ -3645,6 +3719,7 @@ impl Interp {
             self.envs.push(TEnv { fi: fi, sub: sub })
         }
         if id >= 0 { self.env_memo[key] = EnvMemo { fi: fi, env: k } }
+        if tkey != "" { self.type_env_memo[tkey] = k }
         return k
     }
 
@@ -3978,11 +4053,16 @@ impl Interp {
     // `a == b` as the language has it: a struct or enum through its own `eq`
     // when one is written, else (`#derive(Eq)`, whose synthesized `eq` has
     // no body) member by member; a tuple's and a list's elements in turn
-    // (D163), each compared the same way, as native code compares them.
-    #test(interp_on("[int]"), Value.VTuple([Value.VInt(1), Value.VStr("a")]), Value.VTuple([Value.VInt(1), Value.VStr("a")]))[true]
-    #test(interp_on("[int]"), Value.VList([Value.VInt(1)]), Value.VList([Value.VInt(1), Value.VInt(2)]))[false]
-    #test(interp_on("[int]"), Value.VEnum("Color", "Red", []), Value.VEnum("Color", "Red", []))[true]
-    fun values_equal(var self, a: Value, b: Value) -> bool {
+    // (D163), each compared the same way, as native code compares them. In
+    // a program with a generic `eq` or `hash` written (`typed_keys`), as
+    // `typed_equal` compares them, by `t`, the static type of `a` (None:
+    // unknown); without one no member's type is needed, nor its cost
+    // (MYLA-436).
+    #test(interp_on("[int]"), Value.VTuple([Value.VInt(1), Value.VStr("a")]), Value.VTuple([Value.VInt(1), Value.VStr("a")]), None)[true]
+    #test(interp_on("[int]"), Value.VList([Value.VInt(1)]), Value.VList([Value.VInt(1), Value.VInt(2)]), None)[false]
+    #test(interp_on("[int]"), Value.VEnum("Color", "Red", []), Value.VEnum("Color", "Red", []), None)[true]
+    fun values_equal(var self, a: Value, b: Value, t: Option<Type>) -> bool {
+        if self.typed_keys { return self.typed_equal(a, b, t) }
         return match a {
             Value.VStruct(n, fns, fvs) => {
                 if self.own_eq.contains(n) {
@@ -4011,7 +4091,7 @@ impl Interp {
             },
             Value.VList(xs) => match b {
                 Value.VList(ys) => self.all_equal(xs, ys),
-                Value.VBytes(t) => self.all_equal(xs, byte_values(t)),
+                Value.VBytes(s) => self.all_equal(xs, byte_values(s)),
                 _ => false,
             },
             _ => value_eq(a, b),
@@ -4024,27 +4104,111 @@ impl Interp {
         if a.len() != b.len() { return false }
         var i = 0
         while i < a.len() {
-            if !self.values_equal(a[i], b[i]) { return false }
+            if !self.values_equal(a[i], b[i], None) { return false }
             i = i + 1
         }
         return true
     }
 
+    // `values_equal` where a generic `eq` is written: each such `eq` binds
+    // its impl's type parameters by the static type of what it compares,
+    // `t` for `a`, a member's type for a member's (MYLA-436).
+    #test(interp_on("[int]"), Value.VList([Value.VInt(1)]), Value.VList([Value.VInt(1)]), Some(Type.TList(Type.TInt(64, false))))[true]
+    fun typed_equal(var self, a: Value, b: Value, t: Option<Type>) -> bool {
+        return match a {
+            Value.VStruct(n, fns, fvs) => {
+                if self.own_eq.contains(n) { return self.written_eq(n, a, b, t) }
+                match b {
+                    Value.VStruct(n2, fns2, fvs2) => n == n2 && self.all_typed_equal(fvs, fvs2, self.member_types(a, t)),
+                    _ => false,
+                }
+            },
+            Value.VEnum(en, vr, pl) => {
+                if self.own_eq.contains(en) { return self.written_eq(en, a, b, t) }
+                match b {
+                    Value.VEnum(en2, vr2, pl2) => en == en2 && vr == vr2 && self.all_typed_equal(pl, pl2, self.member_types(a, t)),
+                    _ => false,
+                }
+            },
+            Value.VTuple(es) => match b {
+                Value.VTuple(es2) => self.all_typed_equal(es, es2, self.member_types(a, t)),
+                Value.VUnit => es.len() == 0,
+                _ => false,
+            },
+            Value.VList(xs) => match b {
+                Value.VList(ys) => self.all_typed_equal(xs, ys, self.member_types(a, t)),
+                Value.VBytes(s) => self.all_equal(xs, byte_values(s)),
+                _ => false,
+            },
+            _ => value_eq(a, b),
+        }
+    }
+
+    // `all_equal`, the members of the types `ts` (`member_type`).
+    fun all_typed_equal(var self, a: [Value], b: [Value], ts: [Type]) -> bool {
+        if a.len() != b.len() { return false }
+        var i = 0
+        while i < a.len() {
+            if !self.typed_equal(a[i], b[i], member_type(ts, i, a.len())) { return false }
+            i = i + 1
+        }
+        return true
+    }
+
+    // `a.eq(b)` by the `eq` written for the type `key`, a generic impl's
+    // type parameters bound by `a`'s type `t`.
+    fun written_eq(var self, key: str, a: Value, b: Value, t: Option<Type>) -> bool {
+        let fi = self.func_idx(key + ".eq")
+        self.bind_next(fi, -1, t)
+        let (rr, fs) = self.call_method(fi, a, [b])
+        return as_bool(rr)
+    }
+
+    // The types of the members of `v`, of type `t`, for `member_type`: a
+    // struct's fields in `v`'s order, an enum's payload, a tuple's elements,
+    // a list's element type alone; [] where `t` doesn't say (MYLA-436).
+    #test(interp_on("[int]"), Value.VList([]), Some(Type.TList(Type.TStr)))[[Type.TStr]]
+    #test(interp_on("[int]"), Value.VTuple([]), None)[[]]
+    fun member_types(self, v: Value, t: Option<Type>) -> [Type] {
+        let ty = match t { Some(x) => x, None => { return [] } }
+        return match ty {
+            Type.TTuple(ts) => ts,
+            Type.TList(e) => [e],
+            Type.TStruct(sn, args) => match v {
+                Value.VStruct(n, names, vals) => {
+                    let fields = self.checker.struct_field_types(sn, args)
+                    var ts: [Type] = []
+                    for nm in names { for f in fields { if f.name == nm { ts.push(f.ty) } } }
+                    if ts.len() == names.len() { ts } else { [] }
+                },
+                _ => [],
+            },
+            Type.TEnum(en, args) => match v {
+                Value.VEnum(n, vr, pl) => payload_types(self.checker, en, args, vr),
+                _ => [],
+            },
+            _ => [],
+        }
+    }
+
     // The hash of the map key `v` (D163, MYLA-313): by its structure, as
     // `value_hash` gives it, but for a struct or enum with a `hash` written
     // for it, which is called (from a hasher of state 0). Keys `==` finds
-    // equal hash equal as long as a written `hash` keeps D163's promise.
-    fun key_hash(var self, v: Value) -> int64 {
+    // equal hash equal as long as a written `hash` keeps D163's promise. In
+    // a program with a generic `eq` or `hash` written, as `typed_hash` gives
+    // it, by `v`'s type `t` (MYLA-436).
+    fun key_hash(var self, v: Value, t: Option<Type>) -> int64 {
+        if self.typed_keys { return self.typed_hash(v, t) }
         return match v {
             Value.VTuple(es) => self.keys_hash(3, es),
             Value.VList(xs) => self.keys_hash(mix_key(4, xs.len() as int64), xs),
             Value.VBytes(s) => self.keys_hash(mix_key(4, s.len() as int64), byte_values(s)),
             Value.VStruct(n, fns, fvs) => {
-                if self.own_hash.contains(n) { return self.written_hash(n, v) }
+                if self.own_hash.contains(n) { return self.written_hash(n, v, None) }
                 self.keys_hash(mix_key(5, str_key_hash(n)), fvs)
             },
             Value.VEnum(en, vr, pl) => {
-                if self.own_hash.contains(en) { return self.written_hash(en, v) }
+                if self.own_hash.contains(en) { return self.written_hash(en, v, None) }
                 self.keys_hash(mix_key(6, str_key_hash(vr)), pl)
             },
             _ => value_hash(v),
@@ -4054,37 +4218,91 @@ impl Interp {
     // `key_hash` of each of `xs` mixed into `h` in turn.
     fun keys_hash(var self, h: int64, xs: [Value]) -> int64 {
         var g = h
-        for x in xs { g = mix_key(g, self.key_hash(x)) }
+        for x in xs { g = mix_key(g, self.key_hash(x, None)) }
         return g
     }
 
-    // The state the `hash` written for the type `key` gives `v`.
-    fun written_hash(var self, key: str, v: Value) -> int64 {
+    // `key_hash` where a generic `eq` or `hash` is written: each such
+    // `hash` binds its impl's type parameters by the static type of what
+    // it hashes, `t` for `v`, a member's type for a member's (MYLA-436).
+    fun typed_hash(var self, v: Value, t: Option<Type>) -> int64 {
+        return match v {
+            Value.VTuple(es) => self.typed_keys_hash(3, es, self.member_types(v, t)),
+            Value.VList(xs) => self.typed_keys_hash(mix_key(4, xs.len() as int64), xs, self.member_types(v, t)),
+            Value.VBytes(s) => self.keys_hash(mix_key(4, s.len() as int64), byte_values(s)),
+            Value.VStruct(n, fns, fvs) => {
+                if self.own_hash.contains(n) { return self.written_hash(n, v, t) }
+                self.typed_keys_hash(mix_key(5, str_key_hash(n)), fvs, self.member_types(v, t))
+            },
+            Value.VEnum(en, vr, pl) => {
+                if self.own_hash.contains(en) { return self.written_hash(en, v, t) }
+                self.typed_keys_hash(mix_key(6, str_key_hash(vr)), pl, self.member_types(v, t))
+            },
+            _ => value_hash(v),
+        }
+    }
+
+    // `keys_hash`, the members of the types `ts` (`member_type`).
+    fun typed_keys_hash(var self, h: int64, xs: [Value], ts: [Type]) -> int64 {
+        var g = h
+        var i = 0
+        while i < xs.len() {
+            g = mix_key(g, self.typed_hash(xs[i], member_type(ts, i, xs.len())))
+            i += 1
+        }
+        return g
+    }
+
+    // The state the `hash` written for the type `key` gives `v`, a generic
+    // impl's type parameters bound by `v`'s type `t`.
+    fun written_hash(var self, key: str, v: Value, t: Option<Type>) -> int64 {
         let h0 = Value.VStruct("Hasher", ["state"], [Value.VInt(0)])
-        let (rv, fs) = self.call_method(self.func_idx(key + ".hash"), v, [h0])
+        let fi = self.func_idx(key + ".hash")
+        self.bind_next(fi, -1, t)
+        let (rv, fs) = self.call_method(fi, v, [h0])
         return as_int(get_field(rv, "state"))
     }
 
-    // The place of the key `k` in the map `m`, or -1, and its hash (0 for a
-    // number or a string): a compound key's among those of its hash, by
-    // `==` (`values_equal`).
-    fun key_place(var self, m: MapV, k: Value) -> (int32, int64) {
+    // The place of the key `k`, of type `kt`, in the map `m`, or -1, and its
+    // hash (0 for a number or a string): a compound key's among those of its
+    // hash, by `==` (`values_equal`).
+    fun key_place(var self, m: MapV, k: Value, kt: Option<Type>) -> (int32, int64) {
         if is_plain_key(k) { return (m.place(k), 0) }
-        let h = self.key_hash(k)
+        let h = self.key_hash(k, kt)
         var j = m.first_of(h)
         while j >= 0 {
-            if self.values_equal(m.ks[j], k) { return (j, h) }
+            if self.values_equal(m.ks[j], k, kt) { return (j, h) }
             j = m.nexts[j]
         }
         return (-1, h)
     }
 
-    // The place of `k` in the map value `c` (`key_place`), -1 for none or
-    // for a value that isn't a map.
-    fun place_in(var self, c: Value, k: Value) -> int32 {
+    // The place of `k`, of type `kt`, in the map value `c` (`key_place`), -1
+    // for none or for a value that isn't a map.
+    fun place_in(var self, c: Value, k: Value, kt: Option<Type>) -> int32 {
         return match c {
-            Value.VMap(m) => self.key_place(m, k).0,
+            Value.VMap(m) => self.key_place(m, k, kt).0,
             _ => -1,
+        }
+    }
+
+    // The key type of the map `e` is, as `key_place` reads it: None but in a
+    // program with a generic `eq` or `hash` written (`typed_keys`).
+    fun hashed_key_type(self, e: Expr) -> Option<Type> {
+        if !self.typed_keys { return None }
+        return map_key_type(self.full_type_of(e.id))
+    }
+
+    // The key type of the map the index `nd` (`m[k]`) reads, None for
+    // another index.
+    fun index_key_type(self, nd: Expr) -> Option<Type> {
+        return match nd.kind {
+            // (an assignment's target has no type of its own: its key's)
+            ExprKind.Index(t, i) => match map_key_type(self.full_type_of(t.id)) {
+                Some(kt) => Some(kt),
+                None => self.full_type_of(i.id),
+            },
+            _ => None,
         }
     }
 
@@ -4096,9 +4314,14 @@ impl Interp {
     fun eval_op_overload(var self, e: Expr, op: str, lv: Value, rv: Value, lt: Option<Type>) -> Value {
         let key = value_key(lv)
         if op == "==" || op == "!=" {
-            // an `eq` written for the type is the method `values_equal` calls
-            if self.own_eq.contains(key) { self.bind_next(self.func_idx(key + ".eq"), e.id, lt) }
-            let eq = self.values_equal(lv, rv)
+            var eq = false
+            if self.own_eq.contains(key) {
+                // an `eq` written for the type, bound by the call site
+                let ei = self.func_idx(key + ".eq")
+                self.bind_next(ei, e.id, lt)
+                let (er, efs) = self.call_method(ei, lv, [rv])
+                eq = as_bool(er)
+            } else { eq = self.values_equal(lv, rv, lt) }
             if op == "==" { return Value.VBool(eq) }
             return Value.VBool(!eq)
         }
@@ -4640,14 +4863,17 @@ impl Interp {
         }
         if nm == "contains" {
             let m = self.eval(args[0])
-            return Value.VBool(self.place_in(m, self.eval(args[1])) >= 0)
+            let k = self.eval(args[1])
+            let kt = self.hashed_key_type(args[0])
+            return Value.VBool(self.place_in(m, k, kt) >= 0)
         }
         if nm == "remove" {
             let p = self.place_of(args[0])
             let k = self.eval(args[1])
             self.read_place(p)
             if self.stop() { return Value.VUnit }
-            self.update_place(p, PlaceOp.ORemove(k))
+            let kt = self.hashed_key_type(args[0])
+            self.update_place(p, PlaceOp.ORemove(k, kt))
             return Value.VUnit
         }
         if nm == "keys" { return map_keys(self.eval(args[0])) }
@@ -5484,13 +5710,17 @@ fun index_error(c: Value, k: Value, assigning: bool, place: int32) -> str {
             }
         },
         Value.VMap(m) => {
-            if !assigning && place < 0 {
-                return format("map key {} not found", py_repr(k))
-            }
+            if !assigning && place < 0 { return missing_key(py_repr(k)) }
         },
         _ => {},
     }
     return ""
+}
+
+// The message of a missing map key whose text is `key`.
+#test("'a'")["map key 'a' not found"]
+fun missing_key(key: str) -> str {
+    return format("map key {} not found", key)
 }
 
 // The parts of a container value (empty for any other value), for
@@ -5609,7 +5839,10 @@ fun sb_bytes(v: Value) -> [int64] {
 // (`hashes`, as `Interp.key_hash` gives it): `heads` the first place of
 // each hash, `nexts` the next place of the same hash, -1 at the end. The
 // interpreter finds such a key among those of its hash with `==`
-// (`Interp.key_place`), which may call a type's own `eq`.
+// (`Interp.key_place`), which may call a type's own `eq`. Every place below
+// `lo` is a hole, so a `for` that leaves at its first key costs the holes a
+// removal of the oldest keys left since the last loop, not the map's size
+// (MYLA-496).
 pub struct MapV {
     ks: [Value],
     vs: [Value],
@@ -5620,18 +5853,19 @@ pub struct MapV {
     hashes: [int64],
     heads: [int64: int32],
     nexts: [int32],
+    lo: int32,
 }
 
-#test()[MapV { ks: [], vs: [], here: [], ints: [:], strs: [:], count: 0, hashes: [], heads: [:], nexts: [] }]
+#test()[MapV { ks: [], vs: [], here: [], ints: [:], strs: [:], count: 0, hashes: [], heads: [:], nexts: [], lo: 0 }]
 pub fun new_mapv() -> MapV {
-    return MapV { ks: [], vs: [], here: [], ints: [:], strs: [:], count: 0, hashes: [], heads: [:], nexts: [] }
+    return MapV { ks: [], vs: [], here: [], ints: [:], strs: [:], count: 0, hashes: [], heads: [:], nexts: [], lo: 0 }
 }
 
 // The map of `ks` and `vs`, inserted in that order (a key given again
 // replaces the value, keeping its first place); a compound key's hash its
 // structure's (`value_hash`).
-#test([Value.VInt(1)], [Value.VInt(2)])[MapV { ks: [Value.VInt(1)], vs: [Value.VInt(2)], here: [true], ints: [1: 0], strs: [:], count: 1, hashes: [0], heads: [:], nexts: [-1] }]
-#test([Value.VStr("a"), Value.VStr("a")], [Value.VInt(1), Value.VInt(2)])[MapV { ks: [Value.VStr("a")], vs: [Value.VInt(2)], here: [true], ints: [:], strs: ["a": 0], count: 1, hashes: [0], heads: [:], nexts: [-1] }]
+#test([Value.VInt(1)], [Value.VInt(2)])[MapV { ks: [Value.VInt(1)], vs: [Value.VInt(2)], here: [true], ints: [1: 0], strs: [:], count: 1, hashes: [0], heads: [:], nexts: [-1], lo: 0 }]
+#test([Value.VStr("a"), Value.VStr("a")], [Value.VInt(1), Value.VInt(2)])[MapV { ks: [Value.VStr("a")], vs: [Value.VInt(2)], here: [true], ints: [:], strs: ["a": 0], count: 1, hashes: [0], heads: [:], nexts: [-1], lo: 0 }]
 pub fun mapv_of(ks: [Value], vs: [Value]) -> MapV {
     var m = new_mapv()
     var i = 0
@@ -5790,6 +6024,9 @@ impl MapV {
         self.vs[j] = Value.VUnit
         self.here[j] = false
         self.count = self.count - 1
+        if j == self.lo {
+            while self.lo < self.ks.len() && !self.here[self.lo] { self.lo = self.lo + 1 }
+        }
         let holes = self.ks.len() - self.count
         if holes >= 16 && holes > self.count { self.compact() }
     }
@@ -5821,6 +6058,7 @@ impl MapV {
         self.vs = vs
         self.here = here
         self.hashes = hashes
+        self.lo = 0
     }
 }
 
@@ -6198,10 +6436,7 @@ pub fun typed_repr(ch: Checker, v: Value, t: Option<Type>) -> str {
             match v {
                 Value.VEnum(n, vr, pl) => {
                     if pl.len() == 0 { return n + "." + vr }
-                    var ts: [Type] = []
-                    if en == "Option" && args.len() == 1 { ts = [args[0]] }
-                    else if en == "Result" && args.len() == 2 { ts = if vr == "Ok" { [args[0]] } else { [args[1]] } }
-                    else { ts = match ch.enum_variant_payload(en, args, vr) { Some(p) => p, None => [] } }
+                    let ts = payload_types(ch, en, args, vr)
                     if ts.len() == pl.len() { return n + "." + vr + "(" + typed_reprs(ch, pl, ts) + ")" }
                 },
                 _ => {},
@@ -6210,6 +6445,34 @@ pub fun typed_repr(ch: Checker, v: Value, t: Option<Type>) -> str {
         _ => {},
     }
     return py_repr(v)
+}
+
+// The payload types of the variant `vr` of the enum `en<args>`, [] for
+// none known.
+#test(checker_on("fun f() {}"), "Result", [Type.TStr, Type.TBool], "Err")[[Type.TBool]]
+#test(checker_on("enum E<T> { A(T, int) }"), "E", [Type.TStr], "A")[[Type.TStr, Type.TInt(32, true)]]
+fun payload_types(ch: Checker, en: str, args: [Type], vr: str) -> [Type] {
+    if en == "Option" && args.len() == 1 { return [args[0]] }
+    if en == "Result" && args.len() == 2 { return if vr == "Ok" { [args[0]] } else { [args[1]] } }
+    return match ch.enum_variant_payload(en, args, vr) { Some(p) => p, None => [] }
+}
+
+// The type of member `i` of `n` (`Interp.member_types`): `ts[i]`, or a
+// list's element type `ts[0]`; None for none known.
+#test([], 0, 2)[None]
+#test([Type.TStr, Type.TBool], 1, 2)[Some(Type.TBool)]
+#test([Type.TStr], 3, 5)[Some(Type.TStr)]
+fun member_type(ts: [Type], i: int32, n: int32) -> Option<Type> {
+    if ts.len() == n { return Some(ts[i]) }
+    if ts.len() == 1 { return Some(ts[0]) }
+    return None
+}
+
+// The key type of a map of type `t`, None for another.
+#test(Some(Type.TMap(Type.TStr, Type.TBool)))[Some(Type.TStr)]
+#test(Some(Type.TList(Type.TStr)))[None]
+fun map_key_type(t: Option<Type>) -> Option<Type> {
+    return match t { Some(Type.TMap(k, v)) => Some(k), _ => None }
 }
 
 fun typed_reprs(ch: Checker, vs: [Value], ts: [Type]) -> str {
