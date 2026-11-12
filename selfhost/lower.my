@@ -656,6 +656,19 @@ fun index_unaffected_by(cg: CodeGen, i: Expr, v: Expr) -> bool {
     }
 }
 
+// Whether `e` is a variable or a field or tuple element of one, at any
+// depth: a read that runs nothing and can't fail.
+#test(expr_of("a.b.0"))[true]
+#test(expr_of("a[0].b"))[false]
+fun field_path(e: Expr) -> bool {
+    return match e.kind {
+        ExprKind.Name(n) => true,
+        ExprKind.GetField(x, f) => field_path(x),
+        ExprKind.TupleIndex(x, i) => field_path(x),
+        _ => false,
+    }
+}
+
 fun settled_operands(es: [Expr], root: str) -> bool {
     for x in es { if !settled_operand(x, root) { return false } }
     return true
@@ -4223,7 +4236,13 @@ impl Lower {
             argv = [self.held_place(cg, argv0[0], e.id)]
             var j = 1
             while j < argv0.len() {
-                argv.push(self.held_operand(cg, argv0[j], format("%arg{}_{}", e.id, j)))
+                // a variable, or a field of one, that no later argument
+                // writes reads the same where it is passed: not copied
+                // (`lw.entry_member(cg, lw.read_cell(sm), …)` copied the
+                // code generator, MYLA-542)
+                let a = argv0[j]
+                if field_path(a) && place_root(a) != root && !written_after(cg, a, argv0[j + 1:]) { argv.push(a) }
+                else { argv.push(self.held_operand(cg, a, format("%arg{}_{}", e.id, j))) }
                 j = j + 1
             }
         }
