@@ -33,6 +33,7 @@ import struct
 import subprocess
 import tempfile
 import termios
+import threading
 import time
 import unittest
 
@@ -900,6 +901,34 @@ class Repl(Case):
         self.assertEqual(lflag() & (termios.ECHO | termios.ICANON), termios.ECHO | termios.ICANON)
         t.close()
 
+    def test_a_long_line_typed_while_an_input_runs(self):
+        """MYLA-548: a line of 20,000 characters typed while the last input
+        runs reaches the editor whole: the terminal takes a key at a time
+        then (echoed, Ctrl-C a signal), where, cooked, its own line editing
+        kept 4,095 bytes of it and dropped the rest."""
+        t = Pty([selfhost_tool("main"), "repl", "--stdlib", STDLIB_ROOT], env=env_with(TERM="xterm"))
+        t.expect("myla> ")
+        t.send(b"var t = 0\r")
+        t.expect("myla> ")
+        t.send(b"for i in 0..3000000 { t += 1 }\r")
+        time.sleep(0.3)
+        # a key at a time, echoed, signals on, while it runs
+        lflag = t.lflag()
+        self.assertEqual(lflag & (termios.ECHO | termios.ICANON | termios.ISIG), termios.ECHO | termios.ISIG)
+        line = b'print("' + b"x" * 20000 + b'".len())\r'
+        # written from a thread: the terminal holds 4 KiB of input, and the
+        # echo has to be read meanwhile
+        writer = threading.Thread(target=lambda: [t.send(line[i:i + 1000]) for i in range(0, len(line), 1000)])
+        writer.start()
+        t.expect("\n20000\n", timeout=120)
+        writer.join()
+        t.expect("myla> ")
+        t.send(b"\x04")
+        out, code = t.finish_keeping()
+        self.assertEqual(code, 0, out)
+        self.assertEqual(t.lflag() & (termios.ECHO | termios.ICANON), termios.ECHO | termios.ICANON)
+        t.close()
+
     def test_pipes_read_plain_lines(self):
         p = subprocess.run([selfhost_tool("main"), "repl", "--stdlib", STDLIB_ROOT], input="1 + 1\n",
                            capture_output=True, text=True, timeout=120)
@@ -1002,10 +1031,13 @@ fun main() {
     let h = __signal_listen(1)
     print(f"{h >= 0} {__io_errno()}")
     let h2 = __signal_listen(1)
+    // each listener a handle of its own, which lets go once (MYLA-548)
     print(h2 == h)
+    print(e(__signal_listen(h2)))
+    print(e(__signal_listen(h2)))
     print(e(__signal_listen(0)))
-    print(e(__signal_listen(0)))
-    print(e(__signal_listen(0)))
+    print(e(__signal_take(0)))
+    print(e(__signal_listen(h)))
 }
 """
 PRIMITIVES_OUT = """0 0
@@ -1018,9 +1050,11 @@ PRIMITIVES_OUT = """0 0
 -1 25
 -1 9
 true 0
-true
+false
 0 0
-0 0
+-1 9
+-1 9
+-1 9
 0 0
 """
 
@@ -1069,6 +1103,7 @@ class Warnings(Case):
         "__term_get": "print(__term_get(0))",
         "__term_set": "print(__term_set(0, \"\"))",
         "__term_raw": "print(__term_raw(0))",
+        "__term_cbreak": "print(__term_cbreak(0))",
         "__term_vt": "print(__term_vt(1))",
         "__signal_listen": "print(__signal_listen(0))",
         "__signal_take": "print(__signal_take(-1))",
