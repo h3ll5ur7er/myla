@@ -3746,6 +3746,24 @@ impl Interp {
             let (r, fs) = self.call_method(fi, rv, argv)
             return r
         }
+        // `x.format(spec)` of a printable builtin value, `x: T` with
+        // `T: Format` (MYLA-544): its print form by the spec, as a hole's
+        if method == "format" && args.len() == 1 && fi < 0 {
+            if !evaluated {
+                rv = self.eval(recv)
+                evaluated = true
+            }
+            let user = match self.deref(rv) {
+                Value.VStruct(n, fns, fvs) => true,
+                Value.VEnum(en, vr, pl) => true,
+                _ => false,
+            }
+            if !user {
+                let spec = self.eval(args[0])
+                if self.stop() { return Value.VUnit }
+                return Value.VStr(self.format_spec_value(rv, self.full_type_of(recv.id), as_str(spec)))
+            }
+        }
         // not a method: a field holding a function, called (an actor's
         // through its handle, from its own method: the 2026-11-10 review's
         // L3)

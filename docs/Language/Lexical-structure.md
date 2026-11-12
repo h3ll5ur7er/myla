@@ -103,8 +103,8 @@ fun main() {
 ```
 
 - `_` may only stand between two digits.
-- There are no negative literals: `-5` is unary minus applied to `5`.
-- An unsuffixed literal takes the integer type its context expects (an annotation, a parameter, the other operand), defaulting to `int`. It must fit that type, or it is a type error. For signed types the check allows a magnitude up to 2^(width-1), so that `-128i8` works; `128i8` is therefore accepted and wraps to -128. A literal *pattern* is checked as the value it denotes, so `128` or `-1` can't match an `int8` or `uint8` ([[MYLA-7]]).
+- There are no negative literals: `-5` is unary minus applied to `5`, but a negated literal is checked as the value it denotes: `-128i8` and `let a: int8 = -128` work, `128i8` and `let b: uint8 = -1` are type errors, and so is `let c: uint8 = -'a'` (a char literal where an integer is expected is its code, so `-'a'` is -97; [[MYLA-417]], [[MYLA-544]]).
+- An unsuffixed literal takes the integer type its context expects (an annotation, a parameter, the other operand on either side, `5000000000 + big` and `-1 + big` as `big + 5000000000` with `big: int64`, a range's other bound, another arm of an `if` or a `match`), defaulting to `int`. It must fit that type, or it is a type error ([[MYLA-544]]). A literal *pattern* is checked as the value it denotes, so `128` or `-1` can't match an `int8` or `uint8` ([[MYLA-7]]).
 - A literal directly followed by letters that aren't a suffix (`5x`) is a lex error.
 
 ## Float literals

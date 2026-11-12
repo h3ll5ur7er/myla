@@ -3813,6 +3813,8 @@ impl Lower {
                 }
                 if !cg.has_func(mname) {
                     if field == "eq" && args.len() == 1 && cg.derived_eq_routine(key) { return self.derived_eq(cg, mname, recv, args[0], tail) }
+                    // `x.format(spec)` of a builtin `T: Format` (MYLA-544)
+                    if field == "format" && args.len() == 1 && !is_struct_or_enum_t(cg.type_of(recv.id)) { return self.builtin_format(cg, recv, args[0]) }
                     // a tuple's `hash` is the language's (D163)
                     let rt = cg.type_of(recv.id)
                     if field == "hash" && args.len() == 1 && (is_unit(rt) || is_compound_eq_t(rt)) && !is_list_t(rt) && !tail {
@@ -4122,11 +4124,22 @@ impl Lower {
         // recursion) asks for instances without end: refused where it is
         // built, past a nesting no program needs (H5)
         var too = ""
+        // only an instance past the limit itself asks for one in a
+        // recursion: a deep type the program writes is no recursion
+        // (MYLA-544: a call of `mk<[[…int…]]>` 65 deep from `main`)
+        var cur_depth = 0
+        var cur_size = 0
+        for sb in cg.subst {
+            let d = type_depth(sb.ty)
+            if d > cur_depth { cur_depth = d }
+            let z = type_size(sb.ty, MAX_INSTANCE_SIZE)
+            if z > cur_size { cur_size = z }
+        }
         for ta in targs {
             // (a type that doubles at each step grows too large long before
             // it is too deep)
-            if too == "" && type_size(ta, MAX_INSTANCE_SIZE) > MAX_INSTANCE_SIZE { too = format("more than {} types in all", MAX_INSTANCE_SIZE) }
-            else if too == "" && type_depth(ta) > MAX_INSTANCE_DEPTH { too = format("{} types deep (the limit is {})", type_depth(ta), MAX_INSTANCE_DEPTH) }
+            if too == "" && cur_size > MAX_INSTANCE_SIZE / 2 && type_size(ta, MAX_INSTANCE_SIZE) > MAX_INSTANCE_SIZE { too = format("more than {} types in all", MAX_INSTANCE_SIZE) }
+            else if too == "" && cur_depth >= MAX_INSTANCE_DEPTH && type_depth(ta) > MAX_INSTANCE_DEPTH { too = format("{} types deep (the limit is {})", type_depth(ta), MAX_INSTANCE_DEPTH) }
         }
         if too != "" { self.refuse_instance(cg, call, if sig.has_decl { sig.decl.name } else { sig.name }, too) }
         else { self.f.instances.push(Instance { orig: sig.name, targs: targs }) }
@@ -5044,6 +5057,44 @@ impl Lower {
         let sv = self.temp(Type.TStr)
         self.add(Inst.Str(sv, spec))
         vals.push(sv)
+        return self.call_owning(cg, name, vals)
+    }
+
+    // `x.format(spec)` of a printable builtin value, `x: T` with `T: Format`
+    // at a builtin `T` (MYLA-544): its print form by the spec `sp`, a value,
+    // with std.fmt, as `render_spec` gives a hole's; a new string the
+    // statement owns.
+    fun builtin_format(var self, cg: CodeGen, arg: Expr, sp: Expr) -> int32 {
+        let t = cg.type_of(arg.id)
+        var name = "std$fmt$fmt_text"
+        var vals: [int32] = []
+        match t {
+            Type.TInt(w, sg) => {
+                name = "std$fmt$fmt_int"
+                let v = self.expr(cg, arg)
+                let v64 = self.temp(Type.TInt(64, true))
+                self.add(Inst.Cast(v64, t, Type.TInt(64, true), v))
+                vals = [v64, self.int_const(w), self.konst(Type.TBool, if sg { 1 } else { 0 })]
+            },
+            Type.TFloat(w) => {
+                name = "std$fmt$fmt_float"
+                let v = self.expr(cg, arg)
+                var extra = 17
+                if w == 32 { extra = 9 }
+                let text = self.temp(Type.TStr)
+                self.rt_call(cg, text, "__float_to_str", [v, self.int_const(extra)])
+                let owned_text = self.owned_value(cg, text, Type.TStr)
+                var v64 = v
+                if w == 32 {
+                    v64 = self.temp(Type.TFloat(64))
+                    self.add(Inst.Cast(v64, t, Type.TFloat(64), v))
+                }
+                vals = [v64, owned_text]
+            },
+            _ => { vals = [self.render(cg, arg)] },
+        }
+        if !cg.has_func(name) { return self.unsupported("a format spec without std.fmt") }
+        vals.push(self.expr(cg, sp))
         return self.call_owning(cg, name, vals)
     }
 
