@@ -72,8 +72,11 @@ def _corpus() -> list[str]:
 
 
 # Error-corpus files whose program the grammar accepts: they break a limit of
-# the parsers, not a rule of the grammar (MYLA-182: 256 levels of nesting)
-_PARSER_LIMITS = {"parse_nested_too_deeply.my"}
+# the parsers, not a rule of the grammar (MYLA-182: 256 levels of nesting), or
+# a rule that depends on where the form stands (D186: in a literal's
+# parentheses a comma ends `name<A, B>(…)`'s type arguments, which the
+# grammar, without that context, reads as a call; MYLA-545)
+_PARSER_LIMITS = {"parse_nested_too_deeply.my", "parse_d186_call_read_as_comparisons.my"}
 
 
 def _syntax_errors() -> list[str]:
