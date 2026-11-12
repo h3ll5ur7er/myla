@@ -2522,8 +2522,52 @@ pub fun key_str_text(s: str) -> str {
 // `exit`, a runtime error or a stack overflow ends here. It allocates
 // nothing.
 pub fun exit_program(code: int) {
+    // a test child's record of how its case ended, unless one was written
+    // (D191): a stack overflow (`__on_segv`, which wrote its line) or an exit
+    if __load64(__rt_addr("__segv_once")) != 0 {
+        let m = __addr_of("stack overflow")
+        let wrote = test_record(69, __load64(m), m)  // 'E'
+    } else {
+        let wrote = test_record(88, (code as int64) & 255, 0)  // 'X'
+    }
     exit_hook()
     os.exit(code as int64)
+}
+
+// In a test child of `myla test --native` (D191), the record of how its
+// case ended on stderr, the last thing there: `__test_report`'s head (which
+// std.test's `reporting` set), the kind `kind` (`E` a runtime error, `X` an
+// exit), `:`, the number `n` (the length of the text, else the status the
+// process ends with, 0 to 255) and `;`, then the text `text` (a string's
+// cell, or 0 for none). The head is taken off as it is written, so a case's
+// end has one record. Whether this process is a test child that had none
+// yet. It allocates nothing.
+fun test_record(kind: int64, n: int64, text: int64) -> bool {
+    let head = __xchg64(__rt_addr("__test_report"), 0)
+    if head == 0 {
+        return false
+    }
+    write_err(head)
+    let end = __rt_addr("__panic_buf") + 32
+    var at = end - 1
+    __store8(at, 59u8)  // ';'
+    var v = n
+    while true {
+        at -= 1
+        __store8(at, (48 + v % 10) as uint8)
+        v = v / 10
+        if v == 0 {
+            break
+        }
+    }
+    at -= 2
+    __store8(at, kind as uint8)
+    __store8(at + 1, 58u8)  // ':'
+    os.write_all(2, at, end - at)
+    if text != 0 {
+        write_err(text)
+    }
+    return true
 }
 
 // The exit hook: the terminal `__term_raw` made raw, if nothing put it back
@@ -2558,6 +2602,10 @@ pub fun panic_report_tasks(msg: int64, pos: int64) {
 }
 
 fun report_error(msg: int64, pos: int64) {
+    // in a test child, its record instead (D191)
+    if test_record(69, __load64(msg), msg) {  // 'E'
+        return
+    }
     write_err(__addr_of("runtime error: "))
     write_err(msg)
     if pos != 0 {
@@ -4740,8 +4788,7 @@ fun exec_stuck() {
             os.sleep_ns(1000000)
         }
     }
-    let msg = __addr_of("runtime error: every task waits for another one\n")
-    os.write_all(2, msg + 8, __load64(msg))
+    report_error(__addr_of("every task waits for another one"), 0)
     exit_program(1)
 }
 

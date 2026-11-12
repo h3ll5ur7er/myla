@@ -911,14 +911,17 @@ impl Interp {
                     if sel.list {
                         report.push(case_name + "\n")
                     } else {
-                        let detail = self.run_case(i, fd, attr, is_fn)
-                        if detail == "" {
-                            passed = passed + 1
-                            report.push(format("PASS  {}\n", case_name))
-                        } else {
-                            report.push(format("FAIL  {}: {}\n", case_name, on_one_line(detail)))
-                            // what the case printed, under its line
-                            for line in output_lines(self.captured) { report.push("      | " + line + "\n") }
+                        match self.run_case(i, fd, attr, is_fn) {
+                            None => {
+                                passed = passed + 1
+                                report.push(format("PASS  {}\n", case_name))
+                            },
+                            Some(detail) => {
+                                // (an empty detail, an `Err("")`'s, fails too)
+                                report.push(fail_line(case_name, detail))
+                                // what the case printed, under its line
+                                for line in output_lines(self.captured) { report.push("      | " + line + "\n") }
+                            },
                         }
                     }
                 }
@@ -930,9 +933,9 @@ impl Interp {
 
     // One case of the function `fi`: its arguments and expected value
     // evaluated, the call made with the case running (a failure unwinds its
-    // deferred blocks, D162), its scratch directory removed; "" when it
-    // passed, else why it failed.
-    fun run_case(var self, fi: int32, fd: FunData, attr: Attribute, is_fn: bool) -> str {
+    // deferred blocks, D162), its scratch directory removed; its verdict,
+    // None when it passed, else why it failed.
+    fun run_case(var self, fi: int32, fd: FunData, attr: Attribute, is_fn: bool) -> Option<str> {
         self.push_scope()
         var argv: [Value] = []
         for a in attr.args { argv.push(self.eval(a)) }
@@ -948,6 +951,12 @@ impl Interp {
             None => {},
         }
         self.pop_scope()
+        // a process ends with 0 to 255: no call can give another status
+        // (the native harness says the same)
+        match want {
+            Expected.Exits(n) => { if n < 0 || n > 255 { return Some(format("expected exit status {}: a status is 0 to 255", n)) } },
+            _ => {},
+        }
         self.testing = true
         self.defer_errs = []
         self.captured = []
@@ -982,7 +991,8 @@ impl Interp {
                 // a runtime error or `exit` ends this case only
                 outcome = match self.rt_err {
                     Some(r) => Outcome.Failed(r.msg),
-                    None => Outcome.Exited(self.exit_code),
+                    // the status the process ends with, as natively
+                    None => Outcome.Exited(self.exit_code & 255),
                 }
                 self.ctrl = Ctrl.CNone
                 self.rt_err = None
@@ -995,6 +1005,7 @@ impl Interp {
             self.test_root = ""
         }
         var parts: [str] = []
+        var failed = false   // a test function's `Err`, its text "" too
         // the values shown by the function's checked result type (MYLA-361)
         let rt = case_ret(self.checker, self.func_names[fi])
         let returns = match fd.ret_type { Some(t) => true, None => false }
@@ -1006,7 +1017,12 @@ impl Interp {
                         if is_fn {
                             // a test function's `Err(e)` fails it with `e` (D162)
                             match v {
-                                Value.VEnum(en, vr, pl) => { if vr == "Err" { parts.push(self.shown(pl[0], err_type(rt))) } },
+                                Value.VEnum(en, vr, pl) => {
+                                    if vr == "Err" {
+                                        failed = true
+                                        parts.push(self.shown(pl[0], err_type(rt)))
+                                    }
+                                },
                                 _ => {},
                             }
                         } else if !value_eq(v, expected) { parts.push("expected " + typed_repr(ch, expected, rt) + ", got " + typed_repr(ch, v, rt)) }
@@ -1034,7 +1050,8 @@ impl Interp {
         }
         // the deferred blocks that failed while the case unwound (D162)
         for d in self.defer_errs { parts.push("deferred block: runtime error: " + d) }
-        return join_parts(parts)
+        if parts.len() == 0 && !failed { return None }
+        return Some(join_parts(parts))
     }
 
     fun eval_consts(var self) {
@@ -1051,6 +1068,14 @@ impl Interp {
                 _ => {},
             }
         }
+    }
+
+    // Whether `fd` is a running case's standard input, which is empty, as
+    // a native case's is (MYLA-547): a read gives "" without an error.
+    fun empty_stdin(var self, fd: int32) -> bool {
+        if fd != 0 || !self.testing { return false }
+        self.captured_io = true
+        return true
     }
 
     #test(interp_on("[int]"))[-1]
@@ -4669,6 +4694,12 @@ impl Interp {
             Value.VBytes(bs) => { return py_repr(v) },
             Value.VTuple(es) => { return without_module_ids(typed_repr(self.checker, v, t)) },
             Value.VMap(m) => { return without_module_ids(typed_repr(self.checker, v, t)) },
+            // no form of their own: as natively (MYLA-547)
+            Value.VUnit => { return "()" },
+            Value.VSB(bs) => { return "<StringBuilder>" },
+            Value.VClosure(ps, body, cn, cv, fname, is_func) => { return "<function>" },
+            Value.VCompose(fs) => { return "<function>" },
+            Value.VPartial(f, slots, holes) => { return "<function>" },
             _ => {},
         }
         return self.format_spec_value(v, t, "")
@@ -4822,7 +4853,8 @@ impl Interp {
         if nm == "__wait_readable" {
             let fd = as_int(self.eval(args[0])) as int32
             if self.stop() { return Value.VUnit }
-            if self.cur < 0 || self.cur >= self.tasks.len() || self.tasks[self.cur].requested || fd < 0 || __poll(fd, 0) != 0 { return Value.VUnit }
+            // (a case's stdin is empty: ready at once, MYLA-547)
+            if self.cur < 0 || self.cur >= self.tasks.len() || self.tasks[self.cur].requested || fd < 0 || (fd == 0 && self.testing) || __poll(fd, 0) != 0 { return Value.VUnit }
             self.fd_waits.push(FdWait { fd: fd, fd2: -1, task: self.cur, events: 0 })
             self.tasks[self.cur].state = 1
             self.parked = true
@@ -4870,7 +4902,7 @@ impl Interp {
             let fb = as_int(self.eval(args[1])) as int32
             if self.stop() { return Value.VUnit }
             // (`fb` negative is "only `fa`", as natively)
-            if self.cur < 0 || self.cur >= self.tasks.len() || self.tasks[self.cur].requested || fa < 0 || __poll(fa, 0) != 0 || (fb >= 0 && __poll(fb, 0) != 0) { return Value.VUnit }
+            if self.cur < 0 || self.cur >= self.tasks.len() || self.tasks[self.cur].requested || fa < 0 || (fa == 0 && self.testing) || __poll(fa, 0) != 0 || (fb >= 0 && __poll(fb, 0) != 0) { return Value.VUnit }
             self.fd_waits.push(FdWait { fd: fa, fd2: fb, task: self.cur, events: 0 })
             self.tasks[self.cur].state = 1
             self.parked = true
@@ -4912,13 +4944,17 @@ impl Interp {
         }
         if nm == "__read" {
             let fd = as_int(self.eval(args[0])) as int32
-            return Value.VStr(__read(fd, as_int(self.eval(args[1])) as int32))
+            let n = as_int(self.eval(args[1])) as int32
+            if self.empty_stdin(fd) { return Value.VStr("") }
+            return Value.VStr(__read(fd, n))
         }
         // `__read` and `__write` of bytes (D177): here through a string,
         // which the bytes stay (`VBytes`, S2)
         if nm == "__read_bytes" {
             let fd = as_int(self.eval(args[0])) as int32
-            return Value.VBytes(__read(fd, as_int(self.eval(args[1])) as int32))
+            let n = as_int(self.eval(args[1])) as int32
+            if self.empty_stdin(fd) { return Value.VBytes("") }
+            return Value.VBytes(__read(fd, n))
         }
         if nm == "__write_bytes" {
             let fd = as_int(self.eval(args[0])) as int32
@@ -4941,7 +4977,9 @@ impl Interp {
         }
         if nm == "__poll" {
             let fd = as_int(self.eval(args[0])) as int32
-            return Value.VInt(__poll(fd, as_int(self.eval(args[1])) as int32) as int64)
+            let ms = as_int(self.eval(args[1])) as int32
+            if self.empty_stdin(fd) { return Value.VInt(1) }
+            return Value.VInt(__poll(fd, ms) as int64)
         }
         if nm == "__io_errno" {
             if self.captured_io {
@@ -7183,6 +7221,15 @@ fun without_module_ids(text: str) -> str {
 #test(' ')[false]
 fun is_name_byte(c: uint8) -> bool {
     return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'
+}
+
+// A case's FAIL line in the report: without a detail for an empty one
+// (an `Err("")`'s), as std.test's `fail_line` writes it natively.
+#test("f #1", "x")["FAIL  f #1: x\n"]
+#test("t", "")["FAIL  t\n"]
+fun fail_line(name: str, detail: str) -> str {
+    if detail == "" { return format("FAIL  {}\n", name) }
+    return format("FAIL  {}: {}\n", name, on_one_line(detail))
 }
 
 // `text` for a report line: its newlines shown as `\n`.
