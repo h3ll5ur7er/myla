@@ -12,7 +12,7 @@
 from .ast import FunData
 from .checker import Type
 from .codegen import CodeGen, CgBinding, int_signed, same_int, takes_operand, is_cmp, fold_load, fold_load_for_reader, text_at, has_text, is_aggregate, is_actor_t, is_tfloat32, REG_WORDS, arg_reg, spilled_word, narrow_operand, int_width_cg, tls_offset, TLS_SIZE
-from .ir import IrFunc, Inst, Term, Touches, Slot, ENV_WORD, Intrinsic, is_rc_dec, is_rc_atomic, is_cas, is_atomic_at, render_func, touches, use_counts, def_counts, inst_uses, term_uses, successors, ends_in_call
+from .ir import IrFunc, Inst, Term, Touches, Slot, ENV_WORD, Intrinsic, is_rc_dec, is_rc_atomic, is_cas, is_atomic_at, render_func, touches, use_counts, def_counts, inst_uses, term_uses, successors, ends_in_call, Pos
 from .ir_util import reachable_blocks, wrapped
 from .ssa import promote, add_ssa_stats
 from .parser import expr_of, stmt_of, type_expr_of, block_of, pattern_of, fun_of  // AST values for #test cases (MYLA-184)
@@ -279,6 +279,7 @@ impl CodeGen {
         if !self.frameless { self.emit("leave") }
         // the caller pops the argument words it pushed (D119)
         self.emit("ret")
+        self.emit_cold_traps()
         // cells reserved for temporaries whose values never left %rax: a
         // body that doesn't reach its frame after all sets up none either
         if !self.frameless && self.saved_regs.len() == 0 && self.arg_words == 0 && !self.debug && !f.frame { self.drop_unused_frame(prologue_at) }
@@ -938,7 +939,8 @@ impl CodeGen {
             Inst.Moved(s) => {},
             Inst.Check(v, kind, p) => {
                 self.emit_test(v, temp_base)
-                self.trap("jz", "__trap_" + kind, p.line, p.col)
+                if kind == "overflow" || kind == "shift" { self.cold_trap("z", kind, p) }
+                else { self.trap("jz", "__trap_" + kind, p.line, p.col) }
             },
             Inst.SbAppend(h, v) => {
                 // the string's length and bytes
@@ -1304,9 +1306,9 @@ impl CodeGen {
 
     // An integer comparison that only the `check` after it reads, of an
     // overflow or a shift's count (D175's checked build): the `cmpq` and a
-    // jump over the trap when it holds, as a bounds check is. False for any
-    // other pair; the other checks keep their code (a plain build's is
-    // unchanged).
+    // jump to the trap, out of line, when it doesn't hold (MYLA-551). False
+    // for any other pair; the other checks keep their code (a plain build's
+    // is unchanged).
     fun emit_compare_check(var self, a: Inst, b: Inst, temp_base: int32) -> bool {
         match a {
             Inst.Cmp(d, op, t, x, y) => {
@@ -1315,11 +1317,7 @@ impl CodeGen {
                     Inst.Check(v, kind, p) => {
                         if v != d || self.temp_uses[d] != 1 || (kind != "overflow" && kind != "shift") { return false }
                         let cond = self.emit_int_compare(op, t, x, y, temp_base)
-                        let ok = self.label()
-                        self.emit(format("j{} {}", cond, ok))
-                        self.load_position(p.line, p.col, "rsi")
-                        self.emit(format("call __trap_{}", kind))
-                        self.emit(format("{}:", ok))
+                        self.cold_trap(negated_cond(cond), kind, p)
                         return true
                     },
                     _ => {},
@@ -1332,7 +1330,7 @@ impl CodeGen {
 
     // `ok = fits op (x, y)` that only the `check ok overflow` after it reads
     // (D175's checked build, MYLA-430): the operation in %rax, its result
-    // unused, and a jump over the trap on its flag. False for any other pair.
+    // unused, and a jump to the trap on its flag. False for any other pair.
     fun emit_fits_check(var self, a: Inst, b: Inst, temp_base: int32) -> bool {
         match a {
             Inst.Intr(ok, op, args) => {
@@ -1353,8 +1351,8 @@ impl CodeGen {
 
     // `ok = fits op (x, y)`, the `check ok overflow` that alone reads it and
     // `d = x op y` at `i` (the lowering's checked `+`, `-` and `*` on 64-bit
-    // integers, MYLA-430): the operation once and a jump over the trap on
-    // its overflow or carry flag. In place, as the plain operation is, where
+    // integers, MYLA-430): the operation once and a jump to the trap on its
+    // overflow or carry flag. In place, as the plain operation is, where
     // `d`'s register holds an operand already (`emit_bin_in_reg`), or where
     // only a store into a variable living in the register of `x` (or, the
     // order not mattering, of `y`) reads `d` (`emit_in_place`), the store
@@ -1461,19 +1459,47 @@ impl CodeGen {
         return if signed { "o" } else { "c" }
     }
 
-    // A jump over the trap of the `check` `c` when the flag (`o` or `c`)
-    // is clear: the trap call takes the position, %rax keeps the result.
+    // A jump to the trap of the `check` `c` when the flag (`o` or `c`) is
+    // set (out of line, `cold_trap`); %rax keeps the result.
     fun emit_trap_on_flag(var self, flag: str, c: Inst) {
         match c {
-            Inst.Check(v, kind, p) => {
-                let ok = self.label()
-                self.emit(format("jn{} {}", flag, ok))
-                self.load_position(p.line, p.col, "rsi")
-                self.emit(format("call __trap_{}", kind))
-                self.emit(format("{}:", ok))
-            },
+            Inst.Check(v, kind, p) => { self.cold_trap(flag, kind, p) },
             _ => {},
         }
+    }
+
+    // A jump on the condition `cond` (`o`, `z`, `ae`, ...) to the call of
+    // `__trap_<kind>` reporting `p`, out of line (MYLA-551): a checked
+    // build's overflow and shift checks are a `jcc` the code that doesn't
+    // trap falls through, not a jump over the call. The call, made the first
+    // time the function traps with that kind at that position, follows the
+    // function's `ret` (`emit_cold_traps`); under -g it has the position's
+    // line, so a backtrace from the trap shows it.
+    fun cold_trap(var self, cond: str, kind: str, p: Pos) {
+        let key = format("{}:{}:{}", kind, p.line, p.col)
+        var lab = ""
+        match self.cold_keys.get(key) {
+            Some(l) => { lab = l },
+            None => {
+                lab = self.label()
+                self.cold_keys[key] = lab
+                self.cold_traps.push(lab + ":")
+                if self.cur_file != 0 && p.line > 0 { self.cold_traps.push(format("\t.loc {} {} {}", self.cur_file, p.line, p.col)) }
+                if p.line > 0 { self.cold_traps.push(format("\tleaq {}(%rip), %rsi", self.position_label(p.line, p.col))) }
+                else { self.cold_traps.push("\tmovq $0, %rsi") }
+                self.cold_traps.push("\tcall __trap_" + kind)
+            },
+        }
+        self.emit(format("j{} {}", cond, lab))
+    }
+
+    // The function's out-of-line traps (`cold_trap`), after its code.
+    fun emit_cold_traps(var self) {
+        for line in self.cold_traps { self.text.push(line) }
+        self.cold_traps = []
+        self.cold_keys = [:]
+        // the line that follows isn't the last trap's
+        self.last_loc = ""
     }
 
     // A block's terminator; `next` is the block emitted after it (-1: none),
