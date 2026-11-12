@@ -21,6 +21,8 @@ woken and all but one watched again.
 - `Closed`: a task waiting in `read_async` on a socket another task closes
   gets EBADF (it waited for good natively), and the next socket given the
   descriptor is watched afresh.
+- `Lots`: the primitives of a lot (MYLA-468: sockets parked with no task,
+  std.http's kept connections), natively and interpreted.
 - `Readers`: 500 tasks read one pipe to its end (`read_to_end_async`), each
   woken in turn as the input comes and ends; every byte is read once and
   every task ends (on every target: wasm32's poller too).
@@ -32,7 +34,76 @@ import subprocess
 import tempfile
 import unittest
 
-from ._native import CAN_BUILD_NATIVE, SKIP_REASON, Program, native_build, run_argv, write_program
+from ._native import CAN_BUILD_NATIVE, SKIP_REASON, Program, native_build, run_argv, selfhost_run, write_program
+
+# A lot's primitives (MYLA-468, std.http's parked connections) on both
+# runners: sockets parked with deadlines and tags, two made readable in
+# turn, then those whose deadline passed taken by the earliest, the rest,
+# the lot closed.
+LOTS = r"""import std.net as net
+import std.task as task
+from std.net import TcpListener, TcpStream
+
+fun conn(l: TcpListener, port: int) -> (TcpStream, TcpStream) {
+    let a = match net.connect(net.addr(net.loopback(), port)) { Ok(s) => s, Err(e) => { panic("connect") } }
+    let b = match l.accept() { Ok(s) => s, Err(e) => { panic("accept") } }
+    return (a, b)
+}
+
+#allow(primitive)
+#main
+async fun main() {
+    let l = match net.listen(net.addr(net.loopback(), 0)) { Ok(l) => l, Err(e) => { panic("listen") } }
+    let port = match l.local_addr() { Ok(a) => a.port, Err(e) => 0 }
+    let n = task.notifier()
+    let lot = __sock_lot(n.id)
+    var cs: [(TcpStream, TcpStream)] = []
+    for i in 0..4 { cs.push(conn(l, port)) }
+    // parked with deadlines 300, 100, -1, 200 and tags 10..13
+    let ds = [300i64, 100i64, -1i64, 200i64]
+    for i in 0..4 {
+        print(__sock_park(lot, cs[i].1.handle, ds[i], 10i64 + i as int64))
+    }
+    print(__sock_ready(lot))
+    // the third and the first get bytes
+    for k in [2, 0] {
+        var w = cs[k].0
+        let x = w.write([7u8])
+        let woke = await n.wait()
+        let h = __sock_ready(lot)
+        var which = -1
+        for i in 0..4 { if cs[i].1.handle == h { which = i } }
+        print(f"ready {which} tag {__sock_tag(h)}")
+    }
+    print(__sock_ready(lot))
+    // by deadline: 1 (100) then 3 (200); none at 150 after the first
+    print(__sock_expired(lot, 50) == 0)
+    print(__sock_expired(lot, 150) == cs[1].1.handle)
+    print(__sock_expired(lot, 150))
+    // the rest
+    print(__sock_expired(lot, -1) == cs[3].1.handle)
+    print(__sock_expired(lot, -1))
+    print(__sock_lot_close(lot))
+    print(__sock_ready(lot))
+}
+"""
+
+LOTS_OUT = """1
+2
+3
+4
+0
+ready 2 tag 12
+ready 0 tag 10
+0
+true
+true
+0
+true
+0
+0
+-1
+"""
 
 PROGRAM = r"""import std.io as io
 import std.net as net
@@ -323,6 +394,20 @@ class Closed(_Built):
         # descriptor started with the closed one's watch (EBADF, as
         # interpreted)
         self.assertEqual(self.run_text("closed", 0), "error error 9 (Other(9)), read 3\n")
+
+
+@unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
+class Lots(unittest.TestCase):
+    def test_parked_sockets_on_both_runners(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = write_program(tmp, LOTS, "lots.my")
+            binary = os.path.join(tmp, "lots")
+            native_build(Program(path), binary)
+            argv, exe = run_argv(binary, binary)
+            p = subprocess.run(argv, executable=exe, capture_output=True, text=True, timeout=60)
+            self.assertEqual((p.stdout, p.returncode), (LOTS_OUT, 0), p.stderr)
+            out, err, code = selfhost_run(path)
+            self.assertEqual((out, code), (LOTS_OUT, 0), err)
 
 
 class Readers(_Built):

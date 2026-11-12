@@ -4010,13 +4010,13 @@ fun poll_events(n: int64) -> [int64] {
                 if (ready & 1) != 0 {
                     a = watch_first(slot, 1)
                     if a != 0 {
-                        a = frame_unwatch(a)
+                        a = watch_fired(a)
                     }
                 }
                 if (ready & 2) != 0 {
                     b = watch_first(slot, 2)
                     if b != 0 {
-                        b = frame_unwatch(b)
+                        b = watch_fired(b)
                     }
                 }
                 if __load64(slot) != 0 {
@@ -4048,18 +4048,20 @@ fun push_woken(woken: [int64]) {
 // `__watches`, under the timers' lock: a table indexed by descriptor,
 // `[cap][woken]` and then `cap` slots (MYLA-518; `woken`: the frames a
 // close woke, for the next poll to queue), each `[first watch][last
-// watch][receivers][senders][sockets][armed][known]`: the frames waiting
-// for that descriptor in the order they came, how many wait to receive (or
-// read) and to send, how many of them wait for a socket
+// watch][receivers][senders][sockets][armed][known][tag]`: the frames
+// waiting for that descriptor in the order they came, how many wait to
+// receive (or read) and to send, how many of them wait for a socket
 // (`os.poller_watch_socket`; the others for a descriptor to read,
 // `os.poller_watch`), what the poller watches the descriptor for now
-// (`events`, 5 for a read through `poller_watch`, 0: nothing), and whether
-// the poller has it (1: watched before and not forgotten, so it is armed
-// again, not added: its watch fires once and stays). A watch is `[fd]
-// [frame][events][next][previous][other]`: `events` 0 for a descriptor
-// waited for until it is readable, else what a socket is waited for (1 to
-// receive, 2 to send; MYLA-346); `other` the frame's other watch when it
-// waits for two descriptors (`wait_fd2`), each the other's. The frame's
+// (`events`, 5 for a read through `poller_watch`, 0: nothing), whether the
+// poller has it (1: watched before and not forgotten, so it is armed
+// again, not added: its watch fires once and stays), and the tag of its
+// socket's last parking (a lot's, below). A watch is `[fd][frame][events]
+// [next][previous][other]`: `events` 0 for a descriptor waited for until
+// it is readable, else what a socket is waited for (1 to receive, 2 to
+// send; MYLA-346); `other` the frame's other watch when it waits for two
+// descriptors (`wait_fd2`), each the other's, or, with no frame, the
+// parking of a socket parked on a lot. The frame's
 // task's wait (its record's) is its first watch | 3, so a cancel finds it.
 // Adding, taking and finding a frame's watches cost O(1), an event O(1)
 // unless it looks past frames waiting for the other direction.
@@ -4067,7 +4069,7 @@ fun push_woken(woken: [int64]) {
 // platforms (a port whose sockets aren't, Windows', would key the slots by
 // handle instead).
 
-const WSLOT: int64 = 56
+const WSLOT: int64 = 64
 const WNODE: int64 = 48
 
 // `myla___wait_fd(frame, fd)`: the frame waiting until `fd` is readable (its
@@ -4327,8 +4329,9 @@ fun frame_unwatch(w: int64) -> int64 {
 }
 
 // The descriptor `fd` about to be closed: the frames waiting for it woken
-// (their operation then fails, its handle closed), and its slot cleared,
-// so that the next descriptor given its number starts afresh, not with the
+// (their operation then fails, its handle closed), a socket parked on a
+// lot ready there (its parker finds it closed), and its slot cleared, so
+// that the next descriptor given its number starts afresh, not with the
 // poller's watch of this one, which the close ends. The frames are queued
 // by the next poll (`woken_later`), which the poller is woken for: a
 // program without tasks has no queues to push them on (nor any watch),
@@ -4344,17 +4347,20 @@ fun watches_closed(fd: int64) {
     let slot = watch_slot(fd)
     if slot != 0 {
         while __load64(slot) != 0 {
-            let fr = frame_unwatch(__load64(slot))
-            // on the table's list, counted a watch until it is queued
-            let n = __alloc(16)
-            __store64(n, fr)
-            __store64(n + 8, __load64(__rt_get("__watches") + 8))
-            __store64(__rt_get("__watches") + 8, n)
-            __store64(__rt_addr("__watch_count"), __rt_get("__watch_count") + 1)
-            any = true
+            let fr = watch_fired(__load64(slot))
+            if fr != 0 {
+                // on the table's list, counted a watch until it is queued
+                let n = __alloc(16)
+                __store64(n, fr)
+                __store64(n + 8, __load64(__rt_get("__watches") + 8))
+                __store64(__rt_get("__watches") + 8, n)
+                __store64(__rt_addr("__watch_count"), __rt_get("__watch_count") + 1)
+                any = true
+            }
         }
         __store64(slot + 40, 0)
         __store64(slot + 48, 0)
+        __store64(slot + 56, 0)
     }
     give_lock(lock)
     if any && __rt_get("__exec_poller") != 0 {
@@ -4382,11 +4388,283 @@ fun woken_later(woken: [int64]) -> [int64] {
     return out
 }
 
+// The watch `w`'s wait over (its descriptor ready, or closed): its frame
+// no longer waiting, or its parked socket ready on its lot. The frame to
+// queue, or 0 (the lock held).
+fun watch_fired(w: int64) -> int64 {
+    if __load64(w + 8) == 0 {
+        return parked_fired(w)
+    }
+    return frame_unwatch(w)
+}
+
 // The watch `w` off its slot, and freed (the lock held).
 fun watch_free(w: int64) {
     watch_unlink(watch_slot(__load64(w)), w)
     __free(w)
     __store64(__rt_addr("__watch_count"), __rt_get("__watch_count") - 1)
+}
+
+// --- lots: sockets parked with no task (MYLA-468) --------------------------------
+// A lot is a set of sockets parked on the reactor, each waiting to become
+// readable with no frame: a watch whose frame is 0 and whose `other` is its
+// parking, `[lot][handle][descriptor][deadline][next][previous][watch]`
+// (PARKING bytes). A socket ready leaves the watches for the lot's ready
+// list, and the lot's notifier (a `std.task.Notifier`'s id) is notified
+// once, so a task waiting on it takes the socket (`__sock_ready`). A lot is
+// the record `[notifier][first ready][last ready][first parked][last
+// parked][count parked]`, which a handle names (kind H_LOT, D181); its
+// parked sockets are kept in the order of their deadlines (none: last), so
+// the ones whose time ran out come first (`__sock_expired`). A parking's
+// `tag`, a number its parker keeps with the socket (std.http: when its
+// connection's time is up), stays in the socket's slot of the watches
+// (`__sock_tag`). All under the timers' lock.
+
+const H_LOT: int64 = 4
+const LOT: int64 = 48
+const PARKING: int64 = 56
+
+// `__sock_lot(n)`: a new lot whose sockets, once ready, notify the
+// notifier whose id is `n`: its handle.
+pub fun sock_lot(n: int64) -> int {
+    __set_io_errno(0)
+    let rec = __alloc(LOT)
+    zero_words(rec, LOT)
+    __store64(rec, n)
+    return handle_new(H_LOT, rec) as int
+}
+
+// `__sock_park(lot, h, deadline, tag)`: the socket `h` parked on `lot` until
+// it is readable (or its input ended), with `deadline` (a time of the
+// parker's clock, `std.time.now_ms` in std.http, negative for none) and
+// `tag` kept with it: how many sockets are parked on the lot then, or -1
+// with EBADF (`lot` or `h` not open). A socket the poller can't watch is
+// ready at once.
+pub fun sock_park(lot: int, h: int, deadline: int64, tag: int64) -> int {
+    let lock = __rt_addr("__timer_lock")
+    take_lock(lock)
+    let rec = handle_get(lot as int64, H_LOT)
+    let fd = handle_get(h as int64, H_SOCKET)
+    if rec < 0 || fd < 0 {
+        give_lock(lock)
+        return sock_result(-EBADF)
+    }
+    __set_io_errno(0)
+    if __rt_get("__exec_poller") == 0 {
+        __store64(__rt_addr("__exec_poller"), os.poller_new())
+    }
+    let p = __alloc(PARKING)
+    zero_words(p, PARKING)
+    __store64(p, rec)
+    __store64(p + 8, h as int64)
+    __store64(p + 16, fd)
+    __store64(p + 24, deadline)
+    // after the last parked whose deadline isn't later (looked for from the
+    // end: most come with the latest deadline)
+    var after = __load64(rec + 32)
+    while after != 0 && deadline_before(deadline, __load64(after + 24)) {
+        after = __load64(after + 40)
+    }
+    parking_link(rec, p, after)
+    __store64(rec + 40, __load64(rec + 40) + 1)
+    let count = __load64(rec + 40)
+    __store64(watch_slot_made(fd) + 56, tag)
+    let w = watch_add(fd, 0, 1)
+    var fr: int64 = 0
+    if w == 0 {
+        fr = parking_ready(p)
+    } else {
+        __store64(w + 40, p)
+        __store64(p + 48, w)
+    }
+    give_lock(lock)
+    if fr != 0 {
+        exec_push(fr)
+    }
+    return count as int
+}
+
+// Whether the deadline `a` comes before `b` (a negative one: never).
+#test(5i64, 7i64)[true]
+#test(7i64, 5i64)[false]
+#test(5i64, -1i64)[true]
+#test(-1i64, 5i64)[false]
+#test(-1i64, -1i64)[false]
+fun deadline_before(a: int64, b: int64) -> bool {
+    if a < 0 {
+        return false
+    }
+    return b < 0 || a < b
+}
+
+// The parking `p` put on its lot `rec`'s parked list after `after` (0: first).
+fun parking_link(rec: int64, p: int64, after: int64) {
+    var next: int64 = 0
+    if after != 0 {
+        next = __load64(after + 32)
+        __store64(after + 32, p)
+    } else {
+        next = __load64(rec + 24)
+        __store64(rec + 24, p)
+    }
+    __store64(p + 32, next)
+    __store64(p + 40, after)
+    if next != 0 {
+        __store64(next + 40, p)
+    } else {
+        __store64(rec + 32, p)
+    }
+}
+
+// The parking `p` off its lot's list that starts at `rec + head` (8: the
+// ready, 24: the parked).
+fun parking_unlink(rec: int64, p: int64, head: int64) {
+    let next = __load64(p + 32)
+    let prev = __load64(p + 40)
+    if prev != 0 {
+        __store64(prev + 32, next)
+    } else {
+        __store64(rec + head, next)
+    }
+    if next != 0 {
+        __store64(next + 40, prev)
+    } else {
+        __store64(rec + head + 8, prev)
+    }
+}
+
+// The parked socket `p` ready: off the parked (its watch gone already, or
+// never made), last on the ready list, and its lot's notifier notified once:
+// the frame of the task that waited longest on it, to queue, or 0 (a permit
+// left). The lock held.
+fun parking_ready(p: int64) -> int64 {
+    let rec = __load64(p)
+    parking_unlink(rec, p, 24)
+    __store64(rec + 40, __load64(rec + 40) - 1)
+    __store64(p + 48, 0)
+    let last = __load64(rec + 16)
+    __store64(p + 32, 0)
+    __store64(p + 40, last)
+    if last != 0 {
+        __store64(last + 32, p)
+    } else {
+        __store64(rec + 8, p)
+    }
+    __store64(rec + 16, p)
+    let n = notifier_record(__load64(rec))
+    if n < 0 {
+        return 0
+    }
+    let w = __load64(n + 16)
+    if w == 0 {
+        __store64(n, __load64(n) + 1)
+        return 0
+    }
+    let fr = __load64(w)
+    unpark_locked(w, 2, true)
+    return fr
+}
+
+// The watch `w` of a parked socket fired (or its descriptor is being
+// closed): the socket ready on its lot. The frame to queue, or 0.
+fun parked_fired(w: int64) -> int64 {
+    let p = __load64(w + 40)
+    watch_free(w)
+    return parking_ready(p)
+}
+
+// `__sock_ready(lot)`: the socket parked on `lot` that became ready first,
+// taken off the lot; 0 when none is, -1 with EBADF when `lot` isn't open.
+pub fun sock_ready(lot: int) -> int {
+    let lock = __rt_addr("__timer_lock")
+    take_lock(lock)
+    let rec = handle_get(lot as int64, H_LOT)
+    if rec < 0 {
+        give_lock(lock)
+        return sock_result(-EBADF)
+    }
+    __set_io_errno(0)
+    let p = __load64(rec + 8)
+    var h: int64 = 0
+    if p != 0 {
+        parking_unlink(rec, p, 8)
+        h = __load64(p + 8)
+        __free(p)
+    }
+    give_lock(lock)
+    return h as int
+}
+
+// `__sock_expired(lot, now)`: a socket parked on `lot` whose deadline is
+// `now` or before, taken off the lot (no longer watched), the one with the
+// earliest deadline; with `now` negative the earliest, whatever its
+// deadline (the one parked longest, when they all have the same time
+// limit). 0 when none is, -1 with EBADF when `lot` isn't open.
+pub fun sock_expired(lot: int, now: int64) -> int {
+    let lock = __rt_addr("__timer_lock")
+    take_lock(lock)
+    let rec = handle_get(lot as int64, H_LOT)
+    if rec < 0 {
+        give_lock(lock)
+        return sock_result(-EBADF)
+    }
+    __set_io_errno(0)
+    let p = __load64(rec + 24)
+    var h: int64 = 0
+    if p != 0 && (now < 0 || (__load64(p + 24) >= 0 && __load64(p + 24) <= now)) {
+        h = __load64(p + 8)
+        parking_unlink(rec, p, 24)
+        __store64(rec + 40, __load64(rec + 40) - 1)
+        if __load64(p + 48) != 0 {
+            watch_free(__load64(p + 48))
+        }
+        __free(p)
+    }
+    give_lock(lock)
+    return h as int
+}
+
+// `__sock_tag(h)`: the tag the socket `h` was last parked with (0: never).
+pub fun sock_tag(h: int) -> int64 {
+    let lock = __rt_addr("__timer_lock")
+    take_lock(lock)
+    let fd = handle_get(h as int64, H_SOCKET)
+    var tag: int64 = 0
+    let slot = watch_slot(fd)
+    if slot != 0 {
+        tag = __load64(slot + 56)
+    }
+    give_lock(lock)
+    return tag
+}
+
+// `__sock_lot_close(lot)`: the lot closed, its parked sockets no longer
+// watched and its ready ones forgotten (none of them closed: the parker
+// takes them first, `__sock_expired(lot, -1)` and `__sock_ready`). 0, or
+// -1 with EBADF.
+pub fun sock_lot_close(lot: int) -> int {
+    let lock = __rt_addr("__timer_lock")
+    take_lock(lock)
+    let rec = handle_free(lot as int64, H_LOT)
+    if rec < 0 {
+        give_lock(lock)
+        return sock_result(-EBADF)
+    }
+    __set_io_errno(0)
+    for head in [8i64, 24i64] {
+        var p = __load64(rec + head)
+        while p != 0 {
+            let next = __load64(p + 32)
+            if __load64(p + 48) != 0 {
+                watch_free(__load64(p + 48))
+            }
+            __free(p)
+            p = next
+        }
+    }
+    __free(rec)
+    give_lock(lock)
+    return 0
 }
 
 // Every task waits for another one: the program ends. Each idle worker can

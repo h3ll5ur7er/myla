@@ -204,6 +204,8 @@ The module rests on these ([[MYLA-346]]), each a function of `std.rt` over `std.
 | `__sock_shutdown(h, how)`, `__sock_option(h, opt, v)`, `__sock_close(h)` | shutdown(2) (1 read, 2 write, 3 both), setsockopt(2) (1 `TCP_NODELAY`, 2 `SO_BROADCAST`, 3 `SO_REUSEADDR`), close(2) | 0 or -1 |
 | `__sock_poll(h, events, ms) -> int` | poll(2) (ppoll(2) on aarch64) | The events ready (1 receive or accept, 2 send or a connect's end; an error or a hang-up counts as both), 0 when `ms` ran out |
 | `await __wait_socket(h, events)` | The reactor: epoll, the socket armed once with what its waiters wait for | The task waits; without tasks, `__sock_poll(h, events, -1)` |
+| `__sock_lot(n: int64) -> int`, `__sock_park(lot, h, deadline: int64, tag: int64) -> int` | The reactor: a watch with no frame ([[MYLA-468]], std.http's kept connections) | A lot, whose sockets once readable notify the notifier `n` (a `Notifier`'s id) once each; `h` parked on it with its deadline and tag: how many are parked |
+| `__sock_ready(lot) -> int`, `__sock_expired(lot, now: int64) -> int`, `__sock_tag(h) -> int64`, `__sock_lot_close(lot) -> int` | std.rt's (the interpreter's own) | The first socket that became ready; one whose deadline is `now` or before, the earliest (`now` negative: whatever its deadline); `h`'s tag; the lot closed (its sockets unwatched, not closed). 0 for none, -1 (EBADF) for a lot that isn't open |
 | `__net_config(which) -> str` | `/etc/hosts` (0); `/etc/resolv.conf`'s text (1) | `""` for none |
 
 On wasm32 each gives ENOSYS (38), `Unsupported`, and `__net_config` `""`.

@@ -698,7 +698,7 @@ class KeepAlive(unittest.TestCase):
                     try:
                         port = int(proc.stdout.readline())
                         get = b"GET / HTTP/1.1\r\nHost: x\r\n\r\n"
-                        # idle after one request: closed by the guard
+                        # idle after one request: closed by the keeper
                         with socket.create_connection(("127.0.0.1", port), timeout=10) as s:
                             s.sendall(get)
                             first = recv_response(s)
@@ -926,8 +926,8 @@ class TimeLimits(unittest.TestCase):
         # the review's case (MYLA-422): 64 silent connections took every
         # worker of a default server for keep_alive_ms (60 s), then for
         # idle_ms (5 s); renewed every 4.5 s, they stopped it for good
-        # (MYLA-468). A connection that has said nothing for a whole look of
-        # its guard gives its worker up once another waits to be accepted.
+        # (MYLA-468). A connection waiting for a request is parked on the
+        # reactor and holds no worker.
         def check(port):
             stop = threading.Event()
             renewed = threading.Event()
@@ -957,8 +957,8 @@ class TimeLimits(unittest.TestCase):
                     out, t = quick_get(port, timeout=15)
                     self.assertTrue(out.startswith(b"HTTP/1.1 200 OK\r\n"), out)
                     took.append(t)
-                # two looks of a guard (a second each) at most, not the
-                # 4.5 s until the next renewal
+                # at once (it was two looks of a guard, about a second, after
+                # the first follow-up), not the 4.5 s until the next renewal
                 self.assertLess(max(took), 3.2, took)
             finally:
                 stop.set()
@@ -966,6 +966,54 @@ class TimeLimits(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             for name, (argv, exe) in self.forms(tmp, ["20000", "d"]).items():
+                with self.subTest(server=name):
+                    self.serve(argv, exe, check)
+
+
+    def test_kept_connections_wait_parked(self):
+        # MYLA-468: a connection waiting for its next request is parked on
+        # the reactor and holds no worker. 200 kept connections and 100
+        # silent new ones beside a 2-worker server: a request on a new
+        # connection is answered at once, every kept one's next request is
+        # served, and `idle_ms` still closes them all. Before, each held a
+        # worker until a guard's look gave it up for a waiting connection,
+        # closing it: the first 200 requests ended in a reset.
+        def check(port):
+            kept = []
+            t0 = time.monotonic()
+            for _ in range(200):
+                s = socket.create_connection(("127.0.0.1", port), timeout=5)
+                s.sendall(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+                r = recv_response(s)
+                self.assertTrue(r.startswith(b"HTTP/1.1 200 OK\r\n") and r.endswith(b"\r\n\r\nok"), r)
+                kept.append(s)
+            first = time.monotonic() - t0
+            silent = [socket.create_connection(("127.0.0.1", port), timeout=5) for _ in range(100)]
+            time.sleep(0.2)
+            out, took = quick_get(port, timeout=5)
+            self.assertTrue(out.startswith(b"HTTP/1.1 200 OK\r\n"), out)
+            # every kept connection's next request, on the connection
+            t1 = time.monotonic()
+            for s in kept:
+                s.sendall(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+            for s in kept:
+                r = recv_response(s)
+                self.assertTrue(r.startswith(b"HTTP/1.1 200 OK\r\n") and r.endswith(b"\r\n\r\nok"), r)
+            again = time.monotonic() - t1
+            self.assertLess(first, 10, "200 first requests")
+            self.assertLess(took, 1, "a request beside 300 connections")
+            self.assertLess(again, 10, "200 kept connections' next requests")
+            # quiet from now on: closed by the server within idle_ms (1.5 s)
+            # and a look of its keeper
+            t2 = time.monotonic()
+            for s in kept + silent:
+                self.assertEqual(end_of(s, 5)[0], b"")
+            self.assertLess(time.monotonic() - t2, 3)
+            for s in kept + silent:
+                s.close()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            for name, (argv, exe) in self.forms(tmp, ["12000", "2", "-", "1500", "5000", "5000"]).items():
                 with self.subTest(server=name):
                     self.serve(argv, exe, check)
 
