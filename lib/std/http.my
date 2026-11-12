@@ -1555,11 +1555,12 @@ fun request_text(r: Request, t: Target, keep: bool) -> Result<(str, str), HttpEr
         return Err(HttpError.BadStartLine)
     }
     var h = headers()
-    let hosts = r.headers.get_all("Host")
-    if hosts.len() > 1 || (hosts.len() == 1 && !is_host(hosts[0])) {
-        return Err(HttpError.BadHeader)
-    }
-    if hosts.len() == 0 {
+    if r.headers.has("Host") {
+        let hosts = r.headers.get_all("Host")
+        if hosts.len() > 1 || !is_host(hosts[0]) {
+            return Err(HttpError.BadHeader)
+        }
+    } else {
         h.add("Host", t.host_header)
     }
     h = joined(h, r.headers)
@@ -1569,24 +1570,32 @@ fun request_text(r: Request, t: Target, keep: bool) -> Result<(str, str), HttpEr
     if !keep && !h.has("Connection") {
         h.add("Connection", "close")
     }
-    let codings = tokens(h.get_all("Transfer-Encoding"))
-    for c in codings {
-        if c != "chunked" {
-            return Err(HttpError.Unsupported(f"transfer coding {c}"))
+    // the fields looked at, and the list rebuilt, only when the request has
+    // a framing of its own
+    var chunk = false
+    if h.has("Transfer-Encoding") {
+        for c in tokens(h.get_all("Transfer-Encoding")) {
+            if c != "chunked" {
+                return Err(HttpError.Unsupported(f"transfer coding {c}"))
+            }
+            chunk = true
+        }
+        if chunk {
+            h.set("Transfer-Encoding", "chunked")
+        } else {
+            // an empty `Transfer-Encoding` names no coding
+            h.remove("Transfer-Encoding")
         }
     }
-    let chunk = codings.len() > 0
-    if chunk {
-        h.set("Transfer-Encoding", "chunked")
-        h.remove("Content-Length")
-    } else {
-        // an empty `Transfer-Encoding` names no coding
-        h.remove("Transfer-Encoding")
-        if r.body.len() > 0 || method_has_body(r.method) {
+    let own_length = h.has("Content-Length")
+    if !chunk && (r.body.len() > 0 || method_has_body(r.method)) {
+        if own_length {
             h.set("Content-Length", f"{r.body.len()}")
         } else {
-            h.remove("Content-Length")
+            h.add("Content-Length", f"{r.body.len()}")
         }
+    } else if own_length {
+        h.remove("Content-Length")
     }
     var sb = StringBuilder()
     sb.append(r.method)
