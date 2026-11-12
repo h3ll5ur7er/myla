@@ -929,6 +929,7 @@ pub fun sock_close(h: int) -> int {
     if s < 0 {
         return sock_result(-EBADF)
     }
+    watches_closed(s)
     return sock_result(os.sock_close(s))
 }
 
@@ -1254,6 +1255,7 @@ pub fun close(fd: int) {
         __set_io_errno(EBADF)
         return
     }
+    watches_closed(d)
     var r = os.close(d)
     if r == os.EINTR {
         r = 0
@@ -3267,9 +3269,18 @@ fun exec_idle() {
         if exec_all_waiting() {
             exec_stuck()
         }
-        var spins: int64 = 4000
+        // descriptors watched: a look at the poller first, and every 512
+        // turns of the spin, without waiting (MYLA-518): a descriptor armed
+        // again may be ready at once (the next frame waiting to accept on a
+        // listener), and a reply that comes while this worker spins is
+        // taken then, not once the spin is over
+        var spins: int64 = 4096
         while spins != 0 && exec_peek() == 0 {
-            __pause()
+            if (spins & 511) == 0 && __rt_get("__watch_count") != 0 {
+                exec_glance()
+            } else {
+                __pause()
+            }
             spins -= 1
         }
         if spins == 0 && (__rt_get("__timer_count") != 0 || __rt_get("__watch_count") != 0) && __xchg64(__rt_addr("__exec_polling"), 1) == 0 {
@@ -3454,8 +3465,9 @@ pub fun task_end(fr: int64) {
 // visits its task's and its descendants' records, not every timer, waiter
 // and watch. `wait` is what the task waits on now, tagged: its frame | 1
 // asleep (and its place among the timers, `timer_placed`), its waiter | 2
-// parked, its frame | 3 watching (a task runs one frame at a time, so it
-// waits on one thing). Everything here is under the timers' lock.
+// parked, its frame's first watch | 3 watching a descriptor (MYLA-518)
+// (a task runs one frame at a time, so it waits on one thing). Everything
+// here is under the timers' lock.
 
 const TASK_REC: int64 = 56
 
@@ -3784,10 +3796,9 @@ fun cancel_wait(r: int64) {
         unpark_locked(p, 4, true)
         exec_push(wf)
     } else if kind == 3 {
-        // every entry of the frame taken (and unwatched), so it is queued
-        // once
-        let gone = watch_take(p)
-        exec_push(p)
+        // every watch of the frame taken (and its descriptors unwatched
+        // when no other frame waits for them), so it is queued once
+        exec_push(frame_unwatch(p))
     }
 }
 
@@ -3942,7 +3953,11 @@ fun exec_poll() {
         }
         give_lock(lock)
         if timeout != 0 {
-            poll_events(os.poller_wait(__rt_get("__exec_poller"), timeout))
+            let woken = poll_events(os.poller_wait(__rt_get("__exec_poller"), timeout))
+            __store_rel64(__rt_addr("__exec_polling"), 0)
+            push_woken(woken)
+            timers_fire()
+            return
         }
     }
     __store_rel64(__rt_addr("__exec_polling"), 0)
@@ -3953,46 +3968,102 @@ fun exec_poll() {
 // frames whose descriptors became readable queued.
 fun exec_glance() {
     if __xchg64(__rt_addr("__exec_polling"), 1) == 0 {
-        poll_events(os.poller_wait(__rt_get("__exec_poller"), 0))
+        let woken = poll_events(os.poller_wait(__rt_get("__exec_poller"), 0))
         __store_rel64(__rt_addr("__exec_polling"), 0)
+        push_woken(woken)
     }
 }
 
-// The `n` events of the last wait (the poll held): each frame whose
-// descriptor became readable queued, unless a cancel took it already.
-fun poll_events(n: int64) {
+// The `n` events of the last wait (the poll held): for each descriptor
+// ready, the first frame waiting to receive (or read) on it queued if it is
+// ready for that, and the first waiting to send if it is ready for that,
+// each with its other watch taken off, unless a cancel took them already;
+// the descriptor armed again for the frames that still wait (MYLA-518).
+// The poller's watch is level-triggered and fires once: armed again while
+// the descriptor is still ready (a second connection to accept, data the
+// woken frame left), it fires again, and the next waiter is woken then. So
+// N tasks accepting on one listener cost O(1) a connection, where every
+// waiter was woken and all but one watched again. The frames woken, which
+// `push_woken` queues once the poll is given back (a push while it is held
+// would write to the poller to wake its holder: this worker);
+// `__exec_waking` counts them until then.
+fun poll_events(n: int64) -> [int64] {
     let lock = __rt_addr("__timer_lock")
     __fetch_add64(__rt_addr("__exec_waking"), 1)
+    var woken: [int64] = []
     var i: int64 = 0
     while i < n {
-        // the descriptor's token (`watch_add`): every frame waiting for it
-        // queued, each with its other entries taken off
         let tok = os.poller_event(i)
         if tok != 0 {
+            let ready = os.poller_event_ready(i)
             take_lock(lock)
-            let frs = watchers_of(tok - 1)
-            for fr in frs {
-                let mine = watch_take(fr)
+            var a: int64 = 0
+            var b: int64 = 0
+            let slot = watch_slot(tok - 1)
+            if slot != 0 {
+                // (fired: the poller watches it no more)
+                __store64(slot + 40, 0)
+                if (ready & 1) != 0 {
+                    a = watch_first(slot, 1)
+                    if a != 0 {
+                        a = frame_unwatch(a)
+                    }
+                }
+                if (ready & 2) != 0 {
+                    b = watch_first(slot, 2)
+                    if b != 0 {
+                        b = frame_unwatch(b)
+                    }
+                }
+                if __load64(slot) != 0 {
+                    let armed = slot_arm(tok - 1, slot)
+                }
             }
             give_lock(lock)
-            for fr in frs {
-                exec_push(fr)
+            if a != 0 {
+                woken.push(a)
+            }
+            if b != 0 {
+                woken.push(b)
             }
         }
         i += 1
+    }
+    return woken
+}
+
+// The frames `poll_events` woke queued, and no longer counted waking.
+fun push_woken(woken: [int64]) {
+    for fr in woken {
+        exec_push(fr)
     }
     __fetch_add64(__rt_addr("__exec_waking"), -1)
 }
 
 // --- descriptors: frames waiting for input (D124) --------------------------------
-// `__watches`: `[count][cap]` and then `[fd][frame][events]` entries, under
-// the timers' lock; `__watch_count` its count. `events` is 0 for a
-// descriptor waited for until it is readable (`os.poller_watch`), else what
-// a socket is waited for (1 to receive, 2 to send; `os.poller_watch_socket`,
-// MYLA-346).
+// `__watches`, under the timers' lock: a table indexed by descriptor,
+// `[cap][0]` and then `cap` slots (MYLA-518), each `[first watch][last
+// watch][receivers][senders][sockets][armed][known]`: the frames waiting
+// for that descriptor in the order they came, how many wait to receive (or
+// read) and to send, how many of them wait for a socket
+// (`os.poller_watch_socket`; the others for a descriptor to read,
+// `os.poller_watch`), what the poller watches the descriptor for now
+// (`events`, 5 for a read through `poller_watch`, 0: nothing), and whether
+// the poller has it (1: watched before and not forgotten, so it is armed
+// again, not added: its watch fires once and stays). A watch is `[fd]
+// [frame][events][next][previous][other]`: `events` 0 for a descriptor
+// waited for until it is readable, else what a socket is waited for (1 to
+// receive, 2 to send; MYLA-346); `other` the frame's other watch when it
+// waits for two descriptors (`wait_fd2`), each the other's. The frame's
+// task's wait (its record's) is its first watch | 3, so a cancel finds it.
+// Adding, taking and finding a frame's watches cost O(1), an event O(1)
+// unless it looks past frames waiting for the other direction.
+// `__watch_count` counts the watches. Descriptors are small numbers on the
+// platforms (a port whose sockets aren't, Windows', would key the slots by
+// handle instead).
 
-// The bytes of an entry of `__watches`.
-const WATCH: int64 = 24
+const WSLOT: int64 = 56
+const WNODE: int64 = 48
 
 // `myla___wait_fd(frame, fd)`: the frame waiting until `fd` is readable (its
 // input there or ended): watched by the poller, which queues it then (its
@@ -4024,16 +4095,16 @@ pub fun wait_writable_frame(fr: int64, fd: int64) {
 // frame waiting until the socket `h` is ready for `events` (1 to receive or
 // accept, 2 to send or a connect's end; an error or a hang-up counts as
 // either), watched by the poller through the platform's socket functions.
-// A wake-up may come early (another frame's event on the same socket): the
-// caller tries its operation again and waits again on EAGAIN. A handle that
-// isn't open (D181) waits no time, and the operation then fails.
+// A wake-up may come early (another task took what was there): the caller
+// tries its operation again and waits again on EAGAIN. A handle that isn't
+// open (D181) waits no time, and the operation then fails.
 pub fun wait_sock(fr: int64, h: int64, events: int64) {
     wait_fds(fr, handle_get(h, H_SOCKET), -1, events & 3)
 }
 
-// The frame waiting for `a`, and `b` too unless it is negative: an entry
-// for each, so the first event takes both (`watch_take`); `events` as an
-// entry's (0: readable descriptors).
+// The frame waiting for `a`, and `b` too unless it is negative: a watch
+// for each, so the first event takes both (`frame_unwatch`); `events` as a
+// watch's (0: readable descriptors).
 fun wait_fds(fr: int64, a: int64, b: int64, events: int64) {
     // (its flags read under the lock, `task_cancel`)
     let lock = __rt_addr("__timer_lock")
@@ -4054,169 +4125,231 @@ fun wait_fds(fr: int64, a: int64, b: int64, events: int64) {
     if __rt_get("__exec_poller") == 0 {
         __store64(__rt_addr("__exec_poller"), os.poller_new())
     }
-    var ready = !watch_add(a, fr, events)
+    let first = watch_add(a, fr, events)
+    var ready = first == 0
     if b >= 0 && !ready {
-        ready = !watch_add(b, fr, events)
+        let second = watch_add(b, fr, events)
+        if second == 0 {
+            ready = true
+        } else {
+            __store64(first + 40, second)
+            __store64(second + 40, first)
+        }
     }
     if ready {
         // one the poller can't watch (a regular file): ready now
-        let gone = watch_take(fr)
+        if first != 0 {
+            let gone = frame_unwatch(first)
+        }
         give_lock(lock)
         exec_push(fr)
         return
     }
     // its task's wait, which a cancel ends
-    waits_on(fr, fr | 3)
+    waits_on(fr, first | 3)
     give_lock(lock)
 }
 
-// An entry `[fd][frame][events]` on `__watches`, the descriptor watched;
-// false when the poller can't watch it (no entry then). The lock held. A
-// descriptor is watched once whatever number of frames wait for it, its
-// token `fd + 1` (a poller keeps one per descriptor: a second frame's would
-// replace the first's, the review of 2026-11-06, R5), and an event queues
-// them all. A socket is armed again for every waiter, with the union of
-// what they all wait for (one receiving, another sending).
-fun watch_add(fd: int64, fr: int64, events: int64) -> bool {
-    var cell = __rt_get("__watches")
-    if cell == 0 || __load64(cell) == __load64(cell + 8) {
-        var cap: int64 = 8
-        var n: int64 = 0
-        if cell != 0 {
-            n = __load64(cell)
-            cap = __load64(cell + 8) * 2
+// The slot of the descriptor `fd` in `__watches`, or 0 when the table
+// doesn't reach it (the lock held).
+fun watch_slot(fd: int64) -> int64 {
+    let t = __rt_get("__watches")
+    if t == 0 || fd < 0 || fd >= __load64(t) {
+        return 0
+    }
+    return t + 16 + fd * WSLOT
+}
+
+// The slot of `fd`, the table grown to reach it (64 slots at first, then
+// doubled until it does); the lock held.
+fun watch_slot_made(fd: int64) -> int64 {
+    let t = __rt_get("__watches")
+    var cap: int64 = 64
+    if t != 0 {
+        cap = __load64(t)
+        if fd < cap {
+            return t + 16 + fd * WSLOT
         }
-        let bigger = __alloc(16 + cap * WATCH)
-        __store64(bigger, n)
-        __store64(bigger + 8, cap)
-        if cell != 0 {
-            __copy_bytes(bigger + 16, cell + 16, n * WATCH)
-            __free(cell)
-        }
-        __store64(__rt_addr("__watches"), bigger)
-        cell = bigger
+    }
+    while cap <= fd {
+        cap *= 2
+    }
+    let bigger = __alloc(16 + cap * WSLOT)
+    zero_words(bigger, 16 + cap * WSLOT)
+    __store64(bigger, cap)
+    if t != 0 {
+        // (the watches hold no slot's address: they move as they are)
+        __copy_bytes(bigger + 16, t + 16, __load64(t) * WSLOT)
+        __free(t)
+    }
+    __store64(__rt_addr("__watches"), bigger)
+    return bigger + 16 + fd * WSLOT
+}
+
+// A watch of the frame `fr` on `fd` for `events`, last among the frames
+// waiting for it, and the descriptor watched for what they all wait for: the
+// watch, or 0 when the poller can't watch the descriptor (no watch then).
+// The lock held. A descriptor is watched once whatever number of frames
+// wait for it, its token `fd + 1` (a poller keeps one per descriptor: a
+// second frame's would replace the first's, the review of 2026-11-06, R5).
+fun watch_add(fd: int64, fr: int64, events: int64) -> int64 {
+    let slot = watch_slot_made(fd)
+    let w = __alloc(WNODE)
+    __store64(w, fd)
+    __store64(w + 8, fr)
+    __store64(w + 16, events)
+    __store64(w + 24, 0)
+    __store64(w + 40, 0)
+    let last = __load64(slot + 8)
+    __store64(w + 32, last)
+    if last != 0 {
+        __store64(last + 24, w)
+    } else {
+        __store64(slot, w)
+    }
+    __store64(slot + 8, w)
+    slot_count(slot, events, 1)
+    if slot_arm(fd, slot) < 0 {
+        watch_unlink(slot, w)
+        __free(w)
+        return 0
+    }
+    __store64(__rt_addr("__watch_count"), __rt_get("__watch_count") + 1)
+    return w
+}
+
+// The counts of the slot `slot` changed by `d` for a watch for `events`.
+fun slot_count(slot: int64, events: int64, d: int64) {
+    if events == 0 || (events & 1) != 0 {
+        __store64(slot + 16, __load64(slot + 16) + d)
+    }
+    if (events & 2) != 0 {
+        __store64(slot + 24, __load64(slot + 24) + d)
     }
     if events != 0 {
-        if os.poller_watch_socket(__rt_get("__exec_poller"), fd, events | watched_events(fd), fd + 1) < 0 {
-            return false
-        }
-    } else if !watched(fd) && os.poller_watch(__rt_get("__exec_poller"), fd, fd + 1) < 0 {
-        return false
+        __store64(slot + 32, __load64(slot + 32) + d)
     }
-    let n = __load64(cell)
-    __store64(cell + 16 + n * WATCH, fd)
-    __store64(cell + 24 + n * WATCH, fr)
-    __store64(cell + 32 + n * WATCH, events)
-    __store64(cell, n + 1)
-    __store64(__rt_addr("__watch_count"), n + 1)
-    return true
 }
 
-// Whether the frame `fr` was waiting for a descriptor: every entry of it
-// taken off and its descriptor no longer watched (the lock held).
-fun watch_take(fr: int64) -> bool {
-    let cell = __rt_get("__watches")
-    if cell == 0 {
-        return false
+// The descriptor `fd` (its slot `slot`, with a watch) watched by the poller
+// for what its frames wait for, unless it is already: negative when the
+// poller can't watch it. The lock held.
+fun slot_arm(fd: int64, slot: int64) -> int64 {
+    var want: int64 = 5
+    if __load64(slot + 32) != 0 {
+        want = 0
+        if __load64(slot + 16) != 0 {
+            want |= 1
+        }
+        if __load64(slot + 24) != 0 {
+            want |= 2
+        }
     }
-    var n = __load64(cell)
-    var found = false
-    var gone: [int64] = []
-    var socks: [int64] = []
-    var i: int64 = 0
-    while i < n {
-        if __load64(cell + 24 + i * WATCH) == fr {
-            gone.push(__load64(cell + 16 + i * WATCH))
-            socks.push(__load64(cell + 32 + i * WATCH))
-            n -= 1
-            __copy_bytes(cell + 16 + i * WATCH, cell + 16 + n * WATCH, WATCH)
-            found = true
+    let armed = __load64(slot + 40)
+    if armed == want {
+        return 0
+    }
+    let again = __load64(slot + 48) != 0
+    var r: int64 = 0
+    if want == 5 {
+        r = os.poller_watch(__rt_get("__exec_poller"), fd, fd + 1, again)
+    } else {
+        r = os.poller_watch_socket(__rt_get("__exec_poller"), fd, want, fd + 1, again)
+    }
+    if r >= 0 {
+        __store64(slot + 40, want)
+        __store64(slot + 48, 1)
+    }
+    return r
+}
+
+// The first watch of `slot` for `ready` (1: to receive or read, 2: to
+// send), or 0 (the lock held).
+fun watch_first(slot: int64, ready: int64) -> int64 {
+    var w = __load64(slot)
+    while w != 0 {
+        let ev = __load64(w + 16)
+        if (ev == 0 && ready == 1) || (ev & ready) != 0 {
+            return w
+        }
+        w = __load64(w + 24)
+    }
+    return 0
+}
+
+// The watch `w` out of the list of `slot` and its counts; the descriptor no
+// longer watched when no frame waits for it. The lock held.
+fun watch_unlink(slot: int64, w: int64) {
+    let next = __load64(w + 24)
+    let prev = __load64(w + 32)
+    if prev != 0 {
+        __store64(prev + 24, next)
+    } else {
+        __store64(slot, next)
+    }
+    if next != 0 {
+        __store64(next + 32, prev)
+    } else {
+        __store64(slot + 8, prev)
+    }
+    slot_count(slot, __load64(w + 16), -1)
+    if __load64(slot) == 0 && __load64(slot + 40) != 0 {
+        let fd = __load64(w)
+        if __load64(slot + 40) == 5 {
+            os.poller_forget(__rt_get("__exec_poller"), fd)
         } else {
-            i += 1
+            os.poller_forget_socket(__rt_get("__exec_poller"), fd)
         }
+        __store64(slot + 40, 0)
+        __store64(slot + 48, 0)
     }
-    __store64(cell, n)
-    __store64(__rt_addr("__watch_count"), n)
-    if found {
-        wait_over(fr, fr | 3)
-    }
-    // a descriptor no other frame waits for no longer watched
-    var k = 0
-    while k < gone.len() {
-        let fd = gone[k]
-        if !watched(fd) {
-            if socks[k] != 0 {
-                os.poller_forget_socket(__rt_get("__exec_poller"), fd)
-            } else {
-                os.poller_forget(__rt_get("__exec_poller"), fd)
-            }
-        }
-        k += 1
-    }
-    return found
 }
 
-// Whether a frame waits for `fd` (the lock held).
-fun watched(fd: int64) -> bool {
-    let cell = __rt_get("__watches")
-    if cell == 0 {
-        return false
+// The frame of the watch `w` no longer waiting: its watches (`w` and its
+// other) taken off and freed, its task's wait over. The frame, to queue
+// (the lock held).
+fun frame_unwatch(w: int64) -> int64 {
+    let fr = __load64(w + 8)
+    let other = __load64(w + 40)
+    wait_over(fr, w | 3)
+    watch_free(w)
+    if other != 0 {
+        wait_over(fr, other | 3)
+        watch_free(other)
     }
-    var i: int64 = 0
-    while i < __load64(cell) {
-        if __load64(cell + 16 + i * WATCH) == fd {
-            return true
-        }
-        i += 1
-    }
-    return false
+    return fr
 }
 
-// What the frames waiting for the socket `h` wait for, together (the lock
-// held).
-fun watched_events(h: int64) -> int64 {
-    let cell = __rt_get("__watches")
-    var ev: int64 = 0
-    if cell == 0 {
-        return ev
+// The descriptor `fd` about to be closed: the frames waiting for it
+// queued (their operation then fails, its handle closed), and its slot
+// cleared, so that the next descriptor given its number starts afresh, not
+// with the poller's watch of this one, which the close ends.
+fun watches_closed(fd: int64) {
+    if __rt_get("__watches") == 0 {
+        return
     }
-    var i: int64 = 0
-    while i < __load64(cell) {
-        if __load64(cell + 16 + i * WATCH) == h {
-            ev |= __load64(cell + 32 + i * WATCH)
+    let lock = __rt_addr("__timer_lock")
+    take_lock(lock)
+    var woken: [int64] = []
+    let slot = watch_slot(fd)
+    if slot != 0 {
+        while __load64(slot) != 0 {
+            woken.push(frame_unwatch(__load64(slot)))
         }
-        i += 1
+        __store64(slot + 40, 0)
+        __store64(slot + 48, 0)
     }
-    return ev
+    give_lock(lock)
+    for fr in woken {
+        exec_push(fr)
+    }
 }
 
-// The frames waiting for `fd` (the lock held).
-fun watchers_of(fd: int64) -> [int64] {
-    var out: [int64] = []
-    let cell = __rt_get("__watches")
-    if cell == 0 {
-        return out
-    }
-    var i: int64 = 0
-    while i < __load64(cell) {
-        let fr = __load64(cell + 24 + i * WATCH)
-        if __load64(cell + 16 + i * WATCH) == fd && !has_word(out, fr) {
-            out.push(fr)
-        }
-        i += 1
-    }
-    return out
-}
-
-#test([3i64, 5i64], 5i64)[true]
-#test([], 1i64)[false]
-fun has_word(xs: [int64], x: int64) -> bool {
-    for y in xs {
-        if y == x {
-            return true
-        }
-    }
-    return false
+// The watch `w` off its slot, and freed (the lock held).
+fun watch_free(w: int64) {
+    watch_unlink(watch_slot(__load64(w)), w)
+    __free(w)
+    __store64(__rt_addr("__watch_count"), __rt_get("__watch_count") - 1)
 }
 
 // Every task waits for another one: the program ends. Each idle worker can

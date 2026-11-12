@@ -27,6 +27,9 @@ SUITES = [
     "tests.burn.test_http",
     # a deadline's end and a cancel beside many timers (MYLA-456)
     "tests.burn.test_timer_scaling",
+    # a wait for a descriptor beside many others, one frame woken per
+    # readiness (MYLA-518)
+    "tests.burn.test_reactor_scaling",
     "tests.burn.test_unit_type",
     "tests.burn.test_defer",
     "tests.burn.test_format_specs",
@@ -86,6 +89,8 @@ SKIP: dict[str, dict[str, str]] = {
         # `Unsupported`; the addresses, the hosts file and the warnings run
         **{f"test_net.{c}": "WASI has no sockets (NetOnWasm checks they are Unsupported)"
            for c in ["Tcp", "Udp", "Dns", "Errors", "Primitives"]},
+        **{f"test_reactor_scaling.{c}": "WASI has no sockets (its Readers run)"
+           for c in ["RoundTrips", "Accepts", "Closed"]},
         # MYLA-350: WASI preview 1 has no terminal modes and no signals, which
         # TermOnWasm checks are `Unsupported` (nothing a terminal, no size)
         **{f"test_term.{c}": "WASI has no terminals or signals (TermOnWasm checks they are Unsupported)"
