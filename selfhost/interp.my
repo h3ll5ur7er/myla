@@ -12,7 +12,7 @@ from .tokens import SrcSpan, no_span
 from .checker import is_notify_primitive
 from .checker import Checker, Type, Subst, subst_type, subst_get, unify_param, type_name, is_raw_memory_primitive, is_net_primitive, is_term_primitive, checker_on, builtin_method, builtin_method_name, is_wrapping_method, add_overflows, sub_overflows, mul_overflows, int_min, int_neg_overflows, shift_out_of_range, is_slice_expr, from_end_of, slice_parts, is_hole_part
 from .anf import Norm, new_norm, stmt_suspends, body_suspends
-from .util import cp_utf8, format_specs
+from .util import cp_utf8, format_specs, written_type_name
 from std.fmt import fmt_int, fmt_float, fmt_text
 from std.slice import range_of, str_whole, take_str
 from std.num import f64_literal_bits, f32_round_bits, float_from_bits, pow2, format_float
@@ -1064,8 +1064,9 @@ impl Interp {
         let msg = index_error(c, k, assigning, self.place_in(c, k, kt))
         if msg.len() > 0 {
             // a missing key written by its type, a uint64's unsigned, as
-            // native code writes it (D183, MYLA-440)
-            if is_vmap(c) { self.fail(e, missing_key(typed_repr(self.checker, k, self.index_key_type(e)))) } else { self.fail(e, msg) }
+            // native code writes it (D183, MYLA-440), a type of another
+            // module's by the name messages give it (MYLA-514)
+            if is_vmap(c) { self.fail(e, missing_key(typed_repr(self.checker, as_written(k), self.index_key_type(e)))) } else { self.fail(e, msg) }
             return false
         }
         return true
@@ -5715,6 +5716,29 @@ fun index_error(c: Value, k: Value, assigning: bool, place: int32) -> str {
         _ => {},
     }
     return ""
+}
+
+// `v` with the name of each struct and enum in it as messages write it
+// (`lib.Q` for the loader's `lib$Q`, `written_type_name`), for a missing
+// key's text (MYLA-514): `py_repr` writes a value's names as they are, and
+// taking the module ids off the text would also cut a string's `$`.
+#test(Value.VStruct("lib$Q", ["s"], [Value.VStr("a$b")]))[Value.VStruct("lib.Q", ["s"], [Value.VStr("a$b")])]
+#test(Value.VTuple([Value.VEnum("lib$E", "A", [Value.VList([Value.VStruct("P", [], [])])])]))[Value.VTuple([Value.VEnum("lib.E", "A", [Value.VList([Value.VStruct("P", [], [])])])])]
+fun as_written(v: Value) -> Value {
+    return match v {
+        Value.VStruct(n, names, vals) => Value.VStruct(written_type_name(n), names, all_as_written(vals)),
+        Value.VEnum(en, vr, pl) => Value.VEnum(written_type_name(en), vr, all_as_written(pl)),
+        Value.VTuple(es) => Value.VTuple(all_as_written(es)),
+        Value.VList(xs) => Value.VList(all_as_written(xs)),
+        _ => v,
+    }
+}
+
+// `as_written` of each of `vs`.
+fun all_as_written(vs: [Value]) -> [Value] {
+    var out: [Value] = []
+    for x in vs { out.push(as_written(x)) }
+    return out
 }
 
 // The message of a missing map key whose text is `key`.

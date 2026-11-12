@@ -32,7 +32,7 @@ from .ast import Expr, ExprKind, Stmt, StmtKind, Block, FunData, ElseTail, ExprO
 from .checker import CheckErr, REG_ARG_WORDS, type_name, Type, is_unit, is_slice_expr, from_end_of, slice_parts, is_hole_part, is_raw_memory_primitive, is_platform_primitive, Subst, FuncSig, opt_subst_type, subst_type, builtin_method, is_wrapping_method, int_op_overflows, int_min
 from .checker import is_notify_primitive
 from .codegen import codegen_on, type_job_name, recv_by_address, may_write_expr, is_mutating_builtin, list_has_str, contains_int, is_actor_t, is_sb_t, is_async_t, CodeGen, LamJob, PartialJob, Cap, DropEntry, tfunc_params, tfunc_ret, is_hole_expr, mangle_fn, is_builtin_call_name, is_aggregate, tuple_elems, is_struct_or_enum_t, is_tfunc, is_overloadable_op, arith_method_cg, enum_name_of, is_tstr, is_cmp, place_root, is_aggregate_opt, arms_may_write, is_cell_t, list_elem, is_list_t, is_map_t, is_str_t, map_key, map_val, format_segments, args_have_hole, success_variant, failure_variant
-from .util import format_specs
+from .util import format_specs, written_type_name
 from .tokens import Note, no_span
 from .ir_x86 import slots_at, frame_size
 from .ir import IrFunc, IrBlock, Inst, Term, Slot, Pos, Instance, ENV_WORD, Intrinsic, primitive_intrinsic
@@ -6329,7 +6329,8 @@ pub fun map_keys_ir(cg: CodeGen, kt: Type, name: str) -> Routine {
 // `__krepr_<T>(p) -> str`, a map key of the struct, enum, tuple or list type
 // `t` as the interpreter's `py_repr` writes it (D183, MYLA-441), for `map key
 // … not found`: the value at `p` (a list's cell), each member by its own text
-// (`repr_member`), so a member of a compound type by its own routine. Called
+// (`repr_member`), so a member of a compound type by its own routine; a type
+// of another module by the name messages give it (`lib.Q`, MYLA-514). Called
 // on the error's way only.
 pub fun key_repr_ir(cg: CodeGen, t: Type, name: str) -> Routine {
     let i64 = Type.TInt(64, true)
@@ -6342,7 +6343,7 @@ pub fun key_repr_ir(cg: CodeGen, t: Type, name: str) -> Routine {
         Type.TStruct(n, args) => {
             let info = cg.struct_info(n)
             let sub = cg.type_subst(info.type_params, args)
-            var acc = lw.text(n + " { ")
+            var acc = lw.text(written_type_name(n) + " { ")
             var off = 0
             var i = 0
             for fl in info.fields {
@@ -6370,9 +6371,9 @@ pub fun key_repr_ir(cg: CodeGen, t: Type, name: str) -> Routine {
                 lw.start(here)
                 let payload = cg.variant_payload(t, v.name)
                 if payload.len() == 0 {
-                    lw.finish(Term.Ret(lw.text(n + "." + v.name)))
+                    lw.finish(Term.Ret(lw.text(written_type_name(n) + "." + v.name)))
                 } else {
-                    var acc = lw.text(n + "." + v.name + "(")
+                    var acc = lw.text(written_type_name(n) + "." + v.name + "(")
                     var i = 0
                     while i < payload.len() {
                         if i > 0 { acc = lw.concat_now(cg, acc, ", ") }

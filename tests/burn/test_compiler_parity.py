@@ -10077,6 +10077,45 @@ class TestCompilerParity(unittest.TestCase):
                                             "runtime error: invalid char"))
                 self.assertEqual(build_and_run_full(Program(path), entry_path=path), (out, "\n".join(lines[:2]) + "\n", 1))
 
+    def test_runtime_errors_name_imported_key_types_as_written(self):
+        # MYLA-514: a missing key of a type declared in another module named
+        # it with the loader's module id (`map key lib$Q { a: 1 } not
+        # found`) on both runners; the name is the module's last segment
+        # and the type's, as messages write it (MYLA-383), and a string's
+        # `$` stays. The interpreter's text is the binary's (D183)
+        lib = ("#derive(Eq, Hash)\npub struct Q { a: int, s: str }\n"
+               "#derive(Eq, Hash)\npub enum Shape { Dot, Pair(Q, [int]) }\n")
+        cases = {
+            "struct_key": ("let m = [Q { a: 0, s: \"\" }: 1]\n    print(m[Q { a: 1, s: \"it's\" }])",
+                           "map key lib.Q { a: 1, s: \"it's\" } not found"),
+            "unit_variant_key": ("let m = [Shape.Pair(Q { a: 0, s: \"\" }, []): 1]\n    print(m[Shape.Dot])",
+                                 "map key lib.Shape.Dot not found"),
+            "variant_key": ("let m = [Shape.Dot: 1]\n    print(m[Shape.Pair(Q { a: 1, s: \"x$y\" }, [1, 2])])",
+                            "map key lib.Shape.Pair(lib.Q { a: 1, s: 'x$y' }, [1, 2]) not found"),
+            "nested_key": ("let m = [Holder { q: Q { a: 0, s: \"\" }, t: (Shape.Dot, 1) }: 1]\n"
+                           "    print(m[Holder { q: Q { a: 2, s: \"a$b\" }, t: (Shape.Dot, 3) }])",
+                           "map key Holder { q: lib.Q { a: 2, s: 'a$b' }, t: (lib.Shape.Dot, 3) } not found"),
+            "list_of_imported_key": ("let m = [[Q { a: 0, s: \"\" }]: 1]\n    print(m[[Q { a: 5, s: \"$\" }]])",
+                                     "map key [lib.Q { a: 5, s: '$' }] not found"),
+            "option_of_imported_key": ("let m = [Some(Shape.Dot): 1]\n    let k: Option<Shape> = Some(Shape.Pair(Q { a: 3, s: \"\" }, []))\n"
+                                       "    print(m[k])",
+                                       "map key Option.Some(lib.Shape.Pair(lib.Q { a: 3, s: '' }, [])) not found"),
+            "string_key_with_a_dollar": ("let m = [\"a\": 1]\n    print(m[\"lib$Q\"])", "map key 'lib$Q' not found"),
+        }
+        main = ("from .lib import Q, Shape\n"
+                "#derive(Eq, Hash)\nstruct Holder { q: Q, t: (Shape, int) }\n"
+                "fun main() {\n    {body}\n}\n")
+        for name, (body, message) in cases.items():
+            with self.subTest(case=name), tempfile.TemporaryDirectory() as tmp:
+                write_program(tmp, lib, "lib.my")
+                path = write_program(tmp, main.replace("{body}", body))
+                out, err, code = selfhost_run(path)
+                self.assertEqual(code, 1, err)
+                lines = err.splitlines()
+                self.assertEqual(lines[0], "runtime error: " + message)
+                self.assertTrue(lines[1].startswith("  --> "), err)
+                self.assertEqual(build_and_run_full(Program(path), entry_path=path), (out, "\n".join(lines[:2]) + "\n", 1))
+
     def test_become_runs_a_million_deep(self):
         # MYLA-128, MYLA-131: every `become` of the parity programs jumps, so
         # they run a million calls deep in the default stack
