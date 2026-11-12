@@ -2858,11 +2858,12 @@ fun reading(o: ServerOptions) -> Reading {
 
 // A request begun whose next bytes haven't come, kept while its connection
 // waits parked (MYLA-549): the reading, the bytes read and not taken yet,
-// and the connection's time's end.
+// the connection's time's end and its client's address.
 struct Begun {
     r: Reading,
     rest: str,
     life_end: int64,
+    peer: Option<SocketAddr>,
 }
 
 // The requests begun of a server's parked connections, by the connection's
@@ -3017,11 +3018,13 @@ async fun serve_ready(h: int, l: TcpListener, o: ServerOptions, handler: async (
     var link = Link { w: wire(stream_of(h)) }
     // a request begun, taken up where it waited (MYLA-549)
     var begun: Option<Reading> = None
+    var peer: Option<SocketAddr> = None
     if life_end == BEGUN {
         match await lot.pending.take(h) {
             Some(b) => {
                 life_end = b.life_end
                 link.w.buf = b.rest
+                peer = b.peer
                 begun = Some(b.r)
             }
             None => {
@@ -3035,9 +3038,11 @@ async fun serve_ready(h: int, l: TcpListener, o: ServerOptions, handler: async (
         let margin = if o.keep_alive_ms / 10 > 1000 { 1000 } else { o.keep_alive_ms / 10 }
         close_at = life_end - margin as int64
     }
-    let peer = match link.w.stream.peer_addr() {
-        Ok(a) => Some(a)
-        Err(_) => None
+    if begun.is_none() {
+        peer = match link.w.stream.peer_addr() {
+            Ok(a) => Some(a)
+            Err(_) => None
+        }
     }
     while true {
         var resumed = false
@@ -3083,7 +3088,7 @@ async fun serve_ready(h: int, l: TcpListener, o: ServerOptions, handler: async (
                 if !q.p.done() {
                     // the rest of it not there yet: parked with what came
                     let rest = part(link.w.buf, link.w.pos, link.w.buf.len())
-                    if await park_begun(lot, h, Begun { r: q, rest: rest, life_end: life_end }, o) {
+                    if await park_begun(lot, h, Begun { r: q, rest: rest, life_end: life_end, peer: peer }, o) {
                         await evict(lot, l)
                     }
                     return (true, answered)

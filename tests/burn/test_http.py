@@ -545,6 +545,9 @@ def python_clients(test: unittest.TestCase, port: int) -> None:
         (b"POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: gzip\r\n\r\n", b"501 Not Implemented"),
         (b"GET / HTTP/2.0\r\n\r\n", b"505 HTTP Version Not Supported"),
         (b"POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 1x\r\n\r\n", b"400 Bad Request"),
+        # a length beside chunked must still be one (MYLA-549)
+        (b"POST / HTTP/1.1\r\nHost: x\r\nContent-Length: zz\r\nTransfer-Encoding: chunked\r\n\r\n1\r\nx\r\n0\r\n\r\n",
+         b"400 Bad Request"),
         # H7 (MYLA-422): a chunk size that would take body_len + size past
         # int32 is 413, on every runner (it killed a checked server, and a
         # plain one waited for 2 GiB past its limit)
