@@ -815,6 +815,26 @@ def quick_get(port: int, timeout: float = 3) -> tuple[bytes, float]:
         return recv_all(s), time.monotonic() - t0
 
 
+def sockets_of(pid: int) -> int:
+    """How many sockets the process `pid` has open (Linux's /proc)."""
+    n = 0
+    for fd in os.listdir(f"/proc/{pid}/fd"):
+        try:
+            n += os.readlink(f"/proc/{pid}/fd/{fd}").startswith("socket:")
+        except OSError:   # closed meanwhile
+            pass
+    return n
+
+
+def wait_for_sockets(pid: int, n: int, limit: float) -> int:
+    """Waits, at most `limit` seconds, until the process `pid` has at most
+    `n` sockets open; how many it has."""
+    deadline = time.monotonic() + limit
+    while (have := sockets_of(pid)) > n and time.monotonic() < deadline:
+        time.sleep(0.02)
+    return have
+
+
 def end_of(s: socket.socket, limit: float) -> tuple[bytes, float]:
     """What `s` receives until it ends (the end of the stream or a reset),
     and when, at most `limit` seconds from now."""
@@ -852,6 +872,7 @@ class TimeLimits(unittest.TestCase):
 
     def serve(self, argv, exe, check):
         proc = subprocess.Popen(argv, executable=exe, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.server_pid = proc.pid
         try:
             port = int(proc.stdout.readline())
             check(port)
@@ -884,6 +905,11 @@ class TimeLimits(unittest.TestCase):
             time.sleep(0.2)
             out, took = quick_get(port, timeout=8)
             self.assertTrue(out.startswith(b"HTTP/1.1 200 OK\r\n"), out)
+            # read them once the server has closed both (it keeps its
+            # listener only): reading is progress, and a holder read before
+            # its write_ms passed gets the whole response (MYLA-555: once in
+            # 9 runs under load, the second holder's handler started late)
+            self.assertEqual(wait_for_sockets(self.server_pid, 1, 10), 1)
             for s in hold:
                 got, _ = end_of(s, 5)
                 self.assertLess(len(got), 8 << 20, "closed before the whole response")

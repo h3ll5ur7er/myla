@@ -17,7 +17,9 @@ first (`captures`); the answers must be the same.
   RE2's Pike VM), so it checks the whole syntax, but for a literal `A`:
   go1.24's parser merges a case-sensitive `A` with a case-folded `a` that
   starts another alternative, and finds `A|(?i:a)c` in `acA` at 2-3, where
-  Python and `std.regex` find 0-2. The test skips without `go`.
+  Python and `std.regex` find 0-2. The test skips without `go`, but not
+  in CI, which installs Go and sets MYLA_REQUIRE_TARGETS: there
+  `GoOracle.test_go_is_there` fails without it (MYLA-555).
 - Python's `re` backtracks: it agrees only where no repetition can repeat
   an empty match, so its patterns repeat only what can't be empty, and `$`
   and `\\z` are written in its spelling. Backtracking takes exponential
@@ -318,6 +320,15 @@ def python_answer(pattern: str, text: bytes) -> str:
             out.append("x," if a < 0 else f"{a}-{b},")
     out.append(f" G{rx.groups}")
     return "".join(out)
+
+
+@unittest.skipUnless(os.environ.get("MYLA_REQUIRE_TARGETS"), "MYLA_REQUIRE_TARGETS is not set")
+class GoOracle(unittest.TestCase):
+    """CI sets MYLA_REQUIRE_TARGETS, so the Go half below fails there
+    without `go` instead of skipping unnoticed (MYLA-555)."""
+
+    def test_go_is_there(self):
+        self.assertIsNotNone(shutil.which("go"), "the Go oracle needs go (CI's burn job installs it)")
 
 
 class RegexDifferentialTest(unittest.TestCase):

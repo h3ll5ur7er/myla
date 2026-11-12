@@ -27,7 +27,8 @@ case "$mode" in
         slow=(test_compiler_parity test_concurrency_stress test_json test_lsp test_vscode_debugger
               test_native_runtime test_grammar test_fs test_stdin test_declaration_recovery test_toml
               test_aarch64 test_wasm test_compress test_yaml test_archive test_xml test_http test_regex
-              test_std_cache)
+              test_std_cache test_generated_deep_copies test_generated_writes test_generated_widths
+              test_generated_extremes test_formats_checked)
         modules=()
         for f in tests/burn/test_*.py; do
             name="$(basename "$f" .py)"
