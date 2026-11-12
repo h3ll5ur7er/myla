@@ -2136,6 +2136,64 @@ fun main() {
     print(f"{bump_first([A { n: 20 }])} {w.of_a_call()} {w.of_a_method()} {w.of_an_element()}")
 }
 """,
+    "generic_var_self_past_a_written_key": """// MYLA-414 (B6): a `var self` method of generic code called on a map's
+// element whose key has a written `eq` or `hash`: finding the key runs it,
+// and the method's frame still binds its type parameters
+trait Twice {
+    fun twice(self) -> Self
+}
+
+impl Twice for uint64 {
+    fun twice(self) -> uint64 { return self * 2 }
+}
+
+#derive(Eq)
+struct K {
+    v: int,
+}
+
+impl Hash for K {
+    fun hash(self, h: Hasher) -> Hasher { return h.add(self.v) }
+}
+
+#derive(Hash)
+struct E {
+    v: int,
+}
+
+impl Eq for E {
+    fun eq(self, other: E) -> bool { return self.v == other.v }
+}
+
+struct Cell<T> {
+    v: T,
+}
+
+impl<T: Twice + Ord> Cell<T> {
+    fun grow(var self) { self.v = self.v.twice() }
+    fun below(var self, w: T) -> bool { return self.v < w }
+}
+
+fun main() {
+    // a written `hash`
+    var m = [K { v: 1 }: Cell { v: 3u64 }]
+    m[K { v: 1 }].grow()
+    print(m[K { v: 1 }].v)
+    print(m[K { v: 1 }].below(18446744073709551615u64))
+    // a written `eq`: std.list's `sort` on a [uint64]
+    var n = [E { v: 1 }: [5u64, 18446744073709551615u64, 1u64]]
+    n[E { v: 1 }].sort()
+    for x in n[E { v: 1 }] { print(x) }
+    // two keys deep
+    var d = [K { v: 2 }: [E { v: 3 }: [9223372036854775808u64, 7u64]]]
+    d[K { v: 2 }][E { v: 3 }].sort()
+    for x in d[K { v: 2 }][E { v: 3 }] { print(x) }
+    // a plain key, for comparison
+    var p = ["a": Cell { v: 9223372036854775807u64 }]
+    p["a"].grow()
+    print(p["a"].v)
+}
+""",
     "generic_eq_and_hash_the_interpreter_calls": """// A written `eq` or `hash` of a generic impl, which the interpreter calls
 // itself (an element's `==`, a map's key), binds its type parameters
 // (MYLA-436): `<` on a uint64 compares unsigned, a uint64 formats unsigned
@@ -10545,6 +10603,8 @@ PINNED = {
     "generic_code_per_width": 'int8: 126 -127 63 1 2 true false -128 127 127 S127 true\nint16: 32766 -32767 16383 1 2 true false -32768 32767 32767 S32767 true\nint32: 2147483646 -2147483647 1073741823 1 2 true false -2147483648 2147483647 2147483647 S2147483647 true\nint64: 9223372036854775806 -9223372036854775807 4611686018427387903 1 2 true false -9223372036854775808 9223372036854775807 9223372036854775807 S9223372036854775807 true\nuint8: 254 1 127 1 2 true false 0 255 255 S255 true\nuint16: 65534 1 32767 1 2 true false 0 65535 65535 S65535 true\nuint32: 4294967294 1 2147483647 1 2 true false 0 4294967295 4294967295 S4294967295 true\nuint64: 18446744073709551614 1 9223372036854775807 1 2 true false 0 18446744073709551615 18446744073709551615 S18446744073709551615 true\n18446744073709551614\n18446744073709551614\n255\ntrue\ntrue\n0.010000000707805157\n0.6000000238418579\n0.6000000238418579\n0.33333334\n0.3333333333333333\n<18446744073709551615>\ntrue\n<-128>\n',
     # MYLA-414 (H6, M4): new; the interpreter lost the mutations and printed 'ERR: VUnit'
     "receivers_of_type_parameter_type": '4 11 31\n22 31 31 4\n',
+    # MYLA-414 (B6): new; the interpreter sorted signed and lost 'twice' (an internal error)
+    "generic_var_self_past_a_written_key": '6\ntrue\n1\n5\n18446744073709551615\n7\n9223372036854775808\n18446744073709551614\n',
     # MYLA-436: new; the interpreter called an element's or a key's written
     # generic `eq` or `hash` without binding its type parameters
     "generic_eq_and_hash_the_interpreter_calls": 'false\nfalse\nfalse\nfalse\nfalse\nfalse\nfalse\nfalse\nfalse\nfalse\nhash 18446744073709551615\nhash 18446744073709551615\ntrue\nhash 18446744073709551615\nhash 18446744073709551615\ntrue\nfalse\nfalse\nfalse\n2\n5\n1\n1\nfalse\ntrue\ntrue\n',

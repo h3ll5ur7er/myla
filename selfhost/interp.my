@@ -332,7 +332,8 @@ pub struct Interp {
     env_memo: [int64: EnvMemo],
     // (`type_env_memo`: the index a call by no call site gives, by the
     // function and the closed type it binds by: a written `eq`, `hash` or
-    // `format` the interpreter calls itself, MYLA-436)
+    // `format` the interpreter calls itself, MYLA-436; and, by `#`, the
+    // function and what it binds, so equal environments are one)
     type_env_memo: [str: int32],
     env_next: int32,
     env_fi: int32,
@@ -3730,19 +3731,22 @@ impl Interp {
             }
             let argv = self.eval_args(args)
             if self.stop() { return Value.VUnit }
-            self.bind_next(fi, e.id, self.resolved_of(recv.id))
             if var_self && place.root != "" {
                 // (its keys found once: again only if they moved, MYLA-506)
                 place = self.settle(place, false)
                 let ok = !self.stop()
                 self.receivers.push(if ok { self.value_at(place) } else { Value.VUnit })
                 if ok { self.update_place(place, PlaceOp.OSet(Value.VUnit)) }
+                // bound after `settle`: a key's written `hash` or `eq` it
+                // runs would take the binding (the 2026-11-12 review's B6)
+                self.bind_next(fi, e.id, self.resolved_of(recv.id))
                 let (r, final_self) = self.call_with_receiver(fi, argv)
                 self.write_place(place, final_self)
                 // an async body deferred: its `self` goes back here when it ends
                 match self.deferred { Some(d) => { self.deferred_place = Some(place) }, None => {} }
                 return r
             }
+            self.bind_next(fi, e.id, self.resolved_of(recv.id))
             let (r, fs) = self.call_method(fi, rv, argv)
             return r
         }
@@ -3930,8 +3934,22 @@ impl Interp {
         }
         var k = -1
         if sub.len() > 0 {
-            k = self.envs.len()
-            self.envs.push(TEnv { fi: fi, sub: sub })
+            // one environment per content: a call site's memo is keyed by
+            // the caller's environment, so a recursion through two call
+            // sites would make one per call path (the 2026-11-12 review's
+            // C3: generic `fib(27)` held 163 MB)
+            var sb = StringBuilder()
+            sb.append(f"#{fi}")
+            for s in sub { sb.append(f" {s.name}={type_name(s.ty)}") }
+            let ck = sb.build()
+            match self.type_env_memo.get(ck) {
+                Some(j) => { k = j },
+                None => {
+                    k = self.envs.len()
+                    self.envs.push(TEnv { fi: fi, sub: sub })
+                    self.type_env_memo[ck] = k
+                },
+            }
         }
         if id >= 0 { self.env_memo[key] = EnvMemo { fi: fi, env: k } }
         if tkey != "" { self.type_env_memo[tkey] = k }
@@ -4602,6 +4620,8 @@ impl Interp {
             Value.VStruct(n, fns, fvs) => { if self.func_idx(format("{}.format", value_key(v))) < 0 { return without_module_ids(typed_repr(self.checker, v, t)) } },
             Value.VEnum(en, vr, pl) => { if self.func_idx(format("{}.format", value_key(v))) < 0 { return without_module_ids(typed_repr(self.checker, v, t)) } },
             Value.VList(xs) => { return without_module_ids(typed_repr(self.checker, v, t)) },
+            // (packed bytes too: `ERR: VBytes()`, the 2026-11-12 review's C18)
+            Value.VBytes(bs) => { return py_repr(v) },
             Value.VTuple(es) => { return without_module_ids(typed_repr(self.checker, v, t)) },
             Value.VMap(m) => { return without_module_ids(typed_repr(self.checker, v, t)) },
             _ => {},

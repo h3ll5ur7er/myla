@@ -116,8 +116,16 @@ SUMS = {
     "iter_sum": ("import std.iter as iter\n\nfun main() {\n    let xs = [2000000000, 2000000000]\n"
                  "    print(xs.iter() |> iter.sum(0))\n}\n"),
     "fold": "fun main() {\n    let xs: [uint8] = [200, 100]\n    print(xs.fold(0u8, (a, b) => a + b))\n}\n",
+    # MYLA-414 (B6): a `var self` call on a map's element whose key's
+    # written `hash` runs first printed 200 interpreted
+    "var_self_past_a_written_key": ("#derive(Eq)\nstruct K {\n    v: int,\n}\n\n"
+                                    "impl Hash for K {\n    fun hash(self, h: Hasher) -> Hasher { return h.add(self.v) }\n}\n\n"
+                                    "struct Cell<T> {\n    v: T,\n}\n\n"
+                                    "impl<T: Add> Cell<T> {\n    fun bump(var self, w: T) { self.v = self.v + w }\n}\n\n"
+                                    "fun main() {\n    var m = [K { v: 1 }: Cell { v: 100i8 }]\n"
+                                    "    m[K { v: 1 }].bump(100i8)\n    print(m[K { v: 1 }].v)\n}\n"),
 }
-SUMS_WRAPPED = {"list_sum": "-294967296", "iter_sum": "-294967296", "fold": "44"}
+SUMS_WRAPPED = {"list_sum": "-294967296", "iter_sum": "-294967296", "fold": "44", "var_self_past_a_written_key": "-56"}
 
 
 def build_and_run(path: str, checked: bool) -> tuple[str, str, int]:

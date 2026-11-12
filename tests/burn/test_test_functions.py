@@ -373,14 +373,18 @@ class TestTestFunctions(unittest.TestCase):
                "#test\nfun list() -> Result<(), [int]> { return Err([1, 2]) }\n\n"
                "#test\nfun tuple() -> Result<(), (int, str)> { return Err((1, \"a\")) }\n\n"
                "#test\nfun nested() -> Result<(), [(str, [uint64])]> { return Err([(\"k\", [18446744073709551615u64])]) }\n\n"
-               "#test\nfun table() -> Result<(), [str: int]> { return Err([\"x\": 1]) }\n")
+               "#test\nfun table() -> Result<(), [str: int]> { return Err([\"x\": 1]) }\n\n"
+               # the 2026-11-12 review's C18: packed bytes printed `ERR: VBytes()`
+               "#test\nfun packed() -> Result<(), [uint8]> { return Err(\"ab\".bytes()) }\n\n"
+               "#test\nfun sliced() -> Result<(), [uint8]> { return Err(\"abc\".bytes()[1:]) }\n")
         with tempfile.TemporaryDirectory() as tmp:
             path = _write(tmp, "errs.my", src)
             proc = _myla(["test", path], tmp)
             self.assertEqual(proc.returncode, 1, proc.stderr)
             self.assertEqual(proc.stdout, "FAIL  big: 18446744073709551615\nFAIL  list: [1, 2]\n"
                                           "FAIL  tuple: (1, 'a')\nFAIL  nested: [('k', [18446744073709551615])]\n"
-                                          "FAIL  table: ['x': 1]\n\n0/5 passed.\n")
+                                          "FAIL  table: ['x': 1]\nFAIL  packed: [97, 98]\nFAIL  sliced: [98, 99]\n\n"
+                                          "0/7 passed.\n")
 
     def test_temp_dir_needs_a_running_case(self):
         with tempfile.TemporaryDirectory() as tmp:
