@@ -810,6 +810,10 @@ pub fun term_make_raw(fd: int64) -> int64 {
     return ENOSYS
 }
 
+pub fun term_make_cbreak(fd: int64) -> int64 {
+    return ENOSYS
+}
+
 pub fun term_enable_vt(fd: int64) -> int64 {
     return ENOSYS
 }

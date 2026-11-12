@@ -1023,6 +1023,23 @@ pub fun term_set(fd: int, mode: str) -> int {
 // the mode back first and then ends it as the signal would have
 // (`os.raw_signals`, D192; MYLA-548: such a death left the terminal raw).
 pub fun term_raw(fd: int) -> int {
+    return term_keys(fd, true)
+}
+
+// `__term_cbreak(fd)`: the terminal a key at a time, as raw mode has it,
+// but echoed, with its signal keys and its line ends as they were: 0, or
+// -1 (MYLA-548: what `myla repl` keeps while an input runs, so the next
+// line typed meanwhile isn't cut at the 4,095 bytes a line of the
+// terminal's own editing holds). The exit hook and the signals' handlers
+// as for raw mode.
+pub fun term_cbreak(fd: int) -> int {
+    return term_keys(fd, false)
+}
+
+// The terminal `fd` in raw mode (`raw`) or a key at a time, the mode before
+// kept for the exit hook unless it keeps one already, and the signals'
+// handlers set with the hook.
+fun term_keys(fd: int, raw: bool) -> int {
     if fd < 0 {
         return sock_result(-EBADF)
     }
@@ -1039,7 +1056,12 @@ pub fun term_raw(fd: int) -> int {
             kept = true
         }
     }
-    let r = os.term_make_raw(fd as int64)
+    var r: int64 = 0
+    if raw {
+        r = os.term_make_raw(fd as int64)
+    } else {
+        r = os.term_make_cbreak(fd as int64)
+    }
     if kept && r >= 0 {
         __store64(h, (fd as int64) + 1)
         os.raw_signals(true)

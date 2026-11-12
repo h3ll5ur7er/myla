@@ -991,10 +991,11 @@ pub fun is_platform_primitive(name: str) -> bool {
 #test("__term_raw")[true]
 #test("__signal_take")[true]
 #test("__term_vt")[true]
+#test("__term_cbreak")[true]
 #test("__terminal")[false]
 pub fun is_term_primitive(name: str) -> bool {
     if name.len() < 9 || name[0] != '_' || name[1] != '_' { return false }
-    return name == "__term_is_tty" || name == "__term_size" || name == "__term_get" || name == "__term_set" || name == "__term_raw" || name == "__term_vt" || name == "__signal_listen" || name == "__signal_take"
+    return name == "__term_is_tty" || name == "__term_size" || name == "__term_get" || name == "__term_set" || name == "__term_raw" || name == "__term_cbreak" || name == "__term_vt" || name == "__signal_listen" || name == "__signal_take"
 }
 
 // A terminal or signal primitive's parameters, as its messages show them
