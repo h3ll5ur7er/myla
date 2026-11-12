@@ -6821,9 +6821,13 @@ pub fun map_drop_slow_ir(cg: CodeGen, mt: Type, name: str, free: str, kind: int3
 
 // The std.rt function that words the runtime error `__trap_<kind>` (D183).
 #test("lindex")["std$rt$list_index_text"]
+#test("suindex")["std$rt$str_uindex_text"]
 pub fun trap_text_fn(kind: str) -> str {
     if kind == "lindex" { return "std$rt$list_index_text" }
     if kind == "sindex" { return "std$rt$str_index_text" }
+    // a uint64 index (MYLA-546)
+    if kind == "luindex" { return "std$rt$list_uindex_text" }
+    if kind == "suindex" { return "std$rt$str_uindex_text" }
     return "std$rt$range_text"
 }
 

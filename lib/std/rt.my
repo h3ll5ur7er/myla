@@ -2383,6 +2383,16 @@ pub fun str_index_text(i: int64, n: int64) -> str {
     return "string index " + int_to_str(i) + " out of bounds (len " + int_to_str(n) + ")"
 }
 
+// The same with a `uint64` index, written unsigned (`__trap_luindex`,
+// `__trap_suindex`; MYLA-546).
+pub fun list_uindex_text(i: int64, n: int64) -> str {
+    return "list index " + uint_to_str(i as uint64) + " out of bounds (len " + int_to_str(n) + ")"
+}
+
+pub fun str_uindex_text(i: int64, n: int64) -> str {
+    return "string index " + uint_to_str(i as uint64) + " out of bounds (len " + int_to_str(n) + ")"
+}
+
 // `string range 2..9 out of bounds (len 3)`: `sb.append(s, a, b)` with a
 // range that isn't within `s` (`__trap_range`).
 pub fun range_text(a: int64, b: int64, n: int64) -> str {

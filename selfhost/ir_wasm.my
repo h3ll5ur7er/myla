@@ -629,7 +629,7 @@ impl CodeGen {
                     self.emit("i64.ge_u")
                     self.emit("if")
                     // the index and the length reported (D183)
-                    let tr = self.want_trap(if is_str { "sindex" } else { "lindex" })
+                    let tr = self.want_index_trap(is_str, f.temps[i])
                     if tr == "" { self.wasm_trap("__trap_index", p.line, p.col) }
                     else {
                         self.wasm_position(p.line, p.col)

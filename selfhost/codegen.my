@@ -200,7 +200,8 @@ pub struct CodeGen {
     // nothing more is emitted
     refused: [CheckErr],
     // the runtime errors with values native code reports through a routine
-    // of their own (`want_trap`, D183): "lindex", "sindex", "range"
+    // of their own (`want_trap`, D183): "lindex", "sindex", "range", and
+    // "luindex", "suindex" for a uint64 index (MYLA-546)
     trap_vals: [str],
     ir_texts: [str],
     ir_blocked: [str],
@@ -3082,7 +3083,7 @@ impl CodeGen {
     fun emit_elem_check(var self, line: int32, col: int32, is_str: bool, it: Type) {
         self.emit("movq (%rax), %rdx")
         self.emit("cmpq %rdx, %rcx")
-        let tr = self.want_trap(if is_str { "sindex" } else { "lindex" })
+        let tr = self.want_index_trap(is_str, it)
         if tr == "" {
             self.trap("jae", "__trap_index", line, col)
             return
@@ -3102,6 +3103,15 @@ impl CodeGen {
         if !self.has_func(trap_text_fn(kind)) { return "" }
         if !list_has_str(self.trap_vals, kind) { self.trap_vals.push(kind) }
         return "__trap_" + kind
+    }
+
+    // The routine an element's bounds check of a list or string (`is_str`)
+    // reports through, the index of type `it`: a `uint64`'s written
+    // unsigned (`luindex`, `suindex`; MYLA-546).
+    fun want_index_trap(var self, is_str: bool, it: Type) -> str {
+        let u = match it { Type.TInt(w, sg) => w == 64 && !sg, _ => false }
+        if is_str { return self.want_trap(if u { "suindex" } else { "sindex" }) }
+        return self.want_trap(if u { "luindex" } else { "lindex" })
     }
 
     // -- copy-on-write mutation addressing --------------------------------
