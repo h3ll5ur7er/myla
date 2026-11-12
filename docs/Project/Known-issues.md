@@ -14,7 +14,6 @@ Open bugs and gaps by component, each with a task that has its steps to reproduc
 - `--checked` int64 arithmetic is five times slower by time in hot loops on x86-64 (0.62 s against 0.12 s), as each check jumps over an inline call ([[MYLA-551]]).
 - **Checker:** an impl's bound that names a generic trait (`I: Iterator<str>`) isn't checked where the impl is used, so an `Iterator<int>` gets in and native code reads an int as a string ([[MYLA-538]]). D178's call error fires on a generic actor's getter ([[MYLA-417]]); D95 no longer reports an `await` and a mutator in one head ([[MYLA-394]]); `x.format(spec)` on a builtin behind `T: Format` is an internal error ([[MYLA-544]]).
 - **Loading:** a program's own top-level `std/` directory is read lazily, so `myla check` says `ok` over its errors ([[MYLA-413]]); a declaration swallowed after a missing `}` loads silently when it doesn't start its line, and a library root written with `..` fails ([[MYLA-545]]). A hello world checks in 6.1 ms against the 5 ms aimed at, and the generated code depends on which library bodies were read ([[MYLA-552]]).
-- **`myla test`:** a multi-line panic is cut natively, an empty `Err` passes, and exit statuses outside 0 to 255 differ between runners ([[MYLA-547]]).
 
 ## Backends and platforms
 
