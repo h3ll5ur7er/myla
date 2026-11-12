@@ -71,7 +71,10 @@ impl CodeGen {
         var body0 = [".local i64"]
         for l in start { body0.push(l) }
         self.wasm_fn("_start", 0, body0, false)
-        self.wasm_fn("__exit", 1, ["local.get 0", "i32.wrap_i64", "call proc_exit", "unreachable"], true)
+        // every end of the program through std.rt's `exit_program`, as on
+        // the other targets (its exit hook, a test child's record, D191)
+        self.wasm_fn("__exit", 1, ["local.get 0", "call __exit_program", "drop", "unreachable"], true)
+        self.wasm_calls["__exit_program"] = 1
         // __syscall(n, args, _, _): the import numbered `n` called with the
         // words at `args`, its errno; `memory.grow`'s result for its number
         var body: [str] = []
