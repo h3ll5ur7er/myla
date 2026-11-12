@@ -200,7 +200,7 @@ fun main() {
 | `.precision` | that many digits after the point, rounded on the exact binary value to nearest, ties to even: `2.675` (2.67499… in binary) gives `2.67`, `0.125` gives `0.12` | floats |
 | `kind` | `x` `X` hexadecimal, `b` binary, `o` octal; a negative signed value as its two's complement at its type's width (`{-1i8:x}` is `ff`) | integers |
 
-Anything else is a compile-time error at the value: `the format spec '.2' needs a float, found 'int32'`, `invalid format spec 'q'`. A hole's spec may not contain `{` or `}`.
+Anything else is a compile-time error at the value: `the format spec '.2' needs a float, found 'int32'`, `invalid format spec 'q'`. A hole's spec may not contain `{` or `}`. A spec known only when the program runs, `x.format(spec)` on a primitive `x: T` with `T: Format`, is checked there: one that isn't a spec is the runtime error `invalid format spec 'q'` at the call, on every runner (D183, [[MYLA-565]]).
 
 A type of the program can give itself a form by implementing the prelude's `Format` trait: `{x}` calls `x.format("")`, `{x:spec}` passes the spec's text as it is, read when the program runs (it isn't checked before), and `std.fmt.pad(text, spec)` applies fill, alignment and width ([[Language/Standard-library]]).
 

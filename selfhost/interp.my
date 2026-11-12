@@ -3775,23 +3775,15 @@ impl Interp {
                 let spec = as_str(self.eval(args[0]))
                 if self.stop() { return Value.VUnit }
                 let t = self.full_type_of(recv.id)
-                match parse_spec(spec) {
-                    Ok(sp) => { return Value.VStr(self.format_spec_value(rv, t, spec)) },
-                    Err(why) => {},
+                return match parse_spec(spec) {
+                    Ok(sp) => Value.VStr(self.format_spec_value(rv, t, spec)),
+                    // a spec that isn't one is the caller's mistake: at the
+                    // call, on every runner (D183, MYLA-565)
+                    Err(why) => {
+                        self.fail(e, why)
+                        Value.VUnit
+                    },
                 }
-                // a spec that isn't one: the program's std.fmt fails on it,
-                // as native code's does, not the interpreter's own copy
-                let (name, argv) = match t {
-                    Some(Type.TInt(w, sg)) => ("std$fmt$fmt_int", [Value.VInt(as_int(rv)), Value.VInt(w as int64), Value.VBool(sg), Value.VStr(spec)]),
-                    Some(Type.TFloat(w)) => ("std$fmt$fmt_float", [Value.VFloat(as_float(rv)), Value.VStr(format_typed(rv, t)), Value.VStr(spec)]),
-                    _ => ("std$fmt$fmt_text", [Value.VStr(format_typed(rv, t)), Value.VStr(spec)]),
-                }
-                let ffi = self.func_idx(name)
-                if ffi < 0 {
-                    self.fail(e, format("invalid format spec '{}'", spec))
-                    return Value.VUnit
-                }
-                return self.call_func(ffi, argv)
             }
         }
         // not a method: a field holding a function, called (an actor's

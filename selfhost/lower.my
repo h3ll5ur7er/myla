@@ -3871,7 +3871,7 @@ impl Lower {
                 if !cg.has_func(mname) {
                     if field == "eq" && args.len() == 1 && cg.derived_eq_routine(key) { return self.derived_eq(cg, mname, recv, args[0], tail) }
                     // `x.format(spec)` of a builtin `T: Format` (MYLA-544)
-                    if field == "format" && args.len() == 1 && !is_struct_or_enum_t(cg.type_of(recv.id)) { return self.builtin_format(cg, recv, args[0]) }
+                    if field == "format" && args.len() == 1 && !is_struct_or_enum_t(cg.type_of(recv.id)) { return self.builtin_format(cg, recv, args[0], Pos { line: e.line, col: e.col }) }
                     // a tuple's `hash` is the language's (D163)
                     let rt = cg.type_of(recv.id)
                     if field == "hash" && args.len() == 1 && (is_unit(rt) || is_compound_eq_t(rt)) && !is_list_t(rt) && !tail {
@@ -5172,8 +5172,9 @@ impl Lower {
     // `x.format(spec)` of a printable builtin value, `x: T` with `T: Format`
     // at a builtin `T` (MYLA-544): its print form by the spec `sp`, a value,
     // with std.fmt, as `render_spec` gives a hole's; a new string the
-    // statement owns.
-    fun builtin_format(var self, cg: CodeGen, arg: Expr, sp: Expr) -> int32 {
+    // statement owns. A spec that isn't one is a runtime error at `at`, the
+    // call's place.
+    fun builtin_format(var self, cg: CodeGen, arg: Expr, sp: Expr, at: Pos) -> int32 {
         let t = cg.type_of(arg.id)
         var name = "std$fmt$fmt_text"
         var vals: [int32] = []
@@ -5203,7 +5204,23 @@ impl Lower {
             _ => { vals = [self.render(cg, arg)] },
         }
         if !cg.has_func(name) { return self.unsupported("a format spec without std.fmt") }
-        vals.push(self.expr(cg, sp))
+        let spec = self.expr(cg, sp)
+        if cg.has_func("std$fmt$spec_error") {
+            // a spec that isn't one is the caller's: reported here, as the
+            // interpreter does, not inside std.fmt (D183, MYLA-565)
+            let why = self.call_owning(cg, "std$fmt$spec_error", [spec])
+            let n = self.temp(Type.TInt(32, true))
+            self.add_load(n, why, 0)
+            let fine = self.temp(Type.TBool)
+            self.add(Inst.Cmp(fine, "==", Type.TInt(32, true), n, self.int_const(0)))
+            let bad = self.new_block()
+            let ok = self.new_block()
+            self.finish(Term.Br(fine, ok, bad))
+            self.start(bad)
+            self.finish(Term.Panic(why, at))
+            self.start(ok)
+        }
+        vals.push(spec)
         return self.call_owning(cg, name, vals)
     }
 

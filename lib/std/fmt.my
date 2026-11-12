@@ -97,6 +97,18 @@ pub fun parse_spec(s: str) -> Result<Spec, str> {
     return Ok(sp)
 }
 
+// Why `s` isn't a spec, "" when it is: what native code checks at
+// `x.format(spec)` on a builtin `T: Format`, so that a spec given at run
+// time is reported at the call, as the interpreter does (D183, MYLA-565).
+#test("q")["invalid format spec 'q'"]
+#test("*>8.2")[""]
+pub fun spec_error(s: str) -> str {
+    return match parse_spec(s) {
+        Ok(sp) => ""
+        Err(why) => why
+    }
+}
+
 // What the spec `sp` needs that a value of class `class` (0 an integer, 1 a
 // float, 2 text: `str`, `char`, `bool`) isn't, as the checker's message ends
 // ("needs a float"); "" when it fits.

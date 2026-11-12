@@ -80,7 +80,7 @@ pub struct DeclOrigin { module: str, path: str, implicit: bool, lazy: bool }
 pub fun backend_std_functions() -> [str] {
     return [
         // f-strings' holes and slices (`lower.my`), `task.cancel` (D96)
-        "std$fmt$fmt_text", "std$fmt$fmt_int", "std$fmt$fmt_float",
+        "std$fmt$fmt_text", "std$fmt$fmt_int", "std$fmt$fmt_float", "std$fmt$spec_error",
         "std$slice$take", "std$slice$take_str", "std$slice$str_whole",
         "std$task$cancel",
         // the wasm32 start and its memory (`runtime_wasm.my`)
