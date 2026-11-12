@@ -1,6 +1,6 @@
 # std.signal
 
-The interrupt and terminate signals as events a program awaits ([[MYLA-350]]). Until a program asks, a signal does what it always did: Ctrl-C or a request to terminate ends the program. Only what every system has is here: an interrupt (SIGINT; Ctrl-C and Ctrl-Break on Windows) and a request to terminate (SIGTERM; a closed console, a log-off or a shutdown on Windows), not SIGUSR1, SIGHUP or SIGCHLD. On wasm32 (WASI has no signals) `listen` is `Unsupported`.
+The interrupt and terminate signals as events a program awaits ([[MYLA-350]]). Until a program asks, a signal does what it always did: Ctrl-C or a request to terminate ends the program. Only what every system has is here: an interrupt (SIGINT; Ctrl-C and Ctrl-Break on Windows) and a request to terminate (SIGTERM; a closed console, a log-off or a shutdown on Windows), not SIGUSR1, SIGHUP or SIGCHLD. On wasm32 (WASI has no signals) `listen` is `Unsupported`. While std.term holds the terminal raw, the runtime catches these two and SIGHUP and SIGQUIT to put the terminal's mode back before they end the program (D192, [[Language/Standard-library/Term#raw-mode-and-keys]]); a listener still gets the two it listens for.
 
 [TOC]
 

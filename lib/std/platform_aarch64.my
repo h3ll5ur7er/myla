@@ -1557,7 +1557,11 @@ fun catch_signal(sig: int64, handler: int64, saved: int64) {
     __store64(act + 8, 0)
     __store64(act + 16, 0)
     __store64(act + 24, 0)
-    if handler > 1 {
+    if handler == __rt_addr("__on_raw_signal") {
+        // raw mode's (D192): the default back as it runs, the signal it
+        // sends again not held
+        __store64(act + 8, 3489660928)                 // SA_RESETHAND | SA_NODEFER | SA_RESTART
+    } else if handler > 1 {
         __store64(act + 8, 268435456)                  // SA_RESTART: the kernel's own trampoline returns
     }
     var old: int64 = 0
@@ -1630,8 +1634,9 @@ pub fun raw_signal(sig: int64) {
 }
 
 // `raw_signal` the handler, from now on, of each of the four signals whose
-// handler is the default (`on`), or the default again for each whose
-// handler it is (not `on`); under `signal_listen`'s lock.
+// handler is the default (`on`; or it already, as a listener that let go
+// put it back), or the default again for each whose handler it is (not
+// `on`); under `signal_listen`'s lock.
 pub fun raw_signals(on: bool) {
     let st = __rt_addr("__sig_pipe")
     while __xchg64(st + 24, 1) != 0 {
@@ -1643,27 +1648,14 @@ pub fun raw_signals(on: bool) {
         __store64(act, 0)
         __syscall5(SYS_RT_SIGACTION, sig, 0, act, 8, 0)
         let now = __load64(act)
-        if on && now == 0 {
-            zero_act(act)
-            __store64(act, raw)
-            __store64(act + 8, 3489660928)  // SA_RESETHAND | SA_NODEFER | SA_RESTART (the kernel's trampoline)
-            __syscall5(SYS_RT_SIGACTION, sig, act, 0, 8, 0)
+        if on && (now == 0 || now == raw) {
+            catch_signal(sig, raw, 0)
         } else if !on && now == raw {
-            zero_act(act)
-            __syscall5(SYS_RT_SIGACTION, sig, act, 0, 8, 0)
+            catch_signal(sig, 0, 0)
         }
     }
     __free(act)
     __store_rel64(st + 24, 0)
-}
-
-// The 32 bytes of a `sigaction` at `act` zeroed: the default, no flags, no
-// signal held.
-fun zero_act(act: int64) {
-    __store64(act, 0)
-    __store64(act + 8, 0)
-    __store64(act + 16, 0)
-    __store64(act + 24, 0)
 }
 
 // --- memory --------------------------------------------------------------------

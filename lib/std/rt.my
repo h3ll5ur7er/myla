@@ -985,7 +985,8 @@ pub fun term_get(fd: int) -> str {
 
 // `__term_set(fd, mode)`: the terminal back in the mode `__term_get` gave:
 // 0, or -1. The mode the exit hook keeps for `fd` set again is raw mode
-// left: the hook goes (D187).
+// left: the hook goes (D187), and so do the signals' handlers raw mode set
+// (D192).
 pub fun term_set(fd: int, mode: str) -> int {
     if fd < 0 {
         return sock_result(-EBADF)
@@ -995,6 +996,7 @@ pub fun term_set(fd: int, mode: str) -> int {
     let m = __addr_of(mode)
     if r >= 0 && __load64(h) == (fd as int64) + 1 && __load64(m) == __load64(h + 24) && __equal_bytes(m + 8, h + 32, __load64(m)) {
         __store64(h, 0)
+        os.raw_signals(false)
     }
     return sock_result(r)
 }
@@ -1002,7 +1004,10 @@ pub fun term_set(fd: int, mode: str) -> int {
 // `__term_raw(fd)`: the terminal in raw mode (no echo, a key at a time, no
 // signal keys): 0, or -1. The mode before it is kept for the exit hook,
 // which puts it back however the program ends (D187); raw mode entered
-// again keeps the first one's.
+// again keeps the first one's. While it is raw, a hang-up, an interrupt, a
+// quit or a request to terminate whose default would end the program puts
+// the mode back first and then ends it as the signal would have
+// (`os.raw_signals`, D192; MYLA-548: such a death left the terminal raw).
 pub fun term_raw(fd: int) -> int {
     if fd < 0 {
         return sock_result(-EBADF)
@@ -1023,6 +1028,7 @@ pub fun term_raw(fd: int) -> int {
     let r = os.term_make_raw(fd as int64)
     if kept && r >= 0 {
         __store64(h, (fd as int64) + 1)
+        os.raw_signals(true)
     }
     return sock_result(r)
 }
@@ -1038,9 +1044,15 @@ pub fun term_vt(fd: int) -> int {
 
 // `__signal_listen(on)`: the interrupt and terminate signals caught (`on`
 // 1: the handle they arrive on, or -1), or let go (0: their defaults back
-// once nobody listens).
+// once nobody listens). Let go while the terminal is raw, a default put
+// back is raw mode's handler again; let go after raw mode ended, a handler
+// of raw mode's that a listener kept is the default again (D192).
 pub fun signal_listen(on: int) -> int {
-    return sock_result(os.signal_listen(on as int64))
+    let r = os.signal_listen(on as int64)
+    if on == 0 {
+        os.raw_signals(__rt_get("__exit_hook") != 0)
+    }
+    return sock_result(r)
 }
 
 // `__signal_take(h)`: the next signal on the handle `h`, the thread
