@@ -3188,6 +3188,10 @@ impl Interp {
         // a `char` literal where an integer is expected (`let b: uint8 =
         // 'a'`) is that number (the 2026-11-10 review's L4)
         if isc && !is_int_value_type(self.resolved_of(e.id)) { return Value.VChar(v) }
+        // a small one is itself in every integer type, and a literal's type
+        // is never a type parameter's: none looked up (most literals; the
+        // plain loop's cost, MYLA-546)
+        if v >= 0 && v < 128 { return Value.VInt(v) }
         return Value.VInt(wrap_opt(v, self.typed_of(e.id)))
     }
 
@@ -3863,9 +3867,10 @@ impl Interp {
     // the common case costs a tag's test.
     #test(interp_on("[int]"), -1)[None]
     fun typed_of(self, id: int32) -> Option<Type> {
-        var r = self.resolved.get(id)
-        // (a function's test: a match here retains the type and drops it)
-        if is_param_opt(r) { r = Some(self.env_type(opt_type(r))) }
+        let r = self.resolved.get(id)
+        // (a function's test: a match here retains the type and drops it;
+        // no test before the first generic call, as nothing is bound)
+        if self.envs.len() > 0 && is_param_opt(r) { return Some(self.env_type(opt_type(r))) }
         return r
     }
 
