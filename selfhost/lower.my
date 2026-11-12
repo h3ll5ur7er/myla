@@ -2425,15 +2425,11 @@ impl Lower {
 
     // The instance of `callee` that the call `e` asks for, `too` large,
     // refused (H5): its function asks for a larger one in turn, without end.
-    // A call outside every generic instance asks for a type the program
-    // writes, finite: too large, not without end (MYLA-543).
+    // Only a call inside an instance at the limit is refused (MYLA-544), so
+    // a type the program writes, however deep, is never refused here.
     fun refuse_instance(var self, cg: CodeGen, e: Expr, callee: str, too: str) {
-        var msg = format("the instances of '{}' nest without end: this call asks for one whose type arguments are {}", callee, too)
-        var note = format("'{}' is called with a larger type at each step (polymorphic recursion), which native code can't be built for; the interpreter runs it", callee)
-        if cg.subst.len() == 0 {
-            msg = format("the instance of '{}' this call asks for is too large to build: its type arguments are {}", callee, too)
-            note = "native code is built for each list of type arguments a generic function is called with, up to that size; the interpreter runs it"
-        }
+        let msg = format("the instances of '{}' nest without end: this call asks for one whose type arguments are {}", callee, too)
+        let note = format("'{}' is called with a larger type at each step (polymorphic recursion), which native code can't be built for; the interpreter runs it", callee)
         self.refused.push(CheckErr { line: e.line, col: e.col, sp: e.sp, msg: msg, decl: e.id, notes: [Note { label: "note", msg: note, line: 0, col: 0, sp: no_span() }] })
         let d = self.unsupported("a refused instance")
     }

@@ -33,8 +33,8 @@ Work package R1 of [[Project/Review-2026-11-12]]. Files: `selfhost/lower.my`, `s
 - [x] **A map keyed directly by a recursive enum** (`#derive(Eq, Hash) enum Lst { Nil, Cons(int, Lst) }`, `var m: [Lst: int] = [:]`) runs interpreted and is `internal error: main can't be lowered to the IR: a map keyed by a recursive enum` at build; wrapped in a struct, list, tuple or `Option` it works. Build it (decision 4), or refuse it in the checker with a real message ([[MYLA-313]]) Decided as recommended: D194 (built natively, as interpreted).
 - [x] Float fields in a missing key's text: `Fl { f: 3.0, g: 10000000000.0 }` interpreted, `Fl { f: 3, g: 10000000000 }` natively; also `-0.0`, `1e+300`, `1e-07` ([[MYLA-441]])
 - [x] wasm32: a list literal of 52,000 elements builds a module that Node refuses (`local count too large`)
-- [x] H5's wording: a finite program (`id(x)` with a 65-deep literal type) is told its instances "nest without end … polymorphic recursion"
-- [ ] … and `myla check` says `ok` for what `myla build` calls a type error: left open, a proposal below (the checker's file, [[MYLA-544]] lists it too)
+- [x] H5's wording: a finite program (`id(x)` with a 65-deep literal type) is told its instances "nest without end … polymorphic recursion" (solved by [[MYLA-544]]'s rule at integration: such a program now builds, so no finite type is refused)
+- [ ] … and `myla check` says `ok` for what `myla build` calls a type error: left open, a proposal below (the checker's file, [[MYLA-544]] lists it too); since [[MYLA-544]] only polymorphic recursion is refused
 
 ## What changed
 
@@ -44,7 +44,7 @@ Work package R1 of [[Project/Review-2026-11-12]]. Files: `selfhost/lower.my`, `s
 - **C11, D194**: a recursive-enum key is held in its slot as a box (as any member is, so the map's release, clone and deep copy already worked). `key_operand` gives a word pointing at the key's value, which `__khash_`, `__keq_`, `__mfind_` and `__krepr_` only read; `__mput_<K>` boxes a copy with references of its own when the key is new; `for k in m` reads the key out of its box.
 - **Float fields in a key's text**: std.rt's `key_float_text` turns the print form into Python's `repr` (`3.0`, `-0.0`, `1e+300`, `1.5e-07`); `repr_scalar` calls it where the program has it (as with D183's texts, the tools' built-in library has it after the seed commit; `backend_std_functions` lists it).
 - **wasm32**: `wasm_locals` gives a temporary that is written and read in one block only, each read after a write, a local it shares with the block's other temporaries that aren't live beside it (freed after its last reader, so no result shares its operands' local); the others keep one of their own. Node refuses more than 50,000 locals in a function.
-- **H5's wording**: a refused instance asked for outside every generic instance (`cg.subst` empty) is a type the program writes, finite: `the instance of 'id' this call asks for is too large to build: its type arguments are 65 types deep (the limit is 64)`, without "polymorphic recursion". Inside an instance the old words stand.
+- **H5's wording**: this lane gave a refused instance outside every generic instance its own words (`too large to build`). [[MYLA-544]]'s rule, merged beside it, refuses only an instance already at the limit asking for a larger one, so a type the program writes builds and that branch could never run: at integration it was taken out, with its test, and `test_a_deep_type_the_program_writes_is_no_recursion` covers the finite case.
 
 ## Evidence
 

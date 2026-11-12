@@ -10958,18 +10958,6 @@ class TestCompilerParity(unittest.TestCase):
                     self.assertIn(f"type error: the instances of '{callee}' nest without end: this call asks for one "
                                   f"whose type arguments are {why}\n  --> {path}:{at}\n", built.stderr)
                     self.assertIn("(polymorphic recursion)", built.stderr)
-        # a finite type the program writes, too large: not one "without end"
-        # (MYLA-543)
-        src = ("fun id<T>(x: T) -> int {\n    return 1\n}\n\nfun main() {\n    print(id(" + "[" * 65 + "1" + "]" * 65
-               + "))\n}\n")
-        with tempfile.TemporaryDirectory() as tmp:
-            path = write_program(tmp, src)
-            built = subprocess.run([myla, "build", path, "-o", os.path.join(tmp, "out")],
-                                   capture_output=True, text=True, timeout=60)
-            self.assertEqual(built.returncode, 1, built.stderr)
-            self.assertIn("type error: the instance of 'id' this call asks for is too large to build: its type "
-                          f"arguments are 65 types deep (the limit is 64)\n  --> {path}:6:13\n", built.stderr)
-            self.assertNotIn("polymorphic recursion", built.stderr)
 
     def test_a_deep_type_the_program_writes_is_no_recursion(self):
         # MYLA-544: a type 65 or 100 deep that the program writes is no
