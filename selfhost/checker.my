@@ -9573,6 +9573,13 @@ fun errors_of(src: str) -> [str] {
 #test("actor P { n: int }\nimpl P { fun charge(var self) -> bool { return true } }\nactor S { items: [int] }\nimpl S { async fun sell(var self, p: P) -> int { if self.items.len() == 0 { return 0 }\nlet paid = await p.charge()\nreturn match 1 { 0 => 0, _ if self.items.pop() > 0 => 1, _ => 2 } } }")[["'self.items' was checked before an 'await' and is changed after it: another call to this actor may have changed it meanwhile"]]
 #test("actor P { n: int }\nimpl P { fun charge(var self) -> bool { return true } }\nactor S { items: [int] }\nimpl S { async fun sell(var self, p: P) -> int { if self.items.len() == 0 { return 0 }\nlet paid = await p.charge()\nif self.items.pop() > 0 { let q = await p.charge()\nself.items.push(1) }\nreturn 0 } }")[["'self.items' was checked before an 'await' and is changed after it: another call to this actor may have changed it meanwhile", "'self.items' was checked before an 'await' and is changed after it: another call to this actor may have changed it meanwhile"]]
 #test("actor P { n: int }\nimpl P { fun charge(var self) -> bool { return true } }\nactor S { items: [int] }\nimpl S { async fun sell(var self, p: P) -> int { if self.items.len() == 0 { return 0 }\nlet paid = await p.charge()\nlet x = match self.items.pop() { 0 => 0, _ => 1 }\nreturn x } }")[["'self.items' was checked before an 'await' and is changed after it: another call to this actor may have changed it meanwhile"]]
+// a statement walked in evaluation order (MYLA-394's C2): an `await` and a
+// mutator in one head or value, the left side of `&&` a condition
+#test("actor P { n: int }\nimpl P { fun charge(var self) -> int { return 1 } }\nactor S { items: [int] }\nimpl S { async fun sell(var self, p: P) -> int { if self.items.len() == 0 { return 0 }\nwhile await p.charge() > 0 && self.items.pop() > 0 { }\nreturn 0 } }")[["'self.items' was checked before an 'await' and is changed after it: another call to this actor may have changed it meanwhile"]]
+#test("actor P { n: int }\nimpl P { fun charge(var self) -> int { return 1 } }\nactor S { items: [int] }\nimpl S { async fun sell(var self, p: P) -> int { if self.items.len() > 0 && await p.charge() > 0 && self.items.pop() > 0 { return 1 }\nreturn 0 } }")[["'self.items' was checked before an 'await' and is changed after it: another call to this actor may have changed it meanwhile"]]
+#test("actor P { n: int }\nimpl P { fun charge(var self) -> int { return 1 } }\nactor S { items: [int] }\nimpl S { async fun sell(var self, p: P) -> int { let ok = self.items.len() > 0 && await p.charge() > 0 && self.items.pop() > 0\nreturn 0 } }")[["'self.items' was checked before an 'await' and is changed after it: another call to this actor may have changed it meanwhile"]]
+#test("actor P { n: int }\nimpl P { fun charge(var self) -> int { return 1 } }\nactor S { items: [int] }\nimpl S { async fun sell(var self, p: P) -> int { if self.items.len() == 0 { return 0 }\nlet paid = await p.charge()\nif self.items.len() > 0 && self.items.pop() > 0 { return 1 }\nlet ok = self.items.len() > 0 && self.items.pop() > 0\nreturn 0 } }")[[]]
+#test("actor P { n: int }\nimpl P { fun charge(var self) -> int { return 1 } }\nactor S { items: [int] }\nimpl S { async fun sell(var self, p: P) -> int { if self.items.len() == 0 { return 0 }\nlet x = self.items.pop() + await p.charge()\nreturn x } }")[[]]
 fun warnings_of(src: str) -> [str] {
     var out: [str] = []
     for w in checker_on(src).warnings { out.push(w.msg) }
@@ -11399,63 +11406,6 @@ fun self_method(c: Expr) -> str {
     return ""
 }
 
-// The calls of methods of `self` and of its fields (`self.items.pop()`,
-// MYLA-394) in `e`, innermost first, outside lambdas and the block arms of a
-// `match` (statements of their own, MYLA-171).
-#test(expr_of("f(1) + other.g(2)"))[[]]
-#test(expr_of("() => self.a()"))[[]]
-fun self_calls(e: Expr) -> [Expr] {
-    var out: [Expr] = []
-    var subs: [Expr] = []
-    match e.kind {
-        ExprKind.Lambda(ps, rt, body, asy) => { return [] },
-        ExprKind.Call(c, args, _) => {
-            subs.push(c)
-            for a in args { subs.push(a) }
-        },
-        ExprKind.GetField(t, f) => { subs.push(t) },
-        ExprKind.Await(x) => { subs.push(x) },
-        ExprKind.Unary(op, x) => { subs.push(x) },
-        ExprKind.Binary(op, l, r) => {
-            subs.push(l)
-            subs.push(r)
-        },
-        ExprKind.StructLit(n, fs) => { for fi in fs { subs.push(fi.value) } },
-        ExprKind.TupleLit(es) => { for x in es { subs.push(x) } },
-        ExprKind.ListLit(es) => { for x in es { subs.push(x) } },
-        ExprKind.MapLit(ents) => {
-            for en in ents {
-                subs.push(en.key)
-                subs.push(en.value)
-            }
-        },
-        ExprKind.TupleIndex(t, i) => { subs.push(t) },
-        ExprKind.Index(t, i) => {
-            subs.push(t)
-            subs.push(i)
-        },
-        ExprKind.MatchE(sc, arms) => {
-            subs.push(sc)
-            for arm in arms {
-                match arm.guard { Some(g) => { subs.push(g) }, None => {} }
-                match arm.body { ExprOrBlock.EB_Expr(x) => { subs.push(x) }, ExprOrBlock.EB_Block(b) => {} }
-            }
-        },
-        ExprKind.Try(x) => { subs.push(x) },
-        ExprKind.Cast(x, ty) => { subs.push(x) },
-        _ => {},
-    }
-    for x in subs { for c in self_calls(x) { out.push(c) } }
-    match e.kind {
-        ExprKind.Call(c, args, _) => {
-            let on_field = match c.kind { ExprKind.GetField(recv, m) => self_field(recv) != "", _ => false }
-            if self_method(c) != "" || on_field { out.push(e) }
-        },
-        _ => {},
-    }
-    return out
-}
-
 // What the body of a synchronous method of an actor does to the actor's
 // fields itself (MYLA-171): the fields it changes (assigned, or changed by
 // `push`, `pop`, `remove` or `append` or a `var self` method, the calls of
@@ -11852,26 +11802,6 @@ impl Reentrancy {
         return out
     }
 
-    // `e` examined as a condition; its awaits.
-    #test(Reentrancy { epoch: 0, checked: [:], locals: [:], awaits: [], out: [], changes: [:], examines: [:], mutators: [:] }, expr_of("-n * 2"))[[]]
-    fun check(var self, e: Expr) -> [Expr] {
-        let r = self.scan(e)
-        for n in r.names {
-            match self.locals.get(n) {
-                Some(t) => {
-                    for f in t.fields {
-                        var prev = -1
-                        match self.checked.get(f) { Some(p) => { prev = p }, None => {} }
-                        if t.epoch > prev { self.checked[f] = t.epoch } else { self.checked[f] = prev }
-                    }
-                },
-                None => {},
-            }
-        }
-        for f in r.fields { self.checked[f] = self.epoch }
-        return r.awaits
-    }
-
     fun suspend(var self, awaits: [Expr]) {
         if awaits.len() > 0 {
             self.awaits.push(awaits[0])
@@ -11883,59 +11813,135 @@ impl Reentrancy {
         for s in b.stmts { self.stmt(s) }
     }
 
-    // A statement's value: a `match`'s scrutinee and guards are conditions and
-    // its block arms statements; its awaits.
-    #test(Reentrancy { epoch: 0, checked: ["balance": 0], locals: [:], awaits: [], out: [], changes: [:], examines: [:], mutators: [:] }, Expr { id: 26, line: 22, col: 20, sp: SrcSpan { sline: 22, scol: 20, eline: 22, ecol: 25 }, kind: ExprKind.BoolLit(false) })[[]]
-    fun value(var self, e: Expr) -> [Expr] {
+    // `e` walked in evaluation order (MYLA-394): an `await` starts its epoch
+    // once its operand has run, a call of a mutator on a field of `self` (or
+    // of a method of `self` that changes fields) changes them once its
+    // receiver and arguments have, and, when `e` is examined as a condition
+    // (`cond`), each field of `self` it reads is examined where it is read:
+    // after a change before it, before an `await` after it. The head of an
+    // `if` or a `while`, a match's scrutinee and guards and the left side of
+    // `&&` and `||` are conditions; a match's block arms are statements, and
+    // a lambda runs elsewhere.
+    #test(Reentrancy { epoch: 0, checked: ["balance": 0], locals: [:], awaits: [], out: [], changes: [:], examines: [:], mutators: [:] }, Expr { id: 26, line: 22, col: 20, sp: SrcSpan { sline: 22, scol: 20, eline: 22, ecol: 25 }, kind: ExprKind.BoolLit(false) }, true)[0]
+    fun ordered(var self, e: Expr, cond: bool) -> int32 {
         match e.kind {
+            ExprKind.Lambda(ps, rt, body, asy) => {},
+            ExprKind.Await(x) => {
+                self.ordered(x, cond)
+                self.suspend([e])
+            },
+            ExprKind.GetField(t, f) => {
+                match t.kind {
+                    ExprKind.Name(n) => {
+                        if n == "self" {
+                            if cond { self.checked[f] = self.epoch }
+                            return 0
+                        }
+                    },
+                    _ => {},
+                }
+                self.ordered(t, cond)
+            },
+            ExprKind.Name(n) => { if cond { self.examine_local(n) } },
+            ExprKind.Unary(op, x) => { self.ordered(x, cond) },
+            ExprKind.Binary(op, l, r) => {
+                self.ordered(l, cond || op == "&&" || op == "||")
+                self.ordered(r, cond)
+            },
+            ExprKind.Call(c, args, _) => {
+                let fs = self.call_fields(e)
+                let m = self_method(c)
+                match c.kind {
+                    // a mutator's receiver is examined by what it gives, after the change
+                    ExprKind.GetField(recv, mn) => { if m == "" { self.ordered(recv, cond && fs.len() == 0) } },
+                    _ => { self.ordered(c, cond) },
+                }
+                for a in args { self.ordered(a, cond) }
+                if fs.len() > 0 {
+                    var names: [str] = []
+                    for a in args { for n in self.scan(a).names { names = add_name(names, n) } }
+                    for f in fs { self.write(f, names, e) }
+                }
+                if cond {
+                    // `self.m(…)` examines what `m` does (MYLA-171), and a
+                    // field's mutator gives what the field now holds
+                    var seen: [str] = []
+                    if m != "" { seen = self.examines.get(m).unwrap_or([]) }
+                    else { if fs.len() > 0 { seen = fs } }
+                    for f in seen { self.checked[f] = self.epoch }
+                }
+            },
+            ExprKind.StructLit(n, fs) => { for fi in fs { self.ordered(fi.value, cond) } },
+            ExprKind.TupleLit(es) => { for x in es { self.ordered(x, cond) } },
+            ExprKind.ListLit(es) => { for x in es { self.ordered(x, cond) } },
+            ExprKind.MapLit(ents) => {
+                for en in ents {
+                    self.ordered(en.key, cond)
+                    self.ordered(en.value, cond)
+                }
+            },
+            ExprKind.TupleIndex(t, i) => { self.ordered(t, cond) },
+            ExprKind.Index(t, i) => {
+                self.ordered(t, cond)
+                self.ordered(i, cond)
+            },
             ExprKind.MatchE(sc, arms) => {
-                // a mutator in the scrutinee or a guard changes its field
-                // before the match examines it (MYLA-394)
-                self.call_changes(sc)
-                var awaits = self.check(sc)
+                self.ordered(sc, true)
                 for arm in arms {
-                    match arm.guard {
-                        Some(g) => {
-                            self.call_changes(g)
-                            for a in self.check(g) { awaits.push(a) }
-                        },
-                        None => {},
-                    }
+                    match arm.guard { Some(g) => { self.ordered(g, true) }, None => {} }
                     match arm.body {
                         ExprOrBlock.EB_Block(b) => { self.block(b) },
-                        ExprOrBlock.EB_Expr(x) => { for a in self.scan(x).awaits { awaits.push(a) } },
+                        ExprOrBlock.EB_Expr(x) => { self.ordered(x, cond) },
                     }
                 }
-                return awaits
+            },
+            ExprKind.Try(x) => { self.ordered(x, cond) },
+            ExprKind.Cast(x, ty) => { self.ordered(x, cond) },
+            _ => {},
+        }
+        return 0
+    }
+
+    // The local `n` examined by a condition: the fields it was read from,
+    // as of the epoch it was read in.
+    fun examine_local(var self, n: str) {
+        match self.locals.get(n) {
+            Some(t) => {
+                for f in t.fields {
+                    let prev = self.checked.get(f).unwrap_or(-1)
+                    if t.epoch > prev { self.checked[f] = t.epoch } else { self.checked[f] = prev }
+                }
+            },
+            None => {},
+        }
+    }
+
+    // The fields of `self` the call `c` changes: what the method of `self`
+    // it calls changes (MYLA-171), or the field a mutator is called on, the
+    // builtin `push`, `pop`, `remove` or `append` or a `var self` method
+    // (MYLA-394).
+    fun call_fields(self, c: Expr) -> [str] {
+        match c.kind {
+            ExprKind.Call(callee, args, _) => {
+                match self.changes.get(self_method(callee)) {
+                    Some(x) => { return x },
+                    None => {},
+                }
+                match callee.kind {
+                    ExprKind.GetField(recv, m) => {
+                        let root = self_field(recv)
+                        if root != "" && (mutating_builtin(m) || self.mutators.contains(c.id)) { return [root] }
+                    },
+                    _ => {},
+                }
             },
             _ => {},
         }
-        return self.scan(e).awaits
+        return []
     }
 
-    // The head `c` of an `if` or a `while`: its calls' changes (a mutator's
-    // on a field of `self` a change of the field, MYLA-394) before it is
-    // examined, then its awaits.
-    fun head(var self, c: Expr) {
-        self.call_changes(c)
-        let aw = self.check(c)
-        self.suspend(aw)
-    }
-
-    // The changes of `e`'s calls that `value` hasn't made: all of them but
-    // a match's scrutinee's and guards'.
-    fun value_changes(var self, e: Expr) {
-        match e.kind {
-            ExprKind.MatchE(sc, arms) => {
-                for arm in arms {
-                    match arm.body {
-                        ExprOrBlock.EB_Expr(x) => { self.call_changes(x) },
-                        ExprOrBlock.EB_Block(b) => {},
-                    }
-                }
-            },
-            _ => { self.call_changes(e) },
-        }
+    fun opt(var self, e: Option<Expr>) {
+        match e { Some(x) => { self.ordered(x, false) }, None => {} }
     }
 
     fun stmt(var self, s: Stmt) {
@@ -11944,17 +11950,13 @@ impl Reentrancy {
                 if k == "async" { return }
                 let r = self.scan(init)
                 let before = self.epoch
-                let awaits = self.value(init)
+                self.ordered(init, false)
                 self.locals[name] = Taint { fields: self.taint(r), epoch: before }
-                self.suspend(awaits)
-                self.value_changes(init)
             },
             StmtKind.Assign(target, v) => {
                 let r = self.scan(v)
                 let before = self.epoch
-                let awaits = self.value(v)
-                self.suspend(awaits)
-                self.value_changes(v)
+                self.ordered(v, false)
                 let root = self_field(target)
                 if root != "" {
                     self.write(root, r.names, target)
@@ -11966,9 +11968,7 @@ impl Reentrancy {
                 }
             },
             StmtKind.IfS(c, th, el) => {
-                // the head's mutators change their fields before it is
-                // examined (MYLA-394); its awaits come after
-                self.head(c)
+                self.ordered(c, true)
                 self.block(th)
                 match el {
                     Some(ElseTail.ElseBlock(b)) => { self.block(b) },
@@ -11977,119 +11977,21 @@ impl Reentrancy {
                 }
             },
             StmtKind.WhileS(c, b) => {
-                self.head(c)
+                self.ordered(c, true)
                 self.block(b)
             },
             StmtKind.ForS(v, st, en, body, it) => {
-                var awaits: [Expr] = []
-                match st { Some(x) => { for a in self.scan(x).awaits { awaits.push(a) } }, None => {} }
-                match en { Some(x) => { for a in self.scan(x).awaits { awaits.push(a) } }, None => {} }
-                match it { Some(x) => { for a in self.scan(x).awaits { awaits.push(a) } }, None => {} }
-                self.suspend(awaits)
-                for x in [st, en, it] { match x { Some(y) => { self.call_changes(y) }, None => {} } }
+                self.opt(st)
+                self.opt(en)
+                self.opt(it)
                 self.block(body)
             },
-            StmtKind.ReturnS(v, t) => {
-                match v {
-                    Some(x) => {
-                        let aw = self.value(x)
-                        self.suspend(aw)
-                        self.value_changes(x)
-                    },
-                    None => {},
-                }
-            },
-            StmtKind.ExprStmt(e) => {
-                match e.kind {
-                    ExprKind.Call(c, args, _) => {
-                        // `self.f.push(x)`: the builtin as a method (D103)
-                        match c.kind {
-                            ExprKind.GetField(recv, m) => {
-                                let root = self_field(recv)
-                                if root != "" && (mutating_builtin(m) || self.mutators.contains(e.id)) {
-                                    var names: [str] = []
-                                    var awaits: [Expr] = []
-                                    for a in args {
-                                        let r = self.scan(a)
-                                        for n in r.names { names = add_name(names, n) }
-                                        for aw in r.awaits { awaits.push(aw) }
-                                    }
-                                    self.suspend(awaits)
-                                    // its arguments' own changes first (MYLA-394)
-                                    for a in args { self.call_changes(a) }
-                                    self.write(root, names, e)
-                                    return
-                                }
-                            },
-                            _ => {},
-                        }
-                        match c.kind {
-                            ExprKind.Name(f) => {
-                                if (f == "push" || f == "pop" || f == "remove" || f == "append") && args.len() > 0 {
-                                    let root = self_field(args[0])
-                                    var names: [str] = []
-                                    var awaits: [Expr] = []
-                                    var i = 1
-                                    while i < args.len() {
-                                        let r = self.scan(args[i])
-                                        for n in r.names { names = add_name(names, n) }
-                                        for a in r.awaits { awaits.push(a) }
-                                        i = i + 1
-                                    }
-                                    self.suspend(awaits)
-                                    self.call_changes(e)
-                                    if root != "" { self.write(root, names, e) }
-                                    return
-                                }
-                            },
-                            _ => {},
-                        }
-                    },
-                    _ => {},
-                }
-                let aw = self.value(e)
-                self.suspend(aw)
-                self.value_changes(e)
-            },
-            StmtKind.DestructDecl(k, b, ty, init) => {
-                let aw = self.scan(init).awaits
-                self.suspend(aw)
-                self.call_changes(init)
-            },
+            StmtKind.ReturnS(v, t) => { self.opt(v) },
+            StmtKind.ExprStmt(e) => { self.ordered(e, false) },
+            StmtKind.DestructDecl(k, b, ty, init) => { self.ordered(init, false) },
             // without an `await`, read as where it stands (D135)
             StmtKind.DeferS(b) => { self.block(b) },
             _ => {},
-        }
-    }
-
-    // The calls of methods of `self` in `e` change what those methods change
-    // (MYLA-171), and a mutator on a field of `self` that field, wherever it
-    // stands (MYLA-394): each with the locals its arguments read.
-    fun call_changes(var self, e: Expr) {
-        for c in self_calls(e) {
-            match c.kind {
-                ExprKind.Call(callee, args, _) => {
-                    var fs: [str] = []
-                    match self.changes.get(self_method(callee)) {
-                        Some(x) => { fs = x },
-                        None => {
-                            match callee.kind {
-                                ExprKind.GetField(recv, m) => {
-                                    let root = self_field(recv)
-                                    if root != "" && (mutating_builtin(m) || self.mutators.contains(c.id)) { fs = [root] }
-                                },
-                                _ => {},
-                            }
-                        },
-                    }
-                    if fs.len() > 0 {
-                        var names: [str] = []
-                        for a in args { for n in self.scan(a).names { names = add_name(names, n) } }
-                        for f in fs { self.write(f, names, c) }
-                    }
-                },
-                _ => {},
-            }
         }
     }
 
