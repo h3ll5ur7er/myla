@@ -2997,14 +2997,37 @@ pub fun failed_wait() {
     }
 }
 
+// How long a failure waits at most for the other workers to stop, in
+// milliseconds (MYLA-548).
+const STOP_WAIT_MS: int64 = 1000
+
 // `__wait_stopped`: until no other worker runs a frame, each worker's
-// current one looked at again from the first once one does.
+// current one looked at again from the first once one does, for at most
+// STOP_WAIT_MS: a worker blocked in a system call (a key read in raw mode,
+// a blocking read of a socket) or looping without a suspension point
+// doesn't hold the end for ever. The terminal's mode goes back first
+// (D187), so the report isn't followed by a raw terminal while it waits,
+// and after a short spin the wait sleeps a millisecond at a time instead
+// of spinning (MYLA-548: a worker spun at 99 percent of a CPU, the
+// terminal raw, until a key was pressed).
 pub fun wait_stopped() {
+    exit_hook()
     let me = __rt_get("__worker_id")
+    var spins: int64 = 1000
+    var naps: int64 = 0
     var w: int64 = 0
     while w < __rt_get("__exec_workers") {
         if w != me && __load64(__rt_waddr("__exec_cur", w)) != 0 {
-            __pause()
+            if spins > 0 {
+                __pause()
+                spins -= 1
+            } else {
+                if naps == STOP_WAIT_MS {
+                    return
+                }
+                os.sleep_ns(1000000)
+                naps += 1
+            }
             w = 0
         } else {
             w += 1

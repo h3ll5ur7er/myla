@@ -26,6 +26,7 @@ target, which must agree; `scripts/test-target.py` runs the suite for aarch64
 import fcntl
 import os
 import pty
+import resource
 import select
 import signal
 import struct
@@ -360,6 +361,40 @@ async fun main() {
 """
 
 
+# MYLA-548 (C17): raw mode, the entry task blocked reading a key, while a
+# task on another worker fails or exits
+BLOCKED_KEY = """import std.term as term
+import std.task as task
+import std.process as process
+from std.io import write
+
+async fun ending(ms: int, fail: bool) -> int {
+    await task.sleep(ms)
+    if fail {
+        let xs: [int] = []
+        return xs[3]
+    }
+    process.exit(4)
+    return 0
+}
+
+#main
+async fun main() {
+    let mode = process.args()[1]
+    let r = match term.raw_mode() {
+        Ok(r) => r
+        Err(e) => panic(f"raw_mode: {e}")
+    }
+    let w = write(1, "ready\\n")
+    async let f = ending(300, mode == "fail")
+    var kr = term.key_reader()
+    let k = kr.next()
+    let w2 = write(1, "got a key\\n")
+    let x = await f
+}
+"""
+
+
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
 class RawModeEnds(Case):
     """D187: raw mode ends with the program, through the runtime's exit hook:
@@ -419,6 +454,44 @@ class RawModeEnds(Case):
                 out, code, lflag = self.ended(argv, exe)
                 self.assertEqual((out, code), ("raw\n", 0))
                 self.assertEqual(lflag & (termios.ECHO | termios.ICANON), 0, oct(lflag))
+
+    def test_a_failure_beside_a_blocked_key_read(self):
+        """MYLA-548: on four workers, a task fails or exits while the entry
+        task blocks in a key read. The terminal is cooked again when the
+        failure is reported, while the program waits a second (the bounded
+        wait for the other workers) and the waiting worker sleeps: it ran on,
+        raw, a worker at 99 percent of a CPU, until a key came. (On one
+        worker the key read holds the only worker, the failing task's too.)"""
+        built = Built(BLOCKED_KEY)
+        try:
+            for mode, want in (("fail", 1), ("exit", 4)):
+                with self.subTest(mode=mode):
+                    argv, exe = run_argv(built.binary, built.path, [mode])
+                    before = resource.getrusage(resource.RUSAGE_CHILDREN)
+                    t = Pty(argv, exe, env=env_with(MYLA_THREADS="4"))
+                    t.expect("ready\n")
+                    start = time.time()
+                    if mode == "fail":
+                        t.expect("runtime error: list index 3 out of bounds (len 0)")
+                        # (the report comes just before the wait restores it)
+                        while t.lflag() & self.COOKED != self.COOKED and time.time() < start + 0.8:
+                            time.sleep(0.01)
+                        self.assertEqual(t.lflag() & self.COOKED, self.COOKED, "raw while it waits")
+                        self.assertIsNone(t.proc.poll())
+                    out, code = t.finish_keeping(timeout=10)
+                    took = time.time() - start
+                    lflag = t.lflag()
+                    t.close()
+                    after = resource.getrusage(resource.RUSAGE_CHILDREN)
+                    self.assertEqual(code, want, out)
+                    self.assertNotIn("got a key", out)
+                    self.assertEqual(lflag & self.COOKED, self.COOKED, f"left raw: {oct(lflag)}")
+                    self.assertLess(took, 5)
+                    if TEST_TARGET == "":
+                        cpu = (after.ru_utime + after.ru_stime) - (before.ru_utime + before.ru_stime)
+                        self.assertLess(cpu, 0.8, f"{cpu:.2f} s of CPU")
+        finally:
+            built.close()
 
     def test_a_failed_task(self):
         for how, argv, exe in self.ends_async.commands():
