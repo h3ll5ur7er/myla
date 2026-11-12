@@ -1093,12 +1093,13 @@ impl Interp {
     // not.
     #test(interp_on("enum E { A, B(int) }"), Value.VList([Value.VInt(7)]), Value.VInt(0), expr_of("a.b[0]"), false, -1)[true]
     fun check_index(var self, c: Value, k: Value, e: Expr, assigning: bool, place: int32) -> bool {
-        let msg = index_error(c, k, assigning, place)
+        let msg = index_error(c, k, assigning, place, None)
         if msg.len() > 0 {
             // a missing key written by its type, a uint64's unsigned, as
             // native code writes it (D183, MYLA-440), a type of another
-            // module's by the name messages give it (MYLA-514)
-            if is_vmap(c) { self.fail(e, missing_key(typed_repr(self.checker, as_written(k), self.index_key_type(e)))) } else { self.fail(e, msg) }
+            // module's by the name messages give it (MYLA-514); a uint64
+            // index unsigned too (MYLA-546)
+            if is_vmap(c) { self.fail(e, missing_key(typed_repr(self.checker, as_written(k), self.index_key_type(e)))) } else { self.fail(e, index_error(c, k, assigning, place, self.index_key_type(e))) }
             return false
         }
         return true
@@ -5941,29 +5942,32 @@ fun value_len(v: Value) -> int64 {
 
 // Why `c[k]` can't be read (or, `assigning`, written: a missing map key is
 // then an insert), with the Python interpreter's message; "" if it can.
-#test(Value.VStr("a"), Value.VInt(0), false, -1)[""]
-#test(Value.VStr("b"), Value.VInt(0), false, -1)[""]
-#test(Value.VStr("e"), Value.VInt(0), false, -1)[""]
-#test(Value.VMap(new_mapv()), Value.VInt(0), false, -1)["map key 0 not found"]
-// (`place`: a map key's place, as `Interp.place_in` finds it)
-fun index_error(c: Value, k: Value, assigning: bool, place: int32) -> str {
+#test(Value.VStr("a"), Value.VInt(0), false, -1, None)[""]
+#test(Value.VStr("b"), Value.VInt(0), false, -1, None)[""]
+#test(Value.VStr("e"), Value.VInt(0), false, -1, None)[""]
+#test(Value.VMap(new_mapv()), Value.VInt(0), false, -1, None)["map key 0 not found"]
+#test(Value.VList([]), Value.VInt(-1), false, -1, Some(Type.TInt(64, false)))["list index 18446744073709551615 out of bounds (len 0)"]
+#test(Value.VStr("ab"), Value.VInt(-1), false, -1, Some(Type.TInt(64, true)))["string index -1 out of bounds (len 2)"]
+// (`place`: a map key's place, as `Interp.place_in` finds it; `it`: the
+// index's type, by which a `uint64` is written unsigned, MYLA-546)
+fun index_error(c: Value, k: Value, assigning: bool, place: int32, it: Option<Type>) -> str {
     match c {
         Value.VList(xs) => {
             let i = as_int(k)
             if i < 0 || i >= (xs.len() as int64) {
-                return format("list index {} out of bounds (len {})", i, xs.len())
+                return format("list index {} out of bounds (len {})", index_text(i, it), xs.len())
             }
         },
         Value.VBytes(s) => {
             let i = as_int(k)
             if i < 0 || i >= (s.len() as int64) {
-                return format("list index {} out of bounds (len {})", i, s.len())
+                return format("list index {} out of bounds (len {})", index_text(i, it), s.len())
             }
         },
         Value.VStr(str_) => {
             let i = as_int(k)
             if i < 0 || i >= (str_.len() as int64) {
-                return format("string index {} out of bounds (len {})", i, str_.len())
+                return format("string index {} out of bounds (len {})", index_text(i, it), str_.len())
             }
         },
         Value.VMap(m) => {
@@ -5972,6 +5976,14 @@ fun index_error(c: Value, k: Value, assigning: bool, place: int32) -> str {
         _ => {},
     }
     return ""
+}
+
+// An index `i` of type `it` as an error's text writes it: a `uint64`'s
+// unsigned.
+#test(-1, Some(Type.TInt(64, false)))["18446744073709551615"]
+#test(-1, None)["-1"]
+fun index_text(i: int64, it: Option<Type>) -> str {
+    return match it { Some(Type.TInt(w, sg)) => if w == 64 && !sg { format("{}", i as uint64) } else { format("{}", i) }, _ => format("{}", i) }
 }
 
 // `v` with the name of each struct and enum in it as messages write it

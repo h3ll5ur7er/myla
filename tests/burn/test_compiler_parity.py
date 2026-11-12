@@ -10434,6 +10434,16 @@ class TestCompilerParity(unittest.TestCase):
                 self.assertEqual((native[0], native[2]), (interp[0], interp[2]))
                 self.assertEqual(native[1], _without_snippets(interp[1]))
 
+    def test_a_uint64_index_is_reported_unsigned(self):
+        # MYLA-546: 2^64-1 was `list index -1 out of bounds`
+        for name, text in (("uint64_list_index", "list index 18446744073709551615 out of bounds (len 2)"),
+                           ("uint64_index_assigned", "list index 9223372036854775808 out of bounds (len 2)"),
+                           ("uint64_string_index", "string index 18446744073709551614 out of bounds (len 2)")):
+            with self.subTest(program=name):
+                interp, native = _both(RUNTIME_ERRORS[name])
+                self.assertTrue(interp[1].startswith(f"runtime error: {text}\n"), interp[1])
+                self.assertTrue(native[1].startswith(f"runtime error: {text}\n"), native[1])
+
     def test_divide_by_zero_traps_nonzero(self):
         src = "#main\nfun main() {\n    var z = 0\n    print(1 / z)\n}\n"
         out, code = build_and_run(src)
@@ -10748,6 +10758,11 @@ RUNTIME_ERRORS = {
                                            "fun main() {\n    let t = Table { m: [1: \"a\"] }\n    print(look(t.m, 1))\n"
                                            "    print(look(t.m, 18446744073709551615))\n}\n"),
     "string_index": 'fun main() {\n    let s = "ab"\n    var i = 9\n    print(s[i])\n}\n',
+    # MYLA-546: a uint64 index of 2^63 or more was reported signed, on both runners
+    "uint64_list_index": "fun main() {\n    let xs = [1, 2]\n    var i: uint64 = 18446744073709551615\n    print(xs[i])\n}\n",
+    "uint64_index_assigned": "fun main() {\n    var xs = [[1], [2]]\n    var i: uint64 = 9223372036854775808\n    xs[i].push(3)\n}\n",
+    "uint64_string_index": ('fun main() {\n    let s = "ab"\n    let i: [uint64] = [18446744073709551614]\n'
+                            '    print(s[i[0]])\n}\n'),
     "error_after_stderr": 'from std.io import eprint\n\nfun main() {\n    eprint("before\\n")\n    panic("then")\n}\n',
 }
 
