@@ -2412,9 +2412,15 @@ impl Lower {
 
     // The instance of `callee` that the call `e` asks for, `too` large,
     // refused (H5): its function asks for a larger one in turn, without end.
+    // A call outside every generic instance asks for a type the program
+    // writes, finite: too large, not without end (MYLA-543).
     fun refuse_instance(var self, cg: CodeGen, e: Expr, callee: str, too: str) {
-        let msg = format("the instances of '{}' nest without end: this call asks for one whose type arguments are {}", callee, too)
-        let note = format("'{}' is called with a larger type at each step (polymorphic recursion), which native code can't be built for; the interpreter runs it", callee)
+        var msg = format("the instances of '{}' nest without end: this call asks for one whose type arguments are {}", callee, too)
+        var note = format("'{}' is called with a larger type at each step (polymorphic recursion), which native code can't be built for; the interpreter runs it", callee)
+        if cg.subst.len() == 0 {
+            msg = format("the instance of '{}' this call asks for is too large to build: its type arguments are {}", callee, too)
+            note = "native code is built for each list of type arguments a generic function is called with, up to that size; the interpreter runs it"
+        }
         self.refused.push(CheckErr { line: e.line, col: e.col, sp: e.sp, msg: msg, decl: e.id, notes: [Note { label: "note", msg: note, line: 0, col: 0, sp: no_span() }] })
         let d = self.unsupported("a refused instance")
     }
@@ -2952,7 +2958,8 @@ impl Lower {
         self.add(Inst.Load(p, at))
         let off = cg.map_key_off(mt)
         if is_aggregate(kt) {
-            self.add(Inst.Copy(self.slot_addr(elem), self.offset(p, off), cg.size(kt)))
+            // (a recursive enum's from its box, D194)
+            self.add(Inst.Copy(self.slot_addr(elem), self.unbox(cg, kt, self.offset(p, off)), cg.size(kt)))
         } else {
             let x = self.temp(kt)
             self.add(Inst.LoadAt(x, p, off, 8))
@@ -4557,7 +4564,14 @@ impl Lower {
     fun key_operand(var self, cg: CodeGen, mt: Type, k: Expr) -> int32 {
         if !cg.map_hashed(mt) { return self.expr(cg, k) }
         let kt = map_key(mt)
-        if cg.is_boxed(kt) { return self.unsupported("a map keyed by a recursive enum") }
+        if cg.is_boxed(kt) {
+            // a recursive enum (D194), as its slot holds it: a word pointing
+            // at the value, borrowed, which the key's routines only read
+            // (`__mput_<K>` boxes a copy)
+            let w = self.new_slot("__key", Type.TPtr, 8, -1, false)
+            self.add(Inst.Store(w, self.addr(cg, k)))
+            return self.slot_addr(w)
+        }
         if is_aggregate(kt) { return self.addr(cg, k) }
         let v = self.expr(cg, k)
         let slot = self.new_slot("__key", kt, 8, -1, false)
@@ -4658,7 +4672,13 @@ impl Lower {
                     x = self.temp(Type.TFloat(64))
                     self.add(Inst.Cast(x, t, Type.TFloat(64), v))
                 }
-                self.rt_call(cg, d, "__float_to_str", [x, self.int_const(17)])
+                // (written as the interpreter's `py_repr` writes it, `3.0`,
+                // `1e+300`, by std.rt where it has the routine)
+                if cg.has_func("std$rt$key_float_text") {
+                    let text = self.temp(Type.TStr)
+                    self.rt_call(cg, text, "__float_to_str", [x, self.int_const(17)])
+                    self.add(Inst.Call(d, "std$rt$key_float_text", [text]))
+                } else { self.rt_call(cg, d, "__float_to_str", [x, self.int_const(17)]) }
             },
             _ => { self.add(Inst.Str(d, "?")) },
         }
@@ -6397,7 +6417,17 @@ pub fun map_put_ir(cg: CodeGen, kt: Type, name: str) -> Routine {
     let sm = lw.new_slot("made", i64, 8, -1, false)
     lw.add(Inst.Store(sm, made))
     let ks = cg.stored_size(kt)
-    if ks > 0 {
+    if cg.is_boxed(kt) {
+        // a recursive enum's key (D194), given as a word pointing at it: a
+        // new box holding a copy, with references of its own
+        let b = lw.temp(Type.TPtr)
+        lw.add(Inst.Rt(b, "__alloc", [lw.int_const(cg.size(kt))]))
+        let src = lw.temp(Type.TPtr)
+        lw.add(Inst.LoadAt(src, lw.read_ptr(sk), 0, 8))
+        lw.add(Inst.Copy(b, src, cg.size(kt)))
+        lw.add(Inst.Retain(kt, b))
+        lw.add(Inst.StoreAt(lw.read_cell(sm), 16, b, 8))
+    } else if ks > 0 {
         let at = lw.temp(i64)
         lw.add(Inst.Bin(at, "+", i64, i64, lw.read_cell(sm), lw.int_const(16), Pos { line: 0, col: 0 }))
         let dst = lw.temp(Type.TPtr)

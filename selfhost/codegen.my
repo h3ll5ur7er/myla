@@ -1597,21 +1597,25 @@ impl CodeGen {
             Type.TAsync(f) => { return true },
             Type.TActor(n, a) => { return true },
             Type.TStruct(n, a) => {
-                if list_has_str(seen, n) { return false }
+                let tok = mono_token(t)
+                if list_has_str(seen, tok) { return false }
                 let info = self.struct_info(n)
                 let sub = self.type_subst(info.type_params, a)
                 for f in info.fields {
-                    if self.owns_heap_seen(subst_type(f.ty, sub), push_str_copy(seen, n)) { return true }
+                    if self.owns_heap_seen(subst_type(f.ty, sub), push_str_copy(seen, tok)) { return true }
                 }
                 return false
             },
             Type.TEnum(n, a) => {
-                if list_has_str(seen, n) { return false }
+                // (seen by the whole type: `Option<Option<Tree>>` holds an
+                // `Option` that owns a box, C10)
+                let tok = mono_token(t)
+                if list_has_str(seen, tok) { return false }
                 let info = self.enum_info(n)
                 let sub = self.type_subst(info.type_params, a)
                 for v in info.variants {
                     for ft in v.payload {
-                        if self.owns_heap_seen(subst_type(ft, sub), push_str_copy(seen, n)) { return true }
+                        if self.owns_heap_seen(subst_type(ft, sub), push_str_copy(seen, tok)) { return true }
                     }
                 }
                 return false

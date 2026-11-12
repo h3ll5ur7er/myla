@@ -22,16 +22,121 @@
 
 from .checker import Type, subst_type
 from .codegen import CodeGen, is_aggregate, int_width_cg, is_tfloat32, is_aggregate_opt, is_cell_t, is_tfunc, tls_offset
-from .ir import IrFunc, Inst, Term, Slot, ENV_WORD, ends_in_call, Intrinsic, is_xchg, is_rc_dec
+from .ir import IrFunc, IrBlock, Inst, Term, Slot, ENV_WORD, ends_in_call, Intrinsic, is_xchg, is_rc_dec, inst_uses, inst_defs, term_uses
 from .ir_x86 import slots_at, frame_size, tail_call_at, drops_after_free, passes_frame_address, frame_addresses
 from .ir_util import int_in, is_char_type, is_float_type, reachable_blocks, wrapped
 
 // A function being emitted: its argument words, the local of each
-// temporary (`nparams + t`), the scratch locals, the frame's size and each
-// slot's offset in it (from the frame-base local, or in the heap frame),
-// the dispatch number of each block, the blocks in dispatch order, the
-// points a frame function resumes at.
-struct WFn { nparams: int32, la: int32, lb: int32, bb: int32, fp: int32, size: int32, soff: [int32], scratch: int32, frame: bool, num: [int32], order: [int32], resumes: [int32] }
+// temporary (`nparams + loc[t]`, `wasm_locals`), the scratch locals, the
+// frame's size and each slot's offset in it (from the frame-base local, or
+// in the heap frame), the dispatch number of each block, the blocks in
+// dispatch order, the points a frame function resumes at.
+struct WFn { nparams: int32, la: int32, lb: int32, bb: int32, fp: int32, size: int32, soff: [int32], scratch: int32, frame: bool, num: [int32], order: [int32], resumes: [int32], loc: [int32] }
+
+// The local of each temporary of `f`, counted after the parameters, and how
+// many there are (MYLA-543): a temporary read and written in one block only,
+// each read after a write there, shares its local with the others of its
+// block that aren't live at the same time (a read frees it after the
+// instruction that reads it last, so no instruction's result shares a local
+// with its own operands); any other has one of its own. Node refuses a
+// function of more than 50,000 locals, which a list literal of 52,000
+// elements made when every temporary had one.
+#test(IrFunc { name: "f", ret: None, slots: [], temps: [Type.TBool, Type.TBool, Type.TBool], blocks: [IrBlock { insts: [Inst.Const(0, Type.TBool, 1), Inst.Exit(0), Inst.Const(1, Type.TBool, 1), Inst.Exit(1)], term: Term.Ret(-1) }], order: [0], instances: [], frame: false, scope_parent: [] })[([0, 0, 1], 2)]
+fun wasm_locals(f: IrFunc) -> ([int32], int32) {
+    let n = f.temps.len()
+    // the one block a temporary is in (-2: none yet, -1: more than one, or
+    // read before it is written), and where its block reads it last
+    var home: [int32] = []
+    var last: [int32] = []
+    var written: [bool] = []
+    var loc: [int32] = []
+    var k = 0
+    while k < n {
+        home.push(-2)
+        last.push(-1)
+        written.push(false)
+        loc.push(-1)
+        k += 1
+    }
+    var b = 0
+    while b < f.blocks.len() {
+        var i = 0
+        let insts = f.blocks[b].insts
+        while i <= insts.len() {
+            var uses: [int32] = []
+            var defs: [int32] = []
+            if i < insts.len() {
+                uses = inst_uses(insts[i])
+                defs = inst_defs(insts[i])
+            } else { uses = term_uses(f.blocks[b].term) }
+            for u in uses {
+                if u >= 0 && u < n {
+                    if home[u] == -2 { home[u] = b } else if home[u] != b { home[u] = -1 }
+                    if !written[u] { home[u] = -1 }
+                    last[u] = i
+                }
+            }
+            for d in defs {
+                if d >= 0 && d < n {
+                    if home[d] == -2 { home[d] = b } else if home[d] != b { home[d] = -1 }
+                    written[d] = true
+                }
+            }
+            i += 1
+        }
+        b += 1
+    }
+    // their own locals first, then the shared ones of each block
+    var count = 0
+    k = 0
+    while k < n {
+        if home[k] == -1 {
+            loc[k] = count
+            count += 1
+        }
+        k += 1
+    }
+    let own = count
+    b = 0
+    while b < f.blocks.len() {
+        var free: [int32] = []
+        var top = own
+        let insts = f.blocks[b].insts
+        var i = 0
+        while i < insts.len() {
+            for d in inst_defs(insts[i]) {
+                if d >= 0 && d < n && home[d] == b && loc[d] < 0 {
+                    if free.len() > 0 { loc[d] = free.pop() } else {
+                        loc[d] = top
+                        top += 1
+                    }
+                    // never read: free again at once
+                    if last[d] < 0 { free.push(loc[d]) }
+                }
+            }
+            var done: [int32] = []
+            for u in inst_uses(insts[i]) {
+                if u >= 0 && u < n && home[u] == b && last[u] == i && !int_in(done, u) {
+                    done.push(u)
+                    free.push(loc[u])
+                }
+            }
+            i += 1
+        }
+        if top > count { count = top }
+        b += 1
+    }
+    // (one the instructions don't name: a local of its own all the same)
+    k = 0
+    while k < n {
+        if loc[k] < 0 {
+            loc[k] = count
+            count += 1
+        }
+        k += 1
+    }
+    return (loc, count)
+}
 
 impl CodeGen {
     // `f` as `myla_<mangled>` for wasm32.
@@ -89,8 +194,9 @@ impl CodeGen {
                 match f.blocks[b].term { Term.Suspend(rb) => { if !int_in(resumes, rb) { resumes.push(rb) } }, _ => {} }
             }
         }
-        let t = f.temps.len()
-        let w = WFn { nparams: nparams, la: nparams + t, lb: nparams + t + 1, bb: nparams + t + 2, fp: nparams + t + 3, size: size, soff: soff, scratch: scratch, frame: f.frame, num: num, order: order, resumes: resumes }
+        // the temporaries' locals, shared where they can be (`wasm_locals`)
+        let (loc, t) = wasm_locals(f)
+        let w = WFn { nparams: nparams, la: nparams + t, lb: nparams + t + 1, bb: nparams + t + 2, fp: nparams + t + 3, size: size, soff: soff, scratch: scratch, frame: f.frame, num: num, order: order, resumes: resumes, loc: loc }
         let name = format("myla_{}", mangled)
         self.wasm_define(name, nparams)
         self.emit("")
@@ -255,7 +361,7 @@ impl CodeGen {
     // -- operands ----------------------------------------------------------
 
     fun wasm_get(var self, w: WFn, t: int32) {
-        self.emit(format("local.get {}", w.nparams + t))
+        self.emit(format("local.get {}", w.nparams + w.loc[t]))
     }
 
     fun wasm_set(var self, w: WFn, t: int32) {
@@ -263,7 +369,7 @@ impl CodeGen {
             self.emit("drop")
             return
         }
-        self.emit(format("local.set {}", w.nparams + t))
+        self.emit(format("local.set {}", w.nparams + w.loc[t]))
     }
 
     // The i32 address of slot `s`'s cell (its offset not added: `wasm_soff`).

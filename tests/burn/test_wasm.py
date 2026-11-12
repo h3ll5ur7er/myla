@@ -177,6 +177,21 @@ class WasmParity(unittest.TestCase):
             build_wasm(path, wb)
             self.assertEqual(run(NODE + [wb]), ("150000000\n149999999\n", "", 0))
 
+    def test_a_list_literal_of_52000_elements(self):
+        # Node refused the module (`local count too large`): each temporary
+        # had a local of its own, past Node's 50,000; a block's temporaries
+        # share them now (MYLA-543)
+        elems = ", ".join(str(i) for i in range(52000))
+        source = (f"fun tbl() -> [int] {{\n    return [{elems}]\n}}\n\n"
+                  "fun main() {\n    let t = tbl()\n    print(t.len())\n    print(t[51999])\n}\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "literal.my")
+            with open(path, "w") as fh:
+                fh.write(source)
+            wb = os.path.join(tmp, "literal.wasm")
+            build_wasm(path, wb)
+            self.assertEqual(run(NODE + [wb]), ("52000\n51999\n", "", 0))
+
     def test_files(self):
         # files and directories through WASI: written, read, listed, renamed
         # and removed, a relative path against the working directory

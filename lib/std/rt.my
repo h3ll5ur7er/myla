@@ -2409,6 +2409,54 @@ pub fun key_bool_text(b: bool) -> str {
     return "False"
 }
 
+// A float's from its print form `s` (`__float_to_str`): an integral value
+// with `.0` (`3.0`, `-0.0`), an exponent signed and of two digits at least
+// (`1e+300`, `1.5e-07`); `nan`, `inf` and `-inf` as they are.
+#test("3")["3.0"]
+#test("-0")["-0.0"]
+#test("2.5")["2.5"]
+#test("1e300")["1e+300"]
+#test("1.5e-7")["1.5e-07"]
+#test("1e-100")["1e-100"]
+#test("-inf")["-inf"]
+pub fun key_float_text(s: str) -> str {
+    var e = -1
+    var point = false
+    var i = 0
+    while i < s.len() {
+        if s[i] == 'e' {
+            e = i
+        }
+        if s[i] == '.' {
+            point = true
+        }
+        i += 1
+    }
+    if s == "nan" || s == "inf" || s == "-inf" {
+        return s
+    }
+    if e < 0 {
+        if point {
+            return s
+        }
+        return s + ".0"
+    }
+    var sb = StringBuilder()
+    sb.append(s, 0, e + 1)
+    var d = e + 1
+    if s[d] == '-' {
+        sb.append("-")
+        d += 1
+    } else {
+        sb.append("+")
+    }
+    if s.len() - d < 2 {
+        sb.append("0")
+    }
+    sb.append(s, d, s.len())
+    return sb.build()
+}
+
 pub fun key_str_text(s: str) -> str {
     var has_single = false
     var has_double = false
