@@ -1138,6 +1138,81 @@ class SelfHostedCodegenParity(unittest.TestCase):
         self.assertNotIn("myla_slot:", asm)
         self.assertIn("call myla_slot", self._function_asm(plain, "total"))
 
+    def test_a_builtin_types_method_inlines_its_modules_functions(self) -> None:
+        # MYLA-526: a method of a built-in type (`impl [int]`, `impl<T> [T]`)
+        # is named after its type (`__list.first_bumped`), not its module,
+        # and still counts as its module's: it inlines the module's small
+        # functions as a struct's method does, and a trap in the copy reports
+        # the callee's own file and line
+        module = (
+            "fun bump(n: int) -> int {\n"
+            "    if n > 100 { return n }\n"
+            "    return n + 1\n"
+            "}\n"
+            "fun ratio(a: int, b: int) -> int {\n"
+            "    return a / b\n"
+            "}\n"
+            "pub struct Box {\n"
+            "    v: int,\n"
+            "}\n"
+            "impl Box {\n"
+            "    fun bumped(self) -> int {\n"
+            "        return bump(self.v)\n"
+            "    }\n"
+            "}\n"
+            "impl [int] {\n"
+            "    fun first_bumped(self) -> int {\n"
+            "        return bump(self[0])\n"
+            "    }\n"
+            "    fun per_first(self) -> int {\n"
+            "        return ratio(100, self[0])\n"
+            "    }\n"
+            "}\n"
+            "impl<T> [T] {\n"
+            "    fun len_bumped(self) -> int {\n"
+            "        return bump(self.len())\n"
+            "    }\n"
+            "}\n")
+        main = (
+            "from .pkg.m import Box\n"
+            "fun main() {\n"
+            "    print(Box { v: 3 }.bumped() + [5].first_bumped() + [1, 2].len_bumped())\n"
+            "    print([4].per_first())\n"
+            "    print([0].per_first())\n"
+            "}\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            os.mkdir(os.path.join(tmp, "pkg"))
+            with open(os.path.join(tmp, "pkg", "m.my"), "w", encoding="utf-8") as fh:
+                fh.write(module)
+            path = os.path.join(tmp, "main.my")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(main)
+            asm = self._emit_asm(path, STDLIB_ROOT)
+            with tempfile.TemporaryDirectory() as tmp2:
+                asm_path = os.path.join(tmp2, "out.s")
+                bin_path = os.path.join(tmp2, "out")
+                with open(asm_path, "w", encoding="utf-8") as fh:
+                    fh.write(asm)
+                assemble(asm_path, bin_path)
+                argv, exe = run_argv(bin_path, bin_path)
+                run = subprocess.run(argv, executable=exe, capture_output=True, text=True, timeout=30)
+            self.assertEqual((run.stdout, run.returncode), ("13\n25\n", 1))
+            self.assertIn("division by zero", run.stderr)
+            self.assertIn("m.my:6:", run.stderr)
+        self._x86_only()
+        for name in ("pkg$m$Box.bumped", "__list.first_bumped", "__list.len_bumped__4.i32"):
+            body = self._whole_function_asm(asm, name)
+            self.assertNotIn("myla_pkg$m$bump", body, body)
+        self.assertNotIn("myla_pkg$m$ratio", self._whole_function_asm(asm, "__list.per_first"))
+
+    def _whole_function_asm(self, asm: str, name: str) -> str:
+        """The lines of `myla_<name>`, up to the next function's label (its
+        tail calls too, which `_function_asm`, stopping at a `ret`, can miss)."""
+        lines = asm.split("\n")
+        start = lines.index(f"myla_{name}:")
+        end = next((i for i in range(start + 1, len(lines)) if re.match(r"^[A-Za-z_][^ \t]*:$", lines[i])), len(lines))
+        return "\n".join(lines[start:end])
+
     def test_constant_operands_fold(self) -> None:
         # MYLA-162: an operator on two constants (literals, `const`s) is one
         # constant, wrapped as at run time

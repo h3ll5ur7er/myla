@@ -19,7 +19,7 @@ from .checker import CheckErr, Checker, Type, is_builtin_value, is_raw_memory_pr
 from .checker import is_notify_primitive
 from .ir import render_func, verify, moves, IrFunc, Inst
 from .ssa import SsaStats, no_ssa_stats
-from .inline import inlinable, inline_calls, same_module, may_inline, merge_blocks
+from .inline import inlinable, inline_calls, may_inline, merge_blocks
 from .hoist import hoist_cows
 from .ranges import widen_counters
 from .anf import Norm, new_norm
@@ -406,6 +406,27 @@ impl CodeGen {
         var path = self.line_spans[0].path
         for sp in self.line_spans { if sp.first_id <= id { path = sp.path } }
         return path
+    }
+
+    // The module the node `id` is in, for the inliner, which copies a
+    // function only into its own module's functions (so that the positions
+    // its traps report, which name the caller's file, stay right: MYLA-162,
+    // MYLA-526): the index of the file's span, as `path_of` finds it (0
+    // without spans), or -1 for a node with no file of its own (the
+    // prelude's, or none).
+    #test(codegen_on("[int]"), 3)[0]
+    #test(codegen_on("[int]"), -1)[-1]
+    fun module_of(self, id: int32) -> int32 {
+        if id < 0 || (self.line_spans.len() > 0 && id >= self.prelude_id) { return -1 }
+        // the last span starting at or before `id`: those from `hi` on start
+        // after it
+        var lo = 0
+        var hi = self.line_spans.len()
+        while hi - lo > 1 {
+            let mid = lo + (hi - lo) / 2
+            if self.line_spans[mid].first_id <= id { lo = mid } else { hi = mid }
+        }
+        return lo
     }
 
     // -- runtime-error positions (MYLA-65, MYLA-66) ------------------------
@@ -1067,6 +1088,16 @@ impl CodeGen {
         return match self.func_ix.get(name) {
             Some(i) => self.funcs[i]
             None => panic(format("internal error: no function '{}' to compile", name))
+        }
+    }
+
+    // The node that declares the function `name` (the impl, for a method),
+    // or -1 for none: `sig_of(name).decl_id` without copying the signature.
+    #test(codegen_on("[int]"), "add")[-1]
+    fun decl_of(self, name: str) -> int32 {
+        return match self.func_ix.get(name) {
+            Some(i) => self.funcs[i].decl_id,
+            None => -1,
         }
     }
 
@@ -2495,7 +2526,8 @@ impl CodeGen {
         }
         var body_fd = fd
         if self.frames && fd.is_async { body_fd = self.normalized_fn(fd) }
-        self.emit_ir(self.take_ir(lower_function(self, body_fd, mangled), mangled), body_fd, mangled)
+        let decl_id = self.decl_of(body_fd.name)
+        self.emit_ir(self.take_ir(lower_function(self, body_fd, mangled), mangled, decl_id), body_fd, mangled)
     }
 
     // `fd` with its body normalized for its frame function: each `await` in
@@ -2545,7 +2577,7 @@ impl CodeGen {
             self.resolved = self.norm.resolved
             self.norm.resolved = [:]
         }
-        let f = self.take_ir(lower_lambda(self, job), job.lifted)
+        let f = self.take_ir(lower_lambda(self, job), job.lifted, job.id)
         self.emit_ir_at(f, job.id, job.line, job.col, job.lifted)
         var owned: [DropEntry] = []
         for c in job.caps { if self.owns_heap(c.ty) { owned.push(DropEntry { off: c.off, ty: c.ty }) } }
@@ -2556,8 +2588,9 @@ impl CodeGen {
     // The lowering's result, accepted by the ownership verifier (MYLA-105),
     // with what it needs queued: generic instances, and the lambdas, partial
     // applications and function values it makes (MYLA-106). A function that
-    // can't be lowered or doesn't verify is a compiler bug.
-    fun take_ir(var self, lowered: Result<Lowered, str>, mangled: str) -> IrFunc {
+    // can't be lowered or doesn't verify is a compiler bug. `decl_id`: the
+    // node that declares it, whose file is its module's.
+    fun take_ir(var self, lowered: Result<Lowered, str>, mangled: str, decl_id: int32) -> IrFunc {
         let l = match lowered {
             Ok(x) => x
             Err(why) => { panic(format("internal error: {} can't be lowered to the IR: {}", mangled, why)) }
@@ -2571,7 +2604,7 @@ impl CodeGen {
         var f = moves(l.f)
         if !f.frame && self.inlining && !self.debug {
             let n = f.blocks.len()
-            f = self.inline_small(f)
+            f = self.inline_small(f, decl_id)
             // the copies' blocks joined to their neighbours
             if f.blocks.len() != n { f = merge_blocks(f) }
         }
@@ -2609,22 +2642,33 @@ impl CodeGen {
         return f
     }
 
-    // `f` with its calls to small leaf functions of its own module replaced
-    // by their bodies (`inline.my`, MYLA-162).
-    fun inline_small(var self, f: IrFunc) -> IrFunc {
+    // `f`, declared by the node `decl_id`, with its calls to small leaf
+    // functions of its own module replaced by their bodies (`inline.my`,
+    // MYLA-162). The module is the declaration's file, not a part of the
+    // name: a method of a built-in type (`__list.first_bumped`) is named
+    // after its type, and inlines its module's functions as a struct's
+    // method does (MYLA-526).
+    fun inline_small(var self, f: IrFunc, decl_id: int32) -> IrFunc {
+        let home = self.module_of(decl_id)
+        if home < 0 {
+            return f
+        }
         var names: [str] = []
         var bodies: [IrFunc] = []
         for b in f.blocks {
             for i in b.insts {
                 match i {
                     Inst.Call(d, name, args) => {
-                        if name != f.name && same_module(name, f.name) && !list_has_str(names, name) {
-                            match self.inline_body(name) {
-                                Some(body) => {
-                                    names.push(name)
-                                    bodies.push(body)
-                                },
-                                None => {},
+                        if name != f.name && !list_has_str(names, name) {
+                            let id = self.decl_of(name)
+                            if id >= 0 && self.module_of(id) == home {
+                                match self.inline_body(name) {
+                                    Some(body) => {
+                                        names.push(name)
+                                        bodies.push(body)
+                                    },
+                                    None => {},
+                                }
                             }
                         }
                     },
@@ -3606,7 +3650,7 @@ impl CodeGen {
     // (`myla_<its name>`) where the type `decl_id` is declared: checked,
     // its small leaf callees inlined, the functions it calls requested.
     fun emit_routine(var self, f: IrFunc, decl_id: int32, line: int32, col: int32) {
-        let g = self.take_ir(Ok(Lowered { f: f, lams: [], partials: [], fnvals: [], refused: [], wants: [] }), f.name)
+        let g = self.take_ir(Ok(Lowered { f: f, lams: [], partials: [], fnvals: [], refused: [], wants: [] }), f.name, decl_id)
         self.emit_ir_at(g, decl_id, line, col, f.name)
     }
 
