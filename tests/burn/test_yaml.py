@@ -19,7 +19,10 @@ parser reports (`test.event`) and, for a text that isn't YAML, a file
 What `std.yaml` reads, `to_string` writes and `parse` reads back must be the
 same value. A Myla driver reads length-framed texts from stdin and prints, for
 each, `ok <round trip> <json>` or `err <line> <col> <kind>`; it runs natively,
-and a few cases run on the self-hosted interpreter too.
+and a few cases run on the self-hosted interpreter too. The broken texts and
+the numbers run through the driver built `--checked` as well, which must
+answer as the plain build does: an integer overflow is an error there (D184,
+MYLA-550: `0xFFFFFFFFFFFFFFFF` trapped).
 
 The suite is data, not code: the test only reads its files. It looks for the
 data release in `$MYLA_YAML_TEST_SUITE`, else clones its `data-2022-01-17`
@@ -86,6 +89,7 @@ fun kind_name(e: yaml.YamlError) -> str {
         ExplicitKey => "ExplicitKey"
         ComplexKey => "ComplexKey"
         DuplicateKey => "DuplicateKey"
+        OutOfRange => "OutOfRange"
         _ => "other"
     }
 }
@@ -113,6 +117,13 @@ _FEATURE_KINDS = {
     "alias": "Alias", "anchor": "Anchor", "tag": "Tag", "directive": "Directive",
     "documents": "MultipleDocuments", "complex key": "ComplexKey", "explicit key": "ExplicitKey",
 }
+
+
+def _build_checked(path: str, out: str) -> list[str]:
+    """The driver at `path` built `--checked` at `out`, as its argv."""
+    subprocess.run([selfhost_tool("main"), "build", path, "-o", out, "--stdlib", STDLIB_ROOT, "--checked"],
+                   capture_output=True, check=True)
+    return [out]
 
 
 def _suite_dir() -> str | None:
@@ -290,6 +301,7 @@ class YamlTestSuite(unittest.TestCase):
         subprocess.run(["as", "--64", "-o", native + ".o", native + ".s"], check=True)
         subprocess.run(["ld", "-o", native, native + ".o"], check=True)
         cls.native = [native]
+        cls.checked = _build_checked(path, os.path.join(cls.tmp.name, "checked"))
         cls.interpreter = [selfhost_tool("interp_main"), path, STDLIB_ROOT]
         cls.cases = []
         for cid, d in _cases(suite):
@@ -378,6 +390,7 @@ class YamlTestSuite(unittest.TestCase):
                 t = t[:i]
             texts.append(t)
         lines = self.run_driver(self.native, texts)
+        self.assertEqual(self.run_driver(self.checked, texts), lines, "the plain and the checked build differ")
         bad = [f"{t!r}: {line[:200]}" for t, line in zip(texts, lines) if line.startswith("ok !")]
         self.assertEqual(bad[:5], [], f"{len(bad)} of {len(texts)} don't read back as written")
         read = sum(1 for line in lines if line.startswith("ok"))
@@ -423,6 +436,58 @@ fun main() {
     }
 }
 """
+
+def _numbers(seed: int, count: int) -> list[str]:
+    """Integers in bases 10, 8 and 16 around int64's limits and past them,
+    signed and with leading zeros, and a few random ones of any length."""
+    rng = random.Random(seed)
+    values = [0, 1, 2**31 - 1, 2**31, 2**32, 2**53 + 1, 2**63 - 2, 2**63 - 1, 2**63, 2**63 + 1, 2**64 - 1,
+              2**64, 2**64 + 1, 2**65, 10**19, 10**20, 10**30]
+    out = []
+    for v in values + [rng.randrange(2 ** rng.randrange(1, 90)) for _ in range(count)]:
+        out += [str(v), "-" + str(v), "+" + str(v), "00" + str(v), f"0x{v:x}", f"0x{v:X}", f"0x000{v:x}",
+                f"0o{v:o}", f"0o00{v:o}"]
+    return out
+
+
+@unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
+class YamlNumbers(unittest.TestCase):
+    """A plain integer scalar is an `Int` within int64; outside it a decimal
+    one is a `Float`, as in `std.json`, and one in base 8 or 16 is
+    `OutOfRange` (D184): built plain and checked, the driver gives the same."""
+
+    def test_numbers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "main.my")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(DRIVER)
+            plain = os.path.join(tmp, "plain")
+            subprocess.run([selfhost_tool("main"), "build", path, "-o", plain, "--stdlib", STDLIB_ROOT],
+                           capture_output=True, check=True)
+            checked = _build_checked(path, os.path.join(tmp, "checked"))
+            numbers = _numbers(7, 200)
+            texts = [f"v: {n}\n".encode() for n in numbers]
+            answers = []
+            for argv in ([plain], checked):
+                proc = subprocess.run(argv, input=_framed(texts), capture_output=True, timeout=600)
+                self.assertEqual(proc.returncode, 0, proc.stderr[-2000:])
+                answers.append(proc.stdout.decode().split("\n")[:-1])
+        self.assertEqual(answers[0], answers[1], "the plain and the checked build differ")
+        wrong = []
+        for n, got in zip(numbers, answers[0]):
+            radix = n[:2] in ("0x", "0o")
+            v = int(n[2:], 16 if n[1] == "x" else 8) if radix else int(n)
+            if -2**63 <= v < 2**63:
+                ok = got == "ok = " + json.dumps({"v": v}, separators=(",", ":"))
+            elif radix:
+                ok = got == "err 1 4 OutOfRange"
+            else:
+                ok = got.startswith("ok = ") and json.loads(got[5:])["v"] == float(v)
+            if not ok:
+                wrong.append(f"{n}: {got}")
+        self.assertEqual(len(answers[0]), len(numbers))
+        self.assertEqual(wrong[:5], [], f"{len(wrong)} of {len(numbers)}")
+
 
 # the pieces of YAML 1.1's implicit types: a string of a few of them is often
 # one of its numbers, booleans or timestamps
