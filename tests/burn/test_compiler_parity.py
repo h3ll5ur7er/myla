@@ -10318,6 +10318,25 @@ class TestCompilerParity(unittest.TestCase):
                 self.assertEqual(native, interp)
                 self.assertEqual(native, ("true\n", "", 0))
 
+    def test_an_invalid_spec_of_a_builtin_format_is_a_runtime_error(self):
+        # MYLA-544 (C8): a spec known only when it runs, invalid, is the
+        # program's runtime error on both runners, and a case's under
+        # `myla test`; the interpreter failed in its own std.fmt, which
+        # ended `myla test` itself (the position differs: MYLA-565)
+        src = ('fun show<T: Format>(x: T, spec: str) -> str {\n    return x.format(spec)\n}\n'
+               '#test(5, "q")[panic("invalid format spec \'q\'")]\n#test(5, "x")["5"]\n'
+               'fun f(n: int, s: str) -> str {\n    return show(n, s)\n}\n'
+               'fun main() {\n    print(f(255, "x"))\n    print(f(1, "q"))\n}\n')
+        interp, native = _both(src)
+        for out, err, code in (interp, native):
+            self.assertEqual((out, code), ("ff\n", 1))
+            self.assertTrue(err.startswith("runtime error: invalid format spec 'q'\n"), err)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = write_program(tmp, src)
+            ran = subprocess.run([selfhost_tool("main"), "test", path], capture_output=True, text=True, timeout=60)
+            self.assertEqual(ran.returncode, 0, ran.stdout + ran.stderr)
+            self.assertIn("2/2 passed.", ran.stdout)
+
     def test_a_file_without_main_is_a_clean_error_for_build(self):
         # MYLA-415 (Z3): `CodeGen.sig_of` fell back on the first function, so
         # `myla build` of a library built that function as the entry point,

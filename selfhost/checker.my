@@ -1347,18 +1347,6 @@ fun literal_waits(l: Expr, hint: Option<Type>) -> bool {
     }
 }
 
-// Whether `e` is an integer literal, negated or not, not a char's.
-#test(expr_of("-12"))[true]
-#test(expr_of("'a'"))[false]
-#test(expr_of("1.5"))[false]
-fun is_int_literal(e: Expr) -> bool {
-    return match e.kind {
-        ExprKind.IntLit(v, suf, isc, big) => !isc,
-        ExprKind.Unary(op, x) => op == "-" && is_int_literal(x),
-        _ => false,
-    }
-}
-
 // A hint that is a hole says nothing.
 #test(Some(Type.TParam("?")))[None]
 #test(Some(Type.TList(Type.TParam("?"))))[Some(Type.TList(Type.TParam("?")))]
