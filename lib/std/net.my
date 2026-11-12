@@ -1670,8 +1670,10 @@ fun skip_name(msg: str, at0: int) -> int {
 
 // --- the cases' helpers --------------------------------------------------------
 
-// The bytes of `s` in hex: not std.encoding's `hex_encode`, which every
-// program importing this module would check for the tests' sake.
+// The bytes of `s` in hex: not std.encoding's `hex_encode`, whose import
+// would add 1.4 M instructions (1.8 %) to checking every program that
+// imports this module, for the tests' sake; this copy, which only the tests
+// call, costs them nothing (MYLA-553).
 fun hex_of(s: str) -> str {
     let digits = "0123456789abcdef"
     var sb = StringBuilder()
@@ -1708,7 +1710,8 @@ fun dns_query_hex(id: int, name: str, qtype: int) -> str {
 }
 
 // The bytes of the hex text `h` as a string (std.encoding's `hex_decode`
-// gives a list, and would be checked by this module's importers).
+// gives a list, and its import would cost this module's importers what
+// `hex_of`'s says).
 fun unhex(h: str) -> str {
     var sb = StringBuilder()
     var i = 0
