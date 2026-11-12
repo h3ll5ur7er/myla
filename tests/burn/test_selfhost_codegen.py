@@ -1682,6 +1682,53 @@ class SelfHostedCodegenParity(unittest.TestCase):
         g = self._function_asm(asm, "g")
         self.assertIn("testq %rcx, %rcx", g, g)
 
+    def test_narrow_integers_divide_in_32_bits(self) -> None:
+        # MYLA-544: operands of at most 32 bits divide with the 32-bit
+        # instruction, which is the faster one; only 64-bit ones need idivq/divq
+        source = (
+            "fun s32(a: int, b: int) -> int { return a / b * 1000 + a % b }\n"
+            "fun u32(a: uint32, b: uint32) -> uint32 { return a / b + a % b }\n"
+            "fun s8(a: int8, b: int8) -> int8 { return a / b + a % b }\n"
+            "fun u16(a: uint16, b: uint16) -> uint16 { return a / b + a % b }\n"
+            "fun s64(a: int64, b: int64) -> int64 { return a / b + a % b }\n"
+            "fun k32(a: int) -> int { return a / 7 * 10 + a % 7 }\n"
+            "fun main() {\n"
+            "    print(s32(-2147483647, 46341))\n"
+            "    print(s32(2147483647, -2))\n"
+            "    let lo = -2147483648\n"
+            "    let m1 = -1\n"
+            "    print(lo / m1)\n"
+            "    print(lo % m1)\n"
+            "    print(lo / 3)\n"
+            "    print(lo % 3)\n"
+            "    print(u32(4294967295u32, 3u32))\n"
+            "    print(u32(4000000003u32, 4000000001u32))\n"
+            "    print(s8(-128i8, 5i8))\n"
+            "    let lo8: int8 = -128\n"
+            "    let m8: int8 = -1\n"
+            "    print(lo8 / m8)\n"
+            "    print(lo8 % m8)\n"
+            "    print(u16(65535u16, 256u16))\n"
+            "    print(s64(-9876543210123, 4294967297))\n"
+            "    print(k32(-2147483648))\n"
+            "    print(k32(2147483647))\n"
+            "}\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "prog.my")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(source)
+            asm = self._emit_asm(path, flags=("--no-inline",))
+            # truncating division; the minimum by -1 wraps (MYLA-5)
+            expected = "%s\n" % "\n".join(str(v) for v in (
+                -46381707, 1001, -2147483648, 0, -715827882, -2, 1431655765, 3, -28, -128, 0, 510, -2413396619, 1227133514, -1227133515))
+            self.assertEqual(self._build_and_run(asm), (expected, 0))
+        for name, wanted in (("s32", "idivl %ecx"), ("u32", "divl %ecx"), ("s8", "idivl %ecx"), ("u16", "divl %ecx"),
+                             ("k32", "idivl %ecx")):
+            body = self._function_asm(asm, name)
+            self.assertIn(wanted, body, body)
+            self.assertNotIn("divq", body, body)
+        self.assertIn("idivq %rcx", self._function_asm(asm, "s64"))
+
     def test_loads_go_straight_into_registers(self) -> None:
         # MYLA-125: a value loaded for a temporary or variable in a register
         # isn't loaded into %rax first and moved

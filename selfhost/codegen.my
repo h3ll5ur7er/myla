@@ -2774,6 +2774,36 @@ impl CodeGen {
         }
     }
 
+    // %rax `/` or `%` %rcx, operands of type `lt` and a divisor that is neither
+    // 0 nor, for a signed type, -1: the result in %rax, extended as `lt` is.
+    // Operands of at most 32 bits divide in 32 bits (MYLA-544): the
+    // instruction is the faster one, by a factor of two or more on many
+    // processors, and both are extended from fewer bits than it reads. Its
+    // result fills the low half and clears the high one, which extends an
+    // unsigned result; a signed one is extended on its way to %rax.
+    fun emit_divide(var self, op: str, lt: Type) {
+        let narrow = int_width_cg(lt) <= 32
+        if int_signed(lt) {
+            if narrow {
+                self.emit("cltd")
+                self.emit("idivl %ecx")
+                if op == "%" { self.emit("movslq %edx, %rax") } else { self.emit("cltq") }
+            } else {
+                self.emit("cqo")
+                self.emit("idivq %rcx")
+                if op == "%" { self.emit("movq %rdx, %rax") }
+            }
+        } else if narrow {
+            self.emit("xorl %edx, %edx")
+            self.emit("divl %ecx")
+            if op == "%" { self.emit("movl %edx, %eax") }
+        } else {
+            self.emit("xorq %rdx, %rdx")
+            self.emit("divq %rcx")
+            if op == "%" { self.emit("movq %rdx, %rax") }
+        }
+    }
+
     // The integer operation `op` on %rax (left, of type `lt`) and %rcx (right),
     // its result (of type `rt`) in %rax; `/` and `%` trap at line:col on a zero
     // divisor (shared with the IR backend, MYLA-103).
@@ -2792,42 +2822,35 @@ impl CodeGen {
         } else if (op == "/" || op == "%") && starts_with_dollar(src) {
             // a constant divisor, in %rcx too, that is neither 0 nor -1
             // (MYLA-125)
-            if int_signed(lt) {
-                self.emit("cqo")
-                self.emit("idivq %rcx")
-            } else {
-                self.emit("xorq %rdx, %rdx")
-                self.emit("divq %rcx")
-            }
-            if op == "%" { self.emit("movq %rdx, %rax") }
+            self.emit_divide(op, lt)
             // neither 0 nor -1: the quotient or remainder is in range
             if !same_int(lt, rt) { self.wrap(rt) }
         } else if op == "/" || op == "%" {
             self.emit("testq %rcx, %rcx")
             if op == "/" { self.trap("jz", "__trap_div", line, col) } else { self.trap("jz", "__trap_mod", line, col) }
             if int_signed(lt) {
-                // x / -1 is -x and x % -1 is 0; idivq would trap on the
+                // x / -1 is -x and x % -1 is 0; idiv would trap on the
                 // minimum (its quotient overflows), the language wraps (MYLA-5)
                 let divide = self.label()
                 let done = self.label()
                 self.emit("cmpq $-1, %rcx")
                 self.emit(format("jne {}", divide))
-                if op == "/" { self.emit("negq %rax") } else { self.emit("xorl %eax, %eax") }
+                // only the minimum's quotient by -1 leaves the range
+                // (MYLA-251): a remainder is smaller than the divisor
+                if op == "/" {
+                    self.emit("negq %rax")
+                    self.wrap(lt)
+                } else {
+                    self.emit("xorl %eax, %eax")
+                }
                 self.emit(format("jmp {}", done))
                 self.emit(format("{}:", divide))
-                self.emit("cqo")
-                self.emit("idivq %rcx")
-                if op == "%" { self.emit("movq %rdx, %rax") }
+                self.emit_divide(op, lt)
                 self.emit(format("{}:", done))
             } else {
-                self.emit("xorq %rdx, %rdx")
-                self.emit("divq %rcx")
-                if op == "%" { self.emit("movq %rdx, %rax") }
+                self.emit_divide(op, lt)
             }
-            // only the minimum's quotient by -1 leaves the range (MYLA-251):
-            // a remainder is smaller than the divisor, an unsigned
-            // quotient than the dividend
-            if (op == "/" && int_signed(lt)) || !same_int(lt, rt) { self.wrap(rt) }
+            if !same_int(lt, rt) { self.wrap(rt) }
         } else if is_cmp(op) {
             self.emit(format("cmpq {}, %rax", src))
             self.emit(format("{} %al", cmp_set(op, int_signed(lt))))

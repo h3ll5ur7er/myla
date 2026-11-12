@@ -132,7 +132,7 @@ class LoopOverhead(unittest.TestCase):
         with open(path, "w", encoding="utf-8") as fh:
             fh.write(_WRAPPED)
         body = _function(self.asm(path), "wrapped")
-        self.assertIn("idivq", body, body)
+        self.assertIn("idivl", body, body)
         self.assertNotRegex(body, r"movq %rdx, %rax\n(\.L\d+:\n)?\tmovslq", body)
         self.assertNotRegex(body, r"movslq %(\w+), %\w+\n\tleal [^\n]*, %\1\n", body)
 
