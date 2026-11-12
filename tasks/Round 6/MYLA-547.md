@@ -6,7 +6,7 @@ status: todo
 priority: medium
 labels: [testing, harness, round-6]
 ---
-Work package R5 of [[Project/Review-2026-11-12]]. Files: `selfhost/harness.my`, `lib/std/test.my`, the interpreter's runner. Follows [[MYLA-418]]. The first box waits for the owner's decision 1.
+Work package R5 of [[Project/Review-2026-11-12]]. Files: `selfhost/harness.my`, `lib/std/test.my`, the interpreter's runner. Follows [[MYLA-418]]. The first box builds the owner's decision 1, D191 (2026-11-12): a framed record the runtime writes in a test child.
 
 - [ ] **A multi-line panic is cut natively** (new with [[MYLA-418]], against D183): a message with a later line that starts `runtime error: ` is cut at that line on x86-64, aarch64 and wasm32, so `#test("a\nruntime error: b")[panic("a\nruntime error: b")]` passes interpreted and fails natively, `[panic("b")]` the reverse, and a failing test function shows only the tail (`repro-r5/harness/multiline_panic.my`). Stderr alone can't tell this from an `eprint` followed by a panic. Recommended: the runtime marks its own report in a test child (D189's proposal 1, taken up again), which also closes the forged marks below
 - [ ] **An empty `Err` passes** (old): a test function that returns `Err("")`, or an error whose `Format` gives `""`, is `PASS` on every runner, because `detail == ""` means "passed" in `lib/std/test.my` and in the interpreter's runner. Carry the verdict separately (`err_empty.my`)

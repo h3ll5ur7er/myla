@@ -74,6 +74,14 @@ The lanes are grouped by the files they touch, so they run side by side; a reope
 
 Order: the lowering, checker, interpreter, HTTP and library lanes hold the high findings and come first. R13 only adds tests, so it can start at once, and its generators then guard the other lanes. R10 follows the parser lane, which shares the loader. Toolchain lanes end in one seed (D156).
 
-Five decisions are the owner's before their boxes can be built (section 4 of the review): the test child's report ([[MYLA-547]]), raw mode and signals and a notifier closed beside a starting wait ([[MYLA-548]]), the order of `place[i()].push(v())` and a recursive enum as a map key ([[MYLA-543]]).
+The owner took the five recommendations of the review's section 4 (2026-11-12): D191, the test child's report as a framed record ([[MYLA-547]]); D192, raw mode restored on SIGINT, SIGTERM and SIGHUP, and D195, a wait on a closed notifier returning at once ([[MYLA-548]]); D193, the receiver's place before the arguments, and D194, a recursive enum as a map key natively ([[MYLA-543]]).
+
+The waves, each one pull request with one seed:
+
+| Wave | Lanes |
+| --- | --- |
+| 1 | Lowering ([[MYLA-415]], [[MYLA-543]], [[MYLA-542]]), checker ([[MYLA-417]], [[MYLA-394]], [[MYLA-538]], [[MYLA-544]]), interpreter ([[MYLA-414]], [[MYLA-546]]), library A ([[MYLA-460]], [[MYLA-550]]), HTTP ([[MYLA-549]]), generated tests ([[MYLA-555]]) |
+| 2 | Lexer, parser and loader ([[MYLA-413]], [[MYLA-545]]), test harness ([[MYLA-547]]), runtime ([[MYLA-548]]), back ends ([[MYLA-551]]), library B ([[MYLA-553]]) |
+| 3 | Check time and seeds ([[MYLA-552]], after the loader), docs and board ([[MYLA-554]], last, as it touches every task) |
 
 Left for later, as before: [[MYLA-433]] (the one to start next, as a proposal), [[MYLA-434]], [[MYLA-435]], [[MYLA-504]], [[MYLA-530]], [[MYLA-531]], [[MYLA-377]], [[MYLA-317]], [[MYLA-368]]. Part 2 of the review of 9 November, the whole-codebase pass, is still to come.
