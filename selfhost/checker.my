@@ -3612,6 +3612,9 @@ impl Checker {
             if tps.len() > 0 {
                 var want: [Type] = []
                 for p in tps { want.push(Type.TParam(p.name)) }
+                for p in tps {
+                    if !list_mentions(targs, p.name) { return Err(impl_param_unused(ln, cl, sp, p.name, target, key_or_none(key_opt))) }
+                }
                 if !type_list_eq(targs, want) { return Err(terr_at(ln, cl, sp, format("a generic impl must apply to '{}<{}>' with its type parameters in order", key_or_none(key_opt), join_strs(tp_names(tps), ", ")))) }
             } else {
                 if targs.len() > 0 { return Err(terr_at(ln, cl, sp, format("cannot 'impl' on a concrete generic instantiation; write 'impl<T> {}<T> {{ ... }}' to cover every instance", key_or_none(key_opt)))) }
@@ -3786,6 +3789,16 @@ impl Checker {
         }
         return Ok(0)
     }
+}
+
+// The error of an impl's type parameter `p` that its type `target` doesn't
+// take: an impl's are its type's own, in order (D55), so one that only a
+// bound names has no type to come from, as a function's has (D171,
+// MYLA-564).
+#test(3, 1, no_span(), "T", Type.TStruct("W", [Type.TParam("I")]), "W")[CheckErr { line: 3, col: 1, sp: SrcSpan { sline: 0, scol: 0, eline: 0, ecol: 0 }, msg: "the impl's type parameter 'T' is not one of 'W<I>': a generic impl takes its type's own type parameters, in order", decl: -1, notes: [Note { label: "help", msg: "only a generic function may have a type parameter that only a bound names ('fun f<…, T>(…)'); or add 'T' to the type parameters of 'W'", line: 0, col: 0, sp: SrcSpan { sline: 0, scol: 0, eline: 0, ecol: 0 } }] }]
+fun impl_param_unused(ln: int32, cl: int32, sp: SrcSpan, p: str, target: Type, key: str) -> CheckErr {
+    let e = terr_at(ln, cl, sp, format("the impl's type parameter '{}' is not one of '{}': a generic impl takes its type's own type parameters, in order", p, type_name(target)))
+    return with_notes(e, [Note { label: "help", msg: format("only a generic function may have a type parameter that only a bound names ('fun f<…, {}>(…)'); or add '{}' to the type parameters of '{}'", p, p, key), line: 0, col: 0, sp: no_span() }])
 }
 
 // A method key as Python's f-strings print it (`None` for no key).
