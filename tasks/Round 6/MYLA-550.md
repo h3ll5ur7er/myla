@@ -2,7 +2,7 @@
 id: MYLA-550
 title: "R8 The library's D184 second pass: YAML's hex scalars, a buffered seek, bigint's bit length, zip's output limit"
 type: bug
-status: todo
+status: in-progress
 priority: high
 labels: [std, yaml, io, bigint, archive, round-6]
 ---
