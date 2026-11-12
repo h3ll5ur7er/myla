@@ -1129,6 +1129,10 @@ impl CodeGen {
     fun find_kept_params(var self) {
         for sig in self.funcs {
             if !sig.has_decl { continue }
+            // a body of the standard library that nothing called neither
+            // votes nor keeps: it may not have been read (D179), and what
+            // is built mustn't depend on which were (MYLA-552)
+            if self.unmarked.contains(sig.name) { continue }
             self.scan_kept = []
             match sig.decl.body {
                 Some(b) => { self.scan_block(b) },

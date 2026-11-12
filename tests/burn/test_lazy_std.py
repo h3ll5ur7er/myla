@@ -11,6 +11,11 @@ the back ends' sources write.
 
 An imported module's bodies are read so (MYLA-413), a program's own modules
 whole; a body read late has the eager check's error at its place.
+
+What is built must not depend on which bodies were read (MYLA-552): with
+MYLA_EAGER_BODIES=1 the loader reads every body it left for later before the
+check (`eager_bodies`), and the parity programs and the compiler build to the
+same assembly, on x86-64 and aarch64, as when only the called ones are read.
 """
 from __future__ import annotations
 
@@ -20,6 +25,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 
 from ._native import CAN_BUILD_NATIVE
 from ._tools import STDLIB_ROOT, selfhost_tool
@@ -190,6 +196,56 @@ class ImportedStdBodies(unittest.TestCase):
                         self.assertEqual(proc.returncode, 1, (cmd, proc.stdout))
                         self.assertTrue(proc.stderr.startswith(want), proc.stderr)
                         self.assertIn(f"{d}/helper.my:", proc.stderr)
+
+
+class EagerOracle(unittest.TestCase):
+    """MYLA-552: the parity programs and the compiler build to the same
+    assembly with every body read (MYLA_EAGER_BODIES=1) as with those read
+    once called. The owned parameters' vote (`find_kept_params`) counted the
+    calls in every body loaded, so a body read changed how others were
+    built (`packed_byte_lists` did, with output equal)."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.gen = selfhost_tool("gen_main")
+        cls._tmp = tempfile.TemporaryDirectory(prefix="myla_eager_")
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls._tmp.cleanup()
+
+    def assembly(self, path: str, target: str, eager: bool) -> str:
+        env = dict(os.environ, MYLA_EAGER_BODIES="1" if eager else "")
+        proc = subprocess.run([self.gen, path, STDLIB_ROOT, "--target", target], capture_output=True, text=True,
+                              cwd=_REPO, env=env, timeout=600)
+        self.assertEqual(proc.returncode, 0, f"{path} {target} eager={eager}: {proc.stderr[-2000:]}")
+        return proc.stdout
+
+    def differing(self, paths: list[str], target: str) -> list[str]:
+        def one(path: str) -> str:
+            return "" if self.assembly(path, target, False) == self.assembly(path, target, True) else path
+        with ThreadPoolExecutor(max(1, min(4, os.cpu_count() or 1))) as pool:
+            return [os.path.basename(p) for p in pool.map(one, paths) if p]
+
+    def parity_programs(self) -> list[str]:
+        from .test_compiler_parity import PROGRAMS
+        out = []
+        for name, src in PROGRAMS.items():
+            path = os.path.join(self._tmp.name, name + ".my")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(src)
+            out.append(path)
+        return out
+
+    def test_the_parity_programs_build_the_same(self) -> None:
+        paths = self.parity_programs()
+        self.assertGreater(len(paths), 100)
+        for target in ("x86_64-linux", "aarch64-linux"):
+            with self.subTest(target=target):
+                self.assertEqual(self.differing(paths, target), [])
+
+    def test_the_compiler_builds_the_same(self) -> None:
+        self.assertEqual(self.differing([os.path.join(_SELFHOST, "main.my")], "x86_64-linux"), [])
 
 
 if __name__ == "__main__":

@@ -26,11 +26,12 @@
 // the project root and then the stdlib root.
 
 from std.fs import read_to_string, exists, is_dir, current_dir
+from std.process import env
 from .stdroot import is_embedded, embedded_text, embedded_parse, EMBEDDED_ROOT
 from .astcache import decode, body_part, cached_body, no_bodies, Cached, Bodies
 from .parser import parse_source_with, parse_source_lazy, parse_body, BodySite, LazyParsed, expr_of, stmt_of, type_expr_of, block_of, pattern_of, fun_of
 from .diag import Report, reports, type_report, chain
-from .checker import CheckErr, DeclOrigin, LazyBodies, body_key, no_lazy_bodies
+from .checker import CheckErr, DeclOrigin, LazyBodies, body_key, no_lazy_bodies, unread_key
 from .tokens import SrcSpan, no_span, keywords, TokenKind, Diag, Token, Note
 from .lexer import lex_part, lex
 from .ast import Program, Decl, DeclKind, FunData, Param, TypeParam, Field, Variant
@@ -2242,8 +2243,68 @@ fun load_linked(entry: str, opts: LoadOptions) -> Result<Loaded, Report> {
         // loaded, read or not, as when every body was read (D90, MYLA-413)
         let tasks = if opts.runtime { lazy.task_line() } else { 0 }
         bodies = LazyBodies { ids: lazy_ids, keys: lazy.keys, parse: (key: int64) => table.read(key), task_line: tasks }
+        // the oracle of the lazy load (MYLA-552): every body read now
+        if eager_bodies() { decls = read_every_body(decls, bodies) }
     }
     return Ok(Loaded { decls: decls, next_id: ld.next_id, spans: ld.spans, std_impls: std_impls, bodies: bodies })
+}
+
+// Whether every body the loader leaves for later is read at once, before
+// the program is checked (MYLA-552): MYLA_EAGER_BODIES set to anything but
+// "" or "0". The oracle of the lazy load: a program builds to the same code
+// with it as without (`tests/burn/test_lazy_std.py`), as which bodies were
+// read must not change what is built; they are still checked only once
+// called (D179), and an error in one is still reported only then.
+#test()[false]
+pub fun eager_bodies() -> bool {
+    return match env("MYLA_EAGER_BODIES") {
+        Some(v) => v != "" && v != "0",
+        None => false,
+    }
+}
+
+// `decls` with each body left for later (`bodies`) read into its
+// declaration, as the checker reads it (`Checker.with_body`); one that
+// doesn't read stays left, for the checker to report where it is called.
+#test([], no_lazy_bodies())[[]]
+fun read_every_body(decls: [Decl], bodies: LazyBodies) -> [Decl] {
+    var out: [Decl] = []
+    for d in decls {
+        if !bodies.ids.contains(d.id) {
+            out.push(d)
+            continue
+        }
+        let k = match d.kind {
+            DeclKind.FunDecl(fd) => DeclKind.FunDecl(read_now(d.id, fd, bodies)),
+            DeclKind.ImplDecl(t, ms, tps, tr, targs, attrs) => {
+                var read: [FunData] = []
+                for m in ms { read.push(read_now(d.id, m, bodies)) }
+                DeclKind.ImplDecl(t, read, tps, tr, targs, attrs)
+            },
+            _ => d.kind,
+        }
+        out.push(Decl { id: d.id, line: d.line, col: d.col, sp: d.sp, kind: k })
+    }
+    return out
+}
+
+// `fd`, a function of the declaration `id`, with its body read if it was
+// left for later and reads (`read_every_body`).
+fun read_now(id: int32, fd: FunData, bodies: LazyBodies) -> FunData {
+    let key = match unread_key(id, fd) {
+        Some(k) => k,
+        None => { return fd },
+    }
+    if !bodies.keys.contains(key) { return fd }
+    let parse = bodies.parse
+    return match parse(key) {
+        Ok(b) => {
+            var g = fd
+            g.body = Some(b)
+            g
+        },
+        Err(es) => fd,
+    }
 }
 
 // A function's body an implicit module's parse left for later
