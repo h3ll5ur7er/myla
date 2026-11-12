@@ -2364,6 +2364,11 @@ impl CodeGen {
         // `write_err_num`)
         out.push("__panic_buf:")
         out.push("\t.skip 32")
+        // in a test child of `myla test --native`, the head of its records
+        // as a string's cell, which std.test sets (0 elsewhere): std.rt
+        // writes how the case ended as one (`test_record`, D191)
+        out.push("__test_report:")
+        out.push("\t.skip 8")
         // the poller's events and words (std.platform, D124)
         out.push("__poll_buf:")
         out.push("\t.skip 128")
