@@ -251,9 +251,9 @@ Both runs were on shared 4-CPU cloud VMs, two runs of each language, all checksu
 | Workload | Myla | C | Rust | Swift | Myla's place | Myla by C, first run | second run |
 | --- | --: | --: | --: | --: | --: | --: | --: |
 | Primes | 1.06 s | 0.99 s | 1.00 s | 0.99 s | 13 | 1.67 | 1.07 |
-| Fibonacci | 4.04 s | 0.98 s | 1.72 s | 2.53 s | 19 | 4.87 | 4.13 |
-| Strings | 1.78 s | 0.72 s | 0.63 s | 2.14 s | 12 | 2.90 | 2.47 |
-| Mandelbrot | 0.90 s | 0.73 s | 0.69 s | 0.73 s | 19 | 1.25 | 1.24 |
+| Fibonacci | 4.04 s | 0.98 s | 1.72 s | 2.53 s | 18 | 4.87 | 4.13 |
+| Strings | 1.78 s | 0.72 s | 0.63 s | 2.14 s | 13 | 2.90 | 2.47 |
+| Mandelbrot | 0.90 s | 0.73 s | 0.69 s | 0.73 s | 18 | 1.25 | 1.24 |
 | Binary trees | 0.61 s | 1.21 s | 0.98 s | 2.31 s | 7 | 0.67 | 0.50 |
 | k-nucleotide | 7.05 s | 0.90 s | 1.07 s | 4.30 s | 19 | 8.32 | 7.85 |
 
