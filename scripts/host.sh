@@ -84,16 +84,24 @@ run_tool() {  # <binary> [args...]
 # compiled by <compiler> for <target> with an empty embedded standard library
 # in place of selfhost/embedded_std.my. The bootstrap gives every stage `lib`,
 # so stage 0 never reads the library it embeds, which was over half of each
-# seed; the stages it builds embed the whole library again.
+# seed; the stages it builds embed the whole library again. It compiles a
+# copy of selfhost/ in a directory of its own, beside a link to lib/, by the
+# same relative paths (which the positions of runtime errors carry), so the
+# working tree is never changed, not even while it runs (MYLA-552).
 seed_compile() {  # <compiler> <target> <out.s>
-    local compiler="$1" target="$2" out="$3" keep rc=0
-    keep="$(mktemp)"
-    cp selfhost/embedded_std.my "$keep"
-    trap 'cp "'"$keep"'" selfhost/embedded_std.my; rm -f "'"$keep"'"' EXIT INT TERM
-    cat > selfhost/embedded_std.my <<'STUB'
-// embedded_std.my as the seeds carry it (MYLA-431): no files. Written and
-// removed again by scripts/host.sh's seed_compile; the bootstrap gives stage 0
-// the library under lib/.
+    local compiler="$1" target="$2" out="$3" work f rc=0
+    case "$compiler" in /*) ;; *) compiler="$PWD/$compiler" ;; esac
+    case "$out" in /*) ;; *) out="$PWD/$out" ;; esac
+    work="$(mktemp -d "${TMPDIR:-/tmp}/myla-seed.XXXXXX")"
+    mkdir "$work/selfhost"
+    for f in selfhost/*.my; do
+        if [ "$f" != selfhost/embedded_std.my ]; then cp "$f" "$work/selfhost/"; fi
+    done
+    ln -s "$PWD/lib" "$work/lib"
+    cat > "$work/selfhost/embedded_std.my" <<'STUB'
+// embedded_std.my as the seeds carry it (MYLA-431): no files. Written in a
+// copy of selfhost/ by scripts/host.sh's seed_compile; the bootstrap gives
+// stage 0 the library under lib/.
 
 pub fun embedded_paths() -> [str] {
     return []
@@ -108,12 +116,10 @@ pub fun embedded_cache(path: str) -> str {
 }
 STUB
     if [ "$target" = "$HOST_TARGET" ]; then
-        run_tool "$compiler" selfhost/gen_main.my lib > "$out" || rc=$?
+        (cd "$work" && run_tool "$compiler" selfhost/gen_main.my lib) > "$out" || rc=$?
     else
-        run_tool "$compiler" selfhost/gen_main.my lib --target "$target" > "$out" || rc=$?
+        (cd "$work" && run_tool "$compiler" selfhost/gen_main.my lib --target "$target") > "$out" || rc=$?
     fi
-    cp "$keep" selfhost/embedded_std.my
-    rm -f "$keep"
-    trap - EXIT INT TERM
+    rm -rf "$work"
     return $rc
 }
