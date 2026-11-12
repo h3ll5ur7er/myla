@@ -207,9 +207,16 @@ const INV_LN2: float64 = 1.44269504088896338700e+00
 
 // x · 2^k
 #test(1.5, 3)[12.0]
+#test(4.9406564584124654e-324, 2097)[8.98846567431158e307] // the least subnormal to 2^1023
+#test(1.7976931348623157e308, -2098)[4.9406564584124654e-324] // the greatest double to the least subnormal
+#test(4.9406564584124654e-324, 2147483647)[infinity()] // three steps, not two million
+#test(1.7976931348623157e308, -2147483647 - 1)[0.0]
 pub fun ldexp(x: float64, k: int32) -> float64 {
     var y = x
-    var n = k
+    // A finite non-zero `x` is at least 2^-1074 and less than 2^1024, so
+    // past ±2100 the result overflows or underflows whatever `x` is: at
+    // most three steps (fdlibm's scalbn, MYLA-580)
+    var n = if k > 2100 { 2100 } else if k < -2100 { -2100 } else { k }
     // in steps that keep the scale factor a normal number
     while n > 1023 {
         y = y * from_bits(0x7FE0000000000000)    // 2^1023
