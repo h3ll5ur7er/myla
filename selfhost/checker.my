@@ -1972,6 +1972,11 @@ pub struct ImplBounds { target: Type, bounds: [Bound] }
 // A map's key type met before every impl was known, checked once they are
 // (D163): where, and in which declaration.
 pub struct PendingKey { t: Type, line: int32, col: int32, sp: SrcSpan, decl: int32 }
+// An impl of the trait `trait_name` that `#derive(derive)` on the struct or
+// enum `name` (declared `origin`, at `line`, `col`) gives it: written as
+// source, the declaration `impl_id`, or -1 for a non-generic `Eq` and a
+// `Hash` without std.hash, which have none (MYLA-507).
+pub struct DerivedImpl { impl_id: int32, origin: int32, line: int32, col: int32, sp: SrcSpan, derive: str, trait_name: str, name: str }
 pub struct FuncSig {
     name: str,
     params: [Type],
@@ -2046,6 +2051,7 @@ pub struct Checker {
     method_decl_ids: [int32],       // each method's impl declaration
     impl_decls: [Decl],
     next_id: int32,            // the first node id no declaration has: a derived impl's (MYLA-313)
+    derived: [DerivedImpl],    // the impls the derives give, for their fields' bounds and errors (MYLA-507)
     // map key types (D163): those met before the impls were known, whether
     // they are, and whether a function's bounds are in force (its signature
     // and body are being checked)
@@ -2191,7 +2197,7 @@ fun new_checker(decls: [Decl]) -> Checker {
         decls: decls,
         structs: [], enums: [], recursive_enums: [],
         functions: [], methods: [], method_decls: [], method_decl_keys: [], method_decl_ids: [],
-        impl_decls: [], next_id: 1000000000, pending_keys: [], keys_ready: false, key_ctx: false, traits: [], trait_decls: [], trait_impls: [], user_trait_impls: [], impl_args: [:], impl_bounds: [:], for_iters: [:],
+        impl_decls: [], next_id: 1000000000, derived: [], pending_keys: [], keys_ready: false, key_ctx: false, traits: [], trait_decls: [], trait_impls: [], user_trait_impls: [], impl_args: [:], impl_bounds: [:], for_iters: [:],
         static_selfs: [:], static_calls: [:], on_type_params: false, call_types: [:],
         aliases: [], alias_cache: [], const_decls: [], consts: [], const_values: [:], const_done: [], const_folding: [],
         allow_self: false, type_params: [], bounds_cur: [],
@@ -4435,7 +4441,9 @@ impl Checker {
                     Some(ct) => { return self.not_trait_why(ct.0, ct.1) },
                     None => {},
                 }
-                if is_struct_or_enum(et) { return format("'{}' isn't {} (it needs 'impl {} for {}' or '#derive({})')", type_name(et), trnm, trnm, type_name(et), trnm) }
+                // only `Eq` and `Hash` of these traits are derivable (MYLA-507: `#derive(Ord)`)
+                if is_struct_or_enum(et) && (trnm == "Eq" || trnm == "Hash") { return format("'{}' isn't {} (it needs 'impl {} for {}' or '#derive({})')", type_name(et), trnm, trnm, type_name(et), trnm) }
+                if is_struct_or_enum(et) { return format("'{}' isn't {} (it needs 'impl {} for {}')", type_name(et), trnm, trnm, type_name(et)) }
                 if is_type_param(et) { return format("'{}' isn't {} (it needs the bound '{}: {}')", type_name(et), trnm, type_name(et), trnm) }
                 if is_float(et) && trnm == "Hash" { return format("'{}' isn't Hash (NaN is unequal to itself)", type_name(et)) }
                 return format("'{}' isn't {}", type_name(et), trnm)
@@ -6933,6 +6941,26 @@ fun holds_float(t: Type) -> bool {
     }
 }
 
+// Whether `t` is or holds a generic struct or enum, whose impl's bounds a
+// derived impl's field may not meet (MYLA-507).
+#test(Type.TTuple([Type.TStr, Type.TList(Type.TEnum("Option", [Type.TStr]))]))[true]
+#test(Type.TMap(Type.TStr, Type.TStruct("P", [])))[false]
+fun holds_generic_type(t: Type) -> bool {
+    return match t {
+        Type.TStruct(n, a) => a.len() > 0,
+        Type.TEnum(n, a) => a.len() > 0,
+        Type.TTuple(es) => {
+            for e in es {
+                if holds_generic_type(e) { return true }
+            }
+            false
+        },
+        Type.TList(e) => holds_generic_type(e),
+        Type.TMap(k, v) => holds_generic_type(v),
+        _ => false,
+    }
+}
+
 // Whether the derive attributes among `attrs` name the trait `trnm`.
 fun derives(attrs: [Attribute], trnm: str) -> bool {
     for a in attrs {
@@ -7088,6 +7116,23 @@ fun unqualified(name: str) -> str {
         i += 1
     }
     return name[start:]
+}
+
+// The standard library module that declares the type `name`, as a program
+// imports it (`std$json$Json` is std.json's), "" for another type.
+#test("std$json$JsonErrorKind")["std.json"]
+#test("std$net$http$Request")["std.net.http"]
+#test("geo$Point")[""]
+#test("Point")[""]
+fun std_module_of(name: str) -> str {
+    if !name.starts_with("std$") { return "" }
+    var last = 0
+    var i = 0
+    while i < name.len() {
+        if name[i] == '$' { last = i }
+        i += 1
+    }
+    return name[:last].replace("$", ".")
 }
 
 // Whether `t` is `Option<…>`, and its element.
@@ -7389,7 +7434,7 @@ impl Checker {
             let name = decl_kind_name(decl)
             // explicit `impl Eq for name`? (it stands)
             if explicit_eq.contains(name) {
-                self.record(terr_at(decl.line, decl.col, decl.sp, format("type '{}' both derives Eq and has an explicit 'impl Eq for {}'", name, name)))?
+                self.record_beside_impl(decl, name, "Eq", "Eq", "Eq")?
                 continue
             }
             match self.check_derivable_eq(decl, name, eq_names) {
@@ -7404,7 +7449,7 @@ impl Checker {
             if tps.len() > 0 {
                 // a generic type's: an impl bounded by `T: Eq`, written as
                 // source and checked and run as any other (MYLA-379)
-                self.add_derived_impl(derived_eq_src(name, tps, self.derived_parts(name)), "Eq")
+                self.add_derived_impl(derived_eq_src(name, tps, self.derived_parts(name)), "Eq", decl)
                 self.prelude_waits(name)
                 continue
             }
@@ -7419,6 +7464,7 @@ impl Checker {
             self.add_method(MethodEntry { key: name, name: "eq", sig: sig })
             self.trait_impls.push(TraitImplPair { trait_name: "Eq", key: name })
             self.user_trait_impls.push(TraitImplPair { trait_name: "Eq", key: name })
+            self.note_derived(-1, decl, "Eq", "Eq")
         }
         if hash_targets.len() > 0 { self.derive_hashes(hash_targets, eq_names)? }
         if json_targets.len() > 0 { self.derive_serial(json_serial(), json_targets)? }
@@ -7452,7 +7498,7 @@ impl Checker {
             self.cur_decl = decl.id
             let name = decl_kind_name(decl)
             if explicit_hash.contains(name) {
-                self.record(terr_at(decl.line, decl.col, decl.sp, format("type '{}' both derives Hash and has an explicit 'impl Hash for {}'", name, name)))?
+                self.record_beside_impl(decl, name, "Hash", "Hash", "Hash")?
                 continue
             }
             if self.broken_impls.contains("Eq\t" + name) {
@@ -7480,6 +7526,7 @@ impl Checker {
                 // the runners hash a derived key by its members
                 self.trait_impls.push(TraitImplPair { trait_name: "Hash", key: name })
                 self.user_trait_impls.push(TraitImplPair { trait_name: "Hash", key: name })
+                self.note_derived(-1, decl, "Hash", "Hash")
                 let gtps = self.type_params_of(name)
                 if gtps.len() > 0 {
                     // a generic type's arguments `Hash` too (MYLA-379)
@@ -7498,7 +7545,7 @@ impl Checker {
             let tps = self.type_params_of(name)
             if tps.len() > 0 {
                 // a generic type's, bounded, against the linked program's names (MYLA-379)
-                self.add_derived_impl(derived_hash_src(f"impl{bounded_params(tps, "Hash")} Hash for {with_params(name, tps)}", self.derived_parts(name)), "Hash")
+                self.add_derived_impl(derived_hash_src(f"impl{bounded_params(tps, "Hash")} Hash for {with_params(name, tps)}", self.derived_parts(name)), "Hash", decl)
                 // the prelude's (D182): its body, and std.hash's methods it
                 // calls, checked once a type that holds one is hashed
                 self.prelude_waits(name)
@@ -7512,6 +7559,7 @@ impl Checker {
                         let made = impl_for(d, name)
                         self.decls.push(made)
                         self.impl_decls.push(made)
+                        self.note_derived(made.id, decl, "Hash", "Hash")
                     }
                 },
                 Err(d) => { panic("a derived Hash impl does not parse") },
@@ -7531,20 +7579,266 @@ impl Checker {
         return []
     }
 
-    // The impl `src` a derive of `trnm` wrote, against the linked program's
-    // names (`parse_qualified`), among the declarations: its impls are
-    // resolved after the derives (MYLA-379).
-    fun add_derived_impl(var self, src: str, trnm: str) {
+    // The impls `src` that `#derive(derive)` on `origin` wrote, against the
+    // linked program's names (`parse_qualified`), among the declarations:
+    // they are resolved after the derives (MYLA-379).
+    fun add_derived_impl(var self, src: str, derive: str, origin: Decl) {
         match parse_qualified(src, self.next_id) {
             Ok(p) => {
                 self.next_id = p.next_id
                 for d in p.program.decls {
                     self.decls.push(d)
                     self.impl_decls.push(d)
+                    let trnm = match d.kind {
+                        DeclKind.ImplDecl(tg, m, tp, Some(tn), ta, dattrs) => tn,
+                        _ => derive,
+                    }
+                    self.note_derived(d.id, origin, derive, trnm)
                 }
             },
-            Err(d) => { panic(f"a derived {trnm} impl does not parse: {d.msg}\n{src}") },
+            Err(d) => { panic(f"a derived {derive} impl does not parse: {d.msg}\n{src}") },
         }
+    }
+
+    // That `#derive(derive)` on `origin` gave its type the impl `impl_id`
+    // of `trnm` (-1: one not written as source).
+    fun note_derived(var self, impl_id: int32, origin: Decl, derive: str, trnm: str) {
+        self.derived.push(DerivedImpl { impl_id: impl_id, origin: origin.id, line: origin.line, col: origin.col, sp: origin.sp, derive: derive, trait_name: trnm, name: decl_kind_name(origin) })
+    }
+
+    // The error of `#derive(derive)` on `name` (declared `decl`) beside an
+    // explicit impl of its trait `full` (`shown` as the message names it):
+    // at the derive; at the program's impl when the type is the prelude's
+    // (D182) or a standard library module's, whose file the program doesn't
+    // change, nor is its position one of the program's files (MYLA-507).
+    fun record_beside_impl(var self, decl: Decl, name: str, derive: str, full: str, shown: str) -> Result<int32, CheckErr> {
+        let module = if name == "Option" || name == "Result" { "the prelude (D182)" } else { std_module_of(name) }
+        if module != "" {
+            for d in self.impl_decls {
+                match impl_target_name(d, full) {
+                    Some(nm) => {
+                        if nm == name {
+                            self.cur_decl = d.id
+                            return self.record(terr_at(d.line, d.col, d.sp, f"type '{name}' derives {derive} in {module}: it can't have an explicit 'impl {shown} for {name}'"))
+                        }
+                    },
+                    None => {},
+                }
+            }
+        }
+        return self.record(terr_at(decl.line, decl.col, decl.sp, f"type '{name}' both derives {derive} and has an explicit 'impl {shown} for {name}'"))
+    }
+
+    // The derived impls' fields (MYLA-507), once every impl's bounds are
+    // known: a field whose type is the trait only under a bound the derive
+    // doesn't give (`W<T>` under `impl<T: Ord> Eq for W<T>`, where the
+    // derive bounds `T` by `Eq` alone), or not at all (`W<S>`, `S` not
+    // `Ord`), is the derive's error, at its struct or enum, and the impl is
+    // left out: the error in its body would name a position of source no
+    // file has.
+    #test(checker_on("[int]"))[Ok(0)]
+    fun check_derived_fields(var self) -> Result<int32, CheckErr> {
+        var failed: [str: bool] = [:]     // the derives that failed, `origin\tderive`
+        for dv in self.derived {
+            if failed.len() > 0 {
+                // the other impl of a failed `Json` derive, or a `Hash` whose type's `Eq` failed
+                if failed.contains(f"{dv.origin}\t{dv.derive}") || (dv.derive == "Hash" && failed.contains(f"{dv.origin}\tEq")) {
+                    self.skip_derived(dv)
+                    continue
+                }
+            }
+            // only a field of a generic struct or enum may lack a bound
+            if !self.has_generic_member(dv.name) { continue }
+            if self.broken_impls.contains(dv.trait_name + "\t" + dv.name) { continue }
+            self.cur_decl = dv.origin
+            for t in self.type_params_of(dv.name) { self.bounds_cur.push(Bound { tp: t, traits: [dv.trait_name], args: [[]] }) }
+            let err = self.derived_field_error(dv)
+            self.bounds_cur = []
+            match err {
+                Some(e) => {
+                    failed[f"{dv.origin}\t{dv.derive}"] = true
+                    self.skip_derived(dv)
+                    self.record(e)?
+                },
+                None => {},
+            }
+        }
+        return Ok(0)
+    }
+
+    // Whether a field or payload of the struct or enum `name` has a generic
+    // struct or enum in its type.
+    #test(checker_on("struct P<T> { x: T, y: [(int, T)] }"), "P")[false]
+    #test(checker_on("struct W<T> { v: T }\nstruct P { w: [W<int>] }"), "P")[true]
+    fun has_generic_member(self, name: str) -> bool {
+        let si = self.struct_idx(name)
+        if si >= 0 {
+            for f in self.structs[si].fields { if holds_generic_type(f.ty) { return true } }
+            return false
+        }
+        let ei = self.enum_idx(name)
+        if ei >= 0 { for v in self.enums[ei].variants { for pt in v.payload { if holds_generic_type(pt) { return true } } } }
+        return false
+    }
+
+    // The derived impl `dv` is left out: its type isn't the trait, silently
+    // (MYLA-110), and its methods' bodies aren't checked.
+    fun skip_derived(var self, dv: DerivedImpl) {
+        self.broken_impls[dv.trait_name + "\t" + dv.name] = true
+        if dv.impl_id < 0 { return }
+        var i = 0
+        while i < self.method_decl_ids.len() {
+            if self.method_decl_ids[i] == dv.impl_id { self.skipped_fns[self.method_decls[i].name] = true }
+            i += 1
+        }
+    }
+
+    // The error of the derived impl `dv` for its first field (payload) whose
+    // type isn't its trait under the bounds in force (`bounds_cur`, the
+    // derive's own), else None: a type that isn't the trait whatever the
+    // type parameters, or the bounds they lack, which the help's impl adds.
+    fun derived_field_error(self, dv: DerivedImpl) -> Option<CheckErr> {
+        var what: [str] = []
+        var types: [Type] = []
+        var kind = "struct"
+        let si = self.struct_idx(dv.name)
+        if si >= 0 {
+            for f in self.structs[si].fields {
+                what.push(f"field '{f.name}'")
+                types.push(f.ty)
+            }
+        } else {
+            kind = "enum"
+            let ei = self.enum_idx(dv.name)
+            if ei >= 0 {
+                for v in self.enums[ei].variants {
+                    var i = 0
+                    for pt in v.payload {
+                        what.push(f"payload #{i} of variant '{v.name}'")
+                        types.push(pt)
+                        i += 1
+                    }
+                }
+            }
+        }
+        let head = f"cannot derive {dv.derive} for {kind} '{dv.name}'"
+        var first = -1
+        var lacks: [(Type, str)] = []
+        // what each type parameter needs besides the derive's bound, for the help
+        var needs: [str: [str]] = [:]
+        var k = 0
+        while k < types.len() {
+            let ls = self.derive_lacks(types[k], dv.trait_name)
+            if ls.len() > 0 && first < 0 {
+                first = k
+                lacks = ls
+            }
+            for l in ls {
+                match l.0 {
+                    Type.TParam(n) => {
+                        var have = needs.get(n).unwrap_or([dv.trait_name])
+                        if !contains_str(have, l.1) { have.push(l.1) }
+                        needs[n] = have
+                    },
+                    _ => {},
+                }
+            }
+            k += 1
+        }
+        if first < 0 { return None }
+        let at = f"{head}: {what[first]} has type '{type_name(types[first])}'"
+        for l in lacks {
+            if !is_type_param(l.0) { return Some(terr_at(dv.line, dv.col, dv.sp, f"{at}, which isn't {unqualified(dv.trait_name)}: {self.not_trait_why(l.0, l.1)}")) }
+        }
+        var wanted: [str] = []
+        for l in lacks {
+            let b = f"'{type_name(l.0)}: {l.1}'"
+            if !contains_str(wanted, b) { wanted.push(b) }
+        }
+        var params: [str] = []
+        for t in self.type_params_of(dv.name) { params.push(f"{t}: {needs.get(t).unwrap_or([dv.trait_name]).join(" + ")}") }
+        let written = f"'impl<{params.join(", ")}> {dv.trait_name} for {with_params(dv.name, self.type_params_of(dv.name))}'"
+        var help = f"write the impl instead: {written}"
+        if dv.derive == "Json" || dv.derive == "Toml" { help = f"write both impls instead (a derive writes them together), this one as {written}" }
+        return Some(with_notes(terr_at(dv.line, dv.col, dv.sp, f"{at}, which is {unqualified(dv.trait_name)} only where {wanted.join(" and ")}"), [Note { label: "help", msg: help, line: 0, col: 0, sp: no_span() }]))
+    }
+
+    // What the type `t` of a derived impl's field lacks to be `trnm` under
+    // the bounds in force (`bounds_cur`, MYLA-507): each bound of a generic
+    // type's impl that its argument doesn't meet, `(T, Ord)` of `W<T>` under
+    // `impl<T: Ord> Eq for W<T>`, or the argument that isn't the bound's
+    // trait at all, `(S, Ord)` of `W<S>`; a tuple's, list's or map value's
+    // through their elements. Other types are the derive's checks' (`is_eq_type`).
+    #test(checker_on("[int]"), Type.TList(Type.TInt(32, true)), "Eq")[[]]
+    fun derive_lacks(self, t: Type, trnm: str) -> [(Type, str)] {
+        var out: [(Type, str)] = []
+        match t {
+            Type.TTuple(es) => { for e in es { for x in self.derive_lacks(e, trnm) { out.push(x) } } },
+            Type.TList(e) => { return self.derive_lacks(e, trnm) },
+            Type.TMap(kt, vt) => { return self.derive_lacks(vt, trnm) },
+            Type.TStruct(n, a) => { if a.len() > 0 { return self.impl_lacks(t, trnm) } },
+            Type.TEnum(n, a) => { if a.len() > 0 { return self.impl_lacks(t, trnm) } },
+            _ => {},
+        }
+        return out
+    }
+
+    // `derive_lacks` of the generic struct or enum `t`, by its impl's bounds.
+    fun impl_lacks(self, t: Type, trnm: str) -> [(Type, str)] {
+        var out: [(Type, str)] = []
+        let k = match self.type_key(t) {
+            Some(x) => x,
+            None => { return out },
+        }
+        let ib = match self.impl_bounds.get(trnm + "\t" + k) {
+            Some(x) => x,
+            None => { return out },
+        }
+        let u = unify_param(ib.target, t, [])
+        for b in ib.bounds {
+            let c = match subst_get(u.subst, b.tp) {
+                Some(x) => x,
+                None => Type.TError,
+            }
+            if has_error(c) { continue }
+            var j = 0
+            while j < b.traits.len() {
+                let tr = b.traits[j]
+                // a generic trait's arguments are its impl's to solve (D171)
+                if b.args[j].len() == 0 {
+                    match c {
+                        Type.TParam(pn) => { if !self.bound_has(pn, tr) { out.push((c, tr)) } },
+                        _ => {
+                            let ok = match self.type_implements(c, tr) {
+                                Ok(x) => x,
+                                Err(x) => true,
+                            }
+                            if !ok {
+                                let inner = self.derive_lacks(c, tr)
+                                if inner.len() == 0 { out.push((c, tr)) }
+                                for x in inner { out.push(x) }
+                            }
+                        },
+                    }
+                }
+                j += 1
+            }
+        }
+        return out
+    }
+
+    // An error in a derived impl's body that `check_derived_fields` didn't
+    // foresee, at its struct or enum, in its file: the impl's own positions
+    // are of source no file has (MYLA-507).
+    fun in_derived(self, e: CheckErr) -> CheckErr {
+        for dv in self.derived {
+            if dv.impl_id == self.cur_decl && dv.impl_id >= 0 {
+                var notes: [Note] = []
+                for n in e.notes { if n.line == 0 { notes.push(n) } }
+                return CheckErr { line: dv.line, col: dv.col, sp: dv.sp, msg: f"cannot derive {dv.derive} for '{dv.name}': {e.msg}", decl: dv.origin, notes: notes }
+            }
+        }
+        return CheckErr { line: e.line, col: e.col, sp: e.sp, msg: e.msg, decl: self.cur_decl, notes: e.notes }
     }
 
     // How std.json's names are qualified in the linked program: `std$json$`
@@ -7653,7 +7947,7 @@ impl Checker {
                 }
             }
             if explicit != "" {
-                self.record(terr_at(decl.line, decl.col, decl.sp, f"type '{name}' both derives {f.name} and has an explicit 'impl {explicit} for {name}'"))?
+                self.record_beside_impl(decl, name, f.name, pre + explicit, explicit)?
                 continue
             }
             match self.check_derivable_serial(f, decl, name, names) {
@@ -7678,16 +7972,7 @@ impl Checker {
                 }
                 src = derived_enum_src(f, name, self.type_params_of(name), pre, variants)
             }
-            match parse_qualified(src, self.next_id) {
-                Ok(p) => {
-                    self.next_id = p.next_id
-                    for d in p.program.decls {
-                        self.decls.push(d)
-                        self.impl_decls.push(d)
-                    }
-                },
-                Err(d) => { panic(f"a derived {f.name} impl does not parse: {d.msg}\n{src}") },
-            }
+            self.add_derived_impl(src, f.name, decl)
         }
         return Ok(0)
     }
@@ -8760,6 +9045,7 @@ impl Checker {
         self.synthesize_derives()?
         self.resolve_impls()?
         self.validate_bounds()?
+        self.check_derived_fields()?
         self.check_pending_keys()?
         self.fold_consts()?
         return Ok(0)
@@ -8891,7 +9177,7 @@ impl Checker {
     // Collect `e`, an error in the declaration being checked.
     fun note(var self, e: CheckErr) {
         if is_poisoned(e) { return }   // depends on the error type: no error (MYLA-110)
-        self.errs.push(CheckErr { line: e.line, col: e.col, sp: e.sp, msg: e.msg, decl: self.cur_decl, notes: e.notes })
+        self.errs.push(self.in_derived(e))
     }
 
     // Whether MAX_ERRORS errors were collected: the check ends.
@@ -9037,6 +9323,24 @@ pub fun checker_on(src: str) -> Checker {
     var c = new_checker(decls)
     let r = c.run_all()
     return c
+}
+
+// Where `in_derived` puts an error at line 3, column 23 of the first derived
+// impl of `src` written as source: its line, column and message, and
+// whether its declaration is the derive's (MYLA-507).
+#test("#derive(Eq)\nstruct P<T> {\n    x: T,\n}\n")[(2, 1, "cannot derive Eq for 'P': nope", true)]
+#test("struct P {\n    x: int,\n}\n")[(3, 23, "nope", false)]
+fun derived_error_at(src: str) -> (int32, int32, str, bool) {
+    var c = checker_on(src)
+    var origin = -2
+    for dv in c.derived {
+        if dv.impl_id >= 0 && origin == -2 {
+            c.cur_decl = dv.impl_id
+            origin = dv.origin
+        }
+    }
+    let e = c.in_derived(terr_at(3, 23, no_span(), "nope"))
+    return (e.line, e.col, e.msg, e.decl == origin)
 }
 
 // The messages of the errors `checker_on(src)` finds: cases that check a

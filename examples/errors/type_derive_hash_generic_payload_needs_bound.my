@@ -1,0 +1,38 @@
+//~ type error: cannot derive Hash for enum 'Key': payload #0 of variant 'One' has type '[W<T>]', which is Hash only where 'T: Ord'
+//~ help: write the impl instead: 'impl<T: Hash + Ord> Hash for Key<T>'
+// `#derive(Hash)` bounds `T` by `Hash` alone (MYLA-379); the payload's
+// `W<T>` is `Hash` only where `T: Ord` too, so the derive is refused at the
+// enum, not in the impl it writes (MYLA-507). Its `Eq` is written by hand.
+struct W<T> {
+    v: T,
+}
+
+impl<T: Eq> Eq for W<T> {
+    fun eq(self, other: W<T>) -> bool {
+        return self.v == other.v
+    }
+}
+
+impl<T: Hash + Ord> Hash for W<T> {
+    fun hash(self, h: Hasher) -> Hasher {
+        return h.add(self.v)
+    }
+}
+
+impl<T: Eq> Eq for Key<T> {
+    fun eq(self, other: Key<T>) -> bool {
+        return true
+    }
+}
+
+#derive(Hash)
+enum Key<T> {
+    One([W<T>]),
+    Other,
+}
+
+fun main() {
+    var seen: [Key<int>: bool] = [:]
+    seen[Key.Other] = true
+    print(seen.len())
+}

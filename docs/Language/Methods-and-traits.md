@@ -255,6 +255,8 @@ fun main() {
 
 On a generic type ([[MYLA-379]]) the impl is bounded by the trait on every type parameter, `impl<A: Eq, B: Eq> Eq for Pair<A, B>`, so `Pair<int, str>` has `==` and `Pair<int, Pos>` hasn't while `Pos` isn't `Eq` (`operator '==' is not defined for 'Pair<int32, Pos>': 'Pos' isn't Eq (…)`). A field of a type parameter is `Eq` by that bound; any other field is checked as a concrete type's is (`[str: T]` is a map, never `Eq`). `#derive(Hash)` bounds it by `T: Hash`, `#derive(Json)` by `T: ToJson` and `T: FromJson`. The prelude's `Option` and `Result` derive `Eq` and `Hash` this way (D182).
 
+A derive adds only its own trait as a bound. A field whose type has the trait only under another bound, such as a `W<T>` with `impl<T: Ord> Eq for W<T>`, refuses the derive at the struct (`cannot derive Eq for struct 'P': field 'w' has type 'W<T>', which is Eq only where 'T: Ord'`). The help then gives the impl to write by hand, `impl<T: Eq + Ord> Eq for P<T>` ([[MYLA-507]]). A concrete argument that misses its impl's bound is refused the same way, with or without type parameters: a field `W<S>` where `S` isn't `Ord` gives `which isn't Eq: 'S' isn't Ord`. The prelude and the standard library derive for their own types too, so a program's `impl Eq for Option<T>` (or for std.json's `JsonErrorKind`) is an error at that impl: `type 'Option' derives Eq in the prelude (D182): it can't have an explicit 'impl Eq for Option'`.
+
 ```myla
 #derive(Eq, Hash)
 struct Pair<A, B> {

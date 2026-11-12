@@ -1,0 +1,6 @@
+type error: cannot derive Hash for enum 'Key': payload #0 of variant 'One' has type '[W<T>]', which is Hash only where 'T: Ord'
+  --> examples/errors/type_derive_hash_generic_payload_needs_bound.my:29:1
+   |
+29 | enum Key<T> {
+   | ^^^^^^^^^^^^^
+help: write the impl instead: 'impl<T: Hash + Ord> Hash for Key<T>'

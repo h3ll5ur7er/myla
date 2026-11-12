@@ -1,0 +1,6 @@
+type error: cannot derive Json for struct 'Page': field 'items' has type '[W<T>]', which is ToJson only where 'T: Ord'
+  --> examples/errors/type_derive_json_generic_field_needs_bound.my:25:1
+   |
+25 | struct Page<T> {
+   | ^^^^^^^^^^^^^^^^
+help: write both impls instead (a derive writes them together), this one as 'impl<T: json.ToJson + Ord> json.ToJson for Page<T>'
