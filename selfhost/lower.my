@@ -7762,7 +7762,20 @@ pub fun env_deep_members_ir(cg: CodeGen, lifted: str, owned: [DropEntry], clone:
     let sc = lw.new_slot("env", Type.TInt(64, true), 8, 0, false)
     let guarded = lw.drop_guard(sc, kind)
     lw.add(Inst.StoreAt(lw.read_cell(sc), -8, lw.int_const(1), 8))
-    for d in owned { lw.deep_member(cg, sc, d.off, d.ty, clone) }
+    for d in owned {
+        if cg.is_boxed(d.ty) {
+            // a boxed enum captured is its cell's contents, inline, as
+            // `env_drop_ir` releases it: walked in place, not loaded as a box
+            // (B1)
+            let i64 = Type.TInt(64, true)
+            lw.wants.push(Want { kind: 2, t: d.ty, clone: clone })
+            let p = lw.temp(i64)
+            lw.add(Inst.Bin(p, "+", i64, i64, lw.read_cell(sc), lw.int_const(d.off), Pos { line: 0, col: 0 }))
+            lw.add(Inst.Rt(-1, cg.deep_walk_label(d.ty, clone, true), [p]))
+        } else {
+            lw.deep_member(cg, sc, d.off, d.ty, clone)
+        }
+    }
     if guarded { lw.guard_end() }
     lw.finish(Term.Ret(-1))
     return Routine { f: lw.f, wants: lw.wants }

@@ -8839,6 +8839,98 @@ async fun main() {
     print(count(l))
 }
 """,
+    "closures_capturing_recursive_enums_across_tasks": r"""// B1 (MYLA-415): a closure held in a variable that captures a recursive
+// enum crosses to a child task, an actor or a channel as a deep copy: its
+// environment holds the enum inline (its cell's contents), not as a box.
+// Also a partial, a struct holding the closure, nested closures, a list of
+// them to `task.all`, and a channel.
+import std.task as task
+
+enum Lst { Nil, Cons(int, Lst) }
+enum T { Leaf, Bin(T, int, T) }
+
+fun total(l: Lst) -> int {
+    return match l {
+        Cons(n, rest) => n + total(rest)
+        Nil => 0
+    }
+}
+
+fun size(t: T) -> int { return match t { Leaf => 0, Bin(l, _, r) => size(l) + 1 + size(r) } }
+
+fun add(l: Lst, k: int) -> int { return total(l) + k }
+
+struct Holder { name: str, f: () -> int }
+
+async fun run(f: () -> int) -> int { return f() }
+async fun run_held(h: Holder) -> int { return h.f() + h.name.len() }
+async fun run_partial(g: (int) -> int) -> int { return g(10) }
+async fun maker(n: int) -> () -> int {
+    var l = Lst.Nil
+    for i in 0..n { l = Lst.Cons(i, l) }
+    return () => total(l)
+}
+
+actor Keep { f: () -> int }
+impl Keep {
+    fun put(var self, f: () -> int) { self.f = f }
+    fun call(self) -> int { return self.f() }
+}
+
+#main
+async fun main() {
+    let cap = Lst.Cons(1, Lst.Cons(2, Lst.Nil))
+    let tr = T.Bin(T.Bin(T.Leaf, 1, T.Leaf), 2, T.Leaf)
+    let f = () => total(cap)
+    async let a = run(f)
+    print(await a)
+    // two recursive enums and a string beside them
+    let label = "tree"
+    let g = () => total(cap) * 100 + size(tr) * 10 + label.len()
+    async let b = run(g)
+    print(await b)
+    // a partial
+    let p = add(cap, _)
+    async let c = run_partial(p)
+    print(await c)
+    // a struct holding the closure
+    let h = Holder { name: "held", f: f }
+    async let d = run_held(h)
+    print(await d)
+    // nested closures
+    let outer = () => f() + g()
+    async let e = run(outer)
+    print(await e)
+    // a list of them to task.all
+    let jobs: [async () -> int] = [async () => f(), async () => g()]
+    let rs = await task.all(jobs)
+    print(rs[0] + rs[1])
+    // an actor keeps it
+    let k = Keep { f: () => 0 }
+    await k.put(f)
+    print(await k.call())
+    // through a channel
+    let ch: task.Channel<() -> int> = task.channel(2)
+    let s1 = await ch.send(f)
+    let s2 = await ch.send(g)
+    match await ch.recv() {
+        Some(x) => print(x())
+        None => print("none")
+    }
+    match await ch.recv() {
+        Some(x) => print(x())
+        None => print("none")
+    }
+    // a child's closure, which its siblings and the parent share (a clone)
+    async let m = maker(5)
+    async let s3 = run(await m)
+    async let s4 = run(await m)
+    let mine = await m
+    print(await s3 + await s4 + mine())
+    // the parent's copies are still whole
+    print(f() + g() + p(1) + total(cap) + size(tr))
+}
+""",
     "actors_store_every_heap_type": r"""// H2 (MYLA-415): an actor's method keeps an argument of every heap type in
 // its state, in a program with tasks, the arguments temporaries or the
 // caller's own values, which the caller then changes
@@ -10631,6 +10723,8 @@ PINNED = {
     "inference_through_lambdas_try_and_variants": 'true\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\nfalse\ntrue\ntrue\n',
     # MYLA-417: new ("cannot reassign 'self'" before); native, aarch64 and wasm32 give the same
     "enum_var_self_assigns_self": '3\n2\n1\n0\nabbccc|\namber\namber green\n10\n',
+    # MYLA-415 (B1): native code segfaulted (the captured enum deep-copied as a box)
+    "closures_capturing_recursive_enums_across_tasks": '3\n324\n13\n7\n327\n327\n3\n3\n324\n30\n336\n',
     # MYLA-415 (H2): native code segfaulted (a string, list or map argument kept)
     "actors_store_every_heap_type": '1\n7\n3\n2\n2\n2\nvalue 7 2 1 built! rec/2 t4 some 7 5 42 2\n14\npre-value 7 3 1 built! rec/2 t4 some 7 5 42 2\n3 3 built more\n',
     # MYLA-415 (H3): native code segfaulted in __deepb_ and on a child's result
