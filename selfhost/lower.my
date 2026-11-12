@@ -3377,6 +3377,14 @@ impl Lower {
         let i64 = Type.TInt(64, true)
         let u64 = Type.TInt(64, false)
         if op == "<<" || op == ">>" {
+            // a constant count below the width checks nothing (MYLA-551)
+            let n = self.f.blocks[self.cur].insts.len()
+            if n > 0 {
+                match self.f.blocks[self.cur].insts[n - 1] {
+                    Inst.Const(d, t, k) => { if d == b && k >= 0 && k < (w as int64) { return -1 } },
+                    _ => {},
+                }
+            }
             // the count as unsigned: a negative one is as far out of range
             let ok = self.temp(Type.TBool)
             self.add(Inst.Cmp(ok, "<", u64, b, self.konst(u64, w as int64)))

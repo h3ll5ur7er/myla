@@ -103,6 +103,12 @@ pub struct CodeGen {
     fnval_set: [str],
     uses_float: bool,
     epilogue: str,
+    // the current function's out-of-line traps of a checked build's
+    // arithmetic (MYLA-551): their lines, each a label and the call,
+    // emitted after the function's return; one per `kind:line:col`, the
+    // key of its label
+    cold_traps: [str],
+    cold_keys: [str: str],
     ret_type: Option<Type>,
     // Reference-counting helper worklists: concrete owning types whose per-type
     // drop/clone routines must be emitted (deduped by mangled token).
@@ -354,7 +360,7 @@ pub fun new_codegen(c: Checker) -> CodeGen {
         subst: [], fn_worklist: [], fn_seen: [:],
         lam_jobs: [], lam_seen: [:], partial_jobs: [], fnval_set: [],
         uses_float: false,
-        epilogue: "", ret_type: None,
+        epilogue: "", cold_traps: [], cold_keys: [:], ret_type: None,
         need_drop: [], type_jobs: [], type_jobs_seen: [:], drop_emitted: [], drop_kinds: [], need_clone: [], clone_emitted: [],
         need_walk: [], need_deep: [], deep_inline: [], deep_clone: [], need_deepc: [], deepc_clone: [], walk_retain: [], walk_emitted: [], helper_seen: [:],
         need_sb: false,
