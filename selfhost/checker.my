@@ -474,6 +474,19 @@ fun type_names(ts: [Type]) -> str {
     return sb.build()
 }
 
+// The trait a bound's text names, without its arguments: `Iterator` of
+// `Iterator<str>` (MYLA-538).
+#test("Iterator<str>")["Iterator"]
+#test("Eq")["Eq"]
+fun trait_head(text: str) -> str {
+    var i = 0
+    while i < text.len() {
+        if text[i] == '<' { return text[:i] }
+        i += 1
+    }
+    return text
+}
+
 #test("P", [])["P"]
 #test("Rect", [])["Rect"]
 #test("Counter", [])["Counter"]
@@ -2518,18 +2531,34 @@ impl Checker {
             if has_error(c) { continue }
             var j = 0
             while j < b.traits.len() {
-                // a generic trait's arguments are its impl's to solve (D171)
-                if b.args[j].len() == 0 {
-                    let ok = match c {
-                        Type.TParam(pn) => self.bound_has(pn, b.traits[j]),
-                        _ => self.type_implements(c, b.traits[j])?,
-                    }
-                    if !ok { return Ok(Some((c, b.traits[j]))) }
-                }
+                let want = subst_type_list(b.args[j], u.subst)
+                if !self.meets_bound(c, b.traits[j], want)? { return Ok(Some((c, generic_name(b.traits[j], want)))) }
                 j += 1
             }
         }
         return Ok(None)
+    }
+
+    // Whether `c` meets a bound on it of the trait `tr`, with the arguments
+    // `want` when `tr` is generic: a generic impl's bound where the impl is
+    // used. It implements `tr`, as its bounds say for a type parameter, and
+    // with those arguments, so `impl<I: Iterator<str>> Eq for W<I>` doesn't
+    // make `W<list.ListIter<int32>>` `Eq` (MYLA-538); a generic trait's
+    // arguments are its impl's (D171) or the type parameter's bound's.
+    #test(checker_on("[int]"), Type.TInt(32, true), "Eq", [])[Ok(true)]
+    #test(checker_on("[int]"), Type.TInt(32, true), "Iterator", [Type.TInt(32, true)])[Ok(false)]
+    #test(checker_on("enum Option<T> { Some(T), None }\ntrait Iterator<T> {\n    fun next(var self) -> Option<T>\n}\nstruct C { n: int }\nimpl Iterator<int> for C {\n    fun next(var self) -> Option<int> { return None }\n}"), Type.TStruct("C", []), "Iterator", [Type.TInt(32, true)])[Ok(true)]
+    #test(checker_on("enum Option<T> { Some(T), None }\ntrait Iterator<T> {\n    fun next(var self) -> Option<T>\n}\nstruct C { n: int }\nimpl Iterator<int> for C {\n    fun next(var self) -> Option<int> { return None }\n}"), Type.TStruct("C", []), "Iterator", [Type.TStr])[Ok(false)]
+    fun meets_bound(self, c: Type, tr: str, want: [Type]) -> Result<bool, CheckErr> {
+        let ok = match c {
+            Type.TParam(pn) => self.bound_has(pn, tr),
+            _ => self.type_implements(c, tr)?,
+        }
+        if !ok || want.len() == 0 { return Ok(ok) }
+        return match self.trait_args_of(c, tr) {
+            Some(have) => Ok(type_list_eq(have, want)),
+            None => Ok(true),
+        }
     }
 
     // --- scope -----------------------------------------------------------
@@ -4443,6 +4472,22 @@ impl Checker {
 
     // Why the tuple or list type `t` isn't `trnm` (`Eq` or `Hash`).
     fun not_trait_why(self, t: Type, trnm: str) -> str {
+        // a generic trait's bound, `Iterator<str>` (MYLA-538)
+        let base = trait_head(trnm)
+        if base != trnm {
+            let why = format("'{}' isn't {}", type_name(t), unqualified(trnm))
+            let ok = match t {
+                Type.TParam(pn) => self.bound_has(pn, base),
+                _ => match self.type_implements(t, base) { Ok(b) => b, Err(x) => false },
+            }
+            if !ok { return why }
+            let have = match self.trait_args_of(t, base) {
+                Some(h) => generic_name(unqualified(base), h),
+                None => { return why },
+            }
+            if is_type_param(t) { return format("{} (its bound is '{}: {}')", why, type_name(t), have) }
+            return format("{} (it implements '{}')", why, have)
+        }
         var inner: [Type] = []
         match t {
             Type.TTuple(es) => { inner = es },
@@ -4484,6 +4529,16 @@ impl Checker {
         return match self.impl_bound_failing(k, trnm, t) {
             Ok(x) => x,
             Err(x) => None,
+        }
+    }
+
+    // `failing_arg` as a message ends with it: ": 'int32' isn't Iterator<str>",
+    // "" when `t` has no impl of `trnm` whose bound fails (MYLA-538).
+    #test(checker_on("[int]"), Type.TStruct("Vec2", []), "Eq")[""]
+    fun bound_why(self, t: Type, trnm: str) -> str {
+        return match self.failing_arg(t, trnm) {
+            Some(ct) => ": " + self.not_trait_why(ct.0, ct.1),
+            None => "",
         }
     }
 
@@ -6133,7 +6188,10 @@ impl Checker {
                     Type.TStr => Type.TChar,
                     _ => {
                         if self.is_iterator(it)? { return self.check_for_iterator(s, var_name, body, it_expr, it) }
-                        return Err(terr_at(it_expr.line, it_expr.col, it_expr.sp, format("`for ... in` requires a list, a map, a string, a range or an Iterator, found '{}'{}", type_name(it), iterator_hint(it))))
+                        // its impl's bound unmet: why (MYLA-538)
+                        var why = self.bound_why(it, "Iterator")
+                        if why == "" { why = iterator_hint(it) }
+                        return Err(terr_at(it_expr.line, it_expr.col, it_expr.sp, format("`for ... in` requires a list, a map, a string, a range or an Iterator, found '{}'{}", type_name(it), why)))
                     },
                 }
             },
@@ -7125,12 +7183,15 @@ fun bounded_params(tps: [str], trnm: str) -> str {
 
 // A type's name without its module, as a program writes it (`geo$Point` is
 // `Point`), for the messages of a derived impl.
+// A generic trait's bound loses only its head's module (`m$Conv<geo$P>` is
+// `Conv<geo$P>`, MYLA-538).
 #test("geo$Point")["Point"]
 #test("Point")["Point"]
+#test("m$Conv<geo$P>")["Conv<geo$P>"]
 fun unqualified(name: str) -> str {
     var start = 0
     var i = 0
-    while i < name.len() {
+    while i < name.len() && name[i] != '<' {
         if name[i] == '$' { start = i + 1 }
         i += 1
     }
@@ -7823,8 +7884,15 @@ impl Checker {
             var j = 0
             while j < b.traits.len() {
                 let tr = b.traits[j]
-                // a generic trait's arguments are its impl's to solve (D171)
-                if b.args[j].len() == 0 {
+                let want = subst_type_list(b.args[j], u.subst)
+                if want.len() > 0 {
+                    // a generic trait's bound, with its arguments (MYLA-538)
+                    let ok = match self.meets_bound(c, tr, want) {
+                        Ok(x) => x,
+                        Err(x) => true,
+                    }
+                    if !ok { out.push((c, generic_name(tr, want))) }
+                } else {
                     match c {
                         Type.TParam(pn) => { if !self.bound_has(pn, tr) { out.push((c, tr)) } },
                         _ => {
@@ -10143,7 +10211,7 @@ impl Checker {
                 i = i + 1
                 continue
             }
-            if !is_printable(at) { return Err(terr_at(args[i].line, args[i].col, args[i].sp, format("format() cannot render a value of type '{}'", type_name(at)))) }
+            if !is_printable(at) { return Err(terr_at(args[i].line, args[i].col, args[i].sp, format("format() cannot render a value of type '{}'{}", type_name(at), self.bound_why(at, "Format")))) }
             if spec != "" {
                 let sp = match parse_spec(spec) {
                     Ok(x) => x
@@ -10462,7 +10530,7 @@ impl Checker {
                         if b.args[j].len() > 0 {
                             let ok = match concrete { Type.TParam(pn) => self.bound_has(pn, tr), _ => self.type_implements(concrete, tr)? }
                             if !ok {
-                                let msg = format("type '{}' does not satisfy the bound '{}: {}' required by '{}'", type_name(concrete), b.tp, generic_name(tr, subst_type_list(b.args[j], subst)), sig.decl.name)
+                                let msg = format("type '{}' does not satisfy the bound '{}: {}' required by '{}'{}", type_name(concrete), b.tp, generic_name(tr, subst_type_list(b.args[j], subst)), sig.decl.name, self.bound_why(concrete, tr))
                                 return Err(CheckErr { line: arg.line, col: arg.col, sp: arg.sp, msg: msg, decl: -1, notes: self.iter_hint(concrete, tr, arg) })
                             }
                         }
