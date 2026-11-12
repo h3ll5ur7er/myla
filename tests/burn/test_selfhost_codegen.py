@@ -877,6 +877,35 @@ class SelfHostedCodegenParity(unittest.TestCase):
         start = proc.stdout.index("fun myla_scale")
         self.assertEqual(proc.stdout[start:proc.stdout.index("}\n", start) + 2], IR_SAMPLE_TEXT)
 
+    def test_a_method_taking_self_writes_nothing(self) -> None:
+        # MYLA-542: `self.f(self.g(k))` in a `var self` method staged a copy
+        # of the receiver for `f`, `g` counting as a write of `self` though
+        # neither takes `var self`; now as `let j = self.g(k)` then
+        # `self.f(j)`. A `var self` method in the argument still stages one
+        source = (
+            "struct S { names: [str], n: int }\n"
+            "impl S {\n"
+            "    fun g(self, k: int) -> int { return k + self.names.len() }\n"
+            "    fun f(self, k: int) -> int { return k * 2 + self.n }\n"
+            "    fun bump(var self, k: int) -> int {\n        self.n += k\n        return k\n    }\n"
+            "    fun nested(var self, k: int) -> int {\n        self.n += 1\n        return self.f(self.g(k))\n    }\n"
+            "    fun writes(var self, k: int) -> int {\n        self.n += 1\n        return self.f(self.bump(k))\n    }\n"
+            "}\n"
+            "fun main() {\n    var s = S { names: [\"a\"], n: 1 }\n"
+            "    print(s.nested(3))\n    print(s.writes(3))\n}\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "prog.my")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(source)
+            proc = subprocess.run([self._binary, path, "--emit-ir", "--no-inline"], capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+
+        def body(name: str) -> str:
+            start = proc.stdout.index(f"fun myla_S.{name}")
+            return proc.stdout[start:proc.stdout.index("\n}", start)]
+        self.assertNotIn("__staged", body("nested"))
+        self.assertIn("__staged", body("writes"))
+
     def test_lets_of_fixed_variables_borrow(self) -> None:
         # MYLA-122: a `let` of a part of a variable nothing writes while it
         # lives (a parameter, a `let`, a loop's element), and a `for` over

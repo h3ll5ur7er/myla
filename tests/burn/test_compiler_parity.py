@@ -8931,6 +8931,299 @@ async fun main() {
     print(f() + g() + p(1) + total(cap) + size(tr))
 }
 """,
+    "operands_kept_when_a_later_operand_writes_their_variable": r"""// B2 (MYLA-543): an operator's left operand, read from a variable's
+// container, kept while the right one replaces that container (a `var self`
+// method); a compound assignment's old value too. Native code read freed
+// cells (`s121!`, `out of memory`)
+struct P { x: int, s: str }
+
+#derive(Eq)
+struct Q { name: str, n: int }
+
+impl Add for P {
+    fun add(self, other: P) -> P { return P { x: self.x + other.x, s: self.s + other.s } }
+}
+
+struct H {
+    xs: [str], m: [int: str], g: [[str]], ps: [P], qs: [Q], name: str,
+    t: [(str, int)], fs: [(int) -> str], n: int,
+}
+
+fun mk(n: int) -> str { return f"s{n}" }
+
+fun fresh() -> H {
+    return H {
+        xs: [mk(10), mk(11), mk(12)], m: [0: mk(20), 1: mk(21)], g: [[mk(30), mk(31)], [mk(32), mk(33)]],
+        ps: [P { x: 1, s: mk(40) }], qs: [Q { name: mk(41), n: 1 }], name: mk(50), t: [(mk(60), 6)],
+        fs: [(i: int) => mk(70 + i), (i: int) => mk(80 + i)], n: 0,
+    }
+}
+
+impl H {
+    // every container of `self` replaced: what was read from them released
+    fun repl(var self) {
+        self.xs = [mk(110), mk(111), mk(112)]
+        self.m = [0: mk(120), 1: mk(121)]
+        self.g = [[mk(130), mk(131)], [mk(132), mk(133)]]
+        self.ps = [P { x: 9, s: mk(140) }]
+        self.qs = [Q { name: mk(141), n: 9 }]
+        self.name = mk(150)
+        self.t = [(mk(160), 16)]
+        self.fs = [(i: int) => mk(170 + i), (i: int) => mk(180 + i)]
+        self.n += 1
+    }
+    fun s(var self) -> str { self.repl(); return "!" }
+    fun k(var self) -> int { self.repl(); return 1 }
+    fun l(var self) -> [str] { self.repl(); return [mk(10), mk(11), mk(12)] }
+    fun p(var self) -> P { self.repl(); return P { x: 2, s: "p" } }
+    fun q(var self) -> Q { self.repl(); return Q { name: mk(41), n: 1 } }
+    fun tu(var self) -> (str, int) { self.repl(); return (mk(60), 6) }
+    fun shrink(var self) -> str {
+        self.m.remove(1)
+        self.xs.truncate(1)
+        return "v"
+    }
+}
+
+fun shl(xs: [str]) -> str {
+    var sb = StringBuilder()
+    for x in xs { sb.append(x + ",") }
+    return sb.build()
+}
+
+fun main() {
+    // operators
+    var h = fresh()
+    print(h.xs[0] + h.s())
+    h = fresh()
+    print(h.name + h.s())
+    h = fresh()
+    print(h.g[0][0] + (h.xs[1] + h.s()))
+    h = fresh()
+    print(h.m[0] + h.s())
+    h = fresh()
+    print(f"{h.xs[0] == h.s()} {h.xs[0] < h.s()}")
+    h = fresh()
+    print(f"{h.xs == h.l()}")
+    h = fresh()
+    print(f"{h.t[0] == h.tu()}")
+    h = fresh()
+    print(f"{h.qs[0] == h.q()}")
+    h = fresh()
+    let sum = h.ps[0] + h.p()
+    print(f"{sum.x} {sum.s}")
+    h = fresh()
+    print(h.xs[0] + (if h.k() > 0 { "T" } else { "F" }))
+    // compound assignments
+    h = fresh()
+    h.xs[0] += h.s()
+    print(shl(h.xs))
+    h = fresh()
+    h.m[1] += h.shrink()
+    print(f"{h.m[1]} {h.m.len()} {shl(h.xs)}")
+}
+""",
+    "bases_kept_when_their_index_writes_their_variable": r"""// B2 (MYLA-543): an index's or a slice's base kept while the index replaces
+// the container it is read from; and a function value called from a list.
+// Native code read freed cells (`list index 1 out of bounds (len 0)`)
+struct P { x: int, s: str }
+
+#derive(Eq)
+struct Q { name: str, n: int }
+
+impl Add for P {
+    fun add(self, other: P) -> P { return P { x: self.x + other.x, s: self.s + other.s } }
+}
+
+struct H {
+    xs: [str], m: [int: str], g: [[str]], ps: [P], qs: [Q], name: str,
+    t: [(str, int)], fs: [(int) -> str], n: int,
+}
+
+fun mk(n: int) -> str { return f"s{n}" }
+
+fun fresh() -> H {
+    return H {
+        xs: [mk(10), mk(11), mk(12)], m: [0: mk(20), 1: mk(21)], g: [[mk(30), mk(31)], [mk(32), mk(33)]],
+        ps: [P { x: 1, s: mk(40) }], qs: [Q { name: mk(41), n: 1 }], name: mk(50), t: [(mk(60), 6)],
+        fs: [(i: int) => mk(70 + i), (i: int) => mk(80 + i)], n: 0,
+    }
+}
+
+impl H {
+    // every container of `self` replaced: what was read from them released
+    fun repl(var self) {
+        self.xs = [mk(110), mk(111), mk(112)]
+        self.m = [0: mk(120), 1: mk(121)]
+        self.g = [[mk(130), mk(131)], [mk(132), mk(133)]]
+        self.ps = [P { x: 9, s: mk(140) }]
+        self.qs = [Q { name: mk(141), n: 9 }]
+        self.name = mk(150)
+        self.t = [(mk(160), 16)]
+        self.fs = [(i: int) => mk(170 + i), (i: int) => mk(180 + i)]
+        self.n += 1
+    }
+    fun s(var self) -> str { self.repl(); return "!" }
+    fun k(var self) -> int { self.repl(); return 1 }
+    fun l(var self) -> [str] { self.repl(); return [mk(10), mk(11), mk(12)] }
+    fun p(var self) -> P { self.repl(); return P { x: 2, s: "p" } }
+    fun q(var self) -> Q { self.repl(); return Q { name: mk(41), n: 1 } }
+    fun tu(var self) -> (str, int) { self.repl(); return (mk(60), 6) }
+    fun shrink(var self) -> str {
+        self.m.remove(1)
+        self.xs.truncate(1)
+        return "v"
+    }
+}
+
+fun shl(xs: [str]) -> str {
+    var sb = StringBuilder()
+    for x in xs { sb.append(x + ",") }
+    return sb.build()
+}
+
+fun main() {
+    // an index's and a slice's base
+    var h = fresh()
+    print(h.xs[h.k()])
+    h = fresh()
+    print(h.g[0][h.k()])
+    h = fresh()
+    print(h.g[h.k()][0])
+    h = fresh()
+    print(h.m[h.k()])
+    h = fresh()
+    print(h.ps[h.k() - 1].s)
+    h = fresh()
+    print(f"{h.xs[0][h.k()]}")
+    h = fresh()
+    print(shl(h.xs[h.k():]))
+    h = fresh()
+    print(h.xs[0][h.k():])
+    // a function value called from a list
+    h = fresh()
+    print(h.fs[0](h.k()))
+    print(h.n)
+}
+""",
+    "holes_and_keys_kept_when_a_later_one_writes_their_variable": r"""// B2 (MYLA-543): an f-string's or `format`'s hole, a map literal's key and a
+// `match` scrutinee's operand kept while a later operand replaces the
+// container they are read from. Native code read freed cells
+struct P { x: int, s: str }
+
+#derive(Eq)
+struct Q { name: str, n: int }
+
+impl Add for P {
+    fun add(self, other: P) -> P { return P { x: self.x + other.x, s: self.s + other.s } }
+}
+
+struct H {
+    xs: [str], m: [int: str], g: [[str]], ps: [P], qs: [Q], name: str,
+    t: [(str, int)], fs: [(int) -> str], n: int,
+}
+
+fun mk(n: int) -> str { return f"s{n}" }
+
+fun fresh() -> H {
+    return H {
+        xs: [mk(10), mk(11), mk(12)], m: [0: mk(20), 1: mk(21)], g: [[mk(30), mk(31)], [mk(32), mk(33)]],
+        ps: [P { x: 1, s: mk(40) }], qs: [Q { name: mk(41), n: 1 }], name: mk(50), t: [(mk(60), 6)],
+        fs: [(i: int) => mk(70 + i), (i: int) => mk(80 + i)], n: 0,
+    }
+}
+
+impl H {
+    // every container of `self` replaced: what was read from them released
+    fun repl(var self) {
+        self.xs = [mk(110), mk(111), mk(112)]
+        self.m = [0: mk(120), 1: mk(121)]
+        self.g = [[mk(130), mk(131)], [mk(132), mk(133)]]
+        self.ps = [P { x: 9, s: mk(140) }]
+        self.qs = [Q { name: mk(141), n: 9 }]
+        self.name = mk(150)
+        self.t = [(mk(160), 16)]
+        self.fs = [(i: int) => mk(170 + i), (i: int) => mk(180 + i)]
+        self.n += 1
+    }
+    fun s(var self) -> str { self.repl(); return "!" }
+    fun k(var self) -> int { self.repl(); return 1 }
+    fun l(var self) -> [str] { self.repl(); return [mk(10), mk(11), mk(12)] }
+    fun p(var self) -> P { self.repl(); return P { x: 2, s: "p" } }
+    fun q(var self) -> Q { self.repl(); return Q { name: mk(41), n: 1 } }
+    fun tu(var self) -> (str, int) { self.repl(); return (mk(60), 6) }
+    fun shrink(var self) -> str {
+        self.m.remove(1)
+        self.xs.truncate(1)
+        return "v"
+    }
+}
+
+fun shl(xs: [str]) -> str {
+    var sb = StringBuilder()
+    for x in xs { sb.append(x + ",") }
+    return sb.build()
+}
+
+fun main() {
+    // holes
+    var h = fresh()
+    print(f"{h.xs[0]}{h.s()}{h.xs[0]}")
+    h = fresh()
+    print(format("{}-{}", h.g[0][0], h.s()))
+    // a map literal's key
+    h = fresh()
+    let m = [h.xs[0]: h.s()]
+    for k in m { print(k + m[k]) }
+    // a scrutinee
+    h = fresh()
+    print(match h.xs[0] + h.s() { "s10!" => "ok", _ => "bad" })
+}
+""",
+    "a_method_call_takes_its_receivers_place_first": r"""// C9, D193 (MYLA-543): `place[i()].push(v())` takes the receiver's place
+// (its indices and keys) before the argument, as every method call does and
+// as the interpreter did; native code ran the value first (`push: 21`)
+struct C { n: int, g: [[int]], m: [int: [int]] }
+
+impl C {
+    fun k(var self) -> int {
+        self.n = self.n * 10 + 1
+        return 0
+    }
+    fun v(var self) -> int {
+        self.n = self.n * 10 + 2
+        return 7
+    }
+}
+
+fun at(n: int) -> int {
+    print(f"index {n}")
+    return 0
+}
+
+fun val(n: int) -> int {
+    print(f"value {n}")
+    return n
+}
+
+fun main() {
+    // C9
+    var c = C { n: 0, g: [[1]], m: [0: [1]] }
+    c.g[c.k()].push(c.v())
+    print(f"push: {c.n} {c.g[0].len()}")
+    c.n = 0
+    c.m[c.k()].push(c.v())
+    print(f"map element push: {c.n} {c.m[0].len()}")
+    c.n = 0
+    c.g[c.n].push(c.v())
+    print(f"index read first: {c.n} {c.g[0].len()}")
+    var g: [[int]] = [[]]
+    g[at(1)].push(val(2))
+    var bs = [StringBuilder()]
+    bs[at(3)].append(f"{val(4)}")
+    print(f"{g[0].len()} {bs[0].build()}")
+}
+""",
     "actors_store_every_heap_type": r"""// H2 (MYLA-415): an actor's method keeps an argument of every heap type in
 // its state, in a program with tasks, the arguments temporaries or the
 // caller's own values, which the caller then changes
@@ -10725,6 +11018,14 @@ PINNED = {
     "enum_var_self_assigns_self": '3\n2\n1\n0\nabbccc|\namber\namber green\n10\n',
     # MYLA-415 (B1): native code segfaulted (the captured enum deep-copied as a box)
     "closures_capturing_recursive_enums_across_tasks": '3\n324\n13\n7\n327\n327\n3\n3\n324\n30\n336\n',
+    # MYLA-543: native code read freed cells (B2)
+    "operands_kept_when_a_later_operand_writes_their_variable": 's10!\ns50!\ns30s11!\ns20!\nfalse false\ntrue\ntrue\ntrue\n3 s40p\ns10T\ns10!,s111,s112,\ns21v 2 s10,\n',
+    # MYLA-543: native code read freed cells (B2)
+    "bases_kept_when_their_index_writes_their_variable": 's11\ns31\ns32\ns21\ns40\n49\ns11,s12,\n10\ns71\n1\n',
+    # MYLA-543: native code read freed cells (B2)
+    "holes_and_keys_kept_when_a_later_one_writes_their_variable": 's10!s110\ns30-!\ns10!\nok\n',
+    # MYLA-543: native code ran the value first
+    "a_method_call_takes_its_receivers_place_first": 'push: 12 2\nmap element push: 12 2\nindex read first: 2 3\nindex 1\nvalue 2\nindex 3\nvalue 4\n1 4\n',
     # MYLA-415 (H2): native code segfaulted (a string, list or map argument kept)
     "actors_store_every_heap_type": '1\n7\n3\n2\n2\n2\nvalue 7 2 1 built! rec/2 t4 some 7 5 42 2\n14\npre-value 7 3 1 built! rec/2 t4 some 7 5 42 2\n3 3 built more\n',
     # MYLA-415 (H3): native code segfaulted in __deepb_ and on a child's result
