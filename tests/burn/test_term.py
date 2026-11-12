@@ -69,11 +69,11 @@ class Pty:
     stderr, `COLS` by `ROWS`; this side keeps the terminal's end open to read
     its mode."""
 
-    def __init__(self, argv, executable=None, env=None):
+    def __init__(self, argv, executable=None, env=None, preexec_fn=None):
         self.master, self.slave = pty.openpty()
         fcntl.ioctl(self.slave, termios.TIOCSWINSZ, struct.pack("HHHH", ROWS, COLS, 0, 0))
         self.proc = subprocess.Popen(argv, executable=executable, stdin=self.slave, stdout=self.slave,
-                                     stderr=self.slave, env=env, start_new_session=True)
+                                     stderr=self.slave, env=env, start_new_session=True, preexec_fn=preexec_fn)
         _RUNNING.append(self.proc)
         self.out = b""
         self.seen = 0
@@ -395,6 +395,53 @@ async fun main() {
 """
 
 
+# D192 (MYLA-548): a signal while the terminal is raw; `left`: raw mode
+# left before the wait, `listen`: std.signal catches one first and lets go
+RAW_SIGNALS = """import std.term as term
+import std.signal as signal
+import std.task as task
+import std.process as process
+from std.io import write
+
+#main
+async fun main() {
+    let mode = process.args()[1]
+    let r = match term.raw_mode() {
+        Ok(r) => r
+        Err(e) => panic(f"raw_mode: {e}")
+    }
+    if mode == "left" {
+        let x = r.restore()
+    }
+    if mode == "listen" {
+        match signal.listen() {
+            Ok(s) => {
+                let w = write(1, "listening\\n")
+                match await s.next() {
+                    Ok(sig) => { let w2 = write(1, f"caught {sig}\\n") }
+                    Err(e) => { let w2 = write(1, f"{e}\\n") }
+                }
+                s.close()
+            }
+            Err(e) => panic(f"listen: {e}")
+        }
+    }
+    let w = write(1, "ready\\n")
+    await task.sleep(30000)
+}
+"""
+
+
+def caught_signals(pid: int) -> set[int]:
+    """The signals the process `pid` has a handler for (its `SigCgt`)."""
+    with open(f"/proc/{pid}/status", encoding="ascii") as fh:
+        for line in fh:
+            if line.startswith("SigCgt:"):
+                mask = int(line.split()[1], 16)
+                return {n for n in range(1, 65) if mask & (1 << (n - 1))}
+    return set()
+
+
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
 class RawModeEnds(Case):
     """D187: raw mode ends with the program, through the runtime's exit hook:
@@ -407,11 +454,13 @@ class RawModeEnds(Case):
     def setUpClass(cls):
         cls.ends = Built(ENDS)
         cls.ends_async = Built(ENDS_ASYNC)
+        cls.signals = Built(RAW_SIGNALS)
 
     @classmethod
     def tearDownClass(cls):
         cls.ends.close()
         cls.ends_async.close()
+        cls.signals.close()
 
     def commands(self, built: Built, arg: str):
         """("interpreted", argv, executable) and ("built", …), the program
@@ -492,6 +541,73 @@ class RawModeEnds(Case):
                         self.assertLess(cpu, 0.8, f"{cpu:.2f} s of CPU")
         finally:
             built.close()
+
+    ENDING = {signal.SIGHUP, signal.SIGINT, signal.SIGQUIT, signal.SIGTERM}
+
+    def signalled(self, how: str, argv, exe, sigs, ready="ready\n", ignore_hup=False):
+        """The program started on a terminal and sent the signals `sigs`
+        once it is `ready`, a beat apart: the signals it catches then, its
+        exit status and whether the terminal is cooked once it ended."""
+        def pre():
+            resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+            if ignore_hup:
+                signal.signal(signal.SIGHUP, signal.SIG_IGN)
+        t = Pty(argv, exe, preexec_fn=pre)
+        t.expect(ready)
+        caught = caught_signals(t.proc.pid)
+        for sig in sigs:
+            t.proc.send_signal(sig)
+            time.sleep(0.3)
+        out, code = t.finish_keeping(timeout=20)
+        lflag = t.lflag()
+        t.close()
+        return caught, code, lflag & self.COOKED == self.COOKED
+
+    def test_a_signal_while_raw_puts_the_mode_back(self):
+        """D192 (MYLA-548): while the terminal is raw, a hang-up, an interrupt,
+        a quit or a request to terminate puts the mode back and ends the
+        program as the signal would have (it left the terminal raw)."""
+        for how, argv, exe in self.commands(self.signals, "raw"):
+            for sig in sorted(self.ENDING):
+                with self.subTest(how, signal=sig.name):
+                    caught, code, cooked = self.signalled(how, argv, exe, [sig])
+                    if TEST_TARGET == "":
+                        self.assertLessEqual(self.ENDING, caught)
+                    self.assertEqual((code, cooked), (-sig, True))
+
+    def test_raw_mode_left_lets_the_signals_go(self):
+        """Raw mode left, the four signals are as they were (their defaults):
+        the program has no handler for them."""
+        for how, argv, exe in self.commands(self.signals, "left"):
+            with self.subTest(how):
+                caught, code, cooked = self.signalled(how, argv, exe, [signal.SIGINT])
+                if TEST_TARGET == "":
+                    self.assertEqual(self.ENDING & caught, set())
+                self.assertEqual((code, cooked), (-signal.SIGINT, True))
+
+    def test_an_ignored_signal_stays_ignored_in_raw_mode(self):
+        for how, argv, exe in self.commands(self.signals, "raw"):
+            with self.subTest(how):
+                caught, code, cooked = self.signalled(how, argv, exe, [signal.SIGHUP, signal.SIGTERM],
+                                                      ignore_hup=True)
+                if TEST_TARGET == "":
+                    self.assertNotIn(signal.SIGHUP, caught)
+                self.assertEqual((code, cooked), (-signal.SIGTERM, True))
+
+    def test_a_listener_in_raw_mode_gets_the_signal(self):
+        """std.signal's listener takes an interrupt while the terminal is raw;
+        once it lets go, raw mode's handler is back for the next one."""
+        for how, argv, exe in self.commands(self.signals, "listen"):
+            with self.subTest(how):
+                t = Pty(argv, exe)
+                t.expect("listening\n")
+                t.proc.send_signal(signal.SIGINT)
+                self.assertIn("caught interrupt", t.expect("ready\n"))
+                t.proc.send_signal(signal.SIGINT)
+                out, code = t.finish_keeping(timeout=20)
+                lflag = t.lflag()
+                t.close()
+                self.assertEqual((code, lflag & self.COOKED), (-signal.SIGINT, self.COOKED))
 
     def test_a_failed_task(self):
         for how, argv, exe in self.ends_async.commands():
@@ -598,6 +714,44 @@ async fun main() {
 """
 
 
+# MYLA-548: a listener is a handle of the runtime's table (D181). A
+# `Signals` built by hand takes nothing (it read a byte of the descriptor it
+# named); closing a listener twice, or one built by hand, lets go of no other
+# listener (each close counted one listener less, so `a` stopped listening)
+SIGNAL_HANDLES = """import std.signal as signal
+import std.io as io
+from std.signal import Signals
+
+#main
+async fun main() {
+    let forged = Signals { handle: 0 }
+    print(f"forged try_next: {match forged.try_next() { Some(x) => "a signal", None => "none" }}")
+    var r = io.stdin()
+    print(f"stdin: {match r.read_line() { Ok(Some(l)) => l, Ok(None) => "<end>", Err(e) => "error" }}")
+    match signal.listen() {
+        Ok(a) => {
+            match signal.listen() {
+                Ok(b) => {
+                    let b2 = b
+                    b.close()
+                    b2.close()
+                    forged.close()
+                }
+                Err(e) => print(f"{e}")
+            }
+            print("ready")
+            match await a.next() {
+                Ok(s) => print(f"a got {s}")
+                Err(e) => print(f"{e}")
+            }
+            a.close()
+        }
+        Err(e) => print(f"{e}")
+    }
+}
+"""
+
+
 class Lines:
     """A command's stdout read line by line as it runs."""
 
@@ -672,6 +826,25 @@ class Signals(Case):
                     self.assertEqual(p.line(), "ready\n")
                     p.signal(sig)
                     self.assertEqual(p.finish(), ("", "", -sig))
+
+    def test_a_listener_is_a_handle(self):
+        built = Built(SIGNAL_HANDLES)
+        try:
+            for how, argv, exe in built.commands():
+                with self.subTest(how):
+                    p = subprocess.Popen(argv, executable=exe, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                         stderr=subprocess.PIPE, text=True)
+                    _RUNNING.append(p)
+                    p.stdin.write("line one\n")
+                    p.stdin.close()
+                    got = [p.stdout.readline() for _ in range(3)]
+                    self.assertEqual(got, ["forged try_next: none\n", "stdin: line one\n", "ready\n"])
+                    time.sleep(0.2)
+                    p.send_signal(signal.SIGINT)
+                    out, err = p.communicate(timeout=60)
+                    self.assertEqual((out, err, p.returncode), ("a got interrupt\n", "", 0))
+        finally:
+            built.close()
 
     def test_an_ignored_signal_stays_ignored(self):
         # started with SIGINT ignored (`nohup`, a background job): after the

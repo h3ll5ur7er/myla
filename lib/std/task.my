@@ -108,9 +108,11 @@ pub async fun timeout<T>(ms: int, f: async () -> T) -> Option<T> {
 // leaves its notifier with the actor in the same call, and the sender's call
 // wakes it). A notifier is a handle into the runtime's table (D181): it
 // lives until `close`, which wakes the tasks waiting on it (their waits
-// give `false`) and frees it; from then on a wake, a wait or a `listen`
-// through any copy of it, as through a `Notifier` value built by hand, is
-// the runtime error "use of a closed notifier". A channel closes the
+// give `false`) and frees it. A wait through any copy of it from then on
+// gives `false` at once too, and so does one that was starting as it closed
+// (D195): a closer can't know that a waiter on another worker isn't about to
+// park. A wake or a close from then on is the runtime error "use of a
+// closed notifier", and so is any use of a `Notifier` value built by hand. A channel closes the
 // notifiers it made itself, so it holds none while no task waits on it.
 //
 // `notify_one` wakes the task that has waited longest, or, when none waits,
@@ -163,8 +165,9 @@ impl Notifier {
     }
 
     // Closes the notifier: the tasks waiting on it are woken, their waits
-    // giving `false`, and it is freed (D181). Every later use of it, through
-    // any copy, is a runtime error, and so is a second close.
+    // giving `false`, and it is freed (D181). A later wait or `listen`,
+    // through any copy, gives `false` at once (D195); a later wake is a
+    // runtime error, and so is a second close.
     fun close(self) {
         if !__notifier_close(self.id) {
             closed_notifier()
@@ -186,10 +189,11 @@ impl Notifier {
     }
 
     // The notifier from now on: a wait on the listener also ends at once
-    // when a `notify_all` came after this.
+    // when a `notify_all` came after this. On a closed notifier, a listener
+    // whose waits give `false` (D195).
     fun listen(self) -> Listener {
         let gen = __notify_gen(self.id)
-        if gen < 0i64 {
+        if gen == -2i64 {
             closed_notifier()
         }
         return Listener { id: self.id, gen: gen }
@@ -222,7 +226,8 @@ fun limit(ms: int) -> int {
 }
 
 // One wait on the notifier `n` (since its generation `since`, -1 any; for
-// at most `ms` milliseconds, -1 no limit): whether it was woken.
+// at most `ms` milliseconds, -1 no limit): whether it was woken; false at
+// once when it is closed, a runtime error when it was never made (D195).
 async fun wait_on(n: int64, since: int64, ms: int) -> bool {
     let w = __waiter(n, since, ms)
     await __park(w)
@@ -272,18 +277,38 @@ fun forged_notifier() {
 }
 
 #test()[panic("use of a closed notifier")]
-async fun wait_after_close() {
-    let n = notifier()
-    let copy = n
-    n.close()
-    let woken = await copy.wait_timeout(1)
+async fun forged_wait() {
+    let n = Notifier { id: 4096i64 }
+    let woken = await n.wait_timeout(1)
 }
 
 #test()[panic("use of a closed notifier")]
-fun listen_after_close() {
-    let n = notifier()
-    n.close()
+fun forged_listen() {
+    let n = Notifier { id: 4096i64 }
     let l = n.listen()
+}
+
+#test()[panic("use of a closed notifier")]
+fun notify_after_close() {
+    let n = notifier()
+    let copy = n
+    n.close()
+    copy.notify_all()
+}
+
+// A wait on a closed notifier gives false at once, through any copy and
+// through a listener taken before or after the close (D195).
+#test
+async fun wait_after_close() {
+    let n = notifier()
+    let copy = n
+    let before = n.listen()
+    n.close()
+    assert(!(await copy.wait()))
+    assert(!(await copy.wait_timeout(1000)))
+    assert(!(await before.wait()))
+    let after = n.listen()
+    assert(!(await after.wait_timeout(1000)))
 }
 
 #test()[panic("use of a closed notifier")]

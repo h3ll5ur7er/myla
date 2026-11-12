@@ -74,6 +74,9 @@ impl Format for SignalError {
 }
 
 // The interrupt and terminate signals being caught: what `listen` gives.
+// Its handle is the listener's, an entry of the runtime's table (D181): a
+// copy is the same listener, and one closed or built by hand reaches
+// nothing (no signal, no descriptor's byte, no other listener).
 pub struct Signals {
     handle: int,
 }
@@ -112,9 +115,10 @@ impl Signals {
     }
 
     // No longer listening: once nobody listens, the signals end the program
-    // again, and those not taken are dropped. Close a `Signals` once.
+    // again, and those not taken are dropped. A second close, through any
+    // copy, does nothing (MYLA-548: it stopped another listener's signals).
     fun close(self) {
-        let r = __signal_listen(0)
+        let r = __signal_listen(self.handle)
     }
 }
 
