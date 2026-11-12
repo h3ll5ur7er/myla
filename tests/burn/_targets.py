@@ -47,6 +47,15 @@ SUITES = [
     # std.toml against tomllib and the toml-test suite, its drivers built for
     # the target (MYLA-424)
     "tests.burn.test_toml",
+    # the review's generators: deep copies between tasks, reads beside a
+    # mutation, writes into containers, generic code per width, the
+    # library at extreme arguments, the parsers built --checked (MYLA-555)
+    "tests.burn.test_generated_deep_copies",
+    "tests.burn.test_generated_reads",
+    "tests.burn.test_generated_writes",
+    "tests.burn.test_generated_widths",
+    "tests.burn.test_generated_extremes",
+    "tests.burn.test_formats_checked",
 ]
 
 # A test that reads the x86-64 code ends there, skipped, on another target,
