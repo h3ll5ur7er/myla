@@ -102,20 +102,34 @@ pub fun program() -> str {
 // --- The harness of `myla test --native` (MYLA-307) ----------------------
 //
 // `myla test --native` builds a program from a file and its cases: each
-// case a function giving "" when it passed, else why it failed, and a
-// `#main` that runs them through the functions below. The runner starts a
-// child process of itself for each case (`<harness> --case <n>`), so a
-// runtime error or an `exit` ends that case only, what it printed is kept
-// for the report and its scratch directory (MYLA_TEST_DIR) removed.
+// case a function giving its verdict (None when it passed, else why it
+// failed), and a `#main` that runs them through the functions below. The
+// runner starts a child process of itself for each case (`<harness> --case
+// <n> <nonce>`), so a runtime error or an `exit` ends that case only, what
+// it printed is kept for the report and its scratch directory
+// (MYLA_TEST_DIR) removed.
+//
+// A child tells the runner how its case ended in a record on stderr, which
+// is the child's last word (D191): the head `\u{1}myla-<nonce>\u{1}`
+// (`record_head`), a kind, `:`, a number and `;`, then as many bytes of text
+// as the number says for the kinds that carry a text. `P:0;` the case
+// returned and passed, `F:<n>;<detail>` it returned and failed, both
+// written here (`case_end`); `E:<n>;<message>` a runtime error and
+// `X:<status>;` an `exit` (the status the process ends with, `exit(n)`'s
+// `n` modulo 256), which the runtime writes (std.rt's
+// `test_record`), once `reporting` has given it the head. The nonce is the
+// runner's, new for each run, so nothing a case writes can pass for a
+// record, and the length frames the text, so a message of many lines is
+// whole. The rest of stderr is what the case wrote itself, passed on.
 //
 // A wasm32 module can start no process, so there `myla test` itself runs
-// the harness, `<harness> --from <n>` (MYLA-370): it runs the cases from
-// `n` on in itself, each between markers on both streams (`case_begin`,
-// `case_end`), and `myla test` cuts what it printed into the cases'
-// (`cut_run`); the case a runtime error or an `exit` ended is the last
-// one, and the next run starts after it. Run by hand without either flag,
-// where no process can be started the cases run in the harness itself, in
-// order, and the first runtime error ends the run.
+// the harness, `<harness> --from <n> <nonce>` (MYLA-370): it runs the cases
+// from `n` on in itself, each after a record `B:0;` on both streams
+// (`case_begin`) and ending with its record, and `myla test` cuts what it
+// printed into the cases' (`cut_run`); the case a runtime error or an
+// `exit` ended is the last one, and the next run starts after it. Run by
+// hand without either flag, where no process can be started the cases run
+// in the harness itself, in order, and the first runtime error ends the run.
 
 import std.fs as fs
 from std.process import args, exit, command, ExitStatus, Output, env
@@ -128,13 +142,16 @@ from std.num import format_float
 // `[panic("message")]`), an exit with `code` (2, `[exit(code)]`).
 pub struct Case { name: str, kind: int32, message: str, code: int32 }
 
-// The case `argv` names, `<harness> --case <n>`; -1 when it names none and
-// this process is the runner.
+// The case `argv` names, `<harness> --case <n>` with the run's nonce after
+// it, or without one by hand; -1 when it names none and this process is
+// the runner.
+#test(["h", "--case", "3", "17"])[3]
 #test(["h", "--case", "3"])[3]
 #test(["h"])[-1]
 #test(["h", "--case", "x"])[-1]
+#test(["h", "--case", "3", "17", "x"])[-1]
 pub fun case_index(argv: [str]) -> int32 {
-    if argv.len() != 3 || argv[1] != "--case" { return -1 }
+    if argv.len() < 3 || argv.len() > 4 || argv[1] != "--case" { return -1 }
     var n = 0
     var i = 0
     while i < argv[2].len() {
@@ -146,55 +163,89 @@ pub fun case_index(argv: [str]) -> int32 {
     return n
 }
 
-// The case `argv` starts a run at, `<harness> --from <n>` (MYLA-370); -1
-// when it names none.
-#test(["h", "--from", "12"])[12]
+// The case `argv` starts a run at, `<harness> --from <n> <nonce>`
+// (MYLA-370); -1 when it names none.
+#test(["h", "--from", "12", "17"])[12]
 #test(["h", "--case", "3"])[-1]
 #test(["h"])[-1]
 pub fun from_index(argv: [str]) -> int32 {
-    if argv.len() != 3 || argv[1] != "--from" { return -1 }
+    if argv.len() < 3 || argv.len() > 4 || argv[1] != "--from" { return -1 }
     return case_index(["", "--case", argv[2]])
 }
 
-// The markers on a case's stderr: one on both streams before each case of
-// a run `--from <n>`, and one after a case that ended by returning, with
-// its verdict after it ("" when it passed), in a child as in a run `--from`.
-// Without that mark the case ended the process: by a runtime error, whose
-// report is the last thing on stderr, or by an `exit`, `exit(0)` too (M6).
-// What the case wrote itself comes before the mark, so no line of its own
-// can pass for a verdict.
-const CASE_MARK: str = "\u{1}myla-case\u{1}"
-const DONE_MARK: str = "\u{1}myla-done\u{1}"
-
-// A case of a run `--from <n>` begins.
-pub fun case_begin() {
-    let o = write(1, CASE_MARK)
-    let e = write(2, CASE_MARK)
+// The head of the records of the run whose nonce is `nonce` (D191).
+#test("17")["\u{1}myla-17\u{1}"]
+pub fun record_head(nonce: str) -> str {
+    return "\u{1}myla-" + nonce + "\u{1}"
 }
 
-// A case ended by returning, with `detail` ("" when it passed): the mark
-// and the verdict on stderr.
-pub fun case_end(detail: str) {
-    let e = write(2, DONE_MARK + detail)
+// A run's nonce, new for each run: what no case can know beforehand.
+fun new_nonce() -> str {
+    return f"{now_ns()}"
+}
+
+// This process reports its cases with records (D191): their head, from the
+// nonce `argv` names after `--case <n>` or `--from <n>` ("" without one, and
+// then no records), given to the runtime too, which writes the record of a
+// runtime error or an `exit` with it (`__test_report`: a string's cell of
+// its own, which stays as long as the process).
+pub fun reporting(argv: [str]) -> str {
+    if argv.len() != 4 || (argv[1] != "--case" && argv[1] != "--from") { return "" }
+    let head = record_head(argv[3])
+    let n = head.len() as int64
+    let cell = __alloc(n + 8)
+    __store64(cell, n)
+    __copy_bytes(cell + 8, __addr_of(head) + 8, n)
+    __store64(__rt_addr("__test_report"), cell)
+    return head
+}
+
+// The runtime writes no record from now on: the harness ends by itself.
+fun reporting_ends() {
+    __store64(__rt_addr("__test_report"), 0)
+}
+
+// A case of a run `--from <n>` begins: a record on both streams.
+pub fun case_begin(head: str) {
+    if head == "" { return }
+    let o = write(1, head + "B:0;")
+    let e = write(2, head + "B:0;")
+}
+
+// A case ended by returning, with its verdict (None when it passed): its
+// record on stderr.
+pub fun case_end(head: str, verdict: Option<str>) {
+    if head == "" { return }
+    let e = match verdict {
+        Some(detail) => write(2, head + f"F:{detail.len()};" + detail),
+        None => write(2, head + "P:0;"),
+    }
+}
+
+// A child's end: its case returned, and passed (status 0) or failed (1),
+// its record the last thing on stderr.
+pub fun child_done(head: str, verdict: Option<str>) {
+    case_end(head, verdict)
+    reporting_ends()
+    exit(match verdict { Some(detail) => 1, None => 0 })
 }
 
 // A run `--from <n>` cut into its cases: for each case it began, what it
-// printed on stdout and on stderr, and its status as a child's would be (0
-// for one that ended by returning, whose stderr has the mark and the
-// verdict; the run's `code` for the one it ended in). Output before the
-// first case is dropped.
-#test("\u{1}myla-case\u{1}a\n\u{1}myla-case\u{1}", "\u{1}myla-case\u{1}\u{1}myla-done\u{1}\u{1}myla-case\u{1}runtime error: x\n", 1)[[("a\n", "\u{1}myla-done\u{1}", 0), ("", "runtime error: x\n", 1)]]
-#test("\u{1}myla-case\u{1}", "\u{1}myla-case\u{1}\u{1}myla-done\u{1}no", 0)[[("", "\u{1}myla-done\u{1}no", 0)]]
-#test("", "", 1)[[]]
-pub fun cut_run(stdout: str, stderr: str, code: int32) -> [(str, str, int32)] {
-    let outs = pieces(stdout, CASE_MARK)
-    let errs = pieces(stderr, CASE_MARK)
+// printed on stdout and on stderr, and its status as a child's would be
+// (0 for one the run went on after; the run's `code` for the last one).
+// Output before the first case is dropped.
+#test("\u{1}myla-1\u{1}B:0;a\n\u{1}myla-1\u{1}B:0;", "\u{1}myla-1\u{1}B:0;\u{1}myla-1\u{1}P:0;\u{1}myla-1\u{1}B:0;\u{1}myla-1\u{1}E:1;x", 1, "\u{1}myla-1\u{1}")[[("a\n", "\u{1}myla-1\u{1}P:0;", 0), ("", "\u{1}myla-1\u{1}E:1;x", 1)]]
+#test("\u{1}myla-case\u{1}x", "\u{1}myla-2\u{1}B:0;\u{1}myla-case\u{1}\u{1}myla-2\u{1}P:0;", 0, "\u{1}myla-1\u{1}")[[]]   // another run's marks, an old one's
+#test("", "", 1, "\u{1}myla-1\u{1}")[[]]
+pub fun cut_run(stdout: str, stderr: str, code: int32, head: str) -> [(str, str, int32)] {
+    let mark = head + "B:0;"
+    let outs = pieces(stdout, mark)
+    let errs = pieces(stderr, mark)
     var runs: [(str, str, int32)] = []
     var i = 1
     while i < errs.len() {
         let out = if i < outs.len() { outs[i] } else { "" }
-        let e = errs[i]
-        runs.push((out, e, if last_at(e, DONE_MARK, false) >= 0 { 0 } else { code }))
+        runs.push((out, errs[i], if i == errs.len() - 1 { code } else { 0 }))
         i = i + 1
     }
     return runs
@@ -221,13 +272,6 @@ fun pieces(text: str, mark: str) -> [str] {
     }
     out.push(slice_of(text, start, text.len()))
     return out
-}
-
-// A child's end: its case returned, and passed (`detail` empty, status 0)
-// or failed with `detail` (status 1), told to the runner after the mark.
-pub fun child_done(detail: str) {
-    case_end(detail)
-    exit(if detail == "" { 0 } else { 1 })
 }
 
 // The runner: every case in a child process of `program` (this harness),
@@ -258,12 +302,15 @@ pub fun run_in_children(program: str, cases: [Case]) -> Option<int32> {
     var base = match env("TMPDIR") { Some(d) => d, None => "" }
     if base == "" { base = "/tmp" }
     let root = f"{base}/myla-test-{now_ns()}"
+    let nonce = new_nonce()
+    let head = record_head(nonce)
     var lines: [str] = []
     while k < cases.len() {
         let dir = f"{root}/c{k}"
         var argv = lead
         argv.push("--case")
         argv.push(f"{k}")
+        argv.push(nonce)
         let ran = command(exe).args(argv).env("MYLA_TEST_DIR", dir).stdin("").output()
         var started = true
         var out = Output { stdout: [], stderr: [], status: ExitStatus.Exited(0) }
@@ -280,9 +327,9 @@ pub fun run_in_children(program: str, cases: [Case]) -> Option<int32> {
                 ExitStatus.Exited(c) => c,
                 ExitStatus.Signaled(s) => -s,
             }
-            let (detail, shown) = case_detail(cases[k], text(out.stdout), text(out.stderr), code)
-            if detail == "" { passed = passed + 1 }
-            for l in case_lines(cases[k], detail, shown) { lines.push(l) }
+            let (verdict, shown) = case_detail(cases[k], text(out.stdout), text(out.stderr), code, head)
+            match verdict { None => { passed = passed + 1 }, Some(d) => {} }
+            for l in case_lines(cases[k], verdict, shown) { lines.push(l) }
         }
         k = k + 1
     }
@@ -291,83 +338,157 @@ pub fun run_in_children(program: str, cases: [Case]) -> Option<int32> {
     return Some(summary(passed, cases.len()))
 }
 
-// A case's lines in the report: PASS, or FAIL with the detail and the
-// output lines it printed under it.
-#test(Case { name: "t", kind: 0, message: "", code: 0 }, "", ["x"])[["PASS  t\n"]]
-#test(Case { name: "t", kind: 0, message: "", code: 0 }, "a\nb", ["x"])[["FAIL  t: a\\nb\n", "      | x\n"]]
-pub fun case_lines(c: Case, detail: str, shown: [str]) -> [str] {
-    if detail == "" { return [f"PASS  {c.name}\n"] }
-    var lines = [f"FAIL  {c.name}: {on_one_line(detail)}\n"]
+// A case's lines in the report: PASS, or FAIL with the detail (none for an
+// empty one) and the output lines it printed under it.
+#test(Case { name: "t", kind: 0, message: "", code: 0 }, None, ["x"])[["PASS  t\n"]]
+#test(Case { name: "t", kind: 0, message: "", code: 0 }, Some("a\nb"), ["x"])[["FAIL  t: a\\nb\n", "      | x\n"]]
+#test(Case { name: "t", kind: 0, message: "", code: 0 }, Some(""), [])[["FAIL  t\n"]]   // an empty `Err` fails
+pub fun case_lines(c: Case, verdict: Option<str>, shown: [str]) -> [str] {
+    let detail = match verdict {
+        Some(d) => d,
+        None => { return [f"PASS  {c.name}\n"] },
+    }
+    var lines = [fail_line(c.name, detail)]
     for l in shown { lines.push("      | " + l + "\n") }
     return lines
 }
 
-// What a child's run says of its case: the detail ("" when it passed) and
-// the output lines to show under a FAIL line. What the case wrote on
-// stderr itself is passed on, as `myla test` lets a case's stderr through
-// when it interprets it; the verdict and the runtime error aren't.
-#test(Case { name: "t", kind: 0, message: "", code: 0 }, "x\n", "\u{1}myla-done\u{1}", 0)[("", ["x"])]
-#test(Case { name: "t", kind: 0, message: "", code: 0 }, "x\n", "\u{1}myla-done\u{1}expected 1, got 2", 1)[("expected 1, got 2", ["x"])]
-#test(Case { name: "t", kind: 0, message: "", code: 0 }, "", "runtime error: boom\n  --> t.my:1:1\n", 1)[("runtime error: boom", [])]
-#test(Case { name: "t", kind: 1, message: "boom", code: 0 }, "", "runtime error: boom\n  --> t.my:1:1\n", 1)[("", [])]
-#test(Case { name: "t", kind: 1, message: "boom", code: 0 }, "", "runtime error: bo\n  --> t.my:1:1\n", 1)[("expected runtime error 'boom', got runtime error 'bo'", [])]   // exactly (D183)
-#test(Case { name: "t", kind: 1, message: "", code: 0 }, "", "runtime error: x\n  --> t.my:1:1\n", 1)[("expected runtime error '', got runtime error 'x'", [])]
-#test(Case { name: "t", kind: 1, message: "list index 3 out of bounds (len 3)", code: 0 }, "", "runtime error: index out of bounds\n", 1)[("expected runtime error 'list index 3 out of bounds (len 3)', got runtime error 'index out of bounds'", [])]
-#test(Case { name: "t", kind: 1, message: "boom", code: 0 }, "", "", 3)[("expected runtime error 'boom', exited with status 3", [])]
-#test(Case { name: "t", kind: 2, message: "", code: 3 }, "", "", 3)[("", [])]
-#test(Case { name: "t", kind: 2, message: "", code: 3 }, "", "", 0)[("expected exit status 3, exited with status 0", [])]
-#test(Case { name: "t", kind: 2, message: "", code: 0 }, "", "", 0)[("", [])]   // `[exit(0)]` (M6)
-#test(Case { name: "t", kind: 2, message: "", code: 0 }, "", "\u{1}myla-done\u{1}expected exit status 0, got 2", 1)[("expected exit status 0, got 2", [])]
-#test(Case { name: "t", kind: 0, message: "", code: 0 }, "", "", 0)[("exited with status 0", [])]   // `exit(0)` in a case (M6)
-#test(Case { name: "t", kind: 0, message: "", code: 0 }, "", "", 2)[("exited with status 2", [])]
-#test(Case { name: "t", kind: 0, message: "", code: 0 }, "", "", -9)[("killed by signal 9", [])]
-#test(Case { name: "t", kind: 0, message: "", code: 0 }, "", "runtime error: expected a\n, got b\n\n  --> t.my:1:1\n", 1)[("runtime error: expected a\n, got b\n", [])]
-#test(Case { name: "t", kind: 0, message: "", code: 0 }, "", "runtime error: stack overflow\n", 1)[("runtime error: stack overflow", [])]
-pub fun case_detail(c: Case, stdout: str, stderr: str, code: int32) -> (str, [str]) {
-    let (detail, shown, rest) = case_outcome(c, stdout, stderr, code)
-    if rest != "" { eprint(rest) }
-    return (detail, shown)
+// A case's FAIL line, as the interpreter's `myla test` writes it.
+#test("t", "x")["FAIL  t: x\n"]
+#test("t", "")["FAIL  t\n"]
+pub fun fail_line(name: str, detail: str) -> str {
+    if detail == "" { return f"FAIL  {name}\n" }
+    return f"FAIL  {name}: {on_one_line(detail)}\n"
 }
 
-// `case_detail`'s detail and lines, and what the case wrote on stderr
-// itself, which `case_detail` passes on: what comes before the mark of a
-// case that returned, else before the runtime error's report (the last
-// `runtime error: ` that starts a line, else the last after a line the
-// case left open). A line the case wrote can't pass for a verdict or a
-// runtime error (the interpreter's `myla test` sees through it too).
-#test(Case { name: "t", kind: 0, message: "", code: 0 }, "", "warn\n\u{1}myla-done\u{1}no", 1)[("no", [], "warn\n")]
-#test(Case { name: "t", kind: 0, message: "", code: 0 }, "", "myla test: fake verdict\nruntime error: fake\n\u{1}myla-done\u{1}", 0)[("", [], "myla test: fake verdict\nruntime error: fake\n")]
-#test(Case { name: "t", kind: 1, message: "boom", code: 0 }, "", "progress... runtime error: boom\n  --> t.my:1:1\n", 1)[("", [], "progress... ")]
-#test(Case { name: "t", kind: 1, message: "boom", code: 0 }, "", "runtime error: fake\nruntime error: boom\n  --> t.my:1:1\n", 1)[("", [], "runtime error: fake\n")]
-#test(Case { name: "t", kind: 0, message: "", code: 0 }, "", "runtime error: fake\n", 0)[("exited with status 0", [], "runtime error: fake\n")]
-pub fun case_outcome(c: Case, stdout: str, stderr: str, code: int32) -> (str, [str], str) {
+// What a child's run says of its case: the verdict (None when it passed)
+// and the output lines to show under a FAIL line. What the case wrote on
+// stderr itself is passed on, as `myla test` lets a case's stderr through
+// when it interprets it; the record isn't.
+#test(Case { name: "t", kind: 0, message: "", code: 0 }, "x\n", "\u{1}myla-1\u{1}P:0;", 0, "\u{1}myla-1\u{1}")[(None, ["x"])]
+#test(Case { name: "t", kind: 0, message: "", code: 0 }, "x\n", "\u{1}myla-1\u{1}F:17;expected 1, got 2", 1, "\u{1}myla-1\u{1}")[(Some("expected 1, got 2"), ["x"])]
+#test(Case { name: "t", kind: 0, message: "", code: 0 }, "", "\u{1}myla-1\u{1}F:0;", 1, "\u{1}myla-1\u{1}")[(Some(""), [])]   // an empty `Err`
+#test(Case { name: "t", kind: 0, message: "", code: 0 }, "", "\u{1}myla-1\u{1}E:4;boom", 1, "\u{1}myla-1\u{1}")[(Some("runtime error: boom"), [])]
+#test(Case { name: "t", kind: 1, message: "boom", code: 0 }, "", "\u{1}myla-1\u{1}E:4;boom", 1, "\u{1}myla-1\u{1}")[(None, [])]
+#test(Case { name: "t", kind: 1, message: "boom", code: 0 }, "", "\u{1}myla-1\u{1}E:2;bo", 1, "\u{1}myla-1\u{1}")[(Some("expected runtime error 'boom', got runtime error 'bo'"), [])]   // exactly (D183)
+#test(Case { name: "t", kind: 1, message: "", code: 0 }, "", "\u{1}myla-1\u{1}E:1;x", 1, "\u{1}myla-1\u{1}")[(Some("expected runtime error '', got runtime error 'x'"), [])]
+#test(Case { name: "t", kind: 1, message: "a\nruntime error: b", code: 0 }, "", "\u{1}myla-1\u{1}E:18;a\nruntime error: b", 1, "\u{1}myla-1\u{1}")[(None, [])]   // a message of many lines, whole (C5)
+#test(Case { name: "t", kind: 1, message: "b", code: 0 }, "", "\u{1}myla-1\u{1}E:18;a\nruntime error: b", 1, "\u{1}myla-1\u{1}")[(Some("expected runtime error 'b', got runtime error 'a\nruntime error: b'"), [])]
+#test(Case { name: "t", kind: 1, message: "boom", code: 0 }, "", "\u{1}myla-1\u{1}X:3;", 3, "\u{1}myla-1\u{1}")[(Some("expected runtime error 'boom', exited with status 3"), [])]
+#test(Case { name: "t", kind: 2, message: "", code: 3 }, "", "\u{1}myla-1\u{1}X:3;", 3, "\u{1}myla-1\u{1}")[(None, [])]
+#test(Case { name: "t", kind: 2, message: "", code: 3 }, "", "\u{1}myla-1\u{1}X:0;", 0, "\u{1}myla-1\u{1}")[(Some("expected exit status 3, exited with status 0"), [])]
+#test(Case { name: "t", kind: 2, message: "", code: 0 }, "", "\u{1}myla-1\u{1}X:0;", 0, "\u{1}myla-1\u{1}")[(None, [])]   // `[exit(0)]` (M6)
+#test(Case { name: "t", kind: 2, message: "", code: 0 }, "", "\u{1}myla-1\u{1}F:29;expected exit status 0, got 2", 1, "\u{1}myla-1\u{1}")[(Some("expected exit status 0, got 2"), [])]
+#test(Case { name: "t", kind: 0, message: "", code: 0 }, "", "\u{1}myla-1\u{1}X:0;", 0, "\u{1}myla-1\u{1}")[(Some("exited with status 0"), [])]   // `exit(0)` in a case (M6)
+#test(Case { name: "t", kind: 0, message: "", code: 0 }, "", "\u{1}myla-1\u{1}X:2;", 2, "\u{1}myla-1\u{1}")[(Some("exited with status 2"), [])]
+#test(Case { name: "t", kind: 0, message: "", code: 0 }, "", "", -9, "\u{1}myla-1\u{1}")[(Some("killed by signal 9"), [])]
+#test(Case { name: "t", kind: 0, message: "", code: 0 }, "", "\u{1}myla-1\u{1}E:19;expected a\n, got b\n", 1, "\u{1}myla-1\u{1}")[(Some("runtime error: expected a\n, got b\n"), [])]
+#test(Case { name: "t", kind: 0, message: "", code: 0 }, "", "runtime error: stack overflow\n", 1, "\u{1}myla-1\u{1}")[(Some("runtime error: stack overflow"), [])]   // an emulator's report of a trap
+pub fun case_detail(c: Case, stdout: str, stderr: str, code: int32, head: str) -> (Option<str>, [str]) {
+    let (verdict, shown, rest) = case_outcome(c, stdout, stderr, code, head)
+    if rest != "" { eprint(rest) }
+    return (verdict, shown)
+}
+
+// `case_detail`'s verdict and lines, and what the case wrote on stderr
+// itself, which `case_detail` passes on: stderr without the case's record
+// (with the records of the run whose head is `head`, D191). A case that
+// ended without one ended outside the runtime: by a signal, or by a trap an
+// emulator reported as the runtime does, `runtime error: …` last on stderr
+// (wasm32's, `tools/wasm/run.mjs`).
+#test(Case { name: "t", kind: 0, message: "", code: 0 }, "", "warn\n\u{1}myla-1\u{1}F:2;no", 1, "\u{1}myla-1\u{1}")[(Some("no"), [], "warn\n")]
+#test(Case { name: "t", kind: 0, message: "", code: 0 }, "", "\u{1}myla-done\u{1}runtime error: fake\n\u{1}myla-1\u{1}X:1;", 1, "\u{1}myla-1\u{1}")[(Some("exited with status 1"), [], "\u{1}myla-done\u{1}runtime error: fake\n")]   // marks of its own
+#test(Case { name: "t", kind: 0, message: "", code: 0 }, "", "\u{1}myla-2\u{1}P:0;\u{1}myla-1\u{1}X:3;", 3, "\u{1}myla-1\u{1}")[(Some("exited with status 3"), [], "\u{1}myla-2\u{1}P:0;")]   // another run's record
+#test(Case { name: "t", kind: 1, message: "boom", code: 0 }, "", "progress... \u{1}myla-1\u{1}E:4;boom", 1, "\u{1}myla-1\u{1}")[(None, [], "progress... ")]
+#test(Case { name: "t", kind: 1, message: "stack overflow", code: 0 }, "", "w\nruntime error: stack overflow\n\u{1}myla-1\u{1}E:14;stack overflow", 1, "\u{1}myla-1\u{1}")[(None, [], "w\n")]   // the runtime's own line taken off
+#test(Case { name: "t", kind: 1, message: "boom", code: 0 }, "", "runtime error: fake\nruntime error: boom\n", 1, "\u{1}myla-1\u{1}")[(None, [], "runtime error: fake\n")]   // an emulator's report, last
+#test(Case { name: "t", kind: 0, message: "", code: 0 }, "", "\u{1}myla-1\u{1}E:9;cut", 1, "\u{1}myla-1\u{1}")[(Some("exited with status 1"), [], "\u{1}myla-1\u{1}E:9;cut")]   // a record cut short is none
+pub fun case_outcome(c: Case, stdout: str, stderr: str, code: int32, head: str) -> (Option<str>, [str], str) {
     let shown = lines_of(stdout)
-    let done = last_at(stderr, DONE_MARK, false)
-    if done >= 0 { return (after(stderr, done + DONE_MARK.len()), shown, before(stderr, done)) }
-    // the case ended the process: a runtime error ends it with status 1,
-    // its report the last thing on stderr
+    let r = record_in(stderr, head)
+    if r.kind == "P" { return (None, shown, r.rest) }
+    if r.kind == "F" { return (Some(r.text), shown, r.rest) }
+    if r.kind == "E" { return (failed(c, r.text), shown, without_overflow_line(r.rest, r.text)) }
+    if r.kind == "X" { return (exited(c, r.n), shown, r.rest) }
+    if code < 0 { return (Some(f"killed by signal {-code}"), shown, stderr) }
     var at = -1
     if code == 1 {
         at = last_at(stderr, ERROR_HEAD, true)
         if at < 0 { at = last_at(stderr, ERROR_HEAD, false) }
     }
-    if at >= 0 {
-        let failure = error_message(after(stderr, at + ERROR_HEAD.len()))
-        let rest = before(stderr, at)
-        if c.kind == 1 {
-            if failure == c.message { return ("", shown, rest) }
-            return (f"expected runtime error '{c.message}', got runtime error '{failure}'", shown, rest)
-        }
-        if c.kind == 2 { return (f"expected exit status {c.code}, got runtime error '{failure}'", shown, rest) }
-        return ("runtime error: " + failure, shown, rest)
+    if at >= 0 { return (failed(c, error_message(after(stderr, at + ERROR_HEAD.len()))), shown, before(stderr, at)) }
+    return (exited(c, code), shown, stderr)
+}
+
+// The verdict on a case whose call ended in a runtime error with `failure`.
+fun failed(c: Case, failure: str) -> Option<str> {
+    if c.kind == 1 {
+        if failure == c.message { return None }
+        return Some(f"expected runtime error '{c.message}', got runtime error '{failure}'")
     }
-    if code < 0 { return (f"killed by signal {-code}", shown, stderr) }
-    if c.kind == 1 { return (f"expected runtime error '{c.message}', exited with status {code}", shown, stderr) }
+    if c.kind == 2 { return Some(f"expected exit status {c.code}, got runtime error '{failure}'") }
+    return Some("runtime error: " + failure)
+}
+
+// The verdict on a case whose call ended the process with `status`.
+fun exited(c: Case, status: int32) -> Option<str> {
+    if c.kind == 1 { return Some(f"expected runtime error '{c.message}', exited with status {status}") }
     if c.kind == 2 {
-        if code == c.code { return ("", shown, stderr) }
-        return (f"expected exit status {c.code}, exited with status {code}", shown, stderr)
+        if status == c.code { return None }
+        return Some(f"expected exit status {c.code}, exited with status {status}")
     }
-    return (f"exited with status {code}", shown, stderr)
+    return Some(f"exited with status {status}")
+}
+
+// What a case wrote on stderr, `rest`, without the line natively written
+// for a stack overflow before its record (`__on_segv`'s, which runs no
+// Myla code first).
+#test("a\nruntime error: stack overflow\n", "stack overflow")["a\n"]
+#test("a\nruntime error: stack overflow\n", "boom")["a\nruntime error: stack overflow\n"]
+fun without_overflow_line(rest: str, failure: str) -> str {
+    let line = "runtime error: stack overflow\n"
+    if failure != "stack overflow" || rest.len() < line.len() { return rest }
+    let at = rest.len() - line.len()
+    if after(rest, at) != line { return rest }
+    return before(rest, at)
+}
+
+// A record of a case's end on its stderr (D191): its kind (`P`, `F`, `E`,
+// `X`; "" when there is none), its number, its text, and stderr without it.
+pub struct Record { kind: str, n: int32, text: str, rest: str }
+
+// The last record with the head `head` on `stderr`, whole, else none.
+#test("w\n\u{1}myla-9\u{1}F:3;a\nb", "\u{1}myla-9\u{1}")[Record { kind: "F", n: 3, text: "a\nb", rest: "w\n" }]
+#test("\u{1}myla-9\u{1}X:255;", "\u{1}myla-9\u{1}")[Record { kind: "X", n: 255, text: "", rest: "" }]
+#test("a\u{1}myla-9\u{1}E:1;xb", "\u{1}myla-9\u{1}")[Record { kind: "E", n: 1, text: "x", rest: "ab" }]
+#test("\u{1}myla-8\u{1}P:0;", "\u{1}myla-9\u{1}")[Record { kind: "", n: 0, text: "", rest: "\u{1}myla-8\u{1}P:0;" }]
+#test("\u{1}myla-9\u{1}E:9;x", "\u{1}myla-9\u{1}")[Record { kind: "", n: 0, text: "", rest: "\u{1}myla-9\u{1}E:9;x" }]
+#test("\u{1}myla-9\u{1}E:;x", "\u{1}myla-9\u{1}")[Record { kind: "", n: 0, text: "", rest: "\u{1}myla-9\u{1}E:;x" }]
+#test("x", "")[Record { kind: "", n: 0, text: "", rest: "x" }]
+pub fun record_in(stderr: str, head: str) -> Record {
+    let none = Record { kind: "", n: 0, text: "", rest: stderr }
+    if head == "" { return none }
+    let at = last_at(stderr, head, false)
+    if at < 0 { return none }
+    var i = at + head.len()
+    if i + 2 > stderr.len() || stderr[i + 1] != ':' { return none }
+    let kind = slice_of(stderr, i, i + 1)
+    i = i + 2
+    let digits = i
+    var n = 0
+    while i < stderr.len() && stderr[i] >= '0' && stderr[i] <= '9' && i - digits < 9 {
+        n = n * 10 + (stderr[i] as int32 - 48)
+        i = i + 1
+    }
+    if i == digits || i >= stderr.len() || stderr[i] != ';' { return none }
+    i = i + 1
+    var text = ""
+    if kind == "E" || kind == "F" {
+        if n > stderr.len() - i { return none }
+        text = slice_of(stderr, i, i + n)
+        i = i + n
+    }
+    return Record { kind: kind, n: n, text: text, rest: before(stderr, at) + after(stderr, i) }
 }
 
 // How the runtime's report of a runtime error starts.
@@ -404,21 +525,27 @@ fun last_at(text: str, mark: str, line_start: bool) -> int32 {
     return -1
 }
 
-// A case run in this process (no children here), which gave `detail`: its
+// A case run in this process (no children here), which gave `verdict`: its
 // line printed now, so that a later failure that ends the run leaves it;
 // whether it passed. (A `[panic]` or `[exit]` case can't pass this way:
 // the failure ends the run.)
-pub fun report_inline(c: Case, detail: str) -> bool {
-    if detail == "" {
-        let w = write(1, f"PASS  {c.name}\n")
-        return true
+pub fun report_inline(c: Case, verdict: Option<str>) -> bool {
+    match verdict {
+        Some(detail) => {
+            let w = write(1, fail_line(c.name, detail))
+            return false
+        },
+        None => {
+            let w = write(1, f"PASS  {c.name}\n")
+            return true
+        },
     }
-    let w = write(1, f"FAIL  {c.name}: {on_one_line(detail)}\n")
-    return false
+    unreachable()
 }
 
-// The harness ends with `status`.
+// The harness ends with `status`, writing no record.
 pub fun end(status: int32) {
+    reporting_ends()
     exit(status)
 }
 
