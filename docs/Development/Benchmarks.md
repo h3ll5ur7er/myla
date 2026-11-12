@@ -232,6 +232,36 @@ All thirteen programs after the standard library waves, D175 (#54) and batches 4
 
 - An insert stores its slot's index in the order (4 bytes a slot more, 12.5 % of an `[int: int]` map's 32-byte slot), and a compaction walks the order: `map_remove`'s `map_by_rank` and the `zero_bytes` of its block are gone, `map_set_slot` and `map_rehash` run a little more.
 
+## Against other languages: benchLANG (2026-11-12)
+
+[benchLANG](https://github.com/GlebOlsen/benchLANG) runs six workloads in 22 runtimes (C, C++, Rust, Swift, Go, Java, Python and others) and measures the time of each, peak memory, binary size and compile time ([[MYLA-543]]). `benchmarks/benchlang/` holds Myla's part:
+
+- [[benchmarks/benchlang/bench.my]]: the six workloads in one file, written as the language's documentation writes code and not tuned afterwards, with `#test` cases checked against benchLANG's Python version at small sizes;
+- `benchlang-runner.patch`: the entry for Myla in benchLANG's runner (`myla build bench.my -o bench && strip bench`), against its commit `fedbb12`;
+- `results-2026-11-12.txt`: the runner's results file; `report_data.py` turns one into JSON, and with `--into report.html` writes it into the report page.
+
+To repeat it: clone benchLANG, apply the patch, copy `bench.my` to `languages/Myla/`, put `build/myla` on the `PATH`, and run `./run_benchmarks.sh --runs 2` inside `nix develop`, which brings every toolchain. The whole suite takes about 12 minutes.
+
+The run of 2026-11-12 (commit `547339a`, a shared 4-CPU cloud VM, Xeon at 2.3 GHz, two runs each, all checksums equal): Myla is 16th of 23 by total time, 11.03 s against C's 3.42 s (3.2 times), between Bun (9.12 s) and Node (11.56 s), and behind Swift (8.76 s).
+
+| Workload | Myla | C | Rust | Swift | Myla's place |
+| --- | --: | --: | --: | --: | --: |
+| Primes | 1.16 s | 0.70 s | 0.69 s | 0.71 s | 18 |
+| Fibonacci | 2.73 s | 0.56 s | 1.03 s | 1.68 s | 18 |
+| Strings | 1.24 s | 0.43 s | 0.41 s | 1.29 s | 14 |
+| Mandelbrot | 0.56 s | 0.45 s | 0.44 s | 0.46 s | 17 |
+| Binary trees | 0.47 s | 0.71 s | 0.72 s | 1.50 s | 7 |
+| k-nucleotide | 4.87 s | 0.59 s | 0.80 s | 3.13 s | 19 |
+
+Beside the times: the fastest compile of the 16 native builds (0.21 s; OCaml 0.34 s, C 0.74 s, Rust 4.70 s), the fifth smallest binary (71 KiB stripped; C 34, Swift 39), and 54 MiB at the peak (C 24).
+
+What it showed:
+
+- **Primes** is bound by the divider, and most runtimes tie at 0.69 s. Myla's `int32` `%` is a 64-bit `idiv` (`cqto; idiv %rcx`), slower than the 32-bit one on this CPU, behind a check of the divisor for 0 and for -1; `n % 2` and `n % 3` are divisions too.
+- **Fibonacci** is one call per recursion; the GCC-based compilers unroll part of it.
+- **k-nucleotide** makes a new string for each `seq[i:i + k]`, where Rust and Swift hash a view of the sequence's bytes; with fib it is 69 % of Myla's total.
+- **Binary trees** is ahead of every language that frees by hand or counts references, but Nim.
+
 ## How the first round went
 
 The first round (fib, the sieve, binary trees) checked the method and needed two additions to `run.py`: user and system time and page faults, and names for valgrind's addresses. Instruction counts alone hid both large gaps of the round: the sieve's page faults, and binary trees running C's instruction count in 5.7× C's time. The second turned out to be `rep movsq` copying the three-word `Tree` at every match: a microcoded instruction that starts slowly, and which callgrind counts as one. Copying up to 8 words with moves fixed it ([[MYLA-246]]).
