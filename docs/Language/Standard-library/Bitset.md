@@ -85,7 +85,7 @@ fun main() {
 
 ## Visiting the integers
 
-`for i in b.items()` visits them in order. `next_from` does without the list:
+`for i in b.iter()` visits them in order, without the list `b.items()` makes ([[MYLA-553]]): `b.iter()` is a `BitSetIter`, an `Iterator<int>` (D171) that holds the set as it was and a copy of which keeps its own position, so it goes into a pipeline of [[Language/Standard-library/Iter|std.iter]] too, `b.iter() |> iter.filter((i) => i % 2 == 0) |> iter.count()`. `next_from` does without either:
 
 ```myla fragment
 var at = b.next_from(0)
@@ -95,7 +95,7 @@ while let Some(i) = at {
 }
 ```
 
-`for i in b` isn't possible yet ([[MYLA-353]]).
+`for i in b` isn't possible: a `BitSet` isn't an iterator itself (D171), and the checker's message says to write `b.iter()`.
 
 ## Equality and keys
 

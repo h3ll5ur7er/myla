@@ -6320,7 +6320,8 @@ impl Checker {
                         // its impl's bound unmet: why (MYLA-538)
                         var why = self.bound_why(it, "Iterator")
                         if why == "" { why = iterator_hint(it) }
-                        return Err(terr_at(it_expr.line, it_expr.col, it_expr.sp, format("`for ... in` requires a list, a map, a string, a range or an Iterator, found '{}'{}", type_name(it), why)))
+                        // with an `iter()` method: "write 's.iter()'" (MYLA-553)
+                        return Err(with_notes(terr_at(it_expr.line, it_expr.col, it_expr.sp, format("`for ... in` requires a list, a map, a string, a range or an Iterator, found '{}'{}", type_name(it), why)), self.iter_hint(it, "Iterator", it_expr)))
                     },
                 }
             },

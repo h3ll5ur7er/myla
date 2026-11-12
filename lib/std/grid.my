@@ -14,7 +14,7 @@
 // `Grid<char>` of text and `parse_with` a grid of anything a character maps
 // to.
 
-import std.list as list_m // `filled`, `extend` and `map` of the cells
+import std.list as list_m // `filled`, `extend`, `map` and `iter` of the cells
 import std.option as option_m // `is_none`, `err` in the test functions
 
 // Two grids are equal when their sizes and cells are (`T: Eq`); a grid of
@@ -234,6 +234,14 @@ impl<T> Grid<T> {
             panic(f"grid index {i} out of bounds for {self.cells.len()} cells")
         }
         return (i % self.width, i / self.width)
+    }
+
+    // An iterator over the cells, row by row (D171): `for c in g.iter()`,
+    // or a pipeline of `std.iter`; `g.pos(i)` is the position of the `i`th,
+    // `g.iter() |> iter.enumerate()` numbering them. It holds the grid as it
+    // is now (MYLA-553).
+    fun iter(self) -> list_m.ListIter<T> {
+        return self.cells.iter()
     }
 
     // Every position, row by row.
@@ -487,4 +495,26 @@ fun set_one(x: int, y: int) -> [int] {
     var g = new(2, 2, 0)
     g.set((x, y), 1)
     return g.cells
+}
+
+// `iter()` visits the cells row by row, as `positions()` lists their
+// places (MYLA-553).
+#test
+fun iterating() {
+    let g = of([['a', 'b'], ['c', 'd'], ['e', 'f']]).expect("a grid")
+    var seen: [char] = []
+    for c in g.iter() {
+        seen.push(c)
+    }
+    assert(seen == ['a', 'b', 'c', 'd', 'e', 'f'], "row by row")
+    var i = 0
+    for c in g.iter() {
+        assert(g.at(g.pos(i)) == Some(c) && g.positions()[i] == g.pos(i), f"cell {i} at its position")
+        i += 1
+    }
+    var none = 0
+    for c in new(0, 4, 'x').iter() {
+        none += 1
+    }
+    assert(none == 0, "a grid without cells")
 }

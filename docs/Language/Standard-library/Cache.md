@@ -71,6 +71,7 @@ fun main() {
 | `c.clear()` | Takes every entry out; the capacity stays. Needs a `var` place |
 | `c.len() -> int`, `c.is_empty() -> bool`, `c.capacity() -> int` | The number of entries; whether there are none; the most it holds |
 | `c.keys() -> [K]`, `c.items() -> [(K, V)]` | The keys, the entries, the most recently used first |
+| `c.iter() -> LruIter<K, V>` | An iterator over the entries in that order, without the list `items()` makes (D171, [[MYLA-553]]): `for (k, v) in c.iter()`, or a pipeline of [[Language/Standard-library/Iter|std.iter]]. Visiting isn't using: the order stays. It holds the cache as it was, and a copy keeps its own position |
 
 `unlink` and `link_front`, methods of `Lru`, are the cache's own steps on its recency list; a program has no need of them.
 
