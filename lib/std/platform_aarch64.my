@@ -1585,6 +1585,13 @@ fun drain(fd: int64) {
     __free(buf)
 }
 
+// The descriptor `signal_listen(1)` gives (the pipe's read end), or -1
+// before the first listener: what std.rt checks a listener's handle holds
+// (D181, MYLA-548).
+pub fun signal_fd() -> int64 {
+    return __load64(__rt_addr("__sig_pipe") + 8) - 1
+}
+
 // The next signal caught on the handle `h` that `signal_listen` gave, the
 // thread waiting for one: 2 or 15, 0 when the pipe ended, or minus the
 // errno.

@@ -714,6 +714,44 @@ async fun main() {
 """
 
 
+# MYLA-548: a listener is a handle of the runtime's table (D181). A
+# `Signals` built by hand takes nothing (it read a byte of the descriptor it
+# named); closing a listener twice, or one built by hand, lets go of no other
+# listener (each close counted one listener less, so `a` stopped listening)
+SIGNAL_HANDLES = """import std.signal as signal
+import std.io as io
+from std.signal import Signals
+
+#main
+async fun main() {
+    let forged = Signals { handle: 0 }
+    print(f"forged try_next: {match forged.try_next() { Some(x) => "a signal", None => "none" }}")
+    var r = io.stdin()
+    print(f"stdin: {match r.read_line() { Ok(Some(l)) => l, Ok(None) => "<end>", Err(e) => "error" }}")
+    match signal.listen() {
+        Ok(a) => {
+            match signal.listen() {
+                Ok(b) => {
+                    let b2 = b
+                    b.close()
+                    b2.close()
+                    forged.close()
+                }
+                Err(e) => print(f"{e}")
+            }
+            print("ready")
+            match await a.next() {
+                Ok(s) => print(f"a got {s}")
+                Err(e) => print(f"{e}")
+            }
+            a.close()
+        }
+        Err(e) => print(f"{e}")
+    }
+}
+"""
+
+
 class Lines:
     """A command's stdout read line by line as it runs."""
 
@@ -788,6 +826,25 @@ class Signals(Case):
                     self.assertEqual(p.line(), "ready\n")
                     p.signal(sig)
                     self.assertEqual(p.finish(), ("", "", -sig))
+
+    def test_a_listener_is_a_handle(self):
+        built = Built(SIGNAL_HANDLES)
+        try:
+            for how, argv, exe in built.commands():
+                with self.subTest(how):
+                    p = subprocess.Popen(argv, executable=exe, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                         stderr=subprocess.PIPE, text=True)
+                    _RUNNING.append(p)
+                    p.stdin.write("line one\n")
+                    p.stdin.close()
+                    got = [p.stdout.readline() for _ in range(3)]
+                    self.assertEqual(got, ["forged try_next: none\n", "stdin: line one\n", "ready\n"])
+                    time.sleep(0.2)
+                    p.send_signal(signal.SIGINT)
+                    out, err = p.communicate(timeout=60)
+                    self.assertEqual((out, err, p.returncode), ("a got interrupt\n", "", 0))
+        finally:
+            built.close()
 
     def test_an_ignored_signal_stays_ignored(self):
         # started with SIGINT ignored (`nohup`, a background job): after the

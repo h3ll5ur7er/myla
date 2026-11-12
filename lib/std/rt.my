@@ -1043,26 +1043,51 @@ pub fun term_vt(fd: int) -> int {
 }
 
 // `__signal_listen(on)`: the interrupt and terminate signals caught (`on`
-// 1: the handle they arrive on, or -1), or let go (0: their defaults back
-// once nobody listens). Let go while the terminal is raw, a default put
-// back is raw mode's handler again; let go after raw mode ended, a handler
-// of raw mode's that a listener kept is the default again (D192).
+// 1: a handle of the listener's, which the reactor waits on as on a
+// descriptor's, or -1), or the listener whose handle `on` is lets go: its
+// handle closed, and their defaults back once nobody listens. Each listener
+// has a handle of its own (D181, MYLA-548): a second close, through a copy
+// too, or a handle made up (`Signals { handle: 0 }`) is EBADF and lets go
+// of nothing, where it stopped another listener's signals. Let go while the
+// terminal is raw, a default put back is raw mode's handler again; let go
+// after raw mode ended, a handler of raw mode's that a listener kept is the
+// default again (D192).
 pub fun signal_listen(on: int) -> int {
-    let r = os.signal_listen(on as int64)
-    if on == 0 {
-        os.raw_signals(__rt_get("__exit_hook") != 0)
+    if on == 1 {
+        let r = os.signal_listen(1)
+        if r < 0 {
+            return sock_result(r)
+        }
+        return sock_result(fd_handle(r))
     }
+    if signal_of(on) < 0 || handle_free(on as int64, H_FD) != os.signal_fd() {
+        return sock_result(-EBADF)
+    }
+    let r = os.signal_listen(0)
+    os.raw_signals(__rt_get("__exit_hook") != 0)
     return sock_result(r)
 }
 
-// `__signal_take(h)`: the next signal on the handle `h`, the thread
-// waiting for one: 2 (an interrupt) or 15 (termination); 0 when the handle
-// ended, or -1.
+// The signals' descriptor that the listener's handle `h` holds, or -1 for
+// a handle that isn't a listener's.
+fun signal_of(h: int) -> int64 {
+    let fd = handle_get(h as int64, H_FD)
+    if fd < 0 || fd != os.signal_fd() {
+        return -1
+    }
+    return fd
+}
+
+// `__signal_take(h)`: the next signal on the listener's handle `h`, the
+// thread waiting for one: 2 (an interrupt) or 15 (termination); 0 when the
+// handle ended, or -1 (EBADF for a handle that isn't a listener's: a forged
+// one read a byte of the descriptor it named, MYLA-548).
 pub fun signal_take(h: int) -> int {
-    if h < 0 {
+    let fd = signal_of(h)
+    if fd < 0 {
         return sock_result(-EBADF)
     }
-    return sock_result(os.signal_take(h as int64))
+    return sock_result(os.signal_take(fd))
 }
 
 // --- the environment ---------------------------------------------------------
