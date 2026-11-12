@@ -792,14 +792,12 @@ pub fun sock_send(h: int, s: str, start: int) -> int {
     return sock_result(r)
 }
 
-// `__sock_recv(h, n)`: what one receive of at most `n` bytes gives: empty
-// at the end of the stream, for `n <= 0`, or with the errno (EAGAIN: nothing
-// there yet on a non-blocking socket). Retried on EINTR.
+// `__sock_recv(h, n)`: what one receive of at most `n` bytes (and at most
+// READ_ROOM, MYLA-572) gives: empty at the end of the stream, for `n <= 0`,
+// or with the errno (EAGAIN: nothing there yet on a non-blocking socket).
+// Retried on EINTR.
 pub fun sock_recv(h: int, n: int) -> str {
-    var want = n as int64
-    if want < 0 {
-        want = 0
-    }
+    let want = read_room(n)
     let cell = __alloc(want + 8)
     var got: int64 = 0
     __set_io_errno(0)
@@ -1281,15 +1279,32 @@ fun fitted(cell: int64, head: int64, got: int64) -> int64 {
     return small
 }
 
+// The most bytes one read takes room for (MYLA-572): a read may give fewer
+// than it was asked for (D177), so a count past this costs no more memory
+// than this, whatever the stream holds, only more reads of a long input.
+// Before, `read(2000000000)` of `abc` asked for 2 GB of room and was `out
+// of memory` under a limit of 400 MB.
+const READ_ROOM: int64 = 4194304
+
+// The room for a read of `n` bytes: none for a negative `n`, at most
+// READ_ROOM.
+fun read_room(n: int) -> int64 {
+    let want = n as int64
+    if want < 0 {
+        return 0
+    }
+    if want > READ_ROOM {
+        return READ_ROOM
+    }
+    return want
+}
+
 // `__read`: what one read of at most `n` bytes of `fd` gives (retried on
 // EINTR): empty at the end of the input, for `n <= 0`, or with the errno.
 pub fun read(fd: int, n: int) -> str {
     let d = fd_of(fd as int64)
     __set_io_errno(0)
-    var want = n as int64
-    if want < 0 {
-        want = 0
-    }
+    let want = read_room(n)
     let cell = __alloc(want + 8)
     var got: int64 = 0
     if want > 0 {
@@ -1311,10 +1326,7 @@ pub fun read(fd: int, n: int) -> str {
 pub fun read_bytes(fd: int, n: int) -> [uint8] {
     let d = fd_of(fd as int64)
     __set_io_errno(0)
-    var want = n as int64
-    if want < 0 {
-        want = 0
-    }
+    let want = read_room(n)
     let cell = __alloc(want + 16)
     var got: int64 = 0
     if want > 0 {
