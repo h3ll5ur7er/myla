@@ -68,14 +68,7 @@ SLOW = [re.compile(p) for p in [
 ]]
 
 # the cases that fail today, per group, with the task that fixes them
-KNOWN: dict[str, dict] = {
-    "seq": {
-        # `bit_len` of a bigint shifted by 2^31 - 2 is negative in a plain
-        # build and `integer overflow` checked (`mag_bitlen`)
-        "bigint.shl(2147483646)": "MYLA-550",
-        "bigint.shl(2147483647)": "MYLA-550",
-    },
-}
+KNOWN: dict[str, dict] = {}
 
 
 _OVERFLOW = re.compile(r"!! exit 1: runtime error: integer overflow\n  --> \S*/std/(int|list|iter)\.my:")

@@ -28,13 +28,7 @@ RUNNERS = [INTERPRETED, NATIVE, Runner("1 worker", "native", {"MYLA_THREADS": "1
            Runner("8 workers", "native", {"MYLA_THREADS": "8"}), CHECKED]
 
 # the shapes that fail today, with the task that fixes them
-KNOWN = {
-    # B1: a closure that captures a recursive enum, deep-copied to a child
-    # task, an actor or a channel, is a segmentation fault on x86-64 and
-    # aarch64 (wasm32 passes)
-    **{shape: {"": "MYLA-415", "aarch64-linux": "MYLA-415"}
-       for shape in ["clst", "ctree", "cmutual", "hlst", "flst", "plst"]},
-}
+KNOWN: dict[str, dict] = {}
 
 
 def no_bad_copy(name: str, outs: dict[str, str]) -> str | None:

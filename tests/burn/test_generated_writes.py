@@ -25,26 +25,8 @@ from ._native import CAN_BUILD_NATIVE, SKIP_REASON, write_program
 
 SAMPLE = 150
 
-# C9: in `g[g.k()].push(g.v())` the interpreter runs the index first,
-# native code the value first (decision 3: the place first)
-_ORDER = {case: "MYLA-543" for case in ["gpush_mv_ggrow", "gpush_mvg_grepl", "gpush_mvg_gshrink", "self_gpush"]}
-
 # the cases that fail today, per program, with the task that fixes them
-KNOWN = {
-    "containers_str": {
-        # B2: `op=` on a string element (and `x[i] = x[i] + v()`) whose
-        # value replaces the container reads the old element after it was
-        # freed natively
-        case: "MYLA-543" for case in [
-            "gadd_kkv_grow_repl", "gadd_kkv_plain_repl", "gadd_kkv_repl_repl", "gadd_kkv_shrink_repl",
-            "gadd_kkv_snap_repl", "gadd_kkv_snapgrow_repl", "gadd_v_repl", "gadd_vb_repl", "inmadd_v_repl",
-            "inmadd_vb_repl", "insadd_v_repl", "insadd_vb_repl", "ladd_kv_grow_repl", "ladd_kv_plain_repl",
-            "ladd_kv_repl_repl", "ladd_kv_shrink_repl", "ladd_v_repl", "ladd_vb_repl", "lplain_v_repl",
-            "lplain_vb_repl", "madd_kv_grow_repl", "madd_kv_plain_repl", "madd_kv_repl_repl",
-            "madd_kv_shrink_repl", "madd_v_repl", "madd_vb_repl", "mgadd_v_repl", "mgadd_vb_repl",
-            "mplain_v_repl", "mplain_vb_repl"]},
-    **{f"locals_{ctx}_{elt}": _ORDER for ctx in gen.CONTEXTS for elt in gen.ELEMENTS},
-}
+KNOWN: dict[str, dict] = {}
 
 
 def _program(test, name: str, made) -> None:

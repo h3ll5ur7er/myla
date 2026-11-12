@@ -248,14 +248,7 @@ FORMATS = {
 }
 
 # documents that fail today, per format, with the task that fixes them
-KNOWN = {
-    "yaml": {
-        # B5: a hex or octal scalar past int64 is `integer overflow` in a
-        # checked build, a float in a plain one
-        doc: "MYLA-550" for doc in ["mask: 0x8000000000000000\n", "mask: 0xFFFFFFFFFFFFFFFF\n",
-                                    "mask: 0x10000000000000000\n",
-                                    "mask: 0o1777777777777777777777\n", "mask: 0o2000000000000000000000\n"]},
-}
+KNOWN: dict[str, dict] = {}
 
 
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)

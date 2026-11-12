@@ -18,14 +18,7 @@ from ._differential import THREE, check, driver, run_all
 from ._native import CAN_BUILD_NATIVE, SKIP_REASON, write_program
 
 # the forms that fail today, with the task that fixes them
-KNOWN = {
-    # B2: natively the read value is freed by the later operand (a wrong
-    # value, `out of memory`, an index error or a segmentation fault)
-    **{form: "MYLA-543" for form in [
-        "bin_l", "bin_m", "bin_g", "bin_f", "bin_inn", "bin_ins", "bin_par", "idx", "idx_g", "idx_g2", "idx_m",
-        "idx_ins", "idx_ins2", "slice", "slice_g", "slice_s", "fstr", "fstr2", "fstr_g", "fmt", "maplit",
-        "match_scrut", "if_e", "match_e", "push_l"]},
-}
+KNOWN: dict[str, str] = {}
 
 
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
