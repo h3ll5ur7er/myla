@@ -19,6 +19,7 @@ from std.num import f64_literal_bits, f32_round_bits, float_from_bits, pow2, for
 from std.io import write, eprint, errno_text
 from std.process import exit
 from std.fs import read_to_string, make_dir_all, remove_dir_all
+from .parser import fused_compound
 from .parser import expr_of, stmt_of, type_expr_of, block_of, pattern_of, fun_of  // AST values for #test cases (MYLA-184)
 
 // =========================================================================
@@ -324,6 +325,18 @@ pub struct Interp {
     env_fi: int32,
     env_tail: int32,
     env_tail_fi: int32,
+    // MYLA-506: how many times a variable's value was changed (`update_place`)
+    // or the running task changed, which tells whether a place's keys found
+    // before are still where they were found (`Place.stamp`); the node of
+    // the compound assignment whose read `eval_binary` takes as `fused_val`
+    // (-1: none)
+    writes: int64,
+    fused: int32,
+    fused_val: Value,
+    // the value at the place the next `settle` settles, which it keeps in
+    // `leaf` when `leaf_wanted`
+    leaf_wanted: bool,
+    leaf: Value,
 }
 
 // What a generic function's frame binds its type parameters to
@@ -436,15 +449,18 @@ fun is_qualified(name: str) -> bool {
 }
 
 // A step of an assignable place: a struct field, or an index (evaluated once)
-// with the expression it came from.
+// with the expression it came from and, in a map, where its key was found
+// (`Interp.settle`): its place in the map (-1: missing, -2: not looked up)
+// and its hash (MYLA-506).
 enum Step {
     SField(str),
-    SIndex(Value, Expr),
+    SIndex(Value, Expr, int32, int64),
 }
 
 // A variable and the path into it that an assignment, `push`/`pop`, a builder
-// or map builtin, or a `var self` call updates.
-struct Place { root: str, steps: [Step] }
+// or map builtin, or a `var self` call updates; `stamp` the `Interp.writes`
+// at which the places of its keys were found (-1: never).
+struct Place { root: str, steps: [Step], stamp: int64 }
 
 // What an update does at the end of a place (`Interp.update_place`).
 enum PlaceOp {
@@ -592,6 +608,7 @@ pub fun new_interp(c: Checker, argv: [str]) -> Interp {
         testing: false, defer_errs: [], captured: [], captured_io: false, test_root: "", test_program: "", checker: c,
         static_calls: c.static_calls, impl_selfs: c.static_selfs, call_types: c.call_types,
         tparams: [], envs: [], env_memo: [:], type_env_memo: [:], env_next: -1, env_fi: -1, env_tail: -1, env_tail_fi: -1,
+        writes: 0, fused: -1, fused_val: Value.VUnit, leaf_wanted: false, leaf: Value.VUnit,
     }
     // a generic impl's methods: their receiver's type solves the impl's
     // type parameters when the call has none recorded (a bound's)
@@ -1057,11 +1074,12 @@ impl Interp {
     }
 
     // Whether `c[k]` can be read (or, `assigning`, written: a missing map key
-    // is then an insert); fails with the Python interpreter's message if not.
-    #test(interp_on("enum E { A, B(int) }"), Value.VList([Value.VInt(7)]), Value.VInt(0), expr_of("a.b[0]"), false)[true]
-    fun check_index(var self, c: Value, k: Value, e: Expr, assigning: bool) -> bool {
-        let kt = self.hashed_index_key(k, e)
-        let msg = index_error(c, k, assigning, self.place_in(c, k, kt))
+    // is then an insert), `place` the place of `k` in the map `c` as
+    // `key_place` found it; fails with the Python interpreter's message if
+    // not.
+    #test(interp_on("enum E { A, B(int) }"), Value.VList([Value.VInt(7)]), Value.VInt(0), expr_of("a.b[0]"), false, -1)[true]
+    fun check_index(var self, c: Value, k: Value, e: Expr, assigning: bool, place: int32) -> bool {
+        let msg = index_error(c, k, assigning, place)
         if msg.len() > 0 {
             // a missing key written by its type, a uint64's unsigned, as
             // native code writes it (D183, MYLA-440), a type of another
@@ -1080,32 +1098,12 @@ impl Interp {
         return self.index_key_type(nd)
     }
 
-    // Whether every index on the path to `p` is still valid, without failing.
-    #test(interp_on("[int]"), Place { root: "b", steps: [] })[true]
-    fun place_valid(var self, p: Place) -> bool {
-        var v = self.lookup_or_unit(p.root)
-        if p.steps.len() > 0 { v = self.deref(v) }
-        var i = 0
-        while i < p.steps.len() {
-            match p.steps[i] {
-                Step.SField(f) => { v = get_field(v, f) },
-                Step.SIndex(k, nd) => {
-                    let last = i == p.steps.len() - 1
-                    let kt = self.hashed_index_key(k, nd)
-                    if index_error(v, k, last, self.place_in(v, k, kt)).len() > 0 { return false }
-                    if !last { v = index_get(v, k, self.place_in(v, k, kt)) }
-                },
-            }
-            i = i + 1
-        }
-        return true
-    }
-
     // -- places -----------------------------------------------------------
 
     // Resolve the place `e` names, evaluating each index once, left to right;
-    // a containing index is read (and bounds-checked) before the next key.
-    #test(interp_on("[int]"), Expr { id: 22, line: 24, col: 9, sp: SrcSpan { sline: 24, scol: 9, eline: 24, ecol: 10 }, kind: ExprKind.Name("i") })[Place { root: "i", steps: [] }]
+    // a containing index is read (and bounds-checked) before the next key,
+    // and the place of its key kept (`settle`).
+    #test(interp_on("[int]"), Expr { id: 22, line: 24, col: 9, sp: SrcSpan { sline: 24, scol: 9, eline: 24, ecol: 10 }, kind: ExprKind.Name("i") })[Place { root: "i", steps: [], stamp: -1 }]
     fun place_of(var self, e: Expr) -> Place {
         return match e.kind {
             ExprKind.GetField(t, f) => {
@@ -1115,74 +1113,166 @@ impl Interp {
             },
             ExprKind.Index(t, i) => {
                 var p = self.place_of(t)
+                if p.steps.len() > 0 { p = self.settle(p, false) }
                 var k = Value.VUnit
                 match from_end_of(i) {
                     // `^n`: from the end of the list there (D142)
-                    Some(n) => { k = Value.VInt(value_len(self.read_place(p)) - as_int(self.eval(n))) },
-                    None => {
-                        if p.steps.len() > 0 { self.read_place(p) }
-                        k = self.eval(i)
-                    },
+                    Some(n) => { k = Value.VInt(value_len(self.settled_value(p)) - as_int(self.eval(n))) },
+                    None => { k = self.eval(i) },
                 }
-                p.steps.push(Step.SIndex(k, e))
+                p.steps.push(Step.SIndex(k, e, -2, 0))
                 p
             },
-            ExprKind.Name(n) => Place { root: n, steps: [] },
-            _ => Place { root: "", steps: [] },
+            ExprKind.Name(n) => Place { root: n, steps: [], stamp: -1 },
+            _ => Place { root: "", steps: [], stamp: -1 },
         }
     }
 
-    // The value at `p`, bounds-checked at every index (a read).
-    #test(interp_on("[int]"), Place { root: "b", steps: [] })[Value.VUnit]
-    fun read_place(var self, p: Place) -> Value {
+    // `p` with the place of each compound map key on its path found
+    // (`key_place`), each index checked as a read checks it, the last as a
+    // write when `assigning` (a missing map key is then an insert, whose
+    // place `update_cell` finds): fails as the read would. A key found
+    // before keeps its place while no variable changed since (`writes`), or
+    // while that place still holds it (the key found, which the step keeps),
+    // so each index finds its key once and a compound key's `hash` runs
+    // once, as natively (MYLA-506). A number's or a string's place, which
+    // runs no code of the program's, is found again where it is used: a
+    // lookup costs less than keeping it. With `leaf_wanted`, the value at
+    // the place goes to `leaf`.
+    #test(interp_on("[int]"), Place { root: "b", steps: [], stamp: -1 }, false)[Place { root: "b", steps: [], stamp: -1 }]
+    fun settle(var self, p: Place, assigning: bool) -> Place {
+        let n = p.steps.len()
+        let want = self.leaf_wanted
+        self.leaf_wanted = false
+        if n == 0 { return p }
+        var q = p
+        let root = self.lookup_or_unit(p.root)
+        var v = self.deref(root)
+        let fresh = p.stamp == self.writes
+        var i = 0
+        while i < n {
+            match p.steps[i] {
+                Step.SField(f) => { v = get_field(v, f) },
+                Step.SIndex(k, nd, at, h) => {
+                    let last = i == n - 1
+                    let insert = last && assigning
+                    var j = at
+                    if !is_vmap(v) {
+                        // (a list's or a string's index is its own place)
+                    } else if is_plain_key(k) {
+                        if !insert { j = self.place_in(v, k, None) }
+                    } else if !(j >= 0 && (fresh || still_at(v, j, k))) {
+                        if insert {
+                            j = -2
+                            if at != -2 { q.steps[i] = Step.SIndex(k, nd, -2, 0) }
+                        } else {
+                            let kt = self.hashed_index_key(k, nd)
+                            let (found, fh) = self.key_place_in(v, k, kt)
+                            if self.stop() { return p }
+                            j = found
+                            q.steps[i] = Step.SIndex(key_at(v, found, k), nd, found, fh)
+                        }
+                    }
+                    if !self.check_index(v, k, nd, insert, j) { return p }
+                    if !last || want { v = index_get(v, k, j) }
+                },
+            }
+            i += 1
+        }
+        if want { self.leaf = v }
+        q.stamp = self.writes
+        return q
+    }
+
+    // The value `settle` kept (`leaf_wanted`), taken.
+    fun take_leaf(var self) -> Value {
+        let v = self.leaf
+        self.leaf = Value.VUnit
+        return v
+    }
+
+    // The value at the settled place `p` (`settle`), by the places of its
+    // keys found (a number's or a string's found here).
+    fun value_at(var self, p: Place) -> Value {
         var v = self.lookup_or_unit(p.root)
         if p.steps.len() > 0 { v = self.deref(v) }
         for st in p.steps {
-            if self.stop() { return Value.VUnit }
             match st {
                 Step.SField(f) => { v = get_field(v, f) },
-                Step.SIndex(k, nd) => {
-                    if !self.check_index(v, k, nd, false) { return Value.VUnit }
-                    let kt = self.hashed_index_key(k, nd)
-                    v = index_get(v, k, self.place_in(v, k, kt))
+                Step.SIndex(k, nd, at, h) => {
+                    var j = at
+                    if j == -2 && is_vmap(v) { j = self.place_in(v, k, None) }
+                    v = index_get(v, k, j)
                 },
             }
         }
         return v
     }
 
-    // Store `v` at `p`; writing past the end of a list fails, at the target.
+    // The value at `p`, every index on the way checked (a read): unit after
+    // a failure.
+    #test(interp_on("[int]"), Place { root: "b", steps: [], stamp: -1 })[Value.VUnit]
+    fun settled_value(var self, p: Place) -> Value {
+        if p.steps.len() == 0 { return self.value_at(p) }
+        self.leaf_wanted = true
+        let q = self.settle(p, false)
+        return self.take_leaf()
+    }
+
+    // Store `v` at `p`; writing past the end of a list fails, at the target,
+    // and a missing map key on the way (`m[k].f = v`, `m[k][0] = v`) as a
+    // read does.
     fun write_place(var self, p: Place, v: Value) {
         if self.stop() || p.root.len() == 0 { return }
-        let n = p.steps.len()
-        if n > 0 {
-            var parent = Place { root: p.root, steps: [] }
-            var i = 0
-            while i < n - 1 {
-                parent.steps.push(p.steps[i])
-                i = i + 1
-            }
-            match p.steps[n - 1] {
-                Step.SIndex(k, nd) => {
-                    if !self.check_index(self.read_place(parent), k, nd, true) { return }
-                },
-                // a field: the indices on the way are read, so a missing map
-                // key fails (`m[k].f = v`) as in the Python interpreter
-                _ => {
-                    if !self.readable(parent) { return }
-                },
-            }
+        if p.steps.len() == 0 {
+            self.update_place(p, PlaceOp.OSet(v))
+            return
         }
+        let q = self.settle(p, true)
+        if self.stop() { return }
+        self.update_place(q, PlaceOp.OSet(v))
+    }
+
+    // `target op= rhs` whose place is found once (`fused_compound`, a scalar
+    // or a string there): the place settled as a read, its value the
+    // operation's left operand (`fused`), `rhs` evaluated, the result stored
+    // there; a map's key hashed once, as native code does (MYLA-506).
+    fun exec_fused(var self, target: Expr, value: Expr) {
+        var p = self.place_of(target)
+        if self.stop() || p.root.len() == 0 { return }
+        self.leaf_wanted = true
+        p = self.settle(p, false)
+        let lv = self.take_leaf()
+        if self.stop() { return }
+        self.fused = target.id
+        self.fused_val = lv
+        let v = self.eval(value)
+        self.fused = -1
+        if self.stop() { return }
+        if p.stamp != self.writes { p = self.settle(p, true) }
+        if self.stop() { return }
         self.update_place(p, PlaceOp.OSet(v))
     }
 
-    // Whether `p` can be read: every index on the way is checked, failing
-    // like a read. The value read is released before anything is written, so
-    // the write doesn't copy the containers on the way (MYLA-74).
-    #test(interp_on("[int]"), Place { root: "c", steps: [] })[true]
-    fun readable(var self, p: Place) -> bool {
-        self.read_place(p)
-        return !self.stop()
+    // The value `exec_fused` read for the operator, taken.
+    fun take_fused(var self) -> Value {
+        let v = self.fused_val
+        self.fused = -1
+        self.fused_val = Value.VUnit
+        return v
+    }
+
+    // Whether the compound assignment to `target` is one `exec_fused` runs:
+    // at a scalar or a string, as native code's (`Lower.fused_assign`).
+    fun fusable_at(self, target: Expr) -> bool {
+        return match self.full_type_of(target.id) {
+            Some(Type.TInt(w, sg)) => true,
+            Some(Type.TFloat(w)) => true,
+            Some(Type.TBool) => true,
+            Some(Type.TChar) => true,
+            Some(Type.TStr) => true,
+            _ => false,
+        }
     }
 
     // Apply `op` to the value at `p`, whose indices are already checked, in
@@ -1192,8 +1282,9 @@ impl Interp {
     // when the interpreted program shares nothing the interpreter holds the
     // only reference and the native copy-on-write doesn't copy: `push` and
     // `xs[i] = v` cost O(1) instead of rebuilding the container (MYLA-74).
-    #test(interp_on("[int]"), Place { root: "i", steps: [] }, PlaceOp.OSet(Value.VInt(1)))[Value.VUnit]
+    #test(interp_on("[int]"), Place { root: "i", steps: [], stamp: -1 }, PlaceOp.OSet(Value.VInt(1)))[Value.VUnit]
     fun update_place(var self, p: Place, op: PlaceOp) -> Value {
+        self.writes += 1
         var i = self.scopes.len() - 1
         while i >= 0 {
             var j = self.scopes[i].names.len() - 1
@@ -1251,13 +1342,19 @@ impl Interp {
                 }
                 self.cell = Value.VStruct(n, names, vals)
             },
-            Step.SIndex(k, nd) => {
+            Step.SIndex(k, nd, at, kh) => {
                 if is_vmap(self.cell) {
-                    let kt = self.hashed_index_key(k, nd)
                     var m = map_parts(self.cell)
                     self.cell = Value.VUnit
-                    let (found, h) = self.key_place(m, k, kt)
-                    var j = found
+                    // the place `settle` found (a place nobody settled: found here)
+                    var j = at
+                    var h = kh
+                    if j == -2 {
+                        let kt = self.hashed_index_key(k, nd)
+                        let (found, fh) = self.key_place(m, k, kt)
+                        j = found
+                        h = fh
+                    }
                     if j < 0 { j = m.add_key(k, h) }
                     self.cell = m.vs[j]
                     m.vs[j] = Value.VUnit
@@ -1324,12 +1421,6 @@ impl Interp {
             },
         }
         return Value.VUnit
-    }
-
-    // The length of the value at `p`, its indices checked (a read).
-    #test(interp_on("[int]"), Place { root: "ys", steps: [] })[0]
-    fun place_len(var self, p: Place) -> int64 {
-        return value_len(self.read_place(p))
     }
 
     fun exec_block_body(var self, body: Option<Block>) {
@@ -1502,6 +1593,7 @@ impl Interp {
             }
             let t = self.next_ready()
             self.cur = t
+            self.writes += 1
             self.frames = self.tasks[t].frames
             self.tasks[t].frames = []
             self.scopes = self.frames[self.frames.len() - 1].scopes
@@ -2619,6 +2711,10 @@ impl Interp {
                 self.bind_destructure(bind_elems(binding), v)
             },
             StmtKind.Assign(target, value) => {
+                if fused_compound(target, value) && self.fusable_at(target) {
+                    self.exec_fused(target, value)
+                    return
+                }
                 let v = self.eval(value)            // the value first, as in Python
                 let p = self.place_of(target)
                 self.write_place(p, v)
@@ -3042,7 +3138,8 @@ impl Interp {
             if as_bool(self.eval(l)) { return Value.VBool(true) }
             return Value.VBool(as_bool(self.eval(r)))
         }
-        let lv = self.eval(l)
+        // (a compound assignment's place, read by `exec_fused`)
+        let lv = if l.id == self.fused { self.take_fused() } else { self.eval(l) }
         let rv = self.eval(r)
         // function composition: `f >> g` when the left operand is callable
         if op == ">>" && is_callable(lv) { return compose_values(lv, rv) }
@@ -3280,9 +3377,12 @@ impl Interp {
         let c = self.eval(tgt)
         if is_slice_expr(idx) { return self.eval_slice(e, c, idx) }
         let k = self.index_value(c, idx)
-        if self.stop() || !self.check_index(c, k, e, false) { return Value.VUnit }
+        if self.stop() { return Value.VUnit }
+        // the key's place found once, for the check and the read (MYLA-506)
         let kt = self.hashed_index_key(k, e)
-        return index_get(c, k, self.place_in(c, k, kt))
+        let at = self.place_in(c, k, kt)
+        if !self.check_index(c, k, e, false, at) { return Value.VUnit }
+        return index_get(c, k, at)
     }
 
     // An index's value: `^n` counted from the end of `c` (D142).
@@ -3466,13 +3566,14 @@ impl Interp {
         // self` method's final `self` goes back to that place (MYLA-391;
         // H6, M4 of the 2026-11-09 review).
         var key = self.type_key(recv)
-        var place = Place { root: "", steps: [] }
+        var place = Place { root: "", steps: [], stamp: -1 }
         var rv = Value.VUnit
         var evaluated = key == ""
         if evaluated {
             if self.place_rooted(recv) {
-                place = self.place_of(recv)
-                rv = self.read_place(place)
+                let named = self.place_of(recv)
+                place = self.settle(named, false)
+                if !self.stop() { rv = self.value_at(place) }
             } else {
                 rv = self.eval(recv)
             }
@@ -3521,8 +3622,11 @@ impl Interp {
             if self.stop() { return Value.VUnit }
             self.bind_next(fi, e.id, self.resolved_of(recv.id))
             if var_self && place.root != "" {
-                self.receivers.push(self.read_place(place))
-                if self.place_valid(place) { self.update_place(place, PlaceOp.OSet(Value.VUnit)) }
+                // (its keys found once: again only if they moved, MYLA-506)
+                place = self.settle(place, false)
+                let ok = !self.stop()
+                self.receivers.push(if ok { self.value_at(place) } else { Value.VUnit })
+                if ok { self.update_place(place, PlaceOp.OSet(Value.VUnit)) }
                 let (r, final_self) = self.call_with_receiver(fi, argv)
                 self.write_place(place, final_self)
                 // an async body deferred: its `self` goes back here when it ends
@@ -4278,6 +4382,14 @@ impl Interp {
         return (-1, h)
     }
 
+    // `key_place` in the map value `c`: (-1, 0) for a value that isn't a map.
+    fun key_place_in(var self, c: Value, k: Value, kt: Option<Type>) -> (int32, int64) {
+        return match c {
+            Value.VMap(m) => self.key_place(m, k, kt),
+            _ => (-1, 0),
+        }
+    }
+
     // The place of `k`, of type `kt`, in the map value `c` (`key_place`), -1
     // for none or for a value that isn't a map.
     fun place_in(var self, c: Value, k: Value, kt: Option<Type>) -> int32 {
@@ -4847,15 +4959,16 @@ impl Interp {
             // so `push(xs, pop(xs))` sees the pop
             let p = self.place_of(args[0])
             let v = self.eval(args[1])
-            self.read_place(p)                  // checks the indices
+            let q = self.settle(p, false)       // checks the indices
             if self.stop() { return Value.VUnit }
-            self.update_place(p, PlaceOp.OPush(v))
+            self.update_place(q, PlaceOp.OPush(v))
             return Value.VUnit
         }
         if nm == "pop" {
-            let p = self.place_of(args[0])
-            let n = self.place_len(p)
+            let named = self.place_of(args[0])
+            let p = self.settle(named, false)
             if self.stop() { return Value.VUnit }
+            let n = value_len(self.value_at(p))
             if n == 0 {
                 self.fail(e, "pop from an empty list")
                 return Value.VUnit
@@ -4871,10 +4984,10 @@ impl Interp {
         if nm == "remove" {
             let p = self.place_of(args[0])
             let k = self.eval(args[1])
-            self.read_place(p)
+            let q = self.settle(p, false)
             if self.stop() { return Value.VUnit }
             let kt = self.hashed_key_type(args[0])
-            self.update_place(p, PlaceOp.ORemove(k, kt))
+            self.update_place(q, PlaceOp.ORemove(k, kt))
             return Value.VUnit
         }
         if nm == "keys" { return map_keys(self.eval(args[0])) }
@@ -4901,19 +5014,19 @@ impl Interp {
                 sb.append(piece, start as int32, end as int32)
                 piece = sb.build()
             }
-            self.read_place(p)
+            let q = self.settle(p, false)
             if self.stop() { return Value.VUnit }
-            self.update_place(p, PlaceOp.OAppend(piece))
+            self.update_place(q, PlaceOp.OAppend(piece))
             return Value.VUnit
         }
         if nm == "append_char" {
             // the character's UTF-8 bytes (MYLA-390)
             let p = self.place_of(args[0])
             let c = self.eval(args[1])
-            self.read_place(p)
+            let q = self.settle(p, false)
             if self.stop() { return Value.VUnit }
             match c {
-                Value.VChar(cp) => self.update_place(p, PlaceOp.OAppend(cp_utf8(cp as int32)))
+                Value.VChar(cp) => self.update_place(q, PlaceOp.OAppend(cp_utf8(cp as int32)))
                 _ => {}
             }
             return Value.VUnit
@@ -4921,9 +5034,9 @@ impl Interp {
         if nm == "append_byte" {
             let p = self.place_of(args[0])
             let b = as_int(self.eval(args[1]))
-            self.read_place(p)
+            let q = self.settle(p, false)
             if self.stop() { return Value.VUnit }
-            self.update_place(p, PlaceOp.OAppendByte(b))
+            self.update_place(q, PlaceOp.OAppendByte(b))
             return Value.VUnit
         }
         if nm == "build" { return Value.VStr(sb_build(self.eval(args[0]))) }
@@ -6685,6 +6798,29 @@ fun index_get(c: Value, k: Value, place: int32) -> Value {
             m.vs[place]
         },
         _ => Value.VUnit,
+    }
+}
+
+// Whether the place `j` of the map `c` still holds the key `k` found there
+// (`Interp.settle` keeps the map's own key): nothing removed it, and no
+// compaction moved it.
+#test(Value.VMap(mapv_of([Value.VInt(5), Value.VInt(7)], [Value.VUnit, Value.VUnit])), 1, Value.VInt(7))[true]
+#test(Value.VMap(mapv_of([Value.VInt(5)], [Value.VUnit])), 1, Value.VInt(5))[false]
+#test(Value.VMap(mapv_of([Value.VInt(5)], [Value.VUnit])), 0, Value.VInt(7))[false]
+fun still_at(c: Value, j: int32, k: Value) -> bool {
+    return match c {
+        Value.VMap(m) => j < m.ks.len() && m.here[j] && value_eq(m.ks[j], k),
+        _ => false,
+    }
+}
+
+// The key the map `c` holds at the place `j`, `k` when there is none.
+#test(Value.VMap(mapv_of([Value.VInt(5)], [Value.VUnit])), 0, Value.VInt(9))[Value.VInt(5)]
+#test(Value.VMap(new_mapv()), -1, Value.VInt(9))[Value.VInt(9)]
+fun key_at(c: Value, j: int32, k: Value) -> Value {
+    return match c {
+        Value.VMap(m) => if j >= 0 { m.ks[j] } else { k },
+        _ => k,
     }
 }
 

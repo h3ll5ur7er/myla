@@ -263,6 +263,85 @@ fun simple_index(e: Expr) -> bool {
     }
 }
 
+// Whether `target = value` is a compound assignment whose place both runners
+// find once, for its read and its store (MYLA-506): `compound_assign`'s
+// `target = target op rhs`, the operand the target's own node, at an element
+// or a field (of a variable, at any depth) whose indices are names or
+// literals, as `hoisted` leaves them, with an `rhs` that changes no place
+// (`changes_no_place`). A map's key is then hashed once, not for the read
+// and again for the store.
+pub fun fused_compound(target: Expr, value: Expr) -> bool {
+    match target.kind {
+        ExprKind.Name(_) => { return false },
+        _ => {},
+    }
+    return match value.kind {
+        ExprKind.Binary(op, l, r) => l.id == target.id && op != "&&" && op != "||" && is_member_place(target) && changes_no_place(r),
+        _ => false,
+    }
+}
+
+// `fused_compound` of the assignment `s` (false for another statement): the
+// way its `#test` cases give it the one node a compound assignment shares.
+#test(stmt_of("m[k] += 1"))[true]
+#test(stmt_of("m[k] = m[k] + 1"))[false]
+#test(stmt_of("x += 1"))[false]
+#test(stmt_of("m[k] += f(1)"))[false]
+#test(stmt_of("m[k + 1] += 1"))[false]
+#test(stmt_of("p.xs[^1] -= q.n * 2"))[true]
+fun fused_assignment(s: Stmt) -> bool {
+    return match s.kind {
+        StmtKind.Assign(target, value) => fused_compound(target, value),
+        _ => false,
+    }
+}
+
+// Whether `e` is an element or a field of a variable, at any depth, each
+// index a name or a literal (`simple_index`, `^` one too).
+#test(expr_of("a.b[i][2]"))[true]
+#test(expr_of("a"))[false]
+#test(expr_of("a[i + 1]"))[false]
+fun is_member_place(e: Expr) -> bool {
+    var cur = e
+    var depth = 0
+    while true {
+        match cur.kind {
+            ExprKind.GetField(x, f) => { cur = x },
+            ExprKind.Index(x, i) => {
+                let plain = match i.kind { ExprKind.Unary(op, n) => op == "^" && simple_index(n), _ => simple_index(i) }
+                if !plain { return false }
+                cur = x
+            },
+            ExprKind.Name(n) => { return depth > 0 },
+            _ => { return false },
+        }
+        depth += 1
+    }
+    return false
+}
+
+// Whether evaluating `e` can't change a variable: literals, names, operators
+// (an operator's written method can change none of the caller's variables),
+// casts, fields and elements of such; no call, no `await`.
+#test(expr_of("a.b[i] * -2 as int64"))[true]
+#test(expr_of("xs.len()"))[false]
+fun changes_no_place(e: Expr) -> bool {
+    return match e.kind {
+        ExprKind.IntLit(v, suf, ch, big) => true,
+        ExprKind.FloatLit(lex, suf) => true,
+        ExprKind.StrLit(t) => true,
+        ExprKind.BoolLit(b) => true,
+        ExprKind.Name(n) => true,
+        ExprKind.Unary(op, x) => changes_no_place(x),
+        ExprKind.Binary(op, l, r) => changes_no_place(l) && changes_no_place(r),
+        ExprKind.Cast(x, t) => changes_no_place(x),
+        ExprKind.GetField(x, f) => changes_no_place(x),
+        ExprKind.TupleIndex(x, i) => changes_no_place(x),
+        ExprKind.Index(x, i) => changes_no_place(x) && changes_no_place(i),
+        _ => false,
+    }
+}
+
 impl Parser {
     // -- node constructors (assign a NodeId + position) --------------------
 

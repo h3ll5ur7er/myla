@@ -2239,6 +2239,116 @@ fun main() {
     print(Q { a: A { v: 1 } }.eq(Q { a: A { v: 2 } }))
 }
 """,
+    "map_keys_hashed_once": """// How often a map's key is hashed and compared, by its written `hash` and
+// `eq`, which say so: once per index on both runners (MYLA-506)
+struct K {
+    v: int,
+}
+
+impl Eq for K {
+    fun eq(self, other: K) -> bool {
+        print("eq")
+        return self.v == other.v
+    }
+}
+
+impl Hash for K {
+    fun hash(self, h: Hasher) -> Hasher {
+        print("hash")
+        return h.add(self.v)
+    }
+}
+
+struct Cell {
+    n: int,
+    name: str,
+}
+
+impl [int] {
+    fun bump(var self) {
+        self.push(9)
+    }
+}
+
+impl [K: [int]] {
+    fun drop_below(var self, n: int) -> int {
+        var i = 0
+        while i < n {
+            self.remove(K { v: i })
+            i += 1
+        }
+        return n
+    }
+}
+
+fun one() -> int {
+    return 1
+}
+
+fun main() {
+    let k = K { v: 2 }
+    var m = [K { v: 1 }: 1]
+    print("-- set")
+    m[k] = 2
+    print("-- get")
+    print(m[k])
+    print("-- +=")
+    m[k] += 1
+    print("-- += of a computed key")
+    m[K { v: 2 }] *= 2
+    print("-- += of a call")
+    m[k] += one()
+    print("-- contains, get_or")
+    print(m.contains(k))
+    print(m.get_or(k, 0))
+    var s = [k: "a"]
+    print("-- += of a string")
+    s[k] += "b"
+    print(s[k])
+    var n = [k: [1, 2]]
+    print("-- nested set")
+    n[k][0] = 5
+    print("-- push")
+    n[k].push(3)
+    print("-- nested get")
+    print(n[k][2])
+    print("-- nested +=")
+    n[k][1] += 4
+    print("-- var self")
+    n[k].bump()
+    print(n[k].len())
+    var cs = [k: Cell { n: 1, name: "c" }]
+    print("-- field set")
+    cs[k].n = 3
+    print("-- field +=")
+    cs[k].n += 4
+    cs[k].name += "d"
+    print(cs[k].n)
+    print(cs[k].name)
+    var mm = [k: [k: 1]]
+    print("-- map in a map")
+    mm[k][k] = 3
+    mm[k][k] += 3
+    print(mm[k][k])
+    var t = [(k, 1): 0]
+    print("-- tuple key")
+    t[(k, 1)] += 5
+    print(t[(k, 1)])
+    var big: [K: [int]] = [:]
+    var i = 0
+    while i < 20 {
+        big[K { v: i }] = [i]
+        i += 1
+    }
+    let last = K { v: 19 }
+    print("-- keys moved by the argument")
+    big[last].push(big.drop_below(17))
+    print(big[last][1])
+    print("-- remove")
+    m.remove(k)
+    print(m.contains(k))
+}
+""",
     "actor_function_field": """// an actor's field that holds a function, called from the actor's own
 // method (MYLA-414, the 2026-11-10 review's L3)
 actor A {
@@ -10438,6 +10548,7 @@ PINNED = {
     # MYLA-436: new; the interpreter called an element's or a key's written
     # generic `eq` or `hash` without binding its type parameters
     "generic_eq_and_hash_the_interpreter_calls": 'false\nfalse\nfalse\nfalse\nfalse\nfalse\nfalse\nfalse\nfalse\nfalse\nhash 18446744073709551615\nhash 18446744073709551615\ntrue\nhash 18446744073709551615\nhash 18446744073709551615\ntrue\nfalse\nfalse\nfalse\n2\n5\n1\n1\nfalse\ntrue\ntrue\n',
+    "map_keys_hashed_once": 'hash\n-- set\nhash\n-- get\nhash\neq\n2\n-- +=\nhash\neq\n-- += of a computed key\nhash\neq\n-- += of a call\nhash\neq\nhash\neq\n-- contains, get_or\nhash\neq\ntrue\nhash\neq\nhash\neq\n7\nhash\n-- += of a string\nhash\neq\nhash\neq\nab\nhash\n-- nested set\nhash\neq\n-- push\nhash\neq\n-- nested get\nhash\neq\n3\n-- nested +=\nhash\neq\n-- var self\nhash\neq\nhash\neq\n4\nhash\n-- field set\nhash\neq\n-- field +=\nhash\neq\nhash\neq\nhash\neq\n7\nhash\neq\ncd\nhash\nhash\n-- map in a map\nhash\neq\nhash\neq\nhash\neq\nhash\neq\nhash\neq\nhash\neq\n6\nhash\n-- tuple key\nhash\neq\nhash\neq\n5\nhash\nhash\nhash\nhash\nhash\nhash\nhash\nhash\nhash\nhash\nhash\nhash\nhash\nhash\nhash\nhash\nhash\nhash\nhash\nhash\n-- keys moved by the argument\nhash\neq\nhash\neq\nhash\neq\nhash\neq\nhash\neq\nhash\neq\nhash\neq\nhash\neq\nhash\neq\nhash\neq\nhash\neq\nhash\neq\nhash\neq\nhash\neq\nhash\neq\nhash\neq\nhash\neq\nhash\neq\nhash\neq\n17\n-- remove\nhash\neq\nhash\nfalse\n',
     # MYLA-414 (L3): new; the interpreter printed 'ERR: VUnit'
     "actor_function_field": '1205\n',
     # MYLA-414 (L4): new; the interpreter printed 'a' for the numbers

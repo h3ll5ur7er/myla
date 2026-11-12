@@ -37,6 +37,7 @@ from .tokens import Note, no_span
 from .ir_x86 import slots_at, frame_size
 from .ir import IrFunc, IrBlock, Inst, Term, Slot, Pos, Instance, ENV_WORD, Intrinsic, primitive_intrinsic
 from .ir_util import is_char_type
+from .parser import fused_compound
 from .parser import expr_of, stmt_of, type_expr_of, block_of, pattern_of, fun_of  // AST values for #test cases (MYLA-184)
 
 // A name in scope: the slot holding it.
@@ -78,7 +79,7 @@ struct LoopTarget { cont: int32, brk: int32, owners: int32, temps: int32 }
 // `scope_ids`: the open scopes' indices in `f.scope_parent` (MYLA-183).
 // `checked`: integer overflow traps here (D175's checked build, but not in
 // the runtime, `checked_code`).
-struct Lower { f: IrFunc, cur: int32, scopes: [[Local]], scope_ids: [int32], owners: [[int32]], temps: [[int32]], loops: [LoopTarget], sret: int32, arm_binds: [Local], err: str, lams: [LamJob], partials: [PartialJob], fnvals: [str], holder: [int32], into: int32, placed: [bool], tail: bool, tailed: bool, frame_fn: bool, result: int32, tasks: [TaskSlot], actor_self: int32, actor_off: int32, deep_res: bool, narrow: [int32: int32], wants: [Want], defers: [LDefer], received: int32, refused: [CheckErr], fn_name: str, by_addr: int32, by_addr_t: Type, resized: [str], scanned: bool, below: [LenFact], len_lets: [LenFact], nonneg: [int32], checked: bool }
+struct Lower { f: IrFunc, cur: int32, scopes: [[Local]], scope_ids: [int32], owners: [[int32]], temps: [[int32]], loops: [LoopTarget], sret: int32, arm_binds: [Local], err: str, lams: [LamJob], partials: [PartialJob], fnvals: [str], holder: [int32], into: int32, placed: [bool], tail: bool, tailed: bool, frame_fn: bool, result: int32, tasks: [TaskSlot], actor_self: int32, actor_off: int32, deep_res: bool, narrow: [int32: int32], wants: [Want], defers: [LDefer], received: int32, refused: [CheckErr], fn_name: str, by_addr: int32, by_addr_t: Type, resized: [str], scanned: bool, below: [LenFact], len_lets: [LenFact], nonneg: [int32], checked: bool, fused: int32, fused_val: int32 }
 
 // A per-type routine a routine built as IR calls, for the code generator to
 // emit (MYLA-162): `kind` 0 a cell's deep copy, 1 an inline value's deep
@@ -193,7 +194,7 @@ struct LDefer { depth: int32, nscopes: int32, nnames: int32, body: Block, cg: Co
 // entry block, the receiver of `#test` cases of the lowering's methods
 // (MYLA-184), with a code generator from `codegen_on` as their `cg`.
 pub fun lower_on() -> Lower {
-    var lw = Lower { f: IrFunc { name: "test", ret: None, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false, scope_parent: [-1] }, cur: 0, scopes: [[]], scope_ids: [0], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [], actor_self: -1, actor_off: 0, deep_res: false, narrow: [:], wants: [], defers: [], received: -1, refused: [], fn_name: "", by_addr: -1, by_addr_t: Type.TBool, resized: [], scanned: false, below: [], len_lets: [], nonneg: [], checked: false }
+    var lw = Lower { f: IrFunc { name: "test", ret: None, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false, scope_parent: [-1] }, cur: 0, scopes: [[]], scope_ids: [0], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [], actor_self: -1, actor_off: 0, deep_res: false, narrow: [:], wants: [], defers: [], received: -1, refused: [], fn_name: "", by_addr: -1, by_addr_t: Type.TBool, resized: [], scanned: false, below: [], len_lets: [], nonneg: [], checked: false, fused: -1, fused_val: -1 }
     lw.start(lw.new_block())
     return lw
 }
@@ -207,7 +208,7 @@ pub fun lower_function(cg: CodeGen, fd: FunData, mangled: str) -> Result<Lowered
     match fd.body { Some(b) => { if is_unread_body(b) { return Err("its body was never read") } }, None => {} }
     let sig = cg.sig_of(fd.name)
     let ret = opt_subst_type(sig.ret, cg.subst)
-    var lw = Lower { f: IrFunc { name: mangled, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false, scope_parent: [-1] }, cur: 0, scopes: [[]], scope_ids: [0], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [], actor_self: -1, actor_off: 0, deep_res: false, narrow: [:], wants: [], defers: [], received: -1, refused: [], fn_name: "", by_addr: -1, by_addr_t: Type.TBool, resized: [], scanned: false, below: [], len_lets: [], nonneg: [], checked: false }
+    var lw = Lower { f: IrFunc { name: mangled, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false, scope_parent: [-1] }, cur: 0, scopes: [[]], scope_ids: [0], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [], actor_self: -1, actor_off: 0, deep_res: false, narrow: [:], wants: [], defers: [], received: -1, refused: [], fn_name: "", by_addr: -1, by_addr_t: Type.TBool, resized: [], scanned: false, below: [], len_lets: [], nonneg: [], checked: false, fused: -1, fused_val: -1 }
     lw.fn_name = fd.name
     lw.checked = cg.checked && checked_code(mangled)
     var first_word = 0
@@ -321,7 +322,7 @@ pub fun lower_function(cg: CodeGen, fd: FunData, mangled: str) -> Result<Lowered
 // own at entry, borrowed as a parameter is (captures are immutable, D48).
 pub fun lower_lambda(cg: CodeGen, job: LamJob) -> Result<Lowered, str> {
     let ret = opt_subst_type(tfunc_ret(job.ftype), cg.subst)
-    var lw = Lower { f: IrFunc { name: job.lifted, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false, scope_parent: [-1] }, cur: 0, scopes: [[]], scope_ids: [0], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [], actor_self: -1, actor_off: 0, deep_res: false, narrow: [:], wants: [], defers: [], received: -1, refused: [], fn_name: "", by_addr: -1, by_addr_t: Type.TBool, resized: [], scanned: false, below: [], len_lets: [], nonneg: [], checked: false }
+    var lw = Lower { f: IrFunc { name: job.lifted, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false, scope_parent: [-1] }, cur: 0, scopes: [[]], scope_ids: [0], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [], actor_self: -1, actor_off: 0, deep_res: false, narrow: [:], wants: [], defers: [], received: -1, refused: [], fn_name: "", by_addr: -1, by_addr_t: Type.TBool, resized: [], scanned: false, below: [], len_lets: [], nonneg: [], checked: false, fused: -1, fused_val: -1 }
     lw.checked = cg.checked && checked_code(job.lifted)
     // an async lambda, when tasks take turns: a frame function, as an async
     // function's (D90); its frame holds the environment and the arguments
@@ -2444,6 +2445,10 @@ impl Lower {
             let d = self.unsupported("an assignment of that type")
             return
         }
+        if fused_compound(target, value) && (is_scalar(t) || is_tstr(t)) {
+            self.fused_assign(cg, target, value, t)
+            return
+        }
         match target.kind {
             ExprKind.Index(base, idx) => {
                 if is_map_t(self.place_type(cg, base)) {
@@ -2498,6 +2503,23 @@ impl Lower {
         // first, then the place, which may still return early (`?`)
         let staged = self.stage(cg, t, value)
         let dst = self.place(cg, target)
+        if cg.owns_heap(t) { self.add(Inst.DropAt(t, dst)) }
+        self.store_staged(cg, t, dst, staged)
+    }
+
+    // `target op= rhs` (`fused_compound`) at a scalar or a string of type `t`:
+    // the place made unique and found once (a missing key trapping there as
+    // the read would), its value the operation's left operand (`fused`), the
+    // result stored there; one lookup of each map key where the read and the
+    // store took one each, as the interpreter's `exec_fused` (MYLA-506).
+    fun fused_assign(var self, cg: CodeGen, target: Expr, value: Expr, t: Type) {
+        let dst = self.place(cg, target)
+        let old = self.temp(t)
+        self.add_load(old, dst, 0)
+        self.fused = target.id
+        self.fused_val = old
+        let staged = self.stage(cg, t, value)
+        self.fused = -1
         if cg.owns_heap(t) { self.add(Inst.DropAt(t, dst)) }
         self.store_staged(cg, t, dst, staged)
     }
@@ -3040,6 +3062,11 @@ impl Lower {
     #test(lower_on(), codegen_on("enum E { A, B(int) }"), expr_of("(a, 'c')"))[0]
     fun expr(var self, cg: CodeGen, e: Expr) -> int32 {
         if self.err != "" { return 0 }
+        if e.id == self.fused {
+            // a compound assignment's place, read by `fused_assign`
+            self.fused = -1
+            return self.fused_val
+        }
         let t = cg.type_of(e.id)
         match e.kind {
             ExprKind.IntLit(v, suf, isc, big) => { return self.konst(t, v) },
@@ -5760,7 +5787,7 @@ fun calls_nothing(e: Expr) -> bool {
 // An empty lowering of the routine `name` with result type `ret`, its entry
 // block started.
 fun routine(name: str, ret: Option<Type>) -> Lower {
-    var lw = Lower { f: IrFunc { name: name, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false, scope_parent: [-1] }, cur: 0, scopes: [[]], scope_ids: [0], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [], actor_self: -1, actor_off: 0, deep_res: false, narrow: [:], wants: [], defers: [], received: -1, refused: [], fn_name: "", by_addr: -1, by_addr_t: Type.TBool, resized: [], scanned: false, below: [], len_lets: [], nonneg: [], checked: false }
+    var lw = Lower { f: IrFunc { name: name, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false, scope_parent: [-1] }, cur: 0, scopes: [[]], scope_ids: [0], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [], actor_self: -1, actor_off: 0, deep_res: false, narrow: [:], wants: [], defers: [], received: -1, refused: [], fn_name: "", by_addr: -1, by_addr_t: Type.TBool, resized: [], scanned: false, below: [], len_lets: [], nonneg: [], checked: false, fused: -1, fused_val: -1 }
     let entry = lw.new_block()
     lw.start(entry)
     return lw
