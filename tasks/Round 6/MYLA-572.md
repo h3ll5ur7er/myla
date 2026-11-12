@@ -2,7 +2,7 @@
 id: MYLA-572
 title: "A read of n bytes from a descriptor allocates n bytes before it reads"
 type: bug
-status: todo
+status: in-progress
 priority: low
 labels: [std, runtime, io, round-6]
 ---

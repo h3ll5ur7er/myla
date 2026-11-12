@@ -3118,9 +3118,10 @@ pub fun exec_find() -> int64 {
         if __load64(q + 8) != __load64(q + 16) {
             take_lock(q)
             let tail = __load64(q + 16) - 1
-            if tail >= __load64(q + 8) {
-                __store64(q + 16, tail)
+            let head = __load64(q + 8)
+            if tail >= head {
                 let fr = __load64(ring_of(me) + ((tail & (EXEC_CAP - 1)) << 3))
+                queue_took(q, head, tail)
                 give_lock(q)
                 return fr
             }
@@ -3128,6 +3129,22 @@ pub fun exec_find() -> int64 {
         }
     }
     return exec_steal(me)
+}
+
+// A frame taken from the queue `q` (its lock held), which now runs from the
+// counter `head` to `tail`: emptied, both counters go back to 0, so a queue
+// that drains reuses the start of its ring. The counters drift otherwise (a
+// frame pushed at one end and taken at the other), each turn a slot further,
+// and the ring's 8 MiB were all touched in time, resident for good: a
+// million actor calls on one worker (MYLA-576).
+fun queue_took(q: int64, head: int64, tail: int64) {
+    if head == tail {
+        __store64(q + 8, 0)
+        __store64(q + 16, 0)
+    } else {
+        __store64(q + 8, head)
+        __store64(q + 16, tail)
+    }
 }
 
 // The oldest frame of each queue in turn, starting with worker `me`'s own; 0
@@ -3143,7 +3160,7 @@ fun exec_steal(me: int64) -> int64 {
             let head = __load64(q + 8)
             if head != __load64(q + 16) {
                 let fr = __load64(ring_of(w) + ((head & (EXEC_CAP - 1)) << 3))
-                __store64(q + 8, head + 1)
+                queue_took(q, head + 1, __load64(q + 16))
                 give_lock(q)
                 return fr
             }
