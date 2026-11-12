@@ -69,6 +69,13 @@ impl str {
             return if i <= n { Some(i) } else { None }
         }
         let first = needle[0]
+        if m == 1 {
+            while i < n {
+                if self[i] == first { return Some(i) }
+                i += 1
+            }
+            return None
+        }
         let last = n - m
         let begin = i
         var work: int64 = 0
