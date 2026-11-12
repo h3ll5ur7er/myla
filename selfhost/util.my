@@ -124,6 +124,28 @@ pub fun is_blank(s: str) -> bool {
     return true
 }
 
+// The name of a type the loader qualified with its module's id (`lib$Q`,
+// `std$fs$IoError`) as messages write it, by the module's last segment:
+// `lib.Q`, `fs.IoError` (MYLA-383, MYLA-514); a name of the entry module's
+// own, without a `$`, as it is.
+#test("lib$Q")["lib.Q"]
+#test("std$fs$IoError")["fs.IoError"]
+#test("Point")["Point"]
+pub fun written_type_name(n: str) -> str {
+    var last = -1
+    var before = -1
+    var i = 0
+    while i < n.len() {
+        if n[i] == '$' {
+            before = last
+            last = i
+        }
+        i += 1
+    }
+    if last < 0 { return n }
+    return n[before + 1:last] + "." + n[last + 1:]
+}
+
 // The spec of each hole of a constant format string, "" for `{}` and the
 // text after the `:` for `{:spec}` (D139); escaped braces are no holes.
 #test("a {} b {:>8} c {{}}")[["", ">8"]]

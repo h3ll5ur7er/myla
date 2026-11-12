@@ -333,8 +333,9 @@ class NativeRuntime(unittest.TestCase):
                 name = line.split()[1]
             elif " = elem " in line:
                 funcs.setdefault(name, []).append(line.endswith(" unchecked"))
+        # (`bs[i].x += bs[i].v` finds its place once, MYLA-506: two elements)
         self.assertEqual({f: funcs.get(f) for f in ("myla_sum", "myla_pairs", "myla_advance", "myla_spaces", "myla_each")},
-                         {"myla_sum": [True], "myla_pairs": [True, True], "myla_advance": [True, True, True],
+                         {"myla_sum": [True], "myla_pairs": [True, True], "myla_advance": [True, True],
                           "myla_spaces": [True], "myla_each": [True]})
         for backend, binary in self.binaries("unchecked", UNCHECKED):
             with self.subTest(backend=backend):
