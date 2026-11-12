@@ -79,7 +79,7 @@ The first bad byte is the one reported, and a bad digit anywhere wins over an ov
 | `to_hex(n: uint64, width: int = 0) -> str` | `n` in hex, lower case, with leading zeros up to `width` digits: `to_hex(255, 4)` is `00ff` |
 | `to_binary(n: uint64, width: int = 0) -> str` | `n` in binary, with leading zeros up to `width` digits |
 
-A number with more digits than the width keeps them all; a negative width is a runtime error, `to_hex: width -3 is negative` (D184, [[MYLA-425]]). There is no prefix: write `"0x" + num.to_hex(n)`. Zero is `0`. A radix outside 2 to 36 is a runtime error. `format("{:x}", n)` and `format("{:08b}", n)` do the same for hex and binary ([[Language/Standard-library/Fmt]]), but write a negative number in two's complement (`ffffffffffffff01` for an `int64` -255), where `to_radix` writes `-ff`.
+A number with more digits than the width keeps them all; a long padding goes in 4,096 zeros at a time, into a string made for it ([[MYLA-546]]); a negative width is a runtime error, `to_hex: width -3 is negative` (D184, [[MYLA-425]]). There is no prefix: write `"0x" + num.to_hex(n)`. Zero is `0`. A radix outside 2 to 36 is a runtime error. `format("{:x}", n)` and `format("{:08b}", n)` do the same for hex and binary ([[Language/Standard-library/Fmt]]), but write a negative number in two's complement (`ffffffffffffff01` for an `int64` -255), where `to_radix` writes `-ff`.
 
 ## Floats
 

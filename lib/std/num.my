@@ -906,6 +906,21 @@ fun radix_digits(n: uint64, r: uint64, width: int, negative: bool) -> str {
     var sb = StringBuilder()
     if negative { sb.append_byte('-') }
     var pad = width - buf.len()
+    if pad > 16 {
+        // in bulk, into a string made for it all: a block of zeros, doubled
+        // up to 4,096, at a time, so `to_hex(n, 2^30)` is 262,144 appends,
+        // not a billion, and needs no memory past its result (MYLA-546)
+        var block = "0000000000000000"
+        while block.len() < 4096 && block.len() < pad {
+            block = block + block
+        }
+        while pad >= block.len() {
+            sb.append(block)
+            pad -= block.len()
+        }
+        sb.append(block, 0, pad)
+        pad = 0
+    }
     while pad > 0 {
         sb.append_byte('0')
         pad -= 1
@@ -1071,6 +1086,7 @@ pub fun to_radix_u64(n: uint64, radix: int) -> str {
 #test(18446744073709551615u64, 0)["ffffffffffffffff"]
 #test(18446744073709551615u64, 20)["0000ffffffffffffffff"]
 #test(3735928559u64, 16)["00000000deadbeef"]
+#test(255u64, 40)["00000000000000000000000000000000000000ff"] // in bulk past 16
 pub fun to_hex(n: uint64, width: int = 0) -> str {
     check_width("to_hex", width)
     return radix_digits(n, 16, width, false)
@@ -1088,6 +1104,27 @@ pub fun to_hex(n: uint64, width: int = 0) -> str {
 pub fun to_binary(n: uint64, width: int = 0) -> str {
     check_width("to_binary", width)
     return radix_digits(n, 2, width, false)
+}
+
+// A padding of more than 16 zeros is written a block at a time (MYLA-546):
+// each width about a block's 4,096 and its doubling.
+#test
+fun pads_in_blocks() {
+    for w in [17, 18, 33, 4095, 4096, 4097, 4098, 8192, 8194, 12290] {
+        let s = to_hex(255u64, w)
+        assert(s.len() == w && s[w - 2:] == "ff", f"to_hex(255, {w}): {s.len()} bytes")
+        var zeros = 0
+        for c in s {
+            if c == '0' { zeros += 1 }
+        }
+        assert(zeros == w - 2, f"to_hex(255, {w}): {zeros} zeros")
+    }
+    let b = to_binary(5u64, 5000)
+    var ones = 0
+    for c in b {
+        if c == '1' { ones += 1 }
+    }
+    assert(b.len() == 5000 && b[4997:] == "101" && ones == 2, "to_binary(5, 5000)")
 }
 
 // Whether `r` is `Ok(v)`, and whether it is an `Err(ParseIntError.Overflow)`.
