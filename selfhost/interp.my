@@ -4757,6 +4757,7 @@ impl Interp {
         if nm == "__term_size" { r = __term_size(fd) }
         if nm == "__term_set" { r = __term_set(fd, mode) }
         if nm == "__term_raw" { r = __term_raw(fd) }
+        if nm == "__term_cbreak" { r = __term_cbreak(fd) }
         if nm == "__term_vt" { r = __term_vt(fd) }
         if nm == "__signal_listen" { r = __signal_listen(fd) }
         if nm == "__signal_take" { r = __signal_take(fd) }

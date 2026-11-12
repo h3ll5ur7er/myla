@@ -25,6 +25,7 @@ The terminal is put back however the program ends, too (D187, [[MYLA-426]]): ent
 | Item | Meaning |
 | --- | --- |
 | `raw_mode() -> Result<RawMode, TermError>` | Raw mode on the input: `NotATerminal` when it isn't one |
+| `cbreak_mode() -> Result<RawMode, TermError>` | A key at a time, as raw mode has it, but echoed, with Ctrl-C and Ctrl-Z still signals and the line ends as they were ([[MYLA-548]]): what a program keeps while it is busy, so what is typed meanwhile waits whole for it, where the terminal's own line editing keeps 4,095 bytes of a line and drops the rest (`myla repl` between lines). A read of the input gets the keys as typed, without that editing. It ends with the program, signals included, as raw mode does; a `raw_mode` inside it restores to it |
 | `RawMode`: `restore() -> Result<(), TermError>` | The mode from before `raw_mode` |
 | `enum Key { Char(char), Ctrl(char), Alt(char), Enter, Tab, Backspace, Escape, Up, Down, Left, Right, Home, End, PageUp, PageDown, Insert, Delete, F(int), Unknown(str) }` | A key. `Ctrl('c')` is Ctrl-C; `Alt(c)` is ESC and a character; an arrow with a modifier is the arrow. `Eq`, `Hash` |
 | `parse_key(s: str) -> Option<(Key, int)>` | The first key in the bytes `s` and how many bytes it takes; `None` when `s` is the start of one cut short (an escape sequence, a character's UTF-8) |
@@ -105,12 +106,13 @@ The module rests on these ([[MYLA-350]]), each a function of `std.rt` over `std.
 | `__term_size(fd) -> int` | `ioctl(TIOCGWINSZ)`: the columns times 65536 plus the rows, or -1 | -1, ENOSYS |
 | `__term_get(fd) -> str` | `ioctl(TCGETS)`: the kernel's `struct termios`, 36 bytes, `""` on an error | `""`, ENOSYS |
 | `__term_set(fd, mode: str) -> int` | `ioctl(TCSETS)` with what `__term_get` gave; EINVAL for another size. The mode the exit hook keeps for `fd` set again removes the hook | -1, ENOSYS |
-| `__term_raw(fd) -> int` | The mode now without ECHO, ICANON, ISIG, IEXTEN, ICRNL, IXON, BRKINT, INPCK, ISTRIP, with CS8, VMIN 1 and VTIME 0; OPOST kept. The mode before it is kept for the exit hook, unless the hook keeps one already (D187) | -1, ENOSYS |
+| `__term_raw(fd) -> int` | The mode now without ECHO, ICANON, ISIG, IEXTEN, ICRNL, IXON, BRKINT, INPCK, ISTRIP, with CS8, VMIN 1 and VTIME 0; OPOST kept. The mode before it is kept for the exit hook, unless the hook keeps one already (D187), and the signals' handlers set (D192) | -1, ENOSYS |
+| `__term_cbreak(fd) -> int` | The mode now without ICANON, with VMIN 1 and VTIME 0, the rest kept ([[MYLA-548]]); the exit hook and the handlers as for `__term_raw` | -1, ENOSYS |
 | `__term_vt(fd) -> int` | 0 for a terminal (Linux's always interprets escapes), else -1 | -1, ENOSYS |
 
 ## Porting to another system
 
-A port gives `std.platform`'s terminal functions again: `term_is_tty(fd)`, `term_size(fd)`, `term_get_mode(fd, buf)`, `term_set_mode(fd, mode)`, `term_make_raw(fd)` and `term_enable_vt(fd)`, each 0 or more or minus an errno ([[Language/Targets#the-terminal-and-signals-on-another-system]]), and `raw_signals(on)` with its handler `raw_signal(sig)` (D192), which the code generator names `__on_raw_signal` in every program: the handler puts the exit hook's mode back without allocating and ends the program as the signal would. `std.term` and `std.rt` stay as they are. For Windows (`platform_windows.my`, over the console API):
+A port gives `std.platform`'s terminal functions again: `term_is_tty(fd)`, `term_size(fd)`, `term_get_mode(fd, buf)`, `term_set_mode(fd, mode)`, `term_make_raw(fd)`, `term_make_cbreak(fd)` and `term_enable_vt(fd)`, each 0 or more or minus an errno ([[Language/Targets#the-terminal-and-signals-on-another-system]]), and `raw_signals(on)` with its handler `raw_signal(sig)` (D192), which the code generator names `__on_raw_signal` in every program: the handler puts the exit hook's mode back without allocating and ends the program as the signal would. `std.term` and `std.rt` stay as they are. For Windows (`platform_windows.my`, over the console API):
 
 - **Streams.** `fd` 0 to 2 are `GetStdHandle(STD_INPUT_HANDLE)`, `STD_OUTPUT_HANDLE` and `STD_ERROR_HANDLE`. `term_is_tty` is whether `GetConsoleMode` succeeds on the handle; a redirected stream is a file or a pipe and gives ENOTTY elsewhere.
 - **Size.** `term_size` is `GetConsoleScreenBufferInfo`'s window, `srWindow.Right - srWindow.Left + 1` columns by `srWindow.Bottom - srWindow.Top + 1` rows (not the buffer's size), packed as `cols << 16 | rows`.
