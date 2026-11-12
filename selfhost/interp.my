@@ -10,7 +10,7 @@
 from .ast import Expr, ExprKind, Stmt, StmtKind, Block, Decl, DeclKind, FunData, Param, MatchArm, Pattern, PatternKind, FieldPat, BindElem, ExprOrBlock, ElseTail, FieldInit, MapEntry, Attribute, TypeExpr, TypeKind, TypeParam, bind_elems, names_in_expr, names_in_block, Expected, expected_failure, is_unread_body
 from .tokens import SrcSpan, no_span
 from .checker import is_notify_primitive
-from .checker import Checker, Type, Subst, subst_type, subst_get, unify_param, type_name, is_raw_memory_primitive, is_net_primitive, is_term_primitive, checker_on, builtin_method, builtin_method_name, is_wrapping_method, add_overflows, sub_overflows, mul_overflows, int_min, int_neg_overflows, shift_out_of_range, is_slice_expr, from_end_of, slice_parts, is_hole_part
+from .checker import Checker, Type, Subst, subst_type, subst_get, unify_param, type_name, is_raw_memory_primitive, is_net_primitive, is_lot_primitive, is_term_primitive, checker_on, builtin_method, builtin_method_name, is_wrapping_method, add_overflows, sub_overflows, mul_overflows, int_min, int_neg_overflows, shift_out_of_range, is_slice_expr, from_end_of, slice_parts, is_hole_part
 from .anf import Norm, new_norm, stmt_suspends, body_suspends
 from .util import cp_utf8, format_specs, written_type_name
 from std.fmt import fmt_int, fmt_float, fmt_text
@@ -171,6 +171,13 @@ const NOTIF_BITS: int64 = 20
 // for a write (`__wait_writable`, MYLA-419)
 struct FdWait { fd: int32, fd2: int32, task: int32, events: int32 }
 
+// A lot (MYLA-468, `__sock_lot`): sockets parked until they are readable,
+// with no task, in the order of their deadlines (`deadline_before`); those
+// ready, in the order they became so; the id of the notifier notified once
+// for each. Its handle is its index + 1.
+struct ILot { nid: int64, parked: [IParked], ready: [int32], open: bool }
+struct IParked { h: int32, deadline: int64 }
+
 // A task's deadline (`std.task.timeout`, D124): at `at` the task `task` is
 // cancelled and `Interp.fired[rec]` says so.
 struct Deadline { at: int64, task: int32, rec: int32 }
@@ -277,6 +284,12 @@ pub struct Interp {
     pwaits: [PWait],
     free_waits: [int32],
     parked_waits: [int32],
+    // MYLA-468: the lots, the tags their sockets were parked with, how many
+    // sockets are parked, and when they were last looked at
+    lots: [ILot],
+    sock_tags: [int32: int64],
+    parked_socks: int32,
+    lots_seen: int64,
     sleep_seq: int64,
     virtual_time: bool,
     vclock: int64,
@@ -604,7 +617,7 @@ pub fun new_interp(c: Checker, argv: [str]) -> Interp {
         failing: false, fail_err: None, fail_code: 0,
         on_failure: (r: RtError) => false, fail_reported: false,
         depth: 0,
-        sleepers: [], deadlines: [], fired: [], fd_waits: [], notifs: [], free_notifs: [], notif_seq: 0, pwaits: [], free_waits: [], parked_waits: [], sleep_seq: 0, virtual_time: false, vclock: 0,
+        sleepers: [], deadlines: [], fired: [], fd_waits: [], notifs: [], free_notifs: [], notif_seq: 0, pwaits: [], free_waits: [], parked_waits: [], lots: [], sock_tags: [:], parked_socks: 0, lots_seen: 0, sleep_seq: 0, virtual_time: false, vclock: 0,
         testing: false, defer_errs: [], captured: [], captured_io: false, test_root: "", test_program: "", checker: c,
         static_calls: c.static_calls, impl_selfs: c.static_selfs, call_types: c.call_types,
         tparams: [], envs: [], env_memo: [:], type_env_memo: [:], env_next: -1, env_fi: -1, env_tail: -1, env_tail_fi: -1,
@@ -1566,6 +1579,8 @@ impl Interp {
         self.pwaits = []
         self.free_waits = []
         self.parked_waits = []
+        self.lots = []
+        self.parked_socks = 0
     }
 
     // The async function `fi` called with `argv` as the first task, every
@@ -1690,7 +1705,7 @@ impl Interp {
     // ready latest first (fifo: earliest first).
     fun wake_sleepers(var self) {
         if self.deadlines.len() > 0 { self.fire_deadlines() }
-        if self.fd_waits.len() > 0 { let any = self.wake_readers() }
+        if self.fd_waits.len() > 0 || self.parked_socks > 0 { let any = self.wake_readers() }
         if self.sleepers.len() == 0 { return }
         let now = self.now()
         var due: [int32] = []
@@ -1747,10 +1762,13 @@ impl Interp {
     }
 
     // The tasks whose descriptor is readable ready (in the order they began
-    // waiting); whether there were any.
+    // waiting), and the parked sockets that are on their lots
+    // (`wake_parked`); whether there were any.
     fun wake_readers(var self) -> bool {
-        var rest: [FdWait] = []
         var woke = false
+        if self.parked_socks > 0 { woke = self.wake_parked() }
+        if self.fd_waits.len() == 0 { return woke }
+        var rest: [FdWait] = []
         for w in self.fd_waits {
             if fd_wait_over(w) {
                 self.tasks[w.task].state = 0
@@ -1764,11 +1782,103 @@ impl Interp {
         return woke
     }
 
+    // The sockets parked on the lots that became readable moved to their
+    // lots' ready lists, each lot's notifier notified once for each (looked
+    // at once a millisecond at most: a look is a poll a socket); whether
+    // any did.
+    fun wake_parked(var self) -> bool {
+        // (the real clock: the virtual one stands still while tasks run)
+        let now = __clock_ns()
+        if now - self.lots_seen < 1000000 && now >= self.lots_seen { return false }
+        self.lots_seen = now
+        var woke = false
+        var li = 0
+        while li < self.lots.len() {
+            if self.lots[li].open && self.lots[li].parked.len() > 0 {
+                var rest: [IParked] = []
+                var due = 0
+                for q in self.lots[li].parked {
+                    if __sock_poll(q.h, 1, 0) != 0 {
+                        self.lots[li].ready.push(q.h)
+                        due = due + 1
+                    } else {
+                        rest.push(q)
+                    }
+                }
+                if due > 0 {
+                    self.lots[li].parked = rest
+                    self.parked_socks = self.parked_socks - due
+                    let ni = self.notif_slot(self.lots[li].nid)
+                    if ni >= 0 {
+                        for k in 0..due { self.notify(ni, false) }
+                    }
+                    woke = true
+                }
+            }
+            li = li + 1
+        }
+        return woke
+    }
+
+    // `__sock_lot` and the other primitives of a lot (MYLA-468), as std.rt's
+    // natively: a socket parked waits with no task, and once readable is
+    // ready on its lot, its notifier notified.
+    fun lot_primitive(var self, nm: str, args: [Expr]) -> Value {
+        var ints: [int64] = []
+        for a in args { ints.push(as_int(self.eval(a))) }
+        if self.stop() { return Value.VUnit }
+        if nm == "__sock_lot" {
+            self.lots.push(ILot { nid: ints[0], parked: [], ready: [], open: true })
+            return Value.VInt(self.lots.len() as int64)
+        }
+        if nm == "__sock_tag" { return Value.VInt(self.sock_tags.get_or(ints[0] as int32, 0)) }
+        let li = (ints[0] - 1) as int32
+        if li < 0 || li >= self.lots.len() || !self.lots[li].open { return Value.VInt(-1) }
+        if nm == "__sock_park" {
+            let h = ints[1] as int32
+            let q = IParked { h: h, deadline: ints[2] }
+            self.sock_tags[h] = ints[3]
+            // after the last parked whose deadline isn't later
+            var at = self.lots[li].parked.len()
+            while at > 0 && deadline_before(q.deadline, self.lots[li].parked[at - 1].deadline) { at = at - 1 }
+            var ps: [IParked] = []
+            var k = 0
+            for x in self.lots[li].parked {
+                if k == at { ps.push(q) }
+                ps.push(x)
+                k = k + 1
+            }
+            if at == self.lots[li].parked.len() { ps.push(q) }
+            self.lots[li].parked = ps
+            self.parked_socks = self.parked_socks + 1
+            return Value.VInt(ps.len() as int64)
+        }
+        if nm == "__sock_ready" {
+            if self.lots[li].ready.len() == 0 { return Value.VInt(0) }
+            let h = self.lots[li].ready[0]
+            self.lots[li].ready = self.lots[li].ready[1:]
+            return Value.VInt(h as int64)
+        }
+        if nm == "__sock_expired" {
+            let now = ints[1]
+            if self.lots[li].parked.len() == 0 { return Value.VInt(0) }
+            let q = self.lots[li].parked[0]
+            if now >= 0 && (q.deadline < 0 || q.deadline > now) { return Value.VInt(0) }
+            self.lots[li].parked = self.lots[li].parked[1:]
+            self.parked_socks = self.parked_socks - 1
+            return Value.VInt(q.h as int64)
+        }
+        // `__sock_lot_close`
+        self.parked_socks = self.parked_socks - self.lots[li].parked.len()
+        self.lots[li] = ILot { nid: 0, parked: [], ready: [], open: false }
+        return Value.VInt(0)
+    }
+
     // No task ready: until the earliest sleeper's or deadline's time (the
     // virtual clock moved to it), or a waiting task's input is there; false
     // when no task sleeps or waits.
     fun wait_for_sleeper(var self) -> bool {
-        if self.fd_waits.len() > 0 {
+        if self.fd_waits.len() > 0 || self.parked_socks > 0 {
             // a millisecond at a time, until input or the next sleeper's time
             // (the virtual clock moves only once no input came)
             while true {
@@ -4550,7 +4660,10 @@ impl Interp {
         if nm == "__sock_shutdown" { r = __sock_shutdown(ints[0], ints[1]) }
         if nm == "__sock_option" { r = __sock_option(ints[0], ints[1], ints[2]) }
         if nm == "__sock_poll" { r = __sock_poll(ints[0], ints[1], ints[2]) }
-        if nm == "__sock_close" { r = __sock_close(ints[0]) }
+        if nm == "__sock_close" {
+            r = __sock_close(ints[0])
+            let gone = self.sock_tags.remove(ints[0])
+        }
         return Value.VInt(r as int64)
     }
 
@@ -4909,6 +5022,7 @@ impl Interp {
             for x in __spawn_piped(prog, argv, opts) { out.push(Value.VInt(x as int64)) }
             return Value.VList(out)
         }
+        if is_lot_primitive(nm) { return self.lot_primitive(nm, args) }
         if is_net_primitive(nm) { return self.net_primitive(nm, args) }
         if is_term_primitive(nm) { return self.term_primitive(nm, args) }
         if nm == "__try_reap" { return Value.VInt(__try_reap(as_int(self.eval(args[0])) as int32) as int64) }
@@ -5363,6 +5477,15 @@ fun format_value(v: Value) -> str {
         Value.VChar(c) => cp_utf8(c as int32),
         _ => format("ERR: {}", v.to_string()),
     }
+}
+
+// Whether the deadline `a` comes before `b` (negative: never), as std.rt's.
+#test(5i64, 7i64)[true]
+#test(5i64, -1i64)[true]
+#test(-1i64, 5i64)[false]
+fun deadline_before(a: int64, b: int64) -> bool {
+    if a < 0 { return false }
+    return b < 0 || a < b
 }
 
 // Whether the wait `w` is over: its descriptor readable, or its socket

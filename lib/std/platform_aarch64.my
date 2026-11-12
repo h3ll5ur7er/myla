@@ -1685,18 +1685,47 @@ pub fun poller_event(i: int64) -> int64 {
     return __load64(__rt_addr("__poll_buf") + 48 + i * 16 + 8)
 }
 
+// What event `i` of the last `poller_wait` found its descriptor ready for:
+// 1 to receive (or its input ended), 2 to send, 3 both (an error or a
+// hang-up counts as either), as `poller_watch_socket`'s `events` (MYLA-518).
+pub fun poller_event_ready(i: int64) -> int64 {
+    let ev = __load32(__rt_addr("__poll_buf") + 48 + i * 16) as int64
+    var r: int64 = 0
+    if (ev & 8219) != 0 { r |= 1 }  // EPOLLIN | EPOLLPRI | EPOLLERR | EPOLLHUP | EPOLLRDHUP
+    if (ev & 28) != 0 { r |= 2 }    // EPOLLOUT | EPOLLERR | EPOLLHUP
+    return r
+}
+
 // The descriptor `fd` watched by the poller `p` until it is readable (or
 // its input ended), once (EPOLLONESHOT): the next wait gives `token`.
-pub fun poller_watch(p: int64, fd: int64, token: int64) -> int64 {
+// `again`: the poller watched it before (a one-shot that fired, MYLA-518),
+// so it is armed again first, added only if the poller has it no more (the
+// descriptor was closed meanwhile).
+pub fun poller_watch(p: int64, fd: int64, token: int64, again: bool) -> int64 {
     let e = __alloc(16)
     __store32(e, 1073741825u32)  // EPOLLIN | EPOLLONESHOT
     __store64(e + 8, token)
-    var r = __syscall5(SYS_EPOLL_CTL, p & LOW32, 1, fd, e, 0)  // EPOLL_CTL_ADD
-    if r == -17 {
-        // watched before (a one-shot that fired): armed again
-        r = __syscall5(SYS_EPOLL_CTL, p & LOW32, 3, fd, e, 0)  // EPOLL_CTL_MOD
-    }
+    let r = poller_ctl(p, fd, e, again)
     __free(e)
+    return r
+}
+
+// The event `e` for `fd` given to the poller `p`: added, or when it has the
+// descriptor already armed again (EEXIST); `again`: armed again first, and
+// added when it hasn't (ENOENT).
+fun poller_ctl(p: int64, fd: int64, e: int64, again: bool) -> int64 {
+    var op: int64 = 1        // EPOLL_CTL_ADD
+    var other: int64 = 3     // EPOLL_CTL_MOD
+    var miss: int64 = -17    // EEXIST
+    if again {
+        op = 3
+        other = 1
+        miss = -2            // ENOENT
+    }
+    var r = __syscall5(SYS_EPOLL_CTL, p & LOW32, op, fd, e, 0)
+    if r == miss {
+        r = __syscall5(SYS_EPOLL_CTL, p & LOW32, other, fd, e, 0)
+    }
     return r
 }
 
@@ -1709,20 +1738,17 @@ pub fun poller_forget(p: int64, fd: int64) {
 // (1: to receive or accept, 2: to send or a connect's end; an error or a
 // hang-up always counts), once: the next wait gives `token` (MYLA-346). A
 // socket watched already is armed again with the new `events`, which the
-// caller makes the union of what its waiters ask. A port whose sockets
-// aren't the poller's descriptors (Windows: WSAPoll, or IOCP) watches them
-// its own way here.
-pub fun poller_watch_socket(p: int64, h: int64, events: int64, token: int64) -> int64 {
+// caller makes the union of what its waiters ask; `again` as
+// `poller_watch`'s. A port whose sockets aren't the poller's descriptors
+// (Windows: WSAPoll, or IOCP) watches them its own way here.
+pub fun poller_watch_socket(p: int64, h: int64, events: int64, token: int64, again: bool) -> int64 {
     var ev: int64 = 1073741824          // EPOLLONESHOT
     if (events & 1) != 0 { ev |= 1 }    // EPOLLIN
     if (events & 2) != 0 { ev |= 4 }    // EPOLLOUT
     let e = __alloc(16)
     __store32(e, ev as uint32)
     __store64(e + EVENT_DATA, token)
-    var r = __syscall5(SYS_EPOLL_CTL, p & LOW32, 1, h, e, 0)  // EPOLL_CTL_ADD
-    if r == -17 {
-        r = __syscall5(SYS_EPOLL_CTL, p & LOW32, 3, h, e, 0)  // EPOLL_CTL_MOD
-    }
+    let r = poller_ctl(p, h, e, again)
     __free(e)
     return r
 }
