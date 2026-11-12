@@ -5,6 +5,8 @@
     python3 report_data.py benchmark_results_<stamp>.txt --into report.html
 
 `--into` writes the JSON into the page's `<script id="data">` block instead.
+`--compile FILE`, after the results file, takes the compile times from a
+`./run_benchmarks.sh --compile-only` results file (a pass with warm caches).
 """
 import datetime
 import json
@@ -66,15 +68,33 @@ def parse(path):
     return {"meta": meta, "workloads": WORKLOADS, "checksums": sums, "langs": out}
 
 
+def compile_times(path):
+    """The compile seconds of a `--compile-only` results file, by language."""
+    out = {}
+    for line in open(path, encoding="utf-8"):
+        f = line.rstrip("\n").split("\t")
+        if f[0] == "LANG" and f[4]:
+            out[SHORT.get(f[1], f[1])] = float(f[4])
+    return out
+
+
 if __name__ == "__main__":
-    data = parse(sys.argv[1])
-    if len(sys.argv) == 4 and sys.argv[2] == "--into":
-        page = open(sys.argv[3], encoding="utf-8").read()
+    args = sys.argv[1:]
+    data = parse(args.pop(0))
+    if "--compile" in args:
+        i = args.index("--compile")
+        times = compile_times(args[i + 1])
+        del args[i:i + 2]
+        for lang in data["langs"]:
+            if lang["compile"] is not None:
+                lang["compile"] = times[lang["name"]]
+    if len(args) == 2 and args[0] == "--into":
+        page = open(args[1], encoding="utf-8").read()
         block = re.compile(r'(<script id="data" type="application/json">).*?(</script>)', re.S)
         text = json.dumps(data, separators=(",", ":")).replace("</", "<\\/")
         page, n = block.subn(lambda m: m.group(1) + text + m.group(2), page, count=1)
         if n != 1:
-            sys.exit("no data block in " + sys.argv[3])
-        open(sys.argv[3], "w", encoding="utf-8").write(page)
+            sys.exit("no data block in " + args[1])
+        open(args[1], "w", encoding="utf-8").write(page)
     else:
         json.dump(data, sys.stdout, indent=1)

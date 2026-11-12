@@ -238,28 +238,34 @@ All thirteen programs after the standard library waves, D175 (#54) and batches 4
 
 - [[benchmarks/benchlang/bench.my]]: the six workloads in one file, written as the language's documentation writes code and not tuned afterwards, with `#test` cases checked against benchLANG's Python version at small sizes;
 - `benchlang-runner.patch`: the entry for Myla in benchLANG's runner (`myla build bench.my -o bench && strip bench`), against its commit `fedbb12`;
-- `results-2026-11-12.txt`: the runner's results file; `report_data.py` turns one into JSON, and with `--into report.html` writes it into the report page.
+- `results-2026-11-12-before-544.txt` and `results-2026-11-12-after-544.txt`: the runner's results files of the two runs below, and `compile-2026-11-12-after-544.txt`, a `--compile-only` pass; `report_data.py` turns a results file into JSON, and with `--into report.html` writes it into the report page (`--compile FILE` takes the compile times from such a pass).
 
-To repeat it: clone benchLANG, apply the patch, copy `bench.my` to `languages/Myla/`, put `build/myla` on the `PATH`, and run `./run_benchmarks.sh --runs 2` inside `nix develop`, which brings every toolchain. The whole suite takes about 12 minutes.
+To repeat it: clone benchLANG, apply the patch, copy `bench.my` to `languages/Myla/`, put `build/myla` on the `PATH`, and run `./run_benchmarks.sh --runs 2` inside `nix develop`, which brings every toolchain. The whole suite takes 12 to 20 minutes.
 
-The run of 2026-11-12 (commit `547339a`, a shared 4-CPU cloud VM, Xeon at 2.3 GHz, two runs each, all checksums equal): Myla is 16th of 23 by total time, 11.03 s against C's 3.42 s (3.2 times), between Bun (9.12 s) and Node (11.56 s), and behind Swift (8.76 s).
+Both runs were on shared 4-CPU cloud VMs, two runs of each language, all checksums equal; the second host was about 1.5 times slower than the first (by C's total), so the runs compare by their ratios to C, not by seconds.
 
-| Workload | Myla | C | Rust | Swift | Myla's place |
-| --- | --: | --: | --: | --: | --: |
-| Primes | 1.16 s | 0.70 s | 0.69 s | 0.71 s | 18 |
-| Fibonacci | 2.73 s | 0.56 s | 1.03 s | 1.68 s | 18 |
-| Strings | 1.24 s | 0.43 s | 0.41 s | 1.29 s | 14 |
-| Mandelbrot | 0.56 s | 0.45 s | 0.44 s | 0.46 s | 17 |
-| Binary trees | 0.47 s | 0.71 s | 0.72 s | 1.50 s | 7 |
-| k-nucleotide | 4.87 s | 0.59 s | 0.80 s | 3.13 s | 19 |
+**The first run** (commit `547339a`, Xeon at 2.3 GHz): Myla 16th of 23 by total time, 11.03 s against C's 3.42 s (3.23 times). Primes took 1.16 s where most runtimes tie at 0.69 s, the divider setting the pace: Myla's `int32` `%` was a 64-bit `idiv` (`cqo; idivq %rcx`), slower than the 32-bit one on these processors. [[MYLA-544]] made it `cltd; idivl %ecx`: on one machine the same program's primes went from 1.59 s to 1.00 s.
 
-Beside the times: the fastest compile of the 16 native builds (0.21 s; OCaml 0.34 s, C 0.74 s, Rust 4.70 s), the fifth smallest binary (71 KiB stripped; C 34, Swift 39), and 54 MiB at the peak (C 24).
+**The second run** (commit `1e4daa0`, with that fix, Xeon at 2.1 GHz): Myla 17th of 23, 15.44 s against C's 5.53 s (2.79 times), 0.01 s behind Node (a tie) and behind Swift (13.01 s).
 
-What it showed:
+| Workload | Myla | C | Rust | Swift | Myla's place | Myla by C, first run | second run |
+| --- | --: | --: | --: | --: | --: | --: | --: |
+| Primes | 1.06 s | 0.99 s | 1.00 s | 0.99 s | 13 | 1.67 | 1.07 |
+| Fibonacci | 4.04 s | 0.98 s | 1.72 s | 2.53 s | 19 | 4.87 | 4.13 |
+| Strings | 1.78 s | 0.72 s | 0.63 s | 2.14 s | 12 | 2.90 | 2.47 |
+| Mandelbrot | 0.90 s | 0.73 s | 0.69 s | 0.73 s | 19 | 1.25 | 1.24 |
+| Binary trees | 0.61 s | 1.21 s | 0.98 s | 2.31 s | 7 | 0.67 | 0.50 |
+| k-nucleotide | 7.05 s | 0.90 s | 1.07 s | 4.30 s | 19 | 8.32 | 7.85 |
 
-- **Primes** is bound by the divider, and most runtimes tie at 0.69 s. Myla's `int32` `%` is a 64-bit `idiv` (`cqto; idiv %rcx`), slower than the 32-bit one on this CPU, behind a check of the divisor for 0 and for -1; `n % 2` and `n % 3` are divisions too.
+Only the primes column is the fix's doing (and a little of strings, whose loop takes `it % cur.len()`); the other ratios moved with the host.
+
+Beside the times: the fastest compile of the 15 native builds (0.28 s; OCaml 0.38 s, C 0.88 s, Rust 6.20 s), the fifth smallest binary (71 KiB stripped; C 34, Swift 39), and 54 MiB at the peak (C 24).
+
+What is left:
+
+- **Primes**: the divisor is still tested for 0 and for -1 before each division, also in a loop where it is plainly positive, and `n % 2` and `n % 3` are divisions.
 - **Fibonacci** is one call per recursion; the GCC-based compilers unroll part of it.
-- **k-nucleotide** makes a new string for each `seq[i:i + k]`, where Rust and Swift hash a view of the sequence's bytes; with fib it is 69 % of Myla's total.
+- **k-nucleotide** makes a new string for each `seq[i:i + k]`, where Rust and Swift hash a view of the sequence's bytes; with fib it is 72 % of Myla's total.
 - **Binary trees** is ahead of every language that frees by hand or counts references, but Nim.
 
 ## How the first round went
