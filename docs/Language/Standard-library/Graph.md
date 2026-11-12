@@ -111,7 +111,7 @@ A goal is a predicate, not a node, so a search can stop at any node that qualifi
 
 ## Dense nodes
 
-`bfs` and `dijkstra` keep a map keyed by node, which costs a hash and a probe per edge. `bfs_dense` and `dijkstra_dense` take nodes numbered 0 to n - 1 and keep lists instead. On a grid, [[Language/Standard-library/Grid]]'s `index` and `pos` number the cells; a state such as a cell and a direction numbers as `index(p) * 4 + dir`.
+`bfs` and `dijkstra` keep a map keyed by node, which costs a hash and a probe per edge. `bfs_dense` and `dijkstra_dense` take nodes numbered 0 to n - 1 and keep lists instead. A `start` or a neighbour outside them is a failure that names it (`bfs_dense: node 2 has a neighbour 3, out of range for 3 nodes`), and so is a negative `n` (D184, [[MYLA-550]]); with no nodes the result is empty whatever the start. On a grid, [[Language/Standard-library/Grid]]'s `index` and `pos` number the cells; a state such as a cell and a direction numbers as `index(p) * 4 + dir`.
 
 ## Speed
 

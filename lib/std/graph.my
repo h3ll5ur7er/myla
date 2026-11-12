@@ -303,9 +303,31 @@ pub fun components<T: Eq + Hash>(nodes: [T], next: (T) -> [T]) -> [[T]] {
     return out
 }
 
+// A failure of the search `name` over `n` nodes from `start` if `n` is
+// negative or `start` isn't a node; with no nodes, any start is none.
+fun check_dense(name: str, n: int, start: int) {
+    if n < 0 {
+        panic(f"{name}: a negative number of nodes {n}")
+    }
+    if n > 0 && (start < 0 || start >= n) {
+        panic(f"{name}: start {start} is out of range for {n} nodes")
+    }
+}
+
+// The failure of the search `name` over `n` nodes whose node `u` has the
+// neighbour `v`, which isn't a node (checked where it is met: a call an
+// edge cost a third of `bfs_dense`'s time).
+fun bad_neighbour(name: str, n: int, u: int, v: int) {
+    panic(f"{name}: node {u} has a neighbour {v}, out of range for {n} nodes")
+}
+
 // `bfs` over the nodes 0 to `n` - 1: the number of edges of a shortest path
 // from `start` to each node, -1 for one it doesn't reach.
 pub fun bfs_dense(n: int, start: int, next: (int) -> [int]) -> [int] {
+    check_dense("bfs_dense", n, start)
+    if n == 0 {
+        return []
+    }
     var dist = list_m.filled(n, -1)
     dist[start] = 0
     var todo: Deque<int> = deque.new()
@@ -313,6 +335,9 @@ pub fun bfs_dense(n: int, start: int, next: (int) -> [int]) -> [int] {
     while let Some(u) = todo.pop_front() {
         let d = dist[u] + 1
         for v in next(u) {
+            if v < 0 || v >= n {
+                bad_neighbour("bfs_dense", n, u, v)
+            }
             if dist[v] < 0 {
                 dist[v] = d
                 todo.push_back(v)
@@ -325,6 +350,10 @@ pub fun bfs_dense(n: int, start: int, next: (int) -> [int]) -> [int] {
 // `dijkstra` over the nodes 0 to `n` - 1: the cost of a cheapest path from
 // `start` to each node, -1 for one it doesn't reach.
 pub fun dijkstra_dense(n: int, start: int, next: (int) -> [(int, int64)]) -> [int64] {
+    check_dense("dijkstra_dense", n, start)
+    if n == 0 {
+        return []
+    }
     var dist: [int64] = list_m.filled(n, -1)
     var best: [int64] = list_m.filled(n, -1)
     best[start] = 0
@@ -338,6 +367,9 @@ pub fun dijkstra_dense(n: int, start: int, next: (int) -> [(int, int64)]) -> [in
         dist[u] = d
         for edge in next(u) {
             let (v, w) = edge
+            if v < 0 || v >= n {
+                bad_neighbour("dijkstra_dense", n, u, v)
+            }
             let c = step_cost("dijkstra_dense", d, w)
             if best[v] < 0 || c < best[v] {
                 best[v] = c
@@ -609,6 +641,37 @@ fun negative_cycle(which: int) -> int {
         return dijkstra_dense(2, 0, next).len()
     }
     return 0
+}
+
+// A node outside 0 to `n` - 1 is a failure that names it, not a list's
+// index error (D184, MYLA-550).
+#test(0)[panic("bfs_dense: start 3 is out of range for 3 nodes")]
+#test(1)[panic("bfs_dense: start -1 is out of range for 3 nodes")]
+#test(2)[panic("bfs_dense: node 2 has a neighbour 3, out of range for 3 nodes")]
+#test(3)[panic("dijkstra_dense: start 3 is out of range for 3 nodes")]
+#test(4)[panic("dijkstra_dense: node 2 has a neighbour -1, out of range for 3 nodes")]
+#test(5)[panic("bfs_dense: a negative number of nodes -1")]
+#test(6)[panic("dijkstra_dense: a negative number of nodes -2")]
+#test(7)[0]
+fun dense_out_of_range(which: int) -> int {
+    let next = (u: int) => [u + 1]
+    let back = (u: int) => [(if u == 2 { -1 } else { u + 1 }, 1i64)]
+    if which == 0 {
+        return bfs_dense(3, 3, next).len()
+    } else if which == 1 {
+        return bfs_dense(3, -1, next).len()
+    } else if which == 2 {
+        return bfs_dense(3, 0, next).len()
+    } else if which == 3 {
+        return dijkstra_dense(3, 3, back).len()
+    } else if which == 4 {
+        return dijkstra_dense(3, 0, back).len()
+    } else if which == 5 {
+        return bfs_dense(-1, 0, next).len()
+    } else if which == 6 {
+        return dijkstra_dense(-2, 0, back).len()
+    }
+    return bfs_dense(0, 0, next).len() + dijkstra_dense(0, 0, back).len()
 }
 
 // A path whose cost is past int64's range is a failure, not a wrapped cost.

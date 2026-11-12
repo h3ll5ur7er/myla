@@ -52,7 +52,7 @@ fun main() {
 | `u.len() -> int` | The number of integers |
 | `u.sets() -> int` | The number of sets |
 
-Every method but `len` and `sets` needs a `var` place (see below). An integer outside 0 to `len() - 1` is a failure, as a list index out of bounds is.
+Every method but `len` and `sets` needs a `var` place (see below). An integer outside 0 to `len() - 1` is a failure that names the method and the integer, `unionfind.find: element 3 is out of range for 3 elements`, and `new` of a negative number is one too (D184, [[MYLA-550]]; they were a list's index error).
 
 ## How it works
 
