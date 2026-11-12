@@ -373,6 +373,48 @@ class SelfHostedParserParity(unittest.TestCase):
                 self.assertEqual(proc.stdout.count('(binary "<" (name "x") (name "y"))'), n, name)
                 self.assertLess(took, 5.0, name)
 
+    def test_type_arguments_have_no_budget_of_tokens(self) -> None:
+        # MYLA-545: the scan looked at 128 tokens, so a tuple of 63 types was
+        # a type argument and one of 64 a comparison (`generic function 'mk'
+        # cannot be used as a value`), and so was a type 43 deep
+        myla = selfhost_tool("main")
+        wide = "(" + ", ".join(["int"] * 200) + ")"
+        deep = "B<" * 60 + "int" + ">" * 60
+        with tempfile.TemporaryDirectory() as tmp:
+            for name, targ in (("wide", wide), ("deep", deep)):
+                path = os.path.join(tmp, name + ".my")
+                with open(path, "w", encoding="utf-8") as fh:
+                    fh.write("struct B<T> { v: [T] }\nfun mk<T>(n: int) -> int { return n }\n"
+                             f"fun main() {{\n    print(mk<{targ}>(1))\n}}\n")
+                proc = subprocess.run([myla, "run", path], capture_output=True, text=True, timeout=120)
+                self.assertEqual((proc.stdout, proc.stderr, proc.returncode), ("1\n", "", 0), name)
+
+    def test_a_long_chain_of_operators_is_a_parse_error(self) -> None:
+        # MYLA-545: `x < y && x < y && …` 16,000 long overflowed the
+        # checker's stack (its tree is as deep as the chain); 4,096 operators
+        # in a row are an expression, more a parse error at the one past
+        # (with `&&`, the `<` of the operand after the 4,096th)
+        myla = selfhost_tool("main")
+        with tempfile.TemporaryDirectory() as tmp:
+            for n, op in ((4097, "&&"), (16000, "&&"), (4097, "+"), (16000, "+")):
+                operand = "x < y" if op == "&&" else "x"
+                path = os.path.join(tmp, f"chain_{n}.my")
+                with open(path, "w", encoding="utf-8") as fh:
+                    fh.write("fun main() {\n    let x = 1\n    let y = 2\n    let t = "
+                             + f" {op}\n        ".join([operand] * n) + "\n    print(t)\n}\n")
+                ok = n <= 4097
+                for cmd in ("check", "run"):
+                    with self.subTest(n=n, op=op, cmd=cmd):
+                        proc = subprocess.run([myla, cmd, path], capture_output=True, text=True, timeout=300)
+                        if ok:
+                            want = "ok\n" if cmd == "check" else ("true\n" if op == "&&" else f"{n}\n")
+                            self.assertEqual((proc.stdout, proc.stderr), (want, ""))
+                        else:
+                            self.assertEqual(proc.returncode, 1)
+                            self.assertTrue(proc.stderr.startswith(
+                                "parse error: more than 4096 operators in a row: split the expression with a 'let'\n"
+                                f"  --> {path}:{4101 if op == '&&' else 4100}:"), proc.stderr[:300])
+
     def test_a_std_file_with_an_error_fails_the_comparison(self) -> None:
         # MYLA-416: `parse_main --lazy` tells a file that fails both ways
         # from one that reads, so that a broken library file isn't passed

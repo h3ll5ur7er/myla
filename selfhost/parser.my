@@ -40,6 +40,7 @@ pub struct Parser {
     skip_tests: bool,           // `#test` cases are skipped, not parsed (an implicit module's, MYLA-320)
     sites: [BodySite],          // the functions' bodies the lexer skipped, kept for later (MYLA-359)
     elems: bool,                // an element of a list, map or tuple literal is parsed: a comma ends it (D186)
+    chain: int32,               // operators in a row the operand being parsed is under, up to MAX_CHAIN (MYLA-545)
 }
 
 // A function's body the lexer skipped (`lex_lazy`, an implicit module's,
@@ -52,22 +53,24 @@ pub struct BodySite { line: int32, col: int32, start: int32, end: int32, first_i
 // Python parser's MAX_NESTING): past it, a parse error, not a stack overflow.
 const MAX_NESTING: int32 = 256
 
-// How many tokens the scan for explicit type arguments looks at (D186): a
-// type-argument list is shorter, and a run of comparisons, `f(x < y, x < y,
-// …)`, which the scan would otherwise follow to its end from every `<`,
-// is parsed in linear time.
-const TYPE_ARGS_BUDGET: int32 = 128
+// How many binary operators, casts, calls, indexes and fields may stand in
+// a row, `a + b + …`, `s.f().g()…`: each makes its left operand one level
+// deeper in the tree, which the checker and the rest walk recursively, so
+// past it a parse error, not a stack overflow (MYLA-545: 16,000 `&&`
+// overflowed the checker's stack, 12,000 didn't).
+const MAX_CHAIN: int32 = 4096
 
-#test([])[Parser { toks: [], pos: 0, allow_struct_lit: true, next_id: 0, errs: [], pending: None, resume: 0, unwinding: false, stopped: false, depth: 0, stmt_match: false, skip_tests: false, sites: [], elems: false }]
+
+#test([])[Parser { toks: [], pos: 0, allow_struct_lit: true, next_id: 0, errs: [], pending: None, resume: 0, unwinding: false, stopped: false, depth: 0, stmt_match: false, skip_tests: false, sites: [], elems: false, chain: 0 }]
 pub fun new_parser(toks: [Token]) -> Parser {
-    return Parser { toks: toks, pos: 0, allow_struct_lit: true, next_id: 0, errs: [], pending: None, resume: 0, unwinding: false, stopped: false, depth: 0, stmt_match: false, skip_tests: false, sites: [], elems: false }
+    return Parser { toks: toks, pos: 0, allow_struct_lit: true, next_id: 0, errs: [], pending: None, resume: 0, unwinding: false, stopped: false, depth: 0, stmt_match: false, skip_tests: false, sites: [], elems: false, chain: 0 }
 }
 
 // A parser at the first token of `src`, the receiver of `#test` cases of the
 // parser's methods (MYLA-184): one without tokens when `src` doesn't lex.
-#test("a")[Parser { toks: [Token { kind: TokenKind.IDENT, lexeme: "a", line: 1, column: 1, eline: 1, ecol: 2, ival: 0, suffix: "", big: "" }, Token { kind: TokenKind.EOF, lexeme: "", line: 1, column: 2, eline: 1, ecol: 2, ival: 0, suffix: "", big: "" }], pos: 0, allow_struct_lit: true, next_id: 0, errs: [], pending: None, resume: 0, unwinding: false, stopped: false, depth: 0, stmt_match: false, skip_tests: false, sites: [], elems: false }]
-#test("d2")[Parser { toks: [Token { kind: TokenKind.IDENT, lexeme: "d2", line: 1, column: 1, eline: 1, ecol: 3, ival: 0, suffix: "", big: "" }, Token { kind: TokenKind.EOF, lexeme: "", line: 1, column: 3, eline: 1, ecol: 3, ival: 0, suffix: "", big: "" }], pos: 0, allow_struct_lit: true, next_id: 0, errs: [], pending: None, resume: 0, unwinding: false, stopped: false, depth: 0, stmt_match: false, skip_tests: false, sites: [], elems: false }]
-#test("right")[Parser { toks: [Token { kind: TokenKind.IDENT, lexeme: "right", line: 1, column: 1, eline: 1, ecol: 6, ival: 0, suffix: "", big: "" }, Token { kind: TokenKind.EOF, lexeme: "", line: 1, column: 6, eline: 1, ecol: 6, ival: 0, suffix: "", big: "" }], pos: 0, allow_struct_lit: true, next_id: 0, errs: [], pending: None, resume: 0, unwinding: false, stopped: false, depth: 0, stmt_match: false, skip_tests: false, sites: [], elems: false }]
+#test("a")[Parser { toks: [Token { kind: TokenKind.IDENT, lexeme: "a", line: 1, column: 1, eline: 1, ecol: 2, ival: 0, suffix: "", big: "" }, Token { kind: TokenKind.EOF, lexeme: "", line: 1, column: 2, eline: 1, ecol: 2, ival: 0, suffix: "", big: "" }], pos: 0, allow_struct_lit: true, next_id: 0, errs: [], pending: None, resume: 0, unwinding: false, stopped: false, depth: 0, stmt_match: false, skip_tests: false, sites: [], elems: false, chain: 0 }]
+#test("d2")[Parser { toks: [Token { kind: TokenKind.IDENT, lexeme: "d2", line: 1, column: 1, eline: 1, ecol: 3, ival: 0, suffix: "", big: "" }, Token { kind: TokenKind.EOF, lexeme: "", line: 1, column: 3, eline: 1, ecol: 3, ival: 0, suffix: "", big: "" }], pos: 0, allow_struct_lit: true, next_id: 0, errs: [], pending: None, resume: 0, unwinding: false, stopped: false, depth: 0, stmt_match: false, skip_tests: false, sites: [], elems: false, chain: 0 }]
+#test("right")[Parser { toks: [Token { kind: TokenKind.IDENT, lexeme: "right", line: 1, column: 1, eline: 1, ecol: 6, ival: 0, suffix: "", big: "" }, Token { kind: TokenKind.EOF, lexeme: "", line: 1, column: 6, eline: 1, ecol: 6, ival: 0, suffix: "", big: "" }], pos: 0, allow_struct_lit: true, next_id: 0, errs: [], pending: None, resume: 0, unwinding: false, stopped: false, depth: 0, stmt_match: false, skip_tests: false, sites: [], elems: false, chain: 0 }]
 pub fun parser_on(src: str) -> Parser {
     return match lex(src) {
         Ok(toks) => new_parser(toks),
@@ -83,9 +86,27 @@ fun elems_parser_on(src: str) -> Parser {
     return p
 }
 
+// A parser at `<B<B<…<int>…>>(x)`, `n` deep, or at `<(int, int, …)>(x)`, a
+// tuple of `n`, for the cases of `type_args_then` (MYLA-545).
+fun type_args_parser_on(n: int32, deep: bool) -> Parser {
+    var text = "<"
+    var k = 0
+    while k < n {
+        text = text + if deep { "B<" } else if k == 0 { "(int" } else { ", int" }
+        k += 1
+    }
+    text = text + if deep { "int" } else { ")" }
+    k = 0
+    while deep && k < n {
+        text = text + ">"
+        k += 1
+    }
+    return parser_on(text + ">(x)")
+}
+
 // A parser at token `k` of `src` lexed as an implicit module's text is
 // (`lex_lazy`, MYLA-359), for the cases of `fun_body`.
-#test("", 0)[Parser { toks: [Token { kind: TokenKind.EOF, lexeme: "", line: 1, column: 1, eline: 1, ecol: 1, ival: 0, suffix: "", big: "" }], pos: 0, allow_struct_lit: true, next_id: 0, errs: [], pending: None, resume: 0, unwinding: false, stopped: false, depth: 0, stmt_match: false, skip_tests: false, sites: [], elems: false }]
+#test("", 0)[Parser { toks: [Token { kind: TokenKind.EOF, lexeme: "", line: 1, column: 1, eline: 1, ecol: 1, ival: 0, suffix: "", big: "" }], pos: 0, allow_struct_lit: true, next_id: 0, errs: [], pending: None, resume: 0, unwinding: false, stopped: false, depth: 0, stmt_match: false, skip_tests: false, sites: [], elems: false, chain: 0 }]
 fun lazy_parser_on(src: str, k: int32) -> Parser {
     var p = match lex_lazy(src) {
         Ok(r) => new_parser(r.0),
@@ -596,6 +617,17 @@ impl Parser {
     fun enter(var self, what: str) {
         self.depth = self.depth + 1
         if self.depth > MAX_NESTING { self.fail_at(self.peek(), format("{} nested too deeply", what)) }
+    }
+
+    // One more operator `op` in a row (`MAX_CHAIN`), counted once its right
+    // operand is read, which is under the ones before it; the loop that
+    // reads them gives its count back when it ends.
+    fun chained(var self, op: Token) {
+        self.chain += 1
+        if self.chain > MAX_CHAIN {
+            let what = if op.kind == TokenKind.LPAREN || op.kind == TokenKind.LBRACKET || op.kind == TokenKind.DOT || op.kind == TokenKind.QUESTION { "calls, indexes, fields and operators" } else { "operators" }
+            self.fail_at(op, format("more than {} {} in a row: split the expression with a 'let'", MAX_CHAIN, what))
+        }
     }
 
     fun fail_at(var self, tok: Token, msg: str) {
@@ -1863,100 +1895,124 @@ impl Parser {
     #test(parser_on("let x = 1"))[Expr { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 10 }, kind: ExprKind.Hole }]
     fun pipe(var self) -> Expr {
         let st = self.peek_pos()
+        let chain = self.chain
         var expr = self.logic_or()
         while self.check(TokenKind.PIPEGT) {
             let op = self.advance()
             let rhs = self.logic_or()
+            self.chained(op)
             let spliced = match rhs.kind {
                 ExprKind.Call(callee, args, targs) => ExprKind.Call(callee, cons_expr(expr, args), targs),
                 _ => ExprKind.Call(rhs, [expr], []),
             }
             expr = self.mk_expr_at(st, op.line, op.column, spliced)
         }
+        self.chain = chain
         return expr
     }
 
     #test(parser_on("let x = 1"))[Expr { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 10 }, kind: ExprKind.Hole }]
     fun logic_or(var self) -> Expr {
         let st = self.peek_pos()
+        let chain = self.chain
         var expr = self.logic_and()
         while self.check(TokenKind.OR) {
             let op = self.advance()
             let right = self.logic_and()
+            self.chained(op)
             expr = self.mk_expr_at(st, op.line, op.column, ExprKind.Binary(op.lexeme, expr, right))
         }
+        self.chain = chain
         return expr
     }
 
     #test(parser_on("let x = 1"))[Expr { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 10 }, kind: ExprKind.Hole }]
     fun logic_and(var self) -> Expr {
         let st = self.peek_pos()
+        let chain = self.chain
         var expr = self.equality()
         while self.check(TokenKind.AND) {
             let op = self.advance()
             let right = self.equality()
+            self.chained(op)
             expr = self.mk_expr_at(st, op.line, op.column, ExprKind.Binary(op.lexeme, expr, right))
         }
+        self.chain = chain
         return expr
     }
 
     #test(parser_on("let x = 1"))[Expr { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 10 }, kind: ExprKind.Hole }]
     fun equality(var self) -> Expr {
         let st = self.peek_pos()
+        let chain = self.chain
         var expr = self.comparison()
         while self.check(TokenKind.EQ) || self.check(TokenKind.NE) {
             let op = self.advance()
             let right = self.comparison()
+            self.chained(op)
             expr = self.mk_expr_at(st, op.line, op.column, ExprKind.Binary(op.lexeme, expr, right))
         }
+        self.chain = chain
         return expr
     }
 
     #test(parser_on("let x = 1"))[Expr { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 10 }, kind: ExprKind.Hole }]
     fun comparison(var self) -> Expr {
         let st = self.peek_pos()
+        let chain = self.chain
         var expr = self.bit_or()
         while (self.check(TokenKind.LT) || self.check(TokenKind.LE) || self.check(TokenKind.GT) || self.check(TokenKind.GE)) && self.compound_ahead() == "" {
             let op = self.advance()
             let right = self.bit_or()
+            self.chained(op)
             expr = self.mk_expr_at(st, op.line, op.column, ExprKind.Binary(op.lexeme, expr, right))
         }
+        self.chain = chain
         return expr
     }
 
     #test(parser_on("let x = 1"))[Expr { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 10 }, kind: ExprKind.Hole }]
     fun bit_or(var self) -> Expr {
         let st = self.peek_pos()
+        let chain = self.chain
         var expr = self.bit_xor()
         while self.check(TokenKind.PIPE) && self.compound_ahead() == "" {
             let op = self.advance()
             let right = self.bit_xor()
+            self.chained(op)
             expr = self.mk_expr_at(st, op.line, op.column, ExprKind.Binary(op.lexeme, expr, right))
         }
+        self.chain = chain
         return expr
     }
 
     #test(parser_on("let x = 1"))[Expr { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 10 }, kind: ExprKind.Hole }]
     fun bit_xor(var self) -> Expr {
         let st = self.peek_pos()
+        let chain = self.chain
         var expr = self.bit_and()
         while self.check(TokenKind.CARET) && self.compound_ahead() == "" {
             let op = self.advance()
             let right = self.bit_and()
+            self.chained(op)
             expr = self.mk_expr_at(st, op.line, op.column, ExprKind.Binary(op.lexeme, expr, right))
         }
+        self.chain = chain
         return expr
     }
 
     #test(parser_on("let x = 1"))[Expr { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 10 }, kind: ExprKind.Hole }]
     fun bit_and(var self) -> Expr {
         let st = self.peek_pos()
+        let chain = self.chain
         var expr = self.shift()
         while self.check(TokenKind.AMP) && self.compound_ahead() == "" {
             let op = self.advance()
             let right = self.shift()
+            self.chained(op)
             expr = self.mk_expr_at(st, op.line, op.column, ExprKind.Binary(op.lexeme, expr, right))
         }
+        self.chain = chain
         return expr
     }
 
@@ -1979,16 +2035,19 @@ impl Parser {
     #test(parser_on("let x = 1"))[Expr { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 10 }, kind: ExprKind.Hole }]
     fun shift(var self) -> Expr {
         let st = self.peek_pos()
+        let chain = self.chain
         var expr = self.term()
         while true {
             let op = self.adjacent_shift()
             if op == "" {
+                self.chain = chain
                 return expr
             }
             let a = self.peek()
             self.skip()
             self.skip()
             let right = self.term()
+            self.chained(a)
             expr = self.mk_expr_at(st, a.line, a.column, ExprKind.Binary(op, expr, right))
         }
         return expr
@@ -1997,36 +2056,45 @@ impl Parser {
     #test(parser_on("let x = 1"))[Expr { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 10 }, kind: ExprKind.Hole }]
     fun term(var self) -> Expr {
         let st = self.peek_pos()
+        let chain = self.chain
         var expr = self.factor()
         while (self.check(TokenKind.PLUS) || self.check(TokenKind.MINUS)) && self.compound_ahead() == "" {
             let op = self.advance()
             let right = self.factor()
+            self.chained(op)
             expr = self.mk_expr_at(st, op.line, op.column, ExprKind.Binary(op.lexeme, expr, right))
         }
+        self.chain = chain
         return expr
     }
 
     #test(parser_on("let x = 1"))[Expr { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 10 }, kind: ExprKind.Hole }]
     fun factor(var self) -> Expr {
         let st = self.peek_pos()
+        let chain = self.chain
         var expr = self.cast()
         while (self.check(TokenKind.STAR) || self.check(TokenKind.SLASH) || self.check(TokenKind.PERCENT)) && self.compound_ahead() == "" {
             let op = self.advance()
             let right = self.cast()
+            self.chained(op)
             expr = self.mk_expr_at(st, op.line, op.column, ExprKind.Binary(op.lexeme, expr, right))
         }
+        self.chain = chain
         return expr
     }
 
     #test(parser_on("let x = 1"))[Expr { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 10 }, kind: ExprKind.Hole }]
     fun cast(var self) -> Expr {
         let st = self.peek_pos()
+        let chain = self.chain
         var expr = self.unary()
         while self.check(TokenKind.AS) {
             let kw = self.advance()
             let target = self.parse_type()
+            self.chained(kw)
             expr = self.mk_expr_at(st, kw.line, kw.column, ExprKind.Cast(expr, target))
         }
+        self.chain = chain
         return expr
     }
 
@@ -2095,6 +2163,7 @@ impl Parser {
     #test(parser_on("let x = 1"))[Expr { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 10 }, kind: ExprKind.Hole }]
     fun postfix(var self) -> Expr {
         let st = self.peek_pos()
+        let chain = self.chain
         var expr = self.primary()
         while true {
             if self.check(TokenKind.LPAREN) {
@@ -2102,11 +2171,13 @@ impl Parser {
                 let args = self.call_args()
                 self.expect(TokenKind.RPAREN, "')'")
                 expr = self.mk_expr_at(st, lp.line, lp.column, ExprKind.Call(expr, args, []))
+                self.chained(lp)
             } else if self.check(TokenKind.LBRACKET) {
                 let lb = self.advance()
                 let index = self.index_or_slice(lb)
                 self.expect(TokenKind.RBRACKET, "']' to close index")
                 expr = self.mk_expr_at(st, lb.line, lb.column, ExprKind.Index(expr, index))
+                self.chained(lb)
             } else if self.check(TokenKind.DOT) {
                 let dot = self.advance()
                 if self.check(TokenKind.INT) {
@@ -2115,13 +2186,16 @@ impl Parser {
                         self.fail_at(idx_tok, "tuple index may not have a type suffix")
                     }
                     expr = self.mk_expr_at(st, dot.line, dot.column, ExprKind.TupleIndex(expr, idx_tok.ival))
+                    self.chained(dot)
                 } else {
                     let name = self.expect(TokenKind.IDENT, "field name or tuple index after '.'").lexeme
                     expr = self.mk_expr_at(st, dot.line, dot.column, ExprKind.GetField(expr, name))
+                    self.chained(dot)
                 }
             } else if self.check(TokenKind.QUESTION) {
                 let q = self.advance()
                 expr = self.mk_expr_at(st, q.line, q.column, ExprKind.Try(expr))
+                self.chained(q)
             } else if self.check(TokenKind.LT) && names_a_callee(expr) && self.toks[self.pos - 1].kind == TokenKind.IDENT {
                 // `f<T>(…)`, `m.f<T>(…)`, `x.m<T>(…)` (D169): kept when the
                 // type arguments close and a `(` follows, else a comparison
@@ -2131,6 +2205,7 @@ impl Parser {
                         let args = self.call_args()
                         self.expect(TokenKind.RPAREN, "')'")
                         expr = self.mk_expr_at(st, lp.line, lp.column, ExprKind.Call(expr, args, targs))
+                        self.chained(lp)
                     },
                     None => {
                         // `Box<int>.zero()`: a generic type's function is
@@ -2144,6 +2219,7 @@ impl Parser {
                 break
             }
         }
+        self.chain = chain
         return expr
     }
 
@@ -2179,11 +2255,17 @@ impl Parser {
 
     // Whether the tokens from the `<` here can be a type-argument list that
     // closes with a `>` right before a `(`: only tokens that a type has, the
-    // `<` and `>` balanced, no bracket closed that it didn't open, within
-    // `TYPE_ARGS_BUDGET` tokens. A comma between two holes of an f-string
-    // ends it, and one outside brackets in an element of a list, map or
-    // tuple literal: `[a < b, c > (d)]` is two comparisons, as in a call's
-    // argument list `f(a < b, c > (d))` is one generic call (D186).
+    // `<` and `>` balanced, no bracket closed that it didn't open, no `<`
+    // more than `MAX_NESTING` deep, as a type nested deeper doesn't parse.
+    // A comma between two holes of an f-string ends it, and one outside
+    // brackets in an element of a list, map or tuple literal: `[a < b, c >
+    // (d)]` is two comparisons, as in a call's argument list `f(a < b, c >
+    // (d))` is one generic call (D186). A run of comparisons, `f(x < y, x <
+    // y, …)`, is parsed in linear time all the same: of two scans that pass
+    // a token the earlier is deeper there, as it is still open at the later
+    // one's `<`, so at most `MAX_NESTING` scans pass a token. (The budget of
+    // 128 tokens it had was a cliff: a tuple of 63 types was a type
+    // argument, one of 64 a comparison, MYLA-545.)
     #test(parser_on("<int>(x)"))[true]
     #test(parser_on("<Box<[int]>>()"))[true]
     #test(parser_on("<(int) -> str, m.T>(f)"))[true]
@@ -2194,6 +2276,12 @@ impl Parser {
     #test(elems_parser_on("<(int) -> str, m.T>(f)"))[false]
     #test(elems_parser_on("<(int, str), [int: str]>(f)"))[false]
     #test(elems_parser_on("<(int, str)>(f)"))[true]
+    // as long or as deep as a type parses, no budget of tokens (MYLA-545)
+    #test(type_args_parser_on(64, false))[true]
+    #test(type_args_parser_on(1000, false))[true]
+    #test(type_args_parser_on(70, true))[true]
+    #test(type_args_parser_on(255, true))[true]
+    #test(type_args_parser_on(256, true))[false]
     fun type_args_ahead(self) -> bool {
         return self.type_args_then(TokenKind.LPAREN)
     }
@@ -2205,11 +2293,12 @@ impl Parser {
         var angles = 0
         var brackets = 0
         var k = self.pos
-        let end = if self.toks.len() - k > TYPE_ARGS_BUDGET { k + TYPE_ARGS_BUDGET } else { self.toks.len() }
+        let end = self.toks.len()
         while k < end {
             let kind = self.toks[k].kind
             if kind == TokenKind.LT {
                 angles += 1
+                if angles > MAX_NESTING { return false }
             } else if kind == TokenKind.GT {
                 angles -= 1
                 if angles == 0 { return brackets == 0 && k + 1 < self.toks.len() && self.toks[k + 1].kind == follow }
