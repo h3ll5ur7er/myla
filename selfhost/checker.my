@@ -9505,6 +9505,10 @@ fun derived_error_at(src: str) -> (int32, int32, str, bool) {
 #test("struct Cell<T> { get: T }\nimpl<T> Cell<T> { fun get(self, n: int) -> int { return -n } }\nfun main() { let c = Cell { get: 4 }\nlet y = c.get(5)\nlet z = c.get + 1 }")[[]]
 #test("struct Cell<T> { get: T }\nfun main() { let c = Cell { get: (x: int) => x + 1 }\nlet g = c.get\nlet y = c.get(5) + g(1) }")[[]]
 #test("struct Cell<T> { get: T }\nstruct W { c: Cell<(int) -> int> }\nimpl<T> Cell<T> { fun get(self, n: int) -> int { return -n } }\nfun f(w: W) -> int { return w.c.get(5) }")[["'get' is a method of 'Cell<(int32) -> int32>' and its field 'get' holds a function here: bind the field first: let g = w.c.get"]]
+// an actor's field isn't reachable from outside it, so its getter of the
+// field's name is no error there (MYLA-417's C1)
+#test("actor Cell<T> { value: T }\nimpl<T> Cell<T> { fun value(self) -> T { return self.value } }\nasync fun f() -> int { let c = Cell { value: (x: int) => x + 1 }\nlet g = await c.value()\nreturn g(5) }")[[]]
+#test("actor Cell<T> { value: T }\nimpl<T> Cell<T> { fun value(self) -> T { return self.value } }\nstruct H { c: Cell<(int) -> int> }\nasync fun f(h: H) -> int { let g = await h.c.value()\nreturn g(5) }")[[]]
 // `Tree.Leaf == t` types the variant by `t`, as `t == Tree.Leaf` does
 // (MYLA-379's follow-up)
 #test("#derive(Eq)\nenum Tree<T> { Leaf, Node(T) }\nfun f(t: Tree<int>) -> bool { return Tree.Leaf == t || Tree.Node(2) != t || t == Tree.Leaf }")[[]]
@@ -10713,9 +10717,12 @@ impl Checker {
     // can't share a method's name): which one the call means is unclear, so
     // it is an error, the field reached through a binding.
     fun field_shadowed(var self, e: Expr, target: Expr, recv_type: Type, field: str) -> Result<int32, CheckErr> {
+        // an actor's fields are its own methods' only, through `self`: from
+        // anywhere else the call can only mean the method (MYLA-417's C1)
+        let own = match target.kind { ExprKind.Name(n) => n == "self", _ => false }
         let nm = match recv_type {
             Type.TStruct(n, a) => if a.len() > 0 { n } else { "" },
-            Type.TActor(n, a) => if a.len() > 0 { n } else { "" },
+            Type.TActor(n, a) => if a.len() > 0 && own { n } else { "" },
             _ => "",
         }
         if nm == "" { return Ok(0) }
