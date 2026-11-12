@@ -1579,10 +1579,14 @@ fun request_text(r: Request, t: Target, keep: bool) -> Result<(str, str), HttpEr
     if chunk {
         h.set("Transfer-Encoding", "chunked")
         h.remove("Content-Length")
-    } else if r.body.len() > 0 || method_has_body(r.method) {
-        h.set("Content-Length", f"{r.body.len()}")
     } else {
-        h.remove("Content-Length")
+        // an empty `Transfer-Encoding` names no coding
+        h.remove("Transfer-Encoding")
+        if r.body.len() > 0 || method_has_body(r.method) {
+            h.set("Content-Length", f"{r.body.len()}")
+        } else {
+            h.remove("Content-Length")
+        }
     }
     var sb = StringBuilder()
     sb.append(r.method)
@@ -3504,6 +3508,8 @@ fun requests_formatted() {
     let twice = request("POST", "http://h/").with_header("Transfer-Encoding", "chunked").with_header("transfer-encoding", "chunked").with_body("abc").with_decompress(false)
     assert(formatted_request(twice) == "POST / HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n0\r\n\r\n", "chunked once")
     assert(formatted_request(request("POST", "http://h/").with_header("Transfer-Encoding", "gzip, chunked").with_body("abc")) == "error: unsupported: transfer coding gzip", "a coding it doesn't apply")
+    let no_coding = request("POST", "http://h/").with_header("Transfer-Encoding", "").with_body("abc").with_decompress(false)
+    assert(formatted_request(no_coding) == "POST / HTTP/1.1\r\nHost: h\r\nContent-Length: 3\r\n\r\nabc", "an empty coding")
     // and back: what is formatted parses to the same request
     match parse_request(formatted_request(post)) {
         Ok(back) => {
