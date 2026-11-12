@@ -430,6 +430,20 @@ class TestRepl(_Layout):
         self.assertIn("unknown name 'cuont'\n  --> <input>:1:1\n  |\n1 | cuont + 1\n  | ^^^^^\n"
                       "help: did you mean 'count'?\n", proc.stderr)
 
+    def test_a_uint64_is_echoed_unsigned(self):
+        # MYLA-546: a uint64 of 2^63 or more was echoed signed, alone and in
+        # a list, a tuple, a map, a struct's field and a variant's payload
+        proc = self.repl("struct P {\n    a: uint64,\n    b: int64,\n}\n"
+                         "enum E {\n    A(uint64),\n}\n"
+                         "let m: uint64 = 18446744073709551615\nm\n[m, 1]\n(m, -1i64)\n[m: [m]]\n"
+                         "P { a: m, b: -1 }\nE.A(m)\nSome(m)\n[Some((1u64, m))]\n")
+        self.assertNotIn("error", proc.stderr)
+        self.assertEqual((proc.stdout, proc.returncode),
+                         ("18446744073709551615\n[18446744073709551615, 1]\n(18446744073709551615, -1)\n"
+                          "[18446744073709551615: [18446744073709551615]]\n"
+                          "P { a: 18446744073709551615, b: -1 }\nE.A(18446744073709551615)\n"
+                          "Some(18446744073709551615)\n[Some((1, 18446744073709551615))]\n", 0))
+
     def test_exit_ends_the_session(self):
         proc = self.repl("from std.process import exit\nprint(1)\nexit(4)\nprint(2)\n")
         self.assertEqual((proc.stdout, proc.returncode), ("1\n", 4))

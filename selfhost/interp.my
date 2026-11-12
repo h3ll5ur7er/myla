@@ -6731,7 +6731,7 @@ pub fun typed_repr(ch: Checker, v: Value, t: Option<Type>) -> str {
 // none known.
 #test(checker_on("fun f() {}"), "Result", [Type.TStr, Type.TBool], "Err")[[Type.TBool]]
 #test(checker_on("enum E<T> { A(T, int) }"), "E", [Type.TStr], "A")[[Type.TStr, Type.TInt(32, true)]]
-fun payload_types(ch: Checker, en: str, args: [Type], vr: str) -> [Type] {
+pub fun payload_types(ch: Checker, en: str, args: [Type], vr: str) -> [Type] {
     if en == "Option" && args.len() == 1 { return [args[0]] }
     if en == "Result" && args.len() == 2 { return if vr == "Ok" { [args[0]] } else { [args[1]] } }
     return match ch.enum_variant_payload(en, args, vr) { Some(p) => p, None => [] }
