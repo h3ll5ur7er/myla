@@ -12,6 +12,54 @@ from tests.burn._native import (CAN_BUILD_NATIVE, SKIP_REASON, Program, build_an
                                 native_build, run_argv, run_file_both_now, selfhost_run, write_program)
 
 PROGRAMS = {
+    # MYLA-553, MYLA-580, MYLA-546: containers' iter(), ldexp, padding in bulk
+    "iter_ldexp_and_padding_in_bulk": r"""// MYLA-553, MYLA-580, MYLA-546: `iter()` on a BitSet, an Lru and a Grid;
+// `ldexp` past ±2100 in three steps; long paddings and repeats in bulk
+import std.bitset as bitset
+import std.cache as cache
+import std.grid as grid
+import std.iter as iter
+import std.math as math
+import std.num as num
+import std.fmt as fmt
+
+fun ends(s: str) -> str {
+    return f"{s.len()} {s[:4]}|{s[s.len() - 4:]}"
+}
+
+fun main() {
+    var b = bitset.fixed(300)
+    for i in [0, 63, 64, 199, 299] {
+        b.insert(i)
+    }
+    var seen = ""
+    for i in b.iter() {
+        seen = seen + f"{i},"
+    }
+    print(f"{seen} {b.iter() |> iter.map((x) => x + 1) |> iter.sum(0)}")
+    var c: cache.Lru<str, int> = cache.new(3)
+    for k in ["a", "b", "c", "d"] {
+        c.put(k, k.len())
+    }
+    c.get("b")
+    var order = ""
+    for (k, v) in c.iter() {
+        order = order + f"{k}{v} "
+    }
+    print(order)
+    let g = grid.new(3, 2, 'x')
+    print(g.iter() |> iter.count())
+    print(f"{math.ldexp(1.5, 2147483647)} {math.ldexp(-1.5, -2147483647 - 1)} {math.ldexp(4.9406564584124654e-324, 2097)} {math.ldexp(1.7976931348623157e308, -2098)}")
+    print(ends(fmt.fmt_text("xy", ">1000000")))
+    print(ends(fmt.pad("xy", "é^999999")))
+    print(ends(fmt.fmt_int(-5i64, 32, true, "01000000")))
+    print(ends(f"{255:#0100x}"))
+    print(ends(num.to_hex(255u64, 1000003)))
+    print(ends(num.to_binary(5u64, 4097)))
+    print(ends("abc".repeat(333333)))
+    print(ends("ab".pad_start(70000, 'ß')))
+}
+""",
     # MYLA-429: a map that removals leave with few keys shrinks
     "map_shrinks_on_remove": r"""// MYLA-429: a map that removals leave with few keys shrinks: its order, its
 // copies, a walk that removes, string, narrow and compound keys, values that
@@ -11410,6 +11458,8 @@ class TestCompilerParity(unittest.TestCase):
 # longer holds (a later decision changed its meaning) or there is none (a
 # program added or changed since): its output, pinned here.
 PINNED = {
+    # MYLA-553, MYLA-580, MYLA-546: new; native code gives the same
+    "iter_ldexp_and_padding_in_bulk": '0,63,64,199,299, 630\nb1 d1 c1 \n6\ninf -0 8.98846567431158e307 5e-324\n1000000     |  xy\n1999996 éé|éé\n1000000 -000|0005\n100 0x00|00ff\n1000003 0000|00ff\n4097 0000|0101\n999999 abca|cabc\n139998 ßß|ßab\n',
     # MYLA-496: new; native code gives the same, before the change and after
     "for_over_a_map_walks_its_slots": '3003 4504497\n0,1,2,3,4,5,6,7,8,9, 15\n0=0 2=4 4=16 6=36 8=64 100=0 101=1 102=2 103=3 104=4 105=5 106=6 107=7 108=8 109=9 \n1=1 3=3 4=4 6=6 7=7 2=20 9=90 5=50 \n4 9 -1\n12\nk3 k43 k83 k123 k163 \n415 0 16,0,\np1:1 p2:2 p4:4 p5:5 p0:9 \n2b 0c 1d \n250=true 252=true 253=false 254=true \n1a 2b 11a 12b \n0 415\n',
     # MYLA-429: new; native code gives the same, before the change and after

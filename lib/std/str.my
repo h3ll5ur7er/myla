@@ -758,8 +758,8 @@ fun count_is_what_replace_replaces() {
     }
 }
 
-// `repeat` past 16 copies appends a run of copies, up to 4,096 bytes, and
-// the rest of one (MYLA-546): each count about a run's size, texts that
+// `repeat` past 16 copies appends a run of copies, up to 4,096 bytes, then
+// part of one (MYLA-546): each count about a run's size, texts that
 // double into a run several times, once, or not at all.
 #test
 fun repeat_in_bulk() {
