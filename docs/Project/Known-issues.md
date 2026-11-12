@@ -11,6 +11,7 @@ Open bugs and gaps by component, each with a task that has its steps to reproduc
 - **Interpreter:** a written `eq` or `hash` of a generic type, called for a list's `==` or a map key, binds no type parameter, so an operation typed by `T` falls back to erasure ([[MYLA-436]]); a `uint64` map key of 2^63 or more is written signed in `map key … not found` ([[MYLA-440]]).
 - Maps never shrink: iteration over an emptied map costs its old size, 82 s for 20,000 keys taken oldest-first from a once-10^6 map ([[MYLA-429]]).
 - `--checked` 64-bit arithmetic is three to five times slower in hot loops, as a checked `*` divides to detect overflow ([[MYLA-430]]).
+- **Checker:** an impl's bound that names a generic trait (`I: Iterator<int>`) isn't checked where the impl is used ([[MYLA-538]]).
 - An import of std.io checks `io`, `fs` and `bytes` whole, as they import each other: 61.8 M instructions of a hello world's 101 M, as [[Project/Review-2026-11-10]] measured ([[MYLA-432]]).
 
 ## Backends and platforms
@@ -22,6 +23,7 @@ The targets are x86-64 and aarch64 Linux and wasm32 on WASI; macOS and Windows a
 - A non-reentrant actor method kind is still open ([[MYLA-274]]).
 - Natively, on 16 workers, armed timers make every loop top take `__timer_lock`: CPU-bound tasks about 15 % slower ([[MYLA-296]]).
 - A trait method can't be async, so there is no async `Read` or `Write` ([[MYLA-434]]).
+- The poller takes at most four events a wait ([[MYLA-531]]); a keep-alive request through std.http's lot costs about a tenth more than a worker waiting on its connection, on 4 workers ([[MYLA-530]]).
 
 ## Tooling in Myla
 

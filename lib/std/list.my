@@ -528,8 +528,11 @@ impl<T: Ord> [T] {
                         }
                         // A node from `end / 2` on has no child: compared
                         // so, `2 * r + 1` can't overflow past 2^30 elements
-                        // (MYLA-480, as in std.heap). Not a helper: a
-                        // method's instance doesn't inline one (MYLA-526).
+                        // (MYLA-480, as in std.heap). Not a helper: inlined
+                        // since MYLA-526, `first_child(r, end)` (-1 for none)
+                        // still took 6.1 % more instructions (`end / 2` each
+                        // step, the -1 tested again), `first_child(r, half)`
+                        // 2.9 %.
                         let half = end / 2
                         while true {
                             if r >= half { break }

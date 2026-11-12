@@ -1,0 +1,35 @@
+//~ type error: cannot derive Toml for enum 'Step': payload #1 of variant 'Many' has type '[W<T>]', which is FromToml only where 'T: Ord'
+//~ help: write both impls instead (a derive writes them together), this one as 'impl<T: toml.FromToml + Ord> toml.FromToml for Step<T>'
+// `#derive(Toml)` bounds `T` by `ToToml` and `FromToml` alone (MYLA-379);
+// `W<T>`'s written `FromToml` needs `T: Ord` too, so the derive is refused
+// at the enum, not in the impl it writes (MYLA-507).
+import std.toml as toml
+
+struct W<T> {
+    v: T,
+}
+
+impl<T: toml.ToToml> toml.ToToml for W<T> {
+    fun to_toml(self) -> toml.Toml {
+        return self.v.to_toml()
+    }
+}
+
+impl<T: toml.FromToml + Ord> toml.FromToml for W<T> {
+    fun from_toml(j: toml.Toml) -> Result<W<T>, toml.TomlError> {
+        return Ok(W { v: T.from_toml(j)? })
+    }
+}
+
+#derive(Toml)
+enum Step<T> {
+    Many(int, [W<T>]),
+    Done,
+}
+
+fun main() {
+    match toml.encode(Step.Many(1, [W { v: 1 }])) {
+        Ok(text) => print(text)
+        Err(e) => print(e)
+    }
+}

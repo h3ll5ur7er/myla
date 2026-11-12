@@ -4,6 +4,9 @@
 // A function whose lowered body is small, calls nothing, takes and gives
 // scalars only and owns nothing is copied into each of its callers in the
 // same module (so the source positions its traps report stay right): the
+// file that declares both, which the code generator's `inline_small` reads
+// from the declarations, not the names (a built-in type's method is named
+// after its type, not its module: MYLA-526). The
 // call's block ends with a store of each argument into a slot of its own (the
 // callee's parameter, a local of the caller now) and a jump into the copy,
 // each `ret` of the copy moves its value into the call's result and jumps to
@@ -153,34 +156,6 @@ pub fun inlinable(f: IrFunc) -> bool {
         }
     }
     return n <= MAX_INSTS
-}
-
-// Whether the functions named `a` and `b` are of one module (their names
-// alike up to the last `$`), without building either module's name.
-#test("std$rt$alloc", "std$rt$free")[true]
-#test("std$rt$alloc", "std$io$free")[false]
-#test("main", "helper")[true]
-#test("main", "std$rt$free")[false]
-pub fun same_module(a: str, b: str) -> bool {
-    var ia = a.len() - 1
-    while ia >= 0 && a[ia] != '$' {
-        ia -= 1
-    }
-    var ib = b.len() - 1
-    while ib >= 0 && b[ib] != '$' {
-        ib -= 1
-    }
-    if ia != ib {
-        return false
-    }
-    var k = 0
-    while k < ia {
-        if a[k] != b[k] {
-            return false
-        }
-        k += 1
-    }
-    return true
 }
 
 // A temporary of the callee as the caller's (-1, none, stays): the

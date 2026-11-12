@@ -1,0 +1,6 @@
+type error: cannot derive Eq for struct 'P': field 'w' has type 'W<T>', which is Eq only where 'T: Ord'
+  --> examples/errors/type_derive_generic_field_needs_bound.my:18:1
+   |
+18 | struct P<T> {
+   | ^^^^^^^^^^^^^
+help: write the impl instead: 'impl<T: Eq + Ord> Eq for P<T>'

@@ -1,0 +1,15 @@
+//~ type error: type 'json.JsonErrorKind' derives Eq in std.json: it can't have an explicit 'impl Eq for json.JsonErrorKind'
+// std.json derives `Eq` for its `JsonErrorKind`: a program's impl of it is
+// the error, at the program's impl, not in std.json, which the program
+// can't change (MYLA-507).
+import std.json as json
+
+impl Eq for json.JsonErrorKind {
+    fun eq(self, other: json.JsonErrorKind) -> bool {
+        return true
+    }
+}
+
+fun main() {
+    print(json.JsonErrorKind.Syntax == json.JsonErrorKind.Syntax)
+}
