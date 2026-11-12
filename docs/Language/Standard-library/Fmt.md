@@ -34,5 +34,6 @@ fun main() {
 | --- | --- |
 | `pad(text: str, spec: str) -> str` | `text` with the fill, alignment (left by default) and width of `spec`: `pad("x", "^5")` is `"  x  "`. A spec that isn't one is a runtime error. A gap of more than 16 characters, as a number's zeros, is filled in bulk by std.str's `repeat` ([[MYLA-546]]) |
 | `parse_spec(s: str) -> Result<Spec, str>` | The spec's parts (`fill`, `align`, `plus`, `alt`, `zero`, `width`, `prec`, `kind`), or why it isn't one |
+| `spec_error(s: str) -> str` | Why `s` isn't a spec, `""` when it is: what native code checks at `x.format(spec)` on a primitive `T: Format`, so a spec given at run time is reported at the call ([[MYLA-565]]) |
 | `spec_need(sp: Spec, class: int32) -> str` | What `sp` needs that a value of the class isn't (0 an integer, 1 a float, 2 text: `str`, `char`, `bool`), as the checker's message ends: `"needs a float"` for a precision on an integer; `""` when it fits |
 | `fmt_int(v: int64, bits: int32, signed: bool, spec: str) -> str`, `fmt_float(x: float64, text: str, spec: str) -> str`, `fmt_text(text: str, spec: str) -> str` | A hole's text, as a spec makes it (what the compiler calls) |

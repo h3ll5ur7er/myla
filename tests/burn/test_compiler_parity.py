@@ -11353,6 +11353,19 @@ class TestCompilerParity(unittest.TestCase):
                 self.assertTrue(interp[1].startswith(f"runtime error: {text}\n"), interp[1])
                 self.assertTrue(native[1].startswith(f"runtime error: {text}\n"), native[1])
 
+    def test_a_runtime_spec_is_reported_at_the_call(self):
+        # MYLA-565: at `x.format(spec)`, on every runner, not in std.fmt
+        for name, text in (("runtime_spec_of_an_int", "invalid format spec 'q'"),
+                           ("runtime_spec_of_a_float", "invalid format spec '9999999': a width above 1000000"),
+                           ("runtime_spec_of_text", "invalid format spec '.x'"),
+                           ("runtime_spec_with_std_fmt", "invalid format spec '<<<'")):
+            with self.subTest(program=name):
+                at = ":3:62\n" if name == "runtime_spec_with_std_fmt" else ":1:62\n"
+                for runner, (out, err, code) in zip(("interpreted", "native"), _both(RUNTIME_ERRORS[name])):
+                    self.assertTrue(err.startswith(f"runtime error: {text}\n"), (runner, err))
+                    self.assertTrue(err.splitlines(True)[1].endswith(at), (runner, err))
+                    self.assertNotIn("std/fmt.my", err, runner)
+
     def test_divide_by_zero_traps_nonzero(self):
         src = "#main\nfun main() {\n    var z = 0\n    print(1 / z)\n}\n"
         out, code = build_and_run(src)
@@ -11711,6 +11724,17 @@ RUNTIME_ERRORS = {
     "uint64_string_index": ('fun main() {\n    let s = "ab"\n    let i: [uint64] = [18446744073709551614]\n'
                             '    print(s[i[0]])\n}\n'),
     "error_after_stderr": 'from std.io import eprint\n\nfun main() {\n    eprint("before\\n")\n    panic("then")\n}\n',
+    # MYLA-565: a spec given at run time to `x.format(spec)` on a builtin
+    # `T: Format` is the caller's mistake, reported at the call (D183);
+    # natively it was inside std.fmt, interpreted too once std.fmt is loaded
+    "runtime_spec_of_an_int": ('fun show<T: Format>(x: T, spec: str) -> str { return x.format(spec) }\n'
+                               'fun main() {\n    print(show(5, ">4"))\n    print(show(5, "q"))\n}\n'),
+    "runtime_spec_of_a_float": ('fun show<T: Format>(x: T, spec: str) -> str { return x.format(spec) }\n'
+                                'fun main() {\n    print(show(2.5, ".1"))\n    print(show(2.5, "9999999"))\n}\n'),
+    "runtime_spec_of_text": ('fun show<T: Format>(x: T, spec: str) -> str { return x.format(spec) }\n'
+                             'fun main() {\n    print(show("ab", "^4"))\n    print(show(true, ".x"))\n}\n'),
+    "runtime_spec_with_std_fmt": ('import std.fmt as fmt\n\nfun show<T: Format>(x: T, spec: str) -> str { return x.format(spec) }\n'
+                                  'fun main() {\n    print(fmt.pad("a", ">2"))\n    print(show(\'c\', "<<<"))\n}\n'),
 }
 
 
