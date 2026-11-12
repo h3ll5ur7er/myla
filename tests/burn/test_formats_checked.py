@@ -287,11 +287,9 @@ class FormatsChecked(unittest.TestCase):
         got = {k: self.run_driver(b, docs) for k, b in builds.items()}
         if got["plain"] == got["checked"] and got["plain"][0] == 0:
             return {}
-        if len(docs) > 1:      # which documents: each on its own
-            bad = {}
-            for d in docs:
-                bad.update(self.failing(builds, [d]))
-            return bad
+        if len(docs) > 1:      # which documents: each half on its own
+            half = len(docs) // 2
+            return {**self.failing(builds, docs[:half]), **self.failing(builds, docs[half:])}
         return {docs[0]: "; ".join(f"{k}: exit {c}, {out[:120]!r} {err[:200]!r}" for k, (c, out, err) in got.items())}
 
     def check_format(self, name: str) -> None:

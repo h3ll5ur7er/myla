@@ -48,6 +48,10 @@ NEVER = [re.compile(p) for p in [
     rf"^bitset\.(new|of\(3\))\.(insert|toggle)\({_HUGE}\)$",
     rf"^(list\.filled|pad_start|pad_end|StringBuilder)\({_HUGE}\)$",
     r"^repeat\(1073741823\)$",
+    # whether 2,562,047 hours fit beside the monotonic clock's reading
+    # depends on the reading: natively for the machine's first 47 minutes
+    # up, on wasm32 under Node (whose clock starts elsewhere) later too
+    r"^now\.add\(time\.hours\(2562047i64\)\)$",
 ]]
 
 # Cases that take seconds or minutes interpreted: the suite runs them on the
