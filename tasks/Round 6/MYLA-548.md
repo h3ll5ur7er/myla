@@ -2,7 +2,7 @@
 id: MYLA-548
 title: "R6 The runtime: a line limit, the poller's creation, `Signals`, a failure beside a blocked read, raw mode and signals"
 type: bug
-status: todo
+status: in-progress
 priority: medium
 labels: [runtime, net, term, round-6]
 ---

@@ -43,21 +43,24 @@ fun main() {
 
 | Item | Meaning |
 | --- | --- |
-| `listen(a: SocketAddr) -> Result<TcpListener, IoError>` | Listening on `a` (port 0: one the system picks); the address is reused while old connections to it linger. `AddrInUse`, `AddrNotAvailable` |
+| `listen(a: SocketAddr) -> Result<TcpListener, IoError>` | Listening on `a` (port 0: one the system picks); the address is reused while old connections to it linger. `AddrInUse`, `AddrNotAvailable`. Up to 128 connections wait to be accepted |
+| `listen_with(a, backlog: int)` | `listen` with up to `backlog` connections waiting to be accepted ([[MYLA-548]]: past the queue a burst of connects is refused or reset); the system may take fewer (Linux: `net.core.somaxconn`, 4096 by default). A `backlog` below 1 is a runtime error (D184) |
 | `TcpListener`: `accept()`, `accept_async()` (async) | The next connection, a `TcpStream`; `set_timeout(ms)` bounds `accept`'s wait (`TimedOut`) |
-| `TcpListener`: `local_addr()`, `close()` | Its address; closed (a second close does nothing) |
+| `TcpListener`: `local_addr()`, `close()` | Its address; closed (a second close is `Other(9)`, as every operation through a closed handle is, D181, and as a `File`'s is; it did nothing before [[MYLA-548]]) |
 | `connect(a)`, `connect_timeout(a, ms)`, `connect_async(a)` (async) | A connection: `ConnectionRefused`, `HostUnreachable`, `NetworkUnreachable`, `TimedOut` |
 | `connect_host(host: str, port: int)` | `lookup(host)`'s addresses tried in turn |
-| `TcpStream` | A `Read` and a `Write` of `std.io` ([[Language/Standard-library/Io#streams]]): `copy` and `read_all` take it, and `buffered(s)` reads its lines outside tasks (in a task it blocks its worker: use `line_reader`). A read gives what one receive gives, `[]` at the end of the stream; a write sends every byte. A copy is the same connection, and `close` closes it for every copy |
+| `TcpStream` | A `Read` and a `Write` of `std.io` ([[Language/Standard-library/Io#streams]]): `copy` and `read_all` take it, and `buffered(s)` reads its lines outside tasks (in a task it blocks its worker: use `line_reader`). A read gives what one receive gives, `[]` at the end of the stream; a write sends every byte. A copy is the same connection, and `close` closes it for every copy; a second close, through it or a copy, is `Other(9)` |
 | `TcpStream`: `read_async(n)`, `write_async(b)` (async) | The read and the write, the task waiting; bytes, as `Read` and `Write` deal in (D177) |
 | `TcpStream`: `peer_addr()`, `local_addr()`, `shutdown(how)`, `set_nodelay(on)`, `set_read_timeout(ms)`, `set_write_timeout(ms)`, `close()` | `how` is `Shutdown.Read`, `Write` or `Both`; after `Write` the peer reads the end. A timeout (negative: none, the default) makes a blocking wait `TimedOut` |
-| `line_reader(s: TcpStream) -> LineReader` | Lines of text from `s` (D180) |
-| `LineReader`: `read_line_async()` (async), `read_line()` | The next line without its `"\n"` (a `"\r"` before it kept, as `io.Buffered.read_line` keeps it), a last line without one too; `None` at the end of the stream. The async form waits with the task suspended, as `read_async` does; a cancelled task gets `Cancelled`, the bytes read so far kept. Each byte is copied a bounded number of times, however long its line |
+| `line_reader(s: TcpStream) -> LineReader` | Lines of text from `s` (D180), of any length: a peer that never sends `"\n"` makes it hold all it sends, about three times its size (a 512 MiB line: 1.59 GB) |
+| `line_reader_with(s, max_line: int) -> LineReader` | Lines of at most `max_line` bytes, without their `"\n"` ([[MYLA-548]]): a longer one is `InvalidData` once more than `max_line` bytes of it are there, and so is every read after it, so the reader holds no more than about `max_line` and a read's 4 KiB (a peer sending 64 MiB without `"\n"` to a limit of 1 MiB: 5.9 MB, where `line_reader` peaked at 230 MB). A negative `max_line` is a runtime error (D184) |
+| `LineReader`: `read_line_async()` (async), `read_line()` | The next line without its `"\n"` (a `"\r"` before it kept, as `io.Buffered.read_line` keeps it), a last line without one too, which `cut_off()` then tells apart; `None` at the end of the stream. The async form waits with the task suspended, as `read_async` does; a cancelled task gets `Cancelled`, the bytes read so far kept. Each byte is copied a bounded number of times, however long its line |
+| `LineReader`: `cut_off()` | Whether the line given last ended at the end of the stream without a `"\n"`: a peer that closed in the middle of a line ([[MYLA-548]]) |
 | `LineReader`: `rest()` | The bytes read past the last line given (a body after a protocol's header lines), taken out of the reader |
 | `udp_bind(a) -> Result<UdpSocket, IoError>` | A UDP socket bound to `a` |
 | `UdpSocket`: `send_to(b, to)`, `send_str_to(s, to)` | One datagram: its length |
 | `UdpSocket`: `recv_from(n)`, `recv_str_from(n)`, `recv_from_async(n)`, `recv_str_from_async(n)` (async) | The next datagram, at most `n` bytes of it (the rest dropped), and its sender |
-| `UdpSocket`: `local_addr()`, `set_read_timeout(ms)`, `set_broadcast(on)`, `close()` | |
+| `UdpSocket`: `local_addr()`, `set_read_timeout(ms)`, `set_broadcast(on)`, `close()` | A second close is `Other(9)` |
 
 An async form waits with the task suspended and the other tasks running, on the reactor (D124): `accept_async`, a connect in progress, a read with nothing there yet, a write with the buffer full. Outside a task it blocks, as its twin does. A task asked to stop (`task.cancel`, `task.timeout`) stops waiting and gets `Cancelled`. A failure is an `IoError` ([[Language/Standard-library/Fs]]), whose network causes are `ConnectionRefused`, `ConnectionReset`, `ConnectionAborted`, `NotConnected`, `AddrInUse`, `AddrNotAvailable`, `TimedOut`, `HostUnreachable`, `NetworkUnreachable` and `InvalidData`; a peer that went away mid-write is `BrokenPipe` or `ConnectionReset`, an IPv6 the machine lacks `Unsupported`.
 

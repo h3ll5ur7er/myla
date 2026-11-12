@@ -15,7 +15,7 @@ Work package R7 of [[Project/Review-2026-11-12]]. Files: `lib/std/http.my`, `tes
 - [x] `format_request` writes two `Host` fields, or a `Content-Length` that disagrees with the body, when the caller set them (`hclient2.my`, `fmt.my`)
 - [x] The server ignores `Content-Length: zz` when `Transfer-Encoding: chunked` is present (200, connection closed)
 - [x] Body sizes are `int`: a `Content-Length` of 3000000000 is 413 and `BodyTooLarge` even with the limit at 2147483647. Document it, or count in `int64`
-- [ ] An older leak: a program that starts a server and a client 12,000 times grows 555 bytes a round on one worker (`manyserve3.my`). Not std.http's: every call of an actor's method from outside leaks 8 bytes natively, and a server makes one per worker when it stops (64 by default) and two per request with a limit. Filed as [[MYLA-576]] (the runtime's or the lowering's), left open here until it is fixed
+- [x] An older leak: a program that starts a server and a client 12,000 times grows 555 bytes a round on one worker (`manyserve3.my`). Not std.http's: every call of an actor's method from outside leaks 8 bytes natively, and a server makes one per worker when it stops (64 by default) and two per request with a limit. Filed as [[MYLA-576]] (the runtime's or the lowering's), left open here until it is fixed. Fixed there (a worker's ready queue walked along its 8 MiB ring): 568 kB at round 10 and 572 kB at round 11,999, where it was 7,224 kB
 
 ## What changed
 

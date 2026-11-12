@@ -83,8 +83,9 @@ pub fun backend_std_functions() -> [str] {
         "std$fmt$fmt_text", "std$fmt$fmt_int", "std$fmt$fmt_float", "std$fmt$spec_error",
         "std$slice$take", "std$slice$take_str", "std$slice$str_whole",
         "std$task$cancel",
-        // the wasm32 start and its memory (`runtime_wasm.my`)
-        "std$platform$wasm_start", "std$platform$map_memory",
+        // the wasm32 start and its memory (`runtime_wasm.my`); the handler
+        // of a signal while the terminal is raw (`codegen.my`, D192)
+        "std$platform$wasm_start", "std$platform$map_memory", "std$platform$raw_signal",
         // the runtime's (`lower.my`, `codegen.my`, `ir_*.my`, `runtime_*.my`)
         "std$rt$actor_enter", "std$rt$actor_leave", "std$rt$alloc", "std$rt$alloc_tasks", "std$rt$cancel_after",
         "std$rt$char_text", "std$rt$dclone_cell", "std$rt$dclone_env", "std$rt$dclone_str", "std$rt$deep_env",
@@ -8096,13 +8097,18 @@ impl Checker {
     }
 
     // The help for a struct or enum `t` that isn't std.json's or std.toml's
-    // trait `trnm`: the derive that gives it one.
+    // trait `trnm`: the derive that gives it one. A TCP stream isn't a
+    // descriptor `std.io` can wait for (`Pollable`): its lines in a task
+    // come from std.net's line reader (MYLA-548).
     #test(checker_on("struct P { x: int }"), Type.TStruct("P", []), "ToJson")[[]]
     fun json_help(self, t: Type, trnm: str) -> [Note] {
         let name = match t {
             Type.TStruct(n, a) => n,
             Type.TEnum(n, a) => n,
             _ => "",
+        }
+        if name == "std$net$TcpStream" && trnm == "std$io$Pollable" {
+            return [Note { label: "help", msg: "in a task, read a TCP stream's lines with 'net.line_reader(s)' and 'await r.read_line_async()' (D180)", line: 0, col: 0, sp: no_span() }]
         }
         for f in [json_serial(), toml_serial()] {
             match self.serial_prefix(f) {
