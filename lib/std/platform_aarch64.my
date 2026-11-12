@@ -1598,6 +1598,74 @@ pub fun signal_take(h: int64) -> int64 {
     return r
 }
 
+// --- raw mode and signals (D192) ---------------------------------------------------
+// While std.term holds the terminal raw, the signals that would end the
+// program by their default, SIGHUP, SIGINT, SIGQUIT and SIGTERM, run
+// `raw_signal` instead (`raw_signals`, from std.rt's `__term_raw`): it puts
+// the terminal's mode back, as the exit hook does (D187), and ends the
+// program as the signal would have. A signal ignored or caught (std.signal)
+// is left as it is. Installed with SA_RESETHAND and SA_NODEFER, the
+// default is back when the handler runs and the signal sent again isn't
+// held, so it ends the program at once. The handler allocates nothing and
+// reads only the exit hook's block (the runtime's `__exit_hook`: the
+// terminal's descriptor plus one, then the mode as a string's cell, its
+// bytes at 32); `__on_raw_signal` is its address (the code generator's
+// name for it, as for the executor's routines). A port does the same on
+// its console (Windows: a SetConsoleCtrlHandler routine that puts the mode
+// back and returns FALSE, so the next handler, the default, ends the
+// process).
+
+const SIGHUP: int64 = 1
+const SIGQUIT: int64 = 3
+
+// The handler of a signal that ends the program while the terminal is raw.
+pub fun raw_signal(sig: int64) {
+    let h = __rt_addr("__exit_hook")
+    let fd = __load64(h) - 1
+    if fd >= 0 {
+        __store64(h, 0)
+        __syscall(SYS_IOCTL, fd, TCSETS, h + 32)
+    }
+    __syscall(SYS_KILL, __syscall(SYS_GETPID, 0, 0, 0), sig, 0)
+}
+
+// `raw_signal` the handler, from now on, of each of the four signals whose
+// handler is the default (`on`), or the default again for each whose
+// handler it is (not `on`); under `signal_listen`'s lock.
+pub fun raw_signals(on: bool) {
+    let st = __rt_addr("__sig_pipe")
+    while __xchg64(st + 24, 1) != 0 {
+        __pause()
+    }
+    let raw = __rt_addr("__on_raw_signal")
+    let act = __alloc(64)
+    for sig in [SIGHUP, SIGINT, SIGQUIT, SIGTERM] {
+        __store64(act, 0)
+        __syscall5(SYS_RT_SIGACTION, sig, 0, act, 8, 0)
+        let now = __load64(act)
+        if on && now == 0 {
+            zero_act(act)
+            __store64(act, raw)
+            __store64(act + 8, 3489660928)  // SA_RESETHAND | SA_NODEFER | SA_RESTART (the kernel's trampoline)
+            __syscall5(SYS_RT_SIGACTION, sig, act, 0, 8, 0)
+        } else if !on && now == raw {
+            zero_act(act)
+            __syscall5(SYS_RT_SIGACTION, sig, act, 0, 8, 0)
+        }
+    }
+    __free(act)
+    __store_rel64(st + 24, 0)
+}
+
+// The 32 bytes of a `sigaction` at `act` zeroed: the default, no flags, no
+// signal held.
+fun zero_act(act: int64) {
+    __store64(act, 0)
+    __store64(act + 8, 0)
+    __store64(act + 16, 0)
+    __store64(act + 24, 0)
+}
+
 // --- memory --------------------------------------------------------------------
 
 // `n` bytes of fresh memory, zeroed, readable and writable (private,

@@ -83,8 +83,9 @@ pub fun backend_std_functions() -> [str] {
         "std$fmt$fmt_text", "std$fmt$fmt_int", "std$fmt$fmt_float",
         "std$slice$take", "std$slice$take_str", "std$slice$str_whole",
         "std$task$cancel",
-        // the wasm32 start and its memory (`runtime_wasm.my`)
-        "std$platform$wasm_start", "std$platform$map_memory",
+        // the wasm32 start and its memory (`runtime_wasm.my`); the handler
+        // of a signal while the terminal is raw (`codegen.my`, D192)
+        "std$platform$wasm_start", "std$platform$map_memory", "std$platform$raw_signal",
         // the runtime's (`lower.my`, `codegen.my`, `ir_*.my`, `runtime_*.my`)
         "std$rt$actor_enter", "std$rt$actor_leave", "std$rt$alloc", "std$rt$alloc_tasks", "std$rt$cancel_after",
         "std$rt$char_text", "std$rt$dclone_cell", "std$rt$dclone_env", "std$rt$dclone_str", "std$rt$deep_env",

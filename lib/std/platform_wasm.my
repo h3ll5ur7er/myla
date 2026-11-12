@@ -822,6 +822,16 @@ pub fun signal_take(h: int64) -> int64 {
     return ENOSYS
 }
 
+// --- raw mode and signals (D192) ---------------------------------------------------
+// WASI has neither: nothing to catch, nothing to put back.
+
+pub fun raw_signal(sig: int64) {
+}
+
+pub fun raw_signals(on: bool) {
+}
+
+
 // --- memory --------------------------------------------------------------------
 
 // `n` bytes of fresh, zeroed memory: the pages the linear memory grew by.
