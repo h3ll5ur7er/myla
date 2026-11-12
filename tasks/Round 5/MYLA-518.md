@@ -48,3 +48,5 @@ Lane D's programs (natively, 2 workers, a machine shared with three lanes): `wat
 Cost (lane D's benchmarks, interleaved with the base, 4 workers): 8 connections × 20,000 round trips (`read_async`/`write_async` both sides) 7.1 to 10.3 s before, 0.78 to 1.55 s after; one keep-alive client's 20,000 GETs 31,900 to 60,600 a second before, 41,000 to 52,400 after; four async clients 5,500 to 18,300 before, 7,400 to 40,500 after (noisy: a load of 2 to 5 from the other lanes).
 
 Suites: `tests.burn.test_net`, `test_process`, `test_time`, `test_concurrency_stress`, `test_scheduling`, `test_task_yield`, `test_timer_scaling`, `test_http` natively (60 tests OK, 2 skipped); `lib/std/task.my` 36/36, `net.my` 98/98, `io.my` 30/30, `process.my` 48/48 natively and on aarch64, `task.my` and `net.my` on wasm32; `lib/std/rt.my` 17/17.
+
+`scripts/test.sh fast` (with MYLA-468's commits on top): 860 tests, the one failure `test_embedded_std` (the embedded library behind `lib/` until the seed commit); `scripts/test.sh`: 1,537 tests, 341 skipped, the same one failure. Filed: [[MYLA-531]] (the poller takes four events a wait).
