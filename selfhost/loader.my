@@ -348,18 +348,22 @@ pub fun normalize(p: str) -> str {
 // Whether `path` is a file of the standard library at `root`: their raw
 // memory is the library's own (D152), so a check of one as the entry (`myla
 // test lib/std/rt.my`, an editor) allows it. Both relative to the working
-// directory when they aren't absolute.
+// directory when they aren't absolute; both made absolute when one is, or
+// climbs with a leading `..` (`option.my` under `..`, MYLA-545), which the
+// text alone can't compare.
 #test("lib/std/rt.my", "lib")[true]
 #test("./lib/std/rt.my", "lib/")[true]
 #test("lib2/std/rt.my", "lib")[false]
 #test("prog.my", "lib")[false]
+#test("../lib/std/rt.my", "../lib")[true]
+#test("../lib2/std/rt.my", "../lib")[false]
 pub fun in_stdlib(path: str, root: str) -> bool {
     if root == EMBEDDED_ROOT { return in_std_tree(path) }
     var p = normalize(path)
     var r = normalize(root)
     let pa = p.len() > 0 && p[0] == '/'
     let ra = r.len() > 0 && r[0] == '/'
-    if pa != ra {
+    if pa != ra || climbs(p) || climbs(r) {
         let here = match current_dir() {
             Ok(d) => d,
             Err(e) => { return false },
@@ -368,6 +372,16 @@ pub fun in_stdlib(path: str, root: str) -> bool {
         if !ra { r = normalize(here + "/" + r) }
     }
     return r != "." && p.len() > r.len() + 1 && starts_with_text(p, r + "/")
+}
+
+// Whether the normalized relative path `p` starts above the working
+// directory (`..`, `../x`): only `..` is left at its start by `normalize`.
+#test("..")[true]
+#test("../lib")[true]
+#test("..lib")[false]
+#test("lib/..x")[false]
+fun climbs(p: str) -> bool {
+    return p.len() >= 2 && p[0] == '.' && p[1] == '.' && (p.len() == 2 || p[2] == '/')
 }
 
 // Whether `path` is a module of the standard library rooted at `root`: a
