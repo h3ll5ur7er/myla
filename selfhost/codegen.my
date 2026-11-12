@@ -15,7 +15,7 @@ from .tokens import no_span
 from std.num import f64_literal_bits, f32_round_bits
 from std.fs import current_dir
 from .loader import Span
-from .checker import CheckErr, Checker, Type, is_builtin_value, is_raw_memory_primitive, is_platform_primitive, FuncSig, StructInfo, EnumInfo, FieldT, VariantT, Subst, subst_type, subst_get, opt_subst_type, CV, type_name, checker_on, ImplArgs, impl_trait_args
+from .checker import CheckErr, Checker, Type, is_builtin_value, is_raw_memory_primitive, is_platform_primitive, FuncSig, StructInfo, EnumInfo, FieldT, VariantT, Subst, subst_type, subst_get, opt_subst_type, CV, type_name, checker_on, ImplArgs, impl_trait_args, builtin_method
 from .checker import is_notify_primitive
 from .ir import render_func, verify, moves, IrFunc, Inst
 from .ssa import SsaStats, no_ssa_stats
@@ -1525,6 +1525,25 @@ impl CodeGen {
         }
     }
 
+    // Whether the method call `recv.m(…)` may write the variable `recv` is
+    // read from (`may_write_expr`): a method that takes `var self`, a builtin
+    // that changes its receiver (`push`, `pop`, `remove`, `append`, …), or a
+    // method this program has no declaration of; not a method taking `self`
+    // (MYLA-542), nor `len`, `contains`, `keys`, `chars` or `build`.
+    #test(codegen_on("[int]"), expr_of("xs"), "push")[true]
+    fun method_may_write(self, recv: Expr, m: str) -> bool {
+        let rt = self.type_of(recv.id)
+        match self.func_ix.get(format("{}.{}", self.type_key(rt), m)) {
+            Some(i) => {
+                if !self.funcs[i].has_decl { return true }
+                return match self.funcs[i].decl.receiver { Some(r) => r == "var self", None => true }
+            },
+            None => {},
+        }
+        if builtin_method(rt, m) { return is_mutating_builtin(m) }
+        return true
+    }
+
     #test(codegen_on("[int]"), Type.TStr)[false]
     fun is_boxed(self, t: Type) -> bool {
         return match t {
@@ -1579,21 +1598,25 @@ impl CodeGen {
             Type.TAsync(f) => { return true },
             Type.TActor(n, a) => { return true },
             Type.TStruct(n, a) => {
-                if list_has_str(seen, n) { return false }
+                let tok = mono_token(t)
+                if list_has_str(seen, tok) { return false }
                 let info = self.struct_info(n)
                 let sub = self.type_subst(info.type_params, a)
                 for f in info.fields {
-                    if self.owns_heap_seen(subst_type(f.ty, sub), push_str_copy(seen, n)) { return true }
+                    if self.owns_heap_seen(subst_type(f.ty, sub), push_str_copy(seen, tok)) { return true }
                 }
                 return false
             },
             Type.TEnum(n, a) => {
-                if list_has_str(seen, n) { return false }
+                // (seen by the whole type: `Option<Option<Tree>>` holds an
+                // `Option` that owns a box, C10)
+                let tok = mono_token(t)
+                if list_has_str(seen, tok) { return false }
                 let info = self.enum_info(n)
                 let sub = self.type_subst(info.type_params, a)
                 for v in info.variants {
                     for ft in v.payload {
-                        if self.owns_heap_seen(subst_type(ft, sub), push_str_copy(seen, n)) { return true }
+                        if self.owns_heap_seen(subst_type(ft, sub), push_str_copy(seen, tok)) { return true }
                     }
                 }
                 return false
@@ -4124,100 +4147,100 @@ pub fun is_mutating_builtin(n: str) -> bool {
 
 // Whether running an arm (guard and body) may write to variable `name`,
 // conservatively: an assignment to or into it, a mutating builtin on it, or a
-// method call on it (the method may take `var self`). Myla has no references
-// and closures capture by value, so nothing else can.
-#test([], "a")[false]
-#test([], "x")[false]
-#test([], "y")[false]
-pub fun arms_may_write(arms: [MatchArm], name: str) -> bool {
+// method call on it that takes `var self` (`CodeGen.method_may_write`). Myla
+// has no references and closures capture by value, so nothing else can.
+#test(codegen_on("[int]"), [], "a")[false]
+#test(codegen_on("[int]"), [], "x")[false]
+#test(codegen_on("[int]"), [], "y")[false]
+pub fun arms_may_write(cg: CodeGen, arms: [MatchArm], name: str) -> bool {
     for arm in arms {
-        match arm.guard { Some(g) => { if may_write_expr(g, name) { return true } }, None => {} }
-        if may_write_body(arm.body, name) { return true }
+        match arm.guard { Some(g) => { if may_write_expr(cg, g, name) { return true } }, None => {} }
+        if may_write_body(cg, arm.body, name) { return true }
     }
     return false
 }
 
-fun may_write_body(b: ExprOrBlock, name: str) -> bool {
+fun may_write_body(cg: CodeGen, b: ExprOrBlock, name: str) -> bool {
     return match b {
-        ExprOrBlock.EB_Expr(e) => may_write_expr(e, name),
-        ExprOrBlock.EB_Block(blk) => may_write_block(blk, name),
+        ExprOrBlock.EB_Expr(e) => may_write_expr(cg, e, name),
+        ExprOrBlock.EB_Block(blk) => may_write_block(cg, blk, name),
     }
 }
 
-#test(block_of("{ }"), "a")[false]
-fun may_write_block(b: Block, name: str) -> bool {
-    for st in b.stmts { if may_write_stmt(st, name) { return true } }
+#test(codegen_on("[int]"), block_of("{ }"), "a")[false]
+fun may_write_block(cg: CodeGen, b: Block, name: str) -> bool {
+    for st in b.stmts { if may_write_stmt(cg, st, name) { return true } }
     return false
 }
 
-#test(None, "let")[false]
-fun may_write_opt(oe: Option<Expr>, name: str) -> bool {
-    return match oe { Some(e) => may_write_expr(e, name), None => false }
+#test(codegen_on("[int]"), None, "let")[false]
+fun may_write_opt(cg: CodeGen, oe: Option<Expr>, name: str) -> bool {
+    return match oe { Some(e) => may_write_expr(cg, e, name), None => false }
 }
 
-#test([], "let")[false]
-fun may_write_exprs(es: [Expr], name: str) -> bool {
-    for e in es { if may_write_expr(e, name) { return true } }
+#test(codegen_on("[int]"), [], "let")[false]
+fun may_write_exprs(cg: CodeGen, es: [Expr], name: str) -> bool {
+    for e in es { if may_write_expr(cg, e, name) { return true } }
     return false
 }
 
-#test(stmt_of("print(1)"), "a")[false]
-fun may_write_stmt(st: Stmt, name: str) -> bool {
+#test(codegen_on("[int]"), stmt_of("print(1)"), "a")[false]
+fun may_write_stmt(cg: CodeGen, st: Stmt, name: str) -> bool {
     match st.kind {
-        StmtKind.VarDecl(k, n, ty, init) => { return may_write_expr(init, name) },
-        StmtKind.DestructDecl(k, bs, ty, init) => { return may_write_expr(init, name) },
+        StmtKind.VarDecl(k, n, ty, init) => { return may_write_expr(cg, init, name) },
+        StmtKind.DestructDecl(k, bs, ty, init) => { return may_write_expr(cg, init, name) },
         StmtKind.Assign(target, value) => {
-            return place_root(target) == name || may_write_expr(target, name) || may_write_expr(value, name)
+            return place_root(target) == name || may_write_expr(cg, target, name) || may_write_expr(cg, value, name)
         },
         StmtKind.IfS(c, then, otherwise) => {
-            if may_write_expr(c, name) || may_write_block(then, name) { return true }
+            if may_write_expr(cg, c, name) || may_write_block(cg, then, name) { return true }
             return match otherwise {
-                Some(ElseTail.ElseBlock(b)) => may_write_block(b, name),
-                Some(ElseTail.ElseIf(s)) => may_write_stmt(s, name),
+                Some(ElseTail.ElseBlock(b)) => may_write_block(cg, b, name),
+                Some(ElseTail.ElseIf(s)) => may_write_stmt(cg, s, name),
                 _ => false,
             }
         },
-        StmtKind.WhileS(c, body) => { return may_write_expr(c, name) || may_write_block(body, name) },
+        StmtKind.WhileS(c, body) => { return may_write_expr(cg, c, name) || may_write_block(cg, body, name) },
         StmtKind.ForS(v, start, end, body, iter) => {
-            return may_write_opt(start, name) || may_write_opt(end, name) || may_write_opt(iter, name) || may_write_block(body, name)
+            return may_write_opt(cg, start, name) || may_write_opt(cg, end, name) || may_write_opt(cg, iter, name) || may_write_block(cg, body, name)
         },
-        StmtKind.ReturnS(ov, tail) => { return may_write_opt(ov, name) },
-        StmtKind.ExprStmt(e) => { return may_write_expr(e, name) },
-        StmtKind.DeferS(body) => { return may_write_block(body, name) },
+        StmtKind.ReturnS(ov, tail) => { return may_write_opt(cg, ov, name) },
+        StmtKind.ExprStmt(e) => { return may_write_expr(cg, e, name) },
+        StmtKind.DeferS(body) => { return may_write_block(cg, body, name) },
         _ => {},
     }
     return false
 }
 
-#test(expr_of("-n * 2"), "r")[false]
-pub fun may_write_expr(e: Expr, name: str) -> bool {
+#test(codegen_on("[int]"), expr_of("-n * 2"), "r")[false]
+pub fun may_write_expr(cg: CodeGen, e: Expr, name: str) -> bool {
     match e.kind {
-        ExprKind.Unary(op, x) => { return may_write_expr(x, name) },
-        ExprKind.Await(x) => { return may_write_expr(x, name) },
-        ExprKind.Binary(op, l, r) => { return may_write_expr(l, name) || may_write_expr(r, name) },
+        ExprKind.Unary(op, x) => { return may_write_expr(cg, x, name) },
+        ExprKind.Await(x) => { return may_write_expr(cg, x, name) },
+        ExprKind.Binary(op, l, r) => { return may_write_expr(cg, l, name) || may_write_expr(cg, r, name) },
         ExprKind.Call(c, args, _) => {
             let writes = match c.kind {
-                ExprKind.GetField(recv, m) => place_root(recv) == name,
+                ExprKind.GetField(recv, m) => place_root(recv) == name && cg.method_may_write(recv, m),
                 ExprKind.Name(f) => is_mutating_builtin(f) && args.len() > 0 && place_root(args[0]) == name,
                 _ => false,
             }
-            return writes || may_write_expr(c, name) || may_write_exprs(args, name)
+            return writes || may_write_expr(cg, c, name) || may_write_exprs(cg, args, name)
         },
-        ExprKind.GetField(t, f) => { return may_write_expr(t, name) },
+        ExprKind.GetField(t, f) => { return may_write_expr(cg, t, name) },
         ExprKind.StructLit(n, fields) => {
-            for fi in fields { if may_write_expr(fi.value, name) { return true } }
+            for fi in fields { if may_write_expr(cg, fi.value, name) { return true } }
         },
-        ExprKind.TupleLit(es) => { return may_write_exprs(es, name) },
-        ExprKind.TupleIndex(t, i) => { return may_write_expr(t, name) },
-        ExprKind.ListLit(es) => { return may_write_exprs(es, name) },
+        ExprKind.TupleLit(es) => { return may_write_exprs(cg, es, name) },
+        ExprKind.TupleIndex(t, i) => { return may_write_expr(cg, t, name) },
+        ExprKind.ListLit(es) => { return may_write_exprs(cg, es, name) },
         ExprKind.MapLit(entries) => {
-            for en in entries { if may_write_expr(en.key, name) || may_write_expr(en.value, name) { return true } }
+            for en in entries { if may_write_expr(cg, en.key, name) || may_write_expr(cg, en.value, name) { return true } }
         },
-        ExprKind.Index(t, i) => { return may_write_expr(t, name) || may_write_expr(i, name) },
-        ExprKind.MatchE(s, arms) => { return may_write_expr(s, name) || arms_may_write(arms, name) },
-        ExprKind.Try(x) => { return may_write_expr(x, name) },
-        ExprKind.Cast(x, ty) => { return may_write_expr(x, name) },
-        ExprKind.Lambda(ps, rt, body, asy) => { return may_write_body(body, name) },
+        ExprKind.Index(t, i) => { return may_write_expr(cg, t, name) || may_write_expr(cg, i, name) },
+        ExprKind.MatchE(s, arms) => { return may_write_expr(cg, s, name) || arms_may_write(cg, arms, name) },
+        ExprKind.Try(x) => { return may_write_expr(cg, x, name) },
+        ExprKind.Cast(x, ty) => { return may_write_expr(cg, x, name) },
+        ExprKind.Lambda(ps, rt, body, asy) => { return may_write_body(cg, body, name) },
         _ => {},
     }
     return false

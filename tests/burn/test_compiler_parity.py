@@ -9,7 +9,7 @@ import unittest
 from tests.burn._targets import program_excuse
 from tests.burn._tools import selfhost_tool
 from tests.burn._native import (CAN_BUILD_NATIVE, SKIP_REASON, Program, build_and_run, build_and_run_full, interpret,
-                                run_file_both_now, selfhost_run, write_program)
+                                native_build, run_argv, run_file_both_now, selfhost_run, write_program)
 
 PROGRAMS = {
     # MYLA-429: a map that removals leave with few keys shrinks
@@ -9195,6 +9195,453 @@ async fun main() {
     print(count(l))
 }
 """,
+    "closures_capturing_recursive_enums_across_tasks": r"""// B1 (MYLA-415): a closure held in a variable that captures a recursive
+// enum crosses to a child task, an actor or a channel as a deep copy: its
+// environment holds the enum inline (its cell's contents), not as a box.
+// Also a partial, a struct holding the closure, nested closures, a list of
+// them to `task.all`, and a channel.
+import std.task as task
+
+enum Lst { Nil, Cons(int, Lst) }
+enum T { Leaf, Bin(T, int, T) }
+
+fun total(l: Lst) -> int {
+    return match l {
+        Cons(n, rest) => n + total(rest)
+        Nil => 0
+    }
+}
+
+fun size(t: T) -> int { return match t { Leaf => 0, Bin(l, _, r) => size(l) + 1 + size(r) } }
+
+fun add(l: Lst, k: int) -> int { return total(l) + k }
+
+struct Holder { name: str, f: () -> int }
+
+async fun run(f: () -> int) -> int { return f() }
+async fun run_held(h: Holder) -> int { return h.f() + h.name.len() }
+async fun run_partial(g: (int) -> int) -> int { return g(10) }
+async fun maker(n: int) -> () -> int {
+    var l = Lst.Nil
+    for i in 0..n { l = Lst.Cons(i, l) }
+    return () => total(l)
+}
+
+actor Keep { f: () -> int }
+impl Keep {
+    fun put(var self, f: () -> int) { self.f = f }
+    fun call(self) -> int { return self.f() }
+}
+
+#main
+async fun main() {
+    let cap = Lst.Cons(1, Lst.Cons(2, Lst.Nil))
+    let tr = T.Bin(T.Bin(T.Leaf, 1, T.Leaf), 2, T.Leaf)
+    let f = () => total(cap)
+    async let a = run(f)
+    print(await a)
+    // two recursive enums and a string beside them
+    let label = "tree"
+    let g = () => total(cap) * 100 + size(tr) * 10 + label.len()
+    async let b = run(g)
+    print(await b)
+    // a partial
+    let p = add(cap, _)
+    async let c = run_partial(p)
+    print(await c)
+    // a struct holding the closure
+    let h = Holder { name: "held", f: f }
+    async let d = run_held(h)
+    print(await d)
+    // nested closures
+    let outer = () => f() + g()
+    async let e = run(outer)
+    print(await e)
+    // a list of them to task.all
+    let jobs: [async () -> int] = [async () => f(), async () => g()]
+    let rs = await task.all(jobs)
+    print(rs[0] + rs[1])
+    // an actor keeps it
+    let k = Keep { f: () => 0 }
+    await k.put(f)
+    print(await k.call())
+    // through a channel
+    let ch: task.Channel<() -> int> = task.channel(2)
+    let s1 = await ch.send(f)
+    let s2 = await ch.send(g)
+    match await ch.recv() {
+        Some(x) => print(x())
+        None => print("none")
+    }
+    match await ch.recv() {
+        Some(x) => print(x())
+        None => print("none")
+    }
+    // a child's closure, which its siblings and the parent share (a clone)
+    async let m = maker(5)
+    async let s3 = run(await m)
+    async let s4 = run(await m)
+    let mine = await m
+    print(await s3 + await s4 + mine())
+    // the parent's copies are still whole
+    print(f() + g() + p(1) + total(cap) + size(tr))
+}
+""",
+    "operands_kept_when_a_later_operand_writes_their_variable": r"""// B2 (MYLA-543): an operator's left operand, read from a variable's
+// container, kept while the right one replaces that container (a `var self`
+// method); a compound assignment's old value too. Native code read freed
+// cells (`s121!`, `out of memory`)
+struct P { x: int, s: str }
+
+#derive(Eq)
+struct Q { name: str, n: int }
+
+impl Add for P {
+    fun add(self, other: P) -> P { return P { x: self.x + other.x, s: self.s + other.s } }
+}
+
+struct H {
+    xs: [str], m: [int: str], g: [[str]], ps: [P], qs: [Q], name: str,
+    t: [(str, int)], fs: [(int) -> str], n: int,
+}
+
+fun mk(n: int) -> str { return f"s{n}" }
+
+fun fresh() -> H {
+    return H {
+        xs: [mk(10), mk(11), mk(12)], m: [0: mk(20), 1: mk(21)], g: [[mk(30), mk(31)], [mk(32), mk(33)]],
+        ps: [P { x: 1, s: mk(40) }], qs: [Q { name: mk(41), n: 1 }], name: mk(50), t: [(mk(60), 6)],
+        fs: [(i: int) => mk(70 + i), (i: int) => mk(80 + i)], n: 0,
+    }
+}
+
+impl H {
+    // every container of `self` replaced: what was read from them released
+    fun repl(var self) {
+        self.xs = [mk(110), mk(111), mk(112)]
+        self.m = [0: mk(120), 1: mk(121)]
+        self.g = [[mk(130), mk(131)], [mk(132), mk(133)]]
+        self.ps = [P { x: 9, s: mk(140) }]
+        self.qs = [Q { name: mk(141), n: 9 }]
+        self.name = mk(150)
+        self.t = [(mk(160), 16)]
+        self.fs = [(i: int) => mk(170 + i), (i: int) => mk(180 + i)]
+        self.n += 1
+    }
+    fun s(var self) -> str { self.repl(); return "!" }
+    fun k(var self) -> int { self.repl(); return 1 }
+    fun l(var self) -> [str] { self.repl(); return [mk(10), mk(11), mk(12)] }
+    fun p(var self) -> P { self.repl(); return P { x: 2, s: "p" } }
+    fun q(var self) -> Q { self.repl(); return Q { name: mk(41), n: 1 } }
+    fun tu(var self) -> (str, int) { self.repl(); return (mk(60), 6) }
+    fun shrink(var self) -> str {
+        self.m.remove(1)
+        self.xs.truncate(1)
+        return "v"
+    }
+}
+
+fun shl(xs: [str]) -> str {
+    var sb = StringBuilder()
+    for x in xs { sb.append(x + ",") }
+    return sb.build()
+}
+
+fun main() {
+    // operators
+    var h = fresh()
+    print(h.xs[0] + h.s())
+    h = fresh()
+    print(h.name + h.s())
+    h = fresh()
+    print(h.g[0][0] + (h.xs[1] + h.s()))
+    h = fresh()
+    print(h.m[0] + h.s())
+    h = fresh()
+    print(f"{h.xs[0] == h.s()} {h.xs[0] < h.s()}")
+    h = fresh()
+    print(f"{h.xs == h.l()}")
+    h = fresh()
+    print(f"{h.t[0] == h.tu()}")
+    h = fresh()
+    print(f"{h.qs[0] == h.q()}")
+    h = fresh()
+    let sum = h.ps[0] + h.p()
+    print(f"{sum.x} {sum.s}")
+    h = fresh()
+    print(h.xs[0] + (if h.k() > 0 { "T" } else { "F" }))
+    // compound assignments
+    h = fresh()
+    h.xs[0] += h.s()
+    print(shl(h.xs))
+    h = fresh()
+    h.m[1] += h.shrink()
+    print(f"{h.m[1]} {h.m.len()} {shl(h.xs)}")
+}
+""",
+    "bases_kept_when_their_index_writes_their_variable": r"""// B2 (MYLA-543): an index's or a slice's base kept while the index replaces
+// the container it is read from; and a function value called from a list.
+// Native code read freed cells (`list index 1 out of bounds (len 0)`)
+struct P { x: int, s: str }
+
+#derive(Eq)
+struct Q { name: str, n: int }
+
+impl Add for P {
+    fun add(self, other: P) -> P { return P { x: self.x + other.x, s: self.s + other.s } }
+}
+
+struct H {
+    xs: [str], m: [int: str], g: [[str]], ps: [P], qs: [Q], name: str,
+    t: [(str, int)], fs: [(int) -> str], n: int,
+}
+
+fun mk(n: int) -> str { return f"s{n}" }
+
+fun fresh() -> H {
+    return H {
+        xs: [mk(10), mk(11), mk(12)], m: [0: mk(20), 1: mk(21)], g: [[mk(30), mk(31)], [mk(32), mk(33)]],
+        ps: [P { x: 1, s: mk(40) }], qs: [Q { name: mk(41), n: 1 }], name: mk(50), t: [(mk(60), 6)],
+        fs: [(i: int) => mk(70 + i), (i: int) => mk(80 + i)], n: 0,
+    }
+}
+
+impl H {
+    // every container of `self` replaced: what was read from them released
+    fun repl(var self) {
+        self.xs = [mk(110), mk(111), mk(112)]
+        self.m = [0: mk(120), 1: mk(121)]
+        self.g = [[mk(130), mk(131)], [mk(132), mk(133)]]
+        self.ps = [P { x: 9, s: mk(140) }]
+        self.qs = [Q { name: mk(141), n: 9 }]
+        self.name = mk(150)
+        self.t = [(mk(160), 16)]
+        self.fs = [(i: int) => mk(170 + i), (i: int) => mk(180 + i)]
+        self.n += 1
+    }
+    fun s(var self) -> str { self.repl(); return "!" }
+    fun k(var self) -> int { self.repl(); return 1 }
+    fun l(var self) -> [str] { self.repl(); return [mk(10), mk(11), mk(12)] }
+    fun p(var self) -> P { self.repl(); return P { x: 2, s: "p" } }
+    fun q(var self) -> Q { self.repl(); return Q { name: mk(41), n: 1 } }
+    fun tu(var self) -> (str, int) { self.repl(); return (mk(60), 6) }
+    fun shrink(var self) -> str {
+        self.m.remove(1)
+        self.xs.truncate(1)
+        return "v"
+    }
+}
+
+fun shl(xs: [str]) -> str {
+    var sb = StringBuilder()
+    for x in xs { sb.append(x + ",") }
+    return sb.build()
+}
+
+fun main() {
+    // an index's and a slice's base
+    var h = fresh()
+    print(h.xs[h.k()])
+    h = fresh()
+    print(h.g[0][h.k()])
+    h = fresh()
+    print(h.g[h.k()][0])
+    h = fresh()
+    print(h.m[h.k()])
+    h = fresh()
+    print(h.ps[h.k() - 1].s)
+    h = fresh()
+    print(f"{h.xs[0][h.k()]}")
+    h = fresh()
+    print(shl(h.xs[h.k():]))
+    h = fresh()
+    print(h.xs[0][h.k():])
+    // a function value called from a list
+    h = fresh()
+    print(h.fs[0](h.k()))
+    print(h.n)
+}
+""",
+    "holes_and_keys_kept_when_a_later_one_writes_their_variable": r"""// B2 (MYLA-543): an f-string's or `format`'s hole, a map literal's key and a
+// `match` scrutinee's operand kept while a later operand replaces the
+// container they are read from. Native code read freed cells
+struct P { x: int, s: str }
+
+#derive(Eq)
+struct Q { name: str, n: int }
+
+impl Add for P {
+    fun add(self, other: P) -> P { return P { x: self.x + other.x, s: self.s + other.s } }
+}
+
+struct H {
+    xs: [str], m: [int: str], g: [[str]], ps: [P], qs: [Q], name: str,
+    t: [(str, int)], fs: [(int) -> str], n: int,
+}
+
+fun mk(n: int) -> str { return f"s{n}" }
+
+fun fresh() -> H {
+    return H {
+        xs: [mk(10), mk(11), mk(12)], m: [0: mk(20), 1: mk(21)], g: [[mk(30), mk(31)], [mk(32), mk(33)]],
+        ps: [P { x: 1, s: mk(40) }], qs: [Q { name: mk(41), n: 1 }], name: mk(50), t: [(mk(60), 6)],
+        fs: [(i: int) => mk(70 + i), (i: int) => mk(80 + i)], n: 0,
+    }
+}
+
+impl H {
+    // every container of `self` replaced: what was read from them released
+    fun repl(var self) {
+        self.xs = [mk(110), mk(111), mk(112)]
+        self.m = [0: mk(120), 1: mk(121)]
+        self.g = [[mk(130), mk(131)], [mk(132), mk(133)]]
+        self.ps = [P { x: 9, s: mk(140) }]
+        self.qs = [Q { name: mk(141), n: 9 }]
+        self.name = mk(150)
+        self.t = [(mk(160), 16)]
+        self.fs = [(i: int) => mk(170 + i), (i: int) => mk(180 + i)]
+        self.n += 1
+    }
+    fun s(var self) -> str { self.repl(); return "!" }
+    fun k(var self) -> int { self.repl(); return 1 }
+    fun l(var self) -> [str] { self.repl(); return [mk(10), mk(11), mk(12)] }
+    fun p(var self) -> P { self.repl(); return P { x: 2, s: "p" } }
+    fun q(var self) -> Q { self.repl(); return Q { name: mk(41), n: 1 } }
+    fun tu(var self) -> (str, int) { self.repl(); return (mk(60), 6) }
+    fun shrink(var self) -> str {
+        self.m.remove(1)
+        self.xs.truncate(1)
+        return "v"
+    }
+}
+
+fun shl(xs: [str]) -> str {
+    var sb = StringBuilder()
+    for x in xs { sb.append(x + ",") }
+    return sb.build()
+}
+
+fun main() {
+    // holes
+    var h = fresh()
+    print(f"{h.xs[0]}{h.s()}{h.xs[0]}")
+    h = fresh()
+    print(format("{}-{}", h.g[0][0], h.s()))
+    // a map literal's key
+    h = fresh()
+    let m = [h.xs[0]: h.s()]
+    for k in m { print(k + m[k]) }
+    // a scrutinee
+    h = fresh()
+    print(match h.xs[0] + h.s() { "s10!" => "ok", _ => "bad" })
+}
+""",
+    "a_method_call_takes_its_receivers_place_first": r"""// C9, D193 (MYLA-543): `place[i()].push(v())` takes the receiver's place
+// (its indices and keys) before the argument, as every method call does and
+// as the interpreter did; native code ran the value first (`push: 21`)
+struct C { n: int, g: [[int]], m: [int: [int]] }
+
+impl C {
+    fun k(var self) -> int {
+        self.n = self.n * 10 + 1
+        return 0
+    }
+    fun v(var self) -> int {
+        self.n = self.n * 10 + 2
+        return 7
+    }
+}
+
+fun at(n: int) -> int {
+    print(f"index {n}")
+    return 0
+}
+
+fun val(n: int) -> int {
+    print(f"value {n}")
+    return n
+}
+
+fun main() {
+    // C9
+    var c = C { n: 0, g: [[1]], m: [0: [1]] }
+    c.g[c.k()].push(c.v())
+    print(f"push: {c.n} {c.g[0].len()}")
+    c.n = 0
+    c.m[c.k()].push(c.v())
+    print(f"map element push: {c.n} {c.m[0].len()}")
+    c.n = 0
+    c.g[c.n].push(c.v())
+    print(f"index read first: {c.n} {c.g[0].len()}")
+    var g: [[int]] = [[]]
+    g[at(1)].push(val(2))
+    var bs = [StringBuilder()]
+    bs[at(3)].append(f"{val(4)}")
+    print(f"{g[0].len()} {bs[0].build()}")
+}
+""",
+    "recursive_enums_as_map_keys": r"""// C11, D194 (MYLA-543): a recursive enum is a map key natively too, as
+// interpreted: written, read, updated, removed, iterated, copied, handed to
+// a child task, in a literal; natively `main can't be lowered to the IR`
+import std.task as task
+
+#derive(Eq, Hash)
+enum Lst { Nil, Cons(int, Lst) }
+
+#derive(Eq, Hash)
+enum T { Leaf(str), Bin(T, T) }
+
+fun upto(n: int) -> Lst {
+    var l = Lst.Nil
+    for i in 0..n { l = Lst.Cons(i, l) }
+    return l
+}
+
+fun total(l: Lst) -> int {
+    return match l {
+        Cons(n, rest) => n + total(rest)
+        Nil => 0
+    }
+}
+
+async fun count_in(m: [Lst: int], k: Lst) -> int { return m.get_or(k, -1) + m.len() }
+
+#main
+async fun main() {
+    var m: [Lst: int] = [:]
+    for i in 0..6 { m[upto(i)] = i * 10 }
+    print(m.len())
+    print(m[upto(3)])
+    print(m.contains(upto(5)))
+    print(m.contains(Lst.Cons(9, Lst.Nil)))
+    m[upto(2)] += 5
+    print(m[upto(2)])
+    m.remove(upto(4))
+    print(f"{m.len()} {m.contains(upto(4))}")
+    var s = 0
+    for k in m { s += total(k) * 100 + m[k] }
+    print(s)
+    let ks = m.keys()
+    print(f"{ks.len()} {total(ks[ks.len() - 1])}")
+    print(m.get(upto(1)) == Some(10))
+    print(m.get_or(upto(7), -1))
+    // a copy keeps its keys when the original changes
+    var c = m
+    c[Lst.Cons(42, Lst.Nil)] = 42
+    m.remove(upto(0))
+    print(f"{m.len()} {c.len()} {c[upto(0)]} {c[Lst.Cons(42, Lst.Nil)]}")
+    // to a child task, the parent keeping its own
+    async let a = count_in(c, upto(5))
+    print(await a)
+    print(c.len())
+    // a literal, and a key holding strings
+    let t: [T: str] = [T.Leaf("a"): "leaf", T.Bin(T.Leaf("a"), T.Leaf("b")): "bin"]
+    print(t[T.Bin(T.Leaf("a"), T.Leaf("b"))] + " " + t[T.Leaf("a")])
+    var many: [Lst: int] = [:]
+    for i in 0..2000 { many[upto(i % 50)] = i }
+    print(f"{many.len()} {many[upto(49)]}")
+}
+""",
     "actors_store_every_heap_type": r"""// H2 (MYLA-415): an actor's method keeps an argument of every heap type in
 // its state, in a program with tasks, the arguments temporaries or the
 // caller's own values, which the caller then changes
@@ -10318,6 +10765,87 @@ fun main() {
 """
 
 
+# C10 (MYLA-543): generic enums and structs nested in themselves, released
+# each round: the peak memory of 20,000 rounds and of 200,000 must be alike
+# (a round leaked some 700 bytes)
+NESTED_GENERICS_SRC = r"""// C10 (MYLA-543): a generic enum or struct nested in itself
+// (`Option<Option<Tree>>`, `Option<Option<[str]>>`, which a channel's
+// `recv` gives) is released: `owns_heap` saw the inner `Option` by its name
+// as the outer one and called it free of the heap
+import std.process as process
+import std.num as num
+import std.task as task
+
+enum Tree { Leaf, Node(Tree, int, Tree) }
+struct Wrap<T> { v: T, n: int }
+
+fun mk(n: int) -> Tree {
+    if n <= 0 { return Tree.Leaf }
+    return Tree.Node(mk(n - 1), n, Tree.Leaf)
+}
+
+async fun recv_n(ch: task.Channel<Option<[str]>>, n: int) -> int {
+    var s = 0
+    for i in 0..n {
+        match await ch.recv() {
+            Some(v) => { s += 1 }
+            None => { s += 100 }
+        }
+    }
+    return s
+}
+
+async fun job(j: Option<[str]>) -> Option<[str]> { return j }
+
+#main
+async fun main() {
+    let rounds = num.parse_int(process.args()[1]).unwrap_or(10) as int
+    var total = 0
+    for i in 0..rounds {
+        let o: Option<Option<Tree>> = Some(Some(mk(6)))
+        match o {
+            Some(v) => { total += 1 }
+            None => {}
+        }
+        let w = Wrap { v: Wrap { v: [f"a{i}", "b"], n: 1 }, n: 2 }
+        total += w.v.v.len()
+        let r: Result<Option<[str]>, Option<str>> = Ok(Some([f"r{i}"]))
+        match r {
+            Ok(Some(xs)) => { total += xs.len() }
+            _ => {}
+        }
+    }
+    for i in 0..rounds / 10 {
+        let ch: task.Channel<Option<[str]>> = task.channel(2)
+        async let r = recv_n(ch, 2)
+        let s1 = await ch.send(Some([f"a{i}", "b"]))
+        let s2 = await ch.send(Some([f"c{i}", "d"]))
+        total += await r
+        await ch.close()
+        let got = await task.pool(2, [Some([f"p{i}"]), None], job)
+        total += got.len()
+    }
+    print(total)
+}
+"""
+
+
+def _peak_kb(argv: list[str], exe: str | None) -> tuple[str, int]:
+    """(stdout, peak resident memory in KB) of running `argv`."""
+    with tempfile.TemporaryFile() as out:
+        pid = os.fork()
+        if pid == 0:
+            try:
+                os.dup2(out.fileno(), 1)
+                os.execvp(exe or argv[0], argv)
+            finally:
+                os._exit(127)
+        _, status, usage = os.wait4(pid, 0)
+        out.seek(0)
+        assert os.waitstatus_to_exitcode(status) == 0
+        return out.read().decode(), usage.ru_maxrss
+
+
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
 class TestCompilerParity(unittest.TestCase):
     def test_trait_functions_across_modules(self):
@@ -10430,6 +10958,18 @@ class TestCompilerParity(unittest.TestCase):
                     self.assertIn(f"type error: the instances of '{callee}' nest without end: this call asks for one "
                                   f"whose type arguments are {why}\n  --> {path}:{at}\n", built.stderr)
                     self.assertIn("(polymorphic recursion)", built.stderr)
+        # a finite type the program writes, too large: not one "without end"
+        # (MYLA-543)
+        src = ("fun id<T>(x: T) -> int {\n    return 1\n}\n\nfun main() {\n    print(id(" + "[" * 65 + "1" + "]" * 65
+               + "))\n}\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = write_program(tmp, src)
+            built = subprocess.run([myla, "build", path, "-o", os.path.join(tmp, "out")],
+                                   capture_output=True, text=True, timeout=60)
+            self.assertEqual(built.returncode, 1, built.stderr)
+            self.assertIn("type error: the instance of 'id' this call asks for is too large to build: its type "
+                          f"arguments are 65 types deep (the limit is 64)\n  --> {path}:6:13\n", built.stderr)
+            self.assertNotIn("polymorphic recursion", built.stderr)
 
     def test_a_deep_type_the_program_writes_is_no_recursion(self):
         # MYLA-544: a type 65 or 100 deep that the program writes is no
@@ -10811,6 +11351,17 @@ class TestCompilerParity(unittest.TestCase):
         self.assertEqual(code, 0, "arena exhausted — break/continue leaked locals")
         self.assertEqual(out.strip(), "200001\n133333")
 
+    def test_nested_generic_enums_are_released(self):
+        # C10 (MYLA-543): `Option<Option<Tree>>`, `Wrap<Wrap<[str]>>`, a
+        # channel's `Option<Option<[str]>>` in a child, `task.pool`'s jobs
+        with tempfile.TemporaryDirectory() as tmp:
+            binary = os.path.join(tmp, "prog")
+            native_build(Program(write_program(tmp, NESTED_GENERICS_SRC)), binary)
+            small = _peak_kb(*run_argv(binary, "prog", ["20000"]))
+            large = _peak_kb(*run_argv(binary, "prog", ["200000"]))
+        self.assertEqual((small[0], large[0]), ("88000\n", "880000\n"))
+        self.assertLess(large[1] - small[1], 8 * 1024, "the rounds leaked")
+
     def test_boxed_members_are_released(self):
         # MYLA-105: the recursive-enum stress program the IR gate also runs
         out, code = build_and_run(STRESS_BOXED_MEMBERS_SRC)
@@ -11045,6 +11596,18 @@ PINNED = {
     "literals_left_of_typed_operands": '5000000005\n4\nfalse\ntrue\n-3.75\n3\n10\n-1\n1.5\n5000000002\n3\ntrue\n-97\n',
     # MYLA-417 (C1): new; the same on both runners
     "actor_getter_of_a_field_s_name": '6\n11\n',
+    # MYLA-415 (B1): native code segfaulted (the captured enum deep-copied as a box)
+    "closures_capturing_recursive_enums_across_tasks": '3\n324\n13\n7\n327\n327\n3\n3\n324\n30\n336\n',
+    # MYLA-543: native code read freed cells (B2)
+    "operands_kept_when_a_later_operand_writes_their_variable": 's10!\ns50!\ns30s11!\ns20!\nfalse false\ntrue\ntrue\ntrue\n3 s40p\ns10T\ns10!,s111,s112,\ns21v 2 s10,\n',
+    # MYLA-543: native code read freed cells (B2)
+    "bases_kept_when_their_index_writes_their_variable": 's11\ns31\ns32\ns21\ns40\n49\ns11,s12,\n10\ns71\n1\n',
+    # MYLA-543: native code read freed cells (B2)
+    "holes_and_keys_kept_when_a_later_one_writes_their_variable": 's10!s110\ns30-!\ns10!\nok\n',
+    # MYLA-543: native code ran the value first
+    "a_method_call_takes_its_receivers_place_first": 'push: 12 2\nmap element push: 12 2\nindex read first: 2 3\nindex 1\nvalue 2\nindex 3\nvalue 4\n1 4\n',
+    # MYLA-543 (C11, D194): native code was `main can't be lowered to the IR`
+    "recursive_enums_as_map_keys": '6\n30\ntrue\nfalse\n25\n5 false\n1515\n5 10\ntrue\n-1\n4 6 0 42\n56\n6\nbin leaf\n50 1999\n',
     # MYLA-415 (H2): native code segfaulted (a string, list or map argument kept)
     "actors_store_every_heap_type": '1\n7\n3\n2\n2\n2\nvalue 7 2 1 built! rec/2 t4 some 7 5 42 2\n14\npre-value 7 3 1 built! rec/2 t4 some 7 5 42 2\n3 3 built more\n',
     # MYLA-415 (H3): native code segfaulted in __deepb_ and on a child's result
@@ -11101,6 +11664,8 @@ RUNTIME_ERRORS = {
                                            "fun look<K: Eq + Hash, V>(m: [K: V], k: K) -> V {\n    return m[k]\n}\n\n"
                                            "fun main() {\n    let t = Table { m: [1: \"a\"] }\n    print(look(t.m, 1))\n"
                                            "    print(look(t.m, 18446744073709551615))\n}\n"),
+    # MYLA-543: float fields as Python's `repr` writes them (`3.0`, `1e+300`), natively `3`, `1e300`
+    "missing_key_with_float_fields": 'struct Fl { a: float, b: float, c: float, d: float32, e: float }\n\nimpl Eq for Fl {\n    fun eq(self, o: Fl) -> bool { return self.a == o.a }\n}\n\nimpl Hash for Fl {\n    fun hash(self, h: Hasher) -> Hasher { return h.add(1) }\n}\n\nfun main() {\n    var m: [Fl: int] = [:]\n    var z = 0.0\n    print(m[Fl { a: 3.0, b: -z, c: 1e300, d: 1e10f32, e: 1.5e-7 }])\n}\n',
     "string_index": 'fun main() {\n    let s = "ab"\n    var i = 9\n    print(s[i])\n}\n',
     # MYLA-546: a uint64 index of 2^63 or more was reported signed, on both runners
     "uint64_list_index": "fun main() {\n    let xs = [1, 2]\n    var i: uint64 = 18446744073709551615\n    print(xs[i])\n}\n",
