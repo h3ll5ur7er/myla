@@ -91,7 +91,16 @@ pub struct CodeGen {
     rodata: [str],
     strdata: [str],                 // static `str` cells (static_str)
     label_n: int32,
-    str_n: int32,
+    // MYLA-552: the labels of the function being emitted are its own,
+    // `.L<prefix>_<n>`, its positions' `.L<prefix>_p<n>` (`begin_labels`;
+    // `label_fn` "" outside a function: `.L<n>`, `.Lpos<n>`), so that a
+    // change in one function renames no other's labels; the prefixes
+    // taken, each by its function
+    label_fn: str,
+    label_fn_n: int32,
+    pos_fn_n: int32,
+    label_fns: [str: str],
+    str_names: [str: bool],         // the string literals' labels taken (`str_name`)
     str_texts: [str],
     str_labels: [str],
     subst: [Subst],
@@ -355,7 +364,7 @@ pub fun new_codegen(c: Checker) -> CodeGen {
         impl_args: c.impl_args,
         static_calls: c.static_calls, static_selfs: c.static_selfs,
         text: [], rodata: [], strdata: [],
-        label_n: 0, str_n: 0,
+        label_n: 0, label_fn: "", label_fn_n: 0, pos_fn_n: 0, label_fns: [:], str_names: [:],
         str_texts: [], str_labels: [],
         subst: [], fn_worklist: [], fn_seen: [:],
         lam_jobs: [], lam_seen: [:], partial_jobs: [], fnval_set: [],
@@ -458,7 +467,12 @@ impl CodeGen {
         match self.pos_labels.get(key) {
             Some(l) => { lab = l },
             None => {
-                lab = format(".Lpos{}", self.pos_labels.len())
+                if self.label_fn != "" {
+                    self.pos_fn_n += 1
+                    lab = format(".L{}_p{}", self.label_fn, self.pos_fn_n)
+                } else {
+                    lab = format(".Lpos{}", self.pos_labels.len())
+                }
                 self.pos_labels[key] = lab
                 let file = self.string_label(self.cur_path)
                 self.posdata.push("\t.balign 8")
@@ -1060,8 +1074,53 @@ impl CodeGen {
 
     #test(codegen_on("[int]"))[".L1"]
     fun label(var self) -> str {
+        if self.label_fn != "" {
+            self.label_fn_n += 1
+            return format(".L{}_{}", self.label_fn, self.label_fn_n)
+        }
         self.label_n = self.label_n + 1
         return format(".L{}", self.label_n)
+    }
+
+    // The labels from here on the function `mangled`'s own (MYLA-552), each
+    // numbered from 1 under its prefix (`label_prefix`), its positions'
+    // too; "" for none (outside a function).
+    #test(codegen_on("[int]"), "")[()]
+    fun begin_labels(var self, mangled: str) {
+        self.label_fn = if mangled == "" { "" } else { self.label_prefix(mangled) }
+        self.label_fn_n = 0
+        self.pos_fn_n = 0
+    }
+
+    // The prefix of the labels of the function `mangled`: its name's FNV-1a
+    // hash in six letters and digits, the hash's next where another
+    // function's name gave it first.
+    #test(codegen_on("[int]"), "main")["wez6ju"]
+    fun label_prefix(var self, mangled: str) -> str {
+        var h = fnv1a(mangled)
+        var p = base36(h, 6)
+        while self.label_fns.contains(p) && self.label_fns[p] != mangled {
+            h = (h ^ 255u64).wrapping_mul(FNV_PRIME)
+            p = base36(h, 6)
+        }
+        self.label_fns[p] = mangled
+        return p
+    }
+
+    // The label of a new string literal `text`: `.Lstr` and the FNV-1a
+    // hash of its bytes in seven letters and digits (the hash's next where
+    // another text gave it first), so that a literal added renumbers no
+    // other (MYLA-552).
+    #test(codegen_on("[int]"), "héλ")[".Lstro0qlabq"]
+    fun str_name(var self, text: str) -> str {
+        var h = fnv1a(text)
+        var lab = ".Lstr" + base36(h, 7)
+        while self.str_names.contains(lab) {
+            h = (h ^ 255u64).wrapping_mul(FNV_PRIME)
+            lab = ".Lstr" + base36(h, 7)
+        }
+        self.str_names[lab] = true
+        return lab
     }
 
     #test(codegen_on("[int]"), "héλ")[-1]
@@ -1073,12 +1132,11 @@ impl CodeGen {
     }
 
     // Intern a string literal, emitting a static `str` cell (MYLA-18).
-    #test(codegen_on("[int]"), "héλ")[".Lstr0"]
+    #test(codegen_on("[int]"), "héλ")[".Lstro0qlabq"]
     fun string_label(var self, text: str) -> str {
         let existing = self.str_index(text)
         if existing >= 0 { return self.str_labels[existing] }
-        let lab = format(".Lstr{}", self.str_n)
-        self.str_n = self.str_n + 1
+        let lab = self.str_name(text)
         self.str_ix[text] = self.str_texts.len()
         self.str_texts.push(text)
         self.str_labels.push(lab)
@@ -4302,6 +4360,44 @@ fun compiler_norm() -> Norm {
 
 // The ready-frame ring's size (D90): a power of two.
 pub const EXEC_CAP: int32 = 1048576
+
+// FNV-1a with 64 bits (as std.checksum's `fnv1a64`), which names the
+// labels of a function and of a string literal (MYLA-552).
+const FNV_BASIS: uint64 = 0xcbf29ce484222325
+const FNV_PRIME: uint64 = 0x100000001b3
+
+#test("")[0xcbf29ce484222325u64]
+#test("foobar")[0x85944171f73967e8u64]
+fun fnv1a(s: str) -> uint64 {
+    var h = FNV_BASIS
+    for i in 0..s.len() { h = (h ^ (s[i] as uint64)).wrapping_mul(FNV_PRIME) }
+    return h
+}
+
+// The low `n` base-36 digits of `h` (`0`–`9`, `a`–`z`), the lowest first.
+#test(0u64, 3)["000"]
+#test(71u64, 2)["z1"]
+fun base36(h: uint64, n: int32) -> str {
+    let digits = "0123456789abcdefghijklmnopqrstuvwxyz"
+    var sb = StringBuilder()
+    var x = h
+    for i in 0..n {
+        sb.append_byte(digits[(x % 36u64) as int32])
+        x = x / 36u64
+    }
+    return sb.build()
+}
+
+// The prefixes `label_prefix` gives the functions `names` in turn: two
+// whose hashes agree get two (the second the next hash's), one emitted
+// again its own.
+#test(["lx_v$tfu", "oktgnxyd", "lx_v$tfu"])[["59tff9", "qinyhk", "59tff9"]]
+fun label_prefixes(names: [str]) -> [str] {
+    var cg = codegen_on("[int]")
+    var out: [str] = []
+    for n in names { out.push(cg.label_prefix(n)) }
+    return out
+}
 
 // The generator of MYLA_SCHED=seed:N (D110): x * SCHED_MUL + SCHED_ADD,
 // wrapping (Knuth's MMIX constants), the same in the interpreter

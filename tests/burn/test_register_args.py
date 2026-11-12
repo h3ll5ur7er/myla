@@ -361,7 +361,7 @@ class RegisterArguments(unittest.TestCase):
         # a tail call of the function itself loops back to its entry block,
         # its stack words written over the ones it received
         body = _function(asm, "spin")
-        entry = re.search(r"^(\.L\d+):$", body, re.M).group(1)
+        entry = re.search(r"^(\.L[0-9a-z]{6}_\d+):$", body, re.M).group(1)
         self.assertIn(f"jmp {entry}\n", body)
         self.assertNotIn("call myla_spin", body)
         self.assertNotIn("jmp myla_spin", body)

@@ -84,6 +84,8 @@ impl CodeGen {
         // a program refused for a `become` of an instance (MYLA-272) builds
         // nothing more: its type errors are what it gets
         if self.refused.len() > 0 { return }
+        // its labels its own (MYLA-552): wasm32's code has none
+        if !self.wasm { self.begin_labels(mangled) }
         // D123's prototype: the scalar slots promoted first (`--ssa`; not
         // under -g, whose debugger reads variables from their slots)
         var f = f0
@@ -106,6 +108,7 @@ impl CodeGen {
             // aarch64's translation, calls in tail position jumps too
             // (MYLA-283)
             self.emit_a64(self.expand_ownership(self.hoist_tail_drops(f)), decl_id, line, col, mangled)
+            self.begin_labels("")
             return
         }
         f = self.expand_ownership(self.hoist_tail_drops(f))
@@ -289,6 +292,7 @@ impl CodeGen {
         self.emit("")
         if f.frame { self.emit_frame_new_ir(f, mangled) }
         self.in_frame = false
+        self.begin_labels("")
     }
 
     // The load of the `width`-byte scalar at `src` into %rax (D120); a
@@ -2745,10 +2749,11 @@ impl CodeGen {
     }
 
     // The constant pool's label for the float bits `bits`, made the first
-    // time, in .rodata.
+    // time, in .rodata: named by the bits, so that a constant added renames
+    // no other (MYLA-552).
     fun fconst_label(var self, bits: int64) -> str {
         if self.fconst_labels.contains(bits) { return self.fconst_labels[bits] }
-        let lab = format(".Lfc{}", self.fconst_labels.len())
+        let lab = format(".Lfc{:x}", bits as uint64)
         self.fconst_labels[bits] = lab
         self.rodata.push(format("\t.p2align 3\n{}:\n\t.quad {}", lab, bits))
         return lab
