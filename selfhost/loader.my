@@ -107,36 +107,50 @@ pub fun type_errors(prog: Loaded, errs: [CheckErr]) -> Report {
 // 'p'` for `a < p.x, c > (d)`). Found in the tokens of the error's file,
 // read again: only on an error's way, so a program that checks pays nothing.
 pub fun with_reading_notes(r: Report, overrides: [str: str]) -> Report {
-    var out = r
-    out.notes = notes_with_reading(r, overrides)
-    var more: [Report] = []
-    for m in r.more {
-        var each = m
-        each.notes = notes_with_reading(m, overrides)
-        more.push(each)
+    var all = [r]
+    for m in r.more { all.push(m) }
+    // each file read and lexed once, for all its errors
+    var files: [str: (str, [Token])] = [:]
+    var done: [Report] = []
+    for each in all {
+        var e = each
+        if e.line > 0 && e.path != "" {
+            if !files.contains(e.path) { files[e.path] = lexed_file(e.path, overrides) }
+            let (src, toks) = files[e.path]
+            match note_at(src, toks, e.line, e.col, e.sp) {
+                Some(n) => { e.notes.push(n) },
+                None => {},
+            }
+        }
+        done.push(e)
     }
-    out.more = more
+    var out = done[0]
+    out.more = []
+    var i = 1
+    while i < done.len() {
+        out.more.push(done[i])
+        i += 1
+    }
     return out
 }
 
-fun notes_with_reading(r: Report, overrides: [str: str]) -> [Note] {
-    var notes = r.notes
-    if r.line == 0 || r.path == "" { return notes }
+// The text of `path` (an editor's buffer, the carried library's or the
+// disk's) and its tokens; none where it doesn't read or lex.
+fun lexed_file(path: str, overrides: [str: str]) -> (str, [Token]) {
     var src = ""
-    match source_text(r.path, overrides) {
+    match source_text(path, overrides) {
         Some(t) => { src = t },
         None => {
-            match read_to_string(r.path) {
+            match read_to_string(path) {
                 Ok(t) => { src = t },
-                Err(e) => { return notes },
+                Err(e) => { return ("", []) },
             }
         },
     }
-    match reading_note(src, r.line, r.col, r.sp) {
-        Some(n) => { notes.push(n) },
-        None => {},
+    return match lex(src) {
+        Ok(toks) => (src, toks),
+        Err(d) => (src, []),
     }
-    return notes
 }
 
 // The note on the first form of D186 in the text `src` that the place
@@ -152,10 +166,14 @@ fun notes_with_reading(r: Report, overrides: [str: str]) -> [Note] {
 #test("fun main() {\n    pair<P, Q>(p, q)\n}", 2, 5, SrcSpan { sline: 2, scol: 5, eline: 2, ecol: 9 })[None]
 #test("fun main() {\n    let x = 1; print(both(a < b, c > (d)))\n}", 2, 9, SrcSpan { sline: 2, scol: 9, eline: 2, ecol: 10 })[None]
 fun reading_note(src: str, line: int32, col: int32, sp: SrcSpan) -> Option<Note> {
-    let toks = match lex(src) {
-        Ok(t) => t,
-        Err(d) => { return None },
+    return match lex(src) {
+        Ok(toks) => note_at(src, toks, line, col, sp),
+        Err(d) => None,
     }
+}
+
+// `reading_note` with the tokens `toks` of `src`.
+fun note_at(src: str, toks: [Token], line: int32, col: int32, sp: SrcSpan) -> Option<Note> {
     // the place: its range, or its column
     var sl = line
     var sc = col
