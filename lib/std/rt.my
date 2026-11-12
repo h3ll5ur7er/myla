@@ -3991,6 +3991,10 @@ fun poll_events(n: int64) -> [int64] {
     let lock = __rt_addr("__timer_lock")
     __fetch_add64(__rt_addr("__exec_waking"), 1)
     var woken: [int64] = []
+    let t = __rt_get("__watches")
+    if t != 0 && __load64(t + 8) != 0 {
+        woken = woken_later(woken)
+    }
     var i: int64 = 0
     while i < n {
         let tok = os.poller_event(i)
@@ -4042,7 +4046,8 @@ fun push_woken(woken: [int64]) {
 
 // --- descriptors: frames waiting for input (D124) --------------------------------
 // `__watches`, under the timers' lock: a table indexed by descriptor,
-// `[cap][0]` and then `cap` slots (MYLA-518), each `[first watch][last
+// `[cap][woken]` and then `cap` slots (MYLA-518; `woken`: the frames a
+// close woke, for the next poll to queue), each `[first watch][last
 // watch][receivers][senders][sockets][armed][known]`: the frames waiting
 // for that descriptor in the order they came, how many wait to receive (or
 // read) and to send, how many of them wait for a socket
@@ -4179,6 +4184,7 @@ fun watch_slot_made(fd: int64) -> int64 {
     __store64(bigger, cap)
     if t != 0 {
         // (the watches hold no slot's address: they move as they are)
+        __store64(bigger + 8, __load64(t + 8))
         __copy_bytes(bigger + 16, t + 16, __load64(t) * WSLOT)
         __free(t)
     }
@@ -4320,29 +4326,60 @@ fun frame_unwatch(w: int64) -> int64 {
     return fr
 }
 
-// The descriptor `fd` about to be closed: the frames waiting for it
-// queued (their operation then fails, its handle closed), and its slot
-// cleared, so that the next descriptor given its number starts afresh, not
-// with the poller's watch of this one, which the close ends.
+// The descriptor `fd` about to be closed: the frames waiting for it woken
+// (their operation then fails, its handle closed), and its slot cleared,
+// so that the next descriptor given its number starts afresh, not with the
+// poller's watch of this one, which the close ends. The frames are queued
+// by the next poll (`woken_later`), which the poller is woken for: a
+// program without tasks has no queues to push them on (nor any watch),
+// and its close comes here too.
 fun watches_closed(fd: int64) {
-    if __rt_get("__watches") == 0 {
+    let t = __rt_get("__watches")
+    if t == 0 {
         return
     }
     let lock = __rt_addr("__timer_lock")
     take_lock(lock)
-    var woken: [int64] = []
+    var any = false
     let slot = watch_slot(fd)
     if slot != 0 {
         while __load64(slot) != 0 {
-            woken.push(frame_unwatch(__load64(slot)))
+            let fr = frame_unwatch(__load64(slot))
+            // on the table's list, counted a watch until it is queued
+            let n = __alloc(16)
+            __store64(n, fr)
+            __store64(n + 8, __load64(__rt_get("__watches") + 8))
+            __store64(__rt_get("__watches") + 8, n)
+            __store64(__rt_addr("__watch_count"), __rt_get("__watch_count") + 1)
+            any = true
         }
         __store64(slot + 40, 0)
         __store64(slot + 48, 0)
     }
     give_lock(lock)
-    for fr in woken {
-        exec_push(fr)
+    if any && __rt_get("__exec_poller") != 0 {
+        os.poller_wake(__rt_get("__exec_poller"))
     }
+}
+
+// The frames a close woke (`watches_closed`), taken off the table's list
+// onto `woken` (the poll held).
+fun woken_later(woken: [int64]) -> [int64] {
+    var out = woken
+    let lock = __rt_addr("__timer_lock")
+    take_lock(lock)
+    let t = __rt_get("__watches")
+    var n = __load64(t + 8)
+    __store64(t + 8, 0)
+    while n != 0 {
+        out.push(__load64(n))
+        let next = __load64(n + 8)
+        __free(n)
+        __store64(__rt_addr("__watch_count"), __rt_get("__watch_count") - 1)
+        n = next
+    }
+    give_lock(lock)
+    return out
 }
 
 // The watch `w` off its slot, and freed (the lock held).
