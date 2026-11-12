@@ -2,7 +2,7 @@
 id: MYLA-413
 title: "An imported std module's bodies parsed and checked once called"
 type: improvement
-status: todo
+status: in-progress
 priority: medium
 labels: [loader, checker, performance, check-time]
 ---

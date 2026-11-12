@@ -2,7 +2,7 @@
 id: MYLA-545
 title: "R3 Lexer, parser, loader: a swallowed declaration, D186's messages, the look-ahead budget, a root written with `..`"
 type: bug
-status: todo
+status: in-progress
 priority: medium
 labels: [lexer, parser, loader, round-6]
 ---

@@ -873,15 +873,42 @@ impl Loader {
     // Whether `path` is a module of the standard library whose functions'
     // bodies are read once called (D179): every one but the entry and
     // std.rt, whose functions the back ends call by the primitives they
-    // replace (MYLA-413). A program's own modules are read whole.
+    // replace (MYLA-413). A program's own modules are read whole, its own
+    // `std/` directory too (`in_std_root`).
     #test(Loader { stdlib_root: "/l", project_root: "/p", packages: [], entry: "/p/a.my", modules: [], next_id: 0, spans: [], overrides: [:], lazy: [:] }, "/l/std/fs.my")[true]
     #test(Loader { stdlib_root: "/l", project_root: "/p", packages: [], entry: "/p/a.my", modules: [], next_id: 0, spans: [], overrides: [:], lazy: [:] }, "/l/std/rt.my")[false]
     #test(Loader { stdlib_root: "/l", project_root: "/p", packages: [], entry: "/p/a.my", modules: [], next_id: 0, spans: [], overrides: [:], lazy: [:] }, "/p/b.my")[false]
     #test(Loader { stdlib_root: "/l", project_root: "/l", packages: [], entry: "/l/std/fs.my", modules: [], next_id: 0, spans: [], overrides: [:], lazy: [:] }, "/l/std/fs.my")[false]
+    #test(Loader { stdlib_root: "/l", project_root: "/p", packages: [], entry: "/p/a.my", modules: [], next_id: 0, spans: [], overrides: [:], lazy: [:] }, "/p/std/helper.my")[false]
+    #test(Loader { stdlib_root: "", project_root: "/p", packages: [], entry: "/p/a.my", modules: [], next_id: 0, spans: [], overrides: [:], lazy: [:] }, "/p/std/helper.my")[false]
+    #test(Loader { stdlib_root: EMBEDDED_ROOT, project_root: "/p", packages: [], entry: "/p/a.my", modules: [], next_id: 0, spans: [], overrides: [:], lazy: [:] }, "<myla>/std/fs.my")[true]
     fun lazy_std(self, path: str) -> bool {
-        if path == self.entry { return false }
-        let id = self.module_id(path)
-        return starts_with_text(id, "std$") && id != "std$rt"
+        if path == self.entry || !self.in_std_root(path) { return false }
+        return self.module_id(path) != "std$rt"
+    }
+
+    // Whether `path` is a file of the standard library's `std/`, under the
+    // stdlib root or in the library the tools carry: decided by the file's
+    // root, as `module_id` names it, not by its id, which a program's own
+    // `std/helper.my` shares (`std$helper`) and which is the program's
+    // (MYLA-413, D179 (3)).
+    #test(Loader { stdlib_root: "/l", project_root: "/p", packages: [], entry: "/p/a.my", modules: [], next_id: 0, spans: [], overrides: [:], lazy: [:] }, "/l/std/fs.my")[true]
+    #test(Loader { stdlib_root: "/l", project_root: "/p", packages: [], entry: "/p/a.my", modules: [], next_id: 0, spans: [], overrides: [:], lazy: [:] }, "/l/geo.my")[false]
+    #test(Loader { stdlib_root: "/l", project_root: "/p", packages: [], entry: "/p/a.my", modules: [], next_id: 0, spans: [], overrides: [:], lazy: [:] }, "/p/std/fs.my")[false]
+    #test(Loader { stdlib_root: "/l", project_root: "/l/app", packages: [], entry: "/l/app/a.my", modules: [], next_id: 0, spans: [], overrides: [:], lazy: [:] }, "/l/app/std/fs.my")[false]
+    fun in_std_root(self, path: str) -> bool {
+        var rest: [str] = []
+        match rel_under(path, EMBEDDED_ROOT) {
+            Some(r) => { rest = r },
+            None => {
+                if self.stdlib_root == "" { return false }
+                match rel_under(path, self.stdlib_root) {
+                    Some(r) => { rest = r },
+                    None => { return false },
+                }
+            },
+        }
+        return rest.len() > 1 && rest[0] == "std"
     }
 
     // Load `path` and its imports (depth first) once each; its module index.
@@ -1934,7 +1961,9 @@ pub fun load_program_opts(entry: str, opts: LoadOptions) -> Result<Loaded, Repor
             }
             for id in lazy.add(k, m.sites, m.decls).keys() { lazy_ids[id] = true }
         }
-        let in_std = starts_with_text(m.id, "std$")
+        // by the file's root: a program's own `std/` is the program's
+        // (MYLA-413); the entry's names stay unqualified (`entry_std`)
+        let in_std = m.path != ld.entry && ld.in_std_root(m.path)
         let is_implicit = has_index(implicit, k)
         // only the entry's cases are the program's, the others' were left
         // unparsed (`load`): an imported module's methods on a built-in type
