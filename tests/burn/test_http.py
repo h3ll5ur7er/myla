@@ -159,6 +159,11 @@ async fun main() {
     print(show(http.fetch(base + "/truncated")))
     print(show(http.fetch(base + "/badchunk")))
     print(show(http.fetch(base + "/hugeheader")))
+    // informational responses are skipped, their heads counted against the
+    // head's limit (MYLA-549): a few, then the response; 30,000 of them
+    print(show(http.fetch(base + "/hints")))
+    print(show(http.fetch(base + "/many-1xx")))
+    print(show(await http.fetch_async(base + "/many-1xx")))
     print(show(http.send(http.request("GET", base + "/big?n=5000").with_limits(65536, 4096))))
     // a gzip bomb: 64 MiB of zeros in 64 KiB, past a limit of 1 MiB once
     // decoded (MYLA-472)
@@ -201,6 +206,9 @@ async keep-alive: true
 error: malformed request or status line
 error: connection closed inside a message
 error: malformed chunked body
+error: headers too large
+200 OK [after the hints] Content-Length=15
+error: headers too large
 error: headers too large
 error: body too large
 error: body too large
@@ -335,6 +343,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.raw(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\n")
         elif path == "/hugeheader":
             self.raw(b"HTTP/1.1 200 OK\r\nX-Big: " + b"a" * 70000 + b"\r\nContent-Length: 0\r\n\r\n")
+        elif path == "/hints":
+            self.raw(b"HTTP/1.1 103 Early Hints\r\nLink: </style.css>; rel=preload\r\n\r\n" * 3
+                     + b"HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 15\r\n\r\nafter the hints")
+        elif path == "/many-1xx":
+            self.raw(b"HTTP/1.1 100 Continue\r\n\r\n" * 30000 + b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nafter")
         else:
             self.answer(404, b"no such page")
 

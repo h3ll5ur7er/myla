@@ -793,8 +793,10 @@ impl Request {
     }
 
     // The request accepting a response head of at most `header_bytes` bytes
-    // and a body of at most `body_bytes` (as received, before decoding).
-    // A negative limit is a runtime error (D184).
+    // and a body of at most `body_bytes` (as received, before decoding; a
+    // body is a `str`, so 2,147,483,647 bytes at most whatever the limit:
+    // a longer one is `BodyTooLarge`). A negative limit is a runtime error
+    // (D184).
     #test(request("GET", "/"), -1, 5)[panic("with_limits: header_bytes -1 is negative")]
     #test(request("GET", "/"), 5, -2)[panic("with_limits: body_bytes -2 is negative")]
     fun with_limits(self, header_bytes: int, body_bytes: int) -> Request {
@@ -1282,8 +1284,12 @@ impl Parser {
             }
             if self.headers.has("Content-Length") {
                 // both: the length is ignored, and the connection can't be
-                // trusted after the message
+                // trusted after the message; a request's must still be a
+                // length (MYLA-549)
                 self.close_after = true
+                if self.request && self.content_length() < -1 {
+                    return
+                }
             }
             if codings[^1] == "chunked" {
                 self.state = S_CHUNK_SIZE
@@ -1298,23 +1304,11 @@ impl Parser {
             self.state = S_UNTIL_CLOSE
             return
         }
-        let lengths = self.headers.get_all("Content-Length")
-        if lengths.len() > 0 {
-            var n = -1
-            for v in lengths {
-                for piece in v.split(",") {
-                    let k = parse_decimal(trim_ows(piece))
-                    if k == -2 {
-                        self.fail(HttpError.BodyTooLarge)
-                        return
-                    }
-                    if k < 0 || (n >= 0 && k != n) {
-                        self.fail(HttpError.BadLength)
-                        return
-                    }
-                    n = k
-                }
-            }
+        let n = self.content_length()
+        if n < -1 {
+            return
+        }
+        if n >= 0 {
             if n > self.max_body {
                 self.fail(HttpError.BodyTooLarge)
                 return
@@ -1330,6 +1324,29 @@ impl Parser {
             self.until_close = true
             self.state = S_UNTIL_CLOSE
         }
+    }
+
+    // The length the `Content-Length` fields give (each the same, a list
+    // of the same one allowed): -1 when there is none, -2 when they don't
+    // give one (the parser failed: `BadLength`, or `BodyTooLarge` past the
+    // largest `int`).
+    fun content_length(var self) -> int {
+        var n = -1
+        for v in self.headers.get_all("Content-Length") {
+            for piece in v.split(",") {
+                let k = parse_decimal(trim_ows(piece))
+                if k == -2 {
+                    self.fail(HttpError.BodyTooLarge)
+                    return -2
+                }
+                if k < 0 || (n >= 0 && k != n) {
+                    self.fail(HttpError.BadLength)
+                    return -2
+                }
+                n = k
+            }
+        }
+        return n
     }
 
     // A request whose body is still to come and that asked for `100
@@ -1526,15 +1543,23 @@ fun method_has_body(method: str) -> bool {
 
 // The request `r` as it is sent to `t`, its head and its body apart (a
 // large body isn't copied after the head): the request line, `Host` first
-// unless `r` has one, `Accept-Encoding` if it decompresses, `Connection:
-// close` unless `keep`, the framing, and the body (chunked if `r` says
-// `Transfer-Encoding: chunked`, with its trailers).
+// unless `r` has one (two, or one that isn't a host and port, are
+// `BadHeader`, as the server refuses them), `Accept-Encoding` if it
+// decompresses, `Connection: close` unless `keep`, the framing, which is
+// the body's (MYLA-549: a `Content-Length` of `r`'s own is replaced by the
+// body's, and left out beside chunked, RFC 9112 section 6.2), and the body
+// (chunked if `r` says `Transfer-Encoding: chunked`, with its trailers;
+// another transfer coding is `Unsupported`, as it isn't applied).
 fun request_text(r: Request, t: Target, keep: bool) -> Result<(str, str), HttpError> {
     if !is_token(r.method) {
         return Err(HttpError.BadStartLine)
     }
     var h = headers()
-    if !r.headers.has("Host") {
+    let hosts = r.headers.get_all("Host")
+    if hosts.len() > 1 || (hosts.len() == 1 && !is_host(hosts[0])) {
+        return Err(HttpError.BadHeader)
+    }
+    if hosts.len() == 0 {
         h.add("Host", t.host_header)
     }
     h = joined(h, r.headers)
@@ -1544,9 +1569,20 @@ fun request_text(r: Request, t: Target, keep: bool) -> Result<(str, str), HttpEr
     if !keep && !h.has("Connection") {
         h.add("Connection", "close")
     }
-    let chunk = h.has_token("Transfer-Encoding", "chunked")
-    if !chunk && !h.has("Content-Length") && (r.body.len() > 0 || method_has_body(r.method)) {
-        h.add("Content-Length", f"{r.body.len()}")
+    let codings = tokens(h.get_all("Transfer-Encoding"))
+    for c in codings {
+        if c != "chunked" {
+            return Err(HttpError.Unsupported(f"transfer coding {c}"))
+        }
+    }
+    let chunk = codings.len() > 0
+    if chunk {
+        h.set("Transfer-Encoding", "chunked")
+        h.remove("Content-Length")
+    } else if r.body.len() > 0 || method_has_body(r.method) {
+        h.set("Content-Length", f"{r.body.len()}")
+    } else {
+        h.remove("Content-Length")
     }
     var sb = StringBuilder()
     sb.append(r.method)
@@ -1565,10 +1601,11 @@ fun request_text(r: Request, t: Target, keep: bool) -> Result<(str, str), HttpEr
 // The request `r` as a `Client` sends it: the request line with the URL's
 // target, a `Host` header from the URL unless `r` has one, `Accept-Encoding:
 // gzip, deflate` if `r` decompresses and has none, `Content-Length` when
-// there is a body (or the method is `POST`, `PUT` or `PATCH`) and no
-// framing of its own, then the body. `send` adds `Connection: close`. A URL
-// that starts with `/` (or is `*`) is sent as the target as it is, with an
-// empty `Host` unless `r` has one.
+// there is a body (or the method is `POST`, `PUT` or `PATCH`) and it isn't
+// chunked (one of `r`'s own replaced), then the body. Two `Host` fields
+// are `BadHeader`. `send` adds `Connection: close`. A URL that starts with
+// `/` (or is `*`) is sent as the target as it is, with an empty `Host`
+// unless `r` has one.
 pub fun format_request(r: Request) -> Result<str, HttpError> {
     let t = if r.url.starts_with("/") || r.url == "*" {
         Target { host: "", port: 80, path: r.url, host_header: "" }
@@ -1995,8 +2032,9 @@ pub fun client() -> Client {
 }
 
 // The request after a redirect `resp` to `r` (from the URL `from`): the
-// `Location` resolved against `from`; a 303, or a 301 or 302 to a `POST`,
-// becomes a `GET` without a body; another host doesn't get `Authorization`
+// `Location` resolved against `from`, with `from`'s fragment when it has
+// none; a 303, or a 301 or 302 to a `POST`, becomes a `GET` without a
+// body; another host doesn't get `Authorization`, `Proxy-Authorization`
 // and `Cookie`. `None` when `resp` isn't a redirect.
 fun redirected(r: Request, resp: Response) -> Option<Request> {
     let s = resp.status
@@ -2009,6 +2047,12 @@ fun redirected(r: Request, resp: Response) -> Option<Request> {
     }
     var next = r
     next.url = resolve(r.url, loc)
+    // a Location without a fragment inherits the request's (RFC 9110,
+    // section 10.2.2)
+    let hash = find_byte(r.url, 35, 0)
+    if hash >= 0 && find_byte(next.url, 35, 0) < 0 {
+        next.url = next.url + part(r.url, hash, r.url.len())
+    }
     if (s == 303 && !same_name(r.method, "HEAD")) || ((s == 301 || s == 302) && same_name(r.method, "POST")) {
         next.method = "GET"
         next.body = ""
@@ -2019,6 +2063,7 @@ fun redirected(r: Request, resp: Response) -> Option<Request> {
     next.headers.remove("Host")
     if authority(next.url) != authority(r.url) {
         next.headers.remove("Authorization")
+        next.headers.remove("Proxy-Authorization")
         next.headers.remove("Cookie")
     }
     return Some(next)
@@ -2332,9 +2377,24 @@ fun retryable(e: HttpError) -> bool {
 // The bytes of a body up to which it is sent with its head in one write.
 const ONE_WRITE: int = 16384
 
+// The room left for the head of a response under its limit `room`, after
+// an informational response whose head took `seen` bytes (MYLA-549): the
+// heads of 1xx responses count against it, so a server can't send them
+// without end. `HeadersTooLarge` when none is left.
+#test(100, 25)[Ok(75)]
+#test(25, 25)[Err(HttpError.HeadersTooLarge)]
+fun after_informational(room: int, seen: int) -> Result<int, HttpError> {
+    let left = room - seen
+    if left <= 0 {
+        return Err(HttpError.HeadersTooLarge)
+    }
+    return Ok(left)
+}
+
 impl Wire {
     // The request's head and body (`text`) sent and the response to `r`
-    // read, the informational (1xx but 101) responses before it skipped.
+    // read, the informational (1xx but 101) responses before it skipped,
+    // their heads counted against the head's limit (`after_informational`).
     fun round_trip(var self, text: (str, str), r: Request, deadline: int64) -> Result<Parser, HttpError> {
         if text.1.len() <= ONE_WRITE {
             self.send(text.0 + text.1, deadline)?
@@ -2342,11 +2402,13 @@ impl Wire {
             self.send(text.0, deadline)?
             self.send(text.1, deadline)?
         }
+        var room = r.max_header_bytes
         while true {
-            let p = self.read_message(parser(false, r.method, r.max_header_bytes, r.max_body_bytes), deadline)?
+            let p = self.read_message(parser(false, r.method, room, r.max_body_bytes), deadline)?
             if p.status >= 200 || p.status == 101 {
                 return Ok(p)
             }
+            room = after_informational(room, p.seen)?
         }
         unreachable()
     }
@@ -2355,12 +2417,14 @@ impl Wire {
     async fun round_trip_async(var self, text: (str, str), r: Request) -> Result<Parser, HttpError> {
         let sent = await self.send_parts_async(text)
         sent?
+        var room = r.max_header_bytes
         while true {
-            let got = await self.read_message_async(parser(false, r.method, r.max_header_bytes, r.max_body_bytes))
+            let got = await self.read_message_async(parser(false, r.method, room, r.max_body_bytes))
             let p = got?
             if p.status >= 200 || p.status == 101 {
                 return Ok(p)
             }
+            room = after_informational(room, p.seen)?
         }
         unreachable()
     }
@@ -3419,6 +3483,22 @@ fun requests_formatted() {
     assert(formatted_request(request("GET", "https://h/")) == "error: unsupported: https", "https")
     let origin = request("GET", "/only/a/path").with_decompress(false)
     assert(formatted_request(origin) == "GET /only/a/path HTTP/1.1\r\nHost: \r\n\r\n", "a target as it is")
+    // the framing is the body's, and one Host (MYLA-549): two of the
+    // caller's are refused as the server refuses them, a length of the
+    // caller's that isn't the body's is replaced, and one beside chunked
+    // left out (RFC 9112, section 6.2)
+    let hosts = request("GET", "http://h/").with_header("Host", "a").with_header("Host", "b")
+    assert(formatted_request(hosts) == "error: malformed header", "two Host fields")
+    assert(formatted_request(request("GET", "http://h/").with_header("Host", "a b")) == "error: malformed header", "a Host that isn't one")
+    let own_length = request("POST", "http://h/").with_header("Content-Length", "1").with_header("X", "y").with_body("abc").with_decompress(false)
+    assert(formatted_request(own_length) == "POST / HTTP/1.1\r\nHost: h\r\nContent-Length: 3\r\nX: y\r\n\r\nabc", "a length of its own replaced")
+    let no_body = request("GET", "http://h/").with_header("Content-Length", "5").with_decompress(false)
+    assert(formatted_request(no_body) == "GET / HTTP/1.1\r\nHost: h\r\n\r\n", "a length without a body left out")
+    let both = request("POST", "http://h/").with_header("Content-Length", "3").with_header("Transfer-Encoding", "chunked").with_body("abc").with_decompress(false)
+    assert(formatted_request(both) == "POST / HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n0\r\n\r\n", "a length beside chunked left out")
+    let twice = request("POST", "http://h/").with_header("Transfer-Encoding", "chunked").with_header("transfer-encoding", "chunked").with_body("abc").with_decompress(false)
+    assert(formatted_request(twice) == "POST / HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n0\r\n\r\n", "chunked once")
+    assert(formatted_request(request("POST", "http://h/").with_header("Transfer-Encoding", "gzip, chunked").with_body("abc")) == "error: unsupported: transfer coding gzip", "a coding it doesn't apply")
     // and back: what is formatted parses to the same request
     match parse_request(formatted_request(post)) {
         Ok(back) => {
@@ -3595,6 +3675,10 @@ fun limits() {
     var w = parser(true, "", 1000, 2147483647)
     let at8 = w.advance("POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n1\r\nx\r\n7ffffffe\r\n", 0)
     assert(!w.failed && w.left == 2147483646, "a chunk up to the largest int")
+    // a body is an `int` of bytes at most, whatever the limit (MYLA-549)
+    var y = parser(false, "GET", 1000, 2147483647)
+    let at10 = y.advance("HTTP/1.1 200 OK\r\nContent-Length: 3000000000\r\n\r\n", 0)
+    assert(y.failed && y.err == HttpError.BodyTooLarge, "a length past the largest int")
     var x = parser(true, "", 1000, 100)
     let at9 = x.advance("POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n1;" + "a".repeat(5000) + "\r\n", 0)
     assert(x.failed && x.err == HttpError.BadChunk, "a chunk line past its limit")
@@ -3614,6 +3698,17 @@ fun framing() {
     var both = parser(true, "", MAX_HEAD, 100)
     let x = both.advance("POST / HTTP/1.1\r\nContent-Length: 99\r\nTransfer-Encoding: chunked\r\n\r\n1\r\na\r\n0\r\n\r\n", 0)
     assert(both.done() && both.close_after && both.to_request().body == "a", "chunked wins, and the connection closes")
+    // the length beside it must still be one (MYLA-549): a request whose
+    // framing can't be read whole is refused
+    var bad_both = parser(true, "", MAX_HEAD, 100)
+    let w = bad_both.advance("POST / HTTP/1.1\r\nContent-Length: zz\r\nTransfer-Encoding: chunked\r\n\r\n1\r\na\r\n0\r\n\r\n", 0)
+    assert(bad_both.failed && bad_both.err == HttpError.BadLength, "a malformed length beside chunked")
+    var odd_both = parser(true, "", MAX_HEAD, 100)
+    let v = odd_both.advance("POST / HTTP/1.1\r\nContent-Length: 1, 2\r\nTransfer-Encoding: chunked\r\n\r\n1\r\na\r\n0\r\n\r\n", 0)
+    assert(odd_both.failed && odd_both.err == HttpError.BadLength, "two lengths beside chunked")
+    var resp_both = parser(false, "GET", MAX_HEAD, 100)
+    let u = resp_both.advance("HTTP/1.1 200 OK\r\nContent-Length: zz\r\nTransfer-Encoding: chunked\r\n\r\n1\r\na\r\n0\r\n\r\n", 0)
+    assert(resp_both.done() && resp_both.close_after && resp_both.to_response().body == "a", "a response's is ignored")
     var ask = parser(true, "", MAX_HEAD, 100)
     let y = ask.advance("PUT / HTTP/1.1\r\nExpect: 100-Continue\r\nContent-Length: 2\r\n\r\n", 0)
     assert(ask.expect_continue && !ask.done(), "100-continue asked")
@@ -3693,9 +3788,27 @@ fun redirects() {
             None => assert(false, f"{c.0}: a redirect")
         }
     }
-    match redirected(request("GET", "http://a/").with_header("Authorization", "s"), response(302, "").with_header("Location", "http://b/")) {
-        Some(next) => assert(!next.headers.has("Authorization") && next.url == "http://b/", "another host")
+    match redirected(request("GET", "http://a/").with_header("Authorization", "s").with_header("Proxy-Authorization", "p").with_header("Cookie", "c"), response(302, "").with_header("Location", "http://b/")) {
+        Some(next) => {
+            assert(!next.headers.has("Authorization") && next.url == "http://b/", "another host")
+            // the credentials of every kind stay with their host (MYLA-549)
+            assert(!next.headers.has("Proxy-Authorization") && !next.headers.has("Cookie"), "another host's credentials")
+        }
         None => assert(false, "another host")
+    }
+    // a Location without a fragment inherits the request's (RFC 9110,
+    // section 10.2.2; MYLA-549); one with its own keeps it
+    match redirected(request("GET", "http://a/x#top"), response(302, "").with_header("Location", "/y")) {
+        Some(next) => assert(next.url == "http://a/y#top", f"the fragment inherited: {next.url}")
+        None => assert(false, "the fragment inherited")
+    }
+    match redirected(request("GET", "http://a/x#top"), response(302, "").with_header("Location", "http://b/y?q#end")) {
+        Some(next) => assert(next.url == "http://b/y?q#end", f"a fragment of its own: {next.url}")
+        None => assert(false, "a fragment of its own")
+    }
+    match redirected(request("GET", "http://a/x"), response(302, "").with_header("Location", "/y?z")) {
+        Some(next) => assert(next.url == "http://a/y?z", f"no fragment: {next.url}")
+        None => assert(false, "no fragment")
     }
     match redirected(post, response(200, "").with_header("Location", "/x")) {
         Some(_) => assert(false, "200 isn't a redirect")
