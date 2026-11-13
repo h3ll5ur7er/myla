@@ -163,8 +163,6 @@ fun parse_command_line(argv: [str]) -> Result<CommandLine, CliError> {
 }
 
 fun main() {
-    // huge pages for the heap: a check touches megabytes of it (MYLA-608)
-    heap_huge_pages()
     let argv = args()
     if argv.len() < 2 {
         usage()
@@ -183,6 +181,11 @@ fun main() {
         usage()
         exit(2)
     }
+    // huge pages for the heap of a check or a build, which touch megabytes
+    // of it at once (MYLA-608); not for a program the interpreter runs,
+    // whose heap may grow to hundreds of MB in 2 MB pages that are each
+    // zeroed whole, with an occasional stall
+    if cmd == "check" || cmd == "build" { heap_huge_pages() }
     var cl = CommandLine { file: "", opts: load_options(""), output: "", debug: false, checked: false, target: TARGET, deps: false, update: false, name: "", lib: false, tests: all_tests(), native: false, rest: [] }
     match parse_command_line(argv) {
         Ok(c) => { cl = c },
