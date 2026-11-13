@@ -1395,6 +1395,18 @@ fun literal_waits(l: Expr, hint: Option<Type>) -> bool {
     }
 }
 
+// Whether the value `ex` of an arm of an `if` or a `match` is an unsuffixed
+// integer literal, negated or not, past `int32`, with nothing `expected`: it
+// waits for another arm's type, as one beside an operator waits for the
+// other operand's (MYLA-609: `if c { big } else { 5000000000 }`).
+#test(expr_of("5000000000"), None)[true]
+#test(expr_of("-5000000000"), None)[true]
+#test(expr_of("5000000000"), Some(Type.TInt(64, true)))[false]
+#test(expr_of("7"), None)[false]
+fun arm_literal_waits(ex: Expr, expected: Option<Type>) -> bool {
+    return is_none_type(expected) && literal_waits(ex, None)
+}
+
 // A hint that is a hole says nothing.
 #test(Some(Type.TParam("?")))[None]
 #test(Some(Type.TList(Type.TParam("?"))))[Some(Type.TList(Type.TParam("?")))]
@@ -5459,7 +5471,7 @@ impl Checker {
             }
         }
         if vals.len() == 0 { return Err(if_worded(terr_at(e.line, e.col, e.sp, "this match is used as a value, but every arm diverges"), arms)) }
-        let result = match self.unify_match_result(vals) {
+        let result = match self.unify_match_result(vals, expected) {
             Ok(t) => t,
             Err(err) => { return Err(if_worded(err, arms)) },
         }
@@ -5575,6 +5587,8 @@ impl Checker {
         match body {
             ExprOrBlock.EB_Expr(ex) => {
                 if as_stmt { match ex.kind { ExprKind.MatchE(sc, arms) => { self.stmt_match = true }, _ => {} } }
+                // typed by another arm (`unify_match_result`, MYLA-609)
+                if !as_stmt && arm_literal_waits(ex, expected) { return Ok(ArmBody.ABValue(Some(t_int()), Some(ex))) }
                 let t = self.infer(ex, expected)?
                 if is_diverging(ex) { return Ok(ArmBody.ABDiverge) }
                 return Ok(ArmBody.ABValue(t, Some(ex)))
@@ -5598,6 +5612,7 @@ impl Checker {
             if i == n - 1 && !as_stmt {
                 match s.kind {
                     StmtKind.ExprStmt(ex) => {
+                        if arm_literal_waits(ex, expected) { return Ok(ArmBody.ABValue(Some(t_int()), Some(ex))) }
                         let t = self.infer(ex, expected)?
                         if is_diverging(ex) { return Ok(ArmBody.ABDiverge) }
                         return Ok(ArmBody.ABValue(t, Some(ex)))
@@ -5613,9 +5628,18 @@ impl Checker {
         return Ok(ArmBody.ABValue(None, None))
     }
 
-    fun unify_match_result(var self, vals: [MatchVal]) -> Result<Type, CheckErr> {
+    fun unify_match_result(var self, vals: [MatchVal], expected: Option<Type>) -> Result<Type, CheckErr> {
         let first = vals[0].ty
-        var all_eq = true
+        // the arms' literals past `int32` that waited for another arm's
+        // type, an `int32` until they get it (`arm_literal_waits`, MYLA-609)
+        var waited: [bool] = []
+        var any_waited = false
+        for v in vals {
+            let w = match v.node { Some(nd) => arm_literal_waits(nd, expected), None => false }
+            waited.push(w)
+            if w { any_waited = true }
+        }
+        var all_eq = !any_waited
         for v in vals { if !type_eq(v.ty, first) { all_eq = false } }
         if all_eq { return Ok(first) }
         var all_int = true
@@ -5630,8 +5654,11 @@ impl Checker {
             has_target = true }
                 }
             }
+            var k = 0
             for v in vals {
-                if !type_eq(v.ty, target) {
+                // (one that waited is typed by the arm that has a type, or
+                // is its own error in an `int32`)
+                if !type_eq(v.ty, target) || waited[k] {
                     match v.node {
                         Some(nd) => {
                             if is_flexible_int_lit(nd) { self.infer_int_lit(nd, Some(target))? }
@@ -5641,8 +5668,20 @@ impl Checker {
                         None => {},
                     }
                 }
+                k += 1
             }
             return Ok(target)
+        }
+        // beside an arm of another kind, one that waited is its own error
+        var k = 0
+        while k < vals.len() {
+            if waited[k] {
+                match vals[k].node {
+                    Some(nd) => { let t = self.expect_value(nd, None)? },
+                    None => {},
+                }
+            }
+            k += 1
         }
         // floats alike: a float literal arm takes the type another arm fixes
         var all_float = true
@@ -9751,6 +9790,15 @@ fun derived_error_at(src: str) -> (int32, int32, str, bool) {
 // operand's type and the expected one reaches an operator's operands
 #test("fun main() { let big: int64 = 5\nlet u: uint32 = 5\nlet f: float32 = 1.5f32\nlet a = 5000000000 + big\nlet b = -1 == big\nlet c = -2.5 * f\nfor i in u..4294967295 { break }\nlet d = if big > 0 { -1 } else { big } }")[[]]
 #test("fun main() { let u: uint64 = 5\nlet b = -1 == u }")[["integer literal -1 does not fit in 'uint64'"]]
+// an arm's literal past `int32` takes another arm's type, in either arm,
+// negated or not, of an `if` and a `match`; with no typed arm it is the
+// error it was (MYLA-609)
+#test("fun main() { let big: int64 = 5\nlet c = big > 0\nlet a = if c { big } else { 5000000000 }\nlet b = if c { 5000000000 } else { big }\nlet d = if c { -5000000000 } else { big }\nlet e = if c { big } else { let k = 1\n-5000000000 }\nlet f = match c { true => big, false => 5000000000 }\nlet g = match c { true => -5000000000, false => big }\nlet h = match 2 { 1 => 5000000000, 2 => big, _ => -5000000000 }\nlet u: uint64 = 1\nlet v = if c { 10000000000000000000 } else { u } }")[[]]
+#test("fun main() { let c = true\nlet a = if c { 1 } else { 5000000000 } }")[["integer literal 5000000000 does not fit in 'int32'"]]
+#test("fun main() { let c = true\nlet a = match c { true => -5000000000, false => 6000000000 } }")[["integer literal 5000000000 does not fit in 'int32'"]]
+#test("fun main() { let c = true\nlet a = if c { \"x\" } else { 5000000000 } }")[["integer literal 5000000000 does not fit in 'int32'"]]
+#test("fun main() { let small: int8 = 1\nlet a = if small > 0 { small } else { 5000000000 } }")[["integer literal 5000000000 does not fit in 'int8'"]]
+#test("fun main() { let big: int64 = 5\nlet a: int32 = if big > 0 { 1 } else { 5000000000 } }")[["integer literal 5000000000 does not fit in 'int32'"]]
 #test("fun main() { let v: uint8 = -'a' }")[["integer literal -97 (the char literal negated) does not fit in 'uint8'"]]
 #test("struct V<T> { v: T }\nimpl<T: Add> Add for V<T> { fun add(self, other: V<T>) -> V<T> { return V { v: self.v + other.v } } }\nfun main() { let c: V<int64> = V { v: 2 } + V { v: 5 }\nlet d = V { v: 2 } + V { v: 1u8 }\nlet e: uint8 = d.v }")[[]]
 #test("trait Z { fun zero() -> Self }\nimpl Z for int { fun zero() -> int { return 0 } }\nfun f<T>() -> T { return T.zero() }")[["type parameter 'T' has no function 'zero': it has no bounds (write 'T: Trait' to call a trait's functions)"]]

@@ -8769,6 +8769,37 @@ fun main() {
     print(w)
 }
 """,
+    # MYLA-609: an arm's literal past int32 takes another arm's type
+    "arm_literals_past_int32": r"""// MYLA-609: an unsuffixed integer literal past int32 in an arm of an `if`
+// or a `match` takes another arm's type, in either arm, negated or not, as
+// one beside a typed operand does
+fun pick(c: bool, big: int64) -> int64 {
+    let a = if c { big } else { 5000000000 }
+    let b = if c { -5000000000 } else { big }
+    let m = match c { true => 6000000000, false => big }
+    let n = match big {
+        0 => big,
+        1 => -7000000000,
+        _ => {
+            let k = big * 2
+            8000000000
+        },
+    }
+    print(f"{a} {b} {m} {n}")
+    return a + b + m + n
+}
+
+fun main() {
+    print(pick(true, 1))
+    print(pick(false, 0))
+    print(pick(false, 2))
+    let u: uint64 = 1
+    let v = if u > 0 { 10000000000000000000 } else { u }
+    print(v)
+    let w: int64 = if u > 0 { 5000000000 } else { 1 }
+    print(w + 1)
+}
+""",
     # MYLA-417 (C1): a generic actor's getter called from outside
     "actor_getter_of_a_field_s_name": r"""// MYLA-417 (C1): a generic actor's getter of a field's name, called from
 // outside, is the method: the actor's fields are its own methods' only, so
@@ -11710,6 +11741,8 @@ PINNED = {
     "format_method_on_a_builtin_type_parameter": '[5]\n[-005]\n[0x00ff]\n[ffffffffffffffff]\n[1111111111111111111111111111111111111111111111111111111111111111]\n[3.14]\n[   2.500]\n[ λ ]\n[  true]\n[ab***]\n[P!]\nV(+7)\n[V(V( c))]\n1 2  3\na b\n10\n',
     # MYLA-544: new; the same on both runners
     "literals_left_of_typed_operands": '5000000005\n4\nfalse\ntrue\n-3.75\n3\n10\n-1\n1.5\n5000000002\n3\ntrue\n-97\n',
+    # MYLA-609: new (a type error before); the same on both runners
+    "arm_literals_past_int32": '1 -5000000000 6000000000 -7000000000\n-5999999999\n5000000000 0 0 0\n5000000000\n5000000000 2 2 8000000000\n13000000004\n10000000000000000000\n5000000001\n',
     # MYLA-417 (C1): new; the same on both runners
     "actor_getter_of_a_field_s_name": '6\n11\n',
     # MYLA-415 (B1): native code segfaulted (the captured enum deep-copied as a box)
