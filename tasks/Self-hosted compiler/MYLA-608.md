@@ -40,6 +40,8 @@ Recommendation: 2, as it keeps a small program's start as it is. It needs the ru
 
 ### The decision (proposed)
 
+*Accepted by the owner (2026-11-13): as built, decision D205: `myla check` and `build`, `gen_main` and the language server, not a program `myla run` interprets.*
+
 The toolchain opts in with a call of std.rt's at its start, rather than:
 1. huge pages for every program with tasks (option 1): every task program pays 0.2 ms at its start and 2 MiB a worker, measured above;
 2. an environment variable (`MYLA_HUGE_PAGES=1`): the toolchain would need it set by whoever runs it, so the check wouldn't gain by default;

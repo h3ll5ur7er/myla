@@ -52,6 +52,8 @@ There is no `unwrap` in Myla (the skill says to write `expect`, `unwrap_or` or a
 
 ## Proposal (open for the owner): the form
 
+*Accepted by the owner (2026-11-13): as built, decision D203.*
+
 Recommended and built: **an attribute open to every program, `#track_caller`**, with Rust's name and meaning for `panic`, `assert` and `unreachable`. A program's own checking helper (a test's `expect_eq`, a validator) points at its caller as `expect` does, and the cost is one word passed per call of such a function (a `leaq`), nothing elsewhere.
 
 Alternatives:
