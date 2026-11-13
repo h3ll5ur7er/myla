@@ -78,7 +78,7 @@ The jobs run on `ubuntu-24.04` (pinned: `ubuntu-latest` moves, and the burn job 
 | Suite | Tests | Result |
 | --- | --- | --- |
 | Burn | 1,035 (plus subtests; 183 skipped on 2026-11-06: recorded answers about `selfhost/`, `tools/` and `lib/std/` files changed since, by now every one of them, each such file one subtest of the lexer and parser corpus gates; the tree-sitter CLI; a target's tools) | All pass; about 5 minutes in one process with the tools cached, the compiler bootstrapped from the seed and every program built by it |
-| `#test` cases in `selfhost/` | on 1,402 of 2,107 value-returning functions (67 %, `scripts/test_coverage.py`; D109's target is 80 %) | `myla test` passes every one ([[MYLA-184]]) |
+| `#test` cases in `selfhost/` | on 1,475 of 2,347 value-returning functions (63 %, `python3 scripts/test_coverage.py` on 2026-11-12, after round 6's waves; [[Project/Review-2026-11-12]] counted 1,447 of 2,295 before them, and round 4 left 1,402 of 2,107, 67 %; D109's target is 80 %) | `myla test` passes every one ([[MYLA-184]]) |
 
 ## What the Python tests covered
 
