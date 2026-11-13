@@ -37,4 +37,4 @@ Behaviour to decide on (bug or by design):
 - [ ] `IoError` is the only error type of the I/O modules without `Eq` (`r == Err(IoError.NotFound)` is a type error), so `HttpError`, `CompressError` and `ArchiveError` compare by message; nothing documents why
 - [ ] The prelude's `Hasher { state: 0u64 }` can be built by any program
 - [ ] `lexer.my` `scan_fstring` keeps an escaped `{`/`}` (code points 123/125) in a branch that can't run, since `scan_escape` rejects `\{`
-- [ ] New hard keywords have no way in: `tokens.keywords()` is pinned to the retired Python lexer's list (`test_grammar.test_the_keyword_list_is_the_lexer_s`), so every new keyword must be soft as `defer` is; a policy for real keywords needs the owner
+- [ ] New hard keywords have no way in: `tokens.keywords()` is pinned to the retired Python lexer's list (`test_grammar.test_the_keyword_list_is_the_lexer_s`), so every new keyword must be soft as `defer` is; a policy for real keywords needs the owner: [[MYLA-583]]
