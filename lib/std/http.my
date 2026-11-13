@@ -47,8 +47,8 @@ import std.str as str_m
 import std.list as list_m
 import std.option as option_m
 import std.json as json_m
-import std.fs as fs
-import std.num as num
+import std.fs as fs_m
+import std.num as num_m
 
 // --- errors --------------------------------------------------------------------------
 
@@ -886,7 +886,7 @@ impl Request {
     // The path parameter `name` as an integer: a `{name:int}` one's.
     fun param_int(self, name: str) -> Option<int> {
         return match self.param(name) {
-            Some(v) => match num.parse_int32(v) {
+            Some(v) => match num_m.parse_int32(v) {
                 Ok(n) => Some(n),
                 Err(_) => None,
             },
@@ -3679,7 +3679,7 @@ fun file_response(dir: str, rel: Option<str>) -> Response {
     for seg in p.split("/") {
         if seg == ".." || seg == "" { return response(404, "not found") }
     }
-    return match fs.read_bytes(dir + "/" + p) {
+    return match fs_m.read_bytes(dir + "/" + p) {
         Ok(b) => response(200, bytes_m.to_str(b)).with_header("Content-Type", content_type(p)),
         Err(_) => response(404, "not found"),
     }
