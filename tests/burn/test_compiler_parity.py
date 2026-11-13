@@ -7,7 +7,7 @@ import tempfile
 import unittest
 
 from tests.burn._targets import program_excuse
-from tests.burn._tools import selfhost_tool
+from tests.burn._tools import peak_memory, selfhost_tool
 from tests.burn._native import (CAN_BUILD_NATIVE, SKIP_REASON, Program, build_and_run, build_and_run_full, interpret,
                                 native_build, run_argv, run_file_both_now, selfhost_run, write_program)
 
@@ -10922,19 +10922,9 @@ async fun main() {
 
 
 def _peak_kb(argv: list[str], exe: str | None) -> tuple[str, int]:
-    """(stdout, peak resident memory in KB) of running `argv`."""
-    with tempfile.TemporaryFile() as out:
-        pid = os.fork()
-        if pid == 0:
-            try:
-                os.dup2(out.fileno(), 1)
-                os.execvp(exe or argv[0], argv)
-            finally:
-                os._exit(127)
-        _, status, usage = os.wait4(pid, 0)
-        out.seek(0)
-        assert os.waitstatus_to_exitcode(status) == 0
-        return out.read().decode(), usage.ru_maxrss
+    """(stdout, peak resident memory in KB) of running `argv`: the program's
+    own peak, not this process's (MYLA-611)."""
+    return peak_memory(argv, exe)
 
 
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)

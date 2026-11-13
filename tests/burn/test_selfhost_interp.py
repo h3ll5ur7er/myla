@@ -38,7 +38,7 @@ import unittest
 
 from ._golden import NoGolden, answered_or_recorded, golden, recorded_examples
 from ._native import CAN_BUILD_NATIVE
-from ._tools import STDLIB_ROOT, selfhost_tool
+from ._tools import STDLIB_ROOT, peak_memory, selfhost_tool
 
 _REPO = os.path.abspath(
     os.path.join(os.path.dirname(__file__), os.pardir, os.pardir)
@@ -541,19 +541,9 @@ def _wake_ups(pid: int) -> int:
 
 def _peak_mb(cmd: list[str]) -> tuple[str, float]:
     """(stdout, peak resident memory in MB) of running `cmd`, which must
-    succeed."""
-    with tempfile.TemporaryFile() as out:
-        pid = os.fork()
-        if pid == 0:
-            try:
-                os.dup2(out.fileno(), 1)
-                os.execv(cmd[0], cmd)
-            finally:
-                os._exit(127)
-        _, status, usage = os.wait4(pid, 0)
-        out.seek(0)
-        assert os.waitstatus_to_exitcode(status) == 0
-        return out.read().decode(), usage.ru_maxrss / 1024
+    succeed: the program's own peak, not this process's (MYLA-611)."""
+    out, kb = peak_memory(cmd)
+    return out, kb / 1024
 
 
 # A recursion through two call sites (test_generic_recursion_binds_its_types_in_constant_memory).
