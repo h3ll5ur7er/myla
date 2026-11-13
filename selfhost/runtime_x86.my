@@ -521,7 +521,7 @@ impl CodeGen {
             self.raw("\tret")
             self.raw("")
         }
-        // __task_exit: `exit` (%edi the code) when tasks take turns
+        // __task_exit: `exit` (%rdi the code, sign-extended) when tasks take turns
         self.raw("__task_exit:")
         self.raw("\tpushq %rdi")
         self.raw("\tmovslq %edi, %rsi")

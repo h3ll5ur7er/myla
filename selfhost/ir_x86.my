@@ -987,9 +987,11 @@ impl CodeGen {
             Inst.Exit(v) => {
                 // the exit hook, then exit_group (every thread ends, D187); when
                 // tasks take turns, held for the parent if a task other than the
-                // entry's exits
+                // entry's exits. The `int` sign-extended, as every argument
+                // of its type (MYLA-588: `exit(-1)` reached `exit_program`
+                // as 4294967295)
                 self.load_temp(v, "rax", temp_base)
-                self.emit("movl %eax, %edi")
+                self.emit("movslq %eax, %rdi")
                 if self.frames { self.emit("call __task_exit") } else { self.emit("call __exit_program") }
             },
             Inst.Elem(d, c, i, stride, is_str, checked, p) => {
