@@ -2,7 +2,7 @@
 id: MYLA-600
 title: "The interpreter's StringBuilder holds each byte in a word: a 20 MB string takes 280 MB to build"
 type: bug
-status: backlog
+status: in-progress
 priority: low
 labels: [interpreter, memory, performance]
 ---

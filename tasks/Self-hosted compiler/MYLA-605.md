@@ -2,7 +2,7 @@
 id: MYLA-605
 title: "Interpreter: a call of a builtin finds it by comparing its name with each builtin's"
 type: improvement
-status: todo
+status: in-progress
 priority: low
 labels: [interpreter, performance]
 ---

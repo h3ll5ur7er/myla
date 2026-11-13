@@ -2,7 +2,7 @@
 id: MYLA-604
 title: "Interpreter: every turn of the scheduler polls every task that waits for a descriptor"
 type: bug
-status: todo
+status: in-progress
 priority: low
 labels: [interpreter, performance, concurrency]
 ---

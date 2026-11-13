@@ -38,7 +38,7 @@ pub enum Value {
     VEnum(str, str, [Value]),              // enum name, variant, payload
     VList([Value]),
     VMap(MapV),                            // the entries in insertion order, indexed (MYLA-310)
-    VSB([int64]),                          // StringBuilder: raw byte buffer
+    VSB(StringBuilder),                    // a builder's bytes, packed (MYLA-600)
     VClosure([Param], ExprOrBlock, [str], [Value], str, bool),  // params, body, capNames, capVals, funcName, isFunc
     VCompose([Value]),                     // composed functions, applied left-to-right
     VPartial(Value, [Value], [bool]),      // base callable, arg slots, which slots are holes
@@ -297,6 +297,10 @@ pub struct Interp {
     deadlines: [Deadline],
     fired: [bool],
     fd_waits: [FdWait],
+    // when the waits for a descriptor were last looked at while tasks were
+    // ready, and the time until the next look (MYLA-604)
+    fds_seen: int64,
+    fds_gap: int64,
     // MYLA-387: the notifiers, the waits on them (`free_waits`: the slots
     // `__woken` gave back) and those parked now (as native code's
     // `__parked`)
@@ -645,7 +649,7 @@ pub fun new_interp(c: Checker, argv: [str]) -> Interp {
         failing: false, fail_err: None, fail_code: 0,
         on_failure: (r: RtError) => false, fail_reported: false,
         depth: 0,
-        sleepers: [], deadlines: [], fired: [], fd_waits: [], notifs: [], free_notifs: [], notif_seq: 0, pwaits: [], free_waits: [], parked_waits: [], lots: [], sock_tags: [:], parked_socks: 0, lots_seen: 0, lots_gap: LOOK_GAP_MIN, fi_find_from: -1, fi_extend: -1, sleep_seq: 0, virtual_time: false, vclock: 0,
+        sleepers: [], deadlines: [], fired: [], fd_waits: [], fds_seen: 0, fds_gap: LOOK_GAP_MIN, notifs: [], free_notifs: [], notif_seq: 0, pwaits: [], free_waits: [], parked_waits: [], lots: [], sock_tags: [:], parked_socks: 0, lots_seen: 0, lots_gap: LOOK_GAP_MIN, fi_find_from: -1, fi_extend: -1, sleep_seq: 0, virtual_time: false, vclock: 0,
         testing: false, defer_errs: [], captured: [], captured_io: false, test_root: "", test_program: "", checker: c,
         static_calls: c.static_calls, impl_selfs: c.static_selfs, call_types: c.call_types,
         tparams: [], envs: [], env_memo: [:], type_env_memo: [:], env_next: -1, env_fi: -1, env_tail: -1, env_tail_fi: -1,
@@ -1473,19 +1477,17 @@ impl Interp {
                 }
             },
             PlaceOp.OAppend(piece) => {
-                var b = sb_bytes(self.cell)
+                // the builder taken out of its cell, so it is unique and
+                // grows in place
+                var b = sb_of(self.cell)
                 self.cell = Value.VUnit
-                var j = 0
-                while j < piece.len() {
-                    b.push(piece[j] as int64)
-                    j = j + 1
-                }
+                b.append(piece)
                 self.cell = Value.VSB(b)
             },
             PlaceOp.OAppendByte(byte) => {
-                var b = sb_bytes(self.cell)
+                var b = sb_of(self.cell)
                 self.cell = Value.VUnit
-                b.push(byte & 255)
+                b.append_byte((byte & 255) as uint8)
                 self.cell = Value.VSB(b)
             },
         }
@@ -1761,7 +1763,7 @@ impl Interp {
     // ready latest first (fifo: earliest first).
     fun wake_sleepers(var self) {
         if self.deadlines.len() > 0 { self.fire_deadlines() }
-        if self.fd_waits.len() > 0 || self.parked_socks > 0 { let any = self.wake_readers() }
+        if self.fd_waits.len() > 0 || self.parked_socks > 0 { let any = self.wake_readers(self.qlen > 0) }
         if self.sleepers.len() == 0 { return }
         let now = self.now()
         var due: [int32] = []
@@ -1819,23 +1821,45 @@ impl Interp {
 
     // The tasks whose descriptor is readable ready (in the order they began
     // waiting), and the parked sockets that are on their lots
-    // (`wake_parked`); whether there were any.
-    fun wake_readers(var self) -> bool {
+    // (`wake_parked`); whether there were any. A look is a poll a wait, so
+    // while tasks are ready (`busy`) the waits are looked at as the parked
+    // sockets are, at most 1/LOOK_SHARE of the time (a turn cost a poll a
+    // waiting task, MYLA-604); with none ready, at once.
+    fun wake_readers(var self, busy: bool) -> bool {
         var woke = false
         if self.parked_socks > 0 { woke = self.wake_parked() }
         if self.fd_waits.len() == 0 { return woke }
-        var rest: [FdWait] = []
+        var now: int64 = 0
+        if busy {
+            // (the real clock: the virtual one stands still while tasks run)
+            now = __clock_ns()
+            if now - self.fds_seen < self.fds_gap && now >= self.fds_seen { return woke }
+            self.fds_seen = now
+        }
+        // a look that finds none ready copies nothing
+        var hits: [int32] = []
+        var k = 0
         for w in self.fd_waits {
-            if fd_wait_over(w) {
+            if fd_wait_over(w) { hits.push(k) }
+            k = k + 1
+        }
+        if busy { self.fds_gap = look_gap(__clock_ns() - now) }
+        if hits.len() == 0 { return woke }
+        var rest: [FdWait] = []
+        var hi = 0
+        k = 0
+        for w in self.fd_waits {
+            if hi < hits.len() && hits[hi] == k {
                 self.tasks[w.task].state = 0
                 self.ready(w.task)
-                woke = true
+                hi = hi + 1
             } else {
                 rest.push(w)
             }
+            k = k + 1
         }
         self.fd_waits = rest
-        return woke
+        return true
     }
 
     // The sockets parked on the lots that became readable moved to their
@@ -1952,7 +1976,7 @@ impl Interp {
             // a millisecond at a time, until input or the next sleeper's time
             // (the virtual clock moves only once no input came)
             while true {
-                if self.wake_readers() { return true }
+                if self.wake_readers(false) { return true }
                 if (self.sleepers.len() > 0 || self.deadlines.len() > 0) && self.virtual_time { break }
                 var due = false
                 for s in self.sleepers {
@@ -2289,17 +2313,29 @@ impl Interp {
         self.frames[top].conts.pop()
     }
 
-    // The task `id` and its children, cancelled: each stops when it next runs.
+    // The task `id` and its children, cancelled: each stops when it next
+    // runs, one asleep or waiting for input or a notifier at once (MYLA-620:
+    // the entry's `exit` waited for a child's sleep or input, natively not).
     fun cancel_task(var self, id: int32) {
         if self.tasks[id].cancelled { return }
         self.tasks[id].cancelled = true
+        self.wake_to_stop(id)
         for k in self.tasks[id].kids { self.cancel_task(k) }
     }
 
     // `task.cancel` of the task `id`: it and its children asked to stop (D96).
     fun request_cancel(var self, id: int32) {
         self.tasks[id].requested = true
-        // asleep, it wakes at once (D124); waiting for input, too
+        self.wake_to_stop(id)
+        for k in self.tasks[id].kids { self.request_cancel(k) }
+    }
+
+    // The task `id`, asked to stop, ready if it waits: asleep, it wakes at
+    // once (D124); waiting for input, too; waiting on a notifier (MYLA-387),
+    // the wait cancelled.
+    fun wake_to_stop(var self, id: int32) {
+        // (only a waiting task is on these lists)
+        if self.tasks[id].state != 1 { return }
         var i = 0
         while i < self.sleepers.len() {
             if self.sleepers[i].task == id { self.sleepers[i].at = -1 }
@@ -2317,14 +2353,12 @@ impl Interp {
             }
             self.fd_waits = rest
         }
-        // waiting on a notifier (MYLA-387): the wait cancelled, ready
         for wi in self.parked_waits {
             if self.pwaits[wi].task == id {
                 self.unpark(wi, 4, true)
                 self.ready(id)
             }
         }
-        for k in self.tasks[id].kids { self.request_cancel(k) }
     }
 
     // -- notifiers (MYLA-387) -------------------------------------------
@@ -5336,10 +5370,11 @@ impl Interp {
         if nm == "chars" { return decode_chars(as_str(self.eval(args[0]))) }
         if nm == "format" { return self.eval_format(args) }
         if nm == "StringBuilder" {
-            // a capacity (MYLA-369) is evaluated; the interpreter's buffer
-            // grows as a list does
-            for a in args { self.eval(a) }
-            return Value.VSB(empty_bytes())
+            // with a capacity (MYLA-369), room for as many bytes, as natively
+            if args.len() == 0 { return Value.VSB(StringBuilder()) }
+            let n = as_int(self.eval(args[0]))
+            if self.stop() { return Value.VUnit }
+            return Value.VSB(StringBuilder(n as int32))
         }
         if nm == "append" {
             let p = self.place_of(args[0])
@@ -6326,14 +6361,20 @@ fun struct_values(v: Value) -> [Value] {
     }
 }
 
-#test(Value.VSB([]))[[]]
-#test(Value.VSB([48, 49, 50, 51]))[[48, 49, 50, 51]]
-#test(Value.VSB([72, 101, 108, 108, 111, 44, 32, 119, 111, 114, 108, 100]))[[72, 101, 108, 108, 111, 44, 32, 119, 111, 114, 108, 100]]
-fun sb_bytes(v: Value) -> [int64] {
+// A builder's value (`Value.VSB`); an empty one for any other value
+// (builders have no `==`: `sb_build`'s cases are its).
+fun sb_of(v: Value) -> StringBuilder {
     return match v {
         Value.VSB(b) => b,
-        _ => empty_bytes(),
+        _ => StringBuilder(),
     }
+}
+
+// A builder that holds `s` (for the cases).
+fun sb_holding(s: str) -> Value {
+    var b = StringBuilder(s.len())
+    b.append(s)
+    return Value.VSB(b)
 }
 
 // A map's entries (`Value.VMap`, MYLA-310): its keys and values in the
@@ -6720,33 +6761,14 @@ fun utf8_at(s: str, i: int32) -> int64 {
     return cp | ((need as int64) << 32)
 }
 
-#test()[[]]
-fun empty_bytes() -> [int64] {
-    let x: [int64] = []
-    return x
-}
-
-#test(Value.VSB([]))[""]
-#test(Value.VSB([48, 49, 50, 51, 52]))["01234"]
-#test(Value.VSB([72, 101, 108, 108, 111, 44, 32, 119, 111, 114, 108, 100, 33]))["Hello, world!"]
+#test(Value.VSB(StringBuilder()))[""]
+#test(sb_holding("01234"))["01234"]
+#test(sb_holding("Hello, world!"))["Hello, world!"]
 fun sb_build(c: Value) -> str {
     return match c {
-        Value.VSB(b) => bytes_to_str(b),
+        Value.VSB(b) => b.build(),
         _ => "",
     }
-}
-
-#test([])[""]
-#test([48, 49, 50, 51, 52])["01234"]
-#test([72, 101, 108, 108, 111, 44, 32, 119, 111, 114, 108, 100, 33])["Hello, world!"]
-fun bytes_to_str(b: [int64]) -> str {
-    var sb = StringBuilder()
-    var i = 0
-    while i < b.len() {
-        sb.append_byte(b[i] as uint8)
-        i = i + 1
-    }
-    return sb.build()
 }
 
 #test("{}€", ["6"])["6€"]
@@ -6871,6 +6893,7 @@ fun value_eq(a: Value, b: Value) -> bool {
 #test(Value.VEnum("E", "B", [Value.VStr("it's")]))["E.B(\"it's\")"]
 // (Also the key in a "map key … not found" message.)
 #test(Value.VStr("a b"))["'a\\xa0b'"]
+#test(sb_holding("a'b"))["StringBuilder(b\"a'b\")"]
 pub fun py_repr(v: Value) -> str {
     return match v {
         Value.VInt(i) => format("{}", i),
@@ -6885,7 +6908,7 @@ pub fun py_repr(v: Value) -> str {
         Value.VList(xs) => "[" + reprs(xs) + "]",
         Value.VBytes(s) => "[" + reprs(byte_values(s)) + "]",
         Value.VMap(m) => map_repr(map_keys_of(m), map_vals_of(m)),
-        Value.VSB(bs) => "StringBuilder(" + bytes_repr(bs) + ")",
+        Value.VSB(b) => "StringBuilder(" + bytes_repr(b.build()) + ")",
         Value.VClosure(ps, body, cn, cv, fname, is_func) => format("<closure {} param(s), {} capture(s)>", ps.len(), cn.len()),
         _ => "<function>",
     }
@@ -7079,20 +7102,25 @@ fun map_repr(ks: [Value], vs: [Value]) -> str {
 }
 
 // Python's repr of bytes: b'…' with printable ASCII as is.
-#test([])["b''"]
-#test([0, 1])["b'\\x00\\x01'"]
-fun bytes_repr(bs: [int64]) -> str {
+#test("")["b''"]
+#test("\0\u{1}")["b'\\x00\\x01'"]
+fun bytes_repr(bs: str) -> str {
     var has_single = false
     var has_double = false
-    for b in bs {
-        if b == 39 { has_single = true }
-        if b == 34 { has_double = true }
+    var i = 0
+    while i < bs.len() {
+        if bs[i] == 39 { has_single = true }
+        if bs[i] == 34 { has_double = true }
+        i += 1
     }
     var quote: int64 = 39
     if has_single && !has_double { quote = 34 }
     var sb = StringBuilder()
     sb.append("b" + cp_utf8(quote as int32))
-    for b in bs {
+    i = 0
+    while i < bs.len() {
+        let b = bs[i] as int64
+        i += 1
         if b == quote || b == 92 {
             sb.append("\\" + cp_utf8(b as int32))
         } else if b == 9 {
