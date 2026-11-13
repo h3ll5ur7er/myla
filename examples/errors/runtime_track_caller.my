@@ -1,0 +1,21 @@
+//~ runtime error: a percentage is 0 to 100, not 140
+//~ native: runtime error: a percentage is 0 to 100, not 140
+//~ span: percent(140)
+// `#track_caller` (MYLA-435): the function's `panic`, `assert` and
+// `unreachable` report the position of its call, and a call from one such
+// function to another passes its own caller's on.
+#track_caller
+fun check_percent(p: int) {
+    assert(p >= 0 && p <= 100, f"a percentage is 0 to 100, not {p}")
+}
+
+#track_caller
+fun percent(p: int) -> float {
+    check_percent(p)
+    return p as float / 100.0
+}
+
+fun main() {
+    print(percent(40))
+    print(percent(140))
+}

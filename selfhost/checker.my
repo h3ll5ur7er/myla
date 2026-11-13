@@ -3544,6 +3544,12 @@ impl Checker {
                     else if no_self && self.enum_has_variant(key, m.name) { bad = Some(terr_at(m.line, m.col, m.sp, format("function '{}' collides with a variant of '{}': '{}.{}()' would build the variant", m.name, key, key, m.name))) }
                 },
             }
+            // a trait's method is called through a bound too, which passes
+            // no caller's position (MYLA-435)
+            match track_attr(m.attributes) {
+                Some(a) => { if have_trait { self.record(terr_at(a.line, a.col, a.sp, "'#track_caller' can't stand on a method of a trait's impl"))? } },
+                None => {},
+            }
             match bad {
                 Some(e) => { self.record(e)? },
                 None => { self.register_method(target_te, key, tps, m, decl.id)? },
@@ -4109,6 +4115,7 @@ impl Checker {
         let idx = self.func_idx(ident)
         let sig = self.functions[idx]
         if sig.type_params.len() > 0 { return Err(terr_at(e.line, e.col, e.sp, format("generic function '{}' cannot be used as a value (its type parameters are unresolved)", ident))) }
+        if tracks_caller(sig.decl) { return Err(tracked_as_value(e, ident)) }
         return Ok(func_type(sig.params, sig.ret, sig.decl.is_async))
     }
 
@@ -6499,6 +6506,9 @@ impl Checker {
         }
         if kind == "value" && !self.in_param(callee) { return Err(terr_at(callee.line, callee.col, callee.sp, "'become' can only call a function value that is (a part of) a parameter")) }
         let target = self.call_target
+        // its frame goes, and the caller's position with it (MYLA-435)
+        let tfi = self.func_idx(target)
+        if kind != "value" && tfi >= 0 && tracks_caller(self.functions[tfi].decl) { return Err(terr_at(ve.line, ve.col, ve.sp, format("'become' can't call '{}', which reports its caller's position ('#track_caller')", target))) }
         var all: [Expr] = []
         match callee.kind {
             ExprKind.GetField(recv, f) => {
@@ -8354,6 +8364,28 @@ fun allow_attrs(attrs: [Attribute]) -> [Attribute] {
     return out
 }
 
+// The `#track_caller` attribute among `attrs`, if any (MYLA-435).
+fun track_attr(attrs: [Attribute]) -> Option<Attribute> {
+    for a in attrs { if a.name == "track_caller" { return Some(a) } }
+    return None
+}
+
+// Whether the function `fd` reports its caller's position (`#track_caller`,
+// MYLA-435): its `panic`, `assert` and `unreachable` report where it was
+// called, which each call passes it (the interpreter in its frame, native
+// code as a hidden last argument).
+#test(fun_of("fun g() { print(1) }"))[false]
+pub fun tracks_caller(fd: FunData) -> bool {
+    for a in fd.attributes { if a.name == "track_caller" { return true } }
+    return false
+}
+
+// The error for a `#track_caller` function `name` used as a value at `e`:
+// a function value has no place for its caller's position (MYLA-435).
+fun tracked_as_value(e: Expr, name: str) -> CheckErr {
+    return with_notes(terr_at(e.line, e.col, e.sp, format("'{}' reports its caller's position ('#track_caller'): it can only be called", name)), [Note { label: "help", msg: format("call it in a lambda: '(…) => {}(…)'", name), line: 0, col: 0, sp: no_span() }])
+}
+
 fun concat_attrs(a: [Attribute], b: [Attribute]) -> [Attribute] {
     var out = a
     for x in b { out.push(x) }
@@ -8851,6 +8883,16 @@ impl Checker {
                 self.reset_state(self.functions[ei].decl_id)
                 self.note(terr_at(d.line, d.col, d.sp, "entry point must take no parameters"))
             }
+            // nothing calls it but the program's start (MYLA-435)
+            if ei >= 0 {
+                match track_attr(self.functions[ei].decl.attributes) {
+                    Some(a) => {
+                        self.reset_state(self.functions[ei].decl_id)
+                        self.note(terr_at(a.line, a.col, a.sp, "the entry point has no caller: '#track_caller' can't stand on it"))
+                    },
+                    None => {},
+                }
+            }
         }
     }
 
@@ -8868,7 +8910,11 @@ impl Checker {
                 self.check_allow(attr)?
                 continue
             }
-            if attr.name != "main" && attr.name != "test" { return Err(terr_at(attr.line, attr.col, attr.sp, format("unknown attribute '#{}'", attr.name))) }
+            if attr.name == "track_caller" && is_fun {
+                match decl.kind { DeclKind.FunDecl(fd) => { self.check_track_caller(fd, attr, "")? }, _ => {} }
+                continue
+            }
+            if attr.name != "main" && attr.name != "test" && attr.name != "track_caller" { return Err(terr_at(attr.line, attr.col, attr.sp, format("unknown attribute '#{}'", attr.name))) }
             if !is_fun { return Err(terr_at(attr.line, attr.col, attr.sp, format("attribute '#{}' may only be applied to functions", attr.name))) }
             match decl.kind {
                 DeclKind.FunDecl(fd) => {
@@ -8896,12 +8942,28 @@ impl Checker {
                 self.check_allow(attr)?
                 continue
             }
-            if attr.name != "test" { return Err(terr_at(attr.line, attr.col, attr.sp, format("attribute '#{}' can't be applied to a method (a method takes only '#test' and '#allow')", attr.name))) }
+            if attr.name == "track_caller" {
+                self.check_track_caller(fd, attr, key)?
+                continue
+            }
+            if attr.name != "test" { return Err(terr_at(attr.line, attr.col, attr.sp, format("attribute '#{}' can't be applied to a method (a method takes only '#test', '#allow' and '#track_caller')", attr.name))) }
             if self.actors.contains(key) { return Err(terr_at(attr.line, attr.col, attr.sp, "'#test' can't run an actor method (its receiver is an actor, not a value)")) }
             if fd.is_async { return Err(terr_at(attr.line, attr.col, attr.sp, "'#test' can't run an async method (test it through an async test function, D162)")) }
             if fd.type_params.len() > 0 { return Err(terr_at(attr.line, attr.col, attr.sp, "attribute '#test' cannot be applied to a generic method (it has no single concrete instantiation)")) }
             self.check_test_attr(fd, attr)?
         }
+        return Ok(0)
+    }
+
+    // `#track_caller` (MYLA-435) on the function or method `fd` (of the type
+    // `key`, "" for a function): no arguments, and only where each call can
+    // pass the caller's position (a trait's method, called through a bound,
+    // is refused where its impl is read).
+    fun check_track_caller(var self, fd: FunData, attr: Attribute, key: str) -> Result<int32, CheckErr> {
+        let none = match attr.outputs { Some(x) => false, None => true }
+        if attr.args.len() > 0 || !none { return Err(terr_at(attr.line, attr.col, attr.sp, "'#track_caller' takes no arguments")) }
+        if key != "" && self.actors.contains(key) { return Err(terr_at(attr.line, attr.col, attr.sp, "'#track_caller' can't stand on an actor's method")) }
+        if fd.is_async { return Err(terr_at(attr.line, attr.col, attr.sp, "'#track_caller' can't stand on an async function")) }
         return Ok(0)
     }
 
@@ -11388,6 +11450,7 @@ impl Checker {
         let sig = self.functions[fi]
         if sig.type_params.len() > 0 { return Err(terr_at(e.line, e.col, e.sp, format("cannot partially apply the generic function '{}'", nm))) }
         if sig.decl.is_async { return Err(terr_at(e.line, e.col, e.sp, "an async function can't be partially applied")) }
+        if tracks_caller(sig.decl) { return Err(tracked_as_value(e, nm)) }
         return Ok(PartialTgt { params: sig.params, ret: sig.ret, name: nm })
     }
 
@@ -11424,6 +11487,7 @@ impl Checker {
                     Some(sig) => {
                         if sig.type_params.len() > 0 { return Err(terr_at(e.line, e.col, e.sp, format("cannot partially apply the generic method '{}'", field))) }
                         if sig.decl.is_async || self.is_actor(k) { return Err(terr_at(e.line, e.col, e.sp, "an async function can't be partially applied")) }
+                        if tracks_caller(sig.decl) { return Err(tracked_as_value(e, field)) }
                         var rest: [Type] = []
                         var i = 1
                         while i < sig.params.len() {

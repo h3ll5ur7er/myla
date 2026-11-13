@@ -9,7 +9,7 @@
 
 from .ast import Expr, ExprKind, Stmt, StmtKind, Block, Decl, DeclKind, FunData, Param, MatchArm, Pattern, PatternKind, FieldPat, BindElem, ExprOrBlock, ElseTail, FieldInit, MapEntry, Attribute, TypeExpr, TypeKind, TypeParam, bind_elems, names_in_expr, names_in_block, Expected, expected_failure, is_unread_body
 from .tokens import SrcSpan, no_span
-from .checker import is_notify_primitive
+from .checker import is_notify_primitive, tracks_caller
 from .checker import Checker, Type, Subst, subst_type, subst_get, unify_param, type_name, is_raw_memory_primitive, is_net_primitive, is_lot_primitive, is_term_primitive, checker_on, builtin_method, builtin_method_name, is_wrapping_method, add_overflows, sub_overflows, mul_overflows, int_min, int_neg_overflows, shift_out_of_range, is_slice_expr, from_end_of, slice_parts, is_hole_part
 from .anf import Norm, new_norm, stmt_suspends, body_suspends
 from .util import cp_utf8, format_specs, written_type_name
@@ -227,6 +227,13 @@ pub struct Interp {
     func_names: [str],
     func_ix: [str: int32],
     func_decls: [FunData],
+    // MYLA-435: whether each reports its caller's position (`#track_caller`);
+    // the call the next one entered reports (`caller_next`, a node of
+    // `call_sites`, for `caller_fi`)
+    tracks: [bool],
+    caller_next: int32,
+    caller_fi: int32,
+    call_sites: [int32: Expr],
     // the structs and enums with an `eq` written for them, and those with a
     // `hash` written for them (not derived), by name (D163, MYLA-313);
     // whether one of those is a generic impl's, whose frame the interpreter
@@ -622,7 +629,7 @@ pub fun new_interp(c: Checker, argv: [str]) -> Interp {
     var it = Interp {
         decls: c.decls,
         resolved: c.resolved,
-        func_names: [], func_ix: [:], func_decls: [], own_eq: [:], own_hash: [:], typed_keys: false,
+        func_names: [], func_ix: [:], func_decls: [], tracks: [], caller_next: -1, caller_fi: -1, call_sites: [:], own_eq: [:], own_hash: [:], typed_keys: false,
         const_names: [], const_vals: [], const_ix: [:],
         enum_names: [], enum_ix: [:], variant_ix: [:], nullary_ix: [:],
         scopes: [],
@@ -763,6 +770,7 @@ impl Interp {
         if !self.func_ix.contains(name) { self.func_ix[name] = self.func_names.len() }
         self.func_names.push(name)
         self.func_decls.push(fd)
+        self.tracks.push(tracks_caller(fd))
     }
 
     #test(interp_on("[int]"), "inc")[-1]
@@ -3868,6 +3876,7 @@ impl Interp {
                 // bound after `settle`: a key's written `hash` or `eq` it
                 // runs would take the binding (the 2026-11-12 review's B6)
                 self.bind_next(fi, e.id, self.resolved_of(recv.id))
+                self.note_caller(fi, e)
                 let (r, final_self) = self.call_with_receiver(fi, argv)
                 self.write_place(place, final_self)
                 // an async body deferred: its `self` goes back here when it ends
@@ -3875,6 +3884,7 @@ impl Interp {
                 return r
             }
             self.bind_next(fi, e.id, self.resolved_of(recv.id))
+            self.note_caller(fi, e)
             let (r, fs) = self.call_method(fi, rv, argv)
             return r
         }
@@ -3984,6 +3994,7 @@ impl Interp {
             return Value.VUnit
         }
         self.bind_next(fi, e.id, Some(t))
+        self.note_caller(fi, e)
         return self.call_func(fi, argv)
     }
 
@@ -4120,10 +4131,50 @@ impl Interp {
     // Bind the type parameters `env_next` gives in the frame of function
     // `fi` just made, as its first variable.
     fun bind_types(var self, fi: int32) {
+        self.bind_caller(fi)
         let k = self.env_next
         self.env_next = -1
         if k < 0 || self.env_fi != fi { return }
         self.define("%env", Value.VInt(k as int64))
+    }
+
+    // The call `e` of function `fi` is about to enter it: when `fi`
+    // reports its caller's position (`#track_caller`, MYLA-435), that is
+    // the call's, or the running function's own caller's when it reports
+    // one too, which `bind_caller` binds in its frame.
+    fun note_caller(var self, fi: int32, e: Expr) {
+        if fi < 0 || !self.tracks[fi] { return }
+        var at = e.id
+        match self.lookup("%caller") {
+            Some(v) => { at = as_int(v) as int32 },
+            None => { self.call_sites[e.id] = e },
+        }
+        self.caller_next = at
+        self.caller_fi = fi
+    }
+
+    // The caller's position `note_caller` found, as the variable `%caller`
+    // of function `fi`'s frame just made.
+    fun bind_caller(var self, fi: int32) {
+        let at = self.caller_next
+        self.caller_next = -1
+        if at < 0 || self.caller_fi != fi { return }
+        self.define("%caller", Value.VInt(at as int64))
+    }
+
+    // Where a `panic`, `assert` or `unreachable` at `e` fails: in a function
+    // that reports its caller's position, at its call (MYLA-435).
+    fun failure_at(self, e: Expr) -> Expr {
+        match self.lookup("%caller") {
+            Some(v) => {
+                match self.call_sites.get(as_int(v) as int32) {
+                    Some(c) => { return c },
+                    None => {},
+                }
+            },
+            None => {},
+        }
+        return e
     }
 
     // The runtime method-dispatch key for a receiver: its checker-resolved type
@@ -5281,17 +5332,17 @@ impl Interp {
             if !ok && !self.stop() {
                 var msg = "assertion failed"
                 if args.len() == 2 { msg = as_str(self.eval(args[1])) }
-                self.fail(e, msg)
+                self.fail(self.failure_at(e), msg)
             }
             return Value.VUnit
         }
         if nm == "panic" {
             let msg = as_str(self.eval(args[0]))
-            self.fail(e, msg)
+            self.fail(self.failure_at(e), msg)
             return Value.VUnit
         }
         if nm == "unreachable" {
-            self.fail(e, "reached unreachable code")
+            self.fail(self.failure_at(e), "reached unreachable code")
             return Value.VUnit
         }
         if nm == "len" { return Value.VInt(value_len(self.eval(args[0]))) }
@@ -5403,6 +5454,7 @@ impl Interp {
         if fi >= 0 {
             let argv = self.eval_args(args)
             self.bind_next(fi, e.id, None)
+            self.note_caller(fi, e)
             return self.call_func(fi, argv)
         }
         // what the checker accepted, the interpreter couldn't find: an
