@@ -11287,6 +11287,72 @@ class TestCompilerParity(unittest.TestCase):
                 self.assertTrue(lines[1].startswith("  --> "), err)
                 self.assertEqual(build_and_run_full(Program(path), entry_path=path), (out, "\n".join(lines[:2]) + "\n", 1))
 
+    def test_track_caller_reports_the_callers_position(self):
+        # MYLA-435: a `#track_caller` function's `panic`, `assert` and
+        # `unreachable` report where it was called, on every runner (a
+        # call from one such function to another passes its caller's on);
+        # std.option's `expect`s and std.args' spec checks are such. Each
+        # case: its program's `main`, the call or index its error points
+        # at (at its first bracket, as every runtime error at a call does)
+        # and its message
+        tracked = ("#track_caller\nfun must(ok: bool, why: str) {\n    if !ok { panic(why) }\n}\n"
+                   "#track_caller\nfun never() -> int {\n    unreachable()\n}\n"
+                   "#track_caller\nfun outer(x: Option<int>) -> int {\n    must(true, \"\")\n    return x.expect(\"outer\")\n}\n"
+                   "fun middle(x: Option<int>) -> int {\n    return x.expect(\"middle\")\n}\n"
+                   "#track_caller\nfun via_middle(x: Option<int>) -> int {\n    return middle(x)\n}\n"
+                   "#track_caller\nfun first(xs: [int]) -> int {\n    return xs[0]\n}\n"
+                   "#track_caller\nfun in_lambda(x: int) -> int {\n    let f = (y: int) => {\n"
+                   "        assert(y < 10, \"big\")\n        return y\n    }\n    return f(x)\n}\n"
+                   "struct Box<T> {\n    v: Option<T>,\n}\n"
+                   "impl<T> Box<T> {\n    #track_caller\n    fun get(self) -> T {\n        return self.v.expect(\"an empty box\")\n    }\n}\n"
+                   "#track_caller\nfun pick<T>(xs: [T], i: int) -> T {\n    assert(i < xs.len(), f\"no {i}\")\n    return xs[i]\n}\n")
+        lib = "#track_caller\npub fun checked_half(n: int) -> int {\n    assert(n % 2 == 0, \"odd\")\n    return n / 2\n}\n"
+        main = "from .lib import checked_half\n" + tracked + "fun main() {\n    print(1)\n    {body}\n}\n"
+        cases = {
+            "option_expect": ("let o: Option<int> = None\n    print(o.expect(\"none here\"))", "expect(\"none here\")", "none here"),
+            "result_expect": ("let r: Result<int, str> = Err(\"e\")\n    print(r.expect(\"an error\"))", "expect(\"an error\")", "an error"),
+            "panic": ("must(1 > 2, \"no\")", "must(1 > 2", "no"),
+            "unreachable": ("print(never())", "never())", "reached unreachable code"),
+            "through_a_tracked_function": ("print(outer(None))", "outer(None)", "outer"),
+            "through_an_untracked_one": ("print(via_middle(None))", "expect(\"middle\")", "middle"),
+            "a_method_of_a_generic_type": ("let b: Box<str> = Box { v: None }\n    print(b.get())", "get())", "an empty box"),
+            "a_generic_function": ("print(pick([\"a\"], 3))", "pick([\"a\"]", "no 3"),
+            "a_module_of_its_own": ("print(checked_half(4))\n    print(checked_half(7))", "checked_half(7)", "odd"),
+            # an index's error is the function's own, and a lambda's
+            # failure its own position
+            "an_index": ("let xs: [int] = []\n    print(first(xs))", "xs[0]", "list index 0 out of bounds (len 0)"),
+            "a_lambda_inside": ("print(in_lambda(12))", "assert(y < 10", "big"),
+            # a whole program
+            "in_a_task": ("async fun work(o: Option<int>) -> int {\n    return o.expect(\"in a task\")\n}\n\n"
+                          "#main\nasync fun main() {\n    print(await work(Some(1)))\n    print(await work(None))\n}\n",
+                          "expect(\"in a task\")", "in a task"),
+            # std.args: a spec it can't read, an argument the spec doesn't
+            # declare (through `get_or`, which calls `get`; MYLA-553)
+            "an_args_spec": ("import std.args as args\n\nfun main() {\n    let s = args.spec(\"t\").option(\"out\", 'o')\n"
+                             "    print(s.flag(\"verbose\", 'o').usage())\n}\n",
+                             "flag(\"verbose\"", "args: '-o' is declared twice (--out and --verbose)"),
+            "an_undeclared_argument": ("import std.args as args\n\nfun main() {\n    let s = args.spec(\"t\").option(\"out\", 'o')\n"
+                                       "    let a = args.parse(s, [\"-o\", \"x\"]).expect(\"parsed\")\n"
+                                       "    print(a.get_or(\"out\", \"\"))\n    print(a.get_or(\"in\", \"\"))\n}\n",
+                                       "get_or(\"in\"", "args: 'in' is not an argument of the spec"),
+        }
+        for name, (body, needle, message) in cases.items():
+            with self.subTest(case=name), tempfile.TemporaryDirectory() as tmp:
+                write_program(tmp, lib, "lib.my")
+                source = body if "fun main" in body else main.replace("{body}", body)
+                path = write_program(tmp, source)
+                lines = source.splitlines()
+                bracket = min(needle.index(c) for c in "([" if c in needle)
+                at = [(i + 1, line.index(needle) + bracket + 1) for i, line in enumerate(lines) if needle in line]
+                self.assertEqual(len(at), 1, needle)
+                out, err, code = selfhost_run(path)
+                self.assertEqual(code, 1, err)
+                self.assertEqual(err.splitlines()[:2], [f"runtime error: {message}", f"  --> {path}:{at[0][0]}:{at[0][1]}"])
+                self.assertEqual(build_and_run_full(Program(path), entry_path=path), (out, "\n".join(err.splitlines()[:2]) + "\n", 1))
+                if name in ("option_expect", "through_a_tracked_function", "in_a_task"):
+                    self.assertEqual(build_and_run_full(Program(path), entry_path=path, checked=True),
+                                     (out, "\n".join(err.splitlines()[:2]) + "\n", 1))
+
     def test_become_runs_a_million_deep(self):
         # MYLA-128, MYLA-131: every `become` of the parity programs jumps, so
         # they run a million calls deep in the default stack

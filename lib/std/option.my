@@ -72,7 +72,9 @@ impl<T> Option<T> {
         }
     }
 
-    // The `Some`'s value; a `None` fails with `msg` (`panic`).
+    // The `Some`'s value; a `None` fails with `msg` (`panic`), at the call
+    // (`#track_caller`, MYLA-435).
+    #track_caller
     fun expect(self, msg: str) -> T {
         return match self {
             Some(v) => v
@@ -145,8 +147,10 @@ impl<T, E> Result<T, E> {
         }
     }
 
-    // The `Ok`'s value; an `Err` fails with `msg` (`panic`). Unlike Rust's,
-    // the message doesn't show the error, which may have no `Format`.
+    // The `Ok`'s value; an `Err` fails with `msg` (`panic`), at the call
+    // (`#track_caller`, MYLA-435). Unlike Rust's, the message doesn't show
+    // the error, which may have no `Format`.
+    #track_caller
     fun expect(self, msg: str) -> T {
         return match self {
             Ok(v) => v

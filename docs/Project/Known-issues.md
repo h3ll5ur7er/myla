@@ -42,7 +42,6 @@ The targets are x86-64 and aarch64 Linux and wasm32 on WASI; macOS and Windows a
 
 ## Standard library
 
-- A failing `opt.expect("…")` points into `lib/std/option.my`, not at its caller ([[MYLA-435]]).
 - **std.http:** one byte per socket stops a default server, as a request that has begun holds a worker for `read_ms` ([[MYLA-549]]).
 - **std.xml:** the stream reader holds back a complete event until more bytes arrive ([[MYLA-460]]).
 - **D184 leftovers:** `std.yaml` traps on a hex scalar past `int64`, a buffered seek and `bigint.bit_len` overflow, `archive.zip_read` has no output limit ([[MYLA-550]]).
