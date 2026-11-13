@@ -144,6 +144,87 @@ A worker reads what the socket has and sends what it takes without waiting; a re
 
 What the server writes: the status line (`HTTP/1.1`, the response's `reason` or the status's standard phrase), the response's headers but its framing, then `Content-Length`, or `Transfer-Encoding: chunked` with the trailers when the response has trailers and the client speaks HTTP/1.1; `Connection: close` when it closes, `Connection: keep-alive` to an HTTP/1.0 client it keeps. A `HEAD` gets the head alone, with the body's length (or the response's own `Content-Length`). 1xx, 204 and 304 have no body. A request with `Expect: 100-continue` gets `100 Continue` before its body is read. A request that can't be read is answered with its status and closed: 400 (malformed, no `Host` in HTTP/1.1, two `Host` fields or one that isn't a host and port), 408 (not read within `read_ms`), 413, 431, 501 (a transfer coding other than chunked), 505 (HTTP/2 and others); a response the handler made that can't be sent (a header with CR or LF) is a 500.
 
+## The router
+
+A router answers each request with the route that matches it best (D202, [[MYLA-613]]): a route is a method, a path pattern and a handler, `(Request) -> Response`; a router holds its routes under a base path and is a handler itself (`r.handler()`), so it is what `serve` takes, routers nest (`mount`), static files are a route (`static_files`) and middleware is a function from a handler to a handler (`wrap`). Typed endpoints are functions of `#derive(Json)` types ([[Language/Standard-library/Json]]) that `json` and `json_body` make handlers of.
+
+```myla
+import std.http as http
+from std.http import Request, Response
+
+#derive(Json)
+struct User {
+    id: int,
+    name: str,
+}
+
+#derive(Json)
+struct NewUser {
+    name: str,
+}
+
+fun get_user(req: Request) -> Result<User, Response> {
+    let id = req.param_int("id").unwrap_or(0)
+    if id == 7 { return Ok(User { id: 7, name: "ada" }) }
+    return Err(http.json_error(404, f"no user {id}"))
+}
+
+fun create_user(req: Request, u: NewUser) -> Result<User, Response> {
+    return Ok(User { id: 8, name: u.name })
+}
+
+fun logged(next: (Request) -> Response) -> (Request) -> Response {
+    return (req: Request) => {
+        let resp = next(req)
+        print(f"{req.method} {req.path()} -> {resp.status}")
+        return resp
+    }
+}
+
+fun main() {
+    var api = http.router("/api")
+    api.get("/users/{id:int}", http.json(get_user))
+    api.post("/users", http.json_body(create_user))
+    var app = http.router("")
+    app.get("/", (req: Request) => http.response(200, "home"))
+    app.mount(api)
+    app.wrap(logged)
+    let h = app.handler()
+    // `await http.serve(addr, h)` serves it; here it is called directly
+    print(h(http.request("GET", "/api/users/7")).text())
+    let created = h(http.request("POST", "/api/users").with_body("{\"name\": \"bob\"}"))
+    print(created.text())
+    let wrong = h(http.request("PUT", "/api/users"))
+    print(wrong.header("Allow").unwrap_or("-"))
+}
+// output:
+// GET /api/users/7 -> 200
+// {"id":7,"name":"ada"}
+// POST /api/users -> 200
+// {"id":8,"name":"bob"}
+// PUT /api/users -> 405
+// POST
+```
+
+| Item | Meaning |
+| --- | --- |
+| `router(base: str) -> Router` | A router of the routes under `base` (`"/api"`; `""` or `"/"` for the root) |
+| `Router`: `route(method, path, handler)`; `get`, `post`, `put`, `patch`, `delete(path, handler)` | `handler` for the requests of `method` (`"*"`: any) whose path below the base matches the pattern `path`; one added for the same method and pattern replaces the earlier one. A `GET` route answers `HEAD` too (the server sends the head alone) |
+| `Router`: `mount(sub: Router)` | `sub` below this router's base, at `sub`'s base, with `sub`'s middleware around its routes. `sub` is copied as it is when mounted: routes added to it later don't count |
+| `Router`: `static_files(prefix, dir)` | The files below the directory `dir` at `prefix`, for `GET`: `/assets/app.css` is `dir/app.css`, its `Content-Type` by its extension (`content_type(name)`); a path with a `..` or an empty segment, and a file that can't be read, are 404 |
+| `Router`: `wrap(middleware: ((Request) -> Response) -> (Request) -> Response)` | Middleware around the router's routes: the first added is outermost and sees the request first. It can answer itself (refuse a request without a token), change the request before passing it on, or the response after |
+| `Router`: `handler() -> (Request) -> Response` | The router with its middleware, as a handler. Taken when called: middleware and routes added after don't count |
+| `Router`: `dispatch(req) -> Response` | The route's response, without the middleware |
+| `Request`: `param(name) -> Option<str>`, `param_int(name) -> Option<int>` | The path parameter the route matched, percent-decoded; as an `int` (`None` when it isn't one) |
+| `Request`: `query_param(name) -> Option<str>` | The query's first value for `name`, decoded |
+| `json<O: ToJson>(f: (Request) -> Result<O, Response>) -> (Request) -> Response` | A handler answering 200 with `f`'s value as JSON (`Content-Type: application/json`), or with the `Err`'s response as it is |
+| `json_body<I: FromJson, O: ToJson>(f: (Request, I) -> Result<O, Response>) -> (Request) -> Response` | `json`, with the body decoded to an `I` first: a body that isn't one is 422 with the decoder's error, `{"error": "$.title: missing field"}` |
+| `json_response(status, body)`, `json_error(status, message)` | A response of a JSON text; of `{"error": message}` |
+
+A pattern is segments between `/`: a literal (`users`), `{name}` (any one segment), `{name:int}` (one of digits, perhaps after a `-`) or, last, `{name:path}` (the rest of the path, any number of segments, perhaps none). Empty segments don't count: `/users/7/` is `/users/7`. A path matches when every segment does. Of the routes matching a request's path and method, the most specific answers, whatever the order they were added in: each literal segment counts 3, `{name:int}` 2, `{name}` 1, `{name:path}` 0, and the highest sum wins, the route added first among equals; a mounted router counts like the literal segments of its base. So `/items/new` answers `GET /items/new` beside `/items/{name}`, and `/users/{id:int}` takes `/users/7` while `/users/{name}` takes `/users/me`. A path that some route matches for other methods only is 405 with `Allow` listing them; any other, 404 (`not found`).
+
+Routes are kept in a map by method and pattern, and a request tries each: a router of a few dozen routes costs a few dozen pattern matches a request. A mounted router passes the rest of the path to the sub-router in the reserved parameter `%rest`, and `static_files` its file in `%file`; a handler sees only the parameters of the route that answered. Handlers are sync: an async handler (one that awaits a database) needs `serve_with` and its own dispatch until routers take async handlers.
+
 ## Messages
 
 | Item | Meaning |
@@ -152,8 +233,8 @@ What the server writes: the status line (`HTTP/1.1`, the response's `reason` or 
 | `headers() -> Headers` | None |
 | `Headers`: `get(name) -> Option<str>`, `get_all(name) -> [str]`, `has(name)`, `has_token(name, token)`, `len()` | Names compared without ASCII case; `has_token` looks in the comma-separated values (`has_token("Connection", "close")`) |
 | `Headers`: `add(name, value)`, `set(name, value)`, `remove(name)` | Changed in place (`var`): added at the end; every field of the name replaced by one, where the first was; every one taken out |
-| `struct Request { method, url, version, headers, body, trailers, peer, timeout_ms, max_redirects, decompress, max_header_bytes, max_body_bytes }` | A request. The server's handler gets `url` as the target came (`/path?query`) and `peer`, the client's `SocketAddr`; the fields after `peer` are the client's |
-| `Request`: `path()`, `query() -> [(str, str)]`, `header(name)`, `text()`, `bytes()` | The path without the query; the query's pairs decoded ([[Language/Standard-library/Url]]); a header's first value; the body as text and bytes |
+| `struct Request { method, url, version, headers, body, trailers, peer, timeout_ms, max_redirects, decompress, max_header_bytes, max_body_bytes, params }` | A request. The server's handler gets `url` as the target came (`/path?query`) and `peer`, the client's `SocketAddr`; the fields after `peer` but `params` are the client's; `params` are the path parameters a router matched (`param(name)`) |
+| `Request`: `path()`, `query() -> [(str, str)]`, `query_param(name)`, `header(name)`, `text()`, `bytes()`, `param(name)`, `param_int(name)` | The path without the query; the query's pairs decoded ([[Language/Standard-library/Url]]), a name's first value; a header's first value; the body as text and bytes; a path parameter (the router) |
 | `struct Response { status, reason, version, headers, body, trailers, url }` | A response. `Eq` |
 | `Response`: `header(name)`, `is_success()`, `text()`, `bytes()` | A header's first value; 200 to 299; the body as UTF-8 text (each byte that isn't valid UTF-8 replaced by U+FFFD) and as bytes |
 | `parse_request(text) -> Result<Request, HttpError>` | A whole request: its line, headers and body (by `Content-Length`, or chunked with trailers) |
@@ -210,6 +291,8 @@ A body received costs the copies of a `str`: the reads into the builder, the bui
 
 ## Tests
 
-The module's 225 cases (`build/myla test lib/std/http.my`) pass interpreted, natively, on aarch64 under qemu and on wasm32 under Node: the parsing of requests and responses (bare LF, folding, repeats, every framing and its errors, a message fed in pieces of 1 to 64 bytes), the formatting and its checks, the limits, chunked bodies, the content codings, redirects and URL resolution, keep-alive decisions, UTF-8 text.
+The module's 241 cases (`build/myla test lib/std/http.my`) pass interpreted, natively, on aarch64 under qemu and on wasm32 under Node: the router's path patterns, their specificity and content types; the parsing of requests and responses (bare LF, folding, repeats, every framing and its errors, a message fed in pieces of 1 to 64 bytes), the formatting and its checks, the limits, chunked bodies, the content codings, redirects and URL resolution, keep-alive decisions, UTF-8 text.
 
 `tests/burn/test_http.py` runs each program interpreted and built, natively and on aarch64 (qemu; loopback networking works there): the Myla server against Python's `http.client` (keep-alive on one connection, `HEAD`, a chunked upload, trailers, a large body), `urllib` and raw sockets (`Expect: 100-continue`, pipelining, bare LF, HTTP/1.0, the limits, malformed requests, no `Host`, a bad response header); the Myla client against Python's `http.server` (chunked, close-delimited, gzip and deflate bodies, redirects followed, left alone and looping, repeated headers, keep-alive, a kept connection the server dropped, a malformed status line, a body cut short, a bad chunk, a head and a body past the limits, timeouts, a refused connection, `https`, bad URLs), sync and async; against a raw Python server that logs each request, that a POST over a dropped kept connection reaches it once and a GET twice (`NoReplay`); a client and a server in one program; how long a connection is kept, idle and busy; the time limits against silent, dribbling, slow-uploading and non-reading clients and a slow handler, and 64 silent connections renewed every 4.5 s against a default server, a request answered within 3.2 s ([[MYLA-468]], `TimeLimits`); 192 requests begun (one byte, a head without its end, a body cut short) beside a default server and 200 dribbled heads beside two workers, a request answered at once, each request begun answered whole once it ends and each dribbler 408 ([[MYLA-549]]); a client that gets 30,000 `100 Continue` responses, `HeadersTooLarge`. The server runs built with `--checked` too, which a chunk size past `int32` killed before [[MYLA-422]]. On wasm32 it checks that an exchange and a server are `Unsupported`.
+
+`tests/burn/test_router.py` runs a router interpreted and natively: path parameters, `int` ones refused, the rest of a path, a literal route beside a parameter added before it, a mounted router and its middleware, 404 and 405 with `Allow`, `HEAD`, typed JSON endpoints and a body that isn't one (422), query parameters, static files (a `..` and a missing file 404), and a router served over loopback.

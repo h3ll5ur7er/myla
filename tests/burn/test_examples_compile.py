@@ -24,6 +24,7 @@ EXAMPLES = [
     "pipelines.my", "traits.my", "floats.my", "chars.my",
     "generic_traits.my", "interpolation.my", "traits_on_builtins.my", "semicolons.my",
     "slices_and_formats.my", "branches_and_defaults.my", "time_and_math.my", "iterators.my", "trait_functions.my", "transforms.my",
+    "book_api.my",
 ]
 # Examples the compiler doesn't build yet: concurrency (D89, MYLA-137).
 NOT_YET = {"concurrency.my"}

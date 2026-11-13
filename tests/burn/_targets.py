@@ -25,6 +25,8 @@ SUITES = [
     "tests.burn.test_net",
     "tests.burn.test_term",
     "tests.burn.test_http",
+    # std.http's router (D202): served over loopback but on wasm32
+    "tests.burn.test_router",
     # a deadline's end and a cancel beside many timers (MYLA-456)
     "tests.burn.test_timer_scaling",
     # a wait for a descriptor beside many others, one frame woken per

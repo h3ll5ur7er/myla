@@ -1,0 +1,92 @@
+// A small JSON API with std.http's router (D202, MYLA-613): typed path
+// parameters, a query parameter, a JSON body decoded into a struct, a
+// sub-router under /api with a middleware, and 404/405/422 for the rest.
+// `myla run examples/book_api.my` calls the router directly; to serve it,
+// `await http.serve(net.addr(net.loopback(), 8080), app().handler())`.
+import std.http as http
+from std.http import Request, Response, Router
+
+#derive(Json)
+struct Book {
+    id: int,
+    title: str,
+    year: int,
+}
+
+#derive(Json)
+struct Search {
+    query: str,
+    found: [Book],
+}
+
+#derive(Json)
+struct NewBook {
+    title: str,
+    year: int,
+}
+
+fun books() -> [Book] {
+    return [
+        Book { id: 1, title: "The Left Hand of Darkness", year: 1969 },
+        Book { id: 2, title: "The Dispossessed", year: 1974 },
+        Book { id: 3, title: "A Wizard of Earthsea", year: 1968 },
+    ]
+}
+
+fun book(req: Request) -> Result<Book, Response> {
+    let id = req.param_int("id").unwrap_or(0)
+    for b in books() {
+        if b.id == id { return Ok(b) }
+    }
+    return Err(http.json_error(404, f"no book {id}"))
+}
+
+fun search(req: Request) -> Result<Search, Response> {
+    let q = req.query_param("q").unwrap_or("").to_lower()
+    var found: [Book] = []
+    for b in books() {
+        if b.title.to_lower().contains(q) { found.push(b) }
+    }
+    return Ok(Search { query: q, found: found })
+}
+
+// The handlers can't keep state between requests (they are values), so a
+// new book is checked and answered, not stored.
+fun add(req: Request, b: NewBook) -> Result<Book, Response> {
+    if b.title == "" { return Err(http.json_error(400, "a book needs a title")) }
+    return Ok(Book { id: books().len() + 1, title: b.title, year: b.year })
+}
+
+// Middleware: every response of the API says which version answered.
+fun versioned(next: (Request) -> Response) -> (Request) -> Response {
+    return (req: Request) => next(req).with_header("Api-Version", "1")
+}
+
+fun app() -> Router {
+    var api = http.router("/api")
+    api.get("/books/{id:int}", http.json(book))
+    api.get("/books/search", http.json(search))
+    api.post("/books", http.json_body(add))
+    api.wrap(versioned)
+    var root = http.router("")
+    root.get("/", (req: Request) => http.response(200, "see /api/books/{id}"))
+    root.mount(api)
+    return root
+}
+
+fun main() {
+    let h = app().handler()
+    let calls = [
+        http.request("GET", "/api/books/2"),
+        http.request("GET", "/api/books/search?q=dark"),
+        http.request("GET", "/api/books/9"),
+        http.request("POST", "/api/books").with_body("{\"title\": \"Lathe of Heaven\", \"year\": 1971}"),
+        http.request("POST", "/api/books").with_body("{\"year\": 1971}"),
+        http.request("DELETE", "/api/books/2"),
+        http.request("GET", "/"),
+    ]
+    for req in calls {
+        let resp = h(req)
+        print(f"{req.method} {req.url} -> {resp.status} {resp.text()}")
+    }
+}
