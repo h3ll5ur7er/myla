@@ -25,7 +25,7 @@ The low-level primitives `__write`, `__read`, `__write_bytes`, `__read_bytes` (t
 
 One page per module (D164). A new module adds its row here.
 
-The conventions (D164): operations on built-in types are methods (`s.split(",")`, `xs.sorted()`), and `std.str`, `std.char`, `std.int`, `std.list`, `std.option` and `std.map` are seen by every program without an import, and `std.hash`, whose methods and impls the `Hash` trait builds on (D163, D166, [[MYLA-313]]) ([[MYLA-320]], [[Language/Modules#implicit-imports]]: their methods, not their functions, which need an import; not in the modules of `std`, which import what they use); everything else is a function of its module (`path.join(a, b)`). Strings are bytes and character classes ASCII. A function that can fail returns a `Result` with its module's error: a bare enum when the variants carry different data, a struct with a `kind` enum when every error has the same position (D168). A map keyed by a type parameter writes `T: Eq + Hash` (D167).
+The conventions (D164): operations on built-in types are methods (`s.split(",")`, `xs.sorted()`), and `std.str`, `std.char`, `std.int`, `std.float` (D199), `std.list`, `std.option` and `std.map` are seen by every program without an import, and `std.hash`, whose methods and impls the `Hash` trait builds on (D163, D166, [[MYLA-313]]) ([[MYLA-320]], [[Language/Modules#implicit-imports]]: their methods, not their functions, which need an import; not in the modules of `std`, which import what they use); everything else is a function of its module (`path.join(a, b)`). Strings are bytes and character classes ASCII. A function that can fail returns a `Result` with its module's error: a bare enum when the variants carry different data, a struct with a `kind` enum when every error has the same position (D168). A map keyed by a type parameter writes `T: Eq + Hash` (D167).
 
 | Module | Page | Holds |
 | --- | --- | --- |
@@ -36,17 +36,22 @@ The conventions (D164): operations on built-in types are methods (`s.split(",")`
 | `std.glob` | [[Language/Standard-library/Glob]] | Glob patterns (`*`, `?`, `**`, sets), directory walks, `glob` |
 | `std.process` | [[Language/Standard-library/Process]] | Arguments, the environment, exit, running programs (`run`, `command`), children streamed through pipes (`spawn`, `Child`, `pipe`) |
 | `std.net` | [[Language/Standard-library/Net]] | TCP and UDP sockets (`listen`, `connect`, `TcpStream` a `Read` and `Write`, `udp_bind`), their async forms on the reactor, `IpAddr` and `SocketAddr` parsed and printed, name lookup through the hosts file and DNS |
-| `std.http` | [[Language/Standard-library/Http]] | An HTTP/1.1 client (`fetch`, `post`, `send(request(…))`, a keep-alive `Client`, redirects, gzip bodies) and server (`serve`, `serve_with`, a task a connection), sync and async; requests, responses, headers and chunked bodies parsed and written |
+| `std.http` | [[Language/Standard-library/Http]] | An HTTP/1.1 client (`fetch`, `post`, `send(request(…))`, a keep-alive `Client`, redirects, gzip bodies) and server (`serve`, `serve_with`, a task a connection), sync and async; a router (path parameters, sub-routers, static files, middleware, typed JSON endpoints); requests, responses, headers and chunked bodies parsed and written |
 | `std.term` | [[Language/Standard-library/Term]] | The terminal: `is_tty`, `size`, raw mode (`raw_mode`, `restore`), styles and colours (`style().fg(c).bold().paint(s)`), cursor sequences, `strip` and `width`, keys (`parse_key`, `key_reader`), a line editor (`LineEdit`, `Editor`) |
 | `std.signal` | [[Language/Standard-library/Signal]] | SIGINT and SIGTERM as events a task awaits: `listen()`, `Signals.next()`, `interrupted()` |
 | `std.char` | [[Language/Standard-library/Char]] | Character classes, case and digits, as methods on `char` (ASCII) |
 | `std.int` | [[Language/Standard-library/Int]] | Methods on every integer type: `gcd`, `pow`, Euclidean division, checked, wrapping, saturating and overflowing arithmetic, `mulmod`, `powmod`, `modinv` |
+| `std.float` | [[Language/Standard-library/Float]] | Methods on `float64` and `float32` (implicit, D199): rounding, `sqrt`, `cbrt`, `pow`, `powi`, the trigonometric and hyperbolic functions, `lerp`, `total_cmp`, `to_bits`; the constants |
 | `std.num` | [[Language/Standard-library/Num]] | Exact parsing and printing of integers and floats; integers in any radix and width, with `ParseIntError` |
 | `std.bigint` | [[Language/Standard-library/Bigint]] | `BigInt`, integers of any size: arithmetic with Karatsuba and recursive division, `pow`, the three divisions, parsing and printing in any radix |
 | `std.str` | [[Language/Standard-library/Str]] | Methods on `str`: search, split, trim, case, padding, replace |
 | `std.text` | [[Language/Standard-library/Text]] | A `Scanner` for hand-written parsers, `ints` (every integer in a line), word wrap, aligned columns, `indent` and `dedent` |
 | `std.fmt` | [[Language/Standard-library/Fmt]] | Format specs and the helpers of `Format` impls |
 | `std.math` | [[Language/Standard-library/Math]] | Floating-point functions after fdlibm |
+| `std.algebra` | [[Language/Standard-library/Algebra]] | The traits `Zero`, `One`, `Identity` (`Vec3.zero()`, `Mat4.identity()`, `T.zero()`), on every number type; `sum`, `product` |
+| `std.vector`, `std.vector32` | [[Language/Standard-library/Vector]] | `Vec2`, `Vec3`, `Vec4` and `Vector` of any length, in float64 and float32: operators, `dot`, `cross`, `length`, `normalized`, `lerp`, `reflect` |
+| `std.matrix`, `std.matrix32` | [[Language/Standard-library/Matrix]] | Column-major `Mat2`, `Mat3`, `Mat4` and `Matrix` of any shape: products, `inverse`, `determinant`, the 2D and 3D transforms, `look_at_rh`, the perspective and orthographic projections |
+| `std.quaternion`, `std.quaternion32` | [[Language/Standard-library/Quaternion]] | `Quat`: rotations from an axis and an angle or Euler angles, `q * v`, `slerp`, to matrices |
 | `std.list` | [[Language/Standard-library/List]] | Methods on lists: building, `map` and the other higher-order operations, sorting, binary search, permutations and combinations |
 | `std.iter` | [[Language/Standard-library/Iter]] | Lazy adapters and consumers over `Iterator<T>`, chained with `\|>`: `range`, `repeat`, `from_fn`; `map`, `filter`, `take`, `skip`, `zip`, `chain`, `flat_map`, …; `to_list`, `count`, `sum`, `fold`, `find`, `min`, `max`, … |
 | `std.slice` | [[Language/Standard-library/Slice]] | The index arithmetic of slices |

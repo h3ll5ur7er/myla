@@ -31,6 +31,7 @@ from std.num import f64_literal_bits, f32_round_bits
 from .ast import Expr, ExprKind, Stmt, StmtKind, Block, FunData, ElseTail, ExprOrBlock, MatchArm, Pattern, PatternKind, FieldInit, MapEntry, BindElem, bind_elems, Param, call_targs, is_unread_body, unread_fun
 from .checker import CheckErr, REG_ARG_WORDS, type_name, Type, is_unit, is_slice_expr, from_end_of, slice_parts, is_hole_part, is_raw_memory_primitive, is_platform_primitive, Subst, FuncSig, opt_subst_type, subst_type, builtin_method, is_wrapping_method, int_op_overflows, int_min
 from .checker import is_notify_primitive, tracks_caller
+from .checker import arith_trait
 from .codegen import codegen_on, type_job_name, recv_by_address, may_write_expr, is_mutating_builtin, list_has_str, contains_int, is_actor_t, is_sb_t, is_async_t, CodeGen, LamJob, PartialJob, Cap, DropEntry, tfunc_params, tfunc_ret, is_hole_expr, mangle_fn, is_builtin_call_name, is_aggregate, tuple_elems, is_struct_or_enum_t, is_tfunc, is_overloadable_op, arith_method_cg, enum_name_of, is_tstr, is_cmp, place_root, is_aggregate_opt, arms_may_write, is_cell_t, list_elem, is_list_t, is_map_t, is_str_t, map_key, map_val, format_segments, args_have_hole, success_variant, failure_variant
 from .util import format_specs, written_type_name
 from .tokens import Note, no_span
@@ -2502,6 +2503,20 @@ impl Lower {
     // (through a `var self` parameter's address too). The new value is taken
     // (retained) before the old one is released, which it may share.
     fun assign(var self, cg: CodeGen, target: Expr, value: Expr) {
+        // `x[i] = v` by an `IndexSet` (D200): `x.set_index(i, v)`, the place
+        // first, as a method call takes it (D193)
+        match target.kind {
+            ExprKind.Index(base, idx) => {
+                if !is_slice_expr(idx) {
+                    let om = cg.op_method("IndexSet", cg.type_of(base.id), cg.type_of(idx.id))
+                    if om != "" {
+                        let d = self.direct_call(cg, target, om, [base, idx, value], -1, false)
+                        return
+                    }
+                }
+            },
+            _ => {},
+        }
         let t = self.place_type(cg, target)
         if !lowerable(cg, t) {
             let d = self.unsupported("an assignment of that type")
@@ -3154,6 +3169,9 @@ impl Lower {
             },
             ExprKind.Name(n) => { return self.name(cg, n, t) },
             ExprKind.Unary(op, x) => {
+                // a struct's or enum's `-x` by its `Neg` (D200)
+                let om = if op == "-" { cg.op_method("Neg", cg.type_of(x.id), cg.type_of(x.id)) } else { "" }
+                if om != "" { return self.direct_call(cg, e, om, [x], -1, false) }
                 if !is_scalar(t) { return self.unsupported("a unary operator on a value that isn't a scalar") }
                 // a negative integer literal is a constant (an immediate
                 // operand where it fits, MYLA-125); the backend wraps it
@@ -3201,6 +3219,9 @@ impl Lower {
             ExprKind.MatchE(scrut, arms) => { return self.match_expr(cg, e, scrut, arms, true) },
             ExprKind.Index(base, idx) => {
                 if is_slice_expr(idx) { return self.slice_expr(cg, e, base, idx) }
+                // a struct's or enum's `x[i]` by its `Index` (D200)
+                let om = cg.op_method("Index", cg.type_of(base.id), cg.type_of(idx.id))
+                if om != "" { return self.direct_call(cg, e, om, [base, idx], -1, false) }
                 let p = self.elem_read(cg, e, base, idx)
                 if is_aggregate(t) { return self.unsupported("an aggregate element used as a scalar") }
                 let d = self.temp(t)
@@ -3261,10 +3282,24 @@ impl Lower {
         return self.unsupported("a function used as a value")
     }
 
+    // The method of the operator impl by type arguments (D200) that `l op
+    // r` calls, by the operands' types here (an instance's, in generic
+    // code); "" for a number's own operator or a classic impl.
+    fun op_call(self, cg: CodeGen, op: str, l: Expr, r: Expr) -> str {
+        if cg.op_impls.len() == 0 { return "" }
+        return match arith_trait(op) {
+            Some(tr) => cg.op_method(tr, cg.type_of(l.id), cg.type_of(r.id)),
+            None => "",
+        }
+    }
+
     #test(lower_on(), codegen_on("enum E { A, B(int) }"), expr_of("(a, 'c')"), "*", expr_of("(a, 'c')"), expr_of("(a, 'c')"))[1]
     fun binary(var self, cg: CodeGen, e: Expr, op: str, l: Expr, r: Expr) -> int32 {
         if op == "&&" || op == "||" { return self.logical(cg, op, l, r) }
         let lt = cg.type_of(l.id)
+        // an operator impl by type arguments (D200): its method called
+        let om = self.op_call(cg, op, l, r)
+        if om != "" { return self.direct_call(cg, e, om, [l, r], -1, false) }
         let rt = cg.type_of(e.id)
         if is_overloadable_op(op) && is_struct_or_enum_t(lt) && lowerable(cg, lt) {
             return self.overloaded_scalar(cg, op, l, r, lt)
@@ -3641,6 +3676,9 @@ impl Lower {
             ExprKind.Binary(op, l, r) => {
                 let lt = cg.type_of(l.id)
                 if op == ">>" && is_tfunc(lt) { return self.compose(cg, e, l, r) }
+                // an operator impl by type arguments (D200): its method called
+                let om = self.op_call(cg, op, l, r)
+                if om != "" { return self.direct_call(cg, e, om, [l, r], into, false) }
                 if !is_overloadable_op(op) || !is_struct_or_enum_t(lt) { return self.unsupported("that operator on aggregates") }
                 let pa = self.operand_addr(cg, l, [r])
                 let pb = self.addr(cg, r)
@@ -3654,7 +3692,17 @@ impl Lower {
                 return res
             },
             ExprKind.MatchE(scrut, arms) => { return self.match_expr(cg, e, scrut, arms, true) },
-            ExprKind.Index(base, idx) => { return self.unbox(cg, t, self.elem_read(cg, e, base, idx)) },
+            ExprKind.Index(base, idx) => {
+                // a struct's or enum's `x[i]` by its `Index` (D200)
+                let om = cg.op_method("Index", cg.type_of(base.id), cg.type_of(idx.id))
+                if om != "" { return self.direct_call(cg, e, om, [base, idx], into, false) }
+                return self.unbox(cg, t, self.elem_read(cg, e, base, idx))
+            },
+            ExprKind.Unary(op, x) => {
+                // a struct's or enum's `-x` by its `Neg` (D200)
+                let om = if op == "-" { cg.op_method("Neg", cg.type_of(x.id), cg.type_of(x.id)) } else { "" }
+                if om != "" { return self.direct_call(cg, e, om, [x], into, false) }
+            },
             ExprKind.Try(inner) => { return self.try_expr(cg, e, inner) },
             _ => {},
         }
@@ -6355,6 +6403,29 @@ impl Lower {
             let h = self.temp(i64)
             self.add(Inst.Call(h, self.want_key(9, ft), [at]))
             self.mix_word(sh, h)
+            return
+        }
+        // a float by std.hash's own `hash` (D198), as a float64 (a float32 is
+        // one exactly): its NaN error and -0.0 folded into 0.0 in one place,
+        // the one the interpreter calls for a NaN too
+        if is_tfloat_ir(ft) {
+            let f64 = Type.TFloat(64)
+            let x = self.temp(f64)
+            if width < 8 {
+                let y = self.temp(ft)
+                self.add(Inst.LoadAt(y, p, off, width))
+                self.add(Inst.Cast(x, ft, f64, y))
+            } else {
+                self.add(Inst.LoadAt(x, p, off, 8))
+            }
+            let hasher = Type.TStruct("Hasher", [])
+            let hs = self.new_slot("__hasher", hasher, 8, -1, false)
+            self.add_store(self.slot_addr(hs), 0, self.int_const(0))
+            let rs = self.new_slot("__hashed", hasher, 8, -1, false)
+            self.add(Inst.CallSret(self.type_method(cg, f64, "hash"), self.slot_addr(rs), [x, self.slot_addr(hs)]))
+            let st = self.temp(i64)
+            self.add(Inst.LoadAt(st, self.slot_addr(rs), 0, 8))
+            self.mix_word(sh, st)
             return
         }
         match ft {

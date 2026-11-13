@@ -24,7 +24,7 @@
 // function, a StringBuilder) shows as `<function>` or `<StringBuilder>`.
 
 from .ast import Decl, DeclKind, FunData, Attribute, Expr, TypeExpr, TypeKind, Expected, expected_failure
-from .checker import Checker, Type, type_name, FuncSig
+from .checker import Checker, Type, type_name, FuncSig, is_op_trait, op_trait_method
 from .tokens import SrcSpan
 from .interp import selected, case_func_name
 from .parser import expr_of, type_expr_of, fun_of   // AST values for #test cases
@@ -32,6 +32,16 @@ from std.test import Case as TCase
 
 // How many cases one function of the dispatcher picks from.
 const DISPATCH_GROUP: int32 = 32
+
+// The operator of the arithmetic trait `tr` (D200).
+#test("Rem")["%"]
+fun op_symbol(tr: str) -> str {
+    if tr == "Add" { return "+" }
+    if tr == "Sub" { return "-" }
+    if tr == "Mul" { return "*" }
+    if tr == "Div" { return "/" }
+    return "%"
+}
 
 // A case the harness runs: its report name, what it expects, and the
 // function (its checked name, `T.m` for a method, `__list.m` for one on a
@@ -46,7 +56,7 @@ pub struct Harness { source: str, cases: [Case] }
 // (its declarations `decls`): None when no case of it is selected by
 // `only`.
 pub fun harness_source(text: str, ch: Checker, decls: [Decl], only: str) -> Option<Harness> {
-    var g = Gen { ch: ch, text: text, line_starts: line_starts(text), out: StringBuilder(), imports: [], type_keys: [], type_imports: [], has_async: false, cases: [], case_async: [], case_code: StringBuilder(), next_alias: 0, shown_done: [] }
+    var g = Gen { ch: ch, text: text, line_starts: line_starts(text), out: StringBuilder(), imports: [], type_keys: [], type_imports: [], has_async: false, cases: [], case_async: [], case_code: StringBuilder(), next_alias: 0, shown_done: [], op_tr: "" }
     var blanked: [SrcSpan] = []
     var k = 0
     for d in decls {
@@ -63,10 +73,20 @@ pub fun harness_source(text: str, ch: Checker, decls: [Decl], only: str) -> Opti
             },
             DeclKind.ImplDecl(target, methods, tps, trnm, targs, dattrs) => {
                 let key = impl_key(target)
+                g.op_tr = match trnm {
+                    Some(t) => if is_op_trait(t) { t } else { "" },
+                    None => "",
+                }
                 for m in methods {
-                    let name = format("{}.{}", key, m.name)
+                    var name = format("{}.{}", key, m.name)
+                    // an operator method beside others of its trait, renamed
+                    // for its right operand's type (D200)
+                    for oi in g.ch.op_impls {
+                        if oi.decl == d.id && op_trait_method(oi.tr) == m.name { name = oi.method }
+                    }
                     if !is_qualified(name) { k = g.cases_of(m, name, k, only) }
                 }
+                g.op_tr = ""
             },
             _ => {},
         }
@@ -155,6 +175,7 @@ pub fun runner_case(c: Case) -> TCase {
 // alias), the helpers written (`out`, one equality and one repr per type,
 // keyed by the type's name), the cases and their code.
 struct Gen {
+    op_tr: str,              // the operator trait of the impl whose methods are being read, "" for none (D200)
     ch: Checker,
     text: str,
     line_starts: [int32],
@@ -242,7 +263,18 @@ impl Gen {
             call = call + self.slice(attr.args[i].sp)
             i = i + 1
         }
-        call = aw + call + ")"
+        // an operator trait's method through its operator: one beside others
+        // of its trait is named for its right operand's type (D200), which
+        // the source's name doesn't say
+        if self.op_tr != "" && fd.name == op_trait_method(self.op_tr) && first == 1 {
+            let a1 = if attr.args.len() > 1 { self.slice(attr.args[1].sp) } else { "" }
+            if self.op_tr == "Neg" { call = "(-__recv)" }
+            else if self.op_tr == "Index" { call = format("__recv[{}]", a1) }
+            else if self.op_tr == "IndexSet" {
+                sb.append(format("    __recv[{}] = {}\n", a1, self.slice(attr.args[2].sp)))
+                call = "()"
+            } else { call = format("(__recv {} {})", op_symbol(self.op_tr), a1) }
+        } else { call = aw + call + ")" }
         let returns = match sig.ret { Some(t) => true, None => false }
         if is_fn {
             // a test function (D162): `Err(e)` fails it with `e` shown
@@ -641,9 +673,13 @@ fun canon(n: str) -> str {
 // Whether `name` is another module's (`std$fs$IoError`).
 #test("std$fs$IoError")[true]
 #test("IoError")[false]
+#test("V.mul$float64")[false]
 pub fun is_qualified(name: str) -> bool {
+    // (before a method's dot: an operator method's own name may hold a `$`,
+    // `V.mul$float64`, D200)
     var i = 0
     while i < name.len() {
+        if name[i] == '.' { return false }
         if name[i] == '$' { return true }
         i = i + 1
     }

@@ -1,0 +1,532 @@
+// std.float: the methods of float64 and float32 (D199, MYLA-585).
+//
+// Like std.int for the integers, this module is in every program without an
+// import (D164): `x.sqrt()`, `x.floor()`, `a.atan2(b)`, `x.is_nan()` work on
+// any float. Its free functions and constants need one: `import std.float as
+// float`, then `float.nan()`, `float.from_bits(b)`, `float.PI`.
+//
+// The float64 methods are std.math's functions (fdlibm ports, bit-identical
+// in the interpreter and natively), plus `cbrt`, `sinh`, `cosh` and `tanh`
+// written here. A float32 method computes in float64 and rounds the result
+// to float32: exact for `sqrt` and the rounding methods, within the float64
+// function's error before the rounding for the rest. `to_bits` reads every
+// NaN as the one quiet NaN, as std.math's does (D128).
+
+import std.math as math
+
+pub const PI: float64 = 3.141592653589793
+pub const TAU: float64 = 6.283185307179586
+pub const E: float64 = 2.718281828459045
+pub const LN2: float64 = 0.6931471805599453
+pub const LN10: float64 = 2.302585092994046
+pub const SQRT2: float64 = 1.4142135623730951
+// the distance from 1.0 to the next float64, the largest finite float64, the
+// smallest positive normal one
+pub const EPSILON: float64 = 2.220446049250313e-16
+pub const MAX: float64 = 1.7976931348623157e308
+pub const MIN_POSITIVE: float64 = 2.2250738585072014e-308
+
+// A quiet NaN.
+pub fun nan() -> float64 {
+    return math.nan()
+}
+
+// Positive infinity.
+pub fun infinity() -> float64 {
+    return math.infinity()
+}
+
+// The float64 whose IEEE 754 bits are `bits`.
+#test(0x3FF0000000000000u64)[1.0]
+#test(0xC004000000000000u64)[-2.5]
+pub fun from_bits(bits: uint64) -> float64 {
+    return math.from_bits(bits)
+}
+
+// The float32 whose IEEE 754 bits are `bits`: built as the float64 of the
+// same value, which holds every float32 exactly.
+#test(0x3F800000u32)[1.0f32]
+#test(0xC0200000u32)[-2.5f32]
+#test(0x00000001u32)[1.401298464324817e-45f32]
+#test(0x00000000u32)[0.0f32]
+pub fun from_bits32(bits: uint32) -> float32 {
+    let negative = (bits >> 31) != 0
+    let e = ((bits >> 23) & 0xFF) as int32
+    let m = (bits & 0x7FFFFF) as uint64
+    var v = 0.0
+    if e == 0xFF {
+        if m != 0 { return math.nan() as float32 }
+        v = math.infinity()
+    } else if e == 0 {
+        // zero, or a subnormal: m * 2^-149
+        v = math.ldexp(m as float64, -149)
+    } else {
+        v = math.from_bits((((e - 127 + 1023) as uint64) << 52) | (m << 29))
+    }
+    if negative { v = -v }
+    return v as float32
+}
+
+// The IEEE 754 bits of the float32 `x`, from those of the float64 that holds
+// it exactly: the sign, the exponent rebiased, the top of the significand
+// (its 29 lower bits are zero); a float32 subnormal is a normal float64.
+#test(1.0f32)[0x3F800000u32]
+#test(-2.5f32)[0xC0200000u32]
+#test(1.401298464324817e-45f32)[0x00000001u32]
+#test(-0.0f32)[0x80000000u32]
+fun bits32(x: float32) -> uint32 {
+    let b = math.to_bits(x as float64)
+    let sign = ((b >> 63) as uint32) << 31
+    let e = ((b >> 52) & 0x7FF) as int32
+    let m = b & 0xFFFFFFFFFFFFF
+    if e == 0x7FF {
+        if m != 0 { return 0x7FC00000 }
+        return sign | 0x7F800000
+    }
+    if e == 0 { return sign }
+    let e32 = e - 1023 + 127
+    if e32 >= 1 { return sign | ((e32 as uint32) << 23) | ((m >> 29) as uint32) }
+    let shift = (926 - e) as uint64
+    return sign | (((m | 0x10000000000000) >> shift) as uint32)
+}
+
+// `x`'s place in IEEE 754's total order, as a signed integer: the negative
+// floats' bits reversed below the positive ones'.
+#test(1.0)[4607182418800017408]
+fun total_key(x: float64) -> int64 {
+    let k = math.to_bits(x) as int64
+    return if k < 0 { k ^ 0x7FFFFFFFFFFFFFFF } else { k }
+}
+
+impl float64 {
+    #test(-1.5)[1.5]
+    fun abs(self) -> float64 {
+        return math.abs(self)
+    }
+
+    // 1.0 or -1.0 by the sign, a signed zero's too; NaN for NaN.
+    #test(-3.0)[-1.0]
+    #test(0.0)[1.0]
+    fun signum(self) -> float64 {
+        if self != self { return self }
+        return math.copysign(1.0, self)
+    }
+
+    #test(3.0, -1.0)[-3.0]
+    fun copysign(self, sign: float64) -> float64 {
+        return math.copysign(self, sign)
+    }
+
+    #test(-2.7)[-2.0]
+    fun trunc(self) -> float64 {
+        return math.trunc(self)
+    }
+
+    #test(-2.5)[-3.0]
+    fun floor(self) -> float64 {
+        return math.floor(self)
+    }
+
+    #test(2.1)[3.0]
+    fun ceil(self) -> float64 {
+        return math.ceil(self)
+    }
+
+    // The nearest integer, halves away from zero.
+    #test(2.5)[3.0]
+    #test(-2.5)[-3.0]
+    fun round(self) -> float64 {
+        return math.round(self)
+    }
+
+    // The part after the point, with the sign: `x - x.trunc()`.
+    #test(-2.75)[-0.75]
+    fun fract(self) -> float64 {
+        return self - math.trunc(self)
+    }
+
+    // The smaller one; a NaN gives way to the other.
+    #test(1.0, 2.0)[1.0]
+    fun min(self, other: float64) -> float64 {
+        return math.min(self, other)
+    }
+
+    #test(1.0, 2.0)[2.0]
+    fun max(self, other: float64) -> float64 {
+        return math.max(self, other)
+    }
+
+    #test(5.0, 0.0, 1.0)[1.0]
+    #test(-5.0, 0.0, 1.0)[0.0]
+    fun clamp(self, lo: float64, hi: float64) -> float64 {
+        return math.max(lo, math.min(self, hi))
+    }
+
+    #test(2.0)[1.4142135623730951]
+    fun sqrt(self) -> float64 {
+        return math.sqrt(self)
+    }
+
+    // The cube root: `pow`'s, refined by a Newton step, so a perfect cube's
+    // is exact; negative for a negative number.
+    #test(27.0)[3.0]
+    #test(-8.0)[-2.0]
+    fun cbrt(self) -> float64 {
+        if self == 0.0 || self != self || math.is_infinite(self) { return self }
+        let a = math.abs(self)
+        var y = math.pow(a, 1.0 / 3.0)
+        y = y - (y * y * y - a) / (3.0 * y * y)
+        return math.copysign(y, self)
+    }
+
+    #test(3.0, 4.0)[5.0]
+    fun hypot(self, other: float64) -> float64 {
+        return math.hypot(self, other)
+    }
+
+    #test(0.0)[1.0]
+    fun exp(self) -> float64 {
+        return math.exp(self)
+    }
+
+    #test(1.0)[0.0]
+    fun ln(self) -> float64 {
+        return math.ln(self)
+    }
+
+    #test(8.0)[3.0]
+    fun log2(self) -> float64 {
+        return math.log2(self)
+    }
+
+    #test(1000.0)[3.0]
+    fun log10(self) -> float64 {
+        return math.log10(self)
+    }
+
+    // The logarithm to the base `base`: `ln(x) / ln(base)`, so an ulp or
+    // two off where the quotient isn't exact (`81.0.log(3.0)` is
+    // 4.000000000000001; `log2` and `log10` are better for their bases).
+    #test(8.0, 2.0)[3.0]
+    fun log(self, base: float64) -> float64 {
+        return math.ln(self) / math.ln(base)
+    }
+
+    #test(2.0, 0.5)[1.4142135623730951]
+    fun pow(self, y: float64) -> float64 {
+        return math.pow(self, y)
+    }
+
+    // `x` to an integer power, by repeated squaring.
+    #test(2.0, 10)[1024.0]
+    #test(2.0, -2)[0.25]
+    fun powi(self, n: int32) -> float64 {
+        var base = self
+        var k = n as int64
+        if k < 0 {
+            base = 1.0 / base
+            k = -k
+        }
+        var acc = 1.0
+        while k > 0 {
+            if k % 2 == 1 { acc = acc * base }
+            base = base * base
+            k = k / 2
+        }
+        return acc
+    }
+
+    #test(0.0)[0.0]
+    fun sin(self) -> float64 {
+        return math.sin(self)
+    }
+
+    #test(0.0)[1.0]
+    fun cos(self) -> float64 {
+        return math.cos(self)
+    }
+
+    #test(0.0)[0.0]
+    fun tan(self) -> float64 {
+        return math.tan(self)
+    }
+
+    #test(1.0)[1.5707963267948966]
+    fun asin(self) -> float64 {
+        return math.asin(self)
+    }
+
+    #test(1.0)[0.0]
+    fun acos(self) -> float64 {
+        return math.acos(self)
+    }
+
+    #test(1.0)[0.7853981633974483]
+    fun atan(self) -> float64 {
+        return math.atan(self)
+    }
+
+    // The angle of the point (`x`, `self`): `y.atan2(x)`, as C's atan2(y, x).
+    #test(1.0, 1.0)[0.7853981633974483]
+    fun atan2(self, x: float64) -> float64 {
+        return math.atan2(self, x)
+    }
+
+    // The hyperbolic sine: `(e^x - e^-x) / 2`, its series near zero; within
+    // a few units in the last place (sinh(1) is 1.1752011936438014…).
+    #test(0.0)[0.0]
+    #test(1.0)[1.1752011936438016]
+    fun sinh(self) -> float64 {
+        if math.abs(self) < 1e-5 { return self + self * self * self / 6.0 }
+        let e = math.exp(self)
+        return (e - 1.0 / e) / 2.0
+    }
+
+    // The hyperbolic cosine, `(e^x + e^-x) / 2`, within a few units in the
+    // last place (cosh(1) is 1.5430806348152437…).
+    #test(0.0)[1.0]
+    #test(1.0)[1.543080634815244]
+    fun cosh(self) -> float64 {
+        let e = math.exp(self)
+        return (e + 1.0 / e) / 2.0
+    }
+
+    // The hyperbolic tangent, its series near zero, ±1 past ±20.
+    #test(0.0)[0.0]
+    #test(100.0)[1.0]
+    fun tanh(self) -> float64 {
+        if math.abs(self) < 1e-5 { return self - self * self * self / 3.0 }
+        if self > 20.0 { return 1.0 }
+        if self < -20.0 { return -1.0 }
+        let e = math.exp(2.0 * self)
+        return (e - 1.0) / (e + 1.0)
+    }
+
+    #test(3.141592653589793)[180.0]
+    fun to_degrees(self) -> float64 {
+        return self * (180.0 / PI)
+    }
+
+    #test(180.0)[3.141592653589793]
+    fun to_radians(self) -> float64 {
+        return self * (PI / 180.0)
+    }
+
+    // The point `t` of the way from `self` to `b`: `self + (b - self) * t`.
+    #test(2.0, 4.0, 0.25)[2.5]
+    fun lerp(self, b: float64, t: float64) -> float64 {
+        return self + (b - self) * t
+    }
+
+    #test(1.0)[false]
+    fun is_nan(self) -> bool {
+        return self != self
+    }
+
+    #test(1.0)[false]
+    fun is_infinite(self) -> bool {
+        return math.is_infinite(self)
+    }
+
+    #test(1.0)[true]
+    fun is_finite(self) -> bool {
+        return math.is_finite(self)
+    }
+
+    // The IEEE 754 bits; every NaN's are 0x7FF8000000000000 (D128).
+    #test(1.0)[0x3FF0000000000000u64]
+    fun to_bits(self) -> uint64 {
+        return math.to_bits(self)
+    }
+
+    // IEEE 754's total order, negative, zero or positive like `Ord`'s
+    // `cmp`: -0.0 before 0.0, NaN after every number. For sorting:
+    // `xs.sort_by((a, b) => a.total_cmp(b) < 0)`.
+    #test(-0.0, 0.0)[-1]
+    #test(2.0, 1.0)[1]
+    fun total_cmp(self, other: float64) -> int {
+        let a = total_key(self)
+        let b = total_key(other)
+        return if a < b { -1 } else if a > b { 1 } else { 0 }
+    }
+
+    // Whether `self` and `other` are at most `eps` apart.
+    #test(0.1 + 0.2, 0.3, 1e-12)[true]
+    fun approx_eq(self, other: float64, eps: float64) -> bool {
+        return math.abs(self - other) <= eps
+    }
+}
+
+impl float32 {
+    #test(-1.5f32)[1.5f32]
+    fun abs(self) -> float32 {
+        return math.abs(self as float64) as float32
+    }
+
+    #test(-3.0f32)[-1.0f32]
+    fun signum(self) -> float32 {
+        if self != self { return self }
+        return math.copysign(1.0, self as float64) as float32
+    }
+
+    fun copysign(self, sign: float32) -> float32 {
+        return math.copysign(self as float64, sign as float64) as float32
+    }
+
+    fun trunc(self) -> float32 {
+        return math.trunc(self as float64) as float32
+    }
+
+    #test(-2.5f32)[-3.0f32]
+    fun floor(self) -> float32 {
+        return math.floor(self as float64) as float32
+    }
+
+    fun ceil(self) -> float32 {
+        return math.ceil(self as float64) as float32
+    }
+
+    fun round(self) -> float32 {
+        return math.round(self as float64) as float32
+    }
+
+    fun fract(self) -> float32 {
+        return self - (math.trunc(self as float64) as float32)
+    }
+
+    fun min(self, other: float32) -> float32 {
+        return math.min(self as float64, other as float64) as float32
+    }
+
+    fun max(self, other: float32) -> float32 {
+        return math.max(self as float64, other as float64) as float32
+    }
+
+    #test(5.0f32, 0.0f32, 1.0f32)[1.0f32]
+    fun clamp(self, lo: float32, hi: float32) -> float32 {
+        return math.max(lo as float64, math.min(self as float64, hi as float64)) as float32
+    }
+
+    #test(2.0f32)[1.4142135f32]
+    fun sqrt(self) -> float32 {
+        return math.sqrt(self as float64) as float32
+    }
+
+    fun cbrt(self) -> float32 {
+        return (self as float64).cbrt() as float32
+    }
+
+    fun hypot(self, other: float32) -> float32 {
+        return math.hypot(self as float64, other as float64) as float32
+    }
+
+    fun exp(self) -> float32 {
+        return math.exp(self as float64) as float32
+    }
+
+    fun ln(self) -> float32 {
+        return math.ln(self as float64) as float32
+    }
+
+    fun log2(self) -> float32 {
+        return math.log2(self as float64) as float32
+    }
+
+    fun log10(self) -> float32 {
+        return math.log10(self as float64) as float32
+    }
+
+    fun log(self, base: float32) -> float32 {
+        return (math.ln(self as float64) / math.ln(base as float64)) as float32
+    }
+
+    fun pow(self, y: float32) -> float32 {
+        return math.pow(self as float64, y as float64) as float32
+    }
+
+    #test(2.0f32, 10)[1024.0f32]
+    fun powi(self, n: int32) -> float32 {
+        return (self as float64).powi(n) as float32
+    }
+
+    fun sin(self) -> float32 {
+        return math.sin(self as float64) as float32
+    }
+
+    fun cos(self) -> float32 {
+        return math.cos(self as float64) as float32
+    }
+
+    fun tan(self) -> float32 {
+        return math.tan(self as float64) as float32
+    }
+
+    fun asin(self) -> float32 {
+        return math.asin(self as float64) as float32
+    }
+
+    fun acos(self) -> float32 {
+        return math.acos(self as float64) as float32
+    }
+
+    fun atan(self) -> float32 {
+        return math.atan(self as float64) as float32
+    }
+
+    fun atan2(self, x: float32) -> float32 {
+        return math.atan2(self as float64, x as float64) as float32
+    }
+
+    fun sinh(self) -> float32 {
+        return (self as float64).sinh() as float32
+    }
+
+    fun cosh(self) -> float32 {
+        return (self as float64).cosh() as float32
+    }
+
+    fun tanh(self) -> float32 {
+        return (self as float64).tanh() as float32
+    }
+
+    fun to_degrees(self) -> float32 {
+        return ((self as float64) * (180.0 / PI)) as float32
+    }
+
+    fun to_radians(self) -> float32 {
+        return ((self as float64) * (PI / 180.0)) as float32
+    }
+
+    #test(2.0f32, 4.0f32, 0.25f32)[2.5f32]
+    fun lerp(self, b: float32, t: float32) -> float32 {
+        return self + (b - self) * t
+    }
+
+    fun is_nan(self) -> bool {
+        return self != self
+    }
+
+    fun is_infinite(self) -> bool {
+        return math.is_infinite(self as float64)
+    }
+
+    fun is_finite(self) -> bool {
+        return math.is_finite(self as float64)
+    }
+
+    // The IEEE 754 bits; every NaN's are 0x7FC00000.
+    #test(1.0f32)[0x3F800000u32]
+    fun to_bits(self) -> uint32 {
+        return bits32(self)
+    }
+
+    // IEEE 754's total order (a float32 is a float64 exactly, in order).
+    #test(-0.0f32, 0.0f32)[-1]
+    fun total_cmp(self, other: float32) -> int {
+        return (self as float64).total_cmp(other as float64)
+    }
+
+    fun approx_eq(self, other: float32, eps: float32) -> bool {
+        return math.abs((self as float64) - (other as float64)) <= (eps as float64)
+    }
+}

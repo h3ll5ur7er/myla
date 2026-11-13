@@ -37,6 +37,10 @@ SUITES = [
     "tests.burn.test_builtin_impls",
     "tests.burn.test_default_params",
     "tests.burn.test_let_else",
+    "tests.burn.test_operator_traits",
+    "tests.burn.test_float_methods",
+    "tests.burn.test_float_keys",
+    "tests.burn.test_linalg",
     "tests.burn.test_ir_contract",
     # integer overflow, checked and plain (D175)
     "tests.burn.test_overflow",
@@ -56,6 +60,10 @@ SUITES = [
     "tests.burn.test_generated_widths",
     "tests.burn.test_generated_extremes",
     "tests.burn.test_formats_checked",
+    # std.http's router (D202): last, so the suites before it keep the
+    # schedule they had without it (the timing tests among them, test_http's
+    # and test_stdio's, run beside the same neighbours)
+    "tests.burn.test_router",
 ]
 
 # A test that reads the x86-64 code ends there, skipped, on another target,

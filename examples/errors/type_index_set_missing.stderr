@@ -1,0 +1,5 @@
+type error: cannot assign to an index of 'V': it needs 'impl IndexSet<int32, float64> for V'
+  --> examples/errors/type_index_set_missing.my:15:10
+   |
+15 |     v[0] = 2.0
+   |     ^^^^^^^^^^

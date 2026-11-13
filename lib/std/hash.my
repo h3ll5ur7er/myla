@@ -156,8 +156,28 @@ impl Hasher {
 // methods above do; a list adds its length and then its elements, so that
 // `([1], [2, 3])` and `([1, 2], [3])` differ. A tuple's is the language's
 // own (its elements in turn), as no impl can name a tuple of any length.
-// Floats aren't `Hash` (NaN is unequal to itself): a hand-written impl may
-// add `math.to_bits(x)`.
+// A float adds its bits (D198): -0.0 as 0.0, which it equals; a NaN, which
+// is unequal to itself and would be a key no lookup finds, is the runtime
+// error `cannot hash NaN`.
+
+impl Hash for float64 {
+    #test(-0.0, new())[0.0.hash(new())]
+    #test(0.0 / 0.0, new())[panic("cannot hash NaN")]
+    fun hash(self, h: Hasher) -> Hasher {
+        if self != self { panic("cannot hash NaN") }
+        let x = if self == 0.0 { 0.0 } else { self }
+        return h.add_u64(__f64_bits(x))
+    }
+}
+
+impl Hash for float32 {
+    #test(1.5f32, new())[1.5.hash(new())]
+    fun hash(self, h: Hasher) -> Hasher {
+        if self != self { panic("cannot hash NaN") }
+        let x = if self == 0.0 { 0.0 } else { self as float64 }
+        return h.add_u64(__f64_bits(x))
+    }
+}
 
 impl Hash for int8 {
     #test(-1i8, new())[Hasher { state: 0x70bc9b8185eefae3u64 }]

@@ -18,6 +18,10 @@
 //   is cancelled. A pool of `workers` tasks serves the requests, with
 //   keep-alive: a connection between its requests waits on the reactor,
 //   holding no task (MYLA-468).
+// - The router (D202, MYLA-613): `router(base)` with routes by method and
+//   path pattern (`/users/{id:int}`), sub-routers, static files and
+//   middleware, itself a handler (`r.handler()`); `json` and `json_body`
+//   make handlers of typed endpoints.
 // - Only plain HTTP: `https` is `Unsupported` until TLS. A failure is an
 //   `HttpError`; on wasm32, which has no sockets, every exchange is
 //   `Unsupported("sockets")`.
@@ -42,6 +46,9 @@ import std.time as time
 import std.str as str_m
 import std.list as list_m
 import std.option as option_m
+import std.json as json_m
+import std.fs as fs_m
+import std.num as num_m
 
 // --- errors --------------------------------------------------------------------------
 
@@ -732,6 +739,7 @@ pub struct Request {
     decompress: bool,
     max_header_bytes: int,
     max_body_bytes: int,
+    params: [(str, str)],
 }
 
 // A request with the method `method` (`GET`, `POST`, …, as written) for
@@ -751,6 +759,7 @@ pub fun request(method: str, url: str) -> Request {
         decompress: true,
         max_header_bytes: MAX_HEAD,
         max_body_bytes: CLIENT_MAX_BODY,
+        params: [],
     }
 }
 
@@ -863,6 +872,34 @@ impl Request {
     // The body's bytes.
     fun bytes(self) -> [uint8] {
         return bytes_m.from_str(self.body)
+    }
+
+    // The path parameter `name` a router matched (`{id}` in
+    // `/users/{id}`, D202), decoded.
+    fun param(self, name: str) -> Option<str> {
+        for kv in self.params {
+            if kv.0 == name { return Some(kv.1) }
+        }
+        return None
+    }
+
+    // The path parameter `name` as an integer: a `{name:int}` one's.
+    fun param_int(self, name: str) -> Option<int> {
+        return match self.param(name) {
+            Some(v) => match num_m.parse_int32(v) {
+                Ok(n) => Some(n),
+                Err(_) => None,
+            },
+            None => None,
+        }
+    }
+
+    // The value of the query parameter `name`, decoded: the first one.
+    fun query_param(self, name: str) -> Option<str> {
+        for kv in self.query() {
+            if kv.0 == name { return Some(kv.1) }
+        }
+        return None
     }
 }
 
@@ -3361,6 +3398,354 @@ pub async fun serve_n(l: TcpListener, n: int, handler: (Request) -> Response) ->
     var o = server_options()
     o.max_requests = n
     return await serve_with(l, o, async (req: Request) => handler(req))
+}
+
+
+// --- routing (D202, MYLA-613) ------------------------------------------------
+//
+// A route answers the requests of a method ("*" for any) whose path matches
+// its pattern, with its handler; a router holds its routes under a base path
+// and is a handler itself (`r.handler()`), so routers nest (`mount`), and
+// middleware is a function from a handler to a handler (`wrap`). A pattern's
+// segments are literal, `{name}` (one segment), `{name:int}` (one of digits)
+// or, last, `{name:path}` (the rest, maybe none); the handler reads them with
+// `req.param(name)` and `req.param_int(name)`. The most specific route
+// matching a path answers it (a literal segment before a parameter, a typed
+// parameter before an untyped one, the first registered among equals); a
+// path some route matches for another method is answered 405 with `Allow`,
+// any other 404.
+
+// One route: `method` ("*": any), its pattern `path`, its handler; a
+// `mount`ed router's route matches its base path and everything below it.
+pub struct Route {
+    method: str,
+    path: str,
+    handler: (Request) -> Response,
+    mount: bool,
+}
+
+// A router: its base path, its routes by method and pattern in the order
+// they were added, and the middleware around it, the first added outermost.
+pub struct Router {
+    base: str,
+    routes: [str: Route],
+    wraps: [((Request) -> Response) -> (Request) -> Response],
+}
+
+// A router of the routes under `base` ("" or "/" for the root, "/api").
+pub fun router(base: str) -> Router {
+    return Router { base: base, routes: [:], wraps: [] }
+}
+
+impl Router {
+    // `handler` for the requests of `method` matching `path` (below the
+    // router's base); one for the same method and pattern is replaced.
+    fun route(var self, method: str, path: str, handler: (Request) -> Response) {
+        self.routes[method + " " + path] = Route { method: method, path: path, handler: handler, mount: false }
+    }
+
+    fun get(var self, path: str, handler: (Request) -> Response) {
+        self.route("GET", path, handler)
+    }
+
+    fun post(var self, path: str, handler: (Request) -> Response) {
+        self.route("POST", path, handler)
+    }
+
+    fun put(var self, path: str, handler: (Request) -> Response) {
+        self.route("PUT", path, handler)
+    }
+
+    fun patch(var self, path: str, handler: (Request) -> Response) {
+        self.route("PATCH", path, handler)
+    }
+
+    fun delete(var self, path: str, handler: (Request) -> Response) {
+        self.route("DELETE", path, handler)
+    }
+
+    // The router `sub` under this one's base, at `sub`'s base: its routes,
+    // and its middleware around them.
+    fun mount(var self, sub: Router) {
+        self.routes["* " + sub.base + "/"] = Route { method: "*", path: sub.base, handler: sub.handler(), mount: true }
+    }
+
+    // The files below the directory `dir` at `prefix` (`/assets` serves
+    // `dir/app.css` as `/assets/app.css`), for GET; a path with a `..` or
+    // a file that can't be read is 404.
+    fun static_files(var self, prefix: str, dir: str) {
+        let d = dir
+        self.route("GET", prefix + "/{%file:path}", (req: Request) => file_response(d, req.param("%file")))
+    }
+
+    // `middleware` around the router's handler: one added later runs inside
+    // one added earlier.
+    fun wrap(var self, middleware: ((Request) -> Response) -> (Request) -> Response) {
+        self.wraps.push(middleware)
+    }
+
+    // The router as a handler: `await http.serve(addr, r.handler())`.
+    fun handler(self) -> (Request) -> Response {
+        let r = self
+        var h: (Request) -> Response = (req: Request) => r.dispatch(req)
+        var i = self.wraps.len() - 1
+        while i >= 0 {
+            let w = self.wraps[i]
+            h = w(h)
+            i -= 1
+        }
+        return h
+    }
+
+    // The response of the route that matches `req` best, without the
+    // middleware; 404 or 405 when none does.
+    fun dispatch(self, req: Request) -> Response {
+        // a mounted router's rest of the path, its base matched by the parent
+        var segs = split_path(req.path())
+        var consumed = false
+        match req.param("%rest") {
+            Some(r) => {
+                segs = split_path(r)
+                consumed = true
+            },
+            None => {},
+        }
+        var rest = segs
+        if !consumed {
+            let base = split_path(self.base)
+            if !segs_start(segs, base) { return response(404, "not found") }
+            rest = segs[base.len():]
+        }
+        var best_score = -1
+        var best_key = ""
+        var best_params: [(str, str)] = []
+        var allowed: [str] = []
+        for key in self.routes.keys() {
+            let rt = self.routes[key]
+            let pat = split_path(rt.path)
+            if rt.mount {
+                if segs_start(rest, pat) {
+                    let sc = pattern_score(pat)
+                    if sc > best_score {
+                        best_score = sc
+                        best_key = key
+                        best_params = [("%rest", "/" + rest[pat.len():].join("/"))]
+                    }
+                }
+                continue
+            }
+            match match_pattern(pat, rest) {
+                Some(ps) => {
+                    if rt.method == req.method || rt.method == "*" || (rt.method == "GET" && req.method == "HEAD") {
+                        let sc = pattern_score(pat)
+                        if sc > best_score {
+                            best_score = sc
+                            best_key = key
+                            best_params = ps
+                        }
+                    } else if !allowed.contains(rt.method) {
+                        allowed.push(rt.method)
+                    }
+                },
+                None => {},
+            }
+        }
+        if best_score < 0 {
+            if allowed.len() > 0 { return response(405, "method not allowed").with_header("Allow", allowed.join(", ")) }
+            return response(404, "not found")
+        }
+        var r2 = req
+        var kept: [(str, str)] = []
+        for kv in req.params {
+            if kv.0 != "%rest" { kept.push(kv) }
+        }
+        for kv in best_params { kept.push(kv) }
+        r2.params = kept
+        let h = self.routes[best_key].handler
+        return h(r2)
+    }
+}
+
+// The non-empty segments of the path `p`.
+#test("/users/42/")[["users", "42"]]
+#test("/")[[]]
+fun split_path(p: str) -> [str] {
+    var out: [str] = []
+    for s in p.split("/") {
+        if s != "" { out.push(s) }
+    }
+    return out
+}
+
+// Whether `segs` begins with `prefix`, segment by segment.
+#test(["api", "users"], ["api"])[true]
+#test(["apix"], ["api"])[false]
+fun segs_start(segs: [str], prefix: [str]) -> bool {
+    if prefix.len() > segs.len() { return false }
+    var i = 0
+    while i < prefix.len() {
+        if segs[i] != prefix[i] { return false }
+        i += 1
+    }
+    return true
+}
+
+// A pattern segment's parameter: its name and kind ("", "int", "path"), or
+// none for a literal segment.
+#test("{id:int}")[Some(("id", "int"))]
+#test("users")[None]
+fun param_of(seg: str) -> Option<(str, str)> {
+    if !(seg.starts_with("{") && seg.ends_with("}")) { return None }
+    let inner = seg[1:seg.len() - 1]
+    return match inner.find(":") {
+        Some(i) => Some((inner[:i], inner[i + 1:])),
+        None => Some((inner, "")),
+    }
+}
+
+// How specific the pattern `pat` is: a literal segment counts 3, a typed
+// parameter 2, a parameter 1, the rest of the path 0.
+#test(["users", "me"])[6]
+#test(["users", "{id}"])[4]
+fun pattern_score(pat: [str]) -> int {
+    var n = 0
+    for seg in pat {
+        n += match param_of(seg) {
+            Some(p) => if p.1 == "int" { 2 } else if p.1 == "path" { 0 } else { 1 },
+            None => 3,
+        }
+    }
+    return n
+}
+
+// The parameters of `path` matched by `pat`, none when it doesn't match.
+#test(["users", "{id:int}"], ["users", "42"])[Some([("id", "42")])]
+#test(["users", "{id:int}"], ["users", "me"])[None]
+#test(["files", "{p:path}"], ["files", "a", "b.txt"])[Some([("p", "a/b.txt")])]
+fun match_pattern(pat: [str], path: [str]) -> Option<[(str, str)]> {
+    var ps: [(str, str)] = []
+    var i = 0
+    while i < pat.len() {
+        match param_of(pat[i]) {
+            Some(p) => {
+                if p.1 == "path" {
+                    ps.push((p.0, decoded(path[i:].join("/"))))
+                    return Some(ps)
+                }
+                if i >= path.len() { return None }
+                let v = decoded(path[i])
+                if p.1 == "int" && !all_digits(v) { return None }
+                ps.push((p.0, v))
+            },
+            None => {
+                if i >= path.len() || path[i] != pat[i] { return None }
+            },
+        }
+        i += 1
+    }
+    if path.len() != pat.len() { return None }
+    return Some(ps)
+}
+
+// A path segment percent-decoded (as it is, when it isn't valid).
+fun decoded(s: str) -> str {
+    return match url_m.percent_decode(s) {
+        Ok(d) => d,
+        Err(_) => s,
+    }
+}
+
+// Whether `s` is an optional `-` and one or more digits.
+#test("-42")[true]
+#test("4a")[false]
+#test("")[false]
+fun all_digits(s: str) -> bool {
+    var i = if s.starts_with("-") { 1 } else { 0 }
+    if i >= s.len() { return false }
+    while i < s.len() {
+        if s[i] < '0' || s[i] > '9' { return false }
+        i += 1
+    }
+    return true
+}
+
+// The file `rel` below `dir`: 200 with its bytes and a content type by its
+// extension; 404 for a path with `..` or a file that can't be read.
+fun file_response(dir: str, rel: Option<str>) -> Response {
+    let p = match rel {
+        Some(x) => x,
+        None => { return response(404, "not found") }
+    }
+    for seg in p.split("/") {
+        if seg == ".." || seg == "" { return response(404, "not found") }
+    }
+    return match fs_m.read_bytes(dir + "/" + p) {
+        Ok(b) => response(200, bytes_m.to_str(b)).with_header("Content-Type", content_type(p)),
+        Err(_) => response(404, "not found"),
+    }
+}
+
+// The content type of a file by its name's extension.
+#test("app.css")["text/css; charset=utf-8"]
+#test("blob")["application/octet-stream"]
+pub fun content_type(name: str) -> str {
+    let dot = match name.rfind(".") {
+        Some(i) => name[i + 1:].to_lower(),
+        None => "",
+    }
+    if dot == "html" || dot == "htm" { return "text/html; charset=utf-8" }
+    if dot == "css" { return "text/css; charset=utf-8" }
+    if dot == "js" || dot == "mjs" { return "text/javascript; charset=utf-8" }
+    if dot == "json" { return "application/json" }
+    if dot == "txt" { return "text/plain; charset=utf-8" }
+    if dot == "svg" { return "image/svg+xml" }
+    if dot == "png" { return "image/png" }
+    if dot == "jpg" || dot == "jpeg" { return "image/jpeg" }
+    if dot == "gif" { return "image/gif" }
+    if dot == "webp" { return "image/webp" }
+    if dot == "ico" { return "image/x-icon" }
+    if dot == "wasm" { return "application/wasm" }
+    if dot == "pdf" { return "application/pdf" }
+    return "application/octet-stream"
+}
+
+// --- typed endpoints ----------------------------------------------------------
+
+// A response of the JSON text `body`, with its content type.
+pub fun json_response(status: int, body: str) -> Response {
+    return response(status, body).with_header("Content-Type", "application/json")
+}
+
+// A JSON error response: `{"error": message}` with the status `status`.
+pub fun json_error(status: int, message: str) -> Response {
+    return json_response(status, json_m.to_string(json_m.obj([("error", json_m.text(message))])))
+}
+
+// A handler answering with `f`'s value as JSON (200), or with the response
+// of its `Err` as it is: `f` a typed endpoint, its result a `#derive(Json)`
+// type.
+pub fun json<O: json_m.ToJson>(f: (Request) -> Result<O, Response>) -> (Request) -> Response {
+    return (req: Request) => {
+        return match f(req) {
+            Ok(v) => json_response(200, json_m.encode(v)),
+            Err(r) => r,
+        }
+    }
+}
+
+// `json`, with the request's body decoded to an `I` first: a body that
+// isn't one is 422, the decoder's error (`$.name: missing field`) the
+// message.
+pub fun json_body<I: json_m.FromJson, O: json_m.ToJson>(f: (Request, I) -> Result<O, Response>) -> (Request) -> Response {
+    return (req: Request) => {
+        return match json_m.decode<I>(req.body) {
+            Ok(input) => match f(req, input) {
+                Ok(v) => json_response(200, json_m.encode(v)),
+                Err(r) => r,
+            },
+            Err(e) => json_error(422, f"{e}"),
+        }
+    }
 }
 
 // --- tests of the pure parts ---------------------------------------------------------

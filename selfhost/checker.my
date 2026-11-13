@@ -276,7 +276,7 @@ fun unknown_function_notes(name: str, cands: [str]) -> [Note] {
 
 // The names of the primitive types, as types.py's _PRIMITIVES has them.
 #test()[["bool", "str", "StringBuilder", "int8", "int16", "int32", "int64", "uint8", "uint16", "uint32", "uint64", "float32", "float64", "char"]]
-fun primitive_type_names() -> [str] {
+pub fun primitive_type_names() -> [str] {
     return ["bool", "str", "StringBuilder", "int8", "int16", "int32", "int64", "uint8", "uint16", "uint32", "uint64", "float32", "float64", "char"]
 }
 
@@ -947,7 +947,7 @@ fun int_fits(value: int64, w: int32, signed: bool, negated: bool) -> bool {
 #test("&")[None]
 #test("+")[Some("Add")]
 #test("/")[Some("Div")]
-fun arith_trait(op: str) -> Option<str> {
+pub fun arith_trait(op: str) -> Option<str> {
     if op == "+" { return Some("Add") }
     if op == "-" { return Some("Sub") }
     if op == "*" { return Some("Mul") }
@@ -972,8 +972,8 @@ fun is_arith_op(op: str) -> bool {
 fun primitive_default_trait(t: Type, trnm: str) -> bool {
     return match t {
         Type.TInt(w, s) => trnm == "Add" || trnm == "Sub" || trnm == "Mul" || trnm == "Div" || trnm == "Rem" || trnm == "Eq" || trnm == "Ord" || trnm == "Format" || trnm == "Hash",
-        // a float isn't `Hash`: NaN is unequal to itself (D163)
-        Type.TFloat(w) => trnm == "Add" || trnm == "Sub" || trnm == "Mul" || trnm == "Div" || trnm == "Rem" || trnm == "Eq" || trnm == "Ord" || trnm == "Format",
+        // a float is `Hash` too, a NaN's hash a runtime error (D198)
+        Type.TFloat(w) => trnm == "Add" || trnm == "Sub" || trnm == "Mul" || trnm == "Div" || trnm == "Rem" || trnm == "Eq" || trnm == "Ord" || trnm == "Format" || trnm == "Hash",
         Type.TChar => trnm == "Eq" || trnm == "Ord" || trnm == "Format" || trnm == "Hash",
         Type.TBool => trnm == "Eq" || trnm == "Format" || trnm == "Hash",
         // a string's `<` is byte-wise (MYLA-318)
@@ -983,10 +983,217 @@ fun primitive_default_trait(t: Type, trnm: str) -> bool {
 }
 
 #test("Add")[true]
+#test("Index")[true]
 #test("Two")[false]
 #test("Show")[false]
 fun is_builtin_op_trait(name: str) -> bool {
-    return name == "Add" || name == "Sub" || name == "Mul" || name == "Div" || name == "Rem" || name == "Eq" || name == "Ord"
+    return is_op_trait(name) || name == "Eq" || name == "Ord"
+}
+
+// The arithmetic operator traits (D200): `Add<R, O>` … `Rem<R, O>`, the
+// right operand's type and the result's.
+#test("Mul")[true]
+#test("Neg")[false]
+#test("Eq")[false]
+pub fun is_arith_trait(name: str) -> bool {
+    return name == "Add" || name == "Sub" || name == "Mul" || name == "Div" || name == "Rem"
+}
+
+// The operator traits that take type arguments (D200): the arithmetic ones,
+// `Neg<O>` (unary `-`), `Index<I, O>` (`x[i]`) and `IndexSet<I, V>` (`x[i] =
+// v`). `Eq` and `Ord` stay between two values of one type.
+#test("Index")[true]
+#test("IndexSet")[true]
+#test("Ord")[false]
+pub fun is_op_trait(name: str) -> bool {
+    return is_arith_trait(name) || name == "Neg" || name == "Index" || name == "IndexSet"
+}
+
+// The arguments of the operator trait `tr` written as `args` in a bound or
+// an impl for the type `self_t` (D200): a bare `Mul` is `Mul<Self, Self>`,
+// `Mul<R>` is `Mul<R, Self>`, a bare `Neg` is `Neg<Self>`; `Index` and
+// `IndexSet` take theirs written out.
+#test("Mul", [], Type.TParam("T"))[[Type.TParam("T"), Type.TParam("T")]]
+#test("Mul", [Type.TFloat(64)], Type.TParam("T"))[[Type.TFloat(64), Type.TParam("T")]]
+#test("Neg", [], Type.TStr)[[Type.TStr]]
+#test("Index", [Type.TStr], Type.TStr)[[Type.TStr]]
+#test("Eq", [], Type.TStr)[[]]
+pub fun expand_op_args(tr: str, args: [Type], self_t: Type) -> [Type] {
+    if is_arith_trait(tr) {
+        if args.len() == 0 { return [self_t, self_t] }
+        if args.len() == 1 { return [args[0], self_t] }
+    }
+    if tr == "Neg" && args.len() == 0 { return [self_t] }
+    return args
+}
+
+// The method of the operator trait `tr` (D200).
+#test("Rem")["rem"]
+#test("IndexSet")["set_index"]
+pub fun op_trait_method(tr: str) -> str {
+    if tr == "Add" { return "add" }
+    if tr == "Sub" { return "sub" }
+    if tr == "Mul" { return "mul" }
+    if tr == "Div" { return "div" }
+    if tr == "Rem" { return "rem" }
+    if tr == "Neg" { return "neg" }
+    if tr == "Index" { return "index" }
+    return "set_index"
+}
+
+// A type in a method's name, of letters, digits, `_` and a module's `$`
+// (`mul$float64`, `index$tuple_int32_int32`): what an operator method beside
+// another of its trait is told apart by (D200).
+#test(Type.TFloat(64))["float64"]
+#test(Type.TTuple([Type.TInt(32, true), Type.TInt(32, true)]))["tuple_int32_int32"]
+#test(Type.TStruct("Box", [Type.TList(Type.TStr)]))["Box_list_str"]
+pub fun type_token(t: Type) -> str {
+    return match t {
+        Type.TInt(w, sg) => int_type_name(w, sg),
+        Type.TFloat(w) => format("float{}", w),
+        Type.TBool => "bool",
+        Type.TChar => "char",
+        Type.TStr => "str",
+        Type.TSB => "StringBuilder",
+        Type.TStruct(n, a) => if a.len() == 0 { n } else { n + "_" + type_tokens(a) },
+        Type.TEnum(n, a) => if a.len() == 0 { n } else { n + "_" + type_tokens(a) },
+        Type.TActor(n, a) => if a.len() == 0 { n } else { n + "_" + type_tokens(a) },
+        Type.TTuple(es) => "tuple_" + type_tokens(es),
+        Type.TList(el) => "list_" + type_token(el),
+        Type.TMap(k, v) => "map_" + type_token(k) + "_" + type_token(v),
+        Type.TParam(n) => n,
+        _ => "fn",
+    }
+}
+
+fun type_tokens(ts: [Type]) -> str {
+    var out: [str] = []
+    for t in ts { out.push(type_token(t)) }
+    return join_strs(out, "_")
+}
+
+// The name of the method `m` of an operator impl whose right operand (or
+// index) is `r`, `r_self` when that is the target itself (D200).
+#test("mul", Type.TFloat(64), false)["mul$float64"]
+#test("mul", Type.TStr, true)["mul$self"]
+pub fun op_method_name(m: str, r: Type, r_self: bool) -> str {
+    return m + "$" + if r_self { "self" } else { type_token(r) }
+}
+
+// The type a right operand (or index) `x` is read with beside impls taking
+// the right operands `rs` (D200): the only one's; for a number literal, the
+// only one of its kind, so `v * 2.0` picks `Mul<float32, …>` beside a
+// classic `Mul` (an integer literal never becomes a float).
+#test([Type.TStruct("V", []), Type.TFloat(32)], expr_of("2.0"))[Some(Type.TFloat(32))]
+#test([Type.TFloat(64)], expr_of("2"))[None]
+#test([Type.TStr], expr_of("s"))[Some(Type.TStr)]
+fun operand_hint(rs: [Type], x: Expr) -> Option<Type> {
+    let kind = literal_kind(x)
+    if kind == "" {
+        if rs.len() == 1 { return Some(rs[0]) }
+        return None
+    }
+    var h: Option<Type> = None
+    var n = 0
+    for t in rs {
+        if (kind == "float" && is_float(t)) || (kind == "int" && is_int(t)) {
+            h = Some(t)
+            n += 1
+        }
+    }
+    return if n == 1 { h } else { None }
+}
+
+// "int" or "float" for a number literal (negated or not), else "".
+#test(expr_of("-1.5"))["float"]
+#test(expr_of("7"))["int"]
+#test(expr_of("x"))[""]
+fun literal_kind(x: Expr) -> str {
+    return match x.kind {
+        ExprKind.IntLit(v, suf, isc, big) => if isc { "" } else { "int" },
+        ExprKind.FloatLit(lex, suf) => "float",
+        ExprKind.Unary(op, y) => if op == "-" { literal_kind(y) } else { "" },
+        _ => "",
+    }
+}
+
+// The type `h` an operand `x` is read with, but none for an integer literal
+// when `h` is a float: an integer literal never becomes a float (D200).
+fun no_float_for_int(h: Option<Type>, x: Expr) -> Option<Type> {
+    return match (h, x.kind) {
+        (Some(t), ExprKind.IntLit(v, suf, isc, big)) => if is_float(t) { None } else { h },
+        _ => h,
+    }
+}
+
+// A note naming the impls of the operator trait `tr` that the type `lt`
+// has (D200), beside an error that none fits.
+fun op_have_note(cands: [OpImpl], lt: Type, classic: bool, tr: str) -> [Note] {
+    var have: [str] = []
+    if classic { have.push(tr) }
+    for oi in cands {
+        let r = if oi.r_self { lt } else { oi.r }
+        if tr == "Neg" { have.push(format("Neg<{}>", type_name(oi.o))) } else { have.push(format("{}<{}, {}>", tr, type_name(r), type_name(oi.o))) }
+    }
+    if have.len() == 0 { return [] }
+    return [Note { label: "note", msg: format("'{}' implements {}", type_name(lt), join_strs(have, ", ")), line: 0, col: 0, sp: no_span() }]
+}
+
+// The element type indexing a value of the built-in type `c` with an index
+// of the type `i` gives: a list's by an integer, a map's by its key, a
+// string's byte by an integer; None for any other.
+#test(Type.TList(Type.TStr), Type.TInt(64, true))[Some(Type.TStr)]
+#test(Type.TMap(Type.TStr, Type.TBool), Type.TInt(32, true))[None]
+fun builtin_index(c: Type, i: Type) -> Option<Type> {
+    return match c {
+        Type.TList(el) => if is_int(i) { Some(el) } else { None },
+        Type.TMap(k, v) => if type_eq(i, k) { Some(v) } else { None },
+        Type.TStr => if is_int(i) { Some(Type.TInt(8, false)) } else { None },
+        _ => None,
+    }
+}
+
+// The bound of the operator trait `tr` with the (expanded) arguments `args`
+// on the type parameter `self_t` as it would be written: `Mul`,
+// `Mul<float64>`, `Mul<float64, float64>`, `Neg`, `Index<int32, str>`.
+#test("Mul", [Type.TParam("T"), Type.TParam("T")], Type.TParam("T"))["Mul"]
+#test("Mul", [Type.TFloat(64), Type.TParam("T")], Type.TParam("T"))["Mul<float64>"]
+#test("Neg", [Type.TStr], Type.TParam("T"))["Neg<str>"]
+fun op_bound_text(tr: str, args: [Type], self_t: Type) -> str {
+    if is_arith_trait(tr) && args.len() == 2 && type_eq(args[1], self_t) {
+        if type_eq(args[0], self_t) { return tr }
+        return format("{}<{}>", tr, type_name(args[0]))
+    }
+    if tr == "Neg" && args.len() == 1 && type_eq(args[0], self_t) { return tr }
+    return format("{}<{}>", tr, type_names(args))
+}
+
+// The method of the operator impl `oi` without its type's key: `mul$float64`
+// of `Vec3.mul$float64`, what a runner calls on its receiver (D200).
+#test(OpImpl { tr: "Mul", key: "V", target: Type.TStruct("V", []), r: Type.TFloat(64), r_self: false, o: Type.TStruct("V", []), method: "V.mul$float64", decl: 0 })["mul$float64"]
+pub fun op_part(oi: OpImpl) -> str {
+    return oi.method[oi.key.len() + 1:]
+}
+
+// The error of a second impl of the operator trait `tn` for the type `key`
+// with the right operand (or index) `r` (D200).
+fun op_dup(ln: int32, cl: int32, sp: SrcSpan, tn: str, r: Type, key: str) -> CheckErr {
+    return terr_at(ln, cl, sp, format("duplicate impl of trait '{}<{}, …>' for type '{}' (one per type of the right operand or index)", tn, type_name(r), key))
+}
+
+// The impl of the operator trait `tr` among `impls` for a left operand (or
+// an indexed value) of the type `lt`, whose type key is `key`, and a right
+// operand (or index) of the type `rt` (D200); `Neg`'s by `lt` alone.
+#test([], "Mul", "V", Type.TStruct("V", []), Type.TFloat(64))[None]
+pub fun find_op_impl(impls: [OpImpl], tr: str, key: str, lt: Type, rt: Type) -> Option<OpImpl> {
+    for oi in impls {
+        if oi.tr != tr || oi.key != key { continue }
+        if tr == "Neg" { return Some(oi) }
+        if oi.r_self {
+            if type_eq(rt, lt) { return Some(oi) }
+        } else if type_eq(rt, oi.r) { return Some(oi) }
+    }
+    return None
 }
 
 #test("A")[false]
@@ -2155,6 +2362,20 @@ pub struct TraitInfo { name: str, methods: [TraitMethodSig], type_params: [str],
 pub struct MethodEntry { key: str, name: str, sig: FuncSig }
 pub struct TraitImplPair { trait_name: str, key: str }
 
+// An impl of an operator trait that isn't the classic same-type one (D200,
+// MYLA-612): `impl Mul<float, Vec3> for Vec3`, `impl Mul<Vec3, Vec3> for
+// float64`, `impl Neg<…> for P`, `impl Index<int, float> for Vec3`. `tr` the
+// trait, `key` the target's type key, `target` its type (with the impl's
+// type parameters), `r` the right operand's or index's type (none of the
+// impl's type parameters, unless `r_self`: the target itself), `o` the
+// result's (or `IndexSet`'s value's) type, `method` the method's full name
+// (`Vec3.mul$float64`): an operator method beside another of its trait on
+// the same type has the right operand's type in its name. The checker, the
+// interpreter and the code generator pick an impl by the operands' types
+// with `find_op_impl`. `decl` is the impl's declaration (the harness names
+// a case by the renamed method through it).
+pub struct OpImpl { tr: str, key: str, target: Type, r: Type, r_self: bool, o: Type, method: str, decl: int32 }
+
 pub struct AliasRaw { name: str, target: TypeExpr, line: int32, col: int32, sp: SrcSpan, id: int32 }
 pub struct AliasCached { name: str, ty: Type }
 
@@ -2228,6 +2449,9 @@ pub struct Checker {
     trait_decls: [Decl],
     trait_impls: [TraitImplPair],
     user_trait_impls: [TraitImplPair],
+    op_impls: [OpImpl],             // the operator impls by type arguments (D200)
+    op_sites: [int32: str],         // an operator or index that calls one: the method, "" to pick by the types in generic code
+    op_sets: [int32: str],          // an index assigned to by an `IndexSet`, as `op_sites` (a compound assignment's target is its value's operand too)
     impl_args: [str: ImplArgs],     // a generic trait's impls' arguments, by `trait\tkey` (D171)
     impl_bounds: [str: ImplBounds], // a generic impl's bounds on its type parameters, by `trait\tkey` (MYLA-379)
     for_iters: [int32: Stmt],       // a `for` over an iterator, by its id: the loop it is (D171, `check_for_iterator`)
@@ -2364,7 +2588,7 @@ fun new_checker(decls: [Decl]) -> Checker {
         decls: decls,
         structs: [], enums: [], recursive_enums: [],
         functions: [], methods: [], method_decls: [], method_decl_keys: [], method_decl_ids: [],
-        impl_decls: [], next_id: 1000000000, derived: [], pending_keys: [], keys_ready: false, key_ctx: false, traits: [], trait_decls: [], trait_impls: [], user_trait_impls: [], impl_args: [:], impl_bounds: [:], for_iters: [:],
+        impl_decls: [], next_id: 1000000000, derived: [], pending_keys: [], keys_ready: false, key_ctx: false, traits: [], trait_decls: [], trait_impls: [], user_trait_impls: [], op_impls: [], op_sites: [:], op_sets: [:], impl_args: [:], impl_bounds: [:], for_iters: [:],
         static_selfs: [:], static_calls: [:], on_type_params: false, call_types: [:],
         grow_calls: [],
         aliases: [], alias_cache: [], const_decls: [], consts: [], const_values: [:], const_done: [], const_folding: [],
@@ -2547,7 +2771,7 @@ impl Checker {
         if !self.method_map.contains(k) { self.method_map[k] = self.methods.len() }
         self.methods.push(m)
     }
-    #test(checker_on("[int]"), "Eq")[5]
+    #test(checker_on("[int]"), "Eq")[8]
     fun trait_idx(self, name: str) -> int32 {
         var i = 0
         while i < self.traits.len() { if self.traits[i].name == name { return i }
@@ -2615,7 +2839,7 @@ impl Checker {
     #test(checker_on("[int]"), Type.TInt(32, true), "Add")[Ok(true)]
     #test(checker_on("[int]"), Type.TTuple([Type.TInt(32, true), Type.TStr]), "Eq")[Ok(true)]
     #test(checker_on("[int]"), Type.TList(Type.TTuple([Type.TChar, Type.TFloat(64)])), "Eq")[Ok(true)]
-    #test(checker_on("[int]"), Type.TTuple([Type.TInt(32, true), Type.TFloat(64)]), "Hash")[Ok(false)]
+    #test(checker_on("[int]"), Type.TTuple([Type.TInt(32, true), Type.TFloat(64)]), "Hash")[Ok(true)]
     #test(checker_on("[int]"), Type.TList(Type.TStr), "Hash")[Ok(true)]
     #test(checker_on("[int]"), Type.TTuple([Type.TStruct("P", [])]), "Eq")[Ok(false)]
     fun type_implements(self, t: Type, trnm: str) -> Result<bool, CheckErr> {
@@ -2686,6 +2910,7 @@ impl Checker {
     #test(checker_on("enum Option<T> { Some(T), None }\ntrait Iterator<T> {\n    fun next(var self) -> Option<T>\n}\nstruct C { n: int }\nimpl Iterator<int> for C {\n    fun next(var self) -> Option<int> { return None }\n}"), Type.TStruct("C", []), "Iterator", [Type.TInt(32, true)])[Ok(true)]
     #test(checker_on("enum Option<T> { Some(T), None }\ntrait Iterator<T> {\n    fun next(var self) -> Option<T>\n}\nstruct C { n: int }\nimpl Iterator<int> for C {\n    fun next(var self) -> Option<int> { return None }\n}"), Type.TStruct("C", []), "Iterator", [Type.TStr])[Ok(false)]
     fun meets_bound(self, c: Type, tr: str, want: [Type]) -> Result<bool, CheckErr> {
+        if is_op_trait(tr) { return self.meets_op_bound(c, tr, want) }
         let ok = match c {
             Type.TParam(pn) => self.bound_has(pn, tr),
             _ => self.type_implements(c, tr)?,
@@ -2694,6 +2919,51 @@ impl Checker {
         return match self.trait_args_of(c, tr) {
             Some(have) => Ok(type_list_eq(have, want)),
             None => Ok(true),
+        }
+    }
+
+    // Whether `c` meets the bound of the operator trait `tr` with the
+    // (expanded) arguments `want` (D200): a type parameter by its own bound
+    // with those arguments; the classic impl, both operands and the result
+    // `c` itself, as `type_implements` knows it (a number's operators
+    // included); a list's, map's or string's indexing; a signed number's or
+    // float's `-`; an impl in `op_impls` whose result is the bound's.
+    #test(checker_on("[int]"), Type.TFloat(64), "Mul", [Type.TFloat(64), Type.TFloat(64)])[Ok(true)]
+    #test(checker_on("[int]"), Type.TFloat(64), "Mul", [Type.TInt(32, true), Type.TFloat(64)])[Ok(false)]
+    #test(checker_on("[int]"), Type.TList(Type.TStr), "Index", [Type.TInt(32, true), Type.TStr])[Ok(true)]
+    #test(checker_on("[int]"), Type.TInt(32, true), "Neg", [Type.TInt(32, true)])[Ok(true)]
+    fun meets_op_bound(self, c: Type, tr: str, want: [Type]) -> Result<bool, CheckErr> {
+        match c {
+            Type.TParam(pn) => {
+                for b in self.bounds_cur {
+                    if b.tp != pn { continue }
+                    var j = 0
+                    while j < b.traits.len() {
+                        if b.traits[j] == tr && type_list_eq(b.args[j], want) { return Ok(true) }
+                        j += 1
+                    }
+                }
+                return Ok(false)
+            },
+            Type.TError => { return Ok(true) },   // has had its error (MYLA-110)
+            _ => {},
+        }
+        if is_arith_trait(tr) && type_eq(want[0], c) && type_eq(want[1], c) { return self.type_implements(c, tr) }
+        if tr == "Index" || tr == "IndexSet" {
+            match builtin_index(c, want[0]) {
+                Some(el) => { if tr == "Index" || !is_str(c) { return Ok(type_eq(el, want[1])) } },
+                None => {},
+            }
+        }
+        if tr == "Neg" && (is_signed_int(c) || is_float(c)) { return Ok(type_eq(want[0], c)) }
+        let key = match self.type_key(c) {
+            Some(k) => k,
+            None => { return Ok(false) },
+        }
+        let rt = if tr == "Neg" { c } else { want[0] }
+        return match find_op_impl(self.op_impls, tr, key, c, rt) {
+            Some(oi) => Ok(type_eq(subst_type(oi.o, unify_param(oi.target, c, []).subst), want[want.len() - 1])),
+            None => Ok(false),
         }
     }
 
@@ -3128,6 +3398,8 @@ impl Checker {
             while i < tp.bounds.len() {
                 var ts: [Type] = []
                 if i < tp.bound_args.len() { for a in tp.bound_args[i] { ts.push(self.resolve_part(a)?) } }
+                // `T: Mul` is `T: Mul<T, T>`, `T: Mul<float>` `T: Mul<float, T>` (D200)
+                if is_op_trait(tp.bounds[i]) { ts = expand_op_args(tp.bounds[i], ts, Type.TParam(tp.name)) }
                 args.push(ts)
                 i += 1
             }
@@ -3340,11 +3612,14 @@ fun agg_refs(t: Type) -> [AggRef] {
 
 impl Checker {
     fun register_builtin_op_traits(var self) {
-        self.traits.push(TraitInfo { name: "Add", methods: [TraitMethodSig { name: "add", params: [Type.TSelf, Type.TSelf], ret: Some(Type.TSelf), receiver: "self" }], type_params: [], builtin: true, line: 0, col: 0 })
-        self.traits.push(TraitInfo { name: "Sub", methods: [TraitMethodSig { name: "sub", params: [Type.TSelf, Type.TSelf], ret: Some(Type.TSelf), receiver: "self" }], type_params: [], builtin: true, line: 0, col: 0 })
-        self.traits.push(TraitInfo { name: "Mul", methods: [TraitMethodSig { name: "mul", params: [Type.TSelf, Type.TSelf], ret: Some(Type.TSelf), receiver: "self" }], type_params: [], builtin: true, line: 0, col: 0 })
-        self.traits.push(TraitInfo { name: "Div", methods: [TraitMethodSig { name: "div", params: [Type.TSelf, Type.TSelf], ret: Some(Type.TSelf), receiver: "self" }], type_params: [], builtin: true, line: 0, col: 0 })
-        self.traits.push(TraitInfo { name: "Rem", methods: [TraitMethodSig { name: "rem", params: [Type.TSelf, Type.TSelf], ret: Some(Type.TSelf), receiver: "self" }], type_params: [], builtin: true, line: 0, col: 0 })
+        // the operators take their operands' and result's types as arguments
+        // (D200): `fun mul(self, other: R) -> O`, a bare `Mul` `Mul<Self, Self>`
+        for tn in ["Add", "Sub", "Mul", "Div", "Rem"] {
+            self.traits.push(TraitInfo { name: tn, methods: [TraitMethodSig { name: op_trait_method(tn), params: [Type.TSelf, Type.TParam("R")], ret: Some(Type.TParam("O")), receiver: "self" }], type_params: ["R", "O"], builtin: true, line: 0, col: 0 })
+        }
+        self.traits.push(TraitInfo { name: "Neg", methods: [TraitMethodSig { name: "neg", params: [Type.TSelf], ret: Some(Type.TParam("O")), receiver: "self" }], type_params: ["O"], builtin: true, line: 0, col: 0 })
+        self.traits.push(TraitInfo { name: "Index", methods: [TraitMethodSig { name: "index", params: [Type.TSelf, Type.TParam("I")], ret: Some(Type.TParam("O")), receiver: "self" }], type_params: ["I", "O"], builtin: true, line: 0, col: 0 })
+        self.traits.push(TraitInfo { name: "IndexSet", methods: [TraitMethodSig { name: "set_index", params: [Type.TSelf, Type.TParam("I"), Type.TParam("V")], ret: None, receiver: "var self" }], type_params: ["I", "V"], builtin: true, line: 0, col: 0 })
         self.traits.push(TraitInfo { name: "Eq", methods: [TraitMethodSig { name: "eq", params: [Type.TSelf, Type.TSelf], ret: Some(Type.TBool), receiver: "self" }], type_params: [], builtin: true, line: 0, col: 0 })
         self.traits.push(TraitInfo { name: "Ord", methods: [TraitMethodSig { name: "cmp", params: [Type.TSelf, Type.TSelf], ret: Some(t_int()), receiver: "self" }], type_params: [], builtin: true, line: 0, col: 0 })
     }
@@ -3550,6 +3825,9 @@ impl Checker {
         var conforms = true
         var pmap: [Subst] = []
         var tinfo = TraitInfo { name: "", methods: [], type_params: [], builtin: false, line: 0, col: 0 }
+        // 0: no operator impl by type arguments; 2: one (D200)
+        var op_kind = 0
+        var ms = methods
         match trait_name {
             Some(tn) => {
                 let ti = self.trait_idx(tn)
@@ -3558,6 +3836,8 @@ impl Checker {
                 } else {
                     tinfo = self.traits[ti]
                     have_trait = true
+                    // `Mul` is `Mul<Self, Self>`, `Mul<R>` `Mul<R, Self>` (D200)
+                    if is_op_trait(tn) { trait_args = expand_op_args(tn, trait_args, target) }
                     if trait_args.len() != tinfo.type_params.len() {
                         var expected = tn
                         if tinfo.type_params.len() > 0 { expected = format("{}<{}>", tn, join_strs(tinfo.type_params, ", ")) }
@@ -3570,16 +3850,49 @@ impl Checker {
                             pi = pi + 1
                         }
                     }
-                    var dup = false
-                    for p in self.user_trait_impls { if p.trait_name == tn && p.key == key { dup = true } }
-                    if dup {
-                        self.record(terr_at(ln, cl, sp, format("duplicate impl of trait '{}' for type '{}' (at most one user impl per trait/type pair)", tn, key)))?
-                        return Ok(0)
+                    // an operator's impl by its type arguments (D200): one per
+                    // right operand's type, its method named by that type
+                    if is_op_trait(tn) && conforms && target_ok {
+                        match self.op_impl_kind(ln, cl, sp, tn, target, key, trait_args) {
+                            Ok(k) => { op_kind = k },
+                            Err(e) => {
+                                self.record(e)?
+                                self.lose_impl(methods, trait_name)
+                                return Ok(0)
+                            },
+                        }
                     }
-                    self.user_trait_impls.push(TraitImplPair { trait_name: tn, key: key })
-                    // what a bound naming the trait with arguments compares
-                    // and solves (D171)
-                    if conforms && trait_args.len() > 0 { self.impl_args[tn + "\t" + key] = ImplArgs { target: target, args: trait_args } }
+                    if op_kind == 2 {
+                        let r_self = type_eq(trait_args[0], target)
+                        let mname = op_trait_method(tn)
+                        let renamed = op_method_name(mname, trait_args[0], r_self)
+                        var ms2: [FunData] = []
+                        for m in ms {
+                            var m2 = m
+                            if m.name == mname { m2.name = renamed }
+                            ms2.push(m2)
+                        }
+                        ms = ms2
+                        self.rename_impl_methods(decl.id, ms)
+                        var tm = tinfo.methods[0]
+                        tm.name = renamed
+                        tinfo.methods = [tm]
+                        let last = if tn == "IndexSet" { trait_args[1] } else { trait_args[trait_args.len() - 1] }
+                        self.op_impls.push(OpImpl { tr: tn, key: key, target: target, r: trait_args[0], r_self: r_self, o: last, method: key + "." + renamed, decl: decl.id })
+                    } else {
+                        var dup = false
+                        for p in self.user_trait_impls { if p.trait_name == tn && p.key == key { dup = true } }
+                        if dup {
+                            self.record(terr_at(ln, cl, sp, format("duplicate impl of trait '{}' for type '{}' (at most one user impl per trait/type pair)", tn, key)))?
+                            return Ok(0)
+                        }
+                        self.user_trait_impls.push(TraitImplPair { trait_name: tn, key: key })
+                        // `Neg` is one per type, its result in the table too
+                        if tn == "Neg" && conforms { self.op_impls.push(OpImpl { tr: tn, key: key, target: target, r: Type.TTuple([]), r_self: false, o: trait_args[0], method: key + ".neg", decl: decl.id }) }
+                        // what a bound naming the trait with arguments compares
+                        // and solves (D171); an operator's are its own (D200)
+                        if conforms && trait_args.len() > 0 && !is_op_trait(tn) { self.impl_args[tn + "\t" + key] = ImplArgs { target: target, args: trait_args } }
+                    }
                 }
             },
             None => {},
@@ -3590,7 +3903,7 @@ impl Checker {
         var fun_fields: [str] = []
         let si = self.struct_idx(key)
         if si >= 0 { for f in self.structs[si].fields { if is_tfunc_type(f.ty) { fun_fields.push(f.name) } } }
-        for m in methods {
+        for m in ms {
             // a method that can't be added is left out, body and all
             var bad: Option<CheckErr> = None
             match self.method_sig(key, m.name) { Some(x) => { bad = Some(self.duplicate_method(m, key, x)) }, None => {} }
@@ -3622,7 +3935,7 @@ impl Checker {
         if have_trait {
             if conforms {
                 var impl_names: [str] = []
-                for m in methods { impl_names.push(m.name) }
+                for m in ms { impl_names.push(m.name) }
                 match self.check_trait_conformance(ln, cl, sp, key, target, tinfo, pmap, impl_names) {
                     Ok(ok) => { conforms = ok },
                     Err(e) => {
@@ -3632,15 +3945,69 @@ impl Checker {
                 }
             }
             match trait_name {
-                Some(tn) => {
+                // (an operator's impl by type arguments is in `op_impls`)
+                Some(tn) if op_kind != 2 => {
                     if !conforms { self.broken_impls[tn + "\t" + key] = true }
                     self.trait_impls.push(TraitImplPair { trait_name: tn, key: key })
                     if ibounds.len() > 0 { self.impl_bounds[tn + "\t" + key] = ImplBounds { target: target, bounds: ibounds } }
                 },
-                None => {},
+                _ => {},
             }
         }
         return Ok(0)
+    }
+
+    // What an impl of the operator trait `tn` with the (expanded) arguments
+    // `args` for `target` (key `key`) is (D200): 0 the classic one, both
+    // operands and the result the type itself, or a `Neg`, one per type, as
+    // any trait's impl; 2 one by its type arguments, beside others of the
+    // trait for other right operands. Its errors: a target that can't have
+    // one, a right operand of the impl's type parameters, a repeat.
+    #test(checker_on("struct V { x: int }"), 1, 1, no_span(), "Mul", Type.TStruct("V", []), "V", [Type.TFloat(64), Type.TStruct("V", [])])[Ok(2)]
+    #test(checker_on("struct V { x: int }"), 1, 1, no_span(), "Add", Type.TStruct("V", []), "V", [Type.TStruct("V", []), Type.TStruct("V", [])])[Ok(0)]
+    fun op_impl_kind(self, ln: int32, cl: int32, sp: SrcSpan, tn: str, target: Type, key: str, args: [Type]) -> Result<int32, CheckErr> {
+        if is_arith_trait(tn) && type_eq(args[0], target) && type_eq(args[1], target) {
+            for oi in self.op_impls { if oi.tr == tn && oi.key == key && oi.r_self { return Err(op_dup(ln, cl, sp, tn, args[0], key)) } }
+            return Ok(0)
+        }
+        let agg = is_struct_or_enum(target)
+        if tn == "Neg" {
+            if !agg { return Err(terr_at(ln, cl, sp, format("'Neg' is implemented by structs and enums: '-' on '{}' is the language's", type_name(target)))) }
+            return Ok(0)
+        }
+        if !agg {
+            let number = is_int(target) || is_float(target)
+            if !(number && is_arith_trait(tn)) { return Err(terr_at(ln, cl, sp, format("'{}' is implemented by structs and enums (an arithmetic operator's also by a number, with a struct or enum on the right)", tn))) }
+            if !is_struct_or_enum(args[0]) { return Err(terr_at(ln, cl, sp, format("an operator impl on '{}' needs a struct or enum on the right: the operators between numbers are the language's", type_name(target)))) }
+        }
+        let r_self = type_eq(args[0], target)
+        if contains_type_param(args[0]) && !r_self { return Err(terr_at(ln, cl, sp, format("the right operand of an operator impl can't use the impl's type parameters (found '{}'): the impl is picked where the operands' types are known", type_name(args[0])))) }
+        for oi in self.op_impls {
+            if oi.tr != tn || oi.key != key { continue }
+            if (r_self && oi.r_self) || (!r_self && !oi.r_self && type_eq(oi.r, args[0])) { return Err(op_dup(ln, cl, sp, tn, args[0], key)) }
+        }
+        if r_self && is_arith_trait(tn) {
+            for p in self.user_trait_impls { if p.trait_name == tn && p.key == key { return Err(op_dup(ln, cl, sp, tn, args[0], key)) } }
+        }
+        return Ok(2)
+    }
+
+    // The impl `id`'s methods made `ms` where the declarations are kept, as
+    // the interpreter collects them from there: an operator method named by
+    // its right operand's type (D200).
+    fun rename_impl_methods(var self, id: int32, ms: [FunData]) {
+        var i = 0
+        while i < self.decls.len() {
+            let d = self.decls[i]
+            if d.id == id {
+                match d.kind {
+                    DeclKind.ImplDecl(t, old, tps, tr, targs, attrs) => { self.decls[i] = Decl { id: d.id, line: d.line, col: d.col, sp: d.sp, kind: DeclKind.ImplDecl(t, ms, tps, tr, targs, attrs) } },
+                    _ => {},
+                }
+                return
+            }
+            i += 1
+        }
     }
 
     // The error of a method `m` that `key` has already, as `first`: with a
@@ -4207,6 +4574,8 @@ impl Checker {
             let tr = self.expect_value(x, hint)
             self.neg_lit = saved_neg
             let t = tr?
+            // a struct's or enum's by its `Neg` (D200)
+            if is_struct_or_enum(t) || is_type_param(t) { return self.infer_neg(e, t) }
             if !(is_int(t) || is_float(t)) { return Err(terr_at(e.line, e.col, e.sp, "unary '-' requires a numeric operand")) }
             // a negative literal fits no unsigned type (L5)
             match x.kind {
@@ -4314,7 +4683,9 @@ impl Checker {
             self.expect_type(r, Type.TBool, format("operand of '{}'", op))?
             return Ok(Type.TBool)
         }
-        if literal_struct(l) && !literal_struct(r) && (is_arith_op(op) || op == "==" || op == "!=" || op == "<" || op == "<=" || op == ">" || op == ">=") {
+        // (beside a number literal the struct is typed first: the literal
+        // takes the type of the impl its kind picks, D200)
+        if literal_struct(l) && !literal_struct(r) && literal_kind(r) == "" && (is_arith_op(op) || op == "==" || op == "!=" || op == "<" || op == "<=" || op == ">" || op == ">=") {
             // a struct of number literals takes the type of the operand
             // beside it, as a number literal does (MYLA-544)
             let rt0 = self.expect_value(r, if is_arith_op(op) { op_hint(expected, None) } else { None })?
@@ -4405,6 +4776,8 @@ impl Checker {
                 if !is_char(lt) { return Err(terr_at(e.line, e.col, e.sp, "operator '+' requires numeric or string operands")) }
             }
             let rt = self.expect_value(r, hint2)?
+            // `2.0 + v` by `impl Add<V, …> for float64` (D200)
+            if self.has_left_scalar("Add", rt) { return self.infer_left_scalar(e, op, l, lt, waits, rt) }
             match self.char_arith(e, op, l, lt, rt)? { Some(t) => { return Ok(t) }, None => {} }
             if adapts(l) { lt = self.left_literal(l, lt, waits, hint, r, rt)? }
             let common = self.unify(l, lt, r, rt)?
@@ -4424,6 +4797,8 @@ impl Checker {
         // what a char is moved by or measured from isn't the context's type
         if is_char(lt) { hint2 = None }
         let rt = self.expect_value(r, hint2)?
+        // `2.0 * v` by `impl Mul<V, …> for float64` (D200)
+        if is_arith_op(op) && self.has_left_scalar(match arith_trait(op) { Some(t) => t, None => "" }, rt) { return self.infer_left_scalar(e, op, l, lt, waits, rt) }
         if op == "-" {
             match self.char_arith(e, op, l, lt, rt)? { Some(t) => { return Ok(t) }, None => {} }
         }
@@ -4477,6 +4852,11 @@ impl Checker {
             kind = "ord" }
         else { trnm = match arith_trait(op) { Some(t) => t, None => "" }
             kind = "arith" } }
+        // impls by type arguments, `impl Mul<float> for V` (D200)
+        if kind == "arith" {
+            let key = match self.type_key(lt) { Some(k) => k, None => "" }
+            if self.op_cands(trnm, key).len() > 0 { return self.infer_op_impl(e, op, trnm, lt, key, r, known_rt) }
+        }
         if !self.type_implements(lt, trnm)? {
             // its generic impl's bound unmet: why its argument isn't (MYLA-379)
             match self.failing_arg(lt, trnm) {
@@ -4509,6 +4889,210 @@ impl Checker {
         return Ok(Type.TBool)
     }
 
+    // The operator impls of the trait `tr` for the type key `key` (D200).
+    fun op_cands(self, tr: str, key: str) -> [OpImpl] {
+        var out: [OpImpl] = []
+        for oi in self.op_impls { if oi.tr == tr && oi.key == key { out.push(oi) } }
+        return out
+    }
+
+    // The type the right operand (or index) `r` is read with beside impls
+    // `cands` of an operator for a left operand of type `lt` (D200): the
+    // only one's right operand; but an integer literal never becomes a
+    // float, so `v * 2` asks for `impl Mul<int32, …>`.
+    fun op_hint(self, cands: [OpImpl], lt: Type, classic: bool, r: Expr) -> Option<Type> {
+        var rs: [Type] = []
+        if classic { rs.push(lt) }
+        for c in cands { rs.push(if c.r_self { lt } else { c.r }) }
+        return operand_hint(rs, r)
+    }
+
+    // `l op r` with `l` of the type `lt` (key `key`), which has impls of the
+    // operator's trait `tr` by type arguments (D200): the right operand's
+    // type picks the impl (or the classic one), whose result it is.
+    fun infer_op_impl(var self, e: Expr, op: str, tr: str, lt: Type, key: str, r: Expr, known_rt: Option<Type>) -> Result<Type, CheckErr> {
+        let classic = self.type_implements(lt, tr)?
+        let cands = self.op_cands(tr, key)
+        let rt = match known_rt {
+            Some(t) => t,
+            None => self.expect_value(r, self.op_hint(cands, lt, classic, r))?,
+        }
+        if classic && type_eq(lt, rt) {
+            return match self.method_sig(key, op_trait_method(tr)) {
+                Some(sig) => match sig.ret {
+                    Some(rr) => Ok(subst_type(rr, unify_param(sig.params[0], lt, []).subst)),
+                    None => Ok(lt),
+                },
+                None => Ok(lt),
+            }
+        }
+        return match find_op_impl(self.op_impls, tr, key, lt, rt) {
+            Some(oi) => {
+                self.op_sites[e.id] = op_part(oi)
+                Ok(subst_type(oi.o, unify_param(oi.target, lt, []).subst))
+            },
+            None => Err(with_notes(terr_at(e.line, e.col, e.sp, format("operator '{}' is not defined for '{}' and '{}': it needs 'impl {}<{}, …> for {}'", op, type_name(lt), type_name(rt), tr, type_name(rt), type_name(lt))), op_have_note(cands, lt, classic, tr))),
+        }
+    }
+
+    // The arguments of each bound of the type parameter `pn` on the
+    // operator trait `tr` (D200).
+    fun bound_arg_sets(self, pn: str, tr: str) -> [[Type]] {
+        var out: [[Type]] = []
+        for b in self.bounds_cur {
+            if b.tp != pn { continue }
+            var j = 0
+            while j < b.traits.len() {
+                if b.traits[j] == tr { out.push(b.args[j]) }
+                j += 1
+            }
+        }
+        return out
+    }
+
+    // Whether a number has an impl of the arithmetic trait `tr` with the
+    // right operand `rt` (D200): `impl Mul<V, V> for float64`.
+    fun has_left_scalar(self, tr: str, rt: Type) -> bool {
+        if !is_struct_or_enum(rt) { return false }
+        for oi in self.op_impls { if oi.tr == tr && !oi.r_self && type_eq(oi.r, rt) && !is_struct_or_enum(oi.target) { return true } }
+        return false
+    }
+
+    // `l op r` with a number on the left, of the type `lt0` (or a literal
+    // that `waits`), and the struct or enum `rt` on the right (D200): the
+    // impl of the operator for the number's type, `impl Mul<V, V> for
+    // float64`; a literal takes the type of the only such impl, but an
+    // integer literal never becomes a float.
+    fun infer_left_scalar(var self, e: Expr, op: str, l: Expr, lt0: Type, waits: bool, rt: Type) -> Result<Type, CheckErr> {
+        let tr = match arith_trait(op) { Some(t) => t, None => "" }
+        var lt = lt0
+        if waits {
+            var hint: Option<Type> = None
+            var n = 0
+            for oi in self.op_impls {
+                if oi.tr == tr && !oi.r_self && type_eq(oi.r, rt) && !is_struct_or_enum(oi.target) {
+                    hint = Some(oi.target)
+                    n += 1
+                }
+            }
+            if n != 1 { hint = None }
+            lt = self.expect_value(l, no_float_for_int(hint, l))?
+        }
+        let key = match self.type_key(lt) { Some(k) => k, None => "" }
+        return match find_op_impl(self.op_impls, tr, key, lt, rt) {
+            Some(oi) => {
+                self.op_sites[e.id] = op_part(oi)
+                Ok(oi.o)
+            },
+            None => Err(terr_at(e.line, e.col, e.sp, format("operator '{}' is not defined for '{}' and '{}': it needs 'impl {}<{}, …> for {}'", op, type_name(lt), type_name(rt), tr, type_name(rt), type_name(lt)))),
+        }
+    }
+
+    // `-x` with `x` of the struct, enum or type parameter `t`: by its `Neg`
+    // (D200).
+    fun infer_neg(var self, e: Expr, t: Type) -> Result<Type, CheckErr> {
+        match t {
+            Type.TParam(pn) => {
+                let sets = self.bound_arg_sets(pn, "Neg")
+                if sets.len() == 0 { return Err(terr_at(e.line, e.col, e.sp, format("unary '-' on a value of type parameter '{}' requires the bound '{}: Neg'", pn, pn))) }
+                self.op_sites[e.id] = ""
+                return Ok(sets[0][0])
+            },
+            _ => {},
+        }
+        let key = match self.type_key(t) { Some(k) => k, None => "" }
+        return match find_op_impl(self.op_impls, "Neg", key, t, t) {
+            Some(oi) => {
+                self.op_sites[e.id] = op_part(oi)
+                Ok(subst_type(oi.o, unify_param(oi.target, t, []).subst))
+            },
+            None => Err(terr_at(e.line, e.col, e.sp, format("unary '-' is not defined for '{}': it needs 'impl Neg for {}'", type_name(t), type_name(t)))),
+        }
+    }
+
+    // `x[i]` with `x` of the struct, enum or type parameter `base`: by its
+    // `Index` for the index's type (D200).
+    fun infer_op_index(var self, e: Expr, base: Type, ix: Expr) -> Result<Type, CheckErr> {
+        match base {
+            Type.TParam(pn) => {
+                let sets = self.bound_arg_sets(pn, "Index")
+                var hint: Option<Type> = None
+                if sets.len() == 1 { hint = no_float_for_int(Some(sets[0][0]), ix) }
+                let it = self.expect_value(ix, hint)?
+                for a in sets {
+                    if type_eq(a[0], it) {
+                        self.op_sites[e.id] = ""
+                        return Ok(a[1])
+                    }
+                }
+                return Err(terr_at(e.line, e.col, e.sp, format("a value of type parameter '{}' can't be indexed by '{}': it needs the bound '{}: Index<{}, …>'", pn, type_name(it), pn, type_name(it))))
+            },
+            _ => {},
+        }
+        let key = match self.type_key(base) { Some(k) => k, None => "" }
+        let cands = self.op_cands("Index", key)
+        let it = self.expect_value(ix, self.op_hint(cands, base, false, ix))?
+        return match find_op_impl(self.op_impls, "Index", key, base, it) {
+            Some(oi) => {
+                self.op_sites[e.id] = op_part(oi)
+                Ok(subst_type(oi.o, unify_param(oi.target, base, []).subst))
+            },
+            None => Err(with_notes(terr_at(e.line, e.col, e.sp, format("type '{}' can't be indexed: it needs 'impl Index<{}, …> for {}'", type_name(base), type_name(it), type_name(base))), op_have_note(cands, base, false, "Index"))),
+        }
+    }
+
+    // `x[i] = v` with `x` a struct, enum or type parameter: by its
+    // `IndexSet` for the index's type (D200), `x` a mutable place; true when
+    // `target` is such a place, which this checked, false for any other.
+    fun check_index_set(var self, s: Stmt, target: Expr, value: Expr) -> Result<bool, CheckErr> {
+        let b = match target.kind { ExprKind.Index(b0, ix0) => b0, _ => { return Ok(false) } }
+        let ix = match target.kind { ExprKind.Index(b0, ix0) => ix0, _ => { return Ok(false) } }
+        if is_slice_expr(ix) { return Ok(false) }
+        match from_end_of(ix) { Some(n) => { return Ok(false) }, None => {} }
+        let lv = self.check_lvalue(b)?
+        let bt = lv.ty
+        if !(is_struct_or_enum(bt) || is_type_param(bt)) { return Ok(false) }
+        if !lv.mutable { return Err(with_notes(terr_at(s.line, s.col, s.sp, "cannot assign to an immutable binding (declare it with 'var')"), self.declared_at(b))) }
+        self.resolved[b.id] = bt
+        var want = Type.TError
+        match bt {
+            Type.TParam(pn) => {
+                let sets = self.bound_arg_sets(pn, "IndexSet")
+                var hint: Option<Type> = None
+                if sets.len() == 1 { hint = no_float_for_int(Some(sets[0][0]), ix) }
+                let it = self.expect_value(ix, hint)?
+                var found = false
+                for a in sets {
+                    if !found && type_eq(a[0], it) {
+                        want = a[1]
+                        found = true
+                    }
+                }
+                if !found { return Err(terr_at(s.line, s.col, s.sp, format("cannot assign to an index of a value of type parameter '{}': it needs the bound '{}: IndexSet<{}, …>'", pn, pn, type_name(it)))) }
+                self.op_sets[target.id] = ""
+            },
+            _ => {
+                let key = match self.type_key(bt) { Some(k) => k, None => "" }
+                let cands = self.op_cands("IndexSet", key)
+                let it = self.expect_value(ix, self.op_hint(cands, bt, false, ix))?
+                match find_op_impl(self.op_impls, "IndexSet", key, bt, it) {
+                    Some(oi) => {
+                        want = subst_type(oi.o, unify_param(oi.target, bt, []).subst)
+                        self.op_sets[target.id] = op_part(oi)
+                    },
+                    None => {
+                        let vt = self.expect_value(value, None)?
+                        return Err(with_notes(terr_at(s.line, s.col, s.sp, format("cannot assign to an index of '{}': it needs 'impl IndexSet<{}, {}> for {}'", type_name(bt), type_name(it), type_name(vt), type_name(bt))), op_have_note(cands, bt, false, "IndexSet")))
+                    },
+                }
+            },
+        }
+        let vt = self.expect_value(value, Some(want))?
+        if !type_eq(vt, want) { return Err(terr_at(s.line, s.col, s.sp, format("cannot assign '{}' to '{}'", type_name(vt), type_name(want)))) }
+        self.resolved[target.id] = want
+        return Ok(true)
+    }
+
     #test(checker_on("enum E { A, B(int) }"), expr_of("a.b[0]"), "+", expr_of("a.b[0]"), expr_of("a.b[0]"), Type.TParam("T"))[Err(CheckErr { line: 1, col: 4, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 7 }, msg: "operator '+' on a value of type parameter 'T' requires the bound 'T: Add'", decl: -1, notes: [] })]
     fun infer_bounded_op(var self, e: Expr, op: str, l: Expr, r: Expr, lt: Type) -> Result<Type, CheckErr> {
         var trnm = ""
@@ -4521,6 +5105,28 @@ impl Checker {
             result = lt } }
         let pname = match lt { Type.TParam(n) => n, _ => "" }
         if !self.bound_has(pname, trnm) { return Err(terr_at(e.line, e.col, e.sp, format("operator '{}' on a value of type parameter '{}' requires the bound '{}: {}'", op, pname, pname, trnm))) }
+        // an arithmetic operator by the bound's arguments, `T: Mul<float>`
+        // giving `a * 2.0` (D200)
+        if is_arith_trait(trnm) {
+            let sets = self.bound_arg_sets(pname, trnm)
+            var rs: [Type] = []
+            for a in sets { rs.push(a[0]) }
+            let rt1 = self.expect_value(r, operand_hint(rs, r))?
+            for a in sets {
+                if type_eq(a[0], rt1) {
+                    // (the impl picked by the types where they are known)
+                    self.op_sites[e.id] = ""
+                    return Ok(a[1])
+                }
+            }
+            // only the classic bound, `T: Add`: both operands `T`
+            var classic = true
+            for a in sets { if !(type_eq(a[0], lt) && type_eq(a[1], lt)) { classic = false } }
+            if classic { return Err(terr_at(e.line, e.col, e.sp, format("operator '{}' requires both operands to have the same type, found '{}' and '{}'", op, type_name(lt), type_name(rt1)))) }
+            var have: [str] = []
+            for a in sets { have.push(op_bound_text(trnm, a, lt)) }
+            return Err(terr_at(e.line, e.col, e.sp, format("operator '{}' on a value of type parameter '{}' is not defined for '{}': its bounds give '{}: {}'", op, pname, type_name(rt1), pname, join_strs(have, " + "))))
+        }
         let rt = self.expect_value(r, None)?
         if !type_eq(lt, rt) { return Err(terr_at(e.line, e.col, e.sp, format("operator '{}' requires both operands to have the same type, found '{}' and '{}'", op, type_name(lt), type_name(rt)))) }
         return Ok(result)
@@ -4652,8 +5258,8 @@ impl Checker {
         return Ok(0)
     }
 
-    // `not_eq_why` for `Hash`: a float isn't, as NaN is unequal to itself.
-    #test(checker_on("[int]"), Type.TTuple([Type.TInt(32, true), Type.TFloat(64)]))["'float64' isn't Hash (NaN is unequal to itself)"]
+    // `not_eq_why` for `Hash`.
+    #test(checker_on("[int]"), Type.TTuple([Type.TInt(32, true), Type.TMap(Type.TStr, Type.TStr)]))["'[str: str]' isn't Hash"]
     fun not_hash_why(self, t: Type) -> str {
         return self.not_trait_why(t, "Hash")
     }
@@ -4697,7 +5303,6 @@ impl Checker {
                 if is_struct_or_enum(et) && (trnm == "Eq" || trnm == "Hash") { return format("'{}' isn't {} (it needs 'impl {} for {}' or '#derive({})')", type_name(et), trnm, trnm, type_name(et), trnm) }
                 if is_struct_or_enum(et) { return format("'{}' isn't {} (it needs 'impl {} for {}')", type_name(et), trnm, trnm, type_name(et)) }
                 if is_type_param(et) { return format("'{}' isn't {} (it needs the bound '{}: {}')", type_name(et), trnm, type_name(et), trnm) }
-                if is_float(et) && trnm == "Hash" { return format("'{}' isn't Hash (NaN is unequal to itself)", type_name(et)) }
                 return format("'{}' isn't {}", type_name(et), trnm)
             }
         }
@@ -5197,6 +5802,8 @@ impl Checker {
             },
             _ => {},
         }
+        // a struct's or enum's by its `Index` (D200)
+        if is_struct_or_enum(base) || is_type_param(base) { return self.infer_op_index(e, base, ix) }
         return Err(terr_at(e.line, e.col, e.sp, format("type '{}' is not a list and cannot be indexed with `[...]`", type_name(base))))
     }
 
@@ -6297,6 +6904,8 @@ impl Checker {
             },
             StmtKind.Assign(target, value) => {
                 match target.kind { ExprKind.Name(n) => { if n == "self" && !self.self_assignable { return Err(terr_at(s.line, s.col, s.sp, "cannot reassign 'self'; mutate its fields or elements instead")) } }, _ => {} }
+                // `x[i] = v` on a struct or enum by its `IndexSet` (D200)
+                if self.check_index_set(s, target, value)? { return Ok(0) }
                 let lv = self.check_lvalue(target)?
                 if !lv.mutable { return Err(with_notes(terr_at(s.line, s.col, s.sp, "cannot assign to an immutable binding (declare it with 'var')"), self.declared_at(target))) }
                 let vt = self.expect_value(value, Some(lv.ty))?
@@ -7289,11 +7898,13 @@ fun is_eq_type(t: Type, eq_names: [str]) -> bool {
 // Whether `t` is `Hash` for a derived impl's field, the structs and enums
 // among `hash_names` being so (D163): not a float, nor anything holding one.
 #test(Type.TTuple([Type.TInt(32, true), Type.TStr]), [])[true]
-#test(Type.TList(Type.TFloat(64)), [])[false]
+#test(Type.TList(Type.TFloat(64)), [])[true]
+#test(Type.TMap(Type.TStr, Type.TStr), [])[false]
 #test(Type.TStruct("P", []), ["P"])[true]
 fun is_hash_type(t: Type, hash_names: [str]) -> bool {
     return match t {
         Type.TInt(w, s) => true,
+        Type.TFloat(w) => true,   // D198
         Type.TBool => true,
         Type.TStr => true,
         Type.TChar => true,
@@ -7312,30 +7923,6 @@ fun all_hash_types(ts: [Type], hash_names: [str]) -> bool {
         if !is_hash_type(t, hash_names) { return false }
     }
     return true
-}
-
-// What a refusal of a field of type `t` adds when `t` is or holds a float.
-#test(Type.TFloat(64))[" (a float isn't: NaN is unequal to itself; a hand-written 'impl Hash' may add 'math.to_bits(x)')"]
-#test(Type.TStr)[""]
-fun float_note(t: Type) -> str {
-    if holds_float(t) { return " (a float isn't: NaN is unequal to itself; a hand-written 'impl Hash' may add 'math.to_bits(x)')" }
-    return ""
-}
-
-#test(Type.TTuple([Type.TStr, Type.TList(Type.TFloat(32))]))[true]
-#test(Type.TInt(8, true))[false]
-fun holds_float(t: Type) -> bool {
-    return match t {
-        Type.TFloat(w) => true,
-        Type.TTuple(es) => {
-            for e in es {
-                if holds_float(e) { return true }
-            }
-            false
-        },
-        Type.TList(e) => holds_float(e),
-        _ => false,
-    }
 }
 
 // Whether `t` is or holds a generic struct or enum, whose impl's bounds a
@@ -8441,7 +9028,7 @@ impl Checker {
         let si = self.struct_idx(name)
         if si >= 0 {
             for f in self.structs[si].fields {
-                if !is_hash_type(f.ty, hash_names) { return Err(terr_at(decl.line, decl.col, decl.sp, format("cannot derive Hash for struct '{}': field '{}' has type '{}', which isn't Hash{}", name, f.name, type_name(f.ty), float_note(f.ty)))) }
+                if !is_hash_type(f.ty, hash_names) { return Err(terr_at(decl.line, decl.col, decl.sp, format("cannot derive Hash for struct '{}': field '{}' has type '{}', which isn't Hash", name, f.name, type_name(f.ty)))) }
             }
             return Ok(0)
         }
@@ -8450,7 +9037,7 @@ impl Checker {
             for v in self.enums[ei].variants {
                 var i = 0
                 for pt in v.payload {
-                    if !is_hash_type(pt, hash_names) { return Err(terr_at(decl.line, decl.col, decl.sp, format("cannot derive Hash for enum '{}': payload #{} of variant '{}' has type '{}', which isn't Hash{}", name, i, v.name, type_name(pt), float_note(pt)))) }
+                    if !is_hash_type(pt, hash_names) { return Err(terr_at(decl.line, decl.col, decl.sp, format("cannot derive Hash for enum '{}': payload #{} of variant '{}' has type '{}', which isn't Hash", name, i, v.name, type_name(pt)))) }
                     i = i + 1
                 }
             }
@@ -9825,9 +10412,9 @@ fun derived_error_at(src: str) -> (int32, int32, str, bool) {
 #test("struct P { x: int }\nfun main() { print((1, P { x: 1 }) == (1, P { x: 1 })) }")[["cannot compare values of type '(int32, P)': 'P' isn't Eq (it needs 'impl Eq for P' or '#derive(Eq)')"]]
 #test("fun main() { var m: [(int, int): int] = [:]\nm[(1, 2)] = 3\nvar n: [[str]: bool] = [[\"a\"]: true] }")[[]]
 #test("#derive(Eq)\nstruct P { x: int }\nfun main() { var m: [P: int] = [:] }")[["map key type must be Eq and Hash, found 'P': 'P' isn't Hash (it needs 'impl Hash for P' or '#derive(Hash)')"]]
-#test("struct Q { m: [(int, float): int] }")[["map key type must be Eq and Hash, found '(int32, float64)': 'float64' isn't Hash (NaN is unequal to itself)"]]
+#test("struct Q { m: [(int, float): int] }")[[]]
 #test("fun f<T>(x: T) -> [T: int] { return [x: 1] }")[["map key type must be Eq and Hash, found 'T': it needs the bound 'T: Eq + Hash'"]]
-#test("#derive(Eq, Hash)\nstruct P { x: float }")[["cannot derive Hash for struct 'P': field 'x' has type 'float64', which isn't Hash (a float isn't: NaN is unequal to itself; a hand-written 'impl Hash' may add 'math.to_bits(x)')"]]
+#test("#derive(Eq, Hash)\nstruct P { x: float }")[[]]
 #test("#derive(Hash)\nstruct P { x: int }")[["cannot derive Hash for 'P': it isn't Eq; derive both, '#derive(Eq, Hash)', or write 'impl Eq for P'"]]
 // a string's characters in a `for`, strings ordered and `Ord`, a char's
 // distance and moves (MYLA-318)
@@ -10945,7 +11532,8 @@ impl Checker {
                     var j = 0
                     while j < b.traits.len() {
                         let tr = b.traits[j]
-                        if b.args[j].len() > 0 {
+                        // (an operator's by `check_call_bounds`, D200)
+                        if b.args[j].len() > 0 && !is_op_trait(tr) {
                             let ok = match concrete { Type.TParam(pn) => self.bound_has(pn, tr), _ => self.type_implements(concrete, tr)? }
                             if !ok {
                                 let msg = format("type '{}' does not satisfy the bound '{}: {}' required by '{}'{}", type_name(concrete), b.tp, generic_name(tr, subst_type_list(b.args[j], subst)), sig.decl.name, self.bound_why(concrete, tr))
@@ -10995,6 +11583,14 @@ impl Checker {
                     var j = 0
                     while j < b.traits.len() {
                         let tr = b.traits[j]
+                        // an operator's, by its type arguments (D200)
+                        if is_op_trait(tr) {
+                            if !self.meets_op_bound(concrete, tr, subst_type_list(b.args[j], subst))? {
+                                return Err(terr_at(e.line, e.col, e.sp, format("type '{}' does not satisfy the bound '{}: {}' required by '{}'", type_name(concrete), b.tp, op_bound_text(tr, b.args[j], Type.TParam(b.tp)), unqualified(sig.decl.name))))
+                            }
+                            j += 1
+                            continue
+                        }
                         var ok = false
                         match concrete { Type.TParam(pn) => { ok = self.bound_has(pn, tr) }, _ => { ok = self.type_implements(concrete, tr)? } }
                         // a generic trait's arguments are its impl's (D171)

@@ -10,6 +10,7 @@
 from .ast import Expr, ExprKind, Stmt, StmtKind, Block, Decl, DeclKind, FunData, Param, MatchArm, Pattern, PatternKind, FieldPat, BindElem, ExprOrBlock, ElseTail, FieldInit, MapEntry, Attribute, TypeExpr, TypeKind, TypeParam, bind_elems, names_in_expr, names_in_block, Expected, expected_failure, is_unread_body
 from .tokens import SrcSpan, no_span
 from .checker import is_notify_primitive, tracks_caller
+from .checker import OpImpl, find_op_impl, op_part, arith_trait
 from .checker import Checker, Type, Subst, subst_type, subst_get, unify_param, type_name, is_raw_memory_primitive, is_net_primitive, is_lot_primitive, is_term_primitive, checker_on, builtin_method, builtin_method_name, is_wrapping_method, add_overflows, sub_overflows, mul_overflows, int_min, int_neg_overflows, shift_out_of_range, is_slice_expr, from_end_of, slice_parts, is_hole_part
 from .anf import Norm, new_norm, stmt_suspends, body_suspends
 from .util import cp_utf8, format_specs, written_type_name
@@ -365,6 +366,9 @@ pub struct Interp {
     // a later one), `env_tail` and `env_tail_fi` a `become`'s; -1 binds
     // nothing
     static_calls: [int32: Type],
+    op_sites: [int32: str],      // the checker's operators that call an operator impl (D200)
+    op_sets: [int32: str],       // and its index assignments that call an `IndexSet`
+    op_impls: [OpImpl],
     impl_selfs: [str: Type],
     call_types: [int32: [Type]],
     tparams: [[str]],
@@ -495,8 +499,12 @@ fun fill_holes(slots: [Value], holes: [bool], argv: [Value]) -> [Value] {
 #test("Point.eq")[false]
 #test("geo$area")[true]
 #test("util$strings$Point.eq")[true]
+#test("V.mul$float64")[false]
 fun is_qualified(name: str) -> bool {
+    // (before a method's dot: an operator method's own name may hold a `$`,
+    // `V.mul$float64`, D200)
     for c in name.chars() {
+        if c == '.' { return false }
         if c == '$' { return true }
     }
     return false
@@ -660,7 +668,7 @@ pub fun new_interp(c: Checker, argv: [str]) -> Interp {
         depth: 0,
         sleepers: [], deadlines: [], fired: [], fd_waits: [], fds_seen: 0, fds_gap: LOOK_GAP_MIN, notifs: [], free_notifs: [], notif_seq: 0, pwaits: [], free_waits: [], parked_waits: [], lots: [], sock_tags: [:], parked_socks: 0, lots_seen: 0, lots_gap: LOOK_GAP_MIN, fi_find_from: -1, fi_extend: -1, bcodes: builtin_codes(), sleep_seq: 0, virtual_time: false, vclock: 0,
         testing: false, defer_errs: [], captured: [], captured_io: false, test_root: "", test_program: "", checker: c,
-        static_calls: c.static_calls, impl_selfs: c.static_selfs, call_types: c.call_types,
+        static_calls: c.static_calls, op_sites: c.op_sites, op_sets: c.op_sets, op_impls: c.op_impls, impl_selfs: c.static_selfs, call_types: c.call_types,
         tparams: [], envs: [], env_memo: [:], type_env_memo: [:], env_next: -1, env_fi: -1, env_tail: -1, env_tail_fi: -1,
         writes: 0, fused: -1, fused_val: Value.VUnit, leaf_wanted: false, leaf: Value.VUnit,
     }
@@ -2986,6 +2994,20 @@ impl Interp {
                 self.bind_destructure(bind_elems(binding), v)
             },
             StmtKind.Assign(target, value) => {
+                // `x[i] = v` by an `IndexSet` (D200): `x.set_index(i, v)`,
+                // the place first, as a method call takes it (D193)
+                if self.op_sets.len() > 0 {
+                    match target.kind {
+                        ExprKind.Index(b, ix) => {
+                            let m = self.op_set_call(target.id, b, ix)
+                            if m != "" {
+                                self.eval_method_call(target, b, m, [ix, value])
+                                return
+                            }
+                        },
+                        _ => {},
+                    }
+                }
                 if fused_compound(target, value) && self.fusable_at(target) {
                     self.exec_fused(target, value)
                     return
@@ -3382,8 +3404,50 @@ impl Interp {
         return self.nullary_ix.get(name)
     }
 
+    // The operator method the node `id` calls (D200): the checker's choice,
+    // or in generic code the impl the operands' types pick now, `l`'s and
+    // `r`'s (`r` none for `Neg`); "" for a number's own operator, a list's
+    // own index, a classic impl.
+    fun op_call(self, id: int32, tr: str, l: Expr, r: Option<Expr>) -> str {
+        return match self.op_sites.get(id) {
+            Some(m) => if m != "" { m } else { self.op_by_types(tr, l, r) },
+            None => "",
+        }
+    }
+
+    // `op_call` of the index assignment `id`, by its `IndexSet` (D200).
+    fun op_set_call(self, id: int32, b: Expr, ix: Expr) -> str {
+        return match self.op_sets.get(id) {
+            Some(m) => if m != "" { m } else { self.op_by_types("IndexSet", b, Some(ix)) },
+            None => "",
+        }
+    }
+
+    // The operator method of the trait `tr` that the types of `l` and `r`
+    // pick now, in generic code (D200); "" for none.
+    fun op_by_types(self, tr: str, l: Expr, r: Option<Expr>) -> str {
+        let lt = match self.full_type_of(l.id) {
+            Some(t) => t,
+            None => { return "" },
+        }
+        var rt = lt
+        match r {
+            Some(x) => { match self.full_type_of(x.id) { Some(t) => { rt = t }, None => {} } },
+            None => {},
+        }
+        return match find_op_impl(self.op_impls, tr, type_key_of(lt), lt, rt) {
+            Some(oi) => op_part(oi),
+            None => "",
+        }
+    }
+
     #test(interp_on("enum E { A, B(int) }"), expr_of("a.b[0]"), "-", expr_of("a.b[0]"))[Value.VInt(0)]
     fun eval_unary(var self, e: Expr, op: str, x: Expr) -> Value {
+        // a struct's or enum's `-` by its `Neg` (D200)
+        if op == "-" && self.op_sites.len() > 0 {
+            let m = self.op_call(e.id, "Neg", x, None)
+            if m != "" { return self.eval_method_call(e, x, m, []) }
+        }
         let v = self.eval(x)
         if op == "!" { return Value.VBool(!as_bool(v)) }
         if op == "-" {
@@ -3416,6 +3480,17 @@ impl Interp {
         if op == "||" {
             if as_bool(self.eval(l)) { return Value.VBool(true) }
             return Value.VBool(as_bool(self.eval(r)))
+        }
+        // an operator impl by type arguments (D200): its method called, the
+        // operands its receiver and argument
+        if self.op_sites.len() > 0 && l.id != self.fused {
+            match arith_trait(op) {
+                Some(tr) => {
+                    let m = self.op_call(e.id, tr, l, Some(r))
+                    if m != "" { return self.eval_method_call(e, l, m, [r]) }
+                },
+                None => {},
+            }
         }
         // (a compound assignment's place, read by `exec_fused`)
         let lv = if l.id == self.fused { self.take_fused() } else { self.eval(l) }
@@ -3657,6 +3732,11 @@ impl Interp {
 
     #test(interp_on("enum E { A, B(int) }"), expr_of("a.b[0]"), expr_of("a.b[0]"), expr_of("a.b[0]"))[Value.VUnit]
     fun eval_index(var self, e: Expr, tgt: Expr, idx: Expr) -> Value {
+        // a struct's or enum's `x[i]` by its `Index` (D200)
+        if self.op_sites.len() > 0 {
+            let m = self.op_call(e.id, "Index", tgt, Some(idx))
+            if m != "" { return self.eval_method_call(e, tgt, m, [idx]) }
+        }
         let c = self.eval(tgt)
         if is_slice_expr(idx) { return self.eval_slice(e, c, idx) }
         let k = self.index_value(c, idx)
@@ -4715,6 +4795,7 @@ impl Interp {
     fun key_hash(var self, v: Value, t: Option<Type>) -> int64 {
         if self.typed_keys { return self.typed_hash(v, t) }
         return match v {
+            Value.VFloat(f) => self.float_key_hash(v),
             Value.VTuple(es) => self.keys_hash(3, es),
             Value.VList(xs) => self.keys_hash(mix_key(4, xs.len() as int64), xs),
             Value.VBytes(s) => self.keys_hash(mix_key(4, s.len() as int64), byte_values(s)),
@@ -4742,6 +4823,7 @@ impl Interp {
     // it hashes, `t` for `v`, a member's type for a member's (MYLA-436).
     fun typed_hash(var self, v: Value, t: Option<Type>) -> int64 {
         return match v {
+            Value.VFloat(f) => self.float_key_hash(v),
             Value.VTuple(es) => self.typed_keys_hash(3, es, self.member_types(v, t)),
             Value.VList(xs) => self.typed_keys_hash(mix_key(4, xs.len() as int64), xs, self.member_types(v, t)),
             Value.VBytes(s) => self.keys_hash(mix_key(4, s.len() as int64), byte_values(s)),
@@ -4770,6 +4852,15 @@ impl Interp {
 
     // The state the `hash` written for the type `key` gives `v`, a generic
     // impl's type parameters bound by `v`'s type `t`.
+    // A float key's hash (D198): a NaN's is the runtime error std.hash's
+    // own `hash` raises, called here as native code calls it; any other's by
+    // its bits, -0.0's as 0.0's (`value_hash`).
+    fun float_key_hash(var self, v: Value) -> int64 {
+        let f = as_float(v)
+        if f != f { return self.written_hash("float64", v, None) }
+        return value_hash(v)
+    }
+
     fun written_hash(var self, key: str, v: Value, t: Option<Type>) -> int64 {
         let h0 = Value.VStruct("Hasher", ["state"], [Value.VInt(0)])
         let fi = self.func_idx(key + ".hash")
@@ -6916,6 +7007,8 @@ impl MapV {
 // `Interp.key_hash` gives for a key no type's own `hash` is in.
 #test(Value.VUnit)[7]
 #test(Value.VList([]))[mix_key(4, 0)]
+#test(Value.VFloat(-0.0))[value_hash(Value.VFloat(0.0))]
+#allow(primitive)
 fun value_hash(v: Value) -> int64 {
     return match v {
         Value.VInt(n) => mix_key(1, n),
@@ -6928,7 +7021,7 @@ fun value_hash(v: Value) -> int64 {
         Value.VBytes(s) => values_hash(mix_key(4, s.len() as int64), byte_values(s)),
         Value.VStruct(n, fns, fvs) => values_hash(mix_key(5, str_key_hash(n)), fvs),
         Value.VEnum(en, vr, pl) => values_hash(mix_key(6, str_key_hash(vr)), pl),
-        Value.VFloat(f) => mix_key(8, f as int64),
+        Value.VFloat(f) => mix_key(8, __f64_bits(if f == 0.0 { 0.0 } else { f }) as int64),
         _ => 9,
     }
 }
