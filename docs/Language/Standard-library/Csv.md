@@ -83,7 +83,7 @@ fun main() {
 | `io_error(self) -> Option<IoError>` | Why the stream failed, after an `Io` error |
 | `next(var self) -> Option<Result<[str], CsvError>>` | The `Iterator`'s: `Some(Ok(record))` for each, `Some(Err(e))` once if the text is broken or the stream fails, then `None` |
 
-`fill`, a method of `CsvStreamReader`, is the reader's own step, which reads the next chunk, public only because a method can't be private yet ([[MYLA-433]]); a program has no need of it.
+`fill` and `take_more`, methods of `CsvStreamReader`, are the reader's own steps (the next chunk read; the bytes a waiting record gathered handed to the reader), public only because a method can't be private yet ([[MYLA-433]]); a program has no need of them.
 
 It gives what `parse_with` gives, the same records and the same error at the same line and column, wherever its reads end: a case reads 21 texts (every kind of quote, line end, blank line and error) with reads of every size from one byte to the whole text, and again over `io.short_reads`, a stream that gives that many bytes a read whatever the reader asks for (and a scratch comparison of 50,000 random texts over reads of 1, 2, 3 and 5 bytes found no difference). After an error it gives nothing more.
 

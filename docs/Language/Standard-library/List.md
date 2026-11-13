@@ -66,7 +66,7 @@ A lambda's parameter types can be left out: the receiver's element type gives th
 | `any(pred)`, `all(pred) -> bool` | Whether `pred: (T) -> bool` holds for some, for every element (false, true for an empty list) |
 | `find(pred) -> Option<T>`, `position(pred) -> Option<int>` | The first element `pred` holds for, its index |
 | `count(pred) -> int` | How many elements `pred` holds for |
-| `sum(zero: T) -> T`, `T: Add` | The elements added to `zero`: `xs.sum(0)`, `xs.sum(0.0)`. Myla has no zero of a generic `T`, so the caller gives it |
+| `sum(zero: T) -> T`, `T: Add` | The elements added to `zero`: `xs.sum(0)`, `xs.sum(0.0)`. Myla has no zero of a generic `T`, so the caller gives it. The sum overflows as the element's `+` does (D175): `[2147483647, 1].sum(0)` is the runtime error `integer overflow` interpreted, under `myla test` and in a `--checked` build, and `-2147483648` in a plain build; for a wider sum, map to `int64` first, `xs.map((x) => x as int64).sum(0i64)` |
 | `min_by(less)`, `max_by(less) -> Option<T>` | The least and greatest element by `less: (T, T) -> bool`, "a goes before b": the first of equal least ones, the last of equal greatest ones, as Rust's |
 | `flat_map<U>(f: (T) -> [U]) -> [U]` | The lists `f` gives, one after the other |
 | `zip<U>(other: [U]) -> [(T, U)]` | Pairs of the elements at the same index, as many as the shorter list has |
