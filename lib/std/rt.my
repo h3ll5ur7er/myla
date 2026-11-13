@@ -3129,8 +3129,8 @@ const STOP_WAIT_MS: int64 = 1000
 // doesn't hold the end for ever. The terminal's mode goes back first
 // (D187), so the report isn't followed by a raw terminal while it waits,
 // and after a short spin the wait sleeps a millisecond at a time instead
-// of spinning (MYLA-548: a worker spun at 99 percent of a CPU, the
-// terminal raw, until a key was pressed).
+// of spinning (MYLA-548: a worker spun on a whole CPU, the terminal raw,
+// until a key was pressed).
 pub fun wait_stopped() {
     exit_hook()
     let me = __rt_get("__worker_id")
