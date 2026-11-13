@@ -170,7 +170,7 @@ impl CodeGen {
         if words > REG_WORDS { self.arg_words = words - REG_WORDS }
         let temp_base = 0
         let frame = (cursor + 15) / 16 * 16
-        self.epilogue = format(".Lret_{}", mangled)
+        self.epilogue = self.epilogue_label(mangled)
         var labels: [str] = []
         for b in f.blocks { labels.push(self.label()) }
 
@@ -1121,12 +1121,12 @@ impl CodeGen {
             Inst.Call(d, name, args) => {
                 ws = args
                 target = format("myla_{}", name)
-                again = format(".Lret_{}", name) == self.epilogue
+                again = self.epilogue_label(name) == self.epilogue
             },
             Inst.CallSret(name, res, args) => {
                 ws = sret_words(res, args)
                 target = format("myla_{}", name)
-                again = format(".Lret_{}", name) == self.epilogue
+                again = self.epilogue_label(name) == self.epilogue
             },
             Inst.CallInd(d, fn, args) => {
                 ws = args

@@ -84,7 +84,7 @@ impl CodeGen {
         let fr = A64Frame { toff: toff, soff: soff, scratch: scratch, size: size, frame: f.frame, save28: save28, resumes: resumes }
         self.arg_words = 0
         if words > A64_WORDS { self.arg_words = words - A64_WORDS }
-        self.epilogue = format(".Lret_{}", mangled)
+        self.epilogue = self.epilogue_label(mangled)
         var labels: [str] = []
         for b in f.blocks { labels.push(self.label()) }
         self.emit("")

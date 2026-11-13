@@ -92,14 +92,13 @@ pub struct CodeGen {
     strdata: [str],                 // static `str` cells (static_str)
     label_n: int32,
     // MYLA-552: the labels of the function being emitted are its own,
-    // `.L<prefix>_<n>`, its positions' `.L<prefix>_p<n>` (`begin_labels`;
-    // `label_fn` "" outside a function: `.L<n>`, `.Lpos<n>`), so that a
-    // change in one function renames no other's labels; the prefixes
-    // taken, each by its function
+    // `.L<name>_<n>`, its positions' `.L<name>_p<n>` and its epilogue
+    // `.L<name>_ret`, under its mangled name (`begin_labels`; `label_fn` ""
+    // outside a function: `.L<n>`, `.Lpos<n>`), so that a change in one
+    // function renames no other's labels
     label_fn: str,
     label_fn_n: int32,
     pos_fn_n: int32,
-    label_fns: [str: str],
     str_names: [str: bool],         // the string literals' labels taken (`str_name`)
     str_texts: [str],
     str_labels: [str],
@@ -364,7 +363,7 @@ pub fun new_codegen(c: Checker) -> CodeGen {
         impl_args: c.impl_args,
         static_calls: c.static_calls, static_selfs: c.static_selfs,
         text: [], rodata: [], strdata: [],
-        label_n: 0, label_fn: "", label_fn_n: 0, pos_fn_n: 0, label_fns: [:], str_names: [:],
+        label_n: 0, label_fn: "", label_fn_n: 0, pos_fn_n: 0, str_names: [:],
         str_texts: [], str_labels: [],
         subst: [], fn_worklist: [], fn_seen: [:],
         lam_jobs: [], lam_seen: [:], partial_jobs: [], fnval_set: [],
@@ -1082,29 +1081,26 @@ impl CodeGen {
         return format(".L{}", self.label_n)
     }
 
-    // The labels from here on the function `mangled`'s own (MYLA-552), each
-    // numbered from 1 under its prefix (`label_prefix`), its positions'
-    // too; "" for none (outside a function).
+    // The labels from here on the function `mangled`'s own (MYLA-552,
+    // D196): its name, `_` and a number from 1 (`.Lmain_3`), its positions'
+    // `_p` and one (`.Lmain_p1`), so that a reader of the assembly sees
+    // whose label it is; "" for none (outside a function). A mangled name
+    // is a symbol's (`myla_<name>`) and a suffix has no `_`, so a label
+    // reads back to one function, and to none of the runtime's named labels
+    // (`.Lsw_next`, `.Lstr_true`).
     #test(codegen_on("[int]"), "")[()]
     fun begin_labels(var self, mangled: str) {
-        self.label_fn = if mangled == "" { "" } else { self.label_prefix(mangled) }
+        self.label_fn = mangled
         self.label_fn_n = 0
         self.pos_fn_n = 0
     }
 
-    // The prefix of the labels of the function `mangled`: its name's FNV-1a
-    // hash in six letters and digits, the hash's next where another
-    // function's name gave it first.
-    #test(codegen_on("[int]"), "main")["wez6ju"]
-    fun label_prefix(var self, mangled: str) -> str {
-        var h = fnv1a(mangled)
-        var p = base36(h, 6)
-        while self.label_fns.contains(p) && self.label_fns[p] != mangled {
-            h = (h ^ 255u64).wrapping_mul(FNV_PRIME)
-            p = base36(h, 6)
-        }
-        self.label_fns[p] = mangled
-        return p
+    // The label of the function `mangled`'s epilogue, under its name as its
+    // other labels are (`begin_labels`).
+    #test(codegen_on("[int]"), "main")[".Lmain_ret"]
+    #test(codegen_on("[int]"), "lexer$Lexer.peek")[".Llexer$Lexer.peek_ret"]
+    fun epilogue_label(self, mangled: str) -> str {
+        return format(".L{}_ret", mangled)
     }
 
     // The label of a new string literal `text`: `.Lstr` and the FNV-1a
@@ -4362,7 +4358,7 @@ fun compiler_norm() -> Norm {
 pub const EXEC_CAP: int32 = 1048576
 
 // FNV-1a with 64 bits (as std.checksum's `fnv1a64`), which names the
-// labels of a function and of a string literal (MYLA-552).
+// label of a string literal (MYLA-552).
 const FNV_BASIS: uint64 = 0xcbf29ce484222325
 const FNV_PRIME: uint64 = 0x100000001b3
 
@@ -4386,17 +4382,6 @@ fun base36(h: uint64, n: int32) -> str {
         x = x / 36u64
     }
     return sb.build()
-}
-
-// The prefixes `label_prefix` gives the functions `names` in turn: two
-// whose hashes agree get two (the second the next hash's), one emitted
-// again its own.
-#test(["lx_v$tfu", "oktgnxyd", "lx_v$tfu"])[["59tff9", "qinyhk", "59tff9"]]
-fun label_prefixes(names: [str]) -> [str] {
-    var cg = codegen_on("[int]")
-    var out: [str] = []
-    for n in names { out.push(cg.label_prefix(n)) }
-    return out
 }
 
 // The generator of MYLA_SCHED=seed:N (D110): x * SCHED_MUL + SCHED_ADD,

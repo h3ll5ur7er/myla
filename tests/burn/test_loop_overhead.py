@@ -95,7 +95,7 @@ class LoopOverhead(unittest.TestCase):
         # calls no copy
         body = _function(self.asm(os.path.join(_REPO, "benchmarks", "sieve", "sieve.my")), "count_primes")
         store = body.index("movb $1, ")
-        back = re.compile(r"\n\tj(?:l|ge|ne|e|b|ae|g|le) (\.L[0-9a-z]{6}_\d+)\n").search(body, store).group(1)
+        back = re.compile(r"\n\tj(?:l|ge|ne|e|b|ae|g|le) (\.L[^\s:]+_\d+)\n").search(body, store).group(1)
         loop = body[body.index("\n" + back + ":\n"):body.index(back + "\n", store)]
         self.assertIn("movb $1, ", loop)
         self.assertNotIn("__clone_list", loop, loop)
@@ -133,7 +133,7 @@ class LoopOverhead(unittest.TestCase):
             fh.write(_WRAPPED)
         body = _function(self.asm(path), "wrapped")
         self.assertIn("idivq", body, body)
-        self.assertNotRegex(body, r"movq %rdx, %rax\n(\.L[0-9a-z]{6}_\d+:\n)?\tmovslq", body)
+        self.assertNotRegex(body, r"movq %rdx, %rax\n(\.L[^\s:]+_\d+:\n)?\tmovslq", body)
         self.assertNotRegex(body, r"movslq %(\w+), %\w+\n\tleal [^\n]*, %\1\n", body)
 
     def test_integer_operations_at_the_limits_print_the_same(self):

@@ -108,17 +108,19 @@ class LabelsPerFunction(unittest.TestCase):
                 self.assertEqual(changed, [])
 
     def test_the_labels_are_named_by_their_function(self) -> None:
+        # by the function's own (mangled) name, for a reader of the assembly
+        # (D196): `.Lsecond_3`, `.Lsecond_ret`
         asm = self.assembly(PROGRAM, "x86_64-linux")
-        body = functions(asm)["myla_second"]
-        own = set(re.findall(r"\.L([0-9a-z]{6})_\d+\b", body))
-        self.assertEqual(len(own), 1, body)
-        first = set(re.findall(r"\.L([0-9a-z]{6})_\d+\b", functions(asm)["myla_first"]))
-        self.assertEqual(len(first), 1)
-        self.assertNotEqual(own, first)
+        for name in ("first", "second", "third"):
+            body = functions(asm)["myla_" + name]
+            labels = set(re.findall(r"^(\.L[^\s:]+):$", body, re.M))
+            self.assertIn(f".L{name}_1", labels, body)
+            self.assertIn(f".L{name}_ret", labels, body)
+            for lab in labels:
+                self.assertRegex(lab, rf"^\.L{name}_(\d+|p\d+|ret)$", body)
         # a string literal by its text, a float constant by its bits
         self.assertRegex(asm, r"\.Lstr[0-9a-z]{7}:")
         self.assertRegex(asm, r"\.Lfc3ff8000000000000:\n\t\.quad 4609434218613702656\n")   # 1.5
-
 
 if __name__ == "__main__":
     unittest.main()
