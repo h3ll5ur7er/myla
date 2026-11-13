@@ -244,5 +244,15 @@ class Generated(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
 
 
+class Benchmark(unittest.TestCase):
+    def test_its_by_hand_versions_are_tested(self) -> None:
+        # benchmarks/linalg_std.my times the library against loops by hand;
+        # its #test cases keep the two computing the same (MYLA-587)
+        from tests.burn._tools import STDLIB_ROOT, selfhost_tool
+        proc = subprocess.run([selfhost_tool("main"), "test", os.path.join(_REPO, "benchmarks", "linalg_std.my"),
+                               "--stdlib", STDLIB_ROOT], capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("5/5 passed.", proc.stdout)
+
 if __name__ == "__main__":
     unittest.main()

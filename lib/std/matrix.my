@@ -61,7 +61,10 @@ impl Mul for Mat2 {
 
 impl Mul<Vec2, Vec2> for Mat2 {
     fun mul(self, v: Vec2) -> Vec2 {
-        return self.x_axis * v.x + self.y_axis * v.y
+        return Vec2 {
+            x: self.x_axis.x * v.x + self.y_axis.x * v.y,
+            y: self.x_axis.y * v.x + self.y_axis.y * v.y,
+        }
     }
 }
 
@@ -214,7 +217,11 @@ impl Mul for Mat3 {
 
 impl Mul<Vec3, Vec3> for Mat3 {
     fun mul(self, v: Vec3) -> Vec3 {
-        return self.x_axis * v.x + self.y_axis * v.y + self.z_axis * v.z
+        return Vec3 {
+            x: self.x_axis.x * v.x + self.y_axis.x * v.y + self.z_axis.x * v.z,
+            y: self.x_axis.y * v.x + self.y_axis.y * v.y + self.z_axis.y * v.z,
+            z: self.x_axis.z * v.x + self.y_axis.z * v.y + self.z_axis.z * v.z,
+        }
     }
 }
 
@@ -384,7 +391,12 @@ impl Mul for Mat4 {
 
 impl Mul<Vec4, Vec4> for Mat4 {
     fun mul(self, v: Vec4) -> Vec4 {
-        return self.x_axis * v.x + self.y_axis * v.y + self.z_axis * v.z + self.w_axis * v.w
+        return Vec4 {
+            x: self.x_axis.x * v.x + self.y_axis.x * v.y + self.z_axis.x * v.z + self.w_axis.x * v.w,
+            y: self.x_axis.y * v.x + self.y_axis.y * v.y + self.z_axis.y * v.z + self.w_axis.y * v.w,
+            z: self.x_axis.z * v.x + self.y_axis.z * v.y + self.z_axis.z * v.z + self.w_axis.z * v.w,
+            w: self.x_axis.w * v.x + self.y_axis.w * v.y + self.z_axis.w * v.z + self.w_axis.w * v.w,
+        }
     }
 }
 

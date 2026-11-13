@@ -520,7 +520,9 @@ def mat_block(p: Precision, n: int) -> str:
     rows_fmt = " + \", \" + ".join(f"f\"{{self.row({i})}}\"" for i in range(n))
     trace = " + ".join(f"self.{a}.{cs[i]}" for i, a in enumerate(axes))
     to_list = "[" + ", ".join(f"self.{a}.{c}" for a in axes for c in cs) + "]"
-    mulv = " + ".join(f"self.{a} * v.{cs[i]}" for i, a in enumerate(axes))
+    # by component, not as a sum of scaled columns: no temporary vectors
+    # (25 % faster for Mat4 * Vec4 natively, benchmarks/linalg_std.my)
+    mulv = f"{V} {{\n" + "".join(f"            {c}: " + " + ".join(f"self.{a}.{c} * v.{cs[i]}" for i, a in enumerate(axes)) + ",\n" for c in cs) + "        }"
     ident_test = ", ".join(f"{V} {{ " + ", ".join(f"{c}: {'1.0' if j == i else '0.0'}" for j, c in enumerate(cs)) + " }" for i in range(n))
     out = f"""
 #derive(Eq, Hash)
