@@ -576,6 +576,15 @@ class RawModeEnds(Case):
                         self.assertLessEqual(self.ENDING, caught)
                     self.assertEqual((code, cooked), (-sig, True))
 
+    def test_a_sent_sigsegv_while_raw_puts_the_mode_back(self):
+        """A SIGSEGV sent by another process while the terminal is raw ends
+        the program by it, the mode put back as for the four (MYLA-592: it
+        was swallowed once, and a second left the terminal raw)."""
+        for how, argv, exe in self.commands(self.signals, "raw"):
+            with self.subTest(how):
+                caught, code, cooked = self.signalled(how, argv, exe, [signal.SIGSEGV])
+                self.assertEqual((code, cooked), (-signal.SIGSEGV, True))
+
     def test_raw_mode_left_lets_the_signals_go(self):
         """Raw mode left, the four signals are as they were (their defaults):
         the program has no handler for them."""
@@ -827,6 +836,22 @@ class Signals(Case):
                     self.assertEqual(p.line(), "ready\n")
                     p.signal(sig)
                     self.assertEqual(p.finish(), ("", "", -sig))
+
+    def test_a_sent_sigsegv_ends_the_program(self):
+        # a SIGSEGV sent by another process (`kill -SEGV`) isn't a fault the
+        # stack overflow handler can let happen again: the program ends by it
+        # at once, as a C program does (MYLA-592: the first one was
+        # swallowed, and the program went on)
+        for how, argv, exe in self.never.commands():
+            with self.subTest(how):
+                p = Lines(argv, exe)
+                self.assertEqual(p.line(), "ready\n")
+                time.sleep(0.2)
+                p.signal(signal.SIGSEGV)
+                out, err, code = p.finish(timeout=10)
+                # (qemu-aarch64 says so as the program dies of it)
+                err = "".join(l for l in err.splitlines(True) if not l.startswith("qemu: uncaught target signal 11"))
+                self.assertEqual((out, err, code), ("", "", -signal.SIGSEGV))
 
     def test_a_listener_is_a_handle(self):
         built = Built(SIGNAL_HANDLES)
