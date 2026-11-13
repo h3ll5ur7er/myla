@@ -1,7 +1,8 @@
 """Burn test: the Myla code in the documentation (D114, MYLA-233).
 
-Every fenced block of the wiki (`docs/`) and the README whose info string is
-`myla` is a program: it must type-check, and when it has a `main` it must run
+Every fenced block of the wiki (`docs/`), the README and the `myla` agent
+skill (`.claude/skills/myla/`, MYLA-581) whose info string is `myla` is a
+program: it must type-check, and when it has a `main` it must run
 in the self-hosted interpreter (in an empty directory, stdin empty) with exit
 status 0, and natively print the same. A block may end with its output, which
 must be exactly what it prints:
@@ -13,7 +14,9 @@ must be exactly what it prints:
 (`//` alone stands for an empty line). Blocks that are deliberately pieces of
 a program are marked `myla fragment` and only kept apart; blocks that are
 deliberately wrong are marked `myla error` and must fail to check. The
-convention is on the wiki page Development/Conventions."""
+convention is on the wiki page Development/Conventions. The skill's two copies
+(`.claude/skills/myla/` and `.agents/skills/myla/`) must be identical."""
+import filecmp
 import glob
 import os
 import re
@@ -28,6 +31,13 @@ _REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__
 
 _FENCE = re.compile(r"^(\s*)```(\S*)[ \t]*(.*)$")
 _MAIN = re.compile(r"^(async )?fun main\(", re.M)
+_SKILL = os.path.join(_REPO, ".claude", "skills", "myla")
+_SKILL_MIRROR = os.path.join(_REPO, ".agents", "skills", "myla")
+
+
+def skill_files(root: str) -> list[str]:
+    """The skill's Markdown files below `root`, relative to it."""
+    return sorted(os.path.relpath(p, root) for p in glob.glob(os.path.join(root, "**", "*.md"), recursive=True))
 
 
 def blocks() -> list[tuple[str, int, str, str]]:
@@ -35,6 +45,7 @@ def blocks() -> list[tuple[str, int, str, str]]:
     "myla", "fragment" or "error", source) of every `myla` block."""
     files = sorted(glob.glob(os.path.join(_REPO, "docs", "**", "*.md"), recursive=True))
     files.append(os.path.join(_REPO, "README.md"))
+    files += [os.path.join(_SKILL, f) for f in skill_files(_SKILL)]
     out = []
     for path in files:
         with open(path, encoding="utf-8") as fh:
@@ -113,10 +124,22 @@ class DocBlocks(unittest.TestCase):
                                         stdin=subprocess.DEVNULL, timeout=60)
                 self.assertEqual((native.stdout, native.returncode), (ran.stdout, 0))
 
+    def test_the_skill_has_blocks(self) -> None:
+        self.assertGreater(sum(1 for b in blocks() if b[0].startswith(".claude")), 3)
+
     def test_output_sections_are_parsed(self) -> None:
         self.assertEqual(expected_output("fun main() {}\n// output:\n// 1\n//\n// a b\n"), "1\n\na b\n")
         self.assertIsNone(expected_output("fun main() {}\n// 1\n"))
         self.assertIsNone(expected_output("// output:\n// 1\nfun main() {}\n"))
+
+
+class SkillCopies(unittest.TestCase):
+    def test_the_two_copies_of_the_skill_are_identical(self) -> None:
+        files = skill_files(_SKILL)
+        self.assertIn("SKILL.md", files)
+        self.assertEqual(skill_files(_SKILL_MIRROR), files)
+        _, mismatch, errors = filecmp.cmpfiles(_SKILL, _SKILL_MIRROR, files, shallow=False)
+        self.assertEqual((mismatch, errors), ([], []))
 
 
 if __name__ == "__main__":
