@@ -10990,50 +10990,101 @@ class TestCompilerParity(unittest.TestCase):
     def test_polymorphic_recursion_is_refused_where_it_is_built(self):
         # MYLA-415 (H5): a generic function calling itself with a larger type
         # asks for instances without end, and `myla build` never ended; it is
-        # a type error at the call now, on every target, when the type
-        # arguments grow too deep or (a pair of pairs of ...) too large; the
-        # interpreter runs it
+        # a type error at the call now. MYLA-543: the checker sees it where
+        # the type arguments are written with the caller's type parameters,
+        # so `myla check`, `myla run` and `myla build` on every target say
+        # the same, at the call that makes the type larger (where the build
+        # refused it before)
         myla = selfhost_tool("main")
         cases = (
             ("grow", "fun grow<T>(n: int, x: T) -> int {\n    if n == 0 { return 0 }\n"
                      "    return 1 + grow<[T]>(n - 1, [x])\n}\nfun main() { print(grow(3, 1)) }\n",
-             "3:25", "65 types deep (the limit is 64)", "3\n"),
+             "3:25", "in 'grow<T>', asks for 'grow<[T]>'", "'grow' calls itself"),
             ("g", "fun f<T>(n: int, x: T) -> int {\n    if n == 0 { return 0 }\n    return g(n - 1, (x, x))\n}\n"
                   "fun g<T>(n: int, x: T) -> int {\n    return f(n, x)\n}\nfun main() { print(f(3, 1)) }\n",
-             "3:13", "more than 4096 types in all", "0\n"),
+             "3:13", "in 'f<T>', asks for 'g<(T, T)>'", "'f' calls itself through 'g'"),
             ("h", "fun h<T>(n: int, x: T) -> int {\n"
                   "    let k = (m: int) => if m == 0 { 0 } else { h(m - 1, Some(x)) }\n    return k(n)\n}\n"
                   "fun main() { print(h(3, 1)) }\n",
-             "2:49", "65 types deep (the limit is 64)", "0\n"),
+             "2:49", "in 'h<T>', asks for 'h<Option<T>>'", "'h' calls itself"),
+            ("Box.deep", "struct Box<T> { v: T }\nimpl<T> Box<T> {\n    fun deep(self, n: int) -> int {\n"
+                         "        if n == 0 { return 0 }\n        return 1 + Box { v: [self.v] }.deep(n - 1)\n    }\n}\n"
+                         "fun main() { print(Box { v: 1 }.deep(3)) }\n",
+             "5:44", "in 'Box.deep<T>', asks for 'Box.deep<[T]>'", "'Box.deep' calls itself"),
         )
-        for callee, src, at, why, out in cases:
+        for callee, src, at, what, how in cases:
             with self.subTest(callee=callee), tempfile.TemporaryDirectory() as tmp:
                 path = write_program(tmp, src)
+                checked = subprocess.run([myla, "check", path], capture_output=True, text=True, timeout=60)
+                self.assertEqual(checked.returncode, 1, checked.stderr)
+                self.assertTrue(checked.stderr.startswith(f"type error: the instances of '{callee}' nest without end: "
+                                                          f"this call, {what}\n  --> {path}:{at}\n"), checked.stderr)
+                self.assertIn(f"note: {how} with a larger type at each step (polymorphic recursion), which native "
+                              "code can't be built for\n", checked.stderr)
                 ran = subprocess.run([myla, "run", path], capture_output=True, text=True, timeout=60)
-                self.assertEqual((ran.stdout, ran.returncode), (out, 0), ran.stderr)
+                self.assertEqual((ran.stdout, ran.stderr, ran.returncode), ("", checked.stderr, 1))
+                for target in ("x86_64-linux", "aarch64-linux", "wasm32-wasi"):
+                    built = subprocess.run([myla, "build", path, "-o", os.path.join(tmp, "out"), "--target", target],
+                                           capture_output=True, text=True, timeout=60)
+                    self.assertEqual((built.stderr, built.returncode), (checked.stderr, 1))
+
+    def test_polymorphic_recursion_through_a_trait_is_refused_by_the_build(self):
+        # MYLA-543: through a trait's method, which instance a call reaches
+        # depends on the type the instance gets, so the checker can't see the
+        # recursion (`run<T: Tr>` calls `x.go()`, `Box<U>`'s `go` calls
+        # `run<Box<[U]>>`); the build still refuses it where the type
+        # arguments grow too deep or (a pair of pairs of ...) too large, and
+        # the interpreter runs it
+        myla = selfhost_tool("main")
+        head = "trait Tr {\n    fun go(self, n: int) -> int\n}\nstruct Box<U> { v: U }\nimpl<U> Tr for Box<U> {\n"
+        tail = ("fun run<T: Tr>(x: T, n: int) -> int {\n    if n == 0 { return 0 }\n    return 1 + x.go(n - 1)\n}\n"
+                "fun main() { print(run(Box { v: 1 }, 3)) }\n")
+        cases = (
+            ("[self.v]", "66 types deep (the limit is 64)"),
+            ("(self.v, self.v)", "more than 4096 types in all"),
+        )
+        for grown, why in cases:
+            src = head + f"    fun go(self, n: int) -> int {{\n        return run(Box {{ v: {grown} }}, n)\n    }}\n}}\n" + tail
+            with self.subTest(grown=grown), tempfile.TemporaryDirectory() as tmp:
+                path = write_program(tmp, src)
+                checked = subprocess.run([myla, "check", path], capture_output=True, text=True, timeout=60)
+                self.assertEqual((checked.stdout, checked.returncode), ("ok\n", 0), checked.stderr)
+                ran = subprocess.run([myla, "run", path], capture_output=True, text=True, timeout=60)
+                self.assertEqual((ran.stdout, ran.returncode), ("3\n", 0), ran.stderr)
                 for target in ("x86_64-linux", "aarch64-linux", "wasm32-wasi"):
                     built = subprocess.run([myla, "build", path, "-o", os.path.join(tmp, "out"), "--target", target],
                                            capture_output=True, text=True, timeout=60)
                     self.assertEqual(built.returncode, 1, built.stderr)
-                    self.assertIn(f"type error: the instances of '{callee}' nest without end: this call asks for one "
-                                  f"whose type arguments are {why}\n  --> {path}:{at}\n", built.stderr)
+                    self.assertIn(f"type error: the instances of 'run' nest without end: this call asks for one "
+                                  f"whose type arguments are {why}\n  --> {path}:7:19\n", built.stderr)
                     self.assertIn("(polymorphic recursion)", built.stderr)
 
     def test_a_deep_type_the_program_writes_is_no_recursion(self):
         # MYLA-544: a type 65 or 100 deep that the program writes is no
         # polymorphic recursion: native code builds its instance, which only
         # an instance past the limit asking for a deeper one was refused
-        # for; the interpreter runs it
+        # for; the interpreter runs it. MYLA-543: `myla check` says `ok`, and
+        # a recursion that passes such a type on unchanged, or hands it to
+        # another generic function as it is, builds too (it was refused)
+        myla = selfhost_tool("main")
         for depth in (65, 100):
             t, v = "int", "5"
             for _ in range(depth):
                 t, v = f"[{t}]", f"[{v}]"
             src = (f"fun mk<T>(x: T) -> T {{\n    return x\n}}\n"
-                   f"fun main() {{\n    let x: {t} = {v}\n    print(mk(x) == x)\n}}\n")
+                   f"fun count<T>(x: T, n: int) -> int {{\n    if n == 0 {{ return 0 }}\n    return 1 + count(x, n - 1)\n}}\n"
+                   f"fun wrap<U>(x: U) -> [U] {{\n    return [x]\n}}\n"
+                   f"fun outer<T>(x: T) -> int {{\n    return wrap(x).len()\n}}\n"
+                   f"fun main() {{\n    let x: {t} = {v}\n    print(mk(x) == x)\n    print(count(x, 3))\n"
+                   f"    print(outer(x))\n}}\n")
             with self.subTest(depth=depth):
                 interp, native = _both(src)
                 self.assertEqual(native, interp)
-                self.assertEqual(native, ("true\n", "", 0))
+                self.assertEqual(native, ("true\n3\n1\n", "", 0))
+                with tempfile.TemporaryDirectory() as tmp:
+                    checked = subprocess.run([myla, "check", write_program(tmp, src)], capture_output=True, text=True,
+                                             timeout=60)
+                    self.assertEqual((checked.stdout, checked.stderr, checked.returncode), ("ok\n", "", 0))
 
     def test_an_invalid_spec_of_a_builtin_format_is_a_runtime_error(self):
         # MYLA-544 (C8): a spec known only when it runs, invalid, is the

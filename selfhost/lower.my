@@ -4191,7 +4191,9 @@ impl Lower {
         var too = ""
         // only an instance past the limit itself asks for one in a
         // recursion: a deep type the program writes is no recursion
-        // (MYLA-544: a call of `mk<[[…int…]]>` 65 deep from `main`)
+        // (MYLA-544: a call of `mk<[[…int…]]>` 65 deep from `main`), and
+        // only for a deeper one than its own: a recursion over such a type
+        // that passes it on unchanged is none either (MYLA-543)
         var cur_depth = 0
         var cur_size = 0
         for sb in cg.subst {
@@ -4204,7 +4206,7 @@ impl Lower {
             // (a type that doubles at each step grows too large long before
             // it is too deep)
             if too == "" && cur_size > MAX_INSTANCE_SIZE / 2 && type_size(ta, MAX_INSTANCE_SIZE) > MAX_INSTANCE_SIZE { too = format("more than {} types in all", MAX_INSTANCE_SIZE) }
-            else if too == "" && cur_depth >= MAX_INSTANCE_DEPTH && type_depth(ta) > MAX_INSTANCE_DEPTH { too = format("{} types deep (the limit is {})", type_depth(ta), MAX_INSTANCE_DEPTH) }
+            else if too == "" && cur_depth >= MAX_INSTANCE_DEPTH && type_depth(ta) > cur_depth { too = format("{} types deep (the limit is {})", type_depth(ta), MAX_INSTANCE_DEPTH) }
         }
         if too != "" { self.refuse_instance(cg, call, if sig.has_decl { sig.decl.name } else { sig.name }, too) }
         else { self.f.instances.push(Instance { orig: sig.name, targs: targs }) }

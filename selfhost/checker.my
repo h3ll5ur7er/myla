@@ -496,6 +496,50 @@ fun generic_name(n: str, args: [Type]) -> str {
     return format("{}<{}>", n, type_names(args))
 }
 
+// A type parameter of a function, a node of `check_instance_growth`'s graph.
+#test("grow", "T")["grow\tT"]
+fun grow_node(f: str, tp: str) -> str {
+    return f + "\t" + tp
+}
+
+// The functions other than `to`'s that a type parameter is passed through
+// on its way from the node `start` to the node `to` of `next` (`grow_node`),
+// in order, or None when it doesn't get there.
+#test(["f\tT": ["f\tT"]], "f\tT", "f\tT")[Some([])]
+#test(["f\tT": ["g\tU"], "g\tU": ["h\tV", "f\tT"], "h\tV": ["f\tT"]], "g\tU", "f\tT")[Some(["g"])]
+#test(["f\tT": ["g\tU"], "g\tU": ["h\tV"], "h\tV": ["g\tW", "f\tS"], "f\tS": ["f\tT"]], "g\tU", "f\tT")[Some(["g", "h"])]
+#test(["f\tT": ["g\tU"], "g\tU": ["h\tV"]], "g\tU", "f\tT")[None]
+fun grow_path(next: [str: [str]], start: str, to: str) -> Option<[str]> {
+    var parent: [str: str] = [:]
+    parent[start] = ""
+    var queue = [start]
+    var at = 0
+    while at < queue.len() {
+        let n = queue[at]
+        at += 1
+        if n == to {
+            let goal = n.split("\t")[0]
+            var fns: [str] = []
+            var k = parent[n]
+            while k != "" {
+                let f = k.split("\t")[0]
+                if f != goal && !contains_str(fns, f) { fns.insert(0, f) }
+                k = parent[k]
+            }
+            return Some(fns)
+        }
+        if next.contains(n) {
+            for m in next[n] {
+                if !parent.contains(m) {
+                    parent[m] = n
+                    queue.push(m)
+                }
+            }
+        }
+    }
+    return None
+}
+
 #test(["b"], ", ")["b"]
 #test(["Rect"], ", ")["Rect"]
 fun join_strs(xs: [str], sep: str) -> str {
@@ -2120,6 +2164,12 @@ pub struct Frame { names: [str], binds: [Binding] }
 // arguments (the receiver first), for `check_become_words` (D119).
 pub struct BecomeWords { func: str, target: str, value: bool, mutates: bool, args: [Type], defaults: [str], line: int32, col: int32, sp: SrcSpan, decl: int32 }
 
+// A call in the generic function `func` (its type parameters `own`) of the
+// generic function `target` (its type parameters `tps`) with the type
+// arguments `targs`, written with `func`'s, for `check_instance_growth`
+// (H5, MYLA-543).
+pub struct GrowCall { func: str, own: [str], target: str, tps: [str], targs: [Type], line: int32, col: int32, sp: SrcSpan, decl: int32 }
+
 // `become` (D87; types.py: _check_become): a `become` that hands a heap value
 // over to a parameter, the first of each, and one that passes a heap-value
 // parameter on to a function value (in declaration `decl`)
@@ -2180,6 +2230,7 @@ pub struct Checker {
     static_calls: [int32: Type],
     on_type_params: bool,
     call_types: [int32: [Type]],
+    grow_calls: [GrowCall],         // the calls of generic functions that pass on a type parameter (`check_instance_growth`)
     aliases: [AliasRaw],
     alias_cache: [AliasCached],
     const_decls: [ConstDeclT],
@@ -2303,6 +2354,7 @@ fun new_checker(decls: [Decl]) -> Checker {
         functions: [], methods: [], method_decls: [], method_decl_keys: [], method_decl_ids: [],
         impl_decls: [], next_id: 1000000000, derived: [], pending_keys: [], keys_ready: false, key_ctx: false, traits: [], trait_decls: [], trait_impls: [], user_trait_impls: [], impl_args: [:], impl_bounds: [:], for_iters: [:],
         static_selfs: [:], static_calls: [:], on_type_params: false, call_types: [:],
+        grow_calls: [],
         aliases: [], alias_cache: [], const_decls: [], consts: [], const_values: [:], const_done: [], const_folding: [],
         allow_self: false, type_params: [], bounds_cur: [],
         cur_ret: None, has_cur_ret: false, ret_at: None, loop_depth: 0, defer_at: -1,
@@ -6604,6 +6656,76 @@ impl Checker {
         }
     }
 
+    // A call `e` of the generic `sig` with the type arguments `targs`: kept,
+    // in a generic function, when it passes one of the function's type
+    // parameters on (`check_instance_growth`).
+    fun note_grow_call(var self, e: Expr, sig: FuncSig, targs: [Type]) {
+        if self.type_params.len() == 0 { return }
+        for ta in targs {
+            if contains_type_param(ta) {
+                self.grow_calls.push(GrowCall { func: self.fun_name, own: self.type_params, target: sig.name, tps: sig.type_params, targs: targs, line: e.line, col: e.col, sp: e.sp, decl: self.cur_decl })
+                return
+            }
+        }
+    }
+
+    // Polymorphic recursion (H5, MYLA-543): a generic function that asks for
+    // an instance of itself with a larger type, directly or through others
+    // (`grow<T>` calling `grow<[T]>`), asks native code for instances
+    // without end. Its type parameter passed on in a larger type (`[T]`,
+    // `(T, T)`) to one that is passed back to it is refused at that call, as
+    // `myla build` refused it (`Lower.call_target`, which still does for
+    // what isn't seen here: a trait's method), so that every command says
+    // the same; whether the program calls the function or not.
+    fun check_instance_growth(var self) {
+        if self.grow_calls.len() == 0 { return }
+        // (function, type parameter) to those it is passed to
+        var next: [str: [str]] = [:]
+        for c in self.grow_calls {
+            var j = 0
+            while j < c.targs.len() && j < c.tps.len() {
+                for tp in c.own {
+                    if mentions_param(c.targs[j], tp) {
+                        let k = grow_node(c.func, tp)
+                        if !next.contains(k) { next[k] = [] }
+                        next[k].push(grow_node(c.target, c.tps[j]))
+                    }
+                }
+                j += 1
+            }
+        }
+        // (a body checked twice, a lambda's, is one call)
+        var seen: [str: bool] = [:]
+        for c in self.grow_calls {
+            if self.full() { return }
+            let at = format("{}:{}:{}", c.decl, c.line, c.col)
+            if seen.contains(at) { continue }
+            seen[at] = true
+            var through: Option<[str]> = None
+            var j = 0
+            while j < c.targs.len() && j < c.tps.len() && through == None {
+                for tp in c.own {
+                    if through == None && mentions_param(c.targs[j], tp) && !type_eq(c.targs[j], Type.TParam(tp)) {
+                        through = grow_path(next, grow_node(c.target, c.tps[j]), grow_node(c.func, tp))
+                    }
+                }
+                j += 1
+            }
+            match through {
+                Some(fns) => {
+                    var own: [Type] = []
+                    for tp in c.own { own.push(Type.TParam(tp)) }
+                    let msg = format("the instances of '{}' nest without end: this call, in '{}', asks for '{}'", c.target, generic_name(c.func, own), generic_name(c.target, c.targs))
+                    var how = format("'{}' calls itself", c.func)
+                    if fns.len() > 0 { how = format("{} through {}", how, quoted_list(fns)) }
+                    let note = format("{} with a larger type at each step (polymorphic recursion), which native code can't be built for", how)
+                    self.errs.push(CheckErr { line: c.line, col: c.col, sp: c.sp, msg: msg, decl: c.decl, notes: [Note { label: "note", msg: note, line: 0, col: 0, sp: no_span() }] })
+                },
+                None => {},
+            }
+        }
+    }
+
     // The words parameter `i` of function `f`, of type `t`, takes beyond
     // one: those of a struct, tuple or enum a `become` hands over to it (at
     // least one, as an empty one takes a word too).
@@ -9072,6 +9194,7 @@ impl Checker {
         }
         self.check_passed_on()
         self.check_become_words()
+        self.check_instance_growth()
         if self.errs.len() > 0 { return Err(unmangled_all(self.errs, self.known_names())) }
         if self.warnings.len() > 0 { self.warnings = unmangled_all(sort_by_place(self.warnings), self.known_names()) }
         return Ok(0)
@@ -10686,6 +10809,7 @@ impl Checker {
         self.prelude_need_all(subst)
         self.targs_taken = e.id
         self.call_types[e.id] = type_args_in(sig.type_params, subst)
+        self.note_grow_call(e, sig, self.call_types[e.id])
         return Ok(opt_subst_type(sig.ret, subst))
     }
 
@@ -11160,6 +11284,7 @@ impl Checker {
         self.prelude_need_all(subst)
         self.targs_taken = e.id
         self.call_types[e.id] = type_args_in(sig.type_params, subst)
+        self.note_grow_call(e, sig, self.call_types[e.id])
         return Ok(opt_subst_type(sig.ret, subst))
     }
 
