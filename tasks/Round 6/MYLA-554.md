@@ -2,7 +2,7 @@
 id: MYLA-554
 title: "R12 Documentation and the board after round 5"
 type: improvement
-status: todo
+status: in-progress
 priority: low
 labels: [docs, board, round-6]
 ---

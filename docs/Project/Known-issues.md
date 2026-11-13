@@ -6,7 +6,7 @@ Open bugs and gaps by component, each with a task that has its steps to reproduc
 
 ## Self-hosted compiler
 
-- `#test` coverage of `selfhost/` is 63 percent (1,447 of 2,295 value-returning functions, `scripts/test_coverage.py`) against D109's 80, with no generator left ([[MYLA-184]]).
+- `#test` coverage of `selfhost/` is 63 percent (1,475 of 2,347 value-returning functions after round 6, `scripts/test_coverage.py`) against D109's 80, with no generator left ([[MYLA-184]]).
 - The interpreter is about 500 times slower than native code (`fib(30)`: 3.7 s against 7 ms on `d5d80bc`, [[MYLA-317]]).
 - **Interpreter:** the binding of type parameters is lost when a map key's written `eq` or `hash` runs before a `var self` call, so `m[k].sort()` on a `[uint64]` sorts signed; the environment memo grows per call path (a generic `fib(27)`: 163 MB against 13 MB) ([[MYLA-414]]). Small differences from native code in texts and map order ([[MYLA-546]]).
 - **Native code, memory safety:** a value read from a container is freed by a later operand (`h.xs[0] + h.repl()` is `old1!` interpreted and `!` natively; 25 of 90 forms), with two leaks and an evaluation order that differs ([[MYLA-543]]); a closure in a variable that captures a recursive enum segfaults when copied to a task, an actor or a channel ([[MYLA-415]]).
@@ -50,6 +50,6 @@ The targets are x86-64 and aarch64 Linux and wasm32 on WASI; macOS and Windows a
 
 ## Documentation and repository
 
-- The recorded Python answers cover only the examples and the error corpus now; 20 new corpus files are held to the CLI's own output ([[MYLA-288]]).
+- Seventeen burn modules still ask the recorded Python answers about the 32 examples of the retirement, so the gates keyed by an example's text freeze it (`examples/floats.my`'s stale comments stay); token and AST expectation files would replace the recordings ([[MYLA-288]]).
 - The tests pin one program per fixed bug; the reviews' generators, which found this round's older bugs, aren't in the suite ([[MYLA-555]]). Stale sentences and 25 `done` tasks with open boxes ([[MYLA-554]]).
-- The tutorial and the "Why Myla" page aren't written yet (D114, [[MYLA-299]]).
+- The tutorial and the "Why Myla" page aren't written yet (D114, [[MYLA-234]]).
