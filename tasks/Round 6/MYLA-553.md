@@ -2,19 +2,19 @@
 id: MYLA-553
 title: "R11 Small library gaps: `std.args`' spec checks, `iter()` on BitSet, Lru and Grid, the comments on import cost"
 type: improvement
-status: in-progress
+status: review
 priority: low
 labels: [std, args, containers, round-6]
 ---
 Work package R11 of [[Project/Review-2026-11-12]]. Files: `lib/std/args.my`, `bitset.my`, `cache.my`, `grid.my`, `list.my`, `encoding.my`, `fs.my`, `digest.my`. Follows [[MYLA-426]], [[MYLA-425]] and [[MYLA-428]].
 
-- [x] **`std.args` accepts specs that can't work** (`repro-r5/std/spec.my`): a `many` followed by a positional or a second `many`, a command named `""` or `-c` (unreachable), a name with a space, the short name `=`, a flag named `help` or short `h` that shadows the built-in one. The panic for a bad spec also points into `std/args.my:191`, not at the caller ([[MYLA-435]]) *(built but for the position, which is [[MYLA-435]]'s language feature, and the own `help`, kept as documented: see the proposal)*
+- [x] **`std.args` accepts specs that can't work** (`repro-r5/std/spec.my`): a `many` followed by a positional or a second `many`, a command named `""` or `-c` (unreachable), a name with a space, the short name `=`, a flag named `help` or short `h` that shadows the built-in one. The panic for a bad spec also points into `std/args.my:191`, not at the caller ([[MYLA-435]]) *(built, the position through [[MYLA-435]]'s `#track_caller` in round 6's follow-up; the own `help` kept as documented: see the proposal)*
 - [x] **`iter()` on BitSet, Lru and Grid**: `for x in b.iter()` is "no method 'iter'" (`it2.my`); BitSet has `next_from` to build on. `for x in s` on a type with an `iter()` method could carry the help "write `s.iter()`", as pipelines do for lists
 - [x] The heapsort's tests don't kill `k = n / 2 - 1` (a heapify that skips the last parent): add an input with the last parent out of order ([[MYLA-480]])
 - [x] `args.same` (11 lines, 8 uses) and `encoding.same_bytes` are the `xs == ys` workaround [[MYLA-428]] removed elsewhere
 - [x] The comments that keep a helper private for its import's cost (`fs.my:736` "would add 2.5 ms to checking every program using std.io", `digest.my:315` "took 4 ms", and those in `net.my`, `archive.my`, `compress.my`, with the sentence in Conventions) were measured before lazy modules: std.fs calling `encoding.hex_encode` costs a std.io hello world 1.7 percent now. Share the helpers, or restate the reason with today's numbers
 
-Left of the first box, and why: the panic's position ([[MYLA-435]], a library function reporting its caller's place, as Rust's `#[track_caller]`) needs a language feature, which that task is; and a flag named `help` or short `h` stays the spec's own (the proposal below).
+Left of the first box after round 6, and why: the panic's position needed a language feature, [[MYLA-435]]'s, built in the follow-up batch (below); a flag named `help` or short `h` stays the spec's own (the proposal below).
 
 ## What was built
 
@@ -28,6 +28,13 @@ Left of the first box, and why: the panic's position ([[MYLA-435]], a library fu
 ## Proposal (open for the owner): a spec's own `help`
 
 The review counted a flag named `help` or short `h` as a spec that shadows the built-in help. It is documented and tested as a feature: `-h` is the spec's own when it gives `h` to an option (`--here`), and a spec that declares `help` (`flag("help", 'h', "…")`, or `option("help", …)` for `--help TOPIC`) takes `--help` as its own argument, gives no `Help` error, and its help lists its own line in place of the built-in one. Recommended and built: keep it (now said on [[Language/Standard-library/Args]]). The alternative: panic on a name `help` (a program that wants its own help then can't have `--help`), or panic only on a flag `help` without a short `h`.
+
+## The panic's position (round 6's follow-up)
+
+A bad spec's panic pointed into `std/args.my` (`  --> <myla>/std/args.my:142:18` for a positional after `many`), not at the program's call. With [[MYLA-435]]'s `#track_caller` on `Spec`'s `flag`, `option`, `positional`, `many` and `command` and their checks `check_name` and `check_option` (which pass the position on), it points at the call that made the bad spec: `  --> examples/errors/runtime_args_spec_at_the_caller.my:9:90`, the `(` of `.positional("to")`. `Args`' `flag`, `count`, `get`, `get_or` and `all` and their check `declared` carry it too, so `a.get_or("in", "")` for a name the spec doesn't declare points at that call ([[lib/std/args.my]]; [[Language/Standard-library/Args]] says so).
+
+- Before: `examples/errors/runtime_args_spec_at_the_caller.my` reported `<myla>/std/args.my:142:18` interpreted and natively (and its span directive failed); the cases `an_args_spec` (`'-o' is declared twice`, at `args.my:230` before) and `an_undeclared_argument` of `test_track_caller_reports_the_callers_position` in `tests/burn/test_compiler_parity.py` pointed into `args.my`.
+- After: both point at the program's call on every runner: the corpus file interpreted, natively, under `-g`, on aarch64 (qemu) and wasm32 (Node); the parity cases interpreted, natively and with `MYLA_TEST_TARGET=aarch64-linux` and `wasm32-wasi`. std.args' 58 cases pass interpreted, `--native`, and on aarch64 and wasm32.
 
 ## Evidence
 

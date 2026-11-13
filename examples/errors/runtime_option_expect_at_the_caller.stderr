@@ -1,0 +1,5 @@
+runtime error: 7 is in the list
+  --> examples/errors/runtime_option_expect_at_the_caller.my:16:39
+   |
+16 |     let at = find([1, 2, 3], 7).expect("7 is in the list")
+   |              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
