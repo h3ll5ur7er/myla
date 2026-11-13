@@ -2429,6 +2429,10 @@ impl CodeGen {
         // writes how the case ended as one (`test_record`, D191)
         out.push("__test_report:")
         out.push("\t.skip 8")
+        // 1 once the program asked for huge pages for its heap's chunks
+        // (std.rt's `heap_huge_pages`, the toolchain's opt-in, MYLA-608)
+        out.push("__heap_huge:")
+        out.push("\t.skip 8")
         // the poller's events and words (std.platform, D124)
         out.push("__poll_buf:")
         out.push("\t.skip 128")
