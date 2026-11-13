@@ -25,7 +25,7 @@ The low-level primitives `__write`, `__read`, `__write_bytes`, `__read_bytes` (t
 
 One page per module (D164). A new module adds its row here.
 
-The conventions (D164): operations on built-in types are methods (`s.split(",")`, `xs.sorted()`), and `std.str`, `std.char`, `std.int`, `std.list`, `std.option` and `std.map` are seen by every program without an import, and `std.hash`, whose methods and impls the `Hash` trait builds on (D163, D166, [[MYLA-313]]) ([[MYLA-320]], [[Language/Modules#implicit-imports]]: their methods, not their functions, which need an import; not in the modules of `std`, which import what they use); everything else is a function of its module (`path.join(a, b)`). Strings are bytes and character classes ASCII. A function that can fail returns a `Result` with its module's error: a bare enum when the variants carry different data, a struct with a `kind` enum when every error has the same position (D168). A map keyed by a type parameter writes `T: Eq + Hash` (D167).
+The conventions (D164): operations on built-in types are methods (`s.split(",")`, `xs.sorted()`), and `std.str`, `std.char`, `std.int`, `std.float` (D197), `std.list`, `std.option` and `std.map` are seen by every program without an import, and `std.hash`, whose methods and impls the `Hash` trait builds on (D163, D166, [[MYLA-313]]) ([[MYLA-320]], [[Language/Modules#implicit-imports]]: their methods, not their functions, which need an import; not in the modules of `std`, which import what they use); everything else is a function of its module (`path.join(a, b)`). Strings are bytes and character classes ASCII. A function that can fail returns a `Result` with its module's error: a bare enum when the variants carry different data, a struct with a `kind` enum when every error has the same position (D168). A map keyed by a type parameter writes `T: Eq + Hash` (D167).
 
 | Module | Page | Holds |
 | --- | --- | --- |
@@ -41,6 +41,7 @@ The conventions (D164): operations on built-in types are methods (`s.split(",")`
 | `std.signal` | [[Language/Standard-library/Signal]] | SIGINT and SIGTERM as events a task awaits: `listen()`, `Signals.next()`, `interrupted()` |
 | `std.char` | [[Language/Standard-library/Char]] | Character classes, case and digits, as methods on `char` (ASCII) |
 | `std.int` | [[Language/Standard-library/Int]] | Methods on every integer type: `gcd`, `pow`, Euclidean division, checked, wrapping, saturating and overflowing arithmetic, `mulmod`, `powmod`, `modinv` |
+| `std.float` | [[Language/Standard-library/Float]] | Methods on `float64` and `float32` (implicit, D197): rounding, `sqrt`, `cbrt`, `pow`, `powi`, the trigonometric and hyperbolic functions, `lerp`, `total_cmp`, `to_bits`; the constants |
 | `std.num` | [[Language/Standard-library/Num]] | Exact parsing and printing of integers and floats; integers in any radix and width, with `ParseIntError` |
 | `std.bigint` | [[Language/Standard-library/Bigint]] | `BigInt`, integers of any size: arithmetic with Karatsuba and recursive division, `pow`, the three divisions, parsing and printing in any radix |
 | `std.str` | [[Language/Standard-library/Str]] | Methods on `str`: search, split, trim, case, padding, replace |

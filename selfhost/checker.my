@@ -275,7 +275,7 @@ fun unknown_function_notes(name: str, cands: [str]) -> [Note] {
 
 // The names of the primitive types, as types.py's _PRIMITIVES has them.
 #test()[["bool", "str", "StringBuilder", "int8", "int16", "int32", "int64", "uint8", "uint16", "uint32", "uint64", "float32", "float64", "char"]]
-fun primitive_type_names() -> [str] {
+pub fun primitive_type_names() -> [str] {
     return ["bool", "str", "StringBuilder", "int8", "int16", "int32", "int64", "uint8", "uint16", "uint32", "uint64", "float32", "float64", "char"]
 }
 
@@ -927,8 +927,8 @@ fun is_arith_op(op: str) -> bool {
 fun primitive_default_trait(t: Type, trnm: str) -> bool {
     return match t {
         Type.TInt(w, s) => trnm == "Add" || trnm == "Sub" || trnm == "Mul" || trnm == "Div" || trnm == "Rem" || trnm == "Eq" || trnm == "Ord" || trnm == "Format" || trnm == "Hash",
-        // a float isn't `Hash`: NaN is unequal to itself (D163)
-        Type.TFloat(w) => trnm == "Add" || trnm == "Sub" || trnm == "Mul" || trnm == "Div" || trnm == "Rem" || trnm == "Eq" || trnm == "Ord" || trnm == "Format",
+        // a float is `Hash` too, a NaN's hash a runtime error (D196)
+        Type.TFloat(w) => trnm == "Add" || trnm == "Sub" || trnm == "Mul" || trnm == "Div" || trnm == "Rem" || trnm == "Eq" || trnm == "Ord" || trnm == "Format" || trnm == "Hash",
         Type.TChar => trnm == "Eq" || trnm == "Ord" || trnm == "Format" || trnm == "Hash",
         Type.TBool => trnm == "Eq" || trnm == "Format" || trnm == "Hash",
         // a string's `<` is byte-wise (MYLA-318)
@@ -2735,7 +2735,7 @@ impl Checker {
     #test(checker_on("[int]"), Type.TInt(32, true), "Add")[Ok(true)]
     #test(checker_on("[int]"), Type.TTuple([Type.TInt(32, true), Type.TStr]), "Eq")[Ok(true)]
     #test(checker_on("[int]"), Type.TList(Type.TTuple([Type.TChar, Type.TFloat(64)])), "Eq")[Ok(true)]
-    #test(checker_on("[int]"), Type.TTuple([Type.TInt(32, true), Type.TFloat(64)]), "Hash")[Ok(false)]
+    #test(checker_on("[int]"), Type.TTuple([Type.TInt(32, true), Type.TFloat(64)]), "Hash")[Ok(true)]
     #test(checker_on("[int]"), Type.TList(Type.TStr), "Hash")[Ok(true)]
     #test(checker_on("[int]"), Type.TTuple([Type.TStruct("P", [])]), "Eq")[Ok(false)]
     fun type_implements(self, t: Type, trnm: str) -> Result<bool, CheckErr> {
@@ -5132,8 +5132,8 @@ impl Checker {
         return Ok(0)
     }
 
-    // `not_eq_why` for `Hash`: a float isn't, as NaN is unequal to itself.
-    #test(checker_on("[int]"), Type.TTuple([Type.TInt(32, true), Type.TFloat(64)]))["'float64' isn't Hash (NaN is unequal to itself)"]
+    // `not_eq_why` for `Hash`.
+    #test(checker_on("[int]"), Type.TTuple([Type.TInt(32, true), Type.TMap(Type.TStr, Type.TStr)]))["'[str: str]' isn't Hash"]
     fun not_hash_why(self, t: Type) -> str {
         return self.not_trait_why(t, "Hash")
     }
@@ -5177,7 +5177,6 @@ impl Checker {
                 if is_struct_or_enum(et) && (trnm == "Eq" || trnm == "Hash") { return format("'{}' isn't {} (it needs 'impl {} for {}' or '#derive({})')", type_name(et), trnm, trnm, type_name(et), trnm) }
                 if is_struct_or_enum(et) { return format("'{}' isn't {} (it needs 'impl {} for {}')", type_name(et), trnm, trnm, type_name(et)) }
                 if is_type_param(et) { return format("'{}' isn't {} (it needs the bound '{}: {}')", type_name(et), trnm, type_name(et), trnm) }
-                if is_float(et) && trnm == "Hash" { return format("'{}' isn't Hash (NaN is unequal to itself)", type_name(et)) }
                 return format("'{}' isn't {}", type_name(et), trnm)
             }
         }
@@ -7672,11 +7671,13 @@ fun is_eq_type(t: Type, eq_names: [str]) -> bool {
 // Whether `t` is `Hash` for a derived impl's field, the structs and enums
 // among `hash_names` being so (D163): not a float, nor anything holding one.
 #test(Type.TTuple([Type.TInt(32, true), Type.TStr]), [])[true]
-#test(Type.TList(Type.TFloat(64)), [])[false]
+#test(Type.TList(Type.TFloat(64)), [])[true]
+#test(Type.TMap(Type.TStr, Type.TStr), [])[false]
 #test(Type.TStruct("P", []), ["P"])[true]
 fun is_hash_type(t: Type, hash_names: [str]) -> bool {
     return match t {
         Type.TInt(w, s) => true,
+        Type.TFloat(w) => true,   // D196
         Type.TBool => true,
         Type.TStr => true,
         Type.TChar => true,
@@ -7695,30 +7696,6 @@ fun all_hash_types(ts: [Type], hash_names: [str]) -> bool {
         if !is_hash_type(t, hash_names) { return false }
     }
     return true
-}
-
-// What a refusal of a field of type `t` adds when `t` is or holds a float.
-#test(Type.TFloat(64))[" (a float isn't: NaN is unequal to itself; a hand-written 'impl Hash' may add 'math.to_bits(x)')"]
-#test(Type.TStr)[""]
-fun float_note(t: Type) -> str {
-    if holds_float(t) { return " (a float isn't: NaN is unequal to itself; a hand-written 'impl Hash' may add 'math.to_bits(x)')" }
-    return ""
-}
-
-#test(Type.TTuple([Type.TStr, Type.TList(Type.TFloat(32))]))[true]
-#test(Type.TInt(8, true))[false]
-fun holds_float(t: Type) -> bool {
-    return match t {
-        Type.TFloat(w) => true,
-        Type.TTuple(es) => {
-            for e in es {
-                if holds_float(e) { return true }
-            }
-            false
-        },
-        Type.TList(e) => holds_float(e),
-        _ => false,
-    }
 }
 
 // Whether `t` is or holds a generic struct or enum, whose impl's bounds a
@@ -8819,7 +8796,7 @@ impl Checker {
         let si = self.struct_idx(name)
         if si >= 0 {
             for f in self.structs[si].fields {
-                if !is_hash_type(f.ty, hash_names) { return Err(terr_at(decl.line, decl.col, decl.sp, format("cannot derive Hash for struct '{}': field '{}' has type '{}', which isn't Hash{}", name, f.name, type_name(f.ty), float_note(f.ty)))) }
+                if !is_hash_type(f.ty, hash_names) { return Err(terr_at(decl.line, decl.col, decl.sp, format("cannot derive Hash for struct '{}': field '{}' has type '{}', which isn't Hash", name, f.name, type_name(f.ty)))) }
             }
             return Ok(0)
         }
@@ -8828,7 +8805,7 @@ impl Checker {
             for v in self.enums[ei].variants {
                 var i = 0
                 for pt in v.payload {
-                    if !is_hash_type(pt, hash_names) { return Err(terr_at(decl.line, decl.col, decl.sp, format("cannot derive Hash for enum '{}': payload #{} of variant '{}' has type '{}', which isn't Hash{}", name, i, v.name, type_name(pt), float_note(pt)))) }
+                    if !is_hash_type(pt, hash_names) { return Err(terr_at(decl.line, decl.col, decl.sp, format("cannot derive Hash for enum '{}': payload #{} of variant '{}' has type '{}', which isn't Hash", name, i, v.name, type_name(pt)))) }
                     i = i + 1
                 }
             }
@@ -10149,9 +10126,9 @@ fun derived_error_at(src: str) -> (int32, int32, str, bool) {
 #test("struct P { x: int }\nfun main() { print((1, P { x: 1 }) == (1, P { x: 1 })) }")[["cannot compare values of type '(int32, P)': 'P' isn't Eq (it needs 'impl Eq for P' or '#derive(Eq)')"]]
 #test("fun main() { var m: [(int, int): int] = [:]\nm[(1, 2)] = 3\nvar n: [[str]: bool] = [[\"a\"]: true] }")[[]]
 #test("#derive(Eq)\nstruct P { x: int }\nfun main() { var m: [P: int] = [:] }")[["map key type must be Eq and Hash, found 'P': 'P' isn't Hash (it needs 'impl Hash for P' or '#derive(Hash)')"]]
-#test("struct Q { m: [(int, float): int] }")[["map key type must be Eq and Hash, found '(int32, float64)': 'float64' isn't Hash (NaN is unequal to itself)"]]
+#test("struct Q { m: [(int, float): int] }")[[]]
 #test("fun f<T>(x: T) -> [T: int] { return [x: 1] }")[["map key type must be Eq and Hash, found 'T': it needs the bound 'T: Eq + Hash'"]]
-#test("#derive(Eq, Hash)\nstruct P { x: float }")[["cannot derive Hash for struct 'P': field 'x' has type 'float64', which isn't Hash (a float isn't: NaN is unequal to itself; a hand-written 'impl Hash' may add 'math.to_bits(x)')"]]
+#test("#derive(Eq, Hash)\nstruct P { x: float }")[[]]
 #test("#derive(Hash)\nstruct P { x: int }")[["cannot derive Hash for 'P': it isn't Eq; derive both, '#derive(Eq, Hash)', or write 'impl Eq for P'"]]
 // a string's characters in a `for`, strings ordered and `Ord`, a char's
 // distance and moves (MYLA-318)

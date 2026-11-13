@@ -133,7 +133,7 @@ fun cached(path: str) -> bool {
 #test("std/int.my")[true]
 #test("std/http.my")[false]
 fun with_bodies(path: str) -> bool {
-    for name in ["str", "char", "int", "list", "option", "map", "hash"] {
+    for name in ["str", "char", "int", "float", "list", "option", "map", "hash"] {
         if path == f"std/{name}.my" { return true }
     }
     return false

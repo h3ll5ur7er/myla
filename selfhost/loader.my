@@ -30,7 +30,7 @@ from .stdroot import is_embedded, embedded_text, embedded_parse, EMBEDDED_ROOT
 from .astcache import decode, body_part, cached_body, no_bodies, Cached, Bodies
 from .parser import parse_source_with, parse_source_lazy, parse_body, BodySite, LazyParsed, expr_of, stmt_of, type_expr_of, block_of, pattern_of, fun_of
 from .diag import Report, reports, type_report, chain
-from .checker import CheckErr, DeclOrigin, LazyBodies, body_key, no_lazy_bodies
+from .checker import CheckErr, DeclOrigin, LazyBodies, body_key, no_lazy_bodies, primitive_type_names
 from .tokens import SrcSpan, no_span, keywords, TokenKind, Diag
 from .lexer import lex_part
 from .ast import Program, Decl, DeclKind, FunData, Param, TypeParam, Field, Variant
@@ -230,15 +230,23 @@ struct Loader {
     lazy: [str: bool],         // the files whose functions' bodies are left unparsed: the implicit modules' (MYLA-359), besides `lazy_std`'s
 }
 
+// Whether `n` names a built-in type: `int`, `float` and the primitives
+// (which `int` and `float`, not being keywords, could also be an alias of).
+#test("float")[true]
+#test("vec")[false]
+fun is_builtin_type_word(n: str) -> bool {
+    return n == "int" || n == "float" || has(primitive_type_names(), n)
+}
+
 // The modules of the standard library every program sees without an import
 // (D164, MYLA-320), as `std.<name>`: the methods of their impls on the
 // built-in types, and std.hash's on the prelude's `Hasher` with the `Hash`
 // impls of the built-in types (D163, MYLA-313). They are loaded for a
 // program whose entry file isn't a module of `std` (whose modules import
 // what they use), and bind no name.
-#test()[["str", "char", "int", "list", "option", "map", "hash"]]
+#test()[["str", "char", "int", "float", "list", "option", "map", "hash"]]
 pub fun implicit_modules() -> [str] {
-    return ["str", "char", "int", "list", "option", "map", "hash"]
+    return ["str", "char", "int", "float", "list", "option", "map", "hash"]
 }
 
 #test([0, 2], 2)[true]
@@ -1341,8 +1349,10 @@ impl Renamer {
         let k = match t.kind {
             TypeKind.TRef(n, args) => {
                 let q = if contains_byte(n, '.') { self.module_type(n, t, true) } else { self.type_name(n) }
-                // a module's name alone (MYLA-371's follow-up)
-                if q == n && !contains_byte(n, '.') && !has(self.tys, n) && !self.env.contains(n) && self.aliases.contains(n) {
+                // a module's name alone (MYLA-371's follow-up); a built-in
+                // type's name is the type where a type stands, whatever a
+                // module is imported as (`import std.float as float`, D197)
+                if q == n && !contains_byte(n, '.') && !has(self.tys, n) && !self.env.contains(n) && self.aliases.contains(n) && !is_builtin_type_word(n) {
                     self.fail(t.line, t.col, t.sp, format("'{}' is a module, not a type: name one of its types, '{}.T'", n, n))
                 }
                 // a name that stays, without arguments (`int`, `T`): the

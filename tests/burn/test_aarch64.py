@@ -19,7 +19,7 @@ import unittest
 from ._hang import run_watched
 from ._native import CAN_BUILD_NATIVE, SKIP_REASON
 from ._tools import STDLIB_ROOT, native_compiler
-from . import test_builtin_impls, test_defer, test_format_specs, test_loop_overhead, test_operator_traits, test_register_args, test_slices, test_time, test_unit_type
+from . import test_builtin_impls, test_defer, test_format_specs, test_float_keys, test_float_methods, test_loop_overhead, test_operator_traits, test_register_args, test_slices, test_time, test_unit_type
 
 _REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir))
 
@@ -251,6 +251,9 @@ PROGRAMS["slices"] = test_slices.PROGRAM
 PROGRAMS["defer"] = test_defer.PROGRAM
 # operators between different types, `Neg`, `Index`, `IndexSet` (D198)
 PROGRAMS["operator_traits"] = test_operator_traits.PROGRAM
+# floats' methods (D197) and floats as map keys (D196)
+PROGRAMS["float_methods"] = test_float_methods.PROGRAM
+PROGRAMS["float_keys"] = test_float_keys.PROGRAM
 # counting loops at INT32_MAX: a `<` loop's step done on 64 bits, a `<=`
 # loop's still wrapping (MYLA-251)
 PROGRAMS["counting_at_the_limit"] = test_loop_overhead._LIMITS

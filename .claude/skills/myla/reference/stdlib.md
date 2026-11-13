@@ -2,7 +2,7 @@
 
 Read from the source, `lib/std/*.my` (November 2026); the prose reference is `docs/Language/Standard-library.md` and one page per module below it. Re-check a signature with `grep -n "fun name" lib/std/<module>.my` before relying on a detail.
 
-Implicit modules (methods in every program, no import): `std.str (implicit)`, `std.char (implicit)`, `std.int (implicit)`, `std.list (implicit)`, `std.option (implicit)`, `std.map (implicit)`, `std.hash (implicit)`.
+Implicit modules (methods in every program, no import): `std.str`, `std.char`, `std.int`, `std.float`, `std.list`, `std.option`, `std.map`, `std.hash`.
 
 Other modules: `std.archive`, `std.args`, `std.bench`, `std.bigint`, `std.bitset`, `std.btree`, `std.bytes`, `std.cache`, `std.checksum`, `std.compress`, `std.csv`, `std.deque`, `std.digest`, `std.encoding`, `std.fmt`, `std.fs`, `std.glob`, `std.graph`, `std.grid`, `std.heap`, `std.http`, `std.ini`, `std.io`, `std.ioerror`, `std.iter`, `std.json`, `std.log`, `std.math`, `std.net`, `std.num`, `std.path`, `std.platform` (with `std.rt`: internal), `std.process`, `std.random`, `std.regex`, `std.set`, `std.signal`, `std.slice`, `std.task`, `std.term`, `std.test`, `std.text`, `std.time`, `std.toml`, `std.unionfind`, `std.url`, `std.uuid`, `std.xml`, `std.yaml`, and the gdb helper `lib/debug/myla_gdb.py`.
 
@@ -14,7 +14,7 @@ A method in an `impl` has no `pub` of its own and follows its type (public type:
 
 Builtin methods (compiler, not std; an `impl` can't redefine them): `len()` on lists, maps, `str` and `StringBuilder`; `xs.push(v)` and `xs.pop()`; `m.contains(k)`, `m.keys()` and `m.remove(k)` (returns `()`); `s.chars()`; `sb.append(s)`, `sb.append(s, start, end)`, `sb.append_byte(b)`, `sb.append_char(c)` and `sb.build()`; `wrapping_add`, `wrapping_sub`, `wrapping_mul` and `wrapping_neg` on every integer.
 
-None of these exist: `s.is_empty()`, `xs.is_empty()`, `xs.min()`, `xs.max()`, `xs.first()`, `opt.unwrap()`, or any method on `float`. Use `len() == 0`, `iter.min(xs.iter())` or `xs.min_by(…)`, and `math.sqrt(x)`.
+None of these exist: `s.is_empty()`, `xs.is_empty()`, `xs.min()`, `xs.max()`, `xs.first()`, `opt.unwrap()`. Use `len() == 0`, `iter.min(xs.iter())` or `xs.min_by(…)`, and `opt.unwrap_or(…)`. Floats have methods (`x.sqrt()`, implicit `std.float`, D197).
 
 ```myla
 import std.iter as iter
@@ -82,6 +82,17 @@ Purpose: arithmetic helpers on `int8` to `int64` and `uint8` to `uint64`. The mo
   - `-5.abs()` parses as `-(5.abs())` and gives `-5`. Write `(-5).abs()`.
 - Prose: `docs/Language/Standard-library/Int.md`
 
+## std.float (implicit): methods on `float64` and `float32`
+Purpose: the float operations as methods (D197, MYLA-585), over std.math. `impl float64` and `impl float32` with the same methods; a float32 one computes in float64 and rounds.
+- Sign, rounding: `x.abs()`, `x.signum()` (a zero's sign too, NaN for NaN), `x.copysign(s)`, `x.trunc()`, `x.floor()`, `x.ceil()`, `x.round()` (halves away from zero), `x.fract()`
+- Comparing: `x.min(o)`, `x.max(o)` (NaN gives way), `x.clamp(lo, hi)`, `x.total_cmp(o) -> int` (IEEE total order: `-0.0 < 0.0`, NaN last; `xs.sort_by((a, b) => a.total_cmp(b) < 0)`), `x.approx_eq(o, eps) -> bool`
+- Powers: `x.sqrt()`, `x.cbrt()`, `x.hypot(o)`, `x.pow(y)`, `x.powi(n: int)`, `x.exp()`, `x.ln()`, `x.log2()`, `x.log10()`, `x.log(base)`
+- Trigonometry: `x.sin()` … `x.atan()`, `y.atan2(x)`, `x.sinh()`, `x.cosh()`, `x.tanh()`, `x.to_degrees()`, `x.to_radians()`
+- Other: `a.lerp(b, t)`, `x.is_nan()`, `x.is_infinite()`, `x.is_finite()`, `x.to_bits()` (`uint64`; a float32's `uint32`; every NaN the one quiet NaN)
+- `import std.float as float` for: `PI`, `TAU`, `E`, `LN2`, `LN10`, `SQRT2`, `EPSILON`, `MAX`, `MIN_POSITIVE`, `nan()`, `infinity()`, `from_bits(b: uint64) -> float64`, `from_bits32(b: uint32) -> float32`. The alias `float` doesn't hide the type `float` where a type stands.
+- Gotchas: `log(base)` and the hyperbolic functions are a few ulps off where their formulas aren't exact (`81.0.log(3.0)` is 4.000000000000001). A program's own method of one of these names on a float is a duplicate.
+- Prose: `docs/Language/Standard-library/Float.md`
+
 ## std.list (implicit): methods on `[T]`
 Purpose: building, higher-order operations, sorting, searching and combinatorics. A `var self` method changes the list in place (it needs a `var` place). A participle or a noun returns a new list.
 - `pub fun filled<T>(n: int, v: T) -> [T]` (needs an import). `pub struct ListIter<T> { xs: [T], at: int }`, which has `impl<T> Iterator<T>`.
@@ -141,12 +152,11 @@ Purpose: building, higher-order operations, sorting, searching and combinatorics
   - `h.add<T: Hash>(x: T)`, `h.add_str(s: str)`, `h.add_bytes(b: [uint8])`, `h.add_bool(x: bool)`, `h.add_char(x: char)`
   - Integers: `h.add_u8(x)`, `h.add_u16(x)`, `h.add_u32(x)`, `h.add_u64(x)`, `h.add_i8(x)`, `h.add_i16(x)`, `h.add_i32(x)`, `h.add_i64(x)`
   - `h.finish() -> uint64`
-- `impl Hash for` every integer type, `char`, `bool`, `str` and `[T: Hash]`. A list adds its length first. Tuples are hashed by the language.
+- `impl Hash for` every integer type, `float64`, `float32` (D196: the value's float64 bits, `-0.0` as `0.0`; a NaN panics `cannot hash NaN`), `char`, `bool`, `str` and `[T: Hash]`. A list adds its length first. Tuples are hashed by the language.
 - `pub fun new() -> Hasher`, `pub fun with_seed(seed: uint64) -> Hasher`, `pub fun wyhash(s: str, seed: uint64) -> uint64`, `pub fun wyhash_bytes(b: [uint8], seed: uint64) -> uint64`. These need `import std.hash as hash`.
 - Gotchas:
   - The hasher is a value: write `h = h.add_u64(x)` or chain the calls.
   - The seed is fixed, so hashes are the same in every run.
-  - Floats aren't `Hash`.
   - The checksums (FNV, CRC-32) are in `std.checksum`.
 - Prose: `docs/Language/Standard-library/Hash.md`
 
@@ -563,7 +573,7 @@ Import: `import std.log as log`. The `MYLA_LOG` environment variable sets the le
 - Prose: `docs/Language/Standard-library/Log.md`
 
 ## std.math: float64 functions (fdlibm ports, bit-identical on every runner)
-Import: `import std.math as math`. These are free functions, because `float` has **no methods** (`x.sqrt()` is a type error).
+Import: `import std.math as math`. These are free functions on `float64`; the same operations are methods of both float types through the implicit `std.float` (`x.sqrt()`).
 - `pub const PI`, `TAU`, `E`, `LN2`, `LN10`, `SQRT2: float64`
 - Bits and classes: `to_bits(x: float64) -> uint64` (every NaN becomes `0x7FF8…`), `from_bits(bits: uint64) -> float64`, `infinity() -> float64`, `nan() -> float64`, `is_nan(x) -> bool`, `is_infinite(x) -> bool`, `is_finite(x) -> bool`
 - Rounding: `copysign(x, s)`, `abs(x)`, `trunc(x)`, `floor(x)`, `ceil(x)`, `round(x)` (halves away from zero), `min(a, b)`, `max(a, b)`. All return `float64`.

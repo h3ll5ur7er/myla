@@ -99,7 +99,7 @@ fun main() {
 
 ### Keys
 
-A map's key type is any type that is `Eq` and `Hash` (D163, [[MYLA-313]]): the integers, `char`, `bool` and `str`; a tuple or a list whose elements are; a struct or enum with `#derive(Eq, Hash)` or with impls written for it ([[Language/Methods-and-traits]]). Floats aren't `Hash`, so neither is anything holding one. A key is a value, so a key in a map never changes.
+A map's key type is any type that is `Eq` and `Hash` (D163, [[MYLA-313]]): the integers, the floats (D196), `char`, `bool` and `str`; a tuple or a list whose elements are; a struct or enum with `#derive(Eq, Hash)` or with impls written for it ([[Language/Methods-and-traits]]). A float key is found by `==`, so `-0.0` and `0.0` are one key; a NaN, unequal to itself, would be a key no lookup finds, so hashing one is the runtime error `cannot hash NaN` ([[MYLA-586]]). A key is a value, so a key in a map never changes.
 
 ```myla
 #derive(Eq, Hash)

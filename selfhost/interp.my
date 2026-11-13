@@ -4554,6 +4554,7 @@ impl Interp {
     fun key_hash(var self, v: Value, t: Option<Type>) -> int64 {
         if self.typed_keys { return self.typed_hash(v, t) }
         return match v {
+            Value.VFloat(f) => self.float_key_hash(v),
             Value.VTuple(es) => self.keys_hash(3, es),
             Value.VList(xs) => self.keys_hash(mix_key(4, xs.len() as int64), xs),
             Value.VBytes(s) => self.keys_hash(mix_key(4, s.len() as int64), byte_values(s)),
@@ -4581,6 +4582,7 @@ impl Interp {
     // it hashes, `t` for `v`, a member's type for a member's (MYLA-436).
     fun typed_hash(var self, v: Value, t: Option<Type>) -> int64 {
         return match v {
+            Value.VFloat(f) => self.float_key_hash(v),
             Value.VTuple(es) => self.typed_keys_hash(3, es, self.member_types(v, t)),
             Value.VList(xs) => self.typed_keys_hash(mix_key(4, xs.len() as int64), xs, self.member_types(v, t)),
             Value.VBytes(s) => self.keys_hash(mix_key(4, s.len() as int64), byte_values(s)),
@@ -4609,6 +4611,15 @@ impl Interp {
 
     // The state the `hash` written for the type `key` gives `v`, a generic
     // impl's type parameters bound by `v`'s type `t`.
+    // A float key's hash (D196): a NaN's is the runtime error std.hash's
+    // own `hash` raises, called here as native code calls it; any other's by
+    // its bits, -0.0's as 0.0's (`value_hash`).
+    fun float_key_hash(var self, v: Value) -> int64 {
+        let f = as_float(v)
+        if f != f { return self.written_hash("float64", v, None) }
+        return value_hash(v)
+    }
+
     fun written_hash(var self, key: str, v: Value, t: Option<Type>) -> int64 {
         let h0 = Value.VStruct("Hasher", ["state"], [Value.VInt(0)])
         let fi = self.func_idx(key + ".hash")
@@ -6494,6 +6505,8 @@ impl MapV {
 // `Interp.key_hash` gives for a key no type's own `hash` is in.
 #test(Value.VUnit)[7]
 #test(Value.VList([]))[mix_key(4, 0)]
+#test(Value.VFloat(-0.0))[value_hash(Value.VFloat(0.0))]
+#allow(primitive)
 fun value_hash(v: Value) -> int64 {
     return match v {
         Value.VInt(n) => mix_key(1, n),
@@ -6506,7 +6519,7 @@ fun value_hash(v: Value) -> int64 {
         Value.VBytes(s) => values_hash(mix_key(4, s.len() as int64), byte_values(s)),
         Value.VStruct(n, fns, fvs) => values_hash(mix_key(5, str_key_hash(n)), fvs),
         Value.VEnum(en, vr, pl) => values_hash(mix_key(6, str_key_hash(vr)), pl),
-        Value.VFloat(f) => mix_key(8, f as int64),
+        Value.VFloat(f) => mix_key(8, __f64_bits(if f == 0.0 { 0.0 } else { f }) as int64),
         _ => 9,
     }
 }

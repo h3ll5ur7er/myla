@@ -6341,6 +6341,29 @@ impl Lower {
             self.mix_word(sh, h)
             return
         }
+        // a float by std.hash's own `hash` (D196), as a float64 (a float32 is
+        // one exactly): its NaN error and -0.0 folded into 0.0 in one place,
+        // the one the interpreter calls for a NaN too
+        if is_tfloat_ir(ft) {
+            let f64 = Type.TFloat(64)
+            let x = self.temp(f64)
+            if width < 8 {
+                let y = self.temp(ft)
+                self.add(Inst.LoadAt(y, p, off, width))
+                self.add(Inst.Cast(x, ft, f64, y))
+            } else {
+                self.add(Inst.LoadAt(x, p, off, 8))
+            }
+            let hasher = Type.TStruct("Hasher", [])
+            let hs = self.new_slot("__hasher", hasher, 8, -1, false)
+            self.add_store(self.slot_addr(hs), 0, self.int_const(0))
+            let rs = self.new_slot("__hashed", hasher, 8, -1, false)
+            self.add(Inst.CallSret(self.type_method(cg, f64, "hash"), self.slot_addr(rs), [x, self.slot_addr(hs)]))
+            let st = self.temp(i64)
+            self.add(Inst.LoadAt(st, self.slot_addr(rs), 0, 8))
+            self.mix_word(sh, st)
+            return
+        }
         match ft {
             Type.TTuple(es) => {
                 var cur = off

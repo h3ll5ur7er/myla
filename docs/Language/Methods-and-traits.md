@@ -425,7 +425,7 @@ fun main() {
 
 `trait Hash { fun hash(self, h: Hasher) -> Hasher }` is in the prelude with the `Hasher` it passes through, by value since Myla has no `var` parameters (D163). The hasher's methods and its algorithm are [[Language/Standard-library/Hash]]'s: `h.add(x)` adds any `Hash` value (it is `x.hash(h)`), `add_u64`, `add_str` and the others add one of a built-in type, `finish()` gives the hash. A map's key type is any type that is `Eq` and `Hash` ([[Language/Collections-and-strings]]).
 
-- The integers, `char`, `bool` and `str` are `Hash`, and a tuple and a list are when their elements are (a list adds its length, then its elements). Floats aren't: NaN is unequal to itself. A hand-written impl may add `math.to_bits(x)` of a float field, as long as its `Eq` agrees.
+- The integers, the floats, `char`, `bool` and `str` are `Hash`, and a tuple and a list are when their elements are (a list adds its length, then its elements). A float adds its bits, `-0.0` as `0.0`; hashing a NaN is the runtime error `cannot hash NaN`, as NaN is unequal to itself (D196, superseding D163's "floats aren't").
 - That `a == b` gives `a.hash(h) == b.hash(h)` is the promise of a written impl: a map finds a key only among those of the same hash. A derived `Hash` with a derived `Eq` keeps it.
 - A tuple's `hash` is the language's, as no impl can name a tuple of every length: `(1, "a").hash(h)` adds `1`, then `"a"`.
 - A generic function that hashes takes `T: Hash` (`h.add(x)` and `x.hash(h)` on a `T: Hash`), and one with a map keyed by a type parameter `K` needs `K: Eq + Hash` written (D167, [[Language/Collections-and-strings]]).

@@ -42,7 +42,7 @@ Implicit std methods (the most used). Every method, with its signature, is in [s
 | `std.map` (`impl<K: Eq + Hash, V> [K: V]`) | `get(k) -> Option<V>`, `get_or(k, default)`, `update(k, default, f)`, `values`, `items -> [(K, V)]`, `iter`, `merge(other)`. Free function `counts(xs)`, which needs an import |
 | `std.hash` (`impl Hasher`) | `add<T: Hash>(x)`, `add_u8` … `add_u64`, `add_i8` … `add_i64`, `add_bool`, `add_char`, `add_str`, `add_bytes`, `finish() -> uint64`. It also has the `Hash` impls of the integers, `char`, `bool`, `str` and `[T: Hash]`. Free functions `new()` and `with_seed`, which need an import |
 
-**Floats and `bool` have no methods**: `2.5.abs()` is `type 'float64' has no method 'abs'`. Use `std.math` (`abs`, `floor`, `sqrt`, `pow`, `min`, `max`, `is_nan`, `to_bits`, …) after `import std.math as math`.
+**Floats have methods** from the implicit `std.float` (D197): `abs`, `floor`, `round`, `sqrt`, `cbrt`, `pow`, `powi`, `sin` … `atan2`, `sinh`, `lerp`, `clamp`, `is_nan`, `to_bits`, `total_cmp`, … on `float64` and `float32` (see [stdlib.md](stdlib.md)). `bool` has none.
 
 A program's own method with the name of an implicit one on the same type is `duplicate method 'trim' for type 'str'`, with a note naming the standard library's module (`duplicate_method`). A new name is fine (`impl str { fun shout(self) -> str { … } }`). The modules' `pub` functions need an import (`import std.list as list`, then `list.filled(3, 0)`).
 
@@ -82,7 +82,7 @@ The built-in traits a primitive type has without an impl (`primitive_default_tra
 | Type | Traits |
 | --- | --- |
 | integers | Add Sub Mul Div Rem Eq Ord Format Hash (and `Neg`, the signed ones) |
-| floats | Add Sub Mul Div Rem Neg Eq Ord Format (**not Hash**, so a float can't be a map key) |
+| floats | Add Sub Mul Div Rem Neg Eq Ord Format Hash (D196: a NaN's hash is the runtime error `cannot hash NaN`; `-0.0` hashes as `0.0`) |
 | `char` | Eq Ord Format Hash |
 | `bool` | Eq Format Hash (**not Ord**: `true < false` is an error) |
 | `str` | Add Eq Ord Format Hash (`<` is byte-wise) |
@@ -97,7 +97,7 @@ Calling an operator trait's method by name on a type parameter fails: `a.eq(b)` 
 Only `Eq`, `Hash`, `Json` and `Toml` can be derived, and only on a struct or enum (`cannot derive 'Ord': only 'Eq', 'Hash', 'Json' and 'Toml' are derivable`).
 
 - `Eq`: every field or payload must be Eq. A float is Eq, a map isn't. On a generic type it gives `impl<T: Eq> Eq for Box<T>`. Deriving `Eq` and also writing `impl Eq` is an error.
-- `Hash`: the type must also be `Eq` (`cannot derive Hash for 'P': it isn't Eq; derive both, '#derive(Eq, Hash)', …`). No float fields: hash `math.to_bits(x)` in a hand-written impl instead.
+- `Hash`: the type must also be `Eq` (`cannot derive Hash for 'P': it isn't Eq; derive both, '#derive(Eq, Hash)', …`). Float fields are fine (D196).
 - `Json` / `Toml`: needs `import std.json as json` / `import std.toml as toml` in the file (`… std.json isn't imported`). Fields may be integers, floats, `bool`, `str`, `char`, lists, maps with `str` keys and derived types. `Option` fields are allowed (for TOML only as a struct field). No tuples.
 - Attributes: `#derive(...)`, `#test(...)[...]`, a bare `#test`, `#main`, `#allow(primitive|reentrancy)`. Anything else is `unknown attribute '#x'`. `#main`/`#test` don't go on a generic function. On a method only `#test` and `#allow` are allowed.
 
@@ -127,7 +127,7 @@ Only `Eq`, `Hash`, `Json` and `Toml` can be derived, and only on a struct or enu
 
 An overloaded operator's operands have the same type unless the type has an impl by type arguments for the right one (D198): with only the classic impl, `operator '+' requires both operands to have the same type, found …`; with impls by arguments, `operator '*' is not defined for 'V' and 'int32': it needs 'impl Mul<int32, …> for V'` and a note naming the impls it has.
 
-**Map keys** (`check_key`, `key_why`): integers, `char`, `bool` and `str`, or any type that is Eq and Hash: tuples and lists of such, `Option`/`Result` of such, and structs and enums with `#derive(Eq, Hash)` or both impls. A generic `K` needs `K: Eq + Hash`, even in an `impl<K, V> [K: V]` block or a function that only calls `m.len()` or `m.keys()`: write `impl<K: Eq + Hash, V> [K: V]`.
+**Map keys** (`check_key`, `key_why`): integers, `char`, `bool` and `str` (the fast path, `is_map_key`), floats (D196: hashed by std.hash's `float64.hash`, natively too, which panics `cannot hash NaN` and folds `-0.0` into `0.0`; found by `==`), or any type that is Eq and Hash: tuples and lists of such, `Option`/`Result` of such, and structs and enums with `#derive(Eq, Hash)` or both impls. A generic `K` needs `K: Eq + Hash`, even in an `impl<K, V> [K: V]` block or a function that only calls `m.len()` or `m.keys()`: write `impl<K: Eq + Hash, V> [K: V]`.
 
 **Indexing** (`infer_index`, `check_lvalue_node`): `[T][int] -> T`, `str[int] -> uint8`, `[K: V][K] -> V` (a missing key fails at run time). Slices `a[i:j:step]` of lists and strings have the same type (a map has none). `^n` counts from the end. Strings are immutable, and you can't assign to a slice.
 
@@ -224,7 +224,7 @@ Loops never count, `while true { return x }` included: add `unreachable()` after
 - **Duplicates.** Two top-level declarations with one name in a file: `duplicate top-level declaration 'x'`.
 - **Mangled names.** Names from other modules are mangled to `std$io$println`. Messages show them unmangled, as `io.println`, by the module's last segment (`unmangled_in`).
 - **Implicit modules** (`implicit_modules`, `merge_order`, `parse_module`):
-  - The implicit modules are `std.str`, `std.char`, `std.int`, `std.list`, `std.option`, `std.map` and `std.hash`. They are loaded for every entry file that isn't under a `std` directory, bind no name, and are merged first, so that the program's method is the duplicate.
+  - The implicit modules are `std.str`, `std.char`, `std.int`, `std.float`, `std.list`, `std.option`, `std.map` and `std.hash`. They are loaded for every entry file that isn't under a `std` directory, bind no name, and are merged first, so that the program's method is the duplicate.
   - Their function bodies, and those of every other `std` module but `std.rt`, are parsed and checked only when something calls them. A type error inside an uncalled std function never shows.
   - Only the entry file's `#test` cases are parsed.
 
@@ -256,7 +256,6 @@ Loops never count, `while true { return x }` included: add `unreachable()` after
 | `duplicate method 'trim' for type 'str'` + note `first defined in std.str, which every program sees` | rename your method |
 | `function 'new' in 'impl P' has no 'self': only a trait's functions go without one` | write a free `fun new_p() -> P` |
 | `'Self' is only valid inside a trait declaration` | name the type in impls |
-| `type 'float64' has no method 'abs'` | use `std.math` |
 | `operator '*' is not defined for 'V' and 'int32': it needs 'impl Mul<int32, …> for V'` | no impl for that right operand; an integer literal never becomes a float, write `2.0` |
 | `unary '-' is not defined for 'V': it needs 'impl Neg for V'`, `type 'V' can't be indexed: it needs 'impl Index<int32, …> for V'`, `cannot assign to an index of 'V': it needs 'impl IndexSet<int32, float64> for V'` | implement the operator trait (D198) |
 | `operator '*' on a value of type parameter 'T' is not defined for 'int32': its bounds give 'T: Mul<float64>'` | the bound's right operand decides |

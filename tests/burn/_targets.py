@@ -38,6 +38,8 @@ SUITES = [
     "tests.burn.test_default_params",
     "tests.burn.test_let_else",
     "tests.burn.test_operator_traits",
+    "tests.burn.test_float_methods",
+    "tests.burn.test_float_keys",
     "tests.burn.test_ir_contract",
     # integer overflow, checked and plain (D175)
     "tests.burn.test_overflow",
