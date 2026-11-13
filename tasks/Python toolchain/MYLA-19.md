@@ -10,9 +10,9 @@ labels: [cli]
 
 ## Done when
 
-- [ ] Line-by-line input with multi-line blocks (open braces continue the input)
-- [ ] Declarations accumulate; expressions print their value
-- [ ] Errors are reported without ending the session
+- [x] Line-by-line input with multi-line blocks (open braces continue the input) (done in Myla by [[MYLA-82]]: `myla repl`)
+- [x] Declarations accumulate; expressions print their value (done in Myla by [[MYLA-82]]: `myla repl`)
+- [x] Errors are reported without ending the session (done in Myla by [[MYLA-82]]: `myla repl`)
 
 ## Superseded
 
