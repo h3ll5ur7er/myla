@@ -106,3 +106,30 @@ def myla_tool(relpath: str, name: str) -> str:
     natively by the self-hosted compiler, cached under `name`."""
     compiler = native_compiler()
     return _cached(name, lambda out: _compile_with(compiler, relpath, out))
+
+
+# A child's peak resident memory (`ru_maxrss`) counts the memory of the
+# process it was forked from, as `exec` keeps the old image's peak; the test
+# process grows to hundreds of MB over a run of the whole suite (MYLA-611).
+# So a measured program is started from this minimal helper, which reports
+# its exit code and peak (KB) on its last line of stderr.
+_MEASURE = (
+    "import os, shutil, sys\n"
+    "exe, argv = sys.argv[1], sys.argv[2:]\n"
+    "path = exe if '/' in exe else shutil.which(exe)\n"
+    "pid = os.posix_spawn(path, argv, os.environ)\n"
+    "_, status, usage = os.wait4(pid, 0)\n"
+    "sys.stderr.write(f'\\n{os.waitstatus_to_exitcode(status)} {usage.ru_maxrss}\\n')\n"
+)
+
+
+def peak_memory(argv: list[str], exe: str | None = None) -> tuple[str, int]:
+    """(stdout, peak resident memory in KB) of running `argv` (the program
+    `exe`, or `argv[0]`), which must succeed, started from a small helper so
+    that the peak is the program's own (MYLA-611)."""
+    import sys
+    r = subprocess.run([sys.executable, "-I", "-c", _MEASURE, exe or argv[0], *argv],
+                       capture_output=True, text=True)
+    code, kb = r.stderr.rstrip("\n").rsplit("\n", 1)[-1].split()
+    assert int(code) == 0, r.stderr
+    return r.stdout, int(kb)

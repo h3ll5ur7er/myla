@@ -34,7 +34,7 @@ Work package R1 of [[Project/Review-2026-11-12]]. Files: `selfhost/lower.my`, `s
 - [x] Float fields in a missing key's text: `Fl { f: 3.0, g: 10000000000.0 }` interpreted, `Fl { f: 3, g: 10000000000 }` natively; also `-0.0`, `1e+300`, `1e-07` ([[MYLA-441]])
 - [x] wasm32: a list literal of 52,000 elements builds a module that Node refuses (`local count too large`)
 - [x] H5's wording: a finite program (`id(x)` with a 65-deep literal type) is told its instances "nest without end … polymorphic recursion" (solved by [[MYLA-544]]'s rule at integration: such a program now builds, so no finite type is refused)
-- [ ] … and `myla check` says `ok` for what `myla build` calls a type error: left open, a proposal below (the checker's file, [[MYLA-544]] lists it too); since [[MYLA-544]] only polymorphic recursion is refused
+- [x] … and `myla check` says `ok` for what `myla build` calls a type error: since [[MYLA-544]] only polymorphic recursion is refused; the checker refuses it now where it can see it, at the same call (round 6's follow-up, below)
 
 ## What changed
 
@@ -60,6 +60,36 @@ Work package R1 of [[Project/Review-2026-11-12]]. Files: `selfhost/lower.my`, `s
 - `scripts/bootstrap.sh`: byte-identical fixed point after each commit's build; `build/myla test` of `selfhost/lower.my` (147/147), `codegen.my` (361/361), `lib/std/rt.my --only key_float_text` (7/7).
 - Suites (at d503468, the lane's last code commit): `scripts/test.sh fast` 867 tests, `scripts/test.sh` (full) 1,556 tests, 341 skipped; failures in both only `test_embedded_std` (expected until the seed commit) and, in the full run, `test_children_run_in_parallel`, which fails alone too and as much with the compiler of 6e699ca: under a load average of 6 to 7 on 4 cores, the eight children got about one CPU (cpu 1.14 s, wall 1.0 to 1.5 s, both compilers' binaries). `scripts/test-target.py aarch64-linux` and `wasm32-wasi` with `test_compiler_parity` and `test_native_runtime`: 2 of 2 suites pass on each.
 
-## Decision this leaves open (proposal)
+## Decision this left open (round 6's proposal, superseded by the follow-up below)
 
 `myla check` accepts what `myla build` refuses for the instantiation limit (H5, D189's proposal 2). Recommended: keep it a property of native builds, as it is now, and say so (done in [[Language/Generics]]): the checker doesn't monomorphize, and polymorphic recursion, the case the limit is for, can't be seen without doing so. Alternatives: the checker applies the depth limit to the type arguments it infers at each call, which catches the finite case (`id` of a 65-deep literal) but not the recursive one; or `myla check` runs the lowering's instantiation walk, which costs check time ([[MYLA-552]]). Either belongs to the checker lane ([[MYLA-544]]).
+
+## The follow-up: `myla check` and polymorphic recursion
+
+**What changed.** The checker refuses a polymorphic recursion where it can see it, so `myla check`, `myla run` and `myla build` say the same, at the call `myla build` refused. Each call of a generic function made in a generic function whose type arguments mention the caller's type parameters is kept (`note_grow_call`, after `infer_generic_call` and `infer_generic_method` solve them); once the bodies are checked, `check_instance_growth` makes a graph of the functions' type parameters, an edge from `f`'s `T` to `g`'s `U` where `f` passes `T` to `g`'s `U`, and refuses a call that passes `T` on in a larger type (`[T]`, `(T, T)`, `Option<T>`) to a parameter that reaches `T` again (`grow_path`):
+
+```
+type error: the instances of 'pair_up' nest without end: this call, in 'halve<T>', asks for 'pair_up<(T, T)>'
+  --> examples/errors/type_polymorphic_recursion_mutual.my:10:19
+note: 'halve' calls itself through 'pair_up' with a larger type at each step (polymorphic recursion), which native code can't be built for
+```
+
+It covers a direct recursion, one through other functions, through a lambda, a generic type's method (`Box<T>.deep` calling `Box<[T]>.deep`), a function's own type parameters on a method, a function of an imported module (named `m.grow`, where the build said `m$grow`) and a recursion through a generic type (`depth<T>(n: Nest<T>)` calling `depth(inner)` with `inner: Nest<[T]>`). It can't see a recursion through a trait's method (`run<T: Tr>` calling `x.go()`, whose impl for `Box<U>` calls `run<Box<[U]>>`): which impl a call reaches depends on the type, and a graph edge for every impl would refuse finite programs. The lowering's limit stays for that case (`test_polymorphic_recursion_through_a_trait_is_refused_by_the_build`, depth and size). The lowering's limit now refuses only a call asking for a deeper instance than the asking one's own (one line in `Lower.call_target`, [[selfhost/lower.my]], the caller-positions lane's file): a recursion that passes a deep written type on unchanged (`count(x, n - 1)` with `x` 65 deep), or a generic call that hands it on as it is (`wrap(x)`), was refused before and builds now. A finite program that wraps such a type once more (`wrap([x])` of a 64-deep `x`) is still refused: filed as [[MYLA-624]] with a proposal.
+
+## Evidence (the follow-up)
+
+- **Tests first**, failing at `aef0b21` and passing after:
+  - Error corpus, pinned (`myla check`): `type_polymorphic_recursion.my` (`grow<T>` calling `grow<[T]>`, the call at 10:25) and `type_polymorphic_recursion_mutual.my` (`halve`/`pair_up`, 10:19): `ok` before; `myla build` refused both at the same positions.
+  - `test_polymorphic_recursion_is_refused_where_it_is_built` (rewritten): for `grow`, the `f`/`g` pair, the lambda of `h` and `Box.deep`, `myla check` exits 1 with the error and note, and `myla run` and `myla build` on x86-64, aarch64 and wasm32 print exactly the same stderr. Before: `check` said `ok`, `run` printed `3`, `build` gave its own message at the same positions (3:25, 3:13, 2:49, 5:44).
+  - `test_polymorphic_recursion_through_a_trait_is_refused_by_the_build` (new): `check` `ok`, `run` `3`, `build` refused at 7:19 (`66 types deep`, `more than 4096 types in all`) on the three targets.
+  - `test_a_deep_type_the_program_writes_is_no_recursion`: `myla check` `ok`, and, 65 and 100 deep, a recursion passing the type on and a generic call handing it on build and print what the interpreter prints (`true`, `3`, `1`); before, `the instances of 'count' nest without end` and `… 'wrap' …` at build.
+  - `selfhost/checker.my`: `grow_node` ×1, `grow_path` ×4.
+- **No false positive**: `myla check` of every module of `lib/std/` on its own, `selfhost/main.my`, `tools/lsp/main.my` and the 37 examples: none refused.
+- **Cost** (callgrind, `myla check --stdlib lib`, instructions, the base tool of `aef0b21` against this branch's three tasks): hello world 21,500,029 → 21,500,640 (+0.003 %), the std.http server of [[Language/Standard-library/Http]] 240,754,393 → 240,951,755 (+0.08 %), `examples/generics.my` 22,735,493 → 22,741,137 (+0.02 %), `examples/generic-types.my` 23,738,359 → 23,746,134 (+0.03 %), `lib/std/iter.my` 34,303,805 → 34,356,875 (+0.15 %), `lib/std/json.my` 65,053,730 → 65,104,261 (+0.08 %). This task alone: std.http +0.04 %, std.iter +0.14 %.
+- `scripts/bootstrap.sh`: byte-identical fixed point.
+
+## Decision this proposes
+
+*Accepted by the owner (2026-11-13): as built, decision D204.*
+
+Polymorphic recursion is a type error of the language, for every command, `myla run` included, and whether the program calls the function or not, as Go refuses an instantiation cycle; the checker reports what it can see (calls whose type arguments are written with the caller's type parameters) and the lowering's limit what it can't (through a trait's method). Recommended because then the runners agree, as with D119's `become` words, which the checker refuses for every command though only native code needs them. Alternatives: (a) only `myla check` and `myla build` refuse it and `myla run` runs it (a flag for the checker; `check` and `run` would disagree); (b) only a recursion reachable from the entry point is refused, as the build did (it needs the call graph from `main`; a library's `myla check` would say `ok` to what its users can't build); (c) leave it to the build, as before. Proposed text for the decisions page: "Polymorphic recursion (a generic function asking, directly or through others, for an instance of itself with a larger type) is a type error at the call that makes the type larger, for every command; the checker refuses what it can see, the build what it can't (a recursion through a trait's method)."

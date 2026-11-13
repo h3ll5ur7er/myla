@@ -1009,6 +1009,58 @@ NET_WASM = PRELUDE + """fun main() {
 NET_WASM_OUT = "Unsupported\nUnsupported\nUnsupported\nUnsupported\nNotFound\n127.0.0.1\n127.0.0.1 ::1\n127.0.0.1 ::1\n"
 
 
+# MYLA-548: a blocking read of a socket in a task (`io.buffered(s)` over a
+# TcpStream) holds its worker; on one worker the task that would send the
+# line never runs. The program still hangs, but says so on stderr after a
+# second of it.
+HELD = """import std.net as net
+import std.io as io
+import std.bytes as bytes
+from std.net import TcpListener
+
+async fun lines(l: TcpListener) -> int {
+    var s = match await l.accept_async() {
+        Ok(s) => s
+        Err(e) => { return -1 }
+    }
+    var r = io.buffered(s)
+    var n = 0
+    while let Ok(Some(line)) = r.read_line() {
+        n += 1
+    }
+    return n
+}
+
+#main
+async fun main() {
+    var l = net.listen(net.addr(net.loopback(), 0)).expect("listen")
+    let at = l.local_addr().expect("address")
+    async let served = lines(l)
+    var s = (await net.connect_async(at)).expect("connect")
+    let w = await s.write_async(bytes.from_str("ping\\n"))
+    let sh = s.shutdown(net.Shutdown.Write)
+    print(await served)
+}
+"""
+
+# MYLA-548: a blocking read with no other task waiting (a program without
+# tasks, and one whose only task reads, on the executor: it has slept)
+# waits as long as it takes, quietly.
+QUIET_BODY = """    var l = net.listen(net.addr(net.loopback(), 0)).expect("listen")
+    print(l.local_addr().expect("address").port)
+    var s = l.accept().expect("accept")
+    var r = io.buffered(s)
+    match r.read_line() {
+        Ok(Some(line)) => print(line)
+        _ => print("no line")
+    }
+}
+"""
+QUIET = "import std.net as net\nimport std.io as io\n\nfun main() {\n" + QUIET_BODY
+QUIET_TASK = ("import std.net as net\nimport std.io as io\nimport std.task as task\n\n#main\nasync fun main() {\n"
+              "    await task.sleep(1)\n" + QUIET_BODY)
+
+
 def run_both(source: str, args=()) -> tuple[str, str, int]:
     """`source` in the self-hosted interpreter and built for the test's
     target, which must agree; their (stdout, stderr, exit)."""
@@ -1130,6 +1182,62 @@ class Tcp(unittest.TestCase):
                     self.assertEqual((p.stdout, p.stderr, p.returncode),
                                      ("slept\n", "runtime error: no descriptor left to wait for input or output on "
                                       "(too many open files)\n", 1))
+
+    def test_a_blocking_read_that_holds_the_only_worker_says_so(self):
+        """MYLA-548: `io.buffered(s).read_line()` in a task on one worker,
+        whose line another task would send: a hang, said on stderr once the
+        read has held the worker for a second (it was silent)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = write_program(tmp, HELD)
+            binary = os.path.join(tmp, "prog")
+            native_build(Program(path), binary)
+            runs = {"interpreted": ([selfhost_tool("main"), "run", path, "--stdlib", STDLIB_ROOT], None),
+                    "built": run_argv(binary, binary)}
+            for name, (argv, exe) in runs.items():
+                with self.subTest(run=name):
+                    proc = subprocess.Popen(argv, executable=exe, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                            text=True, env=dict(os.environ, MYLA_THREADS="1"))
+                    try:
+                        start = time.time()
+                        ready, _, _ = select.select([proc.stderr], [], [], 30)
+                        line = proc.stderr.readline() if ready else ""
+                        took = time.time() - start
+                        time.sleep(0.5)
+                        still = proc.poll() is None
+                    finally:
+                        proc.kill()
+                        proc.communicate()
+                    self.assertTrue(line.startswith("warning: a blocking wait for a socket has held its worker "
+                                                    "for a second while other tasks wait for one;"), line)
+                    self.assertIn("'net.line_reader(s)'", line)
+                    self.assertGreaterEqual(took, 0.9)
+                    self.assertTrue(still)
+
+    def test_a_blocking_read_with_no_task_waiting_is_quiet(self):
+        """MYLA-548: the same read where no other task waits, without tasks
+        and in a program's only task, with the line sent after 1.5 s: read,
+        and nothing said."""
+        for kind, source in (("no tasks", QUIET), ("one task", QUIET_TASK)):
+            with tempfile.TemporaryDirectory() as tmp:
+                path = write_program(tmp, source)
+                binary = os.path.join(tmp, "prog")
+                native_build(Program(path), binary)
+                runs = {"interpreted": ([selfhost_tool("main"), "run", path, "--stdlib", STDLIB_ROOT], None),
+                        "built": run_argv(binary, binary)}
+                for name, (argv, exe) in runs.items():
+                    with self.subTest(kind, run=name):
+                        proc = subprocess.Popen(argv, executable=exe, stdout=subprocess.PIPE,
+                                                stderr=subprocess.PIPE, text=True,
+                                                env=dict(os.environ, MYLA_THREADS="1"))
+                        try:
+                            port = int(proc.stdout.readline())
+                            with socket.create_connection(("127.0.0.1", port)) as c:
+                                time.sleep(1.5)
+                                c.sendall(b"late\n")
+                                out, err = proc.communicate(timeout=60)
+                        finally:
+                            proc.kill()
+                        self.assertEqual((out, err, proc.returncode), ("late\n", "", 0))
 
     def test_a_closed_or_made_up_handle_reaches_nothing(self):
         self.assertEqual(run_both(STALE), (STALE_OUT, "", 0))

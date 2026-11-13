@@ -1,0 +1,6 @@
+type error: the instances of 'grow' nest without end: this call, in 'grow<T>', asks for 'grow<[T]>'
+  --> examples/errors/type_polymorphic_recursion.my:10:25
+   |
+10 |     return 1 + grow<[T]>(n - 1, [x])
+   |                ^^^^^^^^^^^^^^^^^^^^^
+note: 'grow' calls itself with a larger type at each step (polymorphic recursion), which native code can't be built for

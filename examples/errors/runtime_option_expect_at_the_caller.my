@@ -1,0 +1,18 @@
+//~ runtime error: 7 is in the list
+//~ native: runtime error: 7 is in the list
+//~ span: find([1, 2, 3], 7).expect("7 is in the list")
+// A failing `Option.expect` points at its call, not into std.option: it
+// reports its caller's position (`#track_caller`, MYLA-435).
+fun find(xs: [int], v: int) -> Option<int> {
+    for i in 0..xs.len() {
+        if xs[i] == v {
+            return Some(i)
+        }
+    }
+    return None
+}
+
+fun main() {
+    let at = find([1, 2, 3], 7).expect("7 is in the list")
+    print(at)
+}

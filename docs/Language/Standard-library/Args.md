@@ -76,7 +76,7 @@ A spec has either `many` or commands: with `many`, every argument past the posit
 
 `check_name` and `check_option`, methods of `Spec`, are the declaring methods' own checks (the panics below), public only because a method can't be private yet ([[MYLA-433]]); a program has no need of them.
 
-A spec that can't be parsed is a mistake in the program, so the method that would make it panics, naming the argument ([[MYLA-426]]): a name declared twice (options, positionals and `many` share the names `Args` is asked by: `args: 'out' is declared twice`), a short name given twice (`args: '-v' is declared twice (--verbose and --very)`), an empty name or one that starts with `-` or holds `=`, an option's name with a space or a control character (it is typed as one argument; a positional's name is only shown, `<lib dir>`), a short name that isn't a printed ASCII character or is `-` or `=`, a required positional after an optional one, a positional after `many` or a command (it is read before them, so declared after them it would look like a last argument, `cp <from>... <to>`: `args: the positional 'to' comes after 'many' ('from'), which takes the rest`), `many` twice or together with commands, and a command declared twice or that can't be given, its name empty, starting with `-` or holding a space ([[MYLA-553]]).
+A spec that can't be parsed is a mistake in the program, so the method that would make it panics, naming the argument ([[MYLA-426]]): a name declared twice (options, positionals and `many` share the names `Args` is asked by: `args: 'out' is declared twice`), a short name given twice (`args: '-v' is declared twice (--verbose and --very)`), an empty name or one that starts with `-` or holds `=`, an option's name with a space or a control character (it is typed as one argument; a positional's name is only shown, `<lib dir>`), a short name that isn't a printed ASCII character or is `-` or `=`, a required positional after an optional one, a positional after `many` or a command (it is read before them, so declared after them it would look like a last argument, `cp <from>... <to>`: `args: the positional 'to' comes after 'many' ('from'), which takes the rest`), `many` twice or together with commands, and a command declared twice or that can't be given, its name empty, starting with `-` or holding a space ([[MYLA-553]]). The panic points at the program's call that made the bad spec, not into std.args: the declaring methods and their checks report their caller's position (`#track_caller`, [[Language/Attributes-and-testing#track_caller]], [[MYLA-435]]), so `.positional("to")` after `.many("from")` fails at that `.positional(`.
 
 ## Parsing
 
@@ -93,7 +93,7 @@ A spec that can't be parsed is a mistake in the program, so the method that woul
 
 ## The arguments
 
-`Args` is asked by the names of the spec. A name the spec doesn't declare is a mistake in the program, not in its arguments, so it is a panic: `args: 'nme' is not an argument of the spec`. So is asking `get` for a flag or `flag` for an option.
+`Args` is asked by the names of the spec. A name the spec doesn't declare is a mistake in the program, not in its arguments, so it is a panic: `args: 'nme' is not an argument of the spec`. So is asking `get` for a flag or `flag` for an option. It too points at the program's call (`a.get("nme")`, `get_or`, `all`, `flag`, `count`).
 
 | Method | Result |
 | --- | --- |

@@ -31,12 +31,24 @@ Only functions reachable from the entry point are emitted, each instantiation on
 
 ## Polymorphic recursion
 
-A generic function that calls itself with a larger type, `grow<T>` calling `grow<[T]>`, asks for a new instance at each step, so the worklist never empties: `myla build` ran until it ran out of memory, where `myla check` says `ok` and the interpreter, which erases types, runs it ([[MYLA-415]], H5). The lowering refuses such a call where it is made (`call_target`): when an instance's type arguments are more than 64 types deep (`MAX_INSTANCE_DEPTH`, `type_depth`), or have more than 4,096 parts in all (`MAX_INSTANCE_SIZE`, `type_size`: a pair of pairs of … doubles at each step and is too large long before it is too deep), the call is a type error, as a refused `become` is ([[MYLA-272]]):
+A generic function that calls itself with a larger type, `grow<T>` calling `grow<[T]>`, asks for a new instance at each step, so the worklist never empties: `myla build` ran until it ran out of memory, where `myla check` said `ok` and the interpreter, which erases types, ran it ([[MYLA-415]], H5).
+
+**The checker** refuses it where it can see it ([[MYLA-543]]), so every command says the same. Each call of a generic function made in a generic function whose type arguments mention the caller's type parameters is kept (`note_grow_call`, `GrowCall`); after the bodies are checked, `check_instance_growth` builds a graph whose nodes are a function's type parameters, an edge from `f`'s `T` to `g`'s `U` for each call of `g` from `f` whose argument for `U` mentions `T`. An edge whose argument is larger than `T` itself (`[T]`, `(T, T)`, `Option<T>`) grows the type; one that lies on a cycle, its target reaching its source again (`grow_path`), is refused at its call, whether the program calls the function or not (Go refuses such an instantiation cycle too):
 
 ```
-type error: the instances of 'grow' nest without end: this call asks for one whose type arguments are 65 types deep (the limit is 64)
-  --> grow.my:3:16
-note: 'grow' is called with a larger type at each step (polymorphic recursion), which native code can't be built for; the interpreter runs it
+type error: the instances of 'pair_up' nest without end: this call, in 'halve<T>', asks for 'pair_up<(T, T)>'
+  --> mutual.my:10:19
+note: 'halve' calls itself through 'pair_up' with a larger type at each step (polymorphic recursion), which native code can't be built for
 ```
 
-Only an instance that is itself at the limit (its type arguments 64 types deep, or more than half the parts) is refused a larger one: a deep type the program writes is no recursion, so `mk(x)` with `x` a list nested 65 or 100 deep builds, and only an instance of such a type that asks for a deeper one still is refused ([[MYLA-544]]). The program is refused once its first function asks for such an instance, after 64 instances at most beyond the deepest type it writes; no program that terminates needs one, as the instantiations don't depend on the values. Through a lambda or a method the same holds; a recursion through a generic type alone (`enum Nest<T> { Leaf(T), Node(Nest<[T]>) }`, with a function walking it) is refused at the function's call.
+The calls through a lambda and the methods of a generic type count as the function's own (a lambda's call is made in its function; `Box<T>`'s method is a function of `T`), and so does a recursion through a generic type (`enum Nest<T> { Leaf(T), Node(Nest<[T]>) }` walked by `depth<T>`, whose `depth(inner)` asks for `depth<[T]>`). It costs check time only for such calls: a std.http server's check +0.04 %, std.iter's +0.14 % (callgrind).
+
+**The lowering** still refuses what the checker can't see, a recursion through a trait's method (`run<T: Tr>` calling `x.go()`, whose impl for `Box<U>` calls `run<Box<[U]>>`: which impl a call reaches depends on the type). It refuses such a call where it is made (`call_target`): when an instance at the limit (its type arguments 64 types deep) asks for a deeper one (`MAX_INSTANCE_DEPTH`, `type_depth`), or one with more than half the parts asks for type arguments with more than 4,096 parts in all (`MAX_INSTANCE_SIZE`, `type_size`: a pair of pairs of … doubles at each step and is too large long before it is too deep), the call is a type error, as a refused `become` is ([[MYLA-272]]):
+
+```
+type error: the instances of 'run' nest without end: this call asks for one whose type arguments are 66 types deep (the limit is 64)
+  --> trait.my:7:19
+note: 'run' is called with a larger type at each step (polymorphic recursion), which native code can't be built for; the interpreter runs it
+```
+
+A deep type the program writes is no recursion, so `mk(x)` with `x` a list nested 65 or 100 deep builds ([[MYLA-544]]), and so does a recursion that passes such a type on unchanged or a call that hands it on as it is ([[MYLA-543]]): only an instance past the limit asking for a deeper one than its own is refused. One that wraps such a type once more in a generic call (`wrap([x])`) is still refused ([[MYLA-624]]). The program is refused once its first function asks for such an instance, after 64 instances at most beyond the deepest type it writes; no program that terminates needs one, as the instantiations don't depend on the values.
