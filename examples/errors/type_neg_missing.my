@@ -1,0 +1,12 @@
+//~ type error: unary '-' is not defined for 'V': it needs 'impl Neg for V'
+//~ span: -v
+// Unary `-` on a struct calls its `Neg` (D198).
+struct V {
+    x: float,
+}
+
+fun main() {
+    let v = V { x: 1.0 }
+    let w = -v
+    print(w.x)
+}

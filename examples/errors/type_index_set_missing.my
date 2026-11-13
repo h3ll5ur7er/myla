@@ -1,0 +1,17 @@
+//~ type error: cannot assign to an index of 'V': it needs 'impl IndexSet<int32, float64> for V'
+// `Index` reads `v[i]`; assigning to it takes `IndexSet` (D198).
+struct V {
+    x: float,
+}
+
+impl Index<int, float> for V {
+    fun index(self, i: int) -> float {
+        return self.x
+    }
+}
+
+fun main() {
+    var v = V { x: 1.0 }
+    v[0] = 2.0
+    print(v[0])
+}

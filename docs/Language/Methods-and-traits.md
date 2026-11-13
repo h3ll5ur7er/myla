@@ -228,15 +228,79 @@ fun main() {
 
 ## Operator overloading
 
-A fixed set of built-in traits backs the operators on structs and enums (D52):
+A fixed set of built-in traits backs the operators on structs and enums (D52, D198):
 
 | Trait | Method | Operators |
 | --- | --- | --- |
-| `Add` `Sub` `Mul` `Div` `Rem` | `add` `sub` `mul` `div` `rem` `(self, other: Self) -> Self` | `+ - * / %` |
+| `Add<R, O>` `Sub<R, O>` `Mul<R, O>` `Div<R, O>` `Rem<R, O>` | `add` `sub` `mul` `div` `rem` `(self, other: R) -> O` | `+ - * / %`, and `+=` … `%=` |
+| `Neg<O>` | `neg(self) -> O` | unary `-` |
+| `Index<I, O>` | `index(self, i: I) -> O` | `x[i]` |
+| `IndexSet<I, V>` | `set_index(var self, i: I, v: V)` | `x[i] = v` (and `x[i] += v`) |
 | `Eq` | `eq(self, other: Self) -> bool` | `==`, `!=` |
 | `Ord` | `cmp(self, other: Self) -> int` (negative, zero, positive) | `< <= > >=` |
 
-`a + b` on a struct becomes `a.add(b)`; `a < b` becomes `a.cmp(b) < 0`. Both operands must have the same type. Primitive types keep their built-in operators (a user `impl Add for int32` doesn't change `+`), and the bitwise operators can't be overloaded.
+The arithmetic traits take the right operand's type and the result's (D198, [[MYLA-584]]): a bare `Mul` is `Mul<Self, Self>`, the classic same-type operator, and `Mul<R>` is `Mul<R, Self>`; a bare `Neg` is `Neg<Self>`. A type may implement one trait for several right operands, `impl Mul<float> for Vec2` beside `impl Mul<Vec2, float> for Vec2` (a dot product) and `impl Mul for Mat2`: the operands' types pick the impl, and its result type is the expression's. A number may implement an arithmetic trait with a struct or enum on the right, for the scalar on the left: `impl Mul<Vec2, Vec2> for float64` gives `2.0 * v`. `Index` and `IndexSet` take the index's type and the element's, one impl per index type (`Index<int, float>` beside `Index<(int, int), float>`); `x[i] = v` needs `x` to be a `var` place, and `x[i] += v` is `x.set_index(i, x.index(i) + v)`.
+
+```myla
+struct Vec2 {
+    x: float,
+    y: float,
+}
+
+impl Add for Vec2 {
+    fun add(self, o: Vec2) -> Vec2 { return Vec2 { x: self.x + o.x, y: self.y + o.y } }
+}
+
+impl Mul<float> for Vec2 {
+    fun mul(self, k: float) -> Vec2 { return Vec2 { x: self.x * k, y: self.y * k } }
+}
+
+impl Mul<Vec2, Vec2> for float64 {
+    fun mul(self, v: Vec2) -> Vec2 { return v * self }
+}
+
+impl Neg for Vec2 {
+    fun neg(self) -> Vec2 { return Vec2 { x: -self.x, y: -self.y } }
+}
+
+impl Index<int, float> for Vec2 {
+    fun index(self, i: int) -> float { return if i == 0 { self.x } else { self.y } }
+}
+
+impl IndexSet<int, float> for Vec2 {
+    fun set_index(var self, i: int, v: float) {
+        if i == 0 { self.x = v } else { self.y = v }
+    }
+}
+
+fun lerp<T: Add + Mul<float>>(a: T, b: T, t: float) -> T {
+    return a * (1.0 - t) + b * t
+}
+
+fun main() {
+    var pos = Vec2 { x: 1.0, y: 2.0 }
+    let vel = Vec2 { x: 0.5, y: -1.0 }
+    pos += vel * 2.0
+    pos[1] += 10.0
+    let back = -(2.0 * pos)
+    print(f"{pos[0]} {pos[1]} {back.x}")
+    print(lerp(0.0, 10.0, 0.25))
+    print(lerp(pos, back, 0.5)[0])
+}
+// output:
+// 2 10 -4
+// 2.5
+// -1
+```
+
+- Generic code names what it needs: `T: Mul<float>` allows `a * 2.0` and gives a `T`, `T: Neg` allows `-a`, `C: Index<int, float>` allows `c[0]`. A number meets its own operators' bounds (`lerp(0.0, 10.0, 0.25)` above), and a list, map or string the `Index` (and, but a string, the `IndexSet`) of its own indexing.
+- An integer literal never becomes a float, beside an operator either: with only `Mul<float>`, `v * 2` is `operator '*' is not defined for 'Vec2' and 'int32'`; write `2.0`.
+- The right operand of an impl beside others of its trait can't use the impl's type parameters (`impl<T> Mul<T, B<T>> for B<T>` is refused; `impl<T> Mul<int, [T]> for B<T>` is fine): the impl is picked where the operands' types are known.
+- An impl on a number needs a struct or enum on the right: the operators between numbers are the language's (no implicit conversion, D4). `Neg`, `Index` and `IndexSet` are implemented by structs and enums.
+- The method of an impl beside others of its trait carries the right operand's type in its name (`mul$float64`, `index$int32`), so it is reached through its operator, not as `v.mul(2.0)`; the classic same-type one keeps its name.
+- An element reached through `IndexSet` is assigned as a whole: `x[i] = v`, not `x[i].field = v` or a `var self` method on `x[i]`.
+
+`a + b` on a struct becomes `a.add(b)` (the impl the right operand picks); `a < b` becomes `a.cmp(b) < 0`. `Eq` and `Ord` compare two values of one type. Primitive types keep their built-in operators (a user `impl Add for int32` doesn't change `+`), and the bitwise operators can't be overloaded.
 
 ## #derive(Eq), #derive(Hash), #derive(Json) and #derive(Toml)
 
@@ -384,7 +448,7 @@ fun main() {
 // 6
 ```
 
-A type parameter may carry bounds `T: Add + Eq` (built-in or user traits, D53; `Hash` is the prelude's). The bound is checked where the function is called, against the concrete type (primitives count as implementing their built-in operator traits, and the printable ones `Format`, D162). Inside the body, a bound permits that trait's **operators** on `T` (`Add`, `Eq`, `Ord`, …: their methods are their operators) and the **methods** of a user trait or of `Format`, with `Self` the type parameter; a `T: Format` goes in a format hole as its type does ([[MYLA-291]]), and its `x.format(spec)` is, for a primitive `T`, its print form by the spec, as `f"{x:>8}"` gives it ([[MYLA-544]]). The interpreter calls the method of the value's type, native code the method of the type the copy is made for ([[Architecture/Monomorphization]]).
+A type parameter may carry bounds `T: Add + Eq` (built-in or user traits, D53; `Hash` is the prelude's). The bound is checked where the function is called, against the concrete type (primitives count as implementing their built-in operator traits, and the printable ones `Format`, D162). Inside the body, a bound permits that trait's **operators** on `T` (`Add`, `Eq`, `Ord`, …: their methods are their operators; an operator trait's arguments say what the right operand and the result are, `T: Mul<float>` allowing `a * 2.0` and giving a `T`, D198) and the **methods** of a user trait or of `Format`, with `Self` the type parameter; a `T: Format` goes in a format hole as its type does ([[MYLA-291]]), and its `x.format(spec)` is, for a primitive `T`, its print form by the spec, as `f"{x:>8}"` gives it ([[MYLA-544]]). The interpreter calls the method of the value's type, native code the method of the type the copy is made for ([[Architecture/Monomorphization]]).
 
 ```myla
 trait Shape {

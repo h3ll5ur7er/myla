@@ -58,13 +58,19 @@ struct Hasher { state: uint64 }           // with impl Eq; methods from std.hash
 trait Hash { fun hash(self, h: Hasher) -> Hasher }
 trait Iterator<T> { fun next(var self) -> Option<T> }
 // built in, not redeclarable ("'Eq' is a built-in operator trait and cannot be redeclared"):
-// Add.add, Sub.sub, Mul.mul, Div.div, Rem.rem: (self, other: Self) -> Self
+// Add<R, O>.add, Sub.sub, Mul.mul, Div.div, Rem.rem: (self, other: R) -> O   (D198)
+//     a bare `Mul` is `Mul<Self, Self>`, `Mul<R>` is `Mul<R, Self>`
+// Neg<O>.neg: (self) -> O                   (bare `Neg` = `Neg<Self>`: unary `-`)
+// Index<I, O>.index: (self, i: I) -> O      (`x[i]`)
+// IndexSet<I, V>.set_index: (var self, i: I, v: V)   (`x[i] = v`)
 // Eq.eq: (self, other: Self) -> bool       Ord.cmp: (self, other: Self) -> int32
 ```
 
 | Trait | What it enables |
 | --- | --- |
-| `Add` `Sub` `Mul` `Div` `Rem` | `+ - * / %` on the type (both operands the same type, the result `Self`). On `T` with that bound |
+| `Add` `Sub` `Mul` `Div` `Rem` | `+ - * / %` (and `+=` …) on the type: `Mul` both operands the type, the result too; `Mul<float>` the type times a `float`, giving the type; `Mul<V, float>` a `float` result. One impl per right operand's type, picked by the operands (`op_impls`, `find_op_impl` in checker.my). A number's impl with a struct or enum on the right gives `2.0 * v`. On `T` with that bound, by its arguments |
+| `Neg` | unary `-` on a struct or enum (`Neg<O>` for another result); one per type |
+| `Index` `IndexSet` | `x[i]` and `x[i] = v` (also `x[i] += v`) on a struct or enum, one impl per index type; `x` a `var` place; the element is assigned whole (not `x[i].f = v`) |
 | `Eq` | `==` and `!=`, being a map key (with `Hash`), `xs.contains`/`index_of`/`dedup`, and a derived `Eq` of a type that holds it |
 | `Ord` | `< <= > >=` (by `cmp`'s sign) and the sorting/searching list methods. There is no `#derive(Ord)` |
 | `Hash` | being a map key (with `Eq`), `h.add(x)`, `t.hash(h)` |
@@ -75,8 +81,8 @@ The built-in traits a primitive type has without an impl (`primitive_default_tra
 
 | Type | Traits |
 | --- | --- |
-| integers | Add Sub Mul Div Rem Eq Ord Format Hash |
-| floats | Add Sub Mul Div Rem Eq Ord Format (**not Hash**, so a float can't be a map key) |
+| integers | Add Sub Mul Div Rem Eq Ord Format Hash (and `Neg`, the signed ones) |
+| floats | Add Sub Mul Div Rem Neg Eq Ord Format (**not Hash**, so a float can't be a map key) |
 | `char` | Eq Ord Format Hash |
 | `bool` | Eq Format Hash (**not Ord**: `true < false` is an error) |
 | `str` | Add Eq Ord Format Hash (`<` is byte-wise) |
@@ -111,7 +117,7 @@ Only `Eq`, `Hash`, `Json` and `Toml` can be derived, and only on a struct or enu
 
 | Operator | Operands |
 | --- | --- |
-| `+` | two numbers of one type, `str + str`, `char + int32 -> char`, or a type with `Add` |
+| `+` | two numbers of one type, `str + str`, `char + int32 -> char`, or a type with `Add` (`Add<R, O>`: the right operand `R`, the result `O`; a number on the left by its own impl, D198) |
 | `- * / %` | two numbers of one type (`%` works on floats), or a type with the trait. `char - char -> int32`, `char - int32 -> char` |
 | `& \| ^`, unary `~` | integers only (`operator '&' is not defined for floats`) |
 | `<< >>` | an integer on the left and any integer on the right. A constant shift amount must be in `0..width-1`. A function on the left of `>>` composes two one-argument functions |
@@ -119,7 +125,7 @@ Only `Eq`, `Hash`, `Json` and `Toml` can be derived, and only on a struct or enu
 | `< <= > >=` | numbers, `char`, `str`, and types with `Ord` |
 | `&& \|\| !` | `bool` |
 
-Both operands of an overloaded operator must have the same type (`operator '+' requires both operands to have the same type, found …`).
+An overloaded operator's operands have the same type unless the type has an impl by type arguments for the right one (D198): with only the classic impl, `operator '+' requires both operands to have the same type, found …`; with impls by arguments, `operator '*' is not defined for 'V' and 'int32': it needs 'impl Mul<int32, …> for V'` and a note naming the impls it has.
 
 **Map keys** (`check_key`, `key_why`): integers, `char`, `bool` and `str`, or any type that is Eq and Hash: tuples and lists of such, `Option`/`Result` of such, and structs and enums with `#derive(Eq, Hash)` or both impls. A generic `K` needs `K: Eq + Hash`, even in an `impl<K, V> [K: V]` block or a function that only calls `m.len()` or `m.keys()`: write `impl<K: Eq + Hash, V> [K: V]`.
 
@@ -192,7 +198,7 @@ Loops never count, `while true { return x }` included: add `unreachable()` after
 - All impls of a list share one method table (`[T]`), and so do all impls of a map. So `impl [int] { fun total }` makes `total` exist for `[str]` too, but calling it there is an error (`method 'total' is for '[int32]', not '[str]'`), and `impl [str] { fun total }` beside it is a duplicate.
 - An inherent impl can't have a function without `self` (`function 'new' in 'impl P' has no 'self': only a trait's functions go without one`).
 - A trait's methods become methods of the type: two traits with a method of the same name, or an inherent method of a trait method's name, on one type are a `duplicate method`.
-- There is at most one impl per trait and type (`duplicate impl of trait …`).
+- There is at most one impl per trait and type (`duplicate impl of trait …`), but an operator trait has one per right operand's (or index's) type (`duplicate impl of trait 'Mul<float64, …>' for type 'V'`). Such an impl's right operand can't use the impl's type parameters (the classic `impl<T> Mul for B<T>` excepted), an impl on a number needs a struct or enum on the right, and `Neg`/`Index`/`IndexSet` are for structs and enums. Its method is renamed `mul$float64` (`op_method_name`), so it's reached by the operator only.
 - Conformance requires all of the trait's methods and no others, the same receivers (`self` / `var self` / none), and exactly the trait's signature with `Self` replaced: `does not match the trait signature (expected '(P) -> P')`.
 - A trait has signatures only (no default bodies, no default values, no async methods). An actor can't implement a trait.
 - You may add an inherent impl to a type imported from another module.
@@ -251,6 +257,9 @@ Loops never count, `while true { return x }` included: add `unreachable()` after
 | `function 'new' in 'impl P' has no 'self': only a trait's functions go without one` | write a free `fun new_p() -> P` |
 | `'Self' is only valid inside a trait declaration` | name the type in impls |
 | `type 'float64' has no method 'abs'` | use `std.math` |
+| `operator '*' is not defined for 'V' and 'int32': it needs 'impl Mul<int32, …> for V'` | no impl for that right operand; an integer literal never becomes a float, write `2.0` |
+| `unary '-' is not defined for 'V': it needs 'impl Neg for V'`, `type 'V' can't be indexed: it needs 'impl Index<int32, …> for V'`, `cannot assign to an index of 'V': it needs 'impl IndexSet<int32, float64> for V'` | implement the operator trait (D198) |
+| `operator '*' on a value of type parameter 'T' is not defined for 'int32': its bounds give 'T: Mul<float64>'` | the bound's right operand decides |
 | `a lambda can't change 'n', a variable it captures: it holds a copy of its own` | return the new value, or use an actor |
 | `cannot infer the type of lambda parameter 'x'; annotate it (e.g. 'x: int')` | |
 | `type parameter 'T' has no method 'm': it has no bounds …` / `… requires the bound 'T: Ord'` | add the bound |
