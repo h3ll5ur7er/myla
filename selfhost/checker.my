@@ -4993,6 +4993,10 @@ impl Checker {
                     return Ok(a[1])
                 }
             }
+            // only the classic bound, `T: Add`: both operands `T`
+            var classic = true
+            for a in sets { if !(type_eq(a[0], lt) && type_eq(a[1], lt)) { classic = false } }
+            if classic { return Err(terr_at(e.line, e.col, e.sp, format("operator '{}' requires both operands to have the same type, found '{}' and '{}'", op, type_name(lt), type_name(rt1)))) }
             var have: [str] = []
             for a in sets { have.push(op_bound_text(trnm, a, lt)) }
             return Err(terr_at(e.line, e.col, e.sp, format("operator '{}' on a value of type parameter '{}' is not defined for '{}': its bounds give '{}: {}'", op, pname, type_name(rt1), pname, join_strs(have, " + "))))
