@@ -902,8 +902,10 @@ fun last_member(fields: [(str, Json)], name: str) -> Option<Json> {
     return found
 }
 
-// `r`, its error one step further in: `step` (`.name`, `[2]`) after the `$`.
-fun within<T>(r: Result<T, JsonError>, step: str) -> Result<T, JsonError> {
+// `r`, its error one step further in: `step` (`.name`, `[2]`) after the `$`;
+// for a `FromJson` impl written by hand, reading the parts of a value:
+// `json.within(float64.from_json(item), "[2]")`.
+pub fun within<T>(r: Result<T, JsonError>, step: str) -> Result<T, JsonError> {
     return match r {
         Ok(v) => Ok(v)
         Err(e) => Err(JsonError { kind: e.kind, msg: e.msg, line: e.line, col: e.col, path: "$" + step + e.path[1:] })

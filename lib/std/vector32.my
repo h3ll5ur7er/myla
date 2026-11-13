@@ -10,9 +10,12 @@
 // vectors are by component, `v * s`, `s * v` and `v / s` scale, `-v` negates,
 // `v[i]` reads a component and `v[i] = s` writes one (D200); `dot`, `cross`,
 // `length`, `normalized` and the rest are methods. Vectors are `Eq`, `Hash`
-// (map keys, D198) and print as `(1, 2, 3)`.
+// (map keys, D198), print as `(1, 2, 3)` and are JSON arrays, `[1.0, 2.0, 3.0]`,
+// as glTF writes them (`Vector` too).
 
 import std.float as fl
+import std.json as json_m
+from std.json import Json, JsonError
 from std.algebra import Zero, One
 from std.vector import Vec2 as Vec2F64, Vec3 as Vec3F64, Vec4 as Vec4F64, Vector as VectorF64
 
@@ -639,17 +642,6 @@ fun same_len(a: Vector, b: Vector) {
     if a.data.len() != b.data.len() { panic(f"vector lengths differ: {a.data.len()} and {b.data.len()}") }
 }
 
-// `a op b` by element, the lengths checked.
-fun zip_with(a: Vector, b: Vector, f: (float32, float32) -> float32) -> Vector {
-    same_len(a, b)
-    var d: [float32] = []
-    var i = 0
-    while i < a.data.len() {
-        d.push(f(a.data[i], b.data[i]))
-        i += 1
-    }
-    return Vector { data: d }
-}
 
 impl Format for Vector {
     fun format(self, spec: str) -> str {
@@ -668,37 +660,76 @@ impl Format for Vector {
 
 impl Add for Vector {
     fun add(self, o: Vector) -> Vector {
-        return zip_with(self, o, (a: float32, b: float32) => a + b)
+        same_len(self, o)
+        var d: [float32] = []
+        var i = 0
+        while i < self.data.len() {
+            d.push(self.data[i] + o.data[i])
+            i += 1
+        }
+        return Vector { data: d }
     }
 }
 
 impl Sub for Vector {
     fun sub(self, o: Vector) -> Vector {
-        return zip_with(self, o, (a: float32, b: float32) => a - b)
+        same_len(self, o)
+        var d: [float32] = []
+        var i = 0
+        while i < self.data.len() {
+            d.push(self.data[i] - o.data[i])
+            i += 1
+        }
+        return Vector { data: d }
     }
 }
 
 impl Mul for Vector {
     fun mul(self, o: Vector) -> Vector {
-        return zip_with(self, o, (a: float32, b: float32) => a * b)
+        same_len(self, o)
+        var d: [float32] = []
+        var i = 0
+        while i < self.data.len() {
+            d.push(self.data[i] * o.data[i])
+            i += 1
+        }
+        return Vector { data: d }
     }
 }
 
 impl Neg for Vector {
     fun neg(self) -> Vector {
-        return self.map((a: float32) => -a)
+        var d: [float32] = []
+        var i = 0
+        while i < self.data.len() {
+            d.push(-self.data[i])
+            i += 1
+        }
+        return Vector { data: d }
     }
 }
 
 impl Mul<float32> for Vector {
     fun mul(self, k: float32) -> Vector {
-        return self.map((a: float32) => a * k)
+        var d: [float32] = []
+        var i = 0
+        while i < self.data.len() {
+            d.push(self.data[i] * k)
+            i += 1
+        }
+        return Vector { data: d }
     }
 }
 
 impl Div<float32> for Vector {
     fun div(self, k: float32) -> Vector {
-        return self.map((a: float32) => a / k)
+        var d: [float32] = []
+        var i = 0
+        while i < self.data.len() {
+            d.push(self.data[i] / k)
+            i += 1
+        }
+        return Vector { data: d }
     }
 }
 
@@ -770,5 +801,89 @@ impl Vector {
         var d: [float64] = []
         for x in self.data { d.push(x as float64) }
         return VectorF64 { data: d }
+    }
+}
+
+// --- JSON -------------------------------------------------------------------
+//
+// A vector is the array of its components, a matrix the array of its
+// elements column by column, a quaternion `[x, y, z, w]`: as glTF writes
+// them, so a document's `"translation": [1, 2, 3]` reads as a `Vec3`.
+
+// The numbers of the JSON array `j`, `n` of them (any number when `n` is
+// negative), for the `FromJson` impl of the type `what`.
+#test(Json.Array([Json.Int(1i64), Json.Float(2.5)]), 2, "Vec2")[Ok([1.0, 2.5])]
+#test(Json.Array([Json.Int(1i64)]), 2, "Vec2")[Err(json_m.wrong_type("an array of 2 numbers for 'Vec2'", Json.Array([Json.Int(1i64)])))]
+fun json_numbers(j: Json, n: int, what: str) -> Result<[float32], JsonError> {
+    let want = if n < 0 { "an array of numbers" } else { f"an array of {n} numbers" }
+    match j {
+        Json.Array(items) => {
+            if n >= 0 && items.len() != n { return Err(json_m.wrong_type(f"{want} for '{what}'", j)) }
+            var out: [float32] = []
+            var i = 0
+            for item in items {
+                out.push(json_m.within(float32.from_json(item), f"[{i}]")?)
+                i += 1
+            }
+            return Ok(out)
+        }
+        _ => { return Err(json_m.wrong_type(f"{want} for '{what}'", j)) }
+    }
+}
+
+impl json_m.ToJson for Vec2 {
+    #test(vec2(1.0, 2.0))[Json.Array([Json.Float(1.0), Json.Float(2.0)])]
+    fun to_json(self) -> Json {
+        return Json.Array([self.x.to_json(), self.y.to_json()])
+    }
+}
+
+impl json_m.FromJson for Vec2 {
+    fun from_json(j: Json) -> Result<Vec2, JsonError> {
+        let c = json_numbers(j, 2, "Vec2")?
+        return Ok(Vec2 { x: c[0], y: c[1] })
+    }
+}
+
+impl json_m.ToJson for Vec3 {
+    #test(vec3(1.0, 2.0, 3.0))[Json.Array([Json.Float(1.0), Json.Float(2.0), Json.Float(3.0)])]
+    fun to_json(self) -> Json {
+        return Json.Array([self.x.to_json(), self.y.to_json(), self.z.to_json()])
+    }
+}
+
+impl json_m.FromJson for Vec3 {
+    fun from_json(j: Json) -> Result<Vec3, JsonError> {
+        let c = json_numbers(j, 3, "Vec3")?
+        return Ok(Vec3 { x: c[0], y: c[1], z: c[2] })
+    }
+}
+
+impl json_m.ToJson for Vec4 {
+    #test(vec4(1.0, 2.0, 3.0, 4.0))[Json.Array([Json.Float(1.0), Json.Float(2.0), Json.Float(3.0), Json.Float(4.0)])]
+    fun to_json(self) -> Json {
+        return Json.Array([self.x.to_json(), self.y.to_json(), self.z.to_json(), self.w.to_json()])
+    }
+}
+
+impl json_m.FromJson for Vec4 {
+    fun from_json(j: Json) -> Result<Vec4, JsonError> {
+        let c = json_numbers(j, 4, "Vec4")?
+        return Ok(Vec4 { x: c[0], y: c[1], z: c[2], w: c[3] })
+    }
+}
+
+impl json_m.ToJson for Vector {
+    #test(vector([1.0, 2.0]))[Json.Array([Json.Float(1.0), Json.Float(2.0)])]
+    fun to_json(self) -> Json {
+        var items: [Json] = []
+        for x in self.data { items.push(x.to_json()) }
+        return Json.Array(items)
+    }
+}
+
+impl json_m.FromJson for Vector {
+    fun from_json(j: Json) -> Result<Vector, JsonError> {
+        return Ok(Vector { data: json_numbers(j, -1, "Vector")? })
     }
 }

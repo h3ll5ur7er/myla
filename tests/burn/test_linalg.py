@@ -237,6 +237,84 @@ class LinearAlgebra(unittest.TestCase):
         self.assertEqual(interp[1].split("\n")[:2], native[1].split("\n")[:2])
 
 
+# JSON as arrays, as glTF writes them (the owner's choice, 2026-11-13): a
+# vector its components, a matrix its elements column by column, a quaternion
+# [x, y, z, w]; `Vector` an array, `Matrix` {"rows", "cols", "data"}
+JSON_PROGRAM = """import std.json as json
+from std.vector import Vec3, Vector, vec2, vec3, vector
+from std.matrix import Mat2, Mat4, Matrix, mat2, matrix, translation
+from std.quaternion import Quat, quat
+import std.vector32 as v32
+
+#derive(Json)
+struct Node {
+    name: str,
+    translation: Vec3,
+    rotation: Quat,
+    matrix: Mat4,
+}
+
+fun main() {
+    print(json.encode(vec3(1.0, 2.5, -3.0)))
+    print(json.encode(mat2(vec2(0.0, 0.0), vec2(3.0, 4.0))))
+    print(json.encode(quat(0.0, 0.0, 0.5, 1.0)))
+    print(json.encode(vector([1.0, 2.0])))
+    print(json.encode(matrix(2, 1, [5.0, 6.0])))
+    print(json.encode(v32.vec3(0.1, 0.2, 0.3)))
+    let node = Node { name: "box", translation: vec3(1.0, 2.0, 3.0), rotation: quat(0.0, 0.0, 0.0, 1.0), matrix: translation(vec3(7.0, 8.0, 9.0)) }
+    let text = json.encode(node)
+    print(text)
+    match json.decode<Node>(text) {
+        Ok(back) => print(back.translation == node.translation && back.rotation == node.rotation && back.matrix == node.matrix)
+        Err(e) => print(f"{e}")
+    }
+    match json.decode<Vec3>("[1, 2, 3]") {
+        Ok(v) => print(v)
+        Err(e) => print(f"{e}")
+    }
+    match json.decode<Mat2>("[1, 2, 3, 4]") {
+        Ok(m) => print(m.y_axis.x)
+        Err(e) => print(f"{e}")
+    }
+    for bad in ["[1, 2]", "[1, 2, \\"x\\"]", "{\\"x\\": 1}"] {
+        match json.decode<Vec3>(bad) {
+            Ok(v) => print(v)
+            Err(e) => print(f"{e}")
+        }
+    }
+    match json.decode<Matrix>("{\\"rows\\": 2, \\"cols\\": 2, \\"data\\": [1, 2, 3]}") {
+        Ok(m) => print(m)
+        Err(e) => print(f"{e}")
+    }
+    match json.decode<Vector>("[1.5, 2]") {
+        Ok(v) => print(v)
+        Err(e) => print(f"{e}")
+    }
+}
+"""
+
+JSON_WANT = """[1.0,2.5,-3.0]
+[0.0,0.0,3.0,4.0]
+[0.0,0.0,0.5,1.0]
+[1.0,2.0]
+{"rows":2,"cols":1,"data":[5.0,6.0]}
+[0.1,0.2,0.3]
+{"name":"box","translation":[1.0,2.0,3.0],"rotation":[0.0,0.0,0.0,1.0],"matrix":[1.0,0.0,0.0,0.0,0.0,1.0,0.0,0.0,0.0,0.0,1.0,0.0,7.0,8.0,9.0,1.0]}
+true
+(1, 2, 3)
+3
+$: expected an array of 3 numbers for 'Vec3', found an array of 2 items
+$[2]: expected a number, found a string
+$: expected an array of 3 numbers for 'Vec3', found an object
+$.data: a 2x2 matrix takes 4 elements, got 3
+[1.5, 2]
+"""
+
+
+class Json(unittest.TestCase):
+    def test_as_arrays_in_the_interpreter_and_natively(self) -> None:
+        self.assertEqual(run_source_both_now(JSON_PROGRAM), (JSON_WANT, "", 0))
+
 class Generated(unittest.TestCase):
     def test_the_modules_are_the_generators(self) -> None:
         proc = subprocess.run([sys.executable, os.path.join(_REPO, "scripts", "gen_std_linalg.py"), "--check"],
