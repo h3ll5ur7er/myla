@@ -443,6 +443,23 @@ class SelfHostedInterpParity(unittest.TestCase):
                 self.assertEqual(out, "75025\n")
         self.assertLess(peaks["generic"], peaks["int"] + 8, peaks)
 
+    def test_a_builder_takes_its_size(self) -> None:
+        """A `StringBuilder` holds its bytes packed, as natively: building a
+        string of 20 MB takes about 20 MB for the string and at most twice
+        that for the builder (MYLA-600: a word a byte, 280 MB against
+        55 MB natively)."""
+        if self._binary is None:
+            self.skipTest("measuring needs the natively built interpreter")
+        with tempfile.TemporaryDirectory() as tmp:
+            peaks = {}
+            for name, program in (("empty", "fun main() {\n    print(20480000)\n}\n"), ("build", BUILD_20MB)):
+                path = os.path.join(tmp, name + ".my")
+                with open(path, "w", encoding="utf-8") as fh:
+                    fh.write(program)
+                out, peaks[name] = _peak_mb([selfhost_tool("main"), "run", "--stdlib", STDLIB_ROOT, path])
+                self.assertEqual(out, "20480000\n")
+        self.assertLess(peaks["build"], peaks["empty"] + 60, peaks)
+
 
     def test_lines_and_extended_bytes_take_no_step_a_byte(self) -> None:
         """`read_line` and `extend` of `[uint8]` cost what the lines or the
@@ -519,6 +536,62 @@ class SelfHostedInterpParity(unittest.TestCase):
                 proc.kill()
                 proc.communicate()
 
+    def _run_waiting(self, path: str, *argv: str) -> tuple[str, str, int, float]:
+        """`myla run path argv`, its standard input a pipe that stays empty
+        and open: (stdout, stderr, status, seconds until it ended); killed
+        after 30 s."""
+        r, w = os.pipe()
+        start = time.perf_counter()
+        try:
+            proc = subprocess.Popen([selfhost_tool("main"), "run", "--stdlib", STDLIB_ROOT, path, *argv],
+                                    stdin=r, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            os.close(r)
+            r = -1
+            try:
+                out, err = proc.communicate(timeout=30)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                out, err = proc.communicate()
+            return out, err, proc.returncode, time.perf_counter() - start
+        finally:
+            if r >= 0:
+                os.close(r)
+            os.close(w)
+
+    def test_a_turn_costs_nothing_per_waiting_task(self) -> None:
+        """While tasks are ready, the tasks waiting for input are looked at
+        now and then, not at every turn: 20,000 turns take about as long
+        with 400 tasks waiting for the standard input as with none
+        (MYLA-604: a poll a waiting task a turn, 2,321 ms against 151 ms)."""
+        if self._binary is None:
+            self.skipTest("timing needs the natively built interpreter")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "waiters.my")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(WAITERS)
+            ms = {}
+            for n in (0, 400):
+                out, err, code, _ = self._run_waiting(path, str(n))
+                self.assertEqual((err, code), ("", 0))
+                ms[n] = int(out.split()[-2])
+        self.assertLess(ms[400], 2 * ms[0] + 100, ms)
+
+    def test_exit_ends_the_tasks_that_wait(self) -> None:
+        """The entry's `exit` ends the program at once while its children
+        sleep or wait for input, as natively (MYLA-620: it waited for the
+        sleep's time, and for input that never came)."""
+        if self._binary is None:
+            self.skipTest("timing needs the natively built interpreter")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "exit.my")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(EXIT_WHILE_WAITING)
+            for mode in ("sleep", "input", "notifier"):
+                with self.subTest(mode=mode):
+                    out, err, code, took = self._run_waiting(path, mode)
+                    self.assertEqual((out, err, code), ("exit\n", "", 3))
+                    self.assertLess(took, 5.0)
+
 
 def _cpu_seconds(pid: int) -> float:
     """The CPU time the process `pid` has used (Linux's /proc)."""
@@ -555,6 +628,94 @@ fun SIGNATURE {
 
 fun main() {
     print(fib(25, 1, 2))
+}
+"""
+
+
+# N tasks wait for input on the standard input (a pipe that stays empty);
+# meanwhile one task takes 20,000 turns: how long they take
+# (test_a_turn_costs_nothing_per_waiting_task).
+WAITERS = """\
+import std.task as task
+import std.time as time
+from std.io import stdin
+from std.process import args, exit
+from std.num import parse_int
+
+async fun reader() -> int {
+    var r = stdin()
+    return match await r.read_line_async() {
+        Ok(Some(l)) => l.len()
+        _ => 0
+    }
+}
+
+async fun spin() -> int {
+    let t = time.now_ms()
+    var i = 0
+    while i < 20000 {
+        await task.yield()
+        i += 1
+    }
+    return (time.now_ms() - t) as int
+}
+
+#main
+async fun main() {
+    let n = match parse_int(args()[1]) { Some(v) => v as int, None => 0 }
+    var fs: [async () -> int] = []
+    for k in 0..n { fs.push(async () => await reader()) }
+    async let all = task.all(fs)
+    let ms = await spin()
+    print(f"{n} waiting: 20,000 turns in {ms} ms")
+    exit(0)
+}
+"""
+
+# The entry exits while a child sleeps, waits for input or waits on a
+# notifier (test_exit_ends_the_tasks_that_wait).
+EXIT_WHILE_WAITING = """\
+import std.task as task
+from std.io import stdin
+from std.process import args, exit
+
+async fun child(mode: str, n: task.Notifier) -> int {
+    if mode == "sleep" {
+        await task.sleep(60000)
+    } else if mode == "input" {
+        var r = stdin()
+        let l = await r.read_line_async()
+    } else {
+        let woken = await n.wait()
+    }
+    print("child")
+    return 1
+}
+
+#main
+async fun main() {
+    let n = task.notifier()
+    async let a = child(args()[1], n)
+    await task.yield()
+    print("exit")
+    exit(3)
+}
+"""
+
+
+# A string of 20 MB built by 5,000 appends (test_a_builder_takes_its_size).
+BUILD_20MB = """\
+fun main() {
+    var block = "0000000000000000"
+    while block.len() < 4096 {
+        block = block + block
+    }
+    var sb = StringBuilder()
+    for i in 0..5000 {
+        sb.append(block)
+    }
+    let s = sb.build()
+    print(s.len())
 }
 """
 
