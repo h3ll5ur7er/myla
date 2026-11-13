@@ -48,6 +48,10 @@ The conventions (D164): operations on built-in types are methods (`s.split(",")`
 | `std.text` | [[Language/Standard-library/Text]] | A `Scanner` for hand-written parsers, `ints` (every integer in a line), word wrap, aligned columns, `indent` and `dedent` |
 | `std.fmt` | [[Language/Standard-library/Fmt]] | Format specs and the helpers of `Format` impls |
 | `std.math` | [[Language/Standard-library/Math]] | Floating-point functions after fdlibm |
+| `std.algebra` | [[Language/Standard-library/Algebra]] | The traits `Zero`, `One`, `Identity` (`Vec3.zero()`, `Mat4.identity()`, `T.zero()`), on every number type; `sum`, `product` |
+| `std.vector`, `std.vector32` | [[Language/Standard-library/Vector]] | `Vec2`, `Vec3`, `Vec4` and `Vector` of any length, in float64 and float32: operators, `dot`, `cross`, `length`, `normalized`, `lerp`, `reflect` |
+| `std.matrix`, `std.matrix32` | [[Language/Standard-library/Matrix]] | Column-major `Mat2`, `Mat3`, `Mat4` and `Matrix` of any shape: products, `inverse`, `determinant`, the 2D and 3D transforms, `look_at_rh`, the perspective and orthographic projections |
+| `std.quaternion`, `std.quaternion32` | [[Language/Standard-library/Quaternion]] | `Quat`: rotations from an axis and an angle or Euler angles, `q * v`, `slerp`, to matrices |
 | `std.list` | [[Language/Standard-library/List]] | Methods on lists: building, `map` and the other higher-order operations, sorting, binary search, permutations and combinations |
 | `std.iter` | [[Language/Standard-library/Iter]] | Lazy adapters and consumers over `Iterator<T>`, chained with `\|>`: `range`, `repeat`, `from_fn`; `map`, `filter`, `take`, `skip`, `zip`, `chain`, `flat_map`, …; `to_list`, `count`, `sum`, `fold`, `find`, `min`, `max`, … |
 | `std.slice` | [[Language/Standard-library/Slice]] | The index arithmetic of slices |

@@ -1,0 +1,50 @@
+// A small 3D pipeline: a cube's corners moved, rotated and looked at, then
+// projected onto a 640x480 screen (std.vector, std.matrix, std.quaternion,
+// D198, D199). Matrices are column-major and multiply column vectors, so in
+// `projection * view * model` the model's transform comes first.
+
+import std.float as float
+from std.vector import Vec2, Vec3, vec2, vec3
+from std.matrix import translation, rotation_y, look_at_rh, perspective_rh_gl
+from std.quaternion import from_axis_angle
+
+// A point in clip space's -1..1 square, in pixels (y down).
+#test(vec3(0.0, 0.0, 0.5), 640.0, 480.0)[vec2(320.0, 240.0)]
+#test(vec3(-1.0, 1.0, 0.5), 640.0, 480.0)[vec2(0.0, 0.0)]
+fun to_screen(ndc: Vec3, width: float, height: float) -> Vec2 {
+    return vec2((ndc.x + 1.0) * 0.5 * width, (1.0 - ndc.y) * 0.5 * height)
+}
+
+// The eight corners of a cube of side 2 around the origin.
+#test()[[vec3(-1.0, -1.0, -1.0), vec3(1.0, -1.0, -1.0), vec3(-1.0, 1.0, -1.0), vec3(1.0, 1.0, -1.0), vec3(-1.0, -1.0, 1.0), vec3(1.0, -1.0, 1.0), vec3(-1.0, 1.0, 1.0), vec3(1.0, 1.0, 1.0)]]
+fun cube() -> [Vec3] {
+    var out: [Vec3] = []
+    for i in 0..8 {
+        let x = if i % 2 == 0 { -1.0 } else { 1.0 }
+        let y = if (i / 2) % 2 == 0 { -1.0 } else { 1.0 }
+        let z = if i / 4 == 0 { -1.0 } else { 1.0 }
+        out.push(vec3(x, y, z))
+    }
+    return out
+}
+
+// A pixel rounded to whole numbers, for printing.
+#test(vec2(1.4, 2.6))["(1, 3)"]
+fun pixel(p: Vec2) -> str {
+    return f"({p.x.round()}, {p.y.round()})"
+}
+
+fun main() {
+    // the camera: at (0, 2, 6), looking at the origin, a 60-degree field of view
+    let view = look_at_rh(vec3(0.0, 2.0, 6.0), Vec3.zero(), vec3(0.0, 1.0, 0.0))
+    let projection = perspective_rh_gl(60.0.to_radians(), 640.0 / 480.0, 0.1, 100.0)
+    let model = translation(vec3(0.0, 0.0, -1.0)) * rotation_y(float.PI / 4.0)
+    let mvp = projection * view * model
+    for corner in cube() {
+        print(pixel(to_screen(mvp.project_point3(corner), 640.0, 480.0)))
+    }
+    // the same rotation as a quaternion: the corner (1, 1, 1) lands alike
+    let q = from_axis_angle(vec3(0.0, 1.0, 0.0), float.PI / 4.0)
+    let by_matrix = rotation_y(float.PI / 4.0).transform_point3(vec3(1.0, 1.0, 1.0))
+    print((q * vec3(1.0, 1.0, 1.0) - by_matrix).length() < 1e-12)
+}

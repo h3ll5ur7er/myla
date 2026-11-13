@@ -459,8 +459,12 @@ fun fill_holes(slots: [Value], holes: [bool], argv: [Value]) -> [Value] {
 #test("Point.eq")[false]
 #test("geo$area")[true]
 #test("util$strings$Point.eq")[true]
+#test("V.mul$float64")[false]
 fun is_qualified(name: str) -> bool {
+    // (before a method's dot: an operator method's own name may hold a `$`,
+    // `V.mul$float64`, D198)
     for c in name.chars() {
+        if c == '.' { return false }
         if c == '$' { return true }
     }
     return false

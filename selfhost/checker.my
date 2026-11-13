@@ -1035,6 +1035,43 @@ pub fun op_method_name(m: str, r: Type, r_self: bool) -> str {
     return m + "$" + if r_self { "self" } else { type_token(r) }
 }
 
+// The type a right operand (or index) `x` is read with beside impls taking
+// the right operands `rs` (D198): the only one's; for a number literal, the
+// only one of its kind, so `v * 2.0` picks `Mul<float32, …>` beside a
+// classic `Mul` (an integer literal never becomes a float).
+#test([Type.TStruct("V", []), Type.TFloat(32)], expr_of("2.0"))[Some(Type.TFloat(32))]
+#test([Type.TFloat(64)], expr_of("2"))[None]
+#test([Type.TStr], expr_of("s"))[Some(Type.TStr)]
+fun operand_hint(rs: [Type], x: Expr) -> Option<Type> {
+    let kind = literal_kind(x)
+    if kind == "" {
+        if rs.len() == 1 { return Some(rs[0]) }
+        return None
+    }
+    var h: Option<Type> = None
+    var n = 0
+    for t in rs {
+        if (kind == "float" && is_float(t)) || (kind == "int" && is_int(t)) {
+            h = Some(t)
+            n += 1
+        }
+    }
+    return if n == 1 { h } else { None }
+}
+
+// "int" or "float" for a number literal (negated or not), else "".
+#test(expr_of("-1.5"))["float"]
+#test(expr_of("7"))["int"]
+#test(expr_of("x"))[""]
+fun literal_kind(x: Expr) -> str {
+    return match x.kind {
+        ExprKind.IntLit(v, suf, isc, big) => if isc { "" } else { "int" },
+        ExprKind.FloatLit(lex, suf) => "float",
+        ExprKind.Unary(op, y) => if op == "-" { literal_kind(y) } else { "" },
+        _ => "",
+    }
+}
+
 // The type `h` an operand `x` is read with, but none for an integer literal
 // when `h` is a float: an integer literal never becomes a float (D198).
 fun no_float_for_int(h: Option<Type>, x: Expr) -> Option<Type> {
@@ -1088,7 +1125,7 @@ fun op_bound_text(tr: str, args: [Type], self_t: Type) -> str {
 
 // The method of the operator impl `oi` without its type's key: `mul$float64`
 // of `Vec3.mul$float64`, what a runner calls on its receiver (D198).
-#test(OpImpl { tr: "Mul", key: "V", target: Type.TStruct("V", []), r: Type.TFloat(64), r_self: false, o: Type.TStruct("V", []), method: "V.mul$float64" })["mul$float64"]
+#test(OpImpl { tr: "Mul", key: "V", target: Type.TStruct("V", []), r: Type.TFloat(64), r_self: false, o: Type.TStruct("V", []), method: "V.mul$float64", decl: 0 })["mul$float64"]
 pub fun op_part(oi: OpImpl) -> str {
     return oi.method[oi.key.len() + 1:]
 }
@@ -2277,8 +2314,9 @@ pub struct TraitImplPair { trait_name: str, key: str }
 // (`Vec3.mul$float64`): an operator method beside another of its trait on
 // the same type has the right operand's type in its name. The checker, the
 // interpreter and the code generator pick an impl by the operands' types
-// with `find_op_impl`.
-pub struct OpImpl { tr: str, key: str, target: Type, r: Type, r_self: bool, o: Type, method: str }
+// with `find_op_impl`. `decl` is the impl's declaration (the harness names
+// a case by the renamed method through it).
+pub struct OpImpl { tr: str, key: str, target: Type, r: Type, r_self: bool, o: Type, method: str, decl: int32 }
 
 pub struct AliasRaw { name: str, target: TypeExpr, line: int32, col: int32, sp: SrcSpan, id: int32 }
 pub struct AliasCached { name: str, ty: Type }
@@ -3774,7 +3812,7 @@ impl Checker {
                         tm.name = renamed
                         tinfo.methods = [tm]
                         let last = if tn == "IndexSet" { trait_args[1] } else { trait_args[trait_args.len() - 1] }
-                        self.op_impls.push(OpImpl { tr: tn, key: key, target: target, r: trait_args[0], r_self: r_self, o: last, method: key + "." + renamed })
+                        self.op_impls.push(OpImpl { tr: tn, key: key, target: target, r: trait_args[0], r_self: r_self, o: last, method: key + "." + renamed, decl: decl.id })
                     } else {
                         var dup = false
                         for p in self.user_trait_impls { if p.trait_name == tn && p.key == key { dup = true } }
@@ -3784,7 +3822,7 @@ impl Checker {
                         }
                         self.user_trait_impls.push(TraitImplPair { trait_name: tn, key: key })
                         // `Neg` is one per type, its result in the table too
-                        if tn == "Neg" && conforms { self.op_impls.push(OpImpl { tr: tn, key: key, target: target, r: Type.TTuple([]), r_self: false, o: trait_args[0], method: key + ".neg" }) }
+                        if tn == "Neg" && conforms { self.op_impls.push(OpImpl { tr: tn, key: key, target: target, r: Type.TTuple([]), r_self: false, o: trait_args[0], method: key + ".neg", decl: decl.id }) }
                         // what a bound naming the trait with arguments compares
                         // and solves (D171); an operator's are its own (D198)
                         if conforms && trait_args.len() > 0 && !is_op_trait(tn) { self.impl_args[tn + "\t" + key] = ImplArgs { target: target, args: trait_args } }
@@ -4559,7 +4597,9 @@ impl Checker {
             self.expect_type(r, Type.TBool, format("operand of '{}'", op))?
             return Ok(Type.TBool)
         }
-        if literal_struct(l) && !literal_struct(r) && (is_arith_op(op) || op == "==" || op == "!=" || op == "<" || op == "<=" || op == ">" || op == ">=") {
+        // (beside a number literal the struct is typed first: the literal
+        // takes the type of the impl its kind picks, D198)
+        if literal_struct(l) && !literal_struct(r) && literal_kind(r) == "" && (is_arith_op(op) || op == "==" || op == "!=" || op == "<" || op == "<=" || op == ">" || op == ">=") {
             // a struct of number literals takes the type of the operand
             // beside it, as a number literal does (MYLA-544)
             let rt0 = self.expect_value(r, if is_arith_op(op) { op_hint(expected, None) } else { None })?
@@ -4775,10 +4815,10 @@ impl Checker {
     // only one's right operand; but an integer literal never becomes a
     // float, so `v * 2` asks for `impl Mul<int32, …>`.
     fun op_hint(self, cands: [OpImpl], lt: Type, classic: bool, r: Expr) -> Option<Type> {
-        var h: Option<Type> = None
-        if cands.len() == 1 && !classic { h = Some(if cands[0].r_self { lt } else { cands[0].r }) }
-        if cands.len() == 0 && classic { h = Some(lt) }
-        return no_float_for_int(h, r)
+        var rs: [Type] = []
+        if classic { rs.push(lt) }
+        for c in cands { rs.push(if c.r_self { lt } else { c.r }) }
+        return operand_hint(rs, r)
     }
 
     // `l op r` with `l` of the type `lt` (key `key`), which has impls of the
@@ -4983,9 +5023,9 @@ impl Checker {
         // giving `a * 2.0` (D198)
         if is_arith_trait(trnm) {
             let sets = self.bound_arg_sets(pname, trnm)
-            var hint: Option<Type> = None
-            if sets.len() == 1 { hint = no_float_for_int(Some(sets[0][0]), r) }
-            let rt1 = self.expect_value(r, hint)?
+            var rs: [Type] = []
+            for a in sets { rs.push(a[0]) }
+            let rt1 = self.expect_value(r, operand_hint(rs, r))?
             for a in sets {
                 if type_eq(a[0], rt1) {
                     // (the impl picked by the types where they are known)

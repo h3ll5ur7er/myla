@@ -61,6 +61,7 @@ EXPECTED = {
     "branches_and_defaults.my": ("2\npositive\n3\nport 443\nbad port: not a digit: x\n"
                                  "Hello, Myla!\nHello, Myla?\n2\n1\nlift-off\n"),
     "time_and_math.my": "1.41\ntrue\n3.141592653589793\nanswered 7\ngave up\n7\ntrue\n",
+    "transforms.my": "(243, 275)\n(320, 249)\n(235, 164)\n(320, 154)\n(320, 312)\n(397, 275)\n(320, 179)\n(405, 164)\ntrue\n",
 }
 
 def run_file(path: str) -> str:

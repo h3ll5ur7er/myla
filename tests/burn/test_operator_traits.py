@@ -108,11 +108,36 @@ impl Mul for Mat2 {
     }
 }
 
+// beside the classic `Mul`: a float literal on the right picks this one
+impl Mul<float> for Mat2 {
+    fun mul(self, k: float) -> Mat2 {
+        return Mat2 { a: self.a * k, b: self.b * k, c: self.c * k, d: self.d * k }
+    }
+}
+
 impl Index<(int, int), float> for Mat2 {
     fun index(self, rc: (int, int)) -> float {
         let (r, c) = rc
         if r == 0 { return if c == 0 { self.a } else { self.b } }
         return if c == 0 { self.c } else { self.d }
+    }
+}
+
+#derive(Eq)
+// float32 beside a classic `Mul`: the float literal takes the float32 impl
+struct Narrow {
+    v: float32,
+}
+
+impl Mul for Narrow {
+    fun mul(self, o: Narrow) -> Narrow {
+        return Narrow { v: self.v * o.v }
+    }
+}
+
+impl Mul<float32> for Narrow {
+    fun mul(self, k: float32) -> Narrow {
+        return Narrow { v: self.v * k }
     }
 }
 
@@ -187,6 +212,8 @@ fun main() {
     print(m * u)
     print(m * m * u)
     print(m[(0, 1)])
+    print((m * 2.0)[(0, 1)] + (m * m * -1.0)[(0, 0)])
+    print((Narrow { v: 1.5 } * 2.0 * Narrow { v: 2.0 }).v)
     var p = Vec2 { x: 0.0, y: 0.0 }
     let vel = Vec2 { x: 1.0, y: 0.5 }
     p += vel * 2.0
@@ -229,6 +256,8 @@ WANT = """(4, 1)
 (-2, 1)
 (-1, -2)
 -1
+-1
+6
 (7.5, 5)
 true
 (2, 0.5)
@@ -316,6 +345,51 @@ ERRORS = [
 ]
 
 
+# `#test` cases above operator methods: the native harness calls them through
+# their operators, as a method beside others of its trait is renamed for its
+# right operand's type
+CASES = """#derive(Eq)
+struct V {
+    x: float,
+}
+
+impl Mul<float> for V {
+    #test(V { x: 2.0 }, 3.0)[V { x: 6.0 }]
+    fun mul(self, k: float) -> V {
+        return V { x: self.x * k }
+    }
+}
+
+impl Mul for V {
+    #test(V { x: 2.0 }, V { x: 4.0 })[V { x: 8.0 }]
+    fun mul(self, o: V) -> V {
+        return V { x: self.x * o.x }
+    }
+}
+
+impl Neg for V {
+    #test(V { x: 2.0 })[V { x: -2.0 }]
+    fun neg(self) -> V {
+        return V { x: -self.x }
+    }
+}
+
+impl Index<int, float> for V {
+    #test(V { x: 2.0 }, 0)[2.0]
+    fun index(self, i: int) -> float {
+        return self.x
+    }
+}
+
+impl IndexSet<int, float> for V {
+    #test(V { x: 2.0 }, 0, 5.0)[()]
+    fun set_index(var self, i: int, v: float) {
+        self.x = v
+    }
+}
+"""
+
+
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
 class OperatorTraits(unittest.TestCase):
     def setUp(self) -> None:
@@ -326,6 +400,18 @@ class OperatorTraits(unittest.TestCase):
 
     def test_in_async_functions(self) -> None:
         self.assertEqual(run_source_both_now(ASYNC_PROGRAM), (ASYNC_WANT, "", 0))
+
+    def test_cases_on_operator_methods(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "cases.my")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(CASES)
+            for flags in ([], ["--native"]):
+                with self.subTest(flags=flags):
+                    proc = subprocess.run([self.myla, "test", path, "--stdlib", STDLIB_ROOT, *flags],
+                                          capture_output=True, text=True, cwd=tmp)
+                    self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+                    self.assertIn("5/5 passed.", proc.stdout)
 
     def test_errors(self) -> None:
         for src, want in ERRORS:

@@ -1,0 +1,170 @@
+// std.algebra: the traits of a type's distinguished values (D199, MYLA-587).
+//
+// `Zero` is the additive identity, `One` the multiplicative one of a number
+// (and a vector of ones), `Identity` what `*` leaves unchanged for a matrix or
+// a rotation. They are functions without `self` (D172), called on a type:
+// `int.zero()`, `Vec3.zero()`, `Mat4.identity()`, or `T.zero()` in generic
+// code bounded by the trait. Every number type implements `Zero` and `One`
+// here; std.vector, std.matrix and std.quaternion implement them for theirs.
+// A program that imports this module (or one of those) can't also give a
+// number type a `zero` or `one` method of its own: the trait's is that
+// type's method.
+
+pub trait Zero {
+    fun zero() -> Self
+}
+
+pub trait One {
+    fun one() -> Self
+}
+
+pub trait Identity {
+    fun identity() -> Self
+}
+
+// The sum of `xs`, from `T.zero()`.
+pub fun sum<T: Add + Zero>(xs: [T]) -> T {
+    var acc = T.zero()
+    for x in xs {
+        acc = acc + x
+    }
+    return acc
+}
+
+// The product of `xs`, from `T.one()`.
+pub fun product<T: Mul + One>(xs: [T]) -> T {
+    var acc = T.one()
+    for x in xs {
+        acc = acc * x
+    }
+    return acc
+}
+
+#test
+fun sums_and_products_start_at_zero_and_one() {
+    assert(sum([1, 2, 3]) == 6)
+    let none: [int64] = []
+    assert(sum(none) == 0)
+    assert(product([2.0, 3.0, 4.0]) == 24.0)
+    assert(uint8.one() == 1 && float32.zero() == 0.0)
+}
+
+impl Zero for int8 {
+    fun zero() -> int8 {
+        return 0
+    }
+}
+
+impl One for int8 {
+    fun one() -> int8 {
+        return 1
+    }
+}
+
+impl Zero for int16 {
+    fun zero() -> int16 {
+        return 0
+    }
+}
+
+impl One for int16 {
+    fun one() -> int16 {
+        return 1
+    }
+}
+
+impl Zero for int32 {
+    fun zero() -> int32 {
+        return 0
+    }
+}
+
+impl One for int32 {
+    fun one() -> int32 {
+        return 1
+    }
+}
+
+impl Zero for int64 {
+    fun zero() -> int64 {
+        return 0
+    }
+}
+
+impl One for int64 {
+    fun one() -> int64 {
+        return 1
+    }
+}
+
+impl Zero for uint8 {
+    fun zero() -> uint8 {
+        return 0
+    }
+}
+
+impl One for uint8 {
+    fun one() -> uint8 {
+        return 1
+    }
+}
+
+impl Zero for uint16 {
+    fun zero() -> uint16 {
+        return 0
+    }
+}
+
+impl One for uint16 {
+    fun one() -> uint16 {
+        return 1
+    }
+}
+
+impl Zero for uint32 {
+    fun zero() -> uint32 {
+        return 0
+    }
+}
+
+impl One for uint32 {
+    fun one() -> uint32 {
+        return 1
+    }
+}
+
+impl Zero for uint64 {
+    fun zero() -> uint64 {
+        return 0
+    }
+}
+
+impl One for uint64 {
+    fun one() -> uint64 {
+        return 1
+    }
+}
+
+impl Zero for float32 {
+    fun zero() -> float32 {
+        return 0.0
+    }
+}
+
+impl One for float32 {
+    fun one() -> float32 {
+        return 1.0
+    }
+}
+
+impl Zero for float64 {
+    fun zero() -> float64 {
+        return 0.0
+    }
+}
+
+impl One for float64 {
+    fun one() -> float64 {
+        return 1.0
+    }
+}
