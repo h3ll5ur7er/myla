@@ -28,6 +28,7 @@
 from std.process import args, exit
 from std.io import eprintln, println
 from std.platform import TARGET
+from std.rt import heap_huge_pages
 from .repl import repl
 from .loader import load_options, LoadOptions, parse_package_flag
 from .stdroot import default_stdlib_root
@@ -162,6 +163,8 @@ fun parse_command_line(argv: [str]) -> Result<CommandLine, CliError> {
 }
 
 fun main() {
+    // huge pages for the heap: a check touches megabytes of it (MYLA-608)
+    heap_huge_pages()
     let argv = args()
     if argv.len() < 2 {
         usage()

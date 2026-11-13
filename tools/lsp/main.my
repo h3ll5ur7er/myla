@@ -13,6 +13,7 @@
 from std.process import args, exit
 from std.fs import read_to_string
 from std.io import eprintln
+from std.rt import heap_huge_pages
 from ...selfhost.loader import normalize
 from ...selfhost.stdroot import default_stdlib_root
 from .server import new_server
@@ -20,6 +21,8 @@ from .resolve import resolve, describe
 from .projects import context_of
 
 fun main() {
+    // huge pages for the heap: each check touches megabytes of it (MYLA-608)
+    heap_huge_pages()
     let argv = args()
     var stdlib = default_stdlib_root()
     var files: [str] = []

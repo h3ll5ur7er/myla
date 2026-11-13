@@ -2743,6 +2743,29 @@ fun write_err_num(n: int64) {
 // much address space as it uses.
 
 const CHUNK: int64 = 16777216  // 16 MiB, a power of two
+const HUGE_PAGE: int64 = 2097152  // 2 MiB, a huge page of x86-64's and aarch64's
+
+// The toolchain's opt-in to huge pages for the heap (MYLA-608): every
+// chunk mapped from now on is advised (`advise_huge_pages`), and so is the
+// rest of this worker's arena from its next 2 MiB boundary, where it goes on
+// (the bytes before it skipped: a 2 MiB part already touched faults 4 KB at
+// a time). A check of a small program touches a few MB of fresh heap, a
+// fault for each 4 KB without this, one for each 2 MiB with it; but each
+// worker that allocates zeroes a whole 2 MiB page at once, which only a
+// program that allocates that much gains from, so it is the toolchain's
+// choice, not every program's.
+pub fun heap_huge_pages() {
+    if !os.HUGE_PAGES {
+        return
+    }
+    __store64(__rt_addr("__heap_huge"), 1)
+    let end = __rt_get("__heap_end")
+    let at = (__rt_get("__heap_ptr") + HUGE_PAGE - 1) & -HUGE_PAGE
+    if at < end {
+        os.advise_huge_pages(at, end - at)
+        __store64(__rt_addr("__heap_ptr"), at)
+    }
+}
 
 // `__alloc`: a cell of at least `n` bytes, its count 1.
 pub fun alloc(n: int64) -> int64 {
@@ -2784,6 +2807,9 @@ fun alloc_mapped(size: int64) -> int64 {
     let m = os.map_memory(CHUNK)
     if m < 0 {
         __trap_oom()
+    }
+    if __rt_get("__heap_huge") != 0 {
+        os.advise_huge_pages(m, CHUNK)
     }
     __store64(__rt_addr("__heap_ptr"), m + 16 + size)
     __store64(__rt_addr("__heap_end"), m + CHUNK)
@@ -2859,6 +2885,9 @@ fun alloc_tasks_mapped(size: int64) -> int64 {
         return alloc_big(size, 32, __rt_get("__worker_id"))
     }
     let m = map_aligned(span)
+    if __rt_get("__heap_huge") != 0 {
+        os.advise_huge_pages(m, span)
+    }
     __store64(m, __rt_get("__worker_id"))
     if span == CHUNK {
         __store64(__rt_addr("__heap_ptr"), m + 32 + size)

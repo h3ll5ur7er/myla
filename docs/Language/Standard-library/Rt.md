@@ -11,11 +11,11 @@ Not for programs: the runtime written in Myla ([[MYLA-162]], D117), which a nati
 | `std.io`'s reader, `std.process.args` and `env` | `read`, `poll`, `args`, `getenv` |
 | `std.test` | `test_dir` and `test_program`: the running case's scratch root and the program under test, "" outside `myla test` (natively, the environment variables `MYLA_TEST_DIR` and `MYLA_TEST_PROGRAM` the harness of `myla test --native` sets) |
 | `std.process.run` and `Command` | `run`, `run_with`, `spawn`, `spawn_with`, `reap`, `kill`, `close` (fork, exec, both outputs read as they come through poll, wait) |
-| the heap | `alloc`, `free` and their tasks' forms (D157) |
+| the heap | `alloc`, `free` and their tasks' forms (D157); `heap_huge_pages`, the toolchain's opt-in to huge pages for the heap's chunks, which `myla`, `gen_main` and the language server call at their start ([[MYLA-608]]; a program may too, but pays a 2 MiB page per worker that allocates) |
 | tasks, timers, the reactor | the executor, `cancel_after`, the timers, the descriptor watches and the notifiers ([[Language/Concurrency]], [[MYLA-387]]) |
 | the end of the program | `exit_program(code)` (`__exit_program`), where a native program ends however it ends: the entry point's return, `exit`, `panic_report` (every runtime error), the stack overflow's report, a failed task. It runs `exit_hook`, then `std.platform`'s `exit`; `exit_hook` puts back the terminal mode `term_raw` kept in the runtime variable `__exit_hook` (its descriptor plus one, then the mode as a static string's cell), once (D187, [[MYLA-426]]). A closed pipe's quiet end runs the hook too; wasm32, which has no terminal modes, ends through it as well ([[MYLA-547]]). In a test child of `myla test --native` (D191), where `std.test` put the records' head in the runtime variable `__test_report`, `test_record` writes how the case ended as a record on stderr: `panic_report` a runtime error's (`E`, instead of the report), `exit_program` an exit's (`X`, with the status the process ends with) or a stack overflow's, once |
 
-A program never names std.rt, but natively each line of this one runs through it: the comments name the function behind the operation.
+A program never names std.rt (the toolchain's `heap_huge_pages` aside), yet natively each line of this one runs through it: the comments name the function behind the operation.
 
 ```myla
 from std.io import println
