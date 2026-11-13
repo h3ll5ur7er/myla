@@ -47,6 +47,13 @@ if [ ! -f "$SEED" ]; then
 fi
 echo "==> stage0: the seed for $HOST_TARGET ($SEED), assembled and linked"
 asm_to_bin "$SEED" "$OUT_DIR/stage0"
+# the seed is updated only when it can't bootstrap the sources (D207): when
+# it can't, the stages it builds fail here, and this says what to do
+seed_hint() {
+    echo "FAIL: $SEED can't build these sources; if they use something it doesn't know (a primitive, a runtime variable, an attribute), run scripts/update-seed.sh and commit the seeds, as a \`Stage:\` commit before that use (D207)" >&2
+}
+set -E    # the trap in the functions too (run_tool, asm_to_bin)
+trap 'seed_hint' ERR
 echo "==> embed: the standard library the toolchain carries (MYLA-243)"
 # stage0 builds tools/embed, which writes selfhost/embedded_std.my from lib/
 # when it changed, so every stage below carries the same library
@@ -65,6 +72,8 @@ asm_to_bin "$OUT_DIR/stage2.s" "$OUT_DIR/stage2"
 echo "==> stage3: stage2 compiles the compiler"
 run_tool "$OUT_DIR/stage2" "$ENTRY" "$STDLIB_ROOT" > "$OUT_DIR/stage3.s"
 asm_to_bin "$OUT_DIR/stage3.s" "$OUT_DIR/stage3"
+trap - ERR
+set +E
 
 echo "==> fixpoint: comparing stage2.s and stage3.s"
 if cmp -s "$OUT_DIR/stage2.s" "$OUT_DIR/stage3.s"; then

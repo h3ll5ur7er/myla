@@ -6,7 +6,9 @@
 # server choice, gdb for the debug-information tests, and Go for the oracle
 # of test_regex. The runners are
 # pinned (ubuntu-24.04: its python3 is 3.12, which gdb embeds). The vscode-extension job typechecks, lints and tests the VS
-# Code extension and uploads its .vsix. See docs/Development/Testing.md.
+# Code extension and uploads its .vsix. On a push to master the bootstrap
+# jobs upload the commit's seeds and each machine's myla and myla-lsp (D207).
+# See docs/Development/Testing.md.
 name: CI
 
 on:
@@ -140,7 +142,7 @@ jobs:
       # from the seed: as and ld only, no Python (MYLA-218)
       - name: Build stage 0–3 from bootstrap/seed.s and compare stage2.s with stage3.s
         run: scripts/bootstrap.sh build
-      - name: The seed is the current compiler (else run scripts/update-seed.sh and commit it)
+      - name: The seed bootstraps the sources and the embedded library is current (D207)
         run: scripts/check-seed.sh build
       - name: Self-hosted compiler builds and runs an example
         run: |
@@ -148,6 +150,30 @@ jobs:
           as --64 -o build/hello.o build/hello.s
           ld -o build/hello build/hello.o
           build/hello
+      # each master commit's seeds, for every target, and this machine's
+      # tools, as workflow artifacts (D207, MYLA-629): the seeds a commit
+      # bootstraps from stay committed, as artifacts expire; tagged releases
+      # can replace these later. The tools go in a tarball, which keeps
+      # their executable bit (an artifact's zip doesn't)
+      - name: The seeds of this commit and the x86-64 tools (master only)
+        if: github.event_name == 'push'
+        run: |
+          scripts/update-seed.sh --out build/artifacts/seeds
+          tar -czf build/artifacts/myla-x86_64-linux.tar.gz -C build myla myla-lsp
+      - uses: actions/upload-artifact@v7
+        if: github.event_name == 'push'
+        with:
+          name: myla-seeds-${{ github.sha }}
+          path: build/artifacts/seeds/*.s
+          if-no-files-found: error
+          retention-days: 90
+      - uses: actions/upload-artifact@v7
+        if: github.event_name == 'push'
+        with:
+          name: myla-x86_64-linux-${{ github.sha }}
+          path: build/artifacts/myla-x86_64-linux.tar.gz
+          if-no-files-found: error
+          retention-days: 90
 
   bootstrap-arm64:
     # what a Raspberry Pi 4 with a 64-bit OS does (MYLA-276, D127): `just
@@ -164,8 +190,20 @@ jobs:
           sudo apt-get install -y -qq just
       - name: just bootstrap (bootstrap/seed-aarch64.s, stages 0–3, the fixed point)
         run: just bootstrap
-      - name: The seeds are the current compiler (the x86-64 one written by this aarch64 compiler)
+      - name: The aarch64 seed bootstraps the sources and the embedded library is current (D207)
         run: scripts/check-seed.sh build
+      - name: This machine's tools (master only, D207)
+        if: github.event_name == 'push'
+        run: |
+          mkdir -p build/artifacts
+          tar -czf build/artifacts/myla-aarch64-linux.tar.gz -C build myla myla-lsp
+      - uses: actions/upload-artifact@v7
+        if: github.event_name == 'push'
+        with:
+          name: myla-aarch64-linux-${{ github.sha }}
+          path: build/artifacts/myla-aarch64-linux.tar.gz
+          if-no-files-found: error
+          retention-days: 90
       - name: Every example built for this machine gives what the interpreter gives
         run: |
           fail=0
