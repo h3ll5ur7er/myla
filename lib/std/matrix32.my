@@ -14,6 +14,8 @@
 // operators checking the shapes. Matrices print by rows: `[(1, 0), (0, 1)]`.
 
 import std.float as fl
+import std.json as json_m
+from std.json import Json, JsonError
 from std.algebra import Zero, Identity
 from std.vector32 import Vec2, Vec3, Vec4, Vector, vec2, vec3, vec4
 from std.matrix import Mat2 as Mat2F64, Mat3 as Mat3F64, Mat4 as Mat4F64, Matrix as MatrixF64
@@ -61,7 +63,10 @@ impl Mul for Mat2 {
 
 impl Mul<Vec2, Vec2> for Mat2 {
     fun mul(self, v: Vec2) -> Vec2 {
-        return self.x_axis * v.x + self.y_axis * v.y
+        return Vec2 {
+            x: self.x_axis.x * v.x + self.y_axis.x * v.y,
+            y: self.x_axis.y * v.x + self.y_axis.y * v.y,
+        }
     }
 }
 
@@ -214,7 +219,11 @@ impl Mul for Mat3 {
 
 impl Mul<Vec3, Vec3> for Mat3 {
     fun mul(self, v: Vec3) -> Vec3 {
-        return self.x_axis * v.x + self.y_axis * v.y + self.z_axis * v.z
+        return Vec3 {
+            x: self.x_axis.x * v.x + self.y_axis.x * v.y + self.z_axis.x * v.z,
+            y: self.x_axis.y * v.x + self.y_axis.y * v.y + self.z_axis.y * v.z,
+            z: self.x_axis.z * v.x + self.y_axis.z * v.y + self.z_axis.z * v.z,
+        }
     }
 }
 
@@ -384,7 +393,12 @@ impl Mul for Mat4 {
 
 impl Mul<Vec4, Vec4> for Mat4 {
     fun mul(self, v: Vec4) -> Vec4 {
-        return self.x_axis * v.x + self.y_axis * v.y + self.z_axis * v.z + self.w_axis * v.w
+        return Vec4 {
+            x: self.x_axis.x * v.x + self.y_axis.x * v.y + self.z_axis.x * v.z + self.w_axis.x * v.w,
+            y: self.x_axis.y * v.x + self.y_axis.y * v.y + self.z_axis.y * v.z + self.w_axis.y * v.w,
+            z: self.x_axis.z * v.x + self.y_axis.z * v.y + self.z_axis.z * v.z + self.w_axis.z * v.w,
+            w: self.x_axis.w * v.x + self.y_axis.w * v.y + self.z_axis.w * v.z + self.w_axis.w * v.w,
+        }
     }
 }
 
@@ -963,5 +977,97 @@ impl Matrix {
         var d: [float64] = []
         for x in self.data { d.push(x as float64) }
         return MatrixF64 { rows: self.rows, cols: self.cols, data: d }
+    }
+}
+
+// --- JSON -------------------------------------------------------------------
+//
+// A vector is the array of its components, a matrix the array of its
+// elements column by column, a quaternion `[x, y, z, w]`: as glTF writes
+// them, so a document's `"translation": [1, 2, 3]` reads as a `Vec3`.
+
+// The numbers of the JSON array `j`, `n` of them (any number when `n` is
+// negative), for the `FromJson` impl of the type `what`.
+#test(Json.Array([Json.Int(1i64), Json.Float(2.5)]), 2, "Vec2")[Ok([1.0, 2.5])]
+#test(Json.Array([Json.Int(1i64)]), 2, "Vec2")[Err(json_m.wrong_type("an array of 2 numbers for 'Vec2'", Json.Array([Json.Int(1i64)])))]
+fun json_numbers(j: Json, n: int, what: str) -> Result<[float32], JsonError> {
+    let want = if n < 0 { "an array of numbers" } else { f"an array of {n} numbers" }
+    match j {
+        Json.Array(items) => {
+            if n >= 0 && items.len() != n { return Err(json_m.wrong_type(f"{want} for '{what}'", j)) }
+            var out: [float32] = []
+            var i = 0
+            for item in items {
+                out.push(json_m.within(float32.from_json(item), f"[{i}]")?)
+                i += 1
+            }
+            return Ok(out)
+        }
+        _ => { return Err(json_m.wrong_type(f"{want} for '{what}'", j)) }
+    }
+}
+
+impl json_m.ToJson for Mat2 {
+    #test(mat2(vec2(1.0, 2.0), vec2(3.0, 4.0)))[Json.Array([Json.Float(1.0), Json.Float(2.0), Json.Float(3.0), Json.Float(4.0)])]
+    fun to_json(self) -> Json {
+        return Json.Array([self.x_axis.x.to_json(), self.x_axis.y.to_json(), self.y_axis.x.to_json(), self.y_axis.y.to_json()])
+    }
+}
+
+impl json_m.FromJson for Mat2 {
+    fun from_json(j: Json) -> Result<Mat2, JsonError> {
+        let c = json_numbers(j, 4, "Mat2")?
+        return Ok(Mat2 { x_axis: vec2(c[0], c[1]), y_axis: vec2(c[2], c[3]) })
+    }
+}
+
+impl json_m.ToJson for Mat3 {
+    #test(mat3(vec3(1.0, 2.0, 3.0), vec3(4.0, 5.0, 6.0), vec3(7.0, 8.0, 9.0)))[Json.Array([Json.Float(1.0), Json.Float(2.0), Json.Float(3.0), Json.Float(4.0), Json.Float(5.0), Json.Float(6.0), Json.Float(7.0), Json.Float(8.0), Json.Float(9.0)])]
+    fun to_json(self) -> Json {
+        return Json.Array([self.x_axis.x.to_json(), self.x_axis.y.to_json(), self.x_axis.z.to_json(), self.y_axis.x.to_json(), self.y_axis.y.to_json(), self.y_axis.z.to_json(), self.z_axis.x.to_json(), self.z_axis.y.to_json(), self.z_axis.z.to_json()])
+    }
+}
+
+impl json_m.FromJson for Mat3 {
+    fun from_json(j: Json) -> Result<Mat3, JsonError> {
+        let c = json_numbers(j, 9, "Mat3")?
+        return Ok(Mat3 { x_axis: vec3(c[0], c[1], c[2]), y_axis: vec3(c[3], c[4], c[5]), z_axis: vec3(c[6], c[7], c[8]) })
+    }
+}
+
+impl json_m.ToJson for Mat4 {
+    #test(mat4(vec4(1.0, 2.0, 3.0, 4.0), vec4(5.0, 6.0, 7.0, 8.0), vec4(9.0, 10.0, 11.0, 12.0), vec4(13.0, 14.0, 15.0, 16.0)))[Json.Array([Json.Float(1.0), Json.Float(2.0), Json.Float(3.0), Json.Float(4.0), Json.Float(5.0), Json.Float(6.0), Json.Float(7.0), Json.Float(8.0), Json.Float(9.0), Json.Float(10.0), Json.Float(11.0), Json.Float(12.0), Json.Float(13.0), Json.Float(14.0), Json.Float(15.0), Json.Float(16.0)])]
+    fun to_json(self) -> Json {
+        return Json.Array([self.x_axis.x.to_json(), self.x_axis.y.to_json(), self.x_axis.z.to_json(), self.x_axis.w.to_json(), self.y_axis.x.to_json(), self.y_axis.y.to_json(), self.y_axis.z.to_json(), self.y_axis.w.to_json(), self.z_axis.x.to_json(), self.z_axis.y.to_json(), self.z_axis.z.to_json(), self.z_axis.w.to_json(), self.w_axis.x.to_json(), self.w_axis.y.to_json(), self.w_axis.z.to_json(), self.w_axis.w.to_json()])
+    }
+}
+
+impl json_m.FromJson for Mat4 {
+    fun from_json(j: Json) -> Result<Mat4, JsonError> {
+        let c = json_numbers(j, 16, "Mat4")?
+        return Ok(Mat4 { x_axis: vec4(c[0], c[1], c[2], c[3]), y_axis: vec4(c[4], c[5], c[6], c[7]), z_axis: vec4(c[8], c[9], c[10], c[11]), w_axis: vec4(c[12], c[13], c[14], c[15]) })
+    }
+}
+
+// `{"rows": 2, "cols": 3, "data": […]}`, the elements column by column.
+impl json_m.ToJson for Matrix {
+    #test(matrix(2, 1, [5.0, 6.0]))[Json.Object([("rows", Json.Int(2i64)), ("cols", Json.Int(1i64)), ("data", Json.Array([Json.Float(5.0), Json.Float(6.0)]))])]
+    fun to_json(self) -> Json {
+        var items: [Json] = []
+        for x in self.data { items.push(x.to_json()) }
+        return json_m.obj([("rows", self.rows.to_json()), ("cols", self.cols.to_json()), ("data", Json.Array(items))])
+    }
+}
+
+impl json_m.FromJson for Matrix {
+    fun from_json(j: Json) -> Result<Matrix, JsonError> {
+        let ms = json_m.members(j, "Matrix")?
+        let rows = json_m.member<int>(ms, "rows")?
+        let cols = json_m.member<int>(ms, "cols")?
+        let data = json_m.member<[float32]>(ms, "data")?
+        if rows < 0 || cols < 0 || data.len() != rows * cols {
+            return Err(JsonError { kind: json_m.JsonErrorKind.WrongType, msg: f"a {rows}x{cols} matrix takes {rows * cols} elements, got {data.len()}", line: 0, col: 0, path: "$.data" })
+        }
+        return Ok(Matrix { rows: rows, cols: cols, data: data })
     }
 }

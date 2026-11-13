@@ -69,9 +69,12 @@ VECTOR_DOC = """// `Vec2`, `Vec3` and `Vec4` (fields `x`, `y`, `z`, `w`), made b
 // vectors are by component, `v * s`, `s * v` and `v / s` scale, `-v` negates,
 // `v[i]` reads a component and `v[i] = s` writes one (D200); `dot`, `cross`,
 // `length`, `normalized` and the rest are methods. Vectors are `Eq`, `Hash`
-// (map keys, D198) and print as `(1, 2, 3)`.
+// (map keys, D198), print as `(1, 2, 3)` and are JSON arrays, `[1.0, 2.0, 3.0]`,
+// as glTF writes them (`Vector` too).
 
 import std.float as fl
+import std.json as json_m
+from std.json import Json, JsonError
 from std.algebra import Zero, One
 from std.vector@OSFX@ import Vec2 as Vec2@O@, Vec3 as Vec3@O@, Vec4 as Vec4@O@, Vector as Vector@O@
 """
@@ -335,17 +338,6 @@ fun same_len(a: Vector, b: Vector) {
     if a.data.len() != b.data.len() { panic(f"vector lengths differ: {a.data.len()} and {b.data.len()}") }
 }
 
-// `a op b` by element, the lengths checked.
-fun zip_with(a: Vector, b: Vector, f: (@S@, @S@) -> @S@) -> Vector {
-    same_len(a, b)
-    var d: [@S@] = []
-    var i = 0
-    while i < a.data.len() {
-        d.push(f(a.data[i], b.data[i]))
-        i += 1
-    }
-    return Vector { data: d }
-}
 
 impl Format for Vector {
     fun format(self, spec: str) -> str {
@@ -364,37 +356,76 @@ impl Format for Vector {
 
 impl Add for Vector {
     fun add(self, o: Vector) -> Vector {
-        return zip_with(self, o, (a: @S@, b: @S@) => a + b)
+        same_len(self, o)
+        var d: [@S@] = []
+        var i = 0
+        while i < self.data.len() {
+            d.push(self.data[i] + o.data[i])
+            i += 1
+        }
+        return Vector { data: d }
     }
 }
 
 impl Sub for Vector {
     fun sub(self, o: Vector) -> Vector {
-        return zip_with(self, o, (a: @S@, b: @S@) => a - b)
+        same_len(self, o)
+        var d: [@S@] = []
+        var i = 0
+        while i < self.data.len() {
+            d.push(self.data[i] - o.data[i])
+            i += 1
+        }
+        return Vector { data: d }
     }
 }
 
 impl Mul for Vector {
     fun mul(self, o: Vector) -> Vector {
-        return zip_with(self, o, (a: @S@, b: @S@) => a * b)
+        same_len(self, o)
+        var d: [@S@] = []
+        var i = 0
+        while i < self.data.len() {
+            d.push(self.data[i] * o.data[i])
+            i += 1
+        }
+        return Vector { data: d }
     }
 }
 
 impl Neg for Vector {
     fun neg(self) -> Vector {
-        return self.map((a: @S@) => -a)
+        var d: [@S@] = []
+        var i = 0
+        while i < self.data.len() {
+            d.push(-self.data[i])
+            i += 1
+        }
+        return Vector { data: d }
     }
 }
 
 impl Mul<@S@> for Vector {
     fun mul(self, k: @S@) -> Vector {
-        return self.map((a: @S@) => a * k)
+        var d: [@S@] = []
+        var i = 0
+        while i < self.data.len() {
+            d.push(self.data[i] * k)
+            i += 1
+        }
+        return Vector { data: d }
     }
 }
 
 impl Div<@S@> for Vector {
     fun div(self, k: @S@) -> Vector {
-        return self.map((a: @S@) => a / k)
+        var d: [@S@] = []
+        var i = 0
+        while i < self.data.len() {
+            d.push(self.data[i] / k)
+            i += 1
+        }
+        return Vector { data: d }
     }
 }
 
@@ -478,6 +509,7 @@ def vector_module(p: Precision) -> str:
     for n in (2, 3, 4):
         out += vec_block(p, n)
     out += fill(DYN_VECTOR, p)
+    out += vector_json(p)
     return out
 
 
@@ -496,6 +528,8 @@ MATRIX_DOC = """// `Mat2`, `Mat3` and `Mat4`, column-major: the columns are the 
 // operators checking the shapes. Matrices print by rows: `[(1, 0), (0, 1)]`.
 
 import std.float as fl
+import std.json as json_m
+from std.json import Json, JsonError
 from std.algebra import Zero, Identity
 from std.vector@SFX@ import Vec2, Vec3, Vec4, Vector, vec2, vec3, vec4
 from std.matrix@OSFX@ import Mat2 as Mat2@O@, Mat3 as Mat3@O@, Mat4 as Mat4@O@, Matrix as Matrix@O@
@@ -520,7 +554,9 @@ def mat_block(p: Precision, n: int) -> str:
     rows_fmt = " + \", \" + ".join(f"f\"{{self.row({i})}}\"" for i in range(n))
     trace = " + ".join(f"self.{a}.{cs[i]}" for i, a in enumerate(axes))
     to_list = "[" + ", ".join(f"self.{a}.{c}" for a in axes for c in cs) + "]"
-    mulv = " + ".join(f"self.{a} * v.{cs[i]}" for i, a in enumerate(axes))
+    # by component, not as a sum of scaled columns: no temporary vectors
+    # (25 % faster for Mat4 * Vec4 natively, benchmarks/linalg_std.my)
+    mulv = f"{V} {{\n" + "".join(f"            {c}: " + " + ".join(f"self.{a}.{c} * v.{cs[i]}" for i, a in enumerate(axes)) + ",\n" for c in cs) + "        }"
     ident_test = ", ".join(f"{V} {{ " + ", ".join(f"{c}: {'1.0' if j == i else '0.0'}" for j, c in enumerate(cs)) + " }" for i in range(n))
     out = f"""
 #derive(Eq, Hash)
@@ -1207,6 +1243,7 @@ def matrix_module(p: Precision) -> str:
         out += mat_block(p, n)
     out += fill(TRANSFORMS, p)
     out += fill(DYN_MATRIX, p)
+    out += matrix_json(p)
     return out
 
 
@@ -1223,6 +1260,8 @@ QUATERNION = """// `Quat` (fields `x`, `y`, `z`, `w`: the vector part, then the 
 // from the axis' positive side), as std.matrix@SFX@'s.
 
 import std.float as fl
+import std.json as json_m
+from std.json import Json, JsonError
 from std.algebra import Identity
 from std.vector@SFX@ import Vec3, vec3
 from std.matrix@SFX@ import Mat3, Mat4, mat3
@@ -1411,7 +1450,134 @@ impl Quat {
 def quaternion_module(p: Precision) -> str:
     out = HEADER.format(module="quaternion", suffix=p.suffix, what="quaternions", scalar=p.scalar,
                         other_scalar=p.other_scalar, other_suffix=p.other_suffix)
-    return out + fill(QUATERNION, p)
+    return out + fill(QUATERNION, p) + quaternion_json(p)
+
+
+# --------------------------------------------------------------------------
+# JSON: arrays, as glTF writes them (the owner's choice, 2026-11-13)
+# --------------------------------------------------------------------------
+
+JSON_HELPER = """
+// --- JSON -------------------------------------------------------------------
+//
+// A vector is the array of its components, a matrix the array of its
+// elements column by column, a quaternion `[x, y, z, w]`: as glTF writes
+// them, so a document's `"translation": [1, 2, 3]` reads as a `Vec3`.
+
+// The numbers of the JSON array `j`, `n` of them (any number when `n` is
+// negative), for the `FromJson` impl of the type `what`.
+#test(Json.Array([Json.Int(1i64), Json.Float(2.5)]), 2, "Vec2")[Ok([1.0, 2.5])]
+#test(Json.Array([Json.Int(1i64)]), 2, "Vec2")[Err(json_m.wrong_type("an array of 2 numbers for 'Vec2'", Json.Array([Json.Int(1i64)])))]
+fun json_numbers(j: Json, n: int, what: str) -> Result<[@S@], JsonError> {
+    let want = if n < 0 { "an array of numbers" } else { f"an array of {n} numbers" }
+    match j {
+        Json.Array(items) => {
+            if n >= 0 && items.len() != n { return Err(json_m.wrong_type(f"{want} for '{what}'", j)) }
+            var out: [@S@] = []
+            var i = 0
+            for item in items {
+                out.push(json_m.within(@S@.from_json(item), f"[{i}]")?)
+                i += 1
+            }
+            return Ok(out)
+        }
+        _ => { return Err(json_m.wrong_type(f"{want} for '{what}'", j)) }
+    }
+}
+"""
+
+
+def json_impls(t: str, elems: list[str], build: str, test_value: str, test_json: str) -> str:
+    """`impl ToJson` and `impl FromJson` for the type `t`, an array of the
+    fields `elems`; `build` makes a `t` of the list `c`."""
+    items = ", ".join(f"self.{e}.to_json()" for e in elems)
+    return f"""
+impl json_m.ToJson for {t} {{
+    #test({test_value})[{test_json}]
+    fun to_json(self) -> Json {{
+        return Json.Array([{items}])
+    }}
+}}
+
+impl json_m.FromJson for {t} {{
+    fun from_json(j: Json) -> Result<{t}, JsonError> {{
+        let c = json_numbers(j, {len(elems)}, "{t}")?
+        return Ok({build})
+    }}
+}}
+"""
+
+
+def floats_json(xs: list[str]) -> str:
+    return "Json.Array([" + ", ".join(f"Json.Float({x})" for x in xs) + "])"
+
+
+def vector_json(p: Precision) -> str:
+    out = fill(JSON_HELPER, p)
+    for n in (2, 3, 4):
+        cs = comps(n)
+        vals = [f"{i + 1}.0" for i in range(n)]
+        out += json_impls(f"Vec{n}", cs, f"Vec{n} {{ " + ", ".join(f"{c}: c[{i}]" for i, c in enumerate(cs)) + " }",
+                          f"vec{n}(" + ", ".join(vals) + ")", floats_json(vals))
+    out += fill("""
+impl json_m.ToJson for Vector {
+    #test(vector([1.0, 2.0]))[Json.Array([Json.Float(1.0), Json.Float(2.0)])]
+    fun to_json(self) -> Json {
+        var items: [Json] = []
+        for x in self.data { items.push(x.to_json()) }
+        return Json.Array(items)
+    }
+}
+
+impl json_m.FromJson for Vector {
+    fun from_json(j: Json) -> Result<Vector, JsonError> {
+        return Ok(Vector { data: json_numbers(j, -1, "Vector")? })
+    }
+}
+""", p)
+    return out
+
+
+def matrix_json(p: Precision) -> str:
+    out = fill(JSON_HELPER, p)
+    for n in (2, 3, 4):
+        cs = comps(n)
+        axes = AXES[:n]
+        elems = [f"{a}.{c}" for a in axes for c in cs]
+        cols = ", ".join(f"{a}: vec{n}(" + ", ".join(f"c[{j * n + i}]" for i in range(n)) + ")" for j, a in enumerate(axes))
+        vals = [f"{i + 1}.0" for i in range(n * n)]
+        test_value = f"mat{n}(" + ", ".join(f"vec{n}(" + ", ".join(vals[j * n:(j + 1) * n]) + ")" for j in range(n)) + ")"
+        out += json_impls(f"Mat{n}", elems, f"Mat{n} {{ {cols} }}", test_value, floats_json(vals))
+    out += fill("""
+// `{"rows": 2, "cols": 3, "data": […]}`, the elements column by column.
+impl json_m.ToJson for Matrix {
+    #test(matrix(2, 1, [5.0, 6.0]))[Json.Object([("rows", Json.Int(2i64)), ("cols", Json.Int(1i64)), ("data", Json.Array([Json.Float(5.0), Json.Float(6.0)]))])]
+    fun to_json(self) -> Json {
+        var items: [Json] = []
+        for x in self.data { items.push(x.to_json()) }
+        return json_m.obj([("rows", self.rows.to_json()), ("cols", self.cols.to_json()), ("data", Json.Array(items))])
+    }
+}
+
+impl json_m.FromJson for Matrix {
+    fun from_json(j: Json) -> Result<Matrix, JsonError> {
+        let ms = json_m.members(j, "Matrix")?
+        let rows = json_m.member<int>(ms, "rows")?
+        let cols = json_m.member<int>(ms, "cols")?
+        let data = json_m.member<[@S@]>(ms, "data")?
+        if rows < 0 || cols < 0 || data.len() != rows * cols {
+            return Err(JsonError { kind: json_m.JsonErrorKind.WrongType, msg: f"a {rows}x{cols} matrix takes {rows * cols} elements, got {data.len()}", line: 0, col: 0, path: "$.data" })
+        }
+        return Ok(Matrix { rows: rows, cols: cols, data: data })
+    }
+}
+""", p)
+    return out
+
+
+def quaternion_json(p: Precision) -> str:
+    return fill(JSON_HELPER, p) + json_impls("Quat", ["x", "y", "z", "w"], "Quat { x: c[0], y: c[1], z: c[2], w: c[3] }",
+                                             "quat(1.0, 2.0, 3.0, 4.0)", floats_json(["1.0", "2.0", "3.0", "4.0"]))
 
 
 def modules() -> dict[str, str]:

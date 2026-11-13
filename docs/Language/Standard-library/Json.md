@@ -164,6 +164,7 @@ fun main() {
 | `members(j: Json, name: str) -> Result<[(str, Json)], JsonError>` | The members of an object; another value is an error naming the type `name` |
 | `member<T: FromJson>(fields: [(str, Json)], name: str) -> Result<T, JsonError>` | The member `name` (the last of that name, as `field` finds it) read as a `T`, its path step added to an error; a missing one is `MissingField` |
 | `optional_member<T: FromJson>(fields, name) -> Result<Option<T>, JsonError>` | The same, `None` when the member is absent or `null` |
+| `within<T>(r: Result<T, JsonError>, step: str) -> Result<T, JsonError>` | `r` with its error's path one step further in: `json.within(float64.from_json(item), "[2]")` reports `$[2]: …` (an array's element read by hand, as std.vector's `FromJson` does) |
 
 What the derive writes:
 

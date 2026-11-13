@@ -12,6 +12,8 @@
 // from the axis' positive side), as std.matrix's.
 
 import std.float as fl
+import std.json as json_m
+from std.json import Json, JsonError
 from std.algebra import Identity
 from std.vector import Vec3, vec3
 from std.matrix import Mat3, Mat4, mat3
@@ -192,5 +194,46 @@ impl Quat {
 
     fun to_f32(self) -> QuatF32 {
         return QuatF32 { x: self.x as float32, y: self.y as float32, z: self.z as float32, w: self.w as float32 }
+    }
+}
+
+// --- JSON -------------------------------------------------------------------
+//
+// A vector is the array of its components, a matrix the array of its
+// elements column by column, a quaternion `[x, y, z, w]`: as glTF writes
+// them, so a document's `"translation": [1, 2, 3]` reads as a `Vec3`.
+
+// The numbers of the JSON array `j`, `n` of them (any number when `n` is
+// negative), for the `FromJson` impl of the type `what`.
+#test(Json.Array([Json.Int(1i64), Json.Float(2.5)]), 2, "Vec2")[Ok([1.0, 2.5])]
+#test(Json.Array([Json.Int(1i64)]), 2, "Vec2")[Err(json_m.wrong_type("an array of 2 numbers for 'Vec2'", Json.Array([Json.Int(1i64)])))]
+fun json_numbers(j: Json, n: int, what: str) -> Result<[float64], JsonError> {
+    let want = if n < 0 { "an array of numbers" } else { f"an array of {n} numbers" }
+    match j {
+        Json.Array(items) => {
+            if n >= 0 && items.len() != n { return Err(json_m.wrong_type(f"{want} for '{what}'", j)) }
+            var out: [float64] = []
+            var i = 0
+            for item in items {
+                out.push(json_m.within(float64.from_json(item), f"[{i}]")?)
+                i += 1
+            }
+            return Ok(out)
+        }
+        _ => { return Err(json_m.wrong_type(f"{want} for '{what}'", j)) }
+    }
+}
+
+impl json_m.ToJson for Quat {
+    #test(quat(1.0, 2.0, 3.0, 4.0))[Json.Array([Json.Float(1.0), Json.Float(2.0), Json.Float(3.0), Json.Float(4.0)])]
+    fun to_json(self) -> Json {
+        return Json.Array([self.x.to_json(), self.y.to_json(), self.z.to_json(), self.w.to_json()])
+    }
+}
+
+impl json_m.FromJson for Quat {
+    fun from_json(j: Json) -> Result<Quat, JsonError> {
+        let c = json_numbers(j, 4, "Quat")?
+        return Ok(Quat { x: c[0], y: c[1], z: c[2], w: c[3] })
     }
 }

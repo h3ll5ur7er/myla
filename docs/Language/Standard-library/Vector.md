@@ -38,3 +38,39 @@ fun main() {
 | Other | `to_list()`, `to_f32()` (`to_f64()` in std.vector32); `Vector`: `len`, `sum`, `map(f)`, `dot`, `length`, `normalized`, `distance` |
 
 Vectors are `Eq` and `Hash` (map keys, D198) and print as `(1, 2, 3)`, a `Vector` as `[1, 2, 3]`.
+
+## JSON
+
+Vectors are JSON arrays, as glTF writes them (D206): a `Vec3` is `[1.0, 2.0, 3.0]`, a `Vector` the array of its elements. So a `#derive(Json)` struct with a `Vec3` field reads a document's `"translation": [1, 2, 3]`. An array of another length, or an element that isn't a number, is an error with its path ([[Language/Standard-library/Json]]).
+
+```myla
+import std.json as json
+from std.vector import Vec3, vec3
+
+fun main() {
+    print(json.encode(vec3(1.0, 2.5, -3.0)))
+    for text in ["[1, 2, 3]", "[1, 2]", "[1, 2, \"x\"]"] {
+        match json.decode<Vec3>(text) {
+            Ok(v) => print(v)
+            Err(e) => print(f"{e}")
+        }
+    }
+}
+// output:
+// [1.0,2.5,-3.0]
+// (1, 2, 3)
+// $: expected an array of 3 numbers for 'Vec3', found an array of 2 items
+// $[2]: expected a number, found a string
+```
+
+## Speed
+
+`benchmarks/linalg_std.my` times the library against the same work written by hand with `std.bench`, natively on x86-64 (2026-11-13, `3bcafb0`, the fastest run of each; this 4-core machine was shared with other work, and its medians varied by up to a third between runs):
+
+| Work | The library | By hand |
+| --- | --- | --- |
+| `Vec4.dot` | 3.4 ns | |
+| `Vector.dot`, 1000 elements | 1.08 µs | 0.95 µs, a loop over two `[float]` |
+| `Vector + Vector`, 1000 elements | 2.03 µs | 2.04 µs, the same loop pushing to a `[float]` |
+
+`Vector`'s operators are loops over its list; before `3bcafb0` they called a closure for each element and `Vector + Vector` took half as long again as the loop by hand (3.12 µs). `Vector.dot` checks the lengths before its loop.
