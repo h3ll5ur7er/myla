@@ -2,18 +2,74 @@
 id: MYLA-554
 title: "R12 Documentation and the board after round 5"
 type: improvement
-status: in-progress
+status: review
 priority: low
 labels: [docs, board, round-6]
 ---
 Work package R12 of [[Project/Review-2026-11-12]]. Files: `docs/`, `tasks/`, the `myla` skill. Follows [[MYLA-427]]. Known issues, the follow-up plan and the verdicts were brought in line with the review itself.
 
-- [ ] `docs/Language/Standard-library/Bitset.md` line 98 and `Grid.md` line 96 give [[MYLA-353]], which is done, as the reason `for i in b` is missing (the sentence [[MYLA-427]] fixed on Set and Deque); with [[MYLA-553]]'s `iter()`
-- [ ] `docs/Development/Testing.md` line 81: `#test` coverage is 1,447 of 2,295 functions, 63 percent, not 67
-- [ ] Seven public helper methods on their pages, until [[MYLA-433]] can hide them: `args.check_name`, `args.check_option`, `bitset.past`, `csv.take_more`, `http.finish`, `http.reusable`, `net.took`
-- [ ] `xs.sum(0)` and `iter.sum` overflow as the element's `+` does (a trap where checked, wrapping in a plain build); neither page says so
-- [ ] What a `for` over a list or a map sees when its body changes it: the loop walks what it began with ([[MYLA-496]])
-- [ ] The skill's `xs.mapped<str>(g)` reads like a list method; std.list has `map<U>`
-- [ ] 25 `done` tasks have open boxes: [[MYLA-19]] and MYLA-36 to 51 (Rust edition) have none ticked, so do [[MYLA-151]], [[MYLA-161]] and [[MYLA-167]]; [[MYLA-133]], [[MYLA-168]], [[MYLA-171]], [[MYLA-187]], [[MYLA-254]] and [[MYLA-264]] have one or two. Tick what was done, or note what was dropped
-- [ ] [[MYLA-288]], [[MYLA-296]] and [[MYLA-299]] are `in-progress` and untouched since 7 November: 288 lacks the token and AST expectation files, 296's open half is the native timer lock and not its title, 299's only open item duplicates [[MYLA-234]]. Back to `backlog`, renamed or closed, as the owner decides
-- [ ] [[MYLA-435]] names `unwrap`, which doesn't exist, and has no reproducer (a failing `expect` prints `--> <myla>/std/option.my:79:26` on run, plain and `-g`); [[MYLA-504]]'s sizes have drifted (42,544 against 18,720 bytes today)
+- [x] `docs/Language/Standard-library/Bitset.md` line 98 and `Grid.md` line 96 give [[MYLA-353]], which is done, as the reason `for i in b` is missing (the sentence [[MYLA-427]] fixed on Set and Deque); with [[MYLA-553]]'s `iter()`
+- [x] `docs/Development/Testing.md` line 81: `#test` coverage is 1,447 of 2,295 functions, 63 percent, not 67
+- [x] Seven public helper methods on their pages, until [[MYLA-433]] can hide them: `args.check_name`, `args.check_option`, `bitset.past`, `csv.take_more`, `http.finish`, `http.reusable`, `net.took`
+- [x] `xs.sum(0)` and `iter.sum` overflow as the element's `+` does (a trap where checked, wrapping in a plain build); neither page says so
+- [x] What a `for` over a list or a map sees when its body changes it: the loop walks what it began with ([[MYLA-496]])
+- [x] The skill's `xs.mapped<str>(g)` reads like a list method; std.list has `map<U>`
+- [x] 25 `done` tasks have open boxes: [[MYLA-19]] and MYLA-36 to 51 (Rust edition) have none ticked, so do [[MYLA-151]], [[MYLA-161]] and [[MYLA-167]]; [[MYLA-133]], [[MYLA-168]], [[MYLA-171]], [[MYLA-187]], [[MYLA-254]] and [[MYLA-264]] have one or two. Tick what was done, or note what was dropped
+- [x] [[MYLA-288]], [[MYLA-296]] and [[MYLA-299]] are `in-progress` and untouched since 7 November: 288 lacks the token and AST expectation files, 296's open half is the native timer lock and not its title, 299's only open item duplicates [[MYLA-234]]. Back to `backlog`, renamed or closed, as the owner decides (a proposal below)
+- [x] [[MYLA-435]] names `unwrap`, which doesn't exist, and has no reproducer (a failing `expect` prints `--> <myla>/std/option.my:79:26` on run, plain and `-g`); [[MYLA-504]]'s sizes have drifted (42,544 against 18,720 bytes today)
+- [x] The review's other stale sentences: [[Language/Lexical-structure]] lines 106 to 107, [[Language/Attributes-and-testing]] line 200, [[Language/Generics]]'s first line
+- [x] The comments that keep a helper out of a module "for the import cost", measured before the lazy modules: listed below and filed as [[MYLA-610]] (this package edits no `.my` file)
+- [x] [[Project/Follow-up-plan]]'s round 6: the waves built, the tasks the round filed by area, [[MYLA-433]] the next design
+- [x] The board: Known issues for the round's open tasks, the wiki's index links, the `[[…]]` links of the pages touched, the two copies of the skill
+
+## What changed
+
+- **Bitset and Grid.** Both sentences were rewritten by [[MYLA-553]] (`514ef0c`, in wave 2) when it added `iter()`: they say a `BitSet` and a `Grid` aren't iterators themselves (D171) and that the checker says to write `b.iter()` or `g.iter()`. This package added the checker's help line to Bitset's and checked both against `lib/std/grid.my`'s `iter()` (line 243) and `positions()`; Grid.md needed nothing more.
+- **Testing.** [[Development/Testing]] and [[Project/Known-issues]] give the count after round 6's waves, 1,475 of 2,347 (63 %), with the review's 1,447 of 2,295 and round 4's 1,402 of 2,107 beside it.
+- **Public helpers.** [[Language/Standard-library/Args]] (`check_name`, `check_option`), [[Language/Standard-library/Bitset]] (`past`, with `used`, `trim`, `reserve`), [[Language/Standard-library/Csv]] (`take_more`, with `fill`), [[Language/Standard-library/Http]] (`exchange`, `reusable`, `kept`, `finish`, with `exchange_async`, `follow_async`) and [[Language/Standard-library/Net]] (`LineReader`'s `line` and `took`, with `ask_one`) name each as a type's own step, public only until [[MYLA-433]]. Bitset's page also says the module imports `std.int`.
+- **`sum`.** [[Language/Standard-library/List]] and [[Language/Standard-library/Iter]] say that the sum overflows as the element's `+` does (D175) and how to make it wider.
+- **`for`.** [[Language/Statements]]: the body may change the list, map or string a `for` walks, and the loop walks what it began with; a key the body inserts isn't visited, one it removes still is (so `m.get(k)` is the safe read); a range's bounds are evaluated once. With a program and its output, which `test_doc_blocks` runs on both runners.
+- **`map<U>`.** The skill (both copies), [[Language/Generics]] and [[Language/Grammar]] write `xs.map<str>(f)`; `xs.mapped<str>` is `type '[int32]' has no method 'mapped'`. The `mapped<U>` left in Generics, Concurrency and D169 are methods those pages' own types declare.
+- **The 25 tasks.** [[MYLA-19]]'s and [[MYLA-187]]'s boxes were done and are ticked; the rest say what dropped them (the Rust edition's removal, [[MYLA-70]]; D117, no LLVM; [[MYLA-77]], [[MYLA-80]], [[MYLA-271]]) or where the work went ([[MYLA-257]], [[MYLA-260]], [[MYLA-262]], [[MYLA-274]]).
+- **288, 296, 299.** [[MYLA-288]] back to `backlog`, with what is still missing (the token and AST expectation files for the 32 recorded examples, then `_golden.py`, the 27 stores and the frozen copies go; the floors of the other gates). [[MYLA-296]] renamed to its open half, "Natively, every worker's loop top takes the timer lock while any timer is armed", back to `backlog`, its measuring box ticked (about 15 % on 16 workers). [[MYLA-299]] closed as a duplicate of [[MYLA-234]] (its first two boxes done, the third is all of 234), `done` with a note.
+- **435, 504.** [[MYLA-435]] names `Option.expect` and `Result.expect` and has a reproducer; [[MYLA-504]] gives today's sizes.
+- **The other stale sentences.** All three were rewritten by the lanes of waves 1 and 2, and this package checked them against today's behaviour: [[Language/Lexical-structure]] (the old text had `128i8` accepted, wrapping; [[MYLA-544]], `ef41eae`), [[Language/Attributes-and-testing]] (the old text had the child's verdict after a mark on stderr; [[MYLA-547]]'s D191 record, `af8600c`), [[Language/Generics]]'s first line (the old text had the interpreter run generic code by erasure; [[MYLA-414]], `c28ef55`). One claim of Lexical structure is broader than the checker: a literal past `int32` in an `if` or `match` arm doesn't take another arm's type. The page says so now, and the gap is [[MYLA-609]].
+- **Follow-up plan.** Waves 1 to 3 built: wave 1 is pull request #65; waves 2 and 3 each one pull request still to be opened. The leftovers lane is in wave 2's row. The twelve tasks the round filed, in a table by area, those fixed in the round (`review`) apart from the candidates for the next round, and [[MYLA-609]] and [[MYLA-610]] of this package. [[MYLA-433]] is the next design.
+- **The board.** [[Project/Known-issues]] names the round's open tasks ([[MYLA-584]], [[MYLA-588]], [[MYLA-592]], [[MYLA-600]], [[MYLA-604]], [[MYLA-605]], [[MYLA-608]], [[MYLA-609]]); no line went, as none of their tasks is `done`. The one page the round added, [[Project/Review-2026-11-12]], is linked from [[Project]]. Five `[[src/myla/…]]` links of tasks this package touched pointed to the removed Python toolchain and are now plain paths. Every package and reopened task a lane finished stays in `review`.
+
+## Follow-up: the import-cost comments
+
+`grep -rn -i "import cost\|whose import\|importing it\|of checking" lib/std selfhost tools --include=*.my`, read one by one. Two comments quote a check cost measured before the lazy modules ([[MYLA-359]], [[MYLA-412]], [[MYLA-413]]); [[MYLA-610]] has them, with today's figures:
+
+| File:line | Text | Today |
+| --- | --- | --- |
+| `lib/std/task.my:498` to `502` | "(`std.deque` would do, but importing it costs every program that imports `std.task` about 2.5 ms of checking.)" | The import adds 1.0 M instructions (3.9 %) to checking a program that imports std.task, 2.4 M (9.4 %) with `new`, `push_back` and `pop_front` called |
+| `lib/std/time.my:28` to `32` | "Not `std.fmt`'s own: importing it and `std.num` would cost every program that imports `std.time`, `std.test` among them, 16 ms of checking." | 15.2 M instructions (51 %) on a program that imports std.time: the reason holds, the figure doesn't |
+
+The others of the kind give figures measured with the lazy modules already: `lib/std/fs.my:735`, `net.my:1727` and `1766`, `archive.my:1076`, `compress.my:2402` ([[MYLA-553]]) and `selfhost/checker.my:4480` (the prelude's `Eq` and `Hash`, 1.4 %). `lib/std/glob.my:637`, `list.my:712` ("the module doesn't import std.test, which every program would import with it") and `toml.my:1292` give a reason without a figure, and `selfhost/loader.my:1062` and `lib/std/ioerror.my:5` describe what the loader and the module layout do; they stay.
+
+## Decisions (a proposal; the owner decides)
+
+1. **[[MYLA-288]]: back to `backlog`** (built). Its last box, the token and AST expectation files, is real work that nobody has started, and the task says what remains. *Alternatives:* keep it `in-progress` (but nothing is in progress, and the board would say otherwise); split the open box into a new task and close 288 (cleaner history, but the evidence of the first boxes and what remains belong together); `todo` for the next round (if the owner wants the frozen examples freed soon: `examples/floats.my`'s comments are wrong until then).
+2. **[[MYLA-296]]: renamed to its open half and back to `backlog`** (built). The interpreter half is done and measured; what is open is the native timer lock, a cost of about 15 % on 16 workers. *Alternatives:* close 296 as done and file the timer lock as a new task (cleaner title history, one more id); keep the old title with a note (the board would go on naming the done half).
+3. **[[MYLA-299]]: closed as a duplicate of [[MYLA-234]], status `done` with a note** (built). `.genbeya.yml` has no state for a duplicate, and the genbeya skill says to move an abandoned task to the last state and say why. *Alternatives:* a `duplicate` label besides `done` (visible on the board; no other task uses one yet); back to `backlog` with its third box (two tasks then track the tutorial); a `wontfix`/`duplicate` state in `.genbeya.yml` (only the owner edits it).
+4. **The import-cost comments: a task, [[MYLA-610]], not an edit here** (built). The lane rules keep this package out of `.my` files, and std.task's case is a choice (use `std.deque` now?) as well as a comment. *Alternatives:* list them only here (they would be lost once this task is `done`); edit the two comments in this package (a one-line change each, but in the library lanes' files).
+5. **The arm literal: documented as a limit and filed, [[MYLA-609]]** (built). *Alternatives:* drop "another arm" from Lexical structure's list (it is true of every literal that fits `int`, and of a negated one, so the list would be less right).
+6. **The 25 `done` tasks: a dropped box stays open with its reason** (built), so that a box shows only what was done. *Alternative:* tick them with "(dropped)" (fewer open boxes on the board, but a tick would claim work that wasn't done).
+
+## Evidence
+
+Base `2ceef83`; `build/myla` built there. The scratch programs are in this package's notes, not in the repository: the lasting tests are `test_doc_blocks` (the `for` program of Statements) and the pages' examples.
+
+- **`for` that changes what it walks** (`forloop.my`: `push` in `for x in xs`, `ys[2] = 99` in `for y in ys`, a remove and an insert in `for k in m`, `n = 10` in `for i in 0..n`, `s = s + "z"` in `for c in s`): `myla run`, the plain binary and the `--checked` binary all print `1 2 3 6 1 2 3 a true b true c false 0 1 2 a b` (`c` is visited after its removal, `m.get("c")` is `None`, `d` isn't visited).
+- **`sum`'s overflow** (`--stdlib lib`): `[2147483647, 1].sum(0)` is `runtime error: integer overflow --> lib/std/list.my:448:35` under `myla run`, in a `--checked` binary and as a `#test` case under `myla test` (`FAIL  s #1: runtime error: integer overflow`), and `-2147483648` in a plain binary; `iter.sum(0)` the same at `lib/std/iter.my:342:46`; `xs.map((x) => x as int64).sum(0i64)` and `iter.map((x) => x as int64) |> iter.sum(0i64)` print `2147483648` on every runner.
+- **`for i in b`, `for c in g`**: the type error `` `for ... in` requires a list, a map, a string, a range or an Iterator, found 'bitset.BitSet' `` with `help: 'bitset.BitSet' is not an Iterator: write 'b.iter()'`, and the same for `grid.Grid<int32>` with `write 'g.iter()'`; `for c in g.iter()` over `grid.new(2, 2, 7)` prints `7` four times.
+- **`map<str>`**: `xs.map<str>(g)` runs (`<2>`); `xs.mapped<str>(g)` is `type '[int32]' has no method 'mapped'`.
+- **Lexical structure**, `myla check`: `-128i8`, `let a: int8 = -128` ok; `128i8` is `integer literal 128 does not fit in 'int8'`, `let b: uint8 = -1` `integer literal -1 does not fit in 'uint8'`, `let c: uint8 = -'a'` `integer literal -97 (the char literal negated) does not fit in 'uint8'`; `5000000000 + big`, `-1 + big` run (`5000000001`, `0`); `5x` and `1__0` are lex errors; `128` as an `int8` pattern is a type error; `big..5000000000` and `4999999999..big` check; `if c { 7 } else { big }`, `if c { -1 } else { big }` are `int64`; `if c { big } else { 5000000000 }` and its three neighbours fail ([[MYLA-609]]), `let x: int64 = if c { 5000000000 } else { big }` and `5000000000i64` in the arm run.
+- **Attributes and testing**, `myla test` and `myla test --native` of one file (stdin `hi`): `exit(256)` passes `[exit(0)]`; `[exit(256)]` is `FAIL  e1 #1: expected exit status 256: a status is 0 to 255`; a `read_line` sees end of input; `[panic("a\nruntime error: b")]` matches the two-line panic; a case that writes `runtime error: boom` on stderr and calls `exit(1)` passes `[exit(1)]`. Both runners print the same report, 4/5.
+- **MYLA-435**: the reproducer prints `runtime error: 7 is in the list --> <myla>/std/option.my:79:26` and exits 1 under `myla run` and natively.
+- **Coverage**: `python3 scripts/test_coverage.py`: `overall 1475 2347 63 %`.
+- **Import costs**: `valgrind --tool=callgrind build/myla check` of `fun main() {}` 20.7 M instructions; `import std.task` 25.2 M; with `import std.deque` 26.2 M; with deque's `new`, `push_back`, `pop_front` called 27.6 M; `import std.time` 29.8 M; with `std.fmt` and `std.num` 45.1 M.
+- **Links**: a scratch checker of `[[…]]` targets (task ids, page paths and titles, files) over the 49 Markdown files this package changed and over all of `docs/`: 5 broken before (`[[src/myla/…]]` in MYLA-19, 47, 50, 151, 187), 0 after; `docs/` 0 of 120 pages.
+- **Skill**: `cmp .agents/skills/myla/SKILL.md .claude/skills/myla/SKILL.md`: identical.
+- **Suites** (on this package's tip): `nice scripts/test.sh fast`: 895 tests, `OK (skipped=3)`, 636 s. `tests.burn.test_doc_blocks` (every `myla` block of the wiki, the `for` program of Statements among them, interpreted and natively) and `tests.burn.test_embedded_std`: 6 tests, OK. The repository has no link or skill test (`tests/burn/`, `scripts/`); the scratch link checker above stands in for one.
