@@ -2229,8 +2229,10 @@ fun load_linked(entry: str, opts: LoadOptions) -> Result<Loaded, Report> {
         for d in m.decls {
             if in_std && is_impl(d) { std_impls[d.id] = DeclOrigin { module: dotted_id(m.id), path: m.path, implicit: is_implicit, lazy: may_wait } }
             // a module's functions too: the checker checks an implicit
-            // module's bodies only once called (MYLA-359)
-            if may_wait && is_fun(d) { std_impls[d.id] = DeclOrigin { module: dotted_id(m.id), path: m.path, implicit: is_implicit, lazy: true } }
+            // module's bodies only once called (MYLA-359), and gives the
+            // library's its privileges by them, not by a `std$` name, which
+            // a program's own `std/raw.my` has too (MYLA-584)
+            if in_std && is_fun(d) { std_impls[d.id] = DeclOrigin { module: dotted_id(m.id), path: m.path, implicit: is_implicit, lazy: may_wait } }
             if entry_std != "" && tested && is_fun(d) { std_impls[d.id] = DeclOrigin { module: entry_std, path: m.path, implicit: false, lazy: false } }
             decls.push(r.decl(d, m.id))
         }

@@ -9381,13 +9381,14 @@ impl Checker {
         return out
     }
 
-    // Whether the function being checked is the standard library's.
+    // Whether the function being checked is the standard library's: the
+    // loader's origins of its functions and impls tell, by the file's root
+    // (a method of an impl on a built-in type is named after the type,
+    // `str.trim`, MYLA-320), not a `std$` name, which a program's own
+    // `std/raw.my` gives its functions too (MYLA-584).
     #test(checker_on("[int]"))[false]
     fun in_std(self) -> bool {
-        // a method of an impl on a built-in type is named after the type
-        // (`str.trim`): its impl's origin tells (MYLA-320)
-        if self.std_impls.contains(self.cur_decl) { return true }
-        return self.fun_name.len() >= 4 && self.fun_name[0] == 's' && self.fun_name[1] == 't' && self.fun_name[2] == 'd' && self.fun_name[3] == '$'
+        return self.std_impls.contains(self.cur_decl)
     }
 
     // A call of a `__` primitive outside the standard library: allowed, with
