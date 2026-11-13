@@ -92,7 +92,15 @@ pub struct CodeGen {
     rodata: [str],
     strdata: [str],                 // static `str` cells (static_str)
     label_n: int32,
-    str_n: int32,
+    // MYLA-552: the labels of the function being emitted are its own,
+    // `.L<name>_<n>`, its positions' `.L<name>_p<n>` and its epilogue
+    // `.L<name>_ret`, under its mangled name (`begin_labels`; `label_fn` ""
+    // outside a function: `.L<n>`, `.Lpos<n>`), so that a change in one
+    // function renames no other's labels
+    label_fn: str,
+    label_fn_n: int32,
+    pos_fn_n: int32,
+    str_names: [str: bool],         // the string literals' labels taken (`str_name`)
     str_texts: [str],
     str_labels: [str],
     subst: [Subst],
@@ -104,6 +112,12 @@ pub struct CodeGen {
     fnval_set: [str],
     uses_float: bool,
     epilogue: str,
+    // the current function's out-of-line traps of a checked build's
+    // arithmetic (MYLA-551): their lines, each a label and the call,
+    // emitted after the function's return; one per `kind:line:col`, the
+    // key of its label
+    cold_traps: [str],
+    cold_keys: [str: str],
     ret_type: Option<Type>,
     // Reference-counting helper worklists: concrete owning types whose per-type
     // drop/clone routines must be emitted (deduped by mangled token).
@@ -351,12 +365,12 @@ pub fun new_codegen(c: Checker) -> CodeGen {
         impl_args: c.impl_args,
         static_calls: c.static_calls, static_selfs: c.static_selfs,
         text: [], rodata: [], strdata: [],
-        label_n: 0, str_n: 0,
+        label_n: 0, label_fn: "", label_fn_n: 0, pos_fn_n: 0, str_names: [:],
         str_texts: [], str_labels: [],
         subst: [], fn_worklist: [], fn_seen: [:],
         lam_jobs: [], lam_seen: [:], partial_jobs: [], fnval_set: [],
         uses_float: false,
-        epilogue: "", ret_type: None,
+        epilogue: "", cold_traps: [], cold_keys: [:], ret_type: None,
         need_drop: [], type_jobs: [], type_jobs_seen: [:], drop_emitted: [], drop_kinds: [], need_clone: [], clone_emitted: [],
         need_walk: [], need_deep: [], deep_inline: [], deep_clone: [], need_deepc: [], deepc_clone: [], walk_retain: [], walk_emitted: [], helper_seen: [:],
         need_sb: false,
@@ -454,7 +468,12 @@ impl CodeGen {
         match self.pos_labels.get(key) {
             Some(l) => { lab = l },
             None => {
-                lab = format(".Lpos{}", self.pos_labels.len())
+                if self.label_fn != "" {
+                    self.pos_fn_n += 1
+                    lab = format(".L{}_p{}", self.label_fn, self.pos_fn_n)
+                } else {
+                    lab = format(".Lpos{}", self.pos_labels.len())
+                }
                 self.pos_labels[key] = lab
                 let file = self.string_label(self.cur_path)
                 self.posdata.push("\t.balign 8")
@@ -1056,8 +1075,50 @@ impl CodeGen {
 
     #test(codegen_on("[int]"))[".L1"]
     fun label(var self) -> str {
+        if self.label_fn != "" {
+            self.label_fn_n += 1
+            return format(".L{}_{}", self.label_fn, self.label_fn_n)
+        }
         self.label_n = self.label_n + 1
         return format(".L{}", self.label_n)
+    }
+
+    // The labels from here on the function `mangled`'s own (MYLA-552,
+    // D196): its name, `_` and a number from 1 (`.Lmain_3`), its positions'
+    // `_p` and one (`.Lmain_p1`), so that a reader of the assembly sees
+    // whose label it is; "" for none (outside a function). A mangled name
+    // is a symbol's (`myla_<name>`) and a suffix has no `_`, so a label
+    // reads back to one function, and to none of the runtime's named labels
+    // (`.Lsw_next`, `.Lstr_true`).
+    #test(codegen_on("[int]"), "")[()]
+    fun begin_labels(var self, mangled: str) {
+        self.label_fn = mangled
+        self.label_fn_n = 0
+        self.pos_fn_n = 0
+    }
+
+    // The label of the function `mangled`'s epilogue, under its name as its
+    // other labels are (`begin_labels`).
+    #test(codegen_on("[int]"), "main")[".Lmain_ret"]
+    #test(codegen_on("[int]"), "lexer$Lexer.peek")[".Llexer$Lexer.peek_ret"]
+    fun epilogue_label(self, mangled: str) -> str {
+        return format(".L{}_ret", mangled)
+    }
+
+    // The label of a new string literal `text`: `.Lstr` and the FNV-1a
+    // hash of its bytes in seven letters and digits (the hash's next where
+    // another text gave it first), so that a literal added renumbers no
+    // other (MYLA-552).
+    #test(codegen_on("[int]"), "héλ")[".Lstro0qlabq"]
+    fun str_name(var self, text: str) -> str {
+        var h = fnv1a(text)
+        var lab = ".Lstr" + base36(h, 7)
+        while self.str_names.contains(lab) {
+            h = (h ^ 255u64).wrapping_mul(FNV_PRIME)
+            lab = ".Lstr" + base36(h, 7)
+        }
+        self.str_names[lab] = true
+        return lab
     }
 
     #test(codegen_on("[int]"), "héλ")[-1]
@@ -1069,12 +1130,11 @@ impl CodeGen {
     }
 
     // Intern a string literal, emitting a static `str` cell (MYLA-18).
-    #test(codegen_on("[int]"), "héλ")[".Lstr0"]
+    #test(codegen_on("[int]"), "héλ")[".Lstro0qlabq"]
     fun string_label(var self, text: str) -> str {
         let existing = self.str_index(text)
         if existing >= 0 { return self.str_labels[existing] }
-        let lab = format(".Lstr{}", self.str_n)
-        self.str_n = self.str_n + 1
+        let lab = self.str_name(text)
         self.str_ix[text] = self.str_texts.len()
         self.str_texts.push(text)
         self.str_labels.push(lab)
@@ -1125,6 +1185,10 @@ impl CodeGen {
     fun find_kept_params(var self) {
         for sig in self.funcs {
             if !sig.has_decl { continue }
+            // a body of the standard library that nothing called neither
+            // votes nor keeps: it may not have been read (D179), and what
+            // is built mustn't depend on which were (MYLA-552)
+            if self.unmarked.contains(sig.name) { continue }
             self.scan_kept = []
             match sig.decl.body {
                 Some(b) => { self.scan_block(b) },
@@ -2062,8 +2126,10 @@ impl CodeGen {
     fun rt_exec(self) -> [(str, str)] {
         // every program's (`__map_lookup`: `remove`'s too)
         // (`__exit_program`: every end of the program, through the exit
-        // hook, D187)
-        var out = [("__exit_program", "std$rt$exit_program"), ("__panic_report", "std$rt$panic_report"), ("__list_grow", "std$rt$list_grow"), ("__sb_append_bytes", "std$rt$sb_append_bytes"), ("__map_new", "std$rt$map_new"), ("__map_lookup", "std$rt$map_lookup"), ("__equal_bytes", "std$rt$equal_bytes"), ("__func_retain", "std$rt$func_retain"), ("__func_drop", "std$rt$func_drop")]
+        // hook, D187; `__on_raw_signal`: the handler of a signal that ends
+        // the program while the terminal is raw, D192, MYLA-548; named
+        // unqualified when std.platform is the entry, `platform_fn`)
+        var out = [("__exit_program", "std$rt$exit_program"), ("__on_raw_signal", self.platform_fn("raw_signal")), ("__panic_report", "std$rt$panic_report"), ("__list_grow", "std$rt$list_grow"), ("__sb_append_bytes", "std$rt$sb_append_bytes"), ("__map_new", "std$rt$map_new"), ("__map_lookup", "std$rt$map_lookup"), ("__equal_bytes", "std$rt$equal_bytes"), ("__func_retain", "std$rt$func_retain"), ("__func_drop", "std$rt$func_drop")]
         if self.frames {
             for p in [("__sched_init", "std$rt$sched_init"), ("__workers_count", "std$rt$workers_count"), ("__task_cancel", "std$rt$task_cancel"), ("__task_cancelled", "std$rt$task_cancelled"), ("__failed_wait", "std$rt$failed_wait"), ("__wait_stopped", "std$rt$wait_stopped"), ("__exec_push", "std$rt$exec_push"), ("__exec_yield_push", "std$rt$exec_yield_push"), ("__exec_find", "std$rt$exec_find"), ("__exec_peek", "std$rt$exec_peek"), ("__wake_waiters", "std$rt$wake_waiters"), ("__actor_leave", "std$rt$actor_leave"), ("__task_wait", "std$rt$task_wait"), ("__actor_enter_rt", "std$rt$actor_enter"), ("__exec_loop", "std$rt$exec_run"), ("__deep_str", "std$rt$deep_str"), ("__dclone_str", "std$rt$dclone_str"), ("__dclone_cell", "std$rt$dclone_cell"), ("__deep_env", "std$rt$deep_env"), ("__dclone_env", "std$rt$dclone_env"), ("__panic_report_tasks", "std$rt$panic_report_tasks"), ("myla___sleep", "std$rt$sleep_frame"), ("__cancel_after", "std$rt$cancel_after"), ("__task_end", "std$rt$task_end"), ("myla___wait_fd", "std$rt$wait_fd"), ("myla___wait_fd2", "std$rt$wait_fd2"), ("myla___wait_sock", "std$rt$wait_sock")] { out.push(p) }
         }
@@ -2373,6 +2439,11 @@ impl CodeGen {
         // `write_err_num`)
         out.push("__panic_buf:")
         out.push("\t.skip 32")
+        // in a test child of `myla test --native`, the head of its records
+        // as a string's cell, which std.test sets (0 elsewhere): std.rt
+        // writes how the case ended as one (`test_record`, D191)
+        out.push("__test_report:")
+        out.push("\t.skip 8")
         // the poller's events and words (std.platform, D124)
         out.push("__poll_buf:")
         out.push("\t.skip 128")
@@ -4300,6 +4371,33 @@ fun compiler_norm() -> Norm {
 
 // The ready-frame ring's size (D90): a power of two.
 pub const EXEC_CAP: int32 = 1048576
+
+// FNV-1a with 64 bits (as std.checksum's `fnv1a64`), which names the
+// label of a string literal (MYLA-552).
+const FNV_BASIS: uint64 = 0xcbf29ce484222325
+const FNV_PRIME: uint64 = 0x100000001b3
+
+#test("")[0xcbf29ce484222325u64]
+#test("foobar")[0x85944171f73967e8u64]
+fun fnv1a(s: str) -> uint64 {
+    var h = FNV_BASIS
+    for i in 0..s.len() { h = (h ^ (s[i] as uint64)).wrapping_mul(FNV_PRIME) }
+    return h
+}
+
+// The low `n` base-36 digits of `h` (`0`–`9`, `a`–`z`), the lowest first.
+#test(0u64, 3)["000"]
+#test(71u64, 2)["z1"]
+fun base36(h: uint64, n: int32) -> str {
+    let digits = "0123456789abcdefghijklmnopqrstuvwxyz"
+    var sb = StringBuilder()
+    var x = h
+    for i in 0..n {
+        sb.append_byte(digits[(x % 36u64) as int32])
+        x = x / 36u64
+    }
+    return sb.build()
+}
 
 // The generator of MYLA_SCHED=seed:N (D110): x * SCHED_MUL + SCHED_ADD,
 // wrapping (Knuth's MMIX constants), the same in the interpreter

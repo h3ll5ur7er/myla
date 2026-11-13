@@ -1,10 +1,8 @@
 #!/usr/bin/env bash
 # test.sh [fast|all] — run the test suites (MYLA-58).
 #
-#   fast  the burn tests that take less than about 4 seconds each (about 20
-#         seconds once the tools are cached)
-#   all   the whole burn suite (the default; about 2 minutes with the tools
-#         cached)
+#   fast  the burn tests that take less than about 4 seconds each
+#   all   the whole burn suite (the default)
 #
 # Uses only the standard library's unittest (pytest works too: uv run pytest).
 # The compiler (bootstrapped from bootstrap/seed.s) and the tools the tests
@@ -28,7 +26,7 @@ case "$mode" in
               test_native_runtime test_grammar test_fs test_stdin test_declaration_recovery test_toml
               test_aarch64 test_wasm test_compress test_yaml test_archive test_xml test_http test_regex
               test_std_cache test_generated_deep_copies test_generated_writes test_generated_widths
-              test_generated_extremes test_formats_checked)
+              test_generated_extremes test_formats_checked test_lazy_std)
         modules=()
         for f in tests/burn/test_*.py; do
             name="$(basename "$f" .py)"

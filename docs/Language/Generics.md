@@ -128,9 +128,11 @@ fun main() {
 // 6
 ```
 
+Only a function may have one: an impl's type parameters are its type's own, in order (D55), so `impl<I: Iterator<T>, T> Eq for W<I>` is the error `the impl's type parameter 'T' is not one of 'W<I>'`, with a hint to make it a generic function's or a type parameter of `W` ([[MYLA-564]]).
+
 ### Explicit type arguments
 
-Where nothing fixes a type parameter, a call can name it: `mk<int>()`, `deque.new<str>()`, `m.f<A, B>(x)`, `xs.mapped<str>(f)` (D169, [[MYLA-373]]). They are written after the function's or method's name, before its `(`:
+Where nothing fixes a type parameter, a call can name it: `mk<int>()`, `deque.new<str>()`, `m.f<A, B>(x)`, `xs.map<str>(f)` (D169, [[MYLA-373]]). They are written after the function's or method's name, before its `(`:
 
 - They come first: the arguments and the expected type are typed with them, so `widen<int64>(5000000000)` takes an `int64`, and an argument that doesn't fit is a mismatch (`widen<str>(true)`: expected 'str', found 'bool').
 - There is one for each type parameter, in the declaration's order; another count is an error naming both (`function 'mk' expects 1 type argument(s), got 2`).

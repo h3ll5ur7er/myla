@@ -52,13 +52,13 @@ fib 20  min 45.9 µs  median 50.8 µs  ±4.4%  (615 runs of 32 calls)
 
 ## How it works
 
-- **The warm-up and the batch.** Reading the clock takes about 140 ns natively on x86-64 (`__clock_ns` is a system call, measured with `bench.run` itself), so a run of one call of a cheap closure would mostly time the clock. Before the timed runs, `f` is called in batches of 1, 2, 4, … calls until one batch takes a millisecond; that is the warm-up (caches, the allocator's free lists, the branch predictors), and the batch is how many calls each timed run makes. A run then reads the clock twice for a millisecond of work. The batch is at most 2^24 calls.
+- **The warm-up and the batch.** Reading the clock takes about 140 ns natively on x86-64 (`__clock_ns` is a system call, measured with `bench.run` itself, 2026-11-09, `29ed3db`), so a run of one call of a cheap closure would mostly time the clock. Before the timed runs, `f` is called in batches of 1, 2, 4, … calls until one batch takes a millisecond; that is the warm-up (caches, the allocator's free lists, the branch predictors), and the batch is how many calls each timed run makes. A run then reads the clock twice for a millisecond of work. The batch is at most 2^24 calls.
 - **The runs.** `run` makes runs until a second has passed, at least 5 and at most 1000; so a closure that takes longer than 200 ms takes 5 runs and the warm-up's call. `run_n` makes exactly its runs and `run_for` runs until its budget is spent, both after the same warm-up.
 - **Keeping the work.** Every result of `f` goes to `black_box`. Native code inlines only small functions of the caller's own module ([[Architecture/IR]], [[selfhost/inline.my]]) and calls a closure indirectly, so nothing the closure computes is dropped today; `black_box` is where a later optimiser has to stop. A closure that computes a value and drops it should give it to `black_box` itself: `() => { let x = work(); return bench.black_box(x) }`.
 - **A clock that doesn't move.** Under `MYLA_TIME=virtual` the interpreter's clock moves only when tasks sleep. A batch of 1024 calls that took no time ends the warm-up with a batch of 1, every time is 0, and `run` stops at 1000 runs.
-- **The interpreter** times the same way, but a call there costs about 10 µs, so its times say how long the interpreter takes, not how fast the code is: measure natively (`build/myla build`), with `--checked` off as a release build has it.
+- **The interpreter** times the same way, but a call there costs about 10 µs (2026-11-09, `29ed3db`), so its times say how long the interpreter takes, not how fast the code is: measure natively (`build/myla build`), with `--checked` off as a release build has it.
 
-Measured natively on x86-64 with `bench.run` (2026-11-09):
+Measured natively on x86-64 with `bench.run` (2026-11-09, `29ed3db`):
 
 | Closure | Median | Runs |
 | --- | --- | --- |

@@ -123,7 +123,7 @@ Natively on x86-64, the best of five runs over 100 MB (100,000,000 bytes), on a 
 | --- | --- | --- |
 | The Hasher, `add_str` / `add_bytes` (wyhash) | 1496 MB/s | 1496 MB/s |
 
-A key of two `int32`s takes 8.7 ns from `new()` to `finish()`, a 13-byte string 16.1 ns. Every byte is read with a bounds check. std.checksum's FNV-1a, measured the same way, runs at about 950 MB/s.
+A key of two `int32`s takes 8.7 ns from `new()` to `finish()`, a 13-byte string 16.1 ns (2026-11-07, `2583648`). Every byte is read with a bounds check. std.checksum's FNV-1a, measured the same way, runs at about 950 MB/s.
 
 ## Tests
 

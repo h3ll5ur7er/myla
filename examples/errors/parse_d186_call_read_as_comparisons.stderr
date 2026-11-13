@@ -1,0 +1,10 @@
+parse error: expected an expression, found 'str'
+  --> examples/errors/parse_d186_call_read_as_comparisons.my:9:23
+  |
+9 |     let v = (idt<int, str>(7))
+  |                       ^^^
+note: in a list, map or tuple literal `idt<int, str>(7)` is two comparisons, `idt < int` and `str > (7)` (D186); for a call with type arguments, give it a `let` of its own: `let v = idt<int, str>(7)`
+  --> examples/errors/parse_d186_call_read_as_comparisons.my:9:14
+  |
+9 |     let v = (idt<int, str>(7))
+  |              ^^^^^^^^^^^^^^^^

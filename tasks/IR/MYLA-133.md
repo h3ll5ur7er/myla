@@ -12,7 +12,7 @@ The profile of the self-compile after [[MYLA-131]] (callgrind, instructions per 
 - [x] `__map_hash` multiplies a value key (eight FNV-1a rounds before) and mixes a string in eight bytes at a time, the high half folded into the low one: −2.3%
 - [x] The lexer keeps the list `chars` decodes (`[char]`, read `as int32`) instead of copying it into a `[int32]`, and appends an ASCII lexeme's bytes without building a string per character (`cp_utf8`): −4.7%
 - [x] `==` on an enum without payloads whose `eq` is derived compares the tags inline (`tag_only_eq`, the enums found once by `find_tag_enums`) instead of calling the derived routine: −0.9% (a first version looked the enum up among all declarations for each `==`: −0.8%)
-- [ ] ~~Copy list cells eight bytes at a time~~: −3.5% of callgrind's count, which counts `rep movsb` per byte, and no wall time; left out
+- [ ] ~~Copy list cells eight bytes at a time~~: −3.5% of callgrind's count, which counts `rep movsb` per byte, and no wall time; left out (dropped: no wall-time gain)
 
 ## Evidence
 

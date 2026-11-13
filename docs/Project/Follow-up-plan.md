@@ -81,7 +81,20 @@ The waves, each one pull request with one seed:
 | Wave | Lanes |
 | --- | --- |
 | 1 | Lowering ([[MYLA-415]], [[MYLA-543]], [[MYLA-542]]), checker ([[MYLA-417]], [[MYLA-394]], [[MYLA-538]], [[MYLA-544]]), interpreter ([[MYLA-414]], [[MYLA-546]]), library A ([[MYLA-460]], [[MYLA-550]]), HTTP ([[MYLA-549]]), generated tests ([[MYLA-555]]) |
-| 2 | Lexer, parser and loader ([[MYLA-413]], [[MYLA-545]]), test harness ([[MYLA-547]]), runtime ([[MYLA-548]]), back ends ([[MYLA-551]]), library B ([[MYLA-553]]) |
+| 2 | Lexer, parser and loader ([[MYLA-413]], [[MYLA-545]]), test harness ([[MYLA-547]]), runtime ([[MYLA-548]]), back ends ([[MYLA-551]]), library B ([[MYLA-553]]), and the leftovers of wave 1 (the rest of [[MYLA-546]], [[MYLA-564]], [[MYLA-565]]) |
 | 3 | Check time and seeds ([[MYLA-552]], after the loader), docs and board ([[MYLA-554]], last, as it touches every task) |
+
+**Built (2026-11-13).** All three waves are built and every package and reopened task is in `review`, waiting for the owner's sign-off. Wave 1 is pull request #65, merged; waves 2 and 3 are each one pull request still to be opened, wave 2's with its seed commit (`dafd287`, D156), wave 3's to end with one.
+
+The round filed these tasks. Five were fixed in it and wait in `review` with their lanes' packages; the others are candidates for the next round, by area:
+
+| Area | Fixed in the round (`review`) | Candidates for the next round |
+| --- | --- | --- |
+| Checker and loader | [[MYLA-564]]: an impl type parameter that only a bound names is said so, not told to apply to an impossible type | [[MYLA-584]]: a program's own `std/` directory gets the library's privileges in the checker (raw memory, `__` primitives), as it goes by the `std$` prefix of a name, not by the loader's root (`medium`); [[MYLA-609]]: an integer literal past `int32` in an `if` or `match` arm doesn't take another arm's `int64` |
+| Interpreter | [[MYLA-565]]: an invalid spec of `x.format(spec)` on a builtin `T: Format` is reported at the call on every runner | [[MYLA-600]]: a `StringBuilder` holds each byte in a word (a 20 MB string takes 280 MB to build); [[MYLA-604]]: every turn of the scheduler polls every task that waits for a descriptor; [[MYLA-605]]: a builtin's call is found by comparing its name with each builtin's (14 percent of reading lines) |
+| Native runtime and back ends | [[MYLA-572]]: a read of `n` bytes no longer allocates `n` before it reads (4 MiB at most); [[MYLA-576]]: an actor's method called from outside no longer leaks 8 bytes a call | [[MYLA-588]]: x86-64 passes `exit`'s status zero-extended; [[MYLA-592]]: a SIGSEGV sent by `kill` is swallowed once; [[MYLA-608]]: a third of a hello world's check is page faults, and huge pages for the heap's chunks take a millisecond off it (`medium`, a decision) |
+| Standard library | [[MYLA-580]]: `math.ldexp` clamps the exponent first (`ldexp(1.5, 2147483647)` took 18 s interpreted, 2026-11-12, `b71e0e5`) | [[MYLA-610]]: two comments in `std.task` and `std.time` weigh an import by its check cost before the lazy modules |
+
+The next design is [[MYLA-433]], private fields and methods, as the review suggests: until it, the library's own steps are public and its pages list them as such (`args.check_name`, `bitset.past`, `http.finish`, …, [[MYLA-554]]).
 
 Left for later, as before: [[MYLA-433]] (the one to start next, as a proposal), [[MYLA-434]], [[MYLA-435]], [[MYLA-504]], [[MYLA-530]], [[MYLA-531]], [[MYLA-377]], [[MYLA-317]], [[MYLA-368]]. Part 2 of the review of 9 November, the whole-codebase pass, is still to come.

@@ -4,19 +4,20 @@
 // The harness is the file's own text (its `#main`, if any, blanked) with
 // code appended: for each case a function that calls the tested function
 // with the case's arguments (their source text, copied by span) and gives
-// "" when the result is the expected one, else why not (`expected 3, got
-// 4`, the values as the interpreter's report shows them); for each type a
-// case compares, a structural equality and a repr; and a `#main` that
-// hands the cases to `std.test`'s runner (one child process per case; on
-// wasm32, which starts none, `myla test` runs the harness `--from <n>` and
-// again after each case that ended a run, MYLA-370). The report is the
-// interpreter's, line for line, so `myla test` and `myla test --native`
-// can be held to each other.
+// its verdict, None when the result is the expected one, else why not
+// (`expected 3, got 4`, the values as the interpreter's report shows them);
+// for each type a case compares, a structural equality and a repr; and a
+// `#main` that hands the cases to `std.test`'s runner (one child process
+// per case; on wasm32, which starts none, `myla test` runs the harness
+// `--from <n>` and again after each case that ended a run, MYLA-370). The
+// report is the interpreter's, line for line, so `myla test` and `myla test
+// --native` can be held to each other.
 //
-// A child tells how its case ended on stderr (`std.test`'s `case_end`):
-// a mark and the verdict after a case that returned; without the mark the
-// case ended the process, by a runtime error or an `exit`, `exit(0)` too.
-// An expected `[panic("…")]` matches the message exactly (D183).
+// A child tells how its case ended in a record on stderr, framed with the
+// run's nonce (D191, `std.test`'s `reporting`): the verdict of a case that
+// returned, written by std.test; a runtime error with its whole message, or
+// an `exit` with its status, written by the runtime. An expected
+// `[panic("…")]` matches the message exactly (D183).
 //
 // What differs natively, by design: a failed case runs no deferred block
 // (the child process ends), and a value with no form of its own (a
@@ -103,30 +104,30 @@ pub fun harness_source(text: str, ch: Checker, decls: [Decl], only: str) -> Opti
     // its group of DISPATCH_GROUP and its place there, and the list of the
     // cases a function of its own, so that no function is both large and
     // run through often (a wasm engine optimizes such a function, which
-    // took Node 2 s a run on `std.int`'s 1826 cases, MYLA-370)
+    // made Node slow on `std.int`'s 1826 cases, MYLA-370)
     var aw = ""
     if g.has_async { aw = "await " }
     let fun_kw = if g.has_async { "async fun" } else { "fun" }
     var groups = 0
     var i = 0
     while i < g.cases.len() {
-        sb.append(format("{} __myla_run_group_{}(k: int32) -> str {{\n", fun_kw, groups))
+        sb.append(format("{} __myla_run_group_{}(k: int32) -> Option<str> {{\n", fun_kw, groups))
         var j = i
         while j < g.cases.len() && j < i + DISPATCH_GROUP {
             sb.append(format("    if k == {} {{ return {}__myla_case_{}() }}\n", j, if g.case_async[j] { aw } else { "" }, j))
             j = j + 1
         }
-        sb.append("    return \"\"\n}\n\n")
+        sb.append("    return None\n}\n\n")
         groups = groups + 1
         i = j
     }
-    sb.append(format("{} __myla_run_case(k: int32) -> str {{\n", fun_kw))
+    sb.append(format("{} __myla_run_case(k: int32) -> Option<str> {{\n", fun_kw))
     var gi = 0
     while gi < groups {
         sb.append(format("    if k < {} {{ return {}__myla_run_group_{}(k) }}\n", (gi + 1) * DISPATCH_GROUP, aw, gi))
         gi = gi + 1
     }
-    sb.append("    return \"\"\n}\n\n")
+    sb.append("    return None\n}\n\n")
     sb.append("fun __myla_cases() -> [__myla_Case] {\n    return [\n")
     for c in g.cases {
         let rc = runner_case(c)
@@ -137,12 +138,14 @@ pub fun harness_source(text: str, ch: Checker, decls: [Decl], only: str) -> Opti
     sb.append("    let __cases = __myla_cases()\n")
     sb.append("    let __argv = __myla_args()\n")
     sb.append("    let __k = __myla_t.case_index(__argv)\n")
-    sb.append(format("    if __k >= 0 {{ __myla_t.child_done({}__myla_run_case(__k))\n        return }}\n", aw))
-    // `--from <n>`: the cases from `n` on in this process, between markers,
-    // for a host that cuts the output (wasm32, MYLA-370)
+    // the head of the records the run reads (D191), with the runtime too
+    sb.append("    let __head = __myla_t.reporting(__argv)\n")
+    sb.append(format("    if __k >= 0 {{ __myla_t.child_done(__head, {}__myla_run_case(__k))\n        return }}\n", aw))
+    // `--from <n>`: the cases from `n` on in this process, each after a
+    // record, for a host that cuts the output (wasm32, MYLA-370)
     sb.append("    var __j = __myla_t.from_index(__argv)\n")
-    sb.append("    if __j >= 0 {\n        while __j < __cases.len() {\n            __myla_t.case_begin()\n")
-    sb.append(format("            __myla_t.case_end({}__myla_run_case(__j))\n            __j = __j + 1\n        }}\n        __myla_t.end(0)\n        return\n    }}\n", aw))
+    sb.append("    if __j >= 0 {\n        while __j < __cases.len() {\n            __myla_t.case_begin(__head)\n")
+    sb.append(format("            __myla_t.case_end(__head, {}__myla_run_case(__j))\n            __j = __j + 1\n        }}\n        __myla_t.end(0)\n        return\n    }}\n", aw))
     sb.append("    match __myla_t.run_in_children(__argv[0], __cases) {\n")
     sb.append("        Some(status) => { __myla_t.end(status) },\n")
     sb.append("        None => {},\n")
@@ -230,8 +233,8 @@ impl Gen {
     // comparison with its expected value.
     fun case_function(var self, k: int32, fd: FunData, name: str, sig: FuncSig, attr: Attribute, is_fn: bool, kind: Expected, want: str) {
         var sb = StringBuilder()
-        if fd.is_async { sb.append(format("async fun __myla_case_{}() -> str {{\n", k)) }
-        else { sb.append(format("fun __myla_case_{}() -> str {{\n", k)) }
+        if fd.is_async { sb.append(format("async fun __myla_case_{}() -> Option<str> {{\n", k)) }
+        else { sb.append(format("fun __myla_case_{}() -> Option<str> {{\n", k)) }
         var aw = ""
         if fd.is_async { aw = "await " }
         // the call: a method's receiver is the first argument (D116)
@@ -278,9 +281,9 @@ impl Gen {
             match sig.ret {
                 Some(Type.TEnum(en, args)) => {
                     let show = self.shown_fn(args[1])
-                    sb.append(format("    match {} {{\n        Ok(__x) => {{ return \"\" }},\n        Err(__e) => {{ return {}(__e) }},\n    }}\n", call, show))
+                    sb.append(format("    match {} {{\n        Ok(__x) => {{ return None }},\n        Err(__e) => {{ return Some({}(__e)) }},\n    }}\n", call, show))
                 },
-                _ => { sb.append(format("    {}\n    return \"\"\n", call)) },
+                _ => { sb.append(format("    {}\n    return None\n", call)) },
             }
             sb.append("}\n\n")
             self.case_code.append(sb.build())
@@ -293,9 +296,9 @@ impl Gen {
                         let eq = self.eq_fn(t)
                         let repr = self.repr_fn(t)
                         sb.append(format("    let __got = {}\n    var __want = __got\n    __want = {}\n", call, want))
-                        sb.append(format("    if !{}(__got, __want) {{ return \"expected \" + {}(__want) + \", got \" + {}(__got) }}\n    return \"\"\n", eq, repr, repr))
+                        sb.append(format("    if !{}(__got, __want) {{ return Some(\"expected \" + {}(__want) + \", got \" + {}(__got)) }}\n    return None\n", eq, repr, repr))
                     },
-                    None => { sb.append(format("    {}\n    return \"\"\n", call)) },
+                    None => { sb.append(format("    {}\n    return None\n", call)) },
                 }
             },
             Expected.Panics(m) => {
@@ -304,7 +307,10 @@ impl Gen {
             },
             Expected.Exits(n) => {
                 let wanted = format("expected exit status {}", n)
-                sb.append(self.returned_text(call, sig.ret, wanted))
+                // a process ends with 0 to 255: no call can give another
+                // (the interpreter's runner says the same)
+                if n < 0 || n > 255 { sb.append(format("    return Some({})\n", str_lit(wanted + ": a status is 0 to 255"))) }
+                else { sb.append(self.returned_text(call, sig.ret, wanted)) }
             },
         }
         sb.append("}\n\n")
@@ -317,9 +323,9 @@ impl Gen {
         match ret {
             Some(t) => {
                 let repr = self.repr_fn(t)
-                return format("    let __got = {}\n    return {} + \", got \" + {}(__got)\n", call, str_lit(wanted), repr)
+                return format("    let __got = {}\n    return Some({} + \", got \" + {}(__got))\n", call, str_lit(wanted), repr)
             },
-            None => { return format("    {}\n    return {}\n", call, str_lit(wanted + ", the call returned")) },
+            None => { return format("    {}\n    return Some({})\n", call, str_lit(wanted + ", the call returned")) },
         }
     }
 
@@ -474,7 +480,7 @@ impl Gen {
             Type.TTuple(es) => {
                 if es.len() == 0 {
                     eq.append("    return true\n")
-                    repr.append("    return \"None\"\n")
+                    repr.append("    return \"()\"\n")   // as the interpreter shows `()`
                 } else {
                     var conds: [str] = []
                     var parts: [str] = []

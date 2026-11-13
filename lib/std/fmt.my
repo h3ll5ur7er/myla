@@ -9,6 +9,7 @@
 // `pad` gives it fill, alignment and width.
 
 from .num import format_fixed
+import .str as str_m // `repeat`, a long padding in bulk
 
 // A spec: `fill` one character; `align` 0 (the type's default), '<', '>' or
 // '^'; `plus` a sign on numbers that are not negative; `alt` the prefix of a
@@ -97,6 +98,18 @@ pub fun parse_spec(s: str) -> Result<Spec, str> {
     return Ok(sp)
 }
 
+// Why `s` isn't a spec, "" when it is: what native code checks at
+// `x.format(spec)` on a builtin `T: Format`, so that a spec given at run
+// time is reported at the call, as the interpreter does (D183, MYLA-565).
+#test("q")["invalid format spec 'q'"]
+#test("*>8.2")[""]
+pub fun spec_error(s: str) -> str {
+    return match parse_spec(s) {
+        Ok(sp) => ""
+        Err(why) => why
+    }
+}
+
 // What the spec `sp` needs that a value of class `class` (0 an integer, 1 a
 // float, 2 text: `str`, `char`, `bool`) isn't, as the checker's message ends
 // ("needs a float"); "" when it fits.
@@ -124,6 +137,11 @@ fun fill_to(text: str, sp: Spec, dflt: uint8) -> str {
     if align == 0 { align = dflt }
     var left = 0
     if align == '>' { left = gap } else if align == '^' { left = gap / 2 }
+    if gap > 16 {
+        // in bulk: a width of a million, a fill a step, was slow interpreted
+        // (MYLA-546)
+        return sp.fill.repeat(left) + text + sp.fill.repeat(gap - left)
+    }
     var sb = StringBuilder()
     var k = 0
     while k < left {
@@ -144,6 +162,8 @@ fun fill_to(text: str, sp: Spec, dflt: uint8) -> str {
 #test("x", "^5")["  x  "]
 #test("ab", ">4")["  ab"]
 #test("ab", "")["ab"]
+#test("x", "λ^20")["λλλλλλλλλxλλλλλλλλλλ"] // in bulk past 16
+#test("ab", "<19")["ab                 "]
 pub fun pad(text: str, spec: str) -> str {
     return match parse_spec(spec) {
         Ok(sp) => fill_to(text, sp, '<')
@@ -161,6 +181,10 @@ fun number(sign: str, prefix: str, digits: str, sp: Spec) -> str {
         sb.append(sign)
         sb.append(prefix)
         var k = have
+        if sp.width - have > 16 {
+            sb.append("0".repeat(sp.width - have))   // in bulk, as `fill_to`
+            k = sp.width
+        }
         while k < sp.width {
             sb.append_byte('0')
             k += 1
@@ -201,6 +225,8 @@ fun digits_of(u: uint64, base: uint64, upper: bool) -> str {
 #test(-7, 32, true, "04")["-007"]
 #test(7, 32, true, "+")["+7"]
 #test(255, 32, true, "#06x")["0x00ff"]
+#test(-255, 32, true, "#022x")["0x000000000000ffffff01"] // in bulk past 16
+#test(-7, 32, true, "020")["-0000000000000000007"]
 #test(-1, 8, true, "08b")["11111111"]
 #test(-1, 64, false, "")["18446744073709551615"]
 pub fun fmt_int(v: int64, bits: int32, signed: bool, spec: str) -> str {

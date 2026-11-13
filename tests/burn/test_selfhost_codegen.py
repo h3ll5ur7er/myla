@@ -1048,7 +1048,7 @@ class SelfHostedCodegenParity(unittest.TestCase):
         """`myla_<name>`'s tail calls of itself jump back to its entry block
         (MYLA-250): no call of itself, no jump to its start."""
         body = self._function_asm(asm, name)
-        entry = re.search(r"^(\.L\d+):$", body, re.M).group(1)
+        entry = re.search(r"^(\.L[^\s:]+_\d+):$", body, re.M).group(1)
         self.assertIn(f"jmp {entry}\n", body)
         self.assertNotIn(f"call myla_{name}\n", body)
         self.assertNotIn(f"jmp myla_{name}\n", body)
@@ -1521,7 +1521,7 @@ class SelfHostedCodegenParity(unittest.TestCase):
         body = self._function_asm(asm, "spin")
         # the loop: from its first block to the jump back to it
         loop = ""
-        for m in re.finditer(r"\tj[a-z]+ (\.L\d+)\n", body):
+        for m in re.finditer(r"\tj[a-z]+ (\.L[^\s:]+_\d+)\n", body):
             at = body.find(m.group(1) + ":")
             if 0 <= at < m.start():
                 loop = body[at:m.start()]
@@ -2042,6 +2042,39 @@ class SelfHostedCodegenParity(unittest.TestCase):
             self.assertEqual((out, code), ("8997000\n3000\n100000\n", 0))
             self.assertLess(peak, 64, f"peak {peak:.1f} MB")
 
+    def test_actor_calls_from_outside_run_in_bounded_memory(self) -> None:
+        """MYLA-576: a million calls of an actor's method from outside take
+        no more memory than the first few. Each call moved a worker's ready
+        queue a slot along its ring, so the ring's 8 MiB were touched in time
+        (7.9 MB more resident after 10^6 calls on one worker); a queue
+        emptied goes back to its ring's start. The program reads its own
+        resident size (a peak through the harness counts its parent's
+        memory before the exec); on wasm32 the ring is part of the linear
+        memory from the start, whose peak is bounded."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "calls.my")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(ACTOR_CALLS)
+            asm = self._emit_asm(path, STDLIB_ROOT)
+            for threads in ("1", "4"):
+                with self.subTest(workers=threads):
+                    old = os.environ.get("MYLA_THREADS")
+                    os.environ["MYLA_THREADS"] = threads
+                    try:
+                        out, code, peak = self._build_and_measure(asm)
+                    finally:
+                        if old is None:
+                            del os.environ["MYLA_THREADS"]
+                        else:
+                            os.environ["MYLA_THREADS"] = old
+                    total, grown = out.split()
+                    self.assertEqual((total, code), ("1000000", 0))
+                    if TEST_TARGET == "wasm32-wasi":
+                        # (/proc there is Node's own)
+                        self.assertLess(peak, 64, f"peak {peak:.1f} MB")
+                    else:
+                        self.assertLess(int(grown), 1024, f"{threads} workers: {grown} kB more resident")
+
     def test_deep_values_are_released_in_a_bounded_stack(self) -> None:
         """MYLA-389: a value nested 100,000 deep through an enum held in a
         list, a struct's list, recursive enums and a map is released without
@@ -2387,6 +2420,61 @@ async fun main() {
     print(sum)
     print(await c.get())
     print(await down(100000))
+}
+"""
+
+
+# MYLA-576: a million calls of an actor's method from outside, in one task,
+# and the resident size they added in kB (-1 without /proc/self/status)
+ACTOR_CALLS = """\
+import std.fs as fs
+import std.num as num
+
+fun resident_kb() -> int {
+    return match fs.read_to_string("/proc/self/status") {
+        Ok(s) => {
+            var kb = -1
+            for l in s.lines() {
+                if l.starts_with("VmRSS:") {
+                    kb = num.parse_int(l[6:].trim().split(" ")[0]).unwrap_or(-1) as int
+                }
+            }
+            kb
+        }
+        Err(e) => -1
+    }
+}
+
+actor Box {
+    n: int,
+}
+
+impl Box {
+    fun get(self) -> int {
+        return self.n
+    }
+}
+
+async fun calls(b: Box, n: int) -> int {
+    var t = 0
+    for i in 0..n {
+        t += await b.get()
+    }
+    return t
+}
+
+#main
+async fun main() {
+    let b = Box { n: 1 }
+    async let first = calls(b, 1000)
+    var t = await first
+    let before = resident_kb()
+    for i in 0..999000 {
+        t += await b.get()
+    }
+    let after = resident_kb()
+    print(t)
+    print(if before < 0 || after < 0 { -1 } else { after - before })
 }
 """
 

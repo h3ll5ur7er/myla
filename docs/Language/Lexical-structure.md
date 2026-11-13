@@ -104,12 +104,12 @@ fun main() {
 
 - `_` may only stand between two digits.
 - There are no negative literals: `-5` is unary minus applied to `5`, but a negated literal is checked as the value it denotes: `-128i8` and `let a: int8 = -128` work, `128i8` and `let b: uint8 = -1` are type errors, and so is `let c: uint8 = -'a'` (a char literal where an integer is expected is its code, so `-'a'` is -97; [[MYLA-417]], [[MYLA-544]]).
-- An unsuffixed literal takes the integer type its context expects (an annotation, a parameter, the other operand on either side, `5000000000 + big` and `-1 + big` as `big + 5000000000` with `big: int64`, a range's other bound, another arm of an `if` or a `match`), defaulting to `int`. It must fit that type, or it is a type error ([[MYLA-544]]). A literal *pattern* is checked as the value it denotes, so `128` or `-1` can't match an `int8` or `uint8` ([[MYLA-7]]).
+- An unsuffixed literal takes the integer type its context expects (an annotation, a parameter, the other operand on either side, `5000000000 + big` and `-1 + big` as `big + 5000000000` with `big: int64`, a range's other bound, another arm of an `if` or a `match`), defaulting to `int`. It must fit that type, or it is a type error ([[MYLA-544]]). In an arm, a literal that doesn't fit `int` doesn't wait for another arm yet: `if c { big } else { 5000000000 }` is `integer literal 5000000000 does not fit in 'int32'`, so annotate the binding (`let x: int64 = if …`) or suffix the literal ([[MYLA-609]]). A literal *pattern* is checked as the value it denotes, so `128` or `-1` can't match an `int8` or `uint8` ([[MYLA-7]]).
 - A literal directly followed by letters that aren't a suffix (`5x`) is a lex error.
 
 ## Float literals
 
-A decimal number with a fraction (`1.5`), an exponent (`2e10`, `1.5e-3`) or a float suffix (`2f32`, `0.1f64`) is a float. Hex, binary and octal literals are always integers. `2..10` stays a range and `t.0` a tuple index, because a fraction needs a digit after the dot.
+A decimal number with a fraction (`1.5`), an exponent (`2e10`, `1.5e-3`) or a float suffix (`2f32`, `0.1f64`) is a float. Hex, binary and octal literals are always integers. `2..10` stays a range and `t.0` a tuple index, because a fraction needs a digit after the dot; a number right after a `.` is always a tuple index, with no fraction or exponent, so `v.0.0` is two of them ([[MYLA-545]]).
 
 An unsuffixed float literal takes the float type its context expects, defaulting to `float64` (the `float` alias, D102; it was `float32` until November 2026, D19).
 

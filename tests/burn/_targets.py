@@ -78,8 +78,8 @@ _BOTH = {
 SKIP: dict[str, dict[str, str]] = {
     "aarch64-linux": {
         **_BOTH,
-        # a qemu-aarch64 process per case: std.int's 1826 took 4.6 minutes
-        "test_std_modules.StdModuleCases.test_native": "a qemu process per case (std.int's 1826 cases: 4.6 minutes)",
+        # a qemu-aarch64 process per case: std.int's 1826 take too long
+        "test_std_modules.StdModuleCases.test_native": "a qemu process per case (std.int's 1826 cases take too long)",
     },
     "wasm32-wasi": {
         **_BOTH,

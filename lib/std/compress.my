@@ -2400,8 +2400,10 @@ impl<W: Write> Write for Encoder<W> {
 // --- Test helpers ---------------------------------------------------------------
 
 // The bytes the hex digits of `s` stand for (whole bytes): not
-// std.encoding's `hex_decode`, which every program importing this module
-// would check for the tests' sake (3 ms more to check one, MYLA-428).
+// std.encoding's `hex_decode`, whose import would add 1.8 M instructions
+// (1.9 %) to checking every program that imports this module, for the
+// tests' sake; this copy, which only the tests call, costs them nothing
+// (MYLA-553, and MYLA-428 before the lazy modules).
 #test("00ff1a")[[0u8, 255u8, 26u8]]
 fun unhex(s: str) -> [uint8] {
     var out: [uint8] = []

@@ -70,4 +70,4 @@ The tests pin RFC 9562's examples (A.3 for version 4, `919108f7-52d1-4320-9bac-f
 
 ## Speed
 
-Measured natively on x86-64, best of five runs: a million `g.v4().to_str()` take 220 ms.
+Measured natively on x86-64, best of five runs: a million `g.v4().to_str()` take 220 ms (2026-11-08, `a1e0269`).

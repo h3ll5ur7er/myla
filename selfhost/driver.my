@@ -21,7 +21,7 @@ from .codegen import new_codegen
 from .dwarf import read_gdb_script
 from .interp import new_interp, RtError, TestRun, TestOptions, sched_from_env, time_from_env
 from .harness import harness_source, Harness, runner_case
-from std.test import cut_run, case_outcome, case_lines
+from std.test import cut_run, case_outcome, case_lines, record_head
 from std.process import command, env
 from std.time import now_ns
 from std.fs import make_dir_all, remove_dir_all, exists, read_to_string, current_dir
@@ -195,6 +195,11 @@ pub fun native_tests(given_file: str, given: LoadOptions, sel: TestOptions, targ
     if hosts_platform(file, opts.stdlib_root, target) {
         return Err(format("myla: {} is std.platform for {}; for {} it is {}/std/{}, whose cases run there", file, TARGET, target, opts.stdlib_root, target_platform_file(target)))
     }
+    // the runtime is every native program's, a harness's too, which can't
+    // hold it a second time (MYLA-547)
+    if opts.stdlib_root != "" && opts.stdlib_root != EMBEDDED_ROOT && absolute(file) == absolute(opts.stdlib_root + "/std/rt.my") {
+        return Err(format("myla: {} is std.rt, the runtime of every native program, whose own cases run interpreted only ('myla test {}')", given_file, given_file))
+    }
     let ch = load_and_check(file, opts)?
     let text = match read_to_string(file) {
         Ok(t) => t,
@@ -307,10 +312,14 @@ fun resumed_tests(h: Harness, exe: str, lead: [str], program: str, dir: str) -> 
     var lines: [str] = []
     var passed = 0
     var k = 0
+    // the runs' records are framed with a nonce of this run's (D191)
+    let nonce = format("{}", now_ns())
+    let head = record_head(nonce)
     while k < h.cases.len() {
         var argv = lead
         argv.push("--from")
         argv.push(format("{}", k))
+        argv.push(nonce)
         let root = format("{}/run{}", dir, k)
         let ran = command(exe).args(argv).env("MYLA_TEST_PROGRAM", program).env("MYLA_TEST_DIR", root).stdin("").output()
         if exists(root) { let gone = remove_dir_all(root) }
@@ -319,13 +328,13 @@ fun resumed_tests(h: Harness, exe: str, lead: [str], program: str, dir: str) -> 
             Err(e) => { return Err(format("myla: cannot run the test harness with '{}'", exe)) },
         }
         let code = match o.status { ExitStatus.Exited(c) => c, ExitStatus.Signaled(s) => -s }
-        let runs = cut_run(decode(o.stdout), decode(o.stderr), code)
+        let runs = cut_run(decode(o.stdout), decode(o.stderr), code, head)
         if runs.len() == 0 {
             // the harness ended before its first case: that case failed so
-            let (detail, shown, rest) = case_outcome(runner_case(h.cases[k]), "", decode(o.stderr), code)
+            let (verdict, shown, rest) = case_outcome(runner_case(h.cases[k]), "", decode(o.stderr), code, head)
             write(2, rest)
-            let why = if detail == "" { format("the harness ended with status {} before the case", code) } else { detail }
-            for l in case_lines(runner_case(h.cases[k]), why, []) { lines.push(l) }
+            let why = match verdict { Some(d) => d, None => format("the harness ended with status {} before the case", code) }
+            for l in case_lines(runner_case(h.cases[k]), Some(why), []) { lines.push(l) }
             k = k + 1
             continue
         }
@@ -333,10 +342,10 @@ fun resumed_tests(h: Harness, exe: str, lead: [str], program: str, dir: str) -> 
         for run in runs {
             if k >= h.cases.len() { break }
             let c = runner_case(h.cases[k])
-            let (detail, shown, rest) = case_outcome(c, run.0, run.1, run.2)
+            let (verdict, shown, rest) = case_outcome(c, run.0, run.1, run.2, head)
             write(2, rest)
-            if detail == "" { passed = passed + 1 }
-            for l in case_lines(c, detail, shown) { lines.push(l) }
+            match verdict { None => { passed = passed + 1 }, Some(d) => {} }
+            for l in case_lines(c, verdict, shown) { lines.push(l) }
             k = k + 1
         }
     }

@@ -702,10 +702,12 @@ fun addr_of(h: int, peer: int) -> Result<SocketAddr, IoError> {
     }
 }
 
-// The socket `h` closed.
+// The socket `h` closed. A second close is `Other(9)` (EBADF), as a
+// close through a copy after the first is (D181) and as a `File`'s and a
+// child's pipe's are (MYLA-548: here it did nothing).
 fun close_handle(h: int) -> Result<(), IoError> {
     if h < 0 {
-        return Ok(())
+        return Err(IoError.Other(9))
     }
     if __sock_close(h) < 0 {
         return Err(last_error())
@@ -751,14 +753,29 @@ pub struct TcpStream {
     write_ms: int,
 }
 
+// How many connections `listen` lets wait to be accepted.
+const BACKLOG: int = 128
+
 // A socket listening on `a` (port 0: one the system picks, which
 // `local_addr` tells): `AddrInUse` when another listens there,
 // `AddrNotAvailable` for an address that isn't this machine's. Its address
 // is reused while old connections to it linger (SO_REUSEADDR on POSIX).
+// Up to 128 connections wait to be accepted; `listen_with` takes more.
 pub fun listen(a: SocketAddr) -> Result<TcpListener, IoError> {
+    return listen_with(a, BACKLOG)
+}
+
+// `listen`, with up to `backlog` connections waiting to be accepted
+// (MYLA-548: a burst of connects past the queue is refused or reset by the
+// system). The system may take fewer (Linux: `net.core.somaxconn`, 4096 by
+// default). A `backlog` below 1 is a runtime error (D184).
+pub fun listen_with(a: SocketAddr, backlog: int) -> Result<TcpListener, IoError> {
+    if backlog < 1 {
+        panic(f"listen_with: backlog {backlog} is below 1")
+    }
     let h = new_socket(a.ip, STREAM)?
     let reuse = set_option(h, REUSE_ADDR, true)
-    if __sock_bind(h, record(a)) < 0 || __sock_listen(h, 128) < 0 {
+    if __sock_bind(h, record(a)) < 0 || __sock_listen(h, backlog) < 0 {
         return failed(h, __io_errno())
     }
     return Ok(TcpListener { handle: h, timeout_ms: -1 })
@@ -820,7 +837,7 @@ impl TcpListener {
         self.timeout_ms = ms
     }
 
-    // The socket closed: it listens no more. A second close does nothing.
+    // The socket closed: it listens no more. A second close is `Other(9)`.
     fun close(var self) -> Result<(), IoError> {
         let h = self.handle
         self.handle = -1
@@ -1043,7 +1060,7 @@ impl TcpStream {
     }
 
     // The connection closed (every copy of the stream with it). A second
-    // close does nothing.
+    // close, through it or a copy, is `Other(9)`.
     fun close(var self) -> Result<(), IoError> {
         let h = self.handle
         self.handle = -1
@@ -1070,22 +1087,42 @@ pub struct LineReader {
     pos: int,
     scanned: int,
     ended: bool,
+    // the longest line taken, in bytes without its "\n" (-1: any,
+    // MYLA-548), and whether the line given last was cut off by the end
+    // of the stream
+    max: int,
+    cut: bool,
 }
 
-// A line reader over the stream `s`.
+// A line reader over the stream `s`, for lines of any length: a peer that
+// never sends "\n" makes it hold all it sends. For a peer you don't trust,
+// `line_reader_with`.
 pub fun line_reader(s: TcpStream) -> LineReader {
-    return LineReader { s: s, buf: [], pos: 0, scanned: 0, ended: false }
+    return LineReader { s: s, buf: [], pos: 0, scanned: 0, ended: false, max: -1, cut: false }
+}
+
+// A line reader over `s` whose lines are at most `max_line` bytes, without
+// their "\n" (MYLA-548): a longer one is `InvalidData`, as soon as more
+// than `max_line` bytes of it are there, and so is every read after it, so
+// the reader holds no more than about `max_line` and a read's bytes.
+// A negative `max_line` is a runtime error (D184).
+pub fun line_reader_with(s: TcpStream, max_line: int) -> LineReader {
+    if max_line < 0 {
+        panic(f"line_reader_with: max_line {max_line} is negative")
+    }
+    return LineReader { s: s, buf: [], pos: 0, scanned: 0, ended: false, max: max_line, cut: false }
 }
 
 impl LineReader {
     // The next line, without its "\n" (a "\r" before it is kept, as
     // `io.Buffered.read_line` keeps it); a last line without "\n" counts
-    // too. `None` once the peer ended the stream. The task waits for the
-    // bytes, the other tasks running; a task asked to stop gets
-    // `Cancelled`, the bytes read so far kept for the next call.
+    // too (`cut_off()` then says so). `None` once the peer ended the
+    // stream. The task waits for the bytes, the other tasks running; a task
+    // asked to stop gets `Cancelled`, the bytes read so far kept for the
+    // next call. A line past the reader's limit is `InvalidData`.
     async fun read_line_async(var self) -> Result<Option<str>, IoError> {
         while true {
-            if let Some(line) = self.line() {
+            if let Some(line) = self.line()? {
                 return Ok(line)
             }
             let chunk = await self.s.read_async(LINE_CHUNK)
@@ -1098,12 +1135,18 @@ impl LineReader {
     // long as the stream's read timeout allows).
     fun read_line(var self) -> Result<Option<str>, IoError> {
         while true {
-            if let Some(line) = self.line() {
+            if let Some(line) = self.line()? {
                 return Ok(line)
             }
             self.took(self.s.read(LINE_CHUNK)?)
         }
         unreachable()
+    }
+
+    // Whether the line given last ended at the end of the stream, without
+    // a "\n": a peer that closed in the middle of a line (MYLA-548).
+    fun cut_off(self) -> bool {
+        return self.cut
     }
 
     // The bytes read and not yet given as a line (the start of a body after
@@ -1117,30 +1160,41 @@ impl LineReader {
     }
 
     // The next line if the buffer holds one (`Some(None)` at the end of the
-    // stream), else `None`: then more bytes are needed.
-    fun line(var self) -> Option<Option<str>> {
+    // stream), else `None`: then more bytes are needed. `InvalidData` when
+    // the line is longer than the limit (no byte past it is looked at).
+    fun line(var self) -> Result<Option<Option<str>>, IoError> {
         let n = self.buf.len()
+        var end = n
+        if self.max >= 0 && self.pos + self.max + 1 < end {
+            end = self.pos + self.max + 1
+        }
         var i = self.pos + self.scanned
-        while i < n {
+        while i < end {
             if self.buf[i] == 10u8 {
                 let line = bytes_m.to_str(self.buf[self.pos:i])
                 self.pos = i + 1
                 self.scanned = 0
-                return Some(Some(line))
+                self.cut = false
+                return Ok(Some(Some(line)))
             }
             i += 1
         }
-        self.scanned = n - self.pos
+        self.scanned = end - self.pos
+        if self.max >= 0 && self.scanned > self.max {
+            return Err(IoError.InvalidData)
+        }
         if !self.ended {
-            return None
+            return Ok(None)
         }
         if n == self.pos {
-            return Some(None)
+            self.cut = false
+            return Ok(Some(None))
         }
         let last = bytes_m.to_str(self.buf[self.pos:])
         self.pos = n
         self.scanned = 0
-        return Some(Some(last))
+        self.cut = true
+        return Ok(Some(Some(last)))
     }
 
     // The bytes of one read added (none: the end of the stream); the lines
@@ -1278,7 +1332,7 @@ impl UdpSocket {
         return set_option(self.handle, BROADCAST, on)
     }
 
-    // The socket closed. A second close does nothing.
+    // The socket closed. A second close is `Other(9)`.
     fun close(var self) -> Result<(), IoError> {
         let h = self.handle
         self.handle = -1
@@ -1670,8 +1724,10 @@ fun skip_name(msg: str, at0: int) -> int {
 
 // --- the cases' helpers --------------------------------------------------------
 
-// The bytes of `s` in hex: not std.encoding's `hex_encode`, which every
-// program importing this module would check for the tests' sake.
+// The bytes of `s` in hex: not std.encoding's `hex_encode`, whose import
+// would add 1.4 M instructions (1.8 %) to checking every program that
+// imports this module, for the tests' sake; this copy, which only the tests
+// call, costs them nothing (MYLA-553).
 fun hex_of(s: str) -> str {
     let digits = "0123456789abcdef"
     var sb = StringBuilder()
@@ -1708,7 +1764,8 @@ fun dns_query_hex(id: int, name: str, qtype: int) -> str {
 }
 
 // The bytes of the hex text `h` as a string (std.encoding's `hex_decode`
-// gives a list, and would be checked by this module's importers).
+// gives a list, and its import would cost this module's importers what
+// `hex_of`'s says).
 fun unhex(h: str) -> str {
     var sb = StringBuilder()
     var i = 0

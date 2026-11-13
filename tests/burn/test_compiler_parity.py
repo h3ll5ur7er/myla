@@ -12,6 +12,66 @@ from tests.burn._native import (CAN_BUILD_NATIVE, SKIP_REASON, Program, build_an
                                 native_build, run_argv, run_file_both_now, selfhost_run, write_program)
 
 PROGRAMS = {
+    # MYLA-553, MYLA-580, MYLA-546: containers' iter(), ldexp, padding in bulk
+    "iter_ldexp_and_padding_in_bulk": r"""// MYLA-553, MYLA-580, MYLA-546: `iter()` on a BitSet, an Lru and a Grid;
+// `ldexp` past ±2100 in three steps; long paddings and repeats in bulk
+import std.bitset as bitset
+import std.cache as cache
+import std.grid as grid
+import std.iter as iter
+import std.math as math
+import std.num as num
+import std.fmt as fmt
+
+fun ends(s: str) -> str {
+    return f"{s.len()} {s[:4]}|{s[s.len() - 4:]}"
+}
+
+fun main() {
+    var b = bitset.fixed(300)
+    for i in [0, 63, 64, 199, 299] {
+        b.insert(i)
+    }
+    var seen = ""
+    for i in b.iter() {
+        seen = seen + f"{i},"
+    }
+    print(f"{seen} {b.iter() |> iter.map((x) => x + 1) |> iter.sum(0)}")
+    var c: cache.Lru<str, int> = cache.new(3)
+    for k in ["a", "b", "c", "d"] {
+        c.put(k, k.len())
+    }
+    c.get("b")
+    var order = ""
+    for (k, v) in c.iter() {
+        order = order + f"{k}{v} "
+    }
+    print(order)
+    let g = grid.new(3, 2, 'x')
+    print(g.iter() |> iter.count())
+    print(f"{math.ldexp(1.5, 2147483647)} {math.ldexp(-1.5, -2147483647 - 1)} {math.ldexp(4.9406564584124654e-324, 2097)} {math.ldexp(1.7976931348623157e308, -2098)}")
+    print(ends(fmt.fmt_text("xy", ">1000000")))
+    print(ends(fmt.pad("xy", "é^999999")))
+    print(ends(fmt.fmt_int(-5i64, 32, true, "01000000")))
+    print(ends(f"{255:#0100x}"))
+    print(ends(num.to_hex(255u64, 1000003)))
+    print(ends(num.to_binary(5u64, 4097)))
+    print(ends("abc".repeat(333333)))
+    print(ends("ab".pad_start(70000, 'ß')))
+}
+""",
+    # MYLA-545: `v.0.0` is two tuple indexes, not `v.` and the float `0.0`
+    "tuple_index_chain": r"""fun main() {
+    let v = ((1, 2), (3, (4, 5)))
+    print(v.0.0)
+    print(v.1.1.0 + v.0.1)
+    let w = [(7, (8, 9.5))]
+    print(w[0].1.1)
+    print(w[0].1.0 * 2)
+    let x = 0.5
+    print(x + 1.25e1)
+}
+""",
     # MYLA-429: a map that removals leave with few keys shrinks
     "map_shrinks_on_remove": r"""// MYLA-429: a map that removals leave with few keys shrinks: its order, its
 // copies, a walk that removes, string, narrow and compound keys, values that
@@ -10263,8 +10323,8 @@ STRESS_FRAGMENTED_FREE_SRC = (
     # Leaves 8000 freed cells of 8000 different sizes behind (each `keys(m)` on
     # a growing map frees a list one slot longer than the last), then allocates
     # 30000 small lists that none of those cells fit. An allocator that scans
-    # one free list on every allocation does 240 million probes here (about
-    # 14 s); size-class free lists find "nothing free" at once (MYLA-16).
+    # one free list on every allocation does 240 million probes here;
+    # size-class free lists find "nothing free" at once (MYLA-16).
     "#main\nfun main() {\n"
     "    var m: [int: int] = [:]\n"
     "    var i = 0\n"
@@ -11305,6 +11365,19 @@ class TestCompilerParity(unittest.TestCase):
                 self.assertTrue(interp[1].startswith(f"runtime error: {text}\n"), interp[1])
                 self.assertTrue(native[1].startswith(f"runtime error: {text}\n"), native[1])
 
+    def test_a_runtime_spec_is_reported_at_the_call(self):
+        # MYLA-565: at `x.format(spec)`, on every runner, not in std.fmt
+        for name, text in (("runtime_spec_of_an_int", "invalid format spec 'q'"),
+                           ("runtime_spec_of_a_float", "invalid format spec '9999999': a width above 1000000"),
+                           ("runtime_spec_of_text", "invalid format spec '.x'"),
+                           ("runtime_spec_with_std_fmt", "invalid format spec '<<<'")):
+            with self.subTest(program=name):
+                at = ":3:62\n" if name == "runtime_spec_with_std_fmt" else ":1:62\n"
+                for runner, (out, err, code) in zip(("interpreted", "native"), _both(RUNTIME_ERRORS[name])):
+                    self.assertTrue(err.startswith(f"runtime error: {text}\n"), (runner, err))
+                    self.assertTrue(err.splitlines(True)[1].endswith(at), (runner, err))
+                    self.assertNotIn("std/fmt.my", err, runner)
+
     def test_divide_by_zero_traps_nonzero(self):
         src = "#main\nfun main() {\n    var z = 0\n    print(1 / z)\n}\n"
         out, code = build_and_run(src)
@@ -11410,6 +11483,10 @@ class TestCompilerParity(unittest.TestCase):
 # longer holds (a later decision changed its meaning) or there is none (a
 # program added or changed since): its output, pinned here.
 PINNED = {
+    # MYLA-553, MYLA-580, MYLA-546: new; native code gives the same
+    "iter_ldexp_and_padding_in_bulk": '0,63,64,199,299, 630\nb1 d1 c1 \n6\ninf -0 8.98846567431158e307 5e-324\n1000000     |  xy\n1999996 éé|éé\n1000000 -000|0005\n100 0x00|00ff\n1000003 0000|00ff\n4097 0000|0101\n999999 abca|cabc\n139998 ßß|ßab\n',
+    # MYLA-545: new; failed to parse before (`expected field name or tuple index after '.'`)
+    "tuple_index_chain": "1\n6\n9.5\n16\n13\n",
     # MYLA-496: new; native code gives the same, before the change and after
     "for_over_a_map_walks_its_slots": '3003 4504497\n0,1,2,3,4,5,6,7,8,9, 15\n0=0 2=4 4=16 6=36 8=64 100=0 101=1 102=2 103=3 104=4 105=5 106=6 107=7 108=8 109=9 \n1=1 3=3 4=4 6=6 7=7 2=20 9=90 5=50 \n4 9 -1\n12\nk3 k43 k83 k123 k163 \n415 0 16,0,\np1:1 p2:2 p4:4 p5:5 p0:9 \n2b 0c 1d \n250=true 252=true 253=false 254=true \n1a 2b 11a 12b \n0 415\n',
     # MYLA-429: new; native code gives the same, before the change and after
@@ -11661,6 +11738,17 @@ RUNTIME_ERRORS = {
     "uint64_string_index": ('fun main() {\n    let s = "ab"\n    let i: [uint64] = [18446744073709551614]\n'
                             '    print(s[i[0]])\n}\n'),
     "error_after_stderr": 'from std.io import eprint\n\nfun main() {\n    eprint("before\\n")\n    panic("then")\n}\n',
+    # MYLA-565: a spec given at run time to `x.format(spec)` on a builtin
+    # `T: Format` is the caller's mistake, reported at the call (D183);
+    # natively it was inside std.fmt, interpreted too once std.fmt is loaded
+    "runtime_spec_of_an_int": ('fun show<T: Format>(x: T, spec: str) -> str { return x.format(spec) }\n'
+                               'fun main() {\n    print(show(5, ">4"))\n    print(show(5, "q"))\n}\n'),
+    "runtime_spec_of_a_float": ('fun show<T: Format>(x: T, spec: str) -> str { return x.format(spec) }\n'
+                                'fun main() {\n    print(show(2.5, ".1"))\n    print(show(2.5, "9999999"))\n}\n'),
+    "runtime_spec_of_text": ('fun show<T: Format>(x: T, spec: str) -> str { return x.format(spec) }\n'
+                             'fun main() {\n    print(show("ab", "^4"))\n    print(show(true, ".x"))\n}\n'),
+    "runtime_spec_with_std_fmt": ('import std.fmt as fmt\n\nfun show<T: Format>(x: T, spec: str) -> str { return x.format(spec) }\n'
+                                  'fun main() {\n    print(fmt.pad("a", ">2"))\n    print(show(\'c\', "<<<"))\n}\n'),
 }
 
 

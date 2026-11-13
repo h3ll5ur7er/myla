@@ -272,6 +272,16 @@ fun main() {
 """
 
 
+# A checked loop of `int64` arithmetic (MYLA-551, the review's `hot1`).
+HOT = """fun main() {
+    var s: int64 = 0
+    var i: int64 = 0
+    while i < 100000 { s += i * 3 - (i >> 1); i += 1 }
+    print(s)
+}
+"""
+
+
 def function_body(asm: str, name: str) -> str:
     """The lines of the function `myla_<name>` in a target's assembly."""
     lines = asm.splitlines()
@@ -323,17 +333,39 @@ class TestOverflow(unittest.TestCase):
         self.assertFalse("mul_overflows" in proc.stdout, "std.rt's division by the operand is called")
         body = {name: function_body(proc.stdout, name) for name in ["mul", "mulu", "add", "subu"]}
         if TEST_TARGET == "aarch64-linux":
-            want = {"mul": ["smulh"], "mulu": ["umulh"], "add": ["adds", "cset x12, vc"], "subu": ["subs", "cset x12, cs"]}
+            want = {"mul": ["smulh", "b.ne"], "mulu": ["umulh", "b.ne"], "add": ["adds", "b.vs"], "subu": ["subs", "b.cc"]}
         elif TEST_TARGET == "wasm32-wasi":
             want = {"mul": ["i64.shr_u", "i64.div_s"], "mulu": ["i64.shr_u", "i64.div_u"], "add": ["i64.ge_s"],
                     "subu": ["i64.ge_u"]}
         else:
-            want = {"mul": ["imulq", "jno"], "mulu": ["mulq", "jno"], "add": ["addq", "jno"], "subu": ["subq", "jnc"]}
+            # a jump to the trap after the return when the flag is set (MYLA-551)
+            want = {"mul": ["imulq", "\tjo "], "mulu": ["mulq", "\tjo "], "add": ["addq", "\tjo "], "subu": ["subq", "\tjc "]}
         for name, needles in want.items():
             for needle in needles:
                 self.assertIn(needle, body[name], f"{name}:\n{body[name]}")
             if TEST_TARGET != "wasm32-wasi":
                 self.assertNotIn("div", body[name], f"{name}:\n{body[name]}")
+
+    def test_the_traps_are_out_of_line(self):
+        # MYLA-551: a check is a conditional jump to its trap, which follows
+        # the function's return, not a jump over an inline call; a constant
+        # shift count below the width is checked by none at run time
+        with tempfile.TemporaryDirectory() as tmp:
+            path = write_program(tmp, HOT)
+            proc = subprocess.run([selfhost_tool("gen_main"), path, STDLIB_ROOT, "--checked", "--no-inline",
+                                   *target_flags()], capture_output=True, text=True)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            body = function_body(proc.stdout, "main")
+            self.assertNotIn("__trap_shift", body)
+            if TEST_TARGET != "wasm32-wasi":
+                lines = body.splitlines()
+                traps = [k for k, line in enumerate(lines) if "__trap_overflow" in line]
+                # `i * 3`, `-`, `s +=`, `i += 1`, each its own position
+                self.assertEqual(len(traps), 4, body)
+                self.assertTrue(all(k > lines.index(".Lmain_ret:") for k in traps), body)
+            self.assertEqual(selfhost_run(path), ("12499900000\n", "", 0))
+            if CAN_BUILD_NATIVE:
+                self.assertEqual(build_and_run(path, True), ("12499900000\n", "", 0))
 
     def test_what_fits_is_the_same_everywhere(self):
         with tempfile.TemporaryDirectory() as tmp:

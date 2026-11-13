@@ -27,6 +27,6 @@ fun main() {
 | `tan(x)`, `asin(x)`, `acos(x)`, `atan2(y, x)` | Within 4 ulp |
 | `abs(x)`, `copysign(x, s)`, `trunc(x)`, `floor(x)`, `ceil(x)`, `round(x)` | Exact; `round` takes halves away from zero, zeros keep their sign; `copysign` reads a NaN `s` as positive (D128) |
 | `min(a, b)`, `max(a, b)` | The other argument when one is NaN |
-| `ldexp(x, k)` | x·2^k |
+| `ldexp(x, k)` | x·2^k, in at most three steps whatever `k` (past ±2100 the result is the overflow or the underflow, as fdlibm's `scalbn` has it, [[MYLA-580]]) |
 | `is_nan(x)`, `is_infinite(x)`, `is_finite(x)`, `infinity()`, `nan()` | |
 | `to_bits(x) -> uint64`, `from_bits(b) -> float64` | The IEEE 754 bits of a float and back; every NaN gives `0x7FF8000000000000`, so its sign and payload, which differ between processors, can't be seen (D128) |

@@ -9,6 +9,7 @@
 // for input.
 
 from .ioerror import IoError, from_errno
+import .str as str_m // `find_from`
 
 // Write `s`'s bytes to file descriptor `fd` (1 = stdout, 2 = stderr), all of
 // them, or the error that stopped it (D146). A closed pipe on the standard
@@ -471,16 +472,14 @@ impl<R: Read> Buffered<R> {
         return Ok(true)
     }
 
-    // The offset of the first "\n" in the buffer from `start` on, or -1.
+    // The offset of the first "\n" in the buffer from `start` on, or -1
+    // (by std.str's `find_from`, which the interpreter runs without a step
+    // a byte, MYLA-546).
     fun newline_from(self, start: int32) -> int32 {
-        let buf = self.buf
-        let n = buf.len()
-        var i = start
-        while i < n {
-            if buf[i] == '\n' { return i }
-            i += 1
+        return match self.buf.find_from("\n", start) {
+            Some(i) => i
+            None => -1
         }
-        return -1
     }
 
     // The line up to `end`, past the "\n" there if there is one.

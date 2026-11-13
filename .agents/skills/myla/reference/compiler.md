@@ -118,7 +118,7 @@ Parity rules: interpreter output == native output on x86-64 == aarch64 == wasm32
 
 ## Bootstrap and seeds
 
-`scripts/bootstrap.sh [OUT]`: stage0 = `as`+`ld` of `bootstrap/seed.s` (aarch64 host: `seed-aarch64.s`; `scripts/host.sh`); stage0 builds `tools/embed/main.my` → `embed lib selfhost/embedded_std.my` (rewrites it only if `lib/` or the AST/parser changed it); stage0 compiles `selfhost/gen_main.my lib` → `gen_tool` (stage 1); gen_tool → `stage2.s`; stage2 → `stage3.s`; `cmp stage2.s stage3.s` (fixed point); stage3 builds `build/myla` (`selfhost/main.my`) and `build/myla-lsp`, checks a type error exits 1 and the LSP answers. About 8 s.
+`scripts/bootstrap.sh [OUT]`: stage0 = `as`+`ld` of `bootstrap/seed.s` (aarch64 host: `seed-aarch64.s`; `scripts/host.sh`); stage0 builds `tools/embed/main.my` → `embed lib selfhost/embedded_std.my` (rewrites it only if `lib/` or the AST/parser changed it); stage0 compiles `selfhost/gen_main.my lib` → `gen_tool` (stage 1); gen_tool → `stage2.s`; stage2 → `stage3.s`; `cmp stage2.s stage3.s` (fixed point); stage3 builds `build/myla` (`selfhost/main.my`) and `build/myla-lsp`, checks a type error exits 1 and the LSP answers. About 17 s on 2026-11-13 at `706eaec`.
 
 `scripts/update-seed.sh`: bootstrap into `build/seed-update`, `myla check` of the eight implicit modules whole, then `seed_compile` stage3's output for both targets with an empty embedded_std (MYLA-431) under a header (commit, sha256). Commit `bootstrap/seed.s`, `bootstrap/seed-aarch64.s`, `selfhost/embedded_std.my`. `scripts/check-seed.sh` (CI `bootstrap` job, optional pre-push hook) fails when they aren't the current compiler's.
 

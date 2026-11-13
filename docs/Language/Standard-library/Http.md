@@ -80,7 +80,7 @@ async fun main() {
 | `Client`: `send(r)`, `get(url)`, `post(url, body)`, and `send_async`, `get_async`, `post_async` (async) | A request over the connection kept from the last one, when it goes to the same host and port and the server allowed it, else over a new one |
 | `Client`: `close()` | The kept connection closed |
 
-`Client`'s `exchange_async` and `follow_async` are the steps of its `send_async` (one exchange; the redirects), public only because a method can't be private yet ([[MYLA-433]]); a program has no need of them.
+`Client`'s `exchange_async` and `follow_async` are the steps of its `send_async` (one exchange; the redirects), and `exchange`, `reusable`, `kept` and `finish` those of both sends (one exchange; the kept connection a request may use; the kept connection if it goes to the request's host; the connection kept or closed after a response, which is then made and decoded), public only because a method can't be private yet ([[MYLA-433]]); a program has no need of them.
 
 The one-shot GET is `get`, and `fetch` is the same: the module was first written while the prelude's free `get(m, k)` took the name in the file being tested; maps have `m.get(k)` since [[MYLA-393]].
 
@@ -194,7 +194,7 @@ Everything goes through `std.net` and std.rt's socket primitives: a port to anot
 
 ## Speed
 
-Natively on x86-64, a server and a client in two programs on loopback, on a 4-core machine shared with other work, the best of six runs (the server with 4 workers; under the machine's load the runs ranged down to about 60 % of these):
+Natively on x86-64, a server and a client in two programs on loopback, on a 4-core machine shared with other work, the best of six runs (2026-11-08, `8a56bc3`; the server with 4 workers; under the machine's load the runs ranged down to about 60 % of these):
 
 | What | Speed |
 | --- | --- |

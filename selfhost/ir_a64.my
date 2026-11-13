@@ -17,7 +17,7 @@
 
 from .checker import Type, subst_type
 from .codegen import CodeGen, is_aggregate, int_signed, int_width_cg, is_tfloat32, is_aggregate_opt, is_cell_t, is_tfunc, is_actor_t, tls_offset, TLS_SIZE
-from .ir import IrFunc, Inst, Term, Slot, ENV_WORD, ends_in_call, Intrinsic, is_xchg, is_rc_dec, is_rc_atomic
+from .ir import IrFunc, Inst, Term, Slot, ENV_WORD, ends_in_call, Intrinsic, is_xchg, is_rc_dec, is_rc_atomic, Pos, touches, use_counts
 from .ir_x86 import slots_at, frame_size, tail_call_at, drops_after_free, passes_frame_address, frame_addresses
 from .ir_util import int_in, is_char_type, is_float_type, reachable_blocks, wrapped
 
@@ -37,6 +37,8 @@ impl CodeGen {
     fun emit_a64(var self, f: IrFunc, decl_id: int32, line: int32, col: int32, mangled: str) {
         self.cur_file = self.file_number(decl_id)
         self.cur_path = self.path_of(decl_id)
+        // which checks alone read their condition (`a64_checked`)
+        self.temp_uses = use_counts(f, touches(f))
         // the outgoing words: the most any call passes on the stack
         var out = 0
         for b in f.blocks {
@@ -82,7 +84,7 @@ impl CodeGen {
         let fr = A64Frame { toff: toff, soff: soff, scratch: scratch, size: size, frame: f.frame, save28: save28, resumes: resumes }
         self.arg_words = 0
         if words > A64_WORDS { self.arg_words = words - A64_WORDS }
-        self.epilogue = format(".Lret_{}", mangled)
+        self.epilogue = self.epilogue_label(mangled)
         var labels: [str] = []
         for b in f.blocks { labels.push(self.label()) }
         self.emit("")
@@ -169,8 +171,12 @@ impl CodeGen {
                 if !becomes && tail >= 0 { stop = tail }
                 var i = 0
                 while i < stop {
-                    self.a64_inst(f, fr, insts[i])
-                    i = i + 1
+                    let n = self.a64_checked(fr, insts, i, stop)
+                    if n > 0 { i = i + n }
+                    else {
+                        self.a64_inst(f, fr, insts[i])
+                        i = i + 1
+                    }
                 }
                 if becomes {
                     if resume_at >= 0 { self.a64_state(fr, resume_at) }
@@ -186,6 +192,10 @@ impl CodeGen {
         self.emit(format("{}:", self.epilogue))
         self.a64_leave(fr)
         self.emit("ret")
+        // the out-of-line traps (`a64_cold_trap`)
+        for line in self.cold_traps { self.emit(line) }
+        self.cold_traps = []
+        self.cold_keys = [:]
         if f.frame { self.emit_frame_new_ir(f, mangled) }
     }
 
@@ -337,6 +347,109 @@ impl CodeGen {
         if line <= 0 { self.emit("mov x1, #0") }
         else { self.a64_adr("x1", self.position_label(line, col)) }
         self.emit(format("bl {}", trap))
+    }
+
+    // The label of the call of `__trap_<kind>` reporting `p`, out of line
+    // (MYLA-551, as x86-64's `cold_trap`): a checked build's overflow and
+    // shift checks branch to it, after the function's `ret`, where the code
+    // that doesn't trap falls through. One per kind and position in the
+    // function.
+    fun a64_cold_trap(var self, kind: str, p: Pos) -> str {
+        let key = format("{}:{}:{}", kind, p.line, p.col)
+        match self.cold_keys.get(key) {
+            Some(l) => { return l },
+            None => {},
+        }
+        let lab = self.label()
+        self.cold_keys[key] = lab
+        self.cold_traps.push(lab + ":")
+        if p.line <= 0 { self.cold_traps.push("mov x1, #0") }
+        else {
+            let pos = self.position_label(p.line, p.col)
+            self.cold_traps.push(format("adrp x1, {}", pos))
+            self.cold_traps.push(format("add x1, x1, :lo12:{}", pos))
+        }
+        self.cold_traps.push("bl __trap_" + kind)
+        return lab
+    }
+
+    // A checked build's check at `insts[i]` with what it checks (D175,
+    // MYLA-551), each `check` a branch to its trap out of line: `ok = fits
+    // op (x, y)`, the `check ok overflow` that alone reads it and `d = x op
+    // y` (the lowering's 64-bit `+`, `-` and `*`) as the operation once,
+    // setting the flags, and a `b.vs` (`b.cs`, `b.cc` unsigned; `b.ne` for
+    // a `*`'s high half); a comparison that only the `check` after it reads
+    // as a `cmp` and a branch when it doesn't hold. How many instructions it
+    // took: 3, 2, or 0 for any other sequence (nothing emitted).
+    fun a64_checked(var self, fr: A64Frame, insts: [Inst], i: int32, stop: int32) -> int32 {
+        if i + 1 >= stop { return 0 }
+        var kind = ""
+        var pos = Pos { line: 0, col: 0 }
+        var ok = -1
+        match insts[i + 1] {
+            Inst.Check(v, k, p) => {
+                kind = k
+                pos = p
+                ok = v
+            },
+            _ => { return 0 },
+        }
+        if (kind != "overflow" && kind != "shift") || self.temp_uses[ok] != 1 { return 0 }
+        match insts[i] {
+            Inst.Cmp(d, op, t, x, y) => {
+                if d != ok { return 0 }
+                var signed = true
+                match t {
+                    Type.TInt(w, s) => { signed = s },
+                    _ => { return 0 },
+                }
+                self.a64_ld("x10", fr, x)
+                self.a64_ld("x11", fr, y)
+                self.emit("cmp x10, x11")
+                self.emit(format("b.{} {}", a64_inverted(a64_icond(op, signed)), self.a64_cold_trap(kind, pos)))
+                return 2
+            },
+            Inst.Intr(d, fop, args) => {
+                if d != ok || i + 2 >= stop { return 0 }
+                var o = ""
+                var signed = false
+                match fop {
+                    Intrinsic.Fits(fo, sg) => {
+                        o = fo
+                        signed = sg
+                    },
+                    _ => { return 0 },
+                }
+                match insts[i + 2] {
+                    Inst.Bin(r, bop, lt, rt, x, y, p) => {
+                        if bop != o || x != args[0] || y != args[1] { return 0 }
+                        self.a64_ld("x10", fr, x)
+                        self.a64_ld("x11", fr, y)
+                        var cond = ""
+                        if o == "*" {
+                            self.emit("mul x12, x10, x11")
+                            if signed {
+                                self.emit("smulh x13, x10, x11")
+                                self.emit("cmp x13, x12, asr #63")
+                            } else {
+                                self.emit("umulh x13, x10, x11")
+                                self.emit("cmp x13, #0")
+                            }
+                            cond = "ne"
+                        } else {
+                            if o == "+" { self.emit("adds x12, x10, x11") } else { self.emit("subs x12, x10, x11") }
+                            // a borrow clears C: an unsigned `-` overflows while C is clear
+                            cond = if signed { "vs" } else if o == "+" { "cs" } else { "cc" }
+                        }
+                        self.emit(format("b.{} {}", cond, self.a64_cold_trap(kind, pos)))
+                        self.a64_st("x12", fr, r)
+                        return 3
+                    },
+                    _ => { return 0 },
+                }
+            },
+            _ => { return 0 },
+        }
     }
 
     // -- instructions --------------------------------------------------------
@@ -495,6 +608,10 @@ impl CodeGen {
             Inst.Moved(s) => {},
             Inst.Check(v, kind, p) => {
                 self.a64_ld("x10", fr, v)
+                if kind == "overflow" || kind == "shift" {
+                    self.emit("cbz x10, " + self.a64_cold_trap(kind, p))
+                    return
+                }
                 let ok = self.label()
                 self.emit(format("cbnz x10, {}", ok))
                 self.a64_trap("__trap_" + kind, p.line, p.col)
@@ -1178,6 +1295,19 @@ fun a64_wname(r: str) -> str {
     sb.append("w")
     sb.append(r, 1, r.len())
     return sb.build()
+}
+
+// The condition that holds exactly when `cond` (an integer one) doesn't.
+#test("lt")["ge"]
+#test("hi")["ls"]
+#test("eq")["ne"]
+fun a64_inverted(cond: str) -> str {
+    let pairs = [("eq", "ne"), ("lt", "ge"), ("le", "gt"), ("lo", "hs"), ("ls", "hi")]
+    for p in pairs {
+        if cond == p.0 { return p.1 }
+        if cond == p.1 { return p.0 }
+    }
+    return cond
 }
 
 // The condition `cset` sets for the integer comparison `op`.

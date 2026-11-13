@@ -93,7 +93,7 @@ They run the iterator to its end, or until they know the answer.
 | --- | --- |
 | `to_list(it) -> [T]` | The values, in a list |
 | `count(it) -> int` | How many values there are (`iter.filter(p) \|> iter.count()` counts those `p` holds for) |
-| `sum(it, zero: T) -> T`, `T: Add` | The values added to `zero`: `iter.sum(0)`, `iter.sum(0.0)`, `iter.sum(V2 { x: 0, y: 0 })`. Myla has no zero of a generic `T`, so the caller gives it, as for `xs.sum(0)` |
+| `sum(it, zero: T) -> T`, `T: Add` | The values added to `zero`: `iter.sum(0)`, `iter.sum(0.0)`, `iter.sum(V2 { x: 0, y: 0 })`. Myla has no zero of a generic `T`, so the caller gives it, as for `xs.sum(0)`. It overflows as `T`'s `+` does (D175): a trap, `integer overflow`, interpreted, under `myla test` and in a `--checked` build, a wrapped sum in a plain build; `iter.map((x) => x as int64)` before it makes the sum wider |
 | `fold(it, init: A, f: (A, T) -> A) -> A` | `f(… f(f(init, x0), x1) …, xn)`; `init` when there are no values |
 | `any(it, pred: (T) -> bool) -> bool` | Whether `pred` holds for some value (false when there are none); it stops at the first |
 | `all(it, pred: (T) -> bool) -> bool` | Whether `pred` holds for every value (true when there are none); it stops at the first it doesn't hold for |

@@ -444,6 +444,101 @@ class SelfHostedInterpParity(unittest.TestCase):
         self.assertLess(peaks["generic"], peaks["int"] + 8, peaks)
 
 
+    def test_lines_and_extended_bytes_take_no_step_a_byte(self) -> None:
+        """`read_line` and `extend` of `[uint8]` cost what the lines or the
+        reads do, not their bytes: 6,000 lines of 500 bytes take about what
+        6,000 lines of 5 do (MYLA-546: 3 MB in 60,000 lines were slow, the
+        interpreter scanning for each line's end a byte at a time and
+        `extend` pushing each byte)."""
+        if self._binary is None:
+            self.skipTest("timing needs the natively built interpreter")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "bytes.my")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(LINES_AND_EXTENDS)
+            for mode in ("lines", "extend"):
+                times = {}
+                for width in (5, 500):
+                    data = os.path.join(tmp, f"{width}.txt")
+                    with open(data, "wb") as fh:
+                        fh.write((b"x" * width + b"\n") * 6000)
+                    with open(data, "rb") as stdin:
+                        start = time.perf_counter()
+                        proc = subprocess.run([selfhost_tool("main"), "run", "--stdlib", STDLIB_ROOT, path, mode, str(width + 1)],
+                                              stdin=stdin, capture_output=True, text=True, timeout=120)
+                        times[width] = time.perf_counter() - start
+                    self.assertEqual((proc.stdout, proc.stderr, proc.returncode), (f"6000 {6000 * (width + 1)}\n", "", 0))
+                with self.subTest(mode=mode):
+                    self.assertLess(times[500], 3 * times[5] + 0.5, f"{mode}: 5 bytes {times[5]:.2f} s, 500 bytes {times[500]:.2f} s")
+
+    @unittest.skipIf(not os.path.isdir("/proc/self/task"), "counts the wake-ups in /proc")
+    def test_an_idle_server_sleeps(self) -> None:
+        """An interpreted server waiting for connections, and for requests
+        on 900 kept ones, wakes a few dozen times a second and uses a few
+        percent of a CPU (MYLA-546: a poll a parked socket every millisecond;
+        before, 894 wake-ups a second with none, 677 and 26.5 percent with
+        900; natively none)."""
+        if self._binary is None:
+            self.skipTest("the self-hosted interpreter could not be built natively")
+        import resource
+        import socket
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        if hard != resource.RLIM_INFINITY and hard < 2048:
+            self.skipTest(f"900 connections need 2,048 descriptors, the limit is {hard}")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "idle.my")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(IDLE_SERVER)
+            # the server inherits the limit
+            resource.setrlimit(resource.RLIMIT_NOFILE, (max(soft, 2048), hard))
+            try:
+                proc = subprocess.Popen([selfhost_tool("main"), "run", "--stdlib", STDLIB_ROOT, path],
+                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            finally:
+                resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
+            kept = []
+            try:
+                port = int(proc.stdout.readline())
+                for n in (0, 900):
+                    while len(kept) < n:
+                        kept.append(socket.create_connection(("127.0.0.1", port), timeout=10))
+                    time.sleep(1.0)
+                    w0, c0 = _wake_ups(proc.pid), _cpu_seconds(proc.pid)
+                    time.sleep(2.0)
+                    wakes, cpu = (_wake_ups(proc.pid) - w0) / 2, 100 * (_cpu_seconds(proc.pid) - c0) / 2
+                    with self.subTest(connections=n):
+                        self.assertLess(wakes, 250, f"{wakes:.0f} wake-ups a second")
+                        self.assertLess(cpu, 12, f"{cpu:.1f} percent of a CPU")
+                # a kept connection is still served
+                kept[0].sendall(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+                kept[0].settimeout(10)
+                self.assertTrue(kept[0].recv(4096).startswith(b"HTTP/1.1 200 OK\r\n"))
+            finally:
+                for s in kept:
+                    s.close()
+                proc.kill()
+                proc.communicate()
+
+
+def _cpu_seconds(pid: int) -> float:
+    """The CPU time the process `pid` has used (Linux's /proc)."""
+    with open(f"/proc/{pid}/stat") as fh:
+        fields = fh.read().rsplit(")", 1)[1].split()
+    return (int(fields[11]) + int(fields[12])) / os.sysconf("SC_CLK_TCK")
+
+
+def _wake_ups(pid: int) -> int:
+    """How many times the threads of the process `pid` have given up the
+    CPU (their context switches, Linux's /proc)."""
+    n = 0
+    for t in os.listdir(f"/proc/{pid}/task"):
+        with open(f"/proc/{pid}/task/{t}/status") as fh:
+            for line in fh:
+                if line.startswith(("voluntary_ctxt_switches", "nonvoluntary_ctxt_switches")):
+                    n += int(line.split()[1])
+    return n
+
+
 def _peak_mb(cmd: list[str]) -> tuple[str, float]:
     """(stdout, peak resident memory in MB) of running `cmd`, which must
     succeed."""
@@ -503,6 +598,74 @@ fun main() {
     }
     print(xs.len() + bag.items.len() + grid[0].len() + xs.len())
     print(total)
+}
+"""
+
+# The standard input's lines read, or its bytes read `n` at a time and
+# gathered with `extend` (test_lines_and_extended_bytes_take_no_step_a_byte):
+# how many and their bytes (each line's "\n" counted).
+LINES_AND_EXTENDS = """\
+import std.io as io
+from std.io import Read, stdin
+from std.process import args
+from std.num import parse_int
+
+fun main() {
+    let a = args()
+    var count = 0
+    var bytes = 0
+    if a[1] == "lines" {
+        var r = stdin()
+        while let Ok(Some(l)) = r.read_line() {
+            count += 1
+            bytes += l.len() + 1
+        }
+    } else {
+        let n = match parse_int(a[2]) { Some(v) => v as int, None => 1 }
+        var f = io.fd_stream(0)
+        var all: [uint8] = []
+        while true {
+            let chunk = match f.read(n) { Ok(b) => b, Err(e) => { panic("read") } }
+            if chunk.len() == 0 { break }
+            all.extend(chunk)
+            count += 1
+        }
+        bytes = all.len()
+    }
+    print(f"{count} {bytes}")
+}
+"""
+
+# A server that keeps 1,000 connections a minute, its port on the first line
+# (test_an_idle_server_sleeps).
+IDLE_SERVER = """\
+import std.http as http
+from std.http import Request, Response
+import std.net as net
+from std.io import println
+
+async fun handle(r: Request) -> Response {
+    return http.response(200, "ok")
+}
+
+#main
+async fun main() {
+    var l = match net.listen(net.addr(net.loopback(), 0)) {
+        Ok(l) => l
+        Err(e) => { panic("can't listen") }
+    }
+    match l.local_addr() {
+        Ok(at) => println(f"{at.port}")
+        Err(e) => { panic("addr") }
+    }
+    var o = http.server_options()
+    o.max_connections = 1000
+    o.idle_ms = 60000
+    o.read_ms = 60000
+    match await http.serve_with(l, o, handle) {
+        Ok(n) => println(f"served {n}")
+        Err(e) => println(f"server: {e}")
+    }
 }
 """
 

@@ -26,13 +26,14 @@
 // the project root and then the stdlib root.
 
 from std.fs import read_to_string, exists, is_dir, current_dir
+from std.process import env
 from .stdroot import is_embedded, embedded_text, embedded_parse, EMBEDDED_ROOT
 from .astcache import decode, body_part, cached_body, no_bodies, Cached, Bodies
 from .parser import parse_source_with, parse_source_lazy, parse_body, BodySite, LazyParsed, expr_of, stmt_of, type_expr_of, block_of, pattern_of, fun_of
 from .diag import Report, reports, type_report, chain
-from .checker import CheckErr, DeclOrigin, LazyBodies, body_key, no_lazy_bodies, primitive_type_names
-from .tokens import SrcSpan, no_span, keywords, TokenKind, Diag
-from .lexer import lex_part
+from .checker import CheckErr, DeclOrigin, LazyBodies, body_key, no_lazy_bodies, unread_key, primitive_type_names
+from .tokens import SrcSpan, no_span, keywords, TokenKind, Diag, Token, Note
+from .lexer import lex_part, lex
 from .ast import Program, Decl, DeclKind, FunData, Param, TypeParam, Field, Variant
 from .ast import ImportPath, ImportItem, TypeExpr, TypeKind, Expr, ExprKind, FieldInit
 from .ast import MapEntry, Stmt, StmtKind, Block, ElseTail, BindElem, ExprOrBlock, Attribute
@@ -96,7 +97,236 @@ pub fun type_errors(prog: Loaded, errs: [CheckErr]) -> Report {
         r.notes = e.notes
         rs.push(r)
     }
-    return chain(rs)
+    return with_reading_notes(chain(rs), [:])
+}
+
+// `r` and the errors after it, each with a note where its place overlaps a
+// form D186 reads one way that may have been meant the other (MYLA-545):
+// in a call's arguments `a < b, c > (d)` is a call of `a` with the type
+// arguments `b, c`, and in a list, map or tuple literal `pair<A, B>(x)` is
+// two comparisons, so the error is about something else (`unknown module
+// 'p'` for `a < p.x, c > (d)`). Found in the tokens of the error's file,
+// read again: only on an error's way, so a program that checks pays nothing.
+pub fun with_reading_notes(r: Report, overrides: [str: str]) -> Report {
+    var all = [r]
+    for m in r.more { all.push(m) }
+    // each file read and lexed once, for all its errors
+    var files: [str: (str, [Token])] = [:]
+    var done: [Report] = []
+    for each in all {
+        var e = each
+        if e.line > 0 && e.path != "" {
+            if !files.contains(e.path) { files[e.path] = lexed_file(e.path, overrides) }
+            let (src, toks) = files[e.path]
+            match note_at(src, toks, e.line, e.col, e.sp) {
+                Some(n) => { e.notes.push(n) },
+                None => {},
+            }
+        }
+        done.push(e)
+    }
+    var out = done[0]
+    out.more = []
+    var i = 1
+    while i < done.len() {
+        out.more.push(done[i])
+        i += 1
+    }
+    return out
+}
+
+// The text of `path` (an editor's buffer, the carried library's or the
+// disk's) and its tokens; none where it doesn't read or lex.
+fun lexed_file(path: str, overrides: [str: str]) -> (str, [Token]) {
+    var src = ""
+    match source_text(path, overrides) {
+        Some(t) => { src = t },
+        None => {
+            match read_to_string(path) {
+                Ok(t) => { src = t },
+                Err(e) => { return ("", []) },
+            }
+        },
+    }
+    return match lex(src) {
+        Ok(toks) => (src, toks),
+        Err(d) => (src, []),
+    }
+}
+
+// The note on the first form of D186 in the text `src` that the place
+// `line`, `col`, `sp` overlaps: a name, `<`, type arguments with a comma
+// between two of them, `>` and a call's `(…)`, in a call's arguments or an
+// element of a literal.
+#test("fun main() {\n    print(both(a < p.x, c > (d)))\n}", 2, 20, SrcSpan { sline: 2, scol: 20, eline: 2, ecol: 23 })[Some(Note { label: "note", msg: "in a call's arguments `a < p.x, c > (d)` is a call of 'a' with the type arguments `p.x, c` (D186); for two comparisons, write `(a < p.x), c > (d)`", line: 2, col: 16, sp: SrcSpan { sline: 2, scol: 16, eline: 2, ecol: 32 } })]
+#test("fun main() {\n    let v = [pair<P, Q>(p, q)]\n}", 2, 14, SrcSpan { sline: 2, scol: 14, eline: 2, ecol: 18 })[Some(Note { label: "note", msg: "in a list, map or tuple literal `pair<P, Q>(p, q)` is two comparisons, `pair < P` and `Q > (p, q)` (D186); for a call with type arguments, give it a `let` of its own: `let v = pair<P, Q>(p, q)`", line: 2, col: 14, sp: SrcSpan { sline: 2, scol: 14, eline: 2, ecol: 30 } })]
+#test("fun main() {\n    let v = (idt<int, str>(7))\n}", 2, 23, SrcSpan { sline: 2, scol: 23, eline: 2, ecol: 26 })[Some(Note { label: "note", msg: "in a list, map or tuple literal `idt<int, str>(7)` is two comparisons, `idt < int` and `str > (7)` (D186); for a call with type arguments, give it a `let` of its own: `let v = idt<int, str>(7)`", line: 2, col: 14, sp: SrcSpan { sline: 2, scol: 14, eline: 2, ecol: 30 } })]
+// one type argument, an index, a block, or elsewhere on the line: none
+#test("fun main() {\n    let v = [mk<int>(1)]\n}", 2, 14, SrcSpan { sline: 2, scol: 14, eline: 2, ecol: 16 })[None]
+#test("fun main() {\n    let v = xs[pair<P, Q>(p, q)]\n}", 2, 16, SrcSpan { sline: 2, scol: 16, eline: 2, ecol: 20 })[None]
+#test("fun main() {\n    pair<P, Q>(p, q)\n}", 2, 5, SrcSpan { sline: 2, scol: 5, eline: 2, ecol: 9 })[None]
+#test("fun main() {\n    let x = 1; print(both(a < b, c > (d)))\n}", 2, 9, SrcSpan { sline: 2, scol: 9, eline: 2, ecol: 10 })[None]
+fun reading_note(src: str, line: int32, col: int32, sp: SrcSpan) -> Option<Note> {
+    return match lex(src) {
+        Ok(toks) => note_at(src, toks, line, col, sp),
+        Err(d) => None,
+    }
+}
+
+// `reading_note` with the tokens `toks` of `src`.
+fun note_at(src: str, toks: [Token], line: int32, col: int32, sp: SrcSpan) -> Option<Note> {
+    // the place: its range, or its column
+    var sl = line
+    var sc = col
+    var el = line
+    var ec = col + 1
+    if sp.eline > 0 {
+        sl = sp.sline
+        sc = sp.scol
+        el = sp.eline
+        ec = sp.ecol
+    }
+    var k = 0
+    while k + 1 < toks.len() {
+        if toks[k].kind == TokenKind.IDENT && toks[k + 1].kind == TokenKind.LT {
+            match type_args_form(toks, k) {
+                Some(form) => {
+                    let (comma, close, end) = form
+                    let first = toks[k]
+                    let last = toks[end]
+                    let overlaps = place_before(first.line, first.column, el, ec) && place_before(sl, sc, last.eline, last.ecol)
+                    let how = if overlaps { reading_of(toks, k) } else { "" }
+                    if how != "" {
+                        let lines = src.split("\n")
+                        let whole = text_between(lines, toks, k, end)
+                        let callee = toks[k].lexeme
+                        let left = text_between(lines, toks, k + 2, comma - 1)
+                        let right = text_between(lines, toks, comma + 1, close - 1)
+                        let args = text_between(lines, toks, close + 1, end)
+                        var msg = ""
+                        if how == "call" {
+                            msg = format("in a call's arguments `{}` is a call of '{}' with the type arguments `{}` (D186); for two comparisons, write `({} < {}), {} > {}`", whole, callee, text_between(lines, toks, k + 2, close - 1), callee, left, right, args)
+                        } else {
+                            msg = format("in a list, map or tuple literal `{}` is two comparisons, `{} < {}` and `{} > {}` (D186); for a call with type arguments, give it a `let` of its own: `let v = {}`", whole, callee, left, right, args, whole)
+                        }
+                        return Some(Note { label: "note", msg: msg, line: first.line, col: first.column, sp: SrcSpan { sline: first.line, scol: first.column, eline: last.eline, ecol: last.ecol } })
+                    }
+                    k = close
+                },
+                None => {},
+            }
+        }
+        k += 1
+    }
+    return None
+}
+
+// Whether the place `al`, `ac` is before `bl`, `bc`.
+fun place_before(al: int32, ac: int32, bl: int32, bc: int32) -> bool {
+    return al < bl || (al == bl && ac < bc)
+}
+
+// At the name `toks[k]` before a `<`: the index of the comma between its
+// first two type arguments, of the `>` that closes them and of the `)` of
+// the call after it, when the tokens can be such type arguments (as the
+// parser's scan, `type_args_then`, takes them in a call's arguments) and
+// there are two or more.
+fun type_args_form(toks: [Token], k: int32) -> Option<(int32, int32, int32)> {
+    var angles = 0
+    var brackets = 0
+    var comma = -1
+    var i = k + 1
+    while i < toks.len() {
+        let kind = toks[i].kind
+        if kind == TokenKind.LT {
+            angles += 1
+            if angles > 256 { return None }
+        } else if kind == TokenKind.GT {
+            angles -= 1
+            if angles == 0 {
+                if brackets != 0 || comma < 0 || i + 1 >= toks.len() || toks[i + 1].kind != TokenKind.LPAREN { return None }
+                var depth = 0
+                var j = i + 1
+                while j < toks.len() {
+                    let kj = toks[j].kind
+                    if kj == TokenKind.LPAREN || kj == TokenKind.LBRACKET || kj == TokenKind.LBRACE {
+                        depth += 1
+                    } else if kj == TokenKind.RPAREN || kj == TokenKind.RBRACKET || kj == TokenKind.RBRACE {
+                        depth -= 1
+                        if depth == 0 { return Some((comma, i, j)) }
+                    }
+                    j += 1
+                }
+                return None
+            }
+        } else if kind == TokenKind.LPAREN || kind == TokenKind.LBRACKET {
+            brackets += 1
+        } else if kind == TokenKind.RPAREN || kind == TokenKind.RBRACKET {
+            brackets -= 1
+            if brackets < 0 { return None }
+        } else if kind == TokenKind.COMMA {
+            if toks[i].suffix == "hole" { return None }
+            if brackets == 0 && angles == 1 && comma < 0 { comma = i }
+        } else if !(kind == TokenKind.IDENT || kind == TokenKind.DOT || kind == TokenKind.COLON || kind == TokenKind.ARROW || kind == TokenKind.ASYNC || kind == TokenKind.BOOL || kind == TokenKind.STR || kind == TokenKind.INT8 || kind == TokenKind.INT16 || kind == TokenKind.INT32 || kind == TokenKind.INT64 || kind == TokenKind.UINT8 || kind == TokenKind.UINT16 || kind == TokenKind.UINT32 || kind == TokenKind.UINT64) {
+            return None
+        }
+        i += 1
+    }
+    return None
+}
+
+// How D186 reads the form at the name `toks[k]`, by the bracket it is
+// directly in: "call" in a call's arguments, "literal" in an element of a
+// list, map or tuple literal (or parentheses), "" elsewhere (an index, a
+// block, a struct literal's fields, a statement).
+fun reading_of(toks: [Token], k: int32) -> str {
+    var depth = 0
+    var i = k - 1
+    while i >= 0 {
+        let kind = toks[i].kind
+        if kind == TokenKind.RPAREN || kind == TokenKind.RBRACKET || kind == TokenKind.RBRACE {
+            depth += 1
+        } else if kind == TokenKind.LPAREN || kind == TokenKind.LBRACKET || kind == TokenKind.LBRACE {
+            if depth > 0 {
+                depth -= 1
+            } else {
+                if kind == TokenKind.LBRACE { return "" }
+                let p = if i > 0 { toks[i - 1].kind } else { TokenKind.NEWLINE }
+                let after_value = p == TokenKind.IDENT || p == TokenKind.RPAREN || p == TokenKind.RBRACKET || p == TokenKind.GT || p == TokenKind.QUESTION || p == TokenKind.SELF || p == TokenKind.STRING
+                if kind == TokenKind.LPAREN { return if after_value { "call" } else { "literal" } }
+                return if after_value { "" } else { "literal" }
+            }
+        }
+        i -= 1
+    }
+    return ""
+}
+
+// The text of `toks[a]` to `toks[b]` as written, from the lines of their
+// file; with the tokens on more than one line, their lexemes.
+fun text_between(lines: [str], toks: [Token], a: int32, b: int32) -> str {
+    if b < a { return "" }
+    let first = toks[a]
+    let last = toks[b]
+    if first.line == last.eline && first.line >= 1 && first.line <= lines.len() {
+        let cps = lines[first.line - 1].chars()
+        if last.ecol - 1 <= cps.len() {
+            var sb = StringBuilder()
+            var c = first.column - 1
+            while c < last.ecol - 1 {
+                sb.append_char(cps[c])
+                c += 1
+            }
+            return sb.build()
+        }
+    }
+    var words: [str] = []
+    var i = a
+    while i <= b {
+        words.push(toks[i].lexeme)
+        i += 1
+    }
+    return join(words, " ")
 }
 
 // The warnings `ws` of the linked program `prog` (D95), each in its
@@ -356,18 +586,22 @@ pub fun normalize(p: str) -> str {
 // Whether `path` is a file of the standard library at `root`: their raw
 // memory is the library's own (D152), so a check of one as the entry (`myla
 // test lib/std/rt.my`, an editor) allows it. Both relative to the working
-// directory when they aren't absolute.
+// directory when they aren't absolute; both made absolute when one is, or
+// climbs with a leading `..` (`option.my` under `..`, MYLA-545), which the
+// text alone can't compare.
 #test("lib/std/rt.my", "lib")[true]
 #test("./lib/std/rt.my", "lib/")[true]
 #test("lib2/std/rt.my", "lib")[false]
 #test("prog.my", "lib")[false]
+#test("../lib/std/rt.my", "../lib")[true]
+#test("../lib2/std/rt.my", "../lib")[false]
 pub fun in_stdlib(path: str, root: str) -> bool {
     if root == EMBEDDED_ROOT { return in_std_tree(path) }
     var p = normalize(path)
     var r = normalize(root)
     let pa = p.len() > 0 && p[0] == '/'
     let ra = r.len() > 0 && r[0] == '/'
-    if pa != ra {
+    if pa != ra || climbs(p) || climbs(r) {
         let here = match current_dir() {
             Ok(d) => d,
             Err(e) => { return false },
@@ -376,6 +610,16 @@ pub fun in_stdlib(path: str, root: str) -> bool {
         if !ra { r = normalize(here + "/" + r) }
     }
     return r != "." && p.len() > r.len() + 1 && starts_with_text(p, r + "/")
+}
+
+// Whether the normalized relative path `p` starts above the working
+// directory (`..`, `../x`): only `..` is left at its start by `normalize`.
+#test("..")[true]
+#test("../lib")[true]
+#test("..lib")[false]
+#test("lib/..x")[false]
+fun climbs(p: str) -> bool {
+    return p.len() >= 2 && p[0] == '.' && p[1] == '.' && (p.len() == 2 || p[2] == '/')
 }
 
 // Whether `path` is a module of the standard library rooted at `root`: a
@@ -881,15 +1125,42 @@ impl Loader {
     // Whether `path` is a module of the standard library whose functions'
     // bodies are read once called (D179): every one but the entry and
     // std.rt, whose functions the back ends call by the primitives they
-    // replace (MYLA-413). A program's own modules are read whole.
+    // replace (MYLA-413). A program's own modules are read whole, its own
+    // `std/` directory too (`in_std_root`).
     #test(Loader { stdlib_root: "/l", project_root: "/p", packages: [], entry: "/p/a.my", modules: [], next_id: 0, spans: [], overrides: [:], lazy: [:] }, "/l/std/fs.my")[true]
     #test(Loader { stdlib_root: "/l", project_root: "/p", packages: [], entry: "/p/a.my", modules: [], next_id: 0, spans: [], overrides: [:], lazy: [:] }, "/l/std/rt.my")[false]
     #test(Loader { stdlib_root: "/l", project_root: "/p", packages: [], entry: "/p/a.my", modules: [], next_id: 0, spans: [], overrides: [:], lazy: [:] }, "/p/b.my")[false]
     #test(Loader { stdlib_root: "/l", project_root: "/l", packages: [], entry: "/l/std/fs.my", modules: [], next_id: 0, spans: [], overrides: [:], lazy: [:] }, "/l/std/fs.my")[false]
+    #test(Loader { stdlib_root: "/l", project_root: "/p", packages: [], entry: "/p/a.my", modules: [], next_id: 0, spans: [], overrides: [:], lazy: [:] }, "/p/std/helper.my")[false]
+    #test(Loader { stdlib_root: "", project_root: "/p", packages: [], entry: "/p/a.my", modules: [], next_id: 0, spans: [], overrides: [:], lazy: [:] }, "/p/std/helper.my")[false]
+    #test(Loader { stdlib_root: EMBEDDED_ROOT, project_root: "/p", packages: [], entry: "/p/a.my", modules: [], next_id: 0, spans: [], overrides: [:], lazy: [:] }, "<myla>/std/fs.my")[true]
     fun lazy_std(self, path: str) -> bool {
-        if path == self.entry { return false }
-        let id = self.module_id(path)
-        return starts_with_text(id, "std$") && id != "std$rt"
+        if path == self.entry || !self.in_std_root(path) { return false }
+        return self.module_id(path) != "std$rt"
+    }
+
+    // Whether `path` is a file of the standard library's `std/`, under the
+    // stdlib root or in the library the tools carry: decided by the file's
+    // root, as `module_id` names it, not by its id, which a program's own
+    // `std/helper.my` shares (`std$helper`) and which is the program's
+    // (MYLA-413, D179 (3)).
+    #test(Loader { stdlib_root: "/l", project_root: "/p", packages: [], entry: "/p/a.my", modules: [], next_id: 0, spans: [], overrides: [:], lazy: [:] }, "/l/std/fs.my")[true]
+    #test(Loader { stdlib_root: "/l", project_root: "/p", packages: [], entry: "/p/a.my", modules: [], next_id: 0, spans: [], overrides: [:], lazy: [:] }, "/l/geo.my")[false]
+    #test(Loader { stdlib_root: "/l", project_root: "/p", packages: [], entry: "/p/a.my", modules: [], next_id: 0, spans: [], overrides: [:], lazy: [:] }, "/p/std/fs.my")[false]
+    #test(Loader { stdlib_root: "/l", project_root: "/l/app", packages: [], entry: "/l/app/a.my", modules: [], next_id: 0, spans: [], overrides: [:], lazy: [:] }, "/l/app/std/fs.my")[false]
+    fun in_std_root(self, path: str) -> bool {
+        var rest: [str] = []
+        match rel_under(path, EMBEDDED_ROOT) {
+            Some(r) => { rest = r },
+            None => {
+                if self.stdlib_root == "" { return false }
+                match rel_under(path, self.stdlib_root) {
+                    Some(r) => { rest = r },
+                    None => { return false },
+                }
+            },
+        }
+        return rest.len() > 1 && rest[0] == "std"
     }
 
     // Load `path` and its imports (depth first) once each; its module index.
@@ -1880,6 +2151,14 @@ pub fun load_program_packages(entry: str, stdlib_root: str, packages: [(str, str
 
 // The program rooted at `entry`, loaded as `opts` says.
 pub fun load_program_opts(entry: str, opts: LoadOptions) -> Result<Loaded, Report> {
+    return match load_linked(entry, opts) {
+        Ok(p) => Ok(p),
+        // a parse or module error at a form of D186 says how it was read
+        Err(r) => Err(with_reading_notes(r, opts.overrides)),
+    }
+}
+
+fun load_linked(entry: str, opts: LoadOptions) -> Result<Loaded, Report> {
     let e = normalize(entry)
     var stdlib = ""
     if opts.stdlib_root != "" { stdlib = normalize(opts.stdlib_root) }
@@ -1944,7 +2223,9 @@ pub fun load_program_opts(entry: str, opts: LoadOptions) -> Result<Loaded, Repor
             }
             for id in lazy.add(k, m.sites, m.decls).keys() { lazy_ids[id] = true }
         }
-        let in_std = starts_with_text(m.id, "std$")
+        // by the file's root: a program's own `std/` is the program's
+        // (MYLA-413); the entry's names stay unqualified (`entry_std`)
+        let in_std = m.path != ld.entry && ld.in_std_root(m.path)
         let is_implicit = has_index(implicit, k)
         // only the entry's cases are the program's, the others' were left
         // unparsed (`load`): an imported module's methods on a built-in type
@@ -1972,8 +2253,68 @@ pub fun load_program_opts(entry: str, opts: LoadOptions) -> Result<Loaded, Repor
         // loaded, read or not, as when every body was read (D90, MYLA-413)
         let tasks = if opts.runtime { lazy.task_line() } else { 0 }
         bodies = LazyBodies { ids: lazy_ids, keys: lazy.keys, parse: (key: int64) => table.read(key), task_line: tasks }
+        // the oracle of the lazy load (MYLA-552): every body read now
+        if eager_bodies() { decls = read_every_body(decls, bodies) }
     }
     return Ok(Loaded { decls: decls, next_id: ld.next_id, spans: ld.spans, std_impls: std_impls, bodies: bodies })
+}
+
+// Whether every body the loader leaves for later is read at once, before
+// the program is checked (MYLA-552): MYLA_EAGER_BODIES set to anything but
+// "" or "0". The oracle of the lazy load: a program builds to the same code
+// with it as without (`tests/burn/test_lazy_std.py`), as which bodies were
+// read must not change what is built; they are still checked only once
+// called (D179), and an error in one is still reported only then.
+#test()[false]
+pub fun eager_bodies() -> bool {
+    return match env("MYLA_EAGER_BODIES") {
+        Some(v) => v != "" && v != "0",
+        None => false,
+    }
+}
+
+// `decls` with each body left for later (`bodies`) read into its
+// declaration, as the checker reads it (`Checker.with_body`); one that
+// doesn't read stays left, for the checker to report where it is called.
+#test([], no_lazy_bodies())[[]]
+fun read_every_body(decls: [Decl], bodies: LazyBodies) -> [Decl] {
+    var out: [Decl] = []
+    for d in decls {
+        if !bodies.ids.contains(d.id) {
+            out.push(d)
+            continue
+        }
+        let k = match d.kind {
+            DeclKind.FunDecl(fd) => DeclKind.FunDecl(read_now(d.id, fd, bodies)),
+            DeclKind.ImplDecl(t, ms, tps, tr, targs, attrs) => {
+                var read: [FunData] = []
+                for m in ms { read.push(read_now(d.id, m, bodies)) }
+                DeclKind.ImplDecl(t, read, tps, tr, targs, attrs)
+            },
+            _ => d.kind,
+        }
+        out.push(Decl { id: d.id, line: d.line, col: d.col, sp: d.sp, kind: k })
+    }
+    return out
+}
+
+// `fd`, a function of the declaration `id`, with its body read if it was
+// left for later and reads (`read_every_body`).
+fun read_now(id: int32, fd: FunData, bodies: LazyBodies) -> FunData {
+    let key = match unread_key(id, fd) {
+        Some(k) => k,
+        None => { return fd },
+    }
+    if !bodies.keys.contains(key) { return fd }
+    let parse = bodies.parse
+    return match parse(key) {
+        Ok(b) => {
+            var g = fd
+            g.body = Some(b)
+            g
+        },
+        Err(es) => fd,
+    }
 }
 
 // A function's body an implicit module's parse left for later

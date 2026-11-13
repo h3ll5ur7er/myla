@@ -145,8 +145,8 @@ Next on the [Roadmap](docs/Project/Roadmap.md), from the [reflection on the two 
 ## Working on Myla
 
 ```bash
-scripts/test.sh fast        # the quick burn tests, about a minute once the tools are cached
-scripts/test.sh             # every burn test, the self-hosting gates included (about 5 minutes)
+scripts/test.sh fast        # the quick burn tests, about a minute once the tools are cached (2026-11-06, bae1a7f)
+scripts/test.sh             # every burn test, the self-hosting gates included (about 5 minutes, 2026-11-06, bae1a7f)
 scripts/bootstrap.sh        # after changing selfhost/: the fixed point
 scripts/update-seed.sh      # after changing the compiler: a new seed (CI fails on a stale one)
 ```
