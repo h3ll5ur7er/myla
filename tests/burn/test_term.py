@@ -838,6 +838,9 @@ class Signals(Case):
                     _RUNNING.append(p)
                     p.stdin.write("line one\n")
                     p.stdin.close()
+                    # closed: `communicate` flushes a stdin it still holds,
+                    # which Python before 3.13 refuses on a closed file
+                    p.stdin = None
                     got = [p.stdout.readline() for _ in range(3)]
                     self.assertEqual(got, ["forged try_next: none\n", "stdin: line one\n", "ready\n"])
                     time.sleep(0.2)
