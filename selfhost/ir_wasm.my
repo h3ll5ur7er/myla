@@ -487,6 +487,11 @@ impl CodeGen {
                 self.emit("i64.extend_i32_u")
                 self.wasm_set(w, d)
             },
+            Inst.Position(d, p) => {
+                self.emit(format("i32.const {}", self.position_label(p.line, p.col)))
+                self.emit("i64.extend_i32_u")
+                self.wasm_set(w, d)
+            },
             Inst.Load(d, s) => {
                 self.wasm_slot_base(w)
                 self.emit(format("i64.load {}", w.soff[s]))
@@ -1415,6 +1420,13 @@ impl CodeGen {
                     self.emit(format("i32.const {}", self.position_label(p.line, p.col)))
                     self.emit("i64.extend_i32_u")
                 }
+                self.wasm_call("call", "__panic", 2)
+                self.emit("drop")
+                self.emit("unreachable")
+            },
+            Term.PanicAt(m, p) => {
+                self.wasm_get(w, m)
+                self.wasm_get(w, p)
                 self.wasm_call("call", "__panic", 2)
                 self.emit("drop")
                 self.emit("unreachable")

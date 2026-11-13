@@ -473,6 +473,10 @@ impl CodeGen {
                 self.a64_adr("x10", sym)
                 self.a64_st("x10", fr, d)
             },
+            Inst.Position(d, p) => {
+                self.a64_adr("x10", self.position_label(p.line, p.col))
+                self.a64_st("x10", fr, d)
+            },
             Inst.Load(d, s) => {
                 self.emit(format("ldr x10, {}", self.a64_slot(fr, s)))
                 self.a64_st("x10", fr, d)
@@ -1268,6 +1272,11 @@ impl CodeGen {
             Term.Panic(m, p) => {
                 self.a64_ld("x0", fr, m)
                 if p.line <= 0 { self.emit("mov x1, #0") } else { self.a64_adr("x1", self.position_label(p.line, p.col)) }
+                self.emit("bl __panic")
+            },
+            Term.PanicAt(m, p) => {
+                self.a64_ld("x0", fr, m)
+                self.a64_ld("x1", fr, p)
                 self.emit("bl __panic")
             },
         }
