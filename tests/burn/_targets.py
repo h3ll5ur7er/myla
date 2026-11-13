@@ -25,8 +25,6 @@ SUITES = [
     "tests.burn.test_net",
     "tests.burn.test_term",
     "tests.burn.test_http",
-    # std.http's router (D202): served over loopback but on wasm32
-    "tests.burn.test_router",
     # a deadline's end and a cancel beside many timers (MYLA-456)
     "tests.burn.test_timer_scaling",
     # a wait for a descriptor beside many others, one frame woken per
@@ -62,6 +60,10 @@ SUITES = [
     "tests.burn.test_generated_widths",
     "tests.burn.test_generated_extremes",
     "tests.burn.test_formats_checked",
+    # std.http's router (D202): last, so the suites before it keep the
+    # schedule they had without it (the timing tests among them, test_http's
+    # and test_stdio's, run beside the same neighbours)
+    "tests.burn.test_router",
 ]
 
 # A test that reads the x86-64 code ends there, skipped, on another target,
