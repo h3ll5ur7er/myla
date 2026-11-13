@@ -41,7 +41,7 @@ Vectors are `Eq` and `Hash` (map keys, D198) and print as `(1, 2, 3)`, a `Vector
 
 ## JSON
 
-Vectors are JSON arrays, as glTF writes them (D203): a `Vec3` is `[1.0, 2.0, 3.0]`, a `Vector` the array of its elements. So a `#derive(Json)` struct with a `Vec3` field reads a document's `"translation": [1, 2, 3]`. An array of another length, or an element that isn't a number, is an error with its path ([[Language/Standard-library/Json]]).
+Vectors are JSON arrays, as glTF writes them (D206): a `Vec3` is `[1.0, 2.0, 3.0]`, a `Vector` the array of its elements. So a `#derive(Json)` struct with a `Vec3` field reads a document's `"translation": [1, 2, 3]`. An array of another length, or an element that isn't a number, is an error with its path ([[Language/Standard-library/Json]]).
 
 ```myla
 import std.json as json

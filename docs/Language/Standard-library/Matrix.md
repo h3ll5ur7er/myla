@@ -42,7 +42,7 @@ Angles are in radians, rotations counterclockwise looking at the origin from the
 
 ## JSON
 
-A matrix is the JSON array of its elements column by column, as glTF writes a node's `"matrix"` (D203): a `Mat4` is 16 numbers, the translation in the 13th to 15th. A `Matrix` is `{"rows": 2, "cols": 3, "data": […]}`, its data column by column too; data that doesn't fit the shape is an error at `$.data`.
+A matrix is the JSON array of its elements column by column, as glTF writes a node's `"matrix"` (D206): a `Mat4` is 16 numbers, the translation in the 13th to 15th. A `Matrix` is `{"rows": 2, "cols": 3, "data": […]}`, its data column by column too; data that doesn't fit the shape is an error at `$.data`.
 
 ```myla
 import std.json as json

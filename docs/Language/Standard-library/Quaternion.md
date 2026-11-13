@@ -25,4 +25,4 @@ fun main() {
 
 Methods: `dot`, `length`, `length_squared`, `normalized`, `conjugate`, `inverse`, `slerp(end, t)` (the shorter arc, at a constant angular speed), `to_mat3`, `to_mat4`, `to_axis_angle`, `to_f32`; operators `*` (by a quaternion, a `Vec3`, a scalar), `s * q`, `+`, `-`, `-q`. The rotation methods expect a unit quaternion, which every constructor but `quat` gives.
 
-A quaternion is the JSON array `[x, y, z, w]`, as glTF writes a node's `"rotation"` (D203, [[Language/Standard-library/Matrix#json]]); a decoded one isn't normalized.
+A quaternion is the JSON array `[x, y, z, w]`, as glTF writes a node's `"rotation"` (D206, [[Language/Standard-library/Matrix#json]]); a decoded one isn't normalized.
